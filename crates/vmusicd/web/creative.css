@@ -1,0 +1,711 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 mmusic-studio contributors
+
+   创意舞台的外观：三维画布、手绘层、自定义背景层、创意工坊面板。
+
+   一条必须遵守的约定（见 README「前端 CSS 令牌契约」）：本文件排在 style.css
+   与 stage.css 之后，如果在这里重声明 :root 上的共享令牌（--glass-*、--hover、
+   --accent……），会把前面两个文件里的定义整块盖掉，而且页面不会报错、不会缺
+   元素，只会静默丢掉描边和投影。所以这里只声明自有命名空间的新令牌：
+   --hd-*（手绘）与 --ws-*（工坊）。
+
+   同理，凡是要用到共享令牌的地方一律 var() 引用，不复制字面量 —— 主题换色时
+   手绘墨色与工坊描边才能跟着走。 */
+
+/* ---------------------------------------------------------------------------
+   1. 三维舞台画布
+   --------------------------------------------------------------------------- */
+
+.creative-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  /* 默认不吃指针事件：舞台上的歌词行要能点、能选、能拖进度，粒子层与三维层
+     都只是背景。要转视角由用户显式打开「舞台交互」。 */
+  pointer-events: none;
+  z-index: 0;
+  /* 三维场景是"光"，不是"面"：与后面的自定义背景层做加性合成，而不是盖住它。 */
+  mix-blend-mode: normal;
+}
+
+/* 画布作为第一个子元素插进来，其余内容按 DOM 顺序自然压在它上面。
+   但舞台里那几个区块有自己的定位上下文，这里显式抬一层，免得依赖文档顺序。
+   .hd-layer 必须排除掉：它本身就是 absolute 覆盖层，被这条规则改成 relative
+   之后就变成一个撑开高度的普通块，手绘线条会跑到列表下面去。 */
+#stage.creative-on > :not(.creative-canvas):not(.hd-layer),
+#lyric-page.creative-on > :not(.creative-canvas):not(.hd-layer) {
+  position: relative;
+  z-index: 1;
+}
+
+/* 舞台交互模式：画布接管指针。光标提示"这里能拖"。 */
+#stage.creative-interact,
+#lyric-page.creative-interact {
+  cursor: grab;
+}
+
+#stage.creative-interact .creative-canvas,
+#lyric-page.creative-interact .creative-canvas {
+  pointer-events: auto;
+}
+
+#stage.creative-interact .stage-lyrics,
+#lyric-page.creative-interact .lp-body {
+  /* 歌词区仍然优先拿到点击：转视角不该以牺牲"点歌词跳转"为代价。 */
+  pointer-events: auto;
+}
+
+#stage.creative-interact:active,
+#lyric-page.creative-interact:active {
+  cursor: grabbing;
+}
+
+/* 三维舞台开着的时候，让舞台自己的底色退到很淡：场景本身要能透出来。
+   用一层半透明底色而不是 transparent，是为了在 WebGL 不可用时（降级到未启用）
+   仍然是原来的观感。 */
+html.creative-3d #stage {
+  background-color: rgba(0, 0, 0, 0.18);
+}
+/* 全屏页不能跟着半透明：舞台半透明是为了融入工作区，全屏页再半透明，
+   工作区就会从字缝里透出来，"全屏沉浸"不成立。自定义背景开启时再放成
+   透明 —— 背景层（#creative-bg）本身是不透明的，让它透上来即完成融合。 */
+html.creative-3d #lyric-page {
+  background-color: #000000;
+}
+html.creative-3d.creative-bg-on #lyric-page {
+  background-color: transparent;
+}
+
+/* ---------------------------------------------------------------------------
+   2. 自定义背景层
+   --------------------------------------------------------------------------- */
+
+#creative-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background: var(--bg, #0d0f12);
+}
+
+#creative-bg[hidden] {
+  display: none;
+}
+
+#creative-bg-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  /* 模糊/不透明度/混合都由 backgrounds.js 按 spec 写变量；回退值就是 mesh/cover
+     的出厂观感（离屏画布长边 384，必须糊一道遮住块状插值）。 */
+  filter: blur(var(--bg-blur, 38px)) saturate(1.25);
+  transform: scale(1.12);      /* 放大一点，把模糊吃掉边缘后露出的空档补上 */
+  transform-origin: center;
+  opacity: var(--bg-opacity, 0.9);
+  mix-blend-mode: var(--bg-blend, normal);
+}
+
+/* 色谱是"逐列写进去"的信息图，不是低频色块：出厂模糊为 0，糊掉就没有信息了。 */
+#creative-bg[data-type='spectrogram'] #creative-bg-canvas {
+  filter: blur(var(--bg-blur, 0px)) saturate(1.15) contrast(1.05);
+  transform: none;
+}
+
+/* 流场是细线，糊成一片就白画了。出厂轻微模糊 6px。 */
+#creative-bg[data-type='flow'] #creative-bg-canvas {
+  filter: blur(var(--bg-blur, 6px)) saturate(1.2);
+  transform: none;
+}
+
+.creative-bg-media {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* 用户素材的天职是不跟前景抢注意力；不透明度出厂 0.55，模糊出厂 0。 */
+  opacity: var(--bg-opacity, 0.55);
+  filter: blur(var(--bg-blur, 0px)) saturate(1.05);
+  mix-blend-mode: var(--bg-blend, normal);
+}
+
+/* 视差：位移由帧门写进 --bg-tx/--bg-ty（translate 百分比按元素自身尺寸）。
+   画布本来放大了 1.12，6% 的余量吃掉 ±4% 的位移；色谱/流场平时不缩放，
+   视差时补一个 1.08 防止边缘空档；object-fit:cover 的媒体再放大 1.08。 */
+#creative-bg[data-depth='parallax'] #creative-bg-canvas,
+#creative-bg[data-depth='parallax'] .creative-bg-media {
+  will-change: transform;
+}
+#creative-bg[data-depth='parallax'] #creative-bg-canvas {
+  transform: translate(var(--bg-tx, 0), var(--bg-ty, 0)) scale(1.12);
+}
+#creative-bg[data-depth='parallax'][data-type='spectrogram'] #creative-bg-canvas,
+#creative-bg[data-depth='parallax'][data-type='flow'] #creative-bg-canvas {
+  transform: translate(var(--bg-tx, 0), var(--bg-ty, 0)) scale(1.08);
+}
+#creative-bg[data-depth='parallax'] .creative-bg-media {
+  transform: translate(var(--bg-tx, 0), var(--bg-ty, 0)) scale(1.08);
+}
+
+/* 弧形墙：墙自己画完整场景，旧平面元素 display:none。注意媒体视频不能停：
+   墙每帧直接从 <video> 采纹理，display:none 的视频仍在解码，这是必需的。 */
+#creative-bg-wall {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  opacity: var(--bg-opacity, 0.9);
+}
+#creative-bg[data-depth='scene'] #creative-bg-canvas,
+#creative-bg[data-depth='scene'] .creative-bg-media {
+  display: none;
+}
+
+/* 背景层启用时，把界面主体抬到它上面。这里显式给出层级，而不是让 #creative-bg
+   靠 DOM 顺序去赌：背景是 fixed 定位，文档顺序在它面前不成立。 */
+html.creative-bg-on .app,
+html.creative-bg-on .topbar,
+html.creative-bg-on .bar,
+html.creative-bg-on .offline-banner {
+  position: relative;
+  z-index: 1;
+}
+
+html.creative-bg-on #stage,
+html.creative-bg-on #lyric-page {
+  z-index: 2;
+}
+
+/* 背景本身已经足够亮的时候，界面需要一点压暗才不会读不清。
+   用一层极淡的暗罩，而不是提高所有前景的不透明度 —— 后者要动的规则太多。 */
+html.creative-bg-on body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(ellipse at 50% 40%, rgba(0, 0, 0, 0.10), rgba(0, 0, 0, 0.34));
+}
+
+/* ---------------------------------------------------------------------------
+   3. 手绘层
+   --------------------------------------------------------------------------- */
+
+.hd-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;              /* 压在三维修场景与粒子之上、歌词之下（歌词是 DOM 主体） */
+  opacity: 0;
+  transition: opacity 260ms ease;
+  background-repeat: repeat;
+  background-size: 128px 128px;
+  mix-blend-mode: soft-light;
+}
+
+html.hand-on .hd-layer {
+  opacity: 1;
+}
+
+html.hand-paper .hd-layer {
+  background-blend-mode: overlay;
+}
+
+/* 纸张噪点只在手绘模式下出现，而且压得很淡：它是"纸的感觉"，不是"一张贴纸"。 */
+html:not(.hand-paper) .hd-layer {
+  background-image: none !important;
+}
+
+.hd-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.hd-svg path {
+  fill: none;
+  /* 手绘墨色走主题的高亮色：换主题时铅笔线自动跟着变，不需要重做任何图。 */
+  stroke: rgb(var(--music-highlight-rgb, 226, 176, 179));
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+/* 边框最淡：它只是"框住了这一页"，不该被看见。 */
+.hd-frame {
+  stroke-width: 1.4px;
+  opacity: 0.34;
+}
+
+/* 声波是主角，给足对比度。 */
+.hd-wave {
+  stroke-width: 1.6px;
+  opacity: 0.72;
+}
+
+/* 圈注要在文字上可读，所以最实、最粗。 */
+.hd-annot {
+  stroke-width: 2.2px;
+  opacity: 0.9;
+}
+
+/* 手绘模式下的界面元素：把直角换成不对称圆角，与抖动线条同一套语汇。
+   只动边角，不动配色与排版 —— 手绘是"笔迹"，不是"另一套设计"。 */
+html.hand-on .btn,
+html.hand-on .btn-pill,
+html.hand-on .chip,
+html.hand-on .rail-item,
+html.hand-on .iconbtn {
+  border-radius: 14px 10px 16px 9px;
+}
+
+html.hand-on .lib-list > *,
+html.hand-on .q-list > * {
+  border-radius: 10px 16px 9px 14px;
+}
+
+html.hand-paper body {
+  /* 纸的底色：极淡的暖黄，只在手绘模式下出现，且不覆盖真实背景层。 */
+  background-blend-mode: multiply;
+}
+
+html.hand-paper .column,
+html.hand-paper footer.bar {
+  background-image:
+    linear-gradient(rgba(255, 250, 240, 0.035), rgba(255, 250, 240, 0.035));
+  background-blend-mode: overlay;
+}
+
+/* ---------------------------------------------------------------------------
+   4. 创意工坊
+   --------------------------------------------------------------------------- */
+
+.ws-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(430px, 94vw);
+  z-index: 72;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel, rgba(18, 20, 24, 0.94));
+  backdrop-filter: blur(18px) saturate(1.15);
+  border-left: var(--glass-border, 1px solid rgba(255, 255, 255, 0.08));
+  box-shadow: var(--glass-shadow, -14px 0 44px rgba(0, 0, 0, 0.42));
+  transform: translateX(102%);
+  transition: transform 240ms cubic-bezier(0.22, 0.8, 0.3, 1);
+  will-change: transform;
+}
+
+.ws-panel[hidden] {
+  display: flex;           /* hidden 只用来推迟首次上屏，展开与否看 .is-open */
+  visibility: hidden;
+}
+
+.ws-panel.is-open {
+  transform: translateX(0);
+  visibility: visible;
+}
+
+/* 降级"生效真相"提示：sc-note 默认全隐藏，但这条必须被看见 */
+.ws-warn {
+  display: block;
+  margin-top: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #f3c98b;
+  background: rgba(214, 148, 54, 0.12);
+  border: 1px solid rgba(214, 148, 54, 0.35);
+  border-radius: 8px;
+}
+
+.ws-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.ws-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 13px;
+  color: #10120f;
+  background: rgb(var(--music-highlight-rgb, 226, 176, 113));
+  flex: none;
+}
+
+.ws-head-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ws-sub {
+  font-size: 11px;
+  opacity: 0.55;
+  margin-top: 2px;
+}
+
+.ws-close {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.ws-close:hover {
+  background: var(--hover, rgba(255, 255, 255, 0.07));
+}
+
+.ws-close svg {
+  width: 15px;
+  height: 15px;
+}
+
+.ws-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  scrollbar-width: none;
+}
+
+.ws-tabs::-webkit-scrollbar { display: none; }
+
+.ws-tab {
+  flex: none;
+  padding: 6px 11px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ws-tab:hover { opacity: 0.9; }
+
+.ws-tab.on {
+  opacity: 1;
+  border-color: rgba(var(--music-highlight-rgb, 226, 176, 113), 0.45);
+  background: rgba(var(--music-highlight-rgb, 226, 176, 113), 0.12);
+}
+
+.ws-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px 28px;
+  scrollbar-width: thin;
+}
+
+.ws-body::-webkit-scrollbar { width: 8px; }
+.ws-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+.ws-body .sc-group-title:first-child { margin-top: 0; }
+
+.ws-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 8px 0 14px;
+}
+
+.ws-name {
+  flex: 1;
+  min-width: 120px;
+}
+
+.ws-mini {
+  width: 74px;
+  flex: none;
+}
+
+.ws-path {
+  flex: 1;
+  min-width: 120px;
+}
+
+/* 卡片网格：场景与背景来源共用。 */
+.ws-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+
+.ws-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 10px;
+  text-align: left;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.ws-card:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateY(-1px);
+}
+
+.ws-card.on {
+  border-color: rgba(var(--music-highlight-rgb, 226, 176, 113), 0.72);
+  background: rgba(var(--music-highlight-rgb, 226, 176, 113), 0.13);
+}
+
+.ws-card-name { font-size: 12.5px; }
+
+.ws-card-id {
+  font-size: 10px;
+  opacity: 0.45;
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+}
+
+/* 预置画廊 */
+.ws-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(122px, 1fr));
+  gap: 10px;
+  margin: 8px 0 16px;
+}
+
+.ws-shot {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.ws-shot img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
+  background: #0b0d10;
+}
+
+.ws-shot-empty {
+  aspect-ratio: 3 / 2;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  opacity: 0.4;
+  background: #0b0d10;
+}
+
+.ws-shot-name {
+  padding: 7px 8px 4px;
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-shot-btns {
+  display: flex;
+  gap: 5px;
+  padding: 0 8px 8px;
+}
+
+.ws-shot-btns .btn {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+/* 编排轨 / 绑定列表 */
+.ws-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 16px;
+}
+
+.ws-item {
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.025);
+  overflow: hidden;
+}
+
+.ws-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.ws-tag {
+  flex: none;
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  background: rgba(var(--music-highlight-rgb, 226, 176, 113), 0.16);
+  border: 1px solid rgba(var(--music-highlight-rgb, 226, 176, 113), 0.3);
+}
+
+.ws-item-title {
+  flex: 1;
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-icon {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ws-icon:hover {
+  background: var(--hover, rgba(255, 255, 255, 0.08));
+}
+
+.ws-item-body {
+  padding: 0 10px 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.ws-kv {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  font-size: 12px;
+}
+
+.ws-kv > span:first-child {
+  flex: 1;
+  opacity: 0.62;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-live {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.12);
+}
+
+.ws-stats {
+  margin: 6px 0 16px;
+}
+
+/* JSON 文本框 */
+.ws-json {
+  width: 100%;
+  min-height: 200px;
+  margin: 8px 0 4px;
+  padding: 10px;
+  resize: vertical;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.32);
+  color: inherit;
+  font: 11.5px/1.5 ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  tab-size: 2;
+}
+
+.ws-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translate(-50%, 12px);
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(12, 14, 17, 0.94);
+  border: var(--glass-border, 1px solid rgba(255, 255, 255, 0.1));
+  box-shadow: var(--glass-shadow, 0 10px 30px rgba(0, 0, 0, 0.4));
+  opacity: 0;
+  transition: opacity 200ms ease, transform 200ms ease;
+  pointer-events: none;
+  max-width: 86%;
+  text-align: center;
+}
+
+.ws-toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.ws-toast[hidden] { display: none; }
+
+/* ---------------------------------------------------------------------------
+   5. 降低动效与低性能档
+   --------------------------------------------------------------------------- */
+
+body.reduce-motion .creative-canvas {
+  /* 减少动效不只关"帧率"，还要关掉滤镜类的持续开销。 */
+  filter: none;
+}
+
+/* 低性能档下不要纸张噪点的混合模式：soft-light 在大面积上要额外一趟合成。 */
+body.stage-lowfx .hd-layer {
+  mix-blend-mode: normal;
+  background-image: none !important;
+}
+
+body.stage-lowfx #creative-bg-canvas,
+body.stage-lowfx .creative-bg-media {
+  /* 低档下不再吃用户选的混合模式（大面积合成省一趟），模糊仍尊重用户值 */
+  mix-blend-mode: normal;
+}
+
+body.stage-lowfx #creative-bg-canvas {
+  filter: blur(var(--bg-blur, 24px)) saturate(1.1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-panel { transition: none; }
+  .hd-layer { transition: none; }
+}

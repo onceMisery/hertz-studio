@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT
+[package]
+name = "vmusic-library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local library scanning: file walk, tag/metadata reading, cover caching"
+
+[dependencies]
+vmusic-core = { workspace = true }
+
+symphonia = { workspace = true }
+walkdir = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,470 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 mmusic-studio contributors
+//
+// Zero-build UI: plain DOM, one fetch wrapper, one WebSocket.
+// Kept framework-free on purpose so it can be served by the Rust binary
+// itself, with no npm step between "clone" and "hear music".
+
+// The token normally arrives injected into the HTML. The query string is the
+// fallback for links opened elsewhere (the launcher prints one), and it is
+// stripped afterwards so the token does not linger in history.
+const TOKEN = (() => {
+  const params = new URLSearchParams(location.search);
+  const fromUrl = params.get('token');
+  if (fromUrl) {
+    params.delete('token');
+    const rest = params.toString();
+    history.replaceState(null, '', location.pathname + (rest ? `?${rest}` : ''));
+  }
+  return window.__VMUSIC_TOKEN__ || fromUrl || '';
+})();
+const $ = (id) => document.getElementById(id);
+
+const ui = {
+  conn: $('conn'),
+  search: $('search'),
+  scanRoot: $('scan-root'),
+  scanBtn: $('scan-btn'),
+  scanStatus: $('scan-status'),
+  playlists: $('playlists'),
+  newPlaylistName: $('new-playlist-name'),
+  newPlaylistBtn: $('new-playlist-btn'),
+  cover: $('cover'),
+  nowTitle: $('now-title'),
+  nowArtist: $('now-artist'),
+  spectrum: $('spectrum'),
+  lyrics: $('lyrics'),
+  barTitle: $('bar-title'),
+  barTime: $('bar-time'),
+  prev: $('prev'),
+  playpause: $('playpause'),
+  next: $('next'),
+  mode: $('mode'),
+  progress: $('progress'),
+  volume: $('volume'),
+  toast: $('toast'),
+  menuBtn: $('menu-btn'),
+  scrim: $('nav-scrim'),
+  ambient: $('ambient'),
+  ambientImg: $('ambient-img'),
+  nowTech: $('now-tech'),
+};
+
+let toastTimer = 0;
+
+/**
+ * Shows transient feedback. `kind` is either "info" or "error"; errors stay up
+ * longer because the user has to read what failed.
+ */
+function toast(message, kind = 'info') {
+  if (!ui.toast) return;
+  clearTimeout(toastTimer);
+
+  const hide = () => {
+    ui.toast.classList.remove('show');
+    // Let the fade finish before it leaves the layout.
+    setTimeout(() => { ui.toast.hidden = true; }, 240);
+  };
+
+  if (!message) {
+    hide();
+    return;
+  }
+  ui.toast.textContent = message;
+  ui.toast.className = kind === 'error' ? 'toast error' : 'toast';
+  ui.toast.hidden = false;
+  // Adding the class on the next frame is what makes the transition run.
+  requestAnimationFrame(() => ui.toast.classList.add('show'));
+  toastTimer = setTimeout(hide, kind === 'error' ? 6000 : 1200);
+}
+
+const state = {
+  tracks: [],
+  queue: [],
+  snapshot: { playing: false, position_ms: 0, duration_ms: null, volume: 0.8, mode: 'repeat', track_id: null },
+  lyrics: null,
+  lyricIndex: -1,
+  coverUrl: null,
+  coverSeq: 0,
+  seeking: false,
+  spectrum: new Array(64).fill(0),
+  modeLabel: { repeat: '重复', repeat_one: '单曲', shuffle: '随机' },
+};
+
+// ---------------------------------------------------------------------------
+// Transport
+// ---------------------------------------------------------------------------
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${TOKEN}`,
+      ...(options.headers || {}),
+    },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body?.error?.message || `HTTP ${res.status}`);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(body) });
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
+
+  ws.onopen = () => setConn('已连接', true);
+  ws.onclose = () => {
+    setConn('已断开，3 秒后重试', false);
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (event) => {
+    let msg;
+    try { msg = JSON.parse(event.data); } catch { return; }
+    switch (msg.type) {
+      case 'state': applySnapshot(msg); break;
+      case 'spectrum': state.spectrum = msg; drawSpectrum(); break;
+      case 'scan': onScanProgress(msg); break;
+      case 'library_changed': loadTracks(); loadPlaylists(); break;
+      case 'ended': break;
+      // Previously only logged: an interrupted or undecodable track looked
+      // like a silent no-op to anyone not watching the console.
+      case 'error': toast(`播放异常：${msg.message}`, 'error'); break;
+    }
+  };
+}
+
+function setConn(text, ok) {
+  ui.conn.textContent = text;
+  ui.conn.className = ok ? 'conn ok' : 'conn bad';
+}
+
+// ---------------------------------------------------------------------------
+// Library
+// ---------------------------------------------------------------------------
+
+async function loadTracks() {
+  const q = ui.search.value.trim();
+  const page = await api(`/v1/tracks?q=${encodeURIComponent(q)}&limit=500&offset=0`);
+  state.tracks = page.tracks || [];
+  renderTracks(true);
+}
+
+let tracksSignature = '';
+
+function renderTracks(force) {
+  // Snapshots arrive ~50 times a second. Rebuilding the list that often
+  // destroys each row between mousedown and mouseup, so the click never lands
+  // and selecting a track appears to do nothing. Only redraw when the list or
+  // the highlighted track actually changed.
+  const signature = `${state.tracks.length}|${state.snapshot.track_id || ''}`;
+  if (!force && signature === tracksSignature) return;
+  tracksSignature = signature;
+
+  const host = $('track-list') || createTrackList();
+  host.innerHTML = '';
+  if (!state.tracks.length) {
+    host.innerHTML = '<div class="hint">曲库为空，先在左侧扫描一个目录</div>';
+    return;
+  }
+  for (const track of state.tracks) {
+    const row = document.createElement('div');
+    row.className = 'track' + (track.id === state.snapshot.track_id ? ' active' : '');
+    row.innerHTML = `
+      <div class="track-main">
+        <div class="track-title"></div>
+        <div class="track-sub"></div>
+      </div>
+      <div class="track-dur"></div>`;
+    row.querySelector('.track-title').textContent = track.title;
+    row.querySelector('.track-sub').textContent = [track.artist, track.album].filter(Boolean).join(' · ') || '未知';
+    row.querySelector('.track-dur').textContent = fmt(track.duration_ms);
+    row.onclick = () => playTrack(track.id);
+    host.appendChild(row);
+  }
+}
+
+function createTrackList() {
+  const host = document.createElement('div');
+  host.id = 'track-list';
+  host.className = 'track-list';
+  // The list lives under the playlists panel so the sidebar scrolls as one.
+  ui.playlists.parentElement.parentElement.insertBefore(host, ui.playlists.parentElement.nextSibling);
+  return host;
+}
+
+async function loadPlaylists() {
+  const data = await api('/v1/playlists');
+  ui.playlists.innerHTML = '';
+  const mk = (label, onClick) => {
+    const el = document.createElement('button');
+    el.className = 'playlist';
+    el.textContent = label;
+    el.onclick = onClick;
+    ui.playlists.appendChild(el);
+  };
+  mk(`全部曲目 (${state.tracks.length})`, () => {
+    state.queue = state.tracks.map((t) => t.id);
+    if (state.queue.length) playTrack(state.queue[0], state.queue);
+  });
+  for (const p of data.playlists || []) mk(`${p.name} (${p.track_count})`, () => playPlaylist(p.id));
+}
+
+async function playPlaylist(id) {
+  const ids = await api(`/v1/playlists/${id}/tracks`).catch(() => []);
+  if (!ids.length) return;
+  state.queue = ids;
+  playTrack(ids[0], ids);
+}
+
+// ---------------------------------------------------------------------------
+// Playback
+// ---------------------------------------------------------------------------
+
+async function playTrack(id, queue) {
+  const target = queue || (state.queue.length ? state.queue : [id]);
+  const track = state.tracks.find((t) => t.id === id);
+  toast(`正在加载 ${track ? track.title : '曲目'}…`);
+  try {
+    await post('/v1/player/load', { track_id: id, queue: target });
+    toast('');
+    if (typeof setNav === 'function') setNav(false);
+  } catch (err) {
+    // Without this the rejection is unhandled and the click looks like a no-op.
+    toast(`无法播放：${err.message}`, 'error');
+  }
+}
+
+function applySnapshot(snap) {
+  const previousTrack = state.snapshot.track_id;
+  state.snapshot = snap;
+  ui.playpause.classList.toggle('is-playing', snap.playing);
+  ui.mode.textContent = state.modeLabel[snap.mode] || snap.mode;
+  ui.barTime.textContent = `${fmt(snap.position_ms)} / ${fmt(snap.duration_ms)}`;
+
+  if (snap.track_id && snap.track_id !== previousTrack) loadTrackDetails(snap.track_id);
+
+  if (!state.seeking && snap.duration_ms) {
+    ui.progress.value = Math.round((snap.position_ms / snap.duration_ms) * 1000);
+  }
+
+  renderTracks();
+  renderLyrics();
+}
+
+/**
+ * Loads the cover through fetch and hands the element a blob URL.
+ *
+ * A plain `url(...)` in CSS cannot carry the Authorization header, so the
+ * request used to come back 401 and the cover never appeared. Blob URLs are
+ * also revoked on the next switch so repeated track changes do not leak.
+ */
+async function setCover(id, hasCover) {
+  state.coverSeq = (state.coverSeq || 0) + 1;
+  const seq = state.coverSeq;
+
+  if (state.coverUrl) {
+    URL.revokeObjectURL(state.coverUrl);
+    state.coverUrl = null;
+  }
+  if (!hasCover) {
+    ui.cover.style.backgroundImage = 'none';
+    if (ui.ambient) ui.ambient.classList.remove('has-art');
+    return;
+  }
+
+  try {
+    const res = await fetch(`/v1/tracks/${id}/cover`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    if (!res.ok) {
+      ui.cover.style.backgroundImage = 'none';
+      return;
+    }
+    const url = URL.createObjectURL(await res.blob());
+    // A slower request for a track the user already left must not win.
+    if (seq !== state.coverSeq) {
+      URL.revokeObjectURL(url);
+      return;
+    }
+    state.coverUrl = url;
+    ui.cover.style.backgroundImage = `url("${url}")`;
+    // Same art, blurred and scaled behind everything.
+    if (ui.ambient) {
+      ui.ambientImg.style.backgroundImage = `url("${url}")`;
+      ui.ambient.classList.add('has-art');
+    }
+  } catch {
+    ui.cover.style.backgroundImage = 'none';
+  }
+}
+
+async function loadTrackDetails(id) {
+  const track = state.tracks.find((t) => t.id === id) || await api(`/v1/tracks/${id}`).catch(() => null);
+  if (!track) {
+    toast('无法读取该曲目的信息', 'error');
+    return;
+  }
+  ui.nowTitle.textContent = track.title;
+  ui.nowArtist.textContent = [track.artist, track.album].filter(Boolean).join(' · ');
+  ui.barTitle.textContent = track.title;
+  setCover(id, track.has_cover);
+
+  // Technical line: only rendered when the scan actually found these values.
+  const tech = [];
+  if (track.sample_rate) tech.push(`${(track.sample_rate / 1000).toFixed(1)} kHz`);
+  if (track.channels) tech.push(track.channels >= 2 ? '立体声' : '单声道');
+  if (ui.nowTech) {
+    ui.nowTech.textContent = tech.join(' · ');
+    ui.nowTech.hidden = tech.length === 0;
+  }
+
+  const doc = await api(`/v1/tracks/${id}/lyrics`).catch(() => null);
+  state.lyrics = doc && doc.lines && doc.lines.length ? doc : null;
+  state.lyricIndex = -1;
+  renderLyrics(true);
+}
+
+function renderLyrics(force) {
+  if (!state.lyrics) {
+    if (force) ui.lyrics.innerHTML = '<div class="hint">这首歌没有可用歌词</div>';
+    return;
+  }
+  const pos = state.snapshot.position_ms || 0;
+  const lines = state.lyrics.lines;
+  let idx = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].start_ms <= pos) idx = i; else break;
+  }
+  if (idx === state.lyricIndex && !force) return;
+  state.lyricIndex = idx;
+
+  ui.lyrics.innerHTML = '';
+  lines.forEach((line, i) => {
+    const el = document.createElement('div');
+    el.className = 'lyric' + (i === idx ? ' active' : '');
+    el.textContent = line.text;
+    ui.lyrics.appendChild(el);
+  });
+  const active = ui.lyrics.querySelector('.lyric.active');
+  if (active) active.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+// ---------------------------------------------------------------------------
+// Spectrum
+// ---------------------------------------------------------------------------
+
+function drawSpectrum() {
+  const canvas = ui.spectrum;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const bands = state.spectrum.length || 64;
+  const bw = w / bands;
+  const grad = ctx.createLinearGradient(0, h, 0, 0);
+  grad.addColorStop(0, '#1d9e75');
+  grad.addColorStop(1, '#7f77dd');
+  ctx.fillStyle = grad;
+
+  for (let i = 0; i < bands; i += 1) {
+    const v = Math.max(0, Math.min(1, state.spectrum[i] || 0));
+    const bh = Math.max(2, v * h);
+    ctx.fillRect(i * bw + 1, h - bh, bw - 2, bh);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+ui.playpause.onclick = () => post(state.snapshot.playing ? '/v1/player/pause' : '/v1/player/play', {});
+ui.prev.onclick = () => post('/v1/player/previous', {});
+ui.next.onclick = () => post('/v1/player/next', {});
+ui.mode.onclick = () => {
+  const order = ['repeat', 'repeat_one', 'shuffle'];
+  const nextMode = order[(order.indexOf(state.snapshot.mode) + 1) % order.length];
+  post('/v1/player/mode', { mode: nextMode });
+};
+
+ui.progress.oninput = () => { state.seeking = true; };
+ui.progress.onchange = async () => {
+  const d = state.snapshot.duration_ms;
+  if (d) await post('/v1/player/seek', { position_ms: Math.round((ui.progress.value / 1000) * d) });
+  state.seeking = false;
+};
+
+ui.volume.oninput = () => post('/v1/player/volume', { volume: Number(ui.volume.value) / 100 });
+
+let searchTimer = null;
+ui.search.oninput = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(loadTracks, 250);
+};
+
+ui.scanBtn.onclick = async () => {
+  const root = ui.scanRoot.value.trim();
+  if (!root) return;
+  ui.scanBtn.disabled = true;
+  try {
+    await post('/v1/library/scan', { root });
+    ui.scanStatus.textContent = '扫描已开始…';
+  } catch (e) {
+    ui.scanStatus.textContent = `扫描失败：${e.message}`;
+  } finally {
+    ui.scanBtn.disabled = false;
+  }
+};
+
+function onScanProgress(msg) {
+  ui.scanStatus.textContent = `扫描中 ${msg.done}/${msg.total}`;
+  if (msg.done >= msg.total && msg.total > 0) {
+    setTimeout(() => { ui.scanStatus.textContent = '扫描完成'; }, 500);
+  }
+}
+
+ui.newPlaylistBtn.onclick = async () => {
+  const name = ui.newPlaylistName.value.trim();
+  if (!name) return;
+  await post('/v1/playlists', { name });
+  ui.newPlaylistName.value = '';
+  loadPlaylists();
+};
+
+// ---------------------------------------------------------------------------
+// Navigation drawer (narrow screens only; the CSS decides when it applies)
+// ---------------------------------------------------------------------------
+
+function setNav(open) {
+  document.body.classList.toggle('nav-open', open);
+}
+
+if (ui.menuBtn) ui.menuBtn.onclick = () => setNav(!document.body.classList.contains('nav-open'));
+if (ui.scrim) ui.scrim.onclick = () => setNav(false);
+
+function fmt(ms) {
+  if (ms === null || ms === undefined) return '0:00';
+  const total = Math.floor(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s < 10 ? '0' : ''}${s}`;
+}
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
+(async function boot() {
+  createTrackList();
+  connect();
+  await loadTracks();
+  await loadPlaylists();
+  const health = await api('/v1/health');
+  console.info('mmusic-studio server', health);
+})();

@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT
+     Copyright (c) 2026 mmusic-studio contributors
+
+     v2 原型。DOM 契约相对 v1 有变化：曲库不再是 JS 注入进侧栏的裸列表，
+     而是静态声明的三个区域（导航轨 / 内容列 / 演出舞台）+ 底部播放条。
+     注释见 style.css 与 README.md。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0f12">
+<!-- 空图标：没有 favicon 路由时浏览器会去请求 /favicon.ico 并拿到 401，
+     控制台里留一条无意义的红字。 -->
+<link rel="icon" href="data:,">
+<title>mmusic-studio</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="stage.css">
+<link rel="stylesheet" href="creative.css">
+</head>
+<body>
+<script>window.__VMUSIC_TOKEN__ = "__VMUSIC_TOKEN_VALUE__";</script>
+
+<div id="ambient" aria-hidden="true"><div class="ambient-img" id="ambient-img"></div></div>
+
+<div id="offline-banner" class="offline-banner" hidden>
+  与服务断开连接 — 正在自动重连，播放控制暂时不可用
+</div>
+
+<header class="topbar">
+  <div class="brand">mmusic</div>
+
+  <div class="topsearch">
+    <svg class="si" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="M16 16l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <input id="search" type="search" placeholder="搜索标题、艺术家、专辑" autocomplete="off" aria-label="搜索曲库">
+    <button id="search-clear" class="search-clear" aria-label="清空搜索" hidden>
+      <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+    </button>
+    <kbd>/</kbd>
+  </div>
+
+  <div class="top-right">
+    <span id="demo-badge" class="badge-demo" hidden>演示模式</span>
+    <div id="conn" class="conn">连接中…</div>
+
+    <!-- 主题色切换：色板 → 下拉调色盘。列表由 themes.js 的 CATALOG 填充，
+         加主题只需要往那张表里加一条。 -->
+    <div class="theme-picker" id="theme-picker">
+      <button id="theme-btn" class="iconbtn" title="主题色" aria-label="切换主题色" aria-haspopup="listbox" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 100 18c1.1 0 1.8-.8 1.8-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.1 0-.9.8-1.7 1.7-1.7H16a5 5 0 005-5c0-3.9-4-7.3-9-7.3zm-5.2 9a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm2.6-4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm4.6-1.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm3.4 3.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8z"/></svg>
+      </button>
+      <div class="theme-menu" id="theme-menu" role="listbox" aria-label="主题色列表" hidden></div>
+    </div>
+
+    <button id="workshop-btn" class="iconbtn" title="创意工坊" aria-label="打开创意工坊" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.6l2.3 4.9 5.3.7-3.9 3.7 1 5.3-4.7-2.6-4.7 2.6 1-5.3-3.9-3.7 5.3-.7z"/><path d="M4 19.4h6v1.8H4zM14 19.4h6v1.8h-6z"/></svg>
+    </button>
+
+    <button id="stage-control-btn" class="iconbtn" title="舞台控制" aria-label="打开舞台控制">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10v2H4zM18 6.5v3l3-1.5zM4 15h6v2H4zM14 14.5v3l3-1.5zM4 11.2h14v1.6H4zM4 19.2h10v1.6H4z"/></svg>
+    </button>
+
+    <button id="stage-btn" class="iconbtn" title="正在播放" aria-label="打开正在播放">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 14h3v6H4zM9.5 9h3v11h-3zM15 4h3v16h-3z"/></svg>
+    </button>
+  </div>
+</header>
+
+<div class="app">
+
+  <!-- 导航轨：四个一级目的地，选中态常驻，不再依赖记忆 -->
+  <nav class="rail" id="rail" aria-label="主导航">
+    <button class="rail-item active" data-view="library" aria-label="曲库">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h7v12H4zM13 6h7v12h-7z"/></svg>
+      <span>曲库</span>
+    </button>
+    <button class="rail-item" data-view="online" aria-label="在线曲库">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 100 18 9 9 0 000-18zm0 2c3.9 0 7 3.1 7 7s-3.1 7-7 7-7-3.1-7-7 3.1-7 7-7zm0 2.5a4.5 4.5 0 100 9 4.5 4.5 0 000-9z"/></svg>
+      <span>在线</span>
+    </button>
+    <button class="rail-item" data-view="playlists" aria-label="歌单">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h12v2H4zM4 11h12v2H4zM4 16h8v2H4zM18 10l4 5-4 5z"/></svg>
+      <span>歌单</span>
+    </button>
+    <button class="rail-item" data-view="queue" aria-label="播放队列">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v2H3zM3 10h12v2H3zM3 15h8v2H3zM17 5h4v2h-4zM17 10h4v2h-4zM17 15h4v2h-4z"/></svg>
+      <span>队列</span>
+      <em id="queue-badge" class="rail-badge" hidden>0</em>
+    </button>
+    <div class="rail-spacer"></div>
+    <button class="rail-item" data-view="settings" aria-label="设置">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 110-7 3.5 3.5 0 010 7zM19.4 13a7.7 7.7 0 000-2l2-1.5-2-3.4-2.3 1a7.6 7.6 0 00-1.7-1L15 3H9l-.4 2.1a7.6 7.6 0 00-1.7 1l-2.3-1-2 3.4L4.6 11a7.7 7.7 0 000 2l-2 1.5 2 3.4 2.3-1a7.6 7.6 0 001.7 1L9 21h6l.4-2.1a7.6 7.6 0 001.7-1l2.3 1 2-3.4z"/></svg>
+      <span>设置</span>
+    </button>
+  </nav>
+
+  <!-- 内容列：一个时间只呈现一个视图 -->
+  <section class="column" id="column">
+
+    <!-- 曲库 -->
+    <div class="view" id="view-library">
+      <div class="col-head">
+        <div class="col-head-left">
+          <h1 class="col-title">曲库</h1>
+          <span id="lib-count" class="count">—</span>
+        </div>
+        <div class="col-tools">
+          <select id="lib-sort" aria-label="排序方式">
+            <option value="title">按标题</option>
+            <option value="artist">按艺术家</option>
+            <option value="album">按专辑</option>
+            <option value="added">最近添加</option>
+          </select>
+          <button id="scan-toggle" class="btn">扫描目录</button>
+        </div>
+      </div>
+
+      <div class="scan-panel" id="scan-panel" hidden>
+        <div class="scan-row">
+          <input id="scan-root" type="text" placeholder="音乐目录，例如 D:\Music" autocomplete="off">
+          <button id="scan-btn" class="btn primary">开始扫描</button>
+        </div>
+        <div class="scan-history" id="scan-history" hidden></div>
+        <div class="scan-progress"><div class="scan-bar" id="scan-bar"></div></div>
+        <div class="hint" id="scan-label">尚未扫描</div>
+      </div>
+
+      <div class="lib-empty" id="lib-empty" hidden>
+        <div class="empty-card">
+          <h2>曲库还是空的</h2>
+          <p>填入一个本地音乐目录，mmusic-studio 会读取内嵌标签与封面，并把歌词从同目录的 .lrc 里带进来。</p>
+          <div class="empty-row">
+            <button class="btn primary" id="empty-scan-btn">填写音乐目录</button>
+          </div>
+          <div class="hint">数据只留在本机，不会联网上传。</div>
+        </div>
+      </div>
+
+      <div class="lib-head" id="lib-hint">
+        <span>#</span><span></span><span>标题</span><span>专辑</span><span>音质</span><span>时长</span><span></span>
+      </div>
+      <div class="lib-list" id="lib-list"></div>
+      <div class="lib-sentinel" id="lib-sentinel" hidden>加载中…</div>
+    </div>
+
+    <!-- 在线曲库：搜索 + 分类浏览 + 试听。数据经服务端代理，
+         避开浏览器对第三方音乐接口的 CORS 限制。 -->
+    <div class="view" id="view-online" hidden>
+      <div class="col-head">
+        <div class="col-head-left">
+          <h1 class="col-title">在线曲库</h1>
+          <span id="online-count" class="count">—</span>
+        </div>
+        <div class="col-tools">
+          <select id="online-source" aria-label="音源">
+            <option value="netease">网易云音乐</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="online-search">
+        <input id="online-q" type="search" placeholder="搜索在线歌曲、歌手或专辑…" autocomplete="off" aria-label="搜索在线曲库">
+        <button id="online-go" class="btn primary">搜索</button>
+      </div>
+
+      <div class="online-chips" id="online-chips" role="group" aria-label="分类">
+        <button class="chip active" data-cat="hot">热门</button>
+        <button class="chip" data-cat="new">新歌</button>
+        <button class="chip" data-cat="rock">摇滚</button>
+        <button class="chip" data-cat="electronic">电子</button>
+        <button class="chip" data-cat="folk">民谣</button>
+        <button class="chip" data-cat="jazz">爵士</button>
+        <button class="chip" data-cat="classical">古典</button>
+        <button class="chip" data-cat="acg">ACG</button>
+      </div>
+
+      <div class="online-body" id="online-body">
+        <div class="hint">输入关键词搜索，或点上方分类浏览。</div>
+      </div>
+      <div class="online-sentinel" id="online-sentinel" hidden>加载中…</div>
+    </div>
+
+    <!-- 歌单 -->
+    <div class="view" id="view-playlists" hidden>
+      <div class="col-head">
+        <div class="col-head-left"><h1 class="col-title">歌单</h1><span class="count" id="playlist-count"></span></div>
+        <div class="col-tools">
+          <!-- 架子 / 列表是同一份数据的两种排法，不是两个页面：切换只改
+               .shelf / .pl-list 的显隐，选中项和滚动位置都保留。 -->
+          <button id="shelf-toggle" class="btn" aria-pressed="true" title="立体架子 / 列表排布">歌单架</button>
+          <input id="new-playlist-name" type="text" placeholder="新建歌单…">
+          <button id="new-playlist-btn" class="btn primary">新建</button>
+        </div>
+      </div>
+
+      <div class="shelf on" id="shelf">
+        <div class="shelf-stage" id="shelf-stage"></div>
+        <div class="shelf-hint">滚轮 / ← → 拨动 · 拖拽平移 · Enter 播放 · 点侧边卡转过来</div>
+        <div class="shelf-detail" id="shelf-detail" hidden></div>
+      </div>
+
+      <div class="pl-list" id="playlist-list" hidden></div>
+
+      <!-- 歌单详情：与架子/列表是同一视图内的两层，返回即回到原排布 -->
+      <div class="pl-detail" id="pl-detail" hidden>
+        <div class="pl-detail-head">
+          <button id="pl-detail-back" class="btn" aria-label="返回歌单列表">← 返回</button>
+          <div class="pl-detail-title">
+            <strong id="pl-detail-name" class="pl-name"></strong>
+            <span id="pl-detail-count" class="pl-sub"></span>
+          </div>
+          <div class="pl-detail-actions">
+            <button id="pl-detail-play" class="btn primary">播放</button>
+            <button id="pl-detail-queue" class="btn">下一首播放</button>
+            <button id="pl-detail-rename" class="btn">重命名</button>
+            <button id="pl-detail-delete" class="btn danger">删除</button>
+          </div>
+        </div>
+        <div class="pl-detail-list" id="pl-detail-list"></div>
+      </div>
+    </div>
+
+    <!-- 队列 -->
+    <div class="view" id="view-queue" hidden>
+      <div class="col-head">
+        <div class="col-head-left"><h1 class="col-title">播放队列</h1><span class="count" id="queue-count">0 首</span></div>
+        <div class="col-tools"><button id="queue-clear" class="btn">清空队列</button></div>
+      </div>
+      <div class="q-list" id="queue-list"></div>
+    </div>
+
+    <!-- 设置 -->
+    <div class="view" id="view-settings" hidden>
+      <div class="col-head"><div class="col-head-left"><h1 class="col-title">设置</h1></div></div>
+      <div class="set-group">
+        <h2 class="set-title">外观</h2>
+        <div class="set-row">
+          <label for="set-theme">主题色</label>
+          <select id="set-theme"></select>
+        </div>
+        <div class="theme-swatches" id="theme-swatches" role="group" aria-label="主题色快选"></div>
+        <div class="set-row">
+          <label for="set-device">输出设备</label>
+          <select id="set-device"></select>
+        </div>
+        <div class="set-row">
+          <label for="set-density">列表密度</label>
+          <select id="set-density">
+            <option value="comfortable">标准</option>
+            <option value="compact">紧凑</option>
+          </select>
+        </div>
+        <div class="set-row">
+          <label for="set-motion">减少动效</label>
+          <input id="set-motion" type="checkbox">
+        </div>
+        <!-- 舞台封面是纯表现层开关，即时生效、不需要重新加载界面：显示与否只是
+             .lyric-page 上的一个 class，旋转是 CSS 动画。和下面的渲染模式不同，
+             那边换的是渲染器实现，这边什么实现都没换。 -->
+        <div class="set-row">
+          <label for="set-stage-cover">舞台封面</label>
+          <input id="set-stage-cover" type="checkbox">
+          <span class="hint">在全屏舞台里显示当前曲目的 3D 封面盘</span>
+        </div>
+        <!-- 渲染模式：默认标准渲染。选「增强」不会立刻保存，先把下面的警示块
+             摊开让用户读完，再由块里的确认按钮落库——直接 onchange 就写库的话，
+             误操作的用户会在下一帧才开始读提示。 -->
+        <div class="set-row">
+          <label for="set-render-mode">渲染模式</label>
+          <select id="set-render-mode">
+            <option value="standard">标准渲染</option>
+            <option value="enhanced">WebGL 增强渲染</option>
+          </select>
+        </div>
+        <div class="render-warn" id="render-warn" hidden></div>
+        <div class="set-row">
+          <label for="set-backend">服务端</label>
+          <span class="hint" id="set-backend">—</span>
+        </div>
+      </div>
+
+      <!-- 创意舞台：三维场景、手绘风格、自定义背景都在这里开总开关。
+           细分参数不在这里调——那是工坊的活。这一组只回答"开不开"。 -->
+      <div class="set-group">
+        <h2 class="set-title">创意舞台</h2>
+        <!-- WebGL2 上下文可能创建失败，警告块与上面的渲染模式共用同一种做法：
+             不直接落库，先摊开说明再由用户确认。 -->
+        <div class="set-row">
+          <label for="set-creative">三维舞台</label>
+          <input id="set-creative" type="checkbox">
+        </div>
+        <div class="hint set-note" id="set-creative-note">
+          用独立的三维场景替换原来的粒子层：频谱塔林、频谱球、光隧道、星云、频谱地形，
+          由自动导演跟着段落切换镜头。开启后原粒子层自动让位，两者不会同时画。
+        </div>
+        <div class="render-warn" id="creative-warn" hidden></div>
+        <div class="set-row">
+          <label>创意工坊</label>
+          <button id="set-workshop-btn" class="btn">打开工坊</button>
+        </div>
+        <div class="hint set-note">
+          工坊里可以编排 cue 轨、把参数绑到音频、换背景、开手绘风格，
+          并把这些整体存成一份预置或导出成 JSON。全部参数实时生效，不需要重新加载界面。
+        </div>
+      </div>
+      <!-- 在线音源：每个「需要登录」的音源由 app.js 在这里生成一行（见
+           #cookie-rows）。清单来自 /v1/online/sources，所以加音源不用动这里。 -->
+      <div class="set-group">
+        <h2 class="set-title">在线音源</h2>
+        <div id="cookie-rows"></div>
+        <p class="hint set-note">
+          这里填的是<b>你自己</b>在该站点的登录 cookie，服务端只会把它作为 Cookie 头
+          发给那个站点自己的公开接口，和浏览器登录后的行为一致。填了之后退出再进也会
+          保留；清空输入框并保存即可退出。本项目不解密受保护音频、不绕过付费内容，
+          也不模拟任何站点的反爬签名或设备指纹。
+        </p>
+      </div>
+      <div class="set-group">
+        <h2 class="set-title">快捷键</h2>
+        <div class="kbd-grid">
+          <span>播放 / 暂停</span><kbd>空格</kbd>
+          <span>快进 / 快退 5 秒</span><kbd>← →</kbd>
+          <span>上一首 / 下一首</span><kbd>Shift + ← →</kbd>
+          <span>音量</span><kbd>↑ ↓</kbd>
+          <span>静音</span><kbd>M</kbd>
+          <span>聚焦搜索</span><kbd>/</kbd>
+          <span>切换视图</span><kbd>1 – 4</kbd>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- 演出舞台：整屏的视觉重心 -->
+  <aside class="stage" id="stage" data-mode="karaoke">
+    <div class="stage-head">
+      <span class="stage-kicker">正在播放</span>
+      <div class="stage-modes" id="stage-modes" role="group" aria-label="歌词展示模式">
+        <button class="stage-mode" data-mode="cover" aria-pressed="false">封面</button>
+        <button class="stage-mode" data-mode="line" aria-pressed="false">逐行</button>
+        <button class="stage-mode" data-mode="karaoke" aria-pressed="true">卡拉OK</button>
+        <button class="stage-mode" data-mode="page" aria-pressed="false">全屏</button>
+      </div>
+      <button class="stage-queue" id="stage-queue" title="打开播放队列">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v2H3zM3 10h12v2H3zM3 15h8v2H3zM17 5h4v2h-4zM17 10h4v2h-4zM17 15h4v2h-4z"/></svg>
+        <span>队列</span>
+      </button>
+      <span class="stage-tech" id="now-tech" hidden></span>
+    </div>
+
+    <div class="disc-wrap">
+      <div class="disc is-empty" id="cover"></div>
+      <div class="disc-ring" id="disc-ring" aria-hidden="true"></div>
+    </div>
+
+    <div class="stage-title" id="now-title">未在播放</div>
+    <div class="stage-artist" id="now-artist">从左侧曲库里挑一首</div>
+
+    <div class="stage-progress">
+      <div class="stage-times"><span id="stage-time">0:00 / 0:00</span></div>
+      <input id="stage-progress" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+    </div>
+
+    <canvas id="spectrum" class="spectrum" width="960" height="88" aria-hidden="true"></canvas>
+    <div class="stage-lyrics" id="lyrics"><div class="hint">歌词会随播放位置滚动；点击任意一行可跳转</div></div>
+  </aside>
+
+</div>
+
+<footer class="bar">
+  <div class="bar-track">
+    <div id="bar-title" class="bar-title">—</div>
+    <div id="bar-sub" class="bar-sub"></div>
+  </div>
+
+  <div class="bar-controls">
+    <button id="prev" class="ctrl" title="上一首" aria-label="上一首">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6v12H5V6h2zm12 0v12l-9-6 9-6z"/></svg>
+    </button>
+    <button id="playpause" class="ctrl ctrl-primary" title="播放 / 暂停" aria-label="播放或暂停">
+      <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5-11-6.5z"/></svg>
+      <svg class="ic-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h3.2v14H8zM12.8 5H16v14h-3.2z"/></svg>
+    </button>
+    <button id="next" class="ctrl" title="下一首" aria-label="下一首">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 6v12h2V6h-2zM5 6v12l9-6-9-6z"/></svg>
+    </button>
+    <button id="stop" class="ctrl" title="停止" aria-label="停止">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12v12H6z"/></svg>
+    </button>
+  </div>
+
+  <div class="bar-progress">
+    <span id="bar-time" class="bar-time">0:00 / 0:00</span>
+    <div class="progress-wrap">
+      <div class="progress-ghost" id="progress-ghost"></div>
+      <input id="progress" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+    </div>
+  </div>
+
+  <div class="bar-right">
+    <button id="mode" class="btn-pill" title="播放模式">列表循环</button>
+    <div class="bar-volume">
+      <span class="hint">音量</span>
+      <input id="volume" type="range" min="0" max="100" value="80" aria-label="音量">
+    </div>
+  </div>
+</footer>
+
+<!-- 全屏歌词页：与舞台共用同一份歌词数据，只是换一套排版。
+     控制按钮不是底部播放条的复制品——它们通过 stage:control 事件把意图
+     交回 app.js，播放逻辑仍然只有一份。 -->
+<div class="lyric-page" id="lyric-page" data-lp-mode="karaoke" aria-hidden="true" role="dialog" aria-label="全屏歌词">
+  <div class="lp-head">
+    <div>
+      <div class="lp-title" id="lp-title">未在播放</div>
+      <div class="lp-sub" id="lp-artist"></div>
+    </div>
+    <!-- 全屏页里必须自带模式切换和驾驶舱入口：唯一的入口按钮原本在顶栏，
+         而顶栏被这层 z-index 70 的对话框整个盖住，进了全屏就再也调不了任何东西。 -->
+    <div class="lp-modes" id="lp-modes" role="group" aria-label="歌词显示模式">
+      <button class="lp-mode" data-lp-mode="line" aria-pressed="false">逐行</button>
+      <button class="lp-mode" data-lp-mode="karaoke" aria-pressed="true">卡拉OK</button>
+      <button class="lp-mode" data-lp-mode="scatter" aria-pressed="false">心象</button>
+    </div>
+    <div class="lp-spacer"></div>
+    <button class="lp-btn" id="lp-cover" aria-label="舞台封面" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" d="M12 2a10 10 0 100 20 10 10 0 000-20zm0 7.4a2.6 2.6 0 100 5.2 2.6 2.6 0 000-5.2z"/></svg>
+    </button>
+    <button class="lp-btn" id="lp-view-reset" title="重置视角" aria-label="重置舞台视角">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V2L8 6l4 4V7a5 5 0 11-5 5H5a7 7 0 107-7z"/></svg>
+    </button>
+    <button class="lp-btn" id="lp-cockpit" title="舞台驾驶舱" aria-label="打开舞台驾驶舱" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10v2H4zM18 6.5v3l3-1.5zM4 15h6v2H4zM14 14.5v3l3-1.5zM4 11.2h14v1.6H4zM4 19.2h10v1.6H4z"/></svg>
+    </button>
+    <button class="lp-btn" id="lp-close" title="关闭 (Esc)" aria-label="关闭全屏歌词">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+
+  <div class="lp-body" id="lp-lines"></div>
+  <div class="lp-sub2" id="lp-sub" hidden style="padding: 0 clamp(20px,7vw,96px) 8px;"></div>
+
+  <div class="lp-foot">
+    <span class="lp-time" id="lp-time">0:00 / 0:00</span>
+    <input id="lp-progress" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+    <button class="lp-btn" id="lp-prev" title="上一首" aria-label="上一首">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6v12H5V6h2zm12 0v12l-9-6 9-6z"/></svg>
+    </button>
+    <button class="lp-btn primary" id="lp-play" title="播放 / 暂停" aria-label="播放或暂停">
+      <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5-11-6.5z"/></svg>
+      <svg class="ic-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h3.2v14H8zM12.8 5H16v14h-3.2z"/></svg>
+    </button>
+    <button class="lp-btn" id="lp-next" title="下一首" aria-label="下一首">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 6v12h2V6h-2zM5 6v12l9-6-9-6z"/></svg>
+    </button>
+  </div>
+</div>
+
+<div id="scrim"></div>
+
+<!-- 舞台控制舱：从右侧滑出的调参面板。
+     所有滑块都只是往 <html> 写 CSS 变量，实际渲染由 stage.css 里的
+     var(--fx-*) 消费——面板本身不懂任何渲染逻辑，加一个旋钮成本极低。 -->
+<div class="stage-ctl" id="stage-ctl" aria-hidden="true" role="dialog" aria-label="舞台控制">
+  <div class="sc-head">
+    <span class="sc-badge">S</span>
+    <div class="sc-head-text">
+      <div class="sc-title">舞台控制舱</div>
+      <div class="sc-sub">调节舞台渲染、镜头与全局滤镜参数</div>
+    </div>
+    <button class="sc-close" id="sc-close" title="关闭" aria-label="关闭舞台控制">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+
+  <div class="sc-body" id="sc-body">
+    <!-- 分组与滑块由 stage.js 依据 SCHEMA 生成，避免 20 组 markup 手写错漏 -->
+  </div>
+
+  <div class="sc-foot">
+    <button class="sc-reset" id="sc-reset">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V2L7 6l5 4V7a5 5 0 11-5 5H5a7 7 0 107-7z"/></svg>
+      <span>恢复默认设置</span>
+    </button>
+    <button class="sc-ok" id="sc-ok">确定</button>
+  </div>
+</div>
+
+<div id="ctx-menu" class="menu" role="menu" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<!-- 创意工坊：右侧滑出的编辑面板。
+     它不持有任何渲染逻辑 —— 参数元数据来自 creative-stage.js 的表，控件按那张表
+     生成，编辑结果直接写回同一份预置数据。所以这里除了骨架什么都不用声明。 -->
+<div class="ws-panel" id="workshop" aria-hidden="true" role="dialog" aria-label="创意工坊" hidden>
+  <div class="ws-head">
+    <span class="ws-badge">W</span>
+    <div class="ws-head-text">
+      <div class="ws-title">创意工坊</div>
+      <div class="ws-sub">场景 · 参数 · 编排 · 绑定 · 背景 · 导出</div>
+    </div>
+    <button class="ws-close" id="ws-close" title="关闭" aria-label="关闭创意工坊">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div class="ws-tabs" id="ws-tabs" role="tablist" aria-label="工坊页签"></div>
+  <div class="ws-body" id="ws-body"></div>
+  <div class="ws-toast" id="ws-toast" role="status" aria-live="polite" hidden></div>
+</div>
+
+<!-- 演示后端（prototype/mock.js）不随服务发布：app.js 探不到 /v1/health 时
+     会自动退到 ServerTransport，不需要这段 script 也能正常工作。
+     下面五个是创意舞台：内核 → 表现层 → 编排 → 工坊，顺序即依赖顺序。 -->
+<script src="themes.js"></script>
+<script src="stage.js"></script>
+<!-- 起音检测：粒子层与三维层共用同一份"鼓点是哪一刻"，必须排在两者之前 -->
+<script src="onset.js"></script>
+<script src="stage-particles.js"></script>
+<script src="stage-particles-gl.js"></script>
+<script src="stage-control.js"></script>
+<script src="pl-covers.js"></script>
+<script src="shelf.js"></script>
+<script src="creative-gl.js"></script>
+<script src="bgwall.js"></script>
+<script src="lyric3d.js"></script>
+<script src="backgrounds.js"></script>
+<script src="handdrawn.js"></script>
+<script src="creative-stage.js"></script>
+<script src="workshop.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

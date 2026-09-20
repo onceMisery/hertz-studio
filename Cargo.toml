@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 mmusic-studio contributors
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["mmusic-studio contributors"]
+description = "A local-first, self-hosted music service and player"
+homepage = "https://github.com/mmusic-studio/mmusic-studio"
+repository = "https://github.com/mmusic-studio/mmusic-studio"
+
+[workspace.dependencies]
+# --- internal ---
+vmusic-core = { path = "crates/vmusic-core", version = "0.1.0" }
+vmusic-audio = { path = "crates/vmusic-audio", version = "0.1.0" }
+vmusic-store = { path = "crates/vmusic-store", version = "0.1.0" }
+vmusic-library = { path = "crates/vmusic-library", version = "0.1.0" }
+vmusic-lyrics = { path = "crates/vmusic-lyrics", version = "0.1.0" }
+
+# --- async / web ---
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs", "net"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+futures = "0.3"
+# 在线曲库代理：第三方音乐接口不带 CORS 头，必须由服务端代发请求。
+# 用 rustls 而不是 native-tls，免得在 Windows 上引入 OpenSSL 构建依赖。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+
+# --- data ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
+dirs = "5"
+
+# --- audio ---
+symphonia = { version = "0.5", features = ["all"] }
+cpal = "0.15"
+rustfft = "6.2"
+num-complex = "0.4"
+
+# --- observability / config / errors ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+toml = "0.8"
+thiserror = "2"
+anyhow = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+opt-level = 3
+panic = "abort"

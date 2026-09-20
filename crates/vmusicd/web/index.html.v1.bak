@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0f12">
+<title>mmusic-studio</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<script>window.__VMUSIC_TOKEN__ = "__VMUSIC_TOKEN_VALUE__";</script>
+
+<div id="ambient" aria-hidden="true"><div class="ambient-img" id="ambient-img"></div></div>
+
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">mmusic<span>-studio</span></div>
+
+    <div class="search-row">
+      <input id="search" type="search" placeholder="搜索曲库…" autocomplete="off">
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">曲库</div>
+      <div class="scan-row">
+        <input id="scan-root" type="text" placeholder="音乐目录，例如 D:\Music">
+        <button id="scan-btn" class="btn">扫描</button>
+      </div>
+      <div id="scan-status" class="hint"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">播放列表</div>
+      <div id="playlists" class="playlists"></div>
+      <div class="new-playlist">
+        <input id="new-playlist-name" type="text" placeholder="新建歌单…">
+        <button id="new-playlist-btn" class="btn">新建</button>
+      </div>
+    </div>
+
+    <div class="spacer"></div>
+    <div id="conn" class="conn">连接中…</div>
+  </aside>
+
+  <main class="main">
+    <div class="mobile-top">
+      <button id="menu-btn" class="ctrl" title="曲库" aria-label="打开曲库">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v2H4zM4 15h16v2H4z"/></svg>
+      </button>
+      <div class="title">mmusic-studio</div>
+    </div>
+
+    <section class="now">
+      <div class="cover" id="cover"></div>
+      <div class="now-meta">
+        <div class="now-title" id="now-title">未在播放</div>
+        <div class="now-artist" id="now-artist"></div>
+        <div class="now-tech" id="now-tech" hidden></div>
+        <canvas id="spectrum" class="spectrum" width="640" height="84"></canvas>
+      </div>
+    </section>
+
+    <section class="lyrics" id="lyrics">
+      <div class="hint">选择一首曲目开始播放</div>
+    </section>
+  </main>
+</div>
+
+<footer class="bar">
+  <div class="bar-track">
+    <div id="bar-title" class="bar-title">—</div>
+    <div id="bar-time" class="bar-time">0:00 / 0:00</div>
+  </div>
+
+  <div class="bar-controls">
+    <button id="prev" class="ctrl" title="上一首" aria-label="上一首">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6v12H5V6h2zm12 0v12l-9-6 9-6z"/></svg>
+    </button>
+    <button id="playpause" class="ctrl ctrl-primary" title="播放/暂停" aria-label="播放/暂停">
+      <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5-11-6.5z"/></svg>
+      <svg class="ic-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h3.2v14H8zM12.8 5H16v14h-3.2z"/></svg>
+    </button>
+    <button id="next" class="ctrl" title="下一首" aria-label="下一首">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 6v12h2V6h-2zM5 6v12l9-6-9-6z"/></svg>
+    </button>
+  </div>
+
+  <div class="bar-progress">
+    <input id="progress" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+  </div>
+
+  <div class="bar-volume">
+    <span class="hint">音量</span>
+    <input id="volume" type="range" min="0" max="100" value="80" aria-label="音量">
+  </div>
+
+  <div class="bar-mode-cell">
+    <button id="mode" class="btn-pill" title="播放模式">重复</button>
+  </div>
+</footer>
+
+<div id="nav-scrim"></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

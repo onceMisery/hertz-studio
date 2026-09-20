@@ -1,0 +1,38 @@
+mmusic-studio
+Copyright 2026 mmusic-studio contributors
+
+This product includes software developed as part of this project.
+Licensed under the MIT License (see LICENSE).
+
+---------------------------------------------------------------------------
+Third-party acknowledgements
+---------------------------------------------------------------------------
+
+This project depends on the following open-source crates (each under its own
+license, see `cargo deny list` or each crate's own LICENSE file):
+
+  - tokio, axum, tower-http, hyper    (MIT)
+  - serde, serde_json                 (MIT / Apache-2.0)
+  - sqlx                              (MIT / Apache-2.0)
+  - symphonia                         (MPL-2.0)
+  - cpal                              (Apache-2.0 / MIT)
+  - rustfft, num-complex              (MIT / Apache-2.0)
+  - tracing, tracing-subscriber       (MIT)
+  - figment                           (MIT / Apache-2.0)
+  - thiserror, anyhow                 (MIT / Apache-2.0)
+  - uuid, rand, walkdir, dirs         (MIT / Apache-2.0)
+
+---------------------------------------------------------------------------
+Design lineage
+---------------------------------------------------------------------------
+
+The architecture and the audio-pipeline design of this project were informed
+by the music player subsystem of the VCPChat project
+(https://github.com/lioensky/VCPChat), in particular:
+
+  - the three-layer split of audio engine / player / lyric stage;
+  - the idea that playback state must have a single authoritative source;
+  - the HTTP + WebSocket protocol shape of the audio service.
+
+No source file of that project is copied into this repository. All code here
+is an independent implementation written for this project.
