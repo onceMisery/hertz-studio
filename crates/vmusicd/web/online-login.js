@@ -17,17 +17,54 @@
   var loginSources = [];
   // 各源已登录账号：source -> AccountInfo（未登录的源不在表里）。
   var accountsById = {};
-  // 顶栏选中展示头像的音源 id；持久化在 localStorage。
+  // 顶栏选中展示头像的音源 id。
+  //
+  // 权威值存在服务端 settings 表的 `topAvatarSource` 键，跟着数据库走，
+  // 服务重启后仍在。localStorage 只作「同一次会话内的即时镜像」：服务每次
+  // 启动监听的端口不同，浏览器按 origin 隔离 localStorage，换端口就是换
+  // 源，旧镜像根本读不到——只靠它就会每次重启都丢选择。
   var TOP_AV_KEY = 'vmusic.topAvatarSource';
+  var TOP_AV_SETTING = 'topAvatarSource';
   var selectedAvatarSource = readSelectedAvatar();
   function readSelectedAvatar() {
-    try { return localStorage.getItem(TOP_AV_KEY); } catch (e) { return null; }
+    try { return localStorage.getItem(TOP_AV_KEY) || null; } catch (e) { return null; }
   }
-  function writeSelectedAvatar(id) {
+  /// 只写本地镜像，不触网。
+  function writeLocalMirror(id) {
     try {
       if (id) localStorage.setItem(TOP_AV_KEY, id);
       else localStorage.removeItem(TOP_AV_KEY);
     } catch (e) {}
+  }
+  /// 落内存 + 本地镜像 + 服务端持久层。
+  /// 服务端写入失败不打断交互：镜像还在，本次会话仍按选择展示。
+  function writeSelectedAvatar(id) {
+    writeLocalMirror(id);
+    if (!T) return;
+    T.put('/v1/settings', { topAvatarSource: id || '' }).catch(function (e) {
+      if (window.console) console.warn('顶栏头像选择持久化失败：', e);
+    });
+  }
+  /// 启动时从服务端读回选择。
+  /// 服务端没有而镜像有，说明是只存 localStorage 的旧版本留下的选择——
+  /// 顺手迁移到服务端，之后重启就能恢复。
+  async function loadSelectedAvatar() {
+    var remote = null;
+    try {
+      var s = await T.get('/v1/settings');
+      var v = s ? s[TOP_AV_SETTING] : null;
+      if (typeof v === 'string' && v) remote = v;
+    } catch (e) { /* 读不到就退回镜像 */ }
+    var local = readSelectedAvatar();
+    if (remote) {
+      selectedAvatarSource = remote;
+      writeLocalMirror(remote); // 镜像与服务端对齐
+    } else if (local) {
+      selectedAvatarSource = local;
+      writeSelectedAvatar(local); // 旧值迁移上服务端
+    } else {
+      selectedAvatarSource = null;
+    }
   }
 
   // 各平台二维码必须用对应 App 扫：QQ 走的是 QQ 互联授权，用 QQ 音乐 App
@@ -281,7 +318,10 @@
         return;
       }
       await loadAccounts();
+      // 弹窗里也要以服务端为准（另开标签页改过选择时这里能跟上）。
+      await loadSelectedAvatar();
       paintSourceTabs();
+      refreshTopAvatar();
       // 选目标源：显式指定 > 唯一已登录源 > 清单第一个。
       var loggedInIds = list
         .map(function (s) { return s.id; })
@@ -495,7 +535,25 @@
     }
   };
 
+  /// 启动恢复：拉音源清单 + 账号态 + 服务端持久化的顶栏头像选择，重绘顶栏。
+  ///
+  /// app.js 在 boot 里调用。此前 refreshTopAvatar 只挂在「打开登录弹窗」上，
+  /// 服务重启后不打开弹窗就一直是默认人形图标——这是选择「看起来丢了」的
+  /// 另一半原因（另一半是只存 localStorage 而端口每次都变）。
+  /// 顶栏头像属锦上添花，这里失败一律静默，不打扰启动。
+  async function init() {
+    T = window.VMusicTransport;
+    try {
+      var list = await loadLoginSources();
+      if (!list.length) return;
+      await loadAccounts();
+      await loadSelectedAvatar();
+      refreshTopAvatar();
+    } catch (e) { /* 静默 */ }
+  }
+
   window.OnlineLogin = {
+    init: init,
     open: open,
     start: start,
     close: close,

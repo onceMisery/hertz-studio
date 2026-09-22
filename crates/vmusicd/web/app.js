@@ -2784,6 +2784,10 @@ function initNowPlayingModal() {
     errText,
   });
   window.Online.init();
+  // 扫码登录模块（web/online-login.js）：放在 Online.init 之后，头像 URL
+  // 归一化要用它挂出的 safeCoverUrl。init() 负责在启动阶段就把顶栏头像按
+  // 服务端持久化的选择恢复出来（以前只有打开登录弹窗才恢复）。
+  if (window.OnlineLogin) window.OnlineLogin.init();
   // 在线歌单两层界面（web/online-playlist-view.js）：同样是先注入宿主再 init。
   // 宿主只给三样它自己造不出来的东西：层切换、音源能力位、队列写入。
   if (window.OnlinePlaylistView) {
