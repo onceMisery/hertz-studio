@@ -207,6 +207,7 @@
   // 不是整页帧率（那会把"这页本来就重"误判成"这台机器不行"）。
   // phase: 'off' 没在测；'base' 静默窗口（这一帧不画 GL）；'draw' 在画窗口。
   var dprStep = 0;
+  var adaptSlowMs = 0;
   var probe = { pending: false, running: false, skip: false, phase: 'off',
     frames: 0, elapsed: 0, total: 0,
     base: 0, on: 0, loss: null, rounds: 0 };
@@ -752,13 +753,15 @@
     if (!v || !v.el) return false;
     var r = v.el.getBoundingClientRect();
     if (!r.width || !r.height) return false;
+    var quality = tierIndex();
     var d = Math.min(window.devicePixelRatio || 1, 1.5)
-      * TIERS[tierIndex()].dpr * DPR_STEPS[dprStep];
+      * TIERS[quality].dpr * DPR_STEPS[dprStep];
     if (v.w === Math.round(r.width) && v.h === Math.round(r.height)
-        && v.dpr === d && !force) return true;
+        && v.dpr === d && v.quality === quality && !force) return true;
     v.w = Math.round(r.width);
     v.h = Math.round(r.height);
     v.dpr = d;
+    v.quality = quality;
     if (v.eng) v.eng.resize(v.w, v.h, d);
     return true;
   }
@@ -823,6 +826,7 @@
       play: document.body.classList.contains('is-playing'),
       seed: readPath(runtime, 'stage.seed'),
       scene: preset.scene,
+      quality: tierIndex(),
       p: runtime.sc,
       // 三维歌词场景的只读歌词快照（行数组 + 当前行号）；其它场景忽略。
       lyric: (window.Stage && Stage.lyrics) ? Stage.lyrics() : null,
@@ -853,6 +857,7 @@
     // 也一起停掉的话，量出来的是整层的代价而不是差异。
     // 手绘与背景不在静默范围内：它们是另外两层，不该被算进三维的账。
     if (!probeMuted()) {
+      var frameStart = now();
       var r = v.eng.render(state);
       if (r && r.ok === false) {
         if (r.reason === 'shader') {
@@ -866,6 +871,16 @@
         // 任何东西，而 canvas 还留在舞台上糊着一张定格画面。必须走降级，
         // 让粒子层接管并把画布摘掉 —— 只靠 webglcontextrestored 是等不来的。
         if (r.reason === 'context-lost') { degrade('WebGL 上下文在运行中丢失', false, true); return; }
+      }
+      if (r && r.ok) {
+        var frameMs = now() - frameStart;
+        var budget = 1000 / TIERS[tierIndex()].fps;
+        adaptSlowMs = frameMs > budget * 1.35 ? adaptSlowMs + dtMs : 0;
+        if (adaptSlowMs >= 1800 && dprStep < DPR_STEPS.length - 1) {
+          dprStep += 1;
+          views.forEach(function (item) { measure(item, true); });
+          adaptSlowMs = 0;
+        }
       }
     }
     if (window.HandDrawn) HandDrawn.frame(state);
@@ -1077,6 +1092,7 @@
       degradedByProbe = false;
       degradedBecause = null;
       dprStep = 0;
+      adaptSlowMs = 0;
       probe.loss = null;
       teardown();
     }
@@ -1099,7 +1115,9 @@
     if (b) views.push(b);
 
     views.forEach(function (v) {
-      try { v.eng = CreativeGL.create(v.canvas); } catch (e) { v.eng = null; }
+      try {
+        v.eng = CreativeGL.create(v.canvas, { quality: tierIndex() });
+      } catch (e) { v.eng = null; }
       if (v.eng) v.eng.warmUp();
     });
     if (!views[0].eng) { degrade('创建 WebGL2 上下文失败'); return 'off'; }
@@ -1417,7 +1435,7 @@
     stats: function () {
       return {
         active: !!wanted, scene: preset.scene, section: section,
-        fps: targetFps(), tier: tierIndex(),
+        fps: targetFps(), tier: tierIndex(), dprScale: DPR_STEPS[dprStep],
         beats: feat.beats, animations: animations.length,
         energy: Number(feat.energy.toFixed(3)),
         agg: agg.map(function (v) { return Number(v.toFixed(3)); }),

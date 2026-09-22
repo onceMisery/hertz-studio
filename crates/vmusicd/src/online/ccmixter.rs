@@ -131,6 +131,8 @@ fn upload_track(upload: &serde_json::Value) -> Option<OnlineTrack> {
         duration_ms,
         cover: None,
         playable: true,
+        vip_only: false,
+        track_ref: serde_json::json!({}),
     })
 }
 
@@ -170,6 +172,7 @@ pub async fn stream(ctx: &Ctx, id: &str, _quality: u32) -> ApiResult<StreamInfo>
         id: id.to_string(),
         bitrate: None,
         expires_in_secs: None,
+        fallback_urls: Vec::new(),
     })
 }
 

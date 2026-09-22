@@ -39,6 +39,7 @@ const ui = {
     playlists: $('view-playlists'),
     queue: $('view-queue'),
     online: $('view-online'),
+    favorites: $('view-favorites'),
     settings: $('view-settings'),
   },
 
@@ -58,6 +59,7 @@ const ui = {
   scanHistory: $('scan-history'),
 
   playlistList: $('playlist-list'),
+  playlistOnline: $('playlist-online'),
   playlistCount: $('playlist-count'),
   newPlaylistName: $('new-playlist-name'),
   newPlaylistBtn: $('new-playlist-btn'),
@@ -140,6 +142,21 @@ const ui = {
   onlineChips: $('online-chips'),
   onlineBody: $('online-body'),
   onlineSentinel: $('online-sentinel'),
+
+  // 收藏
+  favList: $('fav-list'),
+  favCount: $('fav-count'),
+  favTabs: $('fav-tabs'),
+  favPlayAll: $('fav-play-all'),
+  favRefresh: $('fav-refresh'),
+  favBadge: $('fav-badge'),
+
+  // 每日推荐
+  dailyList: $('daily-list'),
+  dailyDate: $('daily-date'),
+  dailySub: $('daily-sub'),
+  dailyPlayAll: $('daily-play-all'),
+  dailyRefresh: $('daily-refresh'),
 };
 
 // 舞台（VCP 音乐模式）由 stage.js 提供，先于 app.js 加载。它只吃数据、只吐
@@ -456,10 +473,10 @@ function createTrackRow(track) {
     <div class="t-dur"></div>
     <div class="t-actions">
       <button class="t-act" data-act="play-next" title="下一首播放" aria-label="下一首播放">
-        <svg viewBox="0 0 24 24"><path d="M7 4h3v16H7zM11.5 12l6 4V8z"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-skip-next"/></svg>
       </button>
       <button class="t-act" data-act="menu" title="更多" aria-label="更多操作">
-        <svg viewBox="0 0 24 24"><path d="M6 10a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4z"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-more"/></svg>
       </button>
     </div>`;
   row.querySelector('.t-title').textContent = track.title;
@@ -470,10 +487,26 @@ function createTrackRow(track) {
   if (q) row.querySelector('.t-quality').textContent = q;
   row.querySelector('.t-dur').textContent = fmt(track.duration_ms);
 
+  // 收藏红心。本地曲目行的 source 恒为 local，ref_id 就是曲目 id。
+  if (window.Favorites) {
+    window.Favorites.attachHeart(row.querySelector('.t-actions'), {
+      kind: 'track',
+      source: 'local',
+      ref_id: track.id,
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      duration_ms: track.duration_ms,
+    });
+  }
+
   row.addEventListener('click', (e) => {
     const act = e.target.closest('.t-act');
     if (act) {
       e.stopPropagation();
+      // 红心按钮自带 handler（含 stopPropagation），这里只是双保险：
+      // 万一它回滚到行处理，也不该变成「插入下一首」。
+      if (act.dataset.act === 'fav') return;
       if (act.dataset.act === 'menu') openContextMenu(track, act);
       else insertNext(track.id);
       return;
@@ -627,6 +660,8 @@ function applySnapshot(snap) {
   updateRowActiveState(snap);
   // 舞台拿走播放状态：它自己有本地时钟补帧，不依赖推送频率。
   if (Stage) Stage.setSnapshot(snap);
+  // 播放控制弹窗同步播放态 / 时间 / 进度
+  syncNpSnapshot(snap);
   syncMediaSession();
 }
 
@@ -639,15 +674,16 @@ function updateRowActiveState(snap) {
 }
 
 async function loadNowPlaying(id) {
-  // 在线试听的虚拟 id 在本地库里查不到，先回落到搜索时缓存下来的元数据。
-  let track = state.byId.get(id) || onlineMeta.get(id);
-  // 刷新之后 onlineMeta 是空的，再去查本地库必然 404——这类 id 直接跳过请求，
+  // 在线试听的虚拟 id 在本地库里查不到，先回落到搜索时缓存下来的元数据
+  //（缓存归 online.js 所有，通过 window.Online 访问）。
+  let track = state.byId.get(id) || window.Online.getMeta(id);
+  // 刷新之后在线缓存是空的，再去查本地库必然 404——这类 id 直接跳过请求，
   // 别让一个已知无解的地址污染控制台和网络面板。
   if (!track && !id.startsWith('online:')) {
     track = await transport.get(`/v1/tracks/${id}`).catch(() => null);
     if (track) state.byId.set(id, track);
   }
-  // 刷新后 onlineMeta 是空的，但队列/快照里还留着虚拟 id。
+  // 刷新后在线缓存是空的，但队列/快照里还留着虚拟 id。
   // 用 id 反解出音源与曲目号，先给一个占位标题把界面填上，再异步补详情。
   if (!track && id.startsWith('online:')) {
     const rest = id.slice('online:'.length);
@@ -664,7 +700,7 @@ async function loadNowPlaying(id) {
         cover: null,
       };
       track = base;
-      onlineMeta.set(id, base);
+      window.Online.meta.set(id, base);
       state.byId.set(id, base);
       transport
         .get(`/v1/online/detail?source=${encodeURIComponent(base.source)}&id=${encodeURIComponent(base.onlineId)}`)
@@ -675,18 +711,19 @@ async function loadNowPlaying(id) {
             artist: d.artist || '',
             album: d.album || '',
             duration_ms: d.duration_ms || 0,
-            cover: safeCoverUrl(d.cover),
+            cover: window.Online.safeCoverUrl(d.cover),
           });
           // 只在这首仍是当前曲目时重绘，避免切歌后把界面改错
           if (state.current && state.current.id === id) {
-            paintNowPlaying(base, base.cover);
+            window.Online.paintNowPlaying(base, base.cover);
             if (Stage) Stage.setTrack(base, base.cover);
+            syncNpTrack(base, base.cover);
           }
         })
         .catch(() => {
           if (state.current && state.current.id === id) {
             base.artist = '在线试听';
-            paintNowPlaying(base, null);
+            window.Online.paintNowPlaying(base, null);
           }
         });
     }
@@ -707,15 +744,15 @@ async function loadNowPlaying(id) {
   ui.nowTech.hidden = tech.length === 0;
 
   // 本地曲目走 /v1/tracks/<id>/cover；在线曲目用音源给的远程封面地址。
-  // 刷新页面后 onlineMeta 是空的，这里补拉一次详情把封面找回来。
+  // 刷新页面后在线缓存是空的，由 online.js 补拉一次详情把封面找回来。
   let url = null;
   if (track.has_cover) {
     // coverUrl 现在是同步拼串，不再需要 await / catch
     url = transport.coverUrl(id);
   } else if (track.source && track.onlineId) {
-    url = safeCoverUrl(track.cover) || await fetchOnlineCover(track);
+    url = window.Online.safeCoverUrl(track.cover) || await window.Online.fetchCover(track);
   } else {
-    url = safeCoverUrl(track.cover);
+    url = window.Online.safeCoverUrl(track.cover);
   }
   // 远程封面可能 404 / 防盗链：加载不出来就撤掉，用占位图而不是空白
   if (url && !(await probeImage(url))) url = null;
@@ -726,41 +763,14 @@ async function loadNowPlaying(id) {
   }
   // 封面（含旋转）与取色背景交给舞台，app.js 不再直接碰 #cover。
   if (Stage) Stage.setTrack(track, url);
+  // 播放控制弹窗同步曲目信息与封面
+  syncNpTrack(track, url);
 
   const doc = await (track.source && track.onlineId
-    ? loadOnlineLyricDoc(track)
+    ? window.Online.loadLyricDoc(track)
     : transport.get(`/v1/tracks/${id}/lyrics`).catch(() => null));
   if (Stage) Stage.setLyrics(doc && doc.lines && doc.lines.length ? doc : null);
   updateMediaSessionMetadata(track, url);
-}
-
-async function fetchOnlineCover(track) {
-  try {
-    const d = await transport.get(
-      `/v1/online/detail?source=${encodeURIComponent(track.source)}&id=${encodeURIComponent(track.onlineId)}`
-    );
-    const url = safeCoverUrl(d && d.cover);
-    if (url && track.id) {
-      // 回填，下次不用再拉
-      const meta = onlineMeta.get(track.id) || track;
-      meta.cover = url;
-      onlineMeta.set(track.id, meta);
-      if (state.byId.get(track.id)) state.byId.set(track.id, meta);
-    }
-    return url;
-  } catch {
-    return null; // 详情拿不到只是没有封面，不该中断「正在播放」的渲染
-  }
-}
-
-async function loadOnlineLyricDoc(track) {
-  try {
-    return await transport.get(
-      `/v1/online/lyric?source=${encodeURIComponent(track.source)}&id=${encodeURIComponent(track.onlineId)}`
-    );
-  } catch {
-    return null; // 没有歌词是常态，舞台会显示「这首歌没有可用歌词」
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -774,8 +784,16 @@ async function loadOnlineLyricDoc(track) {
 
 function initStage() {
   if (!Stage) { console.warn('stage.js 未加载，歌词与舞台效果不可用'); return; }
-  Stage.init();
-  if (window.StageParticles) window.StageParticles.init();
+  // 视觉子系统（主循环/粒子/GL 宿主/粒子封面/星河）统一由
+  // VisualController 按依赖顺序初始化，也可整体销毁。
+  if (window.VisualController) VisualController.init();
+  else {
+    Stage.init();
+    if (window.StageParticles) window.StageParticles.init();
+    if (window.StageGLHost) window.StageGLHost.init();
+    if (window.StageCoverParticles) window.StageCoverParticles.init();
+    if (window.StageStarRiver) window.StageStarRiver.init();
+  }
   if (window.Shelf) initShelf();
   document.addEventListener('stage:control', onStageControl);
 }
@@ -862,7 +880,7 @@ function renderQueue() {
   let dragId = null;
   list.forEach((id, index) => {
     // 队列里的曲目可能来自尚未加载的曲库分页；宁可显示占位行，也不要整行消失。
-    const track = state.byId.get(id) || onlineMeta.get(id)
+    const track = state.byId.get(id) || window.Online.getMeta(id)
       || { id, title: '未知曲目', artist: '', duration_ms: null };
     const row = document.createElement('div');
     row.className = 'q-row' + (id === state.snapshot.track_id ? ' playing' : '');
@@ -874,7 +892,7 @@ function renderQueue() {
       <span class="q-main"><span class="q-title"></span><span class="q-sub"></span></span>
       <span class="q-dur"></span>
       <button class="t-act" data-act="remove" aria-label="移出队列">
-        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
       </button>`;
     row.querySelector('.q-title').textContent = track.title;
     row.querySelector('.q-sub').textContent = track.artist || '未知艺术家';
@@ -953,8 +971,9 @@ async function loadPlaylists() {
   if (shelf) shelf.setItems(state.playlists);
   ui.playlistList.innerHTML = '';
   rowArts.clear();
-  if (!state.playlists.length) {
-    ui.playlistList.innerHTML = '<div class="hint">还没有歌单，在上面新建一个。</div>';
+  const onlineCount = window.OnlinePlaylists ? window.OnlinePlaylists.all().length : 0;
+  if (!state.playlists.length && !onlineCount) {
+    ui.playlistList.innerHTML = '<div class="hint">还没有歌单，在上面新建一个；或到「在线」面板登录后同步在线歌单。</div>';
     return;
   }
   for (const p of state.playlists) {
@@ -964,16 +983,16 @@ async function loadPlaylists() {
       <span class="pl-art" aria-hidden="true"></span>
       <span class="pl-main"><span class="pl-name"></span><span class="pl-sub"></span></span>
       <button class="t-act" data-act="open" aria-label="打开歌单">
-        <svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-folder"/></svg>
       </button>
       <button class="t-act" data-act="play" aria-label="播放歌单">
-        <svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"/></svg>
       </button>
       <button class="t-act" data-act="rename" aria-label="重命名">
-        <svg viewBox="0 0 24 24"><path d="M4 20h4L20 8l-4-4L4 16zM14 6l4 4"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-pencil"/></svg>
       </button>
       <button class="t-act t-act-danger" data-act="delete" aria-label="删除歌单">
-        <svg viewBox="0 0 24 24"><path d="M6 7h12v13H6zM4 5h16v2H4zM9 3h6v2H9z"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-trash"/></svg>
       </button>`;
     el.querySelector('.pl-name').textContent = p.name;
     el.querySelector('.pl-sub').textContent = `${p.track_count} 首`;
@@ -987,6 +1006,150 @@ async function loadPlaylists() {
     rowArts.set(p.id, art);
     ui.playlistList.appendChild(el);
   }
+  renderOnlinePlaylistSection();
+}
+
+// 在线歌单分区：数据只存在 online-playlists.js 的 state.lists 一份，这里
+// 纯渲染。按音源分组挂在本地歌单之后；点击行打开在线详情抽屉（固定浮层，
+// 在任何视图上都能弹出），▶ 直接整盘播放。与在线面板网格始终同源。
+//
+// 歌单视图有「歌单架 / 列表」两种排布（setPlaylistMode）：列表模式下分区
+// 块挂在 #playlist-list 末尾与本地歌单同列滚动；架子模式下 #playlist-list
+// 整体隐藏，块搬到独立宿主 #playlist-online（架子下方剩余区域）。两种排布
+// 共用同一个块节点，切换时只搬家不重建，滚动状态外的一切都保留。
+let onlineBlockEl = null;
+
+function onlinePlaylistHost() {
+  return playlistMode === 'list' ? ui.playlistList : ui.playlistOnline;
+}
+
+// 把分区块放进当前排布对应的宿主，并维护架子宿主的显隐；没有在线歌单时
+// 架子宿主收起，不把立体架子顶上去或留一块空白。
+function placeOnlineBlock() {
+  if (!ui.playlistOnline) return;
+  if (onlineBlockEl) {
+    const host = onlinePlaylistHost();
+    if (onlineBlockEl.parentElement !== host) host.appendChild(onlineBlockEl);
+  }
+  ui.playlistOnline.hidden = playlistMode !== 'shelf' || !onlineBlockEl;
+}
+
+function renderOnlinePlaylistSection() {
+  const list = ui.playlistList;
+  if (!list) return;
+  const OP = window.OnlinePlaylists;
+  const items = OP ? OP.all() : [];
+
+  // 本地歌单为空时，空态提示与在线分区互补：在线歌单到达就撤掉
+  // 「还没有歌单」提示；两边都空（如退出登录）时把提示补回来。
+  if (!state.playlists.length) {
+    const hint = list.querySelector('.hint');
+    if (items.length) {
+      if (hint) hint.remove();
+    } else if (!hint) {
+      list.innerHTML = '<div class="hint">还没有歌单，在上面新建一个；或到「在线」面板登录后同步在线歌单。</div>';
+    }
+  }
+
+  // 旧块可能挂在列表或架子宿主任一处，在视图范围内摘掉重建。
+  const old = document.querySelector('#view-playlists .pl-online-block');
+  if (old) old.remove();
+  onlineBlockEl = null;
+  if (!items.length) { placeOnlineBlock(); return; }
+
+  const block = document.createElement('div');
+  block.className = 'pl-online-block';
+  const groups = new Map();
+  items.forEach((it) => {
+    if (!groups.has(it.source)) {
+      groups.set(it.source, {
+        label: it.sourceLabel, color: it.badgeColor,
+        badgeText: it.badgeText, rows: [],
+      });
+    }
+    groups.get(it.source).rows.push(it);
+  });
+
+  groups.forEach((g, src) => {
+    block.appendChild(Object.assign(document.createElement('hr'), { className: 'pl-online-sep' }));
+    const head = document.createElement('div');
+    head.className = 'pl-online-head';
+    const title = document.createElement('span');
+    title.textContent = g.label + ' · 在线歌单';
+    head.appendChild(title);
+    const count = document.createElement('span');
+    count.className = 'pl-online-count';
+    count.textContent = g.rows.length + ' 个';
+    head.appendChild(count);
+    const goto = document.createElement('button');
+    goto.className = 'pl-online-goto';
+    goto.type = 'button';
+    goto.textContent = '去在线面板';
+    goto.onclick = () => setView('online');
+    head.appendChild(goto);
+    block.appendChild(head);
+
+    g.rows.forEach((it) => block.appendChild(onlinePlaylistRow(src, it.playlist, g.color, g.badgeText)));
+  });
+  onlineBlockEl = block;
+  onlinePlaylistHost().appendChild(block);
+  placeOnlineBlock();
+}
+
+function onlinePlaylistRow(src, p, badgeColor, badgeText) {
+  const el = document.createElement('div');
+  el.className = 'pl-row is-online';
+  el.title = p.name;
+
+  const art = document.createElement('span');
+  art.className = 'pl-art';
+  const cover = window.Online ? window.Online.safeCoverUrl(p.cover) : null;
+  if (cover) art.style.backgroundImage = 'url("' + cover + '")';
+  else art.classList.add('is-missing');
+  el.appendChild(art);
+
+  const main = document.createElement('span');
+  main.className = 'pl-main';
+  const nameLine = document.createElement('span');
+  nameLine.className = 'pl-name';
+  nameLine.style.display = 'flex';
+  nameLine.style.alignItems = 'center';
+  nameLine.style.gap = '6px';
+  const nameText = document.createElement('span');
+  nameText.style.minWidth = '0';
+  nameText.style.overflow = 'hidden';
+  nameText.style.textOverflow = 'ellipsis';
+  nameText.style.whiteSpace = 'nowrap';
+  nameText.textContent = (p.kind === 'liked' ? '♥ ' : '') + p.name;
+  nameLine.appendChild(nameText);
+  const badge = document.createElement('span');
+  badge.className = 'pl-online-badge';
+  if (badgeColor) badge.style.setProperty('--badge', badgeColor);
+  badge.textContent = badgeText;
+  nameLine.appendChild(badge);
+  main.appendChild(nameLine);
+  const sub = document.createElement('span');
+  sub.className = 'pl-sub';
+  sub.textContent = p.track_count + ' 首' + (p.play_count ? ' · 播放 ' + p.play_count : '');
+  main.appendChild(sub);
+  el.appendChild(main);
+
+  const play = document.createElement('button');
+  play.className = 't-act';
+  play.setAttribute('aria-label', '播放在线歌单');
+  play.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"/></svg>';
+  play.onclick = (e) => { e.stopPropagation(); window.OnlinePlaylists.play(src, p.id); };
+  el.appendChild(play);
+
+  const open = document.createElement('button');
+  open.className = 't-act';
+  open.setAttribute('aria-label', '打开在线歌单详情');
+  open.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-folder"/></svg>';
+  open.onclick = (e) => { e.stopPropagation(); window.OnlinePlaylists.open(src, p.id); };
+  el.appendChild(open);
+
+  el.onclick = () => window.OnlinePlaylists.open(src, p.id);
+  return el;
 }
 
 async function renamePlaylist(p) {
@@ -1086,6 +1249,8 @@ function setPlaylistMode(next, persist) {
   if (persist !== false) {
     try { localStorage.setItem(SHELF_MODE_KEY, want); } catch (err) { /* 隐私模式 */ }
   }
+  // 在线歌单分区块跟随排布搬到对应宿主（架子宿主 / 列表末尾）。
+  placeOnlineBlock();
 }
 
 async function queuePlaylistNext(id) {
@@ -1142,6 +1307,9 @@ async function openPlaylist(id) {
   ui.plDetail.hidden = false;
   ui.shelf.classList.remove('on');
   ui.playlistList.hidden = true;
+  // 本地歌单详情覆盖整个排布时，架子模式的在线分区一并收起；
+  // closeDetail() 经 setPlaylistMode 恢复。
+  if (ui.playlistOnline) ui.playlistOnline.hidden = true;
   try {
     await refreshDetail();
   } catch (err) {
@@ -1189,14 +1357,14 @@ function renderDetailRows(id) {
     row.dataset.index = String(index);
     row.innerHTML = `
       <span class="pd-grip" aria-hidden="true" title="拖拽排序">
-        <svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-grip"/></svg>
       </span>
       <span class="pd-num"></span>
       <span class="pd-art" aria-hidden="true"></span>
       <span class="pd-main"><span class="pd-title"></span><span class="pd-sub"></span></span>
       <span class="pd-dur"></span>
       <button class="t-act t-act-danger" data-act="remove" aria-label="移出歌单">
-        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
       </button>`;
     row.querySelector('.pd-num').textContent = String(index + 1);
     row.querySelector('.pd-title').textContent = track.title;
@@ -1633,10 +1801,13 @@ function setView(name) {
   for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
   ui.rail.querySelectorAll('.rail-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   document.body.classList.remove('column-open');
-  // 首次进入在线页时按默认分类拉一屏，省得是一个空面板。
-  if (name === 'online' && !onlineState.tracks.length && !onlineState.loading) {
-    searchOnline({ silent: true });
-  }
+  // 在线面板的首次拉取、分类/chips 状态都归 online.js，app.js 只通知进入。
+  if (name === 'online') window.Online.onViewEnter();
+  // 在线歌单可能在歌单视图没渲染期间到达（登录、刷新），进入时补一次同步。
+  if (name === 'playlists') renderOnlinePlaylistSection();
+  // 收藏与每日推荐同理：进入时才拉，避免启动时多打两条请求。
+  if (name === 'favorites' && window.Favorites) window.Favorites.onViewEnter();
+  if (name === 'library' && window.Daily) window.Daily.load({ silent: true });
 }
 
 function refreshAll() {
@@ -1672,9 +1843,8 @@ function renderThemeMenu() {
     btn.setAttribute('role', 'option');
     btn.setAttribute('aria-selected', String(current && theme.id === current.id));
     btn.innerHTML = `<span class="theme-dot" style="${themeDotStyle(theme)}"></span>
-      <span class="theme-meta"><span class="theme-name"></span><span class="theme-note"></span></span>`;
+      <span class="theme-meta"><span class="theme-name"></span></span>`;
     btn.querySelector('.theme-name').textContent = theme.name;
-    btn.querySelector('.theme-note').textContent = theme.note || '';
     btn.onclick = () => { applyTheme(theme.id); closeThemeMenu(); };
     ui.themeMenu.appendChild(btn);
   });
@@ -1810,138 +1980,72 @@ function initStageControl() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// 在线曲库
-//
-// 搜索/分类走服务端代理（第三方音乐接口没有 CORS 头）；试听则是服务端把远程
-// 音频落盘缓存后，用 `online:<source>:<id>` 这个虚拟 id 走一遍和本地曲目完全
-// 相同的 load 链路 —— 快照、进度条、舞台因此全部复用，无需第二套状态机。
-// ---------------------------------------------------------------------------
+function initTopMoreMenu() {
+  const root = $('top-more');
+  const btn = $('top-more-btn');
+  const menu = $('top-more-menu');
+  if (!root || !btn || !menu) return;
 
-const onlineState = {
-  source: 'netease',
-  q: '',
-  cat: 'hot',
-  tracks: [],
-  total: 0,
-  loading: false,
-  // 音源清单由 /v1/online/sources 填；拉不到时下拉框保持 index.html 里的静态项。
-  sources: [],
-};
+  let open = false;
+  const items = () => Array.prototype.slice.call(menu.querySelectorAll('.menu-item'));
 
-function sourceLabel(id) {
-  const info = onlineState.sources.find((s) => s.id === id);
-  return (info && info.label) || id;
-}
-
-// 虚拟曲目的元数据。本地曲库里查不到这些 id，loadNowPlaying 会回落到这里。
-const onlineMeta = new Map();
-
-// 直接复用曲库行的 .track 栅格与子元素类名，在线结果因此和本地曲库长得一样，
-// 只是没有封面位与右键菜单（在线曲目进不了本地歌单）。
-function onlineRow(track) {
-  const row = document.createElement('div');
-  // 不可试听的整行置灰：只禁用按钮不够，行本身的点击也必须失效
-  row.className = 'track online-row' + (track.playable ? '' : ' is-disabled');
-  row.innerHTML = `
-    <div class="t-index"><span class="t-num">♪</span></div>
-    <div class="t-art is-remote"></div>
-    <div class="t-main">
-      <div class="t-title"></div>
-      <div class="t-sub"></div>
-    </div>
-    <div class="t-album"></div>
-    <div class="t-quality"></div>
-    <div class="t-dur"></div>
-    <div class="t-actions">
-      <button class="t-act" data-act="preview" title="在线试听" aria-label="在线试听">
-        <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-      </button>
-    </div>`;
-  row.querySelector('.t-title').textContent = track.title;
-  row.querySelector('.t-sub').textContent = track.artist || '未知艺术家';
-  row.querySelector('.t-album').textContent = track.album || '—';
-  row.querySelector('.t-dur').textContent = fmt(track.duration_ms || 0);
-  // 这里原本只建了一个空的 .t-art.is-remote，搜索接口返回的 track.cover
-  // 从头到尾没被用过——在线列表因此永远只有占位符。
-  paintArt(row, safeCoverUrl(track.cover));
-
-  const btn = row.querySelector('[data-act="preview"]');
-  btn.disabled = !track.playable;
-  btn.title = track.playable ? '在线试听' : '该音源没有可用的试听地址';
-  btn.onclick = (e) => { e.stopPropagation(); playOnline(track); };
-  row.querySelector('.t-quality').textContent = track.playable
-    ? (track.source === onlineState.source ? '在线' : sourceLabel(track.source))
-    : '不可试听';
-  // playable 为 false 时整行不响应：既不换色也不触发播放
-  row.addEventListener('click', () => { if (track.playable) playOnline(track); });
-  return row;
-}
-
-function renderOnline() {
-  const body = ui.onlineBody;
-  if (!body) return;
-  body.innerHTML = '';
-  if (onlineState.loading) {
-    body.innerHTML = '<div class="hint">正在连接音源…</div>';
-    return;
+  function setOpen(next) {
+    open = !!next;
+    menu.hidden = !open;
+    btn.classList.toggle('active', open);
+    btn.setAttribute('aria-expanded', String(open));
   }
-  if (!onlineState.tracks.length) {
-    body.innerHTML = '<div class="hint">没有找到结果。换个关键词，或确认服务器可以访问外网。</div>';
-    return;
-  }
-  onlineState.tracks.forEach((t) => body.appendChild(onlineRow(t)));
-  if (ui.onlineCount) ui.onlineCount.textContent = `${onlineState.total} 首`;
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(!open);
+  });
+
+  // 先让菜单项自己的 click 处理器执行，再收起菜单；不阻止默认行为。
+  menu.addEventListener('click', (e) => {
+    if (e.target.closest && e.target.closest('.menu-item')) {
+      setOpen(false);
+      btn.focus();
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (open && !root.contains(e.target)) setOpen(false);
+  });
+
+  menu.addEventListener('keydown', (e) => {
+    const list = items();
+    if (!list.length) return;
+    const idx = list.indexOf(document.activeElement);
+
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      setOpen(false);
+      btn.focus();
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      let next = idx < 0 ? 0 : idx + (e.key === 'ArrowDown' ? 1 : -1);
+      if (next < 0) next = list.length - 1;
+      if (next >= list.length) next = 0;
+      list[next].focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      list[0].focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      list[list.length - 1].focus();
+    }
+  });
+
+  menu.addEventListener('focusout', (e) => {
+    if (open && !menu.contains(e.relatedTarget)) setOpen(false);
+  });
+
+  window.addEventListener('resize', () => setOpen(false));
 }
 
-async function searchOnline(opts = {}) {
-  const body = ui.onlineBody;
-  if (!body) return;
-  onlineState.loading = true;
-  if (ui.onlineSentinel) ui.onlineSentinel.hidden = false;
-  renderOnline();
-  try {
-    const params = new URLSearchParams({
-      source: onlineState.source,
-      limit: '30',
-    });
-    if (onlineState.q.trim()) params.set('q', onlineState.q.trim());
-    else if (onlineState.cat) params.set('cat', onlineState.cat);
-    const page = await transport.get(`/v1/online/search?${params.toString()}`);
-    onlineState.tracks = page.tracks || [];
-    onlineState.total = page.total ?? onlineState.tracks.length;
-    onlineState.tracks.forEach((t) => {
-      onlineMeta.set(`online:${t.source}:${t.id}`, {
-        id: `online:${t.source}:${t.id}`,
-        title: t.title,
-        artist: t.artist,
-        album: t.album,
-        duration_ms: t.duration_ms,
-        cover: t.cover,
-      });
-    });
-    if (page.warning && !opts.silent) toast(page.warning);
-  } catch (err) {
-    onlineState.tracks = [];
-    onlineState.total = 0;
-    toast(errText('在线搜索失败', err), 'error');
-  } finally {
-    onlineState.loading = false;
-    if (ui.onlineSentinel) ui.onlineSentinel.hidden = true;
-    renderOnline();
-  }
-}
-
-// 封面地址归一：http 升 https（页面跑在 https 下时 http 子资源会被直接拦掉），
-// 空串/空白一律当作「没有封面」。
-function safeCoverUrl(url) {
-  if (!url) return null;
-  const s = String(url).trim();
-  if (!s) return null;
-  if (s.startsWith('//')) return `https:${s}`;
-  if (s.startsWith('http://')) return s.replace(/^http:\/\//, 'https://');
-  return s;
-}
+// 在线曲库的全部 UI/状态机已迁到 web/online.js（window.Online），
+// app.js 只在启动时 bind() 注入宿主依赖。
 
 // 预加载封面：失败（404 / 防盗链 / 超时）就当作没有封面，交给占位图兜底，
 // 绝不让一张图片把「正在播放」变成空白。
@@ -1957,243 +2061,6 @@ function probeImage(url, timeoutMs = 8000) {
     img.src = url;
     setTimeout(() => finish(false), timeoutMs); // 卡住的请求不能无限等
   });
-}
-
-async function playOnline(track) {
-  if (!track.playable) return;
-  ui.playpause.classList.add('is-loading');
-  try {
-    const res = await transport.post('/v1/online/play', {
-      source: track.source,
-      id: track.id,
-      title: track.title,
-      artist: track.artist,
-      album: track.album,
-      duration_ms: track.duration_ms,
-    });
-    const id = res.track_id;
-    // 封面以服务端补的详情为准，其次才是搜索结果里带的
-    const cover = safeCoverUrl(res.cover || track.cover);
-    const meta = {
-      id,
-      source: track.source,
-      onlineId: track.id,
-      title: res.title || track.title,
-      artist: res.artist || track.artist,
-      album: res.album || track.album,
-      duration_ms: res.duration_ms || track.duration_ms,
-      cover,
-    };
-    onlineMeta.set(id, meta);
-    state.byId.set(id, meta);
-    state.current = meta;
-    setStateQueue([id], id);
-
-    // 先把能确定的部分画出来（标题/歌手/封面），歌词异步补，
-    // 这样即使歌词接口慢或失败，界面也不会停在空白上。
-    paintNowPlaying(meta, cover);
-    if (Stage) Stage.setTrack(meta, cover);
-    toast(`试听《${meta.title}》`);
-
-    // 封面如果加载不出来，撤掉它改用占位图，而不是留一个永不显示的背景
-    if (cover && !(await probeImage(cover))) {
-      meta.cover = null;
-      paintNowPlaying(meta, null);
-      if (Stage) Stage.setTrack(meta, null);
-    }
-
-    loadOnlineLyrics(meta);
-  } catch (err) {
-    markOnlineUnplayable(track, err);
-    toast(errText('试听失败', err), 'error');
-  } finally {
-    ui.playpause.classList.remove('is-loading');
-  }
-}
-
-// 在线歌词：接口无数据/无权限都返回 200 + 空文档，这里统一成 null 交给舞台
-// 显示「这首歌没有可用歌词」；网络错误也只是不显示歌词，不打断播放。
-async function loadOnlineLyrics(meta) {
-  if (!meta || !meta.source || !meta.onlineId) return;
-  try {
-    const doc = await transport.get(
-      `/v1/online/lyric?source=${encodeURIComponent(meta.source)}&id=${encodeURIComponent(meta.onlineId)}`
-    );
-    if (state.current && state.current.id === meta.id && Stage) {
-      Stage.setLyrics(doc && doc.lines && doc.lines.length ? doc : null);
-    }
-  } catch {
-    if (state.current && state.current.id === meta.id && Stage) Stage.setLyrics(null);
-  }
-}
-
-// 试听失败：整行置灰不可点，并且把这个虚拟 id 从队列里摘掉。
-// 不摘的话它留在队列里，点「下一曲」会去本地库查一个不存在的 id —— 表现为点了没反应。
-function markOnlineUnplayable(track, err) {
-  track.playable = false;
-  renderOnline();
-  const vid = `online:${track.source}:${track.id}`;
-  if (state.snapshot.track_id === vid) {
-    // 当前正在放的就是这首失败的：停掉，别让界面停在「播放中」的假象上
-    transport.post('/v1/player/stop', {}).catch(() => {});
-  }
-  if (state.queue.includes(vid)) {
-    const rest = state.queue.filter((x) => x !== vid);
-    applyQueue(rest, true).catch(() => {});
-  }
-}
-
-// 在线曲目没有本地库记录，走同一套「正在播放」渲染，只是封面要远程取。
-function paintNowPlaying(track, coverUrl) {
-  ui.nowTitle.textContent = track.title || '未知曲目';
-  ui.nowArtist.textContent = [track.artist, track.album].filter(Boolean).join(' · ');
-  ui.barTitle.textContent = track.title || '未知曲目';
-  ui.barSub.textContent = [track.artist, track.album].filter(Boolean).join(' · ');
-  // 在线曲目没有 sample_rate 之类的技术信息，用「在线试听」标出来；
-  // 没拿到封面也照常显示，不能让它变成空白。
-  const isOnline = Boolean(track.source && track.onlineId);
-  ui.nowTech.textContent = isOnline ? '在线试听' : '';
-  ui.nowTech.hidden = !isOnline;
-  const url = coverUrl || safeCoverUrl(track.cover);
-  if (ui.ambient) {
-    ui.ambientImg.style.backgroundImage = url ? `url("${url}")` : 'none';
-    ui.ambient.classList.toggle('has-art', Boolean(url));
-  }
-}
-
-function initOnline() {
-  if (ui.onlineGo) {
-    ui.onlineGo.onclick = () => { onlineState.q = ui.onlineQ.value || ''; searchOnline(); };
-  }
-  if (ui.onlineQ) {
-    ui.onlineQ.onkeydown = (e) => {
-      if (e.key === 'Enter') { onlineState.q = ui.onlineQ.value || ''; searchOnline(); }
-    };
-  }
-  if (ui.onlineSource) {
-    ui.onlineSource.onchange = () => {
-      onlineState.source = ui.onlineSource.value;
-      // 每个音源能浏览的分类不一样，换了音源就得跟着换一排 chips。
-      renderSourceCaps();
-      if (onlineState.q.trim()) searchOnline();
-      else if (onlineState.cat) searchOnline();
-    };
-  }
-  // chips 现在是按音源动态生成的，所以监听挂在容器上：逐个绑定的话，
-  // 换一次音源就有一批新按钮没有处理器，点了没反应也不报错。
-  if (ui.onlineChips) {
-    ui.onlineChips.onclick = (e) => {
-      const chip = e.target.closest('.chip');
-      if (!chip) return;
-      ui.onlineChips.querySelectorAll('.chip').forEach((c) => c.classList.remove('active'));
-      chip.classList.add('active');
-      onlineState.cat = chip.dataset.cat;
-      onlineState.q = '';
-      if (ui.onlineQ) ui.onlineQ.value = '';
-      searchOnline();
-    };
-  }
-  renderOnline();
-  loadSources();
-}
-
-// 音源清单由服务端给出（见 /v1/online/sources）。写死在 HTML 里的话，加一个
-// 音源要改两处、还会漏掉它的分类和登录能力。
-async function loadSources() {
-  const data = await transport.get('/v1/online/sources').catch(() => null);
-  onlineState.sources = (data && data.sources) || [];
-  refreshCookieUi();
-  // 一个都没拿到（服务器没连上）时，下拉框保持 index.html 里的静态选项，
-  // 至少网易云那条路还能走。
-  if (!onlineState.sources.length) return;
-  if (ui.onlineSource) {
-    const keep = ui.onlineSource.value;
-    ui.onlineSource.replaceChildren(...onlineState.sources.map((s) => {
-      const opt = document.createElement('option');
-      opt.value = s.id;
-      opt.textContent = s.label;
-      return opt;
-    }));
-    ui.onlineSource.value = onlineState.sources.some((s) => s.id === keep)
-      ? keep : onlineState.sources[0].id;
-    onlineState.source = ui.onlineSource.value;
-  }
-  renderSourceCaps();
-}
-
-// 当前音源的分类 chips。没有分类的音源（例如只有关键词检索的）整排隐藏，
-// 而不是留一排点了都报错的按钮。
-function renderSourceCaps() {
-  if (!ui.onlineChips) return;
-  const info = onlineState.sources.find((s) => s.id === onlineState.source);
-  const cats = (info && info.cats) || [];
-  onlineState.cat = cats.length ? cats[0].id : '';
-  ui.onlineChips.hidden = cats.length === 0;
-  ui.onlineChips.replaceChildren(...cats.map((c, i) => {
-    const btn = document.createElement('button');
-    btn.className = 'chip' + (i === 0 ? ' active' : '');
-    btn.type = 'button';
-    btn.dataset.cat = c.id;
-    btn.textContent = c.label;
-    return btn;
-  }));
-}
-
-// 音源登录：每个 supportsCookie 的音源生成一行。输入框用 type=password——粘贴
-// 进去的凭据不该在旁人眼里、也不在截图里现形。服务端本来就永不回显它，所以
-// 这里的占位文案承担「已经存过没有」这件事，而不是把值填回来。
-function refreshCookieUi() {
-  const host = ui.cookieRows;
-  if (!host) return;
-  const sources = onlineState.sources.filter((s) => s.supportsCookie);
-  if (!sources.length) {
-    host.innerHTML = `<div class="hint">${
-      onlineState.sources.length ? '当前音源都不需要登录。' : '还没能读到音源清单。'
-    }</div>`;
-    return;
-  }
-  host.replaceChildren(...sources.map((s) => {
-    const row = document.createElement('div');
-    row.className = 'set-row cookie-row';
-
-    const label = document.createElement('label');
-    label.textContent = s.label;
-    label.htmlFor = `cookie-${s.id}`;
-
-    const input = document.createElement('input');
-    input.id = `cookie-${s.id}`;
-    input.type = 'password';
-    input.autocomplete = 'off';
-    input.spellcheck = false;
-    input.placeholder = s.signedIn ? '已保存；留空并保存即退出' : '粘贴你自己账号的 cookie';
-
-    const btn = document.createElement('button');
-    btn.className = 'btn';
-    btn.type = 'button';
-    btn.textContent = '保存';
-    btn.onclick = async () => {
-      const value = input.value.trim();
-      btn.disabled = true;
-      try {
-        const res = await transport.post('/v1/online/cookie', { source: s.id, cookie: value });
-        toast(res && res.signedIn ? `${s.label}：已保存登录凭据` : `${s.label}：已清除登录凭据`, 'info');
-        input.value = '';
-        // 重取一次清单，signedIn 才是服务端的真相，而不是这次请求的猜测。
-        await loadSources();
-      } catch (err) {
-        toast(errText('保存登录凭据失败', err), 'error');
-      } finally {
-        btn.disabled = false;
-      }
-    };
-
-    const badge = document.createElement('span');
-    badge.className = 'hint';
-    badge.textContent = s.signedIn ? '已登录' : '未登录';
-
-    row.append(label, input, btn, badge);
-    return row;
-  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -2255,6 +2122,8 @@ async function seekRelative(deltaSec) {
 }
 
 function setVolumeFromInput() {
+  // 保持弹窗内音量滑块与底部播放栏一致
+  if (np.volume) np.volume.value = ui.volume.value;
   transport.post('/v1/player/volume', { volume: Number(ui.volume.value) / 100 }).catch(() => {});
 }
 
@@ -2266,7 +2135,7 @@ function bindShortcuts() {
   document.addEventListener('keydown', (e) => {
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); ui.search.focus(); ui.search.select(); return; }
-    if (e.key === 'Escape') { closeMenu(); if (typing) document.activeElement.blur(); setView(state.view); document.body.classList.remove('stage-open'); return; }
+    if (e.key === 'Escape') { closeMenu(); closeNowPlaying(); if (typing) document.activeElement.blur(); setView(state.view); document.body.classList.remove('stage-open'); return; }
     if (e.key === '/' && !typing) { e.preventDefault(); ui.search.focus(); return; }
     if (typing) return;
 
@@ -2291,6 +2160,147 @@ function bindShortcuts() {
     }
   });
   document.addEventListener('click', (e) => { if (!e.target.closest('#ctx-menu')) closeMenu(); });
+}
+
+// ---------------------------------------------------------------------------
+// 播放栏显隐：15s 无操作自动隐藏 + 底部热区唤出 + 手动切换
+// ---------------------------------------------------------------------------
+function initBarAutohide() {
+  const bar = document.querySelector('.bar');
+  if (!bar) return;
+  const HIDE_MS = 15000;
+  const LEAVE_MS = 800;
+  const STORE_KEY = 'vmusic.bar.pinned.v1';
+
+  let pinned = true;
+  try { if (localStorage.getItem(STORE_KEY) === '0') pinned = false; } catch (e) { /* ignore */ }
+  let idle = false;
+  let peek = false;
+  let hideTimer = null;
+  let leaveTimer = null;
+  let sliding = false;
+
+  // 隐藏状态下的底部唤出热区（鼠标移到屏幕最底部即唤出）
+  const zone = document.createElement('div');
+  zone.className = 'bar-hover-zone';
+  zone.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(zone);
+
+  // 手动显隐切换按钮（播放栏最右侧）
+  const toggleBtn = document.createElement('button');
+  toggleBtn.type = 'button';
+  toggleBtn.id = 'bar-pin-toggle';
+  toggleBtn.className = 'btn-pill bar-pin-toggle';
+  toggleBtn.title = '隐藏播放栏';
+  toggleBtn.setAttribute('aria-label', '隐藏或显示播放控制栏');
+  toggleBtn.setAttribute('aria-pressed', 'false');
+  toggleBtn.innerHTML =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>';
+  const barRight = document.querySelector('.bar-right');
+  if (barRight) barRight.appendChild(toggleBtn);
+
+  function persist() {
+    try { localStorage.setItem(STORE_KEY, pinned ? '1' : '0'); } catch (e) { /* ignore */ }
+  }
+
+  // 下滑 → 收起（display:none，空间让给主内容）
+  function hideBar() {
+    if (bar.classList.contains('is-hidden') || sliding) return;
+    sliding = true;
+    bar.style.transition = 'transform 0.32s var(--ease-out), opacity 0.25s ease';
+    bar.style.transform = 'translateY(calc(100% + 20px))';
+    bar.style.opacity = '0';
+    bar.addEventListener('transitionend', function onEnd(ev) {
+      if (ev.target !== bar) return;
+      bar.removeEventListener('transitionend', onEnd);
+      finishHide();
+    });
+    // 保底：个别环境 transitionend 不可靠时不卡在半空中
+    setTimeout(finishHide, 600);
+  }
+  function finishHide() {
+    if (!sliding) return;
+    sliding = false;
+    bar.classList.add('is-hidden');
+    bar.style.transition = '';
+    bar.style.transform = '';
+    bar.style.opacity = '';
+  }
+
+  // 展开（先离屏布局，再上滑，避免可见的重排跳变）
+  function showBar() {
+    if (!bar.classList.contains('is-hidden')) return;
+    bar.classList.remove('is-hidden');
+    bar.style.transform = 'translateY(calc(100% + 20px))';
+    bar.style.opacity = '0';
+    void bar.offsetHeight;
+    requestAnimationFrame(() => {
+      bar.style.transition = 'transform 0.32s var(--ease-out), opacity 0.3s ease';
+      bar.style.transform = '';
+      bar.style.opacity = '';
+      setTimeout(() => {
+        bar.style.transition = '';
+        bar.style.transform = '';
+        bar.style.opacity = '';
+      }, 360);
+    });
+  }
+
+  function sync() {
+    const visible = peek || (pinned && !idle);
+    document.body.classList.toggle('bar-hidden', !visible);
+    toggleBtn.setAttribute('aria-pressed', String(!visible));
+    toggleBtn.title = visible ? '隐藏播放栏' : '显示播放栏';
+    if (visible) showBar();
+    else hideBar();
+  }
+
+  function armIdle() {
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => { idle = true; sync(); }, HIDE_MS);
+  }
+
+  function beginPeek() {
+    clearTimeout(leaveTimer);
+    if (!peek) { peek = true; sync(); }
+  }
+  function endPeekSoon() {
+    clearTimeout(leaveTimer);
+    leaveTimer = setTimeout(() => { peek = false; sync(); }, LEAVE_MS);
+  }
+
+  // 底部热区唤出
+  zone.addEventListener('pointerenter', beginPeek);
+  zone.addEventListener('pointermove', beginPeek);
+  // 鼠标/焦点在播放栏上时保持显示，离开再按当前状态收起
+  bar.addEventListener('pointerenter', beginPeek);
+  bar.addEventListener('pointerleave', endPeekSoon);
+  bar.addEventListener('focusin', beginPeek);
+  bar.addEventListener('focusout', endPeekSoon);
+
+  // 全局活动重置 15s 计时（节流，避免 mousemove 风暴）
+  let lastArm = 0;
+  function onActivity() {
+    const now = Date.now();
+    if (now - lastArm < 500) return;
+    lastArm = now;
+    if (idle) { idle = false; if (!peek) sync(); }
+    armIdle();
+  }
+  ['pointerdown', 'keydown', 'mousemove'].forEach((type) =>
+    document.addEventListener(type, onActivity, { passive: true }));
+
+  // 手动切换：用户意图持久化；手动隐藏后只有底部热区能唤出
+  toggleBtn.addEventListener('click', () => {
+    pinned = !pinned;
+    persist();
+    if (pinned) { idle = false; peek = false; }
+    armIdle();
+    sync();
+  });
+
+  armIdle();
+  sync();
 }
 
 function post(path) { return transport.post(path, {}).catch((err) => toast(errText('操作失败', err), 'error')); }
@@ -2418,7 +2428,91 @@ function togglePlay() {
   state.expectedPlaying = next;
   state.commandAt = Date.now();
   ui.playpause.classList.toggle('is-playing', next);
+  if (np.play) np.play.classList.toggle('is-playing', next);
   post(next ? '/v1/player/play' : '/v1/player/pause');
+}
+
+// ---------------------------------------------------------------------------
+// 播放控制弹窗（顶栏「正在播放」）
+// ---------------------------------------------------------------------------
+
+const np = {
+  modal: $('np-modal'), scrim: $('np-scrim'), close: $('np-close'),
+  art: $('np-art'), name: $('np-name'), artist: $('np-artist'),
+  time: $('np-time'), bar: $('np-progress-bar'),
+  play: $('np-playpause'), prev: $('np-prev'), next: $('np-next'), stop: $('np-stop'),
+  volume: $('np-volume'), goto: $('np-goto-stage')
+};
+
+function isNpOpen() {
+  return !!np.modal && !np.modal.hidden;
+}
+
+function openNowPlaying() {
+  np.scrim.hidden = false;
+  np.modal.hidden = false;
+  // 弹窗内音量与底部播放栏保持一致
+  np.volume.value = ui.volume.value;
+  syncNpSnapshot(state.snapshot);
+  if (state.current) syncNpTrack(state.current);
+}
+
+function closeNowPlaying() {
+  np.scrim.hidden = true;
+  np.modal.hidden = true;
+}
+
+// 播放快照 → 弹窗（播放态 / 时间 / 进度）
+function syncNpSnapshot(snap) {
+  if (!isNpOpen()) return;
+  np.play.classList.toggle('is-playing', snap.playing);
+  np.time.textContent = digestMs(snap.position_ms);
+  if (!state.seeking && snap.duration_ms) {
+    np.bar.value = String(Math.round((snap.position_ms / snap.duration_ms) * 1000));
+  }
+}
+
+// 曲目信息 → 弹窗（标题 / 艺术家 / 封面）
+function syncNpTrack(track, coverUrl) {
+  if (!isNpOpen() || !track) return;
+  np.name.textContent = track.title || '未命名';
+  np.artist.textContent = [track.artist, track.album].filter(Boolean).join(' · ') || '未知艺术家';
+  if (coverUrl) np.art.style.backgroundImage = `url("${coverUrl}")`;
+}
+
+function initNowPlayingModal() {
+  if (!np.modal) return;
+
+  np.close.onclick = closeNowPlaying;
+  np.scrim.onclick = closeNowPlaying;
+
+  np.play.onclick = togglePlay;
+  np.prev.onclick = () => post('/v1/player/previous');
+  np.next.onclick = () => post('/v1/player/next');
+  np.stop.onclick = () => post('/v1/player/stop');
+
+  // 进度：拖动即时显示时间，松手跳转
+  np.bar.addEventListener('input', () => {
+    const d = state.snapshot.duration_ms || 0;
+    np.time.textContent = `${fmt((np.bar.value / 1000) * d)} / ${fmt(d)}`;
+  });
+  np.bar.addEventListener('change', async () => {
+    const d = state.snapshot.duration_ms;
+    if (d) await seekTo((np.bar.value / 1000) * d);
+  });
+
+  // 音量：与底部播放栏双向同步后走同一条设置链路
+  np.volume.oninput = () => {
+    ui.volume.value = np.volume.value;
+    setVolumeFromInput();
+  };
+
+  // 跳转到舞台播放页面：关闭弹窗并打开全屏沉浸舞台
+  np.goto.onclick = () => {
+    closeNowPlaying();
+    document.body.classList.remove('stage-open');
+    if (Stage) Stage.setPage(true);
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2509,13 +2603,18 @@ function togglePlay() {
   ui.setStageCover.onchange = () => setStageCover(ui.setStageCover.checked, true);
 
   ui.rail.querySelectorAll('.rail-item').forEach((b) => { b.onclick = () => setView(b.dataset.view); });
-  ui.stageBtn.onclick = () => {
-    const opened = document.body.classList.toggle('stage-open');
-    // 抽屉打开的瞬间 GL 门控可能正从 0 转正，踢一脚让循环立刻补帧，
-    // 而不是等到下一个由别的事件触发的帧。
-    if (opened && Stage) Stage.kick();
-  };
+  // 点击「正在播放」：弹出清晰的播放控制弹窗（不再切换舞台抽屉）
+  ui.stageBtn.onclick = openNowPlaying;
+  initNowPlayingModal();
   ui.scrim.onclick = () => { document.body.classList.remove('stage-open'); closeMenu(); };
+
+  // 顶栏「账号」：任何视图下都能打开统一登录弹窗。
+  const onlineAccountBtn = $('online-account-btn');
+  if (onlineAccountBtn) {
+    onlineAccountBtn.onclick = () => {
+      if (window.OnlineLogin) window.OnlineLogin.open();
+    };
+  }
 
   // 滚到底自动加载下一页，取代"一次性拉 500 条"的硬截断。
   if ('IntersectionObserver' in window) {
@@ -2529,10 +2628,60 @@ function togglePlay() {
 
   initTheme();
   initStageControl();
-  initOnline();
+  initTopMoreMenu();
+  // 在线面板（web/online.js）：先注入宿主依赖，再拉音源清单、绑事件。
+  window.Online.bind({
+    ui,
+    state,
+    setStateQueue,
+    applyQueue,
+    paintArt,
+    probeImage,
+    fmt,
+    toast,
+    errText,
+  });
+  window.Online.init();
+  // 收藏与每日推荐：同样是「先注入宿主依赖，再 init」。宿主回调里
+  // playLocal 走现有播放链路，coverUrl 走带 token 的封面通道。
+  const favHost = {
+    ui,
+    state,
+    fmt,
+    toast,
+    errText,
+    paintArt,
+    coverUrl: (id) => transport.coverUrl(id),
+    playLocal: (id, queue) => playTrack(id, queue && queue.length ? queue : [id]),
+    // 电台/在线收藏：整盘载入交给 online.js 的试听链路。
+    playOnline: (f) => { if (window.Online) window.Online.playAll([toOnlineTrack(f)], 0); },
+    playRadio: (f) => { if (window.Online) window.Online.playAll([toOnlineTrack(f)], 0); },
+    // 红心状态变化时让曲库行跟着改色。
+    onFavoriteChanged: (kind, source, refId, on) => {
+      if (kind !== 'track' || source !== 'local') return;
+      const row = state.rows.get(refId);
+      if (!row) return;
+      const btn = row.querySelector('[data-act="fav"]');
+      if (!btn) return;
+      btn.classList.toggle('is-on', on);
+      btn.innerHTML = window.Favorites.heartSvg(on);
+      btn.title = on ? '取消收藏' : '加入我的收藏';
+    },
+  };
+  if (window.Favorites) {
+    window.Favorites.bind(favHost);
+    window.Favorites.init();
+  }
+  if (window.Daily) {
+    window.Daily.bind(favHost);
+    window.Daily.init();
+  }
+  // 在线歌单（账号区网格）任何变化都同步重绘左侧歌单菜单的在线分区。
+  document.addEventListener('online-playlists:changed', renderOnlinePlaylistSection);
   initStage();
   initCreative();
   bindShortcuts();
+  initBarAutohide();
   bindMediaSession();
 
   setView('library');

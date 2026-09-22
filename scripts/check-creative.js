@@ -1068,9 +1068,14 @@ section('性能收口：不可见画布门控（E1）');
   ok(/function tick\(dtMs\)[\s\S]{0,420}?isStageVisible[\s\S]{0,120}?return;/.test(csSrc),
     'tick 内部有不可见即返回的第二道门');
 
-  // app.js：打开抽屉要踢帧循环。
-  ok(/ui\.stageBtn\.onclick[\s\S]{0,220}?Stage\.kick\(\)/.test(appSrcE),
-    '抽屉打开时 Stage.kick() 立刻补帧');
+  // app.js：点击「正在播放」打开播放控制弹窗（新契约，不再切换舞台抽屉）。
+  ok(/ui\.stageBtn\.onclick = openNowPlaying/.test(appSrcE),
+    '点击正在播放打开播放控制弹窗');
+  ok(/function openNowPlaying[\s\S]{0,260}?np\.modal\.hidden = false/.test(appSrcE),
+    'openNowPlaying 取消弹窗 hidden 并同步播放状态');
+  // 弹窗底部 CTA：点击关闭弹窗并打开全屏沉浸舞台
+  ok(/np\.goto\.onclick[\s\S]{0,220}?Stage\.setPage\(true\)/.test(appSrcE),
+    '「跳转到舞台播放页面」准确导航至舞台播放页面');
   // E2 真机走查发现：窄屏模态抽屉键盘用户关不掉。Esc 必须能关抽屉
   // （沉浸页打开时 stage.js 自己 stopPropagation 处理 Esc，互不干扰）。
   ok(/e\.key === 'Escape'[\s\S]{0,180}?classList\.remove\('stage-open'\)/.test(appSrcE),

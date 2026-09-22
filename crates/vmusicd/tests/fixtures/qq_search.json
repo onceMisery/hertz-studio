@@ -1,0 +1,22 @@
+{
+  "req": {
+    "code": 0,
+    "data": {
+      "body": {
+        "item_song": [
+          {
+            "id": 5257138,
+            "mid": "0039MnYb0qxYhV",
+            "name": "屋顶",
+            "title": "屋顶",
+            "duration": 319,
+            "file": {"media_mid": "0039MnYb0qxYhV"},
+            "singer": [{"id": 6452, "mid": "002J4UUk29y8BY", "name": "周杰伦"}],
+            "album": {"id": 88, "mid": "0039MnYb0qxYhA", "name": "男女情歌对唱",
+                      "pmid": "0039MnYb0qxYhA"}
+          }
+        ]
+      }
+    }
+  }
+}

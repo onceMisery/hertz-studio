@@ -22,6 +22,8 @@
   var tab = 'scene';
   var refs = {};
   var lastParamPath = null;
+  var GUIDE_KEY = 'vmusic.workshop.guide.v1';
+  var helpSeq = 0;
 
   function $(id) { return document.getElementById(id); }
 
@@ -33,6 +35,61 @@
   }
 
   function stage_api() { return window.CreativeStage; }
+
+  function guideDismissed() {
+    try { return localStorage.getItem(GUIDE_KEY) === '1'; }
+    catch (e) { return false; }
+  }
+
+  function dismissGuide() {
+    try { localStorage.setItem(GUIDE_KEY, '1'); } catch (e) { /* ignore */ }
+  }
+
+  function guideCard() {
+    if (guideDismissed()) return null;
+    var card = h('div', 'ws-guide');
+    card.appendChild(h('div', 'ws-guide-title', '四步上手'));
+    var list = h('ol', 'ws-guide-list');
+    [
+      '在下方选择一个三维场景',
+      '到「参数」里调镜头、影调和场景细节',
+      '到「编排」里按歌曲时间或鼓点添加触发',
+      '满意后点「存进工坊」，或到「导出」分享 JSON'
+    ].forEach(function (text) { list.appendChild(h('li', null, text)); });
+    card.appendChild(list);
+
+    var actions = h('div', 'ws-guide-actions');
+    var start = h('button', 'btn primary', '去调参数');
+    start.type = 'button';
+    start.addEventListener('click', function () {
+      dismissGuide();
+      tab = 'params';
+      render();
+    });
+    var ok = h('button', 'btn', '知道了');
+    ok.type = 'button';
+    ok.addEventListener('click', function () {
+      dismissGuide();
+      card.remove();
+    });
+    actions.append(start, ok);
+    card.appendChild(actions);
+    return card;
+  }
+
+  function help(text) {
+    helpSeq += 1;
+    var wrap = h('span', 'ws-help');
+    var btn = h('button', 'ws-help-btn', '?');
+    var tip = h('span', 'ws-tip', text);
+    var tipId = 'ws-tip-' + helpSeq;
+    btn.type = 'button';
+    btn.setAttribute('aria-label', '查看说明');
+    btn.setAttribute('aria-describedby', tipId);
+    tip.id = tipId;
+    wrap.append(btn, tip);
+    return wrap;
+  }
 
   function num(v, digits) {
     var n = Number(v);
@@ -174,6 +231,10 @@
     var CS = stage_api();
     var cur = CS.preset();
 
+    var guide = guideCard();
+    if (guide) body.appendChild(guide);
+
+    body.appendChild(h('h2', 'sc-group-title', '当前舞台'));
     var nameRow = h('div', 'ws-row');
     var nameInput = h('input', 'ws-name');
     nameInput.type = 'text';
@@ -222,34 +283,53 @@
       '打开舞台交互后：拖拽转视角、滚轮推拉、单击爆闪、双击复位。'
       + '默认关闭是为了不抢歌词行的点击。'));
 
-    body.appendChild(h('h2', 'sc-group-title', '工坊收藏'));
+  }
+
+  function renderPresets(body) {
+    var head = h('div', 'ws-section-head');
+    head.appendChild(h('h2', 'sc-group-title', '工坊收藏'));
+    head.appendChild(help('收藏只保存在本机；载入会立即替换当前舞台，删除前会再次确认。'));
+    body.appendChild(head);
+    renderPresetGallery(body, stage_api());
+  }
+
+  function renderPresetGallery(body, CS) {
     var lib = CS.library();
     if (!lib.length) {
-      body.appendChild(h('div', 'sc-note', '还没有收藏。调好一份舞台之后点上面的「存进工坊」。'));
-    } else {
-      var libGrid = h('div', 'ws-gallery');
-      lib.forEach(function (p) {
-        var card = h('div', 'ws-shot');
-        if (p.thumb) {
-          var img = h('img');
-          img.src = p.thumb;
-          img.alt = '';
-          card.appendChild(img);
-        } else {
-          card.appendChild(h('div', 'ws-shot-empty', '无预览'));
-        }
-        card.appendChild(h('div', 'ws-shot-name', p.name || '未命名'));
-        var btns = h('div', 'ws-shot-btns');
-        var load = h('button', 'btn', '载入');
-        load.addEventListener('click', function () { CS.loadPresetById(p.id); flash('已载入'); render(); });
-        var del = h('button', 'btn', '删除');
-        del.addEventListener('click', function () { CS.removePreset(p.id); render(); });
-        btns.append(load, del);
-        card.appendChild(btns);
-        libGrid.appendChild(card);
-      });
-      body.appendChild(libGrid);
+      body.appendChild(h('div', 'sc-note', '还没有收藏。调好一份舞台后回到「场景」页点「存进工坊」。'));
+      return;
     }
+
+    var libGrid = h('div', 'ws-gallery');
+    lib.forEach(function (p) {
+      var card = h('div', 'ws-shot');
+      if (p.thumb) {
+        var img = h('img');
+        img.src = p.thumb;
+        img.alt = '';
+        card.appendChild(img);
+      } else {
+        card.appendChild(h('div', 'ws-shot-empty', '无预览'));
+      }
+      card.appendChild(h('div', 'ws-shot-name', p.name || '未命名'));
+      var btns = h('div', 'ws-shot-btns');
+      var load = h('button', 'btn', '载入并应用');
+      load.addEventListener('click', function () {
+        CS.loadPresetById(p.id);
+        flash('已载入');
+        render();
+      });
+      var del = h('button', 'btn danger', '删除');
+      del.addEventListener('click', function () {
+        if (!window.confirm('删除收藏「' + (p.name || '未命名') + '」？')) return;
+        CS.removePreset(p.id);
+        render();
+      });
+      btns.append(load, del);
+      card.appendChild(btns);
+      libGrid.appendChild(card);
+    });
+    body.appendChild(libGrid);
   }
 
   function renderParams(body) {
@@ -292,7 +372,10 @@
     var cur = CS.preset();
     var rt = CS.runtime();
 
-    body.appendChild(h('h2', 'sc-group-title', '编排轨'));
+    var head = h('div', 'ws-section-head');
+    head.appendChild(h('h2', 'sc-group-title', '编排轨'));
+    head.appendChild(help('秒级 cue 填歌曲秒数；节拍 cue 填每几拍触发，目标值会按下方“缓动时长”平滑过渡。'));
+    body.appendChild(head);
     body.appendChild(h('div', 'sc-note',
       '一条 cue = 在某个时刻（或每 N 拍）把一组参数缓动到目标值。'
       + '秒级 cue 跟着歌曲进度走，节拍 cue 跟着鼓点走。'));
@@ -406,7 +489,10 @@
     var cur = CS.preset();
     var spec = CS.spec();
 
-    body.appendChild(h('h2', 'sc-group-title', '音频绑定'));
+    var head = h('div', 'ws-section-head');
+    head.appendChild(h('h2', 'sc-group-title', '音频绑定'));
+    head.appendChild(help('推荐先从低频 agg.0 开始；增益可以理解成音频特征放大多少倍。'));
+    body.appendChild(head);
     body.appendChild(h('div', 'sc-note',
       '绑定把音频特征按增益叠到参数上：基础值是"停下来的样子"，绑定决定它怎么动。'
       + '全部关掉就能得到一张静止的舞台照片，方便先调构图再调律动。'));
@@ -644,7 +730,10 @@
 
   function renderIO(body) {
     var CS = stage_api();
-    body.appendChild(h('h2', 'sc-group-title', '导出 / 导入'));
+    var head = h('div', 'ws-section-head');
+    head.appendChild(h('h2', 'sc-group-title', '导出 / 导入'));
+    head.appendChild(help('先复制或下载 JSON；把别人的 JSON 粘贴到文本框后点“载入这段 JSON”。'));
+    body.appendChild(head);
     body.appendChild(h('div', 'sc-note',
       '一份预置就是一段 JSON：场景、全部参数、cue 轨、绑定、背景与手绘设置。'
       + '把这段文字发给别人，对面粘进来就能得到一模一样的舞台。'));
@@ -732,7 +821,7 @@
   // -------------------------------------------------------------------------
 
   var TABS = [
-    ['scene', '场景'], ['params', '参数'], ['cues', '编排'],
+    ['scene', '场景'], ['presets', '收藏'], ['params', '参数'], ['cues', '编排'],
     ['binds', '绑定'], ['look', '背景手绘'], ['io', '导出']
   ];
 
@@ -743,6 +832,7 @@
       if (refs.tabs && refs.tabs[t[0]]) refs.tabs[t[0]].classList.toggle('on', tab === t[0]);
     });
     if (tab === 'scene') renderScene(refs.body);
+    else if (tab === 'presets') renderPresets(refs.body);
     else if (tab === 'params') renderParams(refs.body);
     else if (tab === 'cues') renderCues(refs.body);
     else if (tab === 'binds') renderBindings(refs.body);

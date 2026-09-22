@@ -130,9 +130,7 @@ fn apply_revision(meta: &mut FileMeta, revision: &MetadataRevision) {
             Some(StandardTagKey::Artist) if meta.artist.is_none() => {
                 meta.artist = Some(text.clone())
             }
-            Some(StandardTagKey::Album) if meta.album.is_none() => {
-                meta.album = Some(text.clone())
-            }
+            Some(StandardTagKey::Album) if meta.album.is_none() => meta.album = Some(text.clone()),
             _ => {}
         }
     }

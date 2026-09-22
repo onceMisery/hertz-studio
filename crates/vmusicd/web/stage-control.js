@@ -99,9 +99,9 @@
           } },
         // 封面盘的两颗旋钮。周期用秒而不是百分比：它对应的是"转一圈几秒"，
         // 换算成强度百分比反而要用户在脑内做倒数。
-        // def 必须和 stage.css 的 :root 保持一致（30vmin→52vmin 那轮改动里
-        // 两边都动过）；不一致的话面板一打开显示的就不是画面上的值。
-        { key: 'coverSize', label: '封面盘尺寸', min: 16, max: 72, step: 1, unit: 'vmin', def: 52,
+        // def 必须和 stage.css 的 :root 保持一致：新默认 100vmin = 铺满短边。
+        // 量程上限同步提到 100。
+        { key: 'coverSize', label: '背景尺寸', min: 16, max: 100, step: 1, unit: 'vmin', def: 100,
           css: '--lp-cover-size', fmt: function (v) { return v + 'vmin'; } },
         { key: 'coverSpin', label: '封面盘转一圈', min: 6, max: 60, step: 2, unit: 's', def: 22,
           css: '--lp-cover-spin', fmt: function (v) { return v + 's'; } }
@@ -135,16 +135,12 @@
       items: [
         // 总开关。它决定 html 上有没有 .fx-on：关掉时滤镜层整体不参与合成，
         // 比把每个强度调成 0 更彻底（省掉一层 blur/混合）。
-        // 默认关闭：滤镜是氛围增强而不是必需品，界面首先要清晰可读，
-        // 想要氛围的用户点一下就能开。
-        { key: 'enabled', label: '启用舞台滤镜', type: 'toggle', def: false },
+        // 默认开启：此前默认关闭时，用户拖动镜头/胶片组旋钮毫无反应，
+        // 被误认为「配置不生效」。滤镜幅度都很轻微，不影响界面可读性。
+        { key: 'enabled', label: '启用舞台滤镜', type: 'toggle', def: true },
         { key: 'intensity', label: '滤镜强度', min: 0, max: 200, step: 1, unit: '%', def: 100, wide: true }
       ],
       selects: [
-        {
-          key: 'paletteMode', label: '俗丽色标', def: 'film',
-          options: [['film', '电影'], ['duotone', '双色调'], ['mono', '单色'], ['neon', '霓虹']]
-        },
         {
           key: 'stagePreset', label: '舞台主题', def: 'venue',
           options: [['venue', '第一现场 · 舞台'], ['diorama', '纸雕剧场'], ['tempo', '节拍律动'], ['still', '静帧']]
@@ -160,7 +156,7 @@
   function $(id) { return document.getElementById(id); }
 
   function defaults() {
-    var out = { enabled: false };
+    var out = { enabled: true };
     SCHEMA.forEach(function (g) {
       (g.items || []).forEach(function (it) { out[it.key] = it.def; });
       (g.selects || []).forEach(function (it) { out[it.key] = it.def; });
@@ -175,6 +171,18 @@
     if (!raw) return;
     try {
       var saved = JSON.parse(raw);
+      // 一次性迁移：52 是旧版默认尺寸。保留它会让"铺满短边"的新默认
+      // 永远被旧存档盖掉；删掉让其回落到新默认 100
+      if (saved.coverSize === 52) delete saved.coverSize;
+      // 一次性迁移：滤镜总开关新默认是「启用」。老存档里存着 false 会把
+      // 新默认盖掉（用户拖任何光学旋钮都无反应）。版本标记只做一次，
+      // 迁移后用户手动关闭的选择照常被保存。
+      var ver = null;
+      try { ver = localStorage.getItem(STORE_KEY + '.v'); } catch (e) { /* ignore */ }
+      if (ver !== '2') {
+        delete saved.enabled;
+        try { localStorage.setItem(STORE_KEY + '.v', '2'); } catch (e) { /* ignore */ }
+      }
       Object.keys(saved).forEach(function (k) {
         if (k in values) values[k] = saved[k];
       });
@@ -226,6 +234,9 @@
           }
           return;
         }
+        // global.intensity 的真实消费变量是单独写的 --fx-intensity，
+        // 不再写一份无人读取的 --fx-global-intensity。
+        if (g.id === 'global' && it.key === 'intensity') return;
         root.setProperty('--fx-' + g.id + '-' + it.key, String(v));
       });
       (g.selects || []).forEach(function (it) {
@@ -246,7 +257,6 @@
     root.setProperty('--fx-intensity', (values.intensity / 100).toFixed(3));
     document.documentElement.classList.toggle('fx-on', !!values.enabled);
     document.documentElement.dataset.stagePreset = values.stagePreset;
-    document.documentElement.dataset.paletteMode = values.paletteMode;
   }
 
   function emit() {

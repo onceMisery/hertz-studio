@@ -9,7 +9,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0d0f12">
+<meta name="theme-color" content="#0a0a0a">
 <!-- 空图标：没有 favicon 路由时浏览器会去请求 /favicon.ico 并拿到 401，
      控制台里留一条无意义的红字。 -->
 <link rel="icon" href="data:,">
@@ -17,9 +17,114 @@
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="stage.css">
 <link rel="stylesheet" href="creative.css">
+<link rel="stylesheet" href="online.css">
 </head>
 <body>
 <script>window.__VMUSIC_TOKEN__ = "__VMUSIC_TOKEN_VALUE__";</script>
+
+<!-- 统一图标库：全站只维护这一份 24×24 SVG symbol；页面中通过
+     use 节点引用对应 symbol，避免同形图标散落多份。 -->
+<svg id="icon-sprite" width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <circle cx="11" cy="11" r="7"/>
+    <path d="M16 16l5 5" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <path d="M6 6l12 12M18 6L6 18"/>
+  </symbol>
+  <symbol id="i-palette" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 3a9 9 0 100 18c1.1 0 1.8-.8 1.8-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.1 0-.9.8-1.7 1.7-1.7H16a5 5 0 005-5c0-3.9-4-7.3-9-7.3zm-5.2 9a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm2.6-4a1.4 1.4 0 110-2.8 1.4 1.4 0 110 2.8zm4.6-1.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm3.4 3.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8z"/>
+  </symbol>
+  <symbol id="i-workshop" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 2.6l2.3 4.9 5.3.7-3.9 3.7 1 5.3-4.7-2.6-4.7 2.6 1-5.3-3.9-3.7 5.3-.7z"/>
+    <path d="M4 19.4h6v1.8H4zM14 19.4h6v1.8h-6z"/>
+  </symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M4 7h10v2H4zM18 6.5v3l3-1.5zM4 15h6v2H4zM14 14.5v3l3-1.5zM4 11.2h14v1.6H4zM4 19.2h10v1.6H4z"/>
+  </symbol>
+  <symbol id="i-user" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 12a4 4 0 100-8 4 4 0 000 8zm0 2c-3.3 0-7 1.7-7 5v1h14v-1c0-3.3-3.7-5-7-5z"/>
+  </symbol>
+  <symbol id="i-equalizer" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M4 14h3v6H4zM9.5 9h3v11h-3zM15 4h3v16h-3z"/>
+  </symbol>
+  <symbol id="i-library" viewBox="0 0 24 24" fill="currentColor">
+    <path fill-rule="evenodd" d="M12 4C8.4 4 5.4 5.1 5.4 6.5S8.4 9 12 9s6.6-1.1 6.6-2.5S15.6 4 12 4zm0 1.6a.9.9 0 100 1.8.9.9 0 000-1.8z"/>
+    <path d="M5.4 6.5v4.3c0 1.4 3 2.5 6.6 2.5s6.6-1.1 6.6-2.5V6.5"/>
+    <path d="M5.4 10.8v4.4c0 1.4 3 2.5 6.6 2.5s6.6-1.1 6.6-2.5v-4.4"/>
+    <path d="M5.4 15.2c0 1.4 3 2.5 6.6 2.5s6.6-1.1 6.6-2.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  </symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 3a9 9 0 100 18 9 9 0 000-18zm0 2c3.9 0 7 3.1 7 7s-3.1 7-7 7-7-3.1-7-7 3.1-7 7-7zm0 2.5a4.5 4.5 0 100 9 4.5 4.5 0 000-9z"/>
+  </symbol>
+  <symbol id="i-playlist" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M4 6h12v2H4zM4 11h12v2H4zM4 16h8v2H4zM18 10l4 5-4 5z"/>
+  </symbol>
+  <symbol id="i-queue" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M3 5h12v2H3zM3 10h12v2H3zM3 15h8v2H3zM17 5h4v2h-4zM17 10h4v2h-4zM17 15h4v2h-4z"/>
+  </symbol>
+  <!-- 收藏用的红心。fill-rule=evenodd 让它是描边+实心可切换的两态图形：
+       实心版（收藏后）用外层路径填充，描边版用空心路径。 -->
+  <symbol id="i-heart" viewBox="0 0 24 24" fill="currentColor">
+    <path fill-rule="evenodd" d="M12 20.4l-1.1-1C6.7 15.6 3.6 12.8 3.6 9.2 3.6 6.3 5.9 4 8.8 4c1.6 0 3.1.7 4.1 1.9C13.9 4.7 15.4 4 17 4c2.9 0 5.2 2.3 5.2 5.2 0 3.6-3.1 6.4-7.3 10.2L12 20.4z"/>
+  </symbol>
+  <symbol id="i-heart-outline" viewBox="0 0 24 24" fill="currentColor">
+    <path fill-rule="evenodd" d="M12 20.4l-1.1-1C6.7 15.6 3.6 12.8 3.6 9.2 3.6 6.3 5.9 4 8.8 4c1.6 0 3.1.7 4.1 1.9C13.9 4.7 15.4 4 17 4c2.9 0 5.2 2.3 5.2 5.2 0 3.6-3.1 6.4-7.3 10.2L12 20.4zm0-2.6c3.6-3.3 6.4-5.9 6.4-8.6 0-1.8-1.4-3.2-3.2-3.2-1.3 0-2.5.8-3.1 2h-1.4c-.6-1.2-1.8-2-3.1-2C6.8 6 5.6 7.4 5.6 9.2c0 2.7 2.8 5.3 6.4 8.6z"/>
+  </symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 15.5a3.5 3.5 0 110-7 3.5 3.5 0 010 7zM19.4 13a7.7 7.7 0 000-2l2-1.5-2-3.4-2.3 1a7.6 7.6 0 00-1.7-1L15 3H9l-.4 2.1a7.6 7.6 0 00-1.7 1l-2.3 1-2 3.4L4.6 11a7.7 7.7 0 000 2l-2 1.5 2 3.4 2.3-1a7.6 7.6 0 001.7 1L9 21h6l.4-2.1a7.6 7.6 0 001.7-1l2.3 1 2-3.4z"/>
+  </symbol>
+  <symbol id="i-prev" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M7 6v12H5V6h2zm12 0v12l-9-6 9-6z"/>
+  </symbol>
+  <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M8 5.5v13l11-6.5-11-6.5z"/>
+  </symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M8 5h3.2v14H8zM12.8 5H16v14h-3.2z"/>
+  </symbol>
+  <symbol id="i-next" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M17 6v12h2V6h-2zM5 6v12l9-6-9-6z"/>
+  </symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M6 6h12v12H6z"/>
+  </symbol>
+  <symbol id="i-disc" viewBox="0 0 24 24" fill="currentColor">
+    <path fill-rule="evenodd" d="M12 2a10 10 0 100 20 10 10 0 000-20zm0 7.4a2.6 2.6 0 100 5.2 2.6 2.6 0 000-5.2z"/>
+  </symbol>
+  <symbol id="i-reset" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 5V2L8 6l4 4V7a5 5 0 11-5 5H5a7 7 0 107-7z"/>
+  </symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M4 6h6l2 2h8v10H4z"/>
+  </symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M4 20h4L20 8l-4-4L4 16zM14 6l4 4"/>
+  </symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M6 7h12v13H6zM4 5h16v2H4zM9 3h6v2H9z"/>
+  </symbol>
+  <symbol id="i-grip" viewBox="0 0 24 24" fill="currentColor">
+    <circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/>
+    <circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/>
+    <circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/>
+  </symbol>
+  <symbol id="i-more" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M6 10a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4z"/>
+  </symbol>
+  <symbol id="i-skip-next" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M7 4h3v16H7zM11.5 12l6 4V8z"/>
+  </symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6 9l6 6 6-6"/>
+  </symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 9V5a1 1 0 011-1h4"/>
+    <path d="M20 9V5a1 1 0 00-1-1h-4"/>
+    <path d="M4 15v4a1 1 0 001 1h4"/>
+    <path d="M20 15v4a1 1 0 01-1 1h-4"/>
+  </symbol>
+</svg>
 
 <div id="ambient" aria-hidden="true"><div class="ambient-img" id="ambient-img"></div></div>
 
@@ -31,10 +136,10 @@
   <div class="brand">mmusic</div>
 
   <div class="topsearch">
-    <svg class="si" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="M16 16l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <svg class="si" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
     <input id="search" type="search" placeholder="搜索标题、艺术家、专辑" autocomplete="off" aria-label="搜索曲库">
     <button id="search-clear" class="search-clear" aria-label="清空搜索" hidden>
-      <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
     </button>
     <kbd>/</kbd>
   </div>
@@ -47,21 +152,37 @@
          加主题只需要往那张表里加一条。 -->
     <div class="theme-picker" id="theme-picker">
       <button id="theme-btn" class="iconbtn" title="主题色" aria-label="切换主题色" aria-haspopup="listbox" aria-expanded="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 100 18c1.1 0 1.8-.8 1.8-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.1 0-.9.8-1.7 1.7-1.7H16a5 5 0 005-5c0-3.9-4-7.3-9-7.3zm-5.2 9a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm2.6-4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm4.6-1.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm3.4 3.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8z"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-palette"/></svg>
       </button>
       <div class="theme-menu" id="theme-menu" role="listbox" aria-label="主题色列表" hidden></div>
     </div>
 
-    <button id="workshop-btn" class="iconbtn" title="创意工坊" aria-label="打开创意工坊" aria-expanded="false">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.6l2.3 4.9 5.3.7-3.9 3.7 1 5.3-4.7-2.6-4.7 2.6 1-5.3-3.9-3.7 5.3-.7z"/><path d="M4 19.4h6v1.8H4zM14 19.4h6v1.8h-6z"/></svg>
-    </button>
+    <div class="top-more" id="top-more">
+      <button type="button" id="top-more-btn" class="iconbtn" title="更多工具" aria-label="更多工具" aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-more"/></svg>
+      </button>
 
-    <button id="stage-control-btn" class="iconbtn" title="舞台控制" aria-label="打开舞台控制">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10v2H4zM18 6.5v3l3-1.5zM4 15h6v2H4zM14 14.5v3l3-1.5zM4 11.2h14v1.6H4zM4 19.2h10v1.6H4z"/></svg>
+      <div id="top-more-menu" class="top-more-menu" role="menu" aria-label="更多工具" hidden>
+        <button type="button" id="workshop-btn" class="iconbtn menu-item" role="menuitem" title="创意工坊" aria-label="打开创意工坊" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-workshop"/></svg>
+          <span>创意工坊</span>
+        </button>
+        <button type="button" id="stage-control-btn" class="iconbtn menu-item" role="menuitem" title="舞台控制" aria-label="打开舞台控制">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg>
+          <span>舞台控制</span>
+        </button>
+      </div>
+    </div>
+
+    <button id="online-account-btn" class="iconbtn" title="登录音源" aria-label="登录在线音源账号" aria-haspopup="dialog">
+      <span class="iconbtn-face" id="online-account-face">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-user"/></svg>
+        <span id="online-account-dot" class="icon-dot" hidden></span>
+      </span>
     </button>
 
     <button id="stage-btn" class="iconbtn" title="正在播放" aria-label="打开正在播放">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 14h3v6H4zM9.5 9h3v11h-3zM15 4h3v16h-3z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-equalizer"/></svg>
     </button>
   </div>
 </header>
@@ -71,25 +192,30 @@
   <!-- 导航轨：四个一级目的地，选中态常驻，不再依赖记忆 -->
   <nav class="rail" id="rail" aria-label="主导航">
     <button class="rail-item active" data-view="library" aria-label="曲库">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h7v12H4zM13 6h7v12h-7z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-library"/></svg>
       <span>曲库</span>
     </button>
     <button class="rail-item" data-view="online" aria-label="在线曲库">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 100 18 9 9 0 000-18zm0 2c3.9 0 7 3.1 7 7s-3.1 7-7 7-7-3.1-7-7 3.1-7 7-7zm0 2.5a4.5 4.5 0 100 9 4.5 4.5 0 000-9z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-globe"/></svg>
       <span>在线</span>
     </button>
     <button class="rail-item" data-view="playlists" aria-label="歌单">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h12v2H4zM4 11h12v2H4zM4 16h8v2H4zM18 10l4 5-4 5z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-playlist"/></svg>
       <span>歌单</span>
     </button>
     <button class="rail-item" data-view="queue" aria-label="播放队列">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v2H3zM3 10h12v2H3zM3 15h8v2H3zM17 5h4v2h-4zM17 10h4v2h-4zM17 15h4v2h-4z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg>
       <span>队列</span>
       <em id="queue-badge" class="rail-badge" hidden>0</em>
     </button>
+    <button class="rail-item" data-view="favorites" aria-label="我的收藏">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-heart"/></svg>
+      <span>收藏</span>
+      <em id="fav-badge" class="rail-badge" hidden>0</em>
+    </button>
     <div class="rail-spacer"></div>
     <button class="rail-item" data-view="settings" aria-label="设置">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 110-7 3.5 3.5 0 010 7zM19.4 13a7.7 7.7 0 000-2l2-1.5-2-3.4-2.3 1a7.6 7.6 0 00-1.7-1L15 3H9l-.4 2.1a7.6 7.6 0 00-1.7 1l-2.3-1-2 3.4L4.6 11a7.7 7.7 0 000 2l-2 1.5 2 3.4 2.3-1a7.6 7.6 0 001.7 1L9 21h6l.4-2.1a7.6 7.6 0 001.7-1l2.3 1 2-3.4z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg>
       <span>设置</span>
     </button>
   </nav>
@@ -125,6 +251,23 @@
         <div class="hint" id="scan-label">尚未扫描</div>
       </div>
 
+      <!-- 每日推荐：服务端按本地规则（种子 = 本地日期）每天出一份，
+           点击任一卡片即把整份当成一个队列从该首开始播。 -->
+      <div class="daily-strip" id="daily-strip">
+        <div class="daily-head">
+          <div class="daily-copy">
+            <span class="daily-kicker">DAILY MIX · 每日推荐</span>
+            <span class="daily-title" id="daily-date">—</span>
+            <span class="daily-sub" id="daily-sub">每天换一批，规则跑在本机</span>
+          </div>
+          <div class="daily-tools">
+            <button id="daily-play-all" class="btn primary" disabled>播放全部</button>
+            <button id="daily-refresh" class="btn" aria-label="重新拉取每日推荐">刷新</button>
+          </div>
+        </div>
+        <div class="daily-list" id="daily-list"></div>
+      </div>
+
       <div class="lib-empty" id="lib-empty" hidden>
         <div class="empty-card">
           <h2>曲库还是空的</h2>
@@ -158,6 +301,9 @@
         </div>
       </div>
 
+      <!-- 搜索/分类/结果/账号区全部进同一个滚动容器：内容超出时整体
+           可滚动，而不是被视图边界裁掉（与本地曲库内部列表滚动同理）。 -->
+      <div class="online-scroll">
       <div class="online-search">
         <input id="online-q" type="search" placeholder="搜索在线歌曲、歌手或专辑…" autocomplete="off" aria-label="搜索在线曲库">
         <button id="online-go" class="btn primary">搜索</button>
@@ -178,6 +324,17 @@
         <div class="hint">输入关键词搜索，或点上方分类浏览。</div>
       </div>
       <div class="online-sentinel" id="online-sentinel" hidden>加载中…</div>
+
+      <!-- 账号区 + 我的歌单（online-playlists.js 驱动）。
+           有任一登录能力（cookie/qr/歌单）的音源都会出现账号卡；
+           未登录时是扫码/cookie 入口，登录后才拉歌单网格。 -->
+      <div id="online-plugins" class="online-plugins">
+        <div class="op-section-title">我的账号</div>
+        <div id="op-accounts" class="op-accounts"></div>
+        <div id="op-grid-head" class="op-section-title" hidden>我的歌单</div>
+        <div id="op-grid" class="op-grid"></div>
+      </div>
+      </div>
     </div>
 
     <!-- 歌单 -->
@@ -201,6 +358,11 @@
 
       <div class="pl-list" id="playlist-list" hidden></div>
 
+      <!-- 在线歌单分区的架子模式宿主：列表模式下块挂在 #playlist-list 末尾
+           与本地行同列滚动；架子模式下列表被隐藏，块搬到这里占架子下方
+           剩余空间，保证默认排布也能看到全部在线歌单。 -->
+      <div class="pl-online-host" id="playlist-online" hidden></div>
+
       <!-- 歌单详情：与架子/列表是同一视图内的两层，返回即回到原排布 -->
       <div class="pl-detail" id="pl-detail" hidden>
         <div class="pl-detail-head">
@@ -218,6 +380,27 @@
         </div>
         <div class="pl-detail-list" id="pl-detail-list"></div>
       </div>
+    </div>
+
+    <!-- 收藏：歌曲 / 电台两个 tab，共用同一份列表渲染 -->
+    <div class="view" id="view-favorites" hidden>
+      <div class="col-head">
+        <div class="col-head-left"><h1 class="col-title">我的收藏</h1><span class="count" id="fav-count">—</span></div>
+        <div class="col-tools">
+          <button id="fav-play-all" class="btn primary">播放本地收藏</button>
+          <button id="fav-refresh" class="btn" aria-label="刷新收藏">刷新</button>
+        </div>
+      </div>
+
+      <div class="fav-tabs" id="fav-tabs" role="group" aria-label="收藏类型">
+        <button class="chip active" type="button" data-fav-kind="track">歌曲 0</button>
+        <button class="chip" type="button" data-fav-kind="radio">电台 0</button>
+      </div>
+
+      <div class="lib-head fav-head">
+        <span>#</span><span></span><span>标题</span><span>专辑</span><span>来源</span><span>时长</span><span></span>
+      </div>
+      <div class="lib-list fav-list" id="fav-list"></div>
     </div>
 
     <!-- 队列 -->
@@ -260,7 +443,7 @@
         <div class="set-row">
           <label for="set-stage-cover">舞台封面</label>
           <input id="set-stage-cover" type="checkbox">
-          <span class="hint">在全屏舞台里显示当前曲目的 3D 封面盘</span>
+          <span class="hint">在全屏舞台里显示当前曲目的 3D 粒子封面</span>
         </div>
         <!-- 渲染模式：默认标准渲染。选「增强」不会立刻保存，先把下面的警示块
              摊开让用户读完，再由块里的确认按钮落库——直接 onchange 就写库的话，
@@ -337,12 +520,12 @@
       <span class="stage-kicker">正在播放</span>
       <div class="stage-modes" id="stage-modes" role="group" aria-label="歌词展示模式">
         <button class="stage-mode" data-mode="cover" aria-pressed="false">封面</button>
-        <button class="stage-mode" data-mode="line" aria-pressed="false">逐行</button>
         <button class="stage-mode" data-mode="karaoke" aria-pressed="true">卡拉OK</button>
+        <button class="stage-mode" data-mode="starriver" id="mode-starriver" aria-pressed="false">星河</button>
         <button class="stage-mode" data-mode="page" aria-pressed="false">全屏</button>
       </div>
       <button class="stage-queue" id="stage-queue" title="打开播放队列">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v2H3zM3 10h12v2H3zM3 15h8v2H3zM17 5h4v2h-4zM17 10h4v2h-4zM17 15h4v2h-4z"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg>
         <span>队列</span>
       </button>
       <span class="stage-tech" id="now-tech" hidden></span>
@@ -375,17 +558,17 @@
 
   <div class="bar-controls">
     <button id="prev" class="ctrl" title="上一首" aria-label="上一首">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6v12H5V6h2zm12 0v12l-9-6 9-6z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-prev"/></svg>
     </button>
     <button id="playpause" class="ctrl ctrl-primary" title="播放 / 暂停" aria-label="播放或暂停">
-      <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5-11-6.5z"/></svg>
-      <svg class="ic-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h3.2v14H8zM12.8 5H16v14h-3.2z"/></svg>
+      <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"/></svg>
+      <svg class="ic-pause" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-pause"/></svg>
     </button>
     <button id="next" class="ctrl" title="下一首" aria-label="下一首">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 6v12h2V6h-2zM5 6v12l9-6-9-6z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-next"/></svg>
     </button>
     <button id="stop" class="ctrl" title="停止" aria-label="停止">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12v12H6z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-stop"/></svg>
     </button>
   </div>
 
@@ -406,6 +589,22 @@
   </div>
 </footer>
 
+<!-- 在线歌单详情抽屉的遮罩与抽屉本体必须是 <body> 直接子级：.column 带
+     backdrop-filter，会把内部 fixed 元素的包含块劫持到自身（抽屉整体下移
+     一个顶栏高度、底部溢出盖住播放条）。播放不中断，关掉抽屉即恢复。 -->
+<div id="op-drawer-scrim" class="op-drawer-scrim" hidden></div>
+<aside id="op-drawer" class="op-drawer" hidden aria-label="歌单详情" aria-modal="true">
+  <header class="op-drawer-head">
+    <button id="op-back" class="op-back" type="button" aria-label="返回">‹</button>
+    <div id="op-title" class="op-drawer-title"></div>
+  </header>
+  <div id="op-tracks" class="op-tracks"></div>
+  <footer class="op-drawer-foot">
+    <button id="op-playall" class="btn primary" type="button">播放全部</button>
+    <button id="op-shuffle" class="btn" type="button">随机播放</button>
+  </footer>
+</aside>
+
 <!-- 全屏歌词页：与舞台共用同一份歌词数据，只是换一套排版。
      控制按钮不是底部播放条的复制品——它们通过 stage:control 事件把意图
      交回 app.js，播放逻辑仍然只有一份。 -->
@@ -418,22 +617,21 @@
     <!-- 全屏页里必须自带模式切换和驾驶舱入口：唯一的入口按钮原本在顶栏，
          而顶栏被这层 z-index 70 的对话框整个盖住，进了全屏就再也调不了任何东西。 -->
     <div class="lp-modes" id="lp-modes" role="group" aria-label="歌词显示模式">
-      <button class="lp-mode" data-lp-mode="line" aria-pressed="false">逐行</button>
       <button class="lp-mode" data-lp-mode="karaoke" aria-pressed="true">卡拉OK</button>
       <button class="lp-mode" data-lp-mode="scatter" aria-pressed="false">心象</button>
     </div>
     <div class="lp-spacer"></div>
     <button class="lp-btn" id="lp-cover" aria-label="舞台封面" aria-pressed="false">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" d="M12 2a10 10 0 100 20 10 10 0 000-20zm0 7.4a2.6 2.6 0 100 5.2 2.6 2.6 0 000-5.2z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-disc"/></svg>
     </button>
     <button class="lp-btn" id="lp-view-reset" title="重置视角" aria-label="重置舞台视角">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V2L8 6l4 4V7a5 5 0 11-5 5H5a7 7 0 107-7z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reset"/></svg>
     </button>
     <button class="lp-btn" id="lp-cockpit" title="舞台驾驶舱" aria-label="打开舞台驾驶舱" aria-expanded="false">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10v2H4zM18 6.5v3l3-1.5zM4 15h6v2H4zM14 14.5v3l3-1.5zM4 11.2h14v1.6H4zM4 19.2h10v1.6H4z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg>
     </button>
     <button class="lp-btn" id="lp-close" title="关闭 (Esc)" aria-label="关闭全屏歌词">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
     </button>
   </div>
 
@@ -444,14 +642,14 @@
     <span class="lp-time" id="lp-time">0:00 / 0:00</span>
     <input id="lp-progress" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
     <button class="lp-btn" id="lp-prev" title="上一首" aria-label="上一首">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6v12H5V6h2zm12 0v12l-9-6 9-6z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-prev"/></svg>
     </button>
     <button class="lp-btn primary" id="lp-play" title="播放 / 暂停" aria-label="播放或暂停">
-      <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5-11-6.5z"/></svg>
-      <svg class="ic-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h3.2v14H8zM12.8 5H16v14h-3.2z"/></svg>
+      <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"/></svg>
+      <svg class="ic-pause" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-pause"/></svg>
     </button>
     <button class="lp-btn" id="lp-next" title="下一首" aria-label="下一首">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 6v12h2V6h-2zM5 6v12l9-6-9-6z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-next"/></svg>
     </button>
   </div>
 </div>
@@ -469,7 +667,7 @@
       <div class="sc-sub">调节舞台渲染、镜头与全局滤镜参数</div>
     </div>
     <button class="sc-close" id="sc-close" title="关闭" aria-label="关闭舞台控制">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
     </button>
   </div>
 
@@ -479,7 +677,7 @@
 
   <div class="sc-foot">
     <button class="sc-reset" id="sc-reset">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V2L7 6l5 4V7a5 5 0 11-5 5H5a7 7 0 107-7z"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reset"/></svg>
       <span>恢复默认设置</span>
     </button>
     <button class="sc-ok" id="sc-ok">确定</button>
@@ -497,15 +695,98 @@
     <span class="ws-badge">W</span>
     <div class="ws-head-text">
       <div class="ws-title">创意工坊</div>
-      <div class="ws-sub">场景 · 参数 · 编排 · 绑定 · 背景 · 导出</div>
+      <div class="ws-sub">场景 · 收藏 · 参数 · 编排 · 绑定 · 背景 · 导出</div>
     </div>
     <button class="ws-close" id="ws-close" title="关闭" aria-label="关闭创意工坊">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
     </button>
   </div>
   <div class="ws-tabs" id="ws-tabs" role="tablist" aria-label="工坊页签"></div>
   <div class="ws-body" id="ws-body"></div>
   <div class="ws-toast" id="ws-toast" role="status" aria-live="polite" hidden></div>
+</div>
+
+<!-- 在线音源登录（online-login.js 驱动）。顶栏「账号」按钮随时可打开，
+     弹窗内可切换音源；每个音源支持扫码（QQ 还能切 QQ/微信）或手动 cookie。 -->
+<div id="qr-modal" class="qr-modal" hidden>
+  <div class="qr-card glass" role="dialog" aria-modal="true" aria-labelledby="qr-title">
+    <button id="qr-close" class="qr-close" aria-label="关闭">×</button>
+    <div id="qr-title" class="qr-title">登录音源</div>
+    <!-- 音源选择：有任一登录能力的平台都在这里。 -->
+    <div id="qr-sources" class="qr-sources"></div>
+    <!-- QQ 音乐的码渠道：手机 QQ 扫 / 微信扫。仅 QQ 显示。 -->
+    <div id="qr-channels" class="qr-channels" hidden>
+      <button id="qr-ch-qq" class="qr-ch active" type="button">QQ 扫码</button>
+      <button id="qr-ch-wx" class="qr-ch" type="button">微信扫码</button>
+    </div>
+    <div id="qr-canvas" class="qr-canvas"></div>
+    <div id="qr-status" class="qr-status">正在生成二维码…</div>
+    <details class="qr-cookie-fallback">
+      <summary>手动粘贴 cookie</summary>
+      <textarea id="qr-cookie-input" rows="3" placeholder="粘贴该平台的完整 cookie"></textarea>
+      <button id="qr-cookie-save" type="button">保存</button>
+    </details>
+  </div>
+</div>
+
+<!-- 播放控制弹窗：点击顶栏「正在播放」按钮弹出。
+     内容为不透明实体卡片，保证进度 / 音量 / 播放暂停等控件清晰无模糊；
+     底部播放控制区提供「跳转到舞台播放页面」的明显入口。 -->
+<div id="np-scrim" class="np-scrim" hidden></div>
+<div id="np-modal" class="np-modal" role="dialog" aria-modal="true" aria-label="播放控制" hidden>
+  <div class="np-card">
+    <header class="np-head">
+      <div class="np-head-text">
+        <div class="np-title">正在播放</div>
+        <div class="np-subtitle">播放控制</div>
+      </div>
+      <button type="button" id="np-close" class="np-close" aria-label="关闭播放控制">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
+      </button>
+    </header>
+
+    <div class="np-now">
+      <div class="np-art" id="np-art"><span class="np-art-note">♪</span></div>
+      <div class="np-meta">
+        <div class="np-name" id="np-name">未在播放</div>
+        <div class="np-artist" id="np-artist">从曲库中挑选一首</div>
+      </div>
+    </div>
+
+    <div class="np-progress">
+      <input id="np-progress-bar" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+      <div class="np-times"><span id="np-time">0:00 / 0:00</span></div>
+    </div>
+
+    <div class="np-transport">
+      <button type="button" id="np-prev" class="np-ctrl" title="上一首" aria-label="上一首">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-prev"/></svg>
+      </button>
+      <button type="button" id="np-playpause" class="np-ctrl np-ctrl-primary np-playpause" title="播放 / 暂停" aria-label="播放或暂停">
+        <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"/></svg>
+        <svg class="ic-pause" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-pause"/></svg>
+      </button>
+      <button type="button" id="np-next" class="np-ctrl" title="下一首" aria-label="下一首">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-next"/></svg>
+      </button>
+      <button type="button" id="np-stop" class="np-ctrl" title="停止" aria-label="停止">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-stop"/></svg>
+      </button>
+    </div>
+
+    <div class="np-volume">
+      <span class="np-volume-label">音量</span>
+      <input id="np-volume" type="range" min="0" max="100" value="80" aria-label="音量">
+    </div>
+
+    <!-- 底部播放控制区域：跳转到舞台播放页面 -->
+    <div class="np-goto">
+      <button type="button" id="np-goto-stage" class="np-goto-btn">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
+        <span>跳转到舞台播放页面</span>
+      </button>
+    </div>
+  </div>
 </div>
 
 <!-- 演示后端（prototype/mock.js）不随服务发布：app.js 探不到 /v1/health 时
@@ -517,6 +798,14 @@
 <script src="onset.js"></script>
 <script src="stage-particles.js"></script>
 <script src="stage-particles-gl.js"></script>
+<!-- 共享 GL 宿主：唯一的画布与上下文，必须排在两个场景模块之前 -->
+<script src="stage-gl-host.js"></script>
+<!-- 3D 粒子舞台封面：静态点阵 → 播放时涟漪律动，WebGL 不可用自动退回 CSS 封面 -->
+<script src="stage-cover-particles.js"></script>
+<!-- 星河背景：星野 + 流动星河，与粒子封面同画布切换 -->
+<script src="stage-starriver.js"></script>
+<!-- 视觉子系统统一控制器：仅注册，初始化由 boot 经 VisualController.init() -->
+<script src="visual-controller.js"></script>
 <script src="stage-control.js"></script>
 <script src="pl-covers.js"></script>
 <script src="shelf.js"></script>
@@ -527,6 +816,14 @@
 <script src="handdrawn.js"></script>
 <script src="creative-stage.js"></script>
 <script src="workshop.js"></script>
+<script src="vendor/qrcode.js"></script>
+<script src="online-login.js"></script>
+<script src="online.js"></script>
+<script src="online-playlists.js"></script>
+<!-- 收藏与每日推荐：都依赖 VMusicTransport（app.js 里定义），所以排在 app.js
+     之前加载、由 app.js 的启动序列 bind() 注入宿主依赖。 -->
+<script src="favorites.js"></script>
+<script src="daily.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

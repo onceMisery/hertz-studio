@@ -233,17 +233,25 @@ fn run(
     let mut state = PlayerSnapshot::default();
     let mut spectrum = vec![0f32; SPECTRUM_BANDS];
     let mut last_spectrum = Instant::now();
+    // 「本首的 Ended 是否已发过」门闩。它必须在每次换装/停止后复位，否则进程
+    // 生命周期里只有第一首歌自然结束会发 Ended——在线整盘的自动接力只会成功
+    // 一次（apply 用返回值告知本 tick 是否发生了换装/停止）。
     let mut ended_emitted = false;
 
     loop {
         match rx.recv_timeout(TICK) {
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
-            Ok(cmd) => {
-                if let Err(e) = apply(&mut *backend, &mut state, &snapshot, cmd) {
+            Ok(cmd) => match apply(&mut *backend, &mut state, &snapshot, cmd) {
+                Ok(source_reset) => {
+                    if source_reset {
+                        ended_emitted = false;
+                    }
+                }
+                Err(e) => {
                     tracing::warn!("audio command failed: {e}");
                     let _ = events.send(AudioEvent::Error(e.to_string()));
                 }
-            }
+            },
             Err(RecvTimeoutError::Timeout) => {}
         }
 
@@ -284,12 +292,18 @@ fn publish(sink: &ArcSwap<PlayerSnapshot>, state: &PlayerSnapshot) {
     sink.store(std::sync::Arc::new(state.clone()));
 }
 
+/// 应用一条命令。
+///
+/// 返回值 `source_reset` 回答「本 tick 是否换装或停止」：成功的 Load/Stop 为
+/// true，run() 据此把「每首一次」的 Ended 门闩重新上膛；其余命令为 false。
+/// 注意命令自身的业务成败走 `reply`，这里 Err 只用于真正需要上 Error 事件的
+/// 场景（当前各臂均不产生）。
 fn apply(
     backend: &mut dyn AudioBackend,
     state: &mut PlayerSnapshot,
     sink: &ArcSwap<PlayerSnapshot>,
     cmd: Command,
-) -> Result<(), AudioError> {
+) -> Result<bool, AudioError> {
     match cmd {
         Command::Load {
             uri,
@@ -305,8 +319,9 @@ fn apply(
                 state.generation += 1;
             }
             publish(sink, state);
+            let reset = info.is_ok();
             let _ = reply.send(info);
-            Ok(())
+            Ok(reset)
         }
         Command::Play(reply) => {
             // Playing with nothing loaded used to silently flip `playing` to
@@ -318,13 +333,13 @@ fn apply(
             };
             publish(sink, state);
             let _ = reply.send(result);
-            Ok(())
+            Ok(false)
         }
         Command::Pause(reply) => {
             let result = backend.pause().map(|()| state.playing = false);
             publish(sink, state);
             let _ = reply.send(result);
-            Ok(())
+            Ok(false)
         }
         Command::Stop(reply) => {
             let result = backend.stop().map(|()| {
@@ -333,8 +348,9 @@ fn apply(
                 state.generation += 1;
             });
             publish(sink, state);
+            let reset = result.is_ok();
             let _ = reply.send(result);
-            Ok(())
+            Ok(reset)
         }
         Command::Seek(ms, reply) => {
             let result = backend.seek(ms).map(|()| {
@@ -343,7 +359,7 @@ fn apply(
             });
             publish(sink, state);
             let _ = reply.send(result);
-            Ok(())
+            Ok(false)
         }
         Command::SetVolume(v, reply) => {
             let result = backend
@@ -351,19 +367,19 @@ fn apply(
                 .map(|()| state.volume = v.clamp(0.0, 1.0));
             publish(sink, state);
             let _ = reply.send(result);
-            Ok(())
+            Ok(false)
         }
         Command::SetMode(mode, reply) => {
             state.mode = mode;
             publish(sink, state);
             let _ = reply.send(Ok(()));
-            Ok(())
+            Ok(false)
         }
         Command::Devices(reply) => {
             let devices = backend.devices().unwrap_or_default();
             publish(sink, state);
             let _ = reply.send(devices);
-            Ok(())
+            Ok(false)
         }
         Command::SelectDevice(id, reply) => {
             let result = backend.select_device(id.as_deref());
@@ -372,9 +388,9 @@ fn apply(
             }
             publish(sink, state);
             let _ = reply.send(result);
-            Ok(())
+            Ok(false)
         }
-        Command::Shutdown => Ok(()),
+        Command::Shutdown => Ok(false),
     }
 }
 
@@ -464,5 +480,168 @@ mod tests {
         );
 
         audio.shutdown();
+    }
+
+    /// 一 play 就「播完」的后端：用来钉 apply 的 Ended 门闩复位契约。
+    /// run() 的门闩消费无法经 BackendKind 注入假后端，所以复位契约在这层钉：
+    /// 只有成功的 Load/Stop 允许返回 true，且每次 Load 都要返回——门闩是
+    /// 「每首一次」，不是「进程一次」。少了它，在线整盘只会自动接力一次。
+    #[derive(Default)]
+    struct InstantEndBackend {
+        armed: bool,
+        load_fails: bool,
+        stop_fails: bool,
+    }
+
+    impl AudioBackend for InstantEndBackend {
+        fn name(&self) -> &'static str {
+            "instant-end"
+        }
+        fn devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
+            Ok(vec![])
+        }
+        fn select_device(&mut self, _id: Option<&str>) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn load(&mut self, _uri: &str) -> Result<MediaInfo, AudioError> {
+            if self.load_fails {
+                return Err(AudioError::UnsupportedFormat("test load failure".into()));
+            }
+            self.armed = false;
+            Ok(MediaInfo::default())
+        }
+        fn play(&mut self) -> Result<(), AudioError> {
+            self.armed = true;
+            Ok(())
+        }
+        fn pause(&mut self) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), AudioError> {
+            if self.stop_fails {
+                return Err(AudioError::BackendInit("test stop failure".into()));
+            }
+            self.armed = false;
+            Ok(())
+        }
+        fn seek(&mut self, _position_ms: u64) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn set_volume(&mut self, _volume: f32) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn position_ms(&self) -> u64 {
+            0
+        }
+        fn duration_ms(&self) -> Option<u64> {
+            None
+        }
+        fn finished(&self) -> bool {
+            self.armed
+        }
+        fn spectrum(&self, _out: &mut [f32]) -> bool {
+            false
+        }
+    }
+
+    fn unit_reply<T>() -> oneshot::Sender<T> {
+        let (tx, _rx) = oneshot::channel();
+        tx
+    }
+
+    #[test]
+    fn load_and_stop_rearm_the_ended_latch_every_time() {
+        let mut backend = InstantEndBackend::default();
+        let mut state = PlayerSnapshot::default();
+        let sink = ArcSwap::from_pointee(PlayerSnapshot::default());
+
+        // 成功 Load：换装，门闩必须重新上膛。
+        assert!(apply(
+            &mut backend,
+            &mut state,
+            &sink,
+            Command::Load {
+                uri: "a".into(),
+                track_id: Some("t1".into()),
+                reply: unit_reply(),
+            }
+        )
+        .unwrap());
+        // Play 之后后端即报 finished（模拟本首自然结束），但 Play 命令本身
+        // 不触发复位。
+        assert!(!apply(&mut backend, &mut state, &sink, Command::Play(unit_reply())).unwrap());
+        assert!(backend.finished());
+        // 其余传输/查询命令一律不复位。
+        assert!(!apply(
+            &mut backend,
+            &mut state,
+            &sink,
+            Command::Pause(unit_reply())
+        )
+        .unwrap());
+        assert!(!apply(
+            &mut backend,
+            &mut state,
+            &sink,
+            Command::Seek(0, unit_reply())
+        )
+        .unwrap());
+        // Stop 也重新上膛（门闩不能把「停止后再播」吞掉）。
+        assert!(apply(&mut backend, &mut state, &sink, Command::Stop(unit_reply())).unwrap());
+        // 第二首 Load 仍须返回 true：门闩按首复位。
+        assert!(apply(
+            &mut backend,
+            &mut state,
+            &sink,
+            Command::Load {
+                uri: "b".into(),
+                track_id: Some("t2".into()),
+                reply: unit_reply(),
+            }
+        )
+        .unwrap());
+
+        // 负向半契约：换装/停止失败时门闩绝不能被重新上膛。门闩此刻已随第二
+        // 首 Load 复位（ended_emitted=false），失败命令必须保持 false 返回值。
+        let mut failing = InstantEndBackend {
+            armed: true,
+            load_fails: true,
+            stop_fails: true,
+        };
+        let mut failing_state = PlayerSnapshot::default();
+        // 先让它成功装一首，门闩应被复位；随后两个失败命令都不得再报复位。
+        failing.load_fails = false;
+        failing.stop_fails = false;
+        assert!(apply(
+            &mut failing,
+            &mut failing_state,
+            &sink,
+            Command::Load {
+                uri: "c".into(),
+                track_id: Some("t3".into()),
+                reply: unit_reply(),
+            }
+        )
+        .unwrap());
+        failing.load_fails = true;
+        failing.stop_fails = true;
+        assert!(!apply(
+            &mut failing,
+            &mut failing_state,
+            &sink,
+            Command::Load {
+                uri: "broken".into(),
+                track_id: Some("t4".into()),
+                reply: unit_reply(),
+            }
+        )
+        .unwrap());
+        assert!(!apply(
+            &mut failing,
+            &mut failing_state,
+            &sink,
+            Command::Stop(unit_reply())
+        )
+        .unwrap());
     }
 }

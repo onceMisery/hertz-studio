@@ -1,0 +1,261 @@
+/* SPDX-License-Identifier: MIT */
+/* 在线曲库样式。Task 17：扫码登录弹窗；Task 18/19 继续追加面板样式。
+   只使用 style.css :root 里既有的令牌（--text/--panel-2/--accent 等）。 */
+
+/* z-index 100：压过所有面板/抽屉/toast，保证登录弹窗始终在最上层，
+   不被舞台抽屉(50/85)、歌单抽屉(75)、菜单(90)等遮挡。 */
+.qr-modal{position:fixed;inset:0;z-index:100;display:flex;align-items:center;
+  justify-content:center;background:rgba(4,5,7,.62);backdrop-filter:blur(6px)}
+.qr-modal[hidden]{display:none}
+
+/* 弹窗打开时隔离背景：.app 整体不可见也不可点（仍占位，不引起跳动）。
+   这是 modal 的标准隔离，能杜绝页面内任何动画/transform 元素穿透遮挡。 */
+html.qr-modal-open .app{visibility:hidden}
+/* 卡片：明确的深灰渐变面板，比纯黑背景亮一档，形成「浮起」的层次感；
+   顶部内高光 + 实色边框描边，避免之前一团死黑、与背景融为一体。 */
+.qr-card{position:relative;width:320px;max-width:86vw;padding:26px 24px 22px;
+  border-radius:20px;text-align:center;
+  background:linear-gradient(180deg,#1A1D23 0%,#121419 52%,#0E1015 100%);
+  border:1px solid rgba(255,255,255,.1);
+  box-shadow:0 24px 60px rgba(0,0,0,.66),inset 0 1px 0 rgba(255,255,255,.06)}
+.qr-title{font-size:16px;font-weight:650;color:var(--text);letter-spacing:.2px}
+.qr-close{position:absolute;top:6px;right:8px;width:36px;height:36px;
+  display:flex;align-items:center;justify-content:center;
+  border:0;border-radius:50%;background:transparent;
+  font-size:24px;line-height:1;cursor:pointer;color:var(--text,#eee)}
+.qr-close:hover{background:rgba(255,255,255,.08);opacity:.85}
+.qr-canvas{margin:14px auto;min-height:180px;display:flex;align-items:center;
+  justify-content:center}
+.qr-canvas svg,.qr-canvas img{width:180px;height:180px;border-radius:8px;background:#fff;padding:6px}
+.qr-status{margin-bottom:10px;font-size:14px;color:var(--text)}
+.qr-cookie-fallback{margin-top:8px;text-align:left;font-size:12px;opacity:.85}
+.qr-cookie-fallback summary{cursor:pointer;margin-bottom:6px}
+.qr-cookie-fallback textarea{width:100%;box-sizing:border-box;color:var(--text);
+  background:var(--panel-2);border:1px solid rgba(255,255,255,.12);border-radius:8px;
+  padding:8px;font:inherit;resize:vertical}
+.qr-cookie-fallback button{margin-top:6px;padding:6px 14px;border-radius:8px;
+  border:1px solid rgba(255,255,255,.18);background:var(--panel-2);color:var(--text);
+  font:inherit;cursor:pointer}
+.qr-cookie-fallback button:hover{border-color:var(--accent)}
+.qr-cookie-fallback button:disabled{opacity:.5;cursor:default}
+
+/* QQ 扫码/微信扫码 切换条 */
+.qr-channels{display:flex;gap:6px;justify-content:center;margin:10px 0 2px}
+.qr-ch{padding:6px 14px;border-radius:99px;border:1px solid var(--line);
+  background:var(--panel-2);color:var(--muted);font:inherit;font-size:12px;
+  cursor:pointer;transition:all .2s var(--ease)}
+.qr-ch:hover{color:var(--text);border-color:var(--line-strong)}
+.qr-ch.active{color:var(--accent-ink);background:var(--accent);
+  border-color:transparent;font-weight:600}
+
+/* 弹窗顶部音源选择条 */
+.qr-sources{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;
+  margin:12px 0 2px}
+/* 音源 chip 基础态：半透明深底 + 弱文字，hover 提亮 */
+.qr-source{padding:7px 14px;border-radius:99px;border:1px solid var(--line);
+  background:rgba(255,255,255,.045);color:var(--muted);font:inherit;font-size:12px;
+  cursor:pointer;transition:all .18s var(--ease)}
+.qr-source:hover{color:var(--text);border-color:var(--line-strong);
+  background:rgba(255,255,255,.08)}
+/* 当前选中的未登录源：实色 accent 填充，对比最强 */
+.qr-source.active{color:var(--accent-ink);background:var(--accent);
+  border-color:transparent;font-weight:650}
+
+/* 已登录音源：头像 + 昵称 */
+.qr-source.is-in{padding:4px 13px 4px 5px;gap:8px}
+/* 已登录且选中：白底不再适合带头像，改为 accent 描边 + 微亮底色，
+   明确「当前展示的就是这个账号」，比之前的细圈更清晰。 */
+.qr-source.is-in.active{color:var(--text);background:rgba(var(--accent-rgb),.12);
+  border-color:rgba(var(--accent-rgb),.7)}
+.qr-source-av{width:26px;height:26px;border-radius:50%;overflow:hidden;
+  flex:none;display:flex;align-items:center;justify-content:center;
+  background:var(--panel)}
+.qr-source-av img{width:100%;height:100%;object-fit:cover}
+.qr-source-av.is-missing{font-size:12px;font-weight:700;color:var(--accent)}
+.qr-source-nm{font-size:12px;font-weight:600;max-width:96px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 已登录源的详情面板 */
+.qr-logged-in{display:flex;flex-direction:column;align-items:center;gap:8px;
+  padding:6px 0}
+.qr-logged-av{width:88px;height:88px;border-radius:50%;overflow:hidden;
+  background:var(--panel);display:flex;align-items:center;justify-content:center}
+.qr-logged-av img{width:100%;height:100%;object-fit:cover}
+.qr-logged-av.is-missing{font-size:34px;font-weight:700;color:var(--accent)}
+.qr-logged-nick{font-size:15px;font-weight:650}
+.qr-logged-hint{font-size:12px;color:var(--muted)}
+.qr-logged-out{margin-top:6px;padding:8px 22px;border-radius:99px;
+  border:1px solid rgba(224,138,155,.55);background:rgba(180,84,106,.14);
+  color:#e89aab;font-size:13px;cursor:pointer;transition:all .18s var(--ease)}
+.qr-logged-out:hover{border-color:#e08a9b;background:rgba(180,84,106,.26);
+  color:#f0aab8}
+
+/* 「在右上角展示此头像」按钮：accent 描边的次级按钮 */
+.qr-use-avatar{margin-top:2px;padding:7px 16px;border-radius:99px;
+  border:1px solid rgba(var(--accent-rgb),.45);background:rgba(var(--accent-rgb),.08);
+  color:var(--text);font-size:12.5px;cursor:pointer;transition:all .18s var(--ease)}
+.qr-use-avatar:hover{border-color:rgba(var(--accent-rgb),.8);
+  background:rgba(var(--accent-rgb),.16)}
+
+/* 顶栏账号按钮 */
+.iconbtn{position:relative}
+/* 头像承载：默认显示人形 svg；has-avatar 时变成圆形裁剪的平台头像 */
+.iconbtn-face{position:relative;display:flex;align-items:center;justify-content:center}
+.iconbtn-face svg{width:22px;height:22px}
+.iconbtn-face.has-avatar{width:30px;height:30px;border-radius:50%;
+  background-size:cover;background-position:center;
+  border:1px solid rgba(255,255,255,.18);
+  box-shadow:0 0 0 2px var(--bg)}
+.iconbtn-face.has-avatar svg{display:none}
+.icon-dot{position:absolute;top:1px;right:1px;width:8px;height:8px;z-index:1;
+  border-radius:50%;background:var(--accent);box-shadow:0 0 0 2px var(--bg)}
+
+/* ── Task 18：在线曲库面板（徽标 / VIP / All 聚合分组）──────────────────── */
+
+/* 平台徽标：品牌色由 online.js 的 --badge 内联注入，这里只管形状。 */
+.src-badge{display:inline-flex;align-items:center;height:18px;padding:0 7px;
+  border-radius:9px;font-size:11px;font-weight:600;line-height:1;
+  color:#fff;background:var(--badge,var(--accent));letter-spacing:.5px}
+
+/* VIP 专享标记。红线：不模拟会员权益——置灰不可点由 .is-disabled 负责，
+   这里只给视觉标识。 */
+.vip-tag{display:inline-flex;align-items:center;height:18px;padding:0 6px;
+  margin-left:6px;border-radius:4px;font-size:10px;font-weight:700;line-height:1;
+  color:#3a2a00;background:linear-gradient(135deg,#f5d97b,#e0b53f);letter-spacing:1px}
+
+.online-row .t-quality{display:flex;align-items:center;gap:6px}
+
+/* All 聚合：每个音源结果组的分组头 */
+.all-group-head{display:flex;align-items:center;gap:6px;margin:14px 4px 6px;
+  font-size:13px;font-weight:600;color:var(--text)}
+.all-group-head:first-child{margin-top:4px}
+
+/* 聚合里某个音源失败/降级：明确挂出来，绝不吞成空分组 */
+.all-failed{margin:4px;padding:6px 10px;border-radius:8px;font-size:12px;
+  color:var(--muted);background:color-mix(in srgb,var(--accent) 8%,transparent)}
+
+/* ── Task 19：账号区 / 歌单网格 / 详情抽屉 ──────────────────────────────── */
+
+.online-plugins{flex:none;margin-top:18px;padding-top:14px;
+  border-top:1px solid var(--line)}
+.op-section-title{margin:10px 4px;font-size:13px;font-weight:600;color:var(--muted);
+  letter-spacing:.5px}
+
+/* 账号卡横排 */
+.op-accounts{display:flex;flex-wrap:wrap;gap:10px;margin:8px 0 4px}
+.op-account{display:flex;align-items:center;gap:10px;padding:10px 12px;
+  min-width:240px;border-radius:12px;background:var(--panel-2);
+  border:1px solid var(--line)}
+.op-account .op-name{font-size:14px;font-weight:600;color:var(--text)}
+.op-account .btn{padding:5px 12px;font-size:12px}
+.op-account.is-in{justify-content:flex-start}
+.op-avatar{width:38px;height:38px;flex:none;border-radius:50%;overflow:hidden;
+  background:color-mix(in srgb,var(--accent) 18%,var(--panel-2));
+  display:flex;align-items:center;justify-content:center;
+  font-size:16px;font-weight:700;color:var(--text)}
+.op-avatar img{width:100%;height:100%;object-fit:cover}
+.op-avatar.is-missing{color:var(--accent)}
+.op-meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.op-nick{font-size:14px;font-weight:600;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.op-vip{font-size:11px;font-weight:700;color:#8a6a1f;
+  background:linear-gradient(135deg,#f5d97b,#e0b53f);border-radius:4px;
+  padding:1px 6px;width:max-content;letter-spacing:.5px}
+
+/* 歌单网格 */
+.op-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
+  gap:16px;margin:8px 0 16px}
+.op-card{cursor:pointer;border-radius:12px;transition:transform .12s ease}
+.op-card:hover{transform:translateY(-2px)}
+.op-card:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.op-cover{width:100%;aspect-ratio:1;border-radius:12px;margin-bottom:8px;
+  background-size:cover;background-position:center;
+  background-color:var(--panel-2);
+  background-image:linear-gradient(135deg,
+    color-mix(in srgb,var(--accent-2) 22%,transparent),
+    color-mix(in srgb,var(--accent) 12%,transparent))}
+.op-cover.is-missing{display:flex;align-items:center;justify-content:center}
+.op-cover.is-missing::after{content:'♪';font-size:34px;opacity:.45;color:var(--accent)}
+.op-pl-name{font-size:13px;font-weight:600;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.op-pl-sub{margin-top:2px;font-size:11px;color:var(--muted);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.op-card.is-liked .op-pl-name{color:var(--accent)}
+
+/* 右侧滑出抽屉：不透明实底 + 强描边 + 深投影，与底层内容彻底拉开层级。
+   z-index 压过顶栏(55)/舞台抽屉(50)；遮罩在它下面一档。 */
+.op-drawer-scrim{position:fixed;inset:0;z-index:70;
+  background:rgba(4,5,7,.62);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);
+  animation:op-scrim-in .18s ease both}
+.op-drawer-scrim[hidden]{display:none}
+.op-drawer{position:fixed;top:0;right:0;z-index:75;width:min(500px,94vw);
+  height:100dvh;display:flex;flex-direction:column;
+  /* --panel 只有 74% 不透明度，浮层必须实底，否则底层歌单行会透出来；
+     用与面板同色系但接近不透明的实色 + 顶部微光做层次。 */
+  background:
+    linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,0) 140px),
+    #0d0f13;
+  border-left:1px solid var(--line-strong);
+  box-shadow:-24px 0 64px rgba(0,0,0,.62),-2px 0 0 rgba(255,255,255,.04) inset;
+  animation:op-drawer-in .22s var(--ease) both}
+.op-drawer[hidden]{display:none}
+@keyframes op-scrim-in{from{opacity:0}to{opacity:1}}
+@keyframes op-drawer-in{from{transform:translateX(48px);opacity:.4}to{transform:translateX(0);opacity:1}}
+.op-drawer-head{display:flex;align-items:center;gap:10px;flex:none;
+  padding:14px 16px;border-bottom:1px solid var(--line)}
+.op-back{flex:none;width:32px;height:32px;border-radius:50%;border:1px solid var(--line);
+  background:var(--panel-2);color:var(--text);font-size:20px;line-height:1;
+  cursor:pointer;display:flex;align-items:center;justify-content:center}
+.op-back:hover{border-color:var(--accent)}
+.op-drawer-title{flex:1;min-width:0;font-size:15px;font-weight:600;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.op-tracks{flex:1;min-height:0;overflow-y:auto;padding:8px 12px;
+  display:flex;flex-direction:column;gap:2px}
+.op-detail-count{padding:6px 4px 10px}
+.op-drawer-foot{flex:none;display:flex;gap:10px;padding:12px 16px;
+  border-top:1px solid var(--line)}
+.op-drawer-foot .btn{flex:1}
+
+/* 抽屉行内的移除按钮：文字小按钮，和试听图标按钮并排 */
+.op-remove{display:inline-flex;align-items:center;font-size:11px;
+  padding:2px 8px;height:auto;width:auto;background:none;border:0;
+  color:var(--muted);opacity:0;cursor:pointer}
+.online-row:hover .op-remove{opacity:1}
+.op-remove:hover{color:#e06666}
+
+/* ── 左侧「歌单」菜单里的在线歌单分区（与在线面板网格同源同数据）────── */
+
+/* 架子模式下的宿主：占歌单列在立体架子之下的剩余高度并独立滚动，使默认
+   排布（歌单架）里在线歌单同样完整可见；列表模式下该宿主收起，分区块
+   直接挂在 #playlist-list 末尾和本地歌单同列滚动。 */
+.pl-online-host{flex:1;min-height:0;overflow-y:auto;
+  display:flex;flex-direction:column;gap:4px;padding:12px 0 4px}
+
+/* 分区紧跟在本地歌单行之后，顶部分隔清楚。 */
+.pl-online-sep{flex:none;border:0;border-top:1px solid var(--line);
+  margin:14px 12px 4px}
+.pl-online-head{display:flex;align-items:baseline;gap:8px;
+  padding:8px 14px 4px;font-size:12px;font-weight:600;color:var(--muted);
+  letter-spacing:.5px}
+.pl-online-head .pl-online-count{font-weight:400;color:var(--muted);opacity:.75}
+.pl-online-head .pl-online-goto{margin-left:auto;border:0;background:none;
+  color:var(--muted);font:inherit;font-size:11px;cursor:pointer;padding:2px 6px;
+  border-radius:6px}
+.pl-online-head .pl-online-goto:hover{color:var(--text);background:var(--hover)}
+/* 在线歌单行：封面用平台下发的真图；名称旁挂平台徽标，信息一行不折行。 */
+.pl-row.is-online .pl-art{background:var(--panel-2);opacity:1;
+  background-size:cover;background-position:center;position:relative}
+.pl-row.is-online .pl-art.is-missing{
+  background:linear-gradient(135deg,
+    color-mix(in srgb,var(--accent-2) 22%,var(--panel-2)),
+    color-mix(in srgb,var(--accent) 12%,var(--panel-2)))}
+.pl-row.is-online .pl-art.is-missing::after{content:'♪';position:absolute;
+  inset:0;display:flex;align-items:center;justify-content:center;
+  font-size:18px;color:var(--accent);opacity:.6}
+.pl-online-badge{display:inline-flex;align-items:center;height:16px;padding:0 6px;
+  border-radius:8px;font-size:10px;font-weight:600;line-height:1;color:#fff;
+  background:var(--badge,var(--accent));flex:none;letter-spacing:.3px}
+.pl-row.is-online .pl-main{cursor:pointer}
+
+
+

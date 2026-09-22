@@ -27,6 +27,10 @@
   var CELL_H = 192;        // 单条带高；条带宽高比 = 1024/192 ≈ 5.33
   var ATLAS_H = CELLS * CELL_H;
   var MAX_TEXT_W = ATLAS_W - 104;   // 两侧各留 52px 安全边
+  var quality = 2;
+
+  var ATLAS_WIDTHS = [512, 768, 1024];
+  var CELL_HEIGHTS = [96, 144, 192];
 
   // 中文字体走系统栈，不内嵌字体文件（契约：单 exe 体积与零构建）。
   var FONT_STACK = '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", '
@@ -39,6 +43,22 @@
 
   // 帧签名：index + 九格文本 + 有无歌词。相同就跳过重画。
   var lastSig = '';
+
+  function setQuality(q) {
+    var next = Number(q);
+    if (!isFinite(next)) next = 2;
+    next = next < 0 ? 0 : next > 2 ? 2 : next | 0;
+    if (next === quality) return;
+
+    quality = next;
+    ATLAS_W = ATLAS_WIDTHS[next];
+    CELL_H = CELL_HEIGHTS[next];
+    ATLAS_H = CELLS * CELL_H;
+    MAX_TEXT_W = ATLAS_W - Math.round(ATLAS_W * 0.10);
+    canvas.width = ATLAS_W;
+    canvas.height = ATLAS_H;
+    lastSig = '';
+  }
 
   function textOf(lyric, lineIdx) {
     if (!lyric || !lyric.lines) return '';
@@ -68,7 +88,7 @@
       // 粗体 + 大字号在密集中文长句上会把字怀（笔画间隙）全部堵死，
       // 远看就是一整条实心棒。600 重 + 72px 既保住"当前行"的分量，
       // 又留得出字形内部的呼吸。
-      var s1 = fitFont(600, 72, text);
+      var s1 = fitFont(600, Math.round(CELL_H * 0.375), text);
       ctx.font = '600 ' + s1 + 'px ' + FONT_STACK;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -82,7 +102,7 @@
     } else {
       // 周边句：暗蓝灰、轻晕。亮度刻意压低，着色器再按距离乘衰减，
       // 保证视觉焦点永远在当前行。
-      var s2 = fitFont(500, 54, text);
+      var s2 = fitFont(500, Math.round(CELL_H * 0.28125), text);
       ctx.font = '500 ' + s2 + 'px ' + FONT_STACK;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -139,8 +159,11 @@
 
   window.Lyric3D = {
     frame: frame,
+    setQuality: setQuality,
     sig: function (lyric) { return signature(lyric).sig; },
     canvas: canvas,
-    size: function () { return { w: ATLAS_W, h: ATLAS_H, cells: CELLS, cellH: CELL_H, mid: MID }; }
+    size: function () {
+      return { w: ATLAS_W, h: ATLAS_H, cells: CELLS, cellH: CELL_H, mid: MID, quality: quality };
+    }
   };
 })();

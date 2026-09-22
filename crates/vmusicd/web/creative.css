@@ -168,18 +168,40 @@ html.creative-3d.creative-bg-on #lyric-page {
 }
 
 /* 背景层启用时，把界面主体抬到它上面。这里显式给出层级，而不是让 #creative-bg
-   靠 DOM 顺序去赌：背景是 fixed 定位，文档顺序在它面前不成立。 */
+   靠 DOM 顺序去赌：背景是 fixed 定位，文档顺序在它面前不成立。
+
+   但只抬「相对背景的下限」，不能把各曲面压成同一个档位——否则同 z-index 时
+   DOM 顺序决定绘制，.app 会盖住顶栏溢出的下拉菜单（2026-09-22 真机故障：
+   顶栏「舞台控制」菜单项点不到）。这里沿用 style.css / stage.css 的层叠阶梯。 */
 html.creative-bg-on .app,
-html.creative-bg-on .topbar,
-html.creative-bg-on .bar,
-html.creative-bg-on .offline-banner {
+html.creative-bg-on .bar {
   position: relative;
   z-index: 1;
 }
 
-html.creative-bg-on #stage,
+/* 顶栏（含其下拉菜单）保持 40，必须高于 .app(1) */
+html.creative-bg-on .topbar {
+  position: relative;
+  z-index: 40;
+}
+
+/* 断连横幅保持 55 */
+html.creative-bg-on .offline-banner {
+  z-index: 55;
+}
+
+/* 全屏沉浸页保持 70（舞台控制舱 80 仍可压在它上面打开） */
 html.creative-bg-on #lyric-page {
-  z-index: 2;
+  z-index: 70;
+}
+
+/* 宽屏布局里 #stage 与列不重叠，只需略高于 .app；
+   窄屏它是 z-index:50 的抽屉，必须高于遮罩(45)与顶栏(40)。 */
+@media (min-width: 1241px) {
+  html.creative-bg-on #stage { z-index: 2; }
+}
+@media (max-width: 1240px) {
+  html.creative-bg-on #stage { z-index: 50; }
 }
 
 /* 背景本身已经足够亮的时候，界面需要一点压暗才不会读不清。
@@ -433,6 +455,74 @@ html.hand-paper footer.bar {
 }
 
 .ws-body .sc-group-title:first-child { margin-top: 0; }
+
+.ws-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 18px 0 8px;
+}
+.ws-section-head .sc-group-title { margin: 0; }
+
+.ws-guide {
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid rgba(var(--music-highlight-rgb, 226, 176, 113), 0.32);
+  border-radius: 12px;
+  background: rgba(var(--music-highlight-rgb, 226, 176, 113), 0.08);
+}
+.ws-guide-title { font-size: 14px; font-weight: 650; margin-bottom: 8px; }
+.ws-guide-list {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 10px;
+  padding-left: 20px;
+  font-size: 12.5px;
+}
+.ws-guide-actions { display: flex; gap: 8px; }
+
+.ws-help { position: relative; display: inline-flex; }
+.ws-help-btn {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted, rgba(255, 255, 255, 0.62));
+  font-size: 11px;
+  line-height: 16px;
+  cursor: help;
+}
+.ws-help-btn:hover, .ws-help-btn:focus-visible {
+  color: #fff;
+  border-color: rgba(var(--music-highlight-rgb, 226, 176, 113), 0.55);
+}
+.ws-tip {
+  position: absolute;
+  top: 24px;
+  right: 0;
+  z-index: 20;
+  width: 220px;
+  padding: 8px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 9px;
+  background: rgba(20, 20, 22, 0.96);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 11.5px;
+  line-height: 1.45;
+  text-align: left;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+.ws-help:hover .ws-tip,
+.ws-help:focus-within .ws-tip {
+  opacity: 1;
+  transform: translateY(0);
+}
 
 .ws-row {
   display: flex;

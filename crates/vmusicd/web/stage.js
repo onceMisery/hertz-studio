@@ -16,7 +16,9 @@
 (function () {
   'use strict';
 
-  var BASE_MODES = ['cover', 'line', 'karaoke', 'scatter'];
+  // 模式合并：逐行（整行亮白）与卡拉OK 渲染管线 90% 重叠，已移除。
+  // 老存档里的 'line' 在 setMode 中统一回落到 'karaoke'。
+  var BASE_MODES = ['cover', 'karaoke', 'scatter'];
   var STORE_KEY = 'vmusic.stage.mode';
   var WORD_CAP_MS = 1200; // 单字推进上限：脏时间戳给出几十秒的词时不至于爬不动
 
@@ -28,6 +30,14 @@
   var playing = false;
   var track = null;
   var lastCover = null;    // 记住封面，换主题时用它重新取色（retint）
+
+  // 全屏页的背景场景：'cover' 粒子专辑封面 / 'starriver' 星河 / 'off' 仅歌词
+  var SCENES = ['cover', 'starriver'];
+  var SCENE_KEY = 'vmusic.stage.scene';
+  var scene = 'cover';
+  var SPIN_KEY = 'vmusic.stage.autospin';
+  var autoSpin = false;           // 自动 360° 环转
+  var SPIN_DEG_PER_SEC = 5;       // 约 72s 转一圈
 
   // 本地时钟：base 是快照给的基准点，clockAt 是挂上去的那一刻
   var basePos = 0;
@@ -256,8 +266,15 @@
       if (big) {
         view.scene = document.createElement('div');
         view.scene.className = 'lp-scene';
+        // 歌词轨单独包一层负责 overflow 裁剪与上下渐隐 mask：这两件事都不能
+        // 写在 .lp-scene 上（会把 preserve-3d 压平），也不能留在 .lp-body 上
+        // ——全屏粒子背景（.lp-cover.gl-active）要溢出 body、铺满整个视口，
+        // body 的裁剪和 mask 会把它切掉。歌词的裁剪收进这一层，背景就自由了。
+        var trackClip = document.createElement('div');
+        trackClip.className = 'lp-track-clip';
         view.scene.appendChild(buildCover());
-        view.scene.appendChild(view.track);
+        trackClip.appendChild(view.track);
+        view.scene.appendChild(trackClip);
         container.appendChild(view.scene);
       } else {
         view.scene = null;
@@ -553,12 +570,34 @@
     return node;
   }
 
+  // 背景粒子层是否真的可用：场景与对应子模块都就绪才算数
+  function particleBackgroundOn() {
+    if (!cover.on) return false;
+    if (scene === 'cover') {
+      return !!(window.StageCoverParticles && StageCoverParticles.active());
+    }
+    if (scene === 'starriver') {
+      return !!(window.StageStarRiver && StageStarRiver.active());
+    }
+    return false;
+  }
+
   function paintCover() {
     if (!cover.node || !el.page) return;
     // 图片地址只跟着曲目，显不显示只跟着开关：两者混在一个 url 里的话，关一下
     // 再开会把 src 摘掉又挂回去，白白重新解码两张 640px 的图。
     var url = lastCover || '';
-    el.page.classList.toggle('has-cover', !!(cover.on && url));
+
+    // 背景场景三态分流：cover 粒子专辑封面 / starriver 星河；任一粒子层生效时
+    // has-particles 隐藏 CSS 旋转卡片
+    el.page.classList.toggle('has-cover',
+      !!(cover.on && scene === 'cover' && url));
+    el.page.classList.toggle('has-starriver',
+      !!(cover.on && scene === 'starriver'));
+    el.page.classList.toggle('has-particles', particleBackgroundOn());
+    // 共享 GL 画布只在某个粒子场景真正生效时可见
+    cover.node.classList.toggle('gl-active', particleBackgroundOn());
+
     [cover.front, cover.back].forEach(function (img) {
       if (!img) return;
       // 同一个 URL 不重设：换主题 / retint 也会再走一遍这里。
@@ -566,6 +605,7 @@
       else if (img.hasAttribute('src')) img.removeAttribute('src');
     });
     syncCoverBtn();
+    syncSceneBtns();
   }
 
   function syncCoverBtn() {
@@ -588,6 +628,60 @@
   }
 
   // -------------------------------------------------------------------------
+  // 背景场景：粒子封面 / 星河
+  // -------------------------------------------------------------------------
+
+  function syncSceneBtns() {
+    // 全屏页头部的背景切换组
+    if (el.sceneBtns) {
+      Array.prototype.forEach.call(el.sceneBtns.children, function (b) {
+        var on = b.getAttribute('data-scene') === scene && cover.on;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+    }
+    // 侧栏舞台模式条上的星河按钮：仅在全屏星河场景时高亮
+    var sbStar = $('mode-starriver');
+    if (sbStar) {
+      var sbOn = isPageOpen() && scene === 'starriver' && cover.on;
+      sbStar.classList.toggle('active', sbOn);
+      sbStar.setAttribute('aria-pressed', String(sbOn));
+    }
+  }
+
+  function setScene(next, opts) {
+    if (SCENES.indexOf(next) < 0) next = 'cover';
+    if (scene === next && !(opts && opts.force)) {
+      // 已在该场景：当作"关掉背景总开关"
+      if (cover.on) setCover(false);
+      return;
+    }
+    scene = next;
+    try { localStorage.setItem(SCENE_KEY, scene); } catch (e) { /* 隐私模式 */ }
+    if (!cover.on) setCover(true, { silent: true });
+    else paintCover();
+    schedule();
+  }
+
+  // -------------------------------------------------------------------------
+  // 自动 360° 环转
+  // -------------------------------------------------------------------------
+
+  function setAutoSpin(next, opts) {
+    autoSpin = (next === undefined) ? !autoSpin : !!next;
+    try { localStorage.setItem(SPIN_KEY, autoSpin ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
+    var btn = $('lp-autospin');
+    if (btn) {
+      btn.classList.toggle('active', autoSpin);
+      btn.setAttribute('aria-pressed', String(autoSpin));
+      var label = autoSpin ? '停止自动旋转' : '自动 360° 旋转';
+      btn.setAttribute('title', label);
+      btn.setAttribute('aria-label', label);
+    }
+    if (!(opts && opts.silent)) schedule();
+  }
+
+  // -------------------------------------------------------------------------
   // 全屏舞台的 3D 视角
   // -------------------------------------------------------------------------
   //
@@ -600,6 +694,8 @@
   // translateZ 到不同深度上（见 stage.css 的 --lyric-row-depth）。于是转起来
   // 近的行位移多、远的位移多，行与行之间产生视差；否则整块文字只是斜了一下。
 
+  // 360° 视角：拖拽角度不再设上限，可以连续转满整圈。tilt.max 只剩一个用途——
+  // 驾驶舱 UI 的语义保留；自动漂移是小幅摆动，自动环转才做 360。
   var tilt = { max: 26, resumeMs: 1400, drift: 1, enabled: true };
 
   function readTilt() {
@@ -614,17 +710,31 @@
     tilt.enabled = cs.getPropertyValue('--lp-3d').trim() !== 'off';
   }
 
-  function writeTilt(view) {
+  // writeTilt 每帧由歌词门调用；dtMs 用来把自动环转的角速度换算成增量
+  function writeTilt(view, dtMs) {
     if (!view.scene) return;
     var t = now();
+    var rx = view.tiltX;
+    var ry = view.tiltY;
+
+    // 自动 360 环转：仅全屏页、未拖拽、未要求减少动效时推进。增量直接写回
+    // tiltY，用户此刻抓指针拖拽会从当前真实角度接手，不会跳回环转起点。
+    if (autoSpin && view.big && view.dragId < 0 && !reduced) {
+      view.tiltY += SPIN_DEG_PER_SEC * Math.max(0.001, dtMs || lastDt) / 1000;
+      ry = view.tiltY;
+    }
+
     // 自动漂移在用户刚操作过的那段时间里让位，否则手刚松开就被拽回去。
-    // 用 sin 的相位对齐而不是叠加一个常量，避免"让位"那一刻角度突跳。
+    // 环转开启时漂移关掉，避免两种自动运动叠加。
     var idle = t - view.lastInputAt > tilt.resumeMs;
-    var d = (idle && tilt.drift > 0 && !reduced)
-      ? Math.sin(t / 5200) * 3.4 * tilt.drift
-      : 0;
-    var rx = clamp(view.tiltX + d * 0.6, -tilt.max, tilt.max);
-    var ry = clamp(view.tiltY + d, -tilt.max, tilt.max);
+    if (!autoSpin) {
+      var d = (idle && tilt.drift > 0 && !reduced)
+        ? Math.sin(t / 5200) * 3.4 * tilt.drift
+        : 0;
+      rx += d * 0.6;
+      ry += d;
+    }
+
     if (view._rx === rx && view._ry === ry) return;
     view._rx = rx;
     view._ry = ry;
@@ -658,9 +768,10 @@
       var dy = e.clientY - view.dragFrom.y;
       view.dragFrom.moved = Math.max(view.dragFrom.moved, Math.abs(dx) + Math.abs(dy));
       if (view.dragFrom.moved < 8) return;         // 8px 以内当点击，不误伤跳转
-      // 横向拖 = 绕 Y，纵向拖 = 绕 X；除以 4 大致是"拖 4px 转 1°"的手感
-      view.tiltY = clamp(view.dragFrom.ty + dx / 4, -tilt.max, tilt.max);
-      view.tiltX = clamp(view.dragFrom.tx - dy / 4, -tilt.max, tilt.max);
+      // 横向拖 = 绕 Y，纵向拖 = 绕 X；除以 4 大致是"拖 4px 转 1°"的手感。
+      // 角度不夹：拖满一圈就是 360°，连续拖可以转到任意角度
+      view.tiltY = view.dragFrom.ty + dx / 4;
+      view.tiltX = view.dragFrom.tx - dy / 4;
       view.lastInputAt = now();
       // 直接操作不能等帧门：eco 档歌词只有 24fps，拖一下要 40ms 才回应，
       // 手感上就是"粘"。漂移那种低频运动才交给 tick 去节流。
@@ -684,9 +795,13 @@
     el.setAttribute('tabindex', '0');
     el.addEventListener('keydown', function (e) {
       var k = e.key === 'ArrowLeft' ? -3 : e.key === 'ArrowRight' ? 3 : 0;
-      if (!k || !e.altKey) return;
-      view.tiltY = clamp(view.tiltY + k, -tilt.max, tilt.max);
+      // 纵向也给键盘：Alt+↑/↓ 各 3°
+      var kx = e.key === 'ArrowUp' ? -3 : e.key === 'ArrowDown' ? 3 : 0;
+      if ((!k && !kx) || !e.altKey) return;
+      view.tiltY += k;
+      view.tiltX += kx;
       view.lastInputAt = now();
+      writeTilt(view);
       e.preventDefault();
     });
   }
@@ -1045,6 +1160,19 @@
     if (fpsFn() > 0) schedule();
   }
 
+  // 注销帧门（子系统销毁时调用）
+  function removeGate(name) {
+    for (var i = 0; i < gates.length; i += 1) {
+      if (gates[i].name === name) { gates.splice(i, 1); break; }
+    }
+  }
+
+  // 整体销毁：停循环、清帧门。子模块各自的 GL/DOM 资源由自己的 destroy 释放。
+  function destroy() {
+    gates.length = 0;
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+  }
+
   function runGates(dt) {
     for (var i = 0; i < gates.length; i += 1) {
       var g = gates[i];
@@ -1101,9 +1229,9 @@
     var snap = changed && activeIdx > -2 && Math.abs(i - activeIdx) >= tune.snapSpan;
     activeIdx = i;
     update(i, pos, snap, changed);
-    // 漂移是持续的低频运动，跟着歌词帧门走：降级时歌词掉到 24fps，漂移也一起
-    // 掉，不会出现"歌词停了但背景还在慢慢转"的割裂感。
-    for (var k = 0; k < views.length; k += 1) writeTilt(views[k]);
+    // 漂移/环转是持续的低频运动，跟着歌词帧门走：降级时歌词掉到 24fps，
+    // 背景也一起掉，不会出现"歌词停了但场景还在慢慢转"的割裂感。
+    for (var k = 0; k < views.length; k += 1) writeTilt(views[k], dtMs);
     if (!seeking) paintProgress(pos);
   }
 
@@ -1226,6 +1354,12 @@
 
   function setMode(next, opts) {
     if (next === 'page') { setPage(true); return; }
+    // 星河 = 打开全屏页并切到星河背景场景，与歌词展示模式无关
+    if (next === 'starriver') {
+      setScene('starriver', { force: true });
+      setPage(true);
+      return;
+    }
     if (BASE_MODES.indexOf(next) < 0) next = 'karaoke';
     mode = next;
     if (el.stage) el.stage.setAttribute('data-mode', mode);
@@ -1305,6 +1439,50 @@
   // -------------------------------------------------------------------------
   // 初始化
   // -------------------------------------------------------------------------
+
+  // 全屏页头部的背景场景切换组：封面 / 星河
+  function buildSceneButtons() {
+    var head = document.querySelector('.lp-head');
+    if (!head || head.querySelector('.lp-scenes')) return null;
+    var group = document.createElement('div');
+    group.className = 'lp-scenes';
+    group.setAttribute('role', 'group');
+    group.setAttribute('aria-label', '舞台背景');
+    [['cover', '封面'], ['starriver', '星河']].forEach(function (pair) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'lp-scene-btn';
+      b.setAttribute('data-scene', pair[0]);
+      b.setAttribute('aria-pressed', 'false');
+      b.textContent = pair[1];
+      b.addEventListener('click', function () { setScene(pair[0]); });
+      group.appendChild(b);
+    });
+    // 插在歌词模式组之前：先选背景、再选歌词排版
+    var modes = $('lp-modes');
+    if (modes && modes.parentNode === head) head.insertBefore(group, modes);
+    else head.insertBefore(group, head.children[1]);
+    return group;
+  }
+
+  // 自动 360° 环转按钮：放在圆形封面按钮之前
+  function buildAutoSpinButton() {
+    var head = document.querySelector('.lp-head');
+    if (!head || $('lp-autospin')) return null;
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'lp-btn';
+    btn.id = 'lp-autospin';
+    btn.setAttribute('aria-pressed', 'false');
+    btn.setAttribute('title', '自动 360° 旋转');
+    btn.setAttribute('aria-label', '自动 360° 旋转');
+    btn.innerHTML =
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reset"/></svg>';
+    var coverBtn = $('lp-cover');
+    if (coverBtn && coverBtn.parentNode === head) head.insertBefore(btn, coverBtn);
+    else head.appendChild(btn);
+    return btn;
+  }
 
   function init() {
     el.stage = $('stage');
@@ -1406,13 +1584,34 @@
       if (window.StageControl) StageControl.toggle();
     });
 
+    // 背景场景切换组（封面 / 星河）：动态注入到全屏页头部、歌词模式组之前
+    el.sceneBtns = buildSceneButtons();
+    // 自动 360° 环转按钮
+    var lpAutoSpin = buildAutoSpinButton();
+    if (lpAutoSpin) lpAutoSpin.addEventListener('click', function () { setAutoSpin(); });
+
+    // 侧栏星河按钮（#mode-starriver）的点击已由 el.modes 的统一处理覆盖，
+    // 这里不重复绑定；其高亮状态由 syncSceneBtns 同步。
+
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && isPageOpen()) { e.stopPropagation(); setPage(false); }
     }, true);
 
     var saved = null;
     try { saved = localStorage.getItem(STORE_KEY); } catch (e) { /* 隐私模式 */ }
+    // 迁移：已合并的 'line' → 'karaoke'
+    if (saved === 'line') {
+      saved = 'karaoke';
+      try { localStorage.setItem(STORE_KEY, saved); } catch (e) { /* ignore */ }
+    }
     setMode(saved || 'karaoke', { silent: true });
+
+    // 背景场景与自动环转：持久化在各自的 localStorage 键里
+    try {
+      var sv = localStorage.getItem(SCENE_KEY);
+      if (SCENES.indexOf(sv) >= 0) scene = sv;
+      autoSpin = localStorage.getItem(SPIN_KEY) === '1';
+    } catch (e) { /* 隐私模式 */ }
 
     readTilt();
     views = [
@@ -1480,9 +1679,13 @@
 
   window.Stage = {
     init: init,
+    destroy: destroy,
+    removeGate: removeGate,
     // 子系统自己的目标帧率从 0 变正（如背景从主题切到弧形墙且正暂停）时，
     // 靠它冷启动循环；循环已在转时是空操作，没人想要帧时帧循环会自行停下。
     kick: function () { schedule(); },
+    // 背景子模块异步就绪/重试成功后，重算 has-cover/gl-active 等类
+    repaint: function () { paintCover(); schedule(); },
     setMode: setMode,
     togglePage: function () { setPage(); },
     setPage: setPage,
@@ -1500,6 +1703,17 @@
       return v ? { x: v.tiltX, y: v.tiltY, max: tilt.max, drift: tilt.drift } : null;
     },
     setTiltDrift: function (v) { tilt.drift = v; },
+
+    // 当前曲目封面 URL（可能是同源 /v1/tracks/.. 封面，也可能是在线音源远程图）。
+    // 粒子封面据此加载纹理，不在这里拿的话只能去 img.src 反解。
+    coverUrl: function () { return lastCover; },
+
+    // 当前背景场景（'cover' / 'starriver'）与自动环转状态，
+    // 背景子模块据此决定自己该不该画
+    scene: function () { return scene; },
+    setScene: setScene,
+    isAutoSpin: function () { return autoSpin; },
+    setAutoSpin: setAutoSpin,
 
     setTrack: function (t, coverUrl) {
       track = t || null;

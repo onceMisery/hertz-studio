@@ -98,12 +98,15 @@ linkedCss.concat(linkedJs).forEach((href) => {
   ok(fs.existsSync(path.join(WEB, href)), `index.html 引用的 ${href} 文件存在`);
 });
 
-// 每个前端资源也都应该被 index.html 引用，否则它永远不会被加载
+// 每个前端资源也都应该被 index.html 引用，否则它永远不会被加载。
+// 用相对 web/ 的完整 href 比对而不是 basename：vendor/qrcode.js 与未来可能的
+// 同名文件处在子目录里，basename 会把它们混为一谈。
 includes.forEach((inc) => {
   if (inc.name === 'INDEX_HTML') return;
-  const base = '/' + path.basename(inc.rel);
-  ok(linkedCss.includes(path.basename(inc.rel)) || linkedJs.includes(path.basename(inc.rel)),
-    `${inc.name}（${path.basename(inc.rel)}）被 index.html 引用`);
+  const abs = path.resolve(path.join(ROOT, 'crates', 'vmusicd', 'src'), inc.rel);
+  const href = path.relative(WEB, abs).split(path.sep).join('/');
+  ok(linkedCss.includes(href) || linkedJs.includes(href),
+    `${inc.name}（${href}）被 index.html 引用`);
 });
 
 // ---------------------------------------------------------------------------
@@ -122,7 +125,8 @@ const REQUIRE_BEFORE = [
   ['stage-control.js', 'creative-stage.js'],    // 三维开启时让粒子层让位
   ['creative-stage.js', 'workshop.js'],
   ['creative-stage.js', 'app.js'],              // app.js 调 CreativeStage.init()
-  ['stage.js', 'app.js']
+  ['stage.js', 'app.js'],
+  ['vendor/qrcode.js', 'online-login.js']      // 扫码弹窗读 window.qrcode
 ];
 
 REQUIRE_BEFORE.forEach((pair) => {
@@ -162,6 +166,41 @@ ids.forEach((id) => {
 });
 ok(missing.length === 0,
   'app.js 取用的每个 id 都存在于 index.html' + (missing.length ? ' → 缺：' + missing.join(', ') : ''));
+
+// ---------------------------------------------------------------------------
+// 6. 图标库：每个 <use href="#i-*"> 都必须有对应 symbol
+// ---------------------------------------------------------------------------
+
+console.log('\n图标库');
+const spriteStart = indexHtml.indexOf('<svg id="icon-sprite"');
+const spriteEnd = indexHtml.indexOf('</svg>', spriteStart);
+const spriteBlock = spriteStart >= 0 && spriteEnd > spriteStart
+  ? indexHtml.slice(spriteStart, spriteEnd + 6) : '';
+const symbolIds = new Set();
+let symbolMatch;
+const symbolRe = /<symbol\s+id="(i-[^"]+)"/g;
+while ((symbolMatch = symbolRe.exec(spriteBlock)) !== null) symbolIds.add(symbolMatch[1]);
+
+ok(symbolIds.size >= 20, `图标 symbol 数量合理（${symbolIds.size}）`);
+ok(symbolIds.has('i-play') && symbolIds.has('i-close') && symbolIds.has('i-settings'),
+  '核心图标已定义');
+
+const iconRefs = [];
+fs.readdirSync(WEB).filter((f) => f.endsWith('.js')).forEach((f) => {
+  const text = fs.readFileSync(path.join(WEB, f), 'utf8');
+  let ref;
+  const refRe = /<use\s+href="#(i-[^"]+)"/g;
+  while ((ref = refRe.exec(text)) !== null) iconRefs.push({ file: f, id: ref[1] });
+});
+let useMatch;
+const useRe = /<use\s+href="#(i-[^"]+)"/g;
+while ((useMatch = useRe.exec(indexHtml)) !== null) {
+  iconRefs.push({ file: 'index.html', id: useMatch[1] });
+}
+ok(iconRefs.length >= 30, `图标引用数量合理（${iconRefs.length}）`);
+iconRefs.forEach((ref) => {
+  ok(symbolIds.has(ref.id), `${ref.file} 引用的 ${ref.id} 已定义`);
+});
 
 // 一个控件只能有一个主人。同一个 id 在两个文件里各绑一次 click，一次点击就会
 // 翻两遍开关 —— 症状是"按钮没反应"，而两边代码单看都对。2026-09-19 顶栏的

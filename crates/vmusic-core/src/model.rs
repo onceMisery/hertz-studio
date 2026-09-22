@@ -99,6 +99,68 @@ pub struct Playlist {
 }
 
 // ---------------------------------------------------------------------------
+// 收藏
+// ---------------------------------------------------------------------------
+
+/// 收藏项的类型。
+///
+/// 歌曲与电台在「我的收藏」里是同一个列表的两种行：歌曲点下去是入队播放，
+/// 电台点下去是载入整盘。用枚举而不是两个布尔/两张表，是为了让类型本身
+/// 成为排他约束——一行收藏不可能同时是歌曲和电台。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FavoriteKind {
+    /// 一首歌。本地曲目或某个在线音源的曲目。
+    Track,
+    /// 电台 / 在线歌单这类可整体播放的节目。
+    Radio,
+}
+
+impl FavoriteKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FavoriteKind::Track => "track",
+            FavoriteKind::Radio => "radio",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "track" => Some(FavoriteKind::Track),
+            "radio" => Some(FavoriteKind::Radio),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for FavoriteKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 一条收藏。
+///
+/// `source` + `ref_id` 是它指向的对象：`local` + 本地曲目 id，或音源 id +
+/// 该音源内的曲目/电台 id。之所以把标题、艺术家、封面这些**快照**一起存下来，
+/// 是因为在线收藏的对象不在本地库里——不存快照的话，收藏列表要么得为每条
+/// 现打一次上游接口（慢且可能失败），要么显示一排空白行。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Favorite {
+    /// 稳定主键：`favorites::identity(kind, source, ref_id)`。
+    pub id: String,
+    pub kind: FavoriteKind,
+    pub source: String,
+    pub ref_id: String,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub cover: Option<String>,
+    pub added_at: i64,
+}
+
+// ---------------------------------------------------------------------------
 // Lyrics
 // ---------------------------------------------------------------------------
 

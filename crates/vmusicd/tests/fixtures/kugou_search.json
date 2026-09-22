@@ -1,0 +1,26 @@
+{
+  "status": 1,
+  "data": {
+    "lists": [
+      {
+        "FileHash": "8E10D8825DDE03BCABBDE13E5A4150D2",
+        "SongName": "我们应该算爱过吧",
+        "SingerName": "歌手A",
+        "AlbumID": "67026620",
+        "MixSongID": "477417208",
+        "Duration": 213,
+        "Privilege": 0,
+        "AlbumName": "专辑X"
+      },
+      {
+        "FileHash": "",
+        "MixSongID": "111",
+        "SongName": "<em>无版权</em>演示",
+        "SingerName": "歌手B",
+        "AlbumID": "1",
+        "Duration": 60,
+        "Privilege": 10
+      }
+    ]
+  }
+}

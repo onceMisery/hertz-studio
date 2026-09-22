@@ -14,8 +14,8 @@ pub mod model;
 pub use audio::{AudioBackend, MediaInfo};
 pub use error::{http_status, AudioError, CoreError, LibraryError, Result, StoreError};
 pub use model::{
-    DeviceInfo, LyricDocument, LyricLine, LyricSource, LyricWord, PlayMode, PlayerSnapshot,
-    Playlist, PlaylistId, Track, TrackId, TrackSource, PROTOCOL_VERSION,
+    DeviceInfo, Favorite, FavoriteKind, LyricDocument, LyricLine, LyricSource, LyricWord, PlayMode,
+    PlayerSnapshot, Playlist, PlaylistId, Track, TrackId, TrackSource, PROTOCOL_VERSION,
 };
 
 #[cfg(test)]

@@ -58,8 +58,62 @@ curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/playlists"
 echo "==> discovery file"
 [[ -f "$DATA/vmusicd.json" ]] || { echo "missing discovery file"; exit 1; }
 
+AUTH=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
+
+echo "==> 收藏：新增 / 列表 / 判红 / 开关 / 删除"
+curl -sf "${AUTH[@]}" -X POST \
+  -d '{"kind":"track","source":"local","ref_id":"smoke-1","title":"Smoke One","artist":"QA"}' \
+  "http://127.0.0.1:$PORT/v1/favorites" | grep -q '"favorited":true'
+# 重复收藏必须落在同一行上，不能变成两条。
+curl -sf "${AUTH[@]}" -X POST \
+  -d '{"kind":"track","source":"local","ref_id":"smoke-1","title":"Smoke One","artist":"QA"}' \
+  "http://127.0.0.1:$PORT/v1/favorites" | grep -q '"favorited":true'
+curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/favorites?kind=track" \
+  | grep -q '"total":1'
+curl -sf "${AUTH[@]}" -X POST \
+  -d '{"kind":"track","source":"local","ids":["smoke-1","nope"]}' \
+  "http://127.0.0.1:$PORT/v1/favorites/membership" | grep -q '"smoke-1"'
+# 开关到关闭，再开回来；最终态由服务端说了算。
+curl -sf "${AUTH[@]}" -X POST \
+  -d '{"kind":"track","source":"local","ref_id":"smoke-1","favorited":false}' \
+  "http://127.0.0.1:$PORT/v1/favorites/toggle" | grep -q '"favorited":false'
+curl -sf "${AUTH[@]}" -X POST \
+  -d '{"kind":"track","source":"local","ref_id":"smoke-1"}' \
+  "http://127.0.0.1:$PORT/v1/favorites/toggle" | grep -q '"favorited":true'
+curl -sf "${AUTH[@]}" -X DELETE \
+  "http://127.0.0.1:$PORT/v1/favorites/track:local:smoke-1" | grep -q '"ok":true'
+curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/favorites" | grep -q '"total":0'
+
+echo "==> 收藏：非法类型必须 400 而不是静默吞掉"
+code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X POST \
+  -d '{"kind":"album","source":"local","ref_id":"x","title":"X"}' \
+  "http://127.0.0.1:$PORT/v1/favorites")
+[[ "$code" == "400" ]] || { echo "expected 400 for bad kind, got $code"; exit 1; }
+code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X POST \
+  -d '{"kind":"track","source":"local","ref_id":"","title":"X"}' \
+  "http://127.0.0.1:$PORT/v1/favorites")
+[[ "$code" == "400" ]] || { echo "expected 400 for empty ref_id, got $code"; exit 1; }
+
+echo "==> 每日推荐：确定性与入参校验"
+DAY_A="$(curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/recommend/daily" | tr -d '\n')"
+grep -q '"day"' <<<"$DAY_A"
+DAY_B="$(curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/recommend/daily" | tr -d '\n')"
+[[ "$DAY_A" == "$DAY_B" ]] || { echo "每日推荐同一天必须完全一致"; exit 1; }
+code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" \
+  "http://127.0.0.1:$PORT/v1/recommend/daily?limit=0")
+[[ "$code" == "400" ]] || { echo "expected 400 for limit=0, got $code"; exit 1; }
+
+echo "==> 汽水音乐：已注册且能力位如实"
+curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/online/sources" | grep -q '"qishui"'
+# 只登记了 CookieLogin：不承诺扫码，也不承诺高音质（受保护音质是拒播的）。
+curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/online/sources" \
+  | tr ',' '\n' | grep -A0 '"caps"' | head -1
+
 echo "==> ui"
 curl -sf "http://127.0.0.1:$PORT/" | grep -q 'mmusic'
+# 内嵌资源：新增的两个模块必须能取到，否则界面静默少一块功能。
+curl -sf "http://127.0.0.1:$PORT/favorites.js" | grep -q 'Favorites'
+curl -sf "http://127.0.0.1:$PORT/daily.js" | grep -q 'Daily'
 
 echo
 echo "smoke test passed"

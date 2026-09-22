@@ -18,10 +18,11 @@ use axum::{middleware, Json, Router};
 use serde::{Deserialize, Serialize};
 use vmusic_core::{PlayMode, PROTOCOL_VERSION};
 
+use crate::daily;
 use crate::error::{bad_request, not_found, unauthorized, ApiError, ApiResult};
 use crate::online;
 use crate::scan;
-use crate::state::{AppState, ScanProgress};
+use crate::state::{AppState, ScanProgress, WsEvent};
 
 /// Builds the API router.
 ///
@@ -70,15 +71,44 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             axum::routing::delete(remove_from_playlist),
         )
         .route("/v1/settings", get(get_settings).put(put_settings))
+        // 收藏：列表 / 新增 / 删除 / 开关；membership 是给一整屏曲目批量判红的。
+        .route("/v1/favorites", get(list_favorites).post(add_favorite))
+        .route("/v1/favorites/membership", post(favorite_membership))
+        .route("/v1/favorites/toggle", post(toggle_favorite))
+        .route("/v1/favorites/{id}", axum::routing::delete(remove_favorite))
+        // 每日推荐：本地规则引擎，按天确定性出榜。
+        .route("/v1/recommend/daily", get(daily_recommend))
         // 在线曲库：搜索与试听地址都由服务端代发，浏览器绕不开第三方接口的
         // CORS 与 Referer 校验。
         .route("/v1/online/sources", get(online_sources))
         .route("/v1/online/search", get(online_search))
+        .route("/v1/online/search/all", get(online_search_all))
         .route("/v1/online/stream", get(online_stream))
         .route("/v1/online/detail", get(online_detail))
         .route("/v1/online/lyric", get(online_lyric))
         .route("/v1/online/play", post(online_play))
         .route("/v1/online/cookie", post(online_cookie))
+        // 我的歌单 / 歌单详情 / 写操作
+        .route("/v1/online/playlists", get(online_playlists))
+        .route(
+            "/v1/online/playlist",
+            get(online_playlist)
+                .post(online_playlist_create)
+                .delete(online_playlist_delete),
+        )
+        .route("/v1/online/playlist/tracks/add", post(online_playlist_add))
+        .route(
+            "/v1/online/playlist/tracks/remove",
+            post(online_playlist_remove),
+        )
+        .route("/v1/online/like", post(online_like))
+        .route("/v1/online/recommend/songs", get(online_rec_songs))
+        .route("/v1/online/recommend/playlists", get(online_rec_playlists))
+        // 扫码登录：start 发票、poll 轮询、cancel 幂等关闭
+        .route("/v1/online/qr/start", post(online_qr_start))
+        .route("/v1/online/qr/poll", get(online_qr_poll))
+        .route("/v1/online/qr/cancel", post(online_qr_cancel))
+        .route("/v1/online/account", get(online_account))
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new().route("/v1/health", get(health)).merge(api)
@@ -626,11 +656,280 @@ async fn put_settings(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// 设置表里存的是「用户在音源站点的登录 cookie」。这类键有三条规矩：
+/// 设置表里存的是「用户在音源站点的登录凭据」（旧版裸 cookie 键
+/// `online_cookie_*` 与新版结构化凭据键 `online_cred_*`）。这类键有三条规矩：
 /// 不出现在 `GET /v1/settings` 里、不能从 `PUT /v1/settings` 写进去、
 /// 改它只能走 `/v1/online/cookie`（那里才校验得了音源是否真的支持登录）。
+/// `online_device_*` 是非敏感设备身份，不在此列。
 fn is_credential(key: &str) -> bool {
-    key.starts_with(online::COOKIE_PREFIX)
+    key.starts_with(online::COOKIE_PREFIX) || key.starts_with(online::CRED_PREFIX)
+}
+
+// ---------------------------------------------------------------------------
+// 收藏
+// ---------------------------------------------------------------------------
+
+/// 收藏列表的默认/最大分页。
+const FAV_PAGE: i64 = 200;
+const FAV_PAGE_MAX: i64 = 500;
+
+fn store_err(e: vmusic_core::StoreError) -> ApiError {
+    ApiError::from(vmusic_core::CoreError::Store(e))
+}
+
+#[derive(Debug, Deserialize)]
+struct FavoritesQuery {
+    /// track | radio；省略表示全部。
+    kind: Option<String>,
+    #[serde(default)]
+    offset: i64,
+    limit: Option<i64>,
+}
+
+async fn list_favorites(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<FavoritesQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let kind = match q.kind.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => Some(daily::parse_kind(raw)?),
+        _ => None,
+    };
+    let limit = q.limit.unwrap_or(FAV_PAGE).clamp(1, FAV_PAGE_MAX);
+    let offset = q.offset.max(0);
+    let favorites = vmusic_store::favorites::list(&state.db, kind, limit, offset)
+        .await
+        .map_err(store_err)?;
+    let total = vmusic_store::favorites::count(&state.db, kind)
+        .await
+        .map_err(store_err)?;
+    // 两个 tab 各自的总数：前端一次拿到就不用为「歌曲 / 电台」各请求一遍。
+    let track_count =
+        vmusic_store::favorites::count(&state.db, Some(vmusic_core::FavoriteKind::Track))
+            .await
+            .map_err(store_err)?;
+    let radio_count =
+        vmusic_store::favorites::count(&state.db, Some(vmusic_core::FavoriteKind::Radio))
+            .await
+            .map_err(store_err)?;
+    Ok(Json(serde_json::json!({
+        "favorites": favorites,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "counts": { "track": track_count, "radio": radio_count },
+    })))
+}
+
+/// 入站收藏项的公共字段。新增与开关两个端点形状相同，只是一处多一个
+/// `favorited`，所以解析成两个请求体、共用这一个结构体。
+#[derive(Debug, Clone, Deserialize)]
+struct FavoriteBody {
+    /// track | radio
+    kind: String,
+    /// local 或音源 id（netease/qq/kugou/qishui/ccmixter）
+    #[serde(default = "default_favorite_source")]
+    source: String,
+    /// 本地曲目 id 或音源内的曲目/电台 id
+    #[serde(default)]
+    ref_id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    artist: Option<String>,
+    #[serde(default)]
+    album: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    cover: Option<String>,
+}
+
+fn default_favorite_source() -> String {
+    "local".to_string()
+}
+
+/// 校验并归一「收藏指向什么」。
+fn favorite_target(body: &FavoriteBody) -> ApiResult<(vmusic_core::FavoriteKind, String, String)> {
+    let kind = daily::parse_kind(&body.kind)?;
+    let source = body.source.trim().to_string();
+    let ref_id = body.ref_id.trim().to_string();
+    if source.is_empty() {
+        return Err(bad_request("缺少 source"));
+    }
+    if ref_id.is_empty() {
+        return Err(bad_request("缺少 ref_id"));
+    }
+    Ok((kind, source, ref_id))
+}
+
+/// 空串一律折成 None：收藏表里 artist/album/cover 允许为 NULL，存空串会让
+/// 「未知艺术家」这类判断在前后端出现两套写法。
+fn clean(value: Option<&String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 构造要落盘的元数据快照。
+///
+/// `title` 允许省略：收藏本地曲目时前端往往只持有 id，标题由服务端回读本地库
+/// 补上，省掉前端为一次点击先拉一次曲目详情。
+///
+/// 回读是**尽力而为**，不是前置条件：本地库里查不到时不能把整个收藏动作判死。
+/// 曲库可能还没扫描完、文件可能刚被移走，而用户此刻明确点了一次红心——
+/// 那种情况下落一条「未知曲目」的收藏，也比回 404 让他白点一次好。
+async fn favorite_meta(
+    db: &sqlx::SqlitePool,
+    body: &FavoriteBody,
+    kind: vmusic_core::FavoriteKind,
+    source: &str,
+    ref_id: &str,
+) -> ApiResult<vmusic_store::favorites::FavoriteMeta> {
+    let mut meta = vmusic_store::favorites::FavoriteMeta {
+        title: clean(body.title.as_ref()).unwrap_or_else(|| "未知曲目".to_string()),
+        artist: clean(body.artist.as_ref()),
+        album: clean(body.album.as_ref()),
+        duration_ms: body.duration_ms,
+        cover: clean(body.cover.as_ref()),
+    };
+    if kind == vmusic_core::FavoriteKind::Track && source == "local" && body.title.is_none() {
+        if let Some(t) = vmusic_store::get_track(db, &ref_id.to_string())
+            .await
+            .map_err(store_err)?
+        {
+            meta.title = t.title.clone();
+            meta.artist = t.artist.clone();
+            meta.album = t.album.clone();
+            meta.duration_ms = t.duration_ms;
+        }
+    }
+    Ok(meta)
+}
+
+async fn add_favorite(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<FavoriteBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (kind, source, ref_id) = favorite_target(&body)?;
+    let meta = favorite_meta(&state.db, &body, kind, &source, &ref_id).await?;
+    let favorite = vmusic_store::favorites::add(&state.db, kind, &source, &ref_id, &meta)
+        .await
+        .map_err(store_err)?;
+    Ok(Json(
+        serde_json::json!({ "favorite": favorite, "favorited": true }),
+    ))
+}
+
+async fn remove_favorite(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let removed = vmusic_store::favorites::remove(&state.db, &id)
+        .await
+        .map_err(store_err)?;
+    // 取消一个不存在的收藏按成功处理：前端的心形按钮可能在刷新竞态下连点两次。
+    Ok(Json(serde_json::json!({ "ok": true, "removed": removed })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ToggleRequest {
+    #[serde(flatten)]
+    body: FavoriteBody,
+    /// 显式指定目标态；省略则按当前状态取反。
+    #[serde(default)]
+    favorited: Option<bool>,
+}
+
+/// 红心开关。
+///
+/// 返回**最终态**而不是「操作成功」：按钮的乐观更新需要知道结果是什么，而
+/// 「加了还是删了」在连点时不能靠前端自己记。
+async fn toggle_favorite(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ToggleRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (kind, source, ref_id) = favorite_target(&req.body)?;
+    let id = vmusic_store::favorites::identity(kind, &source, &ref_id);
+    let existing = vmusic_store::favorites::get(&state.db, &id)
+        .await
+        .map_err(store_err)?;
+    let want = req.favorited.unwrap_or(existing.is_none());
+
+    if !want {
+        vmusic_store::favorites::remove(&state.db, &id)
+            .await
+            .map_err(store_err)?;
+        return Ok(Json(
+            serde_json::json!({ "favorited": false, "favorite": null, "id": id }),
+        ));
+    }
+
+    let meta = favorite_meta(&state.db, &req.body, kind, &source, &ref_id).await?;
+    let favorite = vmusic_store::favorites::add(&state.db, kind, &source, &ref_id, &meta)
+        .await
+        .map_err(store_err)?;
+    Ok(Json(
+        serde_json::json!({ "favorited": true, "favorite": favorite, "id": id }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct MembershipRequest {
+    /// track | radio
+    kind: String,
+    #[serde(default = "default_favorite_source")]
+    source: String,
+    /// 一屏曲目的 ref_id。
+    #[serde(default)]
+    ids: Vec<String>,
+}
+
+/// 批量判断「这一屏里哪些已收藏」。
+///
+/// 曲库一屏 200 行，逐行问一次是 200 次往返；这里一次捞回命中的 ref_id 集合。
+async fn favorite_membership(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<MembershipRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let kind = daily::parse_kind(&body.kind)?;
+    let source = body.source.trim().to_string();
+    if source.is_empty() {
+        return Err(bad_request("缺少 source"));
+    }
+    if body.ids.is_empty() {
+        return Ok(Json(serde_json::json!({ "ids": [] })));
+    }
+    // 上限与曲库分页对齐：超出就是前端构造错了，不该让 SQL 参数无限膨胀。
+    if body.ids.len() > FAV_PAGE_MAX as usize {
+        return Err(bad_request(format!("ids 数量超过上限 {}", FAV_PAGE_MAX)));
+    }
+    let ids: Vec<String> = body
+        .ids
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let hit = vmusic_store::favorites::is_favorited(&state.db, kind, &source, &ids)
+        .await
+        .map_err(store_err)?;
+    Ok(Json(serde_json::json!({ "ids": hit })))
+}
+
+// ---------------------------------------------------------------------------
+// 每日推荐
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct DailyQuery {
+    limit: Option<usize>,
+}
+
+async fn daily_recommend(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DailyQuery>,
+) -> ApiResult<Json<daily::DailyPage>> {
+    let limit = daily::parse_limit(q.limit)?;
+    daily::daily(&state.db, limit).await.map(Json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -664,16 +963,29 @@ async fn online_cookie(
     if value.len() > 8192 {
         return Err(bad_request("cookie 过长（上限 8192 字节）"));
     }
-    let signed_in = !value.is_empty();
-    vmusic_store::settings::set(
-        &state.db,
-        &format!("{}{}", online::COOKIE_PREFIX, body.source),
-        &serde_json::Value::String(value),
-    )
-    .await
-    .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    // 统一走 cred 保险库：空串=登出（新键与历史裸键一起清，否则扫码写入的
+    // cred 会让「清空 cookie」不生效）；非空时先按平台规则补齐判态字段再存，
+    // 否则酷狗的 userid/token 缺失会被误判成未登录。
+    let store_err = |e: vmusic_core::StoreError| ApiError::from(vmusic_core::CoreError::Store(e));
+    if value.is_empty() {
+        online::cred_clear(&state.db, &body.source)
+            .await
+            .map_err(store_err)?;
+    } else {
+        online::cred_put_cookie(&state.db, &body.source, &value)
+            .await
+            .map_err(store_err)?;
+    }
     // 只回布尔：原文一旦回到前端，就可能进日志、进截图、进用户粘贴到别处的
     // 那段文本里。
+    //
+    // signedIn 不能用「cookie 非空」冒充：贴进来的串可能缺平台判态关键字段
+    // （网易 MUSIC_U、QQ qm_keyst、酷狗 token），那种包存得进去但各平台仍按
+    // 未登录处理。回读 cred 包走平台自己的判据，能力失败绝不伪造成功。
+    let signed_in = online::cred_get(&state.db, &body.source)
+        .await
+        .map_err(store_err)?
+        .is_some_and(|pack| online::cred_is_signed_in(&body.source, &pack));
     Ok(Json(serde_json::json!({
         "ok": true,
         "source": body.source,
@@ -698,6 +1010,47 @@ fn source_of(raw: Option<String>) -> String {
         .unwrap_or_else(|| online::SOURCES[0].id.to_string())
 }
 
+/// spec §1.2：在线代理错误体带音源 id，前端按源分流提示，不必解析 message。
+fn tagged<T>(source: &str, result: ApiResult<T>) -> ApiResult<T> {
+    result.map_err(|e| e.with_source(source))
+}
+
+/// 歌单 scope 白名单。平台模块各自再做映射，路由层先挡住非法值，
+/// 避免「拼错 scope 被静默当成全部歌单」。
+fn playlist_scope(raw: Option<String>) -> ApiResult<String> {
+    let scope = raw.unwrap_or_else(|| "created".to_string());
+    match scope.as_str() {
+        "created" | "collected" | "liked" => Ok(scope),
+        other => Err(bad_request(format!(
+            "scope 只能是 created|collected|liked，收到: {other}"
+        ))),
+    }
+}
+
+/// 整盘播放的起始下标归一：缺省 0；越界夹到最后一首而不是直接 400——
+/// 前端分页/刷新后传来旧 index 是常事，夹一下比播失败友好。
+/// 空列表也安全（当前调用点已保证非空，纯防御）：返回 0 而不是下溢。
+fn pick_index(requested: Option<usize>, len: usize) -> usize {
+    match requested {
+        Some(i) if i < len => i,
+        Some(_) => len.saturating_sub(1),
+        None => 0,
+    }
+}
+
+/// 取二维码会话并校验它属于请求的音源。
+///
+/// 这一步不能省：票是不透明的随机串，但 Registry 里记着它的来源平台。
+/// 若 A 平台的票能投到 B 平台的 qr_check，confirmed 时平台模块会把 A 的
+/// 凭据写进 B 的保险库——属于跨源凭据污染。票过期/已取消则让前端重新扫码。
+fn qr_session(source: &str, sess: Option<online::qr::Session>) -> ApiResult<online::qr::Session> {
+    let sess = sess.ok_or_else(|| bad_request("二维码已过期，请重新扫码"))?;
+    if sess.source != source {
+        return Err(bad_request("二维码会话与音源不匹配，请重新扫码"));
+    }
+    Ok(sess)
+}
+
 /// 音源清单：id、显示名、分类、是否支持 cookie、当前是否已登录。
 /// 前端的音源下拉框和分类 chips 全部由它生成。
 async fn online_sources(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
@@ -710,7 +1063,8 @@ async fn online_search(
     State(state): State<Arc<AppState>>,
     Query(q): Query<online::SearchQuery>,
 ) -> ApiResult<Json<online::SearchPage>> {
-    online::search(&online_ctx(&state), q).await.map(Json)
+    let source = q.source.clone();
+    tagged(&source, online::search(&online_ctx(&state), q).await).map(Json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -726,9 +1080,12 @@ async fn online_stream(
     Query(q): Query<StreamQuery>,
 ) -> ApiResult<Json<online::StreamInfo>> {
     let source = source_of(q.source);
-    online::stream(&online_ctx(&state), &source, &q.id, q.quality)
-        .await
-        .map(Json)
+    // GET 形态没有 track_ref，平台模块按 id 回落取流。
+    tagged(
+        &source,
+        online::stream(&online_ctx(&state), &source, &q.id, None, q.quality).await,
+    )
+    .map(Json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -743,9 +1100,11 @@ async fn online_detail(
     Query(q): Query<ItemQuery>,
 ) -> ApiResult<Json<online::OnlineDetail>> {
     let source = source_of(q.source);
-    online::detail(&online_ctx(&state), &source, &q.id)
-        .await
-        .map(Json)
+    tagged(
+        &source,
+        online::detail(&online_ctx(&state), &source, &q.id).await,
+    )
+    .map(Json)
 }
 
 /// 在线歌词。返回体与 `/v1/tracks/{id}/lyrics` 同形，前端可直接使用。
@@ -755,79 +1114,523 @@ async fn online_lyric(
     Query(q): Query<ItemQuery>,
 ) -> ApiResult<Json<vmusic_core::LyricDocument>> {
     let source = source_of(q.source);
-    online::lyric(&online_ctx(&state), &source, &q.id)
-        .await
-        .map(Json)
+    tagged(
+        &source,
+        online::lyric(&online_ctx(&state), &source, &q.id).await,
+    )
+    .map(Json)
 }
 
 #[derive(Debug, Deserialize)]
 struct OnlinePlayRequest {
     source: Option<String>,
-    id: String,
-    /// 搜索结果里的元数据。服务端不保存这些字段（队列里只有虚拟 id），
-    /// 带过来只是为了在返回体里回显，方便前端对齐。
+    /// 旧单曲形态的曲目 id；新整盘形态只给 tracks。两者都缺时回 400。
+    #[serde(default)]
+    id: Option<String>,
+    /// 旧单曲形态的元数据回显字段。
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
     duration_ms: Option<u64>,
     quality: Option<u32>,
+    /// 整盘形态：一整首歌单/专辑的曲目列表，当前曲由 index 指定。
+    #[serde(default)]
+    tracks: Option<Vec<OnlinePlayTrack>>,
+    #[serde(default)]
+    index: Option<usize>,
 }
 
-/// 在线试听。
+#[derive(Debug, Deserialize)]
+struct OnlinePlayTrack {
+    id: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    duration_ms: Option<u64>,
+    cover: Option<String>,
+    /// 搜索/歌单结果里随曲目带来的平台原始引用（QQ media_mid 等），
+    /// 取流时原样透传给平台模块；JSON 字段名与 OnlineTrack 一致为 ref。
+    #[serde(default, rename = "ref")]
+    track_ref: Option<online::TrackRef>,
+}
+
+/// /online/play「占队列后、起播前」失败或被顶代际时的收口：
+/// 仍属当代——把队列和 cursor 整体还原成占队前的快照，推一条带 code/source
+/// 的 WS Error（spec §1.5，与 play_index_for 内失败同一条用户可见路径），再
+/// 把错误回给正在等待的 HTTP 调用；已被后来的切入顶掉——静默回当前播放器
+/// 状态，不报错也不动新队列/新播放。
 ///
-/// 拿到试听地址 → 落盘缓存 → 用虚拟 id 走一遍和本地曲目完全相同的 load 链路。
-/// 队列里只放这一个 id：在线曲目没有「上一首 / 下一首」的语境，播完即停，
-/// 不假装自己混在本地队列里。
+/// 「过闸 → 还原 queue/cursor」必须在同一把 commit 锁内：旧队列与旧 cursor
+/// 是一对快照，cursor 是旧队列的下标，分开恢复或在锁外恢复都会让旧下标落进
+/// 新队列（越界高亮 / next 重试刚失败的曲）。
+async fn settle_online_play(
+    state: &Arc<AppState>,
+    gen: usize,
+    index: usize,
+    vids: &[String],
+    prev_queue: Vec<String>,
+    prev_cursor: Option<usize>,
+    err: ApiError,
+) -> ApiResult<Json<serde_json::Value>> {
+    let fresh = {
+        let _commit = state.play_commit.lock().await;
+        if state.attempt_alive(gen, index, &vids[index]).await {
+            state.publish(WsEvent::Error {
+                message: err.message.clone(),
+                code: Some(err.code.to_string()),
+                source: err.source.clone(),
+            });
+            *state.queue.lock().await = prev_queue;
+            *state.cursor.lock().await = prev_cursor;
+            true
+        } else {
+            false
+        }
+    };
+    if fresh {
+        return Err(err);
+    }
+    Ok(get_state(State(state.clone())).await)
+}
+
+/// 在线试听：先把整盘虚拟 id 占进队列，再用当前曲的 track_ref 取最优试听
+/// 地址落盘，最后走与本地曲目完全相同的 play_index 提交链路。
+///
+/// 队列必须先占：stream/下载是数秒级 await，期间用户可能改点别的。早 set_queue
+/// 立即顶代际并挂出新队列，预取回来后凭代际复核——已被顶掉的迟到结果静默收
+/// 在当前播放器状态上，绝不允许整盘换回、把用户后来选的曲盖掉。
+///
+/// 队列只存虚拟 id、不存 track_ref，所以切到其他曲目时 play_index 按稳定 id
+/// 回落取流，可能拿不到最优音质——这是队列状态机的有意取舍，不在本端点扩大。
 async fn online_play(
     State(state): State<Arc<AppState>>,
     Json(body): Json<OnlinePlayRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let source = source_of(body.source);
+
+    // 归一两种入站形态：整盘 tracks 优先；旧单曲 {id,+元数据} 包成长度 1。
+    let mut tracks = body.tracks.unwrap_or_default();
+    if tracks.is_empty() {
+        let id = body.id.as_deref().unwrap_or("").trim().to_string();
+        if id.is_empty() {
+            return Err(bad_request("缺少曲目 id"));
+        }
+        tracks.push(OnlinePlayTrack {
+            id,
+            title: body.title,
+            artist: body.artist,
+            album: body.album,
+            duration_ms: body.duration_ms,
+            cover: None,
+            track_ref: None,
+        });
+    }
+    // virtual_id 必须能反解出非空 id，任何一项空都在入队前拒绝。
+    if tracks.iter().any(|t| t.id.trim().is_empty()) {
+        return Err(bad_request("tracks 中存在缺少 id 的曲目"));
+    }
+    let index = pick_index(body.index, tracks.len());
+    let current = &tracks[index];
+
+    let vids: Vec<String> = tracks
+        .iter()
+        .map(|t| online::virtual_id(&source, &t.id))
+        .collect();
+
+    // 先占队列再取流（见函数文档）。set_queue 原子地返回新代际和占队前的
+    // (queue, cursor) 快照：首曲新鲜失败时整体还原，不留下指向旧队列下标的
+    // cursor；预取窗口里被顶代际则凭 gen 静默收口。
+    let (gen, prev_queue, prev_cursor) = state.set_queue(vids.clone(), Some(index)).await;
+
     let ctx = online_ctx(&state);
-    let info = online::stream(&ctx, &source, &body.id, body.quality).await?;
+    // 当前曲透传 track_ref，争取平台最优音质；其余曲目切歌时按 id 回落。
+    let info = match tagged(
+        &source,
+        online::stream(
+            &ctx,
+            &source,
+            &current.id,
+            current.track_ref.as_ref(),
+            body.quality,
+        )
+        .await,
+    ) {
+        Ok(info) => info,
+        Err(e) => {
+            return settle_online_play(
+                &state,
+                gen,
+                index,
+                &vids,
+                prev_queue.clone(),
+                prev_cursor,
+                e,
+            )
+            .await;
+        }
+    };
     let dir = state.online_cache_dir();
-    let path = online::fetch_to_cache(&dir, &source, &body.id, &info.url).await?;
-    let uri = path
-        .to_str()
-        .ok_or_else(|| ApiError::internal("缓存路径含非 UTF-8 字符".to_string()))?;
+    // 只关心落盘这个副作用：返回的路径由随后 play_index 的缓存就绪分支自行
+    // 解析，这里不保留 PathBuf。
+    if let Err(e) = tagged(
+        &source,
+        online::fetch_to_cache(&dir, &source, &current.id, &info.url).await,
+    ) {
+        return settle_online_play(&state, gen, index, &vids, prev_queue, prev_cursor, e).await;
+    }
 
-    let vid = online::virtual_id(&source, &body.id);
-    state.set_queue(vec![vid.clone()], Some(0)).await;
-    state
-        .audio
-        .load(uri, Some(vid.clone()))
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state
-        .audio
-        .play()
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.publish(crate::state::WsEvent::State(state.audio.snapshot()));
+    // 预取这几秒里用户若已改点，预留区的代际复核会挡住：迟到结果不再 load、
+    // 不 bump、不写 cursor，HTTP 调用收在「当前」播放器状态上。返回 false 即
+    // 被后来的切入/换队顶掉。首曲已用最优 track_ref/quality 落盘，缓存就绪
+    // 分支零网络直接 load；闸门、commit 串行、cursor 与失败恢复都在同一函数。
+    if !state.play_index_for(index, Some(gen)).await? {
+        return Ok(get_state(State(state.clone())).await);
+    }
 
-    // 封面在搜索结果里经常缺失，这里主动补一次详情。
-    // 补不到也不算失败——前端有占位图，不能让一张图片拖垮整次播放。
-    let cover = online::detail(&ctx, &source, &body.id)
-        .await
-        .map(|d| d.cover)
-        .unwrap_or(None);
+    // 封面：整盘曲目通常已带 cover；缺失时补一次详情。补不到不算失败——
+    // 前端有占位图，不能让一张图片拖垮整次播放。
+    let cover = match &current.cover {
+        Some(c) if !c.is_empty() => Some(c.clone()),
+        _ => online::detail(&ctx, &source, &current.id)
+            .await
+            .ok()
+            .and_then(|d| d.cover),
+    };
 
     Ok(Json(serde_json::json!({
         "ok": true,
-        "track_id": vid,
+        "track_id": vids[index],
+        // 前端 Task 18 用它填充队列 UI，避免再拼一遍虚拟 id。
+        "track_ids": vids,
+        "index": index,
         "source": source,
-        "id": body.id,
-        "title": body.title.unwrap_or_default(),
-        "artist": body.artist.unwrap_or_default(),
-        "album": body.album.unwrap_or_default(),
-        "duration_ms": body.duration_ms.unwrap_or(0),
+        "id": current.id,
+        "title": current.title.clone().unwrap_or_default(),
+        "artist": current.artist.clone().unwrap_or_default(),
+        "album": current.album.clone().unwrap_or_default(),
+        "duration_ms": current.duration_ms.unwrap_or(0),
         "cover": cover,
     })))
 }
 
+// ---------------------------------------------------------------------------
+// 在线曲库：账号 / 歌单 / 红心 / 推荐
+//
+// 全部是薄转发：校验入参 → 过能力闸门（在 online::dispatch 内）→ 回统一 DTO。
+// 任何写操作失败都直接透传 ApiError，绝不伪造空成功。
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct PlaylistsQuery {
+    source: String,
+    scope: Option<String>,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_page_limit")]
+    limit: usize,
+}
+
+fn default_page_limit() -> usize {
+    30
+}
+
+async fn online_playlists(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<PlaylistsQuery>,
+) -> ApiResult<Json<Vec<online::OnlinePlaylist>>> {
+    let scope = playlist_scope(q.scope)?;
+    let limit = q.limit.clamp(1, 50);
+    tagged(
+        &q.source,
+        online::playlists(&online_ctx(&state), &q.source, &scope, q.offset, limit).await,
+    )
+    .map(Json)
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaylistQuery {
+    source: String,
+    id: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_page_limit")]
+    limit: usize,
+}
+
+async fn online_playlist(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<PlaylistQuery>,
+) -> ApiResult<Json<online::PlaylistDetail>> {
+    let limit = q.limit.clamp(1, 50);
+    tagged(
+        &q.source,
+        online::playlist_detail(&online_ctx(&state), &q.source, &q.id, q.offset, limit).await,
+    )
+    .map(Json)
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaylistCreateRequest {
+    source: String,
+    name: String,
+}
+
+async fn online_playlist_create(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PlaylistCreateRequest>,
+) -> ApiResult<Json<online::OnlinePlaylist>> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(bad_request("歌单名不能为空"));
+    }
+    tagged(
+        &body.source,
+        online::playlist_create(&online_ctx(&state), &body.source, name).await,
+    )
+    .map(Json)
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaylistDeleteRequest {
+    source: String,
+    id: String,
+}
+
+async fn online_playlist_delete(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PlaylistDeleteRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.id.trim().is_empty() {
+        return Err(bad_request("缺少歌单 id"));
+    }
+    tagged(
+        &body.source,
+        online::playlist_delete(&online_ctx(&state), &body.source, &body.id).await,
+    )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaylistTracksRequest {
+    source: String,
+    id: String,
+    tracks: Vec<online::TrackEntry>,
+}
+
+async fn online_playlist_add(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PlaylistTracksRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.id.trim().is_empty() {
+        return Err(bad_request("缺少歌单 id"));
+    }
+    if body.tracks.is_empty() {
+        return Err(bad_request("没有要添加的曲目"));
+    }
+    tagged(
+        &body.source,
+        online::playlist_add(&online_ctx(&state), &body.source, &body.id, &body.tracks).await,
+    )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn online_playlist_remove(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PlaylistTracksRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.id.trim().is_empty() {
+        return Err(bad_request("缺少歌单 id"));
+    }
+    if body.tracks.is_empty() {
+        return Err(bad_request("没有要移除的曲目"));
+    }
+    tagged(
+        &body.source,
+        online::playlist_remove(&online_ctx(&state), &body.source, &body.id, &body.tracks).await,
+    )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct LikeRequest {
+    source: String,
+    id: String,
+    liked: bool,
+}
+
+async fn online_like(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<LikeRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.id.trim().is_empty() {
+        return Err(bad_request("缺少曲目 id"));
+    }
+    tagged(
+        &body.source,
+        online::like(&online_ctx(&state), &body.source, &body.id, body.liked).await,
+    )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct RecommendQuery {
+    source: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_page_limit")]
+    limit: usize,
+}
+
+async fn online_rec_songs(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RecommendQuery>,
+) -> ApiResult<Json<Vec<online::OnlineTrack>>> {
+    let limit = q.limit.clamp(1, 50);
+    tagged(
+        &q.source,
+        online::recommend_songs(&online_ctx(&state), &q.source, q.offset, limit).await,
+    )
+    .map(Json)
+}
+
+async fn online_rec_playlists(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RecommendQuery>,
+) -> ApiResult<Json<Vec<online::OnlinePlaylist>>> {
+    let limit = q.limit.clamp(1, 50);
+    tagged(
+        &q.source,
+        online::recommend_playlists(&online_ctx(&state), &q.source, q.offset, limit).await,
+    )
+    .map(Json)
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchAllQuery {
+    q: String,
+    #[serde(default = "default_page_limit")]
+    limit: usize,
+}
+
+async fn online_search_all(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SearchAllQuery>,
+) -> ApiResult<Json<online::AggregateSearch>> {
+    // 路由层先夹到 30（聚合要并发打全部源），dispatch 内还有 1..=50 的兜底。
+    online::search_all(&online_ctx(&state), q.q.trim(), q.limit.clamp(1, 30))
+        .await
+        .map(Json)
+}
+
+// ---------------------------------------------------------------------------
+// 在线曲库：扫码登录
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct SourceRequest {
+    source: String,
+    /// QQ 专用："qq"（默认）或 "wx"（微信扫码）。
+    #[serde(default)]
+    channel: Option<String>,
+}
+
+async fn online_qr_start(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SourceRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // 平台握手票绝不离开服务端：进 Registry 换成不透明 ticket，
+    // 前端轮询/取消只认 ticket。
+    let payload = tagged(
+        &body.source,
+        online::qr_start(&online_ctx(&state), &body.source, body.channel.as_deref()).await,
+    )?;
+    let ticket = state.qr.start(&body.source, payload.platform_ticket).await;
+    Ok(Json(serde_json::json!({
+        "ticket": ticket,
+        "qr_text": payload.qr_text,
+        "qr_image": payload.qr_image,
+        "poll_ms": payload.poll_ms,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct QrPollQuery {
+    source: String,
+    ticket: String,
+}
+
+async fn online_qr_poll(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<QrPollQuery>,
+) -> ApiResult<Json<online::QrPoll>> {
+    let sess = qr_session(&q.source, state.qr.take(&q.ticket).await)?;
+    // 终态直接回本地票态、不再打上游：confirmed/expired 不可回退，QQ 的
+    // check_sig 是一次性凭证，confirmed 后重放只会报错并可能逼票态降级。
+    // account 在首次 confirmed 响应里已带过，前端见终态即停止轮询。
+    if online::qr::is_terminal(&sess.state) {
+        return Ok(Json(online::QrPoll {
+            state: sess.state,
+            account: None,
+        }));
+    }
+    let (state_name, account) = tagged(
+        &q.source,
+        online::qr_poll(&online_ctx(&state), &q.source, &sess.platform_ticket).await,
+    )?;
+    // 平台已确认时凭据由平台模块自己写入 cred 保险库；这里只同步票态。
+    // 上游调用失败时不更新票态，让前端按原节奏继续轮询；Registry 自身
+    // 再挡一道：终态不会被任何上游返回降级。
+    state.qr.update(&q.ticket, &state_name).await;
+    Ok(Json(online::QrPoll {
+        state: state_name,
+        account,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct QrCancelRequest {
+    source: String,
+    /// 前端关弹窗时总会调一次 cancel（可能从未拿到票）；空票按幂等成功处理。
+    #[serde(default)]
+    ticket: String,
+}
+
+async fn online_qr_cancel(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<QrCancelRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !body.ticket.is_empty() {
+        // 取消同样要验源：不能拿一个源的 ticket 去删另一个源的会话。
+        if let Some(sess) = state.qr.take(&body.ticket).await {
+            if sess.source != body.source {
+                return Err(bad_request("二维码会话与音源不匹配，请重新扫码"));
+            }
+            state.qr.cancel(&body.ticket).await;
+        }
+        // 票已过期/不存在：cancel 本就是幂等清理，返回成功即可。
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountQuery {
+    source: String,
+}
+
+async fn online_account(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<AccountQuery>,
+) -> ApiResult<Json<online::AccountInfo>> {
+    tagged(
+        &q.source,
+        online::account(&online_ctx(&state), &q.source).await,
+    )
+    .map(Json)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::query_token;
+    use super::{pick_index, playlist_scope, qr_session, query_token};
 
     #[test]
     fn token_is_read_from_a_query_string() {
@@ -845,5 +1648,48 @@ mod tests {
         // 空串会被原样取出来，交给上层和真实 token 比对后落到 401 分支。
         // 这里不特殊处理，是为了让"没带 token"和"带了个错的 token"走同一条路径。
         assert_eq!(query_token(Some("token=")).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn playlist_scope_defaults_and_whitelists() {
+        assert_eq!(playlist_scope(None).unwrap(), "created");
+        assert_eq!(playlist_scope(Some("liked".into())).unwrap(), "liked");
+        // 非法 scope 必须 400，不能被平台模块静默当成「全部歌单」。
+        let err = playlist_scope(Some("friends".into())).unwrap_err();
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn pick_index_clamps_out_of_range() {
+        assert_eq!(pick_index(None, 5), 0);
+        assert_eq!(pick_index(Some(2), 5), 2);
+        // 越界（前端分页后传来旧下标）夹到最后一首而非报错。
+        assert_eq!(pick_index(Some(99), 5), 4);
+        // 空列表不允许下溢 panic：两个分支都收 0。
+        assert_eq!(pick_index(None, 0), 0);
+        assert_eq!(pick_index(Some(0), 0), 0);
+    }
+
+    #[test]
+    fn qr_session_rejects_missing_and_cross_source_tickets() {
+        // 过期/未知票：400 引导重新扫码。
+        assert_eq!(qr_session("netease", None).unwrap_err().status, 400);
+
+        let sess = crate::online::qr::Session {
+            source: "qq".into(),
+            state: "waiting".into(),
+            created_ms: 0,
+            platform_ticket: "pt".into(),
+        };
+        // A 平台的票不能投到 B 平台的 qr_check。
+        assert_eq!(
+            qr_session("netease", Some(sess.clone()))
+                .unwrap_err()
+                .status,
+            400
+        );
+        // 同源放行，平台票原样可取。
+        let ok = qr_session("qq", Some(sess)).unwrap();
+        assert_eq!(ok.platform_ticket, "pt");
     }
 }

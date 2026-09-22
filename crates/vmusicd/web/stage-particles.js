@@ -602,8 +602,25 @@
     return api;
   }
 
+  // 销毁：移除注入的画布与涟漪节点、注销帧门
+  function destroy() {
+    if (window.Stage && Stage.removeGate) Stage.removeGate('particles');
+    views.forEach(function (v) {
+      if (v.pool) v.pool.forEach(function (n) {
+        if (n.parentNode) n.parentNode.removeChild(n);
+      });
+      if (v.canvas && v.canvas.parentNode) v.canvas.parentNode.removeChild(v.canvas);
+    });
+    views = [];
+    active = null;
+    renderer = null;
+    stageEl = null;
+    pageEl = null;
+  }
+
   var api = {
     init: init,
+    destroy: destroy,
     // 由 app.js 在设置加载完成后调用一次；之后再调用不会换渲染器。
     attach: attach,
     renderer: function () { return rendererName; },

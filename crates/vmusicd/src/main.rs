@@ -7,6 +7,7 @@
 //! port, writes a discovery file with the token, and serves the bundled UI.
 
 mod config;
+mod daily;
 mod error;
 mod online;
 mod routes;
@@ -38,6 +39,10 @@ const CREATIVE_CSS: &str = include_str!("../web/creative.css");
 const STAGE_JS: &str = include_str!("../web/stage.js");
 const STAGE_PARTICLES_JS: &str = include_str!("../web/stage-particles.js");
 const STAGE_PARTICLES_GL_JS: &str = include_str!("../web/stage-particles-gl.js");
+const STAGE_GL_HOST_JS: &str = include_str!("../web/stage-gl-host.js");
+const STAGE_COVER_PARTICLES_JS: &str = include_str!("../web/stage-cover-particles.js");
+const STAGE_STARRIVER_JS: &str = include_str!("../web/stage-starriver.js");
+const VISUAL_CONTROLLER_JS: &str = include_str!("../web/visual-controller.js");
 const THEMES_JS: &str = include_str!("../web/themes.js");
 const STAGE_CTL_JS: &str = include_str!("../web/stage-control.js");
 const SHELF_JS: &str = include_str!("../web/shelf.js");
@@ -56,6 +61,15 @@ const BACKGROUNDS_JS: &str = include_str!("../web/backgrounds.js");
 const BGWALL_JS: &str = include_str!("../web/bgwall.js");
 const LYRIC3D_JS: &str = include_str!("../web/lyric3d.js");
 const WORKSHOP_JS: &str = include_str!("../web/workshop.js");
+// 在线曲库（SP1）：vendored MIT 二维码库 + 三个在线模块与样式。
+const QRCODE_JS: &str = include_str!("../web/vendor/qrcode.js");
+const ONLINE_LOGIN_JS: &str = include_str!("../web/online-login.js");
+const ONLINE_JS: &str = include_str!("../web/online.js");
+const ONLINE_PLAYLISTS_JS: &str = include_str!("../web/online-playlists.js");
+const ONLINE_CSS: &str = include_str!("../web/online.css");
+// 收藏与每日推荐。两者都先于 app.js 加载，由 app.js 在启动序列里 bind()。
+const FAVORITES_JS: &str = include_str!("../web/favorites.js");
+const DAILY_JS: &str = include_str!("../web/daily.js");
 
 const JS: &str = "application/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
@@ -105,6 +119,9 @@ async fn main() -> anyhow::Result<()> {
         queue: Default::default(),
         cursor: Default::default(),
         scan: Default::default(),
+        qr: crate::online::qr::Registry::new(),
+        play_generation: Default::default(),
+        play_commit: Default::default(),
     });
     spawn_event_pump(state.clone());
 
@@ -120,6 +137,16 @@ async fn main() -> anyhow::Result<()> {
             "/stage-particles-gl.js",
             get(|| asset(JS, STAGE_PARTICLES_GL_JS)),
         )
+        .route("/stage-gl-host.js", get(|| asset(JS, STAGE_GL_HOST_JS)))
+        .route(
+            "/stage-cover-particles.js",
+            get(|| asset(JS, STAGE_COVER_PARTICLES_JS)),
+        )
+        .route("/stage-starriver.js", get(|| asset(JS, STAGE_STARRIVER_JS)))
+        .route(
+            "/visual-controller.js",
+            get(|| asset(JS, VISUAL_CONTROLLER_JS)),
+        )
         .route("/themes.js", get(|| asset(JS, THEMES_JS)))
         .route("/shelf.js", get(|| asset(JS, SHELF_JS)))
         .route("/pl-covers.js", get(|| asset(JS, PL_COVERS_JS)))
@@ -130,9 +157,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/bgwall.js", get(|| asset(JS, BGWALL_JS)))
         .route("/lyric3d.js", get(|| asset(JS, LYRIC3D_JS)))
         .route("/workshop.js", get(|| asset(JS, WORKSHOP_JS)))
+        .route("/vendor/qrcode.js", get(|| asset(JS, QRCODE_JS)))
+        .route("/online-login.js", get(|| asset(JS, ONLINE_LOGIN_JS)))
+        .route("/online.js", get(|| asset(JS, ONLINE_JS)))
+        .route(
+            "/online-playlists.js",
+            get(|| asset(JS, ONLINE_PLAYLISTS_JS)),
+        )
+        .route("/favorites.js", get(|| asset(JS, FAVORITES_JS)))
+        .route("/daily.js", get(|| asset(JS, DAILY_JS)))
         .route("/style.css", get(|| asset(CSS, STYLE_CSS)))
         .route("/stage.css", get(|| asset(CSS, STAGE_CSS)))
         .route("/creative.css", get(|| asset(CSS, CREATIVE_CSS)))
+        .route("/online.css", get(|| asset(CSS, ONLINE_CSS)))
         .route(
             "/",
             get({

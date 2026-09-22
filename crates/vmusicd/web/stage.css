@@ -104,7 +104,9 @@
      被移除 → 回落到封面取色/主题色。rgb 三元组同理（rgba() 用）。 */
   --lyric-highlight: var(--lyric-color, var(--music-highlight));
   --lyric-highlight-rgb: var(--lyric-color-rgb, var(--music-highlight-rgb));
-  --lyric-idle: rgba(255, 255, 255, 0.62);
+  /* 未唱字的基础亮度。模式合并后取略亮的档：行一进入就有轻微整体亮度，
+     随逐字填充升至全亮（兼顾原逐行模式「整行即亮」的观感）。 */
+  --lyric-idle: rgba(255, 255, 255, 0.74);
   --lyric-active: var(--text);
 
   /* 距离衰减：越远越淡，但不低于 floor，保证还能读。
@@ -163,12 +165,12 @@
      而不是整个滚动视口——带太宽等于整层粒子都被压暗，白铺一层。 */
   --lp-fade-span: 0.17;
 
-  /* --- 全屏舞台封面盘 ---
+  /* --- 全屏舞台背景盒（粒子封面 / 星河共用）---
      这块板子在 .lp-scene 里，所以它和歌词共用同一个透视与用户拖出来的角度。
-     尺寸/转速由驾驶舱的旋钮写覆盖，其余（明暗、倒角、发光）留在组件里。
-     52vmin 是"背景装置"的尺度：30vmin 在 2K 屏上只有 356px，缩在整屏中间
-     像一张贴纸，撑到一半视口高度才压得住 68px 的字。 */
-  --lp-cover-size: 52vmin;
+     100vmin = 铺满显示区短边：横屏时铺满整高、竖屏时铺满整宽，背景四周
+     不再留黑边；画面超出长边的部分自然裁出屏外。
+     尺寸仍可由驾驶舱旋钮覆盖。 */
+  --lp-cover-size: 100vmin;
   --lp-cover-spin: 22s;
   /* 往画面深处推的距离。负值让板子退到歌词平面之后，这样旋转时它是"舞台
      后面的装置"，而不是糊在字上的一块贴纸。推得越远，透视缩得越小，
@@ -492,13 +494,6 @@ body.is-playing .disc { animation-play-state: running; }
     rgba(var(--lyric-highlight-rgb), calc(var(--lyric-glow-alpha) + var(--stage-energy) * 0.35));
 }
 
-/* 逐行模式：不做逐字染色，整行推进 */
-.stage[data-mode="line"] .word {
-  background-image: none;
-  color: inherit;
-  -webkit-text-fill-color: currentColor;
-}
-
 .word {
   position: relative;
   /* 擦除边界不做硬切：让已唱色在 --lyric-edge-soft 宽度过渡带里融进未唱色。
@@ -648,8 +643,17 @@ body.is-playing .disc { animation-play-state: running; }
      完全由 stage.js 的 lo/hi 边界负责，短歌词靠边界钳制自然停在不动的位置，
      两种长度走同一条路径。 */
   gap: 14px;
-  padding: 0 clamp(20px, 7vw, 96px);
+  /* overflow / mask / padding 都不在这一层了：它们会裁掉溢出 body、铺满视口
+     的全屏粒子背景（.lp-cover.gl-active）。歌词轨自己的裁剪与渐隐收进
+     .lp-track-clip，两个子系统互不干扰。 */
+}
+/* 歌词轨裁剪层：overflow + mask 只能待在这种"普通"节点上（见上条），
+   preserve-3d 全部留在 .lp-scene。 */
+.lp-track-clip {
+  position: absolute;
+  inset: 0;
   overflow: hidden;
+  padding: 0 clamp(20px, 7vw, 96px);
   /* 全屏页里没有"页面滚动"这回事，禁掉浏览器手势，把纵向拖拽留给 JS 唱片式滚动 */
   touch-action: none;
   /* 顶部/底部渐隐，让大段歌词有进出场的感觉 */
@@ -804,7 +808,39 @@ body.is-playing .disc { animation-play-state: running; }
      封面层不需要自己的时钟，也不必再多占一个帧门。 */
   scale: calc(1 + var(--stage-energy) * 0.05);
 }
-.lyric-page.has-cover .lp-cover { display: block; }
+/* 背景盒在两种粒子场景下都显示：has-cover（专辑封面）/ has-starriver（星河） */
+.lyric-page.has-cover .lp-cover,
+.lyric-page.has-starriver .lp-cover { display: block; }
+
+/* 共享 GL 画布铺满背景盒：粒子封面与星河都画在这一块画布上。
+   默认隐藏，仅当某粒子场景真正生效（.gl-active）时显示。 */
+.lp-cover-gl {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+}
+.lp-cover.gl-active .lp-cover-gl { display: block; }
+
+/* 粒子层生效时隐藏 CSS 双面旋转卡片，两层不同时出现 */
+.lp-cover.gl-active .lp-cover-spin { display: none; }
+/* 粒子场景下这一层是**全屏背景**：以视口中心为基准撑成 100vw × 100vh，
+   溢出 body 也不受裁剪（裁剪与 mask 已收进 .lp-track-clip）。
+   原有 100vmin 方盒定位（left/top/margin）、translateZ+rotateX 变换和能量
+   呼吸全部失效——它们是为歌词中间那块小封面准备的。视角旋转仍由外层
+   .lp-scene 的 rotateX/rotateY 提供，所以 360° 旋转照样带着背景走。 */
+.lp-cover.gl-active {
+  left: 50%;
+  top: 50%;
+  width: 100vw;
+  height: 100vh;
+  margin: -50vh 0 0 -50vw;
+  transform: none;
+  scale: none;
+}
+/* 全屏粒子背景不显示专辑封面那圈主色辉光（星河与粒子封面都不显示） */
+.lp-cover.gl-active::before { display: none; }
 
 /* 盘后的一圈主色辉光：让封面"挂在舞台上"，而不是浮在黑底上 */
 .lp-cover::before {
@@ -815,6 +851,32 @@ body.is-playing .disc { animation-play-state: running; }
   background: radial-gradient(closest-side, rgba(var(--music-highlight-rgb), 0.55), transparent);
   filter: blur(26px);
   opacity: calc(0.3 + var(--stage-energy) * 0.4);
+}
+
+/* 背景场景切换组：样式与歌词模式组同一套语言 */
+.lp-scenes {
+  display: flex;
+  gap: 4px;
+  margin-left: 18px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+.lp-scene-btn {
+  padding: 5px 11px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.lp-scene-btn:hover { color: var(--text); background: var(--hover); }
+.lp-scene-btn.active {
+  color: #0a0c0f;
+  background: var(--text);
 }
 
 .lp-cover-spin {
@@ -1524,14 +1586,15 @@ html.fx-on .stage-dots {
   mix-blend-mode: screen;
 }
 
-/* 镜头组：柔化 / 色散 / 眩光 / 畸变 —— 作用在唱片上，避免糊掉歌词文字 */
+/* 镜头组：柔化 / 色散 / 眩光 / 暗部 —— 全部作用在唱片上，避免糊掉歌词文字。
+   （此前 contrast/brightness 挂在不存在的 .disc-img 上，是永不生效的死规则，
+   现合并到 .disc。） */
 html.fx-on .disc {
   filter:
     blur(calc(var(--fx-lens-bokeh, 0) * 0.06px))
-    saturate(calc(1 + var(--fx-lens-chroma, 0) / 220));
-}
-html.fx-on .disc-img {
-  filter: contrast(calc(1 + var(--fx-lens-aberration, 0) / 400))
+    saturate(calc(1 + var(--fx-lens-chroma, 0) / 220))
+    contrast(calc(1 + var(--fx-lens-aberration, 0) / 400))
+    hue-rotate(calc(var(--fx-lens-distort, 0) * 0.5deg))
     brightness(calc(1 + var(--fx-grain-softness, 0) / 420));
 }
 html.fx-on .disc-wrap::after {

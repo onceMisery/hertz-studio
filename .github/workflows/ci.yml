@@ -25,6 +25,19 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Frontend contract checks
+        run: |
+          node scripts/check-assets.js
+          node scripts/check-css-tokens.js
+          node scripts/check-creative.js
+          node scripts/check-favorites.js
+          node scripts/check-online.js
+          node scripts/check-stage-control.js
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

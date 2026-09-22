@@ -223,6 +223,11 @@ vec3 paletteMix(float t) { return mix(uColorA, uColorB, clamp(t, 0.0, 1.0)); }
     id: 'towers',
     label: '频谱塔林',
     geom: { mode: 'TRIANGLES', verts: 36, instances: 64 },
+    qualityGeom: [
+      { verts: 36, instances: 32 },
+      { verts: 36, instances: 48 },
+      { verts: 36, instances: 64 }
+    ],
     depth: true,
     blend: 'add',
     uniforms: ['uCount', 'uSpan', 'uHeight', 'uWidth', 'uDepth', 'uAlphaK'],
@@ -280,7 +285,8 @@ void main() {
   frag = vec4(c * a, a);
 }`,
     setup: function (gl, U, S) {
-      gl.uniform1i(U.uCount, 64);
+      var q = qualityOf(S);
+      gl.uniform1i(U.uCount, [32, 48, 64][q]);
       gl.uniform1f(U.uSpan, S.p.span);
       gl.uniform1f(U.uHeight, S.p.height);
       gl.uniform1f(U.uWidth, S.p.width);
@@ -307,6 +313,15 @@ void main() {
     id: 'orb',
     label: '频谱球',
     geom: { mode: 'TRIANGLES', verts: 40 * 24 * 6, instances: 1 },
+    qualityGeom: [
+      { verts: 24 * 14 * 6, instances: 1 },
+      { verts: 32 * 20 * 6, instances: 1 },
+      { verts: 40 * 24 * 6, instances: 1 }
+    ],
+    qualityDefs: function (q) {
+      var seg = [24, 32, 40][q], ring = [14, 20, 24][q];
+      return '#define Q_SEG ' + seg + '\n#define Q_RING ' + ring + '\n';
+    },
     depth: true,
     blend: 'add',
     uniforms: ['uRadius', 'uAmp', 'uWire', 'uWobble'],
@@ -315,8 +330,8 @@ void main() {
 uniform float uRadius; uniform float uAmp; uniform float uWire; uniform float uWobble;
 `,
     vert: GEOM + `
-const int SEG = 40;
-const int RING = 24;
+const int SEG = Q_SEG;
+const int RING = Q_RING;
 out vec3 vN; out vec3 vW; out vec3 vBary; out float vE;
 void main() {
   vec3 bary;
@@ -365,17 +380,23 @@ void main() {
     id: 'tunnel',
     label: '光隧道',
     geom: { mode: 'TRIANGLES', verts: 6, instances: 180 },
+    qualityGeom: [
+      { verts: 6, instances: 96 },
+      { verts: 6, instances: 144 },
+      { verts: 6, instances: 180 }
+    ],
     depth: true,
     blend: 'add',
-    uniforms: ['uRingRadius', 'uRingLen', 'uSpread', 'uPush'],
+    uniforms: ['uCount', 'uRingRadius', 'uRingLen', 'uSpread', 'uPush'],
     defaults: { ringRadius: 4.2, ringLen: 22, spread: 1.5, push: 6.5 },
     decl: `
+uniform int uCount;
 uniform float uRingRadius; uniform float uRingLen; uniform float uSpread; uniform float uPush;
 `,
     vert: GEOM + `
 out vec2 vUV; out float vId; out float vDepth; out vec3 vW;
 void main() {
-  int n = 180;
+  int n = uCount;
   int id = gl_InstanceID;
   vec2 q = quadVert(gl_VertexID);
   float lane = float(id) / float(n);
@@ -429,6 +450,8 @@ void main() {
   frag = vec4(c * a, a);
 }`,
     setup: function (gl, U, S) {
+      var q = qualityOf(S);
+      gl.uniform1i(U.uCount, [96, 144, 180][q]);
       gl.uniform1f(U.uRingRadius, S.p.ringRadius);
       gl.uniform1f(U.uRingLen, S.p.ringLen);
       gl.uniform1f(U.uSpread, S.p.spread);
@@ -443,11 +466,17 @@ void main() {
     id: 'nebula',
     label: '星云',
     geom: { mode: 'POINTS', verts: 1, instances: 24000 },
+    qualityGeom: [
+      { verts: 1, instances: 8000 },
+      { verts: 1, instances: 16000 },
+      { verts: 1, instances: 24000 }
+    ],
     depth: true,
     blend: 'add',
-    uniforms: ['uCloudR', 'uSpread3', 'uSize', 'uSpin', 'uDensityK'],
+    uniforms: ['uCount', 'uCloudR', 'uSpread3', 'uSize', 'uSpin', 'uDensityK'],
     defaults: { cloudR: 6.0, spread3: 2.4, size: 2.6, spin: 0.5, densityK: 1.0 },
     decl: `
+uniform int uCount;
 uniform float uCloudR; uniform float uSpread3; uniform float uSize;
 uniform float uSpin; uniform float uDensityK;
 `,
@@ -457,7 +486,7 @@ void main() {
   float i = float(gl_InstanceID);
   vec3 h = hash31(i * 0.7311 + uSeed * 13.0);
   vec3 h2 = hash31(i * 1.9137 + 7.0 + uSeed * 5.0);
-  float n = float(24000);
+  float n = float(uCount);
   float u = (i + 0.5) / n;
 
   // 参考带：每个点归属一段频谱，轨道半径与高度都由那一段的能量决定。
@@ -503,6 +532,8 @@ void main() {
   frag = vec4(c * o, o);
 }`,
     setup: function (gl, U, S) {
+      var q = qualityOf(S);
+      gl.uniform1i(U.uCount, [8000, 16000, 24000][q]);
       gl.uniform1f(U.uCloudR, S.p.cloudR);
       gl.uniform1f(U.uSpread3, S.p.spread3);
       gl.uniform1f(U.uSize, S.p.size);
@@ -518,6 +549,15 @@ void main() {
     id: 'terrain',
     label: '频谱地形',
     geom: { mode: 'TRIANGLES', verts: 72 * 72 * 6, instances: 1 },
+    qualityGeom: [
+      { verts: 36 * 36 * 6, instances: 1 },
+      { verts: 54 * 54 * 6, instances: 1 },
+      { verts: 72 * 72 * 6, instances: 1 }
+    ],
+    qualityDefs: function (q) {
+      var n = [36, 54, 72][q];
+      return '#define Q_N ' + n + '\n';
+    },
     depth: true,
     blend: 'add',
     uniforms: ['uExtent', 'uAmp2', 'uScroll', 'uWire2'],
@@ -530,7 +570,7 @@ uniform float uExtent; uniform float uAmp2;
 uniform float uScroll; uniform float uWire2;
 `,
     vert: GEOM + `
-const int N = 72;
+const int N = Q_N;
 out vec3 vW; out vec3 vBary; out float vH; out vec3 vN; out float vZ;
 void main() {
   vec2 cxz; vec3 bary;
@@ -835,6 +875,26 @@ void main() {
     } catch (e) { return false; }
   }
 
+  function clampQuality(q, fallback) {
+    var n = Number(q);
+    if (!isFinite(n)) n = fallback;
+    return n < 0 ? 0 : n > 2 ? 2 : n | 0;
+  }
+
+  function qualityOf(S) {
+    return clampQuality(S && S.quality, 2);
+  }
+
+  function geometryFor(def, q) {
+    var base = def.geom;
+    var pick = (def.qualityGeom && def.qualityGeom[q]) || base;
+    return {
+      mode: pick.mode || base.mode,
+      verts: pick.verts,
+      instances: pick.instances || 1
+    };
+  }
+
   function compile(gl, type, src) {
     var sh = gl.createShader(type);
     gl.shaderSource(sh, src);
@@ -867,6 +927,7 @@ void main() {
 
   function create(canvas, opts) {
     opts = opts || {};
+    var engineQuality = clampQuality(opts.quality, 2);
     var gl = null;
     try {
       gl = canvas.getContext('webgl2', {
@@ -904,6 +965,7 @@ void main() {
     // 图集内容由 window.Lyric3D 生成；只在当前行变化时变像素。
     var lyricTex = gl.createTexture();
     var lyricReady = false;
+    var atlasW = 0, atlasH = 0;
     // 本引擎纹理当前内容的签名。不能依赖 Lyric3D 的全局去重：舞台与全屏页各持
     // 一个引擎、一张纹理，却共享同一张图集。一个视图停渲时图集被另一个视图反复
     // 改写；它重新激活的那一帧全局签名恰好相同，全局去重会返回"无变化"，纹理
@@ -911,22 +973,29 @@ void main() {
     var lyricSig = null;
     function uploadLyric(S) {
       if (!window.Lyric3D) return;
+      var q = qualityOf(S);
+      window.Lyric3D.setQuality(q);
+      var info = window.Lyric3D.size();
+      var resized = info.w !== atlasW || info.h !== atlasH;
       var need = window.Lyric3D.sig(S.lyric);
       var changed = false;
-      if (need !== lyricSig) {
+      if (resized || need !== lyricSig) {
         lyricSig = need;
-        // force：即使全局签名相同也重画图集——图集此刻多半装着另一视图的歌词。
+        // force：即使全局签名相同也重画图集——图集此刻多半装着另一视图的歌词，
+        // 或尺寸刚发生变化。
         changed = window.Lyric3D.frame(S.lyric, true);
       }
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, lyricTex);
-      if (!lyricReady) {
+      if (!lyricReady || resized) {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, window.Lyric3D.canvas);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
         lyricReady = true;
+        atlasW = info.w;
+        atlasH = info.h;
       } else if (changed) {
         gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, window.Lyric3D.canvas);
       }
@@ -972,19 +1041,23 @@ void main() {
     var progs = {};       // sceneId -> { prog, U }
     var postProgs = {};
 
-    function sceneProgram(def) {
-      if (progs[def.id]) return progs[def.id];
+    function sceneProgram(def, quality) {
+      var q = clampQuality(quality, engineQuality);
+      var key = def.id + ':' + q;
+      if (progs[key]) return progs[key];
       // decl 同时前置到两个阶段。某个阶段用不到的 uniform 会被编译器优化掉、
       // location 变 null，uniform*() 传 null 在 WebGL 里是合法的空操作 ——
       // 这样就不必为每个场景维护两份声明列表，也就不会出现"改了声明忘了另一边"。
       var decl = def.decl || '';
-      var prog = link(gl, '#version 300 es\n' + COMMON + decl + def.vert,
+      var qualityDefs = def.qualityDefs ? def.qualityDefs(q) : '';
+      var prog = link(gl,
+        '#version 300 es\n' + qualityDefs + COMMON + decl + def.vert,
         '#version 300 es\n' + COMMON + decl + def.frag);
       var U = collect(prog, ['uViewProj', 'uModel', 'uCamPos', 'uTime', 'uSeed',
         'uSpec', 'uAgg', 'uPulse', 'uEnergy', 'uPlay', 'uRes',
         'uColorA', 'uColorB'].concat(def.uniforms || []));
       var entry = { prog: prog, U: U };
-      progs[def.id] = entry;
+      progs[key] = entry;
       return entry;
     }
 
@@ -1087,9 +1160,10 @@ void main() {
       for (var i = 0; i < SCENES.length; i += 1) if (SCENES[i].id === S.scene) def = SCENES[i];
       if (!def) return { ok: false, reason: 'unknown-scene' };
 
+      var q = qualityOf(S);
       var entry;
       try {
-        entry = sceneProgram(def);
+        entry = sceneProgram(def, q);
       } catch (e) {
         return { ok: false, reason: 'shader', message: String(e.message || e) };
       }
@@ -1111,7 +1185,7 @@ void main() {
       if (def.id === 'lyric') uploadLyric(S);
 
       // --- 场景渲染到离屏 ---
-      var g = def.geom;
+      var g = geometryFor(def, q);
       gl.bindFramebuffer(gl.FRAMEBUFFER, sceneT.fbo);
       gl.viewport(0, 0, sceneT.w, sceneT.h);
       gl.clearColor(0, 0, 0, 0);
@@ -1295,7 +1369,7 @@ void main() {
     // 正在跑的帧率探测。放在用户还看不到画面的启动阶段一次付清。
     function warmUp() {
       for (var i = 0; i < SCENES.length; i += 1) {
-        try { sceneProgram(SCENES[i]); } catch (e) { /* 单个场景坏掉不影响其它 */ }
+        try { sceneProgram(SCENES[i], engineQuality); } catch (e) { /* 单个场景坏掉不影响其它 */ }
       }
       try { postProgram('bright', BRIGHT_FS); postProgram('blur', BLUR_FS); postProgram('composite', COMPOSITE_FS); }
       catch (e) { /* 同上 */ }
