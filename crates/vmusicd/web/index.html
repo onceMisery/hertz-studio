@@ -400,6 +400,13 @@
         <div class="opl-bar">
           <button id="opl-detail-back" class="btn" type="button" aria-label="返回在线歌单">← 返回</button>
           <div class="opl-bar-title" id="opl-detail-title"></div>
+          <!-- 曲目两种排布。封面是默认排法（一眼看得到专辑图），列表用于读
+               专辑/时长这类文本列；切换只改渲染，不重新取数，滚动位置以外
+               的一切都保留。 -->
+          <div class="opl-modes" id="opl-modes" role="group" aria-label="曲目排布">
+            <button class="chip active" type="button" data-opl-mode="cover">封面</button>
+            <button class="chip" type="button" data-opl-mode="list">列表</button>
+          </div>
           <input id="opl-detail-q" class="opl-filter" type="search" autocomplete="off"
                  placeholder="过滤曲目…" aria-label="过滤已加载曲目">
         </div>
@@ -409,7 +416,7 @@
                的七列栅格，两处列宽因此永远一致。 -->
           <aside class="opl-info" id="opl-info" aria-label="歌单信息"></aside>
           <div class="opl-tracks">
-            <div class="lib-head opl-head">
+            <div class="lib-head opl-head" id="opl-head">
               <span>#</span><span></span><span>标题</span><span>专辑</span><span>来源</span><span>时长</span><span></span>
             </div>
             <div id="opl-rows" class="opl-rows"></div>

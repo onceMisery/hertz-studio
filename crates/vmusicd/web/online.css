@@ -307,3 +307,18 @@ html.qr-modal-open .app{visibility:hidden}
 .opl-sentinel[hidden]{display:none}
 .opl-error{display:flex;flex-direction:column;align-items:flex-start;gap:8px;
   padding:10px 4px}
+
+/* ── 详情层曲目排布切换：封面（默认）/ 列表 ──────────────────────────────
+   封面排布复用在线面板网格那套卡片类，两处网格长得完全一样；列表排布沿用
+   曲库的 .lib-head 七列栅格。切换只换 class，不重建数据。 */
+
+.opl-modes{display:flex;gap:4px;flex:none}
+.opl-head[hidden]{display:none}
+
+.opl-rows.is-cover{display:grid;flex:1;align-content:start;
+  grid-template-columns:repeat(auto-fill,minmax(124px,1fr));gap:14px;
+  padding:10px 0}
+.opl-track-card{position:relative;min-width:0}
+.opl-track-card.is-disabled{opacity:.45;cursor:default}
+.opl-track-card.is-disabled:hover{transform:none}
+.opl-card-vip{position:absolute;top:6px;right:6px;margin-left:0}

@@ -331,6 +331,58 @@ function detailBody(tracks, total) {
     eq(env.spies.played[0].tracks.length, 1, '播放的是筛选后的曲目');
   }
 
+  section('曲目排布：默认封面，可切列表');
+  {
+    const env = makeSandbox({
+      transport: makeTransport(() => detailBody([
+        T('1', '晴天'),
+        T('2', '稻香'),
+        T('3', 'VIP 曲', { vip_only: true, playable: false }),
+      ], 3)),
+    });
+    env.view.open('netease', 'P1', 'arrange');
+    await ticks();
+    const box = env.doc.getElementById('opl-rows');
+    const cards = byClass(box, 'opl-track-card');
+    eq(cards.length, 3, '默认按封面铺成卡片，一卡一首');
+    eq(byClass(box, 'track').length, 0, '封面排布下没有表格行');
+    eq(env.doc.getElementById('opl-head').hidden, true, '封面排布收起文本表头');
+    ok(classOf(box, 'is-cover'), '容器带上封面排布的类');
+    has(texts(cards[0]), '晴天', '卡片上有歌名');
+    has(texts(cards[0]), 'A · 0:01', '卡片上带歌手与时长');
+
+    cards[1].onclick();
+    await ticks();
+    eq(env.spies.played.length, 1, '点卡片即播放');
+    eq(env.spies.played[0].index, 1, '从被点的那一首开始');
+    eq(env.spies.played[0].tracks.length, 3, '队列是整盘可见曲目');
+
+    ok(classOf(cards[2], 'is-disabled'), 'VIP 卡置灰');
+    env.spies.played.length = 0;
+    cards[2].onclick();
+    await ticks();
+    eq(env.spies.played.length, 0, 'VIP 卡点了不播');
+    has(env.spies.toasts.map((t) => t.msg).join('|'), 'VIP 专享', 'VIP 卡如实提示');
+
+    env.view.setMode('list');
+    await ticks();
+    eq(byClass(box, 'opl-track-card').length, 0, '切列表后不再有卡片');
+    eq(byClass(box, 'track').length, 3, '切列表后是表格行');
+    eq(env.doc.getElementById('opl-head').hidden, false, '列表排布恢复文本表头');
+    eq(env.view.state.mode, 'list', '排布状态记录为 list');
+
+    // 切排布不重新取数：筛选词与已加载曲目都保留。
+    const q = env.doc.getElementById('opl-detail-q');
+    q.value = '稻';
+    q.oninput();
+    await ticks();
+    eq(byClass(box, 'track').length, 1, '列表下的筛选照旧生效');
+    env.view.setMode('cover');
+    await ticks();
+    eq(byClass(box, 'opl-track-card').length, 1, '切回封面后筛选词仍在生效');
+    ok(env.spies.played.length === 0, '两次切换都没有触发重新取数或播放');
+  }
+
   section('歌单过期与写能力');
   {
     const env = makeSandbox({ transport: makeTransport(() => detailBody([T('1', 'A')], 1)) });
@@ -341,15 +393,18 @@ function detailBody(tracks, total) {
     ok(env.spies.toasts[0].kind === 'error', '提示是错误级');
   }
   {
-    // playlist_write 能力位决定曲目行是否挂移除按钮；没有该能力就不挂。
+    // 移除按钮只挂在列表排布的行上——封面卡片没有动作位（与参考实现一致：
+    // 它的封面画布也没有单曲移除，移除在曲目列表里）。所以两条用例都先切列表。
     const withWrite = makeSandbox({
       transport: makeTransport(() => detailBody([T('1', 'A')], 1)),
       caps: { netease: ['playlist_write'] },
     });
     withWrite.view.open('netease', 'P1', 'arrange');
     await ticks();
+    withWrite.view.setMode('list');
+    await ticks();
     const row = withWrite.spies.rows[0];
-    eq(row.querySelector('.t-actions').children.length, 1, '有 playlist_write 时挂移除按钮');
+    eq(row.querySelector('.t-actions').children.length, 1, '列表排布下挂移除按钮');
 
     const noWrite = makeSandbox({
       transport: makeTransport(() => detailBody([T('1', 'A')], 1)),
@@ -357,7 +412,20 @@ function detailBody(tracks, total) {
     });
     noWrite.view.open('netease', 'P1', 'arrange');
     await ticks();
+    noWrite.view.setMode('list');
+    await ticks();
     eq(noWrite.spies.rows[0].querySelector('.t-actions').children.length, 0, '没有该能力就不挂');
+
+    // 封面排布下压根不建行，因此也不存在移除按钮。
+    const coverOnly = makeSandbox({
+      transport: makeTransport(() => detailBody([T('1', 'A')], 1)),
+      caps: { netease: ['playlist_write'] },
+    });
+    coverOnly.view.open('netease', 'P1', 'arrange');
+    await ticks();
+    eq(coverOnly.spies.rows, undefined, '封面排布下不建表格行');
+    eq(byClass(coverOnly.doc.getElementById('opl-rows'), 'op-remove').length, 0,
+      '封面卡片上没有移除按钮');
   }
 
   console.log('\n' + '─'.repeat(64));

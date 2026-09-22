@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 //
-// 在线歌单的两层界面：网格层（歌单卡片）→ 详情层（信息面板 + 曲目表）。
+// 在线歌单的两层界面：网格层（歌单卡片）→ 详情层（信息面板 + 曲目）。
+//
+// 详情层的曲目有两种排布：封面（默认，一眼看得到专辑图）与列表（读专辑/时长
+// 这些文本列）。这与参考实现一致——它默认把曲目铺成封面卡片，文本列表是二级
+// 入口；切换只改渲染，不重新取数。
 //
 // 结构参照 folia-major 的「集合网格 → 曲目详情」，实现全部走当前项目的原生
 // 方式：
@@ -45,6 +49,7 @@
     error: null,      // { kind: 'generic' | 'not-public', message }
     loadingMore: false,
     trackQuery: '',
+    mode: 'cover',    // cover | list
   };
 
   function el(id) { return document.getElementById(id); }
@@ -60,6 +65,16 @@
   function setLayer(name) { if (H && H.setLayer) H.setLayer(name); }
   function capsOf(src) { return (H && H.caps) ? (H.caps(src) || []) : []; }
   function hasCap(src, cap) { return capsOf(src).indexOf(cap) >= 0; }
+  // 时长：宿主（app.js）有一份和曲库/搜索完全相同的格式化实现，优先用它，
+  // 取不到时退回本地算，卡片上不会出现空白时长。
+  function fmt(ms) {
+    if (H && H.fmt) return H.fmt(ms);
+    if (!ms) return '—';
+    var total = Math.round(ms / 1000);
+    var m = Math.floor(total / 60);
+    var s = total % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
 
   // ── 网格层 ───────────────────────────────────────────────────────────────
 
@@ -359,6 +374,12 @@
     var box = el('opl-rows');
     if (!box) return;
     box.innerHTML = '';
+    // 封面排布下"专辑/来源/时长"这几列没有落点（卡片上放不下也读不清），
+    // 表头随之收起。
+    var cover = state.mode === 'cover';
+    box.className = 'opl-rows' + (cover ? ' is-cover' : '');
+    var head = el('opl-head');
+    if (head) head.hidden = cover;
 
     if (state.phase === 'loading') {
       box.innerHTML = '<div class="hint">正在加载歌单…</div>';
@@ -383,6 +404,12 @@
       return;
     }
 
+    if (state.mode === 'cover') {
+      view.forEach(function (t, i) { box.appendChild(trackCard(t, i, view)); });
+      paintTail();
+      return;
+    }
+
     var canWrite = hasCap(state.source, 'playlist_write');
     view.forEach(function (t, i) {
       var row = window.Online.row(t, function () {
@@ -401,6 +428,68 @@
       box.appendChild(row);
     });
     paintTail();
+  }
+
+  // 封面排布的单张曲目卡：封面 + 歌名 + 歌手·时长。类名沿用在线面板网格那套
+  // （.op-card / .op-cover / .op-pl-name / .op-pl-sub），两处网格永远同款。
+  // 不可播 / VIP 整卡置灰且点击无效——与列表排布下 Online.row 的红线一致：
+  // 绝不模拟会员权益偷播 VIP 曲目。
+  function trackCard(t, i, view) {
+    var blocked = !t.playable || t.vip_only;
+    var c = document.createElement('div');
+    c.className = 'op-card opl-track-card' + (blocked ? ' is-disabled' : '');
+    c.setAttribute('role', 'button');
+    c.tabIndex = 0;
+    c.title = t.title;
+
+    var cover = document.createElement('div');
+    cover.className = 'op-cover';
+    var url = window.Online ? window.Online.safeCoverUrl(t.cover) : null;
+    if (url) cover.style.backgroundImage = 'url("' + url + '")';
+    else cover.classList.add('is-missing');
+    if (t.vip_only) {
+      var vip = document.createElement('span');
+      vip.className = 'vip-tag opl-card-vip';
+      vip.textContent = 'VIP';
+      cover.appendChild(vip);
+    }
+    c.appendChild(cover);
+
+    var name = document.createElement('div');
+    name.className = 'op-pl-name';
+    name.textContent = t.title;
+    c.appendChild(name);
+
+    var sub = document.createElement('div');
+    sub.className = 'op-pl-sub';
+    sub.textContent = (t.artist || '未知艺术家') + ' · ' + fmt(t.duration_ms || 0);
+    c.appendChild(sub);
+
+    function play() {
+      if (t.vip_only) { toast('该曲目为 VIP 专享'); return; }
+      if (!t.playable) return;
+      window.Online.playAll(view, i);
+    }
+    c.onclick = play;
+    c.onkeydown = function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); }
+    };
+    return c;
+  }
+
+  // 切换曲目排布。只重渲染，不重新取数：已加载的曲目、筛选词、总数和
+  // 「加载更多」的位置都原样保留。
+  function setMode(name) {
+    state.mode = name === 'list' ? 'list' : 'cover';
+    var group = el('opl-modes');
+    if (group && group.querySelectorAll) {
+      var btns = group.querySelectorAll('button[data-opl-mode]');
+      for (var i = 0; i < btns.length; i++) {
+        btns[i].classList.toggle('active',
+          btns[i].getAttribute('data-opl-mode') === state.mode);
+      }
+    }
+    renderTracks();
   }
 
   function errorNode() {
@@ -463,6 +552,16 @@
       renderTracks();
     };
 
+    var modes = el('opl-modes');
+    if (modes && modes.querySelectorAll) {
+      var btns = modes.querySelectorAll('button[data-opl-mode]');
+      for (var i = 0; i < btns.length; i++) {
+        (function (btn) {
+          btn.onclick = function () { setMode(btn.getAttribute('data-opl-mode')); };
+        })(btns[i]);
+      }
+    }
+
     document.addEventListener('keydown', function (e) {
       if (e.key !== 'Escape') return;
       var grid = el('opl-grid');
@@ -487,6 +586,8 @@
     openGrid: openGrid,
     open: openById,
     close: back,
+    // 曲目排布（cover | list）。菜单/命令面板这类外部入口也用它切换。
+    setMode: setMode,
     state: state,
   };
 

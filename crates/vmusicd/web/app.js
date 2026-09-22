@@ -2731,6 +2731,8 @@ function initNowPlayingModal() {
       ensureVisible: () => { if (state.view !== 'playlists') setView('playlists'); },
       caps: capsOfSource,
       enqueue: enqueueOnlineTracks,
+      // 时长格式化与曲库/搜索共用同一个实现，卡片上的时长不会和别处不一致。
+      fmt,
       toast,
       errText,
     });
