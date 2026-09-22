@@ -74,6 +74,7 @@
     state.query = '';
     var q = el('opl-grid-q');
     if (q) q.value = '';
+    ensureVisible();
     setLayer('online-grid');
     renderGrid();
   }
@@ -186,10 +187,17 @@
     state.trackQuery = '';
     var q = el('opl-detail-q');
     if (q) q.value = '';
+    ensureVisible();
     setLayer('online-detail');
     renderInfo();
     renderTracks();
     loadPage(0);
+  }
+
+  // 两层界面挂在歌单视图里。从在线面板的歌单卡片进来时当前视图还是「在线」，
+  // 不先切过去的话层是开了但整个视图 hidden —— 表现就是点了没反应。
+  function ensureVisible() {
+    if (H && H.ensureVisible) H.ensureVisible();
   }
 
   // 歌单视图的在线行 / 左侧菜单点进来时手上只有一个 id，先回 OnlinePlaylists

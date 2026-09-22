@@ -253,12 +253,23 @@
       c.appendChild(fav);
     }
 
-    function open() { openDetail(src, p); }
+    function open() { openFromCard(src, p); }
     c.onclick = open;
     c.onkeydown = function (e) {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
     };
     return c;
+  }
+
+  // 在线面板的卡片点开去哪儿：两层界面加载了就进整页详情层（它会顺带把视图
+  // 切到歌单页——详情层挂在那里，在在线页下是隐藏的）；没加载就退回抽屉。
+  // 后者是降级路径，check-online.js 的抽屉用例覆盖的正是这一支。
+  function openFromCard(src, p) {
+    if (window.OnlinePlaylistView) {
+      window.OnlinePlaylistView.open(src, p.id, 'arrange');
+      return;
+    }
+    openDetail(src, p);
   }
 
   // ── 详情抽屉 ─────────────────────────────────────────────────────────────

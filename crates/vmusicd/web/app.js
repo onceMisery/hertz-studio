@@ -1318,10 +1318,15 @@ function enqueueOnlineTracks(tracks) {
   return applyQueue(list, true).then(() => ids.length);
 }
 
-// 在线歌单详情层的入口。两层界面未加载时退回抽屉，行为不倒退。
+// 在线歌单详情层的唯一入口。两层界面未加载时退回抽屉，行为不倒退。
 function openOnlinePlaylistDetail(src, id, from) {
   const view = window.OnlinePlaylistView;
-  if (view) { view.open(src, id, from || 'arrange'); return; }
+  if (view) {
+    // 切视图那一步由模块自己调宿主的 ensureVisible()：两层界面挂在歌单
+    // 视图里，从在线面板卡片进来时它是隐藏的，不切就看不见。
+    view.open(src, id, from || 'arrange');
+    return;
+  }
   window.OnlinePlaylists.open(src, id);
 }
 
@@ -2721,6 +2726,9 @@ function initNowPlayingModal() {
   if (window.OnlinePlaylistView) {
     window.OnlinePlaylistView.bind({
       setLayer: setPlaylistLayer,
+      // 两层界面住在歌单视图里：从在线面板卡片进来时要先把视图切过去，
+      // 否则开了层也看不见。已经在歌单视图上时这一步是空操作。
+      ensureVisible: () => { if (state.view !== 'playlists') setView('playlists'); },
       caps: capsOfSource,
       enqueue: enqueueOnlineTracks,
       toast,

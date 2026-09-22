@@ -278,6 +278,21 @@ function makeSandbox(opts) {
   load('online.js');
   load('online-login.js');
   load('online-playlists.js');
+  // 两层界面（online-playlist-view.js）加载后，在线面板的歌单卡片改走整页
+  // 详情层；不加载它就退回抽屉。下面两种沙箱分别覆盖这两条路径。
+  if (opts.loadPlaylistView) {
+    load('online-playlist-view.js');
+    spies.layers = [];
+    spies.ensureVisible = 0;
+    sandbox.window.OnlinePlaylistView.bind({
+      setLayer(name) { spies.layers.push(name); },
+      ensureVisible() { spies.ensureVisible += 1; },
+      caps: () => [],
+      enqueue: async (t) => t.length,
+      toast: (m, k) => spies.toasts.push({ msg: m, kind: k }),
+      errText: (p, e) => p + ':' + (e && e.message),
+    });
+  }
   const realPlaylists = sandbox.window.OnlinePlaylists;
   // 登录状态机测试只关心「确认后通知账号区」，用间谍替换真实模块；
   // 歌单测试显式要求 realPlaylists 时保留真模块。
@@ -714,11 +729,37 @@ async function loginScenario(pollStates, opts) {
     const transport = makeTransport(routes);
     // 歌单测试要保留真实 OnlinePlaylists（网格/抽屉/导出 all/open/play），
     // 只把登录弹窗换成间谍。
-    const env = makeSandbox({ transport, readyState: 'loading', stubLogin: true, realPlaylists: true });
+    const env = makeSandbox({
+      transport, readyState: 'loading', stubLogin: true, realPlaylists: true,
+      loadPlaylistView: opts.loadPlaylistView,
+    });
     bindOnline(env);
+    if (opts.loadPlaylistView) env.sandbox.window.OnlinePlaylistView.init();
     return env;
   }
 
+  section('在线面板卡片 → 整页详情层（两层界面在场时抽屉不再接这个入口）');
+  {
+    const env = playlistSandbox({
+      loadPlaylistView: true,
+      sources: [{ id: 'netease', label: '网易云音乐', caps: ['cookie_login', 'user_playlists', 'playlist_detail'] }],
+      playlists: [{ source: 'netease', id: 'p1', name: '我的歌单', track_count: 2, kind: 'created', cover: null }],
+      detail: { total: 2, playlist: { id: 'p1' }, tracks: [T({ id: '1' }), T({ id: '2' })] },
+    });
+    await env.doc.fireDCL();
+    await ticks(20);
+    const card = env.doc.getElementById('op-grid').children[0];
+    ok(card && classList(card, 'op-card'), '在线面板渲染出歌单卡');
+    card.onclick();
+    await ticks(20);
+    eq(env.doc.getElementById('op-drawer').hidden, true, '抽屉不再被这个入口打开');
+    ok(env.spies.layers.indexOf('online-detail') >= 0, '改走两层界面的详情层');
+    ok(env.spies.ensureVisible >= 1, '先把视图切到歌单页（否则层开了也看不见）');
+    eq(env.doc.getElementById('opl-rows').children.length, 2, '详情层渲染出 2 行');
+  }
+
+  // 以下抽屉用例跑在「两层界面未加载」的沙箱里，覆盖的是降级路径：
+  // 生产环境两层界面一定在场，卡片点开走的是上面那一节。
   section('caps：登录态卡片 + 写能力给移除按钮');
   {
     const env = playlistSandbox({
