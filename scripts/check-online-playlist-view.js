@@ -1,0 +1,368 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: MIT
+//
+// 在线歌单两层界面（web/online-playlist-view.js）的无头契约检查（零依赖、不触网）。
+//
+//   node scripts/check-online-playlist-view.js
+//
+// 检查的是这套界面最容易静默坏掉的几处：
+//   1. 层级：网格层 / 详情层的进出只走宿主 setLayer，返回回得去
+//   2. 三态：加载中 / 加载失败 / 空歌单 必须是三种渲染，失败不能被画成空
+//   3. 分页：offset 递增、曲目追加、剩余数如实、到底收起「加载更多」
+//   4. 筛选：作用于已加载曲目，按钮文案跟着切成「播放 N 首 / 加入 N 首」
+//   5. 加入队列：交给宿主的必须是当前可见的那批曲目
+//
+// 桩原则与 check-online.js 一致：DOM 只实现脚本真实用到的方法，HTTP 走可编排
+// 的假 transport，定时器不做推进（本模块不用定时器）。
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const WEB = path.join(__dirname, '..', 'crates', 'vmusicd', 'web');
+
+let failures = 0;
+let checks = 0;
+function ok(cond, label) {
+  checks += 1;
+  if (!cond) {
+    failures += 1;
+    console.error('  X ' + label);
+  }
+}
+function eq(a, b, label) { ok(a === b, label + ' (got ' + JSON.stringify(a) + ')'); }
+function has(v, sub, label) {
+  ok(String(v).indexOf(sub) >= 0, label + ' (got ' + JSON.stringify(String(v)) + ')');
+}
+function section(name) { console.log('\n' + name); }
+async function ticks(n) {
+  for (let i = 0; i < (n || 12); i++) await new Promise((r) => setImmediate(r));
+}
+
+// ---------------------------------------------------------------------------
+// 最小 DOM 桩
+// ---------------------------------------------------------------------------
+
+function makeClassList() {
+  const set = new Set();
+  return {
+    add: (...c) => c.forEach((x) => set.add(x)),
+    remove: (...c) => c.forEach((x) => set.delete(x)),
+    toggle: (c) => (set.has(c) ? set.delete(c) : set.add(c)),
+    contains: (c) => set.has(c),
+    _set: set,
+  };
+}
+
+function makeEl(id) {
+  const el = {
+    id: id || '',
+    tagName: 'DIV',
+    hidden: false,
+    className: '',
+    textContent: '',
+    disabled: false,
+    value: '',
+    tabIndex: 0,
+    dataset: {},
+    style: { setProperty(k, v) { this[k] = v; }, getPropertyValue() { return ''; } },
+    attrs: {},
+    children: [],
+    parentNode: null,
+    classList: makeClassList(),
+    _memo: {},
+    _html: '',
+    onclick: null,
+    onkeydown: null,
+    oninput: null,
+    appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
+    append(...cs) { cs.forEach((c) => this.appendChild(c)); },
+    addEventListener() {},
+    removeEventListener() {},
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    getAttribute(k) { return this.attrs[k]; },
+    focus() {},
+    querySelector(sel) {
+      if (!this._memo[sel]) this._memo[sel] = makeEl('qs:' + sel);
+      return this._memo[sel];
+    },
+    querySelectorAll() { return []; },
+  };
+  Object.defineProperty(el, 'innerHTML', {
+    get() { return this._html; },
+    set(v) { this._html = String(v); this.children = []; },
+  });
+  return el;
+}
+
+function classOf(el, cls) {
+  return typeof el.className === 'string'
+    && el.className.split(/\s+/).indexOf(cls) >= 0;
+}
+function walk(root, out) {
+  if (!root || !root.children) return out;
+  for (const c of root.children) {
+    out.push(c);
+    if (c._memo) Object.values(c._memo).forEach((m) => walk(m, out));
+    walk(c, out);
+  }
+  return out;
+}
+// 按类名找（含 querySelector 备忘节点，移除按钮就挂在 .t-actions 备忘上）
+function byClass(root, cls) { return walk(root, []).filter((e) => classOf(e, cls)); }
+function texts(root) { return walk(root, []).map((e) => e.textContent).join(' | '); }
+// 找按钮：textContent 命中且类名带 btn
+function buttons(root) {
+  return walk(root, []).filter((e) => classOf(e, 'btn'));
+}
+function btnByText(root, sub) {
+  return buttons(root).filter((b) => String(b.textContent).indexOf(sub) >= 0)[0];
+}
+
+function makeDocument() {
+  const registry = {};
+  return {
+    readyState: 'complete',
+    documentElement: { classList: makeClassList() },
+    _registry: registry,
+    getElementById(id) {
+      if (!registry[id]) registry[id] = makeEl(id);
+      return registry[id];
+    },
+    createElement() { return makeEl(); },
+    createTextNode(t) { return { text: String(t) }; },
+    addEventListener() {},
+    dispatchEvent() { return true; },
+    querySelector() { return null; },
+  };
+}
+
+function makeTransport(pages) {
+  // pages: 函数 (url) => 返回体 或 抛错
+  const calls = [];
+  return {
+    calls,
+    async get(url) {
+      calls.push(url);
+      return pages(url);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 沙箱装配：加载 online-playlist-view.js，注入桩宿主
+// ---------------------------------------------------------------------------
+
+function makeSandbox(opts) {
+  const doc = makeDocument();
+  const spies = { layers: [], toasts: [], enqueued: [], played: [] };
+  const sandbox = {
+    console, Promise, Object, Array, JSON, Math, String,
+    URL, URLSearchParams, encodeURIComponent, decodeURIComponent,
+    setTimeout, clearTimeout,
+  };
+  sandbox.window = sandbox;
+  sandbox.document = doc;
+  sandbox.VMusicTransport = opts.transport;
+  sandbox.window.VMusicTransport = opts.transport;
+
+  // Online：只提供本模块用到的四个入口。row 返回带 .t-actions 的桩行，
+  // 并记下激活回调（点击行的行为由调用方注入，不在本模块里）。
+  sandbox.window.Online = {
+    row(track, activate) {
+      const row = makeEl();
+      row.className = 'track online-row';
+      row._track = track;
+      row._activate = activate;
+      spies.rows = spies.rows || [];
+      spies.rows.push(row);
+      return row;
+    },
+    safeCoverUrl(u) { return u || null; },
+    sourceBadge(id) { return id === 'netease' ? { text: '网易', color: '#e34c4c' } : null; },
+    playAll(tracks, index) { spies.played.push({ tracks: tracks.slice(), index }); },
+  };
+  sandbox.window.OnlinePlaylists = {
+    all() {
+      return [
+        { source: 'netease', sourceLabel: '网易云音乐', badgeColor: '#e34c4c', badgeText: '网易',
+          playlist: { id: 'P1', name: '我喜欢的音乐', cover: null, track_count: 5, play_count: 120, creator: 'me', kind: 'liked' } },
+        { source: 'netease', sourceLabel: '网易云音乐', badgeColor: '#e34c4c', badgeText: '网易',
+          playlist: { id: 'P2', name: '华语精选', cover: null, track_count: 2, play_count: 0, creator: 'them', kind: 'created' } },
+        { source: 'kugou', sourceLabel: '酷狗音乐', badgeColor: '#2ea8ff', badgeText: '酷狗',
+          playlist: { id: 'K1', name: '酷狗收藏', cover: null, track_count: 3, play_count: 0, creator: 'me', kind: 'created' } },
+      ];
+    },
+    removeButton() { return makeEl(); },
+  };
+  sandbox.window.toast = (m, k) => spies.toasts.push({ msg: m, kind: k });
+  vm.createContext(sandbox);
+
+  const src = fs.readFileSync(path.join(WEB, 'online-playlist-view.js'), 'utf8');
+  vm.runInContext(src, sandbox, { filename: 'online-playlist-view.js' });
+
+  sandbox.window.OnlinePlaylistView.bind({
+    setLayer(name) { spies.layers.push(name); },
+    caps(src) { return (opts.caps && opts.caps[src]) || []; },
+    enqueue: async (tracks) => { spies.enqueued.push(tracks.slice()); return tracks.length; },
+    toast: (m, k) => spies.toasts.push({ msg: m, kind: k }),
+    errText: (p, e) => p + '：' + (e && e.message),
+  });
+  sandbox.window.OnlinePlaylistView.init();
+  return { sandbox, doc, spies, view: sandbox.window.OnlinePlaylistView };
+}
+
+const T = (id, title, extra) => Object.assign({
+  source: 'netease', id, title, artist: 'A', album: 'L',
+  duration_ms: 1000, cover: null, playable: true, vip_only: false, ref: {},
+}, extra || {});
+
+function detailBody(tracks, total) {
+  return { playlist: { id: 'P1', name: '我喜欢的音乐', cover: null, track_count: total, play_count: 120, creator: 'me', kind: 'liked' },
+    total, tracks };
+}
+
+// ---------------------------------------------------------------------------
+
+(async function main() {
+  section('层级：网格层与详情层的进出');
+  {
+    const env = makeSandbox({ transport: makeTransport(() => detailBody([T('1', 'A')], 1)) });
+    env.view.openGrid('netease');
+    eq(env.spies.layers[0], 'online-grid', '进入网格层只通知一次 online-grid');
+    // 网格层只显示该音源的歌单
+    const cards = byClass(env.doc.getElementById('opl-grid-list'), 'op-card');
+    eq(cards.length, 2, '网格层按音源过滤后只剩该音源的歌单');
+    has(env.doc.getElementById('opl-grid-count').textContent, '2', '计数显示歌单个数');
+
+    env.view.open('netease', 'P1', 'grid');
+    await ticks();
+    eq(env.spies.layers[1], 'online-detail', '从网格层进详情层');
+    env.view.close();
+    eq(env.spies.layers[2], 'online-grid', '详情返回回到网格层');
+
+    const env2 = makeSandbox({ transport: makeTransport(() => detailBody([T('1', 'A')], 1)) });
+    env2.view.open('netease', 'P1', 'arrange');
+    await ticks();
+    env2.view.close();
+    eq(env2.spies.layers[1], 'arrange', '从歌单行直接进详情时返回回到排布层');
+  }
+
+  section('三态：加载中 / 加载失败 / 空歌单 是三种渲染');
+  {
+    const loading = makeSandbox({ transport: makeTransport(() => new Promise(() => {})) });
+    loading.view.open('netease', 'P1', 'arrange');
+    await ticks();
+    has(loading.doc.getElementById('opl-rows').innerHTML, '正在加载歌单', '加载中给出加载态');
+    has(loading.doc.getElementById('opl-sentinel').textContent, '加载中', '尾哨兵同步显示加载中');
+
+    const err = Object.assign(new Error('登录已过期'), { code: 'auth_required' });
+    const failed = makeSandbox({ transport: makeTransport(() => { throw err; }) });
+    failed.view.open('netease', 'P1', 'arrange');
+    await ticks();
+    const box = failed.doc.getElementById('opl-rows');
+    eq(byClass(box, 'opl-error').length, 1, '失败渲染成错误块而不是空列表');
+    has(texts(box), '歌单加载失败：登录已过期', '失败态带上真实错误');
+    has(texts(box), '重新登录', '失败态给出可操作提示');
+    ok(!!btnByText(box, '重试'), '失败态给重试按钮');
+
+    const empty = makeSandbox({ transport: makeTransport(() => detailBody([], 0)) });
+    empty.view.open('netease', 'P1', 'arrange');
+    await ticks();
+    has(texts(empty.doc.getElementById('opl-rows')), '这个歌单是空的', '空歌单单独一句文案');
+    eq(byClass(empty.doc.getElementById('opl-rows'), 'opl-error').length, 0, '空歌单不是错误');
+  }
+
+  section('分页：offset 递增、曲目追加、剩余数如实');
+  {
+    let n = 0;
+    const transport = makeTransport((url) => {
+      n += 1;
+      if (url.indexOf('offset=0') >= 0) return detailBody([T('1', '第一首'), T('2', '第二首')], 5);
+      return detailBody([T('3', '第三首'), T('4', '第四首'), T('5', '第五首')], 5);
+    });
+    const env = makeSandbox({ transport });
+    env.view.open('netease', 'P1', 'arrange');
+    await ticks();
+    const rows = env.doc.getElementById('opl-rows');
+    eq(rows.children.length, 2, '首页渲染 2 行');
+    const more = env.doc.getElementById('opl-more');
+    eq(more.hidden, false, '还有剩余时显示「加载更多」');
+    has(more.textContent, '还有 3 首', '按钮说清还剩多少首');
+
+    more.onclick();
+    await ticks();
+    eq(rows.children.length, 5, '加载更多后曲目追加到 5 行');
+    ok(n === 2, '只发了两次请求');
+    has(transport.calls[1], 'offset=2', '第二页的 offset 递增');
+    eq(more.hidden, true, '加载完后收起「加载更多」');
+  }
+
+  section('筛选：作用于已加载曲目，按钮文案跟着变');
+  {
+    const env = makeSandbox({
+      transport: makeTransport(() => detailBody([T('1', '晴天'), T('2', '稻香'), T('3', '夜曲')], 3)),
+    });
+    env.view.open('netease', 'P1', 'arrange');
+    await ticks();
+    const info = env.doc.getElementById('opl-info');
+    ok(!!btnByText(info, '播放全部'), '未筛选时按钮是「播放全部」');
+    ok(!!btnByText(info, '加入队列'), '未筛选时按钮是「加入队列」');
+
+    const q = env.doc.getElementById('opl-detail-q');
+    q.value = '稻';
+    q.oninput();
+    await ticks();
+    eq(env.doc.getElementById('opl-rows').children.length, 1, '筛选后只剩匹配行');
+    ok(!!btnByText(info, '播放 1 首'), '筛选后按钮改成「播放 N 首」');
+    ok(!!btnByText(info, '加入 1 首到队列'), '筛选后按钮改成「加入 N 首到队列」');
+
+    btnByText(info, '加入 1 首到队列').onclick();
+    await ticks();
+    eq(env.spies.enqueued.length, 1, '加入队列交给宿主一次');
+    eq(env.spies.enqueued[0].length, 1, '交给宿主的是筛选后的那一批，不是整盘');
+    eq(env.spies.enqueued[0][0].title, '稻香', '交出去的曲目确实是被筛出来的那首');
+
+    btnByText(info, '播放 1 首').onclick();
+    await ticks();
+    eq(env.spies.played.length, 1, '播放全部走 Online.playAll');
+    eq(env.spies.played[0].tracks.length, 1, '播放的是筛选后的曲目');
+  }
+
+  section('歌单过期与写能力');
+  {
+    const env = makeSandbox({ transport: makeTransport(() => detailBody([T('1', 'A')], 1)) });
+    env.view.open('netease', 'NOPE', 'arrange');
+    await ticks();
+    eq(env.spies.layers.length, 0, '找不到歌单时不切层');
+    has(env.spies.toasts.map((t) => t.msg).join('|'), '已过期', '找不到歌单时如实提示');
+    ok(env.spies.toasts[0].kind === 'error', '提示是错误级');
+  }
+  {
+    // playlist_write 能力位决定曲目行是否挂移除按钮；没有该能力就不挂。
+    const withWrite = makeSandbox({
+      transport: makeTransport(() => detailBody([T('1', 'A')], 1)),
+      caps: { netease: ['playlist_write'] },
+    });
+    withWrite.view.open('netease', 'P1', 'arrange');
+    await ticks();
+    const row = withWrite.spies.rows[0];
+    eq(row.querySelector('.t-actions').children.length, 1, '有 playlist_write 时挂移除按钮');
+
+    const noWrite = makeSandbox({
+      transport: makeTransport(() => detailBody([T('1', 'A')], 1)),
+      caps: { netease: [] },
+    });
+    noWrite.view.open('netease', 'P1', 'arrange');
+    await ticks();
+    eq(noWrite.spies.rows[0].querySelector('.t-actions').children.length, 0, '没有该能力就不挂');
+  }
+
+  console.log('\n' + '─'.repeat(64));
+  console.log(failures === 0
+    ? `在线歌单两层界面契约检查：${checks} 项全部通过`
+    : `在线歌单两层界面契约检查：${checks - failures}/${checks} 通过，${failures} 项失败`);
+  process.exit(failures === 0 ? 0 : 1);
+})();

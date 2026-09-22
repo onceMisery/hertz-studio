@@ -380,6 +380,44 @@
         </div>
         <div class="pl-detail-list" id="pl-detail-list"></div>
       </div>
+
+      <!-- 在线歌单的两层界面（online-playlist-view.js 驱动）：网格层 → 详情层。
+           与上面的本地歌单详情是同一层的两个分支，同一时刻只显示一个；
+           层的显隐统一由 app.js 的 setPlaylistLayer() 收口。
+           入口在在线分区的「网格」按钮和在线行，退出即回原排布。 -->
+      <div class="opl-grid" id="opl-grid" hidden>
+        <div class="opl-bar">
+          <button id="opl-grid-back" class="btn" type="button" aria-label="返回歌单">← 返回</button>
+          <div class="opl-bar-title">在线歌单<em id="opl-grid-count" class="opl-count"></em></div>
+          <input id="opl-grid-q" class="opl-filter" type="search" autocomplete="off"
+                 placeholder="过滤在线歌单…" aria-label="过滤在线歌单">
+        </div>
+        <div id="opl-grid-list" class="op-grid opl-cards"></div>
+        <div id="opl-grid-empty" class="hint" hidden></div>
+      </div>
+
+      <div class="opl-detail" id="opl-detail" hidden>
+        <div class="opl-bar">
+          <button id="opl-detail-back" class="btn" type="button" aria-label="返回在线歌单">← 返回</button>
+          <div class="opl-bar-title" id="opl-detail-title"></div>
+          <input id="opl-detail-q" class="opl-filter" type="search" autocomplete="off"
+                 placeholder="过滤曲目…" aria-label="过滤已加载曲目">
+        </div>
+        <div class="opl-detail-body">
+          <!-- 信息面板：封面 + 标题 + 音源徽标 + 曲目数/播放数/创建者 + 操作。
+               曲目表与在线搜索结果同一套行（Online.row），表头沿用 .lib-head
+               的七列栅格，两处列宽因此永远一致。 -->
+          <aside class="opl-info" id="opl-info" aria-label="歌单信息"></aside>
+          <div class="opl-tracks">
+            <div class="lib-head opl-head">
+              <span>#</span><span></span><span>标题</span><span>专辑</span><span>来源</span><span>时长</span><span></span>
+            </div>
+            <div id="opl-rows" class="opl-rows"></div>
+            <button id="opl-more" class="btn opl-more" type="button" hidden>加载更多</button>
+            <div id="opl-sentinel" class="opl-sentinel" hidden>加载中…</div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 收藏：歌曲 / 电台两个 tab，共用同一份列表渲染 -->
@@ -820,6 +858,7 @@
 <script src="online-login.js"></script>
 <script src="online.js"></script>
 <script src="online-playlists.js"></script>
+<script src="online-playlist-view.js"></script>
 <!-- 收藏与每日推荐：都依赖 VMusicTransport（app.js 里定义），所以排在 app.js
      之前加载、由 app.js 的启动序列 bind() 注入宿主依赖。 -->
 <script src="favorites.js"></script>

@@ -347,7 +347,9 @@
       });
       if (canWrite) {
         var actions = row.querySelector('.t-actions');
-        if (actions) actions.appendChild(removeButton(p, t));
+        // 移除按钮由本模块统一产出并导出：在线歌单详情层复用同一个，
+        // 两处的行为（入参、400 处理、刷新口径）才不会各自漂移。
+        if (actions) actions.appendChild(removeButton(src, p, t, null));
       }
       box.appendChild(row);
     });
@@ -367,7 +369,10 @@
     };
   }
 
-  function removeButton(p, t) {
+  // src 显式传入而不是读 state.detailSource：详情层（online-playlist-view.js）
+  // 也用这颗按钮，那里的当前音源不在本模块的 state 里。
+  // after 为空时走本模块默认的「重拉抽屉详情」；详情层传自己的重拉函数。
+  function removeButton(src, p, t, after) {
     var b = document.createElement('button');
     b.className = 't-act op-remove';
     b.type = 'button';
@@ -381,7 +386,7 @@
         // 入参是平台稳定 id + 不透明 ref（{id, ref}）；载荷缺失时后端仅用
         // id 尝试，需要专有字段而缺失会明确 400——不静默丢项。
         await tr().post('/v1/online/playlist/tracks/remove', {
-          source: state.detailSource,
+          source: src,
           id: p.id,
           tracks: [{ id: t.id, ref: t.ref || {} }],
         });
@@ -392,7 +397,8 @@
       }
       window.toast('已从《' + p.name + '》移除');
       // 重新拉详情，让总数和行序与平台保持一致。
-      openDetail(state.detailSource, p);
+      if (after) after();
+      else openDetail(src, p);
     };
     return b;
   }
@@ -500,6 +506,8 @@
     open: openPlaylistById,
     play: playPlaylistById,
     closeDrawer: closeDrawer,
+    // 详情层（online-playlist-view.js）复用同一颗移除按钮。
+    removeButton: removeButton,
   };
 
   if (document.readyState === 'loading') {

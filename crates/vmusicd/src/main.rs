@@ -66,6 +66,7 @@ const QRCODE_JS: &str = include_str!("../web/vendor/qrcode.js");
 const ONLINE_LOGIN_JS: &str = include_str!("../web/online-login.js");
 const ONLINE_JS: &str = include_str!("../web/online.js");
 const ONLINE_PLAYLISTS_JS: &str = include_str!("../web/online-playlists.js");
+const ONLINE_PLAYLIST_VIEW_JS: &str = include_str!("../web/online-playlist-view.js");
 const ONLINE_CSS: &str = include_str!("../web/online.css");
 // 收藏与每日推荐。两者都先于 app.js 加载，由 app.js 在启动序列里 bind()。
 const FAVORITES_JS: &str = include_str!("../web/favorites.js");
@@ -163,6 +164,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/online-playlists.js",
             get(|| asset(JS, ONLINE_PLAYLISTS_JS)),
+        )
+        .route(
+            "/online-playlist-view.js",
+            get(|| asset(JS, ONLINE_PLAYLIST_VIEW_JS)),
         )
         .route("/favorites.js", get(|| asset(JS, FAVORITES_JS)))
         .route("/daily.js", get(|| asset(JS, DAILY_JS)))

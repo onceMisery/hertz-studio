@@ -36,6 +36,7 @@ jobs:
           node scripts/check-creative.js
           node scripts/check-favorites.js
           node scripts/check-online.js
+          node scripts/check-online-playlist-view.js
           node scripts/check-stage-control.js
 
       - name: Check formatting

@@ -60,6 +60,8 @@ const ui = {
 
   playlistList: $('playlist-list'),
   playlistOnline: $('playlist-online'),
+  oplGrid: $('opl-grid'),
+  oplDetail: $('opl-detail'),
   playlistCount: $('playlist-count'),
   newPlaylistName: $('new-playlist-name'),
   newPlaylistBtn: $('new-playlist-btn'),
@@ -247,8 +249,10 @@ async function request(path, options = {}, attempt = 0) {
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       const err = new Error(body?.error?.message || `HTTP ${res.status}`);
-      // request_id 是后端错误契约的一部分，带上它才能回查日志。
+      // request_id 与 code 都是后端错误契约的一部分：request_id 用来回查日志，
+      // code 让前端能按判别式分流（渲染时才翻成文案，不拿服务端的句子当判据）。
       err.requestId = body?.error?.request_id;
+      err.code = body?.error?.code;
       err.status = res.status;
       throw err;
     }
@@ -1087,6 +1091,16 @@ function renderOnlinePlaylistSection() {
     goto.textContent = '去在线面板';
     goto.onclick = () => setView('online');
     head.appendChild(goto);
+    // 两层界面的入口：只带这一个音源进网格层，与分组标题指的是同一个音源。
+    const grid = document.createElement('button');
+    grid.className = 'pl-online-goto';
+    grid.type = 'button';
+    grid.textContent = '网格';
+    grid.onclick = () => {
+      if (window.OnlinePlaylistView) window.OnlinePlaylistView.openGrid(src);
+      else setView('online');
+    };
+    head.appendChild(grid);
     block.appendChild(head);
 
     g.rows.forEach((it) => block.appendChild(onlinePlaylistRow(src, it.playlist, g.color, g.badgeText)));
@@ -1145,10 +1159,10 @@ function onlinePlaylistRow(src, p, badgeColor, badgeText) {
   open.className = 't-act';
   open.setAttribute('aria-label', '打开在线歌单详情');
   open.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-folder"/></svg>';
-  open.onclick = (e) => { e.stopPropagation(); window.OnlinePlaylists.open(src, p.id); };
+  open.onclick = (e) => { e.stopPropagation(); openOnlinePlaylistDetail(src, p.id); };
   el.appendChild(open);
 
-  el.onclick = () => window.OnlinePlaylists.open(src, p.id);
+  el.onclick = () => openOnlinePlaylistDetail(src, p.id);
   return el;
 }
 
@@ -1253,6 +1267,70 @@ function setPlaylistMode(next, persist) {
   placeOnlineBlock();
 }
 
+// 歌单视图的层：排布层（架子 / 列表 + 在线分区）、本地歌单详情、在线歌单
+// 网格层、在线歌单详情层。
+//
+// 四层的显隐只写这一处。散到各模块自己 `hidden = false` 的话，「返回」迟早
+// 会漏掉某一层——参考实现因此专门需要一个导航栈；这里最深只有两层，一个
+// 字符串状态量就够，不为此引一套 store。
+let playlistLayer = 'arrange';
+
+function setPlaylistLayer(layer) {
+  playlistLayer = layer;
+  ui.plDetail.hidden = layer !== 'local-detail';
+  if (ui.oplGrid) ui.oplGrid.hidden = layer !== 'online-grid';
+  if (ui.oplDetail) ui.oplDetail.hidden = layer !== 'online-detail';
+  if (layer === 'arrange') {
+    // 排布层：交给 setPlaylistMode 恢复架子/列表与在线分区宿主。persist=false
+    // —— 返回不该顺手改掉用户上次选的排布偏好。
+    setPlaylistMode(playlistMode, false);
+    return;
+  }
+  ui.shelf.classList.remove('on');
+  ui.playlistList.hidden = true;
+  if (ui.playlistOnline) ui.playlistOnline.hidden = true;
+}
+
+// 在线曲目加入队列。虚拟 id 是 `online:{source}:{id}`（后端 virtual_id 是纯
+// 函数，set_queue 也不校验 id），所以前端能直接构造，不必先起播一次。
+// 代价：不带平台专有 ref，播放时后端按稳定 id 回落取流，音质可能非最优。
+// 元数据同步进 state.byId，队列视图才有名字可显示。
+function enqueueOnlineTracks(tracks) {
+  const ids = [];
+  for (const t of tracks) {
+    const vid = `online:${t.source}:${t.id}`;
+    state.byId.set(vid, {
+      id: vid,
+      source: t.source,
+      onlineId: t.id,
+      title: t.title,
+      artist: t.artist,
+      album: t.album,
+      duration_ms: t.duration_ms,
+      cover: window.Online ? window.Online.safeCoverUrl(t.cover) : null,
+      vip_only: !!t.vip_only,
+    });
+    ids.push(vid);
+  }
+  // 队列接口只有整体替换，没有"追加一批"的端点：拼到尾部再整体写回。
+  const list = state.queue.length ? state.queue.slice() : [];
+  for (const x of ids) if (!list.includes(x)) list.push(x);
+  return applyQueue(list, true).then(() => ids.length);
+}
+
+// 在线歌单详情层的入口。两层界面未加载时退回抽屉，行为不倒退。
+function openOnlinePlaylistDetail(src, id, from) {
+  const view = window.OnlinePlaylistView;
+  if (view) { view.open(src, id, from || 'arrange'); return; }
+  window.OnlinePlaylists.open(src, id);
+}
+
+function capsOfSource(src) {
+  const list = (window.Online && window.Online.sources()) || [];
+  const hit = list.filter((x) => x.id === src)[0];
+  return (hit && hit.caps) || [];
+}
+
 async function queuePlaylistNext(id) {
   let ids = [];
   try {
@@ -1304,12 +1382,9 @@ async function playPlaylist(id, startIndex) {
 
 async function openPlaylist(id) {
   detailPlaylistId = id;
-  ui.plDetail.hidden = false;
-  ui.shelf.classList.remove('on');
-  ui.playlistList.hidden = true;
-  // 本地歌单详情覆盖整个排布时，架子模式的在线分区一并收起；
-  // closeDetail() 经 setPlaylistMode 恢复。
-  if (ui.playlistOnline) ui.playlistOnline.hidden = true;
+  // 层显隐交给 setPlaylistLayer：本地歌单详情覆盖整个排布时，架子、列表、
+  // 在线分区宿主和在线两层一并收起，closeDetail() 原路恢复。
+  setPlaylistLayer('local-detail');
   try {
     await refreshDetail();
   } catch (err) {
@@ -1321,8 +1396,7 @@ async function openPlaylist(id) {
 function closeDetail() {
   detailPlaylistId = null;
   detailTracks = [];
-  ui.plDetail.hidden = true;
-  setPlaylistMode(playlistMode, false);
+  setPlaylistLayer('arrange');
 }
 
 async function refreshDetail() {
@@ -2642,6 +2716,18 @@ function initNowPlayingModal() {
     errText,
   });
   window.Online.init();
+  // 在线歌单两层界面（web/online-playlist-view.js）：同样是先注入宿主再 init。
+  // 宿主只给三样它自己造不出来的东西：层切换、音源能力位、队列写入。
+  if (window.OnlinePlaylistView) {
+    window.OnlinePlaylistView.bind({
+      setLayer: setPlaylistLayer,
+      caps: capsOfSource,
+      enqueue: enqueueOnlineTracks,
+      toast,
+      errText,
+    });
+    window.OnlinePlaylistView.init();
+  }
   // 收藏与每日推荐：同样是「先注入宿主依赖，再 init」。宿主回调里
   // playLocal 走现有播放链路，coverUrl 走带 token 的封面通道。
   const favHost = {
