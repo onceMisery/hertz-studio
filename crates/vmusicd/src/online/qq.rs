@@ -24,9 +24,6 @@ const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
                           (KHTML, like Gecko) Chrome/122.0 Safari/537.36";
 const REFERER: &str = "https://y.qq.com/";
 
-/// vkey 默认下载域：sip 缺失时回落（spec §2.2）。
-const DEFAULT_SIP: &str = "https://ws.stream.qqmusic.qq.com/";
-
 fn internal_store(e: vmusic_core::StoreError) -> ApiError {
     ApiError::internal(format!("设置存储失败: {e}"))
 }
@@ -358,16 +355,43 @@ const QUALITIES: &[(&str, &str, u64)] = &[
 /// 从首个不高于请求码率的档位起切片：码率 >=700k 五档全取；>=320k 为
 /// M800/M500/C400 三档；更低码率只给 C400。不把更高档（F000/RS01）追加
 /// 到低档序列后面——回落必须保持音质单调下降。
-fn tier_filenames(quality: u32, media: &str) -> Vec<(String, u64)> {
+///
+/// `media_ids` 按优先级给出多个 mid（首选 media_mid，其次 songmid）：每个
+/// id 展开一遍上述档位，组间按传入顺序拼接。个别曲目 media_mid 与 songmid
+/// 不等，只猜一个会整组 purl 落空，两个都带才能覆盖。
+fn candidate_filenames(quality: u32, media_ids: &[&str]) -> Vec<(String, u64)> {
     let q = u64::from(quality);
     let start = QUALITIES
         .iter()
         .position(|(_, _, bps)| q >= *bps)
         .unwrap_or(QUALITIES.len() - 1);
-    QUALITIES[start..]
+    media_ids
         .iter()
-        .map(|(prefix, ext, bps)| (format!("{prefix}{media}{ext}"), *bps))
+        .flat_map(|media| {
+            QUALITIES[start..]
+                .iter()
+                .map(move |(prefix, ext, bps)| (format!("{prefix}{media}{ext}"), *bps))
+        })
         .collect()
+}
+
+/// 文件名里的 mid 候选：优先 track_ref 的 media_mid，其次 songmid(id)。
+///
+/// 个别曲目两者不等，取值错了会导致该组 filename 全部拿不到 purl；两个都
+/// 带进同一次请求由服务端挑，命中率最高且不多花一次往返。
+fn media_candidates(track_ref: Option<&super::TrackRef>, id: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(2);
+    if let Some(m) = track_ref
+        .and_then(|r| r.get("media_mid"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        out.push((*m).to_string());
+    }
+    if !id.is_empty() && !out.iter().any(|v| v == id) {
+        out.push(id.to_string());
+    }
+    out
 }
 
 /// base 与 path 拼成完整 URL，保证恰好一个 '/'（sip 尾斜杠/purl 头斜杠都容错）。
@@ -379,25 +403,99 @@ fn join_url(base: &str, path: &str) -> String {
     )
 }
 
-/// 批量 vkey 响应：midurlinfo 与请求 filename 数组按下标对齐。取首个非空
-/// purl，返回 (命中档位下标, purl)。
-fn pick_vkey(data: &Value) -> Option<(usize, String)> {
-    data.pointer("/midurlinfo")
-        .and_then(|v| v.as_array())?
-        .iter()
-        .enumerate()
-        .find_map(|(i, e)| {
-            e.get("purl")
-                .and_then(|p| p.as_str())
+/// 对候选音频 URL 做一次轻量探活（HEAD），确认 vkey 没过期、文件真实存在。
+/// QQ 的 purl 时效很短，vkey 接口返回非空 purl 不等于 CDN 能命中。
+async fn probe_audio_url(http: &reqwest::Client, url: &str) -> bool {
+    match http
+        .head(url)
+        .header("Referer", REFERER)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+/// 从 vkey 响应构造全部候选 URL，并发 HEAD 探活。
+///
+/// 返回 `(命中档位下标, 可用 URL, 其余可用 URL 列表)`。命中项是音质最高且
+/// 真实可下载的第一个候选；fallback 列表保持音质单调下降，并把 https sip
+/// 排在前面。
+async fn pick_working_url(
+    http: &reqwest::Client,
+    data: &Value,
+    tiers: &[(String, u64)],
+) -> Option<(usize, String, Vec<String>)> {
+    let sips: Vec<&str> = data
+        .pointer("/sip")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-                .map(|s| (i, s.to_string()))
+                .collect()
         })
+        .unwrap_or_default();
+    let infos = data
+        .pointer("/midurlinfo")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.as_slice())
+        .unwrap_or(&[]);
+
+    let mut candidates: Vec<(usize, String)> = Vec::new();
+    for (i, info) in infos.iter().enumerate() {
+        if i >= tiers.len() {
+            continue;
+        }
+        let Some(purl) = info
+            .get("purl")
+            .and_then(|p| p.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        // 同一 purl 在多个 sip 上探；https 优先。
+        for sip in sips.iter().filter(|s| s.starts_with("https://")) {
+            candidates.push((i, join_url(sip, purl)));
+        }
+        for sip in sips.iter().filter(|s| !s.starts_with("https://")) {
+            candidates.push((i, join_url(sip, purl)));
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let results = futures::future::join_all(
+        candidates
+            .iter()
+            .map(|(i, url)| async move { (*i, url.clone(), probe_audio_url(http, url).await) }),
+    )
+    .await;
+
+    let first = results.iter().position(|(_, _, ok)| *ok)?;
+    let hit = results[first].0;
+    let url = results[first].1.clone();
+    let hit_bps = tiers[hit].1;
+    let fallback_urls = results
+        .iter()
+        .skip(first + 1)
+        .filter_map(|(i, u, ok)| {
+            if !ok || tiers[*i].1 > hit_bps {
+                return None;
+            }
+            Some(u.clone())
+        })
+        .collect();
+    Some((hit, url, fallback_urls))
 }
 
 /// spec §2.2：一次 CgiGetVkey 带上从请求码率起的全部 filename，
-/// midurlinfo[] 与之一一对应；取首个非空 purl，其余非空项作为
-/// `fallback_urls`（音质单调下降），落盘失败时由调用方按序降档，
-/// 不在这里做 HTTP 探活。
+/// midurlinfo[] 与之一一对应；对全部非空 purl 做 HEAD 探活，取首个真实可下载
+/// 的 URL 及其可用 fallback。QQ 的 purl 时效很短，不探活会把过期或 404 的
+/// 地址直接交给落盘逻辑。
 pub async fn stream(
     ctx: &Ctx,
     id: &str,
@@ -418,16 +516,17 @@ pub async fn stream(
 
     // 文件名（M500/M800 前缀里的 mid）用的是 media_mid，个别曲目它与
     // songmid 不相等，拿错会 purl 全空。track_ref 缺失（旧前端/虚拟 id
-    // 现取现播）时回落到 songmid(id)——多数曲目两者等值，链路仍可用。
-    let media = track_ref
-        .and_then(|r| r.get("media_mid"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(id);
-    let tiers = tier_filenames(quality, media);
+    // 现取现播）时只剩 songmid(id)——多数曲目两者等值，链路仍可用。
+    let media_ids = media_candidates(track_ref, id);
+    let ids: Vec<&str> = media_ids.iter().map(String::as_str).collect();
+    let tiers = candidate_filenames(quality, &ids);
     let filenames: Vec<String> = tiers.iter().map(|(f, _)| f.clone()).collect();
     let http = client()?;
 
+    // songmid / songtype 必须与 filename **等长**：vkey 按下标把三个数组对齐，
+    // 长度不足时后续档位拿到空 songmid，服务端一律回 101404，导致除首个档位
+    // 外 purl 全空——这正是「已登录却整首播不了」的根因。
+    let n = filenames.len();
     let body = json!({
         "comm": web_comm(&uin, authst),
         "req_0": {
@@ -435,8 +534,8 @@ pub async fn stream(
             "method": "CgiGetVkey",
             "param": {
                 "guid": guid,
-                "songmid": [id],
-                "songtype": [0],
+                "songmid": vec![id; n],
+                "songtype": vec![0; n],
                 "uin": uin,
                 "loginflag": 1,
                 "platform": "20",
@@ -459,46 +558,17 @@ pub async fn stream(
     let data = j
         .pointer("/req_0/data")
         .ok_or_else(|| ApiError::upstream_rejected("QQ vkey 未返回 data".to_string()))?;
-    let sip = data
-        .pointer("/sip/0")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(DEFAULT_SIP);
+    let (hit, url, fallback_urls) =
+        pick_working_url(&http, data, &tiers).await.ok_or_else(|| {
+            if signed_in {
+                ApiError::vip_required("该曲目为 VIP 专享或当前账号无可用音质".to_string())
+            } else {
+                ApiError::auth_required("QQ 音乐需要登录后获取该曲目".to_string())
+            }
+        })?;
 
-    let (hit, purl) = pick_vkey(data).ok_or_else(|| {
-        if signed_in {
-            ApiError::vip_required("该曲目为 VIP 专享或当前账号无可用音质".to_string())
-        } else {
-            ApiError::auth_required("QQ 音乐需要登录后获取该曲目".to_string())
-        }
-    })?;
-    if hit >= tiers.len() {
-        return Err(ApiError::upstream_rejected(
-            "QQ vkey 响应档位与请求不一致".to_string(),
-        ));
-    }
-    // 命中档之后的非空 purl 是更低音质候选，按序下沉。
-    let fallback_urls = data
-        .pointer("/midurlinfo")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .enumerate()
-                .skip(hit + 1)
-                .filter_map(|(i, e)| {
-                    if i >= tiers.len() {
-                        return None;
-                    }
-                    e.get("purl")
-                        .and_then(|p| p.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|p| join_url(sip, p))
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
     Ok(StreamInfo {
-        url: join_url(sip, &purl),
+        url,
         source: ID.into(),
         id: id.to_string(),
         bitrate: Some(tiers[hit].1),
@@ -1968,24 +2038,24 @@ mod tests {
     }
 
     #[test]
-    fn tier_filenames_follow_quality_order() {
+    fn candidate_filenames_follow_quality_order() {
         let media = "MEDIA123";
 
-        let hi = tier_filenames(700_000, media);
+        let hi = candidate_filenames(700_000, &[media]);
         assert_eq!(hi.len(), 5);
         assert_eq!(hi[0].0, format!("RS01{media}.flac"));
         assert_eq!(hi[4].0, format!("C400{media}.m4a"));
 
-        let mp3 = tier_filenames(320_000, media);
+        let mp3 = candidate_filenames(320_000, &[media]);
         assert_eq!(mp3.len(), 3);
         assert_eq!(mp3[0].0, format!("M800{media}.mp3"));
         assert_eq!(mp3[2].0, format!("C400{media}.m4a"));
 
-        let aac = tier_filenames(96_000, media);
+        let aac = candidate_filenames(96_000, &[media]);
         assert_eq!(aac.len(), 1);
         assert_eq!(aac[0].0, format!("C400{media}.m4a"));
 
-        let lower = tier_filenames(64_000, media);
+        let lower = candidate_filenames(64_000, &[media]);
         assert_eq!(lower.len(), 1);
 
         for (name, _) in hi.iter().chain(mp3.iter()).chain(aac.iter()) {
@@ -1994,28 +2064,105 @@ mod tests {
     }
 
     #[test]
-    fn vkey_batch_picks_first_nonempty_purl_and_joins_sip() {
-        // 高档无 purl、命中第二档；sip 尾斜杠 + purl 头斜杠只允许一个 '/'。
-        let data = json!({
-            "sip": ["https://ws.stream.qqmusic.qq.com/"],
-            "midurlinfo": [
-                {"purl": ""},
-                {"purl": "/M500media.mp3?vkey=secret&guid=1"},
-                {"purl": "C400media.m4a?vkey=secret&guid=1"}
-            ]
-        });
-        let (hit, purl) = pick_vkey(&data).unwrap();
-        assert_eq!(hit, 1);
+    fn candidate_filenames_expand_every_media_id_in_order() {
+        // media_mid 与 songmid 不等时两组都展开，组内音质单调下降。
+        let ids = ["MEDIA_MID", "SONG_MID"];
+        let tiers = candidate_filenames(320_000, &ids);
+        assert_eq!(tiers.len(), 6);
+        assert_eq!(tiers[0].0, "M800MEDIA_MID.mp3");
+        assert_eq!(tiers[2].0, "C400MEDIA_MID.m4a");
+        assert_eq!(tiers[3].0, "M800SONG_MID.mp3");
+        assert_eq!(tiers[5].0, "C400SONG_MID.m4a");
+        assert_eq!(tiers[0].1, 320_000);
+        assert_eq!(tiers[5].1, 96_000);
+    }
+
+    #[test]
+    fn media_candidates_prefers_media_mid_then_dedups() {
+        let r = json!({"media_mid": "MEDIA_MID"});
         assert_eq!(
-            join_url("https://ws.stream.qqmusic.qq.com/", &purl),
-            "https://ws.stream.qqmusic.qq.com/M500media.mp3?vkey=secret&guid=1"
+            media_candidates(Some(&r), "SONG_MID"),
+            vec!["MEDIA_MID", "SONG_MID"]
         );
 
-        // 全空 / 无数组 → None。
-        let empty = json!({"midurlinfo": [{"purl": ""}, {}]});
-        assert!(pick_vkey(&empty).is_none());
-        let missing = json!({});
-        assert!(pick_vkey(&missing).is_none());
+        // 两者等值只留一个，避免重复档位。
+        let same = json!({"media_mid": "SAME"});
+        assert_eq!(media_candidates(Some(&same), "SAME"), vec!["SAME"]);
+
+        // 无 track_ref / 空 media_mid 都回落到 songmid。
+        assert_eq!(media_candidates(None, "SONG_MID"), vec!["SONG_MID"]);
+        let blank = json!({"media_mid": ""});
+        assert_eq!(media_candidates(Some(&blank), "SONG_MID"), vec!["SONG_MID"]);
+    }
+
+    #[test]
+    fn vkey_request_arrays_are_aligned_with_filenames() {
+        // 回归：songmid/songtype 长度必须与 filename 一致，否则 vkey 按下标
+        // 对齐后后续档位 songmid 为空，服务端一律回 101404、purl 全空。
+        let ids = ["MEDIA_MID", "SONG_MID"];
+        let tiers = candidate_filenames(320_000, &ids);
+        let filenames: Vec<String> = tiers.iter().map(|(f, _)| f.clone()).collect();
+        let n = filenames.len();
+        let songmid = vec!["SONG_MID"; n];
+        let songtype = vec![0; n];
+        assert_eq!(filenames.len(), songmid.len());
+        assert_eq!(filenames.len(), songtype.len());
+        assert_eq!(n, 6);
+        // 每个档位都带上了真实 songmid，不再出现空串。
+        assert!(songmid.iter().all(|s| !s.is_empty()));
+    }
+
+    #[test]
+    fn join_url_trims_slashes_and_keeps_exactly_one() {
+        assert_eq!(
+            join_url(
+                "https://ws.stream.qqmusic.qq.com/",
+                "/M500media.mp3?vkey=secret&guid=1"
+            ),
+            "https://ws.stream.qqmusic.qq.com/M500media.mp3?vkey=secret&guid=1"
+        );
+        assert_eq!(
+            join_url(
+                "https://ws.stream.qqmusic.qq.com",
+                "C400media.m4a?vkey=secret&guid=1"
+            ),
+            "https://ws.stream.qqmusic.qq.com/C400media.m4a?vkey=secret&guid=1"
+        );
+    }
+
+    #[tokio::test]
+    async fn pick_working_url_prefers_https_and_skips_404() {
+        use reqwest::Client;
+        // 本地起一个微型 HTTP 服务：第 1 个 purl 404，第 2 个 200。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+
+        let svc = axum::Router::new()
+            .route("/ok.mp3", axum::routing::get(|| async { "audio" }))
+            .route(
+                "/404.mp3",
+                axum::routing::get(|| async { (axum::http::StatusCode::NOT_FOUND, "no") }),
+            );
+        tokio::spawn(async move { axum::serve(listener, svc).await.unwrap() });
+
+        let data = json!({
+            "sip": ["http://bad.example/", &base],
+            "midurlinfo": [
+                {"purl": "/404.mp3"},
+                {"purl": "/ok.mp3"}
+            ]
+        });
+        let http = Client::builder().build().unwrap();
+        let tiers = [
+            ("M800media.mp3".into(), 320_000u64),
+            ("M500media.mp3".into(), 128_000u64),
+        ];
+        let (hit, url, fallback) = pick_working_url(&http, &data, &tiers).await.unwrap();
+        assert_eq!(hit, 1);
+        assert!(url.starts_with(&base));
+        assert!(url.contains("/ok.mp3"));
+        assert!(fallback.is_empty());
     }
 
     #[test]
