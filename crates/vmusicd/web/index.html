@@ -490,6 +490,14 @@
           <input id="set-stage-cover" type="checkbox">
           <span class="hint">在全屏舞台里显示当前曲目的 3D 粒子封面</span>
         </div>
+        <!-- 空闲隐藏是纯布局开关：判据（有没有曲目 / 是否已按停止）在 app.js 的
+             stageIdle() 里，CSS 只认 body[data-stage-idle] 这一个标记，不参与判定。
+             暂停不收起——曲目还在，收起会让歌词和进度凭空消失。 -->
+        <div class="set-row">
+          <label for="set-stage-idle-hide">空闲时隐藏正在播放</label>
+          <input id="set-stage-idle-hide" type="checkbox">
+          <span class="hint">没有曲目在播或已按停止时收起右侧舞台，列表占满宽度；开始播放自动恢复</span>
+        </div>
         <!-- 渲染模式：默认标准渲染。选「增强」不会立刻保存，先把下面的警示块
              摊开让用户读完，再由块里的确认按钮落库——直接 onchange 就写库的话，
              误操作的用户会在下一帧才开始读提示。 -->
@@ -596,8 +604,11 @@
 </div>
 
 <footer class="bar">
+  <!-- 空态不写占位符：原来这里放了一个 em dash「—」，在满屏 SVG 图标中间
+       它看起来像一个坏掉的图标（笔画、尺寸、风格都和旁边的图标对不上）。
+       没有曲目时这一格就该是空的，标题由 app.js 在载入曲目后写入。 -->
   <div class="bar-track">
-    <div id="bar-title" class="bar-title">—</div>
+    <div id="bar-title" class="bar-title"></div>
     <div id="bar-sub" class="bar-sub"></div>
   </div>
 

@@ -38,6 +38,7 @@ jobs:
           node scripts/check-online.js
           node scripts/check-online-playlist-view.js
           node scripts/check-stage-control.js
+          node scripts/check-stage-idle.js
 
       - name: Check formatting
         run: cargo fmt --all -- --check

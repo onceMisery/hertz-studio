@@ -331,6 +331,17 @@ body::before {
 .iconbtn svg { width: 18px; height: 18px; fill: currentColor; }
 @media (min-width: 1241px) { #stage-btn { display: none; } }
 
+/* 空闲时收起右侧舞台：标记由 app.js 写（body[data-stage-idle]），判据在
+   stageIdle()，这里只负责把那一列让出去。限定宽屏是因为窄屏舞台本来就是
+   抽屉（默认在屏外），收起它没有意义，还会把「点开抽屉」这条路堵死。
+   收起后顶栏的「正在播放」按钮重新出现——它是全屏歌词/播放控制的入口，
+   舞台不在时总得留一条回去的路。 */
+@media (min-width: 1241px) {
+  body[data-stage-idle="1"] .app { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
+  body[data-stage-idle="1"] .stage { display: none; }
+  body[data-stage-idle="1"] #stage-btn { display: inline-flex; }
+}
+
 /* ---------- 主体三区 ---------- */
 
 .app {
@@ -1235,16 +1246,35 @@ kbd {
 }
 body.bar-hidden .bar-hover-zone { display: block; }
 
-/* 手动显隐按钮与播放模式胶囊并排 */
-.bar-pin-toggle {
+/* 手动显隐按钮与播放模式胶囊并排。它复用 .btn-pill 的外形，但内容只有一个
+   图标，所以尺寸得自己钉死。
+
+   选择器必须写成 `.btn-pill.bar-pin-toggle` 而不是单独的 `.bar-pin-toggle`：
+   .bar-pin-toggle 这一节排在 .btn-pill 之前，两者特异性又都是 (0,1,0)，
+   后出现的 .btn-pill 会把 `padding: 7px 14px` 盖回来 —— 34px 宽的按钮里
+   只剩 4px 内容盒，18px 的 svg 作为 flex 子项被压到最小尺寸（宽度受
+   默认 2:1 内在比例限制 ≈ 9px），symbol 跟着缩到 0.375 倍。
+   结果就是截图里那个「空心圆 + 中间一小撮看不出是什么的东西」：
+   全站其它图标都是实心面（fill:currentColor），压扁了还能看出个色块，
+   而它是唯一的描边图标（#i-chevron-down = fill:none + stroke:currentColor），
+   描边被压成亚像素就彻底消失。
+   flex: none 是第二道保险：图标永远不参与收缩。 */
+.btn-pill.bar-pin-toggle {
   margin-left: 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 34px;
+  height: 34px;
   padding: 0;
 }
-.bar-pin-toggle svg { width: 18px; height: 18px; }
+.btn-pill.bar-pin-toggle svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+}
 
 /* 减少动效偏好：播放栏显隐不做滑动过渡，瞬间完成 */
 body.reduce-motion .bar { transition: none !important; }

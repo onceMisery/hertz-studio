@@ -87,6 +87,7 @@ const ui = {
   setDensity: $('set-density'),
   setMotion: $('set-motion'),
   setStageCover: $('set-stage-cover'),
+  setStageIdleHide: $('set-stage-idle-hide'),
   cookieRows: $('cookie-rows'),
   setRenderMode: $('set-render-mode'),
   renderWarn: $('render-warn'),
@@ -187,6 +188,9 @@ const state = {
   // 与 VCP music.js 的 isChangingState / expectedPlayingState / lastCommandTime 同一思路。
   commandAt: 0,
   expectedPlaying: false,
+  // 用户按下过「停止」且之后没再播放。停止与暂停在快照里长得一样（playing 都是
+  // false、track_id 都还在），只有客户端知道那一下是停而不是暂停。
+  stopped: false,
   loadingTrack: null,
   spectrum: new Array(64).fill(0),
   peaks: new Array(64).fill(0),
@@ -661,6 +665,7 @@ function applySnapshot(snap) {
   }
 
   if (snap.track_id && snap.track_id !== previous) loadNowPlaying(snap.track_id);
+  syncStageIdle();
   updateRowActiveState(snap);
   // 舞台拿走播放状态：它自己有本地时钟补帧，不依赖推送频率。
   if (Stage) Stage.setSnapshot(snap);
@@ -825,6 +830,45 @@ function setStageCover(on, persist) {
   if (ui.setStageCover && ui.setStageCover.checked !== want) ui.setStageCover.checked = want;
   if (window.Stage) Stage.setCoverMode(want, { silent: true });
   if (persist) transport.put('/v1/settings', { stage_cover: want }).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// 空闲时收起「正在播放」
+// ---------------------------------------------------------------------------
+//
+// 右侧舞台占掉 --stage-w（宽屏 460px），没有曲目在播时它只是一块写着「未在播放」
+// 的空面板，白占一列。空闲时把它整列让给曲库，播放开始立刻还回来。
+//
+// 判据只有两条，都很保守：
+//   1. 快照里没有 track_id —— 从没载入过曲目；
+//   2. 用户按过「停止」且之后没再播放。
+// 暂停不算空闲：曲目还在、进度还在，收起来会让歌词和进度条凭空消失。
+//
+// app.js 只写 body[data-stage-idle] 这一个标记，收起动作本身在 style.css 里。
+// 判定和表现分开，窄屏那条「舞台变抽屉」的媒体查询就不用关心这套逻辑。
+
+function stageIdle() {
+  return !state.snapshot.track_id || state.stopped;
+}
+
+function syncStageIdle() {
+  // 真的在播了，上一次「停止」就不作数——舞台该还回来。清在这里而不是散在
+  // 各个调用点，是为了让"收起与否"永远只由这一处算出，调用方给什么都行。
+  if (state.snapshot.playing) state.stopped = false;
+  // 默认开启：设置表里没有这项（老用户、首次运行）时按「开」处理。
+  const hide = state.settings.stage_idle_hide !== false && stageIdle();
+  if (hide) document.body.dataset.stageIdle = '1';
+  else delete document.body.dataset.stageIdle;
+}
+
+// 与 setStageCover 同构：persist 只在用户真的动了一下开关时为 true，
+// loadSettings 恢复状态传 false，否则每次刷新都会多写一次设置表。
+function setStageIdleHide(on, persist) {
+  const want = !!on;
+  state.settings.stage_idle_hide = want;
+  if (ui.setStageIdleHide && ui.setStageIdleHide.checked !== want) ui.setStageIdleHide.checked = want;
+  syncStageIdle();
+  if (persist) transport.put('/v1/settings', { stage_idle_hide: want }).catch(() => {});
 }
 
 function prefersReducedMotion() {
@@ -1698,6 +1742,8 @@ async function loadSettings() {
   if (Stage) Stage.setReducedMotion(ui.setMotion.checked);
   // 封面盘是即时开关：恢复状态不写库（persist=false），也不经过 stage:control。
   setStageCover(state.settings.stage_cover, false);
+  // 空闲收起默认开：设置表里没有这项时传 true，行为与"用户勾上了"一致。
+  setStageIdleHide(state.settings.stage_idle_hide !== false, false);
   // 渲染器在这里定：设置到手之前，粒子层一直挂着（帧门报 0，一帧不画）。
   // attach 只认第一次调用，所以之后用户改设置不会换渲染器——那是
   // 「重新加载界面」之后的事，设置页也是这么写的。
@@ -1907,6 +1953,13 @@ function refreshAll() {
 
 const Theme = window.Theme;
 
+// 喂三个颜色：主题色样本 = 底色（盘心）+ 主色→次色（外环），画法见 stage.css
+// 的 `.theme-dot, .theme-swatch`。
+//
+// 底色必须一起给：主题名说的是底色（矿石黑 / 星蓝深空 / 夜樱猫语），只给主色
+// 的话「矿石黑（默认）」会画成一个亮青球，名字和样本对不上。CSS 那侧的兜底是
+// var(--bg)（当前主题的底色），漏传不会报错，只会让所有样本变成同一个颜色 ——
+// scripts/check-css-tokens.js 有断言盯着这两个别名，别只改这里。
 function themeDotStyle(theme) {
   return `--t-bg:${theme.tokens['--bg']};--t-accent:${theme.tokens['--accent']};--t-accent-2:${theme.tokens['--accent-2']}`;
 }
@@ -2511,6 +2564,15 @@ function togglePlay() {
   post(next ? '/v1/player/play' : '/v1/player/pause');
 }
 
+// 停止与暂停在快照里无法区分（playing 都变 false、track_id 都留着），
+// 所以这里自己记一笔，空闲收起才知道「这一下是停，不是暂停」。
+function stopPlayback() {
+  state.stopped = true;
+  state.expectedPlaying = false;
+  syncStageIdle();
+  post('/v1/player/stop');
+}
+
 // ---------------------------------------------------------------------------
 // 播放控制弹窗（顶栏「正在播放」）
 // ---------------------------------------------------------------------------
@@ -2568,7 +2630,7 @@ function initNowPlayingModal() {
   np.play.onclick = togglePlay;
   np.prev.onclick = () => post('/v1/player/previous');
   np.next.onclick = () => post('/v1/player/next');
-  np.stop.onclick = () => post('/v1/player/stop');
+  np.stop.onclick = () => stopPlayback();
 
   // 进度：拖动即时显示时间，松手跳转
   np.bar.addEventListener('input', () => {
@@ -2608,7 +2670,7 @@ function initNowPlayingModal() {
   ui.playpause.onclick = togglePlay;
   ui.prev.onclick = () => post('/v1/player/previous');
   ui.next.onclick = () => post('/v1/player/next');
-  ui.stop.onclick = () => post('/v1/player/stop');
+  ui.stop.onclick = () => stopPlayback();
   ui.mode.onclick = () => {
     const order = ['repeat', 'repeat_one', 'shuffle'];
     const next = order[(order.indexOf(state.snapshot.mode) + 1) % order.length];
@@ -2680,6 +2742,7 @@ function initNowPlayingModal() {
     transport.put('/v1/settings', { reduce_motion: ui.setMotion.checked }).catch(() => {});
   };
   ui.setStageCover.onchange = () => setStageCover(ui.setStageCover.checked, true);
+  ui.setStageIdleHide.onchange = () => setStageIdleHide(ui.setStageIdleHide.checked, true);
 
   ui.rail.querySelectorAll('.rail-item').forEach((b) => { b.onclick = () => setView(b.dataset.view); });
   // 点击「正在播放」：弹出清晰的播放控制弹窗（不再切换舞台抽屉）

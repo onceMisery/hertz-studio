@@ -39,20 +39,35 @@ html.qr-modal-open .app{visibility:hidden}
 .qr-cookie-fallback button:hover{border-color:var(--accent)}
 .qr-cookie-fallback button:disabled{opacity:.5;cursor:default}
 
-/* QQ 扫码/微信扫码 切换条 */
+/* QQ 扫码/微信扫码 切换条。高度与 .qr-source 对齐：两行 chip 在同一个弹窗里，
+   一行 34px 一行 29px 会一眼看出来（QQ 选中时这两行是上下紧挨着的）。 */
 .qr-channels{display:flex;gap:6px;justify-content:center;margin:10px 0 2px}
-.qr-ch{padding:6px 14px;border-radius:99px;border:1px solid var(--line);
+.qr-ch{height:34px;padding:0 14px;border-radius:99px;border:1px solid var(--line);
   background:var(--panel-2);color:var(--muted);font:inherit;font-size:12px;
   cursor:pointer;transition:all .2s var(--ease)}
 .qr-ch:hover{color:var(--text);border-color:var(--line-strong)}
 .qr-ch.active{color:var(--accent-ink);background:var(--accent);
   border-color:transparent;font-weight:600}
 
-/* 弹窗顶部音源选择条 */
-.qr-sources{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;
+/* 弹窗顶部音源选择条：两列等宽栅格。
+   四块标签长度不一（网易云音乐 5 字 / QQ 音乐带头像 / 酷狗音乐 4 字 /
+   汽水音乐 4 字），320px 的卡片去掉左右内边距只剩 272px，横排放不下第四块 ——
+   它被挤到第二行成了光秃秃的一块，看着像"没做完"。两列等宽后四块尺寸完全一致，
+   也不会留下半行。（`.qr-source-nm` 给了 min-width:0，长昵称会省略号收口。） */
+.qr-sources{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;
   margin:12px 0 2px}
-/* 音源 chip 基础态：半透明深底 + 弱文字，hover 提亮 */
-.qr-source{padding:7px 14px;border-radius:99px;border:1px solid var(--line);
+/* 音源 chip：半透明深底 + 弱文字，hover 提亮。
+   display:inline-flex 不是排版偏好，缺了它有两个真 bug：
+     1. 已登录的 chip（.is-in）里是「头像 + 昵称」两个子元素。头像 .qr-source-av
+        是 display:flex 的**块级**元素，没有 flex 时它和昵称上下堆叠，chip 被撑到
+        53px（26 头像 + 一行文字 + 内边距）；
+     2. 音源条是 flex 行，默认 align-items:stretch，同一行里其它 chip 会被这块
+        53px 的拉着一起变高（实测 54px）；而换行到第二行的 chip 没人拉，只有
+        31px —— 「汽水音乐那块明显比别的小」就是这么来的。
+   height:34px 把高度钉死（26px 头像 + 上下各 3px + 1px 边框），内容一律居中：
+   带不带头像、标签几个字，四块都一样高。 */
+.qr-source{display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  height:34px;padding:0 14px;border-radius:99px;border:1px solid var(--line);
   background:rgba(255,255,255,.045);color:var(--muted);font:inherit;font-size:12px;
   cursor:pointer;transition:all .18s var(--ease)}
 .qr-source:hover{color:var(--text);border-color:var(--line-strong);
@@ -61,8 +76,9 @@ html.qr-modal-open .app{visibility:hidden}
 .qr-source.active{color:var(--accent-ink);background:var(--accent);
   border-color:transparent;font-weight:650}
 
-/* 已登录音源：头像 + 昵称 */
-.qr-source.is-in{padding:4px 13px 4px 5px;gap:8px}
+/* 已登录音源：头像 + 昵称并排（gap 由基础态给，这里只调左右的留白：
+   左侧贴边让头像不悬空）。高度由基础态的 height 统一管。 */
+.qr-source.is-in{padding:0 13px 0 5px}
 /* 已登录且选中：白底不再适合带头像，改为 accent 描边 + 微亮底色，
    明确「当前展示的就是这个账号」，比之前的细圈更清晰。 */
 .qr-source.is-in.active{color:var(--text);background:rgba(var(--accent-rgb),.12);
@@ -72,7 +88,7 @@ html.qr-modal-open .app{visibility:hidden}
   background:var(--panel)}
 .qr-source-av img{width:100%;height:100%;object-fit:cover}
 .qr-source-av.is-missing{font-size:12px;font-weight:700;color:var(--accent)}
-.qr-source-nm{font-size:12px;font-weight:600;max-width:96px;
+.qr-source-nm{font-size:12px;font-weight:600;max-width:96px;min-width:0;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* 已登录源的详情面板 */

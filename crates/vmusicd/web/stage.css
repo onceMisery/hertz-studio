@@ -1731,27 +1731,53 @@ body.reduce-motion .stage-ripple { display: none; }
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
+/* 主题色样本（菜单里的色点 .theme-dot、设置里的色块 .theme-swatch）画的是同一件
+   事，所以画法只写这一处：**盘心 = 主题底色，外环 = 主色→次色渐变**。
+
+   为什么盘心必须吃 --t-bg：主题名描述的是**底色**（矿石黑 / 星蓝深空 / 夜樱猫语
+   / 纸墨与机芯），主色只是点缀。只画主色渐变的后果是「矿石黑（默认）」被画成
+   一个亮青球 —— 名字和样本对不上。反过来也不能只画底色：各主题底色都是近黑，
+   落在深色行底上几乎看不见；外环顺手兼任"勾边"，同时把主色/次色这一层信息留住。
+
+   画法：外环是**下层**（裁进内边距盒，内边距宽 = 环宽），盘心是**上层**（裁进
+   内容盒）。background 简写的颜色只能写在最后一层，而这里两层各自要自己的裁剪盒，
+   所以盘心写成"同色同色"的两停靠点渐变，而不是 background-color。
+   不用 radial-gradient 的硬停靠点来切内外：硬停靠点在浏览器里不做抗锯齿，18px
+   的圆上会看到一圈毛边。
+
+   注意 background-color 要显式置透明：.theme-swatch 是 <button>，有 UA 默认底色，
+   而两层裁剪盒都收在内边距盒以内，边框那条 1px 会露出 buttonface 的浅灰。 */
+.theme-dot,
+.theme-swatch {
+  background-color: transparent;
+  background-image:
+    linear-gradient(var(--t-bg, var(--bg)), var(--t-bg, var(--bg))),
+    linear-gradient(135deg, var(--t-accent, var(--accent)), var(--t-accent-2, var(--accent-2)));
+  background-origin: content-box, padding-box;
+  background-clip: content-box, padding-box;
+}
+
 .theme-dot {
   flex: none;
   width: 18px;
   height: 18px;
+  padding: 2px; /* 外环宽度 */
   border-radius: 50%;
   border: 1px solid rgba(255, 255, 255, 0.22);
-  background: linear-gradient(135deg, var(--t-accent, var(--accent)), var(--t-accent-2, var(--accent-2)));
-  box-shadow: inset 0 0 0 2px var(--t-bg, transparent);
 }
 .theme-meta { display: grid; gap: 1px; min-width: 0; }
 .theme-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .theme-note { font-size: 10px; color: var(--muted); }
 
 .theme-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
+/* 画法与 .theme-dot 共用（见上方那条共同规则），这里只给尺寸：外环略宽，
+   22px 的块上 2px 的环会显得"盘心太大"。 */
 .theme-swatch {
   width: 22px;
   height: 22px;
-  padding: 0;
+  padding: 3px; /* 外环宽度 */
   border-radius: 50%;
   border: 1px solid var(--line-strong);
-  background: linear-gradient(135deg, var(--t-accent, var(--accent)), var(--t-accent-2, var(--accent-2)));
   cursor: pointer;
   transition: transform var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
 }
