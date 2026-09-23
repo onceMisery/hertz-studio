@@ -114,22 +114,36 @@ mod tests {
             message: "boom".into(),
             code: None,
             source: None,
+            index: None,
         })
         .unwrap();
         assert!(json.contains("\"type\":\"error\""));
-        // 本地音频错误不带 code/source：可选字段缺省时必须整体缺席而不是 null，
-        // 否则旧客户端会收到它不认识的 null 字段。
+        // 本地音频错误不带 code/source/index：可选字段缺省时必须整体缺席而不是
+        // null，否则旧客户端会收到它不认识的 null 字段。
         assert!(!json.contains("\"code\""));
         assert!(!json.contains("\"source\""));
+        assert!(!json.contains("\"index\""));
 
         // 在线播放失败的错误事件带错误码与音源 id（spec §1.5），供前端按码分流。
         let json = serde_json::to_string(&WsEvent::Error {
             message: "受版权限制".into(),
             code: Some("upstream_error".into()),
             source: Some("qq".into()),
+            index: None,
         })
         .unwrap();
         assert!(json.contains("\"code\":\"upstream_error\""));
         assert!(json.contains("\"source\":\"qq\""));
+        assert!(!json.contains("\"index\""));
+
+        // 手动点播失败带失败曲的队列下标，错误条「重试」凭它精确重放。
+        let json = serde_json::to_string(&WsEvent::Error {
+            message: "取流失败".into(),
+            code: Some("upstream_rejected".into()),
+            source: Some("netease".into()),
+            index: Some(2),
+        })
+        .unwrap();
+        assert!(json.contains("\"index\":2"));
     }
 }

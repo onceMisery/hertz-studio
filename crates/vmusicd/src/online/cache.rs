@@ -94,10 +94,25 @@ pub async fn clean_parts(dir: &Path) {
     }
 }
 
+/// 文件名是否命中保护名单。名单项支持两种形态：
+/// - 以 `.` 结尾的项按缓存名**前缀**匹配（如 `qq-a1-lossless.` 同时保护
+///   `qq-a1-lossless.mp3` / `.m4a` 等任意扩展名，这是当前播放曲的主保护项）；
+/// - 不以 `.` 结尾的项按**全名**精确匹配（legacy 命名缓存单独保护）。
+fn is_protected(name: &str, protected: &[String]) -> bool {
+    protected.iter().any(|p| {
+        if p.ends_with('.') {
+            name.starts_with(p.as_str())
+        } else {
+            name == p
+        }
+    })
+}
+
 /// 总量超 max_bytes 时按 mtime 从旧到新删到上限的 90%；.part 与 protected
-/// 跳过。无论超容多严重，mtime 最新的 1 个正式文件始终保留——它通常就是
-/// 刚 rename 落盘的当前曲，绝不能在落盘后立刻被 LRU 删掉。
-/// 启动时与每次曲目提交后的后台任务调用。
+/// （前缀/全名两种形态，见 [`is_protected`]）跳过。无论超容多严重，mtime
+/// 最新的 1 个正式文件始终保留——它通常就是刚 rename 落盘的当前曲，绝不能
+/// 在落盘后立刻被 LRU 删掉。
+/// 启动时传空名单；每次曲目提交后的后台任务传当前播放曲的保护名单。
 pub async fn enforce_limit(
     dir: &Path,
     max_bytes: u64,
@@ -111,7 +126,7 @@ pub async fn enforce_limit(
     while let Ok(Some(entry)) = it.next_entry().await {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(".part") || protected.contains(&name) {
+        if name.ends_with(".part") || is_protected(&name, protected) {
             continue;
         }
         if let Ok(meta) = fs::metadata(&path).await {
@@ -234,5 +249,43 @@ mod tests {
         assert!(removed >= 10_000);
         assert!(dir.join("song2.mp3").exists());
         assert!(!dir.join("song1.mp3").exists());
+    }
+
+    #[tokio::test]
+    async fn protected_supports_prefix_and_full_name() {
+        let dir = std::env::temp_dir().join(format!("vmusic-cache-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).await.unwrap();
+        // 5 个文件，写入顺序即 mtime 从旧到新：待删旧文件、相邻键（验证前缀
+        // 边界）、legacy 全名保护、前缀保护曲、以及不保护的「最新」锚点
+        // （enforce_limit 始终保留 mtime 最新的非保护文件，需要它占住这个位，
+        // 相邻键才会真正进入淘汰）。
+        for name in [
+            "old.mp3",
+            "qq-a1-losslesshi.mp3",
+            "qq-a1.mp3",
+            "qq-a1-lossless.m4a",
+            "zzz-new.mp3",
+        ] {
+            fs::write(dir.join(name), vec![0u8; 10_000]).await.unwrap();
+            // 拉开 mtime（50ms，跨过文件系统可能的粗时间粒度，避免同刻文件
+            // 被稳定排序随机成「最新」）。
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // `qq-a1-lossless.` 前缀保护 m4a，legacy 全名保护 qq-a1.mp3；
+        // 相邻键 qq-a1-losslesshi.mp3 不得被前缀误护，与最旧的 old 一起删。
+        let protected = vec!["qq-a1-lossless.".to_string(), "qq-a1.mp3".to_string()];
+        enforce_limit(&dir, 20_001, &protected).await.unwrap();
+        assert!(dir.join("qq-a1-lossless.m4a").exists(), "前缀保护命中");
+        assert!(dir.join("qq-a1.mp3").exists(), "全名保护命中");
+        // 前缀带点边界：相邻音质键不在保护内，与 old 一起被淘汰。
+        assert!(
+            !dir.join("qq-a1-losslesshi.mp3").exists(),
+            "相邻键不被前缀误护"
+        );
+        assert!(
+            !dir.join("old.mp3").exists(),
+            "最旧且不受保护的文件必须删掉"
+        );
+        assert!(dir.join("zzz-new.mp3").exists(), "最新文件始终保留");
     }
 }

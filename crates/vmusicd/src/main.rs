@@ -135,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
         buffering: Default::default(),
         online_meta: Default::default(),
         downloads: Default::default(),
+        protected: Default::default(),
         auto_failures: Default::default(),
         quality: tokio::sync::Mutex::new(quality_prefs),
     });

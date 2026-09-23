@@ -119,6 +119,35 @@ impl Inner {
             g = ng;
         }
     }
+
+    /// 单次预读 tick：最多在 Condvar 上等 200ms，醒来重检谓词。
+    ///
+    /// 返回 `Ok(true)` = 已达预读阈值或已完成；`Ok(false)` = 超时仍未达
+    /// （调用方复核代际后再来一轮）；`Err` = 已 abort 或下载出错。与
+    /// [`Self::wait_for`] 的无限等待不同，本调用必然在 ~200ms 内返回，
+    /// 播放流程因而能在每轮之间插入代际复核，及时中止被切歌顶掉的下载。
+    fn poll_prebuffer(&self, abort: &AtomicBool) -> Result<bool, WaitError> {
+        let want = prebuffer_target(self.total());
+        let mut g = self.downloaded.lock().unwrap();
+        if abort.load(Ordering::Relaxed) {
+            return Err(WaitError::Aborted);
+        }
+        if let Some(e) = self.error.lock().unwrap().clone() {
+            return Err(WaitError::Failed(e));
+        }
+        if *g >= want || *self.finished.lock().unwrap() {
+            return Ok(true);
+        }
+        let (ng, _) = self.cv.wait_timeout(g, Duration::from_millis(200)).unwrap();
+        g = ng;
+        if abort.load(Ordering::Relaxed) {
+            return Err(WaitError::Aborted);
+        }
+        if let Some(e) = self.error.lock().unwrap().clone() {
+            return Err(WaitError::Failed(e));
+        }
+        Ok(*g >= want || *self.finished.lock().unwrap())
+    }
 }
 
 #[derive(Debug)]
@@ -232,44 +261,18 @@ pub struct Download {
 }
 
 impl Download {
-    /// 嗅探出的容器扩展名（预读完成后一定可用）。
-    pub fn ext(&self) -> &'static str {
-        self.inner.ext()
-    }
-
-    /// 后台下载是否已跑到完成态（WaitFull 轮询用，不取 JoinHandle）。
+    /// 后台下载是否已跑到完成态（注册表惰性清理用，不取 JoinHandle）。
     pub fn is_finished(&self) -> bool {
         self.inner.is_finished()
     }
-}
 
-// 保留计划代码「先保下限再封顶」的显式写法，语义与 clamp 等价。
-#[allow(clippy::manual_clamp)]
-pub fn prebuffer_target(total: Option<u64>) -> u64 {
-    match total {
-        Some(t) => ((t * 8 / 100).max(FLUSH_STEP)).min(PREBUFFER_CAP),
-        None => FLUSH_STEP,
-    }
-}
-
-impl Download {
-    pub fn pct(&self) -> Option<u8> {
-        self.inner.pct()
-    }
-
-    /// 等预读阈值（spawn_blocking 里阻塞，不卡 async 运行时）。
-    pub async fn wait_prebuffer(&self) -> Result<u64, String> {
-        let inner = self.inner.clone();
-        let abort = self.abort.clone();
-        let need = prebuffer_target(inner.total());
-        tokio::task::spawn_blocking(move || {
-            inner.wait_for(need, &abort).map_err(|e| match e {
-                WaitError::Aborted => "download aborted".to_string(),
-                WaitError::Failed(m) => m,
-            })
-        })
-        .await
-        .map_err(|e| e.to_string())?
+    /// 廉价克隆一个播放流程用的视图（只复制 Arc/路径，所有权留在注册表）。
+    pub fn view(&self) -> DownloadView {
+        DownloadView {
+            inner: self.inner.clone(),
+            abort: self.abort.clone(),
+            part_path: self.part_path.clone(),
+        }
     }
 
     pub async fn join(self) -> Result<PathBuf, String> {
@@ -281,6 +284,73 @@ impl Download {
         self.abort.store(true, Ordering::Relaxed);
         self.task.abort();
         let _ = std::fs::remove_file(&self.part_path);
+    }
+}
+
+/// [`Download`] 的廉价克隆视图：下载注册表持有 Download 所有权（供切歌时
+/// cancel / WaitFull 完成时 join），播放流程只持本视图做可被代际打断的
+/// 预读轮询与进度查询。所有字段都是 Arc 共享，视图与原下载看到同一状态。
+#[derive(Clone)]
+pub struct DownloadView {
+    /// 同 Download::inner：私有类型仅在 crate 内经 media_parts 传给
+    /// HttpMediaSource::open。
+    #[allow(private_interfaces)]
+    inner: Arc<Inner>,
+    abort: Arc<AtomicBool>,
+    part_path: PathBuf,
+}
+
+impl DownloadView {
+    pub fn part_path(&self) -> &Path {
+        &self.part_path
+    }
+
+    /// 嗅探出的容器扩展名（预读完成后一定可用）。
+    pub fn ext(&self) -> &'static str {
+        self.inner.ext()
+    }
+
+    pub fn pct(&self) -> Option<u8> {
+        self.inner.pct()
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.inner.is_finished()
+    }
+
+    /// 构造 HttpMediaSource 所需的三件共享状态。
+    #[allow(private_interfaces)]
+    pub fn media_parts(&self) -> (PathBuf, Arc<Inner>, Arc<AtomicBool>) {
+        (
+            self.part_path.clone(),
+            self.inner.clone(),
+            self.abort.clone(),
+        )
+    }
+
+    /// 单次预读 tick（spawn_blocking 里 Condvar 等待，不卡 async 运行时）：
+    /// `Ok(true)` = 已达预读阈值/已完成；`Ok(false)` = 200ms 超时未达，
+    /// 调用方复核代际后继续循环；`Err` = abort 或下载错误。
+    pub async fn prebuffer_tick(&self) -> Result<bool, String> {
+        let inner = self.inner.clone();
+        let abort = self.abort.clone();
+        tokio::task::spawn_blocking(move || {
+            inner.poll_prebuffer(&abort).map_err(|e| match e {
+                WaitError::Aborted => "download aborted".to_string(),
+                WaitError::Failed(m) => m,
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+}
+
+// 保留计划代码「先保下限再封顶」的显式写法，语义与 clamp 等价。
+#[allow(clippy::manual_clamp)]
+pub fn prebuffer_target(total: Option<u64>) -> u64 {
+    match total {
+        Some(t) => ((t * 8 / 100).max(FLUSH_STEP)).min(PREBUFFER_CAP),
+        None => FLUSH_STEP,
     }
 }
 
@@ -408,6 +478,18 @@ pub fn start(
                     inner.fail(msg.clone());
                     let _ = std::fs::remove_file(&part_path);
                     return Err(msg);
+                }
+                // 截断响应（连接提前断开但没触发续传、或末个 URL 给了短体）
+                // 绝不允许 rename 成正式缓存：否则 find_cached_by_key 会永久
+                // 命中这个坏文件，之后每次播放都解码失败。Content-Length 已知
+                // 才校验；chunked（total=None）没有可比对的总长，跳过。
+                if let Some(t) = inner.total() {
+                    if written != t {
+                        let msg = "下载不完整".to_string();
+                        inner.fail(msg.clone());
+                        let _ = std::fs::remove_file(&part_path);
+                        return Err(msg);
+                    }
                 }
                 // 完成：按嗅探扩展名落正式名。Windows 终文件已存在则复用。
                 let final_path = dir2.join(format!("{}.{}", key2, inner.ext()));

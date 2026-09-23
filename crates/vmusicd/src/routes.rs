@@ -205,10 +205,12 @@ async fn get_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
     // 读同一个 state.buffering，轮询 /state 的客户端拿到的口径与推送一致。
     let mut v = serde_json::to_value(state.audio.snapshot()).unwrap_or_default();
     if let Some(obj) = v.as_object_mut() {
+        // 字段口径与 WS Buffering 事件一致：buffering + pct（旧名 buffer_pct
+        // 已移除，前端只消费 WS 推送，轮询快照仅作首帧/降级对齐）。
         let (active, pct) = *state.buffering.lock().await;
         obj.insert("buffering".into(), serde_json::Value::Bool(active));
         if let Some(p) = pct {
-            obj.insert("buffer_pct".into(), serde_json::Value::from(p));
+            obj.insert("pct".into(), serde_json::Value::from(p));
         }
     }
     Json(v)
@@ -1001,17 +1003,24 @@ struct ReplayRequest {
     index: usize,
 }
 
-/// 错误条「重试」：重新播放当前队列指定下标（在线曲重新取流）。
+/// 错误条「重试」/ 音质热切换：重新播放当前队列指定下标（在线曲重新取流），
+/// 并接续切换前的播放进度（>1s 才 seek；渐进源会在解码侧等到对应字节）。
 async fn replay_index(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ReplayRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // 在重新取流（数秒 await）之前抓进度：提交后旧曲已被换装，快照归零。
+    let resume = state.audio.snapshot().position_ms;
     let outcome = state
         .play_index_for(body.index, None, false)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    // 只有真正起播才触发后台预取 + LRU；被更新代际顶掉时不收口。
+    // 只有真正起播才 seek + 触发后台预取 + LRU；被更新代际顶掉时不收口。
     if outcome.committed {
+        if resume > 1000 {
+            // seek 失败不致命：从头播也好过半途整个请求报错。
+            state.audio.seek(resume).await.ok();
+        }
         state.post_commit_background();
     }
     Ok(get_state(State(state)).await)

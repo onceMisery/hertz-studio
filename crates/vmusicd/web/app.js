@@ -380,9 +380,9 @@ function handleEvent(msg) {
         if (/已跳过/.test(msg.message)) {
           toast(msg.message);
         } else {
-          const ids = state.queueIds || [];
-          const idx = ids.indexOf(state.snapshot.track_id);
-          window.Online.showOnlineError(msg.message, idx >= 0 ? idx : null);
+          // 重试下标以事件携带的为准：快照反查会在自动跳曲/切歌后指错曲。
+          var idx = (msg.index != null ? msg.index : null);
+          window.Online.showOnlineError(msg.message, idx);
         }
       } else {
         toast(`播放异常：${msg.message}`, 'error');
@@ -695,7 +695,12 @@ function applySnapshot(snap) {
     ui.progress.setAttribute('aria-valuetext', `${fmt(snap.position_ms)} / ${fmt(snap.duration_ms)}`);
   }
 
-  if (snap.track_id && snap.track_id !== previous) loadNowPlaying(snap.track_id);
+  if (snap.track_id && snap.track_id !== previous) {
+    // 新曲起播：上一首留下的在线错误条（如手动失败后的重试条）立即收口，
+    // 不能让它带着旧下标盖在新曲上。
+    if (window.Online && window.Online.hideOnlineError) window.Online.hideOnlineError();
+    loadNowPlaying(snap.track_id);
+  }
   syncStageIdle();
   updateRowActiveState(snap);
   // 舞台拿走播放状态：它自己有本地时钟补帧，不依赖推送频率。
