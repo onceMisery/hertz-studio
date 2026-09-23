@@ -329,6 +329,13 @@
            有任一登录能力（cookie/qr/歌单）的音源都会出现账号卡；
            未登录时是扫码/cookie 入口，登录后才拉歌单网格。 -->
       <div id="online-plugins" class="online-plugins">
+        <div id="op-history" class="op-history" hidden>
+          <div class="op-section-title op-history-head">
+            <span>最近播放</span>
+            <button id="op-history-clear" class="op-history-clear" type="button">清空</button>
+          </div>
+          <div id="op-history-list" class="op-history-list"></div>
+        </div>
         <div class="op-section-title">我的账号</div>
         <div id="op-accounts" class="op-accounts"></div>
         <div id="op-grid-head" class="op-section-title" hidden>我的歌单</div>

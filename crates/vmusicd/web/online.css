@@ -338,3 +338,29 @@ html.qr-modal-open .app{visibility:hidden}
 .opl-track-card.is-disabled{opacity:.45;cursor:default}
 .opl-track-card.is-disabled:hover{transform:none}
 .opl-card-vip{position:absolute;top:6px;right:6px;margin-left:0}
+
+/* 最近播放 */
+.op-history{margin:8px 0 4px}
+.op-history-head{display:flex;align-items:center;justify-content:space-between}
+.op-history-clear{background:none;border:none;color:var(--muted);font:inherit;font-size:12px;
+  cursor:pointer;padding:2px 6px;border-radius:6px}
+.op-history-clear:hover{color:var(--text);background:rgba(255,255,255,.06)}
+.op-history-list{display:flex;flex-direction:column;gap:2px;margin:4px 0 8px}
+.op-history-item{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:10px;
+  cursor:pointer;transition:background .15s var(--ease)}
+.op-history-item:hover{background:rgba(var(--accent-rgb),.1)}
+.op-history-item .op-h-cover{width:34px;height:34px;flex:none;border-radius:7px;
+  background:var(--panel-2) center/cover no-repeat;
+  display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--muted)}
+.op-history-item .op-h-main{flex:1;min-width:0}
+.op-history-item .op-h-title{font-size:13px;color:var(--text);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.op-history-item .op-h-sub{font-size:11px;color:var(--muted);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.op-history-item .op-h-time{font-size:11px;color:var(--muted);flex:none}
+.op-history-item .op-h-del{background:none;border:none;color:var(--muted);cursor:pointer;
+  font-size:14px;line-height:1;padding:2px 6px;border-radius:6px;opacity:0}
+.op-history-item:hover .op-h-del{opacity:1}
+.op-history-item .op-h-del:hover{color:#ff8a8a;background:rgba(255,90,90,.12)}
+.op-h-src{font-size:10px;padding:1px 6px;border-radius:999px;
+  background:rgba(var(--accent-rgb),.14);color:var(--text);flex:none}

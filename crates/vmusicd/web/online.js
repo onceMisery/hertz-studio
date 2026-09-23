@@ -14,6 +14,9 @@
   var H = null; // 宿主：{ ui, state, setStateQueue, applyQueue, paintArt,
                 //       probeImage, fmt, toast, errText }
 
+  // 本文件内没有全局 $；个人区新增元素直接按 id 取，不经 H.ui。
+  function $(id) { return document.getElementById(id); }
+
   var onlineState = {
     source: 'netease',
     q: '',
@@ -456,6 +459,122 @@
     }
   }
 
+  // ---- 最近播放（服务端 play_history，个人区区块）----
+  function relTime(ms) {
+    var d = new Date(ms);
+    var today = new Date();
+    var sameDay = d.toDateString() === today.toDateString();
+    if (sameDay) {
+      return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+    }
+    var yesterday = new Date(today.getTime() - 86400000);
+    if (d.toDateString() === yesterday.toDateString()) return '昨天';
+    return (d.getMonth() + 1) + '月' + d.getDate() + '日';
+  }
+
+  async function loadHistory() {
+    var host = $('op-history');
+    if (!host) return;
+    var list = $('op-history-list');
+    if (!list) return;
+    // 清空按钮每次渲染重新绑定（元素与区块同在，这里绑一定拿得到）。
+    var clearBtn = $('op-history-clear');
+    if (clearBtn) {
+      clearBtn.onclick = async function () {
+        try {
+          await T.delete('/v1/history');
+          loadHistory();
+        } catch (e) {
+          H.toast('清空失败', 'error');
+        }
+      };
+    }
+    var data;
+    try {
+      data = await T.get('/v1/history?limit=20');
+    } catch (e) {
+      host.hidden = true;
+      return;
+    }
+    var items = (data && data.items) || [];
+    host.hidden = items.length === 0;
+    list.textContent = '';
+    items.forEach(function (it) {
+      var row = document.createElement('div');
+      row.className = 'op-history-item';
+
+      var cover = document.createElement('div');
+      cover.className = 'op-h-cover';
+      if (it.cover_url) {
+        cover.style.backgroundImage = 'url("' + safeCoverUrl(it.cover_url) + '")';
+      } else {
+        cover.textContent = '♪';
+      }
+
+      var main = document.createElement('div');
+      main.className = 'op-h-main';
+      var title = document.createElement('div');
+      title.className = 'op-h-title';
+      title.textContent = it.title || it.ref_id;
+      var sub = document.createElement('div');
+      sub.className = 'op-h-sub';
+      sub.textContent = [it.artist, it.album].filter(Boolean).join(' · ') || '未知艺术家';
+      main.append(title, sub);
+
+      var src = document.createElement('span');
+      src.className = 'op-h-src';
+      src.textContent = it.source === 'local' ? '本地' : sourceLabel(it.source);
+
+      var time = document.createElement('span');
+      time.className = 'op-h-time';
+      time.textContent = relTime(it.played_at);
+
+      var del = document.createElement('button');
+      del.className = 'op-h-del';
+      del.type = 'button';
+      del.title = '移除';
+      del.textContent = '×';
+      del.onclick = async function (e) {
+        e.stopPropagation();
+        try {
+          await T.delete('/v1/history/' + it.id);
+          loadHistory();
+        } catch (err) {
+          H.toast('移除失败', 'error');
+        }
+      };
+
+      row.append(cover, main, src, time, del);
+      row.addEventListener('click', function () {
+        replayHistory(it);
+      });
+      list.appendChild(row);
+    });
+  }
+
+  // 点击历史行：在线曲按单元素 track 重新入队（playable:true 走整盘试听链路，
+  // 服务端实时取流，不存在 URL 过期问题）；本地曲走 /v1/player/load 起播
+  // （已核实 PUT /queue 只换队列不起播）。
+  function replayHistory(it) {
+    if (it.source === 'local') {
+      T.post('/v1/player/load', { track_id: it.track_id, queue: [it.track_id] })
+        .then(function () { H.toast('播放《' + it.title + '》'); })
+        .catch(function (err) { H.toast(H.errText('播放失败', err), 'error'); });
+      return;
+    }
+    var track = {
+      source: it.source,
+      id: it.ref_id,
+      title: it.title,
+      artist: it.artist || '',
+      album: it.album || '',
+      duration_ms: it.duration_ms || 0,
+      cover: it.cover_url || '',
+      playable: true,
+    };
+    playAll([track], 0);
+  }
+
   function initOnline() {
     if (H.ui.onlineGo) {
       H.ui.onlineGo.onclick = function () {
@@ -517,6 +636,7 @@
     }
     renderOnline();
     loadSources();
+    loadHistory();
   }
 
   // 音源清单由服务端给出（/v1/online/sources）。写死 HTML 会漏掉分类和能力位。
@@ -637,6 +757,9 @@
     // setView 首次进入在线页时按默认分类拉一屏；当前音源只支持关键词
     // 检索（QQ/酷狗）且搜索框为空时不预取——那条请求后端必回 400。
     onViewEnter: function () {
+      // 历史与搜索预取互不依赖：每次切回在线视图都刷新，播完一曲再回来
+      // 新记录能置顶（下面的早退只针对搜索预取）。
+      loadHistory();
       if (onlineState.loading) return;
       if (onlineState.tracks.length) return;
       if (!onlineState.q.trim() && !onlineState.cat) return;
@@ -648,6 +771,7 @@
     row: buildRow,
     loadSources: loadSources,
     refreshCookieUi: refreshCookieUi,
+    reloadHistory: loadHistory,
     sources: function () { return onlineState.sources; },
     state: onlineState,
     // —— 供宿主「正在播放」/队列渲染回落到在线元数据 ——
