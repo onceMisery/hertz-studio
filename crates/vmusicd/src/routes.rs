@@ -333,6 +333,7 @@ async fn volume(
         .set_volume(body.volume)
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    crate::persist::save_volume(&state.db, body.volume).await;
     Ok(get_state(State(state)).await)
 }
 
@@ -350,6 +351,7 @@ async fn mode(
         .set_mode(body.mode)
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    crate::persist::save_mode(&state.db, body.mode).await;
     Ok(get_state(State(state)).await)
 }
 

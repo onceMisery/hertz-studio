@@ -13,6 +13,7 @@ mod error;
 #[allow(dead_code)]
 mod history;
 mod online;
+mod persist;
 mod routes;
 mod scan;
 mod state;
@@ -110,7 +111,11 @@ async fn main() -> anyhow::Result<()> {
             spawn(BackendKind::Null).await?
         }
     };
-    audio.set_volume(config.audio.volume).await.ok();
+    // 音量/模式以服务端 settings 为权威；缺键才回落到 config 默认。
+    let (restore_volume, restore_mode) =
+        persist::load_player_prefs(&db, config.audio.volume, vmusic_core::PlayMode::Repeat).await;
+    audio.set_volume(restore_volume).await.ok();
+    audio.set_mode(restore_mode).await.ok();
 
     let (events, _) = broadcast::channel(128);
     let state = Arc::new(AppState {
