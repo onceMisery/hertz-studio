@@ -364,3 +364,16 @@ html.qr-modal-open .app{visibility:hidden}
 .op-history-item .op-h-del:hover{color:#ff8a8a;background:rgba(255,90,90,.12)}
 .op-h-src{font-size:10px;padding:1px 6px;border-radius:999px;
   background:rgba(var(--accent-rgb),.14);color:var(--text);flex:none}
+
+/* 音质档位选择器（选项由 GET /v1/online/quality 按当前音源渲染） */
+.online-quality{height:32px;border-radius:8px;border:1px solid var(--line);
+  background:var(--panel-2);color:var(--text);font:inherit;font-size:12px;padding:0 8px}
+/* 在线播放错误条：重试 / 下一首 / 关闭 */
+.online-errorbar{display:flex;align-items:center;gap:10px;margin:8px 0;padding:9px 12px;
+  border-radius:10px;border:1px solid rgba(255,150,120,.4);
+  background:rgba(255,120,80,.1);font-size:13px;color:var(--text)}
+.online-error-text{flex:1;min-width:0}
+.online-error-actions{display:flex;gap:6px;align-items:center}
+.online-error-actions .btn{padding:4px 12px;font-size:12px}
+/* 实际档位标（now-tech 内） */
+.actual-q{font-size:10px;color:#ffc46b;margin-left:6px}

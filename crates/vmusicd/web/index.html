@@ -298,12 +298,21 @@
           <select id="online-source" aria-label="音源">
             <option value="netease">网易云音乐</option>
           </select>
+          <select id="online-quality" class="online-quality" aria-label="音质档位" title="音质档位"></select>
         </div>
       </div>
 
       <!-- 搜索/分类/结果/账号区全部进同一个滚动容器：内容超出时整体
            可滚动，而不是被视图边界裁掉（与本地曲库内部列表滚动同理）。 -->
       <div class="online-scroll">
+      <div id="online-errorbar" class="online-errorbar" hidden>
+        <span id="online-error-text" class="online-error-text"></span>
+        <span class="online-error-actions">
+          <button id="online-error-retry" class="btn" type="button">重试</button>
+          <button id="online-error-next" class="btn primary" type="button">下一首</button>
+          <button id="online-error-close" class="iconbtn" type="button" aria-label="关闭">×</button>
+        </span>
+      </div>
       <div class="online-search">
         <input id="online-q" type="search" placeholder="搜索在线歌曲、歌手或专辑…" autocomplete="off" aria-label="搜索在线曲库">
         <button id="online-go" class="btn primary">搜索</button>

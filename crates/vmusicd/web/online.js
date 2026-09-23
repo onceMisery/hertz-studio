@@ -381,6 +381,17 @@
     // 先把能确定的部分画出来（标题/歌手/封面），歌词异步补，
     // 这样即使歌词接口慢或失败，界面也不会停在空白上。
     paintNowPlaying(meta, cover);
+    // 实际可用档位：上游可能给不到请求档（如未登录拿不到无损）。放在
+    // paintNowPlaying 之后写 nowTech，否则会被默认的「在线试听」文案盖掉。
+    if (res.actual_quality) {
+      var requested = qualityMap[source];
+      if (requested && requested !== res.actual_quality && !window.__qtoast) {
+        window.__qtoast = true;
+        H.toast('该曲目实际可用：' + qualityLabel(res.actual_quality));
+      }
+      var tech = H.ui.nowTech;
+      if (tech) tech.textContent = '在线 · ' + qualityLabel(res.actual_quality);
+    }
     if (window.Stage && meta) window.Stage.setTrack(meta, cover);
     if (meta) H.toast('试听《' + meta.title + '》');
 
@@ -593,6 +604,8 @@
     if (H.ui.onlineSource) {
       H.ui.onlineSource.onchange = function () {
         onlineState.source = H.ui.onlineSource.value;
+        // 按新音源重建档位选项（All 无档位描述，选择器自动隐藏）。
+        renderQualityOptions();
         // All 是音源维度的聚合项：没有分类，也不自动拉取（需要关键词）。
         if (onlineState.source === 'all') {
           renderSourceCaps();
@@ -634,9 +647,106 @@
         searchOnline();
       };
     }
+    // 音质档位：保存偏好；若正在播该音源的在线曲，按当前队列下标重新取流，
+    // 服务端接续进度热切换（queueIds 由 app.js 暴露，Task 14 前可能不存在）。
+    var qSel = $('online-quality');
+    if (qSel) {
+      qSel.onchange = async function () {
+        var src = onlineState.source;
+        var q = qSel.value;
+        try {
+          await T.post('/v1/online/quality', { source: src, quality: q });
+          qualityMap[src] = q;
+          // 正在播该音源在线曲 → 服务端热切换（按当前队列下标重新取流，接续进度）。
+          var snap = H.state.snapshot || {};
+          if (snap.track_id && snap.track_id.indexOf('online:' + src + ':') === 0) {
+            var ids = (H.state.queueIds || []);
+            var idx = ids.indexOf(snap.track_id);
+            if (idx >= 0) {
+              H.ui.playpause.classList.add('is-loading');
+              try {
+                await T.post('/v1/player/replay', { index: idx });
+                var opt = qSel.options ? qSel.options[qSel.selectedIndex] : null;
+                H.toast('已切换到' + (opt ? opt.textContent : qualityLabel(q)));
+              } finally {
+                H.ui.playpause.classList.remove('is-loading');
+              }
+            }
+          }
+        } catch (err) {
+          H.toast(H.errText('音质切换失败', err), 'error');
+          renderQualityOptions();
+        }
+      };
+    }
     renderOnline();
     loadSources();
     loadHistory();
+  }
+
+  // ---- 音质档位（GET /v1/online/quality 描述各音源可选档位与当前选择）----
+  var qualityMap = {}; // source -> "standard"/...
+  var QUALITY_LABELS = { standard: '标准', exhigh: '高品 320k', lossless: '无损', hires: 'Hi-Res' };
+
+  function qualityLabel(q) { return QUALITY_LABELS[q] || q; }
+
+  async function loadQualityPrefs() {
+    var data = await T.get('/v1/online/quality').catch(function () { return null; });
+    var prefs = (data && data.prefs) || [];
+    // 原始描述挂到 window：renderQualityOptions 的选项表（value/label）来自它。
+    window.__qualityDesc = prefs;
+    qualityMap = {};
+    prefs.forEach(function (p) { qualityMap[p.source] = p.selected; });
+    renderQualityOptions();
+  }
+
+  function renderQualityOptions() {
+    var sel = $('online-quality');
+    if (!sel) return;
+    var src = onlineState.source;
+    var data = null;
+    // 选项表来自 /v1/online/quality 的描述（缓存在 window.__qualityDesc）。
+    (window.__qualityDesc || []).forEach(function (p) {
+      if (p.source === src) data = p;
+    });
+    // All 聚合或后端没给描述的音源：没有档位概念，整枚选择器隐藏。
+    if (!data) { sel.hidden = true; return; }
+    sel.hidden = false;
+    var keep = qualityMap[src] || data.selected;
+    sel.textContent = '';
+    (data.options || []).forEach(function (o) {
+      var opt = document.createElement('option');
+      opt.value = o.value;
+      opt.textContent = o.label;
+      sel.appendChild(opt);
+    });
+    sel.value = keep;
+  }
+
+  // 手动点播失败 / WS 上报在线音源错误时由 app.js（Task 14）调用：
+  // 在面板顶部显示错误条，可重试当前下标或跳到下一首。
+  function showOnlineError(message, retryIndex) {
+    var bar = $('online-errorbar');
+    if (!bar) { H.toast(message, 'error'); return; }
+    $('online-error-text').textContent = message;
+    bar.hidden = false;
+    bar.dataset.index = retryIndex == null ? '' : String(retryIndex);
+    $('online-error-retry').onclick = function () {
+      bar.hidden = true;
+      var idx = Number(bar.dataset.index);
+      if (bar.dataset.index !== '' && !Number.isNaN(idx)) {
+        T.post('/v1/player/replay', { index: idx }).catch(function () {});
+      }
+    };
+    $('online-error-next').onclick = function () {
+      bar.hidden = true;
+      T.post('/v1/player/next', {}).catch(function (e) { H.toast(H.errText('下一首失败', e), 'error'); });
+    };
+    $('online-error-close').onclick = function () { bar.hidden = true; };
+  }
+  function hideOnlineError() {
+    var bar = $('online-errorbar');
+    if (bar) bar.hidden = true;
   }
 
   // 音源清单由服务端给出（/v1/online/sources）。写死 HTML 会漏掉分类和能力位。
@@ -644,6 +754,8 @@
     var data = await T.get('/v1/online/sources').catch(function () { return null; });
     onlineState.sources = (data && data.sources) || [];
     refreshCookieUi();
+    // 档位描述与音源清单同源拉取；失败自吞（选择器保持隐藏），不影响音源加载。
+    loadQualityPrefs();
     // 一个都没拿到时下拉框保持 index.html 里的静态选项。
     if (!onlineState.sources.length) return;
     if (H.ui.onlineSource) {
@@ -784,5 +896,8 @@
     paintNowPlaying: paintNowPlaying,
     sourceLabel: sourceLabel,
     sourceBadge: sourceBadge,
+    // 在线播放错误条（app.js Task 14 的 WS error 分支调用）。
+    showOnlineError: showOnlineError,
+    hideOnlineError: hideOnlineError,
   };
 })();
