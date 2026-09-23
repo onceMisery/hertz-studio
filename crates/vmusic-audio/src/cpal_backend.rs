@@ -50,6 +50,12 @@ const BUFFER_SECONDS: f32 = 4.0;
 /// Keep every Nth frame in the tap; 4 keeps the tap useful at 48 kHz.
 const TAP_STRIDE: usize = 3;
 const TAP_LEN: usize = FFT_SIZE * 3;
+/// 开播 / 换装后的淡入时长。
+const FADE_IN_MS: u64 = 250;
+/// 暂停 / 停止 / 切歌时的淡出时长。
+const FADE_OUT_MS: u64 = 200;
+/// 自然播放到尾部前提前开始淡出的时长。
+const TAIL_FADE_MS: u64 = 500;
 
 /// State shared between the decoder thread and the audio callback.
 struct Shared {
@@ -58,6 +64,12 @@ struct Shared {
     volume: AtomicU32,
     playing: AtomicBool,
     frames_played: AtomicU64,
+    /// 增益斜坡（单位：设备声道帧）。fade_frames=0 表示无斜坡，增益恒为 fade_gain。
+    fade_gain: AtomicU32,
+    fade_from: AtomicU32,
+    fade_to: AtomicU32,
+    fade_frames: AtomicU64,
+    fade_done: AtomicU64,
 }
 
 impl Shared {
@@ -68,7 +80,48 @@ impl Shared {
             volume: AtomicU32::new(1.0f32.to_bits()),
             playing: AtomicBool::new(false),
             frames_played: AtomicU64::new(0),
+            fade_gain: AtomicU32::new(1.0f32.to_bits()),
+            fade_from: AtomicU32::new(1.0f32.to_bits()),
+            fade_to: AtomicU32::new(1.0f32.to_bits()),
+            fade_frames: AtomicU64::new(0),
+            fade_done: AtomicU64::new(0),
         }
+    }
+
+    /// 每帧增益的纯函数（便于单测）。
+    fn ramp_value(from: f32, to: f32, total: u64, done: u64) -> f32 {
+        if total == 0 {
+            return to;
+        }
+        let t = (done as f32 / total as f32).clamp(0.0, 1.0);
+        from + (to - from) * t
+    }
+
+    /// 从当前增益出发，装一条到 `to` 的线性斜坡（`ms` 毫秒，按设备采样率折算帧数）。
+    fn arm_fade(&self, to: f32, ms: u64, rate: u32) {
+        let from = f32::from_bits(self.fade_gain.load(Ordering::Relaxed));
+        let frames = (ms as u128 * rate as u128 / 1000) as u64;
+        self.fade_from.store(from.to_bits(), Ordering::Relaxed);
+        self.fade_to.store(to.to_bits(), Ordering::Relaxed);
+        self.fade_frames.store(frames, Ordering::Relaxed);
+        self.fade_done.store(0, Ordering::Relaxed);
+    }
+
+    fn fade_active(&self) -> bool {
+        self.fade_frames.load(Ordering::Relaxed) > 0
+    }
+
+    /// 换装/新曲复位：增益归 0（静音），清掉一切斜坡。
+    ///
+    /// 换装之后要么立即 arm 一条 0→1 淡入，要么保持暂停（playing=false，
+    /// 回调整体输出 0）——两条路都要求起点是静音，而不是 1：若归 1，随后的
+    /// `arm_fade(1.0, …)` 会变成 1→1 常量斜坡，淡入名存实亡。
+    fn reset_fade_shared(&self) {
+        self.fade_gain.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.fade_from.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.fade_to.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.fade_frames.store(0, Ordering::Relaxed);
+        self.fade_done.store(0, Ordering::Relaxed);
     }
 }
 
@@ -76,6 +129,14 @@ struct DecoderCtl {
     stop: Arc<AtomicBool>,
     /// `Some(ms)` means "seek here as soon as you can".
     seek_to: Arc<Mutex<Option<u64>>>,
+}
+
+/// 换装的"半完成态"：probe 已做完，等旧源淡出到 0 再由 maintain 换。
+struct PendingLoad {
+    opened: OpenedReader,
+    info: MediaInfo,
+    /// 换装完成后是否进入播放态（暂停/停止意图可能在淡出期间到达）。
+    play_after: bool,
 }
 
 pub struct CpalBackend {
@@ -89,6 +150,14 @@ pub struct CpalBackend {
     duration_ms: Option<u64>,
     fft: Arc<dyn rustfft::Fft<f32>>,
     spectrum_state: Mutex<Vec<f32>>,
+    /// 暂停淡出到 0 的瞬间才真正置 playing=false。
+    pending_pause: bool,
+    /// 停止淡出到 0 的瞬间才 seek 回 0 复位。
+    pending_stop: bool,
+    /// 自然尾部淡出是否已武装（seek 回主体段后可重新武装）。
+    tail_armed: bool,
+    /// 等旧源淡出完成后换装的新源。
+    pending_load: Option<PendingLoad>,
 }
 
 impl CpalBackend {
@@ -115,6 +184,10 @@ impl CpalBackend {
             duration_ms: None,
             fft,
             spectrum_state: Mutex::new(Vec::new()),
+            pending_pause: false,
+            pending_stop: false,
+            tail_armed: false,
+            pending_load: None,
         })
     }
 
@@ -161,22 +234,95 @@ impl CpalBackend {
         }
     }
 
-    /// Task 8 会用真实的淡入淡出斜坡替换；open_and_spawn 换装时必须调用它。
-    fn reset_fade(&mut self) {}
+    /// 立即换装（暂停/停止态）或新曲复位时调用：增益归 1、尾部门闩与
+    /// pending 标志全部清掉。pending_load 不在此清：换装路径自己决定存不存。
+    fn reset_fade(&mut self) {
+        self.shared.reset_fade_shared();
+        self.tail_armed = false;
+        self.pending_pause = false;
+        self.pending_stop = false;
+    }
+
+    /// 起一个解码线程消费 `opened`。立即换装与 pending 换装共用。
+    fn spawn_now(&mut self, opened: OpenedReader) -> Result<(), AudioError> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let seek_to = Arc::new(Mutex::new(None));
+        let ctl = DecoderCtl {
+            stop: stop.clone(),
+            seek_to: seek_to.clone(),
+        };
+        let shared = self.shared.clone();
+        let device_rate = self.device_rate;
+        let device_channels = self.device_channels.max(1) as usize;
+        let handle = std::thread::Builder::new()
+            .name("vmusic-decoder".into())
+            .spawn(move || {
+                decode_loop_opened(opened, shared, stop, seek_to, device_rate, device_channels);
+            })
+            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
+        self.decoder = Some((handle, ctl));
+        Ok(())
+    }
+
+    /// 停止语义的复位动作：seek 回 0、清缓冲、进度归零（duration 保留）。
+    fn do_stop_reset(&mut self) {
+        let _ = self.seek(0);
+        self.clear_buffers();
+        self.shared.frames_played.store(0, Ordering::Relaxed);
+    }
+
+    /// 淡出到 0 后的换装：停旧解码线程 → 清场 → 起新线程 → 复位斜坡，
+    /// 再按 play_after 决定淡入播放还是保持暂停。
+    fn spawn_pending(&mut self) {
+        let Some(pending) = self.pending_load.take() else {
+            return;
+        };
+        self.stop_decoder();
+        self.clear_buffers();
+        self.shared.frames_played.store(0, Ordering::Relaxed);
+        self.duration_ms = pending.info.duration_ms;
+        let PendingLoad {
+            opened,
+            info,
+            play_after,
+        } = pending;
+        let _ = info;
+        self.spawn_now(opened).expect("spawn decoder");
+        self.tail_armed = false;
+        self.shared.reset_fade_shared();
+        if play_after {
+            self.shared.arm_fade(1.0, FADE_IN_MS, self.device_rate);
+            self.shared.playing.store(true, Ordering::Relaxed);
+        } else {
+            self.shared.playing.store(false, Ordering::Relaxed);
+        }
+    }
 
     /// probe 时长 → 起解码线程。`load`（本地文件）与 `load_source`（流式源）
     /// 两个入口共用，杜绝双份打开/探测逻辑。
+    ///
+    /// 正在播放时不立即换：probe 期间旧曲继续出声，probe 成功后武装 200ms
+    /// 淡出，把新源放进 pending_load，由 maintain() 在增益到 0 的瞬间换装，
+    /// 切歌不爆音；暂停/停止态则立即换装。
     fn open_and_spawn(
         &mut self,
         mss: MediaSourceStream,
         ext: Option<&str>,
     ) -> Result<MediaInfo, AudioError> {
         self.ensure_stream()?;
-        self.stop_decoder();
-        self.clear_buffers();
-        self.shared.frames_played.store(0, Ordering::Relaxed);
-        self.shared.playing.store(false, Ordering::Relaxed);
-        self.reset_fade();
+        let was_playing = self.shared.playing.load(Ordering::Relaxed);
+        // 播放中且仍有可闻增益才需要「先淡出再换装」；暂停态、或尾段淡出
+        // 已把增益压到 0（自然播完自动接下一首）则立即换装，避免两首之间
+        // 凭空多等 200ms 死寂。
+        let audible = was_playing
+            && (self.shared.fade_active()
+                || f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed)) > 0.001);
+        if !audible {
+            self.stop_decoder();
+            self.clear_buffers();
+            self.shared.frames_played.store(0, Ordering::Relaxed);
+            self.reset_fade();
+        }
 
         let mut hint = Hint::new();
         if let Some(e) = ext {
@@ -214,31 +360,88 @@ impl CpalBackend {
         let decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &DecoderOptions::default())
             .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
-        self.duration_ms = duration_ms;
 
-        let stop = Arc::new(AtomicBool::new(false));
-        let seek_to = Arc::new(Mutex::new(None));
-        let ctl = DecoderCtl {
-            stop: stop.clone(),
-            seek_to: seek_to.clone(),
-        };
-        let shared = self.shared.clone();
-        let device_rate = self.device_rate;
-        let device_channels = self.device_channels.max(1) as usize;
         let opened: OpenedReader = (probed.format, decoder, track_id);
-        let handle = std::thread::Builder::new()
-            .name("vmusic-decoder".into())
-            .spawn(move || {
-                decode_loop_opened(opened, shared, stop, seek_to, device_rate, device_channels);
-            })
-            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
-        self.decoder = Some((handle, ctl));
-
-        Ok(MediaInfo {
+        let info = MediaInfo {
             duration_ms,
             sample_rate,
             channels,
-        })
+        };
+
+        if audible {
+            // 旧源先淡出 200ms，probe 期间旧曲继续出声；maintain 到点换装并
+            // 淡入。淡出期间到达的暂停/停止意图优先：换装后保持暂停而非开播。
+            let play_after = !self.pending_pause && !self.pending_stop;
+            self.pending_pause = false;
+            self.pending_stop = false;
+            self.shared.arm_fade(0.0, FADE_OUT_MS, self.device_rate);
+            self.pending_load = Some(PendingLoad {
+                opened,
+                info: info.clone(),
+                play_after,
+            });
+            return Ok(info);
+        }
+
+        // 立即换装：暂停态保持暂停（playing 为 false）；尾段淡出后自动接歌
+        // （playing 仍为 true）则装一条 0→1 淡入，让新曲渐强而不是爆入。
+        self.duration_ms = duration_ms;
+        self.spawn_now(opened)?;
+        if was_playing {
+            self.shared.arm_fade(1.0, FADE_IN_MS, self.device_rate);
+        }
+        Ok(info)
+    }
+
+    /// actor 线程每 20ms 调一次：推进淡出后的延迟动作与自然尾部淡出。
+    fn maintain(&mut self) {
+        let fading = self.shared.fade_active();
+
+        if self.pending_pause && !fading {
+            self.shared.playing.store(false, Ordering::Relaxed);
+            self.pending_pause = false;
+        }
+        if self.pending_stop && !fading {
+            self.pending_stop = false;
+            self.do_stop_reset();
+        }
+        if self.pending_load.is_some() && !fading {
+            self.spawn_pending();
+        }
+
+        // 自然结束前的尾部淡出（仅武装一次；seek 回主体段后可重新武装）。
+        // 斜坡进行中（暂停/切歌淡出或本段尾淡出）绝不能覆写斜坡参数。
+        if self.shared.playing.load(Ordering::Relaxed)
+            && self.pending_load.is_none()
+            && !self.pending_stop
+            && !self.shared.fade_active()
+        {
+            if let Some(d) = self.duration_ms {
+                let pos = self.position_ms();
+                let remain = d.saturating_sub(pos);
+                if !self.tail_armed && remain <= TAIL_FADE_MS && remain > 0 {
+                    // 直接按剩余帧数装斜坡（不用 arm_fade 的固定毫秒），
+                    // 保证增益恰好在最后一帧到 0。
+                    let frames = (remain as u128 * self.device_rate as u128 / 1000) as u64;
+                    let from = f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed));
+                    self.shared
+                        .fade_from
+                        .store(from.to_bits(), Ordering::Relaxed);
+                    self.shared
+                        .fade_to
+                        .store(0.0f32.to_bits(), Ordering::Relaxed);
+                    self.shared
+                        .fade_frames
+                        .store(frames.max(1), Ordering::Relaxed);
+                    self.shared.fade_done.store(0, Ordering::Relaxed);
+                    self.tail_armed = true;
+                }
+                // 用户拖回主体段：允许再次武装。
+                if pos + 100 < d.saturating_sub(TAIL_FADE_MS) {
+                    self.tail_armed = false;
+                }
+            }
+        }
     }
 }
 
@@ -265,20 +468,12 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
     if let Ok(mut queue) = shared.samples.lock() {
         copied = data.len().min(queue.len());
         for (i, sample) in queue.drain(..copied).enumerate() {
-            data[i] = sample * volume;
+            data[i] = sample; // 先放原始样本，tap 要在淡变前取
         }
     }
-    for sample in data.iter_mut().skip(copied) {
-        *sample = 0.0;
-    }
 
-    if copied > 0 {
-        shared
-            .frames_played
-            .fetch_add((copied / channels.max(1)) as u64, Ordering::Relaxed);
-    }
-
-    // Spectrum tap: cheap, bounded, and skipped entirely under contention.
+    // 频谱 tap：淡变前信号（舞台可视化不随淡出塌陷）。cheap, bounded, and
+    // skipped entirely under contention.
     if let Ok(mut tap) = shared.tap.try_lock() {
         let mut i = 0;
         while i + channels <= copied {
@@ -289,6 +484,43 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
             tap.push_back(sum / channels as f32);
             i += channels * TAP_STRIDE;
         }
+    }
+
+    // 逐帧乘 用户音量 × 斜坡增益，每帧推进一次斜坡。斜坡状态只在回调末尾
+    // 写回原子量，中途不产生跨线程可见的中间态。
+    let mut fade_total = shared.fade_frames.load(Ordering::Relaxed);
+    let mut fade_done = shared.fade_done.load(Ordering::Relaxed);
+    let fade_from = f32::from_bits(shared.fade_from.load(Ordering::Relaxed));
+    let fade_to = f32::from_bits(shared.fade_to.load(Ordering::Relaxed));
+    let mut gain = f32::from_bits(shared.fade_gain.load(Ordering::Relaxed));
+    let frames = copied / channels.max(1);
+    for f in 0..frames {
+        if fade_total > 0 {
+            fade_done += 1;
+            gain = Shared::ramp_value(fade_from, fade_to, fade_total, fade_done);
+            if fade_done >= fade_total {
+                fade_total = 0;
+                gain = fade_to;
+            }
+        }
+        for c in 0..channels {
+            let idx = f * channels + c;
+            data[idx] = data[idx] * volume * gain;
+        }
+    }
+    shared.fade_gain.store(gain.to_bits(), Ordering::Relaxed);
+    shared.fade_done.store(fade_done, Ordering::Relaxed);
+    shared.fade_frames.store(fade_total, Ordering::Relaxed);
+
+    // 缓冲欠载：没填满的部分补 0，不能把上一轮回调的残留样本播出去。
+    for sample in data.iter_mut().skip(copied) {
+        *sample = 0.0;
+    }
+
+    if copied > 0 {
+        shared
+            .frames_played
+            .fetch_add((copied / channels.max(1)) as u64, Ordering::Relaxed);
     }
 }
 
@@ -370,29 +602,54 @@ impl AudioBackend for CpalBackend {
 
     fn play(&mut self) -> Result<(), AudioError> {
         self.ensure_stream()?;
+        self.pending_pause = false;
+        self.pending_stop = false;
+        if self.pending_load.is_some() {
+            // 切歌淡出途中按播放：不能把旧源的下行斜坡重新 arm 成淡入
+            // （否则旧歌会先响回来再被换掉），只标记换装后开播；新曲由
+            // spawn_pending 装自己的淡入。
+            if let Some(pending) = self.pending_load.as_mut() {
+                pending.play_after = true;
+            }
+        } else if self.shared.fade_active()
+            || f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed)) < 0.999
+        {
+            // 从淡出中点或零增益恢复也走淡入，不硬拉满。
+            self.shared.arm_fade(1.0, FADE_IN_MS, self.device_rate);
+        }
         self.shared.playing.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     fn pause(&mut self) -> Result<(), AudioError> {
-        self.shared.playing.store(false, Ordering::Relaxed);
+        if self.shared.playing.load(Ordering::Relaxed) && !self.pending_pause {
+            self.shared.arm_fade(0.0, FADE_OUT_MS, self.device_rate);
+            self.pending_pause = true;
+            // 换装淡出期间暂停：新曲换装后也保持暂停。
+            if let Some(pending) = self.pending_load.as_mut() {
+                pending.play_after = false;
+            }
+        }
         Ok(())
     }
 
-    /// 停止 = 暂停 + 回到开头，**保留解码线程**。
+    /// 停止 = 淡出到 0 + 回到开头，**保留解码线程**。
     ///
-    /// 之前这里会 `stop_decoder()` 杀掉解码线程，但上层的 track_id / playing
-    /// 状态并没有清空，于是「点停止 → 再点播放」就变成：playing 置回 true、
-    /// 却再没有解码线程往环形缓冲里写数据 —— 界面显示正在播放，实际一声不响，
-    /// 进度也永远停在 0。停止语义上不该等于「卸载曲目」，卸载由 load() 负责。
+    /// 正在播放时先武装 200ms 淡出，maintain 到点再 seek 回 0（seek 内部清
+    /// 缓冲）；已暂停则立刻复位。解码线程不杀：停止语义不等于「卸载曲目」，
+    /// 卸载由 load() 负责，杀线程会让「停止 → 再播放」无声卡死。
+    /// duration 不清：停止后进度条仍应显示总时长。
     fn stop(&mut self) -> Result<(), AudioError> {
-        self.shared.playing.store(false, Ordering::Relaxed);
-        // 解码线程还在就 seek 回 0（seek 内部会清缓冲）；没有解码线程说明
-        // 还没 load 过，此时 frames_played 本来就是 0。
-        let _ = self.seek(0);
-        self.clear_buffers();
-        self.shared.frames_played.store(0, Ordering::Relaxed);
-        // duration 不清：停止后进度条仍应显示总时长，而不是变回 0:00 / 0:00。
+        if self.shared.playing.load(Ordering::Relaxed) && !self.pending_stop {
+            self.shared.arm_fade(0.0, FADE_OUT_MS, self.device_rate);
+            self.pending_stop = true;
+            if let Some(pending) = self.pending_load.as_mut() {
+                pending.play_after = false;
+            }
+        } else if !self.pending_stop {
+            // 已暂停：立刻复位，不等斜坡。
+            self.do_stop_reset();
+        }
         Ok(())
     }
 
@@ -507,6 +764,10 @@ impl AudioBackend for CpalBackend {
             *v = state[i];
         }
         true
+    }
+
+    fn maintain(&mut self) {
+        CpalBackend::maintain(self);
     }
 }
 
@@ -828,6 +1089,34 @@ mod tests {
             16,
             "the queue must not be drained while paused"
         );
+    }
+
+    #[test]
+    fn ramp_value_is_linear_and_clamped() {
+        assert_eq!(Shared::ramp_value(0.0, 1.0, 100, 0), 0.0);
+        assert!((Shared::ramp_value(0.0, 1.0, 100, 50) - 0.5).abs() < 1e-6);
+        assert_eq!(Shared::ramp_value(0.0, 1.0, 100, 100), 1.0);
+        assert_eq!(Shared::ramp_value(0.0, 1.0, 100, 500), 1.0);
+        assert_eq!(Shared::ramp_value(0.0, 1.0, 0, 0), 1.0);
+    }
+
+    #[test]
+    fn fade_in_callback_grows_sample_gain_across_frames() {
+        let shared = Shared::new();
+        shared.playing.store(true, Ordering::Relaxed);
+        // 2 声道、48k：250ms 淡入 = 12000 帧；放 4 帧数据验证趋势。
+        // 先 arm 再 reset 再 arm，钉死「换装复位不会留下脏斜坡」这条路径。
+        shared.arm_fade(1.0, FADE_IN_MS, 48_000);
+        shared.reset_fade_shared();
+        shared.arm_fade(1.0, FADE_IN_MS, 48_000);
+        // 队列里放 8 个样本（4 帧），全为 1。
+        shared.samples.lock().unwrap().extend([1.0f32; 8]);
+        let mut buf = vec![0.0f32; 8];
+        write_samples(&mut buf, &shared, 2);
+        // 淡入起点增益≈0：首帧样本幅值小于末帧。
+        assert!(buf[0].abs() < buf[6].abs());
+        assert!(buf[0] >= 0.0 && buf[0] < 0.01);
+        assert!(shared.fade_active());
     }
 
     #[test]

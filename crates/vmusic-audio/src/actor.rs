@@ -284,6 +284,10 @@ fn run(
             Err(RecvTimeoutError::Timeout) => {}
         }
 
+        // 后端自己线程上的延迟状态机：淡出到点再暂停/停止、换装、尾部淡出。
+        // 必须在命令处理之后、Ended 判定之前——换装会复位解码进度与门闩输入。
+        backend.maintain();
+
         // Natural end of track: latch it so we emit exactly once.
         if !ended_emitted && backend.finished() {
             ended_emitted = true;

@@ -72,4 +72,8 @@ pub trait AudioBackend {
     /// Returns `false` when the backend cannot provide spectrum data (null
     /// backend, unsupported format, or not currently playing).
     fn spectrum(&self, out: &mut [f32]) -> bool;
+
+    /// 每 20ms 由 actor 调一次：让后端在自己线程上完成延迟状态机
+    /// （淡出后再暂停/停止、换装、尾部淡出）。默认空操作。
+    fn maintain(&mut self) {}
 }
