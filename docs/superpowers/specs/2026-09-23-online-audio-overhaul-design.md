@@ -1,7 +1,7 @@
 # 在线音源全面优化 设计文档
 
 > 日期：2026-09-23
-> 状态：已与用户逐节确认，待最终审阅
+> 状态：已实施（见 plans/2026-09-23-online-audio-overhaul.md；自动门 193 Rust 测试 + 8 个前端契约检查全绿，真机弱网/音频耳测待验收）
 > 前置调研：[hertz-online-audit.md](../../research/hertz-online-audit.md)、[mineradio-online.md](../../research/mineradio-online.md)
 > 范围：仅在线音源工作线。3D 舞台对标（节拍相机/自由相机/焦点跟拍/玻璃化 UI/存量视觉打磨）为独立的后续 spec，不在此文档实施。
 
