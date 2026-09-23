@@ -22,7 +22,7 @@ use crate::daily;
 use crate::error::{bad_request, not_found, unauthorized, ApiError, ApiResult};
 use crate::online;
 use crate::scan;
-use crate::state::{AppState, ScanProgress, WsEvent};
+use crate::state::{AppState, ScanProgress};
 
 /// Builds the API router.
 ///
@@ -78,6 +78,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/favorites/{id}", axum::routing::delete(remove_favorite))
         // 每日推荐：本地规则引擎，按天确定性出榜。
         .route("/v1/recommend/daily", get(daily_recommend))
+        // 播放历史：列表/清空/单删；replay 供错误条重试当前队列指定下标。
+        .route("/v1/history", get(history_list).delete(history_clear))
+        .route("/v1/history/{id}", axum::routing::delete(history_remove))
+        .route("/v1/player/replay", post(replay_index))
         // 在线曲库：搜索与试听地址都由服务端代发，浏览器绕不开第三方接口的
         // CORS 与 Referer 校验。
         .route("/v1/online/sources", get(online_sources))
@@ -197,7 +201,17 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Health> {
 }
 
 async fn get_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(serde_json::to_value(state.audio.snapshot()).unwrap_or_default())
+    // 播放器快照之外叠加「在线曲缓冲覆盖态」：buffering 与 WS Buffering 事件
+    // 读同一个 state.buffering，轮询 /state 的客户端拿到的口径与推送一致。
+    let mut v = serde_json::to_value(state.audio.snapshot()).unwrap_or_default();
+    if let Some(obj) = v.as_object_mut() {
+        let (active, pct) = *state.buffering.lock().await;
+        obj.insert("buffering".into(), serde_json::Value::Bool(active));
+        if let Some(p) = pct {
+            obj.insert("buffer_pct".into(), serde_json::Value::from(p));
+        }
+    }
+    Json(v)
 }
 
 async fn play(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
@@ -938,6 +952,63 @@ async fn daily_recommend(
     daily::daily(&state.db, limit).await.map(Json)
 }
 
+// ---------------------------------------------------------------------------
+// 播放历史与重放
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    limit: Option<i64>,
+}
+
+async fn history_list(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<HistoryQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 100);
+    let items = crate::history::list_recent(&state.db, limit)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+async fn history_clear(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let n = crate::history::clear(&state.db)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(serde_json::json!({ "removed": n })))
+}
+
+async fn history_remove(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let n = crate::history::remove(&state.db, id)
+        .await
+        .map_err(ApiError::internal)?;
+    if n == 0 {
+        return Err(not_found("历史记录不存在"));
+    }
+    Ok(Json(serde_json::json!({ "removed": n })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplayRequest {
+    index: usize,
+}
+
+/// 错误条「重试」：重新播放当前队列指定下标（在线曲重新取流）。
+async fn replay_index(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ReplayRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state
+        .play_index_for(body.index, None, false)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(get_state(State(state)).await)
+}
+
 #[derive(Debug, Deserialize)]
 struct CookieRequest {
     source: String,
@@ -1168,50 +1239,6 @@ struct OnlinePlayTrack {
     track_ref: Option<online::TrackRef>,
 }
 
-/// /online/play「占队列后、起播前」失败或被顶代际时的收口：
-/// 仍属当代——把队列和 cursor 整体还原成占队前的快照，推一条带 code/source
-/// 的 WS Error（spec §1.5，与 play_index_for 内失败同一条用户可见路径），再
-/// 把错误回给正在等待的 HTTP 调用；已被后来的切入顶掉——静默回当前播放器
-/// 状态，不报错也不动新队列/新播放。
-///
-/// 「过闸 → 还原 queue/cursor」必须在同一把 commit 锁内：旧队列与旧 cursor
-/// 是一对快照，cursor 是旧队列的下标，分开恢复或在锁外恢复都会让旧下标落进
-/// 新队列（越界高亮 / next 重试刚失败的曲）。
-//
-// Task 9 起首曲起播改由 state::play_index_for 内部收口，本函数暂无调用方；
-// 「占队后失败整盘还原」仍是唯一持有快照恢复语义的实现，后续 /online/play
-// 失败路径（如 Task 10 元数据/重放接线）复用，故保留而非删除。
-#[allow(dead_code)]
-async fn settle_online_play(
-    state: &Arc<AppState>,
-    gen: usize,
-    index: usize,
-    vids: &[String],
-    prev_queue: Vec<String>,
-    prev_cursor: Option<usize>,
-    err: ApiError,
-) -> ApiResult<Json<serde_json::Value>> {
-    let fresh = {
-        let _commit = state.play_commit.lock().await;
-        if state.attempt_alive(gen, index, &vids[index]).await {
-            state.publish(WsEvent::Error {
-                message: err.message.clone(),
-                code: Some(err.code.to_string()),
-                source: err.source.clone(),
-            });
-            *state.queue.lock().await = prev_queue;
-            *state.cursor.lock().await = prev_cursor;
-            true
-        } else {
-            false
-        }
-    };
-    if fresh {
-        return Err(err);
-    }
-    Ok(get_state(State(state.clone())).await)
-}
-
 async fn online_quality_get(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -1252,6 +1279,9 @@ async fn online_quality_set(
     let q = online::quality::save_source(&state.db, &mut prefs, &body.source, &body.quality)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    // 内存偏好表同步热更新：play_index_for 读这张表决定取流码率，不热更的话
+    // 要等重启才生效。
+    state.quality.lock().await.insert(body.source.clone(), q);
     Ok(Json(
         serde_json::json!({ "source": body.source, "selected": q.as_str() }),
     ))
@@ -1301,17 +1331,35 @@ async fn online_play(
         .map(|t| online::virtual_id(&source, &t.id))
         .collect();
 
-    // 先占队列再起播（见函数文档）。set_queue 原子地返回新代际和占队前的
-    // (queue, cursor) 快照；起播窗口里被顶代际则由 play_index_for 的预留复核
-    // 静默收在「当前」播放器状态上。
+    // 先占队列再起播（见函数文档）。set_queue 原子地顶代际并挂出新队列；
+    // 起播窗口里被顶代际则由 play_index_for 的预留复核静默收在「当前」播放器
+    // 状态上。占队前的 (queue, cursor) 快照（第 2、3 个返回值）已无消费方：
+    // Task 9 后起播失败由 state::online_failed 收口（cursor 回退由它负责），
+    // 不再整盘还原队列，故这里只取代际。
     //
     // 取流与渐进式下载全部在 play_index_for 内按服务端音质偏好完成；旧版
-    // 「先整首 stream()+fetch_to_cache() 预热」已删除——保留会让首曲下两遍，
-    // Task 11 删除 fetch_to_cache 后也无法编译。
-    //
-    // prev_queue/prev_cursor 仅服务于占队后失败的整体还原路径
-    // （settle_online_play），当前起播失败由 state 内部收口，暂不解构使用。
-    let (gen, _prev_queue, _prev_cursor) = state.set_queue(vids.clone(), Some(index)).await;
+    // 「先整首 stream()+fetch_to_cache() 预热」已删除——保留会让首曲下两遍。
+    let (gen, _, _) = state.set_queue(vids.clone(), Some(index)).await;
+
+    // 整盘元数据入内存暂存：play_index_for 提交成功后据此写历史（在线曲的
+    // URL 会过期，历史只存元数据快照，重播时重新实时取流）。
+    {
+        let mut meta = state.online_meta.lock().await;
+        for (t, vid) in tracks.iter().zip(vids.iter()) {
+            meta.insert(
+                vid.clone(),
+                crate::state::OnlineMetaSnap {
+                    source: source.clone(),
+                    ref_id: t.id.clone(),
+                    title: t.title.clone().unwrap_or_else(|| t.id.clone()),
+                    artist: t.artist.clone(),
+                    album: t.album.clone(),
+                    cover: t.cover.clone(),
+                    duration_ms: t.duration_ms.filter(|v| *v > 0),
+                },
+            );
+        }
+    }
 
     let outcome = state.play_index_for(index, Some(gen), false).await?;
     if !outcome.committed {

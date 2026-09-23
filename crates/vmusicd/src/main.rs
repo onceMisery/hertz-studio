@@ -9,8 +9,6 @@
 mod config;
 mod daily;
 mod error;
-// 播放历史数据层；路由与播放记录在后续任务接入，此前暂允许 dead_code。
-#[allow(dead_code)]
 mod history;
 mod online;
 mod persist;
