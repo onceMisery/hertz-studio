@@ -46,6 +46,7 @@ mod cred;
 mod http;
 mod kugou;
 mod netease;
+pub mod progressive;
 mod qishui;
 mod qq;
 // state.rs 的 AppState 持有 qr::Registry，routes.rs 要校验 Session 来源，
@@ -105,7 +106,8 @@ pub fn client() -> ApiResult<reqwest::Client> {
 }
 
 /// 下载用客户端：读空闲超时放宽到 30s，不设整体超时（长曲目慢链路保活）。
-/// Task 6 的渐进式下载器接入；此前没有下载链路调用方。
+/// 供 [`progressive`] 渐进式下载器使用。
+// 唯一调用方 progressive::start 待 Task 9 接入，此前调用链不可达。
 #[allow(dead_code)]
 pub fn download_client() -> ApiResult<reqwest::Client> {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
