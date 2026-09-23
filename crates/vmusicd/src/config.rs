@@ -16,6 +16,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub audio: AudioConfig,
     pub library: LibraryConfig,
+    pub online: OnlineConfig,
     pub log: LogConfig,
 }
 
@@ -45,6 +46,21 @@ pub struct LibraryConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct OnlineConfig {
+    /// 在线音频缓存上限（字节），默认 2 GiB。
+    pub cache_max_bytes: u64,
+}
+
+impl Default for OnlineConfig {
+    fn default() -> Self {
+        Self {
+            cache_max_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LogConfig {
     pub level: String,
     pub format: String,
@@ -70,6 +86,7 @@ impl Default for Config {
                     .collect(),
                 follow_symlinks: false,
             },
+            online: OnlineConfig::default(),
             log: LogConfig {
                 level: "info".into(),
                 format: "pretty".into(),

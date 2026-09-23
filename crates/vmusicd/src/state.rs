@@ -176,7 +176,7 @@ impl AppState {
         let path = if let Some((source, id)) = crate::online::split_virtual_id(&track_id) {
             let cached = self
                 .online_cache_dir()
-                .join(crate::online::cache_name(&source, &id));
+                .join(crate::online::cache_name_legacy(&source, &id));
             // 与 fetch_to_cache 用同一个 1KB 阈值：版权拦截页/错误 JSON 也会
             // 落出一个几百字节的「文件」，直接喂给音频后端只会得到解码失败。
             let ready = cached.exists()

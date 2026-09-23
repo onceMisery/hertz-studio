@@ -40,6 +40,7 @@
 //! 传染成法律上有问题的版本。宁可少一个音源；能力失败如实报错，绝不伪造空成功。
 
 mod aggregate;
+pub mod cache;
 mod ccmixter;
 mod cred;
 mod http;
@@ -86,13 +87,38 @@ const MAX_AUDIO_BYTES: u64 = 64 * 1024 * 1024;
 /// 走完，而挂死的连接必须有个地方被放弃。
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// 进程级共享 API 客户端（连接池复用）。
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
+            .user_agent(UA)
+            .build()
+            .expect("reqwest client")
+    })
+}
+
 pub fn client() -> ApiResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(READ_TIMEOUT)
-        .user_agent(UA)
-        .build()
-        .map_err(|e| ApiError::internal(format!("HTTP 客户端初始化失败: {e}")))
+    Ok(shared_client().clone())
+}
+
+/// 下载用客户端：读空闲超时放宽到 30s，不设整体超时（长曲目慢链路保活）。
+/// Task 6 的渐进式下载器接入；此前没有下载链路调用方。
+#[allow(dead_code)]
+pub fn download_client() -> ApiResult<reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    Ok(CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(Duration::from_secs(30))
+                .user_agent(UA)
+                .build()
+                .expect("reqwest download client")
+        })
+        .clone())
 }
 
 /// 设置表里 cookie 键的前缀。`get_settings` 按它过滤，绝不把凭据回显给前端。
@@ -874,38 +900,13 @@ pub fn split_virtual_id(vid: &str) -> Option<(String, String)> {
     Some((source.to_string(), id.to_string()))
 }
 
-/// 缓存文件名。音源 id 可能带路径分隔符，统一洗一遍避免越权写文件。
+/// 旧版缓存命名（无音质、恒 .mp3）的兼容包装。
 ///
-/// CCmixter 的 id 是一条站内路径，长起来没有上限，而 Windows 的路径预算只有
-/// 260 字符。所以超长时截断，并把完整 id 的散列拼在尾巴上：只截断的话，两个
-/// 前缀相同、只差在后缀的曲目会共用同一个缓存文件，表现是「点了 A 放出 B」。
-pub fn cache_name(source: &str, id: &str) -> String {
-    let raw = format!("{source}-{id}");
-    let safe: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let stem = if safe.len() <= 96 {
-        safe
-    } else {
-        format!("{}-{:08x}", &safe[..96], fnv1a(&raw))
-    };
-    format!("{stem}.mp3")
-}
-
-fn fnv1a(text: &str) -> u32 {
-    let mut hash: u32 = 0x811c_9dc5;
-    for byte in text.as_bytes() {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    hash
+/// 渐进式下载（Task 6/9）接入前，`fetch_to_cache` 与 state.rs 的旧播放入口
+/// 仍按旧名落盘/命中；Task 11 删除 fetch_to_cache 后本包装一并移除。
+/// 新代码请直接用 [`cache::cache_name`] / [`cache::legacy_cache_name`]。
+pub fn cache_name_legacy(source: &str, id: &str) -> String {
+    cache::legacy_cache_name(source, id)
 }
 
 /// 把远程音频拉到本地缓存目录，返回可直接喂给 audio actor 的路径。
@@ -922,7 +923,7 @@ pub async fn fetch_to_cache(
         .await
         .map_err(|e| ApiError::internal(format!("创建缓存目录失败: {e}")))?;
 
-    let final_path = dir.join(cache_name(source, id));
+    let final_path = dir.join(cache_name_legacy(source, id));
     if let Ok(meta) = tokio::fs::metadata(&final_path).await {
         if meta.len() > 1024 {
             return Ok(final_path);
@@ -972,7 +973,7 @@ pub async fn fetch_to_cache(
     // 时，固定 .part 名会让两次写盘互相 truncate、rename 交错，可能落出半成品。
     let tmp = dir.join(format!(
         ".{}.{}.part",
-        cache_name(source, id),
+        cache_name_legacy(source, id),
         Uuid::new_v4().simple()
     ));
     if let Err(e) = tokio::fs::write(&tmp, &bytes).await {
@@ -1059,24 +1060,30 @@ mod tests {
 
     #[test]
     fn cache_names_cannot_escape_the_cache_directory() {
-        assert_eq!(cache_name("netease", "123"), "netease-123.mp3");
+        assert_eq!(
+            cache::legacy_cache_name("netease", "123"),
+            "netease-123.mp3"
+        );
         // 点号不在白名单里，所以 ".." 连不成路径上跳，只能变成两个下划线。
         assert_eq!(
-            cache_name("ccmixter", "../../etc/passwd"),
+            cache::legacy_cache_name("ccmixter", "../../etc/passwd"),
             "ccmixter-______etc_passwd.mp3"
         );
-        assert!(!cache_name("a", "b/\\c:d").contains('/'));
-        assert!(!cache_name("a", "b/\\c:d").contains('\\'));
-        assert!(!cache_name("a", "..").contains(".."));
+        assert!(!cache::legacy_cache_name("a", "b/\\c:d").contains('/'));
+        assert!(!cache::legacy_cache_name("a", "b/\\c:d").contains('\\'));
+        assert!(!cache::legacy_cache_name("a", "..").contains(".."));
     }
 
     #[test]
     fn long_ids_are_truncated_without_colliding() {
         let base = "content/a/".to_string() + &"x".repeat(200);
-        assert_eq!(cache_name("ccmixter", &base).len(), 96 + 9 + 4);
+        assert_eq!(
+            cache::legacy_cache_name("ccmixter", &base).len(),
+            96 + 9 + 4
+        );
         // 只有尾巴不同的两条长 id，截断之后必须落到不同的文件上
-        let left = cache_name("ccmixter", &format!("{base}1"));
-        let right = cache_name("ccmixter", &format!("{base}2"));
+        let left = cache::legacy_cache_name("ccmixter", &format!("{base}1"));
+        let right = cache::legacy_cache_name("ccmixter", &format!("{base}2"));
         assert_ne!(left, right);
         // 清洗后的名字只有 ASCII，按字节切不会踩到字符边界
         assert!(left.is_ascii());
