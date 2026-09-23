@@ -87,6 +87,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/online/detail", get(online_detail))
         .route("/v1/online/lyric", get(online_lyric))
         .route("/v1/online/play", post(online_play))
+        .route(
+            "/v1/online/quality",
+            get(online_quality_get).post(online_quality_set),
+        )
         .route("/v1/online/cookie", post(online_cookie))
         // 我的歌单 / 歌单详情 / 写操作
         .route("/v1/online/playlists", get(online_playlists))
@@ -1193,6 +1197,51 @@ async fn settle_online_play(
         return Err(err);
     }
     Ok(get_state(State(state.clone())).await)
+}
+
+async fn online_quality_get(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let prefs = online::quality::load(&state.db)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    let sources = ["netease", "qq", "kugou", "qishui", "ccmixter"];
+    Ok(Json(serde_json::json!({
+        "prefs": sources.iter().map(|s| {
+            let q = online::quality::get(&prefs, s);
+            serde_json::json!({
+                "source": s,
+                "selected": q.as_str(),
+                "options": online::quality::allowed_for(s).iter().map(|c|
+                    serde_json::json!({"value": c.as_str(), "label": c.label()})
+                ).collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>()
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct OnlineQualityRequest {
+    source: String,
+    quality: String,
+}
+
+async fn online_quality_set(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<OnlineQualityRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !["netease", "qq", "kugou", "qishui", "ccmixter"].contains(&body.source.as_str()) {
+        return Err(bad_request("不支持的音源"));
+    }
+    let mut prefs = online::quality::load(&state.db)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    let q = online::quality::save_source(&state.db, &mut prefs, &body.source, &body.quality)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    Ok(Json(
+        serde_json::json!({ "source": body.source, "selected": q.as_str() }),
+    ))
 }
 
 /// 在线试听：先把整盘虚拟 id 占进队列，再用当前曲的 track_ref 取最优试听

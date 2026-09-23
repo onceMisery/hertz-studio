@@ -50,6 +50,7 @@ mod qq;
 // state.rs 的 AppState 持有 qr::Registry，routes.rs 要校验 Session 来源，
 // 所以对子模块外暴露到 crate 内；平台协议细节仍关在 online 内部。
 pub(crate) mod qr;
+pub mod quality;
 mod sign;
 
 // cred 是 online 的私有子模块，routes 过滤凭据键/手动登录/登出/回读登录态
