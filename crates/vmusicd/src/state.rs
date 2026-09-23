@@ -449,7 +449,7 @@ impl AppState {
         }
 
         // Progressive：头部元数据已齐，解码源直接读 .part，读到哪等到哪。
-        // HttpMediaSource 是 Read+Seek+Send+Sync，自动满足 AudioSource。
+        // HttpMediaSource 显式 impl AudioSource（media_len 透传 Content-Length）。
         let media = match crate::online::progressive::HttpMediaSource::open(
             &dl.part_path,
             dl.inner.clone(),
@@ -914,6 +914,9 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     code: None,
                     source: None,
                 }),
+                // 批B接入：解码早夭事件暂在此空收口（不转发）；批 B 将据此
+                // 对在线曲自动跳曲、本地曲提示并清空播放状态。
+                AudioEvent::DecodeError { .. } => {}
             }
         }
     });

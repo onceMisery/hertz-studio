@@ -62,6 +62,14 @@ pub enum AudioEvent {
     /// The current source played to its end.
     Ended,
     Error(String),
+    /// 当前曲目的解码线程异常早夭（非自然 EOF、非主动换装/停止/seek）。
+    ///
+    /// 与普通 [`AudioEvent::Error`] 区分开：状态层要据此对在线曲自动跳下
+    /// 一首（本地曲则提示）。`track_id` 是夭折曲目的 id，事件发出时 actor
+    /// 已把当前快照的 track_id 清空。
+    DecodeError {
+        track_id: Option<String>,
+    },
 }
 
 type Reply<T> = oneshot::Sender<T>;
@@ -287,6 +295,19 @@ fn run(
         // 后端自己线程上的延迟状态机：淡出到点再暂停/停止、换装、尾部淡出。
         // 必须在命令处理之后、Ended 判定之前——换装会复位解码进度与门闩输入。
         backend.maintain();
+
+        // 解码线程异常早夭（如边下边播的下载链路断开）：清空当前曲目，
+        // 发专门事件让状态层对在线曲自动跳曲，并立即发布一帧快照。
+        // ended 门闩同时上膛，避免位置恰好到尾时再补一发 Ended 双重接力。
+        if backend.take_decode_failure() {
+            let track_id = state.track_id.take();
+            state.playing = false;
+            ended_emitted = true;
+            tracing::warn!(?track_id, "decoder stalled");
+            let _ = events.send(AudioEvent::DecodeError { track_id });
+            let _ = events.send(AudioEvent::Snapshot(state.clone()));
+            snapshot.store(std::sync::Arc::new(state.clone()));
+        }
 
         // Natural end of track: latch it so we emit exactly once.
         if !ended_emitted && backend.finished() {
@@ -752,8 +773,9 @@ mod tests {
         }
     }
 
-    /// 内存媒体源：命令字段类型是标准库 `Read + Seek + Send`，所以这里
-    /// 只需委托 Cursor，不必实现 symphonia 的 MediaSource。
+    /// 内存媒体源：命令字段类型是标准库 `Read + Seek` 超集 [`AudioSource`]，
+    /// 这里委托 Cursor 并显式 impl（core 不再提供 blanket impl），不必实现
+    /// symphonia 的 MediaSource。
     struct MemSource(std::io::Cursor<Vec<u8>>);
 
     impl std::io::Read for MemSource {
@@ -765,6 +787,12 @@ mod tests {
     impl std::io::Seek for MemSource {
         fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
             self.0.seek(pos)
+        }
+    }
+
+    impl AudioSource for MemSource {
+        fn media_len(&self) -> Option<u64> {
+            Some(self.0.get_ref().len() as u64)
         }
     }
 

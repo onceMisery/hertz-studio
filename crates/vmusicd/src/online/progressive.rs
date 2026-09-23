@@ -23,7 +23,9 @@ use crate::online::download_client;
 /// 预读基础块与封顶：max(256KB, 总长 8%)，封顶 1.5MB。
 pub const FLUSH_STEP: u64 = 256 * 1024;
 const PREBUFFER_CAP: u64 = 3 * 512 * 1024;
-const MAX_AUDIO_BYTES: u64 = 64 * 1024 * 1024;
+/// 单曲下载硬上限。64MiB 会误杀无损/Hi-Res（整轨 flac 常达数十 MiB），
+/// 放宽到 512MiB；超限仍按「内容过大」拒绝，防止异常响应撑爆磁盘。
+const MAX_AUDIO_BYTES: u64 = 512 * 1024 * 1024;
 
 /// 开播模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +208,15 @@ impl symphonia::core::io::MediaSource for HttpMediaSource {
         true
     }
     fn byte_len(&self) -> Option<u64> {
+        self.inner.total()
+    }
+}
+
+/// 显式实现（vmusic-core 不再提供 blanket impl）：把 HTTP `Content-Length`
+/// 经 `media_len` 透给探测层。无 Xing/VBRI 头的 CBR mp3 只能靠总字节数
+/// 估时长，缺了它 duration=None，自然结束判定永不成立、无法连播。
+impl vmusic_core::AudioSource for HttpMediaSource {
+    fn media_len(&self) -> Option<u64> {
         self.inner.total()
     }
 }

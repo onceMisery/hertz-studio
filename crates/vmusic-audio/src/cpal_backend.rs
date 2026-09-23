@@ -70,6 +70,9 @@ struct Shared {
     fade_to: AtomicU32,
     fade_frames: AtomicU64,
     fade_done: AtomicU64,
+    /// 解码线程异常早夭标志：仅在「非干净 EOF、非主动 stop」的退出时置位，
+    /// actor 经 take_decode_failure 每 tick 取走（换装淡出窗口除外）。
+    decode_error: AtomicBool,
 }
 
 impl Shared {
@@ -85,6 +88,7 @@ impl Shared {
             fade_to: AtomicU32::new(1.0f32.to_bits()),
             fade_frames: AtomicU64::new(0),
             fade_done: AtomicU64::new(0),
+            decode_error: AtomicBool::new(false),
         }
     }
 
@@ -109,6 +113,16 @@ impl Shared {
 
     fn fade_active(&self) -> bool {
         self.fade_frames.load(Ordering::Relaxed) > 0
+    }
+
+    /// 解码线程异常早夭时置位（干净 EOF / 主动 stop 不调）。
+    fn flag_decode_error(&self) {
+        self.decode_error.store(true, Ordering::Relaxed);
+    }
+
+    /// 取走并清零早夭标志；没有早夭返回 false。
+    fn take_decode_error(&self) -> bool {
+        self.decode_error.swap(false, Ordering::Relaxed)
     }
 
     /// 换装/新曲复位：增益归 0（静音），清掉一切斜坡。
@@ -279,6 +293,10 @@ impl CpalBackend {
         };
         self.stop_decoder();
         self.clear_buffers();
+        // 旧源可能在淡出窗口里已置下解码错误位：那是旧世界的事，清掉。
+        // pending 期间 take_decode_failure 不消费该位，就等这里清；新解码
+        // 器若也早夭，会再置一次并照常上报。
+        let _ = self.shared.take_decode_error();
         self.shared.frames_played.store(0, Ordering::Relaxed);
         self.duration_ms = pending.info.duration_ms;
         let PendingLoad {
@@ -287,7 +305,12 @@ impl CpalBackend {
             play_after,
         } = pending;
         let _ = info;
-        self.spawn_now(opened).expect("spawn decoder");
+        // 线程创建失败绝不能 panic（这里在 actor 线程上）：置解码错误位，
+        // 让上层经 DecodeError 收口而不是整个 actor 挂掉。
+        if let Err(e) = self.spawn_now(opened) {
+            tracing::error!("spawn pending decoder failed: {e}");
+            self.shared.flag_decode_error();
+        }
         self.tail_armed = false;
         self.shared.reset_fade_shared();
         if play_after {
@@ -320,6 +343,9 @@ impl CpalBackend {
         if !audible {
             self.stop_decoder();
             self.clear_buffers();
+            // 旧解码线程的早夭位随换装一并作废（stop 与其置位可能竞争），
+            // 否则新曲刚加载就会被旧标志误报 DecodeError。
+            let _ = self.shared.take_decode_error();
             self.shared.frames_played.store(0, Ordering::Relaxed);
             self.reset_fade();
         }
@@ -386,7 +412,12 @@ impl CpalBackend {
         // 立即换装：暂停态保持暂停（playing 为 false）；尾段淡出后自动接歌
         // （playing 仍为 true）则装一条 0→1 淡入，让新曲渐强而不是爆入。
         self.duration_ms = duration_ms;
-        self.spawn_now(opened)?;
+        // 解码线程创建失败不再让 load 报错：置解码错误位，actor 下一 tick
+        // 经 DecodeError 事件收口（在线曲自动跳曲），状态仍按已加载发布。
+        if let Err(e) = self.spawn_now(opened) {
+            tracing::error!("spawn decoder failed: {e}");
+            self.shared.flag_decode_error();
+        }
         if was_playing {
             self.shared.arm_fade(1.0, FADE_IN_MS, self.device_rate);
         }
@@ -662,6 +693,16 @@ impl AudioBackend for CpalBackend {
                 Ordering::Relaxed,
             );
         }
+        // 尾段淡出途中 seek：增益正沿尾斜坡滑向 0，而 tail_armed 会阻止
+        // 尾部逻辑重新武装——不处理就永远卡在静音。解除门闩，从当前增益
+        // 起步装一条 120ms 短回淡（arm_fade 自己读当前 fade_gain 当初值）。
+        // 例外：pending_stop 复位时的 seek(0) 是停止动作，不能再淡回来。
+        if self.tail_armed {
+            self.tail_armed = false;
+            if !self.pending_stop {
+                self.shared.arm_fade(1.0, 120, self.device_rate);
+            }
+        }
         Ok(())
     }
 
@@ -685,6 +726,11 @@ impl AudioBackend for CpalBackend {
     }
 
     fn finished(&self) -> bool {
+        // 换装淡出窗口里旧源耗尽绝不能算「播完」：maintain 马上要换上新源，
+        // 此刻报 Ended 会让状态层错误地接力/停播（I1）。
+        if self.pending_load.is_some() {
+            return false;
+        }
         // Finished means "decoder drained the file and we played all of it".
         let drained = self
             .decoder
@@ -700,6 +746,15 @@ impl AudioBackend for CpalBackend {
             Some(d) => self.position_ms() + d.div_ceil(4).min(80) >= d,
             None => false,
         }
+    }
+
+    fn take_decode_failure(&mut self) -> bool {
+        // 换装淡出窗口里旧源的早夭不上报（新源即将接手；旧错误位由
+        // spawn_pending 清掉，新解码器若再失败会重新置位）。
+        if self.pending_load.is_some() {
+            return false;
+        }
+        self.shared.take_decode_error()
     }
 
     fn spectrum(&self, out: &mut [f32]) -> bool {
@@ -852,6 +907,9 @@ fn decode_loop_opened(
         .unwrap_or(device_rate);
     let mut resampler = Resampler::new(src_rate, device_rate);
     let capacity = (device_rate as f32 * BUFFER_SECONDS) as usize * device_channels;
+    // 循环退出原因：只有 symphonia 的 UnexpectedEof("end of stream") 才算
+    // 自然播完；其余跳出（含解码致命错、下载断开的 BrokenPipe）都是早夭。
+    let mut natural_eof = false;
 
     while !stop.load(Ordering::Relaxed) {
         if let Some(target_ms) = seek_to.lock().ok().and_then(|mut g| g.take()) {
@@ -908,8 +966,27 @@ fn decode_loop_opened(
             Err(SymError::ResetRequired) => {
                 decoder.reset();
             }
-            Err(_) => break, // end of stream (or unrecoverable I/O)
+            Err(e) => {
+                // symphonia 以 IoError(UnexpectedEof) 表示自然播完；其它
+                // I/O 错误（如下载链路断开）是异常早夭，交循环后统一置位。
+                if matches!(
+                    &e,
+                    SymError::IoError(ioe)
+                        if ioe.kind() == std::io::ErrorKind::UnexpectedEof
+                ) {
+                    natural_eof = true;
+                } else {
+                    tracing::warn!("format reader stalled: {e}");
+                }
+                break;
+            }
         }
+    }
+
+    // 主动 stop（换装/选设备/卸载）与干净 EOF 都不报；只有非预期早夭置位，
+    // actor 下一个 tick 取走并发 DecodeError。
+    if !natural_eof && !stop.load(Ordering::Relaxed) {
+        shared.flag_decode_error();
     }
 
     tracing::debug!("decoder thread finished for stream");
@@ -940,15 +1017,22 @@ impl std::io::Seek for DynMediaSource {
     }
 }
 
+impl vmusic_core::AudioSource for DynMediaSource {
+    /// 转发内层源上报的总字节数（流式源为 HTTP Content-Length）。
+    fn media_len(&self) -> Option<u64> {
+        self.inner.media_len()
+    }
+}
+
 impl symphonia::core::io::MediaSource for DynMediaSource {
     fn is_seekable(&self) -> bool {
         true
     }
 
-    /// 流式源（边下边播）往往拿不到总长；返回 None 让 symphonia 仅依赖
-    /// 容器自身的元数据。
+    /// 透传内层媒体源的总字节数：无 Xing/VBRI 头的 CBR mp3 靠它估算
+    /// 时长（拿不到就 None，symphonia 仅依赖容器自身元数据）。
     fn byte_len(&self) -> Option<u64> {
-        None
+        self.inner.media_len()
     }
 }
 

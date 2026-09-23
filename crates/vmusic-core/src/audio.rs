@@ -29,9 +29,22 @@ pub struct MediaInfo {
 /// `Box<dyn Read + Seek + Send>`；而 vmusic-core 又不能依赖 symphonia。
 /// 故用这个超集 trait 跨 actor 边界传递媒体源，真实后端内部再适配成
 /// symphonia 的 `MediaSource`（symphonia 0.5 还额外要求 `Sync`）。
-pub trait AudioSource: std::io::Read + std::io::Seek + Send + Sync {}
-
-impl<T: std::io::Read + std::io::Seek + Send + Sync> AudioSource for T {}
+///
+/// 刻意**不做** `impl<T: Read + Seek + Send + Sync> AudioSource for T` 的
+/// blanket impl：那样具体类型（如边下边播的 HTTP 源）就无法覆写
+/// [`AudioSource::media_len`]。需要跨边界传递的类型各自显式 impl。
+pub trait AudioSource: std::io::Read + std::io::Seek + Send + Sync {
+    /// 媒体总字节数（已知时）。
+    ///
+    /// 名字避开 symphonia `MediaSource::byte_len`（vmusic-core 不依赖
+    /// symphonia，不能用同名方法）。无 Xing/VBRI 头的 CBR mp3 容器里没有
+    /// 总帧数/时长，symphonia 只能按「总字节 ÷ 每帧字节」估算；流式源在
+    /// 这里透传 HTTP `Content-Length`，这类曲目才有 duration、才不会永远
+    /// `finished()==false` 而无法连播。未知（如 chunked 传输）时返回 None。
+    fn media_len(&self) -> Option<u64> {
+        None
+    }
+}
 
 pub trait AudioBackend {
     fn name(&self) -> &'static str;
@@ -66,6 +79,16 @@ pub trait AudioBackend {
 
     /// True once the current source has been fully consumed.
     fn finished(&self) -> bool;
+
+    /// 取出并清除「解码线程异常早夭」标志。
+    ///
+    /// 返回 true 表示当前曲目的解码线程既不是自然播完（干净 EOF）、也不是
+    /// 被主动换装/停止/seek 打断，而是因 I/O 或解码错误提前退出——典型如
+    /// 边下边播时下载链路断开。actor 每个 maintain tick 调一次；取走即清零。
+    /// 没有独立解码线程的后端（如 null）用默认实现，恒为 false。
+    fn take_decode_failure(&mut self) -> bool {
+        false
+    }
 
     /// Fill `out` with normalized band energies (0.0..=1.0).
     ///
