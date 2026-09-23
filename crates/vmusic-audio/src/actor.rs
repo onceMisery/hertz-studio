@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use tokio::sync::{broadcast, oneshot};
-use vmusic_core::{AudioBackend, AudioError, DeviceInfo, MediaInfo, PlayMode, PlayerSnapshot};
+use vmusic_core::{
+    AudioBackend, AudioError, AudioSource, DeviceInfo, MediaInfo, PlayMode, PlayerSnapshot,
+};
 
 #[cfg(feature = "playback")]
 use crate::cpal_backend::CpalBackend;
@@ -70,6 +72,15 @@ enum Command {
         track_id: Option<String>,
         reply: Reply<Result<MediaInfo, AudioError>>,
     },
+    /// 直接喂一个可读可定位的媒体源（边下边播）。命令只携带标准库
+    /// `Read + Seek + Send` 超集（[`AudioSource`]）：actor 层不认识
+    /// symphonia，trait 对象可直接经 std mpsc 传递。
+    LoadSource {
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+        track_id: Option<String>,
+        reply: Reply<Result<MediaInfo, AudioError>>,
+    },
     /// Every transport command carries a reply so the caller sees the *result*
     /// of the command, not merely "the queue accepted it". Without this the HTTP
     /// handler reads the snapshot before the actor has run and reports stale
@@ -106,6 +117,24 @@ impl AudioHandle {
         let (tx, rx) = oneshot::channel();
         self.send(Command::Load {
             uri: uri.to_string(),
+            track_id,
+            reply: tx,
+        })?;
+        rx.await
+            .unwrap_or(Err(AudioError::Other("actor gone".into())))
+    }
+
+    /// 直接加载流式媒体源（边下边播）。`ext` 帮助 symphonia 探测容器格式。
+    pub async fn load_source(
+        &self,
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+        track_id: Option<String>,
+    ) -> Result<MediaInfo, AudioError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Command::LoadSource {
+            source,
+            ext,
             track_id,
             reply: tx,
         })?;
@@ -311,6 +340,25 @@ fn apply(
             reply,
         } => {
             let info = backend.load(&uri);
+            if let Ok(info) = &info {
+                state.track_id = track_id;
+                state.duration_ms = info.duration_ms;
+                state.position_ms = 0;
+                state.playing = false;
+                state.generation += 1;
+            }
+            publish(sink, state);
+            let reset = info.is_ok();
+            let _ = reply.send(info);
+            Ok(reset)
+        }
+        Command::LoadSource {
+            source,
+            ext,
+            track_id,
+            reply,
+        } => {
+            let info = backend.load_source(source, ext);
             if let Ok(info) = &info {
                 state.track_id = track_id;
                 state.duration_ms = info.duration_ms;
@@ -643,5 +691,104 @@ mod tests {
             Command::Stop(unit_reply())
         )
         .unwrap());
+    }
+
+    /// LoadSource 的最小可用后端：记录调用标记，不做真解码。
+    struct SourceBackend {
+        loaded: std::cell::Cell<Option<String>>,
+    }
+
+    impl AudioBackend for SourceBackend {
+        fn name(&self) -> &'static str {
+            "source-test"
+        }
+        fn devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
+            Ok(vec![])
+        }
+        fn select_device(&mut self, _id: Option<&str>) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn load(&mut self, _uri: &str) -> Result<MediaInfo, AudioError> {
+            Ok(MediaInfo::default())
+        }
+        fn load_source(
+            &mut self,
+            _source: Box<dyn AudioSource>,
+            _ext: Option<String>,
+        ) -> Result<MediaInfo, AudioError> {
+            self.loaded.set(Some("stream".into()));
+            Ok(MediaInfo::default())
+        }
+        fn play(&mut self) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn pause(&mut self) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn seek(&mut self, _position_ms: u64) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn set_volume(&mut self, _volume: f32) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn position_ms(&self) -> u64 {
+            0
+        }
+        fn duration_ms(&self) -> Option<u64> {
+            None
+        }
+        fn finished(&self) -> bool {
+            false
+        }
+        fn spectrum(&self, _out: &mut [f32]) -> bool {
+            false
+        }
+    }
+
+    /// 内存媒体源：命令字段类型是标准库 `Read + Seek + Send`，所以这里
+    /// 只需委托 Cursor，不必实现 symphonia 的 MediaSource。
+    struct MemSource(std::io::Cursor<Vec<u8>>);
+
+    impl std::io::Read for MemSource {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl std::io::Seek for MemSource {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.0.seek(pos)
+        }
+    }
+
+    #[test]
+    fn load_source_command_updates_track_id() {
+        let mut backend = SourceBackend {
+            loaded: std::cell::Cell::new(None),
+        };
+        let mut state = PlayerSnapshot::default();
+        let sink = ArcSwap::from_pointee(PlayerSnapshot::default());
+        let ok = apply(
+            &mut backend,
+            &mut state,
+            &sink,
+            Command::LoadSource {
+                source: Box::new(MemSource(std::io::Cursor::new(b"ID3fake".to_vec()))),
+                ext: Some("mp3".into()),
+                track_id: Some("online:qq:1".into()),
+                reply: unit_reply(),
+            },
+        )
+        .unwrap();
+        assert!(ok);
+        assert_eq!(state.track_id.as_deref(), Some("online:qq:1"));
+        assert_eq!(state.position_ms, 0);
+        assert!(!state.playing);
+        assert_eq!(state.generation, 1);
+        // Cell<Option<String>> 不是 Copy，用 take() 取出标记。
+        assert_eq!(backend.loaded.take(), Some("stream".to_string()));
     }
 }

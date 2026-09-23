@@ -23,6 +23,16 @@ pub struct MediaInfo {
     pub channels: Option<u8>,
 }
 
+/// 可流式读取的音频源：标准库 `Read + Seek + Send + Sync` 的组合。
+///
+/// Rust 的 trait object 只能含一个非 auto trait，无法直接写
+/// `Box<dyn Read + Seek + Send>`；而 vmusic-core 又不能依赖 symphonia。
+/// 故用这个超集 trait 跨 actor 边界传递媒体源，真实后端内部再适配成
+/// symphonia 的 `MediaSource`（symphonia 0.5 还额外要求 `Sync`）。
+pub trait AudioSource: std::io::Read + std::io::Seek + Send + Sync {}
+
+impl<T: std::io::Read + std::io::Seek + Send + Sync> AudioSource for T {}
+
 pub trait AudioBackend {
     fn name(&self) -> &'static str;
 
@@ -32,6 +42,17 @@ pub trait AudioBackend {
 
     /// Open a source and prepare playback in a paused state.
     fn load(&mut self, uri: &str) -> Result<MediaInfo, AudioError>;
+
+    /// 直接打开一个媒体源（边下边播用）。默认不支持，真实后端按需实现。
+    fn load_source(
+        &mut self,
+        _source: Box<dyn AudioSource>,
+        _ext: Option<String>,
+    ) -> Result<MediaInfo, AudioError> {
+        Err(AudioError::UnsupportedFormat(
+            "该后端不支持流式媒体源".into(),
+        ))
+    }
 
     fn play(&mut self) -> Result<(), AudioError>;
     fn pause(&mut self) -> Result<(), AudioError>;

@@ -41,7 +41,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
-use vmusic_core::{AudioBackend, AudioError, DeviceInfo, MediaInfo};
+use vmusic_core::{AudioBackend, AudioError, AudioSource, DeviceInfo, MediaInfo};
 
 /// Number of mono samples kept for spectrum analysis.
 const FFT_SIZE: usize = 2048;
@@ -160,6 +160,86 @@ impl CpalBackend {
             t.clear();
         }
     }
+
+    /// Task 8 会用真实的淡入淡出斜坡替换；open_and_spawn 换装时必须调用它。
+    fn reset_fade(&mut self) {}
+
+    /// probe 时长 → 起解码线程。`load`（本地文件）与 `load_source`（流式源）
+    /// 两个入口共用，杜绝双份打开/探测逻辑。
+    fn open_and_spawn(
+        &mut self,
+        mss: MediaSourceStream,
+        ext: Option<&str>,
+    ) -> Result<MediaInfo, AudioError> {
+        self.ensure_stream()?;
+        self.stop_decoder();
+        self.clear_buffers();
+        self.shared.frames_played.store(0, Ordering::Relaxed);
+        self.shared.playing.store(false, Ordering::Relaxed);
+        self.reset_fade();
+
+        let mut hint = Hint::new();
+        if let Some(e) = ext {
+            if !e.is_empty() {
+                hint.with_extension(e);
+            }
+        }
+        let probed = symphonia::default::get_probe()
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+
+        let track = probed
+            .format
+            .default_track()
+            .ok_or_else(|| AudioError::UnsupportedFormat("no audio track".into()))?;
+        // 直接读 CodecParams 字段（都是 Copy），不要 clone 整个 params。
+        let duration_ms = track
+            .codec_params
+            .time_base
+            .zip(track.codec_params.n_frames)
+            .map(|(tb, frames)| {
+                let time = tb.calc_time(frames);
+                // `Time::seconds` 截断，短于 1 秒的片段会报 0ms，进而让
+                // finished() 一开播就触发——保留小数部分。
+                ((time.seconds as f64 + time.frac) * 1000.0).round() as u64
+            });
+        let sample_rate = track.codec_params.sample_rate;
+        let channels = track.codec_params.channels.map(|c| c.count() as u8);
+        let track_id = track.id;
+        let decoder = symphonia::default::get_codecs()
+            .make(&track.codec_params, &DecoderOptions::default())
+            .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+        self.duration_ms = duration_ms;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let seek_to = Arc::new(Mutex::new(None));
+        let ctl = DecoderCtl {
+            stop: stop.clone(),
+            seek_to: seek_to.clone(),
+        };
+        let shared = self.shared.clone();
+        let device_rate = self.device_rate;
+        let device_channels = self.device_channels.max(1) as usize;
+        let opened: OpenedReader = (probed.format, decoder, track_id);
+        let handle = std::thread::Builder::new()
+            .name("vmusic-decoder".into())
+            .spawn(move || {
+                decode_loop_opened(opened, shared, stop, seek_to, device_rate, device_channels);
+            })
+            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
+        self.decoder = Some((handle, ctl));
+
+        Ok(MediaInfo {
+            duration_ms,
+            sample_rate,
+            channels,
+        })
+    }
 }
 
 fn no_device() -> AudioError {
@@ -267,38 +347,25 @@ impl AudioBackend for CpalBackend {
 
     fn load(&mut self, uri: &str) -> Result<MediaInfo, AudioError> {
         let path = uri_to_path(uri);
-        self.ensure_stream()?;
-        self.stop_decoder();
-        self.clear_buffers();
-        self.shared.frames_played.store(0, Ordering::Relaxed);
-        self.shared.playing.store(false, Ordering::Relaxed);
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_string);
+        let file = File::open(&path).map_err(|e| AudioError::DecodeFailed(e.to_string()))?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        self.open_and_spawn(mss, ext.as_deref())
+    }
 
-        let (duration_ms, sample_rate, channels) = probe_info(&path)?;
-        self.duration_ms = duration_ms;
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let seek_to = Arc::new(Mutex::new(None));
-        let ctl = DecoderCtl {
-            stop: stop.clone(),
-            seek_to: seek_to.clone(),
-        };
-
-        let shared = self.shared.clone();
-        let device_rate = self.device_rate;
-        let device_channels = self.device_channels.max(1) as usize;
-        let handle = std::thread::Builder::new()
-            .name("vmusic-decoder".into())
-            .spawn(move || {
-                decode_loop(path, shared, stop, seek_to, device_rate, device_channels);
-            })
-            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
-
-        self.decoder = Some((handle, ctl));
-        Ok(MediaInfo {
-            duration_ms,
-            sample_rate,
-            channels,
-        })
+    fn load_source(
+        &mut self,
+        source: Box<dyn AudioSource>,
+        ext: Option<String>,
+    ) -> Result<MediaInfo, AudioError> {
+        let mss = MediaSourceStream::new(
+            Box::new(DynMediaSource { inner: source }),
+            Default::default(),
+        );
+        self.open_and_spawn(mss, ext.as_deref())
     }
 
     fn play(&mut self) -> Result<(), AudioError> {
@@ -507,66 +574,15 @@ fn pick_config(device: &Device) -> Result<SupportedStreamConfig, AudioError> {
     Ok(range.with_sample_rate(cpal::SampleRate(rate)))
 }
 
-/// Duration, sample rate and channel count of a media file.
-type MediaSummary = (Option<u64>, Option<u32>, Option<u8>);
-
-/// Reads just enough of the file to know duration / rate / channels.
-fn probe_info(path: &std::path::Path) -> Result<MediaSummary, AudioError> {
-    let file = File::open(path).map_err(|e| AudioError::DecodeFailed(e.to_string()))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_string();
-    let mut hint = Hint::new();
-    if !ext.is_empty() {
-        hint.with_extension(&ext);
-    }
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
-
-    let params = &probed
-        .format
-        .default_track()
-        .ok_or_else(|| AudioError::UnsupportedFormat("no audio track".into()))?
-        .codec_params;
-
-    // `Time::seconds` truncates, so anything shorter than a second reports
-    // 0 ms — which then makes `finished()` fire the moment playback starts.
-    // Keep the fractional part.
-    let duration_ms = params.time_base.zip(params.n_frames).map(|(tb, frames)| {
-        let time = tb.calc_time(frames);
-        ((time.seconds as f64 + time.frac) * 1000.0).round() as u64
-    });
-    let sample_rate = params.sample_rate;
-    let channels = params.channels.map(|c| c.count() as u8);
-    Ok((duration_ms, sample_rate, channels))
-}
-
 #[allow(clippy::too_many_arguments)]
-fn decode_loop(
-    path: PathBuf,
+fn decode_loop_opened(
+    opened: OpenedReader,
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
     seek_to: Arc<Mutex<Option<u64>>>,
     device_rate: u32,
     device_channels: usize,
 ) {
-    let opened = match open_reader(&path) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("cannot open {}: {e}", path.display());
-            stop.store(true, Ordering::Relaxed);
-            return;
-        }
-    };
     let (mut reader, mut decoder, track_id) = opened;
 
     let src_rate = reader
@@ -635,7 +651,7 @@ fn decode_loop(
         }
     }
 
-    tracing::debug!("decoder thread finished for {}", path.display());
+    tracing::debug!("decoder thread finished for stream");
     stop.store(true, Ordering::Relaxed);
 }
 
@@ -645,38 +661,34 @@ type OpenedReader = (
     u32,
 );
 
-fn open_reader(path: &std::path::Path) -> Result<OpenedReader, AudioError> {
-    let file = File::open(path).map_err(|e| AudioError::DecodeFailed(e.to_string()))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let mut hint = Hint::new();
-    if !ext.is_empty() {
-        hint.with_extension(ext);
+/// 把标准库 `Read + Seek + Send` 超集（[`AudioSource`]）适配成 symphonia
+/// 的 MediaSource。
+struct DynMediaSource {
+    inner: Box<dyn AudioSource>,
+}
+
+impl std::io::Read for DynMediaSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
     }
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+}
 
-    let track_id = probed
-        .format
-        .default_track()
-        .map(|t| t.id)
-        .ok_or_else(|| AudioError::UnsupportedFormat("no audio track".into()))?;
+impl std::io::Seek for DynMediaSource {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
 
-    let track = probed
-        .format
-        .default_track()
-        .ok_or_else(|| AudioError::UnsupportedFormat("no audio track".into()))?;
-    let decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+impl symphonia::core::io::MediaSource for DynMediaSource {
+    fn is_seekable(&self) -> bool {
+        true
+    }
 
-    Ok((probed.format, decoder, track_id))
+    /// 流式源（边下边播）往往拿不到总长；返回 None 让 symphonia 仅依赖
+    /// 容器自身的元数据。
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Linear-interpolating resampler with carry-over between decode blocks.
