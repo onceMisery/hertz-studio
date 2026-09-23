@@ -731,6 +731,12 @@
     $('online-error-text').textContent = message;
     bar.hidden = false;
     bar.dataset.index = retryIndex == null ? '' : String(retryIndex);
+    // 终态错误（自动接力连 3 停、后端没给下标）没有可重试的具体曲目：
+    // 藏掉重试按钮，避免点了毫无反应；有下标时才放出来。
+    var retryBtn = $('online-error-retry');
+    if (retryBtn) {
+      retryBtn.hidden = retryIndex == null || retryIndex === '';
+    }
     $('online-error-retry').onclick = function () {
       bar.hidden = true;
       var idx = Number(bar.dataset.index);

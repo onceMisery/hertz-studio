@@ -433,8 +433,11 @@ impl CpalBackend {
             self.pending_pause = false;
         }
         if self.pending_stop && !fading {
-            self.pending_stop = false;
+            // 先复位再摘标志：do_stop_reset() 内 seek(0) 靠 pending_stop
+            // 走「停止复位不回淡」例外，顺序反了会在停止后补出一条 120ms
+            // 回淡（停止后放声）。
             self.do_stop_reset();
+            self.pending_stop = false;
         }
         if self.pending_load.is_some() && !fading {
             self.spawn_pending();
@@ -907,9 +910,11 @@ fn decode_loop_opened(
         .unwrap_or(device_rate);
     let mut resampler = Resampler::new(src_rate, device_rate);
     let capacity = (device_rate as f32 * BUFFER_SECONDS) as usize * device_channels;
-    // 循环退出原因：只有 symphonia 的 UnexpectedEof("end of stream") 才算
-    // 自然播完；其余跳出（含解码致命错、下载断开的 BrokenPipe）都是早夭。
+    // 循环退出原因有三种「正常」：symphonia 的 UnexpectedEof("end of stream")
+    // 自然播完；io::ErrorKind::Interrupted（下载 abort / seek-stop 主动中止）；
+    // stop 位被外部置上。其余跳出（含解码致命错、下载断开的 BrokenPipe）才算早夭。
     let mut natural_eof = false;
+    let mut interrupted = false;
 
     while !stop.load(Ordering::Relaxed) {
         if let Some(target_ms) = seek_to.lock().ok().and_then(|mut g| g.take()) {
@@ -960,6 +965,9 @@ fn decode_loop_opened(
                 }
                 Err(e) => {
                     tracing::warn!("decode error: {e}");
+                    // 解码器正常不做 I/O，但若主动中止的 Interrupted 从这里
+                    // 冒出来，同样按中止收口，不能误报早夭。
+                    interrupted = is_interrupted(&e);
                     break;
                 }
             },
@@ -967,14 +975,19 @@ fn decode_loop_opened(
                 decoder.reset();
             }
             Err(e) => {
-                // symphonia 以 IoError(UnexpectedEof) 表示自然播完；其它
-                // I/O 错误（如下载链路断开）是异常早夭，交循环后统一置位。
+                // symphonia 以 IoError(UnexpectedEof) 表示自然播完；
+                // Interrupted 是下载 abort（未下完切歌）/ seek-stop 的主动
+                // 中止；其它 I/O 错误（如下载链路断开）才是异常早夭，交循环
+                // 后统一置位。
                 if matches!(
                     &e,
                     SymError::IoError(ioe)
                         if ioe.kind() == std::io::ErrorKind::UnexpectedEof
                 ) {
                     natural_eof = true;
+                } else if is_interrupted(&e) {
+                    interrupted = true;
+                    tracing::debug!("decoder loop aborted: {e}");
                 } else {
                     tracing::warn!("format reader stalled: {e}");
                 }
@@ -983,14 +996,54 @@ fn decode_loop_opened(
         }
     }
 
-    // 主动 stop（换装/选设备/卸载）与干净 EOF 都不报；只有非预期早夭置位，
-    // actor 下一个 tick 取走并发 DecodeError。
-    if !natural_eof && !stop.load(Ordering::Relaxed) {
+    // 主动 stop（换装/选设备/卸载）、干净 EOF 与主动中止（下载 abort /
+    // seek-stop 的 Interrupted，此时 stop 位可能尚未被解码线程观察到）都不报；
+    // 只有非预期早夭置位，actor 下一个 tick 取走并发 DecodeError。
+    if should_flag_decode_error(stop.load(Ordering::Relaxed), interrupted, natural_eof) {
         shared.flag_decode_error();
     }
 
     tracing::debug!("decoder thread finished for stream");
     stop.store(true, Ordering::Relaxed);
+}
+
+/// symphonia 错误链里是否藏着一个 [`std::io::ErrorKind::Interrupted`]。
+///
+/// 下载 abort（HttpMediaSource 把 WaitError::Aborted 映成 Interrupted）与
+/// seek/stop 路径上的中断都以这个 kind 冒到解码循环：它是「主动中止」而不是
+/// 解码早夭，绝不能据此 flag_decode_error——未下完即切歌时 stop 位甚至可能
+/// 还没被解码线程观察到。
+///
+/// 两条途径都试：先匹配 `IoError` 变体里的 io::Error（等同 io_error() 入口）；
+/// 再沿错误链逐层 downcast——symphonia 0.5 的 `Error` 只实现了旧版 `cause()`
+/// 而 `source()` 返回 None，所以链上的 symphonia 层要显式认出 `IoError`
+/// 变体；io::Error 层则用 `get_ref()` 取自定义负载（其 `source()` 会跳过
+/// 负载本身，直接返回负载的 source，单纯走 source() 会漏掉这一层）。
+fn is_interrupted(err: &SymError) -> bool {
+    let mut chain: Vec<&(dyn std::error::Error + 'static)> = vec![err];
+    while let Some(node) = chain.pop() {
+        if let Some(ioe) = node.downcast_ref::<std::io::Error>() {
+            if ioe.kind() == std::io::ErrorKind::Interrupted {
+                return true;
+            }
+            if let Some(inner) = ioe.get_ref() {
+                chain.push(inner);
+            }
+        } else if let Some(SymError::IoError(ioe)) = node.downcast_ref::<SymError>() {
+            chain.push(ioe);
+        } else if let Some(src) = std::error::Error::source(node) {
+            chain.push(src);
+        }
+    }
+    false
+}
+
+/// 解码线程退出后是否应置「异常早夭」位（纯函数，便于单测）。
+///
+/// 三种正常退出都不置位：外部主动 `stop`、自然 EOF（UnexpectedEof）、
+/// 主动中止（Interrupted）；只有三者皆否时才算早夭候选。
+fn should_flag_decode_error(stop: bool, interrupted: bool, natural_eof: bool) -> bool {
+    !stop && !interrupted && !natural_eof
 }
 
 type OpenedReader = (
@@ -1229,5 +1282,39 @@ mod tests {
             (out_frames as i64 - expected).abs() <= 2,
             "unexpected frame count {out_frames}, expected about {expected}"
         );
+    }
+
+    #[test]
+    fn is_interrupted_recognises_abort_along_the_error_chain() {
+        use std::io;
+        // 下载 abort：HttpMediaSource 直接返回 Interrupted，symphonia 包进
+        // IoError 变体——中止候选，不是早夭。
+        let aborted = SymError::IoError(io::Error::new(io::ErrorKind::Interrupted, "aborted"));
+        assert!(is_interrupted(&aborted));
+        // 自然 EOF：干净结束候选，不能当中止也不能当早夭。
+        let eof = SymError::IoError(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "end of stream",
+        ));
+        assert!(!is_interrupted(&eof));
+        // 与 I/O 无关的 symphonia 错误：早夭候选。
+        assert!(!is_interrupted(&SymError::ResetRequired));
+        // Interrupted 被外层 io::Error + IoError 变体埋深一层时，沿 source
+        // 链 downcast 仍认得。
+        let wrapped = io::Error::other(aborted);
+        assert!(is_interrupted(&SymError::IoError(wrapped)));
+    }
+
+    #[test]
+    fn exit_classification_flags_only_unexpected_deaths() {
+        // UnexpectedEof 干净结束：不 flag（stop 位未必置上）。
+        assert!(!should_flag_decode_error(false, false, true));
+        // Interrupted 主动中止（未下完切歌，stop 位可能尚未被观察到）：不 flag。
+        assert!(!should_flag_decode_error(false, true, false));
+        // 主动 stop 之后无论何种错误都不 flag。
+        assert!(!should_flag_decode_error(true, false, false));
+        assert!(!should_flag_decode_error(true, true, true));
+        // 其它错误（如下载链路断开）且未 stop：异常早夭，flag 候选。
+        assert!(should_flag_decode_error(false, false, false));
     }
 }

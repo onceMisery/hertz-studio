@@ -3,6 +3,7 @@
 
 //! Shared server state, the event bus and the playback queue.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -445,14 +446,25 @@ impl AppState {
         };
 
         // 播放流程持视图轮询；Download 所有权注册进 map，随代际可被中止/接管。
+        // entry 原子落槽：开头摘同键与此处之间隔着取流 await，双击/并发预取
+        // 可能已重新塞进同键条目——先 cancel 旧的再插入，槽位必须归本播放
+        // 流程持有的这个 dl（后面靠 key 摘它做 cancel/join）。
         let view = dl.view();
-        self.downloads.lock().await.insert(
-            key.clone(),
-            DlEntry {
-                dl,
-                role: DlRole::Playback,
-            },
-        );
+        match self.downloads.lock().await.entry(key.clone()) {
+            Entry::Vacant(v) => {
+                v.insert(DlEntry {
+                    dl,
+                    role: DlRole::Playback,
+                });
+            }
+            Entry::Occupied(mut o) => {
+                o.get().dl.cancel();
+                o.insert(DlEntry {
+                    dl,
+                    role: DlRole::Playback,
+                });
+            }
+        }
 
         // 等预读阈值：每轮一个 200ms tick，轮间复核代际——用户切走立刻摘条目
         // 并 cancel，旧代际的等待再也拖不住新一代（修 B3）。
@@ -970,13 +982,24 @@ impl AppState {
         let referer = crate::online::referer(&source).map(str::to_string);
         match crate::online::progressive::start(dir, key.clone(), urls, referer) {
             Ok(dl) => {
-                self.downloads.lock().await.insert(
-                    key,
-                    DlEntry {
-                        dl,
-                        role: DlRole::Prefetch,
-                    },
-                );
+                // entry 原子落槽：前面的 contains_key 检查与这里之间隔着
+                // 取流 await，并发预取/播放接管可能已占下同键槽位——先 cancel
+                // 旧的再插入本次预取。
+                match self.downloads.lock().await.entry(key) {
+                    Entry::Vacant(v) => {
+                        v.insert(DlEntry {
+                            dl,
+                            role: DlRole::Prefetch,
+                        });
+                    }
+                    Entry::Occupied(mut o) => {
+                        o.get().dl.cancel();
+                        o.insert(DlEntry {
+                            dl,
+                            role: DlRole::Prefetch,
+                        });
+                    }
+                }
             }
             Err(e) => tracing::debug!("预取启动失败: {}", e.message),
         }
@@ -1070,6 +1093,19 @@ impl AppState {
             return;
         };
 
+        // 防御纵深：DecodeError 从解码线程冒到事件泵是异步的，期间用户可能
+        // 已经切走、新代际正在播放。事件 track_id 必须仍是当前 cursor 指向的
+        // 队列项；不一致说明这是旧曲的残留事件——直接静默返回，不发任何事件、
+        // 不 step、不动连续失败计数，更不能顶掉新曲（缓冲态也由新流程自理）。
+        {
+            let queue = self.queue.lock().await;
+            let current = *self.cursor.lock().await;
+            if current.and_then(|i| queue.get(i)) != Some(&track_id) {
+                tracing::debug!(?track_id, "丢弃过期 DecodeError：cursor 已指向新曲目");
+                return;
+            }
+        }
+
         if let Some((source, id)) = crate::online::split_virtual_id(&track_id) {
             let quality = {
                 let prefs = self.quality.lock().await;
@@ -1103,7 +1139,11 @@ impl AppState {
                 });
             } else {
                 // 同 online_failed：递归链路 Box::pin 间接化。
-                let _ = Box::pin(self.step(1, true)).await;
+                let stepped = Box::pin(self.step(1, true)).await;
+                if stepped.is_ok() {
+                    // 与 Ended 接力口径一致：接力成功后补一次后台预取 + LRU。
+                    self.post_commit_background();
+                }
             }
         } else {
             self.publish(WsEvent::Error {
