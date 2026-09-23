@@ -3,6 +3,7 @@
 
 //! Shared server state, the event bus and the playback queue.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -44,6 +45,13 @@ pub enum WsEvent {
         done: usize,
         total: usize,
     },
+    /// 在线曲边下边播的缓冲覆盖态：进入播放流程先 active=true，提交/失败/
+    /// 被顶代际时必须 active=false 收口；WaitFull 模式下带百分比。
+    Buffering {
+        active: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pct: Option<u8>,
+    },
     LibraryChanged,
 }
 
@@ -55,6 +63,30 @@ pub struct ScanProgress {
     pub added: usize,
     pub failed: usize,
     pub last_error: Option<String>,
+}
+
+/// 在线曲目元数据快照（仅在内存，与队列同生命周期）。
+///
+/// /online/play 入队时随 tracks 写入 [`AppState::online_meta`]，提交成功后
+/// 据此写播放历史；队列外没有任何持久化。
+// Task 10 才由 /online/play 写入，Task 9 只在 record_history 读取。
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct OnlineMetaSnap {
+    pub source: String,
+    pub ref_id: String,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub cover: Option<String>,
+    pub duration_ms: Option<u64>,
+}
+
+/// 一次播放尝试的结果：是否真正提交（没被更新代际顶掉）与平台实际给到的
+/// 音质档位（缓存命中/预取接管时无法回填，为 None）。
+pub(crate) struct PlayOutcome {
+    pub committed: bool,
+    pub actual_quality: Option<crate::online::quality::Quality>,
 }
 
 pub struct AppState {
@@ -81,6 +113,16 @@ pub struct AppState {
     /// 上可能 B 过闸 → A 入队 Load(A) → B 入队 Load(B)，最后 Play(A) 配的
     /// 是 Load(B) 的声音。set_queue 也过这把锁，保证换队+顶代际相对提交原子。
     pub(crate) play_commit: Mutex<()>,
+    /// 下载缓冲覆盖态（WS 推送与 /v1/state 读取共用）。
+    pub(crate) buffering: Mutex<(bool, Option<u8>)>,
+    /// /online/play 入队时随 tracks 带来的元数据快照（虚拟 id → 快照）。
+    pub(crate) online_meta: Mutex<HashMap<String, OnlineMetaSnap>>,
+    /// 进行中的下载器（缓存键 → Download），供预取接管与切歌中止。
+    pub(crate) downloads: Mutex<HashMap<String, crate::online::progressive::Download>>,
+    /// 自动接力连续失败计数，任一曲成功提交即清零；累计到 3 停止接力。
+    pub(crate) auto_failures: AtomicUsize,
+    /// 逐源音质偏好（启动时装载、POST 热切换即时更新；Task 11 前为缺省表）。
+    pub(crate) quality: Mutex<crate::online::quality::QualityPrefs>,
 }
 
 impl AppState {
@@ -131,24 +173,31 @@ impl AppState {
 
     /// Loads and starts the track at `index` of the current queue.
     pub async fn play_index(&self, index: usize) -> Result<(), vmusic_core::CoreError> {
-        self.play_index_for(index, None).await.map(|_| ())
+        self.play_index_for(index, None, false).await.map(|_| ())
     }
 
-    /// 播放指定队列位置；`reserve_gen` 用于 /online/play 的「先占队列后预取」：
+    /// 播放指定队列位置；`reserve_gen` 用于 /online/play 的「先占队列后起播」：
     /// 传入 set_queue 返回的代际，进入预留区时代际已被顶掉则返回
-    /// `Ok(false)`（被取代，未提交），成功提交返回 `Ok(true)`。
+    /// `committed=false`（被取代，未提交）。
+    ///
+    /// `auto` 标识自然结束接力（true）还是用户点播（false）：在线曲取流失败
+    /// 时前者按连续失败计数自动跳曲，后者停在当前曲并推可操作错误。
     pub(crate) async fn play_index_for(
         &self,
         index: usize,
         reserve_gen: Option<usize>,
-    ) -> Result<bool, vmusic_core::CoreError> {
+        auto: bool,
+    ) -> Result<PlayOutcome, vmusic_core::CoreError> {
         // 预留区整段持 commit：验代际、读曲、顶新代际、写乐观 cursor 必须相对
         // set_queue 与别的播放预留原子——否则多 worker 下「预闸后队列被换」或
         // 「同队列秒切」都可能让迟到的提交劫持正在听的曲。
         let commit = self.play_commit.lock().await;
         if let Some(expected) = reserve_gen {
             if self.play_generation.load(Ordering::Relaxed) != expected {
-                return Ok(false);
+                return Ok(PlayOutcome {
+                    committed: false,
+                    actual_quality: None,
+                });
             }
         }
         let track_id = {
@@ -170,110 +219,363 @@ impl AppState {
         *self.cursor.lock().await = Some(index);
         drop(commit);
 
-        // 在线试听的虚拟 id 不在本地库里：它对应的是 online 缓存目录里那个
-        // 已经落盘的文件。不认这个前缀的话，上一首/下一首走到在线曲目时
-        // 只会在本地库里查、必然 NotFound —— 表现就是「点了下一曲没反应」。
-        let path = if let Some((source, id)) = crate::online::split_virtual_id(&track_id) {
-            let cached = self
-                .online_cache_dir()
-                .join(crate::online::cache_name_legacy(&source, &id));
-            // 与 fetch_to_cache 用同一个 1KB 阈值：版权拦截页/错误 JSON 也会
-            // 落出一个几百字节的「文件」，直接喂给音频后端只会得到解码失败。
-            let ready = cached.exists()
-                && std::fs::metadata(&cached)
-                    .map(|m| m.len() > 1024)
-                    .unwrap_or(false);
-            if ready {
-                cached
-            } else {
-                // 整盘入队后切到尚未播放的曲目时，缓存还不存在：现场取试听
-                // 地址再落盘，播过一次之后就回到上面的零网络缓存分支。
-                //
-                // 队列里只存虚拟 id、不存搜索结果的 track_ref，因此这里只能
-                // 用稳定 id 回落取流——QQ media_mid / 酷狗 album_id 等专有
-                // 字段缺失时平台可能给不到最优音质，但链路必须可用。
-                let ctx = crate::online::Ctx {
-                    db: self.db.clone(),
-                };
-                let info =
-                    match crate::online::stream(&ctx, &source, &id, None, Some(320_000)).await {
-                        Ok(info) => info,
-                        Err(e) => {
-                            // spec §1.5：WS error 事件必须带错误码与音源 id。
-                            // 平台模块构造的 ApiError 默认不标源（REST 侧由
-                            // tagged 标），这里补上。
-                            return self
-                                .online_play_failed(
-                                    gen,
-                                    index,
-                                    &track_id,
-                                    prev_cursor,
-                                    e.with_source(source.clone()),
-                                )
-                                .await;
-                        }
-                    };
-                match crate::online::fetch_to_cache(
-                    &self.online_cache_dir(),
-                    &source,
-                    &id,
-                    &info.url,
-                )
+        let outcome = if let Some((source, id)) = crate::online::split_virtual_id(&track_id) {
+            self.play_online(gen, index, track_id.clone(), source, id, prev_cursor, auto)
                 .await
-                {
-                    Ok(path) => path,
-                    Err(e) => {
-                        return self
-                            .online_play_failed(
-                                gen,
-                                index,
-                                &track_id,
-                                prev_cursor,
-                                e.with_source(source.clone()),
-                            )
-                            .await;
-                    }
-                }
-            }
         } else {
-            let track = vmusic_store::get_track(&self.db, &track_id)
-                .await
-                .map_err(vmusic_core::CoreError::Store)?
-                .ok_or_else(|| vmusic_core::CoreError::NotFound(track_id.clone()))?;
-            std::path::PathBuf::from(track.path)
-        };
+            self.play_local(gen, index, track_id.clone()).await
+        }?;
 
-        // 提交尾部整段持 commit 锁：多 worker 下「过闸」与「load 命令入队」
-        // 分布在两条语句、两个核上，中间可以插进另一次完整切入；不串行化时
-        // 交错入队会让 Play(A) 配到 Load(B) 的声音。取流在锁外，等待只发生
-        // 在 actor 命令往返这种快路径上。
+        if outcome.committed {
+            *self.cursor.lock().await = Some(index);
+            // actual_quality 是 Copy 字段，这里按值传入不构成 outcome 的部分 move。
+            self.on_track_committed(&track_id, outcome.actual_quality)
+                .await;
+        }
+        Ok(outcome)
+    }
+
+    /// 本地曲提交：先作废全部在途在线下载（含预取），其余代际/锁纪律与
+    /// 旧版 play_index 一致。
+    async fn play_local(
+        &self,
+        gen: usize,
+        index: usize,
+        track_id: String,
+    ) -> Result<PlayOutcome, vmusic_core::CoreError> {
+        self.cancel_all_downloads().await;
+        let track = vmusic_store::get_track(&self.db, &track_id)
+            .await
+            .map_err(vmusic_core::CoreError::Store)?
+            .ok_or_else(|| vmusic_core::CoreError::NotFound(track_id.clone()))?;
         let _commit = self.play_commit.lock().await;
         if !self.attempt_alive(gen, index, &track_id).await {
-            return Ok(false);
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
         }
-
-        let uri = path
-            .to_str()
-            .ok_or_else(|| vmusic_core::CoreError::NotFound("路径含非 UTF-8 字符".into()))?;
-
         self.audio
-            .load(uri, Some(track_id.clone()))
+            .load(&track.path, Some(track_id.clone()))
             .await
             .map_err(vmusic_core::CoreError::Audio)?;
         // load 已被 actor 处理：若这期间又切了歌，更新一代的命令已排在后面，
         // 本调用绝不能再 play() 或写 cursor。
         if !self.attempt_alive(gen, index, &track_id).await {
-            return Ok(false);
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
         }
         self.audio
             .play()
             .await
             .map_err(vmusic_core::CoreError::Audio)?;
-        let committed = self.attempt_alive(gen, index, &track_id).await;
-        if committed {
-            *self.cursor.lock().await = Some(index);
+        Ok(PlayOutcome {
+            committed: self.attempt_alive(gen, index, &track_id).await,
+            actual_quality: None,
+        })
+    }
+
+    /// 在线曲播放：缓存快路径 → 预取接管/新开渐进式下载 → WaitFull/Progressive
+    /// 两条提交路。所有网络 await 都在 commit 锁外；只有复核与 actor 入队在
+    /// 锁内。失败一律走 [`Self::online_failed`] 收口。
+    //
+    // 参数多是有意的分层结果：代际/下标/track_id 是乐观并发三件套，
+    // source/id 是在线曲身份，prev_cursor 供失败回退，auto 决定失败策略——
+    // 收成结构体只会引入一个只用一次的临时参数包。
+    #[allow(clippy::too_many_arguments)]
+    async fn play_online(
+        &self,
+        gen: usize,
+        index: usize,
+        track_id: String,
+        source: String,
+        id: String,
+        prev_cursor: Option<usize>,
+        auto: bool,
+    ) -> Result<PlayOutcome, vmusic_core::CoreError> {
+        self.set_buffering(true, None).await;
+
+        let dir = self.online_cache_dir();
+        // 读偏好只在块作用域短持锁：tokio Mutex 不能跨后面的网络 await 持有。
+        let quality = {
+            let prefs = self.quality.lock().await;
+            crate::online::quality::get(&prefs, &source)
+        };
+        let key = crate::online::cache::cache_key(&source, &id, quality.as_str());
+
+        // 只取消「别的键」的在途下载；同键说明预取已在跑，下面直接接管，
+        // 绝不重下一遍。
+        {
+            let mut map = self.downloads.lock().await;
+            let others: Vec<String> = map.keys().filter(|k| k.as_str() != key).cloned().collect();
+            for k in others {
+                if let Some(old) = map.remove(&k) {
+                    old.cancel();
+                }
+            }
         }
-        Ok(committed)
+
+        // 快路径：正式名（任意扩展名）或旧名缓存已就绪。find_cached_by_key
+        // 是 tokio::fs 的 async 扫描（目录内只有少量缓存文件），直接 await，
+        // 不另开 blocking 任务。
+        if let Some(path) =
+            crate::online::cache::find_cached_by_key(&dir, &source, &id, quality.as_str()).await
+        {
+            // 同键下载（如刚完成 rename 的预取）从注册表摘掉，句柄 drop 释放。
+            self.downloads.lock().await.remove(&key);
+            return self.commit_file(gen, index, track_id, path, None).await;
+        }
+
+        // 未缓存：同键预取在跑则 owned 接管（实际档位无法回填）；否则现场
+        // 取流并新开渐进式下载。
+        let (dl, actual) =
+            {
+                let existing = self.downloads.lock().await.remove(&key);
+                if let Some(dl) = existing {
+                    (dl, None)
+                } else {
+                    let ctx = crate::online::Ctx {
+                        db: self.db.clone(),
+                    };
+                    let info =
+                        match crate::online::stream(&ctx, &source, &id, None, Some(quality.bps()))
+                            .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.set_buffering(false, None).await;
+                                return self
+                                    .online_failed(
+                                        gen,
+                                        index,
+                                        track_id,
+                                        prev_cursor,
+                                        auto,
+                                        e.with_source(source),
+                                    )
+                                    .await;
+                            }
+                        };
+                    let actual = crate::online::quality::from_bitrate(info.bitrate);
+                    let urls: Vec<String> = std::iter::once(info.url)
+                        .chain(info.fallback_urls)
+                        .collect();
+                    let referer = crate::online::referer(&source).map(str::to_string);
+                    match crate::online::progressive::start(dir.clone(), key.clone(), urls, referer)
+                    {
+                        Ok(dl) => (dl, actual),
+                        Err(e) => {
+                            self.set_buffering(false, None).await;
+                            return self
+                                .online_failed(gen, index, track_id, prev_cursor, auto, e)
+                                .await;
+                        }
+                    }
+                }
+            };
+
+        // 等预读阈值（下载器内部在 spawn_blocking 里阻塞，不卡运行时）。
+        if let Err(e) = dl.wait_prebuffer().await {
+            self.set_buffering(false, None).await;
+            dl.cancel();
+            return self
+                .online_failed(
+                    gen,
+                    index,
+                    track_id,
+                    prev_cursor,
+                    auto,
+                    crate::error::ApiError::upstream_timeout(e).with_source(source),
+                )
+                .await;
+        }
+
+        // 容器探测：读 .part 前 1MB（blocking 任务做同步读）；文件打不开时
+        // 保守按 WaitFull + 下载器自己嗅探出的扩展名处理。
+        let (mode, ext) = {
+            let part = dl.part_path.clone();
+            let sniffed = dl.ext();
+            let head = tokio::task::spawn_blocking(move || {
+                let mut buf = vec![0u8; 1024 * 1024];
+                use std::io::Read;
+                let mut f = std::fs::File::open(&part).ok()?;
+                let n = f.read(&mut buf).ok()?;
+                buf.truncate(n);
+                Some(buf)
+            })
+            .await
+            .ok()
+            .flatten();
+            match head {
+                Some(h) => crate::online::progressive::plan_mode(&h),
+                None => (crate::online::progressive::StreamMode::WaitFull, sniffed),
+            }
+        };
+
+        if mode == crate::online::progressive::StreamMode::WaitFull {
+            // late-moov m4a：等整首下完。每 200ms 推一次百分比并复核代际，
+            // 用户切走立刻取消，不让迟到下载回来劫持新歌。
+            loop {
+                if !self.attempt_alive(gen, index, &track_id).await {
+                    self.set_buffering(false, None).await;
+                    dl.cancel();
+                    return Ok(PlayOutcome {
+                        committed: false,
+                        actual_quality: None,
+                    });
+                }
+                self.set_buffering(true, dl.pct()).await;
+                if dl.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            let path = match dl.join().await {
+                Ok(p) => p,
+                Err(e) => {
+                    self.set_buffering(false, None).await;
+                    return self
+                        .online_failed(
+                            gen,
+                            index,
+                            track_id,
+                            prev_cursor,
+                            auto,
+                            crate::error::ApiError::upstream_rejected(e).with_source(source),
+                        )
+                        .await;
+                }
+            };
+            self.set_buffering(false, None).await;
+            return self.commit_file(gen, index, track_id, path, actual).await;
+        }
+
+        // Progressive：头部元数据已齐，解码源直接读 .part，读到哪等到哪。
+        // HttpMediaSource 是 Read+Seek+Send+Sync，自动满足 AudioSource。
+        let media = match crate::online::progressive::HttpMediaSource::open(
+            &dl.part_path,
+            dl.inner.clone(),
+            dl.abort.clone(),
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                self.set_buffering(false, None).await;
+                dl.cancel();
+                return self
+                    .online_failed(
+                        gen,
+                        index,
+                        track_id,
+                        prev_cursor,
+                        auto,
+                        crate::error::ApiError::internal(e.to_string()).with_source(source),
+                    )
+                    .await;
+            }
+        };
+
+        let commit = self.play_commit.lock().await;
+        if !self.attempt_alive(gen, index, &track_id).await {
+            self.set_buffering(false, None).await;
+            dl.cancel();
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
+        }
+        if let Err(e) = self
+            .audio
+            .load_source(
+                Box::new(media),
+                Some(ext.to_string()),
+                Some(track_id.clone()),
+            )
+            .await
+        {
+            // online_failed 自己要取 commit 锁，必须先释放本守卫，否则同任务
+            // 重入 tokio Mutex 直接死锁。
+            drop(commit);
+            self.set_buffering(false, None).await;
+            dl.cancel();
+            return self
+                .online_failed(
+                    gen,
+                    index,
+                    track_id,
+                    prev_cursor,
+                    auto,
+                    crate::error::ApiError::internal(e.to_string()).with_source(source),
+                )
+                .await;
+        }
+        if !self.attempt_alive(gen, index, &track_id).await {
+            self.set_buffering(false, None).await;
+            // 已装入 actor 但被顶代际：不取消下载，后台跑完照样落缓存。
+            drop(dl);
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
+        }
+        let play = self.audio.play().await;
+        let committed = self.attempt_alive(gen, index, &track_id).await;
+        self.set_buffering(false, None).await;
+        play.map_err(vmusic_core::CoreError::Audio)?;
+        // 下载任务在后台继续到完成并 rename；Download 无 Drop 中止语义，
+        // drop 句柄只是放弃 JoinHandle 接收端，不会 cancel 任务（不能 forget）。
+        drop(dl);
+        Ok(PlayOutcome {
+            committed,
+            actual_quality: actual,
+        })
+    }
+
+    /// 缓存就绪曲目的提交（本地正式路径，走原 load 快路径）。
+    async fn commit_file(
+        &self,
+        gen: usize,
+        index: usize,
+        track_id: String,
+        path: PathBuf,
+        actual: Option<crate::online::quality::Quality>,
+    ) -> Result<PlayOutcome, vmusic_core::CoreError> {
+        let _commit = self.play_commit.lock().await;
+        if !self.attempt_alive(gen, index, &track_id).await {
+            self.set_buffering(false, None).await;
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
+        }
+        let Some(uri) = path.to_str() else {
+            self.set_buffering(false, None).await;
+            return Err(vmusic_core::CoreError::NotFound(
+                "路径含非 UTF-8 字符".into(),
+            ));
+        };
+        if let Err(e) = self.audio.load(uri, Some(track_id.clone())).await {
+            self.set_buffering(false, None).await;
+            return Err(vmusic_core::CoreError::Audio(e));
+        }
+        if !self.attempt_alive(gen, index, &track_id).await {
+            self.set_buffering(false, None).await;
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
+        }
+        if let Err(e) = self.audio.play().await {
+            self.set_buffering(false, None).await;
+            return Err(vmusic_core::CoreError::Audio(e));
+        }
+        let committed = self.attempt_alive(gen, index, &track_id).await;
+        self.set_buffering(false, None).await;
+        Ok(PlayOutcome {
+            committed,
+            actual_quality: actual,
+        })
     }
 
     /// 本次播放尝试是否仍代表用户的当前选择：代际没被后续切歌/换队列顶掉，
@@ -286,30 +588,204 @@ impl AppState {
             && queue.get(index).is_some_and(|id| id == track_id)
     }
 
-    /// 在线取流/落盘失败的统一收口。仍属当代时：推带码与音源的 WS 错误
-    /// （CoreError 不上 WebSocket，不推前端只看到「切歌没反应」），把
-    /// cursor 恢复到切入前，不让 next/prev 从一首没播起来的曲算，并把错误
-    /// 交回调用方。已被用户切走的失败整体静默丢弃（连 Err 都不回）——
-    /// 为一首跳过的曲子弹错、抢光标、给迟到的 HTTP 响应塞 404 都不对。
-    async fn online_play_failed(
+    /// 写缓冲覆盖态并立即推 WS（/v1/state 轮询读同一个 [`Self::buffering`]）。
+    pub(crate) async fn set_buffering(&self, active: bool, pct: Option<u8>) {
+        *self.buffering.lock().await = (active, pct);
+        self.publish(WsEvent::Buffering { active, pct });
+    }
+
+    /// 中止全部在途下载并清空注册表（切到本地曲/换队预留时调用）。
+    /// 短锁内 drain：cancel 只是置 AtomicBool + 删 .part，不 await。
+    pub(crate) async fn cancel_all_downloads(&self) {
+        let mut map = self.downloads.lock().await;
+        for (_, dl) in map.drain() {
+            dl.cancel();
+        }
+    }
+
+    /// 播放成功提交后的统一收口：清连续失败计数、写历史、预取后一首。
+    pub(crate) async fn on_track_committed(
+        &self,
+        track_id: &str,
+        actual: Option<crate::online::quality::Quality>,
+    ) {
+        self.auto_failures.store(0, Ordering::Relaxed);
+        self.record_history(track_id).await;
+        self.spawn_prefetch().await;
+        // 实际档位本任务只回传给 /online/play 响应；后续统计/打点再消费。
+        let _ = actual;
+    }
+
+    /// 写一条播放历史。在线曲用 online_meta 快照（缺失则标题退化为平台 id）；
+    /// 本地曲从库中取字段。失败只记日志，绝不能影响播放链路。
+    async fn record_history(&self, track_id: &str) {
+        if let Some((source, ref_id)) = crate::online::split_virtual_id(track_id) {
+            let snap = self.online_meta.lock().await.get(track_id).cloned();
+            let (title, artist, album, cover, duration) = match snap {
+                Some(m) => (m.title, m.artist, m.album, m.cover, m.duration_ms),
+                None => (ref_id.clone(), None, None, None, None),
+            };
+            if let Err(e) = crate::history::upsert(
+                &self.db,
+                crate::history::HistoryEntry {
+                    track_id,
+                    source: &source,
+                    ref_id: &ref_id,
+                    title: &title,
+                    artist: artist.as_deref(),
+                    album: album.as_deref(),
+                    cover_url: cover.as_deref(),
+                    duration_ms: duration,
+                },
+            )
+            .await
+            {
+                tracing::warn!("写播放历史失败: {e}");
+            }
+        } else if let Ok(Some(t)) = vmusic_store::get_track(&self.db, &track_id.to_string()).await {
+            if let Err(e) = crate::history::upsert(
+                &self.db,
+                crate::history::HistoryEntry {
+                    track_id: &t.id,
+                    source: "local",
+                    ref_id: &t.id,
+                    title: &t.title,
+                    artist: t.artist.as_deref(),
+                    album: t.album.as_deref(),
+                    cover_url: None,
+                    duration_ms: t.duration_ms,
+                },
+            )
+            .await
+            {
+                tracing::warn!("写播放历史失败: {e}");
+            }
+        }
+    }
+
+    /// 当前曲提交后按当前播放模式 peek 下一首：在线、无在途同键下载、无缓存
+    /// 命中时，后台预热下一首（注册表最多同时 1 个，由切歌取消逻辑保证）。
+    /// 任何失败都只 debug 日志——预取绝不影响正在听的曲。
+    async fn spawn_prefetch(&self) {
+        let mode = self.audio.snapshot().mode;
+        let queue = self.queue.lock().await.clone();
+        let len = queue.len();
+        if len < 2 {
+            return;
+        }
+        let current = self.cursor.lock().await.unwrap_or(0);
+        let next = match mode {
+            // 单曲循环：下一首还是自己，无需预取。
+            vmusic_core::PlayMode::RepeatOne => return,
+            // 与 step() 同一条随机规则，但只 peek、不推进游标。
+            vmusic_core::PlayMode::Shuffle => random_index(len, Some(current)),
+            _ => {
+                if current + 1 >= len {
+                    0
+                } else {
+                    current + 1
+                }
+            }
+        };
+        let Some((source, id)) = queue
+            .get(next)
+            .and_then(|v| crate::online::split_virtual_id(v))
+        else {
+            return; // 本地曲无需预取
+        };
+        let quality = {
+            let prefs = self.quality.lock().await;
+            crate::online::quality::get(&prefs, &source)
+        };
+        let key = crate::online::cache::cache_key(&source, &id, quality.as_str());
+        if self.downloads.lock().await.contains_key(&key) {
+            return;
+        }
+        let dir = self.online_cache_dir();
+        if crate::online::cache::find_cached_by_key(&dir, &source, &id, quality.as_str())
+            .await
+            .is_some()
+        {
+            return;
+        }
+        let ctx = crate::online::Ctx {
+            db: self.db.clone(),
+        };
+        let Ok(info) = crate::online::stream(&ctx, &source, &id, None, Some(quality.bps())).await
+        else {
+            return;
+        };
+        let urls: Vec<String> = std::iter::once(info.url)
+            .chain(info.fallback_urls)
+            .collect();
+        let referer = crate::online::referer(&source).map(str::to_string);
+        match crate::online::progressive::start(dir, key.clone(), urls, referer) {
+            Ok(dl) => {
+                self.downloads.lock().await.insert(key, dl);
+            }
+            Err(e) => tracing::debug!("预取启动失败: {}", e.message),
+        }
+    }
+
+    /// 在线曲播放失败的统一收口（取流/下载/解码失败都汇到这里）。
+    /// 仍属当代时把 cursor 恢复到切入前，不让 next/prev 从一首没播起来的
+    /// 曲算起；已被用户切走则整体静默（连 Err 都不回）。
+    ///
+    /// - `auto=true`（自然结束接力）：连续失败 +1，推「已跳过」提示后自动
+    ///   step 到下一首；累计 3 首发终态事件并返回 Err，停止接力。
+    /// - `auto=false`（手动点播）：推原始错误（不停服务），返回 Err 交回
+    ///   HTTP 调用方，由前端错误条引导重试。
+    async fn online_failed(
         &self,
         gen: usize,
         index: usize,
-        track_id: &str,
+        track_id: String,
         prev_cursor: Option<usize>,
+        auto: bool,
         e: crate::error::ApiError,
-    ) -> Result<bool, vmusic_core::CoreError> {
-        // 与提交尾部/换队互斥：否则可能在新一代已完成提交后把 cursor 恢复旧值。
-        let _commit = self.play_commit.lock().await;
-        if !self.attempt_alive(gen, index, track_id).await {
-            return Ok(false);
+    ) -> Result<PlayOutcome, vmusic_core::CoreError> {
+        let commit = self.play_commit.lock().await;
+        if !self.attempt_alive(gen, index, &track_id).await {
+            // 被顶代际：为跳过的曲子弹错、抢光标、给迟到的 HTTP 响应塞 404
+            // 都不对。
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
         }
+        *self.cursor.lock().await = prev_cursor;
+
+        if auto {
+            let n = self.auto_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            self.publish(WsEvent::Error {
+                message: format!("《{}》暂不可用，已跳过", track_title(&track_id)),
+                code: Some(e.code.to_string()),
+                source: e.source.clone(),
+            });
+            if n >= 3 {
+                self.publish(WsEvent::Error {
+                    message: "连续多首无法播放，已停止。可检查音源登录或网络后重试。".into(),
+                    code: Some("online_unavailable_streak".to_string()),
+                    source: e.source,
+                });
+                return Err(vmusic_core::CoreError::NotFound(e.message));
+            }
+            drop(commit);
+            // 自动跳下一首（仍按当前模式 step；其成功提交会清零失败计数）。
+            // step → play_index_for → play_online → online_failed 与本函数构成
+            // async 递归，future 尺寸无限；这一边必须 Box::pin 引入间接。
+            let _ = Box::pin(self.step(1, true)).await;
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
+        }
+
         self.publish(WsEvent::Error {
             message: e.message.clone(),
             code: Some(e.code.to_string()),
-            source: e.source.clone(),
+            source: e.source,
         });
-        *self.cursor.lock().await = prev_cursor;
         Err(vmusic_core::CoreError::NotFound(e.message))
     }
 
@@ -344,8 +820,14 @@ impl AppState {
             }
         };
 
-        self.play_index(next).await
+        self.play_index_for(next, None, true).await.map(|_| ())
     }
+}
+
+/// 失败提示里显示的曲目名：state 层此刻拿不到锁外的在线元数据快照，退而
+/// 显示虚拟 id 尾段（平台曲目 id），至少能让用户认出是哪一首。
+fn track_title(track_id: &str) -> String {
+    track_id.rsplit(':').next().unwrap_or(track_id).to_string()
 }
 
 /// Shuffle without pulling in an RNG crate: xorshift seeded from the clock.

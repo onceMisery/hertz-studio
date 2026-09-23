@@ -9,11 +9,19 @@ use tokio::fs;
 
 /// 正式缓存文件名：`{stem}-{quality}.{ext}`。
 ///
-/// 生产路径（Task 9）走 `cache_key` + 扩展名前缀扫描；此函数与 [`find_cached`]
+/// 生产路径走 [`cache_key`] + 扩展名前缀扫描；此函数与 [`find_cached`]
 /// 作为命名契约的直接实现保留并由单测覆盖。
 #[allow(dead_code)]
 pub fn cache_name(source: &str, id: &str, quality: &str, ext: &str) -> String {
     format!("{}-{quality}.{}", stem(source, id), ext_clean(ext))
+}
+
+/// 缓存键（不含扩展名）：`{stem}-{quality}`。
+///
+/// 渐进式下载落盘前不知道真实容器扩展名，下载注册表与缓存查找都以无扩展
+/// 名的键为身份；正式文件名是 `{key}.{ext}`（见 [`progressive::start`]）。
+pub fn cache_key(source: &str, id: &str, quality: &str) -> String {
+    format!("{}-{quality}", stem(source, id))
 }
 
 /// 旧版命名（无音质、恒 .mp3），一次性回退命中。
@@ -94,6 +102,36 @@ pub async fn find_cached(
 
 async fn is_ready(path: &Path) -> bool {
     matches!(fs::metadata(path).await, Ok(m) if m.len() > 1024)
+}
+
+/// 不知道扩展名时按缓存键前缀查正式文件：扫描任意 `{key}.*`（跳过
+/// `.part` 残骸），扫描完无果再回退旧名 `{stem}.mp3`。两条路径都必须
+/// 通过 [`is_ready`]（>1024 字节），版权拦截页那种几百字节的「文件」
+/// 不能被当成可播缓存。
+///
+/// 前缀末尾带点：`qq-a1-standard.` 不能误匹配到 `qq-a1-standardhi.*`
+/// 之类的相邻键。
+pub async fn find_cached_by_key(
+    dir: &Path,
+    source: &str,
+    id: &str,
+    quality: &str,
+) -> Option<PathBuf> {
+    let prefix = format!("{}.", cache_key(source, id, quality));
+    let legacy = dir.join(legacy_cache_name(source, id));
+    let Ok(mut it) = fs::read_dir(dir).await else {
+        return is_ready(&legacy).await.then_some(legacy);
+    };
+    while let Ok(Some(entry)) = it.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".part") && name.starts_with(&prefix) {
+            let p = entry.path();
+            if is_ready(&p).await {
+                return Some(p);
+            }
+        }
+    }
+    is_ready(&legacy).await.then_some(legacy)
 }
 
 /// 删除目录内残留 `.part`（上次进程被杀的残骸）。启动时调用（Task 10 接入）。
@@ -177,6 +215,52 @@ mod tests {
         let hit = find_cached(&dir, "qq", "a1", "lossless", "m4a").await;
         assert!(hit.is_some());
         assert!(hit.unwrap().1);
+    }
+
+    #[tokio::test]
+    async fn find_by_prefix_matches_any_ext_then_legacy() {
+        let dir = std::env::temp_dir().join(format!("vmusic-cache-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).await.unwrap();
+        // 新键 m4a 存在 → 命中它，即使同目录还有别的键/别的扩展名。
+        fs::write(dir.join("qq-a1-lossless.m4a"), vec![0u8; 2000])
+            .await
+            .unwrap();
+        fs::write(dir.join("qq-a1-standard.mp3"), vec![0u8; 2000])
+            .await
+            .unwrap();
+        fs::write(dir.join(".qq-a1-lossless.part"), vec![0u8; 4096])
+            .await
+            .unwrap();
+        let hit = find_cached_by_key(&dir, "qq", "a1", "lossless")
+            .await
+            .unwrap();
+        assert!(hit.to_string_lossy().ends_with("qq-a1-lossless.m4a"));
+
+        // 前缀边界：不能被相邻音质键误命中。
+        assert!(find_cached_by_key(&dir, "qq", "a1", "hires")
+            .await
+            .is_none());
+
+        // 只有旧名时回退。
+        let dir2 = std::env::temp_dir().join(format!("vmusic-cache-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir2).await.unwrap();
+        fs::write(dir2.join("qq-a2.mp3"), vec![0u8; 2000])
+            .await
+            .unwrap();
+        let hit2 = find_cached_by_key(&dir2, "qq", "a2", "lossless")
+            .await
+            .unwrap();
+        assert!(hit2.to_string_lossy().ends_with("qq-a2.mp3"));
+
+        // 太小的「版权拦截页」不算就绪：既不命中新名也不回退旧名。
+        let dir3 = std::env::temp_dir().join(format!("vmusic-cache-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir3).await.unwrap();
+        fs::write(dir3.join("qq-a3-lossless.mp3"), vec![0u8; 128])
+            .await
+            .unwrap();
+        assert!(find_cached_by_key(&dir3, "qq", "a3", "lossless")
+            .await
+            .is_none());
     }
 
     #[tokio::test]

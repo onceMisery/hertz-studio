@@ -131,6 +131,12 @@ async fn main() -> anyhow::Result<()> {
         qr: crate::online::qr::Registry::new(),
         play_generation: Default::default(),
         play_commit: Default::default(),
+        buffering: Default::default(),
+        online_meta: Default::default(),
+        downloads: Default::default(),
+        auto_failures: Default::default(),
+        // Task 11 改为启动时从 settings 装载的偏好表；此前用缺省档位。
+        quality: Default::default(),
     });
     spawn_event_pump(state.clone());
 

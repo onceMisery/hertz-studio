@@ -38,8 +38,10 @@ pub enum StreamMode {
     WaitFull,
 }
 
+// pub(crate)：state.rs 经 Download::inner / HttpMediaSource::open 跨模块传递
+// Arc<Inner>，类型必须在 crate 内可命名（字段与方法仍保持私有）。
 #[cfg_attr(not(test), allow(dead_code))] // Task 9 接入前仅单测直接构造
-struct Inner {
+pub(crate) struct Inner {
     downloaded: Mutex<u64>,
     cv: Condvar,
     total: Mutex<Option<u64>>,

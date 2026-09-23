@@ -399,7 +399,8 @@ pub fn find(source: &str) -> Option<&'static SourceInfo> {
 /// 多个音源共用一个下载函数，而 Referer 各不相同——CCmixter 对无 Referer 的
 /// 直链请求直接回 403。以前这里把网易云的地址写死，换第二个音源就会全部下载
 /// 失败，所以它必须跟着音源走。
-fn referer(source: &str) -> Option<&'static str> {
+// pub(crate)：渐进式播放接入后，state.rs 的播放/预取流程也要按音源带 Referer。
+pub(crate) fn referer(source: &str) -> Option<&'static str> {
     match source {
         "netease" => Some("https://music.163.com"),
         // QQ/酷狗的 CDN 直链校验 Referer，缺了直接 403（Task 15 落盘播放依赖）。
@@ -904,9 +905,11 @@ pub fn split_virtual_id(vid: &str) -> Option<(String, String)> {
 
 /// 旧版缓存命名（无音质、恒 .mp3）的兼容包装。
 ///
-/// 渐进式下载（Task 6/9）接入前，`fetch_to_cache` 与 state.rs 的旧播放入口
-/// 仍按旧名落盘/命中；Task 11 删除 fetch_to_cache 后本包装一并移除。
-/// 新代码请直接用 [`cache::cache_name`] / [`cache::legacy_cache_name`]。
+/// Task 9 渐进式下载接入后，生产播放链路改用 `cache::cache_key` +
+/// `find_cached_by_key`；仅剩 `fetch_to_cache` 旧路径引用本包装，Task 11
+/// 删除 fetch_to_cache 时一并移除。新代码请直接用
+/// [`cache::cache_key`] / [`cache::legacy_cache_name`]。
+#[allow(dead_code)] // 随 fetch_to_cache 在 Task 11 一并删除
 pub fn cache_name_legacy(source: &str, id: &str) -> String {
     cache::legacy_cache_name(source, id)
 }
@@ -915,6 +918,7 @@ pub fn cache_name_legacy(source: &str, id: &str) -> String {
 ///
 /// 已经在缓存里的直接复用，不重复下载。写临时文件再 rename，避免进程被杀时
 /// 留下一个半截的 mp3 被下次播放当成完整文件。
+#[allow(dead_code)] // Task 9 起播放链路改走 progressive；Task 11 删除本函数
 pub async fn fetch_to_cache(
     dir: &std::path::Path,
     source: &str,

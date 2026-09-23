@@ -1138,6 +1138,10 @@ struct OnlinePlayRequest {
     artist: Option<String>,
     album: Option<String>,
     duration_ms: Option<u64>,
+    // Task 9 起音质以服务端逐源偏好（settings online_quality）为权威，请求体
+    // 里的单次 quality 不再读取；保留字段以兼容旧客户端入参，待播放端点版本
+    // 演进时连同旧单曲形态一起评估移除。
+    #[allow(dead_code)]
     quality: Option<u32>,
     /// 整盘形态：一整首歌单/专辑的曲目列表，当前曲由 index 指定。
     #[serde(default)]
@@ -1156,7 +1160,11 @@ struct OnlinePlayTrack {
     cover: Option<String>,
     /// 搜索/歌单结果里随曲目带来的平台原始引用（QQ media_mid 等），
     /// 取流时原样透传给平台模块；JSON 字段名与 OnlineTrack 一致为 ref。
+    ///
+    /// Task 9 起队列只存虚拟 id、播放按稳定 id 取流，暂不读取本字段；
+    /// 仍须接收以免 serde 拒绝前端载荷，后续首曲最优音质透传恢复时启用。
     #[serde(default, rename = "ref")]
+    #[allow(dead_code)]
     track_ref: Option<online::TrackRef>,
 }
 
@@ -1169,6 +1177,11 @@ struct OnlinePlayTrack {
 /// 「过闸 → 还原 queue/cursor」必须在同一把 commit 锁内：旧队列与旧 cursor
 /// 是一对快照，cursor 是旧队列的下标，分开恢复或在锁外恢复都会让旧下标落进
 /// 新队列（越界高亮 / next 重试刚失败的曲）。
+//
+// Task 9 起首曲起播改由 state::play_index_for 内部收口，本函数暂无调用方；
+// 「占队后失败整盘还原」仍是唯一持有快照恢复语义的实现，后续 /online/play
+// 失败路径（如 Task 10 元数据/重放接线）复用，故保留而非删除。
+#[allow(dead_code)]
 async fn settle_online_play(
     state: &Arc<AppState>,
     gen: usize,
@@ -1244,15 +1257,15 @@ async fn online_quality_set(
     ))
 }
 
-/// 在线试听：先把整盘虚拟 id 占进队列，再用当前曲的 track_ref 取最优试听
-/// 地址落盘，最后走与本地曲目完全相同的 play_index 提交链路。
+/// 在线试听：先把整盘虚拟 id 占进队列，再交给 play_index_for 按服务端音质
+/// 偏好在线取流、边下边播，提交链路与本地曲目完全相同。
 ///
 /// 队列必须先占：stream/下载是数秒级 await，期间用户可能改点别的。早 set_queue
-/// 立即顶代际并挂出新队列，预取回来后凭代际复核——已被顶掉的迟到结果静默收
-/// 在当前播放器状态上，绝不允许整盘换回、把用户后来选的曲盖掉。
+/// 立即顶代际并挂出新队列，起播调用回来后凭代际复核——已被顶掉的迟到结果静默
+/// 收在当前播放器状态上，绝不允许整盘换回、把用户后来选的曲盖掉。
 ///
-/// 队列只存虚拟 id、不存 track_ref，所以切到其他曲目时 play_index 按稳定 id
-/// 回落取流，可能拿不到最优音质——这是队列状态机的有意取舍，不在本端点扩大。
+/// 队列只存虚拟 id、不存 track_ref，所以 play_index_for 按稳定 id 回落取流，
+/// 可能拿不到最优音质——这是队列状态机的有意取舍，不在本端点扩大。
 async fn online_play(
     State(state): State<Arc<AppState>>,
     Json(body): Json<OnlinePlayRequest>,
@@ -1288,58 +1301,26 @@ async fn online_play(
         .map(|t| online::virtual_id(&source, &t.id))
         .collect();
 
-    // 先占队列再取流（见函数文档）。set_queue 原子地返回新代际和占队前的
-    // (queue, cursor) 快照：首曲新鲜失败时整体还原，不留下指向旧队列下标的
-    // cursor；预取窗口里被顶代际则凭 gen 静默收口。
-    let (gen, prev_queue, prev_cursor) = state.set_queue(vids.clone(), Some(index)).await;
+    // 先占队列再起播（见函数文档）。set_queue 原子地返回新代际和占队前的
+    // (queue, cursor) 快照；起播窗口里被顶代际则由 play_index_for 的预留复核
+    // 静默收在「当前」播放器状态上。
+    //
+    // 取流与渐进式下载全部在 play_index_for 内按服务端音质偏好完成；旧版
+    // 「先整首 stream()+fetch_to_cache() 预热」已删除——保留会让首曲下两遍，
+    // Task 11 删除 fetch_to_cache 后也无法编译。
+    //
+    // prev_queue/prev_cursor 仅服务于占队后失败的整体还原路径
+    // （settle_online_play），当前起播失败由 state 内部收口，暂不解构使用。
+    let (gen, _prev_queue, _prev_cursor) = state.set_queue(vids.clone(), Some(index)).await;
 
-    let ctx = online_ctx(&state);
-    // 当前曲透传 track_ref，争取平台最优音质；其余曲目切歌时按 id 回落。
-    let info = match tagged(
-        &source,
-        online::stream(
-            &ctx,
-            &source,
-            &current.id,
-            current.track_ref.as_ref(),
-            body.quality,
-        )
-        .await,
-    ) {
-        Ok(info) => info,
-        Err(e) => {
-            return settle_online_play(
-                &state,
-                gen,
-                index,
-                &vids,
-                prev_queue.clone(),
-                prev_cursor,
-                e,
-            )
-            .await;
-        }
-    };
-    let dir = state.online_cache_dir();
-    // 只关心落盘这个副作用：返回的路径由随后 play_index 的缓存就绪分支自行
-    // 解析，这里不保留 PathBuf。
-    if let Err(e) = tagged(
-        &source,
-        online::fetch_to_cache(&dir, &source, &current.id, &info.url).await,
-    ) {
-        return settle_online_play(&state, gen, index, &vids, prev_queue, prev_cursor, e).await;
-    }
-
-    // 预取这几秒里用户若已改点，预留区的代际复核会挡住：迟到结果不再 load、
-    // 不 bump、不写 cursor，HTTP 调用收在「当前」播放器状态上。返回 false 即
-    // 被后来的切入/换队顶掉。首曲已用最优 track_ref/quality 落盘，缓存就绪
-    // 分支零网络直接 load；闸门、commit 串行、cursor 与失败恢复都在同一函数。
-    if !state.play_index_for(index, Some(gen)).await? {
+    let outcome = state.play_index_for(index, Some(gen), false).await?;
+    if !outcome.committed {
         return Ok(get_state(State(state.clone())).await);
     }
 
     // 封面：整盘曲目通常已带 cover；缺失时补一次详情。补不到不算失败——
     // 前端有占位图，不能让一张图片拖垮整次播放。
+    let ctx = online_ctx(&state);
     let cover = match &current.cover {
         Some(c) if !c.is_empty() => Some(c.clone()),
         _ => online::detail(&ctx, &source, &current.id)
@@ -1361,6 +1342,8 @@ async fn online_play(
         "album": current.album.clone().unwrap_or_default(),
         "duration_ms": current.duration_ms.unwrap_or(0),
         "cover": cover,
+        // 平台实际给到的音质档位（缓存命中/预取接管时为 null）。
+        "actual_quality": outcome.actual_quality.map(|q| q.as_str()),
     })))
 }
 
