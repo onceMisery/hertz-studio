@@ -31,6 +31,9 @@ Thumbs.db
 # Local cargo home used in this sandbox (the global one is read-only here)
 .cargo-home/
 
+# Brainstorming visual companion
+.superpowers/
+
 # Agent working notes / local verification scratch files
 .workbuddy/
 /_root.txt
