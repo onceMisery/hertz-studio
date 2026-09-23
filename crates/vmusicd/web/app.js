@@ -640,6 +640,8 @@ async function applyQueue(list, opts) {
   const current = state.snapshot.track_id;
   const index = current ? Math.max(0, list.indexOf(current)) : null;
   state.queue = list;
+  // 与 setStateQueue 保持同一别名：队列重排后音质热切换读到的下标才不旧。
+  state.queueIds = state.queue;
   state.queueIndex = index === null ? -1 : index;
   try {
     // 只替换队列与游标，不碰 audio actor：正在播放的曲目不会被打断。
@@ -660,6 +662,8 @@ async function restoreQueue() {
     const data = await transport.get('/v1/player/queue');
     if (data && data.queue && data.queue.length) {
       state.queue = data.queue;
+      // 刷新恢复后同样同步别名，否则 online.js 热切换仍读到旧队列。
+      state.queueIds = state.queue;
       state.queueIndex = data.index ?? state.queue.indexOf(state.snapshot.track_id);
       renderQueue();
     }

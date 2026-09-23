@@ -1012,6 +1012,39 @@ async function loginScenario(pollStates, opts) {
   }
 
   // -------------------------------------------------------------------------
+  // 4. 在线音源增强（2026-09）：历史 / 音质热切换 / buffering / 渐进式播放接缝
+  //    这些接缝一旦被改名或回退，浏览器里只会静默坏掉；不跑浏览器，直接钉
+  //    源码字符串（断言措辞已按当前真实代码校准，路径均为真实全路径）。
+  // -------------------------------------------------------------------------
+  section('在线音源增强（2026-09）：历史、音质、buffering 与渐进式播放接缝');
+  {
+    const appJs = fs.readFileSync(path.join(WEB, 'app.js'), 'utf8');
+    const onlineJs = fs.readFileSync(path.join(WEB, 'online.js'), 'utf8');
+    const indexHtml = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
+    const stateRs = fs.readFileSync(
+      path.join(__dirname, '..', 'crates', 'vmusicd', 'src', 'state.rs'), 'utf8');
+    const actorRs = fs.readFileSync(
+      path.join(__dirname, '..', 'crates', 'vmusic-audio', 'src', 'actor.rs'), 'utf8');
+
+    ok(indexHtml.includes('id="op-history"'), 'index.html：最近播放历史区块容器存在');
+    ok(indexHtml.includes('id="online-quality"'), 'index.html：音质档位选择器存在');
+    ok(indexHtml.includes('id="online-errorbar"'), 'index.html：在线错误条容器存在');
+    ok(onlineJs.includes('/v1/history'), 'online.js：引用历史端点 /v1/history');
+    ok(onlineJs.includes('/v1/online/quality'), 'online.js：引用音质档位端点 /v1/online/quality');
+    ok(onlineJs.includes('/v1/player/replay'), 'online.js：失败行经 /v1/player/replay 重播');
+    ok(onlineJs.includes('showOnlineError'), 'online.js：暴露 showOnlineError 错误条入口');
+    ok(appJs.includes("case 'buffering'"), 'app.js：快照分发处理 buffering 事件');
+    ok(appJs.includes('state.queueIds'), 'app.js：state.queueIds 别名供热切换读队列下标');
+    ok(actorRs.includes('LoadSource'), 'vmusic-audio actor.rs：定义 LoadSource 命令');
+    ok(stateRs.includes('load_source'), 'state.rs：经 AudioHandle 调用 load_source 喂入解码源');
+    ok(!stateRs.includes('Some(320_000)'), 'state.rs：取流不再硬编码 320k（无 Some(320_000)）');
+    ok(stateRs.includes('progressive::'), 'state.rs：接入 crate::online::progressive 渐进式下载');
+    ok(stateRs.includes('cancel_all_downloads'), 'state.rs：统一下载中止入口 cancel_all_downloads 存在');
+    ok(stateRs.includes('auto_failures'), 'state.rs：auto_failures 连续失败计数驱动自动跳曲');
+    ok(!stateRs.includes('fetch_to_cache'), 'state.rs：旧整曲下载路径 fetch_to_cache 已移除');
+  }
+
+  // -------------------------------------------------------------------------
   console.log('\n' + checks + ' checks, ' + failures + ' failures');
   process.exit(failures ? 1 : 0);
 })().catch((e) => {
