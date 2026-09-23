@@ -493,7 +493,7 @@
     if (clearBtn) {
       clearBtn.onclick = async function () {
         try {
-          await T.delete('/v1/history');
+          await T.del('/v1/history');
           loadHistory();
         } catch (e) {
           H.toast('清空失败', 'error');
@@ -548,7 +548,7 @@
       del.onclick = async function (e) {
         e.stopPropagation();
         try {
-          await T.delete('/v1/history/' + it.id);
+          await T.del('/v1/history/' + it.id);
           loadHistory();
         } catch (err) {
           H.toast('移除失败', 'error');

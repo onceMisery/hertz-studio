@@ -373,7 +373,31 @@ function handleEvent(msg) {
     case 'scan': onScanProgress(msg); break;
     case 'library_changed': loadTracks(true); loadPlaylists(); break;
     case 'ended': break;
-    case 'error': toast(`播放异常：${msg.message}`, 'error'); break;
+    case 'error': {
+      // 在线音源失败交给在线面板错误条（可重试当前队列下标 / 跳下一首）；
+      // 「已跳过」类是服务端已自行处置的告知，轻提示即可；本地播放失败仍走错误 toast。
+      if (msg.source && window.Online && window.Online.showOnlineError) {
+        if (/已跳过/.test(msg.message)) {
+          toast(msg.message);
+        } else {
+          const ids = state.queueIds || [];
+          const idx = ids.indexOf(state.snapshot.track_id);
+          window.Online.showOnlineError(msg.message, idx >= 0 ? idx : null);
+        }
+      } else {
+        toast(`播放异常：${msg.message}`, 'error');
+      }
+      break;
+    }
+    case 'buffering': {
+      // 在线曲边下边播：播放键转 loading 态，title 提示缓冲进度；收口时清空。
+      const active = !!msg.active;
+      ui.playpause.classList.toggle('is-loading', active);
+      ui.playpause.title = active
+        ? (msg.pct != null ? `缓冲中 ${msg.pct}%` : '缓冲中…')
+        : '';
+      break;
+    }
     default: break;
   }
 }
@@ -595,6 +619,9 @@ async function playTrack(id, queue) {
 
 function setStateQueue(queue, currentId) {
   state.queue = queue || [];
+  // online.js 热切换音质时按 id 读当前队列下标；与 state.queue 同数组，
+  // 单独留一个语义化别名供跨模块读取（renderQueue 等仍只用 state.queue）。
+  state.queueIds = state.queue;
   state.queueIndex = currentId ? state.queue.indexOf(currentId) : -1;
   renderQueue();
 }
