@@ -439,6 +439,14 @@ fn stream_info(url: String, id: &str) -> StreamInfo {
     }
 }
 
+/// 回填实际请求码率，便于上层标注「实际档位」。酷狗无备用直链，fallback
+/// 由 progressive 下载器在传输层处理。
+fn stream_info_with_fallback(url: String, hash: &str, quality: u32) -> StreamInfo {
+    let mut info = stream_info(url, hash);
+    info.bitrate = Some(quality as u64);
+    info
+}
+
 /// 取流日志用的 status 摘要（缺失/数字/字符串均可安全展示，不含敏感信息）。
 fn status_digest(b: &serde_json::Value) -> String {
     b.get("status")
@@ -446,7 +454,18 @@ fn status_digest(b: &serde_json::Value) -> String {
         .unwrap_or_else(|| "缺失".into())
 }
 
-/// 按 spec §2.3 顺序尝试通道：移动匿名 → Web H5（含 retry 域）→ 登录网关。
+/// 通道尝试顺序。已登录且请求 ≥320k 时登录网关排第一（能给 320/flac）；
+/// 其余情况维持「移动匿名 → H5 → retry」。
+fn channel_plan(signed_in: bool, quality: u32) -> Vec<&'static str> {
+    if signed_in && quality >= 320_000 {
+        vec!["gateway", "mobile", "h5", "h5_retry"]
+    } else {
+        vec!["mobile", "h5", "h5_retry"]
+    }
+}
+
+/// 按 spec §2.3 顺序尝试通道：已登录且请求 ≥320k 时登录网关优先（320/flac），
+/// 不通再回落移动匿名与 Web H5（含 retry 域）；其余情况移动匿名 → H5 → retry。
 ///
 /// 错误归类：传输层失败（get_json Err）只记 debug 并续跑下一跳，全部停在
 /// 传输层时透传最后一个传输错误；只要有一跳拿到业务 JSON 但都没给出 url，
@@ -482,102 +501,107 @@ pub async fn stream(
     let mut last_transport: Option<ApiError> = None;
     let mut business_seen = false;
 
-    // ① 移动版匿名 playInfo（128k）
-    let mut mobile_url = reqwest::Url::parse(PLAY_MOBILE).unwrap();
-    mobile_url
-        .query_pairs_mut()
-        .append_pair("cmd", "playInfo")
-        .append_pair("hash", hash)
-        .append_pair("key", &kugou::mobile_key(hash))
-        .append_pair("album_id", album_id)
-        .append_pair("pid", "1")
-        .append_pair("forceDown", "0")
-        .append_pair("vip", "65530");
-    let h = super::http::headers(Some(&cookie), Some("https://m.kugou.com/"));
-    match super::http::get_json(&http, mobile_url.as_str(), h).await {
-        Ok(b) => {
-            business_seen = true;
-            if status_ok(b.get("status")) {
-                if let Some(url) = pick_url(&b) {
-                    return Ok(stream_info(url, hash));
+    let plan = channel_plan(signed_in, quality);
+
+    macro_rules! try_mobile {
+        () => {{
+            let mut mobile_url = reqwest::Url::parse(PLAY_MOBILE).unwrap();
+            mobile_url
+                .query_pairs_mut()
+                .append_pair("cmd", "playInfo")
+                .append_pair("hash", hash)
+                .append_pair("key", &kugou::mobile_key(hash))
+                .append_pair("album_id", album_id)
+                .append_pair("pid", "1")
+                .append_pair("forceDown", "0")
+                .append_pair("vip", "65530");
+            let h = super::http::headers(Some(&cookie), Some("https://m.kugou.com/"));
+            match super::http::get_json(&http, mobile_url.as_str(), h).await {
+                Ok(b) => {
+                    business_seen = true;
+                    if status_ok(b.get("status")) {
+                        if let Some(url) = pick_url(&b) {
+                            return Ok(stream_info_with_fallback(url, hash, quality));
+                        }
+                    }
+                    tracing::debug!(channel = "kugou_mobile", status = %status_digest(&b), "酷狗取流通道失败");
+                }
+                Err(e) => {
+                    tracing::debug!(channel = "kugou_mobile", error = %e.message, "酷狗取流通道失败");
+                    last_transport = Some(e);
                 }
             }
-            tracing::debug!(
-                channel = "kugou_mobile",
-                status = %status_digest(&b),
-                "酷狗取流通道失败"
+        }};
+    }
+
+    macro_rules! try_h5 {
+        ($endpoint:expr, $channel:literal) => {{
+            let mut params = h5_base(&cred, &mid, &dfid);
+            params.insert("platid".into(), "4".into());
+            params.insert("hash".into(), hash.to_lowercase());
+            params.insert("album_id".into(), album_id.into());
+            let url = signed_url($endpoint, params);
+            let h = super::http::headers(Some(&cookie), Some("https://www.kugou.com/"));
+            match super::http::get_json(&http, &url, h).await {
+                Ok(b) => {
+                    business_seen = true;
+                    if status_ok(b.get("status")) {
+                        if let Some(u) = pick_url(&b) {
+                            return Ok(stream_info_with_fallback(u, hash, quality));
+                        }
+                    }
+                    tracing::debug!(channel = $channel, status = %status_digest(&b), "酷狗取流通道失败");
+                }
+                Err(e) => {
+                    tracing::debug!(channel = $channel, error = %e.message, "酷狗取流通道失败");
+                    last_transport = Some(e);
+                }
+            }
+        }};
+    }
+
+    macro_rules! try_gateway {
+        () => {{
+            let mut params = h5_base(&cred, &mid, &dfid);
+            params.insert("album_id".into(), album_id.into());
+            params.insert("area_code".into(), "1".into());
+            params.insert("hash".into(), hash.to_lowercase());
+            params.insert("behavior".into(), "play".into());
+            params.insert("pid".into(), "2".into());
+            params.insert("cmd".into(), "26".into());
+            params.insert("quality".into(), quality_param(quality).to_string());
+            params.insert("key".into(), kugou::play_key(hash, &mid, &cred.userid, WEB_APPID));
+            let url = signed_url(&format!("{GATEWAY}/v5/url"), params);
+            let mut h = super::http::headers(Some(&cookie), Some("https://www.kugou.com/"));
+            h.insert(
+                "x-router",
+                reqwest::header::HeaderValue::from_static("trackercdn.kugou.com"),
             );
-        }
-        Err(e) => {
-            // ApiError 未实现 Display：message 为结构化文案（不含 url/cookie/token）。
-            tracing::debug!(channel = "kugou_mobile", error = %e.message, "酷狗取流通道失败");
-            last_transport = Some(e);
-        }
+            match super::http::get_json(&http, &url, h).await {
+                Ok(b) => {
+                    business_seen = true;
+                    if status_ok(b.get("status")) {
+                        if let Some(u) = pick_url(&b) {
+                            return Ok(stream_info_with_fallback(u, hash, quality));
+                        }
+                    }
+                    tracing::debug!(channel = "kugou_gateway", status = %status_digest(&b), "酷狗取流通道失败");
+                }
+                Err(e) => {
+                    tracing::debug!(channel = "kugou_gateway", error = %e.message, "酷狗取流通道失败");
+                    last_transport = Some(e);
+                }
+            }
+        }};
     }
 
-    // ② Web H5 签名（匿名），失败换 retry 域名
-    for (endpoint, channel) in [(PLAY_WEB, "kugou_h5"), (PLAY_WEB_RETRY, "kugou_h5_retry")] {
-        let mut params = h5_base(&cred, &mid, &dfid);
-        params.insert("platid".into(), "4".into());
-        params.insert("hash".into(), hash.to_lowercase());
-        params.insert("album_id".into(), album_id.into());
-        let url = signed_url(endpoint, params);
-        let h = super::http::headers(Some(&cookie), Some("https://www.kugou.com/"));
-        match super::http::get_json(&http, &url, h).await {
-            Ok(b) => {
-                business_seen = true;
-                if status_ok(b.get("status")) {
-                    if let Some(u) = pick_url(&b) {
-                        return Ok(stream_info(u, hash));
-                    }
-                }
-                tracing::debug!(channel, status = %status_digest(&b), "酷狗取流通道失败");
-            }
-            Err(e) => {
-                tracing::debug!(channel, error = %e.message, "酷狗取流通道失败");
-                last_transport = Some(e);
-            }
-        }
-    }
-
-    // ③ 登录网关 /v5/url（320/flac），未登录跳过
-    if signed_in {
-        let mut params = h5_base(&cred, &mid, &dfid);
-        params.insert("album_id".into(), album_id.into());
-        params.insert("area_code".into(), "1".into());
-        params.insert("hash".into(), hash.to_lowercase());
-        params.insert("behavior".into(), "play".into());
-        params.insert("pid".into(), "2".into());
-        params.insert("cmd".into(), "26".into());
-        params.insert("quality".into(), quality_param(quality).to_string());
-        params.insert(
-            "key".into(),
-            kugou::play_key(hash, &mid, &cred.userid, WEB_APPID),
-        );
-        let url = signed_url(&format!("{GATEWAY}/v5/url"), params);
-        let mut h = super::http::headers(Some(&cookie), Some("https://www.kugou.com/"));
-        h.insert(
-            "x-router",
-            reqwest::header::HeaderValue::from_static("trackercdn.kugou.com"),
-        );
-        match super::http::get_json(&http, &url, h).await {
-            Ok(b) => {
-                business_seen = true;
-                if status_ok(b.get("status")) {
-                    if let Some(u) = pick_url(&b) {
-                        return Ok(stream_info(u, hash));
-                    }
-                }
-                tracing::debug!(
-                    channel = "kugou_gateway",
-                    status = %status_digest(&b),
-                    "酷狗取流通道失败"
-                );
-            }
-            Err(e) => {
-                tracing::debug!(channel = "kugou_gateway", error = %e.message, "酷狗取流通道失败");
-                last_transport = Some(e);
-            }
+    for channel in plan {
+        match channel {
+            "gateway" => try_gateway!(),
+            "mobile" => try_mobile!(),
+            "h5" => try_h5!(PLAY_WEB, "kugou_h5"),
+            "h5_retry" => try_h5!(PLAY_WEB_RETRY, "kugou_h5_retry"),
+            _ => {}
         }
     }
 
@@ -1529,5 +1553,29 @@ mod tests {
         assert!(parse_listid("collection_3_888_67890_0_extra").is_err());
         assert!(parse_listid("collection_2_888_67890_0").is_err());
         assert!(parse_listid("a_b_c_78").is_err());
+    }
+
+    #[test]
+    fn channel_order_prefers_gateway_for_high_quality_when_signed_in() {
+        assert_eq!(
+            channel_plan(false, 128_000),
+            vec!["mobile", "h5", "h5_retry"]
+        );
+        assert_eq!(
+            channel_plan(false, 740_000),
+            vec!["mobile", "h5", "h5_retry"]
+        );
+        assert_eq!(
+            channel_plan(true, 320_000),
+            vec!["gateway", "mobile", "h5", "h5_retry"]
+        );
+        assert_eq!(
+            channel_plan(true, 740_000),
+            vec!["gateway", "mobile", "h5", "h5_retry"]
+        );
+        assert_eq!(
+            channel_plan(true, 128_000),
+            vec!["mobile", "h5", "h5_retry"]
+        );
     }
 }
