@@ -47,7 +47,6 @@ impl Quality {
     }
 
     /// 传给平台 stream(quality: Option<u32>) 的标称码率（bps）。
-    #[allow(dead_code)] // 后续 Task 在线取流按档位传码率时启用
     pub fn bps(self) -> u32 {
         match self {
             Quality::Standard => 128_000,
@@ -154,7 +153,6 @@ pub async fn save_source(
 }
 
 /// 平台实际返回码率反推档位（"实际档位"标注用）。
-#[allow(dead_code)] // 后续 Task 标注平台实际返回档位时启用
 pub fn from_bitrate(bps: Option<u64>) -> Option<Quality> {
     let b = bps?;
     Some(if b >= 900_000 {

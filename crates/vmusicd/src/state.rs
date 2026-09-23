@@ -69,12 +69,8 @@ pub struct ScanProgress {
 ///
 /// /online/play 入队时随 tracks 写入 [`AppState::online_meta`]，提交成功后
 /// 据此写播放历史；队列外没有任何持久化。
-// Task 10 才由 /online/play 写入，Task 9 只在 record_history 读取。
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct OnlineMetaSnap {
-    pub source: String,
-    pub ref_id: String,
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
@@ -121,7 +117,7 @@ pub struct AppState {
     pub(crate) downloads: Mutex<HashMap<String, crate::online::progressive::Download>>,
     /// 自动接力连续失败计数，任一曲成功提交即清零；累计到 3 停止接力。
     pub(crate) auto_failures: AtomicUsize,
-    /// 逐源音质偏好（启动时装载、POST 热切换即时更新；Task 11 前为缺省表）。
+    /// 逐源音质偏好（启动时从 settings 装载、POST 热切换即时更新）。
     pub(crate) quality: Mutex<crate::online::quality::QualityPrefs>,
 }
 
@@ -603,7 +599,11 @@ impl AppState {
         }
     }
 
-    /// 播放成功提交后的统一收口：清连续失败计数、写历史、预取后一首。
+    /// 播放成功提交后的内联收口：只做快操作（清连续失败计数、写历史）。
+    ///
+    /// 预取与 LRU 含网络/磁盘 await（预取要发一次取流 API，最坏数秒），绝不能
+    /// 内联在这里拖慢 /online/play 等 HTTP 响应与自动接力；统一由
+    /// [`Self::post_commit_background`] 在调用入口 detach 出去。
     pub(crate) async fn on_track_committed(
         &self,
         track_id: &str,
@@ -611,9 +611,30 @@ impl AppState {
     ) {
         self.auto_failures.store(0, Ordering::Relaxed);
         self.record_history(track_id).await;
-        self.spawn_prefetch().await;
         // 实际档位本任务只回传给 /online/play 响应；后续统计/打点再消费。
         let _ = actual;
+    }
+
+    /// 曲目确认成功起播（committed/Ok）后的后台收口：预取后一首，再做一次
+    /// 缓存容量回收。必须由「成功播放入口」在提交成功后恰好调用一次：
+    /// 自动接力在事件泵入口、手动点播在各路由入口。
+    ///
+    /// 整个流程 detach：调用方不等它，HTTP 响应与接力不被取流拖住。
+    /// enforce_limit 内置「最新文件始终保留」，不会删掉刚落盘的当前曲。
+    pub(crate) fn post_commit_background(self: &Arc<Self>) {
+        let s = self.clone();
+        tokio::spawn(async move {
+            s.spawn_prefetch().await;
+            if let Err(e) = crate::online::cache::enforce_limit(
+                &s.online_cache_dir(),
+                s.config.online.cache_max_bytes,
+                &[],
+            )
+            .await
+            {
+                tracing::warn!("缓存 LRU 回收失败: {e}");
+            }
+        });
     }
 
     /// 写一条播放历史。在线曲用 online_meta 快照（缺失则标题退化为平台 id）；
@@ -879,8 +900,11 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     // 泵自己永远只做即时转发。
                     let advance = state.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = advance.step(1, true).await {
-                            tracing::warn!("auto-advance failed: {e}");
+                        // 成功（含失败后内部自动跳曲成功）后在接力入口做一次
+                        // 后台预取 + LRU；每首成功播放恰好这一次。
+                        match advance.step(1, true).await {
+                            Ok(()) => advance.post_commit_background(),
+                            Err(e) => tracing::warn!("auto-advance failed: {e}"),
                         }
                     });
                 }

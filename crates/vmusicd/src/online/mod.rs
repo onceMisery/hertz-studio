@@ -66,7 +66,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use uuid::Uuid;
 
 use crate::error::{bad_request, ApiError, ApiResult};
 
@@ -77,16 +76,9 @@ const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
 /// 这里原来是一个 `.timeout(12s)`：reqwest 的 timeout 覆盖到响应体读完为止，
 /// 所以一首几 MB 的完整曲目在慢链路上会被自己掐断，报出来是一句看不懂的
 /// "error decoding response body"。拆成连接超时 + 读空闲超时之后，JSON 接口
-/// 慢一点不会被误杀；下载另外再叠一个总时长上限（见 `DOWNLOAD_TIMEOUT`）。
+/// 慢一点不会被误杀；渐进式下载器在 progressive 模块内自带大小封顶。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const READ_TIMEOUT: Duration = Duration::from_secs(12);
-
-/// 单曲下载的大小上限。
-const MAX_AUDIO_BYTES: u64 = 64 * 1024 * 1024;
-
-/// 整首下载允许占用的总时长。只在下载这条路上加：一首正常的歌几十秒内一定
-/// 走完，而挂死的连接必须有个地方被放弃。
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// 进程级共享 API 客户端（连接池复用）。
 fn shared_client() -> &'static reqwest::Client {
@@ -107,8 +99,6 @@ pub fn client() -> ApiResult<reqwest::Client> {
 
 /// 下载用客户端：读空闲超时放宽到 30s，不设整体超时（长曲目慢链路保活）。
 /// 供 [`progressive`] 渐进式下载器使用。
-// 唯一调用方 progressive::start 待 Task 9 接入，此前调用链不可达。
-#[allow(dead_code)]
 pub fn download_client() -> ApiResult<reqwest::Client> {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     Ok(CLIENT
@@ -418,22 +408,6 @@ pub(crate) fn referer(source: &str) -> Option<&'static str> {
 #[derive(Clone)]
 pub struct Ctx {
     pub db: SqlitePool,
-}
-
-/// 把 reqwest 的错误链摊平。
-///
-/// 它的 Display 只有最外层那一句（"error decoding response body"），而真正的
-/// 原因挂在 source 上（是连接被掐、是读超时、还是对方给 mp3 套了一层 gzip）。
-/// 不摊开的话，用户报回来的截图就永远只有一句没用的话。
-fn req_error(action: &str, err: &reqwest::Error) -> ApiError {
-    let mut chain = http::redact_qs(&err.to_string());
-    let mut source = std::error::Error::source(err);
-    while let Some(inner) = source {
-        chain.push_str(" ← ");
-        chain.push_str(&http::redact_qs(&inner.to_string()));
-        source = inner.source();
-    }
-    ApiError::internal(format!("{action}: {chain}"))
 }
 
 /// 封面地址统一升到 https。
@@ -901,104 +875,6 @@ pub fn split_virtual_id(vid: &str) -> Option<(String, String)> {
         return None;
     }
     Some((source.to_string(), id.to_string()))
-}
-
-/// 旧版缓存命名（无音质、恒 .mp3）的兼容包装。
-///
-/// Task 9 渐进式下载接入后，生产播放链路改用 `cache::cache_key` +
-/// `find_cached_by_key`；仅剩 `fetch_to_cache` 旧路径引用本包装，Task 11
-/// 删除 fetch_to_cache 时一并移除。新代码请直接用
-/// [`cache::cache_key`] / [`cache::legacy_cache_name`]。
-#[allow(dead_code)] // 随 fetch_to_cache 在 Task 11 一并删除
-pub fn cache_name_legacy(source: &str, id: &str) -> String {
-    cache::legacy_cache_name(source, id)
-}
-
-/// 把远程音频拉到本地缓存目录，返回可直接喂给 audio actor 的路径。
-///
-/// 已经在缓存里的直接复用，不重复下载。写临时文件再 rename，避免进程被杀时
-/// 留下一个半截的 mp3 被下次播放当成完整文件。
-#[allow(dead_code)] // Task 9 起播放链路改走 progressive；Task 11 删除本函数
-pub async fn fetch_to_cache(
-    dir: &std::path::Path,
-    source: &str,
-    id: &str,
-    url: &str,
-) -> ApiResult<std::path::PathBuf> {
-    tokio::fs::create_dir_all(dir)
-        .await
-        .map_err(|e| ApiError::internal(format!("创建缓存目录失败: {e}")))?;
-
-    let final_path = dir.join(cache_name_legacy(source, id));
-    if let Ok(meta) = tokio::fs::metadata(&final_path).await {
-        if meta.len() > 1024 {
-            return Ok(final_path);
-        }
-    }
-
-    let mut req = client()?.get(url).timeout(DOWNLOAD_TIMEOUT);
-    if let Some(referer) = referer(source) {
-        req = req.header("Referer", referer);
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| req_error("下载试听音频失败", &e))?;
-    if !resp.status().is_success() {
-        return Err(ApiError::internal(format!(
-            "试听地址返回 HTTP {}",
-            resp.status()
-        )));
-    }
-    // 地址是第三方给的，所以先问一句多大再往内存里收。一首歌几十 MB 已经到顶，
-    // 报 64MB 以上的 Content-Length 只可能是坏了或者在耍人。
-    //
-    // 这只拦得住诚实的服务器：分块传输可以谎报长度。真要封顶得改成边读边计数的
-    // 流式落盘，那是十几倍代码量，对一个本地回环服务不值得。
-    if resp
-        .content_length()
-        .is_some_and(|len| len > MAX_AUDIO_BYTES)
-    {
-        return Err(ApiError::internal(
-            "试听地址声称的内容过大，已放弃下载".to_string(),
-        ));
-    }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| req_error("读取试听音频失败", &e))?;
-    // 与三处「就绪」判定（>1024）严格互补：恰好 1024 字节也判无效，否则这
-    // 个文件会落盘却永远不被当作缓存、每次播放都重新下载。
-    if bytes.len() <= 1024 {
-        return Err(ApiError::internal(
-            "试听地址返回的内容过小，可能已被版权限制".to_string(),
-        ));
-    }
-
-    // 临时名带随机后缀：两个 play_index 同时现取同一首（连点下一首/多标签页）
-    // 时，固定 .part 名会让两次写盘互相 truncate、rename 交错，可能落出半成品。
-    let tmp = dir.join(format!(
-        ".{}.{}.part",
-        cache_name_legacy(source, id),
-        Uuid::new_v4().simple()
-    ));
-    if let Err(e) = tokio::fs::write(&tmp, &bytes).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(ApiError::internal(format!("写入缓存失败: {e}")));
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, &final_path).await {
-        // Windows 上 rename 不覆盖已存在文件：并发的另一个调用可能已经把同
-        // 一首落好——它是赢家，本调用直接复用最终文件即可，别报错也别留垃圾。
-        if let Ok(meta) = tokio::fs::metadata(&final_path).await {
-            if meta.len() > 1024 {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                return Ok(final_path);
-            }
-        }
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(ApiError::internal(format!("落盘缓存失败: {e}")));
-    }
-    Ok(final_path)
 }
 
 #[cfg(test)]

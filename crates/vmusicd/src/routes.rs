@@ -243,11 +243,14 @@ async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::
 
 async fn next(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     state.step(1, false).await?;
+    // 成功起播后在路由入口 detach 预取 + LRU（每首恰好一次）。
+    state.post_commit_background();
     Ok(get_state(State(state)).await)
 }
 
 async fn previous(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     state.step(-1, false).await?;
+    state.post_commit_background();
     Ok(get_state(State(state)).await)
 }
 
@@ -270,6 +273,7 @@ async fn load(
         .unwrap_or(0);
     state.set_queue(queue, Some(index)).await;
     state.play_index(index).await?;
+    state.post_commit_background();
     Ok(get_state(State(state)).await)
 }
 
@@ -1002,10 +1006,14 @@ async fn replay_index(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ReplayRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    state
+    let outcome = state
         .play_index_for(body.index, None, false)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
+    // 只有真正起播才触发后台预取 + LRU；被更新代际顶掉时不收口。
+    if outcome.committed {
+        state.post_commit_background();
+    }
     Ok(get_state(State(state)).await)
 }
 
@@ -1337,8 +1345,8 @@ async fn online_play(
     // Task 9 后起播失败由 state::online_failed 收口（cursor 回退由它负责），
     // 不再整盘还原队列，故这里只取代际。
     //
-    // 取流与渐进式下载全部在 play_index_for 内按服务端音质偏好完成；旧版
-    // 「先整首 stream()+fetch_to_cache() 预热」已删除——保留会让首曲下两遍。
+    // 取流与渐进式下载全部在 play_index_for 内按服务端音质偏好完成；首曲不再
+    // 走「先整首下载预热」的旧路径——那会让首曲下两遍。
     let (gen, _, _) = state.set_queue(vids.clone(), Some(index)).await;
 
     // 整盘元数据入内存暂存：play_index_for 提交成功后据此写历史（在线曲的
@@ -1349,8 +1357,6 @@ async fn online_play(
             meta.insert(
                 vid.clone(),
                 crate::state::OnlineMetaSnap {
-                    source: source.clone(),
-                    ref_id: t.id.clone(),
                     title: t.title.clone().unwrap_or_else(|| t.id.clone()),
                     artist: t.artist.clone(),
                     album: t.album.clone(),
@@ -1365,6 +1371,8 @@ async fn online_play(
     if !outcome.committed {
         return Ok(get_state(State(state.clone())).await);
     }
+    // 首曲确认起播：后台预取后一首 + LRU（play_index_for 内部不预取）。
+    state.post_commit_background();
 
     // 封面：整盘曲目通常已带 cover；缺失时补一次详情。补不到不算失败——
     // 前端有占位图，不能让一张图片拖垮整次播放。

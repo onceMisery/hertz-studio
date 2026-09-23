@@ -115,6 +115,9 @@ async fn main() -> anyhow::Result<()> {
     audio.set_volume(restore_volume).await.ok();
     audio.set_mode(restore_mode).await.ok();
 
+    // 逐源音质偏好以 settings 为权威；缺键/坏值由 load 内部回落为缺省表。
+    let quality_prefs = crate::online::quality::load(&db).await.unwrap_or_default();
+
     let (events, _) = broadcast::channel(128);
     let state = Arc::new(AppState {
         db,
@@ -133,10 +136,19 @@ async fn main() -> anyhow::Result<()> {
         online_meta: Default::default(),
         downloads: Default::default(),
         auto_failures: Default::default(),
-        // Task 11 改为启动时从 settings 装载的偏好表；此前用缺省档位。
-        quality: Default::default(),
+        quality: tokio::sync::Mutex::new(quality_prefs),
     });
     spawn_event_pump(state.clone());
+
+    // 清掉上次崩溃留下的半截下载，并按配置做一次缓存容量回收。
+    {
+        let cache_dir = state.online_cache_dir();
+        crate::online::cache::clean_parts(&cache_dir).await;
+        let max = state.config.online.cache_max_bytes;
+        if let Err(e) = crate::online::cache::enforce_limit(&cache_dir, max, &[]).await {
+            tracing::warn!("缓存 LRU 回收失败: {e}");
+        }
+    }
 
     let app = Router::new()
         .route("/ws", get(ws::ws_handler))

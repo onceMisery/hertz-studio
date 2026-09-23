@@ -7,15 +7,6 @@ use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
-/// 正式缓存文件名：`{stem}-{quality}.{ext}`。
-///
-/// 生产路径走 [`cache_key`] + 扩展名前缀扫描；此函数与 [`find_cached`]
-/// 作为命名契约的直接实现保留并由单测覆盖。
-#[allow(dead_code)]
-pub fn cache_name(source: &str, id: &str, quality: &str, ext: &str) -> String {
-    format!("{}-{quality}.{}", stem(source, id), ext_clean(ext))
-}
-
 /// 缓存键（不含扩展名）：`{stem}-{quality}`。
 ///
 /// 渐进式下载落盘前不知道真实容器扩展名，下载注册表与缓存查找都以无扩展
@@ -48,26 +39,6 @@ fn stem(source: &str, id: &str) -> String {
     }
 }
 
-fn ext_clean(ext: &str) -> String {
-    let e: String = ext
-        .trim()
-        .trim_start_matches('.')
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if e.is_empty() {
-        "mp3".into()
-    } else {
-        e
-    }
-}
-
 fn fnv1a(text: &str) -> u32 {
     let mut hash: u32 = 0x811c_9dc5;
     for byte in text.as_bytes() {
@@ -75,29 +46,6 @@ fn fnv1a(text: &str) -> u32 {
         hash = hash.wrapping_mul(0x0100_0193);
     }
     hash
-}
-
-/// 正式名优先；缺失时回退旧名。返回 (路径, 是否旧名)。
-///
-/// Task 9 的生产入口是按 key 扫描任意扩展名的 `find_cached_by_key`；本函数
-/// 固定扩展名的语义由单测锁定，作为其语义参照与公开 API 保留。
-#[allow(dead_code)]
-pub async fn find_cached(
-    dir: &Path,
-    source: &str,
-    id: &str,
-    quality: &str,
-    ext: &str,
-) -> Option<(PathBuf, bool)> {
-    let fresh = dir.join(cache_name(source, id, quality, ext));
-    if is_ready(&fresh).await {
-        return Some((fresh, false));
-    }
-    let legacy = dir.join(legacy_cache_name(source, id));
-    if is_ready(&legacy).await {
-        return Some((legacy, true));
-    }
-    None
 }
 
 async fn is_ready(path: &Path) -> bool {
@@ -134,8 +82,7 @@ pub async fn find_cached_by_key(
     is_ready(&legacy).await.then_some(legacy)
 }
 
-/// 删除目录内残留 `.part`（上次进程被杀的残骸）。启动时调用（Task 10 接入）。
-#[allow(dead_code)]
+/// 删除目录内残留 `.part`（上次进程被杀的残骸）。启动时调用。
 pub async fn clean_parts(dir: &Path) {
     let Ok(mut it) = fs::read_dir(dir).await else {
         return;
@@ -147,9 +94,10 @@ pub async fn clean_parts(dir: &Path) {
     }
 }
 
-/// 总量超 max_bytes 时按 mtime 从旧到新删到上限的 90%；.part 与 protected 跳过。
-/// Task 10 在启动与每次落盘后调用。
-#[allow(dead_code)]
+/// 总量超 max_bytes 时按 mtime 从旧到新删到上限的 90%；.part 与 protected
+/// 跳过。无论超容多严重，mtime 最新的 1 个正式文件始终保留——它通常就是
+/// 刚 rename 落盘的当前曲，绝不能在落盘后立刻被 LRU 删掉。
+/// 启动时与每次曲目提交后的后台任务调用。
 pub async fn enforce_limit(
     dir: &Path,
     max_bytes: u64,
@@ -179,10 +127,15 @@ pub async fn enforce_limit(
     }
     let target = (max_bytes as f64 * 0.9) as u64;
     files.sort_by_key(|(_, mtime, _)| *mtime);
+    // 最新文件（刚落盘的当前曲）无条件保留，即使总容量仍然超目标。
+    let newest = files.last().map(|(p, _, _)| p.clone());
     let mut removed = 0u64;
     for (path, _, len) in files {
         if total <= target {
             break;
+        }
+        if newest.as_ref() == Some(&path) {
+            continue;
         }
         if fs::remove_file(&path).await.is_ok() {
             total -= len;
@@ -195,27 +148,6 @@ pub async fn enforce_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn naming_and_legacy_fallback() {
-        assert_eq!(
-            cache_name("qq", "a1", "lossless", "m4a"),
-            "qq-a1-lossless.m4a"
-        );
-        assert_eq!(
-            cache_name("qq", "a1", "standard", ".MP3"),
-            "qq-a1-standard.mp3"
-        );
-        assert_eq!(legacy_cache_name("qq", "a1"), "qq-a1.mp3");
-
-        let dir = std::env::temp_dir().join(format!("vmusic-cache-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).await.unwrap();
-        let legacy = dir.join(legacy_cache_name("qq", "a1"));
-        fs::write(&legacy, vec![0u8; 2048]).await.unwrap();
-        let hit = find_cached(&dir, "qq", "a1", "lossless", "m4a").await;
-        assert!(hit.is_some());
-        assert!(hit.unwrap().1);
-    }
 
     #[tokio::test]
     async fn find_by_prefix_matches_any_ext_then_legacy() {
@@ -286,11 +218,21 @@ mod tests {
         }
         let removed = enforce_limit(&dir, 25_000, &[]).await.unwrap();
         assert!(removed >= 10_000);
+        // 删最旧 1 个、剩 2 个，且 mtime 最新的文件必须在保留之列。
+        assert!(!dir.join("song0.mp3").exists());
+        assert!(dir.join("song1.mp3").exists());
+        assert!(dir.join("song2.mp3").exists());
         let mut remaining = 0;
         let mut it = fs::read_dir(&dir).await.unwrap();
         while it.next_entry().await.unwrap().is_some() {
             remaining += 1;
         }
         assert_eq!(remaining, 2);
+
+        // 极端超容（上限小于单文件）：最新文件依旧保留，不允许清空目录。
+        let removed = enforce_limit(&dir, 1, &[]).await.unwrap();
+        assert!(removed >= 10_000);
+        assert!(dir.join("song2.mp3").exists());
+        assert!(!dir.join("song1.mp3").exists());
     }
 }

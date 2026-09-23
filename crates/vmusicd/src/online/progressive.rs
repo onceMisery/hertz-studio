@@ -21,16 +21,12 @@ use crate::error::ApiError;
 use crate::online::download_client;
 
 /// 预读基础块与封顶：max(256KB, 总长 8%)，封顶 1.5MB。
-#[cfg_attr(not(test), allow(dead_code))] // Task 9 接入前仅单测覆盖
 pub const FLUSH_STEP: u64 = 256 * 1024;
-#[cfg_attr(not(test), allow(dead_code))] // Task 9 接入前仅单测覆盖
 const PREBUFFER_CAP: u64 = 3 * 512 * 1024;
-#[allow(dead_code)] // Task 9 接入：仅 start 下载任务读取
 const MAX_AUDIO_BYTES: u64 = 64 * 1024 * 1024;
 
 /// 开播模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))] // Task 9 接入前仅单测覆盖
 pub enum StreamMode {
     /// 头部已含解复用元数据（mp3/flac/ogg/early-moov m4a）。
     Progressive,
@@ -40,7 +36,6 @@ pub enum StreamMode {
 
 // pub(crate)：state.rs 经 Download::inner / HttpMediaSource::open 跨模块传递
 // Arc<Inner>，类型必须在 crate 内可命名（字段与方法仍保持私有）。
-#[cfg_attr(not(test), allow(dead_code))] // Task 9 接入前仅单测直接构造
 pub(crate) struct Inner {
     downloaded: Mutex<u64>,
     cv: Condvar,
@@ -48,13 +43,9 @@ pub(crate) struct Inner {
     finished: Mutex<bool>,
     error: Mutex<Option<String>>,
     /// 首块嗅探出的容器扩展名；下载完成时据此命名正式缓存。
-    #[allow(dead_code)] // Task 9 接入：经 Download::ext 对外，单测不直接读
     ext: Mutex<&'static str>,
 }
 
-// Task 9 接入前仅单测使用：非 test 构建整体允许方法 dead_code；
-// 单测也不碰的方法（ext/set_ext/reset/is_finished/fail/pct）单独无条件 allow。
-#[cfg_attr(not(test), allow(dead_code))]
 impl Inner {
     fn new() -> Self {
         Self {
@@ -67,11 +58,9 @@ impl Inner {
         }
     }
 
-    #[allow(dead_code)] // Task 9 接入：经 Download::ext 对外
     fn ext(&self) -> &'static str {
         *self.ext.lock().unwrap()
     }
-    #[allow(dead_code)] // Task 9 接入：仅 start 下载任务调用
     fn set_ext(&self, ext: &'static str) {
         *self.ext.lock().unwrap() = ext;
     }
@@ -87,7 +76,6 @@ impl Inner {
         *self.downloaded.lock().unwrap() += n;
         self.cv.notify_all();
     }
-    #[allow(dead_code)] // Task 9 接入：仅 start 续传/重下时调用
     fn reset(&self) {
         *self.downloaded.lock().unwrap() = 0;
         *self.finished.lock().unwrap() = false;
@@ -97,16 +85,13 @@ impl Inner {
         *self.finished.lock().unwrap() = true;
         self.cv.notify_all();
     }
-    #[allow(dead_code)] // Task 9 接入：经 Download::is_finished 对外
     fn is_finished(&self) -> bool {
         *self.finished.lock().unwrap()
     }
-    #[allow(dead_code)] // Task 9 接入：仅 start 下载任务调用
     fn fail(&self, msg: String) {
         *self.error.lock().unwrap() = Some(msg);
         self.cv.notify_all();
     }
-    #[allow(dead_code)] // Task 9 接入：经 Download::pct 对外
     fn pct(&self) -> Option<u8> {
         let t = self.total()?;
         if t == 0 {
@@ -135,14 +120,12 @@ impl Inner {
 }
 
 #[derive(Debug)]
-#[cfg_attr(not(test), allow(dead_code))] // Task 9 接入前仅经单测的 read/seek 间接触达
 pub enum WaitError {
     Aborted,
     Failed(String),
 }
 
 /// 解码线程读的同步源。
-#[cfg_attr(not(test), allow(dead_code))] // Task 9 接入前仅单测构造
 pub struct HttpMediaSource {
     file: File,
     pos: u64,
@@ -153,7 +136,6 @@ pub struct HttpMediaSource {
 impl HttpMediaSource {
     // Inner 刻意保持模块私有，仅在 crate 内经本入口传入。
     #[allow(private_interfaces)]
-    #[cfg_attr(not(test), allow(dead_code))] // Task 9 接入前仅单测调用
     pub fn open(part: &Path, inner: Arc<Inner>, abort: Arc<AtomicBool>) -> io::Result<Self> {
         Ok(Self {
             file: OpenOptions::new().read(true).open(part)?,
@@ -229,19 +211,15 @@ impl symphonia::core::io::MediaSource for HttpMediaSource {
 }
 
 /// 一次进行中的下载。缓存键不含扩展名（扩展名首块才知道）。
-#[allow(dead_code)] // Task 9 接入
 pub struct Download {
     /// Inner 刻意保持模块私有，仅在 crate 内经本字段传给 HttpMediaSource。
     #[allow(private_interfaces)]
     pub inner: Arc<Inner>,
     pub abort: Arc<AtomicBool>,
     pub part_path: PathBuf,
-    key: String,
-    dir: PathBuf,
     task: JoinHandle<Result<PathBuf, String>>,
 }
 
-#[allow(dead_code)] // Task 9 接入
 impl Download {
     /// 嗅探出的容器扩展名（预读完成后一定可用）。
     pub fn ext(&self) -> &'static str {
@@ -252,15 +230,8 @@ impl Download {
     pub fn is_finished(&self) -> bool {
         self.inner.is_finished()
     }
-
-    /// 正式缓存路径（扩展名以当前嗅探结果为准）。
-    pub fn final_path(&self) -> PathBuf {
-        self.dir.join(format!("{}.{}", self.key, self.inner.ext()))
-    }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-// Task 9 接入前仅单测覆盖
 // 保留计划代码「先保下限再封顶」的显式写法，语义与 clamp 等价。
 #[allow(clippy::manual_clamp)]
 pub fn prebuffer_target(total: Option<u64>) -> u64 {
@@ -270,7 +241,6 @@ pub fn prebuffer_target(total: Option<u64>) -> u64 {
     }
 }
 
-#[allow(dead_code)] // Task 9 接入
 impl Download {
     pub fn pct(&self) -> Option<u8> {
         self.inner.pct()
@@ -291,28 +261,6 @@ impl Download {
         .map_err(|e| e.to_string())?
     }
 
-    /// WaitFull：等整首下完。
-    pub async fn wait_full(&self) -> Result<(), String> {
-        loop {
-            if self.abort.load(Ordering::Relaxed) {
-                return Err("download aborted".into());
-            }
-            if let Some(t) = self.inner.total() {
-                let inner = self.inner.clone();
-                let abort = self.abort.clone();
-                return tokio::task::spawn_blocking(move || {
-                    inner.wait_for(t, &abort).map(|_| ()).map_err(|e| match e {
-                        WaitError::Aborted => "download aborted".to_string(),
-                        WaitError::Failed(m) => m,
-                    })
-                })
-                .await
-                .map_err(|e| e.to_string())?;
-            }
-            tokio::time::sleep(Duration::from_millis(150)).await;
-        }
-    }
-
     pub async fn join(self) -> Result<PathBuf, String> {
         self.task.await.map_err(|e| e.to_string())?
     }
@@ -326,7 +274,6 @@ impl Download {
 }
 
 /// 启动下载。`key` 不含扩展名（如 `qq-a1-lossless`）；urls = [主 url, fallback...]。
-#[allow(dead_code)] // Task 9 接入
 pub fn start(
     dir: PathBuf,
     key: String,
@@ -477,8 +424,6 @@ pub fn start(
         inner,
         abort,
         part_path,
-        key,
-        dir,
         task,
     })
 }
@@ -488,7 +433,6 @@ pub fn start(
 // ---------------------------------------------------------------------------
 
 /// 嗅探真实容器扩展名；认不出返回 None（调用方按 WaitFull 保守处理）。
-#[cfg_attr(not(test), allow(dead_code))] // Task 9 接入前仅单测覆盖
 pub fn sniff_ext(head: &[u8]) -> Option<&'static str> {
     if head.starts_with(b"fLaC") {
         Some("flac")
@@ -506,7 +450,6 @@ pub fn sniff_ext(head: &[u8]) -> Option<&'static str> {
 }
 
 /// 在 ISO BMFF 顶层 box 序列里找 moov。
-#[cfg_attr(not(test), allow(dead_code))] // Task 9 接入前仅单测覆盖
 pub fn mp4_has_moov(buf: &[u8]) -> bool {
     let mut i = 0usize;
     while i + 8 <= buf.len() {
@@ -527,7 +470,6 @@ pub fn mp4_has_moov(buf: &[u8]) -> bool {
 }
 
 /// 预读后判定开播模式。
-#[cfg_attr(not(test), allow(dead_code))] // Task 9 接入前仅单测覆盖
 pub fn plan_mode(head: &[u8]) -> (StreamMode, &'static str) {
     match sniff_ext(head) {
         Some("m4a") => {
