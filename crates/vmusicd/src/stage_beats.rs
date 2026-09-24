@@ -22,8 +22,8 @@ use crate::state::{AppState, WsEvent};
 #[derive(Debug, Clone)]
 pub(crate) enum TaskState {
     Analyzing,
-    /// 缓存命中后记录地图文件路径；当前决策只匹配状态（`Ready(_)`），
-    /// 路径暂不读取，任务 3 GET 侧直出缓存时启用。
+    /// 缓存命中后记录地图文件路径，目前仅作排障信息保留：所有读取（含
+    /// GET 侧）都按 key 重算路径、不读本字段，故保留 allow(dead_code)。
     #[allow(dead_code)]
     Ready(PathBuf),
     Failed(Reason),
