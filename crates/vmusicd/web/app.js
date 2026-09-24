@@ -977,6 +977,7 @@ function renderQueue() {
     row.className = 'q-row' + (id === state.snapshot.track_id ? ' playing' : '');
     row.draggable = true;
     row.dataset.index = String(index);
+    row.dataset.trackId = id;
     row.innerHTML = `
       <span class="q-grip" aria-hidden="true"></span>
       <span class="q-num">${index + 1}</span>
@@ -2580,6 +2581,7 @@ function initCreative() {
   if (window.CreativeStage) CreativeStage.init();
   if (window.StageCinema) StageCinema.init();
   if (window.StageFreecam) StageFreecam.init();
+  if (window.StageFocus) StageFocus.init();
   if (window.Backgrounds) Backgrounds.init();
   if (window.HandDrawn) HandDrawn.init();
   if (window.Workshop) Workshop.init();

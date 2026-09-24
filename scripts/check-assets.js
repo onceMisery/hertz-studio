@@ -126,6 +126,7 @@ const REQUIRE_BEFORE = [
   ['creative-stage.js', 'workshop.js'],
   ['creative-stage.js', 'stage-cinema.js'],   // cinema 注册 camLayers 依赖编排层 API
   ['stage-cinema.js', 'stage-freecam.js'],    // freecam 与 cinema 互斥联动
+  ['stage-cinema.js', 'stage-focus.js'],      // peek 经 cinema setPeek 联动
   ['creative-stage.js', 'app.js'],              // app.js 调 CreativeStage.init()
   ['stage.js', 'app.js'],
   ['vendor/qrcode.js', 'online-login.js']      // 扫码弹窗读 window.qrcode

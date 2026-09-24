@@ -201,5 +201,23 @@ section('跨文件契约：自由相机');
   ok(/StageFreecam\.init\(\)/.test(app) && /stage-freecam\.js/.test(html), '初始化与页面引用');
 }
 
+section('跨文件契约：焦点跟拍');
+{
+  const fc = read('stage-focus.js');
+  const app = read('app.js');
+  const html = read('index.html');
+  ok(/HOVER_MS = 120/.test(fc) && /FLIGHT_MS = 260/.test(fc), 'peek 120ms 确认 / 260ms 飞行');
+  ok(/closest\('\.shelf-card'\)/.test(fc), '歌单卡片用 closest 委托识别');
+  ok(/closest\('\.q-row'\)/.test(fc) && /dataset\.trackId = id/.test(app), '队列行识别 + dataset.trackId');
+  ok(/addCamLayer\(layer, 20\)/.test(fc), 'focus 以 priority 20 位于 cinema/freecam 之间');
+  ok(/flight\.snapped/.test(fc), '回程起点 out 首帧快照，不每帧覆盖 from');
+  ok(/setPeek\(true\)/.test(fc) && /setPeek\(false\)/.test(fc), 'peek 期压制 cinema、移出恢复');
+  ok(/matchMedia\('\(hover: none\)'\)/.test(fc), '触屏无 hover 不触发');
+  ok(/StageFreecam\.isEnabled/.test(fc), 'freecam 开启时不响应 peek');
+  ok(/Stage\.tier/.test(fc), 'perfTier0 下取消进行中的 peek 且不再触发');
+  ok(!/preventDefault/.test(fc), 'peek 不拦截点击/滚轮');
+  ok(/StageFocus\.init\(\)/.test(app) && /stage-focus\.js/.test(html), '初始化与页面引用');
+}
+
 console.log(`\n${failures === 0 ? 'OK' : 'FAIL'}: ${checks - failures}/${checks} 通过`);
 process.exit(failures === 0 ? 0 : 1);

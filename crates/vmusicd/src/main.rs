@@ -67,6 +67,7 @@ const WORKSHOP_JS: &str = include_str!("../web/workshop.js");
 // 舞台相机三件套（电影 → 自由 → 焦点），顺序与 camLayers priority 一致。
 const STAGE_CINEMA_JS: &str = include_str!("../web/stage-cinema.js");
 const STAGE_FREECAM_JS: &str = include_str!("../web/stage-freecam.js");
+const STAGE_FOCUS_JS: &str = include_str!("../web/stage-focus.js");
 // 在线曲库（SP1）：vendored MIT 二维码库 + 三个在线模块与样式。
 const QRCODE_JS: &str = include_str!("../web/vendor/qrcode.js");
 const ONLINE_LOGIN_JS: &str = include_str!("../web/online-login.js");
@@ -194,6 +195,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/workshop.js", get(|| asset(JS, WORKSHOP_JS)))
         .route("/stage-cinema.js", get(|| asset(JS, STAGE_CINEMA_JS)))
         .route("/stage-freecam.js", get(|| asset(JS, STAGE_FREECAM_JS)))
+        .route("/stage-focus.js", get(|| asset(JS, STAGE_FOCUS_JS)))
         .route("/vendor/qrcode.js", get(|| asset(JS, QRCODE_JS)))
         .route("/online-login.js", get(|| asset(JS, ONLINE_LOGIN_JS)))
         .route("/online.js", get(|| asset(JS, ONLINE_JS)))
