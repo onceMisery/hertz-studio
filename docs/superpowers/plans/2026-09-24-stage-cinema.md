@@ -2269,6 +2269,22 @@ bindInteraction 五个回调入口（锚点以内容匹配为准，落地时约 
 
 pointercancel 不动。
 
+另在 stepInteraction(dtMs) 开头加屏蔽期帧内收口（事件入口早退后，冻结的视差残差
+要借既有 520ms 平滑收回，并解除"拖拽中切走、pointerup 被吞"的 dragging 闩锁；
+惯性/滚轮路径保持不动）：
+
+```js
+    var interactionBlocked = !!(interactionBlocker && interactionBlocker({ target: null }));
+    if (interactionBlocked) interact.dragging = false;
+```
+
+视差目标两行同步改为：
+
+```js
+    var tpx = (interact.on && !interactionBlocked) ? interact.px : 0;
+    var tpy = (interact.on && !interactionBlocked) ? interact.py : 0;
+```
+
 - [ ] **7.2 创建 stage-freecam.js**
 
 完整内容（落地一处机械修正：层注册直接写字面量 `addCamLayer(layer, 30)`，
@@ -2325,7 +2341,17 @@ pointercancel 不动。
   function loadPose() {
     try {
       var p = JSON.parse(localStorage.getItem(POSE_KEY) || 'null');
-      if (p && typeof p.yawDeg === 'number') return p;
+      // 存储可能被外部写残（缺字段/类型错）：逐项补全，任何 NaN 都不进相机。
+      if (p && typeof p.yawDeg === 'number') {
+        return {
+          yawDeg: p.yawDeg,
+          pitchDeg: typeof p.pitchDeg === 'number' ? p.pitchDeg : 0,
+          dist: typeof p.dist === 'number' && p.dist > 0 ? p.dist : 6,
+          tx: typeof p.tx === 'number' ? p.tx : 0,
+          tz: typeof p.tz === 'number' ? p.tz : 0,
+          rollDeg: typeof p.rollDeg === 'number' ? p.rollDeg : 0
+        };
+      }
     } catch (e) { /* 隐私模式：会话内 pose 变量兜底 */ }
     return null;
   }
@@ -2624,6 +2650,9 @@ section('跨文件契约：自由相机');
   ok(/stage:fps/.test(fc) && /sc-cine-freecam/.test(fc), 'tier0 退出并隐藏开关');
   ok(/setInteractionBlocker/.test(fc) && /interactionBlocker/.test(stage),
     '屏蔽 creative-stage 原生拖拽/点击/滚轮，防双触发');
+  ok(/interactionBlocker\(\{ target: null \}\)/.test(stage) &&
+    /\(interact\.on && !interactionBlocked\) \? interact\.px/.test(stage),
+    '屏蔽期视差目标归零并解除拖拽闩锁');
   ok(/StageFreecam\.init\(\)/.test(app) && /stage-freecam\.js/.test(html), '初始化与页面引用');
 }
 ```
