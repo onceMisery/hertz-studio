@@ -1676,6 +1676,7 @@ git --no-pager commit -m "feat(stage): 相机 roll 通道与 camLayers 层总线
   }
 
   // 拍游标：cursor 是「下一个尚未消费的拍」在 beats 里的下标。
+  // 前置条件：map.beats 按 t 非降序（服务端分析库保证；乱序会延迟/丢拍）。
   function createTimeline(map) { return { map: map, cursor: 0 }; }
 
   // 地图晚到 / 换曲 / seek：从 nowMs 之后开始，落点 ±60ms 内的拍不补放。
@@ -1705,12 +1706,18 @@ git --no-pager commit -m "feat(stage): 相机 roll 通道与 camLayers 层总线
 
   // 确定性包络。sign 为该拍的交替方向（调用方按下标奇偶给 ±1）；
   // params = { punch: 用户冲击强度倍率（已含 peek 压制）, tunnel: 是否近机位 }。
-  // 返回 { fovMul, distMul, rollDeg }，超过 DOWN_ROLL_MS 或 dt<0 都是单位元。
+  // punch 定义域 [0,+∞)，UI（cinePunch 滑块 0–200%）实际只给 0..2；该域内
+  // fovMul 最低约 0.82、distMul 不低于 0.93，画面安全。
+  // 返回 { fovMul, distMul, rollDeg }，超出 [0,420]ms 窗口是单位元。
   function envelope(beat, nowMs, sign, params) {
     var identity = { fovMul: 1, distMul: 1, rollDeg: 0 };
     var dt = nowMs - beat.t;
-    if (dt < 0 || dt > DOWN_ROLL_MS) return identity;
-    var punch = params && params.punch != null ? params.punch : 1;
+    // !(dt >= 0) 同时挡住负值与 NaN：NaN 比较既不抛错也不进单位元分支，
+    // 放行会产出全 NaN 相机矩阵——层总线的 try/catch 捕不到这种"坏而不崩"。
+    if (!(dt >= 0) || dt > DOWN_ROLL_MS) return identity;
+    var punch0 = params && params.punch != null ? params.punch : 1;
+    var punch = isFinite(punch0) && punch0 >= 0 ? punch0 : 1;
+    if (sign !== 1 && sign !== -1) sign = 1;
     var amp = punch * (beat.intensity === 3 ? 1.5 : 1);
     var strong = !!beat.downbeat;
     var fovMin = strong ? DOWN_FOV_MIN : BEAT_FOV_MIN;
@@ -1719,14 +1726,16 @@ git --no-pager commit -m "feat(stage): 相机 roll 通道与 camLayers 层总线
     // 0..28ms 线性起振，之后 ease-out 回收（fov/dist 用 fovLen，roll 用自己的长度）。
     var attackK = dt <= ATTACK_MS ? dt / ATTACK_MS : 1;
     var eFov = dt <= ATTACK_MS ? 0 : easeOutCubic(clamp((dt - ATTACK_MS) / fovLen, 0, 1));
+    // 0.5 正下界：驱动缺陷给出越界倍率时宁可少推镜头，也不能让负 fov/dist
+    // 进投影矩阵造成绕序翻转（合法 punch 域内这两个钳制永不触发）。
     var out = {
-      fovMul: 1 - (1 - fovMin) * amp * attackK * (1 - eFov),
+      fovMul: Math.max(0.5, 1 - (1 - fovMin) * amp * attackK * (1 - eFov)),
       distMul: 1,
       rollDeg: 0
     };
     if (strong) {
       var tunnel = params && params.tunnel ? 0.5 : 1;
-      out.distMul = 1 - (1 - DOWN_DIST_MIN) * amp * tunnel * attackK * (1 - eFov);
+      out.distMul = Math.max(0.5, 1 - (1 - DOWN_DIST_MIN) * amp * tunnel * attackK * (1 - eFov));
       var eRoll = easeOutCubic(clamp((dt - ATTACK_MS) / DOWN_ROLL_MS, 0, 1));
       out.rollDeg = clamp(sign * DOWN_ROLL_MAX * amp * attackK * (1 - eRoll), -ROLL_LIMIT, ROLL_LIMIT);
     } else if (beat.strength > BEAT_ROLL_GATE) {
@@ -1788,7 +1797,7 @@ function makeMap(beatSpec) {
   return {
     version: 1, bpm: 120, offset_ms: 0, truncated: false,
     beats: beatSpec.map(function (b, i) {
-      return { t: b[0], strength: b[1], downbeat: !!b[2], intensity: b[3] || (i % 4 === 0 ? 2 : 1) };
+      return { t: b[0], strength: b[1], downbeat: !!b[2], intensity: b[3] != null ? b[3] : (i % 4 === 0 ? 2 : 1) };
     })
   };
 }
@@ -1843,29 +1852,35 @@ section('节拍包络');
   const e0 = P.envelope(down, 990, 1, {});
   ok(e0.fovMul === 1 && e0.distMul === 1 && e0.rollDeg === 0, '拍前是单位元');
   const attack = P.envelope(down, 1028, 1, { punch: 1 });
-  ok(approx(attack.fovMul, 0.94, 0.005), '强拍起振底 fov×0.94');
-  ok(approx(attack.distMul, 0.975, 0.005), '强拍 dist×0.975');
-  ok(approx(attack.rollDeg, 1.2, 0.005), '强拍 roll +1.2°');
+  ok(approx(attack.fovMul, 0.94, 0.0001), '强拍起振底 fov×0.94');
+  ok(approx(attack.distMul, 0.975, 0.0001), '强拍 dist×0.975');
+  ok(approx(attack.rollDeg, 1.2, 0.0001), '强拍 roll +1.2°');
   ok(P.envelope(down, 1028, -1, {}).rollDeg < 0, '相邻方向交替取负');
   const back = P.envelope(down, 1420, 1, {});
-  ok(approx(back.fovMul, 1, 0.01) && approx(back.rollDeg, 0, 0.01), '收束段回到基线');
+  ok(approx(back.fovMul, 1, 0.001) && approx(back.rollDeg, 0, 0.001), '收束段回到基线');
 
   const w = P.envelope(weak, 1028, 1, {});
-  ok(approx(w.fovMul, 0.975, 0.005), '普通拍 fov×0.975');
+  ok(approx(w.fovMul, 0.975, 0.0001), '普通拍 fov×0.975');
   ok(w.distMul === 1, '普通拍无 dist punch');
-  ok(approx(w.rollDeg, 0.5, 0.005), 'strength>0.8 普通拍带 ±0.5° roll');
+  ok(approx(w.rollDeg, 0.5, 0.0001), 'strength>0.8 普通拍带 ±0.5° roll');
   const ws = P.envelope(weakSoft, 1028, 1, {});
   ok(ws.rollDeg === 0, 'strength≤0.8 普通拍无 roll');
 
   const hot = P.envelope({ t: 1000, strength: 0.9, downbeat: true, intensity: 3 }, 1028, 1, {});
-  ok(approx(hot.fovMul, 1 - 0.06 * 1.5, 0.005), 'intensity 3 幅度 ×1.5');
+  ok(approx(hot.fovMul, 1 - 0.06 * 1.5, 0.0001), 'intensity 3 幅度 ×1.5');
   const tuned = P.envelope(down, 1028, 1, { punch: 0.5 });
-  ok(approx(tuned.fovMul, 1 - 0.06 * 0.5, 0.005), 'cinePunch 等比缩放');
+  ok(approx(tuned.fovMul, 1 - 0.06 * 0.5, 0.0001), 'cinePunch 等比缩放');
   const tunnel = P.envelope(down, 1028, 1, { punch: 1, tunnel: true });
-  ok(approx(tunnel.distMul, 1 - 0.025 * 0.5, 0.005), 'tunnel 近机位 dist punch 折半');
-  // amp=15*1.5=22.5、起振满（dt=28）时原始 roll=27°，必须被钳到 25。
-  const capped = P.envelope({ t: 0, strength: 1, downbeat: true, intensity: 3 }, 28, 1, { punch: 15 });
-  ok(capped.rollDeg === P.ROLL_LIMIT, 'roll 超幅时精确钳到 +25°');
+  ok(approx(tunnel.distMul, 1 - 0.025 * 0.5, 0.0001), 'tunnel 近机位 dist punch 折半');
+  // 越界倍率（驱动缺陷的极端输入，UI 合法域 punch≤2）：roll 原始 27° 精确
+  // 钳到 25，fov/dist 被 0.5 正下界兜住，画面不翻转。
+  const wild = P.envelope({ t: 0, strength: 1, downbeat: true, intensity: 3 }, 28, 1, { punch: 15 });
+  ok(wild.rollDeg === P.ROLL_LIMIT, 'roll 超幅时精确钳到 +25°');
+  ok(wild.fovMul === 0.5 && wild.distMul === 0.5, 'fov/dist 有 0.5 正下界');
+  const nanEnv = P.envelope(down, NaN, 1, {});
+  ok(nanEnv.fovMul === 1 && nanEnv.distMul === 1 && nanEnv.rollDeg === 0, 'NaN 时间返回单位元');
+  const negPunch = P.envelope(down, 1028, 1, { punch: -1 });
+  ok(approx(negPunch.fovMul, 0.94, 0.0001), '负 punch 退回缺省倍率 1');
   const over = P.envelope(down, 1421, 1, {});
   ok(over.fovMul === 1 && over.distMul === 1 && over.rollDeg === 0, '超过 420ms 窗口是单位元');
 }
