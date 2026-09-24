@@ -50,6 +50,7 @@
   function beginPeek(ref) {
     if (!lastBase || freecamOn() || touchDevice()) return;
     flight = {
+      el: ref.el,
       from: { yawDeg: lastBase.yawDeg, pitchDeg: lastBase.pitchDeg, dist: lastBase.dist },
       target: targetFor(ref.el, ref.kind),
       start: now(),
@@ -86,7 +87,10 @@
     var ref = current;
     hoverTimer = setTimeout(function () {
       hoverTimer = 0;
-      if (current === ref) beginPeek(ref);
+      // 等待期间歌单架/队列可能被整体重渲染：节点已脱离 DOM 就放弃，
+      // 否则会对一个 rect 全 0 的悬空卡片算出错误方位。
+      if (current === ref && document.contains(ref.el)) beginPeek(ref);
+      else if (current === ref) current = null;
     }, HOVER_MS);
   }
 
@@ -119,6 +123,12 @@
       if (global.StageCinema) StageCinema.setPeek(false);
       return;
     }
+    // 悬停中元素被重渲染移除（队列/歌单架整体重建不发 mouseout）：自动转回程。
+    if (!flight.out && flight.el && !document.contains(flight.el)) {
+      flight.out = true;
+      flight.snapped = false;
+      if (global.StageCinema) StageCinema.setPeek(false);
+    }
     // 回程起点只在 out 第一帧快照一次：时长重新计、k 基于固定 start，
     // 之后绝不再覆盖 from——否则起点每帧重置，ease 永远飞不到基线。
     if (flight.out && !flight.snapped) {
@@ -139,7 +149,10 @@
     ctx.tz = 0;
     ctx.rollDeg = 0;
     ctx.fov = ctx.baseFov;
-    if (k >= 1) flight = null;
+    // 只在回程完成时清 flight：去程到点后 k 钳在 1 持续输出看台机位
+    // （鼠标停在卡片上期间一直保持），直到 mouseout 进入回程。无条件清空
+    // 会让目标机位只保持一帧，并把 cinema 的 peek 衰减永久闩住。
+    if (k >= 1 && flight.out) flight = null;
   }
 
   function init() {

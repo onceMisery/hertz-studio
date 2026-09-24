@@ -211,6 +211,9 @@ section('跨文件契约：焦点跟拍');
   ok(/closest\('\.q-row'\)/.test(fc) && /dataset\.trackId = id/.test(app), '队列行识别 + dataset.trackId');
   ok(/addCamLayer\(layer, 20\)/.test(fc), 'focus 以 priority 20 位于 cinema/freecam 之间');
   ok(/flight\.snapped/.test(fc), '回程起点 out 首帧快照，不每帧覆盖 from');
+  ok(/if \(k >= 1 && flight\.out\) flight = null/.test(fc), '去程到点持续保持机位，仅回程完成清 flight');
+  ok(/document\.contains\(ref\.el\)/.test(fc) && /!document\.contains\(flight\.el\)/.test(fc),
+    '悬停元素被重渲染移除时放弃/自动回程');
   ok(/setPeek\(true\)/.test(fc) && /setPeek\(false\)/.test(fc), 'peek 期压制 cinema、移出恢复');
   ok(/matchMedia\('\(hover: none\)'\)/.test(fc), '触屏无 hover 不触发');
   ok(/StageFreecam\.isEnabled/.test(fc), 'freecam 开启时不响应 peek');
