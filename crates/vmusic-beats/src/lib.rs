@@ -136,6 +136,9 @@ pub fn analyze_path(path: &Path) -> Result<BeatMap, AnalyzeError> {
                         }
                         mono.push(acc / channels as f32);
                     }
+                    if mono.len() >= max_in {
+                        break;
+                    }
                 }
                 // 坏帧跳过（与播放后端 cpal_backend 同策略），ResetRequired 复位。
                 Err(SymError::DecodeError(_)) => {}
