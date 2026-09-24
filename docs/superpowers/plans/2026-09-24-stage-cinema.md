@@ -219,6 +219,22 @@ mod tests {
             assert!(w[1].t > w[0].t, "beats 必须严格升序");
         }
     }
+
+    #[test]
+    fn silence_is_unsupported_not_empty_map() {
+        let pcm = vec![0f32; 22050 * 2];
+        let err = analyze_mono(&pcm, 22050, 2000).unwrap_err();
+        assert!(matches!(err, AnalyzeError::Unsupported(_)));
+    }
+
+    #[test]
+    fn non_finite_samples_fail_without_panicking() {
+        let mut pcm = vec![0.1f32; 22050];
+        pcm[100] = f32::INFINITY;
+        pcm[200] = f32::NAN;
+        let err = analyze_mono(&pcm, 22050, 1000).unwrap_err();
+        assert!(matches!(err, AnalyzeError::Failed(_)));
+    }
 }
 ```
 
@@ -332,6 +348,7 @@ pub fn analyze_path(path: &Path) -> Result<BeatMap, AnalyzeError> {
     let mut sr: u32 = 0;
     let mut channels: usize = 1;
     let mut mono: Vec<f32> = Vec::new();
+    let mut capped = false;
     loop {
         match probed.format.next_packet() {
             Ok(packet) => match decoder.decode(&packet) {
@@ -355,11 +372,13 @@ pub fn analyze_path(path: &Path) -> Result<BeatMap, AnalyzeError> {
                         let base = f * channels;
                         let mut acc = 0.0f32;
                         for c in 0..channels {
-                            acc += samples[base + c];
+                            let s = samples[base + c];
+                            acc += if s.is_finite() { s } else { 0.0 };
                         }
                         mono.push(acc / channels as f32);
                     }
                     if mono.len() >= max_in {
+                        capped = true;
                         break;
                     }
                 }
@@ -377,7 +396,8 @@ pub fn analyze_path(path: &Path) -> Result<BeatMap, AnalyzeError> {
         return Err(AnalyzeError::Failed("decoded no audio samples".into()));
     }
     let decoded_ms = (mono.len() as u64 * 1000) / sr as u64;
-    analyze_mono(&mono, sr, header_ms.unwrap_or(decoded_ms))
+    let duration_ms = header_ms.unwrap_or(if capped { ANALYZE_MS + 1 } else { decoded_ms });
+    analyze_mono(&mono, sr, duration_ms)
 }
 
 /// PCM 单声道 f32（采样率 in_rate）→ 节拍地图。时长由调用方给出（用于选分析率
@@ -385,6 +405,9 @@ pub fn analyze_path(path: &Path) -> Result<BeatMap, AnalyzeError> {
 pub fn analyze_mono(mono: &[f32], in_rate: u32, duration_ms: u64) -> Result<BeatMap, AnalyzeError> {
     if mono.is_empty() || in_rate == 0 {
         return Err(AnalyzeError::Failed("empty pcm".into()));
+    }
+    if mono.iter().any(|s| !s.is_finite()) {
+        return Err(AnalyzeError::Failed("non-finite pcm".into()));
     }
     let out_rate = if duration_ms >= LONG_MS { LOW_RATE } else { HIGH_RATE };
     let mut pcm = resample_linear(mono, in_rate, out_rate);
@@ -596,7 +619,7 @@ pub fn analyze_mono(mono: &[f32], in_rate: u32, duration_ms: u64) -> Result<Beat
 }
 
 /// 线性重采样（比值任意）。采样率相同时原样返回，省一次拷贝。
-pub fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
+fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
     if in_rate == out_rate {
         return input.to_vec();
     }
@@ -649,7 +672,7 @@ fn estimate_bpm(times: &[i64], env: &[f32], out_rate: u32) -> Option<f64> {
     }
     let mut hist = vec![0f64; 1001];
     for d in &intervals {
-        for (b, h) in hist.iter_mut().enumerate().take(1000).skip(333) {
+        for (b, h) in hist.iter_mut().enumerate().take(1001).skip(333) {
             let w = (1.0 - (d - b as f64).abs() / 15.0).max(0.0);
             *h += w;
         }
@@ -658,9 +681,9 @@ fn estimate_bpm(times: &[i64], env: &[f32], out_rate: u32) -> Option<f64> {
         .iter()
         .enumerate()
         .skip(333)
-        .take(667)
+        .take(668)
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())?;
-    let mean: f64 = hist[333..1000].iter().sum::<f64>() / 667.0;
+    let mean: f64 = hist[333..=1000].iter().sum::<f64>() / 668.0;
     if *score < mean * 1.6 {
         return None;
     }
@@ -717,7 +740,7 @@ fn estimate_bpm(times: &[i64], env: &[f32], out_rate: u32) -> Option<f64> {
 
 - [ ] **1.4 验证**
 
-`cargo fmt --all; cargo test -p vmusic-beats`（6 测试全绿）；`cargo clippy --workspace --all-targets -- -D warnings`。
+`cargo fmt --all; cargo test -p vmusic-beats`（8 测试全绿）；`cargo clippy --workspace --all-targets -- -D warnings`。
 
 - [ ] **1.5 Commit**
 
