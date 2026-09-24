@@ -142,3 +142,147 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   global.StageCinemaPure = api;
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));
+
+// ---------------------------------------------------------------------------
+// 浏览器驱动：经 CreativeStage.addCamLayer 挂进唯一 rAF；持有 beatmap 会话、
+// 时钟重锚与三态（absent → waiting → active）。Node 下 window 不存在，整段跳过。
+// ---------------------------------------------------------------------------
+(function (global) {
+  'use strict';
+  if (typeof window === 'undefined' || !global.StageCinemaPure) return;
+  var P = global.StageCinemaPure;
+  var URL = '/v1/stage/beatmap?track=';
+
+  var s = {
+    trackId: null,
+    mode: 'absent',        // absent（onset 兜底/未请求/tier0）| waiting（202）| active
+    map: null,
+    clock: P.createClock(),
+    tl: null,
+    lastPt: 0,
+    beat: null,
+    cinemaOn: true,
+    cinePunch: 100,
+    freecamOn: false,
+    peek: false,
+    seq: 0,
+    inited: false
+  };
+
+  function now() { return global.performance && performance.now ? performance.now() : Date.now(); }
+  function tier0() { return !!(global.Stage && Stage.tier && Stage.tier() === 0); }
+
+  function onControls(v) {
+    if (!v) return;
+    // detail 是 values 快照：缺键保持默认，不被 undefined 覆盖。
+    if (typeof v.cinema === 'boolean') s.cinemaOn = v.cinema;
+    if (typeof v.cinePunch === 'number') s.cinePunch = v.cinePunch;
+    if (typeof v.freecam === 'boolean') s.freecamOn = v.freecam;
+  }
+
+  function activate(map) {
+    s.map = map;
+    s.tl = P.createTimeline(map);
+    s.lastPt = P.pt(s.clock, now());
+    // 地图就绪晚于起播：只从当前 pt 开始，已过去的拍不补放。
+    P.relocate(s.tl, s.lastPt);
+    s.beat = null;
+    s.mode = 'active';
+  }
+
+  function requestMap(trackId) {
+    var transport = global.VMusicTransport;
+    if (!transport || !transport.get || tier0()) { s.mode = 'absent'; return; }
+    var seq = ++s.seq;
+    s.mode = 'waiting';
+    transport.get(URL + encodeURIComponent(trackId)).then(function (body) {
+      if (seq !== s.seq || trackId !== s.trackId) return;
+      if (body && body.status === 'analyzing') { s.mode = 'waiting'; return; }
+      if (body && body.beats && body.beats.length) activate(body);
+      else s.mode = 'absent';
+    }, function () {
+      // 404（failed/unsupported/not_ready）与网络错都静默回落 onset；
+      // 不轮询：分析完成有 beatmap_ready 事件，下次播放也会重新触发。
+      if (seq === s.seq && trackId === s.trackId) s.mode = 'absent';
+    });
+  }
+
+  function onTrack(trackId) {
+    s.trackId = trackId || null;
+    s.map = null;
+    s.tl = null;
+    s.beat = null;
+    s.clock = P.createClock();
+    s.lastPt = 0;
+    s.mode = 'absent';
+    if (trackId && !tier0()) requestMap(trackId);
+  }
+
+  function onSnapshot(snap) {
+    if (!snap) return;
+    var hard = P.reanchor(s.clock, snap.position_ms | 0, now(), !!snap.playing);
+    if (hard && s.tl) {
+      var p = P.pt(s.clock, now());
+      P.relocate(s.tl, p);
+      s.lastPt = p;
+      s.beat = null;
+    }
+  }
+
+  function onBeatmapReady(msg) {
+    if (!msg || msg.track_id !== s.trackId) return;
+    if (s.mode === 'active') return;
+    requestMap(s.trackId);
+  }
+
+  function layer(ctx) {
+    if (tier0()) { s.mode = 'absent'; return; }
+    // 时间轴每帧推进（freecam 开也照常推进，只是不应用包络——关掉 freecam
+    // 立刻无缝续上）。
+    if (s.mode === 'active' && s.tl) {
+      var p = P.pt(s.clock, ctx.t);
+      if (p < s.lastPt - P.SEEK_TOL_MS) P.relocate(s.tl, p);
+      var picked = P.advance(s.tl, s.lastPt, p);
+      s.lastPt = p;
+      if (picked) s.beat = picked;
+      if (s.beat && p - s.beat.t > 420) s.beat = null;
+    }
+    // resolve 优先级：freecam 全覆盖（drift 也停）；peek 把包络幅度压到 30%。
+    if (s.freecamOn) { ctx.driftMul = 0; return; }
+    if (!s.cinemaOn || s.mode !== 'active' || !s.beat) return;
+    var idx = P.lowerBound(s.map.beats, s.beat.t);
+    var sign = idx % 2 === 0 ? 1 : -1;
+    var env = P.envelope(s.beat, P.pt(s.clock, ctx.t), sign, {
+      punch: (s.cinePunch / 100) * (s.peek ? 0.3 : 1),
+      tunnel: ctx.baseDist < 5
+    });
+    ctx.fov *= env.fovMul;
+    ctx.dist *= env.distMul;
+    ctx.rollDeg += env.rollDeg;
+    if (s.beat.intensity === 3) ctx.driftMul = 1.4;
+  }
+
+  function init() {
+    if (s.inited) return;
+    s.inited = true;
+    if (global.CreativeStage && CreativeStage.addCamLayer) CreativeStage.addCamLayer(layer, 10);
+    document.addEventListener('stagecontrol:change', function (e) { onControls(e.detail); });
+    if (global.StageControl && StageControl.values) onControls(StageControl.values());
+    document.addEventListener('stage:fps', function (e) {
+      // tier 只降不升：降到 0 立即停包络（onset 现状行为保留）。
+      if (e.detail && e.detail.lowfx) s.mode = 'absent';
+    });
+  }
+
+  global.StageCinema = {
+    init: init,
+    onTrack: onTrack,
+    onSnapshot: onSnapshot,
+    onBeatmapReady: onBeatmapReady,
+    setFreecam: function (on) { s.freecamOn = !!on; },
+    setPeek: function (on) { s.peek = !!on; },
+    mode: function () { return s.mode; },
+    _pure: P
+  };
+  init();
+})(typeof window !== 'undefined' ? window : this);

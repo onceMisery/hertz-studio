@@ -140,5 +140,32 @@ section('跨文件契约：roll 通道');
     'shake 在层结果之后最后叠加（单向顺序，不收反向）');
 }
 
+section('跨文件契约：驱动 / 协议 / 开关');
+{
+  const cinema = read('stage-cinema.js');
+  const control = read('stage-control.js');
+  const app = read('app.js');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'crates', 'vmusicd', 'src', 'main.rs'), 'utf8');
+  const html = read('index.html');
+
+  ok(cinema.indexOf("'absent'") >= 0 && cinema.indexOf("'waiting'") >= 0 && cinema.indexOf("'active'") >= 0,
+    '三态 absent/waiting/active 存在');
+  ok(/\/v1\/stage\/beatmap\?track=/.test(cinema), 'beatmap 请求 URL');
+  ok(/addCamLayer\(layer, 10\)/.test(cinema), 'cinema 以 priority 10 注册');
+  ok(/Stage\.tier\(\) === 0/.test(cinema), 'tier0 不请求/不驱动');
+  ok(/stagecontrol:change/.test(cinema) && /detail/.test(cinema), '消费控制面板事件');
+  ok(/v\.cinema|detail\.cinema/.test(cinema) && /cinePunch/.test(cinema) && /freecam/.test(cinema),
+    'cine 三键被读取');
+  ok(/setPeek/.test(cinema) && /0\.3/.test(cinema), 'peek 压制系数 0.3');
+  ok(/baseDist < 5/.test(cinema), 'tunnel 判定基线 dist<5');
+
+  ok(/id: 'cine'/.test(control), 'SCHEMA 含 cine 组');
+  ok(/g\.id === 'cine'/.test(control), 'push 跳过 cine 组脏变量');
+  ok(/case 'beatmap_ready'/.test(app), 'app.js 分发 beatmap_ready');
+  ok(/StageCinema\.onTrack\(snap\.track_id\)/.test(app), '换曲钩子 onTrack');
+  ok(/StageCinema\.onSnapshot\(snap\)/.test(app), '快照重锚钩子 onSnapshot');
+  ok(/STAGE_CINEMA_JS/.test(main) && /stage-cinema\.js/.test(html), 'cinema 资源内嵌与页面引用');
+}
+
 console.log(`\n${failures === 0 ? 'OK' : 'FAIL'}: ${checks - failures}/${checks} 通过`);
 process.exit(failures === 0 ? 0 : 1);

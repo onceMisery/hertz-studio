@@ -704,11 +704,14 @@ function applySnapshot(snap) {
     // 不能让它带着旧下标盖在新曲上。
     if (window.Online && window.Online.hideOnlineError) window.Online.hideOnlineError();
     loadNowPlaying(snap.track_id);
+    // Stage 不暴露当前 track_id（私有变量），换曲由这里显式通知电影相机。
+    if (window.StageCinema) StageCinema.onTrack(snap.track_id);
   }
   syncStageIdle();
   updateRowActiveState(snap);
   // 舞台拿走播放状态：它自己有本地时钟补帧，不依赖推送频率。
   if (Stage) Stage.setSnapshot(snap);
+  if (window.StageCinema) StageCinema.onSnapshot(snap);
   // 播放控制弹窗同步播放态 / 时间 / 进度
   syncNpSnapshot(snap);
   syncMediaSession();
@@ -2575,6 +2578,7 @@ function onCreativeRuntimeDegrade(ev) {
 
 function initCreative() {
   if (window.CreativeStage) CreativeStage.init();
+  if (window.StageCinema) StageCinema.init();
   if (window.Backgrounds) Backgrounds.init();
   if (window.HandDrawn) HandDrawn.init();
   if (window.Workshop) Workshop.init();

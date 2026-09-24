@@ -167,7 +167,7 @@ for (const g of groups) {
     for (const t of target) {
       // 先查 var/JS读取；motion 组与 lyrics.beatAmp 允许事件消费（读 detail）
       const viaVar = consumedVar(t);
-      const viaEvent = (g.id === 'motion' ||
+      const viaEvent = (g.id === 'motion' || g.id === 'cine' ||
         (g.id === 'lyrics' && it.key === 'beatAmp')) && consumedByEvent(it.key);
       ok(viaVar || viaEvent,
         `${it.key} → ${t} 有真实消费方（${viaVar ? 'CSS' : 'event'}）`);

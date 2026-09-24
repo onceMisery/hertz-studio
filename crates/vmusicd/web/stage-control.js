@@ -130,6 +130,18 @@
       ]
     },
     {
+      id: 'cine',
+      title: '电影镜头',
+      // 这一组不落任何 CSS 变量：由 stage-cinema.js / stage-freecam.js 监听
+      // stagecontrol:change 事件直接消费（push() 对 cine 组整体跳过）。
+      items: [
+        { key: 'cinema', label: '电影镜头', type: 'toggle', def: true },
+        { key: 'cinePunch', label: '冲击强度', min: 0, max: 200, step: 5, unit: '%', def: 100, wide: true },
+        // 真正的键鼠操控在 stage-freecam.js；perfTier 0 时该模块隐藏本开关。
+        { key: 'freecam', label: '自由相机', type: 'toggle', def: false }
+      ]
+    },
+    {
       id: 'global',
       title: '全局覆盖',
       items: [
@@ -237,6 +249,8 @@
         // global.intensity 的真实消费变量是单独写的 --fx-intensity，
         // 不再写一份无人读取的 --fx-global-intensity。
         if (g.id === 'global' && it.key === 'intensity') return;
+        // cine 组只走事件，不写 --fx-cine-* 脏变量。
+        if (g.id === 'cine') return;
         root.setProperty('--fx-' + g.id + '-' + it.key, String(v));
       });
       (g.selects || []).forEach(function (it) {

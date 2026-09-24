@@ -124,6 +124,7 @@ const REQUIRE_BEFORE = [
   ['stage-particles.js', 'handdrawn.js'],       // 手绘抖动读起音脉冲
   ['stage-control.js', 'creative-stage.js'],    // 三维开启时让粒子层让位
   ['creative-stage.js', 'workshop.js'],
+  ['creative-stage.js', 'stage-cinema.js'],   // cinema 注册 camLayers 依赖编排层 API
   ['creative-stage.js', 'app.js'],              // app.js 调 CreativeStage.init()
   ['stage.js', 'app.js'],
   ['vendor/qrcode.js', 'online-login.js']      // 扫码弹窗读 window.qrcode
