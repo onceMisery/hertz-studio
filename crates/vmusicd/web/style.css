@@ -449,10 +449,8 @@ body::before {
 input[type="search"], input[type="text"], select {
   padding: 8px 12px;
   border-radius: var(--radius);
-  border: 1px solid var(--glass-line);
-  background: color-mix(in srgb, var(--glass-bg-strong) 42%, transparent);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--line);
+  background: var(--panel-2);
   color: var(--text);
   outline: none;
   font-size: 13px;
@@ -488,7 +486,7 @@ select option { background: var(--panel-solid); color: var(--text); }
 /* ---- 在线曲库 ---- */
 
 .online-search { display: flex; gap: 8px; margin-bottom: 10px; flex: none; }
-.online-search input {
+.online-search input[type="search"] {
   flex: 1; min-width: 0;
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
@@ -1754,11 +1752,24 @@ button.btn {
 
 /* ---------- 表单控件 ---------- */
 
+/* search/text/select 坐在玻璃面上：半透明深玻璃底 + 8px 模糊（本规则在
+   同特异性规则的最后，是 resting 态的实际权威；更早的通用规则只留兜底）。
+   number/password/textarea 多在模态卡内，继续用实色 field 令牌。 */
 input[type="text"],
 input[type="search"],
+select {
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  color: var(--text);
+  background: color-mix(in srgb, var(--glass-bg-strong) 42%, transparent);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-4);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
 input[type="number"],
 input[type="password"],
-select,
 textarea {
   font-family: var(--font-sans);
   font-size: var(--fs-md);

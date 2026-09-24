@@ -234,6 +234,12 @@ section('玻璃化契约：在线曲库面板');
   ok(/\.op-drawer\{[^}]*var\(--glass-bg-strong\)[^}]*blur\(var\(--glass-blur\)\)/.test(css),
     '歌单抽屉强玻璃底 + 令牌模糊');
   ok(/input\[type="search"\][^}]*var\(--glass-line\)/.test(style), '通用输入描边走 --glass-line');
+  // 级联权威：玻璃底必须落在文件尾部的统一表单层（最后一条同特异性规则），
+  // 只给 search/text/select；number/password/textarea 保留 field 实色令牌。
+  ok(/input\[type="number"\],\s*input\[type="password"\],\s*textarea[\s\S]*?var\(--field-bg\)/.test(style),
+    '玻璃底只给 search/text/select，模态控件保留 field 令牌');
+  ok(/\.online-search input\[type="search"\]/.test(style), '在线搜索框选择器提权，blur10 盖过权威层 8px');
+  ok(/input\.opl-filter\{/.test(css), '抽屉过滤框提权，resting 玻璃底不被通用规则盖掉');
   ok(/\.online-chips \.chip \{[^}]*var\(--glass-bg-strong\)/.test(style), 'chip 半透明玻璃底');
   ok(/\.online-errorbar\{[^}]*rgba\(255,\s*120,\s*80,\s*\.1\)/.test(css),
     '错误条保持警示橙红，不玻璃化');

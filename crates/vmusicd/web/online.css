@@ -290,7 +290,9 @@ html.qr-modal-open .app{visibility:hidden}
 .opl-bar-title{flex:1;min-width:0;font-size:15px;font-weight:600;color:var(--text);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .opl-count{font-style:normal;font-weight:400;font-size:12px;color:var(--muted)}
-.opl-filter{flex:none;width:190px;height:30px;padding:0 10px;
+/* input.opl-filter 提权到 (0,1,1)：元素是 type=search，否则 resting 底会
+   被 style.css 尾部同属性的 input[type=search] 权威规则盖掉。 */
+input.opl-filter{flex:none;width:190px;height:30px;padding:0 10px;
   border:1px solid var(--glass-line);border-radius:999px;
   background:color-mix(in srgb,var(--glass-bg-strong) 42%,transparent);
   backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
