@@ -429,11 +429,13 @@ if (!THEME_SAMPLE_CONTRACT.found) {
 // --- 契约 H：新玻璃令牌必须真正被消费 ---
 // 只定义不使用的令牌一定会漂移：定义处（--x: ...）本身不含 var(--x)，
 // @supports 回落声明也不含，所以这里直接全文件扫 var(名字) 即可，不会误判。
+// 扫描前先剥注释——否则注释里「记得用 var(--x)」这类文字会制造假阳性消费。
 const USAGE_TOKENS = ['--glass-bg-strong', '--glass-line', '--press-scale'];
 for (const name of USAGE_TOKENS) {
-  const used = files.some((f) =>
-    fs.readFileSync(path.join(webDir, f), 'utf8').includes(`var(${name})`)
-  );
+  const used = files.some((f) => {
+    const raw = fs.readFileSync(path.join(webDir, f), 'utf8');
+    return stripComments(raw).includes(`var(${name})`);
+  });
   if (!used) {
     problems.push({
       file: OWNER_FILE,

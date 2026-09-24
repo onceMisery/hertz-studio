@@ -245,5 +245,16 @@ section('玻璃化契约：在线曲库面板');
     '错误条保持警示橙红，不玻璃化');
 }
 
+section('玻璃化契约：舞台控制与工坊抽屉 + lowfx 降级');
+{
+  const stageCss = read('stage.css');
+  const creativeCss = read('creative.css');
+  const style = read('style.css');
+  ok(/\.theme-menu\s*\{[^}]*var\(--glass-bg-strong\)/.test(stageCss), '主题菜单统一到强玻璃底');
+  ok(!/所有曲面共用同一份玻璃配方/.test(style || ''), '旧玻璃死规则已删除');
+  ok(/\.ctrl-primary:active\s*\{[^}]*transition:\s*transform var\(--dur-base\)/.test(style),
+    '主键按压保持自己的回弹时长');
+}
+
 console.log(`\n${failures === 0 ? 'OK' : 'FAIL'}: ${checks - failures}/${checks} 通过`);
 process.exit(failures === 0 ? 0 : 1);

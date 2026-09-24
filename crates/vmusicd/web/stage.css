@@ -1702,10 +1702,12 @@ body.reduce-motion .stage-ripple { display: none; }
   padding: 6px;
   display: grid;
   gap: 2px;
-  background: var(--panel-solid);
-  border: 1px solid var(--line-strong);
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-line);
   border-radius: 12px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--glass-shadow-glow);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.2);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.2);
 }
 .theme-menu[hidden] { display: none; }
 
