@@ -2274,8 +2274,13 @@ pointercancel 不动。
 惯性/滚轮路径保持不动）：
 
 ```js
-    var interactionBlocked = !!(interactionBlocker && interactionBlocker({ target: null }));
-    if (interactionBlocked) interact.dragging = false;
+    var interactionBlocked = !!(interactionBlocker && interactionBlocker(null));
+    if (interactionBlocked) {
+      interact.dragging = false;
+      // 视差采样一并清零：屏蔽解除时不会朝旧指针位置缓动。
+      interact.px = 0;
+      interact.py = 0;
+    }
 ```
 
 视差目标两行同步改为：
@@ -2303,6 +2308,9 @@ pointercancel 不动。
 (function (global) {
   'use strict';
 
+  // Node（无头契约扫描）下早退：不触碰 document/localStorage，纯文本扫描不受影响。
+  if (typeof window === 'undefined') return;
+
   var POSE_KEY = 'vmusic.stage.freecam.pose';
   var MOVE_SPEED = 0.35;         // ×cam.dist/秒
   var SHIFT_MUL = 2;
@@ -2328,6 +2336,7 @@ pointercancel 不动。
   };
   var locked = false;
   var dragging = false;
+  var pid = null;               // 拖拽中指针 id：多指触摸只认落下的第一指
   var lastX = 0, lastY = 0;
   var lastT = 0;
 
@@ -2335,21 +2344,25 @@ pointercancel 不动。
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
   function lerp(a, b, k) { return a + (b - a) * k; }
   function easeInOut(x) { return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2; }
+  // 角度折回 (-180,180]：飞回 yaw 永远走最短弧，积累多圈时不会原地倒转。
+  function wrap180(v) { v = ((v + 180) % 360 + 360) % 360 - 180; return v; }
   function tier0() { return !!(global.Stage && Stage.tier && Stage.tier() === 0); }
   function stageEl() { return document.getElementById('stage'); }
 
   function loadPose() {
     try {
       var p = JSON.parse(localStorage.getItem(POSE_KEY) || 'null');
-      // 存储可能被外部写残（缺字段/类型错）：逐项补全，任何 NaN 都不进相机。
-      if (p && typeof p.yawDeg === 'number') {
+      // 存储可能被外部写残（缺字段/类型错/NaN/Infinity）：逐项补全，任何非有限值都不进相机。
+      if (p && typeof p.yawDeg === 'number' && isFinite(p.yawDeg)) {
+        var num = function (v, d) { return typeof v === 'number' && isFinite(v) ? v : d; };
+        var d = num(p.dist, 6);
         return {
           yawDeg: p.yawDeg,
-          pitchDeg: typeof p.pitchDeg === 'number' ? p.pitchDeg : 0,
-          dist: typeof p.dist === 'number' && p.dist > 0 ? p.dist : 6,
-          tx: typeof p.tx === 'number' ? p.tx : 0,
-          tz: typeof p.tz === 'number' ? p.tz : 0,
-          rollDeg: typeof p.rollDeg === 'number' ? p.rollDeg : 0
+          pitchDeg: num(p.pitchDeg, 0),
+          dist: d < 0.3 ? 0.3 : (d > 100 ? 100 : d),
+          tx: num(p.tx, 0),
+          tz: num(p.tz, 0),
+          rollDeg: num(p.rollDeg, 0)
         };
       }
     } catch (e) { /* 隐私模式：会话内 pose 变量兜底 */ }
@@ -2378,11 +2391,19 @@ pointercancel 不动。
   function setEnabled(on, fromEvent) {
     on = !!on;
     if (on) {
-      if (tier0() || enabled) return;
+      if (enabled) return;
+      if (tier0()) {
+        // 探针落锤前用户点了开关：把面板拨回 false 并隐藏，杜绝卡在 ON。
+        syncControl(false);
+        updateSwitchVisibility();
+        return;
+      }
       enabled = true;
       returning = null;
       rollBack = null;
       keys = {};
+      dragging = false;
+      pid = null;
       if (!pose) pose = loadPose();   // 首帧层回调还会用基线兜底
       if (global.StageCinema) StageCinema.setFreecam(true);
       addDomListeners();
@@ -2390,10 +2411,11 @@ pointercancel 不动。
       updateSwitchVisibility();
       return;
     }
-    if (!enabled && !returning) { if (!fromEvent) syncControl(false); return; }
+    if (!enabled) { if (!fromEvent) syncControl(false); return; }
     enabled = false;
     keys = {};
     dragging = false;
+    pid = null;
     releaseLock();
     if (global.StageCinema) StageCinema.setFreecam(false);
     removeDomListeners();
@@ -2427,12 +2449,16 @@ pointercancel 不动。
     }
   }
   function onKeyUp(e) { if (MOVE_CODES[e.code]) keys[e.code] = false; }
+  // 窗口失焦（Alt-Tab/切桌面）时 keyup 会丢：清空按键与拖拽，回来不会自己继续走。
+  function onBlur() { keys = {}; dragging = false; }
 
   function onPointerDown(e) {
     if (!enabled) return;
     if (e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, .stage-lyrics, .lp-body')) return;
+    if (e.isPrimary === false) return;
     if (e.button !== 0) return;
     dragging = true;
+    pid = e.pointerId;
     lastX = e.clientX;
     lastY = e.clientY;
     // 用户手势里申请指针锁定；被拒绝（权限策略/非安全上下文）也没关系，
@@ -2445,17 +2471,21 @@ pointercancel 不动。
       } catch (err) { locked = false; }
     }
   }
-  function onPointerUp() { dragging = false; }
+  function onPointerUp(e) {
+    if (e.pointerId !== pid) return;
+    dragging = false;
+    pid = null;
+  }
   function onMouseMove(e) {
     if (!enabled || !pose) return;
     if (locked && typeof e.movementX === 'number') {
-      pose.yawDeg += e.movementX * LOOK_YAW;
+      pose.yawDeg -= e.movementX * LOOK_YAW;
       pose.pitchDeg = clamp(pose.pitchDeg + e.movementY * LOOK_PITCH, -PITCH_LIMIT, PITCH_LIMIT);
-    } else if (dragging) {
+    } else if (dragging && (e.pointerId == null || e.pointerId === pid)) {
       var dx = e.clientX - lastX, dy = e.clientY - lastY;
       lastX = e.clientX;
       lastY = e.clientY;
-      pose.yawDeg += dx * LOOK_YAW;
+      pose.yawDeg -= dx * LOOK_YAW;
       pose.pitchDeg = clamp(pose.pitchDeg + dy * LOOK_PITCH, -PITCH_LIMIT, PITCH_LIMIT);
     }
   }
@@ -2471,6 +2501,7 @@ pointercancel 不动。
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('pointerlockchange', onLockChange);
     document.addEventListener('pointerlockerror', onLockError);
+    window.addEventListener('blur', onBlur);
     var el = stageEl();
     if (el) {
       el.addEventListener('pointerdown', onPointerDown);
@@ -2483,6 +2514,7 @@ pointercancel 不动。
     document.removeEventListener('mousemove', onMouseMove);
     document.removeEventListener('pointerlockchange', onLockChange);
     document.removeEventListener('pointerlockerror', onLockError);
+    window.removeEventListener('blur', onBlur);
     var el = stageEl();
     if (el) {
       el.removeEventListener('pointerdown', onPointerDown);
@@ -2510,7 +2542,8 @@ pointercancel 不动。
       var k = clamp((ctx.t - returning.start) / RETURN_MS, 0, 1);
       var e = easeInOut(k);
       var f = returning.from;
-      ctx.yawDeg = lerp(f.yawDeg, ctx.baseYawDeg, e);
+      var fromYaw = ctx.baseYawDeg + wrap180(f.yawDeg - ctx.baseYawDeg);
+      ctx.yawDeg = lerp(fromYaw, ctx.baseYawDeg, e);
       ctx.pitchDeg = lerp(f.pitchDeg, ctx.basePitchDeg, e);
       ctx.dist = lerp(f.dist, ctx.baseDist, e);
       ctx.tx = lerp(f.tx, 0, e);
@@ -2545,10 +2578,11 @@ pointercancel 不动。
       if (rk >= 1) rollBack = null;
     }
 
-    // WASD：水平面沿 yaw 朝向（eye 向量 x=sin(yaw)、z=cos(yaw)，与 creative-gl 一致）。
+    // WASD：屏幕前向 = target-eye 水平向（eye 向量 x=sin(yaw)、z=cos(yaw)，
+    // 与 creative-gl 一致），故 W 取其反方向 (-sin,-cos)。
     var speed = MOVE_SPEED * pose.dist * ((keys.ShiftLeft || keys.ShiftRight) ? SHIFT_MUL : 1) * dt / 1000;
     var yaw = pose.yawDeg * Math.PI / 180;
-    var fx = Math.sin(yaw), fz = Math.cos(yaw);
+    var fx = -Math.sin(yaw), fz = -Math.cos(yaw);   // 屏幕前向 = target-eye 水平向
     var rx = Math.cos(yaw), rz = -Math.sin(yaw);
     var mx = 0, mz = 0;
     if (keys.KeyW) { mx += fx; mz += fz; }
@@ -2595,6 +2629,18 @@ pointercancel 不动。
 ```
 
 上面正文已是最终版：移动键判定一律查顶部的显式集合 `MOVE_CODES`（不要改回 `hasOwnProperty(keys, code)`——`keys` 初始为空表，那种写法永不命中）；setEnabled 中两处 `keys = {}` 只负责清空按下状态，保持不变；layer 中读 `keys.KeyW` 等也不变。
+
+代码质量审查后已并入本版的修复（2026-09-24）：
+
+- I1 操控方向：W 的前向取 target-eye 水平向 `(-sin,-cos)`（屏幕前向），S 反向不变；右向量 `(cos,-sin)` 不变。
+- I2 环视方向：锁定与拖拽两分支的 yaw 均改为 `-=`（与 creative-stage 原生拖拽 -dx 一致，鼠标右拖视角右转）；pitch 加号不变。
+- M1 禁态不重建：关闭路径早退条件由 `!enabled && !returning` 改为 `!enabled`，禁态下重复关只同步面板，不再重建 returning。
+- M2 飞回最短弧：新增 `wrap180`，yaw 插值从"基线 ±180° 内的等效角"起算，积累多圈也不倒转。
+- M3 loadPose 全字段有限性：`yawDeg` 也必须 `isFinite`；统一 `num()` 兜底；dist 夹到 `[0.3,100]`。
+- M4 tier0 点击假亮自愈：tier0 下点开不再直接 return，而是 `syncControl(false)` + 隐藏开关，杜绝面板卡 ON。
+- M5 窗口失焦清键：`window` 的 `blur` 事件清空 keys 并解除 dragging。
+- M7 指针多指过滤：`isPrimary === false` 早退；新增 `pid` 跟踪同一指针，pointerup/mousemove 拖拽分支按 pointerId 过滤；setEnabled 两路径清 `pid`。
+- M9 Node 守卫：IIFE 在 `typeof window === 'undefined'` 时早退，纯文本契约扫描不触碰 document。
 
 - [ ] **7.3 app.js init**
 
@@ -2644,13 +2690,21 @@ section('跨文件契约：自由相机');
   ok(/0\.14/.test(fc) && /0\.11/.test(fc), '指针锁定灵敏度取拖拽一半');
   ok(/requestPointerLock/.test(fc) && /dragging/.test(fc), '指针锁定 + 按住拖拽回落');
   ok(/KeyW/.test(fc) && /KeyQ/.test(fc) && /KeyE/.test(fc) && /KeyK/.test(fc), 'WASD/QE/K 操控');
+  ok(/fx = -Math\.sin\(yaw\), fz = -Math\.cos\(yaw\)/.test(fc), 'W 朝屏幕前向（target-eye 水平向）');
+  ok(/-= e\.movementX \* LOOK_YAW/.test(fc) && /-= dx \* LOOK_YAW/.test(fc),
+    '锁定/拖拽环视 yaw 为负（鼠标右转视角右）');
+  ok(/addEventListener\('blur', onBlur\)/.test(fc), '窗口失焦清空按键');
+  ok(/isPrimary === false/.test(fc) && /e\.pointerId !== pid/.test(fc), '指针只认主键/同一指');
+  ok(/isFinite\(p\.yawDeg\)/.test(fc) && /d > 100 \? 100 : d/.test(fc), '机位存储全有限性与 dist 区间');
+  ok(/wrap180\(f\.yawDeg - ctx\.baseYawDeg\)/.test(fc), '飞回 yaw 走最短弧');
+  ok(/typeof window === 'undefined'\) return/.test(fc), 'Node 下驱动早退');
   ok(/40/.test(fc) && /ROLL_LIMIT = 25/.test(fc), '滚转速度 40°/s、上限 ±25°');
   ok(/RETURN_MS = 600/.test(fc), '关闭 600ms 飞回');
   ok(/Escape/.test(fc) && /setEnabled\(false/.test(fc), 'Esc 退出');
   ok(/stage:fps/.test(fc) && /sc-cine-freecam/.test(fc), 'tier0 退出并隐藏开关');
   ok(/setInteractionBlocker/.test(fc) && /interactionBlocker/.test(stage),
     '屏蔽 creative-stage 原生拖拽/点击/滚轮，防双触发');
-  ok(/interactionBlocker\(\{ target: null \}\)/.test(stage) &&
+  ok(/interactionBlocker\(null\)/.test(stage) &&
     /\(interact\.on && !interactionBlocked\) \? interact\.px/.test(stage),
     '屏蔽期视差目标归零并解除拖拽闩锁');
   ok(/StageFreecam\.init\(\)/.test(app) && /stage-freecam\.js/.test(html), '初始化与页面引用');
@@ -2660,6 +2714,8 @@ section('跨文件契约：自由相机');
 - [ ] **7.6 验证**
 
 全量门（含 check-creative：blocker 早退不破坏解析链）；浏览器手工验证留到任务 13 真机清单，本任务以契约 + 代码审查为准。
+
+真机首测：W 朝屏幕内、鼠标右拖视角右转（含拖拽回落手感）。
 
 - [ ] **7.7 Commit**
 
