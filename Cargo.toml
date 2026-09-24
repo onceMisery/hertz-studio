@@ -21,6 +21,7 @@ vmusic-audio = { path = "crates/vmusic-audio", version = "0.1.0" }
 vmusic-store = { path = "crates/vmusic-store", version = "0.1.0" }
 vmusic-library = { path = "crates/vmusic-library", version = "0.1.0" }
 vmusic-lyrics = { path = "crates/vmusic-lyrics", version = "0.1.0" }
+vmusic-beats = { path = "crates/vmusic-beats", version = "0.1.0" }
 
 # --- async / web ---
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs", "net"] }

@@ -3309,6 +3309,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vmusic-beats"
+version = "0.1.0"
+dependencies = [
+ "num-complex",
+ "rustfft",
+ "serde",
+ "symphonia",
+]
+
+[[package]]
 name = "vmusic-core"
 version = "0.1.0"
 dependencies = [
