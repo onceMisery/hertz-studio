@@ -30,6 +30,9 @@ const SHARED_TOKENS = [
   '--glass-shadow',
   '--glass-shadow-glow',
   '--glass-blur',
+  '--glass-bg-strong',
+  '--glass-line',
+  '--press-scale',
   '--hover',
 ];
 const OWNER_FILE = 'style.css';
@@ -420,6 +423,24 @@ if (!THEME_SAMPLE_CONTRACT.found) {
         });
       }
     }
+  }
+}
+
+// --- 契约 H：新玻璃令牌必须真正被消费 ---
+// 只定义不使用的令牌一定会漂移：定义处（--x: ...）本身不含 var(--x)，
+// @supports 回落声明也不含，所以这里直接全文件扫 var(名字) 即可，不会误判。
+const USAGE_TOKENS = ['--glass-bg-strong', '--glass-line', '--press-scale'];
+for (const name of USAGE_TOKENS) {
+  const used = files.some((f) =>
+    fs.readFileSync(path.join(webDir, f), 'utf8').includes(`var(${name})`)
+  );
+  if (!used) {
+    problems.push({
+      file: OWNER_FILE,
+      line: 1,
+      rule: `玻璃令牌 ${name} 没有任何 var() 消费处`,
+      why: '只定义不使用的令牌会漂移；要么用上，要么删掉定义',
+    });
   }
 }
 

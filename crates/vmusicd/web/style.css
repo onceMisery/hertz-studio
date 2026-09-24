@@ -100,13 +100,21 @@
      弹出层（菜单/抽屉/toast）才用带品牌色辉光的那一档，因为它们本来就
      应该是「浮起来」的视觉层级。 */
   --glass-shadow: 0 22px 64px rgba(0, 0, 0, 0.3),
-    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 1px 0 var(--glass-line),
     inset 0 -24px 58px rgba(0, 0, 0, 0.16);
   --glass-shadow-glow: 0 22px 64px rgba(0, 0, 0, 0.34),
     0 0 34px rgba(var(--brand-rgb, 0, 245, 212), 0.07),
-    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 1px 0 var(--glass-line),
     inset 0 -24px 58px rgba(0, 0, 0, 0.16);
   --glass-blur: 22px;
+  /* 强玻璃底：弹层/抽屉/浮起件。比常驻面更不透明，背后内容不穿透。 */
+  --glass-bg-strong: rgba(18, 20, 28, 0.78);
+  /* 内描边高光：只作颜色用，1px 宽度由使用处（或玻璃阴影令牌）给出。
+     绝不能拼进 var(--glass-border)——那是 "1px solid <color>" 完整简写，
+     拼接会产出非法值（check-css-tokens 契约 C）；内高光一律走 inset box-shadow。 */
+  --glass-line: rgba(255, 255, 255, 0.10);
+  /* 按压档位：图标按钮 80ms 压下、240ms 回弹（见 .ctrl/.ctrl:active）。 */
+  --press-scale: 0.97;
 
   /* 焦点环：键盘可达性。任何元素都不允许「去掉 outline 却不给替代」。 */
   --focus-ring: 1px solid rgba(var(--brand-rgb, 0, 245, 212), 0.34);
@@ -133,6 +141,13 @@
   --stage-w: 460px;
   --bar-h: 76px;
   --row-h: 52px;
+}
+
+/* 不支持 backdrop-filter 的环境（旧内核/企业策略禁用）：强玻璃底退为实色，
+   保证弹层/抽屉文字对比，不靠背后模糊也能读。
+   契约 A 仍认得它：选择器还是 :root、文件还是 style.css。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root { --glass-bg-strong: #12141c; }
 }
 
 body[data-density="compact"] {
@@ -183,8 +198,8 @@ body::before {
 /* 所有曲面共用同一份玻璃配方 */
 .topbar, .rail, .column, .stage, .bar {
   background: var(--panel);
-  backdrop-filter: blur(22px) saturate(150%);
-  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  backdrop-filter: blur(22px) saturate(120%);
+  -webkit-backdrop-filter: blur(22px) saturate(120%);
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
 }
@@ -1291,10 +1306,14 @@ body.reduce-motion .bar { transition: none !important; }
   border-radius: 50%; border: 1px solid transparent;
   background: transparent; color: var(--muted);
   cursor: pointer; padding: 0;
-  transition: color 0.25s var(--ease), background 0.25s var(--ease), transform 0.15s var(--ease);
+  transition: color 0.25s var(--ease), background 0.25s var(--ease),
+              transform 240ms var(--ease-out);
 }
 .ctrl:hover { color: var(--text); background: var(--hover); }
-.ctrl:active { transform: scale(0.9); }
+.ctrl:active {
+  transform: scale(var(--press-scale));
+  transition: transform 80ms var(--ease-out);
+}
 .ctrl svg { width: 19px; height: 19px; fill: currentColor; display: block; }
 
 .ctrl-primary {
@@ -1562,8 +1581,8 @@ body.reduce-motion * {
   background: var(--glass-bg);
   border: var(--glass-border);
   box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(var(--glass-blur)) saturate(150%);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(120%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(120%);
 }
 .topbar { border-radius: 0; border-width: 0 0 1px; }
 .bar { border-radius: var(--r-xl); }
@@ -1790,7 +1809,7 @@ select { cursor: pointer; }
 /* ---------- 弹层：菜单 / 对话框 / toast ---------- */
 
 .menu, .toast, .theme-menu, .stage-ctl {
-  background: color-mix(in srgb, var(--panel-solid) 88%, transparent);
+  background: var(--glass-bg-strong);
   border: var(--glass-border);
   box-shadow: var(--glass-shadow-glow);
   backdrop-filter: blur(var(--glass-blur));
