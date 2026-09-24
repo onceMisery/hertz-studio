@@ -1498,6 +1498,8 @@ L171 `var views = [];` 那一行之后插入：
   // 相机层总线：每帧按 priority 升序调用（cinema=10 / focus peek=20 /
   // freecam=30）。层函数只改 ctx，基线/ shake/漂移在层外统一收口。
   var camLayers = [];
+  // 交互屏蔽钩子：自由相机启用时由任务 7 注册，bindInteraction 各入口早退。
+  var interactionBlocker = null;
 ```
 
 - [ ] **4.4 creative-stage：renderOne 构造 ctx 并收口**
