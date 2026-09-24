@@ -105,8 +105,20 @@ section('节拍包络');
   ok(approx(tuned.fovMul, 1 - 0.06 * 0.5, 0.005), 'cinePunch 等比缩放');
   const tunnel = P.envelope(down, 1028, 1, { punch: 1, tunnel: true });
   ok(approx(tunnel.distMul, 1 - 0.025 * 0.5, 0.005), 'tunnel 近机位 dist punch 折半');
-  const capped = P.envelope({ t: 0, strength: 1, downbeat: true, intensity: 3 }, 14, 1, { punch: 2 });
-  ok(Math.abs(capped.rollDeg) <= P.ROLL_LIMIT, 'roll 受 ±25° 钳制');
+  // amp=15*1.5=22.5、起振满（dt=28）时原始 roll=27°，必须被钳到 25。
+  const capped = P.envelope({ t: 0, strength: 1, downbeat: true, intensity: 3 }, 28, 1, { punch: 15 });
+  ok(capped.rollDeg === P.ROLL_LIMIT, 'roll 超幅时精确钳到 +25°');
+  const over = P.envelope(down, 1421, 1, {});
+  ok(over.fovMul === 1 && over.distMul === 1 && over.rollDeg === 0, '超过 420ms 窗口是单位元');
+}
+
+section('边界：relocate 的 ±60ms 容差');
+{
+  // now=1000：now+60 的拍排除、now+61 的拍保留（lowerBound(now+61)）。
+  const tl = P.createTimeline(makeMap([[1060, 0.5], [1061, 0.6]]));
+  P.relocate(tl, 1000);
+  const got = P.advance(tl, 1000, 1100);
+  ok(got && got.t === 1061, '落点 +60ms 内不补、+61ms 保留');
 }
 
 section('跨文件契约：roll 通道');
@@ -118,8 +130,8 @@ section('跨文件契约：roll 通道');
   ok(/addCamLayer/.test(stage) && /removeCamLayer/.test(stage), 'creative-stage 暴露层总线 API');
   ok(/var camLayers = \[\]/.test(stage), 'camLayers 模块状态存在');
   ok(/roll: ctx\.rollDeg \* Math\.PI \/ 180/.test(stage), 'ctx.rollDeg 以弧度进 cam.roll');
-  ok(/cam\.shakeYaw/.test(stage) && /ctx\.yawDeg[\s\S]*cam\.shakeYaw|cam\.shakeYaw[\s\S]*ctx\.yawDeg/.test(stage),
-    'shake 在层结果之后最后叠加');
+  ok(/ctx\.yawDeg[\s\S]*cam\.shakeYaw/.test(stage),
+    'shake 在层结果之后最后叠加（单向顺序，不收反向）');
 }
 
 console.log(`\n${failures === 0 ? 'OK' : 'FAIL'}: ${checks - failures}/${checks} 通过`);
