@@ -130,6 +130,7 @@
   var api = {
     ROLL_LIMIT: ROLL_LIMIT,
     SEEK_TOL_MS: SEEK_TOL_MS,
+    DOWN_ROLL_MS: DOWN_ROLL_MS,
     createClock: createClock,
     pt: pt,
     reanchor: reanchor,
@@ -198,8 +199,10 @@
     transport.get(URL + encodeURIComponent(trackId)).then(function (body) {
       if (seq !== s.seq || trackId !== s.trackId) return;
       if (body && body.status === 'analyzing') { s.mode = 'waiting'; return; }
-      if (body && body.beats && body.beats.length) activate(body);
-      else s.mode = 'absent';
+      // 在途期间若已降到 tier0，地图到达也不激活（下一帧 layer 同样会早退）。
+      if (body && body.beats && body.beats.length) {
+        if (tier0()) s.mode = 'absent'; else activate(body);
+      } else s.mode = 'absent';
     }, function () {
       // 404（failed/unsupported/not_ready）与网络错都静默回落 onset；
       // 不轮询：分析完成有 beatmap_ready 事件，下次播放也会重新触发。
@@ -245,7 +248,7 @@
       var picked = P.advance(s.tl, s.lastPt, p);
       s.lastPt = p;
       if (picked) s.beat = picked;
-      if (s.beat && p - s.beat.t > 420) s.beat = null;
+      if (s.beat && p - s.beat.t > P.DOWN_ROLL_MS) s.beat = null;
     }
     // resolve 优先级：freecam 全覆盖（drift 也停）；peek 把包络幅度压到 30%。
     if (s.freecamOn) { ctx.driftMul = 0; return; }

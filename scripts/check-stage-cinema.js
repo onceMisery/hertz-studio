@@ -78,6 +78,7 @@ section('时间轴：游标 / seek / 一帧多拍');
 
 section('节拍包络');
 {
+  ok(P.DOWN_ROLL_MS === 420, '导出拍窗口 420ms 常量（驱动复用，不另写魔数）');
   const down = { t: 1000, strength: 0.9, downbeat: true, intensity: 2 };
   const weak = { t: 1000, strength: 0.95, downbeat: false, intensity: 1 };
   const weakSoft = { t: 1000, strength: 0.5, downbeat: false, intensity: 1 };
@@ -158,6 +159,8 @@ section('跨文件契约：驱动 / 协议 / 开关');
     'cine 三键被读取');
   ok(/setPeek/.test(cinema) && /0\.3/.test(cinema), 'peek 压制系数 0.3');
   ok(/baseDist < 5/.test(cinema), 'tunnel 判定基线 dist<5');
+  ok(/P\.DOWN_ROLL_MS/.test(cinema), '拍过期窗口复用纯模块常量');
+  ok(/if \(tier0\(\)\) s\.mode = 'absent'; else activate\(body\)/.test(cinema), '地图到达回调复查 tier0');
 
   ok(/id: 'cine'/.test(control), 'SCHEMA 含 cine 组');
   ok(/g\.id === 'cine'/.test(control), 'push 跳过 cine 组脏变量');
