@@ -2238,7 +2238,7 @@ git --no-pager commit -m "feat(stage): 电影相机驱动接入帧循环与 cine
 ## Files
 
 - Create: `crates/vmusicd/web/stage-freecam.js`
-- Modify: `crates/vmusicd/web/creative-stage.js`（interactionBlocker 模块变量 + 5 个入口早退；api2 setter 已在任务 4 加入）
+- Modify: `crates/vmusicd/web/creative-stage.js`（blocked 早退 5 个入口；interactionBlocker 变量与 api2 setter 已在任务 4 加入）
 - Modify: `crates/vmusicd/src/main.rs`（include + 路由）
 - Modify: `crates/vmusicd/web/index.html`（script）
 - Modify: `scripts/check-assets.js`（REQUIRE_BEFORE）
@@ -2249,26 +2249,31 @@ git --no-pager commit -m "feat(stage): 电影相机驱动接入帧循环与 cine
 
 - [ ] **7.1 creative-stage：交互屏蔽钩子落地**
 
-L195 `var cam = {...}` 附近（模块变量区）加：
+`var interactionBlocker = null;` 已由任务 4 加在模块状态区（约 L177，`var camLayers = [];`
+下方，带注释），本任务**不再重复声明**，只在其下方新增 blocked 函数（注释只描述 blocked）：
 
 ```js
-  // 外部（自由相机）可注册屏蔽判定：返回 true 时舞台原生拖拽/点击爆闪/
-  // 滚轮/双击复位全部早退，避免双触发。
-  var interactionBlocker = null;
+  // 各交互入口统一走 blocked 早退：钩子返回 true（自由相机开启/飞回中）时，
+  // 原生拖拽/视差/惯性/爆闪/滚轮/双击复位全部不触发，避免与 freecam 双控。
   function blocked(e) { return !!(interactionBlocker && interactionBlocker(e)); }
 ```
 
-bindInteraction 五个回调入口各插一行：
+bindInteraction 五个回调入口（锚点以内容匹配为准，落地时约 L550/L564/L588/L597/L605）
+在最前面各插一行：
 
-- pointerdown（L542 回调首行，`if (!interact.on) return;` 之前）：`if (blocked(e)) return;`
-- pointermove（L554 回调首行）：`if (blocked(e)) return;`
-- pointerup（L577 回调首行）：`if (blocked(e)) return;`
-- wheel（L585 回调首行）：`if (blocked(e)) return;`
-- dblclick（L593）：回调改为 `function (e) { if (blocked(e)) return; resetView(); }`
+- pointerdown（回调首行，`if (!interact.on) return;` 之前）：`if (blocked(e)) return;`
+- pointermove（回调首行，`if (!interact.on) return;` 之前）：`if (blocked(e)) return;`
+- pointerup（回调首行，`if (!interact.on || !interact.dragging) return;` 之前）：`if (blocked(e)) return;`
+- wheel（passive:false 回调首行，`if (!interact.on) return;` 之前）：`if (blocked(e)) return;`
+- dblclick：回调改为 `function (e) { if (blocked(e)) return; resetView(); }`
+
+pointercancel 不动。
 
 - [ ] **7.2 创建 stage-freecam.js**
 
-完整内容：
+完整内容（落地一处机械修正：层注册直接写字面量 `addCamLayer(layer, 30)`，
+与 cinema 的 `(layer, 10)` 写法及 7.5 契约正则 `/addCamLayer\(layer, 30\)/` 一致，
+不再单设 PRIORITY 常量；任务 8 focus 落地时同理用 `(layer, 20)`）：
 
 ```js
 // SPDX-License-Identifier: MIT
@@ -2283,7 +2288,6 @@ bindInteraction 五个回调入口各插一行：
   'use strict';
 
   var POSE_KEY = 'vmusic.stage.freecam.pose';
-  var PRIORITY = 30;             // camLayers：cinema=10 < focus=20 < freecam=30
   var MOVE_SPEED = 0.35;         // ×cam.dist/秒
   var SHIFT_MUL = 2;
   var LOOK_YAW = 0.14;           // 度/px（creative-stage 拖拽 0.28 的一半）
@@ -2538,7 +2542,8 @@ bindInteraction 五个回调入口各插一行：
     if (inited) return;
     inited = true;
     if (global.CreativeStage) {
-      if (CreativeStage.addCamLayer) CreativeStage.addCamLayer(layer, PRIORITY);
+      // camLayers：cinema=10 < focus=20 < freecam=30，priority 小者先执行。
+      if (CreativeStage.addCamLayer) CreativeStage.addCamLayer(layer, 30);
       if (CreativeStage.setInteractionBlocker) {
         CreativeStage.setInteractionBlocker(function () { return enabled || !!returning; });
       }
