@@ -1091,6 +1091,17 @@ body.stage-lowfx .disc { animation: none !important; }
 body.stage-lowfx .disc-ring { display: none; }
 body.stage-lowfx .stage,
 body.stage-lowfx .bar { backdrop-filter: none; -webkit-backdrop-filter: none; }
+/* 顶栏/导航轨/曲库列与两个大抽屉背后基本是静态底：低性能档只把模糊从 22px
+   降到 8px、摘掉饱和度叠加，保留「玻璃」语义而不是退回实色板（spec §7.3）。
+   舞台与播放条见上一条规则——它们盖着动态画布，直接关模糊。 */
+body.stage-lowfx .topbar,
+body.stage-lowfx .rail,
+body.stage-lowfx .column,
+body.stage-lowfx .stage-ctl,
+body.stage-lowfx .ws-panel {
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
 /* 弱机上把行过渡砍到三分之一，但不是拍一个常数：按 --line-ms 折算，短句的
    「几乎瞬发」在降级后依然成立。写死 var(--dur-1) 会把 100ms 的 ad-lib 和
    4s 的长句拉成同一个时长，正好把这套 per-line 调度的意义抹掉。 */
@@ -1196,9 +1207,11 @@ body.reduce-motion .lyric-page::before { transition: none; transform: none; }
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: var(--panel-solid);
-  border-left: 1px solid var(--line);
-  box-shadow: -24px 0 60px rgba(0, 0, 0, 0.45);
+  background: var(--glass-bg-strong);
+  border-left: var(--glass-border);
+  box-shadow: var(--glass-shadow-glow);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.2);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.2);
   transform: translateX(102%);
   transition: transform var(--dur-2) var(--ease);
   will-change: transform;

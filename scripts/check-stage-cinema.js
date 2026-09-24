@@ -250,6 +250,19 @@ section('玻璃化契约：舞台控制与工坊抽屉 + lowfx 降级');
   const stageCss = read('stage.css');
   const creativeCss = read('creative.css');
   const style = read('style.css');
+  ok(/\.stage-ctl\s*\{[^}]*var\(--glass-bg-strong\)/.test(stageCss),
+    'stage-ctl 统一到强玻璃底');
+  ok(!/\.stage-ctl\s*\{[^}]*var\(--panel-solid\)/.test(stageCss),
+    'stage-ctl 不再用 panel-solid 实色覆盖弹层玻璃');
+  ok(/\.ws-panel\s*\{[^}]*var\(--glass-bg-strong\)/.test(creativeCss),
+    '工坊抽屉强玻璃底');
+  ok(!/var\(--glass-border,\s*1px/.test(creativeCss) &&
+     !/var\(--glass-shadow,\s*-?\d/.test(creativeCss),
+    'ws-panel 去掉玻璃令牌 fallback');
+  ok(/body\.stage-lowfx \.stage-ctl[\s\S]{0,200}blur\(8px\)/.test(stageCss),
+    'lowfx 下大抽屉模糊降到 8px');
+  ok(/body\.stage-lowfx \.stage,[\s\S]{0,120}backdrop-filter:\s*none/.test(stageCss),
+    'lowfx 下舞台/播放条仍直接关模糊');
   ok(/\.theme-menu\s*\{[^}]*var\(--glass-bg-strong\)/.test(stageCss), '主题菜单统一到强玻璃底');
   ok(!/所有曲面共用同一份玻璃配方/.test(style || ''), '旧玻璃死规则已删除');
   ok(/\.ctrl-primary:active\s*\{[^}]*transition:\s*transform var\(--dur-base\)/.test(style),
