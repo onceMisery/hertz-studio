@@ -395,7 +395,6 @@ pub fn analyze_mono(mono: &[f32], in_rate: u32, duration_ms: u64) -> Result<Beat
         return Err(AnalyzeError::Unsupported("audio too short".into()));
     }
     let n_frames = (pcm.len() - WINDOW) / HOP + 1;
-    let hop_ms = (HOP as u32 * 1000) / out_rate;
 
     // Hann 窗 + 26 个 mel 三角带（30Hz .. min(8kHz, 奈奎斯特 95%)），mel 均匀。
     let mut hann = vec![0f32; WINDOW];
@@ -500,14 +499,16 @@ pub fn analyze_mono(mono: &[f32], in_rate: u32, duration_ms: u64) -> Result<Beat
     let span = (hi - lo).max(1e-3);
     let times: Vec<i64> = chosen_idx
         .iter()
-        .map(|(i, _)| (*i as i64 * hop_ms as i64))
+        .map(|(i, _)| {
+            (*i as i64 * HOP as i64 * 1000 + out_rate as i64 / 2) / out_rate as i64
+        })
         .collect();
     let strengths: Vec<f32> = chosen_idx
         .iter()
         .map(|(_, v)| ((*v - lo) / span).clamp(0.0, 1.0))
         .collect();
 
-    let bpm = estimate_bpm(&times);
+    let bpm = estimate_bpm(&times, &env, out_rate);
 
     // downbeat：前 8 拍里取最强峰为第 0 拍（并列取第一拍），之后每 4 拍。
     let anchor_window = chosen_idx.len().min(8);
@@ -629,9 +630,10 @@ fn percentile_sorted(sorted: &[f32], q: f32) -> f32 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
-/// 峰间隔直方图（±15ms 三角加权，60–180BPM = 333..1000ms），峰值需显著高于
-/// 均值（×1.6），再用 ±8% 内间隔中位数微调；间隔样本不足 8 个返回 None。
-fn estimate_bpm(times: &[i64]) -> Option<f64> {
+/// BPM 粗估：峰间隔三角加权直方图（333..1000ms）+ ×1.6 显著性门；
+/// 精修：在粗估 lag ±8% 内对 onset 包络做自相关，抛物线插值取连续周期
+/// （hop 量化约 23/46ms，整数毫秒中位数会偏到整档，插值消除该量化误差）。
+fn estimate_bpm(times: &[i64], env: &[f32], out_rate: u32) -> Option<f64> {
     if times.len() < 8 {
         return None;
     }
@@ -645,38 +647,75 @@ fn estimate_bpm(times: &[i64]) -> Option<f64> {
     }
     let mut hist = vec![0f64; 1001];
     for d in &intervals {
-        for b in 333..1000 {
+        for (b, h) in hist.iter_mut().enumerate().take(1000).skip(333) {
             let w = (1.0 - (d - b as f64).abs() / 15.0).max(0.0);
-            hist[b] += w;
+            *h += w;
         }
     }
     let (best, score) = hist
         .iter()
         .enumerate()
         .skip(333)
+        .take(667)
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())?;
     let mean: f64 = hist[333..1000].iter().sum::<f64>() / 667.0;
     if *score < mean * 1.6 {
         return None;
     }
-    let near: Vec<f64> = intervals
-        .iter()
-        .filter(|d| ((**d - best as f64) / best as f64).abs() < 0.08)
-        .copied()
-        .collect();
-    if near.len() < 4 {
-        return None;
+
+    // 自相关精修：粗周期换算成帧 lag，±8% 内找自相关最大整数 lag，
+    // 再用相邻三点抛物线插值得到亚帧周期。
+    let hop_ms = HOP as f64 * 1000.0 / out_rate as f64;
+    let lag0 = best as f64 / hop_ms;
+    let lo_lag = (lag0 * 0.92).ceil().max(1.0) as usize;
+    let hi_lag = (lag0 * 1.08).floor() as usize;
+    let hi_lag = hi_lag.min(env.len().saturating_sub(1));
+    if hi_lag < lo_lag {
+        return Some(60_000.0 / best as f64);
     }
-    let mut near = near;
-    near.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let med = near[near.len() / 2];
-    Some(60_000.0 / med)
+    let acf = |lag: usize| -> f64 {
+        let n = env.len() - lag;
+        if n == 0 {
+            return 0.0;
+        }
+        let mut s = 0.0f64;
+        for i in 0..n {
+            s += env[i] as f64 * env[i + lag] as f64;
+        }
+        s / n as f64
+    };
+    let mut peak_lag = lo_lag;
+    let mut peak_v = f64::MIN;
+    for lag in lo_lag..=hi_lag {
+        let v = acf(lag);
+        if v > peak_v {
+            peak_v = v;
+            peak_lag = lag;
+        }
+    }
+    let mut refined = peak_lag as f64;
+    if peak_lag > 0 && peak_lag + 1 < env.len() {
+        let rm = acf(peak_lag - 1);
+        let rp = acf(peak_lag + 1);
+        let denom = rm - 2.0 * peak_v + rp;
+        if denom < 0.0 {
+            let delta = 0.5 * (rm - rp) / denom;
+            if (-1.0..=1.0).contains(&delta) {
+                refined += delta;
+            }
+        }
+    }
+    let period = refined * hop_ms;
+    if !(333.0..=1000.0).contains(&period) {
+        return Some(60_000.0 / best as f64);
+    }
+    Some(60_000.0 / period)
 }
 ```
 
 - [ ] **1.4 验证**
 
-`cargo fmt --all; cargo test -p vmusic-beats`（7 测试全绿）；`cargo clippy --workspace --all-targets -- -D warnings`。
+`cargo fmt --all; cargo test -p vmusic-beats`（6 测试全绿）；`cargo clippy --workspace --all-targets -- -D warnings`。
 
 - [ ] **1.5 Commit**
 
