@@ -1328,6 +1328,8 @@ git --no-pager commit -m "feat(stage): 节拍地图缓存与播放提交后后�
 - [ ] **3.2 WsEvent 变体**
 
 > 注：该变体已随任务 2 提前落地（见任务 2 Step 2.4 第 4 点），执行任务 3 时跳过本步。
+>
+> 任务 3 同时删除任务 2 预留的 4 处 #[allow(dead_code)]（as_str/Outcome×2/request_on_demand）；TaskState::Ready(PathBuf) 字段与 Reason::Tier0 的 allow 保留。
 
 state.rs L59 `Buffering {...},` 与 L60 `LibraryChanged,` 之间插入：
 
@@ -1418,7 +1420,7 @@ app.js `handleEvent` 的 `buffering` case（L391-399）之后、L400 `default: b
 - [ ] **3.6 Commit**
 
 ```
-git --no-pager add crates/vmusicd/src/routes.rs crates/vmusicd/src/state.rs crates/vmusicd/src/ws.rs crates/vmusicd/web/app.js
+git --no-pager add crates/vmusicd/src/routes.rs crates/vmusicd/src/state.rs crates/vmusicd/src/ws.rs crates/vmusicd/src/stage_beats.rs crates/vmusicd/web/app.js
 git --no-pager commit -m "feat(stage): beatmap REST 三态与 WS beatmap_ready 事件"
 ```
 
