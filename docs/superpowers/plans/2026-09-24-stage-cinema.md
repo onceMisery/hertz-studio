@@ -3241,24 +3241,38 @@ input[type="search"], input[type="text"], select {
 }
 ```
 
-改为：
+**注意（落地修正，计划原版此步改错了位置）**：L434-443 这条早期规则的 resting 底/边在文件尾部「统一组件层」（约 L1757 的六选择器分组规则）里被同特异性后置规则盖回 field 令牌——在这里改玻璃值运行时不生效。落地做法：
+1. 早期规则（L434-443）**保持原样不动**；
+2. 把尾部统一表单层的六选择器分组**拆成两条**：search/text/select 给玻璃底 + 8px 模糊（成为 resting 态实际权威），number/password/textarea 保留 field 实色（模态卡控件不玻璃化）：
 
 ```css
-input[type="search"], input[type="text"], select {
-  padding: 8px 12px;
-  border-radius: var(--radius);
-  border: 1px solid var(--glass-line);
+input[type="text"],
+input[type="search"],
+select {
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  color: var(--text);
   background: color-mix(in srgb, var(--glass-bg-strong) 42%, transparent);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-4);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+}
+input[type="number"],
+input[type="password"],
+textarea {
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
   color: var(--text);
-  outline: none;
-  font-size: 13px;
-  transition: border-color 0.2s var(--ease), background 0.2s var(--ease);
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+  border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-4);
 }
 ```
 
-L446 `input:focus, select:focus` 与 L447 `select option` 保持不动（原生 option 弹层仍是实色）。
+input:focus / select:focus / select option 保持不动（原生 option 弹层仍是实色）。
 
 - [ ] **10.2 在线搜索框模糊再加一档**
 
@@ -3271,14 +3285,14 @@ L474：
 改为：
 
 ```css
-.online-search input {
+.online-search input[type="search"] {
   flex: 1; min-width: 0;
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
 }
 ```
 
-（同特异性晚于通用规则，覆盖为 10px；底色/描边仍来自 10.1。）
+（选择器带 type 提权到 (0,2,1)，才能盖过统一表单权威层的 8px；底色/描边来自权威层。）
 
 - [ ] **10.3 音源分类 chips 玻璃底**
 
@@ -3388,10 +3402,11 @@ L292-294：
   background:transparent;color:var(--text);font:inherit;font-size:12px;outline:none}
 ```
 
-改为：
+改为（选择器写 `input.opl-filter` 提权到 (0,1,1)，否则 resting 底被
+style.css 尾部 input[type=search] 权威规则盖掉；online.css 后加载而同特异性时胜出）：
 
 ```css
-.opl-filter{flex:none;width:190px;height:30px;padding:0 10px;
+input.opl-filter{flex:none;width:190px;height:30px;padding:0 10px;
   border:1px solid var(--glass-line);border-radius:999px;
   background:color-mix(in srgb,var(--glass-bg-strong) 42%,transparent);
   backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
@@ -3451,6 +3466,12 @@ section('玻璃化契约：在线曲库面板');
   ok(/\.op-drawer\{[^}]*var\(--glass-bg-strong\)[^}]*blur\(var\(--glass-blur\)\)/.test(css),
     '歌单抽屉强玻璃底 + 令牌模糊');
   ok(/input\[type="search"\][^}]*var\(--glass-line\)/.test(style), '通用输入描边走 --glass-line');
+  // 级联权威：玻璃底必须落在文件尾部的统一表单层（最后一条同特异性规则），
+  // 只给 search/text/select；number/password/textarea 保留 field 实色令牌。
+  ok(/input\[type="number"\],\s*input\[type="password"\],\s*textarea[\s\S]*?var\(--field-bg\)/.test(style),
+    '玻璃底只给 search/text/select，模态控件保留 field 令牌');
+  ok(/\.online-search input\[type="search"\]/.test(style), '在线搜索框选择器提权，blur10 盖过权威层 8px');
+  ok(/input\.opl-filter\{/.test(css), '抽屉过滤框提权，resting 玻璃底不被通用规则盖掉');
   ok(/\.online-chips \.chip \{[^}]*var\(--glass-bg-strong\)/.test(style), 'chip 半透明玻璃底');
   ok(/\.online-errorbar\{[^}]*rgba\(255,\s*120,\s*80,\s*\.1\)/.test(css),
     '错误条保持警示橙红，不玻璃化');
