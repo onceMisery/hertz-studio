@@ -850,17 +850,23 @@ mod tests {
     fn idempotent_table_decisions() {
         let mut t: HashMap<String, TaskState> = HashMap::new();
         // 首次：建任务。
-        assert!(matches!(table_decide(&mut t, "k"), Action::Spawn));
+        assert!(matches!(table_decide(&mut t, "k", false), Action::Spawn));
         assert!(matches!(t.get("k"), Some(TaskState::Analyzing)));
         // 在途：等待。
-        assert!(matches!(table_decide(&mut t, "k"), Action::Wait));
+        assert!(matches!(table_decide(&mut t, "k", false), Action::Wait));
         // 失败：GET 不重试，播放（retry）重试。
         t.insert("k".into(), TaskState::Failed(Reason::Failed));
-        assert!(matches!(table_decide(&mut t, "k"), Action::Fail(Reason::Failed)));
+        assert!(matches!(
+            table_decide(&mut t, "k", false),
+            Action::Fail(Reason::Failed)
+        ));
         assert!(matches!(table_decide(&mut t, "k", true), Action::Spawn));
         // unsupported 不与 failed 混淆。
         t.insert("u".into(), TaskState::Failed(Reason::Unsupported));
-        assert!(matches!(table_decide(&mut t, "u"), Action::Fail(Reason::Unsupported)));
+        assert!(matches!(
+            table_decide(&mut t, "u", false),
+            Action::Fail(Reason::Unsupported)
+        ));
         // Ready 但磁盘文件没了（被外部删/LRU）：重开任务。
         t.insert("r".into(), TaskState::Ready(PathBuf::from("r.json")));
         assert!(matches!(table_decide(&mut t, "r", false), Action::Spawn));
@@ -879,7 +885,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sha1::{Digest, Sha1};
-use tokio::sync::Mutex;
 
 use vmusic_beats::{Beat, BeatMap};
 
@@ -896,6 +901,8 @@ pub(crate) enum TaskState {
 /// 404 reason（tier0 由客户端自行兜底，服务端保留枚举以对齐协议）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reason {
+    /// tier0 由客户端按性能档位自行回落，服务端保留枚举对齐 404 reason 协议。
+    #[allow(dead_code)]
     Tier0,
     Failed,
     Unsupported,
@@ -994,7 +1001,7 @@ pub(crate) fn table_decide(
             e.insert(TaskState::Analyzing);
             Action::Spawn
         }
-        Entry::Occupied(mut e) => match e.get() {
+        Entry::Occupied(e) => match e.get() {
             TaskState::Analyzing => Action::Wait,
             TaskState::Ready(_) => {
                 *e.into_mut() = TaskState::Analyzing;
@@ -1030,7 +1037,7 @@ async fn resolve_audio(state: &Arc<AppState>, track_id: &str) -> Option<AudioRef
         let key = online_cache_key(track_id);
         audio_ref(path, key).await
     } else {
-        let track = vmusic_store::get_track(&state.db, track_id)
+        let track = vmusic_store::get_track(&state.db, &track_id.to_string())
             .await
             .ok()
             .flatten()?;
@@ -1209,6 +1216,19 @@ L9-10 `use std::sync::Arc;` 已有；在 state.rs 中：
         }
 ```
 
+4. WsEvent BeatmapReady 变体（由任务 3.2 提前至本任务落地）：state.rs 中 `Buffering` 变体后、`LibraryChanged` 前插入，供 `spawn_blocking_analysis` 成功后 `state.publish` 广播：
+
+```rust
+    /// 节拍地图后台分析完成：前端仅当 track_id 仍是当前播放曲时拉取。
+    /// bpm 低置信为 None，字段整体不序列化。
+    BeatmapReady {
+        track_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bpm: Option<f64>,
+        beats_n: usize,
+    },
+```
+
 - [ ] **2.5 main.rs 接线**
 
 1. L16 `mod scan;` 后、L17 `mod state;` 前插入：
@@ -1234,7 +1254,7 @@ mod stage_beats;
 
 - [ ] **2.6 验证**
 
-`cargo fmt --all; cargo clippy --workspace --all-targets -- -D warnings; cargo test --workspace`（新 4 测试含 1 个 tokio 测试全绿；193 既有测试不回归）。8 个 check 脚本此时不涉及前端，应保持全绿。
+`cargo fmt --all; cargo clippy --workspace --all-targets -- -D warnings; cargo test --workspace`（新 3 测试（含 1 个 tokio 测试）全绿；workspace 全量合计 204 测试不回归）。8 个 check 脚本此时不涉及前端，应保持全绿。
 
 - [ ] **2.7 Commit**
 
@@ -1288,6 +1308,8 @@ git --no-pager commit -m "feat(stage): 节拍地图缓存与播放提交后后�
 跑 `cargo test -p vmusicd --lib ws::` 确认编译失败（无该变体）。
 
 - [ ] **3.2 WsEvent 变体**
+
+> 注：该变体已随任务 2 提前落地（见任务 2 Step 2.4 第 4 点），执行任务 3 时跳过本步。
 
 state.rs L59 `Buffering {...},` 与 L60 `LibraryChanged,` 之间插入：
 
