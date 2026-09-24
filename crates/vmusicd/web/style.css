@@ -449,8 +449,10 @@ body::before {
 input[type="search"], input[type="text"], select {
   padding: 8px 12px;
   border-radius: var(--radius);
-  border: 1px solid var(--line);
-  background: var(--panel-2);
+  border: 1px solid var(--glass-line);
+  background: color-mix(in srgb, var(--glass-bg-strong) 42%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   color: var(--text);
   outline: none;
   font-size: 13px;
@@ -486,14 +488,20 @@ select option { background: var(--panel-solid); color: var(--text); }
 /* ---- 在线曲库 ---- */
 
 .online-search { display: flex; gap: 8px; margin-bottom: 10px; flex: none; }
-.online-search input { flex: 1; min-width: 0; }
+.online-search input {
+  flex: 1; min-width: 0;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
 
 .online-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; flex: none; }
 .online-chips .chip {
   font: inherit; font-size: 12px;
   color: var(--muted);
-  border: 1px solid var(--line);
-  background: transparent;
+  border: 1px solid var(--glass-line);
+  background: color-mix(in srgb, var(--glass-bg-strong) 32%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   border-radius: 999px;
   padding: 4px 11px;
   cursor: pointer;

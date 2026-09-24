@@ -225,5 +225,19 @@ section('跨文件契约：焦点跟拍');
   ok(/StageFocus\.init\(\)/.test(app) && /stage-focus\.js/.test(html), '初始化与页面引用');
 }
 
+section('玻璃化契约：在线曲库面板');
+{
+  const css = read('online.css');
+  const style = read('style.css');
+  ok(!/#1A1D23|#0d0f13/.test(css), 'qr-card / 歌单抽屉不再写死实色');
+  ok(/\.qr-card\{[^}]*var\(--glass-bg-strong\)/.test(css), '登录卡片走强玻璃底');
+  ok(/\.op-drawer\{[^}]*var\(--glass-bg-strong\)[^}]*blur\(var\(--glass-blur\)\)/.test(css),
+    '歌单抽屉强玻璃底 + 令牌模糊');
+  ok(/input\[type="search"\][^}]*var\(--glass-line\)/.test(style), '通用输入描边走 --glass-line');
+  ok(/\.online-chips \.chip \{[^}]*var\(--glass-bg-strong\)/.test(style), 'chip 半透明玻璃底');
+  ok(/\.online-errorbar\{[^}]*rgba\(255,\s*120,\s*80,\s*\.1\)/.test(css),
+    '错误条保持警示橙红，不玻璃化');
+}
+
 console.log(`\n${failures === 0 ? 'OK' : 'FAIL'}: ${checks - failures}/${checks} 通过`);
 process.exit(failures === 0 ? 0 : 1);
