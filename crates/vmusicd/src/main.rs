@@ -14,6 +14,7 @@ mod online;
 mod persist;
 mod routes;
 mod scan;
+mod stage_beats;
 mod state;
 mod ws;
 
@@ -138,7 +139,12 @@ async fn main() -> anyhow::Result<()> {
         protected: Default::default(),
         auto_failures: Default::default(),
         quality: tokio::sync::Mutex::new(quality_prefs),
+        stage_beats: Default::default(),
+        weak_self: Default::default(),
     });
+    // 供 on_track_committed detach 'static 后台任务用；set 失败只可能是
+    // 重复注入，启动路径只走一次，忽略即可。
+    let _ = state.weak_self.set(std::sync::Arc::downgrade(&state));
     spawn_event_pump(state.clone());
 
     // 清掉上次崩溃留下的半截下载，并按配置做一次缓存容量回收。

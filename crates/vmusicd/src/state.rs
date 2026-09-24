@@ -57,6 +57,14 @@ pub enum WsEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         pct: Option<u8>,
     },
+    /// 节拍地图后台分析完成：前端仅当 track_id 仍是当前播放曲时拉取。
+    /// bpm 低置信为 None，字段整体不序列化。
+    BeatmapReady {
+        track_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bpm: Option<f64>,
+        beats_n: usize,
+    },
     LibraryChanged,
 }
 
@@ -153,11 +161,20 @@ pub struct AppState {
     pub(crate) auto_failures: AtomicUsize,
     /// 逐源音质偏好（启动时从 settings 装载、POST 热切换即时更新）。
     pub(crate) quality: Mutex<crate::online::quality::QualityPrefs>,
+    /// 节拍分析幂等表：缓存键 → 任务态。
+    pub(crate) stage_beats: Mutex<HashMap<String, crate::stage_beats::TaskState>>,
+    /// 启动后由 main 注入 Weak：on_track_committed 只有 &self，detach
+    /// 'static 任务时凭它拿回 Arc（不改 play_index/step 的签名链）。
+    pub(crate) weak_self: std::sync::OnceLock<std::sync::Weak<AppState>>,
 }
 
 impl AppState {
     pub fn cover_dir(&self) -> PathBuf {
         self.data_dir.join("cache").join("covers")
+    }
+
+    pub(crate) fn stage_beats_dir(&self) -> PathBuf {
+        self.data_dir.join("stage-beats")
     }
 
     /// 在线试听的落盘位置。音频后端目前只吃本地文件路径，所以远程流先缓存到
@@ -848,6 +865,11 @@ impl AppState {
         self.record_history(track_id).await;
         // 实际档位本任务只回传给 /online/play 响应；后续统计/打点再消费。
         let _ = actual;
+        // 节拍分析：成功起播后后台 detach，覆盖手动点播/重播/在线播放/自动接力
+        // 四条提交路径（committed 是唯一收口）。不 await、不阻塞播放链路。
+        if let Some(arc) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
+            crate::stage_beats::spawn_after_commit(arc, track_id.to_string());
+        }
     }
 
     /// 曲目确认成功起播（committed/Ok）后的后台收口：预取后一首，再做一次

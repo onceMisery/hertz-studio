@@ -3387,6 +3387,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vmusic-audio",
+ "vmusic-beats",
  "vmusic-core",
  "vmusic-library",
  "vmusic-lyrics",

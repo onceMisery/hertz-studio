@@ -17,6 +17,7 @@ vmusic-audio = { workspace = true }
 vmusic-store = { workspace = true }
 vmusic-library = { workspace = true }
 vmusic-lyrics = { workspace = true }
+vmusic-beats = { workspace = true }
 
 tokio = { workspace = true }
 axum = { workspace = true }
