@@ -82,11 +82,13 @@ struct CachedMap {
     truncated: bool,
     beats: Vec<Beat>,
     source_mtime_ms: i64,
+    source_len: u64,
 }
 
 struct AudioRef {
     path: PathBuf,
     mtime_ms: i64,
+    len: u64,
     key: String,
 }
 
@@ -110,7 +112,7 @@ async fn request(state: &Arc<AppState>, track_id: &str, retry_failed: bool) -> O
         return Outcome::Unavailable(Reason::NotReady);
     };
     let cache_file = state.stage_beats_dir().join(format!("{}.json", audio.key));
-    if let Some(map) = read_cache(&cache_file, audio.mtime_ms).await {
+    if let Some(map) = read_cache(&cache_file, audio.mtime_ms, audio.len).await {
         state
             .stage_beats
             .lock()
@@ -201,6 +203,7 @@ async fn audio_ref(path: PathBuf, key: String) -> Option<AudioRef> {
     Some(AudioRef {
         path,
         mtime_ms,
+        len: meta.len(),
         key,
     })
 }
@@ -237,11 +240,18 @@ fn sha1_hex(bytes: &[u8]) -> String {
     s
 }
 
-/// 读缓存：mtime 不一致 / 坏 JSON / 空 beats 均视为未命中。
-pub(crate) async fn read_cache(file: &Path, source_mtime_ms: i64) -> Option<BeatMap> {
+/// 读缓存：mtime 或长度不一致 / 坏 JSON / 空 beats 均视为未命中。
+pub(crate) async fn read_cache(
+    file: &Path,
+    source_mtime_ms: i64,
+    source_len: u64,
+) -> Option<BeatMap> {
     let bytes = tokio::fs::read(file).await.ok()?;
     let cached: CachedMap = serde_json::from_slice(&bytes).ok()?;
-    if cached.source_mtime_ms != source_mtime_ms || cached.beats.is_empty() {
+    if cached.source_mtime_ms != source_mtime_ms
+        || cached.source_len != source_len
+        || cached.beats.is_empty()
+    {
         return None;
     }
     Some(BeatMap {
@@ -258,6 +268,7 @@ pub(crate) async fn write_cache(
     file: &Path,
     map: &BeatMap,
     source_mtime_ms: i64,
+    source_len: u64,
 ) -> std::io::Result<()> {
     let body = CachedMap {
         version: map.version,
@@ -266,12 +277,14 @@ pub(crate) async fn write_cache(
         truncated: map.truncated,
         beats: map.beats.clone(),
         source_mtime_ms,
+        source_len,
     };
     if let Some(dir) = file.parent() {
         tokio::fs::create_dir_all(dir).await?;
     }
     let tmp = file.with_extension("tmp");
-    tokio::fs::write(&tmp, serde_json::to_vec(&body).unwrap()).await?;
+    let bytes = serde_json::to_vec(&body).map_err(std::io::Error::other)?;
+    tokio::fs::write(&tmp, bytes).await?;
     tokio::fs::rename(&tmp, file).await
 }
 
@@ -281,6 +294,7 @@ fn spawn_blocking_analysis(state: Arc<AppState>, track_id: String, audio: AudioR
             path,
             key,
             mtime_ms,
+            len,
         } = audio;
         let joined = tokio::task::spawn_blocking(move || vmusic_beats::analyze_path(&path)).await;
         match joined {
@@ -290,7 +304,7 @@ fn spawn_blocking_analysis(state: Arc<AppState>, track_id: String, audio: AudioR
                     return;
                 }
                 let cache_file = state.stage_beats_dir().join(format!("{key}.json"));
-                match write_cache(&cache_file, &map, mtime_ms).await {
+                match write_cache(&cache_file, &map, mtime_ms, len).await {
                     Ok(()) => {
                         state
                             .stage_beats
@@ -325,11 +339,10 @@ fn spawn_blocking_analysis(state: Arc<AppState>, track_id: String, audio: AudioR
 }
 
 async fn mark_failed(state: &Arc<AppState>, key: &str, reason: Reason) {
-    state
-        .stage_beats
-        .lock()
-        .await
-        .insert(key.to_string(), TaskState::Failed(reason));
+    let mut table = state.stage_beats.lock().await;
+    if !matches!(table.get(key), Some(TaskState::Ready(_))) {
+        table.insert(key.to_string(), TaskState::Failed(reason));
+    }
 }
 
 #[cfg(test)]
@@ -398,20 +411,23 @@ mod tests {
         let file = dir.join("a.flac");
         std::fs::write(&file, b"x").unwrap();
         let cache = dir.join("m.json");
-        write_cache(&cache, &sample_map(), mtime_ms(&file))
+        write_cache(&cache, &sample_map(), mtime_ms(&file), 1)
             .await
             .unwrap();
-        assert!(read_cache(&cache, mtime_ms(&file)).await.is_some());
+        assert!(read_cache(&cache, mtime_ms(&file), 1).await.is_some());
+        // 长度与 mtime 任一不符即失效（FAT 2 秒 mtime 粒度下的兜底）。
+        assert!(read_cache(&cache, mtime_ms(&file), 999).await.is_none());
+        assert!(read_cache(&cache, mtime_ms(&file), 1).await.is_some());
         // mtime 变化（这里模拟：改写缓存里的 source_mtime_ms）即失效。
         let mut bytes = std::fs::read(&cache).unwrap();
         let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         v["source_mtime_ms"] = serde_json::json!(mtime_ms(&file) - 5000);
         bytes = serde_json::to_vec(&v).unwrap();
         std::fs::write(&cache, bytes).unwrap();
-        assert!(read_cache(&cache, mtime_ms(&file)).await.is_none());
+        assert!(read_cache(&cache, mtime_ms(&file), 1).await.is_none());
         // 坏 JSON。
         std::fs::write(&cache, b"{nope").unwrap();
-        assert!(read_cache(&cache, mtime_ms(&file)).await.is_none());
+        assert!(read_cache(&cache, mtime_ms(&file), 1).await.is_none());
     }
 
     #[test]
