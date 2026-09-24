@@ -2762,8 +2762,8 @@ L972 `row.dataset.index = String(index);` 之后加：
 
 (function (global) {
   'use strict';
+  if (typeof window === 'undefined') return;
 
-  var PRIORITY = 20;             // cinema=10 < focus=20 < freecam=30
   var HOVER_MS = 120;
   var FLIGHT_MS = 260;
   var SHELF_DIST_MUL = 0.55;
@@ -2899,8 +2899,10 @@ L972 `row.dataset.index = String(index);` 之后加：
   function init() {
     if (inited) return;
     inited = true;
+    // camLayers：cinema=10 < focus=20 < freecam=30，数字直接写字面量以对齐
+    // 无头契约（与 cinema/freecam 注册写法一致）。
     if (global.CreativeStage && CreativeStage.addCamLayer) {
-      CreativeStage.addCamLayer(layer, PRIORITY);
+      CreativeStage.addCamLayer(layer, 20);
     }
     document.addEventListener('mouseover', onOver);
     document.addEventListener('mouseout', onOut);
