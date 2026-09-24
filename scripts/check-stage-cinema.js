@@ -269,5 +269,17 @@ section('玻璃化契约：舞台控制与工坊抽屉 + lowfx 降级');
     '主键按压保持自己的回弹时长');
 }
 
+section('存量场景参数防护（spec §8：只调参数，不动几何/着色器）');
+{
+  const gl = read('creative-gl.js');
+  const stage = read('creative-stage.js');
+  const focus = read('stage-focus.js');
+  ok(!/uRoll/.test(gl), 'roll 只经视图矩阵，不进着色器 uniform（粒子/星河不受 roll 影响）');
+  ok(/perspective\(proj,\s*cam\.fov[^)]*0\.1,\s*400\)/.test(gl), 'near 0.1 / far 400 保持');
+  ok(/tunnel:\s*\{[^}]*'cam\.dist':\s*4\.2/.test(stage), 'tunnel 基线 dist 4.2 保持（最近机位）');
+  ok(/Math\.max\(0\.3,/.test(stage), 'renderOne 对 dist 有 0.3 下限防护');
+  ok(!/\.style\./.test(focus), 'peek 只动相机 ctx，不碰 shelf-card 的 CSS 3D transform');
+}
+
 console.log(`\n${failures === 0 ? 'OK' : 'FAIL'}: ${checks - failures}/${checks} 通过`);
 process.exit(failures === 0 ? 0 : 1);
