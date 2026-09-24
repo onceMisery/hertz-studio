@@ -3609,6 +3609,78 @@ git --no-pager add crates/vmusicd/web/stage.css crates/vmusicd/web/creative.css 
 git --no-pager commit -m "feat(ui): 舞台控制与工坊抽屉玻璃化，lowfx 模糊降级 8px"
 ```
 
+## 主控追加（审查遗留，与 11.1-11.4 同批完成）
+
+任务 9 审查遗留四项 + 三条追加契约。因 fix 与 feat 两个提交都改 stage.css / check-stage-cinema.js，
+按编辑顺序切分提交边界（不用 `git add -p`）：**先落 fix 提交**（B1-B4 + C 的 3 条契约，
+此时 check-stage-cinema 103 项），**再落 feat 提交**（11.1-11.4 的 6 条契约，最终 109 项）。
+
+- **B1 删除旧玻璃死规则（style.css）**：原 L198-205 注释 `/* 所有曲面共用同一份玻璃配方 */`
+  及整条 `.topbar, .rail, .column, .stage, .bar { background: var(--panel); ... }` 规则删除——
+  四个饰面声明全部被文件后部 v2 规则（同特异性、后出现）
+  `.topbar, .rail, .column, .stage, .bar { background: var(--glass-bg); border: var(--glass-border); ... }`
+  覆盖，是死规则；任务 9 已把其 saturate 对齐到 120%，删掉无视觉变化。
+  删后令牌消费核对：`--panel` 仍有 online.css（.qr-card 等 2 处）与 stage.css（L1301/L1390 2 处）消费；
+  `--shadow` 仍有 style.css L1431/L1480 两处消费——check-css-tokens 契约 H 零消费告警未触发。
+
+- **B2 .theme-menu 实色覆盖一并玻璃化（stage.css）**：与 .stage-ctl 同病——style.css 弹层组
+  `.menu, .toast, .theme-menu, .stage-ctl` 已指向强玻璃，却被 stage.css 晚加载的同特异性实色盖掉。
+  .theme-menu 规则内三行实色声明（`border-radius: 12px` 保留原位）最终文本：
+
+```css
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-line);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow-glow);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.2);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.2);
+```
+
+- **B3 主键按压时长（style.css）**：`.ctrl-primary:active` 原单行规则被 `.ctrl:active` 的
+  80ms 过渡改写，补一行自己的回弹时长（`--dur-base` 已在 :root 定义并被本文件大量使用）：
+
+```css
+.ctrl-primary:active {
+  transform: scale(0.96);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+```
+
+- **B4 契约 H 防假阳性（scripts/check-css-tokens.js）**：契约 H 消费扫描原直接
+  `fs.readFileSync(...).includes(...)`，注释里写 `var(--x)` 会造成假阳性消费。复用该文件
+  主扫描已用的 `stripComments`，改为读 raw → `stripComments(raw)` → `includes`：
+
+```js
+  const used = files.some((f) => {
+    const raw = fs.readFileSync(path.join(webDir, f), 'utf8');
+    return stripComments(raw).includes(`var(${name})`);
+  });
+```
+
+- **C 追加契约（scripts/check-stage-cinema.js）**：并入任务 11 的同一个 section，
+  section 顶部在 stageCss/creativeCss 之外并列声明 `const style = read('style.css');`，
+  在 11.4 六条契约之后、section 的 `}` 之前加 3 条最终文本：
+
+```js
+  ok(/\.theme-menu\s*\{[^}]*var\(--glass-bg-strong\)/.test(stageCss), '主题菜单统一到强玻璃底');
+  ok(!/所有曲面共用同一份玻璃配方/.test(style || ''), '旧玻璃死规则已删除');
+  ok(/\.ctrl-primary:active\s*\{[^}]*transition:\s*transform var\(--dur-base\)/.test(style),
+    '主键按压保持自己的回弹时长');
+```
+
+- **追加发现：creative.css .ws-toast 同步去 fallback**：11.4 第 4 条契约与 grep 自查均为
+  **整文件口径**（creative.css 不得出现任何 `var(--glass-border,` / `var(--glass-shadow,` 带 fallback
+  写法），而 .ws-panel 之外 .ws-toast 规则（L758-759）还残留同样的 fallback，仅改 .ws-panel 会让
+  109 契约失败。处理：剥掉 fallback 默认值、保留同名令牌（视觉档位不变）：
+  `border: var(--glass-border);` / `box-shadow: var(--glass-shadow);`。
+
+- **提交**：`f334467 fix(ui): 主题菜单玻璃化、删除旧玻璃死规则、主键按压时长与契约H剥注释`
+  （style.css / stage.css / check-css-tokens.js / check-stage-cinema.js）先行；
+  `869441e feat(ui): 舞台控制与工坊抽屉玻璃化，lowfx 模糊降级 8px`
+  （stage.css / creative.css / check-stage-cinema.js）随后。
+  验证：check-stage-cinema 109/109、check-css-tokens 0 problems（990 规则 / 47 受检声明）、
+  9 脚本全过、cargo fmt/clippy -D warnings/test 204 全绿。
+
 ---
 
 # 任务 12：存量场景参数对照调优（只动参数/防护，不动几何与着色器）
