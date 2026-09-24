@@ -41,8 +41,7 @@ pub(crate) enum Reason {
 }
 
 impl Reason {
-    /// 任务 3 `GET /v1/stage/beatmap` 的 404 体读取 reason 字符串。
-    #[allow(dead_code)]
+    /// 404 响应体中的 reason 字符串。
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Reason::Tier0 => "tier0",
@@ -55,15 +54,13 @@ impl Reason {
 
 /// 请求结果：Ready 携带地图与是否命中磁盘缓存。
 pub(crate) enum Outcome {
-    /// 任务 3 `GET /v1/stage/beatmap` 200 响应读取地图与缓存命中标记。
-    #[allow(dead_code)]
+    /// 200 响应：完整地图与是否命中磁盘缓存。
     Ready {
         map: BeatMap,
         cached: bool,
     },
     Analyzing,
-    /// Reason 随任务 3 的 404 体读取。
-    #[allow(dead_code)]
+    /// 404 不可用及原因。
     Unavailable(Reason),
 }
 
@@ -100,9 +97,6 @@ pub(crate) fn spawn_after_commit(state: Arc<AppState>, track_id: String) {
 }
 
 /// GET 触发：失败态在本曲目播放期内不重试。
-///
-/// 任务 3 `GET /v1/stage/beatmap` 路由接线后启用；本任务只落地播放提交路径。
-#[allow(dead_code)]
 pub(crate) async fn request_on_demand(state: &Arc<AppState>, track_id: &str) -> Outcome {
     request(state, track_id, false).await
 }

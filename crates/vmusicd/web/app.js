@@ -398,6 +398,10 @@ function handleEvent(msg) {
         : '';
       break;
     }
+    case 'beatmap_ready':
+      // 服务端后台分析完成：是否拉取由 StageCinema 自己按当前曲目判断。
+      if (window.StageCinema && StageCinema.onBeatmapReady) StageCinema.onBeatmapReady(msg);
+      break;
     default: break;
   }
 }

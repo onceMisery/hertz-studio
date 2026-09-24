@@ -145,5 +145,28 @@ mod tests {
         })
         .unwrap();
         assert!(json.contains("\"index\":2"));
+
+        // beatmap_ready：bpm=None 时字段必须整体缺席（不是 null）。
+        let json = serde_json::to_string(&WsEvent::BeatmapReady {
+            track_id: "online:qq:42".into(),
+            bpm: Some(128.4),
+            beats_n: 412,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            "{\"type\":\"beatmap_ready\",\"track_id\":\"online:qq:42\",\"bpm\":128.4,\"beats_n\":412}"
+        );
+        let json = serde_json::to_string(&WsEvent::BeatmapReady {
+            track_id: "t1".into(),
+            bpm: None,
+            beats_n: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            "{\"type\":\"beatmap_ready\",\"track_id\":\"t1\",\"beats_n\":0}"
+        );
+        assert!(!json.contains("bpm"));
     }
 }

@@ -117,9 +117,47 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/online/qr/poll", get(online_qr_poll))
         .route("/v1/online/qr/cancel", post(online_qr_cancel))
         .route("/v1/online/account", get(online_account))
+        // 节拍地图：200 完整地图 / 202 分析中 / 404 不可用（前端静默回落 onset）。
+        .route("/v1/stage/beatmap", get(beatmap))
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new().route("/v1/health", get(health)).merge(api)
+}
+
+// ---------------------------------------------------------------------------
+// 舞台节拍地图
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub(super) struct BeatmapQuery {
+    track: String,
+}
+
+/// 三态响应手写状态码与 JSON 体：404 体是 `{status,reason}` 而不是标准
+/// ApiError 的 `{error}`，前端按 err.status / body.status 分流，不弹错。
+async fn beatmap(State(state): State<Arc<AppState>>, Query(q): Query<BeatmapQuery>) -> Response {
+    match crate::stage_beats::request_on_demand(&state, &q.track).await {
+        crate::stage_beats::Outcome::Ready { map, cached } => {
+            let mut value = serde_json::to_value(&map).unwrap_or(serde_json::Value::Null);
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("cached".into(), serde_json::Value::Bool(cached));
+            }
+            (StatusCode::OK, Json(value)).into_response()
+        }
+        crate::stage_beats::Outcome::Analyzing => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "status": "analyzing" })),
+        )
+            .into_response(),
+        crate::stage_beats::Outcome::Unavailable(reason) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "status": "unavailable",
+                "reason": reason.as_str(),
+            })),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
