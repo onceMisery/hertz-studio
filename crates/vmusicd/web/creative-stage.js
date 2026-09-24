@@ -612,8 +612,13 @@
     // 归零，让已平滑出去的残差用下面的 520ms 收回；同时解除"拖拽中被切走"
     // 留下的 dragging 闩锁（pointerup 在屏蔽期被吞）。惯性/滚轮不动基线外
     // 的量，保持原衰减路径。
-    var interactionBlocked = !!(interactionBlocker && interactionBlocker({ target: null }));
-    if (interactionBlocked) interact.dragging = false;
+    var interactionBlocked = !!(interactionBlocker && interactionBlocker(null));
+    if (interactionBlocked) {
+      interact.dragging = false;
+      // 视差采样一并清零：屏蔽解除时不会朝旧指针位置缓动。
+      interact.px = 0;
+      interact.py = 0;
+    }
     // 惯性：松手后按最后的步长继续滑，指数衰减到停。
     if (interact.on && !interact.dragging && (Math.abs(interact.vx) > 0.02 || Math.abs(interact.vy) > 0.02)) {
       interact.hadInertia = true;

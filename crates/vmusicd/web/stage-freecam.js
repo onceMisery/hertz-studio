@@ -9,6 +9,9 @@
 (function (global) {
   'use strict';
 
+  // Node（无头契约扫描）下早退：不触碰 document/localStorage，纯文本扫描不受影响。
+  if (typeof window === 'undefined') return;
+
   var POSE_KEY = 'vmusic.stage.freecam.pose';
   var MOVE_SPEED = 0.35;         // ×cam.dist/秒
   var SHIFT_MUL = 2;
@@ -34,6 +37,7 @@
   };
   var locked = false;
   var dragging = false;
+  var pid = null;               // 拖拽中指针 id：多指触摸只认落下的第一指
   var lastX = 0, lastY = 0;
   var lastT = 0;
 
@@ -41,21 +45,25 @@
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
   function lerp(a, b, k) { return a + (b - a) * k; }
   function easeInOut(x) { return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2; }
+  // 角度折回 (-180,180]：飞回 yaw 永远走最短弧，积累多圈时不会原地倒转。
+  function wrap180(v) { v = ((v + 180) % 360 + 360) % 360 - 180; return v; }
   function tier0() { return !!(global.Stage && Stage.tier && Stage.tier() === 0); }
   function stageEl() { return document.getElementById('stage'); }
 
   function loadPose() {
     try {
       var p = JSON.parse(localStorage.getItem(POSE_KEY) || 'null');
-      // 存储可能被外部写残（缺字段/类型错）：逐项补全，任何 NaN 都不进相机。
-      if (p && typeof p.yawDeg === 'number') {
+      // 存储可能被外部写残（缺字段/类型错/NaN/Infinity）：逐项补全，任何非有限值都不进相机。
+      if (p && typeof p.yawDeg === 'number' && isFinite(p.yawDeg)) {
+        var num = function (v, d) { return typeof v === 'number' && isFinite(v) ? v : d; };
+        var d = num(p.dist, 6);
         return {
           yawDeg: p.yawDeg,
-          pitchDeg: typeof p.pitchDeg === 'number' ? p.pitchDeg : 0,
-          dist: typeof p.dist === 'number' && p.dist > 0 ? p.dist : 6,
-          tx: typeof p.tx === 'number' ? p.tx : 0,
-          tz: typeof p.tz === 'number' ? p.tz : 0,
-          rollDeg: typeof p.rollDeg === 'number' ? p.rollDeg : 0
+          pitchDeg: num(p.pitchDeg, 0),
+          dist: d < 0.3 ? 0.3 : (d > 100 ? 100 : d),
+          tx: num(p.tx, 0),
+          tz: num(p.tz, 0),
+          rollDeg: num(p.rollDeg, 0)
         };
       }
     } catch (e) { /* 隐私模式：会话内 pose 变量兜底 */ }
@@ -84,11 +92,19 @@
   function setEnabled(on, fromEvent) {
     on = !!on;
     if (on) {
-      if (tier0() || enabled) return;
+      if (enabled) return;
+      if (tier0()) {
+        // 探针落锤前用户点了开关：把面板拨回 false 并隐藏，杜绝卡在 ON。
+        syncControl(false);
+        updateSwitchVisibility();
+        return;
+      }
       enabled = true;
       returning = null;
       rollBack = null;
       keys = {};
+      dragging = false;
+      pid = null;
       if (!pose) pose = loadPose();   // 首帧层回调还会用基线兜底
       if (global.StageCinema) StageCinema.setFreecam(true);
       addDomListeners();
@@ -96,10 +112,11 @@
       updateSwitchVisibility();
       return;
     }
-    if (!enabled && !returning) { if (!fromEvent) syncControl(false); return; }
+    if (!enabled) { if (!fromEvent) syncControl(false); return; }
     enabled = false;
     keys = {};
     dragging = false;
+    pid = null;
     releaseLock();
     if (global.StageCinema) StageCinema.setFreecam(false);
     removeDomListeners();
@@ -133,12 +150,16 @@
     }
   }
   function onKeyUp(e) { if (MOVE_CODES[e.code]) keys[e.code] = false; }
+  // 窗口失焦（Alt-Tab/切桌面）时 keyup 会丢：清空按键与拖拽，回来不会自己继续走。
+  function onBlur() { keys = {}; dragging = false; }
 
   function onPointerDown(e) {
     if (!enabled) return;
     if (e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, .stage-lyrics, .lp-body')) return;
+    if (e.isPrimary === false) return;
     if (e.button !== 0) return;
     dragging = true;
+    pid = e.pointerId;
     lastX = e.clientX;
     lastY = e.clientY;
     // 用户手势里申请指针锁定；被拒绝（权限策略/非安全上下文）也没关系，
@@ -151,17 +172,21 @@
       } catch (err) { locked = false; }
     }
   }
-  function onPointerUp() { dragging = false; }
+  function onPointerUp(e) {
+    if (e.pointerId !== pid) return;
+    dragging = false;
+    pid = null;
+  }
   function onMouseMove(e) {
     if (!enabled || !pose) return;
     if (locked && typeof e.movementX === 'number') {
-      pose.yawDeg += e.movementX * LOOK_YAW;
+      pose.yawDeg -= e.movementX * LOOK_YAW;
       pose.pitchDeg = clamp(pose.pitchDeg + e.movementY * LOOK_PITCH, -PITCH_LIMIT, PITCH_LIMIT);
-    } else if (dragging) {
+    } else if (dragging && (e.pointerId == null || e.pointerId === pid)) {
       var dx = e.clientX - lastX, dy = e.clientY - lastY;
       lastX = e.clientX;
       lastY = e.clientY;
-      pose.yawDeg += dx * LOOK_YAW;
+      pose.yawDeg -= dx * LOOK_YAW;
       pose.pitchDeg = clamp(pose.pitchDeg + dy * LOOK_PITCH, -PITCH_LIMIT, PITCH_LIMIT);
     }
   }
@@ -177,6 +202,7 @@
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('pointerlockchange', onLockChange);
     document.addEventListener('pointerlockerror', onLockError);
+    window.addEventListener('blur', onBlur);
     var el = stageEl();
     if (el) {
       el.addEventListener('pointerdown', onPointerDown);
@@ -189,6 +215,7 @@
     document.removeEventListener('mousemove', onMouseMove);
     document.removeEventListener('pointerlockchange', onLockChange);
     document.removeEventListener('pointerlockerror', onLockError);
+    window.removeEventListener('blur', onBlur);
     var el = stageEl();
     if (el) {
       el.removeEventListener('pointerdown', onPointerDown);
@@ -216,7 +243,8 @@
       var k = clamp((ctx.t - returning.start) / RETURN_MS, 0, 1);
       var e = easeInOut(k);
       var f = returning.from;
-      ctx.yawDeg = lerp(f.yawDeg, ctx.baseYawDeg, e);
+      var fromYaw = ctx.baseYawDeg + wrap180(f.yawDeg - ctx.baseYawDeg);
+      ctx.yawDeg = lerp(fromYaw, ctx.baseYawDeg, e);
       ctx.pitchDeg = lerp(f.pitchDeg, ctx.basePitchDeg, e);
       ctx.dist = lerp(f.dist, ctx.baseDist, e);
       ctx.tx = lerp(f.tx, 0, e);
@@ -251,10 +279,11 @@
       if (rk >= 1) rollBack = null;
     }
 
-    // WASD：水平面沿 yaw 朝向（eye 向量 x=sin(yaw)、z=cos(yaw)，与 creative-gl 一致）。
+    // WASD：屏幕前向 = target-eye 水平向（eye 向量 x=sin(yaw)、z=cos(yaw)，
+    // 与 creative-gl 一致），故 W 取其反方向 (-sin,-cos)。
     var speed = MOVE_SPEED * pose.dist * ((keys.ShiftLeft || keys.ShiftRight) ? SHIFT_MUL : 1) * dt / 1000;
     var yaw = pose.yawDeg * Math.PI / 180;
-    var fx = Math.sin(yaw), fz = Math.cos(yaw);
+    var fx = -Math.sin(yaw), fz = -Math.cos(yaw);   // 屏幕前向 = target-eye 水平向
     var rx = Math.cos(yaw), rz = -Math.sin(yaw);
     var mx = 0, mz = 0;
     if (keys.KeyW) { mx += fx; mz += fz; }

@@ -181,13 +181,21 @@ section('跨文件契约：自由相机');
   ok(/0\.14/.test(fc) && /0\.11/.test(fc), '指针锁定灵敏度取拖拽一半');
   ok(/requestPointerLock/.test(fc) && /dragging/.test(fc), '指针锁定 + 按住拖拽回落');
   ok(/KeyW/.test(fc) && /KeyQ/.test(fc) && /KeyE/.test(fc) && /KeyK/.test(fc), 'WASD/QE/K 操控');
+  ok(/fx = -Math\.sin\(yaw\), fz = -Math\.cos\(yaw\)/.test(fc), 'W 朝屏幕前向（target-eye 水平向）');
+  ok(/-= e\.movementX \* LOOK_YAW/.test(fc) && /-= dx \* LOOK_YAW/.test(fc),
+    '锁定/拖拽环视 yaw 为负（鼠标右转视角右）');
+  ok(/addEventListener\('blur', onBlur\)/.test(fc), '窗口失焦清空按键');
+  ok(/isPrimary === false/.test(fc) && /e\.pointerId !== pid/.test(fc), '指针只认主键/同一指');
+  ok(/isFinite\(p\.yawDeg\)/.test(fc) && /d > 100 \? 100 : d/.test(fc), '机位存储全有限性与 dist 区间');
+  ok(/wrap180\(f\.yawDeg - ctx\.baseYawDeg\)/.test(fc), '飞回 yaw 走最短弧');
+  ok(/typeof window === 'undefined'\) return/.test(fc), 'Node 下驱动早退');
   ok(/40/.test(fc) && /ROLL_LIMIT = 25/.test(fc), '滚转速度 40°/s、上限 ±25°');
   ok(/RETURN_MS = 600/.test(fc), '关闭 600ms 飞回');
   ok(/Escape/.test(fc) && /setEnabled\(false/.test(fc), 'Esc 退出');
   ok(/stage:fps/.test(fc) && /sc-cine-freecam/.test(fc), 'tier0 退出并隐藏开关');
   ok(/setInteractionBlocker/.test(fc) && /interactionBlocker/.test(stage),
     '屏蔽 creative-stage 原生拖拽/点击/滚轮，防双触发');
-  ok(/interactionBlocker\(\{ target: null \}\)/.test(stage) &&
+  ok(/interactionBlocker\(null\)/.test(stage) &&
     /\(interact\.on && !interactionBlocked\) \? interact\.px/.test(stage),
     '屏蔽期视差目标归零并解除拖拽闩锁');
   ok(/StageFreecam\.init\(\)/.test(app) && /stage-freecam\.js/.test(html), '初始化与页面引用');
