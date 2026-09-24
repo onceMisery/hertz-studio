@@ -170,5 +170,25 @@ section('跨文件契约：驱动 / 协议 / 开关');
   ok(/STAGE_CINEMA_JS/.test(main) && /stage-cinema\.js/.test(html), 'cinema 资源内嵌与页面引用');
 }
 
+section('跨文件契约：自由相机');
+{
+  const fc = read('stage-freecam.js');
+  const stage = read('creative-stage.js');
+  const app = read('app.js');
+  const html = read('index.html');
+  ok(/vmusic\.stage\.freecam\.pose/.test(fc), '机位 localStorage 独立键');
+  ok(/addCamLayer\(layer, 30\)/.test(fc), 'freecam 以 priority 30 全覆盖');
+  ok(/0\.14/.test(fc) && /0\.11/.test(fc), '指针锁定灵敏度取拖拽一半');
+  ok(/requestPointerLock/.test(fc) && /dragging/.test(fc), '指针锁定 + 按住拖拽回落');
+  ok(/KeyW/.test(fc) && /KeyQ/.test(fc) && /KeyE/.test(fc) && /KeyK/.test(fc), 'WASD/QE/K 操控');
+  ok(/40/.test(fc) && /ROLL_LIMIT = 25/.test(fc), '滚转速度 40°/s、上限 ±25°');
+  ok(/RETURN_MS = 600/.test(fc), '关闭 600ms 飞回');
+  ok(/Escape/.test(fc) && /setEnabled\(false/.test(fc), 'Esc 退出');
+  ok(/stage:fps/.test(fc) && /sc-cine-freecam/.test(fc), 'tier0 退出并隐藏开关');
+  ok(/setInteractionBlocker/.test(fc) && /interactionBlocker/.test(stage),
+    '屏蔽 creative-stage 原生拖拽/点击/滚轮，防双触发');
+  ok(/StageFreecam\.init\(\)/.test(app) && /stage-freecam\.js/.test(html), '初始化与页面引用');
+}
+
 console.log(`\n${failures === 0 ? 'OK' : 'FAIL'}: ${checks - failures}/${checks} 通过`);
 process.exit(failures === 0 ? 0 : 1);

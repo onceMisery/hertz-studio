@@ -2579,6 +2579,7 @@ function onCreativeRuntimeDegrade(ev) {
 function initCreative() {
   if (window.CreativeStage) CreativeStage.init();
   if (window.StageCinema) StageCinema.init();
+  if (window.StageFreecam) StageFreecam.init();
   if (window.Backgrounds) Backgrounds.init();
   if (window.HandDrawn) HandDrawn.init();
   if (window.Workshop) Workshop.init();

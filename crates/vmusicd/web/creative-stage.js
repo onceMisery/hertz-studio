@@ -175,6 +175,9 @@
   var camLayers = [];
   // 交互屏蔽钩子：自由相机启用时由任务 7 注册，bindInteraction 各入口早退。
   var interactionBlocker = null;
+  // 各交互入口统一走 blocked 早退：钩子返回 true（自由相机开启/飞回中）时，
+  // 原生拖拽/视差/惯性/爆闪/滚轮/双击复位全部不触发，避免与 freecam 双控。
+  function blocked(e) { return !!(interactionBlocker && interactionBlocker(e)); }
   var activeIdx = 0;
   var attached = false;
   var wanted = false;        // 用户是否要求启用三维舞台
@@ -545,6 +548,7 @@
 
   function bindInteraction(el) {
     el.addEventListener('pointerdown', function (e) {
+      if (blocked(e)) return;
       if (!interact.on) return;
       if (interact.dragging) return;          // 多指：第二根手指不接管拖拽
       if (e.target.closest && e.target.closest('button, a, input, select, textarea, .stage-lyrics, .lp-body')) return;
@@ -557,6 +561,7 @@
       interact.vy = 0;
     });
     el.addEventListener('pointermove', function (e) {
+      if (blocked(e)) return;
       if (!interact.on) return;
       // 视差：不拖拽时指针也轻轻推着镜头偏。不写入任何参数，只是渲染层的
       // 一个偏移量 —— 所以 cue、导演、预置数据完全不受它污染。
@@ -580,6 +585,7 @@
       setParam('cam.pitch', readPath(runtime, 'cam.pitch') + pitchStep);
     });
     el.addEventListener('pointerup', function (e) {
+      if (blocked(e)) return;
       if (!interact.on || !interact.dragging) return;
       if (e.pointerId !== interact.pid) return;
       interact.dragging = false;
@@ -588,6 +594,7 @@
     });
     el.addEventListener('pointercancel', function () { interact.dragging = false; });
     el.addEventListener('wheel', function (e) {
+      if (blocked(e)) return;
       if (!interact.on) return;
       e.preventDefault();
       // 只记目标值，真正的移动在渲染帧里做平滑趋近 —— 滚轮事件是离散的，
@@ -595,7 +602,7 @@
       var base = (interact.zoomTarget === null) ? readPath(runtime, 'cam.dist') : interact.zoomTarget;
       interact.zoomTarget = clampPath('cam.dist', base + Math.sign(e.deltaY) * 1.2);
     }, { passive: false });
-    el.addEventListener('dblclick', function () { resetView(); });
+    el.addEventListener('dblclick', function (e) { if (blocked(e)) return; resetView(); });
   }
 
   // 每帧的交互连续量：拖拽惯性、滚轮缩放的平滑趋近、指针视差。
