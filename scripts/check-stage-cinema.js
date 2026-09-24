@@ -187,6 +187,9 @@ section('跨文件契约：自由相机');
   ok(/stage:fps/.test(fc) && /sc-cine-freecam/.test(fc), 'tier0 退出并隐藏开关');
   ok(/setInteractionBlocker/.test(fc) && /interactionBlocker/.test(stage),
     '屏蔽 creative-stage 原生拖拽/点击/滚轮，防双触发');
+  ok(/interactionBlocker\(\{ target: null \}\)/.test(stage) &&
+    /\(interact\.on && !interactionBlocked\) \? interact\.px/.test(stage),
+    '屏蔽期视差目标归零并解除拖拽闩锁');
   ok(/StageFreecam\.init\(\)/.test(app) && /stage-freecam\.js/.test(html), '初始化与页面引用');
 }
 

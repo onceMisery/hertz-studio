@@ -47,7 +47,17 @@
   function loadPose() {
     try {
       var p = JSON.parse(localStorage.getItem(POSE_KEY) || 'null');
-      if (p && typeof p.yawDeg === 'number') return p;
+      // 存储可能被外部写残（缺字段/类型错）：逐项补全，任何 NaN 都不进相机。
+      if (p && typeof p.yawDeg === 'number') {
+        return {
+          yawDeg: p.yawDeg,
+          pitchDeg: typeof p.pitchDeg === 'number' ? p.pitchDeg : 0,
+          dist: typeof p.dist === 'number' && p.dist > 0 ? p.dist : 6,
+          tx: typeof p.tx === 'number' ? p.tx : 0,
+          tz: typeof p.tz === 'number' ? p.tz : 0,
+          rollDeg: typeof p.rollDeg === 'number' ? p.rollDeg : 0
+        };
+      }
     } catch (e) { /* 隐私模式：会话内 pose 变量兜底 */ }
     return null;
   }

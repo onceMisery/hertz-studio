@@ -608,6 +608,12 @@
   // 每帧的交互连续量：拖拽惯性、滚轮缩放的平滑趋近、指针视差。
   // 全部放在渲染帧里推进，与事件循环解耦 —— 事件是离散的，画面是连续的。
   function stepInteraction(dtMs) {
+    // 交互屏蔽（自由相机开启/飞回中）：事件入口虽已早退，这里仍要把视差目标
+    // 归零，让已平滑出去的残差用下面的 520ms 收回；同时解除"拖拽中被切走"
+    // 留下的 dragging 闩锁（pointerup 在屏蔽期被吞）。惯性/滚轮不动基线外
+    // 的量，保持原衰减路径。
+    var interactionBlocked = !!(interactionBlocker && interactionBlocker({ target: null }));
+    if (interactionBlocked) interact.dragging = false;
     // 惯性：松手后按最后的步长继续滑，指数衰减到停。
     if (interact.on && !interact.dragging && (Math.abs(interact.vx) > 0.02 || Math.abs(interact.vy) > 0.02)) {
       interact.hadInertia = true;
@@ -642,8 +648,8 @@
     // 视差：慢速跟随，幅度刻意小（±2° 上下），只是"舞台活着"的呼吸感。
     // 交互关掉时目标归零，镜头悄悄回正。
     var pk = alpha(dtMs, 520);
-    var tpx = interact.on ? interact.px : 0;
-    var tpy = interact.on ? interact.py : 0;
+    var tpx = (interact.on && !interactionBlocked) ? interact.px : 0;
+    var tpy = (interact.on && !interactionBlocked) ? interact.py : 0;
     interact.parYaw += (tpx * 0.038 - interact.parYaw) * pk;
     interact.parPitch += (tpy * 0.024 - interact.parPitch) * pk;
   }
