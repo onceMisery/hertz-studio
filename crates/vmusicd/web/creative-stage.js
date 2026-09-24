@@ -170,6 +170,11 @@
   // -------------------------------------------------------------------------
 
   var views = [];            // [{ el, canvas, eng, w, h }]：舞台 + 全屏页各一块
+  // 相机层总线：每帧按 priority 升序调用（cinema=10 / focus peek=20 /
+  // freecam=30）。层函数只改 ctx，基线/ shake/漂移在层外统一收口。
+  var camLayers = [];
+  // 交互屏蔽钩子：自由相机启用时由任务 7 注册，bindInteraction 各入口早退。
+  var interactionBlocker = null;
   var activeIdx = 0;
   var attached = false;
   var wanted = false;        // 用户是否要求启用三维舞台
@@ -803,18 +808,50 @@
       }
     }
 
-    // --- 相机 ---
+    // --- 相机：基线 → camLayers（cinema/peek/freecam）→ 漂移 → shake ---
     stepInteraction(dtMs);
-    var drift = readPath(runtime, 'cam.drift') / 100;
-    driftPhase += dtMs / 1000 * 0.12 * drift;
+    var driftBase = readPath(runtime, 'cam.drift') / 100;
+    driftPhase += dtMs / 1000 * 0.12 * driftBase;
     cam.shakeYaw *= Math.exp(-dtMs / 130);
     cam.shakePitch *= Math.exp(-dtMs / 130);
-    var yaw = (readPath(runtime, 'cam.yaw') * Math.PI / 180)
+    var ctx = {
+      t: t,
+      dtMs: dtMs,
+      scene: preset.scene,
+      play: document.body.classList.contains('is-playing'),
+      readPath: function (p) { return readPath(runtime, p); },
+      // 基线（preset/滑块/导演），层函数读它但不改它。
+      baseYawDeg: readPath(runtime, 'cam.yaw'),
+      basePitchDeg: readPath(runtime, 'cam.pitch'),
+      baseDist: readPath(runtime, 'cam.dist'),
+      baseFov: readPath(runtime, 'cam.fov'),
+      baseHeight: readPath(runtime, 'cam.height'),
+      // 层输出：cinema 乘 fov/dist/加 roll；peek/freecam 直接覆盖机位。
+      yawDeg: readPath(runtime, 'cam.yaw'),
+      pitchDeg: readPath(runtime, 'cam.pitch'),
+      dist: readPath(runtime, 'cam.dist'),
+      fov: readPath(runtime, 'cam.fov'),
+      tx: 0,
+      ty: readPath(runtime, 'cam.height'),
+      tz: 0,
+      rollDeg: 0,
+      // 漂移倍率（cinema 在 intensity 3 时抬到 1.4；freecam 置 0）。
+      driftMul: 1,
+      // 自由相机全开标志（目前只作观测，不参与合成分支）。
+      freecam: false
+    };
+    for (var li = 0; li < camLayers.length; li += 1) {
+      try { camLayers[li].fn(ctx); } catch (e) { /* 单层抛错不能拖垮帧循环 */ }
+    }
+
+    var drift = driftBase * ctx.driftMul;
+    var yaw = (ctx.yawDeg * Math.PI / 180)
       + Math.sin(driftPhase) * 0.22 * drift + cam.shakeYaw + interact.parYaw;
-    var pitch = clamp((readPath(runtime, 'cam.pitch') * Math.PI / 180)
+    var pitch = clamp((ctx.pitchDeg * Math.PI / 180)
       + Math.sin(driftPhase * 0.73 + 1.1) * 0.10 * drift + cam.shakePitch + interact.parPitch, -1.35, 1.35);
-    var dist = readPath(runtime, 'cam.dist')
-      * (1 - agg[0] * 0.06 * (readPath(runtime, 'cam.kick') / 100));
+    // agg kick 是基线音频响应，对所有层生效；near plane 0.1，dist 不得贴到 0.3 以下。
+    var dist = Math.max(0.3, ctx.dist
+      * (1 - agg[0] * 0.06 * (readPath(runtime, 'cam.kick') / 100)));
 
     var rot = readPath(runtime, 'stage.rotY') * Math.PI / 180 + driftPhase * 0.25 * drift;
     var sc = readPath(runtime, 'stage.scale');
@@ -831,8 +868,9 @@
       // 三维歌词场景的只读歌词快照（行数组 + 当前行号）；其它场景忽略。
       lyric: (window.Stage && Stage.lyrics) ? Stage.lyrics() : null,
       cam: { yaw: yaw, pitch: pitch, dist: dist,
-        fov: readPath(runtime, 'cam.fov'),
-        tx: 0, ty: readPath(runtime, 'cam.height'), tz: 0 },
+        fov: ctx.fov,
+        tx: ctx.tx, ty: ctx.ty, tz: ctx.tz,
+        roll: ctx.rollDeg * Math.PI / 180 },
       colors: colors(),
       // 模型矩阵只承载绕 Y 旋转与整体缩放，但仍然走完整的 mat4：towers 场景
       // 的地面倒影需要把它整体换成镜像矩阵再画一遍，接口一致才不用特殊分支。
@@ -1445,7 +1483,25 @@
         probe: probeInfo()
       };
     },
-    onChange: onChange
+    onChange: onChange,
+
+    // 相机层注册。priority 小者先执行；同 fn 不重复注册。
+    addCamLayer: function (fn, priority) {
+      if (typeof fn !== 'function') return;
+      if (camLayers.some(function (x) { return x.fn === fn; })) return;
+      camLayers.push({ fn: fn, p: priority == null ? 100 : priority });
+      camLayers.sort(function (a, b) { return a.p - b.p; });
+    },
+    removeCamLayer: function (fn) {
+      for (var i = 0; i < camLayers.length; i += 1) {
+        if (camLayers[i].fn === fn) { camLayers.splice(i, 1); return; }
+      }
+    },
+    // 自由相机等需要完全屏蔽舞台原生拖拽/点击爆闪/滚轮/双击的场景注册；
+    // fn 返回 true 时 bindInteraction 各入口早退。传 null 解除。
+    setInteractionBlocker: function (fn) {
+      interactionBlocker = typeof fn === 'function' ? fn : null;
+    }
   };
 
   function readRuntime() {

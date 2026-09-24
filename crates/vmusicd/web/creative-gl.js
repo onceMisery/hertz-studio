@@ -75,6 +75,19 @@
     return out;
   }
 
+  // 相机滚转：lookAt 之后视线在视图空间指向 -Z，对视图矩阵左乘 Rz
+  // 等价于绕相机前向轴旋转（若在世界轴上转，机位本身会被甩偏）。
+  // scratch 为调用方持有的矩阵缓存，避免每帧分配。
+  function rollView(out, scratch, viewMat, rollRad) {
+    var c = Math.cos(rollRad), s = Math.sin(rollRad);
+    scratch[0] = c;  scratch[1] = s;  scratch[2] = 0;  scratch[3] = 0;
+    scratch[4] = -s; scratch[5] = c;  scratch[6] = 0;  scratch[7] = 0;
+    scratch[8] = 0;  scratch[9] = 0;  scratch[10] = 1; scratch[11] = 0;
+    scratch[12] = 0; scratch[13] = 0; scratch[14] = 0; scratch[15] = 1;
+    mul(out, scratch, viewMat);
+    return out;
+  }
+
   // ---------------------------------------------------------------------------
   // 着色器公共前导
   // ---------------------------------------------------------------------------
@@ -1090,7 +1103,7 @@ void main() {
     }
 
     // --- 矩阵缓存 -----------------------------------------------------------
-    var proj = mat4(), view = mat4(), viewProj = mat4();
+    var proj = mat4(), view = mat4(), viewProj = mat4(), rollM = mat4(), rolled = mat4();
     var identity = mat4();
     identity[0] = identity[5] = identity[10] = identity[15] = 1;
     // 沿 y 镜像：倒影用。模型矩阵直接换成它，顶点着色器不用改。
@@ -1179,7 +1192,13 @@ void main() {
       S.eye = eye;
       perspective(proj, cam.fov * Math.PI / 180, w / h, 0.1, 400);
       lookAt(view, eye[0], eye[1], eye[2], cam.tx, cam.ty, cam.tz, 0, 1, 0);
-      mul(viewProj, proj, view);
+      // roll 缺省 0：除电影/自由相机外所有调用方不传即完全等价旧路径。
+      if (cam.roll) {
+        rollView(rolled, rollM, view, cam.roll);
+        mul(viewProj, proj, rolled);
+      } else {
+        mul(viewProj, proj, view);
+      }
 
       uploadSpectrum(S.bands, S.rises);
       if (def.id === 'lyric') uploadLyric(S);
