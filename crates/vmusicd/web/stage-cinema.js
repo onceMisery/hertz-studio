@@ -58,6 +58,7 @@
   }
 
   // 拍游标：cursor 是「下一个尚未消费的拍」在 beats 里的下标。
+  // 前置条件：map.beats 按 t 非降序（服务端分析库保证；乱序会延迟/丢拍）。
   function createTimeline(map) { return { map: map, cursor: 0 }; }
 
   // 地图晚到 / 换曲 / seek：从 nowMs 之后开始，落点 ±60ms 内的拍不补放。
@@ -87,12 +88,18 @@
 
   // 确定性包络。sign 为该拍的交替方向（调用方按下标奇偶给 ±1）；
   // params = { punch: 用户冲击强度倍率（已含 peek 压制）, tunnel: 是否近机位 }。
-  // 返回 { fovMul, distMul, rollDeg }，超过 DOWN_ROLL_MS 或 dt<0 都是单位元。
+  // punch 定义域 [0,+∞)，UI（cinePunch 滑块 0–200%）实际只给 0..2；该域内
+  // fovMul 最低约 0.82、distMul 不低于 0.93，画面安全。
+  // 返回 { fovMul, distMul, rollDeg }，超出 [0,420]ms 窗口是单位元。
   function envelope(beat, nowMs, sign, params) {
     var identity = { fovMul: 1, distMul: 1, rollDeg: 0 };
     var dt = nowMs - beat.t;
-    if (dt < 0 || dt > DOWN_ROLL_MS) return identity;
-    var punch = params && params.punch != null ? params.punch : 1;
+    // !(dt >= 0) 同时挡住负值与 NaN：NaN 比较既不抛错也不进单位元分支，
+    // 放行会产出全 NaN 相机矩阵——层总线的 try/catch 捕不到这种"坏而不崩"。
+    if (!(dt >= 0) || dt > DOWN_ROLL_MS) return identity;
+    var punch0 = params && params.punch != null ? params.punch : 1;
+    var punch = isFinite(punch0) && punch0 >= 0 ? punch0 : 1;
+    if (sign !== 1 && sign !== -1) sign = 1;
     var amp = punch * (beat.intensity === 3 ? 1.5 : 1);
     var strong = !!beat.downbeat;
     var fovMin = strong ? DOWN_FOV_MIN : BEAT_FOV_MIN;
@@ -101,14 +108,16 @@
     // 0..28ms 线性起振，之后 ease-out 回收（fov/dist 用 fovLen，roll 用自己的长度）。
     var attackK = dt <= ATTACK_MS ? dt / ATTACK_MS : 1;
     var eFov = dt <= ATTACK_MS ? 0 : easeOutCubic(clamp((dt - ATTACK_MS) / fovLen, 0, 1));
+    // 0.5 正下界：驱动缺陷给出越界倍率时宁可少推镜头，也不能让负 fov/dist
+    // 进投影矩阵造成绕序翻转（合法 punch 域内这两个钳制永不触发）。
     var out = {
-      fovMul: 1 - (1 - fovMin) * amp * attackK * (1 - eFov),
+      fovMul: Math.max(0.5, 1 - (1 - fovMin) * amp * attackK * (1 - eFov)),
       distMul: 1,
       rollDeg: 0
     };
     if (strong) {
       var tunnel = params && params.tunnel ? 0.5 : 1;
-      out.distMul = 1 - (1 - DOWN_DIST_MIN) * amp * tunnel * attackK * (1 - eFov);
+      out.distMul = Math.max(0.5, 1 - (1 - DOWN_DIST_MIN) * amp * tunnel * attackK * (1 - eFov));
       var eRoll = easeOutCubic(clamp((dt - ATTACK_MS) / DOWN_ROLL_MS, 0, 1));
       out.rollDeg = clamp(sign * DOWN_ROLL_MAX * amp * attackK * (1 - eRoll), -ROLL_LIMIT, ROLL_LIMIT);
     } else if (beat.strength > BEAT_ROLL_GATE) {

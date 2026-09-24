@@ -30,7 +30,7 @@ function makeMap(beatSpec) {
   return {
     version: 1, bpm: 120, offset_ms: 0, truncated: false,
     beats: beatSpec.map(function (b, i) {
-      return { t: b[0], strength: b[1], downbeat: !!b[2], intensity: b[3] || (i % 4 === 0 ? 2 : 1) };
+      return { t: b[0], strength: b[1], downbeat: !!b[2], intensity: b[3] != null ? b[3] : (i % 4 === 0 ? 2 : 1) };
     })
   };
 }
@@ -85,29 +85,35 @@ section('节拍包络');
   const e0 = P.envelope(down, 990, 1, {});
   ok(e0.fovMul === 1 && e0.distMul === 1 && e0.rollDeg === 0, '拍前是单位元');
   const attack = P.envelope(down, 1028, 1, { punch: 1 });
-  ok(approx(attack.fovMul, 0.94, 0.005), '强拍起振底 fov×0.94');
-  ok(approx(attack.distMul, 0.975, 0.005), '强拍 dist×0.975');
-  ok(approx(attack.rollDeg, 1.2, 0.005), '强拍 roll +1.2°');
+  ok(approx(attack.fovMul, 0.94, 0.0001), '强拍起振底 fov×0.94');
+  ok(approx(attack.distMul, 0.975, 0.0001), '强拍 dist×0.975');
+  ok(approx(attack.rollDeg, 1.2, 0.0001), '强拍 roll +1.2°');
   ok(P.envelope(down, 1028, -1, {}).rollDeg < 0, '相邻方向交替取负');
   const back = P.envelope(down, 1420, 1, {});
-  ok(approx(back.fovMul, 1, 0.01) && approx(back.rollDeg, 0, 0.01), '收束段回到基线');
+  ok(approx(back.fovMul, 1, 0.001) && approx(back.rollDeg, 0, 0.001), '收束段回到基线');
 
   const w = P.envelope(weak, 1028, 1, {});
-  ok(approx(w.fovMul, 0.975, 0.005), '普通拍 fov×0.975');
+  ok(approx(w.fovMul, 0.975, 0.0001), '普通拍 fov×0.975');
   ok(w.distMul === 1, '普通拍无 dist punch');
-  ok(approx(w.rollDeg, 0.5, 0.005), 'strength>0.8 普通拍带 ±0.5° roll');
+  ok(approx(w.rollDeg, 0.5, 0.0001), 'strength>0.8 普通拍带 ±0.5° roll');
   const ws = P.envelope(weakSoft, 1028, 1, {});
   ok(ws.rollDeg === 0, 'strength≤0.8 普通拍无 roll');
 
   const hot = P.envelope({ t: 1000, strength: 0.9, downbeat: true, intensity: 3 }, 1028, 1, {});
-  ok(approx(hot.fovMul, 1 - 0.06 * 1.5, 0.005), 'intensity 3 幅度 ×1.5');
+  ok(approx(hot.fovMul, 1 - 0.06 * 1.5, 0.0001), 'intensity 3 幅度 ×1.5');
   const tuned = P.envelope(down, 1028, 1, { punch: 0.5 });
-  ok(approx(tuned.fovMul, 1 - 0.06 * 0.5, 0.005), 'cinePunch 等比缩放');
+  ok(approx(tuned.fovMul, 1 - 0.06 * 0.5, 0.0001), 'cinePunch 等比缩放');
   const tunnel = P.envelope(down, 1028, 1, { punch: 1, tunnel: true });
-  ok(approx(tunnel.distMul, 1 - 0.025 * 0.5, 0.005), 'tunnel 近机位 dist punch 折半');
-  // amp=15*1.5=22.5、起振满（dt=28）时原始 roll=27°，必须被钳到 25。
-  const capped = P.envelope({ t: 0, strength: 1, downbeat: true, intensity: 3 }, 28, 1, { punch: 15 });
-  ok(capped.rollDeg === P.ROLL_LIMIT, 'roll 超幅时精确钳到 +25°');
+  ok(approx(tunnel.distMul, 1 - 0.025 * 0.5, 0.0001), 'tunnel 近机位 dist punch 折半');
+  // 越界倍率（驱动缺陷的极端输入，UI 合法域 punch≤2）：roll 原始 27° 精确
+  // 钳到 25，fov/dist 被 0.5 正下界兜住，画面不翻转。
+  const wild = P.envelope({ t: 0, strength: 1, downbeat: true, intensity: 3 }, 28, 1, { punch: 15 });
+  ok(wild.rollDeg === P.ROLL_LIMIT, 'roll 超幅时精确钳到 +25°');
+  ok(wild.fovMul === 0.5 && wild.distMul === 0.5, 'fov/dist 有 0.5 正下界');
+  const nanEnv = P.envelope(down, NaN, 1, {});
+  ok(nanEnv.fovMul === 1 && nanEnv.distMul === 1 && nanEnv.rollDeg === 0, 'NaN 时间返回单位元');
+  const negPunch = P.envelope(down, 1028, 1, { punch: -1 });
+  ok(approx(negPunch.fovMul, 0.94, 0.0001), '负 punch 退回缺省倍率 1');
   const over = P.envelope(down, 1421, 1, {});
   ok(over.fovMul === 1 && over.distMul === 1 && over.rollDeg === 0, '超过 420ms 窗口是单位元');
 }
