@@ -1802,8 +1802,8 @@ section('时间轴：外推时钟');
   ok(P.pt(c, 750) === 1250, '播放中按本地时钟外推');
   P.reanchor(c, 1300, 800, true);
   ok(P.pt(c, 800) === 1300, '状态帧到达即重锚');
-  ok(P.reanchor(c, 2000, 900, false) === false, '小幅偏差不是硬对齐');
-  ok(P.pt(c, 1000) === 2000, '暂停时冻结在锚点');
+  ok(P.reanchor(c, 1400, 900, false) === false, '小幅偏差不是硬对齐');
+  ok(P.pt(c, 1000) === 1400, '暂停时冻结在锚点');
   ok(P.reanchor(c, 5000, 1100, true) === true, '漂移 >150ms 触发硬对齐');
 }
 
@@ -1818,8 +1818,11 @@ section('时间轴：游标 / seek / 一帧多拍');
   ok(got2 && got2.t === 500, '后续区间继续推进');
 
   const tl2 = P.createTimeline(makeMap([[1000, 0.5], [5000, 0.6], [5050, 0.9], [5100, 0.4]]));
-  ok(P.advance(tl2, 0, 200).t === 1000, '正常区间拍点');
-  ok(P.advance(tl2, 200, 30000) === null, 'seek 后硬跳不补发区间拍（由 relocate 负责）');
+  ok(P.advance(tl2, 0, 1000).t === 1000, '正常区间拍点');
+  // seek：驱动侧检测到硬对齐会先 relocate 到新位置，随后 advance 不得补发
+  // 跨越区间内的历史拍（spec §9：只取最强一拍的长帧规则也不允许连发）。
+  P.relocate(tl2, 30000);
+  ok(P.advance(tl2, 1000, 30000) === null, 'seek 经 relocate 后不补发区间拍');
 
   const tl3 = P.createTimeline(makeMap([[1000, 0.5], [2000, 0.6]]));
   P.relocate(tl3, 5000);
