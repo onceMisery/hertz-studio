@@ -28,9 +28,22 @@
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
   function lerp(a, b, k) { return a + (b - a) * k; }
   function easeOutCubic(x) { return 1 - Math.pow(1 - x, 3); }
-  function freecamOn() { return !!(global.StageFreecam && StageFreecam.isEnabled && StageFreecam.isEnabled()); }
+  // isBusy 含开启与 600ms 飞回中：飞回期 peek 输出会被 freecam 层覆盖，
+  // 等它结束再起，否则两层在同一帧交班时会跳切。
+  function freecamBusy() {
+    return !!(global.StageFreecam && (
+      (StageFreecam.isBusy && StageFreecam.isBusy()) ||
+      (!StageFreecam.isBusy && StageFreecam.isEnabled && StageFreecam.isEnabled())));
+  }
   function tier0() { return !!(global.Stage && Stage.tier && Stage.tier() === 0); }
-  function touchDevice() { return !!(global.matchMedia && matchMedia('(hover: none)').matches); }
+  // hover 能力会话内不变：惰性缓存，避免 document 级 mouseover 高频查 matchMedia。
+  var hoverCapable = null;
+  function touchDevice() {
+    if (hoverCapable === null) {
+      hoverCapable = !(global.matchMedia && matchMedia('(hover: none)').matches);
+    }
+    return !hoverCapable;
+  }
 
   function targetFor(ref, kind) {
     var vw = global.innerWidth || 1, vh = global.innerHeight || 1;
@@ -48,7 +61,7 @@
   }
 
   function beginPeek(ref) {
-    if (!lastBase || freecamOn() || touchDevice()) return;
+    if (!lastBase || freecamBusy() || touchDevice()) return false;
     flight = {
       el: ref.el,
       from: { yawDeg: lastBase.yawDeg, pitchDeg: lastBase.pitchDeg, dist: lastBase.dist },
@@ -57,6 +70,7 @@
       out: false
     };
     if (global.StageCinema) StageCinema.setPeek(true);
+    return true;
   }
 
   function cancelTimer() {
@@ -74,7 +88,7 @@
   }
 
   function onOver(e) {
-    if (tier0() || touchDevice() || freecamOn()) return;
+    if (tier0() || touchDevice() || freecamBusy()) return;
     var card = e.target && e.target.closest ? e.target.closest('.shelf-card') : null;
     var row = null;
     if (!card && e.target && e.target.closest) row = e.target.closest('.q-row');
@@ -89,7 +103,7 @@
       hoverTimer = 0;
       // 等待期间歌单架/队列可能被整体重渲染：节点已脱离 DOM 就放弃，
       // 否则会对一个 rect 全 0 的悬空卡片算出错误方位。
-      if (current === ref && document.contains(ref.el)) beginPeek(ref);
+      if (current === ref && document.contains(ref.el) && beginPeek(ref)) { /* 已起 peek */ }
       else if (current === ref) current = null;
     }, HOVER_MS);
   }
@@ -118,21 +132,26 @@
       lastBase = { yawDeg: ctx.baseYawDeg, pitchDeg: ctx.basePitchDeg, dist: ctx.baseDist };
       return;
     }
-    if (freecamOn()) {
+    if (freecamBusy()) {
       flight = null;
       if (global.StageCinema) StageCinema.setPeek(false);
       return;
     }
-    // 悬停中元素被重渲染移除（队列/歌单架整体重建不发 mouseout）：自动转回程。
-    if (!flight.out && flight.el && !document.contains(flight.el)) {
+    // 悬停中元素被重渲染移除/隐藏（队列/歌单架整体重建不发 mouseout）：自动转回程。
+    if (!flight.out && flight.el && (!document.contains(flight.el) || flight.el.hidden)) {
       flight.out = true;
       flight.snapped = false;
       if (global.StageCinema) StageCinema.setPeek(false);
     }
-    // 回程起点只在 out 第一帧快照一次：时长重新计、k 基于固定 start，
-    // 之后绝不再覆盖 from——否则起点每帧重置，ease 永远飞不到基线。
+    // 回程起点只在 out 第一帧快照一次，取的是**上一帧 focus 实际输出**
+    // （ctx 每帧从基线重建，直接读当帧 ctx 会从基线起跳、回程动画空跑成硬切）；
+    // 时长重新计、k 基于固定 start，之后绝不再覆盖 from。
     if (flight.out && !flight.snapped) {
-      flight.from = { yawDeg: ctx.yawDeg, pitchDeg: ctx.pitchDeg, dist: ctx.dist };
+      if (flight.oy != null) {
+        flight.from = { yawDeg: flight.oy, pitchDeg: flight.op, dist: flight.od };
+      } else {
+        flight.from = { yawDeg: ctx.yawDeg, pitchDeg: ctx.pitchDeg, dist: ctx.dist };
+      }
       flight.start = ctx.t;
       flight.snapped = true;
     }
@@ -149,6 +168,10 @@
     ctx.tz = 0;
     ctx.rollDeg = 0;
     ctx.fov = ctx.baseFov;
+    // 记录本帧实际输出，供下一帧（或回程首帧）取机位；标量原地写，无分配。
+    flight.oy = ctx.yawDeg;
+    flight.op = ctx.pitchDeg;
+    flight.od = ctx.dist;
     // 只在回程完成时清 flight：去程到点后 k 钳在 1 持续输出看台机位
     // （鼠标停在卡片上期间一直保持），直到 mouseout 进入回程。无条件清空
     // 会让目标机位只保持一帧，并把 cinema 的 peek 衰减永久闩住。

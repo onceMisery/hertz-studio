@@ -322,6 +322,8 @@
   global.StageFreecam = {
     init: init,
     isEnabled: function () { return enabled; },
+    // 含 600ms 飞回中：focus 等覆盖型模块据此避让交班跳切。
+    isBusy: function () { return enabled || !!returning; },
     // 供 focus 等模块查询/联动。
     setEnabled: function (on) { setEnabled(!!on, false); }
   };

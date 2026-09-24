@@ -198,6 +198,7 @@ section('跨文件契约：自由相机');
   ok(/interactionBlocker\(null\)/.test(stage) &&
     /\(interact\.on && !interactionBlocked\) \? interact\.px/.test(stage),
     '屏蔽期视差目标归零并解除拖拽闩锁');
+  ok(/isBusy: function/.test(fc), '暴露 isBusy（含飞回中）供 focus 避让');
   ok(/StageFreecam\.init\(\)/.test(app) && /stage-freecam\.js/.test(html), '初始化与页面引用');
 }
 
@@ -216,7 +217,9 @@ section('跨文件契约：焦点跟拍');
     '悬停元素被重渲染移除时放弃/自动回程');
   ok(/setPeek\(true\)/.test(fc) && /setPeek\(false\)/.test(fc), 'peek 期压制 cinema、移出恢复');
   ok(/matchMedia\('\(hover: none\)'\)/.test(fc), '触屏无 hover 不触发');
-  ok(/StageFreecam\.isEnabled/.test(fc), 'freecam 开启时不响应 peek');
+  ok(/StageFreecam\.isBusy/.test(fc), 'freecam 开启或飞回中都不响应 peek');
+  ok(/flight\.oy != null/.test(fc) && /flight\.oy = ctx\.yawDeg/.test(fc),
+    '回程从上个实际输出帧快照，平滑飞回不硬切');
   ok(/Stage\.tier/.test(fc), 'perfTier0 下取消进行中的 peek 且不再触发');
   ok(!/preventDefault/.test(fc), 'peek 不拦截点击/滚轮');
   ok(/StageFocus\.init\(\)/.test(app) && /stage-focus\.js/.test(html), '初始化与页面引用');
