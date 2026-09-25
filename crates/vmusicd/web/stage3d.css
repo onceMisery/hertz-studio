@@ -1,0 +1,365 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 mmusic-studio contributors
+
+   沉浸式三维舞台（stage3d.js）的样式。
+
+   两条必须遵守的约定（见 README「前端 CSS 令牌契约」与 scripts/check-css-tokens.js）：
+
+   1. 本文件排在 style.css / stage.css 之后。若在 :root 上重声明共享令牌
+      （--glass-*、--hover、--accent……），会把前面两个文件的定义整块盖掉，
+      而且页面不报错、不缺元素，只是静默丢掉描边和投影。所以这里所有自有
+      令牌都挂在 .s3d 上，命名空间 --s3d-*，一个 :root 都不写。
+   2. 用到共享令牌的地方一律 var() 引用，不复制字面量；且：
+      var(--glass-shadow) 已是完整阴影列表，不能再拼长度；
+      var(--glass-border) 已是 "1px solid <color>" 完整简写，不能再写 "1px solid"。
+
+   结构：全屏遮罩 → 画布 → 顶栏 → 底部舞台坞 → 提示 → 降级文案。
+   顶栏与舞台坞默认隐去，由 .s3d-chrome 控制（鼠标静止 2.6s 后摘掉）。 */
+
+.s3d {
+  /* 自有令牌：只在这一层内生效 */
+  --s3d-bg: #040507;
+  --s3d-bar-bg: linear-gradient(112deg,
+      rgba(255, 255, 255, 0.055),
+      rgba(12, 15, 18, 0.42) 52%,
+      rgba(2, 4, 7, 0.56));
+  --s3d-bar-border: 1px solid rgba(255, 255, 255, 0.062);
+  --s3d-bar-shadow: 0 18px 56px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.11);
+  --s3d-bar-blur: 26px;
+  --s3d-btn: 38px;
+  --s3d-dock-h: 54px;
+  --s3d-gap: 10px;
+
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  background: var(--s3d-bg);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity var(--dur-3, 0.5s) var(--ease),
+    visibility 0s linear var(--dur-3, 0.5s);
+  /* 全屏时避免文字选中和触摸滚动把舞台拖走 */
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+  overscroll-behavior: none;
+  contain: strict;
+}
+
+.s3d.s3d-open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity var(--dur-2, 0.3s) var(--ease), visibility 0s linear 0s;
+}
+
+.s3d.s3d-native-fs {
+  background: #000;
+}
+
+/* ---------------------------------------------------------------------------
+   画布
+   --------------------------------------------------------------------------- */
+
+.s3d-canvas-wrap {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.s3d-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* 拖动旋转时不要触发浏览器的图片拖拽手势 */
+  -webkit-user-drag: none;
+  touch-action: none;
+}
+
+.s3d.s3d-dragging .s3d-canvas-wrap {
+  cursor: grabbing;
+}
+
+.s3d.s3d-open:not(.s3d-chrome) {
+  cursor: none;
+}
+
+/* 画布上压一层极淡的径向渐隐，让中心更聚焦；不参与命中。 */
+.s3d-vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 48%,
+      transparent 34%,
+      rgba(0, 0, 0, 0.24) 76%,
+      rgba(0, 0, 0, 0.5) 100%);
+}
+
+/* ---------------------------------------------------------------------------
+   顶栏
+   --------------------------------------------------------------------------- */
+
+.s3d-head {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  display: flex;
+  align-items: center;
+  gap: var(--s3d-gap);
+  padding: 7px 9px;
+  border-radius: var(--r-pill);
+  background: var(--s3d-bar-bg);
+  border: var(--s3d-bar-border);
+  box-shadow: var(--s3d-bar-shadow);
+  backdrop-filter: blur(var(--s3d-bar-blur)) saturate(1.3);
+  opacity: 0;
+  transform: translateY(-10px);
+  pointer-events: none;
+  transition: opacity var(--dur-2, 0.3s) var(--ease),
+    transform var(--dur-2, 0.3s) var(--ease-out);
+}
+
+.s3d-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 34vw;
+  padding: 0 6px 0 8px;
+  overflow: hidden;
+}
+
+.s3d-meta-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.s3d-meta-sub {
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.s3d-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--s3d-btn);
+  height: var(--s3d-btn);
+  padding: 0;
+  border-radius: var(--r-pill);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--dur-1, 0.16s) var(--ease),
+    color var(--dur-1, 0.16s) var(--ease),
+    transform var(--dur-1, 0.16s) var(--ease);
+}
+
+.s3d-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.s3d-btn:active {
+  transform: scale(0.94);
+}
+
+.s3d-btn[aria-pressed='true'] {
+  color: var(--accent-ink);
+  background: var(--accent-2);
+  border-color: transparent;
+}
+
+.s3d-btn svg {
+  width: 19px;
+  height: 19px;
+}
+
+.s3d-btn .ic-compress {
+  display: none;
+}
+
+.s3d.s3d-native-fs .s3d-btn .ic-expand {
+  display: none;
+}
+
+.s3d.s3d-native-fs .s3d-btn .ic-compress {
+  display: block;
+}
+
+/* ---------------------------------------------------------------------------
+   底部舞台坞
+   --------------------------------------------------------------------------- */
+
+.s3d-dock {
+  position: absolute;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%) translateY(14px);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px;
+  border-radius: var(--r-pill);
+  background: var(--s3d-bar-bg);
+  border: var(--s3d-bar-border);
+  box-shadow: var(--s3d-bar-shadow);
+  backdrop-filter: blur(var(--s3d-bar-blur)) saturate(1.3);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-2, 0.3s) var(--ease),
+    transform var(--dur-2, 0.3s) var(--ease-out);
+}
+
+.s3d-dock-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 40px;
+  padding: 0 14px;
+  border-radius: var(--r-pill);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: background var(--dur-1, 0.16s) var(--ease),
+    color var(--dur-1, 0.16s) var(--ease);
+}
+
+.s3d-dock-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.s3d-dock-btn.active {
+  color: var(--accent-ink);
+  background: var(--accent-2);
+}
+
+.s3d-dock-btn.active:hover {
+  background: var(--accent-2);
+  color: var(--accent-ink);
+}
+
+.s3d-dock-ic {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.s3d-dock-tx {
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+   提示与降级
+   --------------------------------------------------------------------------- */
+
+.s3d-hint {
+  position: absolute;
+  left: 24px;
+  bottom: 30px;
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-2, 0.3s) var(--ease);
+}
+
+.s3d-keys {
+  position: absolute;
+  right: 24px;
+  bottom: 30px;
+  font-size: var(--fs-3xs);
+  color: rgba(138, 144, 153, 0.62);
+  line-height: 1.7;
+  text-align: right;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-2, 0.3s) var(--ease);
+}
+
+.s3d-chrome .s3d-head,
+.s3d-chrome .s3d-dock,
+.s3d-chrome .s3d-hint,
+.s3d-chrome .s3d-keys {
+  opacity: 1;
+}
+
+.s3d-chrome .s3d-head,
+.s3d-chrome .s3d-dock {
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
+.s3d-chrome .s3d-head {
+  transform: translateY(0);
+}
+
+.s3d-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-7);
+  font-size: var(--fs-base);
+  color: var(--muted);
+  text-align: center;
+  background: var(--s3d-bg);
+}
+
+/* ---------------------------------------------------------------------------
+   窄屏与降级动效
+   --------------------------------------------------------------------------- */
+
+@media (max-width: 760px) {
+  .s3d-head {
+    top: 12px;
+    right: 12px;
+    --s3d-btn: 34px;
+  }
+
+  .s3d-meta {
+    display: none;
+  }
+
+  .s3d-dock {
+    bottom: 16px;
+    gap: 3px;
+    padding: 5px;
+  }
+
+  .s3d-dock-btn {
+    height: 36px;
+    padding: 0 10px;
+  }
+
+  .s3d-keys {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .s3d,
+  .s3d-head,
+  .s3d-dock,
+  .s3d-hint,
+  .s3d-keys {
+    transition-duration: 0.01ms;
+  }
+}

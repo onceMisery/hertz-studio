@@ -68,6 +68,12 @@ const WORKSHOP_JS: &str = include_str!("../web/workshop.js");
 const STAGE_CINEMA_JS: &str = include_str!("../web/stage-cinema.js");
 const STAGE_FREECAM_JS: &str = include_str!("../web/stage-freecam.js");
 const STAGE_FOCUS_JS: &str = include_str!("../web/stage-focus.js");
+// 沉浸演出：星幕歌词（半调点环）与原生全屏 + 舞台场景切换坞。
+const STAGE_HALO_JS: &str = include_str!("../web/stage-halo.js");
+// 沉浸式三维舞台：独占一个 WebGL2 上下文的全屏演出层，自带后处理链与舞台坞。
+const STAGE3D_JS: &str = include_str!("../web/stage3d.js");
+const STAGE3D_CSS: &str = include_str!("../web/stage3d.css");
+const STAGE_IMMERSIVE_JS: &str = include_str!("../web/stage-immersive.js");
 // 在线曲库（SP1）：vendored MIT 二维码库 + 三个在线模块与样式。
 const QRCODE_JS: &str = include_str!("../web/vendor/qrcode.js");
 const ONLINE_LOGIN_JS: &str = include_str!("../web/online-login.js");
@@ -196,6 +202,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/stage-cinema.js", get(|| asset(JS, STAGE_CINEMA_JS)))
         .route("/stage-freecam.js", get(|| asset(JS, STAGE_FREECAM_JS)))
         .route("/stage-focus.js", get(|| asset(JS, STAGE_FOCUS_JS)))
+        .route("/stage-halo.js", get(|| asset(JS, STAGE_HALO_JS)))
+        .route("/stage3d.js", get(|| asset(JS, STAGE3D_JS)))
+        .route("/stage-immersive.js", get(|| asset(JS, STAGE_IMMERSIVE_JS)))
         .route("/vendor/qrcode.js", get(|| asset(JS, QRCODE_JS)))
         .route("/online-login.js", get(|| asset(JS, ONLINE_LOGIN_JS)))
         .route("/online.js", get(|| asset(JS, ONLINE_JS)))
@@ -212,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/style.css", get(|| asset(CSS, STYLE_CSS)))
         .route("/stage.css", get(|| asset(CSS, STAGE_CSS)))
         .route("/creative.css", get(|| asset(CSS, CREATIVE_CSS)))
+        .route("/stage3d.css", get(|| asset(CSS, STAGE3D_CSS)))
         .route("/online.css", get(|| asset(CSS, ONLINE_CSS)))
         .route(
             "/",

@@ -33,9 +33,11 @@
 /* 画布作为第一个子元素插进来，其余内容按 DOM 顺序自然压在它上面。
    但舞台里那几个区块有自己的定位上下文，这里显式抬一层，免得依赖文档顺序。
    .hd-layer 必须排除掉：它本身就是 absolute 覆盖层，被这条规则改成 relative
-   之后就变成一个撑开高度的普通块，手绘线条会跑到列表下面去。 */
-#stage.creative-on > :not(.creative-canvas):not(.hd-layer),
-#lyric-page.creative-on > :not(.creative-canvas):not(.hd-layer) {
+   之后就变成一个撑开高度的普通块，手绘线条会跑到列表下面去。
+   .lp-dock 同理：它是浮在底部的舞台切换坞，relative 会把它变成文档流里
+   一个 11px 高的占位条，挤穿 flex 布局。 */
+#stage.creative-on > :not(.creative-canvas):not(.hd-layer):not(.lp-dock),
+#lyric-page.creative-on > :not(.creative-canvas):not(.hd-layer):not(.lp-dock) {
   position: relative;
   z-index: 1;
 }

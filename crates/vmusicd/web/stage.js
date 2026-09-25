@@ -19,6 +19,9 @@
   // 模式合并：逐行（整行亮白）与卡拉OK 渲染管线 90% 重叠，已移除。
   // 老存档里的 'line' 在 setMode 中统一回落到 'karaoke'。
   var BASE_MODES = ['cover', 'karaoke', 'scatter'];
+  // 星幕（halo）是全屏页独占的排版：侧栏模式组里没有它的按钮，但持久化恢复
+  // 与全屏页模式切换都要认这个值。
+  var PAGE_ONLY_MODES = ['halo'];
   var STORE_KEY = 'vmusic.stage.mode';
   var WORD_CAP_MS = 1200; // 单字推进上限：脏时间戳给出几十秒的词时不至于爬不动
 
@@ -574,6 +577,10 @@
   function particleBackgroundOn() {
     if (!cover.on) return false;
     if (scene === 'cover') {
+      // 没有封面纹理就不算数：粒子层是按封面采样出点的，没图它只能画一片空，
+      // 而 gl-active 会顺手把 CSS 旋转卡片藏掉 —— 两头都不显示，背景就成了空白。
+      // 这里判否之后走 CSS 卡片，至少看得见东西。
+      if (!lastCover) return false;
       return !!(window.StageCoverParticles && StageCoverParticles.active());
     }
     if (scene === 'starriver') {
@@ -590,8 +597,14 @@
 
     // 背景场景三态分流：cover 粒子专辑封面 / starriver 星河；任一粒子层生效时
     // has-particles 隐藏 CSS 旋转卡片
-    el.page.classList.toggle('has-cover',
-      !!(cover.on && scene === 'cover' && url));
+    //
+    // has-cover 不再要求「有封面图」。原来写着 `&& url`，于是当前曲目没有
+    // 封面时这个开关怎么点都不显示任何东西 —— 按钮状态在翻、库里也存住了，
+    // 但画面纹丝不动，用户只能认为「这个按钮坏了」。没有图就退回 CSS 旋转
+    // 卡片（.lp-cover-face 自带占位底色），至少开关有可见的反馈。
+    el.page.classList.toggle('has-cover', !!(cover.on && scene === 'cover'));
+    // 没有封面图的占位态，交给 CSS 铺一层主题色渐变，免得看到的是死灰一块
+    el.page.classList.toggle('no-cover-art', !url);
     el.page.classList.toggle('has-starriver',
       !!(cover.on && scene === 'starriver'));
     el.page.classList.toggle('has-particles', particleBackgroundOn());
@@ -616,9 +629,11 @@
     btn.setAttribute('aria-pressed', String(cover.on));
     btn.setAttribute('title', label);
     btn.setAttribute('aria-label', label);
-    // 开着但当前曲目没有封面图：给按钮上一个"暂无内容"的暗态。不禁用——
-    // 模式留着，切到下一首有封面的歌自己就出来了。
-    btn.classList.toggle('is-void', cover.on && !lastCover);
+    // 没有封面图时不再上"暂无内容"的暗态：现在这种情况会退回 CSS 旋转卡片
+    // 并铺一层主题色渐变（.lyric-page.no-cover-art），画面上是有东西的，
+    // 再把按钮调暗等于告诉用户"没生效"，与事实相反。不禁用——模式留着，
+    // 切到下一首有封面的歌就自动顶上粒子封面。
+    btn.classList.remove('is-void');
   }
 
   function setCover(next, opts) {
@@ -649,17 +664,25 @@
     }
   }
 
-  function setScene(next, opts) {
+  // 第二个参数（旧的 { force: true }）不再需要：新语义下「已是当前场景」天然幂等，
+  // 多传的参数会被忽略。
+  function setScene(next) {
     if (SCENES.indexOf(next) < 0) next = 'cover';
-    if (scene === next && !(opts && opts.force)) {
-      // 已在该场景：当作"关掉背景总开关"
-      if (cover.on) setCover(false);
-      return;
-    }
+    // 点场景 = 「切到这个背景，并把背景打开」；已经是当前场景则幂等。
+    //
+    // 这里原本还有一条隐藏规则：点已选中的场景等于「关掉背景总开关」。于是
+    //   背景开着 → 点一下整块背景消失（与 #lp-cover 那个开关语义重复）
+    //   背景关着 → `if (cover.on)` 判否，直接 return，点了完全没反应
+    // 同一颗按钮两种结果，而且都不能从界面上看出来。现在总开关只归 #lp-cover，
+    // 场景按钮只负责「选背景内容」一件事。
+    if (scene === next && cover.on) { syncSceneBtns(); return; }
     scene = next;
     try { localStorage.setItem(SCENE_KEY, scene); } catch (e) { /* 隐私模式 */ }
     if (!cover.on) setCover(true, { silent: true });
     else paintCover();
+    // 上面两支都会经 paintCover 刷一次，这里再显式刷一次：还有「已是该场景、
+    // 但背景被总开关关着」这条路径，它必须也把按钮点亮。
+    syncSceneBtns();
     schedule();
   }
 
@@ -1356,40 +1379,61 @@
     if (next === 'page') { setPage(true); return; }
     // 星河 = 打开全屏页并切到星河背景场景，与歌词展示模式无关
     if (next === 'starriver') {
-      setScene('starriver', { force: true });
+      // 顺序不能反：星河的亮灭由 syncSceneBtns 判定，而它要读 isPageOpen()。
+      // 先落场景再开页的话，判定发生在「页还没开」的时刻，算出来是灭的。
       setPage(true);
+      setScene('starriver');
       return;
     }
-    if (BASE_MODES.indexOf(next) < 0) next = 'karaoke';
+    if (BASE_MODES.indexOf(next) < 0 && PAGE_ONLY_MODES.indexOf(next) < 0) next = 'karaoke';
     mode = next;
-    if (el.stage) el.stage.setAttribute('data-mode', mode);
+    // 星幕只存在于全屏页：侧栏没有这套排版，data-mode 回落到卡拉OK 的侧栏样式，
+    // 全屏页自己的 data-lp-mode 仍然带着 halo。
+    if (el.stage) el.stage.setAttribute('data-mode', mode === 'halo' ? 'karaoke' : mode);
     // 全屏页用独立的属性承载模式：它的排版差异比侧栏大（居中、散开、发光），
     // 选择器挂在 .lyric-page 上比复用 data-mode 更清楚，也不会互相牵连。
+    // 「封面」排版在全屏页退化成卡拉OK —— 全屏页没有「只看封面」这种形态。
     if (el.page) el.page.setAttribute('data-lp-mode', mode === 'cover' ? 'karaoke' : mode);
-    syncLpModes();
-    if (el.modes) {
-      Array.prototype.forEach.call(el.modes.children, function (b) {
-        var m = b.getAttribute('data-mode');
-        b.classList.toggle('active', m === mode || (m === 'page' && isPageOpen()));
-        b.setAttribute('aria-pressed', String(b.classList.contains('active')));
-      });
-    }
     if (!(opts && opts.silent)) {
       try { localStorage.setItem(STORE_KEY, mode); } catch (e) { /* 隐私模式 */ }
     }
+    syncModeUi();
     // cover 模式会把 .stage-lyrics 整个 display:none，切回来时量出来的高度
     // 全是旧的，必须重算并直接落位。
     refresh(true);
     schedule();
   }
 
-  function syncLpModes() {
-    if (!el.lpModes) return;
-    Array.prototype.forEach.call(el.lpModes.children, function (b) {
-      var on = b.getAttribute('data-lp-mode') === mode;
-      b.classList.toggle('active', on);
-      b.setAttribute('aria-pressed', String(on));
-    });
+  // 模式/场景按钮的唯一刷新入口。
+  //
+  // 此前这段逻辑散在三个地方各写各的 class：setMode 末尾循环刷侧栏模式条、
+  // setPage 末尾循环又刷一遍、syncSceneBtns 单独刷场景按钮。谁后跑谁说了算，
+  // 于是出现「侧栏点星河不亮」「切心象把星河高亮熄灭」「点封面把全屏页模式组
+  // 全部清空」这类互相打架的现象。收敛成一处之后，任何状态变化都只经过这里，
+  // 每个按钮恰有一个判据。
+  function syncModeUi() {
+    // 侧栏排版模式条。星河不是排版模式而是背景场景，它的亮灭归 syncSceneBtns，
+    // 这里必须跳过 —— 否则会被「当前模式是不是 starriver」误判成灭。
+    if (el.modes) {
+      Array.prototype.forEach.call(el.modes.children, function (b) {
+        var m = b.getAttribute('data-mode');
+        if (m === 'starriver') return;
+        var on = m === 'page' ? isPageOpen() : (m === mode);
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+    }
+    // 全屏页排版模式条：判据是页面实际承载的 data-lp-mode，不是内部 mode。
+    // 「封面」模式在全屏页会被写成 karaoke，拿 mode 去比会一个都不亮。
+    if (el.lpModes) {
+      var shown = el.page ? el.page.getAttribute('data-lp-mode') : mode;
+      Array.prototype.forEach.call(el.lpModes.children, function (b) {
+        var on = b.getAttribute('data-lp-mode') === shown;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+    }
+    syncSceneBtns();
   }
 
   function isPageOpen() {
@@ -1402,12 +1446,8 @@
     el.page.classList.toggle('open', want);
     el.page.setAttribute('aria-hidden', String(!want));
     document.body.classList.toggle('lp-open', want);
-    if (el.modes) {
-      Array.prototype.forEach.call(el.modes.children, function (b) {
-        var m = b.getAttribute('data-mode');
-        b.classList.toggle('active', m === 'page' ? want : (!want && m === mode));
-      });
-    }
+    // 页面开合会改变「星河的亮灭」判据（要页开着才亮），所以要重刷一遍按钮。
+    syncModeUi();
     // 打开时直接落位，避免动画过程中从列表顶端一路追下来
     refresh(true);
     schedule();
@@ -1415,6 +1455,12 @@
     // 不会带它跑。让创意舞台为这次视图切换补一帧，全屏页/舞台才不会空白或
     // 停留在上一句歌词。
     if (window.CreativeStage && CreativeStage.kick) CreativeStage.kick();
+    // 演出页开关广播：沉浸模块（场景坞高亮等）据此同步，不反向依赖具体按钮。
+    document.dispatchEvent(new CustomEvent('stage:page', { detail: { open: want } }));
+  }
+
+  function isNativeFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement);
   }
 
   // -------------------------------------------------------------------------
@@ -1441,6 +1487,15 @@
   // -------------------------------------------------------------------------
 
   // 全屏页头部的背景场景切换组：封面 / 星河
+  //
+  // 两个「封面」不是同一件事，靠 title 把它们区分开：侧栏那颗是「只显示封面盘」
+  // 的排版模式，这一组选的是背景内容。tools tip 之外不改文案，是因为「封面」
+  // 这个词在控制舱、设置页都已经在用，单独改名反而更乱。
+  var SCENE_HINTS = {
+    cover: '背景：当前曲目的三维粒子封面',
+    starriver: '背景：星野与流动星河'
+  };
+
   function buildSceneButtons() {
     var head = document.querySelector('.lp-head');
     if (!head || head.querySelector('.lp-scenes')) return null;
@@ -1454,6 +1509,7 @@
       b.className = 'lp-scene-btn';
       b.setAttribute('data-scene', pair[0]);
       b.setAttribute('aria-pressed', 'false');
+      b.setAttribute('title', SCENE_HINTS[pair[0]] || '');
       b.textContent = pair[1];
       b.addEventListener('click', function () { setScene(pair[0]); });
       group.appendChild(b);
@@ -1477,14 +1533,22 @@
     btn.setAttribute('title', '自动 360° 旋转');
     btn.setAttribute('aria-label', '自动 360° 旋转');
     btn.innerHTML =
-      '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reset"/></svg>';
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-orbit"/></svg>';
     var coverBtn = $('lp-cover');
     if (coverBtn && coverBtn.parentNode === head) head.insertBefore(btn, coverBtn);
     else head.appendChild(btn);
     return btn;
   }
 
+  // init 只允许跑一次。它给 el.modes / el.lpModes / lp-close / lp-play / 进度条…
+  // 绑的全是一次性监听，而 destroy() 只回收帧门、**不解绑 DOM**。视觉控制器
+  // 的 destroy() → init() 是允许再来一轮的，所以这里必须自己兜住：否则第二轮
+  // 会把同一颗按钮绑上第二个 handler，点一次触发两次。
+  var inited = false;
+
   function init() {
+    if (inited) return;
+    inited = true;
     el.stage = $('stage');
     el.disc = $('cover');
     el.ring = $('disc-ring');
@@ -1594,7 +1658,11 @@
     // 这里不重复绑定；其高亮状态由 syncSceneBtns 同步。
 
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && isPageOpen()) { e.stopPropagation(); setPage(false); }
+      // 原生全屏下 Esc 被浏览器拿去退全屏（按键事件通常也不会派发）：这时
+      // 不连带关闭演出页，退完全屏用户仍停留在沉浸式页面里。
+      if (e.key === 'Escape' && isPageOpen() && !isNativeFullscreen()) {
+        e.stopPropagation(); setPage(false);
+      }
     }, true);
 
     var saved = null;

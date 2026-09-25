@@ -40,6 +40,12 @@
       name: 'starriver',
       get: function () { return window.StageStarRiver; },
     },
+    {
+      // 沉浸式三维舞台。它自己建上下文、自己走 Stage.gate()，这里只负责
+      // 让它的生命周期跟着其余视觉层一起走（逆序销毁）。
+      name: 'stage3d',
+      get: function () { return window.Stage3D; },
+    },
   ];
 
   var ready = false;

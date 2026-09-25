@@ -30,7 +30,10 @@
      的字面量里，没有可复用的名字，所以每加一个删除按钮就要再抄一遍色值。 */
   --danger: #ff9b9b;
   --radius: 12px;
-  --radius-lg: 18px;
+  /* 面板圆角。曾经是 18px，而组件层的 --r-xl 是 16px —— 同一批面板
+     （导航轨 / 内容列 / 舞台 / 播放条）在新旧两套规则里各拿一个值，
+     谁生效取决于哪条规则排在后面，等于随机。对齐到 --r-xl 的 16px。 */
+  --radius-lg: 16px;
   --shadow: 0 12px 32px rgba(0, 0, 0, 0.42);
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
 
@@ -86,12 +89,23 @@
   --dur-slow: 0.22s;
   --dur-slower: 0.28s;
 
-  /* 玻璃曲面：带方向性的渐变 + 顶部高光 + 底部内阴影，比纯半透明更有质感 */
+  /* 玻璃曲面：顶部高光 → 底部回落的三段中性叠层。
+
+     ⚠ 色停**绝不能再混 --bg**。--bg 是近黑（#0A0A0A），拿它混 74–84%
+     会让整条渐变塌成「比底色还暗的一层黑」：顶栏 / 导航轨 / 内容列 /
+     舞台 / 播放条五块面板于是全部糊成一片，只剩 1px 描边能看出边界 ——
+     玻璃质感全靠描边硬撑，卡片坐在面板上也分不出层级（面板 +4 个明度级，
+     卡片 +9，肉眼几乎不可分）。
+
+     现在改成纯白叠层：面板稳定比 --bg 亮 8–12 个明度级（≈ #161618），
+     卡片再叠 --surface-1 又能往上跳一级，层级才是「暗底 → 面 → 卡」三层。
+     角度用 168deg（几近垂直）而不是 112deg：大面板上斜向渐变会在右上角
+     攒出一条比其余三边亮得多的描边，看着像漏光。 */
   --glass-bg: linear-gradient(
-    112deg,
-    color-mix(in srgb, var(--text) 11%, transparent),
-    color-mix(in srgb, var(--bg) 74%, transparent) 48%,
-    color-mix(in srgb, var(--bg) 84%, transparent)
+    168deg,
+    color-mix(in srgb, var(--text) 5%, transparent),
+    color-mix(in srgb, var(--text) 2.2%, transparent) 46%,
+    color-mix(in srgb, var(--text) 1.2%, transparent)
   );
   --glass-border: 1px solid rgba(255, 255, 255, 0.095);
   /* 两档阴影：
@@ -116,8 +130,10 @@
   /* 按压档位：图标按钮 80ms 压下、240ms 回弹（见 .ctrl/.ctrl:active）。 */
   --press-scale: 0.97;
 
-  /* 焦点环：键盘可达性。任何元素都不允许「去掉 outline 却不给替代」。 */
-  --focus-ring: 1px solid rgba(var(--brand-rgb, 0, 245, 212), 0.34);
+  /* 焦点环：键盘可达性。任何元素都不允许「去掉 outline 却不给替代」。
+     1px 在近黑底上只有一根发丝，低亮度屏上基本读不到；2px + 60% 品牌色
+     是「一眼能确认焦点在哪」的最低成本档位。 */
+  --focus-ring: 2px solid rgba(var(--brand-rgb, 0, 245, 212), 0.6);
   --focus-offset: 2px;
 
   /* 两个强调角色（与 Mineradio 一致）：
@@ -135,11 +151,44 @@
   --field-border: rgba(255, 255, 255, 0.095);
   --field-border-strong: rgba(255, 255, 255, 0.18);
 
+  /* 曲面三级：暗底 → 面板（--glass-bg）→ 卡片（--surface-1）→ 卡片悬停（--surface-2）。
+     卡片底色以前散落着 --panel-2 / --hover / 各自的 rgba 字面量，
+     同一个视觉层级在三个地方是三组数，改一处不动另外两处必然漂移。
+     统一收在这里，新增卡片一律取令牌。 */
+  --surface-1: rgba(255, 255, 255, 0.042);
+  --surface-2: rgba(255, 255, 255, 0.075);
+  --surface-line: rgba(255, 255, 255, 0.075);
+  --surface-line-strong: rgba(255, 255, 255, 0.15);
+  /* 顶部内高光：只作 box-shadow 的一个分量用。1px 宽的「受光边」是卡片
+     能读出厚度而不靠加重描边的关键。 */
+  --surface-hi: inset 0 1px 0 rgba(255, 255, 255, 0.055);
+  /* 卡片悬停时投出的影子。低于 --glass-shadow 一整档——卡片只是"抬了 1px"，
+     用面板级的 22px 阴影会把它从面板上掀起来。 */
+  --surface-lift: 0 8px 20px rgba(0, 0, 0, 0.3);
+
+  /* 轨道（进度条 / 音量条）的底色。以前这个值在 stage.css 里以
+     rgba(255, 255, 255, 0.12) 的字面量重复了三遍（.progress-wrap::before、
+     webkit 轨道、moz 轨道），style.css 的 .progress-wrap::before 又是另一支
+     --hover（7% 白，静止态几乎看不见轨道）。收成一个令牌：
+     轨道要多亮只改这里。 */
+  --track: rgba(255, 255, 255, 0.12);
+
+  /* 元信息排版：小号大写标签（表头、kicker、徽标）的字距。
+     以前 .lib-head 写 0.6px、.daily-kicker 写 0.14em，同一个角色两套数。 */
+  --meta-tracking: 0.12em;
+
+  /* 按压分档：压下要「快」（不跟手就钝），回弹要「缓」（回弹有弹性）。
+     一条 transition 两头同速是手感发木的根因。 */
+  --dur-press: 0.08s;
+  --dur-release: 0.24s;
+  /* 视图切换入场。0.26s 是"看得见但不等待"的上限。 */
+  --dur-enter: 0.26s;
+
   /* v2 新增：结构性尺寸令牌 */
   --topbar-h: 58px;
   --rail-w: 86px;
   --stage-w: 460px;
-  --bar-h: 76px;
+  --bar-h: 72px;
   --row-h: 52px;
 }
 
@@ -172,14 +221,21 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* 底色氛围光。
+   以前两处色停一处是 var(--accent)（默认主题 = 纯白）、一处是写死的紫
+   rgba(127,119,221,.16)：白的那一处在大面积上就是一层**灰雾**，跟近黑底
+   混出一个"没洗干净的黑"，而不是"黑底上有色光"。改成两支都取主题色，
+   一角品牌色、一角次强调色——默认主题下是双份薄荷青的低饱和辉光，
+   换到 accent-2 不等于 accent 的主题（星蓝 / 午夜霓虹）就是干净的冷暖双色。
+   有曲目在播时 #ambient 会用模糊封面色盖掉这一层，这里只是无封面时的兜底。 */
 body::before {
   content: "";
   position: fixed;
   inset: -20%;
   z-index: -2;
   background:
-    radial-gradient(38% 30% at 12% 8%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%),
-    radial-gradient(42% 34% at 88% 92%, rgba(127, 119, 221, 0.16), transparent 70%);
+    radial-gradient(40% 32% at 12% 6%, color-mix(in srgb, var(--brand) 15%, transparent), transparent 70%),
+    radial-gradient(46% 38% at 90% 94%, color-mix(in srgb, var(--accent-2) 11%, transparent), transparent 72%);
 }
 
 #ambient { position: fixed; inset: -40px; z-index: -1; overflow: hidden; pointer-events: none; }
@@ -1360,12 +1416,16 @@ body.reduce-motion .bar { transition: none !important; }
 .bar-progress { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .bar-time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
 .progress-wrap { position: relative; flex: 1; min-width: 0; height: 18px; display: flex; align-items: center; }
+/* ⚠ 这里的高度/底色实际上被 stage.css 的同名规则（6px / var(--track)）覆盖：
+   stage.css 在 <link> 里排在 style.css 之后，同优先级整块胜出。
+   保留这几条只在 stage.css 未加载时才生效，取值已对齐到那边，避免出现
+   「两个文件对同一条轨道给两组数」这种下次必然踩到的坑。 */
 .progress-wrap::before {
-  content: ""; position: absolute; left: 0; right: 0; height: 5px;
-  border-radius: 99px; background: var(--hover);
+  content: ""; position: absolute; left: 0; right: 0; height: 6px;
+  border-radius: 99px; background: var(--track);
 }
 .progress-ghost {
-  position: absolute; left: 0; height: 5px; width: 0;
+  position: absolute; left: 0; height: 6px; width: 0;
   border-radius: 99px;
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
   pointer-events: none;
@@ -2204,3 +2264,195 @@ button:focus-visible, [role="button"]:focus-visible,
     opacity: 0.75;
   }
 }
+
+/* ==========================================================================
+   Mineradio 视觉对齐层
+   --------------------------------------------------------------------------
+   这一节排在文件最后：同特异性下压过前面所有规则（前面那些是历年一版版叠
+   上来的，同一个组件的写法彼此不一致）。三条原则：
+
+     1. 只在「同一件事被写了两遍」的地方收口，不重画任何组件；
+     2. 新增/覆盖的声明一律取令牌，不写裸 px / rgba；
+     3. **不碰布局**——grid 列宽、间距档位、断点全部原样保留。布局是业务逻辑
+        的载体，动它的风险远大于观感收益。
+
+   对照参考项目 Mineradio 的设计语言，本层收口四类差距：
+     · 曲面层次：面板与卡片在近黑底上分不出级差（--glass-bg 已单独修）
+     · 形状语言：底栏还是「大圆角矩形」，不是它的胶囊
+     · 状态语言：顶栏连接状态、卡片悬停、按压回弹各写各的
+     · 可达性：三个 css 文件里漏掉焦点态的可点元素，按 Tab 完全没有反馈
+   ========================================================================== */
+
+/* ---------- 曲面 ---------- */
+
+/* 播放条是界面上唯一的**浮起件**：它不参与网格分栏，横跨在内容之上。
+   Mineradio 的播放条是一条完整胶囊而不是"大圆角矩形"，半径必须 ≥ 高度一半。
+   --bar-h 是 72px，999px 会被浏览器按盒子高度钳到 36px，正好是胶囊。
+   窄屏（≤900px）播放条折成两行、高度翻倍，那时胶囊会被钳成"两头尖"，
+   所以那一档退回 --r-xl。
+
+   注意：进度条 / 音量条的几何（6px 轨道、12px 把手、hover 放大）由
+   stage.css 的全局 `input[type="range"]` 一节负责——它排在 style.css 之后，
+   同特异性下压过这边，所以那部分**不要在这里重写**，改要改在 stage.css。 */
+.bar { border-radius: var(--r-pill); }
+@media (max-width: 900px) { .bar { border-radius: var(--r-xl); } }
+
+/* ---------- 顶栏 ---------- */
+
+/* 连接状态原本是 12px 裸文字加一个小圆点，夹在四个胶囊图标按钮中间，
+   是顶栏里唯一"没有形状"的东西。改成胶囊：有边界、有状态色、和旁边
+   的 .iconbtn 同高，整条顶栏的节奏就齐了。 */
+.conn {
+  height: 28px;
+  padding: 0 11px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--surface-line);
+  background: var(--surface-1);
+  font-size: var(--fs-xs);
+  gap: 7px;
+}
+.conn::before { width: 6px; height: 6px; }
+/* 已连接：品牌薄荷青。"能连上"是本项目的核心状态，值得一个真正的色相，
+   而不是接在 --accent（默认主题 = 纯白）上的又一个白点。 */
+.conn.ok {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--brand) 32%, transparent);
+  background: color-mix(in srgb, var(--brand) 10%, transparent);
+}
+.conn.ok::before { background: var(--brand); box-shadow: 0 0 8px var(--brand); }
+.conn.bad {
+  color: var(--danger);
+  border-color: rgba(255, 120, 120, 0.32);
+  background: rgba(255, 90, 90, 0.1);
+}
+.conn.bad::before { background: #ff8080; }
+/* 620px 断点里有一条 `.conn { font-size: 0 }`（窄屏把状态收成一个点，
+   否则 nowrap 的右侧区块会把搜索框挤出视口）。媒体查询不增加特异性，
+   本节的 .conn 排在它之后会把它盖掉，所以这里重新声明一遍。 */
+@media (max-width: 620px) { .conn { font-size: 0; } }
+
+/* 搜索框聚焦：白色描边在近黑面上和未聚焦的灰描边分不开，换成品牌色 +
+   一圈外发光。Mineradio 的搜索框聚焦也是"整条亮起来"而不是只描一根线。 */
+.topsearch:focus-within {
+  border-color: color-mix(in srgb, var(--brand) 46%, transparent);
+  background: color-mix(in srgb, var(--brand) 7%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 13%, transparent);
+}
+
+/* ---------- 卡片：一套配方 ---------- */
+
+/* 视觉层级是「暗底 → 面板 → 卡片」，卡片必须比面板再亮一档才浮得起来。
+   以前同一个层级三种做法：.daily-strip / .empty-card 取 --panel-2、
+   .daily-card 干脆 background: transparent 只留描边、.scan-panel 又一份。
+   --surface-1 是比 --panel-2 略收敛的叠层，配上顶部内高光（--surface-hi）
+   之后卡片才读得出"厚度"，而不是一块平色。 */
+.daily-strip,
+.daily-card,
+.empty-card,
+.scan-panel {
+  background: var(--surface-1);
+  box-shadow: var(--surface-hi);
+}
+.daily-strip,
+.daily-card,
+.scan-panel { border: 1px solid var(--surface-line); }
+/* 空态保留虚线：它表达的是"这里还没有东西，放一个目录进来"，
+   换成实线就丢掉了这层语义。只把颜色对齐到同一支描边令牌。 */
+.empty-card { border-color: var(--surface-line-strong); }
+
+/* 卡片悬停：抬 1px + 描边提亮 + 影子跟上来。三件事要一起做才读得出
+   "可以点"——在近黑面上只换背景色，明度差 2–3 级，肉眼几乎看不出来。 */
+.daily-card {
+  transition: background var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
+}
+.daily-card:hover {
+  background: var(--surface-2);
+  border-color: var(--surface-line-strong);
+  transform: translateY(-1px);
+  box-shadow: var(--surface-hi), var(--surface-lift);
+}
+
+/* ---------- 排版层级 ---------- */
+
+/* 元信息（小号、大写、加字距）以前是"每个用到的地方自己写一遍字距"：
+   .lib-head 写 0.6px、.daily-kicker 写 0.14em —— 同一个角色两套数，
+   第三处再写就是第三套。收成一个令牌。 */
+.lib-head,
+.daily-kicker {
+  letter-spacing: var(--meta-tracking);
+}
+/* 「共 N 首」由裸文字改成胶囊标签：标题旁的数字是"标签"不是"副标题"，
+   Mineradio 里同一位置也是 tag 形态。 */
+.count {
+  font-size: var(--fs-xs);
+  color: color-mix(in srgb, var(--text) 58%, transparent);
+  border: 1px solid var(--surface-line);
+  background: var(--surface-1);
+  border-radius: var(--r-pill);
+  padding: 2px 9px;
+}
+/* 胶囊带内边距之后，baseline 对齐会让它比标题明显偏低，改成居中。 */
+.col-head-left { align-items: center; }
+
+/* ---------- 导航轨 ---------- */
+
+/* 选中态**必须保留香槟金**（--highlight）。本项目把两个强调角色分得很死：
+   --brand（薄荷青）= "正在生效 / 正在播放"，--highlight（香槟金）= "当前选中项"。
+   导航轨的选中是后者，把它改成 --accent（默认主题 = 纯白）会和旁边几个
+   薄荷青的播放态控件抢同一层语义。这里只补两件它缺的东西：内高光让选中块
+   有厚度，标签加粗让"选中"不只靠颜色表达。 */
+.rail-item.active {
+  color: var(--highlight);
+  background: rgba(var(--highlight-rgb), 0.1);
+  border-color: rgba(var(--highlight-rgb), 0.32);
+  box-shadow: var(--surface-hi);
+}
+.rail-item.active span { font-weight: 600; }
+
+/* ---------- 按压手感 ---------- */
+
+/* 压下去要"快"（不跟手就是钝），回弹要"缓"（回弹才有弹性）。
+   一条 transition 两头同速正是手感发木的原因。
+   这里只动 transition-duration 这一个长手属性：上面各按钮的 transition
+   简写里 transform 仍在，时长按这里走，不用重抄一遍属性列表。
+   `.ctrl` 不列进来——它的 80ms 压下 / 240ms 回弹是就地写好的（见 .ctrl:active），
+   再声明一遍只会和 .ctrl-primary 自己的时长打架。 */
+.btn:not(:disabled),
+.iconbtn,
+.btn-pill { transition-duration: var(--dur-release); }
+.btn:active:not(:disabled),
+.iconbtn:active,
+.btn-pill:active { transition-duration: var(--dur-press); }
+
+/* ---------- 键盘焦点兜底 ---------- */
+
+/* 整条选择器用 :where() 包住 → 特异性 0：只在"没有任何既有规则管过"的
+   元素上生效，绝不覆盖各组件自己精调过的 focus-visible 表现。
+   补的是 online.css / creative.css / stage3d.css 里那些漏掉焦点态的可点
+   元素（卡片、抽屉里的按钮、列表项）——它们此前按 Tab 是完全没有可见反馈的。 */
+:where(a[href], button, [role="button"], summary, [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
+/* ---------- 视图入场 ---------- */
+
+/* 切 tab 时内容硬切，是从"面板感"掉回"网页感"最快的一处。
+   0.26s 的位移 + 淡入够让人看出"换了一块"，又不至于要等。
+   只动 .view 自身、不做逐行错峰：里面全是滚动容器与懒加载列表，
+   逐个入场会和行的插入时机打架。reduce-motion 由上面的全局规则兜住。
+
+   填充模式必须是 backwards，**不能是 both**：both 会让末帧的
+   `transform: none` 以"动画终值"的身份常驻在计算样式里，浏览器把它算成
+   单位矩阵 matrix(1,0,0,1,0,0)——而这不是关键字 none，于是 .view 会**永久**
+   成为一个包含块兼层叠上下文，里面任何 position:fixed 都会被改成相对 .view
+   定位。backwards 同样能防住首帧闪烁（无 delay 时动画从第 0 帧就在活动期），
+   动画一结束就干净地退回基础样式。 */
+@keyframes view-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.view:not([hidden]) { animation: view-enter var(--dur-enter) var(--ease-out) backwards; }

@@ -1,0 +1,8 @@
+# 迁移文件的字节内容会被编译进二进制：sqlx 在 build 期读磁盘字节算 sha384，
+# 启动时会拿它跟库里 _sqlx_migrations.checksum 比对。
+# 一旦检出时对 migrations/*.sql 做了 CRLF 转换，校验和就对不上，服务会以
+# "migration N was previously applied but has been modified" 直接拒绝启动
+# （改的是换行符，SQL 语义完全没变）。
+# core.autocrlf=true 的机器上默认是 CRLF，所以这里强行钉死 LF，
+# 优先级高于 core.autocrlf。
+*.sql text eol=lf

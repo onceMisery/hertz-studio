@@ -78,6 +78,9 @@ function makeEnv(settings) {
   const sandbox = {
     state, ui, transport, console,
     document: { body },
+    // setStageIdleHide 在用户真的动手时会 bump 设置世代号（防远端旧响应把本地
+    // 刚点的状态反杀）。这条链路不归本脚本测，沙箱里给个空实现即可。
+    markSettingsDirty: () => {},
   };
   vm.createContext(sandbox);
   vm.runInContext(CODE, sandbox);

@@ -767,15 +767,43 @@ body.is-playing .disc { animation-play-state: running; }
               calc(var(--w-dy) * var(--lp-spread-y)))
     rotate(calc(var(--w-rot) * var(--lp-spread-r)))
     scale(var(--w-sc));
-  /* 散开后词与词会靠近，给一点各自的落位过渡，切换模式时是"散开"而不是跳 */
-  transition: transform var(--dur-3) var(--ease), color var(--dur-3) var(--ease);
+  /* 散开后词与词会靠近，给一点各自的落位过渡，切换模式时是"散开"而不是跳。
+     只挂 transform：换色是改 background-image（逐字那条渐变），而渐变不可
+     动画，写进 transition 只会让人误以为颜色会平滑过渡。 */
+  transition: transform var(--dur-3) var(--ease);
 }
-/* 冷暖两色交替：单色的散落会糊成一团字，分两个色相才读得出它们是独立的词 */
+/* 冷暖两色交替：单色的散落会糊成一团字，分两个色相才读得出它们是独立的词。
+   必须改写 background-image 而不是 color —— .word 的逐字擦除是
+   background-clip:text 配 -webkit-text-fill-color: transparent 做的，属性
+   填充本身就是透明的，写 color 会被那个 transparent 直接盖掉，一个字都换
+   不了色（症状：心象看着仍是卡拉OK 那套单色渐变）。换掉渐变里的「已唱」段
+   即可，未唱段仍是 idle 色，逐字进展也就一并保住了。 */
 .lyric-page[data-lp-mode="scatter"] .lp-line.active .word:nth-child(odd) {
-  color: var(--lyric-highlight);
+  background-image: linear-gradient(
+    to right,
+    var(--lyric-highlight) 0%,
+    var(--lyric-highlight) calc(var(--word-progress, 0%) - var(--lyric-edge-soft)),
+    var(--lyric-idle) calc(var(--word-progress, 0%) + var(--lyric-edge-soft)),
+    var(--lyric-idle) 100%
+  );
 }
 .lyric-page[data-lp-mode="scatter"] .lp-line.active .word:nth-child(even) {
-  color: var(--music-highlight-alt);
+  background-image: linear-gradient(
+    to right,
+    var(--music-highlight-alt) 0%,
+    var(--music-highlight-alt) calc(var(--word-progress, 0%) - var(--lyric-edge-soft)),
+    var(--lyric-idle) calc(var(--word-progress, 0%) + var(--lyric-edge-soft)),
+    var(--lyric-idle) 100%
+  );
+}
+/* 正在唱的字的辉光跟着走：不然偶数位明明是青色，光晕还是主色那一圈白，
+   看着像两层东西没对齐。 */
+.lyric-page[data-lp-mode="scatter"] .lp-line.active .word:nth-child(even).singing {
+  text-shadow:
+    0 0 var(--lyric-singing-glow)
+      rgba(var(--music-highlight-alt-rgb), var(--lyric-singing-glow-alpha)),
+    0 0 calc(var(--lyric-singing-glow) * 3.2)
+      rgba(var(--music-highlight-alt-rgb), calc(var(--lyric-singing-glow-alpha) * 0.5));
 }
 /* 非当前行不参与散开，否则整页都是飘着的字，没法看进度在哪 */
 .lyric-page[data-lp-mode="scatter"] .lp-line:not(.active) .word {
@@ -907,6 +935,22 @@ body.is-playing .disc { animation-play-state: running; }
   object-fit: cover;
   display: block;
 }
+/* 当前曲目没有封面图时的占位：铺一层主题色渐变 + 一圈内环，
+   让「显示舞台封面」开着时看到的是一张有内容的盘，而不是 --panel-solid 的死灰。
+   之所以要这一层 —— has-cover 已经不再要求「有封面图」，否则那个开关在这种
+   曲目下怎么点都不显示，看着就是坏的。 */
+.lyric-page.no-cover-art .lp-cover-face {
+  background:
+    radial-gradient(circle at 50% 42%,
+      rgba(var(--music-highlight-rgb), 0.42), transparent 62%),
+    radial-gradient(circle at 50% 50%,
+      transparent 26%, rgba(255, 255, 255, 0.10) 27%,
+      rgba(255, 255, 255, 0.10) 29%, transparent 30%),
+    linear-gradient(155deg,
+      rgba(var(--music-highlight-rgb), 0.26),
+      rgba(var(--music-highlight-alt-rgb), 0.16) 60%,
+      var(--panel-solid));
+}
 /* 背面压暗一档并降一点饱和：正反面要有主次，否则转起来像两面都在"正面"。
    镜像是为了让翻转读得出连续性——看到的内容和正面有关，而不是随机一块色。 */
 .lp-cover-back {
@@ -984,7 +1028,7 @@ body.is-playing .disc { animation-play-state: running; }
 .progress-wrap::before {
   height: 6px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--track);
 }
 .progress-ghost {
   height: 6px;
@@ -1003,7 +1047,7 @@ input[type="range"] {
 input[type="range"]::-webkit-slider-runnable-track {
   height: 6px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--track);
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -1018,7 +1062,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.18); }
 input[type="range"]::-moz-range-track {
-  height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.12);
+  height: 6px; border-radius: 3px; background: var(--track);
 }
 input[type="range"]::-moz-range-thumb {
   width: 12px; height: 12px; border: 0; border-radius: 50%;
@@ -1065,6 +1109,12 @@ input[type="range"]::-moz-range-thumb {
   background: var(--music-highlight);
   color: var(--accent-ink);
   border-color: transparent;
+}
+/* 自动环转开启时，轨道图标自身缓慢公转——一排圆钮里不用细看也知道它在转 */
+#lp-autospin.active svg { animation: lp-orbit-spin 4s linear infinite; }
+@keyframes lp-orbit-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  #lp-autospin.active svg { animation: none; }
 }
 /* 开着但当前曲目没有封面图：降一档亮度说明"开关是好的，只是暂时没东西可看"。
    不做成 disabled，那会被读成按钮坏了。 */
@@ -1797,6 +1847,213 @@ body.reduce-motion .stage-ripple { display: none; }
   transition: transform var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
 }
 .theme-swatch:hover { transform: scale(1.1); }
-.theme-swatch[aria-pressed="true"] {
+.theme-swatches[aria-pressed="true"] {
   box-shadow: 0 0 0 2px var(--panel-solid), 0 0 0 3px var(--accent);
+}
+
+/* ==========================================================================
+   11. 沉浸演出：原生全屏、舞台坞、星幕
+   ========================================================================== */
+
+/* --- 侧栏舞台头的全屏入口（与「队列」同排） ----------------------------- */
+.stage-head-fs {
+  order: 2;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+.stage-head-fs:hover { color: var(--text); background: var(--hover); }
+.stage-head-fs svg { width: 16px; height: 16px; }
+
+/* --- 全屏页头部的全屏按钮：展开/退出两个图标互斥 ------------------------- */
+#lp-fs .ic-compress { display: none; }
+body.fs-on #lp-fs .ic-expand { display: none; }
+body.fs-on #lp-fs .ic-compress { display: block; }
+
+/* --- 舞台场景坞：六个 WebGL 场景的一键切换 ------------------------------- */
+.lp-dock {
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  padding: 5px;
+  max-width: calc(100vw - 28px);
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  border-radius: 17px;
+  background: var(--glass-bg);
+  border: var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(var(--glass-blur)) saturate(120%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(120%);
+  /* 容器本身不吃指针，缝隙处的拖拽/点击直接落到歌词轨；按钮各自开口子。 */
+  pointer-events: none;
+  transition: opacity 0.32s var(--ease);
+}
+.lp-dock::-webkit-scrollbar { display: none; }
+.lp-dock-btn {
+  pointer-events: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 13px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease),
+    transform var(--dur-1) var(--ease);
+}
+.lp-dock-ic { width: 17px; height: 17px; }
+.lp-dock-btn:hover { color: var(--text); background: var(--hover); }
+.lp-dock-btn:active { transform: scale(var(--press-scale)); }
+.lp-dock-btn.active {
+  color: var(--accent-ink);
+  background: rgb(var(--accent-rgb));
+}
+
+/* --- 原生全屏：静止 2.6s 隐去操作层与光标，移动鼠标/按键唤回 ------------- */
+body.fs-on { cursor: none; }
+body.fs-on.fs-chrome { cursor: default; }
+body.fs-on .lp-head,
+body.fs-on .lp-foot,
+body.fs-on .lp-dock {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.32s var(--ease);
+}
+body.fs-on.fs-chrome .lp-head,
+body.fs-on.fs-chrome .lp-foot { opacity: 1; pointer-events: auto; }
+body.fs-on.fs-chrome .lp-dock { opacity: 1; }
+body.fs-on.fs-chrome .lp-dock-btn { pointer-events: auto; }
+
+/* --- 星幕（halo） -------------------------------------------------------- */
+
+/* 半调点环层：.lp-scene 的第一个孩子，z-index 0 垫在歌词轨（其后兄弟）之下。
+   不用 translateZ：全屏页透视盒高度为 0 时（见 --lyric-row-depth 处注释），
+   非零 Z 会被异常放大；层级改用 z-index，铺满靠 scale。指针视差吃
+   stage-halo.js 阻尼写入的 --halo-rx/ry。 */
+.lp-halo {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  /* 只在星幕排版下出现：卡拉OK / 心象是另一套视觉，碟层必须整个让开。
+     帧门也同步报 0（stage-halo.js targetFps），两层开关互为兜底。 */
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  transform: scale(1.12)
+    rotateX(var(--halo-rx, 0deg)) rotateY(var(--halo-ry, 0deg));
+}
+.lyric-page[data-lp-mode="halo"] .lp-halo { display: flex; }
+/* 碟后的主色辉光：纯 CSS 径向渐变 + 模糊，不进画布。 */
+.lp-halo::before {
+  content: '';
+  position: absolute;
+  width: 78vmin;
+  height: 78vmin;
+  border-radius: 50%;
+  background: radial-gradient(circle,
+    rgba(var(--music-highlight-rgb), 0.13) 0%,
+    rgba(var(--music-highlight-rgb), 0.05) 44%,
+    transparent 68%);
+  filter: blur(18px);
+}
+.lp-halo-spin {
+  position: relative;
+  /* 节拍呼吸直接消费 --stage-energy（能量门已在写），零逐帧 JS。 */
+  scale: calc(1 + var(--stage-energy) * 0.035);
+  animation: lp-halo-spin 96s linear infinite;
+  will-change: transform;
+}
+.lp-halo-disc { display: block; }
+@keyframes lp-halo-spin { to { transform: rotate(360deg); } }
+
+/* 星幕里旋转封面盘 / 粒子封面让位给点环碟心（碟心画的就是同一张封面）。 */
+.lyric-page[data-lp-mode="halo"] .lp-cover {
+  opacity: 0 !important;
+  visibility: hidden !important;
+}
+
+/* 景深歌词：只在星幕作用域覆盖现有 --lyric-* 令牌，距离衰减公式本体不动。
+   效果对标 Mineradio 舞台歌词：当前行最大最亮、近两行暖粉色快速变暗变虚，
+   三行之外彻底淡出；纵向不错峰（句子垂直叠成一列）。 */
+.lyric-page[data-lp-mode="halo"] {
+  --lyric-page-size: clamp(30px, 4.4vh, 52px);
+  --lyric-page-line-height: 1.72;
+  /* 行纵深刻意保持 0：全屏页 .lp-body 在三维舞台开启时实际高度为 0
+     （粒子画布被 creative-on 规则留在文档流里占位），在零高透视盒里给歌词行
+     非零 translateZ 会被浏览器放大成满屏白块。景深改由下面的缩放 + 虚化 +
+     透明度三件套表达，观感一致且不依赖透视盒高度。 */
+  --lyric-row-depth: 0px;
+  --lyric-dim-step: 0.36;
+  --lyric-dim-floor: 0;
+  --lyric-row-shrink: 0.16;
+  --lyric-row-shrink-cap: 3;
+  --lyric-blur-inactive: 1.8px;
+  --lyric-row-shift: 0px;
+  --lyric-active-scale: 1.5;
+  --lyric-active-weight: 850;
+}
+.lyric-page[data-lp-mode="halo"] .lp-line {
+  color: rgba(255, 213, 218, 0.42);
+  letter-spacing: 0.02em;
+}
+.lyric-page[data-lp-mode="halo"] .lp-line.active {
+  color: #fff5f1;
+  text-shadow:
+    0 0 8px rgba(255, 240, 236, 0.62),
+    0 0 30px rgba(var(--music-highlight-rgb),
+      calc(0.26 + var(--stage-energy) * 0.30)),
+    0 0 84px rgba(var(--music-highlight-rgb),
+      calc(0.10 + var(--stage-energy) * 0.22));
+}
+/* 星幕行间距拉开，给大字号当前行留足呼吸。 */
+.lyric-page[data-lp-mode="halo"] .lp-track { gap: clamp(16px, 3.2vh, 40px); }
+
+/* 降级 / 减少动效：停转、去辉光、去景深补偿（perspective 已被置 none，
+   translateZ 不再产生缩短，scale 必须一起撤掉否则碟被放大 1.34 倍）。 */
+body.stage-lowfx .lp-halo-spin,
+body.reduce-motion .lp-halo-spin { animation: none; }
+body.stage-lowfx .lp-halo::before { display: none; }
+body.stage-lowfx .lp-halo { --halo-rx: 0deg; --halo-ry: 0deg; }
+body.reduce-motion .lp-halo { transform: none; }
+/* 这两个偏好的全局令牌归零特异性是 0,1,1，低于上面星幕作用域的 0,2,0，
+   不显式提权会被星幕值反盖，用户偏好静默失效。 */
+body.stage-lowfx .lyric-page[data-lp-mode="halo"] {
+  --lyric-blur-inactive: 0px;
+  --lyric-row-shrink: 0;
+}
+body.reduce-motion .lyric-page[data-lp-mode="halo"] {
+  --lyric-dim-step: 0;
+  --lyric-active-scale: 1;
+  --lyric-blur-inactive: 0px;
+  --lyric-row-shrink: 0;
+}
+
+/* 窄屏：坞贴底收窄，避免与播放控件挤在一起。 */
+@media (max-width: 620px) {
+  .lp-dock { bottom: 84px; border-radius: 14px; }
+  .lp-dock-btn { padding: 7px 10px; font-size: 12px; }
 }
