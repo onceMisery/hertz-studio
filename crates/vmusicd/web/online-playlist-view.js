@@ -134,7 +134,7 @@
 
     var cover = document.createElement('div');
     cover.className = 'op-cover';
-    var url = window.Online ? window.Online.safeCoverUrl(p.cover) : null;
+    var url = window.Online ? window.Online.rowCoverUrl(window.Online.safeCoverUrl(p.cover), 300) : null;
     if (url) cover.style.backgroundImage = 'url("' + url + '")';
     else cover.classList.add('is-missing');
     c.appendChild(cover);
@@ -300,7 +300,7 @@
 
     var cover = document.createElement('div');
     cover.className = 'opl-cover';
-    var url = window.Online ? window.Online.safeCoverUrl(p.cover) : null;
+    var url = window.Online ? window.Online.rowCoverUrl(window.Online.safeCoverUrl(p.cover), 300) : null;
     if (url) cover.style.backgroundImage = 'url("' + url + '")';
     else cover.classList.add('is-missing');
     box.appendChild(cover);
@@ -310,13 +310,14 @@
     var name = document.createElement('strong');
     name.textContent = p.name;
     head.appendChild(name);
-    var badge = document.createElement('span');
-    badge.className = 'src-badge opl-badge';
-    var b = window.Online && window.Online.sourceBadge
-      ? window.Online.sourceBadge(state.source) : null;
-    badge.textContent = b ? b.text : capSourceLabel();
-    if (b && b.color) badge.style.setProperty('--badge', b.color);
-    head.appendChild(badge);
+    // 徽标与在线面板同一套：平台 app 图标（见 online.js 的 badge()）。
+    var badge = window.Online && window.Online.badge
+      ? window.Online.badge(state.source, capSourceLabel())
+      : null;
+    if (badge) {
+      badge.classList.add('opl-badge');
+      head.appendChild(badge);
+    }
     box.appendChild(head);
 
     var meta = document.createElement('div');
@@ -444,7 +445,7 @@
 
     var cover = document.createElement('div');
     cover.className = 'op-cover';
-    var url = window.Online ? window.Online.safeCoverUrl(t.cover) : null;
+    var url = window.Online ? window.Online.rowCoverUrl(window.Online.safeCoverUrl(t.cover), 300) : null;
     if (url) cover.style.backgroundImage = 'url("' + url + '")';
     else cover.classList.add('is-missing');
     if (t.vip_only) {

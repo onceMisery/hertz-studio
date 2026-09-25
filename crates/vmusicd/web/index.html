@@ -17,6 +17,7 @@
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="stage.css">
 <link rel="stylesheet" href="creative.css">
+<link rel="stylesheet" href="stage3d.css">
 <link rel="stylesheet" href="online.css">
 </head>
 <body>
@@ -95,6 +96,19 @@
   <symbol id="i-reset" viewBox="0 0 24 24" fill="currentColor">
     <path d="M12 5V2L8 6l4 4V7a5 5 0 11-5 5H5a7 7 0 107-7z"/>
   </symbol>
+  <!-- 自动 360° 环转：倾斜的轨道环 + 中心焦点 + 卫星，区别于 i-reset 的单箭头复位 -->
+  <symbol id="i-orbit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <circle cx="12" cy="12" r="2.8" fill="currentColor" stroke="none"/>
+    <ellipse cx="12" cy="12" rx="9.2" ry="4.4" transform="rotate(-28 12 12)"/>
+    <circle cx="20.1" cy="7.7" r="1.9" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- 三维舞台：等距立方体。必须是独立图标 —— i-orbit 已经被「自动 360° 环转」
+       占用，两者在顶栏操作区相邻，复用同一个符号会并排出现两个一模一样的图形。 -->
+  <symbol id="i-cube" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 2.6l8.1 4.7v9.4L12 21.4 3.9 16.7V7.3z"/>
+    <path d="M12 12l8.1-4.7M12 12v9.4M12 12L3.9 7.3"/>
+  </symbol>
   <symbol id="i-folder" viewBox="0 0 24 24" fill="currentColor">
     <path d="M4 6h6l2 2h8v10H4z"/>
   </symbol>
@@ -123,6 +137,52 @@
     <path d="M20 9V5a1 1 0 00-1-1h-4"/>
     <path d="M4 15v4a1 1 0 001 1h4"/>
     <path d="M20 15v4a1 1 0 01-1 1h-4"/>
+  </symbol>
+  <symbol id="i-compress" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 4v5H4"/>
+    <path d="M15 4v5h5"/>
+    <path d="M9 20v-5H4"/>
+    <path d="M15 20v-5h5"/>
+  </symbol>
+
+  <!-- 音源平台 app 图标：24×24 单色字形，由 online.css 套进品牌色圆角方块
+       （--badge 由 online.js 按音源注入），用来替代原先的两字文字徽标。
+       画的是轮廓化的品牌标识（云+音符 / 双音符 / 狗头 / 汽水杯 / 唱片），
+       不是官方商标原图；平台名保留在徽标的 title 与 aria-label 上，悬停和
+       读屏照样能说出来源。i-app-generic 是未登记音源的兜底。 -->
+  <symbol id="i-app-netease" viewBox="0 0 24 24" fill="currentColor">
+    <circle cx="8.6" cy="8.8" r="2.9"/>
+    <circle cx="12.4" cy="7.4" r="3.7"/>
+    <circle cx="15.8" cy="9.4" r="2.4"/>
+    <rect x="7.8" y="8.3" width="9.4" height="3.4" rx="1.7"/>
+    <rect x="17.4" y="10.4" width="1.9" height="6.6" rx="0.95"/>
+    <ellipse cx="15.2" cy="18.2" rx="3.3" ry="2.5"/>
+  </symbol>
+  <symbol id="i-app-qq" viewBox="0 0 24 24" fill="currentColor">
+    <ellipse cx="7.4" cy="17.8" rx="3.4" ry="2.6"/>
+    <ellipse cx="16.6" cy="15.8" rx="3.4" ry="2.6"/>
+    <rect x="8.9" y="8" width="1.9" height="9.3" rx="0.95"/>
+    <rect x="18.1" y="6" width="1.9" height="9.3" rx="0.95"/>
+    <path d="M8.9 11.3L20 8.7V5.5L8.9 8.1z"/>
+  </symbol>
+  <symbol id="i-app-kugou" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M6.6 7.6L4.4 2.8l5.3 2.2zM17.4 7.6L19.6 2.8l-5.3 2.2z"/>
+    <path fill-rule="evenodd" d="M12 5.6a6.9 6.9 0 016.9 6.9c0 2.5-1.3 4.5-3.2 5.7-.8.5-1.2.9-1.2 1.6 0 .8-.6 1.4-1.4 1.4h-2.2c-.8 0-1.4-.6-1.4-1.4 0-.7-.4-1.1-1.2-1.6-1.9-1.2-3.2-3.2-3.2-5.7A6.9 6.9 0 0112 5.6zm-2.7 6.2a1.3 1.3 0 100 2.6 1.3 1.3 0 000-2.6zm5.4 0a1.3 1.3 0 100 2.6 1.3 1.3 0 000-2.6z"/>
+  </symbol>
+  <symbol id="i-app-qishui" viewBox="0 0 24 24" fill="currentColor">
+    <circle cx="17.5" cy="4.8" r="1.5"/>
+    <circle cx="20.4" cy="7.9" r="1"/>
+    <circle cx="7.6" cy="4.4" r="1.1"/>
+    <path d="M6.2 8.6h11.6l-1.1 10.8a1.7 1.7 0 01-1.7 1.5h-6a1.7 1.7 0 01-1.7-1.5z"/>
+  </symbol>
+  <symbol id="i-app-local" viewBox="0 0 24 24" fill="currentColor">
+    <path fill-rule="evenodd" d="M12 3.2a8.8 8.8 0 100 17.6 8.8 8.8 0 000-17.6zm0 6a2.8 2.8 0 100 5.6 2.8 2.8 0 000-5.6z"/>
+    <circle cx="12" cy="12" r="1.3"/>
+  </symbol>
+  <symbol id="i-app-generic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+    <circle cx="12" cy="12" r="8.6"/>
+    <ellipse cx="12" cy="12" rx="3.7" ry="8.6"/>
+    <path d="M3.4 12h17.2"/>
   </symbol>
 </svg>
 
@@ -588,11 +648,21 @@
     <div class="stage-head">
       <span class="stage-kicker">正在播放</span>
       <div class="stage-modes" id="stage-modes" role="group" aria-label="歌词展示模式">
-        <button class="stage-mode" data-mode="cover" aria-pressed="false">封面</button>
-        <button class="stage-mode" data-mode="karaoke" aria-pressed="true">卡拉OK</button>
-        <button class="stage-mode" data-mode="starriver" id="mode-starriver" aria-pressed="false">星河</button>
-        <button class="stage-mode" data-mode="page" aria-pressed="false">全屏</button>
+        <button class="stage-mode" data-mode="cover" aria-pressed="false"
+                title="侧栏只留封面盘，隐藏歌词">封面</button>
+        <button class="stage-mode" data-mode="karaoke" aria-pressed="true"
+                title="侧栏逐字高亮的歌词排版">卡拉OK</button>
+        <button class="stage-mode" data-mode="starriver" id="mode-starriver" aria-pressed="false"
+                title="进入全屏，并把背景切成星野与流动星河">星河</button>
+        <button class="stage-mode" data-mode="page" aria-pressed="false"
+                title="打开全屏歌词页">全屏</button>
       </div>
+      <button class="stage-head-fs" id="stage-fs" title="全屏舞台 (F)" aria-label="全屏舞台" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
+      </button>
+      <button class="stage-head-fs" id="stage-3d-btn" title="沉浸式三维舞台 (V)" aria-label="打开沉浸式三维舞台">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-cube"/></svg>
+      </button>
       <button class="stage-queue" id="stage-queue" title="打开播放队列">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg>
         <span>队列</span>
@@ -689,8 +759,12 @@
     <!-- 全屏页里必须自带模式切换和驾驶舱入口：唯一的入口按钮原本在顶栏，
          而顶栏被这层 z-index 70 的对话框整个盖住，进了全屏就再也调不了任何东西。 -->
     <div class="lp-modes" id="lp-modes" role="group" aria-label="歌词显示模式">
-      <button class="lp-mode" data-lp-mode="karaoke" aria-pressed="true">卡拉OK</button>
-      <button class="lp-mode" data-lp-mode="scatter" aria-pressed="false">心象</button>
+      <button class="lp-mode" data-lp-mode="karaoke" aria-pressed="true"
+              title="逐字高亮的歌词排版">卡拉OK</button>
+      <button class="lp-mode" data-lp-mode="scatter" aria-pressed="false"
+              title="字词散开的意象排版">心象</button>
+      <button class="lp-mode" data-lp-mode="halo" aria-pressed="false"
+              title="环形点阵星幕">星幕</button>
     </div>
     <div class="lp-spacer"></div>
     <button class="lp-btn" id="lp-cover" aria-label="舞台封面" aria-pressed="false">
@@ -701,6 +775,13 @@
     </button>
     <button class="lp-btn" id="lp-cockpit" title="舞台驾驶舱" aria-label="打开舞台驾驶舱" aria-expanded="false">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg>
+    </button>
+    <button class="lp-btn" id="lp-3d" title="沉浸式三维舞台 (V)" aria-label="打开沉浸式三维舞台">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-cube"/></svg>
+    </button>
+    <button class="lp-btn" id="lp-fs" title="全屏 (F)" aria-label="全屏" aria-pressed="false">
+      <svg class="ic-expand" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
+      <svg class="ic-compress" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-compress"/></svg>
     </button>
     <button class="lp-btn" id="lp-close" title="关闭 (Esc)" aria-label="关闭全屏歌词">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
@@ -724,6 +805,50 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-next"/></svg>
     </button>
   </div>
+</div>
+
+<!-- 沉浸式三维舞台：一整块屏幕就是一个舞台。
+     它和 .lyric-page 是两个独立的全屏层——歌词页的画布是「陪衬歌词」，这一层
+     反过来独占指针 / 独占全屏 / 独占后处理链，两者对同一份资源的诉求互斥。
+     默认 hidden + visibility:hidden：不可见时不参与命中测试也不参与合成。
+     内部节点由 stage3d.js 填充（舞台坞的清单来自它的 STAGES 目录），这里只
+     放骨架和四个固定按钮，避免 JS 里拼整段 DOM。 -->
+<div class="s3d" id="stage3d" aria-hidden="true" role="dialog" aria-label="沉浸式三维舞台">
+  <div class="s3d-canvas-wrap" id="s3d-canvas-wrap"></div>
+  <div class="s3d-vignette" aria-hidden="true"></div>
+
+  <div class="s3d-head">
+    <div class="s3d-meta">
+      <div class="s3d-meta-title" id="s3d-title">未在播放</div>
+      <div class="s3d-meta-sub" id="s3d-artist"></div>
+    </div>
+    <button class="s3d-btn" id="s3d-cruise" title="自动巡航 (C)" aria-label="自动巡航" aria-pressed="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>
+        <circle cx="12" cy="12" r="4"/>
+      </svg>
+    </button>
+    <button class="s3d-btn" id="s3d-reset" title="复位视角 (K / 双击)" aria-label="复位视角">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reset"/></svg>
+    </button>
+    <button class="s3d-btn" id="s3d-fs" title="全屏 (F)" aria-label="全屏" aria-pressed="false">
+      <svg class="ic-expand" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
+      <svg class="ic-compress" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-compress"/></svg>
+    </button>
+    <button class="s3d-btn" id="s3d-close" title="关闭 (Esc)" aria-label="关闭三维舞台">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
+    </button>
+  </div>
+
+  <div class="s3d-dock" id="s3d-dock" role="toolbar" aria-label="三维舞台切换"></div>
+  <div class="s3d-hint" id="s3d-hint"></div>
+  <div class="s3d-keys">
+    拖动旋转 · 滚轮缩放 · 双击复位<br>
+    1–5 切舞台 · [ ] 上一个/下一个<br>
+    F 全屏 · C 巡航 · K 复位 · V / Esc 关闭
+  </div>
+  <div class="s3d-fallback" id="s3d-fallback" hidden></div>
 </div>
 
 <div id="scrim"></div>
@@ -892,6 +1017,11 @@
 <script src="stage-cinema.js"></script>
 <script src="stage-freecam.js"></script>
 <script src="stage-focus.js"></script>
+<script src="stage-halo.js"></script>
+<!-- 沉浸式三维舞台：自建一个 WebGL2 上下文（拿不到就整体降级），逐帧驱动
+     仍然走 Stage.gate()。排在 stage-immersive 之前，键盘用捕获阶段抢下 F。 -->
+<script src="stage3d.js"></script>
+<script src="stage-immersive.js"></script>
 <script src="vendor/qrcode.js"></script>
 <script src="online-login.js"></script>
 <script src="online.js"></script>

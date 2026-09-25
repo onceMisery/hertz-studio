@@ -253,6 +253,23 @@ fn duration_ms(item: &serde_json::Value) -> u64 {
         .saturating_mul(1000)
 }
 
+/// 封面尺寸占位。酷狗下发的是模板 URL（
+/// `http://imge.kugou.com/stdmusic/{size}/20230920/....jpg`），直接原样交给
+/// 前端就是一张打不开的图——整列曲目会齐刷刷落到占位音符。列表里只有 40px，
+/// 但舞台与歌单详情会把同一条 URL 放大到几百像素，所以取 480。
+const COVER_SIZE: &str = "480";
+
+/// 取封面：展开 `{size}` 占位并升 https。
+///
+/// `Image` 是搜索/歌单曲目都带的模板图；`AlbumImage` 是部分接口的专辑图
+/// （实测搜索结果里它是空串，所以排在后面）；`imgurl`/`pic` 是老接口字段。
+fn cover_of(item: &serde_json::Value) -> Option<String> {
+    pick_str(Some(item), &["Image", "AlbumImage", "imgurl", "pic", "img"])
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|u| super::https_url(&u.replace("{size}", COVER_SIZE)))
+        .filter(|u| u.starts_with("https://"))
+}
+
 fn map_track(item: &serde_json::Value) -> OnlineTrack {
     let hash = item.get("FileHash").and_then(|v| v.as_str()).unwrap_or("");
     // 真机 MixSongID/AlbumID 可能以整数出现：val_string 统一转十进制，不丢值。
@@ -285,7 +302,7 @@ fn map_track(item: &serde_json::Value) -> OnlineTrack {
         ),
         album: clean_text(item.get("AlbumName").and_then(|v| v.as_str()).unwrap_or("")),
         duration_ms: duration_ms(item),
-        cover: None,
+        cover: cover_of(item),
         playable: !hash.is_empty(),
         vip_only: privilege != 0,
         track_ref: json!({
@@ -1533,6 +1550,28 @@ mod tests {
         assert!(!t1.title.contains('<'));
         assert_eq!(t1.title, "无版权演示");
         assert_eq!(t1.duration_ms, 60_000);
+    }
+
+    #[test]
+    fn cover_template_size_is_expanded_and_upgraded() {
+        // 酷狗下发的是模板 URL，{size} 不展开就是一张打不开的图。
+        let t = map_track(&json!({
+            "FileHash": "H",
+            "SongName": "晴天",
+            "Duration": 240,
+            "Image": "http://imge.kugou.com/stdmusic/{size}/20230920/20230920142503632013.jpg"
+        }));
+        assert_eq!(
+            t.cover.as_deref(),
+            Some("https://imge.kugou.com/stdmusic/480/20230920/20230920142503632013.jpg")
+        );
+    }
+
+    #[test]
+    fn cover_stays_none_when_upstream_has_none() {
+        assert_eq!(cover_of(&json!({})), None);
+        // 空串 / 纯空白（搜索结果里 AlbumImage 常常是空串）
+        assert_eq!(cover_of(&json!({"Image": "", "AlbumImage": "  "})), None);
     }
 
     #[test]

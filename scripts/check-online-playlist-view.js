@@ -168,7 +168,7 @@ function makeSandbox(opts) {
   sandbox.VMusicTransport = opts.transport;
   sandbox.window.VMusicTransport = opts.transport;
 
-  // Online：只提供本模块用到的四个入口。row 返回带 .t-actions 的桩行，
+  // Online：只提供本模块用到的几个入口。row 返回带 .t-actions 的桩行，
   // 并记下激活回调（点击行的行为由调用方注入，不在本模块里）。
   sandbox.window.Online = {
     row(track, activate) {
@@ -181,7 +181,25 @@ function makeSandbox(opts) {
       return row;
     },
     safeCoverUrl(u) { return u || null; },
-    sourceBadge(id) { return id === 'netease' ? { text: '网易', color: '#e34c4c' } : null; },
+    // 缩略图改写：这里按网易云 CDN 的真实规则实现，卡片封面才测得出来。
+    rowCoverUrl(u, px) {
+      const url = u || null;
+      if (!url || url.indexOf('.music.126.net/') < 0 || url.indexOf('?') >= 0) return url;
+      const n = px || 90;
+      return url + '?param=' + n + 'y' + n;
+    },
+    sourceBadge(id) {
+      return id === 'netease'
+        ? { text: '网易云音乐', color: '#e34c4c', icon: 'i-app-netease' }
+        : null;
+    },
+    badge(source, label) {
+      const el = makeEl();
+      el.className = 'src-badge';
+      el.title = label || source;
+      el.innerHTML = '<use href="#i-app-netease"/>';
+      return el;
+    },
     playAll(tracks, index) { spies.played.push({ tracks: tracks.slice(), index }); },
   };
   sandbox.window.OnlinePlaylists = {

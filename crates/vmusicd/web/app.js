@@ -330,6 +330,11 @@ function toast(message, kind = 'info') {
 
 let retries = 0;
 let reconnectTimer = 0;
+// 只有「真的断过线」才需要在重连时补一次全量拉取。启动流程自己会
+// await refreshAll()，WebSocket 的首次 onopen 不该再补一遍——那第二遍
+// loadSettings 的响应是异步到达的，落在用户已经开始操作的时刻，会把刚点
+// 下的即时开关按服务端旧值覆盖回去（症状：舞台上的按钮点了没反应）。
+let missedWhileOffline = false;
 
 function onConnectionChange(ok) {
   state.connected = ok;
@@ -339,7 +344,12 @@ function onConnectionChange(ok) {
   if (ok) {
     retries = 0;
     // 断线期间错过了一切，重连后先把全量状态拉回来。
-    refreshAll();
+    if (missedWhileOffline) {
+      missedWhileOffline = false;
+      refreshAll();
+    }
+  } else {
+    missedWhileOffline = true;
   }
 }
 
@@ -865,6 +875,15 @@ function onStageControl(e) {
   }
 }
 
+// 远端设置回填与本地即时操作的竞态守卫。
+//
+// loadSettings 是异步的：GET 发出之后，用户随时可能在舞台上按下某个即时开关。
+// 等响应回来时它带的是按下之前的旧值，无脑回填会把刚按下的状态反杀回去——
+// 表现为「点了没反应」，可库里其实已经写对了，刷新页面才看得到。用世代号判定
+// 最稳：这条 GET 发出之后只要用户动过即时开关，就以界面上的现状为准。
+let settingsEpoch = 0;
+function markSettingsDirty() { settingsEpoch += 1; }
+
 // 舞台封面盘的持久化：persist 只在用户真的动了一下开关时为 true。
 // loadSettings 恢复状态时传 false，否则每次刷新页面都会多写一次设置表。
 function setStageCover(on, persist) {
@@ -872,7 +891,10 @@ function setStageCover(on, persist) {
   state.settings.stage_cover = want;
   if (ui.setStageCover && ui.setStageCover.checked !== want) ui.setStageCover.checked = want;
   if (window.Stage) Stage.setCoverMode(want, { silent: true });
-  if (persist) transport.put('/v1/settings', { stage_cover: want }).catch(() => {});
+  if (persist) {
+    markSettingsDirty();
+    transport.put('/v1/settings', { stage_cover: want }).catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -911,7 +933,10 @@ function setStageIdleHide(on, persist) {
   state.settings.stage_idle_hide = want;
   if (ui.setStageIdleHide && ui.setStageIdleHide.checked !== want) ui.setStageIdleHide.checked = want;
   syncStageIdle();
-  if (persist) transport.put('/v1/settings', { stage_idle_hide: want }).catch(() => {});
+  if (persist) {
+    markSettingsDirty();
+    transport.put('/v1/settings', { stage_idle_hide: want }).catch(() => {});
+  }
 }
 
 function prefersReducedMotion() {
@@ -1154,10 +1179,7 @@ function renderOnlinePlaylistSection() {
   const groups = new Map();
   items.forEach((it) => {
     if (!groups.has(it.source)) {
-      groups.set(it.source, {
-        label: it.sourceLabel, color: it.badgeColor,
-        badgeText: it.badgeText, rows: [],
-      });
+      groups.set(it.source, { label: it.sourceLabel, rows: [] });
     }
     groups.get(it.source).rows.push(it);
   });
@@ -1191,14 +1213,14 @@ function renderOnlinePlaylistSection() {
     head.appendChild(grid);
     block.appendChild(head);
 
-    g.rows.forEach((it) => block.appendChild(onlinePlaylistRow(src, it.playlist, g.color, g.badgeText)));
+    g.rows.forEach((it) => block.appendChild(onlinePlaylistRow(src, it.playlist)));
   });
   onlineBlockEl = block;
   onlinePlaylistHost().appendChild(block);
   placeOnlineBlock();
 }
 
-function onlinePlaylistRow(src, p, badgeColor, badgeText) {
+function onlinePlaylistRow(src, p) {
   const el = document.createElement('div');
   el.className = 'pl-row is-online';
   el.title = p.name;
@@ -1224,11 +1246,12 @@ function onlinePlaylistRow(src, p, badgeColor, badgeText) {
   nameText.style.whiteSpace = 'nowrap';
   nameText.textContent = (p.kind === 'liked' ? '♥ ' : '') + p.name;
   nameLine.appendChild(nameText);
-  const badge = document.createElement('span');
-  badge.className = 'pl-online-badge';
-  if (badgeColor) badge.style.setProperty('--badge', badgeColor);
-  badge.textContent = badgeText;
-  nameLine.appendChild(badge);
+  // 平台徽标与搜索结果同源同款（online.js 的 badge()），这里不再自己拼。
+  const badge = window.Online ? window.Online.badge(src) : null;
+  if (badge) {
+    badge.classList.add('pl-online-badge');
+    nameLine.appendChild(badge);
+  }
   main.appendChild(nameLine);
   const sub = document.createElement('span');
   sub.className = 'pl-sub';
@@ -1773,6 +1796,8 @@ async function finishScan() {
 // ---------------------------------------------------------------------------
 
 async function loadSettings() {
+  // 这条 GET 在飞期间用户有没有动过即时开关，见 settingsEpoch 的注释。
+  const epoch = settingsEpoch;
   const s = await transport.get('/v1/settings').catch(() => ({}));
   state.settings = s || {};
   await loadScanHistory();
@@ -1784,10 +1809,18 @@ async function loadSettings() {
   document.body.dataset.density = ui.setDensity.value;
   document.body.classList.toggle('reduce-motion', ui.setMotion.checked);
   if (Stage) Stage.setReducedMotion(ui.setMotion.checked);
-  // 封面盘是即时开关：恢复状态不写库（persist=false），也不经过 stage:control。
-  setStageCover(state.settings.stage_cover, false);
-  // 空闲收起默认开：设置表里没有这项时传 true，行为与"用户勾上了"一致。
-  setStageIdleHide(state.settings.stage_idle_hide !== false, false);
+  // 下面两项是舞台上的即时开关。这条 GET 在飞期间用户动过它们的话，响应里是
+  // 旧值——回填等于把刚点下的状态反杀，所以那一次以界面现状为准（库里已经由
+  // 用户那次操作写对了），只回填确实没被动过的项。
+  if (epoch === settingsEpoch) {
+    // 封面盘：恢复状态不写库（persist=false），也不经过 stage:control。
+    setStageCover(state.settings.stage_cover, false);
+    // 空闲收起默认开：设置表里没有这项时传 true，行为与"用户勾上了"一致。
+    setStageIdleHide(state.settings.stage_idle_hide !== false, false);
+  } else if (Stage) {
+    // 内存副本也别留旧值，否则设置页的复选框会和界面不一致。
+    state.settings.stage_cover = Stage.isCoverMode();
+  }
   // 渲染器在这里定：设置到手之前，粒子层一直挂着（帧门报 0，一帧不画）。
   // attach 只认第一次调用，所以之后用户改设置不会换渲染器——那是
   // 「重新加载界面」之后的事，设置页也是这么写的。
@@ -1940,6 +1973,16 @@ function initRenderMode() {
         render_mode_effective: 'standard',
         render_mode_note: e.detail.reason || ''
       }).catch(() => {});
+    }
+  });
+
+  // 沉浸演出页的舞台坞选了某个三维场景、而三维舞台还没开时，统一走这里：
+  // 粒子让位、降级 toast、设置持久化都复用 applyCreative，与设置里手动
+  // 拨「三维舞台」开关是同一条路径。
+  document.addEventListener('stage:creative-request', (e) => {
+    const want = !e.detail || e.detail.on !== false;
+    if (want !== (window.CreativeStage && CreativeStage.active())) {
+      applyCreative(want, true);
     }
   });
 }
@@ -2526,6 +2569,12 @@ function applyCreative(on, persist) {
   } else {
     showCreativeWarn(null);
   }
+
+  // 三维开关状态广播：设置复选框、启动恢复、演出页坞栏请求都收口在本函数，
+  // 坞栏据此清掉/点亮场景高亮（attach 本身不发 preset 事件）。
+  document.dispatchEvent(new CustomEvent('stage:creative-changed', {
+    detail: { on: effective === '3d' }
+  }));
 
   state.settings.creative_stage = want;
   if (persist) {

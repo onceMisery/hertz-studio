@@ -926,13 +926,13 @@ async function loginScenario(pollStates, opts) {
     eq(all.length, 3, '扁平清单包含三个源的歌单');
     eq(all[0].source, 'netease');
     eq(all[0].playlist.id, 'n1');
-    eq(all[0].badgeText, '网易', '网易徽标短名');
+    eq(all[0].badgeIcon, 'i-app-netease', '网易徽标用网易云 app 图标');
     eq(all[1].source, 'qq');
     eq(all[1].badgeColor, '#12b7f5', 'QQ 带品牌色');
-    eq(all[1].badgeText, 'QQ', 'QQ 徽标短名');
+    eq(all[1].badgeIcon, 'i-app-qq', 'QQ 徽标用 QQ 音乐 app 图标');
     eq(all[2].source, 'kugou');
     eq(all[2].badgeColor, '#2ca5f0', '酷狗带品牌色');
-    eq(all[2].badgeText, '酷狗', '酷狗徽标短名（不裸出 source id）');
+    eq(all[2].badgeIcon, 'i-app-kugou', '酷狗徽标用酷狗 app 图标');
 
     // open() 按 source+id 找到歌单并打开抽屉。
     env.sandbox.window.OnlinePlaylists.open('qq', 'q1');
@@ -945,7 +945,7 @@ async function loginScenario(pollStates, opts) {
     ok(env.spies.toasts.some((t) => t.msg.indexOf('过期') >= 0), '未知歌单如实提示');
   }
 
-  section('平台徽标：汽水补齐品牌短名与品牌色');
+  section('平台徽标：app 图标 + 品牌色，未登记音源有兜底');
   {
     const env = playlistSandbox({
       sources: [{ id: 'netease', label: '网易云音乐', caps: ['cookie_login'] }],
@@ -955,16 +955,120 @@ async function loginScenario(pollStates, opts) {
     await ticks(20);
     const Online = env.sandbox.window.Online;
     // 汽水此前缺徽标登记，搜索结果里会降级成裸文本「qishui」。
-    eq(Online.sourceBadge('qishui').text, '汽水', '汽水徽标短名');
+    eq(Online.sourceBadge('qishui').text, '汽水音乐', '汽水徽标品牌名');
     eq(Online.sourceBadge('qishui').color, '#45d68f', '汽水品牌色');
-    eq(Online.sourceBadge('netease').text, '网易', '网易徽标短名（回归）');
+    eq(Online.sourceBadge('qishui').icon, 'i-app-qishui', '汽水 app 图标');
+    eq(Online.sourceBadge('netease').text, '网易云音乐', '网易徽标品牌名（回归）');
+    eq(Online.sourceBadge('netease').icon, 'i-app-netease', '网易 app 图标（回归）');
     eq(Online.sourceBadge('qq').color, '#12b7f5', 'QQ 品牌色（回归）');
+    eq(Online.sourceBadge('qq').icon, 'i-app-qq', 'QQ app 图标（回归）');
     eq(Online.sourceBadge('kugou').color, '#2ca5f0', '酷狗品牌色（回归）');
+    eq(Online.sourceBadge('kugou').icon, 'i-app-kugou', '酷狗 app 图标（回归）');
+    // 本地曲库也有一枚（唱片），且不带任何平台品牌色。
+    eq(Online.sourceBadge('local').icon, 'i-app-local', '本地曲库有自己的图标');
+    eq(Online.sourceBadge('local').color, null, '本地曲库不占用平台品牌色');
     // 未登记音源回 null，由调用方兜到服务端 label，不裸出 source id。
     eq(Online.sourceBadge('ccmixter'), null, '未登记音源无徽标条目');
+    eq(Online.sourceIcon('ccmixter'), 'i-app-generic', '未登记音源兜到通用图标');
     // 歌单菜单与搜索行共用同一份表（online-playlists 去问 online.js）。
     const all = env.sandbox.window.OnlinePlaylists.all();
     eq(all.length, 0, '没有歌单时扁平清单为空');
+  }
+
+  section('徽标节点：画图标而非文字，平台名留在 title/aria-label');
+  {
+    const env = playlistSandbox({
+      sources: [{ id: 'netease', label: '网易云音乐', caps: ['cookie_login'] }],
+      playlists: [],
+    });
+    await env.doc.fireDCL();
+    await ticks(20);
+    const Online = env.sandbox.window.Online;
+    const b = Online.badge('netease');
+    // 桩的 className 与 classList 是两套（classList 只由 .add() 维护），
+    // 这里按 className 断言。
+    eq(b.className, 'src-badge', '徽标带 src-badge 类（配色由 CSS 管）');
+    // 视觉上只有图标：不能再出现文字节点。
+    eq(b.textContent, '', '徽标里不摆文字');
+    ok(b.innerHTML.indexOf('#i-app-netease') >= 0, '徽标引用网易云 app 图标');
+    // 图标本身说不出平台名，读屏与悬停必须能拿到。
+    eq(b.title, '网易云音乐', 'title 给完整平台名');
+    eq(b.getAttribute('aria-label'), '网易云音乐', 'aria-label 给完整平台名');
+
+    const unknown = Online.badge('ccmixter', 'CCMixter');
+    ok(unknown.innerHTML.indexOf('#i-app-generic') >= 0, '未登记音源画通用图标');
+    eq(unknown.title, 'CCMixter', '未登记音源用服务端 label 兜底，不裸出 id');
+
+    // 图标 id 是拼字符串写进 innerHTML 的，check-assets 那条静态扫描（只认
+    // 字面量 <use href="#i-x">）扫不到它。拼错的表现是一个空色块，不报任何
+    // 错，所以这里对着 index.html 的 sprite 逐个核。
+    const html = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
+    const symbols = new Set();
+    const re = /<symbol\s+id="(i-[^"]+)"/g;
+    let m;
+    while ((m = re.exec(html)) !== null) symbols.add(m[1]);
+    ['netease', 'qq', 'kugou', 'qishui', 'local'].forEach((s) => {
+      const icon = Online.sourceBadge(s).icon;
+      ok(symbols.has(icon), 'index.html 定义了 ' + s + ' 的图标 ' + icon);
+    });
+    ok(symbols.has(Online.sourceIcon('nope')), 'index.html 定义了兜底图标');
+  }
+
+  section('列表封面：网易云走 CDN 缩略图，其余音源原样');
+  {
+    const env = playlistSandbox({
+      sources: [{ id: 'netease', label: '网易云音乐', caps: ['cookie_login'] }],
+      playlists: [],
+    });
+    await env.doc.fireDCL();
+    await ticks(20);
+    const O = env.sandbox.window.Online;
+    // 上游原图 300KB+，一屏 30 首近 10MB —— 行里只有 40px，换小图才不会
+    // 「等半天还是没封面」。
+    eq(O.rowCoverUrl('https://p1.music.126.net/a/b.jpg'),
+      'https://p1.music.126.net/a/b.jpg?param=90y90', '行里换 90px 缩略图');
+    eq(O.rowCoverUrl('https://p1.music.126.net/a/b.jpg', 300),
+      'https://p1.music.126.net/a/b.jpg?param=300y300', '卡片传 300');
+    // 只有网易云 CDN 认这个参数，别的音源不能瞎拼。
+    eq(O.rowCoverUrl('https://imge.kugou.com/stdmusic/480/x.jpg'),
+      'https://imge.kugou.com/stdmusic/480/x.jpg', '酷狗 URL 原样返回');
+    eq(O.rowCoverUrl(null), null, '空封面不拼参数');
+    eq(O.rowCoverUrl('https://p1.music.126.net/a/b.jpg?x=1'),
+      'https://p1.music.126.net/a/b.jpg?x=1', '已有 query 不再追加');
+  }
+
+  section('在线封面：网易云补详情、酷狗展开 {size}');
+  {
+    // 这两处坏掉的表现都是「整列曲目没有专辑封面」，浏览器里看着像前端没画，
+    // 实际是后端取数的问题；不联网也能钉住源码里的取数路径。
+    const neteaseRs = fs.readFileSync(
+      path.join(__dirname, '..', 'crates', 'vmusicd', 'src', 'online', 'netease.rs'), 'utf8');
+    const kugouRs = fs.readFileSync(
+      path.join(__dirname, '..', 'crates', 'vmusicd', 'src', 'online', 'kugou.rs'), 'utf8');
+
+    // 搜索接口只给 album.picId，必须靠详情接口补 picUrl。
+    ok(neteaseRs.includes('const DETAIL_URL: &str = "https://music.163.com/api/song/detail"'),
+      'netease.rs：登记了补封面用的歌曲详情端点');
+    ok(neteaseRs.includes('fill_album_covers(ctx, &mut tracks).await'),
+      'netease.rs：搜索结果走 fill_album_covers 补封面');
+    ok(neteaseRs.includes('fn cover_gaps'), 'netease.rs：只给缺封面的曲目补，不重复问');
+    ok(neteaseRs.includes('fn apply_detail_covers'), 'netease.rs：按 id 回填 picUrl');
+    // 艺人头像兜底只属于详情接口（那里给的是真头像）；搜索映射里拿它当封面
+    // 会撞上上游人人同一张的默认图，整列曲目顶着一样的灰图。
+    const mStart = neteaseRs.indexOf('fn netease_track(');
+    ok(mStart > 0, 'netease.rs：搜索映射函数存在');
+    const mEnd = neteaseRs.indexOf('\nfn ', mStart + 20);
+    const mapper = neteaseRs
+      .slice(mStart, mEnd < 0 ? neteaseRs.length : mEnd)
+      // 整行注释里会提到这个字段名，断言只针对真代码。
+      .split('\n').filter((l) => l.trim().indexOf('//') !== 0).join('\n');
+    ok(mapper.indexOf('img1v1Url') < 0, 'netease.rs：搜索映射不再拿默认艺人头像冒充封面');
+    ok(neteaseRs.indexOf('img1v1Url') > 0, 'netease.rs：详情接口仍保留艺人头像兜底');
+
+    // 酷狗下发的是模板 URL，{size} 不展开就是一张打不开的图。
+    ok(kugouRs.includes('const COVER_SIZE'), 'kugou.rs：定义了封面尺寸常量');
+    ok(kugouRs.includes('u.replace("{size}", COVER_SIZE)'), 'kugou.rs：展开 {size} 占位');
+    ok(kugouRs.includes('cover: cover_of(item)'), 'kugou.rs：搜索曲目带上封面');
   }
 
   section('移除失败：按钮复活并报错；成功后重拉详情');

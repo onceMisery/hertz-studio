@@ -26,6 +26,11 @@ use super::{
 const ID: &str = "netease";
 const W: &str = "https://music.163.com";
 
+/// 详情接口。搜索结果里拿不到封面时用它成批补 `songs[].album.picUrl`。
+const DETAIL_URL: &str = "https://music.163.com/api/song/detail";
+/// 一次详情请求带的曲目数。搜索 limit 上限 60，因此最多两批。
+const DETAIL_BATCH: usize = 40;
+
 /// 扫码登录的 `type` 参数。与网页端/公开 API 库同参：取 unikey 与轮询状态都
 /// 带它，两个端点必须用同一个值（真机实测 1 与 3 都能取到 unikey，这里统一
 /// 用 3 与参考实现保持一致）。
@@ -124,7 +129,8 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         .and_then(|v| v.as_u64())
         .unwrap_or(songs.len() as u64) as usize;
 
-    let tracks = songs.iter().map(netease_track).collect::<Vec<_>>();
+    let mut tracks = songs.iter().map(netease_track).collect::<Vec<_>>();
+    fill_album_covers(ctx, &mut tracks).await;
 
     Ok(SearchPage {
         source: "netease".into(),
@@ -147,24 +153,16 @@ fn netease_track(song: &serde_json::Value) -> OnlineTrack {
         .and_then(|n| n.as_str())
         .unwrap_or("")
         .to_string();
-    // /api/search/get 的 album 里通常只有 picId 没有拼好的 picUrl，而艺人的
-    // img1v1Url 倒是直接可用。优先专辑封面，拿不到就退回艺人头像——比空着强，
-    // 舞台取色也因此能出结果。
+    // 只认 `album.picUrl`。搜索接口绝大多数结果只带 `album.picId`（拼不出
+    // URL），曾经拿 `artists[].img1v1Url` 兜底——但上游在搜索结果里给的是
+    // **同一张默认头像**（实测每一条都是同一个 hash），结果整列曲目顶着一模
+    // 一样的灰图，看着像"有封面"其实全是占位。所以这里宁可留 None，由
+    // [`fill_album_covers`] 用详情接口补真图。
     let cover = song
         .get("album")
         .and_then(|a| a.get("picUrl"))
         .and_then(|n| n.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            song.get("artists")
-                .and_then(|a| a.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|a| a.get("img1v1Url"))
-                .and_then(|n| n.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        });
+        .and_then(https_url);
 
     OnlineTrack {
         source: "netease".into(),
@@ -184,6 +182,89 @@ fn netease_track(song: &serde_json::Value) -> OnlineTrack {
         vip_only: false,
         // 写操作（加歌/红心）只认数字 id，顺手放进 ref，dispatch 统一取它。
         track_ref: serde_json::json!({ "id": id }),
+    }
+}
+
+/// 成批补齐搜索结果缺的专辑封面。
+///
+/// `/api/search/get` 只给 `album.picId`，而 picId 与封面 URL 之间那层加密不
+/// 属于公开接口，不能自己拼；`/api/song/detail` 则直接给出 `album.picUrl`，
+/// 且支持一次传多个 id。所以搜索后对缺封面的曲目补一次批量详情：一屏 30 首
+/// 只要一个请求，成本远低于逐首问。
+///
+/// 补不到就保持原样——封面缺失不是搜索失败，不该让整次搜索报错，也不该把
+/// 失败吞成"没封面"。失败只在日志里留痕。
+async fn fill_album_covers(ctx: &Ctx, tracks: &mut [OnlineTrack]) {
+    let ids = cover_gaps(tracks);
+    if ids.is_empty() {
+        return;
+    }
+
+    let client = match client() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let cookie = login_cookie(ctx).await;
+
+    for chunk in ids.chunks(DETAIL_BATCH) {
+        let req = client
+            .get(DETAIL_URL)
+            .query(&[("ids", format!("[{}]", chunk.join(",")))])
+            .header("Referer", W)
+            .header("Accept", "application/json");
+        let resp = match with_cookie(req, cookie.as_deref()).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("封面补全：请求歌曲详情失败: {e}");
+                return;
+            }
+        };
+        let body: serde_json::Value = match resp.json().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::debug!("封面补全：解析歌曲详情失败: {e}");
+                return;
+            }
+        };
+        let songs = match body.get("songs").and_then(|s| s.as_array()) {
+            Some(s) => s,
+            None => return,
+        };
+        apply_detail_covers(tracks, songs);
+    }
+}
+
+/// 哪些曲目需要补封面：缺封面且 id 合法（空串 / "0" 是解析失败的占位，
+/// 拿它去问详情只会浪费一次请求）。
+fn cover_gaps(tracks: &[OnlineTrack]) -> Vec<String> {
+    tracks
+        .iter()
+        .filter(|t| t.cover.is_none() && !t.id.is_empty() && t.id != "0")
+        .map(|t| t.id.clone())
+        .collect()
+}
+
+/// 把 `/api/song/detail` 的 `songs[]` 按 id 回填专辑封面。
+///
+/// 只填空缺：已经有封面的曲目（搜索接口直接给了 picUrl）不被覆盖，避免详情
+/// 接口偶发缺字段时把到手的封面清成 None。
+fn apply_detail_covers(tracks: &mut [OnlineTrack], songs: &[serde_json::Value]) {
+    for s in songs {
+        let id = match s.get("id").and_then(|v| v.as_i64()) {
+            Some(v) => v.to_string(),
+            None => continue,
+        };
+        let pic = match s
+            .pointer("/album/picUrl")
+            .and_then(|v| v.as_str())
+            .and_then(https_url)
+        {
+            Some(p) => p,
+            None => continue,
+        };
+        if let Some(t) = tracks.iter_mut().find(|t| t.id == id && t.cover.is_none()) {
+            t.cover = Some(pic);
+        }
     }
 }
 
@@ -1286,9 +1367,68 @@ mod tests {
         assert_eq!(t.artist, "周杰伦");
         assert_eq!(t.album, "男女情歌对唱冠军全记录");
         assert_eq!(t.duration_ms, 319039);
-        // 搜索接口没给专辑封 URL 时退回艺人头像，而不是留空
-        assert_eq!(t.cover.as_deref(), Some("http://p1.music.126.net/a.jpg"));
+        // 搜索接口只给 picId 时不拿艺人头像顶替（那是上游人人同一张的默认
+        // 头像），留空交给 fill_album_covers 用详情接口补真图。
+        assert_eq!(t.cover, None);
         assert!(t.playable);
+    }
+
+    #[test]
+    fn album_pic_url_is_taken_and_upgraded_to_https() {
+        let t = netease_track(&serde_json::json!({
+            "id": 7,
+            "name": "屋顶",
+            "album": {"name": "A", "picId": 1, "picUrl": "http://p1.music.126.net/a.jpg"}
+        }));
+        assert_eq!(t.cover.as_deref(), Some("https://p1.music.126.net/a.jpg"));
+    }
+
+    fn track(id: &str, cover: Option<&str>) -> OnlineTrack {
+        OnlineTrack {
+            source: "netease".into(),
+            id: id.into(),
+            title: "t".into(),
+            artist: String::new(),
+            album: String::new(),
+            duration_ms: 0,
+            cover: cover.map(|c| c.to_string()),
+            playable: true,
+            vip_only: false,
+            track_ref: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn cover_gaps_skip_tracks_that_already_have_art() {
+        let tracks = vec![
+            track("1", None),
+            track("2", Some("https://p1.music.126.net/has.jpg")),
+            track("0", None),  // 解析失败的占位 id
+            track("", None),   // 同上
+            track("5", None),
+        ];
+        assert_eq!(cover_gaps(&tracks), vec!["1", "5"]);
+    }
+
+    #[test]
+    fn detail_covers_fill_gaps_and_never_overwrite() {
+        let mut tracks = vec![
+            track("1", None),
+            track("2", Some("https://p1.music.126.net/keep.jpg")),
+            track("3", None),
+        ];
+        let songs = vec![
+            serde_json::json!({"id": 1, "album": {"picUrl": "http://p1.music.126.net/a.jpg"}}),
+            // 已经有封面的 2 号：详情给的新图也不能覆盖它
+            serde_json::json!({"id": 2, "album": {"picUrl": "https://p1.music.126.net/new.jpg"}}),
+            // 详情里没有 picUrl / 没有 id 的脏数据：跳过，不 panic
+            serde_json::json!({"id": 3, "album": {}}),
+            serde_json::json!({"album": {"picUrl": "https://x/y.jpg"}}),
+        ];
+        apply_detail_covers(&mut tracks, &songs);
+        assert_eq!(tracks[0].cover.as_deref(), Some("https://p1.music.126.net/a.jpg"));
+        assert_eq!(tracks[1].cover.as_deref(), Some("https://p1.music.126.net/keep.jpg"));
+        assert_eq!(tracks[2].cover, None);
     }
 
     #[test]

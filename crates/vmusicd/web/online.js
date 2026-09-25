@@ -34,42 +34,60 @@
   // 到这里（getMeta）。
   var onlineMeta = new Map();
 
-  // 平台徽标色。音源 id 以后端注册表为准，这里只负责显示。
-  // 汽水的品牌薄荷绿取自官方客户端的主题色；它此前缺了这一条，结果降级成
-  // 裸文本「qishui」——既没有品牌色也没有胶囊形状，看着像没做完的占位符。
+  // 平台徽标：品牌名 / 品牌色 / app 图标 id。音源 id 以后端注册表为准，
+  // 这里只负责显示。
+  // 第三项是 index.html sprite 里的图标：界面上一律用官方 app 图标，不再摆
+  // 两字短名——四个平台的短名长短不一（网易/QQ/酷狗/汽水），挤在 18px 的小
+  // 胶囊里既读不清也不统一。品牌名降级成 title/aria-label，悬停与读屏仍能
+  // 说出平台。汽水的薄荷绿取自官方客户端主题色；它此前缺了整条登记，结果
+  // 降级成裸文本「qishui」，看着像没做完的占位符。
   var SOURCE_BADGE = {
-    netease: ['网易', '#e60026'],
-    qq: ['QQ', '#12b7f5'],
-    kugou: ['酷狗', '#2ca5f0'],
-    qishui: ['汽水', '#45d68f'],
+    netease: ['网易云音乐', '#e60026', 'i-app-netease'],
+    qq: ['QQ 音乐', '#12b7f5', 'i-app-qq'],
+    kugou: ['酷狗音乐', '#2ca5f0', 'i-app-kugou'],
+    qishui: ['汽水音乐', '#45d68f', 'i-app-qishui'],
+    // 本地曲库也走同一套徽标：唱片图标 + 主题色（不占任何平台品牌色）。
+    local: ['本地曲库', null, 'i-app-local'],
   };
+
+  // 未登记音源（如 ccmixter）的兜底图标：地球，配主题色而非某个平台的品牌色。
+  var GENERIC_ICON = 'i-app-generic';
 
   function sourceLabel(id) {
     var info = onlineState.sources.find(function (s) { return s.id === id; });
     return (info && info.label) || id;
   }
 
-  function badge(source) {
+  // 平台徽标节点：品牌色圆角方块 + app 图标字形。
+  // 图标本身不带文字，所以平台名必须挂到 title 与 aria-label 上——否则读屏
+  // 用户和想确认来源的人只能看到一个色块。
+  function badge(source, label) {
     var b = sourceBadge(source);
+    var name = b ? b.text : (label || sourceLabel(source));
     var s = document.createElement('span');
     s.className = 'src-badge';
-    // 未登记的音源不该漏出裸 id：短名兜到服务端给的 label，品牌色兜到主题色。
-    if (!b) {
-      s.textContent = sourceLabel(source);
-      return s;
-    }
-    s.textContent = b.text;
-    s.style.setProperty('--badge', b.color);
+    // 没有登记品牌色的（本地 / 未登记音源）不写 --badge，让 CSS 回落到主题色。
+    if (b && b.color) s.style.setProperty('--badge', b.color);
+    s.title = name;
+    s.setAttribute('aria-label', name);
+    s.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#'
+      + (b ? b.icon : GENERIC_ICON) + '"/></svg>';
     return s;
   }
 
-  // 平台徽标短名与品牌色；未登记的音源回 null。
+  // 平台品牌名、品牌色与 app 图标；未登记的音源回 null。
   //
   // 这是徽标信息的唯一事实源：online-playlists.js 的歌单菜单也来问这里，
   // 避免两张表漂移后同一个音源在搜索结果与歌单菜单里长得不一样。
   function sourceBadge(source) {
     var b = SOURCE_BADGE[source];
-    return b ? { text: b[0], color: b[1] } : null;
+    return b ? { text: b[0], color: b[1], icon: b[2] } : null;
+  }
+
+  // 只取图标 id（歌单菜单等只画图标、自己管颜色的地方用）。
+  function sourceIcon(id) {
+    var b = sourceBadge(id);
+    return b ? b.icon : GENERIC_ICON;
   }
 
   function virtualId(t) {
@@ -85,6 +103,18 @@
     if (s.indexOf('//') === 0) return 'https:' + s;
     if (s.indexOf('http://') === 0) return s.replace(/^http:\/\//, 'https://');
     return s;
+  }
+
+  // 小尺寸展示位用的封面地址。网易云 CDN 认 `?param=宽y高` 缩略图参数：上游
+  // 给的原图动辄 300KB 以上，一屏 30 首就是近 10MB，封面得等好几秒才浮出来
+  // （看起来就像「没有封面」）。行里只有 40px，换成 90px 的小图（约 2KB）
+  // 几乎瞬间出现；歌单卡片传 300。正在播放与舞台仍用全尺寸原图——那里才是
+  // 真需要分辨率的地方（舞台封面会铺满视口）。
+  function rowCoverUrl(url, px) {
+    if (!url) return null;
+    if (url.indexOf('.music.126.net/') < 0 || url.indexOf('?') >= 0) return url;
+    var n = px || 90;
+    return url + '?param=' + n + 'y' + n;
   }
 
   // 直接复用曲库行的 .track 栅格与子元素类名，在线结果因此和本地曲库长得一样。
@@ -115,7 +145,7 @@
     row.querySelector('.t-sub').textContent = track.artist || '未知艺术家';
     row.querySelector('.t-album').textContent = track.album || '—';
     row.querySelector('.t-dur').textContent = H.fmt(track.duration_ms || 0);
-    H.paintArt(row, safeCoverUrl(track.cover));
+    H.paintArt(row, rowCoverUrl(safeCoverUrl(track.cover)));
 
     var quality = row.querySelector('.t-quality');
     quality.appendChild(badge(track.source));
@@ -532,9 +562,9 @@
       sub.textContent = [it.artist, it.album].filter(Boolean).join(' · ') || '未知艺术家';
       main.append(title, sub);
 
-      var src = document.createElement('span');
-      src.className = 'op-h-src';
-      src.textContent = it.source === 'local' ? '本地' : sourceLabel(it.source);
+      // 最近播放的来源同样用平台 app 图标，不摆文字标签。
+      var src = badge(it.source === 'local' ? 'local' : it.source);
+      src.classList.add('op-h-src');
 
       var time = document.createElement('span');
       time.className = 'op-h-time';
@@ -896,12 +926,16 @@
     meta: onlineMeta,
     getMeta: function (id) { return onlineMeta.get(id); },
     safeCoverUrl: safeCoverUrl,
+    rowCoverUrl: rowCoverUrl,
     fetchCover: fetchOnlineCover,
     loadLyricDoc: loadOnlineLyricDoc,
     loadLyrics: loadOnlineLyrics,
     paintNowPlaying: paintNowPlaying,
     sourceLabel: sourceLabel,
     sourceBadge: sourceBadge,
+    sourceIcon: sourceIcon,
+    // 徽标节点工厂：歌单菜单/收藏/两层界面都来这里取，避免各处再拼一遍。
+    badge: badge,
     // 在线播放错误条（app.js Task 14 的 WS error 分支调用）。
     showOnlineError: showOnlineError,
     hideOnlineError: hideOnlineError,

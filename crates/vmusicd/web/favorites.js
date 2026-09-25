@@ -235,15 +235,24 @@
     el.querySelector('.t-dur').textContent = f.duration_ms ? H.fmt(f.duration_ms) : '—';
 
     var quality = el.querySelector('.t-quality');
-    var tag = document.createElement('span');
-    tag.className = 'src-badge';
-    tag.textContent = f.source === 'local' ? '本地' : f.source;
+    // 来源徽标与在线面板同一套平台 app 图标；没有 online.js 时（单元测试桩）
+    // 退回裸文本，至少不把整行渲染打断。
+    var tag = window.Online && window.Online.badge
+      ? window.Online.badge(f.source === 'local' ? 'local' : f.source)
+      : null;
+    if (!tag) {
+      tag = document.createElement('span');
+      tag.className = 'src-badge';
+      tag.textContent = f.source === 'local' ? '本地' : f.source;
+    }
     quality.appendChild(tag);
 
     // 封面：本地曲目走服务端封面接口，在线曲目用存下来的快照 URL。
     var art = el.querySelector('.t-art');
     if (f.cover) {
-      H.paintArt(el, f.cover);
+      // 与在线列表同一套缩略图规则：40px 的行不需要 MB 级原图。
+      H.paintArt(el, window.Online && window.Online.rowCoverUrl
+        ? window.Online.rowCoverUrl(f.cover) : f.cover);
     } else if (f.source === 'local' && H.coverUrl) {
       H.paintArt(el, H.coverUrl(f.ref_id));
     } else {

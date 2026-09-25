@@ -129,10 +129,15 @@ html.qr-modal-open .app{visibility:hidden}
 
 /* ── Task 18：在线曲库面板（徽标 / VIP / All 聚合分组）──────────────────── */
 
-/* 平台徽标：品牌色由 online.js 的 --badge 内联注入，这里只管形状。 */
-.src-badge{display:inline-flex;align-items:center;height:18px;padding:0 7px;
-  border-radius:9px;font-size:11px;font-weight:600;line-height:1;
-  color:#fff;background:var(--badge,var(--accent));letter-spacing:.5px}
+/* 平台徽标：品牌色圆角方块 + 白色 app 图标字形（图标由 online.js 的 badge()
+   注入 <use href>）。品牌色走内联 --badge，未登记的音源回落到主题色。
+   用方块而不是原先的胶囊：胶囊/圆形容器里塞方形 app 图标会在四角留出很脏的
+   空隙，而"圆角方块"本来就是应用图标自己的容器语汇，四个平台也因此尺寸一致
+   —— 以前「网易 / QQ / 酷狗 / 汽水」字数不同，胶囊宽度各不相同。 */
+.src-badge{display:inline-flex;align-items:center;justify-content:center;
+  flex:none;width:20px;height:20px;border-radius:6px;
+  color:#fff;background:var(--badge,var(--accent))}
+.src-badge svg{width:14px;height:14px;display:block}
 
 /* VIP 专享标记。红线：不模拟会员权益——置灰不可点由 .is-disabled 负责，
    这里只给视觉标识。 */
@@ -269,9 +274,9 @@ html.qr-modal-open .app{visibility:hidden}
 .pl-row.is-online .pl-art.is-missing::after{content:'♪';position:absolute;
   inset:0;display:flex;align-items:center;justify-content:center;
   font-size:18px;color:var(--accent);opacity:.6}
-.pl-online-badge{display:inline-flex;align-items:center;height:16px;padding:0 6px;
-  border-radius:8px;font-size:10px;font-weight:600;line-height:1;color:#fff;
-  background:var(--badge,var(--accent));flex:none;letter-spacing:.3px}
+/* 歌单菜单的行高放不下 20px 的方块，这里收成小一号（与 .src-badge 同款）。 */
+.pl-online-badge{width:18px;height:18px;border-radius:5px}
+.pl-online-badge svg{width:12px;height:12px}
 .pl-row.is-online .pl-main{cursor:pointer}
 
 
@@ -368,8 +373,10 @@ input.opl-filter{flex:none;width:190px;height:30px;padding:0 10px;
   font-size:14px;line-height:1;padding:2px 6px;border-radius:6px;opacity:0}
 .op-history-item:hover .op-h-del{opacity:1}
 .op-history-item .op-h-del:hover{color:#ff8a8a;background:rgba(255,90,90,.12)}
-.op-h-src{font-size:10px;padding:1px 6px;border-radius:999px;
-  background:rgba(var(--accent-rgb),.14);color:var(--text);flex:none}
+/* 最近播放行里的来源徽标：与曲库行同一枚方块，只是再收小一号。
+   它同时带 .src-badge，所以这里只覆盖尺寸，底色/图标交给基类。 */
+.op-h-src{width:18px;height:18px;border-radius:5px}
+.op-h-src svg{width:12px;height:12px}
 
 /* 音质档位选择器（选项由 GET /v1/online/quality 按当前音源渲染） */
 .online-quality{height:32px;border-radius:8px;border:1px solid var(--glass-line);

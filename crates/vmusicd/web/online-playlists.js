@@ -449,7 +449,7 @@
           source: s.id,
           sourceLabel: s.label,
           badgeColor: sourceBadge(s.id),
-          badgeText: sourceBadgeText(s.id, s.label),
+          badgeIcon: sourceBadgeIcon(s.id),
           playlist: p,
         });
       });
@@ -472,10 +472,10 @@
     return b ? b.color : null;
   }
 
-  // 徽标里塞两字短名而不是完整源名；未知音源回退到源清单 label。
-  function sourceBadgeText(id, label) {
+  // 徽标画的是平台 app 图标，不再塞两字短名；未知音源回通用地球图标。
+  function sourceBadgeIcon(id) {
     var b = badgeOf(id);
-    return b ? b.text : label;
+    return b ? b.icon : 'i-app-generic';
   }
 
   // 左侧菜单按 source+id 打开抽屉。
