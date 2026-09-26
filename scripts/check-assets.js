@@ -123,6 +123,8 @@ const REQUIRE_BEFORE = [
   ['stage.js', 'handdrawn.js'],
   ['stage-particles.js', 'handdrawn.js'],       // 手绘抖动读起音脉冲
   ['stage-control.js', 'creative-stage.js'],    // 三维开启时让粒子层让位
+  ['creative-stage.js', 'creative-prompt.js'],  // 提示词编译器读编排层 scenes/spec
+  ['creative-prompt.js', 'workshop.js'],        // 工坊"一句成景"读 CreativePrompt
   ['creative-stage.js', 'workshop.js'],
   ['creative-stage.js', 'stage-cinema.js'],   // cinema 注册 camLayers 依赖编排层 API
   ['stage-cinema.js', 'stage-freecam.js'],    // freecam 与 cinema 互斥联动

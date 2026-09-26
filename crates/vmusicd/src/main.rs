@@ -61,6 +61,7 @@ const ONSET_JS: &str = include_str!("../web/onset.js");
 // 统一放在前面，这样任何一个失败都不会连带挡住编排层。
 const CREATIVE_GL_JS: &str = include_str!("../web/creative-gl.js");
 const CREATIVE_STAGE_JS: &str = include_str!("../web/creative-stage.js");
+const CREATIVE_PROMPT_JS: &str = include_str!("../web/creative-prompt.js");
 const HANDDRAWN_JS: &str = include_str!("../web/handdrawn.js");
 const BACKGROUNDS_JS: &str = include_str!("../web/backgrounds.js");
 const BGWALL_JS: &str = include_str!("../web/bgwall.js");
@@ -229,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/pl-covers.js", get(|| asset(JS, PL_COVERS_JS)))
         .route("/creative-gl.js", get(|| asset(JS, CREATIVE_GL_JS)))
         .route("/creative-stage.js", get(|| asset(JS, CREATIVE_STAGE_JS)))
+        .route("/creative-prompt.js", get(|| asset(JS, CREATIVE_PROMPT_JS)))
         .route("/handdrawn.js", get(|| asset(JS, HANDDRAWN_JS)))
         .route("/backgrounds.js", get(|| asset(JS, BACKGROUNDS_JS)))
         .route("/bgwall.js", get(|| asset(JS, BGWALL_JS)))
