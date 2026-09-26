@@ -36,6 +36,7 @@ const ui = {
   column: $('column'),
   views: {
     library: $('view-library'),
+    online: $('view-online'),
     playlists: $('view-playlists'),
     queue: $('view-queue'),
     favorites: $('view-favorites'),
@@ -137,6 +138,15 @@ const ui = {
   scClose: $('sc-close'),
   scReset: $('sc-reset'),
   scOk: $('sc-ok'),
+
+  // 在线曲库
+  onlineCount: $('online-count'),
+  onlineSource: $('online-source'),
+  onlineQ: $('online-q'),
+  onlineGo: $('online-go'),
+  onlineChips: $('online-chips'),
+  onlineBody: $('online-body'),
+  onlineSentinel: $('online-sentinel'),
 
   // 收藏
   favList: $('fav-list'),
