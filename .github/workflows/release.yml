@@ -61,7 +61,11 @@ jobs:
           VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys;print(json.load(sys.stdin)['packages'][0]['version'])")"
           NAME="mmusic-studio-${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/${NAME}"
-          cp "target/${{ matrix.target }}/release/vmusicd"* "dist/${NAME}/" 2>/dev/null || true
+          # 只拷可执行文件本体：MSVC 下 vmusicd* 会把 .pdb 调试符号一并带进包。
+          BIN="target/${{ matrix.target }}/release/vmusicd"
+          if [ -f "$BIN.exe" ]; then cp "$BIN.exe" "dist/${NAME}/vmusicd.exe";
+          elif [ -f "$BIN" ]; then cp "$BIN" "dist/${NAME}/vmusicd";
+          else echo "binary not found" >&2; exit 1; fi
           cp README.md LICENSE "dist/${NAME}/" 2>/dev/null || true
           cd dist
           if [ "${{ matrix.archive }}" = "zip" ]; then

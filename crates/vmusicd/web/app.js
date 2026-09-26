@@ -901,6 +901,17 @@ async function loadNowPlaying(id) {
   // 在线试听的虚拟 id 在本地库里查不到，先回落到搜索时缓存下来的元数据
   //（缓存归 online.js 所有，通过 window.Online 访问）。
   let track = state.byId.get(id) || window.Online.getMeta(id);
+  // 收藏全部播放/歌单整单等路径写入 byId 的条目可能缺 source/onlineId
+  //（只有 id 本身带身份协议）。在这里统一从 id 补齐，否则 refreshLyrics
+  // 会把在线曲当本地曲请求 /v1/tracks/online:.../lyrics 而 404。
+  if (track && id.startsWith('online:') && (!track.source || !track.onlineId)) {
+    const rest = id.slice('online:'.length);
+    const at = rest.indexOf(':');
+    if (at > 0) {
+      track = { ...track, source: rest.slice(0, at), onlineId: rest.slice(at + 1) };
+      state.byId.set(id, track);
+    }
+  }
   // 刷新之后在线缓存是空的，再去查本地库必然 404——这类 id 直接跳过请求，
   // 别让一个已知无解的地址污染控制台和网络面板。
   if (!track && !id.startsWith('online:')) {

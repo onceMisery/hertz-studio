@@ -228,7 +228,25 @@ pub async fn export(pool: &SqlitePool) -> Result<ExportedBackup, StoreError> {
         })
         .collect();
 
-    let settings = crate::settings::get_all(pool).await?;
+    // 凭据绝不进备份：正常情况下钥匙串迁移已把 online_cred_/cookie_ 键搬走，
+    // 但迁移失败时它们还留在 settings——这里按前缀兜底过滤，保证导出文件
+    // 无论服务处于什么状态都不含秘密（remote_cred_ 只进钥匙串，纯防御）。
+    const SECRET_PREFIXES: [&str; 4] = [
+        "online_cred_",
+        "online_cookie_",
+        "online_device_",
+        "remote_cred_",
+    ];
+    let settings: std::collections::BTreeMap<String, serde_json::Value> =
+        crate::settings::get_all(pool)
+            .await?
+            .into_iter()
+            .filter(|(key, _)| {
+                !SECRET_PREFIXES
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix))
+            })
+            .collect();
     let roots: Vec<(String, i64)> =
         sqlx::query_as("SELECT path, enabled FROM scan_roots ORDER BY path")
             .fetch_all(pool)
@@ -575,6 +593,32 @@ mod tests {
         let mut bad = sample(&exported);
         bad.version = 99;
         assert!(restore(&db, &bad).await.is_err(), "未知版本必须拒绝");
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn export_never_contains_credential_keys() {
+        let db = pool().await;
+        // 模拟钥匙串迁移失败：凭据明文键还留在 settings 里。
+        use serde_json::Value;
+        let mut rows: Vec<(String, Value)> = Vec::new();
+        rows.push(("online_cred_netease".into(), serde_json::json!({"cookie": "MUSIC_U=secret"})));
+        rows.push(("online_cookie_kugou".into(), Value::String("kgmid=old".into())));
+        rows.push(("play_mode".into(), Value::String("repeat".into())));
+        for (key, value) in &rows {
+            crate::settings::set(&db, key, value).await.unwrap();
+        }
+        let exported = export(&db).await.unwrap();
+        assert!(exported.settings.contains_key("play_mode"), "正常键保留");
+        for key in exported.settings.keys() {
+            assert!(
+                !key.starts_with("online_cred_")
+                    && !key.starts_with("online_cookie_")
+                    && !key.starts_with("online_device_")
+                    && !key.starts_with("remote_cred_"),
+                "备份混入凭据键: {key}"
+            );
+        }
         db.close().await;
     }
 
