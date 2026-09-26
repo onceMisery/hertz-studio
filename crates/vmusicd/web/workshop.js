@@ -333,7 +333,10 @@
     }
     ta.addEventListener('input', function () { syncInput(ta.value); });
 
-    function renderResult(r) {
+    // 摘要永远从 promptState.result 回放：应用成功会广播 preset 事件并触发面板
+    // 重排，重建后的页面必须还能看到"刚才识别了什么、为什么这么应用"。
+    function renderResult() {
+      var r = promptState.result;
       resultBox.textContent = '';
       if (!r) return;
       if (!r.ok) {
@@ -390,7 +393,7 @@
         return;
       }
       promptState.result = r;
-      renderResult(r);
+      renderResult();
       applyBtn.disabled = !r.ok;
     });
 
@@ -403,19 +406,24 @@
         return;
       }
       var before = CS.preset();          // 撤销快照先于任何写入取出
+      // 先挂上快照再应用：applyIntent 内部会同步广播 preset 事件并触发面板重排，
+      // 重排时撤销按钮就必须已经可见。失败时回滚快照（失败不广播，无需重排）。
+      var prevUndo = promptState.undo;
+      promptState.undo = before;
       var out;
       try {
         out = CS.applyIntent(r.intent);
       } catch (e) {
+        promptState.undo = prevUndo;
         flash('应用失败：' + (e && e.message || e));
         return;
       }
       if (!out || !out.ok) {
-        // 仅成功才替换旧快照；失败时之前的撤销能力原样保留
+        promptState.undo = prevUndo;
+        // 仅成功才保留新快照；失败时之前的撤销能力原样保留
         flash(out && out.message ? '未应用：' + out.message : '该意图无法应用，舞台未改动');
         return;
       }
-      promptState.undo = before;
       flash('已应用'
         + (r.intent.scene ? '（场景：' + r.intent.scene + '）' : '')
         + '，可撤销本次改动');
@@ -423,14 +431,26 @@
     });
 
     undoBtn.addEventListener('click', function () {
-      if (!promptState.undo) return;
+      var snap = promptState.undo;
+      if (!snap) return;
       var CS = stage_api();
       if (!CS) return;
-      CS.setPreset(promptState.undo);
+      // 先清快照再恢复：setPreset 会同步广播 preset 事件并触发面板重排，
+      // 重排时按钮就必须已经回到隐藏态。
       promptState.undo = null;
+      try {
+        CS.setPreset(snap);
+      } catch (e) {
+        promptState.undo = snap;    // 恢复失败时保住撤销能力，舞台未动
+        flash('撤销失败：' + (e && e.message || e));
+        return;
+      }
       flash('已撤销本次应用');
       // setPreset 的 preset 事件触发重排，按钮随之隐藏
     });
+
+    // 重排重建时回放已有解析结果（应用/撤销都会触发一次重排）
+    renderResult();
   }
 
   function renderScene(body) {
