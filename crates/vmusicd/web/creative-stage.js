@@ -723,6 +723,104 @@
   }
 
   // -------------------------------------------------------------------------
+  // StageIntent：提示词编译器（creative-prompt.js）产出的窄协议，经这里一次性
+  // 落到预置上。它是 patch 之外的第二个原子写入口 —— 只新增、不替代：现有
+  // API（setScene/setParam/setPreset…）语义不变，工坊也绝不允许拿一串 setter
+  // 去拼一个"生成的舞台"，那样会产生场景已切、参数未到的半应用状态。
+  //
+  // 流程与 setScene/setPreset 同源：从 deep(preset) 起步 → 校验与钳位全部
+  // 通过后才上任 → normalize/resolve/applyHand/saveLocalSoon/emit 各恰好一次。
+  // 校验失败时返回 {ok:false,...} 且一个字节都不写。
+  // -------------------------------------------------------------------------
+
+  // patch 路径的权威校验。sc. 前缀指向**目标场景**的那一行 —— 编译器按约定
+  // 不产出 sc.*，但手写意图可能有，必须在切场景后的视角下校验。
+  function intentRowFor(path, sceneId) {
+    if (path.slice(0, 3) !== 'sc.') return specFor(path);
+    return sceneRow(sceneId, path.slice(3));
+  }
+
+  function applyIntent(intent) {
+    if (!intent || typeof intent !== 'object' || intent.version !== 1) {
+      return { ok: false, code: 'bad_version', message: '意图版本不受支持' };
+    }
+    if (!preset) {
+      return { ok: false, code: 'bad_state', message: '舞台尚未初始化' };
+    }
+    var hasScene = typeof intent.scene === 'string' && !!intent.scene;
+    var hasDirector = typeof intent.director === 'boolean';
+    var hasHand = !!(intent.hand && typeof intent.hand === 'object'
+      && typeof intent.hand.on === 'boolean');
+    var patchKeys = (intent.patch && typeof intent.patch === 'object')
+      ? Object.keys(intent.patch) : [];
+    if (!hasScene && !hasDirector && !hasHand && !patchKeys.length) {
+      return { ok: false, code: 'empty', message: '意图不包含任何可应用的改变' };
+    }
+    if (hasScene && (!window.CreativeGL || !CreativeGL.sceneById(intent.scene))) {
+      return { ok: false, code: 'bad_scene', message: '未知场景：' + intent.scene };
+    }
+
+    var next = deep(preset);
+    var applied = [];
+    var ignored = [];
+    var changed = false;
+    var sceneSwitched = hasScene && intent.scene !== preset.scene;
+
+    // 切场景：私有参数整体换成目标场景的默认值，机位落到入画点。与 setScene
+    // 同语义（含"同场景不算切换、不重置用户调参"），但先建好再上任，中途
+    // 不广播。patch 在机位落位之后应用 —— 意图里明确写了的值优先于场景默认。
+    if (sceneSwitched) {
+      next.scene = intent.scene;
+      next.sc = sceneDefaults(intent.scene);
+      var camTo = SCENE_CAM[intent.scene];
+      if (camTo) {
+        Object.keys(camTo).forEach(function (k) {
+          writePath(next, k, clampPath(k, camTo[k]));
+        });
+      }
+      changed = true;
+    }
+
+    patchKeys.forEach(function (path) {
+      var v = intent.patch[path];
+      if (typeof v !== 'number' || !isFinite(v)) { ignored.push(path); return; }
+      var row = intentRowFor(path, next.scene);
+      if (!row) { ignored.push(path); return; }
+      var val;
+      if (Array.isArray(row[2])) {
+        // 下拉项（look.grade）没有量程：按选项序号取整并夹进有效档位。
+        val = clamp(Math.round(v), 0, row[2].length - 1);
+      } else {
+        val = clampTo(row, v);
+      }
+      writePath(next, path, val);
+      applied.push(path);
+      changed = true;
+    });
+
+    if (hasDirector) { next.director = intent.director; changed = true; }
+    if (hasHand) {
+      // 首期意图只表达 on；jitter/frame/wave 等用户设置原样保留
+      next.hand = Object.assign({}, next.hand, { on: intent.hand.on });
+      changed = true;
+    }
+
+    if (!changed) {
+      return { ok: false, code: 'empty',
+        message: '意图与当前舞台一致，没有需要应用的改变' };
+    }
+
+    if (sceneSwitched) animations.length = 0;   // 旧场景的 cue 动画不跨场景续跑
+    preset = normalize(next);
+    runtime = {};
+    resolve(now());
+    applyHand();
+    saveLocalSoon();
+    emit('preset', preset);
+    return { ok: true, preset: deep(preset), applied: applied, ignored: ignored };
+  }
+
+  // -------------------------------------------------------------------------
   // 渲染
   // -------------------------------------------------------------------------
 
@@ -1376,6 +1474,9 @@
       emit('preset', preset);
       return deep(preset);
     },
+    /** 原子应用一份 StageIntent（提示词编译器的产出）。要么整份预置一次性
+     *  换掉并广播一次 preset 事件，要么状态零变化返回 {ok:false,...}。 */
+    applyIntent: applyIntent,
 
     // 场景与参数元数据：工坊用它们生成控件，不自己维护一份表
     scenes: function () { return window.CreativeGL ? CreativeGL.scenes() : []; },

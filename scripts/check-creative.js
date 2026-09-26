@@ -423,6 +423,82 @@ ok(CS.preset().look.bloom === 3, 'patch 越界被钳到 3（' + CS.preset().look
 ok(CS.preset().sc.height === 0.5, 'patch 越界被钳到 0.5（' + CS.preset().sc.height + '）');
 ok(!('不存在的' in CS.preset().sc), 'patch 忽略未知键');
 
+section('StageIntent 原子写入口（applyIntent）');
+{
+  const snap = () => JSON.stringify(CS.preset());
+  let presetEvents = 0;
+  CS.onChange((kind) => { if (kind === 'preset') presetEvents += 1; });
+
+  // 坏输入：不抛异常、零变化、零事件
+  const before = snap();
+  ok(CS.applyIntent(null).ok === false, 'null 意图被拒绝');
+  ok(CS.applyIntent('x').ok === false, '字符串意图被拒绝');
+  ok(CS.applyIntent({ scene: 'nebula' }).ok === false, '缺 version 的意图被拒绝');
+  ok(CS.applyIntent({ version: 2, scene: 'nebula' }).ok === false, '未知 version 被拒绝');
+  ok(CS.applyIntent({ version: 1 }).ok === false, '空意图被拒绝');
+  ok(CS.applyIntent({ version: 1, patch: {} }).ok === false, '空 patch 视为空意图');
+  ok(CS.applyIntent({ version: 1, scene: 'atlantis' }).ok === false, '未知场景被拒绝');
+  ok(snap() === before, '拒绝路径没有改动预置');
+  ok(presetEvents === 0, '拒绝路径不产生任何 preset 事件');
+
+  // 切场景：私有参数来自目标默认值、入画机位、patch 优先、保留字段、单次事件
+  CS.setScene('towers');
+  CS.renamePreset('手调过的舞台');
+  CS.setParam('sc.height', 3.3);
+  const cuesBefore = CS.preset().cues.length;
+  CS.addCue({ at: 5, len: 400, set: { 'look.bloom': 2 } });
+  CS.setBindings([{ target: 'look.bloom', source: 'agg.0', gain: 2 }]);
+  CS.setHandDrawn({ on: true, jitter: 55, frame: false });
+  presetEvents = 0;
+  const r1 = CS.applyIntent({
+    version: 1, scene: 'nebula',
+    patch: { 'cam.drift': 18, 'cam.shake': 25, 'cam.dist': 999,
+      'cam.乱写': 5, 'sc.height': 2 },
+    director: false, hand: { on: false }
+  });
+  ok(r1.ok === true, '合法意图应用成功');
+  const p1 = CS.preset();
+  ok(p1.scene === 'nebula', '场景切到 nebula');
+  ok(p1.sc.cloudR === 6 && !('height' in p1.sc),
+    '场景私有参数来自目标场景默认值（旧场景的 sc.height 不串味）');
+  ok(p1.cam.dist === 44, 'patch 值在入画机位之后应用且被钳位（' + p1.cam.dist + '）');
+  ok(p1.cam.drift === 18 && p1.cam.shake === 25, 'patch 生效');
+  ok(Array.isArray(r1.applied) && r1.applied.indexOf('cam.drift') >= 0
+    && r1.applied.indexOf('cam.dist') >= 0,
+    'applied 记录实际写入的路径');
+  ok(Array.isArray(r1.ignored) && r1.ignored.indexOf('cam.乱写') >= 0
+    && r1.ignored.indexOf('sc.height') >= 0,
+    '未知路径与跨场景路径进 ignored（' + JSON.stringify(r1.ignored) + '）');
+  ok(!('乱写' in p1.cam), 'ignored 的键没有写进预置');
+  ok(p1.name === '手调过的舞台', '名字保留');
+  ok(p1.cues.length === cuesBefore + 1 && p1.bindings.length === 1,
+    `cue 与绑定保留（${p1.cues.length} = ${cuesBefore} + 1）`);
+  ok(p1.hand.on === false && p1.hand.jitter === 55 && p1.hand.frame === false,
+    'hand 只改 on，jitter/frame 原样保留');
+  ok(p1.director === false, 'director 布尔写入');
+  ok(presetEvents === 1, `整次应用只广播一次 preset 事件（${presetEvents}）`);
+
+  // 同场景意图：不算切换，用户调过的私有参数不重置
+  CS.setParam('sc.cloudR', 9);
+  const r2 = CS.applyIntent({ version: 1, scene: 'nebula' });
+  ok(r2.ok === false && r2.code === 'empty', '同场景且无其它改变 → 空意图');
+  ok(CS.preset().sc.cloudR === 9, '同场景意图不重置用户调过的私有参数');
+
+  // 全部值非法：等效空意图，零写入
+  const before3 = snap();
+  const r3 = CS.applyIntent({ version: 1, patch: { 'look.bloom': NaN, 'cam.dist': 'x' } });
+  ok(r3.ok === false && r3.code === 'empty', 'patch 全部非法 → 空意图');
+  ok(snap() === before3, '非法值零写入');
+
+  // 下拉参数（look.grade）取整夹档；否定置零
+  const r4 = CS.applyIntent({ version: 1, patch: { 'look.grade': 9, 'cam.shake': 0 } });
+  ok(r4.ok === true && CS.preset().look.grade === 3, '下拉参数夹进有效档位');
+  ok(CS.preset().cam.shake === 0, '否定置零生效');
+
+  // 切场景后旧场景的 cue 动画不续跑（animations 清空），但数据本身保留
+  ok(CS.preset().cues.length === cuesBefore + 1, '场景切换不清空预置里的 cue 数据');
+}
+
 section('编排轨');
 const cues0 = CS.preset().cues.length;
 ok(CS.addCue({ at: 12, len: 800, set: { 'look.bloom': 2.5 } }), '秒级 cue 可以加入');
