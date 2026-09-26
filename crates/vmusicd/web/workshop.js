@@ -13,8 +13,9 @@
 // 于是"写下来的东西"和"跑起来的东西"永远是同一份数据，不存在"面板显示的
 // 和实际渲染的对不上"这类问题：面板读的就是渲染器每帧读的那张表。
 //
-// 五个页签对应五种编辑动作，而不是五种界面：场景（选）+ 参数（调）+
-// 编排（排）+ 绑定（接）+ 保存（传）。
+// 页签对应编辑动作，而不是几种界面：一句成景（生成）+ 场景（选）+ 参数（调）
+// + 编排（排）+ 绑定（接）+ 保存（传）。其中"一句成景"只做解释与确认，
+// 参数写入全部经由 CreativeStage.applyIntent 这个原子口。
 
 (function () {
   'use strict';
@@ -236,6 +237,201 @@
   // -------------------------------------------------------------------------
   // 页签内容
   // -------------------------------------------------------------------------
+
+  // -------------------------------------------------------------------------
+  // 一句成景：离线提示词 → StageIntent → applyIntent。
+  //
+  // 本页是解释器，不是另一个舞台编辑器：识别词典、冲突与否定规则全部住在
+  // creative-prompt.js，写入走 CreativeStage.applyIntent 这一个原子口。
+  // 这里只负责输入、解释、确认与撤销 —— 不直接逐项 setParam。
+  //
+  // 状态放在 promptState（模块级）：预置事件会触发整个面板重排，textarea、
+  // 解析结果与撤销快照必须能原样重建；输入再次改变时解析结果作废。
+  // -------------------------------------------------------------------------
+
+  var promptState = { text: '', result: null, undo: null };
+
+  var PROMPT_EXAMPLES = [
+    '梦幻星云，缓慢镜头，霓虹，跟随音乐',
+    '高速隧道，强烈节拍，近景，不要颗粒',
+    '歌词走廊，安静，单色，固定镜头',
+    '手绘地形，远景，不要抖动'
+  ];
+
+  var PROMPT_GROUPS = [
+    ['scene', '场景'], ['energy', '氛围'], ['camera', '镜头'],
+    ['look', '质感'], ['hand', '手绘'], ['director', '音乐响应']
+  ];
+
+  function renderPrompt(body) {
+    var CP = window.CreativePrompt;
+    body.appendChild(h('div', 'sc-note',
+      '用一句中文或英文描述想要的舞台。识别是离线、确定性的：只认支持的词，'
+      + '解析不改动舞台，点「应用到当前舞台」才生效，且可整体撤销。'));
+
+    if (!CP || typeof CP.compile !== 'function') {
+      body.appendChild(h('div', 'sc-note ws-warn',
+        '提示词模块未加载，本页暂不可用；其它页签不受影响。'));
+      return;
+    }
+
+    var inputId = 'ws-prompt-text';
+    var label = h('label', 'sc-label');
+    label.setAttribute('for', inputId);
+    label.appendChild(h('span', null, '舞台描述'));
+    body.appendChild(label);
+
+    var ta = h('textarea', 'ws-prompt-text');
+    ta.id = inputId;
+    ta.maxLength = 120;
+    ta.spellcheck = false;
+    ta.value = promptState.text;
+    ta.placeholder = '例：梦幻星云，缓慢镜头，霓虹，跟随音乐';
+    body.appendChild(ta);
+
+    var count = h('span', 'sc-value', promptState.text.length + ' / 120');
+    var metaRow = h('div', 'ws-prompt-meta');
+    metaRow.appendChild(count);
+    body.appendChild(metaRow);
+
+    var chips = h('div', 'ws-chips');
+    PROMPT_EXAMPLES.forEach(function (text) {
+      var chip = h('button', 'ws-chip', text);
+      chip.type = 'button';
+      chip.addEventListener('click', function () {
+        // 示例短语只填充：解析与应用都是用户显式的动作
+        ta.value = text;
+        syncInput(text);
+      });
+      chips.appendChild(chip);
+    });
+    body.appendChild(chips);
+
+    var actions = h('div', 'ws-prompt-actions');
+    var parseBtn = h('button', 'btn primary', '解析');
+    parseBtn.type = 'button';
+    var applyBtn = h('button', 'btn primary', '应用到当前舞台');
+    applyBtn.type = 'button';
+    applyBtn.disabled = !(promptState.result && promptState.result.ok);
+    var undoBtn = h('button', 'btn', '撤销本次应用');
+    undoBtn.type = 'button';
+    undoBtn.hidden = !promptState.undo;
+    actions.append(parseBtn, applyBtn, undoBtn);
+    body.appendChild(actions);
+
+    var resultBox = h('div', 'ws-prompt-result');
+    resultBox.setAttribute('aria-live', 'polite');
+    body.appendChild(resultBox);
+
+    function syncInput(value) {
+      promptState.text = String(value).slice(0, 120);
+      count.textContent = promptState.text.length + ' / 120';
+      // 输入再次改变：上一次的解析结果作废，避免拿旧解释应用新文本
+      promptState.result = null;
+      resultBox.textContent = '';
+      applyBtn.disabled = true;
+    }
+    ta.addEventListener('input', function () { syncInput(ta.value); });
+
+    function renderResult(r) {
+      resultBox.textContent = '';
+      if (!r) return;
+      if (!r.ok) {
+        resultBox.appendChild(h('div', 'sc-note ws-warn',
+          r.code === 'empty' ? '没有可识别的文本。' : '没有命中任何支持的词，舞台未改动。'));
+        if (r.unknown && r.unknown.length) {
+          resultBox.appendChild(h('div', 'ws-prompt-unknown',
+            '未识别：' + r.unknown.join('、')));
+        }
+        resultBox.appendChild(h('div', 'sc-note',
+          '只认这些词：场景（塔林/星球/隧道/星云/地形/歌词走廊）、氛围（安静/律动/爆发）、'
+          + '镜头（近景/远景/广角/缓慢/高速）、质感（霓虹/单色/双色/胶片/干净）、'
+          + '手绘、跟随音乐/固定镜头，以及"不要抖动/颗粒/泛光"。'));
+        return;
+      }
+      resultBox.appendChild(h('div', 'ws-prompt-head', '识别结果'));
+      var byGroup = {};
+      r.matches.forEach(function (m) {
+        if (!byGroup[m.group]) byGroup[m.group] = [];
+        if (byGroup[m.group].indexOf(m.label) < 0) byGroup[m.group].push(m.label);
+      });
+      PROMPT_GROUPS.forEach(function (g) {
+        var line = h('div', 'ws-kv');
+        line.appendChild(h('span', null, g[1]));
+        var got = byGroup[g[0]];
+        line.appendChild(h('span', 'sc-value',
+          got && got.length ? got.join('、') : '未提及（保留现状）'));
+        resultBox.appendChild(line);
+      });
+      if (byGroup.negative) {
+        var neg = h('div', 'ws-kv');
+        neg.appendChild(h('span', null, '否定'));
+        neg.appendChild(h('span', 'sc-value', byGroup.negative.join('、') + '（置零）'));
+        resultBox.appendChild(neg);
+      }
+      (r.warnings || []).forEach(function (w) {
+        resultBox.appendChild(h('div', 'sc-note ws-warn', w));
+      });
+      if (r.unknown && r.unknown.length) {
+        resultBox.appendChild(h('div', 'ws-prompt-unknown',
+          '未识别（不会应用）：' + r.unknown.join('、')));
+      }
+      resultBox.appendChild(h('div', 'sc-note',
+        '未提到的 cue、绑定、背景、名称全部保留；切场景只换场景默认值与入画机位。'));
+    }
+
+    parseBtn.addEventListener('click', function () {
+      var text = (ta.value || '').slice(0, 120);
+      var r;
+      try {
+        r = CP.compile(text);
+      } catch (e) {
+        flash('解析失败：' + (e && e.message || e));
+        return;
+      }
+      promptState.result = r;
+      renderResult(r);
+      applyBtn.disabled = !r.ok;
+    });
+
+    applyBtn.addEventListener('click', function () {
+      var r = promptState.result;
+      if (!r || !r.ok) return;
+      var CS = stage_api();
+      if (!CS || typeof CS.applyIntent !== 'function') {
+        flash('舞台模块不可用，未改动');
+        return;
+      }
+      var before = CS.preset();          // 撤销快照先于任何写入取出
+      var out;
+      try {
+        out = CS.applyIntent(r.intent);
+      } catch (e) {
+        flash('应用失败：' + (e && e.message || e));
+        return;
+      }
+      if (!out || !out.ok) {
+        // 仅成功才替换旧快照；失败时之前的撤销能力原样保留
+        flash(out && out.message ? '未应用：' + out.message : '该意图无法应用，舞台未改动');
+        return;
+      }
+      promptState.undo = before;
+      flash('已应用'
+        + (r.intent.scene ? '（场景：' + r.intent.scene + '）' : '')
+        + '，可撤销本次改动');
+      // preset 事件会触发面板重排，撤销按钮随 promptState.undo 出现
+    });
+
+    undoBtn.addEventListener('click', function () {
+      if (!promptState.undo) return;
+      var CS = stage_api();
+      if (!CS) return;
+      CS.setPreset(promptState.undo);
+      promptState.undo = null;
+      flash('已撤销本次应用');
+      // setPreset 的 preset 事件触发重排，按钮随之隐藏
+    });
+  }
 
   function renderScene(body) {
     var CS = stage_api();
@@ -946,8 +1142,8 @@
   }
 
   var TABS = [
-    ['scene', '场景'], ['presets', '收藏'], ['params', '参数'], ['cues', '编排'],
-    ['binds', '绑定'], ['look', '背景手绘'], ['io', '导出']
+    ['prompt', '一句成景'], ['scene', '场景'], ['presets', '收藏'], ['params', '参数'],
+    ['cues', '编排'], ['binds', '绑定'], ['look', '背景手绘'], ['io', '导出']
   ];
 
   function render() {
@@ -967,7 +1163,8 @@
     TABS.forEach(function (t) {
       if (refs.tabs && refs.tabs[t[0]]) refs.tabs[t[0]].classList.toggle('on', tab === t[0]);
     });
-    if (tab === 'scene') renderScene(refs.body);
+    if (tab === 'prompt') renderPrompt(refs.body);
+    else if (tab === 'scene') renderScene(refs.body);
     else if (tab === 'presets') renderPresets(refs.body);
     else if (tab === 'params') renderParams(refs.body);
     else if (tab === 'cues') renderCues(refs.body);

@@ -774,6 +774,97 @@ html.hand-paper footer.bar {
 .ws-toast[hidden] { display: none; }
 
 /* ---------------------------------------------------------------------------
+   4.5 一句成景（离线提示词 → StageIntent）
+   颜色、间距与按钮全部沿用上方令牌；不做嵌套卡片，解析结果是分组列表。
+   --------------------------------------------------------------------------- */
+
+.ws-prompt-text {
+  display: block;
+  width: 100%;
+  min-height: 72px;
+  margin: 6px 0 4px;
+  padding: 9px 10px;
+  resize: vertical;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.32);
+  color: inherit;
+  font: inherit;
+  line-height: 1.55;
+}
+
+.ws-prompt-text:focus-visible {
+  outline: 2px solid #bdd7c7;
+  outline-offset: 1px;
+}
+
+.ws-prompt-meta {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 8px;
+  font-size: 11px;
+}
+
+.ws-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.ws-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ws-chip:hover {
+  border-color: rgba(var(--music-highlight-rgb, 226, 176, 113), 0.55);
+  background: rgba(var(--music-highlight-rgb, 226, 176, 113), 0.1);
+}
+
+/* 窄屏时动作纵向排列，按钮整行可点 */
+.ws-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+
+.ws-prompt-result { margin: 0 0 12px; }
+
+.ws-prompt-head {
+  font-size: 13px;
+  font-weight: 650;
+  margin: 6px 0 4px;
+}
+
+/* 警告与未识别不是错误弹窗，是解释的一部分：淡色、可换行 */
+.ws-warn { color: #d9a441; }
+
+.ws-prompt-unknown {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  color: var(--muted, rgba(255, 255, 255, 0.62));
+  font-size: 11.5px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 360px) {
+  .ws-prompt-actions { flex-direction: column; }
+  .ws-prompt-actions .btn { width: 100%; }
+}
+
+/* ---------------------------------------------------------------------------
    5. 降低动效与低性能档
    --------------------------------------------------------------------------- */
 
