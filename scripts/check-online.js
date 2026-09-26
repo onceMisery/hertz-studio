@@ -719,7 +719,9 @@ async function loginScenario(pollStates, opts) {
           ? { throw: opts.accountThrow }
           : { returns: { source: opts.sources[0].id, nickname: '张三', vip_label: '黑胶VIP' } }) },
         ...playlistGet,
-        { match: '/v1/online/playlist?', returns: opts.detail || { total: 0, tracks: [] } },
+        { match: '/v1/online/playlist?', ...(opts.detailThrow
+          ? { throw: opts.detailThrow }
+          : { returns: opts.detail || { total: 0, tracks: [] } }) },
       ],
       POST: [
         { match: '/v1/online/playlist/tracks/remove', returns: { ok: true } },
@@ -870,6 +872,48 @@ async function loginScenario(pollStates, opts) {
     playCalls = env.sandbox.VMusicTransport.calls.post.filter((c) => c.url.indexOf('/v1/online/play') >= 0);
     eq(playCalls.length, 2, '随机播放再发一次 play');
     eq(playCalls[1].body.tracks.length, 2, '随机仍是 2 首');
+  }
+
+  section('收藏歌单整盘打开：playRef 不要求歌单在账号清单里');
+  {
+    // 收藏视图里的电台快照只有 source+id：上次会话收藏的歌单重启后可能不在
+    // 首屏卡片里，playRef 必须直接按 id 拉整盘。
+    const env = playlistSandbox({
+      sources: [{ id: 'netease', label: '网易云音乐', caps: ['cookie_login', 'user_playlists', 'playlist_detail'] }],
+      playlists: [],
+      detail: { total: 2, tracks: [T({ id: '11' }), T({ id: '22' })] },
+    });
+    await env.doc.fireDCL();
+    await ticks(20);
+    await env.sandbox.window.OnlinePlaylists.playRef('netease', 'fav-pl');
+    await ticks(20);
+    const playCalls = env.sandbox.VMusicTransport.calls.post.filter((c) => c.url.indexOf('/v1/online/play') >= 0);
+    eq(playCalls.length, 1, 'playRef 整盘入队一次');
+    eq(playCalls[0].body.tracks.length, 2, '收藏歌单的两首都入队');
+    eq(playCalls[0].body.index, 0, '从第一首开始');
+
+    // 空歌单与拉取失败都如实提示，不伪造成功。
+    const emptyEnv = playlistSandbox({
+      sources: [{ id: 'netease', label: '网易云音乐', caps: ['cookie_login', 'user_playlists', 'playlist_detail'] }],
+      playlists: [],
+      detail: { total: 0, tracks: [] },
+    });
+    await emptyEnv.doc.fireDCL();
+    await ticks(20);
+    await emptyEnv.sandbox.window.OnlinePlaylists.playRef('netease', 'empty');
+    await ticks(20);
+    ok(emptyEnv.spies.toasts.some((t) => t.msg.indexOf('空') >= 0), '空歌单如实提示');
+
+    const failEnv = playlistSandbox({
+      sources: [{ id: 'netease', label: '网易云音乐', caps: ['cookie_login', 'user_playlists', 'playlist_detail'] }],
+      playlists: [],
+      detailThrow: '网络断了',
+    });
+    await failEnv.doc.fireDCL();
+    await ticks(20);
+    await failEnv.sandbox.window.OnlinePlaylists.playRef('netease', 'boom');
+    await ticks(20);
+    ok(failEnv.spies.toasts.some((t) => t.kind === 'error'), '拉取失败如实报错');
   }
 
   section('抽屉遮罩与抽屉同开同关（Esc / 返回 / 点遮罩）');

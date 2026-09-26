@@ -24,6 +24,9 @@
   var lastParamPath = null;
   var GUIDE_KEY = 'vmusic.workshop.guide.v1';
   var helpSeq = 0;
+  var target = 'immersive', returnFocus = null, home = null;
+  var past = [], future = [], gesture = null;
+  var DEFAULTS = { scene: 'resonance', motion: .65, bloom: .8, reactivity: 1.35, lyrics: true, cruise: true, layout: 'focus', lyricSize: 1, lyricGlow: .45 };
 
   function $(id) { return document.getElementById(id); }
 
@@ -140,6 +143,10 @@
       onChange(row[6]);
     });
     cell.appendChild(input);
+    var reset = h('button', 'ws-value-reset', '重置'); reset.type = 'button';
+    reset.setAttribute('aria-label', '重置' + row[1]);
+    reset.addEventListener('click', function () { input.value = String(row[6]); paint(row[6]); onChange(row[6]); input.dispatchEvent(new Event('change')); });
+    cell.appendChild(reset);
     return cell;
   }
 
@@ -151,6 +158,7 @@
     var sw = h('button', 'sc-switch');
     sw.type = 'button';
     sw.setAttribute('role', 'switch');
+    sw.setAttribute('aria-label', label);
     sw.setAttribute('aria-checked', String(!!on));
     sw.classList.toggle('on', !!on);
     sw.addEventListener('click', function () {
@@ -170,6 +178,8 @@
     cell.appendChild(lab);
     var wrap = h('div', 'sc-select-wrap');
     var sel = h('select');
+    sel.id = 'ws-select-' + (++helpSeq);
+    lab.htmlFor = sel.id;
     options.forEach(function (pair) {
       var o = h('option', null, pair[1]);
       o.value = String(pair[0]);
@@ -263,8 +273,9 @@
       var card = h('button', 'ws-card');
       card.type = 'button';
       card.classList.toggle('on', s.id === cur.scene);
+      card.innerHTML = sceneArt(s.id);
       card.appendChild(h('span', 'ws-card-name', s.label));
-      card.appendChild(h('span', 'ws-card-id', s.id));
+      card.setAttribute('aria-pressed', String(s.id === cur.scene));
       card.addEventListener('click', function () { CS.setScene(s.id); render(); });
       grid.appendChild(card);
     });
@@ -335,16 +346,18 @@
   function renderParams(body) {
     var CS = stage_api();
     var spec = CS.spec();
-    var rt = CS.runtime();
+
     var cur = CS.preset();
 
     var groups = spec.base.concat([{ id: 'sc', title: '场景参数（' + cur.scene + '）', items: spec.scene }]);
     groups.forEach(function (g) {
-      body.appendChild(h('h2', 'sc-group-title', g.title));
+      var group = h('details', 'ws-param-group'); group.open = g.id === 'sc';
+      group.appendChild(h('summary', null, g.title));
       var grid = h('div', 'sc-grid');
       (g.items || []).forEach(function (row) {
         var path = row[0];
-        var value = rt[path];
+        var parts = path.split('.');
+        var value = cur[parts[0]] && cur[parts[0]][parts[1]];
         if (value === undefined) value = row[6];
         grid.appendChild(slider(row, value, function (v) {
           CS.setParam(path, v);
@@ -353,18 +366,18 @@
       });
       (g.selects || []).forEach(function (row) {
         var path = row[0];
-        var value = rt[path];
+        var parts = path.split('.');
+        var value = cur[parts[0]] && cur[parts[0]][parts[1]];
         if (value === undefined) value = row[3];
         grid.appendChild(select(row[1], row[2], value, function (v) {
           CS.setParam(path, Number(v));
         }));
       });
-      body.appendChild(grid);
+      group.appendChild(grid); body.appendChild(group);
     });
 
     body.appendChild(h('div', 'sc-note',
-      '滑块读的是"这一帧实际生效的值"，也就是绑定与编排叠加之后的结果。'
-      + '双击任意滑块回到默认值。'));
+      '这里调整基础值；自动导演、绑定和编排会在演出时叠加变化。点击重置可恢复单项默认值。'));
   }
 
   function renderCues(body) {
@@ -820,6 +833,118 @@
   // 骨架
   // -------------------------------------------------------------------------
 
+  // Static visual studies are navigational thumbnails; the adjacent canvas is
+  // the actual renderer. No second animation loop or renderer lives here.
+  function sceneArt(id) {
+    var art = '<rect width="320" height="180" fill="#0e191b"/>', shape = '';
+    for (var i = 0; i < 75; i++) {
+      var x = (i * 73 + 17) % 320, y = (i * 37 + 11) % 180;
+      shape += '<circle cx="' + x + '" cy="' + y + '" r=".7" opacity=".3"/>';
+    }
+    if (id === 'resonance' || id === 'tunnel') {
+      for (i = 0; i < 11; i++) shape += '<ellipse cx="160" cy="90" rx="' + (id === 'tunnel' ? 12 + i * 13 : 84 + i * 2) + '" ry="' + (id === 'tunnel' ? 8 + i * 8 : 24 + i * 2) + '" transform="rotate(-23 160 90)" fill="none" stroke="currentColor" opacity="' + (.16 + i * .045) + '"/>';
+    } else if (id === 'orb') {
+      for (i = 0; i < 14; i++) shape += '<ellipse cx="160" cy="90" rx="62" ry="' + (4 + i * 4.3) + '" fill="none" stroke="currentColor" opacity=".55"/>';
+    } else if (id === 'silk') {
+      for (i = 0; i < 21; i++) shape += '<path d="M' + (98 + i * 6) + ' 38q-25 52 0 104" fill="none" stroke="currentColor" opacity=".65"/>';
+    } else if (id === 'terrain') {
+      for (i = 0; i < 13; i++) shape += '<path d="M0 ' + (65+i*7) + ' Q65 ' + (i*5) + ' 110 ' + (75+i*6) + 'T230 ' + (60+i*6) + 'T320 ' + (80+i*6) + '" fill="none" stroke="currentColor" opacity=".45"/>';
+    } else {
+      for (i = 0; i < 13; i++) shape += '<path d="M-20 ' + (80+i*4) + 'Q85 ' + (-30+i*8) + ' 155 85T350 ' + (70+i*5) + '" fill="none" stroke="currentColor" opacity=".38" transform="rotate(' + (id === 'prism' ? i*12 : -12) + ' 160 90)"/>';
+    }
+    return '<svg class="ws-scene-art" viewBox="0 0 320 180" aria-hidden="true">' + art + '<g fill="currentColor">' + shape + '</g></svg>';
+  }
+
+  function snapshot() { return window.Stage3D.preferences(); }
+  function remember(previous) {
+    if (JSON.stringify(previous) === JSON.stringify(snapshot())) return;
+    past.push(previous); if (past.length > 40) past.shift(); future = [];
+    syncHistory();
+  }
+  function edit(values) {
+    var previous = snapshot(); Stage3D.configure(values); remember(previous); Stage3D.save(); render();
+  }
+  function syncHistory() {
+    if ($('ws-undo')) $('ws-undo').disabled = !past.length;
+    if ($('ws-redo')) $('ws-redo').disabled = !future.length;
+  }
+  function travel(undo) {
+    var from = undo ? past : future, to = undo ? future : past;
+    if (!from.length) return;
+    to.push(snapshot()); Stage3D.configure(from.pop()); Stage3D.save(); render();
+  }
+  function immersiveSlider(row, prefs) {
+    var cell = slider(row, prefs[row[0]], function (value) {
+      if (!gesture) gesture = snapshot();
+      var change = {}; change[row[0]] = value; Stage3D.configure(change);
+    });
+    cell.addEventListener('change', function () {
+      if (gesture) { remember(gesture); gesture = null; } Stage3D.save();
+    });
+    return cell;
+  }
+  function renderImmersive(body) {
+    var prefs = snapshot();
+    var intro = h('div', 'ws-intro');
+    intro.append(h('span', 'ws-kicker', 'THE LISTENING ROOM'), h('h2', null, '给音乐一个空间'), h('p', null, '挑选声场，调整光与节奏。每一次改变，即刻呈现在预览中。'));
+    body.appendChild(intro);
+    var history = h('div', 'ws-history');
+    [['ws-undo', '撤销', function () { travel(true); }], ['ws-redo', '重做', function () { travel(false); }], ['ws-defaults', '恢复默认', function () { edit(DEFAULTS); }]].forEach(function (spec) {
+      var b = h('button', 'btn', spec[1]); b.type = 'button'; b.id = spec[0]; b.addEventListener('click', spec[2]); history.appendChild(b);
+    });
+    body.appendChild(history);
+    body.appendChild(h('h3', 'ws-section-title', '从一种心情开始'));
+    var templates = h('div', 'ws-templates');
+    [
+      ['夜航', '缓慢穿行，光随声动', { scene: 'tunnel', motion: .3, bloom: .65, reactivity: 1, layout: 'focus' }],
+      ['静听', '把注意力留给每一句', { scene: 'aurora', motion: .15, bloom: .4, reactivity: .55, layout: 'focus' }],
+      ['声浪', '星环共振，节拍鲜明', { scene: 'resonance', motion: .65, bloom: .9, reactivity: 1.65, layout: 'focus' }],
+      ['封面时刻', '像翻开一张珍藏唱片', { scene: 'silk', motion: .2, bloom: .55, reactivity: .85, layout: 'sleeve' }]
+    ].forEach(function (spec, index) {
+      var b = h('button', 'ws-template'); b.type = 'button'; b.id = 'ws-template-' + index; b.innerHTML = sceneArt(spec[2].scene);
+      var label = h('span'); label.append(h('strong', null, spec[0]), h('small', null, spec[1])); b.appendChild(label);
+      b.addEventListener('click', function () { edit(Object.assign({}, DEFAULTS, spec[2])); }); templates.appendChild(b);
+    });
+    body.appendChild(templates);
+    body.appendChild(h('h3', 'ws-section-title', '选择声场'));
+    var scenes = h('div', 'ws-scene-grid');
+    Stage3D.stages().forEach(function (scene) {
+      var b = h('button', 'ws-scene-card'); b.type = 'button'; b.dataset.scene = scene.id; b.id = 'ws-scene-' + scene.id;
+      b.setAttribute('aria-pressed', String(scene.id === prefs.scene)); b.innerHTML = sceneArt(scene.id);
+      b.append(h('strong', null, scene.label), h('small', null, scene.desc));
+      b.addEventListener('click', function () { edit({ scene: scene.id }); }); scenes.appendChild(b);
+    });
+    body.appendChild(scenes);
+    body.appendChild(h('h3', 'ws-section-title', '光与节奏'));
+    var controls = h('div', 'ws-tuning');
+    [ ['reactivity', '律动强度', 0, 2, .05, '', 1.35], ['motion', '镜头动态', 0, 1, .05, '', .65], ['bloom', '光晕强度', 0, 1.5, .05, '', .8] ].forEach(function (row) { controls.appendChild(immersiveSlider(row, prefs)); });
+    controls.appendChild(toggle('镜头自动巡航', prefs.cruise, function (v) { edit({ cruise: v }); }));
+    controls.querySelector('[role="switch"]').id = 'ws-cruise';
+    body.appendChild(controls);
+    body.appendChild(h('h3', 'ws-section-title', '封面与歌词'));
+    var reading = h('div', 'ws-tuning');
+    reading.appendChild(select('聆听布局', [['focus', '沉浸歌词'], ['sleeve', '封面与歌词'], ['single', '简洁单句']], prefs.layout, function (v) { edit({ layout: v }); }));
+    reading.appendChild(toggle('显示歌词', prefs.lyrics, function (v) { edit({ lyrics: v }); }));
+    reading.querySelector('select').id = 'ws-layout';
+    reading.querySelector('label').htmlFor = 'ws-layout';
+    reading.querySelector('[role="switch"]').id = 'ws-lyrics';
+    reading.appendChild(immersiveSlider(['lyricSize', '歌词字号', .75, 1.35, .05, '×', 1], prefs));
+    reading.appendChild(immersiveSlider(['lyricGlow', '字间柔光', 0, 1, .05, '', .45], prefs));
+    body.appendChild(reading);
+    body.appendChild(h('p', 'ws-save-note', '设置自动保存 · 关闭工坊，继续沉浸聆听'));
+    syncHistory();
+  }
+
+  function switchTarget(next) {
+    if (target === next) return;
+    setOpen(false); target = next;
+    if (next === 'advanced') {
+      Stage3D.close();
+      document.dispatchEvent(new CustomEvent('workshop:target', { detail: { target: next } }));
+    } else if (window.Stage && Stage.setPage) Stage.setPage(false);
+    setOpen(true);
+  }
+
   var TABS = [
     ['scene', '场景'], ['presets', '收藏'], ['params', '参数'], ['cues', '编排'],
     ['binds', '绑定'], ['look', '背景手绘'], ['io', '导出']
@@ -827,7 +952,18 @@
 
   function render() {
     if (!refs.body) return;
+    var scroll = refs.body.scrollTop;
+    var focused = document.activeElement;
+    var focusId = refs.body.contains(focused) && focused.id;
+    refs.panel.dataset.target = target;
+    refs.targets.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.target === target)); });
+    $('ws-tabs').hidden = target !== 'advanced';
     refs.body.textContent = '';
+    if (target === 'immersive') {
+      renderImmersive(refs.body); refs.body.scrollTop = scroll;
+      if (focusId && $(focusId)) $(focusId).focus({ preventScroll: true });
+      return;
+    }
     TABS.forEach(function (t) {
       if (refs.tabs && refs.tabs[t[0]]) refs.tabs[t[0]].classList.toggle('on', tab === t[0]);
     });
@@ -856,7 +992,21 @@
   function setOpen(next) {
     var panel = refs.panel;
     if (!panel) return false;
-    panel.hidden = false;
+    if (next === isOpen()) return next;
+    if (next) {
+      returnFocus = document.activeElement;
+      if (target === 'immersive' && window.Stage3D) {
+        if (!Stage3D.isActive()) Stage3D.open();
+        $('stage3d').appendChild(panel);
+        $('stage3d').classList.add('s3d-editing', 's3d-chrome');
+      }
+      panel.inert = false;
+    } else {
+      if (gesture) { remember(gesture); gesture = null; Stage3D.save(); }
+      $('stage3d').classList.remove('s3d-editing');
+      if (home) home.after(panel);
+    }
+    panel.hidden = !next;
     void panel.offsetWidth;                 // hidden → is-open 同帧合并会吃掉过渡
     panel.classList.toggle('is-open', next);
     panel.setAttribute('aria-hidden', String(!next));
@@ -866,7 +1016,8 @@
       btn.classList.toggle('active', next);
       btn.setAttribute('aria-expanded', String(next));
     }
-    if (next) render();
+    if (next) { render(); $('ws-close').focus({ preventScroll: true }); }
+    else if (returnFocus && returnFocus.isConnected && !returnFocus.closest('[hidden]')) returnFocus.focus({ preventScroll: true });
     return next;
   }
 
@@ -879,6 +1030,14 @@
     refs.body = $('ws-body');
     refs.toast = $('ws-toast');
     if (!refs.panel || !refs.body) return null;
+    home = document.createComment('workshop home'); refs.panel.before(home);
+    refs.targets = h('div', 'ws-targets'); refs.targets.setAttribute('aria-label', '编辑目标');
+    [['immersive', '沉浸声场'], ['advanced', '高级编排']].forEach(function (spec) {
+      var b = h('button', null, spec[1]); b.type = 'button'; b.dataset.target = spec[0];
+      b.addEventListener('click', function () { switchTarget(spec[0]); }); refs.targets.appendChild(b);
+    });
+    $('ws-tabs').before(refs.targets);
+    refs.panel.querySelector('.ws-sub').textContent = '你的声音，你的舞台';
 
     var bar = $('ws-tabs');
     refs.tabs = {};
@@ -899,14 +1058,28 @@
     // 一个控件只能有一个主人。
 
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && isOpen()) { e.stopPropagation(); setOpen(false); }
+      if (!isOpen()) return;
+      if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); setOpen(false); return; }
+      if (target === 'immersive' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !/INPUT|TEXTAREA/.test(e.target.tagName)) {
+        e.preventDefault(); e.stopImmediatePropagation(); travel(!e.shiftKey); return;
+      }
+      if (e.key === 'Tab') {
+        var scope = target === 'immersive' ? $('stage3d') : refs.panel;
+        var focusable = Array.from(scope.querySelectorAll('button:not(:disabled),input:not(:disabled),select,textarea')).filter(function (el) { return el.tabIndex >= 0 && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden'; });
+        var first = focusable[0], last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+      // Leave native control keys intact but keep global player shortcuts from
+      // changing the underlying view while this editor has keyboard focus.
+      if (refs.panel.contains(e.target)) e.stopPropagation();
     }, true);
 
     // 外部改动了预置（导演换段、绑定、导入）时，如果面板正开着就跟着刷新。
     // 但只在"结构变了"的时候刷：每帧都重排 DOM 会让正在拖的滑块失焦。
     if (window.CreativeStage && CreativeStage.onChange) {
       CreativeStage.onChange(function (kind) {
-        if (!isOpen()) return;
+        if (!isOpen() || target !== 'advanced') return;
         if (kind === 'preset' || kind === 'library') render();
       });
     }
@@ -915,12 +1088,12 @@
 
   var api = {
     init: init,
-    open: function () { return setOpen(true); },
+    open: function () { if (isOpen()) { switchTarget('immersive'); return true; } target = 'immersive'; return setOpen(true); },
     close: function () { return setOpen(false); },
-    toggle: function () { return setOpen(!isOpen()); },
+    toggle: function () { return isOpen() ? setOpen(false) : api.open(); },
     isOpen: isOpen,
     setTab: function (t) {
-      if (TABS.some(function (x) { return x[0] === t; })) { tab = t; render(); }
+      if (TABS.some(function (x) { return x[0] === t; })) { tab = t; if (isOpen()) switchTarget('advanced'); else target = 'advanced'; render(); }
       return tab;
     },
     render: render,

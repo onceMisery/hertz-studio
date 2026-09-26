@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 use sqlx::SqlitePool;
-use vmusic_core::PlayMode;
+use vmusic_core::{PlayMode, StoreError};
 
 pub const VOLUME_KEY: &str = "player_volume";
 pub const MODE_KEY: &str = "player_mode";
@@ -66,6 +66,43 @@ pub async fn load_player_prefs(
     )
 }
 
+/// 字符串数组的一般化持久化（缓存保留名单等）。坏值按空表处理。
+pub async fn load_strings(pool: &SqlitePool, key: &str) -> Result<Vec<String>, StoreError> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE key = ?1")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    let Some((raw,)) = row else {
+        return Ok(Vec::new());
+    };
+    Ok(serde_json::from_str(&raw).unwrap_or_default())
+}
+
+pub async fn save_strings(
+    pool: &SqlitePool,
+    key: &str,
+    values: &[String],
+) -> Result<(), StoreError> {
+    let json =
+        serde_json::to_string(values).map_err(|e| StoreError::Serialization(e.to_string()))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    )
+    .bind(key)
+    .bind(json)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,3 +134,4 @@ mod tests {
         assert_eq!(parse_mode(None, PlayMode::RepeatOne), PlayMode::RepeatOne);
     }
 }
+

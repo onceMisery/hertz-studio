@@ -17,6 +17,8 @@
 - 自动续播：一首结束自动进入下一首
 - 实时频谱：64 段 FFT，通过 WebSocket 推送（30 fps）
 - 本地曲库：目录扫描、内嵌标签与封面提取、增删自动同步、标题/艺术家/专辑搜索
+- 大曲库：服务端按标题 / 艺术家 / 专辑 / 添加时间排序后分页，点播使用完整筛选结果作为队列；收藏支持继续加载和跨页播放
+- 音乐目录管理：添加、启停、移除目录，监听文件变化自动增量扫描；支持手动扫描、取消与失败明细，移除目录不会删除音乐原文件
 - 歌词：读取音频同目录下的 `.lrc`，支持普通歌词与**逐字时间轴**（enhanced LRC），支持 `[offset:]`
 - 自定义歌单：CRUD + 增删曲目 + 顺序维护
 - 设置持久化（服务端 SQLite，不依赖浏览器 localStorage）
@@ -47,6 +49,10 @@
 - 三档性能预算（eco / balanced / high）+ 分系统帧门，弱机自动降密度与刷新率；
   3D 视角只受「减少动效」管辖，不随低性能降级一起关掉
 - 本地 token 鉴权 + 只监听回环地址
+- 沉浸声场：顶栏立方体按钮或 **V** 进入，提供极光、粒子隧道、点阵地形、粒子球、
+  棱镜星系、共振星环和封面浮雕七种场景。频谱驱动局部形变与节拍波纹，支持拖动旋转、
+  滚轮缩放、逐字歌词、播放进度与音量控制；律动、镜头和光晕强度可即时调整并保存。
+  数字 **1–7** 切场景，**L** 切歌词，**F** 全屏，**K** 复位，**Esc** 返回。
 - 创意舞台：三维场景 + 可编排的演出数据 + 用户工坊 + 手绘风格 + 自定义背景
   （详见 [`创意功能方案.md`](创意功能方案.md)）
   - 手写 WebGL2 内核：透视相机、深度缓冲、离屏帧缓冲与后处理链，五个音频驱动场景
@@ -178,9 +184,12 @@ mmusic-studio v0.1.0
 | POST                | `/v1/player/volume`                                | `{ volume: 0..1 }`                                   |
 | POST                | `/v1/player/mode`                                  | `{ mode: repeat \| repeat_one \| shuffle }`          |
 | GET                 | `/v1/devices` · POST `/v1/devices/select`          | 输出设备                                                 |
-| GET                 | `/v1/tracks?q=&limit=&offset=`                     | 曲库分页与搜索                                              |
+| GET                 | `/v1/tracks?q=&sort=&limit=&offset=`               | 曲库分页与搜索；sort 为 title / artist / album / added       |
+| GET                 | `/v1/tracks/ids?q=&sort=`                          | 完整筛选结果的有序 ID，供全量播放队列使用                     |
 | GET                 | `/v1/tracks/{id}` `/cover` `/lyrics`               | 单曲详情、封面、歌词                                           |
-| POST                | `/v1/library/scan` · GET `/v1/library/status`      | 扫描与进度                                                |
+| POST                | `/v1/library/scan` · GET `/v1/library/status`      | 增量扫描、进度与失败明细                                   |
+| POST                | `/v1/library/scan/cancel`                          | 取消正在进行的扫描                                       |
+| GET/POST/PUT/DELETE | `/v1/library/roots`                                | 音乐目录列表、添加、启停、移除（DELETE 使用 path 查询参数） |
 | GET/POST/PUT/DELETE | `/v1/playlists[/{id}]`                             | 歌单                                                   |
 | POST · DELETE       | `/v1/playlists/{id}/tracks[/{track_id}]`           | 歌单曲目                                                 |
 | GET · PUT           | `/v1/settings`                                     | 键值设置（音源凭据不在其中，见下）                            |

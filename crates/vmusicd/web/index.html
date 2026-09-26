@@ -291,12 +291,19 @@
           <span id="lib-count" class="count">—</span>
         </div>
         <div class="col-tools">
+          <select id="lib-artist-filter" aria-label="按歌手筛选">
+            <option value="">全部歌手</option>
+          </select>
+          <select id="lib-album-filter" aria-label="按专辑筛选">
+            <option value="">全部专辑</option>
+          </select>
           <select id="lib-sort" aria-label="排序方式">
             <option value="title">按标题</option>
             <option value="artist">按艺术家</option>
             <option value="album">按专辑</option>
             <option value="added">最近添加</option>
           </select>
+          <button id="lib-cleanup" class="btn" title="查找并移除文件已丢失的曲目">失效整理</button>
           <button id="scan-toggle" class="btn">音乐目录</button>
         </div>
       </div>
@@ -348,6 +355,15 @@
       </div>
       <div class="lib-list" id="lib-list"></div>
       <button class="btn lib-sentinel" id="lib-sentinel" type="button" hidden>加载更多歌曲</button>
+
+      <!-- 批量操作栏：勾选曲目后浮出，随选中数量更新 -->
+      <div class="lib-batch" id="lib-batch-bar" hidden>
+        <span id="lib-batch-count">已选 0 首</span>
+        <button id="lib-batch-playlist" class="btn" type="button">加入歌单</button>
+        <button id="lib-batch-fav" class="btn" type="button">收藏</button>
+        <button id="lib-batch-edit" class="btn" type="button">批量编辑</button>
+        <button id="lib-batch-clear" class="btn" type="button" aria-label="取消选择">取消</button>
+      </div>
     </div>
 
     <!-- 在线曲库：搜索 + 分类浏览 + 试听。数据经服务端代理，
@@ -405,9 +421,18 @@
         <div id="op-history" class="op-history" hidden>
           <div class="op-section-title op-history-head">
             <span>最近播放</span>
+            <select id="op-history-source" class="op-history-source" aria-label="按来源筛选">
+              <option value="">全部来源</option>
+              <option value="local">本地</option>
+              <option value="netease">网易云</option>
+              <option value="qq">QQ</option>
+              <option value="kugou">酷狗</option>
+              <option value="qishui">汽水</option>
+            </select>
             <button id="op-history-clear" class="op-history-clear" type="button">清空</button>
           </div>
           <div id="op-history-list" class="op-history-list"></div>
+          <button id="op-history-more" class="btn op-history-more" type="button" hidden>加载更早</button>
         </div>
         <div class="op-section-title">我的账号</div>
         <div id="op-accounts" class="op-accounts"></div>
@@ -454,6 +479,7 @@
           <div class="pl-detail-actions">
             <button id="pl-detail-play" class="btn primary">播放</button>
             <button id="pl-detail-queue" class="btn">下一首播放</button>
+            <button id="pl-detail-m3u" class="btn">导出 M3U</button>
             <button id="pl-detail-rename" class="btn">重命名</button>
             <button id="pl-detail-delete" class="btn danger">删除</button>
           </div>
@@ -541,6 +567,74 @@
     <!-- 设置 -->
     <div class="view" id="view-settings" hidden>
       <div class="col-head"><div class="col-head-left"><h1 class="col-title">设置</h1></div></div>
+      <div class="set-group">
+        <h2 class="set-title">音效与均衡器</h2>
+        <div class="set-row" id="dsp-eq-row">
+          <label>均衡器 (Hz)</label>
+          <span class="dsp-eq" id="dsp-eq">
+            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="0"><span>60</span></label>
+            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="1"><span>150</span></label>
+            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="2"><span>400</span></label>
+            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="3"><span>1k</span></label>
+            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="4"><span>2.4k</span></label>
+            <label class="dsp-band"><input type="range" min="-12" max="12" step="0.5" value="0" data-band="5"><span>6k</span></label>
+          </span>
+        </div>
+        <div class="set-row">
+          <label for="dsp-preamp">增益补偿 (dB)</label>
+          <input id="dsp-preamp" type="number" min="-24" max="12" step="0.5" value="0">
+        </div>
+        <div class="set-row">
+          <label for="dsp-loudness">响度归一化（按 ReplayGain 标签）</label>
+          <input id="dsp-loudness" type="checkbox">
+        </div>
+        <div class="set-row">
+          <label for="dsp-crossfade">交叉淡化 (ms，0 = 默认短淡变)</label>
+          <input id="dsp-crossfade" type="number" min="0" max="8000" step="100" value="0">
+        </div>
+        <div class="set-row">
+          <span></span>
+          <span class="set-actions">
+            <button id="dsp-save" class="btn primary">保存音效</button>
+            <button id="dsp-reset" class="btn">复位</button>
+          </span>
+        </div>
+      </div>
+
+      <div class="set-group">
+        <h2 class="set-title">在线缓存</h2>
+        <div class="set-row">
+          <label>占用</label>
+          <span id="cache-usage" class="count">—</span>
+          <span class="set-actions">
+            <button id="cache-clear" class="btn">清理缓存</button>
+            <button id="cache-keep-current" class="btn" title="把正在播放的在线曲目加入保留名单">保留当前播放</button>
+          </span>
+        </div>
+        <div class="hint" id="cache-keep-list" hidden></div>
+        <p class="hint">在线试听的音频会先落盘缓存。当前播放与保留名单里的曲目不会被清理。</p>
+      </div>
+
+      <div class="set-group">
+        <h2 class="set-title">数据备份</h2>
+        <div class="set-row">
+          <label for="backup-export">歌单 / 收藏 / 设置备份</label>
+          <span class="set-actions">
+            <button id="backup-export" class="btn">导出备份</button>
+            <button id="backup-import" class="btn">导入备份</button>
+            <input type="file" id="backup-file" accept=".json,application/json" hidden>
+          </span>
+        </div>
+        <div class="set-row">
+          <label for="m3u-import">M3U 歌单</label>
+          <span class="set-actions">
+            <button id="m3u-import" class="btn">导入 M3U</button>
+            <input type="file" id="m3u-file" accept=".m3u,.m3u8,audio/x-mpegurl" hidden>
+          </span>
+        </div>
+        <p class="hint">备份含歌单、收藏、设置与曲库目录，不含平台凭据。导入按名字合并歌单、收藏去重，可重复执行。</p>
+      </div>
+
       <div class="set-group">
         <h2 class="set-title">外观</h2>
         <div class="set-row">
@@ -698,7 +792,9 @@
   <!-- 空态不写占位符：原来这里放了一个 em dash「—」，在满屏 SVG 图标中间
        它看起来像一个坏掉的图标（笔画、尺寸、风格都和旁边的图标对不上）。
        没有曲目时这一格就该是空的，标题由 app.js 在载入曲目后写入。 -->
-  <div class="bar-track">
+  <!-- 正在播放区：点开底部播放控制弹窗（旧 stage-btn 移除后的接替入口）。 -->
+  <div class="bar-track" id="bar-track" role="button" tabindex="0" title="正在播放"
+       aria-label="打开播放控制弹窗">
     <div id="bar-title" class="bar-title"></div>
     <div id="bar-sub" class="bar-sub"></div>
   </div>
@@ -1015,6 +1111,21 @@
     <div class="np-volume">
       <span class="np-volume-label">音量</span>
       <input id="np-volume" type="range" min="0" max="100" value="80" aria-label="音量">
+    </div>
+
+    <!-- 歌词：本地曲目显示来源（导入 > 内嵌 > sidecar）、导入/清除与每曲偏移；
+         在线曲目的歌词来自平台逐字接口，只显示来源、不出编辑控件。 -->
+    <div class="np-lyrics" id="np-lyrics">
+      <span class="np-volume-label">歌词</span>
+      <span id="np-lyric-source" class="np-lyric-source">—</span>
+      <span class="np-lyric-offset" id="np-lyric-offset">
+        <button type="button" id="np-lyric-offset-down" class="np-lyric-btn" title="歌词提前 0.5 秒" aria-label="歌词提前零点五秒">−0.5s</button>
+        <span id="np-lyric-offset-value" aria-live="polite">0.0s</span>
+        <button type="button" id="np-lyric-offset-up" class="np-lyric-btn" title="歌词延后 0.5 秒" aria-label="歌词延后零点五秒">+0.5s</button>
+      </span>
+      <input type="file" id="np-lyric-file" accept=".lrc,text/plain" hidden>
+      <button type="button" id="np-lyric-import" class="np-lyric-btn">导入歌词</button>
+      <button type="button" id="np-lyric-clear" class="np-lyric-btn" hidden>清除导入</button>
     </div>
 
     <!-- 底部播放控制区域：跳转到舞台播放页面 -->

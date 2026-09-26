@@ -100,7 +100,9 @@ pub async fn clean_parts(dir: &Path) {
 /// - 不以 `.` 结尾的项按**全名**精确匹配（legacy 命名缓存单独保护）。
 fn is_protected(name: &str, protected: &[String]) -> bool {
     protected.iter().any(|p| {
-        if p.ends_with('.') {
+        // 以 `.` 或 `-` 结尾的条目按前缀匹配（分别覆盖单个缓存键与某曲目
+        // 全部音质档），否则精确匹配完整文件名。
+        if p.ends_with('.') || p.ends_with('-') {
             name.starts_with(p.as_str())
         } else {
             name == p
@@ -158,6 +160,112 @@ pub async fn enforce_limit(
         }
     }
     Ok(removed)
+}
+
+/// 缓存占用统计：总量、正式文件数、按音源分组（文件名首段即音源）。
+#[derive(Debug, Default, serde::Serialize)]
+pub struct CacheStats {
+    pub total_bytes: u64,
+    pub files: u64,
+    pub by_source: Vec<(String, u64)>,
+}
+
+/// 只统计正式文件（>0 字节即计入；.part 残骸不算占用展示的一部分，但在
+/// 清理时一并删除）。
+pub async fn cache_stats(dir: &Path) -> CacheStats {
+    let mut stats = CacheStats::default();
+    let Ok(mut it) = fs::read_dir(dir).await else {
+        return stats;
+    };
+    let mut by_source: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    while let Ok(Some(entry)) = it.next_entry().await {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with(".part") {
+            continue;
+        }
+        if let Ok(meta) = fs::metadata(&path).await {
+            if !meta.is_file() {
+                continue;
+            }
+            stats.total_bytes += meta.len();
+            stats.files += 1;
+            let source = name.split('-').next().unwrap_or("other").to_string();
+            *by_source.entry(source).or_insert(0) += meta.len();
+        }
+    }
+    stats.by_source = by_source.into_iter().collect();
+    stats
+}
+
+/// 手动清理：删除缓存目录下（可选限定单一音源）的正式文件与 .part 残骸。
+/// protected 名单（当前播放 + 用户保留）照旧豁免。返回删除的字节数。
+pub async fn clear_cache(
+    dir: &Path,
+    protected: &[String],
+    source: Option<&str>,
+) -> std::io::Result<u64> {
+    let mut removed = 0u64;
+    let Ok(mut it) = fs::read_dir(dir).await else {
+        return Ok(0);
+    };
+    while let Ok(Some(entry)) = it.next_entry().await {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(src) = source {
+            if !name.starts_with(&format!("{src}-")) {
+                continue;
+            }
+        }
+        if !name.ends_with(".part") && is_protected(&name, protected) {
+            continue;
+        }
+        let len = fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+        if fs::remove_file(&path).await.is_ok() {
+            removed += len;
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod tests_clear {
+    use super::*;
+
+    #[tokio::test]
+    async fn stats_and_clear_respect_protected_and_source_filter() {
+        let dir = std::env::temp_dir().join(format!("vmusic-cache-clr-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).await.unwrap();
+        let make = |name: &str, size: usize| {
+            fs::write(dir.join(name), vec![0u8; size])
+        };
+        make("netease-1-standard.mp3", 100).await.unwrap();
+        make("netease-2-higher.mp3", 200).await.unwrap();
+        make("qq-9-standard.mp3", 50).await.unwrap();
+        make("qq-9-standard.mp3.part", 10).await.unwrap();
+
+        let stats = cache_stats(&dir).await;
+        assert_eq!(stats.files, 3);
+        assert_eq!(stats.total_bytes, 350);
+        assert!(stats.by_source.contains(&("netease".into(), 300)));
+        assert!(stats.by_source.contains(&("qq".into(), 50)));
+
+        // 保留 netease-1（豁免其全部音质档）：清理 qq 音源 → 只删 qq；
+        // .part 残骸一并清掉（50+10）。
+        let protected = vec!["netease-1-".to_string()];
+        let removed = clear_cache(&dir, &protected, Some("qq")).await.unwrap();
+        assert_eq!(removed, 60);
+        assert!(dir.join("netease-1-standard.mp3").exists());
+        assert!(dir.join("netease-2-higher.mp3").exists());
+        assert!(!dir.join("qq-9-standard.mp3").exists());
+        assert!(!dir.join("qq-9-standard.mp3.part").exists());
+
+        // 全量清理：保留项豁免。
+        let removed = clear_cache(&dir, &protected, None).await.unwrap();
+        assert_eq!(removed, 200);
+        assert!(dir.join("netease-1-standard.mp3").exists());
+        let _ = fs::remove_dir_all(&dir).await;
+    }
 }
 
 #[cfg(test)]

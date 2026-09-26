@@ -68,7 +68,7 @@
   }
 
   function card(item, index) {
-    var track = item.track || {};
+    var track = item;
     var el = document.createElement('button');
     el.className = 'daily-card';
     el.type = 'button';
@@ -103,7 +103,7 @@
   function playAll(index) {
     var page = dailyState.page;
     if (!page || !page.tracks.length) return;
-    var ids = page.tracks.map(function (i) { return i.track && i.track.id; }).filter(Boolean);
+    var ids = page.tracks.map(function (i) { return i.id; }).filter(Boolean);
     if (!ids.length) return;
     if (typeof H.playLocal === 'function') {
       H.playLocal(ids[Math.max(0, Math.min(ids.length - 1, index || 0))], ids);

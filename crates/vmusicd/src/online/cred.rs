@@ -48,25 +48,43 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// 写入凭据：CredPack 序列化后进钥匙串。钥匙串失败必须向上报错——绝不
+/// 静默把凭据落回 SQLite 明文。
 pub async fn put(db: &SqlitePool, source: &str, pack: &CredPack) -> Result<(), StoreError> {
     let mut pack = pack.clone();
     pack.saved_at = now_ms();
     let v = serde_json::to_value(&pack).map_err(|e| StoreError::Serialization(e.to_string()))?;
-    vmusic_store::settings::set(db, &cred_key(source), &v).await?;
+    let backend = crate::secrets::backend();
+    let mut entry = backend.get(&cred_key(source)).map_err(StoreError::Database)?;
+    entry.cred = Some(v.to_string());
+    backend.put(&cred_key(source), &entry).map_err(StoreError::Database)?;
     // 迁移完成后清掉旧的裸 cookie 键，避免两处真相。
     let _ = sqlx::query("DELETE FROM settings WHERE key = ?1")
         .bind(legacy_cookie_key(source))
         .execute(db)
         .await;
+    let _ = sqlx::query("DELETE FROM settings WHERE key = ?1")
+        .bind(cred_key(source))
+        .execute(db)
+        .await;
     Ok(())
 }
 
-/// 读取凭据：优先新键，回落旧的裸 cookie 键（netease 老用户）。
+/// 读取凭据：钥匙串优先；SQLite 里只剩迁移失败时保留的旧数据（启动时已
+/// ERROR 记录，属可观察状态，不构成静默回退）。
 pub async fn get(db: &SqlitePool, source: &str) -> Result<Option<CredPack>, StoreError> {
+    let backend = crate::secrets::backend();
+    let entry = backend.get(&cred_key(source)).map_err(StoreError::Database)?;
+    if let Some(raw) = entry.cred {
+        match serde_json::from_str::<CredPack>(&raw) {
+            Ok(pack) => return Ok(Some(pack)),
+            // 只记是哪个源的键坏了，绝不把凭据内容写进日志。
+            Err(_) => tracing::warn!(source = source, "钥匙串里的凭据 JSON 损坏，按未登录处理"),
+        }
+    }
     if let Some(v) = vmusic_store::settings::get(db, &cred_key(source)).await? {
         match serde_json::from_value::<CredPack>(v) {
             Ok(pack) => return Ok(Some(pack)),
-            // 只记是哪个源的键坏了，绝不把凭据内容写进日志。
             Err(_) => tracing::warn!(source = source, "online_cred_ 凭据 JSON 损坏，按未登录处理"),
         }
     }
@@ -88,6 +106,9 @@ pub async fn get(db: &SqlitePool, source: &str) -> Result<Option<CredPack>, Stor
 /// 登出：结构化凭据与历史裸键一起删，避免「清了 cookie 但 cred 还在」
 /// 导致 list_sources 仍判登录。
 pub async fn clear(db: &SqlitePool, source: &str) -> Result<(), StoreError> {
+    let backend = crate::secrets::backend();
+    // 钥匙串删除失败不吞掉：登出必须真的把秘密清掉，而不是只在数据库里看起来登出。
+    backend.delete(&cred_key(source)).map_err(StoreError::Database)?;
     for k in [cred_key(source), legacy_cookie_key(source)] {
         let _ = sqlx::query("DELETE FROM settings WHERE key = ?1")
             .bind(k)
@@ -109,20 +130,124 @@ pub async fn put_cookie(db: &SqlitePool, source: &str, cookie: &str) -> Result<(
     put(db, source, &pack).await
 }
 
-/// 非密设备身份（QQ guid、酷狗 mid/dfid）。
+/// 非密设备身份（QQ guid、酷狗 mid/dfid）随凭据一起进钥匙串，SQLite 只留
+/// 迁移失败时的旧值。
 pub async fn get_device(db: &SqlitePool, source: &str) -> Result<Option<String>, StoreError> {
+    let backend = crate::secrets::backend();
+    let entry = backend.get(&cred_key(source)).map_err(StoreError::Database)?;
+    if entry.device.is_some() {
+        return Ok(entry.device);
+    }
     Ok(vmusic_store::settings::get(db, &device_key(source))
         .await?
         .and_then(|v| v.as_str().map(str::to_string)))
 }
 
-pub async fn set_device(db: &SqlitePool, source: &str, value: &str) -> Result<(), StoreError> {
-    vmusic_store::settings::set(
-        db,
-        &device_key(source),
-        &serde_json::Value::String(value.to_string()),
+pub async fn set_device(_db: &SqlitePool, source: &str, value: &str) -> Result<(), StoreError> {
+    let backend = crate::secrets::backend();
+    let mut entry = backend.get(&cred_key(source)).map_err(StoreError::Database)?;
+    entry.device = Some(value.to_string());
+    backend.put(&cred_key(source), &entry).map_err(StoreError::Database)?;
+    Ok(())
+}
+
+/// 启动迁移：把 SQLite 里的旧凭据（online_cred_ / online_cookie_ /
+/// online_device_）搬进钥匙串，成功后删除明文行。任何失败保留原数据、
+/// 记 ERROR，下次启动重试——绝不为了"干净"把唯一副本删掉，也绝不静默跳过。
+pub async fn migrate_secrets_to_keyring(db: &SqlitePool) {
+    migrate_secrets_with(db, crate::secrets::backend().as_ref()).await;
+}
+
+/// 同上，但后端可注入（测试用 memory，不必碰真钥匙串）。
+pub async fn migrate_secrets_with(db: &SqlitePool, backend: &dyn crate::secrets::SecretBackend) {
+    // LIKE 的下划线通配会多匹配（onlineXcredX），但后面按真实前缀
+    // strip_prefix 兜底，多匹配的键会被 continue 跳过，无害。
+    let like = |prefix: &str| format!("{prefix}%");
+    let mut keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM settings WHERE key LIKE ?1 OR key LIKE ?2 OR key LIKE ?3",
     )
+    .bind(like(CRED_PREFIX))
+    .bind(like(super::COOKIE_PREFIX))
+    .bind(like(DEVICE_PREFIX))
+    .fetch_all(db)
     .await
+    .unwrap_or_default();
+    keys.sort();
+    keys.dedup();
+    if keys.is_empty() {
+        return;
+    }
+    for key in keys {
+        let (source, kind) = if let Some(rest) = key.strip_prefix(CRED_PREFIX) {
+            (rest, "cred")
+        } else if let Some(rest) = key.strip_prefix(super::COOKIE_PREFIX) {
+            (rest, "cookie")
+        } else if let Some(rest) = key.strip_prefix(DEVICE_PREFIX) {
+            (rest, "device")
+        } else {
+            continue;
+        };
+        if source.is_empty() {
+            continue;
+        }
+        let mut entry = match backend.get(&cred_key(source)) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!(
+                    source = source,
+                    "凭据迁移到钥匙串读取失败，保留 SQLite 旧数据，下次启动重试: {e}"
+                );
+                continue;
+            }
+        };
+        match kind {
+            "cred" => {
+                if let Ok(Some(v)) = vmusic_store::settings::get(db, &key).await {
+                    entry.cred = Some(v.to_string());
+                }
+            }
+            "device" => {
+                if let Ok(Some(v)) = vmusic_store::settings::get(db, &key).await {
+                    if let Some(s) = v.as_str() {
+                        entry.device = Some(s.to_string());
+                    }
+                }
+            }
+            _ => {
+                // legacy 裸 cookie 只在还没有结构化凭据时补位，不覆盖 cred 包。
+                // 存成 CredPack JSON 对象，get 解析才有意义（裸字符串会被判损坏）。
+                if entry.cred.is_none() {
+                    if let Ok(Some(v)) = vmusic_store::settings::get(db, &key).await {
+                        if let Some(cookie) = v.as_str() {
+                            let pack = CredPack {
+                                cookie: cookie.to_string(),
+                                ..Default::default()
+                            };
+                            if let Ok(json) = serde_json::to_string(&pack) {
+                                entry.cred = Some(json);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        match backend.put(&cred_key(source), &entry) {
+            Ok(()) => {
+                // 只删本次处理的键：同源的其它行可能还在各自的迭代里等处理。
+                let _ = sqlx::query("DELETE FROM settings WHERE key = ?1")
+                    .bind(key.as_str())
+                    .execute(db)
+                    .await;
+                tracing::info!(source = source, "平台凭据已迁入系统钥匙串");
+            }
+            Err(e) => {
+                tracing::error!(
+                    source = source,
+                    "凭据写入钥匙串失败，保留 SQLite 旧数据，下次启动重试: {e}"
+                );
+            }
+        }
+    }
 }
 
 /// 从 cookie 串取一个字段；用于 uin/MUSIC_U 等判态。
@@ -344,5 +469,59 @@ mod tests {
         };
         enrich_from_cookie("qq", &mut r);
         assert_eq!(r.uin, "42");
+    }
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::*;
+    use crate::secrets::{MemoryStore, SecretBackend};
+
+    #[tokio::test]
+    async fn migration_moves_plaintext_rows_into_backend_and_deletes_them() {
+        let dir = std::env::temp_dir().join(format!("vmusic-mig-test-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let pack = serde_json::json!({
+            "cookie": "MUSIC_U=secret", "token": "", "userid": "", "dfid": "",
+            "mid": "", "uin": "", "saved_at": 1
+        });
+        vmusic_store::settings::set(&db, &cred_key("netease"), &pack).await.unwrap();
+        vmusic_store::settings::set(
+            &db,
+            &device_key("netease"),
+            &serde_json::Value::String("guid-9".into()),
+        )
+        .await
+        .unwrap();
+        vmusic_store::settings::set(
+            &db,
+            &legacy_cookie_key("kugou"),
+            &serde_json::Value::String("kgmid=old".into()),
+        )
+        .await
+        .unwrap();
+
+        // get()/put() 走全局单例：测试进程内把它换成 memory，不碰真钥匙串。
+        // 迁移与断言用同一个实例，保证两边看到同一份数据。
+        let backend = std::sync::Arc::new(MemoryStore::default());
+        crate::secrets::set_backend_for_tests(backend.clone());
+        migrate_secrets_with(&db, backend.as_ref()).await;
+
+        // 钥匙串里有全部秘密，SQLite 明文行清空。
+        let entry = backend.get(&cred_key("netease")).unwrap();
+        assert!(entry.cred.as_deref().unwrap_or_default().contains("MUSIC_U=secret"));
+        assert_eq!(entry.device.as_deref(), Some("guid-9"));
+        assert!(backend.get(&cred_key("kugou")).unwrap().cred.is_some());
+        for key in [cred_key("netease"), device_key("netease"), legacy_cookie_key("kugou")] {
+            assert!(vmusic_store::settings::get(&db, &key).await.unwrap().is_none());
+        }
+        // get 走钥匙串：登录态保留。
+        let got = get(&db, "netease").await.unwrap().unwrap();
+        assert_eq!(got.cookie, "MUSIC_U=secret");
+        assert_eq!(get_device(&db, "netease").await.unwrap().as_deref(), Some("guid-9"));
+        // 幂等：再迁移一次无事发生。
+        migrate_secrets_with(&db, backend.as_ref()).await;
+        db.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

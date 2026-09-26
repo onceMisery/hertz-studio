@@ -9,6 +9,7 @@
 //! network.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
@@ -32,18 +33,47 @@ pub fn is_audio_file(path: &Path) -> bool {
 /// Symlinks are not followed: a music library that links back to its own
 /// parent would otherwise turn a scan into an infinite loop.
 pub fn collect_audio_files(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for entry in walkdir::WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() && is_audio_file(entry.path()) {
-            out.push(entry.path().to_path_buf());
+    let mut files = collect_audio_files_checked(root, &AtomicBool::new(false)).files;
+    files.sort();
+    files
+}
+
+#[derive(Debug, Default)]
+pub struct WalkReport {
+    pub files: Vec<PathBuf>,
+    pub errors: Vec<(PathBuf, String)>,
+    pub error_count: usize,
+    pub cancelled: bool,
+}
+
+/// A partial walk is never evidence that an unseen file was deleted. Callers
+/// must skip pruning if `error_count > 0` or `cancelled` is set.
+pub fn collect_audio_files_checked(root: &Path, cancel: &AtomicBool) -> WalkReport {
+    let mut report = WalkReport::default();
+    let mut entries = walkdir::WalkDir::new(root).follow_links(false).into_iter();
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            report.cancelled = true;
+            break;
+        }
+        let Some(entry) = entries.next() else { break };
+        match entry {
+            Ok(entry) if entry.file_type().is_file() && is_audio_file(entry.path()) => {
+                report.files.push(entry.path().to_path_buf());
+            }
+            Ok(_) => {}
+            Err(error) => {
+                report.error_count += 1;
+                if report.errors.len() < 50 {
+                    report.errors.push((
+                        error.path().unwrap_or(root).to_path_buf(),
+                        error.to_string(),
+                    ));
+                }
+            }
         }
     }
-    out.sort();
-    out
+    report
 }
 
 /// Everything the library needs from one file.
@@ -57,6 +87,10 @@ pub struct FileMeta {
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     pub cover: Option<(Vec<u8>, String)>,
+    /// 容器内嵌的歌词原文（未同步的 USLT / Vorbis `LYRICS` 类标签）。
+    pub lyrics: Option<String>,
+    /// ReplayGain 曲目增益（dB，来自 REPLAYGAIN_TRACK_GAIN 类标签）。
+    pub rg_gain: Option<f64>,
 }
 
 pub fn read_metadata(path: &Path) -> Result<FileMeta, String> {
@@ -114,6 +148,15 @@ pub fn read_metadata(path: &Path) -> Result<FileMeta, String> {
     Ok(meta)
 }
 
+/// 宽松解析 "-6.20 dB" / "-6.2dB" / "-6.2" 中的前导浮点。
+fn parse_leading_f64(text: &str) -> Option<f64> {
+    let t = text.trim();
+    let end = t
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
+        .unwrap_or(t.len());
+    t[..end].trim().parse().ok()
+}
+
 /// Fills still-absent fields of `meta` from one metadata revision.
 fn apply_revision(meta: &mut FileMeta, revision: &MetadataRevision) {
     for tag in revision.tags() {
@@ -132,6 +175,24 @@ fn apply_revision(meta: &mut FileMeta, revision: &MetadataRevision) {
             }
             Some(StandardTagKey::Album) if meta.album.is_none() => meta.album = Some(text.clone()),
             _ => {}
+        }
+        // 歌词标签：ID3v2 USLT 经 symphonia 映射为 std Lyrics，FLAC/Ogg 的
+        // Vorbis comment 常见裸键（LYRICS/UNSYNCEDLYRICS/SYNCEDLYRICS）也接住。
+        let is_lyrics_tag = matches!(tag.std_key, Some(StandardTagKey::Lyrics))
+            || tag.key.eq_ignore_ascii_case("lyrics")
+            || tag.key.eq_ignore_ascii_case("unsyncedlyrics")
+            || tag.key.eq_ignore_ascii_case("syncedlyrics");
+        if is_lyrics_tag && meta.lyrics.is_none() {
+            meta.lyrics = Some(text.clone());
+        }
+        // ReplayGain 增益：形如 "-6.20 dB"，宽松解析前导浮点。
+        if meta.rg_gain.is_none()
+            && (matches!(tag.std_key, Some(StandardTagKey::ReplayGainTrackGain))
+                || tag.key.eq_ignore_ascii_case("replaygain_track_gain"))
+        {
+            if let Some(v) = parse_leading_f64(text) {
+                meta.rg_gain = Some(v);
+            }
         }
     }
     if meta.cover.is_none() {
@@ -239,6 +300,18 @@ mod tests {
     }
 
     #[test]
+    fn walk_reports_missing_root_and_honours_cancellation() {
+        let missing = std::env::temp_dir().join(format!("missing-{}", uuid::Uuid::new_v4()));
+        let failed = collect_audio_files_checked(&missing, &AtomicBool::new(false));
+        assert_eq!(failed.error_count, 1);
+        assert_eq!(failed.errors[0].0, missing);
+        let cancelled = collect_audio_files_checked(&missing, &AtomicBool::new(true));
+        assert!(cancelled.cancelled);
+        assert!(cancelled.files.is_empty());
+        assert_eq!(cancelled.error_count, 0);
+    }
+
+    #[test]
     fn missing_tags_fall_back_to_the_file_name() {
         let track = build_track(Path::new("/music/My Song.mp3"), FileMeta::default());
         assert_eq!(track.title, "My Song");
@@ -256,6 +329,113 @@ mod tests {
         );
         assert_eq!(track.title, "My Song");
     }
+
+    /// 构造一个最小的 FLAC 文件：STREAMINFO + VORBIS_COMMENT（含歌词标签）。
+    /// read_metadata 只读元数据，不需要真正的音频帧。
+    fn flac_with_comment(tags: &[(&str, &str)]) -> Vec<u8> {
+        let mut out = b"fLaC".to_vec();
+        // STREAMINFO（block type 0，最后一块标志位由下面按需拼）：
+        // 34 字节，字段布局按 FLAC 规范位打包。
+        let streaminfo = {
+            let mut b = Vec::new();
+            b.extend_from_slice(&4096u16.to_be_bytes()); // min blocksize
+            b.extend_from_slice(&4096u16.to_be_bytes()); // max blocksize
+            b.extend_from_slice(&0u32.to_be_bytes()[1..]); // min framesize (u24)
+            b.extend_from_slice(&0u32.to_be_bytes()[1..]); // max framesize (u24)
+            // 20 bits sample-rate | 3 bits channels-1 | 5 bits bps-1 | 36 bits total-samples
+            let packed = (44_100u64 << 44) | (1u64 << 41) | (15u64 << 36) | 44_100u64;
+            b.extend_from_slice(&packed.to_be_bytes());
+            b.extend_from_slice(&[0u8; 16]); // md5
+            b
+        };
+        let is_last = false;
+        out.push(if is_last { 0x80 } else { 0x00 });
+        out.extend_from_slice(&(streaminfo.len() as u32).to_be_bytes()[1..]);
+        out.extend_from_slice(&streaminfo);
+
+        // VORBIS_COMMENT（block type 4）：
+        let comment = {
+            let mut b = Vec::new();
+            let vendor = b"vmusic-test";
+            b.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+            b.extend_from_slice(vendor);
+            b.extend_from_slice(&(tags.len() as u32).to_le_bytes());
+            for (k, v) in tags {
+                let entry = format!("{k}={v}");
+                b.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+                b.extend_from_slice(entry.as_bytes());
+            }
+            b
+        };
+        out.push(0x80 | 0x04); // last-block flag | type 4
+        out.extend_from_slice(&(comment.len() as u32).to_be_bytes()[1..]);
+        out.extend_from_slice(&comment);
+
+        // 元数据之后追加一个最小合法音频帧（192 样本、2ch、16bit、常数子帧），
+        // symphonia 的 flac reader 在元数据结束后要能读到帧，否则报 end of stream。
+        // 帧头：同步码 + 固定块策略 + 块大小 192 + 44.1kHz(0b1001) + 2ch + 16bit + 帧号 0。
+        let mut frame: Vec<u8> = vec![0xFF, 0xF8, 0x19, 0x18, 0x00];
+        frame.push(crc8(&frame));
+        // 子帧：每声道 1B 常数子帧头 + 2B 常数值；两声道共 6B。
+        frame.extend_from_slice(&[0u8; 6]);
+        // CRC-16 覆盖从帧同步码到子帧结束（不含 CRC 自身）。
+        let tail = crc16(&frame);
+        frame.extend_from_slice(&tail);
+        out.extend_from_slice(&frame);
+        out
+    }
+
+    fn crc8(data: &[u8]) -> u8 {
+        let mut crc: u8 = 0;
+        for &b in data {
+            crc ^= b;
+            for _ in 0..8 {
+                crc = if crc & 0x80 != 0 { (crc << 1) ^ 0x07 } else { crc << 1 };
+            }
+        }
+        crc
+    }
+
+    fn crc16(data: &[u8]) -> [u8; 2] {
+        let mut crc: u16 = 0;
+        for &b in data {
+            crc ^= (b as u16) << 8;
+            for _ in 0..8 {
+                crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x8005 } else { crc << 1 };
+            }
+        }
+        crc.to_be_bytes()
+    }
+
+    #[test]
+    fn embedded_lyrics_are_read_from_vorbis_comment() {
+        let dir = std::env::temp_dir().join(format!("vmusic-lib-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("embedded.flac");
+        std::fs::write(
+            &file,
+            flac_with_comment(&[
+                ("TITLE", "嵌入"),
+                ("LYRICS", "[00:01.00]内嵌歌词"),
+            ]),
+        )
+        .unwrap();
+        let meta = read_metadata(&file).unwrap();
+        assert_eq!(meta.lyrics.as_deref(), Some("[00:01.00]内嵌歌词"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn files_without_lyrics_tags_leave_lyrics_absent() {
+        let dir = std::env::temp_dir().join(format!("vmusic-lib-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("plain.flac");
+        std::fs::write(&file, flac_with_comment(&[("TITLE", "无词")])).unwrap();
+        let meta = read_metadata(&file).unwrap();
+        assert!(meta.lyrics.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
 
     #[test]
     fn sidecar_lookup_uses_the_track_stem() {

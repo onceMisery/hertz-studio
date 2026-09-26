@@ -132,6 +132,14 @@ pub fn not_found(message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", message.into())
 }
 
+pub fn internal(message: impl Into<String>) -> ApiError {
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        message.into(),
+    )
+}
+
 pub fn unauthorized() -> ApiError {
     ApiError::new(
         StatusCode::UNAUTHORIZED,

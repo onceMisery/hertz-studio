@@ -98,6 +98,8 @@ enum Command {
     Stop(Reply<Result<(), AudioError>>),
     Seek(u64, Reply<Result<(), AudioError>>),
     SetVolume(f32, Reply<Result<(), AudioError>>),
+    SetDsp(vmusic_core::DspParams, Reply<Result<(), AudioError>>),
+    SetCrossfade(u64, Reply<Result<(), AudioError>>),
     SetMode(PlayMode, Reply<Result<(), AudioError>>),
     Devices(Reply<Vec<DeviceInfo>>),
     SelectDevice(Option<String>, Reply<Result<(), AudioError>>),
@@ -168,6 +170,16 @@ impl AudioHandle {
 
     pub async fn set_volume(&self, volume: f32) -> Result<(), AudioError> {
         self.ask(|reply| Command::SetVolume(volume, reply)).await
+    }
+
+    /// 更新 DSP（EQ/增益）。real-time 链路上原子生效，不中断播放。
+    pub async fn set_dsp(&self, params: vmusic_core::DspParams) -> Result<(), AudioError> {
+        self.ask(|reply| Command::SetDsp(params, reply)).await
+    }
+
+    /// 可调交叉淡化时长（毫秒）。0 = 用后端内建默认淡变。
+    pub async fn set_crossfade(&self, ms: u64) -> Result<(), AudioError> {
+        self.ask(|reply| Command::SetCrossfade(ms, reply)).await
     }
 
     pub async fn set_mode(&self, mode: PlayMode) -> Result<(), AudioError> {
@@ -430,6 +442,18 @@ fn apply(
                 state.position_ms = ms;
                 state.generation += 1;
             });
+            publish(sink, state);
+            let _ = reply.send(result);
+            Ok(false)
+        }
+        Command::SetDsp(params, reply) => {
+            let result = backend.set_dsp(params);
+            publish(sink, state);
+            let _ = reply.send(result);
+            Ok(false)
+        }
+        Command::SetCrossfade(ms, reply) => {
+            let result = backend.set_crossfade(ms);
             publish(sink, state);
             let _ = reply.send(result);
             Ok(false)

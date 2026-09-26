@@ -45,6 +45,7 @@ num-bigint = "0.4"
 num-traits = "0.2"
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
+notify = "8"
 dirs = "5"
 
 # --- audio ---

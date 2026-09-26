@@ -46,6 +46,31 @@ const ui = {
   libCount: $('lib-count'),
   libSort: $('lib-sort'),
   libList: $('lib-list'),
+  libArtistFilter: $('lib-artist-filter'),
+  libAlbumFilter: $('lib-album-filter'),
+  libCleanup: $('lib-cleanup'),
+  libBatchBar: $('lib-batch-bar'),
+  libBatchCount: $('lib-batch-count'),
+  libBatchPlaylist: $('lib-batch-playlist'),
+  libBatchFav: $('lib-batch-fav'),
+  libBatchEdit: $('lib-batch-edit'),
+  libBatchClear: $('lib-batch-clear'),
+  backupExport: $('backup-export'),
+  backupImport: $('backup-import'),
+  backupFile: $('backup-file'),
+  m3uImport: $('m3u-import'),
+  m3uFile: $('m3u-file'),
+  plDetailM3u: $('pl-detail-m3u'),
+  cacheUsage: $('cache-usage'),
+  cacheClear: $('cache-clear'),
+  cacheKeepCurrent: $('cache-keep-current'),
+  cacheKeepList: $('cache-keep-list'),
+  dspEq: $('dsp-eq'),
+  dspPreamp: $('dsp-preamp'),
+  dspLoudness: $('dsp-loudness'),
+  dspCrossfade: $('dsp-crossfade'),
+  dspSave: $('dsp-save'),
+  dspReset: $('dsp-reset'),
   libEmpty: $('lib-empty'),
   libSentinel: $('lib-sentinel'),
   libHint: $('lib-hint'),
@@ -109,6 +134,8 @@ const ui = {
   spectrum: $('spectrum'),
   lyrics: $('lyrics'),
 
+  // 旧 stage-btn 移除后，「正在播放」入口落在播放栏的曲目标题区。
+  stageBtn: $('bar-track'),
   barTitle: $('bar-title'),
   barSub: $('bar-sub'),
   barTime: $('bar-time'),
@@ -200,6 +227,10 @@ const state = {
   spectrum: new Array(64).fill(0),
   peaks: new Array(64).fill(0),
   playlists: [],
+  // 曲库多选：勾选的曲目 id。批量栏按它显隐与计数。
+  selected: new Set(),
+  // 专辑/歌手筛选（覆盖后的展示值精确匹配）。
+  libFilter: { artist: '', album: '' },
   devices: [],
   settings: {},
   connected: false,
@@ -225,6 +256,9 @@ const PlaybackIntent = {
 const ServerTransport = {
   kind: 'server',
   async get(path) { return request(path, {}); },
+  async postRaw(path, blob, contentType) {
+    return request(path, { method: 'POST', rawBody: blob, headers: { 'Content-Type': contentType || 'application/octet-stream' } });
+  },
   async post(path, body) {
     PlaybackIntent.command(path);
     return request(path, { method: 'POST', body: JSON.stringify(body || {}) });
@@ -268,8 +302,14 @@ async function request(path, options = {}, attempt = 0) {
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT) : 0;
   try {
+    // rawBody：封面替换这类二进制上传走这里，不包 JSON、不改 Content-Type。
+    const body = options.rawBody !== undefined
+      ? options.rawBody
+      : (options.body !== undefined && typeof options.body !== 'string'
+        ? JSON.stringify(options.body) : options.body);
     const res = await fetch(path, {
       ...options,
+      body,
       signal: controller ? controller.signal : undefined,
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}`, ...(options.headers || {}) },
     });
@@ -315,6 +355,7 @@ window.VMusicTransport = {
   get: (p) => transport.get(p),
   put: (p, body) => transport.put(p, body),
   post: (p, body) => transport.post(p, body),
+  postRaw: (p, blob, contentType) => transport.postRaw(p, blob, contentType),
   del: (p) => transport.del(p),
   kind: () => transport.kind
 };
@@ -480,8 +521,10 @@ async function loadTracks(reset) {
   ui.libSentinel.textContent = '正在读取曲库…';
   if (reset) { state.offset = 0; state.tracks = []; state.rows.clear(); ui.libList.innerHTML = ''; }
   try {
+    const artist = state.libFilter.artist ? `&artist=${encodeURIComponent(state.libFilter.artist)}` : '';
+    const album = state.libFilter.album ? `&album=${encodeURIComponent(state.libFilter.album)}` : '';
     const page = await transport.get(
-      `/v1/tracks?q=${encodeURIComponent(q)}&sort=${encodeURIComponent(sort)}&limit=${PAGE}&offset=${offset}`);
+      `/v1/tracks?q=${encodeURIComponent(q)}&sort=${encodeURIComponent(sort)}${artist}${album}&limit=${PAGE}&offset=${offset}`);
     if (epoch !== libraryEpoch) return;
     state.total = page.total;
     state.tracks = state.tracks.concat(page.tracks);
@@ -503,8 +546,27 @@ async function loadTracks(reset) {
 }
 
 async function libraryTrackIds() {
-  const data = await transport.get(`/v1/tracks/ids?q=${encodeURIComponent(state.q)}&sort=${encodeURIComponent(state.sort)}`);
+  const artist = state.libFilter.artist ? `&artist=${encodeURIComponent(state.libFilter.artist)}` : '';
+  const album = state.libFilter.album ? `&album=${encodeURIComponent(state.libFilter.album)}` : '';
+  const data = await transport.get(`/v1/tracks/ids?q=${encodeURIComponent(state.q)}&sort=${encodeURIComponent(state.sort)}${artist}${album}`);
   return data.track_ids;
+}
+
+// 专辑/歌手浏览面：拉一次 facets 重建筛选下拉（保留当前选中值）。
+async function loadFacets() {
+  const kinds = [['artist', ui.libArtistFilter], ['album', ui.libAlbumFilter]];
+  for (const [kind, sel] of kinds) {
+    if (!sel) continue;
+    try {
+      const data = await transport.get(`/v1/tracks/facets?kind=${kind}`);
+      const current = state.libFilter[kind];
+      sel.innerHTML = '';
+      sel.appendChild(new Option(kind === 'artist' ? '全部歌手' : '全部专辑', ''));
+      for (const f of data.facets || []) sel.appendChild(new Option(`${f.name}（${f.count}）`, f.name));
+      sel.value = current || '';
+      if (sel.value !== (current || '')) { sel.value = ''; state.libFilter[kind] = ''; }
+    } catch { /* facets 拉取失败不阻塞曲库 */ }
+  }
 }
 
 function renderLibrary() {
@@ -554,6 +616,7 @@ function createTrackRow(track) {
     <div class="t-quality"></div>
     <div class="t-dur"></div>
     <div class="t-actions">
+      <input type="checkbox" class="t-select" data-act="select" title="选择" aria-label="选择曲目">
       <button class="t-act" data-act="play-next" title="下一首播放" aria-label="下一首播放">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-skip-next"/></svg>
       </button>
@@ -583,6 +646,8 @@ function createTrackRow(track) {
   }
 
   row.addEventListener('click', (e) => {
+    const select = e.target.closest('.t-select');
+    if (select) { e.stopPropagation(); toggleSelect(track.id, select.checked); return; }
     const act = e.target.closest('.t-act');
     if (act) {
       e.stopPropagation();
@@ -607,8 +672,35 @@ function updateTrackRow(row, track, index) {
   row.classList.toggle('active', active);
   row.classList.toggle('playing', active && state.snapshot.playing);
   row.querySelector('.t-num').textContent = index + 1;
+  const select = row.querySelector('.t-select');
+  if (select) select.checked = state.selected.has(track.id);
   // loading="lazy" 已经把"只为可见行加载"交给浏览器了，不再需要手写观察器。
   paintArt(row, track.has_cover ? transport.coverUrl(track.id) : null);
+}
+
+// ---------------------------------------------------------------------------
+// 曲库多选与批量操作
+// ---------------------------------------------------------------------------
+
+function toggleSelect(id, on) {
+  if (on) state.selected.add(id); else state.selected.delete(id);
+  renderBatchBar();
+}
+
+function renderBatchBar() {
+  if (!ui.libBatchBar) return;
+  const n = state.selected.size;
+  ui.libBatchBar.hidden = n === 0;
+  ui.libBatchCount.textContent = `已选 ${n} 首`;
+}
+
+function clearSelection() {
+  state.selected.clear();
+  for (const row of state.rows.values()) {
+    const select = row.querySelector('.t-select');
+    if (select) select.checked = false;
+  }
+  renderBatchBar();
 }
 
 // 行内封面统一走 <img loading="lazy">：可见性、缓存、解码全由浏览器负责。
@@ -884,11 +976,35 @@ async function loadNowPlaying(id) {
   // 播放控制弹窗同步曲目信息与封面
   syncNpTrack(track, url);
 
+  await refreshLyrics(id, track);
+  updateMediaSessionMetadata(track, url);
+}
+
+// 拉取当前曲目的歌词文档并喂给舞台；np 弹窗的来源徽标/偏移显示同步更新。
+// 导入、清除导入、调偏移之后都走这里刷新，保证三处 UI 同源。
+async function refreshLyrics(id, track) {
   const doc = await (track.source && track.onlineId
     ? window.Online.loadLyricDoc(track)
     : transport.get(`/v1/tracks/${id}/lyrics`).catch(() => null));
   if (Stage) Stage.setLyrics(doc && doc.lines && doc.lines.length ? doc : null);
-  updateMediaSessionMetadata(track, url);
+  syncNpLyrics(id, doc);
+  return doc;
+}
+
+// np 弹窗歌词行：来源徽标 + 用户偏移 + 清除导入入口。
+// 在线曲目歌词来自平台接口，没有导入/偏移语义，只显示来源。
+function syncNpLyrics(id, doc) {
+  if (!isNpOpen() || !np.modal || !state.current || state.current.id !== id) return;
+  const online = id.startsWith('online:');
+  const sourceText = online
+    ? '在线'
+    : ({ imported: '已导入', embedded: '内嵌', sidecar: '同名 .lrc' }[doc && doc.source] || '无歌词');
+  np.lyricSource.textContent = sourceText;
+  np.lyricImport.hidden = online;
+  np.lyricClear.hidden = online || !doc || doc.source !== 'imported';
+  np.lyricOffset.hidden = online;
+  np.lyricOffsetMs = online || !doc ? 0 : (doc.user_offset_ms || 0);
+  np.lyricOffsetValue.textContent = `${np.lyricOffsetMs > 0 ? '+' : ''}${(np.lyricOffsetMs / 1000).toFixed(1)}s`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1553,7 +1669,19 @@ async function playPlaylist(id, startIndex) {
   }
   if (!ids.length) { toast('这个歌单还是空的', 'error'); return; }
   const at = Math.max(0, Math.min(startIndex || 0, ids.length - 1));
-  await transport.post('/v1/player/load', { track_id: ids[at], queue: ids });
+  // 重启后服务端的在线元数据暂存是空的：把歌单快照随队注入，播放历史的
+  // 标题才不会退化成平台 id。
+  const meta = {};
+  for (const t of state.byId.values()) {
+    if (t.id && t.id.startsWith('online:') && ids.includes(t.id)) {
+      meta[t.id] = { title: t.title, artist: t.artist, album: t.album, cover: t.cover, duration_ms: t.duration_ms };
+    }
+  }
+  await transport.post('/v1/player/load', {
+    track_id: ids[at],
+    queue: ids,
+    ...(Object.keys(meta).length ? { meta } : {}),
+  });
   setStateQueue(ids, ids[at]);
 }
 
@@ -1588,7 +1716,8 @@ async function refreshDetail() {
   // tracks 可能因曲库被删而缺项：以 track_ids 为准对齐，缺的画占位行。
   const byId = new Map(detailTracks.map((t) => [t.id, t]));
   detailTracks = ids.map((tid) => byId.get(tid)
-    || { id: tid, title: '本地文件已不存在', artist: '', duration_ms: null, missing: true });
+    || { id: tid, title: tid.startsWith('online:') ? '在线信息缺失，请重新添加' : '本地文件已不存在',
+      artist: '', duration_ms: null, missing: true });
   renderDetailHead(id);
   renderDetailRows(id);
 }
@@ -1603,10 +1732,11 @@ function renderDetailRows(id) {
   const list = ui.plDetailList;
   list.innerHTML = '';
   if (!detailTracks.length) {
-    list.innerHTML = '<div class="hint">这个歌单还是空的。去曲库里右键曲目 →「加入歌单」。</div>';
+    list.innerHTML = '<div class="hint">这个歌单还是空的。去曲库里右键曲目 →「加入歌单」，在线结果行也有同一颗按钮。</div>';
     return;
   }
   detailTracks.forEach((track, index) => {
+    const online = track.id && track.id.startsWith('online:');
     const row = document.createElement('div');
     row.className = 'pd-row' + (track.missing ? ' is-missing' : '');
     row.dataset.index = String(index);
@@ -1629,11 +1759,24 @@ function renderDetailRows(id) {
       const art = row.querySelector('.pd-art');
       art.classList.add('pd-has-img');
       art.style.backgroundImage = `url("${transport.coverUrl(track.id)}")`;
+    } else if (online && track.cover) {
+      // 在线快照行：封面是入单时存的 URL，用与在线列表同一套缩略图规则。
+      const art = row.querySelector('.pd-art');
+      art.classList.add('pd-has-img');
+      const url = window.Online && window.Online.rowCoverUrl
+        ? window.Online.rowCoverUrl(track.cover) : track.cover;
+      art.style.backgroundImage = `url("${url}")`;
+    }
+    if (online && window.Online) {
+      // 来源徽标与在线面板同一套平台图标，混合歌单里一眼分清本地与在线。
+      const sub = row.querySelector('.pd-sub');
+      sub.appendChild(document.createTextNode(' '));
+      sub.appendChild(window.Online.badge(track.source));
     }
 
     row.addEventListener('click', (e) => {
       if (e.target.closest('[data-act="remove"]')) { removeDetailTrack(id, track.id); return; }
-      if (track.missing) { toast('文件已不存在，请先移出这一行', 'error'); return; }
+      if (track.missing) { toast(track.id && track.id.startsWith('online:') ? '在线信息缺失，请重新添加这一首' : '文件已不存在，请先移出这一行', 'error'); return; }
       playPlaylist(id, index);
     });
     list.appendChild(row);
@@ -1741,6 +1884,9 @@ function openContextMenu(track, anchor, event) {
     { label: '加入歌单', children: state.playlists.length
       ? state.playlists.map((p) => ({ label: p.name, run: () => addToPlaylist(p.id, track.id) }))
       : [{ label: '（暂无歌单）', disabled: true }] },
+    { label: '编辑信息', run: () => editTrackInfo(track) },
+    { label: '替换封面', run: () => replaceTrackCover(track) },
+    { label: '重置编辑', run: () => resetTrackEdit(track) },
   ];
   buildMenu(ui.menu, items);
   const rect = anchor.getBoundingClientRect();
@@ -1785,10 +1931,95 @@ async function copyText(text) {
   catch { toast('复制失败，请手动选择', 'error'); }
 }
 
-async function addToPlaylist(playlistId, trackId) {
-  await transport.post(`/v1/playlists/${playlistId}/tracks`, { track_ids: [trackId] }).catch(() => {});
+async function addToPlaylist(playlistId, track) {
+  // track 可以是纯 id（本地曲库右键），也可以是完整曲目对象（在线行带来源与
+  // 快照字段）。在线身份沿用 online:<source>:<id> 协议，随单带上快照，服务端
+  // 才能在重启后仍把这首歌渲染出来。
+  const body = typeof track === 'string'
+    ? { track_ids: [track] }
+    : { tracks: [{ id: track.id, source: track.source, title: track.title,
+      artist: track.artist, album: track.album, duration_ms: track.duration_ms, cover: track.cover }] };
+  try {
+    await transport.post(`/v1/playlists/${playlistId}/tracks`, body);
+  } catch (err) {
+    toast(errText('加入歌单失败', err), 'error');
+    return;
+  }
   loadPlaylists();
   toast('已加入歌单');
+}
+
+// 编辑信息：覆盖层字段留空 = 不改动；输入空白 = 回退扫描值。
+// 不直接写音频文件标签——扫描永远以文件为准，用户编辑放在覆盖层。
+let coverFileInput = null;
+function editTrackInfo(track) {
+  const title = prompt(`标题（留空跳过，现：${track.title}）`, track.title);
+  if (title === null) return;
+  const artist = prompt(`歌手（留空跳过，现：${track.artist || '（无）'}；输入空格清除）`, track.artist || '');
+  if (artist === null) return;
+  const album = prompt(`专辑（留空跳过，现：${track.album || '（无)'}；输入空格清除）`, track.album || '');
+  if (album === null) return;
+  const body = {};
+  if (title.trim() && title !== track.title) body.title = title.trim();
+  if (artist.trim() !== (track.artist || '')) body.artist = artist.trim();
+  if (album.trim() !== (track.album || '')) body.album = album.trim();
+  if (!Object.keys(body).length) { toast('信息未改动'); return; }
+  transport.post('/v1/tracks/batch-edit', { track_ids: [track.id], ...body })
+    .then(() => loadTracks(true))
+    .then(() => toast('信息已更新'))
+    .catch((err) => toast(errText('编辑失败', err), 'error'));
+}
+
+function replaceTrackCover(track) {
+  if (!coverFileInput) {
+    coverFileInput = document.createElement('input');
+    coverFileInput.type = 'file';
+    coverFileInput.accept = 'image/*';
+    coverFileInput.hidden = true;
+    document.body.appendChild(coverFileInput);
+    coverFileInput.onchange = async () => {
+      const file = coverFileInput.files && coverFileInput.files[0];
+      const id = coverFileInput.dataset.trackId;
+      coverFileInput.value = '';
+      if (!file || !id) return;
+      try {
+        const blob = await file.arrayBuffer();
+        await transport.postRaw(`/v1/tracks/${encodeURIComponent(id)}/cover`, blob,
+          file.type || 'image/jpeg');
+        toast('封面已替换');
+        const track = state.byId.get(id);
+        if (track) { track.has_cover = 1; state.rows.get(id) && paintArt(state.rows.get(id), transport.coverUrl(id)); }
+      } catch (err) {
+        toast(errText('封面替换失败', err), 'error');
+      }
+    };
+  }
+  coverFileInput.dataset.trackId = track.id;
+  coverFileInput.click();
+}
+
+function resetTrackEdit(track) {
+  transport.del(`/v1/tracks/${encodeURIComponent(track.id)}/edit`)
+    .then(() => loadTracks(true))
+    .then(() => toast('已恢复文件标签'))
+    .catch((err) => toast(errText('重置失败', err), 'error'));
+}
+
+// 在线行的「加入歌单」：与服务端能力一致的自建歌单都是本地持久化的，
+// 在线曲按快照富形态入单。anchor 是触发按钮，菜单贴着它弹出。
+function openPlaylistMenu(track, anchor, event) {
+  if (!state.playlists.length) {
+    toast('还没有自建歌单，先到「歌单」页新建一个', 'error');
+    return;
+  }
+  ui.menu.innerHTML = '';
+  buildMenu(ui.menu, state.playlists.map((p) => ({
+    label: p.name, run: () => addToPlaylist(p.id, track),
+  })));
+  const rect = anchor
+    ? anchor.getBoundingClientRect()
+    : { right: 8, bottom: 0 };
+  showMenu(event ? event.clientX : rect.right - 8, event ? event.clientY : rect.bottom);
 }
 
 // ---------------------------------------------------------------------------
@@ -2163,7 +2394,16 @@ function setView(name) {
   if (name === 'playlists') renderOnlinePlaylistSection();
   // 收藏与每日推荐同理：进入时才拉，避免启动时多打两条请求。
   if (name === 'favorites' && window.Favorites) window.Favorites.onViewEnter();
-  if (name === 'library' && window.Daily) window.Daily.load({ silent: true });
+  if (name === 'library') {
+    if (window.Daily) window.Daily.load({ silent: true });
+    // 专辑/歌手浏览面：编辑/扫描可能改过 facet，进入时对齐一次。
+    loadFacets();
+  }
+  // 缓存占用是随时会变的数字，进设置页才刷新。
+  if (name === 'settings') {
+    if (window.__loadCacheStats) window.__loadCacheStats();
+    if (window.__loadDspSettings) window.__loadDspSettings();
+  }
 }
 
 function refreshAll() {
@@ -2826,7 +3066,13 @@ const np = {
   art: $('np-art'), name: $('np-name'), artist: $('np-artist'),
   time: $('np-time'), bar: $('np-progress-bar'),
   play: $('np-playpause'), prev: $('np-prev'), next: $('np-next'), stop: $('np-stop'),
-  volume: $('np-volume'), goto: $('np-goto-stage')
+  volume: $('np-volume'), goto: $('np-goto-stage'),
+  // 歌词控件（来源徽标 / 导入 / 清除 / 每曲偏移）
+  lyricSource: $('np-lyric-source'), lyricImport: $('np-lyric-import'),
+  lyricClear: $('np-lyric-clear'), lyricFile: $('np-lyric-file'),
+  lyricOffset: $('np-lyric-offset'), lyricOffsetValue: $('np-lyric-offset-value'),
+  lyricOffsetDown: $('np-lyric-offset-down'), lyricOffsetUp: $('np-lyric-offset-up'),
+  lyricOffsetMs: 0,
 };
 
 function isNpOpen() {
@@ -2839,7 +3085,11 @@ function openNowPlaying() {
   // 弹窗内音量与底部播放栏保持一致
   np.volume.value = ui.volume.value;
   syncNpSnapshot(state.snapshot);
-  if (state.current) syncNpTrack(state.current);
+  if (state.current) {
+    syncNpTrack(state.current);
+    // 打开时重拉一次歌词：导入/偏移可能在别的会话改过，徽标要跟服务端对齐。
+    refreshLyrics(state.current.id, state.current).catch(() => {});
+  }
 }
 
 function closeNowPlaying() {
@@ -2871,10 +3121,62 @@ function initNowPlayingModal() {
   np.close.onclick = closeNowPlaying;
   np.scrim.onclick = closeNowPlaying;
 
+  // 点击/回车「正在播放」区打开弹窗；Enter 与 Space 都要能用（role=button）。
+  if (ui.stageBtn) {
+    ui.stageBtn.onclick = openNowPlaying;
+    ui.stageBtn.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openNowPlaying(); }
+    });
+  }
+
   np.play.onclick = togglePlay;
   np.prev.onclick = () => post('/v1/player/previous');
   np.next.onclick = () => post('/v1/player/next');
   np.stop.onclick = () => stopPlayback();
+
+  // 歌词控件：导入读 .lrc 文本按原文入库；偏移每次 ±500ms 直接落库；
+  // 两者成功后都重拉歌词，舞台与弹窗徽标一起刷新。
+  np.lyricImport.onclick = () => np.lyricFile.click();
+  np.lyricFile.onchange = async () => {
+    const file = np.lyricFile.files && np.lyricFile.files[0];
+    np.lyricFile.value = '';
+    const id = state.current && state.current.id;
+    if (!file || !id || id.startsWith('online:')) return;
+    try {
+      const content = await file.text();
+      await transport.put(`/v1/tracks/${encodeURIComponent(id)}/lyrics`, { content });
+      toast('歌词已导入');
+      await refreshLyrics(id, state.current);
+    } catch (err) {
+      toast(errText('歌词导入失败', err), 'error');
+    }
+  };
+  np.lyricClear.onclick = async () => {
+    const id = state.current && state.current.id;
+    if (!id || id.startsWith('online:')) return;
+    try {
+      await transport.del(`/v1/tracks/${encodeURIComponent(id)}/lyrics`);
+      toast('已清除导入的歌词');
+      await refreshLyrics(id, state.current);
+    } catch (err) {
+      toast(errText('清除歌词失败', err), 'error');
+    }
+  };
+  const shiftLyricOffset = async (delta) => {
+    const id = state.current && state.current.id;
+    if (!id || id.startsWith('online:')) return;
+    try {
+      const offset_ms = Math.max(-60000, Math.min(60000, np.lyricOffsetMs + delta));
+      await transport.put(`/v1/tracks/${encodeURIComponent(id)}/lyrics/offset`, { offset_ms });
+      np.lyricOffsetMs = offset_ms;
+      np.lyricOffsetValue.textContent = `${offset_ms > 0 ? '+' : ''}${(offset_ms / 1000).toFixed(1)}s`;
+      await refreshLyrics(id, state.current);
+    } catch (err) {
+      toast(errText('保存歌词偏移失败', err), 'error');
+    }
+  };
+  np.lyricOffsetDown.onclick = () => shiftLyricOffset(-500);
+  np.lyricOffsetUp.onclick = () => shiftLyricOffset(500);
 
   // 进度：拖动即时显示时间，松手跳转
   np.bar.addEventListener('input', () => {
@@ -2949,6 +3251,256 @@ function initNowPlayingModal() {
 
   ui.libSort.onchange = () => { state.sort = ui.libSort.value; loadTracks(true); };
 
+  // 专辑/歌手筛选：选择即按覆盖后的展示值精确过滤。
+  if (ui.libArtistFilter) {
+    ui.libArtistFilter.onchange = () => {
+      state.libFilter.artist = ui.libArtistFilter.value;
+      loadTracks(true);
+    };
+  }
+  if (ui.libAlbumFilter) {
+    ui.libAlbumFilter.onchange = () => {
+      state.libFilter.album = ui.libAlbumFilter.value;
+      loadTracks(true);
+    };
+  }
+
+  // 失效整理：列出文件已丢失的曲目，确认后批量移除。列表为空时如实告知。
+  if (ui.libCleanup) {
+    ui.libCleanup.onclick = async () => {
+      try {
+        const data = await transport.get('/v1/tracks/missing');
+        if (!data.total) { toast('没有失效曲目，曲库很干净'); return; }
+        const names = data.missing.slice(0, 8).map((m) => m.title).join('、');
+        const more = data.total > 8 ? ' 等' : '';
+        if (!confirm(`有 ${data.total} 首曲目文件已丢失：${names}${more}。从曲库移除这些条目？（不删除任何文件）`)) return;
+        const res = await transport.post('/v1/tracks/batch-delete', { track_ids: data.missing.map((m) => m.id) });
+        toast(`已移除 ${res.deleted} 条失效条目`);
+        clearSelection();
+        loadTracks(true);
+        loadFacets();
+      } catch (err) {
+        toast(errText('失效整理失败', err), 'error');
+      }
+    };
+  }
+
+  // 批量操作栏
+  if (ui.libBatchClear) ui.libBatchClear.onclick = clearSelection;
+  if (ui.libBatchFav) {
+    ui.libBatchFav.onclick = async () => {
+      const ids = [...state.selected];
+      if (!ids.length) return;
+      let added = 0;
+      for (const id of ids) {
+        const t = state.byId.get(id);
+        if (!t) continue;
+        try {
+          // 幂等添加端点：已收藏的曲目保持原状，不会因为批量操作被反转。
+          await transport.post('/v1/favorites', {
+            kind: 'track', source: 'local', ref_id: id,
+            title: t.title, artist: t.artist, album: t.album,
+            duration_ms: t.duration_ms, cover: null,
+          });
+          added += 1;
+        } catch (err) {
+          toast(errText(`收藏《${t.title}》失败`, err), 'error');
+        }
+      }
+      if (added) toast(`已收藏 ${added} 首`);
+      clearSelection();
+    };
+  }
+  if (ui.libBatchEdit) {
+    ui.libBatchEdit.onclick = () => {
+      const ids = [...state.selected];
+      if (!ids.length) return;
+      const artist = prompt('批量设置歌手（留空跳过；输入空格清除这些曲目的歌手）', '');
+      if (artist === null) return;
+      const album = prompt('批量设置专辑（留空跳过；输入空格清除专辑）', '');
+      if (album === null) return;
+      const body = { track_ids: ids };
+      if (artist.trim()) body.artist = artist.trim();
+      if (album.trim()) body.album = album.trim();
+      if (artist.trim() === '' && album.trim() === '') { toast('未填写任何字段'); return; }
+      if (!body.artist && !body.album) { toast('未填写任何字段'); return; }
+      transport.post('/v1/tracks/batch-edit', body)
+        .then((res) => { toast(`已更新 ${res.changed} 首`); clearSelection(); loadTracks(true); loadFacets(); })
+        .catch((err) => toast(errText('批量编辑失败', err), 'error'));
+    };
+  }
+  // 在线缓存：设置页显示占用与保留名单，进入设置视图时刷新一次。
+  async function loadCacheStats() {
+    if (!ui.cacheUsage) return;
+    try {
+      const stats = await transport.get('/v1/online/cache');
+      const mb = (n) => `${(n / 1024 / 1024).toFixed(1)} MB`;
+      ui.cacheUsage.textContent = stats.max_bytes
+        ? `${mb(stats.total_bytes)} / ${mb(stats.max_bytes)} · ${stats.files} 个文件`
+        : `${mb(stats.total_bytes)} · ${stats.files} 个文件`;
+      const bySource = Object.fromEntries(stats.by_source || []);
+      if (ui.cacheKeepList) {
+        const keep = stats.keep || [];
+        if (!keep.length) {
+          ui.cacheKeepList.hidden = true;
+          ui.cacheKeepList.textContent = '';
+        } else {
+          ui.cacheKeepList.hidden = false;
+          ui.cacheKeepList.textContent = `已保留 ${keep.length} 项：${keep.map((k) => k.replace(/-$/, '')).join('、')}`;
+        }
+      }
+      void bySource;
+    } catch { /* 缓存统计拉取失败不阻塞设置页 */ }
+  }
+  window.__loadCacheStats = loadCacheStats;
+  if (ui.cacheClear) {
+    ui.cacheClear.onclick = async () => {
+      try {
+        const res = await transport.post('/v1/online/cache/clear', {});
+        const mb = (res.removed_bytes / 1024 / 1024).toFixed(1);
+        toast(`已清理 ${mb} MB 缓存`);
+        loadCacheStats();
+      } catch (err) {
+        toast(errText('缓存清理失败', err), 'error');
+      }
+    };
+  }
+  // 保留当前播放的在线曲目；本地曲没有缓存语义，点了如实提示。
+  if (ui.cacheKeepCurrent) {
+    ui.cacheKeepCurrent.onclick = async () => {
+      const id = state.current && state.current.id;
+      if (!id || !id.startsWith('online:')) { toast('当前没有播放在线曲目', 'error'); return; }
+      const rest = id.slice('online:'.length);
+      const at = rest.indexOf(':');
+      if (at <= 0) { toast('在线曲目身份异常', 'error'); return; }
+      const source = rest.slice(0, at);
+      const onlineId = rest.slice(at + 1);
+      try {
+        await transport.post('/v1/online/cache/keep', { source, id: onlineId, keep: true });
+        toast('已加入保留名单');
+        loadCacheStats();
+      } catch (err) {
+        toast(errText('保留失败', err), 'error');
+      }
+    };
+  }
+
+  // 音效与均衡器：进设置页拉取当前配置回填；保存后立即生效。
+  async function loadDspSettings() {
+    if (!ui.dspEq) return;
+    try {
+      const cfg = await transport.get('/v1/player/dsp');
+      ui.dspEq.querySelectorAll('input[data-band]').forEach((input) => {
+        input.value = cfg.eq_gains_db[Number(input.dataset.band)] || 0;
+      });
+      ui.dspPreamp.value = cfg.preamp_db;
+      ui.dspLoudness.checked = !!cfg.loudness_norm;
+      ui.dspCrossfade.value = cfg.crossfade_ms;
+    } catch { /* 设置读取失败不阻塞 */ }
+  }
+  window.__loadDspSettings = loadDspSettings;
+  if (ui.dspSave) {
+    ui.dspSave.onclick = async () => {
+      try {
+        const body = {
+          eq_gains_db: [...ui.dspEq.querySelectorAll('input[data-band]')]
+            .map((i) => Number(i.value)),
+          preamp_db: Number(ui.dspPreamp.value) || 0,
+          loudness_norm: ui.dspLoudness.checked,
+          crossfade_ms: Math.max(0, Number(ui.dspCrossfade.value) || 0),
+        };
+        await transport.post('/v1/player/dsp', body);
+        toast('音效设置已保存');
+      } catch (err) {
+        toast(errText('保存失败', err), 'error');
+      }
+    };
+  }
+  if (ui.dspReset) {
+    ui.dspReset.onclick = () => {
+      ui.dspEq.querySelectorAll('input[data-band]').forEach((i) => { i.value = 0; });
+      ui.dspPreamp.value = 0;
+      ui.dspLoudness.checked = false;
+      ui.dspCrossfade.value = 0;
+    };
+  }
+
+  // 数据备份：导出下载 JSON；导入读文件后按幂等语义恢复。
+  if (ui.backupExport) {
+    ui.backupExport.onclick = async () => {
+      try {
+        const data = await transport.get('/v1/backup');
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `mmusic-backup-${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        toast('备份已导出');
+      } catch (err) {
+        toast(errText('备份导出失败', err), 'error');
+      }
+    };
+  }
+  if (ui.backupImport && ui.backupFile) {
+    ui.backupImport.onclick = () => ui.backupFile.click();
+    ui.backupFile.onchange = async () => {
+      const file = ui.backupFile.files && ui.backupFile.files[0];
+      ui.backupFile.value = '';
+      if (!file) return;
+      try {
+        const text = await file.text();
+        let parsed;
+        try { parsed = JSON.parse(text); } catch { throw new Error('不是有效的 JSON 备份文件'); }
+        const res = await transport.post('/v1/backup/restore', parsed);
+        toast(`恢复完成：新建歌单 ${res.playlists_created}、合并 ${res.playlists_merged}、收藏 ${res.favorites_added} 条`);
+        loadPlaylists();
+        loadTracks(true);
+        loadSettings();
+        loadFacets();
+      } catch (err) {
+        toast(errText('备份导入失败', err), 'error');
+      }
+    };
+  }
+  // M3U 导入：新建歌单，路径匹配本地曲目。
+  if (ui.m3uImport && ui.m3uFile) {
+    ui.m3uImport.onclick = () => ui.m3uFile.click();
+    ui.m3uFile.onchange = async () => {
+      const file = ui.m3uFile.files && ui.m3uFile.files[0];
+      ui.m3uFile.value = '';
+      if (!file) return;
+      const name = file.name.replace(/\.(m3u8?|M3U8?)$/, '') || '导入歌单';
+      try {
+        const content = await file.text();
+        const res = await transport.post('/v1/playlists/import-m3u', { name, content });
+        toast(`已导入《${name}》：匹配 ${res.added} 首，未匹配 ${res.skipped} 首`);
+        loadPlaylists();
+      } catch (err) {
+        toast(errText('M3U 导入失败', err), 'error');
+      }
+    };
+  }
+
+  if (ui.libBatchPlaylist) {
+    ui.libBatchPlaylist.onclick = () => {
+      const ids = [...state.selected];
+      if (!ids.length) return;
+      if (!state.playlists.length) { toast('还没有自建歌单，先到「歌单」页新建一个', 'error'); return; }
+      ui.menu.innerHTML = '';
+      buildMenu(ui.menu, state.playlists.map((p) => ({
+        label: p.name,
+        run: () => {
+          transport.post(`/v1/playlists/${p.id}/tracks`, { track_ids: ids })
+            .then(() => { toast(`已把 ${ids.length} 首加入《${p.name}》`); clearSelection(); loadPlaylists(); })
+            .catch((err) => toast(errText('加入歌单失败', err), 'error'));
+        },
+      })));
+      showMenu(window.innerWidth / 2 - 80, window.innerHeight / 3);
+    };
+  }
+
   ui.scanToggle.onclick = () => {
     ui.scanPanel.hidden = !ui.scanPanel.hidden;
     if (!ui.scanPanel.hidden) { loadScanRoots(); refreshScanStatus(); }
@@ -2971,6 +3523,13 @@ function initNowPlayingModal() {
 
   // 歌单详情头部
   const currentDetailPl = () => state.playlists.find((p) => p.id === detailPlaylistId);
+  if (ui.plDetailM3u) {
+    ui.plDetailM3u.onclick = () => {
+      if (!detailPlaylistId) return;
+      // 走带 token 的链接下载：coverUrl 同款 query 参数通道。
+      window.open(`/v1/playlists/${encodeURIComponent(detailPlaylistId)}/m3u?token=${encodeURIComponent(TOKEN)}`, '_blank');
+    };
+  }
   ui.plDetailBack.onclick = () => closeDetail();
   ui.plDetailPlay.onclick = () => { if (detailPlaylistId) playPlaylist(detailPlaylistId); };
   ui.plDetailQueue.onclick = () => { const p = currentDetailPl(); if (p) queuePlaylistNext(p.id); };
@@ -3021,6 +3580,9 @@ function initNowPlayingModal() {
   initTheme();
   initStageControl();
   initTopMoreMenu();
+  // 播放控制弹窗（np）：绑定开/关、音量与跳转。此前只定义未调用，
+  // 弹窗在界面上不可达。
+  initNowPlayingModal();
   // 在线面板（web/online.js）：先注入宿主依赖，再拉音源清单、绑事件。
   window.Online.bind({
     ui,
@@ -3032,6 +3594,8 @@ function initNowPlayingModal() {
     fmt,
     toast,
     errText,
+    // 在线行的「加入歌单」：本地自建歌单按快照富形态收下在线曲目。
+    addToPlaylistMenu: openPlaylistMenu,
   });
   window.Online.init();
   // 扫码登录模块（web/online-login.js）：放在 Online.init 之后，头像 URL
@@ -3066,9 +3630,40 @@ function initNowPlayingModal() {
     paintArt,
     coverUrl: (id) => transport.coverUrl(id),
     playLocal: (id, queue) => playTrack(id, queue && queue.length ? queue : [id]),
-    // 电台/在线收藏：整盘载入交给 online.js 的试听链路。
-    playOnline: (f) => { if (window.Online) window.Online.playAll([toOnlineTrack(f)], 0); },
-    playRadio: (f) => { if (window.Online) window.Online.playAll([toOnlineTrack(f)], 0); },
+    // 混合队列：收藏全部播放的本地与在线身份共用一条 /player/load 队列。
+    // meta 是在线 id 的快照，注入服务端在线暂存，历史标题才不退化。
+    playQueue: async (ids, meta) => {
+      if (!ids || !ids.length) return;
+      const track_id = ids[0];
+      try {
+        await transport.post('/v1/player/load', {
+          track_id,
+          queue: ids,
+          ...(meta && Object.keys(meta).length ? { meta } : {}),
+        });
+        for (const [id, m] of Object.entries(meta || {})) {
+          state.byId.set(id, { id, ...m, duration_ms: m.duration_ms ?? null });
+        }
+        setStateQueue(ids, track_id);
+      } catch (err) {
+        toast(errText('播放失败', err), 'error');
+      }
+    },
+    // 单曲在线收藏：直接把快照包成在线曲交给整盘试听链路。
+    playOnline: (f) => {
+      if (window.Online) {
+        window.Online.playAll([{
+          source: f.source, id: f.ref_id, title: f.title, artist: f.artist,
+          album: f.album, duration_ms: f.duration_ms, cover: f.cover, playable: true,
+        }], 0);
+      }
+    },
+    // 电台/在线歌单收藏：整盘载入交给 OnlinePlaylists——它按 source+id 拉
+    // 平台歌单再整盘入队，收藏对象是歌单而不是单曲。
+    playRadio: (f) => {
+      if (window.OnlinePlaylists) window.OnlinePlaylists.playRef(f.source, f.ref_id);
+      else toast('在线歌单模块未加载，请刷新页面后重试', 'error');
+    },
     // 红心状态变化时让曲库行跟着改色。
     onFavoriteChanged: (kind, source, refId, on) => {
       if (kind !== 'track' || source !== 'local') return;

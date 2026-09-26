@@ -10,15 +10,19 @@
 //! offline builds simple. Every statement is still exercised by the
 //! integration tests in `tests/`.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
 use vmusic_core::{Playlist, PlaylistId, StoreError, Track, TrackId, TrackSource};
 
+pub mod backup;
 pub mod favorites;
+pub mod lyrics;
 pub mod playlists;
+pub mod scan_roots;
 pub mod settings;
+pub mod track_edits;
 
 #[derive(Debug, Clone, FromRow)]
 pub struct TrackRow {
@@ -152,8 +156,15 @@ pub async fn get_track_id_by_path(
     Ok(row.map(|(id,)| id))
 }
 
+/// 用户编辑覆盖层的展示表达式：空串/空白归一为无值后盖在扫描值上。
+pub const TRACK_COALESCE_COLS: &str =
+    "COALESCE(NULLIF(TRIM(e.title), ''), t.title) AS title,      COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) AS artist,      COALESCE(NULLIF(TRIM(e.album), ''), t.album) AS album";
+
 pub async fn get_track(pool: &SqlitePool, id: &TrackId) -> Result<Option<Track>, StoreError> {
-    let row = sqlx::query_as::<_, TrackRow>("SELECT * FROM tracks WHERE id = ?1")
+    let sql = format!(
+        "SELECT t.id, t.path, t.source, {TRACK_COALESCE_COLS}, t.duration_ms, t.bitrate,          t.sample_rate, t.channels, t.has_cover, t.cover_key, t.file_mtime, t.file_size, t.added_at          FROM tracks t LEFT JOIN track_edits e ON e.track_id = t.id WHERE t.id = ?1"
+    );
+    let row = sqlx::query_as::<_, TrackRow>(&sql)
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -167,57 +178,267 @@ pub async fn list_tracks(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Track>, StoreError> {
-    let rows = match query {
-        Some(q) if !q.trim().is_empty() => {
-            let like = format!("%{}%", q.trim());
-            sqlx::query_as::<_, TrackRow>(
-                r#"SELECT * FROM tracks
-                   WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1
-                   ORDER BY title COLLATE NOCASE LIMIT ?2 OFFSET ?3"#,
-            )
-            .bind(like)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(pool)
-            .await
-        }
-        _ => {
-            sqlx::query_as::<_, TrackRow>(
-                "SELECT * FROM tracks ORDER BY title COLLATE NOCASE LIMIT ?1 OFFSET ?2",
-            )
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(pool)
-            .await
+    list_tracks_sorted(pool, query, TrackSort::Title, limit, offset).await
+}
+
+/// One ordering contract for paged browsing and the complete playback queue.
+/// SQL fragments only come from this enum, never from a request string.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum TrackSort {
+    #[default]
+    Title,
+    Artist,
+    Album,
+    Added,
+}
+
+impl TrackSort {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "title" => Some(Self::Title),
+            "artist" => Some(Self::Artist),
+            "album" => Some(Self::Album),
+            "added" => Some(Self::Added),
+            _ => None,
         }
     }
-    .map_err(|e| StoreError::Database(e.to_string()))?;
+
+    /// 排序键用覆盖列的完整表达式（裸别名在 ORDER BY 表达式里与表列同名会
+    /// 引发歧义），保证专辑/歌手视图里的排序跟显示一致。
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Title => "COALESCE(NULLIF(TRIM(e.title), ''), t.title) COLLATE NOCASE, t.id",
+            Self::Artist => "COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) COLLATE NOCASE,                              COALESCE(NULLIF(TRIM(e.title), ''), t.title) COLLATE NOCASE, t.id",
+            Self::Album => "COALESCE(NULLIF(TRIM(e.album), ''), t.album) COLLATE NOCASE,                              COALESCE(NULLIF(TRIM(e.title), ''), t.title) COLLATE NOCASE, t.id",
+            Self::Added => "t.added_at DESC, COALESCE(NULLIF(TRIM(e.title), ''), t.title) COLLATE NOCASE, t.id",
+        }
+    }
+}
+
+/// 浏览筛选：按覆盖后的歌手/专辑精确过滤（曲库的专辑/歌手视图用）。
+#[derive(Debug, Clone, Default)]
+pub struct TrackFilter {
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+impl TrackFilter {
+    /// `first` 是本语句里空闲参数的起始编号：筛选子句按 ?N 顺序占位。
+    /// 列表语句的 ?1..?4 被 query/LIKE/LIMIT/OFFSET 占用，所以从 ?5 起；
+    /// 计数语句没有 LIMIT/OFFSET，从 ?3 起。编号错位会让筛选静默落空。
+    fn sql(&self, first: usize) -> String {
+        let mut clauses = Vec::new();
+        if self.artist.is_some() {
+            clauses.push(format!(
+                "COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) = ?{first}"
+            ));
+        }
+        if self.album.is_some() {
+            clauses.push(format!(
+                "COALESCE(NULLIF(TRIM(e.album), ''), t.album) = ?{second}",
+                second = first + 1
+            ));
+        }
+        if clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", clauses.join(" AND "))
+        }
+    }
+
+    fn binds(&self) -> Vec<String> {
+        [&self.artist, &self.album]
+            .into_iter()
+            .filter_map(|b| b.clone())
+            .collect()
+    }
+}
+
+/// `filter_sql` 由调用方按本语句的空闲参数编号渲染（列表有 LIMIT/OFFSET，
+/// 从 ?5 起；ids 没有分页子句，从 ?3 起）。
+fn track_selection(columns: &str, sort: TrackSort, filter_sql: &str) -> String {
+    format!(
+        "SELECT {columns} FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE (?1 = '' OR COALESCE(NULLIF(TRIM(e.title), ''), t.title) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.album), ''), t.album) LIKE ?2){filter_sql}          ORDER BY {}",
+        sort.sql()
+    )
+}
+
+
+
+pub async fn list_tracks_sorted(
+    pool: &SqlitePool,
+    query: Option<&str>,
+    sort: TrackSort,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Track>, StoreError> {
+    list_tracks_filtered(pool, query, &TrackFilter::default(), sort, limit, offset).await
+}
+
+pub async fn list_tracks_filtered(
+    pool: &SqlitePool,
+    query: Option<&str>,
+    filter: &TrackFilter,
+    sort: TrackSort,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Track>, StoreError> {
+    let query = query.unwrap_or("").trim();
+    let columns = format!(
+        "t.id, t.path, t.source, {TRACK_COALESCE_COLS}, t.duration_ms, t.bitrate,          t.sample_rate, t.channels, t.has_cover, t.cover_key, t.file_mtime, t.file_size, t.added_at"
+    );
+    let filter_sql = filter.sql(5);
+    let sql = format!("{} LIMIT ?3 OFFSET ?4", track_selection(&columns, sort, &filter_sql));
+    let mut stmt = sqlx::query_as::<_, TrackRow>(&sql)
+        .bind(query)
+        .bind(format!("%{query}%"))
+        .bind(limit)
+        .bind(offset);
+    for bind in filter.binds() {
+        stmt = stmt.bind(bind.clone());
+    }
+    let rows = stmt
+        .fetch_all(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
+/// IDs are selected in one database snapshot, independent of UI pagination.
+pub async fn list_track_ids(
+    pool: &SqlitePool,
+    query: Option<&str>,
+    sort: TrackSort,
+) -> Result<Vec<String>, StoreError> {
+    list_track_ids_filtered(pool, query, &TrackFilter::default(), sort).await
+}
+
+pub async fn list_track_ids_filtered(
+    pool: &SqlitePool,
+    query: Option<&str>,
+    filter: &TrackFilter,
+    sort: TrackSort,
+) -> Result<Vec<String>, StoreError> {
+    let query = query.unwrap_or("").trim();
+    let filter_sql = filter.sql(3);
+    let sql = track_selection("t.id", sort, &filter_sql);
+    let mut stmt = sqlx::query_scalar(&sql)
+        .bind(query)
+        .bind(format!("%{query}%"));
+    if let Some(artist) = &filter.artist {
+        stmt = stmt.bind(artist);
+    }
+    if let Some(album) = &filter.album {
+        stmt = stmt.bind(album);
+    }
+    stmt.fetch_all(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))
+}
+
 pub async fn count_tracks(pool: &SqlitePool, query: Option<&str>) -> Result<i64, StoreError> {
+    count_tracks_filtered(pool, query, &TrackFilter::default()).await
+}
+
+/// 与列表同一覆盖/筛选语义的计数：分页 total 必须和当前筛选的列表一致。
+pub async fn count_tracks_filtered(
+    pool: &SqlitePool,
+    query: Option<&str>,
+    filter: &TrackFilter,
+) -> Result<i64, StoreError> {
     #[derive(FromRow)]
     struct CountRow {
         n: i64,
     }
-    let row = match query {
-        Some(q) if !q.trim().is_empty() => {
-            let like = format!("%{}%", q.trim());
-            sqlx::query_as::<_, CountRow>(
-                "SELECT COUNT(*) AS n FROM tracks WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1",
-            )
-            .bind(like)
-            .fetch_one(pool)
-            .await
-        }
-        _ => {
-            sqlx::query_as::<_, CountRow>("SELECT COUNT(*) AS n FROM tracks")
-                .fetch_one(pool)
-                .await
-        }
+    let query = query.unwrap_or("").trim();
+    let sql = format!(
+        "SELECT COUNT(*) AS n FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE (?1 = '' OR COALESCE(NULLIF(TRIM(e.title), ''), t.title) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.album), ''), t.album) LIKE ?2){}",
+        filter.sql(3)
+    );
+    let mut stmt = sqlx::query_as::<_, CountRow>(&sql).bind(query).bind(format!("%{query}%"));
+    for bind in filter.binds() {
+        stmt = stmt.bind(bind.clone());
     }
-    .map_err(|e| StoreError::Database(e.to_string()))?;
+    let row = stmt
+        .fetch_one(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
     Ok(row.n)
+}
+
+/// 专辑/歌手浏览面：名字来自覆盖后的展示值，空值不出现。
+pub async fn list_track_facets(
+    pool: &SqlitePool,
+    kind: &str,
+) -> Result<Vec<(String, i64)>, StoreError> {
+    let column = match kind {
+        "artist" => "artist",
+        "album" => "album",
+        _ => return Err(StoreError::Database("facet kind must be artist or album".into())),
+    };
+    let shown = format!(
+        "COALESCE(NULLIF(TRIM(e.{column}), ''), t.{column})"
+    );
+    let sql = format!(
+        "SELECT {shown} AS name, COUNT(*) AS n          FROM tracks t LEFT JOIN track_edits e ON e.track_id = t.id          WHERE {shown} IS NOT NULL AND TRIM({shown}) <> ''          GROUP BY name ORDER BY n DESC, name COLLATE NOCASE"
+    );
+    sqlx::query_as::<_, (String, i64)>(&sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))
+}
+
+/// 批量删除曲目行（失效整理用）。返回删除的行数。
+pub async fn delete_tracks(pool: &SqlitePool, ids: &[String]) -> Result<u64, StoreError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    let mut deleted = 0u64;
+    for id in ids {
+        let result = sqlx::query("DELETE FROM tracks WHERE id = ?1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+        deleted += result.rows_affected();
+    }
+    tx.commit()
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(deleted)
+}
+
+/// 扫描读到的 ReplayGain 曲目增益（dB）。无标签传 NULL。
+pub async fn set_track_rg(pool: &SqlitePool, id: &TrackId, gain: Option<f64>) -> Result<(), StoreError> {
+    sqlx::query("UPDATE tracks SET rg_gain = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(gain)
+        .execute(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(())
+}
+
+/// 读取 ReplayGain 增益（播放端响度归一化用）。
+pub async fn get_track_rg(pool: &SqlitePool, id: &TrackId) -> Result<Option<f64>, StoreError> {
+    let row: Option<(Option<f64>,)> = sqlx::query_as("SELECT rg_gain FROM tracks WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(row.and_then(|(g,)| g))
+}
+
+/// 封面替换后的展示位更新：用户封面已落缓存，has_cover 直接成立。
+pub async fn set_has_cover(pool: &SqlitePool, id: &TrackId, has: bool) -> Result<(), StoreError> {
+    sqlx::query("UPDATE tracks SET has_cover = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(has as i64)
+        .execute(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(())
 }
 
 /// Deletes rows whose path is not in `keep`. Used at the end of a scan so
@@ -261,27 +482,131 @@ pub async fn delete_stale_under_root(
     root: &str,
     keep: &[String],
 ) -> Result<u64, StoreError> {
-    let like = format!("{}%", root.trim_end_matches(['/', '\\']));
-    let paths: Vec<String> =
-        sqlx::query_scalar::<_, String>("SELECT path FROM tracks WHERE path LIKE ?1")
-            .bind(like)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| StoreError::Database(e.to_string()))?;
+    delete_stale_under_root_cancellable(
+        pool,
+        root,
+        keep,
+        &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .await
+    .map(|removed| removed.unwrap_or(0))
+}
 
+/// All-or-nothing pruning: cancellation rolls back every deletion in this pass.
+/// Paths are compared by components, not SQL LIKE (which treats `_` and `%`
+/// specially and would include a neighbouring directory such as Music2).
+pub async fn delete_stale_under_root_cancellable(
+    pool: &SqlitePool,
+    root: &str,
+    keep: &[String],
+    cancelled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Option<u64>, StoreError> {
+    use std::sync::atomic::Ordering;
+    let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM tracks WHERE source = 'local'")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    let keep: std::collections::HashSet<String> = keep.iter().cloned().collect();
+    let root = root.to_string();
+    let worker_cancel = cancelled.clone();
+    // Path resolution may contact an unavailable drive. Keep filesystem work
+    // off async workers and finish it before opening the write transaction.
+    let candidates = tokio::task::spawn_blocking(move || {
+        if worker_cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let root = track_path_key(Path::new(&root));
+        let mut candidates = Vec::new();
+        for path in paths {
+            if worker_cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            if !keep.contains(&path) && track_path_key(Path::new(&path)).starts_with(&root) {
+                candidates.push(path);
+            }
+        }
+        Some(candidates)
+    })
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    let Some(candidates) = candidates else {
+        return Ok(None);
+    };
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
     let mut removed = 0u64;
-    for path in paths {
-        if keep.contains(&path) {
-            continue;
+    for path in candidates {
+        if cancelled.load(Ordering::Relaxed) {
+            tx.rollback()
+                .await
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+            return Ok(None);
         }
         let result = sqlx::query("DELETE FROM tracks WHERE path = ?1")
             .bind(&path)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
         removed += result.rows_affected();
     }
-    Ok(removed)
+    if cancelled.load(Ordering::Relaxed) {
+        tx.rollback()
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+        return Ok(None);
+    }
+    tx.commit()
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(Some(removed))
+}
+
+/// Compare legacy relative/alternate-separator paths with current absolute
+/// paths without rewriting the stored path or track ID. Resolve the nearest
+/// existing ancestor so removed files still have a stable directory identity.
+/// No case folding: Windows can also contain case-sensitive directories.
+pub fn track_path_key(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut ancestor = absolute.as_path();
+    let mut suffix = Vec::new();
+    let mut resolved = loop {
+        if let Ok(canonical) = std::fs::canonicalize(ancestor) {
+            break canonical;
+        }
+        let Some(parent) = ancestor.parent() else {
+            suffix.clear();
+            break absolute.clone();
+        };
+        if let Some(component) = ancestor.components().next_back() {
+            suffix.push(component.as_os_str().to_os_string());
+        }
+        ancestor = parent;
+    };
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    #[cfg(windows)]
+    {
+        let text = resolved.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            resolved = PathBuf::from(format!(r"\\{rest}"));
+        } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+            resolved = PathBuf::from(rest);
+        }
+    }
+    let mut clean = PathBuf::new();
+    for component in resolved.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                clean.pop();
+            }
+            _ => clean.push(component.as_os_str()),
+        }
+    }
+    clean
 }
 
 pub async fn get_playlist_track_ids(
@@ -399,6 +724,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn global_order_and_queue_cover_every_page() {
+        let db = pool().await;
+        for i in 0..205 {
+            let mut track = sample(&format!("/large/{i}.mp3"), &format!("Song {i:03}"));
+            track.artist = Some(format!("Artist {:03}", 204 - i));
+            track.album = Some(if i % 2 == 0 { "Even" } else { "Odd" }.into());
+            upsert_track(&db, &track).await.unwrap();
+            sqlx::query("UPDATE tracks SET added_at = ?1 WHERE id = ?2")
+                .bind(i as i64)
+                .bind(&track.id)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        for sort in [
+            TrackSort::Title,
+            TrackSort::Artist,
+            TrackSort::Album,
+            TrackSort::Added,
+        ] {
+            for query in [None, Some("Even")] {
+                let first = list_tracks_sorted(&db, query, sort, 200, 0).await.unwrap();
+                let second = list_tracks_sorted(&db, query, sort, 200, 200)
+                    .await
+                    .unwrap();
+                let page_ids: Vec<_> = first.iter().chain(&second).map(|t| t.id.clone()).collect();
+                let all = list_track_ids(&db, query, sort).await.unwrap();
+                assert_eq!(page_ids, all);
+                assert_eq!(all.len(), if query.is_none() { 205 } else { 103 });
+                if query.is_none() && matches!(sort, TrackSort::Artist | TrackSort::Added) {
+                    assert_eq!(first[0].title, "Song 204");
+                    assert_eq!(second.last().unwrap().title, "Song 000");
+                }
+            }
+        }
+        assert!(TrackSort::parse("title; DROP TABLE tracks").is_none());
+    }
+
+    #[tokio::test]
     async fn delete_tracks_not_in_removes_stale_rows() {
         let db = pool().await;
         upsert_track(&db, &sample("/m/a.mp3", "A")).await.unwrap();
@@ -409,5 +773,73 @@ mod tests {
             .unwrap();
         assert_eq!(removed, 1);
         assert_eq!(count_tracks(&db, None).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn root_pruning_obeys_path_boundaries_and_literal_names() {
+        let db = pool().await;
+        for path in [
+            "/Music/a.mp3",
+            "/Music2/b.mp3",
+            "/Music_%/c.mp3",
+            "/Music_other/d.mp3",
+        ] {
+            upsert_track(&db, &sample(path, path)).await.unwrap();
+        }
+        assert_eq!(
+            delete_stale_under_root(&db, "/Music", &[]).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            delete_stale_under_root(&db, "/Music_%", &[]).await.unwrap(),
+            1
+        );
+        let remaining = list_tracks(&db, None, 10, 0).await.unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining
+            .iter()
+            .all(|t| t.path == "/Music2/b.mp3" || t.path == "/Music_other/d.mp3"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_pruning_keeps_existing_rows() {
+        let db = pool().await;
+        upsert_track(&db, &sample("/Music/a.mp3", "A"))
+            .await
+            .unwrap();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert_eq!(
+            delete_stale_under_root_cancellable(&db, "/Music", &[], &cancel)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(count_tracks(&db, None).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_relative_paths_prune_within_resolved_directory_only() {
+        let db = pool().await;
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            track_path_key(Path::new("Cargo.toml")),
+            track_path_key(&cwd.join("Cargo.toml"))
+        );
+        upsert_track(&db, &sample("missing-legacy.wav", "inside"))
+            .await
+            .unwrap();
+        upsert_track(&db, &sample("../missing-neighbor.wav", "outside"))
+            .await
+            .unwrap();
+        assert_eq!(
+            delete_stale_under_root(&db, cwd.to_str().unwrap(), &[])
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            list_tracks(&db, None, 10, 0).await.unwrap()[0].title,
+            "outside"
+        );
     }
 }

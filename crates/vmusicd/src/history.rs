@@ -77,16 +77,43 @@ pub async fn upsert(pool: &SqlitePool, e: HistoryEntry<'_>) -> Result<(), String
     Ok(())
 }
 
-/// 倒序取最近 `limit` 条（1..=100）。
-pub async fn list_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<HistoryItem>, String> {
-    sqlx::query_as::<_, HistoryItem>(
-        "SELECT id, track_id, source, ref_id, title, artist, album, cover_url, \
-         duration_ms, played_at FROM play_history ORDER BY played_at DESC, id DESC LIMIT ?1",
-    )
-    .bind(limit.clamp(1, 100))
-    .fetch_all(pool)
-    .await
-    .map_err(|err| err.to_string())
+/// 分页 + 来源筛选 + 标题/歌手/专辑搜索。返回 (条目, 命中总数)。
+///
+/// 500 条上限之外的旧记录因此可达：UI 用 offset 翻页，不靠单次大查询。
+pub async fn list_filtered(
+    pool: &SqlitePool,
+    query: Option<&str>,
+    source: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<(Vec<HistoryItem>, i64), String> {
+    let q = query.unwrap_or("").trim();
+    let source = source.unwrap_or("").trim();
+    let sql = "SELECT id, track_id, source, ref_id, title, artist, album, cover_url, \
+               duration_ms, played_at FROM play_history \
+               WHERE (?1 = '' OR title LIKE ?2 OR artist LIKE ?2 OR album LIKE ?2) \
+               AND (?3 = '' OR source = ?3) \
+               ORDER BY played_at DESC, id DESC LIMIT ?4 OFFSET ?5";
+    let items = sqlx::query_as::<_, HistoryItem>(sql)
+        .bind(q)
+        .bind(format!("%{q}%"))
+        .bind(source)
+        .bind(limit.clamp(1, 200))
+        .bind(offset.max(0))
+        .fetch_all(pool)
+        .await
+        .map_err(|err| err.to_string())?;
+    let count_sql = "SELECT COUNT(*) FROM play_history \
+                     WHERE (?1 = '' OR title LIKE ?2 OR artist LIKE ?2 OR album LIKE ?2) \
+                     AND (?3 = '' OR source = ?3)";
+    let total: (i64,) = sqlx::query_as(count_sql)
+        .bind(q)
+        .bind(format!("%{q}%"))
+        .bind(source)
+        .fetch_one(pool)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok((items, total.0))
 }
 
 pub async fn clear(pool: &SqlitePool) -> Result<u64, String> {
@@ -139,7 +166,7 @@ mod tests {
         e1.title = "歌曲1-改名";
         upsert(&pool, e1).await.unwrap();
 
-        let items = list_recent(&pool, 10).await.unwrap();
+        let items = list_filtered(&pool, None, None, 10, 0).await.unwrap().0;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].title, "歌曲1-改名");
         assert_eq!(items[1].title, "歌曲2");
@@ -163,12 +190,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filtered_listing_supports_pagination_source_and_search() {
+        let pool = db().await;
+        upsert(&pool, entry(1)).await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let mut local = entry(2);
+        local.track_id = "local-2";
+        local.source = "local";
+        local.title = "本地歌";
+        upsert(&pool, local).await.unwrap();
+
+        // 来源筛选
+        let (items, total) = list_filtered(&pool, None, Some("netease"), 50, 0).await.unwrap();
+        assert_eq!((items.len(), total), (1, 1));
+        assert_eq!(items[0].source, "netease");
+        // 搜索命中标题
+        let (_, total) = list_filtered(&pool, Some("本地"), None, 50, 0).await.unwrap();
+        assert_eq!(total, 1);
+        // 分页：limit 1 offset 1 取第二新的
+        let (items, total) = list_filtered(&pool, None, None, 1, 1).await.unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(items.len(), 1);
+    }
+
+    #[tokio::test]
     async fn remove_and_clear_work() {
         let pool = db().await;
         upsert(&pool, entry(9)).await.unwrap();
-        let items = list_recent(&pool, 10).await.unwrap();
+        let items = list_filtered(&pool, None, None, 10, 0).await.unwrap().0;
         assert_eq!(remove(&pool, items[0].id).await.unwrap(), 1);
-        assert_eq!(list_recent(&pool, 10).await.unwrap().len(), 0);
+        assert_eq!(list_filtered(&pool, None, None, 10, 0).await.unwrap().0.len(), 0);
         upsert(&pool, entry(8)).await.unwrap();
         assert!(clear(&pool).await.unwrap() >= 1);
     }

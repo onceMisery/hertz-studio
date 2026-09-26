@@ -6,7 +6,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -71,18 +71,32 @@ pub enum WsEvent {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ScanProgress {
     pub running: bool,
+    pub root: Option<String>,
+    pub phase: String,
     pub done: usize,
     pub total: usize,
     pub added: usize,
+    pub updated: usize,
+    pub skipped: usize,
+    pub removed: usize,
     pub failed: usize,
+    pub cancelled: bool,
     pub last_error: Option<String>,
+    pub errors: Vec<ScanError>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanError {
+    pub path: String,
+    pub message: String,
 }
 
 /// 在线曲目元数据快照（仅在内存，与队列同生命周期）。
 ///
 /// /online/play 入队时随 tracks 写入 [`AppState::online_meta`]，提交成功后
-/// 据此写播放历史；队列外没有任何持久化。
-#[derive(Debug, Clone)]
+/// 据此写播放历史；/player/load 也接受随队的快照注入（重启后从歌单/收藏
+/// 播放时客户端持有元数据而服务端内存已清空）。
+#[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct OnlineMetaSnap {
     pub title: String,
     pub artist: Option<String>,
@@ -124,6 +138,50 @@ enum Commit {
     BadCache,
 }
 
+/// DSP 设置（服务端权威，settings 表持久化）。
+#[derive(Debug, Clone, Serialize)]
+pub struct DspConfig {
+    pub eq_gains_db: [f32; 6],
+    pub preamp_db: f32,
+    pub loudness_norm: bool,
+    pub crossfade_ms: u64,
+}
+
+impl DspConfig {
+    pub fn from_settings(
+        settings: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        let eq = settings
+            .get("dsp_eq")
+            .and_then(|v| serde_json::from_value::<[f32; 6]>(v.clone()).ok())
+            .unwrap_or([0.0; 6]);
+        let preamp = settings
+            .get("dsp_preamp")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32;
+        let loudness = settings
+            .get("dsp_loudness")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let crossfade = settings
+            .get("dsp_crossfade_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        Self {
+            eq_gains_db: eq,
+            preamp_db: preamp,
+            loudness_norm: loudness,
+            crossfade_ms: crossfade,
+        }
+    }
+
+    pub fn clamp_eq(&mut self) {
+        for v in self.eq_gains_db.iter_mut() {
+            *v = v.clamp(-12.0, 12.0);
+        }
+    }
+}
+
 pub struct AppState {
     pub db: SqlitePool,
     pub audio: AudioHandle,
@@ -134,7 +192,8 @@ pub struct AppState {
     /// Ordered list of track ids the "next / previous" buttons walk through.
     pub queue: Mutex<Vec<String>>,
     pub cursor: Mutex<Option<usize>>,
-    pub scan: Mutex<ScanProgress>,
+    pub scan: Arc<Mutex<ScanProgress>>,
+    pub scan_cancel: Arc<AtomicBool>,
     /// 二维码登录会话（票 → 平台握手数据），只活在内存里、TTL 3 分钟。
     pub qr: Arc<crate::online::qr::Registry>,
     /// 播放代际：每次 `play_index` 切入或 `set_queue` 整盘替换都 +1。
@@ -157,6 +216,11 @@ pub struct AppState {
     /// LRU 显式保护名单：在线曲提交成功写入 `{key}.` 前缀（legacy 命中额外
     /// 写命中文件全名），切到本地曲清空；post_commit_background 回收时透传。
     pub(crate) protected: Mutex<Vec<String>>,
+    /// DSP 设置（EQ/增益/响度归一化/交叉淡化）。
+    pub(crate) dsp: Mutex<DspConfig>,
+    /// 用户显式保留的缓存条目（`{stem}.` 前缀，含全部音质档）。启动时从
+    /// settings 装载、pin/unpin 即时更新；LRU 回收与手动清理都豁免它。
+    pub(crate) keep: Mutex<Vec<String>>,
     /// 自动接力连续失败计数，任一曲成功提交即清零；累计到 3 停止接力。
     pub(crate) auto_failures: AtomicUsize,
     /// 逐源音质偏好（启动时从 settings 装载、POST 热切换即时更新）。
@@ -179,6 +243,29 @@ impl AppState {
 
     /// 在线试听的落盘位置。音频后端目前只吃本地文件路径，所以远程流先缓存到
     /// 这里再交给 audio actor —— 播放链路本身完全不变。
+    /// 当前播放曲目的 ReplayGain 增益（dB）；响度归一化下发用。
+    pub(crate) async fn current_rg_gain(&self) -> Option<f64> {
+        let cursor = match *self.cursor.lock().await {
+            Some(i) => i,
+            None => return None,
+        };
+        let track_id = self.queue.lock().await.get(cursor)?.clone();
+        if crate::online::split_virtual_id(&track_id).is_some() {
+            return None; // 在线曲没有 RG 标签
+        }
+        vmusic_store::get_track_rg(&self.db, &track_id)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// LRU 回收与手动清理的豁免名单：当前播放 + 用户保留项。
+    pub(crate) async fn protected_all(&self) -> Vec<String> {
+        let mut all = self.protected.lock().await.clone();
+        all.extend(self.keep.lock().await.iter().cloned());
+        all
+    }
+
     pub fn online_cache_dir(&self) -> PathBuf {
         self.data_dir.join("cache").join("online")
     }
@@ -297,6 +384,25 @@ impl AppState {
             .await
             .map_err(vmusic_core::CoreError::Store)?
             .ok_or_else(|| vmusic_core::CoreError::NotFound(track_id.clone()))?;
+        // 响度归一化：曲目有 RG 标签且开关开启时下发曲目增益。失败不影响播放。
+        let dsp = self.dsp.lock().await.clone();
+        let track_gain_db = if dsp.loudness_norm {
+            vmusic_store::get_track_rg(&self.db, &track_id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(0.0) as f32
+        } else {
+            0.0
+        };
+        let _ = self
+            .audio
+            .set_dsp(vmusic_core::DspParams {
+                eq_gains_db: dsp.eq_gains_db,
+                preamp_db: dsp.preamp_db,
+                track_gain_db,
+            })
+            .await;
         let _commit = self.play_commit.lock().await;
         if !self.attempt_alive(gen, index, &track_id).await {
             return Ok(PlayOutcome {
@@ -886,7 +992,7 @@ impl AppState {
             // 显式保护当前播放曲（前缀 + 可能的 legacy 全名），避免它在容量
             // 回收时被删掉——「最新文件始终保留」只在同一次回收内成立，跨次
             // 回收后当前曲可能已不是最新。
-            let protected = s.protected.lock().await.clone();
+            let protected = s.protected_all().await;
             if let Err(e) = crate::online::cache::enforce_limit(
                 &s.online_cache_dir(),
                 s.config.online.cache_max_bytes,

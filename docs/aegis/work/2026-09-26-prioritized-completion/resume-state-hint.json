@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-09-26-prioritized-completion",
+  "lastCheckpointRef": "docs/aegis/work/2026-09-26-prioritized-completion/todo-checkpoint-draft.json",
+  "resumeInstruction": "检查library_maintenance与scan_review结果；保留并发stage修改；目标必须覆盖1–13",
+  "knownPartialWork": [
+    "1全量排序分页和播放队列，Rust/frontend/API/UI及独立审查通过"
+  ],
+  "mustReadBeforeContinuing": [
+    "docs/aegis/work/2026-09-26-prioritized-completion/10-intent.md",
+    "docs/aegis/work/2026-09-26-prioritized-completion/20-checkpoint.md",
+    "docs/aegis/work/2026-09-26-prioritized-completion/todo-checkpoint-draft.json"
+  ],
+  "unsafeToAssume": [
+    "新目录fixture通过不代表旧曲库路径兼容；真实平台与声卡不能模拟判通过"
+  ]
+}

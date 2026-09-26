@@ -42,7 +42,7 @@
 mod aggregate;
 pub mod cache;
 mod ccmixter;
-mod cred;
+pub(crate) mod cred;
 mod http;
 mod kugou;
 mod netease;

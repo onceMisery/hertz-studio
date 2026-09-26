@@ -16,8 +16,7 @@
 //     逐帧插值只在 center 变化那一刻发生，而那是用户操作触发的。
 //     这是本项目里唯一一处"不写 rAF 反而更流畅"的地方。
 //
-// 每帧循环里唯一持续运行的东西是 CSS 的关键字动画（idle 浮动），
-// 它跑在合成线程上，不占主线程。
+// 歌单切换交给 CSS 合成；静止时没有独立的逐帧循环。
 
 (function () {
   'use strict';
@@ -35,8 +34,6 @@
 
   function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
   function $(id) { return document.getElementById(id); }
-
-  function slotFor(i) { return center - R + i; }
 
   // 把「离中心多远」交给 CSS：这里只写两个整数，缩放/旋转/景深/淡出/
   // 错峰全由 stage.css 从它们算出来。理由和歌词的 --row-d 完全一样——
@@ -59,8 +56,6 @@
       return;
     }
     if (el.hidden) el.hidden = false;
-    if (el._bound === item.id) { paint(el, index - center); return; }
-
     el._bound = item.id;
     el.dataset.id = item.id;
     el.setAttribute('aria-label', item.name + '，' + item.track_count + ' 首');
@@ -74,12 +69,14 @@
   // 卡面上，拿不到封面时用它给的稳定色相占位。
   function applyCover(slot, item) {
     var st = window.PlaylistCovers.state(item.id);
+    slot.el.style.setProperty('--sleeve-hue', st.hue == null ? 160 : st.hue);
+    slot.el.classList.toggle('has-art', st.s === 'url');
     if (st.s === 'url') {
       slot.art.style.backgroundColor = '';
-      slot.art.style.backgroundImage = 'url("' + st.url + '")';
+      slot.el.style.setProperty('--sleeve-art', 'url(' + JSON.stringify(st.url) + ')');
     } else {
-      slot.art.style.backgroundImage = '';
-      slot.art.style.backgroundColor = 'hsl(' + st.hue + ' 32% 16%)';
+      slot.el.style.removeProperty('--sleeve-art');
+      slot.art.style.backgroundColor = '';
     }
   }
 
@@ -89,9 +86,33 @@
   }
 
   function render() {
-    for (var i = 0; i < slots.length; i += 1) bindSlot(slots[i], slotFor(i));
+    // Keep the DOM identity of every surviving record. Rebinding by slot made
+    // images jump in place instead of travelling through the cover flow.
+    var visible = items.slice(Math.max(0, center - R), center + R + 1);
+    var used = [];
+    visible.forEach(function (item) {
+      var slot = slots.find(function (s) { return s.el._bound === item.id; });
+      if (slot) used.push(slot);
+    });
+    visible.forEach(function (item) {
+      var slot = slots.find(function (s) { return s.el._bound === item.id; });
+      var fresh = !slot;
+      if (!slot) {
+        slot = slots.find(function (s) { return used.indexOf(s) < 0; });
+        used.push(slot);
+        slot.el._d = null;
+        slot.el.style.transition = 'none';
+      }
+      bindSlot(slot, items.indexOf(item));
+      if (fresh) { void slot.el.offsetWidth; slot.el.style.removeProperty('transition'); }
+    });
+    slots.forEach(function (slot) { if (used.indexOf(slot) < 0) bindSlot(slot, -1); });
     updateDetail();
     updateAria();
+    $('shelf-prev').disabled = center <= 0;
+    $('shelf-next').disabled = center >= items.length - 1;
+    $('shelf-position').textContent = items.length ? (center + 1) + ' / ' + items.length : '尚无歌单';
+    host.classList.toggle('is-empty', !items.length);
   }
 
   function updateAria() {
@@ -107,8 +128,9 @@
   }
 
   function slotEl(index) {
-    var slot = index - (center - R);
-    return (slot >= 0 && slot < SLOTS) ? slots[slot].el : null;
+    var item = items[index];
+    var slot = item && slots.find(function (s) { return s.el._bound === item.id; });
+    return slot ? slot.el : null;
   }
 
   function updateDetail() {
@@ -171,23 +193,27 @@
     e.preventDefault();
     var t = Date.now();
     if (t - wheelAt > 400) wheelAcc = 0;
-    wheelAt = t;
-    wheelAcc += e.deltaY;
+    var delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    wheelAcc += delta * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? host.clientWidth : 1);
     if (Math.abs(wheelAcc) < WHEEL_STEP) return;
-    var n = Math.trunc(wheelAcc / WHEEL_STEP);
-    wheelAcc -= n * WHEEL_STEP;
+    if (t - wheelAt < 180) return;
+    var n = wheelAcc > 0 ? 1 : -1;
+    wheelAt = t; wheelAcc = 0;
     stepBy(n);
   }
 
   // 拖拽只改一个 --shelf-drag 变量做整体平移，松手才落到新的 center 上重排。
   // 于是拖动过程中没有逐卡写入，也没有惯性——惯性滚动在这里是负资产：
   // 用户是来挑歌单的，多滚出来的那几格得再滚回去。
-  var dragX = 0, dragId = -1, dragMoved = 0;
+  var dragX = 0, dragId = -1, dragMoved = 0, dragCard = null;
   function onPointerDown(e) {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     dragX = e.clientX;
     dragMoved = 0;
     dragId = e.pointerId;
+    dragCard = e.target.closest('.shelf-card');
+    host.focus({ preventScroll: true });
+    host.classList.add('is-dragging');
     host.setPointerCapture(e.pointerId);
   }
   function onPointerMove(e) {
@@ -199,15 +225,18 @@
   function onPointerUp(e) {
     if (dragId !== e.pointerId) return;
     dragId = -1;
+    host.classList.remove('is-dragging');
     host.style.removeProperty('--shelf-drag');
+    if (host.hasPointerCapture(e.pointerId)) host.releasePointerCapture(e.pointerId);
+    if (e.type === 'pointercancel') { dragCard = null; return; }
     var dx = e.clientX - dragX;
     // 阈值按卡位宽度算，拖过半格就算要换一张
-    var step = parseFloat(getComputedStyle(document.documentElement)
+    var step = parseFloat(getComputedStyle(host)
       .getPropertyValue('--shelf-step')) || 78;
     var n = Math.round(-dx / step);
     if (dragMoved > 6) { if (n) stepBy(n); return; }
     // 没有拖动 = 点击。中心卡播放，侧边卡只是转过来。
-    var card = e.target.closest ? e.target.closest('.shelf-card') : null;
+    var card = dragCard;
     if (!card) return;
     var index = cardIndex(card);
     if (index === null) return;
@@ -258,6 +287,12 @@
       var art = document.createElement('div');
       art.className = 'shelf-art';
       art.setAttribute('aria-hidden', 'true');
+      var record = document.createElement('div'); record.className = 'shelf-vinyl';
+      record.setAttribute('aria-hidden', 'true');
+      var back = document.createElement('div'); back.className = 'shelf-back';
+      back.setAttribute('aria-hidden', 'true');
+      var reflection = document.createElement('div'); reflection.className = 'shelf-reflection';
+      reflection.setAttribute('aria-hidden', 'true');
       var label = document.createElement('div');
       label.className = 'shelf-label';
       var name = document.createElement('div');
@@ -265,7 +300,7 @@
       var count = document.createElement('div');
       count.className = 'shelf-count pl-sub';
       label.append(name, count);
-      el.append(art, label);
+      el.append(back, record, art, label, reflection);
       el.hidden = true;
       host.appendChild(el);
       slots.push({ el: el, art: art, name: name, count: count });
@@ -277,6 +312,11 @@
     detail = $('shelf-detail');
     if (!host) return null;
     buildSlots();
+    var nav = document.createElement('div'); nav.className = 'shelf-nav';
+    nav.innerHTML = '<button type="button" class="btn" id="shelf-prev" aria-label="上一个歌单">←</button><span id="shelf-position" aria-live="polite"></span><button type="button" class="btn" id="shelf-next" aria-label="下一个歌单">→</button>';
+    host.after(nav);
+    $('shelf-prev').addEventListener('click', function () { stepBy(-1); });
+    $('shelf-next').addEventListener('click', function () { stepBy(1); });
 
     // 封面异步就绪后，按当前绑定把对应卡面重刷一遍。
     window.PlaylistCovers.onChange(function (id) {
@@ -296,10 +336,10 @@
 
     return api = {
       setItems: function (list) {
-        items = list || [];
         // 集合变了（新建/删除/重命名）之后中心索引要重新落位，但尽量留住
         // 用户当前正看着的那一张，而不是每次都弹回第一张。
         var keep = items[center] && items[center].id;
+        items = list || [];
         if (keep) {
           for (var i = 0; i < items.length; i += 1) if (items[i].id === keep) { center = i; break; }
         }

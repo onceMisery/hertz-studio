@@ -46,10 +46,12 @@
   var basePos = 0;
   var clockAt = 0;
   var durMs = 0;
+  var playbackVolume = 0.8;
   var seeking = false;
 
   var rafId = 0;
   var reduced = false;
+  var systemMotion = null;
   var lowfx = false;
   var fps = { frames: 0, since: 0, last: 0, done: false };
   var ringBars = [];
@@ -1235,7 +1237,7 @@
   // 歌词更新的目标帧率。好机器上 60 等于不节流（rAF 本来就被显示器限着），
   // 只有降级档和前后台状态才真的往下压。
   function lyricsTargetFps() {
-    if (hidden) return 0;
+    if (hidden || document.body.classList.contains('s3d-open')) return 0;
     if (!playing) return isPageOpen() ? 24 : 12;
     if (reduced) return 15;
     return tier === 0 ? 24 : tier === 1 ? 40 : 60;
@@ -1299,7 +1301,7 @@
   // 屏幕——布局尺寸原样保留，GL 不被告知就会持续往不可见画面上烧 GPU。
   var narrow = false;
   function isStageVisible() {
-    if (hidden) return false;
+    if (hidden || document.body.classList.contains('s3d-open')) return false;
     if (!narrow) return true;
     return document.body.classList.contains('stage-open');
   }
@@ -1568,7 +1570,8 @@
     readTune();
     mountFxLayers();
 
-    reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    systemMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    reduced = systemMotion.matches;
     // 窄屏断点跟 CSS 的抽屉规则共用同一个数（style.css：max-width:1240）。
     var narrowMql = window.matchMedia('(max-width: 1240px)');
     narrow = narrowMql.matches;
@@ -1785,6 +1788,7 @@
 
     setTrack: function (t, coverUrl) {
       track = t || null;
+      if (!durMs && t) durMs = t.duration_ms || 0;
       lastCover = coverUrl || null;
       if (el.lpTitle) el.lpTitle.textContent = (t && t.title) || '未在播放';
       var lpArtist = $('lp-artist');
@@ -1800,7 +1804,10 @@
 
     setSnapshot: function (snap) {
       if (!snap) return;
-      durMs = snap.duration_ms || 0;
+      if (typeof snap.volume === 'number') playbackVolume = snap.volume;
+      // A decoder can report unknown duration while library metadata is already
+      // available (null backend, or loading streams). Keep the same track's known length.
+      durMs = snap.duration_ms || (track && track.id === snap.track_id && track.duration_ms) || 0;
       var nextPlaying = !!snap.playing;
       // 服务端位置只在「明显不一致」时才覆盖本地时钟，避免每次推送都跳一下
       var srv = snap.position_ms || 0;
@@ -1850,7 +1857,9 @@
     // 往下调，所以启动后任何时刻读到的都是「这台机器目前确定扛得住的上限」。
     tier: function () { return lowfx ? 0 : tier; },
     isLowFx: function () { return lowfx; },
-    isHidden: function () { return hidden; },
+    // Visual layers under the immersive stage stop drawing. The shared clock,
+    // energy gate and Stage3D gates keep running in the host scheduler.
+    isHidden: function () { return hidden || document.body.classList.contains('s3d-open'); },
     // GL 层据此判断活动画布当前是否真的可见（窄屏抽屉关着 = 不可见）。
     isStageVisible: isStageVisible,
     // 已经平滑过的能量，0–1。粒子层直接吃这个值比自己重算 FFT 均值便宜，
@@ -1860,6 +1869,14 @@
     // 播放位置（毫秒），已经做过本地插值。表现层要跟着音乐走就用它，
     // 不要去读快照的原始 position_ms——那个只有推送到的瞬间才是准的。
     position: currentPos,
+
+    // Read-only presentation data. All stages share this playback clock and track owner.
+    presentation: function () {
+      return { track: track, cover: lastCover, playing: playing,
+        position: currentPos(), duration: durMs, volume: playbackVolume,
+        reduced: reduced || !!(systemMotion && systemMotion.matches) };
+    },
+    lyricTokens: tokensFor,
 
     // 三维歌词场景的只读快照：行数组（{start_ms,text}）+ 当前行号。
     // 行号在歌词未定位时给 0，由消费方自行处理无歌词占位。

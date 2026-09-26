@@ -14,6 +14,7 @@ mod online;
 mod persist;
 mod routes;
 mod scan;
+mod secrets;
 mod stage_beats;
 mod state;
 mod ws;
@@ -71,6 +72,7 @@ const STAGE_FOCUS_JS: &str = include_str!("../web/stage-focus.js");
 // 沉浸演出：星幕歌词（半调点环）与原生全屏 + 舞台场景切换坞。
 const STAGE_HALO_JS: &str = include_str!("../web/stage-halo.js");
 // 沉浸式三维舞台：独占一个 WebGL2 上下文的全屏演出层，自带后处理链与舞台坞。
+const STAGE_LYRICS_JS: &str = include_str!("../web/stage-lyrics.js");
 const STAGE3D_JS: &str = include_str!("../web/stage3d.js");
 const STAGE3D_CSS: &str = include_str!("../web/stage3d.css");
 const STAGE_IMMERSIVE_JS: &str = include_str!("../web/stage-immersive.js");
@@ -92,6 +94,10 @@ const CSS: &str = "text/css; charset=utf-8";
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    if args.version {
+        println!("vmusicd {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if args.help {
         print_help();
         return Ok(());
@@ -128,6 +134,14 @@ async fn main() -> anyhow::Result<()> {
 
     // 逐源音质偏好以 settings 为权威；缺键/坏值由 load 内部回落为缺省表。
     let quality_prefs = crate::online::quality::load(&db).await.unwrap_or_default();
+    // 用户显式保留的缓存条目（跨重启保留）。
+    let keep_list: Vec<String> = crate::persist::load_strings(&db, "online_keep")
+        .await
+        .unwrap_or_default();
+    // DSP 设置：EQ/响度归一化/交叉淡化，跨重启恢复。
+    let dsp_config = crate::state::DspConfig::from_settings(
+        &vmusic_store::settings::get_all(&db).await.unwrap_or_default(),
+    );
 
     let (events, _) = broadcast::channel(128);
     let state = Arc::new(AppState {
@@ -140,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
         queue: Default::default(),
         cursor: Default::default(),
         scan: Default::default(),
+        scan_cancel: Default::default(),
         qr: crate::online::qr::Registry::new(),
         play_generation: Default::default(),
         play_commit: Default::default(),
@@ -147,6 +162,8 @@ async fn main() -> anyhow::Result<()> {
         online_meta: Default::default(),
         downloads: Default::default(),
         protected: Default::default(),
+        keep: tokio::sync::Mutex::new(keep_list),
+        dsp: tokio::sync::Mutex::new(dsp_config.clone()),
         auto_failures: Default::default(),
         quality: tokio::sync::Mutex::new(quality_prefs),
         stage_beats: Default::default(),
@@ -156,6 +173,23 @@ async fn main() -> anyhow::Result<()> {
     // 重复注入，启动路径只走一次，忽略即可。
     let _ = state.weak_self.set(std::sync::Arc::downgrade(&state));
     spawn_event_pump(state.clone());
+    // DSP 即时下发（播放时再按曲目追加 track_gain）。
+    let _ = state
+        .audio
+        .set_dsp(vmusic_core::DspParams {
+            eq_gains_db: dsp_config.eq_gains_db,
+            preamp_db: dsp_config.preamp_db,
+            track_gain_db: 0.0,
+        })
+        .await;
+    let _ = state.audio.set_crossfade(dsp_config.crossfade_ms).await;
+
+    // 凭据迁移：SQLite 旧明文凭据 → 系统钥匙串。失败保留旧数据并记 ERROR。
+    let db_handle = state.db.clone();
+    tokio::spawn(async move {
+        crate::online::cred::migrate_secrets_to_keyring(&db_handle).await;
+    });
+    scan::spawn_watcher(state.clone());
 
     // 清掉上次崩溃留下的半截下载，并按配置做一次缓存容量回收。
     {
@@ -203,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/stage-freecam.js", get(|| asset(JS, STAGE_FREECAM_JS)))
         .route("/stage-focus.js", get(|| asset(JS, STAGE_FOCUS_JS)))
         .route("/stage-halo.js", get(|| asset(JS, STAGE_HALO_JS)))
+        .route("/stage-lyrics.js", get(|| asset(JS, STAGE_LYRICS_JS)))
         .route("/stage3d.js", get(|| asset(JS, STAGE3D_JS)))
         .route("/stage-immersive.js", get(|| asset(JS, STAGE_IMMERSIVE_JS)))
         .route("/vendor/qrcode.js", get(|| asset(JS, QRCODE_JS)))
@@ -330,6 +365,7 @@ struct Args {
     bind: Option<String>,
     port: Option<u16>,
     data_dir: Option<std::path::PathBuf>,
+    version: bool,
 }
 
 impl Args {
@@ -340,11 +376,13 @@ impl Args {
             bind: None,
             port: None,
             data_dir: None,
+            version: false,
         };
         let mut iter = std::env::args().skip(1);
         while let Some(arg) = iter.next() {
             match arg.as_str() {
                 "-h" | "--help" => args.help = true,
+                "--version" => args.version = true,
                 "--open" => args.open = true,
                 "--bind" => args.bind = iter.next(),
                 "--port" => args.port = iter.next().and_then(|v| v.parse().ok()),

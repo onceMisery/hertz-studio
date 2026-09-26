@@ -1014,7 +1014,9 @@ section('歌单体验：封面共享与详情契约');
   // 重扫必须复用既有行 id，否则封面按新 UUID 落盘、DB 保留旧 id，204。
   ok(/pub async fn get_track_id_by_path\(/.test(storeSrc2),
     'store 提供按路径查既有 id 的接口');
-  ok(/get_track_id_by_path\(&state\.db, &track\.path\)[\s\S]{0,220}?save_cover\(/.test(scanSrc),
+  // 增量扫描：既有行走 existing 映射复用 id（track.id = id），封面随后按
+  // 复用后的 track.id 落盘——身份跟路径走的契约不变，代码形态变了。
+  ok(/track\.id = id;[\s\S]{0,1500}?let id = track\.id\.clone\(\);[\s\S]{0,200}?save_cover\(&cache, &id,/.test(scanSrc),
     '扫描在保存封面前复用既有曲目 id（身份跟路径走）');
 
   // MP3 的 ID3v2 位于容器外，Probe 单独返回；漏读它封面与标签全丢。

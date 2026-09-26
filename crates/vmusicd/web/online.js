@@ -171,6 +171,27 @@
       });
     }
 
+    // 加入自建歌单：混合歌单的关键入口。菜单由宿主（app.js）出——它持有
+    // 自建歌单清单；这里只把整份在线曲目（含快照字段）交过去。
+    if (H.addToPlaylistMenu) {
+      var plBtn = document.createElement('button');
+      plBtn.className = 't-act';
+      plBtn.type = 'button';
+      plBtn.title = '加入歌单';
+      plBtn.setAttribute('aria-label', '加入歌单');
+      plBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-playlist"/></svg>';
+      plBtn.onclick = function (e) {
+        e.stopPropagation();
+        H.addToPlaylistMenu(track, plBtn, e);
+      };
+      var plActions = row.querySelector('.t-actions');
+      // 红心（若已挂）在最前，加入歌单排第二，试听按钮保持最后。
+      var anchorNode = plActions.firstChild && plActions.firstChild.nextSibling
+        ? plActions.firstChild.nextSibling : null;
+      if (anchorNode) plActions.insertBefore(plBtn, anchorNode);
+      else plActions.appendChild(plBtn);
+    }
+
     var btn = row.querySelector('[data-act="preview"]');
     btn.disabled = disabled;
     btn.title = track.vip_only
@@ -513,11 +534,26 @@
     return (d.getMonth() + 1) + '月' + d.getDate() + '日';
   }
 
+  // 历史读取状态：来源筛选 + 游标分页（服务端按 played_at 倒序给 total）。
+  var historyState = { source: '', offset: 0, total: 0, loading: false };
+
   async function loadHistory() {
     var host = $('op-history');
     if (!host) return;
     var list = $('op-history-list');
     if (!list) return;
+    historyState.offset = 0;
+    historyState.total = 0;
+    var more = $('op-history-more');
+    if (more) more.hidden = true;
+    var sourceSel = $('op-history-source');
+    if (sourceSel && !sourceSel.dataset.bound) {
+      sourceSel.dataset.bound = '1';
+      sourceSel.onchange = function () {
+        historyState.source = sourceSel.value;
+        loadHistory();
+      };
+    }
     // 清空按钮每次渲染重新绑定（元素与区块同在，这里绑一定拿得到）。
     var clearBtn = $('op-history-clear');
     if (clearBtn) {
@@ -532,13 +568,15 @@
     }
     var data;
     try {
-      data = await T.get('/v1/history?limit=20');
+      var src = historyState.source ? '&source=' + encodeURIComponent(historyState.source) : '';
+      data = await T.get('/v1/history?limit=20&offset=' + historyState.offset + src);
     } catch (e) {
       host.hidden = true;
       return;
     }
     var items = (data && data.items) || [];
-    host.hidden = items.length === 0;
+    historyState.total = (data && data.total) || 0;
+    host.hidden = (historyState.offset === 0 && items.length === 0);
     list.textContent = '';
     items.forEach(function (it) {
       var row = document.createElement('div');
@@ -591,6 +629,93 @@
       });
       list.appendChild(row);
     });
+
+    // 游标分页：还有更早的就显示「加载更早」，追加而不是重绘。
+    historyState.offset += items.length;
+    if (more) {
+      var hasMore = historyState.offset < historyState.total;
+      more.hidden = !hasMore;
+      more.onclick = function () { loadMoreHistory(); };
+    }
+  }
+
+  async function loadMoreHistory() {
+    var list = $('op-history-list');
+    var more = $('op-history-more');
+    if (!list || historyState.loading) return;
+    historyState.loading = true;
+    if (more) { more.disabled = true; more.textContent = '正在读取…'; }
+    try {
+      var src = historyState.source ? '&source=' + encodeURIComponent(historyState.source) : '';
+      var data = await T.get('/v1/history?limit=20&offset=' + historyState.offset + src);
+      var items = (data && data.items) || [];
+      items.forEach(function (it) {
+        var row = historyRow(it);
+        list.appendChild(row);
+      });
+      historyState.offset += items.length;
+      if (more) {
+        more.hidden = historyState.offset >= historyState.total;
+        more.textContent = '加载更早';
+      }
+    } catch (e) {
+      H.toast('读取更早的播放记录失败', 'error');
+    } finally {
+      historyState.loading = false;
+      if (more) more.disabled = false;
+    }
+  }
+
+  // 单条历史行（首次渲染与「加载更早」共用同一套构造）。
+  function historyRow(it) {
+    var row = document.createElement('div');
+    row.className = 'op-history-item';
+
+    var cover = document.createElement('div');
+    cover.className = 'op-h-cover';
+    if (it.cover_url) {
+      cover.style.backgroundImage = 'url("' + safeCoverUrl(it.cover_url) + '")';
+    } else {
+      cover.textContent = '♪';
+    }
+
+    var main = document.createElement('div');
+    main.className = 'op-h-main';
+    var title = document.createElement('div');
+    title.className = 'op-h-title';
+    title.textContent = it.title || it.ref_id;
+    var sub = document.createElement('div');
+    sub.className = 'op-h-sub';
+    sub.textContent = [it.artist, it.album].filter(Boolean).join(' · ') || '未知艺术家';
+    main.append(title, sub);
+
+    var src = badge(it.source === 'local' ? 'local' : it.source);
+    src.classList.add('op-h-src');
+
+    var time = document.createElement('span');
+    time.className = 'op-h-time';
+    time.textContent = relTime(it.played_at);
+
+    var del = document.createElement('button');
+    del.className = 'op-h-del';
+    del.type = 'button';
+    del.title = '移除';
+    del.textContent = '×';
+    del.onclick = async function (e) {
+      e.stopPropagation();
+      try {
+        await T.del('/v1/history/' + it.id);
+        loadHistory();
+      } catch (err) {
+        H.toast('移除失败', 'error');
+      }
+    };
+
+    row.append(cover, main, src, time, del);
+    row.addEventListener('click', function () {
+      replayHistory(it);
+    });
+    return row;
   }
 
   // 点击历史行：在线曲按单元素 track 重新入队（playable:true 走整盘试听链路，

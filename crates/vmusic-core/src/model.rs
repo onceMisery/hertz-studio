@@ -167,6 +167,8 @@ pub struct Favorite {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LyricSource {
+    /// 手动导入/关联、存在数据库里的 LRC 原文：用户明确指定的，最优先。
+    Imported,
     /// Parsed from a sidecar `.lrc` file next to the audio file.
     Sidecar,
     /// Read out of the audio container (e.g. an embedded lyric tag).

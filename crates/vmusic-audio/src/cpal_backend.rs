@@ -54,8 +54,11 @@ const TAP_LEN: usize = FFT_SIZE * 3;
 const FADE_IN_MS: u64 = 250;
 /// 暂停 / 停止 / 切歌时的淡出时长。
 const FADE_OUT_MS: u64 = 200;
-/// 自然播放到尾部前提前开始淡出的时长。
+/// 自然播放到尾部前提前开始淡出的默认时长；服务端 `crossfade_ms` 设置
+/// 会覆盖它（与淡入共用一个值）。
 const TAIL_FADE_MS: u64 = 500;
+/// EQ 频段中心频率（Hz）。六段峰化滤波，覆盖低频架到高频齿音的常用调节。
+pub const EQ_BANDS: [f32; 6] = [60.0, 150.0, 400.0, 1000.0, 2400.0, 6000.0];
 
 /// State shared between the decoder thread and the audio callback.
 struct Shared {
@@ -73,6 +76,15 @@ struct Shared {
     /// 解码线程异常早夭标志：仅在「非干净 EOF、非主动 stop」的退出时置位，
     /// actor 经 take_decode_failure 每 tick 取走（换装淡出窗口除外）。
     decode_error: AtomicBool,
+    /// DSP：EQ 增益（dB bits × 6）与合成增益（preamp+track，dB bits）。
+    eq_gains: [AtomicU32; 6],
+    dsp_gain_db: AtomicU32,
+    device_rate: AtomicU32,
+    /// 可调交叉淡化（毫秒）：换装淡入与尾部淡出共用。
+    crossfade_ms: AtomicU64,
+    /// 回调线程持有的双二阶滤波器组（含各声道状态）。try_lock 拿不到就跳过
+    /// 本轮回调的 EQ——丢一段滤波远好过音频线程阻塞。
+    filters: Mutex<Option<EqBank>>,
 }
 
 impl Shared {
@@ -89,6 +101,18 @@ impl Shared {
             fade_frames: AtomicU64::new(0),
             fade_done: AtomicU64::new(0),
             decode_error: AtomicBool::new(false),
+            eq_gains: [
+                AtomicU32::new(0.0f32.to_bits()),
+                AtomicU32::new(0.0f32.to_bits()),
+                AtomicU32::new(0.0f32.to_bits()),
+                AtomicU32::new(0.0f32.to_bits()),
+                AtomicU32::new(0.0f32.to_bits()),
+                AtomicU32::new(0.0f32.to_bits()),
+            ],
+            dsp_gain_db: AtomicU32::new(0.0f32.to_bits()),
+            device_rate: AtomicU32::new(48_000),
+            crossfade_ms: AtomicU64::new(0),
+            filters: Mutex::new(None),
         }
     }
 
@@ -205,7 +229,19 @@ impl CpalBackend {
         })
     }
 
+    /// DSP 上下文（采样率/滤波器组）跟随设备重建；换设备后 EQ 系数必须
+    /// 按新采样率重算。
+    fn sync_dsp_context(&mut self) {
+        self.shared
+            .device_rate
+            .store(self.device_rate, Ordering::Relaxed);
+        if let Ok(mut f) = self.shared.filters.lock() {
+            *f = None;
+        }
+    }
+
     fn ensure_stream(&mut self) -> Result<(), AudioError> {
+        self.sync_dsp_context();
         if self.stream.is_some() {
             return Ok(());
         }
@@ -314,7 +350,12 @@ impl CpalBackend {
         self.tail_armed = false;
         self.shared.reset_fade_shared();
         if play_after {
-            self.shared.arm_fade(1.0, FADE_IN_MS, self.device_rate);
+            let cf = self
+                .shared
+                .crossfade_ms
+                .load(Ordering::Relaxed);
+            self.shared
+                .arm_fade(1.0, if cf == 0 { FADE_IN_MS } else { cf }, self.device_rate);
             self.shared.playing.store(true, Ordering::Relaxed);
         } else {
             self.shared.playing.store(false, Ordering::Relaxed);
@@ -400,7 +441,12 @@ impl CpalBackend {
             let play_after = !self.pending_pause && !self.pending_stop;
             self.pending_pause = false;
             self.pending_stop = false;
-            self.shared.arm_fade(0.0, FADE_OUT_MS, self.device_rate);
+            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
+            self.shared.arm_fade(
+                0.0,
+                if cf == 0 { FADE_OUT_MS } else { cf.max(60) },
+                self.device_rate,
+            );
             self.pending_load = Some(PendingLoad {
                 opened,
                 info: info.clone(),
@@ -419,7 +465,12 @@ impl CpalBackend {
             self.shared.flag_decode_error();
         }
         if was_playing {
-            self.shared.arm_fade(1.0, FADE_IN_MS, self.device_rate);
+            let cf = self
+                .shared
+                .crossfade_ms
+                .load(Ordering::Relaxed);
+            self.shared
+                .arm_fade(1.0, if cf == 0 { FADE_IN_MS } else { cf }, self.device_rate);
         }
         Ok(info)
     }
@@ -453,7 +504,9 @@ impl CpalBackend {
             if let Some(d) = self.duration_ms {
                 let pos = self.position_ms();
                 let remain = d.saturating_sub(pos);
-                if !self.tail_armed && remain <= TAIL_FADE_MS && remain > 0 {
+                let tail_ms = self.shared.crossfade_ms.load(Ordering::Relaxed);
+                let tail_ms = if tail_ms == 0 { TAIL_FADE_MS } else { tail_ms };
+                if !self.tail_armed && remain <= tail_ms && remain > 0 {
                     // 直接按剩余帧数装斜坡（不用 arm_fade 的固定毫秒），
                     // 保证增益恰好在最后一帧到 0。
                     let frames = (remain as u128 * self.device_rate as u128 / 1000) as u64;
@@ -476,6 +529,117 @@ impl CpalBackend {
                 }
             }
         }
+    }
+}
+
+/// 一个双二阶节（RBJ cookbook peaking EQ）+ 一条声道的历史状态。
+#[derive(Debug, Clone, Copy)]
+struct BiQuad {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
+}
+
+impl BiQuad {
+    /// RBJ cookbook peaking EQ，系数已按 a0 归一化。
+    fn peaking(center_hz: f32, gain_db: f32, q: f32, rate: u32) -> Self {
+        let big_a = 10f64.powf(gain_db as f64 / 40.0);
+        let w0 = 2.0 * std::f64::consts::PI * center_hz as f64 / rate.max(1) as f64;
+        let alpha = w0.sin() / (2.0 * q as f64);
+        let cos_w0 = w0.cos();
+        let a0 = 1.0 + alpha / big_a;
+        Self {
+            b0: (1.0 + alpha * big_a) / a0,
+            b1: (-2.0 * cos_w0) / a0,
+            b2: (1.0 - alpha * big_a) / a0,
+            a1: (-2.0 * cos_w0) / a0,
+            a2: (1.0 - alpha / big_a) / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    /// Direct Form I；中性段（增益 0）系数退化为恒等，计算量可忽略。
+    #[inline]
+    fn process(&mut self, x: f64) -> f64 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
+/// 六段 EQ 滤波器组：系数按 (采样率, 增益) 缓存，状态按声道各一份。
+struct EqBank {
+    rate: u32,
+    gains: [f32; 6],
+    /// 每声道一份滤波器状态（采样历史），系数同源。
+    states: Vec<[BiQuad; 6]>,
+}
+
+impl EqBank {
+    fn new(rate: u32, gains: [f32; 6], channels: usize) -> Self {
+        let bands: Vec<BiQuad> = EQ_BANDS
+            .iter()
+            .zip(gains.iter())
+            .map(|(&f, &g)| BiQuad::peaking(f, g, 1.2, rate))
+            .collect();
+        let states = (0..channels.max(1))
+            .map(|_| {
+                let mut arr = [BiQuad {
+                    b0: 1.0,
+                    b1: 0.0,
+                    b2: 0.0,
+                    a1: 0.0,
+                    a2: 0.0,
+                    x1: 0.0,
+                    x2: 0.0,
+                    y1: 0.0,
+                    y2: 0.0,
+                }; 6];
+                for (a, b) in arr.iter_mut().zip(bands.iter()) {
+                    *a = *b;
+                }
+                arr
+            })
+            .collect();
+        Self { rate, gains, states }
+    }
+
+    fn matches(&self, rate: u32, gains: &[f32; 6], channels: usize) -> bool {
+        self.rate == rate && self.gains == *gains && self.states.len() == channels.max(1)
+    }
+
+    #[inline]
+    fn process_frame(&mut self, ch: usize, sample: f32) -> f32 {
+        let mut v = sample as f64;
+        for band in self.states[ch].iter_mut() {
+            v = band.process(v);
+        }
+        v as f32
+    }
+}
+
+/// 软限幅：-ceiling..ceiling 之外平滑压缩，线性段完全透明。
+fn soft_limit(sample: f32, ceiling: f32) -> f32 {
+    let a = sample.abs();
+    if a <= ceiling {
+        sample
+    } else {
+        let over = a - ceiling;
+        let limited = ceiling + over / (1.0 + over);
+        limited.min(1.0) * sample.signum()
     }
 }
 
@@ -520,6 +684,23 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
         }
     }
 
+    // DSP 链：EQ（每声道滤波器组）→ 线性增益（用户音量 × 斜坡 × preamp+track）
+    // → 软限幅防削波。滤波器组按 (采样率, 增益) 签名惰性重建；try_lock 失败
+    // 就跳过 EQ，音频线程绝不阻塞。
+    let rate = shared.device_rate.load(Ordering::Relaxed);
+    let mut eq_gains = [0.0f32; 6];
+    for (i, g) in eq_gains.iter_mut().enumerate() {
+        *g = f32::from_bits(shared.eq_gains[i].load(Ordering::Relaxed));
+    }
+    let mut bank_guard = shared.filters.try_lock().ok();
+    if let Some(bank) = bank_guard.as_mut() {
+        if !bank.as_ref().is_some_and(|b| b.matches(rate, &eq_gains, channels)) {
+            **bank = Some(EqBank::new(rate, eq_gains, channels));
+        }
+    }
+    let dsp_gain =
+        10f64.powf(f32::from_bits(shared.dsp_gain_db.load(Ordering::Relaxed)) as f64 / 20.0) as f32;
+
     // 逐帧乘 用户音量 × 斜坡增益，每帧推进一次斜坡。斜坡状态只在回调末尾
     // 写回原子量，中途不产生跨线程可见的中间态。
     let mut fade_total = shared.fade_frames.load(Ordering::Relaxed);
@@ -539,7 +720,14 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
         }
         for c in 0..channels {
             let idx = f * channels + c;
-            data[idx] = data[idx] * volume * gain;
+            let mut sample = data[idx];
+            if let Some(bank) = bank_guard.as_mut() {
+                if let Some(b) = bank.as_mut() {
+                    sample = b.process_frame(c, sample);
+                }
+            }
+            sample = sample * volume * gain * dsp_gain;
+            data[idx] = soft_limit(sample, 0.98);
         }
     }
     shared.fade_gain.store(gain.to_bits(), Ordering::Relaxed);
@@ -649,7 +837,12 @@ impl AudioBackend for CpalBackend {
             || f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed)) < 0.999
         {
             // 从淡出中点或零增益恢复也走淡入，不硬拉满。
-            self.shared.arm_fade(1.0, FADE_IN_MS, self.device_rate);
+            let cf = self
+                .shared
+                .crossfade_ms
+                .load(Ordering::Relaxed);
+            self.shared
+                .arm_fade(1.0, if cf == 0 { FADE_IN_MS } else { cf }, self.device_rate);
         }
         self.shared.playing.store(true, Ordering::Relaxed);
         Ok(())
@@ -657,7 +850,12 @@ impl AudioBackend for CpalBackend {
 
     fn pause(&mut self) -> Result<(), AudioError> {
         if self.shared.playing.load(Ordering::Relaxed) && !self.pending_pause {
-            self.shared.arm_fade(0.0, FADE_OUT_MS, self.device_rate);
+            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
+            self.shared.arm_fade(
+                0.0,
+                if cf == 0 { FADE_OUT_MS } else { cf.max(60) },
+                self.device_rate,
+            );
             self.pending_pause = true;
             // 换装淡出期间暂停：新曲换装后也保持暂停。
             if let Some(pending) = self.pending_load.as_mut() {
@@ -675,7 +873,12 @@ impl AudioBackend for CpalBackend {
     /// duration 不清：停止后进度条仍应显示总时长。
     fn stop(&mut self) -> Result<(), AudioError> {
         if self.shared.playing.load(Ordering::Relaxed) && !self.pending_stop {
-            self.shared.arm_fade(0.0, FADE_OUT_MS, self.device_rate);
+            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
+            self.shared.arm_fade(
+                0.0,
+                if cf == 0 { FADE_OUT_MS } else { cf.max(60) },
+                self.device_rate,
+            );
             self.pending_stop = true;
             if let Some(pending) = self.pending_load.as_mut() {
                 pending.play_after = false;
@@ -713,6 +916,24 @@ impl AudioBackend for CpalBackend {
         self.shared
             .volume
             .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn set_dsp(&mut self, params: vmusic_core::DspParams) -> Result<(), AudioError> {
+        for (i, g) in params.eq_gains_db.iter().enumerate() {
+            self.shared.eq_gains[i]
+                .store(g.clamp(-12.0, 12.0).to_bits(), Ordering::Relaxed);
+        }
+        // 增益上限 +18 dB：RG 归一化补偿合理范围；限幅器在链尾兜底。
+        let total_db = params.preamp_db.clamp(-24.0, 12.0) + params.track_gain_db.clamp(-24.0, 12.0);
+        self.shared
+            .dsp_gain_db
+            .store(total_db.clamp(-24.0, 18.0).to_bits(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn set_crossfade(&mut self, ms: u64) -> Result<(), AudioError> {
+        self.shared.crossfade_ms.store(ms.min(8000), Ordering::Relaxed);
         Ok(())
     }
 
@@ -1316,5 +1537,48 @@ mod tests {
         assert!(!should_flag_decode_error(true, true, true));
         // 其它错误（如下载链路断开）且未 stop：异常早夭，flag 候选。
         assert!(should_flag_decode_error(false, false, false));
+    }
+}
+
+#[cfg(test)]
+mod dsp_tests {
+    use super::*;
+
+    #[test]
+    fn peaking_filter_zero_gain_is_identity() {
+        let mut q = BiQuad::peaking(1000.0, 0.0, 1.2, 48_000);
+        // 增益 0 时 b0≈1、b1≈-2cos、a1≈-2cos、其余≈0 → 直通（系数误差 < 1e-9）
+        let out = q.process(0.5);
+        assert!((out - 0.5).abs() < 1e-6, "identity violated: {out}");
+    }
+
+    #[test]
+    fn peaking_filter_boosts_band_center() {
+        // +12dB @1kHz：以 1kHz 正弦（数值上直接喂常数不合适，喂极低频近似直流，
+        // 低频段增益应接近 1）。这里直接验证系数能量：中心频率处幅度比 > 1。
+        let q = BiQuad::peaking(1000.0, 12.0, 1.2, 48_000);
+        // 中心频率增益 |b0+b1 z+b2 z²|/|1+a1 z+a2 z²| 在 z=e^{-jw0} 处 ≈ 10^(12/20)
+        // 简化：直接断言 b0 > a0 归一化后的 1（有增益）
+        assert!(q.b0 > 1.0);
+    }
+
+    #[test]
+    fn limiter_is_transparent_below_ceiling_and_caps_above() {
+        assert_eq!(soft_limit(0.5, 0.98), 0.5);
+        assert_eq!(soft_limit(-0.5, 0.98), -0.5);
+        let loud = soft_limit(1.5, 0.98);
+        assert!(loud > 0.98 && loud <= 1.0, "soft clip must stay bounded: {loud}");
+        let neg = soft_limit(-1.5, 0.98);
+        assert!((-1.0..=-0.98).contains(&neg));
+        assert_eq!(soft_limit(2.5, 0.98), 1.0);
+    }
+
+    #[test]
+    fn eq_bank_matches_by_rate_gains_channels() {
+        let bank = EqBank::new(48_000, [0.0; 6], 2);
+        assert!(bank.matches(48_000, &[0.0; 6], 2));
+        assert!(!bank.matches(44_100, &[0.0; 6], 2));
+        assert!(!bank.matches(48_000, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 2));
+        assert!(!bank.matches(48_000, &[0.0; 6], 1));
     }
 }

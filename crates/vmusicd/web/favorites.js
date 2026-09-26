@@ -21,6 +21,9 @@
     total: 0,
     counts: { track: 0, radio: 0 },
     loading: false,
+    offset: 0,
+    generation: 0,
+    playingAll: false,
     // 已收藏的身份集合，键是 `identity(kind, source, refId)`。
     // 曲库一屏 200 行，靠它做 O(1) 判红，不必每行回服务端问一次。
     owned: new Set(),
@@ -40,27 +43,109 @@
   // 读写
   // ---------------------------------------------------------------------------
 
-  async function load() {
-    if (favState.loading) return;
+  function pageUrl(kind, offset) {
+    return '/v1/favorites?kind=' + encodeURIComponent(kind) + '&limit=200&offset=' + offset;
+  }
+
+  function load() {
+    // 刷新与切 tab 都开启新一轮读取，旧请求即使晚到也不能改写当前列表。
+    favState.generation += 1;
+    favState.items = [];
+    favState.offset = 0;
+    favState.total = 0;
+    return loadPage(false);
+  }
+
+  function loadMore() {
+    if (favState.loading || favState.offset >= favState.total) return;
+    return loadPage(true);
+  }
+
+  async function loadPage(append) {
+    var kind = favState.kind;
+    var generation = favState.generation;
+    var offset = append ? favState.offset : 0;
+    function current() {
+      return generation === favState.generation && kind === favState.kind;
+    }
     favState.loading = true;
     render();
     try {
-      var page = await T.get('/v1/favorites?kind=' + encodeURIComponent(favState.kind)
-        + '&limit=200&offset=0');
-      favState.items = page.favorites || [];
+      var page = await T.get(pageUrl(kind, offset));
+      if (!current()) return;
+      var items = page.favorites || [];
+      favState.items = append ? favState.items.concat(items) : items;
+      // 仅成功后推进 offset；失败重试仍取同一页。
+      favState.offset = offset + items.length;
       favState.total = page.total || 0;
       favState.counts = page.counts || favState.counts;
       // 本地列表本身就是判红集合的来源之一，顺手合并进去。
-      favState.items.forEach(function (f) {
+      items.forEach(function (f) {
         favState.owned.add(identity(f.kind, f.source, f.ref_id));
       });
       renderCounts();
     } catch (err) {
+      if (!current()) return;
       H.toast(H.errText('收藏读取失败', err), 'error');
-      favState.items = [];
     } finally {
-      favState.loading = false;
-      render();
+      if (current()) {
+        favState.loading = false;
+        render();
+      }
+    }
+  }
+
+  /// 收藏全部播放：本地与在线收藏混入同一条队列。
+  ///
+  /// 逐页读全量身份（界面只加载了第一页，不能只播已加载的），本地 ref_id 直接
+  /// 进队列，在线 ref_id 折成 `online:<source>:<id>` 虚拟身份并把快照交给
+  /// H.playQueue——服务端历史与队列渲染都靠这份快照，重启后也不退化。
+  async function playFavorites() {
+    if (favState.playingAll) return;
+    var intent = T.beginPlaybackIntent();
+    favState.playingAll = true;
+    renderButtons();
+    try {
+      var offset = 0;
+      var ids = [];
+      var meta = {};
+      var total;
+      do {
+        var page = await T.get(pageUrl('track', offset));
+        if (!T.isPlaybackIntent(intent)) return;
+        var items = page.favorites || [];
+        total = page.total || 0;
+        if (!items.length && offset < total) throw new Error('收藏列表已变化，请重试');
+        items.forEach(function (f) {
+          if (f.kind !== 'track') return;
+          if (f.source === 'local' || !f.source) {
+            ids.push(f.ref_id);
+            return;
+          }
+          var vid = 'online:' + f.source + ':' + f.ref_id;
+          ids.push(vid);
+          meta[vid] = {
+            title: f.title,
+            artist: f.artist,
+            album: f.album,
+            cover: f.cover,
+            duration_ms: f.duration_ms || null,
+          };
+        });
+        offset += items.length;
+      } while (offset < total);
+      if (!ids.length) {
+        H.toast('还没有可播放的收藏曲目');
+        return;
+      }
+      if (!T.isPlaybackIntent(intent)) return;
+      await H.playQueue(ids, meta);
+    } catch (err) {
+      if (!T.isPlaybackIntent(intent)) return;
+      H.toast(H.errText('收藏播放失败', err), 'error');
+    } finally {
+      favState.playingAll = false;
+      renderButtons();
     }
   }
 
@@ -192,6 +277,7 @@
   }
 
   function render() {
+    renderButtons();
     var body = H.ui.favList;
     if (!body) return;
     if (H.ui.favTabs) {
@@ -200,7 +286,7 @@
       });
     }
     body.innerHTML = '';
-    if (favState.loading) {
+    if (favState.loading && !favState.items.length) {
       body.innerHTML = '<div class="hint">正在读取收藏…</div>';
       return;
     }
@@ -209,6 +295,19 @@
       return;
     }
     favState.items.forEach(function (f) { body.appendChild(row(f)); });
+  }
+
+  function renderButtons() {
+    if (H.ui.favMore) {
+      H.ui.favMore.hidden = favState.offset >= favState.total;
+      H.ui.favMore.disabled = favState.loading;
+      H.ui.favMore.textContent = favState.loading ? '正在读取收藏…' : '加载更多收藏';
+    }
+    if (H.ui.favPlayAll) {
+      H.ui.favPlayAll.hidden = favState.kind !== 'track';
+      H.ui.favPlayAll.disabled = favState.playingAll;
+      H.ui.favPlayAll.textContent = favState.playingAll ? '正在读取收藏…' : '播放收藏';
+    }
   }
 
   function row(f) {
@@ -317,17 +416,9 @@
       };
     }
     if (H.ui.favPlayAll) {
-      H.ui.favPlayAll.onclick = function () {
-        var ids = favState.items
-          .filter(function (f) { return f.kind === 'track' && f.source === 'local'; })
-          .map(function (f) { return f.ref_id; });
-        if (!ids.length) {
-          H.toast('当前列表里没有可播放的本地曲目');
-          return;
-        }
-        if (typeof H.playLocal === 'function') H.playLocal(ids[0], ids);
-      };
+      H.ui.favPlayAll.onclick = function () { return playFavorites(); };
     }
+    if (H.ui.favMore) H.ui.favMore.onclick = function () { return loadMore(); };
     if (H.ui.favRefresh) H.ui.favRefresh.onclick = function () { load(); };
     renderCounts();
     render();
@@ -338,6 +429,10 @@
     init: init,
     onViewEnter: function () { load(); },
     load: load,
+    loadMore: loadMore,
+    playFavorites: playFavorites,
+    // 旧导出名：check 脚本与既有调用方的兼容别名。
+    playLocalFavorites: playFavorites,
     toggle: toggle,
     syncMembership: syncMembership,
     attachHeart: attachHeart,

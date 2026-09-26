@@ -119,6 +119,8 @@
   // -------------------------------------------------------------------------
 
   var ICONS = {
+    silk: '<path d="M4 4h16v16H4zM4 15c4-8 8 8 16-6M4 10c4-8 8 8 16-6"/>',
+    resonance: '<ellipse cx="12" cy="12" rx="9" ry="4" transform="rotate(-28 12 12)"/><circle cx="12" cy="12" r="2"/>',
     aurora: '<path d="M3 17c3-5 6-5 9-1s6 4 9-2"/><path d="M5 21c3-3.5 6-3.5 7-1"/>' +
       '<circle cx="12" cy="6" r="1.6"/>',
     tunnel: '<ellipse cx="12" cy="12" rx="9" ry="7"/><ellipse cx="12" cy="12" rx="5.5" ry="4"/>' +
@@ -140,17 +142,17 @@
       // 机位必须落在隧道近端之外：look + dist 恰好把相机放在 z=0，而环铺在
       // z ∈ [-1, -zSpan]，整段都在前方，近平面永远裁不到东西。
       cam: { theta: 0.0, phi: 0.0, dist: 2.2, look: [0, 0, -2.2] },
-      counts: [36, 60, 92], additive: true, depth: false
+      counts: [12000, 26000, 42000], additive: true, depth: false, field: 1
     },
     {
       id: 'terrain', label: '音域地形', desc: '随频谱起伏的声场地形',
-      cam: { theta: 0.62, phi: 0.52, dist: 30.0, look: [0, 2.4, 0] },
-      counts: [24, 38, 54], additive: false, depth: true
+      cam: { theta: 0.12, phi: 0.38, dist: 22.0, look: [0, 0.4, -3] },
+      counts: [14000, 32000, 54000], additive: true, depth: false, field: 3
     },
     {
-      id: 'orb', label: '黑曜星球', desc: '星球雕塑与大气边缘光',
-      cam: { theta: 0.72, phi: 0.18, dist: 9.2, look: [0, 0, 0] },
-      counts: [2400, 5200, 8600], additive: false, depth: true
+      id: 'orb', label: '引力星球', desc: '声波在粒子曲面上流动',
+      cam: { theta: 0.15, phi: 0.12, dist: 8.2, look: [0, 0, 0] },
+      counts: [12000, 28000, 48000], additive: true, depth: false, field: 2
     },
     {
       id: 'prism', label: '棱镜星系', desc: '色散旋臂与光谱尘埃',
@@ -158,6 +160,16 @@
       // 的那半团点会被近平面的 w≤0 判定整片剔除，屏幕上凭空少一块。
       cam: { theta: 0.34, phi: 0.46, dist: 20.0, look: [0, 0, 0] },
       counts: [3000, 6000, 10000], additive: true, depth: false
+    },
+    {
+      id: 'resonance', label: '共振星环', desc: '让每一次心跳，都有回响',
+      cam: { theta: 0.06, phi: 0.10, dist: 10.5, look: [0, 0, 0] },
+      counts: [14000, 30000, 48000], additive: true, depth: false, field: 4
+    },
+    {
+      id: 'silk', label: '封面浮雕', desc: '把专辑封面，化作有呼吸的粒子',
+      cam: { theta: -0.10, phi: 0.07, dist: 10.2, look: [0, 0, 0] },
+      counts: [14000, 32000, 54000], additive: true, depth: false, field: 0
     }
   ];
 
@@ -264,6 +276,116 @@
   function stageVS(body) { return '#version 300 es\n' + COMMON_VS + body; }
   function stageFS(body) { return '#version 300 es\n' + COMMON_FS + body; }
 
+  // Organised surfaces, rather than random point clouds. The same immutable
+  // vertex grid becomes silk, a tunnel, a globe, topography or nested orbits.
+  // Each frequency band displaces its own part of the surface on the GPU.
+  var FIELD_VS = stageVS([
+    'uniform int uField; uniform float uCols; uniform float uRows;',
+    'uniform sampler2D uArt; uniform float uHasArt; uniform float uBands[64];',
+    'uniform vec2 uPointer; uniform float uPointerActive; uniform vec3 uClick;',
+    'uniform float uBeatAge; uniform float uAspect;',
+    'out vec3 vColor; out float vAlpha;',
+    'const float PI = 3.14159265359;',
+    'void main(){',
+    '  float id = float(gl_VertexID);',
+    '  vec2 uv = vec2(mod(id,uCols)/(uCols-1.0),floor(id/uCols)/(uRows-1.0));',
+    '  float seed = hash11(id*1.71);',
+    '  float t = uTime;',
+    '  float band = uBands[int(clamp(uv.x*63.0,0.0,63.0))];',
+    '  vec3 colorA = vec3(0.31,0.68,0.91), colorB = vec3(0.88,0.60,0.94);',
+    '  vec3 color = mix(colorA,colorB,uv.x*0.65+uv.y*0.35);',
+    '  vec3 pos = vec3(0.0), normal = vec3(0.0,0.0,1.0);',
+    '  float light = 0.55, alpha = 0.80, scale = 1.0;',
+    '  float beatWave = sin(length(uv-0.5)*24.0-uBeatAge*9.0)*exp(-uBeatAge*2.8);',
+    '  if(uField==0){',
+    '    vec3 art = texture(uArt,uv).rgb;',
+    '    float lum = dot(art,vec3(0.2126,0.7152,0.0722));',
+    '    pos.xy = (uv-0.5)*vec2(8.6,7.2);',
+    '    float silk = sin(pos.x*0.85+t*0.32+sin(pos.y*0.8))*0.34;',
+    '    silk += snoise(vec3(pos.xy*0.48,t*0.16))*(0.24+uMid*0.8);',
+    '    pos.z = silk + (lum-0.45)*uHasArt*1.65 + beatWave*(0.22+uBass*0.35);',
+    '    pos.z += band*0.45*sin(uv.y*PI);',
+    '    color = mix(color,art,uHasArt);',
+    '    light = mix(0.72,0.45+lum*0.90,uHasArt);',
+    '    alpha *= 0.6+0.4*sin(uv.x*PI)*sin(uv.y*PI);',
+    '    scale = 0.90;',
+    '  } else if(uField==1){',
+    '    float travel = fract(uv.y-t*(0.038+uBass*0.022));',
+    '    float angle = uv.x*PI*2.0+t*0.085;',
+    '    float radius = 2.65+sin(angle*5.0+travel*16.0-t)*(0.10+uMid*0.28)+band*0.45;',
+    '    pos = vec3(cos(angle)*radius,sin(angle)*radius,-travel*34.0);',
+    '    normal = normalize(vec3(pos.xy,0.0));',
+    '    color = mix(vec3(0.18,0.74,0.91),vec3(0.75,0.44,0.94),0.5+0.5*sin(angle+travel*5.0));',
+    '    light = (0.55+0.45*pow(0.5+0.5*sin(travel*60.0-t),5.0));',
+    '    alpha = smoothstep(0.005,0.065,travel)*(1.0-smoothstep(0.76,1.0,travel));',
+    '    scale = 0.68;',
+    '  } else if(uField==2){',
+    '    float longitude = uv.x*PI*2.0+t*0.065;',
+    '    float latitude = (uv.y-0.5)*PI;',
+    '    normal = vec3(cos(latitude)*sin(longitude),sin(latitude),cos(latitude)*cos(longitude));',
+    '    float tide = snoise(normal*2.4+vec3(0.0,t*0.16,t*0.12));',
+    '    float radius = 3.25+uBass*0.55+tide*(0.12+uMid*0.60)+beatWave*0.12;',
+    '    pos = normal*radius;',
+    '    float facing = dot(normal,normalize(uCamPos-pos));',
+    '    float rim = pow(1.0-abs(facing),2.4);',
+    '    light = 0.38+max(0.0,facing)*0.44+rim*0.65;',
+    '    color = mix(vec3(0.37,0.42,0.91),vec3(0.30,0.91,0.80),0.5+0.5*sin(latitude*2.4+longitude*0.7+tide));',
+    '    alpha = facing>0.0 ? 0.88 : 0.22;',
+    '    scale = 0.82;',
+    '  } else if(uField==3){',
+    '    pos.xz = (uv-0.5)*vec2(28.0,27.0);',
+    '    float valley = sin(pos.x*0.37+pos.z*0.24-t*0.23);',
+    '    float ridge = sin(pos.z*0.55-t*0.33+cos(pos.x*0.29));',
+    '    pos.y = valley*1.25+ridge*0.70+band*(1.1+uBass*1.8);',
+    '    pos.y += snoise(vec3(pos.xz*0.18,t*0.12))*0.80+beatWave*0.40;',
+    '    normal = vec3(0.0,1.0,0.0);',
+    '    color = mix(vec3(0.17,0.57,0.73),vec3(0.67,0.96,0.83),smoothstep(-1.8,2.2,pos.y));',
+    '    light = 0.45+smoothstep(-0.8,2.1,pos.y)*0.8;',
+    '    alpha = smoothstep(0.0,0.10,uv.y)*(1.0-smoothstep(0.80,1.0,uv.y));',
+    '    scale = 0.82;',
+    '  } else {',
+    '    float orbit = min(6.0,floor(uv.y*7.0));',
+    '    float lane = fract(uv.y*7.0)-0.5;',
+    '    float angle = uv.x*PI*2.0+orbit*0.19+t*(0.026+orbit*0.005);',
+    '    float radius = 1.75+orbit*0.63+lane*0.19+uBass*(0.08+orbit*0.026);',
+    '    radius += band*0.16+sin(angle*9.0-orbit-t)*uTreble*0.07;',
+    '    pos = vec3(cos(angle)*radius*1.22,sin(angle)*radius*0.63,(orbit-3.0)*0.24);',
+    '    pos.z += sin(angle*2.0+orbit*0.65)*(0.13+uMid*0.34)+beatWave*0.20;',
+    '    pos.xy = mat2(0.992,-0.126,0.126,0.992)*pos.xy;',
+    '    color = mix(vec3(0.45,0.80,0.94),vec3(0.96,0.75,0.43),orbit/6.0);',
+    '    float filament = exp(-lane*lane*110.0);',
+    '    light = 0.40+filament*0.72+pow(0.5+0.5*sin(angle*18.0-orbit-t*0.6),9.0)*0.26;',
+    '    alpha = (0.28+filament*0.88)*(0.8+0.2*sin(uv.x*PI));',
+    '    scale = 1.08;',
+    '  }',
+    '  vec4 clip = uProj*uView*vec4(pos,1.0);',
+    '  vec2 ndc = clip.xy/max(0.001,clip.w);',
+    '  vec2 delta = (ndc-uPointer)*vec2(uAspect,1.0);',
+    '  float nearPointer = exp(-dot(delta,delta)*25.0)*uPointerActive;',
+    '  float clickDistance = length((ndc-uClick.xy)*vec2(uAspect,1.0));',
+    '  float clickRing = exp(-pow((clickDistance-uClick.z*0.8)*13.0,2.0))*exp(-uClick.z*2.0);',
+    '  pos += normal*(nearPointer*0.55+clickRing*0.65);',
+    '  pos += normalize(pos+0.001)*uScatter*1.7;',
+    '  vec4 mv = uView*vec4(pos,1.0);',
+    '  vColor = color*(light+uEnergy*0.32+nearPointer*0.25+clickRing*0.30);',
+    '  vAlpha = alpha*uFade*smoothstep(0.15,1.2,-mv.z);',
+    '  float pixel = 44.0/max(1.5,-mv.z)*scale;',
+    '  gl_PointSize = clamp(pixel,1.35,5.4)*uPointScale;',
+    '  gl_Position = uProj*mv;',
+    '}'
+  ].join('\n'));
+
+  var FIELD_FS = stageFS([
+    'in vec3 vColor; in float vAlpha;',
+    'void main(){',
+    '  float r = length(gl_PointCoord-0.5)*2.0;',
+    '  if(r>1.0 || vAlpha<0.003) discard;',
+    '  float core = 1.0-smoothstep(0.05,0.42,r);',
+    '  float edge = exp(-r*r*4.6)*(1.0-smoothstep(0.78,1.0,r));',
+    '  o = vec4(vColor*(1.15+core*0.90),edge*vAlpha);',
+    '}'
+  ].join('\n'));
+
   // ---- 舞台 1：极光穹顶 ----------------------------------------------------
   // 星野用点精灵（position 不存在 VBO 里，全部由 aSeed / aLane 在顶点着色器
   // 推导：每帧 CPU→GPU 的只有 uniform，这是整个视觉层最省的一条路）。
@@ -363,245 +485,6 @@
     '}'
   ].join('\n'));
 
-  // ---- 舞台 2：折跃隧道 ----------------------------------------------------
-  // 实例化圆环：一份环带几何 + 每实例一个序号，位置全在 VS 里按「模进」算。
-  var TUNNEL_VS = stageVS([
-    'in vec2 aDir;',
-    'in float aSide;',
-    'in float aIdx;',
-    'out vec3 vCol;',
-    'out float vA;',
-    'uniform float uRings;',
-    'void main(){',
-    '  float spacing = 1.9;',
-    '  float zSpan = uRings*spacing;',
-    '  float travel = uTime*(6.5 + uEnergy*15.0 + uBeat*8.0);',
-    //   模进：环沿 -Z 铺满一整段，随时间向相机方向流动，走完一轮从远端回卷。
-    //   必须保证整段都在相机前方 —— 只要有环落在相机背后，它就会被近平面裁出
-    //   一道笔直的硬边（这正是上一版画面里那条横线）。
-    '  float z = -mod(aIdx*spacing - travel, zSpan) - 1.0;',
-    '  float wob = snoise(vec3(aIdx*0.19, uTime*0.085, 0.0))*0.85;',
-    '  float r = 3.2 + wob + uBass*0.9;',
-    '  float side = mix(0.945, 1.055, aSide);',
-    '  vec3 pos = vec3(aDir.x*r*side, aDir.y*r*side, z);',
-    '  pos.xy *= 1.0 + uScatter*0.5;',
-    '  vec4 mv = uView * vec4(pos, 1.0);',
-    //   纵深窗函数改按视距算而不是按环序号：视距 ≤ 0 的环（在相机后面或贴着
-    //   相机）alpha 直接归零，裁切边就永远不可见。
-    '  float dist = -mv.z;',
-    //   近端必须淡得够早：相机就在隧道轴上，离得最近的环半径 3 出头、
-    //   在屏幕上却铺满整幅画面，不淡掉的话一眼看过去是一块大圆盘而不是隧道。
-    '  float win = smoothstep(1.6, 13.0, dist) * (1.0 - smoothstep(62.0, 98.0, dist));',
-    '  float depthN = 1.0 - clamp(dist/98.0, 0.0, 1.0);',
-    //   色相必须由 aDir 直接构造，不能过 atan：atan(y,x) 在 ±π 处不连续，
-    //   角向色相会沿 -X 撕开一条接缝，投影出来正好是「从中心向左的一条水平线」。
-    '  float hue = 0.5 + 0.5*sin(aDir.x*2.2 + aDir.y*1.3 + uTime*0.35 + depthN*3.4);',
-    //   同样不跟主题的「青 / 香槟」走：两者五五混是灰的，隧道要青→紫这条荧光带
-    '  vec3 cLow = mix(uTint2, vec3(0.20, 0.86, 1.00), 0.60);',
-    '  vec3 cHigh = mix(uTint3, vec3(0.55, 0.34, 1.00), 0.55);',
-    '  vCol = mix(cLow, cHigh, hue);',
-    '  vCol = mix(vCol, vec3(1.0), uBeat*0.30*(1.0 - depthN*0.5));',
-    //   静默段（无音频）时 uMid/uBeat 都是 0，整条隧道的可见度就只剩这个常数项。
-    //   0.20 在暗底上几乎看不见环带，看不出「隧道」，提到 0.30 让待机态也能读出来。
-    '  vA = win * (0.30 + uMid*0.46 + uBeat*0.28) * uFade;',
-    '  vA *= 1.0 - smoothstep(0.0, 1.0, uScatter*1.4);',
-    '  gl_Position = uProj * mv;',
-    '}'
-  ].join('\n'));
-
-  var TUNNEL_FS = stageFS([
-    'in vec3 vCol;',
-    'in float vA;',
-    'void main(){',
-    '  if (vA < 0.002) discard;',
-    '  o = vec4(vCol*(0.85 + vA*1.15), vA);',
-    '}'
-  ].join('\n'));
-
-  // ---- 舞台 3：音域地形 ----------------------------------------------------
-  // 实例化立方体柱阵。高度 = 噪声地形 + 三段频谱抬升；大气雾交给距离衰减。
-  var TERRAIN_VS = stageVS([
-    'in vec3 aPos;',
-    'in vec3 aNormal;',
-    'in vec2 aCell;',
-    'out vec3 vNormal;',
-    'out vec3 vWorld;',
-    'out float vHeight;',
-    'out float vDist;',
-    'void main(){',
-    //   注意：GLSL ES 里 half / fixed / double 是保留字，不能用 half 命名
-    '  float hs = (uGrid-1.0)*0.5;',
-    '  vec2 cell = (aCell - vec2(hs)) * 0.92;',
-    '  float cd = length(cell);',
-    '  float rnd = hash11(cell.x*31.7 + cell.y*71.3);',
-    //   噪声频率要够高：cell*0.055 在 ±17 的网格上只扫过不到 2 个噪声单位，
-    //   整片地形会得到几乎相同的高度，看起来就是一块地毯而不是地景。
-    '  vec2 mp = cell*0.15 + vec2(uTime*0.06, uTime*0.035);',
-    '  float baseN = snoise(vec3(mp, uTime*0.02))*0.5 + 0.5;',
-    '  float wave = sin(cell.x*0.30 + cell.y*0.22 - uTime*0.55)*0.5 + 0.5;',
-    '  float falloff = smoothstep(uGrid*0.55, uGrid*0.08, cd);',
-    '  float idle = mix(baseN, wave, 0.45) * 2.7 * falloff;',
-    '  float bandR = smoothstep(uGrid*0.44, uGrid*0.02, cd);',
-    '  float audioH = (uBass*4.0*bandR',
-    '                + uMid*2.6*smoothstep(0.15, 1.0, rnd)*bandR',
-    '                + uTreble*1.8*smoothstep(0.35, 1.0, rnd)) * falloff;',
-    '  audioH = max(0.0, audioH - 0.04);',
-    '  float h = 0.55 + idle + audioH + uBeat*1.8*bandR*(0.3 + rnd);',
-    //   只沿 Y 拉伸：底面固定、顶面抬升，一个乘加搞定，不需要重建几何。
-    //   aPos.y 在几何里已经抬到 0..1，所以这里直接乘高度。
-    '  vec3 world = vec3(cell.x + aPos.x*0.62, aPos.y*h, cell.y + aPos.z*0.62);',
-    '  world.y += uScatter*1.6*rnd;',
-    '  vec4 mv = uView * vec4(world, 1.0);',
-    '  vNormal = aNormal;',
-    '  vWorld = world;',
-    '  vHeight = h;',
-    '  vDist = -mv.z;',
-    '  gl_Position = uProj * mv;',
-    '}'
-  ].join('\n'));
-
-  var TERRAIN_FS = stageFS([
-    'in vec3 vNormal;',
-    'in vec3 vWorld;',
-    'in float vHeight;',
-    'in float vDist;',
-    'void main(){',
-    '  vec3 n = normalize(vNormal);',
-    '  vec3 vd = normalize(uCamPos - vWorld);',
-    '  float diff = clamp(dot(n, normalize(vec3(0.34, 0.88, 0.33))), 0.0, 1.0);',
-    '  float hN = clamp(vHeight/5.5, 0.0, 1.0);',
-    '  vec3 base = mix(uTint2*0.20, uTint3, hN*0.85 + 0.08);',
-    '  vec3 col = base*(0.14 + diff*0.80);',
-    //   边缘光：正对视线的地方亮起来，柱体的轮廓才不会糊成一团
-    '  float fres = pow(1.0 - clamp(dot(n, vd), 0.0, 1.0), 3.0);',
-    '  col += uTint * fres * 0.30;',
-    //   顶面自发光，跟着能量走
-    '  col += uTint2 * smoothstep(0.55, 1.0, vHeight/3.4) * 0.22 * (0.35 + uEnergy);',
-    //   大气透视：远处的柱子往背景色里退。系数要够大，否则网格的远端会在地平线
-    //   上切出一条直边，整片地形看起来像一块被剪过的地毯。
-    '  float fog = 1.0 - exp(-max(0.0, vDist-5.0)*0.034);',
-    '  col = mix(col, vec3(0.010, 0.013, 0.020), clamp(fog, 0.0, 0.94));',
-    '  o = vec4(col*uFade, 1.0);',
-    '}'
-  ].join('\n'));
-
-  // ---- 舞台 4：黑曜星球 ----------------------------------------------------
-  var ORB_SHELL_VS = stageVS([
-    'in vec3 aPos;',
-    'in vec3 aNormal;',
-    'out vec3 vNormal;',
-    'out vec3 vWorld;',
-    'uniform float uRadius;',
-    'void main(){',
-    '  float breathe = 1.0 + sin(uTime*0.42)*0.012 + uBeat*0.045;',
-    '  vec3 p = aPos*uRadius*breathe;',
-    '  vec4 mv = uView * vec4(p, 1.0);',
-    '  vNormal = aNormal;',
-    '  vWorld = p;',
-    '  gl_Position = uProj * mv;',
-    '}'
-  ].join('\n'));
-
-  var ORB_SHELL_FS = stageFS([
-    'in vec3 vNormal;',
-    'in vec3 vWorld;',
-    'void main(){',
-    '  vec3 n = normalize(vNormal);',
-    '  vec3 vd = normalize(uCamPos - vWorld);',
-    '  vec3 ld = normalize(vec3(0.44, 0.71, 0.55));',
-    '  float ndl = dot(n, ld);',
-    //   晨昏线的过渡区间要够宽。之前把阈值卡在 0.0~0.30，而球面上「与光方向
-    //   夹角小于 72°」的整片区域都落在这个区间之上，于是整个受光面被压成一块
-    //   纯色 —— 屏幕上就是一颗青色的气球，完全没有体积。
-    //   但上界也不能太松：0.62 时可见圆盘的边缘 ndl 还有 ~0.57、term 仍接近 1，
-    //   整个球面照样是一块平色。上界提到 0.78，亮面从圆心向外一路衰减，
-    //   晨昏线才真正落在可见面上，球体有了体积感。
-    '  float term = smoothstep(-0.06, 0.78, ndl);',
-    //   低频噪声当岩层，给表面一点结构，避免大片纯色
-    '  float rock = snoise(n*3.4 + vec3(0.0, uTime*0.012, 0.0))*0.5 + 0.5;',
-    '  vec3 base = mix(vec3(0.010, 0.013, 0.022), uTint3*0.24, term);',
-    //   岩层调制的动态范围拉大：0.55±0.55 出来的是一层薄薄的灰纱，
-    //   换成 0.40±0.85 才有明暗块面，黑曜石该有的「硬」才出来。
-    '  vec3 col = base*(0.40 + rock*0.85);',
-    //   受光侧的边缘散射：星球边缘那圈亮边
-    '  col += uTint2 * pow(clamp(1.0 - abs(ndl), 0.0, 1.0), 8.0) * term * 0.38;',
-    //   高光斑是「这是个球」最直接的线索。只有漫反射 + 轮廓光时，球面中间永远是
-    //   一片均匀的灰度，看着像贴图而不是球。半程向量做一次锐化高光，体积立刻出来。
-    //   指数取 42：够窄才有亮点感，又不至于小到在软渲染下闪掉。
-    '  vec3 hv = normalize(ld + vd);',
-    '  float spec = pow(max(dot(n, hv), 0.0), 42.0) * term;',
-    '  col += mix(uTint2, vec3(1.0), 0.35) * spec * (0.60 + uBeat*0.35);',
-    //   轮廓光压在球体剪影上，靠它把球从黑底里"切"出来
-    //   球体整体比上一版更暗（term 上界收紧 + 岩层压暗），轮廓光要相应加强，
-    //   否则星球的剪影会糊进背景里。指数放小一点让亮边更宽、更实。
-    '  float fres = pow(1.0 - clamp(dot(n, vd), 0.0, 1.0), 3.0);',
-    '  col += uTint2 * fres * (0.44 + uBeat*0.42);',
-    '  o = vec4(col*uFade, 1.0);',
-    '}'
-  ].join('\n'));
-
-  var ORB_ATMO_VS = stageVS([
-    'in vec3 aPos;',
-    'in vec3 aNormal;',
-    'out vec3 vNormal;',
-    'out vec3 vWorld;',
-    'uniform float uRadius;',
-    'void main(){',
-    '  vec3 p = aPos*uRadius;',
-    '  vec4 mv = uView * vec4(p, 1.0);',
-    '  vNormal = aNormal;',
-    '  vWorld = p;',
-    '  gl_Position = uProj * mv;',
-    '}'
-  ].join('\n'));
-
-  var ORB_ATMO_FS = stageFS([
-    'in vec3 vNormal;',
-    'in vec3 vWorld;',
-    'void main(){',
-    '  vec3 n = normalize(vNormal);',
-    '  vec3 vd = normalize(uCamPos - vWorld);',
-    //   渲染背面，所以法线朝内；越接近切向越亮，形成一圈大气环。指数取大一点
-    //   才会收成"一圈"而不是整个球壳发亮。
-    '  float rim = pow(clamp(1.0 - abs(dot(n, vd)), 0.0, 1.0), 5.0);',
-    '  vec3 col = mix(uTint2, uTint3, 0.35) * rim * (1.25 + uEnergy*0.9 + uBeat*0.5);',
-    '  o = vec4(col*uFade, rim);',
-    '}'
-  ].join('\n'));
-
-  var ORB_DUST_VS = stageVS([
-    'in float aSeed;',
-    'in float aLane;',
-    'out vec3 vCol;',
-    'out float vA;',
-    'void main(){',
-    '  float seed = aSeed;',
-    '  float shell = 1.0 + fract(aLane*5.0)*0.55;',
-    '  float th = hash11(seed*2.17)*6.2831853;',
-    '  float ph = acos(clamp(1.0-2.0*hash11(seed*3.91), -1.0, 1.0));',
-    '  float r = 3.05*shell + snoise(vec3(ph*2.0, th*2.0, uTime*0.06))*0.22;',
-    '  vec3 dir = vec3(sin(ph)*cos(th), cos(ph), sin(ph)*sin(th));',
-    '  vec3 pos = dir*r;',
-    //   绕 Y 慢转 + 沿法线呼吸
-    '  float spin = uTime*0.075;',
-    '  float cs = cos(spin), sn = sin(spin);',
-    '  pos.xz = mat2(cs,-sn,sn,cs)*pos.xz;',
-    '  pos += dir*(uBass*0.55 + uBeat*0.35);',
-    '  pos += normalize(pos)*uScatter*(2.0 + hash11(seed*5.7)*4.0);',
-    '  vCol = mix(uTint2, uTint3, hash11(seed*7.9));',
-    '  vCol = mix(vCol, vec3(1.0), uBeat*0.18);',
-    '  float tw = 0.55 + 0.45*sin(uTime*(0.5+hash11(seed*11.3)*1.2)+seed*8.0);',
-    '  vec4 mv = uView * vec4(pos, 1.0);',
-    '  float dist = -mv.z;',
-    '  gl_PointSize = pointSize(dist, 0.85 + uBurst*0.8);',
-    '  vA = tw*(0.14 + uMid*0.5) * uFade * smoothstep(0.5, 2.5, dist);',
-    '  gl_Position = uProj * mv;',
-    '}'
-  ].join('\n'));
-
-  var ORB_DUST_FS = STAR_FS;
-
-  // ---- 舞台 5：棱镜星系 ----------------------------------------------------
   var PRISM_VS = stageVS([
     'in float aSeed;',
     'in float aLane;',
@@ -744,8 +627,10 @@
   var fade = 0;             // 0..1 开合淡入淡出
   var fadeTarget = 0;
   var inited = false;
+  var uiBound = false;
+  var resizeObserver = null, resizeTimers = [];
 
-  var stageIndex = 0;
+  var stageIndex = 5;
   var builtStages = {};     // id -> { draw, dispose, count }
   var post = null;          // 后处理资源
   var fsTri = null;
@@ -781,6 +666,9 @@
   // 音频
   var onset = null;
   var au = { bass: 0, mid: 0, treble: 0, energy: 0, beat: 0 };
+  var audioBands = new Float32Array(64);
+  var lastBeatAt = -100, previousBeat = 0;
+  var pointerField = { x: -9, y: -9, active: 0, clickX: 0, clickY: 0, clickAt: -100 };
 
   // 色调：从主题 CSS 变量取，跟着换肤走
   var tint = [1, 1, 1];
@@ -803,6 +691,17 @@
   var dragging = false;
 
   var chromeTimer = 0;
+  var motion = 0.65, bloom = 0.80, showLyrics = true;
+  var reactivity = 1.35;
+  var restoring = false;
+  var pendingDt = 0;
+  var returnFocus = null, backgroundNodes = [];
+  var seeking = false, lastCover = null, changingVolume = false;
+  var lyricView = null, layout = 'focus', lyricSize = 1, lyricGlow = .45;
+
+  function reducedMotion() {
+    return !!(global.Stage && Stage.presentation && Stage.presentation().reduced);
+  }
 
   // -------------------------------------------------------------------------
   // GL 基础设施
@@ -922,86 +821,6 @@
     return { seed: buffer(a), lane: buffer(b), count: count };
   }
 
-  function ringGeometry(segments) {
-    var dir = new Float32Array((segments + 1) * 2 * 2);
-    var side = new Float32Array((segments + 1) * 2);
-    var k = 0;
-    for (var i = 0; i <= segments; i += 1) {
-      var ang = i / segments * Math.PI * 2;
-      var cx = Math.cos(ang), cy = Math.sin(ang);
-      dir[k * 2] = cx; dir[k * 2 + 1] = cy; side[k] = 0; k += 1;
-      dir[k * 2] = cx; dir[k * 2 + 1] = cy; side[k] = 1; k += 1;
-    }
-    return { dir: buffer(dir), side: buffer(side), verts: k };
-  }
-
-  function boxGeometry() {
-    // 36 顶点三角列表。面法线直接写死，省掉一次索引与法线计算。
-    var f = [
-      [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]
-    ];
-    var v = [];
-    for (var i = 0; i < 6; i += 1) {
-      var n = f[i];
-      var u = i === 0 || i === 1 ? [0, 1, 0] : (i === 2 || i === 3 ? [0, 0, 1] : [1, 0, 0]);
-      var w = i === 0 || i === 1 ? [0, 0, 1] : (i === 2 || i === 3 ? [1, 0, 0] : [0, 1, 0]);
-      var s = [n[0] * 0.5, n[1] * 0.5, n[2] * 0.5];
-      var q = [
-        [s[0] - u[0] * 0.5 - w[0] * 0.5, s[1] - u[1] * 0.5 - w[1] * 0.5, s[2] - u[2] * 0.5 - w[2] * 0.5],
-        [s[0] + u[0] * 0.5 - w[0] * 0.5, s[1] + u[1] * 0.5 - w[1] * 0.5, s[2] + u[2] * 0.5 - w[2] * 0.5],
-        [s[0] + u[0] * 0.5 + w[0] * 0.5, s[1] + u[1] * 0.5 + w[1] * 0.5, s[2] + u[2] * 0.5 + w[2] * 0.5],
-        [s[0] - u[0] * 0.5 + w[0] * 0.5, s[1] - u[1] * 0.5 + w[1] * 0.5, s[2] - u[2] * 0.5 + w[2] * 0.5]
-      ];
-      var order = [0, 1, 2, 0, 2, 3];
-      for (var j = 0; j < 6; j += 1) {
-        var p = q[order[j]];
-        // y 从 -0.5..0.5 抬到 0..1，顶点着色器里直接 (aPos.y+0.5)*height
-        v.push(p[0], p[1] + 0.5, p[2], n[0], n[1], n[2]);
-      }
-    }
-    var arr = new Float32Array(v);
-    var pos = new Float32Array(arr.length / 2);
-    var nor = new Float32Array(arr.length / 2);
-    for (var m = 0, o = 0; m < arr.length; m += 6, o += 3) {
-      pos[o] = arr[m]; pos[o + 1] = arr[m + 1]; pos[o + 2] = arr[m + 2];
-      nor[o] = arr[m + 3]; nor[o + 1] = arr[m + 4]; nor[o + 2] = arr[m + 5];
-    }
-    return { pos: buffer(pos), nor: buffer(nor), verts: pos.length / 3 };
-  }
-
-  function sphereGeometry(stacks, slices) {
-    var pos = new Float32Array((stacks + 1) * (slices + 1) * 3);
-    var k = 0;
-    for (var i = 0; i <= stacks; i += 1) {
-      var phi = i / stacks * Math.PI;
-      var sp = Math.sin(phi), cp = Math.cos(phi);
-      for (var j = 0; j <= slices; j += 1) {
-        var th = j / slices * Math.PI * 2;
-        pos[k] = sp * Math.cos(th); pos[k + 1] = cp; pos[k + 2] = sp * Math.sin(th);
-        k += 3;
-      }
-    }
-    var idx = [];
-    for (        var a = 0; a < stacks; a += 1) {
-      for (var b = 0; b < slices; b += 1) {
-        var p1 = a * (slices + 1) + b;
-        var p2 = p1 + slices + 1;
-        // 逆时针缠绕（GL 默认 frontFace=CCW）。写成 (p1, p2, p1+1) 是顺时针，
-        // 配合 cullFace(BACK) 会把整个近半球剔掉。
-        idx.push(p1, p1 + 1, p2, p1 + 1, p2 + 1, p2);
-      }
-    }
-    return {
-      pos: buffer(pos),
-      idx: indexBuffer(new Uint16Array(idx)),
-      verts: idx.length
-    };
-  }
-
-  // -------------------------------------------------------------------------
-  // 舞台构建
-  // -------------------------------------------------------------------------
-
   function q() {
     var t = (global.Stage && Stage.tier) ? Stage.tier() : 2;
     if (global.Stage && Stage.isLowFx && Stage.isLowFx()) t = 0;
@@ -1082,130 +901,78 @@
     };
   }
 
-  function buildTunnel(def) {
-    var prog = buildProgram(TUNNEL_VS, TUNNEL_FS);
-    if (!prog) return null;
-    var rings = def.counts[q()];
-    var g = ringGeometry(72);
-    var idx = new Float32Array(rings);
-    for (var i = 0; i < rings; i += 1) idx[i] = i;
-    var ib = buffer(idx);
-    var vao = makeVAO([
-      { loc: prog.a('aDir'), buffer: g.dir, size: 2 },
-      { loc: prog.a('aSide'), buffer: g.side, size: 1 },
-      { loc: prog.a('aIdx'), buffer: ib, size: 1, divisor: 1 }
-    ]);
-    return {
-      count: rings,
-      draw: function () {
-        gl.useProgram(prog.p);
-        uploadCommon(prog);
-        setF(prog.u, 'uRings', rings);
-        gl.bindVertexArray(vao);
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, g.verts, rings);
-      },
-      dispose: function () {
-        gl.deleteProgram(prog.p); gl.deleteVertexArray(vao);
-        gl.deleteBuffer(g.dir); gl.deleteBuffer(g.side); gl.deleteBuffer(ib);
-      }
-    };
-  }
-
-  function buildTerrain(def) {
-    var prog = buildProgram(TERRAIN_VS, TERRAIN_FS);
-    if (!prog) return null;
-    var grid = def.counts[q()];
-    var cells = new Float32Array(grid * grid * 2);
-    var k = 0;
-    for (var z = 0; z < grid; z += 1) {
-      for (var x = 0; x < grid; x += 1) {
-        cells[k] = x; cells[k + 1] = z; k += 2;
-      }
+  function buildField(def) {
+    var p = buildProgram(FIELD_VS, FIELD_FS);
+    var starP = buildProgram(STAR_VS, STAR_FS);
+    if (!p || !starP) {
+      if (p) gl.deleteProgram(p.p);
+      if (starP) gl.deleteProgram(starP.p);
+      return null;
     }
-    var box = boxGeometry();
-    var cb = buffer(cells);
-    var vao = makeVAO([
-      { loc: prog.a('aPos'), buffer: box.pos, size: 3 },
-      { loc: prog.a('aNormal'), buffer: box.nor, size: 3 },
-      { loc: prog.a('aCell'), buffer: cb, size: 2, divisor: 1 }
+    var level = q(), count = def.counts[level];
+    var cols = Math.ceil(Math.sqrt(count * 1.24));
+    var rows = Math.floor(count / cols);
+    if (def.field === 4) { cols = [180, 280, 360][level]; rows = Math.floor(count / cols / 7) * 7; }
+    count = cols * rows;
+    var vao = gl.createVertexArray();
+    var stars = seeds([900, 1500, 2400][level]);
+    var starVao = makeVAO([
+      { loc: starP.a('aSeed'), buffer: stars.seed, size: 1 },
+      { loc: starP.a('aLane'), buffer: stars.lane, size: 1 }
     ]);
+    var ctx = gl, disposed = false, artUrl = '', artReady = false, artImage = null;
+    var texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([48, 76, 96, 255]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    function syncArt() {
+      if (def.field !== 0) return;
+      var url = global.Stage && Stage.coverUrl ? Stage.coverUrl() || '' : '';
+      if (url === artUrl) return;
+      artUrl = url; artReady = false;
+      if (artImage) { artImage.onload = null; artImage.onerror = null; }
+      if (!url) return;
+      var img = artImage = new Image(); img.crossOrigin = 'anonymous';
+      img.onload = function () {
+        if (disposed || ctx !== gl || ctx.isContextLost() || url !== artUrl) return;
+        try {
+          ctx.activeTexture(ctx.TEXTURE0); ctx.bindTexture(ctx.TEXTURE_2D, texture);
+          ctx.pixelStorei(ctx.UNPACK_FLIP_Y_WEBGL, true);
+          ctx.texImage2D(ctx.TEXTURE_2D, 0, ctx.RGBA, ctx.RGBA, ctx.UNSIGNED_BYTE, img);
+          artReady = true;
+        } catch (e) { artReady = false; }
+        finally { ctx.pixelStorei(ctx.UNPACK_FLIP_Y_WEBGL, false); }
+      };
+      img.src = url;
+    }
     return {
-      count: grid * grid,
-      grid: grid,
+      count: count,
       draw: function () {
-        gl.useProgram(prog.p);
-        uploadCommon(prog);
-        setF(prog.u, 'uGrid', grid);
-        gl.bindVertexArray(vao);
-        gl.drawArraysInstanced(gl.TRIANGLES, 0, box.verts, grid * grid);
+        syncArt();
+        gl.useProgram(starP.p); uploadCommon(starP); gl.bindVertexArray(starVao);
+        gl.drawArrays(gl.POINTS, 0, stars.count);
+        gl.useProgram(p.p); uploadCommon(p); gl.bindVertexArray(vao);
+        setI(p.u, 'uField', def.field); setF(p.u, 'uCols', cols); setF(p.u, 'uRows', rows);
+        setI(p.u, 'uArt', 0); setF(p.u, 'uHasArt', artReady ? 1 : 0);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texture);
+        if (p.u.uBands) gl.uniform1fv(p.u.uBands, audioBands);
+        var reduced = reducedMotion();
+        setV2(p.u, 'uPointer', pointerField.x, pointerField.y);
+        setF(p.u, 'uPointerActive', reduced ? 0 : pointerField.active);
+        setF(p.u, 'uBeatAge', reduced ? 100 : Math.max(0, time - lastBeatAt));
+        setF(p.u, 'uAspect', bw / bh);
+        if (p.u.uClick) gl.uniform3f(p.u.uClick, pointerField.clickX, pointerField.clickY, reduced ? 100 : time - pointerField.clickAt);
+        gl.drawArrays(gl.POINTS, 0, count);
       },
       dispose: function () {
-        gl.deleteProgram(prog.p); gl.deleteVertexArray(vao);
-        gl.deleteBuffer(box.pos); gl.deleteBuffer(box.nor); gl.deleteBuffer(cb);
-      }
-    };
-  }
-
-  function buildOrb(def) {
-    var shellP = buildProgram(ORB_SHELL_VS, ORB_SHELL_FS);
-    var atmoP = buildProgram(ORB_ATMO_VS, ORB_ATMO_FS);
-    var dustP = buildProgram(ORB_DUST_VS, ORB_DUST_FS);
-    if (!shellP || !atmoP || !dustP) return null;
-    var qq = q();
-    var stacks = qq === 0 ? 24 : (qq === 1 ? 36 : 48);
-    var slices = qq === 0 ? 32 : (qq === 1 ? 48 : 64);
-    var sph = sphereGeometry(stacks, slices);
-    var shellVao = makeVAO([
-      { loc: shellP.a('aPos'), buffer: sph.pos, size: 3 },
-      { loc: shellP.a('aNormal'), buffer: sph.pos, size: 3 }
-    ], sph.idx);
-    var atmoVao = makeVAO([
-      { loc: atmoP.a('aPos'), buffer: sph.pos, size: 3 },
-      { loc: atmoP.a('aNormal'), buffer: sph.pos, size: 3 }
-    ], sph.idx);
-    var s = seeds(def.counts[qq]);
-    var dustVao = makeVAO([
-      { loc: dustP.a('aSeed'), buffer: s.seed, size: 1 },
-      { loc: dustP.a('aLane'), buffer: s.lane, size: 1 }
-    ]);
-    return {
-      count: s.count,
-      draw: function () {
-        // 实体星球：写深度，让后面的尘埃被遮挡出正确的前后关系
-        gl.enable(gl.DEPTH_TEST);
-        gl.depthMask(true);
-        gl.disable(gl.BLEND);
-        gl.enable(gl.CULL_FACE);
-        gl.cullFace(gl.BACK);
-        gl.useProgram(shellP.p);
-        uploadCommon(shellP);
-        setF(shellP.u, 'uRadius', 2.9);
-        gl.bindVertexArray(shellVao);
-        gl.drawElements(gl.TRIANGLES, sph.verts, gl.UNSIGNED_SHORT, 0);
-
-        // 大气壳：渲染背面（剔除正面）且不写深度，additive 叠一圈边缘光
-        gl.enable(gl.BLEND);
-        gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-        gl.depthMask(false);
-        gl.cullFace(gl.FRONT);
-        gl.useProgram(atmoP.p);
-        uploadCommon(atmoP);
-        setF(atmoP.u, 'uRadius', 3.14);
-        gl.bindVertexArray(atmoVao);
-        gl.drawElements(gl.TRIANGLES, sph.verts, gl.UNSIGNED_SHORT, 0);
-
-        // 环绕尘埃：深度测试保留（被星球挡住），但不写深度
-        gl.disable(gl.CULL_FACE);
-        gl.useProgram(dustP.p);
-        uploadCommon(dustP);
-        gl.bindVertexArray(dustVao);
-        gl.drawArrays(gl.POINTS, 0, s.count);
-      },
-      dispose: function () {
-        gl.deleteProgram(shellP.p); gl.deleteProgram(atmoP.p); gl.deleteProgram(dustP.p);
-        gl.deleteVertexArray(shellVao); gl.deleteVertexArray(atmoVao); gl.deleteVertexArray(dustVao);
-        gl.deleteBuffer(sph.pos); gl.deleteBuffer(sph.idx);
-        gl.deleteBuffer(s.seed); gl.deleteBuffer(s.lane);
+        disposed = true;
+        if (artImage) { artImage.onload = null; artImage.onerror = null; }
+        ctx.deleteProgram(p.p); ctx.deleteProgram(starP.p);
+        ctx.deleteVertexArray(vao); ctx.deleteVertexArray(starVao);
+        ctx.deleteBuffer(stars.seed); ctx.deleteBuffer(stars.lane); ctx.deleteTexture(texture);
       }
     };
   }
@@ -1234,10 +1001,12 @@
   }
 
   var BUILDERS = {
+    resonance: buildField,
+    silk: buildField,
     aurora: buildAurora,
-    tunnel: buildTunnel,
-    terrain: buildTerrain,
-    orb: buildOrb,
+    tunnel: buildField,
+    terrain: buildField,
+    orb: buildField,
     prism: buildPrism
   };
 
@@ -1260,6 +1029,7 @@
     var pBlur = buildProgram(POST_VS, BLUR_FS);
     var pComp = buildProgram(POST_VS, COMPOSITE_FS);
     if (!pBright || !pBlur || !pComp) {
+      [pBright, pBlur, pComp].forEach(function (program) { if (program) gl.deleteProgram(program.p); });
       post = null;
       return false;
     }
@@ -1336,10 +1106,10 @@
     setV2(post.comp.u, 'uRes', bw, bh);
     setF(post.comp.u, 'uTime', time);
     setF(post.comp.u, 'uBeat', au.beat);
-    setF(post.comp.u, 'uBloomAmt', q() === 0 ? 0.55 : 0.85);
+    setF(post.comp.u, 'uBloomAmt', bloom * (q() === 0 ? 0.7 : 1.05));
     setF(post.comp.u, 'uVignette', 0.62);
     setF(post.comp.u, 'uGrain', 0.028);
-    setF(post.comp.u, 'uChroma', 1.0 + au.beat * 0.6);
+    setF(post.comp.u, 'uChroma', 0.16 + au.beat * 0.25);
     setF(post.comp.u, 'uExposure', post.hdr ? 1.18 : 1.42);
     setF(post.comp.u, 'uFade', fade);
     drawFullscreen(post.comp);
@@ -1386,6 +1156,7 @@
   function ensureGl() {
     if (gl) return true;
     if (glFailed || !wrapEl) return false;
+    contextLost = false;
     canvas = document.createElement('canvas');
     canvas.className = 's3d-canvas';
     canvas.setAttribute('aria-hidden', 'true');
@@ -1422,8 +1193,11 @@
     // 不 preventDefault 就永远不会收到 restored。
     if (e && e.preventDefault) e.preventDefault();
     contextLost = true;
-    builtStages = {};
+    // Detach pending cover loads before the restored context invalidates their textures.
+    disposeStages();
     post = null;
+    showFallback('舞台正在恢复渲染，音乐播放不受影响。');
+    pokeChrome();
   }
 
   function onContextRestored() {
@@ -1431,7 +1205,11 @@
     glFailed = false;
     if (!gl) return;
     gl.disable(gl.DITHER);
-    if (buildPost()) { builtStages = {}; ensureStage(); }
+    if (buildPost()) {
+      builtStages = {}; sizeDirty = true;
+      $('s3d-fallback').hidden = true;
+      if (global.Stage && Stage.kick) Stage.kick();
+    } else showFallback('舞台暂时无法恢复，可退出后重新进入。');
   }
 
   function releaseGl() {
@@ -1444,9 +1222,12 @@
       if (post.comp) gl.deleteProgram(post.comp.p);
       if (post.tri) gl.deleteBuffer(post.tri);
     }
+    if (fsTri && gl) gl.deleteVertexArray(fsTri);
     post = null;
     fsTri = null;
     if (canvas) {
+      canvas.removeEventListener('webglcontextlost', onContextLost);
+      canvas.removeEventListener('webglcontextrestored', onContextRestored);
       var ext = gl.getExtension('WEBGL_lose_context');
       if (ext) { try { ext.loseContext(); } catch (e) { /* ignore */ } }
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
@@ -1480,8 +1261,8 @@
 
   function resize() {
     if (!gl || !root) return;
-    var w = Math.max(1, Math.round(root.clientWidth || window.innerWidth));
-    var h = Math.max(1, Math.round(root.clientHeight || window.innerHeight));
+    var w = Math.max(1, Math.round(wrapEl.clientWidth || window.innerWidth));
+    var h = Math.max(1, Math.round(wrapEl.clientHeight || window.innerHeight));
     dpr = computeDpr(w, h);
     var nw = Math.max(1, Math.round(w * dpr));
     var nh = Math.max(1, Math.round(h * dpr));
@@ -1512,12 +1293,13 @@
   function updateCamera(dtMs) {
     // 自动演出：三条互质低频正弦叠加，周期各不相同的「呼吸」。
     cam.cinemaT += dtMs / 1000;
-    var drift = cam.cruise ? 1 : 0;
+    var amount = reducedMotion() ? 0 : motion;
+    var drift = cam.cruise ? amount : 0;
     var userBusy = dragging ? 0.25 : 1;   // 用户在拖的时候自动让位
     var d = drift * userBusy;
-    cam.cineT = Math.sin(cam.cinemaT * 0.083) * 0.030 * d + au.beat * 0.012;
+    cam.cineT = Math.sin(cam.cinemaT * 0.083) * 0.030 * d + au.beat * 0.012 * amount;
     cam.cineP = Math.sin(cam.cinemaT * 0.061 + 1.0) * 0.024 * d;
-    cam.cineR = Math.sin(cam.cinemaT * 0.043 + 2.0) * 0.22 * d - au.beat * 0.30;
+    cam.cineR = Math.sin(cam.cinemaT * 0.043 + 2.0) * 0.22 * d - au.beat * 0.30 * amount;
 
     var tT = cam.userT + cam.cineT;
     var tP = clamp(cam.userP + cam.cineP, cam.minP, cam.maxP);
@@ -1531,20 +1313,23 @@
     }
 
     // 起音：焦距收窄快、回弹慢，这个不对称是打击感的来源
-    cam.fovTarget = BASE_FOV - trans.punch * 2.6 - au.beat * 1.1;
+    cam.fovTarget = BASE_FOV - (trans.punch * 2.6 + au.beat * 1.1) * amount;
     var tau = cam.fovTarget < cam.fov ? 90 : 240;
     cam.fov = damp(cam.fov, cam.fovTarget, tau, dtMs);
-    cam.rollTarget = au.beat * 0.012;
+    cam.rollTarget = au.beat * 0.012 * amount;
     cam.roll = damp(cam.roll, cam.rollTarget, 160, dtMs);
 
     var cp = Math.cos(cam.curP), sp = Math.sin(cam.curP);
     var ct = Math.cos(cam.curT), st = Math.sin(cam.curT);
-    var px = cam.curLook[0] + cam.curR * cp * st;
-    var py = cam.curLook[1] + cam.curR * sp;
-    var pz = cam.curLook[2] + cam.curR * cp * ct;
+    var aspect = bw / Math.max(1, bh);
+    var framed = /^(resonance|silk|orb)$/.test(STAGES[stageIndex].id);
+    var fit = framed ? Math.max(1, Math.min(2.6, 1.05 / aspect)) : 1;
+    var radius = cam.curR * fit;
+    var px = cam.curLook[0] + radius * cp * st;
+    var py = cam.curLook[1] + radius * sp;
+    var pz = cam.curLook[2] + radius * cp * ct;
     cam.pos[0] = px; cam.pos[1] = py; cam.pos[2] = pz;
 
-    var aspect = bw / Math.max(1, bh);
     perspective(proj, cam.fov * Math.PI / 180, aspect, 0.1, 220);
     lookAt(view, px, py, pz, cam.curLook[0], cam.curLook[1], cam.curLook[2], 0, 1, 0);
     rollView(viewR, view, cam.roll);
@@ -1565,8 +1350,10 @@
   // -------------------------------------------------------------------------
 
   function updateAudio(dtMs) {
-    var sp = (global.Stage && Stage.spectrum) ? Stage.spectrum() : null;
+    var live = global.Stage && Stage.presentation && Stage.presentation().playing && !reducedMotion();
+    var sp = (live && Stage.spectrum) ? Stage.spectrum() : null;
     var n = sp ? sp.length : 0;
+    for (var b = 0; b < 64; b += 1) audioBands[b] = damp(audioBands[b], n ? clamp(Math.pow(Math.max(0, sp[Math.min(n - 1, Math.floor(b * n / 64))] || 0), 0.7) * reactivity, 0, 1.5) : 0, 65, dtMs);
     var bass = 0, mid = 0, treble = 0;
     if (n) {
       var i;
@@ -1585,20 +1372,22 @@
         return c ? hi / c : 0;
       })() * 0.4;
     }
-    au.bass = damp(au.bass, clamp(bass, 0, 1.5), 70, dtMs);
-    au.mid = damp(au.mid, clamp(mid, 0, 1.5), 90, dtMs);
-    au.treble = damp(au.treble, clamp(treble, 0, 1.5), 60, dtMs);
+    au.bass = damp(au.bass, clamp(Math.pow(bass, 0.7) * reactivity, 0, 1.5), 70, dtMs);
+    au.mid = damp(au.mid, clamp(Math.pow(mid, 0.7) * reactivity, 0, 1.5), 90, dtMs);
+    au.treble = damp(au.treble, clamp(Math.pow(treble, 0.7) * reactivity, 0, 1.5), 60, dtMs);
 
-    var en = (global.Stage && Stage.energy) ? Stage.energy() : 0;
-    au.energy = damp(au.energy, clamp(num(en, 0), 0, 1), 140, dtMs);
+    var en = (live && Stage.energy) ? Stage.energy() : 0;
+    au.energy = damp(au.energy, clamp(num(en, 0) * reactivity, 0, 1), 140, dtMs);
 
     // 起音只认 Onset 一份判定，避免「换一种渲染，律动看起来变了」。
     if (onset && n) {
       onset.step(dtMs, sp, time * 1000);
-      au.beat = clamp(onset.pulse / 1.35, 0, 1);
+      au.beat = clamp(onset.pulse * reactivity / 1.35, 0, 1);
     } else {
       au.beat = damp(au.beat, 0, 200, dtMs);
     }
+    if (au.beat > previousBeat + 0.08 && au.beat > 0.20 && time - lastBeatAt > 0.22) lastBeatAt = time;
+    previousBeat = au.beat;
   }
 
   // -------------------------------------------------------------------------
@@ -1606,6 +1395,7 @@
   // -------------------------------------------------------------------------
 
   function startTransition() {
+    if (reducedMotion()) { trans.on = false; trans.scatter = trans.burst = trans.punch = 0; return; }
     trans.on = true;
     trans.t = 0;
     trans.punch = Math.max(trans.punch, 0.16);
@@ -1689,12 +1479,13 @@
     updateTransition(dtMs);
 
     var st = ensureStage();
-    if (!st) return;
+    if (!st) { showFallback('当前场景未能加载，请切换另一舞台。'); return; }
 
-    // 主几何的公共 uniform 靠「每个 program 上传一遍」——5 个舞台的 uniform
+    // 主几何的公共 uniform 靠「每个 program 上传一遍」——各个舞台的 uniform
     // 布局一致，切换时无需重新绑定，代价可以忽略。
     drawStage(st);
     runPost();
+    paintWords();
   }
 
   // -------------------------------------------------------------------------
@@ -1747,10 +1538,10 @@
 
   // 目标帧率。返回 0 表示这一层完全不需要帧，主循环据此停机。
   function targetFps() {
-    if (!active || !gl || document.hidden) return 0;
+    if (!active || !gl || contextLost || document.hidden) return 0;
     // 240 = 「每个 rAF 都给我」，降频自己用整数除数在 tick 里做：
     // 帧率必须是刷新率的整数分之一，90fps@144Hz 会因为帧间隔不均产生 judder。
-    return 240;
+    return reducedMotion() ? 15 : 240;
   }
 
   function tick(dtMs) {
@@ -1759,11 +1550,13 @@
     sampleHz(dtMs);
     perf.divisor = selectDivisor();
     perf.tick += 1;
+    pendingDt += dtMs;
     if (perf.divisor > 1 && (perf.tick - 1) % perf.divisor !== 0) return;
-    // 被跳过的那些帧的时间并没有丢：帧门已经把 dt 累加进来了，
-    // 所以降频不会让动画变慢。
-    var step = Math.min(dtMs, 120);
-    time += step / 1000;
+    // The host gate resets its accumulator on every callback, including skipped
+    // callbacks. Accumulate here so adaptive rendering cannot slow the animation.
+    var step = Math.min(pendingDt, 160);
+    pendingDt = 0;
+    if (!reducedMotion()) time += step / 1000;
     render(step);
     sampleCost(performance.now() - t0);
   }
@@ -1773,12 +1566,17 @@
   // -------------------------------------------------------------------------
 
   function localPoint(e) {
-    var r = root.getBoundingClientRect();
+    var r = wrapEl.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
   function onPointerDown(e) {
-    if (!active) return;
+    if (!active || (e.button != null && e.button !== 0) || pointers[e.pointerId]) return;
+    root.focus({ preventScroll: true });
+    var point = localPoint(e);
+    pointerField.clickX = point.x / wrapEl.clientWidth * 2 - 1;
+    pointerField.clickY = 1 - point.y / wrapEl.clientHeight * 2;
+    pointerField.clickAt = time;
     pointers[e.pointerId] = localPoint(e);
     pointerCount += 1;
     if (pointerCount === 1) {
@@ -1798,11 +1596,20 @@
 
   function onPointerMove(e) {
     if (!active) return;
+    var point = localPoint(e);
+    pointerField.x = point.x / wrapEl.clientWidth * 2 - 1;
+    pointerField.y = 1 - point.y / wrapEl.clientHeight * 2;
+    if (!reducedMotion() && layout === 'sleeve') {
+      root.style.setProperty('--sleeve-rx', (-pointerField.y * 5) + 'deg');
+      root.style.setProperty('--sleeve-ry', (pointerField.x * 8 - 14) + 'deg');
+    }
+    pointerField.active = 1;
     var prev = pointers[e.pointerId];
     markInteraction(900);
     if (!prev) return;
     var p = localPoint(e);
     if (pointerCount >= 2) {
+      pointers[e.pointerId] = p;
       // 双指捏合：只认两指间距的变化量
       var ks = Object.keys(pointers);
       var a = pointers[ks[0]], b = pointers[ks[1]];
@@ -1894,9 +1701,11 @@
   }
 
   function pokeChrome() {
+    if (!root || !active) return;
     root.classList.add('s3d-chrome');
     if (chromeTimer) clearTimeout(chromeTimer);
     chromeTimer = setTimeout(function () {
+      if ((global.Workshop && Workshop.isOpen()) || !$('s3d-settings').hidden || root.querySelector('.s3d-head:focus-within, .s3d-player:focus-within, .s3d-dock:focus-within') || dragging || seeking) return;
       root.classList.remove('s3d-chrome');
     }, CHROME_HIDE_MS);
   }
@@ -1906,12 +1715,15 @@
   // -------------------------------------------------------------------------
 
   function setStage(i, immediate) {
-    i = clamp(num(i, 0), 0, STAGES.length - 1);
+    i = Math.round(clamp(num(i, 0), 0, STAGES.length - 1));
     var changed = i !== stageIndex;
     stageIndex = i;
     var def = STAGES[i];
+    root.setAttribute('data-scene', def.id);
     applyStageCamera(def, !!immediate);
     if (changed) startTransition();
+    if (changed) savePreferences();
+    if (gl && !contextLost) $('s3d-fallback').hidden = true;
     syncDock();
     syncNowPlaying();
     markInteraction(1200);
@@ -1923,17 +1735,130 @@
     setStage((stageIndex + (dir || 1) + STAGES.length) % STAGES.length, false);
   }
 
-  // 曲目信息直接抄歌词页那两份：它们由 Stage.setTrack 维护，是唯一一份真值，
-  // 这里再自己订阅一遍只会多一条可能不同步的链路。
+  function control(action, value) {
+    document.dispatchEvent(new CustomEvent('stage:control', { detail: { action: action, value: value } }));
+    pokeChrome();
+  }
+
+  function preferences() {
+    return { scene: STAGES[stageIndex].id, motion: motion, bloom: bloom, reactivity: reactivity, lyrics: showLyrics, cruise: cam.cruise, layout: layout, lyricSize: lyricSize, lyricGlow: lyricGlow };
+  }
+
+  function savePreferences() { if (!restoring) control('stage3d', preferences()); }
+
+  function configure(value) {
+    if (!value || typeof value !== 'object') return;
+    restoring = true;
+    try {
+      if (typeof value.motion === 'number') motion = clamp(num(value.motion, 0.65), 0, 1);
+      if (typeof value.bloom === 'number') bloom = clamp(num(value.bloom, 0.8), 0, 1.5);
+      if (typeof value.reactivity === 'number') reactivity = clamp(num(value.reactivity, 1.35), 0, 2);
+      if (typeof value.lyrics === 'boolean') showLyrics = value.lyrics;
+      if (typeof value.cruise === 'boolean') cam.cruise = value.cruise;
+      if (['focus', 'sleeve', 'single'].indexOf(value.layout) >= 0) layout = value.layout;
+      if (typeof value.lyricSize === 'number') lyricSize = clamp(value.lyricSize, .75, 1.35);
+      if (typeof value.lyricGlow === 'number') lyricGlow = clamp(value.lyricGlow, 0, 1);
+      syncLayout();
+      for (var i = 0; i < STAGES.length; i += 1) if (STAGES[i].id === value.scene) setStage(i, true);
+      $('s3d-motion').value = Math.round(motion * 100); text('s3d-motion-value', Math.round(motion * 100) + '%');
+      $('s3d-bloom').value = Math.round(bloom * 100); text('s3d-bloom-value', Math.round(bloom * 100) + '%');
+      $('s3d-reactivity').value = Math.round(reactivity * 100); text('s3d-reactivity-value', Math.round(reactivity * 100) + '%');
+      $('s3d-reading').hidden = !showLyrics;
+      $('s3d-lyrics-toggle').setAttribute('aria-pressed', String(showLyrics));
+      $('s3d-cruise').setAttribute('aria-pressed', String(cam.cruise));
+    } finally { restoring = false; }
+  }
+
+  function play() {
+    if (global.Stage && Stage.presentation && !Stage.presentation().track) { close(); control('view', 'library'); }
+    else control('toggle');
+  }
+
+  function fmt(ms) {
+    var s = Math.floor(Math.max(0, ms || 0) / 1000);
+    return Math.floor(s / 60) + ':' + ('0' + s % 60).slice(-2);
+  }
+
+  function text(id, value) {
+    var el = $(id);
+    if (el && el.textContent !== value) el.textContent = value;
+  }
+
+  function setSettings(on) {
+    $('s3d-settings').hidden = !on;
+    $('s3d-settings-toggle').setAttribute('aria-expanded', String(on));
+    pokeChrome();
+    if (on) $('s3d-motion').focus();
+  }
+
+  function toggleLyrics() {
+    showLyrics = !showLyrics;
+    syncLayout();
+    $('s3d-reading').hidden = !showLyrics;
+    $('s3d-lyrics-toggle').setAttribute('aria-pressed', String(showLyrics));
+    pokeChrome();
+    savePreferences();
+  }
+
+  function syncLayout() {
+    root.dataset.layout = layout;
+    root.style.setProperty('--sl-size', lyricSize);
+    root.style.setProperty('--sl-glow', lyricGlow);
+    $('s3d-layout').value = layout;
+    $('s3d-sleeve').hidden = layout !== 'sleeve';
+    if (lyricView) lyricView.configure(showLyrics);
+  }
+
+  function toggleLayout() {
+    layout = layout === 'sleeve' ? 'focus' : 'sleeve';
+    syncLayout(); savePreferences(); pokeChrome();
+  }
+
+  function paintWords() {
+    if (lyricView && showLyrics) lyricView.paint(Stage.position());
+  }
+
+  // Consume the same clock, metadata and lyric document as the ordinary player.
+  // A separate low-frequency gate updates DOM even when WebGL is unavailable.
   function syncNowPlaying() {
-    var t = $('s3d-title');
-    var a = $('s3d-artist');
-    var lt = $('lp-title');
-    var la = $('lp-artist');
-    if (t && lt) t.textContent = lt.textContent || '未在播放';
-    if (a && la) a.textContent = la.textContent || '';
-    var hint = $('s3d-hint');
-    if (hint) hint.textContent = STAGES[stageIndex].label + ' · ' + STAGES[stageIndex].desc;
+    if (!root || !global.Stage || !Stage.presentation) return;
+    var data = Stage.presentation(), track = data.track;
+    text('s3d-title', track ? track.title || '未知曲目' : '还没有播放音乐');
+    text('s3d-artist', track ? track.artist || '未知艺术家' : '从曲库选择一首喜欢的歌');
+    text('s3d-hint', ('0' + (stageIndex + 1)).slice(-2) + ' / ' + STAGES[stageIndex].label);
+    text('s3d-elapsed', fmt(data.position));
+    text('s3d-duration', fmt(data.duration));
+    text('s3d-status', track ? (data.playing ? '正在聆听' : '已暂停') : '让音乐，拥有形状');
+    text('s3d-motion-note', data.reduced ? '已遵循减少动态效果设置' : '设置即时生效');
+    root.classList.toggle('s3d-playing', data.playing);
+    root.classList.toggle('s3d-reduced', data.reduced);
+    $('s3d-play').setAttribute('aria-label', !track ? '选择音乐' : data.playing ? '暂停' : '播放');
+    $('s3d-play-icon').setAttribute('href', data.playing ? '#i-pause' : '#i-play');
+    $('s3d-prev').disabled = $('s3d-next').disabled = !track;
+    if (!changingVolume) $('s3d-volume').value = Math.round(data.volume * 100);
+    var range = $('s3d-seek');
+    if (!seeking) {
+      range.max = Math.max(1, data.duration);
+      range.value = Math.min(data.duration, data.position);
+      range.disabled = !(data.duration > 0);
+      range.setAttribute('aria-valuetext', fmt(data.position) + ' / ' + fmt(data.duration));
+      range.style.setProperty('--s3d-progress', (data.duration > 0 ? Math.min(100, data.position / data.duration * 100) : 0) + '%');
+    }
+    var cover = $('s3d-cover');
+    if (lastCover !== data.cover) {
+      lastCover = data.cover;
+      cover.hidden = !data.cover;
+      if (data.cover) cover.src = data.cover;
+      else cover.removeAttribute('src');
+    }
+    var sleeve = $('s3d-sleeve-image');
+    if (sleeve.dataset.url !== (data.cover || '')) {
+      sleeve.dataset.url = data.cover || ''; sleeve.hidden = !data.cover;
+      if (data.cover) sleeve.src = data.cover; else sleeve.removeAttribute('src');
+    }
+    text('s3d-sleeve-title', track ? track.title || '未知曲目' : '你的下一张唱片');
+    text('s3d-sleeve-artist', track ? track.artist || '未知艺术家' : '从曲库开始聆听');
+    if (lyricView && showLyrics) lyricView.update(data);
   }
 
   function syncDock() {
@@ -1972,6 +1897,14 @@
 
   function open(stageId) {
     if (!root) return false;
+    if (!active) {
+      returnFocus = document.activeElement;
+      backgroundNodes = [];
+      Array.prototype.forEach.call(document.body.children, function (node) {
+        if (node === root || /^(SCRIPT|STYLE|SVG)$/.test(node.tagName)) return;
+        backgroundNodes.push({ node: node, inert: node.inert }); node.inert = true;
+      });
+    }
     if (stageId != null) {
       for (var i = 0; i < STAGES.length; i += 1) {
         if (STAGES[i].id === stageId) { stageIndex = i; break; }
@@ -1982,10 +1915,15 @@
     root.classList.add('s3d-open');
     root.setAttribute('aria-hidden', 'false');
     document.body.classList.add('s3d-open');
+    root.setAttribute('data-scene', STAGES[stageIndex].id);
+    root.focus({ preventScroll: true });
+    pendingDt = 0;
     var fb = $('s3d-fallback');
     if (fb) fb.hidden = true;
 
-    if (!ensureGl()) return false;
+    syncDock(); syncNowPlaying(); pokeChrome();
+    if (global.Stage && Stage.kick) Stage.kick();
+    if (!ensureGl()) { showFallback('当前设备暂不支持三维渲染，仍可播放音乐或返回曲库。'); return false; }
     sizeDirty = true;
     resize();
     applyStageCamera(STAGES[stageIndex], true);
@@ -2001,12 +1939,24 @@
 
   function close() {
     if (!root || !active) return;
+    if (global.Workshop && Workshop.isOpen()) Workshop.close();
+    if (lyricView) lyricView.reset();
     fadeTarget = 0;
     active = false;
     root.classList.remove('s3d-open');
     root.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('s3d-open');
+    backgroundNodes.forEach(function (entry) { entry.node.inert = entry.inert; });
+    backgroundNodes = [];
+    if (returnFocus && returnFocus.isConnected) returnFocus.focus({ preventScroll: true });
+    returnFocus = null;
+    if (chromeTimer) clearTimeout(chromeTimer);
+    $('s3d-settings').hidden = true;
+    $('s3d-settings-toggle').setAttribute('aria-expanded', 'false');
+    pointers = {}; pointerCount = 0; dragging = false; seeking = false;
+    root.classList.remove('s3d-dragging');
     if (fsEl()) exitFs();
+    if (global.Stage && Stage.kick) Stage.kick();
     // 等淡出走完再真的停手：直接归零会看到画面硬切。
     setTimeout(function () {
       if (active) return;
@@ -2045,14 +1995,29 @@
   // 两者用 active 严格分工，同一个键不会有两个写者。
   function onKeyDown(e) {
     if (!active) return;
-    if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+    pokeChrome();
+    if (global.Workshop && Workshop.isOpen()) return;
     var k = e.key;
+    if (k === 'Tab') {
+      var focusable = Array.prototype.filter.call(root.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled)'), function (el) { return el.tabIndex >= 0 && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden'; });
+      var first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === root)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || document.activeElement === root)) { e.preventDefault(); first.focus(); }
+      return;
+    }
     if (k === 'Escape') {
+      if (!$('s3d-settings').hidden) { setSettings(false); $('s3d-settings-toggle').focus(); e.stopImmediatePropagation(); return; }
       if (fsEl()) { exitFs(); e.stopImmediatePropagation(); return; }
       close();
       e.stopImmediatePropagation();
       return;
     }
+    if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.repeat && /^(v|f|c|l)$/i.test(k)) { e.stopImmediatePropagation(); return; }
+    if (k === ' ' && e.target.tagName === 'BUTTON') { e.stopImmediatePropagation(); return; }
+    if (k === ' ' && e.target.tagName !== 'BUTTON') { e.preventDefault(); play(); e.stopImmediatePropagation(); return; }
+    if (k === 'b' || k === 'B') { toggleLayout(); e.stopImmediatePropagation(); return; }
+    if (k === 'l' || k === 'L') { toggleLyrics(); e.stopImmediatePropagation(); return; }
     if (k === 'f' || k === 'F') {
       toggleFullscreen();
       e.stopImmediatePropagation();
@@ -2065,6 +2030,7 @@
       cam.cruise = !cam.cruise;
       var cb = $('s3d-cruise');
       if (cb) cb.setAttribute('aria-pressed', String(cam.cruise));
+      savePreferences();
       e.stopImmediatePropagation();
       return;
     }
@@ -2081,6 +2047,32 @@
   // -------------------------------------------------------------------------
 
   function bindUi() {
+    $('s3d-lyrics-toggle').addEventListener('click', toggleLyrics);
+    $('s3d-settings-toggle').addEventListener('click', function () { setSettings($('s3d-settings').hidden); });
+    $('s3d-settings-close').addEventListener('click', function () { setSettings(false); $('s3d-settings-toggle').focus(); });
+    $('s3d-motion').addEventListener('input', function () { motion = Number(this.value) / 100; text('s3d-motion-value', this.value + '%'); });
+    $('s3d-bloom').addEventListener('input', function () { bloom = Number(this.value) / 100; text('s3d-bloom-value', this.value + '%'); });
+    $('s3d-reactivity').addEventListener('input', function () { reactivity = Number(this.value) / 100; text('s3d-reactivity-value', this.value + '%'); });
+    $('s3d-reactivity').addEventListener('change', savePreferences);
+    $('s3d-motion').addEventListener('change', savePreferences);
+    $('s3d-bloom').addEventListener('change', savePreferences);
+    $('s3d-play').addEventListener('click', play);
+    $('s3d-prev').addEventListener('click', function () { control('prev'); });
+    $('s3d-next').addEventListener('click', function () { control('next'); });
+    $('s3d-queue').addEventListener('click', function () { close(); control('view', 'queue'); });
+    $('s3d-cover').addEventListener('error', function () { this.hidden = true; });
+    $('s3d-seek').addEventListener('input', function () { seeking = true; text('s3d-elapsed', fmt(Number(this.value))); });
+    $('s3d-seek').addEventListener('change', function () { control('seek', Number(this.value)); seeking = false; });
+    $('s3d-seek').addEventListener('blur', function () { seeking = false; });
+    $('s3d-volume').addEventListener('input', function () { changingVolume = true; });
+    $('s3d-volume').addEventListener('change', function () { control('volume', Number(this.value) / 100); changingVolume = false; });
+    $('s3d-volume').addEventListener('blur', function () { changingVolume = false; });
+    $('s3d-cover-toggle').addEventListener('click', toggleLayout);
+    $('s3d-sleeve-image').addEventListener('error', function () { this.hidden = true; });
+    $('s3d-layout').addEventListener('change', function () { layout = this.value; syncLayout(); savePreferences(); });
+    $('s3d-workshop').addEventListener('click', function () { setSettings(false); if (global.Workshop) Workshop.open(); });
+    root.addEventListener('focusin', pokeChrome);
+    root.addEventListener('focusout', pokeChrome);
     var fsb = $('s3d-fs');
     if (fsb) fsb.addEventListener('click', toggleFullscreen);
     var rb = $('s3d-reset');
@@ -2091,6 +2083,7 @@
       cb.addEventListener('click', function () {
         cam.cruise = !cam.cruise;
         cb.setAttribute('aria-pressed', String(cam.cruise));
+        savePreferences();
       });
     }
     var xb = $('s3d-close');
@@ -2100,7 +2093,7 @@
     document.addEventListener('webkitfullscreenchange', syncFsUi);
 
     // 打开入口：歌词页顶栏的三维按钮 + 舞台侧栏的同款按钮。
-    var openers = ['lp-3d', 'stage-3d-btn'];
+    var openers = ['lp-3d', 'stage-3d-btn', 'stage3d-entry'];
     openers.forEach(function (id) {
       var b = $(id);
       if (b) b.addEventListener('click', function () { open(); });
@@ -2108,8 +2101,10 @@
 
     wrapEl.addEventListener('pointerdown', onPointerDown);
     wrapEl.addEventListener('pointermove', onPointerMove, { passive: true });
+    $('s3d-sleeve').addEventListener('pointermove', onPointerMove, { passive: true });
     wrapEl.addEventListener('pointerup', onPointerUp);
     wrapEl.addEventListener('pointercancel', onPointerUp);
+    wrapEl.addEventListener('pointerleave', function () { pointerField.active = 0; });
     wrapEl.addEventListener('wheel', onWheel, { passive: false });
     wrapEl.addEventListener('dblclick', function () { resetView(); });
     root.addEventListener('pointermove', pokeChrome, { passive: true });
@@ -2141,35 +2136,57 @@
     if (!wrapEl) return null;
     inited = true;
 
+    if (global.StageLyrics) lyricView = StageLyrics.init($('s3d-reading'), function (ms) { control('seek', ms); });
+    syncLayout();
     readTint();
     buildDock();
-    bindUi();
+    if (!uiBound) { bindUi(); uiBound = true; }
 
     // 帧门登记。返回 0 时主循环会把自己停掉，不需要帧的时候不烧 CPU。
     if (global.Stage && Stage.gate) Stage.gate(GATE, targetFps, tick);
+    if (global.Stage && Stage.gate) Stage.gate('stage3d-ui', function () { return active && !document.hidden ? 8 : 0; }, syncNowPlaying);
 
     // 窗口尺寸与 DPR 不是同步生效的：全屏切换 / 跨屏拖动时 devicePixelRatio
     // 要晚一拍才更新，所以延后补几次（Mineradio 那边的经验值是 48/140/320）。
-    function markDirty() { sizeDirty = true; if (active && global.Stage && Stage.kick) Stage.kick(); }
     if (window.ResizeObserver && root) {
-      new ResizeObserver(markDirty).observe(root);
+      resizeObserver = new ResizeObserver(markSizeDirty);
+      resizeObserver.observe(wrapEl);
     }
-    window.addEventListener('resize', function () {
-      markDirty();
-      [48, 140, 320].forEach(function (d) { setTimeout(markDirty, d); });
-    });
-    document.addEventListener('visibilitychange', function () {
-      if (document.hidden && active && global.Stage) { /* 帧门自己会停机 */ }
-      else if (!document.hidden && active && global.Stage && Stage.kick) Stage.kick();
-    });
+    window.addEventListener('resize', onViewportResize);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     if (global.Onset && Onset.create) onset = Onset.create({});
     return api;
   }
 
+  function markSizeDirty() {
+    sizeDirty = true;
+    if (active && global.Stage && Stage.kick) Stage.kick();
+  }
+
+  function onViewportResize() {
+    markSizeDirty();
+    resizeTimers.forEach(clearTimeout);
+    resizeTimers = [48, 140, 320].map(function (delay) { return setTimeout(markSizeDirty, delay); });
+  }
+
+  function onVisibilityChange() {
+    if (!document.hidden && active && global.Stage && Stage.kick) Stage.kick();
+  }
+
   function destroy() {
+    close();
+    if (lyricView) lyricView.destroy();
+    lyricView = null;
     active = false;
     if (global.Stage && Stage.removeGate) Stage.removeGate(GATE);
+    if (global.Stage && Stage.removeGate) Stage.removeGate('stage3d-ui');
+    if (resizeObserver) resizeObserver.disconnect();
+    resizeObserver = null;
+    resizeTimers.forEach(clearTimeout); resizeTimers = [];
+    window.removeEventListener('resize', onViewportResize);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
     releaseGl();
+    glFailed = false;
     inited = false;
     return api;
   }
@@ -2189,6 +2206,9 @@
       });
     },
     resetView: resetView,
+    configure: configure,
+    preferences: preferences,
+    save: savePreferences,
     stats: function () {
       return {
         fps: Math.round(perf.hz / Math.max(1, perf.divisor)),
@@ -2199,6 +2219,9 @@
         quality: q(),
         dpr: Math.round(dpr * 100) / 100,
         stage: STAGES[stageIndex].id,
+        audio: { bass: au.bass, mid: au.mid, treble: au.treble, energy: au.energy, beat: au.beat },
+        camera: { theta: cam.curT, phi: cam.curP, radius: cam.curR },
+        time: time,
         buffer: bw + 'x' + bh
       };
     }

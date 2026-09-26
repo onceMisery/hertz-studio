@@ -141,8 +141,11 @@ function makeClock() {
 
 function makeTransport(routes) {
   const calls = [];
+  let playbackIntent = 0;
   return {
     calls,
+    beginPlaybackIntent() { return ++playbackIntent; },
+    isPlaybackIntent(intent) { return intent === playbackIntent; },
     last(pathPart) {
       for (let i = calls.length - 1; i >= 0; i -= 1) {
         if (calls[i].path.indexOf(pathPart) >= 0) return calls[i];
@@ -180,7 +183,7 @@ function makeTransport(routes) {
 function makeSandbox(transport) {
   const clock = makeClock();
   const doc = makeDocument();
-  const spies = { toasts: [], played: [], radio: [] };
+  const spies = { toasts: [], played: [], queues: [], radio: [] };
   const sandbox = {
     console,
     Promise, Object, Array, JSON, Math, String, Number, Set, Map,
@@ -207,6 +210,7 @@ function makeSandbox(transport) {
     favCount: doc.getElementById('fav-count'),
     favTabs: doc.getElementById('fav-tabs'),
     favPlayAll: doc.getElementById('fav-play-all'),
+    favMore: doc.getElementById('fav-more'),
     favRefresh: doc.getElementById('fav-refresh'),
     favBadge: doc.getElementById('fav-badge'),
     dailyList: doc.getElementById('daily-list'),
@@ -224,7 +228,9 @@ function makeSandbox(transport) {
     paintArt: () => {},
     coverUrl: (id) => '/cover/' + id,
     playLocal: (id, queue) => spies.played.push({ id: id, queue: queue }),
+    playQueue: (ids, meta) => spies.queues.push({ ids: ids, meta: meta }),
     playOnline: (f) => spies.radio.push(f),
+    playRadio: (f) => spies.radio.push(f),
     onFavoriteChanged: () => {},
   };
   sandbox.window.Favorites.bind(host);
@@ -357,11 +363,212 @@ async function checkFavorites() {
   eq(s6.spies.played[0].id, 'a', '播放的是该行的曲目 id');
   eq(s6.spies.radio.length, 0, '歌曲不该走电台链路');
 
-  section('收藏：播放本地收藏');
-  s6.ui.favPlayAll.onclick();
-  eq(s6.spies.played.length, 2, '「播放本地收藏」再入队一次');
-  const lastPlay = s6.spies.played[s6.spies.played.length - 1];
-  eq(Array.isArray(lastPlay.queue), true, '整批作为队列而不是单曲');
+  section('收藏：播放收藏（本地单曲 + 电台行不进歌曲队列）');
+  rows[1]._click();
+  await ticks();
+  eq(s6.spies.radio.length, 1, '电台收藏行点开走整盘载入链路');
+  eq(s6.spies.radio[0].ref_id, 'r1', '电台载入携带歌单身份');
+  await s6.ui.favPlayAll.onclick();
+  eq(s6.spies.queues.length, 1, '「播放收藏」提交混合队列');
+  eq(s6.spies.queues[0].ids.join(','), 'a', '歌曲 tab 的本地收藏进队列');
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function favorite(id, source, kind) {
+  return { id: String(id), kind: kind || 'track', source: source || 'local', ref_id: String(id), title: String(id) };
+}
+
+function favoritePage(items, total, counts) {
+  return { favorites: items, total: total == null ? items.length : total, counts: counts || { track: 201, radio: 0 } };
+}
+
+function selectFavoriteTab(ui, kind) {
+  ui.favTabs.onclick({ target: { closest: () => ({ dataset: { favKind: kind } }) } });
+}
+
+async function checkFavoritesPagination() {
+  section('收藏：201 条、分页失败与原页重试');
+  const items = Array.from({ length: 201 }, (_, i) => favorite(i));
+  let failMore = true;
+  const retry = deferred();
+  const t = makeTransport([{
+    match: (p) => p.startsWith('/v1/favorites?'),
+    reply: (p) => {
+      const offset = Number(new URL(p, 'http://local').searchParams.get('offset'));
+      if (!offset) return favoritePage(items.slice(0, 200), 201);
+      if (failMore) { failMore = false; throw new Error('page failed'); }
+      return retry.promise;
+    },
+  }]);
+  const { sandbox, ui, spies } = makeSandbox(t);
+  const F = sandbox.Favorites;
+  F.init();
+  eq(ui.favMore.hidden, true, '首屏读取前隐藏加载更多');
+  await F.load();
+  eq(ui.favList.children.length, 200, '首屏显示 200 条');
+  eq(ui.favMore.hidden, false, '还有第 201 条时显示加载更多');
+  eq(ui.favMore.disabled, false, '首屏完成后可加载更多');
+  await ui.favMore.onclick({ type: 'click' });
+  eq(ui.favList.children.length, 200, '下一页失败保留已有 200 条');
+  eq(F.state.offset, 200, '失败不推进分页位置');
+  eq(ui.favMore.hidden, false, '失败后保留加载更多入口');
+  eq(ui.favMore.disabled, false, '失败后按钮恢复可重试');
+  eq(ui.favMore.textContent, '加载更多收藏', '失败后清除加载中标签');
+  eq(spies.toasts.length, 1, '分页失败只报告一次');
+  const more = ui.favMore.onclick({ type: 'click' });
+  eq(ui.favList.children.length, 200, '读取下一页过程中保留已有行');
+  eq(ui.favMore.disabled, true, '读取下一页时禁用按钮');
+  eq(ui.favMore.hidden, false, '读取下一页时保留按钮位置');
+  eq(ui.favMore.textContent, '正在读取收藏…', '读取下一页时显示加载中标签');
+  const requestCount = t.calls.length;
+  await F.loadMore();
+  eq(t.calls.length, requestCount, '重复点击不会同时发出同页请求');
+  retry.resolve(favoritePage(items.slice(200), 201));
+  await more;
+  eq(ui.favList.children.length, 201, '第 201 条追加到已有行');
+  eq(F.state.items[200].ref_id, '200', '第二页追加正确曲目');
+  eq(F.state.offset, 201, '仅成功后推进 offset');
+  eq(ui.favMore.hidden, true, '所有收藏读完后隐藏按钮');
+  eq(t.calls[1].path, t.calls[2].path, '失败与重试请求完全相同的 offset');
+  await F.loadMore();
+  eq(t.calls.length, requestCount, '全部读取后不发额外请求');
+
+  section('收藏：切 tab 与刷新丢弃过期响应');
+  const pending = [];
+  const t2 = makeTransport([{
+    match: (p) => p.startsWith('/v1/favorites?'),
+    reply: () => { const req = deferred(); pending.push(req); return req.promise; },
+  }]);
+  const s2 = makeSandbox(t2);
+  const F2 = s2.sandbox.Favorites;
+  F2.init();
+  const oldTrack = F2.load();
+  selectFavoriteTab(s2.ui, 'radio');
+  eq(pending.length, 2, '上一 tab 未完成也立即请求新 tab');
+  eq(s2.ui.favPlayAll.hidden, true, '电台 tab 隐藏播放本地收藏');
+  ok(t2.calls[1].path.includes('kind=radio'), '新请求捕获电台 kind');
+  pending[0].resolve(favoritePage([favorite('stale-track')], 1, { track: 1, radio: 0 }));
+  await oldTrack;
+  eq(F2.state.items.length, 0, '旧 tab 响应不污染新 tab');
+  eq(F2.state.loading, true, '旧请求 finally 不清除新请求 loading');
+  eq(F2.has('track', 'local', 'stale-track'), false, '过期响应不污染判红集合');
+  pending[1].resolve(favoritePage([favorite('radio', 'netease', 'radio')], 1, { track: 201, radio: 1 }));
+  await ticks();
+  eq(F2.state.items[0].ref_id, 'radio', '仅当前 tab 的响应进入列表');
+  eq(F2.state.loading, false, '当前请求完成后清除 loading');
+
+  const oldRefresh = F2.load();
+  s2.ui.favRefresh.onclick({ type: 'click' });
+  eq(pending.length, 4, '刷新立即替代同 kind 的进行中请求');
+  pending[3].resolve(favoritePage([favorite('new-radio', 'netease', 'radio')], 1, { track: 300, radio: 1 }));
+  await ticks();
+  pending[2].resolve(favoritePage([favorite('old-radio', 'netease', 'radio')], 99, { track: 999, radio: 99 }));
+  await oldRefresh;
+  eq(F2.state.items[0].ref_id, 'new-radio', '同 kind 的旧刷新响应也被丢弃');
+  eq(F2.state.total, 1, '过期响应不覆盖 total');
+  eq(s2.ui.favCount.textContent, '300 首', '过期响应不覆盖 counts');
+  eq(s2.ui.favMore.hidden, true, '过期响应不重新展示加载更多');
+
+  const oldFailure = F2.load();
+  selectFavoriteTab(s2.ui, 'track');
+  pending[4].reject(new Error('stale failure'));
+  await oldFailure;
+  eq(s2.spies.toasts.length, 0, '过期请求失败不弹无关错误');
+  eq(F2.state.loading, true, '过期失败不改变新请求状态');
+  eq(s2.ui.favPlayAll.hidden, false, '歌曲 tab 恢复播放本地收藏');
+  pending[5].reject(new Error('initial failure'));
+  await ticks();
+  eq(F2.state.loading, false, '当前首屏失败结束 loading');
+  eq(s2.spies.toasts.length, 1, '当前首屏失败报告错误');
+  s2.ui.favRefresh.onclick({ type: 'click' });
+  eq(pending.length, 7, '首屏失败后可通过刷新重试');
+  pending[6].resolve(favoritePage([favorite('recovered')], 1));
+  await ticks();
+  eq(F2.state.items[0].ref_id, 'recovered', '首屏刷新重试恢复列表');
+
+  section('收藏：全部本地收藏跨三页后再播放');
+  const all = Array.from({ length: 405 }, (_, i) => favorite('all-' + i, i === 200 ? 'netease' : 'local'));
+  const t3 = makeTransport([{
+    match: (p) => p.startsWith('/v1/favorites?'),
+    reply: (p) => {
+      const query = new URL(p, 'http://local').searchParams;
+      eq(query.get('kind'), 'track', '整批播放始终读取歌曲收藏');
+      const offset = Number(query.get('offset'));
+      return favoritePage(all.slice(offset, offset + 200), all.length);
+    },
+  }]);
+  const s3 = makeSandbox(t3);
+  const F3 = s3.sandbox.Favorites;
+  F3.init();
+  await F3.load();
+  eq(F3.state.items.length, 200, '播放前界面仅加载第一页');
+  const play = s3.ui.favPlayAll.onclick({ type: 'click' });
+  eq(s3.ui.favPlayAll.disabled, true, '收集跨页队列时禁用重复播放');
+  eq(s3.spies.queues.length, 0, '全部页读取完成之前不播放残缺队列');
+  await s3.ui.favPlayAll.onclick();
+  await play;
+  eq(s3.spies.queues.length, 1, '重复点击只播放一轮');
+  eq(s3.spies.queues[0].ids.length, 405, '整批播放包含三页全部收藏');
+  eq(s3.spies.queues[0].ids[404], 'all-404', '最后一页收藏进入队列');
+  ok(s3.spies.queues[0].ids.includes('online:netease:all-200'), '在线收藏折成虚拟身份入队');
+  eq(s3.spies.queues[0].meta['online:netease:all-200'].title, 'all-200', '在线收藏快照随队提交');
+  ok(!Object.prototype.hasOwnProperty.call(s3.spies.queues[0].meta, 'local'), '本地收藏不写在线快照');
+  eq(F3.state.items.length, 200, '整批播放不改变界面已加载页');
+  eq(s3.ui.favPlayAll.disabled, false, '播放完成后恢复按钮');
+  eq(s3.ui.favPlayAll.textContent, '播放收藏', '播放完成后恢复标签');
+  eq(t3.calls.map((c) => new URL(c.path, 'http://local').searchParams.get('offset')).join(','), '0,0,200,400', '整批播放从第一页重新读到末页');
+
+  section('收藏：整批播放分页失败不启动残缺队列');
+  let playbackFail = true;
+  const t4 = makeTransport([{
+    match: (p) => p.startsWith('/v1/favorites?'),
+    reply: (p) => {
+      const offset = Number(new URL(p, 'http://local').searchParams.get('offset'));
+      if (offset && playbackFail) throw new Error('last page failed');
+      return favoritePage(items.slice(offset, offset + 200), items.length);
+    },
+  }]);
+  const s4 = makeSandbox(t4);
+  s4.sandbox.Favorites.init();
+  await s4.ui.favPlayAll.onclick();
+  eq(s4.spies.queues.length, 0, '尾页失败时不播放前 200 首');
+  eq(s4.ui.favPlayAll.disabled, false, '失败后可重试整批播放');
+  eq(s4.spies.toasts.length, 1, '尾页失败如实报告');
+  playbackFail = false;
+  await s4.ui.favPlayAll.onclick();
+  eq(s4.spies.queues[0].ids.length, 201, '重试成功后播放完整队列');
+
+  section('收藏：后续播放意图取消尚未读完的收藏队列');
+  for (const staleFailure of [false, true]) {
+    const pendingPage = deferred();
+    const raceTransport = makeTransport([{
+      match: (p) => p.startsWith('/v1/favorites?'),
+      reply: (p) => {
+        const offset = Number(new URL(p, 'http://local').searchParams.get('offset'));
+        return offset ? pendingPage.promise : favoritePage(items.slice(0, 200), items.length);
+      },
+    }]);
+    const race = makeSandbox(raceTransport);
+    race.sandbox.Favorites.init();
+    const collecting = race.ui.favPlayAll.onclick();
+    await ticks();
+    eq(raceTransport.calls.length, 2, '收藏队列正在等待第二页');
+    eq(race.spies.queues.length, 0, '等待尾页时没有提交部分队列');
+    raceTransport.beginPlaybackIntent(); // 用户在其他入口选择了更新的播放。
+    if (staleFailure) pendingPage.reject(new Error('stale page failure'));
+    else pendingPage.resolve(favoritePage(items.slice(200), items.length));
+    await collecting;
+    eq(race.spies.played.length, 0, staleFailure ? '过期失败不播放收藏队列' : '过期成功不覆盖更新的播放');
+    eq(race.spies.toasts.length, 0, '过期的收藏读取不弹错误');
+    eq(race.ui.favPlayAll.disabled, false, '过期收集结束后恢复播放按钮');
+    eq(race.ui.favPlayAll.textContent, '播放收藏', '过期收集结束后恢复按钮标签');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -378,9 +585,9 @@ async function checkDaily() {
     total: 3,
     candidates: 40,
     tracks: [
-      { track: { id: 't1', title: '一', artist: 'A', has_cover: true }, score: 18, reasons: ['你收藏过'] },
-      { track: { id: 't2', title: '二', artist: 'B', has_cover: false }, score: 12, reasons: ['有封面'] },
-      { track: { id: 't3', title: '三', artist: 'C', has_cover: false }, score: 6, reasons: [] },
+      { id: 't1', title: '一', artist: 'A', has_cover: true, score: 18, reasons: ['你收藏过'] },
+      { id: 't2', title: '二', artist: 'B', has_cover: false, score: 12, reasons: ['有封面'] },
+      { id: 't3', title: '三', artist: 'C', has_cover: false, score: 6, reasons: [] },
     ],
   };
   const t = makeTransport([
@@ -394,6 +601,7 @@ async function checkDaily() {
 
   ok(t.last('/v1/recommend/daily') !== null, '走了 /v1/recommend/daily');
   eq(ui.dailyList.children.length, 3, '三张卡片都渲染');
+  eq(ui.dailyList.children[0].querySelector('.daily-name').textContent, '一', '读取服务端扁平曲目字段');
   eq(ui.dailyDate.textContent, '2026-09-22', '显示服务端给的日期');
   eq(ui.dailyPlayAll.disabled, false, '有结果时「播放全部」可用');
   ok(ui.dailySub.textContent.indexOf('3') >= 0, '副标题带条数');
@@ -437,6 +645,7 @@ async function checkDaily() {
 
 (async function main() {
   await checkFavorites();
+  await checkFavoritesPagination();
   await checkDaily();
 
   console.log('\n' + '─'.repeat(60));

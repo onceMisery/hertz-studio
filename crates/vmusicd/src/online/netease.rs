@@ -1403,8 +1403,8 @@ mod tests {
         let tracks = vec![
             track("1", None),
             track("2", Some("https://p1.music.126.net/has.jpg")),
-            track("0", None),  // 解析失败的占位 id
-            track("", None),   // 同上
+            track("0", None), // 解析失败的占位 id
+            track("", None),  // 同上
             track("5", None),
         ];
         assert_eq!(cover_gaps(&tracks), vec!["1", "5"]);
@@ -1426,8 +1426,14 @@ mod tests {
             serde_json::json!({"album": {"picUrl": "https://x/y.jpg"}}),
         ];
         apply_detail_covers(&mut tracks, &songs);
-        assert_eq!(tracks[0].cover.as_deref(), Some("https://p1.music.126.net/a.jpg"));
-        assert_eq!(tracks[1].cover.as_deref(), Some("https://p1.music.126.net/keep.jpg"));
+        assert_eq!(
+            tracks[0].cover.as_deref(),
+            Some("https://p1.music.126.net/a.jpg")
+        );
+        assert_eq!(
+            tracks[1].cover.as_deref(),
+            Some("https://p1.music.126.net/keep.jpg")
+        );
         assert_eq!(tracks[2].cover, None);
     }
 

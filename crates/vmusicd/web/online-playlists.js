@@ -493,6 +493,13 @@
       window.toast('在线歌单信息已过期，请回在线面板刷新', 'error');
       return;
     }
+    return playRef(source, id, p.name);
+  }
+
+  // 按来源+平台歌单 id 整盘载入，不要求该歌单还在账号歌单清单里。
+  // 收藏视图里的电台（kind=radio）快照只有 source+id：上次会话收藏的歌单
+  // 重启后可能不在首屏 30 张卡片里，不能因此拒绝打开整盘。
+  async function playRef(source, id, name) {
     var d;
     try {
       d = await tr().get('/v1/online/playlist?source=' + encodeURIComponent(source)
@@ -508,6 +515,7 @@
     }
     tracks.forEach(function (t) { if (!t.source) t.source = source; });
     window.Online.playAll(tracks, 0);
+    if (name) window.toast('已载入《' + name + '》');
   }
 
   window.OnlinePlaylists = {
@@ -516,6 +524,8 @@
     all: allPlaylists,
     open: openPlaylistById,
     play: playPlaylistById,
+    // 收藏视图整盘打开：只需 source+id，不要求歌单在账号清单里。
+    playRef: playRef,
     closeDrawer: closeDrawer,
     // 详情层（online-playlist-view.js）复用同一颗移除按钮。
     removeButton: removeButton,

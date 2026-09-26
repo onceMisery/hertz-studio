@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-09-26-prioritized-completion",
+  "taskIntentRef": "docs/aegis/work/2026-09-26-prioritized-completion/task-intent-draft.json",
+  "baselineRefs": [
+    "README.md"
+  ],
+  "scopeStatus": "1已实现审查通过；2实施；3–13待实施；14用户移出范围",
+  "compatStatus": "保留local-first、服务端队列权威、既有API默认排序",
+  "retirementStatus": "删除前端分页内排序与局部播放请求代际，复用后端查询与共享播放意图",
+  "newRiskSignals": [],
+  "decision": "continue"
+}

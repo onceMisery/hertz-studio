@@ -35,7 +35,7 @@
     {
       id: 'mineral',
       name: '矿石黑（默认）',
-      note: 'Mineradio 同源：近黑底 + 纯白强调 + 薄荷青辉光',
+      note: '矿石黑 · 近黑底 + 纯白强调 + 薄荷青辉光',
       // 对比度（自 --bg 反推，WCAG AA）：text ≈ 15.6 / muted ≈ 7.4
       tokens: {
         '--bg': '#0A0A0A',
@@ -99,7 +99,7 @@
     {
       id: 'vcp-midnight-neon',
       name: '午夜霓虹',
-      note: '霓虹咖啡 · 深夜窗上反光的赛博粉',
+      note: '午夜霓虹 · 深夜窗上反光的赛博粉',
       tokens: {
         '--bg': '#101116',
         '--panel': 'rgba(26, 27, 34, 0.72)',
@@ -118,7 +118,7 @@
     {
       id: 'vcp-mono',
       name: '黑白简约',
-      note: '黑白简约 · 克制的中性墨灰',
+      note: '黑白简约 · 克制的墨灰底 + 一点冷蓝强调',
       tokens: {
         '--bg': '#1c1c1e',
         '--panel': 'rgba(40, 40, 44, 0.72)',

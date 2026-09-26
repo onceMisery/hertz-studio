@@ -1,0 +1,130 @@
+# SPDX-License-Identifier: MIT
+#
+# Release 打包流水线。
+#
+# 设计边界（计划第 12 项）：
+#   - 仅 workflow_dispatch 手动触发，绝不自动推送/发布/上传 Release；
+#     产物留在 workflow run 的 artifacts 里，由维护者人工检查后自行发布。
+#   - 单二进制发行：web 资源编译期嵌入，产物就是 vmusicd(.exe) + README + LICENSE。
+#   - 每平台输出 sha256 校验和，并合并一份 SHA256SUMS 供下载方核对。
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "本次构建说明（可选，仅记录在 run summary）"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: package ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build (release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys;print(json.load(sys.stdin)['packages'][0]['version'])")"
+          NAME="mmusic-studio-${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/${NAME}"
+          cp "target/${{ matrix.target }}/release/vmusicd"* "dist/${NAME}/" 2>/dev/null || true
+          cp README.md LICENSE "dist/${NAME}/" 2>/dev/null || true
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            python3 -c "import shutil; shutil.make_archive('${NAME}', 'zip', '.', '${NAME}')"
+          else
+            tar czf "${NAME}.tar.gz" "${NAME}"
+          fi
+          rm -rf "${NAME}"
+
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python3 -c "
+import hashlib, glob, sys
+for f in sorted(glob.glob('*.zip') + glob.glob('*.tar.gz')):
+    print(hashlib.sha256(open(f,'rb').read()).hexdigest(), ' ', f)
+" > SHA256SUMS.txt
+          else
+            sha256sum *.zip *.tar.gz > SHA256SUMS.txt 2>/dev/null || sha256sum *.tar.gz > SHA256SUMS.txt
+          fi
+          cat SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  summary:
+    name: merge checksums
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Combined SHA256SUMS
+        shell: bash
+        run: |
+          cd dist
+          cat */SHA256SUMS.txt 2>/dev/null | sort -k2 > SHA256SUMS.txt || true
+          rm -f */SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          {
+            echo "## Release artifacts"
+            echo ""
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+            if [ -n "${{ github.event.inputs.notes }}" ]; then
+              echo "${{ github.event.inputs.notes }}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload combined
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-all
+          path: dist/*
+          if-no-files-found: error

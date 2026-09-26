@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-09-26-prioritized-completion",
+  "currentTodo": "1完成；2目录维护验证中；3–13待实施；14用户移出范围",
+  "completedTodos": [
+    "1全量排序分页和播放队列，Rust/frontend/API/UI及独立审查通过"
+  ],
+  "activeSlice": "2-library-maintenance",
+  "evidenceRefs": [
+    "scripts/check-library-api.py",
+    "scripts/check-scan-ui.js"
+  ],
+  "blockedOn": null,
+  "nextStep": "修复旧Windows路径身份兼容，完成第2项审查和浏览器验证，接续第3项混合歌单",
+  "updatedAt": "2026-09-26"
+}

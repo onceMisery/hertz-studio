@@ -35,6 +35,8 @@ jobs:
           node scripts/check-css-tokens.js
           node scripts/check-creative.js
           node scripts/check-favorites.js
+          node scripts/check-library.js
+          node scripts/check-scan-ui.js
           node scripts/check-online.js
           node scripts/check-online-playlist-view.js
           node scripts/check-stage-control.js
@@ -65,3 +67,5 @@ jobs:
         run: bash scripts/smoke.sh 7899
         env:
           VMUSIC_BACKEND: null
+      - name: Library and filesystem integration
+        run: python3 scripts/check-library-api.py --maintenance

@@ -46,6 +46,29 @@ pub trait AudioSource: std::io::Read + std::io::Seek + Send + Sync {
     }
 }
 
+/// DSP 处理链参数。
+///
+/// `eq_gains_db` 是六个峰化均衡段的增益（dB，-12..+12），频段固定为
+/// 60/150/400/1k/2.4k/6k Hz。`preamp_db` 是用户手动增益，`track_gain_db`
+/// 是按曲目走响度归一化时的补偿（ReplayGain 标签），两者之和组成线性
+/// 增益；后面永远挂限幅器防削波。
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DspParams {
+    pub eq_gains_db: [f32; 6],
+    pub preamp_db: f32,
+    pub track_gain_db: f32,
+}
+
+impl Default for DspParams {
+    fn default() -> Self {
+        Self {
+            eq_gains_db: [0.0; 6],
+            preamp_db: 0.0,
+            track_gain_db: 0.0,
+        }
+    }
+}
+
 pub trait AudioBackend {
     fn name(&self) -> &'static str;
 
@@ -73,6 +96,16 @@ pub trait AudioBackend {
 
     fn seek(&mut self, position_ms: u64) -> Result<(), AudioError>;
     fn set_volume(&mut self, volume: f32) -> Result<(), AudioError>;
+
+    /// 更新 DSP 参数（EQ/增益）。默认忽略：null 后端没有音频链。
+    fn set_dsp(&mut self, _params: DspParams) -> Result<(), AudioError> {
+        Ok(())
+    }
+
+    /// 可调交叉淡化时长（毫秒）。默认忽略。
+    fn set_crossfade(&mut self, _ms: u64) -> Result<(), AudioError> {
+        Ok(())
+    }
 
     fn position_ms(&self) -> u64;
     fn duration_ms(&self) -> Option<u64>;

@@ -13,13 +13,13 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{middleware, Json, Router};
 use serde::{Deserialize, Serialize};
 use vmusic_core::{PlayMode, PROTOCOL_VERSION};
 
 use crate::daily;
-use crate::error::{bad_request, not_found, unauthorized, ApiError, ApiResult};
+use crate::error::{bad_request, internal, not_found, unauthorized, ApiError, ApiResult};
 use crate::online;
 use crate::scan;
 use crate::state::{AppState, ScanProgress};
@@ -45,19 +45,45 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/player/queue", get(get_queue).put(set_queue))
         .route("/v1/player/volume", post(volume))
         .route("/v1/player/mode", post(mode))
+        .route("/v1/player/dsp", get(get_dsp).post(set_dsp))
         .route("/v1/devices", get(devices))
         .route("/v1/devices/select", post(select_device))
         .route("/v1/tracks", get(list_tracks))
+        .route("/v1/tracks/ids", get(list_track_ids))
+        .route("/v1/tracks/facets", get(track_facets))
+        .route("/v1/tracks/batch-edit", post(batch_edit_tracks))
+        .route("/v1/tracks/batch-delete", post(batch_delete_tracks))
+        .route("/v1/tracks/missing", get(list_missing_tracks))
         .route("/v1/tracks/{id}", get(get_track))
-        .route("/v1/tracks/{id}/cover", get(get_cover))
-        .route("/v1/tracks/{id}/lyrics", get(get_lyrics))
+        .route("/v1/tracks/{id}/cover", get(get_cover).post(replace_cover))
+        .route(
+            "/v1/tracks/{id}/edit",
+            get(get_track_edit).delete(clear_track_edit),
+        )
+        .route(
+            "/v1/tracks/{id}/lyrics",
+            get(get_lyrics).put(import_lyrics).delete(clear_lyrics),
+        )
+        .route("/v1/tracks/{id}/lyrics/offset", put(set_lyrics_offset))
         .route("/v1/library/scan", post(start_scan))
         .route("/v1/library/status", get(scan_status))
+        .route("/v1/library/scan/cancel", post(cancel_scan))
+        .route(
+            "/v1/library/roots",
+            get(library_roots)
+                .post(add_library_root)
+                .put(update_library_root)
+                .delete(remove_library_root),
+        )
         .route("/v1/playlists", get(list_playlists).post(create_playlist))
+        .route("/v1/playlists/import-m3u", post(import_m3u_route))
+        .route("/v1/backup", get(export_backup))
+        .route("/v1/backup/restore", post(restore_backup))
         .route(
             "/v1/playlists/{id}",
             get(noop).put(rename_playlist).delete(delete_playlist),
         )
+        .route("/v1/playlists/{id}/m3u", get(export_playlist_m3u))
         .route(
             "/v1/playlists/{id}/tracks",
             get(get_playlist_tracks).post(add_to_playlist),
@@ -91,6 +117,9 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/online/detail", get(online_detail))
         .route("/v1/online/lyric", get(online_lyric))
         .route("/v1/online/play", post(online_play))
+        .route("/v1/online/cache", get(online_cache_stats))
+        .route("/v1/online/cache/clear", post(online_cache_clear))
+        .route("/v1/online/cache/keep", post(online_cache_keep))
         .route(
             "/v1/online/quality",
             get(online_quality_get).post(online_quality_set),
@@ -300,12 +329,25 @@ pub struct LoadRequest {
     /// Optional playback queue; when present the track is played from it and
     /// "next / previous" walk this list.
     pub queue: Option<Vec<String>>,
+    /// Optional per-id metadata snapshot for online queue entries. 重启后从
+    /// 歌单/收藏整单播放时，客户端持有快照而服务端内存 `online_meta` 已清空；
+    /// 不注入的话播放历史的标题会退化成平台 id。仅接受合法虚拟 id 的键。
+    #[serde(default)]
+    pub meta: Option<std::collections::HashMap<String, crate::state::OnlineMetaSnap>>,
 }
 
 async fn load(
     State(state): State<Arc<AppState>>,
     Json(body): Json<LoadRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    if let Some(meta) = &body.meta {
+        let mut online_meta = state.online_meta.lock().await;
+        for (id, snap) in meta {
+            if crate::online::split_virtual_id(id).is_some() {
+                online_meta.insert(id.clone(), snap.clone());
+            }
+        }
+    }
     let queue = body.queue.unwrap_or_else(|| vec![body.track_id.clone()]);
     let index = queue
         .iter()
@@ -417,6 +459,80 @@ async fn mode(
     Ok(get_state(State(state)).await)
 }
 
+
+/// 读取 DSP 设置（EQ/preamp/响度归一化/交叉淡化）。
+async fn get_dsp(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let settings = vmusic_store::settings::get_all(&state.db)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    let cfg = crate::state::DspConfig::from_settings(&settings);
+    Ok(Json(serde_json::to_value(&cfg).map_err(|e| internal(e.to_string()))?))
+}
+
+#[derive(Deserialize)]
+struct DspUpdate {
+    eq_gains_db: Option<[f32; 6]>,
+    preamp_db: Option<f32>,
+    loudness_norm: Option<bool>,
+    crossfade_ms: Option<u64>,
+}
+
+/// 更新 DSP 设置并即时下发到音频后端；交叉淡化同步换装/尾淡出时长。
+async fn set_dsp(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<DspUpdate>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let settings = vmusic_store::settings::get_all(&state.db)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    let mut cfg = crate::state::DspConfig::from_settings(&settings);
+    if let Some(eq) = body.eq_gains_db {
+        cfg.eq_gains_db = eq;
+        cfg.clamp_eq();
+    }
+    if let Some(pre) = body.preamp_db {
+        cfg.preamp_db = pre.clamp(-24.0, 12.0);
+    }
+    if let Some(l) = body.loudness_norm {
+        cfg.loudness_norm = l;
+    }
+    if let Some(ms) = body.crossfade_ms {
+        cfg.crossfade_ms = ms.min(8000);
+    }
+    let eq_json = serde_json::json!(cfg.eq_gains_db);
+    vmusic_store::settings::set(&state.db, "dsp_eq", &eq_json)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    for (key, value) in [
+        ("dsp_preamp", serde_json::json!(cfg.preamp_db)),
+        ("dsp_loudness", serde_json::json!(cfg.loudness_norm)),
+        ("dsp_crossfade_ms", serde_json::json!(cfg.crossfade_ms)),
+    ] {
+        vmusic_store::settings::set(&state.db, key, &value)
+            .await
+            .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    }
+    // 即时生效：EQ/增益走 set_dsp，交叉淡化走 set_crossfade。
+    let track_gain = if cfg.loudness_norm {
+        state.current_rg_gain().await.unwrap_or(0.0) as f32
+    } else {
+        0.0
+    };
+    state
+        .audio
+        .set_dsp(vmusic_core::DspParams {
+            eq_gains_db: cfg.eq_gains_db,
+            preamp_db: cfg.preamp_db,
+            track_gain_db: track_gain,
+        })
+        .await
+        .ok();
+    state.audio.set_crossfade(cfg.crossfade_ms).await.ok();
+    Ok(Json(serde_json::to_value(&cfg).map_err(|e| internal(e.to_string()))?))
+}
+
 async fn devices(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let devices = state
         .audio
@@ -446,8 +562,19 @@ async fn select_device(
 #[derive(Deserialize)]
 pub struct TrackQuery {
     pub q: Option<String>,
+    pub sort: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// 专辑/歌手浏览：按覆盖后的展示值精确过滤。
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+fn track_filter_from(query: &TrackQuery) -> vmusic_store::TrackFilter {
+    vmusic_store::TrackFilter {
+        artist: query.artist.as_deref().filter(|v| !v.trim().is_empty()).map(String::from),
+        album: query.album.as_deref().filter(|v| !v.trim().is_empty()).map(String::from),
+    }
 }
 
 #[derive(Serialize)]
@@ -462,13 +589,33 @@ async fn list_tracks(
 ) -> ApiResult<Json<TrackPage>> {
     let limit = query.limit.unwrap_or(200).clamp(1, 1000);
     let offset = query.offset.unwrap_or(0).max(0);
-    let tracks = vmusic_store::list_tracks(&state.db, query.q.as_deref(), limit, offset)
+    let sort = parse_track_sort(query.sort.as_deref())?;
+    let filter = track_filter_from(&query);
+    let tracks = vmusic_store::list_tracks_filtered(
+        &state.db, query.q.as_deref(), &filter, sort, limit, offset)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    let total = vmusic_store::count_tracks(&state.db, query.q.as_deref())
+    let total = vmusic_store::count_tracks_filtered(&state.db, query.q.as_deref(), &filter)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     Ok(Json(TrackPage { total, tracks }))
+}
+
+fn parse_track_sort(value: Option<&str>) -> ApiResult<vmusic_store::TrackSort> {
+    vmusic_store::TrackSort::parse(value.unwrap_or("title"))
+        .ok_or_else(|| bad_request("sort must be title, artist, album or added"))
+}
+
+async fn list_track_ids(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TrackQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let sort = parse_track_sort(query.sort.as_deref())?;
+    let filter = track_filter_from(&query);
+    let ids = vmusic_store::list_track_ids_filtered(&state.db, query.q.as_deref(), &filter, sort)
+        .await
+        .map_err(store_err)?;
+    Ok(Json(serde_json::json!({ "track_ids": ids })))
 }
 
 async fn get_track(
@@ -480,6 +627,165 @@ async fn get_track(
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?
         .map(Json)
         .ok_or_else(|| not_found(format!("track {id}")))
+}
+
+/// 专辑/歌手浏览面：名字与计数来自覆盖后的展示值，按曲目数排序。
+async fn track_facets(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let kind = q.get("kind").map(String::as_str).unwrap_or("artist");
+    let values = vmusic_store::list_track_facets(&state.db, kind)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    let facets: Vec<serde_json::Value> = values
+        .into_iter()
+        .map(|(name, count)| serde_json::json!({ "name": name, "count": count }))
+        .collect();
+    Ok(Json(serde_json::json!({ "kind": kind, "facets": facets })))
+}
+
+#[derive(Deserialize)]
+struct BatchEditRequest {
+    track_ids: Vec<String>,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
+/// 批量编辑：只写请求里出现的字段，其余字段不动（不覆盖各自已有编辑）。
+async fn batch_edit_tracks(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BatchEditRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.track_ids.is_empty() {
+        return Err(bad_request("track_ids must not be empty"));
+    }
+    let input = vmusic_store::track_edits::EditInput {
+        title: body.title,
+        artist: body.artist,
+        album: body.album,
+    };
+    let changed = vmusic_store::track_edits::apply_batch(&state.db, &body.track_ids, &input)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    Ok(Json(serde_json::json!({ "ok": true, "changed": changed })))
+}
+
+/// 单曲编辑覆盖读取（UI 回显用）。
+async fn get_track_edit(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let edit = vmusic_store::track_edits::get(&state.db, &id)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    Ok(Json(serde_json::json!({ "edit": edit })))
+}
+
+/// 重置编辑：删掉覆盖行，回到文件标签。
+async fn clear_track_edit(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    vmusic_store::track_edits::remove(&state.db, &id)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 替换封面：请求体即图片字节，Content-Type 决定扩展名。写缓存文件并打
+/// cover_edited 标记，增量扫描跳过内嵌封面重写，用户封面不会被盖回去。
+async fn replace_cover(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.is_empty() {
+        return Err(bad_request("cover body must not be empty"));
+    }
+    let media_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+    let ext = match media_type.as_str() {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "jpg",
+    };
+    let file_id = id.clone();
+    let dir = state.cover_dir();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        for old_ext in ["jpg", "png", "webp", "gif"] {
+            let _ = std::fs::remove_file(dir.join(format!("{file_id}.{old_ext}")));
+        }
+        std::fs::write(dir.join(format!("{file_id}.{ext}")), &body).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| bad_request(e.to_string()))?
+    .map_err(bad_request)?;
+    vmusic_store::track_edits::set_cover_edited(&state.db, &id, true)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    vmusic_store::set_has_cover(&state.db, &id, true)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    Ok(Json(serde_json::json!({ "ok": true, "cover_key": format!("{id}.{ext}") })))
+}
+
+/// 失效文件整理：文件已不存在的曲目清单（含路径，供界面确认）。
+async fn list_missing_tracks(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT t.id, t.path, COALESCE(NULLIF(TRIM(e.title), ''), t.title),          COALESCE(NULLIF(TRIM(e.artist), ''), t.artist)          FROM tracks t LEFT JOIN track_edits e ON e.track_id = t.id WHERE t.source = 'local'",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| bad_request(e.to_string()))?;
+    let missing: Vec<serde_json::Value> =
+        tokio::task::spawn_blocking(move || {
+            rows.into_iter()
+                .filter(|(_, path, _, _)| !std::path::Path::new(path).is_file())
+                .map(|(id, path, title, artist)| {
+                    serde_json::json!({ "id": id, "path": path, "title": title, "artist": artist })
+                })
+                .collect()
+        })
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "missing": missing, "total": missing.len() })))
+}
+
+/// 批量删除（失效整理的执行端点）：删曲目行并清理封面缓存文件。
+async fn batch_delete_tracks(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BatchDeleteRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.track_ids.is_empty() {
+        return Err(bad_request("track_ids must not be empty"));
+    }
+    let deleted = vmusic_store::delete_tracks(&state.db, &body.track_ids)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    let dir = state.cover_dir();
+    tokio::task::spawn_blocking(move || {
+        for id in &body.track_ids {
+            for ext in ["jpg", "png", "webp", "gif"] {
+                let _ = std::fs::remove_file(dir.join(format!("{id}.{ext}")));
+            }
+        }
+    })
+    .await
+    .ok();
+    Ok(Json(serde_json::json!({ "ok": true, "deleted": deleted })))
+}
+
+#[derive(Deserialize)]
+struct BatchDeleteRequest {
+    track_ids: Vec<String>,
 }
 
 async fn get_cover(State(state): State<Arc<AppState>>, AxumPath(id): AxumPath<String>) -> Response {
@@ -519,17 +825,71 @@ async fn get_cover(State(state): State<Arc<AppState>>, AxumPath(id): AxumPath<St
     }
 }
 
+/// 本地曲目歌词读取，来源优先级固定为 imported > embedded > sidecar：
+/// - imported：用户手动导入/关联、存在数据库里的 LRC 原文（用户明确指定的赢）；
+/// - embedded：音频容器内嵌的歌词标签，每次实时从文件解析，永远与文件同步；
+/// - sidecar：同目录同名 `.lrc`（既有行为，不破坏）。
+///
+/// 每曲用户偏移与文件自身的 `[offset:]` 标签叠加：total = file_offset + user，
+/// 读取端一次应用。响应体额外带 `user_offset_ms` 供 UI 显示与调整。
 async fn get_lyrics(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
-) -> ApiResult<Json<vmusic_core::LyricDocument>> {
+) -> ApiResult<Json<serde_json::Value>> {
     let track = vmusic_store::get_track(&state.db, &id)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?
         .ok_or_else(|| not_found(format!("track {id}")))?;
 
+    let saved = vmusic_store::lyrics::get(&state.db, &id)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
+
     let path = Path::new(&track.path);
-    let mut doc = match vmusic_library::find_sidecar_lyrics(path) {
+    let (mut doc, imported) = match saved.filter(|s| !s.content.trim().is_empty()) {
+        Some(saved) => (vmusic_lyrics::parse_lrc(&saved.content), true),
+        None => (read_embedded_or_sidecar_lyrics(path).await, false),
+    };
+    doc.offset_ms += user_offset;
+    vmusic_lyrics::apply_offset(&mut doc);
+
+    let body = serde_json::to_value(&doc).map_err(|e| internal(e.to_string()))?;
+    let mut body = match body {
+        serde_json::Value::Object(map) => map,
+        _ => unreachable!("LyricDocument serializes to an object"),
+    };
+    if imported {
+        body.insert(
+            "source".into(),
+            serde_json::Value::String("imported".into()),
+        );
+    }
+    body.insert(
+        "user_offset_ms".into(),
+        serde_json::Value::from(user_offset),
+    );
+    Ok(Json(serde_json::Value::Object(body)))
+}
+
+/// 无手动导入时的回退链：容器内嵌歌词标签 → 同目录 sidecar `.lrc`。
+async fn read_embedded_or_sidecar_lyrics(path: &Path) -> vmusic_core::LyricDocument {
+    let embedded = {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            vmusic_library::read_metadata(&path).ok().and_then(|m| m.lyrics)
+        })
+        .await
+        .unwrap_or(None)
+    };
+    if let Some(text) = embedded {
+        let mut doc = vmusic_lyrics::parse_lrc(&text);
+        if !doc.lines.is_empty() {
+            doc.source = vmusic_core::LyricSource::Embedded;
+            return doc;
+        }
+    }
+    match vmusic_library::find_sidecar_lyrics(path) {
         Some(lrc) => match tokio::fs::read_to_string(&lrc).await {
             Ok(text) => vmusic_lyrics::parse_lrc(&text),
             Err(e) => {
@@ -538,9 +898,55 @@ async fn get_lyrics(
             }
         },
         None => vmusic_core::LyricDocument::empty(),
-    };
-    vmusic_lyrics::apply_offset(&mut doc);
-    Ok(Json(doc))
+    }
+}
+
+#[derive(Deserialize)]
+struct LyricsImport {
+    content: String,
+}
+
+/// 手动导入歌词：存 LRC 原文，读取端按 imported 优先返回。清空内容用 DELETE。
+async fn import_lyrics(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<LyricsImport>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.content.trim().is_empty() {
+        return Err(bad_request("lyrics content must not be empty"));
+    }
+    vmusic_store::lyrics::import(&state.db, &id, &body.content)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    Ok(Json(serde_json::json!({ "ok": true, "source": "imported" })))
+}
+
+/// 清除手动导入（偏移一并删除），歌词回退到内嵌/sidecar。
+async fn clear_lyrics(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    vmusic_store::lyrics::remove(&state.db, &id)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct LyricsOffset {
+    offset_ms: i64,
+}
+
+/// 保存每曲歌词偏移（毫秒），与歌词来源无关，重启后保留。
+async fn set_lyrics_offset(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<LyricsOffset>,
+) -> ApiResult<Json<serde_json::Value>> {
+    vmusic_store::lyrics::set_offset(&state.db, &id, body.offset_ms)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    Ok(Json(serde_json::json!({ "ok": true, "offset_ms": body.offset_ms })))
 }
 
 #[derive(Deserialize)]
@@ -552,15 +958,79 @@ async fn start_scan(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ScanRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let root = Path::new(&body.root).to_path_buf();
-    if !root.is_dir() {
-        return Err(bad_request(format!("{} is not a directory", body.root)));
-    }
-    if state.scan.lock().await.running {
-        return Err(bad_request("a scan is already running"));
-    }
-    tokio::spawn(scan::run_scan(state, root));
+    scan::start(state, Path::new(&body.root).to_path_buf())
+        .await
+        .map_err(bad_request)?;
     Ok(Json(serde_json::json!({ "started": true })))
+}
+
+async fn cancel_scan(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    scan::cancel(&state).await;
+    Json(serde_json::json!({ "ok": true }))
+}
+
+async fn library_roots(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let roots = vmusic_store::scan_roots::list(&state.db)
+        .await
+        .map_err(store_err)?;
+    Ok(Json(serde_json::json!({ "roots": roots })))
+}
+
+#[derive(Deserialize)]
+struct LibraryRootRequest {
+    path: String,
+    enabled: Option<bool>,
+}
+
+async fn add_library_root(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<LibraryRootRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let root = tokio::task::spawn_blocking(move || scan::normalize_root(Path::new(&body.path)))
+        .await
+        .map_err(|error| bad_request(error.to_string()))?
+        .map_err(bad_request)?;
+    vmusic_store::scan_roots::upsert(
+        &state.db,
+        &root.to_string_lossy(),
+        body.enabled.unwrap_or(true),
+    )
+    .await
+    .map_err(store_err)?;
+    library_roots(State(state)).await
+}
+
+async fn update_library_root(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<LibraryRootRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let enabled = body
+        .enabled
+        .ok_or_else(|| bad_request("enabled is required"))?;
+    let roots = vmusic_store::scan_roots::list(&state.db)
+        .await
+        .map_err(store_err)?;
+    if !roots.iter().any(|root| root.path == body.path) {
+        return Err(not_found("music directory"));
+    }
+    vmusic_store::scan_roots::set_enabled(&state.db, &body.path, enabled)
+        .await
+        .map_err(store_err)?;
+    if !enabled {
+        scan::cancel_root(&state, &body.path).await;
+    }
+    library_roots(State(state)).await
+}
+
+async fn remove_library_root(
+    State(state): State<Arc<AppState>>,
+    Query(body): Query<LibraryRootRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    vmusic_store::scan_roots::remove(&state.db, &body.path)
+        .await
+        .map_err(store_err)?;
+    scan::cancel_root(&state, &body.path).await;
+    library_roots(State(state)).await
 }
 
 async fn scan_status(State(state): State<Arc<AppState>>) -> Json<ScanProgress> {
@@ -615,7 +1085,75 @@ async fn delete_playlist(
 
 #[derive(Deserialize)]
 pub struct PlaylistTracks {
-    pub track_ids: Vec<String>,
+    /// 纯 id 形态（本地曲库右键入单走这里，保持旧契约）。
+    pub track_ids: Option<Vec<String>>,
+    /// 富形态：在线曲目随单携带元数据快照。`source` 缺省或为 `local` 时按
+    /// 本地 id 处理，不写快照。
+    #[serde(default)]
+    pub tracks: Vec<PlaylistTrackInput>,
+}
+
+#[derive(Deserialize)]
+pub struct PlaylistTrackInput {
+    pub id: String,
+    pub source: Option<String>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub cover: Option<String>,
+}
+
+/// 把入站条目折成 (track_id, 快照)。在线身份沿用 `online:<source>:<id>` 协议：
+/// 客户端传平台 id 时在此拼虚拟 id，传过来的已是虚拟 id 则原样保留。
+fn normalize_playlist_entries(
+    body: PlaylistTracks,
+) -> Result<Vec<(String, Option<vmusic_store::playlists::TrackMeta>)>, ApiError> {
+    let mut entries = Vec::new();
+    for id in body.track_ids.unwrap_or_default() {
+        entries.push((id, None));
+    }
+    for input in body.tracks {
+        let id = input.id.trim().to_string();
+        if id.is_empty() {
+            return Err(bad_request("tracks 中存在缺少 id 的条目"));
+        }
+        let source = input
+            .source
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "local");
+        let (track_id, meta) = match source {
+            None => (id, None),
+            Some(source) => {
+                let title = input.title.unwrap_or_default();
+                if title.trim().is_empty() && input.artist.is_none() && input.cover.is_none() {
+                    // 没有任何元数据的在线条目存了也无法渲染：明确拒绝，
+                    // 不让一条空快照混进歌单。
+                    return Err(bad_request("在线曲目缺少可存的元数据"));
+                }
+                let vid = if id.starts_with("online:") {
+                    id.clone()
+                } else {
+                    online::virtual_id(source, &id)
+                };
+                let meta = vmusic_store::playlists::TrackMeta {
+                    source: source.to_string(),
+                    title: if title.trim().is_empty() { id.clone() } else { title },
+                    artist: input.artist,
+                    album: input.album,
+                    duration_ms: input.duration_ms.map(|v| v as i64),
+                    cover: input.cover,
+                };
+                (vid, Some(meta))
+            }
+        };
+        entries.push((track_id, meta));
+    }
+    if entries.is_empty() {
+        return Err(bad_request("没有可加入的曲目"));
+    }
+    Ok(entries)
 }
 
 async fn add_to_playlist(
@@ -623,7 +1161,8 @@ async fn add_to_playlist(
     AxumPath(id): AxumPath<String>,
     Json(body): Json<PlaylistTracks>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    vmusic_store::playlists::add_tracks(&state.db, &id, &body.track_ids)
+    let entries = normalize_playlist_entries(body)?;
+    vmusic_store::playlists::add_entries(&state.db, &id, &entries)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -650,26 +1189,40 @@ async fn reorder_playlist_tracks(
 
 /// Reads a playlist's contents.
 ///
-/// Only `POST` (append) was registered before, so the UI's click on a playlist
-/// had no way to learn what is inside it. Both shapes are returned:
-/// `track_ids` mirrors the write body, `tracks` saves the client a round trip
-/// per id (the queue view needs titles, and those tracks may be outside the
-/// library page currently loaded).
+/// Both shapes are returned: `track_ids` mirrors the write body, `tracks`
+/// saves the client a round trip per id. 解析顺序按身份协议分层：本地 id 走
+/// tracks 表实时字段（标签编辑、换封面后歌单跟着变）；`online:` 虚拟 id 回
+/// 退到入单时的快照行（重启后显示与顺序不丢）；两者都拿不到的 id 只保留在
+/// `track_ids` 里，客户端渲染占位行。
 async fn get_playlist_tracks(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let ids = vmusic_store::get_playlist_track_ids(&state.db, &id)
+    let entries = vmusic_store::playlists::list_entries(&state.db, &id)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    let ids: Vec<String> = entries.iter().map(|e| e.track_id.clone()).collect();
 
-    let mut tracks = Vec::with_capacity(ids.len());
-    for track_id in &ids {
-        if let Some(track) = vmusic_store::get_track(&state.db, track_id)
+    let mut tracks = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        if let Some(track) = vmusic_store::get_track(&state.db, &entry.track_id)
             .await
             .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?
         {
-            tracks.push(track);
+            tracks.push(serde_json::to_value(track).map_err(|e| internal(e.to_string()))?);
+            continue;
+        }
+        if let Some(meta) = &entry.meta {
+            tracks.push(serde_json::json!({
+                "id": entry.track_id,
+                "source": meta.source,
+                "title": meta.title,
+                "artist": meta.artist,
+                "album": meta.album,
+                "duration_ms": meta.duration_ms,
+                "has_cover": false,
+                "cover": meta.cover,
+            }));
         }
     }
 
@@ -686,6 +1239,79 @@ async fn remove_from_playlist(
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 导出用户数据备份（JSON）。不含凭据：凭据只存系统钥匙串。
+async fn export_backup(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let backup = vmusic_store::backup::export(&state.db)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    let value = serde_json::to_value(&backup).map_err(|e| internal(e.to_string()))?;
+    Ok(Json(value))
+}
+
+/// 恢复备份：格式校验失败 400，单事务写入，幂等。
+async fn restore_backup(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<vmusic_store::backup::BackupFile>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let report = vmusic_store::backup::restore(&state.db, &body)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(serde_json::to_value(&report).map_err(|e| internal(e.to_string()))?))
+}
+
+/// 歌单导出为 M3U8 文本（在线曲没有本地路径，不输出）。
+async fn export_playlist_m3u(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<axum::response::Response, ApiError> {
+    let text = vmusic_store::backup::export_m3u(&state.db, &id)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    match text {
+        Some(text) => Ok((
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "audio/x-mpegurl; charset=utf-8"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!(r#"attachment; filename="playlist-{id}.m3u8""#).as_str(),
+                ),
+            ],
+            text,
+        )
+            .into_response()),
+        None => Err(not_found("playlist")),
+    }
+}
+
+#[derive(Deserialize)]
+struct ImportM3uRequest {
+    name: String,
+    content: String,
+}
+
+/// 导入 M3U：路径精确匹配本地曲目，未命中行计入 skipped。
+async fn import_m3u_route(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ImportM3uRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.name.trim().is_empty() {
+        return Err(bad_request("name must not be empty"));
+    }
+    let result = vmusic_store::backup::import_m3u(&state.db, &body.name, &body.content)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    match result {
+        Some((playlist_id, added, skipped)) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "playlist_id": playlist_id,
+            "added": added,
+            "skipped": skipped,
+        }))),
+        None => Err(bad_request("content is not an M3U playlist")),
+    }
 }
 
 async fn noop() -> Json<serde_json::Value> {
@@ -1003,17 +1629,24 @@ async fn daily_recommend(
 #[derive(Debug, Deserialize)]
 struct HistoryQuery {
     limit: Option<i64>,
+    offset: Option<i64>,
+    /// 来源筛选（local / netease / ...），空 = 全部。
+    source: Option<String>,
+    /// 标题/歌手/专辑子串搜索。
+    q: Option<String>,
 }
 
 async fn history_list(
     State(state): State<Arc<AppState>>,
     Query(q): Query<HistoryQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let limit = q.limit.unwrap_or(50).clamp(1, 100);
-    let items = crate::history::list_recent(&state.db, limit)
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(Json(serde_json::json!({ "items": items })))
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let (items, total) =
+        crate::history::list_filtered(&state.db, q.q.as_deref(), q.source.as_deref(), limit, offset)
+            .await
+            .map_err(ApiError::internal)?;
+    Ok(Json(serde_json::json!({ "items": items, "total": total })))
 }
 
 async fn history_clear(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
@@ -1448,6 +2081,100 @@ async fn online_play(
         // 平台实际给到的音质档位（缓存命中/预取接管时为 null）。
         "actual_quality": outcome.actual_quality.map(|q| q.as_str()),
     })))
+}
+
+/// 缓存占用展示：总量/文件数/按音源分组 + 配置上限 + 用户保留名单。
+async fn online_cache_stats(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let stats = crate::online::cache::cache_stats(&state.online_cache_dir()).await;
+    let keep = state.keep.lock().await.clone();
+    let max = state.config.online.cache_max_bytes;
+    Ok(Json(serde_json::json!({
+        "total_bytes": stats.total_bytes,
+        "files": stats.files,
+        "by_source": stats.by_source,
+        "max_bytes": max,
+        "keep": keep,
+    })))
+}
+
+#[derive(Deserialize)]
+struct CacheClearRequest {
+    /// 省略 = 全部音源；指定 = 只清该音源。
+    source: Option<String>,
+}
+
+/// 手动清理：当前播放与用户保留项豁免，返回删除字节数。
+async fn online_cache_clear(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CacheClearRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if let Some(src) = &body.source {
+        if src.trim().is_empty() {
+            return Err(bad_request("source must not be empty"));
+        }
+    }
+    let protected = state.protected_all().await;
+    let dir = state.online_cache_dir();
+    let source = body.source.clone();
+    let removed = tokio::task::spawn_blocking(move || {
+        tokio::runtime::Handle::current().block_on(async {
+            crate::online::cache::clear_cache(&dir, &protected, source.as_deref()).await
+        })
+    })
+    .await
+    .map_err(|e| bad_request(e.to_string()))?
+    .map_err(|e| internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": true, "removed_bytes": removed })))
+}
+
+#[derive(Deserialize)]
+struct CacheKeepRequest {
+    source: String,
+    id: String,
+    keep: bool,
+}
+
+/// 指定内容保留/取消保留：以 `{stem}.` 前缀写入豁免名单并持久化，
+/// 覆盖该曲目全部音质档。LRU 与手动清理都尊重它。
+async fn online_cache_keep(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CacheKeepRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.source.trim().is_empty() || body.id.trim().is_empty() {
+        return Err(bad_request("source and id are required"));
+    }
+    // 保留粒度是「曲目全部音质档」：文件名形如 {stem}-{quality}.{ext}，
+    // 豁免名单按 `{stem}-` 前缀匹配。代价是 id 前缀撞车（保留 1 会连带
+    // 豁免 10/100）——多保留几首比误删用户想留的歌便宜。
+    let stem = {
+        let sanitized: String = format!("{}-{}", body.source.trim(), body.id.trim())
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("{sanitized}-")
+    };
+    let mut keep = state.keep.lock().await;
+    if body.keep {
+        if !keep.iter().any(|k| k == &stem) {
+            keep.push(stem.clone());
+        }
+    } else {
+        keep.retain(|k| k != &stem);
+    }
+    let snapshot = keep.clone();
+    drop(keep);
+    crate::persist::save_strings(&state.db, "online_keep", &snapshot)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": true, "keep": snapshot })))
 }
 
 // ---------------------------------------------------------------------------

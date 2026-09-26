@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "requestedOutcome": "完成审计列出的 14 项功能修复，先实现后验证，不走 TDD",
+  "goal": "完成审计列出的 14 项功能修复，先实现后验证，不走 TDD",
+  "successEvidence": [],
+  "stopCondition": "Stop when success evidence is satisfied or a blocker/risk requires pause.",
+  "nonGoals": [],
+  "scope": "分页、曲库维护、混合歌单、歌词、整理、迁移、凭据、缓存、在线平台、音频、远程来源、分发、历史、创意与宿主扩展",
+  "changeKinds": [
+    "feature"
+  ],
+  "riskHints": []
+}
