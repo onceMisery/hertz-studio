@@ -244,9 +244,6 @@
       </span>
     </button>
 
-    <button id="stage-btn" class="iconbtn" title="正在播放" aria-label="打开正在播放">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-equalizer"/></svg>
-    </button>
   </div>
 </header>
 
@@ -257,6 +254,10 @@
     <button class="rail-item active" data-view="library" aria-label="曲库">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-library"/></svg>
       <span>曲库</span>
+    </button>
+    <button class="rail-item" data-view="online" aria-label="在线曲库">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-globe"/></svg>
+      <span>在线</span>
     </button>
     <button class="rail-item" data-view="playlists" aria-label="歌单">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-playlist"/></svg>
@@ -347,6 +348,73 @@
       </div>
       <div class="lib-list" id="lib-list"></div>
       <button class="btn lib-sentinel" id="lib-sentinel" type="button" hidden>加载更多歌曲</button>
+    </div>
+
+    <!-- 在线曲库：搜索 + 分类浏览 + 试听。数据经服务端代理，
+         避开浏览器对第三方音乐接口的 CORS 限制。 -->
+    <div class="view" id="view-online" hidden>
+      <div class="col-head">
+        <div class="col-head-left">
+          <h1 class="col-title">在线曲库</h1>
+          <span id="online-count" class="count">—</span>
+        </div>
+        <div class="col-tools">
+          <select id="online-source" aria-label="音源">
+            <option value="netease">网易云音乐</option>
+          </select>
+          <select id="online-quality" class="online-quality" aria-label="音质档位" title="音质档位"></select>
+        </div>
+      </div>
+
+      <!-- 搜索/分类/结果/账号区全部进同一个滚动容器：内容超出时整体
+           可滚动，而不是被视图边界裁掉（与本地曲库内部列表滚动同理）。 -->
+      <div class="online-scroll">
+      <div id="online-errorbar" class="online-errorbar" hidden>
+        <span id="online-error-text" class="online-error-text"></span>
+        <span class="online-error-actions">
+          <button id="online-error-retry" class="btn" type="button">重试</button>
+          <button id="online-error-next" class="btn primary" type="button">下一首</button>
+          <button id="online-error-close" class="iconbtn" type="button" aria-label="关闭">×</button>
+        </span>
+      </div>
+      <div class="online-search">
+        <input id="online-q" type="search" placeholder="搜索在线歌曲、歌手或专辑…" autocomplete="off" aria-label="搜索在线曲库">
+        <button id="online-go" class="btn primary">搜索</button>
+      </div>
+
+      <div class="online-chips" id="online-chips" role="group" aria-label="分类">
+        <button class="chip active" data-cat="hot">热门</button>
+        <button class="chip" data-cat="new">新歌</button>
+        <button class="chip" data-cat="rock">摇滚</button>
+        <button class="chip" data-cat="electronic">电子</button>
+        <button class="chip" data-cat="folk">民谣</button>
+        <button class="chip" data-cat="jazz">爵士</button>
+        <button class="chip" data-cat="classical">古典</button>
+        <button class="chip" data-cat="acg">ACG</button>
+      </div>
+
+      <div class="online-body" id="online-body">
+        <div class="hint">输入关键词搜索，或点上方分类浏览。</div>
+      </div>
+      <div class="online-sentinel" id="online-sentinel" hidden>加载中…</div>
+
+      <!-- 账号区 + 我的歌单（online-playlists.js 驱动）。
+           有任一登录能力（cookie/qr/歌单）的音源都会出现账号卡；
+           未登录时是扫码/cookie 入口，登录后才拉歌单网格。 -->
+      <div id="online-plugins" class="online-plugins">
+        <div id="op-history" class="op-history" hidden>
+          <div class="op-section-title op-history-head">
+            <span>最近播放</span>
+            <button id="op-history-clear" class="op-history-clear" type="button">清空</button>
+          </div>
+          <div id="op-history-list" class="op-history-list"></div>
+        </div>
+        <div class="op-section-title">我的账号</div>
+        <div id="op-accounts" class="op-accounts"></div>
+        <div id="op-grid-head" class="op-section-title" hidden>我的歌单</div>
+        <div id="op-grid" class="op-grid"></div>
+      </div>
+      </div>
     </div>
 
     <!-- 歌单 -->

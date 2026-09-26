@@ -107,7 +107,6 @@ const ui = {
   nowTech: $('now-tech'),
   spectrum: $('spectrum'),
   lyrics: $('lyrics'),
-  stageBtn: $('stage-btn'),
 
   barTitle: $('bar-title'),
   barSub: $('bar-sub'),
@@ -2149,6 +2148,7 @@ function setView(name) {
   for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
   ui.rail.querySelectorAll('.rail-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   document.body.classList.remove('column-open');
+  if (name === 'online' && window.Online) window.Online.onViewEnter();
   // 在线歌单可能在歌单视图没渲染期间到达（登录、刷新），进入时补一次同步。
   if (name === 'playlists') renderOnlinePlaylistSection();
   // 收藏与每日推荐同理：进入时才拉，避免启动时多打两条请求。
@@ -2988,8 +2988,6 @@ function initNowPlayingModal() {
 
   ui.rail.querySelectorAll('.rail-item').forEach((b) => { b.onclick = () => setView(b.dataset.view); });
   // 点击「正在播放」：弹出清晰的播放控制弹窗（不再切换舞台抽屉）
-  ui.stageBtn.onclick = openNowPlaying;
-  initNowPlayingModal();
   ui.scrim.onclick = () => { document.body.classList.remove('stage-open'); closeMenu(); };
 
   // 顶栏「账号」：任何视图下都能打开统一登录弹窗。
