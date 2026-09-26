@@ -730,6 +730,16 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
             data[idx] = soft_limit(sample, 0.98);
         }
     }
+    // 缓冲已干而斜坡没走完：尾部淡出按「剩余帧数」武装，但自然 EOF 后缓冲
+    // 里的实际帧数受重采样/取整影响未必凑得满斜坡；斜坡只在拷到帧时推进，
+    // 停在半路后 fade_active 永远为真，maintain 的换装（连同暂停/停止的
+    // 收口）全部饿死 —— 表现为自动接力的下一首、以及随后的一切换装，
+    // 永远卡在上一首的结束位置，无声。缓冲拿不出帧时直接落到终点收掉斜坡。
+    if copied == 0 && fade_total > 0 {
+        fade_total = 0;
+        fade_done = 0;
+        gain = fade_to;
+    }
     shared.fade_gain.store(gain.to_bits(), Ordering::Relaxed);
     shared.fade_done.store(fade_done, Ordering::Relaxed);
     shared.fade_frames.store(fade_total, Ordering::Relaxed);
@@ -1475,6 +1485,48 @@ mod tests {
         assert!(buf[0].abs() < buf[6].abs());
         assert!(buf[0] >= 0.0 && buf[0] < 0.01);
         assert!(shared.fade_active());
+    }
+
+    /// 自然 EOF 的尾部淡出按「剩余帧数」武装斜坡，而斜坡只在回调真的拷到
+    /// 音频帧时推进。缓冲里的实际帧数受重采样/取整影响未必凑得满斜坡：
+    /// 缓冲见底后 copied==0，斜坡永远停在半路，`fade_active()` 永远为真，
+    /// maintain 的换装（连带暂停/停止收口）全部饿死 —— 表现为自动接力的
+    /// 下一首（以及随后的一切换装）永远卡在上一首的结束位置，无声。
+    /// 回归：缓冲干涸时斜坡必须落到终点。
+    #[test]
+    fn stalled_fade_completes_when_the_buffer_runs_dry() {
+        let shared = Shared::new();
+        shared.playing.store(true, Ordering::Relaxed);
+        // 模拟尾部淡出：直接按帧数武装一条 0.x→0 的斜坡（与 maintain 的
+        // 尾部武装同构），缓冲里只留 2 帧音频 —— 比斜坡短。
+        shared.fade_from.store(0.8f32.to_bits(), Ordering::Relaxed);
+        shared.fade_to.store(0.0f32.to_bits(), Ordering::Relaxed);
+        shared.fade_gain.store(0.8f32.to_bits(), Ordering::Relaxed);
+        shared.fade_frames.store(100, Ordering::Relaxed);
+        shared.fade_done.store(0, Ordering::Relaxed);
+        shared.samples.lock().unwrap().extend([0.5f32; 4]);
+        let mut buf = vec![0.0f32; 4];
+
+        // 第一轮回调：拷走仅有的 2 帧，斜坡只推进 2/100。
+        write_samples(&mut buf, &shared, 2);
+        assert!(shared.fade_active(), "斜坡未走完前必须仍处于武装态");
+        assert!(
+            f32::from_bits(shared.fade_gain.load(Ordering::Relaxed)) < 0.8,
+            "拷贝到的帧必须推进斜坡"
+        );
+
+        // 缓冲已干：再次回调不允许把斜坡永远卡在半路。
+        write_samples(&mut buf, &shared, 2);
+        assert!(
+            !shared.fade_active(),
+            "缓冲干涸时斜坡必须落到终点（否则换装/暂停/停止永久饿死）"
+        );
+        assert_eq!(
+            f32::from_bits(shared.fade_gain.load(Ordering::Relaxed)),
+            0.0,
+            "终点增益取 fade_to（尾部淡出 = 静音）"
+        );
+        assert_eq!(shared.fade_done.load(Ordering::Relaxed), 0);
     }
 
     #[test]
