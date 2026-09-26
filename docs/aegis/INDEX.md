@@ -21,3 +21,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-09-26 | artifact | docs/aegis/work/2026-09-26-prioritized-completion/resume-state-hint.json | 2026-09-26-prioritized-completion resume state hint |
 | 2026-09-26 | artifact | docs/aegis/work/2026-09-26-prioritized-completion/evidence-bundle-draft-paging.json | 2026-09-26-prioritized-completion evidence paging |
 | 2026-09-26 | artifact | docs/aegis/work/2026-09-26-prioritized-completion/evidence-bundle-draft-scan-ui-regression.json | 2026-09-26-prioritized-completion evidence scan-ui-regression |
+| 2026-09-26 | plan | docs/aegis/plans/2026-09-26-offline-prompt-stage.md | 第 14 项首期：离线提示词生成舞台 |
