@@ -410,10 +410,40 @@ impl AppState {
                 actual_quality: None,
             });
         }
-        self.audio
-            .load(&track.path, Some(track_id.clone()))
+        // 远程来源：HTTP Range 直链取流（不落盘）；本地/其余走文件路径。
+        if track.source == vmusic_core::TrackSource::Remote {
+            let url = track.path.clone();
+            let auth = crate::remote::auth_for_url(
+                &self.db,
+                crate::secrets::backend().as_ref(),
+                &url,
+            )
+            .await;
+            let ext = std::path::Path::new(&url)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_string());
+            let open_url = url.clone();
+            let stream = tokio::task::spawn_blocking(move || {
+                crate::remote::HttpRangeStream::open(&open_url, auth.as_ref())
+            })
             .await
-            .map_err(vmusic_core::CoreError::Audio)?;
+            .map_err(|e| {
+                vmusic_core::CoreError::Audio(vmusic_core::AudioError::BackendInit(e.to_string()))
+            })?
+            .map_err(|e| {
+                vmusic_core::CoreError::Audio(vmusic_core::AudioError::BackendInit(e.to_string()))
+            })?;
+            self.audio
+                .load_source(Box::new(stream), ext, Some(track_id.clone()))
+                .await
+                .map_err(vmusic_core::CoreError::Audio)?;
+        } else {
+            self.audio
+                .load(&track.path, Some(track_id.clone()))
+                .await
+                .map_err(vmusic_core::CoreError::Audio)?;
+        }
         // load 已被 actor 处理：若这期间又切了歌，更新一代的命令已排在后面，
         // 本调用绝不能再 play() 或写 cursor。
         if !self.attempt_alive(gen, index, &track_id).await {

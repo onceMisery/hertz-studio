@@ -145,3 +145,14 @@
 - 全仓 248 测试 0 失败（native_watcher 清理阶段一次 Windows 句柄时序 flake，重跑通过）；clippy 零警告；9 个前端契约脚本 + API 冒烟五模式全 PASS
 - Blocked on: none
 - Next step: 第11项 remote 来源（WebDAV 管理/浏览/导入与 HTTP 直链播放，凭据走钥匙串）
+
+## Checkpoint Update
+
+- Current todo: 1–13 全部完成（14 用户移出范围）
+- Active slice: done（剩余为真人验收项）
+- Completed todos:
+- 11 remote 来源：迁移0009 remote_roots（密码只进钥匙串 remote_cred_<id>）、remote.rs（宽松 PROPFIND 解析器按本地名匹配任意命名空间、HttpRangeStream 直链播放实现 Read/Seek/media_len、按 base_url 前缀最长匹配取凭据）、路由 roots CRUD/browse/import（导入幂等 source=remote）、设置页添加/删除/浏览对话框（断网错误如实展示可重试）、迷你 DAV 服务器冒烟（207/401/Range）通过；商店 remote_roots 测试 + 解析器 4 测试通过
+- 主题描述修正：午夜霓虹 note 误写「霓虹咖啡」、矿石黑误写「Mineradio 同源」、黑白简约描述如实标注冷蓝强调
+- Evidence refs:
+- scripts/check-library-api.py --remote（迷你 DAV 全链路）
+- Blocked on: 真实 WebDAV 服务器（Nextcloud/群晖等）与真实声卡/钥匙串/QQ酷狗写操作的真人验收

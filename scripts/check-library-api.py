@@ -25,6 +25,7 @@ parser.add_argument('--lyrics', action='store_true', help='Verify lyrics source 
 parser.add_argument('--library', action='store_true', help='Verify library management: facets, filters, edits, cover replace, missing cleanup')
 parser.add_argument('--backup', action='store_true', help='Verify backup export/restore and M3U import/export')
 parser.add_argument('--cache', action='store_true', help='Verify online cache stats, clear and keep pinning')
+parser.add_argument('--remote', action='store_true', help='Verify WebDAV remote roots: add/browse/import/direct-link play with a mini DAV server')
 args = parser.parse_args()
 repo = Path(__file__).resolve().parents[1]
 data = Path(tempfile.mkdtemp(prefix='vmusic-library-')).resolve()
@@ -32,6 +33,7 @@ assert data.parent == Path(tempfile.gettempdir()).resolve()
 music = data / 'music'
 token = 'disposable-library-test-token'
 binary = args.binary or repo / 'target/debug' / ('vmusicd.exe' if os.name == 'nt' else 'vmusicd')
+NUL_FRAME = b'\x00' * 2
 env = dict(os.environ, VMUSIC_BACKEND='null', VMUSIC_SECRETS='memory')
 proc = None
 base = None
@@ -315,6 +317,112 @@ try:
         assert stats['total_bytes'] == 0 and stats['files'] == 0, stats
         # 保留名单持久化在 settings，重启恢复由 store 层测试覆盖
         print('PASS: online cache stats, per-source clear, keep pinning honored by clear')
+    if args.remote:
+        import base64
+        import http.server
+        import re as _re
+        import threading
+        from io import BytesIO
+
+        buf = BytesIO()
+        with wave.open(buf, 'wb') as audio:
+            audio.setparams((1, 2, 8000, 0, 'NONE', 'not compressed'))
+            audio.writeframes(NUL_FRAME * 8000)
+        wav_bytes = buf.getvalue()
+        propfind_xml = (
+            '<?xml version="1.0"?>'
+            '<D:multistatus xmlns:D="DAV:">'
+            '<D:response><D:href>/dav/</D:href>'
+            '<D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>'
+            '<D:response><D:href>/dav/demo.wav</D:href>'
+            '<D:propstat><D:prop><D:resourcetype/><D:getcontentlength>'
+            + str(len(wav_bytes)) + '</D:getcontentlength></D:prop></D:propstat></D:response>'
+            '</D:multistatus>'
+        ).encode()
+
+        class DavHandler(http.server.BaseHTTPRequestHandler):
+            def _authed(self):
+                expected = 'Basic ' + base64.b64encode(b'u:p').decode()
+                return self.headers.get('Authorization') == expected
+
+            def _send(self, code, body=b'', ctype='application/xml', extra=None):
+                self.send_response(code)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(body)))
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                if self.command != 'HEAD' and body:
+                    self.wfile.write(body)
+
+            def do_PROPFIND(self):
+                if not self._authed():
+                    self._send(401, b'auth', extra={'WWW-Authenticate': 'Basic realm="dav"'})
+                    return
+                self._send(207, propfind_xml)
+
+            def do_HEAD(self):
+                if not self._authed():
+                    self._send(401)
+                    return
+                self._send(200, ctype='audio/wav')
+
+            def do_GET(self):
+                if not self._authed():
+                    self._send(401)
+                    return
+                rng = self.headers.get('Range')
+                if rng:
+                    m = _re.match(r'bytes=(\d+)-(\d*)', rng)
+                    start = int(m.group(1))
+                    end = int(m.group(2)) if m.group(2) else len(wav_bytes) - 1
+                    end = min(end, len(wav_bytes) - 1)
+                    chunk = wav_bytes[start:end + 1]
+                    self._send(206, chunk, ctype='audio/wav', extra={
+                        'Content-Range': 'bytes %d-%d/%d' % (start, end, len(wav_bytes))})
+                else:
+                    self._send(200, wav_bytes, ctype='audio/wav')
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), DavHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        dav_port = srv.server_address[1]
+
+        api('/v1/remote/roots', 'POST', {
+            'name': '测试 NAS', 'base_url': 'http://127.0.0.1:%d/dav' % dav_port,
+            'username': 'u', 'password': 'p'})
+        roots = api('/v1/remote/roots')['roots']
+        assert len(roots) == 1 and roots[0]['base_url'].endswith('/dav'), roots
+        rid = roots[0]['id']
+        entries = api('/v1/remote/roots/%s/browse?path=/' % rid)['entries']
+        assert [e['name'] for e in entries] == ['demo.wav'], entries
+        assert entries[0]['is_audio'] and entries[0]['size'] == len(wav_bytes), entries
+        # 错误密码：浏览如实报鉴权失败
+        api('/v1/remote/roots', 'POST', {
+            'name': '坏凭据', 'base_url': 'http://127.0.0.1:%d/dav' % dav_port,
+            'username': 'u', 'password': 'WRONG'})
+        bad = [r for r in api('/v1/remote/roots')['roots'] if r['name'] == '坏凭据'][0]
+        try:
+            api('/v1/remote/roots/%s/browse?path=/' % bad['id'])
+            raise AssertionError('wrong password accepted')
+        except urllib.error.HTTPError as error:
+            assert error.code == 400
+        api('/v1/remote/roots/%s' % bad['id'], 'DELETE')
+        # 导入（幂等）→ 曲库出现 remote 曲目 → 直链播放走 Range 探测
+        imp = api('/v1/remote/roots/%s/import' % rid, 'POST', {'paths': ['/dav/demo.wav']})
+        assert imp['imported'] == 1, imp
+        imp2 = api('/v1/remote/roots/%s/import' % rid, 'POST', {'paths': ['/dav/demo.wav']})
+        assert imp2['skipped'] == 1, imp2
+        tracks = api('/v1/tracks?q=demo&limit=5')['tracks']
+        assert tracks and tracks[0]['source'] == 'remote', tracks
+        tid = tracks[0]['id']
+        api('/v1/player/load', 'POST', {'track_id': tid})
+        assert api('/v1/player/queue')['queue'] == [tid]
+        api('/v1/remote/roots/%s' % rid, 'DELETE')
+        srv.shutdown()
+        print('PASS: webdav add/browse/401/import idempotent/direct-link play')
     if args.maintenance:
         result = api('/v1/library/roots', 'POST', {'path': str(music), 'enabled': True})
         saved = result['roots'][0]['path']

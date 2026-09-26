@@ -71,6 +71,20 @@ const ui = {
   dspCrossfade: $('dsp-crossfade'),
   dspSave: $('dsp-save'),
   dspReset: $('dsp-reset'),
+  remoteName: $('remote-name'),
+  remoteUrl: $('remote-url'),
+  remoteUser: $('remote-user'),
+  remotePass: $('remote-pass'),
+  remoteAdd: $('remote-add'),
+  remoteRootList: $('remote-root-list'),
+  remoteBrowse: $('remote-browse'),
+  remoteBrowseTitle: $('remote-browse-title'),
+  remoteBrowsePath: $('remote-browse-path'),
+  remoteBrowseClose: $('remote-browse-close'),
+  remoteBrowseList: $('remote-browse-list'),
+  remoteImportDir: $('remote-import-dir'),
+  remoteBrowseStatus: $('remote-browse-status'),
+  remoteScrim: $('remote-scrim'),
   libEmpty: $('lib-empty'),
   libSentinel: $('lib-sentinel'),
   libHint: $('lib-hint'),
@@ -2403,6 +2417,7 @@ function setView(name) {
   if (name === 'settings') {
     if (window.__loadCacheStats) window.__loadCacheStats();
     if (window.__loadDspSettings) window.__loadDspSettings();
+    loadRemoteRoots();
   }
 }
 
@@ -3381,6 +3396,157 @@ function initNowPlayingModal() {
         loadCacheStats();
       } catch (err) {
         toast(errText('保留失败', err), 'error');
+      }
+    };
+  }
+
+  // 远程来源（WebDAV）：登记 / 浏览 / 导入。
+  const remoteState = { roots: [], browseRootId: null, browsePath: '/', browseEntries: [] };
+  async function loadRemoteRoots() {
+    if (!ui.remoteRootList) return;
+    try {
+      const data = await transport.get('/v1/remote/roots');
+      remoteState.roots = data.roots || [];
+      ui.remoteRootList.hidden = remoteState.roots.length === 0;
+      ui.remoteRootList.innerHTML = '';
+      for (const root of remoteState.roots) {
+        const row = document.createElement('div');
+        row.className = 'remote-root';
+        row.innerHTML = `
+          <span class="remote-root-name"></span>
+          <span class="remote-root-url"></span>
+          <button class="btn" data-act="browse">浏览</button>
+          <button class="btn danger" data-act="delete">删除</button>`;
+        row.querySelector('.remote-root-name').textContent = root.name;
+        row.querySelector('.remote-root-url').textContent = root.base_url;
+        row.querySelector('[data-act="browse"]').onclick = () => openRemoteBrowse(root);
+        row.querySelector('[data-act="delete"]').onclick = async () => {
+          try {
+            await transport.del(`/v1/remote/roots/${encodeURIComponent(root.id)}`);
+            toast('远程来源已删除');
+            loadRemoteRoots();
+          } catch (err) {
+            toast(errText('删除失败', err), 'error');
+          }
+        };
+        ui.remoteRootList.appendChild(row);
+      }
+    } catch { /* 列表拉取失败不阻塞设置页 */ }
+  }
+  if (ui.remoteAdd) {
+    ui.remoteAdd.onclick = async () => {
+      const body = {
+        name: ui.remoteName.value.trim(),
+        base_url: ui.remoteUrl.value.trim(),
+        username: ui.remoteUser.value.trim(),
+        password: ui.remotePass.value,
+      };
+      if (!body.name || !body.base_url) { toast('名称与地址必填', 'error'); return; }
+      try {
+        await transport.post('/v1/remote/roots', body);
+        toast('远程来源已添加');
+        ui.remotePass.value = '';
+        loadRemoteRoots();
+      } catch (err) {
+        toast(errText('添加失败', err), 'error');
+      }
+    };
+  }
+  function setRemoteBrowseVisible(on) {
+    if (!ui.remoteBrowse) return;
+    ui.remoteBrowse.hidden = !on;
+    if (ui.remoteScrim) ui.remoteScrim.hidden = !on;
+  }
+  function fmtSize(n) {
+    if (n == null) return '';
+    if (n > 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    if (n > 1024) return `${(n / 1024).toFixed(0)} KB`;
+    return `${n} B`;
+  }
+  async function renderRemoteBrowse() {
+    const root = remoteState.roots.find((r) => r.id === remoteState.browseRootId);
+    if (!root || !ui.remoteBrowseList) return;
+    ui.remoteBrowseTitle.textContent = root.name;
+    ui.remoteBrowsePath.textContent = remoteState.browsePath;
+    ui.remoteBrowseStatus.textContent = '';
+    ui.remoteBrowseList.innerHTML = '<div class="hint">正在读取目录…</div>';
+    try {
+      const data = await transport.get(
+        `/v1/remote/roots/${encodeURIComponent(root.id)}/browse?path=${encodeURIComponent(remoteState.browsePath)}`);
+      remoteState.browseEntries = data.entries || [];
+      ui.remoteBrowseList.innerHTML = '';
+      // 上一级
+      if (remoteState.browsePath !== '/') {
+        const up = document.createElement('div');
+        up.className = 'remote-row';
+        up.innerHTML = '<span class="remote-name">← 上一级</span>';
+        up.onclick = () => {
+          remoteState.browsePath = remoteState.browsePath.replace(/[^/]+\/$/, '/') || '/';
+          renderRemoteBrowse();
+        };
+        ui.remoteBrowseList.appendChild(up);
+      }
+      const audioCount = remoteState.browseEntries.filter((e) => e.is_audio).length;
+      for (const entry of remoteState.browseEntries) {
+        const row = document.createElement('div');
+        row.className = 'remote-row';
+        const icon = entry.is_dir ? '📁' : (entry.is_audio ? '♪' : '·');
+        row.innerHTML = `<span>${icon}</span><span class="remote-name"></span><span class="remote-size"></span>
+          ${entry.is_audio ? '<button class="btn" data-act="import">导入</button>' : ''}`;
+        row.querySelector('.remote-name').textContent = entry.name;
+        row.querySelector('.remote-size').textContent = fmtSize(entry.size);
+        if (entry.is_dir) {
+          row.onclick = () => {
+            remoteState.browsePath = entry.path.endsWith('/') ? entry.path : `${entry.path}/`;
+            renderRemoteBrowse();
+          };
+        }
+        const importBtn = row.querySelector('[data-act="import"]');
+        if (importBtn) {
+          importBtn.onclick = async (e) => {
+            e.stopPropagation();
+            importBtn.disabled = true;
+            try {
+              const res = await transport.post(`/v1/remote/roots/${encodeURIComponent(root.id)}/import`, { paths: [entry.path] });
+              toast(res.imported ? '已导入曲库' : '已在曲库中');
+            } catch (err) {
+              toast(errText('导入失败', err), 'error');
+              importBtn.disabled = false;
+            }
+          };
+        }
+        ui.remoteBrowseList.appendChild(row);
+      }
+      ui.remoteBrowseStatus.textContent = `${remoteState.browseEntries.length} 项 · ${audioCount} 首可导入`;
+      ui.remoteImportDir.disabled = audioCount === 0;
+    } catch (err) {
+      // 断网/鉴权失败：如实展示错误，可关闭后重试，不伪造空目录。
+      ui.remoteBrowseList.innerHTML = '';
+      ui.remoteBrowseStatus.textContent = errText('读取失败', err);
+      ui.remoteImportDir.disabled = true;
+    }
+  }
+  async function openRemoteBrowse(root) {
+    remoteState.browseRootId = root.id;
+    remoteState.browsePath = '/';
+    setRemoteBrowseVisible(true);
+    await renderRemoteBrowse();
+  }
+  if (ui.remoteBrowseClose) {
+    ui.remoteBrowseClose.onclick = () => setRemoteBrowseVisible(false);
+  }
+  if (ui.remoteScrim) ui.remoteScrim.onclick = () => setRemoteBrowseVisible(false);
+  if (ui.remoteImportDir) {
+    ui.remoteImportDir.onclick = async () => {
+      const root = remoteState.roots.find((r) => r.id === remoteState.browseRootId);
+      if (!root) return;
+      const paths = remoteState.browseEntries.filter((e) => e.is_audio).map((e) => e.path);
+      if (!paths.length) { toast('本目录没有音频文件', 'error'); return; }
+      try {
+        const res = await transport.post(`/v1/remote/roots/${encodeURIComponent(root.id)}/import`, { paths });
+        toast(`已导入 ${res.imported} 首（${res.skipped} 首已在库）`);
+      } catch (err) {
+        toast(errText('导入失败', err), 'error');
       }
     };
   }

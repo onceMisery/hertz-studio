@@ -46,6 +46,13 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/player/volume", post(volume))
         .route("/v1/player/mode", post(mode))
         .route("/v1/player/dsp", get(get_dsp).post(set_dsp))
+        .route("/v1/remote/roots", get(list_remote_roots).post(add_remote_root))
+        .route(
+            "/v1/remote/roots/{id}",
+            axum::routing::delete(delete_remote_root),
+        )
+        .route("/v1/remote/roots/{id}/browse", get(browse_remote_root))
+        .route("/v1/remote/roots/{id}/import", post(import_remote_files))
         .route("/v1/devices", get(devices))
         .route("/v1/devices/select", post(select_device))
         .route("/v1/tracks", get(list_tracks))
@@ -1625,6 +1632,201 @@ async fn daily_recommend(
 // ---------------------------------------------------------------------------
 // 播放历史与重放
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 远程来源（WebDAV）：登记 / 浏览 / 导入。密码只进钥匙串。
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RemoteRootRequest {
+    name: String,
+    base_url: String,
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    password: String,
+}
+
+fn remote_cred_key(id: &str) -> String {
+    format!("remote_cred_{id}")
+}
+
+async fn list_remote_roots(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let roots = vmusic_store::remote_roots::list(&state.db)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    Ok(Json(serde_json::json!({ "roots": roots })))
+}
+
+async fn add_remote_root(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RemoteRootRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.name.trim().is_empty() || body.base_url.trim().is_empty() {
+        return Err(bad_request("name and base_url are required"));
+    }
+    let url = reqwest::Url::parse(body.base_url.trim())
+        .map_err(|_| bad_request("base_url must be an absolute http(s) URL"))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err(bad_request("base_url must be http(s)"));
+    }
+    let root = vmusic_store::remote_roots::create(
+        &state.db,
+        &body.name,
+        &body.base_url,
+        &body.username,
+    )
+    .await
+    .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    // 密码只进钥匙串；memory 后端（CI）也不落盘。
+    let cred = format!("{}:{}", body.username, body.password);
+    let entry = crate::secrets::SecretEntry {
+        cred: Some(cred),
+        device: None,
+    };
+    crate::secrets::backend()
+        .put(&remote_cred_key(&root.id), &entry)
+        .map_err(|e| internal(e.to_string()))?;
+    Ok(Json(serde_json::to_value(&root).map_err(|e| internal(e.to_string()))?))
+}
+
+async fn delete_remote_root(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let removed = vmusic_store::remote_roots::remove(&state.db, &id)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    if !removed {
+        return Err(not_found("remote root"));
+    }
+    // 钥匙串残留必须清掉：登出语义与凭据一致性都靠它。
+    crate::secrets::backend()
+        .delete(&remote_cred_key(&id))
+        .map_err(|e| internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 浏览：实时 PROPFIND。is_audio 供 UI 区分可导入的音频文件。
+async fn browse_remote_root(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let root = vmusic_store::remote_roots::get(&state.db, &id)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?
+        .ok_or_else(|| not_found("remote root"))?;
+    let sub = q.get("path").cloned().unwrap_or_else(|| "/".into());
+    let auth = crate::remote::auth_for_url(
+        &state.db,
+        crate::secrets::backend().as_ref(),
+        &root.base_url,
+    )
+    .await;
+    let xml = crate::remote::propfind(&root.base_url, &sub, auth.as_ref())
+        .await
+        .map_err(bad_request)?;
+    // 自条目跳过按「服务器绝对路径」比对：href 是服务器根相对的，
+    // 而请求 path 是相对根 URL 的，先折算成服务器路径再传给解析器。
+    let server_path = reqwest::Url::parse(&root.base_url)
+        .map(|u| u.path().to_string())
+        .unwrap_or_default();
+    let joined = format!(
+        "{}/{}",
+        server_path.trim_end_matches('/'),
+        sub.trim_start_matches('/')
+    );
+    let base = crate::remote::percent_decode(joined.trim_end_matches('/'));
+    let entries = crate::remote::parse_propfind(&xml, &base)
+        .ok_or_else(|| bad_request("响应不是 WebDAV 目录（multistatus）"))?;
+    let entries: Vec<serde_json::Value> = entries
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "path": e.path,
+                "name": e.name,
+                "is_dir": e.is_dir,
+                "is_audio": !e.is_dir && crate::remote::is_audio_name(&e.name),
+                "size": e.size,
+                "mtime": e.mtime,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "entries": entries })))
+}
+
+#[derive(Deserialize)]
+struct RemoteImportRequest {
+    paths: Vec<String>,
+}
+
+/// 导入：把远程音频登记进曲库（source=remote，path=直链 URL，幂等）。
+/// 播放时按 URL 前缀找到来源并从钥匙串取凭据，HTTP Range 直链取流。
+async fn import_remote_files(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<RemoteImportRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let root = vmusic_store::remote_roots::get(&state.db, &id)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?
+        .ok_or_else(|| not_found("remote root"))?;
+    if body.paths.is_empty() {
+        return Err(bad_request("paths must not be empty"));
+    }
+    let mut imported = 0u64;
+    let mut skipped = 0u64;
+    for path in &body.paths {
+        if path.trim().is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path);
+        let url = format!(
+            "{}/{}",
+            root.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        );
+        // 幂等：同一直链只登记一次。
+        let exists: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM tracks WHERE path = ?1")
+                .bind(&url)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| bad_request(e.to_string()))?;
+        if exists.is_some() {
+            skipped += 1;
+            continue;
+        }
+        let track = vmusic_core::Track {
+            id: uuid::Uuid::new_v4().to_string(),
+            path: url,
+            source: vmusic_core::TrackSource::Remote,
+            title: crate::remote::percent_decode(name),
+            artist: None,
+            album: Some(root.name.clone()),
+            duration_ms: None,
+            bitrate: None,
+            sample_rate: None,
+            channels: None,
+            has_cover: false,
+            file_mtime: None,
+            file_size: None,
+            added_at: vmusic_store::now_ms(),
+        };
+        vmusic_store::upsert_track(&state.db, &track)
+            .await
+            .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+        imported += 1;
+    }
+    let _ = state.events.send(crate::state::WsEvent::LibraryChanged);
+    Ok(Json(
+        serde_json::json!({ "ok": true, "imported": imported, "skipped": skipped }),
+    ))
+}
 
 #[derive(Debug, Deserialize)]
 struct HistoryQuery {

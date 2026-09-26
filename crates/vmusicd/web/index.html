@@ -602,6 +602,22 @@
       </div>
 
       <div class="set-group">
+        <h2 class="set-title">远程来源（WebDAV）</h2>
+        <div class="set-row">
+          <label for="remote-name">添加服务器</label>
+          <span class="set-actions remote-form">
+            <input id="remote-name" type="text" placeholder="名称，如 家里NAS" autocomplete="off">
+            <input id="remote-url" type="text" placeholder="https://nas.local:5006/dav" autocomplete="off">
+            <input id="remote-user" type="text" placeholder="用户名（可空）" autocomplete="off">
+            <input id="remote-pass" type="password" placeholder="密码（可空）" autocomplete="new-password">
+            <button id="remote-add" class="btn primary">添加</button>
+          </span>
+        </div>
+        <div id="remote-root-list" class="remote-roots" hidden></div>
+        <p class="hint">密码存入系统钥匙串，不进数据库与备份。导入的曲目以 HTTP 直链播放，需要服务器支持 Range 请求。</p>
+      </div>
+
+      <div class="set-group">
         <h2 class="set-title">在线缓存</h2>
         <div class="set-row">
           <label>占用</label>
@@ -1066,6 +1082,27 @@
 <!-- 播放控制弹窗：点击顶栏「正在播放」按钮弹出。
      内容为不透明实体卡片，保证进度 / 音量 / 播放暂停等控件清晰无模糊；
      底部播放控制区提供「跳转到舞台播放页面」的明显入口。 -->
+<!-- WebDAV 浏览层：目录导航 + 单曲/整目录导入 -->
+<div id="remote-scrim" class="np-scrim" hidden></div>
+<div id="remote-browse" class="np-modal" role="dialog" aria-modal="true" aria-label="浏览远程目录" hidden>
+  <div class="np-card">
+    <header class="np-head">
+      <div class="np-head-text">
+        <div class="np-title" id="remote-browse-title">浏览</div>
+        <div class="np-subtitle" id="remote-browse-path">/</div>
+      </div>
+      <button type="button" id="remote-browse-close" class="np-close" aria-label="关闭浏览">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
+      </button>
+    </header>
+    <div class="remote-browse-actions">
+      <button id="remote-import-dir" class="btn primary" type="button">导入本目录全部音频</button>
+      <span id="remote-browse-status" class="count"></span>
+    </div>
+    <div id="remote-browse-list" class="remote-browse-list"></div>
+  </div>
+</div>
+
 <div id="np-scrim" class="np-scrim" hidden></div>
 <div id="np-modal" class="np-modal" role="dialog" aria-modal="true" aria-label="播放控制" hidden>
   <div class="np-card">

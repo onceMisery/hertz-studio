@@ -20,6 +20,7 @@ pub mod backup;
 pub mod favorites;
 pub mod lyrics;
 pub mod playlists;
+pub mod remote_roots;
 pub mod scan_roots;
 pub mod settings;
 pub mod track_edits;

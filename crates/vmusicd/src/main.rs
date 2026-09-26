@@ -13,6 +13,7 @@ mod history;
 mod online;
 mod persist;
 mod routes;
+mod remote;
 mod scan;
 mod secrets;
 mod stage_beats;

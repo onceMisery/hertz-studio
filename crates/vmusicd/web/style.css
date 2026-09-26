@@ -2229,6 +2229,58 @@ button:focus-visible, [role="button"]:focus-visible,
 }
 .np-lyric-btn:hover { border-color: var(--accent); }
 
+/* 远程来源表单与浏览层 */
+.remote-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.remote-form input[type="text"],
+.remote-form input[type="password"] {
+  min-width: 140px;
+  padding: 6px 10px;
+}
+.remote-roots {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.remote-root {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+.remote-root-name { font-size: 14px; }
+.remote-root-url { font-size: 12px; color: var(--muted); }
+.remote-browse-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+}
+.remote-browse-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 46vh;
+  overflow: auto;
+}
+.remote-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.remote-row:hover { background: var(--hover); }
+.remote-row .remote-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-row .remote-size { font-size: 12px; color: var(--muted); }
+
 /* EQ 六段滑杆 */
 .dsp-eq {
   display: flex;

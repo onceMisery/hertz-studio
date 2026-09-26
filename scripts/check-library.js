@@ -16,7 +16,7 @@ function between(start, end) {
 const pending = [];
 const plays = [];
 const notices = [];
-const state = { tracks: [], total: 0, loading: false, q: '', sort: 'title', offset: 0, rows: new Map(), byId: new Map() };
+const state = { tracks: [], total: 0, loading: false, q: '', sort: 'title', offset: 0, rows: new Map(), byId: new Map(), libFilter: { artist: '', album: '' }, selected: new Set() };
 const context = vm.createContext({
   state, PAGE: 200, Map,
   ui: { libList: { innerHTML: '' }, libSentinel: {} },
