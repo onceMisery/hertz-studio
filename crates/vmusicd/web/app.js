@@ -38,7 +38,6 @@ const ui = {
     library: $('view-library'),
     playlists: $('view-playlists'),
     queue: $('view-queue'),
-    online: $('view-online'),
     favorites: $('view-favorites'),
     settings: $('view-settings'),
   },
@@ -57,6 +56,9 @@ const ui = {
   scanBar: $('scan-bar'),
   scanLabel: $('scan-label'),
   scanHistory: $('scan-history'),
+  scanRoots: $('scan-roots'),
+  scanCancel: $('scan-cancel'),
+  scanErrors: $('scan-errors'),
 
   playlistList: $('playlist-list'),
   playlistOnline: $('playlist-online'),
@@ -137,20 +139,14 @@ const ui = {
   scReset: $('sc-reset'),
   scOk: $('sc-ok'),
 
-  // 在线曲库
-  onlineCount: $('online-count'),
-  onlineSource: $('online-source'),
-  onlineQ: $('online-q'),
-  onlineGo: $('online-go'),
-  onlineChips: $('online-chips'),
-  onlineBody: $('online-body'),
-  onlineSentinel: $('online-sentinel'),
-
   // 收藏
   favList: $('fav-list'),
   favCount: $('fav-count'),
   favTabs: $('fav-tabs'),
   favPlayAll: $('fav-play-all'),
+  favMore: $('fav-more'),
+  favTabTrack: $('fav-tab-track'),
+  favTabRadio: $('fav-tab-radio'),
   favRefresh: $('fav-refresh'),
   favBadge: $('fav-badge'),
 
@@ -205,11 +201,29 @@ const state = {
 // Transport：HTTP / WebSocket 或演示后端
 // ---------------------------------------------------------------------------
 
+// A newer playback command cancels preparation in every view, not just that view.
+const PlaybackIntent = {
+  generation: 0,
+  queueRevision: 0,
+  begin() { return ++this.generation; },
+  current(ticket) { return ticket === this.generation; },
+  command(path) {
+    if (/^\/v1\/player\/(load|play|pause|stop|next|previous|replay)$/.test(path) || path === '/v1/online/play') this.begin();
+    if (path === '/v1/player/load' || path === '/v1/online/play' || path === '/v1/player/queue') this.queueRevision += 1;
+  },
+};
+
 const ServerTransport = {
   kind: 'server',
   async get(path) { return request(path, {}); },
-  async post(path, body) { return request(path, { method: 'POST', body: JSON.stringify(body || {}) }); },
-  async put(path, body) { return request(path, { method: 'PUT', body: JSON.stringify(body || {}) }); },
+  async post(path, body) {
+    PlaybackIntent.command(path);
+    return request(path, { method: 'POST', body: JSON.stringify(body || {}) });
+  },
+  async put(path, body) {
+    PlaybackIntent.command(path);
+    return request(path, { method: 'PUT', body: JSON.stringify(body || {}) });
+  },
   async del(path) { return request(path, { method: 'DELETE' }); },
   // 直接给出可以塞进 <img src> 的地址，不再自己 fetch + createObjectURL。
   //
@@ -287,6 +301,8 @@ let transport = ServerTransport;
 // 用函数转发而不是直接赋值 `transport`：boot 里会把它换成 MockBackend，
 // 直接赋值会让外部一直拿着启动前那个引用。
 window.VMusicTransport = {
+  beginPlaybackIntent: () => PlaybackIntent.begin(),
+  isPlaybackIntent: (ticket) => PlaybackIntent.current(ticket),
   get: (p) => transport.get(p),
   put: (p, body) => transport.put(p, body),
   post: (p, body) => transport.post(p, body),
@@ -441,39 +457,50 @@ function digestMs(ms) {
 // 曲库：分页 + 行节点复用 + 封面懒加载
 // ---------------------------------------------------------------------------
 
+let libraryEpoch = 0;
 async function loadTracks(reset) {
-  if (state.loading) return;
+  if (state.loading && !reset) return;
+  if (reset) libraryEpoch += 1;
+  const epoch = libraryEpoch;
+  const offset = reset ? 0 : state.tracks.length;
+  const q = state.q;
+  const sort = state.sort;
+  let failed = false;
   state.loading = true;
-  if (reset) { state.offset = 0; state.rows.clear(); ui.libList.innerHTML = ''; }
+  ui.libSentinel.disabled = true;
+  ui.libSentinel.textContent = '正在读取曲库…';
+  if (reset) { state.offset = 0; state.tracks = []; state.rows.clear(); ui.libList.innerHTML = ''; }
   try {
     const page = await transport.get(
-      `/v1/tracks?q=${encodeURIComponent(state.q)}&limit=${PAGE}&offset=${state.offset}`);
+      `/v1/tracks?q=${encodeURIComponent(q)}&sort=${encodeURIComponent(sort)}&limit=${PAGE}&offset=${offset}`);
+    if (epoch !== libraryEpoch) return;
     state.total = page.total;
-    if (reset) state.tracks = [];
     state.tracks = state.tracks.concat(page.tracks);
+    state.offset = state.tracks.length;
     for (const t of page.tracks) state.byId.set(t.id, t);
     renderLibrary();
   } catch (err) {
+    if (epoch !== libraryEpoch) return;
+    failed = true;
     toast(errText('曲库读取失败', err), 'error');
   } finally {
-    state.loading = false;
+    if (epoch === libraryEpoch) {
+      state.loading = false;
+      ui.libSentinel.disabled = false;
+      ui.libSentinel.textContent = failed ? '重试读取曲库' : '加载更多歌曲';
+      ui.libSentinel.hidden = !failed && state.tracks.length >= state.total;
+    }
   }
 }
 
-function sortTracks(list) {
-  const arr = list.slice();
-  const coll = new Intl.Collator('zh-Hans-CN', { numeric: true });
-  switch (state.sort) {
-    case 'artist': return arr.sort((a, b) => coll.compare(a.artist || '', b.artist || ''));
-    case 'album': return arr.sort((a, b) => coll.compare(a.album || '', b.album || ''));
-    case 'added': return arr.sort((a, b) => b.added_at - a.added_at);
-    default: return arr.sort((a, b) => coll.compare(a.title, b.title));
-  }
+async function libraryTrackIds() {
+  const data = await transport.get(`/v1/tracks/ids?q=${encodeURIComponent(state.q)}&sort=${encodeURIComponent(state.sort)}`);
+  return data.track_ids;
 }
 
 function renderLibrary() {
   const host = ui.libList;
-  const list = sortTracks(state.tracks);
+  const list = state.tracks;
 
   ui.libEmpty.hidden = list.length > 0;
   ui.libList.hidden = list.length === 0;
@@ -606,12 +633,21 @@ function paintArt(row, url) {
 // 播放
 // ---------------------------------------------------------------------------
 
-function playFromList(id) {
-  const list = sortTracks(state.tracks).map((t) => t.id);
-  playTrack(id, list.length > 1 ? list : [id]);
+async function playFromList(id) {
+  const ticket = PlaybackIntent.begin();
+  try {
+    const list = await libraryTrackIds();
+    if (!PlaybackIntent.current(ticket)) return;
+    if (!list.includes(id)) throw new Error('曲库已更新，请刷新后重试');
+    await playTrack(id, list);
+  } catch (err) {
+    if (PlaybackIntent.current(ticket)) toast(errText('播放列表读取失败', err), 'error');
+  }
 }
 
 async function playTrack(id, queue) {
+  let ticket = PlaybackIntent.begin();
+  let submittedRevision = PlaybackIntent.queueRevision;
   const track = state.byId.get(id);
   const label = track ? track.title : '曲目';
   // VCP 在 load 之后会轮询直到 is_loading 落定；这里后端 load 是带回执的，
@@ -619,12 +655,19 @@ async function playTrack(id, queue) {
   state.loadingTrack = id;
   ui.playpause.classList.add('is-loading');
   try {
-    await transport.post('/v1/player/load', { track_id: id, queue: queue && queue.length ? queue : [id] });
-    setStateQueue(queue, id);
+    const pending = transport.post('/v1/player/load', { track_id: id, queue: queue && queue.length ? queue : [id] });
+    ticket = PlaybackIntent.generation;
+    submittedRevision = PlaybackIntent.queueRevision;
+    state.loadingTrackIntent = ticket;
+    await pending;
+    // Pausing cancels preparation, but does not undo an already submitted queue.
+    // Read the authoritative queue rather than replay a stale request body.
+    if (submittedRevision === PlaybackIntent.queueRevision) await restoreQueue();
   } catch (err) {
-    toast(errText(`无法播放《${label}》`, err), 'error');
+    if (PlaybackIntent.current(ticket)) toast(errText(`无法播放《${label}》`, err), 'error');
+    if (submittedRevision === PlaybackIntent.queueRevision) await restoreQueue();
   } finally {
-    if (state.loadingTrack === id) {
+    if (state.loadingTrackIntent === ticket) {
       state.loadingTrack = null;
       ui.playpause.classList.remove('is-loading');
     }
@@ -641,9 +684,9 @@ function setStateQueue(queue, currentId) {
 }
 
 async function insertNext(id) {
-  const list = state.queue.length ? state.queue.slice() : sortTracks(state.tracks).map((t) => t.id);
+  const list = state.queue.length ? state.queue.slice() : [id];
   const at = state.queueIndex >= 0 ? state.queueIndex + 1 : list.length;
-  list.splice(at, 0, id);
+  if (state.queue.length) list.splice(at, 0, id);
   // resume=true 让后端保留当前播放位置，插入队列不会打断正在放的歌。
   await applyQueue(list, true);
   toast('已插入到下一首');
@@ -671,10 +714,14 @@ async function applyQueue(list, opts) {
 
 // 队列原先只存在于服务端内存且没有查询端点，刷新页面即丢失。补了 GET 之后
 // 这里能在重连 / 刷新后把它取回来；没有该端点的旧版静默降级。
+let queueReadEpoch = 0;
 async function restoreQueue() {
+  const epoch = ++queueReadEpoch;
+  const revision = PlaybackIntent.queueRevision;
   try {
     const data = await transport.get('/v1/player/queue');
-    if (data && data.queue && data.queue.length) {
+    if (epoch !== queueReadEpoch || revision !== PlaybackIntent.queueRevision) return;
+    if (data && Array.isArray(data.queue)) {
       state.queue = data.queue;
       // 刷新恢复后同样同步别名，否则 online.js 热切换仍读到旧队列。
       state.queueIds = state.queue;
@@ -867,6 +914,15 @@ function onStageControl(e) {
     case 'toggle': togglePlay(); break;
     case 'prev': post('/v1/player/previous'); break;
     case 'next': post('/v1/player/next'); break;
+    case 'volume':
+      ui.volume.value = String(Math.max(0, Math.min(100, (Number(d.value) || 0) * 100)));
+      setVolumeFromInput();
+      break;
+    case 'stage3d':
+      markSettingsDirty();
+      state.settings.stage3d = d.value;
+      transport.put('/v1/settings', { stage3d: d.value }).catch(() => toast('舞台设置暂未保存', 'error'));
+      break;
     case 'view': setView(d.value); break;
     // 封面盘在全屏页头部就地切换，状态归 stage.js；这里只负责同步设置页的
     // 复选框并落库，两边共用 setStageCover 才不会各写一半持久化逻辑。
@@ -1022,10 +1078,10 @@ function renderQueue() {
         applyQueue(list.filter((x) => x !== id), true);
         return;
       }
-      // 在线试听的虚拟 id 不在本地库里，load 会查不到。回到在线页重新试听，
-      // 而不是抛一个看不懂的 404。
+      // 在线试听的虚拟 id 不在本地库里，load 会查不到；提示用户从仍支持
+      // 在线点播的歌单或收藏入口重新发起播放，而不是抛一个看不懂的 404。
       if (id.startsWith('online:')) {
-        toast('在线试听曲目请回到「在线曲库」重新点播', 'error');
+        toast('在线曲目已失效，请从歌单或收藏重新点播', 'error');
         return;
       }
       transport.post('/v1/player/load', { track_id: id, queue: list });
@@ -1752,43 +1808,120 @@ async function startScan() {
   ui.scanBtn.disabled = true;
   ui.scanLabel.textContent = '正在准备…';
   try {
-    await transport.post('/v1/library/scan', { root });
-    // 记住这次的路径，下次不用再手打一遍。
-    const prev = state.settings.recent_scan_roots || [];
-    state.settings.recent_scan_roots = [root, ...prev.filter((r) => r !== root)].slice(0, 5);
-    await transport.put('/v1/settings', { recent_scan_roots: state.settings.recent_scan_roots, last_scan_root: root });
-    await loadScanHistory();
+    await transport.post('/v1/library/roots', { path: root, enabled: true });
+    await loadScanRoots();
+    ui.scanLabel.textContent = '目录已添加，正在等待自动同步';
+    scheduleScanStatus();
   } catch (err) {
-    ui.scanLabel.textContent = errText('扫描失败', err);
-    toast(errText('扫描失败', err), 'error');
+    ui.scanLabel.textContent = errText('添加目录失败', err);
+    toast(errText('添加目录失败', err), 'error');
   } finally {
     ui.scanBtn.disabled = false;
   }
 }
 
+let scanRootsEpoch = 0;
+async function loadScanRoots() {
+  const epoch = ++scanRootsEpoch;
+  try {
+    const data = await transport.get('/v1/library/roots');
+    if (epoch !== scanRootsEpoch) return;
+    ui.scanRoots.replaceChildren();
+    for (const root of data.roots) {
+      const row = document.createElement('div');
+      row.className = 'scan-root-row';
+      const label = document.createElement('label');
+      const enabled = document.createElement('input');
+      enabled.type = 'checkbox';
+      enabled.checked = root.enabled;
+      enabled.setAttribute('aria-label', `自动同步 ${root.path}`);
+      const name = document.createElement('span');
+      name.textContent = root.path;
+      label.append(enabled, name);
+      const status = document.createElement('span');
+      status.className = 'hint scan-root-status';
+      status.textContent = root.last_error || (root.last_scanned_at
+        ? `上次同步 ${new Date(root.last_scanned_at).toLocaleString()}` : '等待首次同步');
+      const rescan = document.createElement('button');
+      rescan.className = 'btn'; rescan.type = 'button'; rescan.textContent = '扫描';
+      const remove = document.createElement('button');
+      remove.className = 'btn'; remove.type = 'button'; remove.textContent = '移除';
+      async function change(action) {
+        enabled.disabled = rescan.disabled = remove.disabled = true;
+        try { await action(); await loadScanRoots(); }
+        catch (err) { enabled.checked = root.enabled; toast(errText('目录操作失败', err), 'error'); }
+        finally { enabled.disabled = rescan.disabled = remove.disabled = false; }
+      }
+      enabled.onchange = () => change(() => transport.put('/v1/library/roots', {path: root.path, enabled: enabled.checked}));
+      remove.onclick = () => change(() => transport.del(`/v1/library/roots?path=${encodeURIComponent(root.path)}`));
+      rescan.onclick = () => change(async () => {
+        await transport.post('/v1/library/scan', {root: root.path});
+        await refreshScanStatus();
+      });
+      row.append(label, rescan, remove, status);
+      ui.scanRoots.appendChild(row);
+    }
+  } catch (err) {
+    if (epoch === scanRootsEpoch) ui.scanRoots.textContent = errText('目录读取失败', err);
+  }
+}
+
+let scanStatusTimer = 0;
+let scanStatusPending = false;
+function scheduleScanStatus() {
+  clearTimeout(scanStatusTimer);
+  scanStatusTimer = setTimeout(() => { scanStatusTimer = 0; refreshScanStatus(); }, 1000);
+}
+
+async function refreshScanStatus() {
+  if (scanStatusPending) { scheduleScanStatus(); return; }
+  scanStatusPending = true;
+  clearTimeout(scanStatusTimer); scanStatusTimer = 0;
+  try {
+    const status = await transport.get('/v1/library/status');
+    ui.scanCancel.hidden = !status.running;
+    ui.scanCancel.disabled = !!status.cancelled;
+    ui.scanCancel.textContent = status.cancelled ? '正在取消…' : '取消扫描';
+    const pct = status.total ? Math.round(status.done / status.total * 100) : 0;
+    ui.scanBar.style.width = `${pct}%`;
+    if (status.root) {
+      ui.scanLabel.textContent = `${phaseLabel(status.phase)} · ${status.done}/${status.total}`
+        + ` · 新增 ${status.added} · 更新 ${status.updated} · 跳过 ${status.skipped}`
+        + ` · 移除 ${status.removed} · 失败 ${status.failed}`
+        + (status.last_error ? ` · ${status.last_error}` : '');
+    }
+    const errors = status.errors || [];
+    ui.scanErrors.hidden = errors.length === 0;
+    const list = ui.scanErrors.querySelector('ul');
+    list.replaceChildren();
+    for (const error of errors) {
+      const item = document.createElement('li');
+      item.textContent = `${error.path}：${error.message}`;
+      list.appendChild(item);
+    }
+    if (status.running) scheduleScanStatus();
+    else await loadScanRoots();
+  } catch (err) {
+    ui.scanLabel.textContent = errText('扫描状态读取失败', err);
+  } finally { scanStatusPending = false; }
+}
+
 function onScanProgress(msg) {
   const pct = msg.total ? Math.round((msg.done / msg.total) * 100) : 0;
   ui.scanBar.style.width = `${pct}%`;
-  // 真实 WS 事件的 Scan 载荷是 {phase, done, total}，不带文件名；
-  // 文件名目前只能在 /v1/library/status 里看到，二期的补点是把它放进事件。
-  ui.scanLabel.textContent = msg.current
-    ? `${pct}% · ${msg.current}`
-    : `${phaseLabel(msg.phase)} ${pct}% · ${msg.done}/${msg.total}`;
-  if (msg.total && msg.done >= msg.total) setTimeout(finishScan, 600);
+  ui.scanLabel.textContent = `${phaseLabel(msg.phase)} ${pct}% · ${msg.done}/${msg.total}`;
+  if (['done', 'failed', 'cancelled'].includes(msg.phase)) finishScan();
+  else if (!scanStatusTimer && !scanStatusPending) refreshScanStatus();
 }
 
 function phaseLabel(phase) {
-  return { scanning: '扫描中', walking: '扫描中', done: '完成', failed: '失败' }[phase] || '扫描中';
+  return { scanning: '扫描中', walking: '正在查找文件', done: '扫描完成', failed: '扫描失败', cancelled: '已取消' }[phase] || '尚未扫描';
 }
 
 // 后端一直在 ScanProgress 里统计 added / failed / last_error，旧 UI 一个都没显示，
 // 于是"扫了一半、其中 37 个文件解析失败"这类结果完全是静默的。
 async function finishScan() {
-  const status = await transport.get('/v1/library/status').catch(() => null);
-  if (!status) { ui.scanLabel.textContent = '扫描完成'; return; }
-  ui.scanLabel.textContent = `扫描完成 · 新增 ${status.added ?? '—'} 首 · 失败 ${status.failed ?? 0} 个`;
-  if (status.failed) toast(`有 ${status.failed} 个文件未能解析${status.last_error ? `：${status.last_error}` : ''}`, 'error');
-  else toast('扫描完成');
+  await refreshScanStatus();
 }
 
 // ---------------------------------------------------------------------------
@@ -1801,6 +1934,8 @@ async function loadSettings() {
   const s = await transport.get('/v1/settings').catch(() => ({}));
   state.settings = s || {};
   await loadScanHistory();
+  await loadScanRoots();
+  await refreshScanStatus();
   if (ui.scanRoot && !ui.scanRoot.value && state.settings.last_scan_root) {
     ui.scanRoot.value = state.settings.last_scan_root;
   }
@@ -1813,6 +1948,7 @@ async function loadSettings() {
   // 旧值——回填等于把刚点下的状态反杀，所以那一次以界面现状为准（库里已经由
   // 用户那次操作写对了），只回填确实没被动过的项。
   if (epoch === settingsEpoch) {
+    if (window.Stage3D) Stage3D.configure(state.settings.stage3d);
     // 封面盘：恢复状态不写库（persist=false），也不经过 stage:control。
     setStageCover(state.settings.stage_cover, false);
     // 空闲收起默认开：设置表里没有这项时传 true，行为与"用户勾上了"一致。
@@ -2013,8 +2149,6 @@ function setView(name) {
   for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
   ui.rail.querySelectorAll('.rail-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   document.body.classList.remove('column-open');
-  // 在线面板的首次拉取、分类/chips 状态都归 online.js，app.js 只通知进入。
-  if (name === 'online') window.Online.onViewEnter();
   // 在线歌单可能在歌单视图没渲染期间到达（登录、刷新），进入时补一次同步。
   if (name === 'playlists') renderOnlinePlaylistSection();
   // 收藏与每日推荐同理：进入时才拉，避免启动时多打两条请求。
@@ -2635,8 +2769,12 @@ function initCreative() {
   if (window.HandDrawn) HandDrawn.init();
   if (window.Workshop) Workshop.init();
 
-  // 打开工坊不影响渲染：它只是编辑同一份数据。所以两个入口（顶栏与设置页）
-  // 都直接调 Workshop.toggle，不需要在这里复制状态。
+  // The editor requests its visible target; app remains the owner of renderer activation.
+  document.addEventListener('workshop:target', (event) => {
+    if (event.detail?.target !== 'advanced') return;
+    applyCreative(true, true);
+    if (window.Stage && Stage.setPage) Stage.setPage(true);
+  });
   const openWs = () => { if (window.Workshop) Workshop.toggle(); };
   if (ui.workshopBtn) ui.workshopBtn.addEventListener('click', openWs);
   if (ui.setWorkshopBtn) ui.setWorkshopBtn.addEventListener('click', openWs);
@@ -2799,11 +2937,19 @@ function initNowPlayingModal() {
   };
   ui.searchClear.onclick = () => { ui.search.value = ''; ui.searchClear.hidden = true; state.q = ''; loadTracks(true); };
 
-  ui.libSort.onchange = () => { state.sort = ui.libSort.value; renderLibrary(); };
+  ui.libSort.onchange = () => { state.sort = ui.libSort.value; loadTracks(true); };
 
-  ui.scanToggle.onclick = () => { ui.scanPanel.hidden = !ui.scanPanel.hidden; };
+  ui.scanToggle.onclick = () => {
+    ui.scanPanel.hidden = !ui.scanPanel.hidden;
+    if (!ui.scanPanel.hidden) { loadScanRoots(); refreshScanStatus(); }
+  };
   $('empty-scan-btn').onclick = () => { ui.scanPanel.hidden = false; ui.scanRoot.focus(); };
   ui.scanBtn.onclick = startScan;
+  ui.scanCancel.onclick = async () => {
+    ui.scanCancel.disabled = true;
+    try { await transport.post('/v1/library/scan/cancel'); await refreshScanStatus(); }
+    catch (err) { ui.scanCancel.disabled = false; toast(errText('取消扫描失败', err), 'error'); }
+  };
 
   ui.newPlaylistBtn.onclick = async () => {
     const name = ui.newPlaylistName.value.trim();
@@ -2855,10 +3001,10 @@ function initNowPlayingModal() {
   }
 
   // 滚到底自动加载下一页，取代"一次性拉 500 条"的硬截断。
+  ui.libSentinel.onclick = () => loadTracks(false);
   if ('IntersectionObserver' in window) {
     new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && state.tracks.length < state.total && !state.loading) {
-        state.offset += PAGE;
         loadTracks(false);
       }
     }, { root: ui.column.querySelector('#view-library') }).observe(ui.libSentinel);

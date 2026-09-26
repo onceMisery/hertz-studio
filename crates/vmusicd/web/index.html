@@ -207,6 +207,9 @@
   <div class="top-right">
     <span id="demo-badge" class="badge-demo" hidden>演示模式</span>
     <div id="conn" class="conn">连接中…</div>
+    <button id="stage3d-entry" class="iconbtn" title="沉浸声场 (V)" aria-label="进入沉浸声场">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-cube"/></svg>
+    </button>
 
     <!-- 主题色切换：色板 → 下拉调色盘。列表由 themes.js 的 CATALOG 填充，
          加主题只需要往那张表里加一条。 -->
@@ -255,10 +258,6 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-library"/></svg>
       <span>曲库</span>
     </button>
-    <button class="rail-item" data-view="online" aria-label="在线曲库">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-globe"/></svg>
-      <span>在线</span>
-    </button>
     <button class="rail-item" data-view="playlists" aria-label="歌单">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-playlist"/></svg>
       <span>歌单</span>
@@ -297,18 +296,22 @@
             <option value="album">按专辑</option>
             <option value="added">最近添加</option>
           </select>
-          <button id="scan-toggle" class="btn">扫描目录</button>
+          <button id="scan-toggle" class="btn">音乐目录</button>
         </div>
       </div>
 
       <div class="scan-panel" id="scan-panel" hidden>
         <div class="scan-row">
           <input id="scan-root" type="text" placeholder="音乐目录，例如 D:\Music" autocomplete="off">
-          <button id="scan-btn" class="btn primary">开始扫描</button>
+          <button id="scan-btn" class="btn primary">添加并自动同步</button>
+          <button id="scan-cancel" class="btn" type="button" hidden>取消扫描</button>
         </div>
         <div class="scan-history" id="scan-history" hidden></div>
+        <div id="scan-roots" class="scan-roots" aria-label="已添加音乐目录"></div>
+        <p class="hint">启用的目录会自动同步文件变化。移除目录会停止同步，保留已收录歌曲和原文件。</p>
         <div class="scan-progress"><div class="scan-bar" id="scan-bar"></div></div>
-        <div class="hint" id="scan-label">尚未扫描</div>
+        <div class="hint" id="scan-label" role="status">尚未扫描</div>
+        <details id="scan-errors" class="scan-errors" hidden><summary>扫描失败明细</summary><ul></ul></details>
       </div>
 
       <!-- 每日推荐：服务端按本地规则（种子 = 本地日期）每天出一份，
@@ -343,74 +346,7 @@
         <span>#</span><span></span><span>标题</span><span>专辑</span><span>音质</span><span>时长</span><span></span>
       </div>
       <div class="lib-list" id="lib-list"></div>
-      <div class="lib-sentinel" id="lib-sentinel" hidden>加载中…</div>
-    </div>
-
-    <!-- 在线曲库：搜索 + 分类浏览 + 试听。数据经服务端代理，
-         避开浏览器对第三方音乐接口的 CORS 限制。 -->
-    <div class="view" id="view-online" hidden>
-      <div class="col-head">
-        <div class="col-head-left">
-          <h1 class="col-title">在线曲库</h1>
-          <span id="online-count" class="count">—</span>
-        </div>
-        <div class="col-tools">
-          <select id="online-source" aria-label="音源">
-            <option value="netease">网易云音乐</option>
-          </select>
-          <select id="online-quality" class="online-quality" aria-label="音质档位" title="音质档位"></select>
-        </div>
-      </div>
-
-      <!-- 搜索/分类/结果/账号区全部进同一个滚动容器：内容超出时整体
-           可滚动，而不是被视图边界裁掉（与本地曲库内部列表滚动同理）。 -->
-      <div class="online-scroll">
-      <div id="online-errorbar" class="online-errorbar" hidden>
-        <span id="online-error-text" class="online-error-text"></span>
-        <span class="online-error-actions">
-          <button id="online-error-retry" class="btn" type="button">重试</button>
-          <button id="online-error-next" class="btn primary" type="button">下一首</button>
-          <button id="online-error-close" class="iconbtn" type="button" aria-label="关闭">×</button>
-        </span>
-      </div>
-      <div class="online-search">
-        <input id="online-q" type="search" placeholder="搜索在线歌曲、歌手或专辑…" autocomplete="off" aria-label="搜索在线曲库">
-        <button id="online-go" class="btn primary">搜索</button>
-      </div>
-
-      <div class="online-chips" id="online-chips" role="group" aria-label="分类">
-        <button class="chip active" data-cat="hot">热门</button>
-        <button class="chip" data-cat="new">新歌</button>
-        <button class="chip" data-cat="rock">摇滚</button>
-        <button class="chip" data-cat="electronic">电子</button>
-        <button class="chip" data-cat="folk">民谣</button>
-        <button class="chip" data-cat="jazz">爵士</button>
-        <button class="chip" data-cat="classical">古典</button>
-        <button class="chip" data-cat="acg">ACG</button>
-      </div>
-
-      <div class="online-body" id="online-body">
-        <div class="hint">输入关键词搜索，或点上方分类浏览。</div>
-      </div>
-      <div class="online-sentinel" id="online-sentinel" hidden>加载中…</div>
-
-      <!-- 账号区 + 我的歌单（online-playlists.js 驱动）。
-           有任一登录能力（cookie/qr/歌单）的音源都会出现账号卡；
-           未登录时是扫码/cookie 入口，登录后才拉歌单网格。 -->
-      <div id="online-plugins" class="online-plugins">
-        <div id="op-history" class="op-history" hidden>
-          <div class="op-section-title op-history-head">
-            <span>最近播放</span>
-            <button id="op-history-clear" class="op-history-clear" type="button">清空</button>
-          </div>
-          <div id="op-history-list" class="op-history-list"></div>
-        </div>
-        <div class="op-section-title">我的账号</div>
-        <div id="op-accounts" class="op-accounts"></div>
-        <div id="op-grid-head" class="op-section-title" hidden>我的歌单</div>
-        <div id="op-grid" class="op-grid"></div>
-      </div>
-      </div>
+      <button class="btn lib-sentinel" id="lib-sentinel" type="button" hidden>加载更多歌曲</button>
     </div>
 
     <!-- 歌单 -->
@@ -514,14 +450,15 @@
       </div>
 
       <div class="fav-tabs" id="fav-tabs" role="group" aria-label="收藏类型">
-        <button class="chip active" type="button" data-fav-kind="track">歌曲 0</button>
-        <button class="chip" type="button" data-fav-kind="radio">电台 0</button>
+        <button class="chip active" id="fav-tab-track" type="button" data-fav-kind="track">歌曲 0</button>
+        <button class="chip" id="fav-tab-radio" type="button" data-fav-kind="radio">电台 0</button>
       </div>
 
       <div class="lib-head fav-head">
         <span>#</span><span></span><span>标题</span><span>专辑</span><span>来源</span><span>时长</span><span></span>
       </div>
       <div class="lib-list fav-list" id="fav-list"></div>
+      <button id="fav-more" class="btn" type="button" hidden>加载更多收藏</button>
     </div>
 
     <!-- 队列 -->
@@ -813,15 +750,13 @@
      默认 hidden + visibility:hidden：不可见时不参与命中测试也不参与合成。
      内部节点由 stage3d.js 填充（舞台坞的清单来自它的 STAGES 目录），这里只
      放骨架和四个固定按钮，避免 JS 里拼整段 DOM。 -->
-<div class="s3d" id="stage3d" aria-hidden="true" role="dialog" aria-label="沉浸式三维舞台">
+<div class="s3d" id="stage3d" aria-hidden="true" aria-modal="true" role="dialog" aria-label="沉浸式三维舞台" tabindex="-1">
   <div class="s3d-canvas-wrap" id="s3d-canvas-wrap"></div>
   <div class="s3d-vignette" aria-hidden="true"></div>
-
+  <div class="s3d-brand"><span class="s3d-brand-mark" aria-hidden="true">h<span>z</span></span><div>hertz studio<small>沉 浸 声 场</small></div></div>
   <div class="s3d-head">
-    <div class="s3d-meta">
-      <div class="s3d-meta-title" id="s3d-title">未在播放</div>
-      <div class="s3d-meta-sub" id="s3d-artist"></div>
-    </div>
+    <button class="s3d-btn" id="s3d-lyrics-toggle" title="显示歌词 (L)" aria-label="显示歌词" aria-pressed="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 6h16M4 12h16M7 18h10"/></svg></button>
+    <button class="s3d-btn" id="s3d-settings-toggle" title="舞台设置" aria-label="舞台设置" aria-expanded="false" aria-controls="s3d-settings"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg></button>
     <button class="s3d-btn" id="s3d-cruise" title="自动巡航 (C)" aria-label="自动巡航" aria-pressed="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -840,13 +775,51 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
     </button>
   </div>
-
+  <div class="s3d-reading" id="s3d-reading">
+    <div class="s3d-eyebrow" id="s3d-status">让音乐，拥有形状</div>
+  </div>
+  <div class="s3d-sleeve" id="s3d-sleeve" hidden>
+    <div class="s3d-record-object">
+      <div class="s3d-record-back" aria-hidden="true"></div>
+      <div class="s3d-vinyl" aria-hidden="true"><span>HERTZ · SIDE A</span></div>
+      <div class="s3d-record-front"><img id="s3d-sleeve-image" alt="当前专辑封面" hidden><div class="s3d-record-type" aria-hidden="true">hertz<span>THE LISTENING ROOM</span></div></div>
+    </div>
+    <div class="s3d-sleeve-caption"><strong id="s3d-sleeve-title"></strong><span id="s3d-sleeve-artist"></span></div>
+  </div>
+  <aside class="s3d-settings" id="s3d-settings" aria-label="舞台设置" hidden>
+    <div class="s3d-settings-heading"><span>舞台设置</span><button class="s3d-btn" id="s3d-settings-close" aria-label="收起舞台设置"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+    <label for="s3d-layout">聆听布局</label>
+    <select id="s3d-layout"><option value="focus">沉浸歌词</option><option value="sleeve">封面与歌词</option><option value="single">简洁单句</option></select>
+    <button class="btn s3d-workshop" id="s3d-workshop">进入创意工坊</button>
+    <label for="s3d-reactivity">律动强度 <output id="s3d-reactivity-value">135%</output></label>
+    <input id="s3d-reactivity" type="range" min="0" max="200" value="135">
+    <label for="s3d-motion">镜头动态 <output id="s3d-motion-value">65%</output></label>
+    <input id="s3d-motion" type="range" min="0" max="100" value="65">
+    <label for="s3d-bloom">光晕强度 <output id="s3d-bloom-value">80%</output></label>
+    <input id="s3d-bloom" type="range" min="0" max="150" value="80">
+    <p>拖动探索视角，滚轮拉近。<br>双击或按 K 回到舞台中心。</p>
+    <span id="s3d-motion-note">设置即时生效</span>
+  </aside>
   <div class="s3d-dock" id="s3d-dock" role="toolbar" aria-label="三维舞台切换"></div>
+  <div class="s3d-player" id="s3d-player">
+    <div class="s3d-track-info">
+      <button class="s3d-art" id="s3d-cover-toggle" aria-label="切换封面与歌词布局" title="封面与歌词 (B)"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-disc"/></svg><img id="s3d-cover" alt="当前专辑封面" hidden></button>
+      <div class="s3d-meta"><div class="s3d-meta-title" id="s3d-title">还没有播放音乐</div><div class="s3d-meta-sub" id="s3d-artist">从曲库选择一首喜欢的歌</div></div>
+    </div>
+    <div class="s3d-transport">
+      <div class="s3d-play-buttons">
+        <button class="s3d-btn" id="s3d-prev" aria-label="上一首"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-prev"/></svg></button>
+        <button class="s3d-btn s3d-play" id="s3d-play" aria-label="播放" title="播放 / 暂停（空格）"><svg viewBox="0 0 24 24" aria-hidden="true"><use id="s3d-play-icon" href="#i-play"/></svg></button>
+        <button class="s3d-btn" id="s3d-next" aria-label="下一首"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-next"/></svg></button>
+      </div>
+      <div class="s3d-timeline"><span id="s3d-elapsed">0:00</span><input id="s3d-seek" type="range" min="0" max="1" value="0" step="100" aria-label="舞台播放进度" disabled><span id="s3d-duration">0:00</span></div>
+    </div>
+    <div class="s3d-player-extra"><label class="s3d-volume" title="音量"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4zM17 8c3 2 3 6 0 8"/></svg><input id="s3d-volume" type="range" min="0" max="100" value="80" aria-label="舞台音量"></label><button class="s3d-btn" id="s3d-queue" aria-label="返回播放队列" title="播放队列"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg></button></div>
+  </div>
   <div class="s3d-hint" id="s3d-hint"></div>
   <div class="s3d-keys">
     拖动旋转 · 滚轮缩放 · 双击复位<br>
-    1–5 切舞台 · [ ] 上一个/下一个<br>
-    F 全屏 · C 巡航 · K 复位 · V / Esc 关闭
+    1–7 切舞台 · F 全屏 · L 歌词 · Esc 返回
   </div>
   <div class="s3d-fallback" id="s3d-fallback" hidden></div>
 </div>
@@ -1020,6 +993,7 @@
 <script src="stage-halo.js"></script>
 <!-- 沉浸式三维舞台：自建一个 WebGL2 上下文（拿不到就整体降级），逐帧驱动
      仍然走 Stage.gate()。排在 stage-immersive 之前，键盘用捕获阶段抢下 F。 -->
+<script src="stage-lyrics.js"></script>
 <script src="stage3d.js"></script>
 <script src="stage-immersive.js"></script>
 <script src="vendor/qrcode.js"></script>

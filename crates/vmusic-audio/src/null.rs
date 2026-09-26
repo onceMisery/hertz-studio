@@ -13,7 +13,7 @@
 
 use std::time::Instant;
 
-use vmusic_core::{AudioBackend, AudioError, DeviceInfo, MediaInfo};
+use vmusic_core::{AudioBackend, AudioError, AudioSource, DeviceInfo, MediaInfo};
 
 pub struct NullBackend {
     duration_ms: Option<u64>,
@@ -81,6 +81,25 @@ impl AudioBackend for NullBackend {
         if uri.trim().is_empty() {
             return Err(AudioError::UnsupportedFormat("empty uri".into()));
         }
+        self.duration_ms = None;
+        self.position_ms = 0;
+        self.offset_ms = 0;
+        self.playing = false;
+        self.finished = false;
+        self.started = None;
+        Ok(MediaInfo::default())
+    }
+
+    fn load_source(
+        &mut self,
+        _source: Box<dyn AudioSource>,
+        _ext: Option<String>,
+    ) -> Result<MediaInfo, AudioError> {
+        // The null backend intentionally does not decode or output audio, but
+        // it must still accept the same source contract as the cpal backend.
+        // Online playback uses this path after progressive download; rejecting
+        // it here made headless/fallback runs report the misleading
+        // "streaming media source unsupported" error.
         self.duration_ms = None;
         self.position_ms = 0;
         self.offset_ms = 0;
