@@ -1268,7 +1268,7 @@ async function loadPlaylists() {
   state.playlists = data.playlists || [];
   if (ui.playlistCount) ui.playlistCount.textContent = state.playlists.length
     ? `${state.playlists.length} 个歌单` : '';
-  if (shelf) shelf.setItems(state.playlists);
+  if (shelf) shelf.setItems(shelfItems());
   ui.playlistList.innerHTML = '';
   rowArts.clear();
   const onlineCount = window.OnlinePlaylists ? window.OnlinePlaylists.all().length : 0;
@@ -1313,25 +1313,19 @@ async function loadPlaylists() {
 // 纯渲染。按音源分组挂在本地歌单之后；点击行打开在线详情抽屉（固定浮层，
 // 在任何视图上都能弹出），▶ 直接整盘播放。与在线面板网格始终同源。
 //
-// 歌单视图有「歌单架 / 列表」两种排布（setPlaylistMode）：列表模式下分区
-// 块挂在 #playlist-list 末尾与本地歌单同列滚动；架子模式下 #playlist-list
-// 整体隐藏，块搬到独立宿主 #playlist-online（架子下方剩余区域）。两种排布
-// 共用同一个块节点，切换时只搬家不重建，滚动状态外的一切都保留。
+// 分区块只属于「列表」排布（挂在 #playlist-list 末尾与本地歌单同列滚动）；
+// 「歌单架」排布下在线歌单直接上架（见 onlineShelfItems），#playlist-online
+// 宿主就此退役，仅保留元素避免 HTML/选择器处处跟着改。
 let onlineBlockEl = null;
 
-function onlinePlaylistHost() {
-  return playlistMode === 'list' ? ui.playlistList : ui.playlistOnline;
-}
-
-// 把分区块放进当前排布对应的宿主，并维护架子宿主的显隐；没有在线歌单时
-// 架子宿主收起，不把立体架子顶上去或留一块空白。
+// 分区块只在列表排布下展示：架子模式下在线歌单已经上了架子（见
+// onlineShelfItems），分区再挤在架子下面只剩几十像素，看起来像坏了。
 function placeOnlineBlock() {
   if (!ui.playlistOnline) return;
-  if (onlineBlockEl) {
-    const host = onlinePlaylistHost();
-    if (onlineBlockEl.parentElement !== host) host.appendChild(onlineBlockEl);
+  if (onlineBlockEl && onlineBlockEl.parentElement !== ui.playlistList) {
+    ui.playlistList.appendChild(onlineBlockEl);
   }
-  ui.playlistOnline.hidden = playlistMode !== 'shelf' || !onlineBlockEl;
+  ui.playlistOnline.hidden = true;
 }
 
 function renderOnlinePlaylistSection() {
@@ -1399,7 +1393,7 @@ function renderOnlinePlaylistSection() {
     g.rows.forEach((it) => block.appendChild(onlinePlaylistRow(src, it.playlist)));
   });
   onlineBlockEl = block;
-  onlinePlaylistHost().appendChild(block);
+  ui.playlistList.appendChild(block);
   placeOnlineBlock();
 }
 
@@ -1488,6 +1482,33 @@ async function deletePlaylist(p) {
 
 const SHELF_MODE_KEY = 'vmusic.playlists.mode';
 
+// 在线歌单的架子卡 id 与在线曲目虚拟 id 同构，谁也不必猜第二套拼法。
+function onlineShelfId(source, refId) { return `online:${source}:${refId}`; }
+
+// 架子上的完整集合：本地歌单在前，各在线音源的歌单随后（顺序与在线面板
+// 网格一致）。在线卡自带封面直链与音源徽标，详情栏动作按音源能力裁剪。
+function onlineShelfItems() {
+  const OP = window.OnlinePlaylists;
+  if (!OP) return [];
+  return OP.all().map((it) => ({
+    id: onlineShelfId(it.source, it.playlist.id),
+    name: it.playlist.name,
+    track_count: it.playlist.track_count,
+    coverUrl: (window.Online && window.Online.safeCoverUrl(it.playlist.cover)) || null,
+    badge: it.badgeIcon,
+    badgeColor: it.badgeColor,
+    online: true,
+    source: it.source,
+    sourceLabel: it.sourceLabel,
+    refId: it.playlist.id,
+    kind: it.playlist.kind,
+  }));
+}
+
+function shelfItems() {
+  return state.playlists.concat(onlineShelfItems());
+}
+
 function initShelf() {
   if (!window.Shelf || !ui.shelf) return;
 
@@ -1516,12 +1537,22 @@ function initShelf() {
   document.addEventListener('shelf:action', (e) => {
     const d = e.detail || {};
     const item = state.playlists.find((p) => p.id === d.id);
-    if (!item) return;
-    if (d.action === 'play') playPlaylist(item.id);
-    else if (d.action === 'queue') queuePlaylistNext(item.id);
-    else if (d.action === 'open') openPlaylist(item.id);
-    else if (d.action === 'rename') renamePlaylist(item);
-    else if (d.action === 'delete') deletePlaylist(item);
+    if (item) {
+      if (d.action === 'play') playPlaylist(item.id);
+      else if (d.action === 'queue') queuePlaylistNext(item.id);
+      else if (d.action === 'open') openPlaylist(item.id);
+      else if (d.action === 'rename') renamePlaylist(item);
+      else if (d.action === 'delete') deletePlaylist(item);
+      return;
+    }
+    // 在线歌单卡：没有重命名/删除这些本地动作，播放/查看走在线链路。
+    const online = onlineShelfItems().find((it) => it.id === d.id);
+    if (!online) return;
+    if (d.action === 'play') {
+      window.OnlinePlaylists.playRef(online.source, online.refId, online.name);
+    } else if (d.action === 'open') {
+      openOnlinePlaylistDetail(online.source, online.refId, 'arrange');
+    }
   });
 
   // 封面异步就绪：列表行按 id 对号重画（shelf 内部已自行订阅）。
@@ -1538,7 +1569,7 @@ function initShelf() {
   // 才会喂它一次，而这两件事分属 initStage() 和 refreshAll() 两个阶段——一旦
   // 时序错位，表现就是「歌单列表有内容，架子却是空的」，要等到新建/删除一次
   // 歌单才亮起来。用手头已有的数据兜一次，顺序就无所谓了。
-  shelf.setItems(state.playlists);
+  shelf.setItems(shelfItems());
 }
 
 // 两种排布共用同一份 state.playlists 和同一个 Shelf 实例：列表模式只是把
@@ -3661,13 +3692,27 @@ function initNowPlayingModal() {
     catch (err) { ui.scanCancel.disabled = false; toast(errText('取消扫描失败', err), 'error'); }
   };
 
-  ui.newPlaylistBtn.onclick = async () => {
+  // 新建歌单：按钮与输入框回车同一入口。成功后架子转到位——新歌单追加在
+  // 集合末尾，架子只摆中心附近的几张卡，不主动聚焦时用户看到的就是「没反应」。
+  async function createPlaylist() {
     const name = ui.newPlaylistName.value.trim();
     if (!name) return;
-    await transport.post('/v1/playlists', { name }).catch((e) => toast(errText('创建失败', e), 'error'));
+    let created = null;
+    try {
+      created = await transport.post('/v1/playlists', { name });
+    } catch (e) {
+      toast(errText('创建失败', e), 'error');
+      return;
+    }
     ui.newPlaylistName.value = '';
-    loadPlaylists();
-  };
+    toast(`已创建《${name}》`);
+    await loadPlaylists();
+    if (shelf && created && created.id) shelf.focusId(created.id);
+  }
+  ui.newPlaylistBtn.onclick = createPlaylist;
+  ui.newPlaylistName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); createPlaylist(); }
+  });
 
   // 歌单详情头部
   const currentDetailPl = () => state.playlists.find((p) => p.id === detailPlaylistId);
@@ -3832,7 +3877,12 @@ function initNowPlayingModal() {
     window.Daily.init();
   }
   // 在线歌单（账号区网格）任何变化都同步重绘左侧歌单菜单的在线分区。
-  document.addEventListener('online-playlists:changed', renderOnlinePlaylistSection);
+  // 在线歌单到达/变化：列表分区重画，架子也换上含在线卡的完整集合——
+  // 登录成功是异步的，架子建好后数据才到，不挂这条就会一直缺在线卡。
+  document.addEventListener('online-playlists:changed', () => {
+    renderOnlinePlaylistSection();
+    if (shelf) shelf.setItems(shelfItems());
+  });
   initStage();
   initCreative();
   bindShortcuts();

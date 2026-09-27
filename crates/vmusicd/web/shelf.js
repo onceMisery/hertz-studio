@@ -61,13 +61,31 @@
     el.setAttribute('aria-label', item.name + '，' + item.track_count + ' 首');
     slot.name.textContent = item.name;
     slot.count.textContent = item.track_count + ' 首';
+    paintBadge(slot, item);
     paint(el, index - center);
     applyCover(slot, item);
   }
 
-  // 封面解析在共享的 PlaylistCovers 里（列表行也用它）：这里只把结果画到
-  // 卡面上，拿不到封面时用它给的稳定色相占位。
+  // 在线卡带平台徽标（icon + 品牌色与搜索结果同源）；本地卡没有，隐藏。
+  function paintBadge(slot, item) {
+    var b = slot.badge;
+    if (!item || !item.badge) { b.hidden = true; return; }
+    b.hidden = false;
+    if (item.badgeColor) b.style.setProperty('--badge', item.badgeColor);
+    else b.style.removeProperty('--badge');
+    var use = b.querySelector('use');
+    if (use) use.setAttribute('href', '#' + item.badge);
+  }
+
+  // 封面两路：在线卡直接带平台封面直链（coverUrl）；本地卡走共享的
+  // PlaylistCovers 两跳解析，拿不到时用稳定色相占位。
   function applyCover(slot, item) {
+    if (item.coverUrl) {
+      slot.el.classList.add('has-art');
+      slot.art.style.backgroundColor = '';
+      slot.el.style.setProperty('--sleeve-art', 'url(' + JSON.stringify(item.coverUrl) + ')');
+      return;
+    }
     var st = window.PlaylistCovers.state(item.id);
     slot.el.style.setProperty('--sleeve-hue', st.hue == null ? 160 : st.hue);
     slot.el.classList.toggle('has-art', st.s === 'url');
@@ -145,18 +163,23 @@
     name.textContent = item.name;
     var sub = document.createElement('span');
     sub.className = 'pl-sub';
-    sub.textContent = item.track_count + ' 首';
+    sub.textContent = item.track_count + ' 首'
+      + (item.sourceLabel ? ' · ' + item.sourceLabel : '');
     var spacer = document.createElement('span');
     spacer.className = 'shelf-detail-spacer';
 
     detail.append(name, sub, spacer);
-    [
-      ['play', '播放', 'primary'],
-      ['queue', '下一首播放', ''],
-      ['open', '查看曲目', ''],
-      ['rename', '重命名', ''],
-      ['delete', '删除', 'danger']
-    ].forEach(function (spec) {
+    // 在线卡没有重命名/删除/下一首播放这些本地动作，只留播放与查看。
+    var acts = item.online
+      ? [['play', '播放', 'primary'], ['open', '查看曲目', '']]
+      : [
+        ['play', '播放', 'primary'],
+        ['queue', '下一首播放', ''],
+        ['open', '查看曲目', ''],
+        ['rename', '重命名', ''],
+        ['delete', '删除', 'danger']
+      ];
+    acts.forEach(function (spec) {
       var b = document.createElement('button');
       b.type = 'button';
       b.className = 'btn shelf-act' + (spec[2] ? ' ' + spec[2] : '');
@@ -297,13 +320,21 @@
       label.className = 'shelf-label';
       var name = document.createElement('div');
       name.className = 'shelf-name pl-name';
+      // 在线卡：徽标 + 曲目数同一行；本地卡徽标隐藏，行退化成纯 count。
+      var meta = document.createElement('div');
+      meta.className = 'shelf-meta';
       var count = document.createElement('div');
       count.className = 'shelf-count pl-sub';
-      label.append(name, count);
+      var badge = document.createElement('span');
+      badge.className = 'src-badge shelf-badge';
+      badge.hidden = true;
+      badge.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href=""/></svg>';
+      meta.append(badge, count);
+      label.append(name, meta);
       el.append(back, record, art, label, reflection);
       el.hidden = true;
       host.appendChild(el);
-      slots.push({ el: el, art: art, name: name, count: count });
+      slots.push({ el: el, art: art, name: name, count: count, badge: badge });
     }
   }
 

@@ -247,11 +247,17 @@ html.qr-modal-open .app{visibility:hidden}
 
 /* ── 左侧「歌单」菜单里的在线歌单分区（与在线面板网格同源同数据）────── */
 
-/* 架子模式下的宿主：占歌单列在立体架子之下的剩余高度并独立滚动，使默认
-   排布（歌单架）里在线歌单同样完整可见；列表模式下该宿主收起，分区块
-   直接挂在 #playlist-list 末尾和本地歌单同列滚动。 */
+/* 在线歌单上了 3D 歌单架（app.js onlineShelfItems）：分区块只在列表排布
+   挂在 #playlist-list 末尾；架子排布下宿主由 app.js placeOnlineBlock 永久收起。 */
 .pl-online-host{flex:1;min-height:0;overflow-y:auto;
   display:flex;flex-direction:column;gap:4px;padding:12px 0 4px}
+
+/* 架子在线卡的徽标行：平台徽标与曲目数同一行；本地卡徽标隐藏后行退化成
+   纯 count。.src-badge 的 display 会压过 [hidden]，必须显式收掉。 */
+.shelf-meta{display:flex;align-items:center;gap:6px;min-width:0}
+.shelf-badge{width:16px;height:16px;border-radius:5px}
+.shelf-badge svg{width:11px;height:11px}
+.shelf-badge[hidden]{display:none}
 
 /* 分区紧跟在本地歌单行之后，顶部分隔清楚。 */
 .pl-online-sep{flex:none;border:0;border-top:1px solid var(--line);
