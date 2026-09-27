@@ -22,7 +22,7 @@ mod ws;
 
 use std::sync::Arc;
 
-use axum::response::{Html, IntoResponse};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use tokio::sync::broadcast;
@@ -296,8 +296,15 @@ fn render_index(html: &str, token: &str) -> String {
     html.replace(TOKEN_PLACEHOLDER, token)
 }
 
-async fn index(state: Arc<AppState>) -> Html<String> {
-    Html(render_index(INDEX_HTML, &state.token))
+async fn index(state: Arc<AppState>) -> axum::response::Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        render_index(INDEX_HTML, &state.token),
+    )
+        .into_response()
 }
 
 /// 内嵌资源的统一出口。
@@ -305,8 +312,19 @@ async fn index(state: Arc<AppState>) -> Html<String> {
 /// 每个文件不再有独立的 `serve_*`：以前加一层视觉效果要动 4 个地方（const、
 /// 一个 handler、一条 route、以及那份复制粘贴的 header 拼装），漏一处就是
 /// 404 或 MIME 不对导致浏览器拒绝执行。现在只剩 const 一行 + route 一行。
+///
+/// 必须带 `Cache-Control: no-cache`：内嵌资源没有 Last-Modified/ETag 可供
+/// 协商，浏览器启发式缓存会把几天前的旧 JS/CSS 一直端出来，前端修了 bug
+/// 用户也拿不到（歌单视图在线分区就栽过这个）。本机回源代价可忽略。
 async fn asset(mime: &'static str, body: &'static str) -> axum::response::Response {
-    ([(axum::http::header::CONTENT_TYPE, mime)], body).into_response()
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 async fn load_or_create_token(data_dir: &std::path::Path) -> anyhow::Result<String> {
