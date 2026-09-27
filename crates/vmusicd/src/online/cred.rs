@@ -294,6 +294,13 @@ fn enrich_from_cookie(source: &str, pack: &mut CredPack) {
                     .to_string();
             }
         }
+        // 酷我的网页会话以 uid cookie 标识（spike 2026-09-27：无账号实贴
+        // 验证，先按字段存在性判态；token 字段名待有账号后核对）。
+        "kuwo" => {
+            if pack.userid.is_empty() {
+                pack.userid = cookie_field(&pack.cookie, "uid").unwrap_or("").to_string();
+            }
+        }
         "qq" if pack.uin.is_empty() || pack.uin == "0" => {
             if let Some(raw) = cookie_field(&pack.cookie, "uin") {
                 pack.uin = normalize_qq_uin(raw);
@@ -317,6 +324,8 @@ pub fn is_signed_in(source: &str, pack: &CredPack) -> bool {
                 && cookie_field(&pack.cookie, "qm_keyst").is_some_and(|v| !v.is_empty())
         }
         "kugou" => !pack.userid.is_empty() && pack.userid != "0" && !pack.token.is_empty(),
+        // 酷我：uid cookie 非空非零即视为登录（与酷狗的 userid 判法对称）。
+        "kuwo" => !pack.userid.is_empty() && pack.userid != "0",
         // 汽水的 PC 接口认会话 cookie：sessionid / sessionid_ss / sid_guard /
         // sid_tt 任一存在且非空即认为已登录。空值（sessionid=）等同缺失。
         "qishui" => SESSION_COOKIES
@@ -407,6 +416,40 @@ mod tests {
                 ..Default::default()
             }
         ));
+        assert!(is_signed_in(
+            "kuwo",
+            &CredPack {
+                userid: "9".into(),
+                ..Default::default()
+            }
+        ));
+        assert!(!is_signed_in(
+            "kuwo",
+            &CredPack {
+                userid: "0".into(),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_cookie_enrich_fills_kuwo_uid() {
+        let mut p = CredPack {
+            cookie: " Hm_lvt_x=1; uid=12345; kw_token=t ".into(),
+            ..Default::default()
+        };
+        enrich_from_cookie("kuwo", &mut p);
+        assert_eq!(p.userid, "12345");
+        assert!(is_signed_in("kuwo", &p));
+
+        // 已有 userid 不被覆盖。
+        let mut r = CredPack {
+            cookie: "uid=1".into(),
+            userid: "9".into(),
+            ..Default::default()
+        };
+        enrich_from_cookie("kuwo", &mut r);
+        assert_eq!(r.userid, "9");
     }
 
     #[test]
