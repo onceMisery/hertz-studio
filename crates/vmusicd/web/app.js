@@ -3045,12 +3045,9 @@ function initCreative() {
   if (window.HandDrawn) HandDrawn.init();
   if (window.Workshop) Workshop.init();
 
-  // The editor requests its visible target; app remains the owner of renderer activation.
-  document.addEventListener('workshop:target', (event) => {
-    if (event.detail?.target !== 'advanced') return;
-    applyCreative(true, true);
-    if (window.Stage && Stage.setPage) Stage.setPage(true);
-  });
+  // 「高级编排」目标不再经由这里做任何事：既不替主页强行打开增强渲染
+  // （那会当场改掉右侧播放视窗的画面），也不拉起旧的全屏歌词页。参数改动
+  // 在用户自己开启的增强渲染里实时生效，没开启就是纯编辑。
   const openWs = () => { if (window.Workshop) Workshop.toggle(); };
   if (ui.workshopBtn) ui.workshopBtn.addEventListener('click', openWs);
   if (ui.setWorkshopBtn) ui.setWorkshopBtn.addEventListener('click', openWs);
@@ -3220,11 +3217,14 @@ function initNowPlayingModal() {
     setVolumeFromInput();
   };
 
-  // 跳转到舞台播放页面：关闭弹窗并打开全屏沉浸舞台
+  // 跳转到舞台播放：关闭弹窗并进入沉浸声场（与全屏舞台按钮同一入口同一效果）
   np.goto.onclick = () => {
     closeNowPlaying();
     document.body.classList.remove('stage-open');
-    if (Stage) Stage.setPage(true);
+    if (window.Stage3D && Stage3D.open) {
+      Stage3D.open();
+      setTimeout(function () { if (Stage3D.requestFullscreen) Stage3D.requestFullscreen(); }, 40);
+    } else if (Stage) Stage.setPage(true);
   };
 }
 

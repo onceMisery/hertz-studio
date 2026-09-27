@@ -449,10 +449,14 @@ body.s3d-open > .bar { display: none; }
 .s3d-brand-mark span { color: var(--s3d-accent); }
 .s3d-brand small { display: block; margin-top: 5px; color: var(--s3d-muted); font-size: 9px; font-weight: 400; }
 /* Measured lyric rail. Only nearby lines are mounted by StageLyrics. */
-.s3d-reading { position: absolute; top: 108px; bottom: 226px; left: 13%; width: 74%; color: var(--s3d-text); pointer-events: none; }
+/* 歌词 3D（自歌词演出页移植）：透视在 reading、旋转与 preserve-3d 在 rail、
+   每行按 --sl-d translateZ 出视差。链路上不能有 overflow/mask（会压平 Z），
+   原裁剪与边缘淡出改由 stage-lyrics 的 --sl-opacity 越界归零表达。 */
+.s3d-reading { position: absolute; top: 108px; bottom: 226px; left: 13%; width: 74%; color: var(--s3d-text); pointer-events: none; perspective: 1100px; }
 .s3d-eyebrow { position: absolute; top: -8px; width: 100%; text-align: center; font-size: 10px; letter-spacing: .28em; color: var(--s3d-accent); opacity: .65; }
-.sl-rail { position: absolute; inset: 30px 0 0; overflow: hidden; pointer-events: auto; touch-action: none; mask-image: linear-gradient(transparent, #000 15% 82%, transparent); }
-.sl-line { --sl-y: 0px; --sl-scale: 1; --sl-opacity: 0; --sl-blur: 0px; position: absolute; top: 50%; left: 0; width: 100%; padding: 3px 12px; margin: 0; border: 0; background: transparent; font: 600 calc(clamp(26px, 3.8vw, 56px) * var(--sl-size,1))/1.5 var(--font,system-ui,sans-serif); letter-spacing: .025em; text-align: center; text-wrap: balance; overflow-wrap: anywhere; color: #dbe4e0; cursor: pointer; transform: translateY(var(--sl-y)) scale(var(--sl-scale)); transform-origin: 50% 50%; opacity: var(--sl-opacity); filter: blur(var(--sl-blur)); transition: transform 720ms cubic-bezier(.19,1,.22,1), opacity 550ms ease, filter 550ms ease; }
+.sl-rail { position: absolute; inset: 30px 0 0; transform-style: preserve-3d; transform: rotateX(var(--s3d-rx, 0deg)) rotateY(var(--s3d-ry, 0deg)); pointer-events: none; }
+.sl-line { --sl-y: 0px; --sl-scale: 1; --sl-opacity: 0; --sl-blur: 0px; --sl-d: 0; position: absolute; top: 50%; left: 0; width: 100%; padding: 3px 12px; margin: 0; border: 0; background: transparent; font: 600 calc(clamp(26px, 3.8vw, 56px) * var(--sl-size,1))/1.5 var(--font,system-ui,sans-serif); letter-spacing: .025em; text-align: center; text-wrap: balance; overflow-wrap: anywhere; color: #dbe4e0; cursor: grab; touch-action: none; pointer-events: auto; transform: translateY(var(--sl-y)) scale(var(--sl-scale)) translateZ(calc(var(--sl-d) * var(--s3d-row-depth, 42px) * -1)); transform-origin: 50% 50%; opacity: var(--sl-opacity); filter: blur(var(--sl-blur)); transition: transform 720ms cubic-bezier(.19,1,.22,1), opacity 550ms ease, filter 550ms ease; }
+.sl-line:active { cursor: grabbing; }
 .sl-line:hover { opacity: 1; filter: none; }
 .sl-word { display: inline-block; white-space: pre-wrap; }
 .sl-line.is-active .sl-word { color: transparent; background: linear-gradient(90deg,#f4fff9 calc(var(--sl-fill,-10%) - 10%),#83958d calc(var(--sl-fill,-10%) + 10%)); background-clip: text; -webkit-background-clip: text; transform: translateY(var(--sl-rise,0px)); filter: drop-shadow(0 0 calc(var(--sl-glow,.45) * 14px) rgba(221,255,237,.32)); }
@@ -462,6 +466,73 @@ body.s3d-open > .bar { display: none; }
 .sl-empty strong { font-size: clamp(25px,4vw,54px); font-weight: 500; line-height: 1.45; text-wrap: balance; }
 .sl-empty span { color: var(--s3d-muted); font-size: 13px; letter-spacing: .08em; }
 .s3d[data-layout='single'] .sl-line:not([aria-current='true']) { opacity: 0; pointer-events: none; }
+/* --- 心象歌词（scatter）-------------------------------------------------
+   与歌词页的心象同一手法：只有当前行参与散开，词的落位由 stage-lyrics 构建
+   时写好的 --w-dx/--w-dy/--w-rot/--w-sc 决定，不随时间变。冷挑两色交替才
+   读得出词是独立的——单色散开会糊成一团（歌词页踩过的坑，见 stage.css）。 */
+.s3d[data-layout='scatter'] .sl-line.is-active { line-height: 2.1; }
+.s3d[data-layout='scatter'] .sl-line.is-active .sl-word {
+  display: inline-block;
+  /* 字间距是散落不重叠的前提：相邻词之间没有空隙，全靠这里给（同歌词页）。 */
+  margin: 0 0.3em;
+  transform:
+    translate(calc(var(--w-dx, 0) * 0.28em), calc(var(--w-dy, 0) * 0.2em))
+    rotate(calc(var(--w-rot, 0) * 5deg))
+    scale(var(--w-sc, 1));
+  transition: transform 720ms cubic-bezier(.19,1,.22,1);
+}
+.s3d[data-layout='scatter'] .sl-line.is-active .sl-word:nth-child(odd) {
+  background-image: linear-gradient(90deg, #f4fff9 calc(var(--sl-fill,-10%) - 10%), #83958d calc(var(--sl-fill,-10%) + 10%));
+}
+.s3d[data-layout='scatter'] .sl-line.is-active .sl-word:nth-child(even) {
+  background-image: linear-gradient(90deg, #ffd9a8 calc(var(--sl-fill,-10%) - 10%), #93876f calc(var(--sl-fill,-10%) + 10%));
+}
+/* 非当前行不参与散开，否则整屏都是飘着的字，读不出进度在哪 */
+.s3d[data-layout='scatter'] .sl-line:not(.is-active) .sl-word { transform: none; }
+/* --- 星火歌词（spark）---------------------------------------------------
+   逐字点亮：词等到唱到它才从灰底浮起，染色时长就是词自己的时长（--w-dur，
+   stage-lyrics 构建时按 token 时间轴写入），辉光先胀后收（--w-pulse）。
+   手法借鉴参考项目 folia-major 的 classic 模式：把「填色进度条」换成
+   「每个词自己的颜色过渡 + 辉光脉冲」，快歌自动变成急促的连闪，慢歌则是
+   缓缓浸亮，不随帧率漂移（transition/animation 全由时间驱动，JS 每帧只在
+   词的点亮状态翻转时改一次 class）。冷/暖交替与心象同一理由：单色读不出
+   词的边界（心象踩过的坑，见上）。 */
+.s3d[data-layout='spark'] .sl-line.is-active .sl-word {
+  background: none;
+  color: #71817a;
+  transform: none;
+  filter: none;
+  transition: color 260ms ease-out, transform 340ms cubic-bezier(.19,1,.22,1);
+}
+.s3d[data-layout='spark'] .sl-line.is-active .sl-word.is-lit {
+  color: #f4fff9;
+  /* 点亮走词时长的线性过渡，进度由音频时钟推导；seek 回退走上面的
+     260ms 快速熄灭，不必等词时长走完。 */
+  transition: color var(--w-dur, 300ms) linear;
+  animation: sl-spark-pulse var(--w-pulse, 900ms) cubic-bezier(.22,.68,.31,1) both;
+}
+.s3d[data-layout='spark'] .sl-line.is-active .sl-word:nth-child(even).is-lit {
+  color: #ffd9a8;
+  --w-glow: rgba(255,213,158,.60);
+  --w-glow-soft: rgba(255,203,130,.30);
+}
+/* 辉光脉冲：点亮瞬间胀到峰值（30%），再衰减到一档静态微光常驻。
+   色与幅度都从词上的变量取，冷/暖两套共用同一份关键帧。 */
+@keyframes sl-spark-pulse {
+  0% { text-shadow: 0 0 0 rgba(221,255,237,0), 0 0 0 var(--w-glow, rgba(221,255,237,.55));
+       transform: translateY(var(--sl-rise, 0px)) scale(1); }
+  30% { text-shadow: 0 0 calc(var(--sl-glow,.45) * 26px) var(--w-glow, rgba(221,255,237,.55)),
+        0 0 calc(var(--sl-glow,.45) * 58px) var(--w-glow-soft, rgba(221,255,237,.26));
+       transform: translateY(var(--sl-rise, 0px)) scale(var(--w-pop, 1.05)); }
+  100% { text-shadow: 0 0 calc(var(--sl-glow,.45) * 9px) rgba(221,255,237,.30),
+         0 0 calc(var(--sl-glow,.45) * 24px) rgba(221,255,237,.12);
+       transform: translateY(var(--sl-rise, 0px)) scale(1); }
+}
+/* 减少动态：保留逐字染色，去脉冲与浮沉（--sl-rise 已在 JS 里归零）。 */
+.s3d.s3d-reduced[data-layout='spark'] .sl-line.is-active .sl-word.is-lit {
+  animation: none;
+  text-shadow: 0 0 calc(var(--sl-glow,.45) * 9px) rgba(221,255,237,.30);
+}
 .s3d-settings select { width: 100%; background: #202c28; color: var(--s3d-text); padding: 9px; border: 1px solid rgba(255,255,255,.16); border-radius: 8px; }
 .s3d-workshop { width: 100%; margin-top: 14px; }
 .s3d-art { cursor: pointer; }

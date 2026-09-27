@@ -133,7 +133,7 @@
 
   var STAGES = [
     {
-      id: 'aurora', label: '极光穹顶', desc: '星野与流动极光帷幕',
+      id: 'aurora', label: '极光穹顶', desc: '星野与流动的极光彩带',
       cam: { theta: 0.0, phi: 0.10, dist: 8.4, look: [0, 0.6, -2.0] },
       counts: [3000, 6500, 11000], additive: true, depth: false
     },
@@ -167,8 +167,10 @@
       counts: [14000, 30000, 48000], additive: true, depth: false, field: 4
     },
     {
-      id: 'silk', label: '封面浮雕', desc: '把专辑封面，化作有呼吸的粒子',
-      cam: { theta: -0.10, phi: 0.07, dist: 10.2, look: [0, 0, 0] },
+      id: 'silk', label: '封面浮雕', desc: '把专辑封面，化作一块点阵屏幕',
+      //  机位侧转让平面出现透视（参考 Mineradio 的 3D 封面：左缘近、
+      //  顶缘略向后仰），正视拍摄是「贴图」不是「屏幕」。
+      cam: { theta: -0.30, phi: 0.13, dist: 10.2, look: [0, 0, 0] },
       counts: [14000, 32000, 54000], additive: true, depth: false, field: 0
     }
   ];
@@ -300,15 +302,27 @@
     '  if(uField==0){',
     '    vec3 art = texture(uArt,uv).rgb;',
     '    float lum = dot(art,vec3(0.2126,0.7152,0.0722));',
-    '    pos.xy = (uv-0.5)*vec2(8.6,7.2);',
-    '    float silk = sin(pos.x*0.85+t*0.32+sin(pos.y*0.8))*0.34;',
-    '    silk += snoise(vec3(pos.xy*0.48,t*0.16))*(0.24+uMid*0.8);',
-    '    pos.z = silk + (lum-0.45)*uHasArt*1.65 + beatWave*(0.22+uBass*0.35);',
-    '    pos.z += band*0.45*sin(uv.y*PI);',
+    '    // 封面平面原来固定 8.6x7.2，默认机位下占约 72% 视高，窄窗口里宽度几',
+    '    // 乎吃满整屏——观感是"封面太大"。收一档：目标 55% 视高，且宽度不超',
+    '    // 过可视宽的 92%（9.95 = dist 10.2 在 52° FOV 下的可视高；宽屏不放大）。',
+    '    float coverFit = min(min(0.88, 0.92*9.95*uAspect/8.6), 1.0);',
+    '    pos.xy = (uv-0.5)*vec2(8.6,7.2)*coverFit;',
+    '    //  Mineradio 的 3D 封面是一块近乎全平的 LED 点阵屏：位移收到只够',
+    '    //  呼吸，明暗全部交给封面像素自己（暗像素≈灭点），透视来自机位侧转。',
+    '    float silk = sin(pos.x*0.85+t*0.32+sin(pos.y*0.8))*0.12;',
+    '    silk += snoise(vec3(pos.xy*0.48,t*0.16))*(0.10+uMid*0.28);',
+    '    pos.z = silk + (lum-0.45)*uHasArt*0.30 + beatWave*(0.10+uBass*0.18);',
+    '    pos.z += band*0.15*sin(uv.y*PI);',
     '    color = mix(color,art,uHasArt);',
-    '    light = mix(0.72,0.45+lum*0.90,uHasArt);',
-    '    alpha *= 0.6+0.4*sin(uv.x*PI)*sin(uv.y*PI);',
-    '    scale = 0.90;',
+    '    light = mix(0.72, 0.12+lum*1.50, uHasArt);',
+    '    //  发光边框：封面四周一圈青色霓虹（bdist = 以封面高为基准的到边距离）',
+    '    float bdist = min(min(uv.x,1.0-uv.x)*1.19, min(uv.y,1.0-uv.y));',
+    '    float frame = 1.0 - smoothstep(0.006, 0.028, bdist);',
+    '    color = mix(color, vec3(0.30,0.95,1.00), frame*0.85*uHasArt);',
+    '    light += frame*1.9*uHasArt;',
+    '    float fade = 0.6+0.4*sin(uv.x*PI)*sin(uv.y*PI);',
+    '    alpha *= mix(fade, 1.0, uHasArt*0.92);',
+    '    scale = 0.62;',
     '  } else if(uField==1){',
     '    float travel = fract(uv.y-t*(0.038+uBass*0.022));',
     '    float angle = uv.x*PI*2.0+t*0.085;',
@@ -380,9 +394,11 @@
     'void main(){',
     '  float r = length(gl_PointCoord-0.5)*2.0;',
     '  if(r>1.0 || vAlpha<0.003) discard;',
-    '  float core = 1.0-smoothstep(0.05,0.42,r);',
-    '  float edge = exp(-r*r*4.6)*(1.0-smoothstep(0.78,1.0,r));',
-    '  o = vec4(vColor*(1.15+core*0.90),edge*vAlpha);',
+    '  //  点芯收紧、余晕收短：LED 点阵要的是「实心亮点+暗隙」，软圆点会把',
+    '  //  点阵糊成一片（封面浮雕改为点阵屏后尤其明显）',
+    '  float core = 1.0-smoothstep(0.12,0.60,r);',
+    '  float edge = exp(-r*r*6.0)*(1.0-smoothstep(0.76,1.0,r));',
+    '  o = vec4(vColor*(1.10+core*1.05),edge*vAlpha);',
     '}'
   ].join('\n'));
 
@@ -409,7 +425,7 @@
     '  float tw = pow(0.5+0.5*sin(uTime*(0.55+hash11(seed*9.13)*1.7)+seed*10.0), 4.0);',
     //   基准亮度必须够高：加性混合下 alpha 会被 sprite 的软边再乘一次，
     //   再叠上 tonemap 的低位压缩，写 0.1 最后屏幕上就是 0.01（看不见）。
-    '  vA = (0.44 + tw*0.80) * (0.62 + uEnergy*0.5);',
+    '  vA = (0.55 + tw*0.80) * (0.62 + uEnergy*0.5);',
     '  pos += normalize(pos + vec3(0.0, 0.001, 0.0))*uScatter*(2.0 + hash11(seed*23.1)*4.0);',
     '  vec4 mv = uView * vec4(pos, 1.0);',
     '  float dist = -mv.z;',
@@ -429,61 +445,114 @@
     '}'
   ].join('\n'));
 
-  // 极光帷幕用真正的带状网格而不是散点：一条 13–21 单位宽、8–12 单位高的帘子，
-  // 靠几百个点精灵是铺不满的（覆盖率只有百分之几，看起来是散沙），网格则天然
-  // 连续，横向条纹与"底亮上散"的衰减都能直接写进片元。
-  var CURTAIN_VS = stageVS([
-    'in float aCurtain;',
+  // 天幕（用户给定的参考图：珠母云式的极光——粉/蜜桃/薄荷/薰衣草四色的丝绸
+  // 缎带从画面中下偏左的漩涡中心成扇形铺满天空，中心一团白热）。旧版的
+  // 「垂直射线帘」是经典极光的做法，与这个构图对不上，整段换掉。
+  //
+  // 缎带不是几何体：一张覆盖全视野的天幕 quad（几何恒定，1 段就够），缎带
+  // 在对数螺旋坐标系里逐像素算——螺旋坐标沿缎带方向近似守恒，所以每条缎带
+  // 有自己固定的色相；noise 负责让带子弯折、起皱（丝绸感），中心密度趋于
+  // 无限的地方交给白热光斑盖住。
+  var SKY_VS = stageVS([
     'in vec2 aUV;',
-    'out vec3 vCol;',
-    'out float vA;',
     'out vec2 vUV;',
+    'out vec3 vWorld;',
+    'out float vA;',
     'void main(){',
-    '  float c = aCurtain;',
-    '  float u = aUV.x*2.0 - 1.0;',
-    '  float v = aUV.y;',
-    '  float seed = c*17.31;',
-    '  float sway = snoise(vec3(u*1.35 + seed, uTime*0.055 + c*3.0, 0.0))*2.8;',
-    '  vec3 pos;',
-    '  pos.x = u*(12.0 + c*4.5) + sway;',
-    '  pos.y = -3.4 + v*(7.5 + hash11(seed*7.7)*4.5)',
-    '         + snoise(vec3(u*2.1, uTime*0.085, seed))*1.0;',
-    '  pos.z = -6.0 - c*12.0 + sway*0.32;',
-    '  pos += normalize(pos + vec3(0.0, 0.001, 0.0))*uScatter*(2.0 + hash11(seed*3.3)*4.0);',
+    '  vec3 pos = vec3((aUV.x - 0.5)*170.0, (aUV.y - 0.5)*100.0 + 4.0, -50.0);',
     '  vec4 mv = uView * vec4(pos, 1.0);',
     '  float dist = -mv.z;',
     '  vUV = aUV;',
-    //   极光的配色不跟主题走：主题里只有青与香槟两个色相，五五混出来是灰的，
-    //   极光要的是「底绿顶紫」这条固定的荧光带。
-    '  vec3 low = mix(uTint2, vec3(0.16, 1.00, 0.62), 0.65);',
-    '  vec3 high = mix(uTint3, vec3(0.45, 0.34, 1.00), 0.60);',
-    '  vCol = mix(low, high, v);',
-    '  vCol = mix(vCol, vec3(1.0), uBeat*0.20);',
-    //   真实极光是底部亮、向上消散。上下两端都必须化到 0：只压上端的话，
-    //   帘子的下沿会在画面上切出一条笔直的横线。
-    //   底部的常数项必须收到接近 0：帘子几何的下沿整条都在 v=0，只要那里 alpha
-    //   不为零，投影出来就是一条横贯画面的硬边（上一版画面底部的锯齿直边）。
-    '  float shade = smoothstep(0.02, 0.18, v)*(1.0 - smoothstep(0.58, 1.0, v))*pow(1.0 - v, 1.1);',
-    '  vA = (0.025 + shade*0.96) * (0.62 + uMid*0.8 + uBeat*0.4)',
-    '     * uFade * smoothstep(0.5, 3.0, dist) * (1.0 - smoothstep(42.0, 62.0, dist));',
+    '  vWorld = pos;',
+    //   天幕在 z=-50，默认机位下约 56 单位远。距离窗收得宽：拉远到 maxR
+    //   也不许让天幕整体消失或露出 quad 的矩形边界。
+    '  vA = uFade * smoothstep(8.0, 18.0, dist) * (1.0 - smoothstep(96.0, 118.0, dist));',
     '  gl_Position = uProj * mv;',
     '}'
   ].join('\n'));
 
-  var CURTAIN_FS = stageFS([
-    'in vec3 vCol;',
-    'in float vA;',
+  // 视差层：d = 相对基准平面的虚深度（世界单位），w = 亮度权重（Σw=1，总亮度
+  // 与单层版一致），hue = 沿色环的偏移，tm = 时间流速（层间剪切）。三层采样
+  // 同一个缎带场、不同的世界坐标——自动演出的镜头永远在动，层与层之间就有
+  // 真实的相对滑动，天幕的「3D」从这里来；远层混向蓝灰（空气透视）。
+  var SKY_LAYERS = [
+    { d: 0.0,  w: 0.62, hue: 0.03,  tm: 1.00, haze: 0.0 },
+    { d: 8.0,  w: 0.26, hue: -0.05, tm: 1.04, haze: 0.14 },
+    { d: 17.0, w: 0.12, hue: 0.10,  tm: 1.08, haze: 0.28 }
+  ];
+
+  function skyLayer(L) {
+    //  数字一律 toFixed 生成浮点字面量：JS 的 1.00/0.0 会串成 "1"/"0"，
+    //  而 GLSL ES 没有隐式 int→float 转换，裸整数直接让编译挂掉。
+    function f(v) { return v.toFixed(2); }
+    return [
+      '  {',
+      '    vec2 pL = vWorld.xy + par*' + f(L.d) + ' - vc;',
+      '    float rL = length(pL) + 0.001;',
+      //   atan 在 ±π 有分支切割：角度系数带小数时切缝两侧花纹对不上——
+      //   极光左下角那道「断层」就是它。角度系数取整（2.0），且所有 sin
+      //   的角向周期（2.0×系数）与色相系数（0.31831×4π=4）都必须落在
+      //   整数上，切缝才真正无痕。
+      '    float angL = atan(pL.y, pL.x + 0.0001);',
+      '    float spL = angL*2.0 + log(rL)*3.9 - t*' + f(L.tm) + '*0.010;',
+      '    float b1 = 0.5 + 0.5*sin(spL*4.0 + warp);',
+      '    float b2 = 0.5 + 0.5*sin(spL*2.0 - warp*1.2 + 1.7);',
+      '    float b3 = 0.5 + 0.5*sin(spL*8.0 + warp*0.6 + 4.2);',
+      '    float bandL = pow(b1, 1.6)*(0.62 + 0.38*pow(b2, 2.0)) + pow(b3, 5.0)*0.10 + 0.02 + 0.05*b2;',
+      '    bandL += pow(0.5 + 0.5*sin(spL*22.0 + warp*2.0 + t*0.05), 6.0)*0.20*(0.5 + uEnergy*0.6);',
+      '    float fL = fract(spL*0.31831 + ' + f(L.hue) + ' + 0.10*sin(t*0.11 + ' + f(L.d) + '));',
+      '    vec3 cL = fL < 0.25 ? mix(cA, cB, fL*4.0)',
+      '            : fL < 0.50 ? mix(cB, cC, (fL - 0.25)*4.0)',
+      '            : fL < 0.75 ? mix(cC, cD, (fL - 0.50)*4.0)',
+      '            : mix(cD, cA, (fL - 0.75)*4.0);',
+      '    cL = mix(cL, vec3(0.52, 0.60, 0.78), ' + f(L.haze) + ');',
+      '    colAcc += cL*bandL*' + f(L.w) + ';',
+      '    amp += bandL*' + f(L.w) + ';',
+      '  }'
+    ];
+  }
+
+  var SKY_FS = stageFS([
     'in vec2 vUV;',
+    'in vec3 vWorld;',
+    'in float vA;',
     'void main(){',
-    //   横向收边：帘子的左右两端要化开，否则能看到一块直边
-    '  float edge = smoothstep(0.0, 0.16, vUV.x)*(1.0 - smoothstep(0.84, 1.0, vUV.x));',
-    //   竖直条纹：极光的"褶"
-    '  float streak = 0.30 + 0.70*pow(0.5 + 0.5*sin(vUV.x*46.0 + uTime*0.7), 2.0);',
-    '  float a = edge*vA*streak;',
+    '  float t = uTime;',
+    //   漩涡中心（世界 xy 系）：画面中下偏左
+    '  vec2 vc = vec2(-6.0, -10.0);',
+    //   视差：视线穿过基准平面后每深入 1 单位的横向偏移。2.0 是美学夸张
+    //   （56 单位外的几何视差肉眼几乎看不见）；分母下限防轨道绕到天幕
+    //   附近时偏移爆炸。
+    '  vec3 ray = vWorld - uCamPos;',
+    '  vec2 par = ray.xy * (2.0 / max(12.0, -ray.z));',
+    //   弯折与起皱：大尺度噪声定走向，小尺度噪声出丝绸的细褶（全层共享）
+    '  vec2 pb = vWorld.xy - vc;',
+    '  float warp = snoise(vec3(pb*0.045, t*0.03))*1.5 + snoise(vec3(pb*0.11, t*0.05))*0.5;',
+    '  float amp = 0.0;',
+    '  vec3 colAcc = vec3(0.0);',
+    '  vec3 cA = vec3(1.00, 0.73, 0.89);',
+    '  vec3 cB = vec3(1.00, 0.86, 0.73);',
+    '  vec3 cC = vec3(0.66, 0.96, 0.82);',
+    '  vec3 cD = vec3(0.73, 0.69, 1.00);'
+  ].concat(SKY_LAYERS.reduce(function (all, L) { return all.concat(skyLayer(L)); }, []), [
+    //   色相取亮度加权平均：近层权重最大，暗隙里透出远层的蓝灰缎带
+    '  vec3 col = colAcc / max(amp, 0.001);',
+    '  float r0 = length(pb);',
+    '  float hot = exp(-r0*r0*0.006);',
+    '  col = mix(col, vec3(1.0, 0.93, 0.96), hot*0.60);',
+    //   漩涡中心的白热光斑，bass 推它呼吸
+    '  float halo = exp(-r0*r0*0.008)*(1.30 + uBass*0.55);',
+    //   音频增益压缩过：mid 在响度段常到 1.0+，线性叠加会把缎带推成白板。
+    //   基准亮度按「缎带脊线 tonemap 后 ≈0.7、暗隙守住 ≤0.15」标定。
+    '  amp *= 1.0 + uMid*0.45 + uBeat*0.15;',
+    //   quad 边缘收口，避免露出天幕的矩形边界
+    '  float edge = smoothstep(0.0, 0.07, vUV.x)*(1.0 - smoothstep(0.93, 1.0, vUV.x))',
+    '             * smoothstep(0.0, 0.06, vUV.y)*(1.0 - smoothstep(0.94, 1.0, vUV.y));',
+    '  float a = edge*vA*min(amp*smoothstep(0.4, 2.2, r0) + halo, 1.8);',
     '  if (a < 0.004) discard;',
-    '  o = vec4(vCol*(0.85 + a*0.9), a);',
+    '  o = vec4(col*(0.95 + a*0.75), a);',
     '}'
-  ].join('\n'));
+  ]).join('\n'));
 
   var PRISM_VS = stageVS([
     'in float aSeed;',
@@ -600,6 +669,11 @@
     '  base.b = texture(uScene, vUv - c*ca).b;',
     '  vec3 col = base + texture(uBloom, vUv).rgb*uBloomAmt;',
     '  col *= uExposure;',
+    //   指数 tonemap 会把高饱和荧光色往粉彩里洗（加性堆叠越亮越灰）。
+    //   tonemap 前先做一档轻度 vibrance 把色度拉回来，极光的荧光绿/紫才
+    //   保得住；对其它舞台只是略提饱和，无副作用。
+    '  float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));',
+    '  col = max(mix(vec3(lum), col, 1.10), vec3(0.0));',
     //   指数 tonemap：比 ACES 便宜，且不会把 LDR 场景压暗太多
     '  col = vec3(1.0) - exp(-max(col, 0.0));',
     '  float vig = smoothstep(1.18, 0.16, length(c*vec2(1.06, 1.0)));',
@@ -679,7 +753,7 @@
   var perf = {
     hz: 60, lastAt: 0, samples: [],
     avgMs: 0, pressure: 0, divisor: 1, tick: 0,
-    lastQualityDropAt: 0, quality: 2
+    lastQualityDropAt: 0, quality: 2, goodSince: 0
   };
   var interactUntil = 0;
 
@@ -712,7 +786,18 @@
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
     if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-      console.warn('[stage3d] 着色器编译失败：', gl.getShaderInfoLog(sh));
+      //  驱动的报错只给行号不给内容：把出错行（±1）的源码一起打出来，
+      //  否则每次都得人肉数着色器的第 N 行。
+      var log = String(gl.getShaderInfoLog(sh) || '');
+      var m = /ERROR:\s*\d+:(\d+)/.exec(log);
+      if (m) {
+        var n = Number(m[1]);
+        var lines = src.split('\n');
+        for (var i = Math.max(0, n - 2); i < Math.min(lines.length, n + 1); i += 1) {
+          log += '\n  ' + (i + 1) + (i + 1 === n ? ' → ' : '   ') + lines[i];
+        }
+      }
+      console.warn('[stage3d] 着色器编译失败：', log);
       gl.deleteShader(sh);
       return null;
     }
@@ -827,37 +912,12 @@
     return clamp(Math.min(num(t, 2), perf.quality), 0, 2);
   }
 
-  // 帘幕网格：每条帘子一张 (segU+1)×(segV+1) 的规则网格，逐顶点只存
-  // 「第几条」和「归一化 uv」，世界坐标全在顶点着色器里算。
-  function curtainGeometry(curtains, segU, segV) {
-    var per = (segU + 1) * (segV + 1);
-    var n = curtains * per;
-    var aCurtain = new Float32Array(n);
-    var aUV = new Float32Array(n * 2);
-    var idx = [];
-    var k = 0;
-    for (var c = 0; c < curtains; c += 1) {
-      var base = c * per;
-      for (var j = 0; j <= segV; j += 1) {
-        for (var i = 0; i <= segU; i += 1) {
-          aCurtain[k] = c;
-          aUV[k * 2] = i / segU;
-          aUV[k * 2 + 1] = j / segV;
-          k += 1;
-        }
-      }
-      for (var jj = 0; jj < segV; jj += 1) {
-        for (var ii = 0; ii < segU; ii += 1) {
-          var a = base + jj * (segU + 1) + ii;
-          var b = a + 1;
-          var d = a + segU + 1;
-          idx.push(a, d, b, b, d, d + 1);
-        }
-      }
-    }
+  // 天幕 quad：几何完全恒定（世界坐标写死在顶点着色器里），一段两个三角形
+  // 就够——缎带的全部细节都在片元里逐像素算。
+  function quadGeometry() {
+    var idx = [0, 1, 2, 2, 1, 3];
     return {
-      curtain: buffer(aCurtain),
-      uv: buffer(aUV),
+      uv: buffer(new Float32Array([0, 0, 1, 0, 0, 1, 1, 1])),
       idx: indexBuffer(new Uint16Array(idx)),
       indices: idx.length
     };
@@ -865,38 +925,39 @@
 
   function buildAurora(def) {
     var starP = buildProgram(STAR_VS, STAR_FS);
-    var curP = buildProgram(CURTAIN_VS, CURTAIN_FS);
-    if (!starP || !curP) return null;
+    var skyP = buildProgram(SKY_VS, SKY_FS);
+    if (!starP || !skyP) {
+      if (starP) gl.deleteProgram(starP.p);
+      if (skyP) gl.deleteProgram(skyP.p);
+      return null;
+    }
     var s = seeds(def.counts[q()]);
     var starVao = makeVAO([
       { loc: starP.a('aSeed'), buffer: s.seed, size: 1 },
       { loc: starP.a('aLane'), buffer: s.lane, size: 1 }
     ]);
-    var qq = q();
-    var curtains = 6;
-    var g = curtainGeometry(curtains, qq === 0 ? 26 : (qq === 1 ? 38 : 52), 12);
-    var curVao = makeVAO([
-      { loc: curP.a('aCurtain'), buffer: g.curtain, size: 1 },
-      { loc: curP.a('aUV'), buffer: g.uv, size: 2 }
-    ], g.idx);
+    var quad = quadGeometry();
+    var skyVao = makeVAO([
+      { loc: skyP.a('aUV'), buffer: quad.uv, size: 2 }
+    ], quad.idx);
     return {
       count: s.count,
       draw: function () {
+        gl.useProgram(skyP.p);
+        uploadCommon(skyP);
+        gl.bindVertexArray(skyVao);
+        gl.drawElements(gl.TRIANGLES, quad.indices, gl.UNSIGNED_SHORT, 0);
+
         gl.useProgram(starP.p);
         uploadCommon(starP);
         gl.bindVertexArray(starVao);
         gl.drawArrays(gl.POINTS, 0, s.count);
-
-        gl.useProgram(curP.p);
-        uploadCommon(curP);
-        gl.bindVertexArray(curVao);
-        gl.drawElements(gl.TRIANGLES, g.indices, gl.UNSIGNED_SHORT, 0);
       },
       dispose: function () {
-        gl.deleteProgram(starP.p); gl.deleteProgram(curP.p);
-        gl.deleteVertexArray(starVao); gl.deleteVertexArray(curVao);
+        gl.deleteProgram(starP.p); gl.deleteProgram(skyP.p);
+        gl.deleteVertexArray(starVao); gl.deleteVertexArray(skyVao);
         gl.deleteBuffer(s.seed); gl.deleteBuffer(s.lane);
-        gl.deleteBuffer(g.curtain); gl.deleteBuffer(g.uv); gl.deleteBuffer(g.idx);
+        gl.deleteBuffer(quad.uv); gl.deleteBuffer(quad.idx);
       }
     };
   }
@@ -1073,8 +1134,11 @@
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, post.scene.tex);
     setI(post.bright.u, 'uTex', 0);
-    setF(post.bright.u, 'uThreshold', 0.58);
-    setF(post.bright.u, 'uKnee', 0.32);
+    //   阈值必须卡在「亮的结构」上：极光底帐加性堆叠后的亮度普遍在 0.5 上下，
+    //   阈值放低了整片帷幕都会进 bloom——整屏糊一层半分辨率高斯晕，这就是
+    //   「发糊」的直接来源。0.72 只让射线亮脊与星点发光。
+    setF(post.bright.u, 'uThreshold', 0.72);
+    setF(post.bright.u, 'uKnee', 0.26);
     drawFullscreen(post.bright);
 
     // 2) 可分离高斯 ping-pong。迭代次数跟着画质档走。
@@ -1252,7 +1316,7 @@
   function computeDpr(w, h) {
     var dev = window.devicePixelRatio || 1;
     var level = q();
-    var cap = level === 0 ? 0.90 : (level === 1 ? 1.15 : 1.55);
+    var cap = level === 0 ? 1.0 : (level === 1 ? 1.15 : 1.55);
     var floor = level === 0 ? 0.50 : (level === 1 ? 0.60 : 0.75);
     var budget = level === 0 ? 1900000 : (level === 1 ? 3600000 : 6200000);
     var budgetCap = Math.sqrt(budget / Math.max(1, w * h));
@@ -1507,7 +1571,10 @@
     var budget = (1000 / Math.max(1, perf.hz)) * 0.72;
     perf.avgMs = perf.avgMs ? perf.avgMs * 0.9 + costMs * 0.1 : costMs;
     // 压力计带滞回：涨得快、落得慢，避免在阈值附近来回抖。
-    if (perf.avgMs > budget) perf.pressure = Math.min(6, perf.pressure + 0.7);
+    if (perf.avgMs > budget) {
+      perf.pressure = Math.min(6, perf.pressure + 0.7);
+      perf.goodSince = 0;
+    }
     else if (perf.avgMs < budget * 0.62) perf.pressure = Math.max(0, perf.pressure - 0.3);
     else perf.pressure = Math.max(0, perf.pressure - 0.1);
   }
@@ -1529,6 +1596,15 @@
       return perf.hz >= 120 ? 3 : 2;
     }
     if (perf.pressure >= 2) return perf.hz >= 90 ? 2 : 1;
+    // 压力清零持续 12 秒就逐档回升（上限仍被设备档钳住）：偶发卡顿不该
+    // 永久钉在最低档——此前画质只降不升，糊过一次就一直糊到刷新页面。
+    if (!perf.goodSince) perf.goodSince = now;
+    if (perf.quality < 2 && now - perf.goodSince > 12000) {
+      perf.quality += 1;
+      perf.goodSince = now;
+      disposeStages();
+      sizeDirty = true;
+    }
     return 1;
   }
 
@@ -1547,6 +1623,16 @@
   function tick(dtMs) {
     if (!active || !gl) return;
     var t0 = performance.now();
+    // 帧停摆后的一记补帧不是性能证据：内嵌视图/遮挡窗口里「偶发泵帧 + 被
+    // 高估的 hz」会把压力计一路顶满，画质被永久钉在最低档——极光穹顶发糊
+    // 的根源。两帧墙钟隔太久时，耗时样本与压力全部作废，从头再积累。
+    if (perf.lastAt && t0 - perf.lastAt > 250) {
+      perf.samples.length = 0;
+      perf.avgMs = 0;
+      perf.pressure = 0;
+      perf.goodSince = 0;
+    }
+    perf.lastAt = t0;
     sampleHz(dtMs);
     perf.divisor = selectDivisor();
     perf.tick += 1;
@@ -1558,6 +1644,7 @@
     pendingDt = 0;
     if (!reducedMotion()) time += step / 1000;
     render(step);
+    if (showLyrics) writeLyrTilt();
     sampleCost(performance.now() - t0);
   }
 
@@ -1651,6 +1738,93 @@
     var k = Math.exp(-(e.deltaY || 0) * 0.0012);
     cam.userR = clamp(cam.userR * k, cam.minR, cam.maxR);
     markInteraction(900);
+  }
+
+  // -------------------------------------------------------------------------
+  // 歌词 3D（自歌词演出页移植）
+  //
+  // 与歌词页同一套手法：CSS 3D 而不是 WebGL——歌词留在 DOM 里才保得住清晰
+  // 度、字体回退与点击跳转；让旋转"看起来是 3D"的是每行按离当前行的距离
+  // translateZ（stage-lyrics 的 --sl-d），近的行位移多、远的少，转起来有视差。
+  //
+  // 手势分工：抓住歌词行拖拽 = 转歌词平面本身（横向绕 Y、纵向绕 X，角度不设
+  // 上限，可连续转满整圈）；画布空白处拖拽 = 转机位（上面的 pointer 处理器）。
+  // 行的 click（点一行跳转）由 8px 阈值保护，超阈值算拖拽。
+  // -------------------------------------------------------------------------
+
+  var lyrTilt = { rx: 0, ry: 0, _rx: null, _ry: null, dragId: -1, from: null, lastInputAt: 0, on: false };
+
+  function readLyrTilt() {
+    var cs = getComputedStyle(document.documentElement);
+    // 与歌词页共用同一个开关：--lp-3d: off 时两边都不转。
+    lyrTilt.on = cs.getPropertyValue('--lp-3d').trim() !== 'off';
+  }
+
+  function writeLyrTilt() {
+    if (!lyrTilt.on || !root) return;
+    var t = performance.now();
+    var rx = lyrTilt.rx, ry = lyrTilt.ry;
+    // 静止超过 1.4s 后小幅正弦漂移（与歌词页同一参数）；用户刚操作过就让位。
+    if (lyrTilt.dragId < 0 && !reducedMotion() && t - lyrTilt.lastInputAt > 1400) {
+      var d = Math.sin(t / 5200) * 3.4;
+      rx += d * 0.6;
+      ry += d;
+    }
+    if (rx === lyrTilt._rx && ry === lyrTilt._ry) return;
+    lyrTilt._rx = rx;
+    lyrTilt._ry = ry;
+    root.style.setProperty('--s3d-rx', rx.toFixed(2) + 'deg');
+    root.style.setProperty('--s3d-ry', ry.toFixed(2) + 'deg');
+  }
+
+  function resetLyrTilt() {
+    lyrTilt.rx = 0;
+    lyrTilt.ry = 0;
+    lyrTilt.lastInputAt = performance.now();
+    lyrTilt._rx = null;
+    writeLyrTilt();
+  }
+
+  function bindLyrTilt() {
+    readLyrTilt();
+    var host = $('s3d-reading');
+    if (!host || !lyrTilt.on) return;
+    host.addEventListener('pointerdown', function (e) {
+      if (!active || !showLyrics || e.button !== 0 || lyrTilt.dragId >= 0) return;
+      lyrTilt.dragId = e.pointerId;
+      lyrTilt.from = { x: e.clientX, y: e.clientY, rx: lyrTilt.rx, ry: lyrTilt.ry, moved: 0 };
+      lyrTilt.lastInputAt = performance.now();
+      // 捕获后移出歌词区也不会丢事件，更不会中途落到画布上变成转机位。
+      if (host.setPointerCapture) {
+        try { host.setPointerCapture(e.pointerId); } catch (err) { /* 无捕获只是出界丢事件 */ }
+      }
+    });
+    host.addEventListener('pointermove', function (e) {
+      if (e.pointerId !== lyrTilt.dragId || !lyrTilt.from) return;
+      var dx = e.clientX - lyrTilt.from.x;
+      var dy = e.clientY - lyrTilt.from.y;
+      lyrTilt.from.moved = Math.max(lyrTilt.from.moved, Math.abs(dx) + Math.abs(dy));
+      if (lyrTilt.from.moved < 8) return;
+      // 拖 4px 转 1°，与歌词页同一手感。直接写不等帧门：eco 档 24fps 下
+      // 等一帧要 40ms，手感就是"粘"。
+      lyrTilt.ry = lyrTilt.from.ry + dx / 4;
+      lyrTilt.rx = lyrTilt.from.rx - dy / 4;
+      lyrTilt.lastInputAt = performance.now();
+      writeLyrTilt();
+      if (e.cancelable) e.preventDefault();
+    });
+    function end(e) {
+      if (e.pointerId !== lyrTilt.dragId) return;
+      lyrTilt.dragId = -1;
+      lyrTilt.lastInputAt = performance.now();
+      // 挂到宿主上，供 stage-lyrics 的行 click 判断"这一下是拖拽不是跳转"。
+      host._justDragged = !!(lyrTilt.from && lyrTilt.from.moved >= 8);
+      lyrTilt.from = null;
+      if (host._justDragged) setTimeout(function () { host._justDragged = false; }, 0);
+    }
+    host.addEventListener('pointerup', end);
+    host.addEventListener('pointercancel', end);
+    host.addEventListener('dblclick', resetLyrTilt);
   }
 
   // -------------------------------------------------------------------------
@@ -1755,7 +1929,7 @@
       if (typeof value.reactivity === 'number') reactivity = clamp(num(value.reactivity, 1.35), 0, 2);
       if (typeof value.lyrics === 'boolean') showLyrics = value.lyrics;
       if (typeof value.cruise === 'boolean') cam.cruise = value.cruise;
-      if (['focus', 'sleeve', 'single'].indexOf(value.layout) >= 0) layout = value.layout;
+      if (['focus', 'sleeve', 'single', 'scatter', 'spark'].indexOf(value.layout) >= 0) layout = value.layout;
       if (typeof value.lyricSize === 'number') lyricSize = clamp(value.lyricSize, .75, 1.35);
       if (typeof value.lyricGlow === 'number') lyricGlow = clamp(value.lyricGlow, 0, 1);
       syncLayout();
@@ -1895,6 +2069,33 @@
   // 开合
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // 帧停摆看门狗
+  //
+  // 逐帧驱动走 Stage.gate 的主循环（全项目唯一的 rAF），但宿主环境可能把
+  // rAF 整个挂起：Electron 内嵌视图被判定遮挡、全屏切换重建合成器、系统
+  // 省电节流，都会出现「页面 visible、上下文健在、画面却永远静止」。主循环
+  // 的 schedule() 依赖 rAF 回调，挂起后 kick 也叫不醒。看门狗每 1.2s 检查
+  // 一次场景时间：连续三次没有推进就先 kick 一次，仍无帧则由这里低频代跑
+  // （约 1fps），只推进 time 与 render，不碰 perf 统计，避免拉低帧率档位。
+  // rAF 恢复后 time 自然开始前进，看门狗自动退回静默。
+  // -------------------------------------------------------------------------
+
+  var wdTimer = 0, wdLastT = -1, wdStalls = 0;
+
+  function watchdog() {
+    if (!active || !gl || contextLost || document.hidden) { wdStalls = 0; return; }
+    if (time !== wdLastT) { wdLastT = time; wdStalls = 0; return; }
+    wdStalls += 1;
+    if (global.Stage && Stage.kick) Stage.kick();
+    if (wdStalls >= 3 && !reducedMotion()) {
+      time += 0.016;
+      wdLastT = time;
+      render(16);
+      if (showLyrics) writeLyrTilt();
+    }
+  }
+
   function open(stageId) {
     if (!root) return false;
     if (!active) {
@@ -1918,6 +2119,7 @@
     root.setAttribute('data-scene', STAGES[stageIndex].id);
     root.focus({ preventScroll: true });
     pendingDt = 0;
+    if (!wdTimer) wdTimer = setInterval(watchdog, 1200);
     var fb = $('s3d-fallback');
     if (fb) fb.hidden = true;
 
@@ -1927,6 +2129,7 @@
     sizeDirty = true;
     resize();
     applyStageCamera(STAGES[stageIndex], true);
+    resetLyrTilt();
     fade = 0;
     startTransition();
     syncDock();
@@ -1955,6 +2158,8 @@
     $('s3d-settings-toggle').setAttribute('aria-expanded', 'false');
     pointers = {}; pointerCount = 0; dragging = false; seeking = false;
     root.classList.remove('s3d-dragging');
+    if (wdTimer) { clearInterval(wdTimer); wdTimer = 0; }
+    wdLastT = -1; wdStalls = 0;
     if (fsEl()) exitFs();
     if (global.Stage && Stage.kick) Stage.kick();
     // 等淡出走完再真的停手：直接归零会看到画面硬切。
@@ -2092,11 +2297,17 @@
     document.addEventListener('fullscreenchange', syncFsUi);
     document.addEventListener('webkitfullscreenchange', syncFsUi);
 
-    // 打开入口：歌词页顶栏的三维按钮 + 舞台侧栏的同款按钮。
-    var openers = ['lp-3d', 'stage-3d-btn', 'stage3d-entry'];
+    // 统一入口效果：任何地方进沉浸声场都是「开启 + 申请原生全屏」，不再有
+    // 「有的全屏有的不全屏、有的落极光有的落当前舞台」的差别。原生全屏被
+    // 拒绝（无手势/权限）时留在页内全屏层，不影响其余功能。
+    function enterFromUi() {
+      if (!open()) return;
+      requestFs();
+    }
+    var openers = ['lp-3d', 'stage3d-entry'];
     openers.forEach(function (id) {
       var b = $(id);
-      if (b) b.addEventListener('click', function () { open(); });
+      if (b) b.addEventListener('click', enterFromUi);
     });
 
     wrapEl.addEventListener('pointerdown', onPointerDown);
@@ -2107,20 +2318,22 @@
     wrapEl.addEventListener('pointerleave', function () { pointerField.active = 0; });
     wrapEl.addEventListener('wheel', onWheel, { passive: false });
     wrapEl.addEventListener('dblclick', function () { resetView(); });
+    bindLyrTilt();
+    // 驾驶舱改了 --lp-3d 开关后要重读（与 stage.js 的 readTilt 同一事件源）。
+    document.addEventListener('stagecontrol:change', readLyrTilt);
     root.addEventListener('pointermove', pokeChrome, { passive: true });
     root.addEventListener('pointerdown', pokeChrome, { passive: true });
 
     document.addEventListener('keydown', onKeyDown, true);
 
-    // V 的开启分支。#stage-3d-btn 与 #lp-3d 的 title 都写着 "(V)"，但此前
-    // 全工程没有任何 V 的处理器（onKeyDown 第一行就是 !active 直接 return），
-    // 文档承诺和实际行为对不上。这里补上；开着的时候由 onKeyDown 收口关闭。
+    // V 的开启分支：与所有入口按钮同一效果（开启 + 原生全屏）。
+    // 开着的时候由 onKeyDown 收口关闭，形成开合闭环。
     document.addEventListener('keydown', function (e) {
       if (active) return;
       if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key !== 'v' && e.key !== 'V') return;
       e.preventDefault();
-      open();
+      enterFromUi();
     });
 
     // 换肤后重取色调：主题改的是 --accent / --music-highlight，
@@ -2197,6 +2410,10 @@
     open: open,
     close: close,
     isActive: isActive,
+    // 全屏舞台入口（stage-immersive / 模式键）统一走这里申请原生全屏；
+    // 此前这两个方法没导出，外部调用静默失效，全屏链路整个断了。
+    requestFullscreen: function () { if (active) requestFs(); },
+    toggleFullscreen: function () { if (active) toggleFullscreen(); },
     setStage: function (i) { return setStage(i, false); },
     setStageById: function (id) { return open(id); },
     stageId: function () { return STAGES[stageIndex].id; },

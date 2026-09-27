@@ -44,3 +44,5 @@ __pycache__/
 
 # 临时验证工作区（fixture 数据与一次性 token，不入库）
 output/
+# 隔离构建目录（不与运行中的实例抢 target/debug 锁）
+target-verify/

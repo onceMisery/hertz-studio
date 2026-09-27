@@ -11,8 +11,8 @@
     var empty = document.createElement('div'); empty.className = 'sl-empty';
     host.append(rail, empty, back);
     var documentRef = null, lines = [], rows = new Map(), active = -1, center = -2;
-    var browsing = null, until = 0, dirty = true, wheelAt = 0, pointer = null;
-    var reduced = false, enabled = true, suppressClick = false;
+    var browsing = null, until = 0, dirty = true;
+    var reduced = false, enabled = true;
     function resume() { browsing = null; back.hidden = true; center = -2; }
     back.addEventListener('click', resume);
     function browse(delta) {
@@ -20,25 +20,15 @@
       browsing = Math.max(0, Math.min(lines.length - 1, (browsing === null ? Math.max(0, active) : browsing) + delta));
       until = Date.now() + 5000; back.hidden = false; center = -2;
     }
-    rail.addEventListener('wheel', function (e) {
-      if (!lines.length) return;
-      e.preventDefault(); e.stopPropagation();
-      if (Date.now() - wheelAt < 160 || !e.deltaY) return;
-      wheelAt = Date.now(); browse(e.deltaY > 0 ? 1 : -1);
-    }, { passive: false });
-    rail.addEventListener('pointerdown', function (e) { pointer = { id: e.pointerId, y: e.clientY }; suppressClick = false; });
-    rail.addEventListener('pointermove', function (e) {
-      if (!pointer || pointer.id !== e.pointerId) return;
-      var dy = e.clientY - pointer.y;
-      if (Math.abs(dy) > 38) { browse(dy > 0 ? -1 : 1); pointer.y = e.clientY; suppressClick = true; }
-    });
-    rail.addEventListener('pointerup', function () { pointer = null; });
-    rail.addEventListener('pointerleave', function () { pointer = null; });
-    rail.addEventListener('pointercancel', function () { pointer = null; suppressClick = true; });
+    // 轨道已对指针透明（.sl-rail pointer-events:none）：滚轮与拖拽整块让给
+    // 三维机位，此处只保留键盘路径——聚焦歌词行后 Enter 触发 click 寻句、
+    // 方向键回看。滚轮/拖拽回看由 stage3d 的画布手势接管，不再在这里抢。
     rail.addEventListener('click', function (e) {
       var row = e.target.closest('.sl-line');
-      if (row && !suppressClick) { seek(lines[Number(row.dataset.index)].start_ms); resume(); }
-      pointer = null; suppressClick = false;
+      // 抓行拖拽歌词平面后的那一下 click 不算跳转（stage3d 在宿主上标 _justDragged）。
+      if (!row || host._justDragged) return;
+      var line = lines[Number(row.dataset.index)];
+      if (line && typeof line.start_ms === 'number') { seek(line.start_ms); resume(); }
     });
     rail.addEventListener('keydown', function (e) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); browse(e.key === 'ArrowDown' ? 1 : -1); }
@@ -46,16 +36,34 @@
     var observer = global.ResizeObserver && new ResizeObserver(function () { dirty = true; });
     if (observer) observer.observe(rail);
 
+    // 心象（scatter）布局的散开量：与歌词页同一套手法，构建时一次算完写成
+    // 变量，不随时间变。hash 与 stage.js 的 hash2 同式，同一行词在两边的
+    // 落位一致。
+    function hash2(a, b, k) {
+      var x = Math.sin(a * 127.1 + b * 311.7 + k * 74.7) * 43758.5453;
+      return x - Math.floor(x);
+    }
     function buildRow(index) {
       var line = lines[index], button = document.createElement('button');
       button.type = 'button'; button.className = 'sl-line'; button.dataset.index = index;
       button.setAttribute('aria-label', '播放这一句：' + (line.text || '间奏'));
       var tokens = Stage.lyricTokens(line), nodes = [], cursor = 0, source = line.text || '· · ·';
-      tokens.forEach(function (token) {
+      tokens.forEach(function (token, k) {
         // Preserve source spaces/punctuation omitted by the shared tokenizer.
         var at = source.indexOf(token.text, cursor);
         if (at >= cursor) { button.appendChild(document.createTextNode(source.slice(cursor, at))); cursor = at + token.text.length; }
         var node = document.createElement('span'); node.className = 'sl-word'; node.textContent = token.text;
+        node.style.setProperty('--w-dx', ((hash2(index, k, 1) - 0.5) * 2).toFixed(3));
+        node.style.setProperty('--w-dy', ((hash2(index, k, 2) - 0.5) * 2).toFixed(3));
+        node.style.setProperty('--w-rot', ((hash2(index, k, 3) - 0.5) * 2).toFixed(3));
+        node.style.setProperty('--w-sc', (0.9 + hash2(index, k, 4) * 0.22).toFixed(3));
+        // 星火（spark）布局的逐字点亮参数：染色时长取词自己的时长（词快则闪、
+        // 词慢则浸），辉光脉冲往词尾外拖一段衰减；钳位防脏时间轴（0ms/超长词）。
+        // --w-pop 用同一套 hash2 出确定性弹跳幅度，seek 后重排不换样。
+        var sparkDur = Math.max(0, (token.end_ms || token.start_ms) - token.start_ms);
+        node.style.setProperty('--w-dur', Math.max(90, Math.min(sparkDur, 2400)).toFixed(0) + 'ms');
+        node.style.setProperty('--w-pulse', Math.max(520, Math.min(sparkDur * 2.2, 1500)).toFixed(0) + 'ms');
+        node.style.setProperty('--w-pop', (1.03 + hash2(index, k, 5) * 0.05).toFixed(3));
         button.appendChild(node); nodes.push(node);
       });
       if (cursor < source.length) button.appendChild(document.createTextNode(source.slice(cursor)));
@@ -90,8 +98,13 @@
         var row = rows.get(index), distance = Math.abs(index - focus);
         row.el.style.setProperty('--sl-y', positions[index] + 'px');
         row.el.style.setProperty('--sl-scale', Math.max(.76, 1 - distance * .09));
-        row.el.style.setProperty('--sl-opacity', distance ? Math.max(.12, .58 - distance * .12) : 1);
+        // 超出轨道可视界的行直接归零：原 overflow:hidden 的裁剪改由这里表达，
+        // 3D 链路（reading→rail→行）上不能有 overflow/mask，否则 Z 会被压平。
+        var out = Math.abs(positions[index]) > rail.clientHeight * 0.5 + 40;
+        row.el.style.setProperty('--sl-opacity', out ? 0 : (distance ? Math.max(.12, .58 - distance * .12) : 1));
         row.el.style.setProperty('--sl-blur', (reduced ? 0 : distance * 1.1) + 'px');
+        // 离当前行的距离 → translateZ 深度（css 端乘 --s3d-row-depth），旋转时的视差来源。
+        row.el.style.setProperty('--sl-d', distance);
       });
       dirty = false;
     }
@@ -128,6 +141,10 @@
         row.nodes.forEach(function (node, i) {
           var token = row.tokens[i];
           var p = Math.max(0, Math.min(1, (position - token.start_ms) / Math.max(1, (token.end_ms || token.start_ms + 400) - token.start_ms)));
+          // 星火（spark）布局按这个词级开关逐字点亮，其余布局不消费 is-lit。
+          // 必须放在 _fill 早退之前：词起点附近 pct 常落在同一档，早退会吞掉翻转。
+          var lit = p > 0;
+          if (node._lit !== lit) { node._lit = lit; node.classList.toggle('is-lit', lit); }
           var pct = Math.round(p * 120 - 10);
           if (node._fill === pct) return;
           node._fill = pct; node.style.setProperty('--sl-fill', pct + '%');

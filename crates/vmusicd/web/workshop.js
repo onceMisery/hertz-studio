@@ -484,18 +484,34 @@
     body.appendChild(nameRow);
 
     body.appendChild(h('h2', 'sc-group-title', '三维场景'));
-    var grid = h('div', 'ws-cards');
-    CS.scenes().forEach(function (s) {
-      var card = h('button', 'ws-card');
-      card.type = 'button';
-      card.classList.toggle('on', s.id === cur.scene);
-      card.innerHTML = sceneArt(s.id);
-      card.appendChild(h('span', 'ws-card-name', s.label));
-      card.setAttribute('aria-pressed', String(s.id === cur.scene));
-      card.addEventListener('click', function () { CS.setScene(s.id); render(); });
-      grid.appendChild(card);
-    });
-    body.appendChild(grid);
+    // 场景目录与沉浸声场共用同一份（Stage3D.stages），卡片同款。点选即时切换
+    // 沉浸声场的舞台并就地预览；下面的「参数 / 编排 / 手绘」仍作用于高级
+    // 渲染层（右栏增强渲染），两套目录不再各画各的。
+    var grid = h('div', 'ws-scene-grid');
+    if (window.Stage3D && Stage3D.stages) {
+      Stage3D.stages().forEach(function (s, i) {
+        var card = h('button', 'ws-scene-card');
+        card.type = 'button';
+        card.dataset.scene = s.id;
+        card.innerHTML = sceneArt(s.id);
+        card.appendChild(h('strong', null, s.label));
+        card.appendChild(h('small', null, s.desc));
+        var on = window.Stage3D.stageId && Stage3D.isActive && Stage3D.isActive()
+          && Stage3D.stageId() === s.id;
+        card.classList.toggle('on', on);
+        card.setAttribute('aria-pressed', String(on));
+        card.addEventListener('click', function () {
+          // 只切舞台、不强行开层：高级编排不该替主页弹出全屏视窗。沉浸声场
+          // 已经开着时这就是实时预览；没开着时下次进入即生效。
+          if (Stage3D.setStage) Stage3D.setStage(i);
+          render();
+        });
+        grid.appendChild(card);
+      });
+      body.appendChild(grid);
+      body.appendChild(h('div', 'sc-note',
+        '场景与沉浸声场同目录同渲染；「参数 / 编排 / 绑定 / 背景手绘」调的是高级渲染层（右栏增强渲染）。'));
+    }
 
     var opts = h('div', 'sc-grid');
     opts.appendChild(toggle('自动导演', cur.director, function (v) {
@@ -1139,7 +1155,7 @@
     body.appendChild(controls);
     body.appendChild(h('h3', 'ws-section-title', '封面与歌词'));
     var reading = h('div', 'ws-tuning');
-    reading.appendChild(select('聆听布局', [['focus', '沉浸歌词'], ['sleeve', '封面与歌词'], ['single', '简洁单句']], prefs.layout, function (v) { edit({ layout: v }); }));
+    reading.appendChild(select('聆听布局', [['focus', '沉浸歌词'], ['scatter', '心象歌词'], ['spark', '星火歌词'], ['sleeve', '封面与歌词'], ['single', '简洁单句']], prefs.layout, function (v) { edit({ layout: v }); }));
     reading.appendChild(toggle('显示歌词', prefs.lyrics, function (v) { edit({ lyrics: v }); }));
     reading.querySelector('select').id = 'ws-layout';
     reading.querySelector('label').htmlFor = 'ws-layout';
@@ -1206,6 +1222,8 @@
     }, 2200);
   }
 
+  var previewOpenedByWorkshop = false;
+
   function setOpen(next) {
     var panel = refs.panel;
     if (!panel) return false;
@@ -1213,7 +1231,11 @@
     if (next) {
       returnFocus = document.activeElement;
       if (target === 'immersive' && window.Stage3D) {
-        if (!Stage3D.isActive()) Stage3D.open();
+        // 沉浸目标以舞台层为实时预览：没开就替用户开一层。但这是"借"的——
+        // 记一笔，关闭工坊时还回去，否则主页（含右侧播放视窗）会一直被
+        // 舞台层盖着；用户本来就看舞台的话，关面板后照常留在舞台。
+        previewOpenedByWorkshop = !Stage3D.isActive();
+        if (previewOpenedByWorkshop) Stage3D.open();
         $('stage3d').appendChild(panel);
         $('stage3d').classList.add('s3d-editing', 's3d-chrome');
       }
@@ -1222,6 +1244,10 @@
       if (gesture) { remember(gesture); gesture = null; Stage3D.save(); }
       $('stage3d').classList.remove('s3d-editing');
       if (home) home.after(panel);
+      if (previewOpenedByWorkshop) {
+        previewOpenedByWorkshop = false;
+        if (window.Stage3D && Stage3D.isActive()) Stage3D.close();
+      }
     }
     panel.hidden = !next;
     void panel.offsetWidth;                 // hidden → is-open 同帧合并会吃掉过渡

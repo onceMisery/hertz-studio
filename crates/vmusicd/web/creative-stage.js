@@ -875,8 +875,12 @@
     var r = v.el.getBoundingClientRect();
     if (!r.width || !r.height) return false;
     var quality = tierIndex();
+    // 工坊开着的时候这块画布是用户正在调参数的预览：低档 0.55/0.85 的 DPR
+    // 在这里读作"糊成一团"。预览场景帧率压力小，抬到 0.9 起步，聆听时不变。
+    // （用 window 判而非 global：本文件要过 Node 无头契约扫描。）
+    var dprFloor = (typeof window !== 'undefined' && window.Workshop && window.Workshop.isOpen()) ? 0.9 : 0;
     var d = Math.min(window.devicePixelRatio || 1, 1.5)
-      * TIERS[quality].dpr * DPR_STEPS[dprStep];
+      * Math.max(TIERS[quality].dpr, dprFloor) * DPR_STEPS[dprStep];
     if (v.w === Math.round(r.width) && v.h === Math.round(r.height)
         && v.dpr === d && v.quality === quality && !force) return true;
     v.w = Math.round(r.width);

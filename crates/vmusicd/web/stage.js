@@ -1378,13 +1378,20 @@
   // -------------------------------------------------------------------------
 
   function setMode(next, opts) {
-    if (next === 'page') { setPage(true); return; }
+    if (next === 'page') {
+      if (window.Stage3D && Stage3D.open) { Stage3D.open(); return; }
+      setPage(true); return;
+    }
     // 星河 = 打开全屏页并切到星河背景场景，与歌词展示模式无关
     if (next === 'starriver') {
       // 顺序不能反：星河的亮灭由 syncSceneBtns 判定，而它要读 isPageOpen()。
       // 先落场景再开页的话，判定发生在「页还没开」的时刻，算出来是灭的。
-      setPage(true);
-      setScene('starriver');
+      if (window.Stage3D && Stage3D.open) {
+        Stage3D.open('aurora');
+      } else {
+        setPage(true);
+        setScene('starriver');
+      }
       return;
     }
     if (BASE_MODES.indexOf(next) < 0 && PAGE_ONLY_MODES.indexOf(next) < 0) next = 'karaoke';
@@ -1670,8 +1677,9 @@
 
     var saved = null;
     try { saved = localStorage.getItem(STORE_KEY); } catch (e) { /* 隐私模式 */ }
-    // 迁移：已合并的 'line' → 'karaoke'
-    if (saved === 'line') {
+    // 迁移：已合并的 'line' → 'karaoke'；'starriver'/'page' 已并入沉浸声场，
+    // 不再是展示模式——存档里残留会让应用一启动就弹出三维舞台。
+    if (saved === 'line' || saved === 'starriver' || saved === 'page') {
       saved = 'karaoke';
       try { localStorage.setItem(STORE_KEY, saved); } catch (e) { /* ignore */ }
     }

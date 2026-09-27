@@ -767,16 +767,12 @@
                 title="侧栏只留封面盘，隐藏歌词">封面</button>
         <button class="stage-mode" data-mode="karaoke" aria-pressed="true"
                 title="侧栏逐字高亮的歌词排版">卡拉OK</button>
-        <button class="stage-mode" data-mode="starriver" id="mode-starriver" aria-pressed="false"
-                title="进入全屏，并把背景切成星野与流动星河">星河</button>
-        <button class="stage-mode" data-mode="page" aria-pressed="false"
-                title="打开全屏歌词页">全屏</button>
       </div>
+      <!-- 全屏不再是一种"展示模式"：唯一的进入方式是右侧的全屏舞台按钮
+           （与顶栏"沉浸声场"、V/F 键等效，都是开启沉浸声场并申请原生全屏）。
+           旧"星河"对应沉浸声场 1 号舞台「极光穹顶」，在里面 1-7 或坞上切。 -->
       <button class="stage-head-fs" id="stage-fs" title="全屏舞台 (F)" aria-label="全屏舞台" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
-      </button>
-      <button class="stage-head-fs" id="stage-3d-btn" title="沉浸式三维舞台 (V)" aria-label="打开沉浸式三维舞台">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-cube"/></svg>
       </button>
       <button class="stage-queue" id="stage-queue" title="打开播放队列">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg>
@@ -969,7 +965,7 @@
   <aside class="s3d-settings" id="s3d-settings" aria-label="舞台设置" hidden>
     <div class="s3d-settings-heading"><span>舞台设置</span><button class="s3d-btn" id="s3d-settings-close" aria-label="收起舞台设置"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
     <label for="s3d-layout">聆听布局</label>
-    <select id="s3d-layout"><option value="focus">沉浸歌词</option><option value="sleeve">封面与歌词</option><option value="single">简洁单句</option></select>
+    <select id="s3d-layout"><option value="focus">沉浸歌词</option><option value="scatter">心象歌词</option><option value="spark">星火歌词</option><option value="sleeve">封面与歌词</option><option value="single">简洁单句</option></select>
     <button class="btn s3d-workshop" id="s3d-workshop">进入创意工坊</button>
     <label for="s3d-reactivity">律动强度 <output id="s3d-reactivity-value">135%</output></label>
     <input id="s3d-reactivity" type="range" min="0" max="200" value="135">
@@ -998,7 +994,7 @@
   </div>
   <div class="s3d-hint" id="s3d-hint"></div>
   <div class="s3d-keys">
-    拖动旋转 · 滚轮缩放 · 双击复位<br>
+    拖动旋转 · 拖歌词转歌词 · 双击复位<br>
     1–7 切舞台 · F 全屏 · L 歌词 · Esc 返回
   </div>
   <div class="s3d-fallback" id="s3d-fallback" hidden></div>

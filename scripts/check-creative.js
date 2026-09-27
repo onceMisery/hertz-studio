@@ -1151,9 +1151,11 @@ section('性能收口：不可见画布门控（E1）');
     '点击正在播放打开播放控制弹窗');
   ok(/function openNowPlaying[\s\S]{0,260}?np\.modal\.hidden = false/.test(appSrcE),
     'openNowPlaying 取消弹窗 hidden 并同步播放状态');
-  // 弹窗底部 CTA：点击关闭弹窗并打开全屏沉浸舞台
-  ok(/np\.goto\.onclick[\s\S]{0,220}?Stage\.setPage\(true\)/.test(appSrcE),
-    '「跳转到舞台播放页面」准确导航至舞台播放页面');
+  // 弹窗底部 CTA：统一入口——与全屏舞台按钮一致，进入沉浸声场并申请原生全屏
+  ok(/np\.goto\.onclick[\s\S]{0,260}?Stage3D\.open\(\)/.test(appSrcE),
+    '「跳转到舞台播放」走统一入口进入沉浸声场');
+  ok(/np\.goto\.onclick[\s\S]{0,400}?Stage3D\.requestFullscreen\(\)/.test(appSrcE),
+    '「跳转到舞台播放」随入口申请原生全屏');
   // E2 真机走查发现：窄屏模态抽屉键盘用户关不掉。Esc 必须能关抽屉
   // （沉浸页打开时 stage.js 自己 stopPropagation 处理 Esc，互不干扰）。
   ok(/e\.key === 'Escape'[\s\S]{0,180}?classList\.remove\('stage-open'\)/.test(appSrcE),
