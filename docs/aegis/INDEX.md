@@ -23,3 +23,5 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-09-26 | artifact | docs/aegis/work/2026-09-26-prioritized-completion/evidence-bundle-draft-scan-ui-regression.json | 2026-09-26-prioritized-completion evidence scan-ui-regression |
 | 2026-09-26 | plan | docs/aegis/plans/2026-09-26-offline-prompt-stage.md | 第 14 项首期：离线提示词生成舞台 |
 | 2026-09-26 | work | docs/aegis/work/2026-09-26-offline-prompt-stage/90-evidence.md | 离线提示词生成舞台验证证据 |
+| 2026-09-27 | plan | docs/aegis/plans/2026-09-27-kuwo-jamendo.md | 接入酷我音乐与 Jamendo 音源 |
+| 2026-09-27 | work | docs/aegis/work/2026-09-27-kuwo-jamendo/90-evidence.md | 酷我与 Jamendo 接入验证证据 |
