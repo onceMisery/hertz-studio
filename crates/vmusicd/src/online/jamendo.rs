@@ -84,7 +84,9 @@ async fn tracks_call(
             .pointer("/headers/error_message")
             .and_then(|v| v.as_str())
             .unwrap_or("未知错误");
-        return Err(ApiError::upstream_rejected(format!("Jamendo 返回失败: {msg}")));
+        return Err(ApiError::upstream_rejected(format!(
+            "Jamendo 返回失败: {msg}"
+        )));
     }
     let results = body
         .get("results")
@@ -269,10 +271,7 @@ mod tests {
     use super::*;
 
     fn fixture() -> serde_json::Value {
-        serde_json::from_str(include_str!(
-            "../../tests/fixtures/jamendo_search.json"
-        ))
-        .unwrap()
+        serde_json::from_str(include_str!("../../tests/fixtures/jamendo_search.json")).unwrap()
     }
 
     #[test]

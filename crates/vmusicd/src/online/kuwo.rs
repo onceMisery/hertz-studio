@@ -247,7 +247,12 @@ async fn mobi_request(
     match super::http::get_json(cl, url.as_str(), h).await {
         Ok(j) => Ok(j),
         Err(e) => {
-            tracing::debug!(source = ID, channel = channel.name(), br, "酷我取流请求失败: {e:?}");
+            tracing::debug!(
+                source = ID,
+                channel = channel.name(),
+                br,
+                "酷我取流请求失败: {e:?}"
+            );
             Err(e)
         }
     }
@@ -265,14 +270,7 @@ async fn des_request(
          &source={DES_SOURCE}&type=convert_url_with_sign&br={br}&format={fmt}&rid={rid}"
     );
     let q = super::sign::kuwo::mobi_q(&plain);
-    mobi_request(
-        cl,
-        cookie,
-        vec![("f", "kuwo"), ("q", &q)],
-        Channel::Des,
-        br,
-    )
-    .await
+    mobi_request(cl, cookie, vec![("f", "kuwo"), ("q", &q)], Channel::Des, br).await
 }
 
 async fn web_request(
@@ -460,10 +458,7 @@ mod tests {
     use super::*;
 
     fn fixture() -> serde_json::Value {
-        serde_json::from_str(include_str!(
-            "../../tests/fixtures/kuwo_search.json"
-        ))
-        .unwrap()
+        serde_json::from_str(include_str!("../../tests/fixtures/kuwo_search.json")).unwrap()
     }
 
     #[test]
@@ -555,8 +550,10 @@ mod tests {
 
         // 缺 url / 非直链一律不可用。
         assert!(play_from(&serde_json::json!({"code": 200, "data": {}})).is_none());
-        assert!(play_from(&serde_json::json!({"code": 500, "data": {"url": "http://x/a.mp3"}}))
-            .is_none());
+        assert!(
+            play_from(&serde_json::json!({"code": 500, "data": {"url": "http://x/a.mp3"}}))
+                .is_none()
+        );
     }
 
     #[test]
