@@ -1,0 +1,42 @@
+{
+  "headers": {
+    "status": "success",
+    "code": 0,
+    "error_message": "",
+    "warnings": "",
+    "results_count": 2
+  },
+  "results": [
+    {
+      "id": "1176055",
+      "name": "Yes I Do",
+      "duration": "196",
+      "position": 2,
+      "releasedate": "2016-04-15",
+      "artist_id": "35759",
+      "artist_name": "Room 94",
+      "album_id": "13152",
+      "album_name": "Lost Boy",
+      "album_image": "https://usercontent.jamendo.com?type=album&id=13152&width=300",
+      "image": "https://usercontent.jamendo.com?type=album&id=13152&width=300",
+      "audio": "https://prod-1.storage.jamendo.com/?trackid=1176055&format=mp31",
+      "audiodownload": "https://prod-1.storage.jamendo.com/?trackid=1176055&format=mp31&download",
+      "audiodownload_allowed": true,
+      "license_ccurl": "https://creativecommons.org/licenses/by-nc-nd/3.0/"
+    },
+    {
+      "id": "1441077",
+      "name": "Single Without Album",
+      "duration": 201,
+      "artist_id": "40123",
+      "artist_name": "Indie Artist",
+      "album_id": "",
+      "album_name": "",
+      "album_image": "",
+      "image": "",
+      "audio": "",
+      "audiodownload": "",
+      "license_ccurl": ""
+    }
+  ]
+}

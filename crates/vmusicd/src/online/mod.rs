@@ -44,6 +44,7 @@ pub mod cache;
 mod ccmixter;
 pub(crate) mod cred;
 mod http;
+mod jamendo;
 mod kugou;
 mod kuwo;
 mod netease;
@@ -371,6 +372,15 @@ pub const SOURCES: &[SourceInfo] = &[
         caps: &[],
     },
     SourceInfo {
+        id: "jamendo",
+        label: "Jamendo · CC 授权曲库",
+        cats: &[],
+        // client_id 由用户注册后写入 settings（jamendo::CLIENT_ID_KEY）；
+        // 未配置时 list_sources 与聚合搜索都会跳过，列表里不出现这个源。
+        supports_cookie: false,
+        caps: &[],
+    },
+    SourceInfo {
         id: "qishui",
         label: "汽水音乐",
         cats: &[],
@@ -494,10 +504,25 @@ pub(crate) fn base64_decode_std(input: &str) -> Option<Vec<u8>> {
 // 对外入口
 // ---------------------------------------------------------------------------
 
+/// 音源当前是否可用：Jamendo 需要 client_id（用户注册后写入 settings），
+/// 未配置时列表与聚合搜索都跳过它；其余音源恒可用。
+async fn source_ready(ctx: &Ctx, src: &SourceInfo) -> bool {
+    if src.id != jamendo::ID {
+        return true;
+    }
+    matches!(
+        vmusic_store::settings::get(&ctx.db, jamendo::CLIENT_ID_KEY).await,
+        Ok(Some(v)) if v.as_str().is_some_and(|s| !s.trim().is_empty())
+    )
+}
+
 /// 音源清单。`signedIn` 要查设置表，所以这一步是异步的。
 pub async fn list_sources(ctx: &Ctx) -> Vec<serde_json::Value> {
     let mut out = Vec::with_capacity(SOURCES.len());
     for src in SOURCES {
+        if !source_ready(ctx, src).await {
+            continue;
+        }
         // 登录态以 cred 包为准（扫码/手动 cookie 都落 online_cred_<src>，
         // 裸键 online_cookie_ 只是历史兜底）；各平台判定规则不同，交 cred 模块。
         let signed_in = if src.supports_cookie {
@@ -531,6 +556,7 @@ pub async fn search(ctx: &Ctx, q: SearchQuery) -> ApiResult<SearchPage> {
         "qq" => qq::search(ctx, &q).await,
         "kugou" => kugou::search(ctx, &q).await,
         "kuwo" => kuwo::search(ctx, &q).await,
+        "jamendo" => jamendo::search(ctx, &q).await,
         "ccmixter" => ccmixter::search(ctx, &q).await,
         "qishui" => qishui::search(ctx, &q).await,
         other => Err(unsupported(other)),
@@ -543,7 +569,12 @@ pub async fn search_all(ctx: &Ctx, query: &str, limit: usize) -> ApiResult<Aggre
         return Err(bad_request("需要给出搜索关键词"));
     }
     let limit = limit.clamp(1, 50);
-    let ids: Vec<&str> = SOURCES.iter().map(|s| s.id).collect();
+    let mut ids = Vec::new();
+    for src in SOURCES {
+        if source_ready(ctx, src).await {
+            ids.push(src.id);
+        }
+    }
     // spec §2.4：单源 6s 预算，慢源不该拖慢整个聚合页。
     let agg = aggregate::collect(
         &ids,
@@ -603,6 +634,7 @@ pub async fn stream(
         "qq" => qq::stream(ctx, id, track_ref, q).await,
         "kugou" => kugou::stream(ctx, id, track_ref, q).await,
         "kuwo" => kuwo::stream(ctx, id, track_ref, q).await,
+        "jamendo" => jamendo::stream(ctx, id, q).await,
         "ccmixter" => ccmixter::stream(ctx, id, q).await,
         "qishui" => qishui::stream(ctx, id, track_ref, q).await,
         other => Err(unsupported(other)),
@@ -630,6 +662,7 @@ pub async fn detail(ctx: &Ctx, source: &str, id: &str) -> ApiResult<OnlineDetail
         "qq" => qq::detail(ctx, id).await,
         "kugou" => kugou::detail(ctx, id).await,
         "kuwo" => kuwo::detail(ctx, id).await,
+        "jamendo" => jamendo::detail(ctx, id).await,
         "ccmixter" => ccmixter::detail(ctx, id).await,
         "qishui" => qishui::detail(ctx, id).await,
         other => Err(unsupported(other)),
@@ -649,6 +682,7 @@ pub async fn lyric(ctx: &Ctx, source: &str, id: &str) -> ApiResult<vmusic_core::
         "qq" => qq::lyric(ctx, id).await,
         "kugou" => kugou::lyric(ctx, id).await,
         "kuwo" => kuwo::lyric(ctx, id).await,
+        "jamendo" => jamendo::lyric(ctx, id).await,
         "ccmixter" => ccmixter::lyric(ctx, id).await,
         "qishui" => qishui::lyric(ctx, id).await,
         other => Err(unsupported(other)),
@@ -924,8 +958,12 @@ mod tests {
     /// `unsupported(other)`。加音源只改不改测就会在这里失败。
     #[test]
     fn search_dispatches_every_registered_source() {
-        let dispatches =
-            |source: &str| matches!(source, "netease" | "qq" | "kugou" | "kuwo" | "ccmixter" | "qishui");
+        let dispatches = |source: &str| {
+            matches!(
+                source,
+                "netease" | "qq" | "kugou" | "kuwo" | "jamendo" | "ccmixter" | "qishui"
+            )
+        };
         for src in SOURCES {
             assert!(
                 dispatches(src.id),
@@ -1213,6 +1251,8 @@ mod tests {
         assert_eq!(caps_of("kuwo"), &[Capability::CookieLogin]);
         // ccmixter 是 CC 授权匿名曲库，没有任何账号能力。
         assert!(caps_of("ccmixter").is_empty());
+        // Jamendo 同为 CC 匿名曲库；可用性由 client_id 配置决定，不占能力位。
+        assert!(caps_of("jamendo").is_empty());
     }
 
     #[test]
