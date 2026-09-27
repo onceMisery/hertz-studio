@@ -345,10 +345,7 @@ pub mod kuwo {
         fn output_is_padded_to_eight_byte_blocks() {
             // 3 字节明文 → 1 个块；177 字节（KAT 明文长度）→ 23 个块。
             assert_eq!(des_encrypt(b"abc").len(), 8);
-            assert_eq!(
-                des_encrypt(b"corp=kuwo&rid=311875").len() % 8,
-                0
-            );
+            assert_eq!(des_encrypt(b"corp=kuwo&rid=311875").len() % 8, 0);
             assert_ne!(des_encrypt(b"abc"), des_encrypt(b"abd"));
         }
     }

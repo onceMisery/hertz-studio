@@ -58,3 +58,32 @@ q = NI8S5evAnmGldi4g47EsqrT7al5u+JTiJ+heOUwqOwcqvgwFyTLvnshjX+I4drxiGXu1L30BOmfL
 ## 5. 结论
 
 酷我按「r.s 搜索 + DES 主通道 + f=web 备通道 + songinfoandlrc 歌词」接入；能力位 caps=[CookieLogin]，quality allowed=[Standard, Exhigh, Lossless]、default=Exhigh；试听片段以 vip_only 标注 + bitrate 如实回传，与 netease「VIP 曲可播、流阶段如实降级」策略对齐。
+
+## 6. Jamendo 字段核对
+
+对照官方文档 developer.jamendo.com/v3.0/tracks（2026-09-27 抓取）：搜索参数 `search`；曲目字段 `id / name / artist_name / album_name / album_image / image / audio / duration`（秒，整数或字符串两态兼容）；`headers.status / code / error_message / results_count`（总数为 `results_fullcount`，仅 `fullcount=true` 时出现，为省一次计数查询未启用）。
+
+## 7. 实现阶段验证（CI 等价物）
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo fmt --check`（限本项目新增文件 kuwo.rs / jamendo.rs / sign.rs KAT 块） | ✅ 干净（仓库数十个既有文件本就不是 fmt 全净，按约定未动） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 0 警告 0 错误 |
+| `VMUSIC_BACKEND=null cargo test --workspace` | ✅ vmusicd 194 通过（含 DES KAT `des_known_answer_vector_validated_by_live_server`、cred 判态、两源 fixture 归一化），vmusic-audio 29 通过 |
+| `node scripts/check-*.js`（12 个契约脚本） | ✅ 全过，其中 check-online.js 197/197（前端零改动得到契约确认） |
+
+## 8. 真机冒烟（target-verify 隔离实例）
+
+`CARGO_TARGET_DIR=target-verify cargo build -p vmusicd`，`VMUSIC_BACKEND=null` + 隔离数据目录 + 回环端口 + token 鉴权：
+
+- `/v1/online/sources`：出现 `kuwo:酷我音乐 caps=[cookie_login]`（jamendo 未配置时正确隐藏）。
+- **酷我搜索**（source=kuwo&q=海阔天空）：total=3600，曲目 id/标题/歌手/时长/封面/vip 标注齐全（`5886682 海阔天空 BEYOND vip=true`）。
+- **酷我取流**（DES 主通道，默认 320k 请求）：返回真实 CDN 直链（car-er.kuwo.cn），会员歌 `bitrate` 如实为空（试听片段）；Range 下载 64KB 魔数 `ID3` ✅。
+- **酷我歌词**：lrclist 49 行折成 LRC 文档（首行「海阔天空 - BEYOND」）✅；**详情**：按设计返回 400（无单曲详情接口）✅。
+- **Jamendo 配置管线**：未配置 → 列表隐藏 + 直接搜索 400 带注册指引；`PUT /v1/settings` 写入假 client_id → 列表出现 → 搜索真实打到 Jamendo API 并回「Invalid Client Id Error」（HTTP 502 upstream_rejected）——请求构造与响应解析路径全部走通，换真 client_id 即可用。
+
+## 9. 遗留与后续
+
+- Jamendo 真数据播放待用户注册 client_id 后点亮（管线已真机验证到上游鉴权层）。
+- 酷我登录 cookie 对移动通道的实际效果（320k/无损）待有账号实测；当前 cookie 仅透传，HighQuality 能力位未开。
+- 酷我 www 系 API 的 Hm_Iuvt+Secret 鉴权方案已验证可用但无对应存活的业务端点，未写入实现；若 r.s 将来失效需回头启用该方案并找替代搜索端点。

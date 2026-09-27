@@ -58,7 +58,8 @@
 - 逐字演出感：未唱到的字退半步、正在唱的字弹起并带两层同色辉光 + 基线下光柱，
   每个字按自己的相位极缓浮动；擦除边界是软过渡带而不是硬切；
   字号上限从 42px 提到 68px 并把长行 balance 断行
-- 在线曲库：音源注册表驱动（网易云 / CCmixter），搜索、详情、歌词、试听与封面
+- 在线曲库：音源注册表驱动（网易云 / QQ 音乐 / 酷狗 / 酷我 / CCmixter /
+  Jamendo / 汽水），搜索、详情、歌词、试听与封面
   全部由本机服务代理并归一化成同一套字段；前端的选择框与分类由
   `GET /v1/online/sources` 生成，加一个音源不用改前端
 - 在线音源登录：支持填入**你自己**在该站点的账号 cookie（服务端持久化、
@@ -227,9 +228,12 @@ mmusic-studio v0.1.0
 
 ### 在线音源的边界
 
-目前接入了网易云音乐、QQ 音乐、酷狗音乐三个平台和 CCmixter 开放曲库。对接用的
-是两类东西：平台**网页端/自家客户端公开使用的端点**（含这些端点要求的请求签名，
-如酷狗的 MD5 签名、QQ 的 `zzc` 搜索签名与 vkey 取流），和**用户自己账号的
+目前接入了网易云音乐、QQ 音乐、酷狗音乐、酷我音乐四个平台，CCmixter 与
+Jamendo 两个 CC 授权开放曲库（Jamendo 需在 https://devportal.jamendo.com
+免费注册 client_id 后经 `PUT /v1/settings` 写入键 `jamendo_client_id`，未配置
+时自动隐藏）。对接用的是两类东西：平台**网页端/自家客户端公开使用的端点**
+（含这些端点要求的请求签名，如酷狗的 MD5 签名、QQ 的 `zzc` 搜索签名与 vkey
+取流、酷我移动端的变形 DES 载荷），和**用户自己账号的
 凭据**（cookie 或网易云扫码登录）。平台客户端签名算法是项目所有者明确授权实现的
 （设计决策 D7）：仅在用户本机、以用户本人凭据发起请求，不分发平台内容、不做
 商业服务，全部代码为原创实现。
@@ -291,7 +295,7 @@ mmusic-studio/
 │   ├── vmusic-library/      目录扫描、元数据与封面、歌词文件查找
 │   ├── vmusic-lyrics/       LRC 解析（含逐字时间轴）
 │   └── vmusicd/             服务二进制：axum 路由、WS、配置、内置 UI
-│       ├── src/online/      音源注册表：mod（契约+分发+缓存）· netease · ccmixter
+│       ├── src/online/      音源注册表：mod（契约+分发+缓存）· netease · qq · kugou · kuwo · ccmixter · jamendo · qishui
 │       └── web/             零构建的前端，由服务内嵌托管
 │           ├── index.html / app.js / style.css
 │           ├── stage.js / stage.css     歌词舞台（演出模式）
