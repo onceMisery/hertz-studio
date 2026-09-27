@@ -128,7 +128,6 @@ const ui = {
   setDevice: $('set-device'),
   setDensity: $('set-density'),
   setMotion: $('set-motion'),
-  setStageCover: $('set-stage-cover'),
   setStageIdleHide: $('set-stage-idle-hide'),
   cookieRows: $('cookie-rows'),
   setRenderMode: $('set-render-mode'),
@@ -1043,16 +1042,10 @@ function syncNpLyrics(id, doc) {
 
 function initStage() {
   if (!Stage) { console.warn('stage.js 未加载，歌词与舞台效果不可用'); return; }
-  // 视觉子系统（主循环/粒子/GL 宿主/粒子封面/星河）统一由
-  // VisualController 按依赖顺序初始化，也可整体销毁。
-  if (window.VisualController) VisualController.init();
-  else {
-    Stage.init();
-    if (window.StageParticles) window.StageParticles.init();
-    if (window.StageGLHost) window.StageGLHost.init();
-    if (window.StageCoverParticles) window.StageCoverParticles.init();
-    if (window.StageStarRiver) window.StageStarRiver.init();
-  }
+  // 主循环与粒子层直接初始化：旧页背景子系统（GL 宿主/粒子封面/星河）已
+  // 随全屏歌词页摘除，Stage3D 与创意舞台各自在模块内自举。
+  Stage.init();
+  if (window.StageParticles) window.StageParticles.init();
   if (window.Shelf) initShelf();
   document.addEventListener('stage:control', onStageControl);
 }
@@ -1074,9 +1067,6 @@ function onStageControl(e) {
       transport.put('/v1/settings', { stage3d: d.value }).catch(() => toast('舞台设置暂未保存', 'error'));
       break;
     case 'view': setView(d.value); break;
-    // 封面盘在全屏页头部就地切换，状态归 stage.js；这里只负责同步设置页的
-    // 复选框并落库，两边共用 setStageCover 才不会各写一半持久化逻辑。
-    case 'cover': setStageCover(d.value, true); break;
     default: break;
   }
 }
@@ -1089,19 +1079,6 @@ function onStageControl(e) {
 // 最稳：这条 GET 发出之后只要用户动过即时开关，就以界面上的现状为准。
 let settingsEpoch = 0;
 function markSettingsDirty() { settingsEpoch += 1; }
-
-// 舞台封面盘的持久化：persist 只在用户真的动了一下开关时为 true。
-// loadSettings 恢复状态时传 false，否则每次刷新页面都会多写一次设置表。
-function setStageCover(on, persist) {
-  const want = !!on;
-  state.settings.stage_cover = want;
-  if (ui.setStageCover && ui.setStageCover.checked !== want) ui.setStageCover.checked = want;
-  if (window.Stage) Stage.setCoverMode(want, { silent: true });
-  if (persist) {
-    markSettingsDirty();
-    transport.put('/v1/settings', { stage_cover: want }).catch(() => {});
-  }
-}
 
 // ---------------------------------------------------------------------------
 // 空闲时收起「正在播放」
@@ -1132,7 +1109,7 @@ function syncStageIdle() {
   else delete document.body.dataset.stageIdle;
 }
 
-// 与 setStageCover 同构：persist 只在用户真的动了一下开关时为 true，
+// 持久化约定：persist 只在用户真的动了一下开关时为 true，
 // loadSettings 恢复状态传 false，否则每次刷新都会多写一次设置表。
 function setStageIdleHide(on, persist) {
   const want = !!on;
@@ -2214,13 +2191,8 @@ async function loadSettings() {
   // 用户那次操作写对了），只回填确实没被动过的项。
   if (epoch === settingsEpoch) {
     if (window.Stage3D) Stage3D.configure(state.settings.stage3d);
-    // 封面盘：恢复状态不写库（persist=false），也不经过 stage:control。
-    setStageCover(state.settings.stage_cover, false);
     // 空闲收起默认开：设置表里没有这项时传 true，行为与"用户勾上了"一致。
     setStageIdleHide(state.settings.stage_idle_hide !== false, false);
-  } else if (Stage) {
-    // 内存副本也别留旧值，否则设置页的复选框会和界面不一致。
-    state.settings.stage_cover = Stage.isCoverMode();
   }
   // 渲染器在这里定：设置到手之前，粒子层一直挂着（帧门报 0，一帧不画）。
   // attach 只认第一次调用，所以之后用户改设置不会换渲染器——那是
@@ -3220,11 +3192,10 @@ function initNowPlayingModal() {
   // 跳转到舞台播放：关闭弹窗并进入沉浸声场（与全屏舞台按钮同一入口同一效果）
   np.goto.onclick = () => {
     closeNowPlaying();
-    document.body.classList.remove('stage-open');
     if (window.Stage3D && Stage3D.open) {
       Stage3D.open();
       setTimeout(function () { if (Stage3D.requestFullscreen) Stage3D.requestFullscreen(); }, 40);
-    } else if (Stage) Stage.setPage(true);
+    }
   };
 }
 
@@ -3729,7 +3700,6 @@ function initNowPlayingModal() {
     if (Stage) Stage.setReducedMotion(ui.setMotion.checked);
     transport.put('/v1/settings', { reduce_motion: ui.setMotion.checked }).catch(() => {});
   };
-  ui.setStageCover.onchange = () => setStageCover(ui.setStageCover.checked, true);
   ui.setStageIdleHide.onchange = () => setStageIdleHide(ui.setStageIdleHide.checked, true);
 
   ui.rail.querySelectorAll('.rail-item').forEach((b) => { b.onclick = () => setView(b.dataset.view); });

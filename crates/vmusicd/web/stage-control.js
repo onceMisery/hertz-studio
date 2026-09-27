@@ -69,42 +69,9 @@
         { key: 'density', label: '光尘密度', min: 0, max: 200, step: 5, unit: '%', def: 100 },
         { key: 'strength', label: '律动强度', min: 0, max: 200, step: 5, unit: '%', def: 100, wide: true },
         // 键名带 dust 前缀是必需的，不是命名癖：参数表在 values/els 里是一张扁平
-        // 映射，和下面 view 组的「自动漂移」重名会让两颗滑块共用同一个值——
-        // 拖一颗另一颗跟着动，而且 reset 只回得来后注册的那一个。
+        // 映射，旋钮之间重名会让两颗滑块共用同一个值——拖一颗另一颗跟着动，
+        // 而且 reset 只回得来后注册的那一个。
         { key: 'dustDrift', label: '上浮速度', min: 0, max: 200, step: 5, unit: '%', def: 100 }
-      ]
-    },
-    {
-      id: 'view',
-      title: '舞台视角',
-      // 这一组的旋钮直接落到舞台自己的令牌上（--lp-*），而不是面板默认的
-      // --fx-view-*。原因：消费方是 stage.js 的 readTilt() 和 stage-particles.js，
-      // 它们读的就是 --lp-*；再经一层别名只会多出一个"改了旋钮没反应"的断点。
-      // 每个旋钮用 css(v) 把百分比换算成真正的值，面板存的是用户看得懂的单位。
-      items: [
-        { key: 'persp', label: '透视强度', min: 600, max: 2200, step: 20, unit: 'px', def: 1100,
-          css: '--lp-persp', fmt: function (v) { return v + 'px'; } },
-        { key: 'tilt', label: '最大倾角', min: 0, max: 40, step: 1, unit: '°', def: 26,
-          css: '--lp-tilt-max' },
-        { key: 'drift', label: '自动漂移', min: 0, max: 200, step: 5, unit: '%', def: 100, wide: true,
-          css: '--lp-drift', fmt: function (v) { return (v / 100).toFixed(3); } },
-        { key: 'spread', label: '心象散开幅度', min: 0, max: 200, step: 5, unit: '%', def: 100,
-          css: ['--lp-spread-x', '--lp-spread-y', '--lp-spread-r'],
-          // 单位必须跟 stage.css 的令牌一起是 em。这里之前写死 86px/30px/8deg，
-          // 而 push() 在启动时就会把所有旋钮落一遍——等于字号一改，
-          // CSS 里改好的 em 值立刻被这颗旋钮按旧 px 覆盖回去。
-          fmt: function (v) {
-            var k = v / 100;
-            return [0.28 * k + 'em', 0.2 * k + 'em', 5 * k + 'deg'];
-          } },
-        // 封面盘的两颗旋钮。周期用秒而不是百分比：它对应的是"转一圈几秒"，
-        // 换算成强度百分比反而要用户在脑内做倒数。
-        // def 必须和 stage.css 的 :root 保持一致：新默认 100vmin = 铺满短边。
-        // 量程上限同步提到 100。
-        { key: 'coverSize', label: '背景尺寸', min: 16, max: 100, step: 1, unit: 'vmin', def: 100,
-          css: '--lp-cover-size', fmt: function (v) { return v + 'vmin'; } },
-        { key: 'coverSpin', label: '封面盘转一圈', min: 6, max: 60, step: 2, unit: 's', def: 22,
-          css: '--lp-cover-spin', fmt: function (v) { return v + 's'; } }
       ]
     },
     {

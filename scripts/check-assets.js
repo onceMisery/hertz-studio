@@ -129,12 +129,10 @@ const REQUIRE_BEFORE = [
   ['creative-stage.js', 'stage-cinema.js'],   // cinema 注册 camLayers 依赖编排层 API
   ['stage-cinema.js', 'stage-freecam.js'],    // freecam 与 cinema 互斥联动
   ['stage-cinema.js', 'stage-focus.js'],      // peek 经 cinema setPeek 联动
-  ['stage.js', 'stage-halo.js'],              // 星幕挂 Stage.gate 与 .lp-scene
   ['stage.js', 'stage3d.js'],                 // 三维舞台挂 Stage.gate 读 Stage.tier
   ['onset.js', 'stage3d.js'],                 // 三维舞台复用全项目唯一一份起音判定
-  ['stage.js', 'stage-immersive.js'],         // 全屏模块调 Stage.setPage/isPageOpen
+  ['stage.js', 'stage-immersive.js'],         // 沉浸入口模块依赖 Stage 帧门
   ['creative-stage.js', 'stage-immersive.js'], // 舞台坞读 CreativeStage.scenes/preset
-  ['stage-halo.js', 'app.js'],
   ['stage-immersive.js', 'app.js'],
   ['creative-stage.js', 'app.js'],              // app.js 调 CreativeStage.init()
   ['stage.js', 'app.js'],

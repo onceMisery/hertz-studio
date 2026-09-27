@@ -241,7 +241,7 @@
       v.annotPath.setAttribute('d', '');
       return;
     }
-    var sel = v.el.id === 'lyric-page' ? '.lp-body .lyric.active' : '.stage-lyrics .lyric.active';
+    var sel = '.stage-lyrics .lyric.active';
     var node = v.el.querySelector(sel);
     if (!node) { v.annotPath.setAttribute('d', ''); return; }
     var r = node.getBoundingClientRect();
@@ -304,12 +304,7 @@
   }
 
   function pickView() {
-    var want = (window.Stage && Stage.isPageOpen()) ? 1 : 0;
-    if (want !== activeIdx) {
-      activeIdx = want;
-      if (views[activeIdx]) measure(views[activeIdx]);
-    }
-    return views[activeIdx];
+    return views[0];
   }
 
   // -------------------------------------------------------------------------
@@ -333,8 +328,7 @@
 
     if (!attached) {
       var a = mount(document.getElementById('stage'));
-      var b = mount(document.getElementById('lyric-page'));
-      views = [a, b].filter(Boolean);
+      views = [a].filter(Boolean);
       if (!views.length) return opts;
       attached = true;
       if (window.Stage && Stage.gate) Stage.gate('handdrawn', targetFps, tick);
@@ -342,10 +336,9 @@
         var ro = new ResizeObserver(function () { views.forEach(measure); });
         views.forEach(function (v) { ro.observe(v.el); });
       }
-      // 圈注只画在真正承载歌词的那个容器上：舞台侧栏的 .stage-lyrics 与
-      // 全屏页的 .lp-body。挂在最外层会让量出来的矩形包含整个页面高度。
+      // 圈注只画在真正承载歌词的那个容器上：舞台侧栏的 .stage-lyrics。
+      // 挂在最外层会让量出来的矩形包含整个页面高度。
       if (views[0]) views[0].el.classList.add('hand-target');
-      if (views[1]) views[1].el.classList.add('hand-target');
     }
 
     if (opts.paper && !paperUri) paperUri = makePaper();

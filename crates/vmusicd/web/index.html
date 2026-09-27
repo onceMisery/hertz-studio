@@ -673,14 +673,6 @@
           <label for="set-motion">减少动效</label>
           <input id="set-motion" type="checkbox">
         </div>
-        <!-- 舞台封面是纯表现层开关，即时生效、不需要重新加载界面：显示与否只是
-             .lyric-page 上的一个 class，旋转是 CSS 动画。和下面的渲染模式不同，
-             那边换的是渲染器实现，这边什么实现都没换。 -->
-        <div class="set-row">
-          <label for="set-stage-cover">舞台封面</label>
-          <input id="set-stage-cover" type="checkbox">
-          <span class="hint">在全屏舞台里显示当前曲目的 3D 粒子封面</span>
-        </div>
         <!-- 空闲隐藏是纯布局开关：判据（有没有曲目 / 是否已按停止）在 app.js 的
              stageIdle() 里，CSS 只认 body[data-stage-idle] 这一个标记，不参与判定。
              暂停不收起——曲目还在，收起会让歌词和进度凭空消失。 -->
@@ -860,69 +852,9 @@
   </footer>
 </aside>
 
-<!-- 全屏歌词页：与舞台共用同一份歌词数据，只是换一套排版。
-     控制按钮不是底部播放条的复制品——它们通过 stage:control 事件把意图
-     交回 app.js，播放逻辑仍然只有一份。 -->
-<div class="lyric-page" id="lyric-page" data-lp-mode="karaoke" aria-hidden="true" role="dialog" aria-label="全屏歌词">
-  <div class="lp-head">
-    <div>
-      <div class="lp-title" id="lp-title">未在播放</div>
-      <div class="lp-sub" id="lp-artist"></div>
-    </div>
-    <!-- 全屏页里必须自带模式切换和驾驶舱入口：唯一的入口按钮原本在顶栏，
-         而顶栏被这层 z-index 70 的对话框整个盖住，进了全屏就再也调不了任何东西。 -->
-    <div class="lp-modes" id="lp-modes" role="group" aria-label="歌词显示模式">
-      <button class="lp-mode" data-lp-mode="karaoke" aria-pressed="true"
-              title="逐字高亮的歌词排版">卡拉OK</button>
-      <button class="lp-mode" data-lp-mode="scatter" aria-pressed="false"
-              title="字词散开的意象排版">心象</button>
-      <button class="lp-mode" data-lp-mode="halo" aria-pressed="false"
-              title="环形点阵星幕">星幕</button>
-    </div>
-    <div class="lp-spacer"></div>
-    <button class="lp-btn" id="lp-cover" aria-label="舞台封面" aria-pressed="false">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-disc"/></svg>
-    </button>
-    <button class="lp-btn" id="lp-view-reset" title="重置视角" aria-label="重置舞台视角">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reset"/></svg>
-    </button>
-    <button class="lp-btn" id="lp-cockpit" title="舞台驾驶舱" aria-label="打开舞台驾驶舱" aria-expanded="false">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg>
-    </button>
-    <button class="lp-btn" id="lp-3d" title="沉浸式三维舞台 (V)" aria-label="打开沉浸式三维舞台">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-cube"/></svg>
-    </button>
-    <button class="lp-btn" id="lp-fs" title="全屏 (F)" aria-label="全屏" aria-pressed="false">
-      <svg class="ic-expand" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
-      <svg class="ic-compress" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-compress"/></svg>
-    </button>
-    <button class="lp-btn" id="lp-close" title="关闭 (Esc)" aria-label="关闭全屏歌词">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
-    </button>
-  </div>
-
-  <div class="lp-body" id="lp-lines"></div>
-  <div class="lp-sub2" id="lp-sub" hidden style="padding: 0 clamp(20px,7vw,96px) 8px;"></div>
-
-  <div class="lp-foot">
-    <span class="lp-time" id="lp-time">0:00 / 0:00</span>
-    <input id="lp-progress" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
-    <button class="lp-btn" id="lp-prev" title="上一首" aria-label="上一首">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-prev"/></svg>
-    </button>
-    <button class="lp-btn primary" id="lp-play" title="播放 / 暂停" aria-label="播放或暂停">
-      <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"/></svg>
-      <svg class="ic-pause" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-pause"/></svg>
-    </button>
-    <button class="lp-btn" id="lp-next" title="下一首" aria-label="下一首">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-next"/></svg>
-    </button>
-  </div>
-</div>
 
 <!-- 沉浸式三维舞台：一整块屏幕就是一个舞台。
-     它和 .lyric-page 是两个独立的全屏层——歌词页的画布是「陪衬歌词」，这一层
-     反过来独占指针 / 独占全屏 / 独占后处理链，两者对同一份资源的诉求互斥。
+     它是唯一的全屏演出层，独占指针 / 独占全屏 / 独占后处理链。
      默认 hidden + visibility:hidden：不可见时不参与命中测试也不参与合成。
      内部节点由 stage3d.js 填充（舞台坞的清单来自它的 STAGES 目录），这里只
      放骨架和四个固定按钮，避免 JS 里拼整段 DOM。 -->
@@ -1048,6 +980,11 @@
     </button>
   </div>
   <div class="ws-tabs" id="ws-tabs" role="tablist" aria-label="工坊页签"></div>
+  <!-- 高级编排的面板内实时预览：高级渲染层直接画在这里，不惊动主页右栏。 -->
+  <div class="ws-preview" id="ws-preview" hidden>
+    <div class="ws-preview-stage" id="ws-preview-host"></div>
+    <div class="ws-preview-meta" id="ws-preview-meta"></div>
+  </div>
   <div class="ws-body" id="ws-body"></div>
   <div class="ws-toast" id="ws-toast" role="status" aria-live="polite" hidden></div>
 </div>
@@ -1181,13 +1118,9 @@
 <script src="stage-particles.js"></script>
 <script src="stage-particles-gl.js"></script>
 <!-- 共享 GL 宿主：唯一的画布与上下文，必须排在两个场景模块之前 -->
-<script src="stage-gl-host.js"></script>
 <!-- 3D 粒子舞台封面：静态点阵 → 播放时涟漪律动，WebGL 不可用自动退回 CSS 封面 -->
-<script src="stage-cover-particles.js"></script>
 <!-- 星河背景：星野 + 流动星河，与粒子封面同画布切换 -->
-<script src="stage-starriver.js"></script>
 <!-- 视觉子系统统一控制器：仅注册，初始化由 boot 经 VisualController.init() -->
-<script src="visual-controller.js"></script>
 <script src="stage-control.js"></script>
 <script src="pl-covers.js"></script>
 <script src="shelf.js"></script>
@@ -1205,7 +1138,6 @@
 <script src="stage-cinema.js"></script>
 <script src="stage-freecam.js"></script>
 <script src="stage-focus.js"></script>
-<script src="stage-halo.js"></script>
 <!-- 沉浸式三维舞台：自建一个 WebGL2 上下文（拿不到就整体降级），逐帧驱动
      仍然走 Stage.gate()。排在 stage-immersive 之前，键盘用捕获阶段抢下 F。 -->
 <script src="stage-lyrics.js"></script>

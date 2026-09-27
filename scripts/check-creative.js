@@ -112,8 +112,7 @@ function makeEl(tag, size) {
 }
 
 const knownEls = {
-  stage: makeEl('aside', { w: 420, h: 640 }),
-  'lyric-page': makeEl('div', { w: 1280, h: 720 })
+  stage: makeEl('aside', { w: 420, h: 640 })
 };
 
 const documentEl = makeEl('html');
@@ -186,14 +185,12 @@ let stageVisible = true;   // E1：窄屏抽屉开关，默认可见（不影响
 sandbox.Stage = {
   tier: () => 2,
   isHidden: () => false,
-  isPageOpen: () => pageOpen,
   isStageVisible: () => stageVisible,
   spectrum: () => spectrum,
   energy: () => 0.4,
   position: () => 12345,
   gate: (name, fpsFn, tickFn) => { gates[name] = { fpsFn, tickFn }; return true; }
 };
-let pageOpen = false;
 let spectrum = null;
 
 vm.createContext(sandbox);
@@ -296,11 +293,11 @@ section('挂载与帧门');
 ok(gates.creative === undefined, 'attach 之前没有登记帧门');
 const eff = CS.attach(true);
 ok(eff === '3d', 'attach(true) 返回 3d（' + eff + '）');
-ok(fakeEngineCount === 2, `舞台与全屏页各开一个引擎（实际 ${fakeEngineCount}）`);
+ok(fakeEngineCount === 1, `舞台挂载开一个引擎（实际 ${fakeEngineCount}）`);
 ok(!!gates.creative, 'attach 之后登记了 creative 帧门');
 // 挂上就要有一帧画面：暂停时帧门返回 0，而 stage.js 的主循环此刻可能已经停转，
 // 不补这一帧的话用户拨开开关看到的是一块空白舞台。
-ok(renderCalls.length === 2, `挂载时两块画布各补了一帧（${renderCalls.length}）`);
+ok(renderCalls.length === 1, `挂载时画布补了一帧（${renderCalls.length}）`);
 const callsAtAttach = renderCalls.length;
 
 const stageEl = knownEls.stage;
@@ -334,12 +331,10 @@ ok(typeof tick === 'function', '帧门拿到了 tick');
 const FRAMES = 900;
 let frames = 0;
 let mutedFrames = 0;      // 代价探测的静默窗口：这些帧本来就不该画
-let catchups = 0;         // 换挂载点时补的那一帧，一次 tick 会渲染两次
 let sectionsSeen = {};
 for (let f = 0; f < FRAMES; f += 1) {
   fakeNow += 16.7;
   feed(fakeSpectrum(f / 30, ampAt(fakeNow - 1000)));
-  if (f % 120 === 0) { pageOpen = !pageOpen; catchups += 1; }   // 中途来回切挂载点
   tick(16.7);
   frames += 1;
   const st = CS.stats();
@@ -350,8 +345,8 @@ ok(frames === FRAMES, `${FRAMES} 帧全部跑完没有抛异常`);
 // 渲染次数要逐帧对上账，而不是"大概够多"：静默窗口里一次都不许画，
 // 非静默帧每帧恰好一次（外加换挂载点补的那帧）。这条等式同时钉住了
 // A/B 的隔离性 —— 基线窗口里要是偷偷画了，等式就不成立。
-ok(renderCalls.length - callsAtAttach === frames - mutedFrames + catchups,
-  `渲染次数逐帧对账（${renderCalls.length - callsAtAttach} = ${frames} − ${mutedFrames} 静默 + ${catchups} 补帧）`);
+ok(renderCalls.length - callsAtAttach === frames - mutedFrames,
+  `渲染次数逐帧对账（${renderCalls.length - callsAtAttach} = ${frames} − ${mutedFrames} 静默）`);
 ok(mutedFrames > 0 && mutedFrames < FRAMES / 4,
   `探测跑过一个静默窗口后自己收了（${mutedFrames} 帧没画）`);
 ok(CS.stats().probe.rounds >= 1 && CS.stats().probe.loss === 0,
@@ -381,7 +376,6 @@ ok(!badField, '渲染参数里没有 NaN / 非有限值' + (badField ? ' → ' +
 
 section('GL 视图可见性门控（E1）');
 {
-  pageOpen = false;
   const fpsGate = gates.creative.fpsFn;
   stageVisible = true;
   ok(fpsGate() > 0, '舞台可见且播放中：GL 请求帧');
@@ -393,14 +387,6 @@ section('GL 视图可见性门控（E1）');
   tick(16.7);
   ok(renderCalls.length === beforeHidden, '不可见期间 tick 不触发任何渲染');
 
-  // 全屏页打开时活动的是第二块画布，与抽屉无关。
-  pageOpen = true;
-  ok(fpsGate() > 0, '全屏沉浸页打开：不受抽屉状态影响，GL 照常请求帧');
-  const beforePage = renderCalls.length;
-  tick(16.7);   // pickView 切到页画布会补一帧，随后本帧再渲染一次
-  ok(renderCalls.length > beforePage, '页打开时切挂载点补帧并渲染');
-
-  pageOpen = false;
   stageVisible = true;
   tick(16.7);   // 复位活动视图，避免污染后续测试
 }
@@ -641,8 +627,6 @@ section('渲染代价探测');
 function freshStage() {
   knownEls.stage.children.length = 0;
   knownEls.stage.firstChild = null;
-  knownEls['lyric-page'].children.length = 0;
-  knownEls['lyric-page'].firstChild = null;
   sandbox.CreativeGL.isAvailable = () => true;
   sandbox.CreativeGL.create = () => makeFakeEngine();
   delete gates.creative;
@@ -712,7 +696,7 @@ ok(r2.active === true && p2.inst.degradedBecause() === null,
   '中档机器：留住了这一层，只是画面分辨率低了');
 const dpr2 = p2.engines.map((e) => e.lastResize.d);
 ok(dpr2.every((d) => Math.abs(d - 1.5 * 1.10 * 0.6) < 1e-6),
-  `两块画布都按最低档重设过后备缓冲（dpr=${dpr2.join(' / ')}）`);
+  `画布按最低档重设过后备缓冲（dpr=${dpr2.join(' / ')}）`);
 
 const p3 = freshStage();
 const r3 = runProbe(p3, [60, 55, 50]);
@@ -727,7 +711,7 @@ ok(p3.engines.every((e) => e.disposed === true), '重机器：GL 上下文跟着
 const beforeRetry = engines.length;
 const gotRetry = p3.inst.attach(true, { force: true });
 ok(gotRetry === '3d', '重机器：用户强制重试之后重新起来了');
-ok(engines.length === beforeRetry + 2, `重试各开一块新画布（+${engines.length - beforeRetry}）`);
+ok(engines.length === beforeRetry + 1, `重试重开一块新画布（+${engines.length - beforeRetry}）`);
 const afterRetry = pump(p3, 400, [60, 55, 50]);   // 无条件跑 400 帧重负载
 ok(afterRetry.probe.skipped === true, '重机器：这次探测被跳过，不会再否定用户的决定');
 ok(afterRetry.probe.running === false && afterRetry.probe.pending === false,
@@ -960,9 +944,6 @@ section('三维歌词：图集去重契约');
   const cssrc = src('creative-stage.js');
   ok(/kick:\s*kickStaticFrame/.test(cssrc),
     'CreativeStage 导出 kick（视图切换补帧）');
-  const stsrc = src('stage.js');
-  ok(/CreativeStage\.kick\(\)/.test(stsrc),
-    'stage.js setPage 切换时调用 CreativeStage.kick()');
 
   // 在独立沙箱里加载 lyric3d.js：桩 2D 上下文只记录 fillText 的文字。
   const fillLog = [];
@@ -1024,8 +1005,6 @@ section('降级路径');
 // 先把上一次成功挂载留下的画布清掉，否则"有没有残留画布"这一条断言测不准。
 knownEls.stage.children.length = 0;
 knownEls.stage.firstChild = null;
-knownEls['lyric-page'].children.length = 0;
-knownEls['lyric-page'].firstChild = null;
 
 sandbox.CreativeGL.create = () => null;
 sandbox.CreativeGL.isAvailable = () => true;

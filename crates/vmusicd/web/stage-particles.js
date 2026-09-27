@@ -47,7 +47,6 @@
   };
 
   var stageEl = null;
-  var pageEl = null;
   var views = [];          // [{ el, host, canvas, ctx, w, h, cx, cy, rx, ry, fade0, fade1, pool }]
   var active = null;
   var renderer = null;
@@ -539,7 +538,7 @@
   }
 
   function pickView() {
-    var want = Stage.isPageOpen() ? views[1] : views[0];
+    var want = views[0];
     if (want && want !== active) {
       if (active && renderer) renderer.clear(active);
       active = want;
@@ -565,7 +564,6 @@
 
   function init() {
     stageEl = document.getElementById('stage');
-    pageEl = document.getElementById('lyric-page');
     // onset.js 是硬依赖：没有它就没有"鼓点"，脉冲会永远停在 0，于是涟漪、
     // 律动强度、targetFps 的忙判定一起静默失效——画面还在动，但和音乐脱钩了。
     // 这种"活着但错着"的状态比直接不初始化更难发现，所以宁可不起这一层。
@@ -575,8 +573,6 @@
     var a = mountView(stageEl, '.stage-lyrics');
     if (!a) return null;
     views = [a];
-    var b = mountView(pageEl, '.lp-body');
-    if (b) views.push(b);
     active = a;
 
     Stage.gate('particles', targetFps, tick);
@@ -615,7 +611,6 @@
     active = null;
     renderer = null;
     stageEl = null;
-    pageEl = null;
   }
 
   var api = {

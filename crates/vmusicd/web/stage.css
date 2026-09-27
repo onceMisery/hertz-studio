@@ -91,11 +91,6 @@
   --lyric-font-size: 14.5px;
   --lyric-line-height: 1.6;
   --lyric-gap: 10px;
-  /* 全屏页要的是"一句占满视线"，不是"更大的侧栏"。原来 42px 上限读起来仍像
-     列表；提到 68px 之后，短行才撑得起这套排版，正在唱的那一行也才有分量。
-     长行由 .lyric-page 上的 text-wrap 断行，不会溢出。 */
-  --lyric-page-size: clamp(30px, 5.6vw, 68px);
-  --lyric-page-line-height: 1.28;
   --lyric-active-weight: 650;
   --lyric-active-scale: 1.045;
 
@@ -128,55 +123,14 @@
      于是换行读起来是「一排跟着翻」而不是「整版同时跳」。0 等于关掉。 */
   --lyric-reveal-stagger: 22ms;
 
-  /* 行深：离当前行越远越往屏幕里退。没有它，旋转整块歌词只是"斜了一下"；
-     有了它，行与行处在不同深度，转起来才产生视差，才读得出是立体。
-     侧栏没有 perspective，这个值在那边不产生任何视觉效果，所以只在 .lp-body
-     里给非零值。 */
+  /* 行深：离当前行越远越往屏幕里退。侧栏没有 perspective，恒为 0，
+     translateZ 全部落在同一平面上；旧全屏页曾在 .lp-body 里给非零值，
+     页面摘除后保留 0 默认值，--row-d 的 calc 链路原样不动。 */
   --lyric-row-depth: 0px;
 
   /* 这两个由 stage.js 读回来参与运算，不是纯视觉量 */
   --lyric-dim-window: 7;
   --lyric-snap-span: 3;
-
-  /* --- 全屏舞台 3D 视角 ---
-     透视距离越小，同样的转角产生的形变越大（越"鱼眼"）。1100px 在 27 寸屏上
-     大约是"能看出是立体、但不会把字拉变形"的位置。 */
-  --lp-persp: 1100px;
-  --lp-rx: 0deg;
-  --lp-ry: 0deg;
-  --lp-tilt-max: 26;          /* 单位是度数，JS 按数值读 */
-  --lp-drift: 1;              /* 自动漂移幅度，0 关掉 */
-  --lp-drift-resume-ms: 1400; /* 停手多久后漂移重新接管 */
-
-  /* 心象（散落）模式：当前行的每个词按确定性伪随机量散开。
-     spread-* 是唯一需要调的三个数——它们决定"散得多远"，而每个词散向哪里
-     由构建时写好的 --w-dx/--w-dy/--w-rot/--w-sc 决定，不随时间变。
-     单位必须是 em 而不是 px：这一档字号会跟着视口从 30px 涨到 68px，
-     写死 px 的话字号一变，散开量与字宽就脱钩了（之前 86px 配 42px 是 2em，
-     配 68px 只剩 1.26em，相邻字各挪一个整字宽，整行糊成一团）。
-     不重叠是可以算出来的：相邻两字朝彼此最多各挪 --lp-spread-x，
-     合计 0.56em；而字间距（.word 的左右 margin 各 0.3em）有 0.6em。
-     0.6 > 0.56，所以任何随机组合都碰不上。改这两个值时要一起守住这个不等式。 */
-  --lp-spread-x: 0.28em;
-  --lp-spread-y: 0.2em;
-  --lp-spread-r: 5deg;
-
-  /* 粒子让位带的半宽（占舞台高度的比例）。只罩住当前行上下几行，
-     而不是整个滚动视口——带太宽等于整层粒子都被压暗，白铺一层。 */
-  --lp-fade-span: 0.17;
-
-  /* --- 全屏舞台背景盒（粒子封面 / 星河共用）---
-     这块板子在 .lp-scene 里，所以它和歌词共用同一个透视与用户拖出来的角度。
-     100vmin = 铺满显示区短边：横屏时铺满整高、竖屏时铺满整宽，背景四周
-     不再留黑边；画面超出长边的部分自然裁出屏外。
-     尺寸仍可由驾驶舱旋钮覆盖。 */
-  --lp-cover-size: 100vmin;
-  --lp-cover-spin: 22s;
-  /* 往画面深处推的距离。负值让板子退到歌词平面之后，这样旋转时它是"舞台
-     后面的装置"，而不是糊在字上的一块贴纸。推得越远，透视缩得越小，
-     所以尺寸提上来的同时这里要收一点，否则又缩回原来那个大小。 */
-  --lp-cover-depth: 8vmin;
-  --lp-cover-tilt: -7deg;
 
   /* 逐字流光 */
   --lyric-singing-scale: 1.1;
@@ -209,7 +163,7 @@
   --lyric-breath-px: 9px;
 
   /* 节拍踢动：起音时刻当前行沿 y 上抬的幅度（由 --beat 0..1 包络驱动，
-     stage.js 写入）。侧栏小字给 4px；.lp-line 里放大到适配大字的量。 */
+     stage.js 写入）。 */
   --lyric-beat-px: 4px;
 
   /* 模糊 / 发光强度 */
@@ -248,8 +202,7 @@
 }
 
 /* 舞台内部的取色光晕：跟着封面走，随频谱呼吸 */
-.stage::before,
-.lyric-page::before {
+.stage::before {
   content: "";
   position: absolute;
   inset: -30%;
@@ -543,475 +496,6 @@ body.is-playing .disc { animation-play-state: running; }
   text-shadow: none;
   background-image: linear-gradient(var(--lyric-highlight), var(--lyric-highlight));
 }
-/* 全屏页给正在唱的字加一道光柱：基线下方一条两端收口的短横，
-   亮度直接吃 --stage-energy，所以它随鼓点呼吸而不需要任何 JS。 */
-.lyric-page .word.singing::after {
-  content: "";
-  position: absolute;
-  left: 8%;
-  right: 8%;
-  bottom: -0.18em;
-  height: 2px;
-  border-radius: 2px;
-  pointer-events: none;
-  background: linear-gradient(90deg,
-    transparent,
-    rgba(var(--lyric-highlight-rgb), 0.92) 26%,
-    rgba(var(--lyric-highlight-rgb), 0.92) 74%,
-    transparent);
-  opacity: calc(0.3 + var(--stage-energy) * 0.62);
-}
-/* 当前行的字各自极缓地浮动，相位由构建时算好的 --w-fl 决定。
-   同一行所有字同步浮会看着像整块贴图在抖；错开相位才像"字是活的"。 */
-@keyframes lyric-word-float {
-  0%, 100% { translate: 0 0; }
-  50% { translate: 0 calc(var(--lyric-word-float-px) * -1); }
-}
-.lyric-page .lp-line.active .word {
-  animation: lyric-word-float var(--lyric-word-float-ms) ease-in-out infinite;
-  animation-delay: calc(var(--w-fl, 0) * -1s);
-}
-
-.lyric-empty {
-  color: var(--muted);
-  font-size: 12.5px;
-  padding: 18px 0;
-}
-
-/* ==========================================================================
-   3. 全屏歌词页
-   ========================================================================== */
-
-.lyric-page {
-  position: fixed;
-  inset: 0;
-  z-index: 70;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg);
-  overflow: hidden;
-  opacity: 0;
-  visibility: hidden;
-  transform: scale(1.02);
-  transition:
-    opacity var(--dur-3) var(--ease),
-    transform var(--dur-3) var(--ease),
-    visibility var(--dur-3) step-end;
-}
-.lyric-page.open {
-  opacity: 1;
-  visibility: visible;
-  transform: none;
-  transition:
-    opacity var(--dur-3) var(--ease),
-    transform var(--dur-3) var(--ease),
-    visibility 0s step-start;
-}
-.lyric-page::before { inset: -20%; filter: blur(70px); opacity: calc(0.3 + var(--stage-glow) * 0.25); }
-.lyric-page > * { position: relative; z-index: 1; }
-
-.lp-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 22px;
-}
-.lp-title {
-  font-size: 14px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-.lp-sub { font-size: 12px; color: var(--muted); }
-.lp-spacer { flex: 1; }
-
-.lp-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  /* 透视放这里、preserve-3d 放子层，是刻意的：规范里 overflow 非 visible 与
-     mask 都会把**同一元素**的 transform-style 强制压平成 flat。两者写在一个
-     节点上，每行的 translateZ 就全部失效，旋转只剩一块斜掉的平面。 */
-  perspective: var(--lp-persp);
-  /* 这里以前是 justify-content: center + 轨道 min-height:100%：短歌词确实被
-     垂直居中了，但长歌词的轨道一旦溢出容器，居中会把整条往上顶成负的
-     offsetTop，JS 算出来的滚动目标全被吃掉。现在「当前行停在锚点」这件事
-     完全由 stage.js 的 lo/hi 边界负责，短歌词靠边界钳制自然停在不动的位置，
-     两种长度走同一条路径。 */
-  gap: 14px;
-  /* overflow / mask / padding 都不在这一层了：它们会裁掉溢出 body、铺满视口
-     的全屏粒子背景（.lp-cover.gl-active）。歌词轨自己的裁剪与渐隐收进
-     .lp-track-clip，两个子系统互不干扰。 */
-}
-/* 歌词轨裁剪层：overflow + mask 只能待在这种"普通"节点上（见上条），
-   preserve-3d 全部留在 .lp-scene。 */
-.lp-track-clip {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  padding: 0 clamp(20px, 7vw, 96px);
-  /* 全屏页里没有"页面滚动"这回事，禁掉浏览器手势，把纵向拖拽留给 JS 唱片式滚动 */
-  touch-action: none;
-  /* 顶部/底部渐隐，让大段歌词有进出场的感觉 */
-  mask-image: linear-gradient(180deg, transparent, #000 14%, #000 86%, transparent);
-  -webkit-mask-image: linear-gradient(180deg, transparent, #000 14%, #000 86%, transparent);
-}
-/* 3D 场景层：承载视角旋转。滚动位移在它内部的轨道上，两者互不干扰——
-   旋转不会把滚动量算进矩阵，滚动也不会重置用户拖出来的角度。 */
-.lp-scene {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  transform-style: preserve-3d;
-  transform: rotateX(var(--lp-rx)) rotateY(var(--lp-ry));
-  transition: transform var(--dur-2) var(--ease);
-}
-.lp-track {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  width: 100%;
-  will-change: transform;
-  /* 行是轨道的子元素，轨道不 preserve-3d 的话行的 Z 会被压回轨道平面，
-     视差就只剩"当前行前后的几行大小不同"而没有层次。 */
-  transform-style: preserve-3d;
-}
-.lp-line {
-  /* 行的 translateZ 在 1100px 透视下会把远处的字缩小，这里补一档缩放下限，
-     让"退远"表现为退远而不是缩成一团。 */
-  --lyric-row-depth: 42px;
-  /* 大字下节拍踢动也要放大：约字高的 1/4 */
-  --lyric-beat-px: clamp(8px, 1.5vh, 18px);
-  font-size: calc(var(--lyric-page-size) * var(--lyric-size-scale));
-  font-weight: 650;
-  line-height: var(--lyric-page-line-height);
-  letter-spacing: -0.4px;
-  color: rgba(255, 255, 255, 0.34);
-  /* 必须和 .lyric 一样按中心缩放。这里是 0 50% 的话，--row-d 越大缩得越小，
-     远处行会一边缩小一边朝左边飘走，读起来像排版错位而不是景深。 */
-  transform-origin: 50% 50%;
-  /* 全屏页的字大，衰减要更慢半拍才不显得跳，所以这里重列一遍时长；
-     但过渡的**属性集合**必须和 .lyric 保持一致，否则 scale / 错峰会漏掉。
-     时长同样吃 --line-ms（每行自己算），只是兜底换成给大字号定的 --dur-3。 */
-  --line-ms: var(--dur-3);
-  transition:
-    color var(--lyric-line-ms) var(--ease),
-    opacity calc(var(--line-ms) * var(--lyric-alpha-ratio)) var(--ease) calc(var(--row-d) * var(--lyric-reveal-stagger)),
-    transform var(--line-ms) var(--ease) calc(var(--row-d) * var(--lyric-reveal-stagger)),
-    scale var(--line-ms) var(--ease) calc(var(--row-d) * var(--lyric-reveal-stagger)),
-    filter var(--line-ms) var(--ease) calc(var(--row-d) * var(--lyric-reveal-stagger));
-}
-/* 透明度 / 模糊 / 缩放全部由 .lyric 那组 --row-d 公式给出，这里不再各自写一遍：
-   两处写同一个属性只会互相盖，而且 past 的 blur 会直接压掉距离衰减。
-   剩下的「读不读得清」问题由 --lyric-dim-floor 兜住。 */
-.lp-line.active {
-  color: var(--text);
-  opacity: 1;
-  filter: none;
-}
-/* 居中是 3D 视角的前提：左对齐的文本块绕自身中心旋转时，整块会朝一侧甩出
-   画面，看着像布局坏了而不是镜头在动。居中之后旋转是对称的。
-   balance 让长行断成两行时两边字数接近——字号提到 68px 之后，
-   不断行会溢出，随便断又容易留下一个孤字。 */
-.lyric-page .lp-line { text-align: center; text-wrap: balance; }
-.lyric-page .lyric-words { display: inline-block; }
-
-/* 当前行的"亮起来"：三层 text-shadow 各自负责一件事——
-   贴边的高光、中等半径的主色晕、大半径的环境光。只有一层的话要么糊成一团
-   要么边缘发脏；三层半径拉开比例才有 Mineradio 那种"字在发光"的层次。 */
-.lyric-page .lp-line.active {
-  text-shadow:
-    0 0 6px rgba(var(--lyric-highlight-rgb), 0.55),
-    0 0 22px rgba(var(--lyric-highlight-rgb), calc(0.30 + var(--stage-energy) * 0.30)),
-    0 0 68px rgba(var(--lyric-highlight-rgb), calc(0.16 + var(--stage-energy) * 0.26));
-}
-/* 卡拉OK 模式下当前行整体也吃主色，和侧栏保持一致 */
-.lyric-page[data-lp-mode="karaoke"] .lp-line.active { color: var(--lyric-highlight); }
-/* 当前行极缓地起伏一轮。走独立的 translate 属性而不是 transform：transform
-   已经被 --row-d 的距离衰减占着，动画写在 transform 上会把整套衰减整个盖掉，
-   而 translate 与 transform 是各自合成再相乘的，两者互不干涉。
-   只给全屏页：侧栏行高小，7 秒的位移在那个尺度上看着像抖。 */
-@keyframes lyric-breathe {
-  0%, 100% { translate: 0 0; }
-  38% { translate: 0 calc(var(--lyric-breath-px) * -1); }
-  70% { translate: 0 calc(var(--lyric-breath-px) * 0.45); }
-}
-.lyric-page .lp-line.active {
-  animation: lyric-breathe var(--lyric-breath-ms) ease-in-out infinite;
-}
-.lp-line.active .word {
-  font-size: inherit;
-}
-/* --- 心象（散落）模式：当前行的词四散开，像被说出来的顺序 --- */
-.lyric-page[data-lp-mode="scatter"] .lp-line.active {
-  /* 散开需要纵向余量：行高与内边距撑出来的这段空间，就是 --lp-spread-y
-     允许的落点范围，不撑开就会压到上下相邻行。 */
-  padding: 0.5em 0;
-  line-height: 2.3;
-}
-/* 相邻行也跟着拉开，否则当前行撑高了、上下两行还是挤在 14px 的 gap 上 */
-.lyric-page[data-lp-mode="scatter"] .lp-track { gap: 22px; }
-.lyric-page[data-lp-mode="scatter"] .lp-line.active .word {
-  display: inline-block;
-  /* 字间距是散落不重叠的前提：CJK 逐字切分后相邻 span 之间本来没有空隙，
-     全靠这里给。左右各 0.3em → 相邻字之间 0.6em，大于两侧各 0.28em 的
-     最大相向位移 0.56em。不等式写在 --lp-spread-x 的注释里。 */
-  margin: 0 0.3em;
-  transform:
-    translate(calc(var(--w-dx) * var(--lp-spread-x)),
-              calc(var(--w-dy) * var(--lp-spread-y)))
-    rotate(calc(var(--w-rot) * var(--lp-spread-r)))
-    scale(var(--w-sc));
-  /* 散开后词与词会靠近，给一点各自的落位过渡，切换模式时是"散开"而不是跳。
-     只挂 transform：换色是改 background-image（逐字那条渐变），而渐变不可
-     动画，写进 transition 只会让人误以为颜色会平滑过渡。 */
-  transition: transform var(--dur-3) var(--ease);
-}
-/* 冷暖两色交替：单色的散落会糊成一团字，分两个色相才读得出它们是独立的词。
-   必须改写 background-image 而不是 color —— .word 的逐字擦除是
-   background-clip:text 配 -webkit-text-fill-color: transparent 做的，属性
-   填充本身就是透明的，写 color 会被那个 transparent 直接盖掉，一个字都换
-   不了色（症状：心象看着仍是卡拉OK 那套单色渐变）。换掉渐变里的「已唱」段
-   即可，未唱段仍是 idle 色，逐字进展也就一并保住了。 */
-.lyric-page[data-lp-mode="scatter"] .lp-line.active .word:nth-child(odd) {
-  background-image: linear-gradient(
-    to right,
-    var(--lyric-highlight) 0%,
-    var(--lyric-highlight) calc(var(--word-progress, 0%) - var(--lyric-edge-soft)),
-    var(--lyric-idle) calc(var(--word-progress, 0%) + var(--lyric-edge-soft)),
-    var(--lyric-idle) 100%
-  );
-}
-.lyric-page[data-lp-mode="scatter"] .lp-line.active .word:nth-child(even) {
-  background-image: linear-gradient(
-    to right,
-    var(--music-highlight-alt) 0%,
-    var(--music-highlight-alt) calc(var(--word-progress, 0%) - var(--lyric-edge-soft)),
-    var(--lyric-idle) calc(var(--word-progress, 0%) + var(--lyric-edge-soft)),
-    var(--lyric-idle) 100%
-  );
-}
-/* 正在唱的字的辉光跟着走：不然偶数位明明是青色，光晕还是主色那一圈白，
-   看着像两层东西没对齐。 */
-.lyric-page[data-lp-mode="scatter"] .lp-line.active .word:nth-child(even).singing {
-  text-shadow:
-    0 0 var(--lyric-singing-glow)
-      rgba(var(--music-highlight-alt-rgb), var(--lyric-singing-glow-alpha)),
-    0 0 calc(var(--lyric-singing-glow) * 3.2)
-      rgba(var(--music-highlight-alt-rgb), calc(var(--lyric-singing-glow-alpha) * 0.5));
-}
-/* 非当前行不参与散开，否则整页都是飘着的字，没法看进度在哪 */
-.lyric-page[data-lp-mode="scatter"] .lp-line:not(.active) .word {
-  transform: none;
-}
-
-/* ---------------------------------------------------------------------------
-   舞台封面盘
-
-   一张真正的 3D 双面卡片：正面是封面，背面是同一张图的水平镜像。用两张
-   backface-visibility: hidden 的面，而不是让单张图转过去——单面卡片转到
-   90° 之后会突然翻回正面，看起来像坏了而不是在转。
-
-   纵向位置跟着 --lyric-anchor-ratio，也就是当前行所在的锚点。取同一个令牌
-   而不是再抄一遍 38.2%：两处各写一份的话，调锚点时歌词走了、封面留在原地。
-   --------------------------------------------------------------------------- */
-.lp-cover {
-  position: absolute;
-  left: 50%;
-  top: calc(var(--lyric-anchor-ratio) * 100%);
-  width: var(--lp-cover-size);
-  height: var(--lp-cover-size);
-  margin: calc(var(--lp-cover-size) / -2) 0 0 calc(var(--lp-cover-size) / -2);
-  transform-style: preserve-3d;
-  transform: translateZ(calc(var(--lp-cover-depth) * -1)) rotateX(var(--lp-cover-tilt));
-  /* 不吃指针：这一层横在歌词行上面，收下事件会让"点一行跳转"失效 */
-  pointer-events: none;
-  display: none;
-  /* 跟着 --stage-energy 呼吸。能量门已经按帧门频率在写了，这里只是消费——
-     封面层不需要自己的时钟，也不必再多占一个帧门。 */
-  scale: calc(1 + var(--stage-energy) * 0.05);
-}
-/* 背景盒在两种粒子场景下都显示：has-cover（专辑封面）/ has-starriver（星河） */
-.lyric-page.has-cover .lp-cover,
-.lyric-page.has-starriver .lp-cover { display: block; }
-
-/* 共享 GL 画布铺满背景盒：粒子封面与星河都画在这一块画布上。
-   默认隐藏，仅当某粒子场景真正生效（.gl-active）时显示。 */
-.lp-cover-gl {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  display: none;
-}
-.lp-cover.gl-active .lp-cover-gl { display: block; }
-
-/* 粒子层生效时隐藏 CSS 双面旋转卡片，两层不同时出现 */
-.lp-cover.gl-active .lp-cover-spin { display: none; }
-/* 粒子场景下这一层是**全屏背景**：以视口中心为基准撑成 100vw × 100vh，
-   溢出 body 也不受裁剪（裁剪与 mask 已收进 .lp-track-clip）。
-   原有 100vmin 方盒定位（left/top/margin）、translateZ+rotateX 变换和能量
-   呼吸全部失效——它们是为歌词中间那块小封面准备的。视角旋转仍由外层
-   .lp-scene 的 rotateX/rotateY 提供，所以 360° 旋转照样带着背景走。 */
-.lp-cover.gl-active {
-  left: 50%;
-  top: 50%;
-  width: 100vw;
-  height: 100vh;
-  margin: -50vh 0 0 -50vw;
-  transform: none;
-  scale: none;
-}
-/* 全屏粒子背景不显示专辑封面那圈主色辉光（星河与粒子封面都不显示） */
-.lp-cover.gl-active::before { display: none; }
-
-/* 盘后的一圈主色辉光：让封面"挂在舞台上"，而不是浮在黑底上 */
-.lp-cover::before {
-  content: "";
-  position: absolute;
-  inset: -14%;
-  border-radius: 50%;
-  background: radial-gradient(closest-side, rgba(var(--music-highlight-rgb), 0.55), transparent);
-  filter: blur(26px);
-  opacity: calc(0.3 + var(--stage-energy) * 0.4);
-}
-
-/* 背景场景切换组：样式与歌词模式组同一套语言 */
-.lp-scenes {
-  display: flex;
-  gap: 4px;
-  margin-left: 18px;
-  padding: 3px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-}
-.lp-scene-btn {
-  padding: 5px 11px;
-  font: inherit;
-  font-size: 12px;
-  color: var(--muted);
-  background: transparent;
-  border: none;
-  border-radius: 7px;
-  cursor: pointer;
-}
-.lp-scene-btn:hover { color: var(--text); background: var(--hover); }
-.lp-scene-btn.active {
-  color: #0a0c0f;
-  background: var(--text);
-}
-
-.lp-cover-spin {
-  position: absolute;
-  inset: 0;
-  transform-style: preserve-3d;
-  animation: lp-cover-turn var(--lp-cover-spin) linear infinite;
-}
-@keyframes lp-cover-turn { to { transform: rotateY(360deg); } }
-
-.lp-cover-face {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  border-radius: var(--r-lg);
-  backface-visibility: hidden;
-  -webkit-backface-visibility: hidden;
-  background: var(--panel-solid);
-  /* 透明度放在面上而不是盘上：.lp-cover 带着 transform-style: preserve-3d，
-     给它加 opacity 会建分组层并把 3D 压平，两面卡片就塌成一张。 */
-  opacity: 0.82;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.09),
-    0 18px 46px rgba(0, 0, 0, 0.5);
-}
-.lp-cover-face img {
-  width: 100%; height: 100%;
-  object-fit: cover;
-  display: block;
-}
-/* 当前曲目没有封面图时的占位：铺一层主题色渐变 + 一圈内环，
-   让「显示舞台封面」开着时看到的是一张有内容的盘，而不是 --panel-solid 的死灰。
-   之所以要这一层 —— has-cover 已经不再要求「有封面图」，否则那个开关在这种
-   曲目下怎么点都不显示，看着就是坏的。 */
-.lyric-page.no-cover-art .lp-cover-face {
-  background:
-    radial-gradient(circle at 50% 42%,
-      rgba(var(--music-highlight-rgb), 0.42), transparent 62%),
-    radial-gradient(circle at 50% 50%,
-      transparent 26%, rgba(255, 255, 255, 0.10) 27%,
-      rgba(255, 255, 255, 0.10) 29%, transparent 30%),
-    linear-gradient(155deg,
-      rgba(var(--music-highlight-rgb), 0.26),
-      rgba(var(--music-highlight-alt-rgb), 0.16) 60%,
-      var(--panel-solid));
-}
-/* 背面压暗一档并降一点饱和：正反面要有主次，否则转起来像两面都在"正面"。
-   镜像是为了让翻转读得出连续性——看到的内容和正面有关，而不是随机一块色。 */
-.lp-cover-back {
-  transform: rotateY(180deg);
-  filter: brightness(0.62) saturate(0.82);
-}
-.lp-cover-back img { transform: scaleX(-1); }
-
-.lp-modes {
-  display: flex;
-  gap: 4px;
-  margin-left: 18px;
-  padding: 3px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-}
-.lp-mode {
-  padding: 5px 11px;
-  font: inherit;
-  font-size: 12px;
-  color: var(--muted);
-  background: none;
-  border: 0;
-  border-radius: 7px;
-  cursor: pointer;
-  transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
-}
-.lp-mode:hover { color: var(--text); background: var(--hover); }
-.lp-mode.active {
-  color: var(--accent-ink);
-  background: var(--accent);
-  font-weight: 600;
-}
-/* 窄屏下标题让位给模式组：模式是这一层里最常用的控件 */
-@media (max-width: 620px) {
-  .lp-head { flex-wrap: wrap; }
-  .lp-modes { margin-left: 0; order: 3; width: 100%; justify-content: center; }
-}
-
-.lp-sub2 {
-  font-size: clamp(13px, 1.4vw, 18px);
-  color: var(--muted);
-  line-height: 1.5;
-  min-height: 1.5em;
-}
-
-.lp-foot {
-  flex: none;
-  padding: 14px clamp(20px, 7vw, 96px) 22px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 14px;
-}
-.lp-foot input[type="range"] { flex: 1 1 140px; min-width: 90px; }
-.lp-foot .lp-time {
-  font-size: 12px; color: var(--muted);
-  font-variant-numeric: tabular-nums; flex: none;
-}
-
 /* ==========================================================================
    4. 播放条：VCP 玻璃配方 + 6px 进度条
    ========================================================================== */
@@ -1074,13 +558,13 @@ input[type="range"]::-moz-range-thumb {
 #progress::-webkit-slider-runnable-track { background: transparent; }
 #progress::-moz-range-track { background: transparent; }
 
-#progress, #lp-progress, #stage-progress { position: relative; z-index: 1; margin: 0; }
+#progress, #stage-progress { position: relative; z-index: 1; margin: 0; }
 
 /* 注意：这里曾经重复定义了一份全局 .ctrl / .ctrl-primary
    （background: var(--music-highlight)）。.ctrl-primary 全站只有底部播放条在
    用，而 style.css 已经负责它（--accent）；stage.css 加载在后，同优先级规则
    会把底栏主按钮抢成琥珀色 --music-highlight——这就是「按钮突然变黄」的根因。
-   全屏歌词页的按钮走 .lp-btn，底栏交给 style.css，此处不再重复定义。 */
+   底栏交给 style.css，此处不再重复定义。 */
 
 .btn-pill {
   border-radius: 999px;
@@ -1089,54 +573,13 @@ input[type="range"]::-moz-range-thumb {
 }
 .btn-pill:hover { background: var(--hover); }
 
-/* 舞台里的小控制条（全屏歌词页底部）沿用同一套按钮尺寸 */
-.lp-btn {
-  width: 36px; height: 36px;
-  display: grid; place-items: center;
-  border-radius: 50%;
-  border: var(--glass-border);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text);
-  cursor: pointer;
-  transition: background var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
-}
-.lp-btn:hover { background: var(--hover); }
-.lp-btn:active { transform: scale(0.92); }
-.lp-btn svg { width: 17px; height: 17px; fill: currentColor; }
-/* 舞台里的即时开关（目前只有封面盘）用实心态表示"开着"，和 .stage-mode.active
-   同一套语言——一排同样的圆形图标里，否则看不出哪个是活的。 */
-.lp-btn.active {
-  background: var(--music-highlight);
-  color: var(--accent-ink);
-  border-color: transparent;
-}
-/* 自动环转开启时，轨道图标自身缓慢公转——一排圆钮里不用细看也知道它在转 */
-#lp-autospin.active svg { animation: lp-orbit-spin 4s linear infinite; }
-@keyframes lp-orbit-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) {
-  #lp-autospin.active svg { animation: none; }
-}
-/* 开着但当前曲目没有封面图：降一档亮度说明"开关是好的，只是暂时没东西可看"。
-   不做成 disabled，那会被读成按钮坏了。 */
-.lp-btn.is-void { opacity: 0.45; }
-.lp-btn.primary {
-  background: var(--music-highlight);
-  color: var(--accent-ink);
-  border-color: transparent;
-}
-.lp-btn.primary svg { width: 20px; height: 20px; }
-.lp-btn .ic-pause { display: none; }
-.lp-btn.primary.is-playing .ic-play { display: none; }
-.lp-btn.primary.is-playing .ic-pause { display: block; }
-
 /* ==========================================================================
    5. 低性能降级
    ========================================================================== */
 
 /* 采样到的帧率低于阈值时由 stage.js 挂上这个类：
    去掉大面积模糊（最贵的一项）、停掉旋转与光晕缩放。 */
-body.stage-lowfx .stage::before,
-body.stage-lowfx .lyric-page::before { filter: none; opacity: 0.18; }
+body.stage-lowfx .stage::before { filter: none; opacity: 0.18; }
 body.stage-lowfx .disc { animation: none !important; }
 body.stage-lowfx .disc-ring { display: none; }
 body.stage-lowfx .stage,
@@ -1155,13 +598,6 @@ body.stage-lowfx .ws-panel {
 /* 弱机上把行过渡砍到三分之一，但不是拍一个常数：按 --line-ms 折算，短句的
    「几乎瞬发」在降级后依然成立。写死 var(--dur-1) 会把 100ms 的 ad-lib 和
    4s 的长句拉成同一个时长，正好把这套 per-line 调度的意义抹掉。 */
-body.stage-lowfx .lp-line { transition-duration: calc(var(--line-ms) * 0.34); }
-body.stage-lowfx .lp-body { mask-image: none; -webkit-mask-image: none; }
-/* 封面盘的辉光模糊和投影按像素半径收费，lowfx 下摘掉；旋转本身是合成层上的
-   一次矩阵变换，成本几乎为零，留着。 */
-body.stage-lowfx .lp-cover::before { display: none; }
-body.stage-lowfx .lp-cover-face { box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.09); }
-
 /* 歌词的距离衰减以前是 JS 逐个元素写 opacity/filter，降级时靠 JS 跳过 blur
    分支。现在衰减整体搬到 CSS 之后，降级只需要把这几个旋钮拨到 0：公式还在，
    但每一项都算出「无变形」，浏览器少合成一层 blur 也就少一层开销。
@@ -1174,19 +610,6 @@ body.reduce-motion {
   --lyric-row-shrink: 0;
   --lyric-reveal-stagger: 0ms;
 }
-/* 3D 视角只受「减少动效」管辖，不受低性能降级管辖。
-   理由是这个项目的开销分布：真正贵的是大面积 blur 与 backdrop-filter（它们按
-   像素半径收费），而 perspective + 一个 rotateY 是合成层上的一次矩阵变换，
-   成本几乎为零。把 3D 跟着 lowfx 一起关掉，等于用一把为模糊设计的刀切掉了
-   本层最核心的表现力——弱机用户反而什么都看不到了。
-   倾角上限归零后 clamp(x, 0, 0) 恒等于 0，拖拽自然变成无操作；行深归零后
-   translateZ 全部落在同一平面上。两处都不需要在 stage.js 里加 if。 */
-body.reduce-motion {
-  --lp-persp: none;
-  --lp-tilt-max: 0;
-  --lp-drift: 0;
-}
-body.reduce-motion .lp-scene { transition: none; }
 /* 减少动效是用户明确的偏好，不是性能不够：连透明度都不该过渡，只保留
    瞬间的显隐。dim-step 归零等于取消距离衰减，远处行和当前行一样亮，
    不再靠空间层次引导视线，只剩下「哪一行在唱」这一个颜色信号。 */
@@ -1198,15 +621,6 @@ body.reduce-motion {
 /* 用户手动「减少动效」或系统偏好：全部动效归零，但布局不变 */
 body.reduce-motion .disc { animation: none !important; }
 body.reduce-motion .disc-ring { transition: none; }
-/* 减少动效下封面盘停止旋转，但**不消失**：这一层是用户主动打开的「要看什么」，
-   把它整个停掉等于替他改回「不要封面」。静止的板子仍在场景里，透视与拖拽
-   角度由上面的 --lp-persp / --lp-tilt-max 归零，退化成一张正面朝向的封面图。 */
-body.reduce-motion .lp-cover-spin { animation: none; }
-/* 呼吸起伏同理：减少动效只停掉「动」，行的显隐与衰减全部保留。 */
-body.reduce-motion .lyric-page .lp-line.active { animation: none; }
-/* 逐字层面同理：停掉浮动动画，并把「唱到的字弹起 / 没唱到的字缩小」压回 1，
-   这样染色照常走，只是不再有尺寸变化。 */
-body.reduce-motion .lyric-page .lp-line.active .word { animation: none; }
 body.reduce-motion {
   --lyric-singing-scale: 1;
   --word-idle-scale: 1;
@@ -1214,8 +628,7 @@ body.reduce-motion {
   /* 节拍踢动也归零：减少动效只保留静态排版与逐字染色 */
   --lyric-beat-px: 0px;
 }
-body.reduce-motion .stage::before,
-body.reduce-motion .lyric-page::before { transition: none; transform: none; }
+body.reduce-motion .stage::before { transition: none; transform: none; }
 
 /* ==========================================================================
    6. 响应式
@@ -1231,9 +644,6 @@ body.reduce-motion .lyric-page::before { transition: none; transform: none; }
   .stage-queue { display: none; }
 }
 @media (max-width: 620px) {
-  .lp-body { padding: 0 18px; gap: 10px; }
-  .lp-foot { padding: 10px 18px 16px; gap: 10px; }
-  .lp-foot .lp-time { font-size: 11px; }
   .disc-wrap { width: 132px; }
   .stage-mode { padding: 4px 8px; font-size: 11px; }
 }
@@ -1249,8 +659,6 @@ body.reduce-motion .lyric-page::before { transition: none; transform: none; }
   position: fixed;
   top: 0;
   right: 0;
-  /* 必须高于 .lyric-page(70)：驾驶舱现在要能在全屏舞台里打开。
-     两者同为 70 时靠 DOM 顺序侥幸压住，一旦有人调整节点顺序就会静默失效。 */
   z-index: 80;
   width: 372px;
   max-width: 92vw;
@@ -1704,7 +1112,7 @@ html.fx-on body.reduce-motion .disc-wrap::after { display: none; }
    9. 舞台粒子层（光尘与节拍涟漪）
    ========================================================================== */
 
-/* canvas 由 stage-particles.js 注入到 .stage 和 .lyric-page 里，位置排在
+/* canvas 由 stage-particles.js 注入到 .stage 里，位置排在
    歌词容器之前。纯装饰、不吃事件，所以 pointer-events 一律让开——
    歌词行是可点击的跳转锚点，被一层透明的 canvas 盖住就废了。 */
 .stage-particles {
@@ -1717,8 +1125,7 @@ html.fx-on body.reduce-motion .disc-wrap::after { display: none; }
 }
 /* 播放中才亮起来：静止时这一层本来就不画（帧门报 0），
    留个淡出比直接消失干净。 */
-body.is-playing .stage-particles,
-.lyric-page.open .stage-particles { opacity: 1; }
+body.is-playing .stage-particles { opacity: 1; }
 
 /* 节拍涟漪：12 个池化 span，位置与尺寸由 stage-particles.js 在起音那一刻写入，
    缩放和淡出交给 Web Animations 跑在合成线程上。画在 canvas 里也行，但那样
@@ -1852,7 +1259,7 @@ body.reduce-motion .stage-ripple { display: none; }
 }
 
 /* ==========================================================================
-   11. 沉浸演出：原生全屏、舞台坞、星幕
+   11. 侧栏舞台头的全屏入口
    ========================================================================== */
 
 /* --- 侧栏舞台头的全屏入口（与「队列」同排） ----------------------------- */
@@ -1872,188 +1279,3 @@ body.reduce-motion .stage-ripple { display: none; }
 }
 .stage-head-fs:hover { color: var(--text); background: var(--hover); }
 .stage-head-fs svg { width: 16px; height: 16px; }
-
-/* --- 全屏页头部的全屏按钮：展开/退出两个图标互斥 ------------------------- */
-#lp-fs .ic-compress { display: none; }
-body.fs-on #lp-fs .ic-expand { display: none; }
-body.fs-on #lp-fs .ic-compress { display: block; }
-
-/* --- 舞台场景坞：六个 WebGL 场景的一键切换 ------------------------------- */
-.lp-dock {
-  position: absolute;
-  z-index: 4;
-  left: 50%;
-  bottom: 92px;
-  transform: translateX(-50%);
-  display: flex;
-  gap: 4px;
-  padding: 5px;
-  max-width: calc(100vw - 28px);
-  overflow-x: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: none;
-  border-radius: 17px;
-  background: var(--glass-bg);
-  border: var(--glass-border);
-  box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(var(--glass-blur)) saturate(120%);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(120%);
-  /* 容器本身不吃指针，缝隙处的拖拽/点击直接落到歌词轨；按钮各自开口子。 */
-  pointer-events: none;
-  transition: opacity 0.32s var(--ease);
-}
-.lp-dock::-webkit-scrollbar { display: none; }
-.lp-dock-btn {
-  pointer-events: auto;
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 8px 13px;
-  border: 0;
-  border-radius: 12px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-  transition:
-    background var(--dur-1) var(--ease),
-    color var(--dur-1) var(--ease),
-    transform var(--dur-1) var(--ease);
-}
-.lp-dock-ic { width: 17px; height: 17px; }
-.lp-dock-btn:hover { color: var(--text); background: var(--hover); }
-.lp-dock-btn:active { transform: scale(var(--press-scale)); }
-.lp-dock-btn.active {
-  color: var(--accent-ink);
-  background: rgb(var(--accent-rgb));
-}
-
-/* --- 原生全屏：静止 2.6s 隐去操作层与光标，移动鼠标/按键唤回 ------------- */
-body.fs-on { cursor: none; }
-body.fs-on.fs-chrome { cursor: default; }
-body.fs-on .lp-head,
-body.fs-on .lp-foot,
-body.fs-on .lp-dock {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.32s var(--ease);
-}
-body.fs-on.fs-chrome .lp-head,
-body.fs-on.fs-chrome .lp-foot { opacity: 1; pointer-events: auto; }
-body.fs-on.fs-chrome .lp-dock { opacity: 1; }
-body.fs-on.fs-chrome .lp-dock-btn { pointer-events: auto; }
-
-/* --- 星幕（halo） -------------------------------------------------------- */
-
-/* 半调点环层：.lp-scene 的第一个孩子，z-index 0 垫在歌词轨（其后兄弟）之下。
-   不用 translateZ：全屏页透视盒高度为 0 时（见 --lyric-row-depth 处注释），
-   非零 Z 会被异常放大；层级改用 z-index，铺满靠 scale。指针视差吃
-   stage-halo.js 阻尼写入的 --halo-rx/ry。 */
-.lp-halo {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  /* 只在星幕排版下出现：卡拉OK / 心象是另一套视觉，碟层必须整个让开。
-     帧门也同步报 0（stage-halo.js targetFps），两层开关互为兜底。 */
-  display: none;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-  transform: scale(1.12)
-    rotateX(var(--halo-rx, 0deg)) rotateY(var(--halo-ry, 0deg));
-}
-.lyric-page[data-lp-mode="halo"] .lp-halo { display: flex; }
-/* 碟后的主色辉光：纯 CSS 径向渐变 + 模糊，不进画布。 */
-.lp-halo::before {
-  content: '';
-  position: absolute;
-  width: 78vmin;
-  height: 78vmin;
-  border-radius: 50%;
-  background: radial-gradient(circle,
-    rgba(var(--music-highlight-rgb), 0.13) 0%,
-    rgba(var(--music-highlight-rgb), 0.05) 44%,
-    transparent 68%);
-  filter: blur(18px);
-}
-.lp-halo-spin {
-  position: relative;
-  /* 节拍呼吸直接消费 --stage-energy（能量门已在写），零逐帧 JS。 */
-  scale: calc(1 + var(--stage-energy) * 0.035);
-  animation: lp-halo-spin 96s linear infinite;
-  will-change: transform;
-}
-.lp-halo-disc { display: block; }
-@keyframes lp-halo-spin { to { transform: rotate(360deg); } }
-
-/* 星幕里旋转封面盘 / 粒子封面让位给点环碟心（碟心画的就是同一张封面）。 */
-.lyric-page[data-lp-mode="halo"] .lp-cover {
-  opacity: 0 !important;
-  visibility: hidden !important;
-}
-
-/* 景深歌词：只在星幕作用域覆盖现有 --lyric-* 令牌，距离衰减公式本体不动。
-   效果对标 Mineradio 舞台歌词：当前行最大最亮、近两行暖粉色快速变暗变虚，
-   三行之外彻底淡出；纵向不错峰（句子垂直叠成一列）。 */
-.lyric-page[data-lp-mode="halo"] {
-  --lyric-page-size: clamp(30px, 4.4vh, 52px);
-  --lyric-page-line-height: 1.72;
-  /* 行纵深刻意保持 0：全屏页 .lp-body 在三维舞台开启时实际高度为 0
-     （粒子画布被 creative-on 规则留在文档流里占位），在零高透视盒里给歌词行
-     非零 translateZ 会被浏览器放大成满屏白块。景深改由下面的缩放 + 虚化 +
-     透明度三件套表达，观感一致且不依赖透视盒高度。 */
-  --lyric-row-depth: 0px;
-  --lyric-dim-step: 0.36;
-  --lyric-dim-floor: 0;
-  --lyric-row-shrink: 0.16;
-  --lyric-row-shrink-cap: 3;
-  --lyric-blur-inactive: 1.8px;
-  --lyric-row-shift: 0px;
-  --lyric-active-scale: 1.5;
-  --lyric-active-weight: 850;
-}
-.lyric-page[data-lp-mode="halo"] .lp-line {
-  color: rgba(255, 213, 218, 0.42);
-  letter-spacing: 0.02em;
-}
-.lyric-page[data-lp-mode="halo"] .lp-line.active {
-  color: #fff5f1;
-  text-shadow:
-    0 0 8px rgba(255, 240, 236, 0.62),
-    0 0 30px rgba(var(--music-highlight-rgb),
-      calc(0.26 + var(--stage-energy) * 0.30)),
-    0 0 84px rgba(var(--music-highlight-rgb),
-      calc(0.10 + var(--stage-energy) * 0.22));
-}
-/* 星幕行间距拉开，给大字号当前行留足呼吸。 */
-.lyric-page[data-lp-mode="halo"] .lp-track { gap: clamp(16px, 3.2vh, 40px); }
-
-/* 降级 / 减少动效：停转、去辉光、去景深补偿（perspective 已被置 none，
-   translateZ 不再产生缩短，scale 必须一起撤掉否则碟被放大 1.34 倍）。 */
-body.stage-lowfx .lp-halo-spin,
-body.reduce-motion .lp-halo-spin { animation: none; }
-body.stage-lowfx .lp-halo::before { display: none; }
-body.stage-lowfx .lp-halo { --halo-rx: 0deg; --halo-ry: 0deg; }
-body.reduce-motion .lp-halo { transform: none; }
-/* 这两个偏好的全局令牌归零特异性是 0,1,1，低于上面星幕作用域的 0,2,0，
-   不显式提权会被星幕值反盖，用户偏好静默失效。 */
-body.stage-lowfx .lyric-page[data-lp-mode="halo"] {
-  --lyric-blur-inactive: 0px;
-  --lyric-row-shrink: 0;
-}
-body.reduce-motion .lyric-page[data-lp-mode="halo"] {
-  --lyric-dim-step: 0;
-  --lyric-active-scale: 1;
-  --lyric-blur-inactive: 0px;
-  --lyric-row-shrink: 0;
-}
-
-/* 窄屏：坞贴底收窄，避免与播放控件挤在一起。 */
-@media (max-width: 620px) {
-  .lp-dock { bottom: 84px; border-radius: 14px; }
-  .lp-dock-btn { padding: 7px 10px; font-size: 12px; }
-}

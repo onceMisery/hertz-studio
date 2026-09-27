@@ -133,9 +133,9 @@
 
   var STAGES = [
     {
-      id: 'aurora', label: '极光穹顶', desc: '星野与流动的极光彩带',
+      id: 'aurora', label: '极光穹顶', desc: '星野与流动的彩色极光帘幕',
       cam: { theta: 0.0, phi: 0.10, dist: 8.4, look: [0, 0.6, -2.0] },
-      counts: [3000, 6500, 11000], additive: true, depth: false
+      counts: [3000, 6500, 11000], additive: true, depth: false, field: 5
     },
     {
       id: 'tunnel', label: '折跃隧道', desc: '穿越光环的速度感',
@@ -357,6 +357,31 @@
     '    light = 0.45+smoothstep(-0.8,2.1,pos.y)*0.8;',
     '    alpha = smoothstep(0.0,0.10,uv.y)*(1.0-smoothstep(0.80,1.0,uv.y));',
     '    scale = 0.82;',
+    '  } else if(uField==5){',
+    '    // 极光穹顶：与其余场型同一套点阵语言——一段拱起的极光帘幕，尺寸',
+    '    // 对标其它舞台（约 55% 视高），不铺满整屏。彩色版：沿帘幕横向走',
+    '    // 绿→青→紫→品红四段色相并随时间缓慢流动，相位脊线上有白热闪点。',
+    '    float ang = (uv.x-0.5)*2.2;',
+    '    float sway = snoise(vec3(uv.x*3.0, uv.y*1.2, t*0.14))*(0.35+uMid*0.5);',
+    '    float R = 5.0 + uBass*0.35 + sin(uv.x*9.0+t*0.5)*0.10;',
+    '    pos.x = sin(ang)*R + sway*0.6;',
+    '    pos.y = -2.6 + uv.y*5.4 + pow(abs(ang)*0.91, 2.0)*0.9',
+    '          + snoise(vec3(uv.x*4.0, t*0.11, uv.y*0.5))*0.35',
+    '          + band*(0.5+uBass*0.9)*sin(uv.y*PI) + beatWave*(0.10+uBass*0.20);',
+    '    pos.z = -cos(ang)*R*0.55 - 2.0 + sway*0.4;',
+    '    normal = normalize(vec3(pos.x*0.4, 0.35, pos.z+3.0));',
+    '    float aur = pow(0.5+0.5*sin(uv.x*60.0 + sway*2.2 + t*0.35), 2.2);',
+    '    float mottle = 0.55+0.45*snoise(vec3(uv.x*18.0, t*0.05, uv.y*1.3));',
+    '    float huePos = fract(uv.x + t*0.012);',
+    '    vec3 col = mix(vec3(0.16,1.00,0.62), vec3(0.20,0.80,1.00), smoothstep(0.0,0.33,huePos));',
+    '    col = mix(col, vec3(0.55,0.35,1.00), smoothstep(0.33,0.66,huePos));',
+    '    col = mix(col, vec3(1.00,0.45,0.75), smoothstep(0.66,1.0,huePos));',
+    '    color = mix(col, vec3(0.88,1.0,0.94), aur*0.30);',
+    '    light = 0.68 + aur*0.85*mottle + (1.0-uv.y)*0.30 + uEnergy*0.20;',
+    '    alpha = (0.50 + aur*0.50*mottle)',
+    '          * smoothstep(0.0,0.05,uv.y)*(1.0-smoothstep(0.80,1.0,uv.y))',
+    '          * smoothstep(0.0,0.03,uv.x)*(1.0-smoothstep(0.97,1.0,uv.x));',
+    '    scale = 1.0;',
     '  } else {',
     '    float orbit = min(6.0,floor(uv.y*7.0));',
     '    float lane = fract(uv.y*7.0)-0.5;',
@@ -444,115 +469,6 @@
     '  o = vec4(vCol*(0.75 + vA*0.7), a*vA);',
     '}'
   ].join('\n'));
-
-  // 天幕（用户给定的参考图：珠母云式的极光——粉/蜜桃/薄荷/薰衣草四色的丝绸
-  // 缎带从画面中下偏左的漩涡中心成扇形铺满天空，中心一团白热）。旧版的
-  // 「垂直射线帘」是经典极光的做法，与这个构图对不上，整段换掉。
-  //
-  // 缎带不是几何体：一张覆盖全视野的天幕 quad（几何恒定，1 段就够），缎带
-  // 在对数螺旋坐标系里逐像素算——螺旋坐标沿缎带方向近似守恒，所以每条缎带
-  // 有自己固定的色相；noise 负责让带子弯折、起皱（丝绸感），中心密度趋于
-  // 无限的地方交给白热光斑盖住。
-  var SKY_VS = stageVS([
-    'in vec2 aUV;',
-    'out vec2 vUV;',
-    'out vec3 vWorld;',
-    'out float vA;',
-    'void main(){',
-    '  vec3 pos = vec3((aUV.x - 0.5)*170.0, (aUV.y - 0.5)*100.0 + 4.0, -50.0);',
-    '  vec4 mv = uView * vec4(pos, 1.0);',
-    '  float dist = -mv.z;',
-    '  vUV = aUV;',
-    '  vWorld = pos;',
-    //   天幕在 z=-50，默认机位下约 56 单位远。距离窗收得宽：拉远到 maxR
-    //   也不许让天幕整体消失或露出 quad 的矩形边界。
-    '  vA = uFade * smoothstep(8.0, 18.0, dist) * (1.0 - smoothstep(96.0, 118.0, dist));',
-    '  gl_Position = uProj * mv;',
-    '}'
-  ].join('\n'));
-
-  // 视差层：d = 相对基准平面的虚深度（世界单位），w = 亮度权重（Σw=1，总亮度
-  // 与单层版一致），hue = 沿色环的偏移，tm = 时间流速（层间剪切）。三层采样
-  // 同一个缎带场、不同的世界坐标——自动演出的镜头永远在动，层与层之间就有
-  // 真实的相对滑动，天幕的「3D」从这里来；远层混向蓝灰（空气透视）。
-  var SKY_LAYERS = [
-    { d: 0.0,  w: 0.62, hue: 0.03,  tm: 1.00, haze: 0.0 },
-    { d: 8.0,  w: 0.26, hue: -0.05, tm: 1.04, haze: 0.14 },
-    { d: 17.0, w: 0.12, hue: 0.10,  tm: 1.08, haze: 0.28 }
-  ];
-
-  function skyLayer(L) {
-    //  数字一律 toFixed 生成浮点字面量：JS 的 1.00/0.0 会串成 "1"/"0"，
-    //  而 GLSL ES 没有隐式 int→float 转换，裸整数直接让编译挂掉。
-    function f(v) { return v.toFixed(2); }
-    return [
-      '  {',
-      '    vec2 pL = vWorld.xy + par*' + f(L.d) + ' - vc;',
-      '    float rL = length(pL) + 0.001;',
-      //   atan 在 ±π 有分支切割：角度系数带小数时切缝两侧花纹对不上——
-      //   极光左下角那道「断层」就是它。角度系数取整（2.0），且所有 sin
-      //   的角向周期（2.0×系数）与色相系数（0.31831×4π=4）都必须落在
-      //   整数上，切缝才真正无痕。
-      '    float angL = atan(pL.y, pL.x + 0.0001);',
-      '    float spL = angL*2.0 + log(rL)*3.9 - t*' + f(L.tm) + '*0.010;',
-      '    float b1 = 0.5 + 0.5*sin(spL*4.0 + warp);',
-      '    float b2 = 0.5 + 0.5*sin(spL*2.0 - warp*1.2 + 1.7);',
-      '    float b3 = 0.5 + 0.5*sin(spL*8.0 + warp*0.6 + 4.2);',
-      '    float bandL = pow(b1, 1.6)*(0.62 + 0.38*pow(b2, 2.0)) + pow(b3, 5.0)*0.10 + 0.02 + 0.05*b2;',
-      '    bandL += pow(0.5 + 0.5*sin(spL*22.0 + warp*2.0 + t*0.05), 6.0)*0.20*(0.5 + uEnergy*0.6);',
-      '    float fL = fract(spL*0.31831 + ' + f(L.hue) + ' + 0.10*sin(t*0.11 + ' + f(L.d) + '));',
-      '    vec3 cL = fL < 0.25 ? mix(cA, cB, fL*4.0)',
-      '            : fL < 0.50 ? mix(cB, cC, (fL - 0.25)*4.0)',
-      '            : fL < 0.75 ? mix(cC, cD, (fL - 0.50)*4.0)',
-      '            : mix(cD, cA, (fL - 0.75)*4.0);',
-      '    cL = mix(cL, vec3(0.52, 0.60, 0.78), ' + f(L.haze) + ');',
-      '    colAcc += cL*bandL*' + f(L.w) + ';',
-      '    amp += bandL*' + f(L.w) + ';',
-      '  }'
-    ];
-  }
-
-  var SKY_FS = stageFS([
-    'in vec2 vUV;',
-    'in vec3 vWorld;',
-    'in float vA;',
-    'void main(){',
-    '  float t = uTime;',
-    //   漩涡中心（世界 xy 系）：画面中下偏左
-    '  vec2 vc = vec2(-6.0, -10.0);',
-    //   视差：视线穿过基准平面后每深入 1 单位的横向偏移。2.0 是美学夸张
-    //   （56 单位外的几何视差肉眼几乎看不见）；分母下限防轨道绕到天幕
-    //   附近时偏移爆炸。
-    '  vec3 ray = vWorld - uCamPos;',
-    '  vec2 par = ray.xy * (2.0 / max(12.0, -ray.z));',
-    //   弯折与起皱：大尺度噪声定走向，小尺度噪声出丝绸的细褶（全层共享）
-    '  vec2 pb = vWorld.xy - vc;',
-    '  float warp = snoise(vec3(pb*0.045, t*0.03))*1.5 + snoise(vec3(pb*0.11, t*0.05))*0.5;',
-    '  float amp = 0.0;',
-    '  vec3 colAcc = vec3(0.0);',
-    '  vec3 cA = vec3(1.00, 0.73, 0.89);',
-    '  vec3 cB = vec3(1.00, 0.86, 0.73);',
-    '  vec3 cC = vec3(0.66, 0.96, 0.82);',
-    '  vec3 cD = vec3(0.73, 0.69, 1.00);'
-  ].concat(SKY_LAYERS.reduce(function (all, L) { return all.concat(skyLayer(L)); }, []), [
-    //   色相取亮度加权平均：近层权重最大，暗隙里透出远层的蓝灰缎带
-    '  vec3 col = colAcc / max(amp, 0.001);',
-    '  float r0 = length(pb);',
-    '  float hot = exp(-r0*r0*0.006);',
-    '  col = mix(col, vec3(1.0, 0.93, 0.96), hot*0.60);',
-    //   漩涡中心的白热光斑，bass 推它呼吸
-    '  float halo = exp(-r0*r0*0.008)*(1.30 + uBass*0.55);',
-    //   音频增益压缩过：mid 在响度段常到 1.0+，线性叠加会把缎带推成白板。
-    //   基准亮度按「缎带脊线 tonemap 后 ≈0.7、暗隙守住 ≤0.15」标定。
-    '  amp *= 1.0 + uMid*0.45 + uBeat*0.15;',
-    //   quad 边缘收口，避免露出天幕的矩形边界
-    '  float edge = smoothstep(0.0, 0.07, vUV.x)*(1.0 - smoothstep(0.93, 1.0, vUV.x))',
-    '             * smoothstep(0.0, 0.06, vUV.y)*(1.0 - smoothstep(0.94, 1.0, vUV.y));',
-    '  float a = edge*vA*min(amp*smoothstep(0.4, 2.2, r0) + halo, 1.8);',
-    '  if (a < 0.004) discard;',
-    '  o = vec4(col*(0.95 + a*0.75), a);',
-    '}'
-  ]).join('\n'));
 
   var PRISM_VS = stageVS([
     'in float aSeed;',
@@ -912,56 +828,6 @@
     return clamp(Math.min(num(t, 2), perf.quality), 0, 2);
   }
 
-  // 天幕 quad：几何完全恒定（世界坐标写死在顶点着色器里），一段两个三角形
-  // 就够——缎带的全部细节都在片元里逐像素算。
-  function quadGeometry() {
-    var idx = [0, 1, 2, 2, 1, 3];
-    return {
-      uv: buffer(new Float32Array([0, 0, 1, 0, 0, 1, 1, 1])),
-      idx: indexBuffer(new Uint16Array(idx)),
-      indices: idx.length
-    };
-  }
-
-  function buildAurora(def) {
-    var starP = buildProgram(STAR_VS, STAR_FS);
-    var skyP = buildProgram(SKY_VS, SKY_FS);
-    if (!starP || !skyP) {
-      if (starP) gl.deleteProgram(starP.p);
-      if (skyP) gl.deleteProgram(skyP.p);
-      return null;
-    }
-    var s = seeds(def.counts[q()]);
-    var starVao = makeVAO([
-      { loc: starP.a('aSeed'), buffer: s.seed, size: 1 },
-      { loc: starP.a('aLane'), buffer: s.lane, size: 1 }
-    ]);
-    var quad = quadGeometry();
-    var skyVao = makeVAO([
-      { loc: skyP.a('aUV'), buffer: quad.uv, size: 2 }
-    ], quad.idx);
-    return {
-      count: s.count,
-      draw: function () {
-        gl.useProgram(skyP.p);
-        uploadCommon(skyP);
-        gl.bindVertexArray(skyVao);
-        gl.drawElements(gl.TRIANGLES, quad.indices, gl.UNSIGNED_SHORT, 0);
-
-        gl.useProgram(starP.p);
-        uploadCommon(starP);
-        gl.bindVertexArray(starVao);
-        gl.drawArrays(gl.POINTS, 0, s.count);
-      },
-      dispose: function () {
-        gl.deleteProgram(starP.p); gl.deleteProgram(skyP.p);
-        gl.deleteVertexArray(starVao); gl.deleteVertexArray(skyVao);
-        gl.deleteBuffer(s.seed); gl.deleteBuffer(s.lane);
-        gl.deleteBuffer(quad.uv); gl.deleteBuffer(quad.idx);
-      }
-    };
-  }
-
   function buildField(def) {
     var p = buildProgram(FIELD_VS, FIELD_FS);
     var starP = buildProgram(STAR_VS, STAR_FS);
@@ -1064,7 +930,7 @@
   var BUILDERS = {
     resonance: buildField,
     silk: buildField,
-    aurora: buildAurora,
+    aurora: buildField,
     tunnel: buildField,
     terrain: buildField,
     orb: buildField,
@@ -2304,7 +2170,7 @@
       if (!open()) return;
       requestFs();
     }
-    var openers = ['lp-3d', 'stage3d-entry'];
+    var openers = ['stage3d-entry'];
     openers.forEach(function (id) {
       var b = $(id);
       if (b) b.addEventListener('click', enterFromUi);

@@ -181,6 +181,8 @@
   var activeIdx = 0;
   var attached = false;
   var wanted = false;        // 用户是否要求启用三维舞台
+  var previewView = null;    // 工坊高级编排的面板内预览视图（挂在哪里渲染哪里）
+  var pvWatchdog = 0, pvLastFrame = 0, pvStalls = 0;
   var degradedBecause = null;
   var degradedByProbe = false;   // 这次降级是"量出来太贵"，不是"起不来"
 
@@ -831,12 +833,13 @@
 
   function targetFps() {
     if (!attached || !wanted || !views.length) return 0;
+    // 工坊面板内的预览视图：它挂在面板里，主页可见性门（右栏抽屉收起、
+    // 沉浸声场盖着主页）都不适用于它——面板可见就渲染。
+    if (previewView) return document.hidden ? 0 : TIERS[tierIndex()].fps;
     if (window.Stage && Stage.isHidden()) return 0;
     // 活动画布不可见就一帧都不画：窄屏抽屉关着时舞台画布只是被 transform
-    // 移出屏幕，尺寸与上下文都在，不挡这一下 GPU 就一直空烧。全屏页开着时
-    // 活动的是第二块画布，与抽屉无关（isPageOpen 为真即放行）。
-    if (window.Stage && !Stage.isPageOpen()
-        && typeof Stage.isStageVisible === 'function' && !Stage.isStageVisible()) return 0;
+    // 移出屏幕，尺寸与上下文都在，不挡这一下 GPU 就一直空烧。
+    if (window.Stage && typeof Stage.isStageVisible === 'function' && !Stage.isStageVisible()) return 0;
     // 探测期间强制满帧：不画东西的窗口量不到代价，而"暂停且无动画"时帧门本来是 0，
     // 拿它当基准会得出一个自信的错误结论。探测一结束这条就退场，预算恢复原样。
     if (probe.pending || probe.running) return TIERS[tierIndex()].fps;
@@ -848,7 +851,8 @@
   }
 
   function pickView() {
-    var want = (window.Stage && Stage.isPageOpen()) ? 1 : 0;
+    var want = previewView ? views.indexOf(previewView) : 0;
+    if (want < 0 || want >= views.length) want = 0;
     if (want !== activeIdx) {
       // 切挂载点时立刻给新视图补一帧：暂停状态下帧门是 0，不补这一帧的话
       // 全屏页会是一块空白，直到用户按下播放才突然出现。
@@ -900,9 +904,11 @@
     if (!v || !v.eng) return;
     // 纵深第二道：正常路径里帧门 fpsFn 在不可见时已报 0、stage.js 不会把
     // tick 调进来；但补帧等旁路仍可能直接触达这里，挡住，不往不可见画布渲染。
-    if (window.Stage && !Stage.isPageOpen()
+    // 工坊面板内的预览视图例外：它不在右栏，是否可见由挂载/卸载自己管理。
+    if (v !== previewView && window.Stage
         && typeof Stage.isStageVisible === 'function' && !Stage.isStageVisible()) return;
     if (!v.w || !v.h) { if (!measure(v)) return; }
+    pvLastFrame = now();
     renderOne(v, dtMs);
   }
 
@@ -1117,7 +1123,7 @@
     // 拿它算出来的"帧率"是一个自信的错误结论。
     if (window.Stage && Stage.isHidden()) return;
     // 抽屉关着同样不测：不可见画布上跑出来的帧数不代表用户要付的代价。
-    if (window.Stage && !Stage.isPageOpen()
+    if (window.Stage
         && typeof Stage.isStageVisible === 'function' && !Stage.isStageVisible()) return;
     beginProbe();
   }
@@ -1194,14 +1200,17 @@
 
   // 只在两个挂载点上切可见性与那个抬层类的开关。
   function showViews(on) {
+    var hasPermanent = false;
     for (var i = 0; i < views.length; i += 1) {
       var v = views[i];
+      if (!v.preview) hasPermanent = true;
       v.el.classList.toggle('creative-on', on);
       // 关掉时必须把画布一起藏掉。只停渲染、画布留在 DOM 里，最后一帧会一直
       // 糊在舞台上 —— 用户看到的是"三维已经关了，画面还在"。
       if (v.canvas) v.canvas.style.display = on ? '' : 'none';
     }
-    document.documentElement.classList.toggle('creative-3d', on && !!views.length);
+    // creative-3d 只跟「正式挂载点」走：面板内预览不该改主页右栏的样式。
+    document.documentElement.classList.toggle('creative-3d', on && hasPermanent);
   }
 
   // 真拆： dispose 上下文 + 把画布从 DOM 摘掉。降级走这条，强制重试也走这条。
@@ -1213,6 +1222,8 @@
       v.el.classList.remove('creative-on', 'creative-interact');
     }
     views = [];
+    previewView = null;
+    if (pvWatchdog) { clearInterval(pvWatchdog); pvWatchdog = 0; }
     attached = false;
     document.documentElement.classList.remove('creative-3d');
   }
@@ -1225,6 +1236,91 @@
     for (var i = 0; i < views.length; i += 1) {
       if (views[i].eng) { measure(views[i]); renderOne(views[i], 16.7); }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // 工坊高级编排的面板内预览
+  //
+  // 与右栏/全屏页挂载点完全独立：挂载它不需要也不改动主页的播放视窗——
+  // 增强渲染没开时只挂预览自己，开了则追加一块视图、右栏照常。
+  // 帧门对它有专门的可见性规则（见 targetFps）：面板可见就渲染，不受
+  // 「沉浸声场盖着主页」那道门影响。
+  // -------------------------------------------------------------------------
+
+  function mountPreview(el) {
+    if (!el) return false;
+    if (previewView) return true;   // 已挂载：幂等成功（render 每轮都会来同步状态条）
+    if (!preset) return false;
+    if (!window.CreativeGL || !CreativeGL.isAvailable()) return false;
+    if (!onset && window.Onset && Onset.create) onset = Onset.create({});
+    if (!onset) return false;
+    var v = mountView(el);
+    if (!v) return false;
+    v.preview = true;
+    var wasAttached = attached;
+    if (!wasAttached) {
+      wanted = true;
+      views = [v];
+    } else {
+      views.push(v);
+    }
+    try { v.eng = CreativeGL.create(v.canvas, { quality: tierIndex() }); } catch (err) { v.eng = null; }
+    if (!v.eng) {
+      views = views.filter(function (x) { return x !== v; });
+      if (!wasAttached) { attached = false; wanted = false; }
+      return false;
+    }
+    v.eng.warmUp();
+    previewView = v;
+    if (!wasAttached) attached = true;
+    measure(v);
+    bindInteraction(el);
+    showViews(true);
+    refreshViews();
+    pvLastFrame = now();
+    pvStalls = 0;
+    if (!pvWatchdog) pvWatchdog = setInterval(pvWatchdogTick, 1200);
+    if (window.Stage && Stage.kick) Stage.kick();
+    return true;
+  }
+
+  // 预览看门狗：与 stage3d 的同一套思路。宿主环境的 rAF 可能整段挂起
+  // （内嵌视图被判定遮挡、全屏切换重建合成器），主循环叫不醒，预览就是
+  // 一张静帧——用户看到的正是"实时预览没起作用"。每 1.2s 查一次帧时戳：
+  // 先 kick 一次主循环，仍无帧就由这里低频代跑（约 1fps），rAF 恢复后自动静默。
+  function pvWatchdogTick() {
+    if (!previewView || document.hidden) return;
+    var t = now();
+    if (t - pvLastFrame < 1500) { pvStalls = 0; return; }
+    pvStalls += 1;
+    if (window.Stage && Stage.kick) Stage.kick();
+    if (pvStalls >= 2) {
+      measure(previewView);
+      renderOne(previewView, 16.7);
+      pvLastFrame = t;
+    }
+  }
+
+  function unmountPreview() {
+    if (!previewView) return;
+    var v = previewView;
+    previewView = null;
+    if (v.eng) { try { v.eng.dispose(); } catch (e) { /* 上下文没了就算了 */ } }
+    if (v.canvas && v.canvas.parentNode) v.canvas.parentNode.removeChild(v.canvas);
+    v.el.classList.remove('creative-on', 'creative-interact');
+    views = views.filter(function (x) { return x !== v; });
+    activeIdx = 0;
+    if (pvWatchdog) { clearInterval(pvWatchdog); pvWatchdog = 0; }
+    pvStalls = 0;
+    if (!views.length) {
+      // 预览是唯一视图（右栏增强渲染没开）：整个挂载收摊，wanted 还原为未启用
+      attached = false;
+      wanted = false;
+      document.documentElement.classList.remove('creative-3d');
+    } else {
+      refreshViews();
+    }
+    if (window.Stage && Stage.kick) Stage.kick();
   }
 
   // 舞台与全屏页是两个挂载点，各自一块画布 —— 一个 canvas 只能有一个 GL 上下文，
@@ -1265,12 +1361,9 @@
     // "活着但错着"的状态必须报出来，而不是让它悄悄跑着。
     if (!onset) { degrade('onset.js 未加载，起音检测不可用'); return 'off'; }
     var stageEl = $('stage');
-    var pageEl = $('lyric-page');
     var a = mountView(stageEl);
     if (!a) { degrade('找不到舞台容器'); return 'off'; }
     views = [a];
-    var b = mountView(pageEl);
-    if (b) views.push(b);
 
     views.forEach(function (v) {
       try {
@@ -1411,6 +1504,8 @@
   var api2 = {
     init: init,
     attach: attach,
+    mountPreview: mountPreview,
+    unmountPreview: unmountPreview,
     effective: effective,
     degradedBecause: function () { return degradedBecause; },
     active: function () { return effective() === '3d'; },

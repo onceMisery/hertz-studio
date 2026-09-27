@@ -44,10 +44,6 @@ const CREATIVE_CSS: &str = include_str!("../web/creative.css");
 const STAGE_JS: &str = include_str!("../web/stage.js");
 const STAGE_PARTICLES_JS: &str = include_str!("../web/stage-particles.js");
 const STAGE_PARTICLES_GL_JS: &str = include_str!("../web/stage-particles-gl.js");
-const STAGE_GL_HOST_JS: &str = include_str!("../web/stage-gl-host.js");
-const STAGE_COVER_PARTICLES_JS: &str = include_str!("../web/stage-cover-particles.js");
-const STAGE_STARRIVER_JS: &str = include_str!("../web/stage-starriver.js");
-const VISUAL_CONTROLLER_JS: &str = include_str!("../web/visual-controller.js");
 const THEMES_JS: &str = include_str!("../web/themes.js");
 const STAGE_CTL_JS: &str = include_str!("../web/stage-control.js");
 const SHELF_JS: &str = include_str!("../web/shelf.js");
@@ -71,8 +67,6 @@ const WORKSHOP_JS: &str = include_str!("../web/workshop.js");
 const STAGE_CINEMA_JS: &str = include_str!("../web/stage-cinema.js");
 const STAGE_FREECAM_JS: &str = include_str!("../web/stage-freecam.js");
 const STAGE_FOCUS_JS: &str = include_str!("../web/stage-focus.js");
-// 沉浸演出：星幕歌词（半调点环）与原生全屏 + 舞台场景切换坞。
-const STAGE_HALO_JS: &str = include_str!("../web/stage-halo.js");
 // 沉浸式三维舞台：独占一个 WebGL2 上下文的全屏演出层，自带后处理链与舞台坞。
 const STAGE_LYRICS_JS: &str = include_str!("../web/stage-lyrics.js");
 const STAGE3D_JS: &str = include_str!("../web/stage3d.js");
@@ -215,16 +209,6 @@ async fn main() -> anyhow::Result<()> {
             "/stage-particles-gl.js",
             get(|| asset(JS, STAGE_PARTICLES_GL_JS)),
         )
-        .route("/stage-gl-host.js", get(|| asset(JS, STAGE_GL_HOST_JS)))
-        .route(
-            "/stage-cover-particles.js",
-            get(|| asset(JS, STAGE_COVER_PARTICLES_JS)),
-        )
-        .route("/stage-starriver.js", get(|| asset(JS, STAGE_STARRIVER_JS)))
-        .route(
-            "/visual-controller.js",
-            get(|| asset(JS, VISUAL_CONTROLLER_JS)),
-        )
         .route("/themes.js", get(|| asset(JS, THEMES_JS)))
         .route("/shelf.js", get(|| asset(JS, SHELF_JS)))
         .route("/pl-covers.js", get(|| asset(JS, PL_COVERS_JS)))
@@ -239,7 +223,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/stage-cinema.js", get(|| asset(JS, STAGE_CINEMA_JS)))
         .route("/stage-freecam.js", get(|| asset(JS, STAGE_FREECAM_JS)))
         .route("/stage-focus.js", get(|| asset(JS, STAGE_FOCUS_JS)))
-        .route("/stage-halo.js", get(|| asset(JS, STAGE_HALO_JS)))
         .route("/stage-lyrics.js", get(|| asset(JS, STAGE_LYRICS_JS)))
         .route("/stage3d.js", get(|| asset(JS, STAGE3D_JS)))
         .route("/stage-immersive.js", get(|| asset(JS, STAGE_IMMERSIVE_JS)))

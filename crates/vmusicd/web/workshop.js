@@ -1169,12 +1169,37 @@
 
   function switchTarget(next) {
     if (target === next) return;
-    setOpen(false); target = next;
-    if (next === 'advanced') {
-      Stage3D.close();
-      document.dispatchEvent(new CustomEvent('workshop:target', { detail: { target: next } }));
-    } else if (window.Stage && Stage.setPage) Stage.setPage(false);
+    // 借来的预览层跨目标切换要记账：切去高级编排不该把用户正在看的沉浸
+    // 声场关掉（那是旧预览面的做法），也不该把「借开」误记成用户自己开的。
+    var borrowed = previewOpenedByWorkshop;
+    previewOpenedByWorkshop = false;
+    setOpen(false);
+    target = next;
     setOpen(true);
+    if (target === 'immersive' && borrowed) previewOpenedByWorkshop = true;
+    syncAdvancedPreview();
+  }
+
+  // 高级编排的面板内实时预览：参数/编排的每一次改动直接画在面板里，
+  // 不依赖也不惊动主页右栏的播放视窗。
+  function syncAdvancedPreview() {
+    var pv = $('ws-preview');
+    if (!pv) return;
+    pv.hidden = target !== 'advanced';
+    if (target !== 'advanced') {
+      if (window.CreativeStage && CreativeStage.unmountPreview) CreativeStage.unmountPreview();
+      return;
+    }
+    if (window.CreativeStage && CreativeStage.mountPreview) {
+      var ok = CreativeStage.mountPreview($('ws-preview-host'));
+      var meta = $('ws-preview-meta');
+      if (meta) {
+        var cur = CreativeStage.preset();
+        meta.textContent = ok
+          ? 'LIVE · 实时预览 · ' + (cur && cur.scene ? cur.scene : 'creative') + ' · 只画在这里，不惊动主页右栏'
+          : '预览不可用（WebGL2 不可达或引擎未就绪）· 参数改动仍会保存';
+      }
+    }
   }
 
   var TABS = [
@@ -1190,6 +1215,7 @@
     refs.panel.dataset.target = target;
     refs.targets.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.target === target)); });
     $('ws-tabs').hidden = target !== 'advanced';
+    syncAdvancedPreview();
     refs.body.textContent = '';
     if (target === 'immersive') {
       renderImmersive(refs.body); refs.body.scrollTop = scroll;
@@ -1236,6 +1262,10 @@
         // 舞台层盖着；用户本来就看舞台的话，关面板后照常留在舞台。
         previewOpenedByWorkshop = !Stage3D.isActive();
         if (previewOpenedByWorkshop) Stage3D.open();
+      }
+      // 舞台层开着（无论当前目标是沉浸还是高级）：面板都挂进舞台层浮在其上，
+      // 否则高级编排的面板会被舞台层整个盖住，什么都看不见。
+      if (window.Stage3D && Stage3D.isActive()) {
         $('stage3d').appendChild(panel);
         $('stage3d').classList.add('s3d-editing', 's3d-chrome');
       }
@@ -1244,6 +1274,7 @@
       if (gesture) { remember(gesture); gesture = null; Stage3D.save(); }
       $('stage3d').classList.remove('s3d-editing');
       if (home) home.after(panel);
+      if (window.CreativeStage && CreativeStage.unmountPreview) CreativeStage.unmountPreview();
       if (previewOpenedByWorkshop) {
         previewOpenedByWorkshop = false;
         if (window.Stage3D && Stage3D.isActive()) Stage3D.close();

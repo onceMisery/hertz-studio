@@ -948,3 +948,11 @@ body.ws-open:not(.s3d-open) #lyric-page { right: 400px; width: auto; }
   .ws-body { padding: 12px 20px 30px; }
   body.ws-open:not(.s3d-open) #lyric-page { right: 0; bottom: 63%; height: auto; }
 }
+
+/* 高级编排的面板内实时预览：16:9 画布 + 状态条。画布由 creative-stage 的
+   预览视图挂进 ws-preview-host，只画在这里，不影响主页右栏。 */
+.ws-preview { margin: 0 20px 4px; border: 1px solid rgba(255,255,255,.10); border-radius: 12px; overflow: hidden; background: #0e191b; }
+.ws-preview[hidden] { display: none; }
+.ws-preview-stage { position: relative; aspect-ratio: 16 / 9; }
+.ws-preview-stage .creative-canvas { position: absolute; }
+.ws-preview-meta { padding: 7px 12px; font-size: 10.5px; letter-spacing: .07em; color: #8fa39a; border-top: 1px solid rgba(255,255,255,.08); }

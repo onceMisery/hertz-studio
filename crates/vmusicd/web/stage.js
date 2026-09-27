@@ -19,9 +19,6 @@
   // 模式合并：逐行（整行亮白）与卡拉OK 渲染管线 90% 重叠，已移除。
   // 老存档里的 'line' 在 setMode 中统一回落到 'karaoke'。
   var BASE_MODES = ['cover', 'karaoke', 'scatter'];
-  // 星幕（halo）是全屏页独占的排版：侧栏模式组里没有它的按钮，但持久化恢复
-  // 与全屏页模式切换都要认这个值。
-  var PAGE_ONLY_MODES = ['halo'];
   var STORE_KEY = 'vmusic.stage.mode';
   var WORD_CAP_MS = 1200; // 单字推进上限：脏时间戳给出几十秒的词时不至于爬不动
 
@@ -33,14 +30,6 @@
   var playing = false;
   var track = null;
   var lastCover = null;    // 记住封面，换主题时用它重新取色（retint）
-
-  // 全屏页的背景场景：'cover' 粒子专辑封面 / 'starriver' 星河 / 'off' 仅歌词
-  var SCENES = ['cover', 'starriver'];
-  var SCENE_KEY = 'vmusic.stage.scene';
-  var scene = 'cover';
-  var SPIN_KEY = 'vmusic.stage.autospin';
-  var autoSpin = false;           // 自动 360° 环转
-  var SPIN_DEG_PER_SEC = 5;       // 约 72s 转一圈
 
   // 本地时钟：base 是快照给的基准点，clockAt 是挂上去的那一刻
   var basePos = 0;
@@ -258,42 +247,14 @@
     // 滚动不走原生 scrollTop：容器只裁剪，真正的位移由 JS 写 track 的
     // translate3d。这样浏览器的平滑滚动不会和每帧的位置更新互相打断。
     //
-    // 全屏页多包一层 .lp-scene 作为 3D 场景：容器负责 overflow 裁剪，场景负责
-    // preserve-3d 与视角旋转。两者必须分开——规范里 overflow 非 visible 会把
-    // 同一元素上的 transform-style: preserve-3d 强制压平成 flat，写在同一个
-    // 节点上的话每行的 translateZ 就全部失效、旋转只剩一块倾斜的平面。
     if (container) {
       // index.html 里留了一颗静态的 .hint 占位，滚动轨道必须接管之前先把它
       // 清掉，否则歌词会和占位一起留在容器里。
       container.textContent = '';
       view.track = document.createElement('div');
-      view.track.className = big ? 'lp-track' : 'lyric-track';
-      if (big) {
-        view.scene = document.createElement('div');
-        view.scene.className = 'lp-scene';
-        // 歌词轨单独包一层负责 overflow 裁剪与上下渐隐 mask：这两件事都不能
-        // 写在 .lp-scene 上（会把 preserve-3d 压平），也不能留在 .lp-body 上
-        // ——全屏粒子背景（.lp-cover.gl-active）要溢出 body、铺满整个视口，
-        // body 的裁剪和 mask 会把它切掉。歌词的裁剪收进这一层，背景就自由了。
-        var trackClip = document.createElement('div');
-        trackClip.className = 'lp-track-clip';
-        view.scene.appendChild(buildCover());
-        trackClip.appendChild(view.track);
-        view.scene.appendChild(trackClip);
-        container.appendChild(view.scene);
-      } else {
-        view.scene = null;
-        container.appendChild(view.track);
-      }
+      view.track.className = 'lyric-track';
+      container.appendChild(view.track);
     }
-
-    // 3D 视角状态。tilt 是用户拖出来的，drift 是自动漂移叠上去的，
-    // 分开存才能做到"拖拽时漂移让位、松手一会儿后再接上"而不跳变。
-    view.tiltX = 0;
-    view.tiltY = 0;
-    view.dragId = -1;
-    view.dragFrom = null;
-    view.lastInputAt = 0;
 
     // 滚动物理状态：current 是当前位移，target 是本帧算出的目标位移
     view.scrollY = 0;
@@ -318,24 +279,6 @@
         view.track.style.transform = 'translate3d(0, ' + (-view.scrollY).toFixed(2) + 'px, 0)';
       }, { passive: true });
 
-      // 触摸拖拽只给全屏页：侧栏是普通文档流，把手势留给页面滚动更自然；
-      // 全屏页自己就是整屏，没有"外层滚动"可让。
-      if (big) {
-        var touchY = 0;
-        container.addEventListener('touchstart', function (e) {
-          touchY = e.touches[0] ? e.touches[0].clientY : 0;
-          yieldToUser();
-        }, { passive: true });
-        container.addEventListener('touchmove', function (e) {
-          if (!view.track || !e.touches[0]) return;
-          var y = e.touches[0].clientY;
-          yieldToUser();
-          view.scrollY = view.clamp(view.scrollY + (touchY - y));
-          view.scrollTarget = view.scrollY;
-          touchY = y;
-          view.track.style.transform = 'translate3d(0, ' + (-view.scrollY).toFixed(2) + 'px, 0)';
-        }, { passive: true });
-      }
     }
 
     // 行几何缓存。
@@ -357,9 +300,7 @@
       var nodes = view.nodes;
       view.box = cont.clientHeight;
       if (!nodes.length) { view.lo = 0; view.hi = 0; return true; }
-      // 有场景层时轨道的 offsetParent 变成场景（它带 transform），所以要两段
-      // 一起加。都是布局值，不含 transform，所以视角怎么转都不影响量出来的行位。
-      var base = (view.scene ? view.scene.offsetTop : 0) + view.track.offsetTop;
+      var base = view.track.offsetTop;
       for (var i = 0; i < nodes.length; i += 1) {
         nodes[i].top = base + nodes[i].el.offsetTop;
         nodes[i].h = nodes[i].el.offsetHeight;
@@ -544,291 +485,6 @@
     };
 
     return view;
-  }
-
-  // -------------------------------------------------------------------------
-  // 舞台封面盘
-  // -------------------------------------------------------------------------
-  //
-  // 挂进 .lp-scene 而不是另起一层：这样它和歌词共用同一个 perspective 与用户
-  // 拖出来的 --lp-rx/--lp-ry，转歌词就是转封面，不需要第二次同步两个角度。
-  //
-  // 旋转本身是 CSS 动画（stage.css 的 lp-cover-turn），律动呼吸直接消费
-  // 已有的 --stage-energy。所以这个子系统在 JS 侧一个帧门都不占、每帧零写入
-  // ——换封面时才动一次 DOM。
-  var cover = { on: false, node: null, front: null, back: null };
-
-  function buildCover() {
-    var node = document.createElement('div');
-    node.className = 'lp-cover';
-    // 纯装饰：屏幕阅读器不该播报"图片"，曲目名和艺术家在标题区已经念过了。
-    node.setAttribute('aria-hidden', 'true');
-    node.innerHTML =
-      '<div class="lp-cover-spin">' +
-        '<div class="lp-cover-face lp-cover-front"><img alt="" decoding="async"></div>' +
-        '<div class="lp-cover-face lp-cover-back"><img alt="" decoding="async"></div>' +
-      '</div>';
-    cover.node = node;
-    var imgs = node.getElementsByTagName('img');
-    cover.front = imgs[0];
-    cover.back = imgs[1];
-    return node;
-  }
-
-  // 背景粒子层是否真的可用：场景与对应子模块都就绪才算数
-  function particleBackgroundOn() {
-    if (!cover.on) return false;
-    if (scene === 'cover') {
-      // 没有封面纹理就不算数：粒子层是按封面采样出点的，没图它只能画一片空，
-      // 而 gl-active 会顺手把 CSS 旋转卡片藏掉 —— 两头都不显示，背景就成了空白。
-      // 这里判否之后走 CSS 卡片，至少看得见东西。
-      if (!lastCover) return false;
-      return !!(window.StageCoverParticles && StageCoverParticles.active());
-    }
-    if (scene === 'starriver') {
-      return !!(window.StageStarRiver && StageStarRiver.active());
-    }
-    return false;
-  }
-
-  function paintCover() {
-    if (!cover.node || !el.page) return;
-    // 图片地址只跟着曲目，显不显示只跟着开关：两者混在一个 url 里的话，关一下
-    // 再开会把 src 摘掉又挂回去，白白重新解码两张 640px 的图。
-    var url = lastCover || '';
-
-    // 背景场景三态分流：cover 粒子专辑封面 / starriver 星河；任一粒子层生效时
-    // has-particles 隐藏 CSS 旋转卡片
-    //
-    // has-cover 不再要求「有封面图」。原来写着 `&& url`，于是当前曲目没有
-    // 封面时这个开关怎么点都不显示任何东西 —— 按钮状态在翻、库里也存住了，
-    // 但画面纹丝不动，用户只能认为「这个按钮坏了」。没有图就退回 CSS 旋转
-    // 卡片（.lp-cover-face 自带占位底色），至少开关有可见的反馈。
-    el.page.classList.toggle('has-cover', !!(cover.on && scene === 'cover'));
-    // 没有封面图的占位态，交给 CSS 铺一层主题色渐变，免得看到的是死灰一块
-    el.page.classList.toggle('no-cover-art', !url);
-    el.page.classList.toggle('has-starriver',
-      !!(cover.on && scene === 'starriver'));
-    el.page.classList.toggle('has-particles', particleBackgroundOn());
-    // 共享 GL 画布只在某个粒子场景真正生效时可见
-    cover.node.classList.toggle('gl-active', particleBackgroundOn());
-
-    [cover.front, cover.back].forEach(function (img) {
-      if (!img) return;
-      // 同一个 URL 不重设：换主题 / retint 也会再走一遍这里。
-      if (url) { if (img.getAttribute('src') !== url) img.setAttribute('src', url); }
-      else if (img.hasAttribute('src')) img.removeAttribute('src');
-    });
-    syncCoverBtn();
-    syncSceneBtns();
-  }
-
-  function syncCoverBtn() {
-    var btn = $('lp-cover');
-    if (!btn) return;
-    var label = cover.on ? '隐藏舞台封面' : '显示舞台封面';
-    btn.classList.toggle('active', cover.on);
-    btn.setAttribute('aria-pressed', String(cover.on));
-    btn.setAttribute('title', label);
-    btn.setAttribute('aria-label', label);
-    // 没有封面图时不再上"暂无内容"的暗态：现在这种情况会退回 CSS 旋转卡片
-    // 并铺一层主题色渐变（.lyric-page.no-cover-art），画面上是有东西的，
-    // 再把按钮调暗等于告诉用户"没生效"，与事实相反。不禁用——模式留着，
-    // 切到下一首有封面的歌就自动顶上粒子封面。
-    btn.classList.remove('is-void');
-  }
-
-  function setCover(next, opts) {
-    cover.on = !!next;
-    paintCover();
-    if (!(opts && opts.silent)) emit('cover', cover.on);
-  }
-
-  // -------------------------------------------------------------------------
-  // 背景场景：粒子封面 / 星河
-  // -------------------------------------------------------------------------
-
-  function syncSceneBtns() {
-    // 全屏页头部的背景切换组
-    if (el.sceneBtns) {
-      Array.prototype.forEach.call(el.sceneBtns.children, function (b) {
-        var on = b.getAttribute('data-scene') === scene && cover.on;
-        b.classList.toggle('active', on);
-        b.setAttribute('aria-pressed', String(on));
-      });
-    }
-    // 侧栏舞台模式条上的星河按钮：仅在全屏星河场景时高亮
-    var sbStar = $('mode-starriver');
-    if (sbStar) {
-      var sbOn = isPageOpen() && scene === 'starriver' && cover.on;
-      sbStar.classList.toggle('active', sbOn);
-      sbStar.setAttribute('aria-pressed', String(sbOn));
-    }
-  }
-
-  // 第二个参数（旧的 { force: true }）不再需要：新语义下「已是当前场景」天然幂等，
-  // 多传的参数会被忽略。
-  function setScene(next) {
-    if (SCENES.indexOf(next) < 0) next = 'cover';
-    // 点场景 = 「切到这个背景，并把背景打开」；已经是当前场景则幂等。
-    //
-    // 这里原本还有一条隐藏规则：点已选中的场景等于「关掉背景总开关」。于是
-    //   背景开着 → 点一下整块背景消失（与 #lp-cover 那个开关语义重复）
-    //   背景关着 → `if (cover.on)` 判否，直接 return，点了完全没反应
-    // 同一颗按钮两种结果，而且都不能从界面上看出来。现在总开关只归 #lp-cover，
-    // 场景按钮只负责「选背景内容」一件事。
-    if (scene === next && cover.on) { syncSceneBtns(); return; }
-    scene = next;
-    try { localStorage.setItem(SCENE_KEY, scene); } catch (e) { /* 隐私模式 */ }
-    if (!cover.on) setCover(true, { silent: true });
-    else paintCover();
-    // 上面两支都会经 paintCover 刷一次，这里再显式刷一次：还有「已是该场景、
-    // 但背景被总开关关着」这条路径，它必须也把按钮点亮。
-    syncSceneBtns();
-    schedule();
-  }
-
-  // -------------------------------------------------------------------------
-  // 自动 360° 环转
-  // -------------------------------------------------------------------------
-
-  function setAutoSpin(next, opts) {
-    autoSpin = (next === undefined) ? !autoSpin : !!next;
-    try { localStorage.setItem(SPIN_KEY, autoSpin ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
-    var btn = $('lp-autospin');
-    if (btn) {
-      btn.classList.toggle('active', autoSpin);
-      btn.setAttribute('aria-pressed', String(autoSpin));
-      var label = autoSpin ? '停止自动旋转' : '自动 360° 旋转';
-      btn.setAttribute('title', label);
-      btn.setAttribute('aria-label', label);
-    }
-    if (!(opts && opts.silent)) schedule();
-  }
-
-  // -------------------------------------------------------------------------
-  // 全屏舞台的 3D 视角
-  // -------------------------------------------------------------------------
-  //
-  // 用 CSS 3D 而不是 WebGL：歌词是文字，留在 DOM 里才能保住清晰度、字体回退、
-  // 点击跳转和屏幕阅读器。WebGL 要拿到同样的文字清晰度得把每行栅格化成贴图，
-  // 换一次字号就重栅一次——那正是 Mineradio 为歌词写了 3200 行调度代码的原因，
-  // 不是我们需要的复杂度。
-  //
-  // 让旋转"看起来是 3D"的不是容器转了一下，而是每行按离当前行的距离
-  // translateZ 到不同深度上（见 stage.css 的 --lyric-row-depth）。于是转起来
-  // 近的行位移多、远的位移多，行与行之间产生视差；否则整块文字只是斜了一下。
-
-  // 360° 视角：拖拽角度不再设上限，可以连续转满整圈。tilt.max 只剩一个用途——
-  // 驾驶舱 UI 的语义保留；自动漂移是小幅摆动，自动环转才做 360。
-  var tilt = { max: 26, resumeMs: 1400, drift: 1, enabled: true };
-
-  function readTilt() {
-    var cs = getComputedStyle(document.documentElement);
-    function num(name, dflt) {
-      var v = parseFloat(cs.getPropertyValue(name));
-      return (typeof v === 'number' && isFinite(v)) ? v : dflt;
-    }
-    tilt.max = num('--lp-tilt-max', 26);
-    tilt.resumeMs = num('--lp-drift-resume-ms', 1400);
-    tilt.drift = num('--lp-drift', 1);
-    tilt.enabled = cs.getPropertyValue('--lp-3d').trim() !== 'off';
-  }
-
-  // writeTilt 每帧由歌词门调用；dtMs 用来把自动环转的角速度换算成增量
-  function writeTilt(view, dtMs) {
-    if (!view.scene) return;
-    var t = now();
-    var rx = view.tiltX;
-    var ry = view.tiltY;
-
-    // 自动 360 环转：仅全屏页、未拖拽、未要求减少动效时推进。增量直接写回
-    // tiltY，用户此刻抓指针拖拽会从当前真实角度接手，不会跳回环转起点。
-    if (autoSpin && view.big && view.dragId < 0 && !reduced) {
-      view.tiltY += SPIN_DEG_PER_SEC * Math.max(0.001, dtMs || lastDt) / 1000;
-      ry = view.tiltY;
-    }
-
-    // 自动漂移在用户刚操作过的那段时间里让位，否则手刚松开就被拽回去。
-    // 环转开启时漂移关掉，避免两种自动运动叠加。
-    var idle = t - view.lastInputAt > tilt.resumeMs;
-    if (!autoSpin) {
-      var d = (idle && tilt.drift > 0 && !reduced)
-        ? Math.sin(t / 5200) * 3.4 * tilt.drift
-        : 0;
-      rx += d * 0.6;
-      ry += d;
-    }
-
-    if (view._rx === rx && view._ry === ry) return;
-    view._rx = rx;
-    view._ry = ry;
-    view.scene.style.setProperty('--lp-rx', rx.toFixed(2) + 'deg');
-    view.scene.style.setProperty('--lp-ry', ry.toFixed(2) + 'deg');
-  }
-
-  function resetTilt(view) {
-    view.tiltX = 0;
-    view.tiltY = 0;
-    view.lastInputAt = now();
-    writeTilt(view);
-  }
-
-  // 拖拽只负责改角度，不碰滚动：纵向手势仍然归滚轮/触摸板（那是翻歌词的），
-  // 所以这里要求按住指针才转，且超过阈值后抑制"点一行跳转"的点击。
-  function bindTiltDrag(view) {
-    var el = view.container;
-    if (!el || !view.scene) return;
-
-    el.addEventListener('pointerdown', function (e) {
-      if (e.button !== 0 || view.dragId >= 0) return;
-      view.dragId = e.pointerId;
-      view.dragFrom = { x: e.clientX, y: e.clientY, tx: view.tiltX, ty: view.tiltY, moved: 0 };
-      view.lastInputAt = now();
-    });
-
-    el.addEventListener('pointermove', function (e) {
-      if (e.pointerId !== view.dragId || !view.dragFrom) return;
-      var dx = e.clientX - view.dragFrom.x;
-      var dy = e.clientY - view.dragFrom.y;
-      view.dragFrom.moved = Math.max(view.dragFrom.moved, Math.abs(dx) + Math.abs(dy));
-      if (view.dragFrom.moved < 8) return;         // 8px 以内当点击，不误伤跳转
-      // 横向拖 = 绕 Y，纵向拖 = 绕 X；除以 4 大致是"拖 4px 转 1°"的手感。
-      // 角度不夹：拖满一圈就是 360°，连续拖可以转到任意角度
-      view.tiltY = view.dragFrom.ty + dx / 4;
-      view.tiltX = view.dragFrom.tx - dy / 4;
-      view.lastInputAt = now();
-      // 直接操作不能等帧门：eco 档歌词只有 24fps，拖一下要 40ms 才回应，
-      // 手感上就是"粘"。漂移那种低频运动才交给 tick 去节流。
-      writeTilt(view);
-      if (e.cancelable) e.preventDefault();
-    });
-
-    function end(e) {
-      if (e.pointerId !== view.dragId) return;
-      view.dragId = -1;
-      view.lastInputAt = now();
-      // 把 moved 挂到容器上，供行的 click 处理器判断"这一下其实是拖拽"
-      el._justDragged = view.dragFrom && view.dragFrom.moved >= 8;
-      view.dragFrom = null;
-      if (el._justDragged) setTimeout(function () { el._justDragged = false }, 0);
-    }
-    el.addEventListener('pointerup', end);
-    el.addEventListener('pointercancel', end);
-    el.addEventListener('dblclick', function () { resetTilt(view); });
-    // 触摸板上双指平移更顺手，给键盘用户留一条路
-    el.setAttribute('tabindex', '0');
-    el.addEventListener('keydown', function (e) {
-      var k = e.key === 'ArrowLeft' ? -3 : e.key === 'ArrowRight' ? 3 : 0;
-      // 纵向也给键盘：Alt+↑/↓ 各 3°
-      var kx = e.key === 'ArrowUp' ? -3 : e.key === 'ArrowDown' ? 3 : 0;
-      if ((!k && !kx) || !e.altKey) return;
-      view.tiltY += k;
-      view.tiltX += kx;
-      view.lastInputAt = now();
-      writeTilt(view);
-      e.preventDefault();
-    });
   }
 
   // 位置 → 行号。d.lines 按 start_ms 升序，命中最后一个 start <= pos 的行。
@@ -1231,14 +887,14 @@
 
     runGates(lastDt);
     sampleFrameRate();
-    if (!hidden && (playing || energy > 0.005 || isPageOpen() || anyGateWants())) schedule();
+    if (!hidden && (playing || energy > 0.005 || anyGateWants())) schedule();
   }
 
   // 歌词更新的目标帧率。好机器上 60 等于不节流（rAF 本来就被显示器限着），
   // 只有降级档和前后台状态才真的往下压。
   function lyricsTargetFps() {
     if (hidden || document.body.classList.contains('s3d-open')) return 0;
-    if (!playing) return isPageOpen() ? 24 : 12;
+    if (!playing) return 12;
     if (reduced) return 15;
     return tier === 0 ? 24 : tier === 1 ? 40 : 60;
   }
@@ -1256,7 +912,6 @@
     update(i, pos, snap, changed);
     // 漂移/环转是持续的低频运动，跟着歌词帧门走：降级时歌词掉到 24fps，
     // 背景也一起掉，不会出现"歌词停了但场景还在慢慢转"的割裂感。
-    for (var k = 0; k < views.length; k += 1) writeTilt(views[k], dtMs);
     if (!seeking) paintProgress(pos);
   }
 
@@ -1345,15 +1000,10 @@
       lastSec = sec;
       var text = fmt(pos) + ' / ' + fmt(d);
       if (el.stageTime) el.stageTime.textContent = text;
-      if (el.lpTime) el.lpTime.textContent = text;
     }
     if (el.stageRange && !seeking) {
       el.stageRange.max = String(d || 1000);
       el.stageRange.value = String(Math.min(pos, d || pos));
-    }
-    if (el.lpRange && !seeking) {
-      el.lpRange.max = String(d || 1000);
-      el.lpRange.value = String(Math.min(pos, d || pos));
     }
   }
 
@@ -1378,31 +1028,9 @@
   // -------------------------------------------------------------------------
 
   function setMode(next, opts) {
-    if (next === 'page') {
-      if (window.Stage3D && Stage3D.open) { Stage3D.open(); return; }
-      setPage(true); return;
-    }
-    // 星河 = 打开全屏页并切到星河背景场景，与歌词展示模式无关
-    if (next === 'starriver') {
-      // 顺序不能反：星河的亮灭由 syncSceneBtns 判定，而它要读 isPageOpen()。
-      // 先落场景再开页的话，判定发生在「页还没开」的时刻，算出来是灭的。
-      if (window.Stage3D && Stage3D.open) {
-        Stage3D.open('aurora');
-      } else {
-        setPage(true);
-        setScene('starriver');
-      }
-      return;
-    }
-    if (BASE_MODES.indexOf(next) < 0 && PAGE_ONLY_MODES.indexOf(next) < 0) next = 'karaoke';
+    if (BASE_MODES.indexOf(next) < 0) next = 'karaoke';
     mode = next;
-    // 星幕只存在于全屏页：侧栏没有这套排版，data-mode 回落到卡拉OK 的侧栏样式，
-    // 全屏页自己的 data-lp-mode 仍然带着 halo。
-    if (el.stage) el.stage.setAttribute('data-mode', mode === 'halo' ? 'karaoke' : mode);
-    // 全屏页用独立的属性承载模式：它的排版差异比侧栏大（居中、散开、发光），
-    // 选择器挂在 .lyric-page 上比复用 data-mode 更清楚，也不会互相牵连。
-    // 「封面」排版在全屏页退化成卡拉OK —— 全屏页没有「只看封面」这种形态。
-    if (el.page) el.page.setAttribute('data-lp-mode', mode === 'cover' ? 'karaoke' : mode);
+    if (el.stage) el.stage.setAttribute('data-mode', mode);
     if (!(opts && opts.silent)) {
       try { localStorage.setItem(STORE_KEY, mode); } catch (e) { /* 隐私模式 */ }
     }
@@ -1413,63 +1041,15 @@
     schedule();
   }
 
-  // 模式/场景按钮的唯一刷新入口。
-  //
-  // 此前这段逻辑散在三个地方各写各的 class：setMode 末尾循环刷侧栏模式条、
-  // setPage 末尾循环又刷一遍、syncSceneBtns 单独刷场景按钮。谁后跑谁说了算，
-  // 于是出现「侧栏点星河不亮」「切心象把星河高亮熄灭」「点封面把全屏页模式组
-  // 全部清空」这类互相打架的现象。收敛成一处之后，任何状态变化都只经过这里，
-  // 每个按钮恰有一个判据。
+  // 模式按钮的唯一刷新入口：任何状态变化都只经过这里，每个按钮恰有一个判据。
   function syncModeUi() {
-    // 侧栏排版模式条。星河不是排版模式而是背景场景，它的亮灭归 syncSceneBtns，
-    // 这里必须跳过 —— 否则会被「当前模式是不是 starriver」误判成灭。
     if (el.modes) {
       Array.prototype.forEach.call(el.modes.children, function (b) {
-        var m = b.getAttribute('data-mode');
-        if (m === 'starriver') return;
-        var on = m === 'page' ? isPageOpen() : (m === mode);
+        var on = b.getAttribute('data-mode') === mode;
         b.classList.toggle('active', on);
         b.setAttribute('aria-pressed', String(on));
       });
     }
-    // 全屏页排版模式条：判据是页面实际承载的 data-lp-mode，不是内部 mode。
-    // 「封面」模式在全屏页会被写成 karaoke，拿 mode 去比会一个都不亮。
-    if (el.lpModes) {
-      var shown = el.page ? el.page.getAttribute('data-lp-mode') : mode;
-      Array.prototype.forEach.call(el.lpModes.children, function (b) {
-        var on = b.getAttribute('data-lp-mode') === shown;
-        b.classList.toggle('active', on);
-        b.setAttribute('aria-pressed', String(on));
-      });
-    }
-    syncSceneBtns();
-  }
-
-  function isPageOpen() {
-    return !!(el.page && el.page.classList.contains('open'));
-  }
-
-  function setPage(open) {
-    if (!el.page) return;
-    var want = open === undefined ? !isPageOpen() : !!open;
-    el.page.classList.toggle('open', want);
-    el.page.setAttribute('aria-hidden', String(!want));
-    document.body.classList.toggle('lp-open', want);
-    // 页面开合会改变「星河的亮灭」判据（要页开着才亮），所以要重刷一遍按钮。
-    syncModeUi();
-    // 打开时直接落位，避免动画过程中从列表顶端一路追下来
-    refresh(true);
-    schedule();
-    // GL 层按帧门节流：暂停空闲时它的目标帧率是 0，上面 schedule 的这一帧
-    // 不会带它跑。让创意舞台为这次视图切换补一帧，全屏页/舞台才不会空白或
-    // 停留在上一句歌词。
-    if (window.CreativeStage && CreativeStage.kick) CreativeStage.kick();
-    // 演出页开关广播：沉浸模块（场景坞高亮等）据此同步，不反向依赖具体按钮。
-    document.dispatchEvent(new CustomEvent('stage:page', { detail: { open: want } }));
-  }
-
-  function isNativeFullscreen() {
-    return !!(document.fullscreenElement || document.webkitFullscreenElement);
   }
 
   // -------------------------------------------------------------------------
@@ -1495,64 +1075,9 @@
   // 初始化
   // -------------------------------------------------------------------------
 
-  // 全屏页头部的背景场景切换组：封面 / 星河
-  //
-  // 两个「封面」不是同一件事，靠 title 把它们区分开：侧栏那颗是「只显示封面盘」
-  // 的排版模式，这一组选的是背景内容。tools tip 之外不改文案，是因为「封面」
-  // 这个词在控制舱、设置页都已经在用，单独改名反而更乱。
-  var SCENE_HINTS = {
-    cover: '背景：当前曲目的三维粒子封面',
-    starriver: '背景：星野与流动星河'
-  };
-
-  function buildSceneButtons() {
-    var head = document.querySelector('.lp-head');
-    if (!head || head.querySelector('.lp-scenes')) return null;
-    var group = document.createElement('div');
-    group.className = 'lp-scenes';
-    group.setAttribute('role', 'group');
-    group.setAttribute('aria-label', '舞台背景');
-    [['cover', '封面'], ['starriver', '星河']].forEach(function (pair) {
-      var b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'lp-scene-btn';
-      b.setAttribute('data-scene', pair[0]);
-      b.setAttribute('aria-pressed', 'false');
-      b.setAttribute('title', SCENE_HINTS[pair[0]] || '');
-      b.textContent = pair[1];
-      b.addEventListener('click', function () { setScene(pair[0]); });
-      group.appendChild(b);
-    });
-    // 插在歌词模式组之前：先选背景、再选歌词排版
-    var modes = $('lp-modes');
-    if (modes && modes.parentNode === head) head.insertBefore(group, modes);
-    else head.insertBefore(group, head.children[1]);
-    return group;
-  }
-
-  // 自动 360° 环转按钮：放在圆形封面按钮之前
-  function buildAutoSpinButton() {
-    var head = document.querySelector('.lp-head');
-    if (!head || $('lp-autospin')) return null;
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'lp-btn';
-    btn.id = 'lp-autospin';
-    btn.setAttribute('aria-pressed', 'false');
-    btn.setAttribute('title', '自动 360° 旋转');
-    btn.setAttribute('aria-label', '自动 360° 旋转');
-    btn.innerHTML =
-      '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-orbit"/></svg>';
-    var coverBtn = $('lp-cover');
-    if (coverBtn && coverBtn.parentNode === head) head.insertBefore(btn, coverBtn);
-    else head.appendChild(btn);
-    return btn;
-  }
-
-  // init 只允许跑一次。它给 el.modes / el.lpModes / lp-close / lp-play / 进度条…
-  // 绑的全是一次性监听，而 destroy() 只回收帧门、**不解绑 DOM**。视觉控制器
-  // 的 destroy() → init() 是允许再来一轮的，所以这里必须自己兜住：否则第二轮
-  // 会把同一颗按钮绑上第二个 handler，点一次触发两次。
+  // init 只允许跑一次：它给侧栏绑的全是一次性监听，而 destroy() 只回收帧门、
+  // **不解绑 DOM**。destroy() → init() 是允许再来一轮的，所以这里必须自己兜住：
+  // 否则第二轮会把同一颗按钮绑上第二个 handler，点一次触发两次。
   var inited = false;
 
   function init() {
@@ -1564,13 +1089,6 @@
     el.modes = $('stage-modes');
     el.stageRange = $('stage-progress');
     el.stageTime = $('stage-time');
-    el.page = $('lyric-page');
-    el.pageLines = $('lp-lines');
-    el.lpTitle = $('lp-title');
-    el.lpSub = $('lp-sub');
-    el.lpTime = $('lp-time');
-    el.lpRange = $('lp-progress');
-    el.lpModes = $('lp-modes');
 
     if (!el.stage) return;
 
@@ -1605,101 +1123,29 @@
       });
     }
 
-    if (el.lpRange) {
-      el.lpRange.addEventListener('pointerdown', function () { seeking = true; });
-      el.lpRange.addEventListener('input', function () {
-        basePos = Number(el.lpRange.value) || 0;
-        clockAt = now();
-        paintProgress(basePos);
-      });
-      el.lpRange.addEventListener('change', function () {
-        seeking = false;
-        emit('seek', Number(el.lpRange.value) || 0);
-      });
-    }
-
     if (el.modes) {
       el.modes.addEventListener('click', function (e) {
         var b = e.target.closest ? e.target.closest('.stage-mode') : null;
         if (!b) return;
         var m = b.getAttribute('data-mode');
-        if (m === 'page') setPage(!isPageOpen());
-        else setMode(m);
+        setMode(m);
       });
     }
 
     var q = $('stage-queue');
     if (q) q.addEventListener('click', function () { emit('view', 'queue'); });
 
-    var close = $('lp-close');
-    if (close) close.addEventListener('click', function () { setPage(false); });
-
-    var lpPlay = $('lp-play');
-    if (lpPlay) lpPlay.addEventListener('click', function () { emit('toggle'); });
-    var lpPrev = $('lp-prev');
-    if (lpPrev) lpPrev.addEventListener('click', function () { emit('prev'); });
-    var lpNext = $('lp-next');
-    if (lpNext) lpNext.addEventListener('click', function () { emit('next'); });
-
-    if (el.lpModes) {
-      el.lpModes.addEventListener('click', function (e) {
-        var b = e.target.closest ? e.target.closest('.lp-mode') : null;
-        if (b) setMode(b.getAttribute('data-lp-mode'));
-      });
-    }
-    var lpReset = $('lp-view-reset');
-    if (lpReset) lpReset.addEventListener('click', function () { views.forEach(resetTilt); });
-    var lpCover = $('lp-cover');
-    if (lpCover) lpCover.addEventListener('click', function () { setCover(!cover.on); });
-    var lpCockpit = $('lp-cockpit');
-    if (lpCockpit) lpCockpit.addEventListener('click', function () {
-      // 驾驶舱本身（stage-control.js）挂在 body 上、z-index 高于本页，
-      // 所以在这里直接开它就行，不需要把面板搬进全屏页里再维护两份。
-      if (window.StageControl) StageControl.toggle();
-    });
-
-    // 背景场景切换组（封面 / 星河）：动态注入到全屏页头部、歌词模式组之前
-    el.sceneBtns = buildSceneButtons();
-    // 自动 360° 环转按钮
-    var lpAutoSpin = buildAutoSpinButton();
-    if (lpAutoSpin) lpAutoSpin.addEventListener('click', function () { setAutoSpin(); });
-
-    // 侧栏星河按钮（#mode-starriver）的点击已由 el.modes 的统一处理覆盖，
-    // 这里不重复绑定；其高亮状态由 syncSceneBtns 同步。
-
-    document.addEventListener('keydown', function (e) {
-      // 原生全屏下 Esc 被浏览器拿去退全屏（按键事件通常也不会派发）：这时
-      // 不连带关闭演出页，退完全屏用户仍停留在沉浸式页面里。
-      if (e.key === 'Escape' && isPageOpen() && !isNativeFullscreen()) {
-        e.stopPropagation(); setPage(false);
-      }
-    }, true);
-
     var saved = null;
     try { saved = localStorage.getItem(STORE_KEY); } catch (e) { /* 隐私模式 */ }
-    // 迁移：已合并的 'line' → 'karaoke'；'starriver'/'page' 已并入沉浸声场，
-    // 不再是展示模式——存档里残留会让应用一启动就弹出三维舞台。
-    if (saved === 'line' || saved === 'starriver' || saved === 'page') {
+    // 迁移：已合并的 'line' → 'karaoke'；'starriver'/'page' 已并入沉浸声场、
+    // 'halo'（星幕）随旧全屏页移除——存档里残留不再是合法展示模式。
+    if (saved === 'line' || saved === 'starriver' || saved === 'page' || saved === 'halo') {
       saved = 'karaoke';
       try { localStorage.setItem(STORE_KEY, saved); } catch (e) { /* ignore */ }
     }
     setMode(saved || 'karaoke', { silent: true });
 
-    // 背景场景与自动环转：持久化在各自的 localStorage 键里
-    try {
-      var sv = localStorage.getItem(SCENE_KEY);
-      if (SCENES.indexOf(sv) >= 0) scene = sv;
-      autoSpin = localStorage.getItem(SPIN_KEY) === '1';
-    } catch (e) { /* 隐私模式 */ }
-
-    readTilt();
-    views = [
-      createView($('lyrics'), false),
-      createView(el.pageLines, true)
-    ];
-    views.forEach(bindTiltDrag);
-    // 封面可能在 init 之前就通过 setTrack 进来了（那时 .lp-cover 还不存在）。
-    paintCover();
+    views = [createView($('lyrics'), false)];
 
     // 节拍检测器（起音 → --beat 包络）。必须在闸门启动前建好。
     beatDet = window.Onset ? Onset.create() : null;
@@ -1722,13 +1168,9 @@
       setHidden(document.hidden);
     });
 
-    // 驾驶舱改了倾角上限 / 漂移 / 透视之后要重读一遍。CSS 变量本身会即时生效
-    // 在 --lp-persp 这类纯视觉量上，但 tilt.max 和 tilt.drift 是 JS 读进变量的
-    // 数值——不重读的话那两颗旋钮拖了没有任何反应，而且不报错。
+    // 律动幅度是驾驶舱里 JS 读进变量的数值（不落 CSS 变量）：它的初始 emit
+    // 在本监听器注册之前，所以这里既监听变更又做一次冷读。
     document.addEventListener('stagecontrol:change', function (e) {
-      readTilt();
-      views.forEach(writeTilt);
-      // 律动幅度：驾驶舱的初始 emit 在本监听器注册之前，下面另做一次冷读。
       if (e.detail && e.detail.beatAmp !== undefined) {
         beatAmp = clamp((Number(e.detail.beatAmp) || 0) / 100, 0, 2);
       }
@@ -1758,55 +1200,25 @@
 
   window.Stage = {
     init: init,
-    destroy: destroy,
     removeGate: removeGate,
     // 子系统自己的目标帧率从 0 变正（如背景从主题切到弧形墙且正暂停）时，
     // 靠它冷启动循环；循环已在转时是空操作，没人想要帧时帧循环会自行停下。
     kick: function () { schedule(); },
-    // 背景子模块异步就绪/重试成功后，重算 has-cover/gl-active 等类
-    repaint: function () { paintCover(); schedule(); },
     setMode: setMode,
-    togglePage: function () { setPage(); },
-    setPage: setPage,
-    isPageOpen: isPageOpen,
     setReducedMotion: function (v) { reduced = !!v; },
-    setLowFx: setLowFx,
-    // 舞台封面盘开关。随时可切：显示与否只是一个 class，旋转是 CSS 动画，
-    // 既不用重载也不用重建 DOM。emit 出去的 'cover' 由 app.js 落到设置里。
-    setCoverMode: setCover,
-    isCoverMode: function () { return cover.on; },
-    // 舞台视角：驾驶舱从这里读写，复位也留一个口子
-    resetView: function () { views.forEach(resetTilt); },
-    tiltState: function () {
-      var v = views[1];
-      return v ? { x: v.tiltX, y: v.tiltY, max: tilt.max, drift: tilt.drift } : null;
-    },
-    setTiltDrift: function (v) { tilt.drift = v; },
-
     // 当前曲目封面 URL（可能是同源 /v1/tracks/.. 封面，也可能是在线音源远程图）。
     // 粒子封面据此加载纹理，不在这里拿的话只能去 img.src 反解。
     coverUrl: function () { return lastCover; },
-
-    // 当前背景场景（'cover' / 'starriver'）与自动环转状态，
-    // 背景子模块据此决定自己该不该画
-    scene: function () { return scene; },
-    setScene: setScene,
-    isAutoSpin: function () { return autoSpin; },
-    setAutoSpin: setAutoSpin,
 
     setTrack: function (t, coverUrl) {
       track = t || null;
       if (!durMs && t) durMs = t.duration_ms || 0;
       lastCover = coverUrl || null;
-      if (el.lpTitle) el.lpTitle.textContent = (t && t.title) || '未在播放';
-      var lpArtist = $('lp-artist');
-      if (lpArtist) lpArtist.textContent = (t && t.artist) || '';
       if (el.disc) {
         el.disc.style.backgroundImage = coverUrl ? 'url("' + coverUrl + '")' : 'none';
         el.disc.classList.toggle('is-empty', !coverUrl);
       }
       extractPalette(coverUrl);
-      paintCover();
       schedule();
     },
 
@@ -1828,8 +1240,6 @@
       }
       playing = nextPlaying;
       document.body.classList.toggle('is-playing', playing);
-      var lpPlay = $('lp-play');
-      if (lpPlay) lpPlay.classList.toggle('is-playing', playing);
       paintProgress(currentPos());
       schedule();
     },
@@ -1890,20 +1300,6 @@
     // 行号在歌词未定位时给 0，由消费方自行处理无歌词占位。
     lyrics: function () {
       return doc ? { lines: doc.lines, index: activeIdx < 0 ? 0 : activeIdx } : null;
-    },
-
-    // 运行时改旋钮：Stage.tune({ 'dim-step': 0.35, 'lerp': 0.2 })
-    // 键名就是 stage.css 里去掉 --lyric- 前缀的那一段。不传参返回当前值。
-    tune: function (patch) {
-      if (!patch) return JSON.parse(JSON.stringify(tune));
-      Object.keys(patch).forEach(function (k) {
-        document.documentElement.style.setProperty('--lyric-' + k, String(patch[k]));
-      });
-      readTune();
-      readTilt();
-      refresh(true);
-      schedule();
-      return JSON.parse(JSON.stringify(tune));
     },
 
     // 换主题后调用：主题改的是 --accent / --text 这一层，而歌词的距离衰减、
