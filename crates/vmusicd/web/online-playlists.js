@@ -351,8 +351,7 @@
 
     tracks.forEach(function (t, i) {
       var row = window.Online.row(t, function () {
-        // 与搜索页同一道闸门：VIP 不偷播、无试听地址不反应。
-        if (t.vip_only) { window.toast('该曲目为 VIP 专享'); return; }
+        // 与搜索页同一道闸门：无试听地址不反应；VIP 由后端按账号定，不预拦。
         if (!t.playable) return;
         window.Online.playAll(tracks, i);
       });

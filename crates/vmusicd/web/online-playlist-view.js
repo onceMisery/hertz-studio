@@ -414,7 +414,7 @@
     var canWrite = hasCap(state.source, 'playlist_write');
     view.forEach(function (t, i) {
       var row = window.Online.row(t, function () {
-        if (t.vip_only) { toast('该曲目为 VIP 专享'); return; }
+        // VIP 曲放行：可播与否由后端按账号 cookie 定，失败如实 toast。
         if (!t.playable) return;
         window.Online.playAll(view, i);
       });
@@ -433,10 +433,10 @@
 
   // 封面排布的单张曲目卡：封面 + 歌名 + 歌手·时长。类名沿用在线面板网格那套
   // （.op-card / .op-cover / .op-pl-name / .op-pl-sub），两处网格永远同款。
-  // 不可播 / VIP 整卡置灰且点击无效——与列表排布下 Online.row 的红线一致：
-  // 绝不模拟会员权益偷播 VIP 曲目。
+  // 只有不可播（无试听地址）整卡置灰且点击无效；VIP 保留徽标、点击交给
+  // 后端按账号判定，与列表排布下 Online.row 的口径一致。
   function trackCard(t, i, view) {
-    var blocked = !t.playable || t.vip_only;
+    var blocked = !t.playable;
     var c = document.createElement('div');
     c.className = 'op-card opl-track-card' + (blocked ? ' is-disabled' : '');
     c.setAttribute('role', 'button');
@@ -467,7 +467,6 @@
     c.appendChild(sub);
 
     function play() {
-      if (t.vip_only) { toast('该曲目为 VIP 专享'); return; }
       if (!t.playable) return;
       window.Online.playAll(view, i);
     }

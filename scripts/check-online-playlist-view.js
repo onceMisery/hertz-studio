@@ -355,14 +355,15 @@ function detailBody(tracks, total) {
       transport: makeTransport(() => detailBody([
         T('1', '晴天'),
         T('2', '稻香'),
-        T('3', 'VIP 曲', { vip_only: true, playable: false }),
-      ], 3)),
+        T('3', 'VIP 曲', { vip_only: true }),
+        T('4', '已下架', { playable: false }),
+      ], 4)),
     });
     env.view.open('netease', 'P1', 'arrange');
     await ticks();
     const box = env.doc.getElementById('opl-rows');
     const cards = byClass(box, 'opl-track-card');
-    eq(cards.length, 3, '默认按封面铺成卡片，一卡一首');
+    eq(cards.length, 4, '默认按封面铺成卡片，一卡一首');
     eq(byClass(box, 'track').length, 0, '封面排布下没有表格行');
     eq(env.doc.getElementById('opl-head').hidden, true, '封面排布收起文本表头');
     ok(classOf(box, 'is-cover'), '容器带上封面排布的类');
@@ -373,19 +374,27 @@ function detailBody(tracks, total) {
     await ticks();
     eq(env.spies.played.length, 1, '点卡片即播放');
     eq(env.spies.played[0].index, 1, '从被点的那一首开始');
-    eq(env.spies.played[0].tracks.length, 3, '队列是整盘可见曲目');
+    eq(env.spies.played[0].tracks.length, 4, '队列是整盘可见曲目');
 
-    ok(classOf(cards[2], 'is-disabled'), 'VIP 卡置灰');
+    // VIP 卡不置灰、照常放行：可播与否由后端按账号 cookie 定（登录的 VIP
+    // 真能取到流），前端预拦只会误伤。置灰只留给确实没有试听地址的曲目。
+    ok(!classOf(cards[2], 'is-disabled'), 'VIP 可播卡不置灰');
     env.spies.played.length = 0;
     cards[2].onclick();
     await ticks();
-    eq(env.spies.played.length, 0, 'VIP 卡点了不播');
-    has(env.spies.toasts.map((t) => t.msg).join('|'), 'VIP 专享', 'VIP 卡如实提示');
+    eq(env.spies.played.length, 1, 'VIP 卡点了正常入队');
+    eq(env.spies.played[0].index, 2, 'VIP 卡从自己这一首开始');
+
+    ok(classOf(cards[3], 'is-disabled'), '不可播卡置灰');
+    env.spies.played.length = 0;
+    cards[3].onclick();
+    await ticks();
+    eq(env.spies.played.length, 0, '不可播卡点了不播');
 
     env.view.setMode('list');
     await ticks();
     eq(byClass(box, 'opl-track-card').length, 0, '切列表后不再有卡片');
-    eq(byClass(box, 'track').length, 3, '切列表后是表格行');
+    eq(byClass(box, 'track').length, 4, '切列表后是表格行');
     eq(env.doc.getElementById('opl-head').hidden, false, '列表排布恢复文本表头');
     eq(env.view.state.mode, 'list', '排布状态记录为 list');
 

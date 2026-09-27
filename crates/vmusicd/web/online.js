@@ -122,9 +122,11 @@
   // 标记/置灰/VIP 闸门在这里统一做，调用方只管激活后干什么。
   function buildRow(track, activate) {
     var row = document.createElement('div');
-    // VIP 专享或无试听地址：整行置灰。只禁用按钮不够，行点击也必须失效——
-    // 红线是不模拟会员权益，VIP 曲目绝不偷偷播。
-    var disabled = !track.playable || track.vip_only;
+    // 无试听地址：整行置灰。只禁用按钮不够，行点击也必须失效。
+    // VIP 曲目不在这里拦截：后端取流时带着用户自己的账号 cookie，VIP 账号
+    // 真能拿到完整曲目（已真机验证）；拿不到时后端如实报错（未登录提示
+    // 登录、无版权提示下架），前端预判只会误伤登录的 VIP 用户。
+    var disabled = !track.playable;
     row.className = 'track online-row' + (disabled ? ' is-disabled' : '');
     row.innerHTML =
       '<div class="t-index"><span class="t-num">♪</span></div>' +
@@ -195,7 +197,7 @@
     var btn = row.querySelector('[data-act="preview"]');
     btn.disabled = disabled;
     btn.title = track.vip_only
-      ? '该曲目为 VIP 专享'
+      ? 'VIP 专享，登录会员账号后可完整播放'
       : (track.playable ? '在线试听' : '该音源没有可用的试听地址');
 
     btn.onclick = function (e) { e.stopPropagation(); activate(); };
@@ -205,10 +207,7 @@
 
   function onlineRow(track) {
     return buildRow(track, function () {
-      if (track.vip_only) {
-        H.toast('该曲目为 VIP 专享');
-        return;
-      }
+      // VIP 曲也放行：能不能播由后端按账号 cookie 定，失败如实 toast。
       if (!track.playable) return;
       // All 视图是跨源拼接的结果，只能单曲播；单源视图整盘入队，点第几首
       // 就从第几首开始（后端队列与高亮都以同一批虚拟 id 为准）。

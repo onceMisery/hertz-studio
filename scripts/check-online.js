@@ -667,7 +667,7 @@ async function loginScenario(pollStates, opts) {
     const transport = makeTransport({
       GET: [
         { match: '/v1/online/search?', once: false, times: 1,
-          returns: { total: 2, tracks: [T({ id: '1', title: '晴天' }), T({ id: '2', vip_only: true, playable: false })] } },
+          returns: { total: 3, tracks: [T({ id: '1', title: '晴天' }), T({ id: '2', vip_only: true, playable: false }), T({ id: '3', title: 'VIP但可播', vip_only: true })] } },
       ],
     });
     const env = makeSandbox({ transport });
@@ -677,8 +677,11 @@ async function loginScenario(pollStates, opts) {
     env.sandbox.window.Online.search();
     await ticks();
     const body = env.doc.getElementById('online-body');
-    eq(findByClass(body, 'online-row').length, 2, '渲染 2 行');
-    eq(findByClass(body, 'is-disabled').length, 1, 'VIP/不可播置灰 1 行');
+    eq(findByClass(body, 'online-row').length, 3, '渲染 3 行');
+    // 置灰只看 playable：VIP 曲在登录态后端真能取到流（真机验证 hires），
+    // 前端不再预拦，只挂 VIP 徽标，能不能播由后端按账号 cookie 定。
+    eq(findByClass(body, 'is-disabled').length, 1, '仅不可播置灰 1 行，VIP 可播不置灰');
+    eq(findByClass(body, 'vip-tag').length, 2, 'VIP 徽标照挂 2 行');
     eq(env.sandbox.window.Online.getMeta('online:netease:1').title, '晴天', '虚拟 id 元数据已缓存');
     eq(env.sandbox.window.Online.state.aggregate, false, '单源不是 aggregate');
 
