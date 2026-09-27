@@ -1,0 +1,60 @@
+{
+  "TOTAL": "3577",
+  "UK": "b8cedd47-7e25-4b17-baf8-d1e0fb3d3bfa",
+  "abslist": [
+    {
+      "AARTIST": "Jay Chou",
+      "ALBUM": "叶惠美",
+      "ALBUMID": "1293",
+      "ARTIST": "周杰伦",
+      "ARTISTID": "336",
+      "COPYRIGHT": "0",
+      "DC_TARGETID": "228908",
+      "DC_TARGETTYPE": "music",
+      "DURATION": "269",
+      "FORMATS": "AAC48|ALFLAC|MP3128|MP3H|OGG192|OGG96|OGGH|WMA128|WMA96",
+      "MINFO": "level:ff,bitrate:2000,format:flac,size:52.83Mb;level:p,bitrate:320,format:mp3,size:10.29Mb;level:h,bitrate:128,format:mp3,size:4.12Mb",
+      "MUSICRID": "MUSIC_228908",
+      "NAME": "晴天",
+      "PAY": "16711935",
+      "SONGNAME": "晴天",
+      "SUBLIST": [],
+      "isdownload": "0",
+      "payInfo": {
+        "cannotDownload": "0",
+        "cannotOnlinePlay": "0",
+        "down": "1111",
+        "download": "1111",
+        "feeType": { "album": "0", "bookvip": "0", "song": "1", "vip": "1" },
+        "limitfree": "0",
+        "listen_fragment": "1",
+        "svip_preview": "0"
+      },
+      "svip_preview": "0",
+      "web_albumpic_short": "120/s3s94/93/211513640.jpg"
+    },
+    {
+      "AARTIST": "群星",
+      "ALBUM": "",
+      "ALBUMID": "",
+      "ARTIST": "网络歌手",
+      "COPYRIGHT": "0",
+      "DC_TARGETID": "91827364",
+      "DC_TARGETTYPE": "music",
+      "DURATION": "213",
+      "MINFO": "level:h,bitrate:128,format:mp3,size:3.26Mb",
+      "MUSICRID": "MUSIC_91827364",
+      "NAME": "晴天 (翻唱版)",
+      "PAY": "0",
+      "SONGNAME": "晴天 (翻唱版)",
+      "isdownload": "0",
+      "payInfo": {
+        "cannotDownload": "0",
+        "cannotOnlinePlay": "0",
+        "feeType": { "album": "0", "bookvip": "0", "song": "0", "vip": "0" },
+        "listen_fragment": "0"
+      },
+      "web_albumpic_short": ""
+    }
+  ]
+}

@@ -45,6 +45,7 @@ mod ccmixter;
 pub(crate) mod cred;
 mod http;
 mod kugou;
+mod kuwo;
 mod netease;
 pub mod progressive;
 mod qishui;
@@ -352,6 +353,17 @@ pub const SOURCES: &[SourceInfo] = &[
         ],
     },
     SourceInfo {
+        id: "kuwo",
+        label: "酷我音乐",
+        cats: &[],
+        supports_cookie: true,
+        // 登录只有 cookie 粘贴一条路（uid 判态，spike 2026-09-27 无账号
+        // 实测，字段名待核对）；匿名档位上限 128k 完整曲/试听片段，登录
+        // 通道对移动接口的效果待实测——不标 HighQuality（标了等于承诺
+        // 拿得到无损）。
+        caps: &[Capability::CookieLogin],
+    },
+    SourceInfo {
         id: "ccmixter",
         label: "CCmixter · CC 授权曲库",
         cats: &[],
@@ -396,6 +408,7 @@ pub(crate) fn referer(source: &str) -> Option<&'static str> {
         // QQ/酷狗的 CDN 直链校验 Referer，缺了直接 403（Task 15 落盘播放依赖）。
         "qq" => Some("https://y.qq.com/"),
         "kugou" => Some("https://www.kugou.com/"),
+        "kuwo" => Some("https://www.kuwo.cn/"),
         "ccmixter" => Some("https://ccmixter.org/"),
         // 汽水的音频 CDN 校验来源页，缺了直接 403。
         "qishui" => Some("https://www.qishui.com/"),
@@ -517,6 +530,7 @@ pub async fn search(ctx: &Ctx, q: SearchQuery) -> ApiResult<SearchPage> {
         "netease" => netease::search(ctx, &q).await,
         "qq" => qq::search(ctx, &q).await,
         "kugou" => kugou::search(ctx, &q).await,
+        "kuwo" => kuwo::search(ctx, &q).await,
         "ccmixter" => ccmixter::search(ctx, &q).await,
         "qishui" => qishui::search(ctx, &q).await,
         other => Err(unsupported(other)),
@@ -588,6 +602,7 @@ pub async fn stream(
         "netease" => netease::stream(ctx, id, q).await,
         "qq" => qq::stream(ctx, id, track_ref, q).await,
         "kugou" => kugou::stream(ctx, id, track_ref, q).await,
+        "kuwo" => kuwo::stream(ctx, id, track_ref, q).await,
         "ccmixter" => ccmixter::stream(ctx, id, q).await,
         "qishui" => qishui::stream(ctx, id, track_ref, q).await,
         other => Err(unsupported(other)),
@@ -614,6 +629,7 @@ pub async fn detail(ctx: &Ctx, source: &str, id: &str) -> ApiResult<OnlineDetail
         "netease" => netease::detail(ctx, id).await,
         "qq" => qq::detail(ctx, id).await,
         "kugou" => kugou::detail(ctx, id).await,
+        "kuwo" => kuwo::detail(ctx, id).await,
         "ccmixter" => ccmixter::detail(ctx, id).await,
         "qishui" => qishui::detail(ctx, id).await,
         other => Err(unsupported(other)),
@@ -632,6 +648,7 @@ pub async fn lyric(ctx: &Ctx, source: &str, id: &str) -> ApiResult<vmusic_core::
         "netease" => netease::lyric(ctx, id).await,
         "qq" => qq::lyric(ctx, id).await,
         "kugou" => kugou::lyric(ctx, id).await,
+        "kuwo" => kuwo::lyric(ctx, id).await,
         "ccmixter" => ccmixter::lyric(ctx, id).await,
         "qishui" => qishui::lyric(ctx, id).await,
         other => Err(unsupported(other)),
@@ -681,6 +698,7 @@ pub async fn account(ctx: &Ctx, source: &str) -> ApiResult<AccountInfo> {
         "netease" => netease::account(ctx).await,
         "qq" => qq::account(ctx).await,
         "kugou" => kugou::account(ctx).await,
+        "kuwo" => kuwo::account(ctx).await,
         // 汽水：扫码/粘贴 cookie 之后顶栏要显示昵称头像，没有这条臂会让
         // 「登录成功但界面仍是未登录」——登录态在，回拉却没路可走。
         "qishui" => qishui::account(ctx).await,
@@ -907,7 +925,7 @@ mod tests {
     #[test]
     fn search_dispatches_every_registered_source() {
         let dispatches =
-            |source: &str| matches!(source, "netease" | "qq" | "kugou" | "ccmixter" | "qishui");
+            |source: &str| matches!(source, "netease" | "qq" | "kugou" | "kuwo" | "ccmixter" | "qishui");
         for src in SOURCES {
             assert!(
                 dispatches(src.id),
@@ -1190,6 +1208,9 @@ mod tests {
                 Capability::HighQuality,
             ]
         );
+        // 酷我：只有 cookie 粘贴登录；匿名上限 128k/试听，登录通道效果待
+        // 实测，不标 HighQuality。
+        assert_eq!(caps_of("kuwo"), &[Capability::CookieLogin]);
         // ccmixter 是 CC 授权匿名曲库，没有任何账号能力。
         assert!(caps_of("ccmixter").is_empty());
     }

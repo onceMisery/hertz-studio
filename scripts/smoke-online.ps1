@@ -11,7 +11,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Base,
     [Parameter(Mandatory = $true)][string]$Token,
-    [string[]]$Sources = @('netease', 'qq', 'kugou'),
+    [string[]]$Sources = @('netease', 'qq', 'kugou', 'kuwo'),
     [string]$Keyword = '海阔天空'
 )
 
@@ -42,6 +42,7 @@ $referers = @{
     netease = 'https://music.163.com/'
     qq      = $null
     kugou   = 'https://www.kugou.com/'
+    kuwo    = 'https://www.kuwo.cn/'
 }
 
 # MP3: "ID3" 起头或 0xFFE 同步字；M4A: 第 4 字节起 "ftyp"；FLAC: "fLaC"。

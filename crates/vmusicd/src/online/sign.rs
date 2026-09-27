@@ -293,8 +293,6 @@ pub mod kuwo {
 
     /// 变形 DES 加密。块内小端装载，尾部不足 8 字节零填充（与 Go 参考实现
     /// 一致，输出恒为 8 字节的倍数）。
-    // kuwo.rs（下一提交）接线后摘除。
-    #[allow(dead_code)]
     pub fn des_encrypt(msg: &[u8]) -> Vec<u8> {
         let mut l = 0i64;
         for (i, &b) in SECRET_KEY.iter().enumerate() {
@@ -325,8 +323,6 @@ pub mod kuwo {
     }
 
     /// mobi.s 的 `q` 参数：加密后做标准 base64。
-    // kuwo.rs（下一提交）接线后摘除。
-    #[allow(dead_code)]
     pub fn mobi_q(plaintext: &str) -> String {
         b64_encode_std(&des_encrypt(plaintext.as_bytes()))
     }

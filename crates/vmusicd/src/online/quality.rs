@@ -72,6 +72,8 @@ pub fn default_for(source: &str) -> Quality {
     match source {
         "netease" => Quality::Hires,
         "qq" | "kugou" => Quality::Lossless,
+        // 酷我匿名拿不到无损（请求会被降级/给试听），默认档避免每次必失败。
+        "kuwo" => Quality::Exhigh,
         _ => Quality::Standard,
     }
 }
@@ -84,7 +86,7 @@ pub fn allowed_for(source: &str) -> &'static [Quality] {
             Quality::Lossless,
             Quality::Hires,
         ],
-        "kugou" => &[Quality::Standard, Quality::Exhigh, Quality::Lossless],
+        "kugou" | "kuwo" => &[Quality::Standard, Quality::Exhigh, Quality::Lossless],
         // 汽水加密档不可播、ccmixter 直链无档位：只暴露标准。
         _ => &[Quality::Standard],
     }
@@ -183,12 +185,15 @@ mod tests {
     fn defaults_and_allowed_tables() {
         assert_eq!(default_for("netease"), Quality::Hires);
         assert_eq!(default_for("qishui"), Quality::Standard);
+        assert_eq!(default_for("kuwo"), Quality::Exhigh);
         assert!(!allowed_for("kugou").contains(&Quality::Hires));
+        assert!(!allowed_for("kuwo").contains(&Quality::Hires));
         assert_eq!(
             clamp_to_allowed("qishui", Quality::Hires),
             Quality::Standard
         );
         assert_eq!(clamp_to_allowed("kugou", Quality::Hires), Quality::Lossless);
+        assert_eq!(clamp_to_allowed("kuwo", Quality::Hires), Quality::Lossless);
     }
 
     #[test]
