@@ -87,10 +87,14 @@
 
     return {
       update: update,
-      setTheme: function (t) { theme = t; lastKey = ''; paintGlow(); },
-      setFontScale: function (v) { fontScale = v; lastKey = ''; },
-      setVisible: function (b) { visible = b; host.hidden = !b; if (b) lastKey = ''; },
-      setGlowBackground: function (b) { glowBg = b; lastKey = ''; },
+      setTheme: function (t) {
+        if (t === theme) return;
+        if (global.FoliaTheme && FoliaTheme.signature(t) === FoliaTheme.signature(theme)) return;
+        theme = t; lastKey = ''; paintGlow();
+      },
+      setFontScale: function (v) { if (Math.abs(v - fontScale) < 1e-6) return; fontScale = v; lastKey = ''; },
+      setVisible: function (b) { if (b === visible) return; visible = b; host.hidden = !b; if (b) lastKey = ''; },
+      setGlowBackground: function (b) { if (b === glowBg) return; glowBg = b; lastKey = ''; },
       setPaused: function () {}, setEco: function () {}, resize: function () { lastKey = ''; },
       destroy: function () { destroyed = true; card.remove(); }
     };
