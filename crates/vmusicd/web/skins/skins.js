@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 mmusic-studio contributors
+//
+// 界面皮肤：只管**布局**，不管配色。
+//
+// 一套皮肤 = 一个 id + 一份 CSS（`skins/skin.<id>.css`）。切换时只做两件事：
+// 把 `data-skin` 写到 <html> 上、把对应那份 CSS 的 disabled 解开。配色一律
+// 沿用当前主题的 token，皮肤 CSS 里不出现任何颜色字面量——所以换皮肤不会
+// 把主题色带跑，换主题也不会破坏皮肤。
+//
+// 加一套新皮肤只需两步（扩展点就是 register）：
+//   1. 新建 `skins/skin.<id>.css`，规则用 `[data-skin="<id>"]` 包起来；
+//   2. 在 CATALOG 里加一行 `{ id, name, note }`，并在 index.html 里补一个
+//      `<link data-skin-css="<id>" disabled>`。
+// 其余（切换、持久化、设置页列表、事件广播）都由这里统一处理。
+
+(function () {
+  'use strict';
+
+  var ATTR = 'data-skin';
+  var KEY = 'vmusic.skin';
+  var DEFAULT_ID = 'classic';
+  var EVENT = 'skin:changed';
+
+  /// 皮肤目录。`classic` 是"没有皮肤"——也就是仓库原本那套布局，它不带 CSS
+  /// 文件，其它皮肤都是在它的基础上做覆盖。
+  var CATALOG = [
+    {
+      id: 'classic',
+      name: '经典',
+      note: '仓库原本的三列布局（导航 / 内容 / 舞台并排）',
+    },
+    {
+      id: 'mineradio',
+      name: '浮光 · Mineradio',
+      note: '顶部悬浮胶囊导航 + 全宽卡片网格，舞台贴右侧边',
+    },
+    {
+      id: 'workbench',
+      name: '工作台',
+      note: '固定窄侧栏 + 内容分栏，直角细线、高信息密度',
+    },
+  ];
+
+  var current = DEFAULT_ID;
+  var listeners = [];
+
+  function byId(id) {
+    for (var i = 0; i < CATALOG.length; i += 1) {
+      if (CATALOG[i].id === id) return CATALOG[i];
+    }
+    return null;
+  }
+
+  /// 皮肤 CSS 是**按需启用**的：所有皮肤都 link 在页面上但默认 disabled，
+  /// 切到谁才解开谁。这样切换是同步的、没有加载闪烁，也不必在运行时插入
+  /// <link>（插入会有一帧无样式）。
+  function syncCss(id) {
+    var links = document.querySelectorAll('link[data-skin-css]');
+    for (var i = 0; i < links.length; i += 1) {
+      var own = links[i].getAttribute('data-skin-css');
+      var want = own === id;
+      if (links[i].disabled === want) links[i].disabled = !want;
+    }
+  }
+
+  /// 声明的皮肤必须真的有那份 CSS，否则切过去等于"什么都没变"——
+  /// 这种静默失败最难查，所以启动时就把它挑出来。
+  function hasCss(id) {
+    var links = document.querySelectorAll('link[data-skin-css]');
+    for (var i = 0; i < links.length; i += 1) {
+      if (links[i].getAttribute('data-skin-css') === id) return true;
+    }
+    return false;
+  }
+
+  function apply(id, opts) {
+    var def = byId(id);
+    if (!def) {
+      def = byId(DEFAULT_ID);
+      id = DEFAULT_ID;
+    }
+    // classic 没有 CSS 文件是设计如此；其它皮肤缺 CSS 就是漏了文件。
+    if (id !== DEFAULT_ID && !hasCss(id)) {
+      if (window.console && console.warn) console.warn('[skins] 缺少 ' + id + ' 的 CSS，回落到 classic');
+      id = DEFAULT_ID;
+      def = byId(DEFAULT_ID);
+    }
+
+    current = id;
+    var root = document.documentElement;
+    if (root.getAttribute(ATTR) !== id) root.setAttribute(ATTR, id);
+    syncCss(id);
+
+    if (!(opts && opts.silent)) {
+      try { localStorage.setItem(KEY, id); } catch (e) { /* 隐私模式 */ }
+    }
+    // 舞台画布、3D 场景这些要按新尺寸重排，广播出去让它们自己响应——
+    // 与项目里 online-playlists:changed 的做法一致，不在这里硬编码谁要重画。
+    try {
+      document.dispatchEvent(new CustomEvent(EVENT, { detail: { id: id, skin: def } }));
+    } catch (e) { /* 老浏览器没有 CustomEvent 构造器 */ }
+    listeners.forEach(function (fn) {
+      try { fn(def); } catch (e) { /* 单个订阅者出错不该拖垮换肤 */ }
+    });
+    return def;
+  }
+
+  function init() {
+    var saved = null;
+    try { saved = localStorage.getItem(KEY); } catch (e) { saved = null; }
+    // 存过但不认识（比如皮肤被删了）就回落 classic，而不是写个无效属性。
+    apply(saved && byId(saved) ? saved : DEFAULT_ID, { silent: true });
+    renderList();
+    return current;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 设置页的皮肤列表
+  // ---------------------------------------------------------------------------
+
+  function el(id) { return document.getElementById(id); }
+
+  function renderList() {
+    var host = el('skins-list');
+    if (!host) return;
+    host.innerHTML = '';
+    CATALOG.forEach(function (def) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'skin-option' + (def.id === current ? ' is-on' : '');
+      b.setAttribute('data-skin-id', def.id);
+      b.setAttribute('aria-pressed', String(def.id === current));
+      var name = document.createElement('strong');
+      name.className = 'skin-option-name';
+      name.textContent = def.name;
+      var note = document.createElement('span');
+      note.className = 'skin-option-note';
+      note.textContent = def.note;
+      b.appendChild(name);
+      b.appendChild(note);
+      b.onclick = function () {
+        apply(def.id);
+        renderList();
+      };
+      host.appendChild(b);
+    });
+  }
+
+  window.Skins = {
+    /// 扩展点：新皮肤走这里登记，之后切换/列表/持久化自动生效。
+    register: function (def) {
+      if (!def || !def.id || byId(def.id)) return false;
+      CATALOG.push(def);
+      return true;
+    },
+    list: function () {
+      return CATALOG.map(function (d) { return { id: d.id, name: d.name, note: d.note }; });
+    },
+    apply: apply,
+    current: function () { return byId(current); },
+    currentId: function () { return current; },
+    onChange: function (fn) { if (typeof fn === 'function') listeners.push(fn); },
+    init: init,
+    render: renderList,
+    /// 契约脚本与排障用：皮肤之间的差别必须体现在布局上，不是颜色。
+    catalog: function () { return CATALOG.slice(); },
+  };
+})();

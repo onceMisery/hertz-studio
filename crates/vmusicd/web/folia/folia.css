@@ -143,9 +143,27 @@
 .s3d-reduced .fl-cline.fl-enter-none { animation: none !important; }
 .s3d-reduced .fl-cline.fl-exit-none { animation: fl-line-out-none .12s ease both !important; }
 
-/* 平面模式：停用 3D 画布的视觉层与歌词轨（DOM 仍在，手势入口由 JS 短路） */
+/* folia 歌词视觉激活（叠加在 3D 舞台上）：隐藏 3D 自带歌词轨，避免两套歌词并存。
+   3D 场景本身照常渲染——.fl-root 背景透明（背景为 stage 模式），只有歌词浮在上层。 */
+.s3d-folia .s3d-reading { display: none !important; }
+
+/* 纯平面回退（无 GL）：再停用 3D 画布视觉层（DOM 仍在，手势入口由 JS 短路）。
+   注意叠加模式（.s3d-folia 但非 .s3d-plane）不隐藏画布，3D 场景必须可见。 */
 .s3d-plane .s3d-canvas-wrap canvas { visibility: hidden; }
-.s3d-plane .s3d-reading { display: none !important; }
+
+/* 叠加层级：极光穹顶场景会把 .s3d-canvas-wrap 抬到 z-index:2（压过氛围光晕），
+   folia 歌词层必须更高（3）才不会被 canvas 盖住；舞台 chrome（顶栏/播放坞/
+   设置/队列/暗角/品牌）统一抬到 4，保证始终可点可见。
+   stage 背景模式下 .fl-root 自身全透明，抬高不遮挡 3D；几何/流体/纯色模式则
+   由 folia 背景层正常覆盖画布（用户显式选择）。 */
+.s3d-folia .fl-root { z-index: 3; }
+.s3d-folia .s3d-head,
+.s3d-folia .s3d-dock,
+.s3d-folia .s3d-player,
+.s3d-folia .s3d-settings,
+.s3d-folia .s3d-queue,
+.s3d-folia .s3d-vignette,
+.s3d-folia .s3d-brand { z-index: 4; }
 
 @media (max-width: 760px) {
   .fl-classic { padding: 0 16px; }

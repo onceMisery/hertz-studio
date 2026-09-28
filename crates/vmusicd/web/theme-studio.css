@@ -1,0 +1,414 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 mmusic-studio contributors
+
+   主题工作室：壁纸背景层 + 壁纸画廊 + 自定义配色。
+
+   为什么这是独立一张表而不是塞进 style.css
+   ----------------------------------------
+   它排在 style.css 之后（index.html 的 <link> 顺序），同特异性会整块胜出，
+   于是"壁纸层压在哪一层"这种和既有布局强耦合的事可以单独读、单独改。
+   style.css 那边一行都不用动——本文件不重定义任何既有令牌，只加新选择器。
+
+   令牌红线（scripts/check-css-tokens.js 契约 A）：--glass-* 一族只能由
+   style.css 的 :root 定义，这里一个都不碰。本文件自己的变量一律带 ts- 前缀。 */
+
+/* ---------- 壁纸层 ---------- */
+
+/* 压在所有内容之下的铺底。z-index 取 -3 而不是 0：style.css 里
+   body::before（主题辉光）在 -2、#ambient（在播封面的模糊氛围）在 -1，
+   三者都是 body 的负层叠子元素，于是天然排成
+   「壁纸 → 主题辉光 → 在播氛围 → 正文」—— 想要的顺序，不必改那两层。 */
+#ts-wallpaper {
+  position: fixed;
+  inset: 0;
+  z-index: -3;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ts-wall-img {
+  position: absolute;
+  inset: 0;
+  background: center / cover no-repeat;
+  opacity: 0;
+  /* scale 略大于 1：模糊会把边缘往里吃出透明带，不放大就会在四周看到一圈
+     底色。放大 6% 在 1600px 长边的图上是 96px，够盖住 40px 以内的模糊。 */
+  transform: scale(1.06);
+  filter: blur(var(--ts-wall-blur, 0px)) saturate(112%);
+  transition: opacity var(--dur-3) var(--ease-out), filter var(--dur-3) var(--ease-out);
+}
+
+#ts-wallpaper.on .ts-wall-img {
+  opacity: var(--ts-wall-opacity, 0.55);
+}
+
+/* 压暗层。取的是**当前主题的底色**，所以"压暗"永远朝着正文反推时用的那个
+   基准色压——换主题不用重新调，这正是文字对比度还能成立的前提。
+   上下两端各多压一档：顶栏与播放条是固定高度、底下直接就是壁纸的，
+   中间那段有面板垫着，压暗可以放轻一点。 */
+.ts-wall-scrim {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  /* --ts-wall-dim / --ts-wall-dim-edge 由 JS 写成百分比字符串（如 "42%"），
+     所以这里直接喂给 color-mix 的占比位，不再套一层 calc。 */
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--ts-wall-scrim, #0a0a0a) var(--ts-wall-dim-edge, 0%), transparent) 0%,
+    color-mix(in srgb, var(--ts-wall-scrim, #0a0a0a) var(--ts-wall-dim, 0%), transparent) 18%,
+    color-mix(in srgb, var(--ts-wall-scrim, #0a0a0a) var(--ts-wall-dim, 0%), transparent) 82%,
+    color-mix(in srgb, var(--ts-wall-scrim, #0a0a0a) var(--ts-wall-dim-edge, 0%), transparent) 100%
+  );
+  transition: opacity var(--dur-3) var(--ease-out);
+}
+
+#ts-wallpaper.on .ts-wall-scrim {
+  opacity: 1;
+}
+
+/* 减少动效时壁纸不做淡入：这是全站统一约定（body.reduce-motion），
+   换壁纸属于"装饰性过渡"，没有它信息也没丢。 */
+body.reduce-motion .ts-wall-img,
+body.reduce-motion .ts-wall-scrim {
+  transition: none;
+}
+
+/* ---------- 重置按钮与画廊 ---------- */
+
+/* 壁纸画廊：一排缩略图，比例固定 16:9。用 auto-fill + minmax 而不是固定列数，
+   设置页在窄屏下会少排几列，不必写断点。 */
+.ts-wall-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 8px;
+}
+
+.ts-wall-item {
+  display: grid;
+  gap: 4px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
+}
+
+.ts-wall-item:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+/* 选中态用香槟金（--highlight）：全项目的约定是「当前选中项」走 highlight，
+   而 --brand（薄荷青）留给「正在生效 / 正在播放」。壁纸是选中的那个，不是
+   正在播放的那个。 */
+.ts-wall-item[aria-pressed="true"] {
+  border-color: var(--highlight);
+  color: var(--text);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--highlight) 46%, transparent);
+}
+
+.ts-wall-thumb {
+  display: block;
+  aspect-ratio: 16 / 9;
+  background: var(--panel-solid) center / cover no-repeat;
+}
+
+.ts-wall-name {
+  display: block;
+  padding: 0 6px 5px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 「无壁纸」那一格不画缩略图，用一道斜杠表示空集，与有图的格子区分开。 */
+.ts-wall-off .ts-wall-thumb {
+  background-image: linear-gradient(
+    135deg,
+    transparent calc(50% - 1px),
+    var(--line-strong) calc(50% - 1px),
+    var(--line-strong) calc(50% + 1px),
+    transparent calc(50% + 1px)
+  );
+}
+
+/* 二次元主题色块。画法复用 stage.css 的 .theme-swatch（盘心 = 底色、
+   外环 = 主色→次色），这里只补选中态——那边用父容器 aria-pressed 表达
+   选中，而这里是每个色块各带一个 aria-pressed。 */
+.ts-theme-swatch[aria-pressed="true"] {
+  box-shadow: 0 0 0 2px var(--highlight);
+}
+
+.ts-theme-swatchs-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+/* 可读性提示的三档配色：良好走 brand（"一切正常"是全站的功能性强调色），
+   尚可走 highlight（"要留神"是状态性的），偏低走 danger。 */
+.ts-contrast-ok { color: var(--brand); }
+.ts-contrast-fair { color: var(--highlight); }
+.ts-contrast-low { color: var(--danger); }
+
+/* 滑块行：label 沿用 .set-row 的 96px 定宽，滑块吃掉剩余宽度，数值跟在后面。 */
+.ts-slider-row input[type="range"] {
+  flex: 1;
+  min-width: 120px;
+  max-width: 260px;
+}
+
+.ts-slider-row input[type="range"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.ts-slider-row .hint {
+  flex: none;
+  min-width: 44px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ts-color-row input[type="color"] {
+  width: 44px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: transparent;
+  cursor: pointer;
+}
+
+.ts-color-row .hint {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ==========================================================================
+   形态（skin）：配色之外的那半套皮肤
+   --------------------------------------------------------------------------
+   颜色由主题 token 决定，这一段只管"长相"：圆角多大、描边什么样式、铺不铺
+   纹理、装饰条长什么样、动不动。只换色的话七套主题就是同一张脸涂七种颜色，
+   看不出换过皮肤。
+
+   卡片语言参照 Mineradio 首页：斜向 tone 光晕打底 + 一层细网格 + 右下角
+   倾斜条纹装饰 + hover 上浮发光。tone 三色直接吃主题的
+   --accent / --accent-2 / --highlight，不再另立一套色。
+   ========================================================================== */
+
+:root {
+  --ts-card-radius: var(--r-md);
+  --ts-card-border: 1px solid var(--line);
+  --ts-card-texture: none;
+  --ts-card-stripe: none;
+  --ts-card-glow: none;
+  --ts-tex-anim: none;
+}
+
+/* 刀光：锐利小圆角 + 斜切刀纹 + 一道斜扫的高光 */
+[data-ts-skin="blade"] {
+  --ts-card-radius: 10px;
+  --ts-card-border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  --ts-card-texture: repeating-linear-gradient(115deg,
+      color-mix(in srgb, var(--accent) 12%, transparent) 0 2px,
+      transparent 2px 9px);
+  --ts-card-stripe: repeating-linear-gradient(0deg,
+      color-mix(in srgb, var(--highlight) 58%, transparent) 0 3px,
+      transparent 3px 8px);
+  --ts-card-glow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent),
+    0 10px 26px rgba(0, 0, 0, .42);
+}
+
+/* 樱吹雪：大圆角 + 柔和光斑 + 缓慢飘落的呼吸感 */
+[data-ts-skin="petal"] {
+  --ts-card-radius: 26px;
+  --ts-card-border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  --ts-card-texture: radial-gradient(120% 88% at 18% 12%,
+      color-mix(in srgb, var(--accent) 20%, transparent), transparent 62%),
+    radial-gradient(90% 70% at 86% 92%,
+      color-mix(in srgb, var(--accent-2) 16%, transparent), transparent 60%);
+  --ts-card-stripe: radial-gradient(circle at 50% 0%,
+      color-mix(in srgb, var(--highlight) 52%, transparent) 0 2.5px, transparent 3px);
+  --ts-card-glow: 0 14px 34px color-mix(in srgb, var(--accent) 14%, transparent);
+  --ts-tex-anim: ts-petal-breathe 9s ease-in-out infinite;
+}
+
+/* 查克拉：能量脉冲描边 + 同心波纹 + 青蓝辉光 */
+[data-ts-skin="chakra"] {
+  --ts-card-radius: 16px;
+  --ts-card-border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line));
+  --ts-card-texture: repeating-radial-gradient(circle at 50% 50%,
+      color-mix(in srgb, var(--accent) 15%, transparent) 0 1px,
+      transparent 1px 7px);
+  --ts-card-stripe: repeating-linear-gradient(90deg,
+      color-mix(in srgb, var(--accent) 46%, transparent) 0 2px,
+      transparent 2px 7px);
+  --ts-card-glow: 0 0 20px color-mix(in srgb, var(--accent) 22%, transparent),
+    inset 0 0 18px color-mix(in srgb, var(--accent) 10%, transparent);
+  --ts-tex-anim: ts-chakra-pulse 5.2s ease-in-out infinite;
+}
+
+/* 卷轴：方正小圆角 + 装裱双线 + 竖排和纸纹 + 朱印方块 */
+[data-ts-skin="scroll"] {
+  --ts-card-radius: 5px;
+  --ts-card-border: 1px solid color-mix(in srgb, var(--accent-2) 38%, var(--line));
+  --ts-card-texture: repeating-linear-gradient(90deg,
+      rgba(255, 255, 255, .045) 0 1px, transparent 1px 6px);
+  --ts-card-stripe: linear-gradient(color-mix(in srgb, var(--accent) 72%, transparent),
+      color-mix(in srgb, var(--accent) 72%, transparent));
+  --ts-card-glow: 0 6px 18px rgba(0, 0, 0, .5);
+}
+
+/* 余烬：大圆角 + 暖色长渐变 + 呼吸的外发光 */
+[data-ts-skin="ember"] {
+  --ts-card-radius: 22px;
+  --ts-card-border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  --ts-card-texture: linear-gradient(168deg,
+      color-mix(in srgb, var(--accent) 22%, transparent), transparent 46%,
+      color-mix(in srgb, var(--highlight) 14%, transparent));
+  --ts-card-stripe: repeating-linear-gradient(0deg,
+      color-mix(in srgb, var(--highlight) 44%, transparent) 0 4px,
+      transparent 4px 11px);
+  --ts-card-glow: 0 16px 40px color-mix(in srgb, var(--accent) 16%, transparent);
+  --ts-tex-anim: ts-ember-breathe 7.6s ease-in-out infinite;
+}
+
+/* 万花筒：勾玉式旋转纹理 + 紫色内发光 */
+[data-ts-skin="kaleido"] {
+  --ts-card-radius: 18px;
+  --ts-card-border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
+  --ts-card-texture: conic-gradient(from 0deg,
+      color-mix(in srgb, var(--accent) 22%, transparent),
+      transparent 28%,
+      color-mix(in srgb, var(--accent-2) 20%, transparent) 52%,
+      transparent 78%,
+      color-mix(in srgb, var(--accent) 22%, transparent));
+  --ts-card-stripe: repeating-conic-gradient(from 45deg,
+      color-mix(in srgb, var(--accent-2) 40%, transparent) 0 6deg,
+      transparent 6deg 15deg);
+  --ts-card-glow: inset 0 0 22px color-mix(in srgb, var(--accent) 18%, transparent),
+    0 10px 30px rgba(0, 0, 0, .46);
+  --ts-tex-anim: ts-kaleido-turn 26s linear infinite;
+}
+
+/* 破晓：细网格 + 晨雾微光 + 一道很慢的扫光 */
+[data-ts-skin="dawn"] {
+  --ts-card-radius: 14px;
+  --ts-card-border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+  --ts-card-texture: linear-gradient(90deg,
+      rgba(255, 255, 255, .04) 0 1px, transparent 1px 34px),
+    linear-gradient(0deg, rgba(255, 255, 255, .04) 0 1px, transparent 1px 34px);
+  --ts-card-stripe: linear-gradient(100deg,
+      transparent 30%, color-mix(in srgb, var(--highlight) 30%, transparent) 50%,
+      transparent 70%);
+  --ts-card-glow: 0 10px 28px rgba(0, 0, 0, .38);
+  --ts-tex-anim: ts-dawn-sweep 11s ease-in-out infinite;
+}
+
+/* --- 动效 -------------------------------------------------------------- */
+
+/* 飘落感靠两个光斑缓慢错位移动来做。用自定义属性做动画必须先 @property
+   注册，否则浏览器当它不可动画——直接用 background-position 省掉注册。 */
+@keyframes ts-petal-breathe {
+  0%, 100% { background-position: 0% 0%, 100% 100%; }
+  50% { background-position: 10% 8%, 90% 86%; }
+}
+
+@keyframes ts-chakra-pulse {
+  0%, 100% { opacity: .82; }
+  50% { opacity: 1; }
+}
+
+@keyframes ts-ember-breathe {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.06); }
+}
+
+@keyframes ts-kaleido-turn {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes ts-dawn-sweep {
+  0%, 100% { background-position: -40% 0, 0 0; }
+  50% { background-position: 140% 0, 0 0; }
+}
+
+/* 系统层面要求减少动效时，全部形态一律静止——只留形状差异。 */
+@media (prefers-reduced-motion: reduce) {
+  [data-ts-skin] {
+    --ts-tex-anim: none;
+  }
+}
+
+/* --- 形态预览 ---------------------------------------------------------- */
+
+/* 设置页里那块"当前皮肤长什么样"的样板。它直接吃 <html> 上的形态变量，
+   所以切主题时不用重画，形状/描边/纹理/装饰条会自己跟着变——这也是给
+   用户看的证据：换主题换的不只是颜色。 */
+.ts-skin-preview {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-3, 10px);
+  min-height: 64px;
+  margin: 0 0 var(--sp-3, 10px);
+  padding: 12px 14px;
+  border: var(--ts-card-border, 1px solid var(--line));
+  border-radius: var(--ts-card-radius, var(--r-md));
+  background: var(--panel-2);
+  box-shadow: var(--ts-card-glow, none);
+  overflow: hidden;
+}
+
+.ts-skin-preview::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--ts-card-texture, none);
+  animation: var(--ts-tex-anim, none);
+  pointer-events: none;
+}
+
+.ts-skin-preview-name {
+  position: relative;
+  z-index: 1;
+  font-size: var(--fs-sm, 12px);
+  color: var(--muted);
+  letter-spacing: 0.06em;
+}
+
+/* 右下角装饰条：与卡片上那道同源，形态不同它也不同。 */
+.ts-skin-preview-stripe {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1;
+  width: 26px;
+  height: 34px;
+  border-radius: var(--r-pill);
+  background: var(--ts-card-stripe, none);
+  opacity: 0.34;
+  transform: skewX(-10deg);
+  pointer-events: none;
+}
+
+/* 色块轮廓按形态分化：七个一模一样的圆点看不出"皮肤"，只能看出"颜色"。
+   形状差异比颜色更能说明这是一套皮肤而不是一支调色盘。 */
+.ts-theme-swatch[data-skin="blade"] { border-radius: 5px; }
+.ts-theme-swatch[data-skin="petal"] { border-radius: 50%; }
+.ts-theme-swatch[data-skin="chakra"] { border-radius: 9px; }
+.ts-theme-swatch[data-skin="scroll"] { border-radius: 2px; }
+.ts-theme-swatch[data-skin="ember"] { border-radius: 11px 11px 4px 4px; }
+.ts-theme-swatch[data-skin="kaleido"] { border-radius: 50%; }
+.ts-theme-swatch[data-skin="dawn"] { border-radius: 7px; }

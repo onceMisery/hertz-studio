@@ -32,7 +32,8 @@
   var DEFAULTS = {
     scene: 'resonance', motion: .65, bloom: .8, reactivity: 1.35,
     lyrics: true, cruise: true, layout: 'focus', lyricSize: 1, lyricGlow: .45,
-    foliaBg: 'geometric', foliaBgOpacity: 0.75, foliaVignette: true, foliaSubtitle: true,
+    foliaVisual: 'stage',
+    foliaBg: 'stage', foliaBgOpacity: 0.75, foliaVignette: true, foliaSubtitle: true,
     classicTuning: { rotation: true, breathing: 1, spacing: 0.7 },
     cadenzaTuning: { width: 0.72, motion: 1, glow: 1, beam: 0 }
   };
@@ -1163,7 +1164,8 @@
     body.appendChild(controls);
     body.appendChild(h('h3', 'ws-section-title', '封面与歌词'));
     var reading = h('div', 'ws-tuning');
-    reading.appendChild(select('聆听布局', [['focus', '沉浸歌词'], ['cadenza', '心象歌词'], ['classic', '流光歌词'], ['sleeve', '封面与歌词'], ['single', '简洁单句']], prefs.layout, function (v) { edit({ layout: v }); }));
+    reading.appendChild(select('聆听布局', [['focus', '沉浸歌词'], ['sleeve', '封面与歌词'], ['single', '简洁单句']], prefs.layout, function (v) { edit({ layout: v }); }));
+    reading.appendChild(select('歌词视觉', [['stage', '舞台 3D 歌词轨'], ['classic', '流光歌词'], ['cadenza', '心象歌词']], prefs.foliaVisual || 'stage', function (v) { edit({ foliaVisual: v }); }));
     reading.appendChild(toggle('显示歌词', prefs.lyrics, function (v) { edit({ lyrics: v }); }));
     reading.querySelector('select').id = 'ws-layout';
     reading.querySelector('label').htmlFor = 'ws-layout';

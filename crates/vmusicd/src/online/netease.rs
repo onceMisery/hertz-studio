@@ -1024,14 +1024,15 @@ pub async fn recommend_playlists(
     Ok(out.into_iter().skip(offset).take(limit).collect())
 }
 
-/// 每日推荐歌曲：`/api/v3/discovery/recommendSongs`，需登录。响应在
-/// data.dailySongs[]（旧版 data.recommend[] 兜底），曲目是 v6 形态。
+/// 每日推荐歌曲：`/api/v3/discovery/recommend/songs`（注意是 recommend/songs，
+/// 写成了 recommendSongs 上游会回 code=404「接口未找到」，实测确认）。需登录。
+/// 响应在 data.dailySongs[]（旧版 data.recommend[] 兜底），曲目是 v6 形态。
 pub async fn recommend_songs(
     ctx: &Ctx,
     offset: usize,
     limit: usize,
 ) -> ApiResult<Vec<OnlineTrack>> {
-    let j = api_get(ctx, "/api/v3/discovery/recommendSongs", &[], true).await?;
+    let j = api_get(ctx, "/api/v3/discovery/recommend/songs", &[], true).await?;
     expect_200(&j, "获取网易云每日推荐")?;
     let songs = j
         .pointer("/data/dailySongs")

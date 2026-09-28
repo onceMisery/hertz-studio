@@ -38,10 +38,23 @@ const ui = {
     library: $('view-library'),
     online: $('view-online'),
     playlists: $('view-playlists'),
+    // 每日推荐：一级目的地，容器在 index.html，菜单项由 daily-view.js 注入。
+    daily: $('view-daily'),
     queue: $('view-queue'),
     favorites: $('view-favorites'),
     settings: $('view-settings'),
   },
+
+  dvBody: $('dv-body'),
+  dvSub: $('dv-sub'),
+  dvPrev: $('dv-prev'),
+  dvNext: $('dv-next'),
+  dvDate: $('dv-date'),
+  dvRefresh: $('dv-refresh'),
+  dvPlay: $('dv-play'),
+  dvModes: $('dv-modes'),
+  dvLayouts: $('dv-layouts'),
+  setNavDaily: $('set-nav-daily'),
 
   libCount: $('lib-count'),
   libSort: $('lib-sort'),
@@ -101,6 +114,8 @@ const ui = {
   scanErrors: $('scan-errors'),
 
   playlistList: $('playlist-list'),
+  playlistGrid: $('playlist-grid'),
+  plViews: $('pl-views'),
   playlistOnline: $('playlist-online'),
   oplGrid: $('opl-grid'),
   oplDetail: $('opl-detail'),
@@ -108,7 +123,6 @@ const ui = {
   newPlaylistName: $('new-playlist-name'),
   newPlaylistBtn: $('new-playlist-btn'),
   shelf: $('shelf'),
-  shelfToggle: $('shelf-toggle'),
 
   plDetail: $('pl-detail'),
   plDetailName: $('pl-detail-name'),
@@ -205,6 +219,7 @@ const ui = {
   dailySub: $('daily-sub'),
   dailyPlayAll: $('daily-play-all'),
   dailyRefresh: $('daily-refresh'),
+  dailyModes: $('daily-modes'),
 };
 
 // 舞台（VCP 音乐模式）由 stage.js 提供，先于 app.js 加载。它只吃数据、只吐
@@ -582,17 +597,34 @@ async function loadFacets() {
   }
 }
 
+/// 曲库空态卡（「曲库还是空的」那张引导）的显隐。
+///
+/// 它描述的是**本地曲库**这一件事，可曲库页顶部还挂着一块每日推荐位，而那块
+/// 有自己的「在线 / 本地」来源。来源选在线时，页面主体是在线推荐，本地库为空
+/// 只是常态而不是待办事项，再压一张「去填音乐目录」的引导既挡视线也说不通
+/// ——推荐位自己会把「没登录 / 这次没返回」写清楚。所以来源在线时一律不显示，
+/// 切回本地再按曲库实际条数恢复。
+function syncLibEmpty(list) {
+  const tracks = list || state.tracks;
+  const onlineSource = !!(window.Daily && window.Daily.state && window.Daily.state.mode === 'online');
+  const hidden = tracks.length > 0 || onlineSource;
+  if (ui.libEmpty) ui.libEmpty.hidden = hidden;
+  return hidden;
+}
+
 function renderLibrary() {
   const host = ui.libList;
   const list = state.tracks;
 
-  ui.libEmpty.hidden = list.length > 0;
+  const emptyHidden = syncLibEmpty(list);
   ui.libList.hidden = list.length === 0;
   // 后端返回了 total 但旧版 UI 直接丢弃，用户永远不知道自己是否被 500 条截断。
   ui.libCount.textContent = state.q
     ? `匹配 ${state.total} 首${state.total > list.length ? ` · 已加载 ${list.length}` : ''}`
     : `共 ${state.total} 首${state.total > list.length ? ` · 已加载 ${list.length}` : ''}`;
-  ui.libHint.hidden = list.length !== 0;
+  // 列头跟着空态卡走：在线来源下既没有曲目、也不显示引导卡时，孤零零一行列头
+  // 只会让人以为列表坏了。本地来源（引导卡在场）保持原样。
+  ui.libHint.hidden = list.length === 0 && emptyHidden;
 
   const seen = new Set();
   list.forEach((track, index) => {
@@ -1307,6 +1339,9 @@ async function loadPlaylists() {
   if (ui.playlistCount) ui.playlistCount.textContent = state.playlists.length
     ? `${state.playlists.length} 个歌单` : '';
   if (shelf) shelf.setItems(shelfItems());
+  // 网格没有自己的数据源，它就是 shelfItems() 的另一种画法；歌单变了要重画，
+  // 否则停在网格排布时新建/删除歌单看不到变化。
+  if (playlistMode === 'grid') renderPlaylistGrid();
   ui.playlistList.innerHTML = '';
   rowArts.clear();
   const onlineCount = window.OnlinePlaylists ? window.OnlinePlaylists.all().length : 0;
@@ -1518,7 +1553,10 @@ async function deletePlaylist(p) {
 // 真能加载再交给卡片，避免七张卡里有一张是浏览器的破图图标。
 // ---------------------------------------------------------------------------
 
-const SHELF_MODE_KEY = 'vmusic.playlists.mode';
+// 歌单浏览方式的持久化键。键名沿用改造前那个（当时只有 shelf/list 两档），
+// 值是 'shelf' | 'grid' | 'list'；读到任何不认识的值都回落到 'shelf'，于是
+// 旧版本写下的 'list' 原样继续有效。
+const PL_VIEW_KEY = 'vmusic.playlists.mode';
 
 // 在线歌单的架子卡 id 与在线曲目虚拟 id 同构，谁也不必猜第二套拼法。
 function onlineShelfId(source, refId) { return `online:${source}:${refId}`; }
@@ -1573,61 +1611,208 @@ function initShelf() {
   if (!shelf) return;
 
   document.addEventListener('shelf:action', (e) => {
-    const d = e.detail || {};
-    const item = state.playlists.find((p) => p.id === d.id);
-    if (item) {
-      if (d.action === 'play') playPlaylist(item.id);
-      else if (d.action === 'queue') queuePlaylistNext(item.id);
-      else if (d.action === 'open') openPlaylist(item.id);
-      else if (d.action === 'rename') renamePlaylist(item);
-      else if (d.action === 'delete') deletePlaylist(item);
-      return;
-    }
-    // 在线歌单卡：没有重命名/删除这些本地动作，播放/查看走在线链路。
-    const online = onlineShelfItems().find((it) => it.id === d.id);
-    if (!online) return;
-    if (d.action === 'play') {
-      window.OnlinePlaylists.playRef(online.source, online.refId, online.name);
-    } else if (d.action === 'open') {
-      openOnlinePlaylistDetail(online.source, online.refId, 'arrange');
-    }
+    dispatchPlaylistAction((e.detail || {}).id, (e.detail || {}).action);
   });
 
-  // 封面异步就绪：列表行按 id 对号重画（shelf 内部已自行订阅）。
+  // 封面异步就绪：列表行与网格卡按 id 对号重画（shelf 内部已自行订阅）。
   plCovers.onChange((id) => {
     const art = rowArts.get(id);
     if (art) paintRowArt(art, id);
+    const card = gridArts.get(id);
+    if (card) paintGridArt(card, id);
   });
 
-  if (ui.shelfToggle) ui.shelfToggle.addEventListener('click', () => setPlaylistMode(null));
-  let saved = null;
-  try { saved = localStorage.getItem(SHELF_MODE_KEY); } catch (err) { /* 隐私模式 */ }
-  setPlaylistMode(saved === 'list' ? 'list' : 'shelf');
   // 启动顺序不该决定架子上有没有歌单。loadPlaylists() 只在 shelf 已经建好时
   // 才会喂它一次，而这两件事分属 initStage() 和 refreshAll() 两个阶段——一旦
   // 时序错位，表现就是「歌单列表有内容，架子却是空的」，要等到新建/删除一次
   // 歌单才亮起来。用手头已有的数据兜一次，顺序就无所谓了。
   shelf.setItems(shelfItems());
+  // 封面缓存刚就位，停在网格排布时要把先前那批壁纸占位换成真封面。
+  if (playlistMode === 'grid') renderPlaylistGrid();
 }
 
-// 两种排布共用同一份 state.playlists 和同一个 Shelf 实例：列表模式只是把
-// 架子藏起来，索引和已取到的封面都还在，来回切不会重新拉一遍。
-// persist=false 用于详情返回时恢复显隐，不写 localStorage。
+// 三档浏览方式的绑定与恢复。
+//
+// 刻意不放进 initShelf()：架子依赖 shelf.js，而排布切换不该因为某个视觉模块
+// 没加载就整个失效——那种连带失效最难排查（列表还在，按钮点不动）。
+function initPlaylistViews() {
+  if (ui.plViews) {
+    // 每个按钮负责"切到自己"，没有整体 toggle——三档时"再点一次换下一个"
+    // 会让用户猜不出顺序。
+    ui.plViews.querySelectorAll('button[data-pl-view]').forEach((b) => {
+      b.addEventListener('click', () => setPlaylistMode(b.dataset.plView));
+    });
+  }
+  let saved = null;
+  try { saved = localStorage.getItem(PL_VIEW_KEY); } catch (err) { /* 隐私模式 */ }
+  setPlaylistMode(saved);
+}
+
+// 对某个歌单执行一个动作，分派到本地 / 在线两条链路。
+//
+// 歌单架（shelf.js 广播 shelf:action）、封面网格（卡上的播放按钮）、以及将来
+// 任何新入口都走这里，于是"同一个歌单在三种排布下点播放"必然是同一件事——
+// 而不是三处各写一遍 if/else，等某一处漏掉在线分支再回来修。
+function dispatchPlaylistAction(id, action) {
+  if (!id || !action) return false;
+  const item = state.playlists.find((p) => p.id === id);
+  if (item) {
+    if (action === 'play') playPlaylist(item.id);
+    else if (action === 'queue') queuePlaylistNext(item.id);
+    else if (action === 'open') openPlaylist(item.id);
+    else if (action === 'rename') renamePlaylist(item);
+    else if (action === 'delete') deletePlaylist(item);
+    else return false;
+    return true;
+  }
+  // 在线歌单卡：没有重命名/删除这些本地动作，播放/查看走在线链路。
+  const online = onlineShelfItems().find((it) => it.id === id);
+  if (!online) return false;
+  if (action === 'play') window.OnlinePlaylists.playRef(online.source, online.refId, online.name);
+  else if (action === 'open') openOnlinePlaylistDetail(online.source, online.refId, 'arrange');
+  else return false;
+  return true;
+}
+
+// 三种排布共用同一份 state.playlists、同一个 Shelf 实例和同一个封面缓存：
+// 换排布只是把另外两个容器藏起来，架子索引、已取到的封面、列表滚动位置都还在，
+// 来回切不会重新拉一遍。persist=false 用于从详情返回时恢复显隐，不写 localStorage。
 function setPlaylistMode(next, persist) {
-  const want = next || (playlistMode === 'shelf' ? 'list' : 'shelf');
+  // 不认识的值（含旧版本可能写下的任何东西）一律回落到歌单架，不抛错。
+  const want = (next === 'grid' || next === 'list') ? next : 'shelf';
   playlistMode = want;
-  const on = want === 'shelf';
-  ui.shelf.classList.toggle('on', on);
-  ui.playlistList.hidden = on;
-  if (ui.shelfToggle) {
-    ui.shelfToggle.setAttribute('aria-pressed', String(on));
-    ui.shelfToggle.textContent = on ? '歌单架' : '列表';
+  if (ui.shelf) ui.shelf.classList.toggle('on', want === 'shelf');
+  if (ui.playlistList) ui.playlistList.hidden = want !== 'list';
+  if (ui.playlistGrid) {
+    ui.playlistGrid.hidden = want !== 'grid';
+    // 网格是唯一需要"按需渲染"的排布：它要遍历一遍封面缓存，而架子和列表
+    // 各自有更早的渲染时机。进入时才渲染，就不会为了没显示的视图做无用功。
+    if (want === 'grid') renderPlaylistGrid();
+  }
+  if (ui.plViews) {
+    ui.plViews.querySelectorAll('button[data-pl-view]').forEach((b) => {
+      const on = b.dataset.plView === want;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
   }
   if (persist !== false) {
-    try { localStorage.setItem(SHELF_MODE_KEY, want); } catch (err) { /* 隐私模式 */ }
+    try { localStorage.setItem(PL_VIEW_KEY, want); } catch (err) { /* 隐私模式 */ }
   }
   // 在线歌单分区块跟随排布搬到对应宿主（架子宿主 / 列表末尾）。
   placeOnlineBlock();
+}
+
+// 封面平铺：本地歌单与在线歌单混排成一片封面墙。
+//
+// 数据源与歌单架是同一个 shelfItems()，所以两边永远不会出现"架子上有、墙上没有"
+// 这类错位——这也是三种排布能共用一个播放逻辑的前提。
+const gridArts = new Map();   // playlistId -> 网格卡封面节点
+
+// 没有封面时拿壁纸当素材，与主题工作室同一个来源，按 id 稳定散列。
+//
+// 用壁纸而不是纯色块：一片封面墙里混着几个纯色块，看起来像加载失败；壁纸至少
+// 是"有内容"的，而且同一个歌单每次拿到同一张，不会刷一次换一张。
+function placeholderArt(id) {
+  return window.ThemeStudio ? window.ThemeStudio.artPlaceholder(id) : '';
+}
+
+// 本地歌单的网格封面：与列表行、歌单架同一套两跳缓存（plCovers）。
+//
+// 只给本地 id 用。在线歌单的封面是现成的 URL，走这里会拿 `online:…` 这种虚拟
+// id 去问 PlaylistCovers，而它的解析链第一步就是 `GET /v1/playlists/{id}/tracks`
+// ——那会打出一个必然 404 的请求，还顺手在缓存里记下一条假状态。
+function paintGridArt(art, id) {
+  const st = plCovers ? plCovers.state(id) : null;
+  if (st && st.s === 'url') {
+    art.style.backgroundImage = `url("${st.url}")`;
+    art.classList.add('has-art');
+    return;
+  }
+  art.classList.remove('has-art');
+  art.style.backgroundImage = placeholderArt(id);
+}
+
+function renderPlaylistGrid() {
+  const host = ui.playlistGrid;
+  if (!host) return;
+  host.innerHTML = '';
+  gridArts.clear();
+
+  const items = shelfItems();
+  if (!items.length) {
+    host.innerHTML = '<div class="hint">还没有歌单，在上面新建一个；或到「在线」面板登录后同步在线歌单。</div>';
+    return;
+  }
+
+  for (const it of items) {
+    const card = document.createElement('div');
+    card.className = 'pl-card' + (it.online ? ' is-online' : '');
+    card.dataset.plId = it.id;
+    card.tabIndex = 0;
+    card.setAttribute('role', 'button');
+    card.setAttribute('aria-label', `${it.name}，${it.track_count || 0} 首`);
+    card.title = it.online ? `${it.sourceLabel} · ${it.name}` : it.name;
+
+    const art = document.createElement('div');
+    art.className = 'pl-card-art';
+    if (it.online) {
+      // 在线卡自带封面直链（由 Online 归一化过），不走 plCovers。
+      if (it.coverUrl) {
+        art.style.backgroundImage = `url("${it.coverUrl}")`;
+        art.classList.add('has-art');
+      } else {
+        art.style.backgroundImage = placeholderArt(it.id);
+      }
+    } else {
+      paintGridArt(art, it.id);
+      // 只有本地歌单的封面是异步解析出来的，需要登记等 onChange 回来重画。
+      gridArts.set(it.id, art);
+    }
+
+    const face = document.createElement('div');
+    face.className = 'pl-card-face';
+    const play = document.createElement('button');
+    play.className = 'pl-card-play';
+    play.type = 'button';
+    play.setAttribute('aria-label', `播放 ${it.name}`);
+    play.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"/></svg>';
+    // 播放按钮的点击不该同时触发卡片的"打开"——stopPropagation 比事后判断
+    // 事件来源可靠，卡片本身的 onclick 只管打开。
+    play.onclick = (e) => { e.stopPropagation(); dispatchPlaylistAction(it.id, 'play'); };
+    face.appendChild(play);
+
+    if (it.badge) {
+      const badge = document.createElement('span');
+      badge.className = 'pl-card-badge';
+      badge.textContent = it.badge;
+      if (it.badgeColor) badge.style.color = it.badgeColor;
+      face.appendChild(badge);
+    }
+    art.appendChild(face);
+
+    const name = document.createElement('div');
+    name.className = 'pl-card-name';
+    name.textContent = it.name;
+    const sub = document.createElement('div');
+    sub.className = 'pl-card-sub';
+    sub.textContent = it.online
+      ? `${it.sourceLabel} · ${it.track_count || 0} 首`
+      : `${it.track_count || 0} 首`;
+
+    card.appendChild(art);
+    card.appendChild(name);
+    card.appendChild(sub);
+    card.onclick = () => dispatchPlaylistAction(it.id, 'open');
+    // 键盘可达：封面墙是 div 拼的，Enter/Space 得自己接。
+    card.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        dispatchPlaylistAction(it.id, 'open');
+      }
+    };
+    host.appendChild(card);
+  }
 }
 
 // 歌单视图的层：排布层（架子 / 列表 + 在线分区）、本地歌单详情、在线歌单
@@ -1644,13 +1829,14 @@ function setPlaylistLayer(layer) {
   if (ui.oplGrid) ui.oplGrid.hidden = layer !== 'online-grid';
   if (ui.oplDetail) ui.oplDetail.hidden = layer !== 'online-detail';
   if (layer === 'arrange') {
-    // 排布层：交给 setPlaylistMode 恢复架子/列表与在线分区宿主。persist=false
-    // —— 返回不该顺手改掉用户上次选的排布偏好。
+    // 排布层：交给 setPlaylistMode 恢复架子/列表/网格与在线分区宿主。
+    // persist=false —— 返回不该顺手改掉用户上次选的排布偏好。
     setPlaylistMode(playlistMode, false);
     return;
   }
   ui.shelf.classList.remove('on');
   ui.playlistList.hidden = true;
+  if (ui.playlistGrid) ui.playlistGrid.hidden = true;
   if (ui.playlistOnline) ui.playlistOnline.hidden = true;
 }
 
@@ -2252,6 +2438,9 @@ async function loadSettings() {
   }
   ui.setDensity.value = state.settings.ui_density || 'comfortable';
   ui.setMotion.checked = state.settings.reduce_motion === true;
+  // 导航里「每日推荐」的可见性：关掉就把入口摘掉，其它菜单项不受影响。
+  // 放在设置到手之后而不是启动时——早于这一步挂载的话，设置里是关的就白挂了。
+  if (window.DailyView) window.DailyView.applySettings(state.settings);
   document.body.dataset.density = ui.setDensity.value;
   document.body.classList.toggle('reduce-motion', ui.setMotion.checked);
   if (Stage) Stage.setReducedMotion(ui.setMotion.checked);
@@ -2460,6 +2649,8 @@ function setView(name) {
   if (name === 'playlists') renderOnlinePlaylistSection();
   // 收藏与每日推荐同理：进入时才拉，避免启动时多打两条请求。
   if (name === 'favorites' && window.Favorites) window.Favorites.onViewEnter();
+  // 每日推荐独立页：数据与首页那条推荐条同源，只是换了个地方展示。
+  if (name === 'daily' && window.DailyView) window.DailyView.onViewEnter();
   if (name === 'library') {
     if (window.Daily) window.Daily.load({ silent: true });
     // 专辑/歌手浏览面：编辑/扫描可能改过 facet，进入时对齐一次。
@@ -2621,6 +2812,17 @@ function initTheme() {
     window.addEventListener('resize', () => { if (!ui.themeMenu.hidden) positionThemeMenu(); });
   }
   if (ui.setTheme) ui.setTheme.onchange = () => applyTheme(ui.setTheme.value);
+}
+
+// 主题工作室（web/theme-studio.js）：壁纸背景 + 二次元主题 + 自定义配色。
+//
+// 它自己管状态、持久化与设置页那块 DOM，宿主只需要给一个 toast。放在这里而不是
+// 塞进 initTheme()：initTheme() 属于 themes.js 的令牌层，工作室是它的下游——
+// 令牌先就位，工作室才有底色可读（自动压暗要按 --bg 算）。
+function initThemeStudio() {
+  if (!window.ThemeStudio) return;
+  window.ThemeStudio.bind({ toast });
+  window.ThemeStudio.init();
 }
 
 // ---------------------------------------------------------------------------
@@ -3807,7 +4009,14 @@ function initNowPlayingModal() {
     }, { root: ui.column.querySelector('#view-library') }).observe(ui.libSentinel);
   }
 
+  // 界面皮肤排在 initTheme() 之后：皮肤只写布局属性（data-skin + 启用对应
+  // CSS），配色仍由主题 token 决定，先定主题再定皮肤，两者互不干扰。
+  if (window.Skins) window.Skins.init();
   initTheme();
+  // 主题工作室必须排在 initTheme() 之后：它第一件事就是往 Theme 里注册二次元
+  // 主题，而 Theme.init() 已经跑完，于是注册结果会经 Theme.onChange 触发的那次
+  // 重渲染落进菜单与设置页。
+  initThemeStudio();
   initStageControl();
   initTopMoreMenu();
   // 播放控制弹窗（np）：绑定开/关、音量与跳转。此前只定义未调用，
@@ -3858,13 +4067,22 @@ function initNowPlayingModal() {
     toast,
     errText,
     paintArt,
+    // 给每日推荐页用：菜单入口被关掉时，若正停在该页要退回曲库，否则会
+    // 留在一个导航里已经没有入口的页面上。
+    setView,
+    // 每日推荐切来源时回传一声：曲库空态卡的显隐要看当前来源（见 syncLibEmpty）。
+    onDailyModeChange: () => syncLibEmpty(),
     coverUrl: (id) => transport.coverUrl(id),
     playLocal: (id, queue) => playTrack(id, queue && queue.length ? queue : [id]),
     // 混合队列：收藏全部播放的本地与在线身份共用一条 /player/load 队列。
     // meta 是在线 id 的快照，注入服务端在线暂存，历史标题才不退化。
-    playQueue: async (ids, meta) => {
+    //
+    // startId 可选：每日推荐这类"整份推荐是一个队列，点第几首就从第几首往下"
+    // 的场景，需要从中间起播。服务端按 queue 里 track_id 的下标定位，所以
+    // 把起点放进 track_id 就行，不必重新排列队列（排了会改掉"下一首"的顺序）。
+    playQueue: async (ids, meta, startId) => {
       if (!ids || !ids.length) return;
-      const track_id = ids[0];
+      const track_id = (startId && ids.includes(startId)) ? startId : ids[0];
       try {
         await transport.post('/v1/player/load', {
           track_id,
@@ -3914,13 +4132,24 @@ function initNowPlayingModal() {
     window.Daily.bind(favHost);
     window.Daily.init();
   }
+  // 每日推荐独立页：菜单注入与页面初始化。可见性开关等设置到手后再 applied
+  // （见 loadSettings），这里先把模块挂上，按钮的点击自己带，不依赖批量绑定。
+  if (window.DailyView) {
+    window.DailyView.bind(favHost);
+    window.DailyView.init();
+  }
   // 在线歌单（账号区网格）任何变化都同步重绘左侧歌单菜单的在线分区。
   // 在线歌单到达/变化：列表分区重画，架子也换上含在线卡的完整集合——
   // 登录成功是异步的，架子建好后数据才到，不挂这条就会一直缺在线卡。
   document.addEventListener('online-playlists:changed', () => {
     renderOnlinePlaylistSection();
     if (shelf) shelf.setItems(shelfItems());
+    // 在线歌单也上封面墙（与架子上的是同一批卡），所以这里同样要重画。
+    if (playlistMode === 'grid') renderPlaylistGrid();
   });
+  // 排布切换排在 initStage() 之前、且不挂在它下面：initStage() 在 stage.js
+  // 缺失时会整段提前返回，排布按钮不该跟着一起失效。
+  initPlaylistViews();
   initStage();
   initCreative();
   bindShortcuts();

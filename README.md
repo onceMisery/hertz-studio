@@ -217,6 +217,8 @@ mmusic-studio v0.1.0
 | GET/POST/PUT/DELETE | `/v1/playlists[/{id}]`                             | 歌单                                                   |
 | POST · DELETE       | `/v1/playlists/{id}/tracks[/{track_id}]`           | 歌单曲目                                                 |
 | GET · PUT           | `/v1/settings`                                     | 键值设置（音源凭据不在其中，见下）                            |
+| GET                 | `/v1/recommend/daily?limit=`                       | 本地每日推荐：规则引擎按天序号出榜，同一天可复现                          |
+| GET                 | `/v1/recommend/daily/online?limit=`                | 各在线平台每日推荐的汇总：只取**已登录**平台的曲目，轮询交错后合成一份歌单；未登录 / 无接口 / 上游失败的平台写进 `skipped`，HTTP 恒为 200 |
 | GET                 | `/v1/online/sources`                               | 音源清单：id、显示名、分类、是否支持登录、当前是否已登录              |
 | GET                 | `/v1/online/search?source=&q=&cat=&limit=&offset=` | 按音源搜索，返回归一化曲目                                     |
 | GET                 | `/v1/online/stream` `/detail` `/lyric`             | 试听地址、单曲详情、歌词                                       |
@@ -311,11 +313,20 @@ mmusic-studio/
 │           ├── workshop.js              创意工坊面板（只编辑数据，不持渲染）
 │           ├── creative.css             以上四层与工坊的样式
 │           ├── shelf.js                 3D 歌单架（CSS 3D）
-│           └── themes.js                主题色目录
+│           ├── pl-covers.js             歌单封面两跳解析（架子 / 列表 / 封面墙共用）
+│           ├── daily.js                 每日推荐（在线汇总 / 本地规则两条来源）
+│           ├── favorites.js             收藏
+│           ├── themes.js                主题色目录（令牌层：只声明 CSS 变量）
+│           ├── theme-studio.js          主题工作室（二次元主题 + 壁纸背景 + 自定义配色）
+│           ├── theme-studio.css         壁纸背景层与壁纸画廊
+│           └── wallpapers/              内嵌壁纸（12 张，已按长边 1600px 预压）
 ├── scripts/                 端到端冒烟脚本（smoke.sh / smoke.ps1）
 │                             + check-creative.js（创意舞台契约，零依赖）
 │                             + check-assets.js（前端资源接线，零依赖）
 │                             + check-css-tokens.js（CSS 令牌契约，零依赖）
+│                             + check-favorites.js（收藏与每日推荐契约，零依赖）
+│                             + check-playlist-views.js（歌单三视图契约，零依赖）
+│                             + check-theme-studio.js（主题对比度与壁纸接线契约，零依赖）
 └── .github/workflows/       CI：fmt · clippy · test · smoke
 ```
 
@@ -331,7 +342,21 @@ node scripts/check-css-tokens.js   # 前端 CSS 令牌契约（零依赖）
 node scripts/check-assets.js       # 前端资源接线：include_str! ↔ 路由 ↔ index.html（零依赖）
 node scripts/check-creative.js     # 创意舞台契约：逐帧解析链的 NaN / 降级路径（零依赖）
 node scripts/check-creative-prompt.js  # 提示词编译器契约：词典 / 冲突 / 否定 / 边界（零依赖）
+node scripts/check-favorites.js    # 收藏与每日推荐契约：分页 / 播放意图 / 在线汇总的降级路径（零依赖）
+node scripts/check-playlist-views.js   # 歌单三视图：互斥显隐 / 持久化 / 同源同链路（零依赖）
+node scripts/check-theme-studio.js     # 主题工作室：WCAG 对比度 / 壁纸接线 / 自动压暗（零依赖）
 ```
+
+**每日推荐的验证边界**：多平台汇总跑在服务端（`crates/vmusicd/src/daily.rs`），
+但最容易坏的是前端的降级路径 —— 某个平台没登录、某个平台没有推荐接口、整条
+在线链路不可达，这三种情况下都**不能**弹红、不能挡住本地那一路。`check-favorites.js`
+逐条钉住这些路径，并断言「未登录」只出现在副标题里（"已跳过：酷狗音乐（未登录）"）
+而不是变成一个错误条。
+
+**主题的验证边界**：文字色不是手写的，是从底色按 WCAG 反推的。反推写错了界面不会
+报错，只会让某套主题的正文糊在背景上。`check-theme-studio.js` 用**自己实现的**对比度
+公式（不复用被测代码那份，否则等于自证）逐套主题验 7:1 / 4.5:1，并对
+「每套主题 × 每张壁纸 × 每个强度」的组合验一遍自动压暗后仍然达到 AA。
 
 **创意舞台的验证边界**：三维舞台跑在浏览器里，CI 上起不了 WebGL。但真正容易出错的地方
 不是 GLSL 的渲染结果，而是两件事：

@@ -547,6 +547,80 @@ pub async fn list_sources(ctx: &Ctx) -> Vec<serde_json::Value> {
     out
 }
 
+/// 音源在「每日推荐歌曲」这件事上的状态。
+///
+/// 每日推荐天生要账号（匿名拿不到个性化结果），所以「能不能去取」是三态
+/// 而不是二态：能取 / 该跳过 / 跳过的原因是什么。原因在这里就定好，界面
+/// 才能写「QQ 音乐未登录，已跳过」而不是笼统的「暂无推荐」。
+#[derive(Debug, Clone, Serialize)]
+pub struct DailySourceState {
+    pub source: String,
+    pub label: String,
+    /// 可以去取：能力位已开、音源可用、登录态为真。
+    pub ready: bool,
+    /// ready 为 false 时的判别式，不是成品文案：
+    /// `unavailable`（音源本身不可用，如 Jamendo 未配 client_id）、
+    /// `unsupported`（没登记 RecommendSongs）、`not_signed_in`（未登录）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    pub message: String,
+}
+
+/// 逐个音源给出每日推荐的可用性快照。
+///
+/// 顺序与 [`SOURCES`] 一致，因此合并出来的歌单顺序是稳定的：同一天、同一
+/// 批登录态下，结果不会因为并发完成顺序而变。
+pub async fn daily_source_states(ctx: &Ctx) -> Vec<DailySourceState> {
+    let mut out = Vec::with_capacity(SOURCES.len());
+    for src in SOURCES {
+        let state = if !source_ready(ctx, src).await {
+            DailySourceState {
+                source: src.id.to_string(),
+                label: src.label.to_string(),
+                ready: false,
+                kind: Some("unavailable"),
+                message: "该音源当前不可用".to_string(),
+            }
+        } else if !src.caps.contains(&Capability::RecommendSongs) {
+            DailySourceState {
+                source: src.id.to_string(),
+                label: src.label.to_string(),
+                ready: false,
+                kind: Some("unsupported"),
+                message: "该音源没有每日推荐歌曲接口".to_string(),
+            }
+        } else if !src.supports_cookie {
+            DailySourceState {
+                source: src.id.to_string(),
+                label: src.label.to_string(),
+                ready: false,
+                kind: Some("not_signed_in"),
+                message: "该音源不支持账号登录".to_string(),
+            }
+        } else {
+            match cred::get(&ctx.db, src.id).await {
+                // 登录态判据集中在 cred 模块，各平台规则不同（见那里）。
+                Ok(Some(pack)) if cred::is_signed_in(src.id, &pack) => DailySourceState {
+                    source: src.id.to_string(),
+                    label: src.label.to_string(),
+                    ready: true,
+                    kind: None,
+                    message: String::new(),
+                },
+                _ => DailySourceState {
+                    source: src.id.to_string(),
+                    label: src.label.to_string(),
+                    ready: false,
+                    kind: Some("not_signed_in"),
+                    message: "未登录".to_string(),
+                },
+            }
+        };
+        out.push(state);
+    }
+    out
+}
+
 pub async fn search(ctx: &Ctx, q: SearchQuery) -> ApiResult<SearchPage> {
     if q.q.as_deref().map(str::trim).unwrap_or("").is_empty() && q.cat.is_none() {
         return Err(bad_request("需要给出搜索关键词或分类"));

@@ -109,8 +109,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/favorites/membership", post(favorite_membership))
         .route("/v1/favorites/toggle", post(toggle_favorite))
         .route("/v1/favorites/{id}", axum::routing::delete(remove_favorite))
-        // 每日推荐：本地规则引擎，按天确定性出榜。
+        // 每日推荐：本地规则引擎按天确定性出榜；/online 是把各在线平台已登录
+        // 账号的每日推荐汇成一份，未登录的平台只缺席不报错。
         .route("/v1/recommend/daily", get(daily_recommend))
+        .route("/v1/recommend/daily/online", get(daily_online_recommend))
         // 播放历史：列表/清空/单删；replay 供错误条重试当前队列指定下标。
         .route("/v1/history", get(history_list).delete(history_clear))
         .route("/v1/history/{id}", axum::routing::delete(history_remove))
@@ -1619,6 +1621,8 @@ async fn favorite_membership(
 #[derive(Debug, Deserialize)]
 struct DailyQuery {
     limit: Option<usize>,
+    /// 天序号（当天本地零点距纪元的天数）。不传或越界都按当天处理。
+    day: Option<i64>,
 }
 
 async fn daily_recommend(
@@ -1626,7 +1630,26 @@ async fn daily_recommend(
     Query(q): Query<DailyQuery>,
 ) -> ApiResult<Json<daily::DailyPage>> {
     let limit = daily::parse_limit(q.limit)?;
-    daily::daily(&state.db, limit).await.map(Json)
+    daily::daily_at(&state.db, limit, q.day).await.map(Json)
+}
+
+/// 各在线平台每日推荐的汇总。
+///
+/// 这里刻意不 `tagged()`：整份汇总本来就是多平台的，把失败标到某一个音源
+/// 上没有意义。单平台的缺席写在响应体的 `skipped` 里，HTTP 状态恒为 200——
+/// 一个平台没登录不该让用户看到一个红色错误条。
+async fn daily_online_recommend(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DailyQuery>,
+) -> ApiResult<Json<daily::DailyOnlinePage>> {
+    let limit = match q.limit {
+        None => daily::ONLINE_DEFAULT_LIMIT,
+        Some(0) => return Err(bad_request("limit 必须大于 0")),
+        Some(n) => n,
+    };
+    daily::online_daily_at(&online_ctx(&state), limit, q.day)
+        .await
+        .map(Json)
 }
 
 // ---------------------------------------------------------------------------

@@ -16,7 +16,9 @@
     host.append(layer, fluidWrap, vignette);
     fluidWrap.append(tint);
 
-    var mode = 'geometric', opacity = 0.75, vignetteOn = true, paused = false, eco = false;
+    // 'stage'：不绘制任何 folia 背景，整个背景层透明，露出舞台自己的 3D 场景
+    // （歌词以叠加层方式浮在 3D 之上）。'geometric'/'fluid'/'solid' 为 folia 自管背景。
+    var mode = 'stage', opacity = 0.75, vignetteOn = true, paused = false, eco = false;
     var theme = FoliaTheme.DEFAULT;
     var shapes = [], particles = [], coverUrl = null;
     var scaleSmooth = { bass: 1, lowMid: 1, mid: 1, treble: 1 };
@@ -152,13 +154,20 @@
     }
 
     function applyMode() {
-      shapeLayer.hidden = mode !== 'geometric';
-      fluidWrap.hidden = mode !== 'fluid';
-      tint.hidden = mode !== 'fluid';
-      if (!shapeLayer.parentElement && mode === 'geometric') host.insertBefore(shapeLayer, vignette);
-      if (mode === 'geometric') buildShapes();
-      if (mode === 'fluid' && coverUrl) setCover(coverUrl);
-      if (mode !== 'fluid') { fluidImgs.forEach(function (x) { x.el.remove(); }); fluidImgs = []; }
+      // stage：所有 folia 背景元素（含底色层与暗角）全部隐藏，3D 舞台场景透出。
+      var stage = mode === 'stage';
+      // .fl-bg 宿主在样式表带了不透明的 #09090b 兜底底色（几何/流体模式靠它垫底），
+      // stage 模式必须把宿主也置为透明，否则即使子层全 hidden，宿主仍会整块盖住 3D。
+      host.style.background = stage ? 'transparent' : '';
+      layer.hidden = stage || mode !== 'solid';
+      shapeLayer.hidden = stage || mode !== 'geometric';
+      fluidWrap.hidden = stage || mode !== 'fluid';
+      tint.hidden = stage || mode !== 'fluid';
+      vignette.hidden = stage || !vignetteOn;
+      if (!stage && !shapeLayer.parentElement && mode === 'geometric') host.insertBefore(shapeLayer, vignette);
+      if (!stage && mode === 'geometric') buildShapes();
+      if (!stage && mode === 'fluid' && coverUrl) setCover(coverUrl);
+      if (stage || mode !== 'fluid') { fluidImgs.forEach(function (x) { x.el.remove(); }); fluidImgs = []; }
     }
 
     // hertz 的 Stage 只导出 0–1 的 energy 与原始 FFT 数组 spectrum()；
@@ -193,7 +202,7 @@
       setTheme: function (t) { theme = t; paintTheme(); },
       // 相同模式不重建形状场（applyFoliaConfig 每 8fps 会调用一次）。
       setMode: function (m) {
-        m = (m === 'fluid' || m === 'solid') ? m : 'geometric';
+        m = (m === 'stage' || m === 'fluid' || m === 'solid') ? m : 'geometric';
         if (m === mode) return;
         mode = m; applyMode();
       },
@@ -204,7 +213,7 @@
         opacity = v;
         tint.style.opacity = String(1 - opacity);
       },
-      setVignette: function (b) { vignetteOn = b; vignette.hidden = !b; },
+      setVignette: function (b) { vignetteOn = b; vignette.hidden = mode === 'stage' || !b; },
       setCover: setCover,
       setPaused: function (b) { if (paused === b) return; paused = b; applyPlayState(); },
       setEco: function (b) { if (eco !== b) { eco = b; buildShapes(); paintTheme(); } },

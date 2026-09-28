@@ -1,0 +1,194 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 mmusic-studio contributors
+
+   皮肤：workbench（工作台）
+   --------------------------------------------------------------------------
+   与 mineradio 那套正相反，四个维度全部反向取值：
+
+     · 导航   mineradio 顶部悬浮胶囊（居中、圆形、浮在上面）
+              workbench 左侧固定窄条（贴边、直角、参与栅格）
+     · 分区   mineradio 单列全宽 + 舞台悬浮盖在内容上
+              workbench 三栏落地 + 舞台是常驻的右栏，各栏之间用 1px 细线切
+     · 密度   mineradio 低密度：大间距、高行高、一屏放得少
+              workbench 高密度：紧凑行、小格子、一屏放得多
+     · 形状   mineradio 大圆角、靠间距分区
+              workbench 直角/微圆角、靠细线分区
+
+   同样**只写布局、不出现颜色字面量**，配色全部沿用当前主题 token。
+*/
+
+[data-skin="workbench"] {
+  /* 与 mineradio 同一组令牌，取值反向——对照这两个块就能看清两套皮肤差在哪。 */
+  --skin-gap: 6px;
+  --skin-pad: 12px;
+  --skin-radius: 3px;
+  --skin-row-py: 3px;    /* 紧凑行：同样的列表能多显示近一倍 */
+  --skin-card-min: 96px;
+  --skin-head-pb: 8px;
+  --skin-title: 15px;
+}
+
+/* --- 外壳：铺满窗口，栏与栏之间只留 1px 细线 ---------------------------- */
+
+[data-skin="workbench"] .app {
+  grid-template-columns: 104px minmax(0, 1fr) minmax(272px, 320px);
+  gap: 1px;
+  padding: 0;
+  /* 缝隙本身当分隔线用：三块面板的背景盖在上面，露出的 1px 就是线。 */
+  background: var(--line);
+}
+
+/* --- 导航：左侧固定窄条，条目紧贴、直角 -------------------------------- */
+
+[data-skin="workbench"] .rail {
+  border-radius: 0;
+  padding: 6px 4px;
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+[data-skin="workbench"] .rail-item {
+  border-radius: 0;
+  padding: 7px 8px;
+  gap: 8px;
+  /* 窄条里文字是次要信息：小一号、可截断，图标始终完整。 */
+  font-size: 12px;
+}
+
+[data-skin="workbench"] .rail-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 窄条里图标是主要信息：定宽定高、不参与压缩，文字被截短也轮不到它。 */
+[data-skin="workbench"] .rail-item svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+/* 弹簧保留：竖轨里「设置」依然被顶到底部，与横向胶囊（没有弹簧）形成对比。 */
+[data-skin="workbench"] .rail-spacer { flex: 1; }
+
+/* --- 内容：直角面板，内边距收紧 ---------------------------------------- */
+
+[data-skin="workbench"] .column {
+  border-radius: 0;
+  overflow: auto;
+}
+
+[data-skin="workbench"] .view {
+  padding: var(--skin-pad) var(--skin-pad) 0;
+}
+
+/* 页头换成两行：标题一行，工具条独占第二行并靠左——工作台的工具条形态，
+   与 mineradio「标题与工具挤在同一行、工具靠右」正好相反。 */
+[data-skin="workbench"] .col-head {
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px var(--skin-gap);
+  padding-bottom: var(--skin-head-pb);
+  margin-bottom: var(--skin-gap);
+}
+
+[data-skin="workbench"] .col-head-left {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+[data-skin="workbench"] .col-tools {
+  order: 2;
+  flex: 0 0 100%;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: var(--skin-gap);
+}
+
+[data-skin="workbench"] .col-title { font-size: var(--skin-title); }
+
+/* --- 列表：高密度，行紧贴 ---------------------------------------------- */
+
+[data-skin="workbench"] .lib-head,
+[data-skin="workbench"] .fav-head {
+  padding-bottom: 4px;
+}
+
+[data-skin="workbench"] .track,
+[data-skin="workbench"] .q-row,
+[data-skin="workbench"] .fav-row,
+[data-skin="workbench"] .online-row,
+[data-skin="workbench"] .pl-row,
+[data-skin="workbench"] .pd-row {
+  padding-top: var(--skin-row-py);
+  padding-bottom: var(--skin-row-py);
+  border-radius: 0;
+}
+
+[data-skin="workbench"] .lib-list,
+[data-skin="workbench"] .q-list,
+[data-skin="workbench"] .fav-list,
+[data-skin="workbench"] .online-body {
+  gap: 0;
+}
+
+/* --- 卡片网格：格子更小，一屏放更多 ------------------------------------ */
+
+[data-skin="workbench"] .pl-grid,
+[data-skin="workbench"] .dv-body-card,
+[data-skin="workbench"] .daily-list {
+  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
+  gap: var(--skin-gap);
+}
+
+[data-skin="workbench"] .pl-card-art,
+[data-skin="workbench"] .dv-art {
+  border-radius: var(--skin-radius);
+}
+
+[data-skin="workbench"] .daily-strip {
+  padding: var(--skin-pad);
+  border-radius: var(--skin-radius);
+  margin-bottom: var(--skin-gap);
+}
+
+/* --- 设置：分组靠细线切，不留大块空白 ---------------------------------- */
+
+[data-skin="workbench"] .set-group {
+  padding: var(--skin-pad);
+  border-radius: var(--skin-radius);
+  margin-bottom: var(--skin-gap);
+}
+
+[data-skin="workbench"] .set-row {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+/* --- 舞台：常驻右栏（不是悬浮层），直角贴边 ---------------------------- */
+
+[data-skin="workbench"] .stage {
+  border-radius: 0;
+  padding: var(--skin-pad);
+  text-align: left;
+  overflow: auto;
+}
+
+/* --- 播放栏：贴底通栏，不留两侧内收 ------------------------------------ */
+
+[data-skin="workbench"] .bar {
+  margin: 0;
+  border-radius: 0;
+  padding: 6px var(--skin-pad);
+  gap: var(--skin-gap);
+  min-height: 0;
+}
+
+/* --- 浮层：跟着直角化 -------------------------------------------------- */
+
+[data-skin="workbench"] .np-card,
+[data-skin="workbench"] .menu,
+[data-skin="workbench"] .empty-card {
+  border-radius: var(--skin-radius);
+}

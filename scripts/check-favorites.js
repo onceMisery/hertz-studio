@@ -126,6 +126,36 @@ function makeDocument() {
   };
 }
 
+/// localStorage 桩。每日推荐要记住用户选的来源（在线/本地），没有它的话
+/// writeMode 会静默吞掉（代码里有 try/catch），于是"选择被持久化"这件事
+/// 根本测不到。
+function makeLocalStorage() {
+  const map = new Map();
+  return {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+    removeItem: (k) => { map.delete(k); },
+    _map: map,
+  };
+}
+
+/// 给容器挂一组"可按属性选择器查到"的按钮。
+///
+/// 桩没有真正的选择器引擎，而来源切换 / 歌单排布这类控件都是
+/// `querySelectorAll('button[data-x]')` 拿的。只支持这一种形态：
+/// 元素不参与布局，能读到属性、能派发 click，就够契约检查用了。
+function attachButtons(host, attr, values) {
+  const btns = values.map((v) => {
+    const b = makeEl('btn:' + attr + '=' + v);
+    b.tagName = 'BUTTON';
+    b.attrs[attr] = v;
+    return b;
+  });
+  host.querySelectorAll = (sel) => (sel.indexOf('button[' + attr + ']') >= 0 ? btns.slice() : []);
+  host._buttons = btns;
+  return btns;
+}
+
 function makeClock() {
   let now = 0;
   return {
@@ -194,6 +224,8 @@ function makeSandbox(transport) {
   };
   sandbox.window = sandbox;
   sandbox.document = doc;
+  sandbox.localStorage = makeLocalStorage();
+  sandbox.window.localStorage = sandbox.localStorage;
   sandbox.VMusicTransport = transport;
   sandbox.window.VMusicTransport = transport;
   vm.createContext(sandbox);
@@ -218,7 +250,9 @@ function makeSandbox(transport) {
     dailySub: doc.getElementById('daily-sub'),
     dailyPlayAll: doc.getElementById('daily-play-all'),
     dailyRefresh: doc.getElementById('daily-refresh'),
+    dailyModes: doc.getElementById('daily-modes'),
   };
+  attachButtons(ui.dailyModes, 'data-daily-mode', ['online', 'local']);
   const host = {
     ui,
     state: { view: 'favorites' },
@@ -228,7 +262,9 @@ function makeSandbox(transport) {
     paintArt: () => {},
     coverUrl: (id) => '/cover/' + id,
     playLocal: (id, queue) => spies.played.push({ id: id, queue: queue }),
-    playQueue: (ids, meta) => spies.queues.push({ ids: ids, meta: meta }),
+    // startId 是第三个参数：每日推荐的在线合并歌单要"从被点的那首起播"，
+    // 而队列里包含多个音源的曲目，不能靠重排队列来实现。
+    playQueue: (ids, meta, startId) => spies.queues.push({ ids: ids, meta: meta, startId: startId }),
     playOnline: (f) => spies.radio.push(f),
     playRadio: (f) => spies.radio.push(f),
     onFavoriteChanged: () => {},
@@ -575,6 +611,11 @@ async function checkFavoritesPagination() {
 // 每日推荐
 // ---------------------------------------------------------------------------
 
+/// `/v1/recommend/daily` 会把 `/v1/recommend/daily/online` 也匹配进来，
+/// 两路请求必须分开编排，这里给出唯一的判定口。
+function isLocalDaily(p) { return p.indexOf('/v1/recommend/daily') === 0 && p.indexOf('/online') < 0; }
+function isOnlineDaily(p) { return p.indexOf('/v1/recommend/daily/online') === 0; }
+
 async function checkDaily() {
   section('每日推荐：取数与渲染');
 
@@ -590,8 +631,10 @@ async function checkDaily() {
       { id: 't3', title: '三', artist: 'C', has_cover: false, score: 6, reasons: [] },
     ],
   };
+  // 本地那一路的匹配要显式排掉 /online：/v1/recommend/daily 是它的前缀，
+  // 不排掉的话在线请求会被这条规则接走，测的就不是本地取数了。
   const t = makeTransport([
-    { match: (p) => p.indexOf('/v1/recommend/daily') === 0, reply: page },
+    { match: isLocalDaily, reply: page },
   ]);
   const { sandbox, ui, spies } = makeSandbox(t);
   const D = sandbox.window.Daily;
@@ -600,6 +643,7 @@ async function checkDaily() {
   await ticks();
 
   ok(t.last('/v1/recommend/daily') !== null, '走了 /v1/recommend/daily');
+  // 没有在线路由 → 在线那一路 reject；页面必须仍然按本地结果渲染。
   eq(ui.dailyList.children.length, 3, '三张卡片都渲染');
   eq(ui.dailyList.children[0].querySelector('.daily-name').textContent, '一', '读取服务端扁平曲目字段');
   eq(ui.dailyDate.textContent, '2026-09-22', '显示服务端给的日期');
@@ -619,7 +663,7 @@ async function checkDaily() {
 
   section('每日推荐：空结果与静默失败');
   const t2 = makeTransport([
-    { match: (p) => p.indexOf('/v1/recommend/daily') === 0, reply: { date: '2026-09-22', day: 20718, limit: 12, total: 0, candidates: 0, tracks: [] } },
+    { match: isLocalDaily, reply: { date: '2026-09-22', day: 20718, limit: 12, total: 0, candidates: 0, tracks: [] } },
   ]);
   const s2 = makeSandbox(t2);
   s2.sandbox.window.Daily.init();
@@ -629,7 +673,7 @@ async function checkDaily() {
   ok(s2.ui.dailyList.innerHTML.indexOf('曲库') >= 0, '空结果提示去扫描曲库');
 
   const t3 = makeTransport([
-    { match: (p) => p.indexOf('/v1/recommend/daily') === 0, throw: '网络断了' },
+    { match: isLocalDaily, throw: '网络断了' },
   ]);
   const s3 = makeSandbox(t3);
   s3.sandbox.window.Daily.init();
@@ -642,11 +686,172 @@ async function checkDaily() {
 }
 
 // ---------------------------------------------------------------------------
+// 每日推荐 · 在线汇总
+//
+// 这一路的铁律是"单点失败不算失败"，所以检查的重点不是"能拿到数据"，
+// 而是：未登录的平台只留名不报错、某个平台挂了不影响别的平台、
+// 整路挂掉也不影响本地那一路。
+// ---------------------------------------------------------------------------
+
+const LOCAL_PAGE = {
+  date: '2026-09-28',
+  day: 20724,
+  limit: 12,
+  total: 2,
+  candidates: 30,
+  tracks: [
+    { id: 't1', title: '本地一', artist: 'L', has_cover: false, score: 9, reasons: ['你收藏过'] },
+    { id: 't2', title: '本地二', artist: 'L', has_cover: false, score: 4, reasons: [] },
+  ],
+};
+
+/// 两个平台出歌、两个平台被跳过（一个没登录、一个没接口）。
+const ONLINE_PAGE = {
+  date: '2026-09-28',
+  limit: 24,
+  total: 3,
+  empty: false,
+  tracks: [
+    {
+      source: 'netease', id: '11', title: '云一', artist: 'N', album: '素', duration_ms: 210000,
+      cover: null, playable: true, vip_only: false,
+      virtual_id: 'online:netease:11', source_label: '网易云音乐',
+    },
+    {
+      source: 'qq', id: '99', title: 'Q 一', artist: 'Q', album: '素', duration_ms: 180000,
+      cover: null, playable: true, vip_only: false,
+      virtual_id: 'online:qq:99', source_label: 'QQ音乐',
+    },
+    {
+      source: 'netease', id: '12', title: '云二', artist: 'N', album: '素', duration_ms: 200000,
+      cover: null, playable: true, vip_only: false,
+      virtual_id: 'online:netease:12', source_label: '网易云音乐',
+    },
+  ],
+  sources: [
+    { source: 'netease', label: '网易云音乐', count: 2 },
+    { source: 'qq', label: 'QQ音乐', count: 1 },
+  ],
+  skipped: [
+    { source: 'kugou', label: '酷狗音乐', kind: 'not_signed_in', message: '未登录' },
+    { source: 'kuwo', label: '酷我音乐', kind: 'unsupported', message: '该音源没有每日推荐歌曲接口' },
+  ],
+};
+
+async function checkDailyOnline() {
+  section('每日推荐 · 在线：默认走在线、合并结果与跳过项可见');
+
+  const t = makeTransport([
+    { match: isOnlineDaily, reply: ONLINE_PAGE },
+    { match: isLocalDaily, reply: LOCAL_PAGE },
+  ]);
+  const { sandbox, ui, spies } = makeSandbox(t);
+  const D = sandbox.window.Daily;
+  D.init();
+  await D.load();
+  await ticks();
+
+  ok(t.last('/v1/recommend/daily/online') !== null, '在线那一路真的被请求了');
+  eq(D.state.mode, 'online', '有已登录平台时默认落在在线');
+  eq(ui.dailyList.children.length, 3, '合并后的三首都渲染');
+  eq(ui.dailyList.children[0].querySelector('.daily-name').textContent, '云一', '取的是在线曲目的标题');
+  eq(ui.dailyList.children[1].querySelector('.daily-why').textContent, 'QQ音乐',
+    '卡片带来源平台，跨平台同名曲目才分得清');
+  eq(ui.dailyDate.textContent, '2026-09-28', '日期用在线那一份');
+
+  ok(ui.dailySub.textContent.indexOf('已合并 3 首') >= 0, '副标题写明合并条数');
+  ok(ui.dailySub.textContent.indexOf('网易云音乐 2 首') >= 0, '副标题列出各平台贡献');
+  ok(ui.dailySub.textContent.indexOf('已跳过') >= 0, '副标题写明有平台被跳过');
+  ok(ui.dailySub.textContent.indexOf('酷狗音乐（未登录）') >= 0, '未登录平台如实写出原因');
+  ok(ui.dailySub.textContent.indexOf('酷我音乐（该音源没有每日推荐歌曲接口）') >= 0,
+    '没接口的平台也如实写出原因');
+
+  eq(spies.toasts.length, 0, '未登录/无接口都不该弹错');
+
+  section('每日推荐 · 在线：点第 N 张 = 整份合并歌单从第 N 首起播');
+  ui.dailyList.children[1].onclick();
+  await ticks();
+  eq(spies.queues.length, 1, '在线曲目走混合队列而不是本地播放');
+  eq(spies.queues[0].ids.length, 3, '整份合并歌单进队列');
+  eq(spies.queues[0].ids[0], 'online:netease:11', '队列用服务端给的虚拟 id');
+  eq(spies.queues[0].startId, 'online:qq:99', '从被点的那首起播');
+  ok(!!spies.queues[0].meta['online:qq:99'], '注入元数据快照，队列与历史才有标题');
+  eq(spies.queues[0].meta['online:qq:99'].onlineId, '99', '快照里带平台侧 id');
+  eq(spies.played.length, 0, '在线曲目不该走本地播放链路');
+
+  section('每日推荐 · 在线：切到本地不改数据，只换渲染');
+  const before = t.calls.length;
+  ui.dailyModes._buttons[1].onclick();
+  await ticks();
+  eq(D.state.mode, 'local', '点了「本地」就切过去');
+  eq(t.calls.length, before, '切来源只重渲染，不重新取数');
+  eq(ui.dailyList.children.length, 2, '换成本地那批');
+  eq(ui.dailyList.children[0].querySelector('.daily-name').textContent, '本地一', '本地标题来自规则引擎');
+  eq(sandbox.localStorage.getItem('vmusic.daily.mode'), 'local', '选择被持久化');
+}
+
+async function checkDailyOnlineDegraded() {
+  section('每日推荐 · 在线：全都没登录时静默落到本地');
+
+  const t = makeTransport([
+    {
+      match: isOnlineDaily,
+      reply: {
+        date: '2026-09-28', limit: 24, total: 0, empty: true,
+        tracks: [], sources: [],
+        skipped: [
+          { source: 'netease', label: '网易云音乐', kind: 'not_signed_in', message: '未登录' },
+          { source: 'qq', label: 'QQ音乐', kind: 'not_signed_in', message: '未登录' },
+        ],
+      },
+    },
+    { match: isLocalDaily, reply: LOCAL_PAGE },
+  ]);
+  const { sandbox, ui, spies } = makeSandbox(t);
+  const D = sandbox.window.Daily;
+  D.init();
+  await D.load();
+  await ticks();
+
+  eq(D.state.mode, 'local', '一个平台都没登录时落到本地');
+  eq(ui.dailyList.children.length, 2, '页面显示本地推荐');
+  eq(spies.toasts.length, 0, '未登录不是错误，不弹红');
+  eq(ui.dailyPlayAll.disabled, false, '本地有结果时播放全部可用');
+
+  section('每日推荐 · 在线：整路失败不影响本地那一路');
+  const t2 = makeTransport([
+    { match: isOnlineDaily, throw: '在线服务不可达' },
+    { match: isLocalDaily, reply: LOCAL_PAGE },
+  ]);
+  const s2 = makeSandbox(t2);
+  s2.sandbox.window.Daily.init();
+  await s2.sandbox.window.Daily.load({ silent: true });
+  await ticks();
+  eq(s2.ui.dailyList.children.length, 2, '在线挂了本地仍然渲染');
+  eq(s2.spies.toasts.length, 0, '自动拉取失败不弹红');
+
+  section('每日推荐 · 在线：用户显式选过来源后不再自动落位');
+  const t3 = makeTransport([
+    { match: isOnlineDaily, reply: ONLINE_PAGE },
+    { match: isLocalDaily, reply: LOCAL_PAGE },
+  ]);
+  const s3 = makeSandbox(t3);
+  s3.sandbox.localStorage.setItem('vmusic.daily.mode', 'local');
+  s3.sandbox.window.Daily.init();
+  await s3.sandbox.window.Daily.load();
+  await ticks();
+  eq(s3.sandbox.window.Daily.state.mode, 'local',
+    '上次选了本地，即使这次有已登录平台也保持本地');
+}
+
+// ---------------------------------------------------------------------------
 
 (async function main() {
   await checkFavorites();
   await checkFavoritesPagination();
   await checkDaily();
+  await checkDailyOnline();
+  await checkDailyOnlineDegraded();
 
   console.log('\n' + '─'.repeat(60));
   if (failures) {

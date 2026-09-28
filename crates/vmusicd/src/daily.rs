@@ -91,6 +91,15 @@ pub struct DailyPage {
 
 /// 生成今日推荐。
 pub async fn daily(db: &SqlitePool, limit: usize) -> ApiResult<DailyPage> {
+    daily_at(db, limit, None).await
+}
+
+/// 生成指定某天的推荐。
+///
+/// 规则引擎本来就是「种子 = 天序号」的确定性出榜，所以回看某一天只是换一个
+/// 种子，不需要存历史榜单。`day` 为 None（或明显是手改 URL 造出来的离谱值）
+/// 时回落当天——宁可给今天，也不要为一个坏参数报错。
+pub async fn daily_at(db: &SqlitePool, limit: usize, day: Option<i64>) -> ApiResult<DailyPage> {
     let limit = limit.clamp(1, MAX_LIMIT);
 
     // 候选池：最近入库的一批曲目。收藏与口味只用来打分，不额外拓宽候选——
@@ -109,9 +118,20 @@ pub async fn daily(db: &SqlitePool, limit: usize) -> ApiResult<DailyPage> {
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     let artists: std::collections::HashSet<String> = artists.into_iter().collect();
 
-    let day = day_number();
+    let day = resolve_day(day);
     let page = build(day, &candidates, &favored, &artists, limit);
     Ok(page)
+}
+
+/// 天序号的合理区间上限：约公元 2243 年。超出只会是手改 URL 造出来的。
+const MAX_DAY: i64 = 100_000;
+
+/// 把外部传入的天序号收敛成可信值。
+fn resolve_day(day: Option<i64>) -> i64 {
+    match day {
+        Some(d) if (0..=MAX_DAY).contains(&d) => d,
+        _ => day_number(),
+    }
 }
 
 /// 天序号：当天本地零点距 Unix 纪元的天数。
@@ -328,6 +348,268 @@ pub fn parse_kind(raw: &str) -> ApiResult<FavoriteKind> {
         .ok_or_else(|| bad_request(format!("收藏类型只能是 track|radio，收到: {raw}")))
 }
 
+// ---------------------------------------------------------------------------
+// 在线每日推荐：把各平台已登录账号的每日推荐汇成一份歌单
+// ---------------------------------------------------------------------------
+//
+// 与上面的本地规则引擎是两回事，共用「每日推荐」这个名字只是因为它们都占
+// 首页那一条推荐位。这里的铁律是**单点失败不算失败**：某个平台没登录、没
+// 这个接口、上游抽风，都只让它自己缺席，绝不让整份汇总拿不到——推荐位是
+// 锦上添花，它不该有能力把首页拖垮。
+
+/// 单音源的超时预算。汇总是一次用户可见的页面加载，慢平台不该拖住整页；
+/// 与聚合搜索（6s）不同，这里给得宽一点，因为推荐接口本身就更慢。
+const ONLINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// 汇总歌单的默认条数与上限。
+pub const ONLINE_DEFAULT_LIMIT: usize = 20;
+const ONLINE_MAX_LIMIT: usize = 60;
+/// 向单个音源要多少条。要比汇总条数宽，这样某个平台曲目少时别的平台能补上。
+const ONLINE_PER_SOURCE: usize = 30;
+
+/// 汇总后的一首歌。
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyOnlineTrack {
+    #[serde(flatten)]
+    pub track: crate::online::OnlineTrack,
+    /// 队列/播放用的虚拟 id `online:{source}:{id}`，与后端 `virtual_id` 同构。
+    /// 前端不必自己拼——拼错一处就会播不出来，而这种 bug 只在换平台时暴露。
+    pub virtual_id: String,
+    /// 来源平台的中文名，界面上给曲目打徽标用。
+    pub source_label: String,
+}
+
+/// 参与了本次汇总的平台与实际贡献条数。
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyOnlineGroup {
+    pub source: String,
+    pub label: String,
+    pub count: usize,
+}
+
+/// 被跳过的平台与原因。`kind` 是给界面分流的判别式，不是成品文案。
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyOnlineSkip {
+    pub source: String,
+    pub label: String,
+    /// `not_signed_in` / `unsupported` / `unavailable` / `failed` / `timeout`。
+    pub kind: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyOnlinePage {
+    /// 本地日期 `YYYY-MM-DD`，只用于显示。
+    pub date: String,
+    pub limit: usize,
+    pub total: usize,
+    /// 已登录平台全部为空时为 true：界面据此决定是「暂无推荐」还是「去登录」。
+    pub empty: bool,
+    pub tracks: Vec<DailyOnlineTrack>,
+    pub sources: Vec<DailyOnlineGroup>,
+    pub skipped: Vec<DailyOnlineSkip>,
+    /// 真正去拉过推荐的平台标签（= 已登录且支持每日推荐）。
+    ///
+    /// 光看 `empty` 分不清两种情形：「一个平台都没登录」和「登录了但这次没
+    /// 拿到」。前者该引导去登录，后者该说"再试一次"——把话说反了，用户会
+    /// 重新扫码登录好几遍才发现不是登录的问题。
+    pub ready: Vec<String>,
+}
+
+/// 汇总今日的各平台每日推荐。
+///
+/// 一次遍历音源状态表：能取的并发去取，不能取的当场记进 `skipped`。所以
+/// 即便所有平台都没登录，这里也返回 200 + 空列表，而不是 401——前端想提示
+/// 登录自己看 `skipped` 里的 `not_signed_in`。
+pub async fn online_daily(ctx: &crate::online::Ctx, limit: usize) -> ApiResult<DailyOnlinePage> {
+    online_daily_at(ctx, limit, None).await
+}
+
+/// 指定某天的在线汇总。
+///
+/// 各平台的「每日推荐」只有**今天**这一份，回看昨天既没有数据也没有意义。
+/// 所以历史日期不去打上游——那是一轮必然空手而归的请求，白白等 8 秒超时——
+/// 而是把支持该能力的平台原样列进 `ready`、逐条记成 `history`。前端据此
+/// 说清"只能看当天"，而不是笼统的"这次没拿到"。
+pub async fn online_daily_at(
+    ctx: &crate::online::Ctx,
+    limit: usize,
+    day: Option<i64>,
+) -> ApiResult<DailyOnlinePage> {
+    let limit = limit.clamp(1, ONLINE_MAX_LIMIT);
+
+    if let Some(d) = day {
+        if d != day_number() {
+            let mut ready: Vec<String> = Vec::new();
+            let mut skipped: Vec<DailyOnlineSkip> = Vec::new();
+            for st in crate::online::daily_source_states(ctx).await {
+                if !st.ready {
+                    continue;
+                }
+                ready.push(st.label.clone());
+                skipped.push(DailyOnlineSkip {
+                    source: st.source,
+                    label: st.label,
+                    kind: "history".to_string(),
+                    message: "在线推荐只提供当天，回看其它日期请用「本地」来源".to_string(),
+                });
+            }
+            return Ok(DailyOnlinePage {
+                date: date_label(d),
+                limit,
+                total: 0,
+                empty: true,
+                tracks: Vec::new(),
+                sources: Vec::new(),
+                skipped,
+                ready,
+            });
+        }
+    }
+
+    let per_source = ONLINE_PER_SOURCE;
+
+    let mut skipped: Vec<DailyOnlineSkip> = Vec::new();
+    let mut ready: Vec<String> = Vec::new();
+    let mut pending: Vec<(
+        String,
+        String,
+        tokio::task::JoinHandle<
+            Result<ApiResult<Vec<crate::online::OnlineTrack>>, tokio::time::error::Elapsed>,
+        >,
+    )> = Vec::new();
+
+    for st in crate::online::daily_source_states(ctx).await {
+        if !st.ready {
+            skipped.push(DailyOnlineSkip {
+                source: st.source,
+                label: st.label,
+                kind: st.kind.unwrap_or("unsupported").to_string(),
+                message: st.message,
+            });
+            continue;
+        }
+        let ctx = ctx.clone();
+        let source = st.source.clone();
+        ready.push(st.label.clone());
+        pending.push((
+            st.source,
+            st.label,
+            tokio::spawn(async move {
+                tokio::time::timeout(
+                    ONLINE_TIMEOUT,
+                    crate::online::recommend_songs(&ctx, &source, 0, per_source),
+                )
+                .await
+            }),
+        ));
+    }
+
+    // 按音源注册顺序 await，结果顺序因此与完成顺序无关——同一批登录态下
+    // 汇总出来的歌单是稳定可复现的，不会每次刷新就换一批排列。
+    let mut groups: Vec<DailyOnlineGroup> = Vec::new();
+    let mut buckets: Vec<Vec<crate::online::OnlineTrack>> = Vec::new();
+    for (source, label, handle) in pending {
+        let outcome = match handle.await {
+            Ok(Ok(Ok(tracks))) => Ok(tracks),
+            // 上游报错：整个平台缺席，但不影响别的平台。
+            Ok(Ok(Err(e))) => Err(("failed", e.message)),
+            Ok(Err(_)) => Err(("timeout", "响应超时".to_string())),
+            // 任务 panic：记成 failed 而不是让整个请求 500。
+            Err(e) => Err(("failed", format!("任务异常退出: {e}"))),
+        };
+        match outcome {
+            Ok(tracks) if !tracks.is_empty() => {
+                groups.push(DailyOnlineGroup {
+                    source: source.clone(),
+                    label: label.clone(),
+                    count: tracks.len(),
+                });
+                buckets.push(tracks);
+            }
+            Ok(_) => skipped.push(DailyOnlineSkip {
+                source,
+                label,
+                kind: "empty".to_string(),
+                message: "该音源本次没有返回推荐".to_string(),
+            }),
+            Err((kind, message)) => skipped.push(DailyOnlineSkip {
+                source,
+                label,
+                kind: kind.to_string(),
+                message,
+            }),
+        }
+    }
+
+    let tracks = merge_online(&groups, &buckets, limit);
+    let day = day_number();
+    Ok(DailyOnlinePage {
+        date: date_label(day),
+        limit,
+        total: tracks.len(),
+        empty: groups.is_empty(),
+        tracks,
+        sources: groups,
+        skipped,
+        ready,
+    })
+}
+
+/// 把各平台的曲目并成一份：轮询交错 + 去重。
+///
+/// **为什么要交错而不是直接拼接**：拼接会让注册顺序靠前的平台占满前 20 个
+/// 位置，第二个平台一首都露不出来——用户看到的「汇总」其实只是第一个平台。
+/// 轮询保证每个已登录平台都在前排有位置，这才是「统一歌单」该有的样子。
+///
+/// **为什么要去重**：同一首歌常同时在多个平台上线，标题与艺术家一致时只留
+/// 先到的那个（即注册顺序靠前的平台，音质通常更好）。
+fn merge_online(
+    groups: &[DailyOnlineGroup],
+    buckets: &[Vec<crate::online::OnlineTrack>],
+    limit: usize,
+) -> Vec<DailyOnlineTrack> {
+    let mut out: Vec<DailyOnlineTrack> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut cursors: Vec<usize> = vec![0; buckets.len()];
+
+    // 一轮是每个平台各取一首；任一平台还有存货就继续下一轮。
+    loop {
+        let mut advanced = false;
+        for (gi, bucket) in buckets.iter().enumerate() {
+            let at = cursors[gi];
+            if at >= bucket.len() {
+                continue;
+            }
+            cursors[gi] = at + 1;
+            advanced = true;
+            let t = &bucket[at];
+            let key = format!(
+                "{}|{}",
+                t.title.trim().to_lowercase(),
+                t.artist.trim().to_lowercase()
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            out.push(DailyOnlineTrack {
+                virtual_id: format!("online:{}:{}", t.source, t.id),
+                source_label: groups
+                    .get(gi)
+                    .map(|g| g.label.clone())
+                    .unwrap_or_else(|| t.source.clone()),
+                track: t.clone(),
+            });
+            if out.len() >= limit {
+                return out;
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,5 +755,98 @@ mod tests {
         let page = build(0, &[], &set(&[]), &set(&[]), 12);
         assert_eq!(page.total, 0);
         assert_eq!(page.candidates, 0);
+    }
+
+    // --- 在线汇总：合并是纯函数，不碰网络也能验完 ---
+
+    fn otrack(source: &str, id: &str, title: &str, artist: &str) -> crate::online::OnlineTrack {
+        crate::online::OnlineTrack {
+            source: source.to_string(),
+            id: id.to_string(),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            album: String::new(),
+            duration_ms: 200_000,
+            cover: None,
+            playable: true,
+            vip_only: false,
+            track_ref: serde_json::Value::Null,
+        }
+    }
+
+    fn groups(entries: &[(&str, &str, usize)]) -> Vec<DailyOnlineGroup> {
+        entries
+            .iter()
+            .map(|(source, label, count)| DailyOnlineGroup {
+                source: (*source).to_string(),
+                label: (*label).to_string(),
+                count: *count,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn online_merge_interleaves_sources() {
+        // 拼接会让第一个平台独占前排；交错才是「汇总」。
+        let g = groups(&[("netease", "网易云音乐", 3), ("qq", "QQ音乐", 3)]);
+        let b = vec![
+            vec![
+                otrack("netease", "1", "A", "x"),
+                otrack("netease", "2", "B", "x"),
+                otrack("netease", "3", "C", "x"),
+            ],
+            vec![
+                otrack("qq", "1", "D", "y"),
+                otrack("qq", "2", "E", "y"),
+                otrack("qq", "3", "F", "y"),
+            ],
+        ];
+        let merged = merge_online(&g, &b, 10);
+        let ids: Vec<&str> = merged.iter().map(|t| t.track.title.as_str()).collect();
+        assert_eq!(ids, vec!["A", "D", "B", "E", "C", "F"]);
+    }
+
+    #[test]
+    fn online_merge_drops_cross_platform_duplicates() {
+        let g = groups(&[("netease", "网易云音乐", 2), ("qq", "QQ音乐", 1)]);
+        let b = vec![
+            vec![otrack("netease", "1", "Same", "Singer"), otrack("netease", "2", "A", "s")],
+            // 标题+艺术家一致 → 判重，大小写与空格不算差异。
+            vec![otrack("qq", "9", " same ", "SINGER")],
+        ];
+        let merged = merge_online(&g, &b, 10);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].track.source, "netease", "重复的留先到的那个平台");
+    }
+
+    #[test]
+    fn online_merge_respects_limit_and_virtual_id() {
+        let g = groups(&[("netease", "网易云音乐", 5)]);
+        let b = vec![(1..=5)
+            .map(|i| otrack("netease", &i.to_string(), &format!("T{i}"), "x"))
+            .collect::<Vec<_>>()];
+        let merged = merge_online(&g, &b, 3);
+        assert_eq!(merged.len(), 3);
+        // 虚拟 id 是播放链路唯一认的拼法，后端 virtual_id 同构。
+        assert_eq!(merged[0].virtual_id, "online:netease:1");
+        assert_eq!(merged[0].source_label, "网易云音乐");
+    }
+
+    #[test]
+    fn online_merge_with_nothing_yields_nothing() {
+        assert!(merge_online(&[], &[], 20).is_empty());
+    }
+
+    #[test]
+    fn resolve_day_keeps_sane_values_and_falls_back_otherwise() {
+        let today = day_number();
+        // 正常值原样用：回看一天就是换一个种子，不该被悄悄改回今天。
+        assert_eq!(resolve_day(Some(today)), today);
+        assert_eq!(resolve_day(Some(today - 1)), today - 1);
+        // 缺失与离谱值都回落当天。负数来自纪元之前的日期，超大值来自手改
+        // URL——两种都不该让接口报错，也不该真去按它出榜。
+        assert_eq!(resolve_day(None), today);
+        assert_eq!(resolve_day(Some(-1)), today);
+        assert_eq!(resolve_day(Some(MAX_DAY + 1)), today);
     }
 }

@@ -1,0 +1,199 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 mmusic-studio contributors
+
+   皮肤：mineradio（浮光）
+   --------------------------------------------------------------------------
+   空间组织参照 Mineradio 首页：导航收成**顶部悬浮胶囊**，主内容区拿回全宽
+   走大卡片网格，舞台从固定的第三列变成**贴右侧边的悬浮面板**，整体低信息
+   密度（大间距、大圆角、高行高）。
+
+   本文件**只写布局，不出现任何颜色字面量**：配色一律走现有主题 token。
+   于是换皮肤不会把主题色带跑，换主题也不会破坏这套皮肤——两者正交。
+
+   再扩展一套皮肤时照抄这个文件的结构即可：先声明 --skin-* 令牌，再按下面
+   的模块顺序（外壳 → 导航 → 内容 → 列表 → 卡片 → 面板 → 浮层）写覆盖。
+*/
+
+[data-skin="mineradio"] {
+  /* 布局令牌：两套皮肤的差别基本都收敛在这几个数上，便于对照与调参。 */
+  --skin-gap: 18px;
+  --skin-pad: 22px;
+  --skin-radius: 22px;
+  --skin-row-py: 11px;   /* 行内上下留白——信息密度的主要旋钮 */
+  --skin-card-min: 182px;
+  --skin-head-pb: 18px;
+  --skin-title: 20px;
+}
+
+/* --- 外壳：三列并排 → 单列全宽 ------------------------------------------ */
+
+[data-skin="mineradio"] .app {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--skin-gap);
+  padding: 0 var(--skin-pad) var(--skin-gap);
+}
+
+/* --- 导航：左侧竖轨 → 顶部悬浮胶囊 -------------------------------------- */
+
+[data-skin="mineradio"] .rail {
+  position: fixed;
+  top: calc(var(--topbar-h) + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  /* 与顶栏的子树一样要抬到内容面板之上：.column 带 backdrop-filter，
+     会形成自己的层叠上下文，z-index 不给够会被整块盖住。 */
+  backdrop-filter: blur(24px) saturate(1.12);
+  -webkit-backdrop-filter: blur(24px) saturate(1.12);
+  box-shadow: var(--surface-lift);
+}
+
+/* 竖轨那根"把设置顶到底部"的弹簧在横向条里没有意义。 */
+[data-skin="mineradio"] .rail-spacer { display: none; }
+
+[data-skin="mineradio"] .rail-item {
+  flex-direction: row;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: var(--r-pill);
+  white-space: nowrap;
+}
+
+[data-skin="mineradio"] .rail-item svg { margin: 0; }
+/* 胶囊里文字是主要信息：正常字号、不截断。 */
+[data-skin="mineradio"] .rail-item span { font-size: 13px; }
+
+/* --- 内容：整块卡片化，给顶部导航让出高度 ------------------------------- */
+
+[data-skin="mineradio"] .column {
+  border-radius: var(--skin-radius);
+  padding: 0 0 8px;
+}
+
+[data-skin="mineradio"] .view {
+  padding: calc(var(--topbar-h) * 0 + 62px) var(--skin-pad) 0;
+}
+
+[data-skin="mineradio"] .col-head {
+  padding-bottom: var(--skin-head-pb);
+  margin-bottom: var(--skin-gap);
+}
+
+[data-skin="mineradio"] .col-title { font-size: var(--skin-title); }
+
+/* 页头：标题在左、工具挤在同一行靠右——与 workbench「工具条独占第二行靠左」
+   正好相反，这是两套皮肤在区块排列上最直观的一处区别。 */
+[data-skin="mineradio"] .col-head-left { flex: 1 1 auto; min-width: 0; }
+[data-skin="mineradio"] .col-tools {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--skin-gap);
+}
+
+/* 设置行：留白跟着整体节奏走大。 */
+[data-skin="mineradio"] .set-row {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+/* 在线结果列表：与卡片网格同一套间距。 */
+[data-skin="mineradio"] .online-body { gap: var(--skin-gap); }
+
+/* --- 列表：低密度（行更高、间距更松） ---------------------------------- */
+
+[data-skin="mineradio"] .lib-head,
+[data-skin="mineradio"] .fav-head {
+  padding-bottom: 10px;
+}
+
+[data-skin="mineradio"] .track,
+[data-skin="mineradio"] .q-row,
+[data-skin="mineradio"] .fav-row,
+[data-skin="mineradio"] .online-row,
+[data-skin="mineradio"] .pl-row,
+[data-skin="mineradio"] .pd-row {
+  padding-top: var(--skin-row-py);
+  padding-bottom: var(--skin-row-py);
+  border-radius: var(--r-md);
+}
+
+/* 列表之间留出呼吸：Mineradio 的分组是靠间距而不是分割线。 */
+[data-skin="mineradio"] .lib-list,
+[data-skin="mineradio"] .q-list,
+[data-skin="mineradio"] .fav-list {
+  gap: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- 卡片网格：格子更大，一屏放得更少 ---------------------------------- */
+
+[data-skin="mineradio"] .pl-grid,
+[data-skin="mineradio"] .dv-body-card {
+  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
+  gap: var(--skin-gap);
+}
+
+[data-skin="mineradio"] .pl-card-art,
+[data-skin="mineradio"] .dv-art {
+  border-radius: calc(var(--skin-radius) * 0.8);
+}
+
+[data-skin="mineradio"] .daily-list {
+  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
+  gap: var(--skin-gap);
+}
+
+[data-skin="mineradio"] .daily-strip {
+  padding: var(--skin-pad);
+  border-radius: var(--skin-radius);
+}
+
+/* --- 设置：分组之间靠间距分区，不再靠一条条分割线 ----------------------- */
+
+[data-skin="mineradio"] .set-group {
+  padding: var(--skin-gap);
+  border-radius: var(--skin-radius);
+  margin-bottom: var(--skin-gap);
+}
+
+/* --- 舞台：从第三列 → 贴右侧边的悬浮面板 ------------------------------- */
+
+[data-skin="mineradio"] .stage {
+  position: fixed;
+  right: var(--skin-pad);
+  top: calc(var(--topbar-h) + 68px);
+  width: min(420px, 32vw);
+  max-height: calc(100vh - var(--topbar-h) - 180px);
+  z-index: 58;
+  padding: var(--skin-pad);
+  border-radius: var(--skin-radius);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(24px) saturate(1.1);
+  -webkit-backdrop-filter: blur(24px) saturate(1.1);
+  box-shadow: var(--surface-lift);
+}
+
+/* --- 播放栏：底部悬浮条，两侧内收 --------------------------------------- */
+
+[data-skin="mineradio"] .bar {
+  margin: 0 var(--skin-pad) var(--skin-gap);
+  border-radius: var(--r-pill);
+  padding: 14px var(--skin-pad);
+  gap: var(--skin-gap);
+}
+
+/* --- 浮层：圆角跟随整套皮肤 -------------------------------------------- */
+
+[data-skin="mineradio"] .np-card,
+[data-skin="mineradio"] .menu,
+[data-skin="mineradio"] .empty-card {
+  border-radius: var(--skin-radius);
+}

@@ -49,12 +49,19 @@
   var TAU_RADIUS = 300;
   var TAU_LOOK = 260;
 
-  // folia 平面歌词布局（流光 classic / 心象 cadenza）：这两种布局不提交 GL，
-  // 由独立的 DOM/canvas 渲染器接管画面，stage3d 只负责挂载与驱动。
-  var FOLIA_LAYOUTS = ['classic', 'cadenza'];
-  function isPlane(l) { return FOLIA_LAYOUTS.indexOf(l != null ? l : layout) >= 0; }
+  // folia 歌词视觉（流光 classic / 心象 cadenza）是与「3D 舞台布局」正交的独立维度：
+  // layout 始终是三维舞台（focus/sleeve/single），GL 场景照常渲染、相机手势照常工作；
+  // folia 歌词以透明叠加层浮在 3D 之上。仅当设备无 GL 时才退化为「纯平面」（standalone），
+  // 此时停掉 GL 与 3D 手势，由 folia 渲染器独立撑画面。
+  //   foliaActive：当前歌词走 folia（classic/cadenza）；standalone：folia 激活且无 GL。
+  var FOLIA_VISUALS = ['classic', 'cadenza'];
+  function foliaActive(v) { return FOLIA_VISUALS.indexOf(v != null ? v : folia.visual) >= 0; }
+  function isStandalone() { return foliaActive() && !gl; }
+  // 旧调用点语义：isPlane() 现在专指「无 GL 纯平面回退」。
+  function isPlane() { return isStandalone(); }
   var folia = { ready: false, bg: null, sub: null, classic: null, cadenza: null,
-    bgMode: 'geometric', bgOpacity: 0.75, vignette: true, subtitle: true,
+    visual: 'stage',
+    bgMode: 'stage', bgOpacity: 0.75, vignette: true, subtitle: true,
     classicTuning: { rotation: true, breathing: 1, spacing: 0.7 },
     cadenzaTuning: { width: 0.72, motion: 1, glow: 1, beam: 0 },
     // pendingOffset：歌词偏移的乐观暂存（毫秒），null 表示与服务端一致。
@@ -1418,8 +1425,8 @@
   }
 
   function render(dtMs) {
-    // 平面模式直接不提交 GPU（画面由 DOM/canvas folia 渲染器负责，3D 画布经 CSS 隐藏）。
-    if (isPlane() || !gl || contextLost) return;
+    // 3D 场景始终渲染：folia 歌词只是透明叠加层（standalone 无 GL 回退时才没有 GL）。
+    if (!gl || contextLost) return;
     if (sizeDirty) resize();
     updateAudio(dtMs);
     updateCamera(dtMs);
@@ -1498,8 +1505,8 @@
   // 目标帧率。返回 0 表示这一层完全不需要帧，主循环据此停机。
   function targetFps() {
     if (!active || document.hidden) return 0;
-    // 平面布局没有 GL 也要跑帧：folia 渲染器靠 tick 驱动动画。
-    if (!gl) return isPlane() ? (reducedMotion() ? 15 : 60) : 0;
+    // 无 GL 时只有 folia 歌词视觉需要帧（纯平面回退）；有 GL 一律走原帧率。
+    if (!gl) return foliaActive() ? (reducedMotion() ? 15 : 60) : 0;
     // 240 = 「每个 rAF 都给我」，降频自己用整数除数在 tick 里做：
     // 帧率必须是刷新率的整数分之一，90fps@144Hz 会因为帧间隔不均产生 judder。
     return reducedMotion() ? 15 : 240;
@@ -1529,8 +1536,9 @@
     pendingDt = 0;
     if (!reducedMotion()) time += step / 1000;
     render(step);
-    if (showLyrics) writeLyrTilt();
-    if (isPlane()) driveFolia(step);
+    // 3D 歌词轨倾角只在舞台轨模式需要；folia 接管歌词时该轨隐藏。
+    if (showLyrics && !foliaActive()) writeLyrTilt();
+    if (foliaActive()) driveFolia(step);
     sampleCost(performance.now() - t0);
   }
 
@@ -1545,7 +1553,9 @@
 
   function onPointerDown(e) {
     if (!active || (e.button != null && e.button !== 0) || pointers[e.pointerId]) return;
-    if (isPlane()) return;
+    // 仅无 GL 纯平面回退禁用 3D 手势；folia 透明叠加时相机拖拽照常
+    // （folia 容器 pointer-events:none，词节点自己处理点击 seek，空白处穿透到这里）。
+    if (isStandalone()) return;
     root.focus({ preventScroll: true });
     var point = localPoint(e);
     pointerField.clickX = point.x / wrapEl.clientWidth * 2 - 1;
@@ -1621,7 +1631,7 @@
 
   function onWheel(e) {
     if (!active) return;
-    if (isPlane()) return;
+    if (isStandalone()) return;
     e.preventDefault();
     var k = Math.exp(-(e.deltaY || 0) * 0.0012);
     cam.userR = clamp(cam.userR * k, cam.minR, cam.maxR);
@@ -1804,6 +1814,7 @@
 
   function preferences() {
     return { scene: STAGES[stageIndex].id, motion: motion, bloom: bloom, reactivity: reactivity, lyrics: showLyrics, cruise: cam.cruise, layout: layout, lyricSize: lyricSize, lyricGlow: lyricGlow,
+      foliaVisual: folia.visual,
       foliaBg: folia.bgMode, foliaBgOpacity: folia.bgOpacity, foliaVignette: folia.vignette,
       foliaSubtitle: folia.subtitle, classicTuning: folia.classicTuning, cadenzaTuning: folia.cadenzaTuning };
   }
@@ -1819,12 +1830,16 @@
       if (typeof value.reactivity === 'number') reactivity = clamp(num(value.reactivity, 1.35), 0, 2);
       if (typeof value.lyrics === 'boolean') showLyrics = value.lyrics;
       if (typeof value.cruise === 'boolean') cam.cruise = value.cruise;
-      if (value.layout === 'spark') { layout = 'classic'; }
-      else if (value.layout === 'scatter') { layout = 'cadenza'; }
-      else if (['focus', 'sleeve', 'single', 'classic', 'cadenza'].indexOf(value.layout) >= 0) { layout = value.layout; }
+      // 布局始终是三维舞台（focus/sleeve/single）。旧版本把流光/心象存成了 layout，
+      // 这里一次性迁移到正交的 foliaVisual 维度（layout 归位 focus）。
+      if (value.layout === 'spark') { layout = 'focus'; folia.visual = 'classic'; }
+      else if (value.layout === 'scatter') { layout = 'focus'; folia.visual = 'cadenza'; }
+      else if (value.layout === 'classic' || value.layout === 'cadenza') { layout = 'focus'; folia.visual = value.layout; }
+      else if (['focus', 'sleeve', 'single'].indexOf(value.layout) >= 0) { layout = value.layout; }
+      if (value.foliaVisual === 'stage' || value.foliaVisual === 'classic' || value.foliaVisual === 'cadenza') folia.visual = value.foliaVisual;
       if (typeof value.lyricSize === 'number') lyricSize = clamp(value.lyricSize, 0.7, 1.5);
       if (typeof value.lyricGlow === 'number') lyricGlow = clamp(value.lyricGlow, 0, 1);
-      if (value.foliaBg === 'geometric' || value.foliaBg === 'fluid' || value.foliaBg === 'solid') folia.bgMode = value.foliaBg;
+      if (value.foliaBg === 'stage' || value.foliaBg === 'geometric' || value.foliaBg === 'fluid' || value.foliaBg === 'solid') folia.bgMode = value.foliaBg;
       if (typeof value.foliaBgOpacity === 'number') folia.bgOpacity = clamp(value.foliaBgOpacity, 0, 1);
       if (typeof value.foliaVignette === 'boolean') folia.vignette = value.foliaVignette;
       if (typeof value.foliaSubtitle === 'boolean') folia.subtitle = value.foliaSubtitle;
@@ -1844,7 +1859,7 @@
       $('s3d-motion').value = Math.round(motion * 100); text('s3d-motion-value', Math.round(motion * 100) + '%');
       $('s3d-bloom').value = Math.round(bloom * 100); text('s3d-bloom-value', Math.round(bloom * 100) + '%');
       $('s3d-reactivity').value = Math.round(reactivity * 100); text('s3d-reactivity-value', Math.round(reactivity * 100) + '%');
-      $('s3d-reading').hidden = isPlane() ? true : !showLyrics;
+      $('s3d-reading').hidden = foliaActive() ? true : !showLyrics;
       $('s3d-lyrics-toggle').setAttribute('aria-pressed', String(showLyrics));
       $('s3d-cruise').setAttribute('aria-pressed', String(cam.cruise));
     } finally { restoring = false; }
@@ -1932,9 +1947,9 @@
   function toggleLyrics() {
     showLyrics = !showLyrics;
     syncLayout();
-    $('s3d-reading').hidden = isPlane() ? true : !showLyrics;
+    $('s3d-reading').hidden = foliaActive() ? true : !showLyrics;
     $('s3d-lyrics-toggle').setAttribute('aria-pressed', String(showLyrics));
-    if (isPlane() && folia.ready) applyFoliaConfig();
+    if (foliaActive() && folia.ready) applyFoliaConfig();
     pokeChrome();
     savePreferences();
   }
@@ -1969,7 +1984,7 @@
     applyFoliaConfig();
   }
 
-  function planeApi() { return layout === 'classic' ? folia.classic : folia.cadenza; }
+  function planeApi() { return folia.visual === 'classic' ? folia.classic : folia.cadenza; }
 
   function applyFoliaConfig() {
     if (!folia.ready) return;
@@ -1989,9 +2004,9 @@
     folia.sub.setVisible(folia.subtitle && showLyrics);
     folia.classic.setTuning(folia.classicTuning);
     folia.cadenza.setTuning(folia.cadenzaTuning);
-    // 只有当前布局对应的渲染器可见，另一个必须隐藏（两者共用 #s3d-fl-lyric）。
-    folia.classic.setVisible(showLyrics && layout === 'classic');
-    folia.cadenza.setVisible(showLyrics && layout === 'cadenza');
+    // 只有当前歌词视觉对应的渲染器可见，另一个必须隐藏（两者共用 #s3d-fl-lyric）。
+    folia.classic.setVisible(showLyrics && folia.visual === 'classic');
+    folia.cadenza.setVisible(showLyrics && folia.visual === 'cadenza');
     var data = global.Stage && Stage.presentation ? Stage.presentation() : null;
     folia.bg.setPaused(!data || !data.playing);
     [folia.classic, folia.cadenza].forEach(function (a) { a.setPaused(!data || !data.playing); });
@@ -2008,13 +2023,14 @@
   }
 
   function syncFoliaMeta() {
-    if (!folia.ready || !isPlane()) return;
+    if (!folia.ready || !foliaActive()) return;
     applyFoliaConfig();
     // 封面变化检测降到 8fps：presentation() 每帧比签名是纯空转。
     var data = global.Stage && Stage.presentation ? Stage.presentation() : null;
     if (data && data.cover !== folia.coverSig) {
       folia.coverSig = data.cover;
-      folia.bg.setCover(data.cover || null);
+      // stage 背景模式（透 3D）不消费封面，仍记录签名避免重复判定。
+      if (folia.bgMode === 'fluid') folia.bg.setCover(data.cover || null);
     }
     folia.sub.update();
     planeApi().update();
@@ -2048,29 +2064,35 @@
     root.style.setProperty('--sl-size', lyricSize);
     root.style.setProperty('--sl-glow', lyricGlow);
     $('s3d-layout').value = layout;
+    var visualSel = $('s3d-lyric-visual');
+    if (visualSel) visualSel.value = folia.visual;
     $('s3d-sleeve').hidden = layout !== 'sleeve';
-    if (lyricView) lyricView.configure(showLyrics && !isPlane());
-    var plane = isPlane();
-    root.classList.toggle('s3d-plane', plane);
-    $('s3d-folia').hidden = !plane;
-    $('s3d-reading').hidden = plane ? true : !showLyrics;
-    $('s3d-fl-common').hidden = !plane;
-    $('s3d-fl-classic').hidden = layout !== 'classic';
-    $('s3d-fl-cadenza').hidden = layout !== 'cadenza';
+    var fa = foliaActive();
+    var standalone = isStandalone();
+    if (lyricView) lyricView.configure(showLyrics && !fa);
+    // s3d-folia：folia 歌词叠加层激活（无论是否有 GL）；s3d-plane：仅无 GL 纯平面回退
+    // （该类负责隐藏 3D 画布与禁用手势）。叠加时 3D 场景照常渲染、相机照常工作。
+    root.classList.toggle('s3d-folia', fa);
+    root.classList.toggle('s3d-plane', standalone);
+    $('s3d-folia').hidden = !fa;
+    $('s3d-reading').hidden = fa ? true : !showLyrics;
+    $('s3d-fl-common').hidden = !fa;
+    $('s3d-fl-classic').hidden = folia.visual !== 'classic';
+    $('s3d-fl-cadenza').hidden = folia.visual !== 'cadenza';
     setOpacityRowEnabled(folia.bgMode === 'fluid');
-    // 平面布局下镜头动态无效（folia 渲染器接管画面），离开平面后恢复可用。
+    // 镜头动态只在无 GL 纯平面回退时失效；folia 透明叠加时它仍驱动 3D 相机。
     var motionInput = $('s3d-motion');
     if (motionInput) {
-      motionInput.disabled = plane;
+      motionInput.disabled = standalone;
       var ml = document.querySelector('label[for="s3d-motion"]');
-      if (ml) ml.style.opacity = plane ? '.5' : '1';
+      if (ml) ml.style.opacity = standalone ? '.5' : '1';
     }
     // init/configure 时 active=false 不预建 folia；舞台打开后 open() 会再跑一次
     // syncLayout，届时才创建实例。
-    if (plane && active) ensureFolia();
-    else if (!plane) {
+    if (fa && active) ensureFolia();
+    else if (!fa) {
       if (folia.ready) { folia.classic.setVisible(false); folia.cadenza.setVisible(false); }
-      // 离开平面切回三维布局：GL 已挂掉时把降级提示还给用户（在平面里横幅被压下）。
+      // 回到舞台歌词轨：GL 已挂掉时把降级提示还给用户。
       if (glFailed) showFallback('当前设备暂不支持三维渲染，仍可播放音乐或返回曲库。');
       else if (contextLost) showFallback('舞台正在恢复渲染，音乐播放不受影响。');
     }
@@ -2107,7 +2129,7 @@
     text('s3d-motion-note', data.reduced ? '已遵循减少动态效果设置' : '设置即时生效');
     root.classList.toggle('s3d-playing', data.playing);
     root.classList.toggle('s3d-reduced', data.reduced);
-    if (isPlane()) syncFoliaMeta();
+    if (foliaActive()) syncFoliaMeta();
     $('s3d-play').setAttribute('aria-label', !track ? '选择音乐' : data.playing ? '暂停' : '播放');
     $('s3d-play-icon').setAttribute('href', data.playing ? '#i-pause' : '#i-play');
     $('s3d-prev').disabled = $('s3d-next').disabled = !track;
@@ -2135,7 +2157,7 @@
     text('s3d-sleeve-title', track ? track.title || '未知曲目' : '你的下一张唱片');
     text('s3d-sleeve-artist', track ? track.artist || '未知艺术家' : '从曲库开始聆听');
     // 平面布局由 folia 渲染器接管歌词，GL lyricView 空转 update 没有意义。
-    if (lyricView && showLyrics && !isPlane()) lyricView.update(data);
+    if (lyricView && showLyrics && !foliaActive()) lyricView.update(data);
   }
 
   function syncDock() {
@@ -2229,7 +2251,8 @@
     syncDock(); syncNowPlaying(); pokeChrome();
     if (global.Stage && Stage.kick) Stage.kick();
     var hasGl = ensureGl();
-    if (!hasGl && !isPlane()) { showFallback('当前设备暂不支持三维渲染，仍可播放音乐或返回曲库。'); return false; }
+    // 无 GL 时只有 folia 歌词视觉可以纯平面回退放行；舞台歌词/封面/单句都需要三维渲染。
+    if (!hasGl && !foliaActive()) { showFallback('当前设备暂不支持三维渲染，仍可播放音乐或返回曲库。'); return false; }
     if (!hasGl) { var fbNoGl = $('s3d-fallback'); if (fbNoGl) fbNoGl.hidden = true; }
     sizeDirty = true;
     resize();
@@ -2344,7 +2367,7 @@
     }
     // V 与入口按钮同义：开着时收掉这一层，形成开合闭环。
     if (k === 'v' || k === 'V') { close(); e.stopImmediatePropagation(); return; }
-    if (k === 'k' || k === 'K') { if (!isPlane()) resetView(); e.stopImmediatePropagation(); return; }
+    if (k === 'k' || k === 'K') { if (!isStandalone()) resetView(); e.stopImmediatePropagation(); return; }
     if (k === 'c' || k === 'C') {
       cam.cruise = !cam.cruise;
       var cb = $('s3d-cruise');
@@ -2394,7 +2417,14 @@
       bgSel.addEventListener('change', function () {
         folia.bgMode = bgSel.value;
         setOpacityRowEnabled(folia.bgMode === 'fluid');
-        applyFoliaConfig(); savePreferences();
+        applyFoliaConfig();
+        // stage 模式不缓存封面，切到 fluid 时立刻补喂当前封面。
+        if (folia.bgMode === 'fluid' && global.Stage && Stage.presentation) {
+          var cov = Stage.presentation().cover;
+          folia.coverSig = cov;
+          folia.bg.setCover(cov || null);
+        }
+        savePreferences();
       }); }
     range('s3d-fl-opacity', function (v) { folia.bgOpacity = v; }, function (v) { return Math.round(v * 100) + '%'; }, 'change');
     check('s3d-fl-vignette', function (b) { folia.vignette = b; });
@@ -2471,7 +2501,24 @@
     syncFoliaControls();
   }
 
+  // 歌词视觉独立切换（舞台 3D 歌词轨 / 流光 / 心象）：与布局正交，
+  // 选 classic/cadenza 时 folia 叠加到 3D 场景之上（无 GL 则纯平面回退）。
+  function bindLyricVisual() {
+    var sel = $('s3d-lyric-visual');
+    if (!sel || sel._bound) return;
+    sel._bound = true;
+    sel.value = folia.visual;
+    sel.addEventListener('change', function () {
+      var v = sel.value;
+      folia.visual = (v === 'classic' || v === 'cadenza') ? v : 'stage';
+      syncLayout();
+      if (folia.ready) applyFoliaConfig();
+      savePreferences();
+    });
+  }
+
   function bindUi() {
+    bindLyricVisual();
     $('s3d-lyrics-toggle').addEventListener('click', toggleLyrics);
     $('s3d-settings-toggle').addEventListener('click', function () { setSettings($('s3d-settings').hidden); });
     $('s3d-settings-close').addEventListener('click', function () { setSettings(false); $('s3d-settings-toggle').focus(); });
@@ -2538,7 +2585,7 @@
     wrapEl.addEventListener('pointercancel', onPointerUp);
     wrapEl.addEventListener('pointerleave', function () { pointerField.active = 0; });
     wrapEl.addEventListener('wheel', onWheel, { passive: false });
-    wrapEl.addEventListener('dblclick', function () { if (!isPlane()) resetView(); });
+    wrapEl.addEventListener('dblclick', function () { if (!isStandalone()) resetView(); });
     bindLyrTilt();
     // 驾驶舱改了 --lp-3d 开关后要重读（与 stage.js 的 readTilt 同一事件源）。
     document.addEventListener('stagecontrol:change', readLyrTilt);
@@ -2605,7 +2652,7 @@
         markSizeDirty();
         // classic 视口 resize：软重建按新视口重算 clamp 字号/散布/narrow（spec 10.3）。
         // cadenza 有自有 ResizeObserver，不走这里。
-        if (folia.ready && isPlane(layout) && layout === 'classic' && folia.classic) folia.classic.resize();
+        if (folia.ready && folia.visual === 'classic' && folia.classic) folia.classic.resize();
       }, delay);
     });
   }

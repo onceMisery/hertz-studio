@@ -813,6 +813,169 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
 .pl-row .t-act { opacity: 0.55; }
 .pl-row:hover .t-act { opacity: 1; }
 
+/* 三种浏览方式的切换组。复用 .chip / .chip.active 的画法（见组件层），
+   这里只把它压扁一点——它和「新建」按钮同一行，不需要在一条工具条上
+   占掉三倍于按钮的高度。 */
+.pl-views { display: flex; gap: 4px; flex: none; }
+.pl-views .chip { padding: 4px 10px; font-size: var(--fs-sm); }
+
+/* 封面平铺：本地歌单与在线歌单混排的封面墙。
+   minmax(148px, 1fr) 是「一屏能放下 5–7 张」的档位：再小封面上的歌单名
+   就开始频繁折行，再大在 1400px 的一级视图里会只剩三列可用。
+   与 .pl-list 一样 flex:1 + overflow-y:auto，切换排布时滚动位置各自独立。 */
+.pl-grid {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 16px;
+  padding: 14px 0 4px;
+  align-content: start;
+}
+
+.pl-card {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  cursor: pointer;
+}
+
+/* 圆角与描边吃主题工作室那套「形态」变量（--ts-card-*），默认回退到统一
+   组件层的值——没有启用二次元主题时行为和改造前一致。 */
+.pl-card-art {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: var(--ts-card-radius, var(--radius));
+  border: var(--ts-card-border, 1px solid var(--surface-line));
+  background: var(--surface-1) center / cover no-repeat;
+  overflow: hidden;
+  box-shadow: var(--surface-hi);
+  transition: transform var(--dur-press) var(--ease), border-color var(--dur-release) var(--ease),
+    box-shadow var(--dur-release) var(--ease);
+}
+
+/* 纹理层：主题形态自带的斜向光晕 / 网格 / 波纹（参照 Mineradio 的 tone 光晕）。
+   inset 取负值是为了万花筒这类会旋转的纹理转起来不露出直角。 */
+.pl-card-art::before {
+  content: '';
+  position: absolute;
+  inset: -32%;
+  background: var(--ts-card-texture, none);
+  animation: var(--ts-tex-anim, none);
+  pointer-events: none;
+}
+
+/* 右下角那道倾斜装饰条：Mineradio 卡片上最显眼的识别元素，这里用主题的
+   highlight 着色，形态不同条纹也不同（刀光是细密斜纹、卷轴是朱印方块）。 */
+.pl-card-art::after {
+  content: '';
+  position: absolute;
+  right: 9%;
+  bottom: 9%;
+  width: 20%;
+  height: 30%;
+  border-radius: var(--r-pill);
+  background: var(--ts-card-stripe, none);
+  opacity: 0.26;
+  transform: skewX(-10deg);
+  pointer-events: none;
+}
+
+.pl-card:hover .pl-card-art {
+  transform: translateY(-2px);
+  border-color: var(--surface-line-strong);
+  box-shadow: var(--surface-hi), var(--surface-lift), var(--ts-card-glow, none);
+}
+
+/* 焦点环走全项目统一的 --focus-ring，键盘 Tab 到卡片时才出现
+   （:focus-visible 而不是 :focus，鼠标点过不留环）。 */
+.pl-card:focus-visible { outline: none; }
+.pl-card:focus-visible .pl-card-art {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
+/* 没有封面时那张壁纸占位要压暗一档：壁纸是彩色的，不压就没有"这是占位
+   而不是封面"的区分，一片墙里分不清哪些歌单真没有封面。 */
+.pl-card-art:not(.has-art) { filter: brightness(0.66) saturate(0.85); }
+
+/* 有真实封面时纹理让位：封面才是主体，纹理只留一点氛围，不然会糊住画面。 */
+.pl-card-art.has-art::before { opacity: 0.45; }
+
+/* 悬停才浮出的操作层。用 opacity 而不是 display：display 参与布局，
+   浮出时会让网格重排一帧，鼠标底下的卡会"跳"一下。 */
+.pl-card-face {
+  position: absolute;
+  inset: 0;
+  /* 压过纹理层与装饰条：::after 在绘制顺序上等同最后一个子元素，不提
+     z-index 的话播放按钮会被那道条纹盖住一层。 */
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px;
+  opacity: 0;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.55), transparent 58%);
+  transition: opacity var(--dur-release) var(--ease);
+}
+
+.pl-card:hover .pl-card-face,
+.pl-card:focus-within .pl-card-face {
+  opacity: 1;
+}
+
+/* 触屏没有 hover：指针类型是 coarse 的设备上常驻显示，否则播放按钮
+   在那类设备上根本不可达。 */
+@media (hover: none) {
+  .pl-card-face { opacity: 1; }
+}
+
+.pl-card-play {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+  transition: transform var(--dur-press) var(--ease);
+}
+
+.pl-card-play:active { transform: scale(var(--press-scale)); }
+.pl-card-play svg { width: 15px; height: 15px; fill: currentColor; }
+
+/* 音源徽标：与歌单架、在线面板卡片用的是同一批图标与配色，由宿主传入。 */
+.pl-card-badge {
+  margin-right: auto;
+  align-self: center;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: var(--meta-tracking);
+  color: var(--muted);
+}
+
+.pl-card-name {
+  font-size: 13px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pl-card-sub {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ==========================================================================
    歌单详情
    --------------------------------------------------------------------------
@@ -2009,12 +2172,29 @@ button:focus-visible, [role="button"]:focus-visible,
 /* 放在曲库顶部的一条横向带：它是「今天听什么」的入口，不占据整屏，
    也不该滚动到曲库列表里被淹没。 */
 
+/* 首页最上面这一块按 Mineradio 的 hero 卡片来画：斜向 tone 光晕打底、
+   圆角与描边跟主题形态走。它是进入页面第一眼看到的东西，形态差异落在
+   这里才"看得见换过皮肤"。 */
 .daily-strip {
+  position: relative;
   margin: 0 0 var(--sp-6);
   padding: var(--sp-5) var(--sp-5) var(--sp-4);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
+  border: var(--ts-card-border, 1px solid var(--line));
+  border-radius: var(--ts-card-radius, var(--radius-lg));
   background: var(--panel-2);
+  overflow: hidden;
+  box-shadow: var(--ts-card-glow, none);
+}
+
+/* 光晕层。绝对定位的伪元素会盖住后面 static 的兄弟，所以下面两块内容
+   都要自己提一层，否则标题和卡片会被这层渐变糊住。 */
+.daily-strip::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--ts-card-texture, none);
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 /* ==========================================================================
@@ -2357,6 +2537,8 @@ button:focus-visible, [role="button"]:focus-visible,
 .np-goto-btn:active { transform: translateY(0) scale(0.98); }
 .np-goto-btn:focus-visible { outline: var(--focus-ring); outline-offset: 3px; }
 .daily-head {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -2372,9 +2554,23 @@ button:focus-visible, [role="button"]:focus-visible,
 }
 .daily-title { font-size: var(--fs-lg); font-weight: 600; color: var(--text); }
 .daily-sub { font-size: var(--fs-sm); color: var(--muted); }
-.daily-tools { display: flex; gap: var(--sp-2); flex-shrink: 0; }
+.daily-tools { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; }
+
+/* 来源切换（在线 / 本地）。画法复用组件层的 .chip / .chip.active，
+   这里只补一点垂直对齐——它和两个 .btn 并排，做高不同会显得整条工具行是歪的。 */
+.daily-modes {
+  display: flex;
+  gap: 2px;
+  flex: none;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--field-bg);
+}
 
 .daily-list {
+  position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: var(--sp-3);
@@ -2636,3 +2832,150 @@ button:focus-visible, [role="button"]:focus-visible,
   to { opacity: 1; transform: none; }
 }
 .view:not([hidden]) { animation: view-enter var(--dur-enter) var(--ease-out) backwards; }
+
+/* ==========================================================================
+   每日推荐（独立页面）
+   --------------------------------------------------------------------------
+   与首页那条推荐条同源同数据，只是换了个地方展示。排布切换沿用歌单三视图
+   的做法：一个容器、两种画法，选择存 localStorage。
+   ========================================================================== */
+
+.dv-days,
+.dv-modes,
+.dv-layouts {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--field-bg);
+}
+
+/* 日期按钮比 ‹ › 宽：它同时是"回到今天"的按钮，得放得下「今天」两个字。 */
+.dv-date {
+  min-width: 62px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dv-body {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0 var(--sp-5);
+  align-content: start;
+}
+
+/* --- 列表画法：序号 + 标题/艺术家 + 来源 ------------------------------- */
+
+.dv-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+
+.dv-row:hover {
+  background: var(--surface-2);
+  border-color: var(--surface-line-strong);
+}
+
+.dv-row:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
+.dv-num {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.dv-main { display: grid; gap: 1px; min-width: 0; }
+
+.dv-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dv-sub {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dv-src {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  letter-spacing: var(--meta-tracking);
+}
+
+/* --- 卡片画法：与歌单封面墙同一套网格，只是格子小一点 ------------------ */
+
+/* 排布由容器上的 class 决定（JS 写的），不用 :has() 反推子元素——
+   列表画法必须是单列，只有卡片画法才铺网格。 */
+.dv-body-card {
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: var(--sp-3);
+}
+
+.dv-card {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.dv-art {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: var(--ts-card-radius, var(--radius));
+  border: var(--ts-card-border, 1px solid var(--surface-line));
+  /* 没有封面时给一层主题色的底，避免一整墙空白方块。 */
+  background: linear-gradient(140deg,
+      color-mix(in srgb, var(--accent) 24%, var(--surface-1)),
+      var(--surface-1)) center / cover no-repeat;
+  overflow: hidden;
+  box-shadow: var(--surface-hi);
+  transition: transform var(--dur-press) var(--ease), box-shadow var(--dur-release) var(--ease);
+}
+
+.dv-card:hover .dv-art {
+  transform: translateY(-2px);
+  box-shadow: var(--surface-hi), var(--surface-lift), var(--ts-card-glow, none);
+}
+
+.dv-card:focus-visible { outline: none; }
+.dv-card:focus-visible .dv-art {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
+/* 没有封面时的占位：与曲库行 .t-art.is-missing 同一套画法（mask 图形跟着
+   主题变色），所以"有封面 / 没封面"在一整墙卡片里一眼能分开，而不是都糊成
+   一片渐变底色。 */
+.dv-art.is-missing::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-color: var(--muted);
+  opacity: 0.42;
+  -webkit-mask: var(--art-glyph) center / 52% 52% no-repeat;
+  mask: var(--art-glyph) center / 52% 52% no-repeat;
+}

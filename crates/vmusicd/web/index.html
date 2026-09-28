@@ -20,6 +20,15 @@
 <link rel="stylesheet" href="stage3d.css">
 <link rel="stylesheet" href="folia/folia.css">
 <link rel="stylesheet" href="online.css">
+<!-- 主题工作室：壁纸背景层与壁纸画廊。排在 style.css 之后（同特异性整块胜出），
+     与 online.css 同一层次——都是"在既有布局之上再铺一层"的模块。 -->
+<link rel="stylesheet" href="theme-studio.css">
+<!-- 界面皮肤：默认全部 disabled，切到哪套由 skins.js 解开哪套。
+     排在其它样式表之后——皮肤做的是覆盖，必须在最后。
+     skins.css 是"选皮肤的地方"，常驻加载，不带 data-skin-css。 -->
+<link rel="stylesheet" href="skins/skins.css">
+<link rel="stylesheet" href="skins/skin.mineradio.css" data-skin-css="mineradio" disabled>
+<link rel="stylesheet" href="skins/skin.workbench.css" data-skin-css="workbench" disabled>
 </head>
 <body>
 <script>window.__VMUSIC_TOKEN__ = "__VMUSIC_TOKEN_VALUE__";</script>
@@ -64,6 +73,10 @@
   </symbol>
   <symbol id="i-queue" viewBox="0 0 24 24" fill="currentColor">
     <path d="M3 5h12v2H3zM3 10h12v2H3zM3 15h8v2H3zM17 5h4v2h-4zM17 10h4v2h-4zM17 15h4v2h-4z"/>
+  </symbol>
+  <!-- 每日推荐：日历页 + 一颗星，读作「今天挑的那批」。 -->
+  <symbol id="i-daily" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M7 2v2H5a2 2 0 00-2 2v2h18V6a2 2 0 00-2-2h-2V2h-2v2H9V2H7zm12 8H5v10a2 2 0 002 2h10a2 2 0 002-2V10zm-6.2 2.6l1.6 3.3 3.6.5-2.6 2.6.6 3.6-3.2-1.7-3.2 1.7.6-3.6-2.6-2.6 3.6-.5 1.6-3.3z"/>
   </symbol>
   <!-- 收藏用的红心。fill-rule=evenodd 让它是描边+实心可切换的两态图形：
        实心版（收藏后）用外层路径填充，描边版用空心路径。 -->
@@ -333,6 +346,13 @@
             <span class="daily-sub" id="daily-sub">每天换一批，规则跑在本机</span>
           </div>
           <div class="daily-tools">
+            <!-- 两种来源：在线是各平台账号的每日推荐汇总（未登录的平台自动跳过），
+                 本地是本机的规则引擎。它们是两个独立的数据源，各有各的失败可能，
+                 所以给用户一个显式的切换，而不是替他在两者间猜。 -->
+            <div class="daily-modes" id="daily-modes" role="group" aria-label="推荐来源">
+              <button class="chip active" type="button" data-daily-mode="online" aria-pressed="true">在线</button>
+              <button class="chip" type="button" data-daily-mode="local" aria-pressed="false">本地</button>
+            </div>
             <button id="daily-play-all" class="btn primary" disabled>播放全部</button>
             <button id="daily-refresh" class="btn" aria-label="重新拉取每日推荐">刷新</button>
           </div>
@@ -448,9 +468,16 @@
       <div class="col-head">
         <div class="col-head-left"><h1 class="col-title">歌单</h1><span class="count" id="playlist-count"></span></div>
         <div class="col-tools">
-          <!-- 架子 / 列表是同一份数据的两种排法，不是两个页面：切换只改
-               .shelf / .pl-list 的显隐，选中项和滚动位置都保留。 -->
-          <button id="shelf-toggle" class="btn" aria-pressed="true" title="立体架子 / 列表排布">歌单架</button>
+          <!-- 歌单三种浏览方式：立体歌单架 / 封面平铺 / 列表。它们是同一份数据
+               （state.playlists + 在线歌单）的三种排法，不是三个页面：切换只改
+               .shelf / .pl-grid / .pl-list 的显隐，架子索引、已取到的封面、
+               列表滚动位置全部保留，来回切不会重新拉一遍。选择记在
+               localStorage 的 vmusic.playlists.mode 里。 -->
+          <div class="pl-views" id="pl-views" role="group" aria-label="歌单浏览方式">
+            <button class="chip active" type="button" data-pl-view="shelf" aria-pressed="true">歌单架</button>
+            <button class="chip" type="button" data-pl-view="grid" aria-pressed="false">封面</button>
+            <button class="chip" type="button" data-pl-view="list" aria-pressed="false">列表</button>
+          </div>
           <input id="new-playlist-name" type="text" placeholder="新建歌单…">
           <button id="new-playlist-btn" class="btn primary">新建</button>
         </div>
@@ -463,6 +490,11 @@
       </div>
 
       <div class="pl-list" id="playlist-list" hidden></div>
+
+      <!-- 封面平铺：本地歌单与在线歌单混排成一片封面墙，数据源与歌单架
+           完全一致（shelfItems()），因此同一个歌单在两种排布下的
+           动作、封面缓存、选中态都对得上。 -->
+      <div class="pl-grid" id="playlist-grid" hidden></div>
 
       <!-- 在线歌单分区的架子模式宿主：列表模式下块挂在 #playlist-list 末尾
            与本地行同列滚动；架子模式下列表被隐藏，块搬到这里占架子下方
@@ -534,6 +566,37 @@
       </div>
     </div>
 
+    <!-- 每日推荐：一级目的地。菜单项是 daily-view.js 按配置注入的，
+         这里只提供页面容器。日期切换、刷新、列表/卡片排布都在模块里。 -->
+    <div class="view" id="view-daily" hidden>
+      <div class="col-head">
+        <div class="col-head-left">
+          <h1 class="col-title">每日推荐</h1>
+          <span class="col-sub" id="dv-sub">—</span>
+        </div>
+        <div class="col-tools">
+          <!-- 按天切换：推荐是按天生成的，所以能回看，但不能看未来
+               （明天的榜单还不存在，next 在今天时会禁用）。 -->
+          <div class="dv-days" id="dv-days" role="group" aria-label="按日期切换">
+            <button class="btn" id="dv-prev" type="button" aria-label="前一天">‹</button>
+            <button class="btn dv-date" id="dv-date" type="button" aria-label="回到今天">今天</button>
+            <button class="btn" id="dv-next" type="button" aria-label="后一天">›</button>
+          </div>
+          <div class="dv-modes" id="dv-modes" role="group" aria-label="推荐来源">
+            <button class="chip active" type="button" data-dv-mode="online" aria-pressed="true">在线</button>
+            <button class="chip" type="button" data-dv-mode="local" aria-pressed="false">本地</button>
+          </div>
+          <div class="dv-layouts" id="dv-layouts" role="group" aria-label="展示方式">
+            <button class="chip active" type="button" data-dv-layout="list" aria-pressed="true">列表</button>
+            <button class="chip" type="button" data-dv-layout="card" aria-pressed="false">卡片</button>
+          </div>
+          <button class="btn primary" id="dv-play" disabled>播放全部</button>
+          <button class="btn" id="dv-refresh" aria-label="刷新每日推荐">刷新</button>
+        </div>
+      </div>
+      <div class="dv-body" id="dv-body"></div>
+    </div>
+
     <!-- 收藏：歌曲 / 电台两个 tab，共用同一份列表渲染 -->
     <div class="view" id="view-favorites" hidden>
       <div class="col-head">
@@ -568,6 +631,15 @@
     <!-- 设置 -->
     <div class="view" id="view-settings" hidden>
       <div class="col-head"><div class="col-head-left"><h1 class="col-title">设置</h1></div></div>
+
+      <!-- 界面皮肤：只换布局（导航形式 / 分区 / 栅格 / 信息密度），
+           配色与主题色一律沿用当前主题，两者互不影响。列表由 skins.js 渲染。 -->
+      <div class="set-group">
+        <h2 class="set-title">界面皮肤</h2>
+        <div class="skins-list" id="skins-list" role="group" aria-label="界面皮肤"></div>
+        <div class="hint">皮肤只管布局。换皮肤不会动主题色，换主题也不会破坏皮肤。</div>
+      </div>
+
       <div class="set-group">
         <h2 class="set-title">音效与均衡器</h2>
         <div class="set-row" id="dsp-eq-row">
@@ -696,6 +768,83 @@
         <div class="set-row">
           <label for="set-backend">服务端</label>
           <span class="hint" id="set-backend">—</span>
+        </div>
+      </div>
+
+      <!-- 主题与壁纸：壁纸背景、二次元主题、自定义配色。
+           上面「外观」组管的是结构性的观感（输出设备、密度、渲染模式）；
+           这一组只管颜色与背景，是 theme-studio.js 的地盘。二次元主题已经
+           注册进上面的「主题色」列表，两处选择始终同步（都监听 Theme.onChange）。 -->
+      <div class="set-group">
+        <h2 class="set-title">主题与壁纸</h2>
+        <div class="set-row">
+          <label>二次元主题</label>
+          <div class="ts-theme-swatchs-row" id="ts-themes" role="group" aria-label="二次元主题快选"></div>
+        </div>
+        <!-- 形态预览：主题除了配色还有一套"长相"（圆角/描边/纹理/装饰条）。
+             七套色块看起来只是七种颜色，必须有个地方把形态摆出来，
+             否则用户换完主题只觉得"变了个色"。 -->
+        <div class="ts-skin-preview" id="ts-skin-preview" aria-hidden="true">
+          <span class="ts-skin-preview-name" id="ts-skin-name"></span>
+          <span class="ts-skin-preview-stripe"></span>
+        </div>
+        <!-- 壁纸组：缩略图选图，末尾一格是「无」。再点当前壁纸等于取消。 -->
+        <div class="ts-wall-grid" id="ts-wall-grid" role="group" aria-label="壁纸背景"></div>
+        <div class="set-row ts-slider-row">
+          <label for="ts-wall-opacity">壁纸强度</label>
+          <input id="ts-wall-opacity" type="range" min="0" max="100" step="1" value="55">
+          <span class="hint" id="ts-wall-opacity-val">—</span>
+        </div>
+        <div class="set-row ts-slider-row">
+          <label for="ts-wall-dim">压暗</label>
+          <input id="ts-wall-dim" type="range" min="0" max="100" step="1" value="0">
+          <span class="hint" id="ts-wall-dim-val">—</span>
+        </div>
+        <div class="set-row ts-slider-row">
+          <label for="ts-wall-blur">背景模糊</label>
+          <input id="ts-wall-blur" type="range" min="0" max="40" step="1" value="0">
+          <span class="hint" id="ts-wall-blur-val">—</span>
+        </div>
+        <div class="set-row">
+          <label for="ts-wall-auto">自动压暗</label>
+          <input id="ts-wall-auto" type="checkbox" checked>
+          <span class="hint">按壁纸亮度自动算出压暗量，保证面板上的文字仍然达到 AA</span>
+        </div>
+        <div class="set-row">
+          <label>文字可读性</label>
+          <span class="hint" id="ts-contrast">—</span>
+        </div>
+        <div class="set-row ts-color-row">
+          <label for="ts-bg">自定义底色</label>
+          <input id="ts-bg" type="color" value="#141821">
+          <span class="hint">底色锁定在暗色区间：玻璃质感令牌不随主题走，浅底会让面板失配</span>
+        </div>
+        <div class="set-row ts-color-row">
+          <label for="ts-accent">自定义强调色</label>
+          <input id="ts-accent" type="color" value="#ff6a3d">
+          <span class="hint">激活态 / 进度 / 焦点</span>
+        </div>
+        <div class="set-row ts-color-row">
+          <label for="ts-accent2">自定义次强调</label>
+          <input id="ts-accent2" type="color" value="#4a7dff">
+          <span class="hint">正在播放 / 选中项</span>
+        </div>
+        <div class="set-row">
+          <label></label>
+          <button id="ts-custom-apply" class="btn" type="button">应用自定义配色</button>
+          <button id="ts-custom-reset" class="btn" type="button">恢复默认</button>
+        </div>
+        <div class="hint" id="ts-note"></div>
+      </div>
+
+      <!-- 导航：一级菜单项的可见性。目前只有「每日推荐」这一个可配项——
+           它是后加的入口，不想让所有人都被迫多一个按钮。 -->
+      <div class="set-group">
+        <h2 class="set-title">导航</h2>
+        <div class="set-row">
+          <label for="set-nav-daily">显示「每日推荐」</label>
+          <input id="set-nav-daily" type="checkbox" checked>
+          <span class="hint">在左侧导航里显示独立的每日推荐入口；关掉后入口消失，不影响其它菜单</span>
         </div>
       </div>
 
@@ -903,7 +1052,9 @@
   <aside class="s3d-settings" id="s3d-settings" aria-label="舞台设置" hidden>
     <div class="s3d-settings-heading"><span>舞台设置</span><button class="s3d-btn" id="s3d-settings-close" aria-label="收起舞台设置"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
     <label for="s3d-layout">聆听布局</label>
-    <select id="s3d-layout"><option value="focus">沉浸歌词</option><option value="cadenza">心象歌词</option><option value="classic">流光歌词</option><option value="sleeve">封面与歌词</option><option value="single">简洁单句</option></select>
+    <select id="s3d-layout"><option value="focus">沉浸歌词</option><option value="sleeve">封面与歌词</option><option value="single">简洁单句</option></select>
+    <label for="s3d-lyric-visual">歌词视觉</label>
+    <select id="s3d-lyric-visual"><option value="stage">舞台 3D 歌词轨</option><option value="classic">流光歌词</option><option value="cadenza">心象歌词</option></select>
     <button class="btn s3d-workshop" id="s3d-workshop">进入创意工坊</button>
     <label for="s3d-reactivity">律动强度 <output id="s3d-reactivity-value">135%</output></label>
     <input id="s3d-reactivity" type="range" min="0" max="200" value="135">
@@ -915,7 +1066,7 @@
       <label for="s3d-fl-size">歌词字号 <output id="s3d-fl-size-value">100%</output></label>
       <input id="s3d-fl-size" type="range" min="0.70" max="1.50" step="0.05" value="1">
       <label for="s3d-fl-bg-mode">背景样式</label>
-      <select id="s3d-fl-bg-mode"><option value="geometric">几何</option><option value="fluid">流体</option><option value="solid">纯色</option></select>
+      <select id="s3d-fl-bg-mode"><option value="stage">舞台场景（3D）</option><option value="geometric">几何</option><option value="fluid">流体</option><option value="solid">纯色</option></select>
       <label for="s3d-fl-opacity">封面底色浓度 <output id="s3d-fl-opacity-value">75%</output></label>
       <input id="s3d-fl-opacity" type="range" min="0" max="1" step="0.05" value="0.75">
       <label for="s3d-fl-vignette"><input id="s3d-fl-vignette" type="checkbox" checked> 暗角</label>
@@ -1149,6 +1300,7 @@
 <!-- 演示后端（prototype/mock.js）不随服务发布：app.js 探不到 /v1/health 时
      会自动退到 ServerTransport，不需要这段 script 也能正常工作。
      下面五个是创意舞台：内核 → 表现层 → 编排 → 工坊，顺序即依赖顺序。 -->
+<script src="skins/skins.js"></script>
 <script src="themes.js"></script>
 <script src="stage.js"></script>
 <!-- 起音检测：粒子层与三维层共用同一份"鼓点是哪一刻"，必须排在两者之前 -->
@@ -1162,6 +1314,9 @@
 <script src="stage-control.js"></script>
 <script src="pl-covers.js"></script>
 <script src="shelf.js"></script>
+<!-- 主题工作室：注册二次元主题 + 铺壁纸背景层。依赖 themes.js 的 Theme.register，
+     设置界面由它自己渲染；app.js 在启动序列里调一次 bind/init。 -->
+<script src="theme-studio.js"></script>
 <script src="creative-gl.js"></script>
 <script src="bgwall.js"></script>
 <script src="lyric3d.js"></script>
@@ -1197,6 +1352,7 @@
      之前加载、由 app.js 的启动序列 bind() 注入宿主依赖。 -->
 <script src="favorites.js"></script>
 <script src="daily.js"></script>
+<script src="daily-view.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

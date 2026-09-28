@@ -22,6 +22,7 @@ mod ws;
 
 use std::sync::Arc;
 
+use axum::extract::Path;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
@@ -48,6 +49,15 @@ const THEMES_JS: &str = include_str!("../web/themes.js");
 const STAGE_CTL_JS: &str = include_str!("../web/stage-control.js");
 const SHELF_JS: &str = include_str!("../web/shelf.js");
 const PL_COVERS_JS: &str = include_str!("../web/pl-covers.js");
+// 主题工作室：往 Theme 注册二次元主题，并铺一层壁纸背景。
+const THEME_STUDIO_JS: &str = include_str!("../web/theme-studio.js");
+const THEME_STUDIO_CSS: &str = include_str!("../web/theme-studio.css");
+// 界面皮肤：注册表 + 每套皮肤一份 CSS。加新皮肤就在这里多 include 一份，
+// 再往路由表里添一行，剩下的（切换/持久化）由 skins.js 统一处理。
+const SKINS_JS: &str = include_str!("../web/skins/skins.js");
+const SKINS_CSS: &str = include_str!("../web/skins/skins.css");
+const SKIN_MINERADIO_CSS: &str = include_str!("../web/skins/skin.mineradio.css");
+const SKIN_WORKBENCH_CSS: &str = include_str!("../web/skins/skin.workbench.css");
 // 起音检测。粒子层与三维层共用，所以它必须排在两者之前。
 const ONSET_JS: &str = include_str!("../web/onset.js");
 
@@ -92,6 +102,67 @@ const ONLINE_CSS: &str = include_str!("../web/online.css");
 // 收藏与每日推荐。两者都先于 app.js 加载，由 app.js 在启动序列里 bind()。
 const FAVORITES_JS: &str = include_str!("../web/favorites.js");
 const DAILY_JS: &str = include_str!("../web/daily.js");
+const DAILY_VIEW_JS: &str = include_str!("../web/daily-view.js");
+
+// 主题壁纸。与 JS/CSS 不同，这里是二进制资源，所以用 `include_bytes!`。
+//
+// 为什么不走 `ServeDir`：单个 exe 拷出构建目录还能跑，是本地优先分发的基本
+// 前提，壁纸不该是唯一的例外。代价就是体积——所以素材是从 naruto-wallpapers
+// 里挑出来的 12 张，并已按长边 1600px / quality 72 预压过（原图每张
+// 0.3–3.7 MB，直接内嵌会让二进制膨胀十几 MB），12 张合计约 1.2 MB。
+//
+// 这张表只负责「名字 → 字节」。哪张配哪套主题、标签叫什么、亮度多少，全部
+// 归 theme-studio.js 管——那些是观感问题，改配色不该动 Rust。
+const WALLPAPERS: &[(&str, &[u8])] = &[
+    (
+        "morning-01.jpg",
+        include_bytes!("../web/wallpapers/morning-01.jpg"),
+    ),
+    (
+        "morning-09.jpg",
+        include_bytes!("../web/wallpapers/morning-09.jpg"),
+    ),
+    (
+        "morning-14.jpg",
+        include_bytes!("../web/wallpapers/morning-14.jpg"),
+    ),
+    (
+        "afternoon-19.jpg",
+        include_bytes!("../web/wallpapers/afternoon-19.jpg"),
+    ),
+    (
+        "afternoon-07.jpg",
+        include_bytes!("../web/wallpapers/afternoon-07.jpg"),
+    ),
+    (
+        "afternoon-20.jpg",
+        include_bytes!("../web/wallpapers/afternoon-20.jpg"),
+    ),
+    (
+        "evening-12.jpg",
+        include_bytes!("../web/wallpapers/evening-12.jpg"),
+    ),
+    (
+        "evening-16.jpg",
+        include_bytes!("../web/wallpapers/evening-16.jpg"),
+    ),
+    (
+        "evening-18.jpg",
+        include_bytes!("../web/wallpapers/evening-18.jpg"),
+    ),
+    (
+        "night-02.jpg",
+        include_bytes!("../web/wallpapers/night-02.jpg"),
+    ),
+    (
+        "night-08.jpg",
+        include_bytes!("../web/wallpapers/night-08.jpg"),
+    ),
+    (
+        "night-12.jpg",
+        include_bytes!("../web/wallpapers/night-12.jpg"),
+    ),
+];
 
 const JS: &str = "application/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
@@ -222,6 +293,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/themes.js", get(|| asset(JS, THEMES_JS)))
         .route("/shelf.js", get(|| asset(JS, SHELF_JS)))
         .route("/pl-covers.js", get(|| asset(JS, PL_COVERS_JS)))
+        .route("/theme-studio.js", get(|| asset(JS, THEME_STUDIO_JS)))
+        .route("/skins/skins.js", get(|| asset(JS, SKINS_JS)))
         .route("/creative-gl.js", get(|| asset(JS, CREATIVE_GL_JS)))
         .route("/creative-stage.js", get(|| asset(JS, CREATIVE_STAGE_JS)))
         .route("/creative-prompt.js", get(|| asset(JS, CREATIVE_PROMPT_JS)))
@@ -265,12 +338,24 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/favorites.js", get(|| asset(JS, FAVORITES_JS)))
         .route("/daily.js", get(|| asset(JS, DAILY_JS)))
+        .route("/daily-view.js", get(|| asset(JS, DAILY_VIEW_JS)))
         .route("/style.css", get(|| asset(CSS, STYLE_CSS)))
         .route("/stage.css", get(|| asset(CSS, STAGE_CSS)))
         .route("/creative.css", get(|| asset(CSS, CREATIVE_CSS)))
         .route("/stage3d.css", get(|| asset(CSS, STAGE3D_CSS)))
         .route("/folia/folia.css", get(|| asset(CSS, FOLIA_CSS)))
         .route("/online.css", get(|| asset(CSS, ONLINE_CSS)))
+        .route("/theme-studio.css", get(|| asset(CSS, THEME_STUDIO_CSS)))
+        .route("/skins/skins.css", get(|| asset(CSS, SKINS_CSS)))
+        .route(
+            "/skins/skin.mineradio.css",
+            get(|| asset(CSS, SKIN_MINERADIO_CSS)),
+        )
+        .route(
+            "/skins/skin.workbench.css",
+            get(|| asset(CSS, SKIN_WORKBENCH_CSS)),
+        )
+        .route("/wallpapers/{name}", get(wallpaper))
         .route(
             "/",
             get({
@@ -352,6 +437,32 @@ async fn asset(mime: &'static str, body: &'static str) -> axum::response::Respon
         body,
     )
         .into_response()
+}
+
+/// 壁纸字节出口。名字取自白名单表，查不到就是 404 —— `{name}` 只匹配单段
+/// 路径，所以 `..%2f` 这类穿越在这里既到不了磁盘也不在表里，无需额外校验。
+async fn wallpaper(Path(name): Path<String>) -> axum::response::Response {
+    match WALLPAPERS.iter().find(|(n, _)| *n == name) {
+        Some((_, bytes)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "image/jpeg"),
+                // 与 JS/CSS 的 no-cache 相反：壁纸是按名字寻址的不可变内容，
+                // 每次进设置页都重下 1.2 MB 才是浪费。换壁纸等于换文件名，
+                // 不存在「缓存了旧内容」的问题。
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "public, max-age=604800, immutable",
+                ),
+            ],
+            *bytes,
+        )
+            .into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            "no such wallpaper",
+        )
+            .into_response(),
+    }
 }
 
 async fn load_or_create_token(data_dir: &std::path::Path) -> anyhow::Result<String> {
