@@ -1,0 +1,166 @@
+/* SPDX-License-Identifier: MIT */
+/* Copyright (c) 2026 mmusic-studio contributors */
+/* folia 歌词模式样式。命名空间 fl-，不改动 stage3d.css。 */
+
+.fl-root { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
+.fl-root[hidden] { display: none !important; }
+.fl-bg { position: absolute; inset: 0; overflow: hidden; background: #09090b; }
+.fl-bg-layer { position: absolute; inset: 0; transition: opacity .8s ease; }
+
+/* 几何形状 */
+.fl-shape { position: absolute; will-change: transform; }
+.fl-shape .fl-shape-inner { position: absolute; inset: 0; animation: fl-drift linear infinite; }
+.fl-circle { border-radius: 50%; }
+.fl-triangle { clip-path: polygon(50% 0%, 0% 100%, 100% 100%); }
+.fl-cross { clip-path: polygon(20% 0%,0% 20%,30% 50%,0% 80%,20% 100%,50% 70%,80% 100%,100% 80%,70% 50%,100% 20%,80% 0%,50% 30%); }
+@keyframes fl-drift {
+  0%   { transform: translate(0, 0) rotate(var(--fl-rot0, 0deg)); }
+  50%  { transform: translate(15px, -30px) rotate(calc(var(--fl-rot0, 0deg) + 180deg)); }
+  100% { transform: translate(0, 0) rotate(calc(var(--fl-rot0, 0deg) + 360deg)); }
+}
+.fl-shape.fl-reverse .fl-shape-inner { animation-direction: reverse; }
+.fl-particle { position: absolute; border-radius: 50%; animation: fl-rise linear infinite; }
+@keyframes fl-rise { 0% { transform: translateY(0); opacity: 0; } 15% { opacity: var(--fl-po, .2); } 85% { opacity: var(--fl-po, .2); } 100% { transform: translateY(-100px); opacity: 0; } }
+.fl-vignette { position: absolute; inset: 0; background: radial-gradient(circle, transparent 40%, rgba(0,0,0,.6) 100%); transition: opacity .6s ease; }
+.fl-vignette[hidden] { display: none; }
+
+/* 流体封面 */
+.fl-fluid-wrap { position: absolute; inset: 0; overflow: hidden; will-change: transform; }
+.fl-fluid-img { position: absolute; inset: -10%; width: 120%; height: 120%; object-fit: cover;
+  filter: blur(40px); transform: scale(1.25); will-change: opacity; transition: opacity .8s ease; }
+.fl-fluid-tint { position: absolute; inset: 0; transition: opacity .3s ease, background-color 1s ease; }
+
+/* 流光（容器对指针透明，词节点单独开放点击 seek） */
+.fl-lyric { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.fl-classic { position: absolute; left: 0; right: 0; top: 15vh; height: 70vh;
+  display: flex; align-items: center; justify-content: center; padding: 0 32px; pointer-events: none; }
+/* [hidden] 需自包含压制上面的 display:flex（UA 样式优先级低于类选择器），setVisible(false) 才能真正隐藏。 */
+.fl-classic[hidden] { display: none; }
+.fl-cline { position: absolute; display: flex; flex-wrap: wrap; width: 100%; max-width: 1152px;
+  min-height: 300px; align-content: center; justify-content: center; }
+.fl-cword { position: relative; display: inline-block; white-space: nowrap; line-height: 1.22;
+  font-weight: 700; will-change: transform, opacity, filter; cursor: pointer; pointer-events: auto; }
+.fl-cword .fl-glow, .fl-cword .fl-body { display: block; }
+.fl-cword .fl-glow { position: absolute; inset: 0; color: transparent; pointer-events: none; z-index: 0; white-space: pre; }
+.fl-cword .fl-body { position: relative; z-index: 1; }
+/* 旋转分层：.fl-cword 只承担 translate/scale/opacity，.fl-crot 单独承担 rotate。
+   passed 词按 folia 原行为用 5s linear 缓漂，其余状态 .4s。 */
+.fl-crot { display: block; transform-origin: center; transition: transform .4s ease; }
+.fl-cword[data-st='passed'] .fl-crot { transition: transform 5s linear; }
+.s3d-reduced .fl-crot { transition: none !important; }
+.fl-cword[data-st='waiting'] .fl-body { filter: blur(10px); transition: filter .4s ease, color .4s ease; }
+.fl-cword[data-st='active'] .fl-body { transition: color var(--fl-dur, 200ms) linear, filter var(--fl-blur-dur, 200ms) ease; }
+.fl-cword[data-st='passed'] .fl-body { transition: color var(--fl-color-back, 800ms) ease-in-out, filter .5s ease; }
+.fl-cword[data-st='waiting'] { opacity: 0; transition: opacity .4s ease, transform .4s ease; }
+.fl-cword[data-st='active'] { opacity: 1; transition: opacity .1s ease, transform .45s cubic-bezier(.34,1.56,.64,1); }
+.fl-cword[data-st='passed'] { opacity: .82; transition: opacity .5s ease, transform .5s ease; }
+/* 辉光 4 套关键帧（半径/节拍逐值复刻 folia）：n=单字/normal，f=fast，i=instant，c=多字词。
+   时长由 --fl-glow-dur 给（多字词改由字素 span 内联 animationDuration 错峰）。 */
+@keyframes fl-glow-n {
+  0% { text-shadow: none; }
+  30%, 90% { text-shadow: 0 0 20px var(--fl-accent), 0 0 40px var(--fl-accent); }
+  100% { text-shadow: 0 0 20px var(--fl-accent), 0 0 40px var(--fl-accent); }
+}
+@keyframes fl-glow-f {
+  0% { text-shadow: none; }
+  40% { text-shadow: 0 0 18px var(--fl-accent), 0 0 32px var(--fl-accent); }
+  100% { text-shadow: none; }
+}
+@keyframes fl-glow-i {
+  0% { text-shadow: none; }
+  35% { text-shadow: 0 0 14px var(--fl-accent), 0 0 24px var(--fl-accent); }
+  100% { text-shadow: none; }
+}
+@keyframes fl-glow-c {
+  0% { text-shadow: none; }
+  30% { text-shadow: 0 0 20px var(--fl-accent), 0 0 40px var(--fl-accent); }
+  100% { text-shadow: none; }
+}
+/* 辉光始终由字素 span 承载（单字词也包一层 span），多字词逐字 delay 错峰。 */
+.fl-cword[data-st='active'][data-reveal='normal'] .fl-glow > span { animation: fl-glow-n var(--fl-glow-dur, 200ms) ease-in-out both; animation-delay: var(--fl-delay, 0ms); }
+.fl-cword[data-st='active'][data-reveal='fast'] .fl-glow > span { animation: fl-glow-f var(--fl-glow-dur, 200ms) ease-in-out both; animation-delay: var(--fl-delay, 0ms); }
+.fl-cword[data-st='active'][data-reveal='instant'] .fl-glow > span { animation: fl-glow-i var(--fl-glow-dur, 120ms) ease-in-out both; animation-delay: var(--fl-delay, 0ms); }
+.fl-cword.fl-multi[data-st='active'] .fl-glow > span { animation-name: fl-glow-c; }
+.fl-cword[data-st='passed'] .fl-glow > span { text-shadow: none; transition: text-shadow var(--fl-glow-back, 900ms) ease-out; }
+/* 呼吸挂在常驻的 .fl-classic 外层，行进入/退出动画挂在内层 .fl-cline，两者不抢 transform。 */
+.fl-classic.fl-cbreath { animation: fl-breath var(--fl-breath-dur, 7s) ease-in-out infinite; }
+@keyframes fl-breath {
+  0% { transform: translateY(0) scale(1); }
+  25% { transform: translateY(calc(var(--fl-breath-amp, 14px) * -1)) scale(calc(1 + var(--fl-bs1, .01))); }
+  50% { transform: translateY(0) scale(1); }
+  75% { transform: translateY(calc(var(--fl-breath-amp, 14px) * .45)) scale(calc(1 - var(--fl-bs2, .005))); }
+  100% { transform: translateY(0) scale(1); }
+}
+/* 行转场时长为固定常量（与 renderHints.enterMs 无关）：normal 进 400/出 300，fast 进/出 160，none 进无动画/出 120。 */
+@keyframes fl-line-in { from { opacity: 0; transform: scale(.9); filter: blur(10px); } to { opacity: 1; transform: scale(1); filter: blur(0); } }
+@keyframes fl-line-out { from { opacity: 1; transform: scale(1); filter: blur(0); } to { opacity: 0; transform: scale(1.1); filter: blur(20px); } }
+.fl-enter-normal { animation: fl-line-in var(--fl-line-dur, 400ms) ease-out both; }
+.fl-exit-normal { animation: fl-line-out var(--fl-line-dur, 300ms) ease both forwards; }
+@keyframes fl-line-in-fast { from { opacity: .35; transform: scale(.96); filter: blur(4px); } to { opacity: 1; transform: scale(1); filter: blur(0); } }
+@keyframes fl-line-out-fast { from { opacity: 1; } to { opacity: 0; transform: scale(1.04); filter: blur(10px); } }
+.fl-enter-fast { animation: fl-line-in-fast var(--fl-line-dur, 160ms) ease-out both; }
+.fl-exit-fast { animation: fl-line-out-fast var(--fl-line-dur, 160ms) ease-in-out both; }
+@keyframes fl-line-out-none { from { opacity: 1; } to { opacity: 0; transform: scale(1.02); filter: blur(6px); } }
+.fl-enter-none { animation: none; }
+.fl-exit-none { animation: fl-line-out-none var(--fl-line-dur, 120ms) ease both forwards; }
+.fl-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  text-align: center; opacity: .5; }
+
+/* 心象 */
+.fl-cadenza { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+/* [hidden] 需自包含压制上面的 absolute（UA 样式优先级低于类选择器），setVisible(false) 才能真正隐藏。 */
+.fl-cadenza[hidden] { display: none; }
+.fl-cadz-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* line-height:1 与 layout 的 h=0.96em 盒模型对齐，避免 UA 行盒把视觉中心顶偏。 */
+.fl-cadz { position: absolute; z-index: 2; line-height: 1; will-change: transform, opacity; cursor: pointer; pointer-events: auto; }
+.fl-cadz .fl-glow { position: absolute; inset: 0; color: transparent; pointer-events: none; z-index: 0; white-space: pre; }
+.fl-cadz .fl-body { position: relative; z-index: 1; white-space: pre; }
+
+/* 字幕条 */
+.fl-sub { position: absolute; left: 0; right: 0; bottom: calc(118px + env(safe-area-inset-bottom));
+  z-index: 5; text-align: center; padding: 0 32px; pointer-events: none; }
+.fl-sub[hidden] { display: none; }
+.fl-sub-card { position: relative; display: inline-block; max-width: 860px; padding: 2px 6px; }
+.fl-sub-glow { position: absolute; inset: -24px -40px; z-index: 0; border-radius: 50%;
+  background: radial-gradient(ellipse 115% 130% at center, rgba(9,9,11,.96) 0%, rgba(9,9,11,.78) 62%, transparent 100%);
+  filter: blur(24px); }
+.fl-sub-text { position: relative; z-index: 1; font-weight: 500; transition: opacity .24s ease, transform .24s ease; }
+.fl-sub-next { opacity: .55; filter: blur(1px); margin-top: 8px; }
+.fl-sub-anim { animation: fl-sub-in .24s ease-out both; }
+@keyframes fl-sub-in { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+
+/* reduced：关闭循环运动，保留染色（染色走 transition，不依赖被全局禁用的 animation）。 */
+.s3d-reduced .fl-cbreath, .s3d-reduced .fl-shape-inner, .s3d-reduced .fl-particle { animation: none !important; }
+.s3d-reduced .fl-cword[data-st='active'] .fl-glow > span,
+.s3d-reduced .fl-cadz[data-st='active'] .fl-glow,
+.s3d-reduced .fl-cadz[data-st='active'] .fl-glow > span { animation: none !important; text-shadow: 0 0 9px var(--fl-accent); }
+/* reduced 下保留行切换淡入淡出（spec 10.3）：本文件在 stage3d.css 之后加载，
+   同特异性后写覆盖其 .s3d-reduced * 的 animation:none，时长统一压到 120ms。 */
+.s3d-reduced .fl-cline.fl-enter-normal { animation: fl-line-in .12s ease-out both !important; }
+.s3d-reduced .fl-cline.fl-exit-normal { animation: fl-line-out .12s ease both !important; }
+.s3d-reduced .fl-cline.fl-enter-fast { animation: fl-line-in-fast .12s ease-out both !important; }
+.s3d-reduced .fl-cline.fl-exit-fast { animation: fl-line-out-fast .12s ease-in-out both !important; }
+.s3d-reduced .fl-cline.fl-enter-none { animation: none !important; }
+.s3d-reduced .fl-cline.fl-exit-none { animation: fl-line-out-none .12s ease both !important; }
+
+/* 平面模式：停用 3D 画布的视觉层与歌词轨（DOM 仍在，手势入口由 JS 短路） */
+.s3d-plane .s3d-canvas-wrap canvas { visibility: hidden; }
+.s3d-plane .s3d-reading { display: none !important; }
+
+@media (max-width: 760px) {
+  .fl-classic { padding: 0 16px; }
+  .fl-sub { padding: 0 16px; bottom: calc(104px + env(safe-area-inset-bottom)); }
+  .fl-sub-card { max-width: calc(100vw - 48px); }
+  .fl-sub-next ~ .fl-sub-next { display: none; } /* 窄屏预告只留 1 行 */
+}
+/* 横屏矮窗：歌词区收高，给底部字幕/播放坞让位 */
+@media (max-height: 500px) {
+  .fl-classic { top: 21vh; height: 58vh; }
+  .fl-sub { bottom: calc(96px + env(safe-area-inset-bottom)); }
+}
+@media (max-width: 380px) {
+  /* 窄屏固定收敛（与 eco 无关）：形状保留 6 个，粒子全关。
+     锚点用实际图层 .fl-bg-layer（形状/粒子均为其直接子节点），自包含不依赖外层 .fl-bg。 */
+  .fl-bg-layer .fl-shape:nth-child(n+7) { display: none !important; }
+  .fl-bg-layer .fl-particle { display: none !important; }
+}

@@ -72,6 +72,16 @@ const STAGE_LYRICS_JS: &str = include_str!("../web/stage-lyrics.js");
 const STAGE3D_JS: &str = include_str!("../web/stage3d.js");
 const STAGE3D_CSS: &str = include_str!("../web/stage3d.css");
 const STAGE_IMMERSIVE_JS: &str = include_str!("../web/stage-immersive.js");
+// folia 歌词模式（流光 classic / 心象 cadenza）：7 个零依赖模块 + 1 个样式表，
+// 在 index.html 中排在 stage-lyrics.js 之前加载。
+const FOLIA_UTIL_JS: &str = include_str!("../web/folia/folia-util.js");
+const FOLIA_THEME_JS: &str = include_str!("../web/folia/folia-theme.js");
+const FOLIA_TEXTLAYOUT_JS: &str = include_str!("../web/folia/folia-textlayout.js");
+const FOLIA_BG_JS: &str = include_str!("../web/folia/folia-bg.js");
+const FOLIA_SUBTITLE_JS: &str = include_str!("../web/folia/folia-subtitle.js");
+const FOLIA_CLASSIC_JS: &str = include_str!("../web/folia/folia-classic.js");
+const FOLIA_CADENZA_JS: &str = include_str!("../web/folia/folia-cadenza.js");
+const FOLIA_CSS: &str = include_str!("../web/folia/folia.css");
 // 在线曲库（SP1）：vendored MIT 二维码库 + 三个在线模块与样式。
 const QRCODE_JS: &str = include_str!("../web/vendor/qrcode.js");
 const ONLINE_LOGIN_JS: &str = include_str!("../web/online-login.js");
@@ -226,6 +236,22 @@ async fn main() -> anyhow::Result<()> {
         .route("/stage-lyrics.js", get(|| asset(JS, STAGE_LYRICS_JS)))
         .route("/stage3d.js", get(|| asset(JS, STAGE3D_JS)))
         .route("/stage-immersive.js", get(|| asset(JS, STAGE_IMMERSIVE_JS)))
+        .route("/folia/folia-util.js", get(|| asset(JS, FOLIA_UTIL_JS)))
+        .route("/folia/folia-theme.js", get(|| asset(JS, FOLIA_THEME_JS)))
+        .route(
+            "/folia/folia-textlayout.js",
+            get(|| asset(JS, FOLIA_TEXTLAYOUT_JS)),
+        )
+        .route("/folia/folia-bg.js", get(|| asset(JS, FOLIA_BG_JS)))
+        .route(
+            "/folia/folia-subtitle.js",
+            get(|| asset(JS, FOLIA_SUBTITLE_JS)),
+        )
+        .route("/folia/folia-classic.js", get(|| asset(JS, FOLIA_CLASSIC_JS)))
+        .route(
+            "/folia/folia-cadenza.js",
+            get(|| asset(JS, FOLIA_CADENZA_JS)),
+        )
         .route("/vendor/qrcode.js", get(|| asset(JS, QRCODE_JS)))
         .route("/online-login.js", get(|| asset(JS, ONLINE_LOGIN_JS)))
         .route("/online.js", get(|| asset(JS, ONLINE_JS)))
@@ -243,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/stage.css", get(|| asset(CSS, STAGE_CSS)))
         .route("/creative.css", get(|| asset(CSS, CREATIVE_CSS)))
         .route("/stage3d.css", get(|| asset(CSS, STAGE3D_CSS)))
+        .route("/folia/folia.css", get(|| asset(CSS, FOLIA_CSS)))
         .route("/online.css", get(|| asset(CSS, ONLINE_CSS)))
         .route(
             "/",

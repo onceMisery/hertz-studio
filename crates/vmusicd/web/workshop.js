@@ -27,7 +27,15 @@
   var helpSeq = 0;
   var target = 'immersive', returnFocus = null, home = null;
   var past = [], future = [], gesture = null;
-  var DEFAULTS = { scene: 'resonance', motion: .65, bloom: .8, reactivity: 1.35, lyrics: true, cruise: true, layout: 'focus', lyricSize: 1, lyricGlow: .45 };
+  // 「恢复默认」整表：edit(DEFAULTS) → Stage3D.configure 按键做部分覆盖后 PUT，
+  // 故这里要列全 stage3d preferences 的键，漏了的键重置时不会被还原。
+  var DEFAULTS = {
+    scene: 'resonance', motion: .65, bloom: .8, reactivity: 1.35,
+    lyrics: true, cruise: true, layout: 'focus', lyricSize: 1, lyricGlow: .45,
+    foliaBg: 'geometric', foliaBgOpacity: 0.75, foliaVignette: true, foliaSubtitle: true,
+    classicTuning: { rotation: true, breathing: 1, spacing: 0.7 },
+    cadenzaTuning: { width: 0.72, motion: 1, glow: 1, beam: 0 }
+  };
 
   function $(id) { return document.getElementById(id); }
 
@@ -1155,7 +1163,7 @@
     body.appendChild(controls);
     body.appendChild(h('h3', 'ws-section-title', '封面与歌词'));
     var reading = h('div', 'ws-tuning');
-    reading.appendChild(select('聆听布局', [['focus', '沉浸歌词'], ['scatter', '心象歌词'], ['spark', '星火歌词'], ['sleeve', '封面与歌词'], ['single', '简洁单句']], prefs.layout, function (v) { edit({ layout: v }); }));
+    reading.appendChild(select('聆听布局', [['focus', '沉浸歌词'], ['cadenza', '心象歌词'], ['classic', '流光歌词'], ['sleeve', '封面与歌词'], ['single', '简洁单句']], prefs.layout, function (v) { edit({ layout: v }); }));
     reading.appendChild(toggle('显示歌词', prefs.lyrics, function (v) { edit({ lyrics: v }); }));
     reading.querySelector('select').id = 'ws-layout';
     reading.querySelector('label').htmlFor = 'ws-layout';

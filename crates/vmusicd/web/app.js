@@ -877,6 +877,8 @@ function applySnapshot(snap) {
     loadNowPlaying(snap.track_id);
     // Stage 不暴露当前 track_id（私有变量），换曲由这里显式通知电影相机。
     if (window.StageCinema) StageCinema.onTrack(snap.track_id);
+    // 换曲不改队列，但浮层的高亮跟着快照走，这里补一次推送。
+    pushStageQueue();
   }
   syncStageIdle();
   updateRowActiveState(snap);
@@ -1061,12 +1063,36 @@ function onStageControl(e) {
       ui.volume.value = String(Math.max(0, Math.min(100, (Number(d.value) || 0) * 100)));
       setVolumeFromInput();
       break;
+    case 'lyricOffset': {
+      // stage3d 侧已做乐观暂存（连点不塌缩），这里只负责落库与回填；
+      // 在线曲目没有偏移语义，与 np 弹窗 shiftLyricOffset 同规拦截。
+      const id = state.current && state.current.id;
+      if (!id || String(id).startsWith('online:')) break;
+      const offset_ms = Math.max(-60000, Math.min(60000, Number(d.value) || 0));
+      transport.put(`/v1/tracks/${encodeURIComponent(id)}/lyrics/offset`, { offset_ms })
+        .then(() => { if (state.current && state.current.id === id) refreshLyrics(id, state.current); })
+        .catch((err) => {
+          toast('保存歌词偏移失败', 'error');
+          // 通知 stage3d 回清该曲的乐观暂存，标签回到服务端值（仍在该曲时才生效）。
+          document.dispatchEvent(new CustomEvent('folia:offset-failed', { detail: { id: id } }));
+        });
+      break;
+    }
     case 'stage3d':
       markSettingsDirty();
       state.settings.stage3d = d.value;
       transport.put('/v1/settings', { stage3d: d.value }).catch(() => toast('舞台设置暂未保存', 'error'));
       break;
     case 'view': setView(d.value); break;
+    case 'queue-play':
+      // 与队列视图同规：在线试听的虚拟 id 已失效，load 查不到。
+      if (String(d.value).startsWith('online:')) { toast('在线曲目已失效，请从歌单或收藏重新点播', 'error'); break; }
+      playTrack(String(d.value), state.queue.slice());
+      break;
+    case 'queue-remove':
+      if (d.value === state.snapshot.track_id) { toast('正在播放的曲目不能移出队列', 'error'); break; }
+      applyQueue(state.queue.filter((x) => x !== d.value), true);
+      break;
     default: break;
   }
 }
@@ -1166,7 +1192,19 @@ function drawSpectrum() {
 // 队列视图
 // ---------------------------------------------------------------------------
 
+// 全屏声场（Stage3D）里的播放队列浮层与队列视图同源：这里把精简后的行模型
+// 推给 Stage3D，全屏内点行跳播/移出经 stage:control 意图回到同一套播放逻辑。
+function pushStageQueue() {
+  if (!window.Stage3D || !Stage3D.setQueue) return;
+  Stage3D.setQueue(state.queue.map((id) => {
+    const track = state.byId.get(id) || window.Online.getMeta(id)
+      || { id, title: '未知曲目', artist: '', duration_ms: null };
+    return { id, title: track.title, artist: track.artist, duration: track.duration_ms, playing: id === state.snapshot.track_id };
+  }));
+}
+
 function renderQueue() {
+  pushStageQueue();
   const list = state.queue;
   ui.queueCount.textContent = `${list.length} 首`;
   ui.queueBadge.textContent = String(list.length);

@@ -1302,6 +1302,14 @@
       return doc ? { lines: doc.lines, index: activeIdx < 0 ? 0 : activeIdx } : null;
     },
 
+    // folia 歌词模式：翻译行与每曲偏移（数据已在 doc 内，只读暴露，不复制）。
+    lyricTranslation: function (i) {
+      return doc && doc.translation ? (doc.translation[i] || null) : null;
+    },
+    lyricOffset: function () {
+      return doc && typeof doc.user_offset_ms === 'number' ? doc.user_offset_ms : 0;
+    },
+
     // 换主题后调用：主题改的是 --accent / --text 这一层，而歌词的距离衰减、
     // 取色背景都是从 CSS 变量里读的，需要重新采一遍，否则新主题下会残留旧色。
     retint: function () {
