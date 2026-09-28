@@ -443,6 +443,24 @@
     var g = state.ctx;
     if (!g || !bands || !bands.length) return;
     var w = state.w, h = state.h;
+    // 整帧静音（曲目间隙/seek 后无输入）时主动把历史色谱渐隐掉：
+    // 色谱是逐列累积滚动的画布，仅靠新列擦除会让旧网格在屏幕上残留一整屏。
+    var maxV = 0;
+    for (var bi = 0; bi < bands.length; bi += 1) { if (bands[bi] > maxV) maxV = bands[bi]; }
+    // AnalyserNode 在暂停时仍返回最后一帧（非零），必须额外判播放态，
+    // 否则暂停/停止后色谱永远不会淡出。
+    var silent = !document.body.classList.contains('is-playing') || maxV < 0.01;
+    if (silent) {
+      var playingNow = document.body.classList.contains('is-playing');
+      g.save();
+      g.globalCompositeOperation = 'destination-out';
+      // 播放中的静音间隙用弱渐隐（保留段落呼吸感）；暂停/停止时快速擦净，
+      // 非播放帧门只有 4fps，alpha 要足够大才能在两三秒内消失。
+      g.fillStyle = playingNow ? 'rgba(0,0,0,0.12)' : 'rgba(0,0,0,0.3)';
+      g.fillRect(0, 0, w, h);
+      g.restore();
+      return;
+    }
     if (state.specColX === undefined) state.specColX = 0;
     var x = state.specColX % w;
     var c = pal[0];
@@ -453,10 +471,14 @@
       var y = h - (i + 1) / bands.length * h;
       var hgt = Math.max(1, h / bands.length + 0.6);
       var mix = v;
+      // 不透明度从 0 起：旧实现给每个频段 0.08 的固定底色，静音段也铺满整屏，
+      // 32+ 条频段行在深黑背景上显出静态横向网格。静音频段应当完全透明，
+      // 只保留极弱（0.015）的底线让极低能量处仍有连续感。
+      var alpha = v <= 0.001 ? 0 : 0.015 + v * 0.95;
       g.fillStyle = 'rgba(' + Math.round((c[0] * (1 - mix) + c2[0] * mix) * 255) + ','
         + Math.round((c[1] * (1 - mix) + c2[1] * mix) * 255) + ','
         + Math.round((c[2] * (1 - mix) + c2[2] * mix) * 255) + ','
-        + (0.08 + v * 0.92).toFixed(3) + ')';
+        + alpha.toFixed(3) + ')';
       g.fillRect(x, y, bw, hgt);
     }
     // 下一列的前瞻：把还没写到的区域擦掉，滚动才不会留残影。
