@@ -29,6 +29,7 @@
 <link rel="stylesheet" href="skins/skins.css">
 <link rel="stylesheet" href="skins/skin.mineradio.css" data-skin-css="mineradio" disabled>
 <link rel="stylesheet" href="skins/skin.workbench.css" data-skin-css="workbench" disabled>
+<link rel="stylesheet" href="skins/skin.liunian.css" data-skin-css="liunian" disabled>
 </head>
 <body>
 <script>window.__VMUSIC_TOKEN__ = "__VMUSIC_TOKEN_VALUE__";</script>
@@ -1301,6 +1302,9 @@
      会自动退到 ServerTransport，不需要这段 script 也能正常工作。
      下面五个是创意舞台：内核 → 表现层 → 编排 → 工坊，顺序即依赖顺序。 -->
 <script src="skins/skins.js"></script>
+<!-- 流年皮肤的 DOM 重编排层：紧跟 skins.js（要监听 skin:changed），
+     且必须在 app.js 之前。 -->
+<script src="skins/skin.liunian.js"></script>
 <script src="themes.js"></script>
 <script src="stage.js"></script>
 <!-- 起音检测：粒子层与三维层共用同一份"鼓点是哪一刻"，必须排在两者之前 -->

@@ -1355,6 +1355,96 @@ pub async fn playlist_remove(ctx: &Ctx, id: &str, tracks: &[super::TrackEntry]) 
     Ok(())
 }
 
+/// 从一次 `GetRadarSong` 响应里取出曲目。纯函数，翻页与去重留在调用方，
+/// 这样解析逻辑可以脱离 HTTP 单测。
+///
+/// 雷达把曲目包在 `Track` 里（`VecSongs[i].Track`）；包缺失时按裸曲目对象解析，
+/// 免得上游换了信封就整页空白。没有 mid 的条目播不了，直接丢掉。
+fn radar_tracks(j: &Value) -> Vec<OnlineTrack> {
+    j.pointer("/req/data/VecSongs")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|item| map_track(item.get("Track").unwrap_or(item)))
+                .filter(|t| !t.id.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 每日推荐歌曲：musicu.fcg `music.recommend.TrackRelationServer/GetRadarSong`
+/// （雷达推荐）。
+///
+/// **为什么不是"每日推荐"**：这条 Web CGI 通道上没有与网易「每日30首」同名的
+/// 端点——`music.recommend.DailyRecommend`、`music.recommend.RecommendSong`
+/// 带真机登录态实测都是 500003（诊断见 tests::probe_daily_candidates_with_cred）。
+/// 真能拿到个性化推荐歌曲的是两个端点：本函数用的 `GetRadarSong`（`Size`/`Page`
+/// 可控、一次 10 条、`HasMore` 分页），以及 `music.radioProxy.MbTrackRadioSvr/
+/// get_radio_track`（电台：`size` 参数无效、一次只推 2~3 首，凑不够每日推荐的量）。
+/// 取前者。
+///
+/// **必须登录态**：匿名一律 500003。所以未登录要如实报错，不静默返回空列表
+/// ——空列表会让每日推荐把它显示成"这次没返回"，把"没登录"掩盖掉。
+pub async fn recommend_songs(
+    ctx: &Ctx,
+    offset: usize,
+    limit: usize,
+) -> ApiResult<Vec<OnlineTrack>> {
+    let limit = limit.clamp(1, 100);
+    let per_page = limit.clamp(1, 30);
+    let mut page = offset / per_page + 1;
+    let http = client()?;
+    let mut out: Vec<OnlineTrack> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // 上游一页只给 10 条左右，要满量得翻几页；翻页次数设上限，避免上游
+    // HasMore 恒为 true 时把一次推荐变成十几次串行请求拖慢整页。
+    for _ in 0..4 {
+        let body = json!({
+            "comm": { "ct": 24, "cv": 0 },
+            "req": {
+                "module": "music.recommend.TrackRelationServer",
+                "method": "GetRadarSong",
+                "param": { "Page": page, "Size": per_page },
+            },
+        });
+        let j = cgi(&http, ctx, body).await?;
+        if !code_zero(j.pointer("/req/code")) {
+            return Err(ApiError::upstream_rejected(format!(
+                "获取 QQ 每日推荐被拒绝（code={}）",
+                j.pointer("/req/code")
+                    .and_then(val_string)
+                    .unwrap_or_else(|| "缺失".into())
+            )));
+        }
+        let songs = radar_tracks(&j);
+        if songs.is_empty() {
+            return Err(ApiError::upstream_rejected("QQ 音乐未返回雷达推荐".to_string()));
+        }
+        // 翻页之间会重复：上游按召回批次给，Page 递增时同一首可能再出现一次。
+        for t in songs {
+            if seen.insert(t.id.clone()) {
+                out.push(t);
+            }
+        }
+        if out.len() >= limit {
+            break;
+        }
+        if j.pointer("/req/data/HasMore") != Some(&Value::Bool(true)) {
+            break;
+        }
+        page += 1;
+    }
+
+    out.truncate(limit);
+    if out.is_empty() {
+        return Err(ApiError::upstream_rejected(
+            "QQ 音乐这次没有返回推荐曲目".to_string(),
+        ));
+    }
+    Ok(out)
+}
+
 /// 推荐歌单：匿名 musicu.fcg，`playlist.PlayListPlazaServer/get_playlist_by_category`，
 /// id=3317 官方歌单广场。
 ///
@@ -1977,6 +2067,236 @@ pub async fn qr_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::online::cred::CRED_PREFIX;
+
+    /// 真机诊断（**不进 CI**，手工跑）：
+    /// `cargo test -p vmusicd --lib -- --ignored --nocapture probe_daily`
+    ///
+    /// 用途：QQ 到底有没有「每日推荐歌曲」端点？`SOURCES` 里 QQ 没开
+    /// RecommendSongs（注释写"无每日歌曲推荐端点"），于是每日推荐汇总把它判成
+    /// unsupported，用户登了 QQ 也不出歌。匿名探测只会得到 500003，分不清是
+    /// "模块不存在"还是"要登录"，所以这里带上真机 cookie 再试一遍。
+    ///
+    /// 候选来自公开参考实现与官方开放平台的能力命名（官方 SDK 的「每日30首」
+    /// 是 fetchDailyRecommendSong，属 App SDK 而非这条 Web CGI 通道）。
+    #[tokio::test]
+    #[ignore]
+    async fn probe_daily_candidates_with_cred() {
+        // 钥匙串条目名是 `{cred_key}:cred`，而 cred_key 是 `online_cred_<source>`。
+        // 写成 "qq:cred" 会拿到 NoEntry，误以为没登录。
+        let entry = keyring::Entry::new("mmusic-studio", &format!("{CRED_PREFIX}{ID}:cred"))
+            .expect("keyring entry");
+        let raw = match entry.get_password() {
+            Ok(v) => v,
+            Err(e) => {
+                println!("!! 读不到 QQ 凭据（未登录？）: {e}");
+                return;
+            }
+        };
+        let pack: CredPack = match serde_json::from_str(&raw) {
+            Ok(p) => p,
+            Err(e) => {
+                println!("!! 凭据不是预期结构: {e}");
+                return;
+            }
+        };
+        if pack.cookie.is_empty() {
+            println!("!! QQ 凭据里没有 cookie，先去在线面板登录");
+            return;
+        }
+        let http = client().expect("http client");
+
+        let cands: [(&str, &str, Value); 6] = [
+            ("music.recommend.DailyRecommend", "GetDailyRecommend", json!({})),
+            ("music.recommend.RecommendSong", "get_recommend_song", json!({})),
+            (
+                "music.radioProxy.MbTrackRadioSvr",
+                "get_radio_track",
+                json!({"seq": 1, "from": 0, "size": 10}),
+            ),
+            (
+                "music.recommend.TrackRelationServer",
+                "GetRadarSong",
+                json!({"Page": 1, "Size": 10}),
+            ),
+            (
+                "music.recommend.RecommendFeed",
+                "get_recommend_feed",
+                json!({"From": 0, "Size": 10}),
+            ),
+            (
+                "music.playlist.PlaylistSquare",
+                "GetRecommendFeed",
+                json!({"From": 0, "Size": 10}),
+            ),
+        ];
+
+        // 雷达：字段形状 + 分页是否真的生效（Page 递增要给出不同的歌，
+        // 否则"分页"只是摆设，实现时就不能靠它凑数）。
+        println!("=== GetRadarSong 结构与分页 ===");
+        for page in [1usize, 2] {
+            let body = json!({
+                "comm": { "ct": 24, "cv": 0 },
+                "req": {
+                    "module": "music.recommend.TrackRelationServer",
+                    "method": "GetRadarSong",
+                    "param": { "Page": page, "Size": 10 },
+                },
+            });
+            let mut h = crate::online::http::headers(Some(&pack.cookie), Some(REFERER));
+            h.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_UA));
+            h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json;charset=UTF-8"));
+            let text = serde_json::to_string(&body).expect("serialize");
+            match crate::online::http::post_json(&http, MUSICU, h, text).await {
+                Ok(j) => {
+                    let arr = j.pointer("/req/data/VecSongs").and_then(|v| v.as_array());
+                    println!(
+                        "  Page={page} code={:?} HasMore={:?} 条数={}",
+                        j.pointer("/req/code").and_then(val_string),
+                        j.pointer("/req/data/HasMore"),
+                        arr.map(|a| a.len()).unwrap_or(0)
+                    );
+                    if let Some(arr) = arr {
+                        for (i, t) in arr.iter().take(3).enumerate() {
+                            println!(
+                                "    [{i}] keys={:?}",
+                                t.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())
+                            );
+                        }
+                        if page == 1 {
+                            if let Some(first) = arr.first() {
+                                println!("  首条完整：");
+                                println!("{}", serde_json::to_string_pretty(first)
+                                    .unwrap_or_default().chars().take(3500).collect::<String>());
+                            }
+                        }
+                    }
+                }
+                Err(e) => println!("  Page={page} ERR {e:?}"),
+            }
+        }
+        println!();
+
+        // 电台的翻页语义：先摸清"一次能要几首"，否则写出来的实现要么只拿
+        // 一首、要么为凑数连打几十次请求。
+        println!("=== get_radio_track 参数矩阵 ===");
+        for param in [
+            json!({"seq": 1, "from": 0, "size": 10}),
+            json!({"seq": 0, "from": 0, "size": 10}),
+            json!({"from": 0, "size": 10}),
+            json!({"seq": 1, "size": 20}),
+            json!({"seq": 1, "from": 0, "size": 10, "num": 10}),
+        ] {
+            let body = json!({
+                "comm": { "ct": 24, "cv": 0 },
+                "req": {
+                    "module": "music.radioProxy.MbTrackRadioSvr",
+                    "method": "get_radio_track",
+                    "param": param,
+                },
+            });
+            let mut h = crate::online::http::headers(Some(&pack.cookie), Some(REFERER));
+            h.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_UA));
+            h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json;charset=UTF-8"));
+            let text = serde_json::to_string(&body).expect("serialize");
+            let n = match crate::online::http::post_json(&http, MUSICU, h, text).await {
+                Ok(j) => format!(
+                    "code={:?} tracks={}",
+                    j.pointer("/req/code").and_then(val_string),
+                    j.pointer("/req/data/tracks").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0)
+                ),
+                Err(e) => format!("ERR {e:?}"),
+            };
+            println!("    {param} -> {n}");
+        }
+        println!();
+
+        for (module, method, param) in cands {
+            let body = json!({
+                "comm": { "ct": 24, "cv": 0 },
+                "req": { "module": module, "method": method, "param": param },
+            });
+            let mut h = crate::online::http::headers(Some(&pack.cookie), Some(REFERER));
+            h.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_UA));
+            h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json;charset=UTF-8"));
+            let text = serde_json::to_string(&body).expect("serialize");
+            match crate::online::http::post_json(&http, MUSICU, h, text).await {
+                Ok(j) => {
+                    let code = j.pointer("/req/code").and_then(val_string);
+                    let sub = j.pointer("/req/subcode").and_then(val_string);
+                    let keys: Vec<&String> = j
+                        .pointer("/req/data")
+                        .and_then(|d| d.as_object())
+                        .map(|o| o.keys().collect())
+                        .unwrap_or_default();
+                    println!(
+                        "{module} / {method}\n    code={code:?} sub={sub:?} dataKeys={keys:?}\n    {}",
+                        serde_json::to_string(&j).unwrap_or_default().chars().take(240).collect::<String>()
+                    );
+                    // 歌曲列表长什么样：只有看清字段，才能写解析（猜字段写出来的
+                    // 解析器上线就是一排空标题）。
+                    for path in ["/req/data/tracks", "/req/data/VecSongs"] {
+                        if let Some(arr) = j.pointer(path).and_then(|v| v.as_array()) {
+                            println!("    {path} 共 {} 条，首条：", arr.len());
+                            if let Some(first) = arr.first() {
+                                let s = serde_json::to_string_pretty(first)
+                                    .unwrap_or_default();
+                                println!("{}", s.chars().take(1600).collect::<String>());
+                            }
+                        }
+                    }
+                }
+                Err(e) => println!("{module} / {method}\n    请求失败: {e:?}"),
+            }
+            println!();
+        }
+    }
+
+    /// 雷达响应的解析：包裹、封面、双歌手顿号连接、以及"没有 mid 播不了"的
+    /// 条目必须被丢掉（留着就是一排点了没反应的行）。
+    #[test]
+    fn radar_tracks_unwrap_wrapper_and_drop_unplayable() {
+        let j: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/qq_radar.json")).unwrap();
+        let v = radar_tracks(&j);
+        assert_eq!(v.len(), 2, "第三条没有 mid，应当被丢掉");
+        assert_eq!(v[0].id, "0034Spf52pFWYE", "取的是 mid（播放用的 songmid）");
+        assert_eq!(v[0].source, "qq");
+        assert_eq!(v[0].title, "只要有你");
+        assert_eq!(v[0].album, "只要有你");
+        // spec §2.5：QQ 歌手数组用顿号连接。
+        assert_eq!(v[0].artist, "张三、李四");
+        assert_eq!(v[0].duration_ms, 223_000);
+        assert_eq!(
+            v[0].cover.as_deref(),
+            Some("https://y.qq.com/music/photo_new/T002R300x300M000000liWDt1CeK6S_1.jpg"),
+            "封面走专辑 pmid"
+        );
+        assert!(v[0].playable);
+        assert!(!v[0].vip_only);
+        // 付费标记两个历史字段名都要认（pay_play / payplay）。
+        assert!(v[1].vip_only, "payplay=1 也要认成 VIP");
+        assert_eq!(v[0].track_ref["media_mid"], "0034Spf52pFWYE");
+    }
+
+    /// 上游万一不再包 `Track`，应当按裸曲目对象解析，而不是整页空白。
+    #[test]
+    fn radar_tracks_accepts_bare_track_objects() {
+        let j: Value = serde_json::from_str(
+            r#"{"req":{"code":0,"data":{"VecSongs":[{"mid":"00abc","name":"裸的","interval":100}]}}}"#,
+        )
+        .unwrap();
+        let v = radar_tracks(&j);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].id, "00abc");
+        assert_eq!(v[0].title, "裸的");
+    }
+
+    #[test]
+    fn radar_tracks_returns_empty_when_envelope_missing() {
+        let j: Value = serde_json::from_str(r#"{"req":{"code":500003}}"#).unwrap();
+        assert!(radar_tracks(&j).is_empty());
+    }
 
     #[test]
     fn fixture_normalizes_item_song() {

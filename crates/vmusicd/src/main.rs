@@ -58,6 +58,8 @@ const SKINS_JS: &str = include_str!("../web/skins/skins.js");
 const SKINS_CSS: &str = include_str!("../web/skins/skins.css");
 const SKIN_MINERADIO_CSS: &str = include_str!("../web/skins/skin.mineradio.css");
 const SKIN_WORKBENCH_CSS: &str = include_str!("../web/skins/skin.workbench.css");
+const SKIN_LIUNIAN_CSS: &str = include_str!("../web/skins/skin.liunian.css");
+const SKIN_LIUNIAN_JS: &str = include_str!("../web/skins/skin.liunian.js");
 // 起音检测。粒子层与三维层共用，所以它必须排在两者之前。
 const ONSET_JS: &str = include_str!("../web/onset.js");
 
@@ -354,6 +356,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/skins/skin.workbench.css",
             get(|| asset(CSS, SKIN_WORKBENCH_CSS)),
+        )
+        .route(
+            "/skins/skin.liunian.css",
+            get(|| asset(CSS, SKIN_LIUNIAN_CSS)),
+        )
+        .route(
+            "/skins/skin.liunian.js",
+            get(|| asset(JS, SKIN_LIUNIAN_JS)),
         )
         .route("/wallpapers/{name}", get(wallpaper))
         .route(

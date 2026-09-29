@@ -30,6 +30,8 @@ const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const SKINS_JS = read(path.join(SKINS, 'skins.js'));
 const MINERADIO = read(path.join(SKINS, 'skin.mineradio.css'));
 const WORKBENCH = read(path.join(SKINS, 'skin.workbench.css'));
+const LIUNIAN = read(path.join(SKINS, 'skin.liunian.css'));
+const LIUNIAN_JS = read(path.join(SKINS, 'skin.liunian.js'));
 const SKINS_CSS = read(path.join(SKINS, 'skins.css'));
 const HTML = read(path.join(WEB, 'index.html'));
 const APP = read(path.join(WEB, 'app.js'));
@@ -109,13 +111,14 @@ function makeSandbox(cssIds) {
 // ---------------------------------------------------------------------------
 
 function checkCatalog() {
-  section('皮肤目录：三套都在，classic 是"没有皮肤"');
+  section('皮肤目录：四套都在，classic 是"没有皮肤"');
 
-  const { sandbox, root, links } = makeSandbox(['mineradio', 'workbench']);
+  const { sandbox, root, links } = makeSandbox(['mineradio', 'workbench', 'liunian']);
   const ids = sandbox.Skins.catalog().map((s) => s.id);
   ok(ids.indexOf('classic') >= 0, '有 classic（仓库原本那套布局）');
   ok(ids.indexOf('mineradio') >= 0, '有 mineradio');
   ok(ids.indexOf('workbench') >= 0, '有 workbench');
+  ok(ids.indexOf('liunian') >= 0, '有 liunian');
   ok(sandbox.Skins.catalog().every((s) => s.name && s.note),
     '每套皮肤都有可读的名字与说明（设置页要靠它做选择）');
 
@@ -125,22 +128,28 @@ function checkCatalog() {
   eq(root.getAttribute('data-skin'), 'mineradio', 'html 上写了当前皮肤');
   eq(links[0].disabled, false, 'mineradio 的 CSS 被启用');
   eq(links[1].disabled, true, 'workbench 的 CSS 保持禁用（两套不能同时生效）');
+  eq(links[2].disabled, true, 'liunian 的 CSS 保持禁用');
 
   sandbox.Skins.apply('workbench');
   eq(links[0].disabled, true, '切走后 mineradio 的 CSS 收起');
   eq(links[1].disabled, false, 'workbench 的 CSS 启用');
 
+  sandbox.Skins.apply('liunian');
+  eq(links[0].disabled, true, '切到 liunian 后 mineradio 的 CSS 收起');
+  eq(links[1].disabled, true, 'workbench 的 CSS 收起');
+  eq(links[2].disabled, false, 'liunian 的 CSS 启用');
+
   sandbox.Skins.apply('classic');
   eq(links.every((l) => l.disabled), true, 'classic 不启用任何皮肤 CSS（它本身就是默认布局）');
 
   section('切换：广播事件让画布类模块自己重排');
-  const { sandbox: s2, events } = makeSandbox(['mineradio', 'workbench']);
+  const { sandbox: s2, events } = makeSandbox(['mineradio', 'workbench', 'liunian']);
   s2.Skins.apply('workbench');
   ok(events.some((e) => e.type === 'skin:changed' && e.detail && e.detail.id === 'workbench'),
     '切肤后广播 skin:changed（舞台/3D 这类要按新尺寸重排）');
 
   section('持久化：选择被记住，坏数据回落而不是写个无效值');
-  const { sandbox: s3, store } = makeSandbox(['mineradio', 'workbench']);
+  const { sandbox: s3, store } = makeSandbox(['mineradio', 'workbench', 'liunian']);
   s3.Skins.apply('workbench');
   eq(store.get('vmusic.skin'), 'workbench', '选择写进 localStorage');
   store.set('vmusic.skin', 'no-such-skin');
@@ -197,6 +206,26 @@ function checkNoColor() {
     // 允许出现的"颜色"只能是变量引用。
     ok(/\bvar\(--/.test(body), `${name} 的着色一律走 var(--…)`);
   }
+
+  section('liunian：颜色字面量同样全禁，color 只准引用主题 token');
+
+  // liunian 复刻 VMusic 的「激活行翻色」，所以它是唯一被允许写 color 的皮肤；
+  // 但值必须来自主题（var(--…))，绝不允许字面量在皮肤里把主题色带跑。
+  const lnBody = LIUNIAN.replace(/\/\*[\s\S]*?\*\//g, '');
+  const lnHex = lnBody.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
+  const lnRgb = lnBody.match(/\brgba?\(/g) || [];
+  const lnNamed = lnBody.replace(/white-space|grey|gray/g, '')
+    .match(/\b(?:red|blue|green|white|black)\b/g) || [];
+  ok(lnHex.length === 0, `liunian 没有十六进制颜色${lnHex.length ? '（' + lnHex.join(',') + '）' : ''}`);
+  ok(lnRgb.length === 0, 'liunian 没有 rgb()/rgba()');
+  ok(lnNamed.length === 0, `liunian 没有颜色关键字${lnNamed.length ? '（' + lnNamed.join(',') + '）' : ''}`);
+  // 扫独立 color 属性（排除 background-color/-webkit-text-fill-color 这类带前缀的）：
+  // 每个 color: 的值都必须以 var(-- 开头。
+  const lnColors = Array.from(lnBody.matchAll(/(?:^|[\s;}])color\s*:\s*([^;}]+)/g));
+  const badColor = lnColors.filter((m) => !/^\s*var\(--/.test(m[1]));
+  ok(badColor.length === 0,
+    `liunian 的 color 只能引用主题 token${badColor.length ? '（' + badColor.map((m) => m[1].trim()).join(',') + '）' : ''}`);
+  ok(lnColors.length >= 2, 'liunian 确实做了激活行翻色（VMusic 实心底 + 深字）');
 
   section('皮肤只管布局：属性也应该是布局属性');
   for (const [name, css] of [['mineradio', MINERADIO], ['workbench', WORKBENCH]]) {
@@ -293,6 +322,12 @@ function checkCoverage() {
   ok(missingInB.length === 0, `mineradio 覆盖的模块 workbench 也都有（缺：${missingInB.join(' ')}）`);
   ok(missingInA.length === 0, `workbench 覆盖的模块 mineradio 也都有（缺：${missingInA.join(' ')}）`);
 
+  // liunian 必须覆盖与前两套相同的模块集合：多覆盖（如 body::after、.disc-wrap）
+  // 允许，少一个都会让某个页面"切了一半"落回默认布局。
+  const c = selectorsOf(LIUNIAN);
+  const missingInC = [...a].filter((s) => !c.has(s));
+  ok(missingInC.length === 0, `liunian 覆盖了其它皮肤的全部模块（缺：${missingInC.join(' ')}）`);
+
   // 这些是主要模块，一套皮肤漏了任何一个，切过去那块就是"没换皮肤"。
   const must = [
     '.app', '.rail', '.rail-item', '.column', '.view', '.col-head', '.col-title',
@@ -302,6 +337,7 @@ function checkCoverage() {
   for (const m of must) {
     ok([...a].some((s) => s.indexOf(m) >= 0), `mineradio 覆盖了 ${m}`);
     ok([...b].some((s) => s.indexOf(m) >= 0), `workbench 覆盖了 ${m}`);
+    ok([...c].some((s) => s.indexOf(m) >= 0), `liunian 覆盖了 ${m}`);
   }
 }
 
@@ -313,7 +349,7 @@ function checkWiring() {
   section('接线：HTML / 路由 / 启动');
 
   ok(/<link rel="stylesheet" href="skins\/skins\.css">/.test(HTML), 'skins.css 常驻引入');
-  for (const id of ['mineradio', 'workbench']) {
+  for (const id of ['mineradio', 'workbench', 'liunian']) {
     ok(new RegExp('href="skins/skin\\.' + id + '\\.css"[^>]*data-skin-css="' + id + '"').test(HTML),
       `skin.${id}.css 引了进来并带上 data-skin-css`);
     ok(new RegExp('data-skin-css="' + id + '"[^>]*disabled').test(HTML),
@@ -324,11 +360,29 @@ function checkWiring() {
     'skins.js 排在 app.js 之前（app.js 启动时要能拿到它）');
   ok(/id="skins-list"/.test(HTML), '设置页有皮肤列表容器');
 
-  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.mineradio.css', 'skins/skin.workbench.css']) {
+  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.mineradio.css', 'skins/skin.workbench.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js']) {
     ok(MAIN_RS.includes(`/skins/${p.split('/')[1]}`) || MAIN_RS.includes(p),
       `main.rs 注册了 /${p} 路由`);
   }
   ok(/include_str!\("\.\.\/web\/skins\/skins\.js"\)/.test(MAIN_RS), 'skins.js 编进二进制');
+  ok(/include_str!\("\.\.\/web\/skins\/skin\.liunian\.css"\)/.test(MAIN_RS),
+    'skin.liunian.css 编进二进制');
+  ok(/include_str!\("\.\.\/web\/skins\/skin\.liunian\.js"\)/.test(MAIN_RS),
+    'skin.liunian.js 编进二进制');
+
+  section('接线：流年重编排 JS 的加载顺序与机制');
+  const lnJsAt = HTML.indexOf('src="skins/skin.liunian.js"');
+  ok(lnJsAt > 0, 'index.html 引入了 skin.liunian.js');
+  ok(lnJsAt > HTML.indexOf('src="skins/skins.js"'),
+    'skin.liunian.js 排在 skins.js 之后（要监听 skin:changed）');
+  ok(lnJsAt < HTML.indexOf('<script src="app.js"'),
+    'skin.liunian.js 排在 app.js 之前');
+  ok(/addEventListener\(['"]skin:changed['"]/.test(LIUNIAN_JS),
+    '重编排层挂在 skin:changed 事件上（不主动 hook 业务代码）');
+  ok(/ln-anchor/.test(LIUNIAN_JS),
+    '搬运节点带锚点（切走皮肤可还原）');
+  ok(/MutationObserver/.test(LIUNIAN_JS),
+    '视图联动用 MutationObserver');
 
   ok(APP.includes('window.Skins.init()'), 'app.js 启动时初始化皮肤');
   // 皮肤排主题之后：先定主题（配色）再定皮肤（布局），两者互不覆盖。

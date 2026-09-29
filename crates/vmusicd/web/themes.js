@@ -304,6 +304,34 @@
         '--accent-ink': '#1c2200',
         '--hover': 'rgba(212, 255, 0, 0.12)'
       }
+    },
+    {
+      id: 'liunian',
+      name: '流年',
+      note: '流年 · 旧纸暖褐底 + 沉金色的岁月流光',
+      // 对比度（自 --bg 反推，WCAG AA）：
+      //   text/bg ≈ 14.8  muted/bg ≈ 6.6  accent-ink/accent ≈ 7.8
+      // 流年专属的 --liunian-vignette 是老照片暗角，仅 skin.liunian.css 消费。
+      tokens: {
+        '--bg': '#15110d',
+        '--panel': 'rgba(38, 30, 22, 0.62)',
+        '--panel-solid': '#211b14',
+        '--panel-2': 'rgba(230, 196, 140, 0.05)',
+        '--line': 'rgba(226, 190, 140, 0.10)',
+        '--line-strong': 'rgba(226, 190, 140, 0.20)',
+        '--text': '#f3e8d8',
+        '--muted': '#ab9880',
+        '--accent': '#d8ab60',
+        '--accent-2': '#c0704e',
+        '--accent-ink': '#241a08',
+        '--brand': '#d8ab60',
+        '--brand-rgb': '216, 171, 96',
+        '--highlight': '#e7c687',
+        '--highlight-rgb': '231, 198, 135',
+        '--hover': 'rgba(216, 171, 96, 0.10)',
+        '--liunian-vignette':
+          'radial-gradient(125% 100% at 50% 38%, transparent 58%, rgba(18, 12, 6, 0.42) 100%)'
+      }
     }
   ];
 

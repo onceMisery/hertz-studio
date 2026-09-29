@@ -38,6 +38,15 @@
   background: var(--line);
 }
 
+/* 宽屏空闲：基础样式的空闲规则会把栅格改成「86px + 1fr」，本皮肤的窄栏
+   设计是 104px，这里把第一栏钉回 104px（舞台仍由基础规则 display:none）。
+   与 mineradio 保留同一条选择器，两套皮肤的模块覆盖保持一致。 */
+@media (min-width: 1241px) {
+  [data-skin="workbench"] body[data-stage-idle="1"] .app {
+    grid-template-columns: 104px minmax(0, 1fr);
+  }
+}
+
 /* --- 导航：左侧固定窄条，条目紧贴、直角 -------------------------------- */
 
 [data-skin="workbench"] .rail {

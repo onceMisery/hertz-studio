@@ -32,13 +32,18 @@
     },
     {
       id: 'mineradio',
-      name: '浮光 · Mineradio',
+      name: '浮光',
       note: '顶部悬浮胶囊导航 + 全宽卡片网格，舞台贴右侧边',
     },
     {
       id: 'workbench',
       name: '工作台',
       note: '固定窄侧栏 + 内容分栏，直角细线、高信息密度',
+    },
+    {
+      id: 'liunian',
+      name: '流年',
+      note: '左侧列表面板 + 悬浮播放卡 + 右侧频谱歌词，暖调玻璃',
     },
   ];
 

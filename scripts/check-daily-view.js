@@ -440,8 +440,13 @@ function checkLayoutAndPlay() {
 
   sandbox.DailyView.state.online = {
     date: '', total: 2, tracks: [
-      { virtual_id: 'online:netease:1', title: '云一', artist: 'A', source_label: '网易云音乐' },
-      { virtual_id: 'online:netease:2', title: '云二', artist: 'B', source_label: '网易云音乐' },
+      // 真实响应里在线曲目**同时**带 id 与 virtual_id：id 是平台裸 id，
+      // virtual_id 才是服务端认的虚拟 id。以前这里只造了 virtual_id，
+      // 于是 `t.id || t.virtual_id` 也能过——真实数据下取到裸 id，
+      // /player/load 直接 not_found（"每日推荐点不动"）。fixture 必须照
+      // 真实响应的形状写，否则契约全绿、线上是坏的。
+      { id: '1', virtual_id: 'online:netease:1', title: '云一', artist: 'A', source_label: '网易云音乐' },
+      { id: '2', virtual_id: 'online:netease:2', title: '云二', artist: 'B', source_label: '网易云音乐' },
     ], sources: [], skipped: [], ready: [],
   };
   sandbox.DailyView.render();
@@ -510,8 +515,20 @@ function checkLayoutAndPlay() {
   const q = calls.playQueue[0];
   ok(q && q.ids.length === 2, '整份推荐作为一个队列');
   eq(q.startId, q.ids[0], '播放全部从第一首起');
+  // 入队 id 必须是虚拟 id：裸平台 id 会被服务端当本地曲目查库 → not_found。
+  ok(q.ids.every((id) => String(id).indexOf('online:') === 0),
+    '在线队列的 id 全是虚拟 id（got ' + q.ids.join(',') + '）');
   ok(q.meta && q.meta['online:netease:1'], '在线曲目带元数据快照（历史标题才不退化成裸 id）');
+  ok(!q.meta['1'], '快照的键是虚拟 id，不是平台裸 id');
+  ok(Object.keys(q.meta || {}).every((k) => String(k).indexOf('online:') === 0),
+    'meta 的键全是虚拟 id（服务端只收虚拟 id 的键，其余整条丢弃）');
+  // OnlineMetaSnap.title 是必填：缺了整条 meta 反序列化失败，连累整次播放 400。
+  ok(q.meta['online:netease:1'].title === '云一', '快照带 title（服务端必填字段）');
   ok(!q.meta['local-1'], '本地曲目不塞进 meta（服务端只认虚拟 id）');
+  // 取 id 的顺序钉死：两个字段都在时 virtual_id 必须赢。
+  const DV = read('daily-view.js');
+  ok(/function idOf\([\s\S]{0,200}?t\.virtual_id \|\| t\.id/.test(DV),
+    'idOf 优先取 virtual_id（两个 id 同时存在时在线身份必须赢）');
 
   // 点第 N 首：从那首起播，队列顺序不变（改顺序会改掉"下一首"）。
   ui.dvPlay.onclick();

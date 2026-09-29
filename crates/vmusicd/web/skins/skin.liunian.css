@@ -1,0 +1,1093 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 mmusic-studio contributors
+
+   皮肤：liunian（流年）v2
+   --------------------------------------------------------------------------
+   布局严格参照 VCPChat 内置音乐播放器（D:\code\github\VCPChat\Musicmodules，
+   下称 VMusic）的真实骨架：
+
+     ┌───────────────────────────────────────────────────────────────┐
+     │ 标题栏（透明）                                                  │
+     ├───────────┬────────────────────────────────┬──────────────────┤
+     │ 左栏 280  │ 中栏（弹性）                    │ 右栏 300         │
+     │           │                                │                  │
+     │ 搜索       │  播放卡（文档流玻璃卡）：        │ 频谱卡（52px）    │
+     │ 本地/云端  │   封面 + 标题艺术家             │                  │
+     │           │   进度条 + 时间                 │ 歌词卡（弹性滚动） │
+     │ tabs：    │   模式/上一首/播放/下一首/音量    │                  │
+     │ 全部/专辑 │                                │                  │
+     │ /歌手/歌单│  内容区（工具行 + 每日推荐/       │                  │
+     │           │   设置分组等，弹性滚动）          │                  │
+     │ 歌曲列表  │                                │                  │
+     │ （弹性滚动）│                                │                  │
+     │ +新建歌单  │                                │                  │
+     └───────────┴────────────────────────────────┴──────────────────┘
+
+   与 v1 的关键差异：播放卡不再是 fixed 悬浮件，而是由 skin.liunian.js 把 .bar
+   移入中栏文档流；左栏不再是导航菜单，而是搜索+tabs+**歌曲列表本体**；右栏是
+   频谱+歌词。DOM 重编排全部可逆。
+
+   选择器约定：与 mineradio/workbench 对齐，模块规则一律用裸类（.track 等），
+   作用域由 [data-skin="liunian"] 前缀限定；.ln-* 仅给流年新建结构使用。
+   本文件不出现颜色字面量；active 行用 color: var(--accent-ink) 复刻 VMusic
+   「沉金底 + 深字」，是唯一允许写 color 的皮肤（契约见 check-skins.js）。
+*/
+
+[data-skin="liunian"] {
+  /* 布局令牌（对照 VMusic：容器 gap/padding 20、面板圆角 20）。 */
+  --skin-gap: 20px;
+  --skin-pad: 20px;
+  --skin-radius: 20px;
+  --skin-row-py: 8px;
+  --skin-card-min: 160px;
+  --skin-head-pb: 14px;
+  --skin-title: 18px;
+
+  /* 结构：标题栏 44（VMusic 40）、左栏 280（VMusic 320）、右栏 300。 */
+  --topbar-h: 44px;
+  --ln-side-w: 280px;
+  --ln-right-w: 300px;
+
+  /* 标题点缀衬线，正文仍用无衬线。 */
+  --font-serif: "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif;
+}
+
+/* --- 标题栏：透明（VMusic 自定义标题栏） --------------------------------- */
+
+[data-skin="liunian"] .topbar {
+  background: transparent;
+  border-bottom: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  padding: 0 18px;
+}
+
+[data-skin="liunian"] .brand {
+  width: auto;
+  font-family: var(--font-serif);
+  letter-spacing: 3px;
+  cursor: pointer; /* 窄屏时点击品牌唤出左栏（见文末响应式） */
+}
+
+[data-skin="liunian"] .topsearch {
+  height: 32px;
+  max-width: 440px;
+}
+
+/* --- 外壳：三栏（padding/gap 20） ---------------------------------------- */
+
+[data-skin="liunian"] .app {
+  grid-template-columns: var(--ln-side-w) minmax(400px, 1fr) var(--ln-right-w);
+  gap: var(--skin-pad);
+  padding: var(--skin-pad);
+}
+
+/* 宽屏空闲：右栏隐藏，收成两列（高特异性钉回，见项目皮肤栅格陷阱）。 */
+@media (min-width: 1241px) {
+  [data-skin="liunian"] body[data-stage-idle="1"] .app {
+    grid-template-columns: var(--ln-side-w) minmax(0, 1fr);
+  }
+}
+
+/* ============================ 左栏 ====================================== */
+
+[data-skin="liunian"] .rail {
+  border-radius: var(--skin-radius);
+  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 原导航项在流年骨架里没有位置（VMusic 左栏不是导航），整体隐藏；
+   子元素一并钉住，切走皮肤由 skin.liunian.js unmount 还原。 */
+[data-skin="liunian"] .rail-item,
+[data-skin="liunian"] .rail-spacer,
+[data-skin="liunian"] .rail-item svg,
+[data-skin="liunian"] .rail-item span {
+  display: none;
+}
+
+/* -- 搜索槽（.topsearch 由 JS 从顶栏移入） -- */
+
+[data-skin="liunian"] .ln-search {
+  flex: none;
+  margin-bottom: 10px;
+}
+
+[data-skin="liunian"] .ln-search .topsearch {
+  max-width: none;
+  width: 100%;
+  height: 36px;
+}
+
+/* -- 操作按钮：本地 / 云端导入 -- */
+
+[data-skin="liunian"] .ln-actions {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+[data-skin="liunian"] .ln-actions button {
+  flex: 1;
+  padding: 7px 0;
+  border-radius: 8px;
+  font-size: 12px;
+  font-family: var(--font-sans);
+  border: 1px solid var(--field-border);
+  background: var(--field-bg);
+  color: var(--text);
+  cursor: pointer;
+  transition: filter var(--dur-base) var(--ease-out),
+    background var(--dur-base) var(--ease-out);
+}
+
+[data-skin="liunian"] #ln-btn-local {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: transparent;
+}
+
+[data-skin="liunian"] #ln-btn-local:hover {
+  filter: brightness(1.1);
+}
+
+[data-skin="liunian"] .ln-actions button:hover {
+  background: var(--field-bg-hover);
+}
+
+[data-skin="liunian"] #ln-btn-local:hover {
+  background: var(--accent);
+}
+
+/* -- tabs：全部/专辑/歌手/歌单（VMusic 同款 tab 行） -- */
+
+[data-skin="liunian"] .ln-tabs {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+[data-skin="liunian"] .ln-tab {
+  flex: 1;
+  padding: 6px 2px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--font-sans);
+  white-space: nowrap;
+  transition: color var(--dur-base) var(--ease-out),
+    background var(--dur-base) var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-tab:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+[data-skin="liunian"] .ln-tab.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+[data-skin="liunian"] .ln-tab .count {
+  font-size: 10px;
+  margin-left: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* -- 列表区与槽位（流年新建结构） -- */
+
+[data-skin="liunian"] .ln-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+[data-skin="liunian"] .ln-slot {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+[data-skin="liunian"] .ln-slot.on {
+  display: flex;
+}
+
+[data-skin="liunian"] .ln-slot::-webkit-scrollbar {
+  width: 4px;
+}
+
+[data-skin="liunian"] .ln-slot::-webkit-scrollbar-thumb {
+  background: var(--field-border-strong);
+  border-radius: 2px;
+}
+
+/* --- 表头（窄栏里不需要，VMusic 列表无表头） ----------------------------- */
+
+[data-skin="liunian"] .lib-head,
+[data-skin="liunian"] .fav-head {
+  display: none;
+}
+
+/* --- 行容器节奏 ---------------------------------------------------------- */
+
+[data-skin="liunian"] .lib-list,
+[data-skin="liunian"] .q-list,
+[data-skin="liunian"] .fav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* --- 歌曲行：VMusic 列表行 = 纯文字行 ----------------------------------- */
+/* .fav-row / .online-row 与 .track 类同时存在（className='track fav-row'），
+   选择器显式列出三个别名（契约要求），规则对同一批元素等效。 */
+
+[data-skin="liunian"] .track,
+[data-skin="liunian"] .fav-row,
+[data-skin="liunian"] .online-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  background: transparent;
+}
+
+[data-skin="liunian"] .track .t-index,
+[data-skin="liunian"] .track .t-art,
+[data-skin="liunian"] .track .t-album,
+[data-skin="liunian"] .track .t-quality,
+[data-skin="liunian"] .track .t-dur,
+[data-skin="liunian"] .track .t-actions {
+  display: none;
+}
+
+[data-skin="liunian"] .track .t-main {
+  flex: 1;
+  min-width: 0;
+}
+
+[data-skin="liunian"] .track .t-title {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+[data-skin="liunian"] .track .t-sub {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-skin="liunian"] .track:hover {
+  background: var(--hover);
+}
+
+/* 正在播出行：VMusic = 沉金底 + 深字。 */
+[data-skin="liunian"] .track.active {
+  background: var(--accent);
+}
+
+[data-skin="liunian"] .track.active .t-title,
+[data-skin="liunian"] .track.active .t-sub {
+  color: var(--accent-ink);
+}
+
+/* --- 队列行：收成纯文字行 ------------------------------------------------ */
+
+[data-skin="liunian"] .q-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  background: transparent;
+}
+
+[data-skin="liunian"] .q-grip,
+[data-skin="liunian"] .q-num,
+[data-skin="liunian"] .q-dur,
+[data-skin="liunian"] .q-row > button {
+  display: none;
+}
+
+[data-skin="liunian"] .q-main {
+  flex: 1;
+  min-width: 0;
+}
+
+[data-skin="liunian"] .q-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-skin="liunian"] .q-sub {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-skin="liunian"] .q-row:hover {
+  background: var(--hover);
+}
+
+[data-skin="liunian"] .q-row.playing {
+  background: var(--accent);
+}
+
+[data-skin="liunian"] .q-row.playing .q-title,
+[data-skin="liunian"] .q-row.playing .q-sub {
+  color: var(--accent-ink);
+}
+
+/* --- 歌单行：收成纯文字行 ------------------------------------------------ */
+
+[data-skin="liunian"] .pl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  background: transparent;
+}
+
+[data-skin="liunian"] .pl-art,
+[data-skin="liunian"] .pl-row > .t-act {
+  display: none;
+}
+
+[data-skin="liunian"] .pl-main {
+  flex: 1;
+  min-width: 0;
+}
+
+[data-skin="liunian"] .pl-name {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-skin="liunian"] .pl-sub {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+[data-skin="liunian"] .pl-row:hover {
+  background: var(--hover);
+}
+
+/* pd-row（歌单详情内曲目行，在中栏）：只做行节奏微调。 */
+[data-skin="liunian"] .pd-row {
+  display: flex;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+/* --- 专辑/歌手分类卡片（JS 生成到 .ln-slot） ----------------------------- */
+
+[data-skin="liunian"] .ln-cat {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-cat:hover {
+  background: var(--hover);
+}
+
+[data-skin="liunian"] .ln-cat-cover {
+  width: 42px;
+  height: 42px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--field-bg) center / cover no-repeat;
+  border: 1px solid var(--field-border);
+}
+
+[data-skin="liunian"] .ln-cat.is-artist .ln-cat-cover {
+  border-radius: 50%;
+}
+
+[data-skin="liunian"] .ln-cat-info {
+  flex: 1;
+  min-width: 0;
+}
+
+[data-skin="liunian"] .ln-cat-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-skin="liunian"] .ln-cat-count {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* --- 底部：新建歌单（VMusic 虚线按钮，仅歌单 tab 显示） ------------------ */
+
+[data-skin="liunian"] .ln-footer {
+  flex: none;
+  padding-top: 10px;
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+[data-skin="liunian"] .ln-footer.is-hidden {
+  display: none;
+}
+
+[data-skin="liunian"] .ln-newpl {
+  width: 100%;
+  padding: 8px;
+  border: 1px dashed var(--field-border-strong);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--font-sans);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: color var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-newpl:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ============================ 中栏 ====================================== */
+
+[data-skin="liunian"] .column {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  border-radius: 0;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  gap: var(--skin-gap);
+}
+
+/* 视图无内边距（播放卡与内容都在 column 栅格节奏里）。 */
+[data-skin="liunian"] .view {
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+/* 工具行：去底边、收成一行。 */
+[data-skin="liunian"] .col-head {
+  padding: 2px 0 0;
+  border-bottom: 0;
+}
+
+[data-skin="liunian"] .col-head-left {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+[data-skin="liunian"] .col-title {
+  font-family: var(--font-serif);
+  font-size: var(--skin-title);
+  letter-spacing: 2px;
+}
+
+[data-skin="liunian"] .col-tools {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+[data-skin="liunian"] .set-row {
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+/* 在线结果列表节奏（节点流年态在左栏槽内）。 */
+[data-skin="liunian"] .online-body {
+  gap: 8px;
+}
+
+/* 每日推荐 / 设置分组保持玻璃卡，圆角略收。 */
+[data-skin="liunian"] .daily-strip {
+  padding: 16px;
+  border-radius: 14px;
+}
+
+[data-skin="liunian"] .daily-list {
+  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
+  gap: 14px;
+}
+
+[data-skin="liunian"] .set-group {
+  padding: 16px;
+  border-radius: 14px;
+  margin-bottom: 16px;
+}
+
+/* 中栏卡片网格，尺寸跟随。 */
+[data-skin="liunian"] .pl-grid,
+[data-skin="liunian"] .dv-body-card {
+  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
+  gap: 14px;
+}
+
+[data-skin="liunian"] .pl-card-art,
+[data-skin="liunian"] .dv-art {
+  border-radius: 12px;
+}
+
+/* ====================== 播放卡 .bar（文档流） =========================== */
+
+[data-skin="liunian"] .bar {
+  margin: 0;
+  padding: 16px 20px 14px;
+  border-radius: var(--skin-radius);
+  flex: none;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 行1：封面 + 曲目信息（JS 建 .bar-row1 包裹）。 */
+[data-skin="liunian"] .bar-row1 {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+/* 唱片在播放卡里变成 84px 方形封面：停旋转、去中心孔与外环。
+   选择器加 .bar-row1 提到 0,3,0，压过右栏节的 .disc-wrap{display:none}（0,2,0）；
+   display 必须显式写，否则封面被全局规则隐藏。 */
+[data-skin="liunian"] .bar .bar-row1 .disc-wrap {
+  display: grid;
+  width: 84px;
+  height: 84px;
+  margin: 0;
+  flex: none;
+}
+
+[data-skin="liunian"] .bar .disc {
+  border-radius: 14px;
+  animation: none;
+}
+
+[data-skin="liunian"] .bar .disc::after {
+  display: none;
+}
+
+[data-skin="liunian"] .bar .disc-ring {
+  display: none;
+}
+
+[data-skin="liunian"] .bar-track {
+  flex: 1;
+  min-width: 0;
+}
+
+[data-skin="liunian"] .bar-title {
+  font-size: 16px;
+  font-weight: 650;
+}
+
+[data-skin="liunian"] .bar-sub {
+  font-size: 12px;
+}
+
+/* 行2：进度条 + 时间。 */
+[data-skin="liunian"] .bar-progress {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+
+[data-skin="liunian"] .progress-wrap {
+  height: 6px;
+}
+
+[data-skin="liunian"] .bar-time {
+  font-size: 11px;
+}
+
+/* 行3：模式 / 上一首 / 播放 / 下一首 / 音量（JS 重排进 .bar-controls）。 */
+[data-skin="liunian"] .bar-controls {
+  gap: 12px;
+  justify-content: center;
+}
+
+[data-skin="liunian"] .bar-controls > #mode {
+  margin-right: 4px;
+}
+
+[data-skin="liunian"] .bar-controls > .bar-volume {
+  margin-left: 4px;
+}
+
+[data-skin="liunian"] .bar-volume .hint {
+  display: none;
+}
+
+[data-skin="liunian"] .bar-volume input[type="range"] {
+  width: 72px;
+}
+
+/* stop、空掉的 bar-right 不显示。 */
+[data-skin="liunian"] #stop,
+[data-skin="liunian"] .bar-right {
+  display: none;
+}
+
+[data-skin="liunian"] .ctrl {
+  width: 40px;
+  height: 40px;
+}
+
+[data-skin="liunian"] .ctrl-primary {
+  width: 52px;
+  height: 52px;
+}
+
+[data-skin="liunian"] .ctrl-primary svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* ============================ 右栏 ====================================== */
+
+[data-skin="liunian"] .stage {
+  border-radius: var(--skin-radius);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 频谱卡头部：VMusic 的 VOCAL PERFORMANCE 风格（小字大写字距）。 */
+[data-skin="liunian"] .stage-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 16px 6px;
+  min-height: 0;
+}
+
+[data-skin="liunian"] .stage-kicker {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+/* 模式切换/全屏/队列等按钮流年态不暴露（默认即频谱+歌词形态）。 */
+[data-skin="liunian"] .stage-modes,
+[data-skin="liunian"] .stage-head-fs,
+[data-skin="liunian"] .stage-queue,
+[data-skin="liunian"] .stage-tech {
+  display: none;
+}
+
+/* 唱片已移到播放卡；标题/艺术家/进度在右栏没有位置。 */
+[data-skin="liunian"] .disc-wrap,
+[data-skin="liunian"] .stage-title,
+[data-skin="liunian"] .stage-artist,
+[data-skin="liunian"] .stage-progress {
+  display: none;
+}
+
+/* 频谱：52px、两侧 16 内收（width:auto 防右溢）。 */
+[data-skin="liunian"] .spectrum {
+  width: auto;
+  height: 52px;
+  margin: 8px 16px 2px;
+  flex: none;
+}
+
+/* 频谱与歌词之间一根分隔线（VMusic 两卡贴合）。 */
+[data-skin="liunian"] .stage-lyrics {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px 16px;
+  margin: 0;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+}
+
+/* --- 浮层：圆角统一 ------------------------------------------------------ */
+
+[data-skin="liunian"] .np-card,
+[data-skin="liunian"] .menu,
+[data-skin="liunian"] .empty-card {
+  border-radius: 16px;
+}
+
+/* ==========================================================================
+   左栏折叠/展开
+   ========================================================================== */
+
+/* 顶部控制条与切换按钮 */
+[data-skin="liunian"] .ln-railbar {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+[data-skin="liunian"] .ln-collapse-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid var(--field-border);
+  background: var(--field-bg);
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--dur-base) var(--ease-out),
+    background var(--dur-base) var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-collapse-btn:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+[data-skin="liunian"] .ln-cb-glyph {
+  font-size: 14px;
+  line-height: 1;
+  font-family: var(--font-serif);
+}
+
+/* 栅格轨道过渡：折叠/展开全程 ≤240ms（给事件循环留余量，
+   transitionend 实测仍在 300ms 预算内）。 */
+[data-skin="liunian"] .app {
+  transition: grid-template-columns 0.24s var(--ease-out);
+}
+
+[data-skin="liunian"] .rail {
+  transition: width 0.24s var(--ease-out),
+    padding 0.24s var(--ease-out);
+}
+
+/* 收起态：第一轨收成 44px 窄条；同时钉死三子元素的轨道归属——
+   hover peek 时 .rail 变 fixed 离流，若轨道为 auto，grid 自动放置会把
+   .column 塞进 44px 第一轨→中栏塌缩（首轮 peek 实测缺陷）。 */
+[data-skin="liunian"] body.ln-rail-collapsed .app {
+  grid-template-columns: 44px minmax(400px, 1fr) var(--ln-right-w);
+}
+
+[data-skin="liunian"] body.ln-rail-collapsed > .app > .rail {
+  grid-column: 1;
+}
+
+[data-skin="liunian"] body.ln-rail-collapsed > .app > .column {
+  grid-column: 2;
+}
+
+[data-skin="liunian"] body.ln-rail-collapsed > .app > .stage {
+  grid-column: 3;
+}
+
+/* 收起态隐藏内容；railbar 按钮居中成为唯一入口 */
+[data-skin="liunian"] body.ln-rail-collapsed .ln-search,
+[data-skin="liunian"] body.ln-rail-collapsed .ln-actions,
+[data-skin="liunian"] body.ln-rail-collapsed .ln-tabs,
+[data-skin="liunian"] body.ln-rail-collapsed .ln-list,
+[data-skin="liunian"] body.ln-rail-collapsed .ln-footer {
+  display: none;
+}
+
+[data-skin="liunian"] body.ln-rail-collapsed .rail {
+  padding: 10px 6px;
+}
+
+[data-skin="liunian"] body.ln-rail-collapsed .ln-railbar {
+  justify-content: center;
+  margin-bottom: 0;
+}
+
+/* -- 悬停临时展开（peek）：窄条上 hover 浮出完整侧栏，移开即收回 ---------- */
+
+@media (min-width: 1001px) {
+  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover {
+    position: fixed;
+    top: var(--skin-pad);
+    left: var(--skin-pad);
+    bottom: var(--skin-pad);
+    width: var(--ln-side-w);
+    padding: 14px 12px;
+    z-index: 80;
+    box-shadow: var(--glass-shadow);
+  }
+
+  /* peek 时内容恢复（特异性高过收起态的 display:none）。 */
+  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-search,
+  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-footer {
+    display: block;
+  }
+
+  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-actions,
+  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-tabs,
+  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-list {
+    display: flex;
+  }
+
+  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-railbar {
+    justify-content: flex-end;
+    margin-bottom: 8px;
+  }
+}
+
+/* ≤1000：左栏已是 fixed 抽屉，折叠控制条隐藏（避免两套机制冲突）。 */
+@media (max-width: 1000px) {
+  [data-skin="liunian"] .ln-railbar {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+   设置页：滚动容器 + sticky 头部 + 返回按钮 + 视图入场动画
+   ========================================================================== */
+
+/* 滚动修复：设置内容为自然流，超出由视图自身滚动（.column 是 overflow:hidden，
+   没有内部滚动容器时内容被裁剪——此前任何主题下设置页都无法下滑）。 */
+[data-skin="liunian"] #view-settings {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 头部吸附：滚动时标题/返回始终可达；底色与模糊取 token，不写字面量。 */
+[data-skin="liunian"] #view-settings .col-head {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  padding: 10px 0 12px;
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* 返回按钮 */
+[data-skin="liunian"] .ln-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 30px;
+  margin-right: 10px;
+  border-radius: 999px;
+  border: 1px solid var(--field-border);
+  background: var(--field-bg);
+  color: var(--muted);
+  font-size: 12px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: color var(--dur-base) var(--ease-out),
+    background var(--dur-base) var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-back-btn:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+[data-skin="liunian"] .ln-back-glyph {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* 视图入场：打开/关闭（返回）均有 ≤260ms 的淡入上移动画；
+   display 从 none 恢复时动画自动播放，reduce-motion 由全局规则接管。 */
+[data-skin="liunian"] .view:not([hidden]) {
+  animation: ln-view-enter 0.24s cubic-bezier(0.2, 0.8, 0.25, 1);
+}
+
+@keyframes ln-view-enter {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ============================ 暗角 ====================================== */
+
+[data-skin="liunian"] body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  background: var(--liunian-vignette);
+}
+
+/* 窄屏左栏遮罩（由 skin.liunian.js 创建；底色取主题 token，不写字面量）。 */
+[data-skin="liunian"] #ln-left-scrim {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 65;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+
+[data-skin="liunian"] body.ln-left-open #ln-left-scrim {
+  display: block;
+}
+
+/* ============================ 响应式 ====================================
+   宽屏三栏；≤1240 右栏抽屉；≤1000 左栏抽屉化（品牌点击唤出）；
+   ≤620 播放卡/控制压缩。右栏抽屉的 transform 隐藏/滑入沿用基础样式，
+   这里只报几何。 */
+
+@media (max-width: 1240px) {
+  [data-skin="liunian"] .app {
+    grid-template-columns: 240px minmax(0, 1fr);
+    gap: 14px;
+    padding: 14px;
+  }
+
+  /* collapsed + 该断点：第一轨保持 44 窄条（同特异性组合规则钉回，
+     否则被上面 240 规则盖掉）。 */
+  [data-skin="liunian"] body.ln-rail-collapsed .app {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  /* peek 浮出位置跟随该断点 14px 外边距。 */
+  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover {
+    top: 14px;
+    left: 14px;
+    bottom: 14px;
+  }
+
+  [data-skin="liunian"] .stage {
+    top: 14px;
+    right: 14px;
+    bottom: calc(var(--bar-h) + 24px);
+    width: min(400px, 86vw);
+  }
+}
+
+/* 宽屏空闲 + collapsed：两列栅格的第一轨收成 44（idle 基础规则同特异性，
+   此组合规则后写且多一个类，钉住）。 */
+@media (min-width: 1241px) {
+  [data-skin="liunian"] body.ln-rail-collapsed[data-stage-idle="1"] .app {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1000px) {
+  /* 左栏抽屉化：默认藏在屏外，body.ln-left-open 时滑入。 */
+  [data-skin="liunian"] .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* collapsed 态的轨道钉死规则在单列下要解除：否则 column 被钉到第 2 轨、
+     落进隐式列导致整列不可见（collapsed 类跨断点残留的兜底）。 */
+  [data-skin="liunian"] body.ln-rail-collapsed > .app > .column {
+    grid-column: 1;
+  }
+
+  [data-skin="liunian"] .rail {
+    position: fixed;
+    top: 14px;
+    left: 14px;
+    bottom: 14px;
+    width: min(280px, 84vw);
+    z-index: 70;
+    transform: translateX(calc(-100% - 24px));
+    transition: transform 0.32s var(--ease);
+  }
+
+  [data-skin="liunian"] body.ln-left-open .rail {
+    transform: none;
+  }
+}
+
+@media (max-width: 900px) {
+  /* 播放卡压缩：封面 64（与基础封面规则同链路加 .bar-row1 才能生效）。 */
+  [data-skin="liunian"] .bar .bar-row1 .disc-wrap {
+    width: 64px;
+    height: 64px;
+  }
+
+  [data-skin="liunian"] .bar {
+    padding: 12px 14px;
+  }
+}
+
+@media (max-width: 620px) {
+  /* 传输行：隐音量，控制间距收紧。 */
+  [data-skin="liunian"] .bar-controls > .bar-volume {
+    display: none;
+  }
+
+  [data-skin="liunian"] .bar-controls {
+    gap: 8px;
+  }
+
+  [data-skin="liunian"] .ctrl {
+    width: 36px;
+    height: 36px;
+  }
+
+  [data-skin="liunian"] .ctrl-primary {
+    width: 46px;
+    height: 46px;
+  }
+
+  [data-skin="liunian"] .stage {
+    bottom: calc(72px + 18px);
+  }
+}

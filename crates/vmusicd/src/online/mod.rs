@@ -327,14 +327,17 @@ pub const SOURCES: &[SourceInfo] = &[
         cats: &[],
         supports_cookie: true,
         // 扫码走 QQ Connect 授权链（2026-09 真机验证 waiting 态返回正常）；
-        // Like 暂无平台实现（红心等价 dirid=201 加曲，待真机后补）；
-        // QQ 无每日歌曲推荐端点，不开 RecommendSongs。
+        // Like 暂无平台实现（红心等价 dirid=201 加曲，待真机后补）。
+        // RecommendSongs 走雷达端点（2026-09 真机验证，需登录态）：QQ 这条
+        // Web CGI 上没有叫"每日推荐"的端点，但 GetRadarSong 给的就是个性化
+        // 推荐歌曲，见 qq::recommend_songs 的注释。
         caps: &[
             Capability::CookieLogin,
             Capability::QrLogin,
             Capability::UserPlaylists,
             Capability::PlaylistDetail,
             Capability::PlaylistWrite,
+            Capability::RecommendSongs,
             Capability::RecommendPlaylists,
             Capability::HighQuality,
         ],
@@ -916,6 +919,8 @@ pub async fn recommend_songs(
     gate(source, Capability::RecommendSongs)?;
     match source {
         "netease" => netease::recommend_songs(ctx, offset, limit).await,
+        // QQ 走雷达端点（一次约 10 条，内部翻页凑够 limit），需登录态。
+        "qq" => qq::recommend_songs(ctx, offset, limit).await,
         // 酷狗端点无分页参数，上游一次给整页后本地切片；真机验收后摘开能力位。
         "kugou" => kugou::recommend_songs(ctx).await.map(|page| {
             page.tracks
@@ -1248,8 +1253,14 @@ mod tests {
                     | RecommendSongs
                     | RecommendPlaylists
             ) | (
+                // 每日推荐走雷达端点（qq::recommend_songs），2026-09 真机验证。
                 "qq",
-                QrLogin | UserPlaylists | PlaylistDetail | PlaylistWrite | RecommendPlaylists
+                QrLogin
+                    | UserPlaylists
+                    | PlaylistDetail
+                    | PlaylistWrite
+                    | RecommendSongs
+                    | RecommendPlaylists
             ) | (
                 "kugou",
                 QrLogin | UserPlaylists | PlaylistDetail | PlaylistWrite | RecommendSongs
@@ -1298,7 +1309,9 @@ mod tests {
                 Capability::HighQuality,
             ]
         );
-        // QQ：无红心/每日推荐实现；扫码走 QQ Connect 链（真机 confirmed 待验收）。
+        // QQ：无红心实现；扫码走 QQ Connect 链（真机 confirmed 待验收）。
+        // 每日推荐 2026-09 已真机验证：这条 Web CGI 上没有叫"每日推荐"的端点，
+        // 但 GetRadarSong（雷达）给的就是个性化推荐歌曲，故开 RecommendSongs。
         assert_eq!(
             caps_of("qq"),
             &[
@@ -1307,6 +1320,7 @@ mod tests {
                 Capability::UserPlaylists,
                 Capability::PlaylistDetail,
                 Capability::PlaylistWrite,
+                Capability::RecommendSongs,
                 Capability::RecommendPlaylists,
                 Capability::HighQuality,
             ]

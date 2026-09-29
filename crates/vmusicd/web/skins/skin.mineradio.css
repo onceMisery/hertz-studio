@@ -197,3 +197,68 @@
 [data-skin="mineradio"] .empty-card {
   border-radius: var(--skin-radius);
 }
+
+/* --- 响应式 --------------------------------------------------------------
+   基础样式 style.css 里有两套与栅格相关的规则会穿透到本皮肤，必须在这里显式
+   接回来，否则内容区会被挤窄：
+     1. 宽屏空闲态 body[data-stage-idle="1"] .app（特异性 0,2,1）把栅格改成
+        「86px + 1fr」两列；本皮肤 .rail/.stage 都是 fixed 脱流元素，栅格里
+        唯一在流的 .column 自动落进第一轨，整块内容被收成 86px 的窄条。
+     2. 窄屏媒体查询只改了 .stage 的 transform（抽屉），几何尺寸仍走本皮肤
+        的基础规则，舞台会停在 32vw 宽——手机上只剩一百多像素。 */
+
+/* 宽屏空闲：舞台收起时栅格也必须保持单列，.column 才能拿回全宽。
+   舞台本身的 display:none 仍由 style.css 的空闲规则负责，这里只管栅格。 */
+@media (min-width: 1241px) {
+  [data-skin="mineradio"] body[data-stage-idle="1"] .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 平板/手机：舞台按基础样式的抽屉方式隐藏与滑入（transform 规则不重写），
+   这里只把几何位置/宽度报成抽屉该有的值。 */
+@media (max-width: 1240px) {
+  [data-skin="mineradio"] .stage {
+    top: 12px;
+    right: 12px;
+    bottom: calc(var(--bar-h) + 24px);
+    width: min(420px, 88vw);
+    max-height: none;
+  }
+}
+
+/* 小屏：两侧留白收窄，给主要内容区让出空间；顶部仍保留胶囊导航的高度。 */
+@media (max-width: 900px) {
+  [data-skin="mineradio"] .app {
+    padding: 0 10px var(--skin-gap);
+  }
+  [data-skin="mineradio"] .view {
+    padding: 62px 12px 0;
+  }
+  [data-skin="mineradio"] .bar {
+    margin: 0 10px var(--skin-gap);
+  }
+}
+
+/* 手机：胶囊收成纯图标条并进一步压缩，内容贴到两侧 12px。 */
+@media (max-width: 620px) {
+  [data-skin="mineradio"] .app {
+    padding: 0 12px 12px;
+  }
+  [data-skin="mineradio"] .view {
+    padding: 56px 12px 0;
+  }
+  [data-skin="mineradio"] .bar {
+    margin: 0 10px 10px;
+  }
+  [data-skin="mineradio"] .rail {
+    top: calc(var(--topbar-h) + 8px);
+    padding: 4px 8px;
+  }
+  [data-skin="mineradio"] .rail-item {
+    padding: 8px 10px;
+  }
+  [data-skin="mineradio"] .stage {
+    padding: 16px;
+  }
+}

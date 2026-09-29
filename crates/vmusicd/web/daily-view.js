@@ -142,18 +142,44 @@
   // 播放：与首页推荐条共用同一条混合队列通道
   // ---------------------------------------------------------------------------
 
+  /// 入队用的 id。
+  ///
+  /// **在线曲目必须是 `virtual_id`**。`/v1/recommend/daily/online` 返回的每个
+  /// track 同时带着两个 id：`id` 是**平台裸 id**（2751951861），`virtual_id`
+  /// 才是服务端认得的 `online:netease:2751951861`。拿裸 id 去 /player/load，
+  /// 服务端只当本地曲目查库，回 `not_found` —— 表现就是"点了没反应/播放失败"。
+  /// 本地曲目没有 virtual_id，落到 `id` 即可。
+  ///
+  /// 顺序写成 `virtual_id || t.id` 而不是反过来：两个字段同时存在时，在线那
+  /// 一路必须赢。（契约脚本原来只造了带 virtual_id 的假数据，两个顺序都能过，
+  /// 这个坑在真实响应下才现形。）
+  function idOf(t) {
+    return t.virtual_id || t.id;
+  }
+
   function playIds() {
-    return items().map(function (t) { return t.id || t.virtual_id; })
-      .filter(function (id) { return !!id; });
+    return items().map(idOf).filter(function (id) { return !!id; });
   }
 
   /// 在线曲目要带一份元数据快照：服务端才认得 online:xxx 这种虚拟 id，
   /// 不注入的话历史记录里标题会退化成裸 id。
+  ///
+  /// 快照按服务端 `OnlineMetaSnap` 的形状给（title 必填，缺了整条 meta 会被
+  /// 反序列化拒掉、连累整次播放请求 400），所以整条 track 不能原样塞进去。
   function metaOf() {
     var meta = {};
     items().forEach(function (t) {
-      var id = t.id || t.virtual_id;
-      if (id && String(id).indexOf('online:') === 0) meta[id] = t;
+      var id = idOf(t);
+      if (!id || String(id).indexOf('online:') !== 0) return;
+      meta[id] = {
+        source: t.source || null,
+        onlineId: t.id || null,
+        title: t.title || '未知曲目',
+        artist: t.artist || null,
+        album: t.album || null,
+        cover: coverOf(t) || null,
+        duration_ms: t.duration_ms || null,
+      };
     });
     return meta;
   }

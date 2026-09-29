@@ -2660,7 +2660,7 @@ function setView(name) {
   if (name === 'settings') {
     if (window.__loadCacheStats) window.__loadCacheStats();
     if (window.__loadDspSettings) window.__loadDspSettings();
-    loadRemoteRoots();
+    if (window.__loadRemoteRoots) window.__loadRemoteRoots();
   }
 }
 
@@ -3686,6 +3686,9 @@ function initNowPlayingModal() {
       }
     } catch { /* 列表拉取失败不阻塞设置页 */ }
   }
+  // 与 __loadCacheStats / __loadDspSettings 同模式：setView 在本初始化函数
+  // 之外，拿不到嵌套的 loadRemoteRoots，挂到 window 上供其调用。
+  window.__loadRemoteRoots = loadRemoteRoots;
   if (ui.remoteAdd) {
     ui.remoteAdd.onclick = async () => {
       const body = {

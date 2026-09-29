@@ -1,0 +1,63 @@
+{
+  "code": 0,
+  "req": {
+    "code": 0,
+    "data": {
+      "BaseSongIds": [245716235, 202966961],
+      "HasMore": true,
+      "RecommendSongIds": [235166617, 275068770],
+      "TimeStamp": 1790660217526,
+      "VecSongs": [
+        {
+          "Abt": "",
+          "Ext": { "comment_num": "503", "fav_cnt": "30w+" },
+          "RadioRecTag": { "RecReasonTemplate": "", "RecReasons": [], "RecType": 40 },
+          "Trace": "ai_radar_feed_1_unify-dssm-recall_...",
+          "Track": {
+            "aid": 0,
+            "album": {
+              "id": 75246534,
+              "mid": "000liWDt1CeK6S",
+              "name": "只要有你",
+              "pmid": "000liWDt1CeK6S_1",
+              "subtitle": "",
+              "time_public": "2025-09-21",
+              "title": "只要有你"
+            },
+            "file": {
+              "media_mid": "0034Spf52pFWYE",
+              "size_128mp3": 3575002,
+              "size_320mp3": 8937210,
+              "size_flac": 47024580
+            },
+            "id": 605616835,
+            "interval": 223,
+            "mid": "0034Spf52pFWYE",
+            "name": "只要有你",
+            "pay": { "pay_play": 0 },
+            "singer": [
+              { "id": 12345, "mid": "001SoVbX3wXyZq", "name": "张三" },
+              { "id": 12346, "mid": "002SoVbX3wXyZq", "name": "李四" }
+            ],
+            "title": "只要有你"
+          }
+        },
+        {
+          "Track": {
+            "album": { "mid": "001liWDt1CeK6S", "name": "第二张", "pmid": "001liWDt1CeK6S_1" },
+            "file": { "media_mid": "0045Tqg63bGXZF", "size_128mp3": 2911000 },
+            "id": 605616836,
+            "interval": 195,
+            "mid": "0045Tqg63bGXZF",
+            "name": "第二首",
+            "pay": { "payplay": 1 },
+            "singer": [{ "name": "王五" }]
+          }
+        },
+        {
+          "Track": { "id": 605616837, "name": "没有 mid 的条目" }
+        }
+      ]
+    }
+  }
+}
