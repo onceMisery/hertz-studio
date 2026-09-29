@@ -289,10 +289,10 @@ impl ScanJob {
                     if let Some((data, media_type)) = cover {
                         // 用户替换过封面：跳过内嵌封面落盘，缓存里的用户封面
                         // 保持原样，has_cover 依旧成立。
-                        let cover_edited = vmusic_store::track_edits::is_cover_edited(
-                            &self.db, &track.id)
-                            .await
-                            .unwrap_or(false);
+                        let cover_edited =
+                            vmusic_store::track_edits::is_cover_edited(&self.db, &track.id)
+                                .await
+                                .unwrap_or(false);
                         if cover_edited {
                             track.has_cover = true;
                         } else {
@@ -309,10 +309,7 @@ impl ScanJob {
                     match vmusic_store::upsert_track(&self.db, &track).await {
                         Ok(()) => {
                             // ReplayGain 增益跟文件走：upsert 不含该列，单独落库。
-                            let _ = vmusic_store::set_track_rg(
-                                &self.db, &track.id, rg_gain,
-                            )
-                            .await;
+                            let _ = vmusic_store::set_track_rg(&self.db, &track.id, rg_gain).await;
                             let mut progress = self.progress.lock().await;
                             if updated {
                                 progress.updated += 1;
@@ -584,17 +581,23 @@ mod tests {
         async fn cleanup(self) {
             self.job.db.close().await;
             // SQLite/Windows can retain a transient file handle after shutdown.
-            for attempt in 0..20 {
+            //
+            // 清理失败不 panic：留在 %TEMP% 里的一个临时目录不会影响任何断言，
+            // 但把一次 sharing violation / 杀软扫描当成失败，会让 CI 偶发红。
+            // vmusic-store 那边同理收敛成了 crate::cleanup_dir()，这里只剩这一处。
+            let mut last = None;
+            for _ in 0..40 {
                 match std::fs::remove_dir_all(&self.base) {
                     Ok(()) => return,
-                    Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) && attempt < 19 => {
-                        tokio::time::sleep(Duration::from_millis(25)).await;
-                    }
-                    Err(error) => panic!(
-                        "fixture cleanup failed for {}: {error}",
-                        self.base.display()
-                    ),
+                    Err(e) => last = Some(e),
                 }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if let Some(e) = last {
+                eprintln!(
+                    "[test] 临时目录没删掉（不影响断言结果）：{}: {e}",
+                    self.base.display()
+                );
             }
         }
     }

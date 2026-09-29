@@ -41,6 +41,10 @@ jobs:
           node scripts/check-online-playlist-view.js
           node scripts/check-stage-control.js
           node scripts/check-stage-idle.js
+          # 换肤/换主题这类「刷新后还在吗」的失败在本地很难发现（没有报错、只有
+          # 观感回到默认），所以也进 CI：不依赖浏览器，纯 Node 沙箱跑真实模块。
+          node scripts/check-skins.js
+          node scripts/check-appearance-restore.js
 
       - name: Check formatting
         run: cargo fmt --all -- --check

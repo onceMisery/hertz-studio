@@ -30,13 +30,11 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<RemoteRoot>, StoreError> {
 }
 
 pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<RemoteRoot>, StoreError> {
-    sqlx::query_as(
-        "SELECT id, name, base_url, username, added_at FROM remote_roots WHERE id = ?1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| StoreError::Database(e.to_string()))
+    sqlx::query_as("SELECT id, name, base_url, username, added_at FROM remote_roots WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))
 }
 
 pub async fn create(
@@ -79,7 +77,9 @@ mod tests {
         let db = crate::open(&dir).await.unwrap();
         assert!(list(&db).await.unwrap().is_empty());
 
-        let created = create(&db, "家里 NAS", "https://nas.local/dav/", "user").await.unwrap();
+        let created = create(&db, "家里 NAS", "https://nas.local/dav/", "user")
+            .await
+            .unwrap();
         assert_eq!(created.base_url, "https://nas.local/dav", "尾斜杠归一");
 
         let all = list(&db).await.unwrap();
@@ -87,17 +87,12 @@ mod tests {
         assert_eq!(all[0].name, "家里 NAS");
 
         assert!(remove(&db, &created.id).await.unwrap());
-        assert!(!remove(&db, &created.id).await.unwrap(), "重复删除返回 false");
+        assert!(
+            !remove(&db, &created.id).await.unwrap(),
+            "重复删除返回 false"
+        );
         assert!(list(&db).await.unwrap().is_empty());
         db.close().await;
-        for attempt in 0..20 {
-            match std::fs::remove_dir_all(&dir) {
-                Ok(()) => break,
-                Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) && attempt < 19 => {
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-                Err(_) => panic!("fixture cleanup failed"),
-            }
-        }
+        crate::cleanup_dir(&dir);
     }
 }

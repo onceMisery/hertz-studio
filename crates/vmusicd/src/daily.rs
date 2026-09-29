@@ -89,11 +89,6 @@ pub struct DailyPage {
     pub tracks: Vec<DailyTrack>,
 }
 
-/// 生成今日推荐。
-pub async fn daily(db: &SqlitePool, limit: usize) -> ApiResult<DailyPage> {
-    daily_at(db, limit, None).await
-}
-
 /// 生成指定某天的推荐。
 ///
 /// 规则引擎本来就是「种子 = 天序号」的确定性出榜，所以回看某一天只是换一个
@@ -415,18 +410,26 @@ pub struct DailyOnlinePage {
     pub ready: Vec<String>,
 }
 
-/// 汇总今日的各平台每日推荐。
+/// 一个已派出但还没收回的在线抓取：`(音源 id, 音源名, 抓取任务)`。
 ///
-/// 一次遍历音源状态表：能取的并发去取，不能取的当场记进 `skipped`。所以
-/// 即便所有平台都没登录，这里也返回 200 + 空列表，而不是 401——前端想提示
-/// 登录自己看 `skipped` 里的 `not_signed_in`。
-pub async fn online_daily(ctx: &crate::online::Ctx, limit: usize) -> ApiResult<DailyOnlinePage> {
-    online_daily_at(ctx, limit, None).await
-}
+/// `JoinHandle` 上那两层 Result 各有含义：外层是任务本身 panic/被取消，
+/// 内层是超时——两者都要记成 `skipped`，但文案不同（异常退出 vs 响应超时），
+/// 所以这里不急着摊平，留到消费处再解。
+type PendingSource = (
+    String,
+    String,
+    tokio::task::JoinHandle<
+        Result<ApiResult<Vec<crate::online::OnlineTrack>>, tokio::time::error::Elapsed>,
+    >,
+);
 
-/// 指定某天的在线汇总。
+/// 汇总各平台的每日推荐。
 ///
-/// 各平台的「每日推荐」只有**今天**这一份，回看昨天既没有数据也没有意义。
+/// **遍历方式**：一次过一遍音源状态表——能取的并发去取，不能取的当场记进
+/// `skipped`。所以即便所有平台都没登录，这里也返回 200 + 空列表而不是 401，
+/// 前端想提示登录自己看 `skipped` 里的 `not_signed_in`。
+///
+/// **指定某天**：各平台的「每日推荐」只有**今天**这一份，回看昨天既没有数据
 /// 所以历史日期不去打上游——那是一轮必然空手而归的请求，白白等 8 秒超时——
 /// 而是把支持该能力的平台原样列进 `ready`、逐条记成 `history`。前端据此
 /// 说清"只能看当天"，而不是笼统的"这次没拿到"。
@@ -470,13 +473,7 @@ pub async fn online_daily_at(
 
     let mut skipped: Vec<DailyOnlineSkip> = Vec::new();
     let mut ready: Vec<String> = Vec::new();
-    let mut pending: Vec<(
-        String,
-        String,
-        tokio::task::JoinHandle<
-            Result<ApiResult<Vec<crate::online::OnlineTrack>>, tokio::time::error::Elapsed>,
-        >,
-    )> = Vec::new();
+    let mut pending: Vec<PendingSource> = Vec::new();
 
     for st in crate::online::daily_source_states(ctx).await {
         if !st.ready {
@@ -810,7 +807,10 @@ mod tests {
     fn online_merge_drops_cross_platform_duplicates() {
         let g = groups(&[("netease", "网易云音乐", 2), ("qq", "QQ音乐", 1)]);
         let b = vec![
-            vec![otrack("netease", "1", "Same", "Singer"), otrack("netease", "2", "A", "s")],
+            vec![
+                otrack("netease", "1", "Same", "Singer"),
+                otrack("netease", "2", "A", "s"),
+            ],
             // 标题+艺术家一致 → 判重，大小写与空格不算差异。
             vec![otrack("qq", "9", " same ", "SINGER")],
         ];

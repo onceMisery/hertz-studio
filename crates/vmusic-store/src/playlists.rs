@@ -81,10 +81,8 @@ pub async fn add_tracks(
     id: &PlaylistId,
     track_ids: &[TrackId],
 ) -> Result<(), StoreError> {
-    let entries: Vec<(TrackId, Option<TrackMeta>)> = track_ids
-        .iter()
-        .map(|tid| (tid.clone(), None))
-        .collect();
+    let entries: Vec<(TrackId, Option<TrackMeta>)> =
+        track_ids.iter().map(|tid| (tid.clone(), None)).collect();
     add_entries(pool, id, &entries).await
 }
 
@@ -161,31 +159,33 @@ type SnapshotRow = (
 
 pub async fn list_entries(pool: &SqlitePool, id: &PlaylistId) -> Result<Vec<Entry>, StoreError> {
     let rows: Vec<SnapshotRow> = sqlx::query_as(
-            "SELECT track_id, source, title, artist, album, duration_ms, cover
+        "SELECT track_id, source, title, artist, album, duration_ms, cover
              FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
-        )
-        .bind(id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| StoreError::Database(e.to_string()))?;
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
     Ok(rows
         .into_iter()
-        .map(|(track_id, source, title, artist, album, duration_ms, cover)| {
-            let meta = match (source, title) {
-                (Some(source), Some(title)) => Some(TrackMeta {
-                    source,
-                    title,
-                    artist,
-                    album,
-                    duration_ms,
-                    cover,
-                }),
-                // 有列没标题的行只可能来自外部改库：按无快照处理，读取端走
-                // 占位渲染，而不是拿半份快照拼出一行假数据。
-                _ => None,
-            };
-            Entry { track_id, meta }
-        })
+        .map(
+            |(track_id, source, title, artist, album, duration_ms, cover)| {
+                let meta = match (source, title) {
+                    (Some(source), Some(title)) => Some(TrackMeta {
+                        source,
+                        title,
+                        artist,
+                        album,
+                        duration_ms,
+                        cover,
+                    }),
+                    // 有列没标题的行只可能来自外部改库：按无快照处理，读取端走
+                    // 占位渲染，而不是拿半份快照拼出一行假数据。
+                    _ => None,
+                };
+                Entry { track_id, meta }
+            },
+        )
         .collect())
 }
 
@@ -295,21 +295,18 @@ mod tests {
             &pl.id,
             &[
                 ("local-uuid-1".into(), None),
-                (
-                    "online:netease:42".into(),
-                    online_meta("netease", "网歌"),
-                ),
-                (
-                    "online:qq:7".into(),
-                    online_meta("qq", "Q歌"),
-                ),
+                ("online:netease:42".into(), online_meta("netease", "网歌")),
+                ("online:qq:7".into(), online_meta("qq", "Q歌")),
             ],
         )
         .await
         .unwrap();
 
         let ids = crate::get_playlist_track_ids(&db, &pl.id).await.unwrap();
-        assert_eq!(ids, vec!["local-uuid-1", "online:netease:42", "online:qq:7"]);
+        assert_eq!(
+            ids,
+            vec!["local-uuid-1", "online:netease:42", "online:qq:7"]
+        );
 
         let entries = list_entries(&db, &pl.id).await.unwrap();
         assert_eq!(entries.len(), 3);
@@ -346,7 +343,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            crate::get_playlist_track_ids(&db, &pl.id).await.unwrap().len(),
+            crate::get_playlist_track_ids(&db, &pl.id)
+                .await
+                .unwrap()
+                .len(),
             1
         );
         assert_eq!(
@@ -378,14 +378,21 @@ mod tests {
         remove_track(&db, &pl.id, &"a".to_string()).await.unwrap();
         let entries = list_entries(&db, &pl.id).await.unwrap();
         assert_eq!(
-            entries.iter().map(|e| e.track_id.as_str()).collect::<Vec<_>>(),
+            entries
+                .iter()
+                .map(|e| e.track_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["online:netease:1", "c"]
         );
         assert!(entries[0].meta.is_some(), "移除中间行后快照不丢");
         // 重排以现有成员为全集：快照行与本地行一视同仁。
-        reorder(&db, &pl.id, &["c".to_string(), "online:netease:1".to_string()])
-            .await
-            .unwrap();
+        reorder(
+            &db,
+            &pl.id,
+            &["c".to_string(), "online:netease:1".to_string()],
+        )
+        .await
+        .unwrap();
         let reordered = list_entries(&db, &pl.id).await.unwrap();
         assert_eq!(reordered[0].track_id, "c".to_string());
         assert!(reordered[1].meta.is_some(), "重排不清洗快照列");
@@ -410,14 +417,6 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].meta.as_ref().unwrap().title, "网歌");
         db.close().await;
-        for attempt in 0..20 {
-            match std::fs::remove_dir_all(&dir) {
-                Ok(()) => break,
-                Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) && attempt < 19 => {
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-                Err(error) => panic!("fixture cleanup failed: {error}"),
-            }
-        }
+        crate::cleanup_dir(&dir);
     }
 }

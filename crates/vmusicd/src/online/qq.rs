@@ -23,6 +23,10 @@ const ANDROID_UA: &str = "QQMusic 14090508(android 12)";
 const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                           (KHTML, like Gecko) Chrome/122.0 Safari/537.36";
 const REFERER: &str = "https://y.qq.com/";
+/// 雷达推荐的翻页上限。上游一页只给 10 条左右，满量要翻几页；设上限是为了
+/// `HasMore` 恒为 true（或恒定返回重复批次）时，别把一次推荐变成十几轮串行
+/// 请求把整页拖慢——宁可少几首，也不要让用户多等十几秒。
+const RADAR_MAX_PAGES: usize = 4;
 
 fn internal_store(e: vmusic_core::StoreError) -> ApiError {
     ApiError::internal(format!("设置存储失败: {e}"))
@@ -1392,14 +1396,13 @@ pub async fn recommend_songs(
 ) -> ApiResult<Vec<OnlineTrack>> {
     let limit = limit.clamp(1, 100);
     let per_page = limit.clamp(1, 30);
-    let mut page = offset / per_page + 1;
+    let start_page = offset / per_page + 1;
     let http = client()?;
     let mut out: Vec<OnlineTrack> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // 上游一页只给 10 条左右，要满量得翻几页；翻页次数设上限，避免上游
-    // HasMore 恒为 true 时把一次推荐变成十几次串行请求拖慢整页。
-    for _ in 0..4 {
+    // 翻页是递增 Page 的简单续传，页码本身就在循环变量里，不需要额外记一份。
+    for page in (start_page..).take(RADAR_MAX_PAGES) {
         let body = json!({
             "comm": { "ct": 24, "cv": 0 },
             "req": {
@@ -1419,7 +1422,9 @@ pub async fn recommend_songs(
         }
         let songs = radar_tracks(&j);
         if songs.is_empty() {
-            return Err(ApiError::upstream_rejected("QQ 音乐未返回雷达推荐".to_string()));
+            return Err(ApiError::upstream_rejected(
+                "QQ 音乐未返回雷达推荐".to_string(),
+            ));
         }
         // 翻页之间会重复：上游按召回批次给，Page 递增时同一首可能再出现一次。
         for t in songs {
@@ -1433,7 +1438,6 @@ pub async fn recommend_songs(
         if j.pointer("/req/data/HasMore") != Some(&Value::Bool(true)) {
             break;
         }
-        page += 1;
     }
 
     out.truncate(limit);
@@ -2107,8 +2111,16 @@ mod tests {
         let http = client().expect("http client");
 
         let cands: [(&str, &str, Value); 6] = [
-            ("music.recommend.DailyRecommend", "GetDailyRecommend", json!({})),
-            ("music.recommend.RecommendSong", "get_recommend_song", json!({})),
+            (
+                "music.recommend.DailyRecommend",
+                "GetDailyRecommend",
+                json!({}),
+            ),
+            (
+                "music.recommend.RecommendSong",
+                "get_recommend_song",
+                json!({}),
+            ),
             (
                 "music.radioProxy.MbTrackRadioSvr",
                 "get_radio_track",
@@ -2145,7 +2157,10 @@ mod tests {
             });
             let mut h = crate::online::http::headers(Some(&pack.cookie), Some(REFERER));
             h.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_UA));
-            h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json;charset=UTF-8"));
+            h.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/json;charset=UTF-8"),
+            );
             let text = serde_json::to_string(&body).expect("serialize");
             match crate::online::http::post_json(&http, MUSICU, h, text).await {
                 Ok(j) => {
@@ -2166,8 +2181,14 @@ mod tests {
                         if page == 1 {
                             if let Some(first) = arr.first() {
                                 println!("  首条完整：");
-                                println!("{}", serde_json::to_string_pretty(first)
-                                    .unwrap_or_default().chars().take(3500).collect::<String>());
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(first)
+                                        .unwrap_or_default()
+                                        .chars()
+                                        .take(3500)
+                                        .collect::<String>()
+                                );
                             }
                         }
                     }
@@ -2197,13 +2218,19 @@ mod tests {
             });
             let mut h = crate::online::http::headers(Some(&pack.cookie), Some(REFERER));
             h.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_UA));
-            h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json;charset=UTF-8"));
+            h.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/json;charset=UTF-8"),
+            );
             let text = serde_json::to_string(&body).expect("serialize");
             let n = match crate::online::http::post_json(&http, MUSICU, h, text).await {
                 Ok(j) => format!(
                     "code={:?} tracks={}",
                     j.pointer("/req/code").and_then(val_string),
-                    j.pointer("/req/data/tracks").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0)
+                    j.pointer("/req/data/tracks")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0)
                 ),
                 Err(e) => format!("ERR {e:?}"),
             };
@@ -2218,7 +2245,10 @@ mod tests {
             });
             let mut h = crate::online::http::headers(Some(&pack.cookie), Some(REFERER));
             h.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_UA));
-            h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json;charset=UTF-8"));
+            h.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/json;charset=UTF-8"),
+            );
             let text = serde_json::to_string(&body).expect("serialize");
             match crate::online::http::post_json(&http, MUSICU, h, text).await {
                 Ok(j) => {
@@ -2239,8 +2269,7 @@ mod tests {
                         if let Some(arr) = j.pointer(path).and_then(|v| v.as_array()) {
                             println!("    {path} 共 {} 条，首条：", arr.len());
                             if let Some(first) = arr.first() {
-                                let s = serde_json::to_string_pretty(first)
-                                    .unwrap_or_default();
+                                let s = serde_json::to_string_pretty(first).unwrap_or_default();
                                 println!("{}", s.chars().take(1600).collect::<String>());
                             }
                         }

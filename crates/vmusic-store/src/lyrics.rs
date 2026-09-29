@@ -127,14 +127,6 @@ mod tests {
         assert_eq!(row.content, "[00:02.00]y");
         assert_eq!(row.offset_ms, -1200);
         db.close().await;
-        for attempt in 0..20 {
-            match std::fs::remove_dir_all(&dir) {
-                Ok(()) => break,
-                Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) && attempt < 19 => {
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-                Err(error) => panic!("fixture cleanup failed: {error}"),
-            }
-        }
+        crate::cleanup_dir(&dir);
     }
 }

@@ -264,8 +264,6 @@ fn track_selection(columns: &str, sort: TrackSort, filter_sql: &str) -> String {
     )
 }
 
-
-
 pub async fn list_tracks_sorted(
     pool: &SqlitePool,
     query: Option<&str>,
@@ -289,7 +287,10 @@ pub async fn list_tracks_filtered(
         "t.id, t.path, t.source, {TRACK_COALESCE_COLS}, t.duration_ms, t.bitrate,          t.sample_rate, t.channels, t.has_cover, t.cover_key, t.file_mtime, t.file_size, t.added_at"
     );
     let filter_sql = filter.sql(5);
-    let sql = format!("{} LIMIT ?3 OFFSET ?4", track_selection(&columns, sort, &filter_sql));
+    let sql = format!(
+        "{} LIMIT ?3 OFFSET ?4",
+        track_selection(&columns, sort, &filter_sql)
+    );
     let mut stmt = sqlx::query_as::<_, TrackRow>(&sql)
         .bind(query)
         .bind(format!("%{query}%"))
@@ -356,7 +357,9 @@ pub async fn count_tracks_filtered(
         "SELECT COUNT(*) AS n FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE (?1 = '' OR COALESCE(NULLIF(TRIM(e.title), ''), t.title) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.album), ''), t.album) LIKE ?2){}",
         filter.sql(3)
     );
-    let mut stmt = sqlx::query_as::<_, CountRow>(&sql).bind(query).bind(format!("%{query}%"));
+    let mut stmt = sqlx::query_as::<_, CountRow>(&sql)
+        .bind(query)
+        .bind(format!("%{query}%"));
     for bind in filter.binds() {
         stmt = stmt.bind(bind.clone());
     }
@@ -375,11 +378,13 @@ pub async fn list_track_facets(
     let column = match kind {
         "artist" => "artist",
         "album" => "album",
-        _ => return Err(StoreError::Database("facet kind must be artist or album".into())),
+        _ => {
+            return Err(StoreError::Database(
+                "facet kind must be artist or album".into(),
+            ))
+        }
     };
-    let shown = format!(
-        "COALESCE(NULLIF(TRIM(e.{column}), ''), t.{column})"
-    );
+    let shown = format!("COALESCE(NULLIF(TRIM(e.{column}), ''), t.{column})");
     let sql = format!(
         "SELECT {shown} AS name, COUNT(*) AS n          FROM tracks t LEFT JOIN track_edits e ON e.track_id = t.id          WHERE {shown} IS NOT NULL AND TRIM({shown}) <> ''          GROUP BY name ORDER BY n DESC, name COLLATE NOCASE"
     );
@@ -411,7 +416,11 @@ pub async fn delete_tracks(pool: &SqlitePool, ids: &[String]) -> Result<u64, Sto
 }
 
 /// 扫描读到的 ReplayGain 曲目增益（dB）。无标签传 NULL。
-pub async fn set_track_rg(pool: &SqlitePool, id: &TrackId, gain: Option<f64>) -> Result<(), StoreError> {
+pub async fn set_track_rg(
+    pool: &SqlitePool,
+    id: &TrackId,
+    gain: Option<f64>,
+) -> Result<(), StoreError> {
     sqlx::query("UPDATE tracks SET rg_gain = ?2 WHERE id = ?1")
         .bind(id)
         .bind(gain)
@@ -659,6 +668,31 @@ pub fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// 删掉测试留下的临时目录，**失败也不 panic**。
+///
+/// 清理不是被测行为：要断言的是 CRUD 的结果，删不掉目录只是在 `%TEMP%` 里
+/// 留一个临时库。Windows 上 SQLite 刚关闭的那几百毫秒里 `-wal` / `-shm` 常常
+/// 还没被放开（32/33 sharing violation），杀软扫一遍又会给 access denied(5)——
+/// 这些都是"再等等就删得掉"。把它们升级成 panic，等于把一次与被测逻辑无关的
+/// I/O 抖动变成红 CI；真删不掉时打到 stderr，谁看到谁来查。
+#[cfg(test)]
+pub(crate) fn cleanup_dir(dir: &std::path::Path) {
+    let mut last = None;
+    for _ in 0..40 {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return,
+            Err(e) => last = Some(e),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if let Some(e) = last {
+        eprintln!(
+            "[test] 临时目录没删掉（不影响断言结果）：{}: {e}",
+            dir.display()
+        );
+    }
 }
 
 #[cfg(test)]
