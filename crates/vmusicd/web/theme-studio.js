@@ -366,6 +366,27 @@
     };
   }
 
+  /// 把 state 里的三个颜色登记成一套主题。
+  ///
+  /// **不写存储、也不切换过去**：它的职责只是让 CUSTOM_ID 这套主题存在于
+  /// 目录里。用户点「应用」时由 applyCustom 接着 apply；启动时则由 restore
+  /// 调用它，好让 themes.js 记着的那个 id 有处可落——自定义主题是每次启动
+  /// 现登记的，漏掉这一步，"记住了选择"就等于白记。
+  function registerCustom() {
+    if (!window.Theme) return;
+    window.Theme.register({
+      id: CUSTOM_ID,
+      name: '自定义配色',
+      note: '自定义 · 底色 + 双强调色，文字色按 AA 反推',
+      tokens: tokensFor({
+        bg: state.bg,
+        accent: state.accent,
+        accent2: state.accent2,
+        highlight: state.accent2
+      })
+    });
+  }
+
   function registerAnimeThemes() {
     if (!window.Theme) return;
     ANIME_THEMES.forEach(function (spec) {
@@ -530,17 +551,23 @@
     } catch (e) { /* 隐私模式 */ }
   }
 
+  /// 把存过的观感读回来。
+  ///
+  /// 两段必须互不牵连：**没铺过壁纸不等于没调过配色**。早先这里读到壁纸为空
+  /// 就 `return`，于是"只改了自定义配色"的用户每次刷新都退回默认——那一次
+  /// 提前返回把下面整段都跳过了。
   function restore() {
     try {
       var raw = localStorage.getItem(WALL_KEY);
-      if (!raw) return;
-      var s = JSON.parse(raw);
-      if (s && typeof s === 'object') {
-        if (typeof s.id === 'string' && wallById(s.id)) state.id = s.id;
-        if (typeof s.opacity === 'number') state.opacity = clamp01(s.opacity);
-        if (typeof s.dim === 'number') state.dim = clamp01(s.dim);
-        if (typeof s.blur === 'number') state.blur = Math.max(0, Math.min(40, s.blur));
-        if (typeof s.auto === 'boolean') state.auto = s.auto;
+      if (raw) {
+        var s = JSON.parse(raw);
+        if (s && typeof s === 'object') {
+          if (typeof s.id === 'string' && wallById(s.id)) state.id = s.id;
+          if (typeof s.opacity === 'number') state.opacity = clamp01(s.opacity);
+          if (typeof s.dim === 'number') state.dim = clamp01(s.dim);
+          if (typeof s.blur === 'number') state.blur = Math.max(0, Math.min(40, s.blur));
+          if (typeof s.auto === 'boolean') state.auto = s.auto;
+        }
       }
     } catch (e) { /* 坏数据当没存过 */ }
 
@@ -552,6 +579,9 @@
           state.bg = c.bg;
           state.accent = c.accent;
           state.accent2 = c.accent2;
+          // 三个颜色还原出来还不算完：这套主题本身也得重新登记回去。
+          // 登记这一步若由 pending 机制接着 apply，用户上次选的就是它。
+          registerCustom();
         }
       }
     } catch (e) { /* 同上 */ }
@@ -618,17 +648,7 @@
       state.bg = rgb2hex(shrunk);
     }
 
-    window.Theme.register({
-      id: CUSTOM_ID,
-      name: '自定义配色',
-      note: '自定义 · 底色 + 双强调色，文字色按 AA 反推',
-      tokens: tokensFor({
-        bg: state.bg,
-        accent: state.accent,
-        accent2: state.accent2,
-        highlight: state.accent2
-      })
-    });
+    registerCustom();
     window.Theme.apply(CUSTOM_ID);
     try {
       localStorage.setItem(CUSTOM_KEY, JSON.stringify({
@@ -882,10 +902,9 @@
   }
 
   function init() {
-    restore();
-
-    // 换主题会改 --bg，压暗取的就是它，所以要重刷一遍壁纸层。主题选择由
-    // themes.js 与其它入口驱动，这里只订阅结果，不抢控制权。
+    // 订阅必须排在 restore 之前：restore 会把存过的自定义配色重新登记，而登记
+    // 一个"存储里正等着被兑现"的主题会当场触发 Theme.apply。订阅晚一步，这次
+    // 广播就没有听众，形态与壁纸层会因为收不到通知停在初始值上。
     if (window.Theme) {
       window.Theme.onChange(function (theme) {
         applySkin(theme && theme.id);
@@ -894,6 +913,8 @@
         syncControls();
       });
     }
+
+    restore();
 
     registerAnimeThemes();
     // 注册本身不广播（Theme.register 只改目录）。但顶栏菜单、设置页的

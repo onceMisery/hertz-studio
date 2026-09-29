@@ -340,6 +340,13 @@
 
   var current = null;
   var listeners = [];
+  /// 启动时想要、但那一刻还没登记进目录的主题 id。
+  ///
+  /// 目录不是一次性给出的：内置主题在这里，而二次元那七套与「自定义配色」由
+  /// ThemeStudio 在启动后半程 register 进来。于是用户选了后者时，存储的 id 在
+  /// init() 读回来的瞬间还不认识——就地兜底就等于"刷新后选择丢了"。这里把它
+  /// 记下来，等那套主题登记完成的那一刻再兑现（见 register）。
+  var pendingId = null;
 
   function root() { return document.documentElement; }
 
@@ -414,7 +421,14 @@
 
   function init() {
     var saved = readStored();
-    apply(byId.has(saved) ? saved : CATALOG[0].id, { silent: true });
+    if (byId.has(saved)) {
+      apply(saved, { silent: true });
+      return current;
+    }
+    // 不认识未必是数据坏了，也可能是这套主题还没登记上来（见 pendingId）。
+    // 注意这里不能回写：存储里那个 id 可能晚一步就变得有效了，抹掉它就真的丢了。
+    pendingId = saved || null;
+    apply(CATALOG[0].id, { silent: true });
     return current;
   }
 
@@ -440,6 +454,13 @@
       } else {
         CATALOG.push(entry);
         byId.set(entry.id, entry);
+      }
+      // 延迟兑现：之前存着的选择正是这套主题，现在它终于存在于目录里了。
+      // 用 silent 是因为存储已经是这个值，写回去只是重复；这一趟的目的是让
+      // 令牌真的落到 <html> 上，并把「主题变了」广播给已经订阅的人。
+      if (pendingId === entry.id) {
+        pendingId = null;
+        apply(entry.id, { silent: true });
       }
       return true;
     }

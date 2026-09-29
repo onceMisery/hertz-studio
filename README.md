@@ -327,6 +327,7 @@ mmusic-studio/
 │                             + check-favorites.js（收藏与每日推荐契约，零依赖）
 │                             + check-playlist-views.js（歌单三视图契约，零依赖）
 │                             + check-theme-studio.js（主题对比度与壁纸接线契约，零依赖）
+│                             + check-appearance-restore.js（换肤类选择的刷新恢复契约，零依赖）
 └── .github/workflows/       CI：fmt · clippy · test · smoke
 ```
 
@@ -345,7 +346,15 @@ node scripts/check-creative-prompt.js  # 提示词编译器契约：词典 / 冲
 node scripts/check-favorites.js    # 收藏与每日推荐契约：分页 / 播放意图 / 在线汇总的降级路径（零依赖）
 node scripts/check-playlist-views.js   # 歌单三视图：互斥显隐 / 持久化 / 同源同链路（零依赖）
 node scripts/check-theme-studio.js     # 主题工作室：WCAG 对比度 / 壁纸接线 / 自动压暗（零依赖）
+node scripts/check-appearance-restore.js  # 刷新恢复：皮肤 / 主题 / 形态 / 自定义配色改过之后都还在（零依赖）
 ```
+
+**换肤的验证边界**：这一类功能的失败没有报错、没有红字，只有「刷新后又变回去了」。
+常见成因不是忘了写 localStorage，而是**读回来的时机不对**：选择要指向的那套主题还没
+登记进目录（二次元七套与自定义配色都在启动后半程才 register），此刻读回来的 id 会被
+当成"不认识"静默忽略。`check-appearance-restore.js` 用真实模块跑一遍真实的启动序列
+（Skins.init → Theme.init → ThemeStudio.init），再用共享同一份 localStorage 的新沙箱
+模拟刷新，逐项断言「改过什么，刷新后就还在什么」。
 
 **每日推荐的验证边界**：多平台汇总跑在服务端（`crates/vmusicd/src/daily.rs`），
 但最容易坏的是前端的降级路径 —— 某个平台没登录、某个平台没有推荐接口、整条
