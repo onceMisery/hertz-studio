@@ -12,8 +12,8 @@ mod error;
 mod history;
 mod online;
 mod persist;
-mod routes;
 mod remote;
+mod routes;
 mod scan;
 mod secrets;
 mod stage_beats;
@@ -81,6 +81,8 @@ const STAGE_FREECAM_JS: &str = include_str!("../web/stage-freecam.js");
 const STAGE_FOCUS_JS: &str = include_str!("../web/stage-focus.js");
 // 沉浸式三维舞台：独占一个 WebGL2 上下文的全屏演出层，自带后处理链与舞台坞。
 const STAGE_LYRICS_JS: &str = include_str!("../web/stage-lyrics.js");
+// 沉浸式 3D 歌单架（封面流），移植自 openmusic GalaxyFloatingSongCard。
+const STAGE_SHELF_JS: &str = include_str!("../web/stage-shelf.js");
 const STAGE3D_JS: &str = include_str!("../web/stage3d.js");
 const STAGE3D_CSS: &str = include_str!("../web/stage3d.css");
 const STAGE_IMMERSIVE_JS: &str = include_str!("../web/stage-immersive.js");
@@ -219,7 +221,9 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default();
     // DSP 设置：EQ/响度归一化/交叉淡化，跨重启恢复。
     let dsp_config = crate::state::DspConfig::from_settings(
-        &vmusic_store::settings::get_all(&db).await.unwrap_or_default(),
+        &vmusic_store::settings::get_all(&db)
+            .await
+            .unwrap_or_default(),
     );
 
     let (events, _) = broadcast::channel(128);
@@ -309,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/stage-freecam.js", get(|| asset(JS, STAGE_FREECAM_JS)))
         .route("/stage-focus.js", get(|| asset(JS, STAGE_FOCUS_JS)))
         .route("/stage-lyrics.js", get(|| asset(JS, STAGE_LYRICS_JS)))
+        .route("/stage-shelf.js", get(|| asset(JS, STAGE_SHELF_JS)))
         .route("/stage3d.js", get(|| asset(JS, STAGE3D_JS)))
         .route("/stage-immersive.js", get(|| asset(JS, STAGE_IMMERSIVE_JS)))
         .route("/folia/folia-util.js", get(|| asset(JS, FOLIA_UTIL_JS)))
@@ -322,7 +327,10 @@ async fn main() -> anyhow::Result<()> {
             "/folia/folia-subtitle.js",
             get(|| asset(JS, FOLIA_SUBTITLE_JS)),
         )
-        .route("/folia/folia-classic.js", get(|| asset(JS, FOLIA_CLASSIC_JS)))
+        .route(
+            "/folia/folia-classic.js",
+            get(|| asset(JS, FOLIA_CLASSIC_JS)),
+        )
         .route(
             "/folia/folia-cadenza.js",
             get(|| asset(JS, FOLIA_CADENZA_JS)),
@@ -361,10 +369,7 @@ async fn main() -> anyhow::Result<()> {
             "/skins/skin.liunian.css",
             get(|| asset(CSS, SKIN_LIUNIAN_CSS)),
         )
-        .route(
-            "/skins/skin.liunian.js",
-            get(|| asset(JS, SKIN_LIUNIAN_JS)),
-        )
+        .route("/skins/skin.liunian.js", get(|| asset(JS, SKIN_LIUNIAN_JS)))
         .route("/wallpapers/{name}", get(wallpaper))
         .route(
             "/",
@@ -467,11 +472,7 @@ async fn wallpaper(Path(name): Path<String>) -> axum::response::Response {
             *bytes,
         )
             .into_response(),
-        None => (
-            axum::http::StatusCode::NOT_FOUND,
-            "no such wallpaper",
-        )
-            .into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, "no such wallpaper").into_response(),
     }
 }
 

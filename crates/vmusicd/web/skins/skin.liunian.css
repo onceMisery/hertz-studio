@@ -861,37 +861,9 @@
   margin-bottom: 0;
 }
 
-/* -- 悬停临时展开（peek）：窄条上 hover 浮出完整侧栏，移开即收回 ---------- */
-
-@media (min-width: 1001px) {
-  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover {
-    position: fixed;
-    top: var(--skin-pad);
-    left: var(--skin-pad);
-    bottom: var(--skin-pad);
-    width: var(--ln-side-w);
-    padding: 14px 12px;
-    z-index: 80;
-    box-shadow: var(--glass-shadow);
-  }
-
-  /* peek 时内容恢复（特异性高过收起态的 display:none）。 */
-  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-search,
-  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-footer {
-    display: block;
-  }
-
-  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-actions,
-  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-tabs,
-  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-list {
-    display: flex;
-  }
-
-  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover .ln-railbar {
-    justify-content: flex-end;
-    margin-bottom: 8px;
-  }
-}
+/* 收起态不做悬停 peek（需求变更）：鼠标滑过窄条不触发展开，
+   只能点击窄条上的「展开(»)」按钮（或 Ctrl+B）打开——
+   避免用户在边缘操作时侧栏意外弹出。 */
 
 /* ≤1000：左栏已是 fixed 抽屉，折叠控制条隐藏（避免两套机制冲突）。 */
 @media (max-width: 1000px) {

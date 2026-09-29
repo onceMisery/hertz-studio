@@ -1050,12 +1050,16 @@
     <div class="fl-lyric" id="s3d-fl-lyric"></div>
     <div class="fl-sub" id="s3d-fl-sub"></div>
   </div>
+  <!-- 3D 歌单架（封面流）：卡片由 stage-shelf.js 按队列生成，这里只留锚点 -->
+  <div class="s3d-shelf" id="s3d-shelf" aria-hidden="true"><div class="s3d-shelf-plane" id="s3d-shelf-plane"></div></div>
   <aside class="s3d-settings" id="s3d-settings" aria-label="舞台设置" hidden>
     <div class="s3d-settings-heading"><span>舞台设置</span><button class="s3d-btn" id="s3d-settings-close" aria-label="收起舞台设置"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
     <label for="s3d-layout">聆听布局</label>
     <select id="s3d-layout"><option value="focus">沉浸歌词</option><option value="sleeve">封面与歌词</option><option value="single">简洁单句</option></select>
     <label for="s3d-lyric-visual">歌词视觉</label>
     <select id="s3d-lyric-visual"><option value="stage">舞台 3D 歌词轨</option><option value="classic">流光歌词</option><option value="cadenza">心象歌词</option></select>
+    <label for="s3d-shelf-mode">3D 歌单架</label>
+    <select id="s3d-shelf-mode"><option value="stage">舞台封面流</option><option value="side">右侧歌单架</option><option value="off">关闭</option></select>
     <button class="btn s3d-workshop" id="s3d-workshop">进入创意工坊</button>
     <label for="s3d-reactivity">律动强度 <output id="s3d-reactivity-value">135%</output></label>
     <input id="s3d-reactivity" type="range" min="0" max="200" value="135">
@@ -1345,6 +1349,8 @@
 <script src="folia/folia-classic.js"></script>
 <script src="folia/folia-cadenza.js"></script>
 <script src="stage-lyrics.js"></script>
+<!-- 3D 歌单架（封面流）：只依赖 Stage 只读出口，必须排在 stage3d.js 之前 -->
+<script src="stage-shelf.js"></script>
 <script src="stage3d.js"></script>
 <script src="stage-immersive.js"></script>
 <script src="vendor/qrcode.js"></script>

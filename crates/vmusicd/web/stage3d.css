@@ -622,6 +622,87 @@ body.s3d-open > .bar { display: none; }
 .s3d-queue-row.playing .s3d-queue-num, .s3d-queue-row.playing .s3d-queue-title { color: var(--s3d-accent); }
 .s3d-queue-dur { flex: none; font: 10px ui-monospace, monospace; color: var(--s3d-muted); }
 .s3d-queue-empty { padding: 26px 8px; color: var(--s3d-muted); font-size: 12px; line-height: 1.8; text-align: center; }
+
+/* ===========================================================================
+   封面浮雕（data-scene=silk）：歌曲区域 = 贴右侧的竖向「歌单轨道」
+   上下滑动浏览完整歌单；从右缘滑入，260ms 到位。
+   =========================================================================== */
+
+.s3d[data-scene="silk"] .s3d-queue:not([hidden]) {
+  top: 88px;
+  right: 0;
+  bottom: 116px;                 /* 让开底部播放器 */
+  width: clamp(300px, 25vw, 372px);
+  max-height: none;
+  border-radius: 22px 0 0 22px;
+  border-right: 0;
+  padding: 14px 12px 14px 18px;
+  animation: s3d-queue-slide-in 0.26s cubic-bezier(.16,1,.3,1);
+}
+
+@keyframes s3d-queue-slide-in {
+  from { opacity: 0; transform: translateX(40px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 轨道头部：标题+计数 */
+.s3d[data-scene="silk"] .s3d-queue-head {
+  flex: none;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+}
+
+/* 列表：弹性占满、纯纵向滚动（触摸/touch 不与横向手势冲突） */
+.s3d[data-scene="silk"] .s3d-queue-list {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;                 /* Firefox 细滚动条 */
+  scrollbar-color: rgba(255,255,255,.18) transparent;
+  -webkit-overflow-scrolling: touch;     /* iOS 惯性滚动，滑动跟手不卡 */
+}
+
+/* WebKit 细滚动条：默认隐入，悬停列表时微显 */
+.s3d[data-scene="silk"] .s3d-queue-list::-webkit-scrollbar { width: 5px; }
+.s3d[data-scene="silk"] .s3d-queue-list::-webkit-scrollbar-thumb {
+  border-radius: 99px;
+  background: rgba(255,255,255,.12);
+}
+.s3d[data-scene="silk"] .s3d-queue-list::-webkit-scrollbar-track { background: transparent; }
+
+/* 行：整行可点（封面浮雕队列里行=歌曲），轻量 hover/按压反馈，
+   只用 transform/opacity，避免滚动中触发重排卡顿。 */
+.s3d[data-scene="silk"] .s3d-queue-row {
+  border-radius: 12px;
+  padding: 9px 10px;
+  transition: background .16s ease;
+}
+
+.s3d[data-scene="silk"] .s3d-queue-title {
+  font-size: 13px;
+}
+
+/* 当前播放行：强调色淡底，视觉层级清晰 */
+.s3d[data-scene="silk"] .s3d-queue-row.playing {
+  background: color-mix(in srgb, var(--s3d-accent) 13%, transparent);
+}
+
+.s3d[data-scene="silk"] .s3d-queue-row.playing .s3d-queue-num,
+.s3d[data-scene="silk"] .s3d-queue-row.playing .s3d-queue-title {
+  color: var(--s3d-accent);
+}
+
+/* 窄屏（手机）：轨道收窄到 86vw，贴边，头部下方到底部播放器 */
+@media (max-width: 760px) {
+  .s3d[data-scene="silk"] .s3d-queue:not([hidden]) {
+    top: 72px;
+    bottom: 96px;
+    width: 86vw;
+  }
+}
 .s3d-chrome .s3d-brand, .s3d-chrome .s3d-player { opacity: 1; }
 .s3d-chrome .s3d-player { pointer-events: auto; transform: translate(-50%,0); }
 .s3d-reduced *, .s3d-reduced *::before, .s3d-reduced *::after { animation: none !important; transition-duration: 0.01ms !important; }
@@ -763,3 +844,261 @@ body.s3d-open > .bar { display: none; }
 .s3d-playing .s3d-vinyl { animation-play-state: running; }
 @keyframes s3d-record-spin { to { rotate: 360deg; } }
 @media (max-width: 760px) { .ws-intro p { max-width: 25em; } }
+
+/* ---------------------------------------------------------------------------
+   3D 歌单架（封面流）—— 移植 openmusic GalaxyFloatingSongCard
+   容器自身 pointer-events:none，只有卡片接指针，空白处拖拽/滚轮穿透给
+   3D 画布手势。卡片 pose（位移/旋转/缩放/景深模糊）由 stage-shelf.js
+   逐帧写内联 transform；这里只管材质、排版、锚点与显隐。
+   --------------------------------------------------------------------------- */
+
+.s3d-shelf {
+  --s3d-sc-radius: clamp(12px, 1.5vw, 18px);
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  perspective: 1500px;
+  perspective-origin: 50% 46%;
+  opacity: 0;
+  transition: opacity 420ms cubic-bezier(.16,1,.3,1);
+}
+.s3d.s3d-shelf-on .s3d-shelf { opacity: 1; }
+.s3d.s3d-shelf-blocked .s3d-shelf { opacity: 0; transition-duration: 220ms; }
+.s3d-editing .s3d-shelf, .s3d.s3d-shelf-blocked .s3d-sc { pointer-events: none; }
+
+/* 零尺寸锚点：卡片以 translate(-50%,-50%) 绕锚点排布。
+   chrome（舞台坞/底播条）显隐时锚点平滑上下让行，避免卡片压在坞上。 */
+.s3d-shelf-plane {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(148px, 20vh, 224px);
+  width: 0;
+  height: 0;
+  transform-style: preserve-3d;
+  transition: bottom 420ms cubic-bezier(.16,1,.3,1), top 420ms cubic-bezier(.16,1,.3,1), right 420ms ease;
+}
+/* chrome 显示时整排抬到舞台坞之上：坞底 158px + 高约 50px，再留 12px 净距 */
+.s3d-chrome .s3d-shelf-plane { bottom: 318px; }
+.s3d-chrome[data-shelf-mode='side'] .s3d-shelf-plane { bottom: auto; }
+.s3d[data-shelf-mode='side'] .s3d-shelf {
+  perspective: 1250px;
+  perspective-origin: 82% 46%;
+}
+.s3d[data-shelf-mode='side'] .s3d-shelf-plane {
+  left: auto;
+  /* 卡片以 translate(-50%,-50%) 把中心钉在该锚点：
+     right 必须 = 卡半宽 + 右边距，当前卡才能完整落在屏内
+     （此前 -5vw 把整列推到屏外，约 70% 被裁切）。
+     卡宽 clamp(212px,22vw,320px)，故半宽 clamp(106,11vw,160)，+24px 净距。 */
+  right: calc(clamp(106px, 11vw, 160px) + 24px);
+  bottom: auto;
+  top: 45%;
+}
+
+.s3d-sc {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: clamp(212px, 22vw, 320px);
+  aspect-ratio: 2 / 1;
+  box-sizing: border-box;
+  display: flex;
+  gap: 5.5%;
+  padding: 2.6%;
+  border-radius: var(--s3d-sc-radius);
+  background:
+    linear-gradient(125deg, rgba(255,255,255,.085), rgba(255,255,255,.018) 52%, rgba(255,255,255,0) 70%),
+    rgba(7,10,12,.74);
+  border: 1px solid rgba(255,255,255,.13);
+  box-shadow: 0 26px 60px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.08);
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
+  backdrop-filter: blur(18px) saturate(1.25);
+  transform-style: preserve-3d;
+  will-change: transform, opacity, filter;
+  cursor: pointer;
+  font-size: clamp(10px, .82vw, 13.5px);
+  color: var(--s3d-text);
+  opacity: 0;
+  visibility: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: pan-y;
+}
+.s3d-sc:focus-visible { outline: 2px solid var(--s3d-accent); outline-offset: 3px; }
+
+.s3d-sc-sheen {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(112deg, rgba(255,255,255,.13), transparent 32% 64%, rgba(255,255,255,.05));
+}
+
+.s3d-sc-cover {
+  position: relative;
+  flex: none;
+  align-self: center;
+  height: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: calc(var(--s3d-sc-radius) * .72);
+  overflow: hidden;
+  background: rgba(0,0,0,.5);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.07);
+}
+.s3d-sc-cover img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transform: scale(1.04);
+  transition: opacity 700ms ease, transform 1.6s ease;
+}
+.s3d-sc-cover img.is-loaded { opacity: 1; transform: scale(1); }
+
+.s3d-sc-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 1.5% 1% 2%;
+}
+.s3d-sc-tag {
+  font-size: 1.05em;
+  font-weight: 700;
+  letter-spacing: .02em;
+  color: rgba(255,255,255,.9);
+}
+.s3d-sc-title {
+  margin-top: 2%;
+  font-size: 1.45em;
+  font-weight: 700;
+  line-height: 1.25;
+  color: rgba(255,255,255,.96);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.s3d-sc-sub {
+  margin-top: 1.5%;
+  font-size: .95em;
+  color: var(--s3d-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.s3d-sc-meta {
+  margin-top: auto;
+  padding-top: 2%;
+  font-size: .86em;
+  color: rgba(255,255,255,.4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.s3d-sc-progress {
+  position: absolute;
+  left: 59%;
+  right: 4%;
+  bottom: 4%;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255,255,255,.13);
+  opacity: 0;
+  transition: opacity 300ms ease;
+}
+.s3d-sc-progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--s3d-accent);
+  width: calc(30.6% + var(--p, 0) * 47% + var(--bass, 0) * 8.8%);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--s3d-accent) 55%, transparent);
+}
+
+/* 当前曲：accent 描边（宽度随鼓点呼吸）+ 低鼓辉光，角标/进度条点亮 */
+.s3d-sc.is-current {
+  border: var(--ring, 1.7px) solid color-mix(in srgb, var(--s3d-accent) 72%, transparent);
+  box-shadow:
+    0 26px 60px rgba(0,0,0,.42),
+    0 0 calc(14px + var(--bass, 0) * 22px) color-mix(in srgb, var(--s3d-accent) 28%, transparent),
+    inset 0 1px 0 rgba(255,255,255,.1);
+}
+.s3d-sc.is-current .s3d-sc-tag { color: var(--s3d-accent); }
+.s3d-sc.is-current .s3d-sc-progress { opacity: 1; }
+
+/* 非当前曲悬停：浮出「播放」提示 */
+.s3d-sc-hint {
+  position: absolute;
+  right: 4.5%;
+  top: 8%;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: .8em;
+  color: var(--s3d-text);
+  background: color-mix(in srgb, var(--s3d-accent) 26%, rgba(0,0,0,.5));
+  border: 1px solid color-mix(in srgb, var(--s3d-accent) 45%, transparent);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 220ms ease, transform 220ms ease;
+  pointer-events: none;
+}
+.s3d-sc:not(.is-current):hover .s3d-sc-hint { opacity: 1; transform: translateY(0); }
+
+/* ---------------------------------------------------------------------------
+   歌单架响应式：窄屏 / 竖屏缩小卡片并上抬避让底播条；超短高度整体收小
+   --------------------------------------------------------------------------- */
+
+@media (max-width: 1180px) {
+  .s3d-sc { width: clamp(196px, 26vw, 280px); font-size: clamp(9.5px, 1.1vw, 12.5px); }
+}
+
+@media (max-width: 980px) and (orientation: landscape) {
+  .s3d-shelf-plane { bottom: clamp(132px, 16vh, 180px); }
+  .s3d-sc { width: clamp(180px, 30vw, 238px); }
+  /* 侧架锚点：卡半宽 clamp(90,15vw,119) + 14px 净距，当前卡完整在屏 */
+  .s3d[data-shelf-mode='side'] .s3d-shelf-plane {
+    right: calc(clamp(90px, 15vw, 119px) + 14px);
+  }
+}
+
+@media (max-width: 760px) {
+  .s3d-shelf-plane { bottom: 214px; }
+  /* 窄屏舞台坞底 183px、卡半高约 78px，chrome 显示时抬到 308px 净空 */
+  .s3d-chrome .s3d-shelf-plane { bottom: 308px; }
+  .s3d-sc {
+    width: min(68vw, 248px);
+    font-size: 11px;
+    padding: 3%;
+    gap: 5%;
+  }
+  /* 竖屏：卡半宽 min(34vw,124) + 12px 净距，当前卡完整在右缘内侧 */
+  .s3d[data-shelf-mode='side'] .s3d-shelf-plane {
+    right: calc(min(34vw, 124px) + 12px);
+    top: 45%;
+  }
+  .s3d-sc-meta { display: none; }
+}
+
+@media (max-width: 760px) and (orientation: portrait) {
+  .s3d-shelf-plane { bottom: 226px; }
+  .s3d-sc { width: min(74vw, 260px); }
+}
+
+@media (max-height: 560px) {
+  .s3d-shelf-plane { bottom: 126px; }
+  .s3d-chrome .s3d-shelf-plane { bottom: 226px; }
+  .s3d-sc { width: clamp(170px, 20vw, 224px); font-size: 9.5px; }
+  .s3d-sc-sub, .s3d-sc-meta { display: none; }
+  .s3d[data-shelf-mode='side'] .s3d-shelf-plane { top: 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .s3d-shelf, .s3d-sc, .s3d-sc-cover img, .s3d-sc-hint, .s3d-sc-progress {
+    transition-duration: 0.01ms !important;
+  }
+}

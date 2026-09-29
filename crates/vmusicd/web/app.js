@@ -1121,6 +1121,36 @@ function onStageControl(e) {
       if (String(d.value).startsWith('online:')) { toast('在线曲目已失效，请从歌单或收藏重新点播', 'error'); break; }
       playTrack(String(d.value), state.queue.slice());
       break;
+    case 'shelf-play': {
+      // 3D 歌单架点卡跳播：本地曲直接走 playTrack；在线曲队列面板的
+      // queue-play 走不通（虚拟 id），用队列里缓存的整盘元数据重组一次
+      // Online.playAll，保持歌单架的队列顺序不塌。
+      const sid = String(d.value);
+      if (sid.startsWith('online:')) {
+        const metas = state.queue
+          .map((qid) => state.byId.get(qid) || (window.Online && window.Online.getMeta(qid)))
+          .filter(Boolean);
+        const idx = metas.findIndex((m) => m.id === sid);
+        if (idx < 0 || !window.Online || !window.Online.playAll) {
+          toast('该在线曲目暂不可跳播', 'error');
+          break;
+        }
+        const tracks = metas.map((m) => ({
+          id: m.onlineId || String(m.id).split(':').slice(2).join(':'),
+          source: m.source,
+          title: m.title,
+          artist: m.artist,
+          album: m.album,
+          duration_ms: m.duration_ms,
+          cover: m.cover,
+          ref: m.ref || {},
+        }));
+        window.Online.playAll(tracks, idx);
+      } else {
+        playTrack(sid, state.queue.slice());
+      }
+      break;
+    }
     case 'queue-remove':
       if (d.value === state.snapshot.track_id) { toast('正在播放的曲目不能移出队列', 'error'); break; }
       applyQueue(state.queue.filter((x) => x !== d.value), true);
@@ -1231,7 +1261,14 @@ function pushStageQueue() {
   Stage3D.setQueue(state.queue.map((id) => {
     const track = state.byId.get(id) || window.Online.getMeta(id)
       || { id, title: '未知曲目', artist: '', duration_ms: null };
-    return { id, title: track.title, artist: track.artist, duration: track.duration_ms, playing: id === state.snapshot.track_id };
+    // 3D 歌单架要预载封面做切歌交叉淡化：本地曲走封面接口，在线曲用音源封面。
+    let cover = null;
+    if (track.has_cover) cover = transport.coverUrl(id);
+    else if (window.Online && track.cover) cover = window.Online.safeCoverUrl(track.cover);
+    return {
+      id, title: track.title, artist: track.artist, album: track.album || '',
+      duration: track.duration_ms, cover, playing: id === state.snapshot.track_id,
+    };
   }));
 }
 
@@ -4012,8 +4049,9 @@ function initNowPlayingModal() {
     }, { root: ui.column.querySelector('#view-library') }).observe(ui.libSentinel);
   }
 
-  // 界面皮肤排在 initTheme() 之后：皮肤只写布局属性（data-skin + 启用对应
-  // CSS），配色仍由主题 token 决定，先定主题再定皮肤，两者互不干扰。
+  // 界面皮肤排在 initTheme() 之前：先定布局（data-skin + 启用对应 CSS），
+  // 再定配色（主题令牌），皮肤写的是布局属性，两者互不覆盖。
+  // 反过来会让第一帧先按默认布局排一遍，再被皮肤推倒重排。
   if (window.Skins) window.Skins.init();
   initTheme();
   // 主题工作室必须排在 initTheme() 之后：它第一件事就是往 Theme 里注册二次元

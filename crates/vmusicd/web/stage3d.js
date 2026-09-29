@@ -704,6 +704,10 @@
   var motion = 0.65, bloom = 0.80, showLyrics = true;
   var reactivity = 1.35;
   var queueData = [], queueOpen = false;
+  // 3D 歌单架（stage-shelf.js）：off/stage/side，默认舞台封面流。
+  // 默认「右侧竖向歌单架」：歌曲列表在屏幕右缘纵向排列上下滑动，
+  // 不再横向铺开（2026-09 需求变更）。
+  var shelf = null, shelfMode = 'side';
   var restoring = false;
   var pendingDt = 0;
   var returnFocus = null, backgroundNodes = [];
@@ -1798,6 +1802,11 @@
     if (gl && !contextLost) $('s3d-fallback').hidden = true;
     syncDock();
     syncNowPlaying();
+    // 封面浮雕：歌曲（歌单）区域以「右侧竖向滑动面板」常驻呈现——
+    // 上下滑动浏览完整队列，不再只显示中央封面卡。用户仍可手动收起。
+    if (def.id === 'silk' && !queueOpen && root.hasAttribute('data-s3d-ready')) {
+      setQueuePanel(true);
+    }
     markInteraction(1200);
     if (global.Stage && Stage.kick) Stage.kick();
     return true;
@@ -1814,6 +1823,7 @@
 
   function preferences() {
     return { scene: STAGES[stageIndex].id, motion: motion, bloom: bloom, reactivity: reactivity, lyrics: showLyrics, cruise: cam.cruise, layout: layout, lyricSize: lyricSize, lyricGlow: lyricGlow,
+      shelfMode: shelfMode,
       foliaVisual: folia.visual,
       foliaBg: folia.bgMode, foliaBgOpacity: folia.bgOpacity, foliaVignette: folia.vignette,
       foliaSubtitle: folia.subtitle, classicTuning: folia.classicTuning, cadenzaTuning: folia.cadenzaTuning };
@@ -1839,6 +1849,12 @@
       if (value.foliaVisual === 'stage' || value.foliaVisual === 'classic' || value.foliaVisual === 'cadenza') folia.visual = value.foliaVisual;
       if (typeof value.lyricSize === 'number') lyricSize = clamp(value.lyricSize, 0.7, 1.5);
       if (typeof value.lyricGlow === 'number') lyricGlow = clamp(value.lyricGlow, 0, 1);
+      if (value.shelfMode === 'off' || value.shelfMode === 'stage' || value.shelfMode === 'side') {
+        shelfMode = value.shelfMode;
+        if (shelf) shelf.setMode(shelfMode);
+        var shelfSel = $('s3d-shelf-mode');
+        if (shelfSel) shelfSel.value = shelfMode;
+      }
       if (value.foliaBg === 'stage' || value.foliaBg === 'geometric' || value.foliaBg === 'fluid' || value.foliaBg === 'solid') folia.bgMode = value.foliaBg;
       if (typeof value.foliaBgOpacity === 'number') folia.bgOpacity = clamp(value.foliaBgOpacity, 0, 1);
       if (typeof value.foliaVignette === 'boolean') folia.vignette = value.foliaVignette;
@@ -1884,6 +1900,7 @@
     $('s3d-settings').hidden = !on;
     $('s3d-settings-toggle').setAttribute('aria-expanded', String(on));
     if (on && queueOpen) setQueuePanel(false);
+    if (shelf) shelf.setBlocked(!!on || queueOpen);
     pokeChrome();
     if (on) $('s3d-motion').focus();
   }
@@ -1896,6 +1913,8 @@
     $('s3d-queue-panel').hidden = !on;
     $('s3d-queue').setAttribute('aria-expanded', String(on));
     if (on && !$('s3d-settings').hidden) setSettings(false);
+    // 队列面板与歌单架是同一信息的两种形态，面板展开时把架子让出去。
+    if (shelf) shelf.setBlocked(queueOpen || !$('s3d-settings').hidden);
     pokeChrome();
     if (on) {
       renderQueuePanel();
@@ -1942,6 +1961,8 @@
   function setQueue(list) {
     queueData = Array.isArray(list) ? list : [];
     if (queueOpen) renderQueuePanel();
+    // 3D 歌单架消费同一份队列（含封面 URL），切歌交叉淡化与封面流由它自管。
+    if (shelf) shelf.setItems(queueData);
   }
 
   function toggleLyrics() {
@@ -2264,6 +2285,7 @@
     // active 已置位：若恢复的布局是平面，这里才真正创建 folia 实例。
     syncLayout();
     syncNowPlaying();
+    if (shelf) { shelf.setItems(queueData); shelf.setBlocked(false); shelf.show(); }
     syncFsUi();
     pokeChrome();
     if (global.Stage && Stage.kick) Stage.kick();
@@ -2289,6 +2311,7 @@
     queueOpen = false;
     $('s3d-queue-panel').hidden = true;
     $('s3d-queue').setAttribute('aria-expanded', 'false');
+    if (shelf) shelf.hide();
     pointers = {}; pointerCount = 0; dragging = false; seeking = false;
     root.classList.remove('s3d-dragging');
     if (wdTimer) { clearInterval(wdTimer); wdTimer = 0; }
@@ -2543,6 +2566,11 @@
     $('s3d-cover-toggle').addEventListener('click', toggleLayout);
     $('s3d-sleeve-image').addEventListener('error', function () { this.hidden = true; });
     $('s3d-layout').addEventListener('change', function () { layout = this.value; syncLayout(); savePreferences(); });
+    $('s3d-shelf-mode').addEventListener('change', function () {
+      shelfMode = this.value === 'off' || this.value === 'side' ? this.value : 'stage';
+      if (shelf) shelf.setMode(shelfMode);
+      savePreferences();
+    });
     $('s3d-workshop').addEventListener('click', function () { setSettings(false); if (global.Workshop) Workshop.open(); });
     root.addEventListener('focusin', pokeChrome);
     root.addEventListener('focusout', pokeChrome);
@@ -2618,6 +2646,11 @@
     inited = true;
 
     if (global.StageLyrics) lyricView = StageLyrics.init($('s3d-reading'), function (ms) { control('seek', ms); });
+    // 3D 歌单架：与舞台同生命周期，gate 自注册；不存在（脚本加载失败）时静默降级。
+    if (global.StageShelf && !shelf) {
+      shelf = StageShelf.init(root);
+      if (shelf) shelf.setMode(shelfMode);
+    }
     syncLayout();
     readTint();
     buildDock();
@@ -2636,6 +2669,9 @@
     window.addEventListener('resize', onViewportResize);
     document.addEventListener('visibilitychange', onVisibilityChange);
     if (global.Onset && Onset.create) onset = Onset.create({});
+    root.setAttribute('data-s3d-ready', '1');
+    // 若启动恢复的场景就是封面浮雕，init 末尾补开右侧歌曲列表面板。
+    if (STAGES[stageIndex].id === 'silk' && !queueOpen) setQueuePanel(true);
     return api;
   }
 
@@ -2663,6 +2699,7 @@
 
   function destroy() {
     close();
+    if (shelf) { shelf.destroy(); shelf = null; }
     if (lyricView) lyricView.destroy();
     lyricView = null;
     if (folia.ready) {
