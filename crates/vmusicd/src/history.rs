@@ -201,11 +201,15 @@ mod tests {
         upsert(&pool, local).await.unwrap();
 
         // 来源筛选
-        let (items, total) = list_filtered(&pool, None, Some("netease"), 50, 0).await.unwrap();
+        let (items, total) = list_filtered(&pool, None, Some("netease"), 50, 0)
+            .await
+            .unwrap();
         assert_eq!((items.len(), total), (1, 1));
         assert_eq!(items[0].source, "netease");
         // 搜索命中标题
-        let (_, total) = list_filtered(&pool, Some("本地"), None, 50, 0).await.unwrap();
+        let (_, total) = list_filtered(&pool, Some("本地"), None, 50, 0)
+            .await
+            .unwrap();
         assert_eq!(total, 1);
         // 分页：limit 1 offset 1 取第二新的
         let (items, total) = list_filtered(&pool, None, None, 1, 1).await.unwrap();
@@ -219,7 +223,14 @@ mod tests {
         upsert(&pool, entry(9)).await.unwrap();
         let items = list_filtered(&pool, None, None, 10, 0).await.unwrap().0;
         assert_eq!(remove(&pool, items[0].id).await.unwrap(), 1);
-        assert_eq!(list_filtered(&pool, None, None, 10, 0).await.unwrap().0.len(), 0);
+        assert_eq!(
+            list_filtered(&pool, None, None, 10, 0)
+                .await
+                .unwrap()
+                .0
+                .len(),
+            0
+        );
         upsert(&pool, entry(8)).await.unwrap();
         assert!(clear(&pool).await.unwrap() >= 1);
     }

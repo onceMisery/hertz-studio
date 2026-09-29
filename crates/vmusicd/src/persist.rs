@@ -134,4 +134,3 @@ mod tests {
         assert_eq!(parse_mode(None, PlayMode::RepeatOne), PlayMode::RepeatOne);
     }
 }
-

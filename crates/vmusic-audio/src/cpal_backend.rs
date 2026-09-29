@@ -350,10 +350,7 @@ impl CpalBackend {
         self.tail_armed = false;
         self.shared.reset_fade_shared();
         if play_after {
-            let cf = self
-                .shared
-                .crossfade_ms
-                .load(Ordering::Relaxed);
+            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
             self.shared
                 .arm_fade(1.0, if cf == 0 { FADE_IN_MS } else { cf }, self.device_rate);
             self.shared.playing.store(true, Ordering::Relaxed);
@@ -465,10 +462,7 @@ impl CpalBackend {
             self.shared.flag_decode_error();
         }
         if was_playing {
-            let cf = self
-                .shared
-                .crossfade_ms
-                .load(Ordering::Relaxed);
+            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
             self.shared
                 .arm_fade(1.0, if cf == 0 { FADE_IN_MS } else { cf }, self.device_rate);
         }
@@ -570,7 +564,8 @@ impl BiQuad {
     /// Direct Form I；中性段（增益 0）系数退化为恒等，计算量可忽略。
     #[inline]
     fn process(&mut self, x: f64) -> f64 {
-        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
             - self.a2 * self.y2;
         self.x2 = self.x1;
         self.x1 = x;
@@ -614,7 +609,11 @@ impl EqBank {
                 arr
             })
             .collect();
-        Self { rate, gains, states }
+        Self {
+            rate,
+            gains,
+            states,
+        }
     }
 
     fn matches(&self, rate: u32, gains: &[f32; 6], channels: usize) -> bool {
@@ -694,7 +693,10 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
     }
     let mut bank_guard = shared.filters.try_lock().ok();
     if let Some(bank) = bank_guard.as_mut() {
-        if !bank.as_ref().is_some_and(|b| b.matches(rate, &eq_gains, channels)) {
+        if !bank
+            .as_ref()
+            .is_some_and(|b| b.matches(rate, &eq_gains, channels))
+        {
             **bank = Some(EqBank::new(rate, eq_gains, channels));
         }
     }
@@ -847,10 +849,7 @@ impl AudioBackend for CpalBackend {
             || f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed)) < 0.999
         {
             // 从淡出中点或零增益恢复也走淡入，不硬拉满。
-            let cf = self
-                .shared
-                .crossfade_ms
-                .load(Ordering::Relaxed);
+            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
             self.shared
                 .arm_fade(1.0, if cf == 0 { FADE_IN_MS } else { cf }, self.device_rate);
         }
@@ -931,11 +930,11 @@ impl AudioBackend for CpalBackend {
 
     fn set_dsp(&mut self, params: vmusic_core::DspParams) -> Result<(), AudioError> {
         for (i, g) in params.eq_gains_db.iter().enumerate() {
-            self.shared.eq_gains[i]
-                .store(g.clamp(-12.0, 12.0).to_bits(), Ordering::Relaxed);
+            self.shared.eq_gains[i].store(g.clamp(-12.0, 12.0).to_bits(), Ordering::Relaxed);
         }
         // 增益上限 +18 dB：RG 归一化补偿合理范围；限幅器在链尾兜底。
-        let total_db = params.preamp_db.clamp(-24.0, 12.0) + params.track_gain_db.clamp(-24.0, 12.0);
+        let total_db =
+            params.preamp_db.clamp(-24.0, 12.0) + params.track_gain_db.clamp(-24.0, 12.0);
         self.shared
             .dsp_gain_db
             .store(total_db.clamp(-24.0, 18.0).to_bits(), Ordering::Relaxed);
@@ -943,7 +942,9 @@ impl AudioBackend for CpalBackend {
     }
 
     fn set_crossfade(&mut self, ms: u64) -> Result<(), AudioError> {
-        self.shared.crossfade_ms.store(ms.min(8000), Ordering::Relaxed);
+        self.shared
+            .crossfade_ms
+            .store(ms.min(8000), Ordering::Relaxed);
         Ok(())
     }
 
@@ -1619,7 +1620,10 @@ mod dsp_tests {
         assert_eq!(soft_limit(0.5, 0.98), 0.5);
         assert_eq!(soft_limit(-0.5, 0.98), -0.5);
         let loud = soft_limit(1.5, 0.98);
-        assert!(loud > 0.98 && loud <= 1.0, "soft clip must stay bounded: {loud}");
+        assert!(
+            loud > 0.98 && loud <= 1.0,
+            "soft clip must stay bounded: {loud}"
+        );
         let neg = soft_limit(-1.5, 0.98);
         assert!((-1.0..=-0.98).contains(&neg));
         assert_eq!(soft_limit(2.5, 0.98), 1.0);

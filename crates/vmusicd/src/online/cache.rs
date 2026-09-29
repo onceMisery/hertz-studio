@@ -236,9 +236,7 @@ mod tests_clear {
     async fn stats_and_clear_respect_protected_and_source_filter() {
         let dir = std::env::temp_dir().join(format!("vmusic-cache-clr-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).await.unwrap();
-        let make = |name: &str, size: usize| {
-            fs::write(dir.join(name), vec![0u8; size])
-        };
+        let make = |name: &str, size: usize| fs::write(dir.join(name), vec![0u8; size]);
         make("netease-1-standard.mp3", 100).await.unwrap();
         make("netease-2-higher.mp3", 200).await.unwrap();
         make("qq-9-standard.mp3", 50).await.unwrap();

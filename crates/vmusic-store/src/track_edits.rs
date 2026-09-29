@@ -186,9 +186,16 @@ mod tests {
             .unwrap();
 
         // 只改专辑：title/artist 覆盖行保持 NULL，读取端回到扫描值。
-        apply(&db, "t1", &EditInput { album: Some("我的专辑".into()), ..Default::default() })
-            .await
-            .unwrap();
+        apply(
+            &db,
+            "t1",
+            &EditInput {
+                album: Some("我的专辑".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let edit = get(&db, "t1").await.unwrap().unwrap();
         assert_eq!(edit.album.as_deref(), Some("我的专辑"));
         assert!(edit.title.is_none() && edit.artist.is_none());
@@ -199,9 +206,16 @@ mod tests {
         assert_eq!(read.album.as_deref(), Some("我的专辑"));
 
         // 再改歌手为空白：读取端归一成「没改过」，回退扫描值；专辑不动。
-        apply(&db, "t1", &EditInput { artist: Some("  ".into()), ..Default::default() })
-            .await
-            .unwrap();
+        apply(
+            &db,
+            "t1",
+            &EditInput {
+                artist: Some("  ".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let read = get_track(&db, &"t1".to_string()).await.unwrap().unwrap();
         assert_eq!(
             read.artist.as_deref(),
@@ -215,16 +229,24 @@ mod tests {
     #[tokio::test]
     async fn rescan_does_not_wipe_user_edits() {
         let db = pool().await;
-        upsert_track(&db, &track("t2", "旧名", Some("旧歌手"))).await.unwrap();
-        apply(&db, "t2", &EditInput {
-            title: Some("用户名".into()),
-            artist: Some("用户歌手".into()),
-            album: None,
-        })
+        upsert_track(&db, &track("t2", "旧名", Some("旧歌手")))
+            .await
+            .unwrap();
+        apply(
+            &db,
+            "t2",
+            &EditInput {
+                title: Some("用户名".into()),
+                artist: Some("用户歌手".into()),
+                album: None,
+            },
+        )
         .await
         .unwrap();
         // 重扫：同一 id 重新写入文件标签。
-        upsert_track(&db, &track("t2", "文件新名", Some("文件歌手"))).await.unwrap();
+        upsert_track(&db, &track("t2", "文件新名", Some("文件歌手")))
+            .await
+            .unwrap();
         let read = get_track(&db, &"t2".to_string()).await.unwrap().unwrap();
         assert_eq!(read.title, "用户名", "重扫后用户编辑必须保留");
         assert_eq!(read.artist.as_deref(), Some("用户歌手"));
@@ -247,7 +269,10 @@ mod tests {
         apply_batch(
             &db,
             &["a".into(), "b".into()],
-            &EditInput { artist: Some("合辑歌手".into()), ..Default::default() },
+            &EditInput {
+                artist: Some("合辑歌手".into()),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();

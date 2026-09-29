@@ -14,7 +14,7 @@
 
 use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::{Arc};
+use std::sync::Arc;
 
 /// 一个远程目录条目。
 #[derive(Debug, Clone, Serialize)]
@@ -151,7 +151,10 @@ fn extract_tag_value(segment: &str, name: &str) -> Option<String> {
         let tag = tag.strip_suffix('/').unwrap_or(tag).trim();
         let local = tag.split(':').next_back().unwrap_or("").trim();
         if local == name && !tag.starts_with('/') {
-            let value_end = segment[end + 1..].find('<').map(|p| end + 1 + p).unwrap_or(segment.len());
+            let value_end = segment[end + 1..]
+                .find('<')
+                .map(|p| end + 1 + p)
+                .unwrap_or(segment.len());
             let value = segment[end + 1..value_end].trim();
             // 容忍值里的 XML 实体（href 里主要是 &amp;）。
             return Some(
@@ -323,7 +326,6 @@ impl HttpRangeStream {
             pos: 0,
         })
     }
-
 }
 
 impl Read for HttpRangeStream {

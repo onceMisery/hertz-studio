@@ -139,13 +139,17 @@ pub fn set_backend_for_tests(b: std::sync::Arc<dyn SecretBackend>) {
 /// 进程级后端单例。`VMUSIC_SECRETS=memory` 是显式降级——使用者知道它不持久。
 pub fn backend() -> std::sync::Arc<dyn SecretBackend> {
     BACKEND
-        .get_or_init(|| match std::env::var("VMUSIC_SECRETS").unwrap_or_default().as_str() {
-            "memory" => {
-                tracing::warn!("VMUSIC_SECRETS=memory：凭据只存进程内，重启即失（仅限测试/CI）");
-                std::sync::Arc::new(MemoryStore::default()) as std::sync::Arc<dyn SecretBackend>
-            }
-            _ => std::sync::Arc::new(OsKeyring) as std::sync::Arc<dyn SecretBackend>,
-        })
+        .get_or_init(
+            || match std::env::var("VMUSIC_SECRETS").unwrap_or_default().as_str() {
+                "memory" => {
+                    tracing::warn!(
+                        "VMUSIC_SECRETS=memory：凭据只存进程内，重启即失（仅限测试/CI）"
+                    );
+                    std::sync::Arc::new(MemoryStore::default()) as std::sync::Arc<dyn SecretBackend>
+                }
+                _ => std::sync::Arc::new(OsKeyring) as std::sync::Arc<dyn SecretBackend>,
+            },
+        )
         .clone()
 }
 

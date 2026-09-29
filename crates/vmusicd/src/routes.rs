@@ -46,7 +46,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/player/volume", post(volume))
         .route("/v1/player/mode", post(mode))
         .route("/v1/player/dsp", get(get_dsp).post(set_dsp))
-        .route("/v1/remote/roots", get(list_remote_roots).post(add_remote_root))
+        .route(
+            "/v1/remote/roots",
+            get(list_remote_roots).post(add_remote_root),
+        )
         .route(
             "/v1/remote/roots/{id}",
             axum::routing::delete(delete_remote_root),
@@ -468,16 +471,15 @@ async fn mode(
     Ok(get_state(State(state)).await)
 }
 
-
 /// 读取 DSP 设置（EQ/preamp/响度归一化/交叉淡化）。
-async fn get_dsp(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn get_dsp(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let settings = vmusic_store::settings::get_all(&state.db)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     let cfg = crate::state::DspConfig::from_settings(&settings);
-    Ok(Json(serde_json::to_value(&cfg).map_err(|e| internal(e.to_string()))?))
+    Ok(Json(
+        serde_json::to_value(&cfg).map_err(|e| internal(e.to_string()))?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -539,7 +541,9 @@ async fn set_dsp(
         .await
         .ok();
     state.audio.set_crossfade(cfg.crossfade_ms).await.ok();
-    Ok(Json(serde_json::to_value(&cfg).map_err(|e| internal(e.to_string()))?))
+    Ok(Json(
+        serde_json::to_value(&cfg).map_err(|e| internal(e.to_string()))?,
+    ))
 }
 
 async fn devices(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
@@ -581,8 +585,16 @@ pub struct TrackQuery {
 
 fn track_filter_from(query: &TrackQuery) -> vmusic_store::TrackFilter {
     vmusic_store::TrackFilter {
-        artist: query.artist.as_deref().filter(|v| !v.trim().is_empty()).map(String::from),
-        album: query.album.as_deref().filter(|v| !v.trim().is_empty()).map(String::from),
+        artist: query
+            .artist
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .map(String::from),
+        album: query
+            .album
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .map(String::from),
     }
 }
 
@@ -601,9 +613,15 @@ async fn list_tracks(
     let sort = parse_track_sort(query.sort.as_deref())?;
     let filter = track_filter_from(&query);
     let tracks = vmusic_store::list_tracks_filtered(
-        &state.db, query.q.as_deref(), &filter, sort, limit, offset)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+        &state.db,
+        query.q.as_deref(),
+        &filter,
+        sort,
+        limit,
+        offset,
+    )
+    .await
+    .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     let total = vmusic_store::count_tracks_filtered(&state.db, query.q.as_deref(), &filter)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
@@ -743,29 +761,34 @@ async fn replace_cover(
     vmusic_store::set_has_cover(&state.db, &id, true)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    Ok(Json(serde_json::json!({ "ok": true, "cover_key": format!("{id}.{ext}") })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "cover_key": format!("{id}.{ext}") }),
+    ))
 }
 
 /// 失效文件整理：文件已不存在的曲目清单（含路径，供界面确认）。
-async fn list_missing_tracks(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+async fn list_missing_tracks(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
     let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
         "SELECT t.id, t.path, COALESCE(NULLIF(TRIM(e.title), ''), t.title),          COALESCE(NULLIF(TRIM(e.artist), ''), t.artist)          FROM tracks t LEFT JOIN track_edits e ON e.track_id = t.id WHERE t.source = 'local'",
     )
     .fetch_all(&state.db)
     .await
     .map_err(|e| bad_request(e.to_string()))?;
-    let missing: Vec<serde_json::Value> =
-        tokio::task::spawn_blocking(move || {
-            rows.into_iter()
+    let missing: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || {
+        rows.into_iter()
                 .filter(|(_, path, _, _)| !std::path::Path::new(path).is_file())
                 .map(|(id, path, title, artist)| {
                     serde_json::json!({ "id": id, "path": path, "title": title, "artist": artist })
                 })
                 .collect()
-        })
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
-    Ok(Json(serde_json::json!({ "missing": missing, "total": missing.len() })))
+    })
+    .await
+    .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({ "missing": missing, "total": missing.len() }),
+    ))
 }
 
 /// 批量删除（失效整理的执行端点）：删曲目行并清理封面缓存文件。
@@ -886,7 +909,9 @@ async fn read_embedded_or_sidecar_lyrics(path: &Path) -> vmusic_core::LyricDocum
     let embedded = {
         let path = path.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            vmusic_library::read_metadata(&path).ok().and_then(|m| m.lyrics)
+            vmusic_library::read_metadata(&path)
+                .ok()
+                .and_then(|m| m.lyrics)
         })
         .await
         .unwrap_or(None)
@@ -927,7 +952,9 @@ async fn import_lyrics(
     vmusic_store::lyrics::import(&state.db, &id, &body.content)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    Ok(Json(serde_json::json!({ "ok": true, "source": "imported" })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "source": "imported" }),
+    ))
 }
 
 /// 清除手动导入（偏移一并删除），歌词回退到内嵌/sidecar。
@@ -955,7 +982,9 @@ async fn set_lyrics_offset(
     vmusic_store::lyrics::set_offset(&state.db, &id, body.offset_ms)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    Ok(Json(serde_json::json!({ "ok": true, "offset_ms": body.offset_ms })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "offset_ms": body.offset_ms }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1148,7 +1177,11 @@ fn normalize_playlist_entries(
                 };
                 let meta = vmusic_store::playlists::TrackMeta {
                     source: source.to_string(),
-                    title: if title.trim().is_empty() { id.clone() } else { title },
+                    title: if title.trim().is_empty() {
+                        id.clone()
+                    } else {
+                        title
+                    },
                     artist: input.artist,
                     album: input.album,
                     duration_ms: input.duration_ms.map(|v| v as i64),
@@ -1267,7 +1300,9 @@ async fn restore_backup(
     let report = vmusic_store::backup::restore(&state.db, &body)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
-    Ok(Json(serde_json::to_value(&report).map_err(|e| internal(e.to_string()))?))
+    Ok(Json(
+        serde_json::to_value(&report).map_err(|e| internal(e.to_string()))?,
+    ))
 }
 
 /// 歌单导出为 M3U8 文本（在线曲没有本地路径，不输出）。
@@ -1695,14 +1730,10 @@ async fn add_remote_root(
     if url.scheme() != "http" && url.scheme() != "https" {
         return Err(bad_request("base_url must be http(s)"));
     }
-    let root = vmusic_store::remote_roots::create(
-        &state.db,
-        &body.name,
-        &body.base_url,
-        &body.username,
-    )
-    .await
-    .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    let root =
+        vmusic_store::remote_roots::create(&state.db, &body.name, &body.base_url, &body.username)
+            .await
+            .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     // 密码只进钥匙串；memory 后端（CI）也不落盘。
     let cred = format!("{}:{}", body.username, body.password);
     let entry = crate::secrets::SecretEntry {
@@ -1712,7 +1743,9 @@ async fn add_remote_root(
     crate::secrets::backend()
         .put(&remote_cred_key(&root.id), &entry)
         .map_err(|e| internal(e.to_string()))?;
-    Ok(Json(serde_json::to_value(&root).map_err(|e| internal(e.to_string()))?))
+    Ok(Json(
+        serde_json::to_value(&root).map_err(|e| internal(e.to_string()))?,
+    ))
 }
 
 async fn delete_remote_root(
@@ -1807,19 +1840,22 @@ async fn import_remote_files(
             skipped += 1;
             continue;
         }
-        let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path);
+        let name = path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(path);
         let url = format!(
             "{}/{}",
             root.base_url.trim_end_matches('/'),
             path.trim_start_matches('/')
         );
         // 幂等：同一直链只登记一次。
-        let exists: Option<(String,)> =
-            sqlx::query_as("SELECT id FROM tracks WHERE path = ?1")
-                .bind(&url)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| bad_request(e.to_string()))?;
+        let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM tracks WHERE path = ?1")
+            .bind(&url)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| bad_request(e.to_string()))?;
         if exists.is_some() {
             skipped += 1;
             continue;
@@ -1867,10 +1903,15 @@ async fn history_list(
 ) -> ApiResult<Json<serde_json::Value>> {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let offset = q.offset.unwrap_or(0).max(0);
-    let (items, total) =
-        crate::history::list_filtered(&state.db, q.q.as_deref(), q.source.as_deref(), limit, offset)
-            .await
-            .map_err(ApiError::internal)?;
+    let (items, total) = crate::history::list_filtered(
+        &state.db,
+        q.q.as_deref(),
+        q.source.as_deref(),
+        limit,
+        offset,
+    )
+    .await
+    .map_err(ApiError::internal)?;
     Ok(Json(serde_json::json!({ "items": items, "total": total })))
 }
 
@@ -2351,7 +2392,9 @@ async fn online_cache_clear(
     .await
     .map_err(|e| bad_request(e.to_string()))?
     .map_err(|e| internal(e.to_string()))?;
-    Ok(Json(serde_json::json!({ "ok": true, "removed_bytes": removed })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "removed_bytes": removed }),
+    ))
 }
 
 #[derive(Deserialize)]

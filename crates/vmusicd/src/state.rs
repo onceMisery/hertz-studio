@@ -148,9 +148,7 @@ pub struct DspConfig {
 }
 
 impl DspConfig {
-    pub fn from_settings(
-        settings: &std::collections::BTreeMap<String, serde_json::Value>,
-    ) -> Self {
+    pub fn from_settings(settings: &std::collections::BTreeMap<String, serde_json::Value>) -> Self {
         let eq = settings
             .get("dsp_eq")
             .and_then(|v| serde_json::from_value::<[f32; 6]>(v.clone()).ok())
@@ -413,12 +411,9 @@ impl AppState {
         // 远程来源：HTTP Range 直链取流（不落盘）；本地/其余走文件路径。
         if track.source == vmusic_core::TrackSource::Remote {
             let url = track.path.clone();
-            let auth = crate::remote::auth_for_url(
-                &self.db,
-                crate::secrets::backend().as_ref(),
-                &url,
-            )
-            .await;
+            let auth =
+                crate::remote::auth_for_url(&self.db, crate::secrets::backend().as_ref(), &url)
+                    .await;
             let ext = std::path::Path::new(&url)
                 .extension()
                 .and_then(|e| e.to_str())

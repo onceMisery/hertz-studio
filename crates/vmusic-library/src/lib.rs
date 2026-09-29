@@ -342,7 +342,7 @@ mod tests {
             b.extend_from_slice(&4096u16.to_be_bytes()); // max blocksize
             b.extend_from_slice(&0u32.to_be_bytes()[1..]); // min framesize (u24)
             b.extend_from_slice(&0u32.to_be_bytes()[1..]); // max framesize (u24)
-            // 20 bits sample-rate | 3 bits channels-1 | 5 bits bps-1 | 36 bits total-samples
+                                                           // 20 bits sample-rate | 3 bits channels-1 | 5 bits bps-1 | 36 bits total-samples
             let packed = (44_100u64 << 44) | (1u64 << 41) | (15u64 << 36) | 44_100u64;
             b.extend_from_slice(&packed.to_be_bytes());
             b.extend_from_slice(&[0u8; 16]); // md5
@@ -390,7 +390,11 @@ mod tests {
         for &b in data {
             crc ^= b;
             for _ in 0..8 {
-                crc = if crc & 0x80 != 0 { (crc << 1) ^ 0x07 } else { crc << 1 };
+                crc = if crc & 0x80 != 0 {
+                    (crc << 1) ^ 0x07
+                } else {
+                    crc << 1
+                };
             }
         }
         crc
@@ -401,7 +405,11 @@ mod tests {
         for &b in data {
             crc ^= (b as u16) << 8;
             for _ in 0..8 {
-                crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x8005 } else { crc << 1 };
+                crc = if crc & 0x8000 != 0 {
+                    (crc << 1) ^ 0x8005
+                } else {
+                    crc << 1
+                };
             }
         }
         crc.to_be_bytes()
@@ -414,10 +422,7 @@ mod tests {
         let file = dir.join("embedded.flac");
         std::fs::write(
             &file,
-            flac_with_comment(&[
-                ("TITLE", "嵌入"),
-                ("LYRICS", "[00:01.00]内嵌歌词"),
-            ]),
+            flac_with_comment(&[("TITLE", "嵌入"), ("LYRICS", "[00:01.00]内嵌歌词")]),
         )
         .unwrap();
         let meta = read_metadata(&file).unwrap();
@@ -435,7 +440,6 @@ mod tests {
         assert!(meta.lyrics.is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
-
 
     #[test]
     fn sidecar_lookup_uses_the_track_stem() {

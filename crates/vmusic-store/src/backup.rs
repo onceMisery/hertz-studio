@@ -148,11 +148,11 @@ pub async fn export(pool: &SqlitePool) -> Result<ExportedBackup, StoreError> {
         Option<String>,
     );
     let snaps: Vec<SnapRow> = sqlx::query_as(
-            "SELECT track_id, source, title, artist, album, duration_ms, cover FROM playlist_tracks",
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(|e| StoreError::Database(e.to_string()))?;
+        "SELECT track_id, source, title, artist, album, duration_ms, cover FROM playlist_tracks",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
     type SnapVals = (
         Option<String>,
         Option<String>,
@@ -206,16 +206,16 @@ pub async fn export(pool: &SqlitePool) -> Result<ExportedBackup, StoreError> {
         Option<String>,
     );
     let rows: Vec<FavRow> = sqlx::query_as(
-            "SELECT kind, source, ref_id, title, artist, album, duration_ms, cover
+        "SELECT kind, source, ref_id, title, artist, album, duration_ms, cover
              FROM favorites ORDER BY added_at",
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(|e| StoreError::Database(e.to_string()))?;
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
     let favorites = rows
         .into_iter()
-        .map(|(kind, source, ref_id, title, artist, album, duration_ms, cover)| {
-            ExportedFavorite {
+        .map(
+            |(kind, source, ref_id, title, artist, album, duration_ms, cover)| ExportedFavorite {
                 kind,
                 source,
                 ref_id,
@@ -224,8 +224,8 @@ pub async fn export(pool: &SqlitePool) -> Result<ExportedBackup, StoreError> {
                 album,
                 duration_ms,
                 cover,
-            }
-        })
+            },
+        )
         .collect();
 
     // 凭据绝不进备份：正常情况下钥匙串迁移已把 online_cred_/cookie_ 键搬走，
@@ -241,11 +241,7 @@ pub async fn export(pool: &SqlitePool) -> Result<ExportedBackup, StoreError> {
         crate::settings::get_all(pool)
             .await?
             .into_iter()
-            .filter(|(key, _)| {
-                !SECRET_PREFIXES
-                    .iter()
-                    .any(|prefix| key.starts_with(prefix))
-            })
+            .filter(|(key, _)| !SECRET_PREFIXES.iter().any(|prefix| key.starts_with(prefix)))
             .collect();
     let roots: Vec<(String, i64)> =
         sqlx::query_as("SELECT path, enabled FROM scan_roots ORDER BY path")
@@ -476,7 +472,10 @@ pub async fn export_m3u(
     let mut out = String::from("#EXTM3U\n");
     out.push_str(&format!("#PLAYLIST:{name}\n"));
     for (path, title) in entries {
-        out.push_str(&format!("#EXTINF:-1,{}\n{path}\n", title.unwrap_or_default()));
+        out.push_str(&format!(
+            "#EXTINF:-1,{}\n{path}\n",
+            title.unwrap_or_default()
+        ));
     }
     Ok(Some(out))
 }
@@ -500,15 +499,13 @@ pub async fn import_m3u(
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
     let playlist_id = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO playlists (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
-    )
-    .bind(&playlist_id)
-    .bind(name.trim())
-    .bind(now_ms())
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| StoreError::Database(e.to_string()))?;
+    sqlx::query("INSERT INTO playlists (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)")
+        .bind(&playlist_id)
+        .bind(name.trim())
+        .bind(now_ms())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
 
     let mut added = 0u64;
     let mut skipped = 0u64;
@@ -562,13 +559,18 @@ mod tests {
     #[tokio::test]
     async fn restore_is_idempotent_and_rejects_unknown_version() {
         let db = pool().await;
-        crate::upsert_track(&db, &sample_track("t1", "A", Some("X"))).await.unwrap();
+        crate::upsert_track(&db, &sample_track("t1", "A", Some("X")))
+            .await
+            .unwrap();
         crate::favorites::add(
             &db,
             vmusic_core::FavoriteKind::Track,
             "local",
             "t1",
-            &crate::favorites::FavoriteMeta { title: "A".into(), ..Default::default() },
+            &crate::favorites::FavoriteMeta {
+                title: "A".into(),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -602,8 +604,14 @@ mod tests {
         // 模拟钥匙串迁移失败：凭据明文键还留在 settings 里。
         use serde_json::Value;
         let mut rows: Vec<(String, Value)> = Vec::new();
-        rows.push(("online_cred_netease".into(), serde_json::json!({"cookie": "MUSIC_U=secret"})));
-        rows.push(("online_cookie_kugou".into(), Value::String("kgmid=old".into())));
+        rows.push((
+            "online_cred_netease".into(),
+            serde_json::json!({"cookie": "MUSIC_U=secret"}),
+        ));
+        rows.push((
+            "online_cookie_kugou".into(),
+            Value::String("kgmid=old".into()),
+        ));
         rows.push(("play_mode".into(), Value::String("repeat".into())));
         for (key, value) in &rows {
             crate::settings::set(&db, key, value).await.unwrap();
@@ -647,7 +655,9 @@ mod tests {
     #[tokio::test]
     async fn m3u_round_trip_matches_by_path_and_reports_skips() {
         let db = pool().await;
-        crate::upsert_track(&db, &sample_track("m1", "M One", None)).await.unwrap();
+        crate::upsert_track(&db, &sample_track("m1", "M One", None))
+            .await
+            .unwrap();
         let playlist = new_playlist(&db, "M3U 源").await;
         crate::playlists::add_tracks(&db, &playlist, &["m1".into(), "online:netease:1".into()])
             .await
@@ -660,8 +670,10 @@ mod tests {
         assert_eq!(m3u.matches("/m/").count(), 1);
 
         // 追加一行不存在的路径：导入应计入 skipped。
-        let m3u_with_miss = format!("{m3u}/nowhere/missing.mp3
-");
+        let m3u_with_miss = format!(
+            "{m3u}/nowhere/missing.mp3
+"
+        );
         let (new_id, added, skipped) = import_m3u(&db, "M3U 导入", &m3u_with_miss)
             .await
             .unwrap()
