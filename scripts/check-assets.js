@@ -101,11 +101,19 @@ linkedCss.concat(linkedJs).forEach((href) => {
 // 每个前端资源也都应该被 index.html 引用，否则它永远不会被加载。
 // 用相对 web/ 的完整 href 比对而不是 basename：vendor/qrcode.js 与未来可能的
 // 同名文件处在子目录里，basename 会把它们混为一谈。
+// 例外：允许被 index.html 引用的脚本按 URL 字符串惰性注入的资源（如商籁
+// 首次启用时才加载的 vendor/pixi.min.js）——在全部已引用脚本源码里能查到
+// 同一 href 字符串即视为已接线。
+const linkedJsSource = linkedJs
+  .map((href) => {
+    try { return fs.readFileSync(path.join(WEB, href), 'utf8'); } catch (e) { return ''; }
+  })
+  .join('\n');
 includes.forEach((inc) => {
   if (inc.name === 'INDEX_HTML') return;
   const abs = path.resolve(path.join(ROOT, 'crates', 'vmusicd', 'src'), inc.rel);
   const href = path.relative(WEB, abs).split(path.sep).join('/');
-  ok(linkedCss.includes(href) || linkedJs.includes(href),
+  ok(linkedCss.includes(href) || linkedJs.includes(href) || linkedJsSource.includes(`'${href}'`),
     `${inc.name}（${href}）被 index.html 引用`);
 });
 

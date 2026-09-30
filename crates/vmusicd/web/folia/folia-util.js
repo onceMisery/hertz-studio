@@ -191,6 +191,7 @@
   function hasReadable(text) { return !!text && READABLE_RE.test(text); }
 
   return {
+    num: num,
     clamp: clamp, lerp: lerp, damp: damp, easeOutCubic: easeOutCubic, srand: srand,
     hexToRgb: hexToRgb, rgbToHex: rgbToHex, mixHex: mixHex, withAlpha: withAlpha,
     rgbToHsl: rgbToHsl, hslToHex: hslToHex,

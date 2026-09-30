@@ -959,6 +959,20 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
   letter-spacing: var(--meta-tracking);
   color: var(--muted);
 }
+/* 平台官方 PNG 徽标：五张图同为 256×256，这里统一钉成 18px 圆角方块，
+   不随原图比例/留白产生视觉大小差。 */
+.pl-card-badge.is-img {
+  padding: 0;
+  line-height: 0;
+  flex: none;
+}
+.pl-card-badge.is-img img {
+  width: 18px;
+  height: 18px;
+  display: block;
+  border-radius: 5px;
+  object-fit: cover;
+}
 
 .pl-card-name {
   font-size: 13px;
@@ -1398,10 +1412,13 @@ body.reduce-motion .shelf-vinyl { transition: none; }
   display: flex; flex-direction: column; gap: 12px;
 }
 .set-title { margin: 0; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; }
-.set-row { display: flex; align-items: center; gap: 12px; }
+.set-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; }
 .set-row label { font-size: 13px; width: 96px; flex: none; color: var(--muted); }
 .set-row select { flex: 1; max-width: 260px; }
 .set-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+.set-row > input:not([type="checkbox"]), .set-row > select { min-width: 0; max-width: 100%; }
+.set-row > .hint { min-width: 0; flex: 1 1 140px; overflow-wrap: anywhere; }
+.set-actions { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
 
 /* 音源登录行：label + 输入框 + 保存 + 状态。输入框给 flex:1 才能在没有内容时
    也撑满一行，否则四个元素会挤在左边、状态文字看起来像按钮的一部分。 */

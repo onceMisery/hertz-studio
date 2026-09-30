@@ -116,6 +116,38 @@
 .fl-cadz .fl-glow { position: absolute; inset: 0; color: transparent; pointer-events: none; z-index: 0; white-space: pre; }
 .fl-cadz .fl-body { position: relative; z-index: 1; white-space: pre; }
 
+/* 商籁 sonnet：全屏 Pixi 画布 + 角标文案 + HUD 读数 + 寻句热区。
+   画面主体在 canvas 里；DOM 层只承载 chrome 与点击热区。 */
+.fl-sonnet-layer { position: absolute; inset: 0; pointer-events: none; }
+.fl-sonnet-layer[hidden] { display: none !important; }
+.fl-sonnet { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.fl-sonnet[hidden] { display: none; }
+.fl-sonnet-canvas { position: absolute; inset: 0; pointer-events: none; }
+.fl-sonnet-eyebrow { position: absolute; top: calc(12px + env(safe-area-inset-top)); left: 50%;
+  transform: translateX(-50%); color: var(--fl-sonnet-accent, #f4f4f5); opacity: .55;
+  font: 700 9px/1.4 "IBM Plex Mono","SFMono-Regular",Consolas,"Microsoft YaHei",monospace;
+  letter-spacing: .25em; white-space: nowrap; }
+.fl-sonnet-hud { position: absolute; right: 8vw; bottom: calc(150px + env(safe-area-inset-bottom));
+  color: var(--fl-sonnet-accent, #f4f4f5); opacity: .62;
+  font: 700 9px/1.4 "IBM Plex Mono","SFMono-Regular",Consolas,"Microsoft YaHei",monospace;
+  letter-spacing: .18em; white-space: nowrap; }
+.fl-sonnet-hot { position: absolute; left: 0; top: 0; pointer-events: auto; cursor: pointer; }
+.fl-sonnet .fl-empty { z-index: 3; }
+
+/* 凝彩 tempera：与商籁共用 .fl-sonnet-layer 宿主（同一时刻只显示其一）。
+   画面主体是 Pixi canvas；DOM 只有角标、空态提示与寻句热区。 */
+.fl-tempera { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.fl-tempera[hidden] { display: none; }
+.fl-tempera-canvas { position: absolute; inset: 0; pointer-events: none; }
+.fl-tempera-eyebrow { position: absolute; top: calc(14px + env(safe-area-inset-top)); left: 50%;
+  transform: translateX(-50%); color: var(--fl-sonnet-accent, #f4f4f5); opacity: .6;
+  font: 800 9px/1.4 "IBM Plex Mono","SFMono-Regular",Consolas,"Microsoft YaHei",monospace;
+  letter-spacing: .32em; white-space: nowrap; }
+.fl-tempera-note { position: absolute; left: 50%; bottom: calc(170px + env(safe-area-inset-bottom));
+  transform: translateX(-50%); color: var(--fl-sonnet-accent, #f4f4f5); opacity: .7;
+  font-size: 13px; letter-spacing: .12em; white-space: nowrap; }
+.fl-tempera-hot { position: absolute; left: 0; top: 0; pointer-events: auto; cursor: pointer; }
+
 /* 字幕条 */
 .fl-sub { position: absolute; left: 0; right: 0; bottom: calc(118px + env(safe-area-inset-bottom));
   z-index: 5; text-align: center; padding: 0 32px; pointer-events: none; }
@@ -170,6 +202,7 @@
   .fl-sub { padding: 0 16px; bottom: calc(104px + env(safe-area-inset-bottom)); }
   .fl-sub-card { max-width: calc(100vw - 48px); }
   .fl-sub-next ~ .fl-sub-next { display: none; } /* 窄屏预告只留 1 行 */
+  .fl-sonnet-hud { right: 16px; bottom: calc(112px + env(safe-area-inset-bottom)); }
 }
 /* 横屏矮窗：歌词区收高，给底部字幕/播放坞让位 */
 @media (max-height: 500px) {

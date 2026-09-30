@@ -1821,9 +1821,15 @@ function renderPlaylistGrid() {
 
     if (it.badge) {
       const badge = document.createElement('span');
-      badge.className = 'pl-card-badge';
-      badge.textContent = it.badge;
-      if (it.badgeColor) badge.style.color = it.badgeColor;
+      if (String(it.badge).charAt(0) === '/') {
+        // 平台官方 PNG 徽标：与在线面板同款同位图，统一尺寸由 CSS 钉死。
+        badge.className = 'pl-card-badge is-img';
+        badge.innerHTML = '<img src="' + it.badge + '" alt="" aria-hidden="true">';
+      } else {
+        badge.className = 'pl-card-badge';
+        badge.textContent = it.badge;
+        if (it.badgeColor) badge.style.color = it.badgeColor;
+      }
       face.appendChild(badge);
     }
     art.appendChild(face);

@@ -33,9 +33,12 @@
     scene: 'resonance', motion: .65, bloom: .8, reactivity: 1.35,
     lyrics: true, cruise: true, layout: 'focus', lyricSize: 1, lyricGlow: .45,
     foliaVisual: 'stage',
+    stageTheme: 'classic',
     foliaBg: 'stage', foliaBgOpacity: 0.75, foliaVignette: true, foliaSubtitle: true,
     classicTuning: { rotation: true, breathing: 1, spacing: 0.7 },
-    cadenzaTuning: { width: 0.72, motion: 1, glow: 1, beam: 0 }
+    cadenzaTuning: { width: 0.72, motion: 1, glow: 1, beam: 0 },
+    sonnetTuning: { shotFlow: 'auto', lyricLayout: 'phrases', phraseLength: 12, decor: true, accents: true },
+    temperaTuning: { composition: 'auto', colorMode: 'duo', screens: true, inversion: true }
   };
 
   function $(id) { return document.getElementById(id); }
@@ -1165,7 +1168,8 @@
     body.appendChild(h('h3', 'ws-section-title', '封面与歌词'));
     var reading = h('div', 'ws-tuning');
     reading.appendChild(select('聆听布局', [['focus', '沉浸歌词'], ['sleeve', '封面与歌词'], ['single', '简洁单句']], prefs.layout, function (v) { edit({ layout: v }); }));
-    reading.appendChild(select('歌词视觉', [['stage', '舞台 3D 歌词轨'], ['classic', '流光歌词'], ['cadenza', '心象歌词']], prefs.foliaVisual || 'stage', function (v) { edit({ foliaVisual: v }); }));
+    reading.appendChild(select('歌词视觉', [['stage', '舞台 3D 歌词轨'], ['classic', '流光歌词'], ['cadenza', '心象歌词'], ['sonnet', '商籁歌词'], ['tempera', '凝彩歌词']], prefs.foliaVisual || 'stage', function (v) { edit({ foliaVisual: v }); }));
+    reading.appendChild(select('舞台主题', [['classic', '默认'], ['starfall', '星落']], prefs.stageTheme || 'classic', function (v) { edit({ stageTheme: v }); }));
     reading.appendChild(toggle('显示歌词', prefs.lyrics, function (v) { edit({ lyrics: v }); }));
     reading.querySelector('select').id = 'ws-layout';
     reading.querySelector('label').htmlFor = 'ws-layout';

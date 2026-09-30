@@ -129,15 +129,17 @@ html.qr-modal-open .app{visibility:hidden}
 
 /* ── Task 18：在线曲库面板（徽标 / VIP / All 聚合分组）──────────────────── */
 
-/* 平台徽标：品牌色圆角方块 + 白色 app 图标字形（图标由 online.js 的 badge()
-   注入 <use href>）。品牌色走内联 --badge，未登记的音源回落到主题色。
-   用方块而不是原先的胶囊：胶囊/圆形容器里塞方形 app 图标会在四角留出很脏的
-   空隙，而"圆角方块"本来就是应用图标自己的容器语汇，四个平台也因此尺寸一致
-   —— 以前「网易 / QQ / 酷狗 / 汽水」字数不同，胶囊宽度各不相同。 */
+/* 平台徽标。平台源：官方 app 图标 PNG（.is-img），容器透明、图片填满同一
+   尺寸的圆角方块（20px），五个平台的 PNG 同为 256×256，显示大小完全一致；
+   本地/未登记音源：品牌色圆角方块 + 白色 sprite 字形（--badge 由 online.js
+   注入），未登记时回落到主题色。品牌色只服务字形，位图自带品牌底色。 */
 .src-badge{display:inline-flex;align-items:center;justify-content:center;
   flex:none;width:20px;height:20px;border-radius:6px;
   color:#fff;background:var(--badge,var(--accent))}
 .src-badge svg{width:14px;height:14px;display:block}
+.src-badge.is-img{background:transparent;overflow:hidden}
+.src-badge.is-img img{width:100%;height:100%;display:block;
+  border-radius:inherit;object-fit:cover}
 
 /* VIP 专享标记。红线：不模拟会员权益——置灰不可点由 .is-disabled 负责，
    这里只给视觉标识。 */

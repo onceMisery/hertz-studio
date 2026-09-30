@@ -60,6 +60,8 @@ const SKIN_MINERADIO_CSS: &str = include_str!("../web/skins/skin.mineradio.css")
 const SKIN_WORKBENCH_CSS: &str = include_str!("../web/skins/skin.workbench.css");
 const SKIN_LIUNIAN_CSS: &str = include_str!("../web/skins/skin.liunian.css");
 const SKIN_LIUNIAN_JS: &str = include_str!("../web/skins/skin.liunian.js");
+// 舞台主题：只管沉浸舞台操作层的观感，与皮肤正交、可组合，常驻引入。
+const STAGE_THEME_STARFALL_CSS: &str = include_str!("../web/stage-themes/starfall.css");
 // 起音检测。粒子层与三维层共用，所以它必须排在两者之前。
 const ONSET_JS: &str = include_str!("../web/onset.js");
 
@@ -86,7 +88,7 @@ const STAGE_SHELF_JS: &str = include_str!("../web/stage-shelf.js");
 const STAGE3D_JS: &str = include_str!("../web/stage3d.js");
 const STAGE3D_CSS: &str = include_str!("../web/stage3d.css");
 const STAGE_IMMERSIVE_JS: &str = include_str!("../web/stage-immersive.js");
-// folia 歌词模式（流光 classic / 心象 cadenza）：7 个零依赖模块 + 1 个样式表，
+// folia 歌词模式（流光 classic / 心象 cadenza / 商籁 sonnet）：零依赖模块 + 样式表，
 // 在 index.html 中排在 stage-lyrics.js 之前加载。
 const FOLIA_UTIL_JS: &str = include_str!("../web/folia/folia-util.js");
 const FOLIA_THEME_JS: &str = include_str!("../web/folia/folia-theme.js");
@@ -95,6 +97,12 @@ const FOLIA_BG_JS: &str = include_str!("../web/folia/folia-bg.js");
 const FOLIA_SUBTITLE_JS: &str = include_str!("../web/folia/folia-subtitle.js");
 const FOLIA_CLASSIC_JS: &str = include_str!("../web/folia/folia-classic.js");
 const FOLIA_CADENZA_JS: &str = include_str!("../web/folia/folia-cadenza.js");
+// 商籁 sonnet：全屏 Pixi 电影镜头歌词。图形引擎 + 渲染器两个模块；PixiJS v8
+// （MIT）随包内嵌，但前端只在首次选中商籁时才注入 <script> 惰性加载它。
+const FOLIA_SONNET_FX_JS: &str = include_str!("../web/folia/folia-sonnet-fx.js");
+const FOLIA_SONNET_JS: &str = include_str!("../web/folia/folia-sonnet.js");
+const FOLIA_TEMPERA_JS: &str = include_str!("../web/folia/folia-tempera.js");
+const PIXI_JS: &str = include_str!("../web/vendor/pixi.min.js");
 const FOLIA_CSS: &str = include_str!("../web/folia/folia.css");
 // 在线曲库（SP1）：vendored MIT 二维码库 + 三个在线模块与样式。
 const QRCODE_JS: &str = include_str!("../web/vendor/qrcode.js");
@@ -166,6 +174,17 @@ const WALLPAPERS: &[(&str, &[u8])] = &[
         "night-12.jpg",
         include_bytes!("../web/wallpapers/night-12.jpg"),
     ),
+];
+
+/// 在线音源平台徽标：官方 app 图标 PNG（256×256 统一规格），由前端
+/// online.js 的 SOURCE_BADGE 按音源 id 取用。与壁纸同为二进制资源，走
+/// `include_bytes!` 内嵌，单 exe 分发不依赖外部文件。
+const PLATFORM_ICONS: &[(&str, &[u8])] = &[
+    ("netease.png", include_bytes!("../web/platform-icons/netease.png")),
+    ("qq.png", include_bytes!("../web/platform-icons/qq.png")),
+    ("kugou.png", include_bytes!("../web/platform-icons/kugou.png")),
+    ("kuwo.png", include_bytes!("../web/platform-icons/kuwo.png")),
+    ("qishui.png", include_bytes!("../web/platform-icons/qishui.png")),
 ];
 
 const JS: &str = "application/javascript; charset=utf-8";
@@ -335,6 +354,13 @@ async fn main() -> anyhow::Result<()> {
             "/folia/folia-cadenza.js",
             get(|| asset(JS, FOLIA_CADENZA_JS)),
         )
+        .route(
+            "/folia/folia-sonnet-fx.js",
+            get(|| asset(JS, FOLIA_SONNET_FX_JS)),
+        )
+        .route("/folia/folia-sonnet.js", get(|| asset(JS, FOLIA_SONNET_JS)))
+        .route("/folia/folia-tempera.js", get(|| asset(JS, FOLIA_TEMPERA_JS)))
+        .route("/vendor/pixi.min.js", get(|| asset(JS, PIXI_JS)))
         .route("/vendor/qrcode.js", get(|| asset(JS, QRCODE_JS)))
         .route("/online-login.js", get(|| asset(JS, ONLINE_LOGIN_JS)))
         .route("/online.js", get(|| asset(JS, ONLINE_JS)))
@@ -370,7 +396,12 @@ async fn main() -> anyhow::Result<()> {
             get(|| asset(CSS, SKIN_LIUNIAN_CSS)),
         )
         .route("/skins/skin.liunian.js", get(|| asset(JS, SKIN_LIUNIAN_JS)))
+        .route(
+            "/stage-themes/starfall.css",
+            get(|| asset(CSS, STAGE_THEME_STARFALL_CSS)),
+        )
         .route("/wallpapers/{name}", get(wallpaper))
+        .route("/platform-icons/{name}", get(platform_icon))
         .route(
             "/",
             get({
@@ -473,6 +504,26 @@ async fn wallpaper(Path(name): Path<String>) -> axum::response::Response {
         )
             .into_response(),
         None => (axum::http::StatusCode::NOT_FOUND, "no such wallpaper").into_response(),
+    }
+}
+
+/// 平台徽标字节出口。与壁纸同一套白名单寻址：名字查不到就是 404，
+/// `{name}` 只匹配单段路径，穿越既到不了磁盘也不在表里。图标按音源 id
+/// 命名、内容不可变，缓存策略与壁纸一致（immutable）。
+async fn platform_icon(Path(name): Path<String>) -> axum::response::Response {
+    match PLATFORM_ICONS.iter().find(|(n, _)| *n == name) {
+        Some((_, bytes)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "image/png"),
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "public, max-age=604800, immutable",
+                ),
+            ],
+            *bytes,
+        )
+            .into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, "no such platform icon").into_response(),
     }
 }
 

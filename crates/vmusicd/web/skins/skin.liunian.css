@@ -35,8 +35,8 @@
 
 [data-skin="liunian"] {
   /* 布局令牌（对照 VMusic：容器 gap/padding 20、面板圆角 20）。 */
-  --skin-gap: 20px;
-  --skin-pad: 20px;
+  --skin-gap: 18px;
+  --skin-pad: 24px;
   --skin-radius: 20px;
   --skin-row-py: 8px;
   --skin-card-min: 160px;
@@ -44,7 +44,7 @@
   --skin-title: 18px;
 
   /* 结构：标题栏 44（VMusic 40）、左栏 280（VMusic 320）、右栏 300。 */
-  --topbar-h: 44px;
+  --topbar-h: 56px;
   --ln-side-w: 280px;
   --ln-right-w: 300px;
 
@@ -78,9 +78,12 @@
 /* --- 外壳：三栏（padding/gap 20） ---------------------------------------- */
 
 [data-skin="liunian"] .app {
-  grid-template-columns: var(--ln-side-w) minmax(400px, 1fr) var(--ln-right-w);
+  grid-template-columns: var(--ln-side-w) minmax(0, 1fr) var(--ln-right-w);
   gap: var(--skin-pad);
   padding: var(--skin-pad);
+  width: 100%;
+  max-width: 1680px;
+  margin-inline: auto;
 }
 
 /* 宽屏空闲：右栏隐藏，收成两列（高特异性钉回，见项目皮肤栅格陷阱）。 */
@@ -525,6 +528,9 @@
   padding: 0;
   background: transparent;
   border: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* 工具行：去底边、收成一行。 */
@@ -563,6 +569,7 @@
 [data-skin="liunian"] .daily-strip {
   padding: 16px;
   border-radius: 14px;
+  flex: none;
 }
 
 [data-skin="liunian"] .daily-list {
@@ -599,6 +606,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  text-align: left;
 }
 
 /* 行1：封面 + 曲目信息（JS 建 .bar-row1 包裹）。 */
@@ -606,6 +614,7 @@
   display: flex;
   align-items: center;
   gap: 14px;
+  width: 100%;
 }
 
 /* 唱片在播放卡里变成 84px 方形封面：停旋转、去中心孔与外环。
@@ -651,6 +660,8 @@
   flex-direction: column;
   align-items: stretch;
   gap: 3px;
+  width: 100%;
+  min-width: 0;
 }
 
 [data-skin="liunian"] .progress-wrap {
@@ -828,7 +839,7 @@
    hover peek 时 .rail 变 fixed 离流，若轨道为 auto，grid 自动放置会把
    .column 塞进 44px 第一轨→中栏塌缩（首轮 peek 实测缺陷）。 */
 [data-skin="liunian"] body.ln-rail-collapsed .app {
-  grid-template-columns: 44px minmax(400px, 1fr) var(--ln-right-w);
+  grid-template-columns: 44px minmax(0, 1fr) var(--ln-right-w);
 }
 
 [data-skin="liunian"] body.ln-rail-collapsed > .app > .rail {
@@ -1061,5 +1072,460 @@
 
   [data-skin="liunian"] .stage {
     bottom: calc(72px + 18px);
+  }
+}
+
+[data-skin="liunian"] .ln-nav {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+[data-skin="liunian"] .ln-nav-item {
+  min-height: 40px;
+  padding: 0 18px;
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 180ms, color 180ms;
+}
+
+[data-skin="liunian"] .ln-nav-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+[data-skin="liunian"] .ln-nav-item.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+[data-skin="liunian"] .ln-mobile-search {
+  display: none;
+}
+
+[data-skin="liunian"] .ln-player-heading,
+[data-skin="liunian"] .ln-player-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+[data-skin="liunian"] .ln-player-heading {
+  justify-content: space-between;
+  width: 100%;
+  margin-bottom: 4px;
+}
+
+[data-skin="liunian"] .ln-player-label {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: .18em;
+}
+
+[data-skin="liunian"] .ln-player-actions button,
+[data-skin="liunian"] .ln-daily-more {
+  border: 0;
+  border-radius: 999px;
+  padding: 8px 12px;
+  min-height: 36px;
+  background: var(--field-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+[data-skin="liunian"] .ln-player-actions button:hover,
+[data-skin="liunian"] .ln-daily-more:hover {
+  background: var(--hover);
+}
+
+[data-skin="liunian"] .bar-title {
+  font-size: clamp(20px, 2vw, 28px);
+  line-height: 1.4;
+  letter-spacing: -.03em;
+}
+
+[data-skin="liunian"] .bar-title:empty::before {
+  content: '从一首喜欢的歌开始';
+}
+
+[data-skin="liunian"] .bar-track:has(.bar-title:empty) .bar-sub:empty::before {
+  content: '选择本地音乐，或去在线曲库发现好歌';
+}
+
+[data-skin="liunian"] .bar-sub {
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+[data-skin="liunian"] .bar .progress-wrap {
+  width: 100%;
+  flex: none;
+}
+
+[data-skin="liunian"] .bar .bar-time {
+  align-self: flex-end;
+}
+
+[data-skin="liunian"] .bar.ln-capsule {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 12px;
+  padding: 10px 20px;
+  border-radius: 28px;
+}
+
+[data-skin="liunian"] .ln-capsule .ln-player-heading {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+[data-skin="liunian"] .ln-capsule .bar-row1 {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+[data-skin="liunian"] .ln-capsule .bar-controls {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+[data-skin="liunian"] .bar.ln-capsule .bar-row1 .disc-wrap {
+  width: 44px;
+  height: 44px;
+}
+
+[data-skin="liunian"] .ln-capsule .bar-title {
+  font-size: 15px;
+}
+
+[data-skin="liunian"] .ln-capsule .bar-progress {
+  grid-column: 1 / -1;
+  grid-row: 3;
+}
+
+[data-skin="liunian"] .ln-capsule .bar-volume,
+[data-skin="liunian"] .ln-capsule #mode {
+  display: none;
+}
+
+[data-skin="liunian"] .ln-library-tools {
+  min-width: 0;
+}
+
+[data-skin="liunian"] .ln-library-tools summary {
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: var(--field-bg);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+[data-skin="liunian"] .ln-library-tools[open] {
+  flex-basis: 100%;
+}
+
+[data-skin="liunian"] .ln-library-tools .col-tools {
+  padding: 12px 0;
+}
+
+[data-skin="liunian"] .col-head {
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+[data-skin="liunian"] .daily-head {
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+[data-skin="liunian"] .daily-copy {
+  flex: 1 1 160px;
+}
+
+[data-skin="liunian"] .daily-title {
+  font-size: 22px;
+  letter-spacing: -.02em;
+}
+
+[data-skin="liunian"] .daily-list {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(150px, 1fr);
+  grid-template-columns: none;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  padding-bottom: 6px;
+}
+
+[data-skin="liunian"] .daily-list > * {
+  scroll-snap-align: start;
+}
+
+[data-skin="liunian"] .daily-list > .hint {
+  grid-column: 1 / -1;
+  min-width: min(100%, 280px);
+}
+
+[data-skin="liunian"] .daily-list:has(> .hint) {
+  display: block;
+}
+
+[data-skin="liunian"] .daily-card .daily-copy {
+  flex: initial;
+}
+
+[data-skin="liunian"] .view .track .t-art,
+[data-skin="liunian"] .view .track .t-dur,
+[data-skin="liunian"] .view .track .t-actions {
+  display: flex;
+}
+
+[data-skin="liunian"] .view .track {
+  padding: 10px;
+  gap: 12px;
+}
+
+[data-skin="liunian"] .view .track .t-actions {
+  opacity: 1;
+}
+
+[data-skin="liunian"] .view .online-head {
+  flex-wrap: wrap;
+}
+
+[data-skin="liunian"] .rail .empty-card {
+  width: 100%;
+  padding: 20px 8px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+[data-skin="liunian"] .rail .empty-card h2 {
+  font-size: 16px;
+}
+
+[data-skin="liunian"] .rail .empty-card p {
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+[data-skin="liunian"] .ln-cat {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+}
+
+[data-skin="liunian"] .ln-cat-name,
+[data-skin="liunian"] .ln-cat-count {
+  display: block;
+}
+
+[data-skin="liunian"] button:focus-visible,
+[data-skin="liunian"] summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+[data-skin="liunian"] .view > .online-body,
+[data-skin="liunian"] .view > .pl-grid,
+[data-skin="liunian"] .view > .lib-list {
+  min-height: 160px;
+}
+
+@media (max-width: 1000px) {
+  [data-skin="liunian"] .rail {
+    display: none;
+  }
+
+  [data-skin="liunian"] .ln-mobile-search {
+    display: block;
+    flex: none;
+  }
+
+  [data-skin="liunian"] .ln-mobile-search .topsearch {
+    width: 100%;
+    max-width: none;
+    height: 40px;
+  }
+
+  [data-skin="liunian"] .ln-nav {
+    align-self: stretch;
+    justify-content: space-between;
+  }
+
+  [data-skin="liunian"] .ln-nav-item {
+    padding-inline: 14px;
+  }
+
+  [data-skin="liunian"] .column {
+    gap: 12px;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    scrollbar-gutter: stable;
+  }
+
+  [data-skin="liunian"] .ln-nav {
+    position: sticky;
+    top: 0;
+    z-index: 8;
+    background: var(--bg);
+  }
+
+  [data-skin="liunian"] .view:not([hidden]) {
+    flex: none;
+    overflow: visible;
+    min-height: 240px;
+  }
+
+  [data-skin="liunian"] #view-settings {
+    overflow: visible;
+  }
+
+  [data-skin="liunian"] #view-settings .col-head {
+    position: static;
+  }
+
+  [data-skin="liunian"] .view > .q-list,
+  [data-skin="liunian"] .view > .online-body,
+  [data-skin="liunian"] .view > .pl-list {
+    flex: none;
+    overflow: visible;
+  }
+
+  [data-skin="liunian"] .view > .lib-list {
+    flex: none;
+    overflow: visible;
+  }
+}
+
+@media (max-width: 620px) {
+  [data-skin="liunian"] .app {
+    padding: 8px 12px 12px;
+  }
+
+  [data-skin="liunian"] .ln-nav {
+    gap: 2px;
+  }
+
+  [data-skin="liunian"] .topbar {
+    padding-inline: 12px;
+  }
+
+  [data-skin="liunian"] .brand {
+    font-size: 16px;
+  }
+
+  [data-skin="liunian"] .ln-nav-item {
+    padding-inline: 9px;
+    min-width: 44px;
+    font-size: 12px;
+    min-height: 40px;
+  }
+
+  [data-skin="liunian"] .ln-player-actions {
+    gap: 4px;
+  }
+
+  [data-skin="liunian"] .bar:not(.ln-capsule) {
+    gap: 6px;
+  }
+
+  [data-skin="liunian"] .bar:not(.ln-capsule) .bar-row1 {
+    gap: 10px;
+  }
+
+  [data-skin="liunian"] .ln-player-heading {
+    margin-bottom: 0;
+  }
+
+  [data-skin="liunian"] .ln-capsule .bar-sub {
+    display: none;
+  }
+
+  [data-skin="liunian"] .ln-player-label {
+    letter-spacing: .04em;
+  }
+
+  [data-skin="liunian"] .bar .bar-row1 .disc-wrap {
+    width: 52px;
+    height: 52px;
+  }
+
+  [data-skin="liunian"] .bar.ln-capsule {
+    padding: 8px 12px;
+    gap: 4px 6px;
+  }
+
+  [data-skin="liunian"] .ln-capsule .bar-row1 {
+    gap: 8px;
+  }
+
+  [data-skin="liunian"] .ln-capsule .bar-controls {
+    gap: 0;
+  }
+
+  [data-skin="liunian"] .ln-capsule .ln-player-label {
+    font-size: 10px;
+  }
+
+  [data-skin="liunian"] .daily-strip {
+    padding: 14px;
+  }
+
+  [data-skin="liunian"] .daily-tools {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  [data-skin="liunian"] .daily-list {
+    grid-auto-columns: minmax(140px, 64%);
+  }
+}
+
+@media (max-height: 760px) {
+  [data-skin="liunian"] .column {
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+  }
+
+  [data-skin="liunian"] .view:not([hidden]) {
+    flex: none;
+    overflow: visible;
+    min-height: 240px;
+  }
+
+  [data-skin="liunian"] .ln-nav {
+    position: sticky;
+    top: 0;
+    z-index: 8;
+    background: var(--bg);
+  }
+
+  [data-skin="liunian"] #view-settings {
+    overflow: visible;
+  }
+
+  [data-skin="liunian"] #view-settings .col-head {
+    position: static;
   }
 }

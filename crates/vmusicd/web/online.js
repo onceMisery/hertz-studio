@@ -34,18 +34,20 @@
   // 到这里（getMeta）。
   var onlineMeta = new Map();
 
-  // 平台徽标：品牌名 / 品牌色 / app 图标 id。音源 id 以后端注册表为准，
+  // 平台徽标：品牌名 / 品牌色 / app 图标。音源 id 以后端注册表为准，
   // 这里只负责显示。
-  // 第三项是 index.html sprite 里的图标：界面上一律用官方 app 图标，不再摆
-  // 两字短名——四个平台的短名长短不一（网易/QQ/酷狗/汽水），挤在 18px 的小
-  // 胶囊里既读不清也不统一。品牌名降级成 title/aria-label，悬停与读屏仍能
-  // 说出平台。汽水的薄荷绿取自官方客户端主题色；它此前缺了整条登记，结果
-  // 降级成裸文本「qishui」，看着像没做完的占位符。
+  // 第三项是图标地址：平台一律用 docs/images 提供的官方 app 图标（经
+  // /platform-icons/ 内嵌分发，统一 256×256 PNG），不再用手绘的单色字形——
+  // 第三方商标轮廓再像也是「仿造」，官方图辨识度更高，且五张图同一规格，
+  // 各徽标位上的显示尺寸天然一致。本地曲库与未登记音源没有对应官方图，
+  // 继续走 index.html 的 sprite 字形（id 以 i- 开头）。酷我此前整条缺席，
+  // 一直降级成通用地球图标，这里补齐。
   var SOURCE_BADGE = {
-    netease: ['网易云音乐', '#e60026', 'i-app-netease'],
-    qq: ['QQ 音乐', '#12b7f5', 'i-app-qq'],
-    kugou: ['酷狗音乐', '#2ca5f0', 'i-app-kugou'],
-    qishui: ['汽水音乐', '#45d68f', 'i-app-qishui'],
+    netease: ['网易云音乐', '#e60026', '/platform-icons/netease.png'],
+    qq: ['QQ 音乐', '#12b7f5', '/platform-icons/qq.png'],
+    kugou: ['酷狗音乐', '#2ca5f0', '/platform-icons/kugou.png'],
+    kuwo: ['酷我音乐', '#f5a623', '/platform-icons/kuwo.png'],
+    qishui: ['汽水音乐', '#45d68f', '/platform-icons/qishui.png'],
     // 本地曲库也走同一套徽标：唱片图标 + 主题色（不占任何平台品牌色）。
     local: ['本地曲库', null, 'i-app-local'],
   };
@@ -53,25 +55,37 @@
   // 未登记音源（如 ccmixter）的兜底图标：地球，配主题色而非某个平台的品牌色。
   var GENERIC_ICON = 'i-app-generic';
 
+  // 位图图标以 '/' 开头（站内资源路径）；sprite 字形 id 以 'i-' 开头。
+  function isImgIcon(icon) {
+    return typeof icon === 'string' && icon.charAt(0) === '/';
+  }
+
   function sourceLabel(id) {
     var info = onlineState.sources.find(function (s) { return s.id === id; });
     return (info && info.label) || id;
   }
 
-  // 平台徽标节点：品牌色圆角方块 + app 图标字形。
-  // 图标本身不带文字，所以平台名必须挂到 title 与 aria-label 上——否则读屏
-  // 用户和想确认来源的人只能看到一个色块。
+  // 平台徽标节点。平台源是官方 app 图标的 PNG（.is-img，容器透明，图片
+  // 填满同一尺寸的圆角方块）；本地/未登记音源仍是品牌色圆角方块 + 白色
+  // 图标字形。图标本身不带文字，所以平台名必须挂到 title 与 aria-label
+  // 上——否则读屏用户和想确认来源的人只能看到一个色块。
   function badge(source, label) {
     var b = sourceBadge(source);
     var name = b ? b.text : (label || sourceLabel(source));
+    var icon = b ? b.icon : GENERIC_ICON;
     var s = document.createElement('span');
-    s.className = 'src-badge';
-    // 没有登记品牌色的（本地 / 未登记音源）不写 --badge，让 CSS 回落到主题色。
-    if (b && b.color) s.style.setProperty('--badge', b.color);
+    // 直接写完整 className：测试桩的 className 与 classList 互不同步。
+    s.className = isImgIcon(icon) ? 'src-badge is-img' : 'src-badge';
+    if (isImgIcon(icon)) {
+      s.innerHTML = '<img src="' + icon + '" alt="" aria-hidden="true">';
+    } else {
+      // 没有登记品牌色的（本地 / 未登记音源）不写 --badge，让 CSS 回落到主题色。
+      if (b && b.color) s.style.setProperty('--badge', b.color);
+      s.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#'
+        + icon + '"/></svg>';
+    }
     s.title = name;
     s.setAttribute('aria-label', name);
-    s.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#'
-      + (b ? b.icon : GENERIC_ICON) + '"/></svg>';
     return s;
   }
 
@@ -1058,6 +1072,8 @@
     sourceLabel: sourceLabel,
     sourceBadge: sourceBadge,
     sourceIcon: sourceIcon,
+    // 区分位图徽标（平台 PNG，路径以 / 开头）与 sprite 字形（i- 开头）。
+    isImgIcon: isImgIcon,
     // 徽标节点工厂：歌单菜单/收藏/两层界面都来这里取，避免各处再拼一遍。
     badge: badge,
     // 在线播放错误条（app.js Task 14 的 WS error 分支调用）。

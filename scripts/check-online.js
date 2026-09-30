@@ -22,6 +22,7 @@ const path = require('path');
 const vm = require('vm');
 
 const WEB = path.join(__dirname, '..', 'crates', 'vmusicd', 'web');
+const SRC_DIR = path.join(__dirname, '..', 'crates', 'vmusicd', 'src');
 
 let failures = 0;
 let checks = 0;
@@ -973,13 +974,13 @@ async function loginScenario(pollStates, opts) {
     eq(all.length, 3, '扁平清单包含三个源的歌单');
     eq(all[0].source, 'netease');
     eq(all[0].playlist.id, 'n1');
-    eq(all[0].badgeIcon, 'i-app-netease', '网易徽标用网易云 app 图标');
+    eq(all[0].badgeIcon, '/platform-icons/netease.png', '网易徽标用网易云官方图标 PNG');
     eq(all[1].source, 'qq');
     eq(all[1].badgeColor, '#12b7f5', 'QQ 带品牌色');
-    eq(all[1].badgeIcon, 'i-app-qq', 'QQ 徽标用 QQ 音乐 app 图标');
+    eq(all[1].badgeIcon, '/platform-icons/qq.png', 'QQ 徽标用 QQ 音乐官方图标 PNG');
     eq(all[2].source, 'kugou');
     eq(all[2].badgeColor, '#2ca5f0', '酷狗带品牌色');
-    eq(all[2].badgeIcon, 'i-app-kugou', '酷狗徽标用酷狗 app 图标');
+    eq(all[2].badgeIcon, '/platform-icons/kugou.png', '酷狗徽标用酷狗官方图标 PNG');
 
     // open() 按 source+id 找到歌单并打开抽屉。
     env.sandbox.window.OnlinePlaylists.open('qq', 'q1');
@@ -1004,13 +1005,16 @@ async function loginScenario(pollStates, opts) {
     // 汽水此前缺徽标登记，搜索结果里会降级成裸文本「qishui」。
     eq(Online.sourceBadge('qishui').text, '汽水音乐', '汽水徽标品牌名');
     eq(Online.sourceBadge('qishui').color, '#45d68f', '汽水品牌色');
-    eq(Online.sourceBadge('qishui').icon, 'i-app-qishui', '汽水 app 图标');
+    eq(Online.sourceBadge('qishui').icon, '/platform-icons/qishui.png', '汽水官方图标 PNG');
     eq(Online.sourceBadge('netease').text, '网易云音乐', '网易徽标品牌名（回归）');
-    eq(Online.sourceBadge('netease').icon, 'i-app-netease', '网易 app 图标（回归）');
+    eq(Online.sourceBadge('netease').icon, '/platform-icons/netease.png', '网易官方图标 PNG（回归）');
     eq(Online.sourceBadge('qq').color, '#12b7f5', 'QQ 品牌色（回归）');
-    eq(Online.sourceBadge('qq').icon, 'i-app-qq', 'QQ app 图标（回归）');
+    eq(Online.sourceBadge('qq').icon, '/platform-icons/qq.png', 'QQ 官方图标 PNG（回归）');
     eq(Online.sourceBadge('kugou').color, '#2ca5f0', '酷狗品牌色（回归）');
-    eq(Online.sourceBadge('kugou').icon, 'i-app-kugou', '酷狗 app 图标（回归）');
+    eq(Online.sourceBadge('kugou').icon, '/platform-icons/kugou.png', '酷狗官方图标 PNG（回归）');
+    // 酷我此前整条缺席、一直挂通用地球图标，这里钉住它的登记。
+    eq(Online.sourceBadge('kuwo').text, '酷我音乐', '酷我徽标品牌名');
+    eq(Online.sourceBadge('kuwo').icon, '/platform-icons/kuwo.png', '酷我官方图标 PNG');
     // 本地曲库也有一枚（唱片），且不带任何平台品牌色。
     eq(Online.sourceBadge('local').icon, 'i-app-local', '本地曲库有自己的图标');
     eq(Online.sourceBadge('local').color, null, '本地曲库不占用平台品牌色');
@@ -1032,12 +1036,14 @@ async function loginScenario(pollStates, opts) {
     await ticks(20);
     const Online = env.sandbox.window.Online;
     const b = Online.badge('netease');
+    // 平台徽标是位图：.src-badge 之外必须挂 .is-img（容器透明、尺寸由 CSS 钉）。
     // 桩的 className 与 classList 是两套（classList 只由 .add() 维护），
     // 这里按 className 断言。
-    eq(b.className, 'src-badge', '徽标带 src-badge 类（配色由 CSS 管）');
+    eq(b.className, 'src-badge is-img', '平台徽标带 src-badge + is-img 类');
     // 视觉上只有图标：不能再出现文字节点。
     eq(b.textContent, '', '徽标里不摆文字');
-    ok(b.innerHTML.indexOf('#i-app-netease') >= 0, '徽标引用网易云 app 图标');
+    ok(b.innerHTML.indexOf('src="/platform-icons/netease.png"') >= 0,
+      '徽标引用网易云官方图标 PNG');
     // 图标本身说不出平台名，读屏与悬停必须能拿到。
     eq(b.title, '网易云音乐', 'title 给完整平台名');
     eq(b.getAttribute('aria-label'), '网易云音乐', 'aria-label 给完整平台名');
@@ -1046,18 +1052,26 @@ async function loginScenario(pollStates, opts) {
     ok(unknown.innerHTML.indexOf('#i-app-generic') >= 0, '未登记音源画通用图标');
     eq(unknown.title, 'CCMixter', '未登记音源用服务端 label 兜底，不裸出 id');
 
-    // 图标 id 是拼字符串写进 innerHTML 的，check-assets 那条静态扫描（只认
-    // 字面量 <use href="#i-x">）扫不到它。拼错的表现是一个空色块，不报任何
-    // 错，所以这里对着 index.html 的 sprite 逐个核。
+    // 平台图标的拼字符串 <img src> 静态扫描扫不出拼写错，而且路由在
+    // main.rs 的 PLATFORM_ICONS 表里——这里对「online.js 声明的路径」与
+    // 「web/platform-icons 磁盘文件」「main.rs 白名单」逐个核，任何一边
+    // 漏了浏览器都只会拿到一个碎图。
     const html = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
     const symbols = new Set();
     const re = /<symbol\s+id="(i-[^"]+)"/g;
     let m;
     while ((m = re.exec(html)) !== null) symbols.add(m[1]);
-    ['netease', 'qq', 'kugou', 'qishui', 'local'].forEach((s) => {
+    const mainRs = fs.readFileSync(path.join(SRC_DIR, 'main.rs'), 'utf8');
+    ['netease', 'qq', 'kugou', 'kuwo', 'qishui'].forEach((s) => {
       const icon = Online.sourceBadge(s).icon;
-      ok(symbols.has(icon), 'index.html 定义了 ' + s + ' 的图标 ' + icon);
+      ok(/^\/platform-icons\/[\w-]+\.png$/.test(icon), s + ' 图标是站内 PNG 路径：' + icon);
+      const rel = icon.slice(1);
+      ok(fs.existsSync(path.join(WEB, rel)), 'web/' + rel + ' 文件存在');
+      ok(mainRs.indexOf('"' + path.basename(icon) + '"') >= 0,
+        'main.rs PLATFORM_ICONS 登记了 ' + path.basename(icon));
     });
+    // 本地与兜底仍是 sprite 字形，必须在 index.html 里有对应 symbol。
+    ok(symbols.has(Online.sourceBadge('local').icon), 'index.html 定义了本地曲库图标');
     ok(symbols.has(Online.sourceIcon('nope')), 'index.html 定义了兜底图标');
   }
 

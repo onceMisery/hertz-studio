@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-09-30 | spec | docs/aegis/specs/2026-09-30-aggregate-search-design.md | 歌曲聚合搜索、加载与展示优化（待确认） |
 | 2026-09-26 | plan | docs/aegis/plans/2026-09-26-listening-experience.md | 歌单、封面、歌词与创意工坊体验升级 |
 | 2026-09-26 | work | docs/aegis/work/2026-09-26-listening-experience/20-checkpoint.md | 体验升级检查点 |
 | 2026-09-26 | work | docs/aegis/work/2026-09-26-listening-experience/90-evidence.md | 体验升级验证与架构记录 |

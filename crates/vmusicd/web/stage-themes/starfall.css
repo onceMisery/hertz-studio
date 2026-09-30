@@ -1,0 +1,493 @@
+/* SPDX-License-Identifier: MIT */
+/* Copyright (c) 2026 mmusic-studio contributors */
+/* 星落（starfall）：**舞台主题**，不是皮肤。
+
+   皮肤管整个应用的布局、且与彼此互斥；舞台主题只管沉浸式三维舞台的操作层，
+   与皮肤是**组合**关系（流年 + 星落、工作台 + 星落都成立）。开关在舞台设置
+   的「舞台主题」里，随舞台偏好持久化，落在 #stage3d 的 data-stage-theme 上。
+
+   交互语言取自 folia 那套沉浸播放器：静止时画面是纯演出（连歌单架与播放舱
+   一起收走），指针一动，玻璃胶囊从一条进度发丝弹开成完整播放条；面板控件
+   一律药丸化，微标题拉开字距，数字读数走等宽。
+
+   配色纪律：本文件不出现任何颜色字面量，所有着色都由 --s3d-* 令牌经
+   color-mix 派生 —— 舞台换强调色时星落的玻璃材质跟着变。 */
+
+/* --- 主题令牌：弹簧曲线、玻璃材质、控件尺寸 --------------------------------
+   --st-spring 是 framer-motion stiffness 280 / damping 24 的阶跃等效曲线
+   （轻微过冲后一次收敛），--st-micro 对应 folia 的 0.18s easeOut 微步进。 */
+.s3d[data-stage-theme="starfall"] {
+  --st-spring: cubic-bezier(.22, 1.16, .36, 1);
+  --st-spring-dur: 340ms;
+  --st-micro: 180ms cubic-bezier(.2, .7, .3, 1);
+  --st-glass: color-mix(in srgb, var(--s3d-text) 7%, transparent);
+  --st-glass-strong: color-mix(in srgb, var(--s3d-text) 12%, transparent);
+  --st-hair: color-mix(in srgb, var(--s3d-text) 13%, transparent);
+  --st-ink-soft: color-mix(in srgb, var(--s3d-text) 58%, transparent);
+  --st-shade: color-mix(in srgb, var(--s3d-bg) 58%, transparent);
+  --st-blur: 30px;
+  --st-panel-radius: 24px;
+  --st-track-h: 6px;
+  --st-thumb: 14px;
+  --st-tracking: .24em;
+}
+
+/* --- 星落氛围层：两道斜向流星的视差 ----------------------------------------
+   挂在 .s3d-vignette 上（它已是 inset:0、pointer-events:none、位于画布之上
+   chrome 之下），因此不需要新增 DOM。只动 transform，合成器友好；
+   .s3d-reduced 的全局 animation:none 会自动把它停掉。 */
+.s3d[data-stage-theme="starfall"] .s3d-vignette::before,
+.s3d[data-stage-theme="starfall"] .s3d-vignette::after {
+  content: '';
+  position: absolute;
+  inset: -30% -20%;
+  pointer-events: none;
+  will-change: transform;
+  /* 边缘压暗，避免流星在屏幕四边硬切断。 */
+  -webkit-mask-image: radial-gradient(circle at 50% 45%, transparent 18%, currentColor 72%);
+  mask-image: radial-gradient(circle at 50% 45%, transparent 18%, currentColor 72%);
+}
+.s3d[data-stage-theme="starfall"] .s3d-vignette::before {
+  background-image: repeating-linear-gradient(101deg,
+      transparent 0 132px,
+      color-mix(in srgb, var(--s3d-accent) 26%, transparent) 132px 133px,
+      transparent 133px 264px);
+  opacity: .5;
+  animation: st-far-fall 17s linear infinite;
+}
+.s3d[data-stage-theme="starfall"] .s3d-vignette::after {
+  background-image: repeating-linear-gradient(97deg,
+      transparent 0 268px,
+      color-mix(in srgb, var(--s3d-text) 34%, transparent) 268px 270px,
+      transparent 270px 520px);
+  opacity: .34;
+  animation: st-near-fall 11s linear infinite;
+}
+/* 位移方向与条纹夹角垂直分量一致，看起来才是「落」而不是「平移」。 */
+@keyframes st-far-fall {
+  from { transform: translate3d(0, -22%, 0); }
+  to { transform: translate3d(-6%, 22%, 0); }
+}
+@keyframes st-near-fall {
+  from { transform: translate3d(0, -26%, 0); }
+  to { transform: translate3d(-9%, 26%, 0); }
+}
+
+/* --- 底部播放舱：静止时整条收走，唤醒时从发丝弹开成完整播放条 --------------
+   静止态保留「收起」的尺寸（两端栏 0fr、播放键高度 0、读数宽度 0），这样
+   chrome 唤醒的瞬间过渡是从一条发丝 bloom 成完整舱，而不是凭空弹出。 */
+.s3d[data-stage-theme="starfall"] .s3d-player {
+  width: min(430px, calc(100% - 120px));
+  grid-template-columns: 0fr minmax(0, 1fr) 0fr;
+  gap: 0;
+  padding: 9px 20px;
+  border-radius: 999px;
+  background: var(--st-glass);
+  border: 1px solid var(--st-hair);
+  box-shadow: 0 24px 80px var(--st-shade);
+  backdrop-filter: blur(var(--st-blur)) saturate(1.4);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 10px);
+  transition: width var(--st-spring-dur) var(--st-spring),
+    grid-template-columns var(--st-spring-dur) var(--st-spring),
+    gap var(--st-spring-dur) var(--st-spring),
+    padding var(--st-spring-dur) var(--st-spring),
+    opacity var(--st-micro), transform var(--st-spring-dur) var(--st-spring),
+    background var(--st-micro), border-color var(--st-micro);
+}
+.s3d[data-stage-theme="starfall"].s3d-chrome .s3d-player {
+  width: min(760px, calc(100% - 96px));
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 22px;
+  padding: 12px 22px;
+  background: var(--st-glass-strong);
+  border-color: color-mix(in srgb, var(--s3d-text) 18%, transparent);
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+/* 悬停只做材质提亮与 2px 上浮，不再承担展开职责（展开归 chrome 唤醒）。 */
+.s3d[data-stage-theme="starfall"].s3d-chrome .s3d-player:hover {
+  background: color-mix(in srgb, var(--s3d-text) 15%, transparent);
+  transform: translate(-50%, -2px);
+}
+
+/* 两端栏：收起时裁掉溢出，否则封面与音量会糊在进度线上。 */
+.s3d[data-stage-theme="starfall"] .s3d-track-info,
+.s3d[data-stage-theme="starfall"] .s3d-player-extra {
+  min-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--st-micro);
+}
+.s3d[data-stage-theme="starfall"].s3d-chrome .s3d-track-info,
+.s3d[data-stage-theme="starfall"].s3d-chrome .s3d-player-extra {
+  opacity: 1;
+  pointer-events: auto;
+}
+.s3d[data-stage-theme="starfall"] .s3d-art { width: 44px; height: 44px; border-radius: 12px; }
+
+/* 播放键组：收起时高度归零（height 可插值，auto 不行，所以给死 48px）。 */
+.s3d[data-stage-theme="starfall"] .s3d-play-buttons {
+  height: 0;
+  margin-bottom: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transform: scale(.82);
+  transition: height var(--st-spring-dur) var(--st-spring),
+    opacity var(--st-micro), transform var(--st-spring-dur) var(--st-spring);
+}
+.s3d[data-stage-theme="starfall"].s3d-chrome .s3d-play-buttons {
+  height: 48px;
+  margin-bottom: 7px;
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1);
+}
+
+/* 时间读数：收起时宽度归零，进度线独占胶囊。 */
+.s3d[data-stage-theme="starfall"] .s3d-timeline {
+  gap: 0;
+  font: 10px/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .04em;
+  color: var(--st-ink-soft);
+}
+.s3d[data-stage-theme="starfall"] .s3d-timeline span {
+  min-width: 0;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-width var(--st-spring-dur) var(--st-spring), opacity var(--st-micro);
+}
+.s3d[data-stage-theme="starfall"].s3d-chrome .s3d-timeline { gap: 12px; }
+.s3d[data-stage-theme="starfall"].s3d-chrome .s3d-timeline span {
+  min-width: 30px;
+  max-width: 42px;
+  opacity: .7;
+}
+
+/* 进度线：轨道画在 runnable-track 上（收起 2px 发丝、弹开 6px），input 本身
+   只当 20px 高的命中区 —— 直接在 input 上写 height + padding 会被 border-box
+   顶成 padding 的高度，发丝就没了。填充色仍复用 stage3d 写的 --s3d-progress。 */
+.s3d[data-stage-theme="starfall"] #s3d-seek {
+  height: 20px;
+  padding: 0;
+  border-radius: 999px;
+  background: none;
+}
+.s3d[data-stage-theme="starfall"] #s3d-seek::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(to right,
+      var(--s3d-accent) var(--s3d-progress, 0%),
+      color-mix(in srgb, var(--s3d-text) 16%, transparent) var(--s3d-progress, 0%));
+  transition: height var(--st-micro);
+}
+.s3d[data-stage-theme="starfall"] #s3d-seek::-moz-range-track {
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(to right,
+      var(--s3d-accent) var(--s3d-progress, 0%),
+      color-mix(in srgb, var(--s3d-text) 16%, transparent) var(--s3d-progress, 0%));
+}
+/* 弹开态的轨道加粗：webkit 与 moz 必须分成两条规则 —— 选择器列表里混进
+   对方引擎不认的伪元素，整条规则会被直接丢弃（不是只丢那一个选择器）。 */
+.s3d[data-stage-theme="starfall"].s3d-chrome #s3d-seek::-webkit-slider-runnable-track { height: var(--st-track-h); }
+.s3d[data-stage-theme="starfall"].s3d-chrome #s3d-seek::-moz-range-track { height: var(--st-track-h); }
+/* 收起时不留圆头（发丝就是一整条），弹开才浮出 14px 圆头。 */
+.s3d[data-stage-theme="starfall"] #s3d-seek::-webkit-slider-thumb {
+  width: var(--st-thumb);
+  height: var(--st-thumb);
+  border-radius: 50%;
+  background: var(--s3d-accent);
+  margin-top: -4px;
+  transform: scale(0);
+  transition: transform var(--st-micro);
+}
+.s3d[data-stage-theme="starfall"].s3d-chrome #s3d-seek::-webkit-slider-thumb { transform: scale(1); }
+.s3d[data-stage-theme="starfall"] #s3d-seek::-moz-range-thumb {
+  width: var(--st-thumb);
+  height: var(--st-thumb);
+  border: 0;
+  border-radius: 50%;
+  background: var(--s3d-accent);
+}
+
+/* --- 顶栏：玻璃胶囊 + 44px 圆钮（folia 的静息 0.65 透明度与按压 0.82 缩放）--- */
+.s3d[data-stage-theme="starfall"] .s3d-head {
+  --s3d-btn: 44px;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 999px;
+  background: var(--st-glass);
+  border: 1px solid var(--st-hair);
+  box-shadow: 0 18px 56px var(--st-shade);
+  backdrop-filter: blur(var(--st-blur)) saturate(1.4);
+  transform: translateY(-14px) scale(.96);
+  transition: opacity var(--st-micro), transform var(--st-spring-dur) var(--st-spring);
+}
+.s3d[data-stage-theme="starfall"].s3d-chrome .s3d-head { transform: translateY(0) scale(1); }
+
+.s3d[data-stage-theme="starfall"] .s3d-btn {
+  border-radius: 999px;
+  opacity: .65;
+  transition: background var(--st-micro), color var(--st-micro), opacity var(--st-micro),
+    transform var(--st-micro), box-shadow var(--st-micro), filter var(--st-micro);
+}
+.s3d[data-stage-theme="starfall"] .s3d-btn:hover {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 26%, transparent);
+}
+.s3d[data-stage-theme="starfall"] .s3d-btn:active { transform: scale(.82); }
+.s3d[data-stage-theme="starfall"] .s3d-btn[aria-pressed="true"] {
+  opacity: 1;
+  color: var(--s3d-accent);
+  background: color-mix(in srgb, var(--s3d-accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--s3d-accent) 45%, transparent);
+}
+/* 播放键是实底强调色，不能套半透明 hover（会发灰）：改用 brightness 提亮。 */
+.s3d[data-stage-theme="starfall"] .s3d-play { width: 48px; height: 48px; opacity: 1; }
+.s3d[data-stage-theme="starfall"] .s3d-play:hover {
+  background: var(--s3d-accent);
+  box-shadow: none;
+  filter: brightness(1.12);
+  transform: scale(1.05);
+}
+
+/* --- 场景坞：药丸分段控件（选中态用 accent 内描边环，不用实底）-------------- */
+.s3d[data-stage-theme="starfall"] .s3d-dock {
+  gap: 4px;
+  padding: 6px;
+  border-radius: 999px;
+  background: var(--st-glass);
+  border: 1px solid var(--st-hair);
+  box-shadow: 0 18px 56px var(--st-shade);
+  backdrop-filter: blur(var(--st-blur)) saturate(1.4);
+  transform: translateX(-50%) translateY(14px) scale(.96);
+  transition: opacity var(--st-micro), transform var(--st-spring-dur) var(--st-spring);
+}
+.s3d[data-stage-theme="starfall"].s3d-chrome .s3d-dock { transform: translateX(-50%) translateY(0) scale(1); }
+.s3d[data-stage-theme="starfall"] .s3d-dock-btn {
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 999px;
+  opacity: .55;
+  transition: background var(--st-micro), color var(--st-micro), opacity var(--st-micro),
+    box-shadow var(--st-micro);
+}
+.s3d[data-stage-theme="starfall"] .s3d-dock-btn:hover {
+  opacity: .9;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+.s3d[data-stage-theme="starfall"] .s3d-dock-btn.active {
+  opacity: 1;
+  color: var(--s3d-accent);
+  background: color-mix(in srgb, var(--s3d-accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--s3d-accent) 55%, transparent);
+}
+.s3d[data-stage-theme="starfall"] .s3d-dock-tx {
+  font-size: 10px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+
+/* --- 右侧玻璃面板：设置与队列同一套材质，角落枢轴弹入 ---------------------- */
+.s3d[data-stage-theme="starfall"] .s3d-settings,
+.s3d[data-stage-theme="starfall"] .s3d-queue {
+  width: 320px;
+  border-radius: var(--st-panel-radius);
+  background: var(--st-glass-strong);
+  border: 1px solid var(--st-hair);
+  box-shadow: 0 24px 80px var(--st-shade);
+  backdrop-filter: blur(40px) saturate(1.4);
+  /* 原生下拉跟随深色，避免弹出系统白底列表。 */
+  color-scheme: dark;
+}
+.s3d[data-stage-theme="starfall"] .s3d-settings { transform-origin: 100% 0; }
+.s3d[data-stage-theme="starfall"] .s3d-queue { transform-origin: 100% 100%; }
+/* hidden 切到显示是一次全新布局，animation 会自然重放 —— 这就是弹入时机。 */
+.s3d[data-stage-theme="starfall"] .s3d-settings:not([hidden]) { animation: st-panel-in 240ms cubic-bezier(.2, .7, .3, 1) both; }
+@keyframes st-panel-in {
+  from { opacity: 0; transform: scale(.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* 面板文字层级：微标题拉字距，读数等宽。 */
+.s3d[data-stage-theme="starfall"] .s3d-settings-heading,
+.s3d[data-stage-theme="starfall"] .s3d-queue-head {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: var(--st-tracking);
+  text-transform: uppercase;
+  color: var(--st-ink-soft);
+}
+.s3d[data-stage-theme="starfall"] .s3d-settings label {
+  margin: 18px 0 10px;
+  font-size: 10.5px;
+  letter-spacing: .12em;
+  color: var(--st-ink-soft);
+}
+/* 开关行：文案在左、药丸开关在右（基础样式是反的）。 */
+.s3d[data-stage-theme="starfall"] .s3d-settings label:has(input[type="checkbox"]) {
+  flex-direction: row-reverse;
+  gap: 12px;
+  align-items: center;
+}
+.s3d[data-stage-theme="starfall"] .s3d-settings output,
+.s3d[data-stage-theme="starfall"] .s3d-queue-num,
+.s3d[data-stage-theme="starfall"] .s3d-queue-dur {
+  font: 11px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .04em;
+  color: var(--s3d-accent);
+}
+.s3d[data-stage-theme="starfall"] .s3d-settings > span { letter-spacing: .1em; }
+
+/* 下拉 → 药丸 chip：自绘箭头，选中/聚焦用 accent 内环。 */
+.s3d[data-stage-theme="starfall"] .s3d-settings select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  padding: 10px 34px 10px 15px;
+  border-radius: 999px;
+  border: 1px solid var(--st-hair);
+  background-color: color-mix(in srgb, var(--s3d-text) 8%, transparent);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--st-ink-soft) 50%),
+    linear-gradient(135deg, var(--st-ink-soft) 50%, transparent 50%);
+  background-position: calc(100% - 19px) 52%, calc(100% - 14px) 52%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  color: var(--s3d-text);
+  font-size: 12px;
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: border-color var(--st-micro), box-shadow var(--st-micro), background-color var(--st-micro);
+}
+.s3d[data-stage-theme="starfall"] .s3d-settings select:hover {
+  border-color: color-mix(in srgb, var(--s3d-accent) 42%, transparent);
+  background-color: color-mix(in srgb, var(--s3d-text) 12%, transparent);
+}
+.s3d[data-stage-theme="starfall"] .s3d-settings select:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--s3d-accent),
+    0 0 0 3px color-mix(in srgb, var(--s3d-accent) 18%, transparent);
+}
+
+/* 滑杆：6px 轨 + 14px 圆头，悬停放大 1.25 倍。 */
+.s3d[data-stage-theme="starfall"] .s3d-settings input[type="range"] {
+  height: var(--st-track-h);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--s3d-text) 14%, transparent);
+}
+.s3d[data-stage-theme="starfall"] .s3d-settings input[type="range"]::-webkit-slider-thumb {
+  width: var(--st-thumb);
+  height: var(--st-thumb);
+  border-radius: 50%;
+  background: var(--s3d-accent);
+  transition: transform var(--st-micro);
+}
+.s3d[data-stage-theme="starfall"] .s3d-settings input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.25); }
+.s3d[data-stage-theme="starfall"] .s3d-settings input[type="range"]::-moz-range-thumb {
+  width: var(--st-thumb);
+  height: var(--st-thumb);
+  border: 0;
+  border-radius: 50%;
+  background: var(--s3d-accent);
+}
+
+/* 复选框 → 48×24 药丸开关，16px 圆头行程 24px。
+   基础样式里有 .s3d-settings input { width: 100% }，这里必须显式定宽。 */
+.s3d[data-stage-theme="starfall"] .s3d-settings input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: none;
+  width: 48px;
+  height: 24px;
+  margin: 0;
+  border-radius: 999px;
+  border: 1px solid var(--st-hair);
+  background: color-mix(in srgb, var(--s3d-text) 10%, transparent);
+  cursor: pointer;
+  transition: background var(--st-micro), border-color var(--st-micro);
+}
+.s3d[data-stage-theme="starfall"] .s3d-settings input[type="checkbox"]::before {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--s3d-muted);
+  transition: transform var(--st-spring-dur) var(--st-spring), background var(--st-micro);
+}
+.s3d[data-stage-theme="starfall"] .s3d-settings input[type="checkbox"]:checked {
+  background: color-mix(in srgb, var(--s3d-accent) 30%, transparent);
+  border-color: color-mix(in srgb, var(--s3d-accent) 55%, transparent);
+}
+.s3d[data-stage-theme="starfall"] .s3d-settings input[type="checkbox"]:checked::before {
+  transform: translateX(24px);
+  background: var(--s3d-accent);
+}
+
+/* 歌词偏移的两个微调钮与工坊入口：一并药丸化，数字走等宽。 */
+.s3d[data-stage-theme="starfall"] #s3d-fl-off-down,
+.s3d[data-stage-theme="starfall"] #s3d-fl-off-up {
+  width: auto;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--st-hair);
+  background: color-mix(in srgb, var(--s3d-text) 8%, transparent);
+  color: var(--s3d-text);
+  font: 11px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  opacity: .85;
+}
+.s3d[data-stage-theme="starfall"] .s3d-workshop {
+  height: 40px;
+  border-radius: 999px;
+  letter-spacing: .1em;
+}
+
+/* 队列行：圆角与悬停底色跟面板同一套材质语言。 */
+.s3d[data-stage-theme="starfall"] .s3d-queue-row { border-radius: 999px; }
+.s3d[data-stage-theme="starfall"] .s3d-queue-row:hover,
+.s3d[data-stage-theme="starfall"] .s3d-queue-row:focus-visible {
+  background: color-mix(in srgb, var(--s3d-text) 9%, transparent);
+}
+
+/* 提示与快捷键说明：等宽 + 低透明度，退成仪表注脚。 */
+.s3d[data-stage-theme="starfall"] .s3d-hint,
+.s3d[data-stage-theme="starfall"] .s3d-keys {
+  font: 10px/1.7 ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .1em;
+  color: var(--st-ink-soft);
+}
+
+/* folia 歌词层的 chrome 跟着同一套声音：微标题字距 + 字幕胶囊。 */
+.s3d[data-stage-theme="starfall"] .fl-sub-card { border-radius: 999px; }
+.s3d[data-stage-theme="starfall"] .fl-sonnet-eyebrow,
+.s3d[data-stage-theme="starfall"] .fl-sonnet-hud {
+  letter-spacing: var(--st-tracking);
+  text-transform: uppercase;
+  opacity: .5;
+}
+
+/* --- 窄屏：胶囊占满可用宽度，面板让出边距 ---------------------------------- */
+@media (max-width: 760px) {
+  .s3d[data-stage-theme="starfall"] .s3d-player { width: calc(100% - 56px); padding: 8px 14px; }
+  .s3d[data-stage-theme="starfall"].s3d-chrome .s3d-player { width: calc(100% - 28px); gap: 12px; }
+  .s3d[data-stage-theme="starfall"] .s3d-head { --s3d-btn: 38px; }
+  .s3d[data-stage-theme="starfall"] .s3d-settings,
+  .s3d[data-stage-theme="starfall"] .s3d-queue { width: min(320px, calc(100% - 24px)); }
+  .s3d[data-stage-theme="starfall"] .s3d-art { width: 38px; height: 38px; }
+}

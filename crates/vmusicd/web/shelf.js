@@ -66,15 +66,27 @@
     applyCover(slot, item);
   }
 
-  // 在线卡带平台徽标（icon + 品牌色与搜索结果同源）；本地卡没有，隐藏。
+  // 在线卡带平台徽标（官方 PNG 图标 + 品牌色与搜索结果同源）；本地卡没有，隐藏。
+  // item.badge 可能是平台 PNG 路径（以 / 开头）或 sprite 字形 id（i- 开头）。
   function paintBadge(slot, item) {
     var b = slot.badge;
     if (!item || !item.badge) { b.hidden = true; return; }
     b.hidden = false;
+    var isImg = item.badge.charAt(0) === '/';
+    b.classList.toggle('is-img', isImg);
     if (item.badgeColor) b.style.setProperty('--badge', item.badgeColor);
     else b.style.removeProperty('--badge');
-    var use = b.querySelector('use');
-    if (use) use.setAttribute('href', '#' + item.badge);
+    if (isImg) {
+      b.innerHTML = '<img src="' + item.badge + '" alt="" aria-hidden="true">';
+    } else {
+      var use = b.querySelector('use');
+      // 上一张若是位图，innerHTML 已被换成 <img>，这里补回 svg 再挂引用。
+      if (!use) {
+        b.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href=""/></svg>';
+        use = b.querySelector('use');
+      }
+      if (use) use.setAttribute('href', '#' + item.badge);
+    }
   }
 
   // 封面两路：在线卡直接带平台封面直链（coverUrl）；本地卡走共享的

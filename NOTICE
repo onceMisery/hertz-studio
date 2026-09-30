@@ -33,6 +33,14 @@ Vendored assets
     Upstream: https://github.com/kazuhikoarase/qrcode-generator
     The word "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
 
+  - crates/vmusicd/web/vendor/pixi.min.js
+    PixiJS v8.20.1
+    Copyright (c) 2013-2023 Mathew Groves, Chad Engler
+    Licensed under the MIT License (http://www.opensource.org/licenses/mit-license.php)
+    Upstream: https://github.com/pixijs/pixijs
+    Loaded lazily by the web UI only when the 商籁 (sonnet) lyric visual is
+    selected; no other screen pays its download or initialization cost.
+
 ---------------------------------------------------------------------------
 Design lineage
 ---------------------------------------------------------------------------
@@ -47,6 +55,18 @@ by the music player subsystem of the VCPChat project
 
 No source file of that project is copied into this repository. All code here
 is an independent implementation written for this project.
+
+The 商籁 (sonnet) lyric visual (`crates/vmusicd/web/folia/folia-sonnet-fx.js`,
+`folia-sonnet.js`) follows the same rule. Its behaviour — the per-line
+cinematic shot selection, the deterministic absolute-time camera paths, the
+glyph/phrase typography pipeline, the accent-choreography cueing rules and the
+optical-print post-process look — was specified by studying the sonnet stage
+mode of VCPChat (CC BY-NC-SA 4.0), itself an adaptation of the sonnet
+visualizer of the folia project (AGPL-3.0). No source file of either project
+is copied into this repository; the implementation, module structure, host
+integration and all code are written independently for this project, and the
+numeric behaviour contracts are re-expressed against this project's own Stage
+facade and folia theme adapter.
 
 The 汽水音乐 (Soda Music) QR sign-in flow
 (`crates/vmusicd/src/online/qishui.rs`, section "扫码登录") is an independent
