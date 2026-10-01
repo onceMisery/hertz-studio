@@ -454,7 +454,10 @@
     }
 
     function frame(dtMs) {
-      if (!active || blocked || document.hidden || !root.classList.contains('s3d-chrome') || mode === 'off') return;
+      // blocked 只该禁输入（拖拽/滚轮/命中，见 setBlocked 与各输入口），不能停姿态：
+      // 设置面板是改「3D 歌单架」的唯一入口，而面板打开即 blocked——姿态若冻住，
+      // 切 封面流/侧栏/关闭 就完全没有视觉反馈，观感即设置没反应。
+      if (!active || document.hidden || !root.classList.contains('s3d-chrome') || mode === 'off') return;
       var reduced = reducedMotion();
       var data = Stage && Stage.presentation ? Stage.presentation() : null;
       var playing = !!(data && data.playing);
@@ -632,7 +635,10 @@
     }
 
     function gateFps() {
-      if (!active || mode === 'off' || blocked || !items.length || document.hidden) return 0;
+      // blocked 不在这里出现：面板打开只该让架子「不可交互」（CSS pointer-events
+      // 与各输入口收口），不该停帧——停帧等于冻结排布，而「3D 歌单架」这个选项
+      // 只能在面板里改，改完看不到任何重排，观感就是设置没反应。
+      if (!active || mode === 'off' || !items.length || document.hidden) return 0;
       if (!root.classList.contains('s3d-chrome')) return 0;
       if (reducedMotion()) return 20;
       // 暂停时没有频谱律动，30fps 足够呼吸与滑动；eco 档同样压到 30。

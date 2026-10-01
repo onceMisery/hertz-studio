@@ -874,7 +874,11 @@ body.s3d-open > .bar { display: none; }
   --s3d-sc-radius: clamp(12px, 1.5vw, 18px);
   position: absolute;
   inset: 0;
-  z-index: 1;
+  /* 与顶栏/播放条同层：folia 歌词层（#s3d-folia，z-index 3）自带不透明背景，
+     架子若留在它下面（原 z-index 1），只要歌词视觉是流光/心象/商籁/凝彩，
+     整个封面流就被盖死——切「3D 歌单架」就完全没有反馈。设置/队列面板在 DOM
+     里更靠后，同层仍然压在卡片上。 */
+  z-index: 4;
   pointer-events: none;
   perspective: 1500px;
   perspective-origin: 50% 46%;
@@ -882,7 +886,9 @@ body.s3d-open > .bar { display: none; }
   transition: opacity 420ms cubic-bezier(.16,1,.3,1);
 }
 .s3d.s3d-shelf-on .s3d-shelf { opacity: 1; }
-.s3d.s3d-shelf-blocked .s3d-shelf { opacity: 0; transition-duration: 220ms; }
+/* 面板打开时歌单架禁输入但不消失：压暗到能看清排布变化（设置里切模式的即时
+   反馈），命中由 .s3d-shelf-blocked .s3d-sc 的 pointer-events:none 收口。 */
+.s3d.s3d-shelf-blocked .s3d-shelf { opacity: .4; transition-duration: 220ms; }
 
 /* 沉浸：3D 歌曲列表默认隐藏（只留舞台与歌词），仅鼠标移动/按键唤醒 chrome
    时才浮现；静止摘掉 chrome 后随之淡出。覆盖上面 shelf-on 的常显。
