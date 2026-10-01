@@ -148,13 +148,14 @@ body.s3d-open > .bar { display: none; }
   to { transform: translate3d(3%, 4%, 0) rotate(-7deg) scale(1.08); opacity: .38; }
 }
 
+/* 极光氛围层是 z-index 1 的伪元素，演出层要抬到它上面。但顶栏/场景坞/播放条
+   不在这份名单里：它们基础值就是 z-index 4，一旦跟着降到 2，就会落到 folia
+   歌词层（#s3d-folia，z-index 3，自带不透明背景 .fl-bg）之下——歌词视觉选
+   流光/心象/商籁/凝彩时，整条控制界面被演出层盖死。 */
 .s3d[data-scene='aurora'] .s3d-canvas-wrap,
 .s3d[data-scene='aurora'] .s3d-vignette,
 .s3d[data-scene='aurora'] .s3d-reading,
-.s3d[data-scene='aurora'] .s3d-brand,
-.s3d[data-scene='aurora'] .s3d-head,
-.s3d[data-scene='aurora'] .s3d-dock,
-.s3d[data-scene='aurora'] .s3d-player {
+.s3d[data-scene='aurora'] .s3d-brand {
   z-index: 2;
 }
 
@@ -874,11 +875,11 @@ body.s3d-open > .bar { display: none; }
   --s3d-sc-radius: clamp(12px, 1.5vw, 18px);
   position: absolute;
   inset: 0;
-  /* 与顶栏/播放条同层：folia 歌词层（#s3d-folia，z-index 3）自带不透明背景，
-     架子若留在它下面（原 z-index 1），只要歌词视觉是流光/心象/商籁/凝彩，
-     整个封面流就被盖死——切「3D 歌单架」就完全没有反馈。设置/队列面板在 DOM
-     里更靠后，同层仍然压在卡片上。 */
-  z-index: 4;
+  /* 压在 folia 歌词层（#s3d-folia，z-index 3，自带不透明背景）之上、chrome
+     （z-index 4）之下：与歌词层同值时靠 DOM 顺序胜出。原先的 z-index 1 让
+     整个封面流被歌词层盖死——切「3D 歌单架」完全没有反馈；而抬到 4 又会盖住
+     顶栏/场景坞/播放条。 */
+  z-index: 3;
   pointer-events: none;
   perspective: 1500px;
   perspective-origin: 50% 46%;
