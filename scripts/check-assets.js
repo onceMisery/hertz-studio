@@ -4,7 +4,7 @@
 //
 // 前端资源接线检查（零依赖）。
 //
-// vmusicd 用 `include_str!` 把 web/ 下的文件内嵌进二进制，再用一张显式路由表
+// hertz-studio 用 `include_str!` 把 web/ 下的文件内嵌进二进制，再用一张显式路由表
 // 逐个挂出去。这条链有三个容易静默失效的地方，而且都不会被 Rust 编译器拦住：
 //
 //   1. include_str! 指向的文件不存在      → 这个会被编译器拦住（唯一的好消息）
@@ -23,8 +23,8 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'crates', 'vmusicd', 'web');
-const MAIN_RS = path.join(ROOT, 'crates', 'vmusicd', 'src', 'main.rs');
+const WEB = path.join(ROOT, 'crates', 'hertz-studio', 'web');
+const MAIN_RS = path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs');
 const INDEX = path.join(WEB, 'index.html');
 
 let failures = 0;
@@ -50,7 +50,7 @@ while ((m = incRe.exec(mainRs)) !== null) includes.push({ name: m[1], rel: m[2] 
 console.log('\n内嵌资源');
 ok(includes.length >= 15, `include_str! 数量合理（${includes.length}）`);
 includes.forEach((inc) => {
-  const abs = path.resolve(path.join(ROOT, 'crates', 'vmusicd', 'src'), inc.rel);
+  const abs = path.resolve(path.join(ROOT, 'crates', 'hertz-studio', 'src'), inc.rel);
   ok(fs.existsSync(abs), `${inc.name} → ${inc.rel} 文件存在`);
 });
 
@@ -111,7 +111,7 @@ const linkedJsSource = linkedJs
   .join('\n');
 includes.forEach((inc) => {
   if (inc.name === 'INDEX_HTML') return;
-  const abs = path.resolve(path.join(ROOT, 'crates', 'vmusicd', 'src'), inc.rel);
+  const abs = path.resolve(path.join(ROOT, 'crates', 'hertz-studio', 'src'), inc.rel);
   const href = path.relative(WEB, abs).split(path.sep).join('/');
   ok(linkedCss.includes(href) || linkedJs.includes(href) || linkedJsSource.includes(`'${href}'`),
     `${inc.name}（${href}）被 index.html 引用`);

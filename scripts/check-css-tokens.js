@@ -20,7 +20,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const webDir = process.argv[2] || path.join(__dirname, '..', 'crates', 'vmusicd', 'web');
+const webDir = process.argv[2] || path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
 
 // 共享令牌：全站只有一个定义处，即 style.css 的 :root。
 // stage.css 只允许声明自己独占的 --stage-*。

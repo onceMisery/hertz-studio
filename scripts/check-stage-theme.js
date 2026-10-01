@@ -23,7 +23,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'crates', 'vmusicd', 'web');
+const WEB = path.join(ROOT, 'crates', 'hertz-studio', 'web');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 
 const THEME = read(path.join(WEB, 'stage-themes', 'starfall.css'));
@@ -31,7 +31,7 @@ const STAGE3D_CSS = read(path.join(WEB, 'stage3d.css'));
 const STAGE3D_JS = read(path.join(WEB, 'stage3d.js'));
 const SKINS_JS = read(path.join(WEB, 'skins', 'skins.js'));
 const HTML = read(path.join(WEB, 'index.html'));
-const MAIN_RS = read(path.join(ROOT, 'crates', 'vmusicd', 'src', 'main.rs'));
+const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs'));
 const WORKSHOP = read(path.join(WEB, 'workshop.js'));
 
 let failures = 0;

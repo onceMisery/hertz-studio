@@ -21,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const WEB = path.join(__dirname, '..', 'crates', 'vmusicd', 'web');
+const WEB = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
 const ROOT = path.join(__dirname, '..');
 
 let failures = 0;
@@ -1049,14 +1049,14 @@ section('歌单体验：封面共享与详情契约');
   const shelfSrc = fs.readFileSync(path.join(WEB, 'shelf.js'), 'utf8');
   const appSrc2 = fs.readFileSync(path.join(WEB, 'app.js'), 'utf8');
   const routesSrc = fs.readFileSync(
-    path.join(ROOT, 'crates', 'vmusicd', 'src', 'routes.rs'), 'utf8');
+    path.join(ROOT, 'crates', 'hertz-studio', 'src', 'routes.rs'), 'utf8');
   const plsRs = fs.readFileSync(path.join(ROOT, 'crates', 'vmusic-store', 'src', 'playlists.rs'), 'utf8');
   const libmetaSrc = fs.readFileSync(
     path.join(ROOT, 'crates', 'vmusic-library', 'src', 'lib.rs'), 'utf8');
   const storeSrc2 = fs.readFileSync(
     path.join(ROOT, 'crates', 'vmusic-store', 'src', 'lib.rs'), 'utf8');
   const scanSrc = fs.readFileSync(
-    path.join(ROOT, 'crates', 'vmusicd', 'src', 'scan.rs'), 'utf8');
+    path.join(ROOT, 'crates', 'hertz-studio', 'src', 'scan.rs'), 'utf8');
 
   // 重扫必须复用既有行 id，否则封面按新 UUID 落盘、DB 保留旧 id，204。
   ok(/pub async fn get_track_id_by_path\(/.test(storeSrc2),

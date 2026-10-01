@@ -6,7 +6,7 @@ const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
 const root = path.resolve(__dirname, '..');
-const web = path.join(root, 'crates/vmusicd/web');
+const web = path.join(root, 'crates/hertz-studio/web');
 const output = path.join(root, 'output/playwright/player');
 const base = process.env.PLAYER_UI_URL || 'http://127.0.0.1:18774';
 const suites = (process.env.PLAYER_CHECKS || 'skins,playback,lists,appearance').split(',');

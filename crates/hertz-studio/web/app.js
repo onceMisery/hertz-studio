@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 mmusic-studio contributors
 //
-// v2 原型：零构建原生 JS，和现有 crates/vmusicd/web/app.js 一样没有 npm 步骤。
+// v2 原型：零构建原生 JS，和现有 crates/hertz-studio/web/app.js 一样没有 npm 步骤。
 //
 // 与旧版最大的结构差异：所有后端访问都经过一个极薄的 transport 抽象。
 // 有真实服务时走 HTTP + WebSocket，没有时（例如直接双击打开本文件）退到
@@ -3846,7 +3846,7 @@ function initNowPlayingModal() {
   transport = await chooseTransport();
   if (transport.kind === 'demo') {
     ui.demoBadge.hidden = false;
-    toast('未连接 vmusicd，已进入演示模式', 'info');
+    toast('未连接本地服务，已进入演示模式', 'info');
   }
 
   ui.playpause.onclick = togglePlay;

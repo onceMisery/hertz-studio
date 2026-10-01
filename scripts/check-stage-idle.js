@@ -28,7 +28,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const WEB = path.join(__dirname, '..', 'crates', 'vmusicd', 'web');
+const WEB = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
 // 统一成 LF：仓库在 Windows 上检出是 CRLF，按行锚点切代码段会切歪。
 const read = (f) => fs.readFileSync(path.join(WEB, f), 'utf8').replace(/\r\n/g, '\n');
 const APP = read('app.js');

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Run against an isolated vmusicd. Upstream/playback responses are fixtures.
+// Run against an isolated hertz-studio. Upstream/playback responses are fixtures.
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -8,7 +8,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
   try {
     const page = await browser.newPage();
     if (process.env.SEARCH_LOCAL_ASSETS === '1') {
-      await page.route('**/online.js', route => route.fulfill({contentType:'application/javascript',body:fs.readFileSync('crates/vmusicd/web/online.js','utf8')}));
+      await page.route('**/online.js', route => route.fulfill({contentType:'application/javascript',body:fs.readFileSync('crates/hertz-studio/web/online.js','utf8')}));
     }
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));

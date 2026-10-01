@@ -25,13 +25,13 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'crates', 'vmusicd', 'web');
+const WEB = path.join(ROOT, 'crates', 'hertz-studio', 'web');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const STUDIO = read(path.join(WEB, 'theme-studio.js'));
 const STUDIO_CSS = read(path.join(WEB, 'theme-studio.css'));
 const STYLE_CSS = read(path.join(WEB, 'style.css'));
 const HTML = read(path.join(WEB, 'index.html'));
-const MAIN_RS = read(path.join(ROOT, 'crates', 'vmusicd', 'src', 'main.rs'));
+const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs'));
 const THEMES_JS = read(path.join(WEB, 'themes.js'));
 
 // main.rs 的壁纸白名单：一对一对的 (名字, include_bytes!)。多个章节都要查它，
@@ -323,7 +323,7 @@ function checkWallpaperWiring() {
     ok(table.has(w.id), `JS 目录里的 ${w.id} 在 main.rs 白名单里`);
     const rel = table.get(w.id);
     if (rel) {
-      const abs = path.resolve(path.join(ROOT, 'crates', 'vmusicd', 'src'), rel);
+      const abs = path.resolve(path.join(ROOT, 'crates', 'hertz-studio', 'src'), rel);
       ok(fs.existsSync(abs), `${w.id} → ${rel} 文件存在`);
       ok(fs.statSync(abs).size > 1024, `${w.id} 不是空文件`);
     }
@@ -382,7 +382,7 @@ function checkThemeBackgrounds() {
     ok(RS_WALLPAPERS.has(wall), `${id} 的 ${wall} 在 main.rs 白名单里`);
     const rel = RS_WALLPAPERS.get(wall);
     if (rel) {
-      const abs = path.resolve(path.join(ROOT, 'crates', 'vmusicd', 'src'), rel);
+      const abs = path.resolve(path.join(ROOT, 'crates', 'hertz-studio', 'src'), rel);
       ok(fs.existsSync(abs) && fs.statSync(abs).size > 1024, `${id} 的 ${wall} 磁盘文件非空`);
     }
   }

@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
-const source = fs.readFileSync(path.join(__dirname, '../crates/vmusicd/web/app.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../crates/hertz-studio/web/app.js'), 'utf8');
 const helper = source.slice(source.indexOf('const REQUEST_TIMEOUT'), source.indexOf('// 后端错误契约'));
 function setup(fetch) {
   const timers = new Map(); let seq = 0;

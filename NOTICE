@@ -26,14 +26,14 @@ license, see `cargo deny list` or each crate's own LICENSE file):
 Vendored assets
 ---------------------------------------------------------------------------
 
-  - crates/vmusicd/web/vendor/qrcode.js
+  - crates/hertz-studio/web/vendor/qrcode.js
     QR Code Generator for JavaScript
     Copyright (c) 2009 Kazuhiko Arase (http://www.d-project.com/)
     Licensed under the MIT License (http://www.opensource.org/licenses/mit-license.php)
     Upstream: https://github.com/kazuhikoarase/qrcode-generator
     The word "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
 
-  - crates/vmusicd/web/vendor/pixi.min.js
+  - crates/hertz-studio/web/vendor/pixi.min.js
     PixiJS v8.20.1
     Copyright (c) 2013-2023 Mathew Groves, Chad Engler
     Licensed under the MIT License (http://www.opensource.org/licenses/mit-license.php)
@@ -56,7 +56,7 @@ by the music player subsystem of the VCPChat project
 No source file of that project is copied into this repository. All code here
 is an independent implementation written for this project.
 
-The 商籁 (sonnet) lyric visual (`crates/vmusicd/web/stanza/stanza-sonnet-fx.js`,
+The 商籁 (sonnet) lyric visual (`crates/hertz-studio/web/stanza/stanza-sonnet-fx.js`,
 `stanza-sonnet.js`) follows the same rule. Its behaviour — the per-line
 cinematic shot selection, the deterministic absolute-time camera paths, the
 glyph/phrase typography pipeline, the accent-choreography cueing rules and the
@@ -69,7 +69,7 @@ numeric behaviour contracts are re-expressed against this project's own Stage
 facade and stanza theme adapter.
 
 The 汽水音乐 (Soda Music) QR sign-in flow
-(`crates/vmusicd/src/online/qishui.rs`, section "扫码登录") is an independent
+(`crates/hertz-studio/src/online/qishui.rs`, section "扫码登录") is an independent
 Rust implementation. The *protocol facts* it relies on — the Passport Web
 endpoint paths, the `aid`, the parameter vocabulary, the status strings and
 the `2046` second-verification response — were learned by reading the qishui
@@ -85,6 +85,6 @@ the live endpoints (see the module documentation), so it differs from the
 reference implementation's.
 
 The non-image platform badges in the web UI (`.src-badge` in
-`crates/vmusicd/web/online.js`) reuse the brand-colour palette of the
+`crates/hertz-studio/web/online.js`) reuse the brand-colour palette of the
 Mineradio project's `--source-*` CSS variables. One colour value is not
 copyrightable subject matter; it is recorded here for completeness.

@@ -5,7 +5,7 @@
 //
 //   在线 —— `GET /v1/recommend/daily/online`：服务端挑出**当前已登录**且支持
 //           每日推荐接口的平台，并发拉取后轮询交错、跨平台去重，合成一份
-//           统一歌单（见 crates/vmusicd/src/daily.rs）。未登录 / 没这个接口 /
+//           统一歌单（见 crates/hertz-studio/src/daily.rs）。未登录 / 没这个接口 /
 //           上游抽风的平台只在自己那一条 `skipped` 里留名，既不报错也不拖慢
 //           整页——单点失败不算失败。
 //   本地 —— `GET /v1/recommend/daily`：本机规则引擎，种子是天序号，同一天

@@ -2098,7 +2098,7 @@ mod tests {
     use crate::online::cred::CRED_PREFIX;
 
     /// 真机诊断（**不进 CI**，手工跑）：
-    /// `cargo test -p vmusicd --lib -- --ignored --nocapture probe_daily`
+    /// `cargo test -p hertz-studio --lib -- --ignored --nocapture probe_daily`
     ///
     /// 用途：QQ 到底有没有「每日推荐歌曲」端点？`SOURCES` 里 QQ 没开
     /// RecommendSongs（注释写"无每日歌曲推荐端点"），于是每日推荐汇总把它判成

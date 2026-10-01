@@ -4,7 +4,7 @@
 //! Error types for the whole workspace.
 //!
 //! Every crate maps its own failures into [`CoreError`] at its boundary, and
-//! `vmusicd` turns that into an HTTP status plus a stable machine-readable
+//! `hertz-studio` turns that into an HTTP status plus a stable machine-readable
 //! code (see `docs` in the main crate).
 
 use thiserror::Error;
@@ -94,7 +94,7 @@ impl CoreError {
 
     /// HTTP status used by the boundary layer.
     ///
-    /// Lives in `vmusic-core` (rather than in `vmusicd`) so the mapping is
+    /// Lives in `vmusic-core` (rather than in `hertz-studio`) so the mapping is
     /// next to the error definition and cannot drift out of sync with it.
     pub fn status(&self) -> u16 {
         http_status(self)

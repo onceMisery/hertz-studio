@@ -21,8 +21,8 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const WEB = path.join(__dirname, '..', 'crates', 'vmusicd', 'web');
-const SRC_DIR = path.join(__dirname, '..', 'crates', 'vmusicd', 'src');
+const WEB = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
+const SRC_DIR = path.join(__dirname, '..', 'crates', 'hertz-studio', 'src');
 
 let failures = 0;
 let checks = 0;
@@ -1232,9 +1232,9 @@ async function loginScenario(pollStates, opts) {
     // 这两处坏掉的表现都是「整列曲目没有专辑封面」，浏览器里看着像前端没画，
     // 实际是后端取数的问题；不联网也能钉住源码里的取数路径。
     const neteaseRs = fs.readFileSync(
-      path.join(__dirname, '..', 'crates', 'vmusicd', 'src', 'online', 'netease.rs'), 'utf8');
+      path.join(__dirname, '..', 'crates', 'hertz-studio', 'src', 'online', 'netease.rs'), 'utf8');
     const kugouRs = fs.readFileSync(
-      path.join(__dirname, '..', 'crates', 'vmusicd', 'src', 'online', 'kugou.rs'), 'utf8');
+      path.join(__dirname, '..', 'crates', 'hertz-studio', 'src', 'online', 'kugou.rs'), 'utf8');
 
     // 搜索接口只给 album.picId，必须靠详情接口补 picUrl。
     ok(neteaseRs.includes('const DETAIL_URL: &str = "https://music.163.com/api/song/detail"'),
@@ -1316,7 +1316,7 @@ async function loginScenario(pollStates, opts) {
     const onlineJs = fs.readFileSync(path.join(WEB, 'online.js'), 'utf8');
     const indexHtml = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
     const stateRs = fs.readFileSync(
-      path.join(__dirname, '..', 'crates', 'vmusicd', 'src', 'state.rs'), 'utf8');
+      path.join(__dirname, '..', 'crates', 'hertz-studio', 'src', 'state.rs'), 'utf8');
     const actorRs = fs.readFileSync(
       path.join(__dirname, '..', 'crates', 'vmusic-audio', 'src', 'actor.rs'), 'utf8');
 

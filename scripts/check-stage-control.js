@@ -18,7 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const WEB = path.join(__dirname, '..', 'crates', 'vmusicd', 'web');
+const WEB = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
 
 let failures = 0;
 let checks = 0;

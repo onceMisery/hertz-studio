@@ -1,6 +1,6 @@
 ﻿# SPDX-License-Identifier: MIT
 # 在线音源真机冒烟：协议层（health/sources）+ 业务层（每源搜索→取流→下载前
-# 64KB 校验音频魔数）。进程层不归这里管——调用方先启动 vmusicd。
+# 64KB 校验音频魔数）。进程层不归这里管——调用方先启动 hertz-studio。
 #
 # Usage:
 #   powershell -File scripts/smoke-online.ps1 -Base http://127.0.0.1:18080 -Token <token>

@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const web = path.join(__dirname, '../crates/vmusicd/web');
+const web = path.join(__dirname, '../crates/hertz-studio/web');
 const util = require(path.join(web, 'stanza/stanza-util.js'));
 global.StanzaUtil = util;
 const theme = require(path.join(web, 'stanza/stanza-theme.js'));

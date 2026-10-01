@@ -28,7 +28,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'crates', 'vmusicd', 'web');
+const WEB = path.join(ROOT, 'crates', 'hertz-studio', 'web');
 const APP = fs.readFileSync(path.join(WEB, 'app.js'), 'utf8').replace(/\r\n/g, '\n');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const SKINS_JS = read(path.join(WEB, 'skins', 'skins.js'));

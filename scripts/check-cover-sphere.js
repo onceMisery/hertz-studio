@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '..', 'crates', 'vmusicd', 'web', 'stage3d.js'), 'utf8').replace(/\r\n/g, '\n');
+const source = fs.readFileSync(path.join(__dirname, '..', 'crates', 'hertz-studio', 'web', 'stage3d.js'), 'utf8').replace(/\r\n/g, '\n');
 let checks = 0;
 function check(value, label) { assert.ok(value, label); checks += 1; }
 function extract(name) {

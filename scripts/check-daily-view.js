@@ -25,10 +25,10 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'crates', 'vmusicd', 'web');
+const WEB = path.join(ROOT, 'crates', 'hertz-studio', 'web');
 /// 前端文件按 web 目录取；后端文件按仓库根取。
 const read = (f) => fs.readFileSync(path.join(WEB, f), 'utf8').replace(/\r\n/g, '\n');
-const readSrc = (f) => fs.readFileSync(path.join(ROOT, 'crates', 'vmusicd', 'src', f), 'utf8')
+const readSrc = (f) => fs.readFileSync(path.join(ROOT, 'crates', 'hertz-studio', 'src', f), 'utf8')
   .replace(/\r\n/g, '\n');
 const SRC = read('daily-view.js');
 const APP = read('app.js');

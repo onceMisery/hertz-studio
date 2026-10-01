@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.join(__dirname, '..');
-const web = path.join(root, 'crates', 'vmusicd', 'web');
+const web = path.join(root, 'crates', 'hertz-studio', 'web');
 const output = path.join(root, 'output', 'playwright', '3d');
 const base = process.env.STAGE3D_UI_URL || 'http://127.0.0.1:18774';
 const localAssets = process.env.STAGE3D_LOCAL_ASSETS === '1';

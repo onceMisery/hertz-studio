@@ -17,7 +17,7 @@ const path = require('path');
 const vm = require('vm');
 const assert = require('assert/strict');
 
-const web = path.join(__dirname, '../crates/vmusicd/web');
+const web = path.join(__dirname, '../crates/hertz-studio/web');
 const appSrc = fs.readFileSync(path.join(web, 'app.js'), 'utf8');
 const dailySrc = fs.readFileSync(path.join(web, 'daily.js'), 'utf8');
 

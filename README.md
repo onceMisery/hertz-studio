@@ -173,7 +173,7 @@ mmusic-studio v0.1.0
 └───────────────────────────┬─────────────────────────────┘
                             │ REST(JSON) + WebSocket
                             │ 127.0.0.1 · Bearer token
-┌─ vmusicd（tokio 多线程）───┴─────────────────────────────┐
+┌─ hertz-studio（多线程）───┴─────────────────────────────┐
 │  routes   axum 路由 + 鉴权中间件 + 错误边界               │
 │  scan     后台扫描任务，进度经事件总线广播                 │
 │  state    播放队列、事件总线、discovery 文件              │
@@ -267,7 +267,7 @@ Jamendo 两个 CC 授权开放曲库（Jamendo 需在 https://devportal.jamendo.
 （只回 `signedIn` 布尔），`PUT /v1/settings` 直接拒绝写这类键。服务只监听回环
 地址且需要 bearer token，cookie 只会作为 `Cookie:` 头发给该音源站点自己。
 
-加一个音源的成本写在 `crates/vmusicd/src/online/mod.rs` 的模块注释里：一个源
+加一个音源的成本写在 `crates/hertz-studio/src/online/mod.rs` 的模块注释里：一个源
 文件 + 注册表一行 + dispatch 一个分支，界面由 `/v1/online/sources` 的能力表
 自动驱动。
 
@@ -310,7 +310,7 @@ mmusic-studio/
 │   ├── vmusic-store/        SQLite 仓储（sqlx）
 │   ├── vmusic-library/      目录扫描、元数据与封面、歌词文件查找
 │   ├── vmusic-lyrics/       LRC 解析（含逐字时间轴）
-│   └── vmusicd/             服务二进制：axum 路由、WS、配置、内置 UI
+│   └── hertz-studio/        服务二进制：axum 路由、WS、配置、内置 UI
 │       ├── src/online/      音源注册表：mod（契约+分发+缓存）· netease · qq · kugou · kuwo · ccmixter · jamendo · qishui
 │       └── web/             零构建的前端，由服务内嵌托管
 │           ├── index.html / app.js / style.css
@@ -370,7 +370,7 @@ node scripts/check-appearance-restore.js  # 刷新恢复：皮肤 / 主题 / 形
 （Skins.init → Theme.init → ThemeStudio.init），再用共享同一份 localStorage 的新沙箱
 模拟刷新，逐项断言「改过什么，刷新后就还在什么」。
 
-**每日推荐的验证边界**：多平台汇总跑在服务端（`crates/vmusicd/src/daily.rs`），
+**每日推荐的验证边界**：多平台汇总跑在服务端（`crates/hertz-studio/src/daily.rs`），
 但最容易坏的是前端的降级路径 —— 某个平台没登录、某个平台没有推荐接口、整条
 在线链路不可达，这三种情况下都**不能**弹红、不能挡住本地那一路。`check-favorites.js`
 逐条钉住这些路径，并断言「未登录」只出现在副标题里（"已跳过：酷狗音乐（未登录）"）
@@ -409,7 +409,7 @@ pass 做上面那一条的 GLSL 静态校验；再用三台"假机器"跑一遍�
 "契约检查全绿，但一个场景都画不出来"。前提是一个**可见的**浏览器窗口：
 后台标签页里 `visibilityState === 'hidden'`，`requestAnimationFrame` 完全停转。
 
-前端是零构建的原生 JS/CSS，但 `crates/vmusicd/web/` 下的 CSS 有一层约定需要守：
+前端是零构建的原生 JS/CSS，但 `crates/hertz-studio/web/` 下的 CSS 有一层约定需要守：
 `style.css` 与 `stage.css` 都在 `:root` 上声明变量，后者在 `<link>` 里排在后面，
 **同优先级整块覆盖**。因此共享令牌（`--glass-*`、`--hover`）只允许由 `style.css`
 的 `:root` 定义，且 `--glass-border` 是 `1px solid <color>` 完整简写、

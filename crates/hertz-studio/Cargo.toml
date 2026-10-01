@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: MIT
 [package]
-name = "vmusicd"
+name = "hertz-studio"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "The mmusic-studio service binary: HTTP + WebSocket API and web UI"
-
-[[bin]]
-name = "hertz-studio"
-path = "src/main.rs"
 
 [dependencies]
 vmusic-core = { workspace = true }

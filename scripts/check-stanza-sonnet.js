@@ -3,7 +3,7 @@
 // 商籁 sonnet 纯函数验证：node scripts/check-stanza-sonnet.js
 'use strict';
 const path = require('path');
-const ROOT = path.join(__dirname, '..', 'crates', 'vmusicd', 'web', 'stanza');
+const ROOT = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web', 'stanza');
 const U = require(path.join(ROOT, 'stanza-util.js'));
 global.StanzaUtil = U;
 const FX = require(path.join(ROOT, 'stanza-sonnet-fx.js'));

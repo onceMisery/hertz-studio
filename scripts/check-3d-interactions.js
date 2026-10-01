@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const web = path.join(__dirname, '..', 'crates', 'vmusicd', 'web');
+const web = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
 const read = file => fs.readFileSync(path.join(web, file), 'utf8').replace(/\r\n/g, '\n');
 let checks = 0;
 function check(value, label) { assert.ok(value, label); checks++; }

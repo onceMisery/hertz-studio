@@ -362,7 +362,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/stage3d.js", get(|| asset(JS, STAGE3D_JS)))
         .route("/stage-immersive.js", get(|| asset(JS, STAGE_IMMERSIVE_JS)))
         .route("/stanza/stanza-util.js", get(|| asset(JS, STANZA_UTIL_JS)))
-        .route("/stanza/stanza-theme.js", get(|| asset(JS, STANZA_THEME_JS)))
+        .route(
+            "/stanza/stanza-theme.js",
+            get(|| asset(JS, STANZA_THEME_JS)),
+        )
         .route(
             "/stanza/stanza-textlayout.js",
             get(|| asset(JS, STANZA_TEXTLAYOUT_JS)),
@@ -384,7 +387,10 @@ async fn main() -> anyhow::Result<()> {
             "/stanza/stanza-sonnet-fx.js",
             get(|| asset(JS, STANZA_SONNET_FX_JS)),
         )
-        .route("/stanza/stanza-sonnet.js", get(|| asset(JS, STANZA_SONNET_JS)))
+        .route(
+            "/stanza/stanza-sonnet.js",
+            get(|| asset(JS, STANZA_SONNET_JS)),
+        )
         .route(
             "/stanza/stanza-tempera.js",
             get(|| asset(JS, STANZA_TEMPERA_JS)),
@@ -412,10 +418,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/online.css", get(|| asset(CSS, ONLINE_CSS)))
         .route("/theme-studio.css", get(|| asset(CSS, THEME_STUDIO_CSS)))
         .route("/skins/skins.css", get(|| asset(CSS, SKINS_CSS)))
-        .route(
-            "/skins/skin.sheen.css",
-            get(|| asset(CSS, SKIN_SHEEN_CSS)),
-        )
+        .route("/skins/skin.sheen.css", get(|| asset(CSS, SKIN_SHEEN_CSS)))
         .route(
             "/skins/skin.workbench.css",
             get(|| asset(CSS, SKIN_WORKBENCH_CSS)),

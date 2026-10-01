@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const WEB = path.join(__dirname, '..', 'crates', 'vmusicd', 'web');
+const WEB = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
 const P = require(path.join(WEB, 'stage-cinema.js'));
 
 let failures = 0;
@@ -146,7 +146,7 @@ section('跨文件契约：驱动 / 协议 / 开关');
   const cinema = read('stage-cinema.js');
   const control = read('stage-control.js');
   const app = read('app.js');
-  const main = fs.readFileSync(path.join(__dirname, '..', 'crates', 'vmusicd', 'src', 'main.rs'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'crates', 'hertz-studio', 'src', 'main.rs'), 'utf8');
   const html = read('index.html');
 
   ok(cinema.indexOf("'absent'") >= 0 && cinema.indexOf("'waiting'") >= 0 && cinema.indexOf("'active'") >= 0,

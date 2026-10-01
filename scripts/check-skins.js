@@ -24,7 +24,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'crates', 'vmusicd', 'web');
+const WEB = path.join(ROOT, 'crates', 'hertz-studio', 'web');
 const SKINS = path.join(WEB, 'skins');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const SKINS_JS = read(path.join(SKINS, 'skins.js'));
@@ -35,7 +35,7 @@ const LIUNIAN_JS = read(path.join(SKINS, 'skin.liunian.js'));
 const SKINS_CSS = read(path.join(SKINS, 'skins.css'));
 const HTML = read(path.join(WEB, 'index.html'));
 const APP = read(path.join(WEB, 'app.js'));
-const MAIN_RS = read(path.join(ROOT, 'crates', 'vmusicd', 'src', 'main.rs'));
+const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs'));
 
 let failures = 0;
 let checks = 0;
