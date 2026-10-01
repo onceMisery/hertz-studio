@@ -58,7 +58,7 @@ const THEME_STUDIO_CSS: &str = include_str!("../web/theme-studio.css");
 // 再往路由表里添一行，剩下的（切换/持久化）由 skins.js 统一处理。
 const SKINS_JS: &str = include_str!("../web/skins/skins.js");
 const SKINS_CSS: &str = include_str!("../web/skins/skins.css");
-const SKIN_MINERADIO_CSS: &str = include_str!("../web/skins/skin.mineradio.css");
+const SKIN_SHEEN_CSS: &str = include_str!("../web/skins/skin.sheen.css");
 const SKIN_WORKBENCH_CSS: &str = include_str!("../web/skins/skin.workbench.css");
 const SKIN_LIUNIAN_CSS: &str = include_str!("../web/skins/skin.liunian.css");
 const SKIN_LIUNIAN_JS: &str = include_str!("../web/skins/skin.liunian.js");
@@ -413,8 +413,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/theme-studio.css", get(|| asset(CSS, THEME_STUDIO_CSS)))
         .route("/skins/skins.css", get(|| asset(CSS, SKINS_CSS)))
         .route(
-            "/skins/skin.mineradio.css",
-            get(|| asset(CSS, SKIN_MINERADIO_CSS)),
+            "/skins/skin.sheen.css",
+            get(|| asset(CSS, SKIN_SHEEN_CSS)),
         )
         .route(
             "/skins/skin.workbench.css",

@@ -40,13 +40,13 @@
   /* ======================================================================
      设计令牌层
      ----------------------------------------------------------------------
-     对齐 Mineradio 的设计体系：字体族、字号阶梯、间距、圆角、缓动时长、
+     设计体系对齐参考项目：字体族、字号阶梯、间距、圆角、缓动时长、
      玻璃质感、焦点环与「品牌色 / 高亮色」两个强调角色。
      规则只有一条：组件里不允许再出现裸的 px/rgba 字面量，一律取令牌。
      主题（themes.js）只改颜色，不改这里的尺度。
      ====================================================================== */
 
-  /* 字体：中文在前、西文在后，与 Mineradio 同一套栈 */
+  /* 字体：中文在前、西文在后 */
   --font-sans: "Noto Sans SC", "PingFang SC", "HarmonyOS Sans SC", "Alibaba PuHuiTi",
     "Inter", system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", "Geist Mono", "SF Mono", ui-monospace,
@@ -82,7 +82,7 @@
   --r-xl: 16px;
   --r-pill: 999px;
 
-  /* 动效：Mineradio 的主缓动 cubic-bezier(.16,1,.3,1) + 18/22/28ms 三档 */
+  /* 动效：主缓动 cubic-bezier(.16,1,.3,1) + 18/22/28ms 三档 */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --dur-fast: 0.16s;
   --dur-base: 0.18s;
@@ -136,7 +136,7 @@
   --focus-ring: 2px solid rgba(var(--brand-rgb, 0, 245, 212), 0.6);
   --focus-offset: 2px;
 
-  /* 两个强调角色（与 Mineradio 一致）：
+  /* 两个强调角色：
      --brand    薄荷青，用于「激活态 / 进度 / 焦点」这类功能性强调
      --highlight 香槟金，用于「当前选中项」这类状态性强调
      二者分工固定，避免到处都是同一种强调色导致层级消失。 */
@@ -892,7 +892,7 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
     box-shadow var(--dur-release) var(--ease);
 }
 
-/* 纹理层：主题形态自带的斜向光晕 / 网格 / 波纹（参照 Mineradio 的 tone 光晕）。
+/* 纹理层：主题形态自带的斜向光晕 / 网格 / 波纹。
    inset 取负值是为了万花筒这类会旋转的纹理转起来不露出直角。 */
 .pl-card-art::before {
   content: '';
@@ -903,7 +903,7 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
   pointer-events: none;
 }
 
-/* 右下角那道倾斜装饰条：Mineradio 卡片上最显眼的识别元素，这里用主题的
+/* 右下角那道倾斜装饰条：卡片上最显眼的识别元素，这里用主题的
    highlight 着色，形态不同条纹也不同（刀光是细密斜纹、卷轴是朱印方块）。 */
 .pl-card-art::after {
   content: '';
@@ -1527,7 +1527,7 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
-/* 封面样式搬到 stage.css（VCP 风格的唱片转盘 .disc），这里不再重复定义。 */
+/* 封面样式搬到 stage.css（唱片转盘 .disc），这里不再重复定义。 */
 
 .stage-title {
   font-size: 21px; font-weight: 650; letter-spacing: -0.2px;
@@ -1645,7 +1645,7 @@ body.reduce-motion .bar { transition: none !important; }
   width: 50px; height: 50px;
   background: var(--accent); color: var(--accent-ink);
   /* 主操作按钮是全局唯一的「白底实心件」，外圈用品牌色辉光把它从底噪里
-     托起来——与 Mineradio 的主按钮处理一致。 */
+     托起来——与参考项目的主按钮处理一致。 */
   box-shadow: 0 6px 20px rgba(var(--brand-rgb), 0.18),
     0 2px 8px rgba(0, 0, 0, 0.4),
     inset 0 1px 0 rgba(255, 255, 255, 0.45);
@@ -1901,7 +1901,7 @@ body.reduce-motion * {
    统一组件层
    --------------------------------------------------------------------------
    这一节是**最终权威**：放在文件末尾，同特异性下压过前面所有旧规则。
-   写法全部对齐 Mineradio：胶囊形状、极淡的白色叠层、hover 微抬升、
+   写法全部对齐参考项目：胶囊形状、极淡的白色叠层、hover 微抬升、
    active 回弹、focus-visible 用品牌色描边、激活态用薄荷青、选中态用香槟金。
 
    新增组件请直接复用这里的类名，不要再写一份自己的按钮/输入框样式。
@@ -1950,7 +1950,7 @@ button.btn {
 .btn:disabled { opacity: 0.42; cursor: default; }
 .btn:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
 
-/* 主按钮：白底 + 深色字（Mineradio 的强调色就是纯白），外圈品牌色辉光 */
+/* 主按钮：白底 + 深色字（参考项目的强调色就是纯白），外圈品牌色辉光 */
 .btn.primary {
   background: var(--accent);
   border-color: transparent;
@@ -2230,7 +2230,7 @@ button:focus-visible, [role="button"]:focus-visible,
 /* 放在曲库顶部的一条横向带：它是「今天听什么」的入口，不占据整屏，
    也不该滚动到曲库列表里被淹没。 */
 
-/* 首页最上面这一块按 Mineradio 的 hero 卡片来画：斜向 tone 光晕打底、
+/* 首页最上面这一块按参考项目的 hero 卡片来画：斜向 tone 光晕打底、
    圆角与描边跟主题形态走。它是进入页面第一眼看到的东西，形态差异落在
    这里才"看得见换过皮肤"。 */
 .daily-strip {
@@ -2700,7 +2700,7 @@ button:focus-visible, [role="button"]:focus-visible,
 }
 
 /* ==========================================================================
-   Mineradio 视觉对齐层
+   参考项目视觉对齐层
    --------------------------------------------------------------------------
    这一节排在文件最后：同特异性下压过前面所有规则（前面那些是历年一版版叠
    上来的，同一个组件的写法彼此不一致）。三条原则：
@@ -2710,7 +2710,7 @@ button:focus-visible, [role="button"]:focus-visible,
      3. **不碰布局**——grid 列宽、间距档位、断点全部原样保留。布局是业务逻辑
         的载体，动它的风险远大于观感收益。
 
-   对照参考项目 Mineradio 的设计语言，本层收口四类差距：
+   对照参考项目的设计语言（出处见 NOTICE），本层收口四类差距：
      · 曲面层次：面板与卡片在近黑底上分不出级差（--glass-bg 已单独修）
      · 形状语言：底栏还是「大圆角矩形」，不是它的胶囊
      · 状态语言：顶栏连接状态、卡片悬停、按压回弹各写各的
@@ -2720,7 +2720,7 @@ button:focus-visible, [role="button"]:focus-visible,
 /* ---------- 曲面 ---------- */
 
 /* 播放条是界面上唯一的**浮起件**：它不参与网格分栏，横跨在内容之上。
-   Mineradio 的播放条是一条完整胶囊而不是"大圆角矩形"，半径必须 ≥ 高度一半。
+   参考项目的播放条是一条完整胶囊而不是"大圆角矩形"，半径必须 ≥ 高度一半。
    --bar-h 是 72px，999px 会被浏览器按盒子高度钳到 36px，正好是胶囊。
    窄屏（≤900px）播放条折成两行、高度翻倍，那时胶囊会被钳成"两头尖"，
    所以那一档退回 --r-xl。
@@ -2766,7 +2766,7 @@ button:focus-visible, [role="button"]:focus-visible,
 @media (max-width: 620px) { .conn { font-size: 0; } }
 
 /* 搜索框聚焦：白色描边在近黑面上和未聚焦的灰描边分不开，换成品牌色 +
-   一圈外发光。Mineradio 的搜索框聚焦也是"整条亮起来"而不是只描一根线。 */
+   一圈外发光。参考项目的搜索框聚焦也是"整条亮起来"而不是只描一根线。 */
 .topsearch:focus-within {
   border-color: color-mix(in srgb, var(--brand) 46%, transparent);
   background: color-mix(in srgb, var(--brand) 7%, transparent);
@@ -2819,7 +2819,7 @@ button:focus-visible, [role="button"]:focus-visible,
   letter-spacing: var(--meta-tracking);
 }
 /* 「共 N 首」由裸文字改成胶囊标签：标题旁的数字是"标签"不是"副标题"，
-   Mineradio 里同一位置也是 tag 形态。 */
+   参考项目里同一位置也是 tag 形态。 */
 .count {
   font-size: var(--fs-xs);
   color: color-mix(in srgb, var(--text) 58%, transparent);

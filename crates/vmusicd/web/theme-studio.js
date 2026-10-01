@@ -91,19 +91,19 @@
   // -------------------------------------------------------------------------
   var THEME_WALL = {
     mineral: 'night-08.jpg',
-    'vcp-starblue': 'night-12.jpg',
-    'vcp-emerald': 'afternoon-07.jpg',
-    'vcp-midnight-neon': 'evening-18.jpg',
-    'vcp-mono': 'morning-14.jpg',
-    'vcp-aero': 'morning-09.jpg',
-    'vcp-codeide': 'evening-16.jpg',
-    'vcp-sakura': 'morning-01.jpg',
-    'vcp-crimson': 'evening-12.jpg',
-    'vcp-paper-ink': 'afternoon-20.jpg',
-    'vcp-forest': 'afternoon-19.jpg',
-    'vcp-porcelain': 'morning-09.jpg',
-    'vcp-snow-dawn': 'morning-01.jpg',
-    'vcp-acid': 'night-08.jpg',
+    'starblue': 'night-12.jpg',
+    'emerald': 'afternoon-07.jpg',
+    'midnight-neon': 'evening-18.jpg',
+    'mono': 'morning-14.jpg',
+    'aero': 'morning-09.jpg',
+    'codeide': 'evening-16.jpg',
+    'sakura': 'morning-01.jpg',
+    'crimson': 'evening-12.jpg',
+    'paper-ink': 'afternoon-20.jpg',
+    'forest': 'afternoon-19.jpg',
+    'porcelain': 'morning-09.jpg',
+    'snow-dawn': 'morning-01.jpg',
+    'acid': 'night-08.jpg',
     liunian: 'evening-16.jpg'
   };
   // 自定义配色没有署名素材，与"没声明"的主题同样走兜底那张。

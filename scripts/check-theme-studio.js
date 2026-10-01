@@ -414,7 +414,7 @@ function checkThemeBackgrounds() {
   T.init();
   ok(T.state.pinned === false, '默认状态是「跟随主题」（未钉住）');
 
-  const trip = ['anime-shinobi', 'mineral', 'anime-sakura', 'vcp-starblue',
+  const trip = ['anime-shinobi', 'mineral', 'anime-sakura', 'starblue',
     'anime-abyss', 'liunian', 'anime-shinobi', 'mineral'];
   const seen = [];
   for (const id of trip) {
@@ -439,7 +439,7 @@ function checkThemeBackgrounds() {
   T2.init();
   T2.setWallpaper('night-02.jpg', { keepTheme: true, persist: false });
   ok(T2.state.pinned === true, '手动选图后壁纸被钉住');
-  env2.sandbox.Theme.apply('vcp-emerald');
+  env2.sandbox.Theme.apply('emerald');
   ok(T2.state.id === 'night-02.jpg', '钉住后换主题不改壁纸');
   T2.setWallpaper('', { keepTheme: true, persist: false });
   env2.sandbox.Theme.apply('mineral');

@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT
    Copyright (c) 2026 mmusic-studio contributors
 
-   皮肤：mineradio（浮光）
+   皮肤：sheen（浮光）
    --------------------------------------------------------------------------
-   空间组织参照 Mineradio 首页：导航收成**顶部悬浮胶囊**，主内容区拿回全宽
+   空间组织取自参考项目的首页布局：导航收成**顶部悬浮胶囊**，主内容区拿回全宽
    走大卡片网格，舞台从固定的第三列变成**贴右侧边的悬浮面板**，整体低信息
    密度（大间距、大圆角、高行高）。
 
@@ -14,7 +14,7 @@
    的模块顺序（外壳 → 导航 → 内容 → 列表 → 卡片 → 面板 → 浮层）写覆盖。
 */
 
-[data-skin="mineradio"] {
+[data-skin="sheen"] {
   /* 布局令牌：两套皮肤的差别基本都收敛在这几个数上，便于对照与调参。 */
   --skin-gap: 18px;
   --skin-pad: 22px;
@@ -27,7 +27,7 @@
 
 /* --- 外壳：三列并排 → 单列全宽 ------------------------------------------ */
 
-[data-skin="mineradio"] .app {
+[data-skin="sheen"] .app {
   grid-template-columns: minmax(0, 1fr);
   gap: var(--skin-gap);
   padding: 0 var(--skin-pad) var(--skin-gap);
@@ -35,7 +35,7 @@
 
 /* --- 导航：左侧竖轨 → 顶部悬浮胶囊 -------------------------------------- */
 
-[data-skin="mineradio"] .rail {
+[data-skin="sheen"] .rail {
   position: fixed;
   top: calc(var(--topbar-h) + 12px);
   left: 50%;
@@ -59,9 +59,9 @@
 }
 
 /* 竖轨那根"把设置顶到底部"的弹簧在横向条里没有意义。 */
-[data-skin="mineradio"] .rail-spacer { display: none; }
+[data-skin="sheen"] .rail-spacer { display: none; }
 
-[data-skin="mineradio"] .rail-item {
+[data-skin="sheen"] .rail-item {
   flex-direction: row;
   gap: 8px;
   padding: 8px 14px;
@@ -69,68 +69,68 @@
   white-space: nowrap;
 }
 
-[data-skin="mineradio"] .rail-item svg { margin: 0; }
+[data-skin="sheen"] .rail-item svg { margin: 0; }
 /* 胶囊里文字是主要信息：正常字号、不截断。 */
-[data-skin="mineradio"] .rail-item span { font-size: 13px; }
+[data-skin="sheen"] .rail-item span { font-size: 13px; }
 
 /* --- 内容：整块卡片化，给顶部导航让出高度 ------------------------------- */
 
-[data-skin="mineradio"] .column {
+[data-skin="sheen"] .column {
   border-radius: var(--skin-radius);
   padding: 0 0 8px;
 }
 
-[data-skin="mineradio"] .view {
+[data-skin="sheen"] .view {
   padding: calc(var(--topbar-h) * 0 + 62px) var(--skin-pad) 0;
 }
 
-[data-skin="mineradio"] .col-head {
+[data-skin="sheen"] .col-head {
   padding-bottom: var(--skin-head-pb);
   margin-bottom: var(--skin-gap);
 }
 
-[data-skin="mineradio"] .col-title { font-size: var(--skin-title); }
+[data-skin="sheen"] .col-title { font-size: var(--skin-title); }
 
 /* 页头：标题在左、工具挤在同一行靠右——与 workbench「工具条独占第二行靠左」
    正好相反，这是两套皮肤在区块排列上最直观的一处区别。 */
-[data-skin="mineradio"] .col-head-left { flex: 1 1 auto; min-width: 0; }
-[data-skin="mineradio"] .col-tools {
+[data-skin="sheen"] .col-head-left { flex: 1 1 auto; min-width: 0; }
+[data-skin="sheen"] .col-tools {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: var(--skin-gap);
 }
 
 /* 设置行：留白跟着整体节奏走大。 */
-[data-skin="mineradio"] .set-row {
+[data-skin="sheen"] .set-row {
   padding-top: 6px;
   padding-bottom: 6px;
 }
 
 /* 在线结果列表：与卡片网格同一套间距。 */
-[data-skin="mineradio"] .online-body { gap: var(--skin-gap); }
+[data-skin="sheen"] .online-body { gap: var(--skin-gap); }
 
 /* --- 列表：低密度（行更高、间距更松） ---------------------------------- */
 
-[data-skin="mineradio"] .lib-head,
-[data-skin="mineradio"] .fav-head {
+[data-skin="sheen"] .lib-head,
+[data-skin="sheen"] .fav-head {
   padding-bottom: 10px;
 }
 
-[data-skin="mineradio"] .track,
-[data-skin="mineradio"] .q-row,
-[data-skin="mineradio"] .fav-row,
-[data-skin="mineradio"] .online-row,
-[data-skin="mineradio"] .pl-row,
-[data-skin="mineradio"] .pd-row {
+[data-skin="sheen"] .track,
+[data-skin="sheen"] .q-row,
+[data-skin="sheen"] .fav-row,
+[data-skin="sheen"] .online-row,
+[data-skin="sheen"] .pl-row,
+[data-skin="sheen"] .pd-row {
   padding-top: var(--skin-row-py);
   padding-bottom: var(--skin-row-py);
   border-radius: var(--r-md);
 }
 
-/* 列表之间留出呼吸：Mineradio 的分组是靠间距而不是分割线。 */
-[data-skin="mineradio"] .lib-list,
-[data-skin="mineradio"] .q-list,
-[data-skin="mineradio"] .fav-list {
+/* 列表之间留出呼吸：分组靠间距，而不是分割线。 */
+[data-skin="sheen"] .lib-list,
+[data-skin="sheen"] .q-list,
+[data-skin="sheen"] .fav-list {
   gap: 4px;
   display: flex;
   flex-direction: column;
@@ -138,30 +138,30 @@
 
 /* --- 卡片网格：格子更大，一屏放得更少 ---------------------------------- */
 
-[data-skin="mineradio"] .pl-grid,
-[data-skin="mineradio"] .dv-body-card {
+[data-skin="sheen"] .pl-grid,
+[data-skin="sheen"] .dv-body-card {
   grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
   gap: var(--skin-gap);
 }
 
-[data-skin="mineradio"] .pl-card-art,
-[data-skin="mineradio"] .dv-art {
+[data-skin="sheen"] .pl-card-art,
+[data-skin="sheen"] .dv-art {
   border-radius: calc(var(--skin-radius) * 0.8);
 }
 
-[data-skin="mineradio"] .daily-list {
+[data-skin="sheen"] .daily-list {
   grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
   gap: var(--skin-gap);
 }
 
-[data-skin="mineradio"] .daily-strip {
+[data-skin="sheen"] .daily-strip {
   padding: var(--skin-pad);
   border-radius: var(--skin-radius);
 }
 
 /* --- 设置：分组之间靠间距分区，不再靠一条条分割线 ----------------------- */
 
-[data-skin="mineradio"] .set-group {
+[data-skin="sheen"] .set-group {
   padding: var(--skin-gap);
   border-radius: var(--skin-radius);
   margin-bottom: var(--skin-gap);
@@ -169,7 +169,7 @@
 
 /* --- 舞台：从第三列 → 贴右侧边的悬浮面板 ------------------------------- */
 
-[data-skin="mineradio"] .stage {
+[data-skin="sheen"] .stage {
   position: fixed;
   right: var(--skin-pad);
   top: calc(var(--topbar-h) + 68px);
@@ -186,7 +186,7 @@
 
 /* --- 播放栏：底部悬浮条，两侧内收 --------------------------------------- */
 
-[data-skin="mineradio"] .bar {
+[data-skin="sheen"] .bar {
   margin: 0 var(--skin-pad) var(--skin-gap);
   border-radius: var(--r-pill);
   padding: 14px var(--skin-pad);
@@ -195,9 +195,9 @@
 
 /* --- 浮层：圆角跟随整套皮肤 -------------------------------------------- */
 
-[data-skin="mineradio"] .np-card,
-[data-skin="mineradio"] .menu,
-[data-skin="mineradio"] .empty-card {
+[data-skin="sheen"] .np-card,
+[data-skin="sheen"] .menu,
+[data-skin="sheen"] .empty-card {
   border-radius: var(--skin-radius);
 }
 
@@ -213,10 +213,10 @@
 /* 宽屏空闲：舞台收起时栅格也必须保持单列，.column 才能拿回全宽。
    舞台本身的 display:none 仍由 style.css 的空闲规则负责，这里只管栅格。 */
 @media (min-width: 1241px) {
-  [data-skin="mineradio"] .app {
+  [data-skin="sheen"] .app {
     padding-right: calc(min(420px, 32vw) + var(--skin-gap) + var(--skin-pad));
   }
-  [data-skin="mineradio"] body[data-stage-idle="1"] .app {
+  [data-skin="sheen"] body[data-stage-idle="1"] .app {
     grid-template-columns: minmax(0, 1fr);
     padding-right: var(--skin-pad);
   }
@@ -225,7 +225,7 @@
 /* 平板/手机：舞台按基础样式的抽屉方式隐藏与滑入（transform 规则不重写），
    这里只把几何位置/宽度报成抽屉该有的值。 */
 @media (max-width: 1240px) {
-  [data-skin="mineradio"] .stage {
+  [data-skin="sheen"] .stage {
     top: 12px;
     right: 12px;
     bottom: calc(var(--bar-h) + 24px);
@@ -236,36 +236,36 @@
 
 /* 小屏：两侧留白收窄，给主要内容区让出空间；顶部仍保留胶囊导航的高度。 */
 @media (max-width: 900px) {
-  [data-skin="mineradio"] .app {
+  [data-skin="sheen"] .app {
     padding: 0 10px var(--skin-gap);
   }
-  [data-skin="mineradio"] .view {
+  [data-skin="sheen"] .view {
     padding: 62px 12px 0;
   }
-  [data-skin="mineradio"] .bar {
+  [data-skin="sheen"] .bar {
     margin: 0 10px var(--skin-gap);
   }
 }
 
 /* 手机：胶囊收成纯图标条并进一步压缩，内容贴到两侧 12px。 */
 @media (max-width: 620px) {
-  [data-skin="mineradio"] .app {
+  [data-skin="sheen"] .app {
     padding: 0 12px 12px;
   }
-  [data-skin="mineradio"] .view {
+  [data-skin="sheen"] .view {
     padding: 56px 12px 0;
   }
-  [data-skin="mineradio"] .bar {
+  [data-skin="sheen"] .bar {
     margin: 0 10px 10px;
   }
-  [data-skin="mineradio"] .rail {
+  [data-skin="sheen"] .rail {
     top: calc(var(--topbar-h) + 8px);
     padding: 4px 8px;
   }
-  [data-skin="mineradio"] .rail-item {
+  [data-skin="sheen"] .rail-item {
     padding: 8px 10px;
   }
-  [data-skin="mineradio"] .stage {
+  [data-skin="sheen"] .stage {
     padding: 16px;
   }
 }

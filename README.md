@@ -289,7 +289,7 @@ volume = 0.8
 spectrum_bands = 64
 
 [log]
-level = "info"          # 例如 "vmusicd=debug,vmusic_audio=info"
+level = "info"          # 例如 "hertz_studio=debug,vmusic_audio=info"
 format = "pretty"       # pretty | json
 ```
 

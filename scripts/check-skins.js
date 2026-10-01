@@ -28,7 +28,7 @@ const WEB = path.join(ROOT, 'crates', 'vmusicd', 'web');
 const SKINS = path.join(WEB, 'skins');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const SKINS_JS = read(path.join(SKINS, 'skins.js'));
-const MINERADIO = read(path.join(SKINS, 'skin.mineradio.css'));
+const SHEEN = read(path.join(SKINS, 'skin.sheen.css'));
 const WORKBENCH = read(path.join(SKINS, 'skin.workbench.css'));
 const LIUNIAN = read(path.join(SKINS, 'skin.liunian.css'));
 const LIUNIAN_JS = read(path.join(SKINS, 'skin.liunian.js'));
@@ -113,10 +113,10 @@ function makeSandbox(cssIds) {
 function checkCatalog() {
   section('皮肤目录：四套都在，classic 是"没有皮肤"');
 
-  const { sandbox, root, links } = makeSandbox(['mineradio', 'workbench', 'liunian']);
+  const { sandbox, root, links } = makeSandbox(['sheen', 'workbench', 'liunian']);
   const ids = sandbox.Skins.catalog().map((s) => s.id);
   ok(ids.indexOf('classic') >= 0, '有 classic（仓库原本那套布局）');
-  ok(ids.indexOf('mineradio') >= 0, '有 mineradio');
+  ok(ids.indexOf('sheen') >= 0, '有 sheen');
   ok(ids.indexOf('workbench') >= 0, '有 workbench');
   ok(ids.indexOf('liunian') >= 0, '有 liunian');
   ok(sandbox.Skins.catalog().every((s) => s.name && s.note),
@@ -124,18 +124,18 @@ function checkCatalog() {
 
   section('切换：写 data-skin，并只启用对应那份 CSS');
 
-  sandbox.Skins.apply('mineradio');
-  eq(root.getAttribute('data-skin'), 'mineradio', 'html 上写了当前皮肤');
-  eq(links[0].disabled, false, 'mineradio 的 CSS 被启用');
+  sandbox.Skins.apply('sheen');
+  eq(root.getAttribute('data-skin'), 'sheen', 'html 上写了当前皮肤');
+  eq(links[0].disabled, false, 'sheen 的 CSS 被启用');
   eq(links[1].disabled, true, 'workbench 的 CSS 保持禁用（两套不能同时生效）');
   eq(links[2].disabled, true, 'liunian 的 CSS 保持禁用');
 
   sandbox.Skins.apply('workbench');
-  eq(links[0].disabled, true, '切走后 mineradio 的 CSS 收起');
+  eq(links[0].disabled, true, '切走后 sheen 的 CSS 收起');
   eq(links[1].disabled, false, 'workbench 的 CSS 启用');
 
   sandbox.Skins.apply('liunian');
-  eq(links[0].disabled, true, '切到 liunian 后 mineradio 的 CSS 收起');
+  eq(links[0].disabled, true, '切到 liunian 后 sheen 的 CSS 收起');
   eq(links[1].disabled, true, 'workbench 的 CSS 收起');
   eq(links[2].disabled, false, 'liunian 的 CSS 启用');
 
@@ -143,13 +143,13 @@ function checkCatalog() {
   eq(links.every((l) => l.disabled), true, 'classic 不启用任何皮肤 CSS（它本身就是默认布局）');
 
   section('切换：广播事件让画布类模块自己重排');
-  const { sandbox: s2, events } = makeSandbox(['mineradio', 'workbench', 'liunian']);
+  const { sandbox: s2, events } = makeSandbox(['sheen', 'workbench', 'liunian']);
   s2.Skins.apply('workbench');
   ok(events.some((e) => e.type === 'skin:changed' && e.detail && e.detail.id === 'workbench'),
     '切肤后广播 skin:changed（舞台/3D 这类要按新尺寸重排）');
 
   section('持久化：选择被记住，坏数据回落而不是写个无效值');
-  const { sandbox: s3, store } = makeSandbox(['mineradio', 'workbench', 'liunian']);
+  const { sandbox: s3, store } = makeSandbox(['sheen', 'workbench', 'liunian']);
   s3.Skins.apply('workbench');
   eq(store.get('vmusic.skin'), 'workbench', '选择写进 localStorage');
   store.set('vmusic.skin', 'no-such-skin');
@@ -164,7 +164,7 @@ function checkCatalog() {
 function checkExtensibility() {
   section('扩展：register 一套新皮肤后，切换/列表自动生效');
 
-  const { sandbox, root, links } = makeSandbox(['mineradio', 'workbench', 'compact']);
+  const { sandbox, root, links } = makeSandbox(['sheen', 'workbench', 'compact']);
   const okReg = sandbox.Skins.register({ id: 'compact', name: '紧凑', note: '测试用的第三套' });
   ok(okReg === true, 'register 接受新皮肤');
   ok(sandbox.Skins.register({ id: 'compact', name: '重复' }) === false, '重复 id 被拒绝');
@@ -179,7 +179,7 @@ function checkExtensibility() {
   ok(opts.length >= 4, `设置页列表会多出这一项（${opts.length} 套）`);
 
   section('扩展：声明了皮肤但漏了 CSS 要显式回落，不能静默装作切成功');
-  const { sandbox: s2, root: r2 } = makeSandbox(['mineradio']); // 没有 workbench 的 link
+  const { sandbox: s2, root: r2 } = makeSandbox(['sheen']); // 没有 workbench 的 link
   s2.Skins.apply('workbench');
   eq(r2.getAttribute('data-skin'), 'classic', '缺 CSS 的皮肤回落到 classic');
   eq(s2.Skins.currentId(), 'classic', 'currentId 也是 classic（不是嘴上说切了）');
@@ -192,7 +192,7 @@ function checkExtensibility() {
 function checkNoColor() {
   section('皮肤只管布局：CSS 里不许有颜色字面量');
 
-  for (const [name, css] of [['mineradio', MINERADIO], ['workbench', WORKBENCH]]) {
+  for (const [name, css] of [['sheen', SHEEN], ['workbench', WORKBENCH]]) {
     // 去掉注释再扫：注释里会提到"不出现颜色"这类字样。
     const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
     const hex = body.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
@@ -228,7 +228,7 @@ function checkNoColor() {
   ok(lnColors.length >= 2, 'liunian 确实做了激活行翻色（VMusic 实心底 + 深字）');
 
   section('皮肤只管布局：属性也应该是布局属性');
-  for (const [name, css] of [['mineradio', MINERADIO], ['workbench', WORKBENCH]]) {
+  for (const [name, css] of [['sheen', SHEEN], ['workbench', WORKBENCH]]) {
     const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
     // 这两条是"改配色"的典型入口，皮肤不该碰。
     ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(body),
@@ -257,14 +257,14 @@ function num(v) {
 function checkContrast() {
   section('区分度：两套皮肤的布局令牌要真的反向取值');
 
-  const a = tokensOf(MINERADIO);
+  const a = tokensOf(SHEEN);
   const b = tokensOf(WORKBENCH);
   const keys = ['gap', 'pad', 'radius', 'row-py', 'card-min', 'head-pb', 'title'];
   for (const k of keys) {
     ok(k in a && k in b, `两套皮肤都声明了 --skin-${k}`);
   }
 
-  // 间距/圆角/格子：mineradio 宽松，workbench 紧凑。要求至少差 1.8 倍，
+  // 间距/圆角/格子：sheen 宽松，workbench 紧凑。要求至少差 1.8 倍，
   // 差个 10% 只能算微调，换皮肤没有意义。
   for (const k of ['gap', 'pad', 'radius', 'row-py', 'card-min', 'head-pb']) {
     const va = num(a[k]);
@@ -273,21 +273,21 @@ function checkContrast() {
     const ratio = Math.max(va, vb) / Math.min(va, vb);
     ok(ratio >= 1.8, `--skin-${k} 两套相差 ${ratio.toFixed(2)} 倍（要求 ≥1.8，否则只是微调）`);
   }
-  ok(num(a['row-py']) > num(b['row-py']), 'mineradio 的行更高（低信息密度）');
-  ok(num(a['card-min']) > num(b['card-min']), 'mineradio 的卡片格子更大（一屏放更少）');
+  ok(num(a['row-py']) > num(b['row-py']), 'sheen 的行更高（低信息密度）');
+  ok(num(a['card-min']) > num(b['card-min']), 'sheen 的卡片格子更大（一屏放更少）');
 
   section('区分度：导航形式与分区方式也不能一样');
-  // mineradio：导航脱离栅格悬浮在顶部；workbench：导航留在栅格里、贴左侧。
-  ok(/\[data-skin="mineradio"\] \.rail \{[^}]*position:\s*fixed/.test(MINERADIO),
-    'mineradio 的导航是悬浮定位');
-  ok(/flex-direction:\s*row/.test(MINERADIO), 'mineradio 的导航横向排布');
+  // sheen：导航脱离栅格悬浮在顶部；workbench：导航留在栅格里、贴左侧。
+  ok(/\[data-skin="sheen"\] \.rail \{[^}]*position:\s*fixed/.test(SHEEN),
+    'sheen 的导航是悬浮定位');
+  ok(/flex-direction:\s*row/.test(SHEEN), 'sheen 的导航横向排布');
   ok(!/position:\s*fixed/.test(WORKBENCH.replace(/\/\*[\s\S]*?\*\//g, '')),
     'workbench 的导航不悬浮（留在栅格里）');
   ok(/flex-direction:\s*column/.test(WORKBENCH) || !/flex-direction/.test(WORKBENCH),
     'workbench 的导航仍是竖向（沿用默认布局的竖轨）');
 
-  // 分区：mineradio 单列全宽，workbench 三栏。
-  ok(/grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(MINERADIO), 'mineradio 是单列全宽');
+  // 分区：sheen 单列全宽，workbench 三栏。
+  ok(/grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(SHEEN), 'sheen 是单列全宽');
   ok(/grid-template-columns:\s*104px/.test(WORKBENCH), 'workbench 是固定三栏');
   ok(/gap:\s*1px/.test(WORKBENCH), 'workbench 用 1px 细线分隔（不是靠间距）');
 }
@@ -315,12 +315,12 @@ function selectorsOf(css) {
 function checkCoverage() {
   section('覆盖：两套皮肤要覆盖同一批模块，不能切过去落回默认');
 
-  const a = selectorsOf(MINERADIO);
+  const a = selectorsOf(SHEEN);
   const b = selectorsOf(WORKBENCH);
   const missingInB = [...a].filter((s) => !b.has(s));
   const missingInA = [...b].filter((s) => !a.has(s));
-  ok(missingInB.length === 0, `mineradio 覆盖的模块 workbench 也都有（缺：${missingInB.join(' ')}）`);
-  ok(missingInA.length === 0, `workbench 覆盖的模块 mineradio 也都有（缺：${missingInA.join(' ')}）`);
+  ok(missingInB.length === 0, `sheen 覆盖的模块 workbench 也都有（缺：${missingInB.join(' ')}）`);
+  ok(missingInA.length === 0, `workbench 覆盖的模块 sheen 也都有（缺：${missingInA.join(' ')}）`);
 
   // liunian 必须覆盖与前两套相同的模块集合：多覆盖（如 body::after、.disc-wrap）
   // 允许，少一个都会让某个页面"切了一半"落回默认布局。
@@ -335,7 +335,7 @@ function checkCoverage() {
     '.pl-grid', '.daily-strip', '.daily-list', '.set-group', '.stage', '.bar',
   ];
   for (const m of must) {
-    ok([...a].some((s) => s.indexOf(m) >= 0), `mineradio 覆盖了 ${m}`);
+    ok([...a].some((s) => s.indexOf(m) >= 0), `sheen 覆盖了 ${m}`);
     ok([...b].some((s) => s.indexOf(m) >= 0), `workbench 覆盖了 ${m}`);
     ok([...c].some((s) => s.indexOf(m) >= 0), `liunian 覆盖了 ${m}`);
   }
@@ -439,7 +439,7 @@ function checkLiunianNavigation() {
     '桥接分流本地 playTrack / 在线 Online.playAll');
 
   // 9) 作用域：搜索面板只属于流年。
-  ok(!/ln-sp/.test(MINERADIO) && !/ln-sp/.test(WORKBENCH), '其它皮肤不引入搜索面板');
+  ok(!/ln-sp/.test(SHEEN) && !/ln-sp/.test(WORKBENCH), '其它皮肤不引入搜索面板');
   ok(!/ln-right|ln-sp/.test(HTML), '业务 HTML 不内置右栏面板（皮肤自持，切走即消失）');
 }
 
@@ -451,7 +451,7 @@ function checkWiring() {
   section('接线：HTML / 路由 / 启动');
 
   ok(/<link rel="stylesheet" href="skins\/skins\.css">/.test(HTML), 'skins.css 常驻引入');
-  for (const id of ['mineradio', 'workbench', 'liunian']) {
+  for (const id of ['sheen', 'workbench', 'liunian']) {
     ok(new RegExp('href="skins/skin\\.' + id + '\\.css"[^>]*data-skin-css="' + id + '"').test(HTML),
       `skin.${id}.css 引了进来并带上 data-skin-css`);
     ok(new RegExp('data-skin-css="' + id + '"[^>]*disabled').test(HTML),
@@ -462,7 +462,7 @@ function checkWiring() {
     'skins.js 排在 app.js 之前（app.js 启动时要能拿到它）');
   ok(/id="skins-list"/.test(HTML), '设置页有皮肤列表容器');
 
-  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.mineradio.css', 'skins/skin.workbench.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js']) {
+  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.sheen.css', 'skins/skin.workbench.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js']) {
     ok(MAIN_RS.includes(`/skins/${p.split('/')[1]}`) || MAIN_RS.includes(p),
       `main.rs 注册了 /${p} 路由`);
   }

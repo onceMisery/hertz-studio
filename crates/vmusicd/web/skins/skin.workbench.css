@@ -3,22 +3,22 @@
 
    皮肤：workbench（工作台）
    --------------------------------------------------------------------------
-   与 mineradio 那套正相反，四个维度全部反向取值：
+   与 sheen 那套正相反，四个维度全部反向取值：
 
-     · 导航   mineradio 顶部悬浮胶囊（居中、圆形、浮在上面）
+     · 导航   sheen 顶部悬浮胶囊（居中、圆形、浮在上面）
               workbench 左侧固定窄条（贴边、直角、参与栅格）
-     · 分区   mineradio 单列全宽 + 舞台悬浮盖在内容上
+     · 分区   sheen 单列全宽 + 舞台悬浮盖在内容上
               workbench 三栏落地 + 舞台是常驻的右栏，各栏之间用 1px 细线切
-     · 密度   mineradio 低密度：大间距、高行高、一屏放得少
+     · 密度   sheen 低密度：大间距、高行高、一屏放得少
               workbench 高密度：紧凑行、小格子、一屏放得多
-     · 形状   mineradio 大圆角、靠间距分区
+     · 形状   sheen 大圆角、靠间距分区
               workbench 直角/微圆角、靠细线分区
 
    同样**只写布局、不出现颜色字面量**，配色全部沿用当前主题 token。
 */
 
 [data-skin="workbench"] {
-  /* 与 mineradio 同一组令牌，取值反向——对照这两个块就能看清两套皮肤差在哪。 */
+  /* 与 sheen 同一组令牌，取值反向——对照这两个块就能看清两套皮肤差在哪。 */
   --skin-gap: 6px;
   --skin-pad: 12px;
   --skin-radius: 3px;
@@ -40,7 +40,7 @@
 
 /* 宽屏空闲：基础样式的空闲规则会把栅格改成「86px + 1fr」，本皮肤的窄栏
    设计是 104px，这里把第一栏钉回 104px（舞台仍由基础规则 display:none）。
-   与 mineradio 保留同一条选择器，两套皮肤的模块覆盖保持一致。 */
+   与 sheen 保留同一条选择器，两套皮肤的模块覆盖保持一致。 */
 @media (min-width: 1241px) {
   [data-skin="workbench"] body[data-stage-idle="1"] .app {
     grid-template-columns: 104px minmax(0, 1fr);
@@ -105,7 +105,7 @@
 }
 
 /* 页头换成两行：标题一行，工具条独占第二行并靠左——工作台的工具条形态，
-   与 mineradio「标题与工具挤在同一行、工具靠右」正好相反。 */
+   与 sheen「标题与工具挤在同一行、工具靠右」正好相反。 */
 [data-skin="workbench"] .col-head {
   flex-wrap: wrap;
   align-items: baseline;

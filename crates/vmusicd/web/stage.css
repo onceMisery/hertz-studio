@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: MIT
    Copyright (c) 2026 mmusic-studio contributors
 
-   VCP 风格「音乐模式」舞台层。
+   「音乐模式」舞台层。
 
    这一层不改动 style.css 的既有令牌，只把**播放器相关组件**——舞台、封面、
-   歌词、进度条、播放条——统一到 VCP 的视觉规范上：
+   歌词、进度条、播放条——统一到同一套玻璃视觉规范上：
 
      · 玻璃配方   rgba(20,20,20,0.6) + 1px rgba(255,255,255,0.1) + blur(12px)
      · 圆角       面板 20px / 封面 16px / 进度条 3px
@@ -16,7 +16,7 @@
    --stage-h3（补色），以及 --stage-glow（0–1 的律动强度）。 */
 
 :root {
-  /* --- VCP 玻璃语言 ---
+  /* --- 玻璃语言 ---
      ⚠ 这里**只允许**声明舞台独占的 --stage-* 令牌。
 
      曾经这里重名声明了 --glass-bg / --glass-border / --glass-shadow /
@@ -306,7 +306,7 @@
 }
 body.is-playing .disc { animation-play-state: running; }
 
-/* 唱片中心轴孔：VCP 的封面是方形卡片，这里保留圆形唱片的辨识度 */
+/* 唱片中心轴孔：参考项目的封面是方形卡片，这里保留圆形唱片的辨识度 */
 .disc::after {
   content: "";
   position: absolute;
@@ -497,7 +497,7 @@ body.is-playing .disc { animation-play-state: running; }
   background-image: linear-gradient(var(--lyric-highlight), var(--lyric-highlight));
 }
 /* ==========================================================================
-   4. 播放条：VCP 玻璃配方 + 6px 进度条
+   4. 播放条：玻璃配方 + 6px 进度条
    ========================================================================== */
 
 .bar {

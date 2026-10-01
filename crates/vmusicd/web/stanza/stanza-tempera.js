@@ -3,8 +3,8 @@
 // 凝彩 tempera：全屏 Pixi 色块分镜歌词 MV。每句歌词重新切一次画面 —— 平涂色块
 // 按构图入场、局部叠网点/斜线网屏、唱到哪里一条强调色「扫光带」推到哪里，
 // 带内文字反色成底色（印刷套色的反白效果）。
-// 行为语言参考 VCPChat 音乐舞台的凝彩模式；代码为本项目独立实现（见 NOTICE
-// 「Design lineage」）。排版 / 镜头 / 起音 / 光学后期全部复用商籁引擎
+// 行为语言参考上游音乐舞台的凝彩模式（出处见 NOTICE「Design lineage」），
+// 代码为本项目独立实现。排版 / 镜头 / 起音 / 光学后期全部复用商籁引擎
 // StanzaSonnetFx，Pixi 惰性加载与 Stage → 帧适配复用 StanzaSonnet 的出口，
 // 本文件只负责「色块 + 网屏 + 扫光反色 + 印刷装饰」这一层。
 // 对外 API 与 classic/cadenza/sonnet 渲染器一致（frame/update/setTheme/.../destroy）。

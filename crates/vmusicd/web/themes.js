@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 mmusic-studio contributors
 //
-// 多主题色：把 VCP Music 已有的一批主题配色搬过来，映射到本项目的令牌上。
+// 多主题色：把参考项目已有的一批主题配色映射到本项目的令牌上。
 //
 // 设计原则
 // --------
@@ -28,7 +28,7 @@
   // -------------------------------------------------------------------------
   // 内置主题
   //
-  // 每一项来自 VCPChat `styles/themes/*.css`：把那里的 --primary-bg /
+  // 每一项来自参考项目的 `styles/themes/*.css`：把那里的 --primary-bg /
   // --secondary-bg / --button-bg / --highlight-text 等映射到本项目令牌。
   // -------------------------------------------------------------------------
   var CATALOG = [
@@ -57,9 +57,9 @@
       }
     },
     {
-      id: 'vcp-starblue',
+      id: 'starblue',
       name: '星蓝深空',
-      note: '参考 VCP 全屏星蓝：深空蓝黑底 + 科技蓝强调色',
+      note: '深空蓝黑底 + 科技蓝强调色',
       // 对比度（自 --bg 反推，WCAG AA）：
       //   text/bg ≈ 14.2  muted/bg ≈ 7.2  accent-ink/accent ≈ 5.7
       tokens: {
@@ -78,9 +78,9 @@
       }
     },
     {
-      id: 'vcp-emerald',
+      id: 'emerald',
       name: '翡翠夜',
-      note: 'VCP 原生气质：墨绿底 + 翡翠强调色',
+      note: '墨绿底 + 翡翠强调色',
       tokens: {
         '--bg': '#0d0f12',
         '--panel': 'rgba(24, 27, 32, 0.66)',
@@ -97,7 +97,7 @@
       }
     },
     {
-      id: 'vcp-midnight-neon',
+      id: 'midnight-neon',
       name: '午夜霓虹',
       note: '午夜霓虹 · 深夜窗上反光的赛博粉',
       tokens: {
@@ -116,7 +116,7 @@
       }
     },
     {
-      id: 'vcp-mono',
+      id: 'mono',
       name: '黑白简约',
       note: '黑白简约 · 克制的墨灰底 + 一点冷蓝强调',
       tokens: {
@@ -135,7 +135,7 @@
       }
     },
     {
-      id: 'vcp-aero',
+      id: 'aero',
       name: '极简 Aero',
       note: '极简 Aero · 冷灰蓝的玻璃质感',
       tokens: {
@@ -154,7 +154,7 @@
       }
     },
     {
-      id: 'vcp-codeide',
+      id: 'codeide',
       name: 'Code IDE',
       note: '代码编辑器 · 低饱和的暖琥珀',
       tokens: {
@@ -173,7 +173,7 @@
       }
     },
     {
-      id: 'vcp-sakura',
+      id: 'sakura',
       name: '夜樱猫语',
       note: '夜樱猫语 · 靛紫底上的樱粉',
       tokens: {
@@ -192,7 +192,7 @@
       }
     },
     {
-      id: 'vcp-crimson',
+      id: 'crimson',
       name: '绯红天穹',
       note: '绯红天穹 · 高能的猩红强调',
       tokens: {
@@ -211,7 +211,7 @@
       }
     },
     {
-      id: 'vcp-paper-ink',
+      id: 'paper-ink',
       name: '纸墨与机芯',
       note: '纸墨与机芯 · 米白纸感 + 黄铜齿轮',
       tokens: {
@@ -230,7 +230,7 @@
       }
     },
     {
-      id: 'vcp-forest',
+      id: 'forest',
       name: '静谧森岭',
       note: '静谧森岭 · 苔绿与蕨叶',
       tokens: {
@@ -249,7 +249,7 @@
       }
     },
     {
-      id: 'vcp-porcelain',
+      id: 'porcelain',
       name: '瓷与锦',
       note: '瓷与锦 · 青花瓷的靛蓝与金线',
       tokens: {
@@ -268,7 +268,7 @@
       }
     },
     {
-      id: 'vcp-snow-dawn',
+      id: 'snow-dawn',
       name: '雪境晨昏',
       note: '雪境晨昏 · 冷蓝夜幕与初升暖光',
       tokens: {
@@ -287,7 +287,7 @@
       }
     },
     {
-      id: 'vcp-acid',
+      id: 'acid',
       name: '酸性玄武',
       note: '酸性玄武 · 荧光黄绿的实验感',
       tokens: {

@@ -79,7 +79,7 @@ function makeEl(tag, id) {
 function makeApp(store) {
   const html = makeEl('html');
   const body = makeEl('body');
-  const links = ['mineradio', 'workbench', 'liunian'].map((id) => {
+  const links = ['sheen', 'workbench', 'liunian'].map((id) => {
     const l = makeEl('link');
     l.setAttribute('data-skin-css', id);
     l.disabled = true;
@@ -180,12 +180,12 @@ function checkBuiltinThemeRestore() {
 
   const store = new Map();
   const first = boot(makeApp(store));
-  first.sandbox.Theme.apply('vcp-sakura');
-  eq(store.get('vmusic.theme.v2'), 'vcp-sakura', '内置主题写进 localStorage');
+  first.sandbox.Theme.apply('sakura');
+  eq(store.get('vmusic.theme.v2'), 'sakura', '内置主题写进 localStorage');
 
   const second = boot(makeApp(store));
-  eq(second.sandbox.Theme.current().id, 'vcp-sakura', '刷新后主题没跑');
-  eq(second.html.getAttribute('data-theme'), 'vcp-sakura', 'html 上的标记也是它');
+  eq(second.sandbox.Theme.current().id, 'sakura', '刷新后主题没跑');
+  eq(second.html.getAttribute('data-theme'), 'sakura', 'html 上的标记也是它');
   eq(second.html.style.getPropertyValue('--accent'), '#ff8c94', '令牌值跟着主题走');
 
   const unknown = boot(makeApp(new Map([['vmusic.theme.v2', 'not-a-theme']])));
@@ -275,10 +275,10 @@ function checkWallpaperRestore() {
 
   // 选壁纸会顺带推一套推荐主题，但推荐不应该盖住用户后来的手动选择。
   const third = boot(makeApp(new Map()));
-  third.sandbox.Theme.apply('vcp-forest');
+  third.sandbox.Theme.apply('forest');
   third.sandbox.ThemeStudio.setWallpaper('evening-12.jpg', { keepTheme: true });
   const fourth = boot(makeApp(third.store));
-  eq(fourth.sandbox.Theme.current().id, 'vcp-forest', 'keepTheme 下壁纸不动主题');
+  eq(fourth.sandbox.Theme.current().id, 'forest', 'keepTheme 下壁纸不动主题');
   eq(fourth.sandbox.ThemeStudio.state.id, 'evening-12.jpg', '壁纸自己记下来了');
 }
 

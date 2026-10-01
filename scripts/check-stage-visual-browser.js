@@ -115,7 +115,7 @@ async function main() {
     await api('POST', '/v1/player/pause');
     await api('POST', '/v1/player/seek', { position_ms: 12500 });
     await page.waitForFunction(id => Stage.presentation().track?.id === id && Stage.coverUrl() && Stage.lyrics()?.lines?.length >= 6, track.id);
-    await page.evaluate(() => { Theme.apply('vcp-mono'); Stage3D.configure({ scene: 'silk', stanzaVisual: 'stage', stanzaBg: 'stage', motion: 0, cruise: false, lyrics: false, shelfMode: 'off' }); Stage3D.open('silk'); });
+    await page.evaluate(() => { Theme.apply('mono'); Stage3D.configure({ scene: 'silk', stanzaVisual: 'stage', stanzaBg: 'stage', motion: 0, cruise: false, lyrics: false, shelfMode: 'off' }); Stage3D.open('silk'); });
     await page.waitForFunction(() => Stage3D.stats().buffer !== '0x0');
     await page.waitForTimeout(900);
     assert.equal(await page.locator('#s3d-fallback').isVisible(), false);

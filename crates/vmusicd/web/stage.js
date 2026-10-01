@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 mmusic-studio contributors
 //
-// VCP 风格「音乐模式」舞台控制器。
+// 「音乐模式」舞台控制器。
 //
 // 职责边界：stage.js 只碰**表现层**——封面转盘、取色背景、歌词渲染与推进、
 // 律动环、全屏歌词页。播放逻辑与数据接口仍然在 app.js 里，两边只通过两个

@@ -9,7 +9,7 @@
 // 舞台时换掉整套几何与着色器。两者对同一份资源的诉求是互斥的，硬塞进一个
 // 编排层只会让两边都长出一堆 if。
 //
-// 设计上大量借鉴 Mineradio 的三维层（它的结论是实测调过的）：
+// 三维层的几条硬性结论来自参考项目的实测（出处见 NOTICE「Design lineage」）：
 //
 //   · DPR 双钳制：硬性上限 ∩ 总像素预算 sqrt(budget / cssPixels)。只写
 //     min(dpr, 2) 在 4K 上会直接爆显存带宽，这个公式保证任何分辨率下
@@ -2036,7 +2036,7 @@
   }
 
   // 播放队列浮层：全屏里直接看队列、点行跳播，不再退出声场去队列页
-  //（交互对齐 folia-major 的沉浸播放器面板）。队列数据由 app.js 在
+  //（交互对齐参考项目的沉浸播放器面板）。队列数据由 app.js 在
   // renderQueue / 换曲时经 setQueue 推送，这里只渲染并回传意图。
   function setQueuePanel(on) {
     queueOpen = !!on;
@@ -3031,7 +3031,7 @@
     document.addEventListener('stage:playing-changed', function () { if (active && !document.hidden) syncNowPlaying(); });
 
     // 窗口尺寸与 DPR 不是同步生效的：全屏切换 / 跨屏拖动时 devicePixelRatio
-    // 要晚一拍才更新，所以延后补几次（Mineradio 那边的经验值是 48/140/320）。
+    // 要晚一拍才更新，所以延后补几次（参考项目的经验值是 48/140/320）。
     if (window.ResizeObserver && root) {
       resizeObserver = new ResizeObserver(markSizeDirty);
       resizeObserver.observe(wrapEl);

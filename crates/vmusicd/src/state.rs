@@ -1616,8 +1616,8 @@ impl AppState {
             match mode {
                 PlayMode::RepeatOne if auto => current,
                 // Shuffle must move: picking the current index again would look
-                // like "next" did nothing. VCP keeps a pre-shuffled queue for the
-                // same reason; excluding the current index is the minimal version.
+                // like "next" did nothing. A pre-shuffled queue is one way to
+                // guarantee movement; excluding the current index is the minimal one.
                 PlayMode::Shuffle if delta > 0 => random_index(len, Some(current)),
                 _ => {
                     let raw = current as isize + delta;

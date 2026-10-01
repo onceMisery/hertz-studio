@@ -236,7 +236,7 @@ const ui = {
   dailyModes: $('daily-modes'),
 };
 
-// 舞台（VCP 音乐模式）由 stage.js 提供，先于 app.js 加载。它只吃数据、只吐
+// 舞台（沉浸音乐模式）由 stage.js 提供，先于 app.js 加载。它只吃数据、只吐
 // 事件：渲染与动画在里面，播放逻辑仍然只有 app.js 这一份。
 const Stage = window.Stage;
 
@@ -259,7 +259,7 @@ const state = {
 
   seeking: false,
   // 乐观 UI 守卫：刚发出播放/暂停命令时，在途的旧快照会让按钮闪回。
-  // 与 VCP music.js 的 isChangingState / expectedPlayingState / lastCommandTime 同一思路。
+  // 用「命令时刻 + 在途意图」两个量压住这段窗口，判定见 staleCommand()。
   commandAt: 0,
   commandPending: false,
   commandIntent: 0,
@@ -881,7 +881,7 @@ async function playTrack(id, queue) {
   let submittedRevision = PlaybackIntent.queueRevision;
   const track = state.byId.get(id);
   const label = track ? track.title : '曲目';
-  // VCP 在 load 之后会轮询直到 is_loading 落定；这里后端 load 是带回执的，
+  // 参考实现在 load 之后会轮询直到 is_loading 落定；这里后端 load 是带回执的，
   // 只需把"正在载入"这段时间显式化，而不是让界面静默几百毫秒。
   state.loadingTrack = id;
   ui.playpause.classList.add('is-loading');
@@ -963,7 +963,7 @@ async function restoreQueue() {
 }
 
 // 命令刚下发、后端还没处理完时到达的快照是旧的：照它渲染会让播放键闪回。
-// VCP music.js 用 isChangingState + 800ms 窗口解决同一问题。
+// 参考实现用「切换态标记 + 800ms 窗口」解决同一问题。
 function staleCommand(snap) {
   return state.commandAt > 0
     && PlaybackIntent.current(state.commandIntent)
@@ -3856,7 +3856,7 @@ function initNowPlayingModal() {
   ui.mode.onclick = () => {
     const order = ['repeat', 'repeat_one', 'shuffle'];
     const next = order[(order.indexOf(state.snapshot.mode) + 1) % order.length];
-    // VCP 把播放模式写进 localStorage；这里写服务端 settings，换浏览器也一致。
+    // 播放模式写服务端 settings 而不是 localStorage，换浏览器也能保持一致。
     transport.post('/v1/player/mode', { mode: next })
       .then(() => transport.put('/v1/settings', { play_mode: next }).catch(() => {}))
       .catch((err) => toast(errText('切换播放模式失败', err), 'error'));
