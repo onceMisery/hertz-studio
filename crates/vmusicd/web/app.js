@@ -974,8 +974,10 @@ function applySnapshot(snap) {
     loadNowPlaying(snap.track_id);
     // Stage 不暴露当前 track_id（私有变量），换曲由这里显式通知电影相机。
     if (window.StageCinema) StageCinema.onTrack(snap.track_id);
-    // 换曲不改队列，但浮层的高亮跟着快照走，这里补一次推送。
+    // 换曲不改队列内容，但两处高亮都要跟着快照走：全屏浮层重推一份，
+    // 队列页就地改类名并把当前行带回可视区。
     pushStageQueue();
+    syncQueuePlaying(snap, true);
   }
   syncStageIdle();
   updateRowActiveState(snap);
@@ -1440,6 +1442,24 @@ function renderQueue() {
     });
     ui.queueList.appendChild(row);
   });
+}
+
+// 换曲不改队列内容，所以这里只改类名，不重建列表：重建会把用户的滚动位置、
+// 拖拽中间态连同整段 DOM 一起丢掉。高亮本来只在 renderQueue() 里按当时的
+// snapshot 算一次，自动接力/上下曲只走 applySnapshot，于是列表会一直停在
+// 「上次重绘队列那一瞬间正在播的那首」——就是队列里红行不跟着换曲的原因。
+// locate：把正在播放的行带回可视区，与全屏声场里的队列浮层同一套行为。
+function syncQueuePlaying(snap, locate) {
+  const rows = ui.queueList.querySelectorAll('.q-row');
+  if (!rows.length) return;
+  let current = null;
+  for (const row of rows) {
+    const active = row.dataset.trackId === snap.track_id;
+    row.classList.toggle('playing', active);
+    if (active) current = row;
+  }
+  // 队列页没打开时行没有布局，滚动留给进入视图时再做。
+  if (locate && current && !ui.views.queue.hidden) current.scrollIntoView({ block: 'center' });
 }
 
 // ---------------------------------------------------------------------------
@@ -2889,6 +2909,8 @@ function setView(name) {
   if (name === 'settings') loadDiagnostics();
   // 在线歌单可能在歌单视图没渲染期间到达（登录、刷新），进入时补一次同步。
   if (name === 'playlists') renderOnlinePlaylistSection();
+  // 队列页的高亮由快照实时同步，但隐藏期间没有布局可滚；进入时把当前曲定位回来。
+  if (name === 'queue') syncQueuePlaying(state.snapshot, true);
   // 收藏与每日推荐同理：进入时才拉，避免启动时多打两条请求。
   if (name === 'favorites' && window.Favorites) window.Favorites.onViewEnter();
   // 每日推荐独立页：数据与首页那条推荐条同源，只是换了个地方展示。
