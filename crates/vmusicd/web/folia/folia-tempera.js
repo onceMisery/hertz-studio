@@ -513,7 +513,9 @@
     };
   }
 
-  function init(host, onSeek) {
+  // 取景框只作视觉：凝彩热区若接点击，舞台中央整块都会把「点一下/拖机位」
+  // 变成跳回当前句首——播放位置被反复打回，观感即一点舞台就停。
+  function init(host) {
     var G = typeof globalThis !== 'undefined' ? globalThis : window;
     var root = document.createElement('div');
     root.className = 'fl-tempera';
@@ -595,10 +597,6 @@
       hot.style.transform = 'translate(' + (sx - hw / 2) + 'px,' + (sy - hh / 2) + 'px)';
       hot.style.width = hw + 'px';
       hot.style.height = hh + 'px';
-      hot.onclick = function (e) {
-        e.stopPropagation();
-        if (onSeek) onSeek(Math.round(line.startTime * 1000));
-      };
     }
 
     function frame() {

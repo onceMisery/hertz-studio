@@ -176,7 +176,7 @@
 .fl-tempera-note { position: absolute; left: 50%; bottom: calc(170px + env(safe-area-inset-bottom));
   transform: translateX(-50%); color: var(--fl-sonnet-accent, #f4f4f5); opacity: .7;
   font-size: 13px; letter-spacing: .12em; white-space: nowrap; }
-.fl-tempera-hot { position: absolute; left: 0; top: 0; pointer-events: auto; cursor: pointer; }
+.fl-tempera-hot { position: absolute; left: 0; top: 0; pointer-events: none; }
 
 /* 字幕条 */
 .fl-sub { position: absolute; left: 0; right: 0; bottom: calc(118px + env(safe-area-inset-bottom));

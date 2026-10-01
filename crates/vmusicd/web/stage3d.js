@@ -2116,8 +2116,10 @@
       folia.sonnet = global.FoliaSonnet.init(sonnetHost, function (ms) { control('seek', ms); });
     }
     // 凝彩与商籁共用同一层宿主与同一份惰性 Pixi；同一时刻只有一个可见。
+    // 凝彩不给 seek 回调：它的取景框只覆盖正在唱的那句，点击只会把播放打回
+    // 句首（见 folia-tempera 的取景框注释），舞台点击应留给机位手势。
     if (global.FoliaTempera && global.FoliaSonnet && sonnetHost) {
-      folia.tempera = global.FoliaTempera.init(sonnetHost, function (ms) { control('seek', ms); });
+      folia.tempera = global.FoliaTempera.init(sonnetHost);
     }
     folia.ready = true;
     bindFoliaControls();
@@ -2968,8 +2970,11 @@
     bindLyrTilt();
     // 驾驶舱改了 --lp-3d 开关后要重读（与 stage.js 的 readTilt 同一事件源）。
     document.addEventListener('stagecontrol:change', readLyrTilt);
-    root.addEventListener('pointermove', pokeChrome, { passive: true });
-    root.addEventListener('pointerdown', pokeChrome, { passive: true });
+    // 捕获阶段挂 window：舞台之上若还有浮层接管命中（弹窗/提示/歌词热区），
+    // 冒泡到不了 root，chrome 会永远唤不醒；捕获阶段无论命中谁都先经过这里。
+    // pokeChrome 自身按 active 收口，舞台关着时是空转。
+    window.addEventListener('pointermove', pokeChrome, { passive: true, capture: true });
+    window.addEventListener('pointerdown', pokeChrome, { passive: true, capture: true });
 
     document.addEventListener('keydown', onKeyDown, true);
 
