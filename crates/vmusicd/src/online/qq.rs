@@ -469,6 +469,12 @@ async fn pick_working_url(
         }
     }
     if candidates.is_empty() {
+        crate::diaglog!(
+            "qq.no_candidate",
+            tiers = tiers.len(),
+            sips = sips.len(),
+            infos = infos.len()
+        );
         return None;
     }
 
@@ -479,11 +485,20 @@ async fn pick_working_url(
     )
     .await;
 
-    let first = results.iter().position(|(_, _, ok)| *ok)?;
+    let Some(first) = results.iter().position(|(_, _, ok)| *ok) else {
+        // 全部候选探活失败：vkey 给了地址但 CDN 都不认，这是「QQ 曲播不出来」
+        // 最常见的形态，必须留下探了多少个。
+        crate::diaglog!(
+            "qq.probe_all_failed",
+            candidates = candidates.len(),
+            tiers = tiers.len()
+        );
+        return None;
+    };
     let hit = results[first].0;
     let url = results[first].1.clone();
     let hit_bps = tiers[hit].1;
-    let fallback_urls = results
+    let fallback_urls: Vec<String> = results
         .iter()
         .skip(first + 1)
         .filter_map(|(i, u, ok)| {
@@ -493,6 +508,15 @@ async fn pick_working_url(
             Some(u.clone())
         })
         .collect();
+    crate::diaglog!(
+        "qq.probe",
+        candidates = candidates.len(),
+        hit_candidate = first,
+        hit_tier = hit,
+        hit_bps = hit_bps,
+        fallbacks = fallback_urls.len(),
+        url = crate::diag::redact_url(&url)
+    );
     Some((hit, url, fallback_urls))
 }
 

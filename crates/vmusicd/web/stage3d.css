@@ -593,14 +593,51 @@ body.s3d-open > .bar { display: none; }
 .s3d-volume { display: flex; gap: 10px; align-items: center; color: var(--s3d-muted); }
 .s3d-volume svg { width: 18px; height: 18px; flex: none; }
 .s3d-volume input { width: 70px; }
+/* 面板是浮层里的浮层：z-index 压过歌单架（3）与 chrome（4），任何模式、
+   任何切换顺序下都不会再被封面卡盖住。浮凸感由分层落影 + 顶部内高光 +
+   微渐变亮面 + 打开时的轻透视入场共同给出；入场动画用 backwards 填充，
+   结束后回归基样式，不留常驻 transform（避免多出常驻层叠上下文）。 */
 .s3d-settings {
   position: absolute; top: 96px; right: 36px; width: 280px; box-sizing: border-box;
-  padding: 18px 22px 22px; border: var(--s3d-bar-border); border-radius: 20px;
-  color: var(--s3d-text); background: rgba(16,22,23,.92); box-shadow: var(--s3d-bar-shadow);
-  backdrop-filter: blur(28px); z-index: 2;
+  padding: 0 22px 22px; border-radius: 20px;
+  border: 1px solid rgba(255,255,255,.13); border-bottom-color: rgba(255,255,255,.05);
+  color: var(--s3d-text);
+  background:
+    linear-gradient(165deg, rgba(255,255,255,.06), rgba(255,255,255,0) 32%),
+    rgba(16,22,23,.94);
+  box-shadow:
+    0 10px 26px rgba(0,0,0,.42),
+    0 36px 90px rgba(0,0,0,.5),
+    inset 0 1px 0 rgba(255,255,255,.09);
+  backdrop-filter: blur(28px); z-index: 5;
+}
+.s3d-settings:not([hidden]) { animation: s3d-settings-in 460ms cubic-bezier(.16,1,.3,1) backwards; }
+@keyframes s3d-settings-in {
+  from { opacity: 0; transform: perspective(1100px) translateY(16px) rotateX(4deg) scale(.97); transform-origin: 50% 0; }
+  to { opacity: 1; transform: none; }
 }
 .s3d-settings { max-height: calc(100% - 120px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
-.s3d-settings-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; font-size: 14px; font-weight: 550; position: sticky; top: 0; z-index: 1; background: var(--s3d-bg); }
+/* 标题栏与面板同材质：全出血吸顶（负 margin 盖住滚动时从两侧漏出的内容），
+   薄荷青 tick + 小字号宽字距 + 发丝分隔线，关闭按钮弱化为幽灵图标——
+   不再是一块突兀的实色条。 */
+.s3d-settings-heading {
+  display: flex; align-items: center; gap: 9px;
+  margin: 0 -22px 4px; padding: 16px 12px 11px 22px;
+  font-size: 11px; font-weight: 600; letter-spacing: .22em;
+  color: var(--s3d-muted);
+  position: sticky; top: 0; z-index: 1;
+  background: rgba(16,21,22,.98);
+  border-bottom: 1px solid rgba(255,255,255,.07);
+}
+.s3d-settings-heading::before {
+  content: ''; flex: none; width: 3px; height: 11px; border-radius: 2px;
+  background: var(--s3d-accent); box-shadow: 0 0 10px rgba(195,229,218,.45);
+}
+.s3d-settings-heading .s3d-btn { width: 30px; height: 30px; margin-left: auto; margin-right: -6px; border-radius: 9px; opacity: .72; }
+.s3d-settings-heading .s3d-btn:hover { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .s3d-settings:not([hidden]) { animation: none; }
+}
 .s3d-settings label { display: flex; justify-content: space-between; margin: 20px 0 14px; font-size: 12px; }
 .s3d-settings output { font: 11px ui-monospace,monospace; color: var(--s3d-accent); }
 .s3d-settings input { width: 100%; }
@@ -611,7 +648,7 @@ body.s3d-open > .bar { display: none; }
   display: flex; flex-direction: column;
   padding: 16px 14px 16px 18px; border: var(--s3d-bar-border); border-radius: 20px;
   color: var(--s3d-text); background: rgba(16,22,23,.92); box-shadow: var(--s3d-bar-shadow);
-  backdrop-filter: blur(28px); z-index: 2;
+  backdrop-filter: blur(28px); z-index: 5;
 }
 .s3d-queue-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; padding-right: 4px; font-size: 14px; font-weight: 550; }
 .s3d-queue-head b { font: 11px ui-monospace, monospace; color: var(--s3d-accent); margin-left: 7px; }

@@ -6,13 +6,13 @@
 // 背景
 // ----
 // 本项目是 SPA：.rail 导航 → .column 六个视图 → .stage 舞台，.bar 是 body 末尾
-// 的播放条。VCPChat/Musicmodules（VMusic）的骨架与此完全不同：
-//   左栏 = 搜索 + 操作按钮 + tabs + **歌曲列表本体**；
-//   中栏 = **文档流播放卡** + 内容区；
-//   右栏 = 频谱 + 歌词。
-// 单靠 CSS 无法把「列表本体」移出视图容器、把播放条搬进中栏，所以流年皮肤
-// 除 skin.liunian.css 外还有本文件：皮肤激活时做可逆的 DOM 重编排，切走时
-// 经锚点逐一还原，恢复到与本文件从未运行过一致的状态。
+// 的播放条。流年皮肤对骨架做如下调整（v3）：
+//   · 移除最左侧 .rail 导航轨（display:none，节点保留以备程序化点击与还原）；
+//   · 中栏顶部新建胶囊导航 .ln-nav（六个一级目的地）；
+//   · .bar 搬进中栏最前成为文档流播放卡（可收为胶囊）；
+//   · 右栏改为纵向两区：上部为「搜索面板」（本地/在线双源并行检索、
+//     分类结果、搜索历史），下部保留 .stage（频谱 + 歌词）；
+//   · 曲库/在线/歌单等列表本体不再搬运，留在中栏各自视图。
 //
 // 契约
 // ----
@@ -20,7 +20,9 @@
 //     业务 JS 的状态与事件（原有监听器随节点一起走，不丢）；
 //   · 每个搬运的节点原位留一个 <span class="ln-anchor">，还原时 insertBefore
 //     回锚点再删锚点，原顺序严格保持；
-//   · 视图切换联动用 MutationObserver（观察 .view 的 hidden），不 hook 业务代码。
+//   · 视图切换联动用 MutationObserver（观察 .view 的 hidden），不 hook 业务代码；
+//   · 搜索面板自包含取数（直连 REST），播放/跳转经 document 上的
+//     `ln:panel` 自定义事件交给 app.js 分流。
 
 (function () {
   'use strict';
@@ -31,21 +33,31 @@
   var moves = [];     // { node, anchor }：搬运记录，后进先出地还原
   var built = [];     // 本文件新建的节点，卸载时 remove
   var observer = null;
-  var libraryObserver = null;
   var refs = {};      // 重编排队列里的 DOM 引用
   var savedText = []; // 临时改过的文本，{ node, text }
-  var activeTab = 'all';
-  var inReflow = false; // reflow 重入保护（ensureView 会在 reflow 内部再调一次）
+  var inReflow = false; // reflow 重入保护
 
-  // 左栏折叠状态（持久化）；进入设置前的视图记忆。
-  var COLLAPSE_KEY = 'vmusic.ln-rail-collapsed';
   var CAPSULE_KEY = 'vmusic.ln-capsule';
-  var lastWorkView = 'library'; // data-view 名（不含 settings/daily）
+  var HISTORY_KEY = 'vmusic.ln-search-history';
+  var HISTORY_MAX = 10;
   var keyHandler = null;
+
+  // 搜索面板运行态。
+  var panel = {
+    scope: 'all',     // all | local | online
+    q: '',
+    input: '',
+    epoch: 0,
+    debounce: 0,
+    controllers: [],
+    sources: null,
+  };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
 
   function byId(id) { return document.getElementById(id); }
+
+  function transport() { return window.VMusicTransport; }
 
   // -------------------------------------------------------------------------
   // 节点搬运（锚点还原）
@@ -64,9 +76,8 @@
   }
 
   function restoreMoves() {
-    // 后进先出：被包裹进新节点的（如 disc-wrap 进 .bar-row1），bar-row1 作为
-    // built 会在 restoreMoves 之后删除——先把内层还原到锚点（锚点在原容器），
-    // 顺序天然安全。
+    // 后进先出：被包裹进新节点的（如 disc-wrap 进 .bar-row1、stage 进 .ln-right），
+    // 内层先还原到锚点（锚点在原容器），顺序天然安全。
     for (var i = moves.length - 1; i >= 0; i -= 1) {
       var m = moves[i];
       if (m.anchor.parentNode) m.anchor.parentNode.insertBefore(m.node, m.anchor);
@@ -95,317 +106,6 @@
   }
 
   // -------------------------------------------------------------------------
-  // 左栏构建
-  // -------------------------------------------------------------------------
-
-  function buildLeft(rail) {
-    // 顶部控制条：折叠/展开切换按钮（始终可见；窄屏由 CSS 隐藏，走抽屉机制）。
-    refs.railbar = make('div', 'ln-railbar', rail);
-    refs.collapseBtn = make('button', 'ln-collapse-btn', refs.railbar);
-    refs.collapseBtn.type = 'button';
-    refs.collapseBtn.title = '收起侧栏 (Ctrl+B)';
-    refs.collapseBtn.setAttribute('aria-label', '收起侧栏');
-    refs.collapseBtn.innerHTML = '<span class="ln-cb-glyph" aria-hidden="true">«</span>';
-
-    // 搜索槽（.topsearch 由顶栏移入）
-    refs.searchSlot = make('div', 'ln-search', rail);
-
-    // 操作按钮：本地 / 云端导入
-    refs.actions = make('div', 'ln-actions', rail);
-    refs.btnLocal = make('button', '', refs.actions);
-    refs.btnLocal.id = 'ln-btn-local';
-    refs.btnLocal.type = 'button';
-    refs.btnLocal.textContent = '添加音乐';
-    refs.btnCloud = make('button', '', refs.actions);
-    refs.btnCloud.id = 'ln-btn-cloud';
-    refs.btnCloud.type = 'button';
-    refs.btnCloud.textContent = '在线找歌';
-
-    // tabs：全部/专辑/歌手/歌单/在线找歌
-    // 「在线找歌」是真实的一项（不是按钮的影子）：它有自己的槽位语义——
-    // 结果在中栏在线页，左栏保留本地曲库。缺了它，左栏就没有任何入口能
-    // 表达"我现在看的是在线"，在线页看起来像没切换过来。
-    refs.tabs = make('div', 'ln-tabs', rail);
-    [
-      { id: 'all', label: '全部', count: true },
-      { id: 'albums', label: '专辑' },
-      { id: 'artists', label: '歌手' },
-      { id: 'playlists', label: '歌单' },
-      { id: 'online', label: '在线找歌' }
-    ].forEach(function (t) {
-      var b = make('button', 'ln-tab' + (t.id === 'all' ? ' active' : ''), refs.tabs);
-      b.type = 'button';
-      b.dataset.tab = t.id;
-      b.textContent = t.label;
-      if (t.count) {
-        var c = document.createElement('span');
-        c.className = 'count';
-        c.id = 'ln-all-count';
-        c.textContent = '0';
-        b.appendChild(c);
-      }
-    });
-
-    // 列表区与六个槽位（曲库/队列/收藏/在线/歌单/分类）
-    refs.listWrap = make('div', 'ln-list', rail);
-    refs.slotLib = make('div', 'ln-slot on', refs.listWrap);
-    refs.slotCategory = make('div', 'ln-slot', refs.listWrap);
-
-    // 底部：新建歌单（VMusic 仅歌单 tab 可见，默认隐藏）
-    refs.footer = make('div', 'ln-footer is-hidden', rail);
-    refs.newPl = make('button', 'ln-newpl', refs.footer);
-    refs.newPl.type = 'button';
-    refs.newPl.innerHTML = '<span>+</span> 新建歌单';
-  }
-
-  // -------------------------------------------------------------------------
-  // 视图/tab 联动
-  // -------------------------------------------------------------------------
-
-  function showSlot(slot) {
-    [refs.slotLib, refs.slotCategory].forEach(function (s) {
-      s.classList.toggle('on', s === slot);
-    });
-  }
-
-  function ensureView(view) {
-    var railItem = refs.rail.querySelector('.rail-item[data-view="' + view + '"]');
-    if (railItem && !railItem.classList.contains('active')) railItem.click();
-    // 立刻同步一次左栏/导航高亮。业务 setView 是同步的，但皮肤重排原先排队到
-    // requestAnimationFrame：掉帧、软件渲染或后台标签页拿不到帧时，高亮要等
-    // 几百毫秒甚至更久才更新，点上去就像"没反应"（实测切到在线 0.9s 后才亮）。
-    if (mounted) reflow();
-    return railItem;
-  }
-
-  // 从曲库行 DOM 聚合专辑/歌手分组，生成 VMusic 分类卡片。
-  function renderCategory(kind) {
-    var slot = refs.slotCategory;
-    slot.textContent = '';
-    var groups = Object.create(null);
-    var order = [];
-
-    refs.slotLib.querySelectorAll('.track').forEach(function (row) {
-      var name;
-      var art = null;
-      if (kind === 'albums') {
-        var a = row.querySelector('.t-album');
-        name = a ? a.textContent.trim() : '';
-      } else {
-        var s = row.querySelector('.t-sub');
-        name = s ? s.textContent.trim() : '';
-      }
-      if (!name || name === '—') name = kind === 'albums' ? '未知专辑' : '未知艺术家';
-      if (!groups[name]) {
-        groups[name] = { name: name, count: 0 };
-        order.push(name);
-        var artDiv = row.querySelector('.t-art');
-        var bg = artDiv ? artDiv.style.backgroundImage : '';
-        if (bg && bg !== 'none' && bg.indexOf('url(') === 0) groups[name].art = bg;
-      }
-      groups[name].count += 1;
-    });
-
-    order
-      .map(function (n) { return groups[n]; })
-      .sort(function (x, y) { return y.count - x.count; })
-      .forEach(function (g) {
-        var cat = document.createElement('button');
-        cat.type = 'button';
-        cat.className = 'ln-cat' + (kind === 'artists' ? ' is-artist' : '');
-        slot.appendChild(cat);
-        var cover = document.createElement('span');
-        cover.className = 'ln-cat-cover';
-        cat.appendChild(cover);
-        if (g.art) cover.style.backgroundImage = g.art;
-        var info = document.createElement('span');
-        info.className = 'ln-cat-info';
-        cat.appendChild(info);
-        var nm = document.createElement('span');
-        nm.className = 'ln-cat-name';
-        info.appendChild(nm);
-        nm.textContent = g.name;
-        var ct = document.createElement('span');
-        ct.className = 'ln-cat-count';
-        info.appendChild(ct);
-        ct.textContent = g.count + ' 首';
-        cat.addEventListener('click', function () {
-          applyLibFilter(kind, g.name);
-        });
-      });
-  }
-
-  // 点分类卡片 → 操作曲库的歌手/专辑筛选下拉，然后回全部 tab。
-  function applyLibFilter(kind, name) {
-    var select = byId(kind === 'albums' ? 'lib-album-filter' : 'lib-artist-filter');
-    if (select) {
-      var opt = Array.prototype.find.call(select.options, function (o) {
-        return o.textContent.trim() === name.trim();
-      });
-      if (opt && select.value !== opt.value) {
-        select.value = opt.value;
-        if (typeof select.onchange === 'function') select.onchange();
-      }
-    }
-    setTab('all');
-  }
-
-  function setTab(tab) {
-    activeTab = tab;
-    Array.prototype.forEach.call(refs.tabs.querySelectorAll('.ln-tab'), function (b) {
-      b.classList.toggle('active', b.dataset.tab === tab);
-    });
-    refs.footer.classList.toggle('is-hidden', tab !== 'playlists');
-
-    if (tab === 'all') {
-      showSlot(refs.slotLib);
-    } else if (tab === 'albums' || tab === 'artists') {
-      renderCategory(tab);
-      showSlot(refs.slotCategory);
-    } else if (tab === 'playlists') {
-      showSlot(refs.slotLib);
-    } else if (tab === 'online') {
-      // 在线结果按 §12 留在主内容区，左栏槽仍是本地曲库；这里只负责把视图
-      // 带过去。已经在在线页时 ensureView 是幂等的（不再触发 setView），
-      // 补一次进入通知，保证每次点「在线找歌」都会拉一屏（onViewEnter 内部
-      // 按 loading / 已有曲目去重，不会重复打请求）。
-      var alreadyOnline = currentViewId() === 'view-online';
-      ensureView('online');
-      // inReflow 时是视图切换的回程（reflow→setTab），那次进入通知由业务
-      // setView 自己发过；只有用户主动再点一次才需要补。
-      if (alreadyOnline && !inReflow && window.Online && window.Online.onViewEnter) window.Online.onViewEnter();
-      showSlot(refs.slotLib);
-    }
-  }
-
-  function currentViewId() {
-    var v = refs.column.querySelector('.view:not([hidden])');
-    return v ? v.id : '';
-  }
-
-  // 视图切换（业务代码切 .view hidden）后的左栏重排。
-  //
-  // 同步执行：调用点（导航点击 / MutationObserver）都在业务写完 DOM 之后，
-  // 一次切换只跑一遍。外面套一层 reflow() 做重入保护，内部的 DOM 写不会再
-  // 触发被观察的属性，所以不存在互相唤醒。
-  function reflow() {
-    if (inReflow) return;
-    inReflow = true;
-    try { reflowInner(); } finally { inReflow = false; }
-  }
-
-  function reflowInner() {
-    var id = currentViewId();
-    if (refs.viewId !== id) {
-      refs.column.scrollTop = 0;
-      revealCurrentView();
-    }
-    refs.viewId = id;
-    var dailyNav = refs.rail.querySelector('[data-view="daily"]');
-    if (refs.dailyMore) refs.dailyMore.hidden = !dailyNav || dailyNav.hidden;
-    if (dailyNav && observer) observer.observe(dailyNav, { attributes: true, attributeFilter: ['hidden'] });
-    refs.column.dataset.lnView = id.replace(/^view-/, '');
-    refs.nav.querySelectorAll('[data-ln-view]').forEach(function (button) {
-      var selected = button.dataset.lnView === (id === 'view-daily' ? 'library' : id.replace(/^view-/, ''));
-      button.classList.toggle('active', selected);
-      if (selected) button.setAttribute('aria-current', 'page');
-      else button.removeAttribute('aria-current');
-    });
-    // 记录最近一个非设置视图：设置页「返回」要精确回到这里（含每日推荐）。
-    if (id && id !== 'view-settings') {
-      lastWorkView = id.replace(/^view-/, '');
-    }
-    if (id === 'view-library') {
-      // 从在线/歌单回到曲库时，标签要回到「全部」，否则左栏会停在没有对应
-      // 槽位的状态上（在线标签高亮 + 曲库槽）。
-      setTab(activeTab === 'playlists' || activeTab === 'online' ? 'all' : activeTab);
-    } else if (id === 'view-playlists') {
-      setTab('playlists');
-    } else if (id === 'view-queue') {
-      setTab('all');
-    } else if (id === 'view-favorites') {
-      setTab('all');
-    } else if (id === 'view-online') {
-      // 在线必须有自己的标签态：原先一律回 setTab('all')，会把「在线找歌」
-      // 的高亮立刻拽回「全部」，点击看起来没有反馈。
-      setTab('online');
-    } else if (id === 'view-settings') {
-      // VMusic 左栏始终是曲库内容，设置在中栏播放卡下方。
-      setTab('all');
-    } else if (id === 'view-daily') {
-      setTab('all');
-    }
-    // 窄屏切视图后收起左抽屉
-    document.body.classList.remove('ln-left-open');
-  }
-
-  // 中栏顶部是导航 + 展开播放卡（约 250px）：长列表视图停在 scrollTop=0 时，
-  // 整块结果落在首屏之外（实测 1366×768 在线首行只剩 29px 可见），看着像
-  // "没加载"。中栏整体滚动时把视图顶部带进可视区；中栏不滚动（视图自己滚）
-  // 或视图本来就在首屏里时不做任何滚动。
-  function revealCurrentView() {
-    var column = refs.column;
-    var view = column.querySelector('.view:not([hidden])');
-    if (!view) return;
-    if (column.scrollHeight <= column.clientHeight + 4) return;
-    var delta = view.getBoundingClientRect().top - column.getBoundingClientRect().top;
-    if (delta < column.clientHeight * 0.6) return;
-    column.scrollTop += Math.max(0, delta - 6);
-  }
-
-  // -------------------------------------------------------------------------
-  // 左栏折叠/展开（body 单一状态类驱动；CSS 负责过渡，JS 不写内联尺寸）
-  // -------------------------------------------------------------------------
-
-  function readCollapsed() {
-    try { return localStorage.getItem(COLLAPSE_KEY) === '1'; }
-    catch (e) { return false; }
-  }
-
-  function writeCollapsed(on) {
-    try { localStorage.setItem(COLLAPSE_KEY, on ? '1' : '0'); }
-    catch (e) { /* 隐私模式等写入失败不阻塞 */ }
-  }
-
-  function setCollapsed(on, silent) {
-    on = !!on;
-    document.body.classList.toggle('ln-rail-collapsed', on);
-    if (refs.collapseBtn) {
-      refs.collapseBtn.title = (on ? '展开侧栏' : '收起侧栏') + ' (Ctrl+B)';
-      refs.collapseBtn.setAttribute('aria-label', on ? '展开侧栏' : '收起侧栏');
-      refs.collapseBtn.setAttribute('aria-expanded', on ? 'false' : 'true');
-      var glyph = $('.ln-cb-glyph', refs.collapseBtn);
-      if (glyph) glyph.textContent = on ? '»' : '«';
-    }
-    if (!silent) writeCollapsed(on);
-  }
-
-  function toggleCollapsed() {
-    // 窄屏左栏是抽屉（品牌/遮罩机制），折叠按钮在该宽度已隐藏，
-    // 此处兜底不执行两套互相冲突的机制。
-    if (window.innerWidth <= 1000) return;
-    setCollapsed(!document.body.classList.contains('ln-rail-collapsed'));
-  }
-
-  // -------------------------------------------------------------------------
-  // 设置页：返回按钮 + 回到来源视图
-  // -------------------------------------------------------------------------
-
-  function buildSettingsChrome() {
-    var left = $('#view-settings .col-head-left');
-    if (!left) return;
-    refs.backBtn = make('button', 'ln-back-btn'); // 不传 parent：要插到标题前
-    refs.backBtn.type = 'button';
-    refs.backBtn.innerHTML = '<span class="ln-back-glyph" aria-hidden="true">←</span> 返回';
-    left.insertBefore(refs.backBtn, left.firstChild);
-  }
-
-  function closeSettings() {
-    var item = refs.rail.querySelector('.rail-item[data-view="' + lastWorkView + '"]');
-    if (item) item.click();
-  }
-
-  // -------------------------------------------------------------------------
   // 播放卡重排
   // -------------------------------------------------------------------------
 
@@ -423,27 +123,11 @@
     // （直接 DOM 操作会让切走皮肤后 progress/controls 顺序错乱）。
     if (progress && controls) relocate(progress, bar, controls);
 
-    // 行3：模式按钮进 controls 最左，音量进最右（VMusic 控制序）。
+    // 行3：模式按钮进 controls 最左，音量进 controls 最右（VMusic 控制序）。
     var mode = byId('mode');
     var volume = $('.bar-volume', bar);
     if (mode) relocate(mode, controls, controls.firstChild);
     if (volume) relocate(volume, controls);
-  }
-
-  function buildNavigation() {
-    refs.nav = make('nav', 'ln-nav');
-    refs.nav.setAttribute('aria-label', '页面导航');
-    refs.column.insertBefore(refs.nav, refs.column.firstChild);
-    [['library', '首页'], ['online', '在线'], ['playlists', '歌单'],
-      ['favorites', '收藏'], ['queue', '队列'], ['settings', '设置']].forEach(function (entry) {
-      var button = make('button', 'ln-nav-item', refs.nav);
-      button.type = 'button';
-      button.dataset.lnView = entry[0];
-      button.textContent = entry[1];
-      button.addEventListener('click', function () { ensureView(entry[0]); refs.column.scrollTop = 0; });
-    });
-    refs.mobileSearch = make('div', 'ln-mobile-search');
-    refs.nav.after(refs.mobileSearch);
   }
 
   function setCapsule(compact, silent) {
@@ -452,7 +136,6 @@
     refs.capsuleBtn.setAttribute('aria-expanded', String(!compact));
     refs.capsuleBtn.setAttribute('aria-label', compact ? '展开播放卡' : '收为播放胶囊');
     if (!silent) {
-      refs.capsulePreference = compact;
       try { localStorage.setItem(CAPSULE_KEY, compact ? '1' : '0'); } catch (error) {}
     }
   }
@@ -476,20 +159,47 @@
     refs.capsuleBtn.addEventListener('click', function () {
       setCapsule(!refs.bar.classList.contains('ln-capsule'));
     });
-    refs.capsulePreference = null;
+    var preference = null;
     try {
-      var preference = localStorage.getItem(CAPSULE_KEY);
-      if (preference === '0' || preference === '1') refs.capsulePreference = preference === '1';
+      var saved = localStorage.getItem(CAPSULE_KEY);
+      if (saved === '0' || saved === '1') preference = saved === '1';
     } catch (error) {}
-    setCapsule(refs.capsulePreference === null ? window.innerWidth <= 620 : refs.capsulePreference, true);
+    setCapsule(preference === null ? window.innerWidth <= 620 : preference, true);
+  }
+
+  // -------------------------------------------------------------------------
+  // 中栏胶囊导航
+  // -------------------------------------------------------------------------
+
+  function buildNavigation() {
+    refs.nav = make('nav', 'ln-nav');
+    refs.nav.setAttribute('aria-label', '页面导航');
+    refs.column.insertBefore(refs.nav, refs.column.firstChild);
+    [['library', '首页'], ['online', '在线'], ['playlists', '歌单'],
+      ['favorites', '收藏'], ['queue', '队列'], ['settings', '设置']].forEach(function (entry) {
+      var button = make('button', 'ln-nav-item', refs.nav);
+      button.type = 'button';
+      button.dataset.lnView = entry[0];
+      button.textContent = entry[1];
+      button.addEventListener('click', function () { clickRailItem(entry[0]); });
+    });
+  }
+
+  // .rail 虽隐藏，业务的视图切换逻辑仍挂在其按钮上：程序化点击即可复用
+  // 整套 setView 链路，避免重写业务行为。
+  function clickRailItem(view) {
+    var item = refs.rail.querySelector('.rail-item[data-view="' + view + '"]');
+    if (item && !item.classList.contains('active')) item.click();
+    if (mounted) reflow();
+    return item;
   }
 
   function buildHomeChrome() {
     var tools = $('#view-library .col-tools');
     if (tools) {
-      refs.libraryTools = make('details', 'ln-library-tools', tools.parentNode);
-      make('summary', '', refs.libraryTools).textContent = '曲库管理';
-      relocate(tools, refs.libraryTools);
+      var wrap = make('details', 'ln-library-tools', tools.parentNode);
+      make('summary', '', wrap).textContent = '曲库管理';
+      relocate(tools, wrap);
     }
     var dailyHead = $('#daily-strip .daily-head');
     if (dailyHead) {
@@ -497,22 +207,448 @@
       refs.dailyMore = more;
       more.type = 'button';
       more.textContent = '查看全部 →';
-      more.addEventListener('click', function () { ensureView('daily'); });
+      more.addEventListener('click', function () { clickRailItem('daily'); });
     }
   }
 
-  function syncResponsive() {
-    if (refs.capsulePreference === null) setCapsule(window.innerWidth <= 620, true);
-    var narrow = window.innerWidth <= 1000;
-    if (refs.narrow === narrow) return;
-    refs.narrow = narrow;
-    refs.libraryNodes.forEach(function (node) {
-      var entry = moves.find(function (move) { return move.node === node; });
-      if (narrow && entry) entry.anchor.after(node);
-      else refs.slotLib.appendChild(node);
+  // -------------------------------------------------------------------------
+  // 视图切换联动（简化：滚动归零 + 导航高亮）
+  // -------------------------------------------------------------------------
+
+  function currentViewId() {
+    var v = refs.column.querySelector('.view:not([hidden])');
+    return v ? v.id : '';
+  }
+
+  function reflow() {
+    if (inReflow) return;
+    inReflow = true;
+    try { reflowInner(); } finally { inReflow = false; }
+  }
+
+  function reflowInner() {
+    var id = currentViewId();
+    if (refs.viewId !== id) {
+      refs.column.scrollTop = 0;
+      revealCurrentView();
+    }
+    refs.viewId = id;
+    var dailyNav = refs.rail.querySelector('[data-view="daily"]');
+    if (refs.dailyMore) refs.dailyMore.hidden = !dailyNav || dailyNav.hidden;
+    if (dailyNav && observer) observer.observe(dailyNav, { attributes: true, attributeFilter: ['hidden'] });
+    refs.column.dataset.lnView = id.replace(/^view-/, '');
+    var navKey = id === 'view-daily' ? 'library' : id.replace(/^view-/, '');
+    refs.nav.querySelectorAll('[data-ln-view]').forEach(function (button) {
+      var selected = button.dataset.lnView === navKey;
+      button.classList.toggle('active', selected);
+      if (selected) button.setAttribute('aria-current', 'page');
+      else button.removeAttribute('aria-current');
     });
-    (narrow ? refs.mobileSearch : refs.searchSlot).appendChild(refs.search);
-    setCollapsed(!narrow && readCollapsed(), true);
+  }
+
+  // 中栏顶部是导航 + 播放卡（约 250px）：长列表视图停在 scrollTop=0 时，
+  // 整块结果落在首屏之外。视图顶部距栏顶过远时把它带进可视区。
+  function revealCurrentView() {
+    var column = refs.column;
+    var view = column.querySelector('.view:not([hidden])');
+    if (!view) return;
+    if (column.scrollHeight <= column.clientHeight + 4) return;
+    var delta = view.getBoundingClientRect().top - column.getBoundingClientRect().top;
+    if (delta < column.clientHeight * 0.6) return;
+    column.scrollTop += Math.max(0, delta - 6);
+  }
+
+  // -------------------------------------------------------------------------
+  // 搜索面板
+  // -------------------------------------------------------------------------
+
+  function emit(action, extra) {
+    var detail = Object.assign({ action: action }, extra || {});
+    document.dispatchEvent(new CustomEvent('ln:panel', { detail: detail }));
+  }
+
+  function buildSearchPanel(host) {
+    var sp = make('section', 'ln-sp', host);
+
+    // 第一行：检索范围
+    var scopeBar = make('div', 'ln-sp-scope', sp);
+    [['all', '全部'], ['local', '本地'], ['online', '在线']].forEach(function (s) {
+      var b = make('button', 'ln-sp-chip' + (s[0] === 'all' ? ' active' : ''), scopeBar);
+      b.type = 'button';
+      b.dataset.scope = s[0];
+      b.textContent = s[1];
+      b.setAttribute('aria-pressed', s[0] === 'all' ? 'true' : 'false');
+      b.addEventListener('click', function () {
+        if (panel.scope === s[0]) return;
+        panel.scope = s[0];
+        scopeBar.querySelectorAll('.ln-sp-chip').forEach(function (c) {
+          var on = c === b;
+          c.classList.toggle('active', on);
+          c.setAttribute('aria-pressed', on ? 'true' : 'false');
+        });
+        runSearch(panel.input);
+      });
+    });
+
+    // 第二行：输入框
+    var field = make('div', 'ln-sp-field', sp);
+    field.innerHTML = '<svg class="ln-sp-ico" viewBox="0 0 24 24" aria-hidden="true">'
+      + '<use href="#i-search"/></svg>';
+    var input = make('input', 'ln-sp-q', field);
+    input.type = 'search';
+    input.placeholder = '搜索本地与在线曲库';
+    input.autocomplete = 'off';
+    input.setAttribute('aria-label', '搜索本地与在线曲库');
+    var clearBtn = make('button', 'ln-sp-clear', field);
+    clearBtn.type = 'button';
+    clearBtn.setAttribute('aria-label', '清空搜索');
+    clearBtn.hidden = true;
+    clearBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>';
+
+    // 结果/历史滚动区
+    refs.panelOut = make('div', 'ln-sp-out', sp);
+
+    input.addEventListener('input', function () {
+      panel.input = input.value;
+      clearBtn.hidden = input.value === '';
+      clearTimeout(panel.debounce);
+      panel.debounce = setTimeout(function () { runSearch(input.value); }, 250);
+    });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        clearTimeout(panel.debounce);
+        var q = input.value.trim();
+        if (q) pushHistory(q);
+        runSearch(input.value);
+      }
+    });
+    clearBtn.addEventListener('click', function () {
+      clearTimeout(panel.debounce);
+      input.value = '';
+      panel.input = '';
+      clearBtn.hidden = true;
+      input.focus();
+      runSearch('');
+    });
+
+    renderHistory();
+  }
+
+  function abortPending() {
+    panel.controllers.forEach(function (c) { try { c.abort(); } catch (e) {} });
+    panel.controllers = [];
+  }
+
+  function makeSignal() {
+    if (typeof AbortController !== 'function') return null;
+    var c = new AbortController();
+    panel.controllers.push(c);
+    return c.signal;
+  }
+
+  function runSearch(raw) {
+    var q = (raw || '').trim();
+    abortPending();
+    panel.epoch += 1;
+    var epoch = panel.epoch;
+    panel.q = q;
+
+    if (!q) {
+      clearResults();
+      renderHistory();
+      return;
+    }
+    clearHistoryView();
+    var out = refs.panelOut;
+    out.textContent = '';
+
+    if (panel.scope === 'local' || panel.scope === 'all') {
+      refs.localSec = buildSection(out, '本地歌曲');
+      searchLocal(epoch, q);
+    }
+    if (panel.scope === 'online' || panel.scope === 'all') {
+      refs.onlineSec = buildSection(out, '在线曲库');
+      searchOnline(epoch, q);
+    }
+  }
+
+  // 一个结果分区：标题 + 计数 + 「查看全部」+ 行容器。
+  function buildSection(out, name) {
+    var sec = make('section', 'ln-sp-sec', out);
+    var head = make('div', 'ln-sp-sec-head', sec);
+    make('span', 'ln-sp-sec-name', head).textContent = name;
+    make('span', 'ln-sp-sec-count', head);
+    var more = make('button', 'ln-sp-more', head);
+    more.type = 'button';
+    var rows = make('div', 'ln-sp-rows', sec);
+    var status = make('div', 'ln-sp-status', sec);
+    return { sec: sec, head: head, rows: rows, status: status, more: more };
+  }
+
+  function setSectionStatus(sec, text, kind) {
+    if (!sec) return;
+    sec.status.textContent = text || '';
+    sec.status.className = 'ln-sp-status' + (kind ? ' is-' + kind : '');
+    sec.status.hidden = !text;
+  }
+
+  function setSectionCount(sec, n) {
+    if (!sec) return;
+    var c = sec.head.querySelector('.ln-sp-sec-count');
+    c.textContent = n ? n + ' 条' : '';
+  }
+
+  function searchLocal(epoch, q) {
+    setSectionStatus(refs.localSec, '搜索中…', 'loading');
+    var signal = makeSignal();
+    var url = '/v1/tracks?q=' + encodeURIComponent(q) + '&limit=8';
+    transport().get(url, signal ? { signal: signal } : {})
+      .then(function (page) {
+        if (epoch !== panel.epoch) return;
+        renderLocalRows(page.tracks || []);
+      })
+      .catch(function (err) {
+        if (epoch !== panel.epoch || (err && err.name === 'AbortError')) return;
+        setSectionStatus(refs.localSec, '本地搜索失败，点击重试', 'error');
+        refs.localSec.status.onclick = function () { searchLocal(epoch, q); };
+      });
+  }
+
+  function renderLocalRows(tracks) {
+    if (!refs.localSec) return;
+    setSectionStatus(refs.localSec, tracks.length ? '' : '本地曲库没有匹配的歌曲', tracks.length ? '' : 'empty');
+    setSectionCount(refs.localSec, tracks.length);
+    refs.localSec.rows.textContent = '';
+    tracks.forEach(function (t) {
+      var cover = t.has_cover ? transport().coverUrl(t.id) : '';
+      var row = buildResultRow({
+        cover: cover,
+        title: t.title,
+        sub: t.artist || '未知艺术家',
+      });
+      row.addEventListener('click', function () {
+        pushHistory(panel.q);
+        emit('play-local', { id: t.id });
+      });
+      refs.localSec.rows.appendChild(row);
+    });
+    if (tracks.length) {
+      refs.localSec.more.textContent = '在曲库页查看全部 →';
+      refs.localSec.more.hidden = false;
+      refs.localSec.more.onclick = function () {
+        emit('view-local', { q: panel.q });
+      };
+    } else {
+      refs.localSec.more.hidden = true;
+    }
+  }
+
+  function ensureSources(epoch) {
+    if (panel.sources) return Promise.resolve(panel.sources);
+    return transport().get('/v1/online/sources')
+      .then(function (data) {
+        if (epoch !== panel.epoch) return null;
+        panel.sources = data.sources || [];
+        return panel.sources;
+      })
+      .catch(function () {
+        if (epoch !== panel.epoch) return null;
+        return [];
+      });
+  }
+
+  function searchOnline(epoch, q) {
+    setSectionStatus(refs.onlineSec, '正在读取音源…', 'loading');
+    var signal = makeSignal();
+    ensureSources(epoch).then(function (sources) {
+      if (epoch !== panel.epoch) return;
+      if (!sources) {
+        setSectionStatus(refs.onlineSec, '音源列表读取失败，点击重试', 'error');
+        refs.onlineSec.status.onclick = function () {
+          panel.sources = null; searchOnline(epoch, q);
+        };
+        return;
+      }
+      if (!sources.length) {
+        setSectionStatus(refs.onlineSec, '没有可用音源', 'empty');
+        return;
+      }
+      setSectionStatus(refs.onlineSec, '搜索中…', 'loading');
+      var perSource = Promise.all(sources.map(function (s) {
+        var url = '/v1/online/search?source=' + encodeURIComponent(s.id)
+          + '&q=' + encodeURIComponent(q) + '&limit=3';
+        return transport().get(url, signal ? { signal: signal } : {})
+          .then(function (d) {
+            return (d.tracks || []).map(function (t) {
+              return Object.assign({}, t, { source: s.id });
+            });
+          })
+          .catch(function () { return []; });
+      }));
+      perSource.then(function (bySource) {
+        if (epoch !== panel.epoch) return;
+        // 交错合并：各源第 1 条、各源第 2 条……更像聚合搜索的混排结果。
+        var flat = [];
+        for (var i = 0; i < 3; i += 1) {
+          bySource.forEach(function (list) { if (list[i]) flat.push(list[i]); });
+        }
+        renderOnlineRows(flat, q);
+      });
+    });
+  }
+
+  function renderOnlineRows(tracks, q) {
+    if (!refs.onlineSec) return;
+    setSectionStatus(refs.onlineSec, tracks.length ? '' : '在线曲库没有匹配的结果', tracks.length ? '' : 'empty');
+    setSectionCount(refs.onlineSec, tracks.length);
+    refs.onlineSec.rows.textContent = '';
+    tracks.forEach(function (t) {
+      var cover = '';
+      if (window.Online) cover = window.Online.rowCoverUrl(window.Online.safeCoverUrl(t.cover));
+      var row = buildResultRow({
+        cover: cover,
+        title: t.title,
+        sub: [t.artist, t.album].filter(Boolean).join(' · ') || '未知艺术家',
+      });
+      if (window.Online) {
+        var badgeWrap = make('span', 'ln-sp-badge', row);
+        badgeWrap.appendChild(window.Online.badge(t.source));
+      }
+      row.addEventListener('click', function () {
+        pushHistory(panel.q);
+        emit('play-online', { track: t });
+      });
+      refs.onlineSec.rows.appendChild(row);
+    });
+    if (tracks.length) {
+      refs.onlineSec.more.textContent = '在在线页查看全部 →';
+      refs.onlineSec.more.hidden = false;
+      refs.onlineSec.more.onclick = function () {
+        emit('view-online', { q: panel.q });
+      };
+    } else {
+      refs.onlineSec.more.hidden = true;
+    }
+  }
+
+  // 结果行：封面 + 标题/艺人（标题省略号），尾部可挂徽标。
+  function buildResultRow(opts) {
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'ln-sp-row';
+    var cover = document.createElement('span');
+    cover.className = 'ln-sp-cover';
+    if (opts.cover) {
+      var img = document.createElement('img');
+      img.src = opts.cover;
+      img.alt = '';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      cover.appendChild(img);
+    }
+    row.appendChild(cover);
+    var meta = document.createElement('span');
+    meta.className = 'ln-sp-meta';
+    var title = document.createElement('span');
+    title.className = 'ln-sp-title';
+    title.textContent = opts.title;
+    var sub = document.createElement('span');
+    sub.className = 'ln-sp-sub';
+    sub.textContent = opts.sub;
+    meta.appendChild(title);
+    meta.appendChild(sub);
+    row.appendChild(meta);
+    return row;
+  }
+
+  // ---------------------------- 搜索历史 -----------------------------------
+
+  function readHistory() {
+    try {
+      var raw = localStorage.getItem(HISTORY_KEY);
+      var list = raw ? JSON.parse(raw) : [];
+      return Array.isArray(list) ? list : [];
+    } catch (e) { return []; }
+  }
+
+  function writeHistory(list) {
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(list)); } catch (e) {}
+  }
+
+  function pushHistory(q) {
+    q = (q || '').trim();
+    if (!q) return;
+    var list = readHistory().filter(function (x) { return x !== q; });
+    list.unshift(q);
+    writeHistory(list.slice(0, HISTORY_MAX));
+    if (!panel.q) renderHistory();
+  }
+
+  function removeHistory(q) {
+    writeHistory(readHistory().filter(function (x) { return x !== q; }));
+    renderHistory();
+  }
+
+  function clearResults() {
+    refs.panelOut.textContent = '';
+    refs.localSec = null;
+    refs.onlineSec = null;
+  }
+
+  function clearHistoryView() {
+    var block = refs.panelOut.querySelector('.ln-sp-history');
+    if (block) block.remove();
+  }
+
+  function renderHistory() {
+    if (!refs.panelOut) return;
+    refs.panelOut.textContent = '';
+    refs.localSec = null;
+    refs.onlineSec = null;
+    var list = readHistory();
+    var block = make('section', 'ln-sp-history', refs.panelOut);
+    var head = make('div', 'ln-sp-sec-head', block);
+    make('span', 'ln-sp-sec-name', head).textContent = '搜索历史';
+    var clearAll = make('button', 'ln-sp-more', head);
+    clearAll.type = 'button';
+    clearAll.textContent = '清空';
+    clearAll.hidden = !list.length;
+    clearAll.addEventListener('click', function () {
+      writeHistory([]);
+      renderHistory();
+    });
+    var chips = make('div', 'ln-sp-hist-chips', block);
+    if (!list.length) {
+      var hint = make('div', 'ln-sp-status is-empty', chips);
+      hint.textContent = '输入关键词，同时搜索本地与在线曲库';
+      return;
+    }
+    list.forEach(function (q) {
+      var chip = make('button', 'ln-sp-hist', chips);
+      chip.type = 'button';
+      var txt = document.createElement('span');
+      txt.className = 'ln-sp-hist-q';
+      txt.textContent = q;
+      chip.appendChild(txt);
+      var del = make('span', 'ln-sp-hist-del', chip);
+      del.setAttribute('aria-hidden', 'true');
+      del.textContent = '×';
+      del.title = '删除该记录';
+      del.addEventListener('click', function (e) {
+        e.stopPropagation();
+        removeHistory(q);
+      });
+      chip.addEventListener('click', function () {
+        var input = $('.ln-sp-q');
+        if (input) {
+          input.value = q;
+          panel.input = q;
+          var clearBtn = $('.ln-sp-clear');
+          if (clearBtn) clearBtn.hidden = false;
+        }
+        runSearch(q);
+      });
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -525,7 +661,8 @@
     var column = byId('column');
     var stage = byId('stage');
     var bar = $('.bar');
-    if (!rail || !column || !stage || !bar) return; // DOM 未就绪，等 skin:changed 再试
+    var app = $('.app');
+    if (!rail || !column || !stage || !bar || !app) return; // DOM 未就绪
 
     mounted = true;
     refs.rail = rail;
@@ -533,114 +670,34 @@
     refs.stage = stage;
     refs.bar = bar;
 
-    // 1) 左栏骨架
-    buildLeft(rail);
+    // 1) 右栏包裹器：上搜索面板 + 下舞台
+    refs.rightWrap = make('div', 'ln-right', app);
 
-    // 2) 列表节点入槽
-    refs.search = relocate($('.topsearch'), refs.searchSlot);
+    // 2) 搜索面板（先建，位于包裹器顶部）
+    buildSearchPanel(refs.rightWrap);
 
-    // 注意：曲库表头的 id 是 lib-hint（class lib-head），用视图作用域选择器，
-    // 避免误选收藏视图的 .lib-head.fav-head。
-    refs.libraryNodes = [byId('lib-empty'), $('#view-library .lib-head'), byId('lib-list'),
-      byId('lib-sentinel'), byId('lib-batch-bar')].filter(Boolean);
-    refs.libraryNodes.forEach(function (node) { relocate(node, refs.slotLib); });
+    // 3) 舞台搬入包裹器下部（原位留锚点）
+    relocate(stage, refs.rightWrap);
 
-    // 3) 播放卡：先把 .bar 搬进中栏最前，再重排内部
+    // 4) 播放卡搬进中栏最前并重排；再建胶囊导航（导航在播放卡之上）
     relocate(bar, column, column.firstChild);
     rearrangeBar(bar);
     buildPlayerChrome();
     buildNavigation();
     buildHomeChrome();
 
-    // 4) 频谱卡标题对齐 VMusic（VOCAL PERFORMANCE）
+    // 5) 频谱卡标题对齐
     var kicker = $('.stage-kicker', stage);
     if (kicker) {
       savedText.push({ node: kicker, text: kicker.textContent });
       kicker.textContent = 'Vocal Performance';
     }
 
-    // 5) 交互
-    refs.tabs.addEventListener('click', function (e) {
-      var b = e.target.closest('.ln-tab');
-      if (!b) return;
-      var tab = b.dataset.tab;
-      if (tab === 'all' || tab === 'albums' || tab === 'artists') {
-        ensureView('library');
-        setTab(tab);
-      } else if (tab === 'playlists') {
-        ensureView('playlists');
-        setTab('playlists');
-      } else if (tab === 'online') {
-        // 走 setTab（内含 ensureView），保证高亮与视图同时落到在线。
-        setTab('online');
-      }
-    });
-
-    refs.btnLocal.addEventListener('click', function () {
-      ensureView('library');
-      var toggle = byId('scan-toggle');
-      if (toggle) toggle.click();
-    });
-
-    refs.btnCloud.addEventListener('click', function () {
-      // 与标签栏的「在线找歌」同一条路径：切视图 + 高亮 + 必要时补拉一屏。
-      setTab('online');
-    });
-
-    refs.newPl.addEventListener('click', function () {
-      ensureView('playlists');
-      var input = byId('new-playlist-name');
-      if (input) input.focus();
-    });
-
-    // 窄屏左栏开关：品牌点击 + 遮罩
-    var scrim = make('div');
-    scrim.id = 'ln-left-scrim';
-    document.body.appendChild(scrim);
-    scrim.addEventListener('click', function () {
-      document.body.classList.remove('ln-left-open');
-    });
-
-    // 设置页头部「返回」
-    buildSettingsChrome();
-    if (refs.backBtn) {
-      refs.backBtn.addEventListener('click', closeSettings);
-    }
-
-    // 左栏折叠/展开：按钮 + 快捷键 Ctrl/Cmd+B
-    refs.collapseBtn.addEventListener('click', toggleCollapsed);
-    keyHandler = function (e) {
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'b' || e.key === 'B')) {
-        e.preventDefault();
-        if (window.innerWidth > 1000) toggleCollapsed();
-        else document.body.classList.remove('ln-left-open'); // 窄屏=关抽屉
-      }
-    };
-    document.addEventListener('keydown', keyHandler);
-
-    // 跨断点同步：窄屏左栏是抽屉，collapsed 的栅格规则（特异性更高）会压过
-    // 单列媒体查询，所以窄屏临时解除类（不动 storage）；回到宽屏按持久化恢复。
-    refs.resizeHandler = syncResponsive;
-    window.addEventListener('resize', refs.resizeHandler);
-
-    // 恢复上次的折叠状态（silent：同值仍落一次 storage，无害；CSS 过渡即反馈）。
-    syncResponsive();
-
     // 6) 视图切换联动
-    // 直接同步重排：hidden 的批量变更只回调一次，成本可控；排队到 rAF 会让
-    // 高亮在掉帧/后台标签页里迟迟不更新。
     observer = new MutationObserver(function () { if (mounted) reflow(); });
     Array.prototype.forEach.call(column.querySelectorAll('.view'), function (v) {
       observer.observe(v, { attributes: true, attributeFilter: ['hidden'] });
     });
-    observer.observe(rail, { childList: true });
-    libraryObserver = new MutationObserver(function () {
-      syncLibraryCount();
-      if (activeTab === 'albums' || activeTab === 'artists') renderCategory(activeTab);
-    });
-    libraryObserver.observe(byId('lib-count'), { childList: true, subtree: true, characterData: true });
-    libraryObserver.observe(byId('lib-list'), { childList: true });
-    syncLibraryCount();
 
     reflow();
   }
@@ -651,7 +708,8 @@
       observer.disconnect();
       observer = null;
     }
-    if (libraryObserver) { libraryObserver.disconnect(); libraryObserver = null; }
+    abortPending();
+    clearTimeout(panel.debounce);
     restoreMoves();
     refs.bar.classList.remove('ln-capsule');
     delete refs.column.dataset.lnView;
@@ -660,21 +718,11 @@
       document.removeEventListener('keydown', keyHandler);
       keyHandler = null;
     }
-    if (refs.resizeHandler) {
-      window.removeEventListener('resize', refs.resizeHandler);
-    }
     savedText.forEach(function (s) { s.node.textContent = s.text; });
     savedText = [];
-    document.body.classList.remove('ln-left-open', 'ln-rail-collapsed');
     refs = {};
     mounted = false;
-    activeTab = 'all';
-  }
-
-  function syncLibraryCount() {
-    var count = byId('lib-count');
-    var label = byId('ln-all-count');
-    if (count && label) label.textContent = (count.textContent.match(/\d+/) || ['0'])[0];
+    panel.sources = null;
   }
 
   function isActiveSkin() {
@@ -690,8 +738,6 @@
 
   document.addEventListener('skin:changed', onSkinChanged);
 
-  // 脚本在 skins.js 之后加载：若启动时已是流年（理论上 Skins.init 尚未跑，
-  // 初始 data-skin 为空），保险处理一次。
   if (isActiveSkin()) mount();
 
   // 暴露仅用于排障/契约脚本：返回当前挂载状态。

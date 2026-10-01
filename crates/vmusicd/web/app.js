@@ -99,6 +99,10 @@ const ui = {
   remoteBrowseStatus: $('remote-browse-status'),
   remoteScrim: $('remote-scrim'),
   libEmpty: $('lib-empty'),
+  libEmptyGuide: $('lib-empty-guide'),
+  libEmptyNoMatch: $('lib-empty-nomatch'),
+  libEmptyNoMatchText: $('lib-empty-nomatch-text'),
+  libEmptyNoMatchClear: $('empty-nomatch-clear'),
   libSentinel: $('lib-sentinel'),
   libHint: $('lib-hint'),
 
@@ -149,6 +153,15 @@ const ui = {
   setRenderMode: $('set-render-mode'),
   renderWarn: $('render-warn'),
   setBackend: $('set-backend'),
+
+  // 开发者选项：播放诊断日志。
+  setDevDiag: $('set-dev-diag'),
+  devDiagDetail: $('dev-diag-detail'),
+  devDiagPath: $('dev-diag-path'),
+  devDiagActions: $('dev-diag-actions'),
+  devDiagCopy: $('dev-diag-copy'),
+  devDiagSave: $('dev-diag-save'),
+  devDiagClear: $('dev-diag-clear'),
 
   // 创意舞台：细分参数在工坊里调。
   workshopBtn: $('workshop-btn'),
@@ -619,19 +632,50 @@ async function loadFacets() {
   }
 }
 
-/// 曲库空态卡（「曲库还是空的」那张引导）的显隐。
+/// 曲库空态卡的显隐。容器内有两张互斥的卡：
+///   - guide：「曲库还是空的」引导（无任何查询条件时才谈得上）；
+///   - noMatch：搜索词/分类筛选命中 0 条时的反馈。
 ///
-/// 它描述的是**本地曲库**这一件事，可曲库页顶部还挂着一块每日推荐位，而那块
+/// guide 描述的是**本地曲库**这一件事，可曲库页顶部还挂着一块每日推荐位，而那块
 /// 有自己的「在线 / 本地」来源。来源选在线时，页面主体是在线推荐，本地库为空
 /// 只是常态而不是待办事项，再压一张「去填音乐目录」的引导既挡视线也说不通
-/// ——推荐位自己会把「没登录 / 这次没返回」写清楚。所以来源在线时一律不显示，
-/// 切回本地再按曲库实际条数恢复。
+/// ——推荐位自己会把「没登录 / 这次没返回」写清楚。所以来源在线且无查询条件时
+/// 一律不显示，切回本地再按曲库实际条数恢复。
+///
+/// 但搜索是用户的显式意图：哪怕曲库为空、哪怕推荐位停在在线来源，只要敲了词却
+/// 0 条，就必须显示 noMatch——否则输入后界面纹丝不动，观感与「搜索坏了」无异。
 function syncLibEmpty(list) {
   const tracks = list || state.tracks;
+
+  const apply = (guide, noMatch) => {
+    if (!ui.libEmpty) return true;
+    if (ui.libEmptyGuide) ui.libEmptyGuide.hidden = !guide;
+    if (ui.libEmptyNoMatch) ui.libEmptyNoMatch.hidden = !noMatch;
+    const containerHidden = !guide && !noMatch;
+    ui.libEmpty.hidden = containerHidden;
+    return containerHidden;
+  };
+
+  if (tracks.length > 0) return apply(false, false);
+
+  const q = (state.q || '').trim();
+  const fArtist = !!(state.libFilter && state.libFilter.artist);
+  const fAlbum = !!(state.libFilter && state.libFilter.album);
+  if (q || fArtist || fAlbum) {
+    if (ui.libEmptyNoMatchText) {
+      ui.libEmptyNoMatchText.textContent = q
+        ? `曲库中没有与「${q}」相关的标题、艺术家或专辑，换个关键词试试。`
+        : '当前筛选条件下没有歌曲，换个歌手或专辑试试。';
+    }
+    if (ui.libEmptyNoMatchClear) {
+      ui.libEmptyNoMatchClear.textContent = q ? '清空搜索' : '清除筛选';
+    }
+    return apply(false, true);
+  }
+
   const onlineSource = !!(window.Daily && window.Daily.state && window.Daily.state.mode === 'online');
-  const hidden = tracks.length > 0 || onlineSource;
-  if (ui.libEmpty) ui.libEmpty.hidden = hidden;
-  return hidden;
+  if (onlineSource) return apply(false, false);
+  return apply(true, false);
 }
 
 function renderLibrary() {
@@ -1028,12 +1072,17 @@ async function loadNowPlaying(id) {
             if (Stage) Stage.setTrack(base, base.cover);
             syncNpTrack(base, base.cover);
             updateMediaSessionMetadata(base, base.cover);
+            // 详情到了必须重推队列：3D 歌单架的占位卡（「在线曲目/正在获取
+            // 信息…」，无封面）只认 pushStageQueue 喂进来的数据，不重推就
+            // 永远停在占位状态——这正是「切歌单后封面不显示」的主因。
+            pushStageQueue();
           }
         })
         .catch(() => {
           if (isCurrent() && state.current && state.current.id === id) {
             base.artist = '在线试听';
             window.Online.paintNowPlaying(base, null);
+            pushStageQueue();
           }
         });
     }
@@ -1067,11 +1116,17 @@ async function loadNowPlaying(id) {
   }
   // 远程封面可能 404 / 防盗链：加载不出来就撤掉，用占位图而不是空白
   if (url && !(await probeImage(url))) url = null;
+  // 探测通过的封面回写进曲目元数据（base/byId/Online.meta 是同一个对象）：
+  // pushStageQueue 重推时歌单架当前卡才能拿到封面，不用等下一次换曲。
+  if (url && !track.cover && track.source && track.onlineId) track.cover = url;
   if (!isCurrent()) return;
   // 封面（含旋转）与取色背景交给舞台，app.js 不再直接碰 #cover。
   if (Stage) Stage.setTrack(track, url);
   // 播放控制弹窗同步曲目信息与封面
   syncNpTrack(track, url);
+  // 在线曲的标题/封面往往是异步补全的，重推一次队列让 3D 歌单架的当前卡
+  // 离开「在线曲目/正在获取信息…」占位状态；本地曲数据没变，不必重推。
+  if (track.source && track.onlineId) pushStageQueue();
 
   updateMediaSessionMetadata(track, url);
   await refreshLyrics(id, track);
@@ -2549,6 +2604,121 @@ async function loadSettings() {
   if (state.settings.play_mode && state.settings.play_mode !== state.snapshot.mode) {
     transport.post('/v1/player/mode', { mode: state.settings.play_mode }).catch(() => {});
   }
+  loadDiagnostics();
+}
+
+// ---------------------------------------------------------------------------
+// 开发者选项：播放诊断日志
+//
+// 三件事凑成这一节：开关（即时生效，不要求重启服务）、路径回显、把日志交出去。
+// 路径必须显式显示——「把日志发给开发者」这一步不能要求用户先去翻数据目录。
+// 日志接口返回 text/plain，所以复制/下载不走 transport（它固定按 JSON 解）。
+// ---------------------------------------------------------------------------
+
+let diagInfo = null;
+
+function fmtDiagSize(bytes) {
+  if (!bytes || bytes < 1024) return `${bytes || 0} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderDiagnostics(info) {
+  diagInfo = info || null;
+  const on = !!(info && info.enabled);
+  if (ui.setDevDiag && ui.setDevDiag.checked !== on) ui.setDevDiag.checked = on;
+  if (ui.devDiagDetail) ui.devDiagDetail.hidden = !on;
+  if (ui.devDiagActions) ui.devDiagActions.hidden = !on;
+  if (!ui.devDiagPath) return;
+  if (!on) {
+    ui.devDiagPath.textContent = '—';
+  } else if (info && info.exists) {
+    ui.devDiagPath.textContent = `${info.path}（${fmtDiagSize(info.size_bytes)}）`;
+  } else {
+    ui.devDiagPath.textContent = `${(info && info.path) || '—'}（还没有内容）`;
+  }
+}
+
+async function loadDiagnostics() {
+  const info = await transport.get('/v1/diagnostics').catch(() => null);
+  // 这条 GET 失败（服务断开）时不动界面：勾选框停在用户刚按下的状态比跳回
+  // 「关」诚实，反正库里写没写通由下面那次 POST 自己报错。
+  if (info) renderDiagnostics(info);
+}
+
+async function setDevDiagnostics(on) {
+  try {
+    renderDiagnostics(await transport.post('/v1/diagnostics', { enabled: on }));
+    toast(on ? '播放诊断日志已开启，复现问题后把下面的日志发给开发者' : '播放诊断日志已关闭');
+  } catch (err) {
+    if (ui.setDevDiag) ui.setDevDiag.checked = !on;
+    toast(errText('切换失败', err), 'error');
+  }
+}
+
+async function diagLogText() {
+  const res = await fetch('/v1/diagnostics/log', {
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+function saveDiagLog(text) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `mmusic-playback-${new Date().toISOString().slice(0, 10)}.log`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function copyDiagLog() {
+  if (!ui.devDiagCopy) return;
+  ui.devDiagCopy.disabled = true;
+  try {
+    const text = await diagLogText();
+    if (!text.trim()) {
+      toast('日志还是空的：先开启，再复现一次问题');
+      return;
+    }
+    // 剪贴板不可用（非安全上下文或被拒）时不硬试第二遍，直接引导到下载。
+    await navigator.clipboard.writeText(text);
+    toast(`已复制 ${text.split('\n').filter(Boolean).length} 行日志，可直接粘贴发给开发者`);
+    loadDiagnostics();
+  } catch (err) {
+    toast('复制失败，请改用「下载文件」', 'error');
+  } finally {
+    ui.devDiagCopy.disabled = false;
+  }
+}
+
+async function saveDiagLogFromServer() {
+  try {
+    const text = await diagLogText();
+    if (!text.trim()) {
+      toast('日志还是空的：先开启，再复现一次问题');
+      return;
+    }
+    saveDiagLog(text);
+    loadDiagnostics();
+  } catch (err) {
+    toast(errText('日志导出失败', err), 'error');
+  }
+}
+
+async function clearDiagLog() {
+  try {
+    await transport.del('/v1/diagnostics/log');
+    // 开关保持原样：用户的下一步通常是「清一次，重新复现」。
+    renderDiagnostics({ ...(diagInfo || {}), enabled: true, exists: false, size_bytes: 0 });
+    toast('日志已清空，继续复现即可');
+  } catch (err) {
+    toast(errText('清空失败', err), 'error');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2714,6 +2884,9 @@ function setView(name) {
   }
   document.body.classList.remove('column-open');
   if (name === 'online' && window.Online) window.Online.onViewEnter();
+  // 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
+  // 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。
+  if (name === 'settings') loadDiagnostics();
   // 在线歌单可能在歌单视图没渲染期间到达（登录、刷新），进入时补一次同步。
   if (name === 'playlists') renderOnlinePlaylistSection();
   // 收藏与每日推荐同理：进入时才拉，避免启动时多打两条请求。
@@ -3244,6 +3417,38 @@ function bindShortcuts() {
 }
 
 // ---------------------------------------------------------------------------
+// 流年搜索面板桥接：播放分流 + 「查看全部」带词跳转
+// ---------------------------------------------------------------------------
+function initPanelBridge() {
+  document.addEventListener('ln:panel', (e) => {
+    const d = e.detail || {};
+    if (d.action === 'play-local') {
+      playTrack(String(d.id), state.queue.slice());
+    } else if (d.action === 'play-online') {
+      if (window.Online && d.track) {
+        window.Online.playAll([Object.assign({ playable: true }, d.track)], 0);
+      }
+    } else if (d.action === 'view-local') {
+      const q = d.q || '';
+      ui.search.value = q;
+      ui.searchClear.hidden = !q;
+      state.q = q.trim();
+      setView('library');
+      loadTracks(true);
+    } else if (d.action === 'view-online') {
+      const q = d.q || '';
+      const wasOnline = state.view === 'online';
+      ui.onlineQ.value = q;
+      // Online.state 导出的是 onlineState 对象本身（非函数），直接写属性。
+      if (window.Online) window.Online.state.q = q;
+      setView('online');
+      // 已在在线页且已有旧结果时 onViewEnter 早退，补一次显式搜索新关键词。
+      if (wasOnline && window.Online) window.Online.search();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 播放栏显隐：15s 无操作自动隐藏 + 底部热区唤出 + 手动切换
 // ---------------------------------------------------------------------------
 function initBarAutohide() {
@@ -3628,6 +3833,31 @@ function initNowPlayingModal() {
     searchTimer = setTimeout(() => { state.q = ui.search.value.trim(); loadTracks(true); }, 250);
   };
   ui.searchClear.onclick = () => { ui.search.value = ''; ui.searchClear.hidden = true; state.q = ''; loadTracks(true); };
+
+  // 无结果卡上的「清空搜索 / 清除筛选」：一键撤掉所有让列表变空的条件。
+  if (ui.libEmptyNoMatchClear) {
+    ui.libEmptyNoMatchClear.onclick = () => {
+      let touched = false;
+      if (ui.search.value) {
+        ui.search.value = '';
+        ui.searchClear.hidden = true;
+        state.q = '';
+        touched = true;
+      }
+      if (state.libFilter.artist) {
+        state.libFilter.artist = '';
+        if (ui.libArtistFilter) ui.libArtistFilter.value = '';
+        touched = true;
+      }
+      if (state.libFilter.album) {
+        state.libFilter.album = '';
+        if (ui.libAlbumFilter) ui.libAlbumFilter.value = '';
+        touched = true;
+      }
+      if (touched) loadTracks(true);
+      ui.search.focus();
+    };
+  }
 
   ui.libSort.onchange = () => { state.sort = ui.libSort.value; loadTracks(true); };
 
@@ -4105,6 +4335,11 @@ function initNowPlayingModal() {
   };
   ui.setStageIdleHide.onchange = () => setStageIdleHide(ui.setStageIdleHide.checked, true);
   ui.setCoverFollow.onchange = () => setCoverFollow(ui.setCoverFollow.checked, true);
+  // 开发者选项：诊断日志的四个动作。开关是即时的，导出与清空都只碰日志本身。
+  if (ui.setDevDiag) ui.setDevDiag.onchange = () => setDevDiagnostics(ui.setDevDiag.checked);
+  if (ui.devDiagCopy) ui.devDiagCopy.onclick = copyDiagLog;
+  if (ui.devDiagSave) ui.devDiagSave.onclick = saveDiagLogFromServer;
+  if (ui.devDiagClear) ui.devDiagClear.onclick = clearDiagLog;
   ui.settingsEntry.onclick = () => {
     setView('settings');
     ui.views.settings.scrollTop = 0;
@@ -4279,6 +4514,7 @@ function initNowPlayingModal() {
   initCreative();
   bindShortcuts();
   initBarAutohide();
+  initPanelBridge();
   bindMediaSession();
 
   setView('library');

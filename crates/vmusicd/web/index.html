@@ -341,13 +341,23 @@
       </div>
 
       <div class="lib-empty" id="lib-empty" hidden>
-        <div class="empty-card">
+        <div class="empty-card" id="lib-empty-guide">
           <h2>曲库还是空的</h2>
           <p>填入一个本地音乐目录，mmusic-studio 会读取内嵌标签与封面，并把歌词从同目录的 .lrc 里带进来。</p>
           <div class="empty-row">
             <button class="btn primary" id="empty-scan-btn">填写音乐目录</button>
           </div>
           <div class="hint">数据只留在本机，不会联网上传。</div>
+        </div>
+        <!-- 搜索/筛选 0 结果态：与空库引导互斥。搜索是显式意图，即使曲库为空
+             或每日推荐停在在线来源，也必须给出针对关键词的反馈——否则输入后
+             界面毫无变化，用户会认为搜索框坏了。 -->
+        <div class="empty-card" id="lib-empty-nomatch" hidden>
+          <h2>没有找到匹配的歌曲</h2>
+          <p id="lib-empty-nomatch-text"></p>
+          <div class="empty-row">
+            <button class="btn primary" id="empty-nomatch-clear" type="button">清空搜索</button>
+          </div>
         </div>
       </div>
 
@@ -882,6 +892,29 @@
           <span>静音</span><kbd>M</kbd>
           <span>聚焦搜索</span><kbd>/</kbd>
           <span>切换视图</span><kbd>1 – 4</kbd>
+        </div>
+      </div>
+      <!-- 开发者选项：诊断日志默认关——写盘要用户明确同意，而且这份文件是拿去
+           转发的，内容必须一眼能预判。开关走 /v1/diagnostics 而不是
+           PUT /v1/settings：后者只写库，不会让正在跑的服务改变行为。 -->
+      <div class="set-group">
+        <h2 class="set-title">开发者选项</h2>
+        <div class="set-row">
+          <label for="set-dev-diag">播放诊断日志</label>
+          <input id="set-dev-diag" type="checkbox" aria-describedby="set-dev-diag-note">
+          <span class="hint" id="set-dev-diag-note">开启后把播放过程逐条写进日志文件：选了哪个音源与音质、走缓存还是现下载、地址是哪个（隐去签名参数）、以及失败原因。内容只与播放有关，会带上在播曲名与本地文件路径，不含账号凭据。遇到问题时先开启再复现一次，然后把下面的日志发给开发者。</span>
+        </div>
+        <div class="set-row" id="dev-diag-detail" hidden>
+          <label>日志文件</label>
+          <span class="hint" id="dev-diag-path">—</span>
+        </div>
+        <div class="set-row" id="dev-diag-actions" hidden>
+          <label>交给开发者</label>
+          <span class="set-actions">
+            <button id="dev-diag-copy" class="btn">复制日志</button>
+            <button id="dev-diag-save" class="btn">下载文件</button>
+            <button id="dev-diag-clear" class="btn">清空</button>
+          </span>
         </div>
       </div>
     </div>

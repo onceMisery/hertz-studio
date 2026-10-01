@@ -75,10 +75,11 @@
   max-width: 440px;
 }
 
-/* --- 外壳：三栏（padding/gap 20） ---------------------------------------- */
+/* --- 外壳：两栏（内容 + 右栏），v3 移除左侧导航轨 ------------------------ */
 
 [data-skin="liunian"] .app {
-  grid-template-columns: var(--ln-side-w) minmax(0, 1fr) var(--ln-right-w);
+  grid-template-columns: minmax(0, 1fr) var(--ln-right-w);
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--skin-pad);
   padding: var(--skin-pad);
   width: 100%;
@@ -86,27 +87,40 @@
   margin-inline: auto;
 }
 
-/* 宽屏空闲：右栏隐藏，收成两列（高特异性钉回，见项目皮肤栅格陷阱）。 */
+/* 必须钉死栅格：全局 body[data-stage-idle="1"] .app（≥1241px、0,2,1）
+   会把外壳改成「86px + 1fr」，皮肤基础 .app（0,2,0）压它不过——
+   不钉则中栏落进 86px 窄轨、右栏布局整个错位。此组合选择器 (0,3,1)
+   显式钉回两列。 */
 @media (min-width: 1241px) {
   [data-skin="liunian"] body[data-stage-idle="1"] .app {
-    grid-template-columns: var(--ln-side-w) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) var(--ln-right-w);
+    gap: var(--skin-pad);
+  }
+  /* idle 时全局规则隐藏 .stage（无曲目让出空间）：搜索面板随之占满
+     整个右栏，去掉 48% 上限并弹性拉伸，视觉不悬空。开始播放后
+     stage 回来，面板自动回到上部。 */
+  [data-skin="liunian"] body[data-stage-idle="1"] .ln-sp {
+    flex: 1 1 auto;
+    max-height: none;
   }
 }
 
 /* ============================ 左栏 ====================================== */
 
+/* v3：整个导航轨移除（display:none）。节点保留——皮肤与 app.js 仍会程序化
+   点击其 rail-item 以复用业务 setView 链路，unmount 后自动恢复可见。 */
 [data-skin="liunian"] .rail {
-  border-radius: var(--skin-radius);
-  padding: 14px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  min-height: 0;
-  overflow: hidden;
+  display: none;
 }
 
-/* 原导航项在流年骨架里没有位置（VMusic 左栏不是导航），整体隐藏；
-   子元素一并钉住，切走皮肤由 skin.liunian.js unmount 还原。 */
+/* 锚点是纯 DOM 定位标记，绝不参与布局：stage 搬进 .ln-right 后留在
+   .app 里的锚点否则会作为 grid item 凭空添出一行，把右栏挤成内容高。
+   display:none 不影响 restoreMoves 时 insertBefore(node, anchor)。 */
+[data-skin="liunian"] .ln-anchor {
+  display: none;
+}
+
+/* 原导航项一并钉住（选择器保留以对齐皮肤覆盖契约）。 */
 [data-skin="liunian"] .rail-item,
 [data-skin="liunian"] .rail-spacer,
 [data-skin="liunian"] .rail-item svg,
@@ -530,6 +544,8 @@
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   gap: var(--skin-gap);
+  grid-column: 1;
+  min-width: 0;
 }
 
 /* 视图无内边距（播放卡与内容都在 column 栅格节奏里）。 */
@@ -569,9 +585,66 @@
   padding-bottom: 5px;
 }
 
-/* 在线结果列表节奏（节点流年态在左栏槽内）。 */
+/* --- 左栏槽：在线结果 / 歌单列表 ---------------------------------------- */
+
+/* 在线结果列表节奏（节点流年态在左栏槽内）。
+   注意：check-skins 契约要求 .online-body 选择器精确在列（三套皮肤
+   归一化选择器集合一致），槽内追加节奏用 > 子代规则另写。 */
 [data-skin="liunian"] .online-body {
-  gap: 8px;
+  gap: 2px;
+}
+
+[data-skin="liunian"] .ln-slot-online > .online-body {
+  padding-top: 2px;
+}
+
+/* 槽就是 online.js 找回滚容器用的 .online-scroll（JS 挂的类）；
+   基础 .online-scroll 规则已给 flex 列 + 滚动，这里只收两侧节奏。 */
+[data-skin="liunian"] .ln-slot.online-scroll {
+  padding-bottom: 12px;
+}
+
+[data-skin="liunian"] .ln-slot-online .hint {
+  padding: 14px 10px;
+}
+
+/* 聚合搜索的来源筛选条在窄槽里横向滑动，不挤压成多行高块。 */
+[data-skin="liunian"] .ln-slot-online .search-summary {
+  padding: 8px 8px 2px;
+  font-size: 11px;
+}
+
+[data-skin="liunian"] .ln-slot-online .search-source-filters {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding: 4px 4px 10px;
+  scrollbar-width: none;
+}
+
+[data-skin="liunian"] .ln-slot-online .search-source-filters::-webkit-scrollbar {
+  display: none;
+}
+
+/* 歌单列表槽：#playlist-list 自带滚动（基础 .pl-list 规则），占满槽高。
+   业务侧切歌单架/封面排布或打开歌单详情都会给它加 hidden（全局
+   [hidden]{display:none!important}），左栏是 master-detail 的主列表，
+   槽内用 !important 钉回 flex；切走皮肤后节点回 #view-playlists，
+   选择器不再匹配，原显隐逻辑恢复。 */
+[data-skin="liunian"] .ln-slot-pl #playlist-list {
+  display: flex !important;
+  flex: 1;
+  width: 100%;
+  padding: 4px 0 10px;
+}
+
+/* 在线歌单分区在窄槽内允许标题行换行，「去在线面板/网格」不挤出轨。 */
+[data-skin="liunian"] .ln-slot-pl .pl-online-head {
+  flex-wrap: wrap;
+  padding: 8px 10px 4px;
+}
+
+[data-skin="liunian"] .ln-slot-pl .pl-online-sep {
+  margin-inline: 10px;
 }
 
 /* 每日推荐 / 设置分组保持玻璃卡，圆角略收。 */
@@ -581,20 +654,18 @@
   flex: none;
 }
 
-[data-skin="liunian"] .daily-list {
-  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
-  gap: 14px;
-}
-
 [data-skin="liunian"] .set-group {
   padding: 16px;
   border-radius: 14px;
   margin-bottom: 16px;
 }
 
-/* 中栏卡片网格，尺寸跟随。 */
+/* 中栏卡片网格，尺寸跟随。
+   每日推荐刻意排在这里而不是收成横向轨道：一屏 24 首排成一行要横滚三千多像素，
+   滚轮和触摸板都推不动，而横滚本身还是"一次只能看到一小段"。 */
 [data-skin="liunian"] .pl-grid,
-[data-skin="liunian"] .dv-body-card {
+[data-skin="liunian"] .dv-body-card,
+[data-skin="liunian"] .daily-list {
   grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
   gap: 14px;
 }
@@ -731,6 +802,7 @@
   padding: 0;
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   min-height: 0;
   overflow: hidden;
 }
@@ -785,6 +857,303 @@
   margin: 0;
   gap: 10px;
   border-top: 1px solid var(--line);
+}
+
+/* ==========================================================================
+   右栏包裹器 .ln-right（上：搜索面板；下：舞台）v3
+   ========================================================================== */
+
+[data-skin="liunian"] .ln-right {
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--skin-gap);
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ----------------------------- 搜索面板 ---------------------------------- */
+
+[data-skin="liunian"] .ln-sp {
+  flex: none;
+  max-height: 48%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px;
+  gap: 10px;
+  border-radius: var(--skin-radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+/* 范围切换 chips */
+[data-skin="liunian"] .ln-sp-scope {
+  flex: none;
+  display: flex;
+  gap: 6px;
+}
+
+[data-skin="liunian"] .ln-sp-chip {
+  border: 0;
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 11px;
+  cursor: pointer;
+  background: var(--field-bg);
+  color: var(--muted);
+  transition: background 180ms var(--ease-out), color 180ms var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-sp-chip.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* 输入框行 */
+[data-skin="liunian"] .ln-sp-field {
+  flex: none;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  height: 34px;
+  border-radius: 999px;
+  background: var(--field-bg);
+  border: 1px solid transparent;
+  transition: border-color 180ms var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-sp-field:focus-within {
+  border-color: var(--accent);
+}
+
+[data-skin="liunian"] .ln-sp-ico {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--muted);
+}
+
+[data-skin="liunian"] .ln-sp-q {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+}
+
+[data-skin="liunian"] .ln-sp-clear {
+  flex: none;
+  border: 0;
+  padding: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--field-bg-hover);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+[data-skin="liunian"] .ln-sp-clear svg { width: 10px; height: 10px; }
+
+/* 结果/历史滚动区 */
+[data-skin="liunian"] .ln-sp-out {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 2px;
+}
+
+/* 分区 */
+[data-skin="liunian"] .ln-sp-sec {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+}
+
+[data-skin="liunian"] .ln-sp-sec-head {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+[data-skin="liunian"] .ln-sp-sec-name {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: var(--muted);
+}
+
+[data-skin="liunian"] .ln-sp-sec-count {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+[data-skin="liunian"] .ln-sp-more {
+  margin-left: auto;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+  transition: color 180ms var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-sp-more:hover { color: var(--accent); }
+
+[data-skin="liunian"] .ln-sp-rows {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 状态行 */
+[data-skin="liunian"] .ln-sp-status {
+  flex: none;
+  padding: 6px 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+[data-skin="liunian"] .ln-sp-status.is-error {
+  color: var(--accent);
+  cursor: pointer;
+}
+
+/* 结果行 */
+[data-skin="liunian"] .ln-sp-row {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border: 0;
+  padding: 5px 8px;
+  margin-inline: -8px;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: background 160ms var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-sp-row:hover { background: var(--hover); }
+
+[data-skin="liunian"] .ln-sp-cover {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--field-bg);
+  display: inline-flex;
+}
+
+[data-skin="liunian"] .ln-sp-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+[data-skin="liunian"] .ln-sp-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+[data-skin="liunian"] .ln-sp-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-skin="liunian"] .ln-sp-sub {
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 在线结果尾部徽标 */
+[data-skin="liunian"] .ln-sp-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  width: 15px;
+  height: 15px;
+}
+
+[data-skin="liunian"] .ln-sp-badge > * { width: 100%; height: 100%; }
+
+/* ----------------------------- 搜索历史 ---------------------------------- */
+
+[data-skin="liunian"] .ln-sp-history {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+[data-skin="liunian"] .ln-sp-hist-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+[data-skin="liunian"] .ln-sp-hist {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 999px;
+  padding: 4px 6px 4px 11px;
+  background: var(--field-bg);
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 180ms var(--ease-out), background 180ms var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-sp-hist:hover {
+  color: var(--accent);
+  background: var(--field-bg-hover);
+}
+
+[data-skin="liunian"] .ln-sp-hist-del {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+}
+
+[data-skin="liunian"] .ln-sp-hist-del:hover {
+  background: var(--field-bg-hover);
+  color: var(--accent);
 }
 
 /* --- 浮层：圆角统一 ------------------------------------------------------ */
@@ -893,10 +1262,10 @@
 }
 
 /* ==========================================================================
-   设置页：滚动容器 + sticky 头部 + 返回按钮 + 视图入场动画
+   设置页：滚动容器 + sticky 头部 + 视图入场动画
    ========================================================================== */
 
-/* 头部吸附：滚动时标题/返回始终可达；底色与模糊取 token，不写字面量。 */
+/* 头部吸附：滚动时标题始终可达；底色与模糊取 token，不写字面量。 */
 [data-skin="liunian"] #view-settings .col-head {
   position: sticky;
   top: 0;
@@ -907,36 +1276,7 @@
   -webkit-backdrop-filter: blur(10px);
 }
 
-/* 返回按钮 */
-[data-skin="liunian"] .ln-back-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 12px;
-  height: 30px;
-  margin-right: 10px;
-  border-radius: 999px;
-  border: 1px solid var(--field-border);
-  background: var(--field-bg);
-  color: var(--muted);
-  font-size: 12px;
-  font-family: var(--font-sans);
-  cursor: pointer;
-  transition: color var(--dur-base) var(--ease-out),
-    background var(--dur-base) var(--ease-out);
-}
-
-[data-skin="liunian"] .ln-back-btn:hover {
-  color: var(--text);
-  background: var(--hover);
-}
-
-[data-skin="liunian"] .ln-back-glyph {
-  font-size: 13px;
-  line-height: 1;
-}
-
-/* 视图入场：打开/关闭（返回）均有 ≤260ms 的淡入上移动画；
+/* 视图入场：打开/关闭均有 ≤260ms 的淡入上移动画；
    display 从 none 恢复时动画自动播放，reduce-motion 由全局规则接管。 */
 [data-skin="liunian"] .view:not([hidden]) {
   animation: ln-view-enter 0.24s cubic-bezier(0.2, 0.8, 0.25, 1);
@@ -972,71 +1312,42 @@
 }
 
 /* ============================ 响应式 ====================================
-   宽屏三栏；≤1240 右栏抽屉；≤1000 左栏抽屉化（品牌点击唤出）；
-   ≤620 播放卡/控制压缩。右栏抽屉的 transform 隐藏/滑入沿用基础样式，
-   这里只报几何。 */
+   v3：宽屏两栏（内容 + 右栏）；≤1240 右栏收窄；≤1000 单列——
+   内容在上、搜索面板与舞台依次在下，各自限高内部滚动。 */
 
 @media (max-width: 1240px) {
   [data-skin="liunian"] .app {
-    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) 260px;
     gap: 14px;
     padding: 14px;
-  }
-
-  /* collapsed + 该断点：第一轨保持 44 窄条（同特异性组合规则钉回，
-     否则被上面 240 规则盖掉）。 */
-  [data-skin="liunian"] body.ln-rail-collapsed .app {
-    grid-template-columns: 44px minmax(0, 1fr);
-  }
-
-  /* peek 浮出位置跟随该断点 14px 外边距。 */
-  [data-skin="liunian"] body.ln-rail-collapsed .rail:hover {
-    top: 14px;
-    left: 14px;
-    bottom: 14px;
-  }
-
-  [data-skin="liunian"] .stage {
-    top: 14px;
-    right: 14px;
-    bottom: calc(var(--bar-h) + 24px);
-    width: min(400px, 86vw);
-  }
-}
-
-/* 宽屏空闲 + collapsed：两列栅格的第一轨收成 44（idle 基础规则同特异性，
-   此组合规则后写且多一个类，钉住）。 */
-@media (min-width: 1241px) {
-  [data-skin="liunian"] body.ln-rail-collapsed[data-stage-idle="1"] .app {
-    grid-template-columns: 44px minmax(0, 1fr);
   }
 }
 
 @media (max-width: 1000px) {
-  /* 左栏抽屉化：默认藏在屏外，body.ln-left-open 时滑入。 */
   [data-skin="liunian"] .app {
     grid-template-columns: minmax(0, 1fr);
+    /* 解除宽屏的单行 1fr：内容与右栏两行按内容自然排布 */
+    grid-template-rows: auto auto;
   }
 
-  /* collapsed 态的轨道钉死规则在单列下要解除：否则 column 被钉到第 2 轨、
-     落进隐式列导致整列不可见（collapsed 类跨断点残留的兜底）。 */
-  [data-skin="liunian"] body.ln-rail-collapsed > .app > .column {
+  [data-skin="liunian"] .column,
+  [data-skin="liunian"] .ln-right {
     grid-column: 1;
   }
 
-  [data-skin="liunian"] .rail {
-    position: fixed;
-    top: 14px;
-    left: 14px;
-    bottom: 14px;
-    width: min(280px, 84vw);
-    z-index: 70;
-    transform: translateX(calc(-100% - 24px));
-    transition: transform 0.32s var(--ease);
+  /* 面板改为内容定高（结果区限高内滚动），舞台固定高度，页面整体不被撑爆。 */
+  [data-skin="liunian"] .ln-sp {
+    flex: none;
+    max-height: none;
   }
 
-  [data-skin="liunian"] body.ln-left-open .rail {
-    transform: none;
+  [data-skin="liunian"] .ln-sp-out {
+    max-height: 38vh;
+  }
+
+  [data-skin="liunian"] .stage {
+    flex: none;
+    height: 38vh;
   }
 }
 
@@ -1226,12 +1537,27 @@
   display: none;
 }
 
-/* 展开播放卡位于中栏文档流，不是底部悬浮播放条。全局自动隐藏会写入
-   translateY + opacity，并在动画结束时清空；流年规则又覆盖了 .bar.is-hidden，
-   于是卡片会先下滑再瞬间弹回。仅在展开态钉住可见性，胶囊态仍沿用原逻辑。 */
+/* 播放卡（展开态/胶囊态）位于中栏文档流，不是底部悬浮播放条。全局自动
+   隐藏会写入 translateY + opacity，并在动画结束时清空；流年规则又覆盖了
+   .bar.is-hidden，于是卡片会先下滑再瞬间弹回。两态都钉住可见性。 */
 [data-skin="liunian"] .bar:not(.ln-capsule) {
   transform: none !important;
   opacity: 1 !important;
+}
+
+/* 胶囊态同样是中栏文档流卡片，底部播放栏那套 idle 滑出 / pointerenter
+   滑入对它不成立：showBar() 会先瞬间写入 translateY(100%+20px) 再动画
+   归位——不钉住时，鼠标一碰到胶囊就整块下坠再滑回，即悬停时的上下跳动。 */
+[data-skin="liunian"] .bar.ln-capsule {
+  transform: none !important;
+  opacity: 1 !important;
+}
+
+/* is-hidden 期间必须保持 grid：.bar.is-hidden{display:none} 与皮肤的
+   [data-skin] .bar{display:flex} 同为 (0,2,0) 且皮肤文件后加载而落败，
+   卡片会退回 flex 排版、grid 槽位全部失配。显式钉回 grid，杜绝排版切换。 */
+[data-skin="liunian"] .bar.ln-capsule.is-hidden {
+  display: grid !important;
 }
 
 [data-skin="liunian"] .ln-library-tools {
@@ -1275,31 +1601,9 @@
   letter-spacing: -.02em;
 }
 
-[data-skin="liunian"] .daily-list {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(150px, 1fr);
-  grid-template-columns: none;
-  overflow-x: auto;
-  scroll-snap-type: x proximity;
-  padding-bottom: 6px;
-}
-
-[data-skin="liunian"] .daily-list > * {
-  scroll-snap-align: start;
-}
-
+/* 空态/错误提示占满整行，而不是掉进第一个格子里被压成一列宽。 */
 [data-skin="liunian"] .daily-list > .hint {
   grid-column: 1 / -1;
-  min-width: min(100%, 280px);
-}
-
-[data-skin="liunian"] .daily-list:has(> .hint) {
-  display: block;
-}
-
-[data-skin="liunian"] .daily-card .daily-copy {
-  flex: initial;
 }
 
 [data-skin="liunian"] .view .track .t-art,
@@ -1356,8 +1660,12 @@
   outline-offset: 3px;
 }
 
+/* 列表节点回到中栏时的两种情况：窄屏（左栏是抽屉，节点全在中栏原位），以及
+   宽屏的歌单「列表」档（placePlaylistList 特意让它留在中栏）。.pl-list 基础
+   规则是 flex:1 + 内部滚动，视图本身也在滚，不给个下限会塌成一条。 */
 [data-skin="liunian"] .view > .online-body,
 [data-skin="liunian"] .view > .pl-grid,
+[data-skin="liunian"] .view > .pl-list,
 [data-skin="liunian"] .view > .lib-list {
   min-height: 160px;
 }
@@ -1505,10 +1813,6 @@
   [data-skin="liunian"] .daily-tools {
     flex-wrap: wrap;
     gap: 6px;
-  }
-
-  [data-skin="liunian"] .daily-list {
-    grid-auto-columns: minmax(140px, 64%);
   }
 }
 

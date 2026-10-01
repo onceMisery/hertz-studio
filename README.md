@@ -49,6 +49,12 @@
 - 数据备份：歌单/收藏/设置/曲库目录一键导出导入（JSON，不含凭据，
   幂等恢复），歌单 M3U 导入导出
 - 在线缓存管理：占用统计、按音源清理、指定曲目保留（豁免 LRU 回收）
+- 开发者选项：设置里一键开启**播放诊断日志**（默认关闭），把播放过程逐条写进
+  `<数据目录>/logs/playback.log`——选了哪个音源与音质、走缓存还是现下载、每个
+  地址的成功与失败、失败码与原因；在线流地址只留 `host/path`（签名与临时 token
+  在 query 里，不落盘）。内容只与播放有关，会带上在播曲名与本地文件路径，不含
+  账号凭据。文件路径显示在设置页，复制 / 下载 / 清空三个按钮，遇到问题时开着它
+  复现一次，把日志发给开发者即可定位
 - 系统凭据：平台 cookie 等秘密存入操作系统钥匙串（Windows 凭据管理器 /
   macOS 钥匙串 / Secret Service），启动自动迁移旧明文数据
 - 远程来源（WebDAV）：登记服务器（密码进钥匙串）、目录浏览、
@@ -222,6 +228,8 @@ mmusic-studio v0.1.0
 | GET/POST/PUT/DELETE | `/v1/playlists[/{id}]`                             | 歌单                                                   |
 | POST · DELETE       | `/v1/playlists/{id}/tracks[/{track_id}]`           | 歌单曲目                                                 |
 | GET · PUT           | `/v1/settings`                                     | 键值设置（音源凭据不在其中，见下）                            |
+| GET · POST          | `/v1/diagnostics`                                  | 开发者选项：读/写播放诊断日志开关（POST 即时生效，并持久化到 `dev_diagnostics`）  |
+| GET · DELETE        | `/v1/diagnostics/log`                              | 日志全文（`text/plain` 附件）与清空                                |
 | GET                 | `/v1/recommend/daily?limit=`                       | 本地每日推荐：规则引擎按天序号出榜，同一天可复现                          |
 | GET                 | `/v1/recommend/daily/online?limit=`                | 各在线平台每日推荐的汇总：只取**已登录**平台的曲目，轮询交错后合成一份歌单；未登录 / 无接口 / 上游失败的平台写进 `skipped`，HTTP 恒为 200 |
 | GET                 | `/v1/online/sources`                               | 音源清单：id、显示名、分类、是否支持登录、当前是否已登录              |
@@ -287,6 +295,7 @@ format = "pretty"       # pretty | json
 
 数据目录默认位置：Windows `%LOCALAPPDATA%\mmusic-studio`，macOS `~/Library/Application Support`，Linux `~/.local/share`。
 其中含 `vmusic.db`（曲库）、`cache/covers/`（封面）、`token`（鉴权令牌）、`vmusicd.json`（服务发现文件，宿主据此拿到端口与令牌）。
+开启开发者选项里的播放诊断日志后还有 `logs/playback.log`（单文件上限 2 MiB，超出裁掉最旧的一半）。
 
 ---
 

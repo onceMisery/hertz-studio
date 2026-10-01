@@ -28,6 +28,7 @@
   var CLICK_THRESHOLD = 10;          // 原 6px，触屏略放宽
   var VISIBLE_RADIUS = 5.5;         // |delta| 超过即不渲染
   var MAX_CARDS = 8;                // 当前曲 + 后续 7 首
+  var COVER_CACHE_CAP = 40;        // 预加载缓存上限（约 5 个歌单窗口，切回去不重拉）
   var LERP_CENTER = 0.16;           // 封面流居中平滑
   var LERP_HOVER = 0.14;
   var SUMMON_OPEN_MS = 910;         // shelfSummonOpenDuration
@@ -92,7 +93,7 @@
       img.decoding = 'async';
       coverCache.set(url, img);
       img.src = url;
-      while (coverCache.size > MAX_CARDS * 2) coverCache.delete(coverCache.keys().next().value);
+      while (coverCache.size > COVER_CACHE_CAP) coverCache.delete(coverCache.keys().next().value);
     }
 
     // ---- DOM 构建 ---------------------------------------------------------
@@ -173,6 +174,10 @@
       img.dataset.url = url;
       img.classList.remove('is-loaded');
       img.src = url;
+      // 预加载缓存里已就绪的图直接亮出：新卡首帧就是封面，
+      // 不会先渲染一帧空卡再淡入（观感即「封面闪烁」）。
+      var pre = coverCache.get(url);
+      if (pre && pre.complete && pre.naturalWidth > 0) img.classList.add('is-loaded');
     }
 
     function repaintTags() {
@@ -393,7 +398,19 @@
     function attachCoverLoad(el) {
       var img = el.querySelector('img');
       img.addEventListener('load', function () { img.classList.add('is-loaded'); });
-      img.addEventListener('error', function () { img.classList.remove('is-loaded'); });
+      img.addEventListener('error', function () {
+        img.classList.remove('is-loaded');
+        // 失败的 URL 必须允许重试：在线封面常见「详情晚到/代理图首次 404」，
+        // 若留着 dataset.url，后续队列重推会命中同 URL 早退，卡面永远黑着。
+        // 清掉记录与预加载缓存里的失败项，下一次 setItems 就会重新赋 src。
+        var failed = img.dataset.url;
+        if (failed) {
+          img.dataset.url = '';
+          img.removeAttribute('src');
+          var bad = coverCache.get(failed);
+          if (bad && !bad.naturalWidth) coverCache.delete(failed);
+        }
+      });
     }
 
     function findLiveNode(id) {

@@ -336,6 +336,7 @@ impl AppState {
         let commit = self.play_commit.lock().await;
         if let Some(expected) = reserve_gen {
             if self.play_generation.load(Ordering::Relaxed) != expected {
+                crate::diaglog!("play.stale", idx = index, reason = "队列已被替换");
                 return Ok(PlayOutcome {
                     committed: false,
                     actual_quality: None,
@@ -346,7 +347,10 @@ impl AppState {
             let queue = self.queue.lock().await;
             match queue.get(index).cloned() {
                 Some(track_id) => track_id,
-                None => return Err(vmusic_core::CoreError::NotFound("queue index".into())),
+                None => {
+                    crate::diaglog!("play.fail", idx = index, reason = "队列里没有这个下标");
+                    return Err(vmusic_core::CoreError::NotFound("queue index".into()));
+                }
             }
         };
         // 每次切入开新一代并捕获它：在线现取流的多个 await 之间用户可能已
@@ -361,11 +365,48 @@ impl AppState {
         *self.cursor.lock().await = Some(index);
         drop(commit);
 
-        let outcome = if let Some((source, id)) = crate::online::split_virtual_id(&track_id) {
+        // 诊断日志在这条分岔上记一次开头：在线曲带上音源与平台内 id，本地曲只
+        // 有队列 id。后来者靠这一行就能把「点了没反应」分成两条路去查。
+        let online_target = crate::online::split_virtual_id(&track_id);
+        if let Some((source, id)) = &online_target {
+            crate::diaglog!(
+                "play.begin",
+                idx = index,
+                gen = gen,
+                kind = "online",
+                source = source,
+                track = id,
+                auto = auto
+            );
+        } else {
+            crate::diaglog!(
+                "play.begin",
+                idx = index,
+                gen = gen,
+                kind = "local",
+                track = track_id,
+                auto = auto
+            );
+        }
+
+        let outcome = if let Some((source, id)) = online_target {
             self.play_online(gen, index, track_id.clone(), source, id, prev_cursor, auto)
                 .await
         } else {
-            self.play_local(gen, index, track_id.clone()).await
+            // 本地曲没有 online_failed 那样的收口点，错误直接回给 HTTP——在这里
+            // 补一行，否则日志里只有 play.begin 没有下文。
+            self.play_local(gen, index, track_id.clone())
+                .await
+                .inspect_err(|e| {
+                    crate::diaglog!(
+                        "play.fail",
+                        idx = index,
+                        gen = gen,
+                        kind = "local",
+                        code = e.code(),
+                        reason = e.to_string()
+                    );
+                })
         }?;
 
         if outcome.committed {
@@ -390,7 +431,17 @@ impl AppState {
         let track = vmusic_store::get_track(&self.db, &track_id)
             .await
             .map_err(vmusic_core::CoreError::Store)?
-            .ok_or_else(|| vmusic_core::CoreError::NotFound(track_id.clone()))?;
+            .ok_or_else(|| {
+                crate::diaglog!(
+                    "play.fail",
+                    idx = index,
+                    gen = gen,
+                    kind = "local",
+                    track = track_id,
+                    reason = "曲目不在曲库里"
+                );
+                vmusic_core::CoreError::NotFound(track_id.clone())
+            })?;
         // 响度归一化：曲目有 RG 标签且开关开启时下发曲目增益。失败不影响播放。
         let dsp = self.dsp.lock().await.clone();
         let track_gain_db = if dsp.loudness_norm {
@@ -438,11 +489,26 @@ impl AppState {
             .map_err(|e| {
                 vmusic_core::CoreError::Audio(vmusic_core::AudioError::BackendInit(e.to_string()))
             })?;
+            // 远程直链的凭据可能在 userinfo 或 query 里，与在线流同规则脱敏。
+            crate::diaglog!(
+                "play.local",
+                idx = index,
+                gen = gen,
+                via = "remote",
+                url = crate::diag::redact_url(&url)
+            );
             self.audio
                 .load_source(Box::new(stream), ext, Some(track_id.clone()))
                 .await
                 .map_err(vmusic_core::CoreError::Audio)?;
         } else {
+            crate::diaglog!(
+                "play.local",
+                idx = index,
+                gen = gen,
+                via = "file",
+                path = track.path
+            );
             self.audio
                 .load(&track.path, Some(track_id.clone()))
                 .await
@@ -451,6 +517,7 @@ impl AppState {
         // load 已被 actor 处理：若这期间又切了歌，更新一代的命令已排在后面，
         // 本调用绝不能再 play() 或写 cursor。
         if !self.attempt_alive(gen, index, &track_id).await {
+            crate::diaglog!("play.stale", idx = index, gen = gen, kind = "local");
             return Ok(PlayOutcome {
                 committed: false,
                 actual_quality: None,
@@ -460,6 +527,7 @@ impl AppState {
             .play()
             .await
             .map_err(vmusic_core::CoreError::Audio)?;
+        crate::diaglog!("play.commit", idx = index, gen = gen, via = "local");
         Ok(PlayOutcome {
             committed: self.attempt_alive(gen, index, &track_id).await,
             actual_quality: None,
@@ -492,6 +560,16 @@ impl AppState {
             crate::online::quality::get(&prefs, &source)
         };
         let key = crate::online::cache::cache_key(&source, &id, quality.as_str());
+        crate::diaglog!(
+            "play.online",
+            idx = index,
+            gen = gen,
+            source = source,
+            track = id,
+            want = quality.as_str(),
+            bps = quality.bps(),
+            key = key
+        );
 
         // 进入即收口下载注册表：他键条目一律移除（在跑的 cancel，已完成的
         // 惰性 drop——去删一个已随 rename 消失的 .part 没有意义）；同键条目
@@ -533,26 +611,42 @@ impl AppState {
         if let Some(path) =
             crate::online::cache::find_cached_by_key(&dir, &source, &id, quality.as_str()).await
         {
+            crate::diaglog!(
+                "cache.hit",
+                idx = index,
+                gen = gen,
+                key = key,
+                path = path.display()
+            );
             match self
                 .try_commit_cached(gen, index, &track_id, &path, None)
                 .await?
             {
                 Commit::Done(outcome) => {
                     if outcome.committed {
+                        crate::diaglog!("play.commit", idx = index, gen = gen, via = "cached");
                         self.note_protected(&key, Some(&path)).await;
                     }
                     return Ok(outcome);
                 }
                 Commit::Stale => {
+                    crate::diaglog!("play.stale", idx = index, gen = gen, via = "cached");
                     return Ok(PlayOutcome {
                         committed: false,
                         actual_quality: None,
-                    })
+                    });
                 }
                 // 坏缓存：删文件后落到下面的新鲜取流流程，静默重试一次
                 // （不 toast、不计失败）。
                 Commit::BadCache => {
                     tracing::warn!(?path, "缓存文件无法解码，删除并新鲜重取一次");
+                    crate::diaglog!(
+                        "cache.bad",
+                        idx = index,
+                        gen = gen,
+                        path = path.display(),
+                        action = "删除并新鲜重取"
+                    );
                     let _ = tokio::fs::remove_file(&path).await;
                 }
             }
@@ -564,6 +658,13 @@ impl AppState {
         // 同键预取在跑则 owned 接管（实际档位无法回填）；否则现场取流并新开
         // 渐进式下载。
         let (dl, actual) = if let Some(dl) = takeover {
+            crate::diaglog!(
+                "download.takeover",
+                idx = index,
+                gen = gen,
+                key = key,
+                from = "prefetch"
+            );
             (dl, None)
         } else {
             let ctx = crate::online::Ctx {
@@ -573,6 +674,14 @@ impl AppState {
                 match crate::online::stream(&ctx, &source, &id, None, Some(quality.bps())).await {
                     Ok(v) => v,
                     Err(e) => {
+                        crate::diaglog!(
+                            "stream.fail",
+                            idx = index,
+                            gen = gen,
+                            source = source,
+                            code = e.code,
+                            reason = e.message
+                        );
                         self.set_buffering(false, None).await;
                         return self
                             .online_failed(
@@ -587,6 +696,19 @@ impl AppState {
                     }
                 };
             let actual = crate::online::quality::from_bitrate(info.bitrate);
+            // 地址只记 host+path：query 里是签名与临时 token，而这份文件要发给
+            // 开发者。域名足以认出 CDN，具体参数开发者查不到也不该查。
+            crate::diaglog!(
+                "stream.ok",
+                idx = index,
+                gen = gen,
+                source = source,
+                url = crate::diag::redact_url(&info.url),
+                extra_urls = info.fallback_urls.len(),
+                bitrate = info.bitrate.unwrap_or(0),
+                actual = actual.map(|q| q.as_str()).unwrap_or("unknown"),
+                expires_secs = info.expires_in_secs.unwrap_or(0)
+            );
             let urls: Vec<String> = std::iter::once(info.url)
                 .chain(info.fallback_urls)
                 .collect();
@@ -594,6 +716,14 @@ impl AppState {
             match crate::online::progressive::start(dir.clone(), key.clone(), urls, referer) {
                 Ok(dl) => (dl, actual),
                 Err(e) => {
+                    crate::diaglog!(
+                        "download.start_fail",
+                        idx = index,
+                        gen = gen,
+                        key = key,
+                        code = e.code,
+                        reason = e.message
+                    );
                     self.set_buffering(false, None).await;
                     return self
                         .online_failed(gen, index, track_id, prev_cursor, auto, e)
@@ -627,6 +757,7 @@ impl AppState {
         // 并 cancel，旧代际的等待再也拖不住新一代（修 B3）。
         loop {
             if !self.attempt_alive(gen, index, &track_id).await {
+                crate::diaglog!("play.stale", idx = index, gen = gen, via = "prebuffer");
                 self.cancel_download(&key).await;
                 self.set_buffering(false, None).await;
                 return Ok(PlayOutcome {
@@ -675,12 +806,26 @@ impl AppState {
                 None => (crate::online::progressive::StreamMode::WaitFull, sniffed),
             }
         };
+        crate::diaglog!(
+            "download.plan",
+            idx = index,
+            gen = gen,
+            key = key,
+            mode = if mode == crate::online::progressive::StreamMode::WaitFull {
+                "wait-full"
+            } else {
+                "progressive"
+            },
+            ext = ext,
+            pct = view.pct().unwrap_or(0)
+        );
 
         if mode == crate::online::progressive::StreamMode::WaitFull {
             // late-moov m4a：等整首下完。每 200ms 推一次百分比并复核代际，
             // 用户切走立刻取消，不让迟到下载回来劫持新歌。
             loop {
                 if !self.attempt_alive(gen, index, &track_id).await {
+                    crate::diaglog!("play.stale", idx = index, gen = gen, via = "wait-full");
                     self.cancel_download(&key).await;
                     self.set_buffering(false, None).await;
                     return Ok(PlayOutcome {
@@ -807,6 +952,7 @@ impl AppState {
                 .await;
         }
         if !self.attempt_alive(gen, index, &track_id).await {
+            crate::diaglog!("play.stale", idx = index, gen = gen, via = "progressive");
             self.set_buffering(false, None).await;
             // 已装入 actor 但被顶代际：不取消下载也不摘条目，后台跑完照样
             // rename 落缓存（后续播放会惰性清理或按角色接管）。
@@ -834,6 +980,13 @@ impl AppState {
         // Progressive 提交成功：条目留在注册表，后台任务继续到 rename 完；
         // 后续播放惰性清理已完成条目，切歌则按角色 cancel。
         if committed {
+            crate::diaglog!(
+                "play.commit",
+                idx = index,
+                gen = gen,
+                via = "progressive",
+                actual = actual.map(|q| q.as_str()).unwrap_or("unknown")
+            );
             self.note_protected(&key, None).await;
         }
         Ok(PlayOutcome {
@@ -908,6 +1061,14 @@ impl AppState {
         {
             Ok(Commit::Done(outcome)) => {
                 if outcome.committed {
+                    crate::diaglog!(
+                        "play.commit",
+                        idx = index,
+                        gen = gen,
+                        via = "downloaded",
+                        file = path.file_name().unwrap_or_default().display(),
+                        actual = actual.map(|q| q.as_str()).unwrap_or("unknown")
+                    );
                     self.note_protected(key, Some(&path)).await;
                 }
                 Ok(outcome)
@@ -1184,10 +1345,28 @@ impl AppState {
         auto: bool,
         e: crate::error::ApiError,
     ) -> Result<PlayOutcome, vmusic_core::CoreError> {
+        // 所有在线播放失败的收口点：这一行就是「为什么这首没响」的答案。写在
+        // 最前面，因为下面的分支会把 e 的字段逐个 move 掉。
+        crate::diaglog!(
+            "play.fail",
+            idx = index,
+            gen = gen,
+            track = track_id,
+            auto = auto,
+            code = e.code,
+            source = e.source.clone().unwrap_or_default(),
+            reason = e.message
+        );
         let commit = self.play_commit.lock().await;
         if !self.attempt_alive(gen, index, &track_id).await {
             // 被顶代际：为跳过的曲子弹错、抢光标、给迟到的 HTTP 响应塞 404
             // 都不对。
+            crate::diaglog!(
+                "play.stale",
+                idx = index,
+                gen = gen,
+                reason = "失败收口时代际已过期"
+            );
             return Ok(PlayOutcome {
                 committed: false,
                 actual_quality: None,
@@ -1197,6 +1376,13 @@ impl AppState {
 
         if auto {
             let n = self.auto_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            crate::diaglog!(
+                "play.skip",
+                idx = index,
+                gen = gen,
+                streak = n,
+                title = track_title(&track_id)
+            );
             self.publish(WsEvent::Error {
                 message: format!("《{}》暂不可用，已跳过", track_title(&track_id)),
                 code: Some(e.code.to_string()),
@@ -1204,6 +1390,7 @@ impl AppState {
                 index: None,
             });
             if n >= 3 {
+                crate::diaglog!("play.streak_stop", streak = n, reason = "接力连续取流失败");
                 self.publish(WsEvent::Error {
                     message: "连续多首无法播放，已停止。可检查音源登录或网络后重试。".into(),
                     code: Some("online_unavailable_streak".to_string()),
@@ -1254,6 +1441,11 @@ impl AppState {
         let reservation = self.play_generation.load(Ordering::Relaxed);
         let mut advance = false;
         let Some(track_id) = track_id else {
+            crate::diaglog!(
+                "decode.fail",
+                gen = generation,
+                reason = "actor 未报告在播曲目"
+            );
             self.publish(WsEvent::Error {
                 message: "播放中断".into(),
                 code: Some("decode_stalled".into()),
@@ -1273,6 +1465,7 @@ impl AppState {
             let current = *self.cursor.lock().await;
             if current.and_then(|i| queue.get(i)) != Some(&track_id) {
                 tracing::debug!(?track_id, "丢弃过期 DecodeError：cursor 已指向新曲目");
+                crate::diaglog!("decode.stale", track = track_id, gen = generation);
                 return;
             }
         }
@@ -1295,6 +1488,16 @@ impl AppState {
                     .unwrap_or_else(|| track_title(&track_id))
             };
             let n = self.auto_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            crate::diaglog!(
+                "decode.fail",
+                kind = "online",
+                gen = generation,
+                source = source,
+                track = id,
+                key = key,
+                streak = n,
+                title = label
+            );
             self.publish(WsEvent::Error {
                 message: format!("《{label}》播放中断，已跳过"),
                 code: Some("decode_stalled".into()),
@@ -1302,6 +1505,7 @@ impl AppState {
                 index: None,
             });
             if n >= 3 {
+                crate::diaglog!("play.streak_stop", streak = n, reason = "解码连续早夭");
                 self.publish(WsEvent::Error {
                     message: "连续多首无法播放，已停止。可检查音源登录或网络后重试。".into(),
                     code: Some("online_unavailable_streak".into()),
@@ -1312,6 +1516,12 @@ impl AppState {
                 advance = true;
             }
         } else {
+            crate::diaglog!(
+                "decode.fail",
+                kind = "local",
+                gen = generation,
+                track = track_id
+            );
             self.publish(WsEvent::Error {
                 message: "播放中断".into(),
                 code: Some("decode_stalled".into()),
@@ -1351,9 +1561,13 @@ impl AppState {
             let queue = self.queue.lock().await;
             self.cursor.lock().await.unwrap_or(0).saturating_add(1) >= queue.len()
         };
-        if delta > 0 && at_tail { let _ = self.radio_refill(false).await; }
+        if delta > 0 && at_tail {
+            let _ = self.radio_refill(false).await;
+        }
         let commit = self.play_commit.lock().await;
-        if self.play_generation.load(Ordering::Relaxed) != before_refill { return Ok(()); }
+        if self.play_generation.load(Ordering::Relaxed) != before_refill {
+            return Ok(());
+        }
         if reservation
             .is_some_and(|expected| self.play_generation.load(Ordering::Relaxed) != expected)
         {
@@ -1370,13 +1584,18 @@ impl AppState {
                 return Ok(());
             }
         }
-        let fm = { let radio = self.radio.lock().await; radio.active && radio.initial_generation.is_none() };
+        let fm = {
+            let radio = self.radio.lock().await;
+            radio.active && radio.initial_generation.is_none()
+        };
         if fm && self.current_index().await.unwrap_or(0) >= 80 {
             let mut queue = self.queue.lock().await;
             let mut cursor = self.cursor.lock().await;
             let remove = cursor.unwrap_or(0).saturating_sub(20);
             let mut meta = self.online_meta.lock().await;
-            for id in queue.drain(..remove) { meta.remove(&id); }
+            for id in queue.drain(..remove) {
+                meta.remove(&id);
+            }
             *cursor = Some(20);
             self.play_generation.fetch_add(1, Ordering::Relaxed);
         }
@@ -1388,24 +1607,30 @@ impl AppState {
         }
         let current = self.current_index().await.unwrap_or(0);
 
-        if fm && delta > 0 && current + 1 >= len { return Ok(()); }
-        let next = if fm { (current as isize + delta).max(0) as usize } else { match mode {
-            PlayMode::RepeatOne if auto => current,
-            // Shuffle must move: picking the current index again would look
-            // like "next" did nothing. VCP keeps a pre-shuffled queue for the
-            // same reason; excluding the current index is the minimal version.
-            PlayMode::Shuffle if delta > 0 => random_index(len, Some(current)),
-            _ => {
-                let raw = current as isize + delta;
-                if raw < 0 {
-                    len - 1
-                } else if raw as usize >= len {
-                    0
-                } else {
-                    raw as usize
+        if fm && delta > 0 && current + 1 >= len {
+            return Ok(());
+        }
+        let next = if fm {
+            (current as isize + delta).max(0) as usize
+        } else {
+            match mode {
+                PlayMode::RepeatOne if auto => current,
+                // Shuffle must move: picking the current index again would look
+                // like "next" did nothing. VCP keeps a pre-shuffled queue for the
+                // same reason; excluding the current index is the minimal version.
+                PlayMode::Shuffle if delta > 0 => random_index(len, Some(current)),
+                _ => {
+                    let raw = current as isize + delta;
+                    if raw < 0 {
+                        len - 1
+                    } else if raw as usize >= len {
+                        0
+                    } else {
+                        raw as usize
+                    }
                 }
             }
-        }};
+        };
 
         drop(commit);
         self.play_index_for(next, Some(generation), auto)
@@ -1467,6 +1692,11 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     track_id,
                 } => {
                     state.publish(WsEvent::Ended);
+                    crate::diaglog!(
+                        "play.end",
+                        gen = generation,
+                        track = track_id.as_deref().unwrap_or("-")
+                    );
                     // 接力绝不能在泵任务里 await：未缓存在线曲的现取流要数秒，
                     // 泵一停，上面那个 64 容量的广播立刻 Lagged。甩到独立任务，
                     // 泵自己永远只做即时转发。
@@ -1481,6 +1711,7 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                             Ok(()) => advance.post_commit_background(),
                             Err(e) => {
                                 tracing::warn!("auto-advance failed: {e}");
+                                crate::diaglog!("advance.fail", reason = e.to_string());
                                 // 接力彻底失败（如连续 3 首不可播之外的错误）：
                                 // 只 warn 会让前端永远停在旧曲上且毫无提示，
                                 // 补发一条可观测错误（不带音源/下标）。
@@ -1495,12 +1726,15 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     });
                 }
                 // 音频后端自身的解码/设备错误没有音源上下文，code/source 缺省。
-                AudioEvent::Error(message) => state.publish(WsEvent::Error {
-                    message,
-                    code: None,
-                    source: None,
-                    index: None,
-                }),
+                AudioEvent::Error(message) => {
+                    crate::diaglog!("audio.error", reason = message);
+                    state.publish(WsEvent::Error {
+                        message,
+                        code: None,
+                        source: None,
+                        index: None,
+                    });
+                }
                 // 解码线程非主动中断的早夭：收口要做下载取消/失败计数/自动跳曲，
                 // 全是 await，同样甩独立任务，泵只负责即时转发。
                 AudioEvent::DecodeError {

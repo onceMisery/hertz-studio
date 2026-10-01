@@ -8,13 +8,14 @@
 
 mod config;
 mod daily;
+mod diag;
 mod error;
 mod history;
 mod online;
 mod persist;
+mod radio;
 mod remote;
 mod routes;
-mod radio;
 mod scan;
 mod secrets;
 mod stage_beats;
@@ -181,11 +182,20 @@ const WALLPAPERS: &[(&str, &[u8])] = &[
 /// online.js 的 SOURCE_BADGE 按音源 id 取用。与壁纸同为二进制资源，走
 /// `include_bytes!` 内嵌，单 exe 分发不依赖外部文件。
 const PLATFORM_ICONS: &[(&str, &[u8])] = &[
-    ("netease.png", include_bytes!("../web/platform-icons/netease.png")),
+    (
+        "netease.png",
+        include_bytes!("../web/platform-icons/netease.png"),
+    ),
     ("qq.png", include_bytes!("../web/platform-icons/qq.png")),
-    ("kugou.png", include_bytes!("../web/platform-icons/kugou.png")),
+    (
+        "kugou.png",
+        include_bytes!("../web/platform-icons/kugou.png"),
+    ),
     ("kuwo.png", include_bytes!("../web/platform-icons/kuwo.png")),
-    ("qishui.png", include_bytes!("../web/platform-icons/qishui.png")),
+    (
+        "qishui.png",
+        include_bytes!("../web/platform-icons/qishui.png"),
+    ),
 ];
 
 const JS: &str = "application/javascript; charset=utf-8";
@@ -220,13 +230,26 @@ async fn main() -> anyhow::Result<()> {
         "null" => BackendKind::Null,
         _ => BackendKind::cpal(),
     };
+    // 实际生效的后端名要单独记：cpal 拿不到设备时会回落到 null，而「有声吗」
+    // 正是播放诊断的第一问句，日志里必须写真正跑起来的那个而不是请求的那个。
+    let mut backend_label = config.audio.backend.clone();
     let (audio, _audio_thread) = match spawn(backend).await {
         Ok(pair) => pair,
         Err(e) => {
             tracing::warn!("requested backend unavailable ({e}); falling back to null");
+            backend_label = "null".to_string();
             spawn(BackendKind::Null).await?
         }
     };
+    // 开发者选项里的播放诊断日志：默认关闭，开着则跨重启继续录（settings 为权威）。
+    diag::init(&data_dir, &backend_label);
+    let diag_enabled = vmusic_store::settings::get(&db, diag::SETTING_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    diag::set_enabled(diag_enabled);
     // 音量/模式以服务端 settings 为权威；缺键才回落到 config 默认。
     let (restore_volume, restore_mode) =
         persist::load_player_prefs(&db, config.audio.volume, vmusic_core::PlayMode::Repeat).await;
@@ -362,7 +385,10 @@ async fn main() -> anyhow::Result<()> {
             get(|| asset(JS, FOLIA_SONNET_FX_JS)),
         )
         .route("/folia/folia-sonnet.js", get(|| asset(JS, FOLIA_SONNET_JS)))
-        .route("/folia/folia-tempera.js", get(|| asset(JS, FOLIA_TEMPERA_JS)))
+        .route(
+            "/folia/folia-tempera.js",
+            get(|| asset(JS, FOLIA_TEMPERA_JS)),
+        )
         .route("/vendor/pixi.min.js", get(|| asset(JS, PIXI_JS)))
         .route("/vendor/qrcode.js", get(|| asset(JS, QRCODE_JS)))
         .route("/online-login.js", get(|| asset(JS, ONLINE_LOGIN_JS)))

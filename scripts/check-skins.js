@@ -342,70 +342,105 @@ function checkCoverage() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. 流年展开播放卡稳定性
+// 6. 流年播放卡稳定性（展开态 + 胶囊态）
 // ---------------------------------------------------------------------------
 
 function checkLiunianExpandedBarStability() {
-  section('流年：展开播放卡不参与底部播放栏自动隐藏');
+  section('流年：播放卡（展开/胶囊）不参与底部播放栏自动隐藏');
 
   const rule = LIUNIAN.match(/\[data-skin="liunian"\]\s+\.bar:not\(\.ln-capsule\)\s*\{([^}]*)\}/);
   ok(rule && /transform:\s*none\s*!important/.test(rule[1]),
     '展开态钉住 transform，自动隐藏不能把文档流卡片滑出');
   ok(rule && /opacity:\s*1\s*!important/.test(rule[1]),
     '展开态钉住 opacity，自动隐藏不能让文档流卡片闪烁');
-  ok(!/\.bar\.ln-capsule[^\{]*\{[^}]*transform:\s*none\s*!important/.test(LIUNIAN),
-    '胶囊收起态未被稳定性规则覆盖');
+  // 胶囊也是文档流卡片：showBar() 先瞬间写 translateY(100%+20px) 再动画
+  // 归位，不钉住则鼠标一悬停胶囊就整块下坠再滑回（上下跳动）。
+  const capRules = LIUNIAN.match(/\[data-skin="liunian"\]\s+\.bar\.ln-capsule\s*\{[^}]*\}/g) || [];
+  ok(capRules.some((r) => /transform:\s*none\s*!important/.test(r)),
+    '胶囊态钉住 transform，悬停不会先下坠再滑回');
+  ok(capRules.some((r) => /opacity:\s*1\s*!important/.test(r)),
+    '胶囊态钉住 opacity，悬停不会闪烁');
+  ok(/\.bar\.ln-capsule\.is-hidden\s*\{[^}]*display:\s*grid\s*!important/.test(LIUNIAN),
+    '胶囊 is-hidden 仍保持 grid 排版，不发生 flex/grid 切换');
   ok(/\.bar\.is-hidden\s*\{\s*display:\s*none/.test(read(path.join(WEB, 'style.css'))),
     '其它主题仍保留播放栏自动隐藏规则');
 }
 
 // ---------------------------------------------------------------------------
-// 7. 流年左栏：在线入口与选中态
+// 7. 流年 v3：rail 移除 + 中栏胶囊导航 + 右侧搜索面板
 // ---------------------------------------------------------------------------
 
 function checkLiunianNavigation() {
-  section('流年左栏：在线找歌入口、路由与高亮');
+  section('流年 v3：rail 移除、中栏导航与搜索面板');
 
-  // 1) 标签栏必须真的有这一项，而不是只有操作按钮里有同名文案。
-  const tabsBlock = LIUNIAN_JS.match(/refs\.tabs = make\('div', 'ln-tabs', rail\);([\s\S]*?)\]\.forEach/);
-  ok(tabsBlock && /\{\s*id:\s*'online',\s*label:\s*'在线找歌'\s*\}/.test(tabsBlock[1]),
-    '标签栏渲染「在线找歌」这一项');
-  ok(tabsBlock && /id:\s*'all'/.test(tabsBlock[1]) && /id:\s*'albums'/.test(tabsBlock[1])
-    && /id:\s*'artists'/.test(tabsBlock[1]) && /id:\s*'playlists'/.test(tabsBlock[1]),
-    '原有四个标签不受影响');
+  // 1) rail 整体隐藏，节点保留（程序化点击其 rail-item 复用 setView）。
+  ok(/\[data-skin="liunian"\]\s+\.rail\s*\{\s*display:\s*none/.test(LIUNIAN),
+    'CSS 把左侧 rail 钉为 display:none');
+  ok(/function clickRailItem/.test(LIUNIAN_JS) && /rail-item\[data-view=/.test(LIUNIAN_JS),
+    '皮肤经程序化点击隐藏 rail 内 rail-item 切换视图');
+  ok(!/buildLeft\(/.test(LIUNIAN_JS), '不再构建旧左栏');
 
-  // 2) 点它要切视图：标签点击分流 + setTab 的 online 分支都要落到 ensureView('online')。
-  ok(/tab === 'online'\)\s*\{\s*\/\/[^\n]*\n\s*setTab\('online'\)/.test(LIUNIAN_JS)
-    || /\}\s*else if \(tab === 'online'\)[\s\S]{0,200}setTab\('online'\)/.test(LIUNIAN_JS),
-    '标签点击把「在线找歌」交给 setTab 处理');
-  ok(/tab === 'online'\)\s*\{[\s\S]{0,400}?ensureView\('online'\)/.test(LIUNIAN_JS),
-    '「在线找歌」标签会切到在线视图');
-  ok(/btnCloud\.addEventListener\('click'[\s\S]{0,200}setTab\('online'\)/.test(LIUNIAN_JS),
-    '操作区的「在线找歌」按钮走同一条路径（切视图 + 高亮）');
+  // 2) 中栏胶囊导航：六个一级目的地。
+  const navBlock = LIUNIAN_JS.match(/function buildNavigation[\s\S]{0,900}?\]\.forEach/);
+  ok(navBlock, '中栏顶部构建胶囊导航');
+  ok(navBlock && /'library'[\s\S]{0,60}'online'[\s\S]{0,60}'playlists'[\s\S]{0,60}'favorites'[\s\S]{0,60}'queue'[\s\S]{0,60}'settings'/.test(navBlock[0]),
+    '胶囊导航含首页/在线/歌单/收藏/队列/设置六项');
 
-  // 3) 在线视图必须有自己的标签态：原先 reflow 一律 setTab('all')，会把高亮
-  //    立刻拽回「全部」，点击看起来没有反馈。
-  ok(/id === 'view-online'\)\s*\{[\s\S]{0,300}?setTab\('online'\)/.test(LIUNIAN_JS),
-    '在线视图对应「在线找歌」标签高亮');
-  ok(/id === 'view-library'\)[\s\S]{0,200}activeTab === 'online' \? 'all'/.test(LIUNIAN_JS),
-    '从在线回到曲库时标签回到「全部」（不留下无对应槽位的状态）');
+  // 3) 右栏包裹器：上搜索面板 + 下舞台。
+  ok(/make\('div', 'ln-right', app\)/.test(LIUNIAN_JS), '创建右栏包裹器');
+  ok(/buildSearchPanel\(refs\.rightWrap\)/.test(LIUNIAN_JS), '搜索面板挂入右栏上部');
+  ok(/relocate\(stage, refs\.rightWrap\)/.test(LIUNIAN_JS), '舞台搬入右栏下部（带锚点可还原）');
+  ok(/\[data-skin="liunian"\]\s+\.ln-right\s*\{[\s\S]{0,220}?display:\s*flex/.test(LIUNIAN),
+    '右栏包裹器为纵向 flex 分区');
 
-  // 4) 选中态不能靠 requestAnimationFrame 排队：掉帧/后台标签页拿不到帧，
-  //    高亮会迟迟不更新，表现为"点了没反应"。
-  ok(/observer = new MutationObserver\(function \(\) \{ if \(mounted\) reflow\(\); \}\)/.test(LIUNIAN_JS),
-    '视图切换联动同步重排（不再排队到 requestAnimationFrame）');
-  ok(!/new MutationObserver\(scheduleReflow\)/.test(LIUNIAN_JS),
-    '不再使用 rAF 版的重排调度');
-  ok(/function reflow\(\) \{\s*\n\s*if \(inReflow\) return;/.test(LIUNIAN_JS),
-    'reflow 有重入保护（ensureView 会在重排内部再调一次）');
-  ok(/ensureView[\s\S]{0,600}?if \(mounted\) reflow\(\);/.test(LIUNIAN_JS),
-    '点击导航后立即同步高亮，不等观察器');
+  // 4) 面板输入：范围切换、防抖、epoch 竞态、AbortController。
+  ok(/dataset\.scope/.test(LIUNIAN_JS) && /'all'[\s\S]{0,40}'local'[\s\S]{0,40}'online'/.test(LIUNIAN_JS),
+    '面板支持全部/本地/在线范围切换');
+  ok(/setTimeout\(function \(\) \{ runSearch\(input\.value\); \}, 250\)/.test(LIUNIAN_JS),
+    '输入防抖 250ms 后检索');
+  ok(/panel\.epoch \+= 1/.test(LIUNIAN_JS) && /AbortController/.test(LIUNIAN_JS)
+    && /epoch !== panel\.epoch/.test(LIUNIAN_JS),
+    '检索带 epoch 竞态保护与 AbortController 取消');
 
-  // 5) 作用域：这些改动只在流年重编排层里，其它皮肤没有左栏标签这套东西。
-  ok(!/ln-tabs/.test(MINERADIO) && !/ln-tabs/.test(WORKBENCH),
-    '其它皮肤不引入流年的左栏标签');
-  ok(!/ln-tabs|ln-nav/.test(APP),
-    '业务 app.js 不认识流年左栏（皮肤自持，切走即消失）');
+  // 5) 两源取数与分类分区显示。
+  ok(/\/v1\/tracks\?q=' \+ encodeURIComponent\(q\) \+ '&limit=8'/.test(LIUNIAN_JS),
+    '本地结果走 /v1/tracks（限 8 条）');
+  ok(/\/v1\/online\/search\?source=/.test(LIUNIAN_JS) && /Promise\.all\(sources\.map/.test(LIUNIAN_JS),
+    '在线结果并行请求各音源 /v1/online/search');
+  ok(/buildSection\(out, '本地歌曲'/.test(LIUNIAN_JS) && /buildSection\(out, '在线曲库'/.test(LIUNIAN_JS),
+    '结果按本地歌曲 / 在线曲库两分区显示');
+  ok(/window\.Online\.badge\(t\.source\)/.test(LIUNIAN_JS), '在线行挂音源徽标');
+  ok(/catch\(function \(\) \{ return \[\]; \}\)/.test(LIUNIAN_JS),
+    '单个音源失败时回落空数组，不拖垮整盘搜索');
+
+  // 6) 结果点击：本地/在线直接播放，经 ln:panel 事件交 app.js。
+  ok(/new CustomEvent\('ln:panel'/.test(LIUNIAN_JS), '面板经 ln:panel 自定义事件对外通信');
+  ok(/emit\('play-local', \{ id: t\.id \}\)/.test(LIUNIAN_JS), '本地结果点击派发 play-local');
+  ok(/emit\('play-online', \{ track: t \}\)/.test(LIUNIAN_JS), '在线结果点击派发 play-online');
+  ok(/emit\('view-local', \{ q: panel\.q \}\)/.test(LIUNIAN_JS)
+    && /emit\('view-online', \{ q: panel\.q \}\)/.test(LIUNIAN_JS),
+    '分区可带词跳转曲库页/在线页查看全部');
+
+  // 7) 搜索历史：持久化、去重置顶、单删/清空。
+  ok(/HISTORY_KEY = 'vmusic\.ln-search-history'/.test(LIUNIAN_JS),
+    '历史记录持久化到 localStorage');
+  ok(/readHistory\(\)\.filter\(function \(x\) \{ return x !== q; \}\)/.test(LIUNIAN_JS)
+    && /list\.unshift\(q\)/.test(LIUNIAN_JS) && /list\.slice\(0, HISTORY_MAX\)/.test(LIUNIAN_JS),
+    '历史去重后置顶，上限 10 条');
+  ok(/function removeHistory/.test(LIUNIAN_JS) && /writeHistory\(\[\]\)/.test(LIUNIAN_JS),
+    '支持单条删除与清空历史');
+
+  // 8) app.js 桥接。
+  ok(/function initPanelBridge/.test(APP) && /initPanelBridge\(\)/.test(APP),
+    'app.js 定义并启动面板桥接');
+  ok(/document\.addEventListener\('ln:panel'/.test(APP), 'app.js 监听 ln:panel');
+  ok(/playTrack\(String\(d\.id\), state\.queue\.slice\(\)\)/.test(APP)
+    && /Online\.playAll\(\[Object\.assign\(\{ playable: true \}, d\.track\)\], 0\)/.test(APP),
+    '桥接分流本地 playTrack / 在线 Online.playAll');
+
+  // 9) 作用域：搜索面板只属于流年。
+  ok(!/ln-sp/.test(MINERADIO) && !/ln-sp/.test(WORKBENCH), '其它皮肤不引入搜索面板');
+  ok(!/ln-right|ln-sp/.test(HTML), '业务 HTML 不内置右栏面板（皮肤自持，切走即消失）');
 }
 
 // ---------------------------------------------------------------------------

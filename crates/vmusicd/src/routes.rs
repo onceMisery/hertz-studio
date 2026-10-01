@@ -107,6 +107,16 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             axum::routing::delete(remove_from_playlist),
         )
         .route("/v1/settings", get(get_settings).put(put_settings))
+        // 开发者选项：播放诊断日志。开关单独走接口而不是 PUT /v1/settings，
+        // 因为那条路只写库、不会让运行中的服务改变行为。
+        .route(
+            "/v1/diagnostics",
+            get(get_diagnostics).post(set_diagnostics),
+        )
+        .route(
+            "/v1/diagnostics/log",
+            get(download_diagnostics_log).delete(clear_diagnostics_log),
+        )
         // 收藏：列表 / 新增 / 删除 / 开关；membership 是给一整屏曲目批量判红的。
         .route("/v1/favorites", get(list_favorites).post(add_favorite))
         .route("/v1/favorites/membership", post(favorite_membership))
@@ -129,7 +139,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/online/detail", get(online_detail))
         .route("/v1/online/lyric", get(online_lyric))
         .route("/v1/online/play", post(online_play))
-        .route("/v1/online/radio", get(online_radio_status).post(online_radio))
+        .route(
+            "/v1/online/radio",
+            get(online_radio_status).post(online_radio),
+        )
         .route("/v1/online/cache", get(online_cache_stats))
         .route("/v1/online/cache/clear", post(online_cache_clear))
         .route("/v1/online/cache/keep", post(online_cache_keep))
@@ -1425,6 +1438,95 @@ fn is_credential(key: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// 开发者选项：播放诊断日志
+// ---------------------------------------------------------------------------
+
+/// 单次导出的读取上限。日志本身受 diag 内部上限约束（约 2MiB），这里只是兜底，
+/// 免得将来上限调大后一次响应把内存当日志缓冲区。
+const DIAG_LOG_LIMIT: u64 = 4 * 1024 * 1024;
+
+fn diagnostics_json() -> serde_json::Value {
+    // stat 是本地一个小文件的 metadata，与 tokio::fs 走的是同一件活；开
+    // spawn_blocking 只会把一次 µs 级调用摊成线程调度。
+    let (exists, size, mtime) = crate::diag::stat();
+    serde_json::json!({
+        "enabled": crate::diag::enabled(),
+        "path": crate::diag::log_path().map(|p| p.display().to_string()),
+        "exists": exists,
+        "size_bytes": size,
+        "updated_at": mtime,
+    })
+}
+
+/// 开发者选项状态：开关 + 日志落在哪个文件、有多大。路径必须回显给用户——
+/// 「把日志发给开发者」这一步不能要求用户先去翻数据目录。
+async fn get_diagnostics() -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(diagnostics_json()))
+}
+
+#[derive(Deserialize)]
+struct DiagnosticsUpdate {
+    enabled: bool,
+}
+
+/// 开关播放诊断日志：settings 落库 + 运行态即时切换，不要求重启服务。
+async fn set_diagnostics(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<DiagnosticsUpdate>,
+) -> ApiResult<Json<serde_json::Value>> {
+    vmusic_store::settings::set(
+        &state.db,
+        crate::diag::SETTING_KEY,
+        &serde_json::json!(body.enabled),
+    )
+    .await
+    .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    // 开启会建目录并写一条会话头，关闭也写一行收尾——都是小文件操作，但确实
+    // 是同步 IO，放阻塞线程池里，别占着 worker。
+    let on = body.enabled;
+    tokio::task::spawn_blocking(move || crate::diag::set_enabled(on))
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    Ok(Json(diagnostics_json()))
+}
+
+/// 导出日志全文：text/plain 附件，文件名带日期，用户直接把这个文件发出去。
+async fn download_diagnostics_log() -> Result<Response, ApiError> {
+    let (text, skipped) = tokio::task::spawn_blocking(|| crate::diag::read(DIAG_LOG_LIMIT))
+        .await
+        .map_err(|e| internal(e.to_string()))?
+        .map_err(|e| internal(format!("读取诊断日志失败: {e}")))?;
+    let body = if skipped > 0 {
+        // 只给了后半段时把这件事写进文件本身，否则开发者会以为这就是全部。
+        format!("[导出时省略了最旧的 {skipped} 字节]\n{text}")
+    } else {
+        text
+    };
+    let name = format!("mmusic-playback-{}.log", crate::diag::today());
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                format!(r#"attachment; filename="{name}""#).as_str(),
+            ),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+/// 清空日志。开关保持原样——用户的下一步通常是「清一次，再复现一遍」。
+async fn clear_diagnostics_log() -> ApiResult<Json<serde_json::Value>> {
+    tokio::task::spawn_blocking(crate::diag::clear)
+        .await
+        .map_err(|e| internal(e.to_string()))?
+        .map_err(|e| internal(format!("清空诊断日志失败: {e}")))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
 // 收藏
 // ---------------------------------------------------------------------------
 
@@ -2280,9 +2382,14 @@ async fn online_radio_status(State(state): State<Arc<AppState>>) -> Json<serde_j
 }
 
 #[derive(Deserialize)]
-struct RadioRequest { action: String }
+struct RadioRequest {
+    action: String,
+}
 
-async fn online_radio(State(state): State<Arc<AppState>>, Json(body): Json<RadioRequest>) -> ApiResult<Json<serde_json::Value>> {
+async fn online_radio(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RadioRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
     match body.action.as_str() {
         "start" => {
             if let Some(gen) = state.radio_start().await? {
@@ -2297,10 +2404,15 @@ async fn online_radio(State(state): State<Arc<AppState>>, Json(body): Json<Radio
                     state.play_index_for(0, Some(gen), false).await?;
                     state.post_commit_background();
                 }
-            } else { state.radio_refill(true).await?; }
+            } else {
+                state.radio_refill(true).await?;
+            }
         }
         "stop" => state.radio_stop().await,
-        "next" => { state.step(1, false).await?; state.post_commit_background(); }
+        "next" => {
+            state.step(1, false).await?;
+            state.post_commit_background();
+        }
         _ => return Err(bad_request("未知 FM 操作")),
     }
     Ok(Json(state.radio_status().await))

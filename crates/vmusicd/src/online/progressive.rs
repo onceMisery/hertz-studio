@@ -383,8 +383,21 @@ pub fn start(
             let mut written: u64 = 0;
             // 累计前 32 字节用于容器嗅探。
             let mut head: Vec<u8> = Vec::with_capacity(32);
-            for url in &urls {
+            crate::diaglog!(
+                "download.start",
+                key = key2,
+                urls_total = urls.len(),
+                first_url = crate::diag::redact_url(urls.first().map(String::as_str).unwrap_or("")),
+                referer = referer.is_some()
+            );
+            for (i, url) in urls.iter().enumerate() {
                 if abort.load(Ordering::Relaxed) {
+                    crate::diaglog!(
+                        "download.cancel",
+                        key = key2,
+                        url_index = i,
+                        written = written
+                    );
                     let _ = std::fs::remove_file(&part_path);
                     return Err("download aborted".to_string());
                 }
@@ -399,12 +412,26 @@ pub fn start(
                     Ok(r) => r,
                     Err(e) => {
                         tracing::debug!("下载连接失败，尝试下一地址: {e}");
+                        crate::diaglog!(
+                            "download.retry",
+                            key = key2,
+                            url_index = i,
+                            url = crate::diag::redact_url(url),
+                            reason = e.to_string()
+                        );
                         continue;
                     }
                 };
                 let status = resp.status();
                 if status == reqwest::StatusCode::OK && written > 0 {
                     // 服务器无视 Range：从头重下。
+                    crate::diaglog!(
+                        "download.range_ignored",
+                        key = key2,
+                        url_index = i,
+                        url = crate::diag::redact_url(url),
+                        restart_from = written
+                    );
                     written = 0;
                     head.clear();
                     inner.reset();
@@ -412,6 +439,13 @@ pub fn start(
                     && status != reqwest::StatusCode::PARTIAL_CONTENT
                 {
                     tracing::debug!("下载返回 {status}，尝试下一地址");
+                    crate::diaglog!(
+                        "download.retry",
+                        key = key2,
+                        url_index = i,
+                        url = crate::diag::redact_url(url),
+                        reason = format!("HTTP {status}")
+                    );
                     continue;
                 }
                 if written == 0 {
@@ -419,6 +453,13 @@ pub fn start(
                     if let Some(t) = total {
                         if t > MAX_AUDIO_BYTES {
                             inner.fail("内容过大".into());
+                            crate::diaglog!(
+                                "download.reject",
+                                key = key2,
+                                url_index = i,
+                                total_bytes = t,
+                                reason = "内容过大"
+                            );
                             let _ = std::fs::remove_file(&part_path);
                             return Err("内容过大".to_string());
                         }
@@ -464,6 +505,14 @@ pub fn start(
                         }
                         Err(e) => {
                             tracing::debug!("下载中断，尝试续传: {e}");
+                            crate::diaglog!(
+                                "download.broke",
+                                key = key2,
+                                url_index = i,
+                                url = crate::diag::redact_url(url),
+                                written = written,
+                                reason = e.to_string()
+                            );
                             broke = true;
                             break;
                         }
@@ -476,6 +525,13 @@ pub fn start(
                 if written <= 1024 {
                     let msg = "内容过小，可能已被版权限制".to_string();
                     inner.fail(msg.clone());
+                    crate::diaglog!(
+                        "download.fail",
+                        key = key2,
+                        url_index = i,
+                        written = written,
+                        reason = msg
+                    );
                     let _ = std::fs::remove_file(&part_path);
                     return Err(msg);
                 }
@@ -487,6 +543,14 @@ pub fn start(
                     if written != t {
                         let msg = "下载不完整".to_string();
                         inner.fail(msg.clone());
+                        crate::diaglog!(
+                            "download.fail",
+                            key = key2,
+                            url_index = i,
+                            written = written,
+                            total_bytes = t,
+                            reason = msg
+                        );
                         let _ = std::fs::remove_file(&part_path);
                         return Err(msg);
                     }
@@ -499,15 +563,35 @@ pub fn start(
                         let ok = matches!(tokio::fs::metadata(&final_path).await, Ok(m) if m.len() > 1024);
                         let _ = tokio::fs::remove_file(&part_path).await;
                         if !ok {
+                            crate::diaglog!(
+                                "download.fail",
+                                key = key2,
+                                url_index = i,
+                                written = written,
+                                reason = "落盘缓存失败"
+                            );
                             return Err("落盘缓存失败".to_string());
                         }
                     }
                 }
+                crate::diaglog!(
+                    "download.done",
+                    key = key2,
+                    url_index = i,
+                    written = written,
+                    file = final_path.file_name().unwrap_or_default().to_string_lossy()
+                );
                 inner.finish();
                 return Ok(final_path);
             }
             let msg = "所有试听地址均失败".to_string();
             inner.fail(msg.clone());
+            crate::diaglog!(
+                "download.fail",
+                key = key2,
+                urls_total = urls.len(),
+                reason = msg
+            );
             let _ = std::fs::remove_file(&part_path);
             Err(msg)
         }
