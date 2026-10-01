@@ -103,6 +103,7 @@ const ui = {
   libEmptyNoMatch: $('lib-empty-nomatch'),
   libEmptyNoMatchText: $('lib-empty-nomatch-text'),
   libEmptyNoMatchClear: $('empty-nomatch-clear'),
+  libEmptyStrip: $('lib-empty-strip'),
   libSentinel: $('lib-sentinel'),
   libHint: $('lib-hint'),
 
@@ -646,8 +647,10 @@ async function loadFacets() {
 /// 0 条，就必须显示 noMatch——否则输入后界面纹丝不动，观感与「搜索坏了」无异。
 function syncLibEmpty(list) {
   const tracks = list || state.tracks;
+  const setStrip = (on) => { if (ui.libEmptyStrip) ui.libEmptyStrip.hidden = !on; };
 
   const apply = (guide, noMatch) => {
+    setStrip(false);
     if (!ui.libEmpty) return true;
     if (ui.libEmptyGuide) ui.libEmptyGuide.hidden = !guide;
     if (ui.libEmptyNoMatch) ui.libEmptyNoMatch.hidden = !noMatch;
@@ -674,7 +677,13 @@ function syncLibEmpty(list) {
   }
 
   const onlineSource = !!(window.Daily && window.Daily.state && window.Daily.state.mode === 'online');
-  if (onlineSource) return apply(false, false);
+  if (onlineSource) {
+    // 大引导卡照旧不弹（推荐位才是页面主体），但列表区也不能是无解释的白板：
+    // 换成一行「本地曲库还没有歌曲 + 去填目录」的轻提示。
+    apply(false, false);
+    setStrip(true);
+    return true;
+  }
   return apply(true, false);
 }
 
@@ -827,7 +836,17 @@ function paintArt(row, url) {
   art.dataset.src = String(url);
   art.replaceChildren();
   art.classList.remove('is-loaded', 'is-missing');
-  if (!url) { art.classList.add('is-missing'); return; }
+  // 占位按曲目 id 稳定取一个色相（--ph）：同一行每次重排都是同一个颜色，
+  // 不会跳色；有色的空占位读作「这个音源本来就没有封面」，而不是「图挂了」。
+  const markMissing = () => {
+    art.classList.add('is-missing');
+    const host = art.closest('[data-id]');
+    const seed = (host && host.dataset.id) || String(url);
+    let h = 0;
+    for (let i = 0; i < seed.length; i += 1) h = (h * 31 + seed.charCodeAt(i)) % 360;
+    art.style.setProperty('--ph', String(h));
+  };
+  if (!url) { markMissing(); return; }
   const img = document.createElement('img');
   img.className = 't-art-img';
   img.alt = '';
@@ -835,7 +854,7 @@ function paintArt(row, url) {
   img.decoding = 'async';
   // 404 / 防盗链 / 断网：把图片本体摘掉，露出 .t-art 自己的占位图，
   // 而不是留一个浏览器默认的回形针图标或一块空白。
-  img.onerror = () => { art.classList.add('is-missing'); img.remove(); };
+  img.onerror = () => { markMissing(); img.remove(); };
   img.onload = () => art.classList.add('is-loaded');
   art.appendChild(img);
   img.src = url;
@@ -3852,7 +3871,13 @@ function initNowPlayingModal() {
   ui.search.oninput = () => {
     ui.searchClear.hidden = ui.search.value === '';
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => { state.q = ui.search.value.trim(); loadTracks(true); }, 250);
+    searchTimer = setTimeout(() => {
+      state.q = ui.search.value.trim();
+      // 顶部搜索框的靶子是本地曲库（占位符已标明）：带着关键词时把结果送到
+      // 用户眼前——否则停在在线/歌单页敲字毫无反应，观感即「搜索坏了」。
+      if (state.q && state.view !== 'library') setView('library');
+      loadTracks(true);
+    }, 250);
   };
   ui.searchClear.onclick = () => { ui.search.value = ''; ui.searchClear.hidden = true; state.q = ''; loadTracks(true); };
 
@@ -4292,6 +4317,9 @@ function initNowPlayingModal() {
     if (!ui.scanPanel.hidden) { loadScanRoots(); refreshScanStatus(); }
   };
   $('empty-scan-btn').onclick = () => { ui.scanPanel.hidden = false; ui.scanRoot.focus(); };
+  // 轻空态条上的同名按钮：同一件事，另一个入口（在线推荐来源下列表区那行提示）。
+  const emptyStripScan = $('empty-strip-scan');
+  if (emptyStripScan) emptyStripScan.onclick = () => { ui.scanPanel.hidden = false; ui.scanRoot.focus(); };
   ui.scanBtn.onclick = startScan;
   ui.scanCancel.onclick = async () => {
     ui.scanCancel.disabled = true;

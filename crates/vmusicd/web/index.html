@@ -184,11 +184,11 @@
 </div>
 
 <header class="topbar">
-  <div class="brand">mmusic</div>
+  <div class="brand"><span class="brand-mark" aria-hidden="true">h<span>z</span></span></div>
 
   <div class="topsearch">
     <svg class="si" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
-    <input id="search" type="search" placeholder="搜索标题、艺术家、专辑" autocomplete="off" aria-label="搜索曲库">
+    <input id="search" type="search" placeholder="在本地曲库中搜索标题、艺术家、专辑" autocomplete="off" aria-label="搜索本地曲库">
     <button id="search-clear" class="search-clear" aria-label="清空搜索" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
     </button>
@@ -361,6 +361,14 @@
         </div>
       </div>
 
+      <!-- 在线推荐来源下的轻空态：本地库为空但页面主体是在线推荐时，不弹
+           「曲库还是空的」大引导卡（压住推荐位且文不对题），只留一行可操作
+           的提示——列表区不再是无解释的白板。 -->
+      <div class="empty-strip" id="lib-empty-strip" hidden>
+        <span class="empty-strip-text">本地曲库还没有歌曲——填一个音乐目录，扫描本机歌曲后即可与在线推荐并列播放。</span>
+        <button class="btn" id="empty-strip-scan" type="button">填写音乐目录</button>
+      </div>
+
       <div class="lib-head" id="lib-hint">
         <span>#</span><span></span><span>标题</span><span>专辑</span><span>音质</span><span>时长</span><span></span>
       </div>
@@ -405,7 +413,7 @@
         </span>
       </div>
       <div class="online-search">
-        <input id="online-q" type="search" placeholder="搜索在线歌曲、歌手或专辑…" autocomplete="off" aria-label="搜索在线曲库">
+        <input id="online-q" type="search" placeholder="搜索在线音源（网易云 / QQ / 酷狗 / 酷我 / 汽水 / ccmixter）…" autocomplete="off" aria-label="搜索在线曲库">
         <button id="online-go" class="btn primary">搜索</button>
       </div>
 
@@ -1036,13 +1044,6 @@
   <div class="s3d-head">
     <button class="s3d-btn" id="s3d-lyrics-toggle" title="显示歌词 (L)" aria-label="显示歌词" aria-pressed="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 6h16M4 12h16M7 18h10"/></svg></button>
     <button class="s3d-btn" id="s3d-settings-toggle" title="舞台设置" aria-label="舞台设置" aria-expanded="false" aria-controls="s3d-settings"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg></button>
-    <button class="s3d-btn" id="s3d-cruise" title="自动巡航 (C)" aria-label="自动巡航" aria-pressed="true">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>
-        <circle cx="12" cy="12" r="4"/>
-      </svg>
-    </button>
     <button class="s3d-btn" id="s3d-reset" title="复位视角 (K / 双击)" aria-label="复位视角">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reset"/></svg>
     </button>

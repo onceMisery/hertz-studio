@@ -31,7 +31,9 @@ const DES_SOURCE: &str = "kwplayerhd_ar_5.1.0.0_B_jiakong_vh.apk";
 const SONG_INFO_URL: &str = "https://m.kuwo.cn/newh5/singles/songinfoandlrc";
 /// 搜索结果给的是相对路径（如 `120/s3s94/93/211513640.jpg`）；img2/3/4 均
 /// 可用（真机 200），统一取 500 尺寸的 img2。
-const COVER_BASE: &str = "https://img2.kuwo.cn/star/albumcover/500/";
+// 注意末尾不带尺寸段：web_albumpic_short 自带的是「缩略图尺寸 + 路径」
+// （如 120/s4s98/44/74212599.jpg），尺寸段由 cover_url 统一改写，见其注释。
+const COVER_BASE: &str = "https://img2.kuwo.cn/star/albumcover/";
 
 fn internal_store(e: vmusic_core::StoreError) -> ApiError {
     ApiError::internal(e.to_string())
@@ -163,12 +165,22 @@ fn flag_one(v: Option<&serde_json::Value>) -> bool {
 }
 
 /// 相对路径拼成绝对地址；空值不猜。
+///
+/// `web_albumpic_short` 形如 `120/s4s98/44/74212599.jpg`——开头的数字段是
+/// **缩略图尺寸**，属于路径的一部分。此前直接前缀 `500/` 得到
+/// `/albumcover/500/120/...`，CDN 上不存在这种双层尺寸路径，全部 404，
+/// 界面上酷我的封面就集体消失。正确做法：剥掉首段尺寸，换成想要的
+/// 500 大图（正在播放与详情页要分辨率）；不带尺寸段的老路径保持原样。
 fn cover_url(short: &str) -> Option<String> {
     let s = short.trim();
     if s.is_empty() {
         return None;
     }
-    Some(format!("{COVER_BASE}{s}"))
+    let rest = match s.split_once('/') {
+        Some((head, tail)) if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()) => tail,
+        _ => s,
+    };
+    Some(format!("{COVER_BASE}500/{rest}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -478,7 +490,7 @@ mod tests {
         assert!(first.vip_only, "feeType.vip=1 是会员曲");
         assert_eq!(
             first.cover.as_deref(),
-            Some("https://img2.kuwo.cn/star/albumcover/500/120/s3s94/93/211513640.jpg")
+            Some("https://img2.kuwo.cn/star/albumcover/500/s3s94/93/211513640.jpg")
         );
         // 第二条：免费曲、无封面。
         let second = &tracks[1];
@@ -506,9 +518,14 @@ mod tests {
 
     #[test]
     fn relative_cover_paths_become_absolute_and_empty_stays_none() {
+        // 首段数字是缩略图尺寸，要被换写成 500 大图（此前双层尺寸段 404）。
         assert_eq!(
             cover_url(" 120/a/b.jpg ").as_deref(),
-            Some("https://img2.kuwo.cn/star/albumcover/500/120/a/b.jpg")
+            Some("https://img2.kuwo.cn/star/albumcover/500/a/b.jpg")
+        );
+        assert_eq!(
+            cover_url("s4s98/44/74212599.jpg").as_deref(),
+            Some("https://img2.kuwo.cn/star/albumcover/500/s4s98/44/74212599.jpg")
         );
         assert_eq!(cover_url(""), None);
         assert_eq!(cover_url("   "), None);

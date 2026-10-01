@@ -535,7 +535,27 @@ body.s3d-open > .bar { display: none; }
   animation: none;
   text-shadow: 0 0 calc(var(--sl-glow,.45) * 9px) rgba(221,255,237,.30);
 }
-.s3d-settings select { width: 100%; background: var(--s3d-control-bg); color: var(--s3d-text); padding: 9px; border: 1px solid rgba(255,255,255,.16); border-radius: 8px; }
+/* 下拉：去原生外观，自绘 chevron，8% 浅色面 + 发丝边；悬停边染 accent，
+   聚焦用 3px 柔光环。展开项铺深底，避免白底闪眼。 */
+.s3d-settings select {
+  appearance: none; -webkit-appearance: none;
+  width: 100%; box-sizing: border-box;
+  background-color: rgba(255,255,255,.05);
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23aab2af' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  background-size: 12px;
+  color: var(--s3d-text);
+  padding: 9px 32px 9px 12px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color .18s var(--ease), background-color .18s var(--ease), box-shadow .18s var(--ease);
+}
+.s3d-settings select:hover { border-color: color-mix(in srgb, var(--s3d-accent) 45%, transparent); background-color: rgba(255,255,255,.08); }
+.s3d-settings select:focus-visible { outline: none; border-color: color-mix(in srgb, var(--s3d-accent) 60%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--s3d-accent) 16%, transparent); }
+.s3d-settings select option { background: #141a18; color: var(--s3d-text); }
 .s3d-workshop { width: 100%; margin-top: 14px; }
 .s3d-art { cursor: pointer; }
 .s3d-art:hover { border-color: var(--s3d-accent); }
@@ -638,11 +658,123 @@ body.s3d-open > .bar { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .s3d-settings:not([hidden]) { animation: none; }
 }
-.s3d-settings label { display: flex; justify-content: space-between; margin: 20px 0 14px; font-size: 12px; }
-.s3d-settings output { font: 11px ui-monospace,monospace; color: var(--s3d-accent); }
-.s3d-settings input { width: 100%; }
-.s3d-settings p { margin: 24px 0 12px; color: var(--s3d-muted); font-size: 11px; line-height: 1.9; }
-.s3d-settings > span { font-size: 10px; color: var(--s3d-accent); }
+/* 行节奏：标题行与控件之间留 9px，行间 16px；控件标题与正文同色，
+   读数用等宽 tabular 数字。 */
+.s3d-settings label { display: flex; justify-content: space-between; align-items: center; margin: 16px 0 9px; font-size: 12px; color: var(--s3d-text); }
+.s3d-settings output { font: 10.5px/1 ui-monospace,monospace; font-variant-numeric: tabular-nums; color: var(--s3d-accent); }
+/* 只有 range 通吃全宽；checkbox 走下面的定宽开关
+   （老规则 input{width:100%} 把复选框拉宽、文案挤成竖排）。 */
+.s3d-settings input[type='range'] { width: 100%; }
+.s3d-settings p { margin: 22px 0 10px; color: var(--s3d-muted); font-size: 11px; line-height: 1.9; }
+.s3d-settings > span { font-size: 10px; letter-spacing: .14em; color: color-mix(in srgb, var(--s3d-accent) 65%, var(--s3d-muted)); }
+
+/* ---------------------------------------------------------------------------
+   默认（classic）主题专属控件层。星落主题有自己完整的一套同构样式，
+   全部规则挂在 [data-stage-theme='classic'] 下，互不串味。
+   --------------------------------------------------------------------------- */
+
+/* 开关行：文案在左、药丸开关在右；整行可点，悬停泛起浅面。
+   负 margin 让悬停面贴近面板边缘，行间 4px 间隙自然成组。 */
+.s3d[data-stage-theme='classic'] .s3d-settings label:has(input[type='checkbox']) {
+  flex-direction: row-reverse;
+  gap: 10px;
+  margin: 2px -10px;
+  padding: 7px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background .18s var(--ease);
+}
+.s3d[data-stage-theme='classic'] .s3d-settings label:has(input[type='checkbox']):hover { background: rgba(255,255,255,.055); }
+.s3d[data-stage-theme='classic'] .s3d-settings label:has(input[type='checkbox']):focus-within {
+  background: rgba(255,255,255,.05);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--s3d-accent) 55%, transparent);
+}
+
+/* 复选框 → 42×24 药丸开关，18px 圆头行程 20px；点亮时轨道染 32% accent，
+   圆头滑到右端并换成 accent 本色，弹性落点带轻微回弹。 */
+.s3d[data-stage-theme='classic'] .s3d-settings input[type='checkbox'] {
+  appearance: none; -webkit-appearance: none;
+  position: relative; flex: none;
+  width: 42px; height: 24px; margin: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.13);
+  background: rgba(255,255,255,.10);
+  cursor: pointer;
+  transition: background .22s var(--ease), border-color .22s var(--ease);
+}
+.s3d[data-stage-theme='classic'] .s3d-settings input[type='checkbox']::before {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #d6dbd8;
+  box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  transition: transform .26s cubic-bezier(.34,1.45,.5,1), background .22s var(--ease);
+}
+.s3d[data-stage-theme='classic'] .s3d-settings input[type='checkbox']:checked {
+  background: color-mix(in srgb, var(--s3d-accent) 32%, transparent);
+  border-color: color-mix(in srgb, var(--s3d-accent) 55%, transparent);
+}
+.s3d[data-stage-theme='classic'] .s3d-settings input[type='checkbox']:checked::before {
+  transform: translateX(20px);
+  background: var(--s3d-accent);
+}
+
+/* 面板内滑杆：4px 轨道 + accent 填充段（--s3d-fill 由 JS 按取值写入），
+   13px 浅色圆头带轻投影，悬停/聚焦放大 1.18 倍。 */
+.s3d[data-stage-theme='classic'] .s3d-settings input[type='range'] {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right,
+    var(--s3d-accent) var(--s3d-fill, 0%),
+    rgba(255,255,255,.14) var(--s3d-fill, 0%));
+}
+.s3d[data-stage-theme='classic'] .s3d-settings input[type='range']::-webkit-slider-thumb {
+  width: 13px; height: 13px;
+  background: #f2f7f4;
+  box-shadow: 0 1px 4px rgba(0,0,0,.45);
+  transition: transform .16s var(--ease);
+}
+.s3d[data-stage-theme='classic'] .s3d-settings input[type='range']:hover::-webkit-slider-thumb,
+.s3d[data-stage-theme='classic'] .s3d-settings input[type='range']:focus-visible::-webkit-slider-thumb { transform: scale(1.18); }
+.s3d[data-stage-theme='classic'] .s3d-settings input[type='range']::-moz-range-thumb {
+  width: 13px; height: 13px; border: 0;
+  background: #f2f7f4;
+  box-shadow: 0 1px 4px rgba(0,0,0,.45);
+}
+
+/* 歌词偏移：−0.1s / 读数 / +0.1s 收成右侧步进组（圆角小方块按钮）。 */
+.s3d[data-stage-theme='classic'] .s3d-settings label:has(#s3d-fl-off-value) { gap: 6px; }
+.s3d[data-stage-theme='classic'] #s3d-fl-off-down { margin-left: auto; }
+.s3d[data-stage-theme='classic'] #s3d-fl-off-down,
+.s3d[data-stage-theme='classic'] #s3d-fl-off-up {
+  width: auto; min-width: 46px; height: 26px;
+  padding: 0 8px;
+  border-radius: 9px;
+  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(255,255,255,.05);
+  color: var(--s3d-text);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  transition: background .16s var(--ease), border-color .16s var(--ease);
+}
+.s3d[data-stage-theme='classic'] #s3d-fl-off-down:hover,
+.s3d[data-stage-theme='classic'] #s3d-fl-off-up:hover {
+  background: rgba(255,255,255,.1);
+  border-color: color-mix(in srgb, var(--s3d-accent) 40%, transparent);
+  color: var(--s3d-text);
+}
+.s3d[data-stage-theme='classic'] #s3d-fl-off-down:disabled,
+.s3d[data-stage-theme='classic'] #s3d-fl-off-up:disabled { opacity: .35; }
+.s3d[data-stage-theme='classic'] #s3d-fl-off-value { min-width: 46px; text-align: center; }
+
+/* 条件子分区（随歌词视觉切换显隐）：顶部发丝分隔线。 */
+.s3d[data-stage-theme='classic'] #s3d-fl-classic:not([hidden]),
+.s3d[data-stage-theme='classic'] #s3d-fl-cadenza:not([hidden]),
+.s3d[data-stage-theme='classic'] #s3d-fl-sonnet:not([hidden]),
+.s3d[data-stage-theme='classic'] #s3d-fl-tempera:not([hidden]) {
+  margin-top: 12px; padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,.07);
+}
+.s3d[data-stage-theme='classic'] #s3d-fl-wallpaper-note { margin: 8px 0 4px; font-size: 10.5px; line-height: 1.6; color: var(--s3d-muted); }
 .s3d-queue {
   position: absolute; right: 36px; bottom: 132px; width: 320px; max-height: min(58vh, 540px); box-sizing: border-box;
   display: flex; flex-direction: column;
@@ -988,6 +1120,10 @@ body.s3d-open > .bar { display: none; }
   backdrop-filter: blur(18px) saturate(1.25);
   transform-style: preserve-3d;
   will-change: transform, opacity, filter;
+  /* 容器 .s3d-shelf 是 pointer-events:none，卡片必须显式接回 auto，
+     否则整条继承链都是 none——真实指针/触摸命不中卡片（合成事件除外），
+     拖拽、点击、滚轮全部失效。沉浸隐藏态/blocked 态另由下面的规则压回 none。 */
+  pointer-events: auto;
   cursor: pointer;
   font-size: clamp(10px, .82vw, 13.5px);
   color: var(--s3d-text);

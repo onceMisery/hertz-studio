@@ -285,14 +285,14 @@ body::before {
   width: calc(var(--rail-w) - 16px);
   flex: none;
 }
-.brand::before {
-  content: "";
-  width: 9px; height: 9px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 12px var(--accent);
+/* 品牌标识与沉浸舞台同形：细体 hz，z 染强调色。 */
+.brand-mark {
+  font-size: 22px;
+  font-weight: 300;
+  line-height: 1;
+  letter-spacing: -0.08em;
 }
-/* 品牌只留 "mmusic"；.brand span 的规则随之删掉，避免留下死样式。 */
+.brand-mark > span { color: var(--accent); }
 
 .topsearch {
   flex: 1;
@@ -740,6 +740,18 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
   -webkit-mask: var(--art-glyph) center / 52% 52% no-repeat;
   mask: var(--art-glyph) center / 52% 52% no-repeat;
 }
+/* 占位底色按 --ph（paintArt 从曲目 id 哈出的色相）铺一层淡渐变，音符也提亮
+   一档：纯灰底 + 42% 灰音符在一排彩色封面里像「图挂了」；有色的空占位读作
+   「这个音源本来就没有封面」。写在 .online-row 的 is-remote 渐变之后，
+   同特异性靠源码顺序胜出。 */
+.track .t-art.is-missing {
+  background:
+    linear-gradient(135deg,
+      hsl(var(--ph, 160) 32% 26% / .6),
+      hsl(calc(var(--ph, 160) + 40) 30% 15% / .6)),
+    var(--panel-2) center/cover no-repeat;
+}
+.track .t-art.is-missing::after { opacity: .75; }
 
 /* 键盘 / 辅助技术用户滚动到屏幕外那一行时的落点。默认的全局焦点环是 2px
    细描边，在一整列等高行里几乎看不出来，所以这里换成整行底色 + 粗描边。 */
@@ -803,6 +815,18 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
 .empty-card h2 { margin: 0 0 8px; font-size: 17px; font-weight: 650; }
 .empty-card p { margin: 0 0 18px; color: var(--muted); font-size: 13px; line-height: 1.65; }
 .empty-row { display: flex; gap: 8px; justify-content: center; margin-bottom: 12px; }
+
+/* 轻空态条：在线推荐来源下本地库为空时的一行提示。不用大引导卡是刻意的
+   （压住推荐位且文不对题），一行可操作的提示就够；样式与 .empty-card 同族
+   （虚线框 + panel 底），只是压扁成一行。 */
+.empty-strip {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 12px; padding: 10px 14px;
+  border: 1px dashed var(--line-strong); border-radius: var(--radius);
+  background: var(--panel-2);
+}
+.empty-strip-text { flex: 1; min-width: 0; color: var(--muted); font-size: 12.5px; line-height: 1.6; }
+.empty-strip .btn { flex: none; }
 
 /* 歌单 */
 

@@ -70,6 +70,12 @@
   cursor: pointer; /* 窄屏时点击品牌唤出左栏（见文末响应式） */
 }
 
+/* hz 标识与舞台同款，不吃播放卡的衬体/宽字距。 */
+[data-skin="liunian"] .brand .brand-mark {
+  font-family: var(--font-sans);
+  letter-spacing: -0.08em;
+}
+
 [data-skin="liunian"] .topsearch {
   height: 32px;
   max-width: 440px;

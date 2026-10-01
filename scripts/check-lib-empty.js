@@ -31,11 +31,12 @@ function between(src, start, end) {
 // ---------- 1. syncLibEmpty：把 app.js 里真实那一段拿出来跑 ----------
 
 const emptyCard = { hidden: false };
+const stripCard = { hidden: true };
 const state = { tracks: [] };
 const win = {};
 const ctx = vm.createContext({
   state,
-  ui: { libEmpty: emptyCard },
+  ui: { libEmpty: emptyCard, libEmptyStrip: stripCard },
   window: win,
 });
 vm.runInContext(between(appSrc, 'function syncLibEmpty(', 'function renderLibrary('), ctx);
@@ -46,18 +47,23 @@ const syncLibEmpty = (list) => vm.runInContext('syncLibEmpty', ctx)(list);
 win.Daily = { state: { mode: 'online' } };
 syncLibEmpty();
 assert.equal(emptyCard.hidden, true, 'online source hides the empty card on an empty library');
+// 但列表区不能是无解释的白板：在线来源 + 空库要亮出轻空态条（可去填目录）。
+assert.equal(stripCard.hidden, false, 'online source shows the empty strip on an empty library');
 
 win.Daily.state.mode = 'local';
 syncLibEmpty();
 assert.equal(emptyCard.hidden, false, 'local source still explains an empty library');
+assert.equal(stripCard.hidden, true, 'local source keeps the strip hidden (guide card is up)');
 
 // 非空曲库：无论来源都不显示。
 state.tracks = [{ id: 'a' }];
 syncLibEmpty();
 assert.equal(emptyCard.hidden, true, 'local source, library has tracks');
+assert.equal(stripCard.hidden, true, 'strip hides once the library has tracks');
 win.Daily.state.mode = 'online';
 syncLibEmpty();
 assert.equal(emptyCard.hidden, true, 'online source, library has tracks');
+assert.equal(stripCard.hidden, true, 'strip stays hidden when the library has tracks');
 
 // 显式传 list 时以传入的为准（renderLibrary 传的是本帧刚算出来的数组）。
 win.Daily.state.mode = 'local';
@@ -70,6 +76,7 @@ assert.equal(emptyCard.hidden, true, 'explicit non-empty list hides the card');
 delete win.Daily;
 syncLibEmpty([]);
 assert.equal(emptyCard.hidden, false, 'without Daily: empty library keeps the card');
+assert.equal(stripCard.hidden, true, 'without Daily: strip stays hidden (guide card is up)');
 syncLibEmpty(state.tracks);
 assert.equal(emptyCard.hidden, true, 'without Daily: non-empty library hides the card');
 
@@ -78,6 +85,10 @@ vm.runInContext('ui.libEmpty = null; syncLibEmpty();', ctx);
 assert.equal(emptyCard.hidden, true, 'missing node is a no-op, not a crash');
 vm.runInContext('ui.libEmpty = __card;', Object.assign(ctx, { __card: emptyCard }));
 win.Daily = { state: { mode: 'online' } };
+// 条节点缺失同理：不能因为找不到 #lib-empty-strip 就崩掉整个空态判定。
+vm.runInContext('ui.libEmptyStrip = null; syncLibEmpty([]);', ctx);
+assert.equal(emptyCard.hidden, true, 'missing strip node is a no-op, not a crash');
+vm.runInContext('ui.libEmptyStrip = __strip;', Object.assign(ctx, { __strip: stripCard }));
 
 // 返回值给 renderLibrary 用：它还要靠这个布尔决定列头去留。
 assert.equal(syncLibEmpty([]), true, 'returns hidden=true for online source on empty library');

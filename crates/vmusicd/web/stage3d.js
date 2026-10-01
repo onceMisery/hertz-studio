@@ -1358,6 +1358,9 @@
     cam.roll = 0;
     dragVel.t = 0;
     dragVel.p = 0;
+    // 复位同时归位歌词轨倾角：按钮 / K 键 / 空白处双击都走这里，
+    // 此前只回相机，拖歪的 3D 歌词没有任何可见的复位入口。
+    resetLyrTilt();
     markInteraction(700);
   }
 
@@ -1985,9 +1988,9 @@
       $('s3d-motion').value = Math.round(motion * 100); text('s3d-motion-value', Math.round(motion * 100) + '%');
       $('s3d-bloom').value = Math.round(bloom * 100); text('s3d-bloom-value', Math.round(bloom * 100) + '%');
       $('s3d-reactivity').value = Math.round(reactivity * 100); text('s3d-reactivity-value', Math.round(reactivity * 100) + '%');
+      sweepRangeFills();
       $('s3d-reading').hidden = foliaActive() ? true : !showLyrics;
       $('s3d-lyrics-toggle').setAttribute('aria-pressed', String(showLyrics));
-      $('s3d-cruise').setAttribute('aria-pressed', String(cam.cruise));
     } finally { restoring = false; }
   }
 
@@ -2006,12 +2009,29 @@
     if (el && el.textContent !== value) el.textContent = value;
   }
 
+  // 设置面板滑杆填充：把取值百分比写到 --s3d-fill，由 CSS 渐变消费。
+  function paintRangeFill(el) {
+    if (!el) return;
+    var min = Number(el.min) || 0;
+    var max = Number(el.max);
+    if (!isFinite(max)) max = 100;
+    var pct = max > min ? ((Number(el.value) - min) / (max - min)) * 100 : 0;
+    el.style.setProperty('--s3d-fill', clamp(pct, 0, 100).toFixed(1) + '%');
+  }
+  function sweepRangeFills() {
+    var panel = $('s3d-settings');
+    if (!panel) return;
+    var rs = panel.querySelectorAll('input[type="range"]');
+    for (var i = 0; i < rs.length; i += 1) paintRangeFill(rs[i]);
+  }
+
   function setSettings(on) {
     $('s3d-settings').hidden = !on;
     $('s3d-settings-toggle').setAttribute('aria-expanded', String(on));
     if (on && queueOpen) setQueuePanel(false);
     if (shelf) shelf.setBlocked(!!on || queueOpen);
     pokeChrome();
+    if (on) sweepRangeFills();
     if (on) $('s3d-motion').focus();
   }
 
@@ -2666,7 +2686,7 @@
       return;
     }
     if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.repeat && /^(v|f|c|l)$/i.test(k)) { e.stopImmediatePropagation(); return; }
+    if (e.repeat && /^(v|f|l)$/i.test(k)) { e.stopImmediatePropagation(); return; }
     if (k === ' ' && e.target.tagName === 'BUTTON') { e.stopImmediatePropagation(); return; }
     if (k === ' ' && e.target.tagName !== 'BUTTON') { e.preventDefault(); play(); e.stopImmediatePropagation(); return; }
     if (k === 'b' || k === 'B') { toggleLayout(); e.stopImmediatePropagation(); return; }
@@ -2680,14 +2700,6 @@
     // V 与入口按钮同义：开着时收掉这一层，形成开合闭环。
     if (k === 'v' || k === 'V') { close(); e.stopImmediatePropagation(); return; }
     if (k === 'k' || k === 'K') { if (!isStandalone()) resetView(); e.stopImmediatePropagation(); return; }
-    if (k === 'c' || k === 'C') {
-      cam.cruise = !cam.cruise;
-      var cb = $('s3d-cruise');
-      if (cb) cb.setAttribute('aria-pressed', String(cam.cruise));
-      savePreferences();
-      e.stopImmediatePropagation();
-      return;
-    }
     if (k === '[') { cycleStage(-1); e.stopImmediatePropagation(); return; }
     if (k === ']') { cycleStage(1); e.stopImmediatePropagation(); return; }
     if (k >= '1' && k <= '9') {
@@ -2836,6 +2848,7 @@
       syncTemperaControls();
       var sizeEl = $('s3d-fl-size'); if (sizeEl) sizeEl.value = String(lyricSize);
       var sizeOut = $('s3d-fl-size-value'); if (sizeOut) sizeOut.textContent = Math.round(lyricSize * 100) + '%';
+      sweepRangeFills();
     }
     syncFoliaControls();
   }
@@ -2898,6 +2911,14 @@
     $('s3d-reactivity').addEventListener('change', savePreferences);
     $('s3d-motion').addEventListener('change', savePreferences);
     $('s3d-bloom').addEventListener('change', savePreferences);
+    // 设置面板内所有滑杆拖动时即时刷新填充段（单次委托，覆盖动态分区）。
+    var settingsPanel = $('s3d-settings');
+    if (settingsPanel && !settingsPanel._fillBound) {
+      settingsPanel._fillBound = true;
+      settingsPanel.addEventListener('input', function (e) {
+        if (e.target && e.target.type === 'range') paintRangeFill(e.target);
+      });
+    }
     $('s3d-play').addEventListener('click', play);
     $('s3d-prev').addEventListener('click', function () { control('prev'); });
     $('s3d-next').addEventListener('click', function () { control('next'); });
@@ -2929,15 +2950,6 @@
     if (fsb) fsb.addEventListener('click', toggleFullscreen);
     var rb = $('s3d-reset');
     if (rb) rb.addEventListener('click', resetView);
-    var cb = $('s3d-cruise');
-    if (cb) {
-      cb.setAttribute('aria-pressed', String(cam.cruise));
-      cb.addEventListener('click', function () {
-        cam.cruise = !cam.cruise;
-        cb.setAttribute('aria-pressed', String(cam.cruise));
-        savePreferences();
-      });
-    }
     var xb = $('s3d-close');
     if (xb) xb.addEventListener('click', close);
 

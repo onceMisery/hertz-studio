@@ -326,6 +326,14 @@
   text-transform: uppercase;
   color: var(--st-ink-soft);
 }
+/* 吸顶标题栏与面板同一套玻璃材质（基础样式里是近黑色实底，星落下会与
+   暖调玻璃面板形成色差）；sticky 滚动态再叠一层同款模糊遮住滑过的内容。 */
+.s3d[data-stage-theme="starfall"] .s3d-settings-heading {
+  background: var(--st-glass-strong);
+  border-bottom: 1px solid var(--st-hair);
+  backdrop-filter: blur(var(--st-blur)) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--st-blur)) saturate(1.4);
+}
 .s3d[data-stage-theme="starfall"] .s3d-settings label {
   margin: 18px 0 10px;
   font-size: 10.5px;

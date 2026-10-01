@@ -164,7 +164,8 @@
       var saved = localStorage.getItem(CAPSULE_KEY);
       if (saved === '0' || saved === '1') preference = saved === '1';
     } catch (error) {}
-    setCapsule(preference === null ? window.innerWidth <= 620 : preference, true);
+    // 播放胶囊默认收起（窄屏原本就收起），用户手动展开/收起后以偏好为准。
+    setCapsule(preference === null ? true : preference, true);
   }
 
   // -------------------------------------------------------------------------

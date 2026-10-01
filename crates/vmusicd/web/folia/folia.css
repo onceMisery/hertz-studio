@@ -215,17 +215,20 @@
 
 /* 叠加层级：极光穹顶场景会把 .s3d-canvas-wrap 抬到 z-index:2（压过氛围光晕），
    folia 歌词层必须更高（3）才不会被 canvas 盖住；舞台 chrome（顶栏/播放坞/
-   设置/队列/暗角/品牌）统一抬到 4，保证始终可点可见。
+   暗角/品牌）统一抬到 4，保证始终可点可见。
+   设置/队列是模态面板，必须再高一档（5）：此前它们也被压在 4，与播放舱/舞台坞
+   同级且 DOM 更靠前，后两者会盖住面板底部，表现为「舞台设置被其他浮层挡住、
+   底部控件点不到」。
    stage 背景模式下 .fl-root 自身全透明，抬高不遮挡 3D；几何/流体/纯色模式则
    由 folia 背景层正常覆盖画布（用户显式选择）。 */
 .s3d-folia .fl-root { z-index: 3; }
 .s3d-folia .s3d-head,
 .s3d-folia .s3d-dock,
 .s3d-folia .s3d-player,
-.s3d-folia .s3d-settings,
-.s3d-folia .s3d-queue,
 .s3d-folia .s3d-vignette,
 .s3d-folia .s3d-brand { z-index: 4; }
+.s3d-folia .s3d-settings,
+.s3d-folia .s3d-queue { z-index: 5; }
 
 @media (max-width: 760px) {
   .fl-classic { padding: 0 16px; }
