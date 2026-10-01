@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 mmusic-studio contributors
-// 商籁 sonnet：全屏 Pixi 电影镜头歌词。独立于 classic/cadenza 的第三个 folia 渲染器，
+// 商籁 sonnet：全屏 Pixi 电影镜头歌词。独立于 classic/cadenza 的第三个 stanza 渲染器，
 // 对外 API 与其余渲染器一致（frame/update/setTheme/.../destroy）。
 // 数据只认 Stage 门面（时间/歌词/频谱/演示态），不自建时钟、不自行解析歌词文档。
 // PixiJS 惰性加载：首次切到商籁才注入 vendor/pixi.min.js，其余布局零开销。
 (function (global) {
   'use strict';
   if (typeof window === 'undefined') return;
-  var U = global.FoliaUtil;
-  var FX = global.FoliaSonnetFx;
+  var U = global.StanzaUtil;
+  var FX = global.StanzaSonnetFx;
   var PIXI_URL = 'vendor/pixi.min.js';
 
   function colorNumber(value, fallback) {
@@ -490,7 +490,7 @@
     // init 被打断时 initialized 尚未置位但渲染器可能已分配：无条件回收 WebGL 上下文。
     if (this.app && this.initialized) {
       try { this.app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true }); }
-      catch (err) { console.warn('[folia-sonnet] PIXI cleanup failed:', err); }
+      catch (err) { console.warn('[stanza-sonnet] PIXI cleanup failed:', err); }
     }
     this.app = null;
     this.sceneContainer = this.geoContainer = this.hudContainer = null;
@@ -895,7 +895,7 @@
     host.append(root);
 
     var director = new SonnetDirector(root, onSeek);
-    var theme = global.FoliaTheme ? FoliaTheme.resolveSonnet(1.35) : { backgroundColor: '#09090b', primaryColor: '#f4f4f5', accentColor: '#f4f4f5', secondaryColor: '#71717a', animationIntensity: 'normal', fontStyle: 'sans' };
+    var theme = global.StanzaTheme ? StanzaTheme.resolveSonnet(1.35) : { backgroundColor: '#09090b', primaryColor: '#f4f4f5', accentColor: '#f4f4f5', secondaryColor: '#71717a', animationIntensity: 'normal', fontStyle: 'sans' };
     var fontScale = 1, visible = false, eco = false, reduced = false;
     var motion = 0.65, reactivity = 1.35;
     var bgMode = 'stage', vignette = true;
@@ -1039,7 +1039,7 @@
           initStarted = true;
           director.init().catch(function (err) {
             initFailed = true;
-            console.warn('[folia-sonnet] 图形引擎不可用：', err);
+            console.warn('[stanza-sonnet] 图形引擎不可用：', err);
             hud.textContent = '图形引擎不可用 · 请切换其他歌词视觉';
           });
         }
@@ -1075,7 +1075,7 @@
       update: function () {},
       setTheme: function (t) {
         if (!t) return;
-        var sig = global.FoliaTheme ? FoliaTheme.signature(t) : JSON.stringify(t);
+        var sig = global.StanzaTheme ? StanzaTheme.signature(t) : JSON.stringify(t);
         if (sig === themeSig) return;
         theme = t;
         themeSig = sig;
@@ -1139,5 +1139,5 @@
 
   // loadPixi / buildFrame 对外只读暴露：凝彩 tempera 与商籁共用同一份 Pixi
   // 惰性加载（全页只注入一次 <script>）与同一套 Stage → 帧适配（含行缓存）。
-  global.FoliaSonnet = { init: init, loadPixi: loadPixi, buildFrame: buildFrame };
+  global.StanzaSonnet = { init: init, loadPixi: loadPixi, buildFrame: buildFrame };
 })(window);

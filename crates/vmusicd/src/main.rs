@@ -90,22 +90,22 @@ const STAGE_SHELF_JS: &str = include_str!("../web/stage-shelf.js");
 const STAGE3D_JS: &str = include_str!("../web/stage3d.js");
 const STAGE3D_CSS: &str = include_str!("../web/stage3d.css");
 const STAGE_IMMERSIVE_JS: &str = include_str!("../web/stage-immersive.js");
-// folia 歌词模式（流光 classic / 心象 cadenza / 商籁 sonnet）：零依赖模块 + 样式表，
+// stanza 歌词模式（流光 classic / 心象 cadenza / 商籁 sonnet）：零依赖模块 + 样式表，
 // 在 index.html 中排在 stage-lyrics.js 之前加载。
-const FOLIA_UTIL_JS: &str = include_str!("../web/folia/folia-util.js");
-const FOLIA_THEME_JS: &str = include_str!("../web/folia/folia-theme.js");
-const FOLIA_TEXTLAYOUT_JS: &str = include_str!("../web/folia/folia-textlayout.js");
-const FOLIA_BG_JS: &str = include_str!("../web/folia/folia-bg.js");
-const FOLIA_SUBTITLE_JS: &str = include_str!("../web/folia/folia-subtitle.js");
-const FOLIA_CLASSIC_JS: &str = include_str!("../web/folia/folia-classic.js");
-const FOLIA_CADENZA_JS: &str = include_str!("../web/folia/folia-cadenza.js");
+const STANZA_UTIL_JS: &str = include_str!("../web/stanza/stanza-util.js");
+const STANZA_THEME_JS: &str = include_str!("../web/stanza/stanza-theme.js");
+const STANZA_TEXTLAYOUT_JS: &str = include_str!("../web/stanza/stanza-textlayout.js");
+const STANZA_BG_JS: &str = include_str!("../web/stanza/stanza-bg.js");
+const STANZA_SUBTITLE_JS: &str = include_str!("../web/stanza/stanza-subtitle.js");
+const STANZA_CLASSIC_JS: &str = include_str!("../web/stanza/stanza-classic.js");
+const STANZA_CADENZA_JS: &str = include_str!("../web/stanza/stanza-cadenza.js");
 // 商籁 sonnet：全屏 Pixi 电影镜头歌词。图形引擎 + 渲染器两个模块；PixiJS v8
 // （MIT）随包内嵌，但前端只在首次选中商籁时才注入 <script> 惰性加载它。
-const FOLIA_SONNET_FX_JS: &str = include_str!("../web/folia/folia-sonnet-fx.js");
-const FOLIA_SONNET_JS: &str = include_str!("../web/folia/folia-sonnet.js");
-const FOLIA_TEMPERA_JS: &str = include_str!("../web/folia/folia-tempera.js");
+const STANZA_SONNET_FX_JS: &str = include_str!("../web/stanza/stanza-sonnet-fx.js");
+const STANZA_SONNET_JS: &str = include_str!("../web/stanza/stanza-sonnet.js");
+const STANZA_TEMPERA_JS: &str = include_str!("../web/stanza/stanza-tempera.js");
 const PIXI_JS: &str = include_str!("../web/vendor/pixi.min.js");
-const FOLIA_CSS: &str = include_str!("../web/folia/folia.css");
+const STANZA_CSS: &str = include_str!("../web/stanza/stanza.css");
 // 在线曲库（SP1）：vendored MIT 二维码库 + 三个在线模块与样式。
 const QRCODE_JS: &str = include_str!("../web/vendor/qrcode.js");
 const ONLINE_LOGIN_JS: &str = include_str!("../web/online-login.js");
@@ -361,33 +361,33 @@ async fn main() -> anyhow::Result<()> {
         .route("/stage-shelf.js", get(|| asset(JS, STAGE_SHELF_JS)))
         .route("/stage3d.js", get(|| asset(JS, STAGE3D_JS)))
         .route("/stage-immersive.js", get(|| asset(JS, STAGE_IMMERSIVE_JS)))
-        .route("/folia/folia-util.js", get(|| asset(JS, FOLIA_UTIL_JS)))
-        .route("/folia/folia-theme.js", get(|| asset(JS, FOLIA_THEME_JS)))
+        .route("/stanza/stanza-util.js", get(|| asset(JS, STANZA_UTIL_JS)))
+        .route("/stanza/stanza-theme.js", get(|| asset(JS, STANZA_THEME_JS)))
         .route(
-            "/folia/folia-textlayout.js",
-            get(|| asset(JS, FOLIA_TEXTLAYOUT_JS)),
+            "/stanza/stanza-textlayout.js",
+            get(|| asset(JS, STANZA_TEXTLAYOUT_JS)),
         )
-        .route("/folia/folia-bg.js", get(|| asset(JS, FOLIA_BG_JS)))
+        .route("/stanza/stanza-bg.js", get(|| asset(JS, STANZA_BG_JS)))
         .route(
-            "/folia/folia-subtitle.js",
-            get(|| asset(JS, FOLIA_SUBTITLE_JS)),
-        )
-        .route(
-            "/folia/folia-classic.js",
-            get(|| asset(JS, FOLIA_CLASSIC_JS)),
+            "/stanza/stanza-subtitle.js",
+            get(|| asset(JS, STANZA_SUBTITLE_JS)),
         )
         .route(
-            "/folia/folia-cadenza.js",
-            get(|| asset(JS, FOLIA_CADENZA_JS)),
+            "/stanza/stanza-classic.js",
+            get(|| asset(JS, STANZA_CLASSIC_JS)),
         )
         .route(
-            "/folia/folia-sonnet-fx.js",
-            get(|| asset(JS, FOLIA_SONNET_FX_JS)),
+            "/stanza/stanza-cadenza.js",
+            get(|| asset(JS, STANZA_CADENZA_JS)),
         )
-        .route("/folia/folia-sonnet.js", get(|| asset(JS, FOLIA_SONNET_JS)))
         .route(
-            "/folia/folia-tempera.js",
-            get(|| asset(JS, FOLIA_TEMPERA_JS)),
+            "/stanza/stanza-sonnet-fx.js",
+            get(|| asset(JS, STANZA_SONNET_FX_JS)),
+        )
+        .route("/stanza/stanza-sonnet.js", get(|| asset(JS, STANZA_SONNET_JS)))
+        .route(
+            "/stanza/stanza-tempera.js",
+            get(|| asset(JS, STANZA_TEMPERA_JS)),
         )
         .route("/vendor/pixi.min.js", get(|| asset(JS, PIXI_JS)))
         .route("/vendor/qrcode.js", get(|| asset(JS, QRCODE_JS)))
@@ -408,7 +408,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/stage.css", get(|| asset(CSS, STAGE_CSS)))
         .route("/creative.css", get(|| asset(CSS, CREATIVE_CSS)))
         .route("/stage3d.css", get(|| asset(CSS, STAGE3D_CSS)))
-        .route("/folia/folia.css", get(|| asset(CSS, FOLIA_CSS)))
+        .route("/stanza/stanza.css", get(|| asset(CSS, STANZA_CSS)))
         .route("/online.css", get(|| asset(CSS, ONLINE_CSS)))
         .route("/theme-studio.css", get(|| asset(CSS, THEME_STUDIO_CSS)))
         .route("/skins/skins.css", get(|| asset(CSS, SKINS_CSS)))

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 mmusic-studio contributors */
-/* folia 歌词模式样式。命名空间 fl-，不改动 stage3d.css。 */
+/* stanza 歌词模式样式。命名空间 fl-，不改动 stage3d.css。 */
 
 .fl-root { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
 .fl-root[hidden] { display: none !important; }
@@ -74,7 +74,7 @@
 .fl-cword .fl-glow { position: absolute; inset: 0; color: transparent; pointer-events: none; z-index: 0; white-space: pre; }
 .fl-cword .fl-body { position: relative; z-index: 1; }
 /* 旋转分层：.fl-cword 只承担 translate/scale/opacity，.fl-crot 单独承担 rotate。
-   passed 词按 folia 原行为用 5s linear 缓漂，其余状态 .4s。 */
+   passed 词按 stanza 原行为用 5s linear 缓漂，其余状态 .4s。 */
 .fl-crot { display: block; transform-origin: center; transition: transform .4s ease; }
 .fl-cword[data-st='passed'] .fl-crot { transition: transform 5s linear; }
 .s3d-reduced .fl-crot { transition: none !important; }
@@ -84,7 +84,7 @@
 .fl-cword[data-st='waiting'] { opacity: 0; transition: opacity .4s ease, transform .4s ease; }
 .fl-cword[data-st='active'] { opacity: 1; transition: opacity .1s ease, transform .45s cubic-bezier(.34,1.56,.64,1); }
 .fl-cword[data-st='passed'] { opacity: .82; transition: opacity .5s ease, transform .5s ease; }
-/* 辉光 4 套关键帧（半径/节拍逐值复刻 folia）：n=单字/normal，f=fast，i=instant，c=多字词。
+/* 辉光 4 套关键帧（半径/节拍逐值复刻 stanza）：n=单字/normal，f=fast，i=instant，c=多字词。
    时长由 --fl-glow-dur 给（多字词改由字素 span 内联 animationDuration 错峰）。 */
 @keyframes fl-glow-n {
   0% { text-shadow: none; }
@@ -205,30 +205,30 @@
 .s3d-reduced .fl-cline.fl-enter-none { animation: none !important; }
 .s3d-reduced .fl-cline.fl-exit-none { animation: fl-line-out-none .12s ease both !important; }
 
-/* folia 歌词视觉激活（叠加在 3D 舞台上）：隐藏 3D 自带歌词轨，避免两套歌词并存。
+/* stanza 歌词视觉激活（叠加在 3D 舞台上）：隐藏 3D 自带歌词轨，避免两套歌词并存。
    3D 场景本身照常渲染——.fl-root 背景透明（背景为 stage 模式），只有歌词浮在上层。 */
-.s3d-folia .s3d-reading { display: none !important; }
+.s3d-stanza .s3d-reading { display: none !important; }
 
 /* 纯平面回退（无 GL）：再停用 3D 画布视觉层（DOM 仍在，手势入口由 JS 短路）。
-   注意叠加模式（.s3d-folia 但非 .s3d-plane）不隐藏画布，3D 场景必须可见。 */
+   注意叠加模式（.s3d-stanza 但非 .s3d-plane）不隐藏画布，3D 场景必须可见。 */
 .s3d-plane .s3d-canvas-wrap canvas { visibility: hidden; }
 
 /* 叠加层级：极光穹顶场景会把 .s3d-canvas-wrap 抬到 z-index:2（压过氛围光晕），
-   folia 歌词层必须更高（3）才不会被 canvas 盖住；舞台 chrome（顶栏/播放坞/
+   stanza 歌词层必须更高（3）才不会被 canvas 盖住；舞台 chrome（顶栏/播放坞/
    暗角/品牌）统一抬到 4，保证始终可点可见。
    设置/队列是模态面板，必须再高一档（5）：此前它们也被压在 4，与播放舱/舞台坞
    同级且 DOM 更靠前，后两者会盖住面板底部，表现为「舞台设置被其他浮层挡住、
    底部控件点不到」。
    stage 背景模式下 .fl-root 自身全透明，抬高不遮挡 3D；几何/流体/纯色模式则
-   由 folia 背景层正常覆盖画布（用户显式选择）。 */
-.s3d-folia .fl-root { z-index: 3; }
-.s3d-folia .s3d-head,
-.s3d-folia .s3d-dock,
-.s3d-folia .s3d-player,
-.s3d-folia .s3d-vignette,
-.s3d-folia .s3d-brand { z-index: 4; }
-.s3d-folia .s3d-settings,
-.s3d-folia .s3d-queue { z-index: 5; }
+   由 stanza 背景层正常覆盖画布（用户显式选择）。 */
+.s3d-stanza .fl-root { z-index: 3; }
+.s3d-stanza .s3d-head,
+.s3d-stanza .s3d-dock,
+.s3d-stanza .s3d-player,
+.s3d-stanza .s3d-vignette,
+.s3d-stanza .s3d-brand { z-index: 4; }
+.s3d-stanza .s3d-settings,
+.s3d-stanza .s3d-queue { z-index: 5; }
 
 @media (max-width: 760px) {
   .fl-classic { padding: 0 16px; }

@@ -43,7 +43,7 @@ function pointer(overrides = {}) {
 const stage = load('stage3d.js', ['computeDpr', 'targetFps', 'controlTarget', 'onWheel', 'onPointerUp'], {
   window: { devicePixelRatio: 3 }, gl: null, q: () => 0,
   active: true, document: { hidden: false }, contextLost: false, post: null, sizeDirty: false,
-  foliaActive: () => false, reducedMotion: () => false,
+  stanzaActive: () => false, reducedMotion: () => false,
   global: { Stage: true }, Stage: { presentation: () => ({ playing: false }) },
   performance: { now: () => 2000 }, interactUntil: 0, dragging: false,
   cam: { userR: 10, minR: 1, maxR: 100 }, isStandalone: () => false, sceneCovered: () => false,

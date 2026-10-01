@@ -5,9 +5,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const web = path.join(__dirname, '../crates/vmusicd/web');
-const source = fs.readFileSync(path.join(web, 'folia/folia-tempera.js'), 'utf8');
-const util = require(path.join(web, 'folia/folia-util.js'));
-const effects = require(path.join(web, 'folia/folia-sonnet-fx.js'));
+const source = fs.readFileSync(path.join(web, 'stanza/stanza-tempera.js'), 'utf8');
+const util = require(path.join(web, 'stanza/stanza-util.js'));
+const effects = require(path.join(web, 'stanza/stanza-sonnet-fx.js'));
 
 function element() {
   return { hidden: false, style: {}, append() {}, remove() {} };
@@ -20,10 +20,10 @@ async function main() {
   const ready = new Promise(resolve => { finishInit = resolve; });
   const context = {
     module: { exports: {} }, console,
-    FoliaUtil: util, FoliaSonnetFx: effects,
+    StanzaUtil: util, StanzaSonnetFx: effects,
     document: { createElement: element },
     Stage: { kick() {} },
-    FoliaSonnet: {
+    StanzaSonnet: {
       buildFrame: () => ({ reduced: false }),
       loadPixi: async () => ({
         Application: class {
@@ -76,8 +76,8 @@ async function main() {
 
   const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
   const host = fs.readFileSync(path.join(web, 'stage3d.js'), 'utf8');
-  assert.ok(html.indexOf('src="folia/folia-tempera.js"') > html.indexOf('src="folia/folia-sonnet.js"'));
-  assert.ok(html.indexOf('src="folia/folia-tempera.js"') < html.indexOf('src="stage3d.js"'));
+  assert.ok(html.indexOf('src="stanza/stanza-tempera.js"') > html.indexOf('src="stanza/stanza-sonnet.js"'));
+  assert.ok(html.indexOf('src="stanza/stanza-tempera.js"') < html.indexOf('src="stage3d.js"'));
   assert.match(html, /option value="tempera"/);
   for (const id of ['composition', 'color-mode', 'screens', 'inversion']) {
     assert.ok(html.includes('id="s3d-fl-' + id + '"'));

@@ -19,7 +19,7 @@
 <link rel="stylesheet" href="creative.css">
 <link rel="stylesheet" href="stage3d.css">
 <link rel="stylesheet" href="stage-themes/starfall.css">
-<link rel="stylesheet" href="folia/folia.css">
+<link rel="stylesheet" href="stanza/stanza.css">
 <link rel="stylesheet" href="online.css">
 <!-- 主题工作室：壁纸背景层与壁纸画廊。排在 style.css 之后（同特异性整块胜出），
      与 online.css 同一层次——都是"在既有布局之上再铺一层"的模块。 -->
@@ -1066,7 +1066,7 @@
     </div>
     <div class="s3d-sleeve-caption"><strong id="s3d-sleeve-title"></strong><span id="s3d-sleeve-artist"></span></div>
   </div>
-  <div class="fl-root" id="s3d-folia" hidden>
+  <div class="fl-root" id="s3d-stanza" hidden>
     <div class="fl-scene-backdrop" id="s3d-fl-backdrop" aria-hidden="true" hidden><img id="s3d-fl-wallpaper" alt="" decoding="async" hidden></div>
     <div class="fl-bg" id="s3d-fl-bg"></div>
     <div class="fl-sonnet-layer" id="s3d-fl-sonnet-stage"></div>
@@ -1390,16 +1390,16 @@
 <script src="stage-focus.js"></script>
 <!-- 沉浸式三维舞台：自建一个 WebGL2 上下文（拿不到就整体降级），逐帧驱动
      仍然走 Stage.gate()。排在 stage-immersive 之前，键盘用捕获阶段抢下 F。 -->
-<script src="folia/folia-util.js"></script>
-<script src="folia/folia-theme.js"></script>
-<script src="folia/folia-textlayout.js"></script>
-<script src="folia/folia-bg.js"></script>
-<script src="folia/folia-subtitle.js"></script>
-<script src="folia/folia-classic.js"></script>
-<script src="folia/folia-cadenza.js"></script>
-<script src="folia/folia-sonnet-fx.js"></script>
-<script src="folia/folia-sonnet.js"></script>
-<script src="folia/folia-tempera.js"></script>
+<script src="stanza/stanza-util.js"></script>
+<script src="stanza/stanza-theme.js"></script>
+<script src="stanza/stanza-textlayout.js"></script>
+<script src="stanza/stanza-bg.js"></script>
+<script src="stanza/stanza-subtitle.js"></script>
+<script src="stanza/stanza-classic.js"></script>
+<script src="stanza/stanza-cadenza.js"></script>
+<script src="stanza/stanza-sonnet-fx.js"></script>
+<script src="stanza/stanza-sonnet.js"></script>
+<script src="stanza/stanza-tempera.js"></script>
 <script src="stage-lyrics.js"></script>
 <!-- 3D 歌单架（封面流）：只依赖 Stage 只读出口，必须排在 stage3d.js 之前 -->
 <script src="stage-shelf.js"></script>

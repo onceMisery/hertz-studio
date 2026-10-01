@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
-// folia 纯函数验证：node scripts/check-folia.js
+// stanza 纯函数验证：node scripts/check-stanza.js
 'use strict';
 const path = require('path');
-const ROOT = path.join(__dirname, '..', 'crates', 'vmusicd', 'web', 'folia');
-// 模块工厂从全局取 FoliaUtil：require util 后先挂到 global，再加载下游模块。
-const U = require(path.join(ROOT, 'folia-util.js'));
-global.FoliaUtil = U;
-const T = require(path.join(ROOT, 'folia-theme.js'));
-const L = require(path.join(ROOT, 'folia-textlayout.js'));
+const ROOT = path.join(__dirname, '..', 'crates', 'vmusicd', 'web', 'stanza');
+// 模块工厂从全局取 StanzaUtil：require util 后先挂到 global，再加载下游模块。
+const U = require(path.join(ROOT, 'stanza-util.js'));
+global.StanzaUtil = U;
+const T = require(path.join(ROOT, 'stanza-theme.js'));
+const L = require(path.join(ROOT, 'stanza-textlayout.js'));
 
 let failures = 0;
 function ok(cond, msg) { if (!cond) { failures += 1; console.error('FAIL:', msg); } else console.log('ok -', msg); }
@@ -98,10 +98,10 @@ ok(!U.hasReadable('●●●'), '圆点不可读');
 ok(U.hasReadable('abc123'), '英文数字可读');
 
 // 8) Theme 取色分支（Node 下 stub window/document/getComputedStyle，每组切换前清 require.cache）
-// require 顺序：global.FoliaUtil 已在文件头部挂好；相对路径以 scripts/ 为基准 → scripts/../crates/...
-var THEME_REQ = '../crates/vmusicd/web/folia/folia-theme.js';
+// require 顺序：global.StanzaUtil 已在文件头部挂好；相对路径以 scripts/ 为基准 → scripts/../crates/...
+var THEME_REQ = '../crates/vmusicd/web/stanza/stanza-theme.js';
 function hexHsl(hex) { var c = U.hexToRgb(hex); return U.rgbToHsl(c.r, c.g, c.b); }
-// 给定 CSS 变量表重新加载 folia-theme.js：工厂不碰 DOM，resolve 时才经 cssVar 读 stub。
+// 给定 CSS 变量表重新加载 stanza-theme.js：工厂不碰 DOM，resolve 时才经 cssVar 读 stub。
 function loadThemeWithVars(vars) {
   delete require.cache[require.resolve(THEME_REQ)];
   global.window = {};
@@ -169,7 +169,7 @@ function loadThemeWithVars(vars) {
   delete global.document;
 })();
 
-// 8f) wordColor：复刻 folia wordColoring.resolveWordColor 语义——CJK 分支为
+// 8f) wordColor：复刻 stanza wordColoring.resolveWordColor 语义——CJK 分支为
 // target.indexOf(clean)>=0，即"配置词 target 包含当前歌词词 token"（不是 token 含 target）；
 // 英文分支按空白拆 target 后做小写/去标点归一化的整词匹配，部分匹配回退 accent。
 (function () {

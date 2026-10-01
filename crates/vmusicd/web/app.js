@@ -1223,7 +1223,7 @@ function onStageControl(e) {
         .catch((err) => {
           toast('保存歌词偏移失败', 'error');
           // 通知 stage3d 回清该曲的乐观暂存，标签回到服务端值（仍在该曲时才生效）。
-          document.dispatchEvent(new CustomEvent('folia:offset-failed', { detail: { id: id } }));
+          document.dispatchEvent(new CustomEvent('stanza:offset-failed', { detail: { id: id } }));
         });
       break;
     }

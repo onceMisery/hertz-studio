@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 mmusic-studio contributors
-// folia 视觉对比：固定时钟截图矩阵。用法：
-//   FOLIA_URL=http://localhost:5173 HERTZ_URL=http://localhost:8080 node scripts/check-folia-visual.js
+// stanza 视觉对比：固定时钟截图矩阵。用法：
+//   STANZA_URL=http://localhost:5173 HERTZ_URL=http://localhost:8080 node scripts/check-stanza-visual.js
 // 依赖 playwright（npx -y playwright@latest install chromium 后可用 require）。
 //
 // 夹具歌词（两边各导入同一 LRC，保存为测试资源；含 normal/short/micro 行、间奏、超长 CJK 句、中英混合行）：
@@ -23,9 +23,9 @@ catch (e) {
   process.exit(2);
 }
 
-const FOLIA = process.env.FOLIA_URL || 'http://localhost:5173';
+const STANZA = process.env.STANZA_URL || 'http://localhost:5173';
 const HERTZ = process.env.HERTZ_URL || 'http://localhost:8080';
-const OUT = path.join(__dirname, '..', 'output', 'folia-verify');
+const OUT = path.join(__dirname, '..', 'output', 'stanza-verify');
 fs.mkdirSync(OUT, { recursive: true });
 
 const MATRIX = [
@@ -57,7 +57,7 @@ async function shot(page, url, file) {
       const page = await ctx.newPage();
       const q = `?mode=${m.mode}&bg=${m.bg}`;
       const base = `${m.mode}-${m.bg}-${m.w}x${m.h}-${s.name}.png`;
-      await shot(page, `${FOLIA}/${q}&t=${s.t}`, path.join(OUT, 'folia-' + base));
+      await shot(page, `${STANZA}/${q}&t=${s.t}`, path.join(OUT, 'stanza-' + base));
       await shot(page, `${HERTZ}/stage3d${q}&t=${s.t}`, path.join(OUT, 'hertz-' + base));
       await ctx.close();
     }

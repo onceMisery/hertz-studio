@@ -1360,7 +1360,7 @@
       return doc ? { lines: doc.lines, index: activeIdx < 0 ? 0 : activeIdx } : null;
     },
 
-    // folia 歌词模式：翻译行与每曲偏移（数据已在 doc 内，只读暴露，不复制）。
+    // stanza 歌词模式：翻译行与每曲偏移（数据已在 doc 内，只读暴露，不复制）。
     lyricTranslation: function (i) {
       return doc && doc.translation ? (doc.translation[i] || null) : null;
     },

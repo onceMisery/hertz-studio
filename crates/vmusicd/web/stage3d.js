@@ -49,17 +49,17 @@
   var TAU_RADIUS = 300;
   var TAU_LOOK = 260;
 
-  // folia 歌词视觉（流光 classic / 心象 cadenza / 商籁 sonnet）是与「3D 舞台布局」正交的独立维度：
+  // stanza 歌词视觉（流光 classic / 心象 cadenza / 商籁 sonnet）是与「3D 舞台布局」正交的独立维度：
   // layout 始终是三维舞台（focus/sleeve/single），GL 场景照常渲染、相机手势照常工作；
-  // folia 歌词以透明叠加层浮在 3D 之上。仅当设备无 GL 时才退化为「纯平面」（standalone），
-  // 此时停掉 GL 与 3D 手势，由 folia 渲染器独立撑画面。
-  //   foliaActive：当前歌词走 folia（classic/cadenza/sonnet）；standalone：folia 激活且无 GL。
-  var FOLIA_VISUALS = ['classic', 'cadenza', 'sonnet', 'tempera'];
-  function foliaActive(v) { return FOLIA_VISUALS.indexOf(v != null ? v : folia.visual) >= 0; }
-  function isStandalone() { return foliaActive() && !gl; }
+  // stanza 歌词以透明叠加层浮在 3D 之上。仅当设备无 GL 时才退化为「纯平面」（standalone），
+  // 此时停掉 GL 与 3D 手势，由 stanza 渲染器独立撑画面。
+  //   stanzaActive：当前歌词走 stanza（classic/cadenza/sonnet）；standalone：stanza 激活且无 GL。
+  var STANZA_VISUALS = ['classic', 'cadenza', 'sonnet', 'tempera'];
+  function stanzaActive(v) { return STANZA_VISUALS.indexOf(v != null ? v : stanza.visual) >= 0; }
+  function isStandalone() { return stanzaActive() && !gl; }
   // 旧调用点语义：isPlane() 现在专指「无 GL 纯平面回退」。
   function isPlane() { return isStandalone(); }
-  var folia = { ready: false, bg: null, sub: null, classic: null, cadenza: null, sonnet: null, tempera: null,
+  var stanza = { ready: false, bg: null, sub: null, classic: null, cadenza: null, sonnet: null, tempera: null,
     visual: 'stage',
     bgMode: 'stage', bgOpacity: 0.75, vignette: true, subtitle: true,
     wallpaper: 'evening-16.jpg', wallpaperDim: 0.48,
@@ -1210,7 +1210,7 @@
     // Detach pending cover loads before the restored context invalidates their textures.
     disposeStages();
     post = null;
-    // 平面布局不依赖 GL，不能让 fallback 横幅盖住 folia；但 preventDefault/
+    // 平面布局不依赖 GL，不能让 fallback 横幅盖住 stanza；但 preventDefault/
     // 状态位/资源释放这些恢复前置动作必须照常，否则切回三维后无法恢复。
     if (!isPlane()) showFallback('舞台正在恢复渲染，音乐播放不受影响。');
     pokeChrome();
@@ -1491,7 +1491,7 @@
   }
 
   function render(dtMs) {
-    // 3D 场景始终渲染：folia 歌词只是透明叠加层（standalone 无 GL 回退时才没有 GL）。
+    // 3D 场景始终渲染：stanza 歌词只是透明叠加层（standalone 无 GL 回退时才没有 GL）。
     if (!gl || contextLost || sceneCovered()) return;
     if (sizeDirty) resize();
     if (!post || !post.scene || !post.a || !post.b) return;
@@ -1572,10 +1572,10 @@
   // 目标帧率。返回 0 表示这一层完全不需要帧，主循环据此停机。
   function targetFps() {
     if (!active || document.hidden) return 0;
-    if (contextLost && !foliaActive()) return 0;
-    if (post && !post.scene && !sizeDirty && !foliaActive()) return 0;
-    // 无 GL 时只有 folia 歌词视觉需要帧（纯平面回退）；有 GL 一律走原帧率。
-    if (!gl) return foliaActive() ? (reducedMotion() ? 15 : 60) : 0;
+    if (contextLost && !stanzaActive()) return 0;
+    if (post && !post.scene && !sizeDirty && !stanzaActive()) return 0;
+    // 无 GL 时只有 stanza 歌词视觉需要帧（纯平面回退）；有 GL 一律走原帧率。
+    if (!gl) return stanzaActive() ? (reducedMotion() ? 15 : 60) : 0;
     // 240 = 「每个 rAF 都给我」，降频自己用整数除数在 tick 里做：
     // 帧率必须是刷新率的整数分之一，90fps@144Hz 会因为帧间隔不均产生 judder。
     if (reducedMotion()) return 15;
@@ -1608,9 +1608,9 @@
     pendingDt = 0;
     if (!reducedMotion()) time += step / 1000;
     render(step);
-    // 3D 歌词轨倾角只在舞台轨模式需要；folia 接管歌词时该轨隐藏。
-    if (showLyrics && !foliaActive()) writeLyrTilt();
-    if (foliaActive()) driveFolia(step);
+    // 3D 歌词轨倾角只在舞台轨模式需要；stanza 接管歌词时该轨隐藏。
+    if (showLyrics && !stanzaActive()) writeLyrTilt();
+    if (stanzaActive()) driveStanza(step);
     sampleCost(performance.now() - t0);
   }
 
@@ -1624,7 +1624,7 @@
   }
 
   function controlTarget(e) {
-    return e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, [contenteditable], [role="button"], .s3d-settings, .s3d-queue-panel, #s3d-reading, #s3d-folia');
+    return e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, [contenteditable], [role="button"], .s3d-settings, .s3d-queue-panel, #s3d-reading, #s3d-stanza');
   }
 
   function cancelGestures() {
@@ -1644,8 +1644,8 @@
 
   function onPointerDown(e) {
     if (!active || (e.button != null && e.button !== 0) || pointers[e.pointerId]) return;
-    // 仅无 GL 纯平面回退禁用 3D 手势；folia 透明叠加时相机拖拽照常
-    // （folia 容器 pointer-events:none，词节点自己处理点击 seek，空白处穿透到这里）。
+    // 仅无 GL 纯平面回退禁用 3D 手势；stanza 透明叠加时相机拖拽照常
+    // （stanza 容器 pointer-events:none，词节点自己处理点击 seek，空白处穿透到这里）。
     if (isStandalone() || sceneCovered() || controlTarget(e)) return;
     root.focus({ preventScroll: true });
     var point = localPoint(e);
@@ -1918,11 +1918,11 @@
     return { scene: STAGES[stageIndex].id, motion: motion, bloom: bloom, reactivity: reactivity, lyrics: showLyrics, cruise: cam.cruise, layout: layout, lyricSize: lyricSize, lyricGlow: lyricGlow,
       shelfMode: shelfMode,
       stageTheme: stageTheme,
-      foliaVisual: folia.visual,
-      foliaBg: folia.bgMode, foliaBgOpacity: folia.bgOpacity, foliaVignette: folia.vignette,
-      foliaWallpaper: folia.wallpaper, foliaWallpaperDim: folia.wallpaperDim,
-      foliaSubtitle: folia.subtitle, classicTuning: folia.classicTuning, cadenzaTuning: folia.cadenzaTuning,
-      sonnetTuning: folia.sonnetTuning, temperaTuning: folia.temperaTuning };
+      stanzaVisual: stanza.visual,
+      stanzaBg: stanza.bgMode, stanzaBgOpacity: stanza.bgOpacity, stanzaVignette: stanza.vignette,
+      stanzaWallpaper: stanza.wallpaper, stanzaWallpaperDim: stanza.wallpaperDim,
+      stanzaSubtitle: stanza.subtitle, classicTuning: stanza.classicTuning, cadenzaTuning: stanza.cadenzaTuning,
+      sonnetTuning: stanza.sonnetTuning, temperaTuning: stanza.temperaTuning };
   }
 
   function savePreferences() { if (!restoring) control('stage3d', preferences()); }
@@ -1937,12 +1937,12 @@
       if (typeof value.lyrics === 'boolean') showLyrics = value.lyrics;
       if (typeof value.cruise === 'boolean') cam.cruise = value.cruise;
       // 布局始终是三维舞台（focus/sleeve/single）。旧版本把流光/心象存成了 layout，
-      // 这里一次性迁移到正交的 foliaVisual 维度（layout 归位 focus）。
-      if (value.layout === 'spark') { layout = 'focus'; folia.visual = 'classic'; }
-      else if (value.layout === 'scatter') { layout = 'focus'; folia.visual = 'cadenza'; }
-      else if (value.layout === 'classic' || value.layout === 'cadenza') { layout = 'focus'; folia.visual = value.layout; }
+      // 这里一次性迁移到正交的 stanzaVisual 维度（layout 归位 focus）。
+      if (value.layout === 'spark') { layout = 'focus'; stanza.visual = 'classic'; }
+      else if (value.layout === 'scatter') { layout = 'focus'; stanza.visual = 'cadenza'; }
+      else if (value.layout === 'classic' || value.layout === 'cadenza') { layout = 'focus'; stanza.visual = value.layout; }
       else if (['focus', 'sleeve', 'single'].indexOf(value.layout) >= 0) { layout = value.layout; }
-      if (['stage', 'classic', 'cadenza', 'sonnet', 'tempera'].indexOf(value.foliaVisual) >= 0) folia.visual = value.foliaVisual;
+      if (['stage', 'classic', 'cadenza', 'sonnet', 'tempera'].indexOf(value.stanzaVisual) >= 0) stanza.visual = value.stanzaVisual;
       if (value.stageTheme === 'starfall' || value.stageTheme === 'classic') stageTheme = value.stageTheme;
       if (typeof value.lyricSize === 'number') lyricSize = clamp(value.lyricSize, 0.7, 1.5);
       if (typeof value.lyricGlow === 'number') lyricGlow = clamp(value.lyricGlow, 0, 1);
@@ -1952,24 +1952,24 @@
         var shelfSel = $('s3d-shelf-mode');
         if (shelfSel) shelfSel.value = shelfMode;
       }
-      if (['stage', 'geometric', 'fluid', 'solid', 'anime', 'atmosphere'].indexOf(value.foliaBg) >= 0) folia.bgMode = value.foliaBg;
-      if (typeof value.foliaWallpaper === 'string') folia.wallpaper = stageWallpaper(value.foliaWallpaper);
-      if (typeof value.foliaWallpaperDim === 'number') folia.wallpaperDim = clamp(num(value.foliaWallpaperDim, 0.48), 0.2, 0.8);
-      if (typeof value.foliaBgOpacity === 'number') folia.bgOpacity = clamp(value.foliaBgOpacity, 0, 1);
-      if (typeof value.foliaVignette === 'boolean') folia.vignette = value.foliaVignette;
-      if (typeof value.foliaSubtitle === 'boolean') folia.subtitle = value.foliaSubtitle;
-      if (value.classicTuning && typeof value.classicTuning === 'object') folia.classicTuning = {
+      if (['stage', 'geometric', 'fluid', 'solid', 'anime', 'atmosphere'].indexOf(value.stanzaBg) >= 0) stanza.bgMode = value.stanzaBg;
+      if (typeof value.stanzaWallpaper === 'string') stanza.wallpaper = stageWallpaper(value.stanzaWallpaper);
+      if (typeof value.stanzaWallpaperDim === 'number') stanza.wallpaperDim = clamp(num(value.stanzaWallpaperDim, 0.48), 0.2, 0.8);
+      if (typeof value.stanzaBgOpacity === 'number') stanza.bgOpacity = clamp(value.stanzaBgOpacity, 0, 1);
+      if (typeof value.stanzaVignette === 'boolean') stanza.vignette = value.stanzaVignette;
+      if (typeof value.stanzaSubtitle === 'boolean') stanza.subtitle = value.stanzaSubtitle;
+      if (value.classicTuning && typeof value.classicTuning === 'object') stanza.classicTuning = {
         rotation: value.classicTuning.rotation !== false,
         breathing: clamp(num(value.classicTuning.breathing, 1), 0, 2),
         spacing: clamp(num(value.classicTuning.spacing, 0.7), 0, 2)
       };
-      if (value.cadenzaTuning && typeof value.cadenzaTuning === 'object') folia.cadenzaTuning = {
+      if (value.cadenzaTuning && typeof value.cadenzaTuning === 'object') stanza.cadenzaTuning = {
         width: clamp(num(value.cadenzaTuning.width, 0.72), 0.5, 0.9),
         motion: clamp(num(value.cadenzaTuning.motion, 1), 0, 2),
         glow: clamp(num(value.cadenzaTuning.glow, 1), 0, 1.6),
         beam: clamp(num(value.cadenzaTuning.beam, 0), 0, 1.2)
       };
-      if (value.sonnetTuning && typeof value.sonnetTuning === 'object') folia.sonnetTuning = {
+      if (value.sonnetTuning && typeof value.sonnetTuning === 'object') stanza.sonnetTuning = {
         shotFlow: typeof value.sonnetTuning.shotFlow === 'string' ? value.sonnetTuning.shotFlow : 'auto',
         lyricLayout: ['phrases', 'lines', 'staircase', 'editorial-track']
           .indexOf(value.sonnetTuning.lyricLayout) >= 0 ? value.sonnetTuning.lyricLayout : 'phrases',
@@ -1977,8 +1977,8 @@
         decor: value.sonnetTuning.decor !== false,
         accents: value.sonnetTuning.accents !== false
       };
-      if (value.temperaTuning && typeof value.temperaTuning === 'object') folia.temperaTuning = {
-        composition: global.FoliaTempera && global.FoliaTempera.COMPOSITION_KINDS.indexOf(value.temperaTuning.composition) >= 0 ? value.temperaTuning.composition : 'auto',
+      if (value.temperaTuning && typeof value.temperaTuning === 'object') stanza.temperaTuning = {
+        composition: global.StanzaTempera && global.StanzaTempera.COMPOSITION_KINDS.indexOf(value.temperaTuning.composition) >= 0 ? value.temperaTuning.composition : 'auto',
         colorMode: ['duo', 'mono', 'vivid'].indexOf(value.temperaTuning.colorMode) >= 0 ? value.temperaTuning.colorMode : 'duo',
         screens: value.temperaTuning.screens !== false,
         inversion: value.temperaTuning.inversion !== false
@@ -1989,7 +1989,7 @@
       $('s3d-bloom').value = Math.round(bloom * 100); text('s3d-bloom-value', Math.round(bloom * 100) + '%');
       $('s3d-reactivity').value = Math.round(reactivity * 100); text('s3d-reactivity-value', Math.round(reactivity * 100) + '%');
       sweepRangeFills();
-      $('s3d-reading').hidden = foliaActive() ? true : !showLyrics;
+      $('s3d-reading').hidden = stanzaActive() ? true : !showLyrics;
       $('s3d-lyrics-toggle').setAttribute('aria-pressed', String(showLyrics));
     } finally { restoring = false; }
   }
@@ -2098,18 +2098,18 @@
   function toggleLyrics() {
     showLyrics = !showLyrics;
     syncLayout();
-    $('s3d-reading').hidden = foliaActive() ? true : !showLyrics;
+    $('s3d-reading').hidden = stanzaActive() ? true : !showLyrics;
     $('s3d-lyrics-toggle').setAttribute('aria-pressed', String(showLyrics));
-    if (foliaActive() && folia.ready) applyFoliaConfig();
+    if (stanzaActive() && stanza.ready) applyStanzaConfig();
     pokeChrome();
     savePreferences();
   }
 
   // -------------------------------------------------------------------------
-  // folia 平面布局：挂载、配置推送与动画驱动
+  // stanza 平面布局：挂载、配置推送与动画驱动
   //
-  // 帧循环只做动画驱动（driveFolia）；主题/字号/调参等配置在 syncLayout、
-  // 8fps 元数据 gate（syncFoliaMeta）与控件回调里推（applyFoliaConfig），
+  // 帧循环只做动画驱动（driveStanza）；主题/字号/调参等配置在 syncLayout、
+  // 8fps 元数据 gate（syncStanzaMeta）与控件回调里推（applyStanzaConfig），
   // 避免每帧 getComputedStyle/重排。
   // -------------------------------------------------------------------------
 
@@ -2122,38 +2122,38 @@
     return (t.track && t.track.id) || t.id || null;
   }
 
-  function ensureFolia() {
-    if (folia.ready) { applyFoliaConfig(); return; }
+  function ensureStanza() {
+    if (stanza.ready) { applyStanzaConfig(); return; }
     var bgHost = $('s3d-fl-bg'), lyricHost = $('s3d-fl-lyric'), subHost = $('s3d-fl-sub');
     var sonnetHost = $('s3d-fl-sonnet-stage');
-    if (!global.FoliaBg || !bgHost) return;
-    folia.bg = global.FoliaBg.init(bgHost);
-    folia.sub = global.FoliaSubtitle.init(subHost);
-    folia.classic = global.FoliaClassic.init(lyricHost, function (ms) { control('seek', ms); });
-    folia.cadenza = global.FoliaCadenza.init(lyricHost, function (ms) { control('seek', ms); });
+    if (!global.StanzaBg || !bgHost) return;
+    stanza.bg = global.StanzaBg.init(bgHost);
+    stanza.sub = global.StanzaSubtitle.init(subHost);
+    stanza.classic = global.StanzaClassic.init(lyricHost, function (ms) { control('seek', ms); });
+    stanza.cadenza = global.StanzaCadenza.init(lyricHost, function (ms) { control('seek', ms); });
     // 商籁独立占一层（全屏 Pixi 画布），不与 classic/cadenza 共用歌词宿主。
-    if (global.FoliaSonnet && sonnetHost) {
-      folia.sonnet = global.FoliaSonnet.init(sonnetHost, function (ms) { control('seek', ms); });
+    if (global.StanzaSonnet && sonnetHost) {
+      stanza.sonnet = global.StanzaSonnet.init(sonnetHost, function (ms) { control('seek', ms); });
     }
     // 凝彩与商籁共用同一层宿主与同一份惰性 Pixi；同一时刻只有一个可见。
     // 凝彩不给 seek 回调：它的取景框只覆盖正在唱的那句，点击只会把播放打回
-    // 句首（见 folia-tempera 的取景框注释），舞台点击应留给机位手势。
-    if (global.FoliaTempera && global.FoliaSonnet && sonnetHost) {
-      folia.tempera = global.FoliaTempera.init(sonnetHost);
+    // 句首（见 stanza-tempera 的取景框注释），舞台点击应留给机位手势。
+    if (global.StanzaTempera && global.StanzaSonnet && sonnetHost) {
+      stanza.tempera = global.StanzaTempera.init(sonnetHost);
     }
-    folia.ready = true;
-    bindFoliaControls();
-    applyFoliaConfig();
+    stanza.ready = true;
+    bindStanzaControls();
+    applyStanzaConfig();
   }
 
   function planeApi() {
-    return folia.visual === 'classic' ? folia.classic
-      : folia.visual === 'sonnet' ? folia.sonnet
-      : folia.visual === 'tempera' && folia.tempera ? folia.tempera : folia.cadenza;
+    return stanza.visual === 'classic' ? stanza.classic
+      : stanza.visual === 'sonnet' ? stanza.sonnet
+      : stanza.visual === 'tempera' && stanza.tempera ? stanza.tempera : stanza.cadenza;
   }
 
   function sceneCovered() {
-    return foliaActive() && (folia.bgMode === 'anime' || folia.bgMode === 'atmosphere');
+    return stanzaActive() && (stanza.bgMode === 'anime' || stanza.bgMode === 'atmosphere');
   }
 
   function stageWallpapers() {
@@ -2169,22 +2169,22 @@
   function syncStageBackdrop() {
     var backdrop = $('s3d-fl-backdrop'), picture = $('s3d-fl-wallpaper');
     var panel = $('s3d-fl-wallpapers'), gallery = $('s3d-fl-wallpaper-grid');
-    var useImage = folia.bgMode === 'anime';
+    var useImage = stanza.bgMode === 'anime';
     if (backdrop) backdrop.hidden = !sceneCovered();
     if (panel) panel.hidden = !useImage;
     if (root) root.classList.toggle('s3d-scene-covered', sceneCovered());
-    if (backdrop && backdrop.dataset.dim !== String(folia.wallpaperDim)) {
-      backdrop.dataset.dim = String(folia.wallpaperDim);
-      backdrop.style.setProperty('--fl-wallpaper-dim', String(folia.wallpaperDim));
+    if (backdrop && backdrop.dataset.dim !== String(stanza.wallpaperDim)) {
+      backdrop.dataset.dim = String(stanza.wallpaperDim);
+      backdrop.style.setProperty('--fl-wallpaper-dim', String(stanza.wallpaperDim));
     }
     if (picture && backdrop) {
-      var selected = stageWallpaper(folia.wallpaper);
+      var selected = stageWallpaper(stanza.wallpaper);
       if (useImage && picture.dataset.wallpaper !== selected) {
-        folia.wallpaper = selected;
+        stanza.wallpaper = selected;
         picture.dataset.wallpaper = selected;
         picture.hidden = true;
         backdrop.dataset.image = 'loading';
-        picture.onload = function () { backdrop.dataset.image = 'ready'; picture.hidden = folia.bgMode !== 'anime'; };
+        picture.onload = function () { backdrop.dataset.image = 'ready'; picture.hidden = stanza.bgMode !== 'anime'; };
         picture.onerror = function () { backdrop.dataset.image = 'error'; picture.hidden = true; };
         if (selected) picture.src = '/wallpapers/' + encodeURIComponent(selected);
         else { picture.removeAttribute('src'); backdrop.dataset.image = 'error'; }
@@ -2199,12 +2199,12 @@
         thumbnail.alt = ''; thumbnail.loading = 'lazy'; thumbnail.src = '/wallpapers/' + encodeURIComponent(item.id);
         var caption = document.createElement('span'); caption.textContent = item.label;
         button.append(thumbnail, caption);
-        button.addEventListener('click', function () { folia.wallpaper = item.id; applyFoliaConfig(); savePreferences(); });
+        button.addEventListener('click', function () { stanza.wallpaper = item.id; applyStanzaConfig(); savePreferences(); });
         gallery.append(button);
       });
     }
     if (gallery) gallery.querySelectorAll('button').forEach(function (button) {
-      var pressed = String(button.dataset.wallpaper === folia.wallpaper);
+      var pressed = String(button.dataset.wallpaper === stanza.wallpaper);
       if (button.getAttribute('aria-pressed') !== pressed) button.setAttribute('aria-pressed', pressed);
     });
     var note = $('s3d-fl-wallpaper-note');
@@ -2214,16 +2214,16 @@
     }
   }
 
-  function applyFoliaConfig() {
-    if (!folia.ready) return;
-    var t = folia.visual === 'sonnet' && global.FoliaTheme.resolveSonnet ? global.FoliaTheme.resolveSonnet(reactivity) : global.FoliaTheme.resolve(reactivity);
-    var sig = folia.visual + ':' + global.FoliaTheme.signature(t);
-    if (sig !== folia.themeSig) {
-      folia.themeSig = sig;
-      folia.bg.setTheme(t); folia.sub.setTheme(t);
-      folia.classic.setTheme(t); folia.cadenza.setTheme(t);
-      if (folia.sonnet) folia.sonnet.setTheme(t);
-      if (folia.tempera) folia.tempera.setTheme(t);
+  function applyStanzaConfig() {
+    if (!stanza.ready) return;
+    var t = stanza.visual === 'sonnet' && global.StanzaTheme.resolveSonnet ? global.StanzaTheme.resolveSonnet(reactivity) : global.StanzaTheme.resolve(reactivity);
+    var sig = stanza.visual + ':' + global.StanzaTheme.signature(t);
+    if (sig !== stanza.themeSig) {
+      stanza.themeSig = sig;
+      stanza.bg.setTheme(t); stanza.sub.setTheme(t);
+      stanza.classic.setTheme(t); stanza.cadenza.setTheme(t);
+      if (stanza.sonnet) stanza.sonnet.setTheme(t);
+      if (stanza.tempera) stanza.tempera.setTheme(t);
       // 商籁 HUD/角标文案的取色跟着主题 accent 走（canvas 内部另有自己的换算）。
       root.style.setProperty('--fl-sonnet-accent', t.accentColor);
       root.style.setProperty('--fl-scene-base', t.backgroundColor);
@@ -2232,80 +2232,80 @@
       root.style.setProperty('--fl-scene-tertiary', t.tertiaryColor || t.accentColor);
     }
     var fs = clamp(num(lyricSize, 1), 0.7, 1.5);
-    root.style.setProperty('--folia-fontscale', String(fs));
-    [folia.classic, folia.cadenza, folia.sub].forEach(function (a) { a.setFontScale(fs); });
-    if (folia.sonnet) folia.sonnet.setFontScale(fs);
-    if (folia.tempera) folia.tempera.setFontScale(fs);
-    folia.bg.setMode(sceneCovered() ? 'stage' : folia.bgMode);
+    root.style.setProperty('--stanza-fontscale', String(fs));
+    [stanza.classic, stanza.cadenza, stanza.sub].forEach(function (a) { a.setFontScale(fs); });
+    if (stanza.sonnet) stanza.sonnet.setFontScale(fs);
+    if (stanza.tempera) stanza.tempera.setFontScale(fs);
+    stanza.bg.setMode(sceneCovered() ? 'stage' : stanza.bgMode);
     syncStageBackdrop();
-    folia.bg.setOpacity(folia.bgOpacity);
-    folia.bg.setVignette(folia.vignette);
-    folia.sub.setVisible(folia.subtitle && showLyrics);
-    folia.classic.setTuning(folia.classicTuning);
-    folia.cadenza.setTuning(folia.cadenzaTuning);
-    if (folia.sonnet) {
-      folia.sonnet.setTuning(folia.sonnetTuning);
+    stanza.bg.setOpacity(stanza.bgOpacity);
+    stanza.bg.setVignette(stanza.vignette);
+    stanza.sub.setVisible(stanza.subtitle && showLyrics);
+    stanza.classic.setTuning(stanza.classicTuning);
+    stanza.cadenza.setTuning(stanza.cadenzaTuning);
+    if (stanza.sonnet) {
+      stanza.sonnet.setTuning(stanza.sonnetTuning);
       // 舞台全局滑杆/开关对商籁的旁路：镜头动态→镜头强度，律动→演绎强度，
       // 背景样式决定 HUD 布景层显隐，暗角开关走光学后期渐晕。
-      folia.sonnet.setMotion(motion);
-      folia.sonnet.setReactivity(reactivity);
-      folia.sonnet.setBgMode(folia.bgMode);
-      folia.sonnet.setVignette(folia.vignette);
+      stanza.sonnet.setMotion(motion);
+      stanza.sonnet.setReactivity(reactivity);
+      stanza.sonnet.setBgMode(stanza.bgMode);
+      stanza.sonnet.setVignette(stanza.vignette);
     }
-    if (folia.tempera) {
-      folia.tempera.setTuning(folia.temperaTuning);
-      folia.tempera.setMotion(motion);
-      folia.tempera.setReactivity(reactivity);
-      folia.tempera.setBgMode(folia.bgMode);
-      folia.tempera.setVignette(folia.vignette);
+    if (stanza.tempera) {
+      stanza.tempera.setTuning(stanza.temperaTuning);
+      stanza.tempera.setMotion(motion);
+      stanza.tempera.setReactivity(reactivity);
+      stanza.tempera.setBgMode(stanza.bgMode);
+      stanza.tempera.setVignette(stanza.vignette);
     }
     // 只有当前歌词视觉对应的渲染器可见，其余必须隐藏（classic/cadenza 共用
     // #s3d-fl-lyric；商籁启用时该宿主整体隐藏，独占 #s3d-fl-sonnet-stage 层）。
-    folia.classic.setVisible(showLyrics && folia.visual === 'classic');
-    folia.cadenza.setVisible(showLyrics && folia.visual === 'cadenza');
-    var pixiVisual = folia.visual === 'sonnet' || folia.visual === 'tempera';
+    stanza.classic.setVisible(showLyrics && stanza.visual === 'classic');
+    stanza.cadenza.setVisible(showLyrics && stanza.visual === 'cadenza');
+    var pixiVisual = stanza.visual === 'sonnet' || stanza.visual === 'tempera';
     if ($('s3d-fl-lyric')) $('s3d-fl-lyric').hidden = pixiVisual;
-    if (folia.sonnet) folia.sonnet.setVisible(showLyrics && folia.visual === 'sonnet');
-    if (folia.tempera) folia.tempera.setVisible(showLyrics && folia.visual === 'tempera');
+    if (stanza.sonnet) stanza.sonnet.setVisible(showLyrics && stanza.visual === 'sonnet');
+    if (stanza.tempera) stanza.tempera.setVisible(showLyrics && stanza.visual === 'tempera');
     var data = global.Stage && Stage.presentation ? Stage.presentation() : null;
-    folia.bg.setPaused(!data || !data.playing);
-    [folia.classic, folia.cadenza].forEach(function (a) { a.setPaused(!data || !data.playing); });
-    if (folia.sonnet) folia.sonnet.setPaused(!data || !data.playing);
-    if (folia.tempera) folia.tempera.setPaused(!data || !data.playing);
+    stanza.bg.setPaused(!data || !data.playing);
+    [stanza.classic, stanza.cadenza].forEach(function (a) { a.setPaused(!data || !data.playing); });
+    if (stanza.sonnet) stanza.sonnet.setPaused(!data || !data.playing);
+    if (stanza.tempera) stanza.tempera.setPaused(!data || !data.playing);
     var eco = !!(global.Stage && Stage.tier && Stage.tier() === 0);
-    folia.bg.setEco(eco);
-    [folia.classic, folia.cadenza].forEach(function (a) { a.setEco(eco); });
-    if (folia.sonnet) folia.sonnet.setEco(eco);
-    if (folia.tempera) folia.tempera.setEco(eco);
+    stanza.bg.setEco(eco);
+    [stanza.classic, stanza.cadenza].forEach(function (a) { a.setEco(eco); });
+    if (stanza.sonnet) stanza.sonnet.setEco(eco);
+    if (stanza.tempera) stanza.tempera.setEco(eco);
   }
 
-  function driveFolia(dtMs) {
-    if (!folia.ready) return;
-    // 配置只在 8fps 的 syncFoliaMeta/控件回调里推；帧循环只做动画驱动，避免每帧重建。
-    folia.bg.frame(dtMs);
+  function driveStanza(dtMs) {
+    if (!stanza.ready) return;
+    // 配置只在 8fps 的 syncStanzaMeta/控件回调里推；帧循环只做动画驱动，避免每帧重建。
+    stanza.bg.frame(dtMs);
     if (showLyrics) { planeApi().frame(dtMs); }
   }
 
-  function syncFoliaMeta() {
-    if (!folia.ready || !foliaActive()) return;
-    applyFoliaConfig();
+  function syncStanzaMeta() {
+    if (!stanza.ready || !stanzaActive()) return;
+    applyStanzaConfig();
     // 封面变化检测降到 8fps：presentation() 每帧比签名是纯空转。
     var data = global.Stage && Stage.presentation ? Stage.presentation() : null;
-    if (data && data.cover !== folia.coverSig) {
-      folia.coverSig = data.cover;
+    if (data && data.cover !== stanza.coverSig) {
+      stanza.coverSig = data.cover;
       // stage 背景模式（透 3D）不消费封面，仍记录签名避免重复判定。
-      if (folia.bgMode === 'fluid') folia.bg.setCover(data.cover || null);
+      if (stanza.bgMode === 'fluid') stanza.bg.setCover(data.cover || null);
     }
-    folia.sub.update();
+    stanza.sub.update();
     planeApi().update();
     var serverOff = global.Stage && Stage.lyricOffset ? Stage.lyricOffset() : 0;
     // 乐观值核销：服务端值追上 pending（PUT+refresh 完成）后回归服务端读数；
     // 未追上则继续显示 pending，不让 8fps 节拍把显示刷回旧值。
     // 核销只清 pendingOffset；pendingTrackId 保留为当前曲，作为切歌/失败判定基准。
-    if (folia.pendingOffset != null && serverOff === folia.pendingOffset) {
-      folia.pendingOffset = null;
+    if (stanza.pendingOffset != null && serverOff === stanza.pendingOffset) {
+      stanza.pendingOffset = null;
     }
-    var off = folia.pendingOffset != null ? folia.pendingOffset : serverOff;
+    var off = stanza.pendingOffset != null ? stanza.pendingOffset : serverOff;
     var ov = $('s3d-fl-off-value');
     if (ov) ov.textContent = (off > 0 ? '+' : '') + (off / 1000).toFixed(1) + 's';
     // 在线曲目没有偏移语义：两个 nudge 按钮置灰（nudge 源头也会再拦一次）。
@@ -2330,44 +2330,44 @@
     root.style.setProperty('--sl-glow', lyricGlow);
     $('s3d-layout').value = layout;
     var visualSel = $('s3d-lyric-visual');
-    if (visualSel) visualSel.value = folia.visual;
+    if (visualSel) visualSel.value = stanza.visual;
     var themeSel = $('s3d-stage-theme');
     if (themeSel) themeSel.value = stageTheme;
     $('s3d-sleeve').hidden = layout !== 'sleeve';
-    var fa = foliaActive();
+    var fa = stanzaActive();
     var standalone = isStandalone();
     if (lyricView) lyricView.configure(showLyrics && !fa);
-    // s3d-folia：folia 歌词叠加层激活（无论是否有 GL）；s3d-plane：仅无 GL 纯平面回退
+    // s3d-stanza：stanza 歌词叠加层激活（无论是否有 GL）；s3d-plane：仅无 GL 纯平面回退
     // （该类负责隐藏 3D 画布与禁用手势）。叠加时 3D 场景照常渲染、相机照常工作。
-    root.classList.toggle('s3d-folia', fa);
+    root.classList.toggle('s3d-stanza', fa);
     root.classList.toggle('s3d-plane', standalone);
-    $('s3d-folia').hidden = !fa;
+    $('s3d-stanza').hidden = !fa;
     $('s3d-reading').hidden = fa ? true : !showLyrics;
     $('s3d-fl-common').hidden = !fa;
-    $('s3d-fl-classic').hidden = folia.visual !== 'classic';
-    $('s3d-fl-cadenza').hidden = folia.visual !== 'cadenza';
+    $('s3d-fl-classic').hidden = stanza.visual !== 'classic';
+    $('s3d-fl-cadenza').hidden = stanza.visual !== 'cadenza';
     var sonnetPanel = $('s3d-fl-sonnet');
-    if (sonnetPanel) sonnetPanel.hidden = folia.visual !== 'sonnet';
+    if (sonnetPanel) sonnetPanel.hidden = stanza.visual !== 'sonnet';
     var temperaPanel = $('s3d-fl-tempera');
-    if (temperaPanel) temperaPanel.hidden = folia.visual !== 'tempera';
+    if (temperaPanel) temperaPanel.hidden = stanza.visual !== 'tempera';
     syncTemperaControls();
-    setOpacityRowEnabled(folia.bgMode === 'fluid');
+    setOpacityRowEnabled(stanza.bgMode === 'fluid');
     syncStageBackdrop();
-    // 镜头动态只在无 GL 纯平面回退时失效；folia 透明叠加时它仍驱动 3D 相机。
+    // 镜头动态只在无 GL 纯平面回退时失效；stanza 透明叠加时它仍驱动 3D 相机。
     var motionInput = $('s3d-motion');
     if (motionInput) {
       motionInput.disabled = standalone;
       var ml = document.querySelector('label[for="s3d-motion"]');
       if (ml) ml.style.opacity = standalone ? '.5' : '1';
     }
-    // init/configure 时 active=false 不预建 folia；舞台打开后 open() 会再跑一次
+    // init/configure 时 active=false 不预建 stanza；舞台打开后 open() 会再跑一次
     // syncLayout，届时才创建实例。
-    if (fa && active) ensureFolia();
+    if (fa && active) ensureStanza();
     else if (!fa) {
-      if (folia.ready) {
-        folia.classic.setVisible(false); folia.cadenza.setVisible(false);
-        if (folia.sonnet) folia.sonnet.setVisible(false);
-        if (folia.tempera) folia.tempera.setVisible(false);
+      if (stanza.ready) {
+        stanza.classic.setVisible(false); stanza.cadenza.setVisible(false);
+        if (stanza.sonnet) stanza.sonnet.setVisible(false);
+        if (stanza.tempera) stanza.tempera.setVisible(false);
       }
       // 回到舞台歌词轨：GL 已挂掉时把降级提示还给用户。
       if (glFailed) showFallback('当前设备暂不支持三维渲染，仍可播放音乐或返回曲库。');
@@ -2452,9 +2452,9 @@
     // 归属不一致（含 null↔id：停播、首次建立基准）时，作废在途偏移，避免 A 曲
     // 的迟到 PUT/refresh 污染 B 曲显示。首次只建立基准，pendingOffset 本就是 null。
     var curTid = currentTrackId();
-    if (curTid !== folia.pendingTrackId) {
-      folia.pendingOffset = null;
-      folia.pendingTrackId = curTid;
+    if (curTid !== stanza.pendingTrackId) {
+      stanza.pendingOffset = null;
+      stanza.pendingTrackId = curTid;
     }
     text('s3d-title', track ? track.title || '未知曲目' : '还没有播放音乐');
     text('s3d-artist', track ? track.artist || '未知艺术家' : '从曲库选择一首喜欢的歌');
@@ -2465,7 +2465,7 @@
     text('s3d-motion-note', data.reduced ? '已遵循减少动态效果设置' : '设置即时生效');
     root.classList.toggle('s3d-playing', data.playing);
     root.classList.toggle('s3d-reduced', data.reduced);
-    if (foliaActive()) syncFoliaMeta();
+    if (stanzaActive()) syncStanzaMeta();
     $('s3d-play').setAttribute('aria-label', !track ? '选择音乐' : data.playing ? '暂停' : '播放');
     $('s3d-play-icon').setAttribute('href', data.playing ? '#i-pause' : '#i-play');
     $('s3d-prev').disabled = $('s3d-next').disabled = !track;
@@ -2484,8 +2484,8 @@
     }
     text('s3d-sleeve-title', track ? track.title || '未知曲目' : '你的下一张唱片');
     text('s3d-sleeve-artist', track ? track.artist || '未知艺术家' : '从曲库开始聆听');
-    // 平面布局由 folia 渲染器接管歌词，GL lyricView 空转 update 没有意义。
-    if (lyricView && showLyrics && !foliaActive()) lyricView.update(data);
+    // 平面布局由 stanza 渲染器接管歌词，GL lyricView 空转 update 没有意义。
+    if (lyricView && showLyrics && !stanzaActive()) lyricView.update(data);
   }
 
   function syncDock() {
@@ -2580,8 +2580,8 @@
     syncDock(); syncNowPlaying(); pokeChrome();
     if (global.Stage && Stage.kick) Stage.kick();
     var hasGl = ensureGl();
-    // 无 GL 时只有 folia 歌词视觉可以纯平面回退放行；舞台歌词/封面/单句都需要三维渲染。
-    if (!hasGl && !foliaActive()) { showFallback('当前设备暂不支持三维渲染，仍可播放音乐或返回曲库。'); return false; }
+    // 无 GL 时只有 stanza 歌词视觉可以纯平面回退放行；舞台歌词/封面/单句都需要三维渲染。
+    if (!hasGl && !stanzaActive()) { showFallback('当前设备暂不支持三维渲染，仍可播放音乐或返回曲库。'); return false; }
     if (!hasGl) { var fbNoGl = $('s3d-fallback'); if (fbNoGl) fbNoGl.hidden = true; }
     sizeDirty = true;
     resize();
@@ -2590,7 +2590,7 @@
     fade = 0;
     startTransition();
     syncDock();
-    // active 已置位：若恢复的布局是平面，这里才真正创建 folia 实例。
+    // active 已置位：若恢复的布局是平面，这里才真正创建 stanza 实例。
     syncLayout();
     syncNowPlaying();
     if (shelf) { shelf.setItems(queueData); shelf.setBlocked(false); shelf.show(); }
@@ -2646,8 +2646,8 @@
     tint2 = parseColor(cs.getPropertyValue('--accent-2'), [0, 0.96, 0.83]);
     tint3 = parseColor(cs.getPropertyValue('--music-highlight') ||
       cs.getPropertyValue('--accent-2'), [0.96, 0.82, 0.54]);
-    // 换肤后强制 folia 主题重算（签名缓存在下一次 applyFoliaConfig 失效）。
-    folia.themeSig = '';
+    // 换肤后强制 stanza 主题重算（签名缓存在下一次 applyStanzaConfig 失效）。
+    stanza.themeSig = '';
   }
 
   // -------------------------------------------------------------------------
@@ -2712,9 +2712,9 @@
   // 初始化
   // -------------------------------------------------------------------------
 
-  // folia 设置面板控件：首次进入平面布局（ensureFolia）时绑定一次。
-  function bindFoliaControls() {
-    // saveOn === 'change'：拖动过程 input 只即时应用（applyFoliaConfig），
+  // stanza 设置面板控件：首次进入平面布局（ensureStanza）时绑定一次。
+  function bindStanzaControls() {
+    // saveOn === 'change'：拖动过程 input 只即时应用（applyStanzaConfig），
     // 松手触发 change 才 savePreferences 发 PUT，与 motion/bloom/reactivity 一致。
     function range(id, fn, fmt, saveOn) {
       var el = $(id), out = $(id + '-value');
@@ -2724,7 +2724,7 @@
       el.addEventListener('input', function () {
         fn(Number(el.value));
         if (out) out.textContent = fmt ? fmt(Number(el.value)) : el.value;
-        applyFoliaConfig();
+        applyStanzaConfig();
         if (when !== 'change') savePreferences();
       });
       if (when === 'change') el.addEventListener('change', savePreferences);
@@ -2733,51 +2733,51 @@
       var el = $(id);
       if (!el || el._bound) return;
       el._bound = true;
-      el.addEventListener('change', function () { fn(el.checked); applyFoliaConfig(); savePreferences(); });
+      el.addEventListener('change', function () { fn(el.checked); applyStanzaConfig(); savePreferences(); });
     }
     range('s3d-fl-size', function (v) { lyricSize = v; }, function (v) { return Math.round(v * 100) + '%'; }, 'change');
     var bgSel = $('s3d-fl-bg-mode');
-    if (bgSel && !bgSel._bound) { bgSel._bound = true; bgSel.value = folia.bgMode;
+    if (bgSel && !bgSel._bound) { bgSel._bound = true; bgSel.value = stanza.bgMode;
       bgSel.addEventListener('change', function () {
-        folia.bgMode = bgSel.value;
-        setOpacityRowEnabled(folia.bgMode === 'fluid');
-        applyFoliaConfig();
+        stanza.bgMode = bgSel.value;
+        setOpacityRowEnabled(stanza.bgMode === 'fluid');
+        applyStanzaConfig();
         // stage 模式不缓存封面，切到 fluid 时立刻补喂当前封面。
-        if (folia.bgMode === 'fluid' && global.Stage && Stage.presentation) {
+        if (stanza.bgMode === 'fluid' && global.Stage && Stage.presentation) {
           var cov = Stage.presentation().cover;
-          folia.coverSig = cov;
-          folia.bg.setCover(cov || null);
+          stanza.coverSig = cov;
+          stanza.bg.setCover(cov || null);
         }
         savePreferences();
       }); }
-    range('s3d-fl-opacity', function (v) { folia.bgOpacity = v; }, function (v) { return Math.round(v * 100) + '%'; }, 'change');
-    range('s3d-fl-wallpaper-dim', function (v) { folia.wallpaperDim = clamp(v, 0.2, 0.8); }, function (v) { return Math.round(v * 100) + '%'; }, 'change');
-    check('s3d-fl-vignette', function (b) { folia.vignette = b; });
-    check('s3d-fl-subtitle', function (b) { folia.subtitle = b; });
-    check('s3d-fl-rotation', function (b) { folia.classicTuning.rotation = b; });
-    range('s3d-fl-breathing', function (v) { folia.classicTuning.breathing = v; }, function (v) { return v.toFixed(2) + 'x'; }, 'change');
-    range('s3d-fl-spacing', function (v) { folia.classicTuning.spacing = v; }, function (v) { return v.toFixed(2) + 'x'; }, 'change');
-    range('s3d-fl-width', function (v) { folia.cadenzaTuning.width = v; }, function (v) { return Math.round(v * 100) + '%'; }, 'change');
-    range('s3d-fl-motion', function (v) { folia.cadenzaTuning.motion = v; }, function (v) { return v.toFixed(2) + 'x'; }, 'change');
-    range('s3d-fl-glow', function (v) { folia.cadenzaTuning.glow = v; }, function (v) { return v.toFixed(2) + 'x'; }, 'change');
-    range('s3d-fl-beam', function (v) { folia.cadenzaTuning.beam = v; }, function (v) { return v.toFixed(2) + 'x'; }, 'change');
+    range('s3d-fl-opacity', function (v) { stanza.bgOpacity = v; }, function (v) { return Math.round(v * 100) + '%'; }, 'change');
+    range('s3d-fl-wallpaper-dim', function (v) { stanza.wallpaperDim = clamp(v, 0.2, 0.8); }, function (v) { return Math.round(v * 100) + '%'; }, 'change');
+    check('s3d-fl-vignette', function (b) { stanza.vignette = b; });
+    check('s3d-fl-subtitle', function (b) { stanza.subtitle = b; });
+    check('s3d-fl-rotation', function (b) { stanza.classicTuning.rotation = b; });
+    range('s3d-fl-breathing', function (v) { stanza.classicTuning.breathing = v; }, function (v) { return v.toFixed(2) + 'x'; }, 'change');
+    range('s3d-fl-spacing', function (v) { stanza.classicTuning.spacing = v; }, function (v) { return v.toFixed(2) + 'x'; }, 'change');
+    range('s3d-fl-width', function (v) { stanza.cadenzaTuning.width = v; }, function (v) { return Math.round(v * 100) + '%'; }, 'change');
+    range('s3d-fl-motion', function (v) { stanza.cadenzaTuning.motion = v; }, function (v) { return v.toFixed(2) + 'x'; }, 'change');
+    range('s3d-fl-glow', function (v) { stanza.cadenzaTuning.glow = v; }, function (v) { return v.toFixed(2) + 'x'; }, 'change');
+    range('s3d-fl-beam', function (v) { stanza.cadenzaTuning.beam = v; }, function (v) { return v.toFixed(2) + 'x'; }, 'change');
     // 商籁：镜头调度/排布为下拉，词组长度为滑杆，装饰与重音为开关。
     function select(id, fn) {
       var el = $(id);
       if (!el || el._bound) return;
       el._bound = true;
-      el.addEventListener('change', function () { fn(el.value); applyFoliaConfig(); savePreferences(); });
+      el.addEventListener('change', function () { fn(el.value); applyStanzaConfig(); savePreferences(); });
     }
-    select('s3d-fl-shot', function (v) { folia.sonnetTuning.shotFlow = v; });
-    select('s3d-fl-track-layout', function (v) { folia.sonnetTuning.lyricLayout = v; });
-    range('s3d-fl-phrase', function (v) { folia.sonnetTuning.phraseLength = Math.round(v); },
+    select('s3d-fl-shot', function (v) { stanza.sonnetTuning.shotFlow = v; });
+    select('s3d-fl-track-layout', function (v) { stanza.sonnetTuning.lyricLayout = v; });
+    range('s3d-fl-phrase', function (v) { stanza.sonnetTuning.phraseLength = Math.round(v); },
       function (v) { return String(Math.round(v)); }, 'change');
-    check('s3d-fl-decor', function (b) { folia.sonnetTuning.decor = b; });
-    check('s3d-fl-accents', function (b) { folia.sonnetTuning.accents = b; });
-    select('s3d-fl-composition', function (value) { folia.temperaTuning.composition = value; });
-    select('s3d-fl-color-mode', function (value) { folia.temperaTuning.colorMode = value; });
-    check('s3d-fl-screens', function (value) { folia.temperaTuning.screens = value; });
-    check('s3d-fl-inversion', function (value) { folia.temperaTuning.inversion = value; });
+    check('s3d-fl-decor', function (b) { stanza.sonnetTuning.decor = b; });
+    check('s3d-fl-accents', function (b) { stanza.sonnetTuning.accents = b; });
+    select('s3d-fl-composition', function (value) { stanza.temperaTuning.composition = value; });
+    select('s3d-fl-color-mode', function (value) { stanza.temperaTuning.colorMode = value; });
+    check('s3d-fl-screens', function (value) { stanza.temperaTuning.screens = value; });
+    check('s3d-fl-inversion', function (value) { stanza.temperaTuning.inversion = value; });
     var down = $('s3d-fl-off-down'), up = $('s3d-fl-off-up');
     function nudge(d) {
       if (!global.Stage || !Stage.lyricOffset) return;
@@ -2788,96 +2788,96 @@
       if (String(tid).indexOf('online:') === 0) return;
       // 基于乐观暂存递增：落库+refresh 完成前 Stage.lyricOffset() 仍是旧值，
       // 直接读它连点会塌缩成一步。
-      var base = (folia.pendingOffset == null) ? Stage.lyricOffset() : folia.pendingOffset;
+      var base = (stanza.pendingOffset == null) ? Stage.lyricOffset() : stanza.pendingOffset;
       var next = Math.max(-60000, Math.min(60000, base + d));
       // pendingOffset 与归属曲目成对记录，供切歌隔离与 PUT 失败回清判定。
-      folia.pendingOffset = next;
-      folia.pendingTrackId = tid;
+      stanza.pendingOffset = next;
+      stanza.pendingTrackId = tid;
       control('lyricOffset', next);
       var ov = $('s3d-fl-off-value');
       if (ov) ov.textContent = (next > 0 ? '+' : '') + (next / 1000).toFixed(1) + 's';
     }
     if (down && !down._bound) { down._bound = true; down.addEventListener('click', function () { nudge(-100); }); }
     if (up && !up._bound) { up._bound = true; up.addEventListener('click', function () { nudge(100); }); }
-    // PUT 失败回清：app.js 落库失败时派发 folia:offset-failed。只注册一次
-    // （bindFoliaControls 理论上仅首调，folia 级标志兜底 destroy 后重建场景）；
+    // PUT 失败回清：app.js 落库失败时派发 stanza:offset-failed。只注册一次
+    // （bindStanzaControls 理论上仅首调，stanza 级标志兜底 destroy 后重建场景）；
     // 仅当失败的仍是 pending 归属曲目时回清，已切歌则忽略，避免误清新曲状态。
-    if (!folia.offsetFailBound) {
-      folia.offsetFailBound = true;
-      document.addEventListener('folia:offset-failed', function (e) {
+    if (!stanza.offsetFailBound) {
+      stanza.offsetFailBound = true;
+      document.addEventListener('stanza:offset-failed', function (e) {
         var fid = e.detail && e.detail.id;
-        if (folia.ready && fid === folia.pendingTrackId) {
-          folia.pendingOffset = null;
-          syncFoliaMeta();
+        if (stanza.ready && fid === stanza.pendingTrackId) {
+          stanza.pendingOffset = null;
+          syncStanzaMeta();
         }
       });
     }
-    // 从 folia 状态回填全部控件并刷新 output 文本。bindFoliaControls 只在首次
-    // 进平面时绑一次，而 configure 在此之前已把偏好读进 folia 状态，故刷新恢复也覆盖。
-    function syncFoliaControls() {
+    // 从 stanza 状态回填全部控件并刷新 output 文本。bindStanzaControls 只在首次
+    // 进平面时绑一次，而 configure 在此之前已把偏好读进 stanza 状态，故刷新恢复也覆盖。
+    function syncStanzaControls() {
       var bgMode = $('s3d-fl-bg-mode');
-      if (bgMode) bgMode.value = folia.bgMode;
+      if (bgMode) bgMode.value = stanza.bgMode;
       var op = $('s3d-fl-opacity');
-      if (op) op.value = String(folia.bgOpacity);
+      if (op) op.value = String(stanza.bgOpacity);
       var opOut = $('s3d-fl-opacity-value');
-      if (opOut) opOut.textContent = Math.round(folia.bgOpacity * 100) + '%';
-      var wallDim = $('s3d-fl-wallpaper-dim'); if (wallDim) wallDim.value = String(folia.wallpaperDim);
-      text('s3d-fl-wallpaper-dim-value', Math.round(folia.wallpaperDim * 100) + '%');
+      if (opOut) opOut.textContent = Math.round(stanza.bgOpacity * 100) + '%';
+      var wallDim = $('s3d-fl-wallpaper-dim'); if (wallDim) wallDim.value = String(stanza.wallpaperDim);
+      text('s3d-fl-wallpaper-dim-value', Math.round(stanza.wallpaperDim * 100) + '%');
       syncStageBackdrop();
-      setOpacityRowEnabled(folia.bgMode === 'fluid');
-      var vg = $('s3d-fl-vignette'); if (vg) vg.checked = folia.vignette;
-      var st = $('s3d-fl-subtitle'); if (st) st.checked = folia.subtitle;
-      var rot = $('s3d-fl-rotation'); if (rot) rot.checked = folia.classicTuning.rotation;
+      setOpacityRowEnabled(stanza.bgMode === 'fluid');
+      var vg = $('s3d-fl-vignette'); if (vg) vg.checked = stanza.vignette;
+      var st = $('s3d-fl-subtitle'); if (st) st.checked = stanza.subtitle;
+      var rot = $('s3d-fl-rotation'); if (rot) rot.checked = stanza.classicTuning.rotation;
       function fillRange(id, v, fmt) {
         var el = $(id), out = $(id + '-value');
         if (el) el.value = String(v);
         if (out) out.textContent = fmt(v);
       }
       var mult = function (v) { return v.toFixed(2) + 'x'; };
-      fillRange('s3d-fl-breathing', folia.classicTuning.breathing, mult);
-      fillRange('s3d-fl-spacing', folia.classicTuning.spacing, mult);
-      fillRange('s3d-fl-width', folia.cadenzaTuning.width, function (v) { return Math.round(v * 100) + '%'; });
-      fillRange('s3d-fl-motion', folia.cadenzaTuning.motion, mult);
-      fillRange('s3d-fl-glow', folia.cadenzaTuning.glow, mult);
-      fillRange('s3d-fl-beam', folia.cadenzaTuning.beam, mult);
-      var shot = $('s3d-fl-shot'); if (shot) shot.value = folia.sonnetTuning.shotFlow;
-      var tlay = $('s3d-fl-track-layout'); if (tlay) tlay.value = folia.sonnetTuning.lyricLayout;
-      fillRange('s3d-fl-phrase', folia.sonnetTuning.phraseLength, function (v) { return String(Math.round(v)); });
-      var decor = $('s3d-fl-decor'); if (decor) decor.checked = folia.sonnetTuning.decor;
-      var accents = $('s3d-fl-accents'); if (accents) accents.checked = folia.sonnetTuning.accents;
+      fillRange('s3d-fl-breathing', stanza.classicTuning.breathing, mult);
+      fillRange('s3d-fl-spacing', stanza.classicTuning.spacing, mult);
+      fillRange('s3d-fl-width', stanza.cadenzaTuning.width, function (v) { return Math.round(v * 100) + '%'; });
+      fillRange('s3d-fl-motion', stanza.cadenzaTuning.motion, mult);
+      fillRange('s3d-fl-glow', stanza.cadenzaTuning.glow, mult);
+      fillRange('s3d-fl-beam', stanza.cadenzaTuning.beam, mult);
+      var shot = $('s3d-fl-shot'); if (shot) shot.value = stanza.sonnetTuning.shotFlow;
+      var tlay = $('s3d-fl-track-layout'); if (tlay) tlay.value = stanza.sonnetTuning.lyricLayout;
+      fillRange('s3d-fl-phrase', stanza.sonnetTuning.phraseLength, function (v) { return String(Math.round(v)); });
+      var decor = $('s3d-fl-decor'); if (decor) decor.checked = stanza.sonnetTuning.decor;
+      var accents = $('s3d-fl-accents'); if (accents) accents.checked = stanza.sonnetTuning.accents;
       syncTemperaControls();
       var sizeEl = $('s3d-fl-size'); if (sizeEl) sizeEl.value = String(lyricSize);
       var sizeOut = $('s3d-fl-size-value'); if (sizeOut) sizeOut.textContent = Math.round(lyricSize * 100) + '%';
       sweepRangeFills();
     }
-    syncFoliaControls();
+    syncStanzaControls();
   }
 
   // 歌词视觉独立切换（舞台 3D 歌词轨 / 流光 / 心象 / 商籁）：与布局正交，
-  // 选 classic/cadenza/sonnet 时 folia 叠加到 3D 场景之上（无 GL 则纯平面回退）。
+  // 选 classic/cadenza/sonnet 时 stanza 叠加到 3D 场景之上（无 GL 则纯平面回退）。
   function bindLyricVisual() {
     var sel = $('s3d-lyric-visual');
     if (!sel || sel._bound) return;
     sel._bound = true;
-    sel.value = folia.visual;
+    sel.value = stanza.visual;
     sel.addEventListener('change', function () {
       var v = sel.value;
-      folia.visual = FOLIA_VISUALS.indexOf(v) >= 0 ? v : 'stage';
+      stanza.visual = STANZA_VISUALS.indexOf(v) >= 0 ? v : 'stage';
       syncLayout();
-      if (folia.ready) applyFoliaConfig();
+      if (stanza.ready) applyStanzaConfig();
       savePreferences();
     });
   }
 
   function syncTemperaControls() {
     var composition = $('s3d-fl-composition');
-    if (composition) composition.value = folia.temperaTuning.composition;
+    if (composition) composition.value = stanza.temperaTuning.composition;
     var colorMode = $('s3d-fl-color-mode');
-    if (colorMode) colorMode.value = folia.temperaTuning.colorMode;
+    if (colorMode) colorMode.value = stanza.temperaTuning.colorMode;
     var screens = $('s3d-fl-screens');
-    if (screens) screens.checked = folia.temperaTuning.screens;
+    if (screens) screens.checked = stanza.temperaTuning.screens;
     var inversion = $('s3d-fl-inversion');
-    if (inversion) inversion.checked = folia.temperaTuning.inversion;
+    if (inversion) inversion.checked = stanza.temperaTuning.inversion;
   }
 
   // 舞台主题与皮肤正交：换主题只改 #stage3d 上的 data-stage-theme，
@@ -2903,8 +2903,8 @@
     $('s3d-motion').addEventListener('input', function () {
       motion = Number(this.value) / 100; text('s3d-motion-value', this.value + '%');
       // 商籁的镜头强度直接吃这根滑杆：拖动即时推送，不等 8fps gate。
-      if (folia.sonnet) folia.sonnet.setMotion(motion);
-      if (folia.tempera) folia.tempera.setMotion(motion);
+      if (stanza.sonnet) stanza.sonnet.setMotion(motion);
+      if (stanza.tempera) stanza.tempera.setMotion(motion);
     });
     $('s3d-bloom').addEventListener('input', function () { bloom = Number(this.value) / 100; text('s3d-bloom-value', this.value + '%'); });
     $('s3d-reactivity').addEventListener('input', function () { reactivity = Number(this.value) / 100; text('s3d-reactivity-value', this.value + '%'); });
@@ -3057,8 +3057,8 @@
         markSizeDirty();
         // classic 视口 resize：软重建按新视口重算 clamp 字号/散布/narrow（spec 10.3）。
         // cadenza 有自有 ResizeObserver，不走这里。
-        if (folia.ready && folia.visual === 'classic' && folia.classic) folia.classic.resize();
-        if (folia.ready && folia.visual === 'sonnet' && folia.sonnet) folia.sonnet.resize();
+        if (stanza.ready && stanza.visual === 'classic' && stanza.classic) stanza.classic.resize();
+        if (stanza.ready && stanza.visual === 'sonnet' && stanza.sonnet) stanza.sonnet.resize();
       }, delay);
     });
   }
@@ -3073,11 +3073,11 @@
     if (shelf) { shelf.destroy(); shelf = null; }
     if (lyricView) lyricView.destroy();
     lyricView = null;
-    if (folia.ready) {
-      [folia.bg, folia.sub, folia.classic, folia.cadenza, folia.sonnet, folia.tempera].forEach(function (renderer) { if (renderer) renderer.destroy(); });
+    if (stanza.ready) {
+      [stanza.bg, stanza.sub, stanza.classic, stanza.cadenza, stanza.sonnet, stanza.tempera].forEach(function (renderer) { if (renderer) renderer.destroy(); });
       if (global.PIXI && global.PIXI.GlobalResourceRegistry) global.PIXI.GlobalResourceRegistry.release();
-      folia.ready = false; folia.bg = folia.sub = folia.classic = folia.cadenza = folia.sonnet = folia.tempera = null;
-      folia.themeSig = ''; folia.coverSig = ''; folia.pendingOffset = null; folia.pendingTrackId = null;
+      stanza.ready = false; stanza.bg = stanza.sub = stanza.classic = stanza.cadenza = stanza.sonnet = stanza.tempera = null;
+      stanza.themeSig = ''; stanza.coverSig = ''; stanza.pendingOffset = null; stanza.pendingTrackId = null;
     }
     active = false;
     if (global.Stage && Stage.removeGate) Stage.removeGate(GATE);

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 mmusic-studio contributors
-// folia 等价移植：纯函数工具。无 DOM 依赖，UMD-lite 尾部允许 Node require 做验证。
+// stanza 等价移植：纯函数工具。无 DOM 依赖，UMD-lite 尾部允许 Node require 做验证。
 (function (root, factory) {
   var api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
-  else root.FoliaUtil = api;
+  else root.StanzaUtil = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
@@ -85,7 +85,7 @@
     return rgbToHex((r + m) * 255, (g + m) * 255, (b + m) * 255);
   }
 
-  // ---- 行渲染提示（逐值复刻 folia renderHints.ts；单位毫秒）----
+  // ---- 行渲染提示（逐值复刻 stanza renderHints.ts；单位毫秒）----
   var MICRO_MS = 100, SHORT_MS = 180, MICRO_FLOOR_MS = 67;
   function lastWordEndMs(line) {
     var start = num(line.start_ms, 0);

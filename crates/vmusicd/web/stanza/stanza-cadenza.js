@@ -4,7 +4,7 @@
 (function (global) {
   'use strict';
   if (typeof window === 'undefined') return;
-  var U = global.FoliaUtil;
+  var U = global.StanzaUtil;
 
   function init(host, onSeek) {
     var wrap = document.createElement('div'); wrap.className = 'fl-cadenza';
@@ -14,7 +14,7 @@
     wrap.append(canvas, dom);
     host.append(wrap);
 
-    var theme = FoliaTheme.DEFAULT, fontScale = 1.12, visible = true, eco = false;
+    var theme = StanzaTheme.DEFAULT, fontScale = 1.12, visible = true, eco = false;
     // reduced 每帧在 frame 内活读祖先 .s3d-reduced：姿态/辉光瞬时吸附、光束能量按 0 冻结。
     var reduced = false;
     var tuning = { width: 0.72, motion: 1, glow: 1, beam: 0 };
@@ -63,8 +63,8 @@
       if (typeof document === 'undefined') return null;
       measureCanvas = document.createElement('canvas');
       measureCtx = measureCanvas.getContext('2d');
-      FoliaTextLayout.configure({ measure: function (text, px) {
-        measureCtx.font = '700 ' + px + 'px ' + FoliaTheme.fontStack(theme.fontStyle);
+      StanzaTextLayout.configure({ measure: function (text, px) {
+        measureCtx.font = '700 ' + px + 'px ' + StanzaTheme.fontStack(theme.fontStyle);
         return measureCtx.measureText(text).width;
       }});
       return measureCtx;
@@ -84,8 +84,8 @@
       // 窄屏排版宽度下限提到 0.88（spec 10.2）。
       var widthRatio = W < 760 ? Math.max(0.88, tuning.width) : tuning.width;
       var maxW = W * widthRatio;
-      setMeasureFont(FoliaTheme.fontStack(theme.fontStyle));
-      var laid = FoliaTextLayout.layout(tokens, { maxW: maxW, fontPx: fontPx });
+      setMeasureFont(StanzaTheme.fontStack(theme.fontStyle));
+      var laid = StanzaTextLayout.layout(tokens, { maxW: maxW, fontPx: fontPx });
       return { line: line, hints: U.renderHints(line), tokens: tokens, laid: laid, fontPx: fontPx };
     }
 
@@ -101,7 +101,7 @@
         el.style.top = '0';
         var narrowHero = p.hero && W < 760 ? 0.85 : 1;   // 窄屏 hero 尺寸上限收 15%
         el.style.fontSize = (pack.fontPx * p.scale * narrowHero) + 'px';
-        el.style.fontFamily = FoliaTheme.fontStack(theme.fontStyle);
+        el.style.fontFamily = StanzaTheme.fontStack(theme.fontStyle);
         el.style.fontWeight = '700';
         var glow = document.createElement('span'); glow.className = 'fl-glow';
         var body = document.createElement('span'); body.className = 'fl-body';
@@ -151,7 +151,7 @@
       if (st === 'waiting') {
         x = p.x + p.entryX * motion; y = p.y + p.entryY * motion;
         rot = p.rotate - 4;
-        // folia：normal 行进场 scale .97，fast/instant 行 .9。
+        // stanza：normal 行进场 scale .97，fast/instant 行 .9。
         scale = cur.hints.revealMode === 'normal' ? 0.97 : 0.9;
         alpha = 0.65;
       } else if (st === 'active') {
@@ -173,7 +173,7 @@
     function writeNode(node, tMs, tg, energyNow) {
       var p = node.p, s = node.state;
       node.el.dataset.st = tg.st;
-      var color = tg.st === 'active' ? FoliaTheme.wordColor(p.text, theme) : theme.primaryColor;
+      var color = tg.st === 'active' ? StanzaTheme.wordColor(p.text, theme) : theme.primaryColor;
       // 当前色写元素变量，供 CSS reduced 回退规则（静态 9px 辉光）与其它 var(--fl-accent) 规则取用。
       node.el.style.setProperty('--fl-accent', color);
       // 总缩放 = 排版缩放 × 窄屏 hero 收敛 × 姿态缩放。layout 以盒心建模而 DOM 从左上锚生长，
@@ -266,10 +266,10 @@
       update: function () {},
       setTheme: function (t) {
         if (t === theme) return;
-        if (global.FoliaTheme && FoliaTheme.signature(t) === FoliaTheme.signature(theme)) return;
+        if (global.StanzaTheme && StanzaTheme.signature(t) === StanzaTheme.signature(theme)) return;
         theme = t;
         // 主题变化后、软重排前刷新一次测宽字体（measure 回调按 px 再设，双保险且成本极低）。
-        setMeasureFont(FoliaTheme.fontStack(theme.fontStyle));
+        setMeasureFont(StanzaTheme.fontStack(theme.fontStyle));
         requestRepack(true);
       },
       setFontScale: function (v) {
@@ -297,5 +297,5 @@
       destroy: function () { destroyed = true; if (ro) ro.disconnect(); wrap.remove(); }
     };
   }
-  global.FoliaCadenza = { init: init };
+  global.StanzaCadenza = { init: init };
 })(window);

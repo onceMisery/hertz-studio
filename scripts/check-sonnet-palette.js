@@ -3,9 +3,9 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const web = path.join(__dirname, '../crates/vmusicd/web');
-const util = require(path.join(web, 'folia/folia-util.js'));
-global.FoliaUtil = util;
-const theme = require(path.join(web, 'folia/folia-theme.js'));
+const util = require(path.join(web, 'stanza/stanza-util.js'));
+global.StanzaUtil = util;
+const theme = require(path.join(web, 'stanza/stanza-theme.js'));
 
 function withColors(variables, callback) {
   const previousWindow = global.window;
@@ -109,7 +109,7 @@ async function checkBrowser() {
   page.on('pageerror', error => errors.push(error.message));
   try {
     await page.setContent('<style>html,body{margin:0;width:100%;height:100%}#host,.fl-sonnet{position:absolute;inset:0}.fl-sonnet-canvas{position:absolute;inset:0}.fl-sonnet-hot{position:absolute}.fl-sonnet-eyebrow,.fl-sonnet-hud{display:none}</style><div id="host"></div>');
-    for (const file of ['vendor/pixi.min.js', 'folia/folia-util.js', 'folia/folia-theme.js', 'folia/folia-sonnet-fx.js']) {
+    for (const file of ['vendor/pixi.min.js', 'stanza/stanza-util.js', 'stanza/stanza-theme.js', 'stanza/stanza-sonnet-fx.js']) {
       await page.addScriptTag({ path: path.join(web, file) });
     }
     await page.evaluate(() => {
@@ -141,11 +141,11 @@ async function checkBrowser() {
         spectrum: () => [], kick() {}
       };
     });
-    await page.addScriptTag({ path: path.join(web, 'folia/folia-sonnet.js') });
+    await page.addScriptTag({ path: path.join(web, 'stanza/stanza-sonnet.js') });
     await page.evaluate(() => {
       const fixture = window.sonnetPaletteFixture;
-      fixture.renderer = FoliaSonnet.init(document.getElementById('host'));
-      fixture.renderer.setTheme(FoliaTheme.resolveSonnet(1.35));
+      fixture.renderer = StanzaSonnet.init(document.getElementById('host'));
+      fixture.renderer.setTheme(StanzaTheme.resolveSonnet(1.35));
       fixture.renderer.setBgMode('atmosphere');
       fixture.renderer.setVisible(true);
     });
@@ -154,7 +154,7 @@ async function checkBrowser() {
       const fixture = window.sonnetPaletteFixture;
       const renderer = fixture.renderer;
       const application = fixture.application;
-      const palette = FoliaTheme.resolveSonnet(1.35);
+      const palette = StanzaTheme.resolveSonnet(1.35);
       const numeric = value => parseInt(value.slice(1), 16);
       const assert = (condition, message) => { if (!condition) throw new Error(message); };
       const glyphs = () => {

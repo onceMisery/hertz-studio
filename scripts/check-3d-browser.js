@@ -63,7 +63,7 @@ async function main() {
         event.stopImmediatePropagation();
         window.__stage3dCheck.commands.push(event.detail);
       }, true);
-      Stage3D.configure({ motion: 0, cruise: false, shelfMode: 'off', foliaVisual: 'stage', foliaBg: 'stage', lyrics: false });
+      Stage3D.configure({ motion: 0, cruise: false, shelfMode: 'off', stanzaVisual: 'stage', stanzaBg: 'stage', lyrics: false });
       Stage3D.open('orb');
     });
     const seek = page.locator('#s3d-seek');
@@ -153,7 +153,7 @@ async function main() {
     pass('native wheel scrolls settings without zooming stage');
     await page.screenshot({ path: path.join(output, 'settings.png') });
     await page.locator('#s3d-settings-close').click();
-    await page.evaluate(() => Stage3D.configure({ foliaVisual: 'stage' }));
+    await page.evaluate(() => Stage3D.configure({ stanzaVisual: 'stage' }));
     const thetaBefore = await page.evaluate(() => Stage3D.stats().camera.theta);
     await page.mouse.move(120, 400);
     await page.mouse.down();

@@ -150,7 +150,7 @@
     stageButton.textContent = '凝彩舞台 ↗';
     stageButton.addEventListener('click', function () {
       if (!window.Stage3D) return;
-      window.Stage3D.configure({ foliaVisual: 'tempera', foliaBg: 'solid', lyrics: true, stageTheme: 'starfall' });
+      window.Stage3D.configure({ stanzaVisual: 'tempera', stanzaBg: 'solid', lyrics: true, stageTheme: 'starfall' });
       window.Stage3D.open();
       window.Stage3D.save();
     });

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 mmusic-studio contributors
-// folia common 背景三档：geometric / fluid / solid。频段缩放走外部 frame(dt) 低通。
+// stanza common 背景三档：geometric / fluid / solid。频段缩放走外部 frame(dt) 低通。
 (function (global) {
   'use strict';
   if (typeof window === 'undefined') return;
-  var U = global.FoliaUtil;
+  var U = global.StanzaUtil;
 
   function init(host) {
     var layer = document.createElement('div');
@@ -16,10 +16,10 @@
     host.append(layer, fluidWrap, vignette);
     fluidWrap.append(tint);
 
-    // 'stage'：不绘制任何 folia 背景，整个背景层透明，露出舞台自己的 3D 场景
-    // （歌词以叠加层方式浮在 3D 之上）。'geometric'/'fluid'/'solid' 为 folia 自管背景。
+    // 'stage'：不绘制任何 stanza 背景，整个背景层透明，露出舞台自己的 3D 场景
+    // （歌词以叠加层方式浮在 3D 之上）。'geometric'/'fluid'/'solid' 为 stanza 自管背景。
     var mode = 'stage', opacity = 0.75, vignetteOn = true, paused = false, eco = false;
-    var theme = FoliaTheme.DEFAULT;
+    var theme = StanzaTheme.DEFAULT;
     var shapes = [], particles = [], coverUrl = null;
     var scaleSmooth = { bass: 1, lowMid: 1, mid: 1, treble: 1 };
     var BAND_KEYS = ['bass', 'lowMid', 'mid', 'treble'];
@@ -154,7 +154,7 @@
     }
 
     function applyMode() {
-      // stage：所有 folia 背景元素（含底色层与暗角）全部隐藏，3D 舞台场景透出。
+      // stage：所有 stanza 背景元素（含底色层与暗角）全部隐藏，3D 舞台场景透出。
       var stage = mode === 'stage';
       // .fl-bg 宿主在样式表带了不透明的 #09090b 兜底底色（几何/流体模式靠它垫底），
       // stage 模式必须把宿主也置为透明，否则即使子层全 hidden，宿主仍会整块盖住 3D。
@@ -200,13 +200,13 @@
 
     var api = {
       setTheme: function (t) { theme = t; paintTheme(); },
-      // 相同模式不重建形状场（applyFoliaConfig 每 8fps 会调用一次）。
+      // 相同模式不重建形状场（applyStanzaConfig 每 8fps 会调用一次）。
       setMode: function (m) {
         m = (m === 'stage' || m === 'fluid' || m === 'solid') ? m : 'geometric';
         if (m === mode) return;
         mode = m; applyMode();
       },
-      // applyFoliaConfig 每 8fps 推一次：值没变就别碰 DOM 写。
+      // applyStanzaConfig 每 8fps 推一次：值没变就别碰 DOM 写。
       setOpacity: function (v) {
         v = U.clamp(v, 0, 1);
         if (Math.abs(v - opacity) < 1e-9) return;
@@ -223,7 +223,7 @@
         layer.remove(); shapeLayer.remove(); fluidWrap.remove(); vignette.remove();
       }
     };
-    // tint 用背景色压在封面上：不透明度语义与 folia 一致（opacity=.75 表示主题色遮罩 25%）
+    // tint 用背景色压在封面上：不透明度语义与 stanza 一致（opacity=.75 表示主题色遮罩 25%）
     tint.style.background = theme.backgroundColor;
     tint.style.opacity = String(1 - opacity);
     vignette.hidden = !vignetteOn;
@@ -232,5 +232,5 @@
     return api;
   }
 
-  global.FoliaBg = { init: init };
+  global.StanzaBg = { init: init };
 })(window);

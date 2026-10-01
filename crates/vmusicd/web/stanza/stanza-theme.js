@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 mmusic-studio contributors
-// folia Theme 适配层：所有 folia 渲染器只认本模块输出，禁止在渲染器内自行取色。
+// stanza Theme 适配层：所有 stanza 渲染器只认本模块输出，禁止在渲染器内自行取色。
 (function (root, factory) {
-  var api = factory(root.FoliaUtil);
+  var api = factory(root.StanzaUtil);
   if (typeof module === 'object' && module.exports) module.exports = api;
-  else root.FoliaTheme = api;
+  else root.StanzaTheme = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (U) {
   'use strict';
 
-  // P2：folia 源码 DEFAULT_THEME（Midnight Default，baseThemes.ts）
+  // P2：stanza 源码 DEFAULT_THEME（Midnight Default，baseThemes.ts）
   var DEFAULT = {
     name: 'Midnight Default',
     backgroundColor: '#09090b',

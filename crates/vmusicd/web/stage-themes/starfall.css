@@ -6,7 +6,7 @@
    与皮肤是**组合**关系（流年 + 星落、工作台 + 星落都成立）。开关在舞台设置
    的「舞台主题」里，随舞台偏好持久化，落在 #stage3d 的 data-stage-theme 上。
 
-   交互语言取自 folia 那套沉浸播放器：静止时画面是纯演出（连歌单架与播放舱
+   交互语言取自 stanza 那套沉浸播放器：静止时画面是纯演出（连歌单架与播放舱
    一起收走），指针一动，玻璃胶囊从一条进度发丝弹开成完整播放条；面板控件
    一律药丸化，微标题拉开字距，数字读数走等宽。
 
@@ -15,7 +15,7 @@
 
 /* --- 主题令牌：弹簧曲线、玻璃材质、控件尺寸 --------------------------------
    --st-spring 是 framer-motion stiffness 280 / damping 24 的阶跃等效曲线
-   （轻微过冲后一次收敛），--st-micro 对应 folia 的 0.18s easeOut 微步进。 */
+   （轻微过冲后一次收敛），--st-micro 对应 stanza 的 0.18s easeOut 微步进。 */
 .s3d[data-stage-theme="starfall"] {
   --st-spring: cubic-bezier(.22, 1.16, .36, 1);
   --st-spring-dur: 340ms;
@@ -217,7 +217,7 @@
   background: var(--s3d-accent);
 }
 
-/* --- 顶栏：玻璃胶囊 + 44px 圆钮（folia 的静息 0.65 透明度与按压 0.82 缩放）--- */
+/* --- 顶栏：玻璃胶囊 + 44px 圆钮（stanza 的静息 0.65 透明度与按压 0.82 缩放）--- */
 .s3d[data-stage-theme="starfall"] .s3d-head {
   --s3d-btn: 44px;
   gap: 4px;
@@ -481,7 +481,7 @@
   color: var(--st-ink-soft);
 }
 
-/* folia 歌词层的 chrome 跟着同一套声音：微标题字距 + 字幕胶囊。 */
+/* stanza 歌词层的 chrome 跟着同一套声音：微标题字距 + 字幕胶囊。 */
 .s3d[data-stage-theme="starfall"] .fl-sub-card { border-radius: 999px; }
 .s3d[data-stage-theme="starfall"] .fl-sonnet-eyebrow,
 .s3d[data-stage-theme="starfall"] .fl-sonnet-hud {

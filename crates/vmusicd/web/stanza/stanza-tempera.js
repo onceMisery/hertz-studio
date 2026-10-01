@@ -5,13 +5,13 @@
 // 带内文字反色成底色（印刷套色的反白效果）。
 // 行为语言参考 VCPChat 音乐舞台的凝彩模式；代码为本项目独立实现（见 NOTICE
 // 「Design lineage」）。排版 / 镜头 / 起音 / 光学后期全部复用商籁引擎
-// FoliaSonnetFx，Pixi 惰性加载与 Stage → 帧适配复用 FoliaSonnet 的出口，
+// StanzaSonnetFx，Pixi 惰性加载与 Stage → 帧适配复用 StanzaSonnet 的出口，
 // 本文件只负责「色块 + 网屏 + 扫光反色 + 印刷装饰」这一层。
 // 对外 API 与 classic/cadenza/sonnet 渲染器一致（frame/update/setTheme/.../destroy）。
 (function (root, factory) {
-  var api = factory(root.FoliaUtil, root.FoliaSonnetFx);
+  var api = factory(root.StanzaUtil, root.StanzaSonnetFx);
   if (typeof module === 'object' && module.exports) module.exports = api;
-  else root.FoliaTempera = api;
+  else root.StanzaTempera = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (U, FX) {
   'use strict';
 
@@ -491,7 +491,7 @@
     if (this.postProcess) { this.postProcess.destroy(); this.postProcess = null; }
     if (this.app && this.initialized) {
       try { this.app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true }); }
-      catch (err) { console.warn('[folia-tempera] PIXI cleanup failed:', err); }
+      catch (err) { console.warn('[stanza-tempera] PIXI cleanup failed:', err); }
     }
     this.app = null;
     this.scene = this.blocks = this.screens = this.decor = this.ink = null;
@@ -532,9 +532,9 @@
     root.append(eyebrow, note, hot);
     host.append(root);
 
-    var sonnet = G.FoliaSonnet;
+    var sonnet = G.StanzaSonnet;
     var director = new TemperaDirector(root, sonnet.loadPixi);
-    var theme = G.FoliaTheme ? G.FoliaTheme.DEFAULT : { backgroundColor: '#09090b', primaryColor: '#f4f4f5', accentColor: '#f4f4f5', secondaryColor: '#71717a', animationIntensity: 'normal' };
+    var theme = G.StanzaTheme ? G.StanzaTheme.DEFAULT : { backgroundColor: '#09090b', primaryColor: '#f4f4f5', accentColor: '#f4f4f5', secondaryColor: '#71717a', animationIntensity: 'normal' };
     var fontScale = 1, visible = false, eco = false, reduced = false;
     var motion = 0.65, reactivity = 1.35, bgMode = 'stage', vignette = true;
     var tuning = { composition: 'auto', colorMode: 'duo', screens: true, inversion: true };
@@ -609,7 +609,7 @@
           director.init().catch(function (err) {
             if (destroyed) return;
             initFailed = true;
-            console.warn('[folia-tempera] 图形引擎不可用：', err);
+            console.warn('[stanza-tempera] 图形引擎不可用：', err);
             note.hidden = false;
             note.textContent = '图形引擎不可用 · 请切换其他歌词视觉';
           });
@@ -642,7 +642,7 @@
       update: function () {},
       setTheme: function (t) {
         if (!t) return;
-        var sig = G.FoliaTheme ? G.FoliaTheme.signature(t) : JSON.stringify(t);
+        var sig = G.StanzaTheme ? G.StanzaTheme.signature(t) : JSON.stringify(t);
         if (sig === themeSig) return;
         theme = t;
         themeSig = sig;

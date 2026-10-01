@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
-// 商籁 sonnet 纯函数验证：node scripts/check-folia-sonnet.js
+// 商籁 sonnet 纯函数验证：node scripts/check-stanza-sonnet.js
 'use strict';
 const path = require('path');
-const ROOT = path.join(__dirname, '..', 'crates', 'vmusicd', 'web', 'folia');
-const U = require(path.join(ROOT, 'folia-util.js'));
-global.FoliaUtil = U;
-const FX = require(path.join(ROOT, 'folia-sonnet-fx.js'));
+const ROOT = path.join(__dirname, '..', 'crates', 'vmusicd', 'web', 'stanza');
+const U = require(path.join(ROOT, 'stanza-util.js'));
+global.StanzaUtil = U;
+const FX = require(path.join(ROOT, 'stanza-sonnet-fx.js'));
 
 let failures = 0;
 function ok(cond, msg) { if (!cond) { failures += 1; console.error('FAIL:', msg); } else console.log('ok -', msg); }
@@ -156,4 +156,4 @@ function near(a, b, eps, msg) { ok(Math.abs(a - b) <= eps, msg + ' (got ' + a + 
 })();
 
 if (failures) { console.error(failures + ' 项失败'); process.exit(1); }
-console.log('check-folia-sonnet 全部通过');
+console.log('check-stanza-sonnet 全部通过');

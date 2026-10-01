@@ -4,7 +4,7 @@
 (function (global) {
   'use strict';
   if (typeof window === 'undefined') return;
-  var U = global.FoliaUtil;
+  var U = global.StanzaUtil;
 
   function init(host) {
     var card = document.createElement('div');
@@ -20,11 +20,11 @@
         U.withAlpha(theme.backgroundColor, 0.78) + ' 62%,transparent 100%)';
     }
 
-    var theme = FoliaTheme.DEFAULT, visible = true, fontScale = 1, glowBg = true;
+    var theme = StanzaTheme.DEFAULT, visible = true, fontScale = 1, glowBg = true;
     var lastKey = '';
     var destroyed = false;
 
-    // 直接复刻 folia 的 clamp：min / vw / max 三段
+    // 直接复刻 stanza 的 clamp：min / vw / max 三段
     function fs(minRem, vw, maxRem) {
       return 'clamp(' + (minRem * fontScale).toFixed(3) + 'rem,' + (vw * fontScale).toFixed(3) + 'vw,' +
         (maxRem * fontScale).toFixed(3) + 'rem)';
@@ -78,7 +78,7 @@
         var div = document.createElement('div');
         div.className = 'fl-sub-anim' + (c.next ? ' fl-sub-next' : '');
         div.style.color = theme.secondaryColor;
-        div.style.fontFamily = FoliaTheme.fontStack(theme.fontStyle);
+        div.style.fontFamily = StanzaTheme.fontStack(theme.fontStyle);
         div.style.fontSize = fs(c.next ? 0.875 : 1.125, c.next ? 2 : 2.6, c.next ? 1 : 1.25);
         div.textContent = c.t;
         text.append(div);
@@ -89,7 +89,7 @@
       update: update,
       setTheme: function (t) {
         if (t === theme) return;
-        if (global.FoliaTheme && FoliaTheme.signature(t) === FoliaTheme.signature(theme)) return;
+        if (global.StanzaTheme && StanzaTheme.signature(t) === StanzaTheme.signature(theme)) return;
         theme = t; lastKey = ''; paintGlow();
       },
       setFontScale: function (v) { if (Math.abs(v - fontScale) < 1e-6) return; fontScale = v; lastKey = ''; },
@@ -99,5 +99,5 @@
       destroy: function () { destroyed = true; card.remove(); }
     };
   }
-  global.FoliaSubtitle = { init: init };
+  global.StanzaSubtitle = { init: init };
 })(window);

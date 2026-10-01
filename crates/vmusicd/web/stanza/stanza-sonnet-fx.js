@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 mmusic-studio contributors
 // 商籁 sonnet 图形引擎：镜头调度、字素时间轴、词组舞台、重音编舞、光学印相后期。
-// 行为语言参考 VCPChat 音乐舞台的商籁模式与 folia 原版 sonnet 的电影镜头思路，
-// 代码为本项目独立实现（见 NOTICE「Design lineage」）。
+// 行为语言参考两个上游项目的商籁舞台（逐行选镜与电影镜头思路），出处见 NOTICE
+// 「Design lineage」；代码为本项目独立实现。
 // 纯函数（时间轴/断句/选点/镜头数学）可在 Node 下 require 做验证；PIXI 相关
 // 构建函数一律以 PIXI 作首参注入，本文件不触碰全局。
 (function (root, factory) {
-  var api = factory(root.FoliaUtil);
+  var api = factory(root.StanzaUtil);
   if (typeof module === 'object' && module.exports) module.exports = api;
-  else root.FoliaSonnetFx = api;
+  else root.StanzaSonnetFx = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (U) {
   'use strict';
 

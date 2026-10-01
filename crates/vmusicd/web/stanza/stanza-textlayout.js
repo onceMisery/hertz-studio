@@ -2,13 +2,13 @@
 // Copyright (c) 2026 mmusic-studio contributors
 // 心象排版器：替代 @chenglou/pretext（歌词短文本/CJK 为主的精简面）。
 //
-// 字段与 folia cadenza spec 术语映射：
+// 字段与 stanza cadenza spec 术语映射：
 // x/y/w/h = placement 的左上角坐标与宽高；entryX/entryY = entryOffset（入场偏移）；
 // passedRotate/driftX/driftY = passed 漂移（唱过后的旋转与位移）；hero = emphasis 标记（强调词）。
 (function (root, factory) {
-  var api = factory(root.FoliaUtil);
+  var api = factory(root.StanzaUtil);
   if (typeof module === 'object' && module.exports) module.exports = api;
-  else root.FoliaTextLayout = api;
+  else root.StanzaTextLayout = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (U) {
   'use strict';
 

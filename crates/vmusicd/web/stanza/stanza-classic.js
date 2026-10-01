@@ -4,19 +4,19 @@
 (function (global) {
   'use strict';
   if (typeof window === 'undefined') return;
-  var U = global.FoliaUtil;
+  var U = global.StanzaUtil;
 
   function init(host, onSeek) {
     var root = document.createElement('div'); root.className = 'fl-classic';
     var lineEl = null, emptyEl = null;
-    var theme = FoliaTheme.DEFAULT, fontScale = 1, visible = true, paused = false;
+    var theme = StanzaTheme.DEFAULT, fontScale = 1, visible = true, paused = false;
     var tuning = { rotation: true, breathing: 1, spacing: 0.7 };
     var curLine = null, curHints = null, measureCanvas = null;
     // soft=true 时下一次 frame 的行切换为"软重建"：配置类变更（主题/调谐/字号/尺寸）只重建节点，
     // 不播 fl-exit/fl-enter，避免拖滑杆时当前行长期半透明模糊与鬼影叠加。
     var softRebuild = false, destroyed = false;
 
-    // 行级转场档位：renderHints 的 timingClass(micro/short/normal) 映射为 folia 固定转场名(none/fast/normal)。
+    // 行级转场档位：renderHints 的 timingClass(micro/short/normal) 映射为 stanza 固定转场名(none/fast/normal)。
     // 转场时长是固定常量，与 enterMs/exitMs 无关（normal 400/300、fast 160/160、none 0/120）。
     var LINE_ENTER_DUR = { normal: '400ms', fast: '160ms', none: '0ms' };
     var LINE_EXIT_DUR = { normal: '300ms', fast: '160ms', none: '120ms' };
@@ -36,7 +36,7 @@
     function measure(text, px) {
       if (!measureCanvas) measureCanvas = document.createElement('canvas');
       var ctx = measureCanvas.getContext('2d');
-      ctx.font = '700 ' + px + 'px ' + FoliaTheme.fontStack(theme.fontStyle);
+      ctx.font = '700 ' + px + 'px ' + StanzaTheme.fontStack(theme.fontStyle);
       return ctx.measureText(text).width;
     }
 
@@ -72,7 +72,7 @@
       var calm = theme.animationIntensity === 'calm';
       var narrow = (global.innerWidth || 1200) < 760;
       var baseSpread = (chaotic ? 60 : calm ? 0 : 20) * (narrow ? 0.6 : 1);
-      var activeScaleMul = narrow ? 1.28 : 1.4;   // folia 窄屏收敛
+      var activeScaleMul = narrow ? 1.28 : 1.4;   // stanza 窄屏收敛
       var seed = line.start_ms;
 
       // 容器对齐：calm 与间奏固定居中；normal/chaotic 由 seed 随机（justify 5 选 1、align 3 选 1）。
@@ -89,7 +89,7 @@
       if (chaotic) container.style.perspective = (500 + Math.floor(rand(seed / 1000, 33) * 500)) + 'px';
 
       dispTokens.forEach(function (w, i) {
-        var wordSeed = seed / 1000 + i; // folia 用秒级 seed
+        var wordSeed = seed / 1000 + i; // stanza 用秒级 seed
         var r = function (off) { return rand(wordSeed, off); };
         var scaleCfg = chaotic ? 0.8 + r(4) * 0.6 : 1.1 + r(4) * 0.2;
         // 间奏词只有轻微纵向随机（±7.5px），无 x 散布。
@@ -103,7 +103,7 @@
         }
         var rotate = tuning.rotation ? (r(3) - 0.5) * (chaotic ? 60 : calm ? 0 : 10) : 0;
         var passedRotate = tuning.rotation ? (r(8) - 0.5) * 45 : 0;
-        // 精确词距（folia 新版排版）
+        // 精确词距（stanza 新版排版）
         var wi = widths[i] || 0, si = scaleCfg * activeScaleMul;
         var wnext = 0, snext = 1, xnext = 0;
         if (i + 1 < dispTokens.length) {
@@ -121,8 +121,8 @@
         wordEl.className = 'fl-cword';
         wordEl.dataset.st = 'waiting';
         wordEl.style.fontSize = px + 'px';
-        wordEl.style.fontFamily = FoliaTheme.fontStack(theme.fontStyle);
-        wordEl.style.marginRight = (isInterlude ? 48 /* folia: 3rem */ : margin) + 'px';
+        wordEl.style.fontFamily = StanzaTheme.fontStack(theme.fontStyle);
+        wordEl.style.marginRight = (isInterlude ? 48 /* stanza: 3rem */ : margin) + 'px';
         wordEl.style.setProperty('--fl-x', x + 'px');
         wordEl.style.setProperty('--fl-y', y + 'px');
         wordEl.style.setProperty('--fl-rot', rotate + 'deg');
@@ -134,7 +134,7 @@
         wordEl._crot = crot;
         var glow = document.createElement('span'); glow.className = 'fl-glow';
         var body = document.createElement('span'); body.className = 'fl-body';
-        var color = FoliaTheme.wordColor(w.text, theme);
+        var color = StanzaTheme.wordColor(w.text, theme);
         body.style.color = theme.primaryColor;
         glow.style.setProperty('--fl-accent', color);
         wordEl.style.setProperty('--fl-accent', color);
@@ -170,7 +170,7 @@
     function applyPose(el, st) {
       var cfg = el._cfg, crot = el._crot;
       if (st === 'waiting') {
-        // folia 原公式：x + sin(y)·100，y + cos(x)·50（cfg 单位即 px）。
+        // stanza 原公式：x + sin(y)·100，y + cos(x)·50（cfg 单位即 px）。
         el.style.transform = 'translate(' + (cfg.x + Math.sin(cfg.y) * 100) + 'px,' +
           (cfg.y + Math.cos(cfg.x) * 50) + 'px) scale(.5)';
         crot.style.transform = 'rotate(' + (cfg.rotate + 20) + 'deg)';
@@ -273,7 +273,7 @@
           words[i].style.setProperty('--fl-color-back', mode === 'instant' ? '120ms' : mode === 'fast' ? '240ms' : '800ms');
           words[i].style.setProperty('--fl-glow-back', mode === 'instant' ? '120ms' : mode === 'fast' ? '220ms' : '900ms');
           words[i].querySelector('.fl-body').style.color = st === 'waiting' ? theme.primaryColor :
-            (st === 'active' ? FoliaTheme.wordColor(w.text, theme) : theme.primaryColor);
+            (st === 'active' ? StanzaTheme.wordColor(w.text, theme) : theme.primaryColor);
           if (st !== 'passed') words[i].style.opacity = '';
           applyPose(words[i], st);
         }
@@ -287,7 +287,7 @@
       update: function () {},
       setTheme: function (t) {
         if (t === theme) return;
-        if (global.FoliaTheme && FoliaTheme.signature(t) === FoliaTheme.signature(theme)) return;
+        if (global.StanzaTheme && StanzaTheme.signature(t) === StanzaTheme.signature(theme)) return;
         theme = t; rebuildSoft();
       },
       setFontScale: function (v) { v = U.clamp(v, 0.7, 1.5); if (Math.abs(v - fontScale) < 1e-6) return; fontScale = v; rebuildSoft(); },
@@ -311,5 +311,5 @@
       destroy: function () { destroyed = true; root.remove(); }
     };
   }
-  global.FoliaClassic = { init: init };
+  global.StanzaClassic = { init: init };
 })(window);

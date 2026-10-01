@@ -79,7 +79,7 @@ async function main() {
   const html = await fetch(base).then(response => response.text());
   token = /window\.__VMUSIC_TOKEN__\s*=\s*"([^"]+)"/.exec(html)?.[1];
   assert.ok(token);
-  for (const file of ['stage3d.js', 'app.js', 'folia/folia.css', 'folia/folia-theme.js', 'folia/folia-sonnet.js']) {
+  for (const file of ['stage3d.js', 'app.js', 'stanza/stanza.css', 'stanza/stanza-theme.js', 'stanza/stanza-sonnet.js']) {
     const embedded = await fetch(base + '/' + file).then(response => response.text());
     assert.ok(embedded.replace(/\r\n/g, '\n') === fs.readFileSync(path.join(web, file), 'utf8').replace(/\r\n/g, '\n'), 'Rebuild stale embedded resource: ' + file);
   }
@@ -115,7 +115,7 @@ async function main() {
     await api('POST', '/v1/player/pause');
     await api('POST', '/v1/player/seek', { position_ms: 12500 });
     await page.waitForFunction(id => Stage.presentation().track?.id === id && Stage.coverUrl() && Stage.lyrics()?.lines?.length >= 6, track.id);
-    await page.evaluate(() => { Theme.apply('vcp-mono'); Stage3D.configure({ scene: 'silk', foliaVisual: 'stage', foliaBg: 'stage', motion: 0, cruise: false, lyrics: false, shelfMode: 'off' }); Stage3D.open('silk'); });
+    await page.evaluate(() => { Theme.apply('vcp-mono'); Stage3D.configure({ scene: 'silk', stanzaVisual: 'stage', stanzaBg: 'stage', motion: 0, cruise: false, lyrics: false, shelfMode: 'off' }); Stage3D.open('silk'); });
     await page.waitForFunction(() => Stage3D.stats().buffer !== '0x0');
     await page.waitForTimeout(900);
     assert.equal(await page.locator('#s3d-fallback').isVisible(), false);
@@ -126,10 +126,10 @@ async function main() {
     await page.screenshot({ path: path.join(output, 'sphere-rotated.png') });
     pass('sphere remains rendered while camera rotates');
     const homepage = await page.evaluate(() => JSON.stringify(ThemeStudio.state));
-    await page.evaluate(() => Stage3D.configure({ foliaVisual: 'sonnet', lyrics: true, foliaBg: 'atmosphere', foliaSubtitle: false, sonnetTuning: { shotFlow: 'quiet-tableau', lyricLayout: 'lines', phraseLength: 12, decor: true, accents: true } }));
+    await page.evaluate(() => Stage3D.configure({ stanzaVisual: 'sonnet', lyrics: true, stanzaBg: 'atmosphere', stanzaSubtitle: false, sonnetTuning: { shotFlow: 'quiet-tableau', lyricLayout: 'lines', phraseLength: 12, decor: true, accents: true } }));
     await page.waitForFunction(() => document.querySelector('#s3d-fl-sonnet-stage canvas'));
     await page.waitForTimeout(800);
-    const palette = await page.evaluate(() => FoliaTheme.resolveSonnet(1));
+    const palette = await page.evaluate(() => StanzaTheme.resolveSonnet(1));
     assert.notEqual(palette.accentColor, palette.primaryColor);
     assert.notEqual(palette.secondaryColor, palette.accentColor);
     await page.screenshot({ path: path.join(output, 'sonnet-atmosphere.png') });
@@ -141,17 +141,17 @@ async function main() {
     await chosen.click();
     await page.waitForFunction(() => document.getElementById('s3d-fl-backdrop').dataset.image === 'ready');
     await page.locator('#s3d-fl-wallpaper-dim').evaluate(element => { element.value = '0.4'; element.dispatchEvent(new Event('input')); element.dispatchEvent(new Event('change')); });
-    await until(() => api('GET', '/v1/settings'), value => value.stage3d?.foliaWallpaper === 'morning-09.jpg' && value.stage3d.foliaWallpaperDim === 0.4, 'wallpaper save');
+    await until(() => api('GET', '/v1/settings'), value => value.stage3d?.stanzaWallpaper === 'morning-09.jpg' && value.stage3d.stanzaWallpaperDim === 0.4, 'wallpaper save');
     assert.equal(await page.evaluate(() => JSON.stringify(ThemeStudio.state)), homepage);
     await page.screenshot({ path: path.join(output, 'sonnet-settings.png') });
     await page.locator('#s3d-settings-close').click();
     await page.screenshot({ path: path.join(output, 'sonnet-anime.png') });
     pass('wallpaper and dimming save independently of homepage');
     await page.reload();
-    await page.waitForFunction(() => Stage3D.preferences().foliaWallpaper === 'morning-09.jpg' && Stage3D.preferences().foliaBg === 'anime');
+    await page.waitForFunction(() => Stage3D.preferences().stanzaWallpaper === 'morning-09.jpg' && Stage3D.preferences().stanzaBg === 'anime');
     await page.evaluate(() => Stage3D.open());
     await page.waitForFunction(() => document.getElementById('s3d-fl-wallpaper').naturalWidth > 0 && document.querySelector('#s3d-fl-sonnet-stage canvas'));
-    assert.equal(await page.evaluate(() => Stage3D.preferences().foliaWallpaperDim), 0.4);
+    assert.equal(await page.evaluate(() => Stage3D.preferences().stanzaWallpaperDim), 0.4);
     pass('background preferences survive a real page reload');
     await page.setViewportSize({ width: 390, height: 844 });
     await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -160,11 +160,11 @@ async function main() {
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
     pass('mobile reduced-motion sonnet remains within viewport');
     await page.route('**/wallpapers/evening-16.jpg', route => route.fulfill({ status: 404, body: '' }));
-    await page.evaluate(() => Stage3D.configure({ foliaWallpaper: 'evening-16.jpg' }));
+    await page.evaluate(() => Stage3D.configure({ stanzaWallpaper: 'evening-16.jpg' }));
     await page.waitForFunction(() => document.getElementById('s3d-fl-backdrop').dataset.image === 'error');
     assert.equal(await page.locator('#s3d-fl-wallpaper').isVisible(), false);
     pass('failed image falls back to atmosphere without broken image icon');
-    await page.evaluate(() => Stage3D.configure({ foliaVisual: 'stage', foliaBg: 'anime', lyrics: false }));
+    await page.evaluate(() => Stage3D.configure({ stanzaVisual: 'stage', stanzaBg: 'anime', lyrics: false }));
     assert.equal(await page.locator('#s3d-fl-backdrop').isVisible(), false);
     assert.equal(await page.evaluate(() => document.getElementById('stage3d').classList.contains('s3d-scene-covered')), false);
     // 减少动效下 15fps：configure 后立刻截图会抢在恢复后首帧之前拍到黑画布。
