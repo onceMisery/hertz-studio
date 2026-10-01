@@ -129,6 +129,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/online/detail", get(online_detail))
         .route("/v1/online/lyric", get(online_lyric))
         .route("/v1/online/play", post(online_play))
+        .route("/v1/online/radio", get(online_radio_status).post(online_radio))
         .route("/v1/online/cache", get(online_cache_stats))
         .route("/v1/online/cache/clear", post(online_cache_clear))
         .route("/v1/online/cache/keep", post(online_cache_keep))
@@ -296,29 +297,46 @@ async fn get_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
 }
 
 async fn play(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let commit = state.play_commit.lock().await;
+    state
+        .play_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     state
         .audio
         .play()
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    drop(commit);
     Ok(get_state(State(state)).await)
 }
 
 async fn pause(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let commit = state.play_commit.lock().await;
+    state
+        .play_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.set_buffering(false, None).await;
     state
         .audio
         .pause()
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    drop(commit);
     Ok(get_state(State(state)).await)
 }
 
 async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let commit = state.play_commit.lock().await;
+    state
+        .play_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.set_buffering(false, None).await;
     state
         .audio
         .stop()
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    drop(commit);
     Ok(get_state(State(state)).await)
 }
 
@@ -365,8 +383,8 @@ async fn load(
         .iter()
         .position(|id| *id == body.track_id)
         .unwrap_or(0);
-    state.set_queue(queue, Some(index)).await;
-    state.play_index(index).await?;
+    let (generation, _, _) = state.set_queue(queue, Some(index)).await;
+    state.play_index_for(index, Some(generation), false).await?;
     state.post_commit_background();
     Ok(get_state(State(state)).await)
 }
@@ -403,9 +421,11 @@ async fn set_queue(
         // A pure reorder sends no index. Dropping the cursor there would break
         // "next" until the next load, so keep it when the client asks to resume.
         _ if body.resume == Some(true) => state
-            .current_index()
-            .await
-            .filter(|i| *i < body.queue.len()),
+            .audio
+            .snapshot()
+            .track_id
+            .as_ref()
+            .and_then(|track_id| body.queue.iter().position(|id| id == track_id)),
         _ => None,
     };
     state.set_queue(body.queue.clone(), index).await;
@@ -424,11 +444,16 @@ async fn seek(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SeekRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let commit = state.play_commit.lock().await;
+    state
+        .play_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     state
         .audio
         .seek(body.position_ms)
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    drop(commit);
     Ok(get_state(State(state)).await)
 }
 
@@ -2250,6 +2275,37 @@ async fn online_quality_set(
 ///
 /// 队列只存虚拟 id、不存 track_ref，所以 play_index_for 按稳定 id 回落取流，
 /// 可能拿不到最优音质——这是队列状态机的有意取舍，不在本端点扩大。
+async fn online_radio_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(state.radio_status().await)
+}
+
+#[derive(Deserialize)]
+struct RadioRequest { action: String }
+
+async fn online_radio(State(state): State<Arc<AppState>>, Json(body): Json<RadioRequest>) -> ApiResult<Json<serde_json::Value>> {
+    match body.action.as_str() {
+        "start" => {
+            if let Some(gen) = state.radio_start().await? {
+                state.play_index_for(0, Some(gen), false).await?;
+                state.post_commit_background();
+            }
+        }
+        "retry" => {
+            let initial = state.radio.lock().await.initial_generation.is_some();
+            if initial {
+                if let Some(gen) = state.radio_start().await? {
+                    state.play_index_for(0, Some(gen), false).await?;
+                    state.post_commit_background();
+                }
+            } else { state.radio_refill(true).await?; }
+        }
+        "stop" => state.radio_stop().await,
+        "next" => { state.step(1, false).await?; state.post_commit_background(); }
+        _ => return Err(bad_request("未知 FM 操作")),
+    }
+    Ok(Json(state.radio_status().await))
+}
+
 async fn online_play(
     State(state): State<Arc<AppState>>,
     Json(body): Json<OnlinePlayRequest>,

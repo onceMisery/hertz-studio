@@ -1030,9 +1030,8 @@ ok(/WebGL2/.test(CS4.degradedBecause() || ''), '原因是"不支持 WebGL2"：' 
 section('运行时降级的生效真相');
 {
   const csSrc = fs.readFileSync(path.join(WEB, 'creative-stage.js'), 'utf8');
-  const appSrc = fs.readFileSync(path.join(WEB, 'app.js'), 'utf8');
-  // 事件必须能区分两类降级：attach 启动期失败（applyCreative 自己接手）
-  // vs 运行中被摘掉（需要事件监听者补做 UI 与服务端真相）。
+  // 事件必须能区分两类降级：attach 启动期失败 vs 运行中被摘掉（上下文丢失、
+  // 着色器失败、探测判定代价过高），宿主据此决定要不要提示用户。
   ok(/function degrade\(reason,\s*byProbe,\s*runtime\)/.test(csSrc),
     'degrade 签名带 runtime 标记');
   ok(/detail:\s*\{\s*reason:\s*reason,\s*runtime:\s*!!runtime\s*\}/.test(csSrc),
@@ -1043,13 +1042,6 @@ section('运行时降级的生效真相');
   const c2 = (csSrc.match(/,\s*true,\s*true\)/g) || []).length;
   ok(c1 >= 2 && c2 >= 1,
     '运行中降级三处调用点都带 runtime（false,true x' + c1 + '；true,true x' + c2 + '）');
-  // app.js 必须监听、按 runtime 过滤，并把"生效真相"回报服务端。
-  ok(/addEventListener\('creative:degrade',\s*onCreativeRuntimeDegrade\)/.test(appSrc),
-    'app.js 注册 creative:degrade 监听者');
-  ok(/function onCreativeRuntimeDegrade[\s\S]{0,200}?if \(!d\.runtime\) return/.test(appSrc),
-    '处理器忽略启动期事件（runtime=false），不与 applyCreative 重复');
-  ok(/creative_stage:\s*false,[\s\S]{0,120}?creative_stage_effective:\s*'standard'/.test(appSrc),
-    '运行时降级回报：creative_stage=false + effective=standard');
 }
 
 section('歌单体验：封面共享与详情契约');

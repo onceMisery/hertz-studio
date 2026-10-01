@@ -168,7 +168,7 @@ console.log('\n工坊面板骨架');
 ['workshop', 'ws-close', 'ws-tabs', 'ws-body', 'ws-toast'].forEach((id) => {
   ok(new RegExp('id="' + id + '"').test(indexHtml), `index.html 存在 #${id}`);
 });
-['workshop-btn', 'set-creative', 'set-workshop-btn', 'creative-warn'].forEach((id) => {
+['workshop-btn', 'set-workshop-btn'].forEach((id) => {
   ok(new RegExp('id="' + id + '"').test(indexHtml), `index.html 存在 #${id}`);
 });
 

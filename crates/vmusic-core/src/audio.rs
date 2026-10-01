@@ -123,6 +123,10 @@ pub trait AudioBackend {
         false
     }
 
+    fn take_transport_error(&mut self) -> Option<AudioError> {
+        None
+    }
+
     /// Fill `out` with normalized band energies (0.0..=1.0).
     ///
     /// Returns `false` when the backend cannot provide spectrum data (null

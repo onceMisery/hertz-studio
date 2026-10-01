@@ -482,12 +482,48 @@
   opacity: .5;
 }
 
-/* --- 窄屏：胶囊占满可用宽度，面板让出边距 ---------------------------------- */
+/* --- 窄屏：紧凑播放舱 -------------------------------------------------------
+   基础样式在 ≤760px 把播放舱折成两行大卡（信息/队列一行、整组传送键独占
+   第二行），凝彩全屏 MV 里这张 150px 高的宽卡显得笨重。星落在窄屏改排为
+   「信息 · 传送键 · 队列」一行 + 进度线一行：用 display:contents 把传输层
+   拆开，让播放键组与进度线直接参与播放舱网格 —— 上一首/播放/下一首/队列
+   一个不少，整舱高度从 ~153px 降到 ~94px，仍保持药丸材质与发丝收束。 */
 @media (max-width: 760px) {
-  .s3d[data-stage-theme="starfall"] .s3d-player { width: calc(100% - 56px); padding: 8px 14px; }
-  .s3d[data-stage-theme="starfall"].s3d-chrome .s3d-player { width: calc(100% - 28px); gap: 12px; }
+  .s3d[data-stage-theme="starfall"] .s3d-player {
+    width: calc(100% - 40px);
+    padding: 8px 14px;
+    gap: 6px 12px;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "info buttons queue"
+      "seek seek seek";
+  }
+  .s3d[data-stage-theme="starfall"].s3d-chrome .s3d-player {
+    width: calc(100% - 24px);
+    padding: 10px 16px;
+    gap: 8px 12px;
+  }
+  .s3d[data-stage-theme="starfall"] .s3d-track-info { grid-area: info; }
+  .s3d[data-stage-theme="starfall"] .s3d-player-extra { grid-area: queue; }
+  /* 传输层去盒化：键组与时间线提升为播放舱网格的直接子项。 */
+  .s3d[data-stage-theme="starfall"] .s3d-transport { display: contents; }
+  .s3d[data-stage-theme="starfall"] .s3d-play-buttons { grid-area: buttons; gap: 16px; }
+  .s3d[data-stage-theme="starfall"].s3d-chrome .s3d-play-buttons { height: 38px; margin-bottom: 0; }
+  .s3d[data-stage-theme="starfall"] .s3d-timeline { grid-area: seek; }
+  .s3d[data-stage-theme="starfall"] .s3d-art { width: 38px; height: 38px; }
+  .s3d[data-stage-theme="starfall"] .s3d-play { width: 40px; height: 40px; }
+  /* 紧凑舱里进度轨 4px / 圆头 12px（桌面弹开态的 6px/14px 太粗）。webkit 与
+     moz 仍分两条规则，避免选择器列表混入私有伪元素被整条丢弃。 */
+  .s3d[data-stage-theme="starfall"].s3d-chrome #s3d-seek::-webkit-slider-runnable-track { height: 4px; }
+  .s3d[data-stage-theme="starfall"].s3d-chrome #s3d-seek::-moz-range-track { height: 4px; }
+  .s3d[data-stage-theme="starfall"] #s3d-seek::-webkit-slider-thumb { width: 12px; height: 12px; }
+  .s3d[data-stage-theme="starfall"] #s3d-seek::-moz-range-thumb { width: 12px; height: 12px; }
+  /* 播放舱矮了约 67px：场景坞下沉贴住播放舱，队列/歌单架净空同步收紧，
+     避免控件悬空（封面浮雕 silk 的队列与低高度媒体查询另有更高特异性规则）。 */
+  .s3d[data-stage-theme="starfall"] .s3d-dock { bottom: 108px; }
+  .s3d[data-stage-theme="starfall"] .s3d-queue { bottom: 112px; }
+  .s3d[data-stage-theme="starfall"].s3d-chrome .s3d-shelf-plane { bottom: 232px; }
   .s3d[data-stage-theme="starfall"] .s3d-head { --s3d-btn: 38px; }
   .s3d[data-stage-theme="starfall"] .s3d-settings,
   .s3d[data-stage-theme="starfall"] .s3d-queue { width: min(320px, calc(100% - 24px)); }
-  .s3d[data-stage-theme="starfall"] .s3d-art { width: 38px; height: 38px; }
 }

@@ -183,8 +183,7 @@ pub enum Capability {
     Like,
     RecommendSongs,
     RecommendPlaylists,
-    /// 私人 FM：spec 保留的能力枚举，SP1 无平台实现，Task 22 评估去留。
-    #[allow(dead_code)]
+    /// 私人 FM：网易云连续歌曲推荐，游客可用性由上游决定。
     PersonalFm,
     HighQuality,
 }
@@ -318,6 +317,7 @@ pub const SOURCES: &[SourceInfo] = &[
             Capability::Like,
             Capability::RecommendSongs,
             Capability::RecommendPlaylists,
+            Capability::PersonalFm,
             Capability::HighQuality,
         ],
     },
@@ -1252,6 +1252,7 @@ mod tests {
                     | Like
                     | RecommendSongs
                     | RecommendPlaylists
+                    | PersonalFm
             ) | (
                 // 每日推荐走雷达端点（qq::recommend_songs），2026-09 真机验证。
                 "qq",
@@ -1306,6 +1307,7 @@ mod tests {
                 Capability::Like,
                 Capability::RecommendSongs,
                 Capability::RecommendPlaylists,
+                Capability::PersonalFm,
                 Capability::HighQuality,
             ]
         );
@@ -1362,4 +1364,12 @@ mod tests {
         // id 必填。
         assert!(serde_json::from_str::<TrackEntry>(r#"{"ref":{}}"#).is_err());
     }
+}
+
+/// 连续推荐目前仅网易云提供；游客是否可用由上游响应决定。
+pub async fn personal_fm(ctx: &Ctx, source: &str) -> ApiResult<Vec<OnlineTrack>> {
+    gate(source, Capability::PersonalFm)?;
+    netease::personal_fm(ctx)
+        .await
+        .map_err(|e| e.with_source(source))
 }

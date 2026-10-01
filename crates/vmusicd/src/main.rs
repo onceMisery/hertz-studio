@@ -14,6 +14,7 @@ mod online;
 mod persist;
 mod remote;
 mod routes;
+mod radio;
 mod scan;
 mod secrets;
 mod stage_beats;
@@ -255,6 +256,8 @@ async fn main() -> anyhow::Result<()> {
         events,
         queue: Default::default(),
         cursor: Default::default(),
+        radio: Default::default(),
+        radio_fetch: Default::default(),
         scan: Default::default(),
         scan_cancel: Default::default(),
         qr: crate::online::qr::Registry::new(),

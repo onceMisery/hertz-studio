@@ -54,7 +54,8 @@
   padding: 6px 4px;
   gap: 0;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 [data-skin="workbench"] .rail-item {
@@ -85,7 +86,18 @@
 
 [data-skin="workbench"] .column {
   border-radius: 0;
-  overflow: auto;
+}
+
+@media (max-width: 1240px) {
+  [data-skin="workbench"] .app {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 620px) {
+  [data-skin="workbench"] .app {
+    grid-template-columns: 48px minmax(0, 1fr);
+  }
 }
 
 [data-skin="workbench"] .view {

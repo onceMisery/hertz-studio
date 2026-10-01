@@ -1,6 +1,6 @@
 # 歌曲聚合搜索、加载与展示优化
 
-状态：待用户确认。ArchitectureReviewRequired: yes。
+状态：用户已确认，已实施。实现与验证记录见 `docs/research/aggregate-search-experience.md`。
 
 ## 目标与证据
 

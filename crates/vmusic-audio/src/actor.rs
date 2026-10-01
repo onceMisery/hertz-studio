@@ -60,7 +60,10 @@ pub enum AudioEvent {
     Snapshot(PlayerSnapshot),
     Spectrum(Vec<f32>),
     /// The current source played to its end.
-    Ended,
+    Ended {
+        generation: u64,
+        track_id: Option<String>,
+    },
     Error(String),
     /// 当前曲目的解码线程异常早夭（非自然 EOF、非主动换装/停止/seek）。
     ///
@@ -69,6 +72,7 @@ pub enum AudioEvent {
     /// 已把当前快照的 track_id 清空。
     DecodeError {
         track_id: Option<String>,
+        generation: u64,
     },
 }
 
@@ -307,6 +311,10 @@ fn run(
         // 后端自己线程上的延迟状态机：淡出到点再暂停/停止、换装、尾部淡出。
         // 必须在命令处理之后、Ended 判定之前——换装会复位解码进度与门闩输入。
         backend.maintain();
+        if let Some(error) = backend.take_transport_error() {
+            state.playing = false;
+            let _ = events.send(AudioEvent::Error(error.to_string()));
+        }
 
         // 解码线程异常早夭（如边下边播的下载链路断开）：清空当前曲目，
         // 发专门事件让状态层对在线曲自动跳曲，并立即发布一帧快照。
@@ -316,17 +324,26 @@ fn run(
             state.playing = false;
             ended_emitted = true;
             tracing::warn!(?track_id, "decoder stalled");
-            let _ = events.send(AudioEvent::DecodeError { track_id });
-            let _ = events.send(AudioEvent::Snapshot(state.clone()));
             snapshot.store(std::sync::Arc::new(state.clone()));
+            let _ = events.send(AudioEvent::DecodeError {
+                track_id,
+                generation: state.generation,
+            });
+            let _ = events.send(AudioEvent::Snapshot(state.clone()));
         }
 
         // Natural end of track: latch it so we emit exactly once.
         if !ended_emitted && backend.finished() {
             ended_emitted = true;
             state.playing = false;
+            if let Err(error) = backend.pause() {
+                let _ = events.send(AudioEvent::Error(error.to_string()));
+            }
             tracing::debug!("track finished");
-            let _ = events.send(AudioEvent::Ended);
+            let _ = events.send(AudioEvent::Ended {
+                generation: state.generation,
+                track_id: state.track_id.clone(),
+            });
         }
 
         state.position_ms = backend.position_ms();
@@ -360,8 +377,7 @@ fn publish(sink: &ArcSwap<PlayerSnapshot>, state: &PlayerSnapshot) {
 
 /// 应用一条命令。
 ///
-/// 返回值 `source_reset` 回答「本 tick 是否换装或停止」：成功的 Load/Stop 为
-/// true，run() 据此把「每首一次」的 Ended 门闩重新上膛；其余命令为 false。
+/// 成功的 Load/Play/Seek/Stop 重新武装 Ended 门闩。
 /// 注意命令自身的业务成败走 `reply`，这里 Err 只用于真正需要上 Error 事件的
 /// 场景（当前各臂均不产生）。
 fn apply(
@@ -414,24 +430,36 @@ fn apply(
             let result = if state.track_id.is_none() {
                 Err(AudioError::NothingLoaded)
             } else {
-                backend.play().map(|()| state.playing = true)
+                backend.play().map(|()| {
+                    state.playing = true;
+                    state.position_ms = backend.position_ms();
+                    state.generation += 1;
+                })
             };
             publish(sink, state);
+            let reset = result.is_ok();
             let _ = reply.send(result);
-            Ok(false)
+            Ok(reset)
         }
         Command::Pause(reply) => {
-            let result = backend.pause().map(|()| state.playing = false);
+            let result = backend.pause().map(|()| {
+                state.playing = false;
+                state.position_ms = backend.position_ms();
+                state.generation += 1;
+            });
             publish(sink, state);
             let _ = reply.send(result);
             Ok(false)
         }
         Command::Stop(reply) => {
+            state.playing = false;
+            state.generation += 1;
             let result = backend.stop().map(|()| {
-                state.playing = false;
                 state.position_ms = 0;
-                state.generation += 1;
             });
+            if result.is_err() {
+                state.position_ms = backend.position_ms();
+            }
             publish(sink, state);
             let reset = result.is_ok();
             let _ = reply.send(result);
@@ -439,12 +467,13 @@ fn apply(
         }
         Command::Seek(ms, reply) => {
             let result = backend.seek(ms).map(|()| {
-                state.position_ms = ms;
+                state.position_ms = backend.position_ms();
                 state.generation += 1;
             });
             publish(sink, state);
+            let reset = result.is_ok();
             let _ = reply.send(result);
-            Ok(false)
+            Ok(reset)
         }
         Command::SetDsp(params, reply) => {
             let result = backend.set_dsp(params);
@@ -581,8 +610,6 @@ mod tests {
 
     /// 一 play 就「播完」的后端：用来钉 apply 的 Ended 门闩复位契约。
     /// run() 的门闩消费无法经 BackendKind 注入假后端，所以复位契约在这层钉：
-    /// 只有成功的 Load/Stop 允许返回 true，且每次 Load 都要返回——门闩是
-    /// 「每首一次」，不是「进程一次」。少了它，在线整盘只会自动接力一次。
     #[derive(Default)]
     struct InstantEndBackend {
         armed: bool,
@@ -647,6 +674,25 @@ mod tests {
     }
 
     #[test]
+    fn failed_stop_preserves_stopped_intent_and_invalidates_old_events() {
+        let mut backend = InstantEndBackend {
+            stop_fails: true,
+            ..Default::default()
+        };
+        let mut state = PlayerSnapshot {
+            playing: true,
+            generation: 7,
+            ..Default::default()
+        };
+        let sink = ArcSwap::from_pointee(state.clone());
+        let (reply, mut result) = oneshot::channel();
+        assert!(!apply(&mut backend, &mut state, &sink, Command::Stop(reply)).unwrap());
+        assert!(result.try_recv().unwrap().is_err());
+        assert!(!sink.load().playing);
+        assert_eq!(sink.load().generation, 8);
+    }
+
+    #[test]
     fn load_and_stop_rearm_the_ended_latch_every_time() {
         let mut backend = InstantEndBackend::default();
         let mut state = PlayerSnapshot::default();
@@ -664,11 +710,8 @@ mod tests {
             }
         )
         .unwrap());
-        // Play 之后后端即报 finished（模拟本首自然结束），但 Play 命令本身
-        // 不触发复位。
-        assert!(!apply(&mut backend, &mut state, &sink, Command::Play(unit_reply())).unwrap());
+        assert!(apply(&mut backend, &mut state, &sink, Command::Play(unit_reply())).unwrap());
         assert!(backend.finished());
-        // 其余传输/查询命令一律不复位。
         assert!(!apply(
             &mut backend,
             &mut state,
@@ -676,7 +719,7 @@ mod tests {
             Command::Pause(unit_reply())
         )
         .unwrap());
-        assert!(!apply(
+        assert!(apply(
             &mut backend,
             &mut state,
             &sink,

@@ -28,6 +28,90 @@ const GATEWAY: &str = "https://gateway.kugou.com";
 const LYRIC_SEARCH: &str = "https://krcs.kugou.com/search";
 const LYRIC_DOWNLOAD: &str = "https://krcs.kugou.com/download";
 
+fn anonymous_search_params(
+    keyword: &str,
+    page: usize,
+    limit: usize,
+    millis: u128,
+) -> BTreeMap<String, String> {
+    let mut p: BTreeMap<String, String> = [
+        ("sorttype", "0"),
+        ("keyword", keyword),
+        ("userid", "0"),
+        ("appid", "3116"),
+        ("token", ""),
+        ("iscorrection", "1"),
+        ("uuid", "-"),
+        ("dfid", "-"),
+        ("clientver", "11070"),
+        ("platform", "AndroidFilter"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.into(), v.into()))
+    .collect();
+    p.insert("page".into(), page.to_string());
+    p.insert("pagesize".into(), limit.to_string());
+    p.insert("clienttime".into(), (millis / 1000).to_string());
+    p.insert(
+        "mid".into(),
+        super::sign::md5_hex(millis.to_string().as_bytes()),
+    );
+    let core: String = p.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let salt = "LnT6xpN3khm36zse0QzvmgTZ3waWdRSA";
+    p.insert(
+        "signature".into(),
+        super::sign::md5_hex(format!("{salt}{core}{salt}").as_bytes()),
+    );
+    p
+}
+
+#[test]
+fn guest_search_uses_public_identity_and_signed_pagination() {
+    let p = anonymous_search_params("晴天", 2, 20, 1700000000123);
+    assert_eq!(p["userid"], "0");
+    assert_eq!(p["token"], "");
+    assert_eq!(p["clienttime"], "1700000000");
+    assert_eq!(p["page"], "2");
+    assert_eq!(p["pagesize"], "20");
+    assert_ne!(
+        p["signature"],
+        anonymous_search_params("晴天", 3, 20, 1700000000123)["signature"]
+    );
+}
+
+async fn anonymous_search(
+    keyword: &str,
+    page: usize,
+    limit: usize,
+) -> ApiResult<serde_json::Value> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let params = anonymous_search_params(keyword, page, limit, millis);
+    let mut url = reqwest::Url::parse("https://complexsearch.kugou.com/v2/search/song").unwrap();
+    url.query_pairs_mut().extend_pairs(params.iter());
+    let mut headers = super::http::headers(None, None);
+    for (key, value) in [
+        ("user-agent", "Android712-AndroidPhone-11070-18-0-Search"),
+        ("kg-rec", "1"),
+        ("kg-rc", "1"),
+        ("x-router", "complexsearch.kugou.com"),
+        ("mid", params["mid"].as_str()),
+        ("kg-clienttimems", &millis.to_string()),
+    ] {
+        headers.insert(
+            reqwest::header::HeaderName::from_bytes(key.as_bytes()).unwrap(),
+            value.parse().unwrap(),
+        );
+    }
+    let body = super::http::get_json(&client()?, url.as_str(), headers).await?;
+    if body["status"].as_i64() != Some(1) {
+        return Err(ApiError::upstream_rejected("酷狗游客搜索暂不可用"));
+    }
+    Ok(body)
+}
+
 fn internal_store(e: vmusic_core::StoreError) -> ApiError {
     ApiError::internal(format!("设置存储失败: {e}"))
 }
@@ -351,7 +435,14 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
     }
     let cookie = cookie_header(&cred, &mid);
     let headers = super::http::headers(Some(&cookie), Some("https://www.kugou.com/"));
-    let body = super::http::get_json(&client()?, url.as_str(), headers).await?;
+    let body = if !super::cred::is_signed_in(ID, &cred) {
+        match anonymous_search(keyword, page, limit).await {
+            Ok(body) => body,
+            Err(_) => super::http::get_json(&client()?, url.as_str(), headers).await?,
+        }
+    } else {
+        super::http::get_json(&client()?, url.as_str(), headers).await?
+    };
     if !status_ok(body.get("status")) {
         return Err(ApiError::upstream_rejected(
             "酷狗搜索暂时不可用，请稍后重试".to_string(),

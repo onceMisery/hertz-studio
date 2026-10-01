@@ -44,6 +44,9 @@
   flex-direction: row;
   align-items: center;
   gap: 4px;
+  max-width: calc(100vw - 24px);
+  overflow-x: auto;
+  overflow-y: hidden;
   padding: 6px 10px;
   border-radius: var(--r-pill);
   border: 1px solid var(--line);
@@ -210,8 +213,12 @@
 /* 宽屏空闲：舞台收起时栅格也必须保持单列，.column 才能拿回全宽。
    舞台本身的 display:none 仍由 style.css 的空闲规则负责，这里只管栅格。 */
 @media (min-width: 1241px) {
+  [data-skin="mineradio"] .app {
+    padding-right: calc(min(420px, 32vw) + var(--skin-gap) + var(--skin-pad));
+  }
   [data-skin="mineradio"] body[data-stage-idle="1"] .app {
     grid-template-columns: minmax(0, 1fr);
+    padding-right: var(--skin-pad);
   }
 }
 

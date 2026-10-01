@@ -30,6 +30,9 @@
   var playing = false;
   var track = null;
   var lastCover = null;    // 记住封面，换主题时用它重新取色（retint）
+  var coverFollow = true;
+  var paletteEpoch = 0;
+  var lastPalette = null;
 
   // 本地时钟：base 是快照给的基准点，clockAt 是挂上去的那一刻
   var basePos = 0;
@@ -37,9 +40,11 @@
   var durMs = 0;
   var playbackVolume = 0.8;
   var seeking = false;
+  var seekPosition = 0;
 
   var rafId = 0;
   var reduced = false;
+  var userReduced = false;
   var systemMotion = null;
   var lowfx = false;
   var fps = { frames: 0, since: 0, last: 0, done: false };
@@ -611,7 +616,7 @@
   // activeIdx 不刷 DOM，下一帧 frame() 算出 changed=false，高亮行就会一直
   // 停在旧的那一行，直到真的换行才纠正过来。
   function refresh(snap) {
-    var pos = seeking ? basePos : currentPos();
+    var pos = seeking ? seekPosition : currentPos();
     var idx = doc ? resolveIndex(doc, pos) : -1;
     var changed = idx !== activeIdx;
     activeIdx = idx;
@@ -699,12 +704,20 @@
   }
 
   function extractPalette(url) {
-    if (!url) { resetPalette(); return; }
+    var epoch = ++paletteEpoch;
+    if (!coverFollow || !url) { resetPalette(); return; }
+    if (lastPalette && lastPalette.url === url) {
+      applyPalette(lastPalette.hue, lastPalette.saturation);
+      return;
+    }
     var img = new Image();
+    img.crossOrigin = 'anonymous';
     img.onload = function () {
+      if (epoch !== paletteEpoch) return;
       var c = document.createElement('canvas');
       c.width = 32; c.height = 32;
       var g = c.getContext('2d');
+      if (!g) { resetPalette(); return; }
       g.drawImage(img, 0, 0, 32, 32);
       var data;
       try { data = g.getImageData(0, 0, 32, 32).data; } catch (e) { resetPalette(); return; }
@@ -728,10 +741,21 @@
         if (!best || buckets[k].w > best.w) best = buckets[k];
       }
       if (!best || best.w <= 0) { resetPalette(); return; }
-      applyPalette(best.h / best.w, best.s / best.w);
+      lastPalette = { url: url, hue: best.h / best.w, saturation: best.s / best.w };
+      applyPalette(lastPalette.hue, lastPalette.saturation);
     };
-    img.onerror = function () { resetPalette(); };
+    img.onerror = function () { if (epoch === paletteEpoch) resetPalette(); };
     img.src = url;
+  }
+
+  function syncCoverAppearance() {
+    var url = coverFollow ? lastCover : null;
+    var ambient = $('ambient');
+    var ambientImage = $('ambient-img');
+    if (ambientImage) ambientImage.style.backgroundImage = url ? 'url("' + url + '")' : 'none';
+    if (ambient) ambient.classList.toggle('has-art', Boolean(url));
+    extractPalette(url);
+    schedule();
   }
 
   // -------------------------------------------------------------------------
@@ -901,7 +925,7 @@
 
   function tickLyrics(dtMs) {
     lastDt = dtMs;
-    var pos = seeking ? basePos : currentPos();
+    var pos = seeking ? seekPosition : currentPos();
     if (!doc) { if (!seeking) paintProgress(pos); return; }
     var i = resolveIndex(doc, pos);
     var changed = i !== activeIdx;
@@ -992,19 +1016,31 @@
   }
 
   var lastSec = -1;
+  var lastDuration = -1;
   function paintProgress(pos) {
     var d = durMs || 0;
     // 时间文本只精确到秒，没必要每帧改 DOM
     var sec = Math.floor(pos / 1000);
-    if (sec !== lastSec) {
+    if (sec !== lastSec || d !== lastDuration) {
       lastSec = sec;
+      lastDuration = d;
       var text = fmt(pos) + ' / ' + fmt(d);
       if (el.stageTime) el.stageTime.textContent = text;
     }
     if (el.stageRange && !seeking) {
       el.stageRange.max = String(d || 1000);
       el.stageRange.value = String(Math.min(pos, d || pos));
+      el.stageRange.disabled = !track || d <= 0;
+      el.stageRange.setAttribute('aria-valuetext', fmt(pos) + ' / ' + fmt(d));
     }
+  }
+
+  function cancelStageSeek() {
+    if (!seeking) return;
+    seeking = false;
+    paintProgress(currentPos());
+    refresh(true);
+    schedule();
   }
 
   function fmt(ms) {
@@ -1096,7 +1132,10 @@
     mountFxLayers();
 
     systemMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
-    reduced = systemMotion.matches;
+    reduced = userReduced || systemMotion.matches;
+    var onMotionChange = function () { reduced = userReduced || systemMotion.matches; schedule(); };
+    if (systemMotion.addEventListener) systemMotion.addEventListener('change', onMotionChange);
+    else if (systemMotion.addListener) systemMotion.addListener(onMotionChange);
     // 窄屏断点跟 CSS 的抽屉规则共用同一个数（style.css：max-width:1240）。
     var narrowMql = window.matchMedia('(max-width: 1240px)');
     narrow = narrowMql.matches;
@@ -1111,16 +1150,20 @@
     buildRing(tier === 0 ? 0 : 36);
 
     if (el.stageRange) {
-      el.stageRange.addEventListener('pointerdown', function () { seeking = true; });
+      el.stageRange.addEventListener('pointerdown', function () { seeking = true; seekPosition = currentPos(); });
       el.stageRange.addEventListener('input', function () {
-        basePos = Number(el.stageRange.value) || 0;
-        clockAt = now();
-        paintProgress(basePos);
+        seeking = true;
+        seekPosition = Number(el.stageRange.value) || 0;
+        paintProgress(seekPosition);
       });
       el.stageRange.addEventListener('change', function () {
         seeking = false;
         emit('seek', Number(el.stageRange.value) || 0);
       });
+      el.stageRange.addEventListener('pointerup', function () { setTimeout(cancelStageSeek, 0); });
+      el.stageRange.addEventListener('pointercancel', cancelStageSeek);
+      el.stageRange.addEventListener('blur', cancelStageSeek);
+      window.addEventListener('blur', cancelStageSeek);
     }
 
     if (el.modes) {
@@ -1205,12 +1248,21 @@
     // 靠它冷启动循环；循环已在转时是空操作，没人想要帧时帧循环会自行停下。
     kick: function () { schedule(); },
     setMode: setMode,
-    setReducedMotion: function (v) { reduced = !!v; },
+    setReducedMotion: function (v) {
+      userReduced = !!v;
+      reduced = userReduced || !!(systemMotion && systemMotion.matches);
+      schedule();
+    },
+    setCoverFollow: function (value) {
+      coverFollow = value !== false;
+      syncCoverAppearance();
+    },
     // 当前曲目封面 URL（可能是同源 /v1/tracks/.. 封面，也可能是在线音源远程图）。
     // 粒子封面据此加载纹理，不在这里拿的话只能去 img.src 反解。
     coverUrl: function () { return lastCover; },
 
     setTrack: function (t, coverUrl) {
+      if (!t || !track || t.id !== track.id) cancelStageSeek();
       track = t || null;
       if (!durMs && t) durMs = t.duration_ms || 0;
       lastCover = coverUrl || null;
@@ -1218,11 +1270,11 @@
         el.disc.style.backgroundImage = coverUrl ? 'url("' + coverUrl + '")' : 'none';
         el.disc.classList.toggle('is-empty', !coverUrl);
       }
-      extractPalette(coverUrl);
+      syncCoverAppearance();
       schedule();
     },
 
-    setSnapshot: function (snap) {
+    setSnapshot: function (snap, options) {
       if (!snap) return;
       if (typeof snap.volume === 'number') playbackVolume = snap.volume;
       // A decoder can report unknown duration while library metadata is already
@@ -1231,16 +1283,22 @@
       var nextPlaying = !!snap.playing;
       // 服务端位置只在「明显不一致」时才覆盖本地时钟，避免每次推送都跳一下
       var srv = snap.position_ms || 0;
-      if (!playing || Math.abs(srv - currentPos()) > 700 ||
+      if (!playing || playing !== nextPlaying || (options && options.seek) || Math.abs(srv - currentPos()) > 700 ||
         (snap.track_id && (!track || track.id !== snap.track_id))) {
         basePos = srv;
         clockAt = now();
         // 这是一次真跳变（换曲 / seek 生效），抗回退的基准要让出去
         guardPos = -1;
       }
+      var playingChanged = playing !== nextPlaying;
       playing = nextPlaying;
       document.body.classList.toggle('is-playing', playing);
-      paintProgress(currentPos());
+      // 播放态跳变沿即时广播：舞台舱按钮/状态不依赖 8fps 门控下一帧才翻面，
+      // 曲尾停止等场景里图标不会比真实状态多停一两百毫秒。
+      if (playingChanged) {
+        document.dispatchEvent(new CustomEvent('stage:playing-changed', { detail: { playing: playing } }));
+      }
+      paintProgress(seeking ? seekPosition : currentPos());
       schedule();
     },
 
@@ -1314,8 +1372,7 @@
     // 取色背景都是从 CSS 变量里读的，需要重新采一遍，否则新主题下会残留旧色。
     retint: function () {
       readTune();
-      if (lastCover) extractPalette(lastCover);
-      else resetPalette();
+      syncCoverAppearance();
       refresh(true);
       schedule();
     }

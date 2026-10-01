@@ -76,6 +76,7 @@ struct Shared {
     /// 解码线程异常早夭标志：仅在「非干净 EOF、非主动 stop」的退出时置位，
     /// actor 经 take_decode_failure 每 tick 取走（换装淡出窗口除外）。
     decode_error: AtomicBool,
+    eof: AtomicBool,
     /// DSP：EQ 增益（dB bits × 6）与合成增益（preamp+track，dB bits）。
     eq_gains: [AtomicU32; 6],
     dsp_gain_db: AtomicU32,
@@ -101,6 +102,7 @@ impl Shared {
             fade_frames: AtomicU64::new(0),
             fade_done: AtomicU64::new(0),
             decode_error: AtomicBool::new(false),
+            eof: AtomicBool::new(false),
             eq_gains: [
                 AtomicU32::new(0.0f32.to_bits()),
                 AtomicU32::new(0.0f32.to_bits()),
@@ -166,7 +168,47 @@ impl Shared {
 struct DecoderCtl {
     stop: Arc<AtomicBool>,
     /// `Some(ms)` means "seek here as soon as you can".
-    seek_to: Arc<Mutex<Option<u64>>>,
+    seek_to: Arc<Mutex<Option<SeekRequest>>>,
+}
+
+impl DecoderCtl {
+    fn seek(
+        &self,
+        handle: &JoinHandle<()>,
+        position_ms: u64,
+        timeout: std::time::Duration,
+    ) -> Result<(), AudioError> {
+        if handle.is_finished() {
+            return Err(AudioError::DecodeFailed("decoder is not running".into()));
+        }
+        let (reply, result) = std::sync::mpsc::channel();
+        *self.seek_to.lock().unwrap() = Some(SeekRequest { position_ms, reply });
+        let started = std::time::Instant::now();
+        loop {
+            match result.recv_timeout(std::time::Duration::from_millis(20)) {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !handle.is_finished() => {
+                    if started.elapsed() >= timeout && self.seek_to.lock().unwrap().take().is_some()
+                    {
+                        return Err(AudioError::DecodeFailed(
+                            "seek timed out before decoder accepted it".into(),
+                        ));
+                    }
+                }
+                Err(_) => {
+                    self.seek_to.lock().unwrap().take();
+                    return Err(AudioError::DecodeFailed(
+                        "decoder stopped during seek".into(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+struct SeekRequest {
+    position_ms: u64,
+    reply: std::sync::mpsc::Sender<Result<(), AudioError>>,
 }
 
 /// 换装的"半完成态"：probe 已做完，等旧源淡出到 0 再由 maintain 换。
@@ -192,6 +234,8 @@ pub struct CpalBackend {
     pending_pause: bool,
     /// 停止淡出到 0 的瞬间才 seek 回 0 复位。
     pending_stop: bool,
+    stop_error: Option<String>,
+    transport_error: Option<AudioError>,
     /// 自然尾部淡出是否已武装（seek 回主体段后可重新武装）。
     tail_armed: bool,
     /// 等旧源淡出完成后换装的新源。
@@ -224,6 +268,8 @@ impl CpalBackend {
             spectrum_state: Mutex::new(Vec::new()),
             pending_pause: false,
             pending_stop: false,
+            stop_error: None,
+            transport_error: None,
             tail_armed: false,
             pending_load: None,
         })
@@ -295,6 +341,7 @@ impl CpalBackend {
 
     /// 起一个解码线程消费 `opened`。立即换装与 pending 换装共用。
     fn spawn_now(&mut self, opened: OpenedReader) -> Result<(), AudioError> {
+        self.shared.eof.store(false, Ordering::Release);
         let stop = Arc::new(AtomicBool::new(false));
         let seek_to = Arc::new(Mutex::new(None));
         let ctl = DecoderCtl {
@@ -311,14 +358,25 @@ impl CpalBackend {
             })
             .map_err(|e| AudioError::BackendInit(e.to_string()))?;
         self.decoder = Some((handle, ctl));
+        self.stop_error = None;
+        self.transport_error = None;
         Ok(())
     }
 
     /// 停止语义的复位动作：seek 回 0、清缓冲、进度归零（duration 保留）。
-    fn do_stop_reset(&mut self) {
-        let _ = self.seek(0);
-        self.clear_buffers();
-        self.shared.frames_played.store(0, Ordering::Relaxed);
+    fn do_stop_reset(&mut self) -> Result<(), AudioError> {
+        self.shared.playing.store(false, Ordering::Relaxed);
+        let result = if self.decoder.is_none() && self.pending_load.is_none() {
+            Ok(())
+        } else {
+            self.seek(0)
+        };
+        self.stop_error = result.as_ref().err().map(ToString::to_string);
+        if result.is_err() {
+            self.pending_pause = false;
+            self.pending_stop = false;
+        }
+        result
     }
 
     /// 淡出到 0 后的换装：停旧解码线程 → 清场 → 起新线程 → 复位斜坡，
@@ -378,16 +436,6 @@ impl CpalBackend {
         let audible = was_playing
             && (self.shared.fade_active()
                 || f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed)) > 0.001);
-        if !audible {
-            self.stop_decoder();
-            self.clear_buffers();
-            // 旧解码线程的早夭位随换装一并作废（stop 与其置位可能竞争），
-            // 否则新曲刚加载就会被旧标志误报 DecodeError。
-            let _ = self.shared.take_decode_error();
-            self.shared.frames_played.store(0, Ordering::Relaxed);
-            self.reset_fade();
-        }
-
         let mut hint = Hint::new();
         if let Some(e) = ext {
             if !e.is_empty() {
@@ -435,7 +483,7 @@ impl CpalBackend {
         if audible {
             // 旧源先淡出 200ms，probe 期间旧曲继续出声；maintain 到点换装并
             // 淡入。淡出期间到达的暂停/停止意图优先：换装后保持暂停而非开播。
-            let play_after = !self.pending_pause && !self.pending_stop;
+            let play_after = false;
             self.pending_pause = false;
             self.pending_stop = false;
             let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
@@ -454,6 +502,13 @@ impl CpalBackend {
 
         // 立即换装：暂停态保持暂停（playing 为 false）；尾段淡出后自动接歌
         // （playing 仍为 true）则装一条 0→1 淡入，让新曲渐强而不是爆入。
+        self.shared.playing.store(false, Ordering::Relaxed);
+        self.pending_load = None;
+        self.stop_decoder();
+        self.clear_buffers();
+        let _ = self.shared.take_decode_error();
+        self.shared.frames_played.store(0, Ordering::Relaxed);
+        self.reset_fade();
         self.duration_ms = duration_ms;
         // 解码线程创建失败不再让 load 报错：置解码错误位，actor 下一 tick
         // 经 DecodeError 事件收口（在线曲自动跳曲），状态仍按已加载发布。
@@ -481,7 +536,9 @@ impl CpalBackend {
             // 先复位再摘标志：do_stop_reset() 内 seek(0) 靠 pending_stop
             // 走「停止复位不回淡」例外，顺序反了会在停止后补出一条 120ms
             // 回淡（停止后放声）。
-            self.do_stop_reset();
+            if let Err(error) = self.do_stop_reset() {
+                self.transport_error = Some(error);
+            }
             self.pending_stop = false;
         }
         if self.pending_load.is_some() && !fading {
@@ -493,17 +550,17 @@ impl CpalBackend {
         if self.shared.playing.load(Ordering::Relaxed)
             && self.pending_load.is_none()
             && !self.pending_stop
+            && self.shared.eof.load(Ordering::Acquire)
             && !self.shared.fade_active()
         {
-            if let Some(d) = self.duration_ms {
-                let pos = self.position_ms();
-                let remain = d.saturating_sub(pos);
+            if let Ok(samples) = self.shared.samples.lock() {
+                let frames = (samples.len() / self.device_channels.max(1) as usize) as u64;
+                let remain = frames_to_ms(frames, self.device_rate);
                 let tail_ms = self.shared.crossfade_ms.load(Ordering::Relaxed);
                 let tail_ms = if tail_ms == 0 { TAIL_FADE_MS } else { tail_ms };
                 if !self.tail_armed && remain <= tail_ms && remain > 0 {
                     // 直接按剩余帧数装斜坡（不用 arm_fade 的固定毫秒），
                     // 保证增益恰好在最后一帧到 0。
-                    let frames = (remain as u128 * self.device_rate as u128 / 1000) as u64;
                     let from = f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed));
                     self.shared
                         .fade_from
@@ -516,10 +573,6 @@ impl CpalBackend {
                         .store(frames.max(1), Ordering::Relaxed);
                     self.shared.fade_done.store(0, Ordering::Relaxed);
                     self.tail_armed = true;
-                }
-                // 用户拖回主体段：允许再次武装。
-                if pos + 100 < d.saturating_sub(TAIL_FADE_MS) {
-                    self.tail_armed = false;
                 }
             }
         }
@@ -667,6 +720,9 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
         for (i, sample) in queue.drain(..copied).enumerate() {
             data[i] = sample; // 先放原始样本，tap 要在淡变前取
         }
+        shared
+            .frames_played
+            .fetch_add((copied / channels.max(1)) as u64, Ordering::Relaxed);
     }
 
     // 频谱 tap：淡变前信号（舞台可视化不随淡出塌陷）。cheap, bounded, and
@@ -750,12 +806,6 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
     for sample in data.iter_mut().skip(copied) {
         *sample = 0.0;
     }
-
-    if copied > 0 {
-        shared
-            .frames_played
-            .fetch_add((copied / channels.max(1)) as u64, Ordering::Relaxed);
-    }
 }
 
 impl AudioBackend for CpalBackend {
@@ -835,7 +885,24 @@ impl AudioBackend for CpalBackend {
     }
 
     fn play(&mut self) -> Result<(), AudioError> {
+        if let Some(error) = &self.stop_error {
+            return Err(AudioError::DecodeFailed(format!(
+                "stop reset failed; retry stop or reload: {error}"
+            )));
+        }
+        if self.pending_stop {
+            self.do_stop_reset()?;
+        }
         self.ensure_stream()?;
+        if self.shared.eof.load(Ordering::Acquire)
+            && self
+                .shared
+                .samples
+                .lock()
+                .is_ok_and(|samples| samples.is_empty())
+        {
+            self.seek(0)?;
+        }
         self.pending_pause = false;
         self.pending_stop = false;
         if self.pending_load.is_some() {
@@ -858,6 +925,18 @@ impl AudioBackend for CpalBackend {
     }
 
     fn pause(&mut self) -> Result<(), AudioError> {
+        if self.pending_load.is_none()
+            && self.shared.eof.load(Ordering::Acquire)
+            && self
+                .shared
+                .samples
+                .lock()
+                .is_ok_and(|samples| samples.is_empty())
+        {
+            self.shared.playing.store(false, Ordering::Relaxed);
+            self.pending_pause = false;
+            return Ok(());
+        }
         if self.shared.playing.load(Ordering::Relaxed) && !self.pending_pause {
             let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
             self.shared.arm_fade(
@@ -894,27 +973,26 @@ impl AudioBackend for CpalBackend {
             }
         } else if !self.pending_stop {
             // 已暂停：立刻复位，不等斜坡。
-            self.do_stop_reset();
+            self.do_stop_reset()?;
         }
         Ok(())
     }
 
     fn seek(&mut self, position_ms: u64) -> Result<(), AudioError> {
-        if let Some((_, ctl)) = &self.decoder {
-            *ctl.seek_to.lock().unwrap() = Some(position_ms);
-            self.clear_buffers();
-            self.shared.frames_played.store(
-                ms_to_frames(position_ms, self.device_rate),
-                Ordering::Relaxed,
-            );
+        if self.pending_load.is_some() {
+            self.shared.playing.store(false, Ordering::Relaxed);
+            self.spawn_pending();
         }
+        let position_ms = position_ms.min(self.duration_ms.unwrap_or(u64::MAX));
+        let (handle, ctl) = self.decoder.as_ref().ok_or(AudioError::NothingLoaded)?;
+        ctl.seek(handle, position_ms, std::time::Duration::from_secs(2))?;
         // 尾段淡出途中 seek：增益正沿尾斜坡滑向 0，而 tail_armed 会阻止
         // 尾部逻辑重新武装——不处理就永远卡在静音。解除门闩，从当前增益
         // 起步装一条 120ms 短回淡（arm_fade 自己读当前 fade_gain 当初值）。
         // 例外：pending_stop 复位时的 seek(0) 是停止动作，不能再淡回来。
         if self.tail_armed {
             self.tail_armed = false;
-            if !self.pending_stop {
+            if !self.pending_stop && !self.pending_pause {
                 self.shared.arm_fade(1.0, 120, self.device_rate);
             }
         }
@@ -922,6 +1000,9 @@ impl AudioBackend for CpalBackend {
     }
 
     fn set_volume(&mut self, volume: f32) -> Result<(), AudioError> {
+        if !volume.is_finite() {
+            return Err(AudioError::Other("volume must be finite".into()));
+        }
         self.shared
             .volume
             .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
@@ -949,6 +1030,9 @@ impl AudioBackend for CpalBackend {
     }
 
     fn position_ms(&self) -> u64 {
+        if self.pending_stop || self.pending_load.is_some() {
+            return 0;
+        }
         frames_to_ms(
             self.shared.frames_played.load(Ordering::Relaxed),
             self.device_rate,
@@ -957,39 +1041,46 @@ impl AudioBackend for CpalBackend {
     }
 
     fn duration_ms(&self) -> Option<u64> {
-        self.duration_ms
+        self.pending_load
+            .as_ref()
+            .map_or(self.duration_ms, |pending| pending.info.duration_ms)
     }
 
     fn finished(&self) -> bool {
         // 换装淡出窗口里旧源耗尽绝不能算「播完」：maintain 马上要换上新源，
         // 此刻报 Ended 会让状态层错误地接力/停播（I1）。
-        if self.pending_load.is_some() {
+        if self.pending_load.is_some()
+            || self.pending_stop
+            || self.pending_pause
+            || !self.shared.playing.load(Ordering::Relaxed)
+        {
             return false;
         }
-        // Finished means "decoder drained the file and we played all of it".
-        let drained = self
-            .decoder
-            .as_ref()
-            .map(|(_, ctl)| ctl.stop.load(Ordering::Relaxed))
-            .unwrap_or(true);
-        if !drained {
-            return false;
-        }
-        match self.duration_ms {
-            // Tolerance for rounding in the frame counter, but never so wide
-            // that a short clip is "finished" before it has started.
-            Some(d) => self.position_ms() + d.div_ceil(4).min(80) >= d,
-            None => false,
-        }
+        self.shared.eof.load(Ordering::Acquire)
+            && self
+                .shared
+                .samples
+                .lock()
+                .is_ok_and(|samples| samples.is_empty())
     }
 
     fn take_decode_failure(&mut self) -> bool {
+        if self.stop_error.is_some() {
+            self.shared.take_decode_error();
+            return false;
+        }
         // 换装淡出窗口里旧源的早夭不上报（新源即将接手；旧错误位由
         // spawn_pending 清掉，新解码器若再失败会重新置位）。
         if self.pending_load.is_some() {
             return false;
         }
-        self.shared.take_decode_error()
+        if !self.shared.take_decode_error() {
+            return false;
+        }
+        self.shared.playing.store(false, Ordering::Relaxed);
+        self.clear_buffers();
+        self.reset_fade();
+        true
     }
 
     fn spectrum(&self, out: &mut [f32]) -> bool {
@@ -1058,6 +1149,10 @@ impl AudioBackend for CpalBackend {
 
     fn maintain(&mut self) {
         CpalBackend::maintain(self);
+    }
+
+    fn take_transport_error(&mut self) -> Option<AudioError> {
+        self.transport_error.take()
     }
 }
 
@@ -1130,7 +1225,7 @@ fn decode_loop_opened(
     opened: OpenedReader,
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
-    seek_to: Arc<Mutex<Option<u64>>>,
+    seek_to: Arc<Mutex<Option<SeekRequest>>>,
     device_rate: u32,
     device_channels: usize,
 ) {
@@ -1147,24 +1242,47 @@ fn decode_loop_opened(
     // stop 位被外部置上。其余跳出（含解码致命错、下载断开的 BrokenPipe）才算早夭。
     let mut natural_eof = false;
     let mut interrupted = false;
+    let mut discard_until = None;
 
     while !stop.load(Ordering::Relaxed) {
-        if let Some(target_ms) = seek_to.lock().ok().and_then(|mut g| g.take()) {
+        if let Some(SeekRequest {
+            position_ms: target_ms,
+            reply,
+        }) = seek_to.lock().ok().and_then(|mut g| g.take())
+        {
             let time = Time::new(target_ms / 1000, (target_ms % 1000) as f64 / 1000.0);
-            if let Err(e) = reader.seek(
+            let sought = reader.seek(
                 SeekMode::Accurate,
                 SeekTo::Time {
                     time,
                     track_id: Some(track_id),
                 },
-            ) {
-                tracing::warn!("seek failed: {e}");
-            }
+            );
+            let sought = match sought {
+                Ok(sought) => sought,
+                Err(error) => {
+                    let _ = reply.send(Err(AudioError::DecodeFailed(format!(
+                        "seek failed: {error}"
+                    ))));
+                    continue;
+                }
+            };
+            discard_until = Some(sought.required_ts);
             decoder.reset();
             resampler.reset();
             if let Ok(mut q) = shared.samples.lock() {
                 q.clear();
+                shared
+                    .frames_played
+                    .store(ms_to_frames(target_ms, device_rate), Ordering::Relaxed);
             }
+            natural_eof = false;
+            shared.eof.store(false, Ordering::Release);
+            let _ = reply.send(Ok(()));
+        }
+        if natural_eof {
+            std::thread::sleep(std::time::Duration::from_millis(8));
+            continue;
         }
 
         // Flow control: decode only while the buffer is not full.
@@ -1177,6 +1295,7 @@ fn decode_loop_opened(
         }
 
         match reader.next_packet() {
+            Ok(packet) if packet.track_id() != track_id => continue,
             Ok(packet) => match decoder.decode(&packet) {
                 Ok(decoded) => {
                     let spec = *decoded.spec();
@@ -1186,7 +1305,26 @@ fn decode_loop_opened(
                     }
                     let mut sb = SampleBuffer::<f32>::new(frames as u64, spec);
                     sb.copy_interleaved_ref(decoded);
-                    let resampled = resampler.push(sb.samples(), spec.channels.count());
+                    let skip = discard_until.map_or(0, |target| {
+                        let ticks = target.saturating_sub(packet.ts());
+                        reader
+                            .default_track()
+                            .and_then(|track| track.codec_params.time_base)
+                            .map_or(ticks as usize, |base| {
+                                let time = base.calc_time(ticks);
+                                ((time.seconds as f64 + time.frac) * spec.rate as f64).round()
+                                    as usize
+                            })
+                            .min(frames)
+                    });
+                    if skip == frames {
+                        continue;
+                    }
+                    discard_until = None;
+                    let resampled = resampler.push(
+                        &sb.samples()[skip * spec.channels.count()..],
+                        spec.channels.count(),
+                    );
                     let mapped = map_channels(&resampled, spec.channels.count(), device_channels);
                     if let Ok(mut q) = shared.samples.lock() {
                         q.extend(mapped);
@@ -1217,6 +1355,8 @@ fn decode_loop_opened(
                         if ioe.kind() == std::io::ErrorKind::UnexpectedEof
                 ) {
                     natural_eof = true;
+                    shared.eof.store(true, Ordering::Release);
+                    continue;
                 } else if is_interrupted(&e) {
                     interrupted = true;
                     tracing::debug!("decoder loop aborted: {e}");
@@ -1411,6 +1551,284 @@ fn map_channels(interleaved: &[f32], from: usize, to: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decoded_fixture() -> CpalBackend {
+        let frames = 8_000u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8_000u32.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 2).to_le_bytes());
+        for sample in 0..frames {
+            wav.extend_from_slice(&(sample as i16).to_le_bytes());
+        }
+        let probed = symphonia::default::get_probe()
+            .format(
+                &Hint::new(),
+                MediaSourceStream::new(Box::new(std::io::Cursor::new(wav)), Default::default()),
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .unwrap();
+        let track = probed.format.default_track().unwrap();
+        let track_id = track.id;
+        let decoder = symphonia::default::get_codecs()
+            .make(&track.codec_params, &DecoderOptions::default())
+            .unwrap();
+        let mut backend = CpalBackend {
+            shared: Arc::new(Shared::new()),
+            device: None,
+            config: None,
+            stream: None,
+            decoder: None,
+            device_rate: 8_000,
+            device_channels: 1,
+            duration_ms: Some(1_000),
+            fft: FftPlanner::new().plan_fft_forward(FFT_SIZE),
+            spectrum_state: Mutex::new(Vec::new()),
+            pending_pause: false,
+            pending_stop: false,
+            stop_error: None,
+            transport_error: None,
+            tail_armed: false,
+            pending_load: None,
+        };
+        backend
+            .spawn_now((probed.format, decoder, track_id))
+            .unwrap();
+        wait_for_eof(&backend);
+        backend
+    }
+
+    fn wait_for_eof(backend: &CpalBackend) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !backend.shared.eof.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "decoder did not reach EOF"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn rejecting_seek_fixture() -> (CpalBackend, Arc<AtomicBool>) {
+        let mut backend = decoded_fixture();
+        backend.stop_decoder();
+        backend.shared.frames_played.store(4_000, Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        let seek_to = Arc::new(Mutex::new(None::<SeekRequest>));
+        let reject = Arc::new(AtomicBool::new(true));
+        let worker_stop = stop.clone();
+        let worker_seek = seek_to.clone();
+        let worker_reject = reject.clone();
+        let shared = backend.shared.clone();
+        let handle = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                let request = worker_seek.lock().unwrap().take();
+                if let Some(request) = request {
+                    let result = if worker_reject.load(Ordering::Relaxed) {
+                        Err(AudioError::DecodeFailed("test seek rejected".into()))
+                    } else {
+                        shared.frames_played.store(0, Ordering::Relaxed);
+                        Ok(())
+                    };
+                    let _ = request.reply.send(result);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        backend.decoder = Some((handle, DecoderCtl { stop, seek_to }));
+        (backend, reject)
+    }
+
+    #[test]
+    fn failed_stop_is_reported_and_blocks_play_until_reset_succeeds() {
+        let (mut backend, reject) = rejecting_seek_fixture();
+        assert!(backend.stop().is_err());
+        assert_eq!(backend.position_ms(), 500);
+        assert!(backend
+            .play()
+            .unwrap_err()
+            .to_string()
+            .contains("stop reset failed"));
+        assert!(!backend.shared.playing.load(Ordering::Relaxed));
+        reject.store(false, Ordering::Relaxed);
+        backend.stop().unwrap();
+        assert!(backend.stop_error.is_none());
+        assert_eq!(backend.position_ms(), 0);
+    }
+
+    #[test]
+    fn delayed_stop_failure_reports_once_without_auto_advance() {
+        let (mut backend, _) = rejecting_seek_fixture();
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        backend.stop().unwrap();
+        backend.shared.fade_frames.store(0, Ordering::Relaxed);
+        backend.maintain();
+        assert!(backend.take_transport_error().is_some());
+        backend.maintain();
+        assert!(backend.take_transport_error().is_none());
+        backend.shared.flag_decode_error();
+        assert!(!backend.take_decode_failure());
+        assert!(!backend.finished());
+        assert!(backend
+            .play()
+            .unwrap_err()
+            .to_string()
+            .contains("stop reset failed"));
+        assert_eq!(backend.position_ms(), 500);
+    }
+
+    #[test]
+    fn play_during_pending_stop_propagates_reset_failure() {
+        let (mut backend, _) = rejecting_seek_fixture();
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        backend.stop().unwrap();
+        assert!(backend
+            .play()
+            .unwrap_err()
+            .to_string()
+            .contains("test seek rejected"));
+        assert!(!backend.shared.playing.load(Ordering::Relaxed));
+        assert!(backend.stop_error.is_some());
+    }
+
+    #[test]
+    fn unclaimed_seek_timeout_removes_request_before_decoder_resumes() {
+        let seek_to = Arc::new(Mutex::new(None::<SeekRequest>));
+        let worker_seek = seek_to.clone();
+        let (release, resume) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            resume.recv().unwrap();
+            assert!(worker_seek.lock().unwrap().take().is_none());
+        });
+        let control = DecoderCtl {
+            stop: Arc::new(AtomicBool::new(false)),
+            seek_to,
+        };
+        let started = std::time::Instant::now();
+        let result = control.seek(&handle, 637, std::time::Duration::from_millis(40));
+        let elapsed = started.elapsed();
+        let removed = control.seek_to.lock().unwrap().is_none();
+        release.send(()).unwrap();
+        handle.join().unwrap();
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert!(removed);
+        assert!(elapsed < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn seek_after_eof_discards_samples_before_the_exact_target() {
+        let mut backend = decoded_fixture();
+        backend.seek(637).unwrap();
+        wait_for_eof(&backend);
+        assert_eq!(backend.position_ms(), 637);
+        let samples = backend.shared.samples.lock().unwrap();
+        assert_eq!(samples.len(), 8_000 - 5_096);
+        assert!((samples[0] - 5_096.0 / 32_768.0).abs() < 1e-6);
+        assert!(!backend.decoder.as_ref().unwrap().0.is_finished());
+    }
+
+    #[test]
+    fn stop_after_eof_rewinds_and_stops_consumption() {
+        let mut backend = decoded_fixture();
+        backend.seek(637).unwrap();
+        wait_for_eof(&backend);
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        backend.stop().unwrap();
+        backend.shared.fade_frames.store(0, Ordering::Relaxed);
+        backend.maintain();
+        wait_for_eof(&backend);
+        assert_eq!(backend.position_ms(), 0);
+        assert!(!backend.shared.playing.load(Ordering::Relaxed));
+        let mut output = [1.0; 128];
+        write_samples(&mut output, &backend.shared, 1);
+        assert_eq!(output, [0.0; 128]);
+        assert_eq!(backend.shared.samples.lock().unwrap().len(), 8_000);
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        write_samples(&mut output, &backend.shared, 1);
+        assert_eq!(backend.position_ms(), 16);
+    }
+
+    #[test]
+    fn natural_end_waits_for_all_samples_even_without_duration() {
+        let mut backend = decoded_fixture();
+        backend.duration_ms = None;
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        let mut output = vec![0.0; 7_999];
+        write_samples(&mut output, &backend.shared, 1);
+        assert!(!backend.finished());
+        write_samples(&mut [0.0], &backend.shared, 1);
+        assert!(backend.finished());
+        backend.seek(0).unwrap();
+        wait_for_eof(&backend);
+        assert!(!backend.finished());
+    }
+
+    #[test]
+    fn volume_applies_to_already_buffered_samples() {
+        let shared = Shared::new();
+        shared.playing.store(true, Ordering::Relaxed);
+        shared.samples.lock().unwrap().extend([0.5; 4]);
+        shared.volume.store(0.25f32.to_bits(), Ordering::Relaxed);
+        let mut output = [0.0; 4];
+        write_samples(&mut output, &shared, 1);
+        assert_eq!(output, [0.125; 4]);
+    }
+
+    #[test]
+    fn tail_fade_uses_decoded_frames_instead_of_estimated_duration() {
+        let mut backend = decoded_fixture();
+        backend.duration_ms = Some(100);
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        backend.maintain();
+        assert!(!backend.tail_armed);
+        write_samples(&mut vec![0.0; 7_000], &backend.shared, 1);
+        backend.maintain();
+        assert!(backend.tail_armed);
+        assert_eq!(backend.shared.fade_frames.load(Ordering::Relaxed), 1_000);
+    }
+
+    #[test]
+    fn seek_failure_preserves_position_and_end_pause_prevents_implicit_resume() {
+        let mut backend = decoded_fixture();
+        backend.duration_ms = None;
+        assert!(backend.seek(10_000).is_err());
+        assert_eq!(backend.position_ms(), 0);
+        assert_eq!(backend.shared.samples.lock().unwrap().len(), 8_000);
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        write_samples(&mut vec![0.0; 8_000], &backend.shared, 1);
+        assert!(backend.finished());
+        backend.pause().unwrap();
+        backend.seek(637).unwrap();
+        wait_for_eof(&backend);
+        write_samples(&mut [0.0; 128], &backend.shared, 1);
+        assert_eq!(backend.position_ms(), 637);
+        assert!(!backend.shared.playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn decoder_failure_stops_buffered_audio_and_is_reported_once() {
+        let mut backend = decoded_fixture();
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        backend.shared.flag_decode_error();
+        assert!(backend.take_decode_failure());
+        assert!(!backend.take_decode_failure());
+        let mut output = [1.0; 128];
+        write_samples(&mut output, &backend.shared, 1);
+        assert_eq!(output, [0.0; 128]);
+        assert_eq!(backend.position_ms(), 0);
+        assert!(backend.shared.samples.lock().unwrap().is_empty());
+        assert!(!backend.finished());
+    }
 
     #[test]
     fn uri_accepts_plain_path_and_file_uri() {

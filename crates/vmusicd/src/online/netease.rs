@@ -4,7 +4,7 @@
 //! 网易云音源。
 //!
 //! 用的是公开的 /api/search/get 与 /api/song/detail 接口，和网页端自己调的是
-//! 同一套端点。这里**不**实现任何签名算法、设备指纹或加密音频解密：需要登录
+//! 同一套端点。游客会话使用 eapi、私人 FM 使用 weapi 参数封装；不处理加密音频。需要登录
 //! 的场景由用户把自己账号的 cookie 填进设置，或走网页同款二维码登录，我们
 //! 只是原样转发给网易云。
 //!
@@ -81,7 +81,7 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
     let limit = q.limit.clamp(1, 60);
     let offset = q.offset.min(500);
 
-    let cookie = login_cookie(ctx).await;
+    let cookie = visitor_cookie(ctx).await.unwrap_or(None);
     let mut req = client
         .get("https://music.163.com/api/search/get/")
         .query(&[
@@ -94,10 +94,7 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         .header("Accept", "application/json");
     req = with_cookie(req, cookie.as_deref());
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| ApiError::internal(format!("连接网易云失败: {e}")))?;
+    let resp = req.send().await.map_err(super::http::send_error)?;
 
     if !resp.status().is_success() {
         return Err(ApiError::internal(format!("网易云返回 {}", resp.status())));
@@ -111,6 +108,8 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
     // 上游在触发风控时会返回 code != 200，或者干脆返回 HTML 登录页。
     let code = body.get("code").and_then(|v| v.as_i64()).unwrap_or(200);
     if code != 200 {
+        invalidate_visitor(&body).await;
+        expect_200(&body, "搜索")?;
         return Err(ApiError::internal(format!(
             "网易云拒绝了这次搜索（code {code}），稍后重试或换关键词"
         )));
@@ -149,6 +148,7 @@ fn netease_track(song: &serde_json::Value) -> OnlineTrack {
         .to_string();
     let album = song
         .get("album")
+        .or_else(|| song.get("al"))
         .and_then(|a| a.get("name"))
         .and_then(|n| n.as_str())
         .unwrap_or("")
@@ -160,6 +160,7 @@ fn netease_track(song: &serde_json::Value) -> OnlineTrack {
     // [`fill_album_covers`] 用详情接口补真图。
     let cover = song
         .get("album")
+        .or_else(|| song.get("al"))
         .and_then(|a| a.get("picUrl"))
         .and_then(|n| n.as_str())
         .and_then(https_url);
@@ -174,7 +175,11 @@ fn netease_track(song: &serde_json::Value) -> OnlineTrack {
             .to_string(),
         artist: song_artists(song),
         album,
-        duration_ms: song.get("duration").and_then(|v| v.as_u64()).unwrap_or(0),
+        duration_ms: song
+            .get("duration")
+            .or_else(|| song.get("dt"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         cover,
         // 网易云对外链试听有版权限制，能不能播要等 /url 接口确认。
         // 这里统一标 true，实际播放时再报错，避免"看起来全不可点"。
@@ -270,6 +275,7 @@ fn apply_detail_covers(tracks: &mut [OnlineTrack], songs: &[serde_json::Value]) 
 
 fn song_artists(song: &serde_json::Value) -> String {
     song.get("artists")
+        .or_else(|| song.get("ar"))
         .and_then(|a| a.as_array())
         .map(|arr| {
             arr.iter()
@@ -288,7 +294,7 @@ fn with_cookie(req: reqwest::RequestBuilder, cookie: Option<&str>) -> reqwest::R
 }
 
 pub async fn stream(ctx: &Ctx, id: &str, quality: u32) -> ApiResult<StreamInfo> {
-    let cookie = login_cookie(ctx).await;
+    let cookie = visitor_cookie(ctx).await.unwrap_or(None);
     let client = client()?;
     let req = client
         .get("https://music.163.com/api/song/enhance/player/url")
@@ -297,13 +303,17 @@ pub async fn stream(ctx: &Ctx, id: &str, quality: u32) -> ApiResult<StreamInfo> 
     let resp = with_cookie(req, cookie.as_deref())
         .send()
         .await
-        .map_err(|e| ApiError::internal(format!("获取试听地址失败: {e}")))?;
+        .map_err(super::http::send_error)?;
 
     let body: serde_json::Value = resp
         .json()
         .await
         .map_err(|e| ApiError::internal(format!("试听响应解析失败: {e}")))?;
 
+    invalidate_visitor(&body).await;
+    if body.get("code").is_some() {
+        expect_200(&body, "获取音频")?;
+    }
     let entry = body
         .get("data")
         .and_then(|d| d.as_array())
@@ -315,18 +325,9 @@ pub async fn stream(ctx: &Ctx, id: &str, quality: u32) -> ApiResult<StreamInfo> 
         .and_then(|u| u.as_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            // 同一条「没有地址」在登录态前后是可修与不可修的两件事，分开说才
-            // 值得用户去设置里粘一次 cookie。
-            if cookie.is_some() {
-                ApiError::internal(
-                    "这首歌在你的账号里也没有可用的试听地址（大概率是版权下架）".to_string(),
-                )
-            } else {
-                ApiError::internal(
-                    "这首歌需要登录：在「设置 → 在线音源」里填入你自己网易云账号的 cookie 再试"
-                        .to_string(),
-                )
-            }
+            ApiError::upstream_rejected(
+                "这首歌暂无可用音频，可能受版权、地区或账号权益限制；可换一首或登录后重试",
+            )
         })?;
 
     Ok(StreamInfo {
@@ -371,11 +372,13 @@ pub async fn detail(ctx: &Ctx, id: &str) -> ApiResult<OnlineDetail> {
     // 专辑封面优先；拿不到就退回艺人头像，再拿不到就交给前端画占位图。
     let cover = song
         .get("album")
+        .or_else(|| song.get("al"))
         .and_then(|a| a.get("picUrl"))
         .and_then(|v| v.as_str())
         .and_then(https_url)
         .or_else(|| {
             song.get("artists")
+                .or_else(|| song.get("ar"))
                 .and_then(|a| a.as_array())
                 .and_then(|arr| arr.first())
                 .and_then(|a| a.get("img1v1Url").or_else(|| a.get("picUrl")))
@@ -394,11 +397,16 @@ pub async fn detail(ctx: &Ctx, id: &str) -> ApiResult<OnlineDetail> {
         artist: song_artists(song),
         album: song
             .get("album")
+            .or_else(|| song.get("al"))
             .and_then(|a| a.get("name"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        duration_ms: song.get("duration").and_then(|v| v.as_u64()).unwrap_or(0),
+        duration_ms: song
+            .get("duration")
+            .or_else(|| song.get("dt"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         cover,
     })
 }
@@ -459,6 +467,125 @@ async fn login_cookie(ctx: &Ctx) -> Option<String> {
         .flatten()
         .map(|p| p.cookie)
         .filter(|s| !s.trim().is_empty())
+}
+
+// 游客会话与账号保险库分离，进程退出即清空；串行申请避免并发搜索重复注册。
+static VISITOR: tokio::sync::Mutex<Option<(std::time::Instant, Option<String>)>> =
+    tokio::sync::Mutex::const_new(None);
+
+async fn invalidate_visitor(body: &serde_json::Value) {
+    if matches!(body["code"].as_i64(), Some(301 | 401 | 403 | -462)) {
+        *VISITOR.lock().await = None;
+    }
+}
+
+fn visitor_ttl(cookie: &Option<String>) -> std::time::Duration {
+    std::time::Duration::from_secs(if cookie.is_some() { 3600 } else { 30 })
+}
+
+#[test]
+fn visitor_lifetime_and_modern_track_fields() {
+    assert_eq!(visitor_ttl(&None).as_secs(), 30);
+    assert_eq!(visitor_ttl(&Some("MUSIC_A=fixture".into())).as_secs(), 3600);
+    let song = netease_track(
+        &serde_json::json!({"id":1,"name":"Song","ar":[{"name":"Artist"}],"al":{"name":"Album","picUrl":"https://example.com/cover.jpg"},"dt":123456}),
+    );
+    assert_eq!(song.artist, "Artist");
+    assert_eq!(song.album, "Album");
+    assert_eq!(song.duration_ms, 123456);
+    assert!(song.cover.is_some());
+}
+
+async fn weapi(
+    path: &str,
+    mut data: serde_json::Value,
+    cookie: Option<&str>,
+) -> ApiResult<(reqwest::header::HeaderMap, serde_json::Value)> {
+    let csrf = cookie
+        .unwrap_or("")
+        .split(';')
+        .find_map(|s| s.trim().strip_prefix("__csrf="))
+        .unwrap_or("");
+    data["csrf_token"] = csrf.into();
+    let key = super::sign::kugou_login::random_key();
+    let (params, secret) = super::sign::netease::weapi(&data.to_string(), &key);
+    let form = BTreeMap::from([("params".into(), params), ("encSecKey".into(), secret)]);
+    let mut headers = super::http::headers(cookie, Some(W));
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/x-www-form-urlencoded"),
+    );
+    super::http::post_json_with_headers(
+        &client()?,
+        &format!("{W}/weapi/{path}"),
+        headers,
+        form_urlencoded(&form),
+    )
+    .await
+}
+
+async fn visitor_cookie(ctx: &Ctx) -> ApiResult<Option<String>> {
+    if let Some(cookie) = login_cookie(ctx).await {
+        return Ok(Some(cookie));
+    }
+    let mut cache = VISITOR.lock().await;
+    if let Some((created, cookie)) = cache.as_ref() {
+        if created.elapsed() < visitor_ttl(cookie) {
+            return Ok(cookie.clone());
+        }
+    }
+    *cache = Some((std::time::Instant::now(), None));
+    let device = uuid::Uuid::new_v4().simple().to_string();
+    let header = serde_json::json!({"os":"ios","appver":"8.20.21","deviceId":device,"versioncode":"140","resolution":"1920x1080","__csrf":"","requestId":uuid::Uuid::new_v4().simple().to_string()});
+    let data = serde_json::json!({"username": super::sign::netease::anonymous_username(&device),"header":header,"e_r":false});
+    let params = super::sign::netease::eapi("/api/register/anonimous", &data.to_string());
+    let mut h = super::http::headers(Some("os=ios; appver=8.20.21"), Some(W));
+    h.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/x-www-form-urlencoded"),
+    );
+    let (headers, body) = super::http::post_json_with_headers(
+        &client()?,
+        "https://interface.music.163.com/eapi/register/anonimous",
+        h,
+        form_urlencoded(&BTreeMap::from([("params".into(), params)])),
+    )
+    .await?;
+    expect_200(&body, "游客会话")?;
+    let mut cookies = BTreeMap::new();
+    absorb_cookies(&headers, &mut cookies);
+    let cookie = cookie_string(&cookies);
+    if !cookies.contains_key("MUSIC_A") {
+        return Err(ApiError::upstream_rejected("网易云未返回游客会话"));
+    }
+    *cache = Some((std::time::Instant::now(), Some(cookie.clone())));
+    Ok(Some(cookie))
+}
+
+pub async fn personal_fm(ctx: &Ctx) -> ApiResult<Vec<OnlineTrack>> {
+    let cookie = visitor_cookie(ctx).await?;
+    let (_, body) = weapi(
+        "v1/radio/get",
+        serde_json::json!({"limit": 3}),
+        cookie.as_deref(),
+    )
+    .await?;
+    invalidate_visitor(&body).await;
+    expect_200(&body, "私人 FM")?;
+    let tracks: Vec<_> = body["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| s["id"].as_i64().is_some_and(|id| id > 0))
+        .take(20)
+        .map(netease_track)
+        .collect();
+    if tracks.is_empty() {
+        return Err(ApiError::upstream_rejected(
+            "私人 FM 暂未返回歌曲，请稍后重试",
+        ));
+    }
+    Ok(tracks)
 }
 
 /// 要求已登录（cookie 含 MUSIC_U），否则 401。

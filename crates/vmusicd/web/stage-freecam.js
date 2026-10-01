@@ -49,6 +49,10 @@
   function wrap180(v) { v = ((v + 180) % 360 + 360) % 360 - 180; return v; }
   function tier0() { return !!(global.Stage && Stage.tier && Stage.tier() === 0); }
   function stageEl() { return document.getElementById('stage'); }
+  function reducedMotion() {
+    return !!(global.Stage && Stage.presentation && Stage.presentation().reduced) ||
+      !!(global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  }
 
   function loadPose() {
     try {
@@ -84,7 +88,7 @@
 
   function releaseLock() {
     try {
-      if (document.pointerLockElement) document.exitPointerLock();
+      if (document.pointerLockElement === stageEl()) document.exitPointerLock();
     } catch (e) { /* 老浏览器无此 API */ }
     locked = false;
   }
@@ -121,7 +125,7 @@
     if (global.StageCinema) StageCinema.setFreecam(false);
     removeDomListeners();
     // 600ms inout 飞回；终点在层里逐帧取最新基线（飞回期间导演可能在动）。
-    if (pose) returning = { start: now(), from: {
+    if (pose && !reducedMotion()) returning = { start: now(), from: {
       yawDeg: pose.yawDeg, pitchDeg: pose.pitchDeg, dist: pose.dist,
       tx: pose.tx, tz: pose.tz, rollDeg: pose.rollDeg
     } };
@@ -132,18 +136,21 @@
 
   function typingTarget(e) {
     var t = e.target;
-    return t && /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName || '');
+    return t && (t.isContentEditable || /^(INPUT|SELECT|TEXTAREA|BUTTON|A)$/.test(t.tagName || ''));
   }
 
   function onKeyDown(e) {
-    if (!enabled || typingTarget(e)) return;
+    if (!enabled || document.hidden || typingTarget(e) || e.ctrlKey || e.metaKey || e.altKey) return;
     if (MOVE_CODES[e.code]) {
       keys[e.code] = true;
       e.preventDefault();
       return;
     }
     if (e.code === 'KeyK') {
-      if (pose) rollBack = { start: now(), from: pose.rollDeg };
+      if (pose) {
+        if (reducedMotion()) { pose.rollDeg = 0; rollBack = null; }
+        else rollBack = { start: now(), from: pose.rollDeg };
+      }
       e.preventDefault();
     } else if (e.code === 'Escape') {
       setEnabled(false, false);
@@ -151,11 +158,13 @@
   }
   function onKeyUp(e) { if (MOVE_CODES[e.code]) keys[e.code] = false; }
   // 窗口失焦（Alt-Tab/切桌面）时 keyup 会丢：清空按键与拖拽，回来不会自己继续走。
-  function onBlur() { keys = {}; dragging = false; }
+  function onBlur() { keys = {}; dragging = false; pid = null; lastT = 0; releaseLock(); }
+  function onVisibilityChange() { if (document.hidden) onBlur(); }
+  function onFocusIn(e) { if (typingTarget(e)) onBlur(); }
 
   function onPointerDown(e) {
-    if (!enabled) return;
-    if (e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, .stage-lyrics, .lp-body')) return;
+    if (!enabled || document.hidden || dragging) return;
+    if (e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, [contenteditable], .stage-lyrics, .lp-body')) return;
     if (e.isPrimary === false) return;
     if (e.button !== 0) return;
     dragging = true;
@@ -165,7 +174,7 @@
     // 用户手势里申请指针锁定；被拒绝（权限策略/非安全上下文）也没关系，
     // 按住拖拽（pointermove 回落分支）始终可用。
     var el = stageEl();
-    if (el && el.requestPointerLock && !document.pointerLockElement) {
+    if (e.pointerType === 'mouse' && el && el.requestPointerLock && !document.pointerLockElement) {
       try {
         var r = el.requestPointerLock();
         if (r && r.catch) r.catch(function () { locked = false; });
@@ -178,7 +187,7 @@
     pid = null;
   }
   function onMouseMove(e) {
-    if (!enabled || !pose) return;
+    if (!enabled || !pose || document.hidden) return;
     if (locked && typeof e.movementX === 'number') {
       pose.yawDeg -= e.movementX * LOOK_YAW;
       pose.pitchDeg = clamp(pose.pitchDeg + e.movementY * LOOK_PITCH, -PITCH_LIMIT, PITCH_LIMIT);
@@ -193,33 +202,41 @@
   function onLockChange() {
     var el = stageEl();
     locked = !!(el && document.pointerLockElement === el);
+    if (locked && (!enabled || document.hidden)) releaseLock();
+    if (!locked) { keys = {}; dragging = false; pid = null; }
   }
   function onLockError() { locked = false; }
 
   function addDomListeners() {
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);
-    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('pointermove', onMouseMove);
+    document.addEventListener('pointerup', onPointerUp);
+    document.addEventListener('pointercancel', onPointerUp);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    document.addEventListener('focusin', onFocusIn);
     document.addEventListener('pointerlockchange', onLockChange);
     document.addEventListener('pointerlockerror', onLockError);
     window.addEventListener('blur', onBlur);
     var el = stageEl();
     if (el) {
       el.addEventListener('pointerdown', onPointerDown);
-      el.addEventListener('pointerup', onPointerUp);
     }
   }
   function removeDomListeners() {
     document.removeEventListener('keydown', onKeyDown);
     document.removeEventListener('keyup', onKeyUp);
-    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('pointermove', onMouseMove);
+    document.removeEventListener('pointerup', onPointerUp);
+    document.removeEventListener('pointercancel', onPointerUp);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    document.removeEventListener('focusin', onFocusIn);
     document.removeEventListener('pointerlockchange', onLockChange);
     document.removeEventListener('pointerlockerror', onLockError);
     window.removeEventListener('blur', onBlur);
     var el = stageEl();
     if (el) {
       el.removeEventListener('pointerdown', onPointerDown);
-      el.removeEventListener('pointerup', onPointerUp);
     }
   }
 
@@ -236,10 +253,12 @@
   }
 
   function layer(ctx) {
+    if (document.hidden) { lastT = 0; return; }
     var dt = lastT ? Math.min(100, ctx.t - lastT) : 16;
     lastT = ctx.t;
 
     if (returning) {
+      if (reducedMotion()) { returning = null; return; }
       var k = clamp((ctx.t - returning.start) / RETURN_MS, 0, 1);
       var e = easeInOut(k);
       var f = returning.from;

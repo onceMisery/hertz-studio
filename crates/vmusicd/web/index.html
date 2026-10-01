@@ -201,6 +201,9 @@
     <button id="stage3d-entry" class="iconbtn" title="沉浸声场 (V)" aria-label="进入沉浸声场">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-cube"/></svg>
     </button>
+    <button type="button" id="settings-entry" class="iconbtn" title="设置 (4)" aria-label="打开设置" aria-controls="view-settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg>
+    </button>
 
     <!-- 主题色切换：色板 → 下拉调色盘。列表由 themes.js 的 CATALOG 填充，
          加主题只需要往那张表里加一条。 -->
@@ -395,6 +398,20 @@
         <input id="online-q" type="search" placeholder="搜索在线歌曲、歌手或专辑…" autocomplete="off" aria-label="搜索在线曲库">
         <button id="online-go" class="btn primary">搜索</button>
       </div>
+
+      <section class="online-radio" aria-label="私人 FM">
+        <div class="online-radio-copy">
+          <strong>私人 FM <span>网易云音乐 · 连续推荐</span></strong>
+          <p id="radio-status" role="status">可尝试游客收听；推荐和播放范围由音源决定。</p>
+          <p id="radio-track" hidden></p>
+        </div>
+        <div class="online-radio-actions">
+          <button id="radio-start" class="btn" type="button">开启 FM</button>
+          <button id="radio-next" class="btn" type="button" hidden>下一首</button>
+          <button id="radio-retry" class="btn" type="button" hidden>重试补歌</button>
+          <button id="radio-stop" class="btn" type="button" hidden>退出 FM</button>
+        </div>
+      </section>
 
       <div class="online-chips" id="online-chips" role="group" aria-label="分类">
         <button class="chip active" data-cat="hot">热门</button>
@@ -709,6 +726,11 @@
         </div>
         <div class="theme-swatches" id="theme-swatches" role="group" aria-label="主题色快选"></div>
         <div class="set-row">
+          <label for="set-cover-follow">界面随歌曲封面变化</label>
+          <input id="set-cover-follow" type="checkbox" checked aria-describedby="set-cover-follow-note">
+          <span class="hint" id="set-cover-follow-note">开启时背景与舞台高亮跟随封面；关闭后使用所选主题，保留歌曲封面。即时生效并自动保存。</span>
+        </div>
+        <div class="set-row">
           <label for="set-device">输出设备</label>
           <select id="set-device"></select>
         </div>
@@ -825,21 +847,10 @@
         </div>
       </div>
 
-      <!-- 创意舞台：三维场景、手绘风格、自定义背景都在这里开总开关。
-           细分参数不在这里调——那是工坊的活。这一组只回答"开不开"。 -->
+      <!-- 创意舞台：手绘风格、自定义背景与工坊入口在这里。
+           细分参数不在这里调——那是工坊的活。 -->
       <div class="set-group">
         <h2 class="set-title">创意舞台</h2>
-        <!-- WebGL2 上下文可能创建失败，警告块与上面的渲染模式共用同一种做法：
-             不直接落库，先摊开说明再由用户确认。 -->
-        <div class="set-row">
-          <label for="set-creative">三维舞台</label>
-          <input id="set-creative" type="checkbox">
-        </div>
-        <div class="hint set-note" id="set-creative-note">
-          用独立的三维场景替换原来的粒子层：频谱塔林、频谱球、光隧道、星云、频谱地形，
-          由自动导演跟着段落切换镜头。开启后原粒子层自动让位，两者不会同时画。
-        </div>
-        <div class="render-warn" id="creative-warn" hidden></div>
         <div class="set-row">
           <label>创意工坊</label>
           <button id="set-workshop-btn" class="btn">打开工坊</button>
@@ -1022,6 +1033,7 @@
     <div class="s3d-sleeve-caption"><strong id="s3d-sleeve-title"></strong><span id="s3d-sleeve-artist"></span></div>
   </div>
   <div class="fl-root" id="s3d-folia" hidden>
+    <div class="fl-scene-backdrop" id="s3d-fl-backdrop" aria-hidden="true" hidden><img id="s3d-fl-wallpaper" alt="" decoding="async" hidden></div>
     <div class="fl-bg" id="s3d-fl-bg"></div>
     <div class="fl-sonnet-layer" id="s3d-fl-sonnet-stage"></div>
     <div class="fl-lyric" id="s3d-fl-lyric"></div>
@@ -1050,7 +1062,13 @@
       <label for="s3d-fl-size">歌词字号 <output id="s3d-fl-size-value">100%</output></label>
       <input id="s3d-fl-size" type="range" min="0.70" max="1.50" step="0.05" value="1">
       <label for="s3d-fl-bg-mode">背景样式</label>
-      <select id="s3d-fl-bg-mode"><option value="stage">舞台场景（3D）</option><option value="geometric">几何</option><option value="fluid">流体</option><option value="solid">纯色</option></select>
+      <select id="s3d-fl-bg-mode"><option value="stage">舞台场景（3D）</option><option value="atmosphere">彩色氛围</option><option value="anime">二次元壁纸</option><option value="geometric">几何</option><option value="fluid">流体</option><option value="solid">纯色</option></select>
+      <div id="s3d-fl-wallpapers" hidden>
+        <div class="s3d-wallpaper-grid" id="s3d-fl-wallpaper-grid" role="group" aria-label="选择歌词舞台壁纸"></div>
+        <label for="s3d-fl-wallpaper-dim">图片压暗 <output id="s3d-fl-wallpaper-dim-value">48%</output></label>
+        <input id="s3d-fl-wallpaper-dim" type="range" min="0.2" max="0.8" step="0.02" value="0.48">
+        <p id="s3d-fl-wallpaper-note" role="status">仅用于歌词舞台，不改变主页背景。</p>
+      </div>
       <label for="s3d-fl-opacity">封面底色浓度 <output id="s3d-fl-opacity-value">75%</output></label>
       <input id="s3d-fl-opacity" type="range" min="0" max="1" step="0.05" value="0.75">
       <label for="s3d-fl-vignette"><input id="s3d-fl-vignette" type="checkbox" checked> 暗角</label>

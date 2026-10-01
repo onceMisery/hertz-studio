@@ -92,6 +92,7 @@
       img.decoding = 'async';
       coverCache.set(url, img);
       img.src = url;
+      while (coverCache.size > MAX_CARDS * 2) coverCache.delete(coverCache.keys().next().value);
     }
 
     // ---- DOM 构建 ---------------------------------------------------------
@@ -189,35 +190,37 @@
       var browseBands = 0;
 
       el.addEventListener('pointerdown', function (e) {
+        if (!active || blocked || down || e.button !== 0 || e.isPrimary === false) return;
         // 卡片不在画布层内，但仍显式吃掉事件，避免任何上层捕获逻辑误判为拖拽
         e.stopPropagation();
-        down = { x: e.clientX, y: e.clientY };
+        down = { x: e.clientX, y: e.clientY, id: e.pointerId, moved: 0 };
         browseBands = 0;
         try { el.setPointerCapture(e.pointerId); } catch (_) {}
       });
 
       el.addEventListener('pointermove', function (e) {
-        if (!down) return;
+        if (!down || e.pointerId !== down.id) return;
+        down.moved = Math.max(down.moved, Math.hypot(e.clientX - down.x, e.clientY - down.y));
         var band;
         if (mode === 'side') {
           // 右侧竖向架：上下拖动浏览（向下=后续曲目），按卡片高度取带。
           var dy = e.clientY - down.y;
           var step = el.offsetHeight || 96;
-          band = dy > 0 ? Math.ceil(dy / step) : Math.floor(dy / step);
+          band = Math.trunc(dy / step);
         } else {
           // 横向封面流：左右拖动
           var dx = e.clientX - down.x;
-          band = dx < 0 ? Math.ceil(-dx / 44) : -Math.floor(dx / 44);
+          band = Math.trunc(-dx / 44);
         }
-        if (band !== browseBands && band !== 0) {
+        if (band !== browseBands) {
           nudgeBrowse(band - browseBands);
           browseBands = band;
         }
       });
 
       function finish(e, cancelled) {
-        if (!down) return;
-        var moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+        if (!down || e.pointerId !== down.id) return;
+        var moved = Math.max(down.moved, Math.hypot(e.clientX - down.x, e.clientY - down.y));
         down = null;
         try { el.releasePointerCapture(e.pointerId); } catch (_) {}
         if (cancelled || moved > CLICK_THRESHOLD || browseBands !== 0) return;
@@ -226,6 +229,8 @@
 
       el.addEventListener('pointerup', function (e) { finish(e, false); });
       el.addEventListener('pointercancel', function (e) { finish(e, true); });
+      el.addEventListener('lostpointercapture', function (e) { finish(e, true); });
+      el._cancelDrag = function () { if (down) finish({ pointerId: down.id }, true); };
 
       el.addEventListener('mouseenter', function () { hoverId = id; });
       el.addEventListener('mouseleave', function () { if (hoverId === id) hoverId = null; });
@@ -255,36 +260,23 @@
 
     // ---- 滚轮浏览（在舞台根节点捕获，贴近歌单架区域才截给架子）-------------
 
-    var lastClient = { x: -1, y: -1 };
-
     function onPointerTrack(e) {
-      lastClient.x = e.clientX;
-      lastClient.y = e.clientY;
+      if (!active || blocked || document.hidden || reducedMotion()) return;
       pointer.x = clamp(e.clientX / Math.max(1, global.innerWidth) * 2 - 1, -1, 1);
       pointer.y = clamp(e.clientY / Math.max(1, global.innerHeight) * 2 - 1, -1, 1);
     }
 
-    function inShelfWheelZone() {
-      var vw = global.innerWidth, vh = global.innerHeight;
-      var x = lastClient.x, y = lastClient.y;
-      if (x < 0) return false;
-      if (mode === 'side') {
-        // 右侧歌单架竖列带
-        return x > vw * 0.70 && y > vh * 0.18 && y < vh * 0.86;
-      }
-      // stage：底部中央封面流一带（避开底播条与顶部）
-      return y > vh * 0.42 && y < vh * 0.80 && Math.abs(x / vw - 0.5) < 0.42;
-    }
-
     function onWheelCapture(e) {
       if (!active || mode === 'off' || blocked || !items.length) return;
-      if (!inShelfWheelZone()) return;
+      if (e.ctrlKey || e.metaKey || !e.target.closest || !plane.contains(e.target.closest('.s3d-sc'))) return;
+      var delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (!delta) return;
       e.preventDefault();
       e.stopPropagation();
       var now = Date.now();
       if (now - lastWheelAt < WHEEL_COOLDOWN_MS) return;
       lastWheelAt = now;
-      nudgeBrowse(e.deltaY > 0 ? 1 : -1);
+      nudgeBrowse(delta > 0 ? 1 : -1);
     }
 
     function nudgeBrowse(dir) {
@@ -325,6 +317,7 @@
     }
 
     function setItems(list) {
+      if (!root.classList.contains('s3d-chrome')) clearDying();
       var source = Array.isArray(list) ? list : [];
       var next = windowAround(source);
       var nextIds = {};
@@ -338,8 +331,13 @@
         if (nextIds[String(it.id)]) return;
         var el = nodes.get(it.id);
         if (el) {
-          el._pose.dead = now;
-          dying.push(el);
+          if (el._cancelDrag) el._cancelDrag();
+          if (!active || blocked || document.hidden || !root.classList.contains('s3d-chrome') || mode === 'off' || reducedMotion()) {
+            if (el.parentNode) el.parentNode.removeChild(el);
+          } else {
+            el._pose.dead = now;
+            dying.push(el);
+          }
           nodes.delete(it.id);
         }
       });
@@ -376,6 +374,7 @@
       });
 
       items = next;
+      if (!items.length) clearDying();
       items.forEach(function (it) { if (it.cover) preloadCover(it.cover); });
       repaintTags();
 
@@ -455,7 +454,7 @@
     }
 
     function frame(dtMs) {
-      if (!active || mode === 'off') return;
+      if (!active || blocked || document.hidden || !root.classList.contains('s3d-chrome') || mode === 'off') return;
       var reduced = reducedMotion();
       var data = Stage && Stage.presentation ? Stage.presentation() : null;
       var playing = !!(data && data.playing);
@@ -463,8 +462,9 @@
 
       if (!reduced) t += dtMs / 1000;
 
-      var bassTarget = computeBass(playing);
-      bass += (bassTarget - bass) * 0.2;
+      if (reduced) pointer.x = pointer.y = 0;
+      var bassTarget = reduced ? 0 : computeBass(playing);
+      bass += (bassTarget - bass) * (reduced ? 1 : 1 - Math.pow(0.8, dtMs / (1000 / 60)));
       if (Math.abs(bassTarget - bass) < 0.002) bass = bassTarget;
 
       // 切歌脉冲：当前曲 id 变化时给新中央卡一次按下反馈
@@ -483,7 +483,7 @@
         browseIndex = 0;
         target = ci;
       }
-      center += (target - center) * LERP_CENTER;
+      center += (target - center) * (reduced ? 1 : 1 - Math.pow(1 - LERP_CENTER, dtMs / (1000 / 60)));
       if (Math.abs(center - target) < 0.001) center = target;
 
       var now = performance.now();
@@ -512,9 +512,9 @@
 
         var isHover = hoverId === item.id;
         var targetHover = isHover ? 1 : 0;
-        p.hover += (targetHover - p.hover) * LERP_HOVER;
+        p.hover += (targetHover - p.hover) * (reduced ? 1 : 1 - Math.pow(1 - LERP_HOVER, dtMs / (1000 / 60)));
 
-        p.pulse = (p.pulse || 0) * (reduced ? 0 : 0.9);
+        p.pulse = (p.pulse || 0) * (reduced ? 0 : Math.pow(0.9, dtMs / (1000 / 60)));
         if (p.pulse < 0.01) p.pulse = 0;
         p.reveal = reveal;
 
@@ -594,25 +594,46 @@
     }
 
     function hide() {
+      cancelDrags();
+      clearDying();
       active = false;
       root.classList.remove('s3d-shelf-on');
       plane.hidden = true;
     }
 
     function setMode(next) {
+      cancelDrags();
       if (next !== 'off' && next !== 'stage' && next !== 'side') next = 'stage';
       mode = next;
+      if (mode === 'off') clearDying();
       applyVisibility(true);
       if (active && mode !== 'off' && Stage && Stage.kick) Stage.kick();
     }
 
     function setBlocked(on) {
       blocked = !!on;
+      if (blocked) { cancelDrags(); clearDying(); }
       root.classList.toggle('s3d-shelf-blocked', blocked);
+      if (!blocked && active && Stage && Stage.kick) Stage.kick();
+    }
+
+    function cancelDrags() {
+      nodes.forEach(function (el) { if (el._cancelDrag) el._cancelDrag(); });
+    }
+
+    function clearDying() {
+      dying.forEach(function (el) { if (el.parentNode) el.parentNode.removeChild(el); });
+      dying = [];
+    }
+
+    function onVisibilityChange() {
+      if (document.hidden) { cancelDrags(); clearDying(); }
+      else if (active && Stage && Stage.kick) Stage.kick();
     }
 
     function gateFps() {
       if (!active || mode === 'off' || blocked || !items.length || document.hidden) return 0;
+      if (!root.classList.contains('s3d-chrome')) return 0;
       if (reducedMotion()) return 20;
       // 暂停时没有频谱律动，30fps 足够呼吸与滑动；eco 档同样压到 30。
       var p = Stage && Stage.presentation ? Stage.presentation() : null;
@@ -621,11 +642,15 @@
     }
 
     function destroy() {
+      hide();
+      window.removeEventListener('blur', cancelDrags);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       if (Stage && Stage.removeGate) Stage.removeGate('stage3d-shelf');
       root.removeEventListener('wheel', onWheelCapture, true);
       document.removeEventListener('pointermove', onPointerTrack, true);
       plane.innerHTML = '';
       nodes.clear();
+      coverCache.clear();
       dying = [];
       items = [];
     }
@@ -634,6 +659,8 @@
 
     if (!inited) {
       inited = true;
+      window.addEventListener('blur', cancelDrags);
+      document.addEventListener('visibilitychange', onVisibilityChange);
       plane.hidden = true;
       root.addEventListener('wheel', onWheelCapture, true);
       document.addEventListener('pointermove', onPointerTrack, { passive: true, capture: true });

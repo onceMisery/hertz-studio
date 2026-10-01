@@ -8,7 +8,7 @@
 // 覆盖三块最容易在浏览器里「静默坏掉」的逻辑：
 //   1. online-login.js 扫码状态机（waiting/scanned/confirmed/expired、
 //      cancel 带真实票据、能力位 404 回落 cookie、轮询网络重试、cookie 判定）
-//   2. online.js 聚合搜索（分组头 / 失败条 / 空查询不发请求 / 单源缓存）
+//   2. online.js 渐进聚合、排序、分页、竞态、缓存失效与播放意图
 //   3. online-playlists.js caps 驱动（无 qr_login 不出扫码按钮、无
 //      playlist_write 不出移除按钮、401 安静留在未登录态）
 //
@@ -48,7 +48,7 @@ function makeClassList() {
   return {
     add: (...c) => c.forEach((x) => set.add(x)),
     remove: (...c) => c.forEach((x) => set.delete(x)),
-    toggle: (c) => (set.has(c) ? set.delete(c) : set.add(c)),
+    toggle: (c, force) => ((force === undefined ? !set.has(c) : force) ? set.add(c) : set.delete(c)),
     contains: (c) => set.has(c),
     _set: set,
   };
@@ -145,6 +145,7 @@ function makeDocument(readyState) {
     // 测试可查某类型事件的监听数。
     _listenerCount(type) { return (listeners[type] || []).length; },
     // 只服务 paintLoggedIn 的 .op-account[data-source="x"] 选择器
+    querySelectorAll() { return []; },
     querySelector(sel) {
       const m = /^\.([\w-]+)\[data-source="([^"]+)"\]$/.exec(sel);
       if (!m) return null;
@@ -249,6 +250,7 @@ function makeSandbox(opts) {
         this.alt = '';
       }
     },
+    setInterval: () => 0,
     setTimeout: clock.setTimeout.bind(clock),
     clearTimeout: clock.clearTimeout.bind(clock),
   };
@@ -547,36 +549,163 @@ async function loginScenario(pollStates, opts) {
   // 2. online.js 聚合 / 单源搜索
   // -------------------------------------------------------------------------
 
-  section('All 聚合：两组成一失败');
+  section('渐进聚合：独立音源、失败重试、确定性排序');
   {
-    const transport = makeTransport({
-      GET: [{
-        match: '/v1/online/search/all',
-        returns: {
-          query: '晴天',
-          results: [
-            { source: 'netease', total: 2, tracks: [T({ id: '1' }), T({ id: '2' })] },
-            { source: 'qq', total: 1, tracks: [T({ source: 'qq', id: '9' })] },
-          ],
-          failed: [{ source: 'kugou', code: 'upstream_timeout', message: '超时了' }],
-        },
-      }],
-    });
+    let finishSlow;
+    const slow = new Promise(r => { finishSlow = r; });
+    const transport = makeTransport({ GET: [
+      { match: 'source=netease', returns: { tracks: [T({ id: '1', title: '晴天 Live' })] } },
+      { match: 'source=qq', returns: slow },
+      { match: 'source=kugou', throw: new Error('超时了') },
+    ] });
     const env = makeSandbox({ transport });
     bindOnline(env);
-    env.sandbox.window.Online.state.source = 'all';
-    env.sandbox.window.Online.state.q = '晴天';
-    env.sandbox.window.Online.search();
+    const online = env.sandbox.window.Online;
+    online.state.sources = ['netease', 'qq', 'kugou'].map(id => ({ id }));
+    online.state.source = 'all'; online.state.q = '晴天';
+    const pending = online.search();
     await ticks();
     const body = env.doc.getElementById('online-body');
-    eq(findByClass(body, 'all-group-head').length, 2, '渲染 2 个分组头');
-    eq(findByClass(body, 'all-failed').length, 1, '渲染 1 条失败源提示');
-    eq(findByClass(body, 'online-row').length, 3, '渲染 3 行曲目');
-    const failed = findByClass(body, 'all-failed')[0];
-    ok(failed.textContent.indexOf('kugou') >= 0 && failed.textContent.indexOf('超时了') >= 0,
-      '失败条带源名与原文');
-    eq(env.doc.getElementById('online-count').textContent, '3 首', '计数为三源合计');
-    eq(env.sandbox.window.Online.state.aggregate, true, 'state 标记 aggregate');
+    eq(findByClass(body, 'online-row').length, 1, '慢源未完成时快源已显示');
+    eq(online.state.loading, true, '部分结果显示后仍记录慢源加载');
+    eq(findByClass(body, 'all-failed').length, 1, '失败源独立显示');
+    finishSlow({ tracks: [T({ source: 'qq', id: '9', title: '晴天' })] });
+    await pending;
+    eq(online.state.tracks[0].source, 'qq', '精确歌名优先于 Live 版本');
+    eq(online.state.tracks.length, 2, '跨源不同版本均保留');
+    eq(online.state.loading, false, '所有源完成后结束加载');
+    eq(env.doc.getElementById('online-count').textContent, '2 首已加载', '显示实际加载数量');
+    eq(transport.calls.get.length, 3, '每源一次并发搜索');
+  }
+
+  section('搜索竞态：新查询与清空均作废旧响应');
+  {
+    let finishOld;
+    const transport = makeTransport({ GET: [
+      { match: 'q=old', returns: new Promise(r => { finishOld = r; }) },
+      { match: 'q=new', returns: { tracks: [T({ title: 'new' })] } },
+    ] });
+    const env = makeSandbox({ transport }); bindOnline(env);
+    const online = env.sandbox.window.Online;
+    online.state.q = 'old'; const old = online.search();
+    online.state.q = 'new'; await online.search();
+    finishOld({ tracks: [T({ title: 'old' })] }); await old;
+    eq(online.state.tracks[0].title, 'new', '旧查询晚返回不覆盖新结果');
+    online.state.source = 'all'; online.state.q = ''; await online.search();
+    eq(online.state.tracks.length, 0, '清空聚合查询后清除结果');
+    eq(online.state.loading, false, '清空结束加载状态');
+  }
+
+  section('分页：原始游标、重复去除、失败后续接、空页终止');
+  {
+    const batch = Array.from({ length: 30 }, (_, i) => T({ id: String(i) }));
+    let fail = true;
+    const transport = makeTransport({ GET: [{ match: '/v1/online/search?', returns(url) {
+      const offset = Number(new URL('http://local' + url).searchParams.get('offset'));
+      if (!offset) return { total: 999, tracks: batch };
+      if (offset === 30) {
+        if (fail) { fail = false; throw new Error('temporary'); }
+        return { total: 999, tracks: batch.slice(1).concat(T({ id: '30' })) };
+      }
+      return { total: 999, tracks: [] };
+    } }] });
+    const env = makeSandbox({ transport }); bindOnline(env);
+    const online = env.sandbox.window.Online;
+    online.state.q = 'page'; await online.search();
+    const more = () => findByClass(env.doc.getElementById('online-body'), 'search-source-status')[0].children.find(c => c.className === 'btn');
+    await more().onclick();
+    eq(online.state.tracks.length, 30, '追加失败保留旧结果');
+    eq(more().textContent, '重试', '失败支持原位重试');
+    await more().onclick();
+    eq(online.state.tracks.length, 31, '重复曲目去除，新曲目保留');
+    await more().onclick();
+    ok(transport.calls.get[3].url.includes('offset=60'), '游标按原始响应长度推进');
+    eq(more(), undefined, '空页停止继续加载，不受错误总数影响');
+    const calls = transport.calls.get.length;
+    await online.search();
+    eq(transport.calls.get.length, calls, '相同查询使用会话缓存');
+    eq(online.state.tracks.length, 31, '缓存包含已加载分页');
+  }
+
+  section('真实音源分页上限：酷狗满20条后仍能继续');
+  {
+    const transport = makeTransport({ GET: [{ match: '/v1/online/search?', returns(url) {
+      const q = new URL('http://local' + url).searchParams;
+      const limit = Math.min(Number(q.get('limit')), 20);
+      const offset = Number(q.get('offset'));
+      return { total: 80, tracks: Array.from({ length: limit }, (_, i) => T({ source: 'kugou', id: String(offset + i) })) };
+    } }] });
+    const env = makeSandbox({ transport }); bindOnline(env);
+    const online = env.sandbox.window.Online;
+    online.state.source = 'kugou'; online.state.q = '晴天'; await online.search();
+    const status = findByClass(env.doc.getElementById('online-body'), 'search-source-status')[0];
+    const more = status.children.find(c => c.className === 'btn');
+    ok(!!more, '酷狗满20条仍显示加载更多');
+    if (more) await more.onclick();
+    eq(online.state.tracks.length, 40, '酷狗第二页追加到40条');
+    ok(transport.calls.get[1] && transport.calls.get[1].url.includes('offset=20'), '后续请求使用offset=20');
+  }
+
+  section('播放意图：重复点击去重、旧返回隔离、暂停取消');
+  {
+    const resolvers = [];
+    let ticket = 0;
+    const transport = makeTransport({
+      POST: [{ match: '/v1/online/play', returns: () => new Promise(resolve => resolvers.push(resolve)) }],
+      GET: [{ match: '/v1/online/lyric', returns: null }],
+    });
+    const post = transport.post;
+    transport.post = function (url, body) { ticket++; return post(url, body); };
+    transport.playbackIntent = () => ticket;
+    transport.isPlaybackIntent = value => value === ticket;
+    const env = makeSandbox({ transport });
+    const bound = bindOnline(env);
+    const online = env.sandbox.window.Online;
+    const first = online.playAll([T({ id: 'a' })]);
+    await online.playAll([T({ id: 'a' })]);
+    eq(resolvers.length, 1, '同一待加载曲目只发一次播放请求');
+    const second = online.playAll([T({ id: 'b' })]);
+    resolvers[1]({ track_ids: ['online:netease:b'], index: 0 }); await second;
+    resolvers[0]({ track_ids: ['online:netease:a'], index: 0 }); await first;
+    eq(bound.setStateQueueCalls.length, 1, '旧播放响应不能改写队列');
+    eq(bound.setStateQueueCalls[0].start, 'online:netease:b', '保留最新点播曲目');
+    const third = online.playAll([T({ id: 'c' })]);
+    ticket++; // Another view issues pause/load while online playback is pending.
+    resolvers[2]({ track_ids: ['online:netease:c'], index: 0 }); await third;
+    eq(bound.setStateQueueCalls.length, 1, '共享播放意图取消旧返回');
+  }
+
+  section('缓存：刷新账号后失效；纯重复页终止');
+  {
+    const batch = Array.from({ length: 30 }, (_, i) => T({ id: String(i) }));
+    const transport = makeTransport({ GET: [
+      { match: '/v1/online/search?', returns: { tracks: batch } },
+      { match: '/v1/online/sources', returns: { sources: [] } },
+    ] });
+    const env = makeSandbox({ transport }); bindOnline(env);
+    const online = env.sandbox.window.Online;
+    online.state.q = 'repeat'; await online.search();
+    const status = () => findByClass(env.doc.getElementById('online-body'), 'search-source-status')[0];
+    await status().children.find(c => c.className === 'btn').onclick();
+    eq(online.state.tracks.length, 30, '纯重复页不重复添加');
+    ok(!status().children.some(c => c.className === 'btn'), '纯重复页终止分页');
+    await online.loadSources();
+    await online.search();
+    eq(transport.calls.get.filter(c => c.url.includes('/search?')).length, 3, '账号刷新后重新请求歌曲');
+  }
+
+  section('缓存时效与容量：过期或淘汰必须重新查询');
+  {
+    const transport = makeTransport({ GET: [{ match: '/v1/online/search?', returns: { tracks: [T({})] } }] });
+    const env = makeSandbox({ transport }); bindOnline(env);
+    const online = env.sandbox.window.Online;
+    online.state.q = 'ttl'; await online.search();
+    vm.runInContext('Date.now = () => 9999999999999', env.sandbox);
+    await online.search();
+    eq(transport.calls.get.length, 2, '超过两分钟缓存失效');
+    for (let i = 0; i < 13; i++) { online.state.q = 'capacity-' + i; await online.search(); }
+    online.state.q = 'capacity-0'; await online.search();
+    eq(transport.calls.get.length, 16, '超过12个查询/来源条目淘汰最旧缓存');
   }
 
   section('All 空查询：不发请求给提示');

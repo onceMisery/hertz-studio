@@ -125,8 +125,11 @@ ok(mediaAt >= 0 && mediaHead.includes('min-width: 1241px'), '收起规则只作�
 // 停止入口：两个按钮都得走 stopPlayback，且 /v1/player/stop 只在它内部出现一次。
 ok(APP.includes('ui.stop.onclick = () => stopPlayback();'), '底部播放条的停止走 stopPlayback');
 ok(APP.includes('np.stop.onclick = () => stopPlayback();'), '播放弹窗的停止走 stopPlayback');
-const stopCalls = APP.split("/v1/player/stop").length - 1;
-eq(stopCalls, 1, '/v1/player/stop 只在 stopPlayback 里出现一次（没有第二个绕过点）');
+const actions = [];
+const stopSandbox = { cancelSeek() {}, setPlayback(action) { actions.push(action); } };
+vm.runInNewContext(grab('stopPlayback'), stopSandbox);
+stopSandbox.stopPlayback();
+eq(actions.join(','), 'stop', 'stopPlayback 只提交一次统一停止动作');
 
 // 快照进来时必须重新算一次，否则"播放开始自动恢复"没有触发点。
 const snapBody = APP.slice(APP.indexOf('function applySnapshot('), APP.indexOf('function updateRowActiveState('));

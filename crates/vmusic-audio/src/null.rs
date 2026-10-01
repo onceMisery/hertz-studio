@@ -16,6 +16,7 @@ use std::time::Instant;
 use vmusic_core::{AudioBackend, AudioError, AudioSource, DeviceInfo, MediaInfo};
 
 pub struct NullBackend {
+    loaded: bool,
     duration_ms: Option<u64>,
     position_ms: u64,
     playing: bool,
@@ -28,6 +29,7 @@ pub struct NullBackend {
 impl NullBackend {
     pub fn new() -> Self {
         Self {
+            loaded: false,
             duration_ms: None,
             position_ms: 0,
             playing: false,
@@ -42,7 +44,9 @@ impl NullBackend {
         let mut pos = self.position_ms;
         if self.playing {
             if let Some(started) = self.started {
-                pos = self.offset_ms + started.elapsed().as_millis() as u64;
+                pos = self
+                    .offset_ms
+                    .saturating_add(started.elapsed().as_millis() as u64);
             }
         }
         match self.duration_ms {
@@ -81,6 +85,7 @@ impl AudioBackend for NullBackend {
         if uri.trim().is_empty() {
             return Err(AudioError::UnsupportedFormat("empty uri".into()));
         }
+        self.loaded = true;
         self.duration_ms = None;
         self.position_ms = 0;
         self.offset_ms = 0;
@@ -95,6 +100,7 @@ impl AudioBackend for NullBackend {
         _source: Box<dyn AudioSource>,
         _ext: Option<String>,
     ) -> Result<MediaInfo, AudioError> {
+        self.loaded = true;
         // The null backend intentionally does not decode or output audio, but
         // it must still accept the same source contract as the cpal backend.
         // Online playback uses this path after progressive download; rejecting
@@ -110,7 +116,16 @@ impl AudioBackend for NullBackend {
     }
 
     fn play(&mut self) -> Result<(), AudioError> {
-        if self.finished || self.playing {
+        if !self.loaded {
+            return Err(AudioError::NothingLoaded);
+        }
+        if self
+            .duration_ms
+            .is_some_and(|duration| self.live_position() >= duration)
+        {
+            self.stop()?;
+        }
+        if self.playing {
             return Ok(());
         }
         self.offset_ms = self.position_ms;
@@ -137,6 +152,10 @@ impl AudioBackend for NullBackend {
     }
 
     fn seek(&mut self, position_ms: u64) -> Result<(), AudioError> {
+        if !self.loaded {
+            return Err(AudioError::NothingLoaded);
+        }
+        let position_ms = position_ms.min(self.duration_ms.unwrap_or(u64::MAX));
         self.position_ms = position_ms;
         self.offset_ms = position_ms;
         self.finished = false;
@@ -145,6 +164,9 @@ impl AudioBackend for NullBackend {
     }
 
     fn set_volume(&mut self, volume: f32) -> Result<(), AudioError> {
+        if !volume.is_finite() {
+            return Err(AudioError::Other("volume must be finite".into()));
+        }
         self.volume = volume.clamp(0.0, 1.0);
         Ok(())
     }
@@ -162,7 +184,7 @@ impl AudioBackend for NullBackend {
             return true;
         }
         match self.duration_ms {
-            Some(d) => self.live_position() >= d,
+            Some(d) => self.playing && self.live_position() >= d,
             None => false,
         }
     }
@@ -175,6 +197,25 @@ impl AudioBackend for NullBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_seek_stays_clamped_when_playing_and_replays_after_end() {
+        let mut backend = NullBackend::new();
+        assert!(matches!(backend.seek(0), Err(AudioError::NothingLoaded)));
+        assert!(matches!(backend.play(), Err(AudioError::NothingLoaded)));
+        backend.load("test.wav").unwrap();
+        backend.duration_ms = Some(1_000);
+        backend.seek(u64::MAX).unwrap();
+        assert_eq!(backend.position_ms(), 1_000);
+        assert!(!backend.finished());
+        backend.play().unwrap();
+        assert!(backend.position_ms() < 1_000);
+        backend.seek(u64::MAX).unwrap();
+        assert!(backend.finished());
+        backend.stop().unwrap();
+        assert!(!backend.finished());
+        assert_eq!(backend.position_ms(), 0);
+    }
 
     #[test]
     fn play_pause_advance_and_stop() {

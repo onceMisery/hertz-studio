@@ -95,10 +95,10 @@
       ctx.shadowColor = 'rgba(255,255,255,0.4)';
       ctx.shadowBlur = 8;
       ctx.fillStyle = '#ffffff';
-      ctx.fillText(text, ATLAS_W / 2, cy);
+      ctx.fillText(text, ATLAS_W / 2, cy, MAX_TEXT_W);
       // 无 shadow 再描一遍实心字：shadow 在字芯下会让字形发虚。
       ctx.shadowBlur = 0;
-      ctx.fillText(text, ATLAS_W / 2, cy);
+      ctx.fillText(text, ATLAS_W / 2, cy, MAX_TEXT_W);
     } else {
       // 周边句：暗蓝灰、轻晕。亮度刻意压低，着色器再按距离乘衰减，
       // 保证视觉焦点永远在当前行。
@@ -109,7 +109,7 @@
       ctx.shadowColor = 'rgba(120,140,180,0.5)';
       ctx.shadowBlur = 10;
       ctx.fillStyle = 'rgba(176,188,210,0.9)';
-      ctx.fillText(text, ATLAS_W / 2, cy);
+      ctx.fillText(text, ATLAS_W / 2, cy, MAX_TEXT_W);
       ctx.shadowBlur = 0;
     }
   }

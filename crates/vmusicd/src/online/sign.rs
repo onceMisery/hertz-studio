@@ -8,6 +8,76 @@
 use md5::{Digest as _, Md5};
 use sha1::Sha1;
 
+/// 网易网页请求封装；仅加密 API 参数，不处理音频加密。
+pub mod netease {
+    use super::qq::b64_encode_std;
+    use aes::cipher::block_padding::Pkcs7;
+    use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+    use num_bigint::BigUint;
+
+    pub fn weapi(json: &str, key: &str) -> (String, String) {
+        let encrypt = |text: &[u8], key: &[u8]| {
+            b64_encode_std(
+                &cbc::Encryptor::<aes::Aes128>::new_from_slices(key, b"0102030405060708")
+                    .expect("fixed 16 byte protocol key")
+                    .encrypt_padded_vec_mut::<Pkcs7>(text),
+            )
+        };
+        let first = encrypt(json.as_bytes(), b"0CoJUm6Qyw8W8jud");
+        let params = encrypt(first.as_bytes(), key.as_bytes());
+        let modulus = BigUint::parse_bytes(b"e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7", 16).unwrap();
+        let secret = BigUint::from_bytes_be(&key.bytes().rev().collect::<Vec<_>>());
+        (
+            params,
+            format!(
+                "{:0>256}",
+                secret
+                    .modpow(&BigUint::from(65537u32), &modulus)
+                    .to_str_radix(16)
+            ),
+        )
+    }
+
+    pub fn anonymous_username(device: &str) -> String {
+        use md5::{Digest, Md5};
+        let salt = b"3go8&$8*3*3h0k(2)2";
+        let bytes: Vec<_> = device
+            .bytes()
+            .enumerate()
+            .map(|(i, b)| b ^ salt[i % salt.len()])
+            .collect();
+        b64_encode_std(format!("{device} {}", b64_encode_std(&Md5::digest(bytes))).as_bytes())
+    }
+
+    pub fn eapi(path: &str, json: &str) -> String {
+        use aes::cipher::{BlockEncrypt, KeyInit};
+        let digest = super::md5_hex(format!("nobody{path}use{json}md5forencrypt").as_bytes());
+        let mut bytes = format!("{path}-36cd479b6b5-{json}-36cd479b6b5-{digest}").into_bytes();
+        let padding = 16 - bytes.len() % 16;
+        bytes.extend(std::iter::repeat_n(padding as u8, padding));
+        let cipher = aes::Aes128::new_from_slice(b"e82ckenh8dichen8").unwrap();
+        for block in bytes.chunks_exact_mut(16) {
+            cipher.encrypt_block(aes::cipher::generic_array::GenericArray::from_mut_slice(
+                block,
+            ));
+        }
+        super::hex_lower(&bytes).to_uppercase()
+    }
+
+    #[test]
+    fn web_request_matches_node_crypto_vector() {
+        let (params, secret) = weapi("{}", "abcdefghijklmnop");
+        assert_eq!(params, "qFnMWVHk2FofqgdXwao9gVJSweI5iRQHowAHHOvBiiA=");
+        assert_eq!(secret.len(), 256);
+        assert!(secret.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(
+            anonymous_username("test-device"),
+            "dGVzdC1kZXZpY2UgalNhbE9yTHpsOGVnOXh5dFNKL2tsZz09"
+        );
+        assert_eq!(eapi("/api/register/anonimous", "{}"), "6327C0EE70AF8E1A97CC95909812274F82CC1FC318A9DE1C3BE70776DD5840E4ECF686631367EF14A06B88AFF5409CE1BB5CC6A6CB1E6BDF7BACC43FABDA98AF09712D5405ED2223D13FD7EE73DB7AB15100E6816189080D5170233B36685FE0");
+    }
+}
+
 pub fn md5_hex(input: &[u8]) -> String {
     let mut h = Md5::new();
     h.update(input);

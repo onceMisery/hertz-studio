@@ -11,6 +11,11 @@
   var FX = global.FoliaSonnetFx;
   var PIXI_URL = 'vendor/pixi.min.js';
 
+  function colorNumber(value, fallback) {
+    var rgb = U.hexToRgb(value);
+    return rgb ? (rgb.r << 16) | (rgb.g << 8) | rgb.b : fallback;
+  }
+
   // ------------------------------------------------------------------
   // Stage → 帧适配：把毫秒制歌词文档整形成引擎的秒制帧对象。
   // 归一化结果按行数组身份缓存（Stage.lyrics() 稳定返回 doc.lines）。
@@ -210,6 +215,9 @@
     this.accent = accentColor || { r: 244, g: 244, b: 245 };
     this.numPrimary = (this.accent.r << 16) | (this.accent.g << 8) | this.accent.b;
     var numPrimary = this.numPrimary;
+    var palette = tuning.palette || {};
+    var numSecondary = colorNumber(palette.secondary, numPrimary);
+    var numTertiary = colorNumber(palette.tertiary, numPrimary);
     var rand = FX.seededRandom('sonnet:' + seed);
     var width = this.width, height = this.height;
     var cx = width * 0.5, cy = height * 0.5;
@@ -228,7 +236,7 @@
     frame.moveTo(padX + fw - corner, padY).lineTo(padX + fw, padY).lineTo(padX + fw, padY + corner);
     frame.moveTo(padX, padY + fh - corner).lineTo(padX, padY + fh).lineTo(padX + corner, padY + fh);
     frame.moveTo(padX + fw - corner, padY + fh).lineTo(padX + fw, padY + fh).lineTo(padX + fw, padY + fh - corner);
-    frame.stroke({ color: numPrimary, width: 2, alpha: 0.65 });
+    frame.stroke({ color: numSecondary, width: 2, alpha: 0.65 });
     for (var x = padX + 40; x < padX + fw - 40; x += 30) {
       var long = x % 90 === 0 ? 10 : 5;
       frame.moveTo(x, padY).lineTo(x, padY + long);
@@ -249,11 +257,12 @@
       // 五层独立局部坐标环：断弧反向缓转 + 刻度圈 + 环上卫星点。
       for (i = 0; i < 5; i += 1) {
         var orbit = new PIXI.Graphics();
+        var orbitColor = i % 2 ? numPrimary : numSecondary;
         var r = radius * (0.4 + i * 0.17);
         for (var seg = 0; seg < 6; seg += 1) {
           var a0 = seg * Math.PI / 3 + i * 0.24;
           orbit.arc(0, 0, r, a0, a0 + Math.PI * (0.16 + i * 0.008));
-          orbit.stroke({ color: numPrimary, width: i % 2 ? 1 : 2, alpha: 0.22 });
+          orbit.stroke({ color: orbitColor, width: i % 2 ? 1 : 2, alpha: 0.22 });
         }
         for (var tick = 0; tick < 36; tick += 1) {
           var a = tick * Math.PI / 18;
@@ -261,8 +270,8 @@
           orbit.moveTo(Math.cos(a) * r, Math.sin(a) * r)
             .lineTo(Math.cos(a) * outer, Math.sin(a) * outer);
         }
-        orbit.stroke({ color: numPrimary, width: 1, alpha: 0.35 });
-        orbit.circle(r, 0, 3).fill({ color: numPrimary, alpha: 0.8 });
+        orbit.stroke({ color: orbitColor, width: 1, alpha: 0.35 });
+        orbit.circle(r, 0, 3).fill({ color: numTertiary, alpha: 0.8 });
         if (this.backgroundKind === 'orrery') {
           orbit.scale.y = 0.35 + i * 0.09;
           orbit.dataset = { flattened: orbit.scale.y };
@@ -274,7 +283,7 @@
       // 十字瞄准线 + 60° 扇形扫描区。
       hud.moveTo(cx - radius, cy).lineTo(cx + radius, cy);
       hud.moveTo(cx, cy - radius).lineTo(cx, cy + radius);
-      hud.stroke({ color: numPrimary, width: 1, alpha: 0.25 });
+      hud.stroke({ color: numSecondary, width: 1, alpha: 0.25 });
       hud.moveTo(cx, cy);
       hud.arc(cx, cy, radius * 0.8, 0, Math.PI / 3);
       hud.lineTo(cx, cy);
@@ -282,6 +291,7 @@
     } else {
       for (i = 0; i < 6; i += 1) {
         part = new PIXI.Graphics();
+        var partColor = i % 2 ? numPrimary : numSecondary;
         if (this.backgroundKind === 'constellation') {
           // 星群折线：上下各三条随机游走链，节点实心圆。
           var px = -radius + rand() * radius * 2;
@@ -290,8 +300,8 @@
           for (j = 0; j < 5; j += 1) {
             var nx = px + (rand() - 0.4) * radius * 0.55;
             var ny = py + (rand() - 0.5) * radius * 0.35;
-            part.lineTo(nx, ny).stroke({ color: numPrimary, width: 1, alpha: 0.28 });
-            part.circle(nx, ny, j % 2 ? 2 : 4).fill({ color: numPrimary, alpha: 0.65 });
+            part.lineTo(nx, ny).stroke({ color: partColor, width: 1, alpha: 0.28 });
+            part.circle(nx, ny, j % 2 ? 2 : 4).fill({ color: numTertiary, alpha: 0.65 });
             part.moveTo(nx, ny);
             px = nx; py = ny;
           }
@@ -304,7 +314,7 @@
             part.moveTo(side * w, -h).lineTo(side * w * 1.18, -h * 1.18);
             part.moveTo(side * w, h).lineTo(side * w * 1.18, h * 1.18);
           });
-          part.stroke({ color: numPrimary, width: 1.2, alpha: 0.3 });
+          part.stroke({ color: partColor, width: 1.2, alpha: 0.3 });
         } else if (this.backgroundKind === 'wave-score') {
           // 六条声波谱线：双正弦叠加，粗细交替。
           for (j = 0; j <= 64; j += 1) {
@@ -314,7 +324,7 @@
               + Math.cos(j * 0.09 - i) * radius * 0.08;
             if (!j) part.moveTo(wx, wy); else part.lineTo(wx, wy);
           }
-          part.stroke({ color: numPrimary, width: i % 2 ? 1 : 2, alpha: 0.25 });
+          part.stroke({ color: partColor, width: i % 2 ? 1 : 2, alpha: 0.25 });
         } else {
           // 社论格线：竖线 + 横刻度 + 随机长短线段。
           var lx = (i - 2.5) * width * 0.135;
@@ -324,7 +334,7 @@
             part.moveTo(lx - 10, ly).lineTo(lx + 10, ly);
             part.rect(lx + 15, ly - 3, 3 + rand() * 18, 6);
           }
-          part.stroke({ color: numPrimary, width: 1, alpha: 0.32 });
+          part.stroke({ color: partColor, width: 1, alpha: 0.32 });
         }
         part.position.set(cx, cy);
         this.hudContainer.addChild(part);
@@ -343,7 +353,7 @@
         fontSize: Math.min(180, width * 0.22),
         fontWeight: '900',
         fill: 'transparent',
-        stroke: { color: numPrimary, width: 2 },
+        stroke: { color: numSecondary, width: 2 },
         alpha: 0.12
       }
     });
@@ -354,13 +364,13 @@
 
     // 4. 正文排版 + 词组舞台 + 重音编舞。
     this.textContainer.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
-    this.motif = FX.buildMotif(PIXI, this.geoContainer, width, height, numPrimary, seed);
+    this.motif = FX.buildMotif(PIXI, this.geoContainer, width, height, numTertiary, seed);
     this.motif.pivot.set(cx, cy);
     this.motif.position.set(cx, cy);
     this.words = FX.buildLyrics(PIXI, this.textContainer, line, width, height, tuning, seed, this.fontStack);
-    this.phrases = FX.buildPhraseStage(PIXI, this.textContainer, this.words, numPrimary);
+    this.phrases = FX.buildPhraseStage(PIXI, this.textContainer, this.words, numSecondary);
     if (this.accents) this.accents.destroy();
-    this.accents = FX.createAccentChoreography(PIXI, this.textContainer, this.words, numPrimary, seed);
+    this.accents = FX.createAccentChoreography(PIXI, this.textContainer, this.words, numTertiary, seed, numPrimary);
     this.scan = hud;
     this.scan.pivot.set(cx, cy);
     this.scan.position.set(cx, cy);
@@ -442,6 +452,7 @@
 
     this.hudContainer.visible = tuning.showBackground !== false && tuning.guideLines !== false;
     this.frameDecorContainer.visible = tuning.showDecor !== false;
+    this.frameDecorContainer.alpha = tuning.backgroundMode === 'anime' ? 0.3 : 1;
     this.geoContainer.visible = tuning.showBackground !== false;
     var backgroundAlpha = this.retirement.update(frame, tuning);
     this.geoContainer.alpha = backgroundAlpha == null ? 1 : backgroundAlpha;
@@ -573,6 +584,9 @@
     }
 
     function makeEntry(line, lineIndex, point, tuning, activeIndexNow) {
+      var palette = tuning.palette || {};
+      var secondary = colorNumber(palette.secondary, color);
+      var tertiary = colorNumber(palette.tertiary, color);
       var entryRoot = new PIXI.Container();
       var entryDecor = new PIXI.Container();
       var entryText = new PIXI.Container();
@@ -641,7 +655,7 @@
       graphic.moveTo(left, top + boxHeight - corner).lineTo(left, top + boxHeight).lineTo(left + corner, top + boxHeight);
       graphic.moveTo(left + boxWidth - corner, top + boxHeight).lineTo(left + boxWidth, top + boxHeight)
         .lineTo(left + boxWidth, top + boxHeight - corner);
-      graphic.stroke({ color: color, width: 1.25, alpha: 0.52 });
+      graphic.stroke({ color: secondary, width: 1.25, alpha: 0.52 });
       entryDecor.addChild(graphic);
 
       var marker = new PIXI.Text({
@@ -649,7 +663,7 @@
         style: { fontFamily: '"IBM Plex Mono","SFMono-Regular",Consolas,monospace',
           fontSize: Math.max(9, fontSize * 0.16), fontWeight: '600', letterSpacing: 2, fill: '#ffffff' }
       });
-      marker.tint = color;
+      marker.tint = secondary;
       marker.alpha = 0.64;
       marker.position.set(left, top - Math.max(14, fontSize * 0.28));
       entryDecor.addChild(marker);
@@ -667,7 +681,7 @@
           for (var arm = 0; arm < 4; arm += 1) {
             var trail = [];
             for (var dotIndex = 0; dotIndex < 14; dotIndex += 1) {
-              var dot = new PIXI.Graphics().circle(0, 0, dotIndex ? 1.5 : 3).fill({ color: color, alpha: 1 });
+              var dot = new PIXI.Graphics().circle(0, 0, dotIndex ? 1.5 : 3).fill({ color: tertiary, alpha: 1 });
               accentLayer.addChild(dot);
               trail.push(dot);
             }
@@ -708,11 +722,11 @@
         var elbowY = b.vertical ? a.y : b.y;
         var junction = new PIXI.Graphics();
         junction.moveTo(a.x, a.y).lineTo(elbowX, elbowY).lineTo(b.x, b.y);
-        junction.stroke({ color: color, width: 1, alpha: 0.24 });
+        junction.stroke({ color: colorNumber(tuning.palette && tuning.palette.secondary, color), width: 1, alpha: 0.24 });
         var tickSize = Math.min(width, height) * 0.012;
         junction.moveTo(elbowX - tickSize, elbowY).lineTo(elbowX + tickSize, elbowY);
         junction.moveTo(elbowX, elbowY - tickSize).lineTo(elbowX, elbowY + tickSize);
-        junction.stroke({ color: color, width: 1, alpha: 0.42 });
+        junction.stroke({ color: colorNumber(tuning.palette && tuning.palette.tertiary, color), width: 1, alpha: 0.42 });
         decor.addChild(junction);
       }
     }
@@ -722,7 +736,8 @@
         width = nextWidth;
         height = nextHeight;
         var nextSignature = [seed, width, height, tuning.fontScale, tuning.trackVerticalChance,
-          tuning.trackJunction, tuning.trackMinSegment, tuning.quality, nextColor].join(':');
+          tuning.trackJunction, tuning.trackMinSegment, tuning.quality, nextColor,
+          JSON.stringify(tuning.palette)].join(':');
         if (source !== frame.lines || activeIndex !== frame.currentLineIndex || signature !== nextSignature) {
           signature = nextSignature;
           rebuild(frame, tuning, nextColor, seed);
@@ -732,11 +747,14 @@
           return { x: width / 2, y: height / 2, scale: 1, rotation: 0, glyphs: glyphs };
         }
         root.visible = true;
+        decor.visible = tuning.showDecor !== false && tuning.backgroundMode !== 'anime';
         var time = frame.playbackTime;
         var motion = FX.motionScale(tuning);
         var glyphStrength = FX.amount(tuning.typographyMotion, 1) * motion;
         var ink = parseInt(String((tuning.palette && tuning.palette.ink) || '#f4f4f5').slice(1), 16);
         entries.forEach(function (entry) {
+          entry.entryDecor.visible = tuning.showDecor !== false;
+          entry.entryDecor.alpha = tuning.backgroundMode === 'anime' ? 0.35 : 1;
           var relative = entry.lineIndex - activeIndex;
           // 未唱到的站点按「距开唱的秒数」渐次铺路，唱过的退成暗色残影。
           var lead = Math.max(0.8, Math.min(4.5,
@@ -877,7 +895,7 @@
     host.append(root);
 
     var director = new SonnetDirector(root, onSeek);
-    var theme = global.FoliaTheme ? FoliaTheme.DEFAULT : { backgroundColor: '#09090b', primaryColor: '#f4f4f5', accentColor: '#f4f4f5', secondaryColor: '#71717a', animationIntensity: 'normal', fontStyle: 'sans' };
+    var theme = global.FoliaTheme ? FoliaTheme.resolveSonnet(1.35) : { backgroundColor: '#09090b', primaryColor: '#f4f4f5', accentColor: '#f4f4f5', secondaryColor: '#71717a', animationIntensity: 'normal', fontStyle: 'sans' };
     var fontScale = 1, visible = false, eco = false, reduced = false;
     var motion = 0.65, reactivity = 1.35;
     var bgMode = 'stage', vignette = true;
@@ -895,8 +913,12 @@
     }
 
     function engineTuning(frame) {
+      var imageMode = bgMode === 'anime';
       return {
-        palette: { background: theme.backgroundColor, ink: theme.primaryColor },
+        palette: { background: theme.backgroundColor, ink: theme.primaryColor,
+          accent: theme.accentColor, secondary: theme.secondaryColor,
+          tertiary: theme.tertiaryColor || theme.accentColor },
+        backgroundMode: bgMode,
         fontScale: fontScale,
         shotFlow: tuning.shotFlow,
         lyricLayout: tuning.lyricLayout,
@@ -908,15 +930,15 @@
         performanceIntensity: reactivity,
         quality: eco ? 'energy-saving' : 'high',
         reducedMotion: reduced,
-        showBackground: bgMode !== 'stage' || tuning.decor,
-        guideLines: tuning.decor,
+        showBackground: !imageMode && (bgMode !== 'stage' || tuning.decor),
+        guideLines: !imageMode && tuning.decor,
         showDecor: tuning.decor,
-        accentEffects: tuning.accents,
-        // 暗角走光学后期的纸色渐晕：开关关掉即 0；stage 透明叠加时用主题深色
-        // 作纸色，边缘轻微压暗属预期观感（与 VCP 舞台一致）。
-        vignette: vignette ? 0.18 : 0,
+        accentEffects: !imageMode && tuning.accents,
+        waitingOpacity: imageMode ? 0.55 : 0.42,
+        postProcess: !imageMode,
+        vignette: vignette && !imageMode ? 0.18 : 0,
         opticalImpact: 0.65,
-        sceneTransitions: true,
+        sceneTransitions: !imageMode,
         textInversion: true
       };
     }
@@ -1058,6 +1080,9 @@
         theme = t;
         themeSig = sig;
         renderedKey = '';
+        lastEmptyText = '';
+        eyebrow.style.color = t.secondaryColor;
+        hud.style.color = t.accentColor;
       },
       setFontScale: function (v) {
         v = U.clamp(v, 0.7, 1.5);

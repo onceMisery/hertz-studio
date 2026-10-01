@@ -62,6 +62,67 @@
     { id: 'night-12.jpg', label: '月下', tone: '夜', lum: 175, theme: 'anime-sakura' }
   ];
 
+  /// 壁纸的 URL 前缀。**必须是绝对路径**：相对路径按"当前文档"解析，页面一旦
+  /// 不是挂在站点根上（反代带前缀、或从某个子路径打开），`wallpapers/x.jpg`
+  /// 就会解析到 `/前缀/wallpapers/x.jpg` 而对服务端是 404 —— 表现正是
+  /// "换了主题，背景图却不出来"。舞台那边的壁纸一直是绝对路径，这里对齐。
+  var WALL_BASE = '/wallpapers/';
+
+  /// 兜底壁纸：某套主题没声明背景、或声明的那张加载不出来时用这张。
+  /// 挑中间亮度（lum 90）那张是有意的——自动压暗对它的处理最轻，于是
+  /// "兜底"这件事本身不会顺手把界面压得看不清。
+  var DEFAULT_WALL = 'evening-16.jpg';
+
+  // -------------------------------------------------------------------------
+  // 主题 → 背景图
+  //
+  // 这是"换到二次元主题却看不到背景图"那一类问题的正面答案。
+  // 主题与壁纸原本是两套互不相干的状态：Theme 每套主题只有**配色令牌**，
+  // 不带任何背景资源；壁纸则只有一个全局 id，而且默认为空（= 不铺）。
+  // 目录里 WALLPAPERS[].theme 是**壁纸 → 主题**的单向推荐（挑壁纸才顺带换
+  // 主题），反方向不成立。于是"点主题"永远带不出背景图。
+  //
+  // 两条纪律：
+  //   1. 二次元那七套**不在**这里重复声明——每张壁纸已经带着推荐主题，反查
+  //      即可（同一套被多张推荐时取第一张）。真值只留一处，就不会出现
+  //      "表里的图和画廊里推荐的那张对不上"。
+  //   2. 内置主题没有专属素材，按底色气质各指派一张；表里没有的、或写了
+  //      不存在文件名的，一律落到 DEFAULT_WALL —— 这就是缺资源时的兜底。
+  // -------------------------------------------------------------------------
+  var THEME_WALL = {
+    mineral: 'night-08.jpg',
+    'vcp-starblue': 'night-12.jpg',
+    'vcp-emerald': 'afternoon-07.jpg',
+    'vcp-midnight-neon': 'evening-18.jpg',
+    'vcp-mono': 'morning-14.jpg',
+    'vcp-aero': 'morning-09.jpg',
+    'vcp-codeide': 'evening-16.jpg',
+    'vcp-sakura': 'morning-01.jpg',
+    'vcp-crimson': 'evening-12.jpg',
+    'vcp-paper-ink': 'afternoon-20.jpg',
+    'vcp-forest': 'afternoon-19.jpg',
+    'vcp-porcelain': 'morning-09.jpg',
+    'vcp-snow-dawn': 'morning-01.jpg',
+    'vcp-acid': 'night-08.jpg',
+    liunian: 'evening-16.jpg'
+  };
+  // 自定义配色没有署名素材，与"没声明"的主题同样走兜底那张。
+  THEME_WALL[CUSTOM_ID] = DEFAULT_WALL;
+
+  /// 某套主题该用哪张壁纸：二次元推荐 → 内置映射表 → 默认兜底。
+  /// 表里给出的文件名还要过一遍目录，写错一个名字不该让整层变空白。
+  function wallForTheme(themeId) {
+    var i;
+    if (themeId) {
+      for (i = 0; i < WALLPAPERS.length; i += 1) {
+        if (WALLPAPERS[i].theme === themeId) return WALLPAPERS[i].id;
+      }
+      var listed = THEME_WALL[themeId];
+      if (listed && wallById(listed)) return listed;
+    }
+    return wallById(DEFAULT_WALL) ? DEFAULT_WALL : (WALLPAPERS[0] && WALLPAPERS[0].id) || '';
+  }
+
   // -------------------------------------------------------------------------
   // 二次元主题
   //
@@ -410,10 +471,29 @@
     dim: 0,           // 压暗层透明度（0..1）
     blur: 0,          // 背景模糊 px
     auto: true,       // 自动压暗
+    /// 壁纸是否被用户钉住。钉住 = 在画廊里亲手点过（包括点「无」），此后换
+    /// 主题不再动它。没钉住时壁纸**跟着主题走**——这样"选中某主题就有对应
+    /// 背景图"才成立。旧存档没有这个字段：只要存过一个文件名就当是用户选的，
+    /// 老用户的选择不会被升级悄悄改掉。
+    pinned: false,
     bg: '#141821',
     accent: '#ff6a3d',
     accent2: '#4a7dff'
   };
+
+  /// 「选壁纸」自己触发的那次换主题，不该反过来改写壁纸。
+  /// 见 setWallpaper：那里先按用户点的图设好 state.id，再 apply 推荐主题；
+  /// 若放任 followTheme 跑，用户刚点的那张当场就被主题默认图顶掉了。
+  var suppressFollow = 0;
+
+  /// 让壁纸跟上当前主题。只在「没钉住 + 不是选壁纸引发的那次 apply」时生效，
+  /// 且目标图必须真的在目录里——映射写错不能把壁纸清成空。
+  function followTheme(themeId) {
+    if (suppressFollow > 0 || state.pinned) return;
+    var want = wallForTheme(themeId);
+    if (!want || want === state.id) return;
+    state.id = want;
+  }
 
   function wallById(id) {
     for (var i = 0; i < WALLPAPERS.length; i += 1) {
@@ -511,6 +591,38 @@
     return layer;
   }
 
+  /// 壁纸的绝对 URL。文件名过一遍 encodeURIComponent：它是按名字寻址的，
+  /// 名字里出现需要转义的字符时不能把 URL 拼坏。
+  function wallUrl(id) { return WALL_BASE + encodeURIComponent(id); }
+
+  /// 取不到的图记在这张表里，之后不再重复试探：结果是确定的，每换一次主题
+  /// 就重试一次只会把控制台刷满。
+  var badWalls = {};
+  var probedWalls = {};
+
+  /// 背景图是不是真的取得到。这是"主题缺少背景资源"在**运行时**的那一半：
+  /// 目录里写错了名字、或服务端确实没有这张，浏览器只会静默留一层空白，
+  /// 不会报错——必须有个地方把它接住并换上兜底图。
+  function probeWall() {
+    // 契约脚本这类非浏览器环境没有 Image，直接跳过（那里验证的是目录解析）。
+    if (typeof Image !== 'function') return;
+    if (!state.id || state.id === DEFAULT_WALL) return;
+    if (badWalls[state.id] || probedWalls[state.id]) return;
+    var probing = state.id;
+    probedWalls[probing] = true;
+    var probe = new Image();
+    probe.onerror = function () {
+      badWalls[probing] = true;
+      // DEFAULT_WALL 自己失败就停在原地，否则会无限回落。
+      if (state.id === probing && wallById(DEFAULT_WALL)) {
+        state.id = DEFAULT_WALL;
+        paintWallpaper();
+        emit();
+      }
+    };
+    probe.src = wallUrl(probing);
+  }
+
   /// 把当前状态刷到壁纸层上。
   function paintWallpaper() {
     var l = ensureLayer();
@@ -518,13 +630,17 @@
     if (!state.id) {
       l.root.classList.remove('on');
       l.img.style.backgroundImage = '';
+      l.img.removeAttribute('data-wall');
       return;
     }
-    var url = 'wallpapers/' + state.id;
-    // 只在真的换了图时才写 background-image：这个属性每次赋值都会让浏览器
-    // 重新解码，拖动滑块时逐帧重设会明显掉帧。
-    var next = 'url("' + url + '")';
-    if (l.img.style.backgroundImage !== next) l.img.style.backgroundImage = next;
+    // 用 data-wall 记当前图，而不是比对 style.backgroundImage：后者是浏览器
+    // **规范化后**的字符串（各引擎对引号与相对路径的处理并不完全一致），
+    // 拿它做去抖会在某些引擎上永远不等，于是拖动滑块时每一帧都重写一次图、
+    // 每帧重新解码——这正是那段注释原本想避免的事。
+    if (l.img.getAttribute('data-wall') !== state.id) {
+      l.img.setAttribute('data-wall', state.id);
+      l.img.style.backgroundImage = 'url("' + wallUrl(state.id) + '")';
+    }
     l.root.classList.add('on');
     l.root.style.setProperty('--ts-wall-opacity', String(clamp01(state.opacity)));
     l.root.style.setProperty('--ts-wall-blur', state.blur + 'px');
@@ -537,6 +653,7 @@
     l.root.style.setProperty('--ts-wall-dim-edge', (Math.min(1, dim + 0.12) * 100).toFixed(1) + '%');
     var tokens = currentThemeTokens();
     l.root.style.setProperty('--ts-wall-scrim', tokens['--bg'] || '#0a0a0a');
+    probeWall();
   }
 
   function persist() {
@@ -546,7 +663,8 @@
         opacity: state.opacity,
         dim: state.dim,
         blur: state.blur,
-        auto: state.auto
+        auto: state.auto,
+        pinned: state.pinned
       }));
     } catch (e) { /* 隐私模式 */ }
   }
@@ -567,6 +685,9 @@
           if (typeof s.dim === 'number') state.dim = clamp01(s.dim);
           if (typeof s.blur === 'number') state.blur = Math.max(0, Math.min(40, s.blur));
           if (typeof s.auto === 'boolean') state.auto = s.auto;
+          // 没存过 pinned 的旧存档：存着一个文件名就说明用户亲手挑过，
+          // 按"已钉住"还原，升级不该把他的选择换成主题默认图。
+          state.pinned = typeof s.pinned === 'boolean' ? s.pinned : !!state.id;
         }
       }
     } catch (e) { /* 坏数据当没存过 */ }
@@ -599,9 +720,15 @@
   function setWallpaper(id, opts) {
     opts = opts || {};
     state.id = wallById(id) ? id : '';
+    // 用户亲手点过（含点「无」）就把壁纸钉住，此后换主题不再覆盖它。
+    state.pinned = true;
     if (state.id && !opts.keepTheme) {
       var w = wallById(state.id);
+      // 抑制跟随：这次 apply 是"选壁纸"顺带换上推荐主题。放任 followTheme
+      // 跑的话，它按主题又把壁纸改回默认那张，用户刚点的图当场就没了。
+      suppressFollow += 1;
       if (w && w.theme && window.Theme) window.Theme.apply(w.theme);
+      suppressFollow -= 1;
     }
     paintWallpaper();
     if (opts.persist !== false) persist();
@@ -689,7 +816,7 @@
       b.title = w.tone + ' · ' + w.label;
       var thumb = document.createElement('span');
       thumb.className = 'ts-wall-thumb';
-      thumb.style.backgroundImage = 'url("wallpapers/' + w.id + '")';
+      thumb.style.backgroundImage = 'url("' + wallUrl(w.id) + '")';
       var name = document.createElement('span');
       name.className = 'ts-wall-name';
       name.textContent = w.label;
@@ -823,9 +950,13 @@
 
     var note = el('ts-note');
     if (note) {
+      var bgNow = currentThemeTokens()['--bg'] || '—';
       note.textContent = w
-        ? '壁纸已铺底，压暗取当前主题底色（' + (currentThemeTokens()['--bg'] || '—') + '）。'
-        : '未铺壁纸时只有主题底色与辉光，即改造前的观感。';
+        ? '壁纸已铺底，压暗取当前主题底色（' + bgNow + '）。'
+          + (state.pinned ? '已手动指定，换主题时保持不变。' : '跟随主题自动切换。')
+        : (state.pinned
+          ? '已手动关闭壁纸：换主题也不会自动铺。'
+          : '未铺壁纸时只有主题底色与辉光，即改造前的观感。');
     }
   }
 
@@ -898,7 +1029,7 @@
     var s = String(seed || '');
     for (var i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) % 100003;
     var w = WALLPAPERS[h % WALLPAPERS.length];
-    return 'url("wallpapers/' + w.id + '")';
+    return 'url("' + wallUrl(w.id) + '")';
   }
 
   function init() {
@@ -907,6 +1038,9 @@
     // 广播就没有听众，形态与壁纸层会因为收不到通知停在初始值上。
     if (window.Theme) {
       window.Theme.onChange(function (theme) {
+        // 跟随必须排在刷层之前：先按新主题定好该用哪张图，paintWallpaper
+        // 才会把它写进 DOM，否则这一帧刷的还是上一张。
+        followTheme(theme && theme.id);
         applySkin(theme && theme.id);
         paintWallpaper();
         renderThemeSwatches();
@@ -925,9 +1059,10 @@
     var currentTheme = window.Theme && window.Theme.current && window.Theme.current();
     if (currentTheme) {
       window.Theme.apply(currentTheme.id, { silent: true });
-      // apply 触发的那次 onChange 已经刷过 skin；这里再补一次是为了
+      // apply 触发的那次 onChange 已经刷过 skin 与壁纸；这里再补一次是为了
       // 「Theme 存在但当前没有主题」以及契约脚本直接跑 init 的情形。
       applySkin(currentTheme.id);
+      followTheme(currentTheme.id);
     }
 
     paintWallpaper();
@@ -944,6 +1079,9 @@
     applyCustom: applyCustom,
     artPlaceholder: artPlaceholder,
     wallpapers: function () { return WALLPAPERS.slice(); },
+    /// 主题 → 背景图的唯一入口。供宿主与契约脚本做"每套主题都有背景"的检查。
+    wallpaperForTheme: wallForTheme,
+    defaultWallpaper: function () { return DEFAULT_WALL; },
     state: state,
     /// 供契约脚本与排障读取：当前有效压暗量与可读性估计。
     effectiveDim: effectiveDim,

@@ -5,7 +5,15 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
-| 2026-09-30 | spec | docs/aegis/specs/2026-09-30-aggregate-search-design.md | 歌曲聚合搜索、加载与展示优化（待确认） |
+| 2026-09-30 | plan | docs/aegis/plans/2026-09-30-cover-sphere-sonnet.md | 球形封面与彩色商籁实施计划 |
+| 2026-09-30 | work | docs/aegis/work/2026-09-30-cover-sphere-sonnet/10-intent.md | 球形封面与彩色商籁批准范围 |
+| 2026-09-30 | work | docs/aegis/work/2026-09-30-cover-sphere-sonnet/20-checkpoint.md | 球形封面与彩色商籁检查点 |
+| 2026-09-30 | work | docs/aegis/work/2026-09-30-cover-sphere-sonnet/90-evidence.md | 球形封面与彩色商籁验证证据 |
+| 2026-09-30 | work | docs/aegis/work/2026-09-30-skin-playback-review/10-intent.md | 皮肤、3D 与播放检查范围 |
+| 2026-09-30 | work | docs/aegis/work/2026-09-30-skin-playback-review/20-checkpoint.md | 皮肤、3D 与播放检查点 |
+| 2026-09-30 | work | docs/aegis/work/2026-09-30-skin-playback-review/90-evidence.md | 皮肤、3D 与播放证据及平台边界 |
+| 2026-09-30 | work | docs/aegis/work/2026-09-30-skin-playback-review/99-reflection.md | 皮肤、3D 与播放复盘 |
+| 2026-09-30 | spec | docs/aegis/specs/2026-09-30-aggregate-search-design.md | 歌曲聚合搜索、加载与展示优化（已实施） |
 | 2026-09-26 | plan | docs/aegis/plans/2026-09-26-listening-experience.md | 歌单、封面、歌词与创意工坊体验升级 |
 | 2026-09-26 | work | docs/aegis/work/2026-09-26-listening-experience/20-checkpoint.md | 体验升级检查点 |
 | 2026-09-26 | work | docs/aegis/work/2026-09-26-listening-experience/90-evidence.md | 体验升级验证与架构记录 |

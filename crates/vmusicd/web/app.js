@@ -142,17 +142,17 @@ const ui = {
   setDevice: $('set-device'),
   setDensity: $('set-density'),
   setMotion: $('set-motion'),
+  setCoverFollow: $('set-cover-follow'),
+  settingsEntry: $('settings-entry'),
   setStageIdleHide: $('set-stage-idle-hide'),
   cookieRows: $('cookie-rows'),
   setRenderMode: $('set-render-mode'),
   renderWarn: $('render-warn'),
   setBackend: $('set-backend'),
 
-  // 创意舞台：只在这里开总开关，细分参数在工坊里调。
+  // 创意舞台：细分参数在工坊里调。
   workshopBtn: $('workshop-btn'),
-  setCreative: $('set-creative'),
   setWorkshopBtn: $('set-workshop-btn'),
-  creativeWarn: $('creative-warn'),
 
   cover: $('cover'),
   nowTitle: $('now-title'),
@@ -247,6 +247,8 @@ const state = {
   // 乐观 UI 守卫：刚发出播放/暂停命令时，在途的旧快照会让按钮闪回。
   // 与 VCP music.js 的 isChangingState / expectedPlayingState / lastCommandTime 同一思路。
   commandAt: 0,
+  commandPending: false,
+  commandIntent: 0,
   expectedPlaying: false,
   // 用户按下过「停止」且之后没再播放。停止与暂停在快照里长得一样（playing 都是
   // false、track_id 都还在），只有客户端知道那一下是停而不是暂停。
@@ -273,22 +275,35 @@ const state = {
 const PlaybackIntent = {
   generation: 0,
   queueRevision: 0,
+  sourceRevision: 0,
   begin() { return ++this.generation; },
   current(ticket) { return ticket === this.generation; },
   command(path) {
-    if (/^\/v1\/player\/(load|play|pause|stop|next|previous|replay)$/.test(path) || path === '/v1/online/play') this.begin();
-    if (path === '/v1/player/load' || path === '/v1/online/play' || path === '/v1/player/queue') this.queueRevision += 1;
+    if (/^\/v1\/player\/(load|play|pause|stop|next|previous|replay)$/.test(path) || (path === '/v1/online/play' || path === '/v1/online/radio')) this.begin();
+    if (/^\/v1\/player\/(load|next|previous|replay)$/.test(path) || path === '/v1/online/play' || path === '/v1/online/radio') this.sourceRevision += 1;
+    if (path === '/v1/player/load' || (path === '/v1/online/play' || path === '/v1/online/radio') || path === '/v1/player/queue') this.queueRevision += 1;
   },
 };
 
+let playerCommandQueue = Promise.resolve();
+
 const ServerTransport = {
   kind: 'server',
-  async get(path) { return request(path, {}); },
+  async get(path, options) { return request(path, options || {}); },
   async postRaw(path, blob, contentType) {
     return request(path, { method: 'POST', rawBody: blob, headers: { 'Content-Type': contentType || 'application/octet-stream' } });
   },
   async post(path, body) {
     PlaybackIntent.command(path);
+    if (/^\/v1\/player\/(play|pause|stop|seek)$/.test(path)) {
+      const revision = PlaybackIntent.sourceRevision;
+      const result = playerCommandQueue.then(() => {
+        if (revision !== PlaybackIntent.sourceRevision) throw new DOMException('Playback replaced', 'AbortError');
+        return request(path, { method: 'POST', body: JSON.stringify(body || {}) });
+      });
+      playerCommandQueue = result.catch(() => {});
+      return result;
+    }
     return request(path, { method: 'POST', body: JSON.stringify(body || {}) });
   },
   async put(path, body) {
@@ -328,6 +343,11 @@ const REQUEST_TIMEOUT = 15000;
 async function request(path, options = {}, attempt = 0) {
   const method = (options.method || 'GET').toUpperCase();
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const cancel = () => controller && controller.abort();
+  if (options.signal) {
+    if (options.signal.aborted) cancel();
+    else options.signal.addEventListener('abort', cancel, { once: true });
+  }
   const timer = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT) : 0;
   try {
     // rawBody：封面替换这类二进制上传走这里，不包 JSON、不改 Content-Type。
@@ -338,7 +358,7 @@ async function request(path, options = {}, attempt = 0) {
     const res = await fetch(path, {
       ...options,
       body,
-      signal: controller ? controller.signal : undefined,
+      signal: controller ? controller.signal : options.signal,
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}`, ...(options.headers || {}) },
     });
     if (!res.ok) {
@@ -351,17 +371,18 @@ async function request(path, options = {}, attempt = 0) {
       err.status = res.status;
       throw err;
     }
-    return res.status === 204 ? null : res.json();
+    return res.status === 204 ? null : await res.json();
   } catch (err) {
     // 网络抖动、超时、服务端 5xx：幂等读重试一次，避免偶发失败直接弹红。
     const transient = !err.status || err.status >= 500 || err.name === 'AbortError' || err.name === 'TypeError';
-    if (method === 'GET' && attempt === 0 && transient) {
+    if (method === 'GET' && attempt === 0 && transient && !(options.signal && options.signal.aborted)) {
       await new Promise((r) => setTimeout(r, 300));
       return request(path, options, attempt + 1);
     }
     throw err;
   } finally {
     if (timer) clearTimeout(timer);
+    if (options.signal) options.signal.removeEventListener('abort', cancel);
   }
 }
 
@@ -380,7 +401,8 @@ let transport = ServerTransport;
 window.VMusicTransport = {
   beginPlaybackIntent: () => PlaybackIntent.begin(),
   isPlaybackIntent: (ticket) => PlaybackIntent.current(ticket),
-  get: (p) => transport.get(p),
+  playbackIntent: () => PlaybackIntent.generation,
+  get: (p, options) => transport.get(p, options),
   put: (p, body) => transport.put(p, body),
   post: (p, body) => transport.post(p, body),
   postRaw: (p, blob, contentType) => transport.postRaw(p, blob, contentType),
@@ -476,7 +498,7 @@ function handleEvent(msg) {
       break;
     case 'scan': onScanProgress(msg); break;
     case 'library_changed': loadTracks(true); loadPlaylists(); break;
-    case 'ended': break;
+    case 'ended': reconcileEnded(); break;
     case 'error': {
       // 在线音源失败交给在线面板错误条（可重试当前队列下标 / 跳下一首）；
       // 「已跳过」类是服务端已自行处置的告知，轻提示即可；本地播放失败仍走错误 toast。
@@ -881,26 +903,25 @@ async function restoreQueue() {
 // VCP music.js 用 isChangingState + 800ms 窗口解决同一问题。
 function staleCommand(snap) {
   return state.commandAt > 0
-    && Date.now() - state.commandAt < 800
+    && PlaybackIntent.current(state.commandIntent)
+    && (state.commandPending || Date.now() - state.commandAt < 800)
     && snap.playing !== state.expectedPlaying;
 }
 
 function applySnapshot(snap) {
   const previous = state.snapshot.track_id;
-  if (staleCommand(snap)) snap = { ...snap, playing: state.expectedPlaying };
-  else if (state.commandAt) state.commandAt = 0;
+  if (previous !== snap.track_id && state.seeking) cancelSeek();
+  if (staleCommand(snap)) snap = { ...snap, playing: state.expectedPlaying,
+    position_ms: state.stopped ? 0 : snap.position_ms };
+  else if (state.commandAt && !state.commandPending) state.commandAt = 0;
+  if (volumeTarget !== null) snap = { ...snap, volume: volumeTarget };
   state.snapshot = snap;
   ui.playpause.classList.toggle('is-playing', snap.playing);
+  ui.playpause.setAttribute('aria-label', snap.playing ? '暂停' : '播放');
   ui.mode.textContent = state.modeLabel[snap.mode] || snap.mode;
-  ui.barTime.textContent = digestMs(snap.position_ms);
   document.title = state.current ? `${state.current.title} · mmusic-studio` : 'mmusic-studio';
-
-  if (!state.seeking && snap.duration_ms) {
-    const ratio = snap.position_ms / snap.duration_ms;
-    ui.progress.value = String(Math.round(ratio * 1000));
-    ui.progressGhost.style.width = `${(ratio * 100).toFixed(2)}%`;
-    ui.progress.setAttribute('aria-valuetext', `${fmt(snap.position_ms)} / ${fmt(snap.duration_ms)}`);
-  }
+  renderPlaybackProgress(snap);
+  syncVolume(snap.volume);
 
   if (snap.track_id && snap.track_id !== previous) {
     // 新曲起播：上一首留下的在线错误条（如手动失败后的重试条）立即收口，
@@ -922,6 +943,25 @@ function applySnapshot(snap) {
   syncMediaSession();
 }
 
+// 「自然播完」是权威事件：此刻服务端播放必然已经停下。正常情况下紧随其后的
+// state 帧会把 playing 置回 false，但这依赖 WS 帧按时到达——接力失败停在
+// 曲尾、FM 尾部停止，或帧丢失 / 连接重连退避时，这一帧可能迟到甚至整个窗口
+// 收不到，表现就是「歌停在了结尾，按钮却还是暂停图标」。
+// 这里先本地落锤到停止态，再走 REST 独立通道复核一次：自动接力成功时新的
+// playing=true 快照（以及这次复核）会立刻把它覆盖回去，不影响连续播放。
+let endedReconcileEpoch = 0;
+function reconcileEnded() {
+  if (!state.snapshot.track_id) return;
+  const epoch = ++endedReconcileEpoch;
+  if (!staleCommand(state.snapshot)) {
+    applySnapshot({ ...state.snapshot, playing: false });
+  }
+  transport.get('/v1/state').then((server) => {
+    if (epoch !== endedReconcileEpoch) return;
+    applySnapshot(server);
+  }).catch(() => {});
+}
+
 function updateRowActiveState(snap) {
   for (const [id, row] of state.rows) {
     const active = id === snap.track_id;
@@ -931,6 +971,7 @@ function updateRowActiveState(snap) {
 }
 
 async function loadNowPlaying(id) {
+  const isCurrent = () => state.snapshot.track_id === id;
   // 在线试听的虚拟 id 在本地库里查不到，先回落到搜索时缓存下来的元数据
   //（缓存归 online.js 所有，通过 window.Online 访问）。
   let track = state.byId.get(id) || window.Online.getMeta(id);
@@ -982,20 +1023,22 @@ async function loadNowPlaying(id) {
             cover: window.Online.safeCoverUrl(d.cover),
           });
           // 只在这首仍是当前曲目时重绘，避免切歌后把界面改错
-          if (state.current && state.current.id === id) {
+          if (isCurrent() && state.current && state.current.id === id) {
             window.Online.paintNowPlaying(base, base.cover);
             if (Stage) Stage.setTrack(base, base.cover);
             syncNpTrack(base, base.cover);
+            updateMediaSessionMetadata(base, base.cover);
           }
         })
         .catch(() => {
-          if (state.current && state.current.id === id) {
+          if (isCurrent() && state.current && state.current.id === id) {
             base.artist = '在线试听';
             window.Online.paintNowPlaying(base, null);
           }
         });
     }
   }
+  if (!isCurrent()) return;
   state.current = track;
   if (!track) return;
 
@@ -1024,18 +1067,14 @@ async function loadNowPlaying(id) {
   }
   // 远程封面可能 404 / 防盗链：加载不出来就撤掉，用占位图而不是空白
   if (url && !(await probeImage(url))) url = null;
-
-  if (ui.ambient) {
-    ui.ambientImg.style.backgroundImage = url ? `url("${url}")` : 'none';
-    ui.ambient.classList.toggle('has-art', Boolean(url));
-  }
+  if (!isCurrent()) return;
   // 封面（含旋转）与取色背景交给舞台，app.js 不再直接碰 #cover。
   if (Stage) Stage.setTrack(track, url);
   // 播放控制弹窗同步曲目信息与封面
   syncNpTrack(track, url);
 
-  await refreshLyrics(id, track);
   updateMediaSessionMetadata(track, url);
+  await refreshLyrics(id, track);
 }
 
 // 拉取当前曲目的歌词文档并喂给舞台；np 弹窗的来源徽标/偏移显示同步更新。
@@ -1084,6 +1123,8 @@ function initStage() {
   document.addEventListener('stage:control', onStageControl);
 }
 
+let stageSettingsWrite = Promise.resolve();
+
 function onStageControl(e) {
   const d = e.detail || {};
   switch (d.action) {
@@ -1113,7 +1154,8 @@ function onStageControl(e) {
     case 'stage3d':
       markSettingsDirty();
       state.settings.stage3d = d.value;
-      transport.put('/v1/settings', { stage3d: d.value }).catch(() => toast('舞台设置暂未保存', 'error'));
+      stageSettingsWrite = stageSettingsWrite.then(() => transport.put('/v1/settings', { stage3d: d.value }))
+        .catch(() => toast('舞台设置暂未保存', 'error'));
       break;
     case 'view': setView(d.value); break;
     case 'queue-play':
@@ -2472,7 +2514,7 @@ async function loadSettings() {
   // 这条 GET 在飞期间用户有没有动过即时开关，见 settingsEpoch 的注释。
   const epoch = settingsEpoch;
   const s = await transport.get('/v1/settings').catch(() => ({}));
-  state.settings = s || {};
+  state.settings = epoch === settingsEpoch ? (s || {}) : { ...(s || {}), ...state.settings };
   await loadScanHistory();
   await loadScanRoots();
   await refreshScanStatus();
@@ -2481,6 +2523,7 @@ async function loadSettings() {
   }
   ui.setDensity.value = state.settings.ui_density || 'comfortable';
   ui.setMotion.checked = state.settings.reduce_motion === true;
+  setCoverFollow(state.settings.cover_follow !== false, false);
   // 导航里「每日推荐」的可见性：关掉就把入口摘掉，其它菜单项不受影响。
   // 放在设置到手之后而不是启动时——早于这一步挂载的话，设置里是关的就白挂了。
   if (window.DailyView) window.DailyView.applySettings(state.settings);
@@ -2505,18 +2548,6 @@ async function loadSettings() {
   // 播放模式在服务端有状态，但进程重启后要恢复成上次的选择。
   if (state.settings.play_mode && state.settings.play_mode !== state.snapshot.mode) {
     transport.post('/v1/player/mode', { mode: state.settings.play_mode }).catch(() => {});
-  }
-  // 创意舞台的开关也在这里恢复：initCreative 跑的时候设置还没到手，在那里读
-  // state.settings 只会拿到空对象 —— 症状是"上次明明开着三维，刷新后是关的"，
-  // 而复选框停在未勾选，与服务端存的 true 不一致。只恢复一次，之后归用户管。
-  if (!creativeRestored) {
-    creativeRestored = true;
-    const saved = !!state.settings.creative_stage;
-    const degraded = state.settings.creative_stage_effective === 'standard';
-    applyCreative(saved, false);
-    if (saved && degraded) {
-      showCreativeWarn(state.settings.creative_stage_note || '上次运行时设备不支持');
-    }
   }
 }
 
@@ -2650,15 +2681,6 @@ function initRenderMode() {
     }
   });
 
-  // 沉浸演出页的舞台坞选了某个三维场景、而三维舞台还没开时，统一走这里：
-  // 粒子让位、降级 toast、设置持久化都复用 applyCreative，与设置里手动
-  // 拨「三维舞台」开关是同一条路径。
-  document.addEventListener('stage:creative-request', (e) => {
-    const want = !e.detail || e.detail.on !== false;
-    if (want !== (window.CreativeStage && CreativeStage.active())) {
-      applyCreative(want, true);
-    }
-  });
 }
 
 async function loadDevices() {
@@ -2686,6 +2708,10 @@ function setView(name) {
   state.view = name;
   for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
   ui.rail.querySelectorAll('.rail-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
+  if (ui.settingsEntry) {
+    ui.settingsEntry.classList.toggle('active', name === 'settings');
+    ui.settingsEntry.setAttribute('aria-pressed', String(name === 'settings'));
+  }
   document.body.classList.remove('column-open');
   if (name === 'online' && window.Online) window.Online.onViewEnter();
   // 在线歌单可能在歌单视图没渲染期间到达（登录、刷新），进入时补一次同步。
@@ -2989,37 +3015,43 @@ function updateMediaSessionMetadata(track, artUrl) {
       title: track.title,
       artist: track.artist || '未知艺术家',
       album: track.album || '',
-      artwork: artUrl ? [{ src: artUrl, sizes: '512x512', type: 'image/svg+xml' }] : [],
+      artwork: artUrl ? [{ src: new URL(artUrl, location.href).href }] : [],
     });
   } catch { /* 某些浏览器在缺字段时会抛，忽略即可 */ }
 }
 
 function syncMediaSession() {
   if (!('mediaSession' in navigator)) return;
-  navigator.mediaSession.playbackState = state.snapshot.playing ? 'playing' : 'paused';
-  if (state.snapshot.duration_ms) {
-    try {
+  try {
+    navigator.mediaSession.playbackState = !state.snapshot.track_id || state.stopped
+      ? 'none' : state.snapshot.playing ? 'playing' : 'paused';
+    const duration = playbackDuration(state.snapshot);
+    if (duration > 0 && !state.stopped) {
       navigator.mediaSession.setPositionState({
-        duration: state.snapshot.duration_ms / 1000,
+        duration: duration / 1000,
         playbackRate: 1,
-        position: state.snapshot.position_ms / 1000,
+        position: Math.max(0, Math.min(duration, state.snapshot.position_ms || 0)) / 1000,
       });
-    } catch { /* positionState 在部分内核上不可用 */ }
-  }
+    } else {
+      navigator.mediaSession.setPositionState();
+    }
+  } catch { /* positionState 在部分内核上不可用 */ }
 }
 
 function bindMediaSession() {
   if (!('mediaSession' in navigator)) return;
   const handlers = {
-    play: () => transport.post('/v1/player/play', {}),
-    pause: () => transport.post('/v1/player/pause', {}),
-    previoustrack: () => transport.post('/v1/player/previous', {}),
-    nexttrack: () => transport.post('/v1/player/next', {}),
+    play: () => setPlayback('play'),
+    pause: () => setPlayback('pause'),
+    stop: stopPlayback,
+    previoustrack: () => post('/v1/player/previous'),
+    nexttrack: () => post('/v1/player/next'),
+    seekto: (d) => seekTo(d.seekTime * 1000),
     seekforward: (d) => seekRelative(d.seekOffset || 10),
     seekbackward: (d) => seekRelative(-(d.seekOffset || 10)),
   };
   for (const [name, fn] of Object.entries(handlers)) {
-    try { navigator.mediaSession.setActionHandler(name, (e) => fn(e).catch(() => {})); } catch { /* 不支持的动作 */ }
+    try { navigator.mediaSession.setActionHandler(name, (e) => Promise.resolve(fn(e || {})).catch(() => {})); } catch { /* 不支持的动作 */ }
   }
 }
 
@@ -3027,19 +3059,151 @@ function bindMediaSession() {
 // 控件
 // ---------------------------------------------------------------------------
 
+let seekRequestEpoch = 0;
+
 async function seekTo(ms) {
-  await transport.post('/v1/player/seek', { position_ms: Math.max(0, Math.round(ms)) }).catch(() => {});
+  if (!state.snapshot.track_id || !Number.isFinite(ms)) return;
+  const epoch = ++seekRequestEpoch;
+  const intent = PlaybackIntent.generation;
+  const trackId = state.snapshot.track_id;
+  const duration = playbackDuration(state.snapshot);
+  const position = Math.max(0, Math.min(duration || Infinity, Math.round(ms)));
+  try {
+    await transport.post('/v1/player/seek', { position_ms: position });
+    if (epoch !== seekRequestEpoch || !PlaybackIntent.current(intent) || state.snapshot.track_id !== trackId) return;
+    state.snapshot = { ...state.snapshot, position_ms: position };
+    if (Stage) Stage.setSnapshot(state.snapshot, { seek: true });
+    renderPlaybackProgress(state.snapshot);
+    syncMediaSession();
+  } catch (error) {
+    if (epoch === seekRequestEpoch && PlaybackIntent.current(intent)) toast(errText('跳转播放位置失败', error), 'error');
+  }
 }
 
 async function seekRelative(deltaSec) {
-  const base = state.snapshot.position_ms || 0;
+  const base = Stage ? Stage.position() : state.snapshot.position_ms || 0;
   await seekTo(base + deltaSec * 1000);
 }
 
+let volumeTarget = null;
+let volumeRequest = null;
+let unmutedVolume = 80;
+
+function syncVolume(volume) {
+  if (!Number.isFinite(volume)) return;
+  const value = Math.round(Math.max(0, Math.min(1, volume)) * 100);
+  if (value > 0) unmutedVolume = value;
+  [ui.volume, np.volume].forEach((range) => {
+    if (!range) return;
+    range.value = String(value);
+    range.setAttribute('aria-valuetext', `${value}%`);
+  });
+}
+
 function setVolumeFromInput() {
-  // 保持弹窗内音量滑块与底部播放栏一致
-  if (np.volume) np.volume.value = ui.volume.value;
-  transport.post('/v1/player/volume', { volume: Number(ui.volume.value) / 100 }).catch(() => {});
+  volumeTarget = Math.max(0, Math.min(1, Number(ui.volume.value) / 100));
+  syncVolume(volumeTarget);
+  state.snapshot = { ...state.snapshot, volume: volumeTarget };
+  if (Stage) Stage.setSnapshot(state.snapshot);
+  if (!volumeRequest) {
+    volumeRequest = (async () => {
+      try {
+        let sent;
+        do {
+          sent = volumeTarget;
+          try {
+            await transport.post('/v1/player/volume', { volume: sent });
+          } catch (error) {
+            toast(errText('调整音量失败', error), 'error');
+          }
+        } while (volumeTarget !== sent);
+      } finally {
+        volumeTarget = null;
+        volumeRequest = null;
+      }
+    })();
+  }
+  return volumeRequest;
+}
+
+function playbackDuration(snap) {
+  return Math.max(0, Number(snap.duration_ms)
+    || (state.current && state.current.id === snap.track_id && Number(state.current.duration_ms)) || 0);
+}
+
+function renderPlaybackProgress(snap, preview) {
+  const duration = playbackDuration(snap);
+  const position = Math.max(0, Math.min(duration, preview == null ? snap.position_ms || 0 : preview));
+  const ratio = duration > 0 ? position / duration : 0;
+  [ui.progress, np.bar].forEach((range) => {
+    if (!range) return;
+    range.disabled = !snap.track_id || duration <= 0;
+    if (state.seeking && preview == null) return;
+    range.value = String(Math.round(ratio * 1000));
+    range.setAttribute('aria-valuetext', `${fmt(position)} / ${fmt(duration)}`);
+  });
+  if (state.seeking && preview == null) return;
+  ui.barTime.textContent = `${fmt(position)} / ${fmt(duration)}`;
+  if (np.time) np.time.textContent = ui.barTime.textContent;
+  ui.progressGhost.style.width = `${(ratio * 100).toFixed(2)}%`;
+}
+
+let seekGesture = null;
+let seekEpoch = 0;
+
+function cancelSeek() {
+  seekEpoch += 1;
+  seekGesture = null;
+  state.seeking = false;
+  renderPlaybackProgress(state.snapshot);
+}
+
+function bindSeekRange(range) {
+  if (!range) return;
+  const begin = () => {
+    seekEpoch += 1;
+    seekGesture = { range, trackId: state.snapshot.track_id };
+    state.seeking = true;
+  };
+  range.addEventListener('pointerdown', begin);
+  range.addEventListener('input', () => {
+    if (!seekGesture || seekGesture.range !== range) begin();
+    renderPlaybackProgress(state.snapshot, Number(range.value) / 1000 * playbackDuration(state.snapshot));
+  });
+  range.addEventListener('change', async () => {
+    const trackId = seekGesture ? seekGesture.trackId : state.snapshot.track_id;
+    const position = Number(range.value) / 1000 * playbackDuration(state.snapshot);
+    const epoch = ++seekEpoch;
+    seekGesture = null;
+    state.seeking = true;
+    try {
+      if (trackId === state.snapshot.track_id) await seekTo(position);
+    } finally {
+      if (epoch === seekEpoch) {
+        state.seeking = false;
+        renderPlaybackProgress(state.snapshot);
+      }
+    }
+  });
+  const cancel = () => { if (seekGesture && seekGesture.range === range) cancelSeek(); };
+  range.addEventListener('pointerup', () => setTimeout(cancel, 0));
+  range.addEventListener('pointercancel', cancel);
+  range.addEventListener('lostpointercapture', () => setTimeout(cancel, 0));
+  range.addEventListener('blur', cancel);
+}
+
+let coverFollowWrite = Promise.resolve();
+
+function setCoverFollow(value, persist) {
+  const enabled = value !== false;
+  state.settings.cover_follow = enabled;
+  if (ui.setCoverFollow) ui.setCoverFollow.checked = enabled;
+  if (Stage) Stage.setCoverFollow(enabled);
+  if (persist) {
+    markSettingsDirty();
+    coverFollowWrite = coverFollowWrite.then(() => transport.put('/v1/settings', { cover_follow: enabled }))
+      .catch((error) => toast(errText('保存封面联动设置失败', error), 'error'));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3048,20 +3212,22 @@ function setVolumeFromInput() {
 
 function bindShortcuts() {
   document.addEventListener('keydown', (e) => {
-    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+    if (e.defaultPrevented) return;
+    const target = document.activeElement;
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); ui.search.focus(); ui.search.select(); return; }
     if (e.key === 'Escape') { closeMenu(); closeNowPlaying(); if (typing) document.activeElement.blur(); setView(state.view); document.body.classList.remove('stage-open'); return; }
     if (e.key === '/' && !typing) { e.preventDefault(); ui.search.focus(); return; }
-    if (typing) return;
+    if (typing || e.ctrlKey || e.metaKey || e.altKey || target.closest('button, a, [role="button"], [role="slider"]')) return;
 
     switch (e.key) {
       case ' ': e.preventDefault(); togglePlay(); break;
-      case 'ArrowRight': e.preventDefault(); if (e.shiftKey) post('next'); else seekRelative(5); break;
-      case 'ArrowLeft': e.preventDefault(); if (e.shiftKey) post('previous'); else seekRelative(-5); break;
+      case 'ArrowRight': e.preventDefault(); if (e.shiftKey) post('/v1/player/next'); else seekRelative(5); break;
+      case 'ArrowLeft': e.preventDefault(); if (e.shiftKey) post('/v1/player/previous'); else seekRelative(-5); break;
       case 'ArrowUp': e.preventDefault(); ui.volume.value = String(Math.min(100, Number(ui.volume.value) + 5)); setVolumeFromInput(); break;
       case 'ArrowDown': e.preventDefault(); ui.volume.value = String(Math.max(0, Number(ui.volume.value) - 5)); setVolumeFromInput(); break;
       case 'm': case 'M': {
-        const v = Number(ui.volume.value) > 0 ? 0 : 80;
+        const v = Number(ui.volume.value) > 0 ? 0 : unmutedVolume;
         ui.volume.value = String(v);
         setVolumeFromInput();
         toast(v ? '已取消静音' : '已静音');
@@ -3223,104 +3389,10 @@ function post(path) { return transport.post(path, {}).catch((err) => toast(errTe
 // ---------------------------------------------------------------------------
 // 创意舞台
 //
-// 这一节只做四件事，一行业务渲染逻辑都没有：
-//   1. 依次初始化表现层模块（三维舞台 / 背景 / 手绘 / 工坊）；
-//   2. 把「三维舞台」这一个开关接到服务端设置上，其余细分参数全部归工坊；
-//   3. 开三维时让原来的粒子层让位 —— 两者都是铺满舞台的氛围层，同时开会
-//      互相糊住，而且 GPU 预算直接翻倍；
-//   4. 降级时把原因说人话，而不是安静地什么都不显示。
-// 背景与手绘不依赖三维舞台：它们各自独立生效，所以即使 WebGL 不可用，
-// 背景层和手绘风格照样能用。
+// 只负责依次初始化表现层模块（三维引擎 / 背景 / 手绘 / 工坊），一行业务渲染
+// 逻辑都没有。三维引擎不再替换右栏粒子层：它只服务于工坊的实时预览与
+// 沉浸声场里挂载的镜头层。背景与手绘各自独立生效，WebGL 不可用也照样能用。
 // ---------------------------------------------------------------------------
-
-let particleBackup = null;
-let creativeRestored = false;   // 设置到手后只恢复一次三维舞台开关，之后归用户管
-
-function applyCreative(on, persist) {
-  const want = !!on;
-  if (ui.setCreative && ui.setCreative.checked !== want) ui.setCreative.checked = want;
-
-  // 粒子层让位。备份的是用户自己的设置，关掉三维时原样还回去 —— 不做备份的话
-  // "试一下三维"会永久改掉用户调好的粒子参数，而他不会想到去看那一栏。
-  if (window.StageControl) {
-    if (want) {
-      if (!particleBackup) {
-        const cur = StageControl.values();
-        particleBackup = { dust: cur.dust, ripples: cur.ripples };
-      }
-      StageControl.set({ dust: false, ripples: false });
-    } else if (particleBackup) {
-      StageControl.set(particleBackup);
-      particleBackup = null;
-    }
-  }
-
-  // 用户亲手拨这个开关 = 一次明确的重试，之前那次降级的结论作废（attach 的
-  // force 分支）。启动时按服务端存档恢复不算，那只是"把上次的选择再演一遍"。
-  const effective = window.CreativeStage ? CreativeStage.attach(want, { force: !!persist }) : 'off';
-  if (want && effective !== '3d') {
-    const why = (window.CreativeStage && CreativeStage.degradedBecause()) || '设备不支持';
-    showCreativeWarn(why);
-    toast(`三维舞台已自动关闭：${why}`, 'error');
-  } else {
-    showCreativeWarn(null);
-  }
-
-  // 三维开关状态广播：设置复选框、启动恢复、演出页坞栏请求都收口在本函数，
-  // 坞栏据此清掉/点亮场景高亮（attach 本身不发 preset 事件）。
-  document.dispatchEvent(new CustomEvent('stage:creative-changed', {
-    detail: { on: effective === '3d' }
-  }));
-
-  state.settings.creative_stage = want;
-  if (persist) {
-    transport.put('/v1/settings', { creative_stage: want })
-      .catch((err) => toast(errText('保存创意舞台设置失败', err), 'error'));
-    // 降级原因同样回报服务端：设置页和别的客户端因此能看到"实际生效"而不是
-    // "用户想要什么"，与 render_mode_effective 是同一个思路。
-    if (want && effective !== '3d') {
-      transport.put('/v1/settings', {
-        creative_stage_effective: 'standard',
-        creative_stage_note: (window.CreativeStage && CreativeStage.degradedBecause()) || ''
-      }).catch(() => {});
-    } else {
-      transport.put('/v1/settings', { creative_stage_effective: null }).catch(() => {});
-    }
-  }
-}
-
-function showCreativeWarn(reason) {
-  if (!ui.creativeWarn) return;
-  if (!reason) { ui.creativeWarn.hidden = true; ui.creativeWarn.textContent = ''; return; }
-  ui.creativeWarn.hidden = false;
-  ui.creativeWarn.className = 'render-warn is-error';
-  ui.creativeWarn.textContent = `三维舞台已自动关闭：${reason}。背景层与手绘风格不受影响，仍可正常使用。`;
-}
-
-// 运行中（已经在画之后）被摘掉的降级：上下文丢失、着色器失败、探测判定 GPU
-// 代价过高。attach 启动期的失败走 applyCreative 自己的分支，事件里 runtime
-// 为 false，这里不接手 —— 否则会重复提示、重复回报。
-function onCreativeRuntimeDegrade(ev) {
-  const d = (ev && ev.detail) || {};
-  if (!d.runtime) return;
-  const why = d.reason || '设备不支持';
-  if (ui.setCreative) ui.setCreative.checked = false;
-  state.settings.creative_stage = false;
-  // 与用户亲手关掉三维走同一套粒子还原约定：备份是用户自己的参数，原样还回去。
-  if (window.StageControl && particleBackup) {
-    StageControl.set(particleBackup);
-    particleBackup = null;
-  }
-  showCreativeWarn(why);
-  toast(`三维舞台已自动关闭：${why}`, 'error');
-  // 设置页必须显示"生效真相"：creative_stage 也一并置 false，否则别的客户端
-  // 打开设置看到的是"用户想要开"，而实际渲染层早已摘除。
-  transport.put('/v1/settings', {
-    creative_stage: false,
-    creative_stage_effective: 'standard',
-    creative_stage_note: why
-  }).catch(() => {});
-}
 
 function initCreative() {
   if (window.CreativeStage) CreativeStage.init();
@@ -3337,33 +3409,49 @@ function initCreative() {
   const openWs = () => { if (window.Workshop) Workshop.toggle(); };
   if (ui.workshopBtn) ui.workshopBtn.addEventListener('click', openWs);
   if (ui.setWorkshopBtn) ui.setWorkshopBtn.addEventListener('click', openWs);
+}
 
-  if (ui.setCreative) ui.setCreative.onchange = () => applyCreative(ui.setCreative.checked, true);
+let playbackCommandEpoch = 0;
 
-  document.addEventListener('creative:degrade', onCreativeRuntimeDegrade);
-
-  // 存档的恢复不在这里：此刻 state.settings 还是空的（loadSettings 在
-  // refreshAll 里，而 refreshAll 排在 initCreative 之后）。它和渲染模式、
-  // 封面盘一样，都在设置到手之后由 loadSettings 统一恢复。
+async function setPlayback(action) {
+  const epoch = ++playbackCommandEpoch;
+  if (action === 'stop') seekRequestEpoch += 1;
+  const previous = state.snapshot;
+  const wasStopped = state.stopped;
+  state.commandAt = 0;
+  state.stopped = action === 'stop';
+  state.expectedPlaying = action === 'play';
+  applySnapshot({ ...previous, playing: state.expectedPlaying,
+    position_ms: action === 'stop' ? 0 : previous.position_ms });
+  state.commandAt = Date.now();
+  state.commandPending = true;
+  const command = transport.post(`/v1/player/${action}`, {});
+  const intent = PlaybackIntent.generation;
+  state.commandIntent = intent;
+  try {
+    await command;
+  } catch (error) {
+    if (epoch !== playbackCommandEpoch || !PlaybackIntent.current(intent)) return;
+    state.commandAt = 0;
+    state.commandPending = false;
+    state.stopped = wasStopped;
+    const snapshot = await transport.get('/v1/state').catch(() => previous);
+    if (epoch === playbackCommandEpoch && PlaybackIntent.current(intent)) applySnapshot(snapshot);
+    toast(errText('播放操作失败', error), 'error');
+  } finally {
+    if (epoch === playbackCommandEpoch) state.commandPending = false;
+  }
 }
 
 function togglePlay() {
-  const next = !state.snapshot.playing;
-  // 乐观更新 + 800ms 守卫窗口：按钮立刻响应，在途的旧快照不会把它弹回去。
-  state.expectedPlaying = next;
-  state.commandAt = Date.now();
-  ui.playpause.classList.toggle('is-playing', next);
-  if (np.play) np.play.classList.toggle('is-playing', next);
-  post(next ? '/v1/player/play' : '/v1/player/pause');
+  return setPlayback(state.snapshot.playing ? 'pause' : 'play');
 }
 
 // 停止与暂停在快照里无法区分（playing 都变 false、track_id 都留着），
 // 所以这里自己记一笔，空闲收起才知道「这一下是停，不是暂停」。
 function stopPlayback() {
-  state.stopped = true;
-  state.expectedPlaying = false;
-  syncStageIdle();
-  post('/v1/player/stop');
+  cancelSeek();
+  return setPlayback('stop');
 }
 
 // ---------------------------------------------------------------------------
@@ -3395,7 +3483,7 @@ function openNowPlaying() {
   np.volume.value = ui.volume.value;
   syncNpSnapshot(state.snapshot);
   if (state.current) {
-    syncNpTrack(state.current);
+    syncNpTrack(state.current, Stage && Stage.coverUrl());
     // 打开时重拉一次歌词：导入/偏移可能在别的会话改过，徽标要跟服务端对齐。
     refreshLyrics(state.current.id, state.current).catch(() => {});
   }
@@ -3410,10 +3498,8 @@ function closeNowPlaying() {
 function syncNpSnapshot(snap) {
   if (!isNpOpen()) return;
   np.play.classList.toggle('is-playing', snap.playing);
-  np.time.textContent = digestMs(snap.position_ms);
-  if (!state.seeking && snap.duration_ms) {
-    np.bar.value = String(Math.round((snap.position_ms / snap.duration_ms) * 1000));
-  }
+  np.play.setAttribute('aria-label', snap.playing ? '暂停' : '播放');
+  renderPlaybackProgress(snap);
 }
 
 // 曲目信息 → 弹窗（标题 / 艺术家 / 封面）
@@ -3421,7 +3507,7 @@ function syncNpTrack(track, coverUrl) {
   if (!isNpOpen() || !track) return;
   np.name.textContent = track.title || '未命名';
   np.artist.textContent = [track.artist, track.album].filter(Boolean).join(' · ') || '未知艺术家';
-  if (coverUrl) np.art.style.backgroundImage = `url("${coverUrl}")`;
+  np.art.style.backgroundImage = coverUrl ? `url("${coverUrl}")` : 'none';
 }
 
 function initNowPlayingModal() {
@@ -3488,14 +3574,7 @@ function initNowPlayingModal() {
   np.lyricOffsetUp.onclick = () => shiftLyricOffset(500);
 
   // 进度：拖动即时显示时间，松手跳转
-  np.bar.addEventListener('input', () => {
-    const d = state.snapshot.duration_ms || 0;
-    np.time.textContent = `${fmt((np.bar.value / 1000) * d)} / ${fmt(d)}`;
-  });
-  np.bar.addEventListener('change', async () => {
-    const d = state.snapshot.duration_ms;
-    if (d) await seekTo((np.bar.value / 1000) * d);
-  });
+  bindSeekRange(np.bar);
 
   // 音量：与底部播放栏双向同步后走同一条设置链路
   np.volume.oninput = () => {
@@ -3537,18 +3616,8 @@ function initNowPlayingModal() {
       .catch((err) => toast(errText('切换播放模式失败', err), 'error'));
   };
 
-  ui.progress.addEventListener('pointerdown', () => { state.seeking = true; });
-  ui.progress.addEventListener('input', () => {
-    state.seeking = true;
-    const d = state.snapshot.duration_ms || 0;
-    ui.barTime.textContent = `${fmt((ui.progress.value / 1000) * d)} / ${fmt(d)}`;
-    ui.progressGhost.style.width = `${(ui.progress.value / 10).toFixed(2)}%`;
-  });
-  ui.progress.addEventListener('change', async () => {
-    const d = state.snapshot.duration_ms;
-    if (d) await seekTo((ui.progress.value / 1000) * d);
-    state.seeking = false;
-  });
+  bindSeekRange(ui.progress);
+  window.addEventListener('blur', () => { if (state.seeking) cancelSeek(); });
 
   ui.volume.oninput = setVolumeFromInput;
 
@@ -4022,16 +4091,25 @@ function initNowPlayingModal() {
   initRenderMode();
 
   ui.setDensity.onchange = () => {
+    markSettingsDirty();
+    state.settings.ui_density = ui.setDensity.value;
     document.body.dataset.density = ui.setDensity.value;
     transport.put('/v1/settings', { ui_density: ui.setDensity.value }).catch(() => {});
   };
   ui.setMotion.onchange = () => {
+    markSettingsDirty();
     state.settings.reduce_motion = ui.setMotion.checked;
     document.body.classList.toggle('reduce-motion', ui.setMotion.checked);
     if (Stage) Stage.setReducedMotion(ui.setMotion.checked);
     transport.put('/v1/settings', { reduce_motion: ui.setMotion.checked }).catch(() => {});
   };
   ui.setStageIdleHide.onchange = () => setStageIdleHide(ui.setStageIdleHide.checked, true);
+  ui.setCoverFollow.onchange = () => setCoverFollow(ui.setCoverFollow.checked, true);
+  ui.settingsEntry.onclick = () => {
+    setView('settings');
+    ui.views.settings.scrollTop = 0;
+    ui.views.settings.querySelector('button, input, select').focus({ preventScroll: true });
+  };
 
   ui.rail.querySelectorAll('.rail-item').forEach((b) => { b.onclick = () => setView(b.dataset.view); });
   // 点击「正在播放」：弹出清晰的播放控制弹窗（不再切换舞台抽屉）

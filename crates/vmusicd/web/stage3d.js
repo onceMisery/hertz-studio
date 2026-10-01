@@ -62,6 +62,7 @@
   var folia = { ready: false, bg: null, sub: null, classic: null, cadenza: null, sonnet: null, tempera: null,
     visual: 'stage',
     bgMode: 'stage', bgOpacity: 0.75, vignette: true, subtitle: true,
+    wallpaper: 'evening-16.jpg', wallpaperDim: 0.48,
     classicTuning: { rotation: true, breathing: 1, spacing: 0.7 },
     cadenzaTuning: { width: 0.72, motion: 1, glow: 1, beam: 0 },
     sonnetTuning: { shotFlow: 'auto', lyricLayout: 'phrases', phraseLength: 12, decor: true, accents: true },
@@ -189,11 +190,9 @@
       counts: [14000, 30000, 48000], additive: true, depth: false, field: 4
     },
     {
-      id: 'silk', label: '封面浮雕', desc: '把专辑封面，化作一块点阵屏幕',
-      //  机位侧转让平面出现透视（参考 Mineradio 的 3D 封面：左缘近、
-      //  顶缘略向后仰），正视拍摄是「贴图」不是「屏幕」。
-      cam: { theta: -0.30, phi: 0.13, dist: 10.2, look: [0, 0, 0] },
-      counts: [14000, 32000, 54000], additive: true, depth: false, field: 0
+      id: 'silk', label: '封面星球', desc: '清晰的封面，随音乐在粒子球面上呼吸',
+      cam: { theta: 0.0, phi: 0.0, dist: 10.2, look: [0, 0, 0] },
+      counts: [14000, 32000, 54000], additive: false, depth: true, field: 0
     }
   ];
 
@@ -304,10 +303,12 @@
   // vertex grid becomes silk, a tunnel, a globe, topography or nested orbits.
   // Each frequency band displaces its own part of the surface on the GPU.
   var FIELD_VS = stageVS([
-    'uniform int uField; uniform float uCols; uniform float uRows;',
+    'uniform highp int uField; uniform float uCols; uniform float uRows;',
     'uniform sampler2D uArt; uniform float uHasArt; uniform float uBands[64];',
     'uniform vec2 uPointer; uniform float uPointerActive; uniform vec3 uClick;',
     'uniform float uBeatAge; uniform float uAspect;',
+    'uniform float uCoverMotion; uniform float uCoverDistance; uniform float uViewportHeight;',
+    'uniform vec2 uArtScale; uniform float uArtLod;',
     'out vec3 vColor; out float vAlpha;',
     'const float PI = 3.14159265359;',
     'void main(){',
@@ -320,31 +321,35 @@
     '  vec3 color = mix(colorA,colorB,uv.x*0.65+uv.y*0.35);',
     '  vec3 pos = vec3(0.0), normal = vec3(0.0,0.0,1.0);',
     '  float light = 0.55, alpha = 0.80, scale = 1.0;',
+    '  float coverSpacing = 0.0;',
     '  float beatWave = sin(length(uv-0.5)*24.0-uBeatAge*9.0)*exp(-uBeatAge*2.8);',
     '  if(uField==0){',
-    '    vec3 art = texture(uArt,uv).rgb;',
-    '    float lum = dot(art,vec3(0.2126,0.7152,0.0722));',
-    '    // 封面平面原来固定 8.6x7.2，默认机位下占约 72% 视高，窄窗口里宽度几',
-    '    // 乎吃满整屏——观感是"封面太大"。收一档：目标 55% 视高，且宽度不超',
-    '    // 过可视宽的 92%（9.95 = dist 10.2 在 52° FOV 下的可视高；宽屏不放大）。',
-    '    float coverFit = min(min(0.88, 0.92*9.95*uAspect/8.6), 1.0);',
-    '    pos.xy = (uv-0.5)*vec2(8.6,7.2)*coverFit;',
-    '    //  Mineradio 的 3D 封面是一块近乎全平的 LED 点阵屏：位移收到只够',
-    '    //  呼吸，明暗全部交给封面像素自己（暗像素≈灭点），透视来自机位侧转。',
-    '    float silk = sin(pos.x*0.85+t*0.32+sin(pos.y*0.8))*0.12;',
-    '    silk += snoise(vec3(pos.xy*0.48,t*0.16))*(0.10+uMid*0.28);',
-    '    pos.z = silk + (lum-0.45)*uHasArt*0.30 + beatWave*(0.10+uBass*0.18);',
-    '    pos.z += band*0.15*sin(uv.y*PI);',
-    '    color = mix(color,art,uHasArt);',
-    '    light = mix(0.72, 0.12+lum*1.50, uHasArt);',
-    '    //  发光边框：封面四周一圈青色霓虹（bdist = 以封面高为基准的到边距离）',
-    '    float bdist = min(min(uv.x,1.0-uv.x)*1.19, min(uv.y,1.0-uv.y));',
-    '    float frame = 1.0 - smoothstep(0.006, 0.028, bdist);',
-    '    color = mix(color, vec3(0.30,0.95,1.00), frame*0.85*uHasArt);',
-    '    light += frame*1.9*uHasArt;',
-    '    float fade = 0.6+0.4*sin(uv.x*PI)*sin(uv.y*PI);',
-    '    alpha *= mix(fade, 1.0, uHasArt*0.92);',
-    '    scale = 0.62;',
+    '    float count = uCols*uRows, frontCount = floor(count*0.76);',
+    '    float reference = max(1.1,uCoverDistance/2.55);',
+    '    float projection = sqrt(reference*reference-1.0);',
+    '    float angle = mod(mod(id,256.0)*2.39996322973+floor(id/256.0)*4.92161201412,PI*2.0);',
+    '    vec2 direction = vec2(cos(angle),sin(angle));',
+    '    if(id<frontCount){',
+    '      float diskRadius2 = (id+0.5)/frontCount;',
+    '      normal.z = (reference*diskRadius2+(reference*reference-1.0)*sqrt(1.0-diskRadius2))',
+    '                 /(reference*reference-1.0+diskRadius2);',
+    '      normal.xy = direction*sqrt(diskRadius2)*(reference-normal.z)/projection;',
+    '      coverSpacing = 2.55*(reference-normal.z)/projection*sqrt(PI/frontCount);',
+    '    } else {',
+    '      normal.z = -1.0+(id-frontCount+0.5)/(count-frontCount)*(1.0+1.0/reference);',
+    '      normal.xy = direction*sqrt(max(0.0,1.0-normal.z*normal.z));',
+    '      coverSpacing = 2.55*sqrt(2.0*PI*(1.0+1.0/reference)/(count-frontCount));',
+    '    }',
+    '    vec2 artUv = 0.5+normal.xy*projection/(2.0*(reference-normal.z));',
+    '    vec3 art = textureLod(uArt,0.5+(artUv-0.5)*uArtScale,uArtLod).rgb;',
+    '    color = mix(mix(colorA,colorB,artUv.x*0.65+artUv.y*0.35),art,uHasArt);',
+    '    float yaw = sin(t*0.19)*0.035*uCoverMotion;',
+    '    normal.xz = mat2(cos(yaw),-sin(yaw),sin(yaw),cos(yaw))*normal.xz;',
+    '    float breath = 1.0+(sin(t*0.72)*0.006+uBass*0.018+uBeat*0.010)*uCoverMotion;',
+    '    pos = normal*2.55*breath;',
+    '    coverSpacing *= breath;',
+    '    light = 0.90;',
+    '    alpha = 1.0;',
     '  } else if(uField==1){',
     '    float travel = fract(uv.y-t*(0.038+uBass*0.022));',
     '    float angle = uv.x*PI*2.0+t*0.085;',
@@ -425,24 +430,37 @@
     '  float nearPointer = exp(-dot(delta,delta)*25.0)*uPointerActive;',
     '  float clickDistance = length((ndc-uClick.xy)*vec2(uAspect,1.0));',
     '  float clickRing = exp(-pow((clickDistance-uClick.z*0.8)*13.0,2.0))*exp(-uClick.z*2.0);',
-    '  pos += normal*(nearPointer*0.55+clickRing*0.65);',
-    '  pos += normalize(pos+0.001)*uScatter*1.7;',
+    '  float interaction = uField==0 ? 0.065*uCoverMotion : 1.0;',
+    '  pos += normal*(nearPointer*0.55+clickRing*0.65)*interaction;',
+    '  pos += normalize(pos+0.001)*uScatter*(uField==0 ? 0.16*uCoverMotion : 1.7);',
     '  vec4 mv = uView*vec4(pos,1.0);',
     '  vColor = color*(light+uEnergy*0.32+nearPointer*0.25+clickRing*0.30);',
     '  vAlpha = alpha*uFade*smoothstep(0.15,1.2,-mv.z);',
     '  float pixel = 44.0/max(1.5,-mv.z)*scale;',
     '  gl_PointSize = clamp(pixel,1.35,5.4)*uPointScale;',
+    '  if(uField==0){',
+    '    float facing = dot(normal,normalize(uCamPos-pos));',
+    '    vAlpha *= step(0.012,facing);',
+    '    vColor = color*light*(0.78+0.22*smoothstep(0.0,0.65,facing));',
+    '    float diameter = coverSpacing*uProj[1][1]*uViewportHeight*0.5/max(0.1,-mv.z);',
+    '    gl_PointSize = clamp(diameter*1.22,1.25,7.0*uPointScale);',
+    '  }',
     '  gl_Position = uProj*mv;',
     '}'
   ].join('\n'));
 
   var FIELD_FS = stageFS([
+    'uniform highp int uField;',
     'in vec3 vColor; in float vAlpha;',
     'void main(){',
     '  float r = length(gl_PointCoord-0.5)*2.0;',
     '  if(r>1.0 || vAlpha<0.003) discard;',
-    '  //  点芯收紧、余晕收短：LED 点阵要的是「实心亮点+暗隙」，软圆点会把',
-    '  //  点阵糊成一片（封面浮雕改为点阵屏后尤其明显）',
+    '  if(uField==0){',
+    '    float edge = 1.0-smoothstep(1.0-min(0.32,fwidth(r)),1.0,r);',
+    '    if(edge<0.08) discard;',
+    '    o = vec4(vColor,edge*vAlpha);',
+    '    return;',
+    '  }',
     '  float core = 1.0-smoothstep(0.12,0.60,r);',
     '  float edge = exp(-r*r*6.0)*(1.0-smoothstep(0.76,1.0,r));',
     '  o = vec4(vColor*(1.10+core*1.05),edge*vAlpha);',
@@ -714,13 +732,15 @@
   var pendingDt = 0;
   var returnFocus = null, backgroundNodes = [];
   var seeking = false, lastCover = null, changingVolume = false;
+  var seekTrackId = null, seekCancelled = false;
   var lyricView = null, layout = 'focus', lyricSize = 1, lyricGlow = .45;
   // 舞台主题：只管沉浸舞台操作层的观感（见 stage-themes/）。与皮肤正交——
   // 皮肤换整个应用的布局，舞台主题换舞台 chrome，两者可任意组合。
   var stageTheme = 'classic';
 
   function reducedMotion() {
-    return !!(global.Stage && Stage.presentation && Stage.presentation().reduced);
+    return !!(global.Stage && Stage.presentation && Stage.presentation().reduced) ||
+      !!(global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches);
   }
 
   // -------------------------------------------------------------------------
@@ -826,8 +846,11 @@
       gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
     }
+    var complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    return { fbo: fbo, tex: tex, rb: rb, w: w, h: h };
+    var target = { fbo: fbo, tex: tex, rb: rb, w: w, h: h };
+    if (!complete) { freeRT(target); return null; }
+    return target;
   }
 
   function freeRT(rt) {
@@ -878,6 +901,7 @@
       { loc: starP.a('aLane'), buffer: stars.lane, size: 1 }
     ]);
     var ctx = gl, disposed = false, artUrl = '', artReady = false, artImage = null;
+    var artScaleX = 1, artScaleY = 1, artLod = 0;
     var texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([48, 76, 96, 255]));
@@ -889,16 +913,21 @@
       if (def.field !== 0) return;
       var url = global.Stage && Stage.coverUrl ? Stage.coverUrl() || '' : '';
       if (url === artUrl) return;
-      artUrl = url; artReady = false;
+      artUrl = url; artReady = false; artScaleX = artScaleY = 1; artLod = 0;
       if (artImage) { artImage.onload = null; artImage.onerror = null; }
       if (!url) return;
       var img = artImage = new Image(); img.crossOrigin = 'anonymous';
       img.onload = function () {
-        if (disposed || ctx !== gl || ctx.isContextLost() || url !== artUrl) return;
+        if (disposed || ctx !== gl || ctx.isContextLost() || url !== artUrl || img !== artImage) return;
         try {
           ctx.activeTexture(ctx.TEXTURE0); ctx.bindTexture(ctx.TEXTURE_2D, texture);
           ctx.pixelStorei(ctx.UNPACK_FLIP_Y_WEBGL, true);
           ctx.texImage2D(ctx.TEXTURE_2D, 0, ctx.RGBA, ctx.RGBA, ctx.UNSIGNED_BYTE, img);
+          ctx.generateMipmap(ctx.TEXTURE_2D);
+          ctx.texParameteri(ctx.TEXTURE_2D, ctx.TEXTURE_MIN_FILTER, ctx.LINEAR_MIPMAP_LINEAR);
+          var width = img.naturalWidth || img.width || 1, height = img.naturalHeight || img.height || 1;
+          artScaleX = Math.min(1, height / width); artScaleY = Math.min(1, width / height);
+          artLod = Math.max(0, Math.log(Math.min(width, height) * 0.5 * Math.sqrt(Math.PI / Math.floor(count * 0.76))) / Math.LN2);
           artReady = true;
         } catch (e) { artReady = false; }
         finally { ctx.pixelStorei(ctx.UNPACK_FLIP_Y_WEBGL, false); }
@@ -909,14 +938,28 @@
       count: count,
       draw: function () {
         syncArt();
+        if (def.field === 0) {
+          gl.disable(gl.DEPTH_TEST); gl.depthMask(false);
+          gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+        }
         gl.useProgram(starP.p); uploadCommon(starP); gl.bindVertexArray(starVao);
         gl.drawArrays(gl.POINTS, 0, stars.count);
+        if (def.field === 0) {
+          gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
+          gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        }
         gl.useProgram(p.p); uploadCommon(p); gl.bindVertexArray(vao);
         setI(p.u, 'uField', def.field); setF(p.u, 'uCols', cols); setF(p.u, 'uRows', rows);
         setI(p.u, 'uArt', 0); setF(p.u, 'uHasArt', artReady ? 1 : 0);
         gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texture);
         if (p.u.uBands) gl.uniform1fv(p.u.uBands, audioBands);
         var reduced = reducedMotion();
+        if (def.field === 0) {
+          setF(p.u, 'uCoverMotion', reduced ? 0 : motion);
+          setF(p.u, 'uCoverDistance', def.cam.dist * Math.max(1, Math.min(2.6, 1.05 / (bw / bh))));
+          setF(p.u, 'uViewportHeight', bh);
+          setV2(p.u, 'uArtScale', artScaleX, artScaleY); setF(p.u, 'uArtLod', artLod);
+        }
         setV2(p.u, 'uPointer', pointerField.x, pointerField.y);
         setF(p.u, 'uPointerActive', reduced ? 0 : pointerField.active);
         setF(p.u, 'uBeatAge', reduced ? 100 : Math.max(0, time - lastBeatAt));
@@ -1007,6 +1050,16 @@
     post.scene = makeRT(bw, bh, true);
     post.a = makeRT(hw, hh, false);
     post.b = makeRT(hw, hh, false);
+    if (!post.scene || !post.a || !post.b) {
+      freeRT(post.scene); freeRT(post.a); freeRT(post.b);
+      post.scene = post.a = post.b = null;
+      if (post.hdr) {
+        post.hdr = false;
+        post.internalFmt = gl.RGBA;
+        post.texType = gl.UNSIGNED_BYTE;
+        resizeTargets();
+      } else showFallback('当前设备无法分配舞台画面，请缩小窗口后重试。');
+    }
   }
 
   function drawFullscreen(prog) {
@@ -1153,6 +1206,7 @@
     // 不 preventDefault 就永远不会收到 restored。
     if (e && e.preventDefault) e.preventDefault();
     contextLost = true;
+    cancelGestures();
     // Detach pending cover loads before the restored context invalidates their textures.
     disposeStages();
     post = null;
@@ -1171,7 +1225,7 @@
       builtStages = {}; sizeDirty = true;
       $('s3d-fallback').hidden = true;
       if (global.Stage && Stage.kick) Stage.kick();
-    } else showFallback('舞台暂时无法恢复，可退出后重新进入。');
+    } else { releaseGl(); showFallback('舞台暂时无法恢复，可退出后重新进入。'); }
   }
 
   function releaseGl() {
@@ -1215,10 +1269,10 @@
     var dev = window.devicePixelRatio || 1;
     var level = q();
     var cap = level === 0 ? 1.0 : (level === 1 ? 1.15 : 1.55);
-    var floor = level === 0 ? 0.50 : (level === 1 ? 0.60 : 0.75);
     var budget = level === 0 ? 1900000 : (level === 1 ? 3600000 : 6200000);
     var budgetCap = Math.sqrt(budget / Math.max(1, w * h));
-    return Math.max(floor, Math.min(dev, Math.min(cap, budgetCap)));
+    var maxSize = gl ? Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE), gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)) : Infinity;
+    return Math.min(dev, cap, budgetCap, maxSize / Math.max(w, h));
   }
 
   function resize() {
@@ -1226,8 +1280,8 @@
     var w = Math.max(1, Math.round(wrapEl.clientWidth || window.innerWidth));
     var h = Math.max(1, Math.round(wrapEl.clientHeight || window.innerHeight));
     dpr = computeDpr(w, h);
-    var nw = Math.max(1, Math.round(w * dpr));
-    var nh = Math.max(1, Math.round(h * dpr));
+    var nw = Math.max(1, Math.floor(w * dpr));
+    var nh = Math.max(1, Math.floor(h * dpr));
     if (canvas.width !== nw || canvas.height !== nh) {
       canvas.width = nw; canvas.height = nh;
     }
@@ -1435,8 +1489,9 @@
 
   function render(dtMs) {
     // 3D 场景始终渲染：folia 歌词只是透明叠加层（standalone 无 GL 回退时才没有 GL）。
-    if (!gl || contextLost) return;
+    if (!gl || contextLost || sceneCovered()) return;
     if (sizeDirty) resize();
+    if (!post || !post.scene || !post.a || !post.b) return;
     updateAudio(dtMs);
     updateCamera(dtMs);
     updateTransition(dtMs);
@@ -1514,15 +1569,20 @@
   // 目标帧率。返回 0 表示这一层完全不需要帧，主循环据此停机。
   function targetFps() {
     if (!active || document.hidden) return 0;
+    if (contextLost && !foliaActive()) return 0;
+    if (post && !post.scene && !sizeDirty && !foliaActive()) return 0;
     // 无 GL 时只有 folia 歌词视觉需要帧（纯平面回退）；有 GL 一律走原帧率。
     if (!gl) return foliaActive() ? (reducedMotion() ? 15 : 60) : 0;
     // 240 = 「每个 rAF 都给我」，降频自己用整数除数在 tick 里做：
     // 帧率必须是刷新率的整数分之一，90fps@144Hz 会因为帧间隔不均产生 judder。
-    return reducedMotion() ? 15 : 240;
+    if (reducedMotion()) return 15;
+    var data = global.Stage && Stage.presentation ? Stage.presentation() : null;
+    if (!dragging && performance.now() > interactUntil && (!data || !data.playing)) return 30;
+    return 240;
   }
 
   function tick(dtMs) {
-    if (!active) return;
+    if (!active || document.hidden) return;
     var t0 = performance.now();
     // 帧停摆后的一记补帧不是性能证据：内嵌视图/遮挡窗口里「偶发泵帧 + 被
     // 高估的 hz」会把压力计一路顶满，画质被永久钉在最低档——极光穹顶发糊
@@ -1560,11 +1620,30 @@
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
+  function controlTarget(e) {
+    return e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, [contenteditable], [role="button"], .s3d-settings, .s3d-queue-panel, #s3d-reading, #s3d-folia');
+  }
+
+  function cancelGestures() {
+    cancelSeek();
+    endVolumeChange();
+    Object.keys(pointers).forEach(function (id) {
+      onPointerUp({ pointerId: Number(id), type: 'pointercancel' });
+    });
+    var host = $('s3d-reading');
+    var id = lyrTilt.dragId;
+    lyrTilt.dragId = -1;
+    lyrTilt.from = null;
+    if (host && host.hasPointerCapture && host.hasPointerCapture(id)) host.releasePointerCapture(id);
+    dragVel.t = dragVel.p = 0;
+    pointerField.active = 0;
+  }
+
   function onPointerDown(e) {
     if (!active || (e.button != null && e.button !== 0) || pointers[e.pointerId]) return;
     // 仅无 GL 纯平面回退禁用 3D 手势；folia 透明叠加时相机拖拽照常
     // （folia 容器 pointer-events:none，词节点自己处理点击 seek，空白处穿透到这里）。
-    if (isStandalone()) return;
+    if (isStandalone() || sceneCovered() || controlTarget(e)) return;
     root.focus({ preventScroll: true });
     var point = localPoint(e);
     pointerField.clickX = point.x / wrapEl.clientWidth * 2 - 1;
@@ -1630,6 +1709,8 @@
     if (!pointers[e.pointerId]) return;
     delete pointers[e.pointerId];
     pointerCount = Math.max(0, pointerCount - 1);
+    if (canvas && canvas.hasPointerCapture && canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+    if (e.type !== 'pointerup') dragVel.t = dragVel.p = 0;
     if (pointerCount === 0) {
       dragging = false;
       root.classList.remove('s3d-dragging');
@@ -1639,10 +1720,11 @@
   }
 
   function onWheel(e) {
-    if (!active) return;
-    if (isStandalone()) return;
+    if (!active || e.ctrlKey || e.metaKey || controlTarget(e)) return;
+    if (isStandalone() || sceneCovered()) return;
     e.preventDefault();
-    var k = Math.exp(-(e.deltaY || 0) * 0.0012);
+    var delta = (e.deltaY || 0) * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? wrapEl.clientHeight : 1);
+    var k = Math.exp(-clamp(delta, -500, 500) * 0.0012);
     cam.userR = clamp(cam.userR * k, cam.minR, cam.maxR);
     markInteraction(900);
   }
@@ -1695,16 +1777,13 @@
   function bindLyrTilt() {
     readLyrTilt();
     var host = $('s3d-reading');
-    if (!host || !lyrTilt.on) return;
+    if (!host) return;
     host.addEventListener('pointerdown', function (e) {
-      if (!active || !showLyrics || e.button !== 0 || lyrTilt.dragId >= 0) return;
+      if (!active || !showLyrics || !lyrTilt.on || e.button !== 0 || lyrTilt.dragId >= 0) return;
       lyrTilt.dragId = e.pointerId;
       lyrTilt.from = { x: e.clientX, y: e.clientY, rx: lyrTilt.rx, ry: lyrTilt.ry, moved: 0 };
       lyrTilt.lastInputAt = performance.now();
       // 捕获后移出歌词区也不会丢事件，更不会中途落到画布上变成转机位。
-      if (host.setPointerCapture) {
-        try { host.setPointerCapture(e.pointerId); } catch (err) { /* 无捕获只是出界丢事件 */ }
-      }
     });
     host.addEventListener('pointermove', function (e) {
       if (e.pointerId !== lyrTilt.dragId || !lyrTilt.from) return;
@@ -1712,6 +1791,7 @@
       var dy = e.clientY - lyrTilt.from.y;
       lyrTilt.from.moved = Math.max(lyrTilt.from.moved, Math.abs(dx) + Math.abs(dy));
       if (lyrTilt.from.moved < 8) return;
+      if (host.setPointerCapture && !host.hasPointerCapture(e.pointerId)) host.setPointerCapture(e.pointerId);
       // 拖 4px 转 1°，与歌词页同一手感。直接写不等帧门：eco 档 24fps 下
       // 等一帧要 40ms，手感就是"粘"。
       lyrTilt.ry = lyrTilt.from.ry + dx / 4;
@@ -1723,6 +1803,7 @@
     function end(e) {
       if (e.pointerId !== lyrTilt.dragId) return;
       lyrTilt.dragId = -1;
+      if (host.hasPointerCapture && host.hasPointerCapture(e.pointerId)) host.releasePointerCapture(e.pointerId);
       lyrTilt.lastInputAt = performance.now();
       // 挂到宿主上，供 stage-lyrics 的行 click 判断"这一下是拖拽不是跳转"。
       host._justDragged = !!(lyrTilt.from && lyrTilt.from.moved >= 8);
@@ -1731,6 +1812,9 @@
     }
     host.addEventListener('pointerup', end);
     host.addEventListener('pointercancel', end);
+    host.addEventListener('lostpointercapture', end);
+    document.addEventListener('pointerup', end);
+    document.addEventListener('pointercancel', end);
     host.addEventListener('dblclick', resetLyrTilt);
   }
 
@@ -1783,7 +1867,9 @@
 
   function pokeChrome() {
     if (!root || !active) return;
+    var wasVisible = root.classList.contains('s3d-chrome');
     root.classList.add('s3d-chrome');
+    if (!wasVisible && global.Stage && Stage.kick) Stage.kick();
     if (chromeTimer) clearTimeout(chromeTimer);
     chromeTimer = setTimeout(function () {
       // 队列面板打开不再豁免 chrome：它应与 3D 歌单架一致，
@@ -1831,6 +1917,7 @@
       stageTheme: stageTheme,
       foliaVisual: folia.visual,
       foliaBg: folia.bgMode, foliaBgOpacity: folia.bgOpacity, foliaVignette: folia.vignette,
+      foliaWallpaper: folia.wallpaper, foliaWallpaperDim: folia.wallpaperDim,
       foliaSubtitle: folia.subtitle, classicTuning: folia.classicTuning, cadenzaTuning: folia.cadenzaTuning,
       sonnetTuning: folia.sonnetTuning, temperaTuning: folia.temperaTuning };
   }
@@ -1862,7 +1949,9 @@
         var shelfSel = $('s3d-shelf-mode');
         if (shelfSel) shelfSel.value = shelfMode;
       }
-      if (value.foliaBg === 'stage' || value.foliaBg === 'geometric' || value.foliaBg === 'fluid' || value.foliaBg === 'solid') folia.bgMode = value.foliaBg;
+      if (['stage', 'geometric', 'fluid', 'solid', 'anime', 'atmosphere'].indexOf(value.foliaBg) >= 0) folia.bgMode = value.foliaBg;
+      if (typeof value.foliaWallpaper === 'string') folia.wallpaper = stageWallpaper(value.foliaWallpaper);
+      if (typeof value.foliaWallpaperDim === 'number') folia.wallpaperDim = clamp(num(value.foliaWallpaperDim, 0.48), 0.2, 0.8);
       if (typeof value.foliaBgOpacity === 'number') folia.bgOpacity = clamp(value.foliaBgOpacity, 0, 1);
       if (typeof value.foliaVignette === 'boolean') folia.vignette = value.foliaVignette;
       if (typeof value.foliaSubtitle === 'boolean') folia.subtitle = value.foliaSubtitle;
@@ -2041,10 +2130,72 @@
       : folia.visual === 'tempera' && folia.tempera ? folia.tempera : folia.cadenza;
   }
 
+  function sceneCovered() {
+    return foliaActive() && (folia.bgMode === 'anime' || folia.bgMode === 'atmosphere');
+  }
+
+  function stageWallpapers() {
+    return global.ThemeStudio && ThemeStudio.wallpapers ? ThemeStudio.wallpapers() : [];
+  }
+
+  function stageWallpaper(id) {
+    var list = stageWallpapers();
+    var selected = list.find(function (item) { return item.id === id; });
+    return selected ? selected.id : (list.find(function (item) { return item.id === 'evening-16.jpg'; }) || list[0] || {}).id || '';
+  }
+
+  function syncStageBackdrop() {
+    var backdrop = $('s3d-fl-backdrop'), picture = $('s3d-fl-wallpaper');
+    var panel = $('s3d-fl-wallpapers'), gallery = $('s3d-fl-wallpaper-grid');
+    var useImage = folia.bgMode === 'anime';
+    if (backdrop) backdrop.hidden = !sceneCovered();
+    if (panel) panel.hidden = !useImage;
+    if (root) root.classList.toggle('s3d-scene-covered', sceneCovered());
+    if (backdrop && backdrop.dataset.dim !== String(folia.wallpaperDim)) {
+      backdrop.dataset.dim = String(folia.wallpaperDim);
+      backdrop.style.setProperty('--fl-wallpaper-dim', String(folia.wallpaperDim));
+    }
+    if (picture && backdrop) {
+      var selected = stageWallpaper(folia.wallpaper);
+      if (useImage && picture.dataset.wallpaper !== selected) {
+        folia.wallpaper = selected;
+        picture.dataset.wallpaper = selected;
+        picture.hidden = true;
+        backdrop.dataset.image = 'loading';
+        picture.onload = function () { backdrop.dataset.image = 'ready'; picture.hidden = folia.bgMode !== 'anime'; };
+        picture.onerror = function () { backdrop.dataset.image = 'error'; picture.hidden = true; };
+        if (selected) picture.src = '/wallpapers/' + encodeURIComponent(selected);
+        else { picture.removeAttribute('src'); backdrop.dataset.image = 'error'; }
+      } else picture.hidden = !useImage || backdrop.dataset.image !== 'ready';
+    }
+    if (gallery && !gallery.childElementCount) {
+      stageWallpapers().forEach(function (item) {
+        var button = document.createElement('button');
+        button.type = 'button'; button.className = 's3d-wallpaper-choice'; button.dataset.wallpaper = item.id;
+        button.setAttribute('aria-label', item.label); button.title = item.label;
+        var thumbnail = document.createElement('img');
+        thumbnail.alt = ''; thumbnail.loading = 'lazy'; thumbnail.src = '/wallpapers/' + encodeURIComponent(item.id);
+        var caption = document.createElement('span'); caption.textContent = item.label;
+        button.append(thumbnail, caption);
+        button.addEventListener('click', function () { folia.wallpaper = item.id; applyFoliaConfig(); savePreferences(); });
+        gallery.append(button);
+      });
+    }
+    if (gallery) gallery.querySelectorAll('button').forEach(function (button) {
+      var pressed = String(button.dataset.wallpaper === folia.wallpaper);
+      if (button.getAttribute('aria-pressed') !== pressed) button.setAttribute('aria-pressed', pressed);
+    });
+    var note = $('s3d-fl-wallpaper-note');
+    if (note) {
+      var message = backdrop && backdrop.dataset.image === 'error' ? '图片加载失败，已使用彩色氛围。可选择另一张图片。' : '仅用于歌词舞台，不改变主页背景。';
+      if (note.textContent !== message) note.textContent = message;
+    }
+  }
+
   function applyFoliaConfig() {
     if (!folia.ready) return;
-    var t = global.FoliaTheme.resolve(reactivity);
-    var sig = global.FoliaTheme.signature(t);
+    var t = folia.visual === 'sonnet' && global.FoliaTheme.resolveSonnet ? global.FoliaTheme.resolveSonnet(reactivity) : global.FoliaTheme.resolve(reactivity);
+    var sig = folia.visual + ':' + global.FoliaTheme.signature(t);
     if (sig !== folia.themeSig) {
       folia.themeSig = sig;
       folia.bg.setTheme(t); folia.sub.setTheme(t);
@@ -2053,13 +2204,18 @@
       if (folia.tempera) folia.tempera.setTheme(t);
       // 商籁 HUD/角标文案的取色跟着主题 accent 走（canvas 内部另有自己的换算）。
       root.style.setProperty('--fl-sonnet-accent', t.accentColor);
+      root.style.setProperty('--fl-scene-base', t.backgroundColor);
+      root.style.setProperty('--fl-scene-accent', t.accentColor);
+      root.style.setProperty('--fl-scene-secondary', t.secondaryColor);
+      root.style.setProperty('--fl-scene-tertiary', t.tertiaryColor || t.accentColor);
     }
     var fs = clamp(num(lyricSize, 1), 0.7, 1.5);
     root.style.setProperty('--folia-fontscale', String(fs));
     [folia.classic, folia.cadenza, folia.sub].forEach(function (a) { a.setFontScale(fs); });
     if (folia.sonnet) folia.sonnet.setFontScale(fs);
     if (folia.tempera) folia.tempera.setFontScale(fs);
-    folia.bg.setMode(folia.bgMode);
+    folia.bg.setMode(sceneCovered() ? 'stage' : folia.bgMode);
+    syncStageBackdrop();
     folia.bg.setOpacity(folia.bgOpacity);
     folia.bg.setVignette(folia.vignette);
     folia.sub.setVisible(folia.subtitle && showLyrics);
@@ -2174,6 +2330,7 @@
     if (temperaPanel) temperaPanel.hidden = folia.visual !== 'tempera';
     syncTemperaControls();
     setOpacityRowEnabled(folia.bgMode === 'fluid');
+    syncStageBackdrop();
     // 镜头动态只在无 GL 纯平面回退时失效；folia 透明叠加时它仍驱动 3D 相机。
     var motionInput = $('s3d-motion');
     if (motionInput) {
@@ -2207,6 +2364,65 @@
 
   // Consume the same clock, metadata and lyric document as the ordinary player.
   // A separate low-frequency gate updates DOM even when WebGL is unavailable.
+  function syncSeek(data) {
+    var range = $('s3d-seek');
+    if (!range || !data) return;
+    if (seeking && seekTrackId !== currentTrackId()) {
+      seeking = false;
+      seekTrackId = null;
+      seekCancelled = true;
+    }
+    if (seeking) return;
+    range.max = Math.max(1, data.duration);
+    range.value = Math.min(data.duration, data.position);
+    range.disabled = !(data.duration > 0);
+    range.setAttribute('aria-valuetext', fmt(data.position) + ' / ' + fmt(data.duration));
+    range.style.setProperty('--s3d-progress', (data.duration > 0 ? Math.min(100, data.position / data.duration * 100) : 0) + '%');
+    text('s3d-elapsed', fmt(data.position));
+  }
+
+  function cancelSeek() {
+    seeking = false;
+    seekTrackId = null;
+    seekCancelled = true;
+    if (global.Stage && Stage.presentation) syncSeek(Stage.presentation());
+  }
+
+  function beginSeek(e) {
+    if (!active || document.hidden || this.disabled) return;
+    if (e.type === 'pointerdown' && e.button !== 0) return;
+    if (e.type === 'keydown' && !/^(ArrowLeft|ArrowRight|ArrowUp|ArrowDown|Home|End|PageUp|PageDown)$/.test(e.key)) return;
+    seekCancelled = false;
+    seekTrackId = currentTrackId();
+    seeking = false;
+  }
+
+  function previewSeek() {
+    if (!active || document.hidden || seekCancelled || (seekTrackId !== null && seekTrackId !== currentTrackId())) { cancelSeek(); return; }
+    if (!seeking) seekTrackId = currentTrackId();
+    seeking = true;
+    text('s3d-elapsed', fmt(Number(this.value)));
+  }
+
+  function commitSeek() {
+    if (!seeking || seekCancelled || !active || document.hidden || document.activeElement !== this || seekTrackId !== currentTrackId()) { cancelSeek(); return; }
+    var position = Number(this.value);
+    seeking = false;
+    seekTrackId = null;
+    seekCancelled = true;
+    control('seek', position);
+  }
+
+  function onVolumeInput() {
+    if (!active || document.hidden) { endVolumeChange(); return; }
+    changingVolume = true;
+    control('volume', Number(this.value) / 100);
+  }
+
+  function endVolumeChange() {
+    changingVolume = false;
+  }
+
   function syncNowPlaying() {
     if (!root || !global.Stage || !Stage.presentation) return;
     var data = Stage.presentation(), track = data.track;
@@ -2221,7 +2437,7 @@
     text('s3d-title', track ? track.title || '未知曲目' : '还没有播放音乐');
     text('s3d-artist', track ? track.artist || '未知艺术家' : '从曲库选择一首喜欢的歌');
     text('s3d-hint', ('0' + (stageIndex + 1)).slice(-2) + ' / ' + STAGES[stageIndex].label);
-    text('s3d-elapsed', fmt(data.position));
+    syncSeek(data);
     text('s3d-duration', fmt(data.duration));
     text('s3d-status', track ? (data.playing ? '正在聆听' : '已暂停') : '让音乐，拥有形状');
     text('s3d-motion-note', data.reduced ? '已遵循减少动态效果设置' : '设置即时生效');
@@ -2232,14 +2448,6 @@
     $('s3d-play-icon').setAttribute('href', data.playing ? '#i-pause' : '#i-play');
     $('s3d-prev').disabled = $('s3d-next').disabled = !track;
     if (!changingVolume) $('s3d-volume').value = Math.round(data.volume * 100);
-    var range = $('s3d-seek');
-    if (!seeking) {
-      range.max = Math.max(1, data.duration);
-      range.value = Math.min(data.duration, data.position);
-      range.disabled = !(data.duration > 0);
-      range.setAttribute('aria-valuetext', fmt(data.position) + ' / ' + fmt(data.duration));
-      range.style.setProperty('--s3d-progress', (data.duration > 0 ? Math.min(100, data.position / data.duration * 100) : 0) + '%');
-    }
     var cover = $('s3d-cover');
     if (lastCover !== data.cover) {
       lastCover = data.cover;
@@ -2322,6 +2530,7 @@
   function open(stageId) {
     if (!root) return false;
     if (!active) {
+      if (global.StageFreecam) StageFreecam.setEnabled(false);
       returnFocus = document.activeElement;
       backgroundNodes = [];
       Array.prototype.forEach.call(document.body.children, function (node) {
@@ -2389,7 +2598,8 @@
     $('s3d-queue-panel').hidden = true;
     $('s3d-queue').setAttribute('aria-expanded', 'false');
     if (shelf) shelf.hide();
-    pointers = {}; pointerCount = 0; dragging = false; seeking = false;
+    cancelGestures();
+    seeking = false;
     root.classList.remove('s3d-dragging');
     if (wdTimer) { clearInterval(wdTimer); wdTimer = 0; }
     wdLastT = -1; wdStalls = 0;
@@ -2527,6 +2737,7 @@
         savePreferences();
       }); }
     range('s3d-fl-opacity', function (v) { folia.bgOpacity = v; }, function (v) { return Math.round(v * 100) + '%'; }, 'change');
+    range('s3d-fl-wallpaper-dim', function (v) { folia.wallpaperDim = clamp(v, 0.2, 0.8); }, function (v) { return Math.round(v * 100) + '%'; }, 'change');
     check('s3d-fl-vignette', function (b) { folia.vignette = b; });
     check('s3d-fl-subtitle', function (b) { folia.subtitle = b; });
     check('s3d-fl-rotation', function (b) { folia.classicTuning.rotation = b; });
@@ -2596,6 +2807,9 @@
       if (op) op.value = String(folia.bgOpacity);
       var opOut = $('s3d-fl-opacity-value');
       if (opOut) opOut.textContent = Math.round(folia.bgOpacity * 100) + '%';
+      var wallDim = $('s3d-fl-wallpaper-dim'); if (wallDim) wallDim.value = String(folia.wallpaperDim);
+      text('s3d-fl-wallpaper-dim-value', Math.round(folia.wallpaperDim * 100) + '%');
+      syncStageBackdrop();
       setOpacityRowEnabled(folia.bgMode === 'fluid');
       var vg = $('s3d-fl-vignette'); if (vg) vg.checked = folia.vignette;
       var st = $('s3d-fl-subtitle'); if (st) st.checked = folia.subtitle;
@@ -2688,12 +2902,16 @@
     $('s3d-queue').addEventListener('click', function () { setQueuePanel($('s3d-queue-panel').hidden); });
     $('s3d-queue-close').addEventListener('click', function () { setQueuePanel(false); $('s3d-queue').focus(); });
     $('s3d-cover').addEventListener('error', function () { this.hidden = true; });
-    $('s3d-seek').addEventListener('input', function () { seeking = true; text('s3d-elapsed', fmt(Number(this.value))); });
-    $('s3d-seek').addEventListener('change', function () { control('seek', Number(this.value)); seeking = false; });
-    $('s3d-seek').addEventListener('blur', function () { seeking = false; });
-    $('s3d-volume').addEventListener('input', function () { changingVolume = true; });
-    $('s3d-volume').addEventListener('change', function () { control('volume', Number(this.value) / 100); changingVolume = false; });
-    $('s3d-volume').addEventListener('blur', function () { changingVolume = false; });
+    $('s3d-seek').addEventListener('pointerdown', beginSeek);
+    $('s3d-seek').addEventListener('keydown', beginSeek);
+    $('s3d-seek').addEventListener('input', previewSeek);
+    $('s3d-seek').addEventListener('change', commitSeek);
+    $('s3d-seek').addEventListener('pointercancel', cancelSeek);
+    $('s3d-seek').addEventListener('blur', cancelSeek);
+    $('s3d-volume').addEventListener('input', onVolumeInput);
+    $('s3d-volume').addEventListener('change', endVolumeChange);
+    $('s3d-volume').addEventListener('pointercancel', endVolumeChange);
+    $('s3d-volume').addEventListener('blur', endVolumeChange);
     $('s3d-cover-toggle').addEventListener('click', toggleLayout);
     $('s3d-sleeve-image').addEventListener('error', function () { this.hidden = true; });
     $('s3d-layout').addEventListener('change', function () { layout = this.value; syncLayout(); savePreferences(); });
@@ -2742,6 +2960,8 @@
     $('s3d-sleeve').addEventListener('pointermove', onPointerMove, { passive: true });
     wrapEl.addEventListener('pointerup', onPointerUp);
     wrapEl.addEventListener('pointercancel', onPointerUp);
+    wrapEl.addEventListener('lostpointercapture', onPointerUp);
+    window.addEventListener('blur', cancelGestures);
     wrapEl.addEventListener('pointerleave', function () { pointerField.active = 0; });
     wrapEl.addEventListener('wheel', onWheel, { passive: false });
     wrapEl.addEventListener('dblclick', function () { if (!isStandalone()) resetView(); });
@@ -2790,6 +3010,8 @@
     // 帧门登记。返回 0 时主循环会把自己停掉，不需要帧的时候不烧 CPU。
     if (global.Stage && Stage.gate) Stage.gate(GATE, targetFps, tick);
     if (global.Stage && Stage.gate) Stage.gate('stage3d-ui', function () { return active && !document.hidden ? 8 : 0; }, syncNowPlaying);
+    // 播放态跳变沿（暂停/起播/曲尾停止）立刻刷一次，不等 8fps 门控。
+    document.addEventListener('stage:playing-changed', function () { if (active && !document.hidden) syncNowPlaying(); });
 
     // 窗口尺寸与 DPR 不是同步生效的：全屏切换 / 跨屏拖动时 devicePixelRatio
     // 要晚一拍才更新，所以延后补几次（Mineradio 那边的经验值是 48/140/320）。
@@ -2825,6 +3047,7 @@
   }
 
   function onVisibilityChange() {
+    if (document.hidden) cancelGestures();
     if (!document.hidden && active && global.Stage && Stage.kick) Stage.kick();
   }
 

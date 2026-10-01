@@ -149,6 +149,57 @@ html.qr-modal-open .app{visibility:hidden}
 
 .online-row .t-quality{display:flex;align-items:center;gap:6px}
 
+/* Progressive search keeps provider progress separate from the song list. */
+.search-summary{padding:12px 4px;color:var(--muted);font-size:12px;line-height:1.6}
+.search-source-filters{display:flex;flex-wrap:wrap;gap:8px;padding:0 4px 16px}
+.search-source-filters .chip{max-width:100%;white-space:normal;text-align:left}
+.search-source-statuses{display:flex;flex-direction:column;gap:6px;padding:14px 0}
+.search-source-status{display:flex;align-items:center;gap:10px;padding:10px 12px;
+  border:1px solid var(--line);border-radius:10px;color:var(--muted);font-size:12px}
+.search-source-status>span:not(.src-badge){flex:1;min-width:0;overflow-wrap:anywhere}
+.search-source-status .btn{flex:none;font-size:12px;padding:6px 12px}
+.search-results mark{background:transparent;color:var(--accent);font-weight:650}
+.online-row:focus-visible,.search-source-filters button:focus-visible,
+.search-source-status button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.online-row.is-loading{background:color-mix(in srgb,var(--accent) 9%,transparent)}
+.online-row.is-loading .t-num{color:var(--accent);animation:search-pulse 1.3s ease-in-out infinite}
+.online-row.has-play-error .t-num{color:var(--accent);font-weight:700}
+.online-load-state{display:block;color:var(--accent);font-size:11px;line-height:1.5}
+.online-load-state[hidden]{display:none}
+.search-skeleton{display:grid;grid-template-columns:42px minmax(80px,1fr) 70px;
+  align-items:center;gap:16px;height:64px;padding:8px 16px}
+.search-skeleton span{height:12px;border-radius:5px;background:var(--panel-2);
+  animation:search-pulse 1.3s ease-in-out infinite}
+.search-skeleton span:first-child{height:42px;border-radius:8px}
+.search-skeleton span:nth-child(2){max-width:300px}
+@keyframes search-pulse{50%{opacity:.4}}
+@media(max-width:600px){
+  #view-online>.col-head{flex-direction:column;align-items:stretch;gap:10px}
+  #view-online .col-head-left{flex-wrap:wrap;gap:8px}
+  #view-online .col-title{white-space:nowrap}
+  #view-online .col-tools{display:flex;flex-wrap:wrap;min-width:0}
+  #view-online .col-tools select{flex:1;min-width:0;max-width:100%}
+  .search-summary{padding:10px 0}
+  .search-source-filters{gap:6px;flex-wrap:nowrap;overflow-x:auto;padding-bottom:10px}
+  .search-source-filters .chip{flex:none;white-space:nowrap}
+  .search-source-status{padding:8px;gap:7px}
+  .search-source-status{flex-wrap:wrap}
+  .search-source-status .btn{margin-left:auto}
+  #view-online .search-results .online-row{grid-template-columns:36px minmax(0,1fr) 44px;
+    grid-template-areas:"art main main" "quality quality duration" "actions actions actions";
+    gap:6px;padding:10px 8px;min-height:108px}
+  #view-online .online-row .t-index,#view-online .online-row .t-album{display:none}
+  #view-online .online-row .t-art{grid-area:art;width:36px;height:36px}
+  #view-online .online-row .t-main{grid-area:main;min-width:0}
+  #view-online .online-row .t-quality{grid-area:quality;gap:4px}
+  #view-online .online-row .t-dur{grid-area:duration;justify-self:end}
+  #view-online .online-row .t-actions{grid-area:actions;opacity:1}
+  #view-online .op-account{min-width:0;max-width:100%;width:100%;box-sizing:border-box;flex-wrap:wrap}
+}
+@media(prefers-reduced-motion:reduce){
+  .search-skeleton span,.online-row.is-loading .t-num{animation:none}
+}
+
 /* All 聚合：每个音源结果组的分组头 */
 .all-group-head{display:flex;align-items:center;gap:6px;margin:14px 4px 6px;
   font-size:13px;font-weight:600;color:var(--text)}
@@ -400,3 +451,11 @@ input.opl-filter{flex:none;width:190px;height:30px;padding:0 10px;
 .online-error-actions .btn{padding:4px 12px;font-size:12px}
 /* 实际档位标（now-tech 内） */
 .actual-q{font-size:10px;color:#ffc46b;margin-left:6px}
+/* FM shares the player and stays compact beside search on narrow screens. */
+.online-radio { display:flex; align-items:center; gap:16px; flex-wrap:wrap; padding:16px; margin:12px 0; border:1px solid var(--glass-line); border-radius:12px; }
+.online-radio-copy { flex:1 1 220px; min-width:0; }
+.online-radio strong { font-size:14px; }
+.online-radio strong span { font-size:12px; font-weight:400; opacity:.65; margin-left:8px; }
+.online-radio p { font-size:12px; margin:6px 0 0; overflow-wrap:anywhere; opacity:.75; }
+.online-radio-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.online-radio [hidden] { display:none; }

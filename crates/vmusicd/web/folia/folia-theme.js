@@ -120,9 +120,29 @@
     };
   }
 
+  function resolveSonnet(reactivity) {
+    var source = readSourceHsl();
+    var chromatic = source && source[1] >= NEUTRAL_SAT_MAX;
+    var hue = chromatic ? ((source[0] % 360) + 360) % 360 : 198;
+    var saturation = chromatic ? U.clamp(source[1], 62, 74) : 68;
+    return {
+      name: chromatic ? 'sonnet-stage-palette' : 'Sonnet Nocturne',
+      backgroundColor: U.hslToHex(hue + 24, 32, 9),
+      primaryColor: '#f5f3ee',
+      accentColor: U.hslToHex(hue, saturation, 77),
+      secondaryColor: U.hslToHex(hue + 46, 56, 68),
+      tertiaryColor: U.hslToHex(hue + 202, 68, 72),
+      wordColors: [],
+      animationIntensity: intensityFrom(reactivity),
+      fontStyle: 'sans'
+    };
+  }
+
   function signature(t) {
-    return [t.backgroundColor, t.primaryColor, t.secondaryColor, t.accentColor,
-      t.animationIntensity, t.fontStyle].join('|');
+    var fields = [t.backgroundColor, t.primaryColor, t.secondaryColor, t.accentColor,
+      t.animationIntensity, t.fontStyle];
+    if (t.tertiaryColor != null) fields.push(t.tertiaryColor);
+    return fields.join('|');
   }
 
   function normalizeToken(s) { return String(s || '').toLowerCase().replace(/[^\w]/g, ''); }
@@ -149,6 +169,6 @@
 
   function fontStack(style) { return FONT_STACKS[style] || FONT_STACKS.sans; }
 
-  return { DEFAULT: DEFAULT, resolve: resolve, signature: signature,
+  return { DEFAULT: DEFAULT, resolve: resolve, resolveSonnet: resolveSonnet, signature: signature,
     wordColor: wordColor, fontStack: fontStack };
 });

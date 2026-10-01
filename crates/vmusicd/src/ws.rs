@@ -63,9 +63,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         break;
                     }
                 }
-                // Lagging just means this client is slow: drop it rather than
-                // letting it stall the broadcast channel for everyone else.
-                Err(_) => break,
+                // 状态 + 频谱约 80 帧/秒，广播容量 128：消费稍慢（GC、
+                // 后台标签页、系统卡顿）就必然掉队。缺几帧增量无所谓——状态帧
+                // 每拍都在全量重发，跳过即可；若直接断开，客户端要走指数退避
+                // 重连，退避窗口里界面会停在旧状态（例如曲尾的「暂停」按钮）。
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
             incoming = receiver.next() => match incoming {
                 Some(Ok(Message::Close(_))) | None => break,

@@ -1403,8 +1403,7 @@
     cancelProbe();
     teardown();
     // runtime=true 表示"已经在画的过程中被摘掉"（上下文丢失、着色器失败、
-    // 探测判定代价过高）。attach 启动期的失败由 applyCreative 自己处理，
-    // app.js 只消费 runtime 事件，避免两处重复提示与回报。
+    // 探测判定代价过高），与 attach 启动期失败区分开，宿主据此决定提示方式。
     document.dispatchEvent(new CustomEvent('creative:degrade', {
       detail: { reason: reason, runtime: !!runtime }
     }));

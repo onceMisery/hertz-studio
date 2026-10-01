@@ -32,6 +32,21 @@ const STUDIO_CSS = read(path.join(WEB, 'theme-studio.css'));
 const STYLE_CSS = read(path.join(WEB, 'style.css'));
 const HTML = read(path.join(WEB, 'index.html'));
 const MAIN_RS = read(path.join(ROOT, 'crates', 'vmusicd', 'src', 'main.rs'));
+const THEMES_JS = read(path.join(WEB, 'themes.js'));
+
+// main.rs 的壁纸白名单：一对一对的 (名字, include_bytes!)。多个章节都要查它，
+// 所以在这里解析一次。
+const RS_WALLPAPERS = new Map();
+{
+  const re = /\(\s*"([^"]+\.jpg)"\s*,\s*include_bytes!\("([^"]+)"\)\s*,?\s*\)/g;
+  let m;
+  while ((m = re.exec(MAIN_RS)) !== null) RS_WALLPAPERS.set(m[1], m[2]);
+}
+
+/// 内置主题（themes.js 的 CATALOG）里的 id。"每套主题都要有背景图"这句话里的
+/// "每套"包括它们，不能只验二次元那七套。
+const BUILTIN_THEME_IDS = [...THEMES_JS.matchAll(/^\s*id:\s*'([^']+)',\s*$/gm)].map((m) => m[1]);
+const ANIME_THEME_IDS = [...STUDIO.matchAll(/^\s*id:\s*'(anime-[^']+)',/gm)].map((m) => m[1]);
 
 let failures = 0;
 let checks = 0;
@@ -103,7 +118,9 @@ function makeEl(tag) {
     appendChild(c) { this.children.push(c); return c; },
     insertBefore(c) { this.children.unshift(c); return c; },
     setAttribute(k, v) { this.attrs[k] = String(v); },
-    getAttribute(k) { return this.attrs[k]; },
+    getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; },
+    removeAttribute(k) { delete this.attrs[k]; },
+    hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); },
     querySelectorAll() { return []; },
     addEventListener() {},
     _html: '',
@@ -137,6 +154,7 @@ function makeSandbox() {
 
   const sandbox = {
     console, Object, Array, JSON, Math, String, Number, Set, Map, RegExp, parseInt, parseFloat,
+    encodeURIComponent, decodeURIComponent,
     document: doc,
     localStorage: {
       getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -298,10 +316,7 @@ function checkWallpaperWiring() {
   ok(catalog.length >= 8, `壁纸目录条目合理（${catalog.length} 张）`);
 
   // main.rs 的白名单表：一对一对的 (名字, include_bytes!)。
-  const table = new Map();
-  const re = /\(\s*"([^"]+\.jpg)"\s*,\s*include_bytes!\("([^"]+)"\)\s*,?\s*\)/g;
-  let m;
-  while ((m = re.exec(MAIN_RS)) !== null) table.set(m[1], m[2]);
+  const table = RS_WALLPAPERS;
   ok(table.size >= 8, `main.rs 白名单条目合理（${table.size} 条）`);
 
   for (const w of catalog) {
@@ -323,6 +338,159 @@ function checkWallpaperWiring() {
   for (const name of table.keys()) {
     ok(listed.has(name), `main.rs 里的 ${name} 也出现在 JS 目录里`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 2b. 主题 → 背景图
+//
+// "切到二次元主题后背景图不显示"的根因是：主题与壁纸原本是两套互不相干的
+// 状态，点主题不带背景。这一段把修好的那半边钉住——**每一套**主题（内置 +
+// 二次元 + 自定义）都要解析出一张真实存在的背景图，而且来回切换要稳定。
+// ---------------------------------------------------------------------------
+
+/// 造一个把内置主题也登记进 Theme 的沙箱：真实运行时它们由 themes.js 的
+/// CATALOG 提供，而这里的 Theme 是桩，得自己补上，否则 apply('mineral') 之类
+/// 取不到主题对象，广播出去的还是上一套。
+function sandboxWithFullCatalog() {
+  const env = makeSandbox();
+  for (const id of BUILTIN_THEME_IDS) {
+    env.sandbox.Theme.register({ id, tokens: { '--bg': '#0a0a0a' } });
+  }
+  return env;
+}
+
+function checkThemeBackgrounds() {
+  section('主题 → 背景图：每一套主题都解析出一张真实存在的图');
+
+  ok(BUILTIN_THEME_IDS.length >= 10, `内置主题被抽出来验证（${BUILTIN_THEME_IDS.length} 套）`);
+  ok(ANIME_THEME_IDS.length >= 5, `二次元主题被抽出来验证（${ANIME_THEME_IDS.length} 套）`);
+
+  const { sandbox } = sandboxWithFullCatalog();
+  const S = sandbox.ThemeStudio;
+  const catalog = S.wallpapers();
+  const onDisk = new Set(catalog.map((w) => w.id));
+  S.init();
+
+  const all = BUILTIN_THEME_IDS.concat(ANIME_THEME_IDS).concat(['custom-studio']);
+  const resolved = new Map();
+  for (const id of all) {
+    const wall = S.wallpaperForTheme(id);
+    resolved.set(id, wall);
+    ok(!!wall, `${id} 解析出了背景图（${wall}）`);
+    if (!wall) continue;
+    ok(onDisk.has(wall), `${id} 的 ${wall} 在 JS 壁纸目录里`);
+    ok(RS_WALLPAPERS.has(wall), `${id} 的 ${wall} 在 main.rs 白名单里`);
+    const rel = RS_WALLPAPERS.get(wall);
+    if (rel) {
+      const abs = path.resolve(path.join(ROOT, 'crates', 'vmusicd', 'src'), rel);
+      ok(fs.existsSync(abs) && fs.statSync(abs).size > 1024, `${id} 的 ${wall} 磁盘文件非空`);
+    }
+  }
+
+  section('主题 → 背景图：二次元主题拿到的就是画廊里推荐给它的那张');
+
+  // 真值只留一处：二次元那七套不在映射表里重复声明，而是从 WALLPAPERS 的
+  // theme 字段反查。这里反过来验一遍——两边对不上就是"表里的图和画廊里
+  // 推荐的那张不一致"，用户点色块和点缩略图会看到两张不同的图。
+  for (const id of ANIME_THEME_IDS) {
+    const recommended = catalog.find((w) => w.theme === id);
+    ok(!!recommended && resolved.get(id) === recommended.id,
+      `${id} → ${resolved.get(id)}（画廊首推 ${recommended && recommended.id}）`);
+  }
+
+  section('主题 → 背景图：缺资源时落到默认兜底');
+
+  const fallback = S.defaultWallpaper();
+  ok(!!fallback && onDisk.has(fallback), `默认兜底图 ${fallback} 本身在目录里`);
+  ok(RS_WALLPAPERS.has(fallback), `默认兜底图 ${fallback} 在 main.rs 白名单里`);
+  ok(S.wallpaperForTheme('__no-such-theme__') === fallback, '没声明过的主题落到兜底图');
+  ok(S.wallpaperForTheme('') === fallback, '空主题 id 也落到兜底图（不清成空白）');
+  ok(S.wallpaperForTheme(null) === fallback, 'null 主题 id 也落到兜底图');
+
+  section('主题 → 背景图：切换时真的把图换上了，来回切稳定');
+
+  const env = sandboxWithFullCatalog();
+  const T = env.sandbox.ThemeStudio;
+  T.init();
+  ok(T.state.pinned === false, '默认状态是「跟随主题」（未钉住）');
+
+  const trip = ['anime-shinobi', 'mineral', 'anime-sakura', 'vcp-starblue',
+    'anime-abyss', 'liunian', 'anime-shinobi', 'mineral'];
+  const seen = [];
+  for (const id of trip) {
+    env.sandbox.Theme.apply(id);
+    seen.push(T.state.id);
+    ok(T.state.id === T.wallpaperForTheme(id),
+      `切到 ${id} 后背景图是 ${T.state.id}`);
+  }
+  ok(seen[0] === seen[6], `A→…→A 回到同一张（${seen[0]}）`);
+  ok(seen[1] === seen[7], `B→…→B 回到同一张（${seen[1]}）`);
+  ok(seen[0] !== seen[1], '不同主题拿到不同的背景图（全落兜底就等于没分）');
+
+  // 二次元七套之间必须真的分开了——这是用户能直接看到的那部分。
+  const animeSeen = new Set(ANIME_THEME_IDS.map((id) => T.wallpaperForTheme(id)));
+  ok(animeSeen.size === ANIME_THEME_IDS.length,
+    `七套二次元主题各有一张不同的背景图（${animeSeen.size}/${ANIME_THEME_IDS.length}）`);
+
+  section('主题 → 背景图：用户手动指定后不再被主题覆盖');
+
+  const env2 = sandboxWithFullCatalog();
+  const T2 = env2.sandbox.ThemeStudio;
+  T2.init();
+  T2.setWallpaper('night-02.jpg', { keepTheme: true, persist: false });
+  ok(T2.state.pinned === true, '手动选图后壁纸被钉住');
+  env2.sandbox.Theme.apply('vcp-emerald');
+  ok(T2.state.id === 'night-02.jpg', '钉住后换主题不改壁纸');
+  T2.setWallpaper('', { keepTheme: true, persist: false });
+  env2.sandbox.Theme.apply('mineral');
+  ok(T2.state.id === '', '手动关掉壁纸后换主题也不会自动铺回来');
+
+  // 选壁纸顺带换上的推荐主题，不能反过来把用户刚点的那张图顶掉。
+  const env3 = sandboxWithFullCatalog();
+  const T3 = env3.sandbox.ThemeStudio;
+  T3.init();
+  T3.setWallpaper('night-12.jpg');
+  ok(T3.state.id === 'night-12.jpg',
+    '选壁纸→换推荐主题，壁纸保持用户点的那张（不被主题默认图顶掉）');
+
+  section('主题 → 背景图：旧存档按「用户选过」还原，不被升级改写');
+
+  const old = JSON.stringify({ id: 'morning-01.jpg', opacity: 0.5, dim: 0, blur: 0, auto: true });
+  const env4 = sandboxWithFullCatalog();
+  env4.store.set('vmusic.wallpaper.v1', old);
+  env4.sandbox.ThemeStudio.init();
+  ok(env4.sandbox.ThemeStudio.state.pinned === true, '没有 pinned 字段的旧存档视为已钉住');
+  ok(env4.sandbox.ThemeStudio.state.id === 'morning-01.jpg', '旧存档的壁纸被原样还原');
+
+  section('主题 → 背景图：图加载不出来时回落到默认图');
+
+  // 目录里写错名字 / 服务端没有这张，浏览器只会静默留一层空白。这一段用一个
+  // 会失败的 Image 桩把那条兜底路径逼出来。
+  const probe = { fail: true };
+  const env5 = makeSandbox();
+  env5.sandbox.Image = function ImageStub() {
+    const self = this;
+    Object.defineProperty(self, 'src', {
+      configurable: true,
+      get() { return self._src; },
+      set(v) {
+        self._src = v;
+        if (probe.fail) { if (typeof self.onerror === 'function') self.onerror(); }
+        else if (typeof self.onload === 'function') self.onload();
+      },
+    });
+  };
+  const T5 = env5.sandbox.ThemeStudio;
+  T5.init();
+  T5.setWallpaper('morning-01.jpg', { keepTheme: true, persist: false });
+  ok(T5.state.id === T5.defaultWallpaper(),
+    `加载失败回落到默认图（${T5.state.id}）`);
+  probe.fail = false;
+  T5.setWallpaper('night-08.jpg', { keepTheme: true, persist: false });
+  ok(T5.state.id === 'night-08.jpg', '能加载时不回落');
+  probe.fail = true;
+  T5.setWallpaper(T5.defaultWallpaper(), { keepTheme: true, persist: false });
+  ok(T5.state.id === T5.defaultWallpaper(), '默认图自身失败也停在默认图（不会无限回落）');
 }
 
 // ---------------------------------------------------------------------------
@@ -447,7 +615,7 @@ function checkCustomAndPersistence() {
   const one = e.sandbox.ThemeStudio.artPlaceholder('pl-42');
   const two = e.sandbox.ThemeStudio.artPlaceholder('pl-42');
   ok(one === two, '同一个 id 稳定映射到同一张');
-  ok(/^url\("wallpapers\/[a-z0-9-]+\.jpg"\)$/.test(one), `产出可直接用的 background-image（${one}）`);
+  ok(/^url\("\/wallpapers\/[a-z0-9-]+\.jpg"\)$/.test(one), `产出可直接用且是绝对路径（${one}）`);
   const seen = new Set();
   for (let i = 0; i < 200; i += 1) seen.add(e.sandbox.ThemeStudio.artPlaceholder('id-' + i));
   ok(seen.size > 1, `不同 id 会分散到多张壁纸（命中 ${seen.size} 张）`);
@@ -459,6 +627,7 @@ function checkCustomAndPersistence() {
   checkThemeContrast();
   checkSkins();
   checkWallpaperWiring();
+  checkThemeBackgrounds();
   checkAutoDim();
   checkCustomAndPersistence();
 

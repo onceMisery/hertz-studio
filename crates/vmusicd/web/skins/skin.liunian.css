@@ -168,7 +168,7 @@
   background: var(--accent);
 }
 
-/* -- tabs：全部/专辑/歌手/歌单（VMusic 同款 tab 行） -- */
+/* -- tabs：全部/专辑/歌手/歌单/在线找歌（VMusic 同款 tab 行） -- */
 
 [data-skin="liunian"] .ln-tabs {
   flex: none;
@@ -208,6 +208,15 @@
   font-size: 10px;
   margin-left: 2px;
   font-variant-numeric: tabular-nums;
+}
+
+/* 「在线找歌」四个字：均分五格时它会被挤断行，多给它一份弹性；
+   其余四项在 254px 窄栏里仍有 45px，两字标签放得下。 */
+[data-skin="liunian"] .ln-tab[data-tab="online"] {
+  flex: 1.6;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* -- 列表区与槽位（流年新建结构） -- */
@@ -887,13 +896,6 @@
    设置页：滚动容器 + sticky 头部 + 返回按钮 + 视图入场动画
    ========================================================================== */
 
-/* 滚动修复：设置内容为自然流，超出由视图自身滚动（.column 是 overflow:hidden，
-   没有内部滚动容器时内容被裁剪——此前任何主题下设置页都无法下滑）。 */
-[data-skin="liunian"] #view-settings {
-  overflow-y: auto;
-  overflow-x: hidden;
-}
-
 /* 头部吸附：滚动时标题/返回始终可达；底色与模糊取 token，不写字面量。 */
 [data-skin="liunian"] #view-settings .col-head {
   position: sticky;
@@ -1222,6 +1224,14 @@
 [data-skin="liunian"] .ln-capsule .bar-volume,
 [data-skin="liunian"] .ln-capsule #mode {
   display: none;
+}
+
+/* 展开播放卡位于中栏文档流，不是底部悬浮播放条。全局自动隐藏会写入
+   translateY + opacity，并在动画结束时清空；流年规则又覆盖了 .bar.is-hidden，
+   于是卡片会先下滑再瞬间弹回。仅在展开态钉住可见性，胶囊态仍沿用原逻辑。 */
+[data-skin="liunian"] .bar:not(.ln-capsule) {
+  transform: none !important;
+  opacity: 1 !important;
 }
 
 [data-skin="liunian"] .ln-library-tools {

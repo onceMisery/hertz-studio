@@ -223,12 +223,15 @@
   // 十几个 1–3 像素的小事件，按事件走格会在半秒内飞过整个歌单集合。
   var wheelAcc = 0;
   var wheelAt = 0;
+  var wheelEventAt = 0;
   function onWheel(e) {
-    if (!items.length) return;
-    e.preventDefault();
+    if (items.length < 2 || e.ctrlKey || e.metaKey) return;
     var t = Date.now();
-    if (t - wheelAt > 400) wheelAcc = 0;
+    if (t - wheelEventAt > 400) wheelAcc = 0;
+    wheelEventAt = t;
     var delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (!delta || (delta < 0 && center === 0) || (delta > 0 && center === items.length - 1)) { wheelAcc = 0; return; }
+    e.preventDefault();
     wheelAcc += delta * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? host.clientWidth : 1);
     if (Math.abs(wheelAcc) < WHEEL_STEP) return;
     if (t - wheelAt < 180) return;
@@ -242,6 +245,7 @@
   // 用户是来挑歌单的，多滚出来的那几格得再滚回去。
   var dragX = 0, dragId = -1, dragMoved = 0, dragCard = null;
   function onPointerDown(e) {
+    if (dragId !== -1 || e.isPrimary === false || e.target.closest('button, a, input, select, textarea, [contenteditable]')) return;
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     dragX = e.clientX;
     dragMoved = 0;
@@ -249,12 +253,12 @@
     dragCard = e.target.closest('.shelf-card');
     host.focus({ preventScroll: true });
     host.classList.add('is-dragging');
-    host.setPointerCapture(e.pointerId);
+    if (host.setPointerCapture) host.setPointerCapture(e.pointerId);
   }
   function onPointerMove(e) {
     if (dragId !== e.pointerId) return;
     var dx = e.clientX - dragX;
-    if (Math.abs(dx) > 4) dragMoved = Math.abs(dx);
+    if (Math.abs(dx) > 4) dragMoved = Math.max(dragMoved, Math.abs(dx));
     host.style.setProperty('--shelf-drag', dx.toFixed(1) + 'px');
   }
   function onPointerUp(e) {
@@ -262,8 +266,8 @@
     dragId = -1;
     host.classList.remove('is-dragging');
     host.style.removeProperty('--shelf-drag');
-    if (host.hasPointerCapture(e.pointerId)) host.releasePointerCapture(e.pointerId);
-    if (e.type === 'pointercancel') { dragCard = null; return; }
+    if (host.hasPointerCapture && host.hasPointerCapture(e.pointerId)) host.releasePointerCapture(e.pointerId);
+    if (e.type !== 'pointerup') { dragCard = null; return; }
     var dx = e.clientX - dragX;
     // 阈值按卡位宽度算，拖过半格就算要换一张
     var step = parseFloat(getComputedStyle(host)
@@ -284,6 +288,7 @@
   }
 
   function onKeyDown(e) {
+    if (e.target !== host || e.ctrlKey || e.metaKey || e.altKey) return;
     switch (e.key) {
       case 'ArrowRight': case 'ArrowDown': stepBy(1); break;
       case 'ArrowLeft': case 'ArrowUp': stepBy(-1); break;
@@ -351,6 +356,7 @@
   }
 
   function init() {
+    if (api) return api;
     host = $('shelf-stage');
     detail = $('shelf-detail');
     if (!host) return null;
@@ -375,10 +381,15 @@
     host.addEventListener('pointermove', onPointerMove);
     host.addEventListener('pointerup', onPointerUp);
     host.addEventListener('pointercancel', onPointerUp);
+    host.addEventListener('lostpointercapture', onPointerUp);
+    function cancelDrag() { if (dragId !== -1) onPointerUp({ pointerId: dragId, type: 'pointercancel' }); }
+    window.addEventListener('blur', cancelDrag);
+    document.addEventListener('visibilitychange', function () { if (document.hidden) cancelDrag(); });
     host.addEventListener('keydown', onKeyDown);
 
     return api = {
       setItems: function (list) {
+        cancelDrag();
         // 集合变了（新建/删除/重命名）之后中心索引要重新落位，但尽量留住
         // 用户当前正看着的那一张，而不是每次都弹回第一张。
         var keep = items[center] && items[center].id;

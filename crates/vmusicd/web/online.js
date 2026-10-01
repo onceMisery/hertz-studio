@@ -3,7 +3,7 @@
 // 在线曲库：音源清单、搜索/分类浏览、All 聚合、整盘试听。
 //
 // 搜索/分类走服务端代理（第三方音乐接口没有 CORS 头）；试听则是服务端把远程
-// 音频落盘缓存后，用 `online:<source>:<id>` 这个虚拟 id 走一遍和本地曲目完全
+// 音频渐进下载并缓存，用 `online:<source>:<id>` 这个虚拟 id 走一遍和本地曲目完全
 // 相同的 load 链路——快照、进度条、舞台因此全部复用，无需第二套状态机。
 //
 // app.js 在启动时先 bind() 注入宿主依赖（ui/state/渲染工具），再 init()。
@@ -24,7 +24,7 @@
     tracks: [],
     total: 0,
     loading: false,
-    // All 聚合时为 true：点击单曲只播那一首（跨源曲目不能整成一个队列）。
+    // All 聚合时为 true：此入口保持单曲试听，跨源队列由宿主的混合队列入口管理。
     aggregate: false,
     // 音源清单由 /v1/online/sources 填；拉不到时下拉框保持 index.html 的静态项。
     sources: [],
@@ -142,6 +142,7 @@
     // 登录、无版权提示下架），前端预判只会误伤登录的 VIP 用户。
     var disabled = !track.playable;
     row.className = 'track online-row' + (disabled ? ' is-disabled' : '');
+    row.dataset.onlineId = virtualId(track);
     row.innerHTML =
       '<div class="t-index"><span class="t-num">♪</span></div>' +
       '<div class="t-art is-remote"></div>' +
@@ -214,8 +215,15 @@
       ? 'VIP 专享，登录会员账号后可完整播放'
       : (track.playable ? '在线试听' : '该音源没有可用的试听地址');
 
+    row.dataset.previewTitle = btn.title;
     btn.onclick = function (e) { e.stopPropagation(); activate(); };
     row.addEventListener('click', activate);
+    row.tabIndex = disabled ? -1 : 0;
+    row.addEventListener('keydown', function (e) {
+      if (e.target !== row || disabled || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault(); activate();
+    });
+    paintRowPlayback(row);
     return row;
   }
 
@@ -223,7 +231,7 @@
     return buildRow(track, function () {
       // VIP 曲也放行：能不能播由后端按账号 cookie 定，失败如实 toast。
       if (!track.playable) return;
-      // All 视图是跨源拼接的结果，只能单曲播；单源视图整盘入队，点第几首
+      // All 视图保持单曲试听；单源视图整盘入队，点第几首
       // 就从第几首开始（后端队列与高亮都以同一批虚拟 id 为准）。
       if (onlineState.aggregate) {
         playAll([track], 0);
@@ -234,136 +242,314 @@
     });
   }
 
+  // One search session owns all source pages. Late responses never mutate a newer session.
+  var searchEpoch = 0;
+  var searchSession = null;
+  var searchCache = new Map();
+  var searchViews = new Map();
+  // Use a page size accepted by every registered provider (KuGou caps at 20).
+  // Otherwise a valid full KuGou page looks short and pagination stops early.
+  var PAGE_SIZE = 20;
+  var CACHE_TTL = 120000;
+  var CACHE_LIMIT = 12;
+
+  function normalizeSearch(value) {
+    return String(value || '').normalize('NFKC').toLowerCase().trim();
+  }
+
+  function relevance(track, query) {
+    var title = normalizeSearch(track.title);
+    var artist = normalizeSearch(track.artist);
+    var album = normalizeSearch(track.album);
+    var q = normalizeSearch(query);
+    if (!q) return 0;
+    var score = title === q ? 1000 : title.indexOf(q) >= 0 ? 500 : 0;
+    if (artist === q) score += 400;
+    else if (artist.indexOf(q) >= 0) score += 200;
+    if (album.indexOf(q) >= 0) score += 80;
+    q.split(/\s+/).forEach(function (word) {
+      if (title.indexOf(word) >= 0) score += 40;
+      if (artist.indexOf(word) >= 0) score += 25;
+      if (album.indexOf(word) >= 0) score += 10;
+    });
+    return score;
+  }
+
+  function highlight(node, value, query) {
+    var text = String(value || '');
+    node.textContent = '';
+    var words = String(query || '').trim().split(/\s+/).filter(Boolean);
+    if (!words.length) { node.textContent = text; return; }
+    var lower = text.toLowerCase();
+    var cursor = 0;
+    while (cursor < text.length) {
+      var start = text.length, size = 0;
+      words.forEach(function (word) {
+        var at = lower.indexOf(word.toLowerCase(), cursor);
+        if (at >= 0 && (at < start || (at === start && word.length > size))) {
+          start = at; size = word.length;
+        }
+      });
+      if (start > cursor) node.appendChild(document.createTextNode(text.slice(cursor, start)));
+      if (!size) break;
+      var mark = document.createElement('mark');
+      mark.textContent = text.slice(start, start + size);
+      node.appendChild(mark);
+      cursor = start + size;
+    }
+  }
+
+  function searchScroller() {
+    var body = H.ui.onlineBody;
+    return body.closest ? body.closest('.online-scroll') || body : body;
+  }
+
+  function cancelSearch() {
+    if (searchSession) {
+      searchViews.delete(searchSession.key);
+      searchViews.set(searchSession.key, { scroll: searchScroller().scrollTop || 0, filter: searchSession.filter });
+      while (searchViews.size > CACHE_LIMIT) searchViews.delete(searchViews.keys().next().value);
+    }
+    searchEpoch += 1;
+    if (searchSession) searchSession.pages.forEach(function (p) {
+      if (p.controller) p.controller.abort();
+    });
+    searchSession = null;
+    onlineState.loading = false;
+    if (H.ui.onlineSentinel) H.ui.onlineSentinel.hidden = true;
+  }
+
+  function searchButton(label, action, cls) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = cls || 'btn';
+    button.textContent = label;
+    button.onclick = action;
+    return button;
+  }
+
   function renderOnline() {
     var body = H.ui.onlineBody;
     if (!body) return;
+    var session = searchSession;
+    var scroller = searchScroller();
+    var scroll = scroller.scrollTop;
+    var anchor = null;
+    if (session && !session.resetScroll && scroller.getBoundingClientRect) {
+      var top = scroller.getBoundingClientRect().top;
+      body.querySelectorAll('.online-row').forEach(function (row) {
+        if (!anchor && row.getBoundingClientRect().bottom > top) {
+          anchor = { id: row.dataset.onlineId, top: row.getBoundingClientRect().top };
+        }
+      });
+    }
+    var active = document.activeElement;
+    var focusKey = active && active.dataset && active.dataset.searchKey;
     body.innerHTML = '';
-    if (onlineState.loading) {
-      body.innerHTML = '<div class="hint">正在连接音源…</div>';
-      return;
-    }
-    if (!onlineState.tracks.length) {
-      // 切源/清空后计数不能留着上一源的数字（如网易云 63 首 → QQ 空结果）。
+    if (!session) {
       if (H.ui.onlineCount) H.ui.onlineCount.textContent = '0 首';
-      body.innerHTML = onlineState.aggregate
-        ? '<div class="hint">没有找到结果。换个关键词试试。</div>'
-        : '<div class="hint">没有找到结果。换个关键词，或确认服务器可以访问外网。</div>';
+      body.innerHTML = '<div class="hint">输入关键词搜索，或选择分类浏览。</div>';
       return;
     }
-    onlineState.tracks.forEach(function (t) { body.appendChild(onlineRow(t)); });
-    if (H.ui.onlineCount) H.ui.onlineCount.textContent = onlineState.total + ' 首';
+    var pages = session.pages;
+    var flat = [];
+    pages.forEach(function (p) { flat = flat.concat(p.tracks); });
+    // Deterministic ties follow registry/page order, independent of response timing.
+    if (session.aggregate) flat = flat.map(function (track, index) {
+      return { track: track, index: index, score: relevance(track, session.q) };
+    }).sort(function (a, b) { return b.score - a.score || a.index - b.index; })
+      .map(function (item) { return item.track; });
+    onlineState.tracks = flat;
+    onlineState.total = flat.length;
+    onlineState.loading = pages.some(function (p) { return p.loading; });
+    cacheTracks(flat);
+    if (H.ui.onlineSentinel) H.ui.onlineSentinel.hidden = true;
+    if (H.ui.onlineCount) H.ui.onlineCount.textContent = flat.length + ' 首已加载';
+
+    var summary = document.createElement('div');
+    summary.className = 'search-summary';
+    summary.setAttribute('role', 'status');
+    summary.textContent = (session.q ? '“' + session.q + '” · ' : '') + flat.length
+      + ' 首已加载 · ' + pages.filter(function (p) { return !p.loading; }).length
+      + '/' + pages.length + ' 个音源已响应';
+    body.appendChild(summary);
+    if (session.aggregate) {
+      var filters = document.createElement('div');
+      filters.className = 'search-source-filters';
+      filters.setAttribute('aria-label', '筛选搜索来源');
+      [{ source: '', label: '综合', tracks: flat }].concat(pages).forEach(function (p) {
+        var label = (p.label || sourceLabel(p.source)) + ' · ' + p.tracks.length;
+        if (p.loading) label += ' · 搜索中';
+        else if (p.error) label += ' · 失败';
+        var button = searchButton(label, function () {
+          session.filter = p.source; session.resetScroll = true; renderOnline();
+        }, 'chip' + (session.filter === p.source ? ' active' : ''));
+        button.dataset.searchKey = 'filter:' + p.source;
+        button.setAttribute('aria-pressed', String(session.filter === p.source));
+        filters.appendChild(button);
+      });
+      body.appendChild(filters);
+    }
+    var shown = session.filter ? flat.filter(function (t) { return t.source === session.filter; }) : flat;
+    var list = document.createElement('div');
+    list.className = 'search-results';
+    shown.forEach(function (t) {
+      var row = session.rows.get(virtualId(t));
+      if (!row) {
+        row = onlineRow(t);
+        highlight(row.querySelector('.t-title'), t.title, session.q);
+        highlight(row.querySelector('.t-sub'), t.artist || '未知艺术家', session.q);
+        highlight(row.querySelector('.t-album'), t.album || '—', session.q);
+        session.rows.set(virtualId(t), row);
+      }
+      paintRowPlayback(row);
+      list.appendChild(row);
+    });
+    body.appendChild(list);
+    var visiblePages = pages.filter(function (p) { return !session.filter || p.source === session.filter; });
+    if (!shown.length && visiblePages.some(function (p) { return p.loading; })) {
+      for (var i = 0; i < 6; i++) {
+        var skeleton = document.createElement('div');
+        skeleton.className = 'search-skeleton';
+        skeleton.setAttribute('aria-hidden', 'true');
+        skeleton.innerHTML = '<span></span><span></span><span></span>';
+        list.appendChild(skeleton);
+      }
+    } else if (!shown.length && !visiblePages.some(function (p) { return p.error; })) {
+      var empty = document.createElement('div');
+      empty.className = 'hint';
+      empty.textContent = '没有找到歌曲，试试歌名或歌手名。';
+      list.appendChild(empty);
+    }
+    var statuses = document.createElement('div');
+    statuses.className = 'search-source-statuses';
+    visiblePages.forEach(function (p) {
+      var item = document.createElement('div');
+      item.className = 'search-source-status' + (p.error ? ' all-failed' : '');
+      item.appendChild(badge(p.source));
+      var text = document.createElement('span');
+      text.textContent = sourceLabel(p.source) + ' · ' + p.tracks.length + ' 首已加载'
+        + (p.loading ? ' · 加载中…' : p.error ? ' · ' + p.error : !p.more ? ' · 暂无更多结果' : '')
+        + (p.warning ? ' · ' + p.warning : '');
+      item.appendChild(text);
+      if (p.error || p.more) {
+        var more = searchButton(p.error ? '重试' : '加载更多', function () { return loadSearchPage(session, p); });
+        more.disabled = p.loading;
+        more.dataset.searchKey = 'more:' + p.source;
+        item.appendChild(more);
+      }
+      statuses.appendChild(item);
+    });
+    body.appendChild(statuses);
+    scroller.scrollTop = session.resetScroll ? 0 : scroll;
+    session.resetScroll = false;
+    if (anchor) {
+      var anchorRow = session.rows.get(anchor.id);
+      if (anchorRow && list.contains && list.contains(anchorRow)) {
+        scroller.scrollTop += anchorRow.getBoundingClientRect().top - anchor.top;
+      }
+    }
+    if (focusKey) body.querySelectorAll('[data-search-key]').forEach(function (el) {
+      if (el.dataset.searchKey === focusKey) el.focus({ preventScroll: true });
+    });
   }
 
-  // 单源搜索/分类浏览。
-  async function searchOnline(opts) {
-    opts = opts || {};
-    var body = H.ui.onlineBody;
-    if (!body) return;
-    onlineState.aggregate = false;
-    onlineState.loading = true;
-    if (H.ui.onlineSentinel) H.ui.onlineSentinel.hidden = false;
+  async function loadSearchPage(session, page) {
+    if (session !== searchSession || page.loading || (!page.more && !page.error)) return;
+    page.loading = true;
+    page.error = '';
+    page.controller = typeof AbortController === 'function' ? new AbortController() : null;
     renderOnline();
     try {
-      var params = new URLSearchParams({ source: onlineState.source, limit: '30' });
-      if (onlineState.q.trim()) params.set('q', onlineState.q.trim());
-      else if (onlineState.cat) params.set('cat', onlineState.cat);
-      var page = await T.get('/v1/online/search?' + params.toString());
-      onlineState.tracks = page.tracks || [];
-      onlineState.total = page.total != null ? page.total : onlineState.tracks.length;
-      cacheTracks(onlineState.tracks);
-      if (page.warning && !opts.silent) H.toast(page.warning);
+      var params = new URLSearchParams({ source: page.source, limit: String(PAGE_SIZE), offset: String(page.offset) });
+      if (session.q) params.set('q', session.q);
+      else if (session.cat) params.set('cat', session.cat);
+      var result = await T.get('/v1/online/search?' + params.toString(),
+        page.controller ? { signal: page.controller.signal } : {});
+      if (session !== searchSession) return;
+      var raw = result.tracks || [];
+      var seen = new Set(page.tracks.map(virtualId));
+      var added = 0;
+      raw.forEach(function (t) {
+        // The requested provider owns identity, even when an upstream omits source.
+        var track = Object.assign({}, t, { source: page.source });
+        if (!seen.has(virtualId(track))) {
+          seen.add(virtualId(track)); page.tracks.push(track); added += 1;
+        }
+      });
+      page.offset += raw.length;
+      page.more = raw.length >= PAGE_SIZE && added > 0;
+      page.warning = result.warning || '';
+      // Search cache is bounded and only contains successful snapshots, never live requests.
+      if (session.q) {
+        var key = JSON.stringify([session.q, page.source]);
+        searchCache.delete(key);
+        if (page.tracks.length <= 300) searchCache.set(key, { time: Date.now(), tracks: page.tracks.slice(), offset: page.offset, more: page.more, warning: page.warning });
+        while (searchCache.size > CACHE_LIMIT) searchCache.delete(searchCache.keys().next().value);
+      }
     } catch (err) {
-      onlineState.tracks = [];
-      onlineState.total = 0;
-      // silent 预取（进页面自动拉一屏）失败不弹 toast 吓人；用户主动
-      // 搜索/点分类的失败照常如实报错。
-      if (!opts.silent) H.toast(H.errText('在线搜索失败', err), 'error');
+      if (session !== searchSession) return;
+      page.error = H.errText('搜索失败', err);
+      if (!session.aggregate && !session.silent) H.toast(page.error, 'error');
     } finally {
-      onlineState.loading = false;
-      if (H.ui.onlineSentinel) H.ui.onlineSentinel.hidden = true;
-      renderOnline();
+      if (session === searchSession) {
+        page.loading = false;
+        page.controller = null;
+        renderOnline();
+      }
     }
   }
 
-  // All 聚合：按源分组渲染，失败的源单独挂降级提示，绝不把失败吞成空分组。
-  async function searchAll(opts) {
+  async function search(opts) {
     opts = opts || {};
-    var body = H.ui.onlineBody;
-    if (!body) return;
-    onlineState.aggregate = true;
-    onlineState.loading = true;
-    if (H.ui.onlineSentinel) H.ui.onlineSentinel.hidden = false;
-    body.innerHTML = '<div class="hint">正在聚合各音源…</div>';
-    var agg;
-    try {
-      agg = await T.get('/v1/online/search/all?q=' + encodeURIComponent(onlineState.q.trim())
-        + '&limit=20');
-    } catch (err) {
-      onlineState.tracks = [];
-      onlineState.total = 0;
-      onlineState.loading = false;
-      if (H.ui.onlineSentinel) H.ui.onlineSentinel.hidden = true;
-      H.toast(H.errText('聚合搜索失败', err), 'error');
+    cancelSearch();
+    var epoch = searchEpoch;
+    var source = onlineState.source;
+    var query = onlineState.q.trim();
+    onlineState.aggregate = source === 'all';
+    onlineState.tracks = [];
+    onlineState.total = 0;
+    if (H.ui.onlineCount) H.ui.onlineCount.textContent = '0 首已加载';
+    if (source === 'all' && !query) {
       renderOnline();
+      H.ui.onlineBody.innerHTML = '<div class="hint">聚合搜索需要输入关键词。</div>';
       return;
     }
-    onlineState.loading = false;
-    if (H.ui.onlineSentinel) H.ui.onlineSentinel.hidden = true;
-    body.innerHTML = '';
-
-    var flat = [];
-    var total = 0;
-    (agg.results || []).forEach(function (page) {
-      var tracks = page.tracks || [];
-      if (!tracks.length) return;
-      var head = document.createElement('div');
-      head.className = 'all-group-head';
-      head.appendChild(badge(page.source));
-      head.appendChild(document.createTextNode(' · ' + page.total + ' 首'));
-      body.appendChild(head);
-      tracks.forEach(function (t) {
-        body.appendChild(onlineRow(t));
-        flat.push(t);
-      });
-      total += page.total;
-      if (page.warning && !opts.silent) {
-        var w = document.createElement('div');
-        w.className = 'all-failed';
-        w.textContent = sourceLabel(page.source) + '：' + page.warning;
-        body.appendChild(w);
-      }
-    });
-    (agg.failed || []).forEach(function (f) {
-      var d = document.createElement('div');
-      d.className = 'all-failed';
-      d.textContent = sourceLabel(f.source) + ' 暂时不可用：' + f.message;
-      body.appendChild(d);
-    });
-
-    onlineState.tracks = flat;
-    onlineState.total = total;
-    cacheTracks(flat);
-    if (H.ui.onlineCount) H.ui.onlineCount.textContent = total + ' 首';
-    if (!flat.length && !(agg.failed || []).length) {
-      body.innerHTML = '<div class="hint">没有找到结果。换个关键词试试。</div>';
-    }
-  }
-
-  function search(opts) {
-    if (onlineState.source === 'all') {
-      // 聚合只支持关键词：空查询不发请求，直接给提示。
-      if (!onlineState.q.trim()) {
-        onlineState.aggregate = true;
-        onlineState.tracks = [];
-        onlineState.total = 0;
+    if (source === 'all' && !onlineState.sources.length) {
+      H.ui.onlineBody.innerHTML = '<div class="hint">正在读取音源…</div>';
+      try {
+        var data = await T.get('/v1/online/sources');
+        if (epoch !== searchEpoch) return;
+        onlineState.sources = data.sources || [];
+        if (!onlineState.sources.length) throw new Error('没有可用音源');
+      } catch (err) {
+        if (epoch !== searchEpoch) return;
         renderOnline();
-        H.ui.onlineBody.innerHTML = '<div class="hint">All 聚合搜索需要输入关键词。</div>';
+        var retry = searchButton('读取音源失败，点击重试', function () { search(opts); });
+        H.ui.onlineBody.appendChild(retry);
         return;
       }
-      return searchAll(opts);
     }
-    return searchOnline(opts);
+    var ids = source === 'all' ? onlineState.sources.map(function (s) { return s.id; }) : [source];
+    var viewKey = JSON.stringify([query, source, query ? '' : onlineState.cat]);
+    var view = searchViews.get(viewKey);
+    var session = { key: viewKey, rows: new Map(), q: query, cat: onlineState.cat, aggregate: source === 'all', filter: view ? view.filter : '', silent: opts.silent, pages: [] };
+    session.pages = ids.map(function (id) {
+      var cached = query && searchCache.get(JSON.stringify([query, id]));
+      if (cached && Date.now() - cached.time >= CACHE_TTL) cached = null;
+      return { source: id, tracks: cached ? cached.tracks.slice() : [], offset: cached ? cached.offset : 0,
+        more: cached ? cached.more : true, warning: cached ? cached.warning : '', error: '', loading: false, cached: !!cached };
+    });
+    searchSession = session;
+    searchScroller().scrollTop = 0;
+    renderOnline();
+    if (view && session.pages.every(function (p) { return p.cached; })) searchScroller().scrollTop = view.scroll;
+    await Promise.all(session.pages.map(function (p) {
+      return p.cached ? Promise.resolve() : loadSearchPage(session, p);
+    }));
   }
+
+  function searchOnline(opts) { return search(opts); }
 
   function cacheTracks(tracks) {
     tracks.forEach(function (t) {
@@ -384,14 +570,56 @@
   // 整盘试听：把当前页（或单曲）整盘 tracks 连同当前曲的平台引用一起 POST。
   // 后端先占队列再现取首曲，返回与 tracks 同序的虚拟 id 列表；失败时后端会
   // 自行恢复它自己的队列，这里只报错，不乐观改本地队列。
+  var pendingPlay = null;
+  var failedPlay = null;
+  var onlinePlayEpoch = 0;
+
+  function paintRowPlayback(row) {
+    var id = row.dataset.onlineId;
+    var loading = pendingPlay && pendingPlay.id === id && pendingPlay.current();
+    var error = failedPlay && failedPlay.id === id;
+    row.classList.toggle('is-loading', !!loading);
+    row.classList.toggle('has-play-error', !!error);
+    row.setAttribute('aria-busy', String(!!loading));
+    var button = row.querySelector('[data-act="preview"]');
+    if (loading) { button.title = '正在加载歌曲…'; button.setAttribute('aria-label', '正在加载歌曲'); }
+    else if (error) { button.title = failedPlay.message + ' · 点击重试'; button.setAttribute('aria-label', '播放失败，点击重试'); }
+    else {
+      button.title = row.dataset.previewTitle || '在线试听';
+      button.setAttribute('aria-label', '在线试听');
+    }
+    if (!row._onlineLoadStatus) {
+      row._onlineLoadStatus = document.createElement('span');
+      row._onlineLoadStatus.className = 'online-load-state';
+      row.querySelector('.t-main').appendChild(row._onlineLoadStatus);
+    }
+    row._onlineLoadStatus.hidden = !loading && !error;
+    row._onlineLoadStatus.textContent = loading ? '正在加载…' : error ? '播放失败 · 点击重试' : '';
+    row._onlineLoadStatus.title = error ? failedPlay.message : '';
+    var status = row.querySelector('.t-num');
+    status.textContent = loading ? '…' : error ? '!' : '♪';
+    status.title = loading ? '正在加载歌曲' : error ? failedPlay.message : '';
+  }
+
+  function refreshPlaybackRows() {
+    document.querySelectorAll('.online-row').forEach(paintRowPlayback);
+  }
+
   async function playAll(tracks, index) {
     if (!tracks || !tracks.length) return;
-    index = index || 0;
+    index = Math.max(0, Math.min(index || 0, tracks.length - 1));
+    var id = virtualId(tracks[index]);
+    if (pendingPlay && pendingPlay.id === id && pendingPlay.current()) return;
+    var epoch = ++onlinePlayEpoch;
+    var ticket = T.playbackIntent ? T.playbackIntent() : null;
+    function current() { return epoch === onlinePlayEpoch && (!T.isPlaybackIntent || T.isPlaybackIntent(ticket)); }
+    pendingPlay = { id: id, current: current };
+    failedPlay = null;
     var source = tracks[0].source;
     H.ui.playpause.classList.add('is-loading');
     var res;
     try {
-      res = await T.post('/v1/online/play', {
+      var request = T.post('/v1/online/play', {
         source: source,
         tracks: tracks.map(function (t) {
           return {
@@ -401,17 +629,29 @@
             album: t.album,
             duration_ms: t.duration_ms,
             cover: t.cover,
-            ref: t.ref || {},
+            ref: t.ref || t.track_ref || {},
           };
         }),
         index: index,
       });
+      ticket = T.playbackIntent ? T.playbackIntent() : null;
+      refreshPlaybackRows();
+      if (window.Stage) window.Stage.setLyrics(null);
+      res = await request;
+      if (!current()) return;
     } catch (err) {
-      H.toast(H.errText('试听失败', err), 'error');
+      if (!current()) return;
+      failedPlay = { id: id, message: H.errText('试听失败', err) };
+      H.toast(failedPlay.message, 'error');
       H.ui.playpause.classList.remove('is-loading');
       return;
+    } finally {
+      if (epoch === onlinePlayEpoch) {
+        pendingPlay = null;
+        refreshPlaybackRows();
+      }
+      if (current()) H.ui.playpause.classList.remove('is-loading');
     }
-    H.ui.playpause.classList.remove('is-loading');
 
     var ids = (res.track_ids && res.track_ids.length)
       ? res.track_ids
@@ -460,17 +700,19 @@
     if (meta) H.toast('试听《' + meta.title + '》');
 
     // 封面加载不出来就撤掉改用占位图，不留一个永不显示的背景。
-    if (cover && !(await H.probeImage(cover))) {
+    var coverOk = !cover || await H.probeImage(cover);
+    if (!current()) return;
+    if (!coverOk) {
       if (meta) meta.cover = null;
       paintNowPlaying(meta, null);
       if (window.Stage && meta) window.Stage.setTrack(meta, null);
     }
-    loadOnlineLyrics(meta);
+    loadOnlineLyrics(meta, current);
   }
 
   // 在线歌词：接口无数据/无权限都按无歌词处理；网络错误也只是不显示歌词，
   // 不打断播放。
-  async function loadOnlineLyrics(meta) {
+  async function loadOnlineLyrics(meta, isCurrent) {
     if (!meta || !meta.source || !meta.onlineId) return;
     var doc;
     try {
@@ -481,7 +723,7 @@
     } catch (e) {
       doc = null;
     }
-    if (H.state.current && H.state.current.id === meta.id && window.Stage) {
+    if ((!isCurrent || isCurrent()) && H.state.current && H.state.current.id === meta.id && window.Stage) {
       window.Stage.setLyrics(doc && doc.lines && doc.lines.length ? doc : null);
     }
   }
@@ -527,11 +769,6 @@
     var isOnline = Boolean(track.source && track.onlineId);
     H.ui.nowTech.textContent = isOnline ? '在线试听' : '';
     H.ui.nowTech.hidden = !isOnline;
-    var url = coverUrl || safeCoverUrl(track.cover);
-    if (H.ui.ambient) {
-      H.ui.ambientImg.style.backgroundImage = url ? 'url("' + url + '")' : 'none';
-      H.ui.ambient.classList.toggle('has-art', Boolean(url));
-    }
   }
 
   // ---- 最近播放（服务端 play_history，个人区区块）----
@@ -754,7 +991,77 @@
     playAll([track], 0);
   }
 
+  var radioEpoch = 0;
+  var radioBusy = false;
+  function renderRadio(data) {
+    if (!$('radio-status')) return;
+    $('radio-start').hidden = !!data.active;
+    $('radio-next').hidden = !data.active;
+    $('radio-stop').hidden = !data.active;
+    $('radio-retry').hidden = !data.error;
+    $('radio-start').disabled = radioBusy || !!data.loading;
+    $('radio-next').disabled = radioBusy || !!data.loading || !(data.tracks || []).length;
+    $('radio-retry').disabled = radioBusy || !!data.loading;
+    $('radio-status').textContent = data.error || (data.loading ? '正在加载推荐…' :
+      data.active ? 'FM 已开启 · 自动补充推荐。退出后保留当前队列。' : '可尝试游客收听；推荐和播放范围由音源决定。');
+    var tracks = data.tracks || [];
+    var current = tracks[data.index || 0];
+    $('radio-track').hidden = !current || !data.active;
+    $('radio-track').textContent = current ? [current.title, current.artist].filter(Boolean).join(' · ') : '';
+    if (data.active && tracks.length) {
+      tracks.forEach(function (t) {
+        var id = virtualId(t);
+        var meta = Object.assign({}, t, { id: id, onlineId: t.id, cover: safeCoverUrl(t.cover) });
+        onlineMeta.set(id, meta);
+        H.state.byId.set(id, meta);
+      });
+      H.setStateQueue(tracks.map(virtualId), current ? virtualId(current) : null);
+    }
+  }
+  async function refreshRadio() {
+    if (radioBusy || document.hidden) return;
+    var epoch = radioEpoch;
+    var intent = T.playbackIntent ? T.playbackIntent() : null;
+    try {
+      var data = await T.get('/v1/online/radio');
+      if (epoch === radioEpoch && (intent === null || intent === T.playbackIntent())) renderRadio(data);
+    } catch (_) { /* Keep the last state while the daemon is unavailable. */ }
+  }
+  async function radioAction(action) {
+    if (radioBusy && action !== 'stop') return;
+    var epoch = ++radioEpoch;
+    radioBusy = true;
+    $('radio-status').textContent = action === 'stop' ? '正在退出 FM…' : '正在加载推荐…';
+    ['start', 'next', 'retry'].forEach(function (name) { $('radio-' + name).disabled = true; });
+    // Exit remains available while a slow request is in flight.
+    $('radio-stop').hidden = false;
+    try {
+      var promise = T.post('/v1/online/radio', { action: action });
+      var intent = T.playbackIntent ? T.playbackIntent() : null;
+      var data = await promise;
+      if (epoch !== radioEpoch || (intent !== null && intent !== T.playbackIntent())) return;
+      radioBusy = false;
+      renderRadio(data);
+    } catch (e) {
+      if (epoch === radioEpoch) {
+        $('radio-status').textContent = H.errText('FM 加载失败', e);
+        $('radio-retry').hidden = false;
+      }
+    } finally {
+      if (epoch === radioEpoch) {
+        radioBusy = false;
+        ['start', 'next', 'retry'].forEach(function (name) { $('radio-' + name).disabled = false; });
+      }
+    }
+  }
   function initOnline() {
+    if ($('radio-start')) {
+      ['start', 'next', 'retry', 'stop'].forEach(function (action) {
+        $('radio-' + action).onclick = function () { radioAction(action); };
+      });
+      refreshRadio();
+      setInterval(refreshRadio, 5000);
+    }
     if (H.ui.onlineGo) {
       H.ui.onlineGo.onclick = function () {
         onlineState.q = H.ui.onlineQ.value || '';
@@ -762,6 +1069,13 @@
       };
     }
     if (H.ui.onlineQ) {
+      H.ui.onlineQ.oninput = function () {
+        if (H.ui.onlineQ.value.trim() === onlineState.q.trim()) return;
+        cancelSearch();
+        onlineState.q = H.ui.onlineQ.value || '';
+        onlineState.tracks = [];
+        renderOnline();
+      };
       H.ui.onlineQ.onkeydown = function (e) {
         if (e.key === 'Enter') {
           onlineState.q = H.ui.onlineQ.value || '';
@@ -771,12 +1085,14 @@
     }
     if (H.ui.onlineSource) {
       H.ui.onlineSource.onchange = function () {
+        cancelSearch();
         onlineState.source = H.ui.onlineSource.value;
         // 按新音源重建档位选项（All 无档位描述，选择器自动隐藏）。
         renderQualityOptions();
         // All 是音源维度的聚合项：没有分类，也不自动拉取（需要关键词）。
         if (onlineState.source === 'all') {
           renderSourceCaps();
+          if (onlineState.q.trim()) { search(); return; }
           onlineState.tracks = [];
           onlineState.total = 0;
           onlineState.aggregate = true;
@@ -925,6 +1241,9 @@
 
   // 音源清单由服务端给出（/v1/online/sources）。写死 HTML 会漏掉分类和能力位。
   async function loadSources() {
+    searchCache.clear();
+    searchViews.clear();
+    if (searchSession) { cancelSearch(); onlineState.tracks = []; renderOnline(); }
     var data = await T.get('/v1/online/sources').catch(function () { return null; });
     onlineState.sources = (data && data.sources) || [];
     refreshCookieUi();

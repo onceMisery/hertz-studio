@@ -35,7 +35,7 @@
   var refs = {};      // 重编排队列里的 DOM 引用
   var savedText = []; // 临时改过的文本，{ node, text }
   var activeTab = 'all';
-  var reflowQueued = false;
+  var inReflow = false; // reflow 重入保护（ensureView 会在 reflow 内部再调一次）
 
   // 左栏折叠状态（持久化）；进入设置前的视图记忆。
   var COLLAPSE_KEY = 'vmusic.ln-rail-collapsed';
@@ -121,13 +121,17 @@
     refs.btnCloud.type = 'button';
     refs.btnCloud.textContent = '在线找歌';
 
-    // tabs：全部/专辑/歌手/歌单
+    // tabs：全部/专辑/歌手/歌单/在线找歌
+    // 「在线找歌」是真实的一项（不是按钮的影子）：它有自己的槽位语义——
+    // 结果在中栏在线页，左栏保留本地曲库。缺了它，左栏就没有任何入口能
+    // 表达"我现在看的是在线"，在线页看起来像没切换过来。
     refs.tabs = make('div', 'ln-tabs', rail);
     [
       { id: 'all', label: '全部', count: true },
       { id: 'albums', label: '专辑' },
       { id: 'artists', label: '歌手' },
-      { id: 'playlists', label: '歌单' }
+      { id: 'playlists', label: '歌单' },
+      { id: 'online', label: '在线找歌' }
     ].forEach(function (t) {
       var b = make('button', 'ln-tab' + (t.id === 'all' ? ' active' : ''), refs.tabs);
       b.type = 'button';
@@ -167,6 +171,10 @@
   function ensureView(view) {
     var railItem = refs.rail.querySelector('.rail-item[data-view="' + view + '"]');
     if (railItem && !railItem.classList.contains('active')) railItem.click();
+    // 立刻同步一次左栏/导航高亮。业务 setView 是同步的，但皮肤重排原先排队到
+    // requestAnimationFrame：掉帧、软件渲染或后台标签页拿不到帧时，高亮要等
+    // 几百毫秒甚至更久才更新，点上去就像"没反应"（实测切到在线 0.9s 后才亮）。
+    if (mounted) reflow();
     return railItem;
   }
 
@@ -256,6 +264,17 @@
       showSlot(refs.slotCategory);
     } else if (tab === 'playlists') {
       showSlot(refs.slotLib);
+    } else if (tab === 'online') {
+      // 在线结果按 §12 留在主内容区，左栏槽仍是本地曲库；这里只负责把视图
+      // 带过去。已经在在线页时 ensureView 是幂等的（不再触发 setView），
+      // 补一次进入通知，保证每次点「在线找歌」都会拉一屏（onViewEnter 内部
+      // 按 loading / 已有曲目去重，不会重复打请求）。
+      var alreadyOnline = currentViewId() === 'view-online';
+      ensureView('online');
+      // inReflow 时是视图切换的回程（reflow→setTab），那次进入通知由业务
+      // setView 自己发过；只有用户主动再点一次才需要补。
+      if (alreadyOnline && !inReflow && window.Online && window.Online.onViewEnter) window.Online.onViewEnter();
+      showSlot(refs.slotLib);
     }
   }
 
@@ -265,9 +284,22 @@
   }
 
   // 视图切换（业务代码切 .view hidden）后的左栏重排。
+  //
+  // 同步执行：调用点（导航点击 / MutationObserver）都在业务写完 DOM 之后，
+  // 一次切换只跑一遍。外面套一层 reflow() 做重入保护，内部的 DOM 写不会再
+  // 触发被观察的属性，所以不存在互相唤醒。
   function reflow() {
+    if (inReflow) return;
+    inReflow = true;
+    try { reflowInner(); } finally { inReflow = false; }
+  }
+
+  function reflowInner() {
     var id = currentViewId();
-    if (refs.viewId !== id) refs.column.scrollTop = 0;
+    if (refs.viewId !== id) {
+      refs.column.scrollTop = 0;
+      revealCurrentView();
+    }
     refs.viewId = id;
     var dailyNav = refs.rail.querySelector('[data-view="daily"]');
     if (refs.dailyMore) refs.dailyMore.hidden = !dailyNav || dailyNav.hidden;
@@ -284,7 +316,9 @@
       lastWorkView = id.replace(/^view-/, '');
     }
     if (id === 'view-library') {
-      setTab(activeTab === 'playlists' ? 'all' : activeTab);
+      // 从在线/歌单回到曲库时，标签要回到「全部」，否则左栏会停在没有对应
+      // 槽位的状态上（在线标签高亮 + 曲库槽）。
+      setTab(activeTab === 'playlists' || activeTab === 'online' ? 'all' : activeTab);
     } else if (id === 'view-playlists') {
       setTab('playlists');
     } else if (id === 'view-queue') {
@@ -292,7 +326,9 @@
     } else if (id === 'view-favorites') {
       setTab('all');
     } else if (id === 'view-online') {
-      setTab('all');
+      // 在线必须有自己的标签态：原先一律回 setTab('all')，会把「在线找歌」
+      // 的高亮立刻拽回「全部」，点击看起来没有反馈。
+      setTab('online');
     } else if (id === 'view-settings') {
       // VMusic 左栏始终是曲库内容，设置在中栏播放卡下方。
       setTab('all');
@@ -303,13 +339,18 @@
     document.body.classList.remove('ln-left-open');
   }
 
-  function scheduleReflow() {
-    if (reflowQueued) return;
-    reflowQueued = true;
-    requestAnimationFrame(function () {
-      reflowQueued = false;
-      if (mounted) reflow();
-    });
+  // 中栏顶部是导航 + 展开播放卡（约 250px）：长列表视图停在 scrollTop=0 时，
+  // 整块结果落在首屏之外（实测 1366×768 在线首行只剩 29px 可见），看着像
+  // "没加载"。中栏整体滚动时把视图顶部带进可视区；中栏不滚动（视图自己滚）
+  // 或视图本来就在首屏里时不做任何滚动。
+  function revealCurrentView() {
+    var column = refs.column;
+    var view = column.querySelector('.view:not([hidden])');
+    if (!view) return;
+    if (column.scrollHeight <= column.clientHeight + 4) return;
+    var delta = view.getBoundingClientRect().top - column.getBoundingClientRect().top;
+    if (delta < column.clientHeight * 0.6) return;
+    column.scrollTop += Math.max(0, delta - 6);
   }
 
   // -------------------------------------------------------------------------
@@ -529,6 +570,9 @@
       } else if (tab === 'playlists') {
         ensureView('playlists');
         setTab('playlists');
+      } else if (tab === 'online') {
+        // 走 setTab（内含 ensureView），保证高亮与视图同时落到在线。
+        setTab('online');
       }
     });
 
@@ -539,7 +583,8 @@
     });
 
     refs.btnCloud.addEventListener('click', function () {
-      ensureView('online');
+      // 与标签栏的「在线找歌」同一条路径：切视图 + 高亮 + 必要时补拉一屏。
+      setTab('online');
     });
 
     refs.newPl.addEventListener('click', function () {
@@ -582,7 +627,9 @@
     syncResponsive();
 
     // 6) 视图切换联动
-    observer = new MutationObserver(scheduleReflow);
+    // 直接同步重排：hidden 的批量变更只回调一次，成本可控；排队到 rAF 会让
+    // 高亮在掉帧/后台标签页里迟迟不更新。
+    observer = new MutationObserver(function () { if (mounted) reflow(); });
     Array.prototype.forEach.call(column.querySelectorAll('.view'), function (v) {
       observer.observe(v, { attributes: true, attributeFilter: ['hidden'] });
     });

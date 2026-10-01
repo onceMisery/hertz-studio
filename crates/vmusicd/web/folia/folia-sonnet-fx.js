@@ -487,7 +487,7 @@
   // 重音编舞：对选点行的三个字素，各放 5 条对数螺线粒子尾迹汇聚到字上
   // ------------------------------------------------------------------
 
-  function createAccentChoreography(PIXI, parent, nodes, color, seed) {
+  function createAccentChoreography(PIXI, parent, nodes, color, seed, lyricColor) {
     var layer = new PIXI.Container();
     parent.addChild(layer);
     var random = seededRandom('accent:sonnet:' + seed);
@@ -535,7 +535,7 @@
           var p = (time - arrival + duration) / duration;
           var glow = p >= 1 ? Math.exp(-(time - arrival) * 7) : 0;
           if (pt.arm === 0 && glow > 0.01) {
-            pt.target.tint = color;
+            pt.target.tint = lyricColor == null ? color : lyricColor;
             pt.target.scale.x *= 1 + glow * 0.07 * strength;
             pt.target.scale.y *= 1 + glow * 0.07 * strength;
           }

@@ -190,6 +190,8 @@ pub struct AppState {
     /// Ordered list of track ids the "next / previous" buttons walk through.
     pub queue: Mutex<Vec<String>>,
     pub cursor: Mutex<Option<usize>>,
+    pub(crate) radio: Mutex<crate::radio::Radio>,
+    pub(crate) radio_fetch: Mutex<()>,
     pub scan: Arc<Mutex<ScanProgress>>,
     pub scan_cancel: Arc<AtomicBool>,
     /// 二维码登录会话（票 → 平台握手数据），只活在内存里、TTL 3 分钟。
@@ -288,6 +290,14 @@ impl AppState {
         // 且「顶代际 + 换队列 + 写 cursor」要相对某个提交原子地发生，否则旧盘
         // 的下载晚于新盘的 load 完成时，会把新歌盖掉。
         let _commit = self.play_commit.lock().await;
+        {
+            let mut radio = self.radio.lock().await;
+            radio.active = false;
+            radio.loading = false;
+            radio.session = radio.session.wrapping_add(1);
+            radio.initial_generation = None;
+            radio.error = None;
+        }
         let prev_queue = self.queue.lock().await.clone();
         let prev_cursor = *self.cursor.lock().await;
         let gen = self
@@ -359,7 +369,6 @@ impl AppState {
         }?;
 
         if outcome.committed {
-            *self.cursor.lock().await = Some(index);
             // actual_quality 是 Copy 字段，这里按值传入不构成 outcome 的部分 move。
             self.on_track_committed(&track_id, outcome.actual_quality)
                 .await;
@@ -1013,7 +1022,7 @@ impl AppState {
     pub(crate) fn post_commit_background(self: &Arc<Self>) {
         let s = self.clone();
         tokio::spawn(async move {
-            s.spawn_prefetch().await;
+            let _ = tokio::join!(s.radio_refill(false), s.spawn_prefetch());
             // 显式保护当前播放曲（前缀 + 可能的 legacy 全名），避免它在容量
             // 回收时被删掉——「最新文件始终保留」只在同一次回收内成立，跨次
             // 回收后当前曲可能已不是最新。
@@ -1232,9 +1241,18 @@ impl AppState {
     /// - 本地曲：只发一条普通错误提示。
     /// - 结束前无条件关闭缓冲覆盖态。
     ///
-    /// 不取 commit 锁（只短持 cursor/queue/map 之外的辅助锁）；step 内部
-    /// 自行处理 commit 串行化。
-    pub(crate) async fn handle_decode_failure(self: &Arc<Self>, track_id: Option<String>) {
+    pub(crate) async fn handle_decode_failure(
+        self: &Arc<Self>,
+        track_id: Option<String>,
+        generation: u64,
+    ) {
+        let commit = self.play_commit.lock().await;
+        let snapshot = self.audio.snapshot();
+        if snapshot.generation != generation || snapshot.track_id.is_some() {
+            return;
+        }
+        let reservation = self.play_generation.load(Ordering::Relaxed);
+        let mut advance = false;
         let Some(track_id) = track_id else {
             self.publish(WsEvent::Error {
                 message: "播放中断".into(),
@@ -1291,12 +1309,7 @@ impl AppState {
                     index: None,
                 });
             } else {
-                // 同 online_failed：递归链路 Box::pin 间接化。
-                let stepped = Box::pin(self.step(1, true)).await;
-                if stepped.is_ok() {
-                    // 与 Ended 接力口径一致：接力成功后补一次后台预取 + LRU。
-                    self.post_commit_background();
-                }
+                advance = true;
             }
         } else {
             self.publish(WsEvent::Error {
@@ -1307,6 +1320,14 @@ impl AppState {
             });
         }
         self.set_buffering(false, None).await;
+        drop(commit);
+        if advance
+            && Box::pin(self.step_for(1, true, None, Some(reservation)))
+                .await
+                .is_ok()
+        {
+            self.post_commit_background();
+        }
     }
 
     /// Moves the queue according to the current play mode.
@@ -1315,6 +1336,51 @@ impl AppState {
     /// button press: `RepeatOne` only repeats on auto, a user pressing "next"
     /// always moves forward.
     pub async fn step(&self, delta: isize, auto: bool) -> Result<(), vmusic_core::CoreError> {
+        self.step_for(delta, auto, None, None).await
+    }
+
+    async fn step_for(
+        &self,
+        delta: isize,
+        auto: bool,
+        ended: Option<(u64, Option<String>)>,
+        reservation: Option<usize>,
+    ) -> Result<(), vmusic_core::CoreError> {
+        let before_refill = self.play_generation.load(Ordering::Relaxed);
+        let at_tail = {
+            let queue = self.queue.lock().await;
+            self.cursor.lock().await.unwrap_or(0).saturating_add(1) >= queue.len()
+        };
+        if delta > 0 && at_tail { let _ = self.radio_refill(false).await; }
+        let commit = self.play_commit.lock().await;
+        if self.play_generation.load(Ordering::Relaxed) != before_refill { return Ok(()); }
+        if reservation
+            .is_some_and(|expected| self.play_generation.load(Ordering::Relaxed) != expected)
+        {
+            return Ok(());
+        }
+        let snapshot = self.audio.snapshot();
+        if let Some((generation, track_id)) = ended {
+            if snapshot.generation != generation || snapshot.track_id != track_id {
+                return Ok(());
+            }
+            let queue = self.queue.lock().await;
+            let current = *self.cursor.lock().await;
+            if current.and_then(|index| queue.get(index)) != track_id.as_ref() {
+                return Ok(());
+            }
+        }
+        let fm = { let radio = self.radio.lock().await; radio.active && radio.initial_generation.is_none() };
+        if fm && self.current_index().await.unwrap_or(0) >= 80 {
+            let mut queue = self.queue.lock().await;
+            let mut cursor = self.cursor.lock().await;
+            let remove = cursor.unwrap_or(0).saturating_sub(20);
+            let mut meta = self.online_meta.lock().await;
+            for id in queue.drain(..remove) { meta.remove(&id); }
+            *cursor = Some(20);
+            self.play_generation.fetch_add(1, Ordering::Relaxed);
+        }
+        let generation = self.play_generation.load(Ordering::Relaxed);
         let mode = self.audio.snapshot().mode;
         let len = self.queue.lock().await.len();
         if len == 0 {
@@ -1322,7 +1388,8 @@ impl AppState {
         }
         let current = self.current_index().await.unwrap_or(0);
 
-        let next = match mode {
+        if fm && delta > 0 && current + 1 >= len { return Ok(()); }
+        let next = if fm { (current as isize + delta).max(0) as usize } else { match mode {
             PlayMode::RepeatOne if auto => current,
             // Shuffle must move: picking the current index again would look
             // like "next" did nothing. VCP keeps a pre-shuffled queue for the
@@ -1338,9 +1405,12 @@ impl AppState {
                     raw as usize
                 }
             }
-        };
+        }};
 
-        self.play_index_for(next, None, true).await.map(|_| ())
+        drop(commit);
+        self.play_index_for(next, Some(generation), auto)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -1392,7 +1462,10 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
             match event {
                 AudioEvent::Snapshot(snap) => state.publish(WsEvent::State(snap)),
                 AudioEvent::Spectrum(bands) => state.publish(WsEvent::Spectrum { bands }),
-                AudioEvent::Ended => {
+                AudioEvent::Ended {
+                    generation,
+                    track_id,
+                } => {
                     state.publish(WsEvent::Ended);
                     // 接力绝不能在泵任务里 await：未缓存在线曲的现取流要数秒，
                     // 泵一停，上面那个 64 容量的广播立刻 Lagged。甩到独立任务，
@@ -1401,7 +1474,10 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     tokio::spawn(async move {
                         // 成功（含失败后内部自动跳曲成功）后在接力入口做一次
                         // 后台预取 + LRU；每首成功播放恰好这一次。
-                        match advance.step(1, true).await {
+                        match advance
+                            .step_for(1, true, Some((generation, track_id)), None)
+                            .await
+                        {
                             Ok(()) => advance.post_commit_background(),
                             Err(e) => {
                                 tracing::warn!("auto-advance failed: {e}");
@@ -1427,10 +1503,13 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                 }),
                 // 解码线程非主动中断的早夭：收口要做下载取消/失败计数/自动跳曲，
                 // 全是 await，同样甩独立任务，泵只负责即时转发。
-                AudioEvent::DecodeError { track_id } => {
+                AudioEvent::DecodeError {
+                    track_id,
+                    generation,
+                } => {
                     let failed = state.clone();
                     tokio::spawn(async move {
-                        failed.handle_decode_failure(track_id).await;
+                        failed.handle_decode_failure(track_id, generation).await;
                     });
                 }
             }
@@ -1466,8 +1545,128 @@ pub async fn remove_discovery(data_dir: &std::path::Path) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::random_index;
+pub(crate) mod tests {
+    use super::*;
+
+    pub(crate) async fn playback_state() -> (AppState, std::thread::JoinHandle<()>) {
+        let (audio, handle) = vmusic_audio::spawn(vmusic_audio::BackendKind::Null)
+            .await
+            .unwrap();
+        let state = AppState {
+            db: sqlx::sqlite::SqlitePoolOptions::new()
+                .connect_lazy("sqlite::memory:")
+                .unwrap(),
+            audio,
+            config: Arc::new(Config::default()),
+            data_dir: PathBuf::new(),
+            token: String::new(),
+            events: broadcast::channel(16).0,
+            queue: Default::default(),
+            cursor: Default::default(),
+            radio: Default::default(),
+            radio_fetch: Default::default(),
+            scan: Default::default(),
+            scan_cancel: Default::default(),
+            qr: crate::online::qr::Registry::new(),
+            play_generation: Default::default(),
+            play_commit: Default::default(),
+            buffering: Default::default(),
+            online_meta: Default::default(),
+            downloads: Default::default(),
+            protected: Default::default(),
+            dsp: Mutex::new(DspConfig::from_settings(&Default::default())),
+            keep: Default::default(),
+            auto_failures: Default::default(),
+            quality: Default::default(),
+            stage_beats: Default::default(),
+            weak_self: Default::default(),
+        };
+        (state, handle)
+    }
+
+    #[tokio::test]
+    async fn delayed_end_cannot_replace_a_new_track_or_restart_after_stop() {
+        let (state, handle) = playback_state().await;
+        state
+            .set_queue(vec!["first".into(), "second".into()], Some(0))
+            .await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        state.audio.play().await.unwrap();
+        let ended = state.audio.snapshot();
+        state.audio.stop().await.unwrap();
+        let generation = state.play_generation.load(Ordering::Relaxed);
+        state
+            .step_for(1, true, Some((ended.generation, ended.track_id)), None)
+            .await
+            .unwrap();
+        assert_eq!(state.current_index().await, Some(0));
+        assert_eq!(state.play_generation.load(Ordering::Relaxed), generation);
+        assert!(!state.audio.snapshot().playing);
+
+        let stopped = state.audio.snapshot();
+        state.set_queue(vec!["second".into()], Some(0)).await;
+        state
+            .audio
+            .load("second.wav", Some("second".into()))
+            .await
+            .unwrap();
+        state.audio.play().await.unwrap();
+        state
+            .step_for(1, true, Some((stopped.generation, stopped.track_id)), None)
+            .await
+            .unwrap();
+        assert_eq!(state.audio.snapshot().track_id.as_deref(), Some("second"));
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn replaced_queue_rejects_a_reserved_load() {
+        let (state, handle) = playback_state().await;
+        let (generation, _, _) = state.set_queue(vec!["first".into()], Some(0)).await;
+        state.set_queue(vec!["second".into()], Some(0)).await;
+        let outcome = state
+            .play_index_for(0, Some(generation), false)
+            .await
+            .unwrap();
+        assert!(!outcome.committed);
+        assert_eq!(*state.queue.lock().await, vec!["second"]);
+        assert!(state.audio.snapshot().track_id.is_none());
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn delayed_decode_failure_cannot_interrupt_a_retry_of_the_same_track() {
+        let (state, handle) = playback_state().await;
+        let state = Arc::new(state);
+        state.set_queue(vec!["first".into()], Some(0)).await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let failed_generation = state.audio.snapshot().generation;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        state.audio.play().await.unwrap();
+        state.set_buffering(true, Some(50)).await;
+        state
+            .handle_decode_failure(Some("first".into()), failed_generation)
+            .await;
+        assert!(state.audio.snapshot().playing);
+        assert_eq!(*state.buffering.lock().await, (true, Some(50)));
+        assert_eq!(state.auto_failures.load(Ordering::Relaxed), 0);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
 
     #[test]
     fn shuffle_never_returns_the_excluded_index() {

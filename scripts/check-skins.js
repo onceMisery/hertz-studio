@@ -342,7 +342,74 @@ function checkCoverage() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. 接线
+// 6. 流年展开播放卡稳定性
+// ---------------------------------------------------------------------------
+
+function checkLiunianExpandedBarStability() {
+  section('流年：展开播放卡不参与底部播放栏自动隐藏');
+
+  const rule = LIUNIAN.match(/\[data-skin="liunian"\]\s+\.bar:not\(\.ln-capsule\)\s*\{([^}]*)\}/);
+  ok(rule && /transform:\s*none\s*!important/.test(rule[1]),
+    '展开态钉住 transform，自动隐藏不能把文档流卡片滑出');
+  ok(rule && /opacity:\s*1\s*!important/.test(rule[1]),
+    '展开态钉住 opacity，自动隐藏不能让文档流卡片闪烁');
+  ok(!/\.bar\.ln-capsule[^\{]*\{[^}]*transform:\s*none\s*!important/.test(LIUNIAN),
+    '胶囊收起态未被稳定性规则覆盖');
+  ok(/\.bar\.is-hidden\s*\{\s*display:\s*none/.test(read(path.join(WEB, 'style.css'))),
+    '其它主题仍保留播放栏自动隐藏规则');
+}
+
+// ---------------------------------------------------------------------------
+// 7. 流年左栏：在线入口与选中态
+// ---------------------------------------------------------------------------
+
+function checkLiunianNavigation() {
+  section('流年左栏：在线找歌入口、路由与高亮');
+
+  // 1) 标签栏必须真的有这一项，而不是只有操作按钮里有同名文案。
+  const tabsBlock = LIUNIAN_JS.match(/refs\.tabs = make\('div', 'ln-tabs', rail\);([\s\S]*?)\]\.forEach/);
+  ok(tabsBlock && /\{\s*id:\s*'online',\s*label:\s*'在线找歌'\s*\}/.test(tabsBlock[1]),
+    '标签栏渲染「在线找歌」这一项');
+  ok(tabsBlock && /id:\s*'all'/.test(tabsBlock[1]) && /id:\s*'albums'/.test(tabsBlock[1])
+    && /id:\s*'artists'/.test(tabsBlock[1]) && /id:\s*'playlists'/.test(tabsBlock[1]),
+    '原有四个标签不受影响');
+
+  // 2) 点它要切视图：标签点击分流 + setTab 的 online 分支都要落到 ensureView('online')。
+  ok(/tab === 'online'\)\s*\{\s*\/\/[^\n]*\n\s*setTab\('online'\)/.test(LIUNIAN_JS)
+    || /\}\s*else if \(tab === 'online'\)[\s\S]{0,200}setTab\('online'\)/.test(LIUNIAN_JS),
+    '标签点击把「在线找歌」交给 setTab 处理');
+  ok(/tab === 'online'\)\s*\{[\s\S]{0,400}?ensureView\('online'\)/.test(LIUNIAN_JS),
+    '「在线找歌」标签会切到在线视图');
+  ok(/btnCloud\.addEventListener\('click'[\s\S]{0,200}setTab\('online'\)/.test(LIUNIAN_JS),
+    '操作区的「在线找歌」按钮走同一条路径（切视图 + 高亮）');
+
+  // 3) 在线视图必须有自己的标签态：原先 reflow 一律 setTab('all')，会把高亮
+  //    立刻拽回「全部」，点击看起来没有反馈。
+  ok(/id === 'view-online'\)\s*\{[\s\S]{0,300}?setTab\('online'\)/.test(LIUNIAN_JS),
+    '在线视图对应「在线找歌」标签高亮');
+  ok(/id === 'view-library'\)[\s\S]{0,200}activeTab === 'online' \? 'all'/.test(LIUNIAN_JS),
+    '从在线回到曲库时标签回到「全部」（不留下无对应槽位的状态）');
+
+  // 4) 选中态不能靠 requestAnimationFrame 排队：掉帧/后台标签页拿不到帧，
+  //    高亮会迟迟不更新，表现为"点了没反应"。
+  ok(/observer = new MutationObserver\(function \(\) \{ if \(mounted\) reflow\(\); \}\)/.test(LIUNIAN_JS),
+    '视图切换联动同步重排（不再排队到 requestAnimationFrame）');
+  ok(!/new MutationObserver\(scheduleReflow\)/.test(LIUNIAN_JS),
+    '不再使用 rAF 版的重排调度');
+  ok(/function reflow\(\) \{\s*\n\s*if \(inReflow\) return;/.test(LIUNIAN_JS),
+    'reflow 有重入保护（ensureView 会在重排内部再调一次）');
+  ok(/ensureView[\s\S]{0,600}?if \(mounted\) reflow\(\);/.test(LIUNIAN_JS),
+    '点击导航后立即同步高亮，不等观察器');
+
+  // 5) 作用域：这些改动只在流年重编排层里，其它皮肤没有左栏标签这套东西。
+  ok(!/ln-tabs/.test(MINERADIO) && !/ln-tabs/.test(WORKBENCH),
+    '其它皮肤不引入流年的左栏标签');
+  ok(!/ln-tabs|ln-nav/.test(APP),
+    '业务 app.js 不认识流年左栏（皮肤自持，切走即消失）');
+}
+
+// ---------------------------------------------------------------------------
+// 7. 接线
 // ---------------------------------------------------------------------------
 
 function checkWiring() {
@@ -402,6 +469,8 @@ function checkWiring() {
   checkNoColor();
   checkContrast();
   checkCoverage();
+  checkLiunianExpandedBarStability();
+  checkLiunianNavigation();
   checkWiring();
 
   console.log('\n' + '─'.repeat(60));

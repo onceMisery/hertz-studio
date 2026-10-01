@@ -7,6 +7,36 @@
 .fl-bg { position: absolute; inset: 0; overflow: hidden; background: #09090b; }
 .fl-bg-layer { position: absolute; inset: 0; transition: opacity .8s ease; }
 
+.fl-scene-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at 16% 26%, color-mix(in srgb, var(--fl-scene-accent, #85acff) 28%, transparent), transparent 60%),
+    radial-gradient(ellipse at 88% 68%, color-mix(in srgb, var(--fl-scene-secondary, #77d8c9) 24%, transparent), transparent 58%),
+    radial-gradient(ellipse at 55% 100%, color-mix(in srgb, var(--fl-scene-tertiary, #eab985) 16%, transparent), transparent 62%),
+    var(--fl-scene-base, #101829);
+}
+.fl-scene-backdrop[hidden], .fl-scene-backdrop img[hidden] { display: none !important; }
+.fl-scene-backdrop img { width: 100%; height: 100%; object-fit: cover; object-position: center; }
+.fl-scene-backdrop::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(5,9,19,.18), rgba(5,9,19,.05) 38%, rgba(5,9,19,.5)), rgba(5,9,19,var(--fl-wallpaper-dim,.48));
+  opacity: 0;
+}
+.fl-scene-backdrop[data-image="ready"]:has(img:not([hidden]))::after { opacity: 1; }
+.s3d-scene-covered .s3d-canvas-wrap canvas { visibility: hidden; }
+.s3d-wallpaper-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin: 12px 0; }
+.s3d-wallpaper-choice { position: relative; min-width: 0; padding: 0; border: 2px solid transparent; border-radius: 8px; overflow: hidden; cursor: pointer; color: var(--s3d-text); background: var(--s3d-bg); font: inherit; }
+.s3d-wallpaper-choice img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
+.s3d-wallpaper-choice span { display: block; padding: 4px 2px; font-size: 10px; }
+.s3d-wallpaper-choice[aria-pressed="true"] { border-color: var(--s3d-accent); }
+.s3d-wallpaper-choice:hover { border-color: var(--s3d-muted); }
+.s3d-wallpaper-choice:focus-visible { outline: 2px solid var(--s3d-accent); outline-offset: 2px; }
+
 /* 几何形状 */
 .fl-shape { position: absolute; will-change: transform; }
 .fl-shape .fl-shape-inner { position: absolute; inset: 0; animation: fl-drift linear infinite; }

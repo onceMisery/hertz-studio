@@ -33,6 +33,7 @@
   --s3d-text: #eef3f0;
   --s3d-muted: #a1aaa8;
   --s3d-accent: #c3e5da;
+  --s3d-control-bg: #202c28;
 
   position: fixed;
   inset: 0;
@@ -49,7 +50,7 @@
   /* 全屏时避免文字选中和触摸滚动把舞台拖走 */
   -webkit-user-select: none;
   user-select: none;
-  touch-action: none;
+  touch-action: auto;
   overscroll-behavior: none;
   contain: strict;
 }
@@ -289,7 +290,7 @@ body.s3d-open > .bar { display: none; }
 
 .s3d-btn[aria-pressed='true'] {
   color: var(--s3d-accent);
-  background: rgba(195, 229, 218, 0.12);
+  background: color-mix(in srgb, var(--s3d-accent) 12%, transparent);
   border-color: transparent;
 }
 
@@ -357,11 +358,11 @@ body.s3d-open > .bar { display: none; }
 
 .s3d-dock-btn.active {
   color: var(--s3d-accent);
-  background: rgba(195, 229, 218, 0.12);
+  background: color-mix(in srgb, var(--s3d-accent) 12%, transparent);
 }
 
 .s3d-dock-btn.active:hover {
-  background: rgba(195, 229, 218, 0.18);
+  background: color-mix(in srgb, var(--s3d-accent) 18%, transparent);
   color: var(--s3d-accent);
 }
 
@@ -533,7 +534,7 @@ body.s3d-open > .bar { display: none; }
   animation: none;
   text-shadow: 0 0 calc(var(--sl-glow,.45) * 9px) rgba(221,255,237,.30);
 }
-.s3d-settings select { width: 100%; background: #202c28; color: var(--s3d-text); padding: 9px; border: 1px solid rgba(255,255,255,.16); border-radius: 8px; }
+.s3d-settings select { width: 100%; background: var(--s3d-control-bg); color: var(--s3d-text); padding: 9px; border: 1px solid rgba(255,255,255,.16); border-radius: 8px; }
 .s3d-workshop { width: 100%; margin-top: 14px; }
 .s3d-art { cursor: pointer; }
 .s3d-art:hover { border-color: var(--s3d-accent); }
@@ -716,6 +717,13 @@ body.s3d-open > .bar { display: none; }
 .s3d-chrome .s3d-brand, .s3d-chrome .s3d-player { opacity: 1; }
 .s3d-chrome .s3d-player { pointer-events: auto; transform: translate(-50%,0); }
 .s3d-reduced *, .s3d-reduced *::before, .s3d-reduced *::after { animation: none !important; transition-duration: 0.01ms !important; }
+.s3d.s3d-reduced::before, .s3d.s3d-reduced::after { animation: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  .s3d, .s3d *, .s3d::before, .s3d::after, .s3d *::before, .s3d *::after {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 
 /* ---------------------------------------------------------------------------
    窄屏与降级动效
@@ -946,6 +954,7 @@ body.s3d-open > .bar { display: none; }
   touch-action: pan-y;
 }
 .s3d-sc:focus-visible { outline: 2px solid var(--s3d-accent); outline-offset: 3px; }
+.s3d[data-shelf-mode='side'] .s3d-sc { touch-action: pan-x; }
 
 .s3d-sc-sheen {
   position: absolute;
