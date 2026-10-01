@@ -32,7 +32,7 @@ data = Path(tempfile.mkdtemp(prefix='vmusic-library-')).resolve()
 assert data.parent == Path(tempfile.gettempdir()).resolve()
 music = data / 'music'
 token = 'disposable-library-test-token'
-binary = args.binary or repo / 'target/debug' / ('vmusicd.exe' if os.name == 'nt' else 'vmusicd')
+binary = args.binary or repo / 'target/debug' / ('hertz-studio.exe' if os.name == 'nt' else 'hertz-studio')
 NUL_FRAME = b'\x00' * 2
 env = dict(os.environ, VMUSIC_BACKEND='null', VMUSIC_SECRETS='memory')
 proc = None

@@ -8,7 +8,7 @@ authors.workspace = true
 description = "The mmusic-studio service binary: HTTP + WebSocket API and web UI"
 
 [[bin]]
-name = "vmusicd"
+name = "hertz-studio"
 path = "src/main.rs"
 
 [dependencies]

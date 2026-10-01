@@ -13,11 +13,11 @@ New-Item -ItemType Directory -Path $data | Out-Null
 $proc = $null
 try {
     Write-Host "==> building"
-    cargo build --manifest-path (Join-Path $root Cargo.toml) --bin vmusicd
+    cargo build --manifest-path (Join-Path $root Cargo.toml) --bin hertz-studio
     if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
     Write-Host "==> starting on port $Port"
-    $proc = Start-Process -FilePath (Join-Path $root "target/debug/vmusicd.exe") `
+    $proc = Start-Process -FilePath (Join-Path $root "target/debug/hertz-studio.exe") `
         -ArgumentList "--port", $Port, "--data-dir", $data `
         -PassThru -WindowStyle Hidden
 

@@ -24,8 +24,8 @@ if curl -fsS --max-time 3 http://127.0.0.1:7899/v1/health 2>/dev/null | python3 
   LOCAL_VERSION="$(curl -fsS --max-time 3 http://127.0.0.1:7899/v1/health 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['version'])")"
 fi
 if [ -z "$LOCAL_VERSION" ]; then
-  if [ -x ./target/release/vmusicd ]; then
-    LOCAL_VERSION="$(./target/release/vmusicd --version 2>/dev/null || true)"
+  if [ -x ./target/release/hertz-studio ]; then
+    LOCAL_VERSION="$(./target/release/hertz-studio --version 2>/dev/null || true)"
   fi
 fi
 if [ -z "$LOCAL_VERSION" ]; then

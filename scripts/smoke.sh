@@ -26,10 +26,10 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> building"
-cargo build --manifest-path "$ROOT/Cargo.toml" --bin vmusicd
+cargo build --manifest-path "$ROOT/Cargo.toml" --bin hertz-studio
 
 echo "==> starting on port $PORT (data dir $DATA)"
-"$ROOT/target/debug/vmusicd" --port "$PORT" --data-dir "$DATA" >"$DATA/server.log" 2>&1 &
+"$ROOT/target/debug/hertz-studio" --port "$PORT" --data-dir "$DATA" >"$DATA/server.log" 2>&1 &
 PID=$!
 
 echo "==> waiting for health"

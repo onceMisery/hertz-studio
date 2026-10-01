@@ -135,7 +135,7 @@
 cargo build --release
 
 # 运行
-./target/release/vmusicd
+./target/release/hertz-studio
 
 # 或者一步到位，并自动打开浏览器
 cargo run --release -- --open

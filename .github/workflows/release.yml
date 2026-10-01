@@ -5,7 +5,7 @@
 # 设计边界（计划第 12 项）：
 #   - 仅 workflow_dispatch 手动触发，绝不自动推送/发布/上传 Release；
 #     产物留在 workflow run 的 artifacts 里，由维护者人工检查后自行发布。
-#   - 单二进制发行：web 资源编译期嵌入，产物就是 vmusicd(.exe) + README + LICENSE。
+#   - 单二进制发行：web 资源编译期嵌入，产物就是 hertz-studio(.exe) + README + LICENSE。
 #   - 每平台输出 sha256 校验和，并合并一份 SHA256SUMS 供下载方核对。
 
 name: release
@@ -61,10 +61,10 @@ jobs:
           VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys;print(json.load(sys.stdin)['packages'][0]['version'])")"
           NAME="mmusic-studio-${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/${NAME}"
-          # 只拷可执行文件本体：MSVC 下 vmusicd* 会把 .pdb 调试符号一并带进包。
-          BIN="target/${{ matrix.target }}/release/vmusicd"
-          if [ -f "$BIN.exe" ]; then cp "$BIN.exe" "dist/${NAME}/vmusicd.exe";
-          elif [ -f "$BIN" ]; then cp "$BIN" "dist/${NAME}/vmusicd";
+          # 只拷可执行文件本体：MSVC 下 hertz-studio* 会把 .pdb 调试符号一并带进包。
+          BIN="target/${{ matrix.target }}/release/hertz-studio"
+          if [ -f "$BIN.exe" ]; then cp "$BIN.exe" "dist/${NAME}/hertz-studio.exe";
+          elif [ -f "$BIN" ]; then cp "$BIN" "dist/${NAME}/hertz-studio";
           else echo "binary not found" >&2; exit 1; fi
           cp README.md LICENSE "dist/${NAME}/" 2>/dev/null || true
           cd dist

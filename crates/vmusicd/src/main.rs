@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 mmusic-studio contributors
 
-//! `vmusicd` — the mmusic-studio service.
+//! `hertz-studio` — the mmusic-studio service binary.
 //!
-//! Run `vmusicd --help` for options. With no arguments it binds a fixed local
+//! Run `hertz-studio --help` for options. With no arguments it binds a fixed local
 //! port, writes a discovery file with the token, and serves the bundled UI.
 
 mod config;
@@ -206,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     if args.version {
-        println!("vmusicd {}", env!("CARGO_PKG_VERSION"));
+        println!("hertz-studio {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if args.help {
@@ -629,8 +629,8 @@ impl Args {
 
 fn print_help() {
     println!(
-        "vmusicd — mmusic-studio service\n\n\
-         Usage: vmusicd [OPTIONS]\n\n\
+        "hertz-studio — mmusic-studio service\n\n\
+         Usage: hertz-studio [OPTIONS]\n\n\
          Options:\n  \
          --bind ADDR      Bind address (default 127.0.0.1)\n  \
          --port PORT      Port, 0 for a random free port (default 7634)\n  \
