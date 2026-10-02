@@ -42,7 +42,7 @@ pub struct Booted {
 /// 否则启动早期的日志全丢。
 pub async fn prepare(data_dir: &Path) -> anyhow::Result<Config> {
     tokio::fs::create_dir_all(data_dir).await?;
-    Ok(Config::load(data_dir)?)
+    Config::load(data_dir)
 }
 
 /// 装配出完整的运行时。

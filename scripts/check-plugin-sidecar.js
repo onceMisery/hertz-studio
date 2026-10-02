@@ -201,6 +201,58 @@ async function main() {
     ok(!('requestId' in detail), 'error 里没有误写成 requestId 的驼峰字段');
     ok(!('source' in detail), '本地接口的错误不带 source 字段');
 
+    console.log('\n播放域');
+    const queue = await client.send('v1/player/queue', { op: 'GET' });
+    eq(queue.result && queue.result.status, 200, 'GET v1/player/queue → 200');
+    ok(Array.isArray((queue.result || {}).body?.queue), 'queue 是数组');
+
+    const dsp = await client.send('v1/player/dsp', { op: 'GET' });
+    eq(dsp.result && dsp.result.status, 200, 'GET v1/player/dsp → 200');
+    const eq6 = (dsp.result || {}).body?.eq_gains_db;
+    ok(Array.isArray(eq6) && eq6.length === 6, 'dsp 带 6 段 EQ 增益');
+
+    const devices = await client.send('v1/devices', { op: 'GET' });
+    eq(devices.result && devices.result.status, 200, 'GET v1/devices → 200');
+    ok(Array.isArray((devices.result || {}).body?.devices), 'devices 是数组');
+
+    // 音量：合法值要能读回来，越界要 400 而不是被静默夹住——夹住的话
+    // 界面滑杆会显示一个和后端不一致的值。
+    const setVolume = await client.send('v1/player/volume', { op: 'POST', body: { volume: 0.42 } });
+    eq(setVolume.result && setVolume.result.status, 200, 'POST volume 0.42 → 200');
+    const gotVolume = (setVolume.result || {}).body?.volume;
+    ok(Math.abs(gotVolume - 0.42) < 0.01, 'volume 回读约等于 0.42（得到 ' + gotVolume + '）');
+    const badVolume = await client.send('v1/player/volume', { op: 'POST', body: { volume: 1.5 } });
+    eq(badVolume.result && badVolume.result.status, 400, 'volume 越界 → 400');
+    eq(((badVolume.result || {}).body || {}).error?.code, 'bad_request', '越界的 code 是 bad_request');
+
+    const setMode = await client.send('v1/player/mode', { op: 'POST', body: { mode: 'shuffle' } });
+    eq(setMode.result && setMode.result.status, 200, 'POST mode shuffle → 200');
+    eq((setMode.result || {}).body?.mode, 'shuffle', 'mode 回读为 shuffle');
+
+    // 动词映射：/v1/player/queue 是 GET|PUT。动词错了必须 404，
+    // 不能静默落到 GET 上——那会让"保存队列"看起来成功其实没保存。
+    const wrongVerb = await client.send('v1/player/queue', { op: 'POST', body: { queue: [] } });
+    eq(wrongVerb.result && wrongVerb.result.status, 404, 'POST v1/player/queue → 404（该路径只有 GET|PUT）');
+
+    const putQueue = await client.send('v1/player/queue', { op: 'PUT', body: { queue: ['a', 'b'], index: 1 } });
+    eq(putQueue.result && putQueue.result.status, 200, 'PUT v1/player/queue → 200');
+    eq((putQueue.result || {}).body?.index, 1, 'PUT queue 回读 index');
+
+    // 空库上直接 play 不该把 sidecar 打崩：之后还要能继续应答。
+    await client.send('v1/player/play', { op: 'POST' });
+    const alive = await client.send('v1/health', { op: 'GET' });
+    eq(alive.result && alive.result.status, 200, '空队列 play 之后 sidecar 仍在应答');
+
+    // 节拍图三态：库里查无此曲应给 404 + {status:"unavailable"}，
+    // 而不是标准 {error} 体——前端按 body.status 分流、不弹错。
+    const beatmap = await client.send('v1/stage/beatmap', { op: 'GET', query: { track: 'nope' } });
+    const beatStatus = (beatmap.result || {}).status;
+    ok([200, 202, 404].includes(beatStatus), 'beatmap 落在三态之一：' + beatStatus);
+    if (beatStatus === 404) {
+      eq((beatmap.result || {}).body?.status, 'unavailable', '404 体是 {status:"unavailable"} 而非 {error}');
+      ok(!('error' in ((beatmap.result || {}).body || {})), '404 体里没有 error 字段');
+    }
+
     console.log('\n信封校验');
     const badOp = await client.send('v1/health', { op: 'PATCH' });
     ok(badOp.error !== undefined, '非法 op 返回真正的 JSON-RPC error（协议级错误）');

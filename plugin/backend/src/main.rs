@@ -29,8 +29,8 @@ use std::sync::{Arc, OnceLock};
 use dbx_plugin_sdk::{
     PluginEmitter, PluginError, PluginHandler, PluginMetadata, PluginServer, RequestContext,
 };
-use hertz_studio::error::{ApiError, ErrorBody, ErrorDetail};
-use hertz_studio::rpc::{Call, Op, Rpc};
+use hertz_studio::error::{ErrorBody, ErrorDetail};
+use hertz_studio::rpc::{Call, Op, Rpc, RpcResult};
 use hertz_studio::state::AppState;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -139,9 +139,9 @@ fn envelope_str<'a>(params: &'a Value, key: &str) -> Result<Option<&'a str>, Plu
 /// 错误体直接复用 `error::ErrorBody`，而不是在这里手搓一份 JSON：字段名
 /// （`request_id` 是 snake_case）、`source` 的缺省语义都跟着 HTTP 版走，
 /// 前端 `app.js` 的错误归一化逻辑因此可以原样复用，不会出现两边漂移。
-fn envelope_result(result: Result<Value, ApiError>) -> Value {
+fn envelope_result(result: RpcResult) -> Value {
     match result {
-        Ok(body) => json!({ "status": 200, "body": body }),
+        Ok(reply) => json!({ "status": reply.status, "body": reply.body }),
         Err(error) => {
             let status = error.status.as_u16();
             let body = ErrorBody {

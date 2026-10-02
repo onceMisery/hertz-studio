@@ -521,11 +521,11 @@ async fn get_dsp(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_jso
 }
 
 #[derive(Deserialize)]
-struct DspUpdate {
-    eq_gains_db: Option<[f32; 6]>,
-    preamp_db: Option<f32>,
-    loudness_norm: Option<bool>,
-    crossfade_ms: Option<u64>,
+pub struct DspUpdate {
+    pub eq_gains_db: Option<[f32; 6]>,
+    pub preamp_db: Option<f32>,
+    pub loudness_norm: Option<bool>,
+    pub crossfade_ms: Option<u64>,
 }
 
 /// 更新 DSP 设置并即时下发到音频后端；交叉淡化同步换装/尾淡出时长。
@@ -2063,8 +2063,8 @@ async fn history_remove(
 }
 
 #[derive(Debug, Deserialize)]
-struct ReplayRequest {
-    index: usize,
+pub struct ReplayRequest {
+    pub index: usize,
 }
 
 /// 错误条「重试」/ 音质热切换：重新播放当前队列指定下标（在线曲重新取流），
