@@ -30,6 +30,12 @@ pub enum WsEvent {
         bands: Vec<f32>,
     },
     Ended,
+    /// 界面实例之间的轻量信号。dock 胶囊与 tab 实例是两个 opaque-origin 的
+    /// iframe，BroadcastChannel / storage 事件都不通，只能借这条已有的广播管道
+    /// 绕一圈：dock 里点胶囊时发 `expand-capsule`，tab 实例收到就解除最小化。
+    UiNotice {
+        action: String,
+    },
     Error {
         message: String,
         /// 机器可读错误码，与 REST 错误体的 `error.code` 一致；前端按码引导
