@@ -1,7 +1,14 @@
-# 本文件相对上游只有一处改动：删掉了原来的空 `[workspace]` 段。
-# 上游用它把自己声明成独立 workspace 根，但在本仓库里它是被 plugin/backend
-# path 依赖的包，cargo 会报 "multiple workspace roots found"。改成由仓库根
-# workspace 统一收编。license 保持 Apache-2.0，不随本仓库的 MIT。
+# 本文件相对上游有两处改动（`src/lib.rs` 保持与上游字节一致，见仓库根 NOTICE）：
+#
+# 1. 删掉了原来的空 `[workspace]` 段。上游用它把自己声明成独立 workspace 根，但在
+#    本仓库里它是被 plugin/backend path 依赖的包，cargo 会报 "multiple workspace
+#    roots found"。改成由仓库根 workspace 统一收编。license 保持 Apache-2.0，不随
+#    本仓库的 MIT。
+# 2. 末尾的 [lints.clippy]。CI 用 `cargo clippy --workspace --all-targets --
+#    -D warnings`，上游代码命中两处（lib 的 type_complexity、lib test 的
+#    items_after_test_module）；`--exclude` 挡不住 path 依赖（它照样被当本地包
+#    lint），而在 lib.rs 里加 #[allow] 就破坏了「与上游字节一致」。豁免放在
+#    manifest 里，源码一个字都不用动。
 [package]
 name = "dbx-plugin-sdk"
 version = "0.1.0"
@@ -12,3 +19,7 @@ description = "Sidecar protocol SDK for DBX plugins"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[lints.clippy]
+type_complexity = "allow"
+items_after_test_module = "allow"

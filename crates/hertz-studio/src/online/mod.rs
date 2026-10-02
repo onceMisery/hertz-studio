@@ -1008,6 +1008,14 @@ pub fn split_virtual_id(vid: &str) -> Option<(String, String)> {
     Some((source.to_string(), id.to_string()))
 }
 
+/// 连续推荐目前仅网易云提供；游客是否可用由上游响应决定。
+pub async fn personal_fm(ctx: &Ctx, source: &str) -> ApiResult<Vec<OnlineTrack>> {
+    gate(source, Capability::PersonalFm)?;
+    netease::personal_fm(ctx)
+        .await
+        .map_err(|e| e.with_source(source))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1364,12 +1372,4 @@ mod tests {
         // id 必填。
         assert!(serde_json::from_str::<TrackEntry>(r#"{"ref":{}}"#).is_err());
     }
-}
-
-/// 连续推荐目前仅网易云提供；游客是否可用由上游响应决定。
-pub async fn personal_fm(ctx: &Ctx, source: &str) -> ApiResult<Vec<OnlineTrack>> {
-    gate(source, Capability::PersonalFm)?;
-    netease::personal_fm(ctx)
-        .await
-        .map_err(|e| e.with_source(source))
 }

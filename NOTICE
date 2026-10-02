@@ -57,9 +57,13 @@ Vendored source
     plugin backend could only be built on a machine that happens to have the DBX
     repository checked out beside this one.
 
-    One local modification: the empty `[workspace]` table was removed from its
-    Cargo.toml so the crate can be a member of this repository's workspace.
-    `src/lib.rs` is byte-identical to upstream.
+    Two local modifications, both confined to Cargo.toml: the empty `[workspace]`
+    table was removed so the crate can be a member of this repository's
+    workspace, and a `[lints.clippy]` table allows `type_complexity` and
+    `items_after_test_module` (CI runs clippy with `-D warnings` over the whole
+    workspace, `--exclude` does not suppress lints from a path dependency, and
+    adding `#[allow]` inside the source would break the byte-identity guarantee
+    below). `src/lib.rs` is byte-identical to upstream.
 
 ---------------------------------------------------------------------------
 Design lineage

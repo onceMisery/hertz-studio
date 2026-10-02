@@ -56,7 +56,8 @@ pub mod netease {
         let padding = 16 - bytes.len() % 16;
         bytes.extend(std::iter::repeat_n(padding as u8, padding));
         let cipher = aes::Aes128::new_from_slice(b"e82ckenh8dichen8").unwrap();
-        for block in bytes.chunks_exact_mut(16) {
+        // bytes 上面已按 16 补齐，余数恒为空，所以 .0 就是全部的块。
+        for block in bytes.as_chunks_mut::<16>().0 {
             cipher.encrypt_block(aes::cipher::generic_array::GenericArray::from_mut_slice(
                 block,
             ));

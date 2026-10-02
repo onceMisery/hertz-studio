@@ -47,7 +47,21 @@ jobs:
           node scripts/check-appearance-restore.js
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        # 不用 --all：它会把 vendored 的 dbx-plugin-sdk 一起重排，而那份 src/lib.rs
+        # 必须与上游字节一致（见 NOTICE）。rustfmt.toml 的 ignore 对 cargo fmt 显式
+        # 传入的 crate 根无效，cargo fmt 也没有 --exclude，所以逐包列出。
+        # 新增 workspace 成员时记得补进来。
+        run: >-
+          cargo fmt
+          -p hertz-studio
+          -p vmusic-core
+          -p vmusic-audio
+          -p vmusic-store
+          -p vmusic-library
+          -p vmusic-lyrics
+          -p vmusic-beats
+          -p dbx-plugin-hertz
+          -- --check
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -67,9 +81,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
       - name: Smoke test
         run: bash scripts/smoke.sh 7899
         env:
           VMUSIC_BACKEND: null
       - name: Library and filesystem integration
         run: python3 scripts/check-library-api.py --maintenance
+      - name: DBX plugin sidecar protocol
+        # 真起 sidecar、用 stdio 喂 JSON-RPC：插件形态唯一的集成守卫（信封、路由表、
+        # 错误契约，以及扫描 → 列出曲目 → load → play 的端到端）。null 后端下频谱
+        # 断言自动跳过，所以 runner 不需要声卡。每日推荐那一条会真的打一次上游
+        # （开放授权平台不需要登录），断言只看形状与判别式，对方限流或离线不会假红。
+        run: |
+          cargo build -p dbx-plugin-hertz
+          node scripts/check-plugin-sidecar.js
+        env:
+          VMUSIC_BACKEND: null

@@ -170,12 +170,18 @@ const PLATFORM_ICONS: &[(&str, &[u8])] = &[
         "netease.png",
         include_bytes!("../../../plugin/ui/platform-icons/netease.png"),
     ),
-    ("qq.png", include_bytes!("../../../plugin/ui/platform-icons/qq.png")),
+    (
+        "qq.png",
+        include_bytes!("../../../plugin/ui/platform-icons/qq.png"),
+    ),
     (
         "kugou.png",
         include_bytes!("../../../plugin/ui/platform-icons/kugou.png"),
     ),
-    ("kuwo.png", include_bytes!("../../../plugin/ui/platform-icons/kuwo.png")),
+    (
+        "kuwo.png",
+        include_bytes!("../../../plugin/ui/platform-icons/kuwo.png"),
+    ),
     (
         "qishui.png",
         include_bytes!("../../../plugin/ui/platform-icons/qishui.png"),
