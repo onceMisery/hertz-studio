@@ -31,8 +31,10 @@
 //! （方法不存在、信封非法）才用真正的 JSON-RPC error。
 
 pub mod library;
+pub mod maintenance;
 pub mod playback;
 pub mod playlists;
+pub mod recommend;
 
 use std::sync::Arc;
 
@@ -304,6 +306,26 @@ impl Rpc {
             }
             (Op::Delete, ["v1", "playlists", id, "tracks", track]) => {
                 playlists::remove_from_playlist(state, id, track).await
+            }
+
+            // --- 备份 ---
+            (Op::Get, ["v1", "backup"]) => maintenance::export_backup(state).await,
+            (Op::Post, ["v1", "backup", "restore"]) => {
+                maintenance::restore_backup(state, body).await
+            }
+
+            // --- 开发者选项：播放诊断日志 ---
+            (Op::Get, ["v1", "diagnostics"]) => maintenance::get_diagnostics().await,
+            (Op::Post, ["v1", "diagnostics"]) => maintenance::set_diagnostics(state, body).await,
+            (Op::Get, ["v1", "diagnostics", "log"]) => maintenance::download_log().await,
+            (Op::Delete, ["v1", "diagnostics", "log"]) => maintenance::clear_log().await,
+
+            // --- 每日推荐 ---
+            (Op::Get, ["v1", "recommend", "daily"]) => {
+                recommend::daily_recommend(state, query).await
+            }
+            (Op::Get, ["v1", "recommend", "daily", "online"]) => {
+                recommend::daily_online_recommend(state, query).await
             }
 
             _ => Err(not_found(format!(

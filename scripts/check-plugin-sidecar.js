@@ -4,7 +4,7 @@
 //
 // DBX 插件 sidecar 的协议冒烟检查（零依赖）。
 //
-// 真的把 dbx-plugin-hertz 起起来，用 stdio 喂 JSON-RPC，验证七件事：
+// 真的把 dbx-plugin-hertz 起起来，用 stdio 喂 JSON-RPC，验证八件事：
 //   1. plugin/initialize 握手能过（协议版本协商）；
 //   2. 装配链路能跑通——数据目录、SQLite 迁移、音频后端（拿不到设备会回落 null）；
 //   3. 门面信封 {status, body} 与 HTTP 版同构；
@@ -16,7 +16,10 @@
 //      → 收到 spectrum 事件。这是插件形态下唯一能证明「原生音频在 dbx 子进程里
 //      真的出声」的检查，也是二进制信封（封面 base64 往返）的落点；
 //   7. 歌单域：增删改名、曲目增删与排序（含成员校验）、在线曲目的虚拟 id 与元数据
-//      快照、M3U 导出为裸 JSON 字符串并能原样导回。
+//      快照、M3U 导出为裸 JSON 字符串并能原样导回；
+//   8. 备份 / 诊断日志 / 每日推荐：备份导出不得含凭据且原样恢复要幂等（合并而不是
+//      再建一个），诊断日志与 m3u 同样走裸字符串，每日推荐同一天问两次必须是同
+//      一份榜单（种子 = 天序号的确定性出榜）。
 //
 // 用法：node scripts/check-plugin-sidecar.js
 // 二进制默认找 target/debug/dbx-plugin-hertz[.exe]，可用 HERTZ_PLUGIN_BIN 覆盖。
@@ -817,6 +820,143 @@ async function main() {
     await client.send('v1/playlists/' + encodeURIComponent(importedId), { op: 'DELETE' });
     const finalPlaylists = await client.send('v1/playlists', { op: 'GET' });
     eq(((finalPlaylists.result || {}).body?.playlists || []).length, 0, '两个歌单都删干净了');
+
+    console.log('\n备份');
+    // 先造点内容，否则导出的备份是空的，"恢复成功" 就只是空转。
+    const bkPl = await client.send('v1/playlists', { op: 'POST', body: { name: '备份验证歌单' } });
+    const bkPlId = (bkPl.result || {}).body?.id;
+    await client.send('v1/playlists/' + encodeURIComponent(bkPlId) + '/tracks', {
+      op: 'POST',
+      body: { track_ids: [track.id] },
+    });
+    await client.send('v1/favorites/toggle', {
+      op: 'POST',
+      body: { kind: 'track', source: 'local', ref_id: track.id },
+    });
+
+    const exported = await client.send('v1/backup', { op: 'GET' });
+    eq(exported.result && exported.result.status, 200, 'GET v1/backup → 200');
+    const backup = (exported.result || {}).body || {};
+    ok(typeof backup.version === 'number', '备份带 version');
+    ok(Array.isArray(backup.playlists) && backup.playlists.length === 1, '备份里有那 1 个歌单');
+    eq(backup.playlists[0]?.name, '备份验证歌单', '歌单名进了备份');
+    eq((backup.playlists[0]?.tracks || []).length, 1, '歌单里那首曲子进了备份');
+    ok(Array.isArray(backup.favorites) && backup.favorites.length === 1, '备份里有那 1 条收藏');
+    ok(backup.settings && typeof backup.settings === 'object', '备份带 settings');
+    // 凭据只存系统钥匙串，绝不进备份——泄出去就是明文密码。
+    ok(
+      !Object.keys(backup.settings || {}).some(
+        (key) => key.startsWith('online_cred_') || key.startsWith('online_cookie_') || key.startsWith('remote_cred_'),
+      ),
+      '备份的 settings 里没有凭据键',
+    );
+    ok(Array.isArray(backup.scan_roots) && backup.scan_roots.length === 1, '备份里有扫描根目录');
+
+    // 原样恢复必须幂等：同名歌单走「合并」而不是再建一个。
+    const restored = await client.send('v1/backup/restore', { op: 'POST', body: backup });
+    if ((restored.result || {}).status !== 200) {
+      console.log('       ↳ ' + JSON.stringify((restored.result || {}).body));
+      console.log('       ↳ 提交的备份: ' + JSON.stringify(backup).slice(0, 600));
+    }
+    eq(restored.result && restored.result.status, 200, 'POST v1/backup/restore → 200');
+    const report = (restored.result || {}).body || {};
+    eq(report.playlists_created, 0, '原样恢复不新建歌单（幂等）');
+    eq(report.playlists_merged, 1, '原样恢复合并了那 1 个歌单');
+    const afterRestore = await client.send('v1/playlists', { op: 'GET' });
+    eq(
+      ((afterRestore.result || {}).body?.playlists || []).length,
+      1,
+      '恢复之后歌单仍然是 1 个，没有翻倍',
+    );
+
+    // 版本号不对必须 400：静默接受旧格式会把用户的库写成半截。
+    const badBackup = await client.send('v1/backup/restore', { op: 'POST', body: { version: 999 } });
+    eq(badBackup.result && badBackup.result.status, 400, '版本号不对的备份 → 400');
+    const junkBackup = await client.send('v1/backup/restore', { op: 'POST', body: { nope: true } });
+    eq(junkBackup.result && junkBackup.result.status, 400, '根本不是备份的 body → 400');
+
+    console.log('\n诊断日志');
+    const diagOff = await client.send('v1/diagnostics', { op: 'GET' });
+    eq(diagOff.result && diagOff.result.status, 200, 'GET v1/diagnostics → 200');
+    const diagBody = (diagOff.result || {}).body || {};
+    ok(typeof diagBody.enabled === 'boolean', 'diagnostics 带 enabled 布尔');
+    // 路径必须回显：「把日志发给开发者」这一步不能要求用户先去翻数据目录。
+    ok(typeof diagBody.path === 'string' && diagBody.path.length > 0, 'diagnostics 回显日志路径');
+    ok('size_bytes' in diagBody && 'updated_at' in diagBody, 'diagnostics 带 size_bytes / updated_at');
+
+    const diagOn = await client.send('v1/diagnostics', { op: 'POST', body: { enabled: true } });
+    eq(diagOn.result && diagOn.result.status, 200, 'POST v1/diagnostics {enabled:true} → 200');
+    eq((diagOn.result || {}).body?.enabled, true, '开关立即生效（不用重启服务）');
+    eq((diagOn.result || {}).body?.exists, true, '开启后日志文件已建出来（写了会话头）');
+
+    // 与 m3u 导出同一套办法：HTTP 版是 text/plain 附件，信封里只能是裸字符串。
+    const logText = await client.send('v1/diagnostics/log', { op: 'GET' });
+    eq(logText.result && logText.result.status, 200, 'GET v1/diagnostics/log → 200');
+    eq(typeof (logText.result || {}).body, 'string', '日志体是裸 JSON 字符串（不是对象）');
+    ok(((logText.result || {}).body || '').length > 0, '开启后日志非空');
+
+    const logCleared = await client.send('v1/diagnostics/log', { op: 'DELETE' });
+    eq(cleared.result && cleared.result.status, 200, 'DELETE v1/diagnostics/log → 200');
+    const afterClear = await client.send('v1/diagnostics', { op: 'GET' });
+    ok(
+      ((afterClear.result || {}).body?.size_bytes || 0) === 0,
+      '清空后 size_bytes 归零，但开关保持原样（下一步通常是「清一次再复现一遍」）',
+    );
+    eq((afterClear.result || {}).body?.enabled, true, '清空日志没有顺手关掉开关');
+
+    const badDiag = await client.send('v1/diagnostics', { op: 'POST', body: {} });
+    eq(badDiag.result && badDiag.result.status, 400, '缺 enabled 字段 → 400');
+    await client.send('v1/diagnostics', { op: 'POST', body: { enabled: false } });
+    const diagFinal = await client.send('v1/diagnostics', { op: 'GET' });
+    eq((diagFinal.result || {}).body?.enabled, false, '关掉之后回读为 false');
+
+    console.log('\n每日推荐');
+    const daily = await client.send('v1/recommend/daily', { op: 'GET' });
+    eq(daily.result && daily.result.status, 200, 'GET v1/recommend/daily → 200');
+    const dailyBody = (daily.result || {}).body || {};
+    ok(/^\d{4}-\d{2}-\d{2}$/.test(dailyBody.date || ''), '推荐带本地日期 YYYY-MM-DD：' + dailyBody.date);
+    ok(typeof dailyBody.day === 'number', '推荐带天序号（出榜种子）');
+    ok(Array.isArray(dailyBody.tracks), '推荐带 tracks 数组');
+    ok(dailyBody.candidates >= 1, '候选池至少 1 首（库里有刚扫进来的那首）');
+
+    const dailyLimited = await client.send('v1/recommend/daily', { op: 'GET', query: { limit: '5' } });
+    eq((dailyLimited.result || {}).body?.limit, 5, 'limit=5 被认下来（字符串参数同口径）');
+    const dailyZero = await client.send('v1/recommend/daily', { op: 'GET', query: { limit: '0' } });
+    eq(dailyZero.result && dailyZero.result.status, 400, 'limit=0 → 400 而不是静默用默认值');
+
+    // 规则引擎是「种子 = 天序号」的确定性出榜：同一天问两次必须是同一份榜单，
+    // 否则「每日推荐」每次刷新都在变，用户没法把它当成一份稳定的单子。
+    const dayA = await client.send('v1/recommend/daily', { op: 'GET', query: { day: '12345' } });
+    const dayB = await client.send('v1/recommend/daily', { op: 'GET', query: { day: '12345' } });
+    const idsOf = (r) => ((r.result || {}).body?.tracks || []).map((t) => t.id).join(',');
+    eq(idsOf(dayA), idsOf(dayB), '同一天问两次榜单一致（确定性出榜）');
+    eq((dayA.result || {}).body?.day, 12345, '回看指定天时 day 原样回显');
+
+    const online = await client.send('v1/recommend/daily/online', { op: 'GET' });
+    eq(online.result && online.result.status, 200, 'GET v1/recommend/daily/online → 200');
+    const onlineBody = (online.result || {}).body || {};
+    // 状态恒为 200 是这一条的核心契约：一个平台没登录/挂了都不该让用户看到红条，
+    // 缺席写在 skipped 里。jamendo / ccmixter 这类开放授权平台不需要登录，所以
+    // ready 天然非空、这里会真的发一次网络请求——因此只钉形状与判别式，不钉条数，
+    // 离线时也应当通过。
+    ok(typeof onlineBody.empty === 'boolean', 'online 推荐带 empty 布尔（界面据此分流「去登录」还是「暂无」）');
+    ok(Array.isArray(onlineBody.ready), 'online 推荐带 ready 数组');
+    ok(Array.isArray(onlineBody.tracks) && Array.isArray(onlineBody.sources), 'online 推荐带 tracks / sources 数组');
+    const skipKinds = (onlineBody.skipped || []).map((s) => s.kind);
+    ok(skipKinds.length > 0, '没有登录任何需要账号的平台时，skipped 非空');
+    ok(
+      skipKinds.every((k) => ['not_signed_in', 'unsupported', 'unavailable', 'failed', 'timeout'].includes(k)),
+      'skipped 每项都带判别式 kind（界面按它分流，不解析文案）：' + JSON.stringify([...new Set(skipKinds)]),
+    );
+    const onlineZero = await client.send('v1/recommend/daily/online', { op: 'GET', query: { limit: '0' } });
+    eq(onlineZero.result && onlineZero.result.status, 400, 'online limit=0 → 400');
+
+    // 收尾：把这一段造出来的歌单与收藏删掉，别影响后面的断言。
+    await client.send('v1/playlists/' + encodeURIComponent(bkPlId), { op: 'DELETE' });
+    await client.send('v1/favorites/toggle', {
+      op: 'POST',
+      body: { kind: 'track', source: 'local', ref_id: track.id, favorited: false },
+    });
 
     // DELETE 的入参在 query 上：漏了 query 通道的话这里会删不掉。
     const removedRoot = await client.send('v1/library/roots', { op: 'DELETE', query: { path: rootPath } });

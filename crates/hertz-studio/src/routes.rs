@@ -1457,9 +1457,9 @@ pub(crate) fn is_credential(key: &str) -> bool {
 
 /// 单次导出的读取上限。日志本身受 diag 内部上限约束（约 2MiB），这里只是兜底，
 /// 免得将来上限调大后一次响应把内存当日志缓冲区。
-const DIAG_LOG_LIMIT: u64 = 4 * 1024 * 1024;
+pub(crate) const DIAG_LOG_LIMIT: u64 = 4 * 1024 * 1024;
 
-fn diagnostics_json() -> serde_json::Value {
+pub(crate) fn diagnostics_json() -> serde_json::Value {
     // stat 是本地一个小文件的 metadata，与 tokio::fs 走的是同一件活；开
     // spawn_blocking 只会把一次 µs 级调用摊成线程调度。
     let (exists, size, mtime) = crate::diag::stat();
@@ -1479,8 +1479,8 @@ async fn get_diagnostics() -> ApiResult<Json<serde_json::Value>> {
 }
 
 #[derive(Deserialize)]
-struct DiagnosticsUpdate {
-    enabled: bool,
+pub(crate) struct DiagnosticsUpdate {
+    pub(crate) enabled: bool,
 }
 
 /// 开关播放诊断日志：settings 落库 + 运行态即时切换，不要求重启服务。
@@ -1797,10 +1797,10 @@ async fn favorite_membership(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct DailyQuery {
-    limit: Option<usize>,
+pub(crate) struct DailyQuery {
+    pub(crate) limit: Option<usize>,
     /// 天序号（当天本地零点距纪元的天数）。不传或越界都按当天处理。
-    day: Option<i64>,
+    pub(crate) day: Option<i64>,
 }
 
 async fn daily_recommend(
@@ -2172,7 +2172,7 @@ async fn online_cookie(
 // ---------------------------------------------------------------------------
 
 /// 每个上游请求都要摸到设置表（读用户自己填的凭据），所以统一从这里造 Ctx。
-fn online_ctx(state: &AppState) -> online::Ctx {
+pub(crate) fn online_ctx(state: &AppState) -> online::Ctx {
     online::Ctx {
         db: state.db.clone(),
     }
