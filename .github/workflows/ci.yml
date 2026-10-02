@@ -25,16 +25,19 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install Linux keyring build dependencies
+      - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
-          # keyring 3 在 Linux 上走 dbus-secret-service → dbus → libdbus-sys，
-          # 后者构建期就要用 pkg-config 找到系统里的 libdbus-1，runner 镜像不自带。
-          # 缺它的表现极具误导性：clippy 直接退 101，看着像 lint 没过，其实是依赖
-          # 根本没编起来；而 macOS 走 apple-native、Windows 走 windows-native，
-          # 两边都不碰 dbus，所以只有 ubuntu 这一格会红。
+          # 两个都是构建期硬依赖，runner 镜像都不自带，缺任何一个 cargo 都会在
+          # 编依赖时就退 101（看着像 lint 或测试失败，其实是 build script 挂了）：
+          #   - libasound2-dev：cpal 在 Linux 上走 ALSA，alsa-sys 的 build.rs 用
+          #     pkg-config 找 alsa，找不到直接 panic。
+          #   - libdbus-1-dev：keyring 3 在 Linux 上走 dbus-secret-service →
+          #     dbus → libdbus-sys，同样构建期就要 pkg-config 找到 libdbus-1。
+          # macOS 走 coreaudio + apple-native、Windows 走 wasapi + windows-native，
+          # 两边都不碰这两个库，所以只有 ubuntu 这一格会红。
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libdbus-1-dev pkg-config
 
       - uses: actions/setup-node@v4
         with:
@@ -144,11 +147,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # 同 test job：keyring 在 Linux 上要系统 libdbus-1 才编得起来。
-      - name: Install Linux keyring build dependencies
+      # 同 test job：cpal 要 ALSA、keyring 要 libdbus-1，都是构建期硬依赖。
+      - name: Install Linux system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libdbus-1-dev pkg-config
       - uses: actions/setup-node@v4
         with:
           node-version: lts/*

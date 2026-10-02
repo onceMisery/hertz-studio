@@ -63,13 +63,13 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # keyring 3 在 Linux 上经 dbus-secret-service 依赖 libdbus-sys，构建期就要
-      # pkg-config 找到系统 libdbus-1，runner 镜像不自带（详见 ci.yml 同名步骤）。
-      - name: Install Linux keyring build dependencies
+      # cpal 要 ALSA、keyring 3 经 dbus-secret-service 要 libdbus-1，两者构建期
+      # 就用 pkg-config 探测系统库，runner 镜像都不自带（详见 ci.yml 同名步骤）。
+      - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libdbus-1-dev pkg-config
 
       - name: Build (release)
         run: cargo build --release --target ${{ matrix.target }}
@@ -125,12 +125,12 @@ jobs:
         with:
           key: plugin-${{ matrix.os }}
 
-      # 同上：sidecar 依赖 hertz-studio，Linux 上要系统 libdbus-1 才编得起来。
-      - name: Install Linux keyring build dependencies
+      # 同上：sidecar 依赖 hertz-studio，Linux 上要 ALSA 与 libdbus-1 才编得起来。
+      - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libasound2-dev libdbus-1-dev pkg-config
 
       - uses: actions/setup-node@v4
         with:

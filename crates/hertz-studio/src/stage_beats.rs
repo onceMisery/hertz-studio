@@ -385,9 +385,24 @@ mod tests {
 
     #[test]
     fn local_key_is_stable_and_absolute_only() {
-        let p = PathBuf::from(r"C:\Music\a b.flac");
-        let k1 = local_cache_key(&p).unwrap();
-        let k2 = local_cache_key(&PathBuf::from("C:/Music/a b.flac")).unwrap();
+        // 反斜杠与正斜杠要归一到同一个键，但这件事**只在 Windows 上成立**：Unix 下
+        // `\` 是合法文件名字符，而且 `C:\Music\a b.flac` 根本不是绝对路径，
+        // local_cache_key 开头的 is_absolute() 判断会直接返回 None。原先这里无条件
+        // 用 Windows 路径再 unwrap()，于是在 macOS/Linux 上必然 panic——CI 上表现
+        // 成 windows 绿、另两个平台红在 Test。
+        let (native, slashed) = if cfg!(windows) {
+            (
+                PathBuf::from(r"C:\Music\a b.flac"),
+                PathBuf::from("C:/Music/a b.flac"),
+            )
+        } else {
+            (
+                PathBuf::from("/Music/a b.flac"),
+                PathBuf::from("/Music/a b.flac"),
+            )
+        };
+        let k1 = local_cache_key(&native).unwrap();
+        let k2 = local_cache_key(&slashed).unwrap();
         assert_eq!(k1, k2);
         assert_eq!(k1.len(), 40, "sha1 hex");
         assert!(local_cache_key(Path::new("relative.flac")).is_none());
