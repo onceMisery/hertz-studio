@@ -63,6 +63,14 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # keyring 3 在 Linux 上经 dbus-secret-service 依赖 libdbus-sys，构建期就要
+      # pkg-config 找到系统 libdbus-1，runner 镜像不自带（详见 ci.yml 同名步骤）。
+      - name: Install Linux keyring build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
       - name: Build (release)
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -116,6 +124,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: plugin-${{ matrix.os }}
+
+      # 同上：sidecar 依赖 hertz-studio，Linux 上要系统 libdbus-1 才编得起来。
+      - name: Install Linux keyring build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
 
       - uses: actions/setup-node@v4
         with:
