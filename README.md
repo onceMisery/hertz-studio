@@ -310,30 +310,41 @@ mmusic-studio/
 │   ├── vmusic-store/        SQLite 仓储（sqlx）
 │   ├── vmusic-library/      目录扫描、元数据与封面、歌词文件查找
 │   ├── vmusic-lyrics/       LRC 解析（含逐字时间轴）
-│   └── hertz-studio/        服务二进制：axum 路由、WS、配置、内置 UI
-│       ├── src/online/      音源注册表：mod（契约+分发+缓存）· netease · qq · kugou · kuwo · ccmixter · jamendo · qishui
-│       └── web/             零构建的前端，由服务内嵌托管
-│           ├── index.html / app.js / style.css
-│           ├── stage.js / stage.css     歌词舞台（演出模式）
-│           ├── onset.js                 起音检测（粒子层与三维层共用唯一一份）
-│           ├── stage-control.js         舞台控制舱（参数写进 CSS 变量）
-│           ├── stage-particles.js       粒子层（帧门 + 渲染器调度）
-│           ├── stage-particles-gl.js    增强渲染器（WebGL2，可选）
-│           ├── creative-gl.js           三维舞台内核：相机 / FBO / 后处理 / 5 场景
-│           ├── creative-stage.js        编排层：预置 · 参数寻址 · 绑定 · cue · 自动导演
-│           ├── creative-prompt.js       离线提示词编译器：描述文本 → StageIntent（无 DOM/存储/网络）
-│           ├── handdrawn.js             手绘层（自写 rough 引擎，SVG）
-│           ├── backgrounds.js           背景层（6 种来源 + 封面取色 + 本地媒体）
-│           ├── workshop.js              创意工坊面板（只编辑数据，不持渲染）
-│           ├── creative.css             以上四层与工坊的样式
-│           ├── shelf.js                 3D 歌单架（CSS 3D）
-│           ├── pl-covers.js             歌单封面两跳解析（架子 / 列表 / 封面墙共用）
-│           ├── daily.js                 每日推荐（在线汇总 / 本地规则两条来源）
-│           ├── favorites.js             收藏
-│           ├── themes.js                主题色目录（令牌层：只声明 CSS 变量）
-│           ├── theme-studio.js          主题工作室（二次元主题 + 壁纸背景 + 自定义配色）
-│           ├── theme-studio.css         壁纸背景层与壁纸画廊
-│           └── wallpapers/              内嵌壁纸（12 张，已按长边 1600px 预压）
+│   └── hertz-studio/        服务逻辑库 + 独立形态二进制
+│       ├── src/lib.rs       业务逻辑库：两种宿主共用同一份
+│       ├── src/bootstrap.rs 进程装配：数据目录 → 可用的 AppState
+│       ├── src/rpc/         与传输无关的 JSON 门面（DBX 插件形态走这里）
+│       ├── src/routes.rs    axum REST 路由表（独立形态）
+│       ├── src/ws.rs        WebSocket 事件下发（独立形态）
+│       └── src/online/      音源注册表：mod（契约+分发+缓存）· netease · qq · kugou · kuwo · ccmixter · jamendo · qishui
+├── plugin/                  DBX 插件形态：与独立形态共用逻辑库和前端
+│   ├── manifest.json        插件清单（workbench + command + menus）
+│   ├── dbx-plugin.toml      打包配置
+│   ├── assets/plugin.svg    插件图标
+│   ├── backend/             sidecar 二进制 dbx-plugin-hertz：stdio JSON-RPC 薄壳
+│   ├── vendor/dbx-plugin-sdk/  DBX 官方 SDK 副本（未发布到 crates.io，出处见 NOTICE）
+│   └── ui/                  零构建的前端，独立形态内嵌托管、插件形态打进 .dbxp
+│       ├── index.html / app.js / style.css
+│       ├── stage.js / stage.css     歌词舞台（演出模式）
+│       ├── onset.js                 起音检测（粒子层与三维层共用唯一一份）
+│       ├── stage-control.js         舞台控制舱（参数写进 CSS 变量）
+│       ├── stage-particles.js       粒子层（帧门 + 渲染器调度）
+│       ├── stage-particles-gl.js    增强渲染器（WebGL2，可选）
+│       ├── creative-gl.js           三维舞台内核：相机 / FBO / 后处理 / 5 场景
+│       ├── creative-stage.js        编排层：预置 · 参数寻址 · 绑定 · cue · 自动导演
+│       ├── creative-prompt.js       离线提示词编译器：描述文本 → StageIntent（无 DOM/存储/网络）
+│       ├── handdrawn.js             手绘层（自写 rough 引擎，SVG）
+│       ├── backgrounds.js           背景层（6 种来源 + 封面取色 + 本地媒体）
+│       ├── workshop.js              创意工坊面板（只编辑数据，不持渲染）
+│       ├── creative.css             以上四层与工坊的样式
+│       ├── shelf.js                 3D 歌单架（CSS 3D）
+│       ├── pl-covers.js             歌单封面两跳解析（架子 / 列表 / 封面墙共用）
+│       ├── daily.js                 每日推荐（在线汇总 / 本地规则两条来源）
+│       ├── favorites.js             收藏
+│       ├── themes.js                主题色目录（令牌层：只声明 CSS 变量）
+│       ├── theme-studio.js          主题工作室（二次元主题 + 壁纸背景 + 自定义配色）
+│       ├── theme-studio.css         壁纸背景层与壁纸画廊
+│       └── wallpapers/              内嵌壁纸（12 张，已按长边 1600px 预压）
 ├── scripts/                 端到端冒烟脚本（smoke.sh / smoke.ps1）
 │                             + check-creative.js（创意舞台契约，零依赖）
 │                             + check-assets.js（前端资源接线，零依赖）
@@ -409,7 +420,7 @@ pass 做上面那一条的 GLSL 静态校验；再用三台"假机器"跑一遍�
 "契约检查全绿，但一个场景都画不出来"。前提是一个**可见的**浏览器窗口：
 后台标签页里 `visibilityState === 'hidden'`，`requestAnimationFrame` 完全停转。
 
-前端是零构建的原生 JS/CSS，但 `crates/hertz-studio/web/` 下的 CSS 有一层约定需要守：
+前端是零构建的原生 JS/CSS，但 `plugin/ui/` 下的 CSS 有一层约定需要守：
 `style.css` 与 `stage.css` 都在 `:root` 上声明变量，后者在 `<link>` 里排在后面，
 **同优先级整块覆盖**。因此共享令牌（`--glass-*`、`--hover`）只允许由 `style.css`
 的 `:root` 定义，且 `--glass-border` 是 `1px solid <color>` 完整简写、

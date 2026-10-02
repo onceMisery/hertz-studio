@@ -25,7 +25,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'crates', 'hertz-studio', 'web');
+const WEB = path.join(ROOT, 'plugin', 'ui');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const STUDIO = read(path.join(WEB, 'theme-studio.js'));
 const STUDIO_CSS = read(path.join(WEB, 'theme-studio.css'));

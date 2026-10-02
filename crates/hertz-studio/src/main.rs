@@ -6,117 +6,101 @@
 //! Run `hertz-studio --help` for options. With no arguments it binds a fixed local
 //! port, writes a discovery file with the token, and serves the bundled UI.
 
-mod config;
-mod daily;
-mod diag;
-mod error;
-mod history;
-mod online;
-mod persist;
-mod radio;
-mod remote;
-mod routes;
-mod scan;
-mod secrets;
-mod stage_beats;
-mod state;
-mod ws;
-
+use hertz_studio::{bootstrap, config, routes, state, ws};
 use std::sync::Arc;
 
 use axum::extract::Path;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use tokio::sync::broadcast;
-use vmusic_audio::{spawn, BackendKind};
 
-use config::Config;
-use state::{spawn_event_pump, AppState};
+use state::AppState;
 
 /// 内嵌的界面资源。
 ///
 /// 用 `include_str!` 而不是 `ServeDir`，是为了让单个 exe 拷出构建目录还能跑
-/// ——这是本地优先分发的基本前提。代价是改 web/ 下的任何文件都要重新编译。
+/// ——这是本地优先分发的基本前提。代价是改 plugin/ui/ 下的任何文件都要重新编译。
 /// 加一个文件在这里加一行、在下面的路由表里加一行，其余不用动。
-const INDEX_HTML: &str = include_str!("../web/index.html");
-const APP_JS: &str = include_str!("../web/app.js");
-const STYLE_CSS: &str = include_str!("../web/style.css");
-const STAGE_CSS: &str = include_str!("../web/stage.css");
-const CREATIVE_CSS: &str = include_str!("../web/creative.css");
-const STAGE_JS: &str = include_str!("../web/stage.js");
-const STAGE_PARTICLES_JS: &str = include_str!("../web/stage-particles.js");
-const STAGE_PARTICLES_GL_JS: &str = include_str!("../web/stage-particles-gl.js");
-const THEMES_JS: &str = include_str!("../web/themes.js");
-const STAGE_CTL_JS: &str = include_str!("../web/stage-control.js");
-const SHELF_JS: &str = include_str!("../web/shelf.js");
-const PL_COVERS_JS: &str = include_str!("../web/pl-covers.js");
+const INDEX_HTML: &str = include_str!("../../../plugin/ui/index.html");
+const HOST_JS: &str = include_str!("../../../plugin/ui/host.js");
+const DIALOGS_JS: &str = include_str!("../../../plugin/ui/dialogs.js");
+const APP_JS: &str = include_str!("../../../plugin/ui/app.js");
+const STYLE_CSS: &str = include_str!("../../../plugin/ui/style.css");
+const STAGE_CSS: &str = include_str!("../../../plugin/ui/stage.css");
+const CREATIVE_CSS: &str = include_str!("../../../plugin/ui/creative.css");
+const STAGE_JS: &str = include_str!("../../../plugin/ui/stage.js");
+const STAGE_PARTICLES_JS: &str = include_str!("../../../plugin/ui/stage-particles.js");
+const STAGE_PARTICLES_GL_JS: &str = include_str!("../../../plugin/ui/stage-particles-gl.js");
+const THEMES_JS: &str = include_str!("../../../plugin/ui/themes.js");
+const STAGE_CTL_JS: &str = include_str!("../../../plugin/ui/stage-control.js");
+const SHELF_JS: &str = include_str!("../../../plugin/ui/shelf.js");
+const PL_COVERS_JS: &str = include_str!("../../../plugin/ui/pl-covers.js");
 // 主题工作室：往 Theme 注册二次元主题，并铺一层壁纸背景。
-const THEME_STUDIO_JS: &str = include_str!("../web/theme-studio.js");
-const THEME_STUDIO_CSS: &str = include_str!("../web/theme-studio.css");
+const THEME_STUDIO_JS: &str = include_str!("../../../plugin/ui/theme-studio.js");
+const THEME_STUDIO_CSS: &str = include_str!("../../../plugin/ui/theme-studio.css");
 // 界面皮肤：注册表 + 每套皮肤一份 CSS。加新皮肤就在这里多 include 一份，
 // 再往路由表里添一行，剩下的（切换/持久化）由 skins.js 统一处理。
-const SKINS_JS: &str = include_str!("../web/skins/skins.js");
-const SKINS_CSS: &str = include_str!("../web/skins/skins.css");
-const SKIN_SHEEN_CSS: &str = include_str!("../web/skins/skin.sheen.css");
-const SKIN_WORKBENCH_CSS: &str = include_str!("../web/skins/skin.workbench.css");
-const SKIN_LIUNIAN_CSS: &str = include_str!("../web/skins/skin.liunian.css");
-const SKIN_LIUNIAN_JS: &str = include_str!("../web/skins/skin.liunian.js");
+const SKINS_JS: &str = include_str!("../../../plugin/ui/skins/skins.js");
+const SKINS_CSS: &str = include_str!("../../../plugin/ui/skins/skins.css");
+const SKIN_SHEEN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.sheen.css");
+const SKIN_WORKBENCH_CSS: &str = include_str!("../../../plugin/ui/skins/skin.workbench.css");
+const SKIN_LIUNIAN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.css");
+const SKIN_LIUNIAN_JS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.js");
 // 舞台主题：只管沉浸舞台操作层的观感，与皮肤正交、可组合，常驻引入。
-const STAGE_THEME_STARFALL_CSS: &str = include_str!("../web/stage-themes/starfall.css");
+const STAGE_THEME_STARFALL_CSS: &str = include_str!("../../../plugin/ui/stage-themes/starfall.css");
 // 起音检测。粒子层与三维层共用，所以它必须排在两者之前。
-const ONSET_JS: &str = include_str!("../web/onset.js");
+const ONSET_JS: &str = include_str!("../../../plugin/ui/onset.js");
 
 // 创意舞台的四件套。加载顺序即依赖顺序：内核 → 编排 → 表现层 → 工坊面板。
 // creative-gl 必须先于 creative-stage（后者建引擎时读 window.CreativeGL），
 // 而 handdrawn / backgrounds 只被 creative-stage 可选地调用，放前放后都行 ——
 // 统一放在前面，这样任何一个失败都不会连带挡住编排层。
-const CREATIVE_GL_JS: &str = include_str!("../web/creative-gl.js");
-const CREATIVE_STAGE_JS: &str = include_str!("../web/creative-stage.js");
-const CREATIVE_PROMPT_JS: &str = include_str!("../web/creative-prompt.js");
-const HANDDRAWN_JS: &str = include_str!("../web/handdrawn.js");
-const BACKGROUNDS_JS: &str = include_str!("../web/backgrounds.js");
-const BGWALL_JS: &str = include_str!("../web/bgwall.js");
-const LYRIC3D_JS: &str = include_str!("../web/lyric3d.js");
-const WORKSHOP_JS: &str = include_str!("../web/workshop.js");
+const CREATIVE_GL_JS: &str = include_str!("../../../plugin/ui/creative-gl.js");
+const CREATIVE_STAGE_JS: &str = include_str!("../../../plugin/ui/creative-stage.js");
+const CREATIVE_PROMPT_JS: &str = include_str!("../../../plugin/ui/creative-prompt.js");
+const HANDDRAWN_JS: &str = include_str!("../../../plugin/ui/handdrawn.js");
+const BACKGROUNDS_JS: &str = include_str!("../../../plugin/ui/backgrounds.js");
+const BGWALL_JS: &str = include_str!("../../../plugin/ui/bgwall.js");
+const LYRIC3D_JS: &str = include_str!("../../../plugin/ui/lyric3d.js");
+const WORKSHOP_JS: &str = include_str!("../../../plugin/ui/workshop.js");
 // 舞台相机三件套（电影 → 自由 → 焦点），顺序与 camLayers priority 一致。
-const STAGE_CINEMA_JS: &str = include_str!("../web/stage-cinema.js");
-const STAGE_FREECAM_JS: &str = include_str!("../web/stage-freecam.js");
-const STAGE_FOCUS_JS: &str = include_str!("../web/stage-focus.js");
+const STAGE_CINEMA_JS: &str = include_str!("../../../plugin/ui/stage-cinema.js");
+const STAGE_FREECAM_JS: &str = include_str!("../../../plugin/ui/stage-freecam.js");
+const STAGE_FOCUS_JS: &str = include_str!("../../../plugin/ui/stage-focus.js");
 // 沉浸式三维舞台：独占一个 WebGL2 上下文的全屏演出层，自带后处理链与舞台坞。
-const STAGE_LYRICS_JS: &str = include_str!("../web/stage-lyrics.js");
+const STAGE_LYRICS_JS: &str = include_str!("../../../plugin/ui/stage-lyrics.js");
 // 沉浸式 3D 歌单架（封面流），移植自 openmusic GalaxyFloatingSongCard。
-const STAGE_SHELF_JS: &str = include_str!("../web/stage-shelf.js");
-const STAGE3D_JS: &str = include_str!("../web/stage3d.js");
-const STAGE3D_CSS: &str = include_str!("../web/stage3d.css");
-const STAGE_IMMERSIVE_JS: &str = include_str!("../web/stage-immersive.js");
+const STAGE_SHELF_JS: &str = include_str!("../../../plugin/ui/stage-shelf.js");
+const STAGE3D_JS: &str = include_str!("../../../plugin/ui/stage3d.js");
+const STAGE3D_CSS: &str = include_str!("../../../plugin/ui/stage3d.css");
+const STAGE_IMMERSIVE_JS: &str = include_str!("../../../plugin/ui/stage-immersive.js");
 // stanza 歌词模式（流光 classic / 心象 cadenza / 商籁 sonnet）：零依赖模块 + 样式表，
 // 在 index.html 中排在 stage-lyrics.js 之前加载。
-const STANZA_UTIL_JS: &str = include_str!("../web/stanza/stanza-util.js");
-const STANZA_THEME_JS: &str = include_str!("../web/stanza/stanza-theme.js");
-const STANZA_TEXTLAYOUT_JS: &str = include_str!("../web/stanza/stanza-textlayout.js");
-const STANZA_BG_JS: &str = include_str!("../web/stanza/stanza-bg.js");
-const STANZA_SUBTITLE_JS: &str = include_str!("../web/stanza/stanza-subtitle.js");
-const STANZA_CLASSIC_JS: &str = include_str!("../web/stanza/stanza-classic.js");
-const STANZA_CADENZA_JS: &str = include_str!("../web/stanza/stanza-cadenza.js");
+const STANZA_UTIL_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-util.js");
+const STANZA_THEME_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-theme.js");
+const STANZA_TEXTLAYOUT_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-textlayout.js");
+const STANZA_BG_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-bg.js");
+const STANZA_SUBTITLE_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-subtitle.js");
+const STANZA_CLASSIC_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-classic.js");
+const STANZA_CADENZA_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-cadenza.js");
 // 商籁 sonnet：全屏 Pixi 电影镜头歌词。图形引擎 + 渲染器两个模块；PixiJS v8
 // （MIT）随包内嵌，但前端只在首次选中商籁时才注入 <script> 惰性加载它。
-const STANZA_SONNET_FX_JS: &str = include_str!("../web/stanza/stanza-sonnet-fx.js");
-const STANZA_SONNET_JS: &str = include_str!("../web/stanza/stanza-sonnet.js");
-const STANZA_TEMPERA_JS: &str = include_str!("../web/stanza/stanza-tempera.js");
-const PIXI_JS: &str = include_str!("../web/vendor/pixi.min.js");
-const STANZA_CSS: &str = include_str!("../web/stanza/stanza.css");
+const STANZA_SONNET_FX_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-sonnet-fx.js");
+const STANZA_SONNET_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-sonnet.js");
+const STANZA_TEMPERA_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-tempera.js");
+const PIXI_JS: &str = include_str!("../../../plugin/ui/vendor/pixi.min.js");
+const STANZA_CSS: &str = include_str!("../../../plugin/ui/stanza/stanza.css");
 // 在线曲库（SP1）：vendored MIT 二维码库 + 三个在线模块与样式。
-const QRCODE_JS: &str = include_str!("../web/vendor/qrcode.js");
-const ONLINE_LOGIN_JS: &str = include_str!("../web/online-login.js");
-const ONLINE_JS: &str = include_str!("../web/online.js");
-const ONLINE_PLAYLISTS_JS: &str = include_str!("../web/online-playlists.js");
-const ONLINE_PLAYLIST_VIEW_JS: &str = include_str!("../web/online-playlist-view.js");
-const ONLINE_CSS: &str = include_str!("../web/online.css");
+const QRCODE_JS: &str = include_str!("../../../plugin/ui/vendor/qrcode.js");
+const ONLINE_LOGIN_JS: &str = include_str!("../../../plugin/ui/online-login.js");
+const ONLINE_JS: &str = include_str!("../../../plugin/ui/online.js");
+const ONLINE_PLAYLISTS_JS: &str = include_str!("../../../plugin/ui/online-playlists.js");
+const ONLINE_PLAYLIST_VIEW_JS: &str = include_str!("../../../plugin/ui/online-playlist-view.js");
+const ONLINE_CSS: &str = include_str!("../../../plugin/ui/online.css");
 // 收藏与每日推荐。两者都先于 app.js 加载，由 app.js 在启动序列里 bind()。
-const FAVORITES_JS: &str = include_str!("../web/favorites.js");
-const DAILY_JS: &str = include_str!("../web/daily.js");
-const DAILY_VIEW_JS: &str = include_str!("../web/daily-view.js");
+const FAVORITES_JS: &str = include_str!("../../../plugin/ui/favorites.js");
+const DAILY_JS: &str = include_str!("../../../plugin/ui/daily.js");
+const DAILY_VIEW_JS: &str = include_str!("../../../plugin/ui/daily-view.js");
 
 // 主题壁纸。与 JS/CSS 不同，这里是二进制资源，所以用 `include_bytes!`。
 //
@@ -130,51 +114,51 @@ const DAILY_VIEW_JS: &str = include_str!("../web/daily-view.js");
 const WALLPAPERS: &[(&str, &[u8])] = &[
     (
         "morning-01.jpg",
-        include_bytes!("../web/wallpapers/morning-01.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/morning-01.jpg"),
     ),
     (
         "morning-09.jpg",
-        include_bytes!("../web/wallpapers/morning-09.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/morning-09.jpg"),
     ),
     (
         "morning-14.jpg",
-        include_bytes!("../web/wallpapers/morning-14.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/morning-14.jpg"),
     ),
     (
         "afternoon-19.jpg",
-        include_bytes!("../web/wallpapers/afternoon-19.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/afternoon-19.jpg"),
     ),
     (
         "afternoon-07.jpg",
-        include_bytes!("../web/wallpapers/afternoon-07.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/afternoon-07.jpg"),
     ),
     (
         "afternoon-20.jpg",
-        include_bytes!("../web/wallpapers/afternoon-20.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/afternoon-20.jpg"),
     ),
     (
         "evening-12.jpg",
-        include_bytes!("../web/wallpapers/evening-12.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/evening-12.jpg"),
     ),
     (
         "evening-16.jpg",
-        include_bytes!("../web/wallpapers/evening-16.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/evening-16.jpg"),
     ),
     (
         "evening-18.jpg",
-        include_bytes!("../web/wallpapers/evening-18.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/evening-18.jpg"),
     ),
     (
         "night-02.jpg",
-        include_bytes!("../web/wallpapers/night-02.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/night-02.jpg"),
     ),
     (
         "night-08.jpg",
-        include_bytes!("../web/wallpapers/night-08.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/night-08.jpg"),
     ),
     (
         "night-12.jpg",
-        include_bytes!("../web/wallpapers/night-12.jpg"),
+        include_bytes!("../../../plugin/ui/wallpapers/night-12.jpg"),
     ),
 ];
 
@@ -184,17 +168,17 @@ const WALLPAPERS: &[(&str, &[u8])] = &[
 const PLATFORM_ICONS: &[(&str, &[u8])] = &[
     (
         "netease.png",
-        include_bytes!("../web/platform-icons/netease.png"),
+        include_bytes!("../../../plugin/ui/platform-icons/netease.png"),
     ),
-    ("qq.png", include_bytes!("../web/platform-icons/qq.png")),
+    ("qq.png", include_bytes!("../../../plugin/ui/platform-icons/qq.png")),
     (
         "kugou.png",
-        include_bytes!("../web/platform-icons/kugou.png"),
+        include_bytes!("../../../plugin/ui/platform-icons/kugou.png"),
     ),
-    ("kuwo.png", include_bytes!("../web/platform-icons/kuwo.png")),
+    ("kuwo.png", include_bytes!("../../../plugin/ui/platform-icons/kuwo.png")),
     (
         "qishui.png",
-        include_bytes!("../web/platform-icons/qishui.png"),
+        include_bytes!("../../../plugin/ui/platform-icons/qishui.png"),
     ),
 ];
 
@@ -215,123 +199,23 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let data_dir = args.data_dir.unwrap_or_else(config::default_data_dir);
-    tokio::fs::create_dir_all(&data_dir).await?;
-
-    let config = Config::load(&data_dir)?;
-    init_logging(&config.log.level, &config.log.format);
+    let boot_config = bootstrap::prepare(&data_dir).await?;
+    init_logging(&boot_config.log.level, &boot_config.log.format);
 
     // The token is the only thing standing between a local web page and full
     // control of playback, so it is generated once and kept with 0600 perms.
     let token = load_or_create_token(&data_dir).await?;
 
-    let db = vmusic_store::open(&data_dir).await?;
-
-    let backend = match config.audio.backend.as_str() {
-        "null" => BackendKind::Null,
-        _ => BackendKind::cpal(),
-    };
-    // 实际生效的后端名要单独记：cpal 拿不到设备时会回落到 null，而「有声吗」
-    // 正是播放诊断的第一问句，日志里必须写真正跑起来的那个而不是请求的那个。
-    let mut backend_label = config.audio.backend.clone();
-    let (audio, _audio_thread) = match spawn(backend).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::warn!("requested backend unavailable ({e}); falling back to null");
-            backend_label = "null".to_string();
-            spawn(BackendKind::Null).await?
-        }
-    };
-    // 开发者选项里的播放诊断日志：默认关闭，开着则跨重启继续录（settings 为权威）。
-    diag::init(&data_dir, &backend_label);
-    let diag_enabled = vmusic_store::settings::get(&db, diag::SETTING_KEY)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    diag::set_enabled(diag_enabled);
-    // 音量/模式以服务端 settings 为权威；缺键才回落到 config 默认。
-    let (restore_volume, restore_mode) =
-        persist::load_player_prefs(&db, config.audio.volume, vmusic_core::PlayMode::Repeat).await;
-    audio.set_volume(restore_volume).await.ok();
-    audio.set_mode(restore_mode).await.ok();
-
-    // 逐源音质偏好以 settings 为权威；缺键/坏值由 load 内部回落为缺省表。
-    let quality_prefs = crate::online::quality::load(&db).await.unwrap_or_default();
-    // 用户显式保留的缓存条目（跨重启保留）。
-    let keep_list: Vec<String> = crate::persist::load_strings(&db, "online_keep")
-        .await
-        .unwrap_or_default();
-    // DSP 设置：EQ/响度归一化/交叉淡化，跨重启恢复。
-    let dsp_config = crate::state::DspConfig::from_settings(
-        &vmusic_store::settings::get_all(&db)
-            .await
-            .unwrap_or_default(),
-    );
-
-    let (events, _) = broadcast::channel(128);
-    let state = Arc::new(AppState {
-        db,
-        audio,
-        config: Arc::new(config.clone()),
-        data_dir: data_dir.clone(),
-        token: token.clone(),
-        events,
-        queue: Default::default(),
-        cursor: Default::default(),
-        radio: Default::default(),
-        radio_fetch: Default::default(),
-        scan: Default::default(),
-        scan_cancel: Default::default(),
-        qr: crate::online::qr::Registry::new(),
-        play_generation: Default::default(),
-        play_commit: Default::default(),
-        buffering: Default::default(),
-        online_meta: Default::default(),
-        downloads: Default::default(),
-        protected: Default::default(),
-        keep: tokio::sync::Mutex::new(keep_list),
-        dsp: tokio::sync::Mutex::new(dsp_config.clone()),
-        auto_failures: Default::default(),
-        quality: tokio::sync::Mutex::new(quality_prefs),
-        stage_beats: Default::default(),
-        weak_self: Default::default(),
-    });
-    // 供 on_track_committed detach 'static 后台任务用；set 失败只可能是
-    // 重复注入，启动路径只走一次，忽略即可。
-    let _ = state.weak_self.set(std::sync::Arc::downgrade(&state));
-    spawn_event_pump(state.clone());
-    // DSP 即时下发（播放时再按曲目追加 track_gain）。
-    let _ = state
-        .audio
-        .set_dsp(vmusic_core::DspParams {
-            eq_gains_db: dsp_config.eq_gains_db,
-            preamp_db: dsp_config.preamp_db,
-            track_gain_db: 0.0,
-        })
-        .await;
-    let _ = state.audio.set_crossfade(dsp_config.crossfade_ms).await;
-
-    // 凭据迁移：SQLite 旧明文凭据 → 系统钥匙串。失败保留旧数据并记 ERROR。
-    let db_handle = state.db.clone();
-    tokio::spawn(async move {
-        crate::online::cred::migrate_secrets_to_keyring(&db_handle).await;
-    });
-    scan::spawn_watcher(state.clone());
-
-    // 清掉上次崩溃留下的半截下载，并按配置做一次缓存容量回收。
-    {
-        let cache_dir = state.online_cache_dir();
-        crate::online::cache::clean_parts(&cache_dir).await;
-        let max = state.config.online.cache_max_bytes;
-        if let Err(e) = crate::online::cache::enforce_limit(&cache_dir, max, &[]).await {
-            tracing::warn!("缓存 LRU 回收失败: {e}");
-        }
-    }
+    // `booted` 必须活到 main 结束：它持有音频 actor 的线程句柄。
+    let booted = bootstrap::boot(data_dir, boot_config, token.clone()).await?;
+    let state = booted.state.clone();
+    let config = &booted.config;
 
     let app = Router::new()
         .route("/ws", get(ws::ws_handler))
         .merge(routes::router(state.clone()))
+        .route("/host.js", get(|| asset(JS, HOST_JS)))
+        .route("/dialogs.js", get(|| asset(JS, DIALOGS_JS)))
         .route("/app.js", get(|| asset(JS, APP_JS)))
         .route("/stage.js", get(|| asset(JS, STAGE_JS)))
         .route("/onset.js", get(|| asset(JS, ONSET_JS)))

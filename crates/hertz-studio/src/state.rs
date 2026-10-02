@@ -97,7 +97,7 @@ pub struct ScanError {
 /// 据此写播放历史；/player/load 也接受随队的快照注入（重启后从歌单/收藏
 /// 播放时客户端持有元数据而服务端内存已清空）。
 #[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct OnlineMetaSnap {
+pub struct OnlineMetaSnap {
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,

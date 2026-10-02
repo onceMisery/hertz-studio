@@ -1,0 +1,15 @@
+# DBX 插件打包配置。
+#
+# 这里没有 [dev] ui_build / ui_watch：plugin/ui 是零构建的原生 JS，没有 npm 步骤，
+# dev-host 直接读文件即可。这也是复用现有前端的一个额外好处。
+schema_version = 1
+
+[backend]
+language = "rust"
+directory = "backend"
+binary = "dbx-plugin-hertz"
+
+[package]
+# 进 .dbxp 的全部内容就这两个目录。manifest.json 由打包器单独写入，
+# backend/ 编译后落到 bin/<target>/，vendor/ 与 crates/ 都不进包。
+include = ["assets", "ui"]

@@ -4,7 +4,7 @@
 //
 // 前端资源接线检查（零依赖）。
 //
-// hertz-studio 用 `include_str!` 把 web/ 下的文件内嵌进二进制，再用一张显式路由表
+// hertz-studio 用 `include_str!` 把 plugin/ui/ 下的文件内嵌进二进制，再用一张显式路由表
 // 逐个挂出去。这条链有三个容易静默失效的地方，而且都不会被 Rust 编译器拦住：
 //
 //   1. include_str! 指向的文件不存在      → 这个会被编译器拦住（唯一的好消息）
@@ -23,7 +23,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'crates', 'hertz-studio', 'web');
+const WEB = path.join(ROOT, 'plugin', 'ui');
 const MAIN_RS = path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs');
 const INDEX = path.join(WEB, 'index.html');
 
@@ -99,7 +99,7 @@ linkedCss.concat(linkedJs).forEach((href) => {
 });
 
 // 每个前端资源也都应该被 index.html 引用，否则它永远不会被加载。
-// 用相对 web/ 的完整 href 比对而不是 basename：vendor/qrcode.js 与未来可能的
+// 用相对 plugin/ui/ 的完整 href 比对而不是 basename：vendor/qrcode.js 与未来可能的
 // 同名文件处在子目录里，basename 会把它们混为一谈。
 // 例外：允许被 index.html 引用的脚本按 URL 字符串惰性注入的资源（如商籁
 // 首次启用时才加载的 vendor/pixi.min.js）——在全部已引用脚本源码里能查到

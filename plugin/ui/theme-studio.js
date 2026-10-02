@@ -62,11 +62,20 @@
     { id: 'night-12.jpg', label: '月下', tone: '夜', lum: 175, theme: 'anime-sakura' }
   ];
 
-  /// 壁纸的 URL 前缀。**必须是绝对路径**：相对路径按"当前文档"解析，页面一旦
+  /// 壁纸的 URL 前缀。**声明必须是绝对路径**：相对路径按"当前文档"解析，页面一旦
   /// 不是挂在站点根上（反代带前缀、或从某个子路径打开），`wallpapers/x.jpg`
   /// 就会解析到 `/前缀/wallpapers/x.jpg` 而对服务端是 404 —— 表现正是
   /// "换了主题，背景图却不出来"。舞台那边的壁纸一直是绝对路径，这里对齐。
+  ///
+  /// 真正赋给 DOM 时还要再过一遍 assetUrl()：DBX 插件形态下宿主注入的
+  /// <base href> 带路径，根相对引用会把这段路径丢掉，需要按 baseURI 补全。
+  /// 两种宿主的差异全部收在 host.js 里，这里的声明保持根相对不变。
   var WALL_BASE = '/wallpapers/';
+
+  /// 站内资源 URL。独立形态恒等返回；插件形态按 <base href> 补全（详见 host.js）。
+  function assetUrl(url) {
+    return window.hertzHost ? window.hertzHost.assetUrl(url) : url;
+  }
 
   /// 兜底壁纸：某套主题没声明背景、或声明的那张加载不出来时用这张。
   /// 挑中间亮度（lum 90）那张是有意的——自动压暗对它的处理最轻，于是
@@ -593,7 +602,7 @@
 
   /// 壁纸的绝对 URL。文件名过一遍 encodeURIComponent：它是按名字寻址的，
   /// 名字里出现需要转义的字符时不能把 URL 拼坏。
-  function wallUrl(id) { return WALL_BASE + encodeURIComponent(id); }
+  function wallUrl(id) { return assetUrl(WALL_BASE + encodeURIComponent(id)); }
 
   /// 取不到的图记在这张表里，之后不再重复试探：结果是确定的，每换一次主题
   /// 就重试一次只会把控制台刷满。

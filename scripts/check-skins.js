@@ -24,7 +24,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'crates', 'hertz-studio', 'web');
+const WEB = path.join(ROOT, 'plugin', 'ui');
 const SKINS = path.join(WEB, 'skins');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const SKINS_JS = read(path.join(SKINS, 'skins.js'));
@@ -466,10 +466,12 @@ function checkWiring() {
     ok(MAIN_RS.includes(`/skins/${p.split('/')[1]}`) || MAIN_RS.includes(p),
       `main.rs 注册了 /${p} 路由`);
   }
-  ok(/include_str!\("\.\.\/web\/skins\/skins\.js"\)/.test(MAIN_RS), 'skins.js 编进二进制');
-  ok(/include_str!\("\.\.\/web\/skins\/skin\.liunian\.css"\)/.test(MAIN_RS),
+  // 只匹配文件名后缀、不写死相对深度：前端目录搬过位置（web/ → plugin/ui/），
+  // 把深度写进断言只会让下一次搬迁假红一片。
+  ok(/include_str!\("[^"]*\/skins\/skins\.js"\)/.test(MAIN_RS), 'skins.js 编进二进制');
+  ok(/include_str!\("[^"]*\/skins\/skin\.liunian\.css"\)/.test(MAIN_RS),
     'skin.liunian.css 编进二进制');
-  ok(/include_str!\("\.\.\/web\/skins\/skin\.liunian\.js"\)/.test(MAIN_RS),
+  ok(/include_str!\("[^"]*\/skins\/skin\.liunian\.js"\)/.test(MAIN_RS),
     'skin.liunian.js 编进二进制');
 
   section('接线：流年重编排 JS 的加载顺序与机制');

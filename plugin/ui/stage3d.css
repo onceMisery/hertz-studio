@@ -159,6 +159,14 @@ body.s3d-open > .bar { display: none; }
   z-index: 2;
 }
 
+/* 上一段注释里「顶栏/场景坞/播放条基础值就是 z-index 4」由这里给出：不透明 WebGL
+   画布被抬到 2 之后，z-index auto 的 chrome 会整层落到画布下面——直接进入沉浸
+   声场（根节点没有 .s3d-stanza 类）切极光穹顶时控制界面消失且点不到。stanza.css
+   在 .s3d-stanza 作用域补过同值，恰好把这个缺口藏住了。 */
+.s3d-head,
+.s3d-dock,
+.s3d-player { z-index: 4; }
+
 .s3d[data-scene='aurora'] .s3d-vignette {
   background: radial-gradient(ellipse at 50% 38%, transparent 24%, rgba(4, 9, 15, .16) 60%, rgba(2, 5, 10, .68) 100%),
     linear-gradient(180deg, rgba(37, 103, 97, .08), transparent 42%, rgba(61, 31, 104, .12));

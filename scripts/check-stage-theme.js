@@ -23,7 +23,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'crates', 'hertz-studio', 'web');
+const WEB = path.join(ROOT, 'plugin', 'ui');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 
 const THEME = read(path.join(WEB, 'stage-themes', 'starfall.css'));
@@ -167,7 +167,8 @@ ok(/<link rel="stylesheet" href="stage-themes\/starfall\.css">/.test(HTML),
   'starfall.css 常驻引入（主题不像皮肤那样按需启用）');
 ok(HTML.indexOf('href="stage3d.css"') < HTML.indexOf('href="stage-themes/starfall.css"'),
   'starfall.css 排在 stage3d.css 之后（同特异性下覆盖基础样式）');
-ok(/include_str!\("\.\.\/web\/stage-themes\/starfall\.css"\)/.test(MAIN_RS), 'starfall.css 编进二进制');
+// 只匹配文件名后缀，不写死相对深度：前端目录搬过位置（web/ → plugin/ui/）。
+ok(/include_str!\("[^"]*\/stage-themes\/starfall\.css"\)/.test(MAIN_RS), 'starfall.css 编进二进制');
 ok(/"\/stage-themes\/starfall\.css"/.test(MAIN_RS), 'main.rs 注册了 /stage-themes/starfall.css 路由');
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,10 @@
 'use strict';
 
 // Token 通常由服务端注入进 HTML；链接带来的 token 用完即抹掉，避免留在历史里。
+// DBX 插件形态下整段要跳过：那边 stdio 天然可信没有 token，而且 iframe 是
+// opaque origin，调 history.replaceState 会直接抛 SecurityError 把脚本打断。
 const TOKEN = (() => {
+  if (window.hertzHost && window.hertzHost.isDbx) return '';
   const params = new URLSearchParams(location.search);
   const fromUrl = params.get('token');
   if (fromUrl) {
@@ -301,6 +304,24 @@ const PlaybackIntent = {
 
 let playerCommandQueue = Promise.resolve();
 
+/// 播放命令的串行化：新的播放意图会作废还在排队的旧命令。
+///
+/// 抽成函数是为了让 HTTP 与 DBX invoke 两条传输共用同一份语义——
+/// check-player-races.js 断言的正是「stop 不等下一首准备完就到后端」，
+/// 两边各写一遍迟早漂移。`send` 是各传输自己的底层请求函数。
+function serializedPlaybackPost(path, body, send) {
+  PlaybackIntent.command(path);
+  const post = () => send(path, { method: 'POST', body: JSON.stringify(body || {}) });
+  if (!/^\/v1\/player\/(play|pause|stop|seek)$/.test(path)) return post();
+  const revision = PlaybackIntent.sourceRevision;
+  const result = playerCommandQueue.then(() => {
+    if (revision !== PlaybackIntent.sourceRevision) throw new DOMException('Playback replaced', 'AbortError');
+    return post();
+  });
+  playerCommandQueue = result.catch(() => {});
+  return result;
+}
+
 const ServerTransport = {
   kind: 'server',
   async get(path, options) { return request(path, options || {}); },
@@ -308,17 +329,7 @@ const ServerTransport = {
     return request(path, { method: 'POST', rawBody: blob, headers: { 'Content-Type': contentType || 'application/octet-stream' } });
   },
   async post(path, body) {
-    PlaybackIntent.command(path);
-    if (/^\/v1\/player\/(play|pause|stop|seek)$/.test(path)) {
-      const revision = PlaybackIntent.sourceRevision;
-      const result = playerCommandQueue.then(() => {
-        if (revision !== PlaybackIntent.sourceRevision) throw new DOMException('Playback replaced', 'AbortError');
-        return request(path, { method: 'POST', body: JSON.stringify(body || {}) });
-      });
-      playerCommandQueue = result.catch(() => {});
-      return result;
-    }
-    return request(path, { method: 'POST', body: JSON.stringify(body || {}) });
+    return serializedPlaybackPost(path, body, request);
   },
   async put(path, body) {
     PlaybackIntent.command(path);
@@ -349,6 +360,246 @@ const ServerTransport = {
       onMessage(msg);
     };
     return ws;
+  },
+  // 独立形态下封面有可直连的 URL，不需要预取、就绪通知与缓存失效。给同名空
+  // 实现，让调用方不必区分宿主。
+  ensureCover: () => Promise.resolve(null),
+  invalidateCover: () => Promise.resolve(),
+  onCoverReady: () => () => {},
+};
+
+// ---------------------------------------------------------------------------
+// Transport：DBX 插件形态（stdio JSON-RPC sidecar）
+// ---------------------------------------------------------------------------
+//
+// DBX 的插件界面是 srcdoc + sandbox="allow-scripts" 的 iframe：origin 是 opaque，
+// CSP 是 connect-src 'none'，而 host.network 权限只接受 https:// ——插件界面根本
+// 没法访问 localhost 上的 HTTP 服务，WebSocket 同理。所有往来只能走
+// window.dbxPlugin.invoke 与 onEvent。
+//
+// 接口与路径写法保持和 ServerTransport 完全一致：调用方照样传 "/v1/tracks?q=x"，
+// 由 splitPath 翻成 RPC 方法名与 query，于是上百个调用点一行都不用改。
+
+/// "/v1/tracks?q=x&limit=50" → { method: "v1/tracks", query: { q: "x", limit: "50" } }
+///
+/// 方法名不能以 "/" 开头：dbx 要求方法名匹配 ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$。
+function splitPath(path) {
+  const cut = path.indexOf('?');
+  const pathname = cut >= 0 ? path.slice(0, cut) : path;
+  const query = {};
+  if (cut >= 0) new URLSearchParams(path.slice(cut + 1)).forEach((value, key) => { query[key] = value; });
+  return { method: pathname.replace(/^\/+/, ''), query };
+}
+
+const DBX_EVENT_METHOD = 'studio/event';
+const DBX_SUBSCRIBE_METHOD = 'studio/events/subscribe';
+
+/// invoke 只有 timeoutMs，没有中断能力。UI 传 signal 想表达的是「这个结果我不要了」
+/// （典型场景：搜索词变了，作废上一批响应），所以让 signal 与 invoke 竞速：本地立刻
+/// 按 AbortError 拒绝，后端那次调用会跑完但结果被丢弃。对调用方与 HTTP 版的 abort
+/// 等价，代价是白跑一次后端。
+function dbxInvoke(method, params, signal) {
+  const call = window.dbxPlugin.invoke(method, params, { timeoutMs: REQUEST_TIMEOUT });
+  if (!signal) return call;
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('Aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    const settle = (finish) => (value) => {
+      signal.removeEventListener('abort', onAbort);
+      finish(value);
+    };
+    call.then(settle(resolve), settle(reject));
+  });
+}
+
+async function blobToBase64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  // 宿主 SDK 自带 base64，省掉 FileReader 和手搓分块 btoa。
+  if (window.dbxPlugin && window.dbxPlugin.encodeBase64) return window.dbxPlugin.encodeBase64(bytes);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+/// 把 sidecar 的 {status, body} 信封还原成与 HTTP 版一致的返回/抛错语义。
+async function dbxRequest(path, options = {}, attempt = 0) {
+  const { method, query } = splitPath(path);
+  const op = (options.method || 'GET').toUpperCase();
+  const params = { op, query };
+  if (options.rawBody !== undefined) {
+    // 二进制上传（封面替换）：HTTP 版是裸 body + Content-Type，这里换成信封里的 base64。
+    params.raw_base64 = await blobToBase64(options.rawBody);
+    params.raw_content_type = (options.headers && options.headers['Content-Type']) || 'application/octet-stream';
+  } else if (options.body !== undefined) {
+    params.body = typeof options.body === 'string' ? JSON.parse(options.body) : options.body;
+  }
+
+  try {
+    const envelope = await dbxInvoke(method, params, options.signal);
+    if (!envelope || typeof envelope.status !== 'number') {
+      throw new Error('sidecar 返回了不认识的结果');
+    }
+    if (envelope.status >= 200 && envelope.status < 300) {
+      // HTTP 版 204 返回 null；这里 body 为 null 时同样给出 null。
+      return envelope.body === undefined ? null : envelope.body;
+    }
+    const detail = (envelope.body && envelope.body.error) || {};
+    const err = new Error(detail.message || `HTTP ${envelope.status}`);
+    // 三个字段都是前端错误契约的一部分：request_id 用来回查日志，code 让前端按
+    // 判别式分流，status 决定算不算「可重试的瞬时错误」。
+    err.requestId = detail.request_id;
+    err.code = detail.code;
+    err.status = envelope.status;
+    if (detail.source) err.source = detail.source;
+    throw err;
+  } catch (err) {
+    // 与 HTTP 版同一套重试判据：幂等读、瞬时故障、重试一次。
+    const transient = !err.status || err.status >= 500 || err.name === 'AbortError' || err.name === 'TypeError';
+    if (op === 'GET' && attempt === 0 && transient && !(options.signal && options.signal.aborted)) {
+      await new Promise((r) => setTimeout(r, 300));
+      return dbxRequest(path, options, attempt + 1);
+    }
+    throw err;
+  }
+}
+
+// 封面：插件形态下没有可直连的 URL，只能经 invoke 取回 base64 拼成 data URL。
+//
+// coverUrl(id) 是**同步**契约——六个文件、十几处调用点把返回值直接塞进 <img src>
+// 或 CSS url()。所以它保持同步只读缓存，未命中时返回 null 并顺手触发异步填充，
+// 填好后经 onCoverReady 通知，由调用方重绘那一格。
+const COVER_CACHE_MAX = 200;
+const coverCache = new Map();    // id -> data URL；Map 的插入序就是 LRU 序
+const coverPending = new Map();  // id -> Promise，避免同一张图被并发取多次
+const coverListeners = new Set();
+
+function coverRemember(id, dataUrl) {
+  coverCache.delete(id);
+  coverCache.set(id, dataUrl);
+  while (coverCache.size > COVER_CACHE_MAX) coverCache.delete(coverCache.keys().next().value);
+}
+
+function notifyCover(id, dataUrl) {
+  repaintCovers(id, dataUrl);
+  coverListeners.forEach((listener) => {
+    try { listener(id, dataUrl); } catch (err) { console.warn('[hertz] 封面重绘失败', err); }
+  });
+}
+
+function ensureCover(id) {
+  if (!id) return Promise.resolve(null);
+  if (coverCache.has(id)) return Promise.resolve(coverCache.get(id));
+  if (coverPending.has(id)) return coverPending.get(id);
+  const task = dbxRequest(`/v1/tracks/${encodeURIComponent(id)}/cover`)
+    .then((cover) => {
+      if (!cover || !cover.data) return null;
+      const dataUrl = `data:${cover.content_type || 'image/jpeg'};base64,${cover.data}`;
+      coverRemember(id, dataUrl);
+      notifyCover(id, dataUrl);
+      return dataUrl;
+    })
+    // 取不到就保持无封面，不该让整行渲染失败。
+    .catch(() => null)
+    .finally(() => coverPending.delete(id));
+  coverPending.set(id, task);
+  return task;
+}
+
+function dbxCoverUrl(id) {
+  if (!id) return null;
+  const hit = coverCache.get(id);
+  if (hit) { coverRemember(id, hit); return hit; }  // 命中即刷新 LRU 位置
+  ensureCover(id);
+  return null;
+}
+
+// 封面异步落地后的回填。
+//
+// 分两路，为的是让调用点改动最小：
+//   · `.t-art` 结构（曲库行、歌单详情行、收藏格）按 [data-id] 全局找回来重绘，
+//     调用点一行都不用改——paintArt 本来就是幂等的（dataset.src 相同即跳过）。
+//   · 背景图 / 封面墙 / 唱片套这类不是 .t-art 的位置，渲染时登记一个 setter。
+//
+// 独立形态下 coverUrl 是同步的真 URL，首帧就画对了，登记进来的 setter 立刻命中
+// 缓存、之后也不会再触发，所以这套机制对 HTTP 宿主是无操作。
+const coverSlots = new Map();  // id -> Set<(url) => void>
+
+function coverSlot(id, apply) {
+  if (!id || typeof apply !== 'function') return;
+  let setters = coverSlots.get(id);
+  if (!setters) { setters = new Set(); coverSlots.set(id, setters); }
+  setters.add(apply);
+  const cached = coverCache.get(id);
+  if (cached) apply(cached);
+}
+
+function releaseCoverSlots(id) {
+  coverSlots.delete(id);
+}
+
+function repaintCovers(id, dataUrl) {
+  if (typeof CSS !== 'undefined' && CSS.escape) {
+    document.querySelectorAll(`[data-id="${CSS.escape(id)}"]`).forEach((host) => {
+      if (host.querySelector('.t-art')) paintArt(host, dataUrl);
+    });
+  }
+  const setters = coverSlots.get(id);
+  if (setters) setters.forEach((apply) => {
+    try { apply(dataUrl); } catch (err) { console.warn('[hertz] 封面回填失败', err); }
+  });
+}
+
+const DbxTransport = {
+  kind: 'dbx',
+  async get(path, options) { return dbxRequest(path, options || {}); },
+  async postRaw(path, blob, contentType) {
+    return dbxRequest(path, {
+      method: 'POST',
+      rawBody: blob,
+      headers: { 'Content-Type': contentType || 'application/octet-stream' },
+    });
+  },
+  async post(path, body) { return serializedPlaybackPost(path, body, dbxRequest); },
+  async put(path, body) {
+    PlaybackIntent.command(path);
+    return dbxRequest(path, { method: 'PUT', body: JSON.stringify(body || {}) });
+  },
+  async del(path) { return dbxRequest(path, { method: 'DELETE' }); },
+  coverUrl: dbxCoverUrl,
+  ensureCover,
+  /// 换封面之后必须先把缓存里的旧图丢掉，否则重绘出来的还是旧的。
+  invalidateCover(id) {
+    coverCache.delete(id);
+    coverPending.delete(id);
+    return Promise.resolve();
+  },
+  onCoverReady(listener) {
+    coverListeners.add(listener);
+    return () => coverListeners.delete(listener);
+  },
+  connect(onMessage) {
+    let closed = false;
+    const unsubscribe = window.dbxPlugin.onEvent((event) => {
+      if (closed || !event || event.method !== DBX_EVENT_METHOD) return;
+      onMessage(event.params);
+    });
+    // 订阅是幂等的：sidecar 侧的转发器只会起一次（emitter 只能在 handle() 里拿到，
+    // 而转发必须共用 SDK 那把 stdout 锁，所以只能惰性启动）。
+    window.dbxPlugin.invoke(DBX_SUBSCRIBE_METHOD, {})
+      .then(() => { if (!closed) onConnectionChange(true); })
+      .catch((err) => {
+        console.warn('[hertz] 事件订阅失败，界面只能靠轮询', err);
+        if (!closed) { onConnectionChange(false); scheduleReconnect(); }
+      });
+    return {
+      close() {
+        if (closed) return;
+        closed = true;
+        if (typeof unsubscribe === 'function') unsubscribe();
+        onConnectionChange(false);
+      },
+    };
   },
 };
 
@@ -405,6 +656,13 @@ function errText(prefix, err) {
   return `${prefix}：${err.message}${err.requestId ? `（request_id ${err.requestId}）` : ''}`;
 }
 
+/// 弹窗统一走 dialogs.js：DBX 的插件 iframe 没有 allow-modals，原生
+/// prompt/confirm 会被浏览器静默忽略（返回 null / false），于是"重命名歌单"
+/// 这类流程点了没反应。独立形态下 dialogs.js 原样委托给原生，行为不变。
+/// 契约脚本的环境里可能没装 hertzDialog，所以退回 window 上的原生实现——
+/// 原生是同步返回值，自建的是 Promise，await 对两者都成立。
+const modal = () => window.hertzDialog || window;
+
 let transport = ServerTransport;
 
 // 其它表现层模块（创意舞台、工坊、背景层）也要读写服务端设置。与其各自再实现
@@ -425,6 +683,12 @@ window.VMusicTransport = {
 };
 
 async function chooseTransport() {
+  // DBX 插件沙箱里 CSP 是 connect-src 'none'，下面的健康探测必然失败，
+  // 而且失败后会误落到演示模式，所以直接短路。
+  if (window.hertzHost && window.hertzHost.isDbx && window.dbxPlugin) {
+    await window.dbxPlugin.ready;
+    return DbxTransport;
+  }
   const forced = new URLSearchParams(location.search).get('demo');
   if (forced === '1') return window.MockBackend;
   try {
@@ -1128,8 +1392,9 @@ async function loadNowPlaying(id) {
   // 刷新页面后在线缓存是空的，由 online.js 补拉一次详情把封面找回来。
   let url = null;
   if (track.has_cover) {
-    // coverUrl 现在是同步拼串，不再需要 await / catch
-    url = transport.coverUrl(id);
+    // 独立形态下 coverUrl 同步就有真 URL，ensureCover 恒返回 null 于是回落到它；
+    // 插件形态下封面要经 invoke 取回 base64，所以这里必须等一手。
+    url = (await transport.ensureCover(id)) || transport.coverUrl(id);
   } else if (track.source && track.onlineId) {
     url = window.Online.safeCoverUrl(track.cover) || await window.Online.fetchCover(track);
   } else {
@@ -1422,6 +1687,12 @@ function renderQueue() {
     row.querySelector('.q-title').textContent = track.title;
     row.querySelector('.q-sub').textContent = track.artist || '未知艺术家';
     row.querySelector('.q-dur').textContent = fmt(track.duration_ms);
+    if (id.startsWith('online:') && window.Online) {
+      // 与歌单详情同一套平台徽标：混合队列里一眼分清本地与在线。
+      const sub = row.querySelector('.q-sub');
+      sub.appendChild(document.createTextNode(' '));
+      sub.appendChild(window.Online.badge(track.source));
+    }
 
     row.addEventListener('click', (e) => {
       if (e.target.closest('[data-act="remove"]')) {
@@ -1701,7 +1972,7 @@ function onlinePlaylistRow(src, p) {
 }
 
 async function renamePlaylist(p) {
-  const name = prompt('重命名歌单', p.name);
+  const name = await modal().prompt('重命名歌单', p.name);
   if (!name || !name.trim()) return;
   await transport.put(`/v1/playlists/${p.id}`, { name: name.trim() });
   if (shelf) shelf.invalidate(p.id);
@@ -1711,7 +1982,7 @@ async function renamePlaylist(p) {
 }
 
 async function deletePlaylist(p) {
-  if (!confirm(`删除歌单「${p.name}」？此操作不可撤销。`)) return;
+  if (!(await modal().confirm(`删除歌单「${p.name}」？此操作不可撤销。`))) return;
   await transport.del(`/v1/playlists/${p.id}`);
   if (shelf) shelf.invalidate(p.id);
   if (detailPlaylistId === p.id) closeDetail();
@@ -1773,7 +2044,10 @@ function initShelf() {
       // 才落到探测那条路上。
       const known = state.byId.get(trackId);
       if (known && !known.has_cover) return null;
-      const url = transport.coverUrl(trackId);
+      // 插件形态下封面是异步取回的 base64，先等一手再探测；独立形态 ensureCover
+      // 恒为 null，回落到同步拼出的 URL。
+      const url = (await transport.ensureCover(trackId)) || transport.coverUrl(trackId);
+      if (!url) return null;
       // 先探一次再返回：拿不到图就明确返回 null，让卡面走占位色，
       // 而不是挂一个必然破图的 <img>。
       return (await probeImage(url)) ? url : null;
@@ -2194,7 +2468,10 @@ function renderDetailRows(id) {
     if (track.has_cover) {
       const art = row.querySelector('.pd-art');
       art.classList.add('pd-has-img');
-      art.style.backgroundImage = `url("${transport.coverUrl(track.id)}")`;
+      // 背景图不是 .t-art 结构，按 [data-id] 那套自动回填找不到它，所以显式登记。
+      const paint = (url) => { art.style.backgroundImage = url ? `url("${url}")` : ''; };
+      paint(transport.coverUrl(track.id));
+      coverSlot(track.id, paint);
     } else if (online && track.cover) {
       // 在线快照行：封面是入单时存的 URL，用与在线列表同一套缩略图规则。
       const art = row.querySelector('.pd-art');
@@ -2362,8 +2639,45 @@ function showMenu(x, y) {
 
 function closeMenu() { ui.menu.hidden = true; ui.menu.innerHTML = ''; }
 
+/// 写剪贴板。
+///
+/// 插件 iframe 是 opaque origin，navigator.clipboard 会被浏览器直接拒（宿主只
+/// 给了 allow="clipboard-write"，但那不足以让 Clipboard API 在 null origin 下
+/// 工作），所以改走宿主的 copy 通道——它不需要额外权限。独立形态保持原路径。
+async function writeClipboard(text) {
+  if (window.hertzHost && window.hertzHost.isDbx && window.dbxPlugin) {
+    await window.dbxPlugin.copy(text);
+    return;
+  }
+  await navigator.clipboard.writeText(text);
+}
+
+/// 存一个文本文件到磁盘。
+///
+/// 插件 iframe 没有 allow-downloads，`<a download>` 点了没反应（宿主代码里也
+/// 记着这条：WKWebView 会取消没有下载处理器的 blob 导航），所以改走宿主的
+/// saveFile——原生存盘对话框 + 宿主写盘，不需要额外权限。
+///
+/// 注意 SDK 把**字符串**参数当 base64 解释，所以文本必须编码成 Uint8Array
+/// 走 ArrayBuffer 转移那条路，直接传字符串会得到一堆乱码字节。
+async function saveTextFile(fileName, contentType, text) {
+  if (window.hertzHost && window.hertzHost.isDbx && window.dbxPlugin) {
+    await window.dbxPlugin.saveFile({ fileName, contentType }, new TextEncoder().encode(text));
+    return;
+  }
+  const blob = new Blob([text], { type: contentType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); toast('路径已复制'); }
+  try { await writeClipboard(text); toast('路径已复制'); }
   catch { toast('复制失败，请手动选择', 'error'); }
 }
 
@@ -2388,12 +2702,12 @@ async function addToPlaylist(playlistId, track) {
 // 编辑信息：覆盖层字段留空 = 不改动；输入空白 = 回退扫描值。
 // 不直接写音频文件标签——扫描永远以文件为准，用户编辑放在覆盖层。
 let coverFileInput = null;
-function editTrackInfo(track) {
-  const title = prompt(`标题（留空跳过，现：${track.title}）`, track.title);
+async function editTrackInfo(track) {
+  const title = await modal().prompt(`标题（留空跳过，现：${track.title}）`, track.title);
   if (title === null) return;
-  const artist = prompt(`歌手（留空跳过，现：${track.artist || '（无）'}；输入空格清除）`, track.artist || '');
+  const artist = await modal().prompt(`歌手（留空跳过，现：${track.artist || '（无）'}；输入空格清除）`, track.artist || '');
   if (artist === null) return;
-  const album = prompt(`专辑（留空跳过，现：${track.album || '（无)'}；输入空格清除）`, track.album || '');
+  const album = await modal().prompt(`专辑（留空跳过，现：${track.album || '（无)'}；输入空格清除）`, track.album || '');
   if (album === null) return;
   const body = {};
   if (title.trim() && title !== track.title) body.title = title.trim();
@@ -2424,7 +2738,14 @@ function replaceTrackCover(track) {
           file.type || 'image/jpeg');
         toast('封面已替换');
         const track = state.byId.get(id);
-        if (track) { track.has_cover = 1; state.rows.get(id) && paintArt(state.rows.get(id), transport.coverUrl(id)); }
+        // 换过封面后缓存里还是旧图，必须先失效再重绘。插件形态下新图要重新
+        // 取一次，就绪后由回填机制画上去；独立形态 coverUrl 直接就是新 URL。
+        if (track) {
+          track.has_cover = 1;
+          await transport.invalidateCover(id);
+          const row = state.rows.get(id);
+          if (row) paintArt(row, (await transport.ensureCover(id)) || transport.coverUrl(id));
+        }
       } catch (err) {
         toast(errText('封面替换失败', err), 'error');
       }
@@ -2696,6 +3017,11 @@ async function setDevDiagnostics(on) {
 }
 
 async function diagLogText() {
+  // 插件形态没有 HTTP 可 fetch（CSP 是 connect-src 'none'），日志走 RPC 取回。
+  if (window.hertzHost && window.hertzHost.isDbx) {
+    const text = await transport.get('/v1/diagnostics/log');
+    return typeof text === 'string' ? text : '';
+  }
   const res = await fetch('/v1/diagnostics/log', {
     headers: { Authorization: `Bearer ${TOKEN}` },
   });
@@ -2704,15 +3030,11 @@ async function diagLogText() {
 }
 
 function saveDiagLog(text) {
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `mmusic-playback-${new Date().toISOString().slice(0, 10)}.log`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return saveTextFile(
+    `mmusic-playback-${new Date().toISOString().slice(0, 10)}.log`,
+    'text/plain;charset=utf-8',
+    text,
+  );
 }
 
 async function copyDiagLog() {
@@ -2725,7 +3047,7 @@ async function copyDiagLog() {
       return;
     }
     // 剪贴板不可用（非安全上下文或被拒）时不硬试第二遍，直接引导到下载。
-    await navigator.clipboard.writeText(text);
+    await writeClipboard(text);
     toast(`已复制 ${text.split('\n').filter(Boolean).length} 行日志，可直接粘贴发给开发者`);
     loadDiagnostics();
   } catch (err) {
@@ -2742,7 +3064,7 @@ async function saveDiagLogFromServer() {
       toast('日志还是空的：先开启，再复现一次问题');
       return;
     }
-    saveDiagLog(text);
+    await saveDiagLog(text);
     loadDiagnostics();
   } catch (err) {
     toast(errText('日志导出失败', err), 'error');
@@ -3843,6 +4165,10 @@ function initNowPlayingModal() {
 // ---------------------------------------------------------------------------
 
 (async function boot() {
+  // 插件形态下 localStorage 是替身，得先把宿主里存的界面偏好读回内存，否则下面
+  // 这一串 init() 拿到的全是默认值（症状：刷新后主题、皮肤、舞台参数集体丢失）。
+  // 独立形态用原生 localStorage，这里是空操作。
+  if (window.hertzHost) await window.hertzHost.hydrate();
   transport = await chooseTransport();
   if (transport.kind === 'demo') {
     ui.demoBadge.hidden = false;
@@ -3930,7 +4256,7 @@ function initNowPlayingModal() {
         if (!data.total) { toast('没有失效曲目，曲库很干净'); return; }
         const names = data.missing.slice(0, 8).map((m) => m.title).join('、');
         const more = data.total > 8 ? ' 等' : '';
-        if (!confirm(`有 ${data.total} 首曲目文件已丢失：${names}${more}。从曲库移除这些条目？（不删除任何文件）`)) return;
+        if (!(await modal().confirm(`有 ${data.total} 首曲目文件已丢失：${names}${more}。从曲库移除这些条目？（不删除任何文件）`))) return;
         const res = await transport.post('/v1/tracks/batch-delete', { track_ids: data.missing.map((m) => m.id) });
         toast(`已移除 ${res.deleted} 条失效条目`);
         clearSelection();
@@ -3969,12 +4295,12 @@ function initNowPlayingModal() {
     };
   }
   if (ui.libBatchEdit) {
-    ui.libBatchEdit.onclick = () => {
+    ui.libBatchEdit.onclick = async () => {
       const ids = [...state.selected];
       if (!ids.length) return;
-      const artist = prompt('批量设置歌手（留空跳过；输入空格清除这些曲目的歌手）', '');
+      const artist = await modal().prompt('批量设置歌手（留空跳过；输入空格清除这些曲目的歌手）', '');
       if (artist === null) return;
-      const album = prompt('批量设置专辑（留空跳过；输入空格清除专辑）', '');
+      const album = await modal().prompt('批量设置专辑（留空跳过；输入空格清除专辑）', '');
       if (album === null) return;
       const body = { track_ids: ids };
       if (artist.trim()) body.artist = artist.trim();
@@ -4352,10 +4678,24 @@ function initNowPlayingModal() {
   // 歌单详情头部
   const currentDetailPl = () => state.playlists.find((p) => p.id === detailPlaylistId);
   if (ui.plDetailM3u) {
-    ui.plDetailM3u.onclick = () => {
+    ui.plDetailM3u.onclick = async () => {
       if (!detailPlaylistId) return;
+      const encoded = encodeURIComponent(detailPlaylistId);
+      // 插件 iframe 没有 allow-popups，window.open 会被静默丢弃；而且也没有
+      // 可直连的下载 URL。改成取回文本再交给宿主的 saveFile。
+      if (window.hertzHost && window.hertzHost.isDbx) {
+        try {
+          const text = await transport.get(`/v1/playlists/${encoded}/m3u`);
+          await saveTextFile(`playlist-${detailPlaylistId}.m3u`, 'audio/x-mpegurl',
+            typeof text === 'string' ? text : '');
+          toast('已导出 m3u');
+        } catch (err) {
+          toast(errText('导出 m3u 失败', err), 'error');
+        }
+        return;
+      }
       // 走带 token 的链接下载：coverUrl 同款 query 参数通道。
-      window.open(`/v1/playlists/${encodeURIComponent(detailPlaylistId)}/m3u?token=${encodeURIComponent(TOKEN)}`, '_blank');
+      window.open(`/v1/playlists/${encoded}/m3u?token=${encodeURIComponent(TOKEN)}`, '_blank');
     };
   }
   ui.plDetailBack.onclick = () => closeDetail();
@@ -4483,6 +4823,11 @@ function initNowPlayingModal() {
     // 每日推荐切来源时回传一声：曲库空态卡的显隐要看当前来源（见 syncLibEmpty）。
     onDailyModeChange: () => syncLibEmpty(),
     coverUrl: (id) => transport.coverUrl(id),
+    // 插件形态下封面是异步落地的（要经 invoke 取回 base64）。卫星模块渲染时
+    // 用 coverSlot 登记一个 setter，图到了由 app.js 统一回填；独立形态下
+    // coverUrl 同步就有真 URL，登记即命中缓存，等于无操作。
+    ensureCover: (id) => transport.ensureCover(id),
+    coverSlot,
     playLocal: (id, queue) => playTrack(id, queue && queue.length ? queue : [id]),
     // 混合队列：收藏全部播放的本地与在线身份共用一条 /player/load 队列。
     // meta 是在线 id 的快照，注入服务端在线暂存，历史标题才不退化。

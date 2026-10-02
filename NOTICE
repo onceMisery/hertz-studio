@@ -26,20 +26,40 @@ license, see `cargo deny list` or each crate's own LICENSE file):
 Vendored assets
 ---------------------------------------------------------------------------
 
-  - crates/hertz-studio/web/vendor/qrcode.js
+  - plugin/ui/vendor/qrcode.js
     QR Code Generator for JavaScript
     Copyright (c) 2009 Kazuhiko Arase (http://www.d-project.com/)
     Licensed under the MIT License (http://www.opensource.org/licenses/mit-license.php)
     Upstream: https://github.com/kazuhikoarase/qrcode-generator
     The word "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
 
-  - crates/hertz-studio/web/vendor/pixi.min.js
+  - plugin/ui/vendor/pixi.min.js
     PixiJS v8.20.1
     Copyright (c) 2013-2023 Mathew Groves, Chad Engler
     Licensed under the MIT License (http://www.opensource.org/licenses/mit-license.php)
     Upstream: https://github.com/pixijs/pixijs
     Loaded lazily by the web UI only when the 商籁 (sonnet) lyric visual is
     selected; no other screen pays its download or initialization cost.
+
+---------------------------------------------------------------------------
+Vendored source
+---------------------------------------------------------------------------
+
+  - plugin/vendor/dbx-plugin-sdk/
+    DBX plugin sidecar protocol SDK (`dbx-plugin-sdk` 0.1.0)
+    Copyright (c) the DBX authors
+    Licensed under the Apache License 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+    Upstream: https://github.com/t8y2/dbx/tree/main/plugins/sdk/rust/dbx-plugin-sdk
+    Vendored at upstream commit cd8f30aa23b11e212c8ab299519ad7bdcd6d16ed.
+
+    Copied into this repository because the SDK is not published on crates.io,
+    while the dbx-plugin CLI supports path dependencies. Without a local copy the
+    plugin backend could only be built on a machine that happens to have the DBX
+    repository checked out beside this one.
+
+    One local modification: the empty `[workspace]` table was removed from its
+    Cargo.toml so the crate can be a member of this repository's workspace.
+    `src/lib.rs` is byte-identical to upstream.
 
 ---------------------------------------------------------------------------
 Design lineage
@@ -56,7 +76,7 @@ by the music player subsystem of the VCPChat project
 No source file of that project is copied into this repository. All code here
 is an independent implementation written for this project.
 
-The 商籁 (sonnet) lyric visual (`crates/hertz-studio/web/stanza/stanza-sonnet-fx.js`,
+The 商籁 (sonnet) lyric visual (`plugin/ui/stanza/stanza-sonnet-fx.js`,
 `stanza-sonnet.js`) follows the same rule. Its behaviour — the per-line
 cinematic shot selection, the deterministic absolute-time camera paths, the
 glyph/phrase typography pipeline, the accent-choreography cueing rules and the
@@ -85,6 +105,6 @@ the live endpoints (see the module documentation), so it differs from the
 reference implementation's.
 
 The non-image platform badges in the web UI (`.src-badge` in
-`crates/hertz-studio/web/online.js`) reuse the brand-colour palette of the
+`plugin/ui/online.js`) reuse the brand-colour palette of the
 Mineradio project's `--source-*` CSS variables. One colour value is not
 copyrightable subject matter; it is recorded here for completeness.

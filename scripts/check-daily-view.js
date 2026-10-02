@@ -25,8 +25,8 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'crates', 'hertz-studio', 'web');
-/// 前端文件按 web 目录取；后端文件按仓库根取。
+const WEB = path.join(ROOT, 'plugin', 'ui');
+/// 前端文件按 前端目录取；后端文件按仓库根取。
 const read = (f) => fs.readFileSync(path.join(WEB, f), 'utf8').replace(/\r\n/g, '\n');
 const readSrc = (f) => fs.readFileSync(path.join(ROOT, 'crates', 'hertz-studio', 'src', f), 'utf8')
   .replace(/\r\n/g, '\n');
@@ -554,7 +554,8 @@ function checkWiring() {
   ok(/id="set-nav-daily"/.test(HTML), '设置页有可见性开关');
   ok(/src="daily-view\.js"/.test(HTML), '页面引入了 daily-view.js');
   ok(/route\("\/daily-view\.js"/.test(MAIN_RS), 'main.rs 注册了 /daily-view.js 路由');
-  ok(/include_str!\("\.\.\/web\/daily-view\.js"\)/.test(MAIN_RS), '脚本被 include 进二进制');
+  // 只匹配文件名后缀，不写死相对深度：前端目录搬过位置（web/ → plugin/ui/）。
+  ok(/include_str!\("[^"]*\/daily-view\.js"\)/.test(MAIN_RS), '脚本被 include 进二进制');
 
   ok(APP.includes("daily: $('view-daily')"), 'app.js 把 daily 注册成一个视图');
   ok(APP.includes("window.DailyView.onViewEnter()"), '进入该视图时才拉数据');

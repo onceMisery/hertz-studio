@@ -13,14 +13,14 @@
 // 不崩、也不缺元素，只是「舞台和播放条有描边投影、顶栏/导航轨/曲库面板没有」。
 // 这种静默降级只能靠断言兜住。
 //
-// 用法: node scripts/check-css-tokens.js [web 目录]
+// 用法: node scripts/check-css-tokens.js [前端目录]
 
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
 
-const webDir = process.argv[2] || path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
+const webDir = process.argv[2] || path.join(__dirname, '..', 'plugin', 'ui');
 
 // 共享令牌：全站只有一个定义处，即 style.css 的 :root。
 // stage.css 只允许声明自己独占的 --stage-*。

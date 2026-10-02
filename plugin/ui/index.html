@@ -33,6 +33,13 @@
 <link rel="stylesheet" href="skins/skin.liunian.css" data-skin-css="liunian" disabled>
 </head>
 <body>
+<!-- 宿主适配层，必须是第一个脚本：app.js 排在最后加载，而 stage3d.js /
+     theme-studio.js / online.js 都在它之前，靠不上它定义的东西。独立形态下
+     它全是恒等实现，行为与没有这个文件时一致。 -->
+<script src="host.js"></script>
+<!-- 自建 prompt/confirm：插件 iframe 没有 allow-modals，原生弹窗会被静默忽略。
+     独立形态下它原样委托给原生，所以排在 host.js 之后、其余模块之前即可。 -->
+<script src="dialogs.js"></script>
 <script>window.__VMUSIC_TOKEN__ = "__VMUSIC_TOKEN_VALUE__";</script>
 
 <!-- 统一图标库：全站只维护这一份 24×24 SVG symbol；页面中通过

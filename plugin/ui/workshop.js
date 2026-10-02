@@ -575,8 +575,11 @@
         render();
       });
       var del = h('button', 'btn danger', '删除');
-      del.addEventListener('click', function () {
-        if (!window.confirm('删除收藏「' + (p.name || '未命名') + '」？')) return;
+      del.addEventListener('click', async function () {
+        // 插件 iframe 没有 allow-modals，原生 confirm 会被静默忽略（返回 false），
+        // 于是删除按钮点了没反应。统一走 dialogs.js，独立形态下它委托给原生。
+        var dialog = window.hertzDialog || window;
+        if (!(await dialog.confirm('删除收藏「' + (p.name || '未命名') + '」？'))) return;
         CS.removePreset(p.id);
         render();
       });
@@ -1006,6 +1009,13 @@
       ta.select();
       var done = false;
       try { done = document.execCommand('copy'); } catch (e) { done = false; }
+      // 插件 iframe 是 opaque origin，execCommand 与 navigator.clipboard 都不可用，
+      // 只能走宿主的 copy 通道。独立形态下前两条路照旧。
+      if (!done && window.hertzHost && window.hertzHost.isDbx && window.dbxPlugin) {
+        window.dbxPlugin.copy(ta.value).then(function () { flash('已复制'); },
+          function () { flash('复制失败，请手动选中'); });
+        return;
+      }
       if (!done && navigator.clipboard) {
         navigator.clipboard.writeText(ta.value).then(function () { flash('已复制'); },
           function () { flash('复制失败，请手动选中'); });

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" role="img" aria-label="Hertz Studio">
+  <g fill="none" stroke="#2563eb" stroke-linecap="round" stroke-width="1.8">
+    <path d="M3 11.5v1"/>
+    <path d="M6.5 9v6"/>
+    <path d="M10 5.5v13"/>
+    <path d="M13.5 8v8"/>
+    <path d="M17 10.5v3"/>
+    <path d="M20.5 11.5v1"/>
+  </g>
+</svg>

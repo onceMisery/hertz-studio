@@ -100,7 +100,7 @@ async function check(page) {
       for (const file of ['online.css', 'online.js', 'app.js']) {
         await page.route('**/' + file, route => route.fulfill({
           contentType: file.endsWith('.css') ? 'text/css' : 'application/javascript',
-          body: fs.readFileSync('crates/hertz-studio/web/' + file, 'utf8'),
+          body: fs.readFileSync('plugin/ui/' + file, 'utf8'),
         }));
       }
     }

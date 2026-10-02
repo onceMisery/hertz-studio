@@ -8,7 +8,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
   try {
     const page = await browser.newPage();
     if (process.env.SEARCH_LOCAL_ASSETS === '1') {
-      await page.route('**/online.js', route => route.fulfill({contentType:'application/javascript',body:fs.readFileSync('crates/hertz-studio/web/online.js','utf8')}));
+      await page.route('**/online.js', route => route.fulfill({contentType:'application/javascript',body:fs.readFileSync('plugin/ui/online.js','utf8')}));
     }
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));

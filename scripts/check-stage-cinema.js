@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const WEB = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
+const WEB = path.join(__dirname, '..', 'plugin', 'ui');
 const P = require(path.join(WEB, 'stage-cinema.js'));
 
 let failures = 0;

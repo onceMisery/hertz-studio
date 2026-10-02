@@ -21,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const WEB = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
+const WEB = path.join(__dirname, '..', 'plugin', 'ui');
 const SRC_DIR = path.join(__dirname, '..', 'crates', 'hertz-studio', 'src');
 
 let failures = 0;
@@ -1183,7 +1183,7 @@ async function loginScenario(pollStates, opts) {
 
     // 平台图标的拼字符串 <img src> 静态扫描扫不出拼写错，而且路由在
     // main.rs 的 PLATFORM_ICONS 表里——这里对「online.js 声明的路径」与
-    // 「web/platform-icons 磁盘文件」「main.rs 白名单」逐个核，任何一边
+    // 「plugin/ui/platform-icons 磁盘文件」「main.rs 白名单」逐个核，任何一边
     // 漏了浏览器都只会拿到一个碎图。
     const html = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
     const symbols = new Set();
@@ -1195,7 +1195,7 @@ async function loginScenario(pollStates, opts) {
       const icon = Online.sourceBadge(s).icon;
       ok(/^\/platform-icons\/[\w-]+\.png$/.test(icon), s + ' 图标是站内 PNG 路径：' + icon);
       const rel = icon.slice(1);
-      ok(fs.existsSync(path.join(WEB, rel)), 'web/' + rel + ' 文件存在');
+      ok(fs.existsSync(path.join(WEB, rel)), 'plugin/ui/' + rel + ' 文件存在');
       ok(mainRs.indexOf('"' + path.basename(icon) + '"') >= 0,
         'main.rs PLATFORM_ICONS 登记了 ' + path.basename(icon));
     });

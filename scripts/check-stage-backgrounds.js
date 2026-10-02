@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const root = path.join(__dirname, '../crates/hertz-studio/web');
+const root = path.join(__dirname, '../plugin/ui');
 const source = fs.readFileSync(path.join(root, 'stage3d.js'), 'utf8').replace(/\r\n/g, '\n');
 function extract(name) {
   const start = source.indexOf('  function ' + name + '(');

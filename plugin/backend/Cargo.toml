@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 mmusic-studio contributors
+
+[package]
+name = "dbx-plugin-hertz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "DBX plugin sidecar for mmusic-studio: stdio JSON-RPC bridge over the hertz-studio service"
+
+[[bin]]
+name = "dbx-plugin-hertz"
+path = "src/main.rs"
+
+[dependencies]
+hertz-studio = { path = "../../crates/hertz-studio" }
+# DBX 官方 SDK 没有发布到 crates.io（`dbx-plugin-sdk` 在 registry 上是 404），
+# 而 dbx-plugin CLI 明确支持 path 依赖，所以这里 vendor 一份保证可独立构建。
+# 副本与上游保持字节一致，放在 plugin/vendor/ 而不是本包目录内——cargo 不允许
+# workspace 成员目录里再套一个 workspace 根。出处与同步方式见仓库根 NOTICE。
+dbx-plugin-sdk = { path = "../vendor/dbx-plugin-sdk" }
+
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }

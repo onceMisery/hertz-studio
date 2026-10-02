@@ -3,7 +3,7 @@
 
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "plugin/backend", "plugin/vendor/dbx-plugin-sdk"]
 
 [workspace.package]
 version = "0.1.0"

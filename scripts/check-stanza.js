@@ -2,7 +2,7 @@
 // stanza 纯函数验证：node scripts/check-stanza.js
 'use strict';
 const path = require('path');
-const ROOT = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web', 'stanza');
+const ROOT = path.join(__dirname, '..', 'plugin', 'ui', 'stanza');
 // 模块工厂从全局取 StanzaUtil：require util 后先挂到 global，再加载下游模块。
 const U = require(path.join(ROOT, 'stanza-util.js'));
 global.StanzaUtil = U;
@@ -99,7 +99,7 @@ ok(U.hasReadable('abc123'), '英文数字可读');
 
 // 8) Theme 取色分支（Node 下 stub window/document/getComputedStyle，每组切换前清 require.cache）
 // require 顺序：global.StanzaUtil 已在文件头部挂好；相对路径以 scripts/ 为基准 → scripts/../crates/...
-var THEME_REQ = '../crates/hertz-studio/web/stanza/stanza-theme.js';
+var THEME_REQ = '../plugin/ui/stanza/stanza-theme.js';
 function hexHsl(hex) { var c = U.hexToRgb(hex); return U.rgbToHsl(c.r, c.g, c.b); }
 // 给定 CSS 变量表重新加载 stanza-theme.js：工厂不碰 DOM，resolve 时才经 cssVar 读 stub。
 function loadThemeWithVars(vars) {

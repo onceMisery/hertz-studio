@@ -65,6 +65,13 @@
     return (info && info.label) || id;
   }
 
+  /// 站内资源 URL。独立形态恒等返回；DBX 插件形态下按宿主的 <base href> 补全，
+  /// 否则根相对路径会丢掉插件 id 前缀而 404（详见 host.js 的 assetUrl）。
+  /// 声明处一律保持根相对，只在赋给 DOM 的这一刻过一遍。
+  function assetUrl(url) {
+    return window.hertzHost ? window.hertzHost.assetUrl(url) : url;
+  }
+
   // 平台徽标节点。平台源是官方 app 图标的 PNG（.is-img，容器透明，图片
   // 填满同一尺寸的圆角方块）；本地/未登记音源仍是品牌色圆角方块 + 白色
   // 图标字形。图标本身不带文字，所以平台名必须挂到 title 与 aria-label
@@ -77,7 +84,7 @@
     // 直接写完整 className：测试桩的 className 与 classList 互不同步。
     s.className = isImgIcon(icon) ? 'src-badge is-img' : 'src-badge';
     if (isImgIcon(icon)) {
-      s.innerHTML = '<img src="' + icon + '" alt="" aria-hidden="true">';
+      s.innerHTML = '<img src="' + assetUrl(icon) + '" alt="" aria-hidden="true">';
     } else {
       // 没有登记品牌色的（本地 / 未登记音源）不写 --badge，让 CSS 回落到主题色。
       if (b && b.color) s.style.setProperty('--badge', b.color);

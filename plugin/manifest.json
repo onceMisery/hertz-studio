@@ -1,0 +1,83 @@
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "io.github.mmusic-studio.hertz-studio",
+  "name": "Hertz Studio",
+  "version": "0.1.0",
+  "publisher": "mmusic-studio",
+  "description": "Local-first music service and player: library scanning, native playback, playlists, word-level lyrics and an immersive 3D stage, all running on your own machine.",
+  "icon": "assets/plugin.svg",
+  "source": "https://github.com/mmusic-studio/mmusic-studio",
+  "homepage": "https://github.com/mmusic-studio/mmusic-studio",
+  "engines": {
+    "dbx": ">=0.6.29",
+    "host_api": "1"
+  },
+  "permissions": ["host.events", "host.storage"],
+  "entrypoints": {
+    "backend": {
+      "executable": "bin/dbx-plugin-hertz"
+    },
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "workbench",
+      "id": "io.github.mmusic-studio.hertz-studio.player",
+      "label": "Hertz Studio",
+      "description": "Browse the local library, play music through the native audio device, and open the immersive lyrics stage.",
+      "icon": "assets/plugin.svg"
+    },
+    {
+      "type": "command",
+      "id": "io.github.mmusic-studio.hertz-studio.open",
+      "label": "Open Hertz Studio",
+      "description": "Open the music player workbench.",
+      "icon": "assets/plugin.svg",
+      "action": {
+        "type": "open-workbench",
+        "workbench": "io.github.mmusic-studio.hertz-studio.player",
+        "presentation": "tab",
+        "reuse": "singleton"
+      }
+    },
+    {
+      "type": "menus",
+      "id": "io.github.mmusic-studio.hertz-studio.menus",
+      "items": [
+        {
+          "location": "commandPalette",
+          "command": "io.github.mmusic-studio.hertz-studio.open",
+          "group": "navigation",
+          "order": 10
+        },
+        {
+          "location": "appToolbar",
+          "command": "io.github.mmusic-studio.hertz-studio.open",
+          "group": "navigation",
+          "order": 10,
+          "default_visible": true
+        }
+      ]
+    }
+  ],
+  "localizations": {
+    "zh-CN": {
+      "name": "Hertz Studio",
+      "description": "本地优先的音乐服务与播放器：曲库扫描、原生出声、歌单、逐字歌词与沉浸式 3D 舞台，全部跑在你自己的机器上。",
+      "contributions": {
+        "io.github.mmusic-studio.hertz-studio.player": {
+          "label": "Hertz Studio",
+          "description": "浏览本地曲库、通过原生音频设备播放，并打开沉浸式歌词舞台。"
+        },
+        "io.github.mmusic-studio.hertz-studio.open": {
+          "label": "打开 Hertz Studio",
+          "description": "打开音乐播放器工作台。"
+        }
+      }
+    }
+  }
+}

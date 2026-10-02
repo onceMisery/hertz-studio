@@ -3037,3 +3037,36 @@ button:focus-visible, [role="button"]:focus-visible,
   -webkit-mask: var(--art-glyph) center / 52% 52% no-repeat;
   mask: var(--art-glyph) center / 52% 52% no-repeat;
 }
+
+/* --------------------------------------------------------------------------
+   自建 prompt / confirm（见 dialogs.js）
+   容器复用 .np-modal / .np-card / .btn，这里只补对话框特有的三块。
+   颜色一律继承，不引入新的色彩令牌。
+   -------------------------------------------------------------------------- */
+.hz-dialog-msg {
+  margin: 0;
+  /* 原生 prompt 的提示文本经常带换行（"标题（留空跳过，现：xxx）"），
+     不保留换行的话几段说明会挤成一行。 */
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.hz-dialog-input {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--field-border-strong);
+  background: var(--panel-solid);
+  font: inherit;
+}
+
+.hz-dialog-input:focus {
+  outline: none;
+  border-color: var(--line-strong);
+}
+
+.hz-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}

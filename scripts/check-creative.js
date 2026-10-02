@@ -21,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const WEB = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
+const WEB = path.join(__dirname, '..', 'plugin', 'ui');
 const ROOT = path.join(__dirname, '..');
 
 let failures = 0;

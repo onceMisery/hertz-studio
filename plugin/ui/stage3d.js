@@ -43,6 +43,12 @@
   if (typeof window === 'undefined') return;
 
   var GATE = 'stage3d';
+
+  /// 站内资源 URL。独立形态恒等返回；DBX 插件形态下按宿主的 <base href> 补全，
+  /// 否则根相对路径会丢掉插件 id 前缀而 404（详见 host.js 的 assetUrl）。
+  function assetUrl(url) {
+    return global.hertzHost ? global.hertzHost.assetUrl(url) : url;
+  }
   var BASE_FOV = 52;
   var CHROME_HIDE_MS = 2600;
   var TAU_ANGLE = 190;      // 相机角度低通时间常数（ms）
@@ -2186,7 +2192,7 @@
         backdrop.dataset.image = 'loading';
         picture.onload = function () { backdrop.dataset.image = 'ready'; picture.hidden = stanza.bgMode !== 'anime'; };
         picture.onerror = function () { backdrop.dataset.image = 'error'; picture.hidden = true; };
-        if (selected) picture.src = '/wallpapers/' + encodeURIComponent(selected);
+        if (selected) picture.src = assetUrl('/wallpapers/' + encodeURIComponent(selected));
         else { picture.removeAttribute('src'); backdrop.dataset.image = 'error'; }
       } else picture.hidden = !useImage || backdrop.dataset.image !== 'ready';
     }
@@ -2196,7 +2202,7 @@
         button.type = 'button'; button.className = 's3d-wallpaper-choice'; button.dataset.wallpaper = item.id;
         button.setAttribute('aria-label', item.label); button.title = item.label;
         var thumbnail = document.createElement('img');
-        thumbnail.alt = ''; thumbnail.loading = 'lazy'; thumbnail.src = '/wallpapers/' + encodeURIComponent(item.id);
+        thumbnail.alt = ''; thumbnail.loading = 'lazy'; thumbnail.src = assetUrl('/wallpapers/' + encodeURIComponent(item.id));
         var caption = document.createElement('span'); caption.textContent = item.label;
         button.append(thumbnail, caption);
         button.addEventListener('click', function () { stanza.wallpaper = item.id; applyStanzaConfig(); savePreferences(); });

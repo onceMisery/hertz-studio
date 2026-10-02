@@ -59,7 +59,7 @@ function clientCookie() {
 
 function loadQrLib() {
   const src = fs.readFileSync(
-    path.join(__dirname, '..', 'crates', 'hertz-studio', 'web', 'vendor', 'qrcode.js'),
+    path.join(__dirname, '..', 'plugin', 'ui', 'vendor', 'qrcode.js'),
     'utf8'
   );
   const sandbox = { window: {}, Math, String, Number, Array, Object, Error };

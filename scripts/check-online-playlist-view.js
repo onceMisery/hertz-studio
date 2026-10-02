@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
 //
-// 在线歌单两层界面（web/online-playlist-view.js）的无头契约检查（零依赖、不触网）。
+// 在线歌单两层界面（plugin/ui/online-playlist-view.js）的无头契约检查（零依赖、不触网）。
 //
 //   node scripts/check-online-playlist-view.js
 //
@@ -21,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const WEB = path.join(__dirname, '..', 'crates', 'hertz-studio', 'web');
+const WEB = path.join(__dirname, '..', 'plugin', 'ui');
 
 let failures = 0;
 let checks = 0;
