@@ -1689,9 +1689,10 @@ function renderQueue() {
     row.querySelector('.q-dur').textContent = fmt(track.duration_ms);
     if (id.startsWith('online:') && window.Online) {
       // 与歌单详情同一套平台徽标：混合队列里一眼分清本地与在线。
+      // 重启后内存快照没了（行退化为「未知曲目」），源仍能从虚拟 id 里解析出来。
       const sub = row.querySelector('.q-sub');
       sub.appendChild(document.createTextNode(' '));
-      sub.appendChild(window.Online.badge(track.source));
+      sub.appendChild(window.Online.badge(track.source || id.split(':')[1]));
     }
 
     row.addEventListener('click', (e) => {
