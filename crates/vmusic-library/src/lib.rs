@@ -160,20 +160,28 @@ fn parse_leading_f64(text: &str) -> Option<f64> {
 /// Fills still-absent fields of `meta` from one metadata revision.
 fn apply_revision(meta: &mut FileMeta, revision: &MetadataRevision) {
     for tag in revision.tags() {
-        let Value::String(text) = &tag.value else {
+        let Value::String(raw) = &tag.value else {
             continue;
         };
+        // RIFF INFO 的字符串以 NUL 结尾，而且块长度把终止符算在内；symphonia
+        // 0.5.5 的 `riff::parse` 只是把整块 `from_utf8_lossy`，不剥终止符，于是
+        // WAV 的标题/艺术家/专辑会带着一个 `\0` 一路落库（ffmpeg 的
+        // `ff_riff_write_info_tag` 正是按这个形状写的，所以真实文件就会中招）。
+        // `str::trim` 治不了它：NUL 不属于 Unicode 空白。
+        let text = raw.trim_end_matches('\0');
         if text.trim().is_empty() {
             continue;
         }
         match tag.std_key {
             Some(StandardTagKey::TrackTitle) if meta.title.is_none() => {
-                meta.title = Some(text.clone())
+                meta.title = Some(text.to_string())
             }
             Some(StandardTagKey::Artist) if meta.artist.is_none() => {
-                meta.artist = Some(text.clone())
+                meta.artist = Some(text.to_string())
             }
-            Some(StandardTagKey::Album) if meta.album.is_none() => meta.album = Some(text.clone()),
+            Some(StandardTagKey::Album) if meta.album.is_none() => {
+                meta.album = Some(text.to_string())
+            }
             _ => {}
         }
         // 歌词标签：ID3v2 USLT 经 symphonia 映射为 std Lyrics，FLAC/Ogg 的
@@ -183,7 +191,7 @@ fn apply_revision(meta: &mut FileMeta, revision: &MetadataRevision) {
             || tag.key.eq_ignore_ascii_case("unsyncedlyrics")
             || tag.key.eq_ignore_ascii_case("syncedlyrics");
         if is_lyrics_tag && meta.lyrics.is_none() {
-            meta.lyrics = Some(text.clone());
+            meta.lyrics = Some(text.to_string());
         }
         // ReplayGain 增益：形如 "-6.20 dB"，宽松解析前导浮点。
         if meta.rg_gain.is_none()
@@ -438,6 +446,77 @@ mod tests {
         std::fs::write(&file, flac_with_comment(&[("TITLE", "无词")])).unwrap();
         let meta = read_metadata(&file).unwrap();
         assert!(meta.lyrics.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 构造一个最小 WAV：fmt + LIST/INFO + data。
+    ///
+    /// INFO 子块按 ffmpeg `ff_riff_write_info_tag` 的形状写——长度字段**含**结尾
+    /// 的 NUL（`len = strlen(str) + 1`），长度为奇数时再补一个 pad 字节。真实的
+    /// WAV 就是这样的，而 symphonia 0.5.5 的 `riff::parse` 把整块 `from_utf8_lossy`
+    /// 之后并不剥终止符，于是标题会带着一个 `\0` 一路落库。
+    fn wav_with_info(tags: &[(&str, &str)]) -> Vec<u8> {
+        fn chunk(tag: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            out.extend_from_slice(payload);
+            // pad 字节不计入长度字段。
+            if payload.len() % 2 == 1 {
+                out.push(0);
+            }
+            out
+        }
+
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // 单声道
+        fmt.extend_from_slice(&44_100u32.to_le_bytes());
+        fmt.extend_from_slice(&88_200u32.to_le_bytes()); // 字节率
+        fmt.extend_from_slice(&2u16.to_le_bytes()); // 块对齐
+        fmt.extend_from_slice(&16u16.to_le_bytes()); // 位深
+
+        let mut info = b"INFO".to_vec();
+        for (tag, value) in tags {
+            let mut fourcc = [0u8; 4];
+            fourcc.copy_from_slice(tag.as_bytes());
+            let mut payload = value.as_bytes().to_vec();
+            payload.push(0);
+            info.extend(chunk(&fourcc, &payload));
+        }
+
+        // 32 个静音采样：够 symphonia 认定这是一条音轨，read_metadata 不要求真帧。
+        let mut body = b"WAVE".to_vec();
+        body.extend(chunk(b"fmt ", &fmt));
+        body.extend(chunk(b"LIST", &info));
+        body.extend(chunk(b"data", &[0u8; 64]));
+
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend(body);
+        out
+    }
+
+    /// 三个标签的长度奇偶都覆盖到了：含 NUL 后 "Nocturne"/"Hertz QA" 是 9 字节
+    /// （要补 pad），"Smoke" 是 6 字节（不补）。pad 被误当成内容的话这里会红。
+    #[test]
+    fn riff_info_tags_drop_the_null_terminator() {
+        let dir = std::env::temp_dir().join(format!("vmusic-lib-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tagged.wav");
+        std::fs::write(
+            &file,
+            wav_with_info(&[
+                ("INAM", "Nocturne"),
+                ("IART", "Hertz QA"),
+                ("IPRD", "Smoke"),
+            ]),
+        )
+        .unwrap();
+        let meta = read_metadata(&file).unwrap();
+        assert_eq!(meta.title.as_deref(), Some("Nocturne"));
+        assert_eq!(meta.artist.as_deref(), Some("Hertz QA"));
+        assert_eq!(meta.album.as_deref(), Some("Smoke"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
