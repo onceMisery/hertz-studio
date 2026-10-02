@@ -32,6 +32,7 @@
 
 pub mod library;
 pub mod playback;
+pub mod playlists;
 
 use std::sync::Arc;
 
@@ -280,6 +281,30 @@ impl Rpc {
             (Op::Get, ["v1", "history"]) => library::history_list(state, query).await,
             (Op::Delete, ["v1", "history"]) => library::history_clear(state).await,
             (Op::Delete, ["v1", "history", id]) => library::history_remove(state, id).await,
+
+            // --- 歌单 ---
+            // 同样地，字面段 `import-m3u` 要排在 `id` 通配之前。
+            (Op::Get, ["v1", "playlists"]) => playlists::list_playlists(state).await,
+            (Op::Post, ["v1", "playlists"]) => playlists::create_playlist(state, body).await,
+            (Op::Post, ["v1", "playlists", "import-m3u"]) => {
+                playlists::import_m3u(state, body).await
+            }
+            (Op::Get, ["v1", "playlists", _]) => playlists::noop().await,
+            (Op::Put, ["v1", "playlists", id]) => playlists::rename_playlist(state, id, body).await,
+            (Op::Delete, ["v1", "playlists", id]) => playlists::delete_playlist(state, id).await,
+            (Op::Get, ["v1", "playlists", id, "m3u"]) => playlists::export_m3u(state, id).await,
+            (Op::Get, ["v1", "playlists", id, "tracks"]) => {
+                playlists::get_playlist_tracks(state, id).await
+            }
+            (Op::Post, ["v1", "playlists", id, "tracks"]) => {
+                playlists::add_to_playlist(state, id, body).await
+            }
+            (Op::Put, ["v1", "playlists", id, "tracks", "order"]) => {
+                playlists::reorder_playlist_tracks(state, id, body).await
+            }
+            (Op::Delete, ["v1", "playlists", id, "tracks", track]) => {
+                playlists::remove_from_playlist(state, id, track).await
+            }
 
             _ => Err(not_found(format!(
                 "no such method: {} {:?}",

@@ -1196,7 +1196,7 @@ pub struct PlaylistTrackInput {
 
 /// 把入站条目折成 (track_id, 快照)。在线身份沿用 `online:<source>:<id>` 协议：
 /// 客户端传平台 id 时在此拼虚拟 id，传过来的已是虚拟 id 则原样保留。
-fn normalize_playlist_entries(
+pub(crate) fn normalize_playlist_entries(
     body: PlaylistTracks,
 ) -> Result<Vec<(String, Option<vmusic_store::playlists::TrackMeta>)>, ApiError> {
     let mut entries = Vec::new();
@@ -1383,9 +1383,9 @@ async fn export_playlist_m3u(
 }
 
 #[derive(Deserialize)]
-struct ImportM3uRequest {
-    name: String,
-    content: String,
+pub(crate) struct ImportM3uRequest {
+    pub(crate) name: String,
+    pub(crate) content: String,
 }
 
 /// 导入 M3U：路径精确匹配本地曲目，未命中行计入 skipped。

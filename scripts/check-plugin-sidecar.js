@@ -4,7 +4,7 @@
 //
 // DBX 插件 sidecar 的协议冒烟检查（零依赖）。
 //
-// 真的把 dbx-plugin-hertz 起起来，用 stdio 喂 JSON-RPC，验证六件事：
+// 真的把 dbx-plugin-hertz 起起来，用 stdio 喂 JSON-RPC，验证七件事：
 //   1. plugin/initialize 握手能过（协议版本协商）；
 //   2. 装配链路能跑通——数据目录、SQLite 迁移、音频后端（拿不到设备会回落 null）；
 //   3. 门面信封 {status, body} 与 HTTP 版同构；
@@ -14,7 +14,9 @@
 //      路由表里「字面段必须排在 {id} 通配之前」这条只有运行期才暴露的顺序约束；
 //   6. 端到端出声：合成一个真 WAV → 注册根目录 → 扫描 → 列出曲目 → load → play
 //      → 收到 spectrum 事件。这是插件形态下唯一能证明「原生音频在 dbx 子进程里
-//      真的出声」的检查，也是二进制信封（封面 base64 往返）的落点。
+//      真的出声」的检查，也是二进制信封（封面 base64 往返）的落点；
+//   7. 歌单域：增删改名、曲目增删与排序（含成员校验）、在线曲目的虚拟 id 与元数据
+//      快照、M3U 导出为裸 JSON 字符串并能原样导回。
 //
 // 用法：node scripts/check-plugin-sidecar.js
 // 二进制默认找 target/debug/dbx-plugin-hertz[.exe]，可用 HERTZ_PLUGIN_BIN 覆盖。
@@ -676,6 +678,145 @@ async function main() {
     );
 
     await client.send('v1/player/pause', { op: 'POST' });
+
+    console.log('\n歌单域');
+    const created = await client.send('v1/playlists', { op: 'POST', body: { name: '冒烟歌单' } });
+    eq(created.result && created.result.status, 200, 'POST v1/playlists → 200');
+    // HTTP 版直接回 Playlist 对象本身、不包一层，插件形态必须同形——包了的话
+    // 前端 createPlaylist() 拿到的是 {playlist:{…}}，id 读不出来。
+    const pl = (created.result || {}).body || {};
+    const plPath = 'v1/playlists/' + encodeURIComponent(pl.id || 'missing');
+    ok(typeof pl.id === 'string' && pl.id.length > 0, '新建直接回 Playlist 对象（不包一层）');
+    eq(pl.name, '冒烟歌单', '歌单名回读一致');
+
+    const blankName = await client.send('v1/playlists', { op: 'POST', body: { name: '   ' } });
+    eq(blankName.result && blankName.result.status, 400, '空白歌单名 → 400');
+
+    const listedPl = await client.send('v1/playlists', { op: 'GET' });
+    eq(((listedPl.result || {}).body?.playlists || []).length, 1, 'GET v1/playlists 回 1 条');
+
+    const addedTracks = await client.send(plPath + '/tracks', {
+      op: 'POST',
+      body: { track_ids: [track.id] },
+    });
+    eq(addedTracks.result && addedTracks.result.status, 200, 'POST 加入本地曲目 → 200');
+
+    const emptyAdd = await client.send(plPath + '/tracks', { op: 'POST', body: { track_ids: [] } });
+    eq(emptyAdd.result && emptyAdd.result.status, 400, '空 track_ids → 400');
+
+    const contents = await client.send(plPath + '/tracks', { op: 'GET' });
+    eq(((contents.result || {}).body?.track_ids || []).length, 1, '曲目读回 1 条');
+    // 本地 id 走 tracks 表的实时字段，所以这里应当是扫出来的真标题——歌单里存的
+    // 是 id 而不是快照，改标签之后歌单要跟着变。
+    eq(
+      (contents.result || {}).body?.tracks?.[0]?.title,
+      'Sidecar Smoke Tone',
+      '本地曲目从 tracks 表实时解析（不是入单时的快照）',
+    );
+
+    // 在线曲目的身份协议：客户端传平台 id + source，服务端拼虚拟 id 并落快照。
+    const onlineAdd = await client.send(plPath + '/tracks', {
+      op: 'POST',
+      body: {
+        tracks: [{ id: 'song-123', source: 'netease', title: '在线曲', artist: '某人', duration_ms: 200000 }],
+      },
+    });
+    eq(onlineAdd.result && onlineAdd.result.status, 200, 'POST 加入在线曲目 → 200');
+    const mixed = await client.send(plPath + '/tracks', { op: 'GET' });
+    const mixedIds = (mixed.result || {}).body?.track_ids || [];
+    eq(mixedIds.length, 2, '歌单里现在有 2 条');
+    eq(mixedIds[1], 'online:netease:song-123', '在线条目被拼成虚拟 id');
+    eq((mixed.result || {}).body?.tracks?.[1]?.title, '在线曲', '在线条目回读入单时的快照');
+
+    // 没有任何元数据的在线条目存了也无法渲染：必须拒绝，不能存一条空快照进去。
+    const bareOnline = await client.send(plPath + '/tracks', {
+      op: 'POST',
+      body: { tracks: [{ id: 'x', source: 'netease' }] },
+    });
+    eq(bareOnline.result && bareOnline.result.status, 400, '在线曲目缺元数据 → 400');
+
+    const reordered = await client.send(plPath + '/tracks/order', {
+      op: 'PUT',
+      body: { track_ids: [mixedIds[1], mixedIds[0]] },
+    });
+    eq(reordered.result && reordered.result.status, 200, 'PUT 重排 → 200');
+    const afterReorder = await client.send(plPath + '/tracks', { op: 'GET' });
+    eq((afterReorder.result || {}).body?.track_ids?.[0], mixedIds[1], '重排后顺序确实换了');
+
+    // 提交的 id 必须正好是当下成员的一个排列。少一个就报错，而不是静默把歌单
+    // 截断成一条——那等于一次没人同意的成员变更。
+    const badReorder = await client.send(plPath + '/tracks/order', {
+      op: 'PUT',
+      body: { track_ids: [mixedIds[0]] },
+    });
+    const badStatus = (badReorder.result || {}).status;
+    ok(badStatus >= 400, '成员不匹配的重排 → 4xx/5xx（得到 ' + badStatus + '），不是静默成功');
+    const afterBadReorder = await client.send(plPath + '/tracks', { op: 'GET' });
+    eq(
+      ((afterBadReorder.result || {}).body?.track_ids || []).length,
+      2,
+      '被拒绝的重排没有改动成员数',
+    );
+
+    // M3U 导出：HTTP 版是 audio/x-mpegurl 纯文本 + 附件下载，信封装不下，所以体是
+    // 一个裸 JSON 字符串——前端 `typeof text === 'string'` 就是按这个契约写的。
+    const m3u = await client.send(plPath + '/m3u', { op: 'GET' });
+    eq(m3u.result && m3u.result.status, 200, 'GET m3u → 200');
+    const m3uText = (m3u.result || {}).body;
+    eq(typeof m3uText, 'string', 'm3u 体是裸 JSON 字符串（不是对象）');
+    ok(typeof m3uText === 'string' && m3uText.startsWith('#EXTM3U'), 'm3u 以 #EXTM3U 开头');
+    ok(
+      typeof m3uText === 'string' && m3uText.includes('smoke-tone.wav'),
+      'm3u 里有本地曲目的路径（在线曲无本地路径，不输出）',
+    );
+
+    const missingM3u = await client.send('v1/playlists/nope/m3u', { op: 'GET' });
+    eq(missingM3u.result && missingM3u.result.status, 404, '不存在的歌单导出 → 404');
+
+    // 导入回环：把刚导出的文本导回去，应当新建歌单并按路径命中同一首本地曲。
+    const importedPl = await client.send('v1/playlists/import-m3u', {
+      op: 'POST',
+      body: { name: '导入的歌单', content: typeof m3uText === 'string' ? m3uText : '' },
+    });
+    eq(importedPl.result && importedPl.result.status, 200, 'POST import-m3u → 200');
+    eq((importedPl.result || {}).body?.added, 1, '导入按路径命中 1 首本地曲');
+    eq((importedPl.result || {}).body?.skipped, 0, '没有未命中的行');
+
+    const notM3u = await client.send('v1/playlists/import-m3u', {
+      op: 'POST',
+      body: { name: 'x', content: '这不是播放列表' },
+    });
+    eq(notM3u.result && notM3u.result.status, 400, '非 M3U 内容 → 400');
+
+    const removedTrack = await client.send(
+      plPath + '/tracks/' + encodeURIComponent(mixedIds[0]),
+      { op: 'DELETE' },
+    );
+    eq(removedTrack.result && removedTrack.result.status, 200, 'DELETE 单曲 → 200');
+    const afterTrackRemove = await client.send(plPath + '/tracks', { op: 'GET' });
+    eq(((afterTrackRemove.result || {}).body?.track_ids || []).length, 1, '移除后剩 1 条');
+
+    const renamed = await client.send(plPath, { op: 'PUT', body: { name: '改过名的歌单' } });
+    eq(renamed.result && renamed.result.status, 200, 'PUT 改名 → 200');
+    const afterRename = await client.send('v1/playlists', { op: 'GET' });
+    ok(
+      ((afterRename.result || {}).body?.playlists || []).some(
+        (p) => p.id === pl.id && p.name === '改过名的歌单',
+      ),
+      '改名后列表里是新名字',
+    );
+
+    // GET /v1/playlists/{id} 在 HTTP 版是 noop（axum 的 PUT|DELETE 组合要挂一个 GET），
+    // 照搬过来保持路由表一一对应，也给前端留一条不会 404 的探测路径。
+    const noopGet = await client.send(plPath, { op: 'GET' });
+    eq(noopGet.result && noopGet.result.status, 200, 'GET /v1/playlists/{id} 的 noop → 200');
+
+    const deletedPl = await client.send(plPath, { op: 'DELETE' });
+    eq(deletedPl.result && deletedPl.result.status, 200, 'DELETE 歌单 → 200');
+    const importedId = (importedPl.result || {}).body?.playlist_id;
+    await client.send('v1/playlists/' + encodeURIComponent(importedId), { op: 'DELETE' });
+    const finalPlaylists = await client.send('v1/playlists', { op: 'GET' });
+    eq(((finalPlaylists.result || {}).body?.playlists || []).length, 0, '两个歌单都删干净了');
 
     // DELETE 的入参在 query 上：漏了 query 通道的话这里会删不掉。
     const removedRoot = await client.send('v1/library/roots', { op: 'DELETE', query: { path: rootPath } });
