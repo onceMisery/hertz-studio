@@ -416,12 +416,15 @@ pub async fn restore(pool: &SqlitePool, file: &BackupFile) -> Result<RestoreRepo
     }
 
     for (key, value) in &file.settings {
+        // updated_at 是 NOT NULL 且没有默认值，必须显式写；冲突时一并更新，口径
+        // 与 settings::set_all 一致。
         sqlx::query(
-            "INSERT INTO settings (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
         )
         .bind(key)
         .bind(value.to_string())
+        .bind(now_ms())
         .execute(&mut *tx)
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -596,6 +599,46 @@ mod tests {
         bad.version = 99;
         assert!(restore(&db, &bad).await.is_err(), "未知版本必须拒绝");
         db.close().await;
+    }
+
+    /// 备份里带 settings 时，恢复必须真的写得进去。
+    ///
+    /// `settings.updated_at` 是 NOT NULL 且没有默认值，而 restore 里那条 INSERT
+    /// 一度漏了这一列，于是任何带 settings 的备份恢复都会撞约束、整单回滚——而
+    /// 真实备份几乎总是带 settings（音量、播放模式、主题…），等于「备份导入」
+    /// 这个功能一直是坏的。上面那个幂等测试没写任何 settings，所以从没覆盖到。
+    #[tokio::test]
+    async fn restore_applies_settings_from_the_backup() {
+        let db = pool().await;
+        crate::settings::set(&db, "player_volume", &serde_json::json!(0.3))
+            .await
+            .unwrap();
+        crate::settings::set(&db, "player_mode", &serde_json::json!("shuffle"))
+            .await
+            .unwrap();
+
+        let exported = export(&db).await.unwrap();
+        assert_eq!(exported.settings.len(), 2, "两个键都进了备份");
+        let file = sample(&exported);
+
+        // 换一个空库恢复，才证明值是写进去的而不是本来就在。
+        let fresh = pool().await;
+        let report = restore(&fresh, &file).await.unwrap();
+        assert_eq!(report.settings_applied, 2);
+        assert_eq!(
+            crate::settings::get(&fresh, "player_volume").await.unwrap(),
+            Some(serde_json::json!(0.3))
+        );
+        assert_eq!(
+            crate::settings::get(&fresh, "player_mode").await.unwrap(),
+            Some(serde_json::json!("shuffle"))
+        );
+
+        // 再恢复一次走 ON CONFLICT 分支：updated_at 也要跟着更新，不能只改 value。
+        let again = restore(&fresh, &file).await.unwrap();
+        assert_eq!(again.settings_applied, 2);
+        db.close().await;
+        fresh.close().await;
     }
 
     #[tokio::test]
