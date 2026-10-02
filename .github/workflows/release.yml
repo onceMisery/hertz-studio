@@ -5,8 +5,16 @@
 # 设计边界（计划第 12 项）：
 #   - 仅 workflow_dispatch 手动触发，绝不自动推送/发布/上传 Release；
 #     产物留在 workflow run 的 artifacts 里，由维护者人工检查后自行发布。
-#   - 单二进制发行：web 资源编译期嵌入，产物就是 hertz-studio(.exe) + README + LICENSE。
-#   - 每平台输出 sha256 校验和，并合并一份 SHA256SUMS 供下载方核对。
+#   - 两种产物并行出：
+#       * 独立形态：单二进制 hertz-studio(.exe)，web 资源编译期嵌入，配 README + LICENSE；
+#       * 插件形态：.dbxp（sidecar + ui + manifest），由 dbx-plugin CLI 打包。
+#   - 校验和只在 summary 里算一次。原先每个平台各算一份再由 summary 拼接，但
+#     download-artifact 的 merge-multiple 会把文件摊平到同一层，`cat */SHA256SUMS.txt`
+#     永远匹配不到子目录，合并结果是空的；而 Windows 那段为了绕开没有 sha256sum
+#     而内嵌的多行 Python 又必须顶格写，直接冲破了 run: | 的块标量——整个文件
+#     从加入起就解析失败，GitHub 每次 push 都建一个 0 job 的 run 标记为 failure。
+#     summary 跑在 ubuntu 上，sha256sum 现成，收归一处两个问题一起消失。
+#   - 每平台产物名带 target，.dbxp 的文件名由 CLI 按 <插件id>-<版本>-<target> 生成。
 
 name: release
 
@@ -25,8 +33,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # -------------------------------------------------------------------------
+  # 独立形态：单二进制
+  # -------------------------------------------------------------------------
   build:
-    name: package ${{ matrix.target }}
+    name: binary ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -58,8 +69,10 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys;print(json.load(sys.stdin)['packages'][0]['version'])")"
-          NAME="mmusic-studio-${VERSION}-${{ matrix.target }}"
+          # 按名字取版本，别用 packages[0]：workspace 成员的顺序不是契约，
+          # 加一个排在 hertz-studio 前面的成员就会静默地把版本号取错。
+          VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='hertz-studio'))")"
+          NAME="hertz-studio-${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/${NAME}"
           # 只拷可执行文件本体：MSVC 下 hertz-studio* 会把 .pdb 调试符号一并带进包。
           BIN="target/${{ matrix.target }}/release/hertz-studio"
@@ -74,32 +87,79 @@ jobs:
             tar czf "${NAME}.tar.gz" "${NAME}"
           fi
           rm -rf "${NAME}"
-
-      - name: Checksums
-        shell: bash
-        run: |
-          cd dist
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            python3 -c "
-import hashlib, glob, sys
-for f in sorted(glob.glob('*.zip') + glob.glob('*.tar.gz')):
-    print(hashlib.sha256(open(f,'rb').read()).hexdigest(), ' ', f)
-" > SHA256SUMS.txt
-          else
-            sha256sum *.zip *.tar.gz > SHA256SUMS.txt 2>/dev/null || sha256sum *.tar.gz > SHA256SUMS.txt
-          fi
-          cat SHA256SUMS.txt
+          ls -la
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
-          path: dist/*
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
           if-no-files-found: error
 
+  # -------------------------------------------------------------------------
+  # 插件形态：.dbxp
+  # -------------------------------------------------------------------------
+  plugin:
+    name: plugin ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: plugin-${{ matrix.os }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install dbx plugin CLI
+        run: npm install -g @dbx-app/plugin-cli
+
+      - name: Package .dbxp
+        shell: bash
+        run: |
+          # 不传 --target：CLI 拿「构建宿主」当原生 target，交叉打包它会直接拒绝
+          # （"does not match build host"），所以只能每个 OS 各打各的。
+          # --output-dir 是相对**项目目录**解析的，写 dist 才落在 plugin/dist，
+          # 写 plugin/dist 会得到一个 plugin/plugin/dist。
+          dbx-plugin package plugin --output-dir dist
+          ls -la plugin/dist
+          # artifact.json 的 url 是给插件仓库清单用的下载地址。这里没有发布环节，
+          # 就填成同目录下的文件名；真正上架时由维护者按仓库布局改写。
+          python3 - <<'PY'
+          import json, pathlib
+          for meta in pathlib.Path('plugin/dist').glob('*.artifact.json'):
+              dbxp = meta.with_name(meta.name.replace('.artifact.json', '.dbxp'))
+              data = json.loads(meta.read_text(encoding='utf-8'))
+              data['url'] = dbxp.name
+              meta.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+              print(f"{meta.name}: target={data.get('target')} url={data['url']} sha256={data.get('sha256')}")
+          PY
+
+      - name: Upload plugin package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbxp-${{ matrix.os }}
+          path: |
+            plugin/dist/*.dbxp
+            plugin/dist/*.artifact.json
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # 合并校验和
+  # -------------------------------------------------------------------------
   summary:
     name: merge checksums
-    needs: build
+    needs: [build, plugin]
     runs-on: ubuntu-latest
     steps:
       - name: Download all dist artifacts
@@ -112,8 +172,15 @@ for f in sorted(glob.glob('*.zip') + glob.glob('*.tar.gz')):
         shell: bash
         run: |
           cd dist
-          cat */SHA256SUMS.txt 2>/dev/null | sort -k2 > SHA256SUMS.txt || true
-          rm -f */SHA256SUMS.txt
+          ls -la
+          # merge-multiple 把所有产物摊平在同一层，所以这里直接对文件算，
+          # 不再指望各平台自己带一份校验和上来。
+          # nullglob 是必需的：某个 glob 不中时 bash 会把字面量传给 sha256sum，
+          # 它会去读 stdin 把整步挂死。
+          shopt -s nullglob
+          files=(./*.zip ./*.tar.gz ./*.dbxp)
+          if [ "${#files[@]}" -eq 0 ]; then echo "no artifacts to checksum" >&2; exit 1; fi
+          sha256sum "${files[@]}" | sed 's|\./||' | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
           {
             echo "## Release artifacts"
