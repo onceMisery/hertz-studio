@@ -78,11 +78,28 @@ jobs:
           -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        id: clippy
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee clippy.log
+
+      # 临时诊断：匿名读不到 Actions 日志（jobs/{id}/logs 要 admin 权限），但
+      # ::error:: 生成的 annotation 是公开的。ubuntu 这一格红在 clippy 退 101，
+      # 而同一份代码在 windows/macos 干净，靠猜已经错过一次（libdbus），所以把
+      # 真正的错误行顶上注解。定位完就撤掉这一步。
+      - name: Surface clippy failure as annotation
+        if: steps.clippy.outcome == 'failure'
+        run: |
+          grep -nE '^(error|error\[|warning: unused|  --> )' clippy.log | head -30 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
+          echo "--- tail of clippy.log ---"
+          tail -40 clippy.log
+          exit 1
 
       # The audio tests run against the null backend so they do not need a
       # sound card on the runner.
       - name: Test
+        if: steps.clippy.outcome == 'success'
         run: cargo test --workspace
         env:
           VMUSIC_BACKEND: null
