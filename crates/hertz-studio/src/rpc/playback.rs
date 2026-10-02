@@ -21,7 +21,7 @@ use crate::routes::{
     DspUpdate, LoadRequest, ModeRequest, ReplayRequest, SeekRequest, SelectDeviceRequest,
     SetQueueRequest, VolumeRequest,
 };
-use crate::rpc::{body_as, query_str, Reply, RpcResult};
+use crate::rpc::{body_as, Reply, RpcResult};
 use crate::state::AppState;
 
 /// 播放器快照，叠加「在线曲缓冲覆盖态」。
@@ -306,21 +306,25 @@ pub async fn select_device(state: &Arc<AppState>, body: &Value) -> RpcResult {
 /// `err.status` 与 `body.status` 分流、不弹错。所以这里不能走 `ApiError`，
 /// 必须直接给 `Reply`——这正是 `Reply` 允许自定义状态码与体的原因。
 pub async fn beatmap(state: &Arc<AppState>, query: &Value) -> RpcResult {
-    let track = query_str(query, "track").unwrap_or_default();
-    Ok(match crate::stage_beats::request_on_demand(state, track).await {
-        crate::stage_beats::Outcome::Ready { map, cached } => {
-            let mut value = serde_json::to_value(&map).unwrap_or(Value::Null);
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert("cached".into(), Value::Bool(cached));
+    // track 是必填项：HTTP 版用 Query<BeatmapQuery> 抽取，缺了就是 400。这里走
+    // 同一个结构体，免得「没带 track」在插件形态下变成一个 404 unavailable。
+    let q: crate::routes::BeatmapQuery = crate::rpc::query_as(query)?;
+    Ok(
+        match crate::stage_beats::request_on_demand(state, &q.track).await {
+            crate::stage_beats::Outcome::Ready { map, cached } => {
+                let mut value = serde_json::to_value(&map).unwrap_or(Value::Null);
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("cached".into(), Value::Bool(cached));
+                }
+                Reply::ok(value)
             }
-            Reply::ok(value)
-        }
-        crate::stage_beats::Outcome::Analyzing => {
-            Reply::with_status(202, json!({ "status": "analyzing" }))
-        }
-        crate::stage_beats::Outcome::Unavailable(reason) => Reply::with_status(
-            404,
-            json!({ "status": "unavailable", "reason": reason.as_str() }),
-        ),
-    })
+            crate::stage_beats::Outcome::Analyzing => {
+                Reply::with_status(202, json!({ "status": "analyzing" }))
+            }
+            crate::stage_beats::Outcome::Unavailable(reason) => Reply::with_status(
+                404,
+                json!({ "status": "unavailable", "reason": reason.as_str() }),
+            ),
+        },
+    )
 }

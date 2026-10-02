@@ -190,8 +190,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-pub(super) struct BeatmapQuery {
-    track: String,
+pub(crate) struct BeatmapQuery {
+    pub(crate) track: String,
 }
 
 /// 三态响应手写状态码与 JSON 体：404 体是 `{status,reason}` 而不是标准

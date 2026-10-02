@@ -14,21 +14,11 @@ use serde_json::Value;
 use crate::daily;
 use crate::error::bad_request;
 use crate::routes::{online_ctx, DailyQuery};
-use crate::rpc::{query_i64, Reply, RpcResult};
+use crate::rpc::{query_as, Reply, RpcResult};
 use crate::state::AppState;
 
-fn daily_query(query: &Value) -> DailyQuery {
-    DailyQuery {
-        // limit 在 HTTP 版是 Option<usize>：serde_urlencoded 遇到负数会直接 400。
-        // RPC 侧的既有口径是「解析不出来当作没传、走默认值」（见 rpc/mod.rs 的
-        // query_* 说明），所以负数在这里折成 None 而不是报错。
-        limit: query_i64(query, "limit").and_then(|v| usize::try_from(v).ok()),
-        day: query_i64(query, "day"),
-    }
-}
-
 pub async fn daily_recommend(state: &Arc<AppState>, query: &Value) -> RpcResult {
-    let q = daily_query(query);
+    let q: DailyQuery = query_as(query)?;
     let limit = daily::parse_limit(q.limit)?;
     Reply::json(&daily::daily_at(&state.db, limit, q.day).await?)
 }
@@ -39,7 +29,7 @@ pub async fn daily_recommend(state: &Arc<AppState>, query: &Value) -> RpcResult 
 /// 单平台的缺席写在响应体的 `skipped` 里，状态恒为 200——一个平台没登录不该让
 /// 用户看到一个红色错误条。
 pub async fn daily_online_recommend(state: &Arc<AppState>, query: &Value) -> RpcResult {
-    let q = daily_query(query);
+    let q: DailyQuery = query_as(query)?;
     let limit = match q.limit {
         None => daily::ONLINE_DEFAULT_LIMIT,
         Some(0) => return Err(bad_request("limit 必须大于 0")),

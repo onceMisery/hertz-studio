@@ -31,54 +31,16 @@ use crate::routes::{
     LibraryRootRequest, LyricsImport, LyricsOffset, MembershipRequest, ScanRequest, ToggleRequest,
     TrackQuery, FAV_PAGE, FAV_PAGE_MAX,
 };
-use crate::rpc::{body_as, encode_base64, query_i64, query_str, RawBody, Reply, RpcResult};
+use crate::rpc::{body_as, encode_base64, query_as, query_str, RawBody, Reply, RpcResult};
 use crate::scan;
 use crate::state::AppState;
-
-fn owned(value: Option<&str>) -> Option<String> {
-    value.map(str::to_string)
-}
-
-/// 查询参数一律先按字符串读出来，再拼成 `routes` 那份结构体。
-///
-/// 不能直接 `serde_json::from_value::<TrackQuery>`：UI 侧 `URLSearchParams` 出来的
-/// 值天然全是字符串，而 axum 的 `Query<T>`（serde_urlencoded）会把 `"50"` 转成
-/// `i64`，serde_json 不会——直接反序列化的话 `?limit=50` 在插件形态下会变成 400，
-/// 而独立形态下正常。
-fn track_query(query: &Value) -> TrackQuery {
-    TrackQuery {
-        q: owned(query_str(query, "q")),
-        sort: owned(query_str(query, "sort")),
-        limit: query_i64(query, "limit"),
-        offset: query_i64(query, "offset"),
-        artist: owned(query_str(query, "artist")),
-        album: owned(query_str(query, "album")),
-    }
-}
-
-fn favorites_query(query: &Value) -> FavoritesQuery {
-    FavoritesQuery {
-        kind: owned(query_str(query, "kind")),
-        offset: query_i64(query, "offset").unwrap_or(0),
-        limit: query_i64(query, "limit"),
-    }
-}
-
-fn history_query(query: &Value) -> HistoryQuery {
-    HistoryQuery {
-        limit: query_i64(query, "limit"),
-        offset: query_i64(query, "offset"),
-        source: owned(query_str(query, "source")),
-        q: owned(query_str(query, "q")),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // 曲目
 // ---------------------------------------------------------------------------
 
 pub async fn list_tracks(state: &Arc<AppState>, query: &Value) -> RpcResult {
-    let query = track_query(query);
+    let query: TrackQuery = query_as(query)?;
     let limit = query.limit.unwrap_or(200).clamp(1, 1000);
     let offset = query.offset.unwrap_or(0).max(0);
     let sort = parse_track_sort(query.sort.as_deref())?;
@@ -100,7 +62,7 @@ pub async fn list_tracks(state: &Arc<AppState>, query: &Value) -> RpcResult {
 }
 
 pub async fn list_track_ids(state: &Arc<AppState>, query: &Value) -> RpcResult {
-    let query = track_query(query);
+    let query: TrackQuery = query_as(query)?;
     let sort = parse_track_sort(query.sort.as_deref())?;
     let filter = track_filter_from(&query);
     let ids = vmusic_store::list_track_ids_filtered(&state.db, query.q.as_deref(), &filter, sort)
@@ -383,11 +345,11 @@ pub async fn update_library_root(state: &Arc<AppState>, body: &Value) -> RpcResu
     library_roots(state).await
 }
 
-/// 删除的入参在 query 上（`?path=…`），HTTP 版用 `Query<LibraryRootRequest>` 抽取。
+/// 删除的入参在 query 上（`?path=…`），HTTP 版用 `Query<LibraryRootRequest>` 抽取，
+/// 这里走同一个结构体，缺 path 同样 400。
 pub async fn remove_library_root(state: &Arc<AppState>, query: &Value) -> RpcResult {
-    let path = query_str(query, "path")
-        .ok_or_else(|| bad_request("path is required"))?
-        .to_string();
+    let request: LibraryRootRequest = query_as(query)?;
+    let path = request.path;
     vmusic_store::scan_roots::remove(&state.db, &path)
         .await
         .map_err(store_err)?;
@@ -450,7 +412,7 @@ pub async fn put_settings(state: &Arc<AppState>, body: &Value) -> RpcResult {
 // ---------------------------------------------------------------------------
 
 pub async fn list_favorites(state: &Arc<AppState>, query: &Value) -> RpcResult {
-    let q = favorites_query(query);
+    let q: FavoritesQuery = query_as(query)?;
     let kind = match q.kind.as_deref() {
         Some(raw) if !raw.trim().is_empty() => Some(daily::parse_kind(raw)?),
         _ => None,
@@ -561,7 +523,7 @@ pub async fn favorite_membership(state: &Arc<AppState>, body: &Value) -> RpcResu
 // ---------------------------------------------------------------------------
 
 pub async fn history_list(state: &Arc<AppState>, query: &Value) -> RpcResult {
-    let q = history_query(query);
+    let q: HistoryQuery = query_as(query)?;
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let offset = q.offset.unwrap_or(0).max(0);
     let (items, total) = crate::history::list_filtered(

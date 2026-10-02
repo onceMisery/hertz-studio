@@ -147,11 +147,6 @@ pub fn body_as<T: DeserializeOwned>(body: &Value) -> Result<T, ApiError> {
     serde_json::from_value(body.clone()).map_err(|e| bad_request(format!("请求体不合法: {e}")))
 }
 
-/// 取查询参数。
-///
-/// 一律按字符串读再解析：UI 那边 `URLSearchParams` 出来的值天然是字符串，
-/// 这与 axum 的 `Query<T>`（serde_urlencoded）行为一致，所以数字/布尔参数在
-/// 两条路上接受同样的写法。
 /// 把信封里的 `query` 还原成 URL 查询串，再按 axum 的同一条路反序列化。
 ///
 /// axum 的 `Query<T>` 就是 `serde_urlencoded::from_str`。走同一个编解码器，两个
@@ -173,29 +168,14 @@ pub fn query_as<T: DeserializeOwned>(query: &Value) -> Result<T, ApiError> {
     serde_urlencoded::from_str(&encoded).map_err(|e| invalid(e.to_string()))
 }
 
+/// 按名字取一个字符串查询参数。
+///
+/// 只给 HTTP 侧用 `Query<HashMap<String, String>>` 抽取的那两个端点用
+/// （`tracks/facets` 的 kind、`remote/roots/{id}/browse` 的 path）——那边本来就是
+/// 按名字查表，没有结构体可反序列化。其余一律走 [`query_as`]。
 pub fn query_str<'a>(query: &'a Value, key: &str) -> Option<&'a str> {
     match query.get(key)? {
         Value::String(text) => Some(text),
-        _ => None,
-    }
-}
-
-pub fn query_i64(query: &Value, key: &str) -> Option<i64> {
-    match query.get(key)? {
-        Value::String(text) => text.trim().parse::<i64>().ok(),
-        Value::Number(number) => number.as_i64(),
-        _ => None,
-    }
-}
-
-pub fn query_bool(query: &Value, key: &str) -> Option<bool> {
-    match query.get(key)? {
-        Value::Bool(flag) => Some(*flag),
-        Value::String(text) => match text.trim() {
-            "1" | "true" | "yes" => Some(true),
-            "0" | "false" | "no" => Some(false),
-            _ => None,
-        },
         _ => None,
     }
 }
@@ -451,17 +431,12 @@ mod tests {
     }
 
     #[test]
-    fn query_helpers_accept_url_shaped_strings() {
-        // UI 侧 URLSearchParams 出来的一律是字符串，与 axum Query<T> 同口径。
-        let query = json!({ "limit": "50", "flag": "true", "name": "夜曲", "bad": "x" });
-        assert_eq!(query_i64(&query, "limit"), Some(50));
-        assert_eq!(query_bool(&query, "flag"), Some(true));
-        assert_eq!(query_str(&query, "name"), Some("夜曲"));
-        // 解析不出来就是没传，让调用方走默认值，而不是当成 0/false。
-        assert_eq!(query_i64(&query, "bad"), None);
-        assert_eq!(query_i64(&query, "missing"), None);
-        // JSON 数字也接受：sidecar 之间互调时不必先转成字符串。
-        assert_eq!(query_i64(&json!({ "limit": 50 }), "limit"), Some(50));
+    fn query_str_reads_only_string_values() {
+        let query = json!({ "kind": "artist", "n": 5 });
+        assert_eq!(query_str(&query, "kind"), Some("artist"));
+        // 非字符串与缺键都是 None，让调用方走自己的默认值。
+        assert_eq!(query_str(&query, "n"), None);
+        assert_eq!(query_str(&query, "missing"), None);
     }
 
     #[test]
