@@ -146,6 +146,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/online/lyric", get(online_lyric))
         .route("/v1/online/play", post(online_play))
         .route("/v1/online/cover", get(online_cover_proxy))
+        .route("/v1/ui/notice", post(post_ui_notice))
         .route(
             "/v1/online/radio",
             get(online_radio_status).post(online_radio),
@@ -988,9 +989,10 @@ pub(crate) async fn fetch_remote_image(url: &reqwest::Url) -> ApiResult<(Vec<u8>
         return Err(bad_request(format!("upstream returned {}", resp.status())));
     }
     // 有 Content-Length 就先挡一道，别把数兆字节读进来才拒绝。
+    // is_some_and 而非 map_or(false, …)：clippy 1.99 起 unnecessary_map_or 会红。
     if resp
         .content_length()
-        .map_or(false, |len| len as usize > MAX_BYTES)
+        .is_some_and(|len| len as usize > MAX_BYTES)
     {
         return Err(bad_request("upstream cover is too large"));
     }
@@ -1021,6 +1023,36 @@ async fn online_cover_proxy(
         "data": crate::rpc::encode_base64(&bytes),
         "content_type": content_type,
     })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct UiNoticeRequest {
+    pub(crate) action: String,
+}
+
+/// 界面实例间信号的白名单。这条管道会广播给**所有**订阅者（独立形态的 WS 客户端
+/// 也会收到），动作名即协议，所以不收任意字符串：前端不必为每个未知动作做防御，
+/// 新增动作时两边一起改。
+const UI_NOTICE_ACTIONS: [&str; 1] = ["expand-capsule"];
+
+pub(crate) async fn broadcast_ui_notice(state: &AppState, action: &str) -> ApiResult<()> {
+    if !UI_NOTICE_ACTIONS.contains(&action) {
+        return Err(bad_request("unknown ui notice action"));
+    }
+    let _ = state.events.send(crate::state::WsEvent::UiNotice {
+        action: action.to_string(),
+    });
+    Ok(())
+}
+
+/// dock 胶囊与 tab 实例之间的信号中转：两个 iframe 是 opaque origin，浏览器侧
+/// 的 BroadcastChannel / storage 事件都不通，只能借服务端这条广播绕一圈。
+async fn post_ui_notice(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<UiNoticeRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    broadcast_ui_notice(&state, &body.action).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// 本地曲目歌词读取，来源优先级固定为 imported > embedded > sidecar：
