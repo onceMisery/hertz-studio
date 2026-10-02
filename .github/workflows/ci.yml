@@ -45,6 +45,9 @@ jobs:
           # 观感回到默认），所以也进 CI：不依赖浏览器，纯 Node 沙箱跑真实模块。
           node scripts/check-skins.js
           node scripts/check-appearance-restore.js
+          # 插件形态下壁纸/图标 404 是同一类「不报错、只是空」的失败，而且独立形态
+          # 与 dev-host 都看不出来，只有真 dbx 才暴露——所以把它钉成契约。
+          node scripts/check-plugin-assets.js
 
       - name: Check formatting
         # 不用 --all：它会把 vendored 的 dbx-plugin-sdk 一起重排，而那份 src/lib.rs

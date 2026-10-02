@@ -21,14 +21,39 @@
   // 站内资源 URL
   // -------------------------------------------------------------------------
 
+  /// 资源协议里「本插件 ui 根」的绝对前缀，形如 `<origin>/<插件id>/`。
+  ///
+  /// 不能直接用 document.baseURI：宿主注入的 <base href> 是
+  /// `<origin>/<插件id>/<entryDirectory>/`，而 entryDirectory 是它从入口 HTML 里
+  /// **第一个带目录的资源引用**推出来的——那套推导假设产物是打包过的（index.html
+  /// 在 ui 根、chunk 全在同一个子目录，于是 base 要落到那个子目录上，动态 import
+  /// 与内联 CSS 的 url() 才解析得对）。
+  ///
+  /// 本插件是零构建的多目录布局：入口的第一个引用是根级的 style.css，推不出目录，
+  /// 于是宿主继续往后找，抓到 `stage-themes/starfall.css`，base 就成了
+  /// `.../stage-themes/`。根相对的 `/wallpapers/x.jpg` 经它会解析成
+  /// `.../stage-themes/wallpapers/x.jpg`——资源协议下是 404，表现是「设置页里说
+  /// 壁纸已铺底，背景却是空的」。
+  ///
+  /// 而资源协议的根**就是** ui 根（`.../<插件id>/wallpapers/x.jpg` 取得到，
+  /// 多带一层 `ui/` 反而取不到），所以这里只保留 origin 与第一段（插件 id），
+  /// 把宿主多算出来的那一段丢掉。entryDirectory 为空时这个函数是恒等的。
+  ///
+  /// 不用 `new URL().origin`：macOS/Linux 上 base 是自定义协议
+  /// `dbx-plugin://localhost/<id>/`，非特殊协议的 origin 是字符串 "null"。
+  function assetBase() {
+    var matched = /^([a-z][a-z0-9+.-]*:\/\/[^/?#]*)\/([^/?#]+)/i.exec(document.baseURI || '');
+    return matched ? matched[1] + '/' + matched[2] + '/' : document.baseURI;
+  }
+
   /// 把站内绝对路径解析成当前宿主下真正可取的 URL。
   ///
   /// 两边要求是冲突的，不能简单选一个：
   /// - 独立形态**必须**用根相对路径。theme-studio.js 的 WALL_BASE 注释记着一个
   ///   修过的 bug：页面挂在反代前缀下时，相对路径会解析成 /前缀/wallpapers/x.jpg
   ///   而对服务端是 404，表现是「换了主题，背景图却不出来」。
-  /// - DBX 插件形态**必须**补全。宿主注入 <base href="dbx-plugin://localhost/<插件id>/ui/">，
-  ///   而按 RFC 3986，以 / 开头的引用会**丢掉 base 的 path**，解析成
+  /// - DBX 插件形态**必须**补全，且要补到 ui 根上（见 assetBase）。按 RFC 3986，
+  ///   以 / 开头的引用会**丢掉 base 的 path**，解析成
   ///   dbx-plugin://localhost/wallpapers/x.jpg —— 少了插件 id 前缀，自定义协议
   ///   处理器直接 404。
   ///
@@ -37,7 +62,7 @@
   function assetUrl(url) {
     if (!dbx || typeof url !== 'string' || url.charAt(0) !== '/') return url;
     try {
-      return new URL(url.slice(1), document.baseURI).href;
+      return new URL(url.slice(1), assetBase()).href;
     } catch (err) {
       return url;
     }
