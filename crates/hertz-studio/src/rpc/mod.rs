@@ -6,7 +6,8 @@
 //! DBX 插件的 sidecar 把 UI 的 `invoke(method, params)` 翻译成这里的 [`Rpc::call`]。
 //! method 名就是原来的 HTTP path 去掉前导斜杠（`v1/player/play`），信封里带
 //! `op`（原 HTTP 动词）、`query`、`body`，所以端点是机械平移，`routes.rs` 里的
-//! handler 逻辑可以照抄。
+//! handler 逻辑可以照抄。唯一的例外是二进制：`raw_base64` / `raw_content_type`
+//! 两个字段承载裸字节，见 [`RawBody`]。
 //!
 //! 这一层既不认识 axum 也不认识 dbx-plugin-sdk：进来是 JSON，出去是
 //! `Result<Reply, ApiError>`，两端各自适配。之所以放在本 crate 内部而不是
@@ -29,6 +30,7 @@
 //! 包成 `{status, body}`，`body` 就是原来那个 `{"error":{...}}`。协议级错误
 //! （方法不存在、信封非法）才用真正的 JSON-RPC error。
 
+pub mod library;
 pub mod playback;
 
 use std::sync::Arc;
@@ -70,6 +72,30 @@ pub struct Call<'a> {
     pub path: &'a str,
     pub query: Value,
     pub body: Value,
+    /// 二进制请求体，见 [`RawBody`]。
+    pub raw: Option<RawBody>,
+}
+
+/// 二进制请求体。
+///
+/// HTTP 版的封面替换把图片字节直接当 body、`Content-Type` 决定落盘扩展名；
+/// JSON 信封装不下裸字节，所以改成 base64 + 单独的媒体类型字段。目前只有
+/// `POST v1/tracks/{id}/cover` 一个端点用它。
+pub struct RawBody {
+    pub bytes: Vec<u8>,
+    pub content_type: String,
+}
+
+/// 信封与字节之间唯一的翻译点：封面读取用 `encode`（出），封面替换用
+/// `decode`（入）。用标准字母表，与前端 `dbxPlugin.encodeBase64` 一致。
+pub fn encode_base64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+pub fn decode_base64(text: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(text)
 }
 
 /// 一次调用的应答，与 HTTP 响应同构。
@@ -158,6 +184,7 @@ impl Rpc {
         let state = &self.state;
         let query = &call.query;
         let body = &call.body;
+        let raw = call.raw.as_ref();
 
         match (call.op, segments.as_slice()) {
             // --- 元信息 / 状态 ---
@@ -186,6 +213,73 @@ impl Rpc {
 
             // --- 舞台节拍图 ---
             (Op::Get, ["v1", "stage", "beatmap"]) => playback::beatmap(state, query).await,
+
+            // --- 曲库：曲目 ---
+            // 字面段必须排在 `id` 通配之前：`["v1","tracks",id]` 同样能匹配
+            // `/v1/tracks/ids`，顺序反了就是「查无此曲 ids」而不是曲目 id 列表。
+            // axum 是按静态段优先自动排序的，slice pattern 只按书写顺序，这一处
+            // 得自己守住。
+            (Op::Get, ["v1", "tracks"]) => library::list_tracks(state, query).await,
+            (Op::Get, ["v1", "tracks", "ids"]) => library::list_track_ids(state, query).await,
+            (Op::Get, ["v1", "tracks", "facets"]) => library::track_facets(state, query).await,
+            (Op::Post, ["v1", "tracks", "batch-edit"]) => {
+                library::batch_edit_tracks(state, body).await
+            }
+            (Op::Post, ["v1", "tracks", "batch-delete"]) => {
+                library::batch_delete_tracks(state, body).await
+            }
+            (Op::Get, ["v1", "tracks", "missing"]) => library::list_missing_tracks(state).await,
+            (Op::Get, ["v1", "tracks", id]) => library::get_track(state, id).await,
+            (Op::Get, ["v1", "tracks", id, "cover"]) => library::get_cover(state, id).await,
+            (Op::Post, ["v1", "tracks", id, "cover"]) => {
+                library::replace_cover(state, id, raw).await
+            }
+            (Op::Get, ["v1", "tracks", id, "edit"]) => library::get_track_edit(state, id).await,
+            (Op::Delete, ["v1", "tracks", id, "edit"]) => {
+                library::clear_track_edit(state, id).await
+            }
+            (Op::Get, ["v1", "tracks", id, "lyrics"]) => library::get_lyrics(state, id).await,
+            (Op::Put, ["v1", "tracks", id, "lyrics"]) => {
+                library::import_lyrics(state, id, body).await
+            }
+            (Op::Delete, ["v1", "tracks", id, "lyrics"]) => library::clear_lyrics(state, id).await,
+            (Op::Put, ["v1", "tracks", id, "lyrics", "offset"]) => {
+                library::set_lyrics_offset(state, id, body).await
+            }
+
+            // --- 曲库：扫描根目录与进度 ---
+            (Op::Get, ["v1", "library", "roots"]) => library::library_roots(state).await,
+            (Op::Post, ["v1", "library", "roots"]) => library::add_library_root(state, body).await,
+            (Op::Put, ["v1", "library", "roots"]) => {
+                library::update_library_root(state, body).await
+            }
+            // 入参在 query 上（`?path=…`），与 HTTP 版的 Query 抽取器同口径。
+            (Op::Delete, ["v1", "library", "roots"]) => {
+                library::remove_library_root(state, query).await
+            }
+            (Op::Post, ["v1", "library", "scan"]) => library::start_scan(state, body).await,
+            (Op::Post, ["v1", "library", "scan", "cancel"]) => library::cancel_scan(state).await,
+            (Op::Get, ["v1", "library", "status"]) => library::scan_status(state).await,
+
+            // --- 设置 ---
+            (Op::Get, ["v1", "settings"]) => library::get_settings(state).await,
+            (Op::Put, ["v1", "settings"]) => library::put_settings(state, body).await,
+
+            // --- 收藏 ---
+            (Op::Get, ["v1", "favorites"]) => library::list_favorites(state, query).await,
+            (Op::Post, ["v1", "favorites"]) => library::add_favorite(state, body).await,
+            (Op::Post, ["v1", "favorites", "membership"]) => {
+                library::favorite_membership(state, body).await
+            }
+            (Op::Post, ["v1", "favorites", "toggle"]) => {
+                library::toggle_favorite(state, body).await
+            }
+            (Op::Delete, ["v1", "favorites", id]) => library::remove_favorite(state, id).await,
+
+            // --- 播放历史 ---
+            (Op::Get, ["v1", "history"]) => library::history_list(state, query).await,
+            (Op::Delete, ["v1", "history"]) => library::history_clear(state).await,
+            (Op::Delete, ["v1", "history", id]) => library::history_remove(state, id).await,
 
             _ => Err(not_found(format!(
                 "no such method: {} {:?}",
@@ -241,6 +335,9 @@ mod tests {
         // 204 的体必须是 Null：前端 request() 对 204 返回 null。
         assert_eq!(Reply::no_content().status, 204);
         assert!(Reply::no_content().body.is_null());
-        assert_eq!(Reply::with_status(202, json!({"status":"analyzing"})).status, 202);
+        assert_eq!(
+            Reply::with_status(202, json!({"status":"analyzing"})).status,
+            202
+        );
     }
 }

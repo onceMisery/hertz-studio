@@ -4,6 +4,12 @@
 //! The REST surface. Thin by design: handlers validate input, call into the
 //! audio actor or the store, and shape a response. No business logic lives
 //! here.
+//!
+//! 一批请求体结构与 helper 标了 `pub(crate)`：`rpc` 门面（DBX 插件形态）复用
+//! 的是同一份定义，而不是照着重写。上百个端点两边各写一份，加字段时漏一边
+//! 就是静默的契约漂移。handler 本体没有共享——两边取参与表达应答的方式不同
+//! （axum 抽取器 / HTTP 状态码 vs 信封 / `Reply.status`），强行抽公共层只会
+//! 多一层间接。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -621,7 +627,7 @@ pub struct TrackQuery {
     pub album: Option<String>,
 }
 
-fn track_filter_from(query: &TrackQuery) -> vmusic_store::TrackFilter {
+pub(crate) fn track_filter_from(query: &TrackQuery) -> vmusic_store::TrackFilter {
     vmusic_store::TrackFilter {
         artist: query
             .artist
@@ -666,7 +672,7 @@ async fn list_tracks(
     Ok(Json(TrackPage { total, tracks }))
 }
 
-fn parse_track_sort(value: Option<&str>) -> ApiResult<vmusic_store::TrackSort> {
+pub(crate) fn parse_track_sort(value: Option<&str>) -> ApiResult<vmusic_store::TrackSort> {
     vmusic_store::TrackSort::parse(value.unwrap_or("title"))
         .ok_or_else(|| bad_request("sort must be title, artist, album or added"))
 }
@@ -711,11 +717,11 @@ async fn track_facets(
 }
 
 #[derive(Deserialize)]
-struct BatchEditRequest {
-    track_ids: Vec<String>,
-    title: Option<String>,
-    artist: Option<String>,
-    album: Option<String>,
+pub(crate) struct BatchEditRequest {
+    pub(crate) track_ids: Vec<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) artist: Option<String>,
+    pub(crate) album: Option<String>,
 }
 
 /// 批量编辑：只写请求里出现的字段，其余字段不动（不覆盖各自已有编辑）。
@@ -804,17 +810,18 @@ async fn replace_cover(
     ))
 }
 
-/// 失效文件整理：文件已不存在的曲目清单（含路径，供界面确认）。
-async fn list_missing_tracks(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<Json<serde_json::Value>> {
+/// 文件已不存在的本地曲目（含路径，供界面确认）。
+///
+/// 抽成 helper 而不是让 HTTP 与 RPC 两个 handler 各写一遍：这条 join 带着「展示
+/// 值取编辑覆盖层」的语义，两份副本改字段时漏一边就是静默的契约漂移。
+pub(crate) async fn missing_local_tracks(state: &AppState) -> ApiResult<Vec<serde_json::Value>> {
     let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
         "SELECT t.id, t.path, COALESCE(NULLIF(TRIM(e.title), ''), t.title),          COALESCE(NULLIF(TRIM(e.artist), ''), t.artist)          FROM tracks t LEFT JOIN track_edits e ON e.track_id = t.id WHERE t.source = 'local'",
     )
     .fetch_all(&state.db)
     .await
     .map_err(|e| bad_request(e.to_string()))?;
-    let missing: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         rows.into_iter()
                 .filter(|(_, path, _, _)| !std::path::Path::new(path).is_file())
                 .map(|(id, path, title, artist)| {
@@ -823,7 +830,14 @@ async fn list_missing_tracks(
                 .collect()
     })
     .await
-    .map_err(|e| bad_request(e.to_string()))?;
+    .map_err(|e| bad_request(e.to_string()))
+}
+
+/// 失效文件整理：文件已不存在的曲目清单（含路径，供界面确认）。
+async fn list_missing_tracks(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let missing = missing_local_tracks(&state).await?;
     Ok(Json(
         serde_json::json!({ "missing": missing, "total": missing.len() }),
     ))
@@ -854,8 +868,8 @@ async fn batch_delete_tracks(
 }
 
 #[derive(Deserialize)]
-struct BatchDeleteRequest {
-    track_ids: Vec<String>,
+pub(crate) struct BatchDeleteRequest {
+    pub(crate) track_ids: Vec<String>,
 }
 
 async fn get_cover(State(state): State<Arc<AppState>>, AxumPath(id): AxumPath<String>) -> Response {
@@ -943,7 +957,7 @@ async fn get_lyrics(
 }
 
 /// 无手动导入时的回退链：容器内嵌歌词标签 → 同目录 sidecar `.lrc`。
-async fn read_embedded_or_sidecar_lyrics(path: &Path) -> vmusic_core::LyricDocument {
+pub(crate) async fn read_embedded_or_sidecar_lyrics(path: &Path) -> vmusic_core::LyricDocument {
     let embedded = {
         let path = path.to_path_buf();
         tokio::task::spawn_blocking(move || {
@@ -974,8 +988,8 @@ async fn read_embedded_or_sidecar_lyrics(path: &Path) -> vmusic_core::LyricDocum
 }
 
 #[derive(Deserialize)]
-struct LyricsImport {
-    content: String,
+pub(crate) struct LyricsImport {
+    pub(crate) content: String,
 }
 
 /// 手动导入歌词：存 LRC 原文，读取端按 imported 优先返回。清空内容用 DELETE。
@@ -1007,8 +1021,8 @@ async fn clear_lyrics(
 }
 
 #[derive(Deserialize)]
-struct LyricsOffset {
-    offset_ms: i64,
+pub(crate) struct LyricsOffset {
+    pub(crate) offset_ms: i64,
 }
 
 /// 保存每曲歌词偏移（毫秒），与歌词来源无关，重启后保留。
@@ -1053,9 +1067,9 @@ async fn library_roots(State(state): State<Arc<AppState>>) -> ApiResult<Json<ser
 }
 
 #[derive(Deserialize)]
-struct LibraryRootRequest {
-    path: String,
-    enabled: Option<bool>,
+pub(crate) struct LibraryRootRequest {
+    pub(crate) path: String,
+    pub(crate) enabled: Option<bool>,
 }
 
 async fn add_library_root(
@@ -1433,7 +1447,7 @@ async fn put_settings(
 /// 不出现在 `GET /v1/settings` 里、不能从 `PUT /v1/settings` 写进去、
 /// 改它只能走 `/v1/online/cookie`（那里才校验得了音源是否真的支持登录）。
 /// `online_device_*` 是非敏感设备身份，不在此列。
-fn is_credential(key: &str) -> bool {
+pub(crate) fn is_credential(key: &str) -> bool {
     key.starts_with(online::COOKIE_PREFIX) || key.starts_with(online::CRED_PREFIX)
 }
 
@@ -1531,20 +1545,20 @@ async fn clear_diagnostics_log() -> ApiResult<Json<serde_json::Value>> {
 // ---------------------------------------------------------------------------
 
 /// 收藏列表的默认/最大分页。
-const FAV_PAGE: i64 = 200;
-const FAV_PAGE_MAX: i64 = 500;
+pub(crate) const FAV_PAGE: i64 = 200;
+pub(crate) const FAV_PAGE_MAX: i64 = 500;
 
-fn store_err(e: vmusic_core::StoreError) -> ApiError {
+pub(crate) fn store_err(e: vmusic_core::StoreError) -> ApiError {
     ApiError::from(vmusic_core::CoreError::Store(e))
 }
 
 #[derive(Debug, Deserialize)]
-struct FavoritesQuery {
+pub(crate) struct FavoritesQuery {
     /// track | radio；省略表示全部。
-    kind: Option<String>,
+    pub(crate) kind: Option<String>,
     #[serde(default)]
-    offset: i64,
-    limit: Option<i64>,
+    pub(crate) offset: i64,
+    pub(crate) limit: Option<i64>,
 }
 
 async fn list_favorites(
@@ -1584,7 +1598,7 @@ async fn list_favorites(
 /// 入站收藏项的公共字段。新增与开关两个端点形状相同，只是一处多一个
 /// `favorited`，所以解析成两个请求体、共用这一个结构体。
 #[derive(Debug, Clone, Deserialize)]
-struct FavoriteBody {
+pub(crate) struct FavoriteBody {
     /// track | radio
     kind: String,
     /// local 或音源 id（netease/qq/kugou/qishui/ccmixter）
@@ -1610,7 +1624,9 @@ fn default_favorite_source() -> String {
 }
 
 /// 校验并归一「收藏指向什么」。
-fn favorite_target(body: &FavoriteBody) -> ApiResult<(vmusic_core::FavoriteKind, String, String)> {
+pub(crate) fn favorite_target(
+    body: &FavoriteBody,
+) -> ApiResult<(vmusic_core::FavoriteKind, String, String)> {
     let kind = daily::parse_kind(&body.kind)?;
     let source = body.source.trim().to_string();
     let ref_id = body.ref_id.trim().to_string();
@@ -1639,7 +1655,7 @@ fn clean(value: Option<&String>) -> Option<String> {
 /// 回读是**尽力而为**，不是前置条件：本地库里查不到时不能把整个收藏动作判死。
 /// 曲库可能还没扫描完、文件可能刚被移走，而用户此刻明确点了一次红心——
 /// 那种情况下落一条「未知曲目」的收藏，也比回 404 让他白点一次好。
-async fn favorite_meta(
+pub(crate) async fn favorite_meta(
     db: &sqlx::SqlitePool,
     body: &FavoriteBody,
     kind: vmusic_core::FavoriteKind,
@@ -1693,12 +1709,12 @@ async fn remove_favorite(
 }
 
 #[derive(Debug, Deserialize)]
-struct ToggleRequest {
+pub(crate) struct ToggleRequest {
     #[serde(flatten)]
-    body: FavoriteBody,
+    pub(crate) body: FavoriteBody,
     /// 显式指定目标态；省略则按当前状态取反。
     #[serde(default)]
-    favorited: Option<bool>,
+    pub(crate) favorited: Option<bool>,
 }
 
 /// 红心开关。
@@ -1735,14 +1751,14 @@ async fn toggle_favorite(
 }
 
 #[derive(Debug, Deserialize)]
-struct MembershipRequest {
+pub(crate) struct MembershipRequest {
     /// track | radio
-    kind: String,
+    pub(crate) kind: String,
     #[serde(default = "default_favorite_source")]
-    source: String,
+    pub(crate) source: String,
     /// 一屏曲目的 ref_id。
     #[serde(default)]
-    ids: Vec<String>,
+    pub(crate) ids: Vec<String>,
 }
 
 /// 批量判断「这一屏里哪些已收藏」。
@@ -2015,13 +2031,13 @@ async fn import_remote_files(
 }
 
 #[derive(Debug, Deserialize)]
-struct HistoryQuery {
-    limit: Option<i64>,
-    offset: Option<i64>,
+pub(crate) struct HistoryQuery {
+    pub(crate) limit: Option<i64>,
+    pub(crate) offset: Option<i64>,
     /// 来源筛选（local / netease / ...），空 = 全部。
-    source: Option<String>,
+    pub(crate) source: Option<String>,
     /// 标题/歌手/专辑子串搜索。
-    q: Option<String>,
+    pub(crate) q: Option<String>,
 }
 
 async fn history_list(

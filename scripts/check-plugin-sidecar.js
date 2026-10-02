@@ -4,12 +4,17 @@
 //
 // DBX 插件 sidecar 的协议冒烟检查（零依赖）。
 //
-// 真的把 dbx-plugin-hertz 起起来，用 stdio 喂 JSON-RPC，验证四件事：
+// 真的把 dbx-plugin-hertz 起起来，用 stdio 喂 JSON-RPC，验证六件事：
 //   1. plugin/initialize 握手能过（协议版本协商）；
 //   2. 装配链路能跑通——数据目录、SQLite 迁移、音频后端（拿不到设备会回落 null）；
 //   3. 门面信封 {status, body} 与 HTTP 版同构；
 //   4. 错误体字段名是 request_id（snake_case）而不是 requestId。前端 app.js 的
-//      错误归一化直接读这个字段，写错了整条错误链路会静默退化成"没有 request_id"。
+//      错误归一化直接读这个字段，写错了整条错误链路会静默退化成"没有 request_id"；
+//   5. 曲库域端点的契约：分页/排序参数、凭据键过滤、收藏开关的最终态语义，以及
+//      路由表里「字面段必须排在 {id} 通配之前」这条只有运行期才暴露的顺序约束；
+//   6. 端到端出声：合成一个真 WAV → 注册根目录 → 扫描 → 列出曲目 → load → play
+//      → 收到 spectrum 事件。这是插件形态下唯一能证明「原生音频在 dbx 子进程里
+//      真的出声」的检查，也是二进制信封（封面 base64 往返）的落点。
 //
 // 用法：node scripts/check-plugin-sidecar.js
 // 二进制默认找 target/debug/dbx-plugin-hertz[.exe]，可用 HERTZ_PLUGIN_BIN 覆盖。
@@ -86,9 +91,13 @@ function makeClient(child, timeoutMs) {
   let nextId = 1;
   return {
     notifications,
-    /// 订阅转发出来的服务端事件。
+    /// 订阅转发出来的服务端事件。返回退订函数。
     onNotify(listener) {
       listeners.push(listener);
+      return () => {
+        const at = listeners.indexOf(listener);
+        if (at >= 0) listeners.splice(at, 1);
+      };
     },
     send(method, params) {
       const id = nextId++;
@@ -106,6 +115,101 @@ function makeClient(child, timeoutMs) {
       });
     },
   };
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/// 轮询到 probe 返回真为止。probe 自己把最后一次结果留在外面，超时了好打印诊断。
+async function pollUntil(probe, timeoutMs, intervalMs = 200) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await probe()) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(intervalMs);
+  }
+}
+
+/// 等一条服务端事件（订阅以来已经收到的也算），超时给 null。
+function waitForEvent(client, match, timeoutMs) {
+  return new Promise((resolve) => {
+    const seen = client.notifications.find(
+      (n) => n.method === 'studio/event' && match(n.params || {}),
+    );
+    if (seen) {
+      resolve(seen.params);
+      return;
+    }
+    let timer = null;
+    const off = client.onNotify((message) => {
+      if (message.method !== 'studio/event') return;
+      const params = message.params || {};
+      if (!match(params)) return;
+      clearTimeout(timer);
+      off();
+      resolve(params);
+    });
+    timer = setTimeout(() => {
+      off();
+      resolve(null);
+    }, timeoutMs);
+  });
+}
+
+/// 合成一个带 RIFF INFO 标签的 16-bit 单声道 WAV。
+///
+/// 用真文件而不是喂假数据：扫描 → 解码 → 出声这条链上只有真音频才验得到。
+/// 标题/艺术家特意写进文件标签，这样「扫描真的解析了元数据」才算被证明——
+/// 退化成文件名（或整条链根本没跑）时这里会红，而不是悄悄通过。
+function writeWav(file, options = {}) {
+  const {
+    seconds = 2,
+    freq = 440,
+    title = 'Sidecar Smoke Tone',
+    artist = 'Hertz Studio',
+  } = options;
+  const rate = 44100;
+  const frames = Math.round(rate * seconds);
+  const samples = Buffer.alloc(frames * 2);
+  for (let i = 0; i < frames; i += 1) {
+    const value = Math.round(Math.sin((2 * Math.PI * freq * i) / rate) * 0.5 * 32767);
+    samples.writeInt16LE(value, i * 2);
+  }
+  // RIFF 块长度是奇数时要补一个 pad 字节，否则后面的块全部错位。
+  const chunk = (id, payload) => {
+    const head = Buffer.alloc(8);
+    head.write(id, 0, 'ascii');
+    head.writeUInt32LE(payload.length, 4);
+    const pad = payload.length % 2 === 1 ? Buffer.alloc(1) : Buffer.alloc(0);
+    return Buffer.concat([head, payload, pad]);
+  };
+  // INFO 字符串按真实文件的形状写：以 NUL 结尾，且长度字段把终止符算在内——
+  // ffmpeg 的 ff_riff_write_info_tag 正是这么干的（`len = strlen + 1`，奇数再补
+  // pad）。symphonia 0.5.5 的 riff::parse 不剥这个终止符，所以标题曾经带着
+  // "\u0000" 一路落库；vmusic-library 现在在边界上剥掉了。这里坚持喂"脏"输入，
+  // 就是为了盯着扫描 → 入库 → API 这一整条路别退化。
+  const text = (id, value) => chunk(id, Buffer.concat([Buffer.from(value, 'ascii'), Buffer.alloc(1)]));
+  const fmt = Buffer.alloc(16);
+  fmt.writeUInt16LE(1, 0);          // PCM
+  fmt.writeUInt16LE(1, 2);          // 单声道
+  fmt.writeUInt32LE(rate, 4);
+  fmt.writeUInt32LE(rate * 2, 8);   // 字节率
+  fmt.writeUInt16LE(2, 12);         // 块对齐
+  fmt.writeUInt16LE(16, 14);        // 位深
+  const info = Buffer.concat([
+    Buffer.from('INFO', 'ascii'),
+    text('INAM', title),
+    text('IART', artist),
+  ]);
+  const payload = Buffer.concat([
+    Buffer.from('WAVE', 'ascii'),
+    chunk('fmt ', fmt),
+    chunk('LIST', info),
+    chunk('data', samples),
+  ]);
+  const riff = Buffer.alloc(8);
+  riff.write('RIFF', 0, 'ascii');
+  riff.writeUInt32LE(payload.length, 4);
+  fs.writeFileSync(file, Buffer.concat([riff, payload]));
 }
 
 async function main() {
@@ -129,6 +233,8 @@ async function main() {
 
   const client = makeClient(child, 30000);
   let exitCode = 1;
+  // 端到端那一段要一个真目录放合成的 WAV，与数据目录分开清理。
+  let musicDir = null;
 
   try {
     console.log('\n握手');
@@ -187,8 +293,8 @@ async function main() {
     ok('buffering' in stateBody, 'state 叠加了 buffering 覆盖态');
 
     console.log('\n错误契约');
-    const missing = await client.send('v1/tracks/does-not-exist', { op: 'GET' });
-    // 路由表还没铺开的阶段，未实现的 path 一律 404；重点是错误体的**形状**。
+    const missing = await client.send('v1/nope/not-a-method', { op: 'GET' });
+    // 路由表没登记的 path 走 not_found；重点是错误体的**形状**。
     ok(missing.result !== undefined, '未知方法走带内信封而不是 JSON-RPC error');
     eq(missing.result && missing.result.status, 404, '未实现的 path 返回 404');
     const detail = ((missing.result || {}).body || {}).error || {};
@@ -200,6 +306,12 @@ async function main() {
     );
     ok(!('requestId' in detail), 'error 里没有误写成 requestId 的驼峰字段');
     ok(!('source' in detail), '本地接口的错误不带 source 字段');
+
+    // 域内 404（查无此曲）与协议级 404（无此方法）形状必须一致：前端只认
+    // error.code，不会去区分这个 404 是哪一层给的。
+    const noTrack = await client.send('v1/tracks/does-not-exist', { op: 'GET' });
+    eq(noTrack.result && noTrack.result.status, 404, '查无此曲 → 404');
+    eq(((noTrack.result || {}).body || {}).error?.code, 'not_found', '查无此曲的 code 是 not_found');
 
     console.log('\n播放域');
     const queue = await client.send('v1/player/queue', { op: 'GET' });
@@ -253,6 +365,337 @@ async function main() {
       ok(!('error' in ((beatmap.result || {}).body || {})), '404 体里没有 error 字段');
     }
 
+    console.log('\n曲库域：空库契约');
+    // 路由表的顺序约束：slice pattern 只按书写顺序取第一个匹配，而
+    // `["v1","tracks",id]` 同样能匹配 /v1/tracks/ids。字面段排到通配后面，这里
+    // 就会变成「查无此曲 ids」而不是 id 列表——axum 会自动按静态段优先排序，
+    // 这一层不会，所以必须有检查盯着。
+    const ids = await client.send('v1/tracks/ids', { op: 'GET' });
+    eq(ids.result && ids.result.status, 200, 'GET v1/tracks/ids → 200（字面段没被 {id} 通配吃掉）');
+    ok(Array.isArray((ids.result || {}).body?.track_ids), 'tracks/ids 回的是 track_ids 数组');
+
+    const facets = await client.send('v1/tracks/facets', { op: 'GET', query: { kind: 'album' } });
+    eq(facets.result && facets.result.status, 200, 'GET v1/tracks/facets → 200');
+    eq((facets.result || {}).body?.kind, 'album', 'facets 回显 kind');
+
+    const emptyTracks = await client.send('v1/tracks', { op: 'GET' });
+    eq(emptyTracks.result && emptyTracks.result.status, 200, 'GET v1/tracks → 200');
+    eq((emptyTracks.result || {}).body?.total, 0, '空库 total 为 0');
+
+    // 排序非法要 400：静默按默认排序返回的话，界面下拉框会和列表内容不一致。
+    const badSort = await client.send('v1/tracks', { op: 'GET', query: { sort: 'nope' } });
+    eq(badSort.result && badSort.result.status, 400, 'sort 非法 → 400');
+
+    // 分页参数是字符串（URLSearchParams 的产物）也得认。用 serde_json 直接反序列化
+    // 请求结构体的话，这里会 400 而独立形态正常——两个宿主行为就此分叉。
+    const paged = await client.send('v1/tracks', { op: 'GET', query: { limit: '50', offset: '0' } });
+    eq(paged.result && paged.result.status, 200, 'limit/offset 传字符串 → 200（与 axum Query<T> 同口径）');
+
+    const emptyBatch = await client.send('v1/tracks/batch-edit', { op: 'POST', body: { track_ids: [] } });
+    eq(emptyBatch.result && emptyBatch.result.status, 400, 'batch-edit 空 track_ids → 400');
+
+    const noCover = await client.send('v1/tracks/whatever/cover', { op: 'GET' });
+    eq(noCover.result && noCover.result.status, 204, '没有封面 → 204');
+    ok(
+      (noCover.result || {}).body === null || (noCover.result || {}).body === undefined,
+      '204 的体是 null（前端按「无封面」处理，不会让整行渲染失败）',
+    );
+
+    const missingTracks = await client.send('v1/tracks/missing', { op: 'GET' });
+    eq(missingTracks.result && missingTracks.result.status, 200, 'GET v1/tracks/missing → 200');
+    eq(((missingTracks.result || {}).body?.missing || []).length, 0, '空库上没有失效曲目');
+
+    console.log('\n扫描根目录与设置');
+    const roots = await client.send('v1/library/roots', { op: 'GET' });
+    eq(roots.result && roots.result.status, 200, 'GET v1/library/roots → 200');
+    ok(Array.isArray((roots.result || {}).body?.roots), 'roots 是数组');
+
+    const badRoot = await client.send('v1/library/roots', {
+      op: 'POST',
+      body: { path: path.join(os.tmpdir(), 'hertz-check-不存在的目录') },
+    });
+    eq(badRoot.result && badRoot.result.status, 400, '添加不存在的根目录 → 400');
+
+    const idle = await client.send('v1/library/status', { op: 'GET' });
+    eq(idle.result && idle.result.status, 200, 'GET v1/library/status → 200');
+    eq((idle.result || {}).body?.running, false, '没扫过的时候 running=false');
+
+    const settings = await client.send('v1/settings', { op: 'GET' });
+    eq(settings.result && settings.result.status, 200, 'GET v1/settings → 200');
+    ok(
+      !Object.keys((settings.result || {}).body || {}).some(
+        (key) => key.startsWith('online_cred_') || key.startsWith('online_cookie_'),
+      ),
+      'settings 不外泄音源凭据键',
+    );
+    const putSettings = await client.send('v1/settings', { op: 'PUT', body: { smoke_marker: 'phase3' } });
+    eq(putSettings.result && putSettings.result.status, 200, 'PUT v1/settings → 200');
+    const readBack = await client.send('v1/settings', { op: 'GET' });
+    eq((readBack.result || {}).body?.smoke_marker, 'phase3', '写进去的设置能读回');
+    // 凭据只能走 /v1/online/cookie（那里才校验得了音源是否真支持登录）。这条策略
+    // 两个宿主共用 is_credential；插件形态漏掉就等于开了个绕过校验的写入口。
+    const credWrite = await client.send('v1/settings', {
+      op: 'PUT',
+      body: { online_cred_netease: { cookie: 'x' } },
+    });
+    eq(credWrite.result && credWrite.result.status, 400, 'PUT settings 写凭据键 → 400');
+
+    console.log('\n收藏与历史');
+    const favorites = await client.send('v1/favorites', { op: 'GET' });
+    eq(favorites.result && favorites.result.status, 200, 'GET v1/favorites → 200');
+    const favBody = (favorites.result || {}).body || {};
+    ok(Array.isArray(favBody.favorites), 'favorites 是数组');
+    // counts 是给前端两个 tab 一次拿齐的，缺了就要多请求一轮。
+    eq(favBody.counts && favBody.counts.track, 0, 'counts.track 为 0');
+    eq(favBody.counts && favBody.counts.radio, 0, 'counts.radio 为 0');
+
+    const badKind = await client.send('v1/favorites', { op: 'GET', query: { kind: 'nope' } });
+    eq(badKind.result && badKind.result.status, 400, 'kind 非法 → 400');
+
+    const emptyMembership = await client.send('v1/favorites/membership', {
+      op: 'POST',
+      body: { kind: 'track', source: 'local', ids: [] },
+    });
+    eq(emptyMembership.result && emptyMembership.result.status, 200, 'membership 空 ids → 200');
+    eq(((emptyMembership.result || {}).body?.ids || []).length, 0, 'membership 空 ids 回空数组');
+
+    const noRef = await client.send('v1/favorites/toggle', {
+      op: 'POST',
+      body: { kind: 'track', source: 'local' },
+    });
+    eq(noRef.result && noRef.result.status, 400, 'toggle 缺 ref_id → 400');
+
+    const history = await client.send('v1/history', { op: 'GET' });
+    eq(history.result && history.result.status, 200, 'GET v1/history → 200');
+    ok(Array.isArray((history.result || {}).body?.items), 'history.items 是数组');
+
+    // 路径参数不是整数要 400 而不是 404：给 404 的话前端按「这条已经不在了」
+    // 静默处理，一个真实的参数错误就被咽下去了。
+    const badHistoryId = await client.send('v1/history/abc', { op: 'DELETE' });
+    eq(badHistoryId.result && badHistoryId.result.status, 400, 'DELETE v1/history/abc → 400（不是 404）');
+
+    console.log('\n端到端：扫描 → 播放 → 频谱');
+    musicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hertz-plugin-music-'));
+    writeWav(path.join(musicDir, 'smoke-tone.wav'), { seconds: 6 });
+
+    const addedRoot = await client.send('v1/library/roots', {
+      op: 'POST',
+      body: { path: musicDir, enabled: true },
+    });
+    eq(addedRoot.result && addedRoot.result.status, 200, 'POST v1/library/roots → 200');
+    const rootList = (addedRoot.result || {}).body?.roots || [];
+    eq(rootList.length, 1, '根目录回读为 1 条');
+    const rootPath = rootList[0] && rootList[0].path;
+    ok(typeof rootPath === 'string' && rootPath.length > 0, '根目录路径已归一化：' + rootPath);
+
+    const scanned = await client.send('v1/library/scan', { op: 'POST', body: { root: rootPath } });
+    eq(scanned.result && scanned.result.status, 200, 'POST v1/library/scan → 200');
+    eq((scanned.result || {}).body?.started, true, 'scan 回 started:true');
+
+    // 扫描是后台任务。一个文件通常几十毫秒就完，但解码 + 写库给足余量。
+    let scanBody = {};
+    const scanDone = await pollUntil(async () => {
+      const status = await client.send('v1/library/status', { op: 'GET' });
+      scanBody = (status.result || {}).body || {};
+      return scanBody.running === false && scanBody.total > 0;
+    }, 60000);
+    ok(
+      scanDone,
+      '扫描收尾（running=false 且 total>0）' + (scanDone ? '' : '：' + JSON.stringify(scanBody).slice(0, 400)),
+    );
+    ok(scanBody.added >= 1, '扫出至少 1 首（added=' + scanBody.added + '）');
+    eq(scanBody.failed, 0, '没有解码失败的文件');
+
+    const tracks = await client.send('v1/tracks', { op: 'GET', query: { limit: '10' } });
+    const list = (tracks.result || {}).body?.tracks || [];
+    eq(list.length, 1, '曲目列表里恰好 1 首');
+    const track = list[0] || {};
+    // 必须是精确相等而不是「包含」：RIFF INFO 的 NUL 终止符曾经跟着落库，标题
+    // 成了 "Sidecar Smoke Tone\u0000"——界面上看不出来，精确比对才抓得住。
+    eq(track.title, 'Sidecar Smoke Tone', '标题来自文件标签，且没带着 RIFF INFO 的 NUL 终止符');
+    eq(track.artist, 'Hertz Studio', '艺术家来自文件标签');
+    ok(
+      Math.abs((track.duration_ms || 0) - 6000) <= 250,
+      '时长约 6000ms（得到 ' + track.duration_ms + '）',
+    );
+
+    const one = await client.send('v1/tracks/' + encodeURIComponent(track.id), { op: 'GET' });
+    eq(one.result && one.result.status, 200, 'GET v1/tracks/{id} → 200');
+    eq((one.result || {}).body?.id, track.id, '单曲读回的 id 与列表一致');
+
+    const artistFacets = await client.send('v1/tracks/facets', { op: 'GET', query: { kind: 'artist' } });
+    ok(
+      ((artistFacets.result || {}).body?.facets || []).some(
+        (facet) => facet.name === 'Hertz Studio' && facet.count === 1,
+      ),
+      'facets(artist) 里有扫出来的艺术家且计数为 1',
+    );
+    const idsAfter = await client.send('v1/tracks/ids', { op: 'GET' });
+    eq(((idsAfter.result || {}).body?.track_ids || []).length, 1, 'tracks/ids 与列表同口径');
+
+    console.log('\n二进制信封：封面往返');
+    // 1x1 PNG。字节级比对：raw_base64 进、base64 出，编解码任一侧写错都会红。
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const coverPath = 'v1/tracks/' + encodeURIComponent(track.id) + '/cover';
+    const putCover = await client.send(coverPath, {
+      op: 'POST',
+      raw_base64: png.toString('base64'),
+      raw_content_type: 'image/png',
+    });
+    eq(putCover.result && putCover.result.status, 200, 'POST 封面（raw_base64）→ 200');
+    eq((putCover.result || {}).body?.cover_key, track.id + '.png', 'cover_key 按 content-type 落成 .png');
+
+    const gotCover = await client.send(coverPath, { op: 'GET' });
+    eq(gotCover.result && gotCover.result.status, 200, 'GET 封面 → 200');
+    eq((gotCover.result || {}).body?.content_type, 'image/png', '封面 content_type 回读为 image/png');
+    ok(
+      Buffer.from((gotCover.result || {}).body?.data || '', 'base64').equals(png),
+      '封面字节原样往返（base64 编解码无损）',
+    );
+    const afterCover = await client.send('v1/tracks/' + encodeURIComponent(track.id), { op: 'GET' });
+    eq(
+      (afterCover.result || {}).body?.has_cover,
+      true,
+      '换封面后 has_cover 置真（前端据此才会去取图）',
+    );
+
+    // 非法 base64 是信封非法，走 JSON-RPC error 而不是带内 400：协议层的错
+    // 不该被伪装成域错误，否则前端会当成「这张封面取不到」静默降级。
+    const badBase64 = await client.send(coverPath, {
+      op: 'POST',
+      raw_base64: '***',
+      raw_content_type: 'image/png',
+    });
+    ok(badBase64.error !== undefined, '非法 base64 → JSON-RPC error');
+    eq(badBase64.error && badBase64.error.code, -32602, '非法 base64 的错误码是 -32602');
+
+    console.log('\n歌词');
+    const lyricsPath = 'v1/tracks/' + encodeURIComponent(track.id) + '/lyrics';
+    const noLyrics = await client.send(lyricsPath, { op: 'GET' });
+    eq(noLyrics.result && noLyrics.result.status, 200, 'GET lyrics → 200（无词也给 200 + 空文档）');
+    eq(((noLyrics.result || {}).body?.lines || []).length, 0, '合成文件没有歌词');
+
+    await client.send(lyricsPath, { op: 'PUT', body: { content: '[00:01.00]冒烟测试' } });
+    const imported = await client.send(lyricsPath, { op: 'GET' });
+    eq((imported.result || {}).body?.source, 'imported', '导入后 source=imported');
+    eq((imported.result || {}).body?.lines?.[0]?.start_ms, 1000, '第一行时间戳 1000ms');
+
+    // 偏移叠加：total = 文件 [offset:] + 用户偏移，读取端一次应用。
+    await client.send(lyricsPath + '/offset', { op: 'PUT', body: { offset_ms: 500 } });
+    const shifted = await client.send(lyricsPath, { op: 'GET' });
+    eq((shifted.result || {}).body?.user_offset_ms, 500, 'user_offset_ms 回读 500');
+    eq((shifted.result || {}).body?.lines?.[0]?.start_ms, 1500, '用户偏移叠加到行时间戳上（1000+500）');
+
+    const blankLyrics = await client.send(lyricsPath, { op: 'PUT', body: { content: '   ' } });
+    eq(blankLyrics.result && blankLyrics.result.status, 400, '导入空白歌词 → 400');
+
+    await client.send(lyricsPath, { op: 'DELETE' });
+    const cleared = await client.send(lyricsPath, { op: 'GET' });
+    ok(
+      (cleared.result || {}).body?.source !== 'imported',
+      'DELETE 后不再是 imported（偏移一并清掉，回退到内嵌/sidecar）',
+    );
+
+    console.log('\n播放与频谱');
+    // 音量压低：这一段会真的出声，而检查只需要频谱帧有能量，不需要响。
+    // 频谱按帧峰值归一化，所以小声也照样有非零频段。
+    await client.send('v1/player/volume', { op: 'POST', body: { volume: 0.1 } });
+    const loaded = await client.send('v1/player/load', { op: 'POST', body: { track_id: track.id } });
+    eq(loaded.result && loaded.result.status, 200, 'POST v1/player/load → 200');
+    eq((loaded.result || {}).body?.track_id, track.id, 'load 后快照的 track_id 是刚扫出来的那首');
+
+    const played = await client.send('v1/player/play', { op: 'POST' });
+    eq(played.result && played.result.status, 200, 'POST v1/player/play → 200');
+    eq((played.result || {}).body?.playing, true, 'play 之后快照 playing=true');
+
+    const before = (((await client.send('v1/state', { op: 'GET' })).result || {}).body) || {};
+    await sleep(700);
+    const after = (((await client.send('v1/state', { op: 'GET' })).result || {}).body) || {};
+    ok(
+      (after.position_ms || 0) > (before.position_ms || 0),
+      `position_ms 在前进（${before.position_ms} → ${after.position_ms}）`,
+    );
+
+    // 频谱是「真的在解码并输出音频」的唯一可观测证据：NullBackend 不产生频谱帧，
+    // 解码停摆也不产生。收不到就说明这条链断了。
+    if (healthBody.backend === 'null') {
+      console.log('  --   backend=null，跳过频谱断言（NullBackend 不产生频谱帧）');
+    } else {
+      const spectrum = await waitForEvent(
+        client,
+        (params) => params.type === 'spectrum' && Array.isArray(params.bands),
+        15000,
+      );
+      ok(spectrum, '收到 spectrum 事件（音频在插件子进程里真的出声了）');
+      ok(spectrum && spectrum.bands.length > 0, 'spectrum.bands 非空');
+      ok(
+        spectrum && spectrum.bands.some((value) => value > 0),
+        'spectrum 至少一个频段有能量',
+      );
+    }
+
+    // 播放提交时写历史：这条把播放域与历史域串起来验。
+    const playedHistory = await client.send('v1/history', { op: 'GET', query: { limit: '10' } });
+    const items = (playedHistory.result || {}).body?.items || [];
+    ok(items.length >= 1, '播放后历史里有记录');
+    ok(
+      items.some((item) => item.title === 'Sidecar Smoke Tone'),
+      '历史记录带的是曲名而不是 id（元数据没有退化）',
+    );
+
+    // 收藏本地曲目时前端往往只持有 id：标题由服务端回读本地库补上。回读是尽力
+    // 而为而不是前置条件，所以这里既验「补上了」也验「补不上时不判死」。
+    const favOn = await client.send('v1/favorites/toggle', {
+      op: 'POST',
+      body: { kind: 'track', source: 'local', ref_id: track.id },
+    });
+    eq((favOn.result || {}).body?.favorited, true, 'toggle → favorited=true');
+    eq(
+      (favOn.result || {}).body?.favorite?.title,
+      'Sidecar Smoke Tone',
+      '收藏标题由服务端回读本地库补上',
+    );
+
+    const membership = await client.send('v1/favorites/membership', {
+      op: 'POST',
+      body: { kind: 'track', source: 'local', ids: [track.id, 'not-favorited'] },
+    });
+    eq(((membership.result || {}).body?.ids || []).length, 1, 'membership 只回命中的那个 id');
+
+    const favOff = await client.send('v1/favorites/toggle', {
+      op: 'POST',
+      body: { kind: 'track', source: 'local', ref_id: track.id },
+    });
+    eq(
+      (favOff.result || {}).body?.favorited,
+      false,
+      '再 toggle → favorited=false（返回最终态而非「操作成功」）',
+    );
+
+    await client.send('v1/player/pause', { op: 'POST' });
+
+    // DELETE 的入参在 query 上：漏了 query 通道的话这里会删不掉。
+    const removedRoot = await client.send('v1/library/roots', { op: 'DELETE', query: { path: rootPath } });
+    eq(removedRoot.result && removedRoot.result.status, 200, 'DELETE v1/library/roots?path=… → 200');
+    eq(((removedRoot.result || {}).body?.roots || []).length, 0, '删除后根目录为 0 条');
+
+    // 删根目录不删曲目：库里的曲目还在，只是不再被扫描维护。
+    const afterRemove = await client.send('v1/tracks', { op: 'GET' });
+    eq((afterRemove.result || {}).body?.total, 1, '删根目录后曲目仍在库里');
+
+    const deleted = await client.send('v1/tracks/batch-delete', {
+      op: 'POST',
+      body: { track_ids: [track.id] },
+    });
+    eq((deleted.result || {}).body?.deleted, 1, 'batch-delete 删掉 1 首');
+    const afterDelete = await client.send('v1/tracks', { op: 'GET' });
+    eq((afterDelete.result || {}).body?.total, 0, '删除后库为空');
+    const coverGone = await client.send(coverPath, { op: 'GET' });
+    eq(coverGone.result && coverGone.result.status, 204, '曲目删掉后封面缓存文件也清掉了（204）');
+
     console.log('\n信封校验');
     const badOp = await client.send('v1/health', { op: 'PATCH' });
     ok(badOp.error !== undefined, '非法 op 返回真正的 JSON-RPC error（协议级错误）');
@@ -274,6 +717,7 @@ async function main() {
     // 临时数据目录里是 SQLite + WAL，Windows 下要等子进程真的退出才能删。
     setTimeout(() => {
       fs.rmSync(dataDir, { recursive: true, force: true });
+      if (musicDir) fs.rmSync(musicDir, { recursive: true, force: true });
     }, 500);
   }
 

@@ -38,6 +38,8 @@ serde_json = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 md-5 = "0.10"
 sha1 = "0.10"
+# DBX 插件形态下封面走 JSON 信封，二进制只能 base64 过一道（HTTP 版是裸 body）。
+base64 = "0.22"
 # 酷狗扫码登录换票的客户端载荷加密（平台公开算法：AES-128-CBC + 1024 RSA）。
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }

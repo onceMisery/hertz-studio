@@ -11,7 +11,8 @@
 //! UI 调 `dbxPlugin.invoke(method, params)`，其中：
 //! - `method` 就是原来的 HTTP path 去掉前导斜杠，例如 `v1/player/play`；
 //! - `params` 是信封 `{op, query, body}`，`op` 是原 HTTP 动词（同一路径可能同时
-//!   挂 GET 和 POST，如 `v1/player/dsp`，所以必须显式带上）。
+//!   挂 GET 和 POST，如 `v1/player/dsp`，所以必须显式带上）；上传二进制时另有
+//!   `raw_base64` / `raw_content_type` 两个字段。
 //!
 //! 返回值一律是 JSON-RPC **成功**结果，形状 `{status, body}`，与 HTTP 响应一一对应。
 //! 域错误不用 JSON-RPC error 传，因为宿主解码 sidecar 响应时只保留 `error.message`，
@@ -30,7 +31,7 @@ use dbx_plugin_sdk::{
     PluginEmitter, PluginError, PluginHandler, PluginMetadata, PluginServer, RequestContext,
 };
 use hertz_studio::error::{ErrorBody, ErrorDetail};
-use hertz_studio::rpc::{Call, Op, Rpc, RpcResult};
+use hertz_studio::rpc::{decode_base64, Call, Op, RawBody, Rpc, RpcResult};
 use hertz_studio::state::AppState;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -80,10 +81,31 @@ impl PluginHandler for Plugin {
         })?;
         let query = params.get("query").cloned().unwrap_or(Value::Null);
         let body = params.get("body").cloned().unwrap_or(Value::Null);
+        // 二进制体（封面替换）：base64 解不开是信封非法，属协议级错误，
+        // 与 `op` 不合法同一档，不能塞进带内的 {status, body}。
+        let raw = match envelope_str(&params, "raw_base64")? {
+            Some(data) => Some(RawBody {
+                bytes: decode_base64(data).map_err(|error| {
+                    PluginError::new(
+                        -32602,
+                        format!("envelope.raw_base64 不是合法 base64: {error}"),
+                    )
+                })?,
+                // 缺省值与前端 dbxRequest 的缺省一致，两边不会因一边省略而错位。
+                content_type: envelope_str(&params, "raw_content_type")?
+                    .unwrap_or("application/octet-stream")
+                    .to_string(),
+            }),
+            None => None,
+        };
 
-        let result = self
-            .runtime
-            .block_on(self.rpc.call(Call { op, path: method, query, body }));
+        let result = self.runtime.block_on(self.rpc.call(Call {
+            op,
+            path: method,
+            query,
+            body,
+            raw,
+        }));
         Ok(envelope_result(result))
     }
 }
