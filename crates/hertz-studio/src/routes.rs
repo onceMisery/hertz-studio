@@ -988,7 +988,10 @@ pub(crate) async fn fetch_remote_image(url: &reqwest::Url) -> ApiResult<(Vec<u8>
         return Err(bad_request(format!("upstream returned {}", resp.status())));
     }
     // 有 Content-Length 就先挡一道，别把数兆字节读进来才拒绝。
-    if resp.content_length().map_or(false, |len| len as usize > MAX_BYTES) {
+    if resp
+        .content_length()
+        .map_or(false, |len| len as usize > MAX_BYTES)
+    {
         return Err(bad_request("upstream cover is too large"));
     }
     let content_type = resp
@@ -1000,10 +1003,7 @@ pub(crate) async fn fetch_remote_image(url: &reqwest::Url) -> ApiResult<(Vec<u8>
     if !content_type.starts_with("image/") {
         return Err(bad_request("upstream is not an image"));
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
+    let bytes = resp.bytes().await.map_err(|e| bad_request(e.to_string()))?;
     if bytes.len() > MAX_BYTES {
         return Err(bad_request("upstream cover is too large"));
     }
