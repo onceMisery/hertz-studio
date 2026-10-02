@@ -108,6 +108,20 @@ pub async fn lyric(state: &Arc<AppState>, query: &Value) -> RpcResult {
     )?)
 }
 
+/// 远程封面代理：插件沙箱的 img-src 只放行 `data:` / `blob:` / 插件资源源，音源
+/// CDN 的 https 图在插件形态画不出来，只能由服务端取回 base64。准入与限流在
+/// `routes::public_https_url` / `fetch_remote_image`，两边共用同一份；应答形状与
+/// 本地封面端点一致，前端一条 data-URL 链路吃两种封面。
+pub async fn cover_proxy(_state: &Arc<AppState>, query: &Value) -> RpcResult {
+    let q: crate::routes::CoverProxyQuery = query_as(query)?;
+    let url = crate::routes::public_https_url(&q.url)?;
+    let (bytes, content_type) = crate::routes::fetch_remote_image(&url).await?;
+    Ok(Reply::ok(json!({
+        "data": crate::rpc::encode_base64(&bytes),
+        "content_type": content_type,
+    })))
+}
+
 // ---------------------------------------------------------------------------
 // 整盘播放
 // ---------------------------------------------------------------------------

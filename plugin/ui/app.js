@@ -514,6 +514,104 @@ function dbxCoverUrl(id) {
   return null;
 }
 
+// 远程封面（音源 CDN 的 https 图）在插件形态下画不出来：沙箱 CSP 的 img-src 只
+// 放行 data: / blob: / 插件资源源，连 fetch 都不行（connect-src 'none'）。独立
+// 形态没有这层 CSP，远程 URL 直接进 <img src> 就是对的。所以插件形态一律经
+// sidecar 的 /v1/online/cover 取回 base64，复用本地封面那套缓存与回填；下面每个
+// 函数对独立形态都是恒等的，调用点因此不需要分支。
+function isRemoteCoverUrl(url) {
+  return typeof url === 'string' && /^https?:\/\//i.test(url);
+}
+
+function remoteCoverKey(url) {
+  return 'url:' + url;
+}
+
+function ensureRemoteCover(url) {
+  const key = remoteCoverKey(url);
+  if (coverCache.has(key)) return Promise.resolve(coverCache.get(key));
+  if (coverPending.has(key)) return coverPending.get(key);
+  const task = dbxRequest(`/v1/online/cover?url=${encodeURIComponent(url)}`)
+    .then((cover) => {
+      if (!cover || !cover.data) return null;
+      const dataUrl = `data:${cover.content_type || 'image/jpeg'};base64,${cover.data}`;
+      coverRemember(key, dataUrl);
+      notifyCover(key, dataUrl);
+      return dataUrl;
+    })
+    // 取不到就保持占位，不该让整行渲染失败。
+    .catch(() => null)
+    .finally(() => coverPending.delete(key));
+  coverPending.set(key, task);
+  return task;
+}
+
+/// 同步契约，与 dbxCoverUrl 同款：命中缓存给 data URL；未命中返回 null 并触发取
+/// 回，落地后经 coverSlot 回填。非远程地址原样返回。
+function remoteCover(url) {
+  if (!url) return null;
+  if (transport.kind !== 'dbx' || !isRemoteCoverUrl(url)) return url;
+  const hit = coverCache.get(remoteCoverKey(url));
+  if (hit) return hit;
+  ensureRemoteCover(url);
+  return null;
+}
+
+/// 等一手解析结果：插件形态把远程地址换成 data URL，换不到返回 null。
+/// 独立形态恒等。正在播放 / 舞台这类「必须拿到才画」的位置用它。
+async function resolveCover(url) {
+  if (!url) return null;
+  if (transport.kind !== 'dbx' || !isRemoteCoverUrl(url)) return url;
+  return (await ensureRemoteCover(url)) || null;
+}
+
+/// 回填登记。独立形态下立即用原 URL 调一次 apply，调用点不用分支。
+function remoteCoverSlot(url, apply) {
+  if (!url || typeof apply !== 'function') return;
+  if (transport.kind !== 'dbx' || !isRemoteCoverUrl(url)) {
+    apply(url);
+    return;
+  }
+  coverSlot(remoteCoverKey(url), apply);
+  ensureRemoteCover(url);
+}
+
+/// 背景图位：插件形态先清空、代理落地后回填。
+function applyCoverBg(el, url) {
+  if (!el) return;
+  const resolved = remoteCover(url);
+  if (resolved === null) {
+    el.style.backgroundImage = '';
+    remoteCoverSlot(url, (u) => { el.style.backgroundImage = `url("${u}")`; });
+    return;
+  }
+  el.style.backgroundImage = resolved ? `url("${resolved}")` : '';
+}
+
+/// <img> 位：与 applyCoverBg 同一套解析，只是落在 src 上。
+function applyCoverImg(img, url) {
+  if (!img) return;
+  const resolved = remoteCover(url);
+  if (resolved === null) {
+    img.removeAttribute('src');
+    remoteCoverSlot(url, (u) => { img.src = u; });
+    return;
+  }
+  if (resolved) img.src = resolved;
+  else img.removeAttribute('src');
+}
+
+// 其它模块（daily / 歌单两层 / 登录头像）拿不到 app.js 的闭包，经这个全局取用；
+// 与 window.Online 的宿主注入是两种风格，但改六个 bind() 的扩散面更大。
+window.HertzCovers = {
+  isRemote: isRemoteCoverUrl,
+  url: remoteCover,
+  resolve: resolveCover,
+  slot: remoteCoverSlot,
+  applyBg: applyCoverBg,
+  applyImg: applyCoverImg,
+};
+
 // 封面异步落地后的回填。
 //
 // 分两路，为的是让调用点改动最小：
@@ -1111,6 +1209,15 @@ function paintArt(row, url) {
     art.style.setProperty('--ph', String(h));
   };
   if (!url) { markMissing(); return; }
+  const resolved = remoteCover(url);
+  if (resolved === null) {
+    // 插件形态 + 远程地址且缓存未命中：先占位，代理落地后按 data URL 重画这一格。
+    // dataset.src 记的是逻辑 URL，重画传的是 data URL，两者不同，所以幂等标记不会
+    // 挡掉这次重画；同一行被复用时逻辑 URL 没变也不会重复发请求（缓存/在途去重）。
+    markMissing();
+    remoteCoverSlot(url, (u) => paintArt(row, u));
+    return;
+  }
   const img = document.createElement('img');
   img.className = 't-art-img';
   img.alt = '';
@@ -1121,7 +1228,7 @@ function paintArt(row, url) {
   img.onerror = () => { markMissing(); img.remove(); };
   img.onload = () => art.classList.add('is-loaded');
   art.appendChild(img);
-  img.src = url;
+  img.src = resolved;
 }
 
 // ---------------------------------------------------------------------------
@@ -1400,11 +1507,17 @@ async function loadNowPlaying(id) {
   } else {
     url = window.Online.safeCoverUrl(track.cover);
   }
+  // 插件形态下远程封面必须先换成 data URL：一则沙箱 CSP 画不出 https 图，二则
+  // 下面的 probeImage 探的是最终要画的那份——探远程地址在插件形态必然失败，封面
+  // 会被当成坏图撤掉，表现正是「正在播放没有封面」。
+  const remote = isRemoteCoverUrl(url) ? url : null;
+  url = await resolveCover(url);
   // 远程封面可能 404 / 防盗链：加载不出来就撤掉，用占位图而不是空白
   if (url && !(await probeImage(url))) url = null;
   // 探测通过的封面回写进曲目元数据（base/byId/Online.meta 是同一个对象）：
   // pushStageQueue 重推时歌单架当前卡才能拿到封面，不用等下一次换曲。
-  if (url && !track.cover && track.source && track.onlineId) track.cover = url;
+  // 回写远程原址而不是 data URL：base64 塞进元数据会把内存与持久化一起撑爆。
+  if (remote && url && !track.cover && track.source && track.onlineId) track.cover = remote;
   if (!isCurrent()) return;
   // 封面（含旋转）与取色背景交给舞台，app.js 不再直接碰 #cover。
   if (Stage) Stage.setTrack(track, url);
@@ -1923,8 +2036,8 @@ function onlinePlaylistRow(src, p) {
   const art = document.createElement('span');
   art.className = 'pl-art';
   const cover = window.Online ? window.Online.safeCoverUrl(p.cover) : null;
-  if (cover) art.style.backgroundImage = 'url("' + cover + '")';
-  else art.classList.add('is-missing');
+  applyCoverBg(art, cover);
+  if (!cover) art.classList.add('is-missing');
   el.appendChild(art);
 
   const main = document.createElement('span');
@@ -2207,7 +2320,7 @@ function renderPlaylistGrid() {
     if (it.online) {
       // 在线卡自带封面直链（由 Online 归一化过），不走 plCovers。
       if (it.coverUrl) {
-        art.style.backgroundImage = `url("${it.coverUrl}")`;
+        applyCoverBg(art, it.coverUrl);
         art.classList.add('has-art');
       } else {
         art.style.backgroundImage = placeholderArt(it.id);
@@ -2479,7 +2592,7 @@ function renderDetailRows(id) {
       art.classList.add('pd-has-img');
       const url = window.Online && window.Online.rowCoverUrl
         ? window.Online.rowCoverUrl(track.cover) : track.cover;
-      art.style.backgroundImage = `url("${url}")`;
+      applyCoverBg(art, url);
     }
     if (online && window.Online) {
       // 来源徽标与在线面板同一套平台图标，混合歌单里一眼分清本地与在线。
@@ -3786,7 +3899,11 @@ function bindShortcuts() {
 function initPanelBridge() {
   document.addEventListener('ln:panel', (e) => {
     const d = e.detail || {};
-    if (d.action === 'play-local') {
+    if (d.action === 'settings-enter') {
+      // 流年把设置页搬进了浮层，不再经过 setView('settings')，
+      // 这里补上它原本顺带做的诊断日志刷新，否则设置页里的日志大小会停在旧值。
+      loadDiagnostics();
+    } else if (d.action === 'play-local') {
       playTrack(String(d.id), state.queue.slice());
     } else if (d.action === 'play-online') {
       if (window.Online && d.track) {
@@ -4076,7 +4193,16 @@ function syncNpTrack(track, coverUrl) {
   if (!isNpOpen() || !track) return;
   np.name.textContent = track.title || '未命名';
   np.artist.textContent = [track.artist, track.album].filter(Boolean).join(' · ') || '未知艺术家';
-  np.art.style.backgroundImage = coverUrl ? `url("${coverUrl}")` : 'none';
+  // 调用方有的传已解析的 data URL（换曲主流程），有的传在线元数据里的远程原址
+  // （详情补拉回填），所以解析收在这里：插件形态远程地址先占位、代理落地后回填。
+  const apply = (u) => { np.art.style.backgroundImage = u ? `url("${u}")` : 'none'; };
+  const resolved = remoteCover(coverUrl);
+  if (resolved === null) {
+    apply(null);
+    remoteCoverSlot(coverUrl, apply);
+  } else {
+    apply(resolved);
+  }
 }
 
 function initNowPlayingModal() {

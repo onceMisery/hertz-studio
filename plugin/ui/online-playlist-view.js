@@ -29,6 +29,13 @@
 //      代价，不是 bug。
 (function () {
   'use strict';
+  /// 背景图位封面：插件形态下远程地址要经 sidecar 换成 data URL（沙箱 CSP 画不
+  /// 出 https 图）。HertzCovers 由 app.js 挂出；契约检查的沙箱只加载本模块，
+  /// 拿不到时回落成直接赋值，即独立形态的同款行为。
+  function applyBg(el, url) {
+    if (window.HertzCovers) { window.HertzCovers.applyBg(el, url); return; }
+    if (el) el.style.backgroundImage = url ? 'url("' + url + '")' : '';
+  }
 
   var PAGE = 50;
   var H = null; // app.js 注入的宿主（setLayer / caps / enqueue / toast）
@@ -135,7 +142,7 @@
     var cover = document.createElement('div');
     cover.className = 'op-cover';
     var url = window.Online ? window.Online.rowCoverUrl(window.Online.safeCoverUrl(p.cover), 300) : null;
-    if (url) cover.style.backgroundImage = 'url("' + url + '")';
+    if (url) applyBg(cover, url);
     else cover.classList.add('is-missing');
     c.appendChild(cover);
 
@@ -301,7 +308,7 @@
     var cover = document.createElement('div');
     cover.className = 'opl-cover';
     var url = window.Online ? window.Online.rowCoverUrl(window.Online.safeCoverUrl(p.cover), 300) : null;
-    if (url) cover.style.backgroundImage = 'url("' + url + '")';
+    if (url) applyBg(cover, url);
     else cover.classList.add('is-missing');
     box.appendChild(cover);
 
@@ -446,7 +453,7 @@
     var cover = document.createElement('div');
     cover.className = 'op-cover';
     var url = window.Online ? window.Online.rowCoverUrl(window.Online.safeCoverUrl(t.cover), 300) : null;
-    if (url) cover.style.backgroundImage = 'url("' + url + '")';
+    if (url) applyBg(cover, url);
     else cover.classList.add('is-missing');
     if (t.vip_only) {
       var vip = document.createElement('span');

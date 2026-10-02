@@ -1212,6 +1212,33 @@ async function main() {
     const rmDeleteAgain = await client.send('v1/remote/roots/' + encodeURIComponent(rmRoot.id), { op: 'DELETE' });
     eq(rmDeleteAgain.result && rmDeleteAgain.result.status, 404, '重复删除 → 404（钥匙串残留也已清掉）');
 
+    console.log('\n远程封面代理（插件形态封面的唯一通道）');
+    // 只钉准入规则、不触网：这个端点等于让服务端替前端发一次任意 GET，边界错了
+    // 就是一个能打内网的开放代理。正向取图由真 dbx 验收那轮覆盖（沙箱 CSP 把
+    // img-src 限死在 data:/blob:/插件源，远程封面只能走这里）。
+    const cpHttp = await client.send('v1/online/cover', {
+      op: 'GET',
+      query: { url: 'http://p1.music.126.net/a.jpg' },
+    });
+    eq(cpHttp.result && cpHttp.result.status, 400, '非 https → 400');
+    const cpLoop = await client.send('v1/online/cover', {
+      op: 'GET',
+      query: { url: 'https://127.0.0.1/a.jpg' },
+    });
+    eq(cpLoop.result && cpLoop.result.status, 400, '环回地址 → 400');
+    const cpPrivate = await client.send('v1/online/cover', {
+      op: 'GET',
+      query: { url: 'https://192.168.1.10/a.jpg' },
+    });
+    eq(cpPrivate.result && cpPrivate.result.status, 400, '私网地址 → 400');
+    const cpLocal = await client.send('v1/online/cover', {
+      op: 'GET',
+      query: { url: 'https://localhost/a.jpg' },
+    });
+    eq(cpLocal.result && cpLocal.result.status, 400, 'localhost → 400');
+    const cpNoUrl = await client.send('v1/online/cover', { op: 'GET', query: {} });
+    eq(cpNoUrl.result && cpNoUrl.result.status, 400, '缺 url → 400');
+
     console.log('\n信封校验');
     const badOp = await client.send('v1/health', { op: 'PATCH' });
     ok(badOp.error !== undefined, '非法 op 返回真正的 JSON-RPC error（协议级错误）');

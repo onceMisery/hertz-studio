@@ -145,6 +145,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/online/detail", get(online_detail))
         .route("/v1/online/lyric", get(online_lyric))
         .route("/v1/online/play", post(online_play))
+        .route("/v1/online/cover", get(online_cover_proxy))
         .route(
             "/v1/online/radio",
             get(online_radio_status).post(online_radio),
@@ -907,6 +908,119 @@ async fn get_cover(State(state): State<Arc<AppState>>, AxumPath(id): AxumPath<St
         },
         None => StatusCode::NO_CONTENT.into_response(),
     }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CoverProxyQuery {
+    pub(crate) url: String,
+}
+
+/// 远程封面准入：只放行 https 的公网地址。
+///
+/// 这个端点等于让服务端替前端发一次任意 GET，边界必须自己守住。它存在的原因是
+/// 插件沙箱的 CSP 把 img-src 限死在 `data:` / `blob:` / 插件资源源，音源 CDN 的
+/// https 图在插件形态根本画不出来（独立形态没有这层 CSP，远程 URL 直接进
+/// `<img src>`，所以这个差异只在插件形态出现）。但服务端没有这层限制，不校验
+/// 的话它就是一个能打内网的开放代理：scheme 只认 https；IP 字面量里的环回 /
+/// 私网 / 链路本地一律拒；主机名拒 localhost 与 `.local` / `.internal` / `.lan`
+/// 这类内网后缀，以及不带点的单段名。
+pub(crate) fn public_https_url(raw: &str) -> ApiResult<reqwest::Url> {
+    let url = reqwest::Url::parse(raw.trim())
+        .map_err(|_| bad_request("url must be an absolute https URL"))?;
+    if url.scheme() != "https" {
+        return Err(bad_request("only https covers are proxied"));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| bad_request("url has no host"))?;
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => {
+            // is_private / is_link_local 只存在于 V4/V6 具体类型上，IpAddr 没有，
+            // 所以按枚举分支各问各的。
+            let blocked = match ip {
+                std::net::IpAddr::V4(v4) => {
+                    v4.is_loopback()
+                        || v4.is_private()
+                        || v4.is_link_local()
+                        || v4.is_unspecified()
+                        || v4.is_multicast()
+                        || v4.is_documentation()
+                }
+                std::net::IpAddr::V6(v6) => {
+                    v6.is_loopback()
+                        || v6.is_unspecified()
+                        || v6.is_multicast()
+                        || v6.is_unicast_link_local()
+                        || v6.is_unique_local()
+                }
+            };
+            if blocked {
+                return Err(bad_request("private addresses are not proxied"));
+            }
+        }
+        Err(_) => {
+            let name = host.to_ascii_lowercase();
+            let intranet = name == "localhost"
+                || name.ends_with(".localhost")
+                || name.ends_with(".local")
+                || name.ends_with(".internal")
+                || name.ends_with(".lan")
+                || !name.contains('.');
+            if intranet {
+                return Err(bad_request("intranet hostnames are not proxied"));
+            }
+        }
+    }
+    Ok(url)
+}
+
+/// 取回远程图，限大小、限类型。返回字节与 Content-Type，供 HTTP 与 RPC 两边编成
+/// 同一份 `{data, content_type}` 信封——与本地封面端点同形状，前端一条 data-URL
+/// 链路就能同时吃本地与远程两种封面。
+pub(crate) async fn fetch_remote_image(url: &reqwest::Url) -> ApiResult<(Vec<u8>, String)> {
+    const MAX_BYTES: usize = 6 * 1024 * 1024;
+    let resp = crate::online::client()?
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(bad_request(format!("upstream returned {}", resp.status())));
+    }
+    // 有 Content-Length 就先挡一道，别把数兆字节读进来才拒绝。
+    if resp.content_length().map_or(false, |len| len as usize > MAX_BYTES) {
+        return Err(bad_request("upstream cover is too large"));
+    }
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    if !content_type.starts_with("image/") {
+        return Err(bad_request("upstream is not an image"));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    if bytes.len() > MAX_BYTES {
+        return Err(bad_request("upstream cover is too large"));
+    }
+    Ok((bytes.to_vec(), content_type))
+}
+
+/// 远程封面代理：插件形态下远程封面的唯一通道。独立形态也保留同形状应答，
+/// 让两张路由表逐条对齐（对表断言在 check-plugin-sidecar.js）。
+async fn online_cover_proxy(
+    Query(q): Query<CoverProxyQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let url = public_https_url(&q.url)?;
+    let (bytes, content_type) = fetch_remote_image(&url).await?;
+    Ok(Json(serde_json::json!({
+        "data": crate::rpc::encode_base64(&bytes),
+        "content_type": content_type,
+    })))
 }
 
 /// 本地曲目歌词读取，来源优先级固定为 imported > embedded > sidecar：
@@ -2949,7 +3063,7 @@ async fn online_account(
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_index, playlist_scope, qr_session, query_token};
+    use super::{pick_index, playlist_scope, public_https_url, qr_session, query_token};
 
     #[test]
     fn token_is_read_from_a_query_string() {
@@ -3010,5 +3124,53 @@ mod tests {
         // 同源放行，平台票原样可取。
         let ok = qr_session("qq", Some(sess)).unwrap();
         assert_eq!(ok.platform_ticket, "pt");
+    }
+
+    #[test]
+    fn cover_proxy_only_accepts_public_https() {
+        // 这个端点等于让服务端替前端发一次任意 GET，准入就是它整个安全边界，
+        // 所以把每条拒绝规则都钉死：漏一条就是一个能打内网的开放代理。
+        assert!(public_https_url("https://p1.music.126.net/a.jpg").is_ok());
+        assert!(public_https_url("https://y.qq.com/music/photo_new/x.jpg").is_ok());
+
+        // scheme 只认 https
+        assert!(public_https_url("http://p1.music.126.net/a.jpg").is_err());
+        assert!(public_https_url("file:///etc/passwd").is_err());
+
+        // IP 字面量：环回 / 私网 / 链路本地 / 文档段一律拒
+        for host in [
+            "127.0.0.1",
+            "10.0.0.7",
+            "192.168.1.1",
+            "172.16.0.1",
+            "169.254.169.254",
+            "192.0.2.1",
+            "[::1]",
+            "[fd00::1]",
+        ] {
+            assert!(
+                public_https_url(&format!("https://{host}/a.jpg")).is_err(),
+                "{host} 应当被拒"
+            );
+        }
+
+        // 内网主机名与单段名
+        for host in [
+            "localhost",
+            "foo.localhost",
+            "nas.local",
+            "db.internal",
+            "printer.lan",
+            "single",
+        ] {
+            assert!(
+                public_https_url(&format!("https://{host}/a.jpg")).is_err(),
+                "{host} 应当被拒"
+            );
+        }
+
+        // 不是绝对 URL
+        assert!(public_https_url("p1.music.126.net/a.jpg").is_err());
+        assert!(public_https_url("").is_err());
     }
 }

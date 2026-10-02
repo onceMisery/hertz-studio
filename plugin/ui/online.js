@@ -14,6 +14,14 @@
   var H = null; // 宿主：{ ui, state, setStateQueue, applyQueue, paintArt,
                 //       probeImage, fmt, toast, errText }
 
+  /// 背景图位封面：插件形态下远程地址要经 sidecar 换成 data URL（沙箱 CSP 画不
+  /// 出 https 图）。HertzCovers 由 app.js 挂出；契约检查的沙箱只加载本模块，
+  /// 拿不到时回落成直接赋值，即独立形态的同款行为。
+  function applyBg(el, url) {
+    if (window.HertzCovers) { window.HertzCovers.applyBg(el, url); return; }
+    if (el) el.style.backgroundImage = url ? 'url("' + url + '")' : '';
+  }
+
   // 本文件内没有全局 $；个人区新增元素直接按 id 取，不经 H.ui。
   function $(id) { return document.getElementById(id); }
 
@@ -842,7 +850,7 @@
       var cover = document.createElement('div');
       cover.className = 'op-h-cover';
       if (it.cover_url) {
-        cover.style.backgroundImage = 'url("' + safeCoverUrl(it.cover_url) + '")';
+        applyBg(cover, safeCoverUrl(it.cover_url));
       } else {
         cover.textContent = '♪';
       }
@@ -931,7 +939,7 @@
     var cover = document.createElement('div');
     cover.className = 'op-h-cover';
     if (it.cover_url) {
-      cover.style.backgroundImage = 'url("' + safeCoverUrl(it.cover_url) + '")';
+      applyBg(cover, safeCoverUrl(it.cover_url));
     } else {
       cover.textContent = '♪';
     }

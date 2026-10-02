@@ -5,6 +5,13 @@
 // 平台握手票从不离开服务端，前端只拿到 Registry 换发的不透明 ticket。
 (function () {
   'use strict';
+  /// <img> 位封面，同 applyBg：插件形态走代理，沙箱回落直接赋值。
+  function applyImg(img, url) {
+    if (window.HertzCovers) { applyImg(img, url); return; }
+    if (!img) return;
+    if (url) img.src = url;
+    else img.removeAttribute('src');
+  }
   // VMusicTransport 由后加载的 app.js 挂到 window，顶层抓只会拿到 undefined；
   // 本模块所有网络调用都发生在 start() 之后，届时再取即可。
   var T = null;
@@ -268,7 +275,7 @@
           : null;
         if (url) {
           var img = new Image();
-          img.src = url;
+          applyImg(img, url);
           img.alt = '';
           av.appendChild(img);
         } else {
@@ -365,7 +372,7 @@
     var url = acc.avatar && window.Online ? window.Online.safeCoverUrl(acc.avatar) : null;
     if (url) {
       var img = new Image();
-      img.src = url; img.alt = '';
+      applyImg(img, url); img.alt = '';
       av.appendChild(img);
     } else {
       av.classList.add('is-missing');

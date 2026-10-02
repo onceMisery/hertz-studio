@@ -348,6 +348,7 @@ impl Rpc {
             (Op::Get, ["v1", "online", "stream"]) => online::stream(state, query).await,
             (Op::Get, ["v1", "online", "detail"]) => online::detail(state, query).await,
             (Op::Get, ["v1", "online", "lyric"]) => online::lyric(state, query).await,
+            (Op::Get, ["v1", "online", "cover"]) => online::cover_proxy(state, query).await,
             (Op::Post, ["v1", "online", "play"]) => online::play(state, body).await,
             (Op::Get, ["v1", "online", "radio"]) => online::radio_status(state).await,
             (Op::Post, ["v1", "online", "radio"]) => online::radio(state, body).await,

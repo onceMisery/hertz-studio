@@ -287,13 +287,21 @@
     el.querySelector('.daily-artist').textContent = item.artist || '未知艺术家';
     el.querySelector('.daily-why').textContent = item.note || '';
 
-    var cover = el.querySelector('.daily-cover');
-    if (item.cover) {
-      cover.style.backgroundImage = 'url("' + item.cover + '")';
-      cover.classList.add('has-art');
-    } else {
-      cover.classList.add('is-missing');
-    }
+    /// 背景图位封面。app.js 的 HertzCovers 在插件形态下把远程地址换成 data URL
+  /// （沙箱 CSP 画不出 https 图）；契约检查的沙箱只加载本模块、拿不到它，回落
+  /// 成直接赋值——那正是独立形态的同款行为。
+  function applyBg(el, url) {
+    if (window.HertzCovers) { window.HertzCovers.applyBg(el, url); return; }
+    if (el) el.style.backgroundImage = url ? 'url("' + url + '")' : '';
+  }
+
+  var cover = el.querySelector('.daily-cover');
+  if (item.cover) {
+    applyBg(cover, item.cover);
+    cover.classList.add('has-art');
+  } else {
+    cover.classList.add('is-missing');
+  }
 
     el.onclick = function () { playAll(index); };
     return el;
