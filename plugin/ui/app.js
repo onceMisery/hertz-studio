@@ -4622,7 +4622,11 @@ function initNowPlayingModal() {
   }
 
   if (ui.libBatchPlaylist) {
-    ui.libBatchPlaylist.onclick = () => {
+    ui.libBatchPlaylist.onclick = (e) => {
+      // 菜单是在这同一次点击里建起来的，而 document 上那条「点不到 #ctx-menu 就
+      // closeMenu()」的监听会在冒泡阶段立刻把它清空——按钮看起来就是点了没反应。
+      // 行内「更多」与 online.js 的加入歌单都挡了冒泡，这里同样得挡。
+      e.stopPropagation();
       const ids = [...state.selected];
       if (!ids.length) return;
       if (!state.playlists.length) { toast('还没有自建歌单，先到「歌单」页新建一个', 'error'); return; }
