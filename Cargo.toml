@@ -35,6 +35,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # --- data ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# axum 的 Query<T> 就是 serde_urlencoded::from_str。RPC 门面走同一个编解码器，
+# 两个宿主的取参语义才逐字一致（见 crates/hertz-studio/src/rpc/mod.rs 的 query_as）。
+serde_urlencoded = "0.7"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 md-5 = "0.10"
 sha1 = "0.10"

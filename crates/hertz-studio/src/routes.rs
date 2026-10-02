@@ -1839,16 +1839,16 @@ async fn daily_online_recommend(
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-struct RemoteRootRequest {
-    name: String,
-    base_url: String,
+pub(crate) struct RemoteRootRequest {
+    pub(crate) name: String,
+    pub(crate) base_url: String,
     #[serde(default)]
-    username: String,
+    pub(crate) username: String,
     #[serde(default)]
-    password: String,
+    pub(crate) password: String,
 }
 
-fn remote_cred_key(id: &str) -> String {
+pub(crate) fn remote_cred_key(id: &str) -> String {
     format!("remote_cred_{id}")
 }
 
@@ -1958,8 +1958,8 @@ async fn browse_remote_root(
 }
 
 #[derive(Deserialize)]
-struct RemoteImportRequest {
-    paths: Vec<String>,
+pub(crate) struct RemoteImportRequest {
+    pub(crate) paths: Vec<String>,
 }
 
 /// 导入：把远程音频登记进曲库（source=remote，path=直链 URL，幂等）。
@@ -2107,10 +2107,10 @@ async fn replay_index(
 }
 
 #[derive(Debug, Deserialize)]
-struct CookieRequest {
-    source: String,
+pub(crate) struct CookieRequest {
+    pub(crate) source: String,
     /// 省略或空串都表示清除。
-    cookie: Option<String>,
+    pub(crate) cookie: Option<String>,
 }
 
 /// 保存/清除用户自己账号的 cookie —— 本项目对「第三方登录」的全部实现。
@@ -2179,19 +2179,19 @@ pub(crate) fn online_ctx(state: &AppState) -> online::Ctx {
 }
 
 /// 没带 source 参数时用注册表的第一个音源，而不是把名字再抄一遍进代码。
-fn source_of(raw: Option<String>) -> String {
+pub(crate) fn source_of(raw: Option<String>) -> String {
     raw.filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| online::SOURCES[0].id.to_string())
 }
 
 /// spec §1.2：在线代理错误体带音源 id，前端按源分流提示，不必解析 message。
-fn tagged<T>(source: &str, result: ApiResult<T>) -> ApiResult<T> {
+pub(crate) fn tagged<T>(source: &str, result: ApiResult<T>) -> ApiResult<T> {
     result.map_err(|e| e.with_source(source))
 }
 
 /// 歌单 scope 白名单。平台模块各自再做映射，路由层先挡住非法值，
 /// 避免「拼错 scope 被静默当成全部歌单」。
-fn playlist_scope(raw: Option<String>) -> ApiResult<String> {
+pub(crate) fn playlist_scope(raw: Option<String>) -> ApiResult<String> {
     let scope = raw.unwrap_or_else(|| "created".to_string());
     match scope.as_str() {
         "created" | "collected" | "liked" => Ok(scope),
@@ -2204,7 +2204,7 @@ fn playlist_scope(raw: Option<String>) -> ApiResult<String> {
 /// 整盘播放的起始下标归一：缺省 0；越界夹到最后一首而不是直接 400——
 /// 前端分页/刷新后传来旧 index 是常事，夹一下比播失败友好。
 /// 空列表也安全（当前调用点已保证非空，纯防御）：返回 0 而不是下溢。
-fn pick_index(requested: Option<usize>, len: usize) -> usize {
+pub(crate) fn pick_index(requested: Option<usize>, len: usize) -> usize {
     match requested {
         Some(i) if i < len => i,
         Some(_) => len.saturating_sub(1),
@@ -2217,7 +2217,10 @@ fn pick_index(requested: Option<usize>, len: usize) -> usize {
 /// 这一步不能省：票是不透明的随机串，但 Registry 里记着它的来源平台。
 /// 若 A 平台的票能投到 B 平台的 qr_check，confirmed 时平台模块会把 A 的
 /// 凭据写进 B 的保险库——属于跨源凭据污染。票过期/已取消则让前端重新扫码。
-fn qr_session(source: &str, sess: Option<online::qr::Session>) -> ApiResult<online::qr::Session> {
+pub(crate) fn qr_session(
+    source: &str,
+    sess: Option<online::qr::Session>,
+) -> ApiResult<online::qr::Session> {
     let sess = sess.ok_or_else(|| bad_request("二维码已过期，请重新扫码"))?;
     if sess.source != source {
         return Err(bad_request("二维码会话与音源不匹配，请重新扫码"));
@@ -2242,11 +2245,11 @@ async fn online_search(
 }
 
 #[derive(Debug, Deserialize)]
-struct StreamQuery {
-    source: Option<String>,
-    id: String,
+pub(crate) struct StreamQuery {
+    pub(crate) source: Option<String>,
+    pub(crate) id: String,
     /// 目标码率（bps）；不传时用 320k
-    quality: Option<u32>,
+    pub(crate) quality: Option<u32>,
 }
 
 async fn online_stream(
@@ -2263,9 +2266,9 @@ async fn online_stream(
 }
 
 #[derive(Debug, Deserialize)]
-struct ItemQuery {
-    source: Option<String>,
-    id: String,
+pub(crate) struct ItemQuery {
+    pub(crate) source: Option<String>,
+    pub(crate) id: String,
 }
 
 /// 单曲详情（封面等）。搜索结果里的封面常常缺失，播放前用它补齐。
@@ -2296,36 +2299,36 @@ async fn online_lyric(
 }
 
 #[derive(Debug, Deserialize)]
-struct OnlinePlayRequest {
-    source: Option<String>,
+pub(crate) struct OnlinePlayRequest {
+    pub(crate) source: Option<String>,
     /// 旧单曲形态的曲目 id；新整盘形态只给 tracks。两者都缺时回 400。
     #[serde(default)]
-    id: Option<String>,
+    pub(crate) id: Option<String>,
     /// 旧单曲形态的元数据回显字段。
-    title: Option<String>,
-    artist: Option<String>,
-    album: Option<String>,
-    duration_ms: Option<u64>,
+    pub(crate) title: Option<String>,
+    pub(crate) artist: Option<String>,
+    pub(crate) album: Option<String>,
+    pub(crate) duration_ms: Option<u64>,
     // Task 9 起音质以服务端逐源偏好（settings online_quality）为权威，请求体
     // 里的单次 quality 不再读取；保留字段以兼容旧客户端入参，待播放端点版本
     // 演进时连同旧单曲形态一起评估移除。
     #[allow(dead_code)]
-    quality: Option<u32>,
+    pub(crate) quality: Option<u32>,
     /// 整盘形态：一整首歌单/专辑的曲目列表，当前曲由 index 指定。
     #[serde(default)]
-    tracks: Option<Vec<OnlinePlayTrack>>,
+    pub(crate) tracks: Option<Vec<OnlinePlayTrack>>,
     #[serde(default)]
-    index: Option<usize>,
+    pub(crate) index: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
-struct OnlinePlayTrack {
-    id: String,
-    title: Option<String>,
-    artist: Option<String>,
-    album: Option<String>,
-    duration_ms: Option<u64>,
-    cover: Option<String>,
+pub(crate) struct OnlinePlayTrack {
+    pub(crate) id: String,
+    pub(crate) title: Option<String>,
+    pub(crate) artist: Option<String>,
+    pub(crate) album: Option<String>,
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) cover: Option<String>,
     /// 搜索/歌单结果里随曲目带来的平台原始引用（QQ media_mid 等），
     /// 取流时原样透传给平台模块；JSON 字段名与 OnlineTrack 一致为 ref。
     ///
@@ -2333,7 +2336,7 @@ struct OnlinePlayTrack {
     /// 仍须接收以免 serde 拒绝前端载荷，后续首曲最优音质透传恢复时启用。
     #[serde(default, rename = "ref")]
     #[allow(dead_code)]
-    track_ref: Option<online::TrackRef>,
+    pub(crate) track_ref: Option<online::TrackRef>,
 }
 
 async fn online_quality_get(
@@ -2358,9 +2361,9 @@ async fn online_quality_get(
 }
 
 #[derive(Debug, Deserialize)]
-struct OnlineQualityRequest {
-    source: String,
-    quality: String,
+pub(crate) struct OnlineQualityRequest {
+    pub(crate) source: String,
+    pub(crate) quality: String,
 }
 
 async fn online_quality_set(
@@ -2398,8 +2401,8 @@ async fn online_radio_status(State(state): State<Arc<AppState>>) -> Json<serde_j
 }
 
 #[derive(Deserialize)]
-struct RadioRequest {
-    action: String,
+pub(crate) struct RadioRequest {
+    pub(crate) action: String,
 }
 
 async fn online_radio(
@@ -2550,9 +2553,9 @@ async fn online_cache_stats(
 }
 
 #[derive(Deserialize)]
-struct CacheClearRequest {
+pub(crate) struct CacheClearRequest {
     /// 省略 = 全部音源；指定 = 只清该音源。
-    source: Option<String>,
+    pub(crate) source: Option<String>,
 }
 
 /// 手动清理：当前播放与用户保留项豁免，返回删除字节数。
@@ -2582,10 +2585,10 @@ async fn online_cache_clear(
 }
 
 #[derive(Deserialize)]
-struct CacheKeepRequest {
-    source: String,
-    id: String,
-    keep: bool,
+pub(crate) struct CacheKeepRequest {
+    pub(crate) source: String,
+    pub(crate) id: String,
+    pub(crate) keep: bool,
 }
 
 /// 指定内容保留/取消保留：以 `{stem}.` 前缀写入豁免名单并持久化，
@@ -2637,16 +2640,16 @@ async fn online_cache_keep(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct PlaylistsQuery {
-    source: String,
-    scope: Option<String>,
+pub(crate) struct PlaylistsQuery {
+    pub(crate) source: String,
+    pub(crate) scope: Option<String>,
     #[serde(default)]
-    offset: usize,
+    pub(crate) offset: usize,
     #[serde(default = "default_page_limit")]
-    limit: usize,
+    pub(crate) limit: usize,
 }
 
-fn default_page_limit() -> usize {
+pub(crate) fn default_page_limit() -> usize {
     30
 }
 
@@ -2664,13 +2667,13 @@ async fn online_playlists(
 }
 
 #[derive(Debug, Deserialize)]
-struct PlaylistQuery {
-    source: String,
-    id: String,
+pub(crate) struct PlaylistQuery {
+    pub(crate) source: String,
+    pub(crate) id: String,
     #[serde(default)]
-    offset: usize,
+    pub(crate) offset: usize,
     #[serde(default = "default_page_limit")]
-    limit: usize,
+    pub(crate) limit: usize,
 }
 
 async fn online_playlist(
@@ -2686,9 +2689,9 @@ async fn online_playlist(
 }
 
 #[derive(Debug, Deserialize)]
-struct PlaylistCreateRequest {
-    source: String,
-    name: String,
+pub(crate) struct PlaylistCreateRequest {
+    pub(crate) source: String,
+    pub(crate) name: String,
 }
 
 async fn online_playlist_create(
@@ -2707,9 +2710,9 @@ async fn online_playlist_create(
 }
 
 #[derive(Debug, Deserialize)]
-struct PlaylistDeleteRequest {
-    source: String,
-    id: String,
+pub(crate) struct PlaylistDeleteRequest {
+    pub(crate) source: String,
+    pub(crate) id: String,
 }
 
 async fn online_playlist_delete(
@@ -2727,10 +2730,10 @@ async fn online_playlist_delete(
 }
 
 #[derive(Debug, Deserialize)]
-struct PlaylistTracksRequest {
-    source: String,
-    id: String,
-    tracks: Vec<online::TrackEntry>,
+pub(crate) struct PlaylistTracksRequest {
+    pub(crate) source: String,
+    pub(crate) id: String,
+    pub(crate) tracks: Vec<online::TrackEntry>,
 }
 
 async fn online_playlist_add(
@@ -2768,10 +2771,10 @@ async fn online_playlist_remove(
 }
 
 #[derive(Debug, Deserialize)]
-struct LikeRequest {
-    source: String,
-    id: String,
-    liked: bool,
+pub(crate) struct LikeRequest {
+    pub(crate) source: String,
+    pub(crate) id: String,
+    pub(crate) liked: bool,
 }
 
 async fn online_like(
@@ -2789,12 +2792,12 @@ async fn online_like(
 }
 
 #[derive(Debug, Deserialize)]
-struct RecommendQuery {
-    source: String,
+pub(crate) struct RecommendQuery {
+    pub(crate) source: String,
     #[serde(default)]
-    offset: usize,
+    pub(crate) offset: usize,
     #[serde(default = "default_page_limit")]
-    limit: usize,
+    pub(crate) limit: usize,
 }
 
 async fn online_rec_songs(
@@ -2822,10 +2825,10 @@ async fn online_rec_playlists(
 }
 
 #[derive(Debug, Deserialize)]
-struct SearchAllQuery {
-    q: String,
+pub(crate) struct SearchAllQuery {
+    pub(crate) q: String,
     #[serde(default = "default_page_limit")]
-    limit: usize,
+    pub(crate) limit: usize,
 }
 
 async fn online_search_all(
@@ -2843,11 +2846,11 @@ async fn online_search_all(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct SourceRequest {
-    source: String,
+pub(crate) struct SourceRequest {
+    pub(crate) source: String,
     /// QQ 专用："qq"（默认）或 "wx"（微信扫码）。
     #[serde(default)]
-    channel: Option<String>,
+    pub(crate) channel: Option<String>,
 }
 
 async fn online_qr_start(
@@ -2870,9 +2873,9 @@ async fn online_qr_start(
 }
 
 #[derive(Debug, Deserialize)]
-struct QrPollQuery {
-    source: String,
-    ticket: String,
+pub(crate) struct QrPollQuery {
+    pub(crate) source: String,
+    pub(crate) ticket: String,
 }
 
 async fn online_qr_poll(
@@ -2904,11 +2907,11 @@ async fn online_qr_poll(
 }
 
 #[derive(Debug, Deserialize)]
-struct QrCancelRequest {
-    source: String,
+pub(crate) struct QrCancelRequest {
+    pub(crate) source: String,
     /// 前端关弹窗时总会调一次 cancel（可能从未拿到票）；空票按幂等成功处理。
     #[serde(default)]
-    ticket: String,
+    pub(crate) ticket: String,
 }
 
 async fn online_qr_cancel(
@@ -2929,8 +2932,8 @@ async fn online_qr_cancel(
 }
 
 #[derive(Debug, Deserialize)]
-struct AccountQuery {
-    source: String,
+pub(crate) struct AccountQuery {
+    pub(crate) source: String,
 }
 
 async fn online_account(

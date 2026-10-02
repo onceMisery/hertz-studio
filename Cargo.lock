@@ -1003,6 +1003,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sha1",
  "sqlx",
  "symphonia",

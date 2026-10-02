@@ -4,7 +4,7 @@
 //
 // DBX 插件 sidecar 的协议冒烟检查（零依赖）。
 //
-// 真的把 dbx-plugin-hertz 起起来，用 stdio 喂 JSON-RPC，验证八件事：
+// 真的把 dbx-plugin-hertz 起起来，用 stdio 喂 JSON-RPC，验证十件事：
 //   1. plugin/initialize 握手能过（协议版本协商）；
 //   2. 装配链路能跑通——数据目录、SQLite 迁移、音频后端（拿不到设备会回落 null）；
 //   3. 门面信封 {status, body} 与 HTTP 版同构；
@@ -19,7 +19,12 @@
 //      快照、M3U 导出为裸 JSON 字符串并能原样导回；
 //   8. 备份 / 诊断日志 / 每日推荐：备份导出不得含凭据且原样恢复要幂等（合并而不是
 //      再建一个），诊断日志与 m3u 同样走裸字符串，每日推荐同一天问两次必须是同
-//      一份榜单（种子 = 天序号的确定性出榜）。
+//      一份榜单（种子 = 天序号的确定性出榜）；
+//   9. 在线曲库：刻意**不打上游**，只验路由、入参校验、能力闸门，以及错误体带
+//      error.source（前端按它分流「去登录 / 版权 / 限流」，不解析 message）——
+//      这几样正是两个宿主最容易漂移的地方，而真去搜索的话对方限流就假红；
+//  10. 远程来源（WebDAV）：登记校验、密码只进钥匙串（应答与列表里都不得出现）、
+//      删除幂等。整个检查用 VMUSIC_SECRETS=memory，绝不碰真实系统钥匙串。
 //
 // 用法：node scripts/check-plugin-sidecar.js
 // 二进制默认找 target/debug/dbx-plugin-hertz[.exe]，可用 HERTZ_PLUGIN_BIN 覆盖。
@@ -228,7 +233,9 @@ async function main() {
   // 专属临时数据目录：绝不碰真实曲库，也不会和 7634 上常驻的独立实例抢 SQLite。
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hertz-plugin-check-'));
   const child = spawn(binary, [], {
-    env: { ...process.env, DBX_PLUGIN_DATA_DIR: dataDir, VMUSIC_LOG: 'warn' },
+    // VMUSIC_SECRETS=memory：远程来源那条会写凭据，必须走进程内后端，绝不能把
+    // 测试用的账号密码塞进用户真实的系统钥匙串。
+    env: { ...process.env, DBX_PLUGIN_DATA_DIR: dataDir, VMUSIC_LOG: 'warn', VMUSIC_SECRETS: 'memory' },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   // stderr 只收集不打印：sidecar 的日志必须走 stderr，stdout 是协议信道。
@@ -976,6 +983,234 @@ async function main() {
     eq((afterDelete.result || {}).body?.total, 0, '删除后库为空');
     const coverGone = await client.send(coverPath, { op: 'GET' });
     eq(coverGone.result && coverGone.result.status, 204, '曲目删掉后封面缓存文件也清掉了（204）');
+
+    console.log('\n在线曲库：入参校验、能力闸门与错误音源标注');
+    // 这一段刻意**不打上游**：验的是路由、入参校验、能力闸门与错误体的音源标注，
+    // 这些正是两个宿主最容易漂移的地方；真去搜索/取流的话对方限流或离线就假红。
+    const olSources = await client.send('v1/online/sources', { op: 'GET' });
+    eq(olSources.result && olSources.result.status, 200, 'GET v1/online/sources → 200');
+    const olSourceList = (olSources.result || {}).body?.sources || [];
+    ok(olSourceList.length >= 4, '音源清单非空：' + olSourceList.length + ' 个');
+    ok(
+      olSourceList.every((s) => typeof s.id === 'string' && typeof s.label === 'string'),
+      '每个音源都带 id 与 label（前端下拉框与分类 chips 全靠它生成）',
+    );
+    // 注意这一份应答是 camelCase（supportsCookie / signedIn），与别处的 snake_case
+    // 不同——那是既有的 HTTP 契约，前端按它取值，改名就是静默的破坏性变更。
+    ok(
+      olSourceList.every((s) => typeof s.supportsCookie === 'boolean' && typeof s.signedIn === 'boolean'),
+      '每个音源都带 supportsCookie / signedIn 布尔（camelCase，与 HTTP 版同形）',
+    );
+    ok(
+      olSourceList.every((s) => Array.isArray(s.caps)),
+      '每个音源都带 caps 能力位数组（前端据此隐藏入口而不是点了才报错）',
+    );
+    const noCookieSource = olSourceList.find((s) => s.supportsCookie === false);
+    ok(!!noCookieSource, '清单里有一个不需要登录的音源可供后续断言');
+
+    const olQuality = await client.send('v1/online/quality', { op: 'GET' });
+    eq(olQuality.result && olQuality.result.status, 200, 'GET v1/online/quality → 200');
+    const olPrefs = (olQuality.result || {}).body?.prefs || [];
+    eq(olPrefs.length, 5, '音质偏好覆盖 5 个平台');
+    ok(
+      olPrefs.every((p) => p.source && p.selected && Array.isArray(p.options) && p.options.length > 0),
+      '每个平台都带 selected 与非空 options',
+    );
+    const olBadSource = await client.send('v1/online/quality', {
+      op: 'POST',
+      body: { source: 'nope', quality: 'x' },
+    });
+    eq(olBadSource.result && olBadSource.result.status, 400, 'POST quality 不支持的音源 → 400');
+    const olSetQuality = await client.send('v1/online/quality', {
+      op: 'POST',
+      body: { source: olPrefs[0].source, quality: olPrefs[0].options[0].value },
+    });
+    eq(olSetQuality.result && olSetQuality.result.status, 200, 'POST quality 合法值 → 200');
+    eq(
+      (olSetQuality.result || {}).body?.selected,
+      olPrefs[0].options[0].value,
+      '音质选择回读一致（内存偏好表热更新，不用重启）',
+    );
+
+    const olCache = await client.send('v1/online/cache', { op: 'GET' });
+    eq(olCache.result && olCache.result.status, 200, 'GET v1/online/cache → 200');
+    const olCacheBody = (olCache.result || {}).body || {};
+    ok(
+      typeof olCacheBody.total_bytes === 'number' && typeof olCacheBody.files === 'number',
+      '缓存统计带 total_bytes / files',
+    );
+    ok('max_bytes' in olCacheBody && Array.isArray(olCacheBody.keep), '缓存统计带 max_bytes 与 keep 名单');
+
+    // 保留名单的粒度是「{source}-{id}-」前缀，覆盖该曲目全部音质档。
+    const olKeepOn = await client.send('v1/online/cache/keep', {
+      op: 'POST',
+      body: { source: 'netease', id: 'smoke', keep: true },
+    });
+    ok(
+      ((olKeepOn.result || {}).body?.keep || []).includes('netease-smoke-'),
+      'keep=true 写入前缀 netease-smoke-',
+    );
+    const olKeepOff = await client.send('v1/online/cache/keep', {
+      op: 'POST',
+      body: { source: 'netease', id: 'smoke', keep: false },
+    });
+    ok(
+      !((olKeepOff.result || {}).body?.keep || []).includes('netease-smoke-'),
+      'keep=false 把它摘掉',
+    );
+    const olKeepBad = await client.send('v1/online/cache/keep', {
+      op: 'POST',
+      body: { source: '  ', id: 'x', keep: true },
+    });
+    eq(olKeepBad.result && olKeepBad.result.status, 400, 'cache/keep 空 source → 400');
+    const olClear = await client.send('v1/online/cache/clear', { op: 'POST', body: {} });
+    eq(olClear.result && olClear.result.status, 200, 'POST cache/clear（全部音源）→ 200');
+    ok(typeof (olClear.result || {}).body?.removed_bytes === 'number', 'cache/clear 回删除字节数');
+    const olClearBad = await client.send('v1/online/cache/clear', { op: 'POST', body: { source: '  ' } });
+    eq(olClearBad.result && olClearBad.result.status, 400, 'cache/clear 空白 source → 400');
+
+    const olPlayNoId = await client.send('v1/online/play', { op: 'POST', body: {} });
+    eq(olPlayNoId.result && olPlayNoId.result.status, 400, 'online/play 缺 id 与 tracks → 400');
+    const olPlayBlank = await client.send('v1/online/play', {
+      op: 'POST',
+      body: { tracks: [{ id: '   ' }] },
+    });
+    eq(olPlayBlank.result && olPlayBlank.result.status, 400, 'online/play 曲目 id 是空白 → 400（入队前就拒绝）');
+
+    // scope 白名单在打上游之前就要挡住：拼错 scope 被静默当成「全部歌单」的话，
+    // 用户看到的是内容不对而不是一个错。
+    const olScope = await client.send('v1/online/playlists', {
+      op: 'GET',
+      query: { source: 'netease', scope: 'friends' },
+    });
+    eq(olScope.result && olScope.result.status, 400, 'playlists 非法 scope → 400');
+
+    const olLike = await client.send('v1/online/like', { op: 'POST', body: { source: 'netease', id: '  ', liked: true } });
+    eq(olLike.result && olLike.result.status, 400, 'like 缺曲目 id → 400');
+    const olPlAdd = await client.send('v1/online/playlist/tracks/add', {
+      op: 'POST',
+      body: { source: 'netease', id: '', tracks: [{ id: 'x' }] },
+    });
+    eq(olPlAdd.result && olPlAdd.result.status, 400, 'playlist/tracks/add 缺歌单 id → 400');
+    const olPlAddEmpty = await client.send('v1/online/playlist/tracks/add', {
+      op: 'POST',
+      body: { source: 'netease', id: 'pl1', tracks: [] },
+    });
+    eq(olPlAddEmpty.result && olPlAddEmpty.result.status, 400, 'playlist/tracks/add 空 tracks → 400');
+
+    const olCookieUnknown = await client.send('v1/online/cookie', { op: 'POST', body: { source: 'nope' } });
+    eq(olCookieUnknown.result && olCookieUnknown.result.status, 400, 'cookie 不支持的音源 → 400');
+    if (noCookieSource) {
+      const olCookieNoNeed = await client.send('v1/online/cookie', {
+        op: 'POST',
+        body: { source: noCookieSource.id, cookie: 'x' },
+      });
+      eq(
+        olCookieNoNeed.result && olCookieNoNeed.result.status,
+        400,
+        `给不需要登录的音源（${noCookieSource.id}）塞 cookie → 400`,
+      );
+    }
+    const olCookieLong = await client.send('v1/online/cookie', {
+      op: 'POST',
+      body: { source: 'netease', cookie: 'a'.repeat(9000) },
+    });
+    eq(olCookieLong.result && olCookieLong.result.status, 400, 'cookie 超长 → 400');
+
+    // 扫码：空票的 cancel 是幂等成功；未知票的 poll 要在打上游之前就被挡住。
+    const olQrCancel = await client.send('v1/online/qr/cancel', {
+      op: 'POST',
+      body: { source: 'netease', ticket: '' },
+    });
+    eq(olQrCancel.result && olQrCancel.result.status, 200, 'qr/cancel 空票 → 200（前端关弹窗总会调一次）');
+    const olQrPoll = await client.send('v1/online/qr/poll', {
+      op: 'GET',
+      query: { source: 'netease', ticket: 'not-a-real-ticket' },
+    });
+    eq(olQrPoll.result && olQrPoll.result.status, 400, 'qr/poll 未知票 → 400（引导重新扫码，不打上游）');
+
+    const olRadio = await client.send('v1/online/radio', { op: 'GET' });
+    eq(olRadio.result && olRadio.result.status, 200, 'GET v1/online/radio → 200（状态快照，不打上游）');
+    const olRadioBad = await client.send('v1/online/radio', { op: 'POST', body: { action: 'nope' } });
+    eq(olRadioBad.result && olRadioBad.result.status, 400, 'radio 未知 action → 400');
+
+    // 在线代理的错误体必须带 source：前端按它分流「去登录 / 版权 / 限流」提示，
+    // 不解析 message。本地接口的错误恰恰不带这个字段（上面「错误契约」那段已钉）。
+    const olAccount = await client.send('v1/online/account', { op: 'GET', query: { source: 'nope' } });
+    ok(
+      (olAccount.result || {}).status >= 400,
+      'account 未知音源 → 4xx（得到 ' + (olAccount.result || {}).status + '）',
+    );
+    eq(
+      ((olAccount.result || {}).body || {}).error?.source,
+      'nope',
+      '在线错误体带 error.source（tagged() 的核心契约）',
+    );
+    const olSearch = await client.send('v1/online/search', {
+      op: 'GET',
+      query: { source: 'nope', q: 'x' },
+    });
+    eq(
+      ((olSearch.result || {}).body || {}).error?.source,
+      'nope',
+      'search 的未知音源错误同样带 error.source',
+    );
+
+    console.log('\n远程来源（WebDAV）');
+    const rmEmpty = await client.send('v1/remote/roots', { op: 'GET' });
+    eq(rmEmpty.result && rmEmpty.result.status, 200, 'GET v1/remote/roots → 200');
+    eq(((rmEmpty.result || {}).body?.roots || []).length, 0, '初始没有远程来源');
+
+    const rmNoName = await client.send('v1/remote/roots', {
+      op: 'POST',
+      body: { name: '  ', base_url: 'http://127.0.0.1:1/dav' },
+    });
+    eq(rmNoName.result && rmNoName.result.status, 400, '空名字 → 400');
+    const rmFtp = await client.send('v1/remote/roots', {
+      op: 'POST',
+      body: { name: 'n', base_url: 'ftp://127.0.0.1/dav' },
+    });
+    eq(rmFtp.result && rmFtp.result.status, 400, '非 http(s) 协议 → 400');
+    const rmRelative = await client.send('v1/remote/roots', {
+      op: 'POST',
+      body: { name: 'n', base_url: 'not a url' },
+    });
+    eq(rmRelative.result && rmRelative.result.status, 400, '不是绝对 URL → 400');
+
+    const rmAdded = await client.send('v1/remote/roots', {
+      op: 'POST',
+      body: { name: '测试服务器', base_url: 'http://127.0.0.1:1/dav', username: 'u', password: 'secret-pw' },
+    });
+    eq(rmAdded.result && rmAdded.result.status, 200, 'POST v1/remote/roots → 200');
+    const rmRoot = (rmAdded.result || {}).body || {};
+    ok(typeof rmRoot.id === 'string' && rmRoot.id.length > 0, '新建直接回 root 对象（带 id）');
+    // 密码只进钥匙串：应答与列表里都不该出现，否则它会进日志、进截图、进备份。
+    ok(
+      !JSON.stringify(rmRoot).includes('secret-pw'),
+      '新建应答里没有密码原文（只进钥匙串）',
+    );
+    const rmListed = await client.send('v1/remote/roots', { op: 'GET' });
+    const rmRoots = (rmListed.result || {}).body?.roots || [];
+    eq(rmRoots.length, 1, '远程来源列表回 1 条');
+    ok(!JSON.stringify(rmRoots).includes('secret-pw'), '列表里也没有密码原文');
+
+    const rmImportEmpty = await client.send('v1/remote/roots/' + encodeURIComponent(rmRoot.id) + '/import', {
+      op: 'POST',
+      body: { paths: [] },
+    });
+    eq(rmImportEmpty.result && rmImportEmpty.result.status, 400, 'import 空 paths → 400');
+    const rmImportMissing = await client.send('v1/remote/roots/nope/import', {
+      op: 'POST',
+      body: { paths: ['/a.mp3'] },
+    });
+    eq(rmImportMissing.result && rmImportMissing.result.status, 404, 'import 不存在的来源 → 404');
+    const rmBrowseMissing = await client.send('v1/remote/roots/nope/browse', { op: 'GET' });
+    eq(rmBrowseMissing.result && rmBrowseMissing.result.status, 404, 'browse 不存在的来源 → 404');
+
+    const rmDeleted = await client.send('v1/remote/roots/' + encodeURIComponent(rmRoot.id), { op: 'DELETE' });
+    eq(rmDeleted.result && rmDeleted.result.status, 200, 'DELETE v1/remote/roots/{id} → 200');
+    const rmDeleteAgain = await client.send('v1/remote/roots/' + encodeURIComponent(rmRoot.id), { op: 'DELETE' });
+    eq(rmDeleteAgain.result && rmDeleteAgain.result.status, 404, '重复删除 → 404（钥匙串残留也已清掉）');
 
     console.log('\n信封校验');
     const badOp = await client.send('v1/health', { op: 'PATCH' });

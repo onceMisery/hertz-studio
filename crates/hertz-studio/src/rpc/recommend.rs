@@ -12,7 +12,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::daily;
-use crate::error::{bad_request, internal};
+use crate::error::bad_request;
 use crate::routes::{online_ctx, DailyQuery};
 use crate::rpc::{query_i64, Reply, RpcResult};
 use crate::state::AppState;
@@ -27,16 +27,10 @@ fn daily_query(query: &Value) -> DailyQuery {
     }
 }
 
-fn page<T: serde::Serialize>(value: &T) -> RpcResult {
-    Ok(Reply::ok(
-        serde_json::to_value(value).map_err(|e| internal(e.to_string()))?,
-    ))
-}
-
 pub async fn daily_recommend(state: &Arc<AppState>, query: &Value) -> RpcResult {
     let q = daily_query(query);
     let limit = daily::parse_limit(q.limit)?;
-    page(&daily::daily_at(&state.db, limit, q.day).await?)
+    Reply::json(&daily::daily_at(&state.db, limit, q.day).await?)
 }
 
 /// 各在线平台每日推荐的汇总。
@@ -51,5 +45,5 @@ pub async fn daily_online_recommend(state: &Arc<AppState>, query: &Value) -> Rpc
         Some(0) => return Err(bad_request("limit 必须大于 0")),
         Some(n) => n,
     };
-    page(&daily::online_daily_at(&online_ctx(state), limit, q.day).await?)
+    Reply::json(&daily::online_daily_at(&online_ctx(state), limit, q.day).await?)
 }

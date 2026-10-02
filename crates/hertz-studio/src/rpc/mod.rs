@@ -32,9 +32,11 @@
 
 pub mod library;
 pub mod maintenance;
+pub mod online;
 pub mod playback;
 pub mod playlists;
 pub mod recommend;
+pub mod remote;
 
 use std::sync::Arc;
 
@@ -127,6 +129,14 @@ impl Reply {
     pub fn with_status(status: u16, body: Value) -> Self {
         Self { status, body }
     }
+
+    /// 序列化任意 `Serialize` 值作为 200 应答。HTTP 版的 handler 直接
+    /// `Json(dto)`，RPC 这边得过一道 `to_value`，收在这里省得每个域各写一遍。
+    pub fn json<T: serde::Serialize>(value: &T) -> Result<Self, ApiError> {
+        Ok(Self::ok(
+            serde_json::to_value(value).map_err(|e| crate::error::internal(e.to_string()))?,
+        ))
+    }
 }
 
 pub type RpcResult = Result<Reply, ApiError>;
@@ -142,6 +152,27 @@ pub fn body_as<T: DeserializeOwned>(body: &Value) -> Result<T, ApiError> {
 /// 一律按字符串读再解析：UI 那边 `URLSearchParams` 出来的值天然是字符串，
 /// 这与 axum 的 `Query<T>`（serde_urlencoded）行为一致，所以数字/布尔参数在
 /// 两条路上接受同样的写法。
+/// 把信封里的 `query` 还原成 URL 查询串，再按 axum 的同一条路反序列化。
+///
+/// axum 的 `Query<T>` 就是 `serde_urlencoded::from_str`。走同一个编解码器，两个
+/// 宿主的取参语义才是**逐字**一致的：`#[serde(default)]` 何时生效、缺字段是 400
+/// 还是走默认、`usize` 遇到负数怎么办——这些边界一个都不用在这里复刻。手写「按
+/// 字符串读出来再 parse」的话，每一处都是一条只在插件形态下出现的分叉。
+///
+/// 只支持扁平标量参数，这不是额外限制：HTTP 侧的 `Query<T>` 同样反序列化不了
+/// 嵌套结构。
+pub fn query_as<T: DeserializeOwned>(query: &Value) -> Result<T, ApiError> {
+    let invalid = |e: String| bad_request(format!("查询参数不合法: {e}"));
+    let encoded = match query {
+        Value::Null => String::new(),
+        Value::Object(_) => {
+            serde_urlencoded::to_string(query).map_err(|e| invalid(e.to_string()))?
+        }
+        _ => return Err(invalid("query 必须是对象".into())),
+    };
+    serde_urlencoded::from_str(&encoded).map_err(|e| invalid(e.to_string()))
+}
+
 pub fn query_str<'a>(query: &'a Value, key: &str) -> Option<&'a str> {
     match query.get(key)? {
         Value::String(text) => Some(text),
@@ -328,6 +359,63 @@ impl Rpc {
                 recommend::daily_online_recommend(state, query).await
             }
 
+            // --- 在线曲库（代理）---
+            // 这一域全是字面段、没有路径参数，所以不存在 tracks / playlists 那种
+            // 「字面段必须排在 {id} 通配之前」的顺序陷阱。
+            (Op::Get, ["v1", "online", "sources"]) => online::sources(state).await,
+            (Op::Get, ["v1", "online", "search"]) => online::search(state, query).await,
+            (Op::Get, ["v1", "online", "search", "all"]) => online::search_all(state, query).await,
+            (Op::Get, ["v1", "online", "stream"]) => online::stream(state, query).await,
+            (Op::Get, ["v1", "online", "detail"]) => online::detail(state, query).await,
+            (Op::Get, ["v1", "online", "lyric"]) => online::lyric(state, query).await,
+            (Op::Post, ["v1", "online", "play"]) => online::play(state, body).await,
+            (Op::Get, ["v1", "online", "radio"]) => online::radio_status(state).await,
+            (Op::Post, ["v1", "online", "radio"]) => online::radio(state, body).await,
+            (Op::Get, ["v1", "online", "cache"]) => online::cache_stats(state).await,
+            (Op::Post, ["v1", "online", "cache", "clear"]) => {
+                online::cache_clear(state, body).await
+            }
+            (Op::Post, ["v1", "online", "cache", "keep"]) => online::cache_keep(state, body).await,
+            (Op::Get, ["v1", "online", "quality"]) => online::quality_get(state).await,
+            (Op::Post, ["v1", "online", "quality"]) => online::quality_set(state, body).await,
+            (Op::Post, ["v1", "online", "cookie"]) => online::cookie(state, body).await,
+            (Op::Get, ["v1", "online", "playlists"]) => online::playlists(state, query).await,
+            (Op::Get, ["v1", "online", "playlist"]) => online::playlist(state, query).await,
+            (Op::Post, ["v1", "online", "playlist"]) => online::playlist_create(state, body).await,
+            // 这两个 DELETE/POST 带 JSON body，而两个宿主的 transport.del() 都不
+            // 发 body——前端也从未调用它们，保留只为与 HTTP 路由表一一对应。
+            (Op::Delete, ["v1", "online", "playlist"]) => {
+                online::playlist_delete(state, body).await
+            }
+            (Op::Post, ["v1", "online", "playlist", "tracks", "add"]) => {
+                online::playlist_add(state, body).await
+            }
+            (Op::Post, ["v1", "online", "playlist", "tracks", "remove"]) => {
+                online::playlist_remove(state, body).await
+            }
+            (Op::Post, ["v1", "online", "like"]) => online::like(state, body).await,
+            (Op::Get, ["v1", "online", "recommend", "songs"]) => {
+                online::rec_songs(state, query).await
+            }
+            (Op::Get, ["v1", "online", "recommend", "playlists"]) => {
+                online::rec_playlists(state, query).await
+            }
+            (Op::Post, ["v1", "online", "qr", "start"]) => online::qr_start(state, body).await,
+            (Op::Get, ["v1", "online", "qr", "poll"]) => online::qr_poll(state, query).await,
+            (Op::Post, ["v1", "online", "qr", "cancel"]) => online::qr_cancel(state, body).await,
+            (Op::Get, ["v1", "online", "account"]) => online::account(state, query).await,
+
+            // --- 远程来源（WebDAV）---
+            (Op::Get, ["v1", "remote", "roots"]) => remote::list_roots(state).await,
+            (Op::Post, ["v1", "remote", "roots"]) => remote::add_root(state, body).await,
+            (Op::Delete, ["v1", "remote", "roots", id]) => remote::delete_root(state, id).await,
+            (Op::Get, ["v1", "remote", "roots", id, "browse"]) => {
+                remote::browse_root(state, id, query).await
+            }
+            (Op::Post, ["v1", "remote", "roots", id, "import"]) => {
+                remote::import_files(state, id, body).await
+            }
+
             _ => Err(not_found(format!(
                 "no such method: {} {:?}",
                 call.path, call.op
@@ -385,6 +473,85 @@ mod tests {
         assert_eq!(
             Reply::with_status(202, json!({"status":"analyzing"})).status,
             202
+        );
+    }
+
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct ProbeQuery {
+        source: String,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default = "probe_default_limit")]
+        limit: usize,
+    }
+
+    fn probe_default_limit() -> usize {
+        30
+    }
+
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct AllOptional {
+        #[serde(default)]
+        q: Option<String>,
+    }
+
+    /// `query_as` 的全部意义就在于与 axum 的 `Query<T>` 逐字同义，所以这些边界
+    /// 要钉住：它们是手写「按字符串读再 parse」最容易分叉的地方。
+    #[test]
+    fn query_as_matches_axum_query_semantics() {
+        // UI 侧 URLSearchParams 出来的值天然是字符串，必须能落进 usize。
+        let q =
+            query_as::<ProbeQuery>(&json!({ "source": "netease", "limit": "20", "offset": "5" }))
+                .unwrap();
+        assert_eq!(
+            q,
+            ProbeQuery {
+                source: "netease".into(),
+                offset: 5,
+                limit: 20
+            }
+        );
+        // JSON 数字也接受：sidecar 之间互调时不必先转成字符串。
+        assert_eq!(
+            query_as::<ProbeQuery>(&json!({ "source": "x", "limit": 7 }))
+                .unwrap()
+                .limit,
+            7
+        );
+        // #[serde(default)] 与自定义默认值都要生效。
+        assert_eq!(
+            query_as::<ProbeQuery>(&json!({ "source": "qq" })).unwrap(),
+            ProbeQuery {
+                source: "qq".into(),
+                offset: 0,
+                limit: 30
+            }
+        );
+        // 缺必填字段与「负数落不进 usize」都是 400，与 axum 抽取失败同口径——
+        // 不是静默走默认值。
+        assert_eq!(query_as::<ProbeQuery>(&json!({})).unwrap_err().status, 400);
+        assert_eq!(
+            query_as::<ProbeQuery>(&json!({ "source": "x", "limit": "-1" }))
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+
+    #[test]
+    fn absent_or_empty_query_yields_defaults() {
+        assert_eq!(
+            query_as::<AllOptional>(&Value::Null).unwrap(),
+            AllOptional { q: None }
+        );
+        assert_eq!(
+            query_as::<AllOptional>(&json!({})).unwrap(),
+            AllOptional { q: None }
+        );
+        // 非对象的 query 是信封非法，不该被当成「没有参数」。
+        assert_eq!(
+            query_as::<AllOptional>(&json!("nope")).unwrap_err().status,
+            400
         );
     }
 }
