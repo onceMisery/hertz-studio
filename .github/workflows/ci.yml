@@ -156,12 +156,26 @@ jobs:
         with:
           node-version: lts/*
       - name: Smoke test
-        run: bash scripts/smoke.sh 7899
+        id: smoke
+        shell: bash
+        continue-on-error: true
+        run: bash scripts/smoke.sh 7899 2>&1 | tee smoke.log
         env:
           VMUSIC_BACKEND: null
+      # 与 test job 同一套临时诊断：smoke 只在 ubuntu 跑，红了没有第二格可对照，
+      # 而日志匿名读不到，只能把尾部顶成 annotation。定位完与 test job 那处一起撤。
+      - name: Surface smoke failure as annotation
+        if: steps.smoke.outcome == 'failure'
+        shell: bash
+        run: |
+          body="$(sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' smoke.log | tail -60 | awk '{ gsub(/%/, "%25"); gsub(/\r/, "%0D"); printf "%s%%0A", $0 }')"
+          echo "::error title=smoke failed on ubuntu-latest::${body}"
+          exit 1
       - name: Library and filesystem integration
+        if: steps.smoke.outcome == 'success'
         run: python3 scripts/check-library-api.py --maintenance
       - name: DBX plugin sidecar protocol
+        if: steps.smoke.outcome == 'success'
         # 真起 sidecar、用 stdio 喂 JSON-RPC：插件形态唯一的集成守卫（信封、路由表、
         # 错误契约，以及扫描 → 列出曲目 → load → play 的端到端）。null 后端下频谱
         # 断言自动跳过，所以 runner 不需要声卡。每日推荐那一条会真的打一次上游
