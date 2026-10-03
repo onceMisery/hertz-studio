@@ -491,7 +491,7 @@
     this.cameraKind = FX.shotKind(seed, {});
     var rand = FX.seededRandom('tempera-screens:' + seed);
 
-    this.retirement.capture([this.blocks, this.screens, this.decor], this.scene, line);
+    this.retirement.capture([this.blocks, this.screens, this.decor], this.scene, line, this.words);
     clear(this.blocks);
     clear(this.screens);
     clear(this.decor);
@@ -628,8 +628,8 @@
         // 扫光带是「箭头形色版」：两端各一个 chevron 尖角。
         // 纯矩形带在画面上读作「一根横条扫过去」，加尖角之后读作「一块色版被推进来」
         // —— 这正是印刷套色的动作，反色文字才站得住「被印上去」的理由。
-        // 尖角取行高的 42%：再高会盖到上一行歌词，字距一窄就撞。
-        var notch = row.h * 0.42;
+        // 收短前缘尖角，避免把下一个未唱字也提前反色。
+        var notch = row.h * 0.12;
         var top = row.y - row.h / 2, bot = row.y + row.h / 2;
         var l = ext.left - pad, right = ext.right + pad;
         var chevron = [l, top, right, top, right + notch, row.y,
@@ -648,6 +648,7 @@
         c.scale.copyFrom(src.scale);
         c.skew.copyFrom(src.skew);
         c.rotation = src.rotation;
+        c.alpha = src.alpha;
         c.visible = src.visible;
       }
     }
@@ -756,6 +757,7 @@
       return {
         palette: { background: theme.backgroundColor, ink: theme.primaryColor },
         fontScale: fontScale,
+        lyricMotion: 'tempera',
         composition: tuning.composition,
         lyricLayout: 'phrases',
         phraseLength: 12,

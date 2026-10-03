@@ -249,7 +249,7 @@
     var cx = width * 0.5, cy = height * 0.5;
     var radius = Math.min(width, height) * 0.38;
 
-    this.retirement.capture([this.geoContainer, this.hudContainer], this.sceneContainer, line);
+    this.retirement.capture([this.geoContainer, this.hudContainer], this.sceneContainer, line, this.words);
     this.backgroundKind = FX.sceneKind(seed);
 
     // 1. 外框线系统：四角括标 + 上下标尺刻度（画面常驻的「取景器」）。
@@ -1014,6 +1014,7 @@
           tertiary: theme.tertiaryColor || theme.accentColor },
         backgroundMode: bgMode,
         fontScale: fontScale,
+        lyricMotion: 'sonnet',
         shotFlow: tuning.shotFlow,
         lyricLayout: tuning.lyricLayout,
         phraseLength: tuning.phraseLength,

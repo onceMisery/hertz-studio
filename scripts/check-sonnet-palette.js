@@ -191,7 +191,17 @@ async function checkBrowser() {
       const numericSecondary = numeric(palette.secondaryColor), numericTertiary = numeric(palette.tertiaryColor);
       assert(glyphs().some(node => node.tint === numericAccent), '活动字使用高对比青蓝');
       assert(glyphs().some(node => node.tint === numericInk), '其他字保持统一正文色');
-      assert(glyphs().every(node => node.tint === numericInk || node.tint === numericAccent), '歌词没有逐字彩虹');
+      // 平滑唱中/收尾允许中间色，但仍只能沿同一正文→强调色轴渐变。
+      const channels = value => [value >> 16 & 255, value >> 8 & 255, value & 255];
+      const inkChannels = channels(numericInk), accentChannels = channels(numericAccent);
+      const delta = accentChannels.map((value, i) => value - inkChannels[i]);
+      const axis = delta.reduce((best, value, i) => Math.abs(value) > Math.abs(delta[best]) ? i : best, 0);
+      assert(glyphs().every(node => {
+        const rgb = channels(node.tint);
+        const progress = delta[axis] ? (rgb[axis] - inkChannels[axis]) / delta[axis] : 0;
+        return progress >= -0.01 && progress <= 1.01
+          && rgb.every((value, i) => Math.abs(value - inkChannels[i] - delta[i] * progress) <= 1.5);
+      }), '歌词渐变不偏离统一色相，不出现逐字彩虹');
       for (const color of [numericAccent, numericSecondary, numericTertiary]) {
         assert(fixture.painted.includes(color), '真实图形使用三层调色 ' + color);
       }
@@ -215,7 +225,7 @@ async function checkBrowser() {
           for (const eco of [false, true]) {
             renderer.setEco(eco);
             const image = pixels();
-            assert(application.stage.filters == null, '图片模式禁用后期填色');
+            assert(!application.stage.filters || application.stage.filters.length === 0, '图片模式禁用后期填色');
             assert(image.cornerAlpha === 0, '图片模式角落 alpha 为零');
             assert(image.transparent > 0.9, '图片模式至少 90% 像素完全透明');
             assert(image.visible > 100, '图片模式仍绘制歌词');

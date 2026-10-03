@@ -5,6 +5,9 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-10-03 | plan | docs/aegis/plans/2026-10-03-lyric-stage-motion.md | 凝彩、商籁歌词动画优化 |
+| 2026-10-03 | work | docs/aegis/work/2026-10-03-lyric-stage-motion/20-checkpoint.md | 歌词动画检查点与范围 |
+| 2026-10-03 | work | docs/aegis/work/2026-10-03-lyric-stage-motion/90-evidence.md | 歌词动画视觉验证与架构证据 |
 | 2026-09-30 | plan | docs/aegis/plans/2026-09-30-cover-sphere-sonnet.md | 球形封面与彩色商籁实施计划 |
 | 2026-09-30 | work | docs/aegis/work/2026-09-30-cover-sphere-sonnet/10-intent.md | 球形封面与彩色商籁批准范围 |
 | 2026-09-30 | work | docs/aegis/work/2026-09-30-cover-sphere-sonnet/20-checkpoint.md | 球形封面与彩色商籁检查点 |

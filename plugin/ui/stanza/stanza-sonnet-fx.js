@@ -333,7 +333,11 @@
       }
       node.dataset = Object.assign({}, glyph, {
         advance: advance, rowX: rowWidth + advance / 2, index: index,
-        angle: (random() - 0.5) * 0.18
+        angle: (random() - 0.5) * 0.18,
+        // 同一词的方向一致；整句时间轴按三字组成小节，避免每字各自乱飞。
+        enterStyle: ['rise', 'from-left', 'from-right', 'stamp', 'swing'][
+          hashString(seed + ':' + glyph.phrase + ':' +
+            ((line.words || []).length > 1 ? glyph.wordIndex : Math.floor(index / 3))) % 5]
       });
       rows[rows.length - 1].push(node);
       rowWidth += advance;
@@ -354,6 +358,7 @@
         d.baseY = height * 0.47 + (rowIndex - (rows.length - 1) / 2) * lineHeight * fit;
         d.fit = fit;
         d.fontSize = fontSize;
+        d.trackingX = (d.rowX - total / 2) * fit;
         node.position.set(d.baseX, d.baseY);
         node.scale.set(fit);
       });
@@ -369,10 +374,19 @@
     return amount(tuning.releaseDuration, 0.45, 1.5);
   }
 
+  // GPU tint 按时间混色，不重建 Text / 纹理；字首、字尾均连续。
+  function mixTint(from, to, progress) {
+    var p = clamp(progress, 0, 1);
+    var r = Math.round((from >> 16 & 255) * (1 - p) + (to >> 16 & 255) * p);
+    var g = Math.round((from >> 8 & 255) * (1 - p) + (to >> 8 & 255) * p);
+    var b = Math.round((from & 255) * (1 - p) + (to & 255) * p);
+    return r << 16 | g << 8 | b;
+  }
+
   function animateLyrics(nodes, frame, tuning, color) {
-    var strength = amount(tuning.typographyMotion, 1) * motionScale(tuning);
+    var strength = Math.min(1.25, amount(tuning.typographyMotion, 1) * motionScale(tuning));
     var hints = (frame.activeLine && frame.activeLine.renderHints) || {};
-    var style = hints.glyphStyle || tuning.glyphStyle || 'rise';
+    var tempera = tuning.lyricMotion === 'tempera';
     var time = num(frame.playbackTime, 0);
     var release = releaseOf(hints, tuning);
     var lineEnd = num(frame.activeLine && frame.activeLine.vocalEndTime,
@@ -380,43 +394,59 @@
     var renderEnd = num(hints.renderEndTime, lineEnd);
     var exitStart = Math.max(lineEnd, renderEnd - release);
     var exit = release > 0 ? ease((time - exitStart) / release) : (time > renderEnd ? 1 : 0);
-    var performance = amount(tuning.performanceIntensity, 1.25) * strength;
-    var phraseEmphasis = amount(tuning.phraseEmphasis, 0.4, 1);
+    var next = frame.nextLines && frame.nextLines[0];
+    // 换句前先收起已唱文字；最后正在唱的字保留亮度，避免两句在原位叠成重影。
+    var handoff = next && frame.activeLine && next.startTime - frame.activeLine.startTime > 0.6
+      ? ease((time - next.startTime + 0.16) / 0.16) : 0;
+    var phraseEmphasis = amount(tuning.phraseEmphasis, 0.3, 1);
     var ink = parseInt(String(tuning.palette && tuning.palette.ink || '#f4f4f5').slice(1), 16);
     nodes.forEach(function (node) {
       var d = node.dataset;
-      var progress = clamp((time - d.startTime) / Math.max(0.04, d.endTime - d.startTime), 0, 1);
-      // 进场：0.42s expo 衰减的「浮起」，唱中 sin 拱弹跳，行尾整体下沉退出。
-      var entry = 1 - expo((time - d.startTime + 0.12) / 0.42);
-      var active = time >= d.startTime && time < d.endTime;
-      var bounce = active ? Math.sin(progress * Math.PI) : 0;
-      var direction = d.index % 2 ? 1 : -1;
-      node.position.set(
-        d.baseX + (style === 'scatter' ? direction * entry * d.fontSize * 0.65 : 0) * strength
-          - entry * d.fontSize * 0.45 * performance,
-        d.baseY + (entry * d.fontSize * (style === 'scatter' ? direction : 1) * 0.65
-          - bounce * d.fontSize * 0.08 - exit * d.fontSize * 0.35) * strength
-      );
-      node.rotation = style === 'scatter' ? d.angle * (entry + bounce) * strength : 0;
-      var pop = style === 'impact' ? -entry * 0.38 + bounce * 0.2 : bounce * 0.1 - entry * 0.12;
-      // 词组重音：起唱 0.48s 内一次 sin×exp 冲击（punch），带斜切。
-      var phraseAge = time - d.phraseStart;
-      var punch = phraseAge >= 0
-        ? Math.sin(Math.min(1, phraseAge / 0.48) * Math.PI) * Math.exp(-phraseAge * 3) : 0;
-      node.position.y -= punch * d.fontSize * 0.07 * performance;
-      node.skew.x = entry * 0.16 * performance;
-      node.scale.set(
-        d.fit * Math.max(0.2, 1 + pop * strength + punch * 0.12 * performance),
-        d.fit * Math.max(0.2, 1 + pop * strength - punch * 0.08 * performance)
-      );
-      // 词组聚焦：非当前词组压暗一半，注意力跟着语义单元走。
+      var sung = Math.max(0, d.endTime - d.startTime);
+      var attack = clamp(sung * 0.35, 0.035, 0.11);
+      var emphasis = sung > 0 && d.text.trim() && !BREAK_PUNCT.test(d.text)
+        ? ease((time - d.startTime) / attack) * (1 - ease((time - d.endTime) / 0.26)) : 0;
+      // 入场和发声分开：先显形再落位，短音节收短行程，长音保持轻微强调。
+      var lead = clamp(sung * 0.45, 0.08, 0.24);
+      var duration = lead + clamp(sung * 0.4, 0.08, 0.32);
+      var linear = clamp((time - d.startTime + lead) / duration, 0, 1);
+      var entry = 1 - easeEnter(linear);
+      var size = d.fontSize * d.fit;
+      var dx = 0, dy = size * 0.22 * entry, rotation = 0;
+      var scale = 1 - entry * 0.07;
+      if (tempera) {
+        var style = d.enterStyle || 'rise';
+        scale = 0.9 + easeSoftBack(linear, 0.7) * 0.1;
+        if (style === 'from-left' || style === 'from-right') {
+          dx = (style === 'from-left' ? -1 : 1) * size * 0.28 * entry;
+          dy *= 0.2;
+        } else if (style === 'stamp') {
+          dy = 0;
+          scale = 1 + entry * 0.12;
+        } else if (style === 'swing') {
+          dx = -size * 0.16 * entry;
+          rotation = (d.angle < 0 ? -1 : 1) * 0.09 * entry;
+        }
+      }
+      var spread = tempera ? ease((time - d.endTime - duration) / Math.max(0.2, lineEnd - d.endTime)) * 0.018 : 0;
+      node.position.set(d.baseX + (dx + num(d.trackingX, 0) * spread) * strength,
+        d.baseY + (dy - emphasis * size * 0.035 - exit * size * 0.16 - handoff * size * 0.12) * strength);
+      node.rotation = rotation * strength;
+      node.skew.set(0, 0);
+      var swell = emphasis * (tempera ? 0.045 : 0.055);
+      node.scale.set(d.fit * (1 + (scale - 1 + swell) * strength));
+      // 非当前词组轻微压暗，保留阅读上下文。
       var phraseWeight = ease((time - d.phraseStart + 0.3) / 0.3)
         * (1 - ease((time - d.phraseEnd) / 0.65));
       var focusAlpha = 1 - phraseEmphasis * 0.5 * (1 - phraseWeight);
-      node.alpha = (time < d.startTime ? amount(tuning.waitingOpacity, 0.25, 1) : 1)
-        * (1 - exit * 0.8) * focusAlpha;
-      // 光栅保持白字，主题色在 GPU 上 tint：唱到的字素换 accent。
-      node.tint = active && tuning.textInversion !== false ? color : ink;
+      var waiting = amount(tuning.waitingOpacity, 0.38, 1);
+      var reveal = ease((time - d.startTime + lead) / lead);
+      node.alpha = (waiting + (1 - waiting) * reveal)
+        * (1 - exit * 0.8) * focusAlpha
+        * (1 - handoff * (time < d.endTime ? 0.18 : 0.75));
+      var sungColor = sung > 0 ? ease((time - d.startTime) / attack) : 0;
+      var colorWeight = sungColor * (0.22 + emphasis * 0.78);
+      node.tint = tuning.textInversion !== false ? mixTint(ink, color, colorWeight) : ink;
     });
   }
 
@@ -1040,11 +1070,13 @@
   function createRetirement(PIXI, stage) {
     var duration = 0.6;
     var layer = null, born = 0, lastFrame = null, lastTuning = null, outgoingLine = null;
+    var lyricLayer = null, lyricY = 0, lyricTravel = 0;
     function release() {
       if (layer) { layer.removeFromParent(); layer.destroy({ children: true }); layer = null; }
+      if (lyricLayer) { lyricLayer.removeFromParent(); lyricLayer.destroy({ children: true }); lyricLayer = null; }
     }
     return {
-      capture: function (containers, scene, nextLine) {
+      capture: function (containers, scene, nextLine, words) {
         release();
         var frame = lastFrame, tuning = lastTuning;
         if (!frame || !frame.isPlaying || !nextLine || !frame.activeLine
@@ -1070,6 +1102,30 @@
           layer.addChild(copy);
         });
         stage.addChildAt(layer, 0);
+        // 只快照已经唱到的正文；短暂上移淡出，不复制遮罩/粒子或尚未唱的词。
+        // 与布景共用生命周期，最多保留一条旧句，seek 时立即一起回收。
+        if (words && words.length && tuning.lyricLayout !== 'editorial-track') {
+          lyricLayer = new PIXI.Container();
+          lyricLayer.position.copyFrom(scene.position);
+          lyricLayer.pivot.copyFrom(scene.pivot);
+          lyricLayer.scale.copyFrom(scene.scale);
+          lyricLayer.rotation = scene.rotation;
+          words.forEach(function (word) {
+            if (word.visible === false || word.alpha < 0.01 || word.dataset.startTime > frame.playbackTime) return;
+            var copy = new PIXI.Text({ text: word.text, style: word.style.clone() });
+            copy.anchor.copyFrom(word.anchor);
+            copy.position.copyFrom(word.position);
+            copy.scale.copyFrom(word.scale);
+            copy.skew.copyFrom(word.skew);
+            copy.rotation = word.rotation;
+            copy.tint = word.tint;
+            copy.alpha = word.alpha;
+            lyricLayer.addChild(copy);
+          });
+          lyricY = lyricLayer.position.y;
+          lyricTravel = Math.min(28, words[0].dataset.fontSize * words[0].dataset.fit * 0.35);
+          stage.addChild(lyricLayer);
+        }
         var hints = nextLine.renderHints || {};
         duration = hints.lineTransitionMode === 'fast' ? 0.12
           : clamp((nextLine.endTime - nextLine.startTime) * 0.3, 0.12, 0.8);
@@ -1097,13 +1153,24 @@
             var p = ease(elapsed / duration);
             layer.alpha = 1 - p;
             incoming = p;
+            if (lyricLayer) {
+              var lyricProgress = clamp(elapsed / Math.min(duration, 0.18), 0, 1);
+              lyricLayer.alpha = Math.pow(1 - lyricProgress, 3);
+              lyricLayer.position.y = lyricY - easeEnter(lyricProgress) * lyricTravel;
+              if (lyricProgress >= 1) {
+                lyricLayer.removeFromParent();
+                lyricLayer.destroy({ children: true });
+                lyricLayer = null;
+              }
+            }
           }
         }
         lastFrame = frame;
         lastTuning = tuning;
         return incoming;
       },
-      snapshot: function () { return { outgoingLayers: layer ? 1 : 0 }; },
+      snapshot: function () { return { outgoingLayers: layer ? 1 : 0,
+        outgoingGlyphs: lyricLayer ? lyricLayer.children.length : 0 }; },
       destroy: function () { release(); lastFrame = lastTuning = outgoingLine = null; }
     };
   }
