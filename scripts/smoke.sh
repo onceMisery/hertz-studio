@@ -21,7 +21,13 @@ cleanup() {
     rm -rf "$DATA" 2>/dev/null && break
     sleep 0.3
   done
-  [[ -d "$DATA" ]] && echo "(could not remove temp dir: $DATA)"
+  # 这里必须是 cleanup 的最后一个真值命令：EXIT trap 的返回状态会顶替脚本的退出码，
+  # 而 `[[ -d ]] && echo` 在「目录已成功删除」时返回 1——成功路径反而让整条 smoke
+  # 退 1。Windows 上临时目录常因 SQLite 文件锁删不掉、会走到 echo 返回 0，所以这个
+  # bug 只在 ubuntu 暴露：日志末尾写着 smoke test passed，步骤却判失败。
+  if [[ -d "$DATA" ]]; then
+    echo "(could not remove temp dir: $DATA)"
+  fi
 }
 trap cleanup EXIT
 
