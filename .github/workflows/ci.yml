@@ -187,12 +187,24 @@ jobs:
         run: python3 scripts/check-library-api.py --maintenance
       - name: DBX plugin sidecar protocol
         if: steps.smoke.outcome == 'success'
+        id: sidecar
+        shell: bash
+        continue-on-error: true
         # 真起 sidecar、用 stdio 喂 JSON-RPC：插件形态唯一的集成守卫（信封、路由表、
         # 错误契约，以及扫描 → 列出曲目 → load → play 的端到端）。null 后端下频谱
         # 断言自动跳过，所以 runner 不需要声卡。每日推荐那一条会真的打一次上游
         # （开放授权平台不需要登录），断言只看形状与判别式，对方限流或离线不会假红。
         run: |
-          cargo build -p dbx-plugin-hertz
-          node scripts/check-plugin-sidecar.js
+          cargo build -p dbx-plugin-hertz 2>&1 | tee sidecar-build.log
+          node scripts/check-plugin-sidecar.js 2>&1 | tee sidecar.log
         env:
           VMUSIC_BACKEND: null
+      # 临时诊断（与 test/smoke 那两处一起撤）：smoke.sh 已绿而这一步在 ubuntu 红，
+      # 同样没有第二格可对照，把构建与检查的尾部一起顶成 annotation。
+      - name: Surface sidecar failure as annotation
+        if: steps.sidecar.outcome == 'failure'
+        shell: bash
+        run: |
+          body="$(cat sidecar-build.log sidecar.log 2>/dev/null | sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tail -60 | awk '{ gsub(/%/, "%25"); gsub(/\r/, "%0D"); printf "%s%%0A", $0 }')"
+          echo "::error title=sidecar check failed on ubuntu-latest::${body}"
+          exit 1
