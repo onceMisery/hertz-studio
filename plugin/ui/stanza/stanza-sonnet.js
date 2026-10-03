@@ -9,7 +9,14 @@
   if (typeof window === 'undefined') return;
   var U = global.StanzaUtil;
   var FX = global.StanzaSonnetFx;
-  var PIXI_URL = 'vendor/pixi.min.js';
+  var PIXI_URL = '/vendor/pixi.min.js';
+
+  // 插件形态的 srcdoc base 落在 …/stage-themes/ 下，裸相对路径会解析到那里而 404，
+  // Pixi 永远加载不起来、商籁与凝彩都初始化不了。与 stage3d.js 壁纸同一类问题：
+  // 声明保持根相对，真正赋给 DOM 时过宿主的 assetUrl 补全到 ui 根。
+  function assetUrl(url) {
+    return global.hertzHost && global.hertzHost.assetUrl ? global.hertzHost.assetUrl(url) : url;
+  }
 
   function colorNumber(value, fallback) {
     var rgb = U.hexToRgb(value);
@@ -114,7 +121,7 @@
     if (pixiLoading) return pixiLoading;
     pixiLoading = new Promise(function (resolve, reject) {
       var s = document.createElement('script');
-      s.src = PIXI_URL;
+      s.src = assetUrl(PIXI_URL);
       s.onload = function () { global.PIXI ? resolve(global.PIXI) : reject(new Error('PIXI missing after load')); };
       s.onerror = function () { pixiLoading = null; reject(new Error('pixi.min.js load failed')); };
       document.head.appendChild(s);
@@ -151,6 +158,8 @@
     this.scan = null;
     this.performance = FX.createPerformance();
     this.postProcess = null;
+    this.optical = null;
+    this.atmosphere = null;
     this.retirement = null;
   }
 
@@ -181,13 +190,30 @@
         self.geoContainer = new PIXI.Container();
         self.hudContainer = new PIXI.Container();
         self.frameDecorContainer = new PIXI.Container();
+        self.markLayer = new PIXI.Container();
+        self.atmosphereLayer = new PIXI.Container();
         self.textContainer = new PIXI.Container();
         self.trackContainer = new PIXI.Container();
+        // 添加顺序保持 geo → hud 不变：契约脚本 check-sonnet-palette 按
+        // stage.children[0].children[0..1] 定位巨型布景与 HUD，改顺序会直接失败。
+        // 真正的层序交给 zIndex 决定（见下），两者解耦。
         self.sceneContainer.addChild(self.geoContainer, self.hudContainer,
-          self.frameDecorContainer, self.textContainer, self.trackContainer);
+          self.frameDecorContainer, self.markLayer, self.atmosphereLayer,
+          self.textContainer, self.trackContainer);
+        // 渲染顺序：氛围光在最底（只给明暗过渡，不能糊掉线稿）→ 巨型布景 → HUD →
+        // 框线 → 角标（取景器语义，歌词从框里穿过）→ 正文。
+        self.sceneContainer.sortableChildren = true;
+        self.atmosphereLayer.zIndex = -10;
+        self.geoContainer.zIndex = 0;
+        self.hudContainer.zIndex = 10;
+        self.frameDecorContainer.zIndex = 20;
+        self.markLayer.zIndex = 30;
+        self.textContainer.zIndex = 40;
+        self.trackContainer.zIndex = 40;
         application.stage.addChild(self.sceneContainer);
         self.editorialTrack = createEditorialTrack(PIXI, self.trackContainer, self.fontStack);
-        self.postProcess = FX.createPostProcess(PIXI, application.stage);
+        self.optical = FX.createOpticalChain(PIXI, application.stage);
+        self.postProcess = self.optical.print;
         self.retirement = FX.createRetirement(PIXI, application.stage);
         self.initialized = true;
         self.resize();
@@ -244,6 +270,59 @@
     }
     frame.stroke({ color: numPrimary, width: 1, alpha: 0.35 });
     this.frameDecorContainer.addChild(frame);
+
+    // 1b. 虚线标尺：设计意图是「镂空巨字 + 刻度边框 + 虚线标尺」三件套。
+    // 刻度边框只有实线短线，缺少那层"印刷套准线"的断续节奏，所以在这里补一段
+    // 独立的虚线标尺。刻意与 frame 分成两个 Graphics：虚线要独立的 alpha/线宽，
+    // 混进同一个 stroke() 会被后一次 stroke 覆盖。
+    // 同样挂在 frameDecorContainer（不随 sceneContainer 的相机变换），
+    // 因此只需在 build 时画一次，update 时零重绘。
+    var ruler = new PIXI.Graphics();
+    // 上下各一条横向虚线：段长 14px、间隙 9px。用 moveTo/lineTo 逐段画而不是
+    // setLineDash —— 后者在不同 Pixi 版本上对 Graphics 的支持并不一致。
+    var dashOn = 14, dashOff = 9, seg = dashOn + dashOff;
+    for (var rx = padX + 20; rx < padX + fw - 20; rx += seg) {
+      var run = Math.min(dashOn, padX + fw - 20 - rx);
+      if (run <= 0) break;
+      // 上轨留出角标缺口，四角附近不画，免得与 corner 括标叠在一起显脏。
+      if (rx > padX + corner + 8 && rx + run < padX + fw - corner - 8) {
+        ruler.moveTo(rx, padY + 16).lineTo(rx + run, padY + 16);
+        ruler.moveTo(rx, padY + fh - 16).lineTo(rx + run, padY + fh - 16);
+      }
+    }
+    ruler.stroke({ color: numSecondary, width: 1, alpha: 0.4 });
+    // 左右各一条纵向虚线，段长刻意与横向错开（11/13），避免四角形成对称的十字。
+    for (var ry = padY + 20; ry < padY + fh - 20; ry += 24) {
+      var vrun = Math.min(11, padY + fh - 20 - ry);
+      if (vrun <= 0) break;
+      if (ry > padY + corner + 8 && ry + vrun < padY + fh - corner - 8) {
+        ruler.moveTo(padX + 16, ry).lineTo(padX + 16, ry + vrun);
+        ruler.moveTo(padX + fw - 16, ry).lineTo(padX + fw - 16, ry + vrun);
+      }
+    }
+    ruler.stroke({ color: numPrimary, width: 1, alpha: 0.28 });
+    this.frameDecorContainer.addChild(ruler);
+
+    // 1c. 氛围光层：两团缓慢漂移的柔光 + 上下渐隐压边。
+    // 挂在 atmosphereLayer 而不是 geoContainer —— 巨型布景在「图片背景」模式下要整层
+    // 隐藏（契约 check-sonnet-palette 断言 children[0].visible === false），柔光不能跟着一起
+    // 消失，否则换图片背景时画面会从「有空气」突变为「纯贴图」。
+    // 固定画幅、不随相机移动：它是「 venue 的灯」而不是「画面里的东西」。
+    if (this.atmosphere) this.atmosphere.destroy();
+    this.atmosphereLayer.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
+    this.atmosphere = FX.buildAtmosphere(PIXI, width, height, {
+      accent: tuning.palette && tuning.palette.accent,
+      secondary: tuning.palette && tuning.palette.secondary
+    }, seed);
+    this.atmosphereLayer.addChild(this.atmosphere.container);
+
+    // 1d. 角标取景器：非对称、只画角不围合。与 1/1b 的框线错开边距（4.5% vs 8%/12%），
+    // 两层各管各的：框线是「画幅」，角标是「机身」。
+    this.markLayer.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
+    this.markLayer.addChild(FX.buildCornerMarks(PIXI, width, height, {
+      primary: tuning.palette && tuning.palette.primary,
+      secondary: tuning.palette && tuning.palette.secondary
+    }, seed));
 
     // 2. HUD 布景：轨道环系（orbital/orrery）或四种静态线稿，按种子六选一。
     this.hudContainer.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
@@ -457,7 +536,17 @@
     var backgroundAlpha = this.retirement.update(frame, tuning);
     this.geoContainer.alpha = backgroundAlpha == null ? 1 : backgroundAlpha;
     this.hudContainer.alpha = this.geoContainer.alpha;
-    this.postProcess.update(frame, tuning, this.width, this.height);
+    // 角标与压边渐隐跟 geo 同步退场：切句时整套画面一起走，不留一层壳。
+    this.markLayer.alpha = this.geoContainer.alpha;
+    this.markLayer.visible = this.geoContainer.visible;
+    // 氛围光不吃退场淡出（它是环境不是内容），但吃起音能量：重拍时空气会「亮一下」。
+    if (this.atmosphere) this.atmosphere.update(time, motion, FXp.energy);
+    // 图片背景模式：柔光必须收掉，否则会在照片上蒙一层彩色雾，且角落不再全透明
+    // （契约要求图片模式至少 90% 像素完全透明、角落 alpha 为 0）。
+    this.atmosphereLayer.visible = tuning.backgroundMode !== 'anime'
+      && tuning.showBackground !== false && tuning.quality !== 'energy-saving';
+    this.optical.setTint(tuning.palette && tuning.palette.accent);
+    this.optical.update(frame, tuning, this.width, this.height);
     this.app.render();
     return camera;
   };
@@ -470,6 +559,8 @@
       accents: this.accents ? this.accents.snapshot() : null,
       editorial: this.editorialTrack ? this.editorialTrack.snapshot() : null,
       resolution: this.app && this.app.renderer ? this.app.renderer.resolution : null,
+      halation: this.optical ? this.optical.halation.enabled : false,
+      atmosphere: !!this.atmosphere,
       retirement: this.retirement ? this.retirement.snapshot() : null
     };
   };
@@ -485,8 +576,10 @@
     if (this.accents) { this.accents.destroy(); this.accents = null; }
     if (this.editorialTrack) { this.editorialTrack.destroy(); this.editorialTrack = null; }
     this.motif = this.scan = this.giantText = null;
+    if (this.atmosphere) { this.atmosphere.destroy(); this.atmosphere = null; }
     if (this.retirement) { this.retirement.destroy(); this.retirement = null; }
-    if (this.postProcess) { this.postProcess.destroy(); this.postProcess = null; }
+    if (this.optical) { this.optical.destroy(); this.optical = null; }
+    this.postProcess = null;
     // init 被打断时 initialized 尚未置位但渲染器可能已分配：无条件回收 WebGL 上下文。
     if (this.app && this.initialized) {
       try { this.app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true }); }
@@ -494,6 +587,7 @@
     }
     this.app = null;
     this.sceneContainer = this.geoContainer = this.hudContainer = null;
+    this.atmosphereLayer = this.markLayer = null;
     this.frameDecorContainer = this.textContainer = this.trackContainer = null;
     this.initialized = false;
   };

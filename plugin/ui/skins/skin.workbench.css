@@ -157,10 +157,16 @@
 /* --- 卡片网格：格子更小，一屏放更多 ------------------------------------ */
 
 [data-skin="workbench"] .pl-grid,
-[data-skin="workbench"] .dv-body-card,
-[data-skin="workbench"] .daily-list {
+[data-skin="workbench"] .dv-body-card {
   grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
   gap: var(--skin-gap);
+}
+
+/* 从上面那条里拆出来单独写：每日推荐的列数公式在 style.css 的 .daily-list
+   上，皮肤只交下限与间距两个令牌，重写 grid-template-columns 会把它整条盖掉。 */
+[data-skin="workbench"] .daily-list {
+  --daily-card-min: var(--skin-card-min);
+  --daily-gap: var(--skin-gap);
 }
 
 [data-skin="workbench"] .pl-card-art,

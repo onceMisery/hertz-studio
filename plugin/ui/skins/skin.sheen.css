@@ -150,8 +150,9 @@
 }
 
 [data-skin="sheen"] .daily-list {
-  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
-  gap: var(--skin-gap);
+  /* 列数公式在 style.css 的 .daily-list 上，皮肤只交下限与间距两个令牌。 */
+  --daily-card-min: var(--skin-card-min);
+  --daily-gap: var(--skin-gap);
 }
 
 [data-skin="sheen"] .daily-strip {

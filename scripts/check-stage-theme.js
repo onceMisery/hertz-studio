@@ -27,6 +27,8 @@ const WEB = path.join(ROOT, 'plugin', 'ui');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 
 const THEME = read(path.join(WEB, 'stage-themes', 'starfall.css'));
+// iOS 舞台主题：与星落同层的第二套，受同一批纪律约束（下面按主题逐个跑）。
+const THEME_IOS = read(path.join(WEB, 'stage-themes', 'ios.css'));
 const STAGE3D_CSS = read(path.join(WEB, 'stage3d.css'));
 const STAGE3D_JS = read(path.join(WEB, 'stage3d.js'));
 const SKINS_JS = read(path.join(WEB, 'skins', 'skins.js'));
@@ -121,7 +123,7 @@ ok(!/data-skin-css="starfall"/.test(HTML), 'index.html 没有把星落挂成皮�
 ok(/stageTheme/.test(STAGE3D_JS), 'stage3d 持有 stageTheme 偏好');
 ok(/root\.dataset\.stageTheme/.test(STAGE3D_JS), 'stage3d 把主题写进 #stage3d 的 data-stage-theme');
 ok(/stageTheme:\s*stageTheme/.test(STAGE3D_JS), 'stageTheme 随舞台偏好持久化');
-ok(/id="s3d-stage-theme"/.test(HTML), '舞台设置里有「舞台主题」下拉');
+ok(/id="s3d-stage-theme"/.test(HTML), '舞台设置里有「设置风格」下拉');
 ok(/stageTheme:\s*'classic'/.test(WORKSHOP), '创意工坊的恢复默认表里有 stageTheme');
 
 // ---------------------------------------------------------------------------
@@ -170,6 +172,80 @@ ok(HTML.indexOf('href="stage3d.css"') < HTML.indexOf('href="stage-themes/starfal
 // 只匹配文件名后缀，不写死相对深度：前端目录搬过位置（web/ → plugin/ui/）。
 ok(/include_str!\("[^"]*\/stage-themes\/starfall\.css"\)/.test(MAIN_RS), 'starfall.css 编进二进制');
 ok(/"\/stage-themes\/starfall\.css"/.test(MAIN_RS), 'main.rs 注册了 /stage-themes/starfall.css 路由');
+
+// ---------------------------------------------------------------------------
+// 5b. iOS 舞台主题：与星落同一批纪律
+// ---------------------------------------------------------------------------
+
+section('iOS 舞台主题：配色纪律 / 作用域 / 与皮肤正交');
+
+const ioBody = THEME_IOS.replace(/\/\*[\s\S]*?\*\//g, '');
+const ioHex = ioBody.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
+const ioRgb = ioBody.match(/\brgba?\(/g) || [];
+const ioNamed = ioBody.replace(/white-space|grey|gray/g, '')
+  .match(/\b(?:red|blue|green|white|black)\b/g) || [];
+ok(ioHex.length === 0, `ios 没有十六进制颜色${ioHex.length ? '（' + ioHex.join(',') + '）' : ''}`);
+ok(ioRgb.length === 0, 'ios 没有 rgb()/rgba()');
+ok(ioNamed.length === 0, `ios 没有颜色关键字${ioNamed.length ? '（' + ioNamed.join(',') + '）' : ''}`);
+ok(/^\s*--s3d-(bg|text|muted|accent)\s*:/m.test(ioBody) === false,
+  'ios 不重定义舞台的基础色令牌（材质必须由 --s3d-* 派生）');
+ok(/\bcolor-mix\(in srgb, var\(--s3d-/.test(ioBody), 'ios 的玻璃材质由舞台令牌经 color-mix 派生');
+ok(!/data-skin/.test(ioBody), 'ios 不引用皮肤选择器（两个维度互不感知）');
+
+// 作用域：每条规则都必须带 .s3d[data-stage-theme="ios"] 前缀。
+const IO_PREFIX = '.s3d[data-stage-theme="ios"]';
+const ioRuleSelectors = Array.from(ioBody.matchAll(/^([^\s@/}][^{]*)\{/gm))
+  .map((m) => m[1].trim())
+  .filter((s) => s && !s.startsWith('@') && !s.startsWith('from') && !s.startsWith('to'));
+const ioMissingPrefix = ioRuleSelectors
+  .filter((s) => !s.split(',').every((p) => p.trim().startsWith(IO_PREFIX)));
+ok(ioMissingPrefix.length === 0,
+  `iOS 每条规则都带 ${IO_PREFIX} 前缀${ioMissingPrefix.length ? '（漏：' + ioMissingPrefix.join(' | ') + '）' : ''}`);
+
+const ioSels = new Set();
+{
+  const re = /\.s3d\[data-stage-theme="ios"\]([^{@]*)\{/g;
+  let m;
+  while ((m = re.exec(ioBody))) {
+    m[1].split(',').forEach((part) => { const s = part.trim(); if (s) ioSels.add(s); });
+  }
+}
+ok(ioSels.size >= 20, `iOS 有实质内容（${ioSels.size} 条选择器）`);
+const ioSpa = [...ioSels].filter((s) => /\.(app|rail|column|view|track|q-row|pl-row|bar)\b/.test(s));
+ok(ioSpa.length === 0, `iOS 不触碰 SPA 模块${ioSpa.length ? '（' + ioSpa.join(' ') + '）' : ''}`);
+
+// 沉浸行为：播放舱静止时收走、唤醒时浮现（与星落同一份硬行为）。
+const ioPlayerBase = ioBody.match(/\.s3d\[data-stage-theme="ios"\] \.s3d-player \{([^}]*)\}/);
+const ioPlayerAwake = ioBody.match(/\.s3d\[data-stage-theme="ios"\]\.s3d-chrome \.s3d-player \{([^}]*)\}/);
+ok(ioPlayerBase && /opacity:\s*0/.test(ioPlayerBase[1]), 'iOS 的播放舱静止时整条收走');
+ok(ioPlayerAwake && /opacity:\s*1/.test(ioPlayerAwake[1]), 'iOS 唤醒 chrome 时播放舱浮现');
+ok(ioPlayerBase && /grid-template-columns:\s*0fr/.test(ioPlayerBase[1]),
+  'iOS 收起态是 0fr（从一条发丝 bloom 成完整舱）');
+ok(ioPlayerBase && /border-radius:\s*999px/.test(ioPlayerBase[1]), 'iOS 播放舱是药丸形');
+
+// 与皮肤正交：iOS 这个 id 在两层里各出现一次（皮肤 + 舞台主题），这是
+// **允许且预期的**——两层各自登记、各自持久化，互不派生。真正要防的是
+// 任一层去引用另一层的选择器，那会让两个维度互相污染。
+const IOS_SKIN_CSS = read(path.join(WEB, 'skins', 'skin.ios.css'));
+ok(!/data-stage-theme/.test(IOS_SKIN_CSS), 'iOS 皮肤不引用舞台主题选择器（两层互不感知）');
+ok(!/data-skin/.test(ioBody), 'iOS 舞台主题不引用皮肤选择器（两层互不感知）');
+// 两层各自登记：皮肤在 Skins 目录 + data-skin-css link；舞台主题在下拉里。
+ok(/id:\s*'ios'/.test(SKINS_JS) && /data-skin-css="ios"/.test(HTML),
+  'iOS 皮肤在 Skins 目录与 link 上独立登记');
+ok(/<option value="ios">/.test(HTML), 'iOS 舞台主题在下拉里独立登记');
+
+// 接线。
+ok(/<link rel="stylesheet" href="stage-themes\/ios\.css">/.test(HTML),
+  'stage-themes/ios.css 常驻引入');
+ok(HTML.indexOf('href="stage3d.css"') < HTML.indexOf('href="stage-themes/ios.css"'),
+  'ios.css 排在 stage3d.css 之后（同特异性下覆盖基础样式）');
+ok(/include_str!\("[^"]*\/stage-themes\/ios\.css"\)/.test(MAIN_RS), 'ios.css 编进二进制');
+ok(/"\/stage-themes\/ios\.css"/.test(MAIN_RS), 'main.rs 注册了 /stage-themes/ios.css 路由');
+ok(/<option value="ios">/.test(HTML), '舞台设置的下拉里有 iOS 选项');
+// 白名单：stage3d.js 以前只认 starfall/classic，加选项而不改白名单的话
+// 选中 iOS 会被静默回落成 classic——页面不报错，只是「选了不起作用」。
+ok(/sel\.value === 'ios' \? 'ios'/.test(STAGE3D_JS), 'stage3d 的下拉处理认得 ios（不会被回落成 classic）');
+ok(/value\.stageTheme === 'ios'/.test(STAGE3D_JS), 'stage3d 的偏好恢复白名单包含 ios');
 
 // ---------------------------------------------------------------------------
 

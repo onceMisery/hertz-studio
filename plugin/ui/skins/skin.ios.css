@@ -1,0 +1,249 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 mmusic-studio contributors
+
+   皮肤：ios（iOS 风格）
+   --------------------------------------------------------------------------
+   与浮光/工作台/流年的关系：四套皮肤**只管布局**，配色一律走主题 token。
+   本文件不出现任何颜色字面量（契约见 check-skins.js 第 3 节），所以它与
+   任意主题正交——单独切到本皮肤而没换主题也不会把主题色带跑。
+
+   空间组织取 iOS 的三条语言：
+     1. **大圆角 + 柔和阴影**，控件与卡片都是连续的圆角矩形，没有直角；
+     2. **分组列表**：行贴着分组圆角卡的左右边缘，分组之间靠留白 + 细线
+        分隔，而不是每行一条分割线（行间线只在同一分组内出现）；
+     3. **大留白 + 高行高**：行高与段间距都放大一档，一屏放更少但每项
+        更易点。
+
+   圆角/间距这些「尺度」令牌写在这里而不写进 themes.js，是 themes.js 自己
+   定的规矩：主题只准改颜色，结构令牌留给皮肤。
+
+   换主题请配套选 themes.js 里的「iOS 浅色」；两者正交，任意组合都成立。
+*/
+
+[data-skin="ios"] {
+  /* 布局令牌。圆角比浮光(22px)更大、行更高、格子更小——iOS 的密度介于
+     浮光与工作台之间，靠圆角与留白而不是靠密度取胜。 */
+  --skin-gap: 20px;
+  --skin-pad: 22px;
+  --skin-radius: 26px;
+  --skin-row-py: 13px;
+  --skin-card-min: 176px;
+  --skin-head-pb: 18px;
+  --skin-title: 21px;
+
+  /* iOS 的圆角梯度比默认更「方」一点：控件 12、卡片 18、面板 26。
+     这里就地覆盖 style.css 的 --r-*，让所有复用这些令牌的组件
+     （按钮、输入框、菜单、弹窗）一起变得更圆。 */
+  --r-sm: 10px;
+  --r-md: 12px;
+  --r-lg: 18px;
+  --r-xl: 22px;
+  --radius: 18px;
+  --radius-lg: 26px;
+
+  /* 行高与留白：正文给到 1.55，分组之间用 --skin-gap 拉开。 */
+  --skin-line: 1.55;
+}
+
+/* --- 外壳：三列并排，两侧收窄留白 ---------------------------------------- */
+
+[data-skin="ios"] .app {
+  gap: var(--skin-gap);
+  padding: 0 var(--skin-pad) var(--skin-gap);
+}
+
+/* --- 导航：竖排药丸，选中态用「淡色填充 + 左侧主色条」 -------------------- */
+
+[data-skin="ios"] .rail {
+  gap: 2px;
+  padding: 10px 8px;
+  border-radius: var(--skin-radius);
+}
+
+[data-skin="ios"] .rail-item {
+  flex-direction: row;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--r-lg);
+  white-space: nowrap;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+
+[data-skin="ios"] .rail-item svg { margin: 0; flex: 0 0 auto; }
+[data-skin="ios"] .rail-item span { font-size: 13px; }
+
+/* 竖排导航保留这根弹簧（浮光横排时把它藏了）。这里给它一个最小高度，
+   保证「设置」贴到底部时上方留白是稳定的，而不是被内容高度顶着走。 */
+[data-skin="ios"] .rail-spacer { min-height: var(--skin-gap); }
+
+/* 选中项：iOS 的分段控件是「淡主色填充」，不是描边也不是实心。 */
+[data-skin="ios"] .rail-item.is-on,
+[data-skin="ios"] .rail-item[aria-current="true"] {
+  background: color-mix(in srgb, var(--brand) 12%, transparent);
+  color: var(--brand);
+  font-weight: 600;
+}
+
+/* --- 内容列：大圆角卡 + 更宽的段间距 -------------------------------------- */
+
+[data-skin="ios"] .column {
+  border-radius: var(--radius-lg);
+  padding: 0 0 10px;
+}
+
+[data-skin="ios"] .view { padding: var(--skin-pad); }
+
+[data-skin="ios"] .col-head {
+  padding-bottom: var(--skin-head-pb);
+  margin-bottom: var(--skin-gap);
+}
+
+[data-skin="ios"] .col-title {
+  font-size: var(--skin-title);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* 页头：工具挤在同一行靠右（与工作台「工具条独占一行」相反）。 */
+[data-skin="ios"] .col-head-left { flex: 1 1 auto; min-width: 0; }
+[data-skin="ios"] .col-tools {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+
+/* --- 分组列表：圆角容器 + 组内细线，组间靠留白 ---------------------------- */
+
+[data-skin="ios"] .set-group {
+  border-radius: var(--skin-radius);
+  margin-bottom: var(--skin-gap);
+  overflow: hidden;
+}
+
+[data-skin="ios"] .set-row { line-height: var(--skin-line); }
+
+/* --- 列表：行更高，组内细线不顶到容器边缘（iOS 的 inset 分隔线） --------- */
+
+[data-skin="ios"] .lib-head,
+[data-skin="ios"] .fav-head {
+  padding-bottom: 10px;
+}
+
+[data-skin="ios"] .track,
+[data-skin="ios"] .q-row,
+[data-skin="ios"] .fav-row,
+[data-skin="ios"] .online-row,
+[data-skin="ios"] .pl-row,
+[data-skin="ios"] .pd-row {
+  padding-top: var(--skin-row-py);
+  padding-bottom: var(--skin-row-py);
+  line-height: var(--skin-line);
+  border-radius: var(--r-md);
+}
+
+[data-skin="ios"] .lib-list,
+[data-skin="ios"] .q-list,
+[data-skin="ios"] .fav-list {
+  gap: 2px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- 卡片网格：格子比浮光小、比工作台大 ---------------------------------- */
+
+[data-skin="ios"] .pl-grid,
+[data-skin="ios"] .dv-body-card {
+  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
+  gap: var(--skin-gap);
+}
+
+[data-skin="ios"] .pl-card-art,
+[data-skin="ios"] .dv-art {
+  border-radius: calc(var(--skin-radius) * 0.62);
+}
+
+[data-skin="ios"] .daily-list {
+  /* 列数公式在 style.css 的 .daily-list 上，皮肤只交下限与间距两个令牌。 */
+  --daily-card-min: var(--skin-card-min);
+  --daily-gap: var(--skin-gap);
+}
+
+[data-skin="ios"] .daily-strip {
+  padding: var(--skin-pad);
+  border-radius: var(--skin-radius);
+}
+
+[data-skin="ios"] .online-body { gap: var(--skin-gap); }
+
+/* --- 舞台：贴右侧的悬浮圆角面板 ------------------------------------------ */
+
+[data-skin="ios"] .stage {
+  position: fixed;
+  right: var(--skin-pad);
+  top: calc(var(--topbar-h) + 68px);
+  width: min(420px, 32vw);
+  max-height: calc(100vh - var(--topbar-h) - 180px);
+  z-index: 58;
+  padding: var(--skin-pad);
+  border-radius: var(--skin-radius);
+  border: 1px solid var(--line);
+  box-shadow: var(--surface-lift);
+}
+
+/* --- 播放栏：底部悬浮药丸 ------------------------------------------------ */
+
+[data-skin="ios"] .bar {
+  margin: 0 var(--skin-pad) var(--skin-gap);
+  border-radius: var(--r-pill);
+  padding: 12px var(--skin-pad);
+  gap: var(--skin-gap);
+}
+
+/* --- 浮层：圆角跟随整套皮肤 ---------------------------------------------- */
+
+[data-skin="ios"] .np-card,
+[data-skin="ios"] .menu,
+[data-skin="ios"] .empty-card {
+  border-radius: var(--skin-radius);
+}
+
+/* --- 响应式 --------------------------------------------------------------
+   与浮光同理：宽屏空闲态那条 body[data-stage-idle="1"] .app 会把栅格改成
+   「86px + 1fr」，本皮肤的 .rail/.stage 都已 fixed 脱流，栅格里只剩
+   .column，会被收成 86px 窄条。必须显式接回来。 */
+
+@media (min-width: 1241px) {
+  [data-skin="ios"] .app {
+    padding-right: calc(min(420px, 32vw) + var(--skin-gap) + var(--skin-pad));
+  }
+  [data-skin="ios"] body[data-stage-idle="1"] .app {
+    grid-template-columns: minmax(0, 1fr);
+    padding-right: var(--skin-pad);
+  }
+}
+
+/* 平板/手机：舞台按基础样式的抽屉方式滑入，这里只报几何位置。 */
+@media (max-width: 1240px) {
+  [data-skin="ios"] .stage {
+    top: 12px;
+    right: 12px;
+    bottom: calc(var(--bar-h) + 24px);
+    width: min(420px, 88vw);
+    max-height: none;
+  }
+}
+
+@media (max-width: 900px) {
+  [data-skin="ios"] .app { padding: 0 10px var(--skin-gap); }
+  [data-skin="ios"] .view { padding: var(--skin-pad) 12px 0; }
+  [data-skin="ios"] .bar { margin: 0 10px var(--skin-gap); }
+}
+
+@media (max-width: 620px) {
+  [data-skin="ios"] .app { padding: 0 12px 12px; }
+  [data-skin="ios"] .view { padding: 12px 12px 0; }
+  [data-skin="ios"] .bar { margin: 0 10px 10px; }
+  [data-skin="ios"] .rail { padding: 8px 6px; }
+  [data-skin="ios"] .rail-item { padding: 9px 10px; }
+  [data-skin="ios"] .stage { padding: 16px; }
+}

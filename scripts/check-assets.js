@@ -113,7 +113,8 @@ includes.forEach((inc) => {
   if (inc.name === 'INDEX_HTML') return;
   const abs = path.resolve(path.join(ROOT, 'crates', 'hertz-studio', 'src'), inc.rel);
   const href = path.relative(WEB, abs).split(path.sep).join('/');
-  ok(linkedCss.includes(href) || linkedJs.includes(href) || linkedJsSource.includes(`'${href}'`),
+  ok(linkedCss.includes(href) || linkedJs.includes(href) || linkedJsSource.includes(`'${href}'`)
+    || linkedJsSource.includes(`'/${href}'`),
     `${inc.name}（${href}）被 index.html 引用`);
 });
 

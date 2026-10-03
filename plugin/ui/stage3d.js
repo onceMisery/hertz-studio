@@ -61,18 +61,39 @@
   // 此时停掉 GL 与 3D 手势，由 stanza 渲染器独立撑画面。
   //   stanzaActive：当前歌词走 stanza（classic/cadenza/sonnet）；standalone：stanza 激活且无 GL。
   var STANZA_VISUALS = ['classic', 'cadenza', 'sonnet', 'tempera'];
-  function stanzaActive(v) { return STANZA_VISUALS.indexOf(v != null ? v : stanza.visual) >= 0; }
+  // starborn 是元导演而非渲染器：它自己不产出画面，只在 STANZA_VISUALS 之间自动切换。
+  // 因此「stanza 是否激活」的判据必须把它也算进去 —— 否则导演切到 classic 时
+  // stanzaActive() 会返回 false，歌词宿主被整体收起，画面直接黑掉。
+  function stanzaActive(v) {
+    var id = v != null ? v : stanza.visual;
+    return id === 'starborn' || STANZA_VISUALS.indexOf(id) >= 0;
+  }
+  // 导演当前真正指向的渲染器（stanza.visual 为 'starborn' 时由 director 给出）。
+  function effectiveVisual() {
+    if (stanza.visual === 'starborn') {
+      var snap = stanza.director && stanza.director.snapshot ? stanza.director.snapshot() : null;
+      return (snap && snap.directedMode) || 'classic';
+    }
+    return stanza.visual;
+  }
   function isStandalone() { return stanzaActive() && !gl; }
   // 旧调用点语义：isPlane() 现在专指「无 GL 纯平面回退」。
   function isPlane() { return isStandalone(); }
   var stanza = { ready: false, bg: null, sub: null, classic: null, cadenza: null, sonnet: null, tempera: null,
+    director: null,          // 星诞元导演实例（仅 visual==='starborn' 时工作）
     visual: 'stage',
+    autoDirector: false,     // 星诞是否启用（从 UI 持久化读回）
+    autoLock: 4,             // 自动切镜的最小间隔（秒）
+    autoAvoidRepeat: true,   // 是否抑制最近用过的模式
+    lastDirected: null,      // 最近一次导演决策，供 HUD 显示
     bgMode: 'stage', bgOpacity: 0.75, vignette: true, subtitle: true,
     wallpaper: 'evening-16.jpg', wallpaperDim: 0.48,
     classicTuning: { rotation: true, breathing: 1, spacing: 0.7 },
     cadenzaTuning: { width: 0.72, motion: 1, glow: 1, beam: 0 },
-    sonnetTuning: { shotFlow: 'auto', lyricLayout: 'phrases', phraseLength: 12, decor: true, accents: true },
-    temperaTuning: { composition: 'auto', colorMode: 'duo', screens: true, inversion: true },
+    // halation / atmosphere 是共享引擎 FX.createOpticalChain 与 buildAtmosphere 的入口参数，
+    // 缺省值必须与引擎内 fallback 一致，否则「面板显示关着但画面仍开」这种鬼故事无从排查。
+    sonnetTuning: { shotFlow: 'auto', lyricLayout: 'phrases', phraseLength: 12, decor: true, accents: true, halation: 0.5, atmosphere: true },
+    temperaTuning: { composition: 'auto', colorMode: 'duo', screens: true, inversion: true, halation: 0.5, seams: true },
     // pendingOffset：歌词偏移的乐观暂存（毫秒），null 表示与服务端一致。
     // PUT+refresh 追上之前连点都基于它递增，避免读旧值导致连点塌缩成一步。
     // pendingTrackId：pendingOffset 所属曲目 id；切歌隔离与 PUT 失败回清都据此判定。
@@ -1928,7 +1949,8 @@
       stanzaBg: stanza.bgMode, stanzaBgOpacity: stanza.bgOpacity, stanzaVignette: stanza.vignette,
       stanzaWallpaper: stanza.wallpaper, stanzaWallpaperDim: stanza.wallpaperDim,
       stanzaSubtitle: stanza.subtitle, classicTuning: stanza.classicTuning, cadenzaTuning: stanza.cadenzaTuning,
-      sonnetTuning: stanza.sonnetTuning, temperaTuning: stanza.temperaTuning };
+      sonnetTuning: stanza.sonnetTuning, temperaTuning: stanza.temperaTuning,
+      autoLock: stanza.autoLock, autoAvoidRepeat: stanza.autoAvoidRepeat };
   }
 
   function savePreferences() { if (!restoring) control('stage3d', preferences()); }
@@ -1948,8 +1970,18 @@
       else if (value.layout === 'scatter') { layout = 'focus'; stanza.visual = 'cadenza'; }
       else if (value.layout === 'classic' || value.layout === 'cadenza') { layout = 'focus'; stanza.visual = value.layout; }
       else if (['focus', 'sleeve', 'single'].indexOf(value.layout) >= 0) { layout = value.layout; }
-      if (['stage', 'classic', 'cadenza', 'sonnet', 'tempera'].indexOf(value.stanzaVisual) >= 0) stanza.visual = value.stanzaVisual;
-      if (value.stageTheme === 'starfall' || value.stageTheme === 'classic') stageTheme = value.stageTheme;
+      if (['stage', 'starborn', 'classic', 'cadenza', 'sonnet', 'tempera'].indexOf(value.stanzaVisual) >= 0) stanza.visual = value.stanzaVisual;
+      // 星诞导演参数。切镜间隔与抑制重复是可独立于 visual 的偏好：从星诞切走后
+      // 再切回来，冷却与抑制策略应当保持用户上次调的值。
+      if (typeof value.autoLock === 'number') stanza.autoLock = clamp(value.autoLock, 0, 12);
+      if (typeof value.autoAvoidRepeat === 'boolean') stanza.autoAvoidRepeat = value.autoAvoidRepeat;
+      // director 可能还没建（首次 configure 早于 ensureStanza），建好时会再推一次；
+      // 这里也推一次是为了覆盖「先建后配」的顺序。
+      if (stanza.director) {
+        if (stanza.director.setTransitionLock) stanza.director.setTransitionLock(stanza.autoLock);
+        if (stanza.director.setAvoidRepeat) stanza.director.setAvoidRepeat(stanza.autoAvoidRepeat);
+      }
+      if (value.stageTheme === 'starfall' || value.stageTheme === 'ios' || value.stageTheme === 'classic') stageTheme = value.stageTheme;
       if (typeof value.lyricSize === 'number') lyricSize = clamp(value.lyricSize, 0.7, 1.5);
       if (typeof value.lyricGlow === 'number') lyricGlow = clamp(value.lyricGlow, 0, 1);
       if (value.shelfMode === 'off' || value.shelfMode === 'stage' || value.shelfMode === 'side') {
@@ -1981,13 +2013,18 @@
           .indexOf(value.sonnetTuning.lyricLayout) >= 0 ? value.sonnetTuning.lyricLayout : 'phrases',
         phraseLength: clamp(Math.round(num(value.sonnetTuning.phraseLength, 12)), 4, 24),
         decor: value.sonnetTuning.decor !== false,
-        accents: value.sonnetTuning.accents !== false
+        accents: value.sonnetTuning.accents !== false,
+        // 老配置里没有这两个键 → 落回引擎默认（0.5 / 开），与全新安装一致
+        halation: clamp(num(value.sonnetTuning.halation, 0.5), 0, 1),
+        atmosphere: value.sonnetTuning.atmosphere !== false
       };
       if (value.temperaTuning && typeof value.temperaTuning === 'object') stanza.temperaTuning = {
         composition: global.StanzaTempera && global.StanzaTempera.COMPOSITION_KINDS.indexOf(value.temperaTuning.composition) >= 0 ? value.temperaTuning.composition : 'auto',
         colorMode: ['duo', 'mono', 'vivid'].indexOf(value.temperaTuning.colorMode) >= 0 ? value.temperaTuning.colorMode : 'duo',
         screens: value.temperaTuning.screens !== false,
-        inversion: value.temperaTuning.inversion !== false
+        inversion: value.temperaTuning.inversion !== false,
+        halation: clamp(num(value.temperaTuning.halation, 0.5), 0, 1),
+        seams: value.temperaTuning.seams !== false
       };
       syncLayout();
       for (var i = 0; i < STAGES.length; i += 1) if (STAGES[i].id === value.scene) setStage(i, true);
@@ -2148,14 +2185,38 @@
       stanza.tempera = global.StanzaTempera.init(sonnetHost);
     }
     stanza.ready = true;
+    // 星诞元导演：只有 visual==='starborn' 时才推进决策，其余时候 isEnabled() 为假、
+    // frame() 直接 return，所以常驻实例不产生任何额外开销。
+    if (global.StanzaStarborn && !stanza.director) {
+      stanza.director = global.StanzaStarborn.init({
+        getVisual: function () { return effectiveVisual(); },
+        // 导演只改「当前生效模式」，不改 stanza.visual —— 用户在设置里选的模式必须保持原样，
+        // 否则关掉星诞后会发现下拉框被导演改成了别的值。
+        setVisual: function (id) {
+          if (STANZA_VISUALS.indexOf(id) < 0) return;
+          if (effectiveVisual() === id) return;
+          stanza.lastDirected = id;
+          applyStanzaConfig();
+        },
+        onSwitch: function (id, meta) { stanza.lastDirected = id; stanza.lastSwitchCount = meta && meta.count; }
+      });
+      // 持久化的导演参数在这里推一次：configure() 可能早于 ensureStanza 执行
+      // （首次进设置页时 stanza 还没建），所以不能只在 configure 里写。
+      if (stanza.director) {
+        stanza.director.setTransitionLock(stanza.autoLock);
+        stanza.director.setAvoidRepeat(stanza.autoAvoidRepeat);
+      }
+    }
     bindStanzaControls();
     applyStanzaConfig();
   }
 
   function planeApi() {
-    return stanza.visual === 'classic' ? stanza.classic
-      : stanza.visual === 'sonnet' ? stanza.sonnet
-      : stanza.visual === 'tempera' && stanza.tempera ? stanza.tempera : stanza.cadenza;
+    // 走 effectiveVisual 而非 stanza.visual：星诞模式下真正决定画面的是导演当前指向的模式。
+    var v = effectiveVisual();
+    return v === 'classic' ? stanza.classic
+      : v === 'sonnet' ? stanza.sonnet
+      : v === 'tempera' && stanza.tempera ? stanza.tempera : stanza.cadenza;
   }
 
   function sceneCovered() {
@@ -2222,8 +2283,11 @@
 
   function applyStanzaConfig() {
     if (!stanza.ready) return;
-    var t = stanza.visual === 'sonnet' && global.StanzaTheme.resolveSonnet ? global.StanzaTheme.resolveSonnet(reactivity) : global.StanzaTheme.resolve(reactivity);
-    var sig = stanza.visual + ':' + global.StanzaTheme.signature(t);
+    // 星诞用通用主题（resolve）而非商籁专属（resolveSonnet）：导演可能在任意两个模式间切换，
+    // 按 stanza.visual 判会让切镜后主题不重算，残留上一个模式的取色。
+    var effForTheme = effectiveVisual();
+    var t = effForTheme === 'sonnet' && global.StanzaTheme.resolveSonnet ? global.StanzaTheme.resolveSonnet(reactivity) : global.StanzaTheme.resolve(reactivity);
+    var sig = effForTheme + ':' + global.StanzaTheme.signature(t);
     if (sig !== stanza.themeSig) {
       stanza.themeSig = sig;
       stanza.bg.setTheme(t); stanza.sub.setTheme(t);
@@ -2267,12 +2331,14 @@
     }
     // 只有当前歌词视觉对应的渲染器可见，其余必须隐藏（classic/cadenza 共用
     // #s3d-fl-lyric；商籁启用时该宿主整体隐藏，独占 #s3d-fl-sonnet-stage 层）。
-    stanza.classic.setVisible(showLyrics && stanza.visual === 'classic');
-    stanza.cadenza.setVisible(showLyrics && stanza.visual === 'cadenza');
-    var pixiVisual = stanza.visual === 'sonnet' || stanza.visual === 'tempera';
+    // 星诞模式下由 effectiveVisual() 给出当前被导演选中的那个。
+    var effVisual = effectiveVisual();
+    stanza.classic.setVisible(showLyrics && effVisual === 'classic');
+    stanza.cadenza.setVisible(showLyrics && effVisual === 'cadenza');
+    var pixiVisual = effVisual === 'sonnet' || effVisual === 'tempera';
     if ($('s3d-fl-lyric')) $('s3d-fl-lyric').hidden = pixiVisual;
-    if (stanza.sonnet) stanza.sonnet.setVisible(showLyrics && stanza.visual === 'sonnet');
-    if (stanza.tempera) stanza.tempera.setVisible(showLyrics && stanza.visual === 'tempera');
+    if (stanza.sonnet) stanza.sonnet.setVisible(showLyrics && effVisual === 'sonnet');
+    if (stanza.tempera) stanza.tempera.setVisible(showLyrics && effVisual === 'tempera');
     var data = global.Stage && Stage.presentation ? Stage.presentation() : null;
     stanza.bg.setPaused(!data || !data.playing);
     [stanza.classic, stanza.cadenza].forEach(function (a) { a.setPaused(!data || !data.playing); });
@@ -2287,14 +2353,26 @@
 
   function driveStanza(dtMs) {
     if (!stanza.ready) return;
+    // 导演先决策：它可能调用 setVisual → applyStanzaConfig()，把可见性与调音推到
+    // 新选中的渲染器上。顺序反了的话，当帧会驱动一个即将被隐藏的渲染器。
+    if (stanza.director && stanza.visual === 'starborn' && stanza.autoDirector) {
+      stanza.director.setEnabled(true);
+      stanza.director.frame();
+    } else if (stanza.director) {
+      stanza.director.setEnabled(false);
+    }
     // 配置只在 8fps 的 syncStanzaMeta/控件回调里推；帧循环只做动画驱动，避免每帧重建。
     stanza.bg.frame(dtMs);
-    if (showLyrics) { planeApi().frame(dtMs); }
+    if (showLyrics) {
+      var api = planeApi();
+      if (api && api.frame) api.frame(dtMs);
+    }
   }
 
   function syncStanzaMeta() {
     if (!stanza.ready || !stanzaActive()) return;
     applyStanzaConfig();
+    syncWordLevelNote();
     // 封面变化检测降到 8fps：presentation() 每帧比签名是纯空转。
     var data = global.Stage && Stage.presentation ? Stage.presentation() : null;
     if (data && data.cover !== stanza.coverSig) {
@@ -2356,6 +2434,9 @@
     if (sonnetPanel) sonnetPanel.hidden = stanza.visual !== 'sonnet';
     var temperaPanel = $('s3d-fl-tempera');
     if (temperaPanel) temperaPanel.hidden = stanza.visual !== 'tempera';
+    var starbornPanel = $('s3d-fl-starborn');
+    if (starbornPanel) starbornPanel.hidden = stanza.visual !== 'starborn';
+    syncStarbornControls();
     syncTemperaControls();
     setOpacityRowEnabled(stanza.bgMode === 'fluid');
     syncStageBackdrop();
@@ -2780,10 +2861,26 @@
       function (v) { return String(Math.round(v)); }, 'change');
     check('s3d-fl-decor', function (b) { stanza.sonnetTuning.decor = b; });
     check('s3d-fl-accents', function (b) { stanza.sonnetTuning.accents = b; });
+    check('s3d-fl-atmosphere', function (b) { stanza.sonnetTuning.atmosphere = b; });
+    range('s3d-fl-halation', function (v) { stanza.sonnetTuning.halation = v; },
+      function (v) { return v.toFixed(2) + 'x'; }, 'change');
     select('s3d-fl-composition', function (value) { stanza.temperaTuning.composition = value; });
     select('s3d-fl-color-mode', function (value) { stanza.temperaTuning.colorMode = value; });
     check('s3d-fl-screens', function (value) { stanza.temperaTuning.screens = value; });
     check('s3d-fl-inversion', function (value) { stanza.temperaTuning.inversion = value; });
+    check('s3d-fl-seams', function (value) { stanza.temperaTuning.seams = value; });
+    range('s3d-fl-halation-t', function (v) { stanza.temperaTuning.halation = v; },
+      function (v) { return v.toFixed(2) + 'x'; }, 'change');
+    // 星诞：切镜间隔走 range（拖动时实时生效，导演下一帧就能用新的冷却），
+    // 抑制重复走 check。这两项只改导演行为，不触发渲染器重建。
+    range('s3d-fl-auto-lock', function (v) {
+      stanza.autoLock = v;
+      if (stanza.director && stanza.director.setTransitionLock) stanza.director.setTransitionLock(v);
+    }, function (v) { return v.toFixed(1) + 's'; }, 'input');
+    check('s3d-fl-auto-avoid', function (value) {
+      stanza.autoAvoidRepeat = value;
+      if (stanza.director && stanza.director.setAvoidRepeat) stanza.director.setAvoidRepeat(value);
+    });
     var down = $('s3d-fl-off-down'), up = $('s3d-fl-off-up');
     function nudge(d) {
       if (!global.Stage || !Stage.lyricOffset) return;
@@ -2851,7 +2948,10 @@
       fillRange('s3d-fl-phrase', stanza.sonnetTuning.phraseLength, function (v) { return String(Math.round(v)); });
       var decor = $('s3d-fl-decor'); if (decor) decor.checked = stanza.sonnetTuning.decor;
       var accents = $('s3d-fl-accents'); if (accents) accents.checked = stanza.sonnetTuning.accents;
+      var atmos = $('s3d-fl-atmosphere'); if (atmos) atmos.checked = stanza.sonnetTuning.atmosphere;
+      fillRange('s3d-fl-halation', stanza.sonnetTuning.halation, mult);
       syncTemperaControls();
+      syncStarbornControls();
       var sizeEl = $('s3d-fl-size'); if (sizeEl) sizeEl.value = String(lyricSize);
       var sizeOut = $('s3d-fl-size-value'); if (sizeOut) sizeOut.textContent = Math.round(lyricSize * 100) + '%';
       sweepRangeFills();
@@ -2884,6 +2984,45 @@
     if (screens) screens.checked = stanza.temperaTuning.screens;
     var inversion = $('s3d-fl-inversion');
     if (inversion) inversion.checked = stanza.temperaTuning.inversion;
+    var seams = $('s3d-fl-seams');
+    if (seams) seams.checked = stanza.temperaTuning.seams;
+    fillRange('s3d-fl-halation-t', stanza.temperaTuning.halation,
+      function (v) { return v.toFixed(2) + 'x'; });
+  }
+
+  // 逐字时间轴的真实性。四个 stanza 模式的逐字动效都建立在 Stage.lyricTokens 上，
+  // 而它在歌词源没有 word-level timing 时会按字数线性插值（见 stage.js 的 tokensFor）。
+  // 插值出来的时序"看起来对"但不是真实唱词时间——这里如实告知用户，不冒充精确。
+  // 走 8fps 的 syncStanzaMeta，不在帧循环里查。
+  function syncWordLevelNote() {
+    var el = $('s3d-fl-wordlevel-note');
+    if (!el) return;
+    // 只有真正逐字动效的模式才需要提示；舞台 3D 轨不消费逐字时间轴。
+    var msg = '';
+    if (global.Stage && Stage.hasWordLevelTiming) {
+      if (!Stage.hasWordLevelTiming()) {
+        msg = '此歌词没有逐字时间轴，逐字进度按字数估算。';
+      }
+    }
+    if (el.textContent !== msg) el.textContent = msg;
+    el.hidden = !msg;
+  }
+
+  // 星诞面板：切镜间隔 / 抑制重复 / 当前导演状态。
+  // 状态行只在导演真的切过镜之后才出现（count>0），避免一进面板就显示"已切 0 次"。
+  function syncStarbornControls() {
+    var lock = $('s3d-fl-auto-lock');
+    if (lock) lock.value = String(stanza.autoLock);
+    text('s3d-fl-auto-lock-value', Number(stanza.autoLock).toFixed(1) + 's');
+    var avoid = $('s3d-fl-auto-avoid');
+    if (avoid) avoid.checked = stanza.autoAvoidRepeat;
+    var state = $('s3d-fl-auto-state');
+    if (!state) return;
+    var snap = stanza.director && stanza.director.snapshot ? stanza.director.snapshot() : null;
+    if (!snap || !snap.transitionCount) { state.hidden = true; return; }
+    var label = (global.StanzaStarborn && global.StanzaStarborn.LABELS[snap.directedMode]) || snap.directedMode || '—';
+    state.hidden = false;
+    text('s3d-fl-auto-state', '当前由「' + label + '」演出 · 已自动切镜 ' + snap.transitionCount + ' 次');
   }
 
   // 舞台主题与皮肤正交：换主题只改 #stage3d 上的 data-stage-theme，
@@ -2894,7 +3033,7 @@
     sel._bound = true;
     sel.value = stageTheme;
     sel.addEventListener('change', function () {
-      stageTheme = sel.value === 'starfall' ? 'starfall' : 'classic';
+      stageTheme = sel.value === 'starfall' ? 'starfall' : (sel.value === 'ios' ? 'ios' : 'classic');
       syncLayout();
       savePreferences();
     });

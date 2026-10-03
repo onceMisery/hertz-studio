@@ -31,6 +31,7 @@ const SKINS_JS = read(path.join(SKINS, 'skins.js'));
 const SHEEN = read(path.join(SKINS, 'skin.sheen.css'));
 const WORKBENCH = read(path.join(SKINS, 'skin.workbench.css'));
 const LIUNIAN = read(path.join(SKINS, 'skin.liunian.css'));
+const IOS = read(path.join(SKINS, 'skin.ios.css'));
 const LIUNIAN_JS = read(path.join(SKINS, 'skin.liunian.js'));
 const SKINS_CSS = read(path.join(SKINS, 'skins.css'));
 const HTML = read(path.join(WEB, 'index.html'));
@@ -113,12 +114,13 @@ function makeSandbox(cssIds) {
 function checkCatalog() {
   section('皮肤目录：四套都在，classic 是"没有皮肤"');
 
-  const { sandbox, root, links } = makeSandbox(['sheen', 'workbench', 'liunian']);
+  const { sandbox, root, links } = makeSandbox(['sheen', 'workbench', 'liunian', 'ios']);
   const ids = sandbox.Skins.catalog().map((s) => s.id);
   ok(ids.indexOf('classic') >= 0, '有 classic（仓库原本那套布局）');
   ok(ids.indexOf('sheen') >= 0, '有 sheen');
   ok(ids.indexOf('workbench') >= 0, '有 workbench');
   ok(ids.indexOf('liunian') >= 0, '有 liunian');
+  ok(ids.indexOf('ios') >= 0, '有 ios');
   ok(sandbox.Skins.catalog().every((s) => s.name && s.note),
     '每套皮肤都有可读的名字与说明（设置页要靠它做选择）');
 
@@ -138,6 +140,10 @@ function checkCatalog() {
   eq(links[0].disabled, true, '切到 liunian 后 sheen 的 CSS 收起');
   eq(links[1].disabled, true, 'workbench 的 CSS 收起');
   eq(links[2].disabled, false, 'liunian 的 CSS 启用');
+
+  sandbox.Skins.apply('ios');
+  eq(links[2].disabled, true, '切到 ios 后 liunian 的 CSS 收起（两套不能同时生效）');
+  eq(links[3].disabled, false, 'ios 的 CSS 启用');
 
   sandbox.Skins.apply('classic');
   eq(links.every((l) => l.disabled), true, 'classic 不启用任何皮肤 CSS（它本身就是默认布局）');
@@ -227,6 +233,24 @@ function checkNoColor() {
     `liunian 的 color 只能引用主题 token${badColor.length ? '（' + badColor.map((m) => m[1].trim()).join(',') + '）' : ''}`);
   ok(lnColors.length >= 2, 'liunian 确实做了激活行翻色（VMusic 实心底 + 深字）');
 
+  section('iOS：颜色字面量同样全禁，选中态只准引用主题 token');
+
+  // iOS 皮肤用 color-mix(var(--brand)) 做选中态填充（iOS 分段控件的
+  // 「淡主色填充」），所以允许写 color/background，但值必须来自主题。
+  const ioBody = IOS.replace(/\/\*[\s\S]*?\*\//g, '');
+  const ioHex = ioBody.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
+  const ioRgb = ioBody.match(/\brgba?\(/g) || [];
+  const ioNamed = ioBody.replace(/white-space|grey|gray/g, '')
+    .match(/\b(?:red|blue|green|white|black)\b/g) || [];
+  ok(ioHex.length === 0, `ios 没有十六进制颜色${ioHex.length ? '（' + ioHex.join(',') + '）' : ''}`);
+  ok(ioRgb.length === 0, 'ios 没有 rgb()/rgba()');
+  ok(ioNamed.length === 0, `ios 没有颜色关键字${ioNamed.length ? '（' + ioNamed.join(',') + '）' : ''}`);
+  ok(/\bvar\(--/.test(ioBody), 'ios 的着色一律走 var(--…)');
+  ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(ioBody),
+    'ios 不重定义主题色变量（配色归 themes.js 管）');
+  ok(/color-mix\(in srgb, var\(--brand\)/.test(ioBody),
+    'ios 的选中态用主色派生填充，而不是写死一个颜色');
+
   section('皮肤只管布局：属性也应该是布局属性');
   for (const [name, css] of [['sheen', SHEEN], ['workbench', WORKBENCH]]) {
     const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
@@ -293,6 +317,53 @@ function checkContrast() {
 }
 
 // ---------------------------------------------------------------------------
+// 4b. iOS 皮肤：大圆角 + 分组列表 + 与工作台的区分度
+// ---------------------------------------------------------------------------
+
+function checkIosSkin() {
+  section('iOS：圆角梯度与行高符合 iOS 观感');
+
+  const t = tokensOf(IOS);
+  // 圆角是这套皮肤的第一特征：面板 26px、卡片 18px，都必须比浮光的 22 大。
+  ok(num(t['radius']) > num(tokensOf(SHEEN)['radius']),
+    `iOS 面板圆角 ${t['radius']} 大于浮光的 ${tokensOf(SHEEN)['radius']}`);
+  ok(num(t['radius']) >= 20, 'iOS 面板圆角 ≥20px（大圆角是这套皮肤的主特征）');
+  // 行高：iOS 的行比工作台高得多，但不该比浮光还松（否则与浮光没区分）。
+  ok(num(t['row-py']) > num(tokensOf(WORKBENCH)['row-py']),
+    'iOS 的行比工作台高');
+  ok(num(t['row-py']) <= num(tokensOf(SHEEN)['row-py']) + 4,
+    'iOS 的行高与浮光同一档（两者都属低密度，不能互相没区分）');
+
+  // 就地覆盖圆角梯度：只声明 --skin-* 不够，组件层的 --r-* 也要跟着圆。
+  const ioBody = IOS.replace(/\/\*[\s\S]*?\*\//g, '');
+  for (const k of ['--r-md', '--r-lg', '--r-xl']) {
+    ok(new RegExp('\\' + k + '\\s*:').test(ioBody), `iOS 覆盖了 ${k}（按钮/输入框/弹窗一起变圆）`);
+  }
+  // 行高令牌必须真的被行消费，否则声明了也不生效。
+  ok(/line-height:\s*var\(--skin-line\)/.test(ioBody), 'iOS 把行高令牌接到列表行上');
+  ok(/--skin-line:\s*1\.5/.test(ioBody), 'iOS 的行高约 1.55（正文可读性）');
+
+  section('iOS：与工作台的区分度（宽松 vs 高密度）');
+  for (const k of ['gap', 'pad', 'radius', 'row-py', 'card-min', 'head-pb']) {
+    const a = num(t[k]);
+    const b = num(tokensOf(WORKBENCH)[k]);
+    ok(a !== null && b !== null, `--skin-${k} 是数值（${t[k]} / ${tokensOf(WORKBENCH)[k]}）`);
+    if (a !== null && b !== null) {
+      const ratio = Math.max(a, b) / Math.min(a, b);
+      ok(ratio >= 1.8, `--skin-${k} iOS 比 workbench 松 ${ratio.toFixed(2)} 倍（要求 ≥1.8）`);
+    }
+  }
+  // 导航形态：iOS 保留竖排（与工作台一致），但选中态是淡色填充而非左条。
+  ok(!/\[data-skin="ios"\] \.rail \{[^}]*position:\s*fixed/.test(IOS),
+    'iOS 的导航留在栅格里（不悬浮）');
+  ok(/\[data-skin="ios"\] \.rail-item\.is-on/.test(IOS)
+    || /\[data-skin="ios"\] \.rail-item\[aria-current/.test(IOS),
+    'iOS 的导航选中态有显式规则（淡主色填充）');
+  ok(/color-mix\(in srgb, var\(--brand\) 12%/.test(IOS),
+    'iOS 选中态是 12% 主色淡填充（iOS 分段控件的语言）');
+}
+
+// ---------------------------------------------------------------------------
 // 5. 模块覆盖：两套必须覆盖同一批模块
 // ---------------------------------------------------------------------------
 
@@ -328,6 +399,11 @@ function checkCoverage() {
   const missingInC = [...a].filter((s) => !c.has(s));
   ok(missingInC.length === 0, `liunian 覆盖了其它皮肤的全部模块（缺：${missingInC.join(' ')}）`);
 
+  // ios 同理：它切过去时也不允许有页面落回默认布局。
+  const d = selectorsOf(IOS);
+  const missingInD = [...a].filter((s) => !d.has(s));
+  ok(missingInD.length === 0, `ios 覆盖了其它皮肤的全部模块（缺：${missingInD.join(' ')}）`);
+
   // 这些是主要模块，一套皮肤漏了任何一个，切过去那块就是"没换皮肤"。
   const must = [
     '.app', '.rail', '.rail-item', '.column', '.view', '.col-head', '.col-title',
@@ -338,6 +414,7 @@ function checkCoverage() {
     ok([...a].some((s) => s.indexOf(m) >= 0), `sheen 覆盖了 ${m}`);
     ok([...b].some((s) => s.indexOf(m) >= 0), `workbench 覆盖了 ${m}`);
     ok([...c].some((s) => s.indexOf(m) >= 0), `liunian 覆盖了 ${m}`);
+    ok([...d].some((s) => s.indexOf(m) >= 0), `ios 覆盖了 ${m}`);
   }
 }
 
@@ -439,8 +516,108 @@ function checkLiunianNavigation() {
     '桥接分流本地 playTrack / 在线 Online.playAll');
 
   // 9) 作用域：搜索面板只属于流年。
-  ok(!/ln-sp/.test(SHEEN) && !/ln-sp/.test(WORKBENCH), '其它皮肤不引入搜索面板');
+  ok(!/ln-sp/.test(SHEEN) && !/ln-sp/.test(WORKBENCH), '其它皮肤不引入遮罩浮层');
   ok(!/ln-right|ln-sp/.test(HTML), '业务 HTML 不内置右栏面板（皮肤自持，切走即消失）');
+}
+
+// ---------------------------------------------------------------------------
+// 6b. 流年：设置浮层（点「设置」在底层面板之上弹一层，而不是切中栏视图）
+// ---------------------------------------------------------------------------
+
+function checkLiunianSettingsSheet() {
+  section('流年：设置浮层（遮罩 / 过渡 / 关闭 / 层级）');
+
+  // 1) 设置视图被搬进浮层，且用 relocate 留锚点（切皮肤严格回位）。
+  ok(/function buildSettingsSheet/.test(LIUNIAN_JS), '构建设置浮层');
+  ok(/relocate\(view, body\)/.test(LIUNIAN_JS),
+    '设置视图经 relocate 搬进浮层（原位留锚点，可还原）');
+  ok(/make\('section', 'ln-modal-card', root\)/.test(LIUNIAN_JS)
+    && /make\('div', 'ln-modal-scrim', root\)/.test(LIUNIAN_JS),
+    '浮层由遮罩 + 卡片两层构成');
+  ok(/setAttribute\('role', 'dialog'\)/.test(LIUNIAN_JS) && /setAttribute\('aria-modal', 'true'\)/.test(LIUNIAN_JS),
+    '卡片带 dialog / aria-modal 语义');
+
+  // 2) 入口：导航「设置」与 clickRailItem('settings') 都开浮层，不切中栏视图。
+  ok(/openSettingsSheet\(button\)/.test(LIUNIAN_JS),
+    '导航「设置」打开浮层');
+  ok(/if \(view === 'settings'\) \{\s*openSettingsSheet\(\)/.test(LIUNIAN_JS),
+    'clickRailItem 对 settings 改为开浮层（避免 setView 把中栏切空）');
+  ok(/if \(sheet\.open\) closeSettingsSheet\(\);\s*else openSettingsSheet\(target\);/.test(LIUNIAN_JS)
+    && /addEventListener\('click', onDocumentClickCapture, true\)/.test(LIUNIAN_JS),
+    '顶栏设置图标被 capture 阶段拦截并开关浮层');
+
+  // 3) 关闭路径：遮罩、关闭按钮、Esc，且退场动画结束后才隐藏。
+  ok(/ln-modal-scrim'\)\.addEventListener|scrim\.addEventListener\('click', function \(\) \{ closeSettingsSheet\(\); \}\)/.test(LIUNIAN_JS),
+    '点遮罩可关闭');
+  ok(/close\.addEventListener\('click', function \(\) \{ closeSettingsSheet\(\); \}\)/.test(LIUNIAN_JS),
+    '点关闭按钮可关闭');
+  ok(/function onSheetKeydown[\s\S]{0,160}e\.key !== 'Escape'/.test(LIUNIAN_JS),
+    'Esc 可关闭');
+  ok(/classList\.add\('is-closing'\)/.test(LIUNIAN_JS) && /classList\.remove\('is-open'\)/.test(LIUNIAN_JS),
+    '关闭走 .is-closing 退场态');
+  ok(/setTimeout\(function \(\) \{[\s\S]{0,420}?root\.hidden = true/.test(LIUNIAN_JS),
+    '退场动画结束后才置 hidden（退场动画真的能播完）');
+
+  // 4) 层级：浮层必须压过所有既有浮层，且与底层面板不冲突。
+  const modalRule = LIUNIAN.match(/\[data-skin="liunian"\]\s+\.ln-modal\s*\{([^}]*)\}/);
+  ok(modalRule && /position:\s*fixed/.test(modalRule[1]), '浮层固定定位脱离文档流');
+  const z = modalRule && Number((modalRule[1].match(/z-index:\s*(\d+)/) || [])[1]);
+  ok(Number.isFinite(z) && z >= 100,
+    `浮层层级高于既有浮层（z-index=${z}，须 ≥ 在线弹窗的 100）`);
+  ok(/classList\.add\('ln-modal-open'\)/.test(LIUNIAN_JS)
+    && /classList\.remove\('ln-modal-open'\)/.test(LIUNIAN_JS),
+    '打开/关闭时给 body 打标记，供样式隔离底层');
+
+  // 4b) 隔离底层只能挡交互，不能加 filter/backdrop-filter：
+  // filter 会让 .app 变成包含块，而流年把 .bar 搬进了中栏（.app 子树内），
+  // 一旦子树里出现 fixed 后代就会被改相对定位。压暗交给遮罩。
+  const isolate = LIUNIAN.match(/\[data-skin="liunian"\]\s+body\.ln-modal-open[^{]*\{([^}]*)\}/g) || [];
+  ok(isolate.length > 0, 'body 标记确有对应样式（不是死代码）');
+  ok(isolate.every((r) => !/filter/.test(r)),
+    '底层隔离不加 filter（否则 .app 变包含块，搬进去的播放卡会错位）');
+  ok(/pointer-events:\s*none/.test(isolate.join('')), '底层隔离用 pointer-events 挡交互');
+
+  // 5) 过渡动画：进场用 animation（display 恢复自动播），退场用 transition。
+  ok(/ln-modal\.is-open \.ln-modal-card\s*\{[^}]*animation:\s*ln-modal-in/.test(LIUNIAN),
+    '进场用 keyframes 动画（hidden→可见时自动播放）');
+  ok(/ln-modal\.is-closing \.ln-modal-card\s*\{[^}]*animation:\s*none[^}]*transition-duration/.test(LIUNIAN),
+    '退场切到 transition 播反向动画');
+  ok(/backwards/.test(LIUNIAN.match(/ln-modal\.is-open \.ln-modal-card\s*\{[^}]*\}/)[0]),
+    '进场动画用 backwards（both 会留下常驻单位矩阵 transform）');
+  ok(/MODAL_EXIT_MS = \d+/.test(LIUNIAN_JS), 'JS 里显式声明退场时长，与 CSS 对齐');
+
+  // 6) 卡片不加 filter/backdrop-filter：否则设置项文字被自身背景糊掉。
+  const cardRule = LIUNIAN.match(/\[data-skin="liunian"\]\s+\.ln-modal-card\s*\{([^}]*)\}/);
+  ok(cardRule && !/backdrop-filter/.test(cardRule[1]) && !/[^-\s]filter\s*:/.test(cardRule[1]),
+    '卡片本身不做模糊/滤镜，只有遮罩模糊');
+  ok(/background:\s*var\(--panel-solid\)/.test(cardRule[1]),
+    '卡片底色取主题令牌（不写字面量）');
+
+  // 7) 卸载可逆：监听与浮层状态都要清，别把浮层留在页面上。
+  ok(/removeEventListener\('click', onDocumentClickCapture, true\)/.test(LIUNIAN_JS),
+    '卸载时摘掉 capture 监听');
+  ok(/clearTimeout\(sheet\.closeTimer\)/.test(LIUNIAN_JS)
+    && /sheet\.viewEl = null/.test(LIUNIAN_JS),
+    '卸载时清退场定时器并释放浮层引用');
+
+  // 7b) hidden 归属：设置视图的 hidden 有两条写入路径（浮层自己 + app.js 的
+  // setView，Esc 与切视图都会跑）。开着或退场期间必须以浮层为准，否则会出现
+  // 「退场动画播的是一张空壳」或「浮层开着内容没了」。
+  ok(/observer\.observe\(sheet\.viewEl,/.test(LIUNIAN_JS)
+    && /attributeFilter: \['hidden'\]/.test(LIUNIAN_JS),
+    '设置视图单独 observe（搬出中栏后仍能纠正 hidden）');
+  const sync = LIUNIAN_JS.match(/function syncSettingsVisibility\(\)[\s\S]{0,420}?\n  \}/);
+  ok(sync && /sheet\.open \|\| sheet\.closing/.test(sync[0])
+    && /if \(sheet\.viewEl\.hidden\) sheet\.viewEl\.hidden = false;/.test(sync[0]),
+    '浮层开着/退场中，hidden 以浮层为准并纠正回来');
+  ok(sync && /if \(!sheet\.viewEl\.hidden\) sheet\.viewEl\.hidden = true;/.test(sync[0]),
+    '浮层关闭后把设置视图收回隐藏（否则中栏留一片空白）');
+  ok(/if \(inReflow\) return;/.test(LIUNIAN_JS),
+    'reflow 有重入保护（观察器里纠正 hidden 不会自激）');
+
+  // 8) 业务节点不动：浮层仍复用同一个 #view-settings，事件不丢。
+  ok(!/id="view-settings"/.test(HTML.replace(/<div class="view" id="view-settings" hidden>/, '')),
+    '设置视图仍是业务 HTML 里那一个（皮肤不复制业务节点）');
 }
 
 // ---------------------------------------------------------------------------
@@ -451,7 +628,7 @@ function checkWiring() {
   section('接线：HTML / 路由 / 启动');
 
   ok(/<link rel="stylesheet" href="skins\/skins\.css">/.test(HTML), 'skins.css 常驻引入');
-  for (const id of ['sheen', 'workbench', 'liunian']) {
+  for (const id of ['sheen', 'workbench', 'liunian', 'ios']) {
     ok(new RegExp('href="skins/skin\\.' + id + '\\.css"[^>]*data-skin-css="' + id + '"').test(HTML),
       `skin.${id}.css 引了进来并带上 data-skin-css`);
     ok(new RegExp('data-skin-css="' + id + '"[^>]*disabled').test(HTML),
@@ -462,7 +639,7 @@ function checkWiring() {
     'skins.js 排在 app.js 之前（app.js 启动时要能拿到它）');
   ok(/id="skins-list"/.test(HTML), '设置页有皮肤列表容器');
 
-  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.sheen.css', 'skins/skin.workbench.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js']) {
+  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.sheen.css', 'skins/skin.workbench.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js', 'skins/skin.ios.css']) {
     ok(MAIN_RS.includes(`/skins/${p.split('/')[1]}`) || MAIN_RS.includes(p),
       `main.rs 注册了 /${p} 路由`);
   }
@@ -473,6 +650,8 @@ function checkWiring() {
     'skin.liunian.css 编进二进制');
   ok(/include_str!\("[^"]*\/skins\/skin\.liunian\.js"\)/.test(MAIN_RS),
     'skin.liunian.js 编进二进制');
+  ok(/include_str!\("[^"]*\/skins\/skin\.ios\.css"\)/.test(MAIN_RS),
+    'skin.ios.css 编进二进制');
 
   section('接线：流年重编排 JS 的加载顺序与机制');
   const lnJsAt = HTML.indexOf('src="skins/skin.liunian.js"');
@@ -505,9 +684,11 @@ function checkWiring() {
   checkExtensibility();
   checkNoColor();
   checkContrast();
+  checkIosSkin();
   checkCoverage();
   checkLiunianExpandedBarStability();
   checkLiunianNavigation();
+  checkLiunianSettingsSheet();
   checkWiring();
 
   console.log('\n' + '─'.repeat(60));

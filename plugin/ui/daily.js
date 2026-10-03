@@ -14,8 +14,9 @@
 // 这一层只负责取、画、播三件事：合并规则、打分规则、跳过判据全在服务端，
 // 前端一行规则都不重复，否则两端迟早给出不一样的答案。
 //
-// 两路请求用 allSettled 并发：它们互不依赖，谁也不该等谁，谁也不该因为对方
-// 挂了就没有结果可显示。
+// 两路请求**各自收尾、各自上屏**，不再等对方。以前是 allSettled 之后统一
+// render 一次：本地那一路是本机纯函数、毫秒级就有结果，却被在线那一路扣住，
+// 用户看到的是「等半天，然后一次性全跳出来」。
 (function () {
   'use strict';
   var T = null;
@@ -25,20 +26,53 @@
   /// 那类服务端设置不是一回事。
   var MODE_KEY = 'vmusic.daily.mode';
 
+  /// 进「曲库」页就会调一次 load()，而在线汇总最坏要等满服务端的等待预算。
+  /// 用户在几个视图之间来回切两下不该每轮都重打上游：手上这份不老于这个秒数
+  /// 就直接用。显式刷新走 force，不受这条限制。跨天也顺带覆盖了——过零点后
+  /// 最多 60 秒就会重取一次。
+  var FRESH_SECS = 60;
+
+  /// 服务端只等一个预算就把已落地的平台先返回，没到的记在 `pending`；拿过期
+  /// 缓存顶上时记 `refreshing`，新值正在后台刷。两种都表示「这份还不是最终的」，
+  /// 要再拉一次才补齐。封顶是为了上游一直不回来时不至于无限轮询下去。
+  var TOPUP_MAX = 3;
+  var TOPUP_DELAY_MS = 2500;
+
+  /// 补拉定时器与轮次号。每发起一轮 load 就把 generation +1，上一轮的回调与
+  /// 定时器据此自行作废：不这么做的话，用户连点两次刷新会看到两份响应互相
+  /// 覆盖，最后停在先发出的那一份上。
+  var topupTimer = null;
+  var generation = 0;
+  var fetchedAt = { local: 0, online: 0 };
+
   var dailyState = {
+    /// 两路里任意一路在飞。刷新按钮据它决定要不要作废重来。
     loading: false,
+    /// 分路的在飞标记：render() 只在**当前来源**那一路在飞且手上没东西时
+    /// 才显示占位，否则「正在挑歌…」会把已经画出来的列表冲掉。
+    localBusy: false,
+    onlineBusy: false,
     loaded: false,
     /// 本地规则引擎的结果（DailyPage）。
     page: null,
     /// 在线汇总的结果（DailyOnlinePage）。
     online: null,
-    /// 在线那一路的错误。只用于副标题里如实说明，不弹红——见 load()。
+    /// 在线那一路的错误。只用于副标题里如实说明，不弹红——见 fetchOnline()。
     onlineError: null,
     /// 'online' | 'local'。
     mode: 'online',
     /// 用户是否显式选过来源。没选过时才允许按"有没有登录平台"自动落位。
     modePinned: false,
   };
+
+  function syncLoading() {
+    dailyState.loading = dailyState.localBusy || dailyState.onlineBusy;
+  }
+
+  function stale(which) {
+    var at = fetchedAt[which];
+    return !at || (Date.now() - at) > FRESH_SECS * 1000;
+  }
 
   function readMode() {
     try { return localStorage.getItem(MODE_KEY); } catch (e) { return null; }
@@ -48,37 +82,93 @@
     try { localStorage.setItem(MODE_KEY, mode); } catch (e) { /* 隐私模式 */ }
   }
 
-  async function load(opts) {
+  function load(opts) {
     opts = opts || {};
-    if (dailyState.loading) return;
-    dailyState.loading = true;
+    // 已经有一轮在飞就不重复发。显式刷新是例外：它要把上一轮整个作废重来。
+    if (dailyState.loading && !opts.force) return;
+    if (topupTimer) { clearTimeout(topupTimer); topupTimer = null; }
+
+    var wantLocal = !!opts.force || !dailyState.page || stale('local');
+    var wantOnline = !!opts.force || !dailyState.online || stale('online');
+    if (!wantLocal && !wantOnline) { render(); return; }
+
+    generation += 1;
+    var gen = generation;
+    dailyState.localBusy = wantLocal;
+    dailyState.onlineBusy = wantOnline;
+    syncLoading();
     render();
 
-    // 两路并发、各自收尾。allSettled 而不是 all：本地规则引擎是本机纯函数，
-    // 没有理由因为在线平台超时而拿不到结果，反过来也一样。
-    var local = T.get('/v1/recommend/daily?limit=12').then(function (p) {
+    if (wantLocal) fetchLocal(opts, gen);
+    if (wantOnline) fetchOnline(gen, 0);
+  }
+
+  function fetchLocal(opts, gen) {
+    T.get('/v1/recommend/daily?limit=12').then(function (p) {
+      if (gen !== generation) return;
       dailyState.page = p;
       dailyState.loaded = true;
+      dailyState.localBusy = false;
+      fetchedAt.local = Date.now();
+      syncLoading();
+      settleMode();
+      render();
     }).catch(function (err) {
+      if (gen !== generation) return;
       dailyState.page = null;
+      dailyState.localBusy = false;
+      syncLoading();
       // 进页面自动拉的那次失败不弹红：推荐位是锦上添花，不该一进来就报错。
       if (!opts.silent) H.toast(H.errText('每日推荐读取失败', err), 'error');
+      settleMode();
+      render();
     });
+  }
 
-    var online = T.get('/v1/recommend/daily/online?limit=24').then(function (p) {
+  /// 在线汇总那一路。失败不弹红、也不带 silent 开关：它从头到尾都不是一次
+  /// 用户发起的操作，弹红只会让人以为播放器坏了。
+  function fetchOnline(gen, attempt) {
+    T.get('/v1/recommend/daily/online?limit=24').then(function (p) {
+      if (gen !== generation) return;
       dailyState.online = p;
       dailyState.onlineError = null;
+      dailyState.onlineBusy = false;
+      fetchedAt.online = Date.now();
+      syncLoading();
+      settleMode();
+      render();
+      scheduleTopUp(gen, p, attempt);
     }).catch(function (err) {
-      // 在线汇总失败同样不弹红：它只是推荐位的一个来源，不是一次用户发起的
-      // 操作。副标题里如实写一句就够，用户想看细节时自己会去在线面板。
+      if (gen !== generation) return;
+      // 副标题里如实写一句就够，用户想看细节时自己会去在线面板。
       dailyState.online = null;
       dailyState.onlineError = err;
+      dailyState.onlineBusy = false;
+      syncLoading();
+      settleMode();
+      render();
     });
+  }
 
-    await Promise.allSettled([local, online]);
-    dailyState.loading = false;
-    settleMode();
-    render();
+  /// 补拉一次。两种触发条件，都由服务端判定：
+  ///   · `pending` 非空 —— 服务端到点先返回了，这几个平台还在后台抓；
+  ///   · `refreshing` —— 有平台是拿过期缓存顶上的，新值正在后台刷新。
+  /// 都不满足说明这份就是刚抓齐的最终答案，到此为止。
+  ///
+  /// 刻意不看 `age_secs`：新鲜命中时它也大于 0，拿它当判据会让每次进页面
+  /// 都白补拉三轮、拿回三份一模一样的数据。
+  function scheduleTopUp(gen, page, attempt) {
+    if (!page || attempt >= TOPUP_MAX) return;
+    var unfinished = !!(page.pending && page.pending.length);
+    if (!unfinished && !page.refreshing) return;
+    if (topupTimer) clearTimeout(topupTimer);
+    topupTimer = setTimeout(function () {
+      topupTimer = null;
+      if (gen !== generation) return;
+      dailyState.onlineBusy = true;
+      syncLoading();
+      fetchOnline(gen, attempt + 1);
+    }, TOPUP_DELAY_MS);
   }
 
   /// 首次拿到数据后决定默认来源。
@@ -87,6 +177,9 @@
   /// 本地。用户一旦手动切过，之后再怎么登录/登出都不改他的选择。
   function settleMode() {
     if (dailyState.modePinned) return;
+    // 在线那一路还在飞就别急着落位。此刻判「没有登录平台」是猜的，等它回来
+    // 又要翻回在线，用户会眼睁睁看着列表从本地整屏跳成在线。
+    if (dailyState.onlineBusy) return;
     var ready = dailyState.online && dailyState.online.sources && dailyState.online.sources.length;
     setMode(ready ? 'online' : 'local', false);
   }
@@ -153,6 +246,22 @@
       : url;
   }
 
+  /// 展示位专用的小图地址。
+  ///
+  /// 推荐位的封面格只有 40px，上游给的却是原图——网易云动辄 300KB，24 张就是
+  /// 7MB，插件形态下每一张还要经 sidecar 的 /v1/online/cover 取回 base64。
+  /// 「歌名早出来了、封面半天不出现」就是这么来的。90px 小图约 2KB，与在线
+  /// 搜索行同一档（见 online.js 的 rowCoverUrl）。
+  ///
+  /// 只在画卡片时用：`item.cover` 必须保持全尺寸，它会随 playQueue 的元数据
+  /// 快照进到正在播放与舞台，那里铺满视口，真需要分辨率。
+  function thumb(url) {
+    if (!url) return null;
+    return (window.Online && window.Online.rowCoverUrl)
+      ? window.Online.rowCoverUrl(url, 90)
+      : url;
+  }
+
   /// 副标题：一行说清"这批是怎么来的"。
   ///
   /// 被跳过的平台一定要写出来。用户装了两三个平台的账号，只看到一份歌单而
@@ -194,9 +303,25 @@
         return '还没有登录任何支持每日推荐的平台。到「在线」面板扫码登录后，这里会自动汇总各平台的每日推荐。';
       }
       var parts = ['已合并 ' + page.total + ' 首'];
-      parts.push(page.sources.map(function (s) {
-        return s.label + ' ' + s.count + ' 首';
-      }).join('、'));
+      if (page.sources.length) {
+        parts.push(page.sources.map(function (s) {
+          return s.label + ' ' + s.count + ' 首';
+        }).join('、'));
+      }
+      // pending 与 refreshing 说的是两件不同的事，不能混着说：
+      //   pending    —— 这几个平台还在抓，稍后自己补上，用户什么都不用做；
+      //   refreshing —— 手上这份是过期缓存顶上的，新值正在后台刷。
+      // 都不说的话，用户看到的是一个静止的、比平时少一截的列表，第一反应是
+      // 「坏了」，然后去点刷新——而那次刷新其实毫无必要。
+      //
+      // 刻意不看 age_secs：新鲜命中时它也大于 0，据此说「正在后台更新」是句
+      // 假话（什么都没在更新）。而且每日推荐一天才换一次，三分钟前的那份与
+      // 刚抓的那份没有区别，不值得占副标题的位置。
+      if (page.pending && page.pending.length) {
+        parts.push(page.pending.join('、') + ' 还在取，稍后自动补上');
+      } else if (page.refreshing) {
+        parts.push('这份是 ' + ageText(page.age_secs) + '的，正在后台更新');
+      }
       var skips = page.skipped.filter(function (s) {
         // empty / failed / timeout 是"这次没拿到"，说成"已跳过"会让人以为
         // 平台没登录。只有 not_signed_in / unsupported 才是稳定状态。
@@ -211,6 +336,13 @@
     return local && local.total
       ? '按本地规则从你的曲库里挑出 ' + local.total + ' 首'
       : '每天换一批，规则跑在本机';
+  }
+
+  function ageText(secs) {
+    if (secs < 60) return secs + ' 秒前';
+    var mins = Math.round(secs / 60);
+    if (mins < 60) return mins + ' 分钟前';
+    return Math.round(mins / 60) + ' 小时前';
   }
 
   function dateLabel() {
@@ -231,6 +363,16 @@
     }
   }
 
+  /// 当前来源那一路在不在飞。占位符只看这一路：另一路慢不该让已经有结果
+  /// 的这一路也跟着显示「正在挑歌…」。
+  function currentBusy() {
+    return dailyState.mode === 'online' ? dailyState.onlineBusy : dailyState.localBusy;
+  }
+
+  /// 上一次画进 DOM 的那批。补拉常常拿回一模一样的一份（后台刷新完了但内容
+  /// 没变），此时重建整墙卡片只会让所有封面重新走一遍解析、闪一下，白折腾。
+  var paintedKey = '';
+
   function render() {
     var host = H.ui.dailyList;
     if (!host) return;
@@ -242,13 +384,18 @@
     var items = visible();
     if (H.ui.dailyPlayAll) H.ui.dailyPlayAll.disabled = !items.length;
 
+    // 空态时把提示文案也算进签名：从「正在挑歌…」换成真正的空态提示，
+    // 曲目 id 列表两边都是空的，光看 id 会以为没变化。
+    var key = dailyState.mode + '|' + (items.length
+      ? items.map(function (i) { return i.id; }).join(',')
+      : '#' + (currentBusy() ? 'loading' : emptyHint()));
+    if (key === paintedKey) return;
+    paintedKey = key;
+
     host.innerHTML = '';
-    if (dailyState.loading) {
-      host.innerHTML = '<div class="hint">正在挑歌…</div>';
-      return;
-    }
     if (!items.length) {
-      host.innerHTML = '<div class="hint">' + emptyHint() + '</div>';
+      host.innerHTML = '<div class="hint">'
+        + (currentBusy() ? '正在挑歌…' : emptyHint()) + '</div>';
       return;
     }
     items.forEach(function (item, index) { host.appendChild(card(item, index)); });
@@ -257,6 +404,12 @@
   function emptyHint() {
     if (dailyState.mode === 'online') {
       if (dailyState.onlineError) return '在线推荐暂时没拿到。点刷新再试，或切到「本地」。';
+      // 服务端只等一个预算就返回了，慢的平台还在后台抓。这时 empty 是 false
+      // （那不是「没有推荐」，是「还没到齐」），但曲目确实一首都还没有。
+      var wait = dailyState.online && dailyState.online.pending;
+      if (wait && wait.length && !(dailyState.online.tracks || []).length) {
+        return wait.join('、') + ' 的推荐还在取，马上就来。';
+      }
       if (!dailyState.online || dailyState.online.empty) {
         var tried = onlineTried(dailyState.online);
         if (tried.length) {
@@ -281,8 +434,10 @@
       '<span class="daily-copy">' +
         '<span class="daily-name"></span>' +
         '<span class="daily-artist"></span>' +
-      '</span>' +
-      '<span class="daily-why"></span>';
+        // 推荐理由/来源平台排在标题与艺术家**下面**，不是卡片右侧第三列：
+        // 一行 5 张时卡片宽度不够再塞一列，标题会被挤成几个省略号。
+        '<span class="daily-why"></span>' +
+      '</span>';
     el.querySelector('.daily-name').textContent = item.title || '未知曲目';
     el.querySelector('.daily-artist').textContent = item.artist || '未知艺术家';
     el.querySelector('.daily-why').textContent = item.note || '';
@@ -297,7 +452,8 @@
 
   var cover = el.querySelector('.daily-cover');
   if (item.cover) {
-    applyBg(cover, item.cover);
+    // 画的是小图，item.cover 本身仍是全尺寸（playQueue 的元数据要用原图）。
+    applyBg(cover, thumb(item.cover));
     cover.classList.add('has-art');
   } else {
     cover.classList.add('is-missing');
@@ -361,7 +517,9 @@
       }
     }
     if (H.ui.dailyRefresh) {
-      H.ui.dailyRefresh.onclick = function () { load(); };
+      // 刷新按钮必须是 force：加了「当天已有数据就不重取」那道闸之后，
+      // 普通的 load() 在这里会变成什么都不做，一个点了没反应的刷新按钮。
+      H.ui.dailyRefresh.onclick = function () { load({ force: true }); };
     }
     if (H.ui.dailyPlayAll) {
       H.ui.dailyPlayAll.onclick = function () { playAll(0); };

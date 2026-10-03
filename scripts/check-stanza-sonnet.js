@@ -155,5 +155,26 @@ function near(a, b, eps, msg) { ok(Math.abs(a - b) <= eps, msg + ' (got ' + a + 
   ok(s3.reset, '时间跳变触发复位');
 })();
 
+// 8b) 虚线标尺：设计意图是「镂空巨字 + 刻度边框 + 虚线标尺」三件套。
+// 2026-10-02 之前只画了实线刻度，缺虚线那一层；这里钉住它，防止以后被无声删掉
+// （这类"少了一层"的退化和构图数、逐字时间轴一样，只表现为"画面变得不对"，不报错）。
+(function () {
+  const fs = require('fs');
+  const src = fs.readFileSync(require('path').join(__dirname, '..', 'plugin', 'ui', 'stanza', 'stanza-sonnet.js'), 'utf8');
+  const block = (src.match(/\/\/ 1b\. 虚线标尺[\s\S]*?this\.frameDecorContainer\.addChild\(ruler\);/) || [''])[0];
+  ok(block.length > 0, '存在虚线标尺层');
+  // 段长与间隙必须是分开的两个值 —— 退化成等距实线就等于没有虚线。
+  ok(/dashOn\s*=\s*14/.test(block) && /dashOff\s*=\s*9/.test(block), '虚线有独立的段长与间隙');
+  ok(/ruler\.stroke\(/.test(block), '虚线标尺被描边（不是画了没上色）');
+  // 必须挂 frameDecorContainer 而不是 sceneContainer：挂到后者会被相机变换拖着走，
+  // 而标尺在参考项目里是固定画幅的印刷套准线。
+  ok(/this\.frameDecorContainer\.addChild\(ruler\)/.test(block), '标尺挂在 frameDecorContainer（不随相机移动）');
+  // 纵向与横向的段长要错开，否则四角会形成对称十字，看着像准星而不是标尺。
+  var vseg = (block.match(/ry \+= (\d+)/) || [])[1];
+  ok(vseg && Number(vseg) % 7 !== 0, '纵向段长与横向错开（避免四角对称十字）');
+  // 角标附近要有缺口，不能与 corner 括标叠在一起。
+  ok(/padX \+ corner \+ 8/.test(block) && /padY \+ corner \+ 8/.test(block), '角标附近留出缺口');
+})();
+
 if (failures) { console.error(failures + ' 项失败'); process.exit(1); }
 console.log('check-stanza-sonnet 全部通过');

@@ -9,6 +9,8 @@
 // 的播放条。流年皮肤对骨架做如下调整（v3）：
 //   · 移除最左侧 .rail 导航轨（display:none，节点保留以备程序化点击与还原）；
 //   · 中栏顶部新建胶囊导航 .ln-nav（六个一级目的地）；
+//   · 「设置」不进中栏视图，而是把 #view-settings 搬进浮层 .ln-modal
+//     （遮罩 + 卡片 + 入退场动画），底层中栏保持原视图不动；
 //   · .bar 搬进中栏最前成为文档流播放卡（可收为胶囊）；
 //   · 右栏改为纵向两区：上部为「搜索面板」（本地/在线双源并行检索、
 //     分类结果、搜索历史），下部保留 .stage（频谱 + 歌词）；
@@ -52,6 +54,22 @@
     controllers: [],
     sources: null,
   };
+
+  // 设置浮层运行态。viewEl 是被搬进浮层的 #view-settings 本体，
+  // lastFocus 用于关闭后把焦点还给触发按钮。
+  var sheet = {
+    root: null,
+    card: null,
+    viewEl: null,
+    open: false,
+    closing: false,
+    closeTimer: 0,
+    lastFocus: null,
+  };
+
+  // 退场动画时长，与 skin.liunian.css 里 .ln-modal-card 的 transition 时长
+  // 对齐。CSS 改了就同步改这里，否则会出现「动画还没完内容先消失」。
+  var MODAL_EXIT_MS = 200;
 
   function $(sel, root) { return (root || document).querySelector(sel); }
 
@@ -182,13 +200,32 @@
       button.type = 'button';
       button.dataset.lnView = entry[0];
       button.textContent = entry[1];
-      button.addEventListener('click', function () { clickRailItem(entry[0]); });
+      // 「设置」走浮层，不进中栏视图；其余仍复用隐藏 rail 的程序化点击。
+      button.addEventListener('click', function () {
+        if (entry[0] === 'settings') {
+          if (sheet.open) closeSettingsSheet();
+          else openSettingsSheet(button);
+          reflow();
+          return;
+        }
+        // 浮层开着时切别的视图：先收掉，免得它悬在新视图上面。
+        if (sheet.open) closeSettingsSheet();
+        clickRailItem(entry[0]);
+      });
+      if (entry[0] === 'settings') button.setAttribute('aria-haspopup', 'dialog');
     });
   }
 
   // .rail 虽隐藏，业务的视图切换逻辑仍挂在其按钮上：程序化点击即可复用
   // 整套 setView 链路，避免重写业务行为。
   function clickRailItem(view) {
+    // 设置视图已被搬进浮层，程序化点击它会让 setView 把中栏其它视图全藏掉、
+    // 却什么也看不见（设置视图不在中栏了）。统一改成开浮层。
+    if (view === 'settings') {
+      openSettingsSheet();
+      reflow();
+      return null;
+    }
     var item = refs.rail.querySelector('.rail-item[data-view="' + view + '"]');
     if (item && !item.classList.contains('active')) item.click();
     if (mounted) reflow();
@@ -228,6 +265,7 @@
   }
 
   function reflowInner() {
+    syncSettingsVisibility();
     var id = currentViewId();
     if (refs.viewId !== id) {
       refs.column.scrollTop = 0;
@@ -239,6 +277,8 @@
     if (dailyNav && observer) observer.observe(dailyNav, { attributes: true, attributeFilter: ['hidden'] });
     refs.column.dataset.lnView = id.replace(/^view-/, '');
     var navKey = id === 'view-daily' ? 'library' : id.replace(/^view-/, '');
+    // 设置视图搬进浮层后不再出现在中栏，所以浮层开着时「设置」才是当前项。
+    if (sheet.open) navKey = 'settings';
     refs.nav.querySelectorAll('[data-ln-view]').forEach(function (button) {
       var selected = button.dataset.lnView === navKey;
       button.classList.toggle('active', selected);
@@ -653,6 +693,136 @@
   }
 
   // -------------------------------------------------------------------------
+  // 设置浮层
+  // -------------------------------------------------------------------------
+  //
+  // 流年把「设置」从中栏视图改成浮层：#view-settings 整个搬进 .ln-modal 的
+  // .ln-modal-body（relocate 留锚点，切皮肤时严格回位），业务节点与事件原样
+  // 跟着走，所以设置项的增删改完全不用两处维护。
+  //
+  // 层级：浮层挂在 body 末尾、z-index 高于所有底层面板（.app 6 / np 96 /
+  // stage3d 90 / online 弹窗 100），因此舞台、搜索面板、播放卡都在它之下，
+  // 不会被它的遮罩或入场动画压住。
+  //
+  // 显隐：CSS 用 [hidden] 之外的 .is-open / .is-closing 两个状态跑过渡，
+  // 关闭动画结束后才置 hidden —— 直接 display:none 会让退场动画根本不播。
+
+  function buildSettingsSheet() {
+    // 挂 body 末尾：body 是 .app / .bar 之上的一层，浮层放在这里才不会被
+    // 中栏的 overflow:hidden 裁掉，也不会与底层面板抢同一个包含块。
+    var root = make('div', 'ln-modal', document.body);
+    root.hidden = true;
+    root.setAttribute('aria-hidden', 'true');
+
+    var scrim = make('div', 'ln-modal-scrim', root);
+    var card = make('section', 'ln-modal-card', root);
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-label', '设置');
+
+    var head = make('header', 'ln-modal-head', card);
+    var title = make('div', 'ln-modal-titles', head);
+    make('h2', 'ln-modal-title', title).textContent = '设置';
+    make('p', 'ln-modal-sub', title).textContent = '皮肤、主题、播放与数据，全部在这里';
+    var close = make('button', 'ln-modal-close', head);
+    close.type = 'button';
+    close.setAttribute('aria-label', '关闭设置');
+    close.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>';
+
+    var body = make('div', 'ln-modal-body', card);
+    var view = byId('view-settings');
+    if (!view) return;            // 业务 HTML 没有设置视图：留空壳，不抛
+    relocate(view, body);         // 原位留锚点，卸载时回位
+
+    scrim.addEventListener('click', function () { closeSettingsSheet(); });
+    close.addEventListener('click', function () { closeSettingsSheet(); });
+
+    sheet.root = root;
+    sheet.card = card;
+    sheet.viewEl = view;
+    // 浮层常驻但默认 hidden，Enter 不需要特殊处理：display 从 none 恢复时
+    // .ln-modal-card 的入场动画会自动播放。
+    view.hidden = true;
+  }
+
+  function openSettingsSheet(trigger) {
+    if (!sheet.root || !sheet.viewEl) return;
+    if (sheet.open) return;
+    sheet.open = true;
+    sheet.closing = false;
+    clearTimeout(sheet.closeTimer);
+    sheet.lastFocus = trigger || document.activeElement;
+    document.body.classList.add('ln-modal-open');
+    sheet.viewEl.hidden = false;
+    sheet.viewEl.scrollTop = 0;
+    sheet.root.hidden = false;
+    sheet.root.setAttribute('aria-hidden', 'false');
+    sheet.root.classList.add('is-open');
+    emit('settings-enter');
+    var focusable = sheet.viewEl.querySelector('button, input, select');
+    if (focusable) focusable.focus({ preventScroll: true });
+    reflow();
+  }
+
+  function closeSettingsSheet() {
+    if (!sheet.open || sheet.closing) return;
+    sheet.open = false;
+    sheet.closing = true;
+    document.body.classList.remove('ln-modal-open');
+    sheet.root.classList.remove('is-open');
+    sheet.root.classList.add('is-closing');
+    // 退场动画跑完再藏。setTimeout 而非 transitionend：SwiftShader/旧内核下
+    // 合成器时钟推不动过渡，transitionend 可能永远不来，浮层就卡在半开。
+    clearTimeout(sheet.closeTimer);
+    sheet.closeTimer = setTimeout(function () {
+      sheet.closeTimer = 0;
+      sheet.closing = false;
+      if (!sheet.root) return;
+      sheet.root.classList.remove('is-closing');
+      sheet.root.hidden = true;
+      sheet.root.setAttribute('aria-hidden', 'true');
+      if (sheet.viewEl) sheet.viewEl.hidden = true;
+      var back = sheet.lastFocus;
+      sheet.lastFocus = null;
+      if (back && back.focus) back.focus({ preventScroll: true });
+    }, MODAL_EXIT_MS);
+    reflow();
+  }
+
+  // 顶栏「设置」图标走的是业务 setView('settings')，而设置视图已被搬进浮层：
+  // 真让它跑完会把中栏其它视图全藏掉、设置视图又不在中栏，结果是一整列空白。
+  // 在 capture 阶段拦下（比按钮自己的 onclick 早），统一改成开关浮层。
+  function onDocumentClickCapture(e) {
+    var target = e.target && e.target.closest
+      ? e.target.closest('#settings-entry')
+      : null;
+    if (!target || !sheet.root) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (sheet.open) closeSettingsSheet();
+    else openSettingsSheet(target);
+  }
+
+  // 浮层开着时按 Esc 关它。放行让 app.js 的全局 Escape 继续跑（它只重置
+  // 视图，不影响浮层），所以这里不 preventDefault。
+  function onSheetKeydown(e) {
+    if (e.key !== 'Escape' || !sheet.open) return;
+    closeSettingsSheet();
+  }
+
+  // 设置视图的 hidden 由两条路写：浮层自己，以及 app.js 的 setView
+  // （Esc 会跑 setView(state.view)，切视图也会）。它是浮层的内容，开着时不该被
+  // 业务藏掉；退场动画期间也不该提前消失，否则卡片淡出的是一张空壳。
+  function syncSettingsVisibility() {
+    if (!sheet.viewEl) return;
+    if (sheet.open || sheet.closing) {
+      if (sheet.viewEl.hidden) sheet.viewEl.hidden = false;
+      return;
+    }
+    if (!sheet.viewEl.hidden) sheet.viewEl.hidden = true;
+  }
+
+  // -------------------------------------------------------------------------
   // 安装 / 卸载
   // -------------------------------------------------------------------------
 
@@ -694,11 +864,23 @@
       kicker.textContent = 'Vocal Performance';
     }
 
-    // 6) 视图切换联动
+    // 6) 设置浮层（挂在 body 末尾，层级高于所有底层面板）
+    buildSettingsSheet();
+
+    // 7) 视图切换联动
     observer = new MutationObserver(function () { if (mounted) reflow(); });
     Array.prototype.forEach.call(column.querySelectorAll('.view'), function (v) {
       observer.observe(v, { attributes: true, attributeFilter: ['hidden'] });
     });
+    // 设置视图已被搬出中栏，得单独 observe：否则 app.js 的 setView
+    // （Esc、切视图都会跑）改它的 hidden 时没有任何钩子把它纠正回来。
+    if (sheet.viewEl) {
+      observer.observe(sheet.viewEl, { attributes: true, attributeFilter: ['hidden'] });
+    }
+
+    keyHandler = onSheetKeydown;
+    document.addEventListener('keydown', keyHandler);
+    document.addEventListener('click', onDocumentClickCapture, true);
 
     reflow();
   }
@@ -709,16 +891,28 @@
       observer.disconnect();
       observer = null;
     }
-    abortPending();
-    clearTimeout(panel.debounce);
-    restoreMoves();
-    refs.bar.classList.remove('ln-capsule');
-    delete refs.column.dataset.lnView;
-    removeBuilt();
     if (keyHandler) {
       document.removeEventListener('keydown', keyHandler);
       keyHandler = null;
     }
+    document.removeEventListener('click', onDocumentClickCapture, true);
+    clearTimeout(sheet.closeTimer);
+    sheet.closeTimer = 0;
+    document.body.classList.remove('ln-modal-open');
+    abortPending();
+    clearTimeout(panel.debounce);
+    // 先把设置视图放回中栏原位（锚点在 column 里），再拆浮层，
+    // 否则 removeBuilt 会连着搬过去的业务节点一起删掉。
+    restoreMoves();
+    refs.bar.classList.remove('ln-capsule');
+    delete refs.column.dataset.lnView;
+    removeBuilt();
+    sheet.root = null;
+    sheet.card = null;
+    sheet.viewEl = null;
+    sheet.open = false;
+    sheet.closing = false;
+    sheet.lastFocus = null;
     savedText.forEach(function (s) { s.node.textContent = s.text; });
     savedText = [];
     refs = {};

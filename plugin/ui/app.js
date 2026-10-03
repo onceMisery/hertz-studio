@@ -178,6 +178,14 @@ const ui = {
   spectrum: $('spectrum'),
   lyrics: $('lyrics'),
 
+  // 胶囊播放器（最小化态）：DOM 在 index.html 的 #capsule，样式在 style.css。
+  capsule: $('capsule'),
+  capsuleArt: $('capsule-art'),
+  capsuleTitle: $('capsule-title'),
+  capsuleArtist: $('capsule-artist'),
+  capsuleLabel: $('capsule-label'),
+  capsuleEntry: $('capsule-entry'),
+
   // 旧 stage-btn 移除后，「正在播放」入口落在播放栏的曲目标题区。
   stageBtn: $('bar-track'),
   barTitle: $('bar-title'),
@@ -785,6 +793,13 @@ async function chooseTransport() {
   // 而且失败后会误落到演示模式，所以直接短路。
   if (window.hertzHost && window.hertzHost.isDbx && window.dbxPlugin) {
     await window.dbxPlugin.ready;
+    // 同一个工作台贡献点会被开成两种 surface：tab（完整播放器）与 dock（manifest
+    // 里 presentation: "panel" 的胶囊命令，宿主把它放进全局底部 dock，切到任何
+    // 标签页都可见）。dock 实例只渲染胶囊：整界面隐藏、舞台 rAF 也停掉（见
+    // stage.js 的 schedule 门），否则等于白跑一份 60fps 渲染。
+    const surface = (window.dbxPlugin.context && window.dbxPlugin.context.surface) || 'tab';
+    window.HertzCapsuleOnly = surface === 'dock';
+    if (window.HertzCapsuleOnly) enterDockCapsule();
     return DbxTransport;
   }
   const forced = new URLSearchParams(location.search).get('demo');
@@ -875,6 +890,10 @@ function handleEvent(msg) {
     case 'scan': onScanProgress(msg); break;
     case 'library_changed': loadTracks(true); loadPlaylists(); break;
     case 'ended': reconcileEnded(); break;
+    case 'ui_notice':
+      // dock 胶囊点了一下：tab 实例解除最小化。dock 实例自己忽略（它永远是最小化态）。
+      if (msg.action === 'expand-capsule' && !window.HertzCapsuleOnly) setCapsuleMinimized(false);
+      break;
     case 'error': {
       // 在线音源失败交给在线面板错误条（可重试当前队列下标 / 跳下一首）；
       // 「已跳过」类是服务端已自行处置的告知，轻提示即可；本地播放失败仍走错误 toast。
@@ -1352,6 +1371,8 @@ function applySnapshot(snap) {
   state.snapshot = snap;
   ui.playpause.classList.toggle('is-playing', snap.playing);
   ui.playpause.setAttribute('aria-label', snap.playing ? '暂停' : '播放');
+  // 胶囊上的小标签跟着播放态走：停着的时候还写「正在播放」是撒谎。
+  ui.capsuleLabel.textContent = snap.playing ? '正在播放' : '已暂停';
   ui.mode.textContent = state.modeLabel[snap.mode] || snap.mode;
   document.title = state.current ? `${state.current.title} · mmusic-studio` : 'mmusic-studio';
   renderPlaybackProgress(snap);
@@ -1523,6 +1544,8 @@ async function loadNowPlaying(id) {
   if (Stage) Stage.setTrack(track, url);
   // 播放控制弹窗同步曲目信息与封面
   syncNpTrack(track, url);
+  // 胶囊（最小化态）同步同一份信息与封面
+  syncCapsule(track, url);
   // 在线曲的标题/封面往往是异步补全的，重推一次队列让 3D 歌单架的当前卡
   // 离开「在线曲目/正在获取信息…」占位状态；本地曲数据没变，不必重推。
   if (track.source && track.onlineId) pushStageQueue();
@@ -4188,6 +4211,56 @@ function syncNpSnapshot(snap) {
   renderPlaybackProgress(snap);
 }
 
+// ---------------------------------------------------------------------------
+// 胶囊播放器（最小化态）
+// ---------------------------------------------------------------------------
+
+const CAPSULE_KEY = 'vmusic.capsule.minimized';
+const CAPSULE_COMMAND = 'io.github.mmusic-studio.hertz-studio.capsule';
+const PLAYER_WORKBENCH = 'io.github.mmusic-studio.hertz-studio.player';
+let lastNowCover = null;
+
+/// dock surface 的初始态：只留胶囊。与 tab 内最小化共用同一套隐藏规则，但胶囊
+/// 常显，且点击行为换成「跳回主工作台 tab」——dock 里展开没有意义，那里只有窄条。
+function enterDockCapsule() {
+  document.body.classList.add('is-dock-capsule');
+  ui.capsule.hidden = false;
+  syncCapsule(state.current, lastNowCover);
+}
+
+/// 最小化 / 展开。隐藏整界面靠 body.is-capsule 一把罩（见 style.css），不逐个
+/// 容器列名单——皮肤会改栅格的类名与层级，列名单必然漏。播放不受影响：最小化
+/// 只是把文档流里的界面藏起来，音频与事件链路照旧跑。
+function setCapsuleMinimized(min) {
+  state.capsuleMin = !!min;
+  document.body.classList.toggle('is-capsule', !!min);
+  ui.capsule.hidden = !min;
+  try { localStorage.setItem(CAPSULE_KEY, min ? '1' : ''); } catch (err) { /* 偏好丢一次无所谓 */ }
+  if (min) syncCapsule(state.current, lastNowCover);
+}
+
+/// 胶囊内容同步。封面与正在播放位走同一套解析：插件形态下远程地址要先换成
+/// data URL（沙箱 CSP 画不出 https 图），未命中先空着、代理落地后回填这一块。
+function syncCapsule(track, coverUrl) {
+  lastNowCover = coverUrl || null;
+  if (!track) {
+    ui.capsuleTitle.textContent = '—';
+    ui.capsuleArtist.textContent = '';
+    ui.capsuleArt.style.backgroundImage = '';
+    return;
+  }
+  ui.capsuleTitle.textContent = track.title || '未命名';
+  ui.capsuleArtist.textContent = [track.artist, track.album].filter(Boolean).join(' · ');
+  const apply = (u) => { ui.capsuleArt.style.backgroundImage = u ? `url("${u}")` : ''; };
+  const resolved = remoteCover(coverUrl);
+  if (resolved === null) {
+    apply(null);
+    remoteCoverSlot(coverUrl, apply);
+  } else {
+    apply(resolved);
+  }
+}
+
 // 曲目信息 → 弹窗（标题 / 艺术家 / 封面）
 function syncNpTrack(track, coverUrl) {
   if (!isNpOpen() || !track) return;
@@ -4903,6 +4976,34 @@ function initNowPlayingModal() {
   // 播放控制弹窗（np）：绑定开/关、音量与跳转。此前只定义未调用，
   // 弹窗在界面上不可达。
   initNowPlayingModal();
+  // 胶囊播放器：顶栏按钮收进去、点胶囊展开。偏好持久化，刷新后保持最小化态。
+  ui.capsuleEntry.addEventListener('click', () => {
+    setCapsuleMinimized(true);
+    // 同时把 dock 胶囊叫出来：最小化的意义就是「离开这个 tab 也还在」。dock 实例
+    // 与 tab 实例共存（宿主的 reuse key 含 presentation），播放状态靠 sidecar 事件
+    // 同步。宿主拒绝时（命令被禁用等）tab 内那个悬浮胶囊仍在，行为不退化。
+    if (window.dbxPlugin && window.dbxPlugin.executeCommand) {
+      window.dbxPlugin.executeCommand(CAPSULE_COMMAND).then((r) => {
+        if (r && r.error) console.warn('[hertz] 打开 dock 胶囊失败：', r.error);
+      }).catch(() => {});
+    }
+  });
+  ui.capsule.addEventListener('click', () => {
+    if (window.HertzCapsuleOnly) {
+      // dock 实例：展开 = 跳回主工作台 tab（宿主为这个场景专门留的口子），同时借
+      // sidecar 广播让 tab 实例解除最小化——两个 iframe 是 opaque origin，浏览器侧
+      // 没有直达通道，只能绕服务端这条事件管道。
+      window.dbxPlugin.openWorkbench(PLAYER_WORKBENCH, {}, { target: 'tab' }).catch(() => {});
+      transport.post('/v1/ui/notice', { action: 'expand-capsule' }).catch(() => {});
+      return;
+    }
+    setCapsuleMinimized(false);
+  });
+  let capsuleMin = false;
+  try { capsuleMin = localStorage.getItem(CAPSULE_KEY) === '1'; } catch (err) { capsuleMin = false; }
+  // dock 实例的形态由 surface 决定，不读 tab 那份偏好：两个 surface 共用宿主
+  // storage 的同一个键空间，互相读会把对方的初始态改错（还会顺手写脏偏好）。
+  if (capsuleMin && !window.HertzCapsuleOnly) setCapsuleMinimized(true);
   // 在线面板（web/online.js）：先注入宿主依赖，再拉音源清单、绑事件。
   window.Online.bind({
     ui,

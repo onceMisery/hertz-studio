@@ -22,6 +22,53 @@
   function ease(v) { var t = clamp(v, 0, 1); return t * t * (3 - 2 * t); }
   function expo(v) { var t = clamp(v, 0, 1); return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t); }
 
+  // ------------------------------------------------------------------
+  // 缓动库：自写 cubic-bezier 求解器，供两个渲染器共用同一条运动语言。
+  // 先对 x 做 12 次二分求 t，再采 y —— 直接把参数当贝塞尔多项式算会在
+  // x1/x2 跨度大时明显偏移（入场曲线最前段几乎不动，看着像卡住了）。
+  // ------------------------------------------------------------------
+
+  function resolveCubicBezier(x1, y1, x2, y2, v) {
+    var t = clamp(v, 0, 1);
+    if (t <= 0 || t >= 1) return t;
+    // 采样端点：参数退化时（x1<=0 && x2>=1 等）直接退化成线性，避免死循环。
+    if (x1 <= 0 && x2 >= 1) return t;
+    var lo = 0, hi = 1, i, xt;
+    for (i = 0; i < 12; i += 1) {
+      xt = (lo + hi) / 2;
+      // x(t) = 3(1-t)²t·x1 + 3(1-t)t²·x2 + t³
+      var inv = 1 - xt;
+      var x = 3 * inv * inv * xt * x1 + 3 * inv * xt * xt * x2 + xt * xt * xt;
+      if (x < t) lo = xt; else hi = xt;
+    }
+    var f = (lo + hi) / 2, g = 1 - f;
+    return 3 * g * g * f * y1 + 3 * g * f * f * y2 + f * f * f;
+  }
+
+  // 入场：极度前重 + 长尾。果断开场是这两个舞台的动感来源，不要改这个形状。
+  var EASE_ENTER = [0.22, 1, 0.36, 1];
+  // 通用进出：两端略沉、中段顺。
+  var EASE_INOUT = [0.62, 0, 0.32, 1];
+  // 收束：退场用，比 inOut 更快离开画面。
+  var EASE_SETTLE = [0.5, 0, 0.75, 0];
+
+  function easeEnter(v) { return resolveCubicBezier(EASE_ENTER[0], EASE_ENTER[1], EASE_ENTER[2], EASE_ENTER[3], v); }
+  function easeInOut(v) { return resolveCubicBezier(EASE_INOUT[0], EASE_INOUT[1], EASE_INOUT[2], EASE_INOUT[3], v); }
+  function easeSettle(v) { return resolveCubicBezier(EASE_SETTLE[0], EASE_SETTLE[1], EASE_SETTLE[2], EASE_SETTLE[3], v); }
+  // 轻微过冲，用于 scale 类属性（色块盖章、字素落位）。
+  function easeSoftBack(v, overshoot) {
+    var c = overshoot == null ? 1.42 : overshoot;
+    var t = clamp(v, 0, 1) - 1;
+    return 1 + (c + 1) * t * t * t + c * t * t;
+  }
+  // 混匀速与缓动：中段不停顿。镜头长距离移动时纯 easeInOut 会「起步—停住—收尾」，
+  // 匀速占一半后中间段是常速，观感才是真正的推轨。
+  function easeGlide(v) {
+    var t = clamp(v, 0, 1);
+    return t * 0.5 + easeInOut(t) * 0.5;
+  }
+
+
   // FNV-1a：字符串 → uint32。选景/构图/随机种子的确定性来源，seek 后不换样。
   function hashString(input) {
     var s = String(input == null ? '' : input), h = 2166136261;
@@ -792,6 +839,108 @@
     '}'
   ].join('\n');
 
+  // ------------------------------------------------------------------
+  // 光晕分离通道：在光学印相之后，把「亮到会溢光」的部分单独抽出来做柔化叠加。
+  // 这就是胶片 halation —— 高光在片基里散射后边缘泛红。放在印相之后而不是之前，
+  // 是因为要先经过色散/网点，溢出的光才带着正确的颜色，不会把字洗成白边。
+  // ------------------------------------------------------------------
+
+  var HALATION_FS = [
+    'in vec2 vTextureCoord;',
+    'out vec4 finalColor;',
+    'uniform sampler2D uTexture;',
+    'uniform highp vec4 uInputSize;',
+    'uniform highp vec4 uInputClamp;',
+    'uniform highp vec4 uOutputFrame;',
+    'uniform float uThreshold;',
+    'uniform float uSpread;',
+    'uniform float uStrength;',
+    'uniform vec3 uTint;',
+    // Pixi 默认按 GLSL ES 1.00 编译（没显式声明 gles3Version）。
+    // `const vec2 k[8] = vec2[8](...)` 这类数组构造是 ES 3.00 才有的语法，
+    // 在 1.00 下编译失败 → 整条 filter 链崩掉 → 全屏黑。
+    // 所以这里用宏把采样点摊平写死，代价是加方向要手工补一行。
+    'vec4 tap(vec2 uv) {',
+    '  if (uv.x < uInputClamp.x || uv.y < uInputClamp.y || uv.x > uInputClamp.z || uv.y > uInputClamp.w) return vec4(0.0);',
+    '  return texture(uTexture, uv);',
+    '}',
+    '#define LUMA(c) dot((c), vec3(0.2126, 0.7152, 0.0722))',
+    // 亮度取该点相对阈值的超出量：暗部完全不参与，避免整屏蒙一层灰纱。
+    '#define RING(r, dx, dy) { vec3 s_ = tap(vTextureCoord + vec2(dx, dy) * texel * r).rgb; glow += s_ * max(0.0, LUMA(s_) - uThreshold) * w_; wsum_ += w_; }',
+    'void main() {',
+    '  vec2 texel = uInputSize.zw * uSpread;',
+    '  vec3 base = tap(vTextureCoord).rgb;',
+    '  vec3 glow = vec3(0.0);',
+    '  float wsum_ = 0.0;',
+    // 外环 8 向：比十字采样贵，但高光的衰减梯度平滑得多。
+    // 半径固定在像素空间（乘 texel），所以不同分辨率下光晕粗细一致。
+    '  float w_ = 1.0;',
+    '  RING(1.0, 1.0, 0.0)',
+    '  RING(1.0, 0.707, 0.707)',
+    '  RING(1.0, 0.0, 1.0)',
+    '  RING(1.0, -0.707, 0.707)',
+    '  RING(1.0, -1.0, 0.0)',
+    '  RING(1.0, -0.707, -0.707)',
+    '  RING(1.0, 0.0, -1.0)',
+    '  RING(1.0, 0.707, -0.707)',
+    // 内环 4 对角、半径减半：只有单环时高光周围是「八角星」而不是实心芯，
+    // 胶片溢光的感觉出不来。内环权重低一些，只负责把芯填实。
+    '  w_ = 0.62;',
+    '  RING(0.5, 0.707, 0.707)',
+    '  RING(0.5, -0.707, 0.707)',
+    '  RING(0.5, -0.707, -0.707)',
+    '  RING(0.5, 0.707, -0.707)',
+    '  glow /= max(wsum_, 1e-3) / max(1.0 - uThreshold, 1e-3);',
+    '  float lum = LUMA(base);',
+    '  float over = max(0.0, lum - uThreshold) / max(1.0 - uThreshold, 1e-3);',
+    '  finalColor = vec4(base + glow * uTint * uStrength * (0.35 + over * 0.9), 1.0);',
+    '}'
+  ].join('\n');
+
+  function createHalation(PIXI, stage) {
+    var descriptors = {
+      uThreshold: { value: 0.62, type: 'f32' },
+      uSpread: { value: 2.4, type: 'f32' },
+      uStrength: { value: 0.5, type: 'f32' },
+      uTint: { value: new Float32Array([1, 0.82, 0.72]), type: 'vec3<f32>' }
+    };
+    var uniforms = new PIXI.UniformGroup(descriptors);
+    var filter = new PIXI.Filter({
+      glProgram: PIXI.GlProgram.from({ vertex: OPTICAL_VS, fragment: HALATION_FS, name: 'hertz-stanza-halation' }),
+      resources: { halationUniforms: uniforms },
+      // 不显式设 resolution 会让 Pixi 用默认 1，把整幅画面降采样再拉回来 ——
+      // 表现就是「一开后期画面就变糊」。'inherit' 让 pass 跟随渲染器实际分辨率。
+      resolution: 'inherit',
+      antialias: 'on'
+    });
+    return {
+      filter: filter,
+      // 光晕染色走主题强调色（偏暖），而不是底色：底色染色等于给整屏蒙一层
+      // 与背景同色的纱，光晕反而被吃掉。调用方传 hex 字符串或 0xRRGGBB。
+      setTint: function (color) {
+        var n = typeof color === 'number' ? color : parseInt(String(color || '#ffd7b0').slice(1), 16) || 0;
+        if (!n) return;
+        // 往暖色拉一点：纯强调色（如青蓝）做 halation 会读成「屏幕偏色」而非胶片溢光。
+        var r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
+        uniforms.uniforms.uTint.set([
+          Math.min(1, r * 0.55 + 0.45),
+          Math.min(1, g * 0.55 + 0.28),
+          Math.min(1, b * 0.55 + 0.16)
+        ]);
+      },
+      update: function (frame, tuning) {
+        var kick = clamp(num(tuning.performance && tuning.performance.impact, 0), 0, 1);
+        // Pixi 的 UniformGroup.uniforms 是**值本身**的映射（不是 {value} 包装），
+        // 写成 uniforms.x.value 会静默把数字的 value 属性写坏并抛 TypeError。
+        uniforms.uniforms.uStrength = amount(tuning.halation, 0.5) * (0.72 + kick * 0.5);
+        uniforms.uniforms.uThreshold = amount(tuning.halationThreshold, 0.62, 1);
+        uniforms.uniforms.uSpread = amount(tuning.halationSpread, 2.4, 6);
+      },
+      destroy: function () { stage.filters = null; filter.destroy(); }
+    };
+  }
+
+
   function createPostProcess(PIXI, stage) {
     var descriptors = {};
     ['Distortion', 'Dispersion', 'Grain', 'Contrast', 'Halftone', 'Vignette', 'Time']
@@ -801,9 +950,16 @@
     var filter = new PIXI.Filter({
       glProgram: PIXI.GlProgram.from({ vertex: OPTICAL_VS, fragment: OPTICAL_FS, name: 'hertz-sonnet-optical-print' }),
       resources: { opticalUniforms: uniforms },
+      // 显式 'inherit'：Pixi 的 Filter 默认把 resolution 硬编码为 1，
+      // 挂上去等于把整幅画面按 1x 光栅化再拉伸到画布分辨率 —— 表现为
+      // 「一开后期画面就变糊」，而且越细的线越糊。'inherit' 跟随渲染器实际分辨率。
+      resolution: 'inherit',
       antialias: 'on'
     });
     return {
+      filter: filter,
+      // 让 createHalation 知道自己该接在哪个 filter 之后：光晕必须在印相之后，
+      // 否则色散/网点会把溢出的高光切碎，边缘出现锯齿状彩边。
       update: function (frame, tuning, width, height) {
         var kick = motionScale(tuning) * amount(tuning.opticalImpact, 0.65, 1)
           * clamp(num(tuning.performance && tuning.performance.impact, 0), 0, 1);
@@ -817,6 +973,7 @@
         };
         var enabled = tuning.postProcess !== false && tuning.quality !== 'energy-saving'
           && Object.keys(values).some(function (k) { return values[k] > 0; });
+        this.enabled = enabled;
         stage.filters = enabled ? [filter] : null;
         if (!enabled) return;
         if (!stage.filterArea) stage.filterArea = new PIXI.Rectangle();
@@ -833,6 +990,47 @@
       destroy: function () { stage.filters = null; filter.destroy(); }
     };
   }
+
+  // ------------------------------------------------------------------
+  // 后期链装配：把「印相 + 光晕」两个 pass 串成一条有序链挂到 stage 上。
+  // 两个渲染器共用 —— 顺序与开关判定只有这一处，避免各写一遍后各自漂移。
+  // ------------------------------------------------------------------
+
+  function createOpticalChain(PIXI, stage) {
+    var print = createPostProcess(PIXI, stage);
+    var halation = createHalation(PIXI, stage);
+    function sync() {
+      // 印相在前、光晕在后。印相被关掉时（节能模式 / 全部参数为 0）光晕单独生效，
+      // 不能因为「前置 pass 没了」就一起消失。
+      var list = [];
+      if (print.enabled) list.push(print.filter);
+      if (halation.enabled) list.push(halation.filter);
+      // 空数组而不是 null：Pixi 见到 null 与空数组行为一致，但空数组能让它把
+      // 整个 effect 从栈上摘干净（挂着但 disabled 的 filter 会让后续 pass 的
+      // screen 坐标原点塌到 (0,0)）。
+      stage.filters = list;
+    }
+    return {
+      print: print,
+      halation: halation,
+      setTint: function (color) { halation.setTint(color); },
+      update: function (frame, tuning, width, height) {
+        // 缺省 0.5：光晕是这个舞台的默认语言，不是可选项。
+        // 之前 fallback 写 0，导致 tuning 不带该键时整条 pass 永不启用 ——
+        // 契约脚本在 Node 里跑不到这里，是浏览器实测把它抓出来的。
+        var strength = amount(tuning.halation, 0.5);
+        var kick = clamp(num(tuning.performance && tuning.performance.impact, 0), 0, 1);
+        // 强度下限 0.04：起音瞬间即便调参为 0 也留一点溢光，读作「画面在呼吸」。
+        halation.enabled = tuning.postProcess !== false && tuning.quality !== 'energy-saving'
+          && (strength > 0 || kick > 0.05) && strength + kick * 0.35 > 0.04;
+        print.update(frame, tuning, width, height);
+        halation.update(frame, tuning);
+        sync();
+      },
+      destroy: function () { print.destroy(); halation.destroy(); }
+    };
+  }
+
 
   // ------------------------------------------------------------------
   // 退场溶解：切句瞬间把上一句的背景几何整体搬走，按行时长快速淡出。
@@ -952,11 +1150,143 @@
     return graphic;
   }
 
+  // ------------------------------------------------------------------
+  // 氛围光层：两个渲染器共用的「体积光」底子。
+  //
+  // 之前两个舞台的背景全是硬边线稿，画面没有一处连续的明暗过渡 —— 线稿在纯黑底上
+  // 读作「工程图」，而不是「有空气的舞台」。这一层补的是那层空气：
+  //   1. 两团缓慢漂移的柔光斑（radial gradient，给画面一个隐式的光源方向）
+  //   2. 一层极淡的胶片颗粒（静态，播放期不重绘）
+  //   3. 顶/底两道渐隐压边（把构图的视觉重量收到中间）
+  // 全部用 Graphics + FillGradient 静态建一次，播放期只写 alpha/scale/position。
+  // ------------------------------------------------------------------
+
+  function buildAtmosphere(PIXI, width, height, colors, seed) {
+    var random = seededRandom('atmosphere:' + seed);
+    var layer = new PIXI.Container();
+    var warm = colors.accent || '#ffffff';
+    var cool = colors.secondary || colors.accent || '#ffffff';
+    var shortSide = Math.min(width, height);
+
+    // 两团柔光：主光偏暖、副光偏冷，一明一暗制造纵深。
+    // 位置由 seed 决定但限制在中区，避免光斑跑到角上与框线装饰打架。
+    var blobs = [
+      { color: warm, r: shortSide * (0.52 + random() * 0.22),
+        x: width * (0.24 + random() * 0.34), y: height * (0.2 + random() * 0.3), alpha: 0.5 },
+      { color: cool, r: shortSide * (0.4 + random() * 0.2),
+        x: width * (0.5 + random() * 0.34), y: height * (0.55 + random() * 0.3), alpha: 0.34 }
+    ];
+    blobs.forEach(function (b) {
+      var g = new PIXI.Graphics();
+      // 8 圈同心圆逼近径向衰减：比 FillGradient 更省（不需要每帧算 stops），
+      // 且在 Pixi v8 上 FillGradient 的 colorStops 接受 rgba 字符串时行为随版本变。
+      var rings = 8;
+      for (var i = rings; i >= 1; i -= 1) {
+        var t = i / rings;
+        g.circle(0, 0, b.r * t);
+        g.fill({ color: parseInt(String(b.color).slice(1), 16) || 0xffffff,
+          alpha: b.alpha * Math.pow(1 - t, 2.4) * 0.34 });
+      }
+      g.position.set(b.x, b.y);
+      layer.addChild(g);
+      b.node = g;
+    });
+
+    // 压边：上下各一道向内渐隐。作用是把视觉重量收到中间，同时让顶栏/底栏
+    // 的操作层永远压得住画面（不会和亮色块撞在一起看不清）。
+    var shade = new PIXI.Graphics();
+    var topH = height * 0.22, botH = height * 0.3;
+    for (var s = 0; s < 6; s += 1) {
+      var st = s / 5;
+      shade.rect(0, topH * (1 - st), width, topH / 5 + 1)
+        .fill({ color: 0x000000, alpha: 0.055 * (1 - st) });
+      shade.rect(0, height - botH * st - 1, width, botH / 5 + 1)
+        .fill({ color: 0x000000, alpha: 0.05 * st });
+    }
+    layer.addChild(shade);
+
+    return {
+      container: layer,
+      blobs: blobs,
+      shade: shade,
+      // 播放期只写变换与透明度：不重绘几何。
+      update: function (time, motion, energy) {
+        layer.alpha = 1;
+        blobs[0].node.position.set(
+          blobs[0].x + Math.sin(time * 0.07) * width * 0.03 * motion,
+          blobs[0].y + Math.cos(time * 0.05) * height * 0.025 * motion);
+        blobs[0].node.scale.set(1 + energy * 0.06);
+        blobs[0].node.alpha = 0.78 + energy * 0.34;
+        blobs[1].node.position.set(
+          blobs[1].x + Math.cos(time * 0.06) * width * 0.025 * motion,
+          blobs[1].y + Math.sin(time * 0.045) * height * 0.03 * motion);
+        blobs[1].node.scale.set(1 + energy * 0.045);
+        blobs[1].node.alpha = 0.7 + energy * 0.3;
+      },
+      destroy: function () { layer.destroy({ children: true }); }
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // 角标叠层：非对称、只画角不围合的取景器标记，商籁与凝彩共用同一套语法。
+  // 全是直线段，一次建图；播放期零重绘。
+  // ------------------------------------------------------------------
+
+  function buildCornerMarks(PIXI, width, height, colors, seed) {
+    var g = new PIXI.Graphics();
+    var ink = parseInt(String(colors.primary || '#ffffff').slice(1), 16) || 0xffffff;
+    var line = parseInt(String(colors.secondary || '#ffffff').slice(1), 16) || 0xffffff;
+    // 边距取 5%，与既有框线系统（8%/12%）错开，两层不会叠在一起显脏。
+    var mx = Math.max(18, width * 0.045), my = Math.max(18, height * 0.045);
+    var long = Math.min(64, width * 0.055), tick = Math.min(18, height * 0.024);
+    var w = Math.max(1, Math.round(shortSideOf(width, height) * 0.0016));
+
+    // 左上：粗横条 + 细竖落线（不对称，这是整套语法的核心）
+    g.moveTo(mx, my).lineTo(mx + long, my);
+    g.stroke({ color: line, width: w * 2, alpha: 0.7 });
+    g.moveTo(mx, my).lineTo(mx, my + long * 1.6);
+    g.stroke({ color: line, width: w, alpha: 0.42 });
+    // 右上：十字准星
+    var rx = width - mx, ry = my;
+    g.moveTo(rx - 6, ry).lineTo(rx + 6, ry);
+    g.moveTo(rx, ry - 6).lineTo(rx, ry + 6);
+    g.stroke({ color: line, width: w, alpha: 0.65 });
+    // 左下：菱形
+    var lx = mx, ly = height - my;
+    g.moveTo(lx, ly - 5).lineTo(lx + 5, ly).lineTo(lx, ly + 5).lineTo(lx - 5, ly).closePath();
+    g.stroke({ color: line, width: w, alpha: 0.6 });
+    // 右下：竖粗条 + 两根延伸细线
+    g.moveTo(rx, ly - long * 0.5).lineTo(rx, ly);
+    g.stroke({ color: line, width: w * 2, alpha: 0.66 });
+    g.moveTo(rx - long * 1.4, ly).lineTo(rx, ly);
+    g.moveTo(rx, ly).lineTo(rx, ly - long * 1.8);
+    g.stroke({ color: ink, width: w, alpha: 0.3 });
+
+    // 边缘刻度：只在右侧与底部，密度由 seed 微调 —— 让两次进同一首歌的构图不完全一样。
+    var step = 26 + (hashString('marks:' + seed) % 5) * 6;
+    var t = 0;
+    for (var y = my + step; y < height - my; y += step, t += 1) {
+      var len = t % 4 === 0 ? tick : tick * 0.45;
+      g.moveTo(width - mx, y).lineTo(width - mx - len, y);
+    }
+    for (var x = mx + step; x < width - mx; x += step, t += 1) {
+      var lenX = t % 4 === 0 ? tick : tick * 0.45;
+      g.moveTo(x, height - my).lineTo(x, height - my - lenX);
+    }
+    g.stroke({ color: line, width: w, alpha: 0.26 });
+    return g;
+  }
+
+  function shortSideOf(w, h) { return Math.min(w, h); }
+
   return {
     // 常量与枚举（验证脚本用）
     SHOT_KINDS: SHOT_KINDS, SCENE_KINDS: SCENE_KINDS, CAMERA_PATHS: CAMERA_PATHS,
     // 纯函数
     num: num, clamp: clamp, amount: amount, ease: ease, expo: expo,
+    resolveCubicBezier: resolveCubicBezier,
+    easeEnter: easeEnter, easeInOut: easeInOut, easeSettle: easeSettle,
+    easeSoftBack: easeSoftBack, easeGlide: easeGlide,
     hashString: hashString, seededRandom: seededRandom,
     shotKind: shotKind, sceneKind: sceneKind, motionScale: motionScale,
     buildGlyphTimeline: buildGlyphTimeline, compilePhrases: compilePhrases,
@@ -968,6 +1298,8 @@
     createAccentChoreography: createAccentChoreography,
     createOnsetDetector: createOnsetDetector, createPerformance: createPerformance,
     applyQuality: applyQuality, createPostProcess: createPostProcess,
-    createRetirement: createRetirement, buildMotif: buildMotif
+    createHalation: createHalation, createOpticalChain: createOpticalChain,
+    createRetirement: createRetirement, buildMotif: buildMotif,
+    buildAtmosphere: buildAtmosphere, buildCornerMarks: buildCornerMarks
   };
 });

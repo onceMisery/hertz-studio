@@ -783,6 +783,27 @@ body.s3d-open > .bar { display: none; }
   border-top: 1px solid rgba(255,255,255,.07);
 }
 .s3d[data-stage-theme='classic'] #s3d-fl-wallpaper-note { margin: 8px 0 4px; font-size: 10.5px; line-height: 1.6; color: var(--s3d-muted); }
+/* 星诞面板：说明文字与导演状态。状态行用薄荷青（--brand，"正在生效"语义），
+   与设置面板里"当前选中项"的香槟金（--highlight）区分开，避免读成"被选中的输入框"。 */
+.s3d[data-stage-theme='classic'] .s3d-fl-auto-note {
+  margin: 8px 0 4px; font-size: 10.5px; line-height: 1.6; color: var(--s3d-muted);
+}
+.s3d[data-stage-theme='classic'] .s3d-fl-auto-state {
+  margin: 6px 0 2px; padding: 7px 10px; font-size: 11px; line-height: 1.5;
+  color: var(--brand, #6fe3c4);
+  border: 1px solid color-mix(in srgb, var(--brand, #6fe3c4) 28%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--brand, #6fe3c4) 8%, transparent);
+}
+.s3d-fl-auto-state[hidden] { display: none !important; }
+/* 切镜间隔滑杆跟其它 range 对齐：拖动时导演下一帧即用新冷却，不需要 change 才生效。 */
+.s3d[data-stage-theme='classic'] #s3d-fl-auto-lock { margin-bottom: 2px; }
+/* 逐字时间轴提示：这是"能力降级"的告知，不是可操作项，所以用中性灰而不是警示色——
+   橙红会让人以为歌词文件坏了，而事实只是这份 LRC 没带逐字时间。 */
+.s3d[data-stage-theme='classic'] .s3d-fl-wordlevel-note {
+  margin: 6px 0 2px; font-size: 10.5px; line-height: 1.6; color: var(--s3d-muted);
+}
+.s3d-fl-wordlevel-note[hidden] { display: none !important; }
 .s3d-queue {
   position: absolute; right: 36px; bottom: 132px; width: 320px; max-height: min(58vh, 540px); box-sizing: border-box;
   display: flex; flex-direction: column;

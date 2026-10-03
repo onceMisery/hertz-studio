@@ -194,8 +194,26 @@
         };
       });
     }
+    // wordLevel：这份逐字时间轴是歌词源真实提供的，还是我们按字数估算的。
+    // 走插值分支时逐字动效"看起来对"但时序是假的，消费方（舞台 UI）据此如实告知用户，
+    // 而不是拿估算结果冒充真实唱词时间。只有本行拿不到真实数据、但整篇里有真实数据时
+    // 才置 false —— 少数行的缺失不代表整首歌都没有逐字时间轴。
+    toks.wordLevel = !!(line.words && line.words.length);
     line._tokens = toks;
     return toks;
+  }
+
+  // 这首歌是否拿到了真实的逐字时间轴。全篇扫一遍：有任一行带 words 就算有。
+  // 结果缓存到 doc 上（换歌词时 doc 是新对象，缓存自动失效）。
+  function hasWordLevelTiming() {
+    if (!doc) return false;
+    if (typeof doc._wordLevel === 'boolean') return doc._wordLevel;
+    var lines = doc.lines || [];
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i] && lines[i].words && lines[i].words.length) { doc._wordLevel = true; return true; }
+    }
+    doc._wordLevel = false;
+    return false;
   }
 
   // 这一行实际能唱多久：下一行的起点减去本行起点。末行没有下一行可参照，
@@ -960,7 +978,9 @@
   }
 
   function schedule() {
-    if (rafId || hidden) return;
+    // dock 胶囊实例不渲染舞台：那个 surface 只有窄条一块地方，跑 60fps 是纯浪费。
+    // 标记由 app.js 在拿到 bridge context 之后挂到 window（见 HertzCapsuleOnly）。
+    if (rafId || hidden || window.HertzCapsuleOnly) return;
     // 循环每停一次再起来，中间空掉的那段时间不能算进 dt
     lastFrameAt = 0;
     rafId = requestAnimationFrame(frame);
@@ -1353,6 +1373,9 @@
         reduced: reduced || !!(systemMotion && systemMotion.matches) };
     },
     lyricTokens: tokensFor,
+    // 本曲是否拿到真实的逐字时间轴。false 时逐字动效由字数估算（见 tokensFor），
+    // 舞台据此提示用户，避免把估算当成真实唱词时间。
+    hasWordLevelTiming: hasWordLevelTiming,
 
     // 三维歌词场景的只读快照：行数组（{start_ms,text}）+ 当前行号。
     // 行号在歌词未定位时给 0，由消费方自行处理无歌词占位。

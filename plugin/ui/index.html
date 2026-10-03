@@ -19,6 +19,7 @@
 <link rel="stylesheet" href="creative.css">
 <link rel="stylesheet" href="stage3d.css">
 <link rel="stylesheet" href="stage-themes/starfall.css">
+<link rel="stylesheet" href="stage-themes/ios.css">
 <link rel="stylesheet" href="stanza/stanza.css">
 <link rel="stylesheet" href="online.css">
 <!-- 主题工作室：壁纸背景层与壁纸画廊。排在 style.css 之后（同特异性整块胜出），
@@ -31,6 +32,7 @@
 <link rel="stylesheet" href="skins/skin.sheen.css" data-skin-css="sheen" disabled>
 <link rel="stylesheet" href="skins/skin.workbench.css" data-skin-css="workbench" disabled>
 <link rel="stylesheet" href="skins/skin.liunian.css" data-skin-css="liunian" disabled>
+<link rel="stylesheet" href="skins/skin.ios.css" data-skin-css="ios" disabled>
 </head>
 <body>
 <!-- 宿主适配层，必须是第一个脚本：app.js 排在最后加载，而 stage3d.js /
@@ -146,8 +148,12 @@
     <circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/>
     <circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/>
   </symbol>
-  <symbol id="i-more" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M6 10a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4z"/>
+  <!-- 最小化到胶囊：向下一条线，读作「收到底部」 -->
+  <symbol id="i-minimize" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <path d="M8 12l4 4 4-4"/>
+    <path d="M5 19h14"/>
+  </symbol>
+  <symbol id="i-more" viewBox="0 0 24 24" fill="currentColor">    <path d="M6 10a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4z"/>
   </symbol>
   <symbol id="i-skip-next" viewBox="0 0 24 24" fill="currentColor">
     <path d="M7 4h3v16H7zM11.5 12l6 4V8z"/>
@@ -205,6 +211,9 @@
   <div class="top-right">
     <span id="demo-badge" class="badge-demo" hidden>演示模式</span>
     <div id="conn" class="conn">连接中…</div>
+    <button id="capsule-entry" class="iconbtn" title="最小化为胶囊" aria-label="最小化为胶囊播放器" aria-controls="capsule">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-minimize"/></svg>
+    </button>
     <button id="stage3d-entry" class="iconbtn" title="沉浸声场 (V)" aria-label="进入沉浸声场">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-cube"/></svg>
     </button>
@@ -1087,9 +1096,16 @@
     <label for="s3d-layout">聆听布局</label>
     <select id="s3d-layout"><option value="focus">沉浸歌词</option><option value="sleeve">封面与歌词</option><option value="single">简洁单句</option></select>
     <label for="s3d-lyric-visual">歌词视觉</label>
-    <select id="s3d-lyric-visual"><option value="stage">舞台 3D 歌词轨</option><option value="classic">流光歌词</option><option value="cadenza">心象歌词</option><option value="sonnet">商籁歌词</option><option value="tempera">凝彩 · 色块歌词 MV</option></select>
-    <label for="s3d-stage-theme">舞台主题</label>
-    <select id="s3d-stage-theme"><option value="classic">默认</option><option value="starfall">星落</option></select>
+    <select id="s3d-lyric-visual"><option value="stage">舞台 3D 歌词轨</option><option value="starborn">星诞 · 自动导演</option><option value="classic">流光歌词</option><option value="cadenza">心象歌词</option><option value="sonnet">商籁歌词</option><option value="tempera">凝彩 · 色块歌词 MV</option></select>
+    <div id="s3d-fl-starborn" hidden>
+      <label for="s3d-fl-auto-lock">自动切镜间隔 <output id="s3d-fl-auto-lock-value">4.0s</output></label>
+      <input id="s3d-fl-auto-lock" type="range" min="0" max="12" step="0.5" value="4">
+      <label for="s3d-fl-auto-avoid"><input id="s3d-fl-auto-avoid" type="checkbox" checked> 抑制最近用过的模式，避免连续重复</label>
+      <p class="s3d-fl-auto-note" id="s3d-fl-auto-note">星诞会按每句的音频特征在流光／心象／商籁／凝彩之间自动切镜；切镜只发生在新句开头，不会打断正在唱的半句。</p>
+      <p class="s3d-fl-auto-state" id="s3d-fl-auto-state" hidden></p>
+    </div>
+    <label for="s3d-stage-theme">设置风格</label>
+    <select id="s3d-stage-theme"><option value="classic">默认</option><option value="starfall">星落</option><option value="ios">iOS</option></select>
     <label for="s3d-shelf-mode">3D 歌单架</label>
     <select id="s3d-shelf-mode"><option value="stage">舞台封面流</option><option value="side">右侧歌单架</option><option value="off">关闭</option></select>
     <button class="btn s3d-workshop" id="s3d-workshop">进入创意工坊</button>
@@ -1102,6 +1118,7 @@
     <div id="s3d-fl-common" hidden>
       <label for="s3d-fl-size">歌词字号 <output id="s3d-fl-size-value">100%</output></label>
       <input id="s3d-fl-size" type="range" min="0.70" max="1.50" step="0.05" value="1">
+      <p id="s3d-fl-wordlevel-note" class="s3d-fl-wordlevel-note" role="status" hidden></p>
       <label for="s3d-fl-bg-mode">背景样式</label>
       <select id="s3d-fl-bg-mode"><option value="stage">舞台场景（3D）</option><option value="atmosphere">彩色氛围</option><option value="anime">二次元壁纸</option><option value="geometric">几何</option><option value="fluid">流体</option><option value="solid">纯色</option></select>
       <div id="s3d-fl-wallpapers" hidden>
@@ -1142,6 +1159,9 @@
       <input id="s3d-fl-phrase" type="range" min="4" max="24" step="1" value="12">
       <label for="s3d-fl-decor"><input id="s3d-fl-decor" type="checkbox" checked> 取景框与 HUD 装饰</label>
       <label for="s3d-fl-accents"><input id="s3d-fl-accents" type="checkbox" checked> 重音粒子</label>
+      <label for="s3d-fl-atmosphere"><input id="s3d-fl-atmosphere" type="checkbox" checked> 氛围光斑</label>
+      <label for="s3d-fl-halation">胶片溢光 <output id="s3d-fl-halation-value">0.50x</output></label>
+      <input id="s3d-fl-halation" type="range" min="0" max="1" step="0.05" value="0.5">
     </div>
     <div id="s3d-fl-tempera" hidden>
       <label for="s3d-fl-composition">凝彩构图</label>
@@ -1150,6 +1170,9 @@
       <select id="s3d-fl-color-mode"><option value="duo">主题双色</option><option value="mono">单色印刷</option><option value="vivid">浓彩波普</option></select>
       <label for="s3d-fl-screens"><input id="s3d-fl-screens" type="checkbox" checked> 网点与线纹</label>
       <label for="s3d-fl-inversion"><input id="s3d-fl-inversion" type="checkbox" checked> 逐字扫光反色</label>
+      <label for="s3d-fl-seams"><input id="s3d-fl-seams" type="checkbox" checked> 色块接缝与纸面颗粒</label>
+      <label for="s3d-fl-halation-t">胶片溢光 <output id="s3d-fl-halation-t-value">0.50x</output></label>
+      <input id="s3d-fl-halation-t" type="range" min="0" max="1" step="0.05" value="0.5">
     </div>
     <p>拖动探索视角，滚轮拉近。<br>双击或按 K 回到舞台中心。</p>
     <span id="s3d-motion-note">设置即时生效</span>
@@ -1407,6 +1430,7 @@
 <script src="stanza/stanza-sonnet-fx.js"></script>
 <script src="stanza/stanza-sonnet.js"></script>
 <script src="stanza/stanza-tempera.js"></script>
+<script src="stanza/stanza-starborn.js"></script>
 <script src="stage-lyrics.js"></script>
 <!-- 3D 歌单架（封面流）：只依赖 Stage 只读出口，必须排在 stage3d.js 之前 -->
 <script src="stage-shelf.js"></script>
@@ -1422,6 +1446,18 @@
 <script src="favorites.js"></script>
 <script src="daily.js"></script>
 <script src="daily-view.js"></script>
+<!-- 胶囊播放器：最小化态下界面唯一可见的东西。整块是一个按钮，点回完整界面。
+     内容只有信息（封面 / 「正在播放」/ 标题 / 艺术家），不放控件——要操作就展开。
+     position: fixed 所以与四套皮肤正交：皮肤改的是布局栅格，胶囊浮在其上。 -->
+<button type="button" id="capsule" class="capsule" hidden aria-label="展开播放器">
+  <span class="capsule-art" id="capsule-art" aria-hidden="true"></span>
+  <span class="capsule-text">
+    <span class="capsule-label" id="capsule-label">正在播放</span>
+    <span class="capsule-title" id="capsule-title">—</span>
+    <span class="capsule-artist" id="capsule-artist"></span>
+  </span>
+</button>
+
 <script src="app.js"></script>
 </body>
 </html>

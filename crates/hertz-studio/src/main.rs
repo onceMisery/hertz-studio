@@ -45,9 +45,11 @@ const SKINS_CSS: &str = include_str!("../../../plugin/ui/skins/skins.css");
 const SKIN_SHEEN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.sheen.css");
 const SKIN_WORKBENCH_CSS: &str = include_str!("../../../plugin/ui/skins/skin.workbench.css");
 const SKIN_LIUNIAN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.css");
+const SKIN_IOS_CSS: &str = include_str!("../../../plugin/ui/skins/skin.ios.css");
 const SKIN_LIUNIAN_JS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.js");
 // 舞台主题：只管沉浸舞台操作层的观感，与皮肤正交、可组合，常驻引入。
 const STAGE_THEME_STARFALL_CSS: &str = include_str!("../../../plugin/ui/stage-themes/starfall.css");
+const STAGE_THEME_IOS_CSS: &str = include_str!("../../../plugin/ui/stage-themes/ios.css");
 // 起音检测。粒子层与三维层共用，所以它必须排在两者之前。
 const ONSET_JS: &str = include_str!("../../../plugin/ui/onset.js");
 
@@ -88,6 +90,7 @@ const STANZA_CADENZA_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-c
 const STANZA_SONNET_FX_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-sonnet-fx.js");
 const STANZA_SONNET_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-sonnet.js");
 const STANZA_TEMPERA_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-tempera.js");
+const STANZA_STARBORN_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-starborn.js");
 const PIXI_JS: &str = include_str!("../../../plugin/ui/vendor/pixi.min.js");
 const STANZA_CSS: &str = include_str!("../../../plugin/ui/stanza/stanza.css");
 // 在线曲库（SP1）：vendored MIT 二维码库 + 三个在线模块与样式。
@@ -285,6 +288,12 @@ async fn main() -> anyhow::Result<()> {
             "/stanza/stanza-tempera.js",
             get(|| asset(JS, STANZA_TEMPERA_JS)),
         )
+        // 星诞元导演：只做模式调度，不产出画面，因此排在 tempera 之后加载
+        // （它要读 StanzaSonnetFX.resolveAudioBands 拿频段数据）。
+        .route(
+            "/stanza/stanza-starborn.js",
+            get(|| asset(JS, STANZA_STARBORN_JS)),
+        )
         .route("/vendor/pixi.min.js", get(|| asset(JS, PIXI_JS)))
         .route("/vendor/qrcode.js", get(|| asset(JS, QRCODE_JS)))
         .route("/online-login.js", get(|| asset(JS, ONLINE_LOGIN_JS)))
@@ -317,10 +326,15 @@ async fn main() -> anyhow::Result<()> {
             "/skins/skin.liunian.css",
             get(|| asset(CSS, SKIN_LIUNIAN_CSS)),
         )
+        .route("/skins/skin.ios.css", get(|| asset(CSS, SKIN_IOS_CSS)))
         .route("/skins/skin.liunian.js", get(|| asset(JS, SKIN_LIUNIAN_JS)))
         .route(
             "/stage-themes/starfall.css",
             get(|| asset(CSS, STAGE_THEME_STARFALL_CSS)),
+        )
+        .route(
+            "/stage-themes/ios.css",
+            get(|| asset(CSS, STAGE_THEME_IOS_CSS)),
         )
         .route("/wallpapers/{name}", get(wallpaper))
         .route("/platform-icons/{name}", get(platform_icon))

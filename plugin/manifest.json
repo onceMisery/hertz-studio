@@ -13,7 +13,7 @@
     "dbx": ">=0.6.29",
     "host_api": "1"
   },
-  "permissions": ["host.events", "host.storage"],
+  "permissions": ["host.events", "host.storage", "host.workbench"],
   "entrypoints": {
     "backend": {
       "executable": "bin/dbx-plugin-hertz"
@@ -45,6 +45,19 @@
       }
     },
     {
+      "type": "command",
+      "id": "io.github.mmusic-studio.hertz-studio.capsule",
+      "label": "Hertz Studio capsule player",
+      "description": "Open the minimized capsule player in the global bottom dock, visible from every tab.",
+      "icon": "assets/plugin.svg",
+      "action": {
+        "type": "open-workbench",
+        "workbench": "io.github.mmusic-studio.hertz-studio.player",
+        "presentation": "panel",
+        "reuse": "singleton"
+      }
+    },
+    {
       "type": "menus",
       "id": "io.github.mmusic-studio.hertz-studio.menus",
       "items": [
@@ -53,6 +66,12 @@
           "command": "io.github.mmusic-studio.hertz-studio.open",
           "group": "navigation",
           "order": 10
+        },
+        {
+          "location": "commandPalette",
+          "command": "io.github.mmusic-studio.hertz-studio.capsule",
+          "group": "navigation",
+          "order": 11
         },
         {
           "location": "appToolbar",
@@ -76,6 +95,10 @@
         "io.github.mmusic-studio.hertz-studio.open": {
           "label": "打开 Hertz Studio",
           "description": "打开音乐播放器工作台。"
+        },
+        "io.github.mmusic-studio.hertz-studio.capsule": {
+          "label": "Hertz Studio 胶囊播放器",
+          "description": "在全局底部 dock 打开最小化胶囊播放器，切到任何标签页都可见。"
         }
       }
     }

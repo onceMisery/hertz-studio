@@ -27,7 +27,82 @@
   // 三种配色：duo 双色（强调 + 次强调）、mono 单色（只用正文色，黑白灰印刷感）、
   // vivid 高饱和（色块直接吃强调色 55%，更接近波普海报）。所有色调都从主题底色
   // 出发混色，保证正文色（浅）在任何色块上都有描边兜底的可读性。
+  //
+  // 关键约束（印刷可读性的来源）：tones 是**四级单调亮度阶梯**，色相只染中间档。
+  // 之前四档各自独立混色，结果是「四档有四种色相」—— 大面积平涂时相邻色块
+  // 分不清前后景，构图读作一堆色纸而不是一张有明暗结构的画面。
+  // 现在：先按固定比例走 paper→ink 得到四级灰阶，再把色相染回中间档，
+  // 并用 matchLuminance 把染过色的档拉回原亮度 —— 色相变了，明度秩序不变。
   var COLOR_MODES = ['duo', 'mono', 'vivid'];
+
+  // paper→ink 的四级混合位置。数值刻意不等距（0.12/0.3/0.52/0.72）：
+  // 等距会让 4 档读作均匀灰阶，缺少「远—中—近」的层次。
+  var TONE_STOPS = [0.12, 0.3, 0.52, 0.72];
+
+  function relLuminance(hex) {
+    var c = U.hexToRgb(hex);
+    if (!c) return 0;
+    var channel = function (v) {
+      var x = v / 255;
+      return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+    };
+    return channel(c.r) * 0.2126 + channel(c.g) * 0.7152 + channel(c.b) * 0.0722;
+  }
+
+  function toHex(r, g, b) {
+    return '#' + [r, g, b].map(function (v) {
+      return ('0' + Math.max(0, Math.min(255, Math.round(v))).toString(16)).slice(-2);
+    }).join('');
+  }
+
+  // 染了色相之后把亮度拉回 wanted。按增益缩放 RGB 后若任一通道被裁剪，
+  // 说明这档亮度在当前色相下根本达不到 —— 此时退回中性阶，
+  // 宁可少一层颜色也不要打乱「四级亮度单调」这个前提。
+  function matchLuminance(color, wanted) {
+    var c = U.hexToRgb(color);
+    if (!c) return color;
+    var current = relLuminance(color);
+    if (current <= 1e-4) return color;
+    var gain = wanted / current;
+    var r = c.r * gain, g = c.g * gain, b = c.b * gain;
+    if (r > 255 || g > 255 || b > 255 || r < 0 || g < 0 || b < 0) {
+      // 拉不回来就往中性方向退一档，而不是硬裁剪（裁剪会明显偏色）。
+      return U.mixHex(color, wanted > current ? '#ffffff' : '#000000', 0.5);
+    }
+    return toHex(r, g, b);
+  }
+
+  function toneLadder(paper, ink, tintA, tintB, tintAmount) {
+    return TONE_STOPS.map(function (stop, index) {
+      var base = U.mixHex(paper, ink, stop);
+      // 只染 tone1/tone3（accent）与 tone2（secondary）；tone4 不染 ——
+      // 最深那档是文字与描边的「墨」，带上色相会削弱正文对比度。
+      var tint = index === 1 ? tintB : (index === 3 ? null : tintA);
+      if (!tint || !tintAmount) return base;
+      return matchLuminance(U.mixHex(base, tint, tintAmount), relLuminance(base));
+    });
+  }
+
+  // 印刷「块面」与「灰阶」是两套东西，别混用：
+  //   fills —— 色块的主填充。直接把主题 accent/secondary 混进 paper，
+  //            混多深由 colorMode 决定（mono 全灰 / duo 0.55 / vivid 0.78）。
+  //            这才是画面的颜色来源。
+  //   tones —— paper↔ink 的四级灰阶。只用于网屏排线密度、纸面颗粒、墨线接缝。
+  // 早期版本拿 tones 直接当填充，tones 是灰阶 → 整屏读作灰板（实测彩色像素仅 0.24%）。
+  //
+  // 关键：blockFill **不**像 toneLadder 那样把染色结果拉回原亮度。
+  // 暗底主题下 paper≈#09090b，拉回原亮度等于把色相压到色差 7/255，
+  // 肉眼就是黑板 —— 彩色算得出来但看不见。参考项目的 blockA/B/C 也不拉亮度，
+  // 直接 mix(paper, accent, 0.55)，色相就是这么活下来的。
+  // 分层感不靠亮度阶梯撑着，靠接缝墨线 + 网屏 + 亮部文字压暗色块。
+  // mono 时 hue 已被palette 换成 ink（纯灰），所以这里退化成立体同色 ——
+// 印刷的单色版本来就靠「一块块叠印的深浅」分层，不靠色相。
+// 但叠印深浅必须递增，否则 mono 下构图完全糊成一块。三档给不同的 ink 混入量。
+  function blockFill(paper, ink, hue, amount) {
+    if (!hue || amount <= 0) return U.mixHex(paper, ink, 0.34);
+    return U.mixHex(paper, hue, amount);
+  }
+
   function palette(theme, mode) {
     theme = theme || {};
     var paper = theme.backgroundColor || '#09090b';
@@ -35,15 +110,30 @@
     var accent = theme.accentColor || ink;
     var second = theme.secondaryColor || accent;
     if (mode === 'mono') { accent = ink; second = ink; }
-    var k = mode === 'vivid' ? [0.2, 0.42, 0.55, 0.12] : mode === 'mono' ? [0.06, 0.12, 0.2, 0.03] : [0.1, 0.22, 0.26, 0.05];
+    // 染色的力度即「色彩表现」：mono 完全不染（纯灰印刷），
+    // duo 轻染（有彩色但仍是同一套灰阶），vivid 重染（接近波普海报）。
+    var tintAmount = mode === 'mono' ? 0 : (mode === 'vivid' ? 0.78 : 0.55);
+    var strength = mode === 'mono' ? 0 : (mode === 'vivid' ? 0.78 : 0.55);
     return {
       paper: paper, ink: ink, accent: accent,
-      tones: [
-        U.mixHex(paper, accent, k[0]),
-        U.mixHex(paper, second, k[1]),
-        U.mixHex(paper, accent, k[2]),
-        U.mixHex(paper, ink, k[3])
-      ]
+      // 四级亮度阶梯恒定由 TONE_STOPS 决定 —— 这是印刷可读性的地基：
+      // 相邻色块靠明度差分层，不靠色相差。契约要求恰好 4 档且都是合法 hex。
+      tones: toneLadder(paper, ink, accent, second, tintAmount),
+      // 四块主填充，索引与构图的 tone 槽位一一对应（0..3）。
+      // 混入量递增（0.5/ 0.58 / 0.66 / 0.74）保证色块由暗到亮，
+      // 与构图的分割方向一致；第 4 档最亮且基本中性，留给文字压在上面。
+      // mono 模式下hue 是 ink（灰），四档必须走**不同**的 ink 混入量，
+      // 否则 mono 的构图全糊成一块 —— 单色印刷靠叠印深浅分层。
+      fills: mode === 'mono'
+        ? [0.14, 0.28, 0.44, 0.6].map(function (t) { return U.mixHex(paper, ink, t); })
+        : [
+          blockFill(paper, ink, accent, strength * 0.64),
+          blockFill(paper, ink, second, strength * 0.74),
+          blockFill(paper, ink, accent, strength * 0.84),
+          U.mixHex(paper, ink, TONE_STOPS[3])
+        ],
+      // 墨线与阴影：接缝、排线、颗粒统一走这一档，保证深色线条压在彩色块上仍可见。
+      line: matchLuminance(U.mixHex(paper, ink, 0.66), relLuminance(U.mixHex(paper, ink, 0.66)))
     };
   }
 
@@ -197,6 +287,7 @@
     this.fontStack = '"Inter","Noto Sans CJK SC","Source Han Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif';
     this.performance = FX.createPerformance();
     this.postProcess = null;
+    this.optical = null;
     this.retirement = null;
   }
 
@@ -235,7 +326,10 @@
           self.text, self.invert, self.sweepMask);
         self.invert.mask = self.sweepMask;
         application.stage.addChild(self.scene, self.flash);
-        self.postProcess = FX.createPostProcess(PIXI, application.stage);
+        // 凝彩复用商籁同一条后期链（印相 + 光晕）：两个舞台的胶片质感必须一致，
+        // 各写一套后期迟早漂移成两种「肤色」。闪白层在 scene 之上，故光晕能吃到它。
+        self.optical = FX.createOpticalChain(PIXI, application.stage);
+        self.postProcess = self.optical.print;
         self.retirement = FX.createRetirement(PIXI, application.stage);
         self.initialized = true;
         self.resize();
@@ -265,22 +359,32 @@
     var g = new PIXI.Graphics();
     var i;
     if (dots) {
-      var step = Math.max(14, Math.sqrt(w * h / 2400));
-      var radius = step * (0.16 + rand() * 0.1);
+      // 点距按画幅自适应，目标是全幅约 2400 点：固定 14px 在 4K 上会读作「网格」
+      // 而不是「网点」，在小屏上又太粗糊成一片。
+      var step = Math.max(11, Math.sqrt(w * h / 2400));
+      var radius = step * (0.15 + rand() * 0.07);
       for (var y = -step; y < h + step; y += step) {
         var shift = Math.round(y / step) % 2 ? step / 2 : 0;
         for (var x = -step; x < w + step; x += step) g.circle(x + shift, y, radius);
       }
-      g.fill({ color: color, alpha: 0.32 });
+      g.fill({ color: color, alpha: 0.3 });
     } else {
-      var angle = (rand() - 0.5) * Math.PI * 0.6 + Math.PI / 4;
-      var spacing = 13 + rand() * 6, diag = Math.hypot(w, h);
+      // 排线角度**只有 4 档**（±45° / ±60°），间距只有 3 档。
+      // 之前是连续随机角度 + 连续随机间距：相邻色块的网屏角度会差出不到 1°，
+      // 交叠处立刻产生摩尔纹 —— 那是「印刷没对齐」而不是「有意为之」，
+      // 观感就是脏。刻度粗跳反而像真的分色版。
+      var ANGLES = [-Math.PI / 4, Math.PI / 4, -Math.PI / 3, Math.PI / 6];
+      var SPACINGS = [10, 14, 19];
+      var angle = ANGLES[Math.floor(rand() * ANGLES.length) % ANGLES.length];
+      var spacing = SPACINGS[Math.floor(rand() * SPACINGS.length) % SPACINGS.length];
+      var diag = Math.hypot(w, h);
       var dx = Math.cos(angle), dy = Math.sin(angle);
       for (i = -diag / spacing; i < diag / spacing; i += 1) {
         var ox = w / 2 - dy * i * spacing, oy = h / 2 + dx * i * spacing;
         g.moveTo(ox - dx * diag, oy - dy * diag).lineTo(ox + dx * diag, oy + dy * diag);
       }
-      g.stroke({ color: color, width: 1.2, alpha: 0.4 });
+      // 线宽跟着间距走：细间距配细线，间距大时线也粗 —— 覆盖率恒定才不显脏。
+      g.stroke({ color: color, width: Math.max(0.9, spacing * 0.15), alpha: 0.36 });
     }
     var clip = new PIXI.Graphics().poly(panel.poly).fill(0xffffff);
     wrap.addChild(g, clip);
@@ -289,16 +393,75 @@
     return wrap;
   }
 
-  // 印刷装饰：四角套准十字、底部色标条、分镜编号。全部静态，按句重建。
+  // 纸面颗粒：铺满全画幅的极淡点阵。间距随视口自适应（目标恒定约 2600 点），
+  // 所以任何屏幕上的颗粒密度观感一致 —— 固定像素间距会在 4K 屏上稀疏成噪点。
+  // 奇数行偏移半格：等距点阵读作方格纸，错位半格才读作半调网点。
+  function buildPaperGrain(PIXI, w, h, colorNum, seed) {
+    var spacing = Math.max(22, Math.sqrt((w * h) / 2600));
+    // 上限 200×200：大屏上不再加密，颗粒变大而不是变密 —— 后者会变成噪点。
+    var cols = Math.min(200, Math.ceil(w / spacing) + 1);
+    var rows = Math.min(200, Math.ceil(h / spacing) + 1);
+    if (cols < 2 || rows < 2) return null;
+    var g = new PIXI.Graphics();
+    // 点尺寸随间距走，保证「覆盖率」恒定而不是「点数」恒定。
+    var radius = Math.max(0.6, spacing * 0.055);
+    var random = FX.seededRandom('tempera-grain:' + seed);
+    for (var r = 0; r < rows; r += 1) {
+      var y = r * spacing;
+      var shift = (r % 2) * spacing * 0.5;
+      for (var c = 0; c < cols; c += 1) {
+        // 每 5 个点跳过一次：纯规则点阵在大面积上会读作「布纹」而非颗粒。
+        if (random() < 0.2) continue;
+        g.circle(c * spacing + shift, y, radius * (0.75 + random() * 0.5));
+      }
+    }
+    g.fill({ color: colorNum, alpha: 1 });
+    var wrap = new PIXI.Container();
+    wrap.addChild(g);
+    // 不参与构图错峰入场：颗粒是「纸的属性」，从第一帧就在。
+    wrap.dataset = { dx: 0, dy: 0, delay: 0, paper: true };
+    return wrap;
+  }
+
+  // 印刷装饰：四角套准十字、底部色标条、分镜编号、边缘压痕。全部静态，按句重建。
   function buildDecor(PIXI, container, w, h, colors, lineNo, kind) {
     var g = new PIXI.Graphics();
     var m = Math.min(w, h) * 0.06, arm = 11;
+    var inkNum = hexNum(colors.ink, 0xffffff);
+    // 四边压痕：印刷版的「内框」。之前只有四个角的十字，中间大片空白，
+    // 画面读作「贴了四个准星」而不是「印了一张东西」。
+    // 压痕线要**断开的**（四角留缺口、中段留呼吸），实线长边框会读作播放器边框。
+    var inset = m * 1.6, gap = arm * 1.4;
+    var runs = [
+      [inset, inset, w - inset, inset, 1, 0], [inset, h - inset, w - inset, h - inset, -1, 0],
+      [inset, inset, inset, h - inset, 0, 1], [w - inset, inset, w - inset, h - inset, 0, -1]
+    ];
+    runs.forEach(function (r) {
+      var dx = r[4], dy = r[5], total = Math.abs(dx ? r[2] - r[0] : r[3] - r[1]);
+      // 分三段，中间那段淡 —— 断开的线才像裁切线，不像 UI 边框。
+      var seg = total / 3;
+      for (var s = 0; s < 3; s += 1) {
+        var t0 = s === 1 ? seg * 1.18 : seg * 0.62 * s;
+        var t1 = t0 + (s === 1 ? seg * 0.64 : seg * 0.55);
+        var x0 = r[0] + dx * t0, y0 = r[1] + dy * t0;
+        var x1 = r[0] + dx * t1, y1 = r[1] + dy * t1;
+        g.moveTo(x0, y0).lineTo(x1, y1);
+      }
+    });
+    g.stroke({ color: inkNum, width: 1, alpha: 0.2 });
     [[m, m], [w - m, m], [m, h - m], [w - m, h - m]].forEach(function (p) {
       g.moveTo(p[0] - arm, p[1]).lineTo(p[0] + arm, p[1]);
       g.moveTo(p[0], p[1] - arm).lineTo(p[0], p[1] + arm);
       g.circle(p[0], p[1], arm * 0.55);
     });
-    g.stroke({ color: hexNum(colors.ink, 0xffffff), width: 1, alpha: 0.5 });
+    g.stroke({ color: inkNum, width: 1, alpha: 0.5 });
+    // 裁切标记：四边中点的短线，像刀版上的裁切线。这是「印刷品」最强的符号之一。
+    var trim = Math.min(w, h) * 0.03;
+    g.moveTo(w / 2, inset - gap).lineTo(w / 2, inset - gap - trim);
+    g.moveTo(w / 2, h - inset + gap).lineTo(w / 2, h - inset + gap + trim);
+    g.moveTo(inset - gap, h / 2).lineTo(inset - gap - trim * 0.7, h / 2);
+    g.moveTo(w - inset + gap, h / 2).lineTo(w - inset + gap + trim * 0.7, h / 2);
+    g.stroke({ color: inkNum, width: 1.4, alpha: 0.42 });
     container.addChild(g);
     var chips = new PIXI.Graphics();
     var cw = Math.max(10, w * 0.012), ch = cw * 0.7;
@@ -335,20 +498,49 @@
 
     var panels = buildPanels(this.kind, w, h, seed);
     var tones = colors.tones.map(function (t) { return hexNum(t, 0x202020); });
+    // fills 是色块主填充，见 palette() 里的说明：颜色来自主题 accent/secondary，
+    // tones 只用于网屏排线与纸面颗粒。
+    var fills = (colors.fills || colors.tones).map(function (t) { return hexNum(t, 0x202020); });
     var accentNum = hexNum(colors.accent, 0xffffff);
+    var inkNum = hexNum(colors.ink, 0xffffff);
     var self = this;
+    // 印刷「接缝」：相邻色块之间压一条极细的墨线。
+    // 这是让平涂色块读作「一块块印上去的色版」而不是「一张图分了几块」的关键 ——
+    // 没有接缝时，两块相近明度的 tone 相接处会糊成一片，构图的分割感消失。
+    // 只画在非首块（首块是整屏底板，它自己就是背景），且用 fill 而非 stroke：
+    // Graphics 的 stroke 在多边形尖角处会画出斜接外扩，fill 不会。
+    // 走 colors.line 而不是 ink：主题 ink 可能是浅色，压在 vivid 彩色块上会糊。
+    var seamNum = hexNum(colors.line, 0x101010);
     panels.forEach(function (panel, i) {
-      var g = new PIXI.Graphics().poly(panel.poly).fill({ color: tones[panel.tone % 4], alpha: 1 });
+      var g = new PIXI.Graphics();
+      // 填充走 fills（主题色块）而不是 tones（灰阶）—— tones 只喂给排线与颗粒。
+      g.poly(panel.poly).fill({ color: fills[panel.tone % 4], alpha: 1 });
+      if (i > 0 && tuning.seams !== false) {
+        // 接缝宽度按画幅缩放：小屏上 2px 会显得粗重，大屏上 1px 又看不见。
+        var seamW = Math.max(1, Math.min(3, Math.min(w, h) * 0.0018));
+        g.poly(panel.poly).stroke({ color: seamNum, width: seamW, alpha: 0.5, alignment: 0.5 });
+      }
       g.dataset = { dx: panel.dx, dy: panel.dy, delay: i * 0.07, base: i === 0 };
       self.blocks.addChild(g);
       // 网屏只落在两块上（第二块与最后一块），一屏至多两层，不糊画面。
       if (tuning.screens !== false && tuning.quality !== 'energy-saving'
         && panels.length > 1 && (i === 1 || i === panels.length - 1)) {
-        var s = buildScreen(PIXI, panel, accentNum, rand, i === 1, w, h);
+        // 网屏用最深那档灰阶而不是 accent：网屏是「压上去的墨点」，
+        // 必须压在任何填充色上都可见。参考项目也是用 tone 深档画排线。
+        var s = buildScreen(PIXI, panel, tones[0], rand, i === 1, w, h);
         s.dataset.delay = i * 0.07 + 0.06;
         self.screens.addChild(s);
       }
     });
+    // 纸面颗粒：铺满全画幅的极淡点阵，让平涂面不是「死平」的。
+    // 错位半格（奇数行偏移）才读作半调网点，等距会读成方格纸。
+    if (tuning.screens !== false && tuning.quality !== 'energy-saving') {
+      var grain = buildPaperGrain(PIXI, w, h, tones[3], seed);
+      if (grain) {
+        grain.alpha = 0.05;
+        this.screens.addChild(grain);
+      }
+    }
     buildDecor(PIXI, this.decor, w, h, colors, lineNo, this.kind);
 
     // 正文：商籁同一条排版管线（字素时间轴 + 词组断行 + 行宽收敛）。
@@ -402,6 +594,8 @@
     });
     this.screens.children.forEach(function (s) {
       var d = s.dataset;
+      // 纸面颗粒没有 .screen 子节点（它本身就是一张整幅点阵），也不参与错峰入场。
+      if (d.paper) return;
       var p = motion > 0 ? FX.clamp((elapsed - d.delay) / 0.55, 0, 1) : 1;
       var e = 1 - Math.pow(1 - p, 3);
       s.position.set(d.dx * (1 - e) * motion, d.dy * (1 - e) * motion);
@@ -431,8 +625,17 @@
         if (!ext) continue;
         any = true;
         var pad = row.h * 0.12;
-        this.ink.rect(ext.left - pad, row.y - row.h / 2, ext.right - ext.left + pad * 2, row.h);
-        this.sweepMask.rect(ext.left - pad, row.y - row.h / 2, ext.right - ext.left + pad * 2, row.h);
+        // 扫光带是「箭头形色版」：两端各一个 chevron 尖角。
+        // 纯矩形带在画面上读作「一根横条扫过去」，加尖角之后读作「一块色版被推进来」
+        // —— 这正是印刷套色的动作，反色文字才站得住「被印上去」的理由。
+        // 尖角取行高的 42%：再高会盖到上一行歌词，字距一窄就撞。
+        var notch = row.h * 0.42;
+        var top = row.y - row.h / 2, bot = row.y + row.h / 2;
+        var l = ext.left - pad, right = ext.right + pad;
+        var chevron = [l, top, right, top, right + notch, row.y,
+          right, bot, l, bot, l - notch, row.y];
+        this.ink.poly(chevron);
+        this.sweepMask.poly(chevron);
       }
       if (any) {
         this.ink.fill({ color: accentNum, alpha: 0.94 * fade });
@@ -449,10 +652,14 @@
       }
     }
 
-    // 起音闪白：整屏一层强调色薄膜，峰值 alpha 0.07，减少动态时关闭。
+    // 起音闪白：整屏一层强调色薄膜。峰值从 0.07 提到 0.1 —— 0.07 在深色构图上
+    // 几乎看不见（相当于 18/255 的抬升），重拍时画面「该跳一下」却没跳。
     this.flash.clear();
     if (motion > 0 && kick > 0.02 && tuning.quality !== 'energy-saving') {
-      this.flash.rect(0, 0, w, h).fill({ color: hexNum(this.colors.accent, 0xffffff), alpha: kick * 0.07 });
+    // 二次方映射：弱起音只给极淡的一层，强起音才明显 —— 线性映射会让
+    // 持续的能量把整屏常驻提亮成「发灰」。
+      this.flash.rect(0, 0, w, h).fill({ color: hexNum(this.colors.accent, 0xffffff),
+        alpha: kick * kick * 0.16 + kick * 0.03 });
     }
 
     var incoming = this.retirement.update(frame, tuning);
@@ -461,7 +668,8 @@
     this.screens.visible = tuning.showBlocks !== false;
     this.decor.visible = tuning.showDecor !== false;
     this.decor.alpha = a;
-    this.postProcess.update(frame, tuning, w, h);
+    this.optical.setTint(this.colors.accent);
+    this.optical.update(frame, tuning, w, h);
     this.app.render();
     return camera;
   };
@@ -473,6 +681,7 @@
       screens: this.screens ? this.screens.children.length : 0,
       glyphs: this.words.length, clones: this.clones.length, rows: this.rows.length,
       performance: this.performance.snapshot(),
+      halation: this.optical ? this.optical.halation.enabled : false,
       retirement: this.retirement ? this.retirement.snapshot() : null
     };
   };
@@ -488,7 +697,8 @@
     this.rows = [];
     if (this.accents) { this.accents.destroy(); this.accents = null; }
     if (this.retirement) { this.retirement.destroy(); this.retirement = null; }
-    if (this.postProcess) { this.postProcess.destroy(); this.postProcess = null; }
+    if (this.optical) { this.optical.destroy(); this.optical = null; }
+    this.postProcess = null;
     if (this.app && this.initialized) {
       try { this.app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true }); }
       catch (err) { console.warn('[stanza-tempera] PIXI cleanup failed:', err); }

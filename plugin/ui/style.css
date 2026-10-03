@@ -29,6 +29,11 @@
   /* 破坏性操作的文字色（删除歌单、清空队列）。以前只写在 .t-act-danger:hover
      的字面量里，没有可复用的名字，所以每加一个删除按钮就要再抄一遍色值。 */
   --danger: #ff9b9b;
+  /* 成功 / 警告。与 --danger 同理：状态色要能被复用，而不是每处重抄。
+     三个值都按暗底反推过（正文 AA），语义表面（--ok-wash 等）留给主题，
+     浅色主题在 themes.js 里连同表面一起翻成浅填充。 */
+  --ok: #7bd88f;
+  --warn: #ffcc66;
   --radius: 12px;
   /* 面板圆角。曾经是 18px，而组件层的 --r-xl 是 16px —— 同一批面板
      （导航轨 / 内容列 / 舞台 / 播放条）在新旧两套规则里各拿一个值，
@@ -783,8 +788,8 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
   display: inline-flex; align-items: center; justify-content: center;
   transition: color 0.2s var(--ease), background 0.2s var(--ease);
 }
-.t-act:hover { color: var(--text); background: rgba(255, 255, 255, 0.1); }
-.t-act.t-act-danger:hover { color: #ff9b9b; background: rgba(255, 90, 90, 0.14); }
+.t-act:hover { color: var(--text); background: var(--hover); }
+.t-act.t-act-danger:hover { color: var(--danger); background: var(--danger-wash, rgba(255, 90, 90, 0.14)); }
 .t-act svg { width: 16px; height: 16px; fill: currentColor; }
 
 /* 正在播放的 equalizer 指示 */
@@ -1790,7 +1795,7 @@ input[type="range"]::-moz-range-thumb { width: 13px; height: 13px; border: none;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast[hidden] { display: none; }
-.toast.error { border-color: rgba(255, 90, 90, 0.5); color: #ffb3b3; }
+.toast.error { border-color: var(--danger); color: var(--danger); }
 
 #scrim { display: none; }
 
@@ -2626,12 +2631,27 @@ button:focus-visible, [role="button"]:focus-visible,
   background: var(--field-bg);
 }
 
+/* 每日推荐：一行 5 张。
+   三个令牌就是这条规则的全部可调面，皮肤只改令牌、不重写公式——四份皮肤
+   以前各写一遍 grid-template-columns，改一次列数要动五个文件。
+     --daily-cols      一行几张
+     --daily-card-min  卡片还能看的最低宽度，窄窗口靠它自动降到 4/3 列
+     --daily-gap       列间距
+   用 auto-fill + max() 而不是硬写 repeat(5, 1fr)：后者不会降级，窗口一窄
+   卡片就被挤成一列省略号。 */
 .daily-list {
+  --daily-cols: 5;
+  --daily-card-min: 150px;
+  --daily-gap: var(--sp-3);
+
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: var(--sp-3);
+  grid-template-columns: repeat(auto-fill, minmax(
+    max(var(--daily-card-min),
+        calc((100% - (var(--daily-cols) - 1) * var(--daily-gap)) / var(--daily-cols))),
+    1fr));
+  gap: var(--daily-gap);
 }
 .daily-card {
   display: flex;
@@ -2680,24 +2700,21 @@ button:focus-visible, [role="button"]:focus-visible,
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 推荐理由：服务端把规则算完了直接给出来，这里是它的展示位。
-   窄卡片里一行放不下就裁掉，不换行——换行会把卡片高度撑乱。 */
+/* 推荐理由 / 来源平台：服务端把规则算完了直接给出来，这里是它的展示位。
+   排在标题与艺术家**下面**，不是卡片右侧第三列——一行 5 张时卡片只有 170px
+   上下，右侧再塞一列 96px，标题就只剩几个省略号了。
+   一行放不下就裁掉，不换行：换行会把卡片高度撑乱，五列网格因此参差不齐。 */
 .daily-why {
-  display: none;
   font-size: var(--fs-2xs);
   color: var(--muted);
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-@media (min-width: 900px) {
-  .daily-list { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
-  .daily-why {
-    display: block;
-    max-width: 96px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    opacity: 0.75;
-  }
-}
+/* 没有理由可写（在线曲目缺 source_label、本地曲目没有命中任何规则）时不占行。
+   空 span 照样撑起一个行高，卡片会凭空比邻居高一截。 */
+.daily-why:empty { display: none; }
 
 /* ==========================================================================
    参考项目视觉对齐层
@@ -2750,16 +2767,16 @@ button:focus-visible, [role="button"]:focus-visible,
    而不是接在 --accent（默认主题 = 纯白）上的又一个白点。 */
 .conn.ok {
   color: var(--text);
-  border-color: color-mix(in srgb, var(--brand) 32%, transparent);
-  background: color-mix(in srgb, var(--brand) 10%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 32%, transparent);
+  background: var(--ok-wash, color-mix(in srgb, var(--brand) 10%, transparent));
 }
-.conn.ok::before { background: var(--brand); box-shadow: 0 0 8px var(--brand); }
+.conn.ok::before { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
 .conn.bad {
   color: var(--danger);
-  border-color: rgba(255, 120, 120, 0.32);
-  background: rgba(255, 90, 90, 0.1);
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+  background: var(--danger-wash, rgba(255, 90, 90, 0.1));
 }
-.conn.bad::before { background: #ff8080; }
+.conn.bad::before { background: var(--danger); }
 /* 620px 断点里有一条 `.conn { font-size: 0 }`（窄屏把状态收成一个点，
    否则 nowrap 的右侧区块会把搜索框挤出视口）。媒体查询不增加特异性，
    本节的 .conn 排在它之后会把它盖掉，所以这里重新声明一遍。 */
@@ -3070,3 +3087,53 @@ button:focus-visible, [role="button"]:focus-visible,
   justify-content: flex-end;
   gap: 10px;
 }
+
+/* ---------- 胶囊播放器（最小化态） ----------
+   最小化时 body 挂 .is-capsule，除胶囊外的顶层节点全部隐藏。不逐个列容器名，
+   是因为皮肤会改布局栅格的类名与层级，列名单必然漏；而胶囊是 position: fixed，
+   与四套皮肤正交——皮肤管文档流里的栅格，胶囊浮在其上。
+   外形对齐参考：深色玻璃胶囊、44px 圆角封面、三行文字（正在播放 / 标题 / 艺术家），
+   整块可点、点回完整界面；不放控件，要操作就展开。 */
+body.is-capsule > *:not(#capsule) { display: none !important; }
+
+.capsule {
+  position: fixed; right: 20px; bottom: 20px;
+  z-index: 90;
+  display: flex; align-items: center; gap: 12px;
+  max-width: min(320px, calc(100vw - 40px));
+  padding: 8px 18px 8px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: rgba(20, 23, 27, 0.9);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.capsule[hidden] { display: none; }
+.capsule-art {
+  flex: 0 0 auto;
+  width: 44px; height: 44px;
+  border-radius: var(--r-md);
+  background-color: rgba(255, 255, 255, 0.08);
+  background-size: cover;
+  background-position: center;
+}
+.capsule-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.capsule-label { font-size: var(--fs-xs); letter-spacing: 0.08em; color: var(--muted); }
+.capsule-title {
+  font-size: var(--fs-base); font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.capsule-artist {
+  font-size: var(--fs-xs); color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* dock surface（manifest 里 presentation: "panel" 的胶囊命令）：宿主把这份实例放进
+   全局底部 dock，切到任何标签页都可见。它只渲染胶囊：隐藏规则与 tab 内最小化态
+   同一套，但胶囊常显——dock 里没有「展开」这个动作，点击是跳回主工作台 tab。 */
+body.is-dock-capsule > *:not(#capsule) { display: none !important; }
+body.is-dock-capsule #capsule { display: flex; }

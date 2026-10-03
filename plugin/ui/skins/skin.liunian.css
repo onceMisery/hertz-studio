@@ -672,8 +672,9 @@
 [data-skin="liunian"] .pl-grid,
 [data-skin="liunian"] .dv-body-card,
 [data-skin="liunian"] .daily-list {
-  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
-  gap: 14px;
+  /* 列数公式在 style.css 的 .daily-list 上，皮肤只交下限与间距两个令牌。 */
+  --daily-card-min: var(--skin-card-min);
+  --daily-gap: 14px;
 }
 
 [data-skin="liunian"] .pl-card-art,
@@ -1291,6 +1292,192 @@
 @keyframes ln-view-enter {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: none; }
+}
+
+/* ==========================================================================
+   设置浮层 .ln-modal
+   --------------------------------------------------------------------------
+   「设置」不再把中栏切成设置视图，而是把 #view-settings 抬到中栏之上的一层
+   模态：底层三栏保持原样，遮罩只压暗不吞掉，关闭有退场动画。
+
+   层级：110 高于项目里所有既有浮层（.app 6 / np 96 / stage3d 90 /
+   在线扫码弹窗 100），所以舞台、搜索面板、播放卡一律在其之下，不会被
+   遮罩压住，也不会与底层面板抢 z-index。
+
+   动画分工：进场用 animation（display 从 none 恢复时自动播），退场用
+   transition + .is-closing（JS 在动画结束后才置 hidden）。两边都挂在
+   card 上，互不干扰。
+   ========================================================================== */
+
+[data-skin="liunian"] .ln-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-8);
+}
+
+[data-skin="liunian"] .ln-modal[hidden] { display: none; }
+
+/* 浮层打开时把底层彻底隔离：不可点、不可选中。
+   只挡交互、不隐藏（display/visibility 保持），底层布局零位移。
+   刻意不加 filter/backdrop-filter：filter 会让 .app 变成包含块，而流年把
+   .bar 搬进了中栏（.app 子树内），一旦有 fixed 后代就会被改相对定位。
+   压暗效果由遮罩负责。 */
+[data-skin="liunian"] body.ln-modal-open .app,
+[data-skin="liunian"] body.ln-modal-open .bar {
+  pointer-events: none;
+  user-select: none;
+}
+
+/* 遮罩：压暗底层 + 轻微模糊，底色走主题 token。 */
+[data-skin="liunian"] .ln-modal-scrim {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  opacity: 0;
+  transition: opacity var(--dur-slow) var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-modal.is-open .ln-modal-scrim { opacity: 1; }
+
+[data-skin="liunian"] .ln-modal.is-closing .ln-modal-scrim { opacity: 0; }
+
+/* 卡片：不透明实体。内容绝不加 filter/backdrop-filter，否则设置项里的
+   文字与开关会被自身背景糊掉（与 .np-card 同一条纪律）。 */
+[data-skin="liunian"] .ln-modal-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(880px, 100%);
+  max-height: calc(100vh - var(--sp-8) * 2);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--skin-radius);
+  background: var(--panel-solid);
+  box-shadow: var(--glass-shadow);
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(14px) scale(0.985);
+  transition: opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+/* 进场用 animation 而不是 transition：卡片随 hidden→可见整块重建，
+   transition 不会自己触发。backwards 而非 both —— both 会把末帧的
+   transform:none 变成常驻计算值（单位矩阵），让卡片永久成为层叠上下文。 */
+[data-skin="liunian"] .ln-modal.is-open .ln-modal-card {
+  animation: ln-modal-in var(--dur-slow) var(--ease-out) backwards;
+}
+
+/* 退场：JS 加 .is-closing 后 transition 播反向动画，播完才置 hidden。 */
+[data-skin="liunian"] .ln-modal.is-closing .ln-modal-card {
+  animation: none;
+  opacity: 0;
+  transform: translateY(10px) scale(0.99);
+  transition-duration: var(--dur-fast);
+}
+
+@keyframes ln-modal-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+[data-skin="liunian"] .ln-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  flex: none;
+  padding: var(--sp-6) var(--sp-7);
+  border-bottom: 1px solid var(--glass-line);
+}
+
+[data-skin="liunian"] .ln-modal-title {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--skin-title);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+[data-skin="liunian"] .ln-modal-sub {
+  margin: 4px 0 0;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+[data-skin="liunian"] .ln-modal-close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--field-border);
+  border-radius: var(--r-md);
+  background: var(--field-bg);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-modal-close:hover {
+  color: var(--text);
+  background: var(--field-bg-hover);
+  border-color: var(--field-border-strong);
+}
+
+[data-skin="liunian"] .ln-modal-close svg { width: 15px; height: 15px; }
+
+/* 内容区：#view-settings 在这里滚动。卡片是固定高度的 flex 列，
+   所以设置视图的 overflow-y:auto 在这里是唯一滚动容器。 */
+[data-skin="liunian"] .ln-modal-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 设置视图自带标题（.col-head 粘顶），浮层头部已有大标题，
+   这里只保留吸顶作用、去掉重复的视觉重量。 */
+[data-skin="liunian"] .ln-modal-body > #view-settings {
+  padding: var(--sp-6) var(--sp-7) var(--sp-7);
+}
+
+/* 浮层头已经写了「设置」，视图自带的 col-head 只剩一个重复标题：藏掉。
+   （.col-head 在浮层外仍是吸顶头，规则不动。） */
+[data-skin="liunian"] .ln-modal-body > #view-settings > .col-head { display: none; }
+
+/* 卡片自身已有整块入场动画，内容再叠一次上浮会显得发糊：浮层内不重播。 */
+[data-skin="liunian"] .ln-modal-body > #view-settings { animation: none; }
+
+/* 窄屏：浮层贴边铺满，去掉外边距与圆角，让设置项有整屏宽度。 */
+@media (max-width: 720px) {
+  [data-skin="liunian"] .ln-modal { padding: 0; }
+
+  [data-skin="liunian"] .ln-modal-card {
+    width: 100%;
+    max-height: 100vh;
+    max-height: 100dvh;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+
+  [data-skin="liunian"] .ln-modal-body > #view-settings { padding: var(--sp-5) var(--sp-5) var(--sp-7); }
+}
+
+/* 低动效偏好：全局 body.reduce-motion 兜底，这里把浮层显式写出来，
+   免得「压暗 + 上浮」在用户明确要求静止时仍然播放。 */
+@media (prefers-reduced-motion: reduce) {
+  [data-skin="liunian"] .ln-modal-scrim,
+  [data-skin="liunian"] .ln-modal-card { transition: none; }
+
+  [data-skin="liunian"] .ln-modal.is-open .ln-modal-card { animation: none; }
 }
 
 /* ============================ 暗角 ====================================== */

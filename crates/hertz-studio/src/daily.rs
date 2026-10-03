@@ -361,6 +361,220 @@ const ONLINE_MAX_LIMIT: usize = 60;
 /// 向单个音源要多少条。要比汇总条数宽，这样某个平台曲目少时别的平台能补上。
 const ONLINE_PER_SOURCE: usize = 30;
 
+// --- 进程内缓存：让重复访问不再重打上游 ---------------------------------
+//
+// 一次汇总最坏要等满 `ONLINE_TIMEOUT`（8s），而进「曲库」页就会打一次——
+// 用户在几个视图之间来回切两下，上游被白打好几轮，界面每轮都要重等一遍。
+//
+// **按源缓存，不按整份汇总缓存**：某个平台超时不该让别的平台的结果一起作废，
+// 补拉时也只补那一个。键里带天序号，跨天自然失效——各平台的每日推荐只有当天
+// 这一份，昨天的条目再也读不到，写新条目时顺手清掉即可。
+//
+// 用进程内 `static` 而不是挂在 AppState 上：这份缓存与连接、数据库都无关，
+// 一个进程一份正好；而 `online_daily_at` 的签名是契约检查盯着的，为它加一个
+// 参数就得两端一起改。
+//
+// 临界区全是纯 map 操作、绝不跨 await，所以用 `std::sync::Mutex` 而不是
+// `tokio::sync::Mutex`：后者会让每次读缓存都变成一次调度点。
+type CacheKey = (i64, String);
+/// 一次抓取的结果。`tracks` 为 None 表示这次没拿到，`kind`/`message` 说明原因。
+#[derive(Debug, Clone)]
+struct SourceEntry {
+    at: std::time::Instant,
+    tracks: Option<Vec<crate::online::OnlineTrack>>,
+    kind: String,
+    message: String,
+}
+
+/// 成功结果的保鲜期。上游一天才换一次榜单，10 分钟内重复进页面直接命中。
+const ONLINE_FRESH: std::time::Duration = std::time::Duration::from_secs(600);
+/// 失败结果的保鲜期短得多：一次超时不该把这个平台按死 10 分钟。
+const ONLINE_FAILED_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
+/// 一次汇总最多等多久。到点就带着已落地的平台先返回，没到的记进 `pending`，
+/// 前端稍后补拉——那时抓取早已在后台完成、直接命中缓存，不会再等一轮 8 秒。
+const ONLINE_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+type EntryTable = std::sync::Mutex<std::collections::HashMap<CacheKey, SourceEntry>>;
+type TaskTable =
+    std::sync::Mutex<std::collections::HashMap<CacheKey, tokio::sync::watch::Sender<bool>>>;
+
+fn entries() -> &'static EntryTable {
+    static SLOTS: std::sync::OnceLock<EntryTable> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn inflight() -> &'static TaskTable {
+    static TASKS: std::sync::OnceLock<TaskTable> = std::sync::OnceLock::new();
+    TASKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 这条还算新鲜吗。成功与失败分开判：失败的过期得快，好让重试有机会翻身。
+fn still_fresh(e: &SourceEntry) -> bool {
+    fresh_after(e.tracks.is_some(), e.at.elapsed())
+}
+
+/// 保鲜判据。
+///
+/// 从 `still_fresh` 里拆出来是为了可测：`Instant` 不能往回拨，测试里造不出
+/// 「五分钟前的那一条」，但可以直接给一个时长。
+fn fresh_after(succeeded: bool, age: std::time::Duration) -> bool {
+    age < if succeeded {
+        ONLINE_FRESH
+    } else {
+        ONLINE_FAILED_FRESH
+    }
+}
+
+/// `schedule_fetch` 的三种结局。
+///
+/// 分成三种而不是「等 / 不等」两种，是因为前端要能区分**新鲜命中**与
+/// **SWR 旧值**：前者这份就是最终答案，后者后台正在刷新、值得稍后再拉一次。
+/// 光看 `age_secs > 0` 分不清——新鲜命中的 age_secs 也大于 0，于是每次进
+/// 页面都会白补拉三轮。
+enum Fetch {
+    /// 缓存新鲜，直接用，不必等。
+    Fresh,
+    /// 缓存过期：本次仍用旧值（SWR），刷新已在后台跑。
+    Stale,
+    /// 一条都没有，必须等这个接收端，不等就啥也画不出来。
+    Missing(tokio::sync::watch::Receiver<bool>),
+}
+
+/// 抓取任务的收尾。
+///
+/// 两件事都不能漏：把 inflight 里那条摘掉、把等待者放行。否则汇总会干等到
+/// 预算耗尽，而且这个平台当天就成了永久的「在飞」，之后每次请求都白等一轮。
+struct FetchGuard {
+    key: CacheKey,
+    tx: tokio::sync::watch::Sender<bool>,
+    /// 正常路径写完缓存后翻成 false。仍是 true 就说明任务半路 panic 了。
+    wrote: bool,
+}
+
+impl Drop for FetchGuard {
+    fn drop(&mut self) {
+        if self.wrote {
+            // panic 掉的抓取压根没写条目，不补一条的话这个平台会被当成「还在
+            // 路上」：前端补拉三次都拿不到东西，而真实原因是崩了。崩了就得
+            // 如实说崩了，记成 failed 走 skipped 那条路。
+            entries()
+                .lock()
+                .unwrap()
+                .entry(self.key.clone())
+                .or_insert(SourceEntry {
+                    at: std::time::Instant::now(),
+                    tracks: None,
+                    kind: "failed".to_string(),
+                    message: "抓取任务异常退出".to_string(),
+                });
+        }
+        inflight().lock().unwrap().remove(&self.key);
+        // send 在没有接收者时返回 Err，那不代表失败：值已经写进 watch，
+        // 之后 subscribe 出来的接收端一眼就能看到 true。
+        let _ = self.tx.send(true);
+    }
+}
+
+/// 把某个平台当天的抓取安排上，并告诉调用方这次该拿它怎么办。
+///
+/// 只有**缓存里一条都没有**时才需要等；已有条目时哪怕过期也直接把旧值给出去
+/// ——SWR 的意思就是「先把旧的给界面上屏」，等新的就成了阻塞式刷新，首屏又慢
+/// 回原样。新值落进缓存后由下一次访问（或前端的补拉）取走。
+fn schedule_fetch(ctx: &crate::online::Ctx, source: &str, day: i64) -> Fetch {
+    let key: CacheKey = (day, source.to_string());
+
+    // 锁只用来做一次判断，绝不在持锁期间派活：新任务干完第一件事就是回来写
+    // 这张表，持锁派活是让它在门口干等。
+    let (exists, fresh) = {
+        let slots = entries().lock().unwrap();
+        match slots.get(&key) {
+            Some(e) => (true, still_fresh(e)),
+            None => (false, false),
+        }
+    };
+    if !exists {
+        return match spawn_fetch(ctx, &key, day, source) {
+            Some(rx) => Fetch::Missing(rx),
+            // 派活与读表之间刚好被别的请求抢先完成并清掉了：条目已经在了。
+            None => Fetch::Fresh,
+        };
+    }
+    if fresh {
+        return Fetch::Fresh;
+    }
+    spawn_fetch(ctx, &key, day, source);
+    Fetch::Stale
+}
+
+/// 真正派活。已经有同一份在飞就只订阅它，不重复打上游。
+fn spawn_fetch(
+    ctx: &crate::online::Ctx,
+    key: &CacheKey,
+    day: i64,
+    source: &str,
+) -> Option<tokio::sync::watch::Receiver<bool>> {
+    let mut tasks = inflight().lock().unwrap();
+    if let Some(tx) = tasks.get(key) {
+        return Some(tx.subscribe());
+    }
+
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    tasks.insert(key.clone(), tx.clone());
+    drop(tasks);
+
+    let ctx = ctx.clone();
+    let source = source.to_string();
+    let key = key.clone();
+    tokio::spawn(async move {
+        // 先建守卫再干活：任何一条返回路径（含 panic）都会走到它的 Drop。
+        let mut guard = FetchGuard {
+            key: key.clone(),
+            tx,
+            wrote: true,
+        };
+        let outcome = tokio::time::timeout(
+            ONLINE_TIMEOUT,
+            crate::online::recommend_songs(&ctx, &source, 0, ONLINE_PER_SOURCE),
+        )
+        .await;
+        let at = std::time::Instant::now();
+        let entry = match outcome {
+            Ok(Ok(tracks)) if !tracks.is_empty() => SourceEntry {
+                at,
+                tracks: Some(tracks),
+                kind: String::new(),
+                message: String::new(),
+            },
+            Ok(Ok(_)) => SourceEntry {
+                at,
+                tracks: None,
+                kind: "empty".to_string(),
+                message: "该音源本次没有返回推荐".to_string(),
+            },
+            Ok(Err(e)) => SourceEntry {
+                at,
+                tracks: None,
+                kind: "failed".to_string(),
+                message: e.message,
+            },
+            Err(_) => SourceEntry {
+                at,
+                tracks: None,
+                kind: "timeout".to_string(),
+                message: "响应超时".to_string(),
+            },
+        };
+        {
+            let mut slots = entries().lock().unwrap();
+            // 别的日期再也读不到（各平台只给当天），趁机清掉，免得长期运行越攒越多。
+            slots.retain(|(d, _), _| *d == day);
+            slots.insert(key, entry);
+        }
+        guard.wrote = false;
+    });
+    Some(rx)
+}
+
 /// 汇总后的一首歌。
 #[derive(Debug, Clone, Serialize)]
 pub struct DailyOnlineTrack {
@@ -397,7 +611,8 @@ pub struct DailyOnlinePage {
     pub date: String,
     pub limit: usize,
     pub total: usize,
-    /// 已登录平台全部为空时为 true：界面据此决定是「暂无推荐」还是「去登录」。
+    /// 一首都没拿到、且没有平台还在路上时为 true：界面据此决定是「暂无推荐」
+    /// 还是「去登录」。`pending` 非空时恒为 false——那不是「没有」，是「还没到」。
     pub empty: bool,
     pub tracks: Vec<DailyOnlineTrack>,
     pub sources: Vec<DailyOnlineGroup>,
@@ -408,26 +623,31 @@ pub struct DailyOnlinePage {
     /// 拿到」。前者该引导去登录，后者该说"再试一次"——把话说反了，用户会
     /// 重新扫码登录好几遍才发现不是登录的问题。
     pub ready: Vec<String>,
+    /// 这次**没等到**的平台标签：抓取还在后台跑，只是超出了本次的等待预算。
+    ///
+    /// 与 `skipped` 严格不同——skipped 是「这次没拿到，别等了」，pending 是
+    /// 「再拉一次就有」。前端据此决定要不要补拉，副标题据此说清「XX 还在取」。
+    pub pending: Vec<String>,
+    /// 这份结果里最老的一条距今多少秒。0 = 全是刚抓的；>0 = 命中了缓存。
+    /// 界面如实写一句「N 分钟前的推荐」，用户才知道看到的不是这一秒抓回来的。
+    pub age_secs: u64,
+    /// 有平台是拿**过期缓存**顶上的，刷新正在后台跑。
+    ///
+    /// 与 `age_secs` 分开报，因为前端只能靠它决定要不要补拉：新鲜命中时
+    /// `age_secs` 同样大于 0，但那份就是最终答案，补拉三次也只是拿回同一份。
+    pub refreshing: bool,
 }
-
-/// 一个已派出但还没收回的在线抓取：`(音源 id, 音源名, 抓取任务)`。
-///
-/// `JoinHandle` 上那两层 Result 各有含义：外层是任务本身 panic/被取消，
-/// 内层是超时——两者都要记成 `skipped`，但文案不同（异常退出 vs 响应超时），
-/// 所以这里不急着摊平，留到消费处再解。
-type PendingSource = (
-    String,
-    String,
-    tokio::task::JoinHandle<
-        Result<ApiResult<Vec<crate::online::OnlineTrack>>, tokio::time::error::Elapsed>,
-    >,
-);
 
 /// 汇总各平台的每日推荐。
 ///
-/// **遍历方式**：一次过一遍音源状态表——能取的并发去取，不能取的当场记进
-/// `skipped`。所以即便所有平台都没登录，这里也返回 200 + 空列表而不是 401，
-/// 前端想提示登录自己看 `skipped` 里的 `not_signed_in`。
+/// **遍历方式**：一次过一遍音源状态表——能取的去取（缓存不新鲜才真打上游），
+/// 不能取的当场记进 `skipped`。所以即便所有平台都没登录，这里也返回 200 +
+/// 空列表而不是 401，前端想提示登录自己看 `skipped` 里的 `not_signed_in`。
+///
+/// **只等 `ONLINE_WAIT_BUDGET`**：到点就把已落地的平台合并返回，没到的写进
+/// `pending`。抓取不会因为响应发出去就被取消——它在后台跑完、结果落进缓存，
+/// 前端补拉那一次直接命中。首屏因此是「快平台的两秒」而不是「最慢平台的
+/// 八秒」，而慢平台的曲目一首都没丢。
 ///
 /// **指定某天**：各平台的「每日推荐」只有**今天**这一份，回看昨天既没有数据
 /// 所以历史日期不去打上游——那是一轮必然空手而归的请求，白白等 8 秒超时——
@@ -465,15 +685,24 @@ pub async fn online_daily_at(
                 sources: Vec::new(),
                 skipped,
                 ready,
+                pending: Vec::new(),
+                age_secs: 0,
+                refreshing: false,
             });
         }
     }
 
-    let per_source = ONLINE_PER_SOURCE;
+    // 上面那道 history 短路之后，day 要么是 None 要么就等于今天。
+    let today = day.unwrap_or_else(day_number);
 
     let mut skipped: Vec<DailyOnlineSkip> = Vec::new();
     let mut ready: Vec<String> = Vec::new();
-    let mut pending: Vec<PendingSource> = Vec::new();
+    // 要去取的平台，按注册顺序。这个顺序就是最终的合并顺序。
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    // 只等「缓存里一条都没有」的那些；已有条目的（含过期的）不该拖住首屏。
+    let mut waits: Vec<tokio::sync::watch::Receiver<bool>> = Vec::new();
+    // 有平台是拿过期缓存顶上的：前端据此决定要不要补拉一次。
+    let mut refreshing = false;
 
     for st in crate::online::daily_source_states(ctx).await {
         if !st.ready {
@@ -485,70 +714,90 @@ pub async fn online_daily_at(
             });
             continue;
         }
-        let ctx = ctx.clone();
-        let source = st.source.clone();
         ready.push(st.label.clone());
-        pending.push((
-            st.source,
-            st.label,
-            tokio::spawn(async move {
-                tokio::time::timeout(
-                    ONLINE_TIMEOUT,
-                    crate::online::recommend_songs(&ctx, &source, 0, per_source),
-                )
-                .await
-            }),
-        ));
+        match schedule_fetch(ctx, &st.source, today) {
+            Fetch::Fresh => {}
+            Fetch::Stale => refreshing = true,
+            Fetch::Missing(rx) => waits.push(rx),
+        }
+        wanted.push((st.source, st.label));
     }
 
-    // 按音源注册顺序 await，结果顺序因此与完成顺序无关——同一批登录态下
-    // 汇总出来的歌单是稳定可复现的，不会每次刷新就换一批排列。
+    // join_all 等到的是最慢那个，外层 timeout 兜住预算——合起来正好是
+    // 「全部落地，或预算耗尽」，不需要自己写轮询。
+    //
+    // 那层 async 块不是多余的：`wait_for` 的 Output 是 `watch::Ref`，里头裹着
+    // `RwLockReadGuard`（非 Send），而 join_all 会把每个子 future 的输出存在
+    // 自己的状态机里，一路连累到 handler 的 future 变成非 Send、axum 直接拒收。
+    // 就地丢掉 Ref 只留 `()` 就干净了。
+    if !waits.is_empty() {
+        let _ = tokio::time::timeout(
+            ONLINE_WAIT_BUDGET,
+            futures::future::join_all(waits.iter_mut().map(|rx| async move {
+                let _ = rx.wait_for(|done| *done).await;
+            })),
+        )
+        .await;
+    }
+
+    // 按注册顺序收结果：同一批登录态下合并出来的歌单稳定可复现，不会每次
+    // 刷新就换一批排列——这条不变量在改成缓存制之后依然要守住。
     let mut groups: Vec<DailyOnlineGroup> = Vec::new();
     let mut buckets: Vec<Vec<crate::online::OnlineTrack>> = Vec::new();
-    for (source, label, handle) in pending {
-        let outcome = match handle.await {
-            Ok(Ok(Ok(tracks))) => Ok(tracks),
-            // 上游报错：整个平台缺席，但不影响别的平台。
-            Ok(Ok(Err(e))) => Err(("failed", e.message)),
-            Ok(Err(_)) => Err(("timeout", "响应超时".to_string())),
-            // 任务 panic：记成 failed 而不是让整个请求 500。
-            Err(e) => Err(("failed", format!("任务异常退出: {e}"))),
-        };
-        match outcome {
-            Ok(tracks) if !tracks.is_empty() => {
-                groups.push(DailyOnlineGroup {
+    let mut pending: Vec<String> = Vec::new();
+    let mut oldest = std::time::Duration::ZERO;
+    {
+        let slots = entries().lock().unwrap();
+        for (source, label) in &wanted {
+            let Some(entry) = slots.get(&(today, source.clone())) else {
+                // 缓存里没有 = 这次没等到。任务还在后台跑，补拉就有。
+                pending.push(label.clone());
+                continue;
+            };
+            let age = entry.at.elapsed();
+            if age > oldest {
+                oldest = age;
+            }
+            match &entry.tracks {
+                Some(tracks) if !tracks.is_empty() => {
+                    groups.push(DailyOnlineGroup {
+                        source: source.clone(),
+                        label: label.clone(),
+                        count: tracks.len(),
+                    });
+                    buckets.push(tracks.clone());
+                }
+                Some(_) => skipped.push(DailyOnlineSkip {
                     source: source.clone(),
                     label: label.clone(),
-                    count: tracks.len(),
-                });
-                buckets.push(tracks);
+                    kind: "empty".to_string(),
+                    message: "该音源本次没有返回推荐".to_string(),
+                }),
+                None => skipped.push(DailyOnlineSkip {
+                    source: source.clone(),
+                    label: label.clone(),
+                    kind: entry.kind.clone(),
+                    message: entry.message.clone(),
+                }),
             }
-            Ok(_) => skipped.push(DailyOnlineSkip {
-                source,
-                label,
-                kind: "empty".to_string(),
-                message: "该音源本次没有返回推荐".to_string(),
-            }),
-            Err((kind, message)) => skipped.push(DailyOnlineSkip {
-                source,
-                label,
-                kind: kind.to_string(),
-                message,
-            }),
         }
     }
 
     let tracks = merge_online(&groups, &buckets, limit);
-    let day = day_number();
     Ok(DailyOnlinePage {
-        date: date_label(day),
+        date: date_label(today),
         limit,
         total: tracks.len(),
-        empty: groups.is_empty(),
+        // 还有平台在路上时不能报 empty：那不是「没有推荐」，是「还没到齐」。
+        // 报错会让界面去引导用户重新扫码登录，而问题只是慢。
+        empty: groups.is_empty() && pending.is_empty(),
         tracks,
         sources: groups,
         skipped,
         ready,
+        pending,
+        age_secs: oldest.as_secs(),
+        refreshing,
     })
 }
 
@@ -848,5 +1097,21 @@ mod tests {
         assert_eq!(resolve_day(None), today);
         assert_eq!(resolve_day(Some(-1)), today);
         assert_eq!(resolve_day(Some(MAX_DAY + 1)), today);
+    }
+
+    #[test]
+    fn failed_fetches_expire_much_sooner_than_successful_ones() {
+        // 一次超时不该把这个平台按死整个保鲜期：那样用户在推荐位上连点两次
+        // 刷新都拿不到东西，第一反应会是「账号掉了」，然后去重新扫码登录。
+        let mid = (ONLINE_FAILED_FRESH + ONLINE_FRESH) / 2;
+        assert!(fresh_after(true, mid), "成功结果此时仍算新鲜，不该重打上游");
+        assert!(
+            !fresh_after(false, mid),
+            "失败结果必须已过期，好让重试有机会翻身"
+        );
+
+        // 等待预算要明显短于单源超时，否则「先到先返回」又退化回「等最慢的」，
+        // pending 与前端补拉那条路永远走不到。
+        assert!(ONLINE_WAIT_BUDGET < ONLINE_TIMEOUT);
     }
 }

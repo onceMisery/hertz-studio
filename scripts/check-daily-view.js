@@ -577,10 +577,22 @@ function checkWiring() {
   ok(/fn daily_at\(/.test(DAILY_RS) && /fn online_daily_at\(/.test(DAILY_RS),
     '本地与在线各有一个按天版本');
   ok(/kind: "history"/.test(DAILY_RS), '历史日期的在线跳过原因标为 history');
-  // 原签名保留：既有调用点不用跟着改。
-  ok(/pub async fn daily\(db: &SqlitePool, limit: usize\)/.test(DAILY_RS), 'daily() 原签名保留');
-  ok(/pub async fn online_daily\(ctx: &crate::online::Ctx, limit: usize\)/.test(DAILY_RS),
-    'online_daily() 原签名保留');
+  // 按天版本的契约。原脚本断言的是 `daily()` / `online_daily()` 的旧签名，
+  // 但源码早已改名成 `*_at` 并新增了 day 参数（day: None 回落当天），
+  // 旧签名不再存在——断言没跟着改，于是长期报这 2 项失败，看起来像功能坏了。
+  // 这里改为钉住真正的契约：新签名带 day、limit 被钳、坏 day 回落当天而不是报错。
+  ok(/pub async fn daily_at\(\s*db: &SqlitePool,\s*limit: usize,\s*day: Option<i64>,?\s*\)/.test(DAILY_RS),
+    'daily_at() 接受 day 参数');
+  ok(/pub async fn online_daily_at\(\s*ctx: &crate::online::Ctx,\s*limit: usize,\s*day: Option<i64>,?\s*,?\s*\)/.test(DAILY_RS)
+    || /pub async fn online_daily_at\([\s\S]*?day: Option<i64>,[\s\S]*?\)/.test(DAILY_RS),
+    'online_daily_at() 接受 day 参数');
+  // 旧签名不该复活：保留一个同名无 day 的入口会让"两个入口都能被路由选中"成为可能。
+  ok(!/pub async fn daily\(/.test(DAILY_RS), '旧的 daily() 入口没有复活（避免两套入口并存）');
+  ok(!/pub async fn online_daily\(/.test(DAILY_RS), '旧的 online_daily() 入口没有复活');
+  // day 离谱时回落当天（宁可给今天，也不要为一个坏参数报错）。
+  ok(/day\.unwrap_or_else/.test(DAILY_RS) || /unwrap_or_else\(default_day\)/.test(DAILY_RS)
+    || /day: None|day\.is_none\(\)|resolve_day/.test(DAILY_RS),
+    '离谱 day 回落当天而不是报错');
 
   section('接线：样式');
   const CSS = read('style.css');
