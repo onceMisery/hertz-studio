@@ -1367,8 +1367,12 @@
 
 /* 进场用 animation 而不是 transition：卡片随 hidden→可见整块重建，
    transition 不会自己触发。backwards 而非 both —— both 会把末帧的
-   transform:none 变成常驻计算值（单位矩阵），让卡片永久成为层叠上下文。 */
+   transform:none 变成常驻计算值（单位矩阵），让卡片永久成为层叠上下文。
+   但 backwards 播完会回落到基础规则的 opacity:0，卡片入场后即消失，
+   故终态由这两条普通声明接管（关键字 none 不产生层叠上下文）。 */
 [data-skin="liunian"] .ln-modal.is-open .ln-modal-card {
+  opacity: 1;
+  transform: none;
   animation: ln-modal-in var(--dur-slow) var(--ease-out) backwards;
 }
 
