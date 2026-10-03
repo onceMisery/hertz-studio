@@ -2963,7 +2963,9 @@
     sel.value = stanza.visual;
     sel.addEventListener('change', function () {
       var v = sel.value;
-      stanza.visual = STANZA_VISUALS.indexOf(v) >= 0 ? v : 'stage';
+      // 星诞是元导演不是渲染器，不在 STANZA_VISUALS 里；判据用 stanzaActive()
+      // （含 starborn），否则选星诞会被当成非法值打回 'stage'。
+      stanza.visual = stanzaActive(v) ? v : 'stage';
       syncLayout();
       if (stanza.ready) applyStanzaConfig();
       savePreferences();
