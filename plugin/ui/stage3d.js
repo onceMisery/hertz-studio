@@ -2931,11 +2931,6 @@
       var vg = $('s3d-fl-vignette'); if (vg) vg.checked = stanza.vignette;
       var st = $('s3d-fl-subtitle'); if (st) st.checked = stanza.subtitle;
       var rot = $('s3d-fl-rotation'); if (rot) rot.checked = stanza.classicTuning.rotation;
-      function fillRange(id, v, fmt) {
-        var el = $(id), out = $(id + '-value');
-        if (el) el.value = String(v);
-        if (out) out.textContent = fmt(v);
-      }
       var mult = function (v) { return v.toFixed(2) + 'x'; };
       fillRange('s3d-fl-breathing', stanza.classicTuning.breathing, mult);
       fillRange('s3d-fl-spacing', stanza.classicTuning.spacing, mult);
@@ -2973,6 +2968,14 @@
       if (stanza.ready) applyStanzaConfig();
       savePreferences();
     });
+  }
+
+  // 滑杆回填：值写进 input、读数写进配对的 <output>。syncStanzaControls 与
+  // syncTemperaControls 共用，故放在两者共同的外层作用域。
+  function fillRange(id, v, fmt) {
+    var el = $(id), out = $(id + '-value');
+    if (el) el.value = String(v);
+    if (out) out.textContent = fmt(v);
   }
 
   function syncTemperaControls() {
