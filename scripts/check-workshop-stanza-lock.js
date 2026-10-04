@@ -5,8 +5,29 @@
 // 而这里要确认的是「锁定态下用户真的改不动参数，且声场卡仍可点」。
 
 const { chromium } = require('playwright');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const BASE = process.env.BASE || 'http://127.0.0.1:7641';
+
+// 服务要 token 才能开根页面，而这个脚本原来直接 goto(BASE + '/')，
+// 裸跑必然 ERR_CONNECTION_REFUSED —— 于是看起来像「环境没起服务」，
+// 实际是少了 token 这一环。
+//
+// 端口与token 一起从环境变量拿，缺省沿用项目里其它浏览器实测脚本的约定
+// （check-qingfeng-browser.js）：BASE 可用 BASE 或 QF_BASE 覆盖，
+// token 从对应数据目录读。跑隔离实例时：
+//   BASE=http://127.0.0.1:7891 QF_DATA_DIR=%LOCALAPPDATA%/Temp/qf-data2 node …
+// 读不到 token 就直接说清楚，别拿连接失败当「服务没起」。
+const DATA_DIR = process.env.QF_DATA_DIR
+  || (process.env.LOCALAPPDATA
+    ? path.join(process.env.LOCALAPPDATA, 'Temp', 'qf-data2')
+    : path.join(os.tmpdir(), 'qf-data2'));
+let TOKEN = process.env.QF_TOKEN || '';
+if (!TOKEN) {
+  try { TOKEN = fs.readFileSync(path.join(DATA_DIR, 'token'), 'utf8').trim(); } catch (e) { /* 下面报错 */ }
+}
 
 function say(...a) { console.log(...a); }
 function check(label, cond, detail) {
@@ -20,7 +41,14 @@ function check(label, cond, detail) {
     args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
   });
   const page = await browser.newPage({ viewport: { width: 1600, height: 940 } });
-  await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+  if (!TOKEN) {
+    say('读不到 token：找 ' + path.join(DATA_DIR, 'token') + '。'
+      + '用 QF_DATA_DIR 指向服务的数据目录，或直接 QF_TOKEN=<token> 传进来。');
+    process.exitCode = 1;
+    return;
+  }
+  // token 走查询参数：浏览器不给页面加请求头，和 /ws 用 ?token= 同一个理由。
+  await page.goto(BASE + '/?token=' + encodeURIComponent(TOKEN), { waitUntil: 'domcontentloaded' });
   // 上一轮会话可能把 stanzaVisual 存成 tempera/sonnet，页面一进来就是接管态。
   // 断言要验的是「锁定前 / 锁定后」两个状态，起点必须干净。
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) { /* 无所谓 */ } });

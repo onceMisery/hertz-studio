@@ -50,6 +50,16 @@ function harness(level, field = 0) {
     gl, FIELD_VS: definitions.FIELD_VS, FIELD_FS: definitions.FIELD_FS, STAR_VS: '', STAR_FS: '',
     q: () => level, seeds: count => ({ count }), makeVAO: () => ({}),
     buildProgram: () => ({ p: ++programId, u: { uBands: 'uBands', uClick: 'uClick' }, a: () => 0 }),
+    // syncArt（buildField 内部）调resolveCoverUrl —— 那是 stage3d.js:63 的
+    // 另一个模块级函数，extract只切了 buildField，不注入就是
+    // ReferenceError: resolveCoverUrl is not defined。
+    //
+    // **报错点出现在被测函数内部**，很容易误判成业务代码坏了。业务代码一直
+    // 好好的（stage3d.js 里它有真实定义），是脚本漏喂了依赖。
+    //
+    // 注意 extract() 返回的是**源码字符串**，不能直接当函数值塞进 env ——
+    // 那会变成 'resolveCoverUrl is not a function'。这三个函数与 buildField
+    // 一起在下面 runInNewContext 里求值，作用域自然连通。
     global: { Stage: true }, Stage: { coverUrl: () => env.url },
     Image: class { constructor() { images.push(this); this.naturalWidth = 1024; this.naturalHeight = 1024; } },
     uploadCommon() {}, setI: (locations, name, value) => { uniforms[name] = value; },
@@ -59,7 +69,15 @@ function harness(level, field = 0) {
     bw: 1440, bh: 960, time: 10, lastBeatAt: 9, audioBands: new Float32Array(64),
     pointerField: { x: 0, y: 0, active: 1, clickX: 0, clickY: 0, clickAt: 9 }
   };
-  vm.runInNewContext(extract('buildField'), env);
+  // buildField 内部还会调resolveCoverUrl（封面喂纹理那条路），
+  // 那是 stage3d.js 里另一个模块级函数，必须跟 buildField 一起求值 ——
+  // 少了它就是 ReferenceError，且报错点落在被测函数内部。
+  vm.runInNewContext(
+    extract('resolveCoverUrl') + '\n'
+      + extract('applyCoverImg') + '\n'
+      + extract('buildField'),
+    env
+  );
   const definition = field === 0 ? sphere : definitions.STAGES.find(stage => stage.field === field);
   return { env, state, events, images, uniforms, built: env.buildField(definition) };
 }

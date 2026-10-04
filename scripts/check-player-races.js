@@ -28,7 +28,27 @@ async function run() {
     renderPlaybackProgress() {}, syncMediaSession() {},
     applySnapshot(snapshot) { state.snapshot = snapshot; },
   });
-  vm.runInContext(section('const PlaybackIntent =', 'const REQUEST_TIMEOUT')
+  // 切片必须**紧贴 ServerTransport 的闭合**。
+  //
+  // 结束标记原来选的是 `const REQUEST_TIMEOUT`（app.js:716），而
+  // ServerTransport 在 381 行就闭合了 —— 中间夹着 300 多行与被测对象无关的
+  // 代码（封面 resolveCover/applyCoverBg 一整块、window.HertzCovers 全局
+  // 导出、DbxTransport），于是 vm 里执行到`window.HertzCovers = {...}` 就
+  // ReferenceError: window is not defined。
+  //
+  // **报错点出现在被测对象之外**，很容易误判成业务代码坏了 —— 业务代码
+  // 一直好好的，是脚本的切片边界陈旧。
+  const block = section('const PlaybackIntent =', '\nconst DBX_EVENT_METHOD');
+  // 自检：切片必须正好是被测的那三样，且**代码里**没有 window.* 全局导出。
+  // 判「代码里」要先剥掉整行注释 —— 区间里本来就有一行注释提到
+  // `window.dbxPlugin.invoke`，不剥就会把正确切片判成错的（假阳性）。
+  const code = block.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert.ok(code.includes('const PlaybackIntent =')
+    && code.includes('function serializedPlaybackPost')
+    && code.includes('const ServerTransport =')
+    && !code.includes('window.'),
+    '切片只含被测的三个定义（PlaybackIntent / serializedPlaybackPost / ServerTransport），代码里不含 window.* 全局导出');
+  vm.runInContext(block
     + '\nthis.transport = ServerTransport; this.intent = PlaybackIntent;', box);
   const first = box.transport.post('/v1/player/play');
   const second = box.transport.post('/v1/player/stop');
