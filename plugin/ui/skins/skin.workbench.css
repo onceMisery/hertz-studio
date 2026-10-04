@@ -119,6 +119,14 @@
   min-width: 0;
 }
 
+/* 顶栏搜索槽也要归皮肤：它是业务 .topsearch（自带高度/圆角/底色），
+   不接手就保持 style.css 的默认胶囊样式 —— 在工作台这套硬边框里读作
+   一个不属于这里的圆角气泡。几何对齐 workbench 的 3px 直角。 */
+[data-skin="workbench"] .topsearch {
+  height: 28px;
+  border-radius: var(--skin-radius);
+}
+
 [data-skin="workbench"] .col-tools {
   order: 2;
   flex: 0 0 100%;
@@ -141,10 +149,18 @@
 [data-skin="workbench"] .fav-row,
 [data-skin="workbench"] .online-row,
 [data-skin="workbench"] .pl-row,
-[data-skin="workbench"] .pd-row {
+[data-skin="workbench"] .pd-row,
+[data-skin="workbench"] .dv-row {
   padding-top: var(--skin-row-py);
   padding-bottom: var(--skin-row-py);
   border-radius: 0;
+}
+
+/* 悬停也归皮肤：业务 .dv-row:hover 走 --surface-2，在浮光这套硬边框
+   列表里会读作"整行换底色"，与同页 .pd-row:hover 的描边式反馈不一致。 */
+[data-skin="workbench"] .dv-row:hover {
+  background: transparent;
+  border-color: var(--skin-line-soft);
 }
 
 [data-skin="workbench"] .lib-list,
@@ -172,6 +188,13 @@
 [data-skin="workbench"] .pl-card-art,
 [data-skin="workbench"] .dv-art {
   border-radius: var(--skin-radius);
+}
+
+/* 每日推荐列表的行距也归皮肤：业务默认是 --sp-2（8px），浮光的
+   --skin-row-py 是 3px，再叠上 .dv-body 自己的 gap 才和紧凑排布一致。
+   不接手的话 30 首会比同页曲库/队列松一档，"紧凑"读不出来。 */
+[data-skin="workbench"] .dv-body {
+  gap: var(--skin-row-py);
 }
 
 [data-skin="workbench"] .daily-strip {

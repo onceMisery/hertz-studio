@@ -1137,15 +1137,58 @@
     });
     return cell;
   }
+  // 商籁 / 凝彩（以及流光 / 心象）接管画面时，舞台参数已经不作用于画面了。
+  //
+  // 它们的渲染器是各自独立的（商籁/凝彩走 Pixi，流光/心象走 DOM+CSS），舞台
+  // 那一套相机/律动/光晕根本不在渲染路径上。此时让用户继续拖滑块，改动既不会
+  // 被看见、也不会真的作用在舞台上 —— 那是骗人，比不给调更糟。所以沉浸舞台
+  // 下只保留「选择」（选声场、选歌词视觉、选主题），把参数编辑整段关掉。
+  //
+  // 判据读 Stage3D.visualState().effective 而不是 preferences().stanzaVisual：
+  // starborn 是元导演，它自己不当渲染器，真正生效的是 director 当前指向的那个。
+  function stanzaVisual() {
+    if (!window.Stage3D || !Stage3D.visualState) return null;
+    var vs = Stage3D.visualState();
+    if (!vs || !vs.active) return null;
+    return vs.effective;
+  }
+
+  // 上一次渲染时的锁定值。只在它翻转时才重渲染（见 init 里 onVisualChange）。
+  var lastLock = null;
+
+  var STANZA_LABELS = {
+    classic: '流光歌词', cadenza: '心象歌词', sonnet: '商籁歌词', tempera: '凝彩歌词'
+  };
+
+  // 锁定时顶上那条说明。要说清三件事：谁接管了、为什么调不动、怎么回去。
+  // 只写"已锁定"等于让用户自己猜，猜不到就会以为面板坏了。
+  function stanzaNotice(vs) {
+    var label = STANZA_LABELS[vs] || '歌词视觉';
+    var box = h('div', 'ws-stanza-note');
+    box.id = 'ws-stanza-note';
+    box.append(
+      h('strong', null, label + '正在接管画面'),
+      h('p', null, '这一套视觉有自己的排版与光影，舞台的律动、镜头与光晕参数不再作用于画面，' +
+        '所以这里只保留选择。想调舞台参数，把「歌词视觉」切回「舞台 3D 歌词轨」。')
+    );
+    return box;
+  }
+
   function renderImmersive(body) {
     var prefs = snapshot();
+    var vs = stanzaVisual();
+    var locked = !!vs;
+    lastLock = vs || null;
     var intro = h('div', 'ws-intro');
     intro.append(h('span', 'ws-kicker', 'THE LISTENING ROOM'), h('h2', null, '给音乐一个空间'), h('p', null, '挑选声场，调整光与节奏。每一次改变，即刻呈现在预览中。'));
     body.appendChild(intro);
+    if (locked) body.appendChild(stanzaNotice(vs));
     var history = h('div', 'ws-history');
     [['ws-undo', '撤销', function () { travel(true); }], ['ws-redo', '重做', function () { travel(false); }], ['ws-defaults', '恢复默认', function () { edit(DEFAULTS); }]].forEach(function (spec) {
       var b = h('button', 'btn', spec[1]); b.type = 'button'; b.id = spec[0]; b.addEventListener('click', spec[2]); history.appendChild(b);
     });
+    // 撤销/重做/恢复默认改的是舞台参数，stanza 接管时同样不作用于画面。
+    if (locked) history.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
     body.appendChild(history);
     body.appendChild(h('h3', 'ws-section-title', '从一种心情开始'));
     var templates = h('div', 'ws-templates');
@@ -1157,10 +1200,14 @@
     ].forEach(function (spec, index) {
       var b = h('button', 'ws-template'); b.type = 'button'; b.id = 'ws-template-' + index; b.innerHTML = sceneArt(spec[2].scene);
       var label = h('span'); label.append(h('strong', null, spec[0]), h('small', null, spec[1])); b.appendChild(label);
+      // 模板是一整套舞台参数的预设，锁定时同样不作用：留着能点就等于骗人。
+      if (locked) b.disabled = true;
       b.addEventListener('click', function () { edit(Object.assign({}, DEFAULTS, spec[2])); }); templates.appendChild(b);
     });
     body.appendChild(templates);
     body.appendChild(h('h3', 'ws-section-title', '选择声场'));
+    // 声场卡保持可用：这是"现场的创意舞台被选择"的那部分，与 stanza 无关。
+    // 选了它仍然写进偏好，stanza 关掉的瞬间就按新声场呈现。
     var scenes = h('div', 'ws-scene-grid');
     Stage3D.stages().forEach(function (scene) {
       var b = h('button', 'ws-scene-card'); b.type = 'button'; b.dataset.scene = scene.id; b.id = 'ws-scene-' + scene.id;
@@ -1169,11 +1216,16 @@
       b.addEventListener('click', function () { edit({ scene: scene.id }); }); scenes.appendChild(b);
     });
     body.appendChild(scenes);
-    body.appendChild(h('h3', 'ws-section-title', '光与节奏'));
+    body.appendChild(locked
+      ? h('h3', 'ws-section-title is-locked', '光与节奏 · 由歌词视觉接管')
+      : h('h3', 'ws-section-title', '光与节奏'));
     var controls = h('div', 'ws-tuning');
     [ ['reactivity', '律动强度', 0, 2, .05, '', 1.35], ['motion', '镜头动态', 0, 1, .05, '', .65], ['bloom', '光晕强度', 0, 1.5, .05, '', .8] ].forEach(function (row) { controls.appendChild(immersiveSlider(row, prefs)); });
     controls.appendChild(toggle('镜头自动巡航', prefs.cruise, function (v) { edit({ cruise: v }); }));
     controls.querySelector('[role="switch"]').id = 'ws-cruise';
+    // 歌词字号/字间柔光归 stanza 自己管（它有自己的排版与光学后期），
+    // 舞台侧的同名参数在 stanza 激活时是死设置，同样关掉。
+    if (locked) controls.querySelectorAll('input, [role="switch"]').forEach(function (el) { el.disabled = true; });
     body.appendChild(controls);
     body.appendChild(h('h3', 'ws-section-title', '封面与歌词'));
     var reading = h('div', 'ws-tuning');
@@ -1186,8 +1238,16 @@
     reading.querySelector('[role="switch"]').id = 'ws-lyrics';
     reading.appendChild(immersiveSlider(['lyricSize', '歌词字号', .75, 1.35, .05, '×', 1], prefs));
     reading.appendChild(immersiveSlider(['lyricGlow', '字间柔光', 0, 1, .05, '', .45], prefs));
+    // 上面这两个滑块在 stanza 激活时是死设置（stanza 有自己的排版与光学后期），
+    // 但「歌词视觉」下拉必须留着 —— 那是回到可编辑状态的唯一出口。
+    if (locked) {
+      var lyricSliders = reading.querySelectorAll('.ws-slider input, input[type="range"]');
+      lyricSliders.forEach(function (el) { el.disabled = true; });
+    }
     body.appendChild(reading);
-    body.appendChild(h('p', 'ws-save-note', '设置自动保存 · 关闭工坊，继续沉浸聆听'));
+    body.appendChild(h('p', 'ws-save-note', locked
+      ? '选择自动保存 · 舞台参数已由歌词视觉接管'
+      : '设置自动保存 · 关闭工坊，继续沉浸聆听'));
     syncHistory();
   }
 
@@ -1206,10 +1266,43 @@
 
   // 高级编排的面板内实时预览：参数/编排的每一次改动直接画在面板里，
   // 不依赖也不惊动主页右栏的播放视窗。
+  // 高级编排的实时预览：参数/编排的每一次改动直接画在面板里，
+  // 不依赖也不惊动主页右栏的播放视窗。
+  //
+  // 另有宽屏形态（ws-expand）：同一个挂载点、同一个 canvas，只把容器摊成
+  // 两栏。窄面板里那个 16:9 画布约 350x200 —— 场景的空间结构读不出来，
+  // 粗光晕 target 也掉到不足 1/8 分辨率。放大是对症解，不是美化。
+  var WIDE_KEY = 'vmusic.workshop.wide.v1';
+
+  function wideStored() {
+    try { return localStorage.getItem(WIDE_KEY) === '1'; }
+    catch (e) { return false; }
+  }
+
+  function applyWide(on) {
+    if (refs.panel) refs.panel.classList.toggle('is-wide', on);
+    // body 上的这个类只给 `body.ws-open.ws-wide #lyric-page` 让位用。
+    // 挂在 body 上而不是让 CSS 去猜面板状态：选择器越短，重排时越稳。
+    document.body.classList.toggle('ws-wide', on);
+    var btn = $('ws-expand');
+    if (btn) {
+      btn.setAttribute('aria-pressed', String(on));
+      btn.title = on ? '收回预览' : '展开预览（宽屏工坊）';
+      btn.setAttribute('aria-label', btn.title);
+      btn.querySelector('use').setAttribute('href', on ? '#i-compress' : '#i-expand');
+    }
+    // 容器尺寸变了，后备缓冲得跟着重设。creative-stage 自己挂了
+    // ResizeObserver，这条只是把首帧提前 —— 否则切换后头一两帧还是旧尺寸。
+    if (window.CreativeStage && CreativeStage.remeasure) CreativeStage.remeasure();
+  }
+
   function syncAdvancedPreview() {
     var pv = $('ws-preview');
     if (!pv) return;
     pv.hidden = target !== 'advanced';
+    // 展开按钮只在预览真的挂着时可用：点了没反应比不给点强。
+    var btn = $('ws-expand');
+    if (btn) btn.disabled = target !== 'advanced';
     if (target !== 'advanced') {
       if (window.CreativeStage && CreativeStage.unmountPreview) CreativeStage.unmountPreview();
       return;
@@ -1350,6 +1443,15 @@
     }
     var close = $('ws-close');
     if (close) close.addEventListener('click', function () { setOpen(false); });
+    var expand = $('ws-expand');
+    if (expand) {
+      expand.addEventListener('click', function () {
+        var on = !refs.panel.classList.contains('is-wide');
+        try { localStorage.setItem(WIDE_KEY, on ? '1' : '0'); } catch (e) { /* 隐私模式，记住不了就不记 */ }
+        applyWide(on);
+      });
+      applyWide(wideStored());
+    }
     // 顶栏那个按钮不在这里绑：app.js 的 initCreative 同时接顶栏与设置页两个入口，
     // 两边都走 Workshop.toggle。这里再绑一次就等于一次点击翻两遍开关 ——
     // 面板开了立刻被第二个 handler 关掉，看起来就是"按钮没反应"。
@@ -1381,6 +1483,19 @@
         if (kind === 'preset' || kind === 'library') render();
       });
     }
+
+    // 接管态变化**不经过 CreativeStage**，所以上面那条订阅永远收不到。
+    // 少了这一条会得到一个很难自查的现象：用户在设置里把歌词视觉切成
+    // 商籁，工坊面板还是那副可编辑的样子 —— 参数照拖、说明不出现，
+    // 直到手动切一次页签才生效。所以这里单独跟一次锁定态，且只在
+    // 「锁定的开/关」翻转时重渲染（每帧重排会打掉正在拖的滑块）。
+    if (window.Stage3D && Stage3D.onVisualChange) {
+      Stage3D.onVisualChange(function () {
+        if (!isOpen() || target !== 'immersive') return;
+        if (stanzaVisual() !== lastLock) render();
+      });
+    }
+
     return api;
   }
 

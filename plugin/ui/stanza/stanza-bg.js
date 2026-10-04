@@ -109,7 +109,13 @@
           } catch (e) { resolve(url); }
         };
         img.onerror = function () { resolve(url); };
-        img.src = url;
+        // 插件形态下 url 可能是元数据里的音源 https 原址：CSP 画不出，canvas 取色
+        // 也会因跨域污染抛错。先经 HertzCovers 换 data URL；代理拿不到时维持原行为。
+        if (window.HertzCovers && window.HertzCovers.slot) {
+          window.HertzCovers.slot(url, function (r) { if (r) img.src = r; else resolve(url); });
+        } else {
+          img.src = url;
+        }
       });
     }
     var fluidImgs = []; // 顺序即 DOM 层级：首项最旧（最底层），末项最新（紧贴 tint 之下、最上层）

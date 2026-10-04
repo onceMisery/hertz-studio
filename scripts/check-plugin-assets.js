@@ -20,7 +20,7 @@
 // `/wallpapers/x.jpg` 被解析成 `.../stage-themes/wallpapers/x.jpg`——404。
 //
 // 资源协议的根其实就是 ui 根，所以 host.js 只取 origin + 第一段（插件 id）。
-// 这里钉四件事：
+// 这里钉五件事：
 //
 //   1. **两种宿主的 base 形状都要对**：WebView2 把自定义协议映射成
 //      http(s) 子域，WKWebView/webkit2gtk 用原生 `dbx-plugin://`；后者的
@@ -30,6 +30,8 @@
 //      （theme-studio.js 的 WALL_BASE 注释记着那个修过的 bug）。
 //   4. **声明出来的资源真的在包里**：路径写错和 base 算错的表象一模一样，
 //      只有对着磁盘核一遍才分得清。
+//   5. **音源直链的图一律经 HertzCovers 代理**：沙箱 CSP 的 img-src 不放行
+//      第三方 https，直连就是一张空图；委派那行写错还测不出来（见该节注释）。
 
 'use strict';
 
@@ -236,6 +238,52 @@ function checkDeclaredAssetsExist() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 6. 远程封面一律经 HertzCovers 代理，且委派没写成递归
+// ---------------------------------------------------------------------------
+
+/// 找出所有自带 applyBg / applyImg 包装的模块。这两个包装是"远程封面在插件
+/// 沙箱里画不出来"的统一出口：真 app 里 window.HertzCovers 一定存在，所以走的
+/// 永远是委派分支——而契约脚本的沙箱里没有它，只跑到回落分支。于是委派那行
+/// 写错（`applyImg(img, url)` 调自己而不是 `HertzCovers.applyImg(...)`）在
+/// 沙箱里静默无恙，在真 app 里是 Maximum call stack size exceeded。
+function checkCoverDelegation() {
+  section('远程封面委派：走 HertzCovers，且没有写成自己调自己');
+
+  const files = fs.readdirSync(WEB).filter((n) => n.endsWith('.js'))
+    .filter((n) => /function applyBg\(|function applyImg\(/.test(read(path.join(WEB, n))));
+  ok(files.length >= 5, `找到 ${files.length} 个自带封面包装的模块（>=5）`);
+
+  for (const name of files) {
+    const text = read(path.join(WEB, name));
+    for (const fn of ['applyBg', 'applyImg']) {
+      if (!new RegExp('function ' + fn + '\\(').test(text)) continue;
+      ok(text.includes('window.HertzCovers.' + fn + '('),
+        `${name} 的 ${fn} 委派给 HertzCovers.${fn}（不是调自己）`);
+      ok(!new RegExp('HertzCovers\\)\\s*\\{\\s*' + fn + '\\(').test(text),
+        `${name} 的 ${fn} 没有递归调用自己`);
+    }
+  }
+
+  // 绕过包装直接写 background-image 的地方。独立形态看不出问题（远程 URL 直接
+  // 就能画），插件形态是一整面空图 + 一串 CSP 报错。
+  //
+  // 白名单里两处画的都是**站内**资源：app.js 的 applyCoverBg 是代理落地后的
+  // 终点，theme-studio.js 铺的是经 assetUrl 补全的壁纸，都在 img-src 放行范围
+  // 内，不需要再过代理。包装自己的回落分支写成三元式（`= url ? 'url("' … : ''`），
+  // 不落在下面这两个形状里，所以不用排除。
+  const RAW_BG_ALLOWED = new Set(['app.js', 'theme-studio.js']);
+  const bypass = fs.readdirSync(WEB).filter((n) => n.endsWith('.js') && !RAW_BG_ALLOWED.has(n))
+    .filter((n) => /style\.backgroundImage\s*=\s*('url\("'|`url\("\$\{)/.test(read(path.join(WEB, n))));
+  eq(bypass.join(','), '', '没有模块绕过 applyBg 直接写 background-image');
+
+  // innerHTML 模板里的空 href/src：解析瞬间就按 <base> 解析成插件 ui 的**目录**
+  // URL 去加载——插件形态下 opaque origin 直接拒（"Unsafe attempt to load" 刷屏），
+  // 独立形态是一次 404。引用应当先建不带 href 的节点、再 setAttribute 挂上。
+  const emptyRef = fs.readdirSync(WEB).filter((n) => n.endsWith('.js') && /(href|src)=""/.test(read(path.join(WEB, n))));
+  eq(emptyRef.join(','), '', '没有空 href/src 的 innerHTML 模板');
+}
+
 (async () => {
   checkWebView2Base();
   checkNativeSchemeBase();
@@ -243,6 +291,7 @@ function checkDeclaredAssetsExist() {
   checkStandalone();
   checkSingleOwner();
   checkDeclaredAssetsExist();
+  checkCoverDelegation();
 
   console.log('\n' + '─'.repeat(60));
   if (failures) {

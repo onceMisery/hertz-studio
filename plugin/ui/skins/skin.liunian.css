@@ -456,6 +456,22 @@
   cursor: pointer;
 }
 
+/* dv-row（每日推荐的列表画法行）：与 pd-row 同一档节奏。
+   这两种行都是「一列里密集排下去」的内容行，不跟 .track 那种带封面的
+   曲目行走同一套 padding —— 行高一大，30 首就撑破一屏。 */
+[data-skin="liunian"] .dv-row {
+  padding: 7px 10px;
+  border-radius: 8px;
+}
+
+/* 悬停态也归皮肤：业务 .dv-row:hover 用 --surface-2 + 强描边，在流年这套
+   暖纸底上会读作"突然变了块底色"，与同页其它行（.pd-row:hover）的处理
+   不一致。这里只接令牌，不写死颜色。 */
+[data-skin="liunian"] .dv-row:hover {
+  background: var(--hover);
+  border-color: var(--skin-line-soft);
+}
+
 /* --- 专辑/歌手分类卡片（JS 生成到 .ln-slot） ----------------------------- */
 
 [data-skin="liunian"] .ln-cat {
@@ -680,6 +696,13 @@
 [data-skin="liunian"] .pl-card-art,
 [data-skin="liunian"] .dv-art {
   border-radius: 12px;
+}
+
+/* 每日推荐列表行距归皮肤：业务 .dv-body 的 gap 写死 --sp-2（8px），
+   而 .dv-row 在本皮肤是 7px 内距 —— 8px 间隙 + 7px 内距让 30 首比
+   同页其它列表松一整档，密集排布的意图全丢了。 */
+[data-skin="liunian"] .dv-body {
+  gap: var(--skin-row-py);
 }
 
 /* ====================== 播放卡 .bar（文档流） =========================== */
@@ -1352,7 +1375,9 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  width: min(880px, 100%);
+  /* 内容切成左栏 216px + 右栏，右栏还放得下宽表单行（主题/输出设备那几行
+     的 select 上限 260px + 96px 标签 + 说明）。窄屏由 media query 接走。 */
+  width: min(1040px, 100%);
   max-height: calc(100vh - var(--sp-8) * 2);
   border: 1px solid var(--glass-line);
   border-radius: var(--skin-radius);
@@ -1446,20 +1471,143 @@
   flex-direction: column;
 }
 
+/* ==========================================================================
+   设置分类导航（左栏）
+   --------------------------------------------------------------------------
+   设置视图里是 12 个平铺的 .set-group，单列一路滚到底，谁在中间都看不见
+   标题。这里给浮层内容切成两栏：左栏列出分类，右栏一次只显示一条。
+
+   滚动仍然只有一个容器：#view-settings。左栏自己 overflow-y:auto，但它是
+   条目列表、永远比内容短，实际上不会滚；真正需要滚的始终是右栏。
+
+   高度靠 flex 链守：.ln-set-layout 撑满 .ln-modal-body 的剩余高度，
+   左栏 min-height:0 + overflow 才能真的裁切而不是把卡片顶高。
+   ========================================================================== */
+
+[data-skin="liunian"] .ln-set-layout {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+[data-skin="liunian"] .ln-set-nav {
+  flex: none;
+  width: 216px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+  padding: var(--sp-5) var(--sp-4) var(--sp-6) var(--sp-6);
+  border-right: 1px solid var(--glass-line);
+}
+
+/* 一级分类名：小号字、弱化。它只是分组标签，不可点（可点的是下面每一条）。 */
+[data-skin="liunian"] .ln-set-cat {
+  padding: var(--sp-4) 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+[data-skin="liunian"] .ln-set-cat:first-child { padding-top: 0; }
+
+[data-skin="liunian"] .ln-set-link {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: 2px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-set-link:hover { background: var(--hover); }
+
+[data-skin="liunian"] .ln-set-link-text {
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+
+/* 副说明只在选中时露出来：未选中时左栏要能一屏扫完，12 条各带一行说明
+   就太长、太吵。选中后右栏正在讲这一条，说明跟着一起看才有意义。 */
+[data-skin="liunian"] .ln-set-link-note {
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  color: var(--muted);
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out);
+}
+
+[data-skin="liunian"] .ln-set-link.active { background: var(--field-bg-hover); }
+
+[data-skin="liunian"] .ln-set-link.active .ln-set-link-text {
+  font-weight: 600;
+  color: var(--highlight);
+}
+
+/* 选中标记走左边缘竖条 + 品牌色圆点：视觉角色分工上「当前选中项」是
+   --highlight（香槟金），而 --brand（薄荷青）留给「正在生效」，所以竖条
+   用 brand、字色用 highlight，两者不抢。 */
+[data-skin="liunian"] .ln-set-link.active .ln-set-link-note {
+  max-height: 3em;
+  opacity: 1;
+}
+
+[data-skin="liunian"] .ln-set-link.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  width: 2px;
+  height: 60%;
+  border-radius: 2px;
+  background: var(--brand);
+}
+
+[data-skin="liunian"] .ln-set-link { position: relative; }
+
+/* 键盘焦点：与全局 focus-visible 同口径，只是这里背景更实，需要自带描边
+   才看得清（全局那条 outline 在浅底上会被 field-bg-hover 吃掉）。 */
+[data-skin="liunian"] .ln-set-link:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+
+/* 右栏：只承载当前分类的分组 */
+[data-skin="liunian"] .ln-set-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* 设置视图自带标题（.col-head 粘顶），浮层头部已有大标题，
    这里只保留吸顶作用、去掉重复的视觉重量。 */
-[data-skin="liunian"] .ln-modal-body > #view-settings {
+[data-skin="liunian"] .ln-set-pane > #view-settings {
   padding: var(--sp-6) var(--sp-7) var(--sp-7);
 }
 
 /* 浮层头已经写了「设置」，视图自带的 col-head 只剩一个重复标题：藏掉。
    （.col-head 在浮层外仍是吸顶头，规则不动。） */
-[data-skin="liunian"] .ln-modal-body > #view-settings > .col-head { display: none; }
+[data-skin="liunian"] .ln-set-pane > #view-settings > .col-head { display: none; }
 
 /* 卡片自身已有整块入场动画，内容再叠一次上浮会显得发糊：浮层内不重播。 */
-[data-skin="liunian"] .ln-modal-body > #view-settings { animation: none; }
+[data-skin="liunian"] .ln-set-pane > #view-settings { animation: none; }
 
-/* 窄屏：浮层贴边铺满，去掉外边距与圆角，让设置项有整屏宽度。 */
+/* 窄屏：浮层贴边铺满，去掉外边距与圆角，让设置项有整屏宽度。
+   左栏在窄屏改成横向滚动的分类条 —— 两栏并排会把右栏压到放不下一个
+   表单行，整列设置项全被挤成一条缝。 */
 @media (max-width: 720px) {
   [data-skin="liunian"] .ln-modal { padding: 0; }
 
@@ -1472,7 +1620,46 @@
     border-right: 0;
   }
 
-  [data-skin="liunian"] .ln-modal-body > #view-settings { padding: var(--sp-5) var(--sp-5) var(--sp-7); }
+  [data-skin="liunian"] .ln-set-layout { flex-direction: column; }
+
+  [data-skin="liunian"] .ln-set-nav {
+    flex: none;
+    width: 100%;
+    display: flex;
+    gap: var(--sp-3);
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: var(--sp-4) var(--sp-5);
+    border-right: 0;
+    border-bottom: 1px solid var(--glass-line);
+    scrollbar-width: none;
+  }
+
+  [data-skin="liunian"] .ln-set-nav::-webkit-scrollbar { display: none; }
+
+  /* 横向条里只留条目：分类名会占掉一整行的宽度，反而把后面的条目推出屏。 */
+  [data-skin="liunian"] .ln-set-cat { display: none; }
+
+  [data-skin="liunian"] .ln-set-link {
+    flex: none;
+    width: auto;
+    white-space: nowrap;
+    padding: var(--sp-3) var(--sp-5);
+    border-radius: 999px;
+  }
+
+  [data-skin="liunian"] .ln-set-link-note { display: none; }
+
+  /* 胶囊条里没有左边距，竖条会压在文字上：改成整条底色标记。 */
+  [data-skin="liunian"] .ln-set-link.active::before { display: none; }
+
+  [data-skin="liunian"] .ln-set-link.active { background: var(--accent); }
+
+  [data-skin="liunian"] .ln-set-link.active .ln-set-link-text { color: var(--accent-ink); }
+
+  [data-skin="liunian"] .ln-set-pane > #view-settings {
+    padding: var(--sp-5) var(--sp-5) var(--sp-7);
+  }
 }
 
 /* 低动效偏好：全局 body.reduce-motion 兜底，这里把浮层显式写出来，

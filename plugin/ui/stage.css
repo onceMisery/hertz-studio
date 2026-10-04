@@ -46,7 +46,7 @@
   /* 封面取色的第二支（补色）。粒子层用它画一半光点，让光尘不是单色的，
      而是有一冷一暖两个方向——和 --stage-h3 是同一个色相。 */
   --music-highlight-alt: var(--accent-2);
-  --music-highlight-alt-rgb: var(--accent-rgb);
+  --music-highlight-alt-rgb: var(--accent-2-rgb);
 
   /* --- 舞台取色产物 --- */
   --stage-h1: #2c313b;

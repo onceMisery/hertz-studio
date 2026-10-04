@@ -33,8 +33,18 @@
 <link rel="stylesheet" href="skins/skin.workbench.css" data-skin-css="workbench" disabled>
 <link rel="stylesheet" href="skins/skin.liunian.css" data-skin-css="liunian" disabled>
 <link rel="stylesheet" href="skins/skin.ios.css" data-skin-css="ios" disabled>
+<link rel="stylesheet" href="skins/skin.qingfeng.css" data-skin-css="qingfeng" disabled>
 </head>
 <body>
+<script>
+  // 浮动实例（dbx 的 surface: "window"）在 app.js boot 之前就会画第一帧：252x55 的
+  // 窗口里闪一下完整界面比闪一下空卡片难看得多，所以按 URL 参数先把整页藏成一张
+  // 深色卡片（样式见 style.css 的 hertz-floating-preboot）。参数是同步可读的，
+  // 而 dbxPlugin.context 要等 init 消息，来不及。
+  if (location.search.indexOf('dbxPluginWindow=') >= 0) {
+    document.documentElement.classList.add('hertz-floating-preboot');
+  }
+</script>
 <!-- 宿主适配层，必须是第一个脚本：app.js 排在最后加载，而 stage3d.js /
      theme-studio.js / online.js 都在它之前，靠不上它定义的东西。独立形态下
      它全是恒等实现，行为与没有这个文件时一致。 -->
@@ -882,6 +892,31 @@
         </div>
       </div>
 
+      <!-- 窗口与舞台：沉浸声场与胶囊播放器的入口。
+           这两个入口原本只挂在顶栏右上角，但清风皮肤把控制入口统一收到
+           左上角的设置按钮里，顶栏那几个图标对清风是冗余的（见 skin.qingfeng.css）。
+           隐藏顶栏按钮前必须在这里补上，否则这两条路就断了 ——
+           快捷键 V / 方向键仍然有效，但没有任何可发现的入口。 -->
+      <div class="set-group">
+        <h2 class="set-title">窗口与舞台</h2>
+        <div class="set-row">
+          <label>沉浸声场</label>
+          <span class="set-actions">
+            <button id="set-stage3d-btn" class="btn">进入声场 (V)</button>
+          </span>
+        </div>
+        <div class="set-row">
+          <label>胶囊播放器</label>
+          <span class="set-actions">
+            <button id="set-capsule-btn" class="btn">最小化为胶囊</button>
+          </span>
+        </div>
+        <div class="hint set-note">
+          沉浸声场是三维歌词与频谱舞台，胶囊播放器把窗口收成一条挂在桌边的窄条。
+          两者都有快捷键，关掉这个窗口不会退出它们。
+        </div>
+      </div>
+
       <!-- 创意舞台：手绘风格、自定义背景与工坊入口在这里。
            细分参数不在这里调——那是工坊的活。 -->
       <div class="set-group">
@@ -1249,12 +1284,22 @@
       <div class="ws-title">创意工坊</div>
       <div class="ws-sub">场景 · 收藏 · 参数 · 编排 · 绑定 · 背景 · 导出</div>
     </div>
+    <button class="ws-expand" id="ws-expand" title="展开预览（宽屏工坊）" aria-label="展开预览" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
+    </button>
     <button class="ws-close" id="ws-close" title="关闭" aria-label="关闭创意工坊">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
     </button>
   </div>
   <div class="ws-tabs" id="ws-tabs" role="tablist" aria-label="工坊页签"></div>
-  <!-- 高级编排的面板内实时预览：高级渲染层直接画在这里，不惊动主页右栏。 -->
+  <!-- 实时预览：高级渲染层直接画在这里，不惊动主页右栏。
+
+       窄面板（默认 400px）里它是 16:9 的小画布，约 350x200 —— 那个尺寸下
+       场景的空间结构（灯柱的疏密、纵深的收敛、字阵的呼吸）几乎读不出来。
+       所以加一个宽屏形态：面板摊成「预览 1.2fr + 参数 380px」两栏，
+       预览占满整列高度。参照 folia-major 的 ThemePark 布局比例
+       （grid-cols-[minmax(0,1.2fr)_380px]，预览 min-h-[300px] 且 h-full）。
+       同一个挂载点、同一个 canvas，只是容器变大 —— 不新增第二条渲染链路。 -->
   <div class="ws-preview" id="ws-preview" hidden>
     <div class="ws-preview-stage" id="ws-preview-host"></div>
     <div class="ws-preview-meta" id="ws-preview-meta"></div>
@@ -1389,6 +1434,9 @@
 <!-- 流年皮肤的 DOM 重编排层：紧跟 skins.js（要监听 skin:changed），
      且必须在 app.js 之前。 -->
 <script src="skins/skin.liunian.js"></script>
+<!-- 清风皮肤的 DOM 重编排层：同样紧跟 skins.js（要监听 skin:changed），
+     且必须在 app.js 之前（要向 app.js 发 qf:panel 事件取队列快照）。 -->
+<script src="skins/skin.qingfeng.js"></script>
 <script src="themes.js"></script>
 <script src="stage.js"></script>
 <!-- 起音检测：粒子层与三维层共用同一份"鼓点是哪一刻"，必须排在两者之前 -->
@@ -1447,17 +1495,37 @@
 <script src="favorites.js"></script>
 <script src="daily.js"></script>
 <script src="daily-view.js"></script>
-<!-- 胶囊播放器：最小化态下界面唯一可见的东西。整块是一个按钮，点回完整界面。
-     内容只有信息（封面 / 「正在播放」/ 标题 / 艺术家），不放控件——要操作就展开。
+<!-- 胶囊播放器：最小化态下界面唯一可见的东西（dock 实例里则是唯一内容）。
+     信息区（封面 / 「正在播放」/ 标题 / 艺术家）整块可点 = 展开；右侧四个按钮是
+     上一首 / 播放暂停 / 下一首 / 展开——不展开也能换歌与控制播放。整块可拖、
+     靠近边或角自动吸附，位置记进 localStorage。
      position: fixed 所以与四套皮肤正交：皮肤改的是布局栅格，胶囊浮在其上。 -->
-<button type="button" id="capsule" class="capsule" hidden aria-label="展开播放器">
+<div id="capsule" class="capsule" hidden role="group" aria-label="胶囊播放器">
   <span class="capsule-art" id="capsule-art" aria-hidden="true"></span>
   <span class="capsule-text">
     <span class="capsule-label" id="capsule-label">正在播放</span>
-    <span class="capsule-title" id="capsule-title">—</span>
-    <span class="capsule-artist" id="capsule-artist"></span>
+    <!-- 歌名 / 演唱人是「窄窗口 + 轮播」：窗口只有 5 字 / 3 字宽，文字比窗口长时
+         左右往返滚过去（app.js 的 tickCapsuleMarquee），比省略号能读全，
+         胶囊也因此能保持窄。 -->
+    <span class="capsule-line capsule-line-title"><span class="capsule-title" id="capsule-title">—</span></span>
+    <span class="capsule-line capsule-line-artist"><span class="capsule-artist" id="capsule-artist"></span></span>
   </span>
-</button>
+  <span class="capsule-controls">
+    <button type="button" class="capsule-btn" id="capsule-prev" title="上一首" aria-label="上一首">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-prev"/></svg>
+    </button>
+    <button type="button" class="capsule-btn capsule-btn-primary" id="capsule-play" title="播放 / 暂停" aria-label="播放或暂停">
+      <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"/></svg>
+      <svg class="ic-pause" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-pause"/></svg>
+    </button>
+    <button type="button" class="capsule-btn" id="capsule-next" title="下一首" aria-label="下一首">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-next"/></svg>
+    </button>
+    <button type="button" class="capsule-btn" id="capsule-expand" title="展开播放器" aria-label="展开播放器">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
+    </button>
+  </span>
+</div>
 
 <script src="app.js"></script>
 </body>

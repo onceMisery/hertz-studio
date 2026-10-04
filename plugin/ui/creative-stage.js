@@ -68,8 +68,11 @@
     },
     {
       id: 'look', title: '影调', items: [
-        ['look.bloom', '泛光', 0, 3, 0.05, '', 0.9],
-        ['look.bloomThresh', '泛光阈值', 0, 1, 0.01, '', 0.58],
+        ['look.bloom', '泛光', 0, 3, 0.05, '', 0.55],
+        // 阈值 0.58 太低：柱体自身的亮度就在 0.6 上下，等于整排灯都进了泛光
+        // 通道，叠上镜面倒影后就是一条实心白带（实测 towers 默认态）。
+        // 0.74 只放真正的亮部过阈，柱体轮廓与双色柱的色差都还在。
+        ['look.bloomThresh', '泛光阈值', 0, 1, 0.01, '', 0.74],
         ['look.chroma', '径向色散', 0, 4, 0.05, '', 0.35],
         ['look.vignette', '暗角', 0, 1.2, 0.02, '', 0.28],
         ['look.grain', '胶片颗粒', 0, 1.2, 0.02, '', 0.20],
@@ -91,12 +94,18 @@
 
   // 场景私有参数。每项 = [键, 中文名, min, max, step, 单位, 默认值]。
   // 路径一律写作 `sc.<键>`，切场景时自动指向当前场景那一份。
+  //
+  // towers 的 width/depth 默认 0.62 是有问题的：柱数 32~64 根（按画质档），
+  // span 26，所以间距约 26/64 ≈ 0.41。**柱宽比间距还大 50%，64 根柱从
+  // 任何角度看都是连成一片的实心墙** —— 之前读作"白色光晕"的那条带，
+  // 根子在这儿：泛光只是把这片实心墙糊亮。改成 0.26（约为间距的六成），
+  // 柱与柱之间才留得出缝，纵深与疏密都读得出来。
   var SCENE_SPEC = {
     towers: [
       ['height', '柱高', 0.5, 22, 0.1, '', 9],
       ['span', '排列宽度', 6, 60, 0.5, '', 26],
-      ['width', '柱宽', 0.1, 2, 0.02, '', 0.62],
-      ['depth', '柱厚', 0.1, 2, 0.02, '', 0.62],
+      ['width', '柱宽', 0.1, 2, 0.02, '', 0.26],
+      ['depth', '柱厚', 0.1, 2, 0.02, '', 0.26],
       ['mirror', '地面倒影', 0, 1, 0.02, '', 0.45]
     ],
     orb: [
@@ -136,14 +145,18 @@
 
   // 自动导演的三个"段落情绪"。数值刻意拉开：安静段几乎不动、副歌段机位拉近 +
   // 大幅抖动，用户一眼能看出导演做了什么，再决定要不要改。
+  //
+  // 泛光按新的默认值（0.55 / 阈值 0.74）等比下调过一轮 —— 原来 chorus 的
+  // 1.75 是配阈值 0.58 调的，那个组合下副歌必然是一条白带。数值拉开的设计
+  // 意图没变：0.3 : 0.6 : 1.05，仍是三倍级差。
   var MOODS = {
-    quiet: { 'look.bloom': 0.45, 'look.vignette': 0.55, 'look.saturation': 0.85,
+    quiet: { 'look.bloom': 0.30, 'look.vignette': 0.55, 'look.saturation': 0.85,
       'cam.dist': 24, 'cam.drift': 12, 'cam.shake': 20, 'cam.kick': 40,
       'cam.fov': 48, 'stage.scale': 0.88 },
-    verse: { 'look.bloom': 0.95, 'look.vignette': 0.28, 'look.saturation': 1.10,
+    verse: { 'look.bloom': 0.60, 'look.vignette': 0.28, 'look.saturation': 1.10,
       'cam.dist': 16, 'cam.drift': 45, 'cam.shake': 70, 'cam.kick': 80,
       'cam.fov': 58, 'stage.scale': 1.0 },
-    chorus: { 'look.bloom': 1.75, 'look.vignette': 0.18, 'look.saturation': 1.32,
+    chorus: { 'look.bloom': 1.05, 'look.vignette': 0.18, 'look.saturation': 1.32,
       'look.chroma': 0.72, 'cam.dist': 10.5, 'cam.drift': 95, 'cam.shake': 150,
       'cam.kick': 140, 'cam.fov': 68, 'stage.scale': 1.16 }
   };
@@ -152,7 +165,10 @@
   // （一个转圈的光环，而不是穿越）、星云贴得太近、地形俯视角度不够。
   // 切场景时基础值直接落位 + 推一条从旧机位出发的补间，镜头"飞过去"。
   var SCENE_CAM = {
-    towers: { 'cam.dist': 15, 'cam.pitch': 14, 'cam.fov': 58, 'cam.height': 0.6 },
+    // pitch 14° 几乎与地面齐平：柱高 9 在那个角度下被压成一条横带，
+    // 柱与柱的高度差完全读不出来。抬到 26°（与 nebula/terrain 同档），
+    // 视线俯下去，"一排高低不一的灯柱"这件事才立得住。
+    towers: { 'cam.dist': 17, 'cam.pitch': 26, 'cam.fov': 58, 'cam.height': 1.6 },
     orb: { 'cam.dist': 10.5, 'cam.pitch': 8, 'cam.fov': 55, 'cam.height': 0.4 },
     // 隧道要钻进去看：机位收进环口内侧，视场角拉大，透视的"冲向深处"才成立。
     tunnel: { 'cam.dist': 4.2, 'cam.pitch': 2, 'cam.fov': 74, 'cam.height': 0 },
@@ -201,6 +217,31 @@
   var agg = onset ? onset.agg : new Float64Array(4);
   var feat = onset;
   var silent = new Float32Array(64);   // 断供时的静默帧
+
+  // 工坊面板内预览的合成频谱。
+  //
+  // 预览要能独立成立，不能只在"正好有歌在放"时才有反应：用户打开工坊、
+  // 还没播任何东西，此时 Stage.spectrum() 是全 0，走 silent 分支，柱体
+  // 全部贴在最低高度 —— 画面近乎静止，看起来就是"预览没起作用"。
+  //
+  // 所以预览视图改用这条确定性合成频谱。它是纯函数（只吃 t），
+  // 不含 Math.random：同一时刻 seek 回来必须是同一帧，否则预览会"闪"。
+  // 低频重、高频轻，形状接近真实音乐的频谱包络。
+  var previewSpec = new Float32Array(64);
+  function synthSpectrum(t) {
+    for (var i = 0; i < 64; i += 1) {
+      var u = i / 63;
+      // 低频权重高：真实音乐的能量分布就是随频率衰减。
+      var env = Math.exp(-u * 2.6) * 0.72 + 0.06;
+      // 三条不同速率的正弦叠出"律动"，再加一点每拍一次的峰。
+      var wobble = Math.sin(t * 0.0021 + u * 5.1) * 0.18
+        + Math.sin(t * 0.0047 + u * 11.3) * 0.10
+        + Math.sin(t * 0.0093 + u * 2.7) * 0.06;
+      var beat = Math.max(0, Math.sin(t * 0.0042)) ** 3 * 0.30 * (1 - u * 0.6);
+      previewSpec[i] = Math.max(0, Math.min(1, env * (0.62 + wobble) + beat));
+    }
+    return previewSpec;
+  }
   if (onset) onset.onBeat(onBeat);     // onBeat 是函数声明，已提升，这里可以直接引用
 
   var cam = { yaw: 0, pitch: 0, dist: 15, shakeYaw: 0, shakePitch: 0 };
@@ -919,7 +960,10 @@
     var sp = window.Stage ? Stage.spectrum() : null;
     if (sp && sp.length && sp !== lastSpectrum) { lastSpectrum = sp; lastSpectrumAt = t; }
     var fresh = !!(sp && sp.length) && lastSpectrumAt > 0 && (t - lastSpectrumAt < 600);
-    onset.step(dtMs, fresh ? sp : silent, now());
+    // 预览视图不吃真实频谱：它要的是"任何时刻打开都有反应"，而不是"正好
+    // 在放歌才有反应"。主舞台仍走真实频谱，两者互不影响。
+    if (v.preview) sp = synthSpectrum(t);
+    onset.step(dtMs, sp && sp.length ? sp : silent, now());
 
     resolve(t);
     stepDirector(t);
@@ -1505,6 +1549,9 @@
     attach: attach,
     mountPreview: mountPreview,
     unmountPreview: unmountPreview,
+    // 容器尺寸被外部改掉后强制重设后备缓冲。ResizeObserver 已经会跟，
+    // 这条是给「同一帧内改完布局就要出画面」的场景用的（工坊展开/收起预览）。
+    remeasure: function () { views.forEach(function (v) { measure(v, true); }); },
     effective: effective,
     degradedBecause: function () { return degradedBecause; },
     active: function () { return effective() === '3d'; },

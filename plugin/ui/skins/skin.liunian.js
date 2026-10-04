@@ -29,6 +29,16 @@
 (function () {
   'use strict';
 
+  /// <img> 位封面：插件形态下远程地址要经 sidecar 换成 data URL（沙箱 CSP 画不
+  /// 出 https 图）。HertzCovers 由 app.js 挂出；契约检查的沙箱只加载本模块，
+  /// 拿不到时回落成直接赋值，即独立形态的同款行为。
+  function applyImg(img, url) {
+    if (window.HertzCovers) { window.HertzCovers.applyImg(img, url); return; }
+    if (!img) return;
+    if (url) img.src = url;
+    else img.removeAttribute('src');
+  }
+
   var SKIN_ID = 'liunian';
 
   var mounted = false;
@@ -65,7 +75,59 @@
     closing: false,
     closeTimer: 0,
     lastFocus: null,
+    nav: null,        // 左栏分类导航
+    entries: [],      // [{ key, group }]：左栏条目与它控制的 .set-group
+    active: '',       // 当前条目的 key
   };
+
+  // 设置分类表：左栏一级分组 + 二级条目，右栏一次只显示一条对应的分组。
+  //
+  // 条目按 .set-group 的标题文案（.set-title 的文字）认领，而不是靠序号或
+  // 额外标记 —— 皮肤层不往业务 HTML 里塞属性，业务日后新增分组也不用改这里。
+  // 认领不到的分组统一落进末尾的「其它」，保证新设置不会从导航里消失。
+  var SET_SECTIONS = [
+    {
+      id: 'appearance',
+      label: '外观',
+      items: [
+        ['skin', '界面皮肤', '只换布局，不动主题色'],
+        ['look', '外观', '主题色、密度、动效与输出设备'],
+        ['wall', '主题与壁纸', '二次元主题与背景图'],
+        ['nav', '导航', '导航里显示哪些入口'],
+      ],
+    },
+    {
+      id: 'playback',
+      label: '播放',
+      items: [
+        ['audio', '音效与均衡器', '均衡器、增益与响度归一'],
+        // 与清风那张表保持一致：业务加了这个分组，两边都得认领，
+        // 否则它会掉进末尾的「其它」——分类在，但要多点一次才找得到。
+        ['window', '窗口与舞台', '沉浸声场与胶囊播放器'],
+        ['stage', '创意舞台', '创意工坊与手绘风格'],
+        ['keys', '快捷键', '键盘操作一览'],
+      ],
+    },
+    {
+      id: 'library',
+      label: '数据与在线',
+      items: [
+        ['source', '在线音源', '各音源的登录 cookie'],
+        ['remote', '远程来源（WebDAV）', '连自己的 WebDAV 目录'],
+        ['cache', '在线缓存', '缓存占用与清理'],
+        ['backup', '数据备份', '导入导出歌单与设置'],
+      ],
+    },
+    {
+      id: 'advanced',
+      label: '高级',
+      items: [
+        ['dev', '开发者选项', '播放诊断日志'],
+      ],
+    },
+  ];
+
+  var SECTION_KEY = 'vmusic.ln-set-section';
 
   // 退场动画时长，与 skin.liunian.css 里 .ln-modal-card 的 transition 时长
   // 对齐。CSS 改了就同步改这里，否则会出现「动画还没完内容先消失」。
@@ -581,7 +643,7 @@
     cover.className = 'ln-sp-cover';
     if (opts.cover) {
       var img = document.createElement('img');
-      img.src = opts.cover;
+      applyImg(img, opts.cover);
       img.alt = '';
       img.loading = 'lazy';
       img.decoding = 'async';
@@ -732,7 +794,13 @@
     var body = make('div', 'ln-modal-body', card);
     var view = byId('view-settings');
     if (!view) return;            // 业务 HTML 没有设置视图：留空壳，不抛
-    relocate(view, body);         // 原位留锚点，卸载时回位
+    var layout = make('div', 'ln-set-layout', body);
+    var nav = make('nav', 'ln-set-nav', layout);
+    nav.setAttribute('aria-label', '设置分类');
+    var pane = make('div', 'ln-set-pane', layout);
+    relocate(view, pane);        // 原位留锚点，卸载时回位
+
+    buildSetNav(nav, view);
 
     scrim.addEventListener('click', function () { closeSettingsSheet(); });
     close.addEventListener('click', function () { closeSettingsSheet(); });
@@ -740,9 +808,145 @@
     sheet.root = root;
     sheet.card = card;
     sheet.viewEl = view;
+    sheet.nav = nav;
     // 浮层常驻但默认 hidden，Enter 不需要特殊处理：display 从 none 恢复时
     // .ln-modal-card 的入场动画会自动播放。
     view.hidden = true;
+  }
+
+  // -------------------------------------------------------------------------
+  // 设置分类导航（左栏）
+  // -------------------------------------------------------------------------
+  //
+  // #view-settings 里是 12 个平铺的 .set-group，单列一路滚到底。这里给它们
+  // 套一层分类：左栏列出「外观 / 播放 / 数据与在线 / 高级」，点一条，右栏
+  // 只显示它对应的那一个 .set-group。
+  //
+  // 两处刻意保持克制：
+  //   · 不搬 .set-group —— 只切 hidden。搬家要维护锚点，而 hidden 是它本来就
+  //     有的语义（[hidden] 有 !important，别的皮肤照旧），切皮肤零残留。
+  //   · 不改业务 HTML —— 分组靠 .set-title 文案认领，见 SET_SECTIONS 的注释。
+  //     认领不到的落进「其它」，所以业务加新设置时这里是「多一项」而不是
+  //     「新设置不出现」。
+
+  function groupTitle(group) {
+    var head = group.querySelector('.set-title');
+    return head ? head.textContent.trim() : '';
+  }
+
+  function readSectionKey() {
+    try { return localStorage.getItem(SECTION_KEY) || ''; } catch (e) { return ''; }
+  }
+
+  function writeSectionKey(key) {
+    try { localStorage.setItem(SECTION_KEY, key); } catch (e) { /* 隐私模式等 */ }
+  }
+
+  function selectSection(key) {
+    if (!sheet.entries.length) return;
+    var found = false;
+    sheet.entries.forEach(function (entry) {
+      if (entry.key === key) found = true;
+      entry.group.hidden = entry.key !== key;
+    });
+    if (!found) return;          // 记住的 key 已不存在：保持当前选择
+    sheet.active = key;
+    writeSectionKey(key);
+    if (sheet.nav) {
+      sheet.nav.querySelectorAll('.ln-set-link').forEach(function (button) {
+        var on = button.dataset.lnKey === key;
+        button.classList.toggle('active', on);
+        if (on) button.setAttribute('aria-current', 'true');
+        else button.removeAttribute('aria-current');
+      });
+    }
+    if (sheet.viewEl) sheet.viewEl.scrollTop = 0;
+  }
+
+  function buildSetNav(nav, view) {
+    var groups = Array.prototype.slice.call(view.querySelectorAll('.set-group'));
+    if (!groups.length) return;  // 没有分组可分类：留空栏，右栏照旧
+
+    var byKey = {};              // key -> { key, group, label, note }
+    var order = [];              // key 的认领顺序，仅供「其它」类沿用 DOM 次序
+    var leftovers = [];          // 认领不到的分组（业务新增的）
+
+    groups.forEach(function (group) {
+      var title = groupTitle(group);
+      var found = null;
+      SET_SECTIONS.forEach(function (section) {
+        if (found) return;
+        section.items.forEach(function (item) {
+          if (item[1] === title) found = { key: item[0], note: item[2] };
+        });
+      });
+      if (found) {
+        byKey[found.key] = { key: found.key, group: group, label: title, note: found.note };
+        order.push(found.key);
+      } else {
+        leftovers.push({ group: group, label: title });
+      }
+    });
+
+    var claimed = [];
+    SET_SECTIONS.forEach(function (section) {
+      var entries = [];
+      // 条目顺序由 SET_SECTIONS 决定，不按 DOM 次序：分类表是唯一的排序
+      // 权威（照 DOM 排会把「在线音源」挤到「数据备份」后面，那是业务
+      // HTML 里的偶然位置，不是人该用的次序）。DOM 只在「其它」类里兜底。
+      section.items.forEach(function (item) {
+        if (byKey[item[0]]) { entries.push(byKey[item[0]]); claimed.push(byKey[item[0]]); }
+      });
+      if (!entries.length) return;  // 这一类在业务 HTML 里已不存在：不显示空类
+      var cat = make('div', 'ln-set-cat', nav);
+      cat.textContent = section.label;
+      entries.forEach(function (entry) {
+        appendSetLink(nav, entry.key, entry.label, entry.note);
+      });
+    });
+
+    // 认领不到的（业务日后新增的设置）统一挂到末尾的「其它」分类，
+    // key 用序号兜底，保证每条都有唯一可寻址的入口。
+    if (leftovers.length) {
+      var tail = make('div', 'ln-set-cat', nav);
+      tail.textContent = '其它';
+      leftovers.forEach(function (entry, i) {
+        var key = 'other-' + i;
+        entry.key = key;
+        entry.note = '业务新增的设置';
+        claimed.push(entry);
+        appendSetLink(nav, key, entry.label || '未命名分组', entry.note);
+      });
+    }
+
+    sheet.entries = claimed;
+
+    // 默认落在上次看的那一类；没有记录（或记录已失效）就第一类。
+    var initial = readSectionKey();
+    if (!claimed.some(function (entry) { return entry.key === initial; })) {
+      initial = claimed.length ? claimed[0].key : '';
+    }
+
+    nav.addEventListener('click', function (e) {
+      var button = e.target.closest ? e.target.closest('.ln-set-link') : null;
+      if (!button) return;
+      selectSection(button.dataset.lnKey);
+    });
+
+    selectSection(initial);
+  }
+
+  function appendSetLink(nav, key, label, note) {
+    var button = make('button', 'ln-set-link', nav);
+    button.type = 'button';
+    button.dataset.lnKey = key;
+    var text = make('span', 'ln-set-link-text', button);
+    text.textContent = label;
+    if (note) {
+      var hint = make('span', 'ln-set-link-note', button);
+      hint.textContent = note;
+    }
+    return button;
   }
 
   function openSettingsSheet(trigger) {
@@ -754,14 +958,29 @@
     sheet.lastFocus = trigger || document.activeElement;
     document.body.classList.add('ln-modal-open');
     sheet.viewEl.hidden = false;
+    // 重新打开时把焦点那条所在的分组带回可见：上次可能是在「外观」下操作到
+    // 一半就关掉浮层，切到别的分类再打开时该分组是 hidden 的，浏览器不会
+    // 自动把焦点挪回来，键盘用户会直接掉到 body 上。
+    var activeGroup = entryGroup(sheet.active);
+    if (activeGroup) activeGroup.hidden = false;
     sheet.viewEl.scrollTop = 0;
     sheet.root.hidden = false;
     sheet.root.setAttribute('aria-hidden', 'false');
     sheet.root.classList.add('is-open');
     emit('settings-enter');
-    var focusable = sheet.viewEl.querySelector('button, input, select');
+    // 焦点先落在左栏当前项：右栏只有一个分组，直接聚焦里面的控件会跳过
+    // 分类导航这道门，键盘用户看不出自己在哪一类。
+    var current = sheet.nav && sheet.nav.querySelector('.ln-set-link.active');
+    var focusable = current || sheet.viewEl.querySelector('button, input, select');
     if (focusable) focusable.focus({ preventScroll: true });
     reflow();
+  }
+
+  function entryGroup(key) {
+    for (var i = 0; i < sheet.entries.length; i += 1) {
+      if (sheet.entries[i].key === key) return sheet.entries[i].group;
+    }
+    return null;
   }
 
   function closeSettingsSheet() {
@@ -820,6 +1039,18 @@
       return;
     }
     if (!sheet.viewEl.hidden) sheet.viewEl.hidden = true;
+  }
+
+  // 分组可见性是皮肤加的，不属于业务：切走皮肤前必须全部摘掉，否则设置页
+  // 在 classic / iOS 下只剩当前那一个分组（表现为「设置里其它项都不见了」，
+  // 而且因为不报错、不崩，很容易被当成设置本身丢了）。
+  function releaseGroups() {
+    sheet.entries.forEach(function (entry) {
+      if (entry.group) entry.group.hidden = false;
+    });
+    sheet.entries = [];
+    sheet.active = '';
+    sheet.nav = null;
   }
 
   // -------------------------------------------------------------------------
@@ -903,6 +1134,7 @@
     clearTimeout(panel.debounce);
     // 先把设置视图放回中栏原位（锚点在 column 里），再拆浮层，
     // 否则 removeBuilt 会连着搬过去的业务节点一起删掉。
+    releaseGroups();
     restoreMoves();
     refs.bar.classList.remove('ln-capsule');
     delete refs.column.dataset.lnView;

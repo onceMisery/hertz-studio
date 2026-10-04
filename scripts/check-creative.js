@@ -524,7 +524,227 @@ ok(round.ok === true, '往返导入成功：' + round.message);
 ok(CS.importJSON('{ 这不是 json').ok === false, '坏 JSON 被拒绝而不是抛异常');
 ok(CS.importJSON('[1,2,3]').ok === false, '错误形状的 JSON 被拒绝');
 
+// 面板内实时预览的过曝防线。
+//
+// 这一组是源码级断言，钉的是"为什么会糊成白团"的三条因果链。改动渲染链
+// 很容易把它们悄悄改回去，而这类改动在 Node 契约里跑不出任何异常——
+// 页面不报错、不少元素，只是画面变成一块白。只能靠文本钉住。
+{
+  const glSrc = fs.readFileSync(path.join(WEB, 'creative-gl.js'), 'utf8');
+  const csSrc = fs.readFileSync(path.join(WEB, 'creative-stage.js'), 'utf8');
+
+  // 1) 合成链必须有 tone mapping，且必须在调色之前。
+  //    少了它，加性混合堆出来的 HDR 值只会被末端 clamp 截断成纯白——
+  //    截断不是压缩，所有过曝区域收敛到同一个值，画面丢掉全部结构。
+  ok(/vec3\s+tonemap\s*\(\s*vec3\s+c\s*\)/.test(glSrc),
+    '合成链声明了 tonemap（加性混合的 HDR 值必须有高光压缩，不能只靠 clamp 截断）');
+  const tmIdx = glSrc.indexOf('c = tonemap(c);');
+  const gradeIdx = glSrc.indexOf('if (uGrade == 1)');
+  ok(tmIdx > 0 && gradeIdx > 0 && tmIdx < gradeIdx,
+    'tonemap 在调色之前调用（grade/saturation/暗角都按 0..1 区间设计）');
+
+  // 2) 每个加性混合场景都要给单次 alpha 设硬上限。
+  //    上限是分辨率无关的：缩小画布只会更暗，不会变白。这正是在小尺寸
+  //    预览里需要、而按画布尺寸调参数做不到的性质。
+  const additiveScenes = (glSrc.match(/blend:\s*'add'/g) || []).length;
+  const alphaCaps = (glSrc.match(/=\s*min\s*\(\s*(?:a|o)\s*,\s*0\.42\s*\)/g) || []).length;
+  ok(additiveScenes > 0 && alphaCaps >= additiveScenes - 1,
+    `加性混合场景的单次 alpha 有硬上限（${alphaCaps} 处 / ${additiveScenes} 个 add 场景；` +
+    'lyric 场景的 alpha 来自有界纹理且有 bloomScale 折扣，是唯一豁免的那个）');
+
+  // 3) 粗光晕 target 要有像素地板。
+  //    1/4 降采样在 324px 预览上只剩 81x50，高斯核在这个尺寸下等价于
+  //    全屏均匀提升——粗光晕不再是"光"，而是一层盖满画面的白雾。
+  ok(/COARSE_MIN_PX/.test(glSrc) && /coarseShift/.test(glSrc),
+    '粗光晕 target 有短边像素地板，不足时退回半分辨率（COARSE_MIN_PX / coarseShift）');
+
+  // 4) 预览必须有自己的频谱来源。
+  //    之前预览吃 Stage.spectrum()，没播歌时走 silent 分支，柱体全部贴地，
+  //    画面近乎静止——用户看到的就是"预览没起作用"。
+  ok(/function\s+synthSpectrum\s*\(/.test(csSrc),
+    '预览有独立的合成频谱（synthSpectrum），不依赖真实播放状态');
+  ok(/v\.preview\s*\)\s*sp\s*=\s*synthSpectrum/.test(csSrc),
+    'renderOne 对预览视图改用合成频谱，主舞台仍走真实频谱');
+  ok(!/function\s+synthSpectrum[\s\S]{0,900}Math\s*\.\s*random/.test(csSrc),
+    '合成频谱是纯函数（不含 Math.random：seek 回同一时刻必须是同一帧）');
+
+  // 5) **双色令牌必须真的不同。** 这一条是"白色光晕"的真正根因，
+  //    而且它伪装成渲染 bug —— 我先查了泛光、tone mapping、alpha 上限、
+  //    降采样倍率，全都不是根因。真正的链条是：
+  //      stage.css 把 --music-highlight-alt-rgb 写成了 var(--accent-rgb)
+  //      → 两支高亮色恒等 → paletteMix() 退化成常量
+  //      → 64 根频谱柱全染成同一个颜色 → 加性混合叠成一块实心白
+  //    症状与"泛光过曝"一模一样，但改后处理链永远修不好。
+  const stageCss = fs.readFileSync(path.join(WEB, 'stage.css'), 'utf8');
+  const styleCss = fs.readFileSync(path.join(WEB, 'style.css'), 'utf8');
+  const themesSrc = fs.readFileSync(path.join(WEB, 'themes.js'), 'utf8');
+  const altDecl = (stageCss.match(/--music-highlight-alt-rgb:\s*([^;]+);/) || [])[1];
+  ok(!!altDecl && /--accent-2-rgb/.test(altDecl),
+    '第二支高亮色指向 --accent-2-rgb 而不是 --accent-rgb（指向后者会让两支同色）');
+  ok(/--accent-2-rgb:\s*[^;]+;/.test(styleCss),
+    '--accent-2-rgb 在 style.css 的 :root 有定义（否则引用悬空，退回固定青）');
+  ok(/'--accent',\s*'--accent-2'\]\.forEach/.test(themesSrc) ||
+     /\['--accent',\s*'--accent-2'\]/.test(themesSrc),
+    'themes.js 换肤时同时派生两支的 rgb（只派生 accent 的话，16 套主题下会退回全局默认色）');
+
+  // 6) 泛光默认值本身也要钉住。上面五条防线全对之后浏览器实测（towers 默认态）
+  //    画面仍是一条白带 —— 纯白像素 0%、有结构，但读不清。原因是阈值 0.58 太低：
+  //    柱体自身亮度就在 0.6 上下，等于整排灯都进了泛光通道，叠上镜面倒影
+  //    就糊成一条。降阈值比改后处理链对症，但它是个"没人会主动去调"的数，
+  //    不钉住迟早被调回去。
+  const bloomRow = (csSrc.match(/\['look\.bloom',\s*'泛光'[^[]*\]/) || [''])[0];
+  const threshRow = (csSrc.match(/\['look\.bloomThresh',\s*'泛光阈值'[^[]*\]/) || [''])[0];
+  const defBloom = parseFloat((bloomRow.match(/,\s*([\d.]+)\s*\]/) || [])[1]);
+  const defThresh = parseFloat((threshRow.match(/,\s*([\d.]+)\s*\]/) || [])[1]);
+  ok(!(defBloom >= 0.9), `泛光默认 ${defBloom} 不再是把柱体整体推过曝的值（实测 0.9 时是一条白带）`);
+  ok(!(defThresh <= 0.6), `泛光阈值默认 ${defThresh} 高于柱体自身亮度（阈值低于它等于整排灯进泛光）`);
+
+  // 导演的三个情绪档跟着一起降 —— 只改默认值不改 MOODS 的话，
+  // 一开自动导演又被推回过曝，用户会以为修复没生效。
+  const moods = (csSrc.match(/var\s+MOODS\s*=\s*\{[\s\S]*?\n  \};/) || [''])[0];
+  const moodBlooms = [...moods.matchAll(/'look\.bloom':\s*([\d.]+)/g)].map((m) => parseFloat(m[1]));
+  ok(moodBlooms.length === 3, '导演三个情绪档都有泛光值');
+  ok(moodBlooms.every((b) => b <= 1.1),
+    `导演三档泛光都收在 1.1 以内（${moodBlooms.join(' / ')}）`);
+  ok(moodBlooms[0] < moodBlooms[1] && moodBlooms[1] < moodBlooms[2],
+    '三档泛光仍严格递增（拉开的设计意图没丢）');
+
+  // 7) **几何默认值：柱宽必须小于柱间距。** 这才是「白色光晕」的源头，
+  //    前面六条防线全修好之后画面仍读作一条带 —— 因为 64 根柱子的
+  //    宽度（0.62）比它们的间距（span 26 / 64 ≈ 0.41）还大 50%，
+  //    从任何角度看都是连成一片的实心墙。泛光只是把这片实心墙糊亮，
+  //    不动几何就永远是一团白。数值不写死具体值，只钉「宽 < 间距」这个关系。
+  const twBlock = (csSrc.match(/var\s+SCENE_SPEC\s*=\s*\{[\s\S]*?\n  \};/) || [''])[0];
+  const twRow = (twBlock.match(/\n\s+towers:\s*\[[\s\S]*?\n\s*\],?/) || [''])[0];
+  const spanDef = parseFloat((twRow.match(/\['span',\s*'[^']*',\s*[\d.]+,\s*[\d.]+,\s*[\d.]+,\s*'[^']*',\s*([\d.]+)\s*\]/) || [])[1]);
+  const widthDef = parseFloat((twRow.match(/\['width',\s*'[^']*',\s*[\d.]+,\s*[\d.]+,\s*[\d.]+,\s*'[^']*',\s*([\d.]+)\s*\]/) || [])[1]);
+  // 柱数按画质档取最多的一档（64），这是最挤的情况。
+  const gap = spanDef / 64;
+  ok(widthDef < gap,
+    `towers 柱宽 ${widthDef} 小于最挤档的柱间距 ${gap.toFixed(3)}（span ${spanDef} / 64 根）`);
+  ok(widthDef / gap <= 0.8,
+    `柱宽不超过间距的八成（${(widthDef / gap * 100).toFixed(0)}%，留得下看得见的缝）`);
+
+  // 入画机位：pitch 太低会把柱高压成一条横带。towers 与 nebula/terrain 同档。
+  const camBlock = (csSrc.match(/towers:\s*\{[^}]*'cam\.pitch'[^}]*\}/) || [''])[0];
+  const pitchDef = parseFloat((camBlock.match(/'cam\.pitch':\s*([\d.]+)/) || [])[1]);
+  ok(pitchDef >= 22,
+    `towers 入画俯角 ${pitchDef}° 不再贴地（14° 时柱高被压成一条带，读不出高低）`);
+}
+
+section('沉浸舞台下工坊只允许选择');
+// 商籁/凝彩接管画面时，舞台参数不作用于画面，此时继续让用户拖滑块
+// 就是骗人。判据读 effectiveVisual 而非 stanzaVisual：starborn 是元导演，
+// 它自己不产画面，真正生效的是 director 当前指向的渲染器。
+{
+  const wsSrc = fs.readFileSync(path.join(WEB, 'workshop.js'), 'utf8');
+  const s3dSrc = fs.readFileSync(path.join(WEB, 'stage3d.js'), 'utf8');
+
+  ok(/visualState:\s*function\s*\(/.test(s3dSrc),
+    'Stage3D 暴露只读的 visualState（工坊靠它判断能不能调）');
+  ok(/effective:\s*effectiveVisual\s*\(\s*\)/.test(s3dSrc),
+    'visualState 报的是 effectiveVisual 而非 stanza.visual（starborn 是元导演）');
+  ok(/function\s+stanzaVisual\s*\(/.test(wsSrc),
+    '工坊有 stanzaVisual 判据');
+  ok(/var\s+locked\s*=\s*!!vs/.test(wsSrc),
+    '工坊把 stanza 激活态算成锁定');
+  ok(/stanzaNotice/.test(wsSrc) && /ws-stanza-note/.test(wsSrc),
+    '锁定时给出说明（说清谁接管了、为什么调不动、怎么回去）');
+  // 选择必须保留：这是"现场的创意舞台可以被选择"的那部分。
+  ok(!/ws-scene-card[\s\S]{0,400}?b\.disabled\s*=\s*true/.test(wsSrc),
+    '锁定时声场卡仍可点（现场舞台的选择不受 stanza 影响）');
+
+  // **锁定态必须能被外部变化唤醒。** 这一条是浏览器实测抓出来的真 bug：
+  // 锁定逻辑本身写对了，但工坊只在 CreativeStage.onChange 里重渲染，而
+  // stanzaVisual 的变化根本不经过那条订阅 —— 于是用户切了商籁，工坊还是
+  // 那副可编辑的样子，说明不出现、参数照拖，要手动切一次页签才生效。
+  // 症状是"功能好像有时灵有时不灵"，极难自查。
+  ok(/onVisualChange:\s*function\s*\(/.test(s3dSrc),
+    'Stage3D 暴露 onVisualChange（接管态变化的广播口）');
+  ok(/function\s+notifyVisualChange\s*\(/.test(s3dSrc),
+    'stage3d 有接管态广播实现');
+  // applyStanzaConfig 每帧都会被 driveStanza 调到，不去重就是每帧叫醒订阅者，
+  // 而订阅者那边是重排整个面板 —— 面板会一直闪。
+  ok(/var\s+lastVisualSig/.test(s3dSrc) && /if \(sig === lastVisualSig\) return;/.test(s3dSrc),
+    '广播按有效视觉签名去重（applyStanzaConfig 每帧都调，不去重面板会闪）');
+  ok(/notifyVisualChange\(\);\s*\}\s*\n\s*\n?\s*\/\/ 接管态广播/.test(s3dSrc) ||
+     /notifyVisualChange\(\);[\s\S]{0,400}var visualListeners/.test(s3dSrc),
+    '广播挂在 applyStanzaConfig 末尾（视觉切换的必经之路）');
+  ok(/Stage3D\.onVisualChange\s*\(/.test(wsSrc),
+    '工坊订阅了接管态变化');
+  ok(/stanzaVisual\(\)\s*!==\s*lastLock/.test(wsSrc),
+    '只在锁定态翻转时才重渲染（每帧重排会打掉正在拖的滑块）');
+  ok(/lastLock\s*=\s*vs\s*\|\|\s*null/.test(wsSrc),
+    'renderImmersive 记录本次锁定值，供上面的翻转比较');
+}
+
+section('宽屏工坊：预览有真正的展示位');
+// 窄面板里那个 16:9 画布约 350x200。这个尺寸下场景的空间结构读不出来，
+// 粗光晕的后备缓冲也掉到不足 1/8 分辨率 —— 放大容器是对症解，
+// 补曝光或调光晕都是在下游打补丁。
+{
+  const wsSrc = fs.readFileSync(path.join(WEB, 'workshop.js'), 'utf8');
+  const csSrc = fs.readFileSync(path.join(WEB, 'creative-stage.js'), 'utf8');
+  const html = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(WEB, 'creative.css'), 'utf8');
+
+  ok(/id="ws-expand"/.test(html), '面板头部有展开按钮');
+
+  // 布局比例必须钉住：1.2fr / 380px 是 folia-major ThemePark 的取值，
+  // 不是随手配的数。改比例等于改了设计依据。
+  const wideBlock = (css.match(/\.ws-panel\.is-wide\s*\{[\s\S]*?\}/) || [''])[0];
+  ok(/minmax\(0,\s*1\.2fr\)\s*380px/.test(wideBlock),
+    '宽屏摊成两栏，比例 1.2fr / 380px（与 folia-major 一致）');
+  ok(/--ws-width:\s*min\(1180px,\s*96vw\)/.test(wideBlock),
+    '宽屏面板宽度有个上限，不是无限摊开');
+
+  // 预览这一列必须跟着面板高度走，不能留 aspect-ratio：
+  // 竖屏时 16:9 会变成一个居中的小方块，比不放预览还糟。
+  const stageBlock = (css.match(/\.ws-panel\.is-wide \.ws-preview-stage\s*\{[\s\S]*?\}/) || [''])[0];
+  ok(/aspect-ratio:\s*auto/.test(stageBlock) && /min-height/.test(stageBlock),
+    '宽屏预览去掉 16:9、改为撑满整列并有高度地板');
+  ok(/min-height:\s*300px/.test(css),
+    '预览容器有 300px 高度地板（对照 folia-major 的 min-h-[300px]）');
+
+  // 窄屏必须退回单列：1.2fr + 380px 在 900px 下预览只剩不到 300px 宽，
+  // 比原来的窄面板还小 —— 那就宁可不给宽屏。
+  const mq = (css.match(/@media\s*\(max-width:\s*900px\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  ok(/is-wide[\s\S]{0,200}?display:\s*flex/.test(mq),
+    '窄屏（≤900px）退回单列，不给一个更差的预览');
+  ok(/is-wide[\s\S]{0,300}?aspect-ratio:\s*16\s*\/\s*9/.test(mq),
+    '退回单列时预览恢复 16:9');
+
+  // 预览不在高级编排页签时，body 得顶上来 —— grid 里少一个格子会空一整列。
+  ok(/is-wide:not\(:has\(\.ws-preview:not\(\[hidden\]\)\)\)/.test(css),
+    '预览缺席时参数栏顶满整行（不留空列）');
+
+  // 主页右栏要跟着让位，否则宽屏工坊会盖住播放视窗。
+  ok(/body\.ws-open\.ws-wide:not\(\.s3d-open\)\s*#lyric-page/.test(css),
+    '宽屏时主页右栏让出宽度');
+
+  // 展开按钮只在预览真的挂着时可用
+  ok(/btn\.disabled\s*=\s*target\s*!==\s*'advanced'/.test(wsSrc),
+    '展开按钮在非高级编排页签下禁用');
+  ok(/function\s+applyWide\s*\(/.test(wsSrc), '工坊有 applyWide');
+  ok(/classList\.toggle\(\s*'ws-wide'/.test(wsSrc),
+    '宽屏态同步到 body（给 #lyric-page 让位用）');
+  ok(/classList\.toggle\(\s*'is-wide'/.test(wsSrc), '宽屏态挂在面板上');
+  ok(/i-compress/.test(wsSrc) && /i-expand/.test(wsSrc),
+    '按钮图标随状态在展开/收起之间切换');
+  ok(/WIDE_KEY/.test(wsSrc) && /localStorage\.setItem/.test(wsSrc),
+    '宽屏偏好持久化');
+
+  // 同一个 canvas：展开不能新开一条渲染链路，那会多一个 WebGL context。
+  ok(!/is-wide[\s\S]{0,300}?mountPreview\s*\(/.test(wsSrc),
+    '展开不新建预览挂载（复用同一个 canvas 与 context）');
+  ok(/remeasure:\s*function\s*\(/.test(csSrc),
+    'creative-stage 暴露 remeasure（容器变大后强制重设后备缓冲）');
+  ok(/CreativeStage\.remeasure/.test(wsSrc),
+    '切换宽屏后立刻重测尺寸，不等 ResizeObserver');
+}
+
 section('预置库');
+
 const saved = CS.savePreset('冒烟预置');
 ok(!!saved.id, '保存返回了 id');
 ok(CS.library().length >= 1, '库里至少有一条');

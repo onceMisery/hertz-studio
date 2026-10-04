@@ -82,7 +82,10 @@
       var use = b.querySelector('use');
       // 上一张若是位图，innerHTML 已被换成 <img>，这里补回 svg 再挂引用。
       if (!use) {
-        b.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href=""/></svg>';
+        // 空 href 不能写：解析时会按 <base> 解析成插件 ui 的目录 URL 去加载，
+    // opaque origin 下被浏览器拒掉并刷一整屏 "Unsafe attempt to load"。
+    // 先建一个不带 href 的 <use>，引用由下面 setAttribute 挂上。
+    b.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use></use></svg>';
         use = b.querySelector('use');
       }
       if (use) use.setAttribute('href', '#' + item.badge);
@@ -345,7 +348,8 @@
       var badge = document.createElement('span');
       badge.className = 'src-badge shelf-badge';
       badge.hidden = true;
-      badge.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href=""/></svg>';
+      // 同上：空 href 会按 <base> 解析成目录 URL 去加载，opaque origin 下被拒。
+      badge.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use></use></svg>';
       meta.append(badge, count);
       label.append(name, meta);
       el.append(back, record, art, label, reflection);

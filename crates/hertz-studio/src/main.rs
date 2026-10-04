@@ -47,6 +47,8 @@ const SKIN_WORKBENCH_CSS: &str = include_str!("../../../plugin/ui/skins/skin.wor
 const SKIN_LIUNIAN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.css");
 const SKIN_IOS_CSS: &str = include_str!("../../../plugin/ui/skins/skin.ios.css");
 const SKIN_LIUNIAN_JS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.js");
+const SKIN_QINGFENG_CSS: &str = include_str!("../../../plugin/ui/skins/skin.qingfeng.css");
+const SKIN_QINGFENG_JS: &str = include_str!("../../../plugin/ui/skins/skin.qingfeng.js");
 // 舞台主题：只管沉浸舞台操作层的观感，与皮肤正交、可组合，常驻引入。
 const STAGE_THEME_STARFALL_CSS: &str = include_str!("../../../plugin/ui/stage-themes/starfall.css");
 const STAGE_THEME_IOS_CSS: &str = include_str!("../../../plugin/ui/stage-themes/ios.css");
@@ -327,7 +329,15 @@ async fn main() -> anyhow::Result<()> {
             get(|| asset(CSS, SKIN_LIUNIAN_CSS)),
         )
         .route("/skins/skin.ios.css", get(|| asset(CSS, SKIN_IOS_CSS)))
+        .route(
+            "/skins/skin.qingfeng.css",
+            get(|| asset(CSS, SKIN_QINGFENG_CSS)),
+        )
         .route("/skins/skin.liunian.js", get(|| asset(JS, SKIN_LIUNIAN_JS)))
+        .route(
+            "/skins/skin.qingfeng.js",
+            get(|| asset(JS, SKIN_QINGFENG_JS)),
+        )
         .route(
             "/stage-themes/starfall.css",
             get(|| asset(CSS, STAGE_THEME_STARFALL_CSS)),

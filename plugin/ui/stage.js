@@ -721,6 +721,14 @@
     }
   }
 
+  /// 背景图位封面：插件形态下远程地址要经 sidecar 换成 data URL（沙箱 CSP 画不
+  /// 出 https 图）。HertzCovers 由 app.js 挂出；契约检查的沙箱只加载本模块，
+  /// 拿不到时回落成直接赋值，即独立形态的同款行为。
+  function applyBg(el, url) {
+    if (window.HertzCovers) { window.HertzCovers.applyBg(el, url); return; }
+    if (el) el.style.backgroundImage = url ? 'url("' + url + '")' : 'none';
+  }
+
   function extractPalette(url) {
     var epoch = ++paletteEpoch;
     if (!coverFollow || !url) { resetPalette(); return; }
@@ -763,14 +771,26 @@
       applyPalette(lastPalette.hue, lastPalette.saturation);
     };
     img.onerror = function () { if (epoch === paletteEpoch) resetPalette(); };
-    img.src = url;
+    // 取色要读像素，所以这里必须是能画出来的那一份。setTrack 的三个调用点里
+    // 有两个（app.js 补元数据、online.js 详情回填）传进来的是元数据里的音源
+    // https 原址——插件沙箱的 img-src 拦掉它，而且就算放行，跨域图也会污染
+    // canvas 让 getImageData 抛。先过代理换成 data URL 再喂给 img。
+    if (window.HertzCovers && window.HertzCovers.resolve) {
+      window.HertzCovers.resolve(url).then(function (resolved) {
+        if (epoch !== paletteEpoch) return;
+        if (!resolved) { resetPalette(); return; }
+        img.src = resolved;
+      });
+    } else {
+      img.src = url;
+    }
   }
 
   function syncCoverAppearance() {
     var url = coverFollow ? lastCover : null;
     var ambient = $('ambient');
     var ambientImage = $('ambient-img');
-    if (ambientImage) ambientImage.style.backgroundImage = url ? 'url("' + url + '")' : 'none';
+    if (ambientImage) applyBg(ambientImage, url);
     if (ambient) ambient.classList.toggle('has-art', Boolean(url));
     extractPalette(url);
     schedule();
@@ -1287,7 +1307,7 @@
       if (!durMs && t) durMs = t.duration_ms || 0;
       lastCover = coverUrl || null;
       if (el.disc) {
-        el.disc.style.backgroundImage = coverUrl ? 'url("' + coverUrl + '")' : 'none';
+        applyBg(el.disc, coverUrl);
         el.disc.classList.toggle('is-empty', !coverUrl);
       }
       syncCoverAppearance();

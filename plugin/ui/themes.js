@@ -336,7 +336,7 @@
     {
       id: 'ios-light',
       name: 'iOS 浅色',
-      note: 'iOS 浅色 · 中性灰白分组底 + 系统蓝，大圆角与柔和投影',
+      note: 'iOS 浅色 · macOS 中性灰白层级、统一系统蓝与轻量分组表面',
       // 对比度（自 --bg #F2F2F7 与 --panel #FFFFFF 反推，WCAG AA）：
       //   text ≈ 15.3 / 17.0   muted ≈ 4.5 / 5.1   accent ≈ 5.2 / 5.8
       //   白字压 accent ≈ 5.8（不是 #007AFF 的 4.0——见下）
@@ -356,12 +356,12 @@
         '--text': '#1C1C1E',
         '--muted': '#6E6E73',
         '--accent': '#0A63C9',
-        '--accent-2': '#5856D6',
+        '--accent-2': '#0A63C9',
         '--accent-ink': '#FFFFFF',
         '--brand': '#0A63C9',
         '--brand-rgb': '10, 99, 201',
-        '--highlight': '#C2410C',
-        '--highlight-rgb': '194, 65, 12',
+        '--highlight': '#0A63C9',
+        '--highlight-rgb': '10, 99, 201',
         '--hover': 'rgba(60, 60, 67, 0.06)',
         // 语义色：成功 / 警告 / 错误。都从 --bg 反推到 AA 以上，
         // 不用 iOS 原色（systemGreen #34C759 在浅底上只有 2.1:1，
@@ -460,23 +460,29 @@
     // accent 的 rgb 三元组：rgba() 透明度合成必须用原始数字，CSS 没法从
     // hex 变量里拆出来，所以换肤时顺手派生一份。舞台的 --music-highlight
     // 默认回退就吃这个值，无封面时与主题同色而不是固定琥珀。
-    var accent = theme.tokens['--accent'];
-    if (accent && /^#([0-9a-f]{6})$/i.test(accent)) {
-      var n = parseInt(accent.slice(1), 16);
-      el.style.setProperty('--accent-rgb',
+    //
+    // accent-2 同样要派生：舞台的第二支高亮色吃它。它与 accent 必须**不同**
+    // —— 两者相同时频谱柱全染成一种颜色，加性混合一叠就是一块实心白。
+    // 只派生不校验的话，某个主题若没给 --accent-2 就会悄悄退回全局默认青，
+    // 在那个主题下重新变成单色。
+    ['--accent', '--accent-2'].forEach(function (key) {
+      var hex = theme.tokens[key];
+      if (!hex || !/^#([0-9a-f]{6})$/i.test(hex)) return;
+      var n = parseInt(hex.slice(1), 16);
+      el.style.setProperty(key + '-rgb',
         [(n >> 16) & 255, (n >> 8) & 255, n & 255].join(', '));
-    }
+    });
     // 老主题里没有 --brand / --highlight 这两个角色色：这里按 accent / accent-2
     // 派生一份，保证统一组件层（激活态/焦点环/选中态）在任何主题下都有值，
     // 不会因为换肤而退化成空白描边。
     ['--brand', '--brand-rgb', '--highlight', '--highlight-rgb'].forEach(function (k) {
       if (theme.tokens[k]) return;
-      if (k === '--brand') el.style.setProperty(k, theme.tokens['--accent-2'] || accent);
-      else if (k === '--highlight') el.style.setProperty(k, theme.tokens['--accent']);
+      var primary = theme.tokens['--accent'];
+      var secondary = theme.tokens['--accent-2'] || primary;
+      if (k === '--brand') el.style.setProperty(k, secondary);
+      else if (k === '--highlight') el.style.setProperty(k, primary);
       else {
-        var hex = k === '--brand-rgb'
-          ? (theme.tokens['--accent-2'] || accent)
-          : theme.tokens['--accent'];
+        var hex = k === '--brand-rgb' ? secondary : primary;
         if (hex && /^#([0-9a-f]{6})$/i.test(hex)) {
           var m = parseInt(hex.slice(1), 16);
           el.style.setProperty(k, [(m >> 16) & 255, (m >> 8) & 255, m & 255].join(', '));

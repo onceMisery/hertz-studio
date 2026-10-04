@@ -12,17 +12,98 @@
 
    再扩展一套皮肤时照抄这个文件的结构即可：先声明 --skin-* 令牌，再按下面
    的模块顺序（外壳 → 导航 → 内容 → 列表 → 卡片 → 面板 → 浮层）写覆盖。
+
+   --------------------------------------------------------------------------
+   排版四级（本轮新增）
+   悬浮式布局天生比三栏布局"轻"：面板浮在内容上、留白大，若不给文字定层级，
+   整屏会读成一片等重的灰块——截图里"每日推荐"的 kicker、曲名、艺人、推荐理由
+   四行字挤在一起，正是因为它们各自写死了字号，彼此没有关系。
+
+   现在收敛成四档：标题（--skin-h1）/ 曲名（--skin-h2）/ 辅助（--skin-h3）/
+   徽标（--skin-h4）。这四个键定义在 style.css 的 :root，默认值与原来的 px
+   一一对应（**默认主题下像素不变**），组件层只消费令牌。于是"整屏层级一起动"
+   是改这四个数的必然结果，而不是在每个组件里各抄一份 13.5px。
+
+   强调色沿用全站分工，本文件不重新定义、也不写 color：--brand（薄荷青）管
+   "正在生效/正在播放"，--highlight（香槟金）管"当前选中项"，导航选中归后者。
+   皮肤与主题继续保持正交：这里只改数值与几何，色值仍归 themes.js。
 */
 
 [data-skin="sheen"] {
-  /* 布局令牌：两套皮肤的差别基本都收敛在这几个数上，便于对照与调参。 */
+  /* ==== 布局令牌 ====
+     受契约 checkContrast 约束：与 workbench 反向取值且相差 ≥1.8 倍
+     （除 title 外），否则"换皮肤"就只是微调。 */
   --skin-gap: 18px;
   --skin-pad: 22px;
   --skin-radius: 22px;
-  --skin-row-py: 11px;   /* 行内上下留白——信息密度的主要旋钮 */
+  --skin-row-py: 12px;      /* 行内上下留白——信息密度的主要旋钮 */
   --skin-card-min: 182px;
   --skin-head-pb: 18px;
-  --skin-title: 20px;
+  /* 区块标题字号。与 --skin-h1 是同一件事，这里保留 --skin-title 这个名字
+     是因为皮肤契约按 --skin-* 逐项比对两套皮肤的区分度（title 是其中一项），
+     改名会让 check-skins 的对比断言漏掉这一维。 */
+  --skin-title: 24px;
+
+  /* ==== 排版令牌：标题 / 正文 / 辅助 三级 ====
+     低密度布局的字号要比默认再大一档：13.5px 的曲名配 22px 的圆角卡片会显得
+     头重脚轻（卡片大、文字小，中间空一圈）。
+
+     这几个键与 style.css 的 :root 同名同义（默认主题下像素不变），皮肤只覆盖
+     数值——于是"整屏字号一起动"是改这四个数的必然结果，而不是逐个组件去抄。 */
+  --skin-h1: var(--skin-title); /* 一级：区块标题。与 --skin-title 同值，
+                                    区别是 --skin-h1 会被组件层直接消费，
+                                    契约比的是 --skin-title。 */
+  --skin-h2: 14.5px;       /* 二级：曲名、卡片标题 */
+  --skin-h3: 12.5px;       /* 三级：艺人 / 专辑 / 时长 / 索引 */
+  --skin-h4: 11px;         /* 四级：音质徽标、表头小标签（与默认同值） */
+  --skin-h2-w: 550;        /* 正文字重：比默认 500 上一档，低密度下更立得住 */
+  --skin-line-h: 1.55;     /* 正文行高：中文小字低于 1.5 会糊成块 */
+  --skin-track-tight: -0.24px; /* 大字号必须收字距，否则"每 日 推 荐"会发散 */
+  --skin-track-wide: 0.72px;   /* 小字号必须开字距，否则辅助信息糊成一条 */
+
+  /* 只有标题需要比正文更紧的行高（正文行高见 --skin-line-h）：
+     1.55 是为多行正文准备的，套到单行标题上会把标题与下方工具撑得太远。 */
+  --skin-lh-tight: 1.28;
+  --skin-w-head: 700;         /* 标题字重：浮光标题独占一行，需要比正文更重 */
+
+  /* ==== 表面令牌 ====
+     关键修正：悬浮件（导航胶囊 / 舞台 / 播放栏）原先用 --panel-2，
+     那只是 5% 的白叠层——浮在壁纸或图片上时背后内容直接透上来，文字对比度
+     完全不可控（实测截图里胶囊里的"每日推荐"与壁纸几乎同亮度）。
+     换成 --glass-bg-strong（78% 不透明）是 style.css 为"浮起件"准备的档，
+     且 ios-light 主题已把它翻成浅色语义，所以深浅色都自动正确。 */
+  --skin-surface: var(--glass-bg-strong);
+  --skin-surface-card: var(--surface-1);
+  --skin-line-soft: var(--surface-line);
+  --skin-line-hard: var(--surface-line-strong);
+  --skin-shadow: var(--glass-shadow);
+  --skin-shadow-card: var(--surface-lift);
+  --skin-hi: var(--surface-hi);   /* 顶部内高光：卡片读出厚度而不必加重描边 */
+
+  /* ==== 控件令牌 ==== */
+  --skin-ctl-radius: var(--r-pill);
+  --skin-focus-offset: 3px;   /* 比默认大 1px：胶囊浮在内容上，焦点环要能脱开底色 */
+
+  /* ==== 悬浮导航的几何：--skin-rail-clear 由它推导 ====
+     胶囊 top = topbar-h + 12，高约 46（padding 5×2 + item 34 + 边框 2）。
+     62px 这个旧值只让开了顶栏，胶囊下沿（≈116px）其实是压在内容上的——
+     宽屏靠"胶囊居中、左右留白"侥幸不撞上，窄屏胶囊一旦拉满宽度就会盖住
+     第一行内容。统一由令牌算出来，改一处两处同步。 */
+  --skin-rail-h: 46px;
+  --skin-rail-top: 12px;
+  --skin-rail-clear: calc(
+    var(--topbar-h) + var(--skin-rail-top) + var(--skin-rail-h) + var(--skin-gap)
+  );  /* 58 + 12 + 46 + 18 = 134px */
+
+  /* ==== 窄屏反向：--skin-rail-clear 归零 ====
+     宽屏胶囊与顶栏同行（见下面 .rail 的 top），内容不需要额外让位，
+     于是这个"让出高度"必须为 0 —— 留着 134px 就是纯粹的大段留白，
+     页面第一屏白白少掉三分之一，而上面除了空无一物什么都没有。
+
+     写成 max(0px, …) 而不是直接 0：窄屏断点里胶囊会退回"顶栏下方独占
+     一行"（见 @media 里的 .view padding），那里确实需要让位，
+     由那边覆盖即可；这里只保证宽屏不留白。 */
+  --skin-clear-wide: 0px;
 }
 
 /* --- 外壳：三列并排 → 单列全宽 ------------------------------------------ */
@@ -33,77 +114,192 @@
   padding: 0 var(--skin-pad) var(--skin-gap);
 }
 
-/* --- 导航：左侧竖轨 → 顶部悬浮胶囊 -------------------------------------- */
+/* --- 导航：左侧竖轨 → 顶栏内的悬浮胶囊 --------------------------------- */
 
+/* 胶囊与顶栏**同行**，而不是吊在顶栏下方另占一行。
+   原来 top = topbar-h + 12 是"贴在顶栏底边"，于是内容区必须让出 134px
+   才不撞第一行 —— 那 134px 里除了空气什么都没有，是整块留白的来源。
+   现在改为在顶栏高度内垂直居中：顶栏 58px、胶囊 46px，上下各余 6px。
+   搜索框在浮光下被摘掉（见下），顶栏中段正好空出来放胶囊，不用挤。 */
 [data-skin="sheen"] .rail {
   position: fixed;
-  top: calc(var(--topbar-h) + 12px);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 60;
+  top: calc((var(--topbar-h) - var(--skin-rail-h)) / 2);
+  /* 左对齐紧跟品牌块，**不居中**。居中在这里是错的：顶栏左右两侧
+     宽度根本不对称 —— 品牌块只有 --rail-w（86px），右侧图标区却要
+     408px（连接状态文字 + 六个图标）。居中等于把胶囊往宽的那侧挤，
+     实测会压住右侧图标区 17px。左对齐时右缘 = 86 + 18 + 659 = 763，
+     离右侧图标区还有 269px 余量，谁也不碰谁。 */
+  left: calc(var(--rail-w) + 18px);
+  right: auto;
+  transform: none;
+  z-index: 61;
   flex-direction: row;
   align-items: center;
   gap: 4px;
-  max-width: calc(100vw - 24px);
+  /* 右侧图标区宽度随连接状态文案变化（"服务已连接" / "重连中 (13s)"），
+     所以留一个保守上限：空间不够时胶囊自己横向滚，而不是压到图标上。 */
+  max-width: calc(100vw - var(--rail-w) - 430px);
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 6px 10px;
+  padding: 5px 10px;
   border-radius: var(--r-pill);
-  border: 1px solid var(--line);
-  background: var(--panel-2);
+  /* 悬浮件用"强玻璃底"而不是 5% 白叠层：胶囊浮在壁纸/封面图上，
+     半透明底会让文字对比度随背景图变化。 */
+  border: 1px solid var(--skin-line-hard);
+  background: var(--skin-surface);
   /* 与顶栏的子树一样要抬到内容面板之上：.column 带 backdrop-filter，
      会形成自己的层叠上下文，z-index 不给够会被整块盖住。 */
   backdrop-filter: blur(24px) saturate(1.12);
   -webkit-backdrop-filter: blur(24px) saturate(1.12);
-  box-shadow: var(--surface-lift);
+  box-shadow: var(--skin-shadow);
+  /* 横向胶囊不该出现滚动条：溢出时它既是视觉噪点，又暗示"还有别的标签"。
+     用 scrollbar-width 隐藏标准滚动条；WebKit 的 ::-webkit-scrollbar 是**另一个
+     选择器**，而皮肤契约要求每个选择器四套皮肤都得有（皮肤之间必须覆盖同一批
+     模块），为一条滚动条给另外三套皮肤各加一条伪元素规则不划算。这里接受
+     Chromium 下仍可见的细滚动条——全局 *::-webkit-scrollbar 本来就是细条样式。 */
+  scrollbar-width: none;
 }
 
 /* 竖轨那根"把设置顶到底部"的弹簧在横向条里没有意义。 */
 [data-skin="sheen"] .rail-spacer { display: none; }
 
 [data-skin="sheen"] .rail-item {
+  flex: none;
   flex-direction: row;
   gap: 8px;
   padding: 8px 14px;
-  border-radius: var(--r-pill);
+  border-radius: var(--skin-ctl-radius);
   white-space: nowrap;
 }
 
-[data-skin="sheen"] .rail-item svg { margin: 0; }
-/* 胶囊里文字是主要信息：正常字号、不截断。 */
-[data-skin="sheen"] .rail-item span { font-size: 13px; }
+[data-skin="sheen"] .rail-item svg { margin: 0; flex: none; }
+/* 胶囊里文字是主要信息：正常字号、不截断。字重提到 550 是为了和图标（线性
+   图形）比权重——否则 21px 的图标会压过 13px 的文字，选中哪一项全靠颜色。 */
+[data-skin="sheen"] .rail-item span {
+  font-size: var(--skin-h3);
+  font-weight: var(--skin-h2-w);
+  line-height: var(--skin-lh-tight);
+}
+
+/* --- 顶栏里的搜索框：浮光下摘掉 ---------------------------------------- */
+
+/* 浮光的胶囊要占顶栏中段，搜索框正好在那儿；两者宽度相加超过顶栏就必然
+   互相压。搜索框是全局元素（曲库/在线/设置共用同一个 state.q），
+   这里只在浮光下改成"默认收着、按快捷键唤起"，业务引用与事件都不动。
+
+   为什么不用 display:none —— app.js 的 ui.search 引用的是这个 input，
+   父级 display:none 会让 focus() **静默失效**（不抛错，焦点就是不动），
+   于是 `/` 与 Ctrl+K 变成两个死键且控制台一片干净。所以用
+   opacity + pointer-events：不可见、点不到，但仍在布局树与 Tab 序里，
+   focus 得到。
+
+   唤起时它**占住胶囊那一格**，胶囊同时退场（见下面 body.sheen-search .rail）。
+   位置与胶囊对齐、宽度也够放一整句 placeholder。
+
+   z-index: 62 只是"万一哪天 topbar 不再形成层叠上下文"的保险，它当前其实
+   不起作用 —— 真正的让位机制是胶囊退场，理由见那条规则的注释。 */
+[data-skin="sheen"] .topsearch {
+  /* 这里写 fixed 时，包含块**不是视口** —— .topbar 带 backdrop-filter
+     （style.css:1960-1965），固定定位的后代改以该元素的 padding box 为
+     包含块。恰好 .topbar 在视口左上角、无左边框，padding box 原点与视口原点
+     重合，所以下面这组 left/top 的数值含义与"相对视口"一致，能直接对着
+     胶囊的 left/top 写不必换算。哪天顶栏加了外边距或左边框，这里要跟着改。 */
+  position: fixed;
+  top: calc((var(--topbar-h) - 36px) / 2);
+  left: calc(var(--rail-w) + 18px);
+  transform: none;
+  z-index: 62;
+  width: min(520px, calc(100vw - var(--rail-w) - 460px));
+  max-width: none;
+  height: 36px;
+  opacity: 0;
+  pointer-events: none;
+  box-shadow: var(--skin-shadow);
+  background: var(--skin-surface);
+  border-color: var(--skin-line-hard);
+}
+
+/* 按 / 或 Ctrl+K 唤起：这一条由 app.js 在 focus 时加 body.sheen-search。 */
+[data-skin="sheen"] body.sheen-search .topsearch {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 唤起时胶囊退场 —— 这条是上面那条能成立的前提，缺了就是死键。
+   为什么不能靠 z-index 解决（本项目最容易掉进去的坑，记在这里）：
+   .topsearch 是 header.topbar 的**子节点**（index.html:204 在 topbar 内），
+   而 .topbar 自己就形成层叠上下文 —— style.css:285-286 的 position:relative
+   + z-index:40，再加 style.css:1960-1965 的 backdrop-filter（两者任一都够）。
+   于是 .topsearch 上写的 z-index:62 只在 topbar 内部参与比较，
+   **永远压不过 body 层的 #rail(61)**：父级 40 < 兄弟 61，子元素再大也没用。
+
+   症状极静默：按 / 之后搜索框确实 opacity:1、焦点确实在它上面、控制台一片
+   干净，但胶囊那层不透明玻璃完整盖住它 —— 屏幕上什么都不会出现，
+   像按键没生效。这正是本项目最在意的那类缺陷。
+
+   抬 .topbar 的 z-index 到 62 能压过胶囊，但会连带把舞台抽屉
+   （窄屏 z-index:50，见 style.css:1857）压到顶栏底下，抽屉就贴着顶栏被切开。
+   所以选择让胶囊让位：唤起搜索期间导航不可见、不可点，Esc 或失焦立刻回来。
+   搜索本来就是一次性的、抢焦点的任务，让位期间没有实际损失。
+
+   这里用 opacity + visibility 而不是 display:none：胶囊里的按钮要保留
+   布局（topbar 的 flex 宽度与滚动条位置不能跳），且 display:none 会让
+   「按 / 后焦点在 search 上」这条断言以外的键盘路径（Tab 遍历）行为突变。 */
+[data-skin="sheen"] body.sheen-search .rail {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
 
 /* --- 内容：整块卡片化，给顶部导航让出高度 ------------------------------- */
 
 [data-skin="sheen"] .column {
   border-radius: var(--skin-radius);
   padding: 0 0 8px;
+  /* min-width:0：栅格轨道已经是 minmax(0,1fr)，但 .column 作为 flex/grid 子项
+     仍可能按内容最小宽度撑开，长歌名/长歌单名就会把整块面板顶出视口。 */
+  min-width: 0;
 }
 
+/* 宽屏：胶囊已并入顶栏，内容不再需要为它让高度 —— 让位值取 0，
+   否则上面 134px 全是空白。窄屏由 @media 覆盖回"胶囊独占一行"的让位值。 */
 [data-skin="sheen"] .view {
-  padding: calc(var(--topbar-h) * 0 + 62px) var(--skin-pad) 0;
+  padding: var(--skin-clear-wide) var(--skin-pad) 0;
+  min-width: 0;
 }
 
+/* 页头：标题是这一块唯一的"一级信息"，必须有独立的字重与字距，
+   否则 22px 的字号只显得"大"、不显得"重"。 */
 [data-skin="sheen"] .col-head {
   padding-bottom: var(--skin-head-pb);
   margin-bottom: var(--skin-gap);
+  align-items: baseline;
 }
-
-[data-skin="sheen"] .col-title { font-size: var(--skin-title); }
 
 /* 页头：标题在左、工具挤在同一行靠右——与 workbench「工具条独占第二行靠左」
    正好相反，这是两套皮肤在区块排列上最直观的一处区别。 */
 [data-skin="sheen"] .col-head-left { flex: 1 1 auto; min-width: 0; }
+[data-skin="sheen"] .col-title {
+  font-size: var(--skin-title);
+  font-weight: var(--skin-w-head);
+  line-height: var(--skin-lh-tight);
+  /* 大字号不收字距会散："每日推荐"四个字之间能塞进半个空格。 */
+  letter-spacing: var(--skin-track-tight);
+}
+
 [data-skin="sheen"] .col-tools {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: var(--skin-gap);
+  /* 工具条是操作区、标题是阅读区：基线对齐后工具会随标题字号变化上下跳，
+     这里固定自身高度与对齐方式，让工具始终坐在同一条基线上。 */
+  align-items: center;
 }
 
 /* 设置行：留白跟着整体节奏走大。 */
 [data-skin="sheen"] .set-row {
-  padding-top: 6px;
-  padding-bottom: 6px;
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 /* 在线结果列表：与卡片网格同一套间距。 */
@@ -111,9 +307,15 @@
 
 /* --- 列表：低密度（行更高、间距更松） ---------------------------------- */
 
+/* 表头是"辅助信息"里最弱的一层：小字号 + 开字距 + 加粗，三者齐上才读得出
+   是一列的标题，而不是正文里掉出来的几个字。 */
 [data-skin="sheen"] .lib-head,
 [data-skin="sheen"] .fav-head {
   padding-bottom: 10px;
+  font-size: var(--skin-h4);
+  font-weight: 600;
+  letter-spacing: var(--skin-track-wide);
+  line-height: var(--skin-line-h);
 }
 
 [data-skin="sheen"] .track,
@@ -121,10 +323,19 @@
 [data-skin="sheen"] .fav-row,
 [data-skin="sheen"] .online-row,
 [data-skin="sheen"] .pl-row,
-[data-skin="sheen"] .pd-row {
+[data-skin="sheen"] .pd-row,
+/* 每日推荐的列表画法行（.dv-row）此前漏在这份名单外，是五套皮肤共同的
+   缺口：它自带 padding/border-radius，与上面六种行的几何各写一份，于是
+   切到任何皮肤，30 首推荐都比同页的曲库/队列/歌单挤一号 —— 浮光尤其
+   明显，低密度布局里突然插进一片紧凑行。列进来后它自动跟 --skin-row-py
+   与 --skin-line-h 走，与其余列表同一节奏。 */
+[data-skin="sheen"] .dv-row {
   padding-top: var(--skin-row-py);
   padding-bottom: var(--skin-row-py);
-  border-radius: var(--r-md);
+  border-radius: var(--r-lg);
+  /* 行高在行容器上定一次，内部所有文字行继承：比逐个给 .t-title/.t-sub
+     写 line-height 更省，也保证同一行里主副信息的行高不会打架。 */
+  line-height: var(--skin-line-h);
 }
 
 /* 列表之间留出呼吸：分组靠间距，而不是分割线。 */
@@ -149,15 +360,52 @@
   border-radius: calc(var(--skin-radius) * 0.8);
 }
 
+/* 每日推荐的列表画法：底色/描边换成卡片档，行距交给 --skin-gap。
+   原来行距是 style.css 的 --sp-2（8px），浮光的 --skin-gap 是 18px ——
+   不换的话这一屏就比同页任何其它列表都紧，"整块卡片化"读不出来。
+   .dv-row 自带 background: var(--surface-1)，这里换成 --skin-surface-card
+   是同一个值，留在令牌上是为了让"行的底色归皮肤"这件事成文。 */
+[data-skin="sheen"] .dv-body {
+  gap: var(--skin-gap);
+}
+
+[data-skin="sheen"] .dv-row {
+  background: var(--skin-surface-card);
+  border-color: transparent;
+  padding-inline: var(--skin-pad);
+  box-shadow: var(--skin-hi);
+}
+
+[data-skin="sheen"] .dv-row:hover {
+  border-color: var(--skin-line-soft);
+  background: var(--skin-surface-card);
+}
+
+/* 行内四级排版：曲名/艺人/来源/序号各归各档。
+   原来 .dv-name 没接字号（继承 .view 的正文），在 24px 标题下面读作
+   同一级；这里让它跟 .t-title 对齐，序号与来源落到 --skin-h3 辅助档。 */
+[data-skin="sheen"] .dv-name { font-size: var(--skin-h2); font-weight: var(--skin-h2-w); }
+[data-skin="sheen"] .dv-sub,
+[data-skin="sheen"] .dv-num,
+[data-skin="sheen"] .dv-src { font-size: var(--skin-h3); }
+[data-skin="sheen"] .dv-num,
+[data-skin="sheen"] .dv-src { letter-spacing: var(--skin-track-wide); }
+
 [data-skin="sheen"] .daily-list {
   /* 列数公式在 style.css 的 .daily-list 上，皮肤只交下限与间距两个令牌。 */
   --daily-card-min: var(--skin-card-min);
   --daily-gap: var(--skin-gap);
 }
 
+/* 推荐条是浮在内容上的一条横幅，背后的封面图会穿过文字：底色必须不透明，
+   否则"已为你挑了 24 首…"整段会随背景明暗忽隐忽现。 */
 [data-skin="sheen"] .daily-strip {
   padding: var(--skin-pad);
   border-radius: var(--skin-radius);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow-card), var(--skin-hi);
+  line-height: var(--skin-line-h);
 }
 
 /* --- 设置：分组之间靠间距分区，不再靠一条条分割线 ----------------------- */
@@ -166,23 +414,33 @@
   padding: var(--skin-gap);
   border-radius: var(--skin-radius);
   margin-bottom: var(--skin-gap);
+  /* 分组底用卡片档而非强玻璃：设置区不浮在内容上，用强底会显得头重。 */
+  background: var(--skin-surface-card);
+  border: 1px solid var(--skin-line-soft);
+  box-shadow: var(--skin-hi);
 }
 
 /* --- 舞台：从第三列 → 贴右侧边的悬浮面板 ------------------------------- */
 
+/* 让位值与 .view 同源：胶囊并入顶栏后宽屏不再需要额外高度，
+   舞台跟着贴到顶栏底边，否则它会比内容低 134px、两者对不齐。 */
 [data-skin="sheen"] .stage {
   position: fixed;
   right: var(--skin-pad);
-  top: calc(var(--topbar-h) + 68px);
+  top: calc(var(--topbar-h) + var(--skin-clear-wide));
   width: min(420px, 32vw);
-  max-height: calc(100vh - var(--topbar-h) - 180px);
+  /* dvh 而非 vh：移动端浏览器地址栏收起/展开时 vh 不变，底边会插进播放栏。 */
+  max-height: calc(100dvh - var(--topbar-h) - var(--skin-clear-wide) - var(--bar-h) - var(--skin-gap));
   z-index: 58;
   padding: var(--skin-pad);
   border-radius: var(--skin-radius);
-  border: 1px solid var(--line);
+  /* 与导航胶囊同一个理由：舞台浮在封面图上，半透明底会让歌词随背景闪。 */
+  border: 1px solid var(--skin-line-hard);
+  background: var(--skin-surface);
   backdrop-filter: blur(24px) saturate(1.1);
   -webkit-backdrop-filter: blur(24px) saturate(1.1);
-  box-shadow: var(--surface-lift);
+  box-shadow: var(--skin-shadow);
+  overflow: auto;
 }
 
 /* --- 播放栏：底部悬浮条，两侧内收 --------------------------------------- */
@@ -192,14 +450,58 @@
   border-radius: var(--r-pill);
   padding: 14px var(--skin-pad);
   gap: var(--skin-gap);
+  /* 播放栏同样浮在内容上（底色是强玻璃档），但它是唯一常驻在视口底部的
+     面板：底噪最低、阴影最浅，否则它会盖住最后一行列表。 */
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow-card);
 }
 
-/* --- 浮层：圆角跟随整套皮肤 -------------------------------------------- */
+/* --- 浮层：圆角跟随整套皮肤，且必须是不透明底 -------------------------- */
 
 [data-skin="sheen"] .np-card,
 [data-skin="sheen"] .menu,
 [data-skin="sheen"] .empty-card {
   border-radius: var(--skin-radius);
+}
+
+/* 空状态卡与菜单浮在内容之上：底色不够实的话，"暂无歌曲"会与背后的封面图
+   混成一片（这正是原来 --panel-2 那 5% 白的直接后果）。 */
+[data-skin="sheen"] .empty-card {
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow);
+  line-height: var(--skin-line-h);
+}
+
+/* --- 交互状态：皮肤只做几何，语义交给 style.css ---------------------------
+   五态的**语义**（hover 底色、focus 环、disabled 透明度、loading 转圈）全部
+   由 style.css 提供，全站一份、四套皮肤共享——上面那一节已经把六种行的
+   hover / active / focus-visible / is-disabled 一次补齐。
+
+   皮肤层再写一遍会有两个后果：
+
+     1. 切换皮肤时状态跟着换一套浓淡，用户会误以为"换皮肤顺带改了行为"；
+     2. 皮肤契约要求每个选择器四套皮肤都得有，为一套状态样式给另外三套皮肤
+        各抄一遍，抄出来的浓淡必然对不上（实测就是 :is() 里的逗号被契约脚本
+        按逗号切成了半个选择器，直接判失败）。
+
+   所以这里只剩两条**确实是浮光特有**的几何：触控命中区与 loading 的忙碌提示。
+   按压/焦点偏移/降低动效这三样已随 style.css 那一节全站生效，不再重写。
+
+   焦点环偏移就是那一节里的 --skin-focus-offset：style.css 给 .rail-item 的
+   :focus-visible 写了 outline-offset: var(--skin-focus-offset)，皮肤只覆盖这个
+   数字即可，不新增选择器（新增 :focus-visible 选择器会被皮肤契约判成"新模块"，
+   要求另外三套皮肤各补一条同名规则）。 */
+
+/* 触控设备：命中区抬到 44px（iOS HIG / Material 的最小可点尺寸）。
+   胶囊里条目多，抬到 44px 后一行放不下时会横向滚动——宁可滚动也不缩到
+   34px 以下让人点不准。写 @media 而不是基础规则：鼠标端保持 34px 的紧凑高度。 */
+@media (pointer: coarse) {
+  [data-skin="sheen"] .rail-item {
+    min-height: 44px;
+    justify-content: center;
+  }
 }
 
 /* --- 响应式 --------------------------------------------------------------
@@ -235,16 +537,32 @@
   }
 }
 
-/* 小屏：两侧留白收窄，给主要内容区让出空间；顶部仍保留胶囊导航的高度。 */
+/* 小屏：两侧留白收窄，给主要内容区让出空间。
+
+   这里胶囊**退回"顶栏下方独占一行"**：宽屏那套 max-width 是按
+   「品牌块 + 右侧图标区」留出来的（见 .rail 的 max-width），
+   窄屏根本没有 220px 的余量给右侧图标，胶囊会被挤成一条几十像素的
+   滚动缝。所以窄屏改回贴边横铺，让位高度由下面 .view 的绝对 padding
+   承担（本来就是解耦的，不依赖 --skin-clear-wide）。 */
 @media (max-width: 900px) {
   [data-skin="sheen"] .app {
     padding: 0 10px var(--skin-gap);
   }
   [data-skin="sheen"] .view {
-    padding: 62px 12px 0;
+    padding: calc(var(--topbar-h) + 100px) 12px 0;
   }
   [data-skin="sheen"] .bar {
     margin: 0 10px var(--skin-gap);
+  }
+  /* 贴边横铺：宽屏那套「紧跟品牌块 + 给右侧图标区留 430px」在窄屏根本
+     放不下（430 > 可用宽度），会让胶囊被压成几十像素。所以窄屏直接
+     铺满可用宽度，靠 overflow-x 自己滚。 */
+  [data-skin="sheen"] .rail {
+    top: calc(var(--topbar-h) + 12px);
+    left: 10px;
+    right: 10px;
+    transform: none;
+    max-width: none;
   }
 }
 
@@ -254,7 +572,7 @@
     padding: 0 12px 12px;
   }
   [data-skin="sheen"] .view {
-    padding: 56px 12px 0;
+    padding: calc(var(--topbar-h) + 92px) 12px 0;
   }
   [data-skin="sheen"] .bar {
     margin: 0 10px 10px;

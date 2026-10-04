@@ -20,8 +20,14 @@
   --accent: #FFFFFF;
   --accent-2: #00F5D4;
   /* accent 的 rgb 三元组，供 rgba() 透明度合成使用（舞台高亮的默认回退）。
-     themes.js 换肤时会按 accent 自动重算。 */
+     themes.js 换肤时会按 accent 自动重算。
+     --accent-2-rgb 是第二支强调色的同一形式。**它必须存在**：舞台的第二支
+     高亮色（--music-highlight-alt-rgb）历史上被误写成 var(--accent-rgb)，
+     于是两支颜色永远相同 —— 创意工坊的 64 根频谱柱全部染成同一个颜色，
+     加性混合一叠就是一块实心白，看不出任何结构。之前一直当成"泛光过曝"，
+     查了半天的 bloom 与 tone mapping 都不是根因。 */
   --accent-rgb: 255, 255, 255;
+  --accent-2-rgb: 0, 245, 212;
   /* 铺在 accent 上的文字色。每个主题自带一份，保证按钮文字在任何色相下
      都够对比度——不要再在 .btn.primary 里写死颜色。 */
   --accent-ink: #0A0A0A;
@@ -507,8 +513,8 @@ body::before {
   flex: none;
 }
 .col-head-left { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
-.col-title { font-size: 17px; font-weight: 650; margin: 0; letter-spacing: -0.1px; }
-.count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.col-title { font-size: var(--skin-h1); font-weight: 650; margin: 0; letter-spacing: -0.1px; }
+.count { font-size: var(--skin-h3); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .col-tools { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
 input[type="search"], input[type="text"], select {
@@ -704,7 +710,49 @@ select option { background: var(--panel-solid); color: var(--text); }
 }
 .track.active .t-title { color: var(--accent); font-weight: 600; }
 
-.t-index { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* ======================================================================
+   信息层级令牌（标题 / 正文 / 辅助）
+   --------------------------------------------------------------------------
+   以前每一处文本各自写死字号：曲名 13.5px、艺人 12px、专辑 12.5px、时长 12px、
+   索引 12px、音质 11px……同一条曲名在六个列表里被抄了六遍（.t-title /
+   .q-title / .pd-title / .pl-name 各一份）。想整体调一档就得改六处，
+   漏一处就出现"队列里的字比收藏夹里大"这种没人能说清但一眼别扭的偏差。
+
+   现在把三档收成 --skin-h1/h2/h3（配合 --skin-h2-w、--skin-line-h、
+   --skin-track-wide），默认值与原来的 px 一一对应——**默认主题下像素不变**，
+   皮肤只要覆盖这几个数字就能整屏一起动。皮肤层只改令牌、不碰组件，
+   继续保持"皮肤=布局、主题=配色"的正交。
+   ====================================================================== */
+:root {
+  --skin-h1: 17px;         /* 一级：区块标题（.col-title 改前就是 17px） */
+  --skin-h2: 13.5px;       /* 二级：曲名、卡片标题 */
+  --skin-h3: 12px;         /* 三级：艺人 / 专辑 / 时长 / 索引 */
+  --skin-h4: 11px;         /* 四级：音质徽标、表头小标签 */
+  --skin-h-album: 12.5px;  /* 专辑名比艺人略大一档（曲库视图里它是第二正文行，
+                             不是纯辅助信息），单独一档而不是并进 --skin-h3 */
+  --skin-h2-w: 500;        /* 正文默认字重 */
+  --skin-line-h: 1.5;      /* 中文小字低于 1.5 会糊成块 */
+  --skin-track-wide: 0.6px; /* 小字号开字距，否则辅助信息糊成一条 */
+  --skin-focus-offset: 2px; /* 焦点环与元素的距离。浮在内容上的控件（导航胶囊）
+                                要往外挂一点，否则环会和"当前选中"描边糊成一道 */
+}
+
+/* --- 二级：曲名 ------------------------------------------------------- */
+
+.t-title { font-size: var(--skin-h2); font-weight: var(--skin-h2-w); }
+/* --- 三级：辅助信息 --------------------------------------------------- */
+
+.t-sub { color: var(--muted); font-size: var(--skin-h3); }
+.t-album { color: var(--muted); font-size: var(--skin-h-album); }
+.t-dur { color: var(--muted); font-size: var(--skin-h3); font-variant-numeric: tabular-nums; text-align: right; }
+.t-index { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: var(--skin-h3); font-variant-numeric: tabular-nums; }
+/* --- 四级：徽标 / 极小字 ----------------------------------------------- */
+
+.t-quality {
+  font-size: var(--skin-h4); color: var(--muted); text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 /* 封面位统一由 <img loading="lazy"> 承载（见 app.js 的 paintArt），.t-art 只负
    责裁剪与占位。overflow 是必需的：图片是绝对定位铺满的，不裁就会顶出圆角。 */
 .t-art {
@@ -770,14 +818,9 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
 .t-title, .t-sub, .t-album {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.t-title { font-size: 13.5px; }
-.t-sub { color: var(--muted); font-size: 12px; }
-.t-album { color: var(--muted); font-size: 12.5px; }
-.t-quality {
-  font-size: 11px; color: var(--muted); text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-.t-dur { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+/* 这几条的字号/字重/颜色已在上方「信息层级令牌」一节里统一到 --skin-h2/h3/h4，
+   这里只保留行内布局（对齐方式与等宽数字）。 */
+.t-quality { text-align: right; }
 .t-actions { display: flex; gap: 2px; justify-content: flex-end; opacity: 0; transition: opacity 0.2s var(--ease); }
 .track:hover .t-actions, .track:focus-within .t-actions { opacity: 1; }
 
@@ -850,8 +893,8 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
 }
 .pl-art.pl-has-img { opacity: 1; }
 .pl-main { flex: 1; min-width: 0; display: flex; flex-direction: column; cursor: default; }
-.pl-name { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pl-sub { font-size: 12px; color: var(--muted); }
+.pl-name { font-size: var(--skin-h2); font-weight: var(--skin-h2-w); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-sub { font-size: var(--skin-h3); color: var(--muted); }
 .pl-row .t-act { opacity: 0.55; }
 .pl-row:hover .t-act { opacity: 1; }
 
@@ -1064,16 +1107,16 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
   touch-action: none;          /* 触摸下不滚页面，交给指针拖拽 */
 }
 .pd-grip svg { width: 14px; height: 22px; display: block; }
-.pd-num { width: 20px; flex: none; font-size: 12px; color: var(--muted); text-align: right; }
+.pd-num { width: 20px; flex: none; font-size: var(--skin-h3); color: var(--muted); text-align: right; }
 .pd-art {
   width: 36px; height: 36px; border-radius: 7px; flex: none;
   background: var(--surface-2);
   background-size: cover; background-position: center;
 }
 .pd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.pd-title { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pd-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pd-dur { font-size: 12px; color: var(--muted); flex: none; width: 46px; text-align: right; }
+.pd-title { font-size: var(--skin-h2); font-weight: var(--skin-h2-w); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pd-sub { font-size: var(--skin-h3); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pd-dur { font-size: var(--skin-h3); color: var(--muted); flex: none; width: 46px; text-align: right; }
 .pd-row.is-missing .pd-title, .pd-row.is-missing .pd-sub { color: var(--muted); font-style: italic; }
 .pd-row .t-act { opacity: 0.55; }
 .pd-row:hover .t-act { opacity: 1; }
@@ -1435,11 +1478,11 @@ body.reduce-motion .shelf-vinyl { transition: none; }
   color: var(--muted); opacity: 0.7;
   cursor: grab;
 }
-.q-num { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+.q-num { color: var(--muted); font-size: var(--skin-h3); font-variant-numeric: tabular-nums; text-align: right; }
 .q-main { min-width: 0; display: flex; flex-direction: column; }
-.q-title { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.q-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.q-dur { color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+.q-title { font-size: var(--skin-h2); font-weight: var(--skin-h2-w); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-sub { font-size: var(--skin-h3); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-dur { color: var(--muted); font-size: var(--skin-h3); text-align: right; font-variant-numeric: tabular-nums; }
 .q-row.playing { background: color-mix(in srgb, var(--accent) 13%, transparent); }
 .q-row.playing .q-title { color: var(--accent); font-weight: 600; }
 
@@ -2156,6 +2199,77 @@ select { cursor: pointer; }
   border-color: rgba(var(--brand-rgb), 0.24);
 }
 
+/* 六种行（曲库/ 队列 / 收藏 / 在线结果 / 歌单行 / 歌单详情）此前只有
+   .track 与 .q-row 拿到了 hover，.fav-row / .online-row / .pl-row / .pd-row
+   都没有——它们是同一个 <div> 加类名构造的（favorites.js 里
+   `className = 'track fav-row'`），却因为选择器只写了 .track 就各自漏掉了反馈。
+   表现是"鼠标移上去没有任何反应"，看起来像列表坏了。
+
+   这里一次补齐六种行，并把 active / focus-visible 一并给全：
+     · hover    底色与 .track 对齐，不因所在列表不同而深浅不一
+     · active   压下用 --dur-press（80ms）。回弹仍走默认的 --dur-release，
+                与 .btn / .iconbtn 同一套手感
+     · focus-visible 走全局焦点环兜底（下方 :where(...) 那条已经覆盖 button 与
+                [role=button]，[tabindex] 的行也在内），这里只保证偏移与行高
+                匹配：行是整条可点的，焦点环贴着相邻行会读成"两行都亮了"。 */
+.track, .q-row, .fav-row, .online-row, .pl-row, .pd-row {
+  transition: background var(--dur-base) var(--ease-out),
+    color var(--dur-base) var(--ease-out),
+    transform var(--dur-release) var(--ease-out);
+}
+@media (hover: hover) {
+  .track:hover, .q-row:hover, .fav-row:hover,
+  .online-row:hover:not(.is-disabled), .pl-row:hover, .pd-row:hover {
+    background: var(--field-bg-hover);
+  }
+}
+.track:active, .q-row:active, .fav-row:active,
+.online-row:active:not(.is-disabled), .pl-row:active, .pd-row:active {
+  transform: scale(var(--press-scale));
+  transition-duration: var(--dur-press);
+}
+
+/* 导航项与上面的行共用同一套按压分档：胶囊里条目小，只靠底色变化确认
+   "点到了"很容易漏，必须也有缩放。 */
+.rail-item:active { transform: scale(var(--press-scale)); }
+
+/* 焦点环的偏移走令牌：浮在内容之上的控件（导航胶囊、卡片）需要比贴边控件
+   更大的偏移，否则环会与选中描边/内高光糊在一起。偏移值由皮肤覆盖，
+   默认贴边布局用 --focus-offset 的 2px。 */
+.rail-item:focus-visible, .pl-card:focus-visible, .dv-card:focus-visible {
+  outline-offset: var(--skin-focus-offset);
+}
+
+/* 拖拽中的行跟手，不参与缩放：正在被拖的行突然缩一下会让"抓起来了"这件事
+   看起来像"点了一下"。 */
+.track.dragging, .q-row.dragging, .pd-row.pd-dragging { transform: none; }
+
+/* 不可用（被平台屏蔽 / 文件缺失）：指针手势与悬停反馈一并撤掉，
+   语义是"这里点不动"，而不是"页面卡住了"。 */
+.online-row.is-disabled { cursor: default; opacity: 0.4; }
+.online-row.is-disabled:hover { background: transparent; }
+
+/* 降低动效：缩放是前庭运动最敏感的反馈之一。全局兜底（见本文件末尾的
+   prefers-reduced-motion / body.reduce-motion 两段）只把 transition-duration
+   压到 0.01ms，**transform 本身照样发生**——行还是会被缩一下，
+   所以这里要显式把 transform 归零。 */
+@media (prefers-reduced-motion: reduce) {
+  .rail-item:active,
+  .track:active, .q-row:active, .fav-row:active,
+  .online-row:active:not(.is-disabled), .pl-row:active, .pd-row:active {
+    transform: none;
+  }
+}
+body.reduce-motion .rail-item:active,
+body.reduce-motion .track:active,
+body.reduce-motion .q-row:active,
+body.reduce-motion .fav-row:active,
+body.reduce-motion .online-row:active:not(.is-disabled),
+body.reduce-motion .pl-row:active,
+body.reduce-motion .pd-row:active {
+  transform: none;
+}
+
 /* ---------- 弹层：菜单 / 对话框 / toast ---------- */
 
 .menu, .toast, .theme-menu, .stage-ctl {
@@ -2206,7 +2320,11 @@ button:focus-visible, [role="button"]:focus-visible,
 
 .fav-tabs { display: flex; gap: var(--sp-3); margin: 0 0 var(--sp-5); }
 .fav-head { margin-bottom: var(--sp-3); }
-.fav-list { display: flex; flex-direction: column; }
+/* 收藏列表是内容体兼滚动容器，必须自己收下三件套 —— 与 .lib-list /
+   .pl-list / .q-list / .dv-body 同一套。缺 flex:1 + min-height:0 +
+   overflow-y 时，收藏多起来就被 .column 的 hidden 裁掉，页面表现为
+   「只能看前几行且滚不动」，不报错、不崩、不少元素。 */
+.fav-list { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; }
 .fav-row .t-index { color: var(--muted); }
 
 /* 在线歌单卡上的收藏按钮 */
@@ -2933,11 +3051,22 @@ button:focus-visible, [role="button"]:focus-visible,
   font-variant-numeric: tabular-nums;
 }
 
+/* 每日推荐的内容体。它是本文件里唯一一个「列表体当滚动容器」的例子，
+   但滚动链缺一环不可：.view 只是 flex:1 + min-height:0，本身不滚；
+   .column 又是 overflow:hidden。所以这里必须自己收下 flex:1 /
+   min-height:0 / overflow-y —— 少任何一条，30 首推荐就撑到内容全高，
+   再被 .column 的 hidden 裁掉，表现为「只能看前 10 首且滚不动」。
+   （.lib-list / .pl-list / .q-list / .fav-list 都是同一套三件套。） */
 .dv-body {
   display: grid;
   gap: var(--sp-2);
   padding: var(--sp-3) 0 var(--sp-5);
   align-content: start;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
 }
 
 /* --- 列表画法：序号 + 标题/艺术家 + 来源 ------------------------------- */
@@ -3092,16 +3221,16 @@ button:focus-visible, [role="button"]:focus-visible,
    最小化时 body 挂 .is-capsule，除胶囊外的顶层节点全部隐藏。不逐个列容器名，
    是因为皮肤会改布局栅格的类名与层级，列名单必然漏；而胶囊是 position: fixed，
    与四套皮肤正交——皮肤管文档流里的栅格，胶囊浮在其上。
-   外形对齐参考：深色玻璃胶囊、44px 圆角封面、三行文字（正在播放 / 标题 / 艺术家），
-   整块可点、点回完整界面；不放控件，要操作就展开。 */
+   外形对齐参考：深色玻璃胶囊、圆角封面、三行文字（正在播放 / 标题 / 艺术家），
+   标题与艺术家是窄窗口 + 左右轮播（5 字 / 3 字宽），整块可拖可点。 */
 body.is-capsule > *:not(#capsule) { display: none !important; }
 
 .capsule {
   position: fixed; right: 20px; bottom: 20px;
   z-index: 90;
-  display: flex; align-items: center; gap: 12px;
-  max-width: min(320px, calc(100vw - 40px));
-  padding: 8px 18px 8px 8px;
+  display: flex; align-items: center; gap: 10px;
+  max-width: min(340px, calc(100vw - 40px));
+  padding: 5px 8px 5px 5px;
   border: 1px solid var(--line-strong);
   border-radius: var(--r-pill);
   background: rgba(20, 23, 27, 0.9);
@@ -3110,30 +3239,109 @@ body.is-capsule > *:not(#capsule) { display: none !important; }
   box-shadow: var(--shadow);
   color: var(--text);
   text-align: left;
-  cursor: pointer;
+  /* 整块是拖拽把手；点与拖靠位移阈值区分（见 app.js 的 initCapsule）。
+     touch-action: none 让触屏的拖动不被滚动抢走。 */
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
+.capsule.is-dragging { cursor: grabbing; }
 .capsule[hidden] { display: none; }
 .capsule-art {
   flex: 0 0 auto;
-  width: 44px; height: 44px;
+  width: 38px; height: 38px;
   border-radius: var(--r-md);
   background-color: rgba(255, 255, 255, 0.08);
   background-size: cover;
   background-position: center;
 }
-.capsule-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.capsule-label { font-size: var(--fs-xs); letter-spacing: 0.08em; color: var(--muted); }
+.capsule-text { display: flex; flex-direction: column; gap: 0; min-width: 0; cursor: pointer; }
+.capsule-label { font-size: var(--fs-xs); letter-spacing: 0.08em; color: var(--muted); line-height: 1.2; }
+/* 轮播窗口：宽度按「几个字」给（em 相对本行字号，CJK 一字 ≈ 1em），超出的部分由
+   内层 span 平移滚过（app.js 的 tickCapsuleMarquee）。窗口定宽，胶囊就不会被
+   长艺术家串撑宽——这是它变小的关键。 */
+.capsule-line { display: block; overflow: hidden; }
+/* 行高设在窗口上：行盒高度由块容器决定，设在内层 inline-block 上不生效。 */
+.capsule-line-title { width: 5em; font-size: var(--fs-base); line-height: 1.2; }
+.capsule-line-artist { width: 3em; font-size: var(--fs-xs); line-height: 1.2; }
 .capsule-title {
-  font-size: var(--fs-base); font-weight: 600; color: var(--text);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-block; white-space: nowrap; will-change: transform;
+  font-size: var(--fs-base); font-weight: 600; color: var(--text); line-height: 1.2;
+  /* 轮播是一格一格跳的（app.js 按字步进），transition 把每格抹成短滑动。 */
+  transition: transform 0.22s var(--ease);
 }
 .capsule-artist {
-  font-size: var(--fs-xs); color: var(--muted);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-block; white-space: nowrap; will-change: transform;
+  font-size: var(--fs-xs); color: var(--muted); line-height: 1.2;
+  transition: transform 0.22s var(--ease);
 }
+/* 传输三键 + 展开：不展开完整界面也能换歌、控播放。比底部播放条的 38px 小一圈，
+   胶囊是浮层，控件大了整块会笨重。 */
+.capsule-controls { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.capsule-btn {
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border: 0; border-radius: 50%;
+  background: transparent; color: var(--muted);
+  cursor: pointer; padding: 0;
+  transition: color 0.2s var(--ease), background 0.2s var(--ease);
+}
+.capsule-btn:hover { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+.capsule-btn svg { width: 13px; height: 13px; }
+.capsule-btn-primary { background: var(--accent); color: var(--accent-ink); }
+.capsule-btn-primary:hover { background: var(--accent); color: var(--accent-ink); }
+/* 与底部播放条同一套图标切换：播放态显示暂停形。 */
+.capsule-btn .ic-pause { display: none; }
+body.is-playing .capsule-btn .ic-play { display: none; }
+body.is-playing .capsule-btn .ic-pause { display: block; }
 
-/* dock surface（manifest 里 presentation: "panel" 的胶囊命令）：宿主把这份实例放进
-   全局底部 dock，切到任何标签页都可见。它只渲染胶囊：隐藏规则与 tab 内最小化态
-   同一套，但胶囊常显——dock 里没有「展开」这个动作，点击是跳回主工作台 tab。 */
-body.is-dock-capsule > *:not(#capsule) { display: none !important; }
-body.is-dock-capsule #capsule { display: flex; }
+/* 浮动实例（宿主的 surface: "window"）：这份 UI 跑在一个无边框、置顶的桌面窗口里，
+   胶囊就是窗口的全部内容。于是要撤掉页内定位——position: fixed 的 right/bottom 偏移
+   会把它推出这么小的窗口。宿主的浮窗不透明（要给用户拖的东西必须处处点得动），所以
+   这里让页面背景与胶囊同色、整窗读作一张圆角卡片；阴影画不出窗口边界，去掉。 */
+body.is-floating-capsule { background: rgb(20 23 27) !important; }
+body.is-floating-capsule > *:not(#capsule) { display: none !important; }
+/* boot 前的第一帧（index.html 里按 URL 参数挂的类）：与 is-floating-capsule 同一套
+   隐藏规则，只是挂在 html 上、早于任何 JS 生效，避免完整界面在小窗口里闪一帧。 */
+html.hertz-floating-preboot body { background: rgb(20 23 27) !important; }
+html.hertz-floating-preboot body > *:not(#capsule) { display: none !important; }
+body.is-floating-capsule #capsule {
+  position: static;
+  display: flex;
+  align-self: flex-start;
+  /* 保持内容宽度：窗口尺寸要按胶囊量出来（app.js 的 fitFloatingWindowToCapsule），
+     写成 100% 会和自己循环——量出来的永远是窗口当前宽。页面与胶囊同色，整窗仍读作
+     一张卡片。 */
+  width: max-content;
+  max-width: none;
+  background: rgb(20 23 27);
+  border-radius: 12px;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+/* 启动失败的兜底（app.js showBootFailure）：浮窗形态下启动死掉若不接管，桌面上就是
+   一块点不动的白页。整页换成深色 + 一张错误卡，和胶囊同一张脸。 */
+body.is-boot-failed { background: rgb(20 23 27) !important; }
+body.is-boot-failed > *:not(.boot-failed-card) { display: none !important; }
+.boot-failed-card {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  background: rgb(20 23 27);
+  color: #d7dbe0;
+  font: 12px/1.4 system-ui, "Microsoft YaHei", sans-serif;
+}
+.boot-failed-card span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.boot-failed-card button {
+  border: 0;
+  border-radius: 6px;
+  background: #2c3138;
+  color: #d7dbe0;
+  padding: 4px 10px;
+  cursor: pointer;
+}

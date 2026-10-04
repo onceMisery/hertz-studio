@@ -295,6 +295,13 @@ void main() {
   // 颜色通道饱和到白，亮部提取才有足够大的面积可晕。
   c += vec3(1.0, 0.97, 0.90) * pow(max(vGlow - 1.35, 0.0), 2.0) * 0.4;
   float a = (0.16 + vGlow * 0.52 + fres * 0.5) * uAlphaK;
+  // 单次贡献的 alpha 硬上限。加性混合（ONE, ONE）的退化根源就是没有上限：
+  // 一个像素上叠了 N 层，光晕再收敛，Σ 也会冲破 1.0。64 根柱体 + 一次
+  // 深度重叠的倒影趟，正好是最坏情况。
+  //
+  // 上限是分辨率无关的：无论一个像素叠了几层，单层贡献永远不超过这个值。
+  // 缩小画布只会让它更暗，不会让它变白 —— 这正是小尺寸预览需要的性质。
+  a = min(a, 0.42);
   frag = vec4(c * a, a);
 }`,
     setup: function (gl, U, S) {
@@ -376,6 +383,7 @@ void main() {
   c += paletteMix(0.9) * wire * 1.4;
   // 白热核心：能量尖峰烧向暖白，泛光会把这些点晕成球面上的"耀斑"。
   c += vec3(1.0, 0.97, 0.90) * pow(max(e - 0.58, 0.0), 2.0) * 1.0;
+  a = min(a, 0.42);
   frag = vec4(c * a, a);
 }`,
     setup: function (gl, U, S) {
@@ -460,6 +468,7 @@ void main() {
   // 白热：起音冲顶的光带烧白，拉远看就是隧道里一道道闪过的"光浪"。
   c += vec3(1.0, 0.96, 0.88) * pow(max(b + r - 1.05, 0.0), 2.0) * 0.9;
   float a = soft * fall * fade * (0.10 + b * 0.55 + r * 0.8) * (0.5 + uAgg.w * 1.2);
+  a = min(a, 0.42);
   frag = vec4(c * a, a);
 }`,
     setup: function (gl, U, S) {
@@ -542,6 +551,10 @@ void main() {
   // 能量守恒：点越大每个像素分摊的亮度越低。否则大点扫过相机时不是
   // "一团云"而是"一堵白墙"，还把填充率一起拖死。
   o *= 30.0 / max(vSize, 30.0);
+  // 单次贡献的 alpha 硬上限（与其它场景同一套约定）。星云有能量守恒，
+  // 但那管的是"点的大小"，管不住"一个像素上叠了几千个点"——密度拉满时
+  // 24000 个实例的贡献照样能把该像素推爆。
+  o = min(o, 0.42);
   frag = vec4(c * o, o);
 }`,
     setup: function (gl, U, S) {
@@ -627,6 +640,7 @@ void main() {
   // 这道波让地形"有节拍"。
   float wave = exp(-pow((fract(vZ * 2.0 - uTime * 0.45) - 0.5) * 7.0, 2.0));
   c += paletteMix(0.8) * wave * uPulse * 0.4;
+  a = min(a, 0.42);
   frag = vec4(c * a, a);
 }`,
     setup: function (gl, U, S) {
@@ -799,6 +813,20 @@ float h11(vec2 p) {
   return fract(p.x * p.y);
 }
 
+// Reinhard 扩展式 tone mapping：白点以上的能量按 x/(1+x) 压回来。
+//
+// 为什么必须有它：这个场景全程加性混合（ONE, ONE），64 根柱体再叠一次倒影，
+// 离屏缓冲的 rgb 本来就远超 1.0。以前末端只有 clamp(c, 0, 1) —— 那不是
+// 高光压缩，是"截断"。凡是超过 1 的通道一律变成 1.0，于是所有过曝区域
+// 都收敛到同一个纯白，画面丢掉全部结构，只剩一块白团。
+//
+// 关键差别在预览小画布上尤其致命：主舞台是整屏，1/4 分辨率的粗光晕
+// target 还有几百像素，能分辨出"光从几何体上溢出来"的结构；面板内
+// 预览只有约 324px 宽，粗光晕 target 掉到 81x50，高斯核在这个尺寸下
+// 等效于全屏均匀提升 —— 再叠上 clamp 截断，结果就是一整块纯白。
+// 有了这条曲线，过曝区是"变亮但仍有层次"，不是"什么都没有"。
+vec3 tonemap(vec3 c) { return c / (1.0 + c); }
+
 void main() {
   // 径向色散：以画面中心为原点，R/B 通道分别向外/向内偏移。
   vec2 d = vUV - 0.5;
@@ -850,6 +878,10 @@ void main() {
   }
 
   c *= uExposure;
+
+  // 高光压缩必须在调色之前：grade/saturation/暗角/颗粒全都在 0..1 区间里
+  // 设计，喂未压缩的 HDR 值会让霓虹三级色阶全部撞到最亮一档。
+  c = tonemap(c);
 
   float l = luma(c);
   if (uGrade == 1) c = mix(uColorA, uColorB, clamp(l * 1.25, 0.0, 1.0)) * (0.5 + l);
@@ -937,6 +969,11 @@ void main() {
     }
     return p;
   }
+
+  // 粗光晕（第二级泛光）target 的短边像素地板。低于这个尺寸，1/4 降采样
+  // 的高斯核就不再是"光从几何体上溢出来"，而是一层盖满画面的均匀白雾 ——
+  // 面板内的小尺寸预览正好落在这个区间里。详见 resize 里的说明。
+  var COARSE_MIN_PX = 96;
 
   function create(canvas, opts) {
     opts = opts || {};
@@ -1130,7 +1167,18 @@ void main() {
       brightA = makeTarget(hw, hh, false);
       brightB = makeTarget(hw, hh, false);
       // 第二级泛光链路：1/4 分辨率。两级独立模糊，合成时各乘各的权重。
-      var qw = Math.max(1, bw >> 2), qh = Math.max(1, bh >> 2);
+      //
+      // 但 1/4 不能无条件成立：粗光晕的观感来自"光溢出来、铺满周围空间"，
+      // 前提是 target 还有足够像素让高斯核分辨出结构。面板内预览只有
+      // 约 324px 宽，1/4 之后 target 掉到 81x50 —— 这个尺寸下核半径
+      // 覆盖的角度大到等价于全屏均匀提升，粗光晕不再是"光"，而是"一层
+      // 均匀的白雾"盖满整个画面。所以这里给一个地板：粗光晕 target 的
+      // 短边不低于 COARSE_MIN_PX，不够就退回半分辨率。
+      //
+      // 退回半分辨率会让这一级的"散"变少（像素更多 = 核覆盖的角度更小），
+      // 但那也比整屏糊白好：宁可光晕紧一点，也不要看不见结构。
+      var coarseShift = COARSE_MIN_PX * 2 <= Math.min(bw, bh) ? 2 : 1;
+      var qw = Math.max(1, bw >> coarseShift), qh = Math.max(1, bh >> coarseShift);
       brightC = makeTarget(qw, qh, false);
       brightD = makeTarget(qw, qh, false);
     }

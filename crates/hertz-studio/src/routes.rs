@@ -1045,7 +1045,7 @@ pub(crate) async fn broadcast_ui_notice(state: &AppState, action: &str) -> ApiRe
     Ok(())
 }
 
-/// dock 胶囊与 tab 实例之间的信号中转：两个 iframe 是 opaque origin，浏览器侧
+/// 浮动胶囊窗口与 tab 实例之间的信号中转：两个 iframe 是 opaque origin，浏览器侧
 /// 的 BroadcastChannel / storage 事件都不通，只能借服务端这条广播绕一圈。
 async fn post_ui_notice(
     State(state): State<Arc<AppState>>,

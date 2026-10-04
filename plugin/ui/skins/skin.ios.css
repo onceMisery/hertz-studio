@@ -1,249 +1,291 @@
 /* SPDX-License-Identifier: MIT
    Copyright (c) 2026 mmusic-studio contributors
 
-   皮肤：ios（iOS 风格）
-   --------------------------------------------------------------------------
-   与浮光/工作台/流年的关系：四套皮肤**只管布局**，配色一律走主题 token。
-   本文件不出现任何颜色字面量（契约见 check-skins.js 第 3 节），所以它与
-   任意主题正交——单独切到本皮肤而没换主题也不会把主题色带跑。
-
-   空间组织取 iOS 的三条语言：
-     1. **大圆角 + 柔和阴影**，控件与卡片都是连续的圆角矩形，没有直角；
-     2. **分组列表**：行贴着分组圆角卡的左右边缘，分组之间靠留白 + 细线
-        分隔，而不是每行一条分割线（行间线只在同一分组内出现）；
-     3. **大留白 + 高行高**：行高与段间距都放大一档，一屏放更少但每项
-        更易点。
-
-   圆角/间距这些「尺度」令牌写在这里而不写进 themes.js，是 themes.js 自己
-   定的规矩：主题只准改颜色，结构令牌留给皮肤。
-
-   换主题请配套选 themes.js 里的「iOS 浅色」；两者正交，任意组合都成立。
+   iOS / macOS：桌面分栏、移动分组列表。只消费 Theme 的颜色令牌，
+   不改 DOM、导航/播放器行为与主题存储。独立于沉浸舞台的外观选择。
+   结构：普通流中的侧栏 + 内容 + 播放面板；1240px 以下仍走既有抽屉。
 */
-
 [data-skin="ios"] {
-  /* 布局令牌。圆角比浮光(22px)更大、行更高、格子更小——iOS 的密度介于
-     浮光与工作台之间，靠圆角与留白而不是靠密度取胜。 */
-  --skin-gap: 20px;
-  --skin-pad: 22px;
-  --skin-radius: 26px;
-  --skin-row-py: 13px;
-  --skin-card-min: 176px;
-  --skin-head-pb: 18px;
-  --skin-title: 21px;
-
-  /* iOS 的圆角梯度比默认更「方」一点：控件 12、卡片 18、面板 26。
-     这里就地覆盖 style.css 的 --r-*，让所有复用这些令牌的组件
-     （按钮、输入框、菜单、弹窗）一起变得更圆。 */
-  --r-sm: 10px;
-  --r-md: 12px;
-  --r-lg: 18px;
-  --r-xl: 22px;
-  --radius: 18px;
-  --radius-lg: 26px;
-
-  /* 行高与留白：正文给到 1.55，分组之间用 --skin-gap 拉开。 */
-  --skin-line: 1.55;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --skin-gap: 16px;
+  --skin-pad: 24px;
+  --skin-radius: 16px;
+  --skin-row-py: 8px;
+  --skin-card-min: 160px;
+  --skin-head-pb: 16px;
+  --skin-title: 28px;
+  --skin-line: 1.5;
+  --rail-w: 184px;
+  --stage-w: 320px;
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --radius: 12px;
+  --radius-lg: 16px;
+  --stage-radius: 16px;
+  --stage-radius-sm: 12px;
+  --ios-control-h: 36px;
+  --ios-hit: 44px;
+  --ios-selected: color-mix(in srgb, var(--brand) 9%, var(--panel-solid));
+  --ios-separator: color-mix(in srgb, var(--text) 12%, transparent);
+  --ios-sidebar: color-mix(in srgb, var(--panel-solid) 64%, var(--bg));
+  --ios-shadow: var(--surface-lift);
+  color-scheme: dark;
 }
+[data-skin="ios"][data-theme="ios-light"] { color-scheme: light; }
+[data-skin="ios"] body { font-family: var(--font-sans); }
 
-/* --- 外壳：三列并排，两侧收窄留白 ---------------------------------------- */
-
-[data-skin="ios"] .app {
+/* macOS 式工具栏与侧栏：平面分区，阴影交给临时浮层。 */
+[data-skin="ios"] .topbar {
   gap: var(--skin-gap);
-  padding: 0 var(--skin-pad) var(--skin-gap);
+  padding-inline: var(--skin-gap);
+  background: var(--ios-sidebar);
+  border-color: var(--ios-separator);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
+[data-skin="ios"] .brand { width: calc(var(--rail-w) - 2px); }
+[data-skin="ios"] .topsearch { height: var(--ios-control-h); border-radius: var(--r-md); background: var(--field-bg); border-color: var(--field-border); }
+[data-skin="ios"] .conn { border: 0; background: transparent; padding-inline: 4px; }
+[data-skin="ios"] .conn::before { box-shadow: none; }
+/* 顶栏那个齿轮是冗余的：侧栏底部已经有「设置」入口（index.html 的
+   .rail-item[data-view=settings]），同一个目标出现两次，且工具栏右侧一排
+   图标里它唯一一个会整页跳转、语义上也最"重"。macOS 工具栏本来就不该挂
+   设置项（那是「系统偏好」的量级），所以这里直接摘掉。
 
-/* --- 导航：竖排药丸，选中态用「淡色填充 + 左侧主色条」 -------------------- */
-
+   用 display:none 而不是 visibility:hidden —— 后者仍会占位、把后面的图标
+   顶偏，还留在 Tab 序里变成一个看不见却能聚焦的按钮。业务侧的 onclick 与
+   ui.settingsEntry 引用都留着（键盘快捷键等路径仍能开设置），这里只负责
+   "iOS 皮肤下不长出来"。 */
+[data-skin="ios"] #settings-entry { display: none; }
+[data-skin="ios"] .app {
+  grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--stage-w);
+  gap: var(--skin-gap);
+  padding: var(--skin-gap);
+}
 [data-skin="ios"] .rail {
-  gap: 2px;
-  padding: 10px 8px;
+  gap: 4px;
+  padding: 8px;
+  border: 0;
   border-radius: var(--skin-radius);
+  background: var(--ios-sidebar);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
-
 [data-skin="ios"] .rail-item {
   flex-direction: row;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: var(--r-lg);
+  justify-content: flex-start;
+  gap: 12px;
+  min-height: var(--ios-hit);
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--muted);
   white-space: nowrap;
-  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+  box-shadow: none;
+  transition: background 160ms var(--ease), color 160ms var(--ease), transform 160ms var(--ease);
 }
-
-[data-skin="ios"] .rail-item svg { margin: 0; flex: 0 0 auto; }
-[data-skin="ios"] .rail-item span { font-size: 13px; }
-
-/* 竖排导航保留这根弹簧（浮光横排时把它藏了）。这里给它一个最小高度，
-   保证「设置」贴到底部时上方留白是稳定的，而不是被内容高度顶着走。 */
+[data-skin="ios"] .rail-item svg { width: 20px; height: 20px; margin: 0; flex: none; color: inherit; }
+[data-skin="ios"] .rail-item span { display: inline; font-size: 13px; }
 [data-skin="ios"] .rail-spacer { min-height: var(--skin-gap); }
-
-/* 选中项：iOS 的分段控件是「淡主色填充」，不是描边也不是实心。 */
+[data-skin="ios"] .rail-badge { position: static; margin-left: auto; min-width: 20px; padding: 1px 5px; color: inherit; background: var(--field-bg-hover); font-size: 11px; }
+/* .active 是现有导航的真实状态；也支持声明式标记。 */
+[data-skin="ios"] .rail-item.active,
 [data-skin="ios"] .rail-item.is-on,
 [data-skin="ios"] .rail-item[aria-current="true"] {
-  background: color-mix(in srgb, var(--brand) 12%, transparent);
   color: var(--brand);
+  background: var(--ios-selected);
   font-weight: 600;
+  box-shadow: none;
 }
-
-/* --- 内容列：大圆角卡 + 更宽的段间距 -------------------------------------- */
-
+[data-skin="ios"] .rail-item.active::before { content: none; }
+[data-skin="ios"] .rail-item.active svg { color: inherit; }
 [data-skin="ios"] .column {
-  border-radius: var(--radius-lg);
-  padding: 0 0 10px;
-}
-
-[data-skin="ios"] .view { padding: var(--skin-pad); }
-
-[data-skin="ios"] .col-head {
-  padding-bottom: var(--skin-head-pb);
-  margin-bottom: var(--skin-gap);
-}
-
-[data-skin="ios"] .col-title {
-  font-size: var(--skin-title);
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}
-
-/* 页头：工具挤在同一行靠右（与工作台「工具条独占一行」相反）。 */
-[data-skin="ios"] .col-head-left { flex: 1 1 auto; min-width: 0; }
-[data-skin="ios"] .col-tools {
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: var(--sp-3);
-}
-
-/* --- 分组列表：圆角容器 + 组内细线，组间靠留白 ---------------------------- */
-
-[data-skin="ios"] .set-group {
+  padding: 0;
+  border: 1px solid var(--ios-separator);
   border-radius: var(--skin-radius);
-  margin-bottom: var(--skin-gap);
-  overflow: hidden;
+  background: var(--panel-solid);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
+[data-skin="ios"] .view { min-width: 0; padding: var(--skin-pad); gap: 0; }
+[data-skin="ios"] .col-head { flex-wrap: wrap; gap: 12px; padding-bottom: var(--skin-head-pb); margin-bottom: 8px; border-color: var(--ios-separator); }
+[data-skin="ios"] .col-head-left { flex: 1 1 auto; min-width: 0; gap: 8px; }
+[data-skin="ios"] .col-title { font-size: var(--skin-title); font-weight: 700; letter-spacing: -.035em; line-height: 1.2; }
+[data-skin="ios"] .col-tools { flex-wrap: wrap; justify-content: flex-end; gap: 8px; min-width: 0; }
+[data-skin="ios"] .count { border: 0; border-radius: var(--r-sm); background: var(--field-bg); color: var(--muted); font-size: 12px; }
+[data-skin="ios"] .hint { line-height: var(--skin-line); }
 
-[data-skin="ios"] .set-row { line-height: var(--skin-line); }
+/* 控件保留原生语义，不替换事件目标。 */
+[data-skin="ios"] .btn,
+[data-skin="ios"] .iconbtn,
+[data-skin="ios"] .btn-pill {
+  min-height: var(--ios-control-h);
+  border-radius: var(--r-sm);
+  border-color: var(--field-border);
+  background: var(--field-bg);
+  box-shadow: none;
+  font-weight: 500;
+  transition: background 160ms var(--ease), border-color 160ms var(--ease), color 160ms var(--ease), transform 160ms var(--ease);
+}
+[data-skin="ios"] .btn.primary { color: var(--accent-ink); background: var(--accent); border-color: transparent; }
+[data-skin="ios"] .btn.tiny { min-height: 28px; padding-inline: 10px; }
+[data-skin="ios"] .iconbtn { min-width: var(--ios-control-h); }
+[data-skin="ios"] .iconbtn svg,
+[data-skin="ios"] .btn-pill svg { width: 18px; height: 18px; flex: none; }
+[data-skin="ios"] :is(input[type="text"], input[type="search"], input[type="password"], input[type="number"], select, textarea) {
+  min-height: var(--ios-control-h);
+  border-radius: var(--r-sm);
+  border-color: var(--field-border);
+  background: var(--field-bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  box-shadow: none;
+}
+[data-skin="ios"] .topsearch input { min-height: 0; height: 100%; background: transparent; border: 0; }
+[data-skin="ios"] :is(input, select, textarea):disabled { opacity: .45; cursor: default; }
+[data-skin="ios"] :is(input[type="checkbox"], input[type="radio"]) { accent-color: var(--brand); }
+[data-skin="ios"] :is(button, [role="button"], input, select, textarea, a):focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+[data-skin="ios"] .topsearch:focus-within { outline: 2px solid var(--brand); outline-offset: 2px; box-shadow: none; }
+[data-skin="ios"] .topsearch input:focus-visible { outline: none; }
+@media (hover: hover) {
+  [data-skin="ios"] :is(.btn, .iconbtn, .btn-pill, .rail-item):hover:not(:disabled):not([aria-disabled="true"]) { background: var(--field-bg-hover); transform: none; }
+  [data-skin="ios"] .btn.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.06); }
+  [data-skin="ios"] .rail-item.active:hover { background: var(--ios-selected); }
+}
+[data-skin="ios"] :is(.btn, .iconbtn, .btn-pill, .rail-item, .ctrl):active:not(:disabled):not([aria-disabled="true"]) { transform: scale(.97); transition-duration: 80ms; }
+[data-skin="ios"] :is(button, [role="button"]):is(:disabled, [aria-disabled="true"]) { opacity: .42; cursor: default; transform: none; filter: none; box-shadow: none; }
 
-/* --- 列表：行更高，组内细线不顶到容器边缘（iOS 的 inset 分隔线） --------- */
+/* 设置分组：inset 分隔线；焦点环不被 overflow:hidden 切掉。 */
+[data-skin="ios"] .set-group { gap: 12px; margin-block: 16px 0; padding: 16px; border: 1px solid var(--ios-separator); border-radius: var(--r-lg); background: var(--ios-sidebar); box-shadow: none; }
+[data-skin="ios"] .set-title { color: var(--text); font-size: 14px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+[data-skin="ios"] .set-row { min-height: var(--ios-hit); gap: 12px; line-height: var(--skin-line); }
+[data-skin="ios"] .set-row + .set-row { padding-top: 12px; border-top: 1px solid var(--ios-separator); }
+[data-skin="ios"] .set-row label { color: var(--text); }
+[data-skin="ios"] .skin-option { background: var(--panel-solid); border-color: var(--ios-separator); box-shadow: none; }
+[data-skin="ios"] .skin-option.is-on { background: var(--ios-selected); border-color: var(--brand); box-shadow: inset 3px 0 0 var(--brand); }
 
+/* 列表行高由内容决定，避免固定 height 与 padding 叠加裁切。 */
 [data-skin="ios"] .lib-head,
-[data-skin="ios"] .fav-head {
-  padding-bottom: 10px;
-}
-
+[data-skin="ios"] .fav-head { padding-bottom: 8px; color: var(--muted); letter-spacing: 0; text-transform: none; }
 [data-skin="ios"] .track,
 [data-skin="ios"] .q-row,
 [data-skin="ios"] .fav-row,
 [data-skin="ios"] .online-row,
 [data-skin="ios"] .pl-row,
-[data-skin="ios"] .pd-row {
-  padding-top: var(--skin-row-py);
-  padding-bottom: var(--skin-row-py);
-  line-height: var(--skin-line);
-  border-radius: var(--r-md);
-}
-
+[data-skin="ios"] .pd-row { height: auto; min-height: 60px; padding-block: var(--skin-row-py); line-height: var(--skin-line); border-radius: var(--r-sm); box-shadow: none; }
 [data-skin="ios"] .lib-list,
 [data-skin="ios"] .q-list,
-[data-skin="ios"] .fav-list {
-  gap: 2px;
-  display: flex;
-  flex-direction: column;
+[data-skin="ios"] .fav-list { display: flex; flex-direction: column; gap: 2px; padding-block: 4px 12px; }
+[data-skin="ios"] :is(.track, .q-row, .fav-row, .online-row) { flex-shrink: 0; }
+[data-skin="ios"] :is(.track, .q-row, .fav-row, .online-row) + :is(.track, .q-row, .fav-row, .online-row) {
+  background-image: linear-gradient(var(--ios-separator), var(--ios-separator));
+  background-size: calc(100% - 64px) 1px;
+  background-position: right top;
+  background-repeat: no-repeat;
 }
-
-/* --- 卡片网格：格子比浮光小、比工作台大 ---------------------------------- */
-
+[data-skin="ios"] :is(.track.active, .q-row.playing, .fav-row.playing, .online-row.playing) { background: var(--ios-selected); border-color: transparent; }
+[data-skin="ios"] :is(.t-title, .q-title, .fav-title) { font-size: 14px; }
+[data-skin="ios"] :is(.t-artist, .q-sub, .bar-sub) { color: var(--muted); font-size: 12px; }
+[data-skin="ios"] :is(.track, .q-row, .fav-row, .online-row):focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
 [data-skin="ios"] .pl-grid,
-[data-skin="ios"] .dv-body-card {
-  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
-  gap: var(--skin-gap);
-}
-
+[data-skin="ios"] .dv-body-card { grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--skin-card-min)), 1fr)); gap: var(--skin-gap); }
 [data-skin="ios"] .pl-card-art,
-[data-skin="ios"] .dv-art {
-  border-radius: calc(var(--skin-radius) * 0.62);
-}
-
-[data-skin="ios"] .daily-list {
-  /* 列数公式在 style.css 的 .daily-list 上，皮肤只交下限与间距两个令牌。 */
-  --daily-card-min: var(--skin-card-min);
-  --daily-gap: var(--skin-gap);
-}
-
-[data-skin="ios"] .daily-strip {
-  padding: var(--skin-pad);
-  border-radius: var(--skin-radius);
-}
-
+[data-skin="ios"] .dv-art { border-radius: var(--r-lg); }
+/* 每日推荐的行几何也归皮肤：.dv-row 内距与 .dv-body 的 gap 在业务里写死
+   （--sp-2 / 8px、padding 8px 10px），与 iOS 皮肤的 --skin-row-py 无关，
+   切到本皮肤时 30 首会比同页其它列表挤一号，行卡片化的读法出不来。 */
+[data-skin="ios"] .dv-body { gap: var(--skin-row-py); }
+[data-skin="ios"] .dv-row { padding-top: var(--skin-row-py); padding-bottom: var(--skin-row-py); padding-inline: var(--skin-pad); }
+[data-skin="ios"] .dv-row:hover { background: var(--surface-2); border-color: var(--ios-separator); }
+[data-skin="ios"] .daily-list { --daily-card-min: var(--skin-card-min); --daily-gap: 12px; }
+[data-skin="ios"] .daily-strip { padding: 16px; margin-block: 8px 16px; border-radius: var(--r-lg); background: var(--ios-sidebar); border-color: var(--ios-separator); box-shadow: none; }
+[data-skin="ios"] .daily-head { flex-wrap: wrap; gap: 12px; }
+[data-skin="ios"] .daily-copy { min-width: 0; flex: 1 1 180px; }
+[data-skin="ios"] .daily-tools { flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; }
+[data-skin="ios"] .daily-card { border-radius: var(--r-lg); background: var(--panel-solid); border-color: var(--ios-separator); box-shadow: none; }
+[data-skin="ios"] .daily-card:hover { background: var(--field-bg-hover); box-shadow: none; transform: none; }
+[data-skin="ios"] .daily-card:active { transform: scale(.98); }
 [data-skin="ios"] .online-body { gap: var(--skin-gap); }
 
-/* --- 舞台：贴右侧的悬浮圆角面板 ------------------------------------------ */
-
-[data-skin="ios"] .stage {
-  position: fixed;
-  right: var(--skin-pad);
-  top: calc(var(--topbar-h) + 68px);
-  width: min(420px, 32vw);
-  max-height: calc(100vh - var(--topbar-h) - 180px);
-  z-index: 58;
-  padding: var(--skin-pad);
-  border-radius: var(--skin-radius);
-  border: 1px solid var(--line);
-  box-shadow: var(--surface-lift);
-}
-
-/* --- 播放栏：底部悬浮药丸 ------------------------------------------------ */
-
-[data-skin="ios"] .bar {
-  margin: 0 var(--skin-pad) var(--skin-gap);
-  border-radius: var(--r-pill);
-  padding: 12px var(--skin-pad);
-  gap: var(--skin-gap);
-}
-
-/* --- 浮层：圆角跟随整套皮肤 ---------------------------------------------- */
-
+/* 正常播放面板留在第三列；仅窄屏抽屉使用 fixed。 */
+[data-skin="ios"] .stage { position: relative; inset: auto; width: auto; max-height: none; padding: 16px 16px 0; border-radius: var(--skin-radius); border: 1px solid var(--ios-separator); background: var(--panel-solid); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+[data-skin="ios"] .stage::before { opacity: .06; }
+[data-skin="ios"] .stage-kicker { font-size: 12px; font-weight: 600; letter-spacing: 0; }
+[data-skin="ios"] .stage-title { font-size: 20px; letter-spacing: -.02em; }
+[data-skin="ios"] .stage-modes { padding: 3px; border: 0; border-radius: var(--r-sm); background: var(--field-bg); }
+[data-skin="ios"] .stage-mode { min-height: 28px; border-radius: 6px; color: var(--muted); }
+[data-skin="ios"] .stage-mode[aria-pressed="true"] { color: var(--text); background: var(--panel-solid); box-shadow: var(--ios-shadow); }
+[data-skin="ios"] .bar { margin: 0 var(--skin-gap) max(var(--skin-gap), env(safe-area-inset-bottom, 0px)); padding: 12px 20px; gap: 16px; border-radius: var(--skin-radius); border: 1px solid var(--ios-separator); background: var(--panel-solid); box-shadow: var(--ios-shadow); backdrop-filter: none; -webkit-backdrop-filter: none; }
+[data-skin="ios"] .ctrl { width: 36px; height: 36px; background: transparent; border: 0; box-shadow: none; }
+[data-skin="ios"] .ctrl-primary { width: 44px; height: 44px; background: var(--accent); color: var(--accent-ink); box-shadow: none; }
+[data-skin="ios"] .bar-track { padding: 4px; border-radius: var(--r-sm); }
+[data-skin="ios"] .bar-time { font-size: 11px; font-variant-numeric: tabular-nums; }
 [data-skin="ios"] .np-card,
 [data-skin="ios"] .menu,
-[data-skin="ios"] .empty-card {
-  border-radius: var(--skin-radius);
-}
-
-/* --- 响应式 --------------------------------------------------------------
-   与浮光同理：宽屏空闲态那条 body[data-stage-idle="1"] .app 会把栅格改成
-   「86px + 1fr」，本皮肤的 .rail/.stage 都已 fixed 脱流，栅格里只剩
-   .column，会被收成 86px 窄条。必须显式接回来。 */
+[data-skin="ios"] .empty-card { border-radius: var(--skin-radius); }
+[data-skin="ios"] :is(.menu, .theme-menu, .top-more-menu, .np-card, .toast) { background: var(--panel-solid); border-color: var(--ios-separator); box-shadow: var(--ios-shadow); }
+[data-skin="ios"] .menu { border-radius: var(--r-md); padding: 6px; }
 
 @media (min-width: 1241px) {
-  [data-skin="ios"] .app {
-    padding-right: calc(min(420px, 32vw) + var(--skin-gap) + var(--skin-pad));
-  }
-  [data-skin="ios"] body[data-stage-idle="1"] .app {
-    grid-template-columns: minmax(0, 1fr);
-    padding-right: var(--skin-pad);
-  }
+  [data-skin="ios"] body[data-stage-idle="1"] .app { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
 }
-
-/* 平板/手机：舞台按基础样式的抽屉方式滑入，这里只报几何位置。 */
 @media (max-width: 1240px) {
-  [data-skin="ios"] .stage {
-    top: 12px;
-    right: 12px;
-    bottom: calc(var(--bar-h) + 24px);
-    width: min(420px, 88vw);
-    max-height: none;
-  }
+  [data-skin="ios"] { --rail-w: 168px; --skin-pad: 20px; }
+  [data-skin="ios"] .app { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
+  [data-skin="ios"] .stage { position: fixed; top: max(12px, env(safe-area-inset-top, 0px)); right: max(12px, env(safe-area-inset-right, 0px)); bottom: calc(var(--bar-h) + 32px); width: min(360px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); z-index: 50; box-shadow: var(--ios-shadow); }
 }
-
 @media (max-width: 900px) {
-  [data-skin="ios"] .app { padding: 0 10px var(--skin-gap); }
-  [data-skin="ios"] .view { padding: var(--skin-pad) 12px 0; }
-  [data-skin="ios"] .bar { margin: 0 10px var(--skin-gap); }
+  [data-skin="ios"] { --rail-w: 148px; --skin-gap: 12px; --skin-pad: 16px; }
+  [data-skin="ios"] .rail { padding: 6px; }
+  [data-skin="ios"] .rail-item { gap: 8px; padding-inline: 8px; }
+  [data-skin="ios"] .brand { width: auto; }
+  [data-skin="ios"] .col-tools { flex: 1 1 100%; justify-content: flex-start; margin-left: 0; }
+  [data-skin="ios"] .bar { gap: 8px 12px; padding: 10px 16px; }
+  [data-skin="ios"] .stage { bottom: 152px; }
 }
-
 @media (max-width: 620px) {
-  [data-skin="ios"] .app { padding: 0 12px 12px; }
-  [data-skin="ios"] .view { padding: 12px 12px 0; }
-  [data-skin="ios"] .bar { margin: 0 10px 10px; }
-  [data-skin="ios"] .rail { padding: 8px 6px; }
-  [data-skin="ios"] .rail-item { padding: 9px 10px; }
-  [data-skin="ios"] .stage { padding: 16px; }
+  [data-skin="ios"] { --skin-gap: 8px; --skin-pad: 12px; --skin-title: 26px; --skin-card-min: 136px; --ios-control-h: 44px; }
+  [data-skin="ios"] .topbar { height: auto; min-height: var(--topbar-h); flex-wrap: wrap; gap: 8px; padding: max(8px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) 8px max(12px, env(safe-area-inset-left, 0px)); }
+  [data-skin="ios"] .brand { width: auto; }
+  [data-skin="ios"] .top-right { margin-left: auto; gap: 2px; }
+  [data-skin="ios"] .topsearch { order: 3; flex: 1 1 100%; max-width: none; }
+  [data-skin="ios"] .topsearch input { font-size: 16px; }
+  [data-skin="ios"] .conn { padding: 0; gap: 0; }
+  [data-skin="ios"] .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); padding: 0 max(8px, env(safe-area-inset-right, 0px)) 8px max(8px, env(safe-area-inset-left, 0px)); gap: 8px; }
+  [data-skin="ios"] .rail { flex-direction: row; gap: 2px; padding: 4px; min-width: 0; overflow-x: auto; overflow-y: hidden; border-radius: var(--r-lg); }
+  [data-skin="ios"] .rail-spacer { display: none; }
+  [data-skin="ios"] .rail-item { flex: 1 0 48px; min-width: 48px; min-height: 52px; padding: 4px 0; gap: 4px; flex-direction: column; justify-content: center; }
+  [data-skin="ios"] .rail-item span { font-size: 11px; }
+  [data-skin="ios"] .rail-item svg { width: 20px; height: 20px; }
+  [data-skin="ios"] .rail-badge { position: absolute; top: 0; right: 0; font-size: 9px; min-width: 14px; padding: 0 3px; }
+  [data-skin="ios"] .column { border-radius: var(--r-lg); }
+  [data-skin="ios"] .view { padding: 16px 12px 12px; }
+  [data-skin="ios"] .col-head { gap: 12px; }
+  [data-skin="ios"] .col-tools { width: 100%; }
+  [data-skin="ios"] .col-tools > :is(input, select) { flex: 1 1 100px; min-width: 0; }
+  [data-skin="ios"] .set-group { padding: 12px; }
+  [data-skin="ios"] .set-row { gap: 8px; }
+  [data-skin="ios"] .set-row label { width: auto; min-width: 80px; }
+  [data-skin="ios"] .daily-strip { padding: 12px; }
+  [data-skin="ios"] .daily-tools { width: 100%; }
+  [data-skin="ios"] .bar { margin-inline: 8px; padding: 8px 12px; gap: 4px 8px; border-radius: var(--r-lg); }
+  [data-skin="ios"] .bar-controls { gap: 8px; }
+  [data-skin="ios"] .ctrl { width: 44px; height: 44px; }
+  [data-skin="ios"] .bar-time { font-size: 11px; }
+  [data-skin="ios"] .stage { bottom: 12px; padding: 16px; }
 }
+@media (pointer: coarse) {
+  [data-skin="ios"] { --ios-control-h: 44px; }
+  [data-skin="ios"] .btn.tiny { min-height: 44px; }
+  [data-skin="ios"] :is(.t-act, .stage-mode) { min-width: 44px; min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-skin="ios"] :is(.btn, .iconbtn, .btn-pill, .rail-item, .ctrl, .daily-card):active { transform: none; }
+}
+[data-skin="ios"] body.reduce-motion :is(.btn, .iconbtn, .btn-pill, .rail-item, .ctrl, .daily-card):active { transform: none; }

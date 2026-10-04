@@ -391,7 +391,8 @@ html.hand-paper footer.bar {
   margin-top: 2px;
 }
 
-.ws-close {
+.ws-close,
+.ws-expand {
   width: 30px;
   height: 30px;
   border-radius: 9px;
@@ -403,13 +404,37 @@ html.hand-paper footer.bar {
   place-items: center;
 }
 
-.ws-close:hover {
+.ws-close:hover,
+.ws-expand:hover {
   background: var(--hover, rgba(255, 255, 255, 0.07));
 }
 
 .ws-close svg {
   width: 15px;
   height: 15px;
+}
+
+/* 展开按钮：常显但低调，只有「预览真的挂上了」才允许点（见 workshop.js）。
+   用 disabled 而不是 hidden —— 一个会随页签出现/消失的按钮比一个置灰的
+   按钮更难预期。 */
+.ws-expand {
+  flex: none;
+  color: inherit;
+}
+
+.ws-expand svg {
+  width: 15px;
+  height: 15px;
+}
+
+.ws-expand[aria-pressed='true'] {
+  background: rgba(var(--music-highlight-rgb, 226, 176, 113), 0.16);
+  color: rgb(var(--music-highlight-rgb, 226, 176, 113));
+}
+
+.ws-expand:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 .ws-tabs {
@@ -934,6 +959,20 @@ body.stage-lowfx #creative-bg-canvas {
 .ws-value-reset:hover { color: #dbe9df; }
 .ws-panel .sc-note { display: block; font-size: 11px; line-height: 1.8; color: #95a99e; }
 .ws-save-note { margin: 24px 0 0; color: #819b8b; font-size: 10px; text-align: center; }
+/* stanza 接管时的锁定说明。用 --music-brand 那类既有令牌不合适（创意工坊
+   有自己的配色体系），所以就地取面板自身的绿灰色系，保持同一张皮。 */
+.ws-stanza-note { margin: 14px 0 4px; padding: 12px 14px; border: 1px solid rgba(185,215,199,.22); border-left: 2px solid #9fc4ae; border-radius: 9px; background: rgba(159,196,174,.06); }
+.ws-stanza-note strong { display: block; font-size: 12px; font-weight: 500; color: #cfe0d5; }
+.ws-stanza-note p { margin: 7px 0 0; font-size: 10px; line-height: 1.75; color: #92a79b; }
+.ws-section-title.is-locked { color: #7d9187; }
+/* 锁定态的控件：置灰但保持可读的层级，别用 opacity 整块压 —— 那样连
+   标签都看不清，用户会以为是渲染坏了而不是被禁用。 */
+.ws-template:disabled, .ws-tuning input:disabled, .ws-tuning [role="switch"][aria-checked] { cursor: not-allowed; }
+.ws-template:disabled { border-color: rgba(255,255,255,.03); background: #141d1c; }
+.ws-template:disabled strong, .ws-template:disabled small { color: #5c6f66; }
+.ws-template:disabled .ws-scene-art { opacity: .35; }
+.ws-tuning input:disabled { accent-color: #3a4a44; }
+.ws-tuning label:has(input:disabled) { color: #6b7e75; }
 .ws-param-group { border-bottom: 1px solid rgba(255,255,255,.09); margin-bottom: 16px; }
 .ws-param-group summary { cursor: pointer; padding: 14px 0; color: #d3dfd7; font-size: 13px; }
 .ws-param-group .sc-grid { padding: 10px 0 20px; }
@@ -956,3 +995,79 @@ body.ws-open:not(.s3d-open) #lyric-page { right: 400px; width: auto; }
 .ws-preview-stage { position: relative; aspect-ratio: 16 / 9; }
 .ws-preview-stage .creative-canvas { position: absolute; }
 .ws-preview-meta { padding: 7px 12px; font-size: 10.5px; letter-spacing: .07em; color: #8fa39a; border-top: 1px solid rgba(255,255,255,.08); }
+
+/* 宽屏工坊：面板摊成两栏，预览占主列、参数占侧栏。
+
+   为什么需要这个形态 —— 窄面板里那个 16:9 画布只有约 350x200。这个尺寸下
+   两件事同时成立：一是场景的空间结构读不出来（灯柱的疏密、纵深的收敛），
+   二是后处理链的粗光晕 target 掉到不足 1/8 分辨率，高斯核等效于全屏均匀
+   提升，画面就糊成一片均匀的光。放大容器是唯一对症解 —— 补光晕或改曝光都
+   是在下游打补丁。
+
+   比例 1.2fr / 380px 与 min-h-[300px] 取自 folia-major 的 ThemePark 编辑器
+   （grid-cols-[minmax(0,1.2fr)_380px]，预览 h-full），不是随手配的数。
+   预览这一列不设 aspect-ratio：让它跟着面板高度走，竖屏时才是满屏而不是
+   一个居中的小方块。 */
+.ws-panel.is-wide {
+  --ws-width: min(1180px, 96vw);
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) 380px;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-areas:
+    'head head'
+    'tabs tabs'
+    'preview body';
+  align-content: start;
+}
+
+.ws-panel.is-wide .ws-head { grid-area: head; }
+.ws-panel.is-wide .ws-tabs { grid-area: tabs; }
+.ws-panel.is-wide .ws-preview { grid-area: preview; }
+.ws-panel.is-wide .ws-body { grid-area: body; }
+
+/* 头与页签要占满两列，且不能被 grid 的行高分配挤扁 */
+.ws-panel.is-wide .ws-head,
+.ws-panel.is-wide .ws-tabs { grid-column: 1 / -1; }
+
+/* 预览不在「高级编排」页签时（hidden）没有 preview 这一格，body 需要顶上来。
+   用 grid-area 而不是 display 覆盖：hidden 的元素不生成盒子，整列会空着。 */
+.ws-panel.is-wide:not(:has(.ws-preview:not([hidden]))) .ws-body {
+  grid-area: body;
+  grid-column: 1 / -1;
+}
+
+.ws-panel.is-wide .ws-preview {
+  margin: 4px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  min-height: 300px;
+}
+
+.ws-panel.is-wide .ws-preview-stage {
+  flex: 1;
+  min-height: 260px;
+  aspect-ratio: auto;
+}
+
+/* 宽屏下右侧参数栏自己滚，头与页签固定。列模板已经给了 minmax(0,1fr)，
+   这里只需把溢出关掉，否则 ws-body 的 padding-bottom 会被算进行高。 */
+.ws-panel.is-wide .ws-body {
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* 主页右栏要跟着让出宽度，否则宽屏工坊会盖住播放视窗 */
+body.ws-open.ws-wide:not(.s3d-open) #lyric-page { right: min(1180px, 96vw); }
+
+@media (max-width: 900px) {
+  /* 窄屏摊不开两栏：1.2fr + 380px 在 900px 下预览只剩不到 300px 宽，
+     比原来的窄面板还小。宁可退回单列，也不要给一个更差的预览。 */
+  .ws-panel.is-wide {
+    display: flex;
+    flex-direction: column;
+  }
+  .ws-panel.is-wide .ws-preview-stage { aspect-ratio: 16 / 9; flex: none; min-height: 0; }
+  .ws-panel.is-wide .ws-body { border-left: 0; }
+  body.ws-open.ws-wide:not(.s3d-open) #lyric-page { right: 0; }
+}

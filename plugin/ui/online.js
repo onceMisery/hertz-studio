@@ -715,7 +715,13 @@
     if (meta) H.toast('试听《' + meta.title + '》');
 
     // 封面加载不出来就撤掉改用占位图，不留一个永不显示的背景。
-    var coverOk = !cover || await H.probeImage(cover);
+    // 插件形态下 cover 是音源直链：probe 前必须先换成 data URL，否则直链在沙箱
+    // 里必然加载失败，会把一张好封面误判成坏图撤掉。
+    var probeTarget = cover;
+    if (cover && window.HertzCovers && window.HertzCovers.resolve) {
+      probeTarget = (await window.HertzCovers.resolve(cover)) || cover;
+    }
+    var coverOk = !cover || await H.probeImage(probeTarget);
     if (!current()) return;
     if (!coverOk) {
       if (meta) meta.cover = null;

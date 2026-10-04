@@ -30,9 +30,9 @@ pub enum WsEvent {
         bands: Vec<f32>,
     },
     Ended,
-    /// 界面实例之间的轻量信号。dock 胶囊与 tab 实例是两个 opaque-origin 的
+    /// 界面实例之间的轻量信号。浮动胶囊窗口与 tab 实例是两个 opaque-origin 的
     /// iframe，BroadcastChannel / storage 事件都不通，只能借这条已有的广播管道
-    /// 绕一圈：dock 里点胶囊时发 `expand-capsule`，tab 实例收到就解除最小化。
+    /// 绕一圈：浮窗里点胶囊时发 `expand-capsule`，tab 实例收到就解除最小化。
     UiNotice {
         action: String,
     },

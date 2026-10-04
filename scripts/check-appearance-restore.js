@@ -107,7 +107,11 @@ function makeApp(store) {
         return nodes.get(id);
       },
       createElement(tag) { return makeEl(tag); },
-      querySelectorAll(sel) { return sel === 'link[data-skin-css]' ? links : []; },
+      // skins.js 用的是组合选择器（插件形态下皮肤 CSS 被宿主内联成 <style>），
+      // 这里按标签名过滤，等价于浏览器对 'link[…], style[…]' 的行为。
+      querySelectorAll(sel) {
+        return String(sel).split(',').some((s) => s.trim() === 'link[data-skin-css]') ? links : [];
+      },
       querySelector() { return null; },
       addEventListener() {},
       removeEventListener() {},

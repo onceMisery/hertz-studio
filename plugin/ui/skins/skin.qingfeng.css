@@ -1,0 +1,1822 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 mmusic-studio contributors
+
+   皮肤：qingfeng（清风）
+   --------------------------------------------------------------------------
+   视觉与交互取自参考项目的真实骨架（出处见 NOTICE「Design lineage」）：
+
+     ┌───────────────────────────────────────────────────────────────┐
+     │ 顶栏（透明）：左=品牌+设置  中=主菜单胶囊        右=搜索        │
+     ├───────────────────────────────────────────────────────────────┤
+     │ 视图区（全宽单列，无侧栏）                                    │
+     │   · 歌单页  → 拍立得卡片网格（封面 + 标题 + 副标）             │
+     │   · 队列拼接 → 海报墙：重复密排方卡，中央一张展开大卡         │
+     │   · 设置    → 浮层：左栏两级分类 + 右栏卡片分组                │
+     ├───────────────────────────────────────────────────────────────┤
+     │ 底部居中：播放胶囊（标题 + 进度）      右下：头像 + 箭头        │
+     └───────────────────────────────────────────────────────────────┘
+
+   与流年（liunian）的关系：两者都移除了左侧 rail，但骨架不同 ——
+   流年是「左栏歌曲列表 + 右栏频谱歌词」的二栏播放器；清风是
+   **全宽单列 + 悬浮胶囊**的展墙式布局，播放信息收在底部胶囊里。
+
+   三条铁律（与 sheen/workbench/liunian/ios 一致）：
+     1. 本文件不出现任何颜色字面量 —— 配色一律走 var(--…) 主题令牌，
+        所以换皮肤不会把主题色带跑，换主题也不会破坏本皮肤。
+     2. 模块覆盖与其余皮肤对齐（契约 check-skins.js 的 checkCoverage 会比），
+        少一个模块就意味着切过去时那个页面「落回默认布局」。
+     3. 几何令牌集中在 :root 块里声明，组件层只消费，不就地写死数值。
+
+   选择器约定：模块规则一律用裸类（.track 等），作用域由
+   [data-skin="qingfeng"] 前缀限定；.qf-* 仅给清风新建结构使用。
+*/
+
+[data-skin="qingfeng"] {
+  /* ==== 布局令牌 ====
+     契约 checkContrast 只比 sheen 与 workbench 的 --skin-* 逐项差值；
+     清风是第三种密度取向：卡片大、行高中等、面板圆角最圆。 */
+  --skin-gap: 24px;
+  --skin-pad: 28px;
+  --skin-radius: 28px;      /* 全项目最大的面板圆角（folia 的 rounded-3xl = 24，这里再放宽一档） */
+  --skin-row-py: 11px;
+  --skin-card-min: 200px;
+  --skin-head-pb: 20px;
+  --skin-title: 26px;
+
+  /* ==== 排版令牌：标题 / 正文 / 辅助 三级 ==== */
+  --skin-h1: var(--skin-title);
+  --skin-h2: 15px;          /* 曲名、卡片标题 */
+  --skin-h3: 12.5px;        /* 艺人 / 专辑 / 时长 */
+  --skin-h4: 11px;          /* 徽标、表头小标签 */
+  --skin-h2-w: 600;
+  --skin-line-h: 1.55;      /* 中文小字低于 1.5 会糊成块 */
+  --skin-track-tight: -0.26px;
+  --skin-track-wide: 0.7px;
+  --skin-lh-tight: 1.26;
+  --skin-w-head: 700;
+
+  /* ==== 表面令牌 ====
+     悬浮件（胶囊 / 舞台 / 播放条）必须用 --glass-bg-strong 那一档：
+     78% 不透明是 style.css 为「浮起件」准备的，浮在壁纸上时文字对比度可控，
+     且 ios-light 已把它翻成浅色语义，深浅色都自动正确。 */
+  --skin-surface: var(--glass-bg-strong);
+  --skin-surface-card: var(--surface-1);
+  --skin-line-soft: var(--surface-line);
+  --skin-line-hard: var(--surface-line-strong);
+  --skin-shadow: var(--glass-shadow);
+  --skin-shadow-card: var(--surface-lift);
+  --skin-hi: var(--surface-hi);
+
+  /* ==== 控件令牌 ==== */
+  --skin-ctl-radius: var(--r-pill);
+  --skin-focus-offset: 3px;
+
+  /* ==== 顶栏与胶囊的几何 ====
+     胶囊的 top / 高度都是令牌，--qf-clear 由它们推导，避免「改了胶囊高度
+     却忘了改内容上让量」这类不同步。 */
+  --topbar-h: 58px;
+  --qf-nav-h: 44px;
+  --qf-nav-top: 10px;
+  --qf-clear: calc(
+    var(--topbar-h) + var(--qf-nav-top) + var(--qf-nav-h) + var(--skin-gap)
+  );
+
+  /* 队列拼接墙的密排参数（海报墙坐标系，见 skin.qingfeng.js 的 LATTICE）。 */
+  --qf-cell: 128px;         /* 单元格边长 */
+  --qf-cell-gap: 8px;       /* 卡片间隙 */
+}
+
+/* ===================== 顶栏：透明，左品牌 / 中菜单 / 右搜索 ============== */
+
+[data-skin="qingfeng"] .topbar {
+  background: transparent;
+  border-bottom: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  padding: 0 var(--skin-pad);
+  /* 顶栏是胶囊的定位参照，必须自己撑住高度，否则胶囊的 absolute 参照物错位 */
+  position: relative;
+  z-index: 20;
+}
+
+[data-skin="qingfeng"] .brand {
+  width: auto;
+  letter-spacing: 4px;
+}
+
+/* hz 标识不吃播放卡的衬体与宽字距 */
+[data-skin="qingfeng"] .brand .brand-mark {
+  letter-spacing: -0.08em;
+}
+
+/* 左上角：品牌 + 设置。folia 把设置挂在品牌右侧，清风照抄这个位置关系 */
+[data-skin="qingfeng"] .qf-brand-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+[data-skin="qingfeng"] .qf-settings-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-pill);
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease),
+              background var(--dur-1) var(--ease),
+              transform var(--dur-press) var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-settings-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+[data-skin="qingfeng"] .qf-settings-btn:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+[data-skin="qingfeng"] .qf-settings-btn:active {
+  transform: scale(0.94);
+}
+
+[data-skin="qingfeng"] .qf-settings-btn:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--skin-focus-offset);
+}
+
+/* 搜索框收在顶栏右侧，胶囊圆角 */
+[data-skin="qingfeng"] .topsearch {
+  height: 34px;
+  max-width: 300px;
+  border-radius: var(--r-pill);
+}
+
+[data-skin="qingfeng"] .top-right {
+  gap: 8px;
+}
+
+/* 收掉顶栏右上角的三个控制按钮：最小化胶囊 / 沉浸声场 / 打开设置。
+   清风的控制入口统一在左上角那一个设置按钮里（.qf-settings-btn），
+   这三个对它是冗余的 —— 尤其「打开设置」，左上角已经有一个了。
+
+   这两条路不能因此断掉，所以设置浮层里补了「窗口与舞台」分组承接
+   前两个（#set-capsule-btn / #set-stage3d-btn，绑定见 app.js 与 stage3d.js）：
+   皮肤只是隐藏入口，不是禁用功能。取消注释任一条即可恢复。
+
+   用 id 选择器 —— 这三个在 index.html 里是 id（#capsule-entry 等），
+   不是 class。写成 .capsule-entry 会一条都匹配不上，规则看起来写了、
+   实际不生效，是最难查的那种「覆盖了却没生效」。 */
+[data-skin="qingfeng"] #capsule-entry,
+[data-skin="qingfeng"] #stage3d-entry,
+[data-skin="qingfeng"] #settings-entry {
+  display: none;
+}
+
+/* ===================== 外壳：单列全宽，无侧栏 ========================== */
+
+[data-skin="qingfeng"] .rail {
+  display: none;
+}
+
+/* rail 整体隐藏，但节点保留：业务的视图切换逻辑仍挂在其按钮上，皮肤与
+   app.js 都靠程序化点击它来复用 setView 链路。所以条目本身不能「顺手续」——
+   选中态徽标、图标尺寸仍要跟着本皮肤的排版走，否则切到某个视图时
+   rail-item 上的 active 类没有对应的视觉规则。 */
+[data-skin="qingfeng"] .rail-spacer {
+  display: none;
+}
+
+[data-skin="qingfeng"] .rail-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+}
+
+[data-skin="qingfeng"] .rail-item svg {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  flex: none;
+}
+
+[data-skin="qingfeng"] .rail-item span {
+  font-size: var(--fs-sm);
+}
+
+/* 必须显式钉死栅格：全局 body[data-stage-idle="1"] .app（≥1241px、0,2,1）
+   会把外壳改成「86px + 1fr」，本皮肤基础 .app（0,2,0）压不过它 ——
+   不钉则内容落进 86px 窄轨、布局整个错位。此组合选择器 (0,3,1) 钉回单列。 */
+[data-skin="qingfeng"] .app {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: var(--skin-gap);
+  padding: 0 var(--skin-pad) var(--skin-pad);
+  width: 100%;
+  max-width: 1720px;
+  margin-inline: auto;
+}
+
+@media (min-width: 1241px) {
+  [data-skin="qingfeng"] body[data-stage-idle="1"] .app {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--skin-gap);
+  }
+}
+
+[data-skin="qingfeng"] .column {
+  min-width: 0;
+  min-height: 0;
+  /* 顶部留出让位给悬浮胶囊：胶囊是 fixed，必须由内容区自己让出这条带，
+     否则第一行内容正好被胶囊压住。 */
+  padding-top: var(--qf-clear);
+  padding-bottom: 96px; /* 让开底部播放胶囊与右下角头像 */
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+[data-skin="qingfeng"] .view {
+  max-width: 100%;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+/* ===================== 居中胶囊主菜单 ================================ */
+
+[data-skin="qingfeng"] .qf-nav {
+  position: fixed;
+  top: calc(var(--topbar-h) + var(--qf-nav-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  height: var(--qf-nav-h);
+  max-width: calc(100vw - 2 * var(--skin-pad));
+  border-radius: var(--r-pill);
+  background: var(--skin-surface);
+  border: 1px solid var(--skin-line-soft);
+  box-shadow: var(--skin-shadow);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+[data-skin="qingfeng"] .qf-nav-item {
+  position: relative;
+  height: calc(var(--qf-nav-h) - 10px);
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--dur-2) var(--ease);
+}
+
+/* 选中态：实心浅色滑块 + 深色字（folia 的 motion.span layoutId 手感） */
+[data-skin="qingfeng"] .qf-nav-item.is-active {
+  color: var(--accent-ink);
+}
+
+[data-skin="qingfeng"] .qf-nav-item.is-active::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--surface-hi);
+  box-shadow: var(--skin-shadow-card);
+  z-index: -1;
+}
+
+[data-skin="qingfeng"] .qf-nav-item:hover {
+  color: var(--text);
+}
+
+[data-skin="qingfeng"] .qf-nav-item:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* 队列拼接入口：只有图标，hover 时才展开出文字（folia 的 max-w 展开） */
+[data-skin="qingfeng"] .qf-nav-icon {
+  display: flex;
+  align-items: center;
+  height: calc(var(--qf-nav-h) - 10px);
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color var(--dur-2) var(--ease), background var(--dur-2) var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-nav-icon svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+
+[data-skin="qingfeng"] .qf-nav-icon span {
+  max-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 0;
+  margin-left: 0;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  transition: max-width var(--dur-2) var(--ease),
+              opacity var(--dur-2) var(--ease),
+              margin-left var(--dur-2) var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-nav-icon:hover,
+[data-skin="qingfeng"] .qf-nav-icon:focus-visible {
+  color: var(--text);
+  background: var(--hover);
+}
+
+[data-skin="qingfeng"] .qf-nav-icon:hover span,
+[data-skin="qingfeng"] .qf-nav-icon:focus-visible span {
+  max-width: 92px;
+  opacity: 1;
+  margin-left: 7px;
+}
+
+[data-skin="qingfeng"] .qf-nav-icon.is-active {
+  color: var(--accent-ink);
+  background: var(--surface-hi);
+}
+
+/* ===================== 区块头 ========================================== */
+
+[data-skin="qingfeng"] .col-head {
+  padding: 0 0 var(--skin-head-pb);
+  border: 0;
+  background: transparent;
+  gap: var(--skin-gap);
+}
+
+[data-skin="qingfeng"] .col-head-left {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 10px;
+}
+
+[data-skin="qingfeng"] .col-title {
+  font-size: var(--skin-h1);
+  font-weight: var(--skin-w-head);
+  letter-spacing: var(--skin-track-tight);
+  line-height: var(--skin-lh-tight);
+  color: var(--text);
+}
+
+[data-skin="qingfeng"] .col-tools {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 在线结果区：与曲库同样的行距与卡距 */
+[data-skin="qingfeng"] .online-body {
+  gap: var(--skin-gap);
+}
+
+/* 每日推荐的「大卡」排布（.dv-* 系列） */
+[data-skin="qingfeng"] .dv-body-card {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
+  gap: calc(var(--skin-gap) * 0.75);
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+[data-skin="qingfeng"] .dv-art {
+  box-shadow: inset 0 0 0 1px var(--skin-line-soft);
+}
+
+/* 每日推荐列表的行距也归皮肤：业务 .dv-body 的 gap 写死 --sp-2（8px），
+   与本皮肤的 --skin-row-py（11px）无关 —— 30 首会比同页其它列表挤一号。 */
+[data-skin="qingfeng"] .dv-body {
+  gap: var(--skin-row-py);
+}
+
+[data-skin="qingfeng"] .lib-head,
+[data-skin="qingfeng"] .fav-head {
+  padding-bottom: 14px;
+  border: 0;
+}
+
+/* ===================== 列表行：拍立得式高行 ========================== */
+
+[data-skin="qingfeng"] .track,
+[data-skin="qingfeng"] .q-row,
+[data-skin="qingfeng"] .fav-row,
+[data-skin="qingfeng"] .online-row,
+[data-skin="qingfeng"] .pl-row,
+[data-skin="qingfeng"] .pd-row,
+[data-skin="qingfeng"] .dv-row {
+  padding: var(--skin-row-py) 14px;
+  gap: 12px;
+  border: 0;
+  border-radius: var(--r-lg);
+  background: transparent;
+  box-shadow: none;
+  transition: background var(--dur-1) var(--ease);
+}
+
+[data-skin="qingfeng"] .track:hover,
+[data-skin="qingfeng"] .q-row:hover,
+[data-skin="qingfeng"] .fav-row:hover,
+[data-skin="qingfeng"] .online-row:hover,
+[data-skin="qingfeng"] .pl-row:hover,
+[data-skin="qingfeng"] .pd-row:hover,
+[data-skin="qingfeng"] .dv-row:hover {
+  background: var(--hover);
+}
+
+/* 正在播放：左侧一条主色竖条 + 底色微亮（不用改字色，避免与主题撞） */
+[data-skin="qingfeng"] .track.playing,
+[data-skin="qingfeng"] .q-row.playing,
+[data-skin="qingfeng"] .fav-row.playing,
+[data-skin="qingfeng"] .online-row.playing,
+[data-skin="qingfeng"] .pl-row.playing,
+[data-skin="qingfeng"] .pd-row.playing {
+  background: var(--surface-hi);
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+
+[data-skin="qingfeng"] .lib-list,
+[data-skin="qingfeng"] .q-list,
+[data-skin="qingfeng"] .fav-list {
+  gap: 2px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+/* ===================== 歌单卡片网格（拍立得） ======================== */
+
+[data-skin="qingfeng"] .pl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
+  gap: calc(var(--skin-gap) * 0.75);
+  padding: 0;
+  background: transparent;
+  border: 0;
+  overflow: visible;
+}
+
+[data-skin="qingfeng"] .pl-grid .pl-card {
+  padding: 12px 12px 14px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface-card);
+  box-shadow: var(--skin-shadow-card);
+  transition: transform var(--dur-2) var(--ease),
+              box-shadow var(--dur-2) var(--ease);
+}
+
+[data-skin="qingfeng"] .pl-grid .pl-card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--surface-lift), var(--skin-shadow);
+}
+
+[data-skin="qingfeng"] .pl-card-art,
+[data-skin="qingfeng"] .dv-art {
+  border-radius: var(--r-md);
+  aspect-ratio: 1 / 1;
+  box-shadow: inset 0 0 0 1px var(--skin-line-soft);
+}
+
+[data-skin="qingfeng"] .pl-card-name,
+[data-skin="qingfeng"] .pl-card-sub {
+  letter-spacing: var(--skin-track-tight);
+}
+
+[data-skin="qingfeng"] .pl-card-sub {
+  color: var(--muted);
+  font-size: var(--skin-h3);
+}
+
+/* 歌单架：既然清风是网格取向，架子压成与卡片同格，避免两种排布落差过大 */
+[data-skin="qingfeng"] .shelf {
+  background: transparent;
+  border: 0;
+}
+
+/* ===================== 每日推荐 ========================================
+
+   .daily-strip 不能改成 grid。
+
+   它的直接子元素是 .daily-head 和 .daily-list 两个**块**，不是卡片。
+   一旦给 .daily-strip 加 display:grid + 卡片列宽，.daily-head 就成了一个
+   网格项：它内部是「左 copy（长文案）+ 右 tools（一排按钮）」的横向 flex，
+   网格列宽由内容均分，copy 文字多、tools 按钮多，copy 就被压到最窄的一列，
+   「DAILY MIX · 每日推荐」「2026-10-03」「已合并 24 首 · 网易云音乐」
+   逐字换行竖排成一条 —— 页面不报错、不少元素，只是读不出来。
+
+   列宽规则要落在 .daily-list（真正的卡片容器）上，strip 只改观感。 */
+[data-skin="qingfeng"] .daily-strip {
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+[data-skin="qingfeng"] .daily-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
+  gap: calc(var(--skin-gap) * 0.75);
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+[data-skin="qingfeng"] .daily-card {
+  border-radius: var(--r-lg);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface-card);
+  box-shadow: var(--skin-shadow-card);
+}
+
+/* ===================== 队列拼接页：海报墙 ============================
+   folia 的 Lattice 是一面「无限重复密排的海报墙」：一首歌在墙上有很多实例，
+   队列去重后循环铺满，展开档只有一格能容纳大卡。
+   这里的坐标系沿用 CELL=128 / GAP=8，由 skin.qingfeng.js 计算每格矩形，
+   CSS 只负责卡片本体的观感。 */
+
+[data-skin="qingfeng"] .qf-lattice {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  overflow: hidden;
+  user-select: none;
+  /* 必须给底色：参考项目的墙是 absolute 铺满**自己的容器**，底下没别的东西；
+     这里是 fixed 盖全屏，底下压着业务视图 —— 全透明会把曲库页整个透出来
+   （实测截图里「曲库 共0首」和歌单卡整片可见，墙读作一层半透明贴纸）。
+   提到 96% 而不是 100%：留一丝壁纸透感，仍读作「在主页面上浮起一层」。 */
+  background: color-mix(in srgb, var(--bg) 96%, transparent);
+  backdrop-filter: blur(28px) saturate(140%);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  cursor: grab;
+  touch-action: none;
+}
+
+/* 墙开着时把底层的浮件全部收掉：悬浮主菜单、右下角头像组、底部播放胶囊。
+   这些是 fixed/z-index 浮在 .app 之上，不收的话会**叠在海报墙上**——
+   实测截图里顶栏搜索框和播放胶囊正好压在那张 12×3 的大卡上，
+   把墙最显眼的位置糊掉。顶栏本体也一起收（logo + 右侧按钮组），
+   否则墙的左上/右上角各挂一排业务控件。.column 留在底下（墙自己铺了底色）。
+   只 display:none，不动 .app 的布局 —— 收起后切回皮肤时零位移。 */
+[data-skin="qingfeng"] body.qf-lattice-open .topbar,
+[data-skin="qingfeng"] body.qf-lattice-open .qf-nav,
+[data-skin="qingfeng"] body.qf-lattice-open .qf-brand,
+[data-skin="qingfeng"] body.qf-lattice-open .qf-settings-btn,
+[data-skin="qingfeng"] body.qf-lattice-open .qf-account,
+[data-skin="qingfeng"] body.qf-lattice-open .bar {
+  display: none;
+}
+
+[data-skin="qingfeng"] .qf-lattice:active {
+  cursor: grabbing;
+}
+
+[data-skin="qingfeng"] .qf-lattice-world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+[data-skin="qingfeng"] .qf-poster {
+  position: absolute;
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  padding: 17px;
+  border-radius: 0; /* 「一切都方角」是这套视觉最强的识别特征 */
+  background: var(--surface-2);
+  box-shadow: 0 0 0 1px var(--skin-line-soft);
+  cursor: pointer;
+  contain: layout paint;
+  transition: box-shadow 600ms var(--ease), filter 600ms var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-poster img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 0;
+}
+
+/* 底部压暗 scrim：文字压在封面上，必须有这层才读得出来 */
+[data-skin="qingfeng"] .qf-poster-shade {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent 34%,
+    color-mix(in srgb, var(--bg) 24%, transparent) 56%,
+    color-mix(in srgb, var(--bg) 92%, transparent) 100%
+  );
+}
+
+[data-skin="qingfeng"] .qf-poster:hover {
+  z-index: 3;
+  filter: saturate(1.08) brightness(1.05);
+}
+
+/* 序号徽章：不用 backdrop-filter —— 每张卡一个模糊层会把整墙提升为
+   N 个合成层，是海报墙最大的 GPU 开销。 */
+[data-skin="qingfeng"] .qf-poster-badge {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 3;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+[data-skin="qingfeng"] .qf-poster-copy {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text);
+}
+
+[data-skin="qingfeng"] .qf-poster-copy strong {
+  font-size: clamp(15px, 1.4vw, 22px);
+  font-weight: 700;
+  line-height: 0.98;
+  letter-spacing: -0.04em;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+[data-skin="qingfeng"] .qf-poster-copy small {
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.78;
+}
+
+/* 正在播放的海报：向内构建的强调边框（卡片 overflow:hidden，画不出外框） */
+[data-skin="qingfeng"] .qf-poster.is-current::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  border: 2px solid var(--brand);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--bg) 52%, transparent),
+    inset 0 0 15px -7px color-mix(in srgb, var(--brand) 46%, transparent);
+  transition: box-shadow 300ms var(--ease);
+}
+
+/* 键盘焦点环用 box-shadow 而非 outline，好跟随卡片形状且没有直角 */
+[data-skin="qingfeng"] .qf-poster.is-focused {
+  z-index: 4;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--bg) 62%, transparent),
+    0 0 0 4px var(--highlight),
+    0 0 0 5px color-mix(in srgb, var(--bg) 38%, transparent),
+    0 12px 32px color-mix(in srgb, var(--bg) 45%, transparent);
+}
+
+/* 展开的大卡：占据中央，抬升 + 更大的投影 */
+[data-skin="qingfeng"] .qf-poster.is-expanded {
+  z-index: 5;
+  padding: 32px;
+  box-shadow: 0 42px 110px color-mix(in srgb, var(--bg) 74%, transparent);
+  filter: none;
+  /* 底部留出控件条的高度：曲名是 flex-end 贴在底边的，控件条是
+     bottom:28px 绝对定位，两片都锚底 → 不留就叠在一起
+     （实测截图里曲名正压在暂停键与时长上）。 */
+  padding-bottom: calc(28px + 44px * 2 + 10px + 14px);
+}
+
+[data-skin="qingfeng"] .qf-poster.is-expanded .qf-poster-shade {
+  background:
+    linear-gradient(
+      0deg,
+      color-mix(in srgb, var(--bg) 86%, transparent) 0%,
+      color-mix(in srgb, var(--bg) 62%, transparent) 14%,
+      color-mix(in srgb, var(--bg) 26%, transparent) 30%,
+      transparent 46%
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--bg) 88%, transparent),
+      color-mix(in srgb, var(--bg) 50%, transparent) 52%,
+      transparent
+    );
+}
+
+[data-skin="qingfeng"] .qf-poster.is-expanded .qf-poster-copy {
+  max-width: 82%;
+  min-width: 0;
+}
+
+/* 字号跟着**卡片实际宽度**走，不能跟视口走：卡片尺寸由模板块的
+   [x,y,w,h] 决定（1×8 的竖条只有 128×1080，6×6 的方卡有 808×808），
+   用 vw 算会在窄竖条上写出撑出卡外的巨字（实测 407px 宽的卡上
+   4.6vw=66px，「曲目 4 · 拼接测试」直接溢出到卡外）。
+   cqi 跟着卡片自身宽度走，pad 越宽字越大，与卡片尺寸自动匹配。 */
+[data-skin="qingfeng"] .qf-poster {
+  container-type: inline-size;
+}
+
+[data-skin="qingfeng"] .qf-poster.is-expanded .qf-poster-copy strong {
+  font-size: clamp(22px, 11cqi, 58px);
+  line-height: 1.04;
+  overflow-wrap: anywhere;
+}
+
+[data-skin="qingfeng"] .qf-poster.is-expanded .qf-poster-copy small {
+  margin-top: 7px;
+  font-size: clamp(12px, 4.4cqi, 16px);
+  overflow-wrap: anywhere;
+}
+
+/* 关灯：非当前海报压黑，只留正在播放那张是亮的 */
+[data-skin="qingfeng"] .qf-lattice.is-lights-out .qf-poster:not(.is-current) {
+  opacity: 0.82;
+}
+
+[data-skin="qingfeng"] .qf-lattice.is-lights-out .qf-poster:not(.is-current)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: var(--bg);
+  opacity: 0.55;
+}
+
+[data-skin="qingfeng"] .qf-lattice.is-lights-out .qf-poster {
+  transition: opacity 260ms var(--ease);
+}
+
+/* 海报墙上的播放控件 */
+/* 控件条占多高：由行高 + 两行之间的间距 + 距卡底距离算出来，
+   写成令牌好让展开态的曲名按它让位（两片都锚在卡底，不让必然重叠）。 */
+[data-skin="qingfeng"] .qf-poster-controls {
+  --qf-ctl-h: 28px + 44px * 2 + 10px;
+  position: absolute;
+  right: 24px;
+  bottom: 28px;
+  left: 32px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+[data-skin="qingfeng"] .qf-chrome {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(100%, 460px);
+  color: var(--text);
+}
+
+[data-skin="qingfeng"] .qf-chrome-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+}
+
+[data-skin="qingfeng"] .qf-chrome button {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.72;
+  transition: opacity var(--dur-1) var(--ease),
+              background var(--dur-1) var(--ease),
+              border-color var(--dur-1) var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-chrome button svg {
+  width: 20px;
+  height: 20px;
+}
+
+[data-skin="qingfeng"] .qf-chrome button:hover {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  border-color: color-mix(in srgb, currentColor 26%, transparent);
+}
+
+[data-skin="qingfeng"] .qf-chrome button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
+[data-skin="qingfeng"] .qf-chrome button:disabled {
+  opacity: 0.28;
+  cursor: default;
+}
+
+[data-skin="qingfeng"] .qf-chrome-play {
+  border-radius: var(--r-pill) !important;
+  background: var(--text) !important;
+  color: var(--bg) !important;
+  opacity: 1;
+}
+
+[data-skin="qingfeng"] .qf-chrome-time {
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.6;
+}
+
+/* 墙内进度线：2px 细线 + 撑开的透明命中区 */
+[data-skin="qingfeng"] .qf-progress {
+  position: relative;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 22%, transparent);
+}
+
+[data-skin="qingfeng"] .qf-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--text);
+}
+
+[data-skin="qingfeng"] .qf-progress input[type="range"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 36px;
+  margin: 0;
+  transform: translateY(-50%);
+  top: 50%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* 墙内空态 */
+[data-skin="qingfeng"] .qf-lattice-empty {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  text-align: center;
+  pointer-events: none;
+}
+
+[data-skin="qingfeng"] .qf-lattice-empty strong {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+}
+
+[data-skin="qingfeng"] .qf-lattice-empty span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 海报墙左下角的「当前队列」浮条 */
+[data-skin="qingfeng"] .qf-queue-peek {
+  position: absolute;
+  left: 24px;
+  bottom: 24px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 340px;
+  padding: 10px 16px 10px 10px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+[data-skin="qingfeng"] .qf-queue-peek-art {
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  background-size: cover;
+  background-position: center;
+}
+
+[data-skin="qingfeng"] .qf-queue-peek-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+[data-skin="qingfeng"] .qf-queue-peek-copy strong {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-skin="qingfeng"] .qf-queue-peek-copy span {
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 右下角圆形工具按钮：关灯 / 设置面板入口 */
+[data-skin="qingfeng"] .qf-tools {
+  position: absolute;
+  right: 24px;
+  bottom: 24px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+[data-skin="qingfeng"] .qf-tools-btn {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--skin-line-soft);
+  border-radius: var(--r-pill);
+  background: var(--skin-surface);
+  color: var(--text);
+  box-shadow: var(--skin-shadow);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  cursor: pointer;
+  transition: transform var(--dur-press) var(--ease),
+              background var(--dur-1) var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-tools-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+[data-skin="qingfeng"] .qf-tools-btn:hover {
+  background: var(--hover);
+}
+
+[data-skin="qingfeng"] .qf-tools-btn:active {
+  transform: scale(0.94);
+}
+
+[data-skin="qingfeng"] .qf-tools-btn:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--skin-focus-offset);
+}
+
+[data-skin="qingfeng"] .qf-tools-btn.is-on {
+  background: var(--brand);
+  color: var(--accent-ink);
+  border-color: transparent;
+}
+
+[data-skin="qingfeng"] .qf-tools-panel {
+  width: min(320px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  transform-origin: 100% 100%;
+}
+
+[data-skin="qingfeng"] .qf-tools-panel[hidden] {
+  display: none;
+}
+
+[data-skin="qingfeng"] .qf-tools-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-tools-action svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  opacity: 0.8;
+}
+
+[data-skin="qingfeng"] .qf-tools-action:hover {
+  background: var(--hover);
+}
+
+[data-skin="qingfeng"] .qf-tools-action:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* ===================== 设置浮层（folia：左栏两级 + 右栏卡片） ========== */
+
+[data-skin="qingfeng"] .qf-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200; /* 必须压过在线登录弹窗的 100 */
+  display: grid;
+  place-items: center;
+  padding: var(--skin-pad);
+}
+
+[data-skin="qingfeng"] .qf-modal[hidden] {
+  display: none;
+}
+
+/* 遮罩负责模糊与压暗。底层不用 filter 隔离 —— filter 会让 .app 变成包含块，
+   把 fixed 后代改成相对定位（这是流年踩过的坑）。 */
+[data-skin="qingfeng"] .qf-modal-scrim {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  animation: qf-modal-scrim-in 240ms var(--ease-out);
+}
+
+@keyframes qf-modal-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+[data-skin="qingfeng"] .qf-modal-card {
+  position: relative;
+  width: min(920px, 100%);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--skin-radius);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--panel-solid);
+  box-shadow: 0 24px 80px color-mix(in srgb, var(--bg) 42%, transparent);
+  overflow: hidden;
+  animation: qf-modal-card-in 260ms var(--ease-out);
+}
+
+/* 进场用 animation（hidden→可见时自动播），退场切到 transition 播反向 */
+@keyframes qf-modal-card-in {
+  from { opacity: 0; transform: translateY(20px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+[data-skin="qingfeng"] .qf-modal.is-closing .qf-modal-card {
+  animation: none;
+  opacity: 0;
+  transform: translateY(12px) scale(0.99);
+  transition: opacity 200ms var(--ease), transform 200ms var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-modal.is-closing .qf-modal-scrim {
+  animation: none;
+  opacity: 0;
+  transition: opacity 200ms var(--ease);
+}
+
+[data-skin="qingfeng"] body.qf-modal-open .app,
+[data-skin="qingfeng"] body.qf-modal-open .bar,
+[data-skin="qingfeng"] body.qf-modal-open .topbar {
+  pointer-events: none;
+}
+
+/* 这里原本有 .qf-modal-head / .qf-modal-tab 一整组「选项 / 帮助」页签样式，
+   随帮助页签一起去掉了。设置浮层现在只有选项一页，右栏的
+   .qf-set-pane-head 已经承担标题与副标题两行信息，不需要再来一层 tab。
+   要加回页签（例如日后想拆出「重置」页）时，从这里重建即可。 */
+
+[data-skin="qingfeng"] .qf-modal-close {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--hover);
+  color: var(--text);
+  cursor: pointer;
+  opacity: 0.4;
+  transition: opacity var(--dur-1) var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-modal-close svg {
+  width: 18px;
+  height: 18px;
+}
+
+[data-skin="qingfeng"] .qf-modal-close:hover {
+  opacity: 1;
+}
+
+[data-skin="qingfeng"] .qf-modal-close:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--skin-focus-offset);
+}
+
+/* 「选项 / 帮助」页签条已去掉，body 直接顶到卡片上沿。
+   顶部内边距从 18 提到 24：原先 22px 的头部 padding 没了，
+   18 会让标题显得贴边，24 与底部 26 对称。 */
+[data-skin="qingfeng"] .qf-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 24px;
+  padding: 24px 26px 26px;
+}
+
+[data-skin="qingfeng"] .qf-set-layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 20px;
+}
+
+[data-skin="qingfeng"] .qf-set-nav {
+  width: 264px;
+  max-width: 264px;
+  flex: none;
+  min-height: 0; /* 缺它左栏不裁切而是把卡片顶高，浮层会长出视口 */
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding-right: 12px;
+  border-right: 1px solid var(--skin-line-soft);
+}
+
+[data-skin="qingfeng"] .qf-set-group-label {
+  padding: 0 4px 6px;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: var(--meta-tracking);
+  text-transform: uppercase;
+}
+
+[data-skin="qingfeng"] .qf-set-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-set-link:hover {
+  background: var(--hover);
+}
+
+[data-skin="qingfeng"] .qf-set-link:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
+
+[data-skin="qingfeng"] .qf-set-link.is-active {
+  background: var(--surface-hi);
+  border-color: var(--skin-line-hard);
+  color: var(--text);
+}
+
+/* 二级项：色块 + 左侧强调竖条（不用改字色，避免与主题撞） */
+[data-skin="qingfeng"] .qf-set-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 0 24px;
+}
+
+[data-skin="qingfeng"] .qf-set-subitem {
+  position: relative;
+  padding: 7px 10px 7px 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  text-align: left;
+  cursor: pointer;
+  opacity: 0.62;
+  transition: background var(--dur-1) var(--ease), opacity var(--dur-1) var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-set-subitem:hover {
+  opacity: 1;
+  background: var(--hover);
+}
+
+[data-skin="qingfeng"] .qf-set-subitem:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
+
+[data-skin="qingfeng"] .qf-set-subitem.is-active {
+  background: var(--surface-hi);
+  color: var(--text);
+  opacity: 1;
+}
+
+[data-skin="qingfeng"] .qf-set-subitem.is-active::before {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 0;
+  width: 2px;
+  border-radius: var(--r-pill);
+  background: var(--brand);
+}
+
+[data-skin="qingfeng"] .qf-set-pane {
+  flex: 1 1 auto;
+  min-width: 0; /* 宽表单行不会把左栏挤没 */
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+[data-skin="qingfeng"] .qf-set-pane-head {
+  margin-bottom: 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--skin-line-soft);
+}
+
+[data-skin="qingfeng"] .qf-set-pane-head h2 {
+  margin: 0;
+  font-size: var(--skin-title);
+  font-weight: 600;
+  letter-spacing: var(--skin-track-tight);
+  color: var(--text);
+}
+
+[data-skin="qingfeng"] .qf-set-pane-head p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+/* 右栏分组：标题 + 卡片，卡片是「标题/描述 + 右侧控件」的行 */
+[data-skin="qingfeng"] .set-group {
+  margin-bottom: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+[data-skin="qingfeng"] .set-group .set-title {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: var(--meta-tracking);
+  text-transform: uppercase;
+}
+
+[data-skin="qingfeng"] .set-row {
+  padding: 14px 16px;
+  margin-bottom: 8px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface-card);
+  gap: 16px;
+}
+
+[data-skin="qingfeng"] .set-row:hover {
+  background: var(--hover);
+}
+
+[data-skin="qingfeng"] .set-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+[data-skin="qingfeng"] .set-info strong {
+  font-size: var(--fs-base);
+  font-weight: 500;
+  color: var(--text);
+}
+
+[data-skin="qingfeng"] .set-info span {
+  max-width: 420px;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+/* 分段控件：folia 的 iOS segmented —— 2px 间隙 + 抬起选中块 */
+[data-skin="qingfeng"] .seg {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-md);
+  background: var(--track);
+}
+
+[data-skin="qingfeng"] .seg button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+
+[data-skin="qingfeng"] .seg button[aria-pressed="true"],
+[data-skin="qingfeng"] .seg button[aria-selected="true"] {
+  background: var(--surface-hi);
+  color: var(--text);
+  box-shadow: var(--skin-shadow-card);
+}
+
+[data-skin="qingfeng"] .seg button:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* 开关：folia 的 w-11 h-6，滑块 translate-x-5 */
+[data-skin="qingfeng"] .switch {
+  position: relative;
+  width: 44px;
+  height: 26px;
+  flex: none;
+  padding: 3px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--track);
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease);
+}
+
+[data-skin="qingfeng"] .switch::after {
+  content: "";
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--text);
+  transform: translateX(0);
+  transition: transform var(--dur-2) var(--ease);
+}
+
+[data-skin="qingfeng"] .switch[aria-checked="true"] {
+  background: var(--brand);
+}
+
+[data-skin="qingfeng"] .switch[aria-checked="true"]::after {
+  transform: translateX(18px);
+}
+
+[data-skin="qingfeng"] .switch:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--skin-focus-offset);
+}
+
+/* 设置里的滑块：1.5px 细轨 + 12px 滑块 */
+[data-skin="qingfeng"] .set-row input[type="range"] {
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--track);
+  appearance: none;
+}
+
+[data-skin="qingfeng"] .set-row input[type="range"]::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text);
+  appearance: none;
+  cursor: pointer;
+  transition: transform var(--dur-press) var(--ease);
+}
+
+[data-skin="qingfeng"] .set-row input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.25);
+}
+
+/* ===================== 舞台 ============================================ */
+
+/* 单列外壳下 .stage 若留在栅格里会掉到内容下方变成第二行（.app 只有一个
+   轨道），所以整块脱离文档流，浮在右侧当「正在播放」侧卡。底部 84px 让开
+   右下角的头像控件。 */
+[data-skin="qingfeng"] .stage {
+  position: fixed;
+  top: var(--qf-clear);
+  right: 24px;
+  bottom: 84px;
+  z-index: 30;
+  width: 300px;
+  border-radius: var(--skin-radius);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  overflow: hidden;
+}
+
+@media (max-width: 1100px) {
+  /* 窄屏侧卡会压住内容右侧，直接撤掉：播放信息在底部胶囊里已经有了。 */
+  [data-skin="qingfeng"] .stage {
+    display: none;
+  }
+}
+
+[data-skin="qingfeng"] .stage-head {
+  padding: 14px 18px 10px;
+}
+
+/* ===================== 底部播放胶囊 + 右下头像 ======================= */
+
+[data-skin="qingfeng"] .bar {
+  /* position 必须显式写：业务 .bar 是 .app 栅格里的 flex 子项，默认 static。
+     只写 left/bottom 而不写 position，偏移量会被整份被忽略，只剩
+     transform: translateX(-50%) 生效 —— 结果是胶囊被左移半个身位
+     （实测 cx=14，视口中心 720）。 */
+  position: fixed;
+  left: 50%;
+  right: auto;
+  bottom: 22px;
+  /* 680px 不是随手取的：胶囊里要装下「曲名 + 播放控制 + 进度条 + 模式 +
+     音量」五块。560px 时进度条被压到 27px、音量滑块挤成一条线
+     （实测截图里它们糊成一团）。680px 是五块都不折的最小值。 */
+  width: min(680px, calc(100vw - 2 * var(--skin-pad)));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+/* 胶囊也是固定定位的浮件：钉住 transform/opacity，否则自动隐藏会先把它
+   甩下去再滑回（悬停时整块下坠）。这条与流年同源。 */
+[data-skin="qingfeng"] .bar:not(.qf-capsule) {
+  transform: translateX(-50%) !important;
+  opacity: 1 !important;
+}
+
+[data-skin="qingfeng"] .bar.qf-capsule {
+  transform: translateX(-50%) !important;
+  opacity: 1 !important;
+}
+
+[data-skin="qingfeng"] .bar.is-hidden {
+  display: none !important;
+}
+
+[data-skin="qingfeng"] .bar-track {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+[data-skin="qingfeng"] .bar-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: var(--skin-track-tight);
+}
+
+[data-skin="qingfeng"] .bar-sub {
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+}
+
+[data-skin="qingfeng"] .bar-progress {
+  /* 进度条不能被 flex 压没：min-width 给到 120px（够放下 0:00 / 0:00 与
+     一段可拖的轨），否则胶囊一窄它先塌成 27px，音量滑块跟着挤成一条线。 */
+  flex: 1 1 220px;
+  min-width: 120px;
+}
+
+[data-skin="qingfeng"] .bar-time {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-3xs);
+  color: var(--muted);
+}
+
+/* 右下角：登录头像 + 箭头（箭头跳舞台播放页） */
+[data-skin="qingfeng"] .qf-account {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+[data-skin="qingfeng"] .qf-account-face {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  background-size: cover;
+  background-position: center;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  position: relative;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+[data-skin="qingfeng"] .qf-account-face svg {
+  width: 20px;
+  height: 20px;
+}
+
+[data-skin="qingfeng"] .qf-account-face:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--skin-focus-offset);
+}
+
+[data-skin="qingfeng"] .qf-account-arrow {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease),
+              transform var(--dur-press) var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-account-arrow svg {
+  width: 17px;
+  height: 17px;
+}
+
+[data-skin="qingfeng"] .qf-account-arrow:hover {
+  background: var(--hover);
+}
+
+[data-skin="qingfeng"] .qf-account-arrow:active {
+  transform: scale(0.94);
+}
+
+[data-skin="qingfeng"] .qf-account-arrow:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--skin-focus-offset);
+}
+
+/* 墙开着时让开右下角的工具按钮 */
+[data-skin="qingfeng"] body.qf-lattice-open .bar {
+  display: none;
+}
+
+/* ===================== 通用：空态 / 菜单 / 焦点 ======================== */
+
+[data-skin="qingfeng"] .np-card,
+[data-skin="qingfeng"] .menu,
+[data-skin="qingfeng"] .empty-card {
+  border-radius: var(--skin-radius);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface-card);
+  box-shadow: var(--skin-shadow-card);
+}
+
+[data-skin="qingfeng"] .empty-card {
+  padding: 40px 24px;
+  text-align: center;
+}
+
+[data-skin="qingfeng"] :focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--skin-focus-offset);
+}
+
+[data-skin="qingfeng"] .btn {
+  border-radius: var(--r-pill);
+}
+
+[data-skin="qingfeng"] .iconbtn {
+  border-radius: var(--r-pill);
+}
+
+[data-skin="qingfeng"] .chip {
+  border-radius: var(--r-pill);
+}
+
+[data-skin="qingfeng"] :disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+/* ===================== 响应式 ========================================== */
+
+@media (max-width: 900px) {
+  [data-skin="qingfeng"] .topsearch {
+    display: none;
+  }
+
+  [data-skin="qingfeng"] .qf-nav {
+    left: var(--skin-pad);
+    right: var(--skin-pad);
+    transform: none;
+    max-width: none;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  [data-skin="qingfeng"] .qf-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  [data-skin="qingfeng"] .bar {
+    width: calc(100vw - 2 * var(--skin-pad));
+  }
+}
+
+@media (max-width: 720px) {
+  [data-skin="qingfeng"] .qf-modal-body {
+    flex-direction: column;
+  }
+
+  [data-skin="qingfeng"] .qf-set-nav {
+    width: 100%;
+    max-width: none;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    padding-right: 0;
+    padding-bottom: 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--skin-line-soft);
+    overflow-x: auto;
+  }
+
+  [data-skin="qingfeng"] .qf-set-sub {
+    flex-direction: row;
+    margin: 0 0 0 8px;
+  }
+
+  [data-skin="qingfeng"] .qf-set-subitem.is-active::before {
+    top: auto;
+    right: 6px;
+    bottom: 0;
+    left: 6px;
+    width: auto;
+    height: 2px;
+  }
+
+  /* 窄屏把播放胶囊让出更多空间：进度条换行到第二排 */
+  [data-skin="qingfeng"] .bar {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 14px;
+  }
+
+  [data-skin="qingfeng"] .bar-progress {
+    order: 3;
+    flex: 1 0 100%;
+  }
+
+  /* 海报墙在窄屏把按钮放大到 44px 触摸目标，展开态文案让开控件区 */
+  [data-skin="qingfeng"] .qf-poster.is-expanded {
+    padding: 20px;
+  }
+
+  [data-skin="qingfeng"] .qf-poster.is-expanded .qf-poster-copy {
+    bottom: 132px;
+  }
+
+  [data-skin="qingfeng"] .qf-queue-peek {
+    left: 16px;
+    bottom: 16px;
+    max-width: calc(100vw - 96px);
+  }
+
+  [data-skin="qingfeng"] .qf-tools {
+    right: 16px;
+    bottom: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-skin="qingfeng"] .qf-modal-scrim,
+  [data-skin="qingfeng"] .qf-modal-card {
+    animation: none;
+  }
+
+  [data-skin="qingfeng"] .qf-poster,
+  [data-skin="qingfeng"] .qf-poster::before,
+  [data-skin="qingfeng"] .qf-lattice.is-lights-out .qf-poster {
+    transition: none;
+  }
+}

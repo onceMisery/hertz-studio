@@ -49,6 +49,21 @@
   function assetUrl(url) {
     return global.hertzHost ? global.hertzHost.assetUrl(url) : url;
   }
+  /// 封面 <img> 位。data.cover / Stage.coverUrl() 在插件形态下可能是元数据里的
+  /// 音源 https 原址（app.js 与 online.js 各有一个调用点直接传原址）：沙箱 CSP
+  /// 的 img-src 画不出来，跨域图还会污染 WebGL 纹理。经 HertzCovers 换成 data
+  /// URL 再赋；独立形态与契约沙箱里没有它，回落成直接赋值。
+  function applyCoverImg(img, url) {
+    if (!img) return;
+    if (global.HertzCovers && global.HertzCovers.applyImg) { global.HertzCovers.applyImg(img, url); return; }
+    if (url) img.src = url;
+    else img.removeAttribute('src');
+  }
+  /// 同上，但调用方要拿解析结果自己做后续（喂纹理），所以返回 Promise 语义。
+  function resolveCoverUrl(url) {
+    if (global.HertzCovers && global.HertzCovers.resolve) return global.HertzCovers.resolve(url);
+    return Promise.resolve(url || null);
+  }
   var BASE_FOV = 52;
   var CHROME_HIDE_MS = 2600;
   var TAU_ANGLE = 190;      // 相机角度低通时间常数（ms）
@@ -959,7 +974,10 @@
         } catch (e) { artReady = false; }
         finally { ctx.pixelStorei(ctx.UNPACK_FLIP_Y_WEBGL, false); }
       };
-      img.src = url;
+      resolveCoverUrl(url).then(function (resolved) {
+        if (!resolved || url !== artUrl || img !== artImage) return;
+        img.src = resolved;
+      });
     }
     return {
       count: count,
@@ -2349,6 +2367,21 @@
     [stanza.classic, stanza.cadenza].forEach(function (a) { a.setEco(eco); });
     if (stanza.sonnet) stanza.sonnet.setEco(eco);
     if (stanza.tempera) stanza.tempera.setEco(eco);
+    notifyVisualChange();
+  }
+
+  // 接管态广播。applyStanzaConfig 每帧都会被 driveStanza 调用（导演决策、
+  // 滑杆变动都会走到），所以必须按「有效视觉签名」去重 —— 否则订阅者
+  // 每帧被叫醒一次，而创意工坊那边的处理是重排整个面板。
+  var visualListeners = [];
+  var lastVisualSig = null;
+  function notifyVisualChange() {
+    var sig = String(stanzaActive()) + ':' + effectiveVisual();
+    if (sig === lastVisualSig) return;
+    lastVisualSig = sig;
+    visualListeners.slice().forEach(function (fn) {
+      try { fn(); } catch (e) { /* 一个订阅者炸了不该带倒其他人 */ }
+    });
   }
 
   function driveStanza(dtMs) {
@@ -2561,13 +2594,12 @@
     if (lastCover !== data.cover) {
       lastCover = data.cover;
       cover.hidden = !data.cover;
-      if (data.cover) cover.src = data.cover;
-      else cover.removeAttribute('src');
+      applyCoverImg(cover, data.cover);
     }
     var sleeve = $('s3d-sleeve-image');
     if (sleeve.dataset.url !== (data.cover || '')) {
       sleeve.dataset.url = data.cover || ''; sleeve.hidden = !data.cover;
-      if (data.cover) sleeve.src = data.cover; else sleeve.removeAttribute('src');
+      applyCoverImg(sleeve, data.cover);
     }
     text('s3d-sleeve-title', track ? track.title || '未知曲目' : '你的下一张唱片');
     text('s3d-sleeve-artist', track ? track.artist || '未知艺术家' : '从曲库开始聆听');
@@ -3113,7 +3145,10 @@
       if (!open()) return;
       requestFs();
     }
-    var openers = ['stage3d-entry'];
+    // 两个入口：顶栏的声场按钮，以及设置里「窗口与舞台」分组的新按钮
+    // （清风皮肤把控制入口统一收进左上角设置，顶栏那个对它是冗余的；
+    //  隐藏前必须在这里补一个可发现的入口，否则这条路就断了）。
+    var openers = ['stage3d-entry', 'set-stage3d-btn'];
     openers.forEach(function (id) {
       var b = $(id);
       if (b) b.addEventListener('click', enterFromUi);
@@ -3266,6 +3301,26 @@
     configure: configure,
     preferences: preferences,
     save: savePreferences,
+    // 当前歌词视觉是否由 stanza 渲染器接管。创意工坊靠它决定"能不能调"：
+    // 商籁/凝彩激活时舞台参数已经不作用于画面（stanza 自带一套视觉），
+    // 此时让用户继续拖参数就是骗人 —— 必须只保留选择、关掉编辑。
+    // 暴露的是 effectiveVisual 而不是 stanza.visual：starborn 是元导演，
+    // 它自己不产画面，真正生效的是 director 当前指向的那个渲染器。
+    visualState: function () {
+      return {
+        active: stanzaActive(),
+        visual: stanza.visual,
+        effective: effectiveVisual()
+      };
+    },
+    // 歌词视觉接管态变化的订阅。创意工坊的锁定与否完全取决于它，
+    // 而这条变化不经过任何广播（不是预置变更、也不是打开/关闭）——
+    // 没有这个订阅，外部把 stanzaVisual 切走后工坊还是可编辑的样子，
+    // 要手动切一次页签才生效。
+    onVisualChange: function (fn) {
+      if (typeof fn !== 'function') return;
+      visualListeners.push(fn);
+    },
     stats: function () {
       return {
         fps: Math.round(perf.hz / Math.max(1, perf.divisor)),

@@ -20,6 +20,13 @@
     if (window.HertzCovers) { window.HertzCovers.applyBg(el, url); return; }
     if (el) el.style.backgroundImage = url ? 'url("' + url + '")' : '';
   }
+  /// <img> 位封面，同 applyBg：插件形态走代理，沙箱回落直接赋值。
+  function applyImg(img, url) {
+    if (window.HertzCovers) { window.HertzCovers.applyImg(img, url); return; }
+    if (!img) return;
+    if (url) img.src = url;
+    else img.removeAttribute('src');
+  }
 
   var state = {
     sources: [],          // 只保留有任一登录能力（cookie/qr/歌单）的音源
@@ -147,7 +154,7 @@
       ? window.Online.safeCoverUrl(acc.avatar) : null;
     if (url) {
       var img = document.createElement('img');
-      img.src = url;
+      applyImg(img, url);
       img.alt = '';
       avatar.appendChild(img);
     } else {

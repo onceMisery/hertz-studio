@@ -5,9 +5,16 @@
 // 平台握手票从不离开服务端，前端只拿到 Registry 换发的不透明 ticket。
 (function () {
   'use strict';
+  /// 背景图位封面：插件形态下远程地址要经 sidecar 换成 data URL（沙箱 CSP 画不
+  /// 出 https 图）。HertzCovers 由 app.js 挂出；契约检查的沙箱只加载本模块，
+  /// 拿不到时回落成直接赋值，即独立形态的同款行为。
+  function applyBg(el, url) {
+    if (window.HertzCovers) { window.HertzCovers.applyBg(el, url); return; }
+    if (el) el.style.backgroundImage = url ? 'url("' + url + '")' : '';
+  }
   /// <img> 位封面，同 applyBg：插件形态走代理，沙箱回落直接赋值。
   function applyImg(img, url) {
-    if (window.HertzCovers) { applyImg(img, url); return; }
+    if (window.HertzCovers) { window.HertzCovers.applyImg(img, url); return; }
     if (!img) return;
     if (url) img.src = url;
     else img.removeAttribute('src');
@@ -240,7 +247,7 @@
     var url = pick ? avatarUrlOf(pick) : null;
     if (url) {
       face.classList.add('has-avatar');
-      face.style.backgroundImage = 'url("' + url.replace(/"/g, '') + '")';
+      applyBg(face, url);
       dot.hidden = false; // 有头像时角标可作在线指示
     } else {
       face.classList.remove('has-avatar');

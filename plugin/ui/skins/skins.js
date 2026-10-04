@@ -47,8 +47,16 @@
     },
     {
       id: 'ios',
-      name: 'iOS',
-      note: '大圆角与分组列表，留白大、行高高的 iOS 式布局（配色请另选「iOS 浅色」主题）',
+      // 显示名不写「iOS」：这套皮肤卖的是 macOS 侧栏 + iOS 分组列表的观感，
+      // 与 Apple 官方无关；沿用商标名会让设置列表看着像官方出品。id 仍是
+      // 'ios'（持久化键 vmusic.skin 靠它，改名只动这一处）。
+      name: 'OS风',
+      note: 'macOS 式侧栏与工具栏、iOS 分组列表；小屏横向导航，支持浅色与深色主题',
+    },
+    {
+      id: 'qingfeng',
+      name: '清风',
+      note: '全宽展墙：顶部胶囊主菜单、方形海报墙队列拼接、folia 式设置浮层',
     },
   ];
 
@@ -62,11 +70,25 @@
     return null;
   }
 
+  /// 皮肤那几份 CSS 在页面上的载体。
+  ///
+  /// 独立形态下它们是 index.html 里声明的 `<link data-skin-css disabled>`；
+  /// DBX 插件形态下宿主会把 `<link rel=stylesheet>` 就地换成 `<style>`
+  /// （srcdoc 沙箱的 CSP 不放行外链样式表），属性一并搬过去，于是同一个标记
+  /// 挂在另一种元素上。两种都要认，否则插件形态下 hasCss() 永远为假、
+  /// apply() 一律回落 classic，表现是「设置里点皮肤没有反应」。
+  ///
+  /// `.disabled` 是 IDL 属性，link 与 style 都支持（style 的 disabled **内容**
+  /// 属性不生效，所以初始的关闭必须由这里在启动时做一次，见 syncCss）。
+  function sheets() {
+    return document.querySelectorAll('link[data-skin-css], style[data-skin-css]');
+  }
+
   /// 皮肤 CSS 是**按需启用**的：所有皮肤都 link 在页面上但默认 disabled，
   /// 切到谁才解开谁。这样切换是同步的、没有加载闪烁，也不必在运行时插入
   /// <link>（插入会有一帧无样式）。
   function syncCss(id) {
-    var links = document.querySelectorAll('link[data-skin-css]');
+    var links = sheets();
     for (var i = 0; i < links.length; i += 1) {
       var own = links[i].getAttribute('data-skin-css');
       var want = own === id;
@@ -77,7 +99,7 @@
   /// 声明的皮肤必须真的有那份 CSS，否则切过去等于"什么都没变"——
   /// 这种静默失败最难查，所以启动时就把它挑出来。
   function hasCss(id) {
-    var links = document.querySelectorAll('link[data-skin-css]');
+    var links = sheets();
     for (var i = 0; i < links.length; i += 1) {
       if (links[i].getAttribute('data-skin-css') === id) return true;
     }

@@ -86,13 +86,21 @@
       return eco() ? 3.2 : VISIBLE_RADIUS;
     }
 
+    // ---- 封面地址解析：队列元数据里存的是音源 https 原址（app.js 故意不回写
+    // base64，见它 1540 行附近的注释），插件沙箱的 img-src 画不出来。HertzCovers.slot
+    // 在插件形态登记回填并触发 sidecar 代理；独立形态同步用原址回调，调用点不分支。
+    function resolveCover(url, apply) {
+      if (global.HertzCovers && global.HertzCovers.slot) { global.HertzCovers.slot(url, apply); return; }
+      apply(url);
+    }
+
     // ---- 封面预加载：切歌时新卡直接命中缓存，交叉淡化不黑帧
     function preloadCover(url) {
       if (!url || coverCache.has(url)) return;
       var img = new Image();
       img.decoding = 'async';
       coverCache.set(url, img);
-      img.src = url;
+      resolveCover(url, function (resolved) { if (resolved) img.src = resolved; });
       while (coverCache.size > COVER_CACHE_CAP) coverCache.delete(coverCache.keys().next().value);
     }
 
@@ -173,7 +181,11 @@
       }
       img.dataset.url = url;
       img.classList.remove('is-loaded');
-      img.src = url;
+      // dataset.url 仍记**原址**作去重键；真正赋给 img 的是代理落地后的 data URL。
+      resolveCover(url, function (resolved) {
+        if (!resolved || img.dataset.url !== url) return;   // 卡已换歌，别回填旧图
+        img.src = resolved;
+      });
       // 预加载缓存里已就绪的图直接亮出：新卡首帧就是封面，
       // 不会先渲染一帧空卡再淡入（观感即「封面闪烁」）。
       var pre = coverCache.get(url);

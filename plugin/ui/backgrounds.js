@@ -569,16 +569,25 @@
     }
   }
 
+  /// 封面地址解析：插件形态下 state.coverUrl 是元数据里的音源 https 原址，沙箱
+  /// CSP 画不出来、canvas 取色也会因跨域污染抛错。HertzCovers.slot 登记回填并
+  /// 触发 sidecar 代理；独立形态同步用原址回调。
+  function resolveCover(url, apply) {
+    if (window.HertzCovers && window.HertzCovers.slot) { window.HertzCovers.slot(url, apply); return; }
+    apply(url);
+  }
+
   function palette() {
     if (state.spec.type === 'cover') {
       if (state.palFor !== state.coverUrl) {
         state.palFor = state.coverUrl;
         state.palette = null;
         if (state.coverUrl) {
+          var target = state.coverUrl;
           var img = new Image();
-          img.onload = function () { state.palette = extractPalette(img); };
-          img.onerror = function () { state.palette = null; };
-          img.src = state.coverUrl;
+          img.onload = function () { if (state.palFor === target) state.palette = extractPalette(img); };
+          img.onerror = function () { if (state.palFor === target) state.palette = null; };
+          resolveCover(target, function (resolved) { if (resolved) img.src = resolved; });
         }
       }
       if (state.palette && state.palette.length === 3) return state.palette;
