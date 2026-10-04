@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 远程来源（WebDAV）根目录登记。
 //!

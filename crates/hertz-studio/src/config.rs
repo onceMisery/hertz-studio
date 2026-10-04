@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! Configuration: defaults, then `config.toml`, then `VMUSIC_*` env vars.
 //!
@@ -159,5 +159,46 @@ pub fn default_data_dir() -> PathBuf {
     }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("mmusic-studio")
+        .join("hertz-studio")
+}
+
+/// 项目原名 `mmusic-studio`（仓库旧名），数据目录也叫过这个。改名后旧目录里是
+/// 曲库、歌词、登录 cookie、token 与插件 sidecar 的全部状态——必须在任何读写路径
+/// 之前把它整体搬到新名下，否则用户看到的就是一座空库。
+///
+/// 只在「新目录不存在且旧目录存在」时动一次 rename（原子、不复制不删）；两边都在
+/// 说明用户自己开过新目录，不碰。显式设了 `VMUSIC_DATA_DIR` 时同样不碰。
+pub fn migrate_legacy_data_dir() {
+    if std::env::var_os("VMUSIC_DATA_DIR").is_some() {
+        return;
+    }
+    let Some(base) = dirs::data_local_dir() else { return };
+    let legacy = base.join("mmusic-studio");
+    let current = base.join("hertz-studio");
+    if !legacy.is_dir() || current.exists() {
+        return;
+    }
+    match std::fs::rename(&legacy, &current) {
+        Ok(()) => tracing::info!(
+            from = %legacy.display(),
+            to = %current.display(),
+            "数据目录已搬到新名字下"
+        ),
+        // 搬不动就照旧跑：新目录会被创建成空库，但这条必须让人看得见——
+        // 调用点可能在日志订阅器装好之前，所以直接写 stderr（sidecar 的协议
+        // 走 stdout，写 stderr 安全）。
+        Err(error) => {
+            tracing::error!(
+                from = %legacy.display(),
+                to = %current.display(),
+                %error,
+                "数据目录改名失败，请手动把旧目录迁移到新名字"
+            );
+            eprintln!(
+                "[hertz-studio] 数据目录改名失败：{} → {}（{error}），请手动迁移",
+                legacy.display(),
+                current.display()
+            );
+        }
+    }
 }

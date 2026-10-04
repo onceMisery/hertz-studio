@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 歌单三种浏览方式（立体歌单架 / 封面平铺 / 列表）的契约检查（零依赖、不触网）。
 //
@@ -293,6 +293,17 @@ function checkGridRendering() {
     },
     ThemeStudio: { artPlaceholder: (id) => { placeholders.push(id); return 'url("wallpapers/morning-01.jpg")'; } },
     dispatchPlaylistAction: () => true,
+    // renderPlaylistGrid 用applyCoverBg 落封面（app.js:2420），不注入就是
+    // ReferenceError: applyCoverBg is not defined —— 而**报错点出现在被测
+    // 函数里**，很容易误判成业务代码坏了，实际是沙箱漏了依赖。
+    //
+    // 这里注入的是**独立形态下的等价实现**而不是真的applyCoverBg：后者要拖
+    // 一整条链（remoteCover → transport.kind / coverCache / coverPending /
+    // dbxRequest），而这组函数在独立形态下按设计就是**恒等**的
+    // （app.js:530-533的注释原话：「下面每个函数对独立形态都是恒等的」）。
+    // 本节要验的是「在线卡用现成直链、本地卡去问缓存」这条分工，
+    // 恒等实现正好让直链原样落地，断言 `url("/api/cover/5")` 才成立。
+    applyCoverBg: (el, url) => { if (el) el.style.backgroundImage = url ? `url("${url}")` : ''; },
   };
   sandbox.window = sandbox;
   vm.createContext(sandbox);

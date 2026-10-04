@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // 心象 cadenza：排版放置 → DOM 层 + canvas 光束层；姿态逐帧低通插值。
 (function (global) {
   'use strict';

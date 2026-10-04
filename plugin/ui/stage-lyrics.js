@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // Presentation only. Stage owns lyric documents, token timings and the clock.
 (function (global) {
   'use strict';

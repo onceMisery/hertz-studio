@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 焦点跟拍（仅悬停 peek，不锁定）：
 // 歌单架卡片 / 播放队列行 hover 120ms 确认 → 260ms out-cubic 飞到看台机位；

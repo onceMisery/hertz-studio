@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! The REST surface. Thin by design: handlers validate input, call into the
 //! audio actor or the store, and shape a response. No business logic lives
@@ -28,7 +28,7 @@ use crate::daily;
 use crate::error::{bad_request, internal, not_found, unauthorized, ApiError, ApiResult};
 use crate::online;
 use crate::scan;
-use crate::state::{AppState, ScanProgress};
+use crate::state::{AppState, PlayTrigger, ScanProgress};
 
 /// Builds the API router.
 ///
@@ -362,14 +362,14 @@ async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::
 }
 
 async fn next(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    state.step(1, false).await?;
+    state.step_by_user(1).await?;
     // 成功起播后在路由入口 detach 预取 + LRU（每首恰好一次）。
     state.post_commit_background();
     Ok(get_state(State(state)).await)
 }
 
 async fn previous(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    state.step(-1, false).await?;
+    state.step_by_user(-1).await?;
     state.post_commit_background();
     Ok(get_state(State(state)).await)
 }
@@ -405,7 +405,7 @@ async fn load(
         .position(|id| *id == body.track_id)
         .unwrap_or(0);
     let (generation, _, _) = state.set_queue(queue, Some(index)).await;
-    state.play_index_for(index, Some(generation), false).await?;
+    state.play_index_for(index, Some(generation), PlayTrigger::Pick).await?;
     state.post_commit_background();
     Ok(get_state(State(state)).await)
 }
@@ -2238,7 +2238,7 @@ async fn replay_index(
     // 在重新取流（数秒 await）之前抓进度：提交后旧曲已被换装，快照归零。
     let resume = state.audio.snapshot().position_ms;
     let outcome = state
-        .play_index_for(body.index, None, false)
+        .play_index_for(body.index, None, PlayTrigger::Pick)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     // 只有真正起播才 seek + 触发后台预取 + LRU；被更新代际顶掉时不收口。
@@ -2558,7 +2558,7 @@ async fn online_radio(
     match body.action.as_str() {
         "start" => {
             if let Some(gen) = state.radio_start().await? {
-                state.play_index_for(0, Some(gen), false).await?;
+                state.play_index_for(0, Some(gen), PlayTrigger::Pick).await?;
                 state.post_commit_background();
             }
         }
@@ -2566,7 +2566,7 @@ async fn online_radio(
             let initial = state.radio.lock().await.initial_generation.is_some();
             if initial {
                 if let Some(gen) = state.radio_start().await? {
-                    state.play_index_for(0, Some(gen), false).await?;
+                    state.play_index_for(0, Some(gen), PlayTrigger::Pick).await?;
                     state.post_commit_background();
                 }
             } else {
@@ -2646,7 +2646,7 @@ async fn online_play(
         }
     }
 
-    let outcome = state.play_index_for(index, Some(gen), false).await?;
+    let outcome = state.play_index_for(index, Some(gen), PlayTrigger::Pick).await?;
     if !outcome.committed {
         return Ok(get_state(State(state.clone())).await);
     }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 多主题色：把参考项目已有的一批主题配色映射到本项目的令牌上。
 //

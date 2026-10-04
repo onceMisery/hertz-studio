@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 每日推荐：本地规则引擎按天确定性出榜，以及各在线平台已登录账号的汇总。
 //!

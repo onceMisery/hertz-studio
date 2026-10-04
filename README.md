@@ -100,10 +100,10 @@ cargo run --release -- --open
 启动后会打印：
 
 ```
-mmusic-studio v0.1.0
+hertz-studio v0.1.0
   ui       http://127.0.0.1:7634/?token=…
   health   http://127.0.0.1:7634/v1/health
-  discovery C:\Users\…\mmusic-studio\vmusicd.json
+  discovery C:\Users\…\hertz-studio\vmusicd.json
 ```
 
 在 UI 左侧填入音乐目录 → 点「扫描」→ 点击曲目即可播放。
@@ -293,8 +293,8 @@ format = "pretty"       # pretty | json
 
 （生成的文件里还有一个 `server.expose_ui`，目前没有任何代码读它，属于预留键。）
 
-数据目录默认位置：Windows `%LOCALAPPDATA%\mmusic-studio`，
-macOS `~/Library/Application Support/mmusic-studio`，Linux `~/.local/share/mmusic-studio`。
+数据目录默认位置：Windows `%LOCALAPPDATA%\hertz-studio`，
+macOS `~/Library/Application Support/hertz-studio`，Linux `~/.local/share/hertz-studio`。
 其中含 `vmusic.db`（曲库）、`cache/covers/`（封面）、`token`（鉴权令牌）、
 `vmusicd.json`（服务发现文件：`{pid, port, token, version, protocol_version}`，宿主据此拿到端口与令牌）。
 开启播放诊断日志后还有 `logs/playback.log`（单文件上限 2 MiB，超出裁掉最旧的一半）。

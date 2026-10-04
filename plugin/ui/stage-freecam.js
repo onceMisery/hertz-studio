@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 自由相机：cine.freecam 开关开启期间接管全部 5 个场景的相机——
 // WASD(+Shift) 水平面平移、画布 click 指针锁定环视（拒绝则按住拖拽回落）、

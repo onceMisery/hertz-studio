@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 弧形背景墙 —— 把用户图片（或生成式背景画布）贴在环绕听众的圆柱内壁上。
 //

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 进程装配：把数据目录变成一个可用的 `AppState`。
 //!
@@ -119,6 +119,7 @@ pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::R
         keep: tokio::sync::Mutex::new(keep_list),
         dsp: tokio::sync::Mutex::new(dsp_config.clone()),
         auto_failures: Default::default(),
+        skip_walk_from: Default::default(),
         quality: tokio::sync::Mutex::new(quality_prefs),
         stage_beats: Default::default(),
         weak_self: Default::default(),

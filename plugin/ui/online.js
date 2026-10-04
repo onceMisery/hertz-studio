@@ -42,6 +42,39 @@
   // 到这里（getMeta）。
   var onlineMeta = new Map();
 
+  // 元数据落盘：页面一重启内存快照就清空，队列行退化成「未知曲目」；源侧日后失效
+  // （下架 / VIP 拒绝）时连补详情都补不回来。所以每拿到一份元数据就写进 localStorage
+  // （插件形态是宿主替身，boot 里 hydrate 之后才可读），启动时再喂回内存。
+  var META_STORE_KEY = 'vmusic.online.meta.v1';
+  var META_STORE_MAX = 400;
+  var metaStore = {};
+  var metaStoreTimer = 0;
+  function scheduleMetaStoreSave() {
+    clearTimeout(metaStoreTimer);
+    metaStoreTimer = setTimeout(function () {
+      try {
+        var keys = Object.keys(metaStore);
+        // 键序即插入序：超上限就砍掉最老的一批，别把替身存储撑爆。
+        if (keys.length > META_STORE_MAX) keys.slice(0, keys.length - META_STORE_MAX).forEach(function (k) { delete metaStore[k]; });
+        localStorage.setItem(META_STORE_KEY, JSON.stringify(metaStore));
+      } catch (e) { /* 存不下就退回落盘前的行为，不影响播放 */ }
+    }, 400);
+  }
+  function rememberMeta(id, meta) {
+    onlineMeta.set(id, meta);
+    if (id && meta && (meta.title || meta.artist)) { metaStore[id] = meta; scheduleMetaStoreSave(); }
+    return meta;
+  }
+  function seedMetaFromStore() {
+    try {
+      var raw = localStorage.getItem(META_STORE_KEY);
+      var obj = raw ? JSON.parse(raw) : null;
+      if (!obj || typeof obj !== 'object') return;
+      metaStore = obj;
+      Object.keys(obj).forEach(function (id) { if (!onlineMeta.has(id)) onlineMeta.set(id, obj[id]); });
+    } catch (e) { /* 坏数据就当没有 */ }
+  }
+
   // 平台徽标：品牌名 / 品牌色 / app 图标。音源 id 以后端注册表为准，
   // 这里只负责显示。
   // 第三项是图标地址：平台一律用 docs/images 提供的官方 app 图标（经
@@ -568,7 +601,7 @@
 
   function cacheTracks(tracks) {
     tracks.forEach(function (t) {
-      onlineMeta.set(virtualId(t), {
+      rememberMeta(virtualId(t), {
         id: virtualId(t),
         source: t.source,
         onlineId: t.id,
@@ -687,7 +720,7 @@
         cover: safeCoverUrl(t.cover),
         vip_only: !!t.vip_only,
       };
-      onlineMeta.set(ids[i], meta);
+      rememberMeta(ids[i], meta);
       H.state.byId.set(ids[i], meta);
     });
     var meta = onlineMeta.get(startId);
@@ -760,7 +793,7 @@
       if (url && track.id) {
         var meta = onlineMeta.get(track.id) || track;
         meta.cover = url;
-        onlineMeta.set(track.id, meta);
+        rememberMeta(track.id, meta);
         if (H.state.byId.get(track.id)) H.state.byId.set(track.id, meta);
       }
       return url;
@@ -1033,7 +1066,7 @@
       tracks.forEach(function (t) {
         var id = virtualId(t);
         var meta = Object.assign({}, t, { id: id, onlineId: t.id, cover: safeCoverUrl(t.cover) });
-        onlineMeta.set(id, meta);
+        rememberMeta(id, meta);
         H.state.byId.set(id, meta);
       });
       H.setStateQueue(tracks.map(virtualId), current ? virtualId(current) : null);
@@ -1403,6 +1436,8 @@
     // —— 供宿主「正在播放」/队列渲染回落到在线元数据 ——
     meta: onlineMeta,
     getMeta: function (id) { return onlineMeta.get(id); },
+    remember: rememberMeta,
+    seedFromStore: seedMetaFromStore,
     safeCoverUrl: safeCoverUrl,
     rowCoverUrl: rowCoverUrl,
     fetchCover: fetchOnlineCover,

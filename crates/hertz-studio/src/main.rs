@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
-//! `hertz-studio` — the mmusic-studio service binary.
+//! `hertz-studio` — the hertz-studio service binary.
 //!
 //! Run `hertz-studio --help` for options. With no arguments it binds a fixed local
 //! port, writes a discovery file with the token, and serves the bundled UI.
@@ -209,6 +209,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // 改名前的数据目录叫 mmusic-studio；必须在任何读写路径碰到目录之前搬完，
+    // 否则 prepare 会先把新目录建成空库。
+    config::migrate_legacy_data_dir();
     let data_dir = args.data_dir.unwrap_or_else(config::default_data_dir);
     let boot_config = bootstrap::prepare(&data_dir).await?;
     init_logging(&boot_config.log.level, &boot_config.log.format);
@@ -365,7 +368,7 @@ async fn main() -> anyhow::Result<()> {
     let discovery = state::write_discovery(&state, actual_port).await?;
     let url = format!("http://127.0.0.1:{actual_port}/?token={token}");
     tracing::info!("listening on {bind}:{actual_port}");
-    println!("mmusic-studio v{}", env!("CARGO_PKG_VERSION"));
+    println!("hertz-studio v{}", env!("CARGO_PKG_VERSION"));
     println!("  ui       {url}");
     println!("  health   http://127.0.0.1:{actual_port}/v1/health");
     println!("  discovery {}", discovery.display());
@@ -546,7 +549,7 @@ impl Args {
 
 fn print_help() {
     println!(
-        "hertz-studio — mmusic-studio service\n\n\
+        "hertz-studio — hertz-studio service\n\n\
          Usage: hertz-studio [OPTIONS]\n\n\
          Options:\n  \
          --bind ADDR      Bind address (default 127.0.0.1)\n  \

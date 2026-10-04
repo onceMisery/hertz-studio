@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // 浏览器类检查的前置自检：node scripts/check-browser-preflight.js
 //
 // 为什么需要它：6 个 browser 检查此前的失败方式非常糟糕 —— 环境不具备时它们

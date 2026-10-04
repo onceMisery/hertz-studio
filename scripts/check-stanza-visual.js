@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // stanza 视觉对比：固定时钟截图矩阵。用法：
 //   STANZA_URL=http://localhost:5173 HERTZ_URL=http://localhost:8080 node scripts/check-stanza-visual.js
 // 依赖 playwright（npx -y playwright@latest install chromium 后可用 require）。

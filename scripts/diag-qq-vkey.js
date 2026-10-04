@@ -43,7 +43,7 @@ const DB = arg(
     os.homedir(),
     'AppData',
     'Local',
-    'mmusic-studio',
+    'hertz-studio',
     'vmusic.db'
   )
 );

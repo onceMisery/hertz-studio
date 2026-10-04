@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 插件形态下站内资源 URL 的契约检查（零依赖、不触网、不开浏览器）。
 //
@@ -44,7 +44,7 @@ const WEB = path.join(ROOT, 'plugin', 'ui');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const HOST_JS = read(path.join(WEB, 'host.js'));
 
-const PLUGIN_ID = 'io.github.mmusic-studio.hertz-studio';
+const PLUGIN_ID = 'io.github.oncemisery.hertz-studio';
 
 let failures = 0;
 let checks = 0;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // 凝彩 tempera：全屏 Pixi 色块分镜歌词 MV。每句歌词重新切一次画面 —— 平涂色块
 // 按构图入场、局部叠网点/斜线网屏、唱到哪里一条强调色「扫光带」推到哪里，
 // 带内文字反色成底色（印刷套色的反白效果）。

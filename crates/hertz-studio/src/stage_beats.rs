@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 节拍地图缓存与后台调度：data/stage-beats/<sha1>.json + 进程内幂等任务表。
 //!

@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!-- SPDX-License-Identifier: MIT
-     Copyright (c) 2026 mmusic-studio contributors
+     Copyright (c) 2026 hertz-studio contributors
 
      v2 原型。DOM 契约相对 v1 有变化：曲库不再是 JS 注入进侧栏的裸列表，
      而是静态声明的三个区域（导航轨 / 内容列 / 演出舞台）+ 底部播放条。
@@ -13,7 +13,7 @@
 <!-- 空图标：没有 favicon 路由时浏览器会去请求 /favicon.ico 并拿到 401，
      控制台里留一条无意义的红字。 -->
 <link rel="icon" href="data:,">
-<title>mmusic-studio</title>
+<title>hertz-studio</title>
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="stage.css">
 <link rel="stylesheet" href="creative.css">
@@ -370,7 +370,7 @@
       <div class="lib-empty" id="lib-empty" hidden>
         <div class="empty-card" id="lib-empty-guide">
           <h2>曲库还是空的</h2>
-          <p>填入一个本地音乐目录，mmusic-studio 会读取内嵌标签与封面，并把歌词从同目录的 .lrc 里带进来。</p>
+          <p>填入一个本地音乐目录，hertz-studio 会读取内嵌标签与封面，并把歌词从同目录的 .lrc 里带进来。</p>
           <div class="empty-row">
             <button class="btn primary" id="empty-scan-btn">填写音乐目录</button>
           </div>

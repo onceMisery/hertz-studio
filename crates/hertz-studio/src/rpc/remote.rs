@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 远程来源（WebDAV）：登记 / 浏览 / 导入。密码只进系统钥匙串，绝不入库。
 //!

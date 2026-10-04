@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-/* Copyright (c) 2026 mmusic-studio contributors */
+/* Copyright (c) 2026 hertz-studio contributors */
 /* stanza 歌词模式样式。命名空间 fl-，不改动 stage3d.css。 */
 
 .fl-root { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }

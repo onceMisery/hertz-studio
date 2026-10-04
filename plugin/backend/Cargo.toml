@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2026 mmusic-studio contributors
+# Copyright (c) 2026 hertz-studio contributors
 
 [package]
 name = "dbx-plugin-hertz"
@@ -7,7 +7,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "DBX plugin sidecar for mmusic-studio: stdio JSON-RPC bridge over the hertz-studio service"
+description = "DBX plugin sidecar for hertz-studio: stdio JSON-RPC bridge over the hertz-studio service"
 
 [[bin]]
 name = "dbx-plugin-hertz"

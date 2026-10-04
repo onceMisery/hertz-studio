@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 浮光：胶囊并入顶栏 + 常驻搜索框摘掉（浏览器验收，需 Playwright + 服务）。
 //

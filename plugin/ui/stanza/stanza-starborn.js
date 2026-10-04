@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // 星诞 starborn：元导演。它本身不渲染，只按当前段的音乐特征在候选渲染器之间自动切镜。
 //
 // 设计约束（与参考项目一致）：瞬态不得污染确定性。音频特征只影响「选哪个模式」这一次决策，

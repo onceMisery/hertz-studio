@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 曲库域：曲目列表与编辑、封面、歌词、扫描根目录与进度、设置、收藏、播放历史。
 //!

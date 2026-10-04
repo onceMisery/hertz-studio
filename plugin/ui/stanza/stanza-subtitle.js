@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // 底部字幕条：当前行翻译（空档驻留上一行）/ 下两句预告。
 (function (global) {
   'use strict';

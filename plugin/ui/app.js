@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // v2 原型：零构建原生 JS，和现有 crates/hertz-studio/web/app.js 一样没有 npm 步骤。
 //
@@ -831,12 +831,14 @@ function toast(message, kind = 'info') {
     ui.toast.classList.remove('show');
     setTimeout(() => { ui.toast.hidden = true; }, 220);
   };
-  if (!message) { hide(); return; }
+  if (!message) { hide(); clearCapsuleNotice(); return; }
   ui.toast.textContent = message;
   ui.toast.className = kind === 'error' ? 'toast error' : 'toast';
   ui.toast.hidden = false;
   requestAnimationFrame(() => ui.toast.classList.add('show'));
   toastTimer = setTimeout(hide, kind === 'error' ? 6000 : 1400);
+  // 最小化态里这一层是看不见的，同一句话交给胶囊自己说。
+  noticeCapsule(message, kind);
 }
 
 let retries = 0;
@@ -908,6 +910,8 @@ function handleEvent(msg) {
           // 重试下标以事件携带的为准：快照反查会在自动跳曲/切歌后指错曲。
           var idx = (msg.index != null ? msg.index : null);
           window.Online.showOnlineError(msg.message, idx);
+          // 在线错误条在完整界面里；最小化态只剩胶囊，同一句话得由胶囊说。
+          noticeCapsule(msg.message, 'error');
         }
       } else {
         toast(`播放异常：${msg.message}`, 'error');
@@ -1378,7 +1382,7 @@ function applySnapshot(snap) {
   // 胶囊上的小标签跟着播放态走：停着的时候还写「正在播放」是撒谎。
   ui.capsuleLabel.textContent = snap.playing ? '正在播放' : '已暂停';
   ui.mode.textContent = state.modeLabel[snap.mode] || snap.mode;
-  document.title = state.current ? `${state.current.title} · mmusic-studio` : 'mmusic-studio';
+  document.title = state.current ? `${state.current.title} · hertz-studio` : 'hertz-studio';
   renderPlaybackProgress(snap);
   syncVolume(snap.volume);
 
@@ -4788,7 +4792,7 @@ function syncNpSnapshot(snap) {
 
 const CAPSULE_KEY = 'vmusic.capsule.minimized';
 const CAPSULE_POS_KEY = 'vmusic.capsule.pos';
-const PLAYER_WORKBENCH = 'io.github.mmusic-studio.hertz-studio.player';
+const PLAYER_WORKBENCH = 'io.github.oncemisery.hertz-studio.player';
 // 拖拽与点击的位移阈值：小于它算「点了一下」（展开），大于才算拖。
 const CAPSULE_DRAG_PX = 4;
 // 页内最小化态：离边多远开始吸附；20 与默认外边距同值，吸上之后正好落回默认位。
@@ -4873,6 +4877,51 @@ function setCapsuleMinimized(min) {
   }
 }
 
+/// 胶囊态的提示出口。最小化两态（页内 `is-capsule`、浮窗 `is-floating-capsule`）
+/// 把除胶囊以外的顶层节点整层 `display:none`（style.css），toast 与在线错误条因此
+/// 都看不见——「按到了但这首放不了」和「什么都没按到」在界面上长得一模一样。
+/// 同一句话改写进胶囊的文字行，靠既有的轮播滚动读完。
+let capsuleNotice = null;
+let capsuleNoticeKind = 'info';
+let capsuleNoticeTimer = 0;
+
+function capsuleShown() {
+  return document.body.classList.contains('is-capsule') || document.body.classList.contains('is-floating-capsule');
+}
+
+function noticeCapsule(message, kind) {
+  if (!message || !capsuleShown()) return;
+  clearTimeout(capsuleNoticeTimer);
+  capsuleNotice = message;
+  capsuleNoticeKind = kind === 'error' ? 'error' : 'info';
+  // 比整页 toast 留得久一点：窗口只有 5em 宽，长句子要滚一轮才看得完。
+  capsuleNoticeTimer = setTimeout(clearCapsuleNotice, capsuleNoticeKind === 'error' ? 6000 : 3500);
+  paintCapsuleNotice();
+}
+
+function clearCapsuleNotice() {
+  clearTimeout(capsuleNoticeTimer);
+  if (!capsuleNotice) return;
+  capsuleNotice = null;
+  syncCapsule(state.current, lastNowCover);
+}
+
+/// 由 syncCapsule 结尾调用：状态重绘（换曲、换封面、皮肤改字号）不能把正在显示的
+/// 提示擦掉，也不能让过期后的曲名留在原地。
+function paintCapsuleNotice() {
+  if (!capsuleNotice) {
+    ui.capsule.classList.remove('is-notice', 'is-notice-error');
+    ui.capsule.removeAttribute('title');
+    return;
+  }
+  ui.capsule.classList.add('is-notice');
+  ui.capsule.classList.toggle('is-notice-error', capsuleNoticeKind === 'error');
+  ui.capsuleTitle.textContent = capsuleNotice;
+  ui.capsuleArtist.textContent = '';
+  // 浮窗里没有别的出口能看全文，hover 出原生 tooltip 兜住截断。
+  ui.capsule.title = capsuleNotice;
+}
+
 /// 胶囊内容同步。封面与正在播放位走同一套解析：插件形态下远程地址要先换成
 /// data URL（沙箱 CSP 画不出 https 图），未命中先空着、代理落地后回填这一块。
 function syncCapsule(track, coverUrl) {
@@ -4893,6 +4942,8 @@ function syncCapsule(track, coverUrl) {
       apply(resolved);
     }
   }
+  // 提示压过曲名：状态重绘不能把刚说出来的话擦掉。
+  paintCapsuleNotice();
   // 浮动实例：文字换了尺寸就可能变，窗口跟着收一次（页内最小化态没有窗口可收）。
   if (window.HertzCapsuleOnly) fitFloatingWindowToCapsule();
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 舞台粒子层：跟着音乐呼吸的环境光尘 + 落在节拍上的涟漪。
 //

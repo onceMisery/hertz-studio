@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 手绘舞台：把舞台的几条关键轮廓换成一笔画出来的铅笔线，并且让它们跟着鼓点抖。
 //

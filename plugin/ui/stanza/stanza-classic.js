@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // 流光 classic：单行逐词三态。JS 只翻状态/写 CSS 变量，过渡与辉光全交 CSS。
 (function (global) {
   'use strict';

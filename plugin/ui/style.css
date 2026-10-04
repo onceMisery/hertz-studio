@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT
-   Copyright (c) 2026 mmusic-studio contributors
+   Copyright (c) 2026 hertz-studio contributors
 
    v2 原型样式。令牌与 v1 完全一致（同一套深色玻璃语言：#0d0f12 底、
    rgba(24,27,32,0.66) 面板 + 22px 背景模糊、accent #1dbf8f / #7f77dd 渐变、
@@ -3276,6 +3276,11 @@ body.is-capsule > *:not(#capsule) { display: none !important; }
   font-size: var(--fs-xs); color: var(--muted); line-height: 1.2;
   transition: transform 0.22s var(--ease);
 }
+/* 胶囊态的提示（app.js 的 noticeCapsule）：最小化两态把 toast 整层藏了，这句话借
+   文字行来说，几秒后由 syncCapsule 换回曲名。窗口宽度不动——长句子交给上面那套
+   轮播滚，胶囊不会被提示撑宽，浮窗也就不用跟着改尺寸。 */
+.capsule.is-notice .capsule-title { color: var(--accent-2); font-weight: 500; }
+.capsule.is-notice.is-notice-error .capsule-title { color: var(--danger); font-weight: 600; }
 /* 传输三键 + 展开：不展开完整界面也能换歌、控播放。比底部播放条的 38px 小一圈，
    胶囊是浮层，控件大了整块会笨重。 */
 .capsule-controls { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }

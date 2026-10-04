@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 渐进式下载：后台 tokio 任务顺序把远程音频写入 `.part`；同步解码线程经
 //! [`HttpMediaSource`] 读到哪等到哪。下载完成原子 rename 成正式缓存。

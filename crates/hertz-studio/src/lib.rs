@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
-//! mmusic-studio 的服务端逻辑。
+//! hertz-studio 的服务端逻辑。
 //!
 //! 这个 crate 同时产出两个可执行入口：
 //! - `hertz-studio`（`src/main.rs`）：独立形态，axum HTTP + WebSocket，自带内嵌界面；

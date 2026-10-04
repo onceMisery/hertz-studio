@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 离线节拍分析：解码 → 单声道重采样 → STFT 频谱通量 → 峰值/BPM/强拍分型。
 //!

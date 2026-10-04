@@ -13,6 +13,12 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// OS 钥匙串的服务名。项目旧名是 `mmusic-studio`，条目还留在那个服务下；
+/// 远程源的凭据 key 是用户自己起的，没法枚举，所以读不到新条目时回读旧服务
+/// 并顺手搬过来——一次改名不该让用户重新登录一次。
+pub(crate) const KEYRING_SERVICE: &str = "hertz-studio";
+const KEYRING_SERVICE_LEGACY: &str = "mmusic-studio";
+
 /// 一个平台的全部秘密：CredPack JSON + 非密设备身份。设备身份本来就不是
 /// 秘密，但和凭据同生共灭，一起放进钥匙串最不容易出现「cookie 清了 guid
 /// 还在」这类半迁移状态。
@@ -33,7 +39,7 @@ pub struct OsKeyring;
 
 impl SecretBackend for OsKeyring {
     fn put(&self, key: &str, entry: &SecretEntry) -> Result<(), String> {
-        let store = keyring::Entry::new("mmusic-studio", &format!("{key}:cred"))
+        let store = keyring::Entry::new(KEYRING_SERVICE, &format!("{key}:cred"))
             .map_err(|e| format!("cannot open keyring entry: {e}"))?;
         match &entry.cred {
             Some(value) if !value.is_empty() => store
@@ -57,7 +63,7 @@ impl SecretBackend for OsKeyring {
 
     fn delete(&self, key: &str) -> Result<(), String> {
         for suffix in [":cred", ":device"] {
-            let entry = keyring::Entry::new("mmusic-studio", &format!("{key}{suffix}"))
+            let entry = keyring::Entry::new(KEYRING_SERVICE, &format!("{key}{suffix}"))
                 .map_err(|e| format!("cannot open keyring entry: {e}"))?;
             match entry.delete_credential() {
                 Ok(()) => {}
@@ -70,17 +76,36 @@ impl SecretBackend for OsKeyring {
 }
 
 fn read_entry(name: &str) -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new("mmusic-studio", name)
+    let entry = keyring::Entry::new(KEYRING_SERVICE, name)
         .map_err(|e| format!("cannot open keyring entry: {e}"))?;
     match entry.get_password() {
         Ok(value) => Ok(Some(value).filter(|v| !v.is_empty())),
-        Err(keyring::Error::NoEntry) => Ok(None),
+        // 改名前存的条目在旧服务名下：读到了就搬进新服务，下次不必再回读。
+        Err(keyring::Error::NoEntry) => read_legacy_entry(name),
         Err(e) => Err(format!("keyring get failed for {name}: {e}")),
     }
 }
 
+fn read_legacy_entry(name: &str) -> Result<Option<String>, String> {
+    let legacy = keyring::Entry::new(KEYRING_SERVICE_LEGACY, name)
+        .map_err(|e| format!("cannot open legacy keyring entry: {e}"))?;
+    let value = match legacy.get_password() {
+        Ok(value) if !value.is_empty() => value,
+        Ok(_) => return Ok(None),
+        Err(keyring::Error::NoEntry) => return Ok(None),
+        Err(e) => return Err(format!("legacy keyring get failed for {name}: {e}")),
+    };
+    let current = keyring::Entry::new(KEYRING_SERVICE, name)
+        .map_err(|e| format!("cannot open keyring entry: {e}"))?;
+    // 搬不动也照样返回读到的值：读路径不该因为搬家失败而失效。
+    if let Err(e) = current.set_password(&value) {
+        tracing::warn!("凭据搬到新钥匙串服务失败，本次仍用旧条目: {name}: {e}");
+    }
+    Ok(Some(value))
+}
+
 fn put_aux(name: &str, value: &Option<String>) -> Result<(), String> {
-    let entry = keyring::Entry::new("mmusic-studio", name)
+    let entry = keyring::Entry::new(KEYRING_SERVICE, name)
         .map_err(|e| format!("cannot open keyring entry: {e}"))?;
     match value {
         Some(v) if !v.is_empty() => entry

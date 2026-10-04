@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // stanza 等价移植：纯函数工具。无 DOM 依赖，UMD-lite 尾部允许 Node require 做验证。
 (function (root, factory) {
   var api = factory();

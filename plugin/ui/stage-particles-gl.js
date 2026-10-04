@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 增强渲染器：WebGL2 光尘场。由 stage-particles.js 在用户开启
 // 「Three.js / WebGL 增强渲染」时挂载；本文件不主动运行，也不碰任何设置存储。

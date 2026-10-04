@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! DBX 插件形态的 sidecar 入口。
 //!
@@ -38,7 +38,7 @@ use tokio::sync::broadcast;
 
 /// 必须与 `plugin/manifest.json` 的 `id` 一致：宿主按它过滤事件，不一致的话
 /// UI 一个事件都收不到。
-const PLUGIN_ID: &str = "io.github.mmusic-studio.hertz-studio";
+const PLUGIN_ID: &str = "io.github.oncemisery.hertz-studio";
 
 /// 服务端事件下发的方法名。UI 侧 `onEvent` 按它过滤后交给原来的 `handleEvent`，
 /// 载荷就是独立形态下 WS 推的那个 `WsEvent`，字段口径完全一致。
@@ -184,6 +184,8 @@ fn envelope_result(result: RpcResult) -> Value {
 /// 手工跑这个二进制调试时该变量不存在。这时**不能**回落到独立形态的默认目录：
 /// 两个进程同时写同一个 SQLite 会互相踩。所以退到默认目录下的一个专属子目录。
 fn resolve_data_dir() -> PathBuf {
+    // sidecar 的专属子目录挂在同一个数据根下，所以根目录的改名迁移要先发生。
+    hertz_studio::config::migrate_legacy_data_dir();
     if let Some(dir) = std::env::var_os("DBX_PLUGIN_DATA_DIR").filter(|value| !value.is_empty()) {
         return PathBuf::from(dir);
     }
@@ -211,7 +213,7 @@ async fn boot_plugin() -> anyhow::Result<hertz_studio::bootstrap::Booted> {
     // 所以填一个随机串，永不外泄也永不校验。
     let token = uuid::Uuid::new_v4().to_string();
     let booted = hertz_studio::bootstrap::boot(data_dir, config, token).await?;
-    tracing::info!(backend = %booted.backend_label, "mmusic-studio sidecar 就绪");
+    tracing::info!(backend = %booted.backend_label, "hertz-studio sidecar 就绪");
     Ok(booted)
 }
 

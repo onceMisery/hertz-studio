@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 在线曲库（代理）：搜索、取流、详情、歌词、整盘播放、FM 电台、缓存、音质、
 //! cookie 登录、扫码登录、平台歌单、红心与推荐。
@@ -40,7 +40,7 @@ use crate::routes::{
     RadioRequest, RecommendQuery, SearchAllQuery, SourceRequest, StreamQuery,
 };
 use crate::rpc::{body_as, query_as, Reply, RpcResult};
-use crate::state::AppState;
+use crate::state::{AppState, PlayTrigger};
 
 fn store_err(e: vmusic_core::StoreError) -> ApiError {
     ApiError::from(vmusic_core::CoreError::Store(e))
@@ -185,7 +185,7 @@ pub async fn play(state: &Arc<AppState>, body: &Value) -> RpcResult {
         }
     }
 
-    let outcome = state.play_index_for(index, Some(gen), false).await?;
+    let outcome = state.play_index_for(index, Some(gen), PlayTrigger::Pick).await?;
     if !outcome.committed {
         // 被更新的代际顶掉：不改队列也不报错，把当下的播放器状态原样回给前端。
         return Ok(Reply::ok(crate::rpc::playback::snapshot(state).await));
@@ -235,7 +235,7 @@ pub async fn radio(state: &Arc<AppState>, body: &Value) -> RpcResult {
     match request.action.as_str() {
         "start" => {
             if let Some(gen) = state.radio_start().await? {
-                state.play_index_for(0, Some(gen), false).await?;
+                state.play_index_for(0, Some(gen), PlayTrigger::Pick).await?;
                 state.post_commit_background();
             }
         }
@@ -243,7 +243,7 @@ pub async fn radio(state: &Arc<AppState>, body: &Value) -> RpcResult {
             let initial = state.radio.lock().await.initial_generation.is_some();
             if initial {
                 if let Some(gen) = state.radio_start().await? {
-                    state.play_index_for(0, Some(gen), false).await?;
+                    state.play_index_for(0, Some(gen), PlayTrigger::Pick).await?;
                     state.post_commit_background();
                 }
             } else {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 创意舞台：把三维场景、镜头、影调、编排轨和自动导演缝合成可编辑的一份数据。
 //

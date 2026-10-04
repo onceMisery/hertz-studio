@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // 商籁 sonnet：全屏 Pixi 电影镜头歌词。独立于 classic/cadenza 的第三个 stanza 渲染器，
 // 对外 API 与其余渲染器一致（frame/update/setTheme/.../destroy）。
 // 数据只认 Stage 门面（时间/歌词/频谱/演示态），不自建时钟、不自行解析歌词文档。

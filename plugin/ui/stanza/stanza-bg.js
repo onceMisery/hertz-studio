@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // stanza common 背景三档：geometric / fluid / solid。频段缩放走外部 frame(dt) 低通。
 (function (global) {
   'use strict';

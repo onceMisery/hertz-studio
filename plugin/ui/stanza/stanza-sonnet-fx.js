@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // 商籁 sonnet 图形引擎：镜头调度、字素时间轴、词组舞台、重音编舞、光学印相后期。
 // 行为语言参考两个上游项目的商籁舞台（逐行选镜与电影镜头思路），出处见 NOTICE
 // 「Design lineage」；代码为本项目独立实现。

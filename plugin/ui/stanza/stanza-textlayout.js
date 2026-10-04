@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // 心象排版器：替代 @chenglou/pretext（歌词短文本/CJK 为主的精简面）。
 //
 // 字段与 stanza cadenza spec 术语映射：

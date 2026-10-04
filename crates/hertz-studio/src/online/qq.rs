@@ -2112,7 +2112,7 @@ mod tests {
     async fn probe_daily_candidates_with_cred() {
         // 钥匙串条目名是 `{cred_key}:cred`，而 cred_key 是 `online_cred_<source>`。
         // 写成 "qq:cred" 会拿到 NoEntry，误以为没登录。
-        let entry = keyring::Entry::new("mmusic-studio", &format!("{CRED_PREFIX}{ID}:cred"))
+        let entry = keyring::Entry::new(crate::secrets::KEYRING_SERVICE, &format!("{CRED_PREFIX}{ID}:cred"))
             .expect("keyring entry");
         let raw = match entry.get_password() {
             Ok(v) => v,

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 每日推荐滚动链 + iOS 齿轮隐藏 + 浮光行节奏（浏览器验收，需 Playwright + 服务）。
 //

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 电影相机的纯时间轴：rAF 外推时钟、单调游标 / seek 重定位、一帧多拍取最强、
 // 确定性节拍包络。不依赖 DOM/GL，Node 可直接 require（check-stage-cinema.js）。

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 // stanza Theme 适配层：所有 stanza 渲染器只认本模块输出，禁止在渲染器内自行取色。
 (function (root, factory) {
   var api = factory(root.StanzaUtil);

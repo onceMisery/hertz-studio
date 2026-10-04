@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT
-   Copyright (c) 2026 mmusic-studio contributors
+   Copyright (c) 2026 hertz-studio contributors
 
    iOS / macOS：桌面分栏、移动分组列表。只消费 Theme 的颜色令牌，
    不改 DOM、导航/播放器行为与主题存储。独立于沉浸舞台的外观选择。

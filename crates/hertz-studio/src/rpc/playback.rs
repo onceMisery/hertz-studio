@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 播放域：状态快照、播放控制、队列、DSP、音频设备、舞台节拍地图。
 //!
@@ -22,7 +22,7 @@ use crate::routes::{
     SetQueueRequest, VolumeRequest,
 };
 use crate::rpc::{body_as, Reply, RpcResult};
-use crate::state::AppState;
+use crate::state::{AppState, PlayTrigger};
 
 /// 播放器快照，叠加「在线曲缓冲覆盖态」。
 ///
@@ -89,14 +89,14 @@ pub async fn stop(state: &Arc<AppState>) -> RpcResult {
 }
 
 pub async fn next(state: &Arc<AppState>) -> RpcResult {
-    state.step(1, false).await?;
+    state.step_by_user(1).await?;
     // 成功起播后在入口 detach 预取 + LRU（每首恰好一次）。
     state.post_commit_background();
     with_state(state).await
 }
 
 pub async fn previous(state: &Arc<AppState>) -> RpcResult {
-    state.step(-1, false).await?;
+    state.step_by_user(-1).await?;
     state.post_commit_background();
     with_state(state).await
 }
@@ -162,7 +162,7 @@ pub async fn load(state: &Arc<AppState>, body: &Value) -> RpcResult {
         .position(|id| *id == request.track_id)
         .unwrap_or(0);
     let (generation, _, _) = state.set_queue(queue, Some(index)).await;
-    state.play_index_for(index, Some(generation), false).await?;
+    state.play_index_for(index, Some(generation), PlayTrigger::Pick).await?;
     state.post_commit_background();
     with_state(state).await
 }
@@ -267,7 +267,7 @@ pub async fn replay(state: &Arc<AppState>, body: &Value) -> RpcResult {
     // 在重新取流（数秒 await）之前抓进度：提交后旧曲已被换装，快照归零。
     let resume = state.audio.snapshot().position_ms;
     let outcome = state
-        .play_index_for(request.index, None, false)
+        .play_index_for(request.index, None, PlayTrigger::Pick)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     // 只有真正起播才 seek + 触发后台预取 + LRU；被更新代际顶掉时不收口。

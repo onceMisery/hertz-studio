@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! Shared server state, the event bus and the playback queue.
 
@@ -118,6 +118,57 @@ pub(crate) struct PlayOutcome {
     pub actual_quality: Option<crate::online::quality::Quality>,
 }
 
+/// 一次播放尝试由什么触发。取流失败后的处置全靠它分流，所以原来那个 `auto: bool`
+/// 必须拆开：「用户点了这一首」和「用户按了下一曲」要的是相反的东西——前者要停在
+/// 原处拿到这一首的报错，后者要跳过放不了的曲子继续找。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlayTrigger {
+    /// 用户点了某一首（点播、重试、直接给队列下标）。
+    Pick,
+    /// 一首自然播完的接力。
+    AutoNext,
+    /// 用户按了上一曲/下一曲。
+    Step { delta: isize },
+}
+
+impl PlayTrigger {
+    /// 这一类失败要不要接着往下跳，以及往哪个方向跳；`None` = 停在原处把错误交回去。
+    ///
+    /// 主动换曲只跳过「这首本身放不了」的：上游整体不健康（502/504、下载后解不开）
+    /// 时一首首试，等于把整支队列烧穿一遍，还会把限流踩得更深。
+    fn skip_direction(&self, code: &str) -> Option<isize> {
+        match self {
+            PlayTrigger::Pick => None,
+            PlayTrigger::AutoNext => Some(1),
+            PlayTrigger::Step { delta }
+                if matches!(code, "vip_required" | "auth_required" | "not_found") =>
+            {
+                Some(delta.signum())
+            }
+            PlayTrigger::Step { .. } => None,
+        }
+    }
+
+    /// 连跳几只之后放弃。接力沿用既有的 3；主动换曲允许跨过队列里其他所有曲子
+    /// （`n` 从 1 起计，跳到第 `len` 首即已绕完一圈），但上限必须存在——失败递归是
+    /// 沿 future 链一路下来的。
+    fn streak_cap(&self, queue_len: usize) -> usize {
+        match self {
+            PlayTrigger::AutoNext => 3,
+            PlayTrigger::Step { .. } => queue_len.max(1),
+            PlayTrigger::Pick => 0,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            PlayTrigger::Pick => "pick",
+            PlayTrigger::AutoNext => "auto",
+            PlayTrigger::Step { .. } => "step",
+        }
+    }
+}
+
 /// 注册表里一条下载的角色：后台预取 vs 当前播放接管。
 ///
 /// 切歌时同键条目按角色分流：预取条目可以被新播放直接接管（下载不白跑），
@@ -229,6 +280,10 @@ pub struct AppState {
     pub(crate) keep: Mutex<Vec<String>>,
     /// 自动接力连续失败计数，任一曲成功提交即清零；累计到 3 停止接力。
     pub(crate) auto_failures: AtomicUsize,
+    /// 一轮跳曲走的起点：第一次失败时把「当时在播的那首」记下来，放弃时把游标还给
+    /// 它。不记的话每跳一首都把游标还给上一首（那首也是放不了的），界面会高亮一首
+    /// 根本没响的曲子。
+    pub(crate) skip_walk_from: Mutex<Option<usize>>,
     /// 逐源音质偏好（启动时从 settings 装载、POST 热切换即时更新）。
     pub(crate) quality: Mutex<crate::online::quality::QualityPrefs>,
     /// 节拍分析幂等表：缓存键 → 任务态。
@@ -321,20 +376,22 @@ impl AppState {
 
     /// Loads and starts the track at `index` of the current queue.
     pub async fn play_index(&self, index: usize) -> Result<(), vmusic_core::CoreError> {
-        self.play_index_for(index, None, false).await.map(|_| ())
+        self.play_index_for(index, None, PlayTrigger::Pick)
+            .await
+            .map(|_| ())
     }
 
     /// 播放指定队列位置；`reserve_gen` 用于 /online/play 的「先占队列后起播」：
     /// 传入 set_queue 返回的代际，进入预留区时代际已被顶掉则返回
     /// `committed=false`（被取代，未提交）。
     ///
-    /// `auto` 标识自然结束接力（true）还是用户点播（false）：在线曲取流失败
-    /// 时前者按连续失败计数自动跳曲，后者停在当前曲并推可操作错误。
+    /// `trigger` 决定在线曲取流失败时的处置：点播停在原处回错，接力与主动换曲
+    /// 各自按 [`PlayTrigger`] 的方向跳过放不了的曲子。
     pub(crate) async fn play_index_for(
         &self,
         index: usize,
         reserve_gen: Option<usize>,
-        auto: bool,
+        trigger: PlayTrigger,
     ) -> Result<PlayOutcome, vmusic_core::CoreError> {
         // 预留区整段持 commit：验代际、读曲、顶新代际、写乐观 cursor 必须相对
         // set_queue 与别的播放预留原子——否则多 worker 下「预闸后队列被换」或
@@ -382,7 +439,7 @@ impl AppState {
                 kind = "online",
                 source = source,
                 track = id,
-                auto = auto
+                trigger = trigger.as_str()
             );
         } else {
             crate::diaglog!(
@@ -391,13 +448,21 @@ impl AppState {
                 gen = gen,
                 kind = "local",
                 track = track_id,
-                auto = auto
+                trigger = trigger.as_str()
             );
         }
 
         let outcome = if let Some((source, id)) = online_target {
-            self.play_online(gen, index, track_id.clone(), source, id, prev_cursor, auto)
-                .await
+            self.play_online(
+                gen,
+                index,
+                track_id.clone(),
+                source,
+                id,
+                prev_cursor,
+                trigger,
+            )
+            .await
         } else {
             // 本地曲没有 online_failed 那样的收口点，错误直接回给 HTTP——在这里
             // 补一行，否则日志里只有 play.begin 没有下文。
@@ -546,7 +611,7 @@ impl AppState {
     /// [`Self::online_failed`] 收口。
     //
     // 参数多是有意的分层结果：代际/下标/track_id 是乐观并发三件套，
-    // source/id 是在线曲身份，prev_cursor 供失败回退，auto 决定失败策略——
+    // source/id 是在线曲身份，prev_cursor 供失败回退，trigger 决定失败策略——
     // 收成结构体只会引入一个只用一次的临时参数包。
     #[allow(clippy::too_many_arguments)]
     async fn play_online(
@@ -557,7 +622,7 @@ impl AppState {
         source: String,
         id: String,
         prev_cursor: Option<usize>,
-        auto: bool,
+        trigger: PlayTrigger,
     ) -> Result<PlayOutcome, vmusic_core::CoreError> {
         let dir = self.online_cache_dir();
         // 读偏好只在块作用域短持锁：tokio Mutex 不能跨后面的网络 await 持有。
@@ -695,7 +760,7 @@ impl AppState {
                                 index,
                                 track_id,
                                 prev_cursor,
-                                auto,
+                                trigger,
                                 e.with_source(source),
                             )
                             .await;
@@ -732,7 +797,7 @@ impl AppState {
                     );
                     self.set_buffering(false, None).await;
                     return self
-                        .online_failed(gen, index, track_id, prev_cursor, auto, e)
+                        .online_failed(gen, index, track_id, prev_cursor, trigger, e)
                         .await;
                 }
             }
@@ -783,7 +848,7 @@ impl AppState {
                             index,
                             track_id,
                             prev_cursor,
-                            auto,
+                            trigger,
                             crate::error::ApiError::upstream_timeout(e).with_source(source),
                         )
                         .await;
@@ -858,7 +923,7 @@ impl AppState {
                         index,
                         track_id,
                         prev_cursor,
-                        auto,
+                        trigger,
                         crate::error::ApiError::upstream_rejected("下载条目已丢失")
                             .with_source(source),
                     )
@@ -874,7 +939,7 @@ impl AppState {
                             index,
                             track_id,
                             prev_cursor,
-                            auto,
+                            trigger,
                             crate::error::ApiError::upstream_rejected(e).with_source(source),
                         )
                         .await;
@@ -891,7 +956,7 @@ impl AppState {
                     path,
                     actual,
                     prev_cursor,
-                    auto,
+                    trigger,
                     source,
                 )
                 .await;
@@ -913,7 +978,7 @@ impl AppState {
                         index,
                         track_id,
                         prev_cursor,
-                        auto,
+                        trigger,
                         crate::error::ApiError::internal(e.to_string()).with_source(source),
                     )
                     .await;
@@ -952,7 +1017,7 @@ impl AppState {
                     index,
                     track_id,
                     prev_cursor,
-                    auto,
+                    trigger,
                     crate::error::ApiError::internal(e.to_string()).with_source(source),
                 )
                 .await;
@@ -978,7 +1043,7 @@ impl AppState {
                     index,
                     track_id,
                     prev_cursor,
-                    auto,
+                    trigger,
                     crate::error::ApiError::internal(e.to_string()).with_source(source),
                 )
                 .await;
@@ -1058,7 +1123,7 @@ impl AppState {
         path: PathBuf,
         actual: Option<crate::online::quality::Quality>,
         prev_cursor: Option<usize>,
-        auto: bool,
+        trigger: PlayTrigger,
         source: String,
     ) -> Result<PlayOutcome, vmusic_core::CoreError> {
         match self
@@ -1090,7 +1155,7 @@ impl AppState {
                     index,
                     track_id,
                     prev_cursor,
-                    auto,
+                    trigger,
                     crate::error::ApiError::internal("下载完成但无法解码").with_source(source),
                 )
                 .await
@@ -1101,7 +1166,7 @@ impl AppState {
                     index,
                     track_id,
                     prev_cursor,
-                    auto,
+                    trigger,
                     crate::error::ApiError::internal(e.to_string()).with_source(source),
                 )
                 .await
@@ -1169,6 +1234,8 @@ impl AppState {
         actual: Option<crate::online::quality::Quality>,
     ) {
         self.auto_failures.store(0, Ordering::Relaxed);
+        // 跳曲走结束了：起点锚只在一次「连着跳了好几首」的过程中有意义。
+        *self.skip_walk_from.lock().await = None;
         self.record_history(track_id).await;
         // 实际档位本任务只回传给 /online/play 响应；后续统计/打点再消费。
         let _ = actual;
@@ -1338,17 +1405,19 @@ impl AppState {
     /// 仍属当代时把 cursor 恢复到切入前，不让 next/prev 从一首没播起来的
     /// 曲算起；已被用户切走则整体静默（连 Err 都不回）。
     ///
-    /// - `auto=true`（自然结束接力）：连续失败 +1，推「已跳过」提示后自动
-    ///   step 到下一首；累计 3 首发终态事件并返回 Err，停止接力。
-    /// - `auto=false`（手动点播）：推原始错误（不停服务），返回 Err 交回
-    ///   HTTP 调用方，由前端错误条引导重试。
+    /// 是否接着往下找由 [`PlayTrigger::skip_direction`] 决定：
+    /// - 接力（AutoNext）：任何失败都算这首跳过，连续 3 首发终态事件并返回 Err。
+    /// - 主动换曲（Step）：只有「这首本身放不了」才同方向继续找，跨过整支队列仍
+    ///   找不到才发终态事件；上游整体故障不试，免得一次限流烧穿整队。
+    /// - 点播（Pick）：推原始错误（不停服务），返回 Err 交回 HTTP 调用方，由前端
+    ///   错误条引导重试。
     async fn online_failed(
         &self,
         gen: usize,
         index: usize,
         track_id: String,
         prev_cursor: Option<usize>,
-        auto: bool,
+        trigger: PlayTrigger,
         e: crate::error::ApiError,
     ) -> Result<PlayOutcome, vmusic_core::CoreError> {
         // 所有在线播放失败的收口点：这一行就是「为什么这首没响」的答案。写在
@@ -1358,7 +1427,7 @@ impl AppState {
             idx = index,
             gen = gen,
             track = track_id,
-            auto = auto,
+            trigger = trigger.as_str(),
             code = e.code,
             source = e.source.clone().unwrap_or_default(),
             reason = e.message
@@ -1380,13 +1449,19 @@ impl AppState {
         }
         *self.cursor.lock().await = prev_cursor;
 
-        if auto {
+        if let Some(delta) = trigger.skip_direction(e.code) {
             let n = self.auto_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            // 起点锚在每轮的第一次失败时定下：那时 prev_cursor 指的是用户此刻真正在
+            // 听的那首。后面几次失败的 prev_cursor 已经是刚跳空的那首了。
+            if n == 1 {
+                *self.skip_walk_from.lock().await = prev_cursor;
+            }
             crate::diaglog!(
                 "play.skip",
                 idx = index,
                 gen = gen,
                 streak = n,
+                by = trigger.as_str(),
                 title = track_title(&track_id)
             );
             self.publish(WsEvent::Error {
@@ -1395,28 +1470,43 @@ impl AppState {
                 source: e.source.clone(),
                 index: None,
             });
-            if n >= 3 {
-                crate::diaglog!("play.streak_stop", streak = n, reason = "接力连续取流失败");
+            let cap = trigger.streak_cap(self.queue.lock().await.len());
+            if n >= cap {
+                crate::diaglog!(
+                    "play.streak_stop",
+                    streak = n,
+                    by = trigger.as_str(),
+                    reason = "连续取流失败，停止跳曲"
+                );
                 self.publish(WsEvent::Error {
                     message: "连续多首无法播放，已停止。可检查音源登录或网络后重试。".into(),
                     code: Some("online_unavailable_streak".to_string()),
                     source: e.source,
                     index: None,
                 });
+                // 放弃：游标还给还在播的那首，而不是最后一首跳空的。
+                let anchor = *self.skip_walk_from.lock().await;
+                *self.cursor.lock().await = anchor;
+                *self.skip_walk_from.lock().await = None;
                 return Err(vmusic_core::CoreError::NotFound(e.message));
             }
+            // 游标停在「这首」上再走一步：上面那行把它回滚成 prev_cursor 是有意的
+            // （放弃时不能从一首没播起来的曲算起），但跳过必须反过来——留着回滚就
+            // 等于「重试同一首三次」，接力与手动换曲都会卡在第一首都放不了的曲子前。
+            *self.cursor.lock().await = Some(index);
             drop(commit);
-            // 自动跳下一首（仍按当前模式 step；其成功提交会清零失败计数）。
-            // step → play_index_for → play_online → online_failed 与本函数构成
+            // 同方向再走一步（仍按当前模式 step；其成功提交会清零失败计数）。
+            // step_for → play_index_for → play_online → online_failed 与本函数构成
             // async 递归，future 尺寸无限；这一边必须 Box::pin 引入间接。
-            let _ = Box::pin(self.step(1, true)).await;
+            let _ = Box::pin(self.step_for(delta, trigger, None, None)).await;
             return Ok(PlayOutcome {
                 committed: false,
                 actual_quality: None,
             });
         }
 
-        // 手动点播：错误条带失败曲的队列下标，重试不再靠快照反查（修 I5）。
+        // 不跳的两种情况（点播，以及主动换曲撞上上游整体故障）：错误条带失败曲的
+        // 队列下标，重试不再靠快照反查（修 I5）。
         self.publish(WsEvent::Error {
             message: e.message.clone(),
             code: Some(e.code.to_string()),
@@ -1538,7 +1628,7 @@ impl AppState {
         self.set_buffering(false, None).await;
         drop(commit);
         if advance
-            && Box::pin(self.step_for(1, true, None, Some(reservation)))
+            && Box::pin(self.step_for(1, PlayTrigger::AutoNext, None, Some(reservation)))
                 .await
                 .is_ok()
         {
@@ -1550,15 +1640,34 @@ impl AppState {
     ///
     /// `auto` is true when the move comes from a track finishing rather than a
     /// button press: `RepeatOne` only repeats on auto, a user pressing "next"
-    /// always moves forward.
+    /// always moves forward. A failed play attempt is reported back as-is — use
+    /// [`Self::step_by_user`] for the 上一曲/下一曲 buttons, which keep looking.
     pub async fn step(&self, delta: isize, auto: bool) -> Result<(), vmusic_core::CoreError> {
-        self.step_for(delta, auto, None, None).await
+        self.step_for(
+            delta,
+            if auto {
+                PlayTrigger::AutoNext
+            } else {
+                PlayTrigger::Pick
+            },
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// 用户按「上一曲/下一曲」。和 [`Self::step`] 的差别只在失败处置：按下按钮要的
+    /// 是「换一首能播的」，所以撞上本身放不了的曲子（VIP、需登录、曲目已失效）会按
+    /// 同一方向继续找；上游整体不健康时不试，直接把错误交回去。
+    pub async fn step_by_user(&self, delta: isize) -> Result<(), vmusic_core::CoreError> {
+        self.step_for(delta, PlayTrigger::Step { delta }, None, None)
+            .await
     }
 
     async fn step_for(
         &self,
         delta: isize,
-        auto: bool,
+        trigger: PlayTrigger,
         ended: Option<(u64, Option<String>)>,
         reservation: Option<usize>,
     ) -> Result<(), vmusic_core::CoreError> {
@@ -1620,7 +1729,7 @@ impl AppState {
             (current as isize + delta).max(0) as usize
         } else {
             match mode {
-                PlayMode::RepeatOne if auto => current,
+                PlayMode::RepeatOne if trigger == PlayTrigger::AutoNext => current,
                 // Shuffle must move: picking the current index again would look
                 // like "next" did nothing. A pre-shuffled queue is one way to
                 // guarantee movement; excluding the current index is the minimal one.
@@ -1639,7 +1748,7 @@ impl AppState {
         };
 
         drop(commit);
-        self.play_index_for(next, Some(generation), auto)
+        self.play_index_for(next, Some(generation), trigger)
             .await
             .map(|_| ())
     }
@@ -1711,7 +1820,7 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                         // 成功（含失败后内部自动跳曲成功）后在接力入口做一次
                         // 后台预取 + LRU；每首成功播放恰好这一次。
                         match advance
-                            .step_for(1, true, Some((generation, track_id)), None)
+                            .step_for(1, PlayTrigger::AutoNext, Some((generation, track_id)), None)
                             .await
                         {
                             Ok(()) => advance.post_commit_background(),
@@ -1817,6 +1926,7 @@ pub(crate) mod tests {
             dsp: Mutex::new(DspConfig::from_settings(&Default::default())),
             keep: Default::default(),
             auto_failures: Default::default(),
+            skip_walk_from: Default::default(),
             quality: Default::default(),
             stage_beats: Default::default(),
             weak_self: Default::default(),
@@ -1840,7 +1950,12 @@ pub(crate) mod tests {
         state.audio.stop().await.unwrap();
         let generation = state.play_generation.load(Ordering::Relaxed);
         state
-            .step_for(1, true, Some((ended.generation, ended.track_id)), None)
+            .step_for(
+                1,
+                PlayTrigger::AutoNext,
+                Some((ended.generation, ended.track_id)),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(state.current_index().await, Some(0));
@@ -1856,7 +1971,12 @@ pub(crate) mod tests {
             .unwrap();
         state.audio.play().await.unwrap();
         state
-            .step_for(1, true, Some((stopped.generation, stopped.track_id)), None)
+            .step_for(
+                1,
+                PlayTrigger::AutoNext,
+                Some((stopped.generation, stopped.track_id)),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(state.audio.snapshot().track_id.as_deref(), Some("second"));
@@ -1870,7 +1990,7 @@ pub(crate) mod tests {
         let (generation, _, _) = state.set_queue(vec!["first".into()], Some(0)).await;
         state.set_queue(vec!["second".into()], Some(0)).await;
         let outcome = state
-            .play_index_for(0, Some(generation), false)
+            .play_index_for(0, Some(generation), PlayTrigger::Pick)
             .await
             .unwrap();
         assert!(!outcome.committed);
@@ -1926,5 +2046,37 @@ pub(crate) mod tests {
         }
         // A one-item queue has nowhere else to go; it must stay valid.
         assert_eq!(random_index(1, Some(0)), 0);
+    }
+
+    #[test]
+    fn a_user_step_walks_past_tracks_that_cannot_play() {
+        // 「这首本身放不了」才接着找，方向跟着按钮走。
+        for code in ["vip_required", "auth_required", "not_found"] {
+            assert_eq!(PlayTrigger::Step { delta: 1 }.skip_direction(code), Some(1));
+            assert_eq!(
+                PlayTrigger::Step { delta: -1 }.skip_direction(code),
+                Some(-1)
+            );
+        }
+        // 上游整体不健康时一首首试等于把整支队列烧穿一遍，错误直接交回调用方。
+        for code in ["upstream_rejected", "upstream_timeout", "upstream_error"] {
+            assert_eq!(PlayTrigger::Step { delta: 1 }.skip_direction(code), None);
+        }
+        // 点播停在原处；接力任何失败都跳（沿用既有策略）。
+        assert_eq!(PlayTrigger::Pick.skip_direction("vip_required"), None);
+        assert_eq!(
+            PlayTrigger::AutoNext.skip_direction("upstream_timeout"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn skip_runs_are_bounded_so_the_failure_recursion_terminates() {
+        assert_eq!(PlayTrigger::AutoNext.streak_cap(24), 3);
+        // 主动换曲最多把队列绕一圈；两首队里「坏+好」也必须能跳到那一首好的。
+        assert_eq!(PlayTrigger::Step { delta: 1 }.streak_cap(24), 24);
+        assert_eq!(PlayTrigger::Step { delta: 1 }.streak_cap(2), 2);
+        assert_eq!(PlayTrigger::Step { delta: -1 }.streak_cap(1), 1);
+        assert_eq!(PlayTrigger::Pick.streak_cap(24), 0);
     }
 }

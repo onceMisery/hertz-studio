@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 电影相机无头检查：
 //   1) 时间轴纯函数（外推时钟 / 重锚 / 单调游标 / seek 重定位 / 多拍取最强 / 包络）；

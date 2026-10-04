@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 在线音频缓存：音质/容器分键命名、旧名回退、LRU 淘汰、.part 清理。
 

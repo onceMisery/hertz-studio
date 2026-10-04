@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 
 //! 远程来源（WebDAV / HTTP 直链）。
 //!
@@ -232,7 +232,7 @@ pub async fn propfind(
         sub_path.trim_start_matches('/')
     );
     let client = reqwest::Client::builder()
-        .user_agent("mmusic-studio/0.1")
+        .user_agent("hertz-studio/0.1")
         .build()
         .map_err(|e| e.to_string())?;
     let mut req = client
@@ -282,7 +282,7 @@ impl HttpRangeStream {
     /// 只是 CBR mp3 这类容器拿不到精确时长。
     pub fn open(url: &str, auth: Option<&BasicAuth>) -> reqwest::Result<Self> {
         let client = reqwest::blocking::Client::builder()
-            .user_agent("mmusic-studio/0.1")
+            .user_agent("hertz-studio/0.1")
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
         let mut req = client.head(url);

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 mmusic-studio contributors
+// Copyright (c) 2026 hertz-studio contributors
 //
 // 皮肤：liunian（流年）—— DOM 重编排层（零依赖 IIFE）。
 //

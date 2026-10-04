@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2026 mmusic-studio contributors
+# Copyright (c) 2026 hertz-studio contributors
 
 [workspace]
 resolver = "2"
@@ -9,10 +9,10 @@ members = ["crates/*", "plugin/backend", "plugin/vendor/dbx-plugin-sdk"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-authors = ["mmusic-studio contributors"]
+authors = ["hertz-studio contributors"]
 description = "A local-first, self-hosted music service and player"
-homepage = "https://github.com/mmusic-studio/mmusic-studio"
-repository = "https://github.com/mmusic-studio/mmusic-studio"
+homepage = "https://github.com/onceMisery/hertz-studio"
+repository = "https://github.com/onceMisery/hertz-studio"
 
 [workspace.dependencies]
 # --- internal ---
