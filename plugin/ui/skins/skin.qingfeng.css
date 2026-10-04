@@ -618,7 +618,59 @@
   box-shadow: 0 0 0 1px var(--skin-line-soft);
   cursor: pointer;
   contain: layout paint;
-  transition: box-shadow 600ms var(--ease), filter 600ms var(--ease);
+  transition: box-shadow 600ms var(--ease), filter 600ms var(--ease),
+              transform 260ms var(--ease);
+  /* 平移/换源露出的新卡默认走一次轻上浮（从 0.94 缩放淡入），
+     不重播入场波 —— folia 的「pan 露出的卡不pop成整卡」。 */
+  animation: qf-rise 320ms var(--ease) backwards;
+}
+
+/* 入场波里的卡（开墙那一批）：从上方 90 世界单位落回格位，带一点
+   过冲（贝塞尔 y>1 读作「着落」），延时按到视口左上角的距离逐级展开，
+   由 JS 写进 --qf-land-delay。backwards 填充：等延时期间停在起点，
+   播完不驻留 —— 之后 hover 的 transform 才能接管。 */
+[data-skin="qingfeng"] .qf-poster.is-landing {
+  animation:
+    qf-land 720ms cubic-bezier(0.3, 1.28, 0.42, 1) backwards,
+    qf-land-fade 300ms ease-out backwards;
+  animation-delay: var(--qf-land-delay, 0s), var(--qf-land-delay, 0s);
+}
+
+@keyframes qf-land {
+  from { transform: translateY(-90px) scale(0.88); }
+}
+
+@keyframes qf-land-fade {
+  from { opacity: 0; }
+}
+
+@keyframes qf-rise {
+  from { opacity: 0; transform: scale(0.94); }
+}
+
+/* 退场波：反向于入场，卡片沿原路飞回去（folia 的退出反向波）。
+   both 填充：等延时期间保持隐形，播完停在隐形（root 由 JS 摘）。 */
+[data-skin="qingfeng"] .qf-lattice.is-closing {
+  pointer-events: none;
+  cursor: default;
+}
+
+[data-skin="qingfeng"] .qf-lattice.is-closing .qf-poster {
+  animation: qf-leave 280ms cubic-bezier(0.4, 0, 1, 1) both;
+  animation-delay: var(--qf-exit-delay, 0s);
+}
+
+@keyframes qf-leave {
+  to { transform: translateY(-90px) scale(0.88); opacity: 0; }
+}
+
+/* 展开让位：块内卡片的 left/top/width/height 只在这一小段时间带过渡
+   （滑到让位表的新格位），平时绝不能带 —— 平移写位置必须 1:1 跟手。 */
+[data-skin="qingfeng"] .qf-lattice.is-reflow .qf-poster {
+  transition: left 480ms var(--ease), top 480ms var(--ease),
+              width 480ms var(--ease), height 480ms var(--ease),
+              box-shadow 600ms var(--ease), filter 600ms var(--ease),
+              transform 260ms var(--ease);
 }
 
 [data-skin="qingfeng"] .qf-poster img {
@@ -647,6 +699,9 @@
 [data-skin="qingfeng"] .qf-poster:hover {
   z-index: 3;
   filter: saturate(1.08) brightness(1.05);
+  /* hover pop（folia 同款）：四条边各向外长出一个 GAP。系数由 JS 按卡
+     自身宽高写在 --qf-popx/--qf-popy —— 非方形卡也恰好各长出一格缝。 */
+  transform: scale(var(--qf-popx, 1), var(--qf-popy, 1));
 }
 
 /* 序号徽章：不用 backdrop-filter —— 每张卡一个模糊层会把整墙提升为
@@ -716,14 +771,18 @@
     0 0 0 4px var(--highlight),
     0 0 0 5px color-mix(in srgb, var(--bg) 38%, transparent),
     0 12px 32px color-mix(in srgb, var(--bg) 45%, transparent);
+  transform: scale(var(--qf-popx, 1), var(--qf-popy, 1));
 }
 
-/* 展开的大卡：占据中央，抬升 + 更大的投影 */
+/* 展开的大卡：占据中央，抬升 + 更大的投影。
+   transform 必须归位 —— 本条写在 :hover/.is-focused 之后，
+   展开卡不参与 pop（它已经是全场最大的那张）。 */
 [data-skin="qingfeng"] .qf-poster.is-expanded {
   z-index: 5;
   padding: 32px;
   box-shadow: 0 42px 110px color-mix(in srgb, var(--bg) 74%, transparent);
   filter: none;
+  transform: none;
   /* 底部留出控件条的高度：曲名是 flex-end 贴在底边的，控件条是
      bottom:28px 绝对定位，两片都锚底 → 不留就叠在一起
      （实测截图里曲名正压在暂停键与时长上）。 */
@@ -789,6 +848,23 @@
 
 [data-skin="qingfeng"] .qf-lattice.is-lights-out .qf-poster {
   transition: opacity 260ms var(--ease);
+}
+
+/* 减弱动效：入/退场波、上浮、让位滑移全部停用，位置与内容直接到位 */
+@media (prefers-reduced-motion: reduce) {
+  [data-skin="qingfeng"] .qf-poster,
+  [data-skin="qingfeng"] .qf-poster.is-landing,
+  [data-skin="qingfeng"] .qf-lattice.is-closing .qf-poster {
+    animation: none;
+  }
+  [data-skin="qingfeng"] .qf-lattice.is-reflow .qf-poster,
+  [data-skin="qingfeng"] .qf-poster {
+    transition: box-shadow 600ms var(--ease), filter 600ms var(--ease);
+  }
+  [data-skin="qingfeng"] .qf-poster:hover,
+  [data-skin="qingfeng"] .qf-poster.is-focused {
+    transform: none;
+  }
 }
 
 /* 海报墙上的播放控件 */

@@ -382,7 +382,7 @@ const { clickPoster } = require('./qf-wall-helpers.js');
       const b = document.querySelector('.qf-nav-icon');
       if (b && !window.__qfSkin.isWallOpen()) b.click();
     });
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(1300); // 等入场波播完再截（~1.1s），否则墙上卡片还没落定
     await page.screenshot({ path: path.join(OUT, `${name}.png`) });
     await page.keyboard.press('Escape');
     await page.waitForTimeout(350);

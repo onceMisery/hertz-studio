@@ -90,7 +90,21 @@ const ok = (cond, label, extra) => {
 
   console.log('打开海报墙');
   await page.click('.qf-nav-icon');
-  await page.waitForTimeout(1200);
+  // 入场波：在波的中段读（约 250ms）—— 卡片带着 is-landing 与逐级递增的
+  // 延时（左上角先落）；波播完后类还在但动画已结束，读了等于没读。
+  await page.waitForTimeout(250);
+  const wave = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll('.qf-poster.is-landing'));
+    const delays = cards.map((n) => parseFloat(getComputedStyle(n).animationDelay) || 0);
+    const midFlight = cards.filter((n) => Number(getComputedStyle(n).opacity) < 0.999).length;
+    return { landing: cards.length, staggered: delays.filter((d) => d > 0.05).length, midFlight };
+  });
+  ok(wave.landing > 0, '开墙有入场波（卡片带 is-landing）', `landing=${wave.landing}`);
+  ok(wave.staggered > 0, '入场波按距离逐级展开（延时不为零）', `staggered=${wave.staggered}`);
+  ok(wave.midFlight > 0, '波中段确有卡片还没落定（动画真的在播）', `midFlight=${wave.midFlight}`);
+  // 入场波窗口约 1.1s（延时 0.34s + 着落 0.72s），等波播完再量几何 ——
+  // 着落期间卡片带着 translateY/scale 变换，getBoundingClientRect 是歪的。
+  await page.waitForTimeout(1250);
 
   const wall = await page.evaluate(() => ({
     posters: document.querySelectorAll('.qf-poster').length,
@@ -99,14 +113,18 @@ const ok = (cond, label, extra) => {
   }));
   ok(wall.posters > 0 && !wall.empty, '渲染出海报', `posters=${wall.posters} count=${wall.count}`);
 
-  // 密排：相邻卡片的缝隙应等于 GAP×相机缩放（0~16px）。
-  // 两个坑：
-  //  1) 模板块是**大小混排**（folia-major 同构：3×2 / 6×4 / 1×8 都有），
-  //     所以相邻两张可能属于不同块、中间隔着整块。必须按 data-qf-key 分组，
-  //     只在同块内量，否则量到的是「块间距」几百上千 px。
-  //  2) 卡片尺寸由 JS 内联（world 是 absolute + 无尺寸，自身 rect 恒为 0），
-  //     所以「墙面尺寸」只能按海报的并集量，不能量 world。
-  const wall2 = await page.evaluate(() => {
+  // 密排：块内必须被卡片精确覆盖（允许 GAP 宽的缝，不允许更大的洞）。
+  // 块的完整矩形按相机矩阵**算出来**（不是从挂载卡的包围盒取 —— 展开卡
+  // 不在块中心，包围盒必然偏），只测完整落在扩边视口内的块：裁剪区比
+  // 视口四周各多 500px，这样的块所有卡一定都挂着。之前按「同一行相邻
+  // 卡片的间距」量 —— 大小混排的模板里同一 top 高度上两张卡中间隔着
+  // 别行的大卡，量出来几百 px 的假缝。
+  const coverage = await page.evaluate(() => {
+    const world = document.querySelector('.qf-lattice-world');
+    const m = new DOMMatrixReadOnly(getComputedStyle(world).transform);
+    const s = m.a;
+    const PITCH = 136, COLS = 12, ROWS = 8;
+    const toScreen = (wx, wy) => ({ x: wx * s + m.e, y: wy * s + m.f });
     const ps = Array.from(document.querySelectorAll('.qf-poster'));
     const byBlock = new Map();
     for (const n of ps) {
@@ -114,39 +132,42 @@ const ok = (cond, label, extra) => {
       if (!byBlock.has(key)) byBlock.set(key, []);
       byBlock.get(key).push(n.getBoundingClientRect());
     }
-    const gaps = [];
-    for (const rects of byBlock.values()) {
-      rects.sort((a, b) => a.top - b.top || a.left - b.left);
-      for (let i = 1; i < rects.length; i += 1) {
-        const a = rects[i - 1]; const b = rects[i];
-        if (Math.abs(a.top - b.top) < 4 && b.left > a.left) {
-          gaps.push(b.left - (a.left + a.width));
+    const MARGIN = 400; // < OVERSCAN(500)：块完整落在视口+400px 内则全部卡片已挂载
+    const STEP = 14;
+    const PAD = 12; // ≈ GAP(8 世界 px) × 0.76 缩放 + 余量
+    let blocks = 0;
+    let holes = 0;
+    for (const key of byBlock.keys()) {
+      const [bxs, bys] = key.split(':').map(Number);
+      const p0 = toScreen(bxs * COLS * PITCH, bys * ROWS * PITCH);
+      const p1 = toScreen((bxs + 1) * COLS * PITCH, (bys + 1) * ROWS * PITCH);
+      if (p0.x < -MARGIN || p0.y < -MARGIN || p1.x > window.innerWidth + MARGIN
+        || p1.y > window.innerHeight + MARGIN) continue;
+      blocks += 1;
+      const rects = byBlock.get(key);
+      for (let y = p0.y; y <= p1.y; y += STEP) {
+        for (let x = p0.x; x <= p1.x; x += STEP) {
+          const covered = rects.some((r) =>
+            x >= r.left - PAD && x <= r.right + PAD && y >= r.top - PAD && y <= r.bottom + PAD);
+          if (!covered) holes += 1;
         }
       }
     }
-    const all = ps.map((n) => n.getBoundingClientRect());
+    return { blocks, holes };
+  });
+  ok(coverage.blocks >= 1 && coverage.holes === 0,
+    '块内密排覆盖完整（无背景色洞）',
+    `${coverage.blocks} 个完整块，${coverage.holes} 个采样洞`);
+  // 墙要铺满视口：渲染实例里必须有相当一部分落在屏幕内（其余是 overscan 缓冲）
+  const span = await page.evaluate(() => {
+    const all = Array.from(document.querySelectorAll('.qf-poster')).map((n) => n.getBoundingClientRect());
+    const vis = all.filter((r) => r.right > 0 && r.left < window.innerWidth && r.bottom > 0 && r.top < window.innerHeight);
     const minL = Math.min(...all.map((r) => r.left));
     const maxR = Math.max(...all.map((r) => r.right));
-    const minT = Math.min(...all.map((r) => r.top));
-    const maxB = Math.max(...all.map((r) => r.bottom));
-    const cam = getComputedStyle(document.querySelector('.qf-lattice-world')).transform;
-    return {
-      gaps: gaps.length ? { min: +Math.min(...gaps).toFixed(1), max: +Math.max(...gaps).toFixed(1), n: gaps.length } : null,
-      blocks: byBlock.size,
-      span: { w: Math.round(maxR - minL), h: Math.round(maxB - minT) },
-      visible: ps.filter((n) => {
-        const r = n.getBoundingClientRect();
-        return r.right > 0 && r.left < window.innerWidth && r.bottom > 0 && r.top < window.innerHeight;
-      }).length,
-      cam,
-    };
+    return { visible: vis.length, w: Math.round(maxR - minL) };
   });
-  ok(wall2.gaps && wall2.gaps.min >= 0 && wall2.gaps.max < 16,
-    '块内密排缝隙正常（无背景色漏缝）',
-    wall2.gaps ? `${wall2.gaps.n} 条缝，${wall2.gaps.min}~${wall2.gaps.max}px（${wall2.blocks} 块）` : 'no rows');
-  // 墙要铺满视口：渲染实例里必须有相当一部分落在屏幕内（其余是 overscan 缓冲）
-  ok(wall2.visible >= 8, '墙铺满视口', `${wall2.visible} 张可见 / 跨度 ${wall2.span.w}×${wall2.span.h}`);
-  ok(wall2.span.w > 1440, '墙在宽度方向溢出（可循环平移）', `span.w=${wall2.span.w}`);
+  ok(span.visible >= 8, '墙铺满视口', `${span.visible} 张可见`);
+  ok(span.w > 1440, '墙在宽度方向溢出（可循环平移）', `span.w=${span.w}`);
 
   // 墙是全屏沉浸的：底层的悬浮主菜单 / 播放胶囊 / 头像组必须收掉。
   // 它们都是 fixed/z-index 浮在 .app 之上，不收就叠在海报墙上 ——
@@ -288,6 +309,39 @@ const ok = (cond, label, extra) => {
     '展开卡是 6×6 固定档（不是原格子尺寸）',
     exp.gear ? `${exp.gear.w}×${exp.gear.h}（原格 ${exp.gear.ow}×${exp.gear.oh}）` : 'n/a');
 
+  // 展开是「整块让位重排」，不是「大卡压住邻居」：
+  //   1) 展开卡与任何其它卡的矩形交叠面积必须≈0（folia 的块内重新咬合）；
+  //   2) 同块的邻居必须真的挪过窝（当前内联矩形 ≠ 建卡时的原始格位），
+  //      否则就是退化成叠罗汉。
+  const reflow = await page.evaluate(() => {
+    const e = document.querySelector('.qf-poster.is-expanded');
+    if (!e) return null;
+    const er = e.getBoundingClientRect();
+    const blockKey = (e.dataset.qfKey || '').split(':').slice(0, 2).join(':');
+    let overlapPx = 0;
+    let movedNeighbors = 0;
+    let neighbors = 0;
+    for (const n of document.querySelectorAll('.qf-poster')) {
+      if (n === e) continue;
+      const r = n.getBoundingClientRect();
+      const ox = Math.min(er.right, r.right) - Math.max(er.left, r.left);
+      const oy = Math.min(er.bottom, r.bottom) - Math.max(er.top, r.top);
+      if (ox > 2 && oy > 2) overlapPx = Math.max(overlapPx, Math.round(ox * oy));
+      if ((n.dataset.qfKey || '').split(':').slice(0, 2).join(':') === blockKey) {
+        neighbors += 1;
+        const base = JSON.parse(n.dataset.qfRect || '{}');
+        const now = { x: parseFloat(n.style.left), y: parseFloat(n.style.top) };
+        if (Math.abs(base.x - now.x) > 1 || Math.abs(base.y - now.y) > 1) movedNeighbors += 1;
+      }
+    }
+    return { overlapPx, movedNeighbors, neighbors };
+  });
+  ok(reflow && reflow.overlapPx === 0, '展开卡不压住任何邻居（让位重排生效）',
+    reflow ? `最大交叠 ${reflow.overlapPx}px²` : 'n/a');
+  ok(reflow && reflow.movedNeighbors > 0,
+    '同块邻居真的挪了窝（不是原格位叠在展开卡底下）',
+    reflow ? `${reflow.movedNeighbors}/${reflow.neighbors} 张移位` : 'n/a');
+
   // 曲名与控件条不许重叠：两片都锚在卡底（copy 靠 flex-end，
   // controls 是 bottom:28px 绝对定位），不各让一条就叠在一起。
   // 只有量真实几何才看得出 —— 截图里曲名正压在暂停键上，DOM 完好。
@@ -303,8 +357,10 @@ const ok = (cond, label, extra) => {
   });
   ok(collide && !collide.overlap, '曲名与播放控件不重叠',
     collide ? `曲名底 ${collide.titleBottom} / 控件顶 ${collide.ctlTop}` : 'n/a');
-  // 正在播放那张：createPoster 用 is-current（没有 is-playing 这个类）
-  ok(exp.currentCount === 1, '有且只有一张打了「正在播放」标记', `${exp.currentCount} 张`);
+  // 正在播放那张：createPoster 用 is-current（没有 is-playing 这个类）。
+  // 墙是循环铺满的（folia 同构），同一项的每个实例都标 is-current ——
+  // 关灯模式靠它留亮所有「正在播放」位，所以断言「至少一张」而不是「恰好一张」。
+  ok(exp.currentCount >= 1, '有海报打了「正在播放」标记（含循环实例）', `${exp.currentCount} 张`);
   await page.screenshot({ path: path.join(OUT, '04-lattice-expanded.png') });
 
   console.log('\n关灯 + 键盘');
@@ -329,7 +385,9 @@ const ok = (cond, label, extra) => {
   await page.screenshot({ path: path.join(OUT, '06-lattice-focus.png') });
 
   await page.keyboard.press('Escape');
-  await page.waitForTimeout(600);
+  // 退场波：root 要等反向波播完（延时 0.34s + 飞回 0.28s）才藏、海报才回收，
+  // isWallOpen/body 标记则是立即摘的 —— 所以这里等足 1s 再断言回收。
+  await page.waitForTimeout(1000);
   ok(await page.evaluate(() => !window.__qfSkin.isWallOpen()), 'Esc 退出海报墙');
   ok(await page.evaluate(() => !document.body.classList.contains('qf-lattice-open')), 'body 标记已摘');
   ok(await page.evaluate(() => document.querySelectorAll('.qf-poster').length === 0), '海报实例已回收');

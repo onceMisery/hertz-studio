@@ -1330,9 +1330,102 @@ function checkQingfengWall() {
   // 非当前项不给进度条：第二层（刚点开的歌单）拖了也不知道在拖谁。
   ok(/progress\.hidden = !\(tile && tile\.current\)/.test(qfCodeWall),
     '没在放的那张不给进度条');
-  ok(/function focusAndReveal/.test(qfCodeWall)
-    && /var visible = r\.right > 0 && r\.bottom > 0 && r\.left < vw && r\.top < vh;[\s\S]{0,120}?if \(!visible\) panTo\(el\)/.test(qfCodeWall),
-    '开墙/换源时保证聚焦的那张在视口内（否则第一张在视口外 = 一片空白）');
+
+  // 8a) 密排模板与让位表：folia 求解器产物的两份数据必须结构完好 ——
+  //     模板精确铺满 12×8；每张让位表精确铺满、被展开的槽位恰为 6×6。
+  //     数据坏一块，墙上就是背景色漏缝，或者展开卡直接压住邻居（那是旧观感，
+  //     folia 的展开是「整块重新咬合」，靠的就是这份数据可靠）。
+  const latticeArr = (name) => {
+    const i = qfCodeWall.indexOf('var ' + name + ' = ');
+    if (i < 0) return null;
+    const start = qfCodeWall.indexOf('[', i);
+    let depth = 0;
+    for (let k = start; k < qfCodeWall.length; k += 1) {
+      if (qfCodeWall[k] === '[') depth += 1;
+      else if (qfCodeWall[k] === ']') {
+        depth -= 1;
+        if (!depth) return eval('(' + qfCodeWall.slice(start, k + 1) + ')');
+      }
+    }
+    return null;
+  };
+  const coverErr = (tables, expectGear) => {
+    if (!Array.isArray(tables)) return '表缺失';
+    for (let t = 0; t < tables.length; t += 1) {
+      const rects = tables[t];
+      if (!Array.isArray(rects) || rects.length !== 12) return `表 ${t} 槽位数不对`;
+      const g = Array.from({ length: 8 }, () => new Array(12).fill(false));
+      for (const r of rects) {
+        for (let y = r[1]; y < r[1] + r[3]; y += 1) {
+          for (let x = r[0]; x < r[0] + r[2]; x += 1) {
+            if (y < 0 || y > 7 || x < 0 || x > 11) return `表 ${t} 越界 ${JSON.stringify(r)}`;
+            if (g[y][x]) return `表 ${t} 重叠 @${x},${y}`;
+            g[y][x] = true;
+          }
+        }
+      }
+      for (let y = 0; y < 8; y += 1) {
+        for (let x = 0; x < 12; x += 1) if (!g[y][x]) return `表 ${t} 漏缝 @${x},${y}`;
+      }
+      if (expectGear) {
+        // 传进来的是展平后的 48 张让位表：t 对应 模板 = t/12、槽位 = t%12。
+        const slot = t % 12;
+        if (rects[slot][2] !== 6 || rects[slot][3] !== 6) return `表 ${t} 展开档不是 6×6`;
+      }
+    }
+    return null;
+  };
+  const tplErr = coverErr(latticeArr('LATTICE_TEMPLATES'), false);
+  ok(tplErr === null, '密排模板精确铺满 12×8（每块 12 槽）', tplErr || '');
+  const reflows = latticeArr('LATTICE_REFLOWS');
+  const reflowErr = coverErr(
+    Array.isArray(reflows) ? reflows.reduce((all, perTemplate) => all.concat(perTemplate), []) : null,
+    true,
+  );
+  ok(reflowErr === null, '让位表精确铺满 12×8 且展开档恰为 6×6', reflowErr || '');
+  // 展开走让位表而不是「中心放大压邻居」；让位过渡挂 .is-reflow，
+  // 收起对称地滑回去。
+  ok(/function expandGear/.test(qfCodeWall) && /expandGear\(index\)/.test(qfCodeWall),
+    '展开按让位表重排整块（不是大卡压邻居）');
+  // 实例身份模型：节点与格位键绑定（folia 的 instanceId 同款），卡片内容
+  // 是格位的纯函数。按数组位置复用节点的话，平移一次窗口格位键整体错位，
+  // 展开卡会在下一次重绘时被拍到别人的格位上（实测 6×6 展开档变 2×2）。
+  ok(/nodeByKey\.get\(entries\[k\]\.key\)/.test(qfCodeWall)
+    && /nodeByKey\.set\(entry\.key, el\)/.test(qfCodeWall),
+    '海报按格位键控绑定（键控差量，不按数组位置复用）');
+  ok(/function tileForKey/.test(qfCodeWall) && /cellSlot % wall\.tiles\.length/.test(qfCodeWall)
+    && /function posterTile/.test(qfCodeWall),
+    '卡片内容是格位的纯函数（cellSlot 对项数取模），跨平移不漂移');
+  // 相机飞行途中挂载集必须跟着走：落地后窗口外是空的，且格位键会整体错位。
+  const panBody = /function panTo\([\s\S]{0,1200}?\n  \}/.exec(qfCodeWall);
+  ok(panBody && /renderWall\(\)/.test(panBody[0]),
+    '相机飞行逐帧重绘（挂载集跟相机走）');
+  ok(/function kickReflowTransition/.test(qfCodeWall) && /is-reflow/.test(QINGFENG),
+    '让位滑移由 .is-reflow 短暂挂类驱动（平移期间不能带过渡）');
+  // 入场波/退场波/轻上浮三段动画的接线齐全（CSS 负责动，JS 负责延时）。
+  ok(/ENTRANCE_WINDOW = \d+/.test(qfCodeWall) && /is-landing/.test(qfCodeWall)
+    && /--qf-land-delay/.test(qfCodeWall),
+    '开墙有入场波（延时按距离写在 --qf-land-delay）');
+  ok(/is-closing/.test(qfCodeWall) && /--qf-exit-delay/.test(qfCodeWall)
+    && /@keyframes qf-leave/.test(QINGFENG),
+    '关墙有反向退场波（延时取入场补数写在 --qf-exit-delay）');
+  ok(/@keyframes qf-land/.test(QINGFENG) && /@keyframes qf-rise/.test(QINGFENG),
+    '着落/上浮关键帧在 CSS 里');
+  ok(/--qf-popx/.test(qfCodeWall) && /transform: scale\(var\(--qf-popx/.test(QINGFENG),
+    'hover/focus 的 pop 系数按卡片尺寸算（四边各长出一个 GAP）');
+  // 换源必须重建海报：卡片内容与点击闭包是建卡时的快照，复用旧节点
+  // 会挂着上一个 tab 的歌（点击还会播错歌）。
+  ok(/function applySource\([\s\S]{0,900}?clearPosters\(\)/.test(qfCodeWall),
+    '换源时清空海报按新源重建（旧卡的内容/闭包是过期快照）');
+
+  // 开墙/换源时保证聚焦的那张在视口内（否则第一张在视口外 = 一片空白）。
+  // 墙是循环铺满的，同一项有很多实例：聚焦走「就近挑实例」（folia 的
+  // locateNearestInstance），实例不在挂载集就把相机瞬时对过去再渲染。
+  ok(/function focusAndReveal\([\s\S]{0,200}?focusQueueIndex\(index, false\)/.test(qfCodeWall),
+    '开墙/换源的定位走 focusQueueIndex（纯聚焦，不展开）');
+  ok(/function focusQueueIndex\([\s\S]{0,300}?locateNearestInstance\(qi, viewportCenterWorld\(\)\)/.test(qfCodeWall)
+    && /if \(!node\) \{[\s\S]{0,600}?applyCamera\(\);[\s\S]{0,120}?renderWall\(\)/.test(qfCodeWall),
+    '聚焦就近实例；不在挂载集就瞬时对位再渲染（保证可见）');
   // 不能把「保证可见」塞进 focusPoster：方向键每按一次就 panTo 一次，
   // 键盘导航会没法用。所以两条路径必须分开。
   //
@@ -1345,14 +1438,16 @@ function checkQingfengWall() {
   const fpPans = fp ? (fp[0].match(/panTo\(/g) || []).length : -1;
   ok(fp && fpPans === 1 && /if \(expand\) \{[\s\S]{0,400}?panTo\(el\);/.test(fp[0]),
     'focusPoster 的相机平移只在 expand 分支（展开卡要带进视口）');
-  ok(/function focusAndReveal\([\s\S]{0,300}?focusPoster\(index, false\)/.test(qfCodeWall),
-    'focusAndReveal 走纯聚焦 + 单独判可见性（方向键导航不能每步跳一次）');
+  // （focusAndReveal 的分工断言合并进上面两条 focusQueueIndex 断言。）
   // 展开新卡前必须先收起上一张。开墙时若源里有 current 项它已被展开
-  //（openWall 的 focusPoster(idx, true)），用户再点另一张若不收，
+  //（开墙的 focusQueueIndex），用户再点另一张若不收，
   // 墙上会同时铺着两张 6×6 展开档，且「展开的是哪一张」不再确定 ——
   // 浏览器实测就是querySelector 取到第一张（旧卡）而断言全红。
-  ok(/if \(wall\.expanded >= 0 && wall\.expanded !== index\) collapse\(true\);\s*\n\s*wall\.expanded = index;/.test(qfCodeWall),
-    '展开新卡前先收起上一张（否则同时铺着两张 6×6 展开档）');
+  // 键控差量下下标随重渲染漂移，收起守卫按**格位键**比较。
+  ok(/if \(wall\.expandedKey && wall\.expandedKey !== el\.dataset\.qfKey\) collapse\(true\);\s*\n\s*wall\.expanded = index;/.test(qfCodeWall),
+    '展开新卡前先收起上一张（按格位键，否则同时铺着两张 6×6 展开档）');
+  ok(/function collapse\(silent\) \{\s*\n\s*if \(!wall\.expandedKey\) return;\s*\n\s*var el = wall\.nodeByKey\.get\(wall\.expandedKey\);/.test(qfCodeWall),
+    '收起按格位键找节点（下标跨重渲染会漂移）');
   // Esc 分层退：第二层先退回列表，再按才关墙。
   ok(/if \(e\.key === 'Escape'\) \{[\s\S]{0,120}?if \(wall\.drill\) leaveDrill\(\);[\s\S]{0,80}?else closeWall\(\)/.test(qfCodeWall),
     'Esc 在第二层先退回歌单列表，再按才退出墙');

@@ -11,7 +11,9 @@
 //     改用**顶部居中胶囊主菜单**（歌单 / 电台 / 专辑 / 收藏 / 本地 + 队列拼接图标）；
 //   · 左上角在品牌旁挂一枚设置按钮（沿用顶栏既有的设置入口语义）；
 //   · 右下角新建「头像 + 箭头」控件：头像开登录，箭头跳舞台播放页；
-//   · 「队列拼接」是本皮肤的特色页：全屏海报墙，来源列循环铺满，中央一张展开大卡；
+//   · 「队列拼接」是本皮肤的特色页：全屏海报墙，12 槽密排地块循环铺满；
+//     开墙有一道从左上角涌进来的入场波，关墙反向退回；展开一张卡时
+//     整块「重新咬合」让出 6×6 档（模板与让位表取自 folia 的求解器数据）；
 //   · 「设置」不进中栏视图，而是把 #view-settings 搬进浮层（遮罩 + 卡片），
 //     浮层内再分「左栏两级分类 + 右栏内容」两栏；
 //   · 搜索留在顶栏右侧，播放条收成底部居中胶囊。
@@ -80,13 +82,23 @@
     field: null,
     open: false,
     tiles: [],        // 当前这一列的项（来源视图的，或第二层里那个歌单的）
-    posters: [],      // 当前挂载的海报 DOM
-    focused: -1,      // 键盘焦点所在的海报下标
-    expanded: -1,     // 展开档所在的下标
+    posters: [],      // 当前挂载的海报 DOM（渲染顺序，供方向键步进）
+    nodeByKey: null,  // 格位键 → 节点。节点与格位键控绑定，跨平移/重排不漂移
+    geo: null,        // cell 几何缓存（按 tiles.length 失效）
+    focused: -1,      // 键盘焦点所在 wall.posters 下标
+    focusedKey: '',   // 焦点节点的格位键（跨重渲染跟节点走）
+    expanded: -1,     // 展开档所在的下标（渲染时重建，仅作簿记）
+    expandedKey: '',  // 展开档的格位键 —— 跨重渲染跟节点走，收起按它找节点
     cam: { x: 0, y: 0, s: 1 },
     raf: 0,
     lightsOut: false,
     entranceDone: false,
+    entranceUntil: 0, // 入场波截止时刻（performance.now() 基准）；0 = 不在波内
+    // 展开让位表：海报键 'bx:by:slot' → 世界坐标矩形。展开期间这块的卡按它摆，
+    // 收起时置回 null。null = 没有展开档，全员原格位。
+    reflow: null,
+    closeTimer: 0,    // 退场波播完后的清理定时器（提前重开时要掐掉）
+    reflowTimer: 0,   // 让位过渡类的回收定时器
     // —— 按视图取源 ——
     // 每个 tab 的墙展示**那个 tab 的内容**：歌单页是歌单、电台页是在线曲库…
     // 播放队列 tab 仍然是队列（第 6 个来源）。取源走 qf:panel('source-request')，
@@ -131,12 +143,17 @@
   var PITCH = CELL + GAP;
   var BLOCK_COLS = 12;   // 一个密排地块 12 列
   var BLOCK_ROWS = 8;    // 8 行
-  var EXPAND_COLS = 6;   // 展开档 6×6 单元格 —— 只有这个尺寸有精确重排解
-  var EXPAND_ROWS = 6;
+  var LATTICE_SLOTS = 12; // 每个地块 12 个槽位（LATTICE_TEMPLATES 每行一张切法）
   var OVERSCAN = 500;    // 裁剪外扩的渲染余量
   var MAX_INSTANCES = 400;
+  // 入场波（folia 的 Metro 着陆）：卡片从上方 90 世界单位落回格位，延时按
+  // 「到视口左上角的曼哈顿距离」逐级展开；整波 ENTRANCE_WINDOW 后算结束，
+  // 之后平移/换源露出的新卡片只做一次轻上浮，不重播整波。
+  var ENTRANCE_LIFT = 90;   // 供注释对照，实际位移写在 CSS 的 @keyframes 里
   var ENTRANCE_STAGGER = 0.03;
   var ENTRANCE_MAX_DELAY = 0.34;
+  var ENTRANCE_WINDOW = 1100;
+  var REFLOW_ANIM_MS = 520; // 展开让位/收起的滑移时长（CSS .is-reflow 的过渡要与之同步）
 
   function $(sel, root) { return (root || document).querySelector(sel); }
   function byId(id) { return document.getElementById(id); }
@@ -351,29 +368,217 @@
   // 队列拼接：海报墙
   // -------------------------------------------------------------------------
 
-  /// 密排模板。folia 用 4 种基础块 + 4 种镜像 = 16 种朝向，按坐标哈希选取，
-  /// 避免整墙出现肉眼可见的重复周期。这里取同样的思路，但块型更简单：
-  /// 四个矩形切法 + 两种镜像。
-  var BLOCKS = [
-    // A：一整条 + 三分
-    [[0, 0, 12, 3], [0, 3, 5, 5], [5, 3, 4, 5], [9, 3, 3, 5]],
-    // B：中间大块 + 两侧条
-    [[0, 0, 4, 8], [4, 0, 7, 5], [4, 5, 7, 3], [11, 0, 1, 8]],
-    // C：2×2 主格 + 底部横条
-    [[0, 0, 6, 4], [6, 0, 6, 4], [0, 4, 8, 4], [8, 4, 4, 4]],
-    // D：竖三栏，高度错落
-    [[0, 0, 4, 6], [4, 0, 4, 8], [8, 0, 4, 5], [0, 6, 8, 2]],
+  /// 密排模板与展开让位表。从 folia-major 的 blockTemplates.ts / blockReflows.ts
+  /// 机械提取（生成脚本校验过：模板精确铺满 12×8；每张让位表精确铺满 12×8；
+  /// 被展开的槽位恰好是 6×6 档）。每块 12 槽、大小混排（2×2 到 6×4），
+  /// 比自造的四槽块密度高、节奏感强 —— 这就是 folia 墙面的观感来源。
+  var LATTICE_TEMPLATES = [
+    [[0,0,3,2], [3,0,6,4], [9,0,3,2], [0,2,3,2], [9,2,3,4], [0,4,4,4], [4,4,2,2], [6,4,3,2], [4,6,2,2], [6,6,2,2], [8,6,2,2], [10,6,2,2]],
+    [[0,0,2,3], [2,0,2,3], [4,0,2,3], [6,0,6,4], [0,3,6,2], [6,4,2,4], [8,4,2,4], [10,4,2,2], [0,5,2,3], [2,5,2,3], [4,5,2,3], [10,6,2,2]],
+    [[0,0,6,4], [6,0,6,3], [6,3,4,3], [10,3,2,2], [0,4,4,2], [4,4,2,2], [10,5,2,3], [0,6,2,2], [2,6,2,2], [4,6,2,2], [6,6,2,2], [8,6,2,2]],
+    [[0,0,2,2], [2,0,2,2], [4,0,4,3], [8,0,2,4], [10,0,2,4], [0,2,2,3], [2,2,2,2], [4,3,4,3], [2,4,2,2], [8,4,4,4], [0,5,2,3], [2,6,6,2]],
   ];
 
-  function blockCells(blockIndex, blockX, blockY) {
-    var tpl = BLOCKS[blockIndex % BLOCKS.length];
-    // 按块坐标做奇偶翻转：两种镜像足够打散周期，又不用维护 16 份模板。
-    if (((blockX + blockY) & 1) === 1) {
-      return tpl.map(function (r) {
-        return [BLOCK_COLS - r[0] - r[2], r[1], r[2], r[3]];
-      });
+    // // 下标 = [模板][被展开的槽位] → 该块 12 张卡在展开期间的位置（[x,y,cols,rows]）
+  var LATTICE_REFLOWS = [
+    [
+      [[0,0,6,6], [6,0,4,4], [10,0,2,2], [2,6,2,2], [10,2,2,4], [0,6,2,2], [4,6,2,2], [6,4,2,2], [6,6,2,2], [8,6,2,2], [8,4,2,2], [10,6,2,2]],
+      [[0,0,3,2], [3,0,6,6], [9,0,3,2], [0,2,3,2], [9,2,3,2], [0,4,3,2], [3,6,3,2], [6,6,2,2], [0,6,3,2], [8,6,2,2], [10,6,2,2], [9,4,3,2]],
+      [[0,0,3,2], [3,0,3,4], [6,0,6,6], [0,2,3,2], [10,6,2,2], [0,4,2,4], [4,4,2,2], [6,6,2,2], [4,6,2,2], [8,6,2,2], [2,6,2,2], [2,4,2,2]],
+      [[2,0,2,2], [4,0,6,2], [8,2,2,2], [0,2,6,6], [10,0,2,6], [0,0,2,2], [6,2,2,2], [6,4,2,2], [6,6,2,2], [8,6,2,2], [8,4,2,2], [10,6,2,2]],
+      [[0,0,3,2], [3,0,4,2], [10,0,2,2], [0,2,2,3], [6,2,6,6], [0,5,2,3], [2,4,2,2], [4,4,2,2], [4,6,2,2], [2,6,2,2], [7,0,3,2], [2,2,4,2]],
+      [[0,0,3,2], [5,0,4,2], [9,0,3,2], [3,0,2,2], [8,2,4,2], [0,2,6,6], [6,2,2,2], [6,4,2,2], [6,6,2,2], [8,4,2,4], [10,6,2,2], [10,4,2,2]],
+      [[0,0,4,2], [4,0,3,2], [9,0,3,2], [0,2,2,3], [10,2,2,2], [0,5,2,3], [4,2,6,6], [10,4,2,2], [2,6,2,2], [10,6,2,2], [7,0,2,2], [2,2,2,4]],
+      [[0,0,4,2], [4,0,4,2], [8,0,2,2], [0,2,2,3], [10,0,2,2], [0,5,2,3], [4,4,2,2], [6,2,6,6], [4,6,2,2], [2,6,2,2], [2,4,2,2], [2,2,4,2]],
+      [[0,0,4,2], [4,0,3,2], [9,0,3,2], [0,2,2,3], [10,2,2,2], [0,5,2,3], [2,2,2,4], [10,4,2,2], [4,2,6,6], [2,6,2,2], [10,6,2,2], [7,0,2,2]],
+      [[0,0,4,2], [4,0,4,2], [8,0,2,2], [0,2,2,3], [10,0,2,2], [0,5,2,3], [2,4,2,2], [4,4,2,2], [4,6,2,2], [6,2,6,6], [2,6,2,2], [2,2,4,2]],
+      [[0,0,4,2], [4,0,4,2], [8,0,2,2], [0,2,2,3], [10,0,2,2], [0,5,2,3], [2,4,2,2], [4,4,2,2], [4,6,2,2], [2,6,2,2], [6,2,6,6], [2,2,4,2]],
+      [[0,0,4,2], [4,0,4,2], [8,0,2,2], [0,2,2,3], [10,0,2,2], [0,5,2,3], [2,4,2,2], [4,4,2,2], [4,6,2,2], [2,6,2,2], [2,2,4,2], [6,2,6,6]],
+    ],
+    [
+      [[0,0,6,6], [6,0,2,2], [6,2,2,2], [8,0,4,4], [2,6,2,2], [6,4,2,4], [8,4,2,2], [10,4,2,2], [0,6,2,2], [4,6,2,2], [8,6,2,2], [10,6,2,2]],
+      [[0,0,2,3], [2,0,6,6], [8,2,4,2], [8,0,4,2], [0,3,2,2], [6,6,2,2], [8,4,2,4], [10,4,2,2], [0,5,2,3], [2,6,2,2], [4,6,2,2], [10,6,2,2]],
+      [[0,0,2,3], [2,0,2,3], [4,0,6,6], [10,0,2,4], [0,3,4,2], [6,6,2,2], [8,6,2,2], [10,4,2,2], [0,5,2,3], [2,5,2,3], [4,6,2,2], [10,6,2,2]],
+      [[0,0,2,3], [2,0,2,3], [4,0,2,4], [6,0,6,6], [0,3,4,2], [6,6,2,2], [8,6,2,2], [10,6,2,2], [0,5,2,3], [2,5,2,3], [4,6,2,2], [4,4,2,2]],
+      [[0,0,2,2], [2,0,2,2], [4,0,4,2], [8,0,4,4], [0,2,6,6], [6,4,2,2], [8,4,2,2], [10,4,2,2], [6,6,2,2], [6,2,2,2], [8,6,2,2], [10,6,2,2]],
+      [[0,0,2,4], [2,0,2,3], [4,0,4,2], [8,0,2,2], [2,3,2,2], [6,2,6,6], [4,4,2,2], [10,0,2,2], [0,4,2,4], [2,5,2,3], [4,6,2,2], [4,2,2,2]],
+      [[0,0,2,4], [2,0,2,3], [4,0,4,2], [8,0,2,2], [2,3,2,2], [4,4,2,2], [6,2,6,6], [10,0,2,2], [0,4,2,4], [2,5,2,3], [4,6,2,2], [4,2,2,2]],
+      [[0,0,2,4], [2,0,2,3], [4,0,4,2], [8,0,2,2], [2,3,2,2], [4,4,2,2], [4,6,2,2], [6,2,6,6], [0,4,2,4], [2,5,2,3], [4,2,2,2], [10,0,2,2]],
+      [[0,0,2,2], [4,0,2,2], [6,0,2,3], [8,0,4,4], [2,0,2,2], [6,6,2,2], [8,4,2,2], [10,4,2,2], [0,2,6,6], [6,3,2,3], [8,6,2,2], [10,6,2,2]],
+      [[0,0,2,2], [2,0,2,2], [4,0,4,2], [8,0,4,4], [0,2,2,2], [8,4,2,2], [8,6,2,2], [10,4,2,2], [0,6,2,2], [2,2,6,6], [0,4,2,2], [10,6,2,2]],
+      [[0,0,2,3], [2,0,2,4], [4,0,4,2], [8,0,4,2], [0,3,2,3], [2,4,2,2], [10,4,2,2], [10,2,2,2], [0,6,2,2], [2,6,2,2], [4,2,6,6], [10,6,2,2]],
+      [[0,0,2,4], [2,0,2,3], [4,0,4,2], [8,0,2,2], [2,3,2,2], [4,4,2,2], [4,6,2,2], [10,0,2,2], [0,4,2,4], [2,5,2,3], [4,2,2,2], [6,2,6,6]],
+    ],
+    [
+      [[0,0,6,6], [6,0,6,2], [8,2,2,4], [10,2,2,3], [0,6,2,2], [6,4,2,2], [10,5,2,3], [2,6,2,2], [4,6,2,2], [6,6,2,2], [8,6,2,2], [6,2,2,2]],
+      [[0,0,4,4], [6,0,6,6], [6,6,2,2], [8,6,2,2], [0,4,2,2], [4,4,2,2], [10,6,2,2], [0,6,2,2], [2,6,2,2], [4,6,2,2], [2,4,2,2], [4,0,2,4]],
+      [[0,0,4,4], [8,0,2,2], [6,2,6,6], [6,0,2,2], [0,4,2,2], [4,4,2,2], [10,0,2,2], [0,6,2,2], [2,6,2,2], [4,6,2,2], [2,4,2,2], [4,0,2,4]],
+      [[0,0,4,4], [8,0,2,2], [4,4,2,2], [6,2,6,6], [0,4,2,2], [4,2,2,2], [10,0,2,2], [0,6,2,2], [2,6,2,2], [4,6,2,2], [2,4,2,2], [4,0,4,2]],
+      [[2,0,4,2], [6,0,6,2], [6,4,2,2], [10,4,2,2], [0,2,6,6], [6,2,2,2], [10,6,2,2], [0,0,2,2], [6,6,2,2], [8,6,2,2], [8,4,2,2], [8,2,4,2]],
+      [[0,0,4,4], [8,0,2,2], [10,4,2,2], [10,2,2,2], [0,4,2,2], [4,2,6,6], [10,6,2,2], [0,6,2,2], [2,6,2,2], [2,4,2,2], [4,0,4,2], [10,0,2,2]],
+      [[0,0,4,4], [8,0,2,2], [4,4,2,2], [10,0,2,2], [0,4,2,2], [4,2,2,2], [6,2,6,6], [0,6,2,2], [2,6,2,2], [4,6,2,2], [2,4,2,2], [4,0,4,2]],
+      [[0,0,4,2], [6,0,6,2], [6,4,2,2], [10,2,2,3], [4,0,2,2], [6,2,2,2], [10,5,2,3], [0,2,6,6], [6,6,2,2], [8,6,2,2], [8,4,2,2], [8,2,2,2]],
+      [[0,0,6,2], [6,0,6,2], [8,4,2,2], [10,2,2,2], [0,4,2,2], [0,2,2,2], [10,6,2,2], [0,6,2,2], [2,2,6,6], [8,6,2,2], [8,2,2,2], [10,4,2,2]],
+      [[0,0,4,4], [8,0,2,2], [10,4,2,2], [10,2,2,2], [0,4,2,2], [2,4,2,2], [10,6,2,2], [0,6,2,2], [2,6,2,2], [4,2,6,6], [4,0,4,2], [10,0,2,2]],
+      [[0,0,4,4], [8,0,2,2], [4,4,2,2], [6,0,2,2], [0,4,2,2], [2,4,2,2], [10,0,2,2], [0,6,2,2], [2,6,2,2], [4,6,2,2], [6,2,6,6], [4,0,2,4]],
+      [[0,0,4,4], [8,0,2,2], [4,4,2,2], [4,0,4,2], [0,4,2,2], [4,2,2,2], [10,0,2,2], [0,6,2,2], [2,6,2,2], [4,6,2,2], [2,4,2,2], [6,2,6,6]],
+    ],
+    [
+      [[0,0,6,6], [6,2,2,2], [6,0,2,2], [8,0,2,6], [10,0,2,2], [0,6,2,2], [6,6,2,2], [6,4,2,2], [8,6,2,2], [10,2,2,6], [2,6,2,2], [4,6,2,2]],
+      [[0,0,2,2], [2,0,6,6], [8,0,2,3], [8,3,2,3], [10,0,2,4], [0,2,2,2], [6,6,2,2], [4,6,2,2], [8,6,2,2], [10,4,2,4], [0,4,2,4], [2,6,2,2]],
+      [[0,0,2,2], [2,0,2,3], [4,0,6,6], [10,0,2,2], [10,2,2,3], [0,2,2,2], [2,3,2,2], [4,6,6,2], [0,4,2,2], [10,5,2,3], [0,6,2,2], [2,5,2,3]],
+      [[0,0,2,2], [2,0,2,2], [4,0,2,4], [6,0,6,6], [7,6,2,2], [0,2,2,4], [2,2,2,2], [4,4,2,2], [2,4,2,4], [9,6,3,2], [0,6,2,2], [4,6,3,2]],
+      [[0,0,2,2], [2,0,2,2], [4,0,2,4], [7,6,2,2], [6,0,6,6], [0,2,2,4], [2,2,2,2], [4,4,2,2], [2,4,2,4], [9,6,3,2], [0,6,2,2], [4,6,3,2]],
+      [[3,0,2,2], [6,2,2,2], [5,0,2,2], [8,2,2,3], [9,0,3,2], [0,2,6,6], [7,0,2,2], [6,4,2,2], [8,5,2,3], [10,2,2,6], [0,0,3,2], [6,6,2,2]],
+      [[0,0,2,2], [2,0,2,2], [4,0,6,2], [8,2,2,2], [10,0,2,3], [0,2,2,3], [2,2,6,6], [8,4,2,2], [10,3,2,2], [10,5,2,3], [0,5,2,3], [8,6,2,2]],
+      [[0,0,2,3], [2,0,2,2], [4,0,3,2], [7,0,3,2], [10,0,2,6], [0,3,2,2], [2,2,2,2], [4,2,6,6], [2,4,2,2], [10,6,2,2], [0,5,2,3], [2,6,2,2]],
+      [[0,0,2,2], [2,0,2,2], [4,0,6,2], [8,2,2,2], [10,0,2,3], [0,2,2,3], [10,3,2,2], [8,4,2,2], [2,2,6,6], [10,5,2,3], [0,5,2,3], [8,6,2,2]],
+      [[0,0,2,2], [2,0,3,2], [5,0,3,2], [8,0,2,2], [10,0,2,2], [0,2,2,3], [2,2,2,2], [4,2,2,6], [2,4,2,2], [6,2,6,6], [0,5,2,3], [2,6,2,2]],
+      [[2,0,3,2], [6,2,2,2], [5,0,3,2], [8,0,4,3], [10,3,2,2], [0,0,2,2], [8,3,2,3], [6,4,2,2], [8,6,2,2], [10,5,2,3], [0,2,6,6], [6,6,2,2]],
+      [[0,0,2,2], [2,0,4,2], [6,0,2,2], [8,0,2,4], [10,0,2,3], [0,2,2,2], [0,4,2,2], [8,4,2,2], [10,3,2,3], [8,6,4,2], [0,6,2,2], [2,2,6,6]],
+    ],
+  ];
+
+  /// 朝向选择（folia 的 getBlockOrientation）：模板按 (列 + 行×2) 步进，
+  /// 保证相邻块不同型；镜像由坐标哈希挑选，整墙不出现肉眼可见的重复周期。
+  function mixBlockCoords(bx, by) {
+    var v = Math.imul(bx, 0x9e3779b1) ^ Math.imul(by, 0x85ebca6b);
+    v = Math.imul(v ^ (v >>> 15), 0x2c1b3c6d);
+    v ^= v >>> 12;
+    return v >>> 0;
+  }
+
+  function blockOrientation(lc, lr) {
+    var n = LATTICE_TEMPLATES.length;
+    var template = ((lc + lr * 2) % n + n) % n;
+    return template * 4 + (mixBlockCoords(lc, lr) % 4);
+  }
+
+  /// 镜像：mode 位 0 = 水平翻转，位 1 = 垂直翻转。翻转逐槽保持槽位顺序，
+  /// 所以一张卡在任意朝向下的槽位下标不变 —— 让位表才能按槽位对上。
+  function reflectRect(r, mode) {
+    var x = r[0], y = r[1];
+    if (mode & 1) x = BLOCK_COLS - x - r[2];
+    if (mode & 2) y = BLOCK_ROWS - y - r[3];
+    return [x, y, r[2], r[3]];
+  }
+
+  /// 朝向取自块在 **cell 内**的局部坐标（folia 同构）：cell 是重复周期单位，
+  /// 局部坐标定朝向，同一座位在每次周期重复里形状一致 ——
+  /// 「第 qi 项坐在哪」才是格位的纯函数（见 tileForKey / locateNearestInstance）。
+  function blockCells(bx, by) {
+    var g = getGeometry();
+    var lc = ((bx % g.perRow) + g.perRow) % g.perRow;
+    var lr = ((by % g.rows) + g.rows) % g.rows;
+    var o = blockOrientation(lc, lr);
+    var mode = o & 3;
+    return LATTICE_TEMPLATES[(o - mode) / 4].map(function (r) { return reflectRect(r, mode); });
+  }
+
+  /// 展开档让位表：展开 (bx,by) 块的第 slot 张时，全块 12 张卡各去哪。
+  /// 被展开的槽位恰好吃满 6×6 档，其余 11 张换小档把块重新铺满 ——
+  /// 块的占地不变，邻居块纹丝不动，卡片是「重新咬合」而不是被大卡压住。
+  function blockReflow(bx, by, slot) {
+    if (slot < 0 || slot >= LATTICE_SLOTS) return null;
+    var g = getGeometry();
+    var lc = ((bx % g.perRow) + g.perRow) % g.perRow;
+    var lr = ((by % g.rows) + g.rows) % g.rows;
+    var o = blockOrientation(lc, lr);
+    var mode = o & 3;
+    return LATTICE_REFLOWS[(o - mode) / 4][slot].map(function (r) { return reflectRect(r, mode); });
+  }
+
+  /// cell 几何：队列铺满一个 cell（perRow×rows 个地块）后周期重复。
+  /// perRow 按 folia 的 FIELD_ASPECT=2.2 取，让重复周期略呈横向。
+  function getGeometry() {
+    var n = wall.tiles.length || 1;
+    if (wall.geo && wall.geo.n === n) return wall.geo.g;
+    var blocks = Math.max(1, Math.ceil(n / LATTICE_SLOTS));
+    var perRow = blocks <= 1 ? 1
+      : Math.max(1, Math.round(Math.sqrt(2.2 * blocks * BLOCK_ROWS / BLOCK_COLS)));
+    var rows = Math.ceil(blocks / perRow);
+    wall.geo = {
+      n: n,
+      g: {
+        perRow: perRow,
+        rows: rows,
+        slots: perRow * rows * LATTICE_SLOTS,
+        w: perRow * BLOCK_COLS * PITCH,
+        h: rows * BLOCK_ROWS * PITCH,
+      },
+    };
+    return wall.geo.g;
+  }
+
+  /// 格位键 → 这一格显示哪一项。cellSlot 是格位在 cell 内的序号，对项数
+  /// 取模 —— 同一项在墙上出现多次、每次周期重复坐同一座位（folia 的
+  /// queueIndex = cellSlot % totalEntries）。
+  function tileForKey(key) {
+    var parts = String(key).split(':');
+    if (parts.length !== 3 || !wall.tiles.length) return null;
+    var g = getGeometry();
+    var bx = Number(parts[0]), by = Number(parts[1]), slot = Number(parts[2]);
+    var rx = Math.floor(bx / g.perRow), ry = Math.floor(by / g.rows);
+    var cellSlot = ((by - ry * g.rows) * g.perRow + (bx - rx * g.perRow)) * LATTICE_SLOTS + slot;
+    return wall.tiles[cellSlot % wall.tiles.length] || null;
+  }
+
+  /// 从海报节点取它那一项（节点与格位键控绑定，内容跨平移/跨重排不漂移）。
+  function posterTile(el) {
+    return el ? tileForKey(el.dataset.qfKey) : null;
+  }
+
+  /// 离世界点 pt 最近的、显示第 qi 项的实例（folia 的 locateNearestInstance）。
+  /// 一项在一个 cell 里可能坐多个座位（项数 < cell 槽位数时），每个座位
+  /// 各取离 pt 最近的周期重复，再取最近者。
+  function locateNearestInstance(qi, pt) {
+    var g = getGeometry();
+    var n = wall.tiles.length;
+    if (n <= 0 || qi < 0 || qi >= n) return null;
+    var best = null;
+    var bestD = Infinity;
+    for (var cellSlot = qi; cellSlot < g.slots; cellSlot += n) {
+      var blockInCell = Math.floor(cellSlot / LATTICE_SLOTS);
+      var lc = blockInCell % g.perRow;
+      var lr = Math.floor(blockInCell / g.perRow);
+      var slot = cellSlot % LATTICE_SLOTS;
+      var base = cellRect(lc, lr, blockCells(lc, lr)[slot]);
+      var rx = Math.round((pt.x - base.x - base.w / 2) / g.w);
+      var ry = Math.round((pt.y - base.y - base.h / 2) / g.h);
+      var dxx = base.x + rx * g.w + base.w / 2 - pt.x;
+      var dyy = base.y + ry * g.h + base.h / 2 - pt.y;
+      var d = dxx * dxx + dyy * dyy;
+      if (d < bestD) {
+        bestD = d;
+        best = {
+          key: (rx * g.perRow + lc) + ':' + (ry * g.rows + lr) + ':' + slot,
+          rect: { x: base.x + rx * g.w, y: base.y + ry * g.h, w: base.w, h: base.h },
+        };
+      }
     }
-    return tpl;
+    return best;
+  }
+
+  /// 视口中心的世界坐标。
+  function viewportCenterWorld() {
+    return {
+      x: ((window.innerWidth || 1280) / 2 - wall.cam.x) / wall.cam.s,
+      y: ((window.innerHeight || 800) / 2 - wall.cam.y) / wall.cam.s,
+    };
+  }
+
+  /// 视口的精确世界坐标范围（无外扩）。入/退场波的延时按它算 ——
+  /// 波是「从视口左上角涌进来」的，外扩的 OVERSCAN 不该参与延时。
+  function viewBounds() {
+    var vw = window.innerWidth || 1280;
+    var vh = window.innerHeight || 800;
+    var s = wall.cam.s;
+    return {
+      left: -wall.cam.x / s,
+      top: -wall.cam.y / s,
+      right: (vw - wall.cam.x) / s,
+      bottom: (vh - wall.cam.y) / s,
+    };
   }
 
   /// 墙的裁剪范围（世界坐标）。OVERSCAN 外扩保证平移时新格子已就位。
@@ -389,12 +594,32 @@
     };
   }
 
-  /// 一首歌在墙上出现很多次：队列去重后循环铺满。这就是 folia 的
-  /// 「队列不改变地块结构，只改变每格显示哪首歌」。
-  function tileFor(index) {
-    if (!wall.tiles.length) return null;
-    return wall.tiles[index % wall.tiles.length];
+  /// 一张海报在波里的延时：按格位到视口左上角的曼哈顿距离逐级展开
+  /// （folia 的 getEntranceDelay）—— 左上角先落，对角线方向涌过去。
+  function entranceDelayFor(rect) {
+    var b = viewBounds();
+    var steps = Math.max(0, rect.x - b.left) + Math.max(0, rect.y - b.top);
+    return Math.min(ENTRANCE_MAX_DELAY, (steps / PITCH) * ENTRANCE_STAGGER);
   }
+
+  /// 退场延时 = 入场延时取补数（folia 的 getExitDelay）：墙朝它进来的
+  /// 那个角反着清空，卡片沿原路飞回去。
+  function exitDelayFor(rect) {
+    return ENTRANCE_MAX_DELAY - entranceDelayFor(rect);
+  }
+
+  /// 海报此刻的世界坐标矩形（读内联样式 —— 那是相机变换前的坐标）。
+  function posterWorldRect(el) {
+    return {
+      x: parseFloat(el.style.left) || 0,
+      y: parseFloat(el.style.top) || 0,
+      w: parseFloat(el.style.width) || 0,
+      h: parseFloat(el.style.height) || 0,
+    };
+  }
+
+  /// 一首歌在墙上出现很多次：队列去重后按 cell 座位循环铺满（tileForKey）。
+  /// 这就是 folia 的「队列不改变地块结构，只改变每格显示哪首歌」。
 
   /// 墙顶的来源标签。歌单视图要点得进去，所以额外挂一个返回键。
   function paintSourceTag() {
@@ -568,6 +793,8 @@
         drag.moved = true;
         // 到这一步才确认是拖拽，此时捕获指针才是对的。
         try { field.setPointerCapture(e.pointerId); } catch (err) { /* 捕获失败不影响拖拽 */ }
+        // 拖拽一来就摘让位过渡：平移必须 1:1 跟手，不许被过渡拖尾。
+        if (wall.root) wall.root.classList.remove('is-reflow');
       }
       wall.cam.x = drag.cx + dx;
       wall.cam.y = drag.cy + dy;
@@ -587,6 +814,7 @@
     field.addEventListener('pointercancel', endDrag);
     field.addEventListener('wheel', function (e) {
       e.preventDefault();
+      if (wall.root) wall.root.classList.remove('is-reflow');
       wall.cam.y -= e.deltaY;
       applyCamera();
       renderWall();
@@ -612,6 +840,7 @@
     wall.root = root;
     wall.field = field;
     wall.world = world;
+    wall.nodeByKey = new Map();
 
     var saved = null;
     try { saved = localStorage.getItem(WALL_KEY); } catch (e) { saved = null; }
@@ -645,14 +874,21 @@
 
   function openWall() {
     if (wall.open) return;
+    // 上一次退场波还没播完就重开：掐掉清理定时器、摘退场标记，
+    // 这面墙从入场波重新开始，而不是接着残局。
+    if (wall.closeTimer) { clearTimeout(wall.closeTimer); wall.closeTimer = 0; }
+    if (wall.root) wall.root.classList.remove('is-closing');
     wall.open = true;
     wall.drill = null;
     wall.drillBusy = false;
     wall.drillError = '';
+    wall.reflow = null;
+    wall.entranceUntil = performance.now() + ENTRANCE_WINDOW;
     var src = requestSource();
     applySource(src);
     wall.focused = -1;
     wall.expanded = -1;
+    wall.expandedKey = '';
     wall.cam.s = wallScale();
     wall.cam.x = 34;
     wall.cam.y = 80;
@@ -661,12 +897,13 @@
     if (refs.wallBtn) refs.wallBtn.classList.add('is-active');
     applyCamera();
     renderWall();
-    // 自动聚焦到正在播放那张，墙一开就有主体。
-    // 歌单那一份没有「正在播放」的概念（歌单不是曲），聚焦第一张即可。
+    // 自动聚焦到正在播放那张，墙一开就有主体（就近挑实例，不长途飞行）。
+    // 歌单那一份没有「正在播放」的概念（歌单不是曲），聚焦第 0 项即可。
     var idx = wall.tiles.findIndex(function (t) { return t.current; });
-    if (idx >= 0) focusPoster(idx, true);
-    // 没有「正在播放」那张（歌单墙永远没有）时落到第一张，并**保证它在视口内** ——
-    // 密排下第一张可能整个在视口外，那样用户看到一片空白，以为墙没加载出来。
+    if (idx >= 0) focusQueueIndex(idx, true);
+    // 没有「正在播放」那张（歌单墙永远没有）时落到第 0 项，并**保证它在
+    // 视口内** —— 密排下它的格位可能整个在视口外，那样用户看到一片空白，
+    // 以为墙没加载出来。
     else if (wall.tiles.length) focusAndReveal(0);
   }
 
@@ -680,6 +917,11 @@
       ? wall.drill.name
       : ((src && src.label) || '');
     wall.emptyHint = (src && src.emptyHint) || '';
+    // 换源必须换内容：海报上的曲名/封面/点击闭包都是**建卡那一刻**抓的快照，
+    // 复用旧节点的话，切了 tab 墙上还挂着上一个 tab 的歌，点击还会播错歌。
+    // 密排的格位键（bx:by:slot）换源前后一模一样，diff 会把旧节点全留下
+    // —— 所以清空让 renderWall 按新源重建。
+    clearPosters();
     paintSourceTag();
     paintEmptyState();
   }
@@ -693,6 +935,7 @@
     wall.drillBusy = true;
     wall.drillError = '';
     wall.expanded = -1;
+    wall.expandedKey = '';
     // 先退到收起态再换列，否则展开档的尺寸会按新列的格位算错。
     collapse(true);
     wall.tiles = [];
@@ -755,6 +998,7 @@
     wall.drillBusy = false;
     wall.drillError = '';
     wall.expanded = -1;
+    wall.expandedKey = '';
     collapse(true);
     applySource(requestSource());
     wall.focused = -1;
@@ -769,9 +1013,32 @@
     wall.drill = null;
     wall.drillBusy = false;
     wall.drillError = '';
-    if (wall.root) wall.root.hidden = true;
     document.body.classList.remove('qf-lattice-open');
     if (refs.wallBtn) refs.wallBtn.classList.remove('is-active');
+    // 退场波：卡片按入场延时的补数依次飞回上去（folia 的退出反向波），
+    // 墙朝它进来的那个角清空。root 先留着，播完再藏再回收。
+    // reduced-motion 或墙上没卡（空态）时没必要演，直接收。
+    var reduced = false;
+    try { reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { /* 老内核 */ }
+    if (wall.root && wall.posters.length && !reduced) {
+      wall.posters.forEach(function (el) {
+        el.style.setProperty('--qf-exit-delay', exitDelayFor(posterWorldRect(el)).toFixed(3) + 's');
+      });
+      wall.root.classList.add('is-closing');
+      wall.closeTimer = setTimeout(finishWallClose, ENTRANCE_MAX_DELAY * 1000 + 420);
+    } else {
+      if (wall.root) wall.root.hidden = true;
+      clearPosters();
+    }
+  }
+
+  /// 退场波播完：藏 root、回收海报、摘标记。
+  function finishWallClose() {
+    wall.closeTimer = 0;
+    if (wall.root) {
+      wall.root.classList.remove('is-closing');
+      wall.root.hidden = true;
+    }
     clearPosters();
   }
 
@@ -784,6 +1051,19 @@
     if (!wall.world) return;
     wall.world.innerHTML = '';
     wall.posters = [];
+    if (wall.nodeByKey) wall.nodeByKey.clear();
+    wall.reflow = null;
+    wall.focused = -1;
+    wall.focusedKey = '';
+  }
+
+  /// 一张海报此刻该在的矩形：展开期间查让位表，其余时候是原格位。
+  function resolveRect(entry) {
+    if (wall.reflow) {
+      var r = wall.reflow.get(entry.key);
+      if (r) return r;
+    }
+    return entry.rect;
   }
 
   /// 重绘画布。只渲染落在裁剪区（含 OVERSCAN）里的格子，上限 MAX_INSTANCES ——
@@ -807,8 +1087,7 @@
 
     for (var by = b0y; by <= b1y && entries.length < MAX_INSTANCES; by += 1) {
       for (var bx = b0x; bx <= b1x && entries.length < MAX_INSTANCES; bx += 1) {
-        var blockIndex = Math.abs(bx * 7 + by * 13);
-        var cells = blockCells(blockIndex, bx, by);
+        var cells = blockCells(bx, by);
         for (var i = 0; i < cells.length && entries.length < MAX_INSTANCES; i += 1) {
           var r = cellRect(bx, by, cells[i]);
           if (r.x + r.w < b.left || r.x > b.right || r.y + r.h < b.top || r.y > b.bottom) continue;
@@ -817,27 +1096,42 @@
       }
     }
 
-    // 差量更新：键集合没变就只挪位置，全量重建会让每次平移都闪一下。
+    // 键控差量：节点与格位键绑定（folia 的 instanceId 同款）。平移时窗口
+    // 一端的键离开、另一端进来，各建各的、各删各的 —— 位置复用会让
+    // 「节点 ↔ 格位」错位，展开卡会在下一次重绘时被拍到别人的格位上。
     var seen = new Set();
+    var next = [];
     for (var k = 0; k < entries.length; k += 1) {
       seen.add(entries[k].key);
-      var node = wall.posters[k];
-      if (!node) node = createPoster(entries[k], k);
-      // 展开中的那张不能被 placePoster 拍回原尺寸 —— 平移/改窗口都会走到这里。
-      else if (!(node.classList.contains('is-expanded'))) placePoster(node, entries[k].rect);
-      node.dataset.qfKey = entries[k].key;
+      var node = wall.nodeByKey.get(entries[k].key);
+      if (!node) node = createPoster(entries[k]);
+      else placePoster(node, resolveRect(entries[k]));
+      next.push(node);
     }
-    for (var d = entries.length; d < wall.posters.length; d += 1) {
-      if (wall.posters[d] && wall.posters[d].parentNode) wall.posters[d].remove();
+    wall.nodeByKey.forEach(function (node, key) {
+      if (!seen.has(key)) {
+        node.remove();
+        wall.nodeByKey.delete(key);
+      }
+    });
+    wall.posters = next;
+    // 焦点跟节点（键控）走：重渲染后节点还在就更新下标，被平移出窗口
+    // 就当作失去焦点。
+    if (wall.focusedKey) {
+      wall.focused = -1;
+      for (var f = 0; f < next.length; f += 1) {
+        if (next[f].dataset.qfKey === wall.focusedKey) { wall.focused = f; break; }
+      }
+      if (wall.focused < 0) wall.focusedKey = '';
     }
-    wall.posters.length = entries.length;
     updatePeek();
   }
 
-  function createPoster(entry, index) {
-    var tile = tileFor(index);
+  function createPoster(entry) {
+    var tile = tileForKey(entry.key);
     var el = document.createElement('article');
     el.className = 'qf-poster';
+    el.dataset.qfKey = entry.key;
     if (tile && tile.current) el.classList.add('is-current');
     if (tile && tile.cover) {
       var img = document.createElement('img');
@@ -867,9 +1161,16 @@
     copy.appendChild(small);
     el.appendChild(copy);
 
-    placePoster(el, entry.rect);
-    // 存原始格位：展开档要按它居中，收起时要还原成它。
+    // 存原始格位（展开档以让位表为准，收起/校验回到它）。
     el.dataset.qfRect = JSON.stringify(entry.rect);
+    // 初次落位也要过 resolveRect：展开期间平移新露出的卡直接按让位表摆。
+    placePoster(el, resolveRect(entry));
+    // 入场波窗口内的卡按到视口左上角的距离依次落下（Metro 着陆）；
+    // 窗口外（平移/换源）露出的卡走 CSS 默认的一次轻上浮，不重播整波。
+    if (wall.open && performance.now() < wall.entranceUntil) {
+      el.classList.add('is-landing');
+      el.style.setProperty('--qf-land-delay', entranceDelayFor(entry.rect).toFixed(3) + 's');
+    }
 
     el.addEventListener('click', function (e) {
       // 展开态下点卡片本体是收起；控件区自己 stopPropagation 了。
@@ -884,7 +1185,7 @@
     });
 
     wall.world.appendChild(el);
-    wall.posters.push(el);
+    wall.nodeByKey.set(entry.key, el);
     return el;
   }
 
@@ -893,86 +1194,113 @@
     el.style.top = rect.y + 'px';
     el.style.width = rect.w + 'px';
     el.style.height = rect.h + 'px';
+    // hover/聚焦的「pop」放大系数：四条边各向外长出一个 GAP（folia 的
+    // popScale）。X/Y 独立算，非方形的卡也恰好各长出一格缝。
+    el.style.setProperty('--qf-popx', ((rect.w + GAP * 2) / rect.w).toFixed(4));
+    el.style.setProperty('--qf-popy', ((rect.h + GAP * 2) / rect.h).toFixed(4));
   }
 
-  /// 把某张卡放到「展开档」的尺寸与位置：6×6 单元格。
-  ///
-  /// 必须显式改尺寸，不能只加 .is-expanded 类：模板块是大小混排
-  /// （1×8 的竖条只有 128×1080 世界尺寸），只加类的话展开的仍是一条
-  /// 竖带 —— 曲名压住播放控件、控件挤在一条窄缝里。参考项目
-  /// （blockTemplates.ts 的 EXPANSION_SPAN）也是固定 6×6 档。
-  ///
-  /// 尺寸走内联 style（与 placePoster 同一套坐标），CSS 只管卡内排版。
-  function applyExpandGear(el, on) {
-    var base = el.dataset.qfRect;
-    if (!base) return;
-    var r = JSON.parse(base);
-    if (on) {
-      el.style.left = (r.x + (r.w - EXPAND_COLS * PITCH) / 2) + 'px';
-      el.style.top = (r.y + (r.h - EXPAND_ROWS * PITCH) / 2) + 'px';
-      el.style.width = EXPAND_COLS * PITCH - GAP + 'px';
-      el.style.height = EXPAND_ROWS * PITCH - GAP + 'px';
-    } else {
-      placePoster(el, r);
+  /// 按让位表展开一块：被点的卡吃到 6×6 档，同块其余 11 张换小档重新铺满，
+  /// 邻居块纹丝不动（folia 的 layoutExpandedBlock —— 「让位」而不是「压住」）。
+  /// 过渡靠 .is-reflow 短暂挂类：拖拽/滚轮一来就摘，平移必须 1:1 不许拖尾。
+  function kickReflowTransition() {
+    if (wall.reflowTimer) clearTimeout(wall.reflowTimer);
+    if (wall.root) wall.root.classList.add('is-reflow');
+    wall.reflowTimer = setTimeout(function () {
+      wall.reflowTimer = 0;
+      if (wall.root) wall.root.classList.remove('is-reflow');
+    }, REFLOW_ANIM_MS);
+  }
+
+  function expandGear(index) {
+    var el = wall.posters[index];
+    if (!el) return;
+    var m = /^(-?\d+):(-?\d+):(\d+)$/.exec(el.dataset.qfKey || '');
+    if (!m) return;
+    var reflow = blockReflow(Number(m[1]), Number(m[2]), Number(m[3]));
+    if (!reflow) return;
+    var map = new Map();
+    for (var i = 0; i < reflow.length; i += 1) {
+      map.set(m[1] + ':' + m[2] + ':' + i, cellRect(Number(m[1]), Number(m[2]), reflow[i]));
     }
+    wall.reflow = map;
+    kickReflowTransition();
+    renderWall();
+    buildPosterControls(el);
   }
 
   function focusPoster(index, expand) {
     if (index < 0 || index >= wall.posters.length) return;
     wall.focused = index;
+    wall.focusedKey = wall.posters[index].dataset.qfKey || '';
     wall.posters.forEach(function (n, i) { n.classList.toggle('is-focused', i === index); });
     if (expand) {
       // **先收起上一张**。开墙时若源里有 current 项，它已经被展开
-      // （openWall 里 focusPoster(idx, true)），用户再点另一张时若不收，
+      //（openWall 里 focusQueueIndex 的展开分支），用户再点另一张时若不收，
       // 墙上会同时铺着两张 6×6 展开档 —— 既视觉错乱（两张都在抢注意力），
       // 也让「展开的是哪一张」这件事变得不确定（querySelector 取到的是第一张）。
-      // 静默收起（不重绘）：列马上要按新卡重排。
-      if (wall.expanded >= 0 && wall.expanded !== index) collapse(true);
-      wall.expanded = index;
+      // 静默收起（不重绘）：列马上要按新卡重排。键控差量下 wall.expanded
+      // 的下标会随重渲染漂移，收起必须按**格位键**找节点。
       var el = wall.posters[index];
+      if (wall.expandedKey && wall.expandedKey !== el.dataset.qfKey) collapse(true);
+      wall.expanded = index;
+      wall.expandedKey = el.dataset.qfKey;
       el.classList.add('is-expanded');
-      applyExpandGear(el, true);
-      buildPosterControls(el, index);
+      expandGear(index);
       panTo(el);
     }
     // 浮条跟焦点走：歌单那列没有 current，不跟焦点就永远显示第一张。
     updatePeek();
   }
 
-  /// 聚焦某张并保证它在视口内。
+  /// 聚焦「显示第 qi 项」的那张，并保证它在视口内。
   ///
   /// 单独于 focusPoster 是因为**不能把这件事塞进 focusPoster**：
   /// 方向键移动焦点时每一步都 panTo 会让键盘导航没法用（每按一次就跳一次）。
   /// 只有「刚开墙 / 刚换源」这种一次性定位才需要。
   ///
-  /// 为什么需要：开墙时若没有「正在播放」那张（歌单墙永远没有、在放歌时
-  /// 当前曲也不一定在源里），就退到第一张 —— 而第一张的格位在密排布局里
-  /// 完全可能落在视口外，用户看到的是一片空白，还以为墙没加载出来。
-  function focusAndReveal(index) {
-    if (index < 0 || index >= wall.posters.length) return;
-    focusPoster(index, false);
-    var el = wall.posters[index];
-    if (!el) return;
-    var r = el.getBoundingClientRect();
-    var vw = window.innerWidth;
-    var vh = window.innerHeight;
-    // 已经有相当一部分在视口内就不动相机，免得每次开墙都来一次无谓的平移。
-    var visible = r.right > 0 && r.bottom > 0 && r.left < vw && r.top < vh;
-    if (!visible) panTo(el);
+  /// 为什么按**项**找而不是按下标：墙是循环铺满的，同一项有很多实例，
+  /// 就近挑一张（folia 的 locateNearestInstance）不用长途飞行；开墙时若
+  /// 没有「正在播放」（歌单墙永远没有），就退到第 0 项的最近实例 ——
+  /// 它的格位完全可能在视口外，那样用户看到的是一片空白，还以为墙没加载。
+  function focusQueueIndex(qi, expand) {
+    if (qi < 0 || !wall.open) return;
+    var inst = locateNearestInstance(qi, viewportCenterWorld());
+    if (!inst) return;
+    var node = wall.nodeByKey.get(inst.key);
+    if (!node) {
+      // 最近实例不在挂载集（OVERSCAN 之外）：把相机瞬间对过去再渲染。
+      // 开墙首聚焦走瞬时对位（folia 的 instant），不做飞行。
+      wall.cam.x = (window.innerWidth || 1280) / 2 - (inst.rect.x + inst.rect.w / 2) * wall.cam.s;
+      wall.cam.y = (window.innerHeight || 800) / 2 - (inst.rect.y + inst.rect.h / 2) * wall.cam.s;
+      applyCamera();
+      renderWall();
+      node = wall.nodeByKey.get(inst.key);
+    }
+    if (node) focusPoster(wall.posters.indexOf(node), expand);
   }
 
-  /// 收起展开档。silent = true 时不重绘画布（换列时用，列马上要重建）。
+  function focusAndReveal(index) {
+    focusQueueIndex(index, false);
+  }
+
+  /// 收起展开档，块内卡片滑回原格位。silent = true 时不重绘不过渡
+  /// （换列时用，列马上要重建）。
   function collapse(silent) {
-    if (wall.expanded < 0) return;
-    var el = wall.posters[wall.expanded];
+    if (!wall.expandedKey) return;
+    var el = wall.nodeByKey.get(wall.expandedKey);
+    wall.reflow = null;
+    wall.expanded = -1;
+    wall.expandedKey = '';
     if (el) {
       el.classList.remove('is-expanded');
-      applyExpandGear(el, false);
       var ctl = $('.qf-poster-controls', el);
       if (ctl) ctl.remove();
     }
-    wall.expanded = -1;
-    if (!silent) renderWall();
+    if (!silent) {
+      kickReflowTransition();
+      renderWall();
+    }
   }
 
   /// 相机飞过去把展开卡摆到视口中央。写 transform 而不是重排版，60fps 无压力。
@@ -1005,15 +1333,19 @@
       wall.cam.x = fromX + (targetX - fromX) * e;
       wall.cam.y = fromY + (targetY - fromY) * e;
       applyCamera();
+      // 挂载集必须跟相机走：飞行可能跨出 OVERSCAN，不跟的话落地后
+      // 窗口外是空的，下一次重绘还会把格位键整体错位（实测展开卡被
+      // 拍到别人的 2×2 格上）。键控差量每帧增量建/删，代价可控。
+      renderWall();
       if (t < 1) wall.raf = requestAnimationFrame(step);
       else wall.raf = 0;
     }
     wall.raf = requestAnimationFrame(step);
   }
 
-  function buildPosterControls(el, index) {
+  function buildPosterControls(el) {
     if ($('.qf-poster-controls', el)) return;
-    var tile = tileFor(index);
+    var tile = posterTile(el);
     var box = document.createElement('div');
     box.className = 'qf-poster-controls';
 
@@ -1132,7 +1464,8 @@
   /// 聚焦优先、没有聚焦才回落到 current，最后才是第一项。
   function updatePeek() {
     if (!refs.wallPeek) return;
-    var t = tileFor(wall.focused) || wall.tiles.find(function (x) { return x.current; }) || wall.tiles[0];
+    var t = posterTile(wall.posters[wall.focused])
+      || wall.tiles.find(function (x) { return x.current; }) || wall.tiles[0];
     if (!t) {
       refs.wallPeek.hidden = true;
       return;
@@ -1173,7 +1506,7 @@
     else if (e.key === 'ArrowLeft') { focusPoster(wall.focused - 1, false); e.preventDefault(); }
     else if (e.key === 'Enter' || e.key === ' ') {
       var at = wall.focused < 0 ? 0 : wall.focused;
-      var t = tileFor(at);
+      var t = posterTile(wall.posters[at]);
       e.preventDefault();
       // 歌单项：Enter 是「打开歌单」而不是展开卡片 —— 卡片里那个
       // 「打开歌单」按钮才是同一条路径，键盘与鼠标必须一致。
@@ -1549,6 +1882,7 @@
         applySource(requestSource());
         wall.focused = -1;
         wall.expanded = -1;
+    wall.expandedKey = '';
         renderWall();
         // 新来源没有「正在播放」可聚焦时，落在第一张，墙不至于空着没主体。
         if (wall.tiles.length) {
@@ -1647,6 +1981,10 @@
     if (wall.raf) { cancelAnimationFrame(wall.raf); wall.raf = 0; }
     clearTimeout(sheet.closeTimer);
     sheet.closeTimer = 0;
+    clearTimeout(wall.closeTimer);
+    wall.closeTimer = 0;
+    clearTimeout(wall.reflowTimer);
+    wall.reflowTimer = 0;
     document.body.classList.remove('qf-modal-open', 'qf-lattice-open');
     // 先把设置视图放回中栏原位（锚点在 column 里），再拆浮层，
     // 否则 removeBuilt 会连着搬过去的业务节点一起删掉。
@@ -1662,6 +2000,10 @@
     wall.field = null;
     wall.open = false;
     wall.posters = [];
+    if (wall.nodeByKey) wall.nodeByKey.clear();
+    wall.geo = null;
+    wall.focusedKey = '';
+    wall.reflow = null;
     sheet.root = null;
     sheet.card = null;
     sheet.viewEl = null;
