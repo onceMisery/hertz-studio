@@ -1208,6 +1208,14 @@ function checkQingfengChrome() {
 function checkQingfengWall() {
   section('清风：队列拼接海报墙');
 
+  // 剥掉注释的源码。**必须剥**：下面几条断言的说明文字里就写着
+  // paintEmptyState / emit('activate') / step(delta, tile) 这些字符串，
+  // 不剥的话断言匹配到自己写的注释，等于永远绿。
+  const qfCodeWall = stripJsComments(QINGFENG_JS);
+  // app.js 侧的按视图取源。同样要剥注释 —— 下面几条断言的说明文字里
+  // 就写着 viewSourceDef / sourceKey 这些标识符。
+  const qfApp = stripJsComments(APP);
+
   // 1) 墙的密排参数：与 CSS 的 --qf-cell / --qf-cell-gap 必须一致，
   //    两处写岔的表现是「卡片之间露出一条背景色的缝」。
   const cell = QINGFENG_JS.match(/var CELL = (\d+)/);
@@ -1246,11 +1254,14 @@ function checkQingfengWall() {
   ok(badgeRule && !/backdrop-filter/.test(badgeRule[1]),
     '序号徽章不用 backdrop-filter（否则每张卡一个合成层）');
 
-  // 6) 队列为空要有空态，不能是一片空白墙。
-  ok(/qf-lattice-empty/.test(QINGFENG_JS) && /队列是空的/.test(QINGFENG_JS),
-    '队列为空时有空态提示');
-  ok(/if \(refs\.wallEmpty\) refs\.wallEmpty\.hidden = true/.test(QINGFENG_JS),
-    '队列非空时空态被收起');
+  // 6) 墙为空要有空态，不能是一片空白墙。
+  //    注意：墙已经**不是播放队列专属**了 —— 每个 tab 的墙展示那个 tab 的
+  //    内容，空态文案也随之变化（歌单页说「还没有歌单」、队列页说
+  //    「队列是空的」），所以不能再钉死某一句文案，要钉「文案由来源决定」。
+  ok(/qf-lattice-empty/.test(QINGFENG_JS) && /function paintEmptyState/.test(QINGFENG_JS),
+    '墙为空时有空态提示，且文案随来源变化');
+  ok(/function paintEmptyState[\s\S]{0,900}?wall\.emptyHint/.test(qfCodeWall),
+    '空态用的是该来源自己的提示文案');
 
   // 7) 键盘：Esc 返回 / 方向键移焦点 / Enter 展开。
   const key = QINGFENG_JS.match(/function onWallKeydown[\s\S]{0,900}?\n  \}/);
@@ -1258,9 +1269,114 @@ function checkQingfengWall() {
   ok(key && /ArrowRight/.test(key[0]) && /ArrowLeft/.test(key[0]), '方向键移动焦点');
   ok(key && /'Enter'/.test(key[0]) && /' '/.test(key[0]), 'Enter / 空格 展开');
 
+  // 8b) 墙是**每个 tab 都有的**，展示那个 tab 的内容（不是只有播放队列）。
+  //     这组钉的是「按视图取源」这条设计：需求是这个功能的核心，
+  //     一旦退回成只服务播放队列，断言要能红。
+  ok(/function requestSource/.test(qfCodeWall) && /emit\('source-request'\)/.test(qfCodeWall),
+    '墙按当前视图取源（source-request），不是只读播放队列');
+  // 三个取源入口都必须走 requestSource。只钉 emit 存在是不够的 ——
+  // 把 openWall 里的调用换成 requestQueue()，emit 那个函数定义照样在，
+  // 断言照样绿，而墙实际已经退回只服务播放队列了。
+  for (const [fn, label] of [
+    ['openWall', '开墙'],
+    ['leaveDrill', '从歌单退回'],
+    ['reflowInner', '切 tab 换源'],
+  ]) {
+    const body = new RegExp(`function ${fn}\\([\\s\\S]{0,3000}?\\n  \\}`).exec(qfCodeWall);
+    ok(body && /requestSource\(\)/.test(body[0]), `${label}走 requestSource（按当前 tab 取源）`);
+  }
+  // 六个视图都要有源，少一个就有一个 tab 的墙是空的。
+  for (const k of ['library', 'online', 'playlists', 'daily', 'favorites', 'queue']) {
+    ok(new RegExp(`key: '${k}'`).test(qfApp), `viewSourceDef 覆盖 ${k}`);
+  }
+  ok(/label: '播放队列'/.test(qfApp) && /label: '歌单'/.test(qfApp),
+    '每个源都带来源名（墙上要标明自己在看哪一列）');
+  // 切 tab 时换源而不是关墙 —— 关掉的话这个功能就退化成
+  // 「只有队列 tab 有队列拼接」，正好是需求要避免的。
+  // **必须钉「换源那一行紧跟在 if (wall.open) 之后」**：
+  // 只测「文件里存在 applySource(requestSource())」会被 enterDrill 之外的
+  // 任意调用点满足，换成关墙照样全绿。
+  ok(/if \(wall\.open\) \{\s*\n\s*var wasDrill[\s\S]{0,700}?applySource\(requestSource\(\)\)/.test(qfCodeWall),
+    '墙开着切 tab 时换源，不关墙');
+  ok(!/if \(wall\.open\) \{ closeWall\(\); \}/.test(qfCodeWall),
+    '切 tab 没有把墙直接关掉（旧行为，已移除）');
+  // 换源前先退到第一层：第二层是「某个歌单里的歌」，跨 tab 留着就串味了。
+  ok(/if \(wall\.open\) \{[\s\S]{0,300}?wall\.drill = null;[\s\S]{0,300}?collapse\(true\)/.test(qfCodeWall),
+    '换源前先退回第一层（歌单里的歌不属于下一个 tab）');
+  // 歌单那列是两层：一张海报 = 一个歌单，点开看里面的歌而不是直接播。
+  ok(/function enterDrill/.test(qfCodeWall) && /function leaveDrill/.test(qfCodeWall),
+    '歌单墙有两层（enterDrill / leaveDrill）');
+  ok(/isPlaylist/.test(qfCodeWall) && /enterDrill\(tile\)/.test(qfCodeWall),
+    '歌单项点开走 enterDrill 而不是直接播');
+  // 钉死「卡片点击处理器里那一行」：只测文件里存在 enterDrill(tile) 的话，
+  // 把卡片点击改成 focusPoster 展开（= 直接播）也照样绿。
+  ok(/tile && tile\.isPlaylist\) \{\s*\n[\s\S]{0,300}?enterDrill\(tile\)/.test(qfCodeWall),
+    '歌单卡片点击确实进第二层');
+  // **pointerdown 里不许 setPointerCapture**。
+  //
+  // 捕获指针后 pointerup/click 会被重定向到捕获元素（field），
+  // 海报上的 click 处理器永远收不到 —— 用户在墙上点卡片就是没反应，
+  // 而且**不报任何错**。浏览器实测里只有 element.click()（不走捕获路径）
+  // 能展开，真实鼠标点击全部失效；两种结果不一致本身就是证据。
+  // 捕获必须推迟到 pointermove 越过拖拽阈值、确认是拖拽之后。
+  const dragBlock = /field\.addEventListener\('pointerdown',[\s\S]{0,800}?\n {4}\}\)/.exec(qfCodeWall);
+  ok(dragBlock && !/setPointerCapture/.test(dragBlock[0]),
+    'pointerdown 不捕获指针（捕获会把 click 重定向到 field，海报点不动）');
+  ok(/if \(!drag\.moved\) \{\s*\n\s*drag\.moved = true;[\s\S]{0,200}?setPointerCapture\(e\.pointerId\)/.test(qfCodeWall),
+    '指针捕获推迟到确认拖拽之后（纯点击全程不捕获）');
+  // 展开卡的主按钮对歌单是「打开歌单」而不是播放控件。
+  ok(/if \(tile && tile\.isPlaylist\) \{[\s\S]{0,600}?open\.className = 'qf-chrome-play is-labelled'/.test(qfCodeWall),
+    '歌单的展开卡是「打开歌单」而不是播放控件');
+  // 非当前项不给进度条：第二层（刚点开的歌单）拖了也不知道在拖谁。
+  ok(/progress\.hidden = !\(tile && tile\.current\)/.test(qfCodeWall),
+    '没在放的那张不给进度条');
+  ok(/function focusAndReveal/.test(qfCodeWall)
+    && /var visible = r\.right > 0 && r\.bottom > 0 && r\.left < vw && r\.top < vh;[\s\S]{0,120}?if \(!visible\) panTo\(el\)/.test(qfCodeWall),
+    '开墙/换源时保证聚焦的那张在视口内（否则第一张在视口外 = 一片空白）');
+  // 不能把「保证可见」塞进 focusPoster：方向键每按一次就 panTo 一次，
+  // 键盘导航会没法用。所以两条路径必须分开。
+  //
+  // 这里判的是**分工**而不是「函数里没有 panTo」—— focusPoster 在 expand
+  // 分支里调 panTo 是正确行为（展开卡必须带进视口），早先写成「整个函数
+  // 里不许出现 panTo」结果把那次合法调用也判红了。所以只钉两件事：
+  //   1. panTo 只出现在 expand 分支里，且全函数只有这一处；
+  //   2. focusAndReveal 走的是不展开的纯聚焦，可见性另行判断。
+  const fp = /function focusPoster\([\s\S]{0,600}?\n  \}/.exec(qfCodeWall);
+  const fpPans = fp ? (fp[0].match(/panTo\(/g) || []).length : -1;
+  ok(fp && fpPans === 1 && /if \(expand\) \{[\s\S]{0,400}?panTo\(el\);/.test(fp[0]),
+    'focusPoster 的相机平移只在 expand 分支（展开卡要带进视口）');
+  ok(/function focusAndReveal\([\s\S]{0,300}?focusPoster\(index, false\)/.test(qfCodeWall),
+    'focusAndReveal 走纯聚焦 + 单独判可见性（方向键导航不能每步跳一次）');
+  // 展开新卡前必须先收起上一张。开墙时若源里有 current 项它已被展开
+  //（openWall 的 focusPoster(idx, true)），用户再点另一张若不收，
+  // 墙上会同时铺着两张 6×6 展开档，且「展开的是哪一张」不再确定 ——
+  // 浏览器实测就是querySelector 取到第一张（旧卡）而断言全红。
+  ok(/if \(wall\.expanded >= 0 && wall\.expanded !== index\) collapse\(true\);\s*\n\s*wall\.expanded = index;/.test(qfCodeWall),
+    '展开新卡前先收起上一张（否则同时铺着两张 6×6 展开档）');
+  // Esc 分层退：第二层先退回列表，再按才关墙。
+  ok(/if \(e\.key === 'Escape'\) \{[\s\S]{0,120}?if \(wall\.drill\) leaveDrill\(\);[\s\S]{0,80}?else closeWall\(\)/.test(qfCodeWall),
+    'Esc 在第二层先退回歌单列表，再按才退出墙');
+  // 展开卡的控件：歌单那列不该跟曲共用「上一首/播放/下一首」——
+  // 歌单不是在放的曲，给那组控件用户会以为点播放能直接开播。
+  ok(/qf-chrome-play is-labelled/.test(qfCodeWall) && /打开歌单/.test(qfCodeWall),
+    '歌单的展开卡是「打开歌单」而不是播放控件');
+  // 墙上要标明来源，且来源名跟着 tab 变。
+  ok(/qf-lattice-tag/.test(qfCodeWall) && /qf-lattice-tag/.test(QINGFENG),
+    '墙上有来源标签（CSS 与 JS 两侧都在）');
+  ok(/WALL_TAB_LABELS/.test(qfCodeWall) && /qf-nav-icon-text/.test(qfCodeWall),
+    '入口按钮文案跟着 tab 变（不再固定叫「队列拼接」）');
+  // 每项都要自报 sourceKey：上一首/下一首要回**同一列**里取，
+  // 不能靠皮肤缓存的列表（那会和业务状态不一致）。
+  ok(/sourceKey/.test(qfApp) && /item\.sourceKey \? viewSourceDef\(item\.sourceKey\)/.test(qfApp),
+    '每项带 sourceKey，播放分派回同一列取');
+
   // 8) 播放路径只有一条：皮肤发意图，app.js 落 play。
-  ok(/emit\('play-index'/.test(QINGFENG_JS), '点播放发 play-index 意图');
-  ok(/emit\('play-step'/.test(QINGFENG_JS), '上一首/下一首发 play-step 意图');
+  //    这里刻意**不钉 play-index / play-step**：墙上的序号是**本视图**的下标，
+  //    而 play-index 按的是播放队列下标 —— 混用会播错歌。所以墙上走
+  //    activate（带整项），由 app.js 按 id 的种类分派。
+  ok(/emit\('activate'/.test(QINGFENG_JS), '点播放发 activate 意图（带整项，不靠下标猜）');
+  ok(/function step\(delta, tile\)[\s\S]{0,200}?emit\('activate', \{ item: tile, delta: delta \}\)/.test(qfCodeWall),
+    '上一首/下一首也走 activate + delta（同样不碰播放队列下标）');
   ok(/!transport\.post|transport\.post\(/.test(QINGFENG_JS) === false
     || !/transport\.post\('\/v1\/player/.test(QINGFENG_JS),
     '皮肤不自己发 /v1/player 请求（播放路径只有 app.js 一条）');
@@ -1290,6 +1406,12 @@ function checkQingfengWall() {
 
 function checkQingfengSettings() {
   section('清风：设置浮层（遮罩 / 两栏分类 / 可逆）');
+
+  // 剥掉注释的源码，后面多条断言都要用。
+  // **必须剥**：这些新断言的说明文字里就写着 paintEmptyState / emit('activate')
+  // 这些字符串，不剥的话断言会匹配到自己写的注释，等于永远绿。
+  const qfCode = stripJsComments(QINGFENG_JS);
+  const qfCodeWall = qfCode;
 
   // 1) 浮层结构：遮罩 + 卡片，卡片带 dialog 语义。
   ok(/make\('div', 'qf-modal-scrim', root\)/.test(QINGFENG_JS)
@@ -1446,9 +1568,7 @@ function checkQingfengSettings() {
   // claimGroups 是模块级函数，不是 sheet 的方法。写成 sheet.claimGroups()
   // 会 TypeError 并让整个 mount() 中途静默中断 —— 页面上表现为「主菜单在、
   // 海报墙和浮层都不存在」，不报任何错。
-  // 断言跑在剥掉注释的源码上：这个 bug 的说明文字里就写着 sheet.claimGroups()，
-  // 不剥注释的话断言会匹配到自己写的注释，等于永远绿。
-  const qfCode = stripJsComments(QINGFENG_JS);
+  // qfCode 见函数开头（剥注释的源码，供全函数复用）。
   // 认领必须走「文案 → 语义 key」这一层间接。byKey 的键是 .set-title 文案
   // （"界面皮肤"、"外观"…），SET_SECTIONS.items[0] 是语义 key（'skin'、'look'…），
   // 两套命名空间。直接 byKey[item[0]] 等于拿语义 key 查文案表，永远查不到 ——

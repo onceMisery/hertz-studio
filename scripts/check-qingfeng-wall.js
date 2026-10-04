@@ -12,6 +12,7 @@ const DATA_DIR = process.env.QF_DATA_DIR || path.join(os.tmpdir(), 'qf-data2');
 const TOKEN = fs.readFileSync(path.join(DATA_DIR, 'token'), 'utf8').trim();
 const OUT = path.resolve(__dirname, '..', 'output', 'qingfeng-verify');
 fs.mkdirSync(OUT, { recursive: true });
+const { clickPoster, clickFirstPoster } = require('./qf-wall-helpers.js');
 
 let failures = 0;
 const ok = (cond, label, extra) => {
@@ -35,6 +36,14 @@ const ok = (cond, label, extra) => {
 
   // 直接注入队列快照：走真实播放路径需要真实音频文件，
   // 这里要验的是墙的排版与交互，不是解码。
+  //
+  // 注入点是 **source-request**（不是旧的 queue-request）：墙现在按当前
+  // tab 取源，队列那一列走的也是 source-request，只是 kind==='queue'。
+  // 挂在 queue-request 上注入会完全不生效 —— 实测「注入64 项」而墙上0 张，
+  // 而页面不报错（事件没人监听而已）。
+  //
+  // 注入的项必须带 sourceKey/queueItem：播放分派靠这两个字段走路，
+  // 与真实 queueSnapshot() 的产物保持同一形状。
   const injected = await page.evaluate(() => {
     const fake = [];
     for (let i = 0; i < 64; i += 1) {
@@ -49,19 +58,35 @@ const ok = (cond, label, extra) => {
         current: i === 3,
         playing: i === 3,
         progress: 0.42,
+        sourceKey: 'queue',
+        queueItem: true,
       });
     }
     window.__qfProbeQueue = fake;
-    // 拦截 requestQueue 的数据源：把 emit 的 detail 换成假数据。
-    // 必须用冒泡阶段且在 app.js 之后注册 —— app.js 的监听器也会写
-    // detail.queue（真实快照），谁后跑谁赢。捕获阶段会排在它前面，
-    // 结果是被它覆盖掉，注入白做。
+    // 拦截取源结果：把 source.items 换成假数据，其余字段（key/label/kind）
+    // 保持 app.js 给的原样 —— 墙上要显示的来源名与按钮组都由它们决定。
+    //
+    // 必须用冒泡阶段且在 app.js 之后注册 —— app.js 的监听器先写 detail.source，
+    // 捕获阶段会排在它前面，结果是被覆盖掉，注入白做。
     document.addEventListener('qf:panel', (e) => {
-      if (e.detail && e.detail.action === 'queue-request') e.detail.queue = window.__qfProbeQueue;
+      const d = e.detail;
+      if (!d || d.action !== 'source-request') return;
+      if (!d.source || d.source.key !== 'queue') return;
+      d.source = { key: 'queue', label: d.source.label, kind: 'queue',
+        items: window.__qfProbeQueue, emptyHint: d.source.emptyHint };
     });
     return fake.length;
   });
   console.log(`注入队列：${injected} 项\n`);
+
+  // **先切到播放队列视图**：墙取的是**当前 tab** 的源（队列拼接是每个 tab
+  // 都有的），停在默认视图上注入 queue 的数据不会被取到 ——
+  // 实测「注入 64 项」而墙上0 张，页面不报错，只是源对不上。
+  await page.evaluate(() => {
+    const item = document.querySelector('.rail-item[data-view="queue"]');
+    if (item) item.click();
+  });
+  await page.waitForTimeout(500);
 
   console.log('打开海报墙');
   await page.click('.qf-nav-icon');
@@ -171,22 +196,41 @@ const ok = (cond, label, extra) => {
   await page.screenshot({ path: path.join(OUT, '03-lattice.png') });
 
   console.log('\n点开一张');
-  // 点「视口内最大的一张」：墙开了相机偏移后，第 N 张 DOM 节点完全可能在
-  // 屏幕外（DOM 顺序 ≠ 视觉顺序），按 nth 点会 timeout。
-  const target = await page.evaluate(() => {
-    const inView = Array.from(document.querySelectorAll('.qf-poster'))
+  // 挑要点的卡，有两条硬约束：
+  //
+  // 1. **排除已展开的那张**。开墙时若源里有 current 项，墙会自动把它展开
+  //（614×614，比任何普通格都大），而「视口内最大的一张」恰好就是它——
+  // 点下去走的是「点已展开的卡片 = 收起」那条分支，断言表现为
+  // 「点开了但没有 is-expanded」。要验的是「点未展开的 → 展开」。
+  // 2. **只要求中心点在视口内**，不要求四边都在。展开卡占住视口中心后，
+  // 密排的 lattice 里没有「四边完整可见」的其它卡了（实测 key=null）。
+  //
+  // 取多个候选交给 clickFirstPoster 挨个试：卡与卡之间没有空白，
+  // 中心点可能被展开卡盖住，那张要跳过而不是当成缺陷。
+  const targets = await page.evaluate(() => {
+    const cx0 = window.innerWidth / 2;
+    const cy0 = window.innerHeight / 2;
+    return Array.from(document.querySelectorAll('.qf-poster'))
       .filter((n) => {
+        if (n.classList.contains('is-expanded')) return false;
         const r = n.getBoundingClientRect();
-        return r.left > 0 && r.top > 0 && r.right < window.innerWidth && r.bottom < window.innerHeight;
+        const x = r.left + r.width / 2;
+        const y = r.top + r.height / 2;
+        return x > 0 && y > 0 && x < window.innerWidth && y < window.innerHeight
+          && Math.abs(x - cx0) + Math.abs(y - cy0) > 120; // 离视口中心远一点，别贴着展开卡
       })
       .sort((a, b) => {
         const ra = a.getBoundingClientRect(); const rb = b.getBoundingClientRect();
         return (rb.width * rb.height) - (ra.width * ra.height);
-      });
-    return inView.length ? inView[0].dataset.qfKey : null;
+      })
+      .slice(0, 8)
+      .map((n) => n.dataset.qfKey);
   });
-  ok(!!target, '视口内有可点的海报', `key=${target}`);
-  await page.click(`.qf-poster[data-qf-key="${target}"]`);
+  const alreadyExpanded = await page.evaluate(() => document.querySelectorAll('.qf-poster.is-expanded').length);
+  ok(targets.length > 0, '视口内有可点的海报（不含已展开的那张）',
+    `候选=${targets.length} 已展开=${alreadyExpanded}`);
+  const clicked = await clickFirstPoster(page, targets.map((k) => `.qf-poster[data-qf-key="${k}"]`));
+  console.log(`  （点的是 ${clicked.selector}，命中 ${clicked.hit}）`);
   await page.waitForTimeout(1000);
   const exp = await page.evaluate(() => {
     const e = document.querySelector('.qf-poster.is-expanded');
@@ -214,6 +258,10 @@ const ok = (cond, label, extra) => {
       isCurrent: e.classList.contains('is-current'),
       currentCount: document.querySelectorAll('.qf-poster.is-current').length,
       litCount: document.querySelectorAll('.qf-poster:not(.is-current)').length,
+      // 同时展开的张数。开墙时 current 那张已被展开，再点一张若不先收，
+      // 墙上会同时铺着两张 6×6 —— 而且下面这些断言 querySelector 取到的
+      // 是第一张（旧卡），红得莫名其妙。
+      expandedCount: document.querySelectorAll('.qf-poster.is-expanded').length,
       // 展开档：世界坐标尺寸（内联样式，未经相机缩放）× 缩放 = 屏幕尺寸
       gear: {
         w: Math.round((parseFloat(e.style.width) + 8) * 0.76),
@@ -224,6 +272,7 @@ const ok = (cond, label, extra) => {
     };
   });
   ok(exp.found, '点海报展开成大卡');
+  ok(exp.expandedCount === 1, '任一时刻只有一张展开档', `${exp.expandedCount} 张`);
   ok(exp.w > 260, '展开卡显著大于普通格', `${exp.w}×${exp.h}`);
   ok(exp.inView, '相机把展开卡完整带进视口',
     `rect=(${Math.round(exp.cx - exp.w / 2)},${Math.round(exp.cy - exp.h / 2)}) ${exp.w}×${exp.h}`

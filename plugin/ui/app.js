@@ -1483,6 +1483,7 @@ async function loadNowPlaying(id) {
             duration_ms: d.duration_ms || 0,
             cover: window.Online.safeCoverUrl(d.cover),
           });
+          if (window.Online && window.Online.remember) window.Online.remember(id, base);
           // 只在这首仍是当前曲目时重绘，避免切歌后把界面改错
           if (isCurrent() && state.current && state.current.id === id) {
             window.Online.paintNowPlaying(base, base.cover);
@@ -1795,6 +1796,69 @@ function pushStageQueue() {
   }));
 }
 
+/// 队列里解析不出来的行异步补详情：元数据快照只活在页面内存里，页面一重启
+/// （最小化关 tab、展开重开、刷新）队列就整片退化成「未知曲目」。当前曲早有
+/// 单首补详情（见 setTrack 的 online 分支），队列行此前没有——这里对缺元数据的
+/// id 走同一套 /v1/online/detail（本地 id 走 /v1/tracks/:id），补完重绘一次。
+/// 单飞 + 每次启动封顶三轮：源侧瞬时 502 时绝不能变成每几秒一轮的请求风暴
+/// （那会把 sidecar 的桥打瘫，整页跟着空白）。
+let queueMetaTimer = 0;
+let queueMetaInFlight = false;
+let queueMetaSweeps = 0;
+const QUEUE_META_MAX_SWEEPS = 3;
+function missingQueueIds() {
+  return state.queue.filter((id) => !state.byId.get(id) && !(window.Online && window.Online.getMeta(id)));
+}
+function scheduleQueueMetaResolve(delay) {
+  if (queueMetaInFlight || queueMetaSweeps >= QUEUE_META_MAX_SWEEPS || clearTimeout === undefined) return;
+  if (queueMetaTimer) return;
+  queueMetaTimer = setTimeout(() => {
+    queueMetaTimer = 0;
+    if (queueMetaInFlight || queueMetaSweeps >= QUEUE_META_MAX_SWEEPS) return;
+    if (!missingQueueIds().length) return;
+    queueMetaSweeps += 1;
+    queueMetaInFlight = true;
+    resolveQueueMissingMeta().then(() => { queueMetaInFlight = false; renderQueue(); }, () => { queueMetaInFlight = false; });
+  }, delay);
+}
+async function resolveQueueMissingMeta() {
+  const missing = missingQueueIds();
+  if (!missing.length) return;
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(4, missing.length) }, async () => {
+    while (cursor < missing.length) {
+      const id = missing[cursor++];
+      if (id.startsWith('online:')) {
+        const rest = id.slice('online:'.length);
+        const at = rest.indexOf(':');
+        if (at <= 0) continue;
+        const source = rest.slice(0, at);
+        const onlineId = rest.slice(at + 1);
+        const d = await transport
+          .get(`/v1/online/detail?source=${encodeURIComponent(source)}&id=${encodeURIComponent(onlineId)}`)
+          .catch(() => null);
+        if (!d) continue;   // 音源 offline / 曲目失效：行保留占位，徽标仍标得出来源
+        const meta = {
+          id, source, onlineId,
+          title: d.title || '在线曲目',
+          artist: d.artist || '',
+          album: d.album || '',
+          duration_ms: d.duration_ms || 0,
+          cover: window.Online ? window.Online.safeCoverUrl(d.cover) : null,
+        };
+        if (window.Online) window.Online.remember(id, meta);
+        state.byId.set(id, meta);
+      } else {
+        const t = await transport.get(`/v1/tracks/${id}`).catch(() => null);
+        if (t) state.byId.set(id, t);
+      }
+    }
+  });
+  await Promise.all(workers);
+  // 源侧瞬时 502（同一批 ref 隔几分钟又能解析）：失败的留给下一轮（封顶内）。
+  if (missingQueueIds().length) scheduleQueueMetaResolve(5000);
+}
+
 function renderQueue() {
   pushStageQueue();
   const list = state.queue;
@@ -1806,6 +1870,8 @@ function renderQueue() {
     ui.queueList.innerHTML = '<div class="hint">队列为空。点击曲目右侧的按钮可插入下一首。</div>';
     return;
   }
+  // 有缺元数据的行就排一次补取（单飞 + 每次启动封顶三轮，见 scheduleQueueMetaResolve）。
+  if (missingQueueIds().length) scheduleQueueMetaResolve(300);
   let dragId = null;
   list.forEach((id, index) => {
     // 队列里的曲目可能来自尚未加载的曲库分页；宁可显示占位行，也不要整行消失。
@@ -3986,7 +4052,21 @@ function initQingfengBridge() {
       if (window.__loadRemoteRoots) window.__loadRemoteRoots();
     } else if (d.action === 'queue-request') {
       d.queue = queueSnapshot();
+    } else if (d.action === 'source-request') {
+      // 按当前 tab 取源 —— 队列拼接墙的正式入口。
+      // 保留 queue-request 是因为播放队列 tab 走的就是它（kind==='queue'，
+      // 那一路的项带 queueItem 标记，播放分派与原逻辑逐字一致）。
+      d.source = viewSnapshot();
+    } else if (d.action === 'activate') {
+      activateSourceItem(d.item);
+    } else if (d.action === 'playlist-drill') {
+      // 歌单墙的第二层：取数，不播。异步，所以这里只发起、把 promise 交回去，
+      // 皮肤那边自己管 loading / 失败提示。
+      d.result = window.OnlinePlaylists && window.OnlinePlaylists.drillTracks
+        ? window.OnlinePlaylists.drillTracks(d.source, d.playlistId)
+        : Promise.resolve({ error: '歌单展开功能还没准备好' });
     } else if (d.action === 'play-index') {
+      // 队列语义：按播放队列下标。只有播放队列 tab 会发这个。
       playQueueIndex(d.index);
     } else if (d.action === 'play-step') {
       playQueueStep(d.delta);
@@ -4026,18 +4106,397 @@ function queueSnapshot() {
       id,
       index,
       badge: index + 1,
+      sourceKey: 'queue',
       title: track.title || '未知曲目',
       artist: track.artist || '未知艺术家',
       duration: duration || null,
       cover,
       current,
       playing: current && state.snapshot.playing,
+      // 播放队列这一份要按**队列下标**播，不能走 playSourceItem 那套
+      // 「看 id 猜来源」的分派 —— 队列里既有本地 id 也可能有 online: 前缀的
+      // 失效项（playQueueIndex 见到它会提示重新点播），语义与墙上来源无关。
+      queueItem: true,
       // 海报墙内的进度条：按已播时长 / 总时长算，没有总时长就不给。
       progress: current && duration
         ? Math.max(0, Math.min(1, (state.snapshot.position_ms || 0) / duration))
         : 0,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// 队列拼接的「按视图取源」
+//
+// 需求：**每个 tab 的墙展示那个 tab 的内容** —— 歌单页是歌单、电台页是在线曲库、
+// 本地页是曲库、每日推荐是当天的推荐、收藏是收藏列表；播放队列 tab 仍是队列
+// （第 6 个来源，保留原行为）。
+//
+// 为什么在这里做而不是让皮肤自己去读：各视图的数据分散在五个模块的闭包里
+// （Online.onlineState、DailyView.st、OnlinePlaylists 私有 state、
+//  Favorites.favState、app 自己的 state），每份形状与 id 体系都不一样
+// （本地 id / online: 虚拟 id / 歌单 ref）。皮肤层逐个去摸会把这些内部结构
+// 全绑死，业务任一处改形状皮肤就跟着坏。收敛成一份统一形状的快照，
+// 皮肤只认 {key,label,kind,items} 这一个契约。
+//
+// 统一项形状：{id,index,badge,title,artist,duration,cover,current,playing,progress}
+// 再加供播放分派用的 ref/source/playlistId/raw。index/badge/current/playing 是
+// **这个源里的位置**，与播放队列无关 —— 墙上的序号永远是「本视图第几项」。
+// ---------------------------------------------------------------------------
+
+/// 单个视图的取源器。kind 决定墙上点一下怎么落播放：
+///   'queue'     播放队列（本地 id，play-index 走 /v1/player/load）
+///   'track'     一列普通曲目（本地或在线都能混，交给各自的播放入口）
+///   'playlist'  一列**歌单**（点开不是播放，是进歌单内的曲目，见 drillIntoPlaylist）
+function viewSourceDef(view) {
+  return {
+    library: {
+      key: 'library',
+      label: '本地曲库',
+      kind: 'track',
+      items: () => state.tracks.map((track, i) => localSourceItem(track, i)),
+    },
+    online: {
+      key: 'online',
+      label: '在线曲库',
+      kind: 'track',
+      items: () => (window.Online ? window.Online.state.tracks : []).map((t, i) => onlineSourceItem(t, i)),
+    },
+    playlists: {
+      key: 'playlists',
+      label: '歌单',
+      // 歌单视图的墙上是**歌单本身**，不是歌单里的歌。所以 kind 是 playlist：
+      // 点开进第二层，而不是直接播 —— 直接播用户根本看不到里面有哪些歌。
+      kind: 'playlist',
+      items: () => playlistSourceItems(),
+    },
+    daily: {
+      key: 'daily',
+      label: '每日推荐',
+      kind: 'track',
+      items: () => dailySourceItems(),
+    },
+    favorites: {
+      key: 'favorites',
+      label: '我的收藏',
+      kind: 'track',
+      items: () => favoriteSourceItems(),
+    },
+    queue: {
+      key: 'queue',
+      label: '播放队列',
+      kind: 'queue',
+      items: () => queueSnapshot(),
+    },
+  }[view] || null;
+}
+
+/// 当前视图的源快照。皮肤发 qf:panel('source-request') 过来要这个。
+function viewSnapshot() {
+  const def = viewSourceDef(state.view);
+  if (!def) return { key: '', label: '', kind: 'track', items: [], emptyHint: '' };
+  let items = [];
+  try {
+    items = def.items() || [];
+  } catch (err) {
+    // 取源失败不该让整面墙空掉还报成一片白。给个空源 + 提示，墙上显示空态
+    // 文案，用户知道是没内容而不是崩了。取值器都只读内存，正常不会抛 ——
+    // 这层是兜底，不是常规路径。
+    items = [];
+  }
+  return {
+    key: def.key,
+    label: def.label,
+    kind: def.kind,
+    items,
+    emptyHint: sourceEmptyHint(def.key),
+  };
+}
+
+function sourceEmptyHint(key) {
+  return {
+    library: '曲库还是空的，先去「本地」导入音乐',
+    online: '在线曲库还没有内容，试试搜索或换个分类',
+    playlists: '还没有歌单。在歌单页新建一个，或去在线曲库收藏几张',
+    daily: '今天的推荐还没加载出来，稍等一下',
+    favorites: '还没有收藏。点曲库或在线结果里的红心加进来',
+    queue: '队列是空的，先在任意列表里加几首歌',
+  }[key] || '这里还没有内容';
+}
+
+/// 本地曲库项。state.tracks 的元素就是曲库元数据，id 是本地 id。
+function localSourceItem(track, index, sourceKey) {
+  const current = track.id === state.snapshot.track_id;
+  const duration = Number(track.duration_ms) || 0;
+  return {
+    id: track.id,
+    sourceKey: sourceKey || 'library',
+    source: 'local',
+    ref: track.id,
+    index,
+    badge: index + 1,
+    title: track.title || '未知曲目',
+    artist: track.artist || '未知艺术家',
+    duration: duration || null,
+    cover: track.has_cover ? transport.coverUrl(track.id) : null,
+    current,
+    playing: current && state.snapshot.playing,
+    progress: current && duration
+      ? Math.max(0, Math.min(1, (state.snapshot.position_ms || 0) / duration))
+      : 0,
+  };
+}
+
+/// 在线曲库项。在线曲目是**虚拟 id**（online: 前缀），不在本地库里，
+/// 播放只能走 Online.playAll，喂 /v1/player/load 会 404。
+function onlineSourceItem(t, index, sourceKey) {
+  const Online = window.Online;
+  const id = onlineItemId(t);
+  const current = id === state.snapshot.track_id;
+  const duration = Number(t.duration_ms) || 0;
+  return {
+    id,
+    sourceKey: sourceKey || 'online',
+    source: t.source || (Online ? Online.state.source : 'netease'),
+    ref: t.ref || t.track_ref || {},
+    // 整条原始记录留给播放侧 —— playAll 要 id/artist/album/duration/cover 全套，
+    // 快照里只留海报要显示的字段。
+    raw: t,
+    index,
+    badge: index + 1,
+    title: t.title || '未知曲目',
+    artist: t.artist || '未知艺术家',
+    duration: duration || null,
+    cover: Online ? Online.safeCoverUrl(t.cover || null) : null,
+    current,
+    playing: current && state.snapshot.playing,
+    progress: current && duration
+      ? Math.max(0, Math.min(1, (state.snapshot.position_ms || 0) / duration))
+      : 0,
+  };
+}
+
+/// 在线虚拟 id。online.js 的 virtualId 是闭包私有函数，这里不能直接调，
+/// 只能按它的规则重算一遍 —— 规则变了两边会不一致，所以 check-skins.js
+/// 钉住了这条表达式。
+function onlineItemId(t) {
+  if (t.id && String(t.id).startsWith('online:')) return String(t.id);
+  const src = t.source || 'netease';
+  const ref = t.ref || t.track_ref || t.id;
+  const key = typeof ref === 'string' ? ref : (ref && (ref.id || ref.song_id)) || t.id;
+  return 'online:' + src + ':' + key;
+}
+
+/// 每日推荐项。已按当前 mode（online/local）选源并截断到 LIMIT。
+function dailySourceItems() {
+  const DV = window.DailyView;
+  if (!DV || !DV.state) return [];
+  const page = DV.state.mode === 'online' ? DV.state.online : DV.state.local;
+  const list = (page && page.tracks ? page.tracks : []).slice(0, 30);
+  return list.map((t, i) => (
+    t.source ? onlineSourceItem(t, i, 'daily') : localSourceItem(t, i, 'daily')
+  ));
+}
+
+/// 收藏项。歌曲收藏与电台收藏在同一份 items 里，靠 f.kind 区分；
+/// 电台不是单曲，墙上照样展示（标题/艺人齐），点开时由播放侧分派。
+function favoriteSourceItems() {
+  const F = window.Favorites;
+  const items = (F && F.state ? F.state.items : []) || [];
+  return items.map((f, i) => {
+    const base = f.kind === 'radio'
+      ? onlineSourceItem({
+        id: f.ref_id,
+        source: f.source,
+        ref: { id: f.ref_id },
+        title: f.title,
+        artist: f.artist,
+        duration_ms: f.duration_ms,
+        cover: f.cover,
+      }, i, 'favorites')
+      : (f.source === 'local'
+        ? localSourceItem({
+          id: f.ref_id,
+          title: f.title,
+          artist: f.artist,
+          duration_ms: f.duration_ms,
+          has_cover: !!f.cover,
+        }, i, 'favorites')
+        : onlineSourceItem({
+          id: f.ref_id,
+          source: f.source,
+          ref: { id: f.ref_id },
+          title: f.title,
+          artist: f.artist,
+          album: f.album,
+          duration_ms: f.duration_ms,
+          cover: f.cover,
+        }, i, 'favorites'));
+    // 收藏项的 id 是 ref_id（不是虚拟 id），播放侧靠这几个字段认出这是收藏。
+    base.favKind = f.kind;
+    base.favRefId = f.ref_id;
+    base.favSource = f.source;
+    return base;
+  });
+}
+
+/// 歌单项。歌单视图的墙上是**歌单本身**：一张海报 = 一个歌单。
+/// 点开进第二层（那个歌单里的歌），所以额外带 playlistId/source/ref/raw。
+function playlistSourceItems() {
+  const OP = window.OnlinePlaylists;
+  const all = OP && OP.all ? OP.all() : [];
+  return all.map((entry, i) => {
+    const p = entry.playlist || {};
+    return {
+      // 歌单没有可播放 id，用平台 id 当唯一键。
+      id: 'pl:' + entry.source + ':' + (p.id != null ? p.id : i),
+      sourceKey: 'playlists',
+      source: entry.source,
+      sourceLabel: entry.sourceLabel,
+      playlistId: p.id,
+      ref: p,
+      raw: p,
+      index: i,
+      badge: i + 1,
+      title: p.name || '未命名歌单',
+      // 歌单的「艺人」位改放来源 + 曲目数 —— 海报上那行小字更有信息量。
+      artist: (p.track_count != null ? p.track_count + ' 首' : '')
+        + (entry.sourceLabel ? ' · ' + entry.sourceLabel : ''),
+      duration: null,
+      cover: p.cover ? onlineSafeCover(p.cover) : null,
+      current: false,
+      playing: false,
+      progress: 0,
+      // 播放侧靠这个标记决定「点开 = 进第二层」而不是直接播。
+      isPlaylist: true,
+    };
+  });
+}
+
+function onlineSafeCover(url) {
+  const Online = window.Online;
+  return Online ? Online.safeCoverUrl(url) : url;
+}
+
+/// 载入一个在线电台（收藏里的电台用它）。
+function playRadioRef(source, refId, name) {
+  const OP = window.OnlinePlaylists;
+  if (OP && typeof OP.playRef === 'function') {
+    OP.playRef(source, refId, name);
+    return true;
+  }
+  toast('该电台来自 ' + source + '，请到「在线」面板登录后载入');
+  return false;
+}
+
+/// 播某一首时给出的上下文队列。源不是播放队列时，用源里的本地 id 组成一条
+/// 同序队列传下去，这样上一首/下一首与进度条在源内也有意义。
+function queueForSourceItem(item) {
+  const def = viewSourceDef(state.view);
+  const list = (def ? def.items() : []) || [];
+  const ids = list
+    .filter((x) => x && !x.isPlaylist && !String(x.id).startsWith('online:'))
+    .map((x) => x.id);
+  if (ids.includes(item.id)) return ids;
+  // 兜底：源里凑不出一条纯本地队列（在线源 / 收藏电台），退回播放队列。
+  return state.queue || [];
+}
+
+/// 在线项播放。整份原始记录交给 Online.playAll —— 它要 id/artist/album/
+/// duration/cover/ref 全套，海报快照里只留了显示字段。
+function playOnlineItem(item) {
+  const Online = window.Online;
+  if (!Online || typeof Online.playAll !== 'function') {
+    toast('在线播放还没准备好', 'error');
+    return;
+  }
+  const def = viewSourceDef(state.view);
+  const list = (def ? def.items() : []) || [];
+  // 传整份同源列表：playAll 从 tracks[index] 开播，之后 next/prev 才有意义。
+  const tracks = list.map((x) => x.raw || x).filter((x) => x && x.id);
+  if (!tracks.length) {
+    toast('这个来源里没有可播放的曲目', 'error');
+    return;
+  }
+  const at = tracks.findIndex((x) => onlineItemId(x) === item.id);
+  Online.playAll(tracks, at >= 0 ? at : 0);
+}
+
+/// 点开一张海报。歌单是**进第二层**，其余是播放。
+/// d.delta 有值时是「相对步进」（展开卡的上一首/下一首）—— 墙上的序号是
+/// **本视图的下标**，不是播放队列下标，所以必须由源来算下一项，不能交给
+/// playQueueStep（那走的是 state.queue，传墙上的下标会播错歌）。
+function activateSourceItem(d) {
+  const item = d.item;
+  if (!item) return;
+  if (item.isPlaylist && !d.delta) {
+    drillIntoPlaylist(item);
+    return;
+  }
+  if (d.delta) {
+    const list = walllessSourceItems(item);
+    if (!list.length) return;
+    const at = list.findIndex((x) => x.id === item.id);
+    // 当前项不在源里时从头/从末开始，而不是 -1+1=0 这种巧合。
+    let next = at < 0 ? (d.delta > 0 ? 0 : list.length - 1) : at + d.delta;
+    if (next < 0) next = list.length - 1;
+    if (next >= list.length) next = 0;
+    playSourceItem(list[next]);
+    return;
+  }
+  playSourceItem(item);
+}
+
+/// 取当前墙上那一列的项。墙上算好了才发 activate，这里按 item 上带的
+/// sourceKey 重新取一次（业务侧唯一权威，避免皮肤自己缓存一份列表）。
+function walllessSourceItems(item) {
+  const def = item && item.sourceKey ? viewSourceDef(item.sourceKey) : null;
+  if (!def) return [];
+  return def.items() || [];
+}
+
+/// 播放某个源里的一项。分派依据是它带的是哪种 id —— 这层判据必须与
+/// viewSnapshot 造 id 的那几处保持一致（同一条规则，见 onlineItemId）。
+function playSourceItem(item) {
+  if (!item) return;
+  // 播放队列那一份已经带好了 id，直接走队列路径（顺序播放语义要对）。
+  if (item.queueItem) {
+    playQueueIndex(item.index);
+    return;
+  }
+  // 电台收藏：整盘载入，不是一首。
+  if (item.favKind === 'radio') {
+    playRadioRef(item.favSource, item.favRefId, item.title);
+    return;
+  }
+  // 在线虚拟 id：本地库里没有，喂 /v1/player/load 必 404。
+  if (String(item.id).startsWith('online:')) {
+    playOnlineItem(item);
+    return;
+  }
+  // 本地 id。
+  transport.post('/v1/player/load', {
+    track_id: item.id,
+    queue: queueForSourceItem(item),
+  });
+}
+
+/// 展开一个歌单：拉它的曲目，交给皮肤进第二层。
+/// 歌单页的墙上是歌单，所以这一层是「点歌单 → 看歌单里的歌」，
+/// 不能直接播 —— 直接播用户根本不知道自己听的是哪个歌单。
+///
+/// 同步返回（不进网络等待）：拉歌单是异步的，皮肤那边拿到的是 pending
+/// 标记并自己转 loading；这里只在**参数就已经不对**时同步报错。
+function drillIntoPlaylist(item) {
+  const source = item.source;
+  const playlistId = item.playlistId;
+  if (!source || playlistId == null) {
+    return { error: '这个歌单缺少平台信息，无法展开' };
+  }
+  if (window.OnlinePlaylists && typeof window.OnlinePlaylists.drillTracks === 'function') {
+    return { source, playlistId, name: item.title, drill: true };
+  }
+  return { error: '歌单展开功能还没准备好' };
 }
 
 // 从队列里挑一首播。在线虚拟 id 不在本地库里，load 查不到会 404，
@@ -4593,6 +5052,8 @@ async function startApp() {
   // 这一串 init() 拿到的全是默认值（症状：刷新后主题、皮肤、舞台参数集体丢失）。
   // 独立形态用原生 localStorage，这里是空操作。
   if (window.hertzHost) await window.hertzHost.hydrate();
+  // 落盘的在线元数据先喂回内存：队列行第一帧就能显示真名字，不用等补取。
+  if (window.Online && window.Online.seedFromStore) window.Online.seedFromStore();
   transport = await chooseTransport();
   if (transport.kind === 'demo') {
     ui.demoBadge.hidden = false;

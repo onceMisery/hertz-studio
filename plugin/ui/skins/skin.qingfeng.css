@@ -867,6 +867,23 @@
   opacity: 1;
 }
 
+/* 歌单那列的主按钮是「打开歌单」，带文字。
+   .qf-chrome button 给的是方形固定尺寸（20px 图标那种），直接放文字会被
+   压成一行挤掉的乱码 —— 所以这一条把它放回 auto 宽度并补内边距。
+   歌单不是曲，不该跟曲共用「圆点播放」的读法。
+   用显式 .is-labelled 而不是 :has(span)：:has() 在旧内核上不成立时会
+   静默退回上面那条方形规则，表现为文字被压扁 —— 又是那种不报错的坏。 */
+[data-skin="qingfeng"] .qf-chrome-play.is-labelled {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: auto;
+  padding: 0 18px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
 [data-skin="qingfeng"] .qf-chrome-time {
   margin-left: auto;
   padding-left: 8px;
@@ -927,6 +944,75 @@
 [data-skin="qingfeng"] .qf-lattice-empty span {
   font-size: 12px;
   color: var(--muted);
+}
+
+/* 墙左上角的来源标签。
+   墙是全屏浮层，盖住了底下的页面 —— 用户看得到歌名却看不到自己是从哪个
+   tab 点进来的，两列内容又可能一模一样（歌单页的墙和队列页的墙都是一列
+   曲目）。所以墙上必须自己标明来源。
+   .is-drill 是第二层：那时标签是歌单名，带一个返回键。 */
+[data-skin="qingfeng"] .qf-lattice-tag {
+  position: absolute;
+  left: 24px;
+  top: 24px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 200px);
+  padding: 9px 16px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+[data-skin="qingfeng"] .qf-lattice-tag strong {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text);
+  /* 歌单名可能很长（「日本 City Pop 精选 30 首」），别把标签撑爆整屏。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-skin="qingfeng"] .qf-lattice-tag span {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 第二层：歌单名高亮成强调色，和第一层的「来源名」一眼能分开。 */
+[data-skin="qingfeng"] .qf-lattice-tag.is-drill strong {
+  color: var(--highlight);
+}
+
+[data-skin="qingfeng"] .qf-lattice-back {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--skin-surface) 70%, var(--text) 8%);
+  color: var(--text);
+  cursor: pointer;
+}
+
+[data-skin="qingfeng"] .qf-lattice-back:hover {
+  background: color-mix(in srgb, var(--skin-surface) 55%, var(--text) 16%);
+}
+
+[data-skin="qingfeng"] .qf-lattice-back[hidden] {
+  display: none;
 }
 
 /* 海报墙左下角的「当前队列」浮条 */
@@ -1799,6 +1885,13 @@
   [data-skin="qingfeng"] .qf-queue-peek {
     left: 16px;
     bottom: 16px;
+    max-width: calc(100vw - 96px);
+  }
+
+  /* 窄屏上来源标签与 peek 条会左右贴边，让它们别顶在一起。 */
+  [data-skin="qingfeng"] .qf-lattice-tag {
+    left: 16px;
+    top: 16px;
     max-width: calc(100vw - 96px);
   }
 

@@ -28,6 +28,7 @@ const ok = (cond, label, extra) => {
   else { failures += 1; console.error('  X   ' + label + (extra ? '  (' + extra + ')' : '')); }
 };
 const section = (n) => console.log('\n' + n);
+const { clickPoster } = require('./qf-wall-helpers.js');
 
 (async () => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -160,6 +161,13 @@ const section = (n) => console.log('\n' + n);
   await page.screenshot({ path: path.join(OUT, '02-playlists.png') });
 
   section('队列拼接（海报墙）');
+  // **切到在线曲库再开墙**：这一段验的是「点一张**曲** → 展开成大卡 + 播放控件」。
+  // 墙上放什么由当前 tab 决定（队列拼接是每个 tab 都有的），所以场景必须挑对 ——
+  // 停在歌单视图时墙上是一张张**歌单**，点开是进第二层而不是展开，
+  // 拿展开卡的断言去测它必然全红，而且红得毫无意义。
+  // 在线曲库有真实曲目，是唯一能验「展开 + 控件」的来源。
+  await page.click('.qf-nav-item[data-qf-view="online"]');
+  await page.waitForTimeout(700);
   await page.click('.qf-nav-icon');
   await page.waitForTimeout(900);
   const wall = await page.evaluate(() => {
@@ -204,8 +212,27 @@ const section = (n) => console.log('\n' + n);
     const radius = await page.$eval('.qf-poster', (n) => getComputedStyle(n).borderTopLeftRadius);
     ok(parseFloat(radius) === 0, '海报保持方角', `radius=${radius}`);
 
-    // 点一张展开
-    await page.click('.qf-poster');
+    // 开墙后「聚焦的那张」必须落在视口内。
+    //
+    // 这条是本轮修的一个真实回归的钉子：无「正在播放」时开墙退到第一张，
+    // 而密排下第一张的格位完全可能在视口外 —— 页面上表现为一片空白，
+    // 不报任何错。下面两处点击都改成点 is-focused，正是靠这条断言保证
+    // 它们点在视口内那张（直接点 .qf-poster 会解析到视口外那张而超时）。
+    const focusInView = await page.evaluate(() => {
+      const f = document.querySelector('.qf-poster.is-focused');
+      if (!f) return { has: false };
+      const r = f.getBoundingClientRect();
+      return {
+        has: true,
+        inView: r.right > 0 && r.bottom > 0 && r.left < window.innerWidth && r.top < window.innerHeight,
+        rect: [Math.round(r.left), Math.round(r.top)],
+      };
+    });
+    ok(focusInView.has && focusInView.inView,
+      '开墙后聚焦的那张在视口内（否则用户看到一片空白）', JSON.stringify(focusInView));
+
+    // 点一张展开（见 clickPoster 的注释：不能用 page.click，滚动会改相机坐标）
+    await clickPoster(page, '.qf-poster.is-focused');
     await page.waitForTimeout(700);
     const exp = await page.evaluate(() => {
       const e = document.querySelector('.qf-poster.is-expanded');
@@ -246,6 +273,219 @@ const section = (n) => console.log('\n' + n);
     await page.waitForTimeout(400);
     ok(await page.evaluate(() => !window.__qfSkin.isWallOpen()), '空态下 Esc 也能退出');
   }
+
+  // -------------------------------------------------------------------
+  // 墙是**每个 tab 都有的**，展示那个 tab 的内容（不是只有播放队列有）。
+  //
+  // 这段是本需求的核心，所以必须**逐个 tab 走过去**看墙上的来源标签与项数，
+  // 只验「墙能打开」等于没验 —— 打开是旧行为早就有的。
+  //
+  // 数据侧不伪造：直接读各视图**此刻真实持有的**数据（曲库/在线/收藏/歌单
+  // 都是本地或登录态下已有的），再断言墙上的项数与之一致。
+  // 一致不了就是取源接错了，页面上看不出来。
+  // -------------------------------------------------------------------
+  section('每个 tab 的墙取到自己的内容');
+
+  // 逐个 tab：切过去 → 开墙 → 读来源标签 + 海报数。
+  // 用 qf:panel 直接问 app.js「这个 tab 的源有几项」，与墙上渲染出的海报数比对。
+  const TABS = [
+    { view: 'playlists', key: 'playlists', label: '歌单' },
+    { view: 'online', key: 'online', label: '在线曲库' },
+    { view: 'library', key: 'library', label: '本地曲库' },
+    { view: 'favorites', key: 'favorites', label: '我的收藏' },
+    { view: 'queue', key: 'queue', label: '播放队列' },
+  ];
+
+  // 入口按钮在每个 tab 下应有的文案，与 skin.qingfeng.js 的 WALL_TAB_LABELS 对齐。
+  // 写成期望表而不是「不等于队列拼接」：播放队列 tab 本来就叫这个名字。
+  const EXPECT_BTN_TEXT = {
+    playlists: '歌单墙',
+    online: '电台拼接',
+    library: '曲库拼接',
+    favorites: '收藏墙',
+    queue: '队列拼接',
+  };
+
+  const perTab = [];
+  for (const tab of TABS) {
+    // 切到这个 tab（走 rail 的程序化点击，与用户点导航同一条链路）
+    await page.evaluate((v) => {
+      const item = document.querySelector('.rail-item[data-view="' + v + '"]');
+      if (item) item.click();
+    }, tab.view);
+    await page.waitForTimeout(450);
+
+    // 开墙
+    await page.evaluate(() => {
+      const btn = document.querySelector('.qf-nav-icon');
+      if (btn && !window.__qfSkin.isWallOpen()) btn.click();
+    });
+    await page.waitForTimeout(650);
+
+    const got = await page.evaluate(() => {
+      const root = document.querySelector('.qf-lattice');
+      const tag = root ? root.querySelector('.qf-lattice-tag') : null;
+      return {
+        open: window.__qfSkin.isWallOpen(),
+        tagHidden: tag ? tag.hidden : null,
+        label: tag ? (tag.querySelector('strong') || {}).textContent : '',
+        count: tag ? (tag.querySelector('span') || {}).textContent : '',
+        posters: document.querySelectorAll('.qf-poster').length,
+        emptyShown: root ? !root.querySelector('.qf-lattice-empty').hidden : null,
+        // 墙内部态：这一列真正有几项。**不数 DOM 海报** —— 那是虚拟化后的
+        // 裁剪结果（只渲染视口 + OVERSCAN 内的），与源里的项数本就不等。
+        info: window.__qfSkin.wallInfo(),
+        btnText: (document.querySelector('.qf-nav-icon-text') || {}).textContent || '',
+      };
+    });
+
+    // 问 app.js 这个 tab 的源里有几项（与墙上应当一致）
+    const src = await page.evaluate(() => {
+      const d = { action: 'source-request' };
+      document.dispatchEvent(new CustomEvent('qf:panel', { detail: d }));
+      return d.source;
+    });
+
+    perTab.push({ tab, got, src });
+    ok(got.open, `${tab.label} tab 的墙能打开`);
+    ok(got.tagHidden === false, `${tab.label} 的墙标明来源`, `label="${got.label}"`);
+    ok(got.label === src.label,
+      `${tab.label} 的墙上来源名与 app.js 给的一致`, `墙="${got.label}" app="${src.label}"`);
+    // 入口文案要跟着 tab 变，但**不能一律断言「不等于队列拼接」** ——
+    // 播放队列 tab 的入口本来就叫「队列拼接」，那样判会把它自己判红。
+    // 判据改成「与该tab 应有的文案一致」，逐个给期望值。
+    ok(got.btnText === EXPECT_BTN_TEXT[tab.key],
+      `${tab.label} 的入口按钮文案跟着 tab 变`, `期望="${EXPECT_BTN_TEXT[tab.key]}" 实得="${got.btnText}"`);
+    // **核心断言**：墙内部态的来源 key 与项数，必须与 app.js 给的那份一致。
+    // 标签对了但内容是别的 tab 的，就是取源接错了 —— 只看标签抓不到这个。
+    ok(got.info.sourceKey === src.key && got.info.count === src.items.length,
+      `${tab.label} 的墙内容与该视图一致`,
+      `key 墙=${got.info.sourceKey} app=${src.key} / 项数 墙=${got.info.count} app=${src.items.length}`);
+
+    // 关墙
+    await page.evaluate(() => {
+      const btn = document.querySelector('.qf-nav-icon');
+      if (btn && window.__qfSkin.isWallOpen()) btn.click();
+    });
+    await page.waitForTimeout(350);
+  }
+
+  // 留两张带来源标签的墙：第一层（歌单）与队列那列，
+  // 便于肉眼确认「墙上标的来源跟当前 tab 一致」这件事。
+  for (const [view, name] of [['playlists', '10-wall-source-playlists'], ['queue', '11-wall-source-queue']]) {
+    await page.evaluate((v) => {
+      const i = document.querySelector('.rail-item[data-view="' + v + '"]');
+      if (i) i.click();
+    }, view);
+    await page.waitForTimeout(450);
+    await page.evaluate(() => {
+      const b = document.querySelector('.qf-nav-icon');
+      if (b && !window.__qfSkin.isWallOpen()) b.click();
+    });
+    await page.waitForTimeout(800);
+    await page.screenshot({ path: path.join(OUT, `${name}.png`) });
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(350);
+  }
+
+  // 六个 tab 的来源名互不相同 —— 全返回同一个名字就等于没按 tab 取源。
+  const labels = perTab.map((x) => x.src.label);
+  ok(new Set(labels).size === labels.length,
+    '各 tab 的来源名互不相同（真的在按 tab 取源）', labels.join(' / '));
+
+  // 除播放队列外的五个 tab，入口文案都必须与队列不同 ——
+  // 固定叫「队列拼接」会让人以为在所有 tab 下看的都是播放队列。
+  // 播放队列自己那个 tab 反而**应该**叫「队列拼接」，所以它不在这条里。
+  const nonQueue = perTab.filter((x) => x.tab.key !== 'queue');
+  ok(nonQueue.every((x) => x.got.btnText && x.got.btnText !== '队列拼接'),
+    '非队列 tab 的入口文案都不叫「队列拼接」',
+    nonQueue.map((x) => `${x.tab.key}=${x.got.btnText}`).join(' / '));
+  const queueTab = perTab.find((x) => x.tab.key === 'queue');
+  ok(queueTab && queueTab.got.btnText === '队列拼接',
+    '播放队列 tab 的入口就叫「队列拼接」', queueTab && queueTab.got.btnText);
+
+  // 歌单那一列必须是 playlist 类：点开进第二层，不是直接播。
+  const plTab = perTab.find((x) => x.tab.key === 'playlists');
+  if (plTab && plTab.src.items.length) {
+    await page.evaluate(() => {
+      const item = document.querySelector('.rail-item[data-view="playlists"]');
+      if (item) item.click();
+    });
+    await page.waitForTimeout(400);
+    await page.evaluate(() => {
+      const btn = document.querySelector('.qf-nav-icon');
+      if (btn && !window.__qfSkin.isWallOpen()) btn.click();
+    });
+    await page.waitForTimeout(650);
+    // 点聚焦的那张（歌单海报），走clickPoster 而不是 page.click ——
+    // 后者会滚动 field 容器，相机随之偏移，事件落到 .qf-lattice-field 上，
+    // 点开了个寂寞还不报错（实测栽在这）。
+    await clickPoster(page, '.qf-poster.is-focused');
+    await page.waitForTimeout(1200);
+    const drill = await page.evaluate(() => {
+      const tag = document.querySelector('.qf-lattice-tag');
+      const back = tag ? tag.querySelector('.qf-lattice-back') : null;
+      return {
+        hasBack: !!(back && !back.hidden),
+        openBtn: !!document.querySelector('.qf-chrome-play.is-labelled'),
+        info: window.__qfSkin.wallInfo(),
+      };
+    });
+ok(drill.hasBack, '歌单点开后进了第二层（左上角出现返回键）');
+  ok(!!drill.info.drill, '墙的运行态确认进了第二层', JSON.stringify(drill.info.drill));
+  // 第二层的项不该再带 isPlaylist —— 否则点开又进第三层。
+  // 判据是「第二层的展开卡上没有『打开歌单』按钮」：那个按钮只给歌单项。
+  ok(!drill.openBtn,
+    '第二层里没有「打开歌单」按钮（那是第一层才有的，否则会进第三层）');
+  await page.screenshot({ path: path.join(OUT, '03-lattice-drill.png') });
+    // Esc 分层退：先退回歌单列表，墙还开着
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(500);
+    const afterEsc = await page.evaluate(() => ({
+      stillOpen: window.__qfSkin.isWallOpen(),
+      hasBack: !!document.querySelector('.qf-lattice-back:not([hidden])'),
+    }));
+    ok(afterEsc.stillOpen && !afterEsc.hasBack,
+      '第二层按 Esc 退回歌单列表而不是直接关墙', JSON.stringify(afterEsc));
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(400);
+  }
+
+  // 墙开着切 tab：换源，不关墙。
+  await page.evaluate(() => {
+    const item = document.querySelector('.rail-item[data-view="library"]');
+    if (item) item.click();
+  });
+  await page.waitForTimeout(400);
+  await page.evaluate(() => {
+    const btn = document.querySelector('.qf-nav-icon');
+    if (btn && !window.__qfSkin.isWallOpen()) btn.click();
+  });
+  await page.waitForTimeout(600);
+  const beforeSwitch = await page.evaluate(() => ({
+    open: window.__qfSkin.isWallOpen(),
+    info: window.__qfSkin.wallInfo(),
+  }));
+  await page.evaluate(() => {
+    const item = document.querySelector('.rail-item[data-view="favorites"]');
+    if (item) item.click();
+  });
+  await page.waitForTimeout(800);
+  const afterSwitch = await page.evaluate(() => ({
+    open: window.__qfSkin.isWallOpen(),
+    info: window.__qfSkin.wallInfo(),
+  }));
+  ok(beforeSwitch.open && afterSwitch.open,
+    '墙开着切 tab 时不关掉（每个 tab 都能用队列拼接）',
+    `${beforeSwitch.info.label} → ${afterSwitch.info.label}`);
+  // 换源的关键判据：sourceKey 必须真的变了。只比 label 不够 ——
+  // 两个来源碰巧同名（比如以后两个 tab 都叫「精选」）就会误判成没换。
+  ok(afterSwitch.info.sourceKey === 'favorites' && beforeSwitch.info.sourceKey === 'library',
+    '切 tab 后墙的来源真的换了',
+    `${beforeSwitch.info.sourceKey} → ${afterSwitch.info.sourceKey}`);
+  ok(!afterSwitch.info.drill, '切 tab 后不在第二层（上一 tab 的歌单不串味）');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
 
   section('设置浮层');
   await page.click('.qf-settings-btn');

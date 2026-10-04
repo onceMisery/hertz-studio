@@ -509,6 +509,28 @@
     return playRef(source, id, p.name);
   }
 
+  // 拉一个歌单的曲目，**不播**，只把曲目交回去给调用方。
+  //
+  // 谁在用：清风皮肤的队列拼接墙。歌单视图的墙上是「歌单」本身（一张海报
+  // 一个歌单），点开应该看到里面的歌，而不是直接开播 —— 直接播的话用户
+  // 根本不知道自己听的是哪个歌单。
+  //
+  // 为什么单独一个函数而不是复用 playRef：playRef 的语义是「立刻整盘播」，
+  // 里面固定跟一句 toast 与 Online.playAll，两边混用会一边展开一边把歌
+  // 放出来。**取数与播放必须分开**，这也是所有视图共用的那条边界。
+  async function drillTracks(source, id) {
+    var d;
+    try {
+      d = await tr().get('/v1/online/playlist?source=' + encodeURIComponent(source)
+        + '&id=' + encodeURIComponent(id) + '&limit=50&offset=0');
+    } catch (e) {
+      return { error: '读取在线歌单失败：' + (e && e.message ? e.message : '网络错误') };
+    }
+    var tracks = (d && d.tracks) || [];
+    tracks.forEach(function (t) { if (!t.source) t.source = source; });
+    return { tracks: tracks };
+  }
+
   // 按来源+平台歌单 id 整盘载入，不要求该歌单还在账号歌单清单里。
   // 收藏视图里的电台（kind=radio）快照只有 source+id：上次会话收藏的歌单
   // 重启后可能不在首屏 30 张卡片里，不能因此拒绝打开整盘。
@@ -539,6 +561,8 @@
     play: playPlaylistById,
     // 收藏视图整盘打开：只需 source+id，不要求歌单在账号清单里。
     playRef: playRef,
+    // 只取歌单曲目、不播 —— 清风队列拼接墙的第二层用。
+    drillTracks: drillTracks,
     closeDrawer: closeDrawer,
     // 详情层（online-playlist-view.js）复用同一颗移除按钮。
     removeButton: removeButton,

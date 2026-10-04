@@ -11,7 +11,7 @@
 //     改用**顶部居中胶囊主菜单**（歌单 / 电台 / 专辑 / 收藏 / 本地 + 队列拼接图标）；
 //   · 左上角在品牌旁挂一枚设置按钮（沿用顶栏既有的设置入口语义）；
 //   · 右下角新建「头像 + 箭头」控件：头像开登录，箭头跳舞台播放页；
-//   · 「队列拼接」是本皮肤的特色页：全屏海报墙，队列循环铺满，中央一张展开大卡；
+//   · 「队列拼接」是本皮肤的特色页：全屏海报墙，来源列循环铺满，中央一张展开大卡；
 //   · 「设置」不进中栏视图，而是把 #view-settings 搬进浮层（遮罩 + 卡片），
 //     浮层内再分「左栏两级分类 + 右栏内容」两栏；
 //   · 搜索留在顶栏右侧，播放条收成底部居中胶囊。
@@ -27,11 +27,23 @@
 //
 // 队列拼接页的数据来源
 // --------------------
-// 海报墙需要「队列里有哪些歌、哪首在放」。这两件事都在 app.js 的闭包里
-// （state.queue / state.snapshot），皮肤拿不到，所以走一条只读的自定义事件：
-// 皮肤发 `qf:queue-request`，app.js 回一份快照。海报墙自己不发播放请求，
-// 点击只发 `qf:play-index`，由 app.js 真正落 play —— 播放路径只有一条，
-// 不会出现「皮肤点一下、app.js 又点一下」的双触发。
+// **每个 tab 的墙展示那个 tab 的内容** —— 歌单页是歌单、电台页是在线曲库、
+// 本地页是曲库、每日推荐是当天的推荐、收藏是收藏列表；播放队列 tab 仍是队列
+// （第 6 个来源）。墙开着时切 tab 是**换源**，不是关墙：关掉的话这个功能
+// 就退化成「只有队列 tab 有队列拼接」。
+//
+// 为什么取数不自己摸：各视图的数据分散在五个模块的闭包里（Online.onlineState、
+// DailyView.st、OnlinePlaylists 私有 state、Favorites.favState、app 自己的
+// state），形状与 id 体系各不相同（本地 id / online: 虚拟 id / 歌单 ref）。
+// 皮肤逐个去摸等于把那些内部结构全绑死，业务改一处形状皮肤就跟着坏。
+// 收敛成 app.js 的 viewSnapshot()，皮肤只认 {key,label,kind,items,emptyHint}。
+//
+// 墙上点一下走 `qf:activate`（带整项），**不发** `qf:play-index`：墙上序号是
+// **本视图的下标**，而 play-index 按的是播放队列下标，混用会播错歌。
+// 真正的 play 永远由 app.js 落 —— 播放路径只有一条，不会双触发。
+//
+// 歌单那列是两层：一张海报 = 一个歌单，点开进第二层看里面的歌（不发播放）。
+// 直接播的话用户根本不知道自己听的是哪个歌单。第二层里 Esc/Backspace 退回。
 
 (function () {
   'use strict';
@@ -67,19 +79,47 @@
     world: null,
     field: null,
     open: false,
-    tiles: [],        // 去重后的队列项
+    tiles: [],        // 当前这一列的项（来源视图的，或第二层里那个歌单的）
     posters: [],      // 当前挂载的海报 DOM
     focused: -1,      // 键盘焦点所在的海报下标
     expanded: -1,     // 展开档所在的下标
     cam: { x: 0, y: 0, s: 1 },
     raf: 0,
     lightsOut: false,
-    queueKey: '',     // 队列指纹，变了才重建
     entranceDone: false,
+    // —— 按视图取源 ——
+    // 每个 tab 的墙展示**那个 tab 的内容**：歌单页是歌单、电台页是在线曲库…
+    // 播放队列 tab 仍然是队列（第 6 个来源）。取源走 qf:panel('source-request')，
+    // 由 app.js 按当前 state.view 统一给一份快照 —— 皮肤不自己读各视图的
+    // 内部状态，那些结构分散在五个模块的闭包里，摸了就绑死。
+    sourceKey: '',      // 当前列来自哪个视图（'library'/'online'/…）
+    sourceLabel: '',    // 墙顶显示的来源名
+    emptyHint: '',      // 该来源为空时的提示
+    // —— 第二层 ——
+    // 歌单视图的墙上，一张海报是一个**歌单**；点开要看里面的歌，不是直接播。
+    // 所以墙有两层：drill 里有值就是第二层，点返回键退回第一层。
+    drill: null,        // { source, playlistId, name }
+    drillBusy: false,   // 拉歌单曲目中（第二层显示 loading）
+    drillError: '',
   };
 
   var SECTION_KEY = 'vmusic.qf-set-section';
   var WALL_KEY = 'vmusic.qf-wall';
+
+  // 墙的入口按钮在每个 tab 下的名字。这个入口开的是**当前视图**的墙，
+  // 所以名字也得跟着变 —— 固定叫「队列拼接」会让人以为在所有 tab 下
+  // 看的都是播放队列，而实际上歌单页开的是歌单、电台页开的是在线曲库。
+  //
+  // 键是视图 id 去掉 'view-' 前缀（与 currentViewId() 对齐）。
+  // 缺键时回落到「队列拼接」，所以新增视图不会让按钮变成空白。
+  var WALL_TAB_LABELS = {
+    library: '曲库拼接',
+    online: '电台拼接',
+    playlists: '歌单墙',
+    favorites: '收藏墙',
+    daily: '每日墙',
+    queue: '队列拼接',
+  };
 
   // 退场动画时长，与 skin.qingfeng.css 里 .qf-modal-card 的 transition 时长对齐。
   // CSS 改了就同步改这里，否则会出现「动画还没完内容先消失」。
@@ -166,8 +206,17 @@
     return detail;
   }
 
-  /// 要队列数据。海报墙不自己读 state（那在 app.js 闭包里），发一条只读请求，
-  /// app.js 同步把快照挂在 detail 上回来。
+  /// 要「当前 tab 那一列」的项。海报墙不自己读各视图状态（那分散在五个模块的
+  /// 闭包里），发一条只读请求，app.js 按当前 view 统一给一份快照回来。
+  ///
+  /// 皮肤只认 {key,label,kind,items,emptyHint} 这一个契约 —— 换视图、换数据源
+  /// 都不需要改皮肤。
+  function requestSource() {
+    var out = emit('source-request');
+    return (out && out.source) || { key: '', label: '', kind: 'track', items: [], emptyHint: '' };
+  }
+
+  /// 要播放队列那份（第二层「从队列打开」与老路径的兼容入口）。
   function requestQueue() {
     var out = emit('queue-request');
     return (out && out.queue) || [];
@@ -220,14 +269,18 @@
     });
 
     // 队列拼接入口：图标常驻，文字 hover 才展开。
+    // 文案跟着当前 tab 变（reflow 里改）：这个入口展示的是**当前视图的**内容，
+    // 在歌单页它开的是歌单墙、在电台页开的是在线曲库墙，固定叫「队列拼接」
+    // 会让用户以为在所有 tab 下都看的是播放队列。
     var wallBtn = make('button', 'qf-nav-icon', nav);
     wallBtn.type = 'button';
     wallBtn.dataset.qfView = 'wall';
     wallBtn.setAttribute('aria-label', '队列拼接');
     wallBtn.setAttribute('aria-haspopup', 'dialog');
-    wallBtn.innerHTML = icon('queue') + '<span>队列拼接</span>';
+    wallBtn.innerHTML = icon('queue') + '<span class="qf-nav-icon-text">队列拼接</span>';
     wallBtn.addEventListener('click', function () { toggleWall(); });
     refs.wallBtn = wallBtn;
+    refs.wallBtnText = $('.qf-nav-icon-text', wallBtn);
 
     document.body.appendChild(nav);
   }
@@ -343,6 +396,50 @@
     return wall.tiles[index % wall.tiles.length];
   }
 
+  /// 墙顶的来源标签。歌单视图要点得进去，所以额外挂一个返回键。
+  function paintSourceTag() {
+    if (refs.wallTag) {
+      var label = wall.sourceLabel || '';
+      if (refs.wallTagLabel) refs.wallTagLabel.textContent = label;
+      if (refs.wallTagCount) {
+        var n = wall.tiles.length;
+        refs.wallTagCount.textContent = n ? n + ' 项' : '';
+      }
+      if (refs.wallTagBack) refs.wallTagBack.hidden = !wall.drill;
+      // 没有来源名就别占位（理论上不会 —— 六个视图都有 label）。
+      refs.wallTag.hidden = !label;
+      if (wall.drill) refs.wallTag.classList.add('is-drill');
+      else refs.wallTag.classList.remove('is-drill');
+    }
+    // 「清空队列」只对播放队列那一列成立：其余视图的项是视图自己的内容
+    // （曲库/在线/收藏），清播放队列不会让墙变空，只会让「正在播放」那张卡
+    // 消失 —— 摆在那儿就是给了个点了没用的按钮。
+    if (refs.wallClear) refs.wallClear.hidden = wall.sourceKey !== 'queue' || !!wall.drill;
+  }
+
+  /// 空态 / 加载态 / 错误态的文案。歌单那列没拉到东西时要说清是哪一层
+  /// ——「加载失败」和「这个歌单是空的」对用户是两件事。
+  function paintEmptyState() {
+    if (!refs.wallEmpty) return;
+    if (wall.tiles.length) {
+      refs.wallEmpty.hidden = true;
+      return;
+    }
+    refs.wallEmpty.hidden = false;
+    var title = '';
+    var hint = wall.emptyHint || '';
+    if (wall.drillBusy) {
+      title = '正在读这个歌单…';
+    } else if (wall.drillError) {
+      title = wall.drillError;
+      hint = '点左上角返回，或退出后重试';
+    } else {
+      title = wall.drill ? '这个歌单是空的' : '这里是空的';
+    }
+    if (refs.wallEmptyTitle) refs.wallEmptyTitle.textContent = title;
+    if (refs.wallEmptyHint) refs.wallEmptyHint.textContent = hint;
+  }
+
   function cellRect(blockX, blockY, cell) {
     return {
       x: blockX * BLOCK_COLS * PITCH + cell[0] * PITCH,
@@ -365,9 +462,22 @@
 
     var empty = make('div', 'qf-lattice-empty', root);
     var emptyTitle = make('strong', '', empty);
-    emptyTitle.textContent = '队列是空的';
+    emptyTitle.textContent = '这里是空的';
     var emptyHint = make('span', '', empty);
-    emptyHint.textContent = '先在任意列表里加几首歌，再回到这里拼接';
+    emptyHint.textContent = '';
+
+    // 左上角：当前这一列的来源名。用户是从某个 tab 点进来的，光看歌名分不清
+    // 「这是歌单页的墙」还是「这是队列的墙」—— 尤其两者内容可能一模一样。
+    var tag = make('div', 'qf-lattice-tag', root);
+    var tagLabel = make('strong', '', tag);
+    var tagCount = make('span', '', tag);
+    var tagBack = make('button', 'qf-lattice-back', tag);
+    tagBack.type = 'button';
+    tagBack.hidden = true;
+    tagBack.title = '返回歌单列表';
+    tagBack.setAttribute('aria-label', '返回歌单列表');
+    tagBack.innerHTML = icon('prev');
+    tagBack.addEventListener('click', leaveDrill);
 
     // 左下角：当前队列浮条。
     var peek = make('div', 'qf-queue-peek', root);
@@ -404,7 +514,10 @@
     var panel = make('div', 'qf-tools-panel', tools);
     panel.hidden = true;
     var help = make('div', 'qf-set-subitem', panel);
-    help.textContent = '← → 移动焦点 · Enter 播放 · Space 展开 · Esc 返回';
+    help.textContent = '← → 移动焦点 · Enter 播放/打开 · Esc 返回';
+    // 「清空队列」只对播放队列那一列成立 —— 其余视图的项是视图自己的内容
+    // （曲库/在线/收藏），清掉播放队列不会让墙变空，只会让「正在播放」那
+    // 张卡消失。所以按来源显隐，而不是摆一个点了没用的按钮。
     var clear = make('button', 'qf-tools-action', panel);
     clear.type = 'button';
     clear.innerHTML = icon('trash') + '<span>清空队列</span>';
@@ -425,13 +538,25 @@
       panel.hidden = !show;
       panelBtn.setAttribute('aria-expanded', String(show));
     });
+    refs.wallClear = clear;
+    refs.wallPanel = panel;
 
     // 拖拽平移。
+    //
+    // **pointerdown 时不能 setPointerCapture** —— 捕获后 pointerup/click 会被
+    // 重定向到 field（捕获元素），海报上的 click 处理器永远收不到，
+    // 表现为「点墙上那张卡没反应」。浏览器实测三种点法里两种失效：
+    //   · locator.click / page.mouse.click（真实输入）→ click 落在 field 上，卡片不动
+    //   · element.click()（JS 直调，不走捕获路径）→ 正常展开
+    // 两种结果不一致本身就是证据：问题出在指针捕获，不在点击逻辑。
+    //
+    // 改成越过拖拽阈值**之后**才捕获：那一步才确定用户是在拖墙而不是点卡片，
+    // 此时捕获是有意的（拖拽就该把指针收进 field）。纯点击全程不捕获，
+    // click 照常派发给海报。
     var drag = null;
     field.addEventListener('pointerdown', function (e) {
       if (e.target.closest('.qf-poster-controls')) return;
       drag = { x: e.clientX, y: e.clientY, cx: wall.cam.x, cy: wall.cam.y, moved: false };
-      field.setPointerCapture(e.pointerId);
     });
     field.addEventListener('pointermove', function (e) {
       if (!drag) return;
@@ -439,7 +564,11 @@
       var dy = e.clientY - drag.y;
       // 阈值 4px：小抖动不算拖拽，否则点卡片会被吃掉一次平移。
       if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
-      drag.moved = true;
+      if (!drag.moved) {
+        drag.moved = true;
+        // 到这一步才确认是拖拽，此时捕获指针才是对的。
+        try { field.setPointerCapture(e.pointerId); } catch (err) { /* 捕获失败不影响拖拽 */ }
+      }
       wall.cam.x = drag.cx + dx;
       wall.cam.y = drag.cy + dy;
       applyCamera();
@@ -447,7 +576,11 @@
     });
     function endDrag(e) {
       if (!drag) return;
-      try { field.releasePointerCapture(e.pointerId); } catch (err) { /* 已释放 */ }
+      // 只在真的捕获过（moved）时才release —— 纯点击那条路从没捕获过，
+      // 对未捕获的指针调 release 是规范允许的空操作，但意图上不该调。
+      if (drag.moved) {
+        try { field.releasePointerCapture(e.pointerId); } catch (err) { /* 已释放 */ }
+      }
       drag = null;
     }
     field.addEventListener('pointerup', endDrag);
@@ -465,6 +598,12 @@
     refs.wallField = field;
     refs.wallWorld = world;
     refs.wallEmpty = empty;
+    refs.wallEmptyTitle = emptyTitle;
+    refs.wallEmptyHint = emptyHint;
+    refs.wallTag = tag;
+    refs.wallTagLabel = tagLabel;
+    refs.wallTagCount = tagCount;
+    refs.wallTagBack = tagBack;
     refs.wallPeek = peek;
     refs.wallPeekArt = peekArt;
     refs.wallPeekTitle = peekTitle;
@@ -507,8 +646,11 @@
   function openWall() {
     if (wall.open) return;
     wall.open = true;
-    wall.tiles = requestQueue();
-    wall.queueKey = wall.tiles.map(function (t) { return t.id; }).join('|');
+    wall.drill = null;
+    wall.drillBusy = false;
+    wall.drillError = '';
+    var src = requestSource();
+    applySource(src);
     wall.focused = -1;
     wall.expanded = -1;
     wall.cam.s = wallScale();
@@ -520,13 +662,113 @@
     applyCamera();
     renderWall();
     // 自动聚焦到正在播放那张，墙一开就有主体。
+    // 歌单那一份没有「正在播放」的概念（歌单不是曲），聚焦第一张即可。
     var idx = wall.tiles.findIndex(function (t) { return t.current; });
     if (idx >= 0) focusPoster(idx, true);
+    // 没有「正在播放」那张（歌单墙永远没有）时落到第一张，并**保证它在视口内** ——
+    // 密排下第一张可能整个在视口外，那样用户看到一片空白，以为墙没加载出来。
+    else if (wall.tiles.length) focusAndReveal(0);
+  }
+
+  /// 把一份来源快照铺到墙上。第一层与第二层共用这一条路径 ——
+  /// 区别只是快照的 kind 与 label 不同。
+  function applySource(src) {
+    wall.tiles = (src && src.items) || [];
+    wall.sourceKey = (src && src.key) || '';
+    // 第二层的标题是「歌单名」，第一层用来源名。
+    wall.sourceLabel = wall.drill
+      ? wall.drill.name
+      : ((src && src.label) || '');
+    wall.emptyHint = (src && src.emptyHint) || '';
+    paintSourceTag();
+    paintEmptyState();
+  }
+
+  /// 展开一个歌单：进第二层看它里面的歌。
+  /// 不直接播 —— 直接播用户根本不知道自己听的是哪个歌单。
+  function enterDrill(item) {
+    var out = emit('playlist-drill', { source: item.source, playlistId: item.playlistId });
+    var res = out && out.result;
+    wall.drill = { source: item.source, playlistId: item.playlistId, name: item.title };
+    wall.drillBusy = true;
+    wall.drillError = '';
+    wall.expanded = -1;
+    // 先退到收起态再换列，否则展开档的尺寸会按新列的格位算错。
+    collapse(true);
+    wall.tiles = [];
+    wall.sourceLabel = item.title;
+    paintSourceTag();
+    renderWall();
+    if (!res || typeof res.then !== 'function') {
+      wall.drillBusy = false;
+      wall.drillError = (out && out.error) || '歌单展开功能还没准备好';
+      paintEmptyState();
+      return;
+    }
+    res.then(function (r) {
+      // 拉的过程中用户可能已经 Esc 关了墙或退回了第一层，这时别再改墙。
+      if (!wall.open || !wall.drill) return;
+      wall.drillBusy = false;
+      if (r && r.error) {
+        wall.drillError = r.error;
+        wall.tiles = [];
+      } else {
+        var list = (r && r.tracks) || [];
+        // 第二层的项要按「曲」来造，不能带 isPlaylist —— 否则点开又进第三层。
+        wall.tiles = list.map(drillItem);
+        wall.drillError = list.length ? '' : '这个歌单是空的';
+      }
+      wall.focused = -1;
+      paintSourceTag();
+      paintEmptyState();
+      renderWall();
+      if (wall.tiles.length) focusPoster(0, true);
+    });
+  }
+
+  /// 第二层的项。形状与 app.js 的 onlineSourceItem 一致，但**不带 isPlaylist**。
+  function drillItem(t, i) {
+    var Online = window.Online;
+    var duration = Number(t.duration_ms) || 0;
+    return {
+      id: 'online:' + (t.source || 'netease') + ':' + ((t.ref && (t.ref.id || t.ref.song_id)) || t.id),
+      sourceKey: 'playlists',
+      source: t.source,
+      ref: t.ref || {},
+      raw: t,
+      index: i,
+      badge: i + 1,
+      title: t.title || '未知曲目',
+      artist: t.artist || '未知艺术家',
+      duration: duration || null,
+      cover: Online ? Online.safeCoverUrl(t.cover || null) : null,
+      current: false,
+      playing: false,
+      progress: 0,
+    };
+  }
+
+  /// 退回第一层（从歌单里返回歌单列表）。
+  function leaveDrill() {
+    if (!wall.drill) return;
+    wall.drill = null;
+    wall.drillBusy = false;
+    wall.drillError = '';
+    wall.expanded = -1;
+    collapse(true);
+    applySource(requestSource());
+    wall.focused = -1;
+    renderWall();
   }
 
   function closeWall() {
     if (!wall.open) return;
     wall.open = false;
+    // 第二层直接退到第一层而不是留在歌单里 —— 关掉再开应该还是原来的那个 tab
+    // 的内容，进去-退出-再开要停在歌单里会让人以为随机。
+    wall.drill = null;
+    wall.drillBusy = false;
+    wall.drillError = '';
     if (wall.root) wall.root.hidden = true;
     document.body.classList.remove('qf-lattice-open');
     if (refs.wallBtn) refs.wallBtn.classList.remove('is-active');
@@ -550,10 +792,11 @@
     if (!wall.open || !wall.world) return;
     if (!wall.tiles.length) {
       clearPosters();
-      if (refs.wallEmpty) refs.wallEmpty.hidden = false;
+      paintEmptyState();
+      paintSourceTag();
       return;
     }
-    if (refs.wallEmpty) refs.wallEmpty.hidden = true;
+    paintEmptyState();
 
     var b = wallBounds();
     var entries = [];
@@ -632,7 +875,12 @@
       // 展开态下点卡片本体是收起；控件区自己 stopPropagation 了。
       if (e.target.closest('.qf-poster-controls')) return;
       if (el.classList.contains('is-expanded')) collapse();
-      else focusPoster(wall.posters.indexOf(el), true);
+      else if (tile && tile.isPlaylist) {
+        // 歌单：进第二层看里面的歌，不直接播。
+        var at = wall.posters.indexOf(el);
+        enterDrill(tile);
+        if (at >= 0) wall.focused = at;
+      } else focusPoster(wall.posters.indexOf(el), true);
     });
 
     wall.world.appendChild(el);
@@ -674,6 +922,12 @@
     wall.focused = index;
     wall.posters.forEach(function (n, i) { n.classList.toggle('is-focused', i === index); });
     if (expand) {
+      // **先收起上一张**。开墙时若源里有 current 项，它已经被展开
+      // （openWall 里 focusPoster(idx, true)），用户再点另一张时若不收，
+      // 墙上会同时铺着两张 6×6 展开档 —— 既视觉错乱（两张都在抢注意力），
+      // 也让「展开的是哪一张」这件事变得不确定（querySelector 取到的是第一张）。
+      // 静默收起（不重绘）：列马上要按新卡重排。
+      if (wall.expanded >= 0 && wall.expanded !== index) collapse(true);
       wall.expanded = index;
       var el = wall.posters[index];
       el.classList.add('is-expanded');
@@ -681,9 +935,34 @@
       buildPosterControls(el, index);
       panTo(el);
     }
+    // 浮条跟焦点走：歌单那列没有 current，不跟焦点就永远显示第一张。
+    updatePeek();
   }
 
-  function collapse() {
+  /// 聚焦某张并保证它在视口内。
+  ///
+  /// 单独于 focusPoster 是因为**不能把这件事塞进 focusPoster**：
+  /// 方向键移动焦点时每一步都 panTo 会让键盘导航没法用（每按一次就跳一次）。
+  /// 只有「刚开墙 / 刚换源」这种一次性定位才需要。
+  ///
+  /// 为什么需要：开墙时若没有「正在播放」那张（歌单墙永远没有、在放歌时
+  /// 当前曲也不一定在源里），就退到第一张 —— 而第一张的格位在密排布局里
+  /// 完全可能落在视口外，用户看到的是一片空白，还以为墙没加载出来。
+  function focusAndReveal(index) {
+    if (index < 0 || index >= wall.posters.length) return;
+    focusPoster(index, false);
+    var el = wall.posters[index];
+    if (!el) return;
+    var r = el.getBoundingClientRect();
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    // 已经有相当一部分在视口内就不动相机，免得每次开墙都来一次无谓的平移。
+    var visible = r.right > 0 && r.bottom > 0 && r.left < vw && r.top < vh;
+    if (!visible) panTo(el);
+  }
+
+  /// 收起展开档。silent = true 时不重绘画布（换列时用，列马上要重建）。
+  function collapse(silent) {
     if (wall.expanded < 0) return;
     var el = wall.posters[wall.expanded];
     if (el) {
@@ -693,7 +972,7 @@
       if (ctl) ctl.remove();
     }
     wall.expanded = -1;
-    renderWall();
+    if (!silent) renderWall();
   }
 
   /// 相机飞过去把展开卡摆到视口中央。写 transform 而不是重排版，60fps 无压力。
@@ -743,39 +1022,60 @@
     var row = document.createElement('div');
     row.className = 'qf-chrome-row';
 
-    var prev = document.createElement('button');
-    prev.type = 'button';
-    prev.title = '上一首';
-    prev.setAttribute('aria-label', '上一首');
-    prev.innerHTML = icon('prev');
-    prev.addEventListener('click', function (e) { e.stopPropagation(); emit('play-step', { delta: -1 }); });
+    // 歌单那列没有「上一首/播放/下一首」这组控件 —— 它不是曲，
+    // 换成「打开这个歌单」一个动作，否则用户会以为点播放能直接开播。
+    if (tile && tile.isPlaylist) {
+      var open = document.createElement('button');
+      open.type = 'button';
+      // 带 .is-labelled 是因为它有文字：.qf-chrome button 给的是方形固定尺寸
+      // （给 20px 图标用的），直接放文字会被压扁。用显式 class 而不是
+      // CSS 里的 :has(span) —— :has() 在旧内核上不生效时会静默退回压扁版。
+      open.className = 'qf-chrome-play is-labelled';
+      open.title = '打开这个歌单';
+      open.setAttribute('aria-label', '打开这个歌单');
+      open.innerHTML = icon('play') + '<span>打开歌单</span>';
+      open.addEventListener('click', function (e) {
+        e.stopPropagation();
+        enterDrill(tile);
+      });
+      row.appendChild(open);
+    } else {
+      var prev = document.createElement('button');
+      prev.type = 'button';
+      prev.title = '上一首';
+      prev.setAttribute('aria-label', '上一首');
+      prev.innerHTML = icon('prev');
+      prev.addEventListener('click', function (e) { e.stopPropagation(); step(-1, tile); });
 
-    var play = document.createElement('button');
-    play.type = 'button';
-    play.className = 'qf-chrome-play';
-    play.title = tile && tile.current && tile.playing ? '暂停' : '播放';
-    play.setAttribute('aria-label', play.title);
-    play.innerHTML = icon(tile && tile.current && tile.playing ? 'pause' : 'play');
-    play.addEventListener('click', function (e) {
-      e.stopPropagation();
-      emit('play-index', { index: index });
-    });
+      var play = document.createElement('button');
+      play.type = 'button';
+      play.className = 'qf-chrome-play';
+      play.title = tile && tile.current && tile.playing ? '暂停' : '播放';
+      play.setAttribute('aria-label', play.title);
+      play.innerHTML = icon(tile && tile.current && tile.playing ? 'pause' : 'play');
+      play.addEventListener('click', function (e) {
+        e.stopPropagation();
+        // 走 activate 而不是 play-index：墙上的下标是**本视图**的下标，
+        // play-index 按的是播放队列下标，传墙上的数会播错歌。
+        emit('activate', { item: tile });
+      });
 
-    var next = document.createElement('button');
-    next.type = 'button';
-    next.title = '下一首';
-    next.setAttribute('aria-label', '下一首');
-    next.innerHTML = icon('next');
-    next.addEventListener('click', function (e) { e.stopPropagation(); emit('play-step', { delta: 1 }); });
+      var next = document.createElement('button');
+      next.type = 'button';
+      next.title = '下一首';
+      next.setAttribute('aria-label', '下一首');
+      next.innerHTML = icon('next');
+      next.addEventListener('click', function (e) { e.stopPropagation(); step(1, tile); });
 
-    var time = document.createElement('span');
-    time.className = 'qf-chrome-time';
-    time.textContent = tile && tile.duration ? fmtDur(tile.duration) : '';
+      var time = document.createElement('span');
+      time.className = 'qf-chrome-time';
+      time.textContent = tile && tile.duration ? fmtDur(tile.duration) : '';
 
-    row.appendChild(prev);
-    row.appendChild(play);
-    row.appendChild(next);
-    row.appendChild(time);
+      row.appendChild(prev);
+      row.appendChild(play);
+      row.appendChild(next);
+      row.appendChild(time);
+    }
     chrome.appendChild(row);
 
     var progress = document.createElement('div');
@@ -801,10 +1101,20 @@
       emit('seek', { ratio: Number(range.value) / 1000 });
     });
     progress.appendChild(range);
+    // 没在放的那首不给进度条 —— 第二层（刚点开的歌单）与非当前项
+    // 拖了也不知道拖的是谁，拖了还会误以为在 seek。
+    progress.hidden = !(tile && tile.current);
 
     box.appendChild(chrome);
     box.appendChild(progress);
     el.appendChild(box);
+  }
+
+  /// 上一首/下一首。按**当前这一列**走，不碰播放队列 ——
+  /// 墙上的下标是本视图的下标，混进 state.queue 会播错歌。
+  function step(delta, tile) {
+    if (!tile) return;
+    emit('activate', { item: tile, delta: delta });
   }
 
   function fmtDur(ms) {
@@ -815,9 +1125,14 @@
     return m + ':' + (s < 10 ? '0' : '') + s;
   }
 
+  /// 左下角浮条：显示「当前聚焦的那一项」。
+  ///
+  /// 不再优先找 current：歌单那列没有「正在播放」的概念（一首歌单不是在放的），
+  /// 硬找会退化成永远显示第一张，用户在看第 20 张歌单时浮条还停在第 1 张。
+  /// 聚焦优先、没有聚焦才回落到 current，最后才是第一项。
   function updatePeek() {
     if (!refs.wallPeek) return;
-    var t = wall.tiles.find(function (x) { return x.current; }) || wall.tiles[0];
+    var t = tileFor(wall.focused) || wall.tiles.find(function (x) { return x.current; }) || wall.tiles[0];
     if (!t) {
       refs.wallPeek.hidden = true;
       return;
@@ -825,6 +1140,10 @@
     refs.wallPeek.hidden = false;
     refs.wallPeekTitle.textContent = t.title;
     refs.wallPeekSub.textContent = t.artist || '未知艺术家';
+    if (refs.wallPeek) {
+      // 歌单那列的浮条标题要说明它是歌单，否则「点它会怎样」不明确。
+      refs.wallPeek.title = t.isPlaylist ? '歌单 · 点开看里面的歌' : (wall.sourceLabel || '当前');
+    }
     if (t.cover) {
       refs.wallPeekArt.style.backgroundImage = '';
       window.HertzCovers
@@ -837,11 +1156,30 @@
 
   function onWallKeydown(e) {
     if (!wall.open) return;
-    if (e.key === 'Escape') { closeWall(); return; }
+    // Esc 分层退：第二层先退回歌单列表，再按才退出整面墙。
+    // 不分层的话在歌单里按 Esc 会连墙一起关掉，用户丢掉了「回到列表」的中间态，
+    // 下次进来又要重新点一遍歌单。
+    if (e.key === 'Escape') {
+      if (wall.drill) leaveDrill();
+      else closeWall();
+      return;
+    }
+    if (e.key === 'Backspace' && wall.drill) {
+      e.preventDefault();
+      leaveDrill();
+      return;
+    }
     if (e.key === 'ArrowRight') { focusPoster(wall.focused + 1, false); e.preventDefault(); }
     else if (e.key === 'ArrowLeft') { focusPoster(wall.focused - 1, false); e.preventDefault(); }
-    else if (e.key === 'Enter') { focusPoster(wall.focused < 0 ? 0 : wall.focused, true); e.preventDefault(); }
-    else if (e.key === ' ') { focusPoster(wall.focused < 0 ? 0 : wall.focused, true); e.preventDefault(); }
+    else if (e.key === 'Enter' || e.key === ' ') {
+      var at = wall.focused < 0 ? 0 : wall.focused;
+      var t = tileFor(at);
+      e.preventDefault();
+      // 歌单项：Enter 是「打开歌单」而不是展开卡片 —— 卡片里那个
+      // 「打开歌单」按钮才是同一条路径，键盘与鼠标必须一致。
+      if (t && t.isPlaylist) enterDrill(t);
+      else focusPoster(at, true);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1191,13 +1529,37 @@
   function reflowInner() {
     syncSettingsVisibility();
     var id = currentViewId();
+    var viewKey = id.replace(/^view-/, '');
     if (refs.viewId !== id) {
       refs.column.scrollTop = 0;
-      // 队列拼接是独立浮层，切到任何业务视图都该收起来 —— 否则遮着内容。
-      if (wall.open && id !== 'view-queue') closeWall();
+      // 墙开着时切 tab —— **换源，不关墙**。
+      //
+      // 需求是「每个 tab 都有队列拼接」，所以从歌单页开着墙切到电台页，
+      // 期望看到的是电台的内容，而不是墙被关掉、用户什么也没换到。
+      // 关掉的话这个功能就退化成「只有队列 tab 有队列拼接」。
+      //
+      // 换源前先退回第一层：在歌单的第二层里切 tab 会把「歌单里的歌」
+      // 留在墙上，那属于上一个 tab 的内容。
+      if (wall.open) {
+        var wasDrill = !!wall.drill;
+        wall.drill = null;
+        wall.drillBusy = false;
+        wall.drillError = '';
+        collapse(true);
+        applySource(requestSource());
+        wall.focused = -1;
+        wall.expanded = -1;
+        renderWall();
+        // 新来源没有「正在播放」可聚焦时，落在第一张，墙不至于空着没主体。
+        if (wall.tiles.length) {
+          var at = wall.tiles.findIndex(function (t) { return t.current; });
+          focusAndReveal(at >= 0 ? at : 0);
+        }
+        if (wasDrill) applyCamera();
+      }
     }
     refs.viewId = id;
-    var navKey = id === 'view-daily' ? 'online' : id.replace(/^view-/, '');
+    var navKey = id === 'view-daily' ? 'online' : viewKey;
     // 设置视图搬进浮层后不再出现在中栏，所以浮层开着时「设置」才是当前项。
     if (sheet.open) navKey = '__settings';
     if (refs.nav) {
@@ -1208,6 +1570,13 @@
         if (selected) button.setAttribute('aria-current', 'page');
         else button.removeAttribute('aria-current');
       });
+    }
+    // 入口文案跟着当前 tab：这个入口开的是**当前视图**的墙，
+    // 固定叫「队列拼接」会让人以为在所有 tab 下看的都是播放队列。
+    if (refs.wallBtnText) {
+      var label = WALL_TAB_LABELS[viewKey] || '队列拼接';
+      refs.wallBtnText.textContent = label;
+      refs.wallBtn.setAttribute('aria-label', label);
     }
     if (refs.settingsBtn) {
       var on = sheet.open;
@@ -1323,6 +1692,18 @@
     isMounted: function () { return mounted; },
     isWallOpen: function () { return wall.open; },
     posterCount: function () { return wall.posters.length; },
-    reflow: function () { if (mounted) reflow(); }
+    reflow: function () { if (mounted) reflow(); },
+    // 墙当前这一列的只读快照。浏览器实测靠它断言「取到了哪个来源、
+    // 有几项、在不在第二层」—— 这些从 DOM 上看不出来（不同来源的卡片
+    // 结构完全一样），不看这个就只剩「墙打开了」这种没信息量的断言。
+    wallInfo: function () {
+      return {
+        sourceKey: wall.sourceKey,
+        label: wall.sourceLabel,
+        count: wall.tiles.length,
+        drill: wall.drill ? { name: wall.drill.name, playlistId: wall.drill.playlistId } : null,
+        emptyHint: wall.emptyHint,
+      };
+    },
   };
 })();
