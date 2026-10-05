@@ -4501,7 +4501,8 @@ function initPalette() {
     },
     {
       id: 'queue-save-playlist', group: '队列', title: '把队列存为歌单',
-      description: '本地曲目收进一个新歌单', keywords: 'save playlist 歌单 保存',
+      description: '本地曲目收进本地歌单，在线曲目按音源存到对应平台',
+      keywords: 'save playlist 歌单 保存',
       run: () => { if (ui.queueSave) ui.queueSave.click(); else setView('queue'); },
     },
 
@@ -6431,26 +6432,80 @@ async function startApp() {
 
   ui.queueClear.onclick = () => applyQueue(state.snapshot.track_id ? [state.snapshot.track_id] : [], true);
 
-  // 队列存为歌单（folia 的 saveCurrentQueueAsLocalPlaylist）：只收本地曲目，
-  // 在线虚拟 id 重启后本来就失效，混进去只会得到一排「未知曲目」。
+  // 队列存为歌单（folia 的 saveCurrentQueueAsLocalPlaylist）：本地曲目收进
+  // 本地歌单；在线曲目按音源拆组，各存进对应平台的在线歌单（仅限已登录且
+  // 具备 playlist_write 能力的源）。各部分独立成败，最后汇总提示。
   if (ui.queueSave) {
     ui.queueSave.onclick = async () => {
       const localIds = state.queue.filter((id) => !id.startsWith('online:'));
-      if (!localIds.length) { toast('队列里没有可保存的本地曲目', 'error'); return; }
-      const onlineSkipped = state.queue.length - localIds.length;
+      const onlineGroups = {};
+      let onlineCount = 0;
+      for (const id of state.queue) {
+        if (!id.startsWith('online:')) continue;
+        const parts = id.split(':');
+        const source = parts[1] || '';
+        const trackId = parts.slice(2).join(':'); // 平台 id 自身可能含冒号
+        if (!source || !trackId) continue;
+        (onlineGroups[source] = onlineGroups[source] || []).push(trackId);
+        onlineCount += 1;
+      }
+      if (!localIds.length && !onlineCount) { toast('队列为空', 'error'); return; }
+
+      const scope = onlineCount
+        ? (localIds.length ? `本地 ${localIds.length} 首和在线 ${onlineCount} 首（按音源拆分）` : `在线 ${onlineCount} 首（按音源拆分）`)
+        : `本地 ${localIds.length} 首`;
       const fallback = `播放队列 ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
-      const note = onlineSkipped ? `（${onlineSkipped} 首在线曲目不会保存）` : '';
-      const name = await modal().prompt(`把 ${localIds.length} 首本地曲目存为歌单${note}`, fallback);
+      const name = await modal().prompt(`把队列里的${scope}曲目存为歌单`, fallback);
       if (name === null) return;
       const trimmed = name.trim();
       if (!trimmed) { toast('歌单名称不能为空', 'error'); return; }
-      try {
-        const created = await transport.post('/v1/playlists', { name: trimmed });
-        await transport.post(`/v1/playlists/${created.id}/tracks`, { track_ids: localIds });
-        toast(`已保存《${trimmed}》（${localIds.length} 首）`);
+
+      const saved = [];
+      const problems = [];
+
+      if (localIds.length) {
+        try {
+          const created = await transport.post('/v1/playlists', { name: trimmed });
+          await transport.post(`/v1/playlists/${created.id}/tracks`, { track_ids: localIds });
+          saved.push(`本地 ${localIds.length} 首`);
+        } catch (err) {
+          problems.push(errText('本地歌单保存失败', err));
+        }
+      }
+
+      if (onlineCount) {
+        // 能力表拉不到时不拦人，逐源直接尝试（后端 gate 会给出具体原因）。
+        let writable = null;
+        try {
+          const list = await transport.get('/v1/online/sources');
+          writable = {};
+          for (const s of list.sources || []) {
+            if ((s.caps || []).includes('playlist_write')) writable[s.id] = s.label || s.id;
+          }
+        } catch (err) { writable = null; }
+        for (const [source, ids] of Object.entries(onlineGroups)) {
+          const label = (writable && writable[source]) || source;
+          if (writable && !writable[source]) {
+            problems.push(`${label}：该音源不支持写歌单（或未登录）`);
+            continue;
+          }
+          try {
+            const pl = await transport.post('/v1/online/playlist', { source, name: trimmed });
+            await transport.post('/v1/online/playlist/tracks/add', {
+              source, id: pl.id, tracks: ids.map((trackId) => ({ id: trackId })),
+            });
+            saved.push(`${label} ${ids.length} 首`);
+          } catch (err) {
+            problems.push(errText(`${label} 保存失败`, err));
+          }
+        }
+      }
+
+      if (saved.length) {
+        toast(`已保存《${trimmed}》（${saved.join('、')}）${problems.length ? `；另有 ${problems.join('；')}` : ''}`);
         loadPlaylists();
-      } catch (err) {
-        toast(errText('保存歌单失败', err), 'error');
+      } else if (problems.length) {
+        toast(`保存歌单失败：${problems.join('；')}`, 'error');
       }
     };
   }
