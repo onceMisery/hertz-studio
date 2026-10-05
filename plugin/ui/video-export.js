@@ -196,7 +196,7 @@ window.VideoExport = (function () {
           '  <div class="vex-row"><label for="vex-audio">系统声音</label>',
           '    <span class="vex-audio"><input id="vex-audio" type="checkbox" checked>',
           '    <span class="vex-hint">录制开始时会请求「共享屏幕」——选择整个屏幕并勾选「共享系统音频」；取消授权则只录画面。</span></span></div>',
-          '  <p class="vex-note">开始后自动打开沉浸声场并隐藏操作界面，舞台左上角出现录制计时；点「停止并保存」生成文件。歌词与标题会作为画面的一部分烧进视频。</p>',
+          '  <p class="vex-note">开始后自动打开沉浸声场并隐藏操作界面，舞台左上角出现录制计时；点「停止并保存」生成文件。歌词与标题会作为画面的一部分烧进视频。录制期间请保持本页面在前台：切到别的标签页或最小化后画面会停住（声音不受影响）。</p>',
           '  <div class="vex-actions"><button type="button" class="btn" data-vex="cancel">取消</button>',
           '    <button type="button" class="btn vex-primary" data-vex="start">开始录制</button></div>'
         ].join('')
