@@ -71,6 +71,11 @@ pub enum WsEvent {
         bpm: Option<f64>,
         beats_n: usize,
     },
+    /// 听歌打卡成功（网易云在线曲有效收听满 30s 已上报）。前端据此轻提示
+    /// 「已计入播放量」，其余情况保持安静。
+    Scrobbled {
+        track_id: String,
+    },
     LibraryChanged,
 }
 
@@ -200,7 +205,9 @@ enum Commit {
 pub struct DspConfig {
     pub eq_gains_db: [f32; 6],
     pub preamp_db: f32,
-    pub loudness_norm: bool,
+    /// 响度归一化档位：`off` / `track` / `album`（folia 的 ReplayGainMode 三档）。
+    /// 旧布尔键 `dsp_loudness` 在 from_settings 里迁移成 track/off。
+    pub loudness_mode: String,
     pub crossfade_ms: u64,
 }
 
@@ -214,10 +221,19 @@ impl DspConfig {
             .get("dsp_preamp")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as f32;
-        let loudness = settings
-            .get("dsp_loudness")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        // 新键是三档字符串；老键是布尔（true=track）。都缺省 = off。
+        let loudness_mode = settings
+            .get("dsp_loudness_mode")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| matches!(s.as_str(), "off" | "track" | "album"))
+            .unwrap_or_else(|| {
+                let legacy = settings
+                    .get("dsp_loudness")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if legacy { "track".into() } else { "off".into() }
+            });
         let crossfade = settings
             .get("dsp_crossfade_ms")
             .and_then(|v| v.as_u64())
@@ -225,15 +241,86 @@ impl DspConfig {
         Self {
             eq_gains_db: eq,
             preamp_db: preamp,
-            loudness_norm: loudness,
+            loudness_mode,
             crossfade_ms: crossfade,
         }
+    }
+
+    pub fn loudness_enabled(&self) -> bool {
+        self.loudness_mode != "off"
     }
 
     pub fn clamp_eq(&mut self) {
         for v in self.eq_gains_db.iter_mut() {
             *v = v.clamp(-12.0, 12.0);
         }
+    }
+}
+
+/// 防削波（folia 同款规则）：增益为正时不得超过峰值余量 −20·log10(peak)，
+/// 否则提升后的波形会顶到满幅削波。无峰值标签时原样返回，由 DSP 链尾兜底。
+pub(crate) fn anti_clip_gain(gain_db: f64, peak: Option<f64>) -> f64 {
+    match peak {
+        Some(p) if p > 0.0 && p < 1.0 && gain_db > 0.0 => gain_db.min(-20.0 * p.log10()),
+        _ => gain_db,
+    }
+}
+
+/// 听歌打卡的 seek-proof 计时器（folia `PlaybackListenTracker` 的服务端移植）。
+///
+/// 常量语义：单帧位移正向且 ≤2s 才计入（更大或倒退 = seek，不算收听）；
+/// 墙钟兜底防刷（单帧计入量 ≤ 流逝墙钟 ×1.25 + 2s）；累计满 30s、一首最多
+/// 报一次。暂停时位置冻结、位移为 0，天然不累计。
+#[derive(Default)]
+pub(crate) struct ListenTracker {
+    track_id: Option<String>,
+    listened_ms: u64,
+    last_pos: Option<u64>,
+    last_at: Option<std::time::Instant>,
+    reported: bool,
+}
+
+impl ListenTracker {
+    /// 喂一帧快照。返回「应结算的旧曲」`(虚拟 id, 有效毫秒)`：换曲/停止时。
+    fn feed(&mut self, snap: &PlayerSnapshot) -> Option<(String, u64)> {
+        let Some(track_id) = snap.track_id.clone() else {
+            return self.reset();
+        };
+        let now = std::time::Instant::now();
+        let mut settle = None;
+        if self.track_id.as_deref() != Some(track_id.as_str()) {
+            settle = self.reset();
+            self.track_id = Some(track_id);
+            self.reported = false;
+        }
+        if let (Some(last_pos), Some(last_at)) = (self.last_pos, self.last_at) {
+            let dpos = snap.position_ms.saturating_sub(last_pos);
+            let dwell = now.duration_since(last_at).as_millis() as u64;
+            if snap.playing && dpos > 0 && dpos <= 2_000 {
+                self.listened_ms += dpos.min(dwell + dwell / 4 + 2_000);
+            }
+        }
+        self.last_pos = Some(snap.position_ms);
+        self.last_at = Some(now);
+        settle
+    }
+
+    /// 清零并取走旧曲的结算值。
+    fn reset(&mut self) -> Option<(String, u64)> {
+        let out = self.harvest();
+        self.track_id = None;
+        self.listened_ms = 0;
+        out
+    }
+
+    /// 取走当前曲的结算值（≥30s 且这一轮还没报过才返回 Some）。
+    fn harvest(&mut self) -> Option<(String, u64)> {
+        if self.reported || self.listened_ms < 30_000 {
+            return None;
+        }
+        let id = self.track_id.clone()?;
+        self.reported = true;
+        Some((id, self.listened_ms))
     }
 }
 
@@ -278,6 +365,9 @@ pub struct AppState {
     /// 用户显式保留的缓存条目（`{stem}.` 前缀，含全部音质档）。启动时从
     /// settings 装载、pin/unpin 即时更新；LRU 回收与手动清理都豁免它。
     pub(crate) keep: Mutex<Vec<String>>,
+    /// 在线音频缓存的运行时上限（字节，0 = 不限）。settings 表权威
+    /// （`online_cache_max_bytes`），缺键回落 config.toml；设置页热改即时生效。
+    pub(crate) cache_max: Mutex<u64>,
     /// 自动接力连续失败计数，任一曲成功提交即清零；累计到 3 停止接力。
     pub(crate) auto_failures: AtomicUsize,
     /// 一轮跳曲走的起点：第一次失败时把「当时在播的那首」记下来，放弃时把游标还给
@@ -291,6 +381,11 @@ pub struct AppState {
     /// 启动后由 main 注入 Weak：on_track_committed 只有 &self，detach
     /// 'static 任务时凭它拿回 Arc（不改 play_index/step 的签名链）。
     pub(crate) weak_self: std::sync::OnceLock<std::sync::Weak<AppState>>,
+    /// 会话恢复的待回放进度：重启时从快照装进来，首次 play 成功提交后
+    /// seek 过去并清空（只消费一次，之后的 play/seek 都是用户自己的意图）。
+    pub(crate) pending_restore_seek: Mutex<Option<u64>>,
+    /// 听歌打卡计时器（网易云在线曲，seek-proof，见 [`ListenTracker`]）。
+    pub(crate) listen: Mutex<ListenTracker>,
 }
 
 impl AppState {
@@ -304,8 +399,12 @@ impl AppState {
 
     /// 在线试听的落盘位置。音频后端目前只吃本地文件路径，所以远程流先缓存到
     /// 这里再交给 audio actor —— 播放链路本身完全不变。
-    /// 当前播放曲目的 ReplayGain 增益（dB）；响度归一化下发用。
-    pub(crate) async fn current_rg_gain(&self) -> Option<f64> {
+    /// 当前播放曲目的响度增益（dB，已含防削波）与所选标签来源；响度归一化
+    /// 下发用。`mode` 是调用方持有的档位（off 时不该走到这里）。
+    pub(crate) async fn current_loudness(
+        &self,
+        mode: &str,
+    ) -> Option<(f64, &'static str)> {
         let cursor = match *self.cursor.lock().await {
             Some(i) => i,
             None => return None,
@@ -314,10 +413,20 @@ impl AppState {
         if crate::online::split_virtual_id(&track_id).is_some() {
             return None; // 在线曲没有 RG 标签
         }
-        vmusic_store::get_track_rg(&self.db, &track_id)
+        let rg = vmusic_store::get_track_rg(&self.db, &track_id)
             .await
             .ok()
-            .flatten()
+            .flatten()?;
+        // 按专辑档缺专辑标签时回落曲目值（folia 的回退规则）。
+        let (gain, peak, from) = if mode == "album" {
+            match (rg.album_gain, rg.album_peak) {
+                (Some(g), p) => (g, p.or(rg.track_peak), "album"),
+                (None, _) => (rg.track_gain?, rg.track_peak, "track(fallback)"),
+            }
+        } else {
+            (rg.track_gain?, rg.track_peak, "track")
+        };
+        Some((anti_clip_gain(gain, peak), from))
     }
 
     /// LRU 回收与手动清理的豁免名单：当前播放 + 用户保留项。
@@ -372,6 +481,79 @@ impl AppState {
 
     pub async fn current_index(&self) -> Option<usize> {
         *self.cursor.lock().await
+    }
+
+    /// 消费会话恢复的待回放进度：>3 秒才 seek（太短的重头播没有体感差），
+    /// 一次性——之后的 play/seek 都是用户自己的意图，不再掺和。
+    pub(crate) async fn consume_restore_seek(&self) {
+        let pending = self.pending_restore_seek.lock().await.take();
+        if let Some(pos) = pending {
+            if pos > 3000 {
+                if let Err(e) = self.audio.seek(pos).await {
+                    tracing::warn!("恢复播放进度失败（从头播）: {e}");
+                }
+            }
+        }
+    }
+
+    /// 事件泵每帧喂计时器：纯内存累积（只碰一把无争用的锁）；换曲/停止时把
+    /// 旧曲的结算甩到独立任务去上报，泵自己绝不碰网络。
+    pub(crate) async fn observe_listen(self: &Arc<Self>, snap: &PlayerSnapshot) {
+        let settle = {
+            let mut tracker = self.listen.lock().await;
+            tracker.feed(snap)
+        };
+        if let Some((id, ms)) = settle {
+            Self::spawn_scrobble(self.clone(), id, ms);
+        }
+    }
+
+    /// 自然播完（Ended）时的结算点：不换曲也要收口，否则最后一首听完不报。
+    pub(crate) async fn harvest_listen(self: &Arc<Self>) {
+        let settle = {
+            let mut tracker = self.listen.lock().await;
+            tracker.harvest()
+        };
+        if let Some((id, ms)) = settle {
+            Self::spawn_scrobble(self.clone(), id, ms);
+        }
+    }
+
+    /// 结算上报（detach）：只认网易云在线曲；`scrobble_enabled` 缺省开。
+    /// 失败只记 debug——打卡是增益功能，绝不能给播放链路制造错误条。
+    fn spawn_scrobble(state: Arc<AppState>, track_id: String, listened_ms: u64) {
+        tokio::spawn(async move {
+            let Some((source, id)) = crate::online::split_virtual_id(&track_id) else {
+                return;
+            };
+            if source != "netease" {
+                return;
+            }
+            let enabled = vmusic_store::settings::get(&state.db, "scrobble_enabled")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if !enabled {
+                return;
+            }
+            // time 参数封顶 10 分钟：畸形计时（快进外的高频帧）也不至于离谱。
+            let seconds = (listened_ms / 1000).clamp(30, 600);
+            let ctx = crate::routes::online_ctx(&state);
+            crate::diaglog!("scrobble.report", track = id.as_str(), seconds = seconds);
+            match crate::online::scrobble(&ctx, &source, &id, seconds).await {
+                Ok(()) => {
+                    tracing::info!("听歌打卡成功：netease:{id}（{seconds}s）");
+                    state.publish(WsEvent::Scrobbled {
+                        track_id: track_id.clone(),
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!("听歌打卡失败（不打扰播放）: {e:?}");
+                }
+            }
+        });
     }
 
     /// Loads and starts the track at `index` of the current queue.
@@ -513,13 +695,21 @@ impl AppState {
                 );
                 vmusic_core::CoreError::NotFound(track_id.clone())
             })?;
-        // 响度归一化：曲目有 RG 标签且开关开启时下发曲目增益。失败不影响播放。
+        // 响度归一化：按档位挑标签（album 缺专辑值回落曲目），增益为正时
+        // 用峰值做防削波。失败不影响播放。
         let dsp = self.dsp.lock().await.clone();
-        let track_gain_db = if dsp.loudness_norm {
-            vmusic_store::get_track_rg(&self.db, &track_id)
+        let track_gain_db = if dsp.loudness_enabled() {
+            self.current_loudness(&dsp.loudness_mode)
                 .await
-                .ok()
-                .flatten()
+                .map(|(gain, from)| {
+                    crate::diaglog!(
+                        "loudness.apply",
+                        mode = dsp.loudness_mode.as_str(),
+                        from = from,
+                        gain_db = gain
+                    );
+                    gain
+                })
                 .unwrap_or(0.0) as f32
         } else {
             0.0
@@ -1261,14 +1451,15 @@ impl AppState {
             // 回收时被删掉——「最新文件始终保留」只在同一次回收内成立，跨次
             // 回收后当前曲可能已不是最新。
             let protected = s.protected_all().await;
-            if let Err(e) = crate::online::cache::enforce_limit(
-                &s.online_cache_dir(),
-                s.config.online.cache_max_bytes,
-                &protected,
-            )
-            .await
-            {
-                tracing::warn!("缓存 LRU 回收失败: {e}");
+            // 0 = 不限：enforce_limit 会把 0 当成「删到什么都不剩」，这里必须挡。
+            let max = *s.cache_max.lock().await;
+            if max > 0 {
+                if let Err(e) =
+                    crate::online::cache::enforce_limit(&s.online_cache_dir(), max, &protected)
+                        .await
+                {
+                    tracing::warn!("缓存 LRU 回收失败: {e}");
+                }
             }
         });
     }
@@ -1785,6 +1976,39 @@ fn random_index(len: usize, exclude: Option<usize>) -> usize {
     }
 }
 
+/// 会话快照的周期保存（5 秒一拍）：队列 + 游标 + 当前进度落 settings 表。
+/// 崩溃最多丢 5 秒进度。空转（无队列、无曲目、没在放）不写——恢复失败或
+/// 无会话的启动里，旧快照值得原样留着，不该被空快照覆盖。
+pub fn spawn_session_saver(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let snap = state.audio.snapshot();
+            let queue = state.queue.lock().await.clone();
+            if queue.is_empty() && snap.track_id.is_none() && !snap.playing {
+                continue;
+            }
+            let cursor = state.current_index().await;
+            let saved_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            crate::persist::save_session(
+                &state.db,
+                &crate::persist::SessionSnapshot {
+                    queue,
+                    cursor,
+                    position_ms: snap.position_ms,
+                    saved_at,
+                },
+            )
+            .await;
+        }
+    });
+}
+
 /// Bridges audio-actor events onto the WebSocket bus and drives auto-advance.
 pub fn spawn_event_pump(state: Arc<AppState>) {
     let mut rx = state.audio.subscribe();
@@ -1800,13 +2024,19 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
             match event {
-                AudioEvent::Snapshot(snap) => state.publish(WsEvent::State(snap)),
+                AudioEvent::Snapshot(snap) => {
+                    state.publish(WsEvent::State(snap.clone()));
+                    // 听歌打卡计时：纯内存累积，结算才 detach 网络任务。
+                    state.observe_listen(&snap).await;
+                }
                 AudioEvent::Spectrum(bands) => state.publish(WsEvent::Spectrum { bands }),
                 AudioEvent::Ended {
                     generation,
                     track_id,
                 } => {
                     state.publish(WsEvent::Ended);
+                    // 自然播完是听歌打卡的收口点之一（换曲帧在 Snapshot 里收）。
+                    state.harvest_listen().await;
                     crate::diaglog!(
                         "play.end",
                         gen = generation,
@@ -1925,11 +2155,14 @@ pub(crate) mod tests {
             protected: Default::default(),
             dsp: Mutex::new(DspConfig::from_settings(&Default::default())),
             keep: Default::default(),
+            cache_max: Mutex::new(0),
             auto_failures: Default::default(),
             skip_walk_from: Default::default(),
             quality: Default::default(),
             stage_beats: Default::default(),
             weak_self: Default::default(),
+            pending_restore_seek: Default::default(),
+            listen: Default::default(),
         };
         (state, handle)
     }

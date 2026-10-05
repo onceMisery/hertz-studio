@@ -72,9 +72,11 @@ routes.forEach((r) => {
 });
 
 // 每个 JS/CSS 资源常量都必须有一条路由，否则浏览器会 404。
-// index.html 是特例：它由 `/` 那条路由用 index() 处理器返回，不走 asset()。
+// 例外：INDEX_HTML 由 `/` 那条路由用 index() 处理器返回；OVERLAY_HTML 是
+// OBS 浮层独立页（不在 index.html 里引用，由 /overlay 出、自带数据轮询）。
+const STANDALONE_PAGES = new Set(['INDEX_HTML', 'OVERLAY_HTML']);
 includes.forEach((inc) => {
-  if (inc.name === 'INDEX_HTML') return;
+  if (STANDALONE_PAGES.has(inc.name)) return;
   ok(routes.some((r) => r.const === inc.name), `${inc.name} 有对应的路由`);
 });
 
@@ -110,7 +112,7 @@ const linkedJsSource = linkedJs
   })
   .join('\n');
 includes.forEach((inc) => {
-  if (inc.name === 'INDEX_HTML') return;
+  if (STANDALONE_PAGES.has(inc.name)) return;
   const abs = path.resolve(path.join(ROOT, 'crates', 'hertz-studio', 'src'), inc.rel);
   const href = path.relative(WEB, abs).split(path.sep).join('/');
   ok(linkedCss.includes(href) || linkedJs.includes(href) || linkedJsSource.includes(`'${href}'`)
@@ -145,6 +147,7 @@ const REQUIRE_BEFORE = [
   ['stage-immersive.js', 'app.js'],
   ['creative-stage.js', 'app.js'],              // app.js 调 CreativeStage.init()
   ['stage.js', 'app.js'],
+  ['palette.js', 'app.js'],                      // 命令由 app.js 注册进面板
   ['vendor/qrcode.js', 'online-login.js']      // 扫码弹窗读 window.qrcode
 ];
 

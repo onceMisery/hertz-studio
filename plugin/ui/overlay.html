@@ -1,0 +1,311 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MIT -->
+<!-- Copyright (c) 2026 hertz-studio contributors -->
+<!--
+  OBS 歌词浮层页（folia 浮层输出的等价物）。
+
+  用法：在 OBS 里添加「浏览器源」，URL 填
+    http://127.0.0.1:7634/overlay?token=<令牌>&style=<风格>
+  风格四种：
+    full     全页歌词：完整歌词列表滚动，当前行高亮（默认）
+    line     单行大字：屏幕中央只显示当前行
+    karaoke  点唱机：封面 + 标题/歌手 + 当前行 + 进度
+    minimal  底部条：左下角标题与当前行，其余全透明
+
+  可选参数：
+    &scale=1.2        全局字号倍率
+    &align=left       full 模式文本对齐（left|center|right，默认 center）
+    &color=%23ffffff  文字主色（十六进制，需 URL 编码 #）
+    &dim=0.45         非当前行透明度（0-1，full 模式）
+
+  页面 500ms 轮询一次 /v1/overlay/lyric，两次轮询之间用本地时钟内插进度，
+  所以歌词滚动是平滑的、不跟着轮询节拍一跳一跳。背景保持全透明（OBS 浏览器
+  源默认透明），需要底色请自行在 OBS 里叠一层。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hertz-studio · 歌词浮层</title>
+<style>
+  :root {
+    --fg: #f5f6f7;
+    --fg-dim: rgba(245, 246, 247, 0.4);
+    --accent: #7dd8ff;
+    --scale: 1;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body {
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    color: var(--fg);
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+
+  /* ---------- full：全页歌词 ---------- */
+  .full { height: 100%; display: flex; flex-direction: column; justify-content: center; padding: 6vh 7vw; }
+  .full .lines { overflow: hidden; max-height: 100%; }
+  .full .inner { display: flex; flex-direction: column; gap: calc(14px * var(--scale)); transition: transform 0.45s cubic-bezier(.25,.8,.3,1); }
+  .full .l {
+    font-size: calc(24px * var(--scale));
+    line-height: 1.45;
+    color: var(--fg-dim);
+    transition: color 0.3s, transform 0.3s, opacity 0.3s;
+    transform-origin: left center;
+  }
+  .full .l.active { color: var(--fg); font-weight: 600; transform: scale(1.06); }
+  .full .l.past { opacity: 0.55; }
+  .full .l .tr { display: block; font-size: 0.62em; color: var(--fg-dim); font-weight: 400; }
+  .full .l.active .tr { color: var(--fg-dim); }
+
+  /* ---------- line：单行大字 ---------- */
+  .line { height: 100%; display: grid; place-items: center; padding: 0 8vw; text-align: center; }
+  .line .cur {
+    font-size: calc(44px * var(--scale));
+    font-weight: 700;
+    line-height: 1.3;
+    text-shadow: 0 2px 18px rgba(0, 0, 0, 0.45);
+    transition: opacity 0.25s;
+    max-width: 100%;
+  }
+  .line .cur.empty { opacity: 0.25; font-weight: 400; }
+  .line .cur .tr { display: block; font-size: 0.5em; font-weight: 400; opacity: 0.6; margin-top: 0.35em; }
+
+  /* ---------- karaoke：点唱机 ---------- */
+  .karaoke { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: calc(18px * var(--scale)); padding: 5vh 6vw; text-align: center; }
+  .karaoke .cover-wrap { width: calc(150px * var(--scale)); height: calc(150px * var(--scale)); border-radius: 14px; overflow: hidden; box-shadow: 0 14px 44px rgba(0, 0, 0, 0.5); background: rgba(255, 255, 255, 0.06); flex: none; }
+  .karaoke .cover-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .karaoke .cover-wrap .disc { width: 100%; height: 100%; display: grid; place-items: center; font-size: calc(40px * var(--scale)); opacity: 0.3; }
+  .karaoke .meta { min-height: calc(30px * var(--scale)); }
+  .karaoke .title { font-size: calc(22px * var(--scale)); font-weight: 700; }
+  .karaoke .artist { font-size: calc(15px * var(--scale)); color: var(--fg-dim); margin-top: 2px; }
+  .karaoke .cur {
+    font-size: calc(26px * var(--scale));
+    font-weight: 600;
+    min-height: calc(36px * var(--scale));
+    transition: opacity 0.25s;
+    text-shadow: 0 2px 14px rgba(0, 0, 0, 0.45);
+  }
+  .karaoke .cur.empty { opacity: 0.25; font-weight: 400; }
+  .karaoke .cur .tr { display: block; font-size: 0.6em; font-weight: 400; opacity: 0.6; }
+  .karaoke .bar { width: min(420px, 70%); height: calc(4px * var(--scale)); border-radius: 99px; background: rgba(255, 255, 255, 0.14); overflow: hidden; }
+  .karaoke .bar i { display: block; height: 100%; width: 0%; border-radius: 99px; background: var(--accent); transition: width 0.2s linear; }
+  .karaoke .paused { position: absolute; top: 14px; right: 18px; font-size: calc(13px * var(--scale)); color: var(--fg-dim); letter-spacing: 2px; }
+
+  /* ---------- minimal：底部条 ---------- */
+  .minimal { height: 100%; display: flex; align-items: flex-end; padding: 0 0 5vh 4vw; }
+  .minimal .box { border-left: 3px solid var(--accent); padding-left: 16px; }
+  .minimal .title { font-size: calc(15px * var(--scale)); font-weight: 700; margin-bottom: 3px; }
+  .minimal .title .artist { font-weight: 400; color: var(--fg-dim); }
+  .minimal .cur { font-size: calc(20px * var(--scale)); min-height: calc(28px * var(--scale)); transition: opacity 0.25s; }
+  .minimal .cur.empty { opacity: 0.25; }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="view full hidden" id="v-full">
+    <div class="lines" id="full-lines"><div class="inner" id="full-inner"></div></div>
+  </div>
+
+  <div class="view line hidden" id="v-line">
+    <div class="cur empty" id="line-cur">…</div>
+  </div>
+
+  <div class="view karaoke hidden" id="v-karaoke">
+    <span class="paused hidden" id="karaoke-paused">已暂停</span>
+    <div class="cover-wrap"><img id="karaoke-cover" alt="" class="hidden"><div class="disc" id="karaoke-disc">♪</div></div>
+    <div class="meta">
+      <div class="title" id="karaoke-title">未在播放</div>
+      <div class="artist" id="karaoke-artist"></div>
+    </div>
+    <div class="cur empty" id="karaoke-cur">…</div>
+    <div class="bar"><i id="karaoke-bar"></i></div>
+  </div>
+
+  <div class="view minimal hidden" id="v-minimal">
+    <div class="box">
+      <div class="title"><span id="min-title">未在播放</span> <span class="artist" id="min-artist"></span></div>
+      <div class="cur empty" id="min-cur">…</div>
+    </div>
+  </div>
+
+<script>
+'use strict';
+(function () {
+  var params = new URLSearchParams(location.search);
+  var TOKEN = params.get('token') || '';
+  var STYLE = ['full', 'line', 'karaoke', 'minimal'].indexOf(params.get('style')) >= 0
+    ? params.get('style') : 'full';
+  var SCALE = Math.max(0.4, Math.min(4, parseFloat(params.get('scale')) || 1));
+  var ALIGN = ['left', 'center', 'right'].indexOf(params.get('align')) >= 0
+    ? params.get('align') : 'center';
+  var COLOR = params.get('color');
+  var DIM = Math.max(0, Math.min(1, parseFloat(params.get('dim')) || 0.45));
+
+  document.documentElement.style.setProperty('--scale', String(SCALE));
+  if (COLOR) {
+    try { document.documentElement.style.setProperty('--fg', decodeURIComponent(COLOR)); } catch (e) { /* 坏颜色就用默认 */ }
+  }
+
+  var $ = function (id) { return document.getElementById(id); };
+  var views = { full: $('v-full'), line: $('v-line'), karaoke: $('v-karaoke'), minimal: $('v-minimal') };
+  views[STYLE].classList.remove('hidden');
+  if (STYLE === 'full') views.full.style.textAlign = ALIGN;
+
+  var state = {
+    trackId: null,
+    lines: [],
+    playing: false,
+    positionMs: 0,
+    durationMs: 0,
+    fetchedAt: 0,
+    lastActive: -1,
+    coverFor: null,
+  };
+
+  function activeIndexAt(posMs) {
+    var lines = state.lines;
+    if (!lines.length) return -1;
+    var lo = 0, hi = lines.length - 1, found = -1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      if (lines[mid].startTime * 1000 <= posMs) { found = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    return found;
+  }
+
+  /// 两次轮询之间的播放位置：拿「抓取时刻的 position + 流逝的墙钟」内插，
+  /// 暂停时停在抓取值上。这样歌词滚动是平滑的，不跟着 500ms 轮询一跳一跳。
+  function interpolatedPos() {
+    if (!state.playing) return state.positionMs;
+    return state.positionMs + Math.max(0, performance.now() - state.fetchedAt);
+  }
+
+  function lineHtml(line) {
+    var esc = function (s) {
+      return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    };
+    return esc(line.text)
+      + (line.translation ? '<span class="tr">' + esc(line.translation) + '</span>' : '');
+  }
+
+  function renderFull(active) {
+    var inner = $('full-inner');
+    if (state.trackId == null) { inner.innerHTML = ''; return; }
+    if (!inner.childElementCount || inner.dataset.track !== state.trackId) {
+      inner.dataset.track = state.trackId;
+      inner.innerHTML = '';
+      state.lines.forEach(function (line) {
+        var div = document.createElement('div');
+        div.className = 'l';
+        div.innerHTML = lineHtml(line);
+        inner.appendChild(div);
+      });
+      state.lastActive = -1;
+    }
+    if (active === state.lastActive) return;
+    var rows = inner.children;
+    for (var i = 0; i < rows.length; i++) {
+      var isActive = i === active;
+      rows[i].classList.toggle('active', isActive);
+      rows[i].classList.toggle('past', i < active);
+      rows[i].style.opacity = isActive ? '' : String(Math.max(0.15, DIM));
+    }
+    if (active >= 0) {
+      var viewport = $('full-lines').clientHeight;
+      var row = rows[active];
+      var offset = row.offsetTop - viewport / 2 + row.offsetHeight / 2;
+      inner.style.transform = 'translateY(' + (-Math.max(0, offset)) + 'px)';
+    }
+    state.lastActive = active;
+  }
+
+  function renderSingle(el, active) {
+    if (state.trackId == null) { el.textContent = '…'; el.classList.add('empty'); return; }
+    var line = active >= 0 ? state.lines[active] : null;
+    if (line) {
+      el.innerHTML = lineHtml(line);
+      el.classList.remove('empty');
+    } else {
+      el.textContent = '♪';
+      el.classList.add('empty');
+    }
+  }
+
+  function renderKaraoke(active) {
+    var cover = state.cover;
+    var img = $('karaoke-cover'), disc = $('karaoke-disc');
+    if (state.trackId == null) {
+      $('karaoke-title').textContent = '未在播放';
+      $('karaoke-artist').textContent = '';
+      img.classList.add('hidden'); disc.classList.remove('hidden');
+      $('karaoke-bar').style.width = '0%';
+    } else {
+      $('karaoke-title').textContent = state.title || '';
+      $('karaoke-artist').textContent = state.artist || '';
+      if (state.coverFor !== state.trackId) {
+        state.coverFor = state.trackId;
+        if (cover) {
+          img.src = cover + (cover.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
+          img.classList.remove('hidden'); disc.classList.add('hidden');
+        } else {
+          img.classList.add('hidden'); disc.classList.remove('hidden');
+        }
+      }
+      var dur = state.durationMs || 0;
+      $('karaoke-bar').style.width = dur ? Math.min(100, interpolatedPos() / dur * 100) + '%' : '0%';
+    }
+    $('karaoke-paused').classList.toggle('hidden', state.playing || state.trackId == null);
+    renderSingle($('karaoke-cur'), active);
+  }
+
+  function renderMinimal(active) {
+    if (state.trackId == null) {
+      $('min-title').textContent = '未在播放';
+      $('min-artist').textContent = '';
+    } else {
+      $('min-title').textContent = state.title || '';
+      $('min-artist').textContent = state.artist ? '· ' + state.artist : '';
+    }
+    renderSingle($('min-cur'), active);
+  }
+
+  function render() {
+    var active = activeIndexAt(interpolatedPos());
+    if (STYLE === 'full') renderFull(active);
+    else if (STYLE === 'line') renderSingle($('line-cur'), active);
+    else if (STYLE === 'karaoke') renderKaraoke(active);
+    else renderMinimal(active);
+  }
+
+  async function poll() {
+    try {
+      var res = await fetch('/v1/overlay/lyric?token=' + encodeURIComponent(TOKEN), { cache: 'no-store' });
+      if (res.ok) {
+        var data = await res.json();
+        state.trackId = data.track_id || null;
+        state.title = data.title || '';
+        state.artist = data.artist || '';
+        state.cover = data.cover || null;
+        state.lines = data.lines || [];
+        state.playing = !!data.playing;
+        state.positionMs = data.position_ms || 0;
+        state.durationMs = data.duration_ms || 0;
+        state.fetchedAt = performance.now();
+      }
+    } catch (e) { /* 服务重启等瞬时失败：保持上一帧，下一轮再试 */ }
+  }
+
+  poll();
+  setInterval(poll, 500);
+  // 渲染走 rAF：位置内插 + 平滑滚动都在这一层，轮询只负责喂数据。
+  (function loop() { render(); requestAnimationFrame(loop); })();
+})();
+</script>
+</body>
+</html>

@@ -63,6 +63,8 @@ const ui = {
   setNavFavorites: $('set-nav-favorites'),
   setQueueAdd: $('set-queue-add'),
   setPlaybackEntry: $('set-playback-entry'),
+  setAutoPlay: $('set-auto-play'),
+  setScrobble: $('set-scrobble'),
   setLyricOffsetValue: $('set-lyric-offset-value'),
   setLyricOffsetDown: $('set-lyric-offset-down'),
   setLyricOffsetUp: $('set-lyric-offset-up'),
@@ -89,6 +91,7 @@ const ui = {
   libBatchPlaylist: $('lib-batch-playlist'),
   libBatchFav: $('lib-batch-fav'),
   libBatchEdit: $('lib-batch-edit'),
+  libBatchComplete: $('lib-batch-complete'),
   libBatchClear: $('lib-batch-clear'),
   backupExport: $('backup-export'),
   backupImport: $('backup-import'),
@@ -97,6 +100,14 @@ const ui = {
   m3uFile: $('m3u-file'),
   plDetailM3u: $('pl-detail-m3u'),
   cacheUsage: $('cache-usage'),
+  cacheBreakdown: $('cache-breakdown'),
+  cacheLimit: $('cache-limit'),
+  overlayGroup: $('overlay-group'),
+  overlayStyle: $('overlay-style'),
+  overlayCopy: $('overlay-copy'),
+  overlayOpen: $('overlay-open'),
+  videoExportGroup: $('video-export-group'),
+  videoExportOpen: $('video-export-open'),
   cacheClear: $('cache-clear'),
   cacheKeepCurrent: $('cache-keep-current'),
   cacheKeepList: $('cache-keep-list'),
@@ -164,6 +175,9 @@ const ui = {
   queueList: $('queue-list'),
   queueCount: $('queue-count'),
   queueClear: $('queue-clear'),
+  queueSave: $('queue-save'),
+  sleepTimer: $('sleep-timer'),
+  sleepTimerLabel: $('sleep-timer-label'),
   queueBadge: $('queue-badge'),
 
   setDevice: $('set-device'),
@@ -952,6 +966,10 @@ function handleEvent(msg) {
       // 服务端后台分析完成：是否拉取由 StageCinema 自己按当前曲目判断。
       if (window.StageCinema && StageCinema.onBeatmapReady) StageCinema.onBeatmapReady(msg);
       break;
+    case 'scrobbled':
+      // 网易云听歌打卡成功（有效收听满 30s）：轻提示确认「播放量 +1」。
+      toast(`已计入网易云播放量${state.current ? `：${state.current.title}` : ''}`);
+      break;
     default: break;
   }
 }
@@ -1390,6 +1408,8 @@ async function applyQueue(list, opts) {
 // 队列原先只存在于服务端内存且没有查询端点，刷新页面即丢失。补了 GET 之后
 // 这里能在重连 / 刷新后把它取回来；没有该端点的旧版静默降级。
 let queueReadEpoch = 0;
+// 启动自动播放只认「会话恢复后的第一拍」，一次机会，用掉即熄火。
+let bootAutoPlayArmed = true;
 async function restoreQueue() {
   const epoch = ++queueReadEpoch;
   const revision = PlaybackIntent.queueRevision;
@@ -1402,6 +1422,29 @@ async function restoreQueue() {
       state.queueIds = state.queue;
       state.queueIndex = data.index ?? state.queue.indexOf(state.snapshot.track_id);
       renderQueue();
+      // 会话恢复（服务端重启后）：快照还没有曲目——音频惰性起播，但游标已
+      // 指向上次听到的那首。把它填进控制条并高亮队列行，按播放键即接续。
+      const restoredId = !state.snapshot.track_id
+        && state.queueIndex >= 0 ? state.queue[state.queueIndex] : null;
+      if (restoredId) {
+        loadNowPlaying(restoredId);
+        syncQueuePlaying({ track_id: restoredId, playing: false }, true);
+        if (bootAutoPlayArmed) {
+          bootAutoPlayArmed = false;
+          // 设置与队列并行加载，这里再取一次设置才有可靠值；只发生一次。
+          transport.get('/v1/settings').then((s) => {
+            if (s && s.startup_auto_play) {
+              // 播放落点（开始播放时自动进入）不跟自动恢复走：那是手动
+              // 开始播放的行为，启动恢复不算（与 folia 语义一致）。
+              state.entryArmed = false;
+              transport.post('/v1/player/play', {}).catch(() => {});
+            }
+          }).catch(() => {});
+        }
+      } else if (bootAutoPlayArmed) {
+        // 快照已有曲目（页面刷新、服务未重启）：不存在恢复语义，直接熄火。
+        bootAutoPlayArmed = false;
+      }
     }
   } catch { /* 端点不存在时忽略 */ }
 }
@@ -3064,6 +3107,7 @@ function openContextMenu(track, anchor, event) {
       ? state.playlists.map((p) => ({ label: p.name, run: () => addToPlaylist(p.id, track.id) }))
       : [{ label: '（暂无歌单）', disabled: true }] },
     { label: '编辑信息', run: () => editTrackInfo(track) },
+    { label: '联网补全信息', run: () => completeTrackInfo(track) },
     { label: '替换封面', run: () => replaceTrackCover(track) },
     { label: '重置编辑', run: () => resetTrackEdit(track) },
   ];
@@ -3184,6 +3228,28 @@ async function editTrackInfo(track) {
     .then(() => loadTracks(true))
     .then(() => toast('信息已更新'))
     .catch((err) => toast(errText('编辑失败', err), 'error'));
+}
+
+// 联网补全单曲：右键菜单入口（folia 的 LocalSongMetadataMatchDialog 的
+// 免弹窗版——单曲直接跑，结果用 toast 汇报）。
+async function completeTrackInfo(track) {
+  toast(`正在为《${track.title}》匹配在线信息…`);
+  try {
+    const res = await transport.post('/v1/tracks/complete', { track_ids: [track.id] });
+    const r = (res.results && res.results[0]) || {};
+    if (r.status !== 'matched') {
+      toast('没有找到足够相似的在线匹配（标题需命中且总分达标）');
+      return;
+    }
+    const fills = [];
+    if (r.filled && r.filled.album) fills.push('专辑');
+    if (r.filled && r.filled.cover) fills.push('封面');
+    if (r.filled && r.filled.lyrics) fills.push('歌词');
+    toast(fills.length ? `已补齐${fills.join('、')}` : '匹配成功，本地信息已齐全、无需补齐');
+    if (fills.length) { loadTracks(true); loadFacets(); }
+  } catch (err) {
+    toast(errText('联网补全失败', err), 'error');
+  }
 }
 
 function replaceTrackCover(track) {
@@ -3409,6 +3475,8 @@ async function loadSettings() {
   ui.setQueueAdd.value = state.settings.queue_add_behavior === 'end' ? 'end' : 'next';
   ui.setPlaybackEntry.value = ['stage', 'wall'].indexOf(state.settings.playback_entry) >= 0
     ? state.settings.playback_entry : 'none';
+  if (ui.setAutoPlay) ui.setAutoPlay.checked = state.settings.startup_auto_play === true;
+  if (ui.setScrobble) ui.setScrobble.checked = state.settings.scrobble_enabled !== false;
   paintLyricSettings();
   setCoverFollow(state.settings.cover_follow !== false, false);
   // 导航里「每日推荐」的可见性：关掉就把入口摘掉，其它菜单项不受影响。
@@ -4216,6 +4284,299 @@ function setCoverFollow(value, persist) {
 }
 
 // ---------------------------------------------------------------------------
+// 睡眠定时器（folia 的 sleep timer）：到点暂停播放。偏好时长跨会话记住，
+// 运行中的倒计时只活在内存里——刷新/重开页面即失效，与 folia 行为一致。
+// ---------------------------------------------------------------------------
+
+const SLEEP_TIMER_KEY = 'vmusic.sleep-timer-preset';
+const sleepState = { deadline: 0, timer: 0 };
+
+function sleepPresetMinutes() {
+  const v = Number(localStorage.getItem(SLEEP_TIMER_KEY));
+  return Number.isFinite(v) && v > 0 ? v : 30;
+}
+
+function sleepRemainingMs() {
+  return sleepState.deadline ? Math.max(0, sleepState.deadline - Date.now()) : 0;
+}
+
+function sleepLabel(remainingMs) {
+  const total = Math.ceil(remainingMs / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+    : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function renderSleepTimer() {
+  if (!ui.sleepTimer) return;
+  const active = sleepState.deadline > 0;
+  ui.sleepTimer.classList.toggle('is-active', active);
+  ui.sleepTimer.setAttribute('aria-pressed', String(active));
+  const label = active ? sleepLabel(sleepRemainingMs()) : '';
+  if (ui.sleepTimerLabel) {
+    ui.sleepTimerLabel.hidden = !active;
+    if (active) ui.sleepTimerLabel.textContent = label;
+  }
+  ui.sleepTimer.title = active ? `睡眠定时：还剩 ${label}` : '睡眠定时器';
+}
+
+function stopSleepTicker() {
+  if (sleepState.timer) { clearInterval(sleepState.timer); sleepState.timer = 0; }
+}
+
+function clearSleepTimer(silent) {
+  sleepState.deadline = 0;
+  stopSleepTicker();
+  renderSleepTimer();
+  if (!silent) toast('已取消睡眠定时');
+}
+
+function armSleepTimer(minutes) {
+  if (!(minutes > 0)) return;
+  localStorage.setItem(SLEEP_TIMER_KEY, String(minutes));
+  sleepState.deadline = Date.now() + minutes * 60 * 1000;
+  stopSleepTicker();
+  sleepState.timer = setInterval(() => {
+    if (!sleepRemainingMs()) {
+      clearSleepTimer(true);
+      toast('睡眠定时到了，已暂停播放');
+      post('/v1/player/pause');
+      return;
+    }
+    renderSleepTimer();
+  }, 500);
+  renderSleepTimer();
+  toast(`将在 ${minutes} 分钟后暂停播放`);
+}
+
+function openSleepTimerMenu(anchor) {
+  const preset = sleepPresetMinutes();
+  const items = [
+    { label: '取消定时', disabled: !sleepState.deadline, run: () => clearSleepTimer() },
+    { sep: true },
+    ...[15, 30, 45, 60, 90].map((m) => ({
+      label: `${m} 分钟${m === preset ? ' ✓' : ''}`,
+      run: () => armSleepTimer(m),
+    })),
+    {
+      label: '自定义分钟数…',
+      run: async () => {
+        const v = await modal().prompt('多少分钟后暂停播放？（分钟，1–1440）', String(preset));
+        if (v === null) return;
+        const m = Number(v);
+        if (!Number.isFinite(m) || m < 1 || m > 1440) { toast('请输入 1–1440 之间的分钟数', 'error'); return; }
+        armSleepTimer(Math.round(m));
+      },
+    },
+  ];
+  buildMenu(ui.menu, items);
+  const rect = anchor.getBoundingClientRect();
+  showMenu(rect.left, rect.bottom + 6);
+}
+
+function initSleepTimer() {
+  if (!ui.sleepTimer) return;
+  // 菜单在同一次点击里建起，document 的 closeMenu 监听会立刻清掉它（与批量
+  // 加入歌单同一坑），必须挡冒泡。
+  ui.sleepTimer.onclick = (e) => { e.stopPropagation(); openSleepTimerMenu(ui.sleepTimer); };
+  renderSleepTimer();
+}
+
+// ---------------------------------------------------------------------------
+// 命令面板（palette.js 的引擎 + 这里的命令注册）。命令用闭包拿 app.js 里的
+// 一切（播放控制、视图切换、睡眠定时、队列操作……），面板本体不认识业务。
+// ---------------------------------------------------------------------------
+
+/// 队列批量方言（folia 的 queueQuery）：`artist:xxx --remove` / `album:xx --next`
+/// / `自由词 --end`。当前曲永远豁免（与 folia 的 skip-current 规则一致）。
+function paletteQueueBatch(query) {
+  if (!/--(remove|rm|delete|next|end)\b/i.test(query)) return null;
+  const action = /--(remove|rm|delete)\b/i.test(query) ? 'remove'
+    : (/--next\b/i.test(query) ? 'next' : 'end');
+  const facetMatch = query.match(/(artist|album|歌手|专辑)\s*[:：]\s*(.+?)(?=\s*--|$)/i);
+  let facet = null;
+  let filterText = '';
+  if (facetMatch) {
+    facet = /^(artist|歌手)$/i.test(facetMatch[1]) ? 'artist' : 'album';
+    filterText = facetMatch[2].trim();
+  } else {
+    filterText = query.replace(/--\S+/g, '').replace(/(artist|album|歌手|专辑)\s*[:：]\s*/gi, '').trim();
+  }
+  if (!filterText) return null;
+  const current = state.snapshot.track_id;
+  const needle = filterText.toLowerCase();
+  const matched = [];
+  state.queue.forEach((id) => {
+    if (id === current) return;
+    const meta = state.byId.get(id) || (window.Online && window.Online.getMeta(id));
+    if (!meta) return;
+    const field = facet === 'artist' ? (meta.artist || '')
+      : facet === 'album' ? (meta.album || '')
+        : `${meta.title || ''} ${meta.artist || ''} ${meta.album || ''}`;
+    if (String(field).toLowerCase().includes(needle)) matched.push(id);
+  });
+  if (!matched.length) return null;
+  const actionLabel = action === 'remove' ? '移出队列' : action === 'next' ? '插到当前曲之后' : '移到队尾';
+  const facetLabel = facet ? (facet === 'artist' ? '歌手' : '专辑') : '关键词';
+  const names = matched.slice(0, 6)
+    .map((id) => ((state.byId.get(id) || {}).title) || id);
+  return {
+    label: `${actionLabel}：${facetLabel}「${filterText}」命中 ${matched.length} 首`,
+    sub: `${names.join('、')}${matched.length > 6 ? '…' : ''}（Enter 应用）`,
+    apply: () => {
+      if (action === 'remove') {
+        applyQueue(state.queue.filter((id) => !matched.includes(id)), true);
+        toast(`已移出 ${matched.length} 首`);
+        return;
+      }
+      const rest = state.queue.filter((id) => !matched.includes(id));
+      const list = rest.slice();
+      if (action === 'next' && current) {
+        list.splice(Math.max(0, list.indexOf(current)) + 1, 0, ...matched);
+      } else {
+        list.push(...matched);
+      }
+      applyQueue(list, true);
+      toast(`已把 ${matched.length} 首${action === 'next' ? '插到当前曲目之后' : '移到队尾'}`);
+    },
+  };
+}
+
+function initPalette() {
+  if (!window.Palette) return;
+  const P = window.Palette;
+  P.registerQueueBatch(paletteQueueBatch);
+
+  const cmds = [
+    // --- 播放 ---
+    { id: 'play-toggle', group: '播放', title: '播放 / 暂停', keywords: 'play pause 播放 暂停', run: () => togglePlay() },
+    { id: 'play-next', group: '播放', title: '下一首', keywords: 'next 下一首', run: () => post('/v1/player/next') },
+    { id: 'play-prev', group: '播放', title: '上一首', keywords: 'previous 上一首', run: () => post('/v1/player/previous') },
+    { id: 'play-stop', group: '播放', title: '停止播放', keywords: 'stop 停止', run: () => post('/v1/player/stop') },
+    { id: 'play-seek-fwd', group: '播放', title: '快进 30 秒', keywords: 'seek forward 快进', run: () => seekRelative(30) },
+    { id: 'play-seek-back', group: '播放', title: '快退 30 秒', keywords: 'seek backward 快退', run: () => seekRelative(-30) },
+    {
+      id: 'play-mode', group: '播放', title: '切换播放模式',
+      description: '列表循环 → 单曲循环 → 随机', keywords: 'mode repeat shuffle 循环 随机',
+      run: () => {
+        const order = ['repeat', 'repeat_one', 'shuffle'];
+        const next = order[(order.indexOf(state.snapshot.mode) + 1) % order.length];
+        transport.post('/v1/player/mode', { mode: next }).catch(() => {});
+      },
+    },
+    {
+      id: 'play-mute', group: '播放', title: '静音 / 取消静音', keywords: 'mute volume 静音 音量',
+      run: () => {
+        const v = Number(ui.volume.value) > 0 ? 0 : unmutedVolume;
+        ui.volume.value = String(v);
+        setVolumeFromInput();
+        toast(v ? '已取消静音' : '已静音');
+      },
+    },
+
+    // --- 视图 ---
+    { id: 'view-library', group: '导航', title: '转到：曲库', keywords: 'library 曲库 本地', run: () => setView('library') },
+    { id: 'view-online', group: '导航', title: '转到：在线曲库', keywords: 'online 在线 搜索', run: () => setView('online') },
+    { id: 'view-playlists', group: '导航', title: '转到：歌单', keywords: 'playlist 歌单', run: () => setView('playlists') },
+    { id: 'view-daily', group: '导航', title: '转到：每日推荐', keywords: 'daily 推荐 每日', run: () => setView('daily') },
+    { id: 'view-queue', group: '导航', title: '转到：播放队列', keywords: 'queue 队列', run: () => setView('queue') },
+    { id: 'view-favorites', group: '导航', title: '转到：收藏', keywords: 'favorite 收藏 红心', run: () => setView('favorites') },
+    { id: 'view-settings', group: '导航', title: '转到：设置', keywords: 'settings 设置', run: () => setView('settings') },
+    { id: 'view-search', group: '导航', title: '聚焦搜索框', keywords: 'search 搜索 查找', run: () => focusSearch(true) },
+
+    // --- 队列 ---
+    {
+      id: 'queue-clear', group: '队列', title: '清空队列（保留当前曲目）',
+      keywords: 'clear queue 清空', run: () => applyQueue(state.snapshot.track_id ? [state.snapshot.track_id] : [], true),
+    },
+    {
+      id: 'queue-save-playlist', group: '队列', title: '把队列存为歌单',
+      description: '本地曲目收进一个新歌单', keywords: 'save playlist 歌单 保存',
+      run: () => { if (ui.queueSave) ui.queueSave.click(); else setView('queue'); },
+    },
+
+    // --- 舞台 ---
+    {
+      id: 'stage-open', group: '舞台', title: '打开沉浸声场',
+      keywords: 'stage 3d 沉浸 声场 舞台 fullscreen',
+      run: () => { try { if (window.Stage3D) Stage3D.open(Stage3D.stageId ? Stage3D.stageId() : undefined); } catch (e) { try { Stage3D.open(); } catch (e2) { toast('沉浸声场不可用', 'error'); } } },
+    },
+    {
+      id: 'stage-close', group: '舞台', title: '关闭沉浸声场',
+      keywords: 'stage close 关闭 退出',
+      run: () => { try { if (window.Stage3D) Stage3D.close(); } catch (e) { /* 不在舞台里 */ } },
+    },
+
+    // --- 睡眠定时 ---
+    ...[15, 30, 45, 60, 90].map((m) => ({
+      id: `sleep-${m}`, group: '睡眠定时', title: `${m} 分钟后暂停播放`,
+      keywords: `sleep timer 睡眠 定时 ${m}`,
+      run: () => armSleepTimer(m),
+    })),
+    { id: 'sleep-cancel', group: '睡眠定时', title: '取消睡眠定时', keywords: 'sleep cancel 取消', run: () => clearSleepTimer() },
+
+    // --- 外观 ---
+    ...(window.Theme && Theme.list ? Theme.list().map((t) => ({
+      id: `theme-${t.id}`, group: '主题', title: `主题：${t.name}`,
+      keywords: `theme 主题 配色 ${t.name} ${t.note || ''}`,
+      run: () => Theme.apply(t.id),
+    })) : []),
+    ...(window.Skins && Skins.list ? Skins.list().map((s) => ({
+      id: `skin-${s.id}`, group: '皮肤', title: `皮肤：${s.name}`,
+      description: s.note || '', keywords: `skin 皮肤 布局 ${s.name}`,
+      run: () => Skins.apply(s.id),
+    })) : []),
+
+    // --- 工具 ---
+    {
+      id: 'tool-video-export', group: '工具', title: '录制歌词视频',
+      description: '舞台画面 + 歌词 + 系统声音，录成 MP4/WebM',
+      keywords: 'video export record 录制 导出 视频 歌词 mv',
+      available: () => window.VideoExport && VideoExport.supported()
+        && !(window.hertzHost && window.hertzHost.isDbx),
+      run: () => VideoExport.open(),
+    },
+    {
+      id: 'tool-video-export-stop', group: '工具', title: '停止录制并保存',
+      keywords: 'video stop record 停止 保存 录制',
+      available: () => window.VideoExport && typeof VideoExport.isRecording === 'function'
+        ? VideoExport.isRecording() : false,
+      run: () => VideoExport.stop(),
+    },
+    {
+      id: 'tool-copy-overlay', group: '工具', title: '复制 OBS 歌词浮层地址',
+      description: '粘进 OBS 浏览器源即可显示歌词', keywords: 'obs overlay 歌词 浮层 直播',
+      available: () => !(window.hertzHost && window.hertzHost.isDbx),
+      run: async () => {
+        const style = ui.overlayStyle ? ui.overlayStyle.value : 'full';
+        const url = `${location.origin}/overlay?token=${encodeURIComponent(TOKEN)}&style=${encodeURIComponent(style)}`;
+        try { await writeClipboard(url); toast('浮层地址已复制'); } catch (e) { toast(errText('复制失败', e), 'error'); }
+      },
+    },
+    {
+      id: 'tool-scrobble-toggle', group: '工具', title: '切换网易云听歌打卡',
+      keywords: 'scrobble 打卡 播放量',
+      run: async () => {
+        const next = state.settings.scrobble_enabled === false;
+        state.settings.scrobble_enabled = next;
+        if (ui.setScrobble) ui.setScrobble.checked = next;
+        await transport.put('/v1/settings', { scrobble_enabled: next }).catch(() => {});
+        toast(next ? '听歌打卡已开启' : '听歌打卡已关闭');
+      },
+    },
+    {
+      id: 'tool-rescan', group: '工具', title: '重新扫描曲库',
+      keywords: 'scan rescan 扫描 曲库',
+      run: () => { startScan(); },
+    },
+  ];
+  P.register(cmds);
+}
+
+// ---------------------------------------------------------------------------
 // 快捷键
 // ---------------------------------------------------------------------------
 
@@ -4235,7 +4596,14 @@ function bindShortcuts() {
     if (e.defaultPrevented) return;
     const target = document.activeElement;
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable;
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); focusSearch(true); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      // 命令面板接管 Ctrl+K（folia 的 command palette）；面板没加载时回落
+      // 到旧的聚焦搜索。
+      if (window.Palette) Palette.open();
+      else focusSearch(true);
+      return;
+    }
     if (e.key === 'Escape') { closeMenu(); closeNowPlaying(); if (typing) document.activeElement.blur(); setView(state.view); document.body.classList.remove('stage-open'); document.body.classList.remove('sheen-search'); return; }
     if (e.key === '/' && !typing) { e.preventDefault(); focusSearch(false); return; }
     if (typing || e.ctrlKey || e.metaKey || e.altKey || target.closest('button, a, [role="button"], [role="slider"]')) return;
@@ -5514,7 +5882,51 @@ async function startApp() {
         .catch((err) => toast(errText('批量编辑失败', err), 'error'));
     };
   }
+  // 联网补全（folia 的「整理歌曲信息」）：匹配网易云，只补缺失的
+  // 封面/歌词/专辑，不覆盖已有信息。
+  if (ui.libBatchComplete) {
+    ui.libBatchComplete.onclick = async () => {
+      const ids = [...state.selected].filter((id) => !id.startsWith('online:'));
+      if (!ids.length) { toast('请先勾选要补全的本地曲目', 'error'); return; }
+      const btn = ui.libBatchComplete;
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = `补全中（0/${ids.length}）…`;
+      // 逐批推进进度提示：一次最多 50 首，超过自动分批串行。
+      try {
+        let matched = 0, noMatch = 0, failed = 0;
+        let covers = 0, lyrics = 0, albums = 0;
+        for (let i = 0; i < ids.length; i += 50) {
+          const chunk = ids.slice(i, i + 50);
+          btn.textContent = `补全中（${Math.min(i + chunk.length, ids.length)}/${ids.length}）…`;
+          const res = await transport.post('/v1/tracks/complete', { track_ids: chunk });
+          matched += res.matched || 0;
+          noMatch += res.no_match || 0;
+          failed += res.failed || 0;
+          covers += res.filled_covers || 0;
+          lyrics += res.filled_lyrics || 0;
+          albums += res.filled_albums || 0;
+        }
+        const parts = [`匹配 ${matched}`, `未匹配 ${noMatch}`];
+        if (failed) parts.push(`失败 ${failed}`);
+        const fills = [];
+        if (covers) fills.push(`${covers} 张封面`);
+        if (lyrics) fills.push(`${lyrics} 份歌词`);
+        if (albums) fills.push(`${albums} 个专辑`);
+        toast(`整理完成：${parts.join('、')}${fills.length ? `，补齐了${fills.join('、')}` : ''}`);
+        clearSelection();
+        loadTracks(true);
+        loadFacets();
+      } catch (err) {
+        toast(errText('联网补全失败', err), 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+    };
+  }
   // 在线缓存：设置页显示占用与保留名单，进入设置视图时刷新一次。
+  const SOURCE_NAMES = { netease: '网易云', qq: 'QQ音乐', kugou: '酷狗', kuwo: '酷我', qishui: '汽水', ccmixter: 'CCMixter' };
   async function loadCacheStats() {
     if (!ui.cacheUsage) return;
     try {
@@ -5522,8 +5934,47 @@ async function startApp() {
       const mb = (n) => `${(n / 1024 / 1024).toFixed(1)} MB`;
       ui.cacheUsage.textContent = stats.max_bytes
         ? `${mb(stats.total_bytes)} / ${mb(stats.max_bytes)} · ${stats.files} 个文件`
-        : `${mb(stats.total_bytes)} · ${stats.files} 个文件`;
-      const bySource = Object.fromEntries(stats.by_source || []);
+        : `${mb(stats.total_bytes)} · ${stats.files} 个文件 · 不限容量`;
+      // 分项展示：按音源分组（folia 的 cache usage breakdown）。
+      if (ui.cacheBreakdown) {
+        const bySource = (stats.by_source || []).filter(([, bytes]) => bytes > 0);
+        if (bySource.length) {
+          ui.cacheBreakdown.hidden = false;
+          ui.cacheBreakdown.innerHTML = '';
+          for (const [source, bytes] of bySource) {
+            const row = document.createElement('div');
+            row.className = 'cache-source-row';
+            const label = document.createElement('span');
+            label.className = 'cache-source-name';
+            if (window.Online && window.Online.badge) {
+              label.appendChild(window.Online.badge(source));
+              label.appendChild(document.createTextNode(` ${SOURCE_NAMES[source] || source}`));
+            } else {
+              label.textContent = SOURCE_NAMES[source] || source;
+            }
+            const size = document.createElement('span');
+            size.className = 'cache-source-size';
+            size.textContent = mb(bytes);
+            row.appendChild(label);
+            row.appendChild(size);
+            ui.cacheBreakdown.appendChild(row);
+          }
+        } else {
+          ui.cacheBreakdown.hidden = true;
+        }
+      }
+      // 上限选择器回填：预设 GB 档位 + 当前值不属于任何档时追加一项。
+      if (ui.cacheLimit) {
+        const gb = Math.round((stats.max_bytes || 0) / 1024 / 1024 / 1024);
+        const known = [...ui.cacheLimit.options].some((o) => Number(o.value) === gb);
+        if (!known) {
+          const opt = document.createElement('option');
+          opt.value = String(gb);
+          opt.textContent = `${gb} GB`;
+          ui.cacheLimit.appendChild(opt);
+        }
+        ui.cacheLimit.value = String(gb);
+      }
       if (ui.cacheKeepList) {
         const keep = stats.keep || [];
         if (!keep.length) {
@@ -5534,10 +5985,57 @@ async function startApp() {
           ui.cacheKeepList.textContent = `已保留 ${keep.length} 项：${keep.map((k) => k.replace(/-$/, '')).join('、')}`;
         }
       }
-      void bySource;
     } catch { /* 缓存统计拉取失败不阻塞设置页 */ }
   }
   window.__loadCacheStats = loadCacheStats;
+  // 上限热改：写后端 settings + 立即 LRU 回收，回包后刷新占用。
+  if (ui.cacheLimit) {
+    ui.cacheLimit.onchange = async () => {
+      const gb = Number(ui.cacheLimit.value) || 0;
+      try {
+        await transport.post('/v1/online/cache/limit', { max_bytes: gb * 1024 * 1024 * 1024 });
+        toast(gb ? `缓存上限已设为 ${gb} GB` : '缓存上限已设为不限');
+        loadCacheStats();
+      } catch (err) {
+        toast(errText('设置缓存上限失败', err), 'error');
+        loadCacheStats();
+      }
+    };
+  }
+  // 歌词输出（OBS 浮层）：插件形态没有本地 HTTP 服务，整组隐藏。
+  if (ui.overlayGroup) {
+    if (window.hertzHost && window.hertzHost.isDbx) {
+      ui.overlayGroup.hidden = true;
+    } else {
+      const overlayUrl = () => `${location.origin}/overlay?token=${encodeURIComponent(TOKEN)}&style=${encodeURIComponent(ui.overlayStyle.value)}`;
+      if (ui.overlayCopy) {
+        ui.overlayCopy.onclick = async () => {
+          try {
+            await writeClipboard(overlayUrl());
+            toast('浮层地址已复制，粘进 OBS 浏览器源即可');
+          } catch (err) {
+            toast(errText('复制失败', err), 'error');
+          }
+        };
+      }
+      if (ui.overlayOpen) {
+        ui.overlayOpen.onclick = () => window.open(overlayUrl(), '_blank');
+      }
+    }
+  }
+  // 歌词视频导出：模块自管弹窗与录制管线，这里只提供入口与降级说明。
+  if (ui.videoExportGroup) {
+    if (window.hertzHost && window.hertzHost.isDbx) {
+      ui.videoExportGroup.hidden = true;
+    } else if (ui.videoExportOpen) {
+      if (window.VideoExport && VideoExport.supported()) {
+        ui.videoExportOpen.onclick = () => VideoExport.open();
+      } else {
+        ui.videoExportOpen.disabled = true;
+        ui.videoExportOpen.title = '当前浏览器不支持 MediaRecorder，无法录制';
+      }
+    }
+  }
   if (ui.cacheClear) {
     ui.cacheClear.onclick = async () => {
       try {
@@ -5733,7 +6231,9 @@ async function startApp() {
         input.value = cfg.eq_gains_db[Number(input.dataset.band)] || 0;
       });
       ui.dspPreamp.value = cfg.preamp_db;
-      ui.dspLoudness.checked = !!cfg.loudness_norm;
+      // 三档响度：旧后端可能仍回布尔 loudness_norm，true 视作 track。
+      ui.dspLoudness.value = (typeof cfg.loudness_mode === 'string' && cfg.loudness_mode)
+        || (cfg.loudness_norm ? 'track' : 'off');
       ui.dspCrossfade.value = cfg.crossfade_ms;
     } catch { /* 设置读取失败不阻塞 */ }
   }
@@ -5745,7 +6245,7 @@ async function startApp() {
           eq_gains_db: [...ui.dspEq.querySelectorAll('input[data-band]')]
             .map((i) => Number(i.value)),
           preamp_db: Number(ui.dspPreamp.value) || 0,
-          loudness_norm: ui.dspLoudness.checked,
+          loudness_mode: ui.dspLoudness.value || 'off',
           crossfade_ms: Math.max(0, Number(ui.dspCrossfade.value) || 0),
         };
         await transport.post('/v1/player/dsp', body);
@@ -5759,7 +6259,7 @@ async function startApp() {
     ui.dspReset.onclick = () => {
       ui.dspEq.querySelectorAll('input[data-band]').forEach((i) => { i.value = 0; });
       ui.dspPreamp.value = 0;
-      ui.dspLoudness.checked = false;
+      ui.dspLoudness.value = 'off';
       ui.dspCrossfade.value = 0;
     };
   }
@@ -5913,6 +6413,30 @@ async function startApp() {
 
   ui.queueClear.onclick = () => applyQueue(state.snapshot.track_id ? [state.snapshot.track_id] : [], true);
 
+  // 队列存为歌单（folia 的 saveCurrentQueueAsLocalPlaylist）：只收本地曲目，
+  // 在线虚拟 id 重启后本来就失效，混进去只会得到一排「未知曲目」。
+  if (ui.queueSave) {
+    ui.queueSave.onclick = async () => {
+      const localIds = state.queue.filter((id) => !id.startsWith('online:'));
+      if (!localIds.length) { toast('队列里没有可保存的本地曲目', 'error'); return; }
+      const onlineSkipped = state.queue.length - localIds.length;
+      const fallback = `播放队列 ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
+      const note = onlineSkipped ? `（${onlineSkipped} 首在线曲目不会保存）` : '';
+      const name = await modal().prompt(`把 ${localIds.length} 首本地曲目存为歌单${note}`, fallback);
+      if (name === null) return;
+      const trimmed = name.trim();
+      if (!trimmed) { toast('歌单名称不能为空', 'error'); return; }
+      try {
+        const created = await transport.post('/v1/playlists', { name: trimmed });
+        await transport.post(`/v1/playlists/${created.id}/tracks`, { track_ids: localIds });
+        toast(`已保存《${trimmed}》（${localIds.length} 首）`);
+        loadPlaylists();
+      } catch (err) {
+        toast(errText('保存歌单失败', err), 'error');
+      }
+    };
+  }
+
   ui.setDevice.onchange = () => transport.post('/v1/devices/select', { id: ui.setDevice.value }).catch(() => {});
   initRenderMode();
 
@@ -5938,6 +6462,23 @@ async function startApp() {
     state.settings.playback_entry = ui.setPlaybackEntry.value;
     transport.put('/v1/settings', { playback_entry: ui.setPlaybackEntry.value }).catch(() => {});
   };
+  // 启动自动播放（folia 的 autoPlayOnLaunch）：会话恢复的收尾开关，服务端
+  // 设置表持久化，restoreQueue 里按它决定要不要自动按下播放键。
+  if (ui.setAutoPlay) {
+    ui.setAutoPlay.checked = state.settings.startup_auto_play === true;
+    ui.setAutoPlay.onchange = () => {
+      state.settings.startup_auto_play = ui.setAutoPlay.checked;
+      transport.put('/v1/settings', { startup_auto_play: ui.setAutoPlay.checked }).catch(() => {});
+    };
+  }
+  // 网易云听歌打卡：后端在每次结算时读设置（缺省开），这里只写开关。
+  if (ui.setScrobble) {
+    ui.setScrobble.checked = state.settings.scrobble_enabled !== false;
+    ui.setScrobble.onchange = () => {
+      state.settings.scrobble_enabled = ui.setScrobble.checked;
+      transport.put('/v1/settings', { scrobble_enabled: ui.setScrobble.checked }).catch(() => {});
+    };
+  }
   // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。
   ui.setLyricOffsetDown.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.max(-2000, globalLyricOffsetMs() - 100) });
   ui.setLyricOffsetUp.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.min(2000, globalLyricOffsetMs() + 100) });
@@ -6304,6 +6845,8 @@ async function startApp() {
   initStage();
   initCreative();
   bindShortcuts();
+  initSleepTimer();
+  initPalette();
   initBarAutohide();
   initPanelBridge();
   initQingfengBridge();

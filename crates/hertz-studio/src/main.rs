@@ -22,6 +22,8 @@ use state::AppState;
 /// ——这是本地优先分发的基本前提。代价是改 plugin/ui/ 下的任何文件都要重新编译。
 /// 加一个文件在这里加一行、在下面的路由表里加一行，其余不用动。
 const INDEX_HTML: &str = include_str!("../../../plugin/ui/index.html");
+// OBS 歌词浮层页：自包含单文件（样式与脚本都内联），只依赖 /v1/overlay/lyric。
+const OVERLAY_HTML: &str = include_str!("../../../plugin/ui/overlay.html");
 const HOST_JS: &str = include_str!("../../../plugin/ui/host.js");
 const DIALOGS_JS: &str = include_str!("../../../plugin/ui/dialogs.js");
 const APP_JS: &str = include_str!("../../../plugin/ui/app.js");
@@ -106,6 +108,10 @@ const ONLINE_CSS: &str = include_str!("../../../plugin/ui/online.css");
 const FAVORITES_JS: &str = include_str!("../../../plugin/ui/favorites.js");
 const DAILY_JS: &str = include_str!("../../../plugin/ui/daily.js");
 const DAILY_VIEW_JS: &str = include_str!("../../../plugin/ui/daily-view.js");
+// 命令面板：引擎与 UI（命令由 app.js 注册），Ctrl+K 唤起。
+const PALETTE_JS: &str = include_str!("../../../plugin/ui/palette.js");
+// 歌词视频导出：自包含模块（弹窗/画幅/录制管线），设置页与命令面板唤起。
+const VIDEO_EXPORT_JS: &str = include_str!("../../../plugin/ui/video-export.js");
 
 // 主题壁纸。与 JS/CSS 不同，这里是二进制资源，所以用 `include_bytes!`。
 //
@@ -195,6 +201,7 @@ const PLATFORM_ICONS: &[(&str, &[u8])] = &[
 
 const JS: &str = "application/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
+const HTML: &str = "text/html; charset=utf-8";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -314,6 +321,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/favorites.js", get(|| asset(JS, FAVORITES_JS)))
         .route("/daily.js", get(|| asset(JS, DAILY_JS)))
         .route("/daily-view.js", get(|| asset(JS, DAILY_VIEW_JS)))
+        .route("/palette.js", get(|| asset(JS, PALETTE_JS)))
+        .route("/video-export.js", get(|| asset(JS, VIDEO_EXPORT_JS)))
         .route("/style.css", get(|| asset(CSS, STYLE_CSS)))
         .route("/stage.css", get(|| asset(CSS, STAGE_CSS)))
         .route("/creative.css", get(|| asset(CSS, CREATIVE_CSS)))
@@ -358,6 +367,9 @@ async fn main() -> anyhow::Result<()> {
                 move || index(state.clone())
             }),
         )
+        // OBS 浮层页：静态壳不走鉴权（没有数据），数据端点 /v1/overlay/lyric
+        // 自带 token 校验，页面从 ?token= 读。与 index 同款 no-cache。
+        .route("/overlay", get(|| asset(HTML, OVERLAY_HTML)))
         .with_state(state.clone());
 
     let bind = args.bind.unwrap_or_else(|| config.server.bind.clone());

@@ -69,6 +69,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/tracks/facets", get(track_facets))
         .route("/v1/tracks/batch-edit", post(batch_edit_tracks))
         .route("/v1/tracks/batch-delete", post(batch_delete_tracks))
+        // 本地歌曲在线补全（folia 的「整理歌曲信息」）：匹配打分 + 补缺。
+        .route("/v1/tracks/complete", post(complete_tracks))
         .route("/v1/tracks/missing", get(list_missing_tracks))
         .route("/v1/tracks/{id}", get(get_track))
         .route("/v1/tracks/{id}/cover", get(get_cover).post(replace_cover))
@@ -152,6 +154,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(online_radio_status).post(online_radio),
         )
         .route("/v1/online/cache", get(online_cache_stats))
+        .route("/v1/online/cache/limit", post(online_cache_limit))
         .route("/v1/online/cache/clear", post(online_cache_clear))
         .route("/v1/online/cache/keep", post(online_cache_keep))
         .route(
@@ -182,6 +185,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/online/account", get(online_account))
         // 节拍地图：200 完整地图 / 202 分析中 / 404 不可用（前端静默回落 onset）。
         .route("/v1/stage/beatmap", get(beatmap))
+        // OBS 歌词输出：「正在播放」歌词+播放态快照，轮询驱动 /overlay 浮层页。
+        .route("/v1/overlay/lyric", get(overlay_lyric))
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new().route("/v1/health", get(health)).merge(api)
@@ -318,6 +323,20 @@ async fn get_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
 }
 
 async fn play(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    // 会话恢复后的首次 play：audio 里还没装任何曲目，但队列/游标已从快照
+    // 回来——按游标起播，提交成功后把上次进度 seek 回去。此后走正常路径。
+    if state.audio.snapshot().track_id.is_none() {
+        if let Some(index) = state.current_index().await {
+            let outcome = state
+                .play_index_for(index, None, PlayTrigger::Pick)
+                .await?;
+            if outcome.committed {
+                state.consume_restore_seek().await;
+                state.post_commit_background();
+            }
+            return Ok(get_state(State(state)).await);
+        }
+    }
     let commit = state.play_commit.lock().await;
     state
         .play_generation
@@ -532,7 +551,8 @@ async fn get_dsp(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_jso
 pub struct DspUpdate {
     pub eq_gains_db: Option<[f32; 6]>,
     pub preamp_db: Option<f32>,
-    pub loudness_norm: Option<bool>,
+    /// 响度归一化档位：off / track / album。旧字段名 loudness_norm 不再接受。
+    pub loudness_mode: Option<String>,
     pub crossfade_ms: Option<u64>,
 }
 
@@ -552,8 +572,11 @@ async fn set_dsp(
     if let Some(pre) = body.preamp_db {
         cfg.preamp_db = pre.clamp(-24.0, 12.0);
     }
-    if let Some(l) = body.loudness_norm {
-        cfg.loudness_norm = l;
+    if let Some(mode) = &body.loudness_mode {
+        if !matches!(mode.as_str(), "off" | "track" | "album") {
+            return Err(bad_request("loudness_mode 只接受 off / track / album"));
+        }
+        cfg.loudness_mode = mode.clone();
     }
     if let Some(ms) = body.crossfade_ms {
         cfg.crossfade_ms = ms.min(8000);
@@ -564,7 +587,7 @@ async fn set_dsp(
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     for (key, value) in [
         ("dsp_preamp", serde_json::json!(cfg.preamp_db)),
-        ("dsp_loudness", serde_json::json!(cfg.loudness_norm)),
+        ("dsp_loudness_mode", serde_json::json!(cfg.loudness_mode)),
         ("dsp_crossfade_ms", serde_json::json!(cfg.crossfade_ms)),
     ] {
         vmusic_store::settings::set(&state.db, key, &value)
@@ -572,8 +595,12 @@ async fn set_dsp(
             .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     }
     // 即时生效：EQ/增益走 set_dsp，交叉淡化走 set_crossfade。
-    let track_gain = if cfg.loudness_norm {
-        state.current_rg_gain().await.unwrap_or(0.0) as f32
+    let track_gain = if cfg.loudness_enabled() {
+        state
+            .current_loudness(&cfg.loudness_mode)
+            .await
+            .map(|(gain, _)| gain)
+            .unwrap_or(0.0) as f32
     } else {
         0.0
     };
@@ -874,6 +901,15 @@ pub(crate) struct BatchDeleteRequest {
     pub(crate) track_ids: Vec<String>,
 }
 
+/// 本地歌曲在线补全（薄壳：逻辑在 `complete.rs`，RPC 门面共用）。
+async fn complete_tracks(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::complete::CompleteRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let report = crate::complete::complete_tracks(&state, &body).await?;
+    Ok(Json(report))
+}
+
 async fn get_cover(State(state): State<Arc<AppState>>, AxumPath(id): AxumPath<String>) -> Response {
     let dir = state.cover_dir();
     let found = ["jpg", "png", "webp", "gif"].iter().find_map(|ext| {
@@ -1075,14 +1111,12 @@ async fn get_lyrics(
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
+    let imported = saved
+        .as_ref()
+        .map(|s| !s.content.trim().is_empty())
+        .unwrap_or(false);
 
-    let path = Path::new(&track.path);
-    let (mut doc, imported) = match saved.filter(|s| !s.content.trim().is_empty()) {
-        Some(saved) => (vmusic_lyrics::parse_lrc(&saved.content), true),
-        None => (read_embedded_or_sidecar_lyrics(path).await, false),
-    };
-    doc.offset_ms += user_offset;
-    vmusic_lyrics::apply_offset(&mut doc);
+    let doc = lyric_doc_for(&state, &track).await;
 
     let body = serde_json::to_value(&doc).map_err(|e| internal(e.to_string()))?;
     let mut body = match body {
@@ -1100,6 +1134,24 @@ async fn get_lyrics(
         serde_json::Value::from(user_offset),
     );
     Ok(Json(serde_json::Value::Object(body)))
+}
+
+/// 本地曲目的完整取词链（imported > embedded > sidecar，含用户偏移叠加）。
+/// `/v1/tracks/{id}/lyrics` 与 OBS 浮层共用这一份。
+pub(crate) async fn lyric_doc_for(
+    state: &AppState,
+    track: &vmusic_core::Track,
+) -> vmusic_core::LyricDocument {
+    let saved = vmusic_store::lyrics::get(&state.db, &track.id).await.ok().flatten();
+    let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
+    let path = Path::new(&track.path);
+    let mut doc = match saved.filter(|s| !s.content.trim().is_empty()) {
+        Some(saved) => vmusic_lyrics::parse_lrc(&saved.content),
+        None => read_embedded_or_sidecar_lyrics(path).await,
+    };
+    doc.offset_ms += user_offset;
+    vmusic_lyrics::apply_offset(&mut doc);
+    doc
 }
 
 /// 无手动导入时的回退链：容器内嵌歌词标签 → 同目录 sidecar `.lrc`。
@@ -1183,6 +1235,155 @@ async fn set_lyrics_offset(
     Ok(Json(
         serde_json::json!({ "ok": true, "offset_ms": body.offset_ms }),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// OBS 歌词输出（folia 的本地歌词 API + 浮层页）
+// ---------------------------------------------------------------------------
+
+/// 空闲态的统一形状：没有曲目时也回 200 + 空文档，浮层页不必分流错误。
+fn overlay_idle() -> serde_json::Value {
+    serde_json::json!({
+        "track_id": serde_json::Value::Null,
+        "title": serde_json::Value::Null,
+        "artist": serde_json::Value::Null,
+        "album": serde_json::Value::Null,
+        "cover": serde_json::Value::Null,
+        "playing": false,
+        "position_ms": 0,
+        "duration_ms": serde_json::Value::Null,
+        "offset": 0,
+        "wordByWord": false,
+        "lines": [],
+    })
+}
+
+/// 「正在播放」的歌词快照，folia `/v1/lyric` 形状（offset 毫秒 / 行与词的
+/// startTime、endTime 秒）扩展了播放态字段：OBS 浏览器源 500ms 轮询这一个
+/// 端点就能驱动全部浮层风格。本地曲走完整取词链，在线曲走音源代理；
+/// 全局歌词偏移（设置表 `global_lyric_offset_ms`）与界面同口径应用。
+/// 两个宿主共用这一份（HTTP handler 与 RPC 门面都是薄壳）。
+pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
+    let snap = state.audio.snapshot();
+    let Some(track_id) = snap.track_id.clone() else {
+        return overlay_idle();
+    };
+
+    let global_offset = vmusic_store::settings::get(&state.db, "global_lyric_offset_ms")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let (title, artist, album, cover, mut doc) =
+        if let Some((source, ref_id)) = crate::online::split_virtual_id(&track_id) {
+            let meta = state.online_meta.lock().await.get(&track_id).cloned();
+            let doc = online::lyric(&online_ctx(&state), &source, &ref_id)
+                .await
+                .unwrap_or_else(|_| vmusic_core::LyricDocument::empty());
+            let cover = meta
+                .as_ref()
+                .and_then(|m| m.cover.as_deref())
+                .filter(|c| !c.is_empty())
+                .map(|c| format!("/v1/online/cover?url={}", urlencode(c)));
+            (
+                meta.as_ref()
+                    .map(|m| m.title.clone())
+                    .unwrap_or_else(|| ref_id.clone()),
+                meta.as_ref().and_then(|m| m.artist.clone()),
+                meta.as_ref().and_then(|m| m.album.clone()),
+                cover,
+                doc,
+            )
+        } else {
+            let Ok(Some(track)) = vmusic_store::get_track(&state.db, &track_id).await else {
+                return overlay_idle();
+            };
+            // 取词链与 /v1/tracks/{id}/lyrics 相同（imported > embedded >
+            // sidecar），但偏移在这里统一叠加后再一次性应用：文件 [offset:] +
+            // 每曲用户偏移 + 全局偏移。apply_offset 不是幂等的，绝不能叠加两次。
+            let saved = vmusic_store::lyrics::get(&state.db, &track.id)
+                .await
+                .ok()
+                .flatten();
+            let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
+            let path = Path::new(&track.path);
+            let mut doc = match saved.filter(|s| !s.content.trim().is_empty()) {
+                Some(saved) => vmusic_lyrics::parse_lrc(&saved.content),
+                None => read_embedded_or_sidecar_lyrics(path).await,
+            };
+            doc.offset_ms += user_offset;
+            let cover = track
+                .has_cover
+                .then(|| format!("/v1/tracks/{}/cover", track.id));
+            (
+                track.title.clone(),
+                track.artist.clone(),
+                track.album.clone(),
+                cover,
+                doc,
+            )
+        };
+    // 全局偏移最后叠加，两种来源都只应用这一次。
+    doc.offset_ms += global_offset;
+    vmusic_lyrics::apply_offset(&mut doc);
+
+    let word_by_word = doc.lines.iter().any(|l| !l.words.is_empty());
+    let translation = doc.translation.as_deref();
+    let lines: Vec<serde_json::Value> = doc
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let mut v = serde_json::json!({
+                "text": line.text,
+                "startTime": line.start_ms as f64 / 1000.0,
+                "endTime": line.end_ms.map(|e| e as f64 / 1000.0),
+                "words": line.words.iter().map(|w| serde_json::json!({
+                    "text": w.text,
+                    "startTime": w.start_ms as f64 / 1000.0,
+                    "endTime": w.end_ms.map(|e| e as f64 / 1000.0),
+                })).collect::<Vec<_>>(),
+            });
+            if let Some(tr) = translation.and_then(|t| t.get(i)) {
+                if !tr.trim().is_empty() {
+                    v["translation"] = serde_json::Value::String(tr.clone());
+                }
+            }
+            v
+        })
+        .collect();
+
+    serde_json::json!({
+        "track_id": track_id,
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "cover": cover,
+        "playing": snap.playing,
+        "position_ms": snap.position_ms,
+        "duration_ms": snap.duration_ms,
+        "offset": doc.offset_ms,
+        "wordByWord": word_by_word,
+        "lines": lines,
+    })
+}
+
+/// HTTP 壳：`GET /v1/overlay/lyric`。永不失败（空闲/查不到曲都回 200 空文档），
+/// OBS 浏览器源轮询不需要错误分流。
+async fn overlay_lyric(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(overlay_lyric_data(&state).await)
+}
+
+/// 查询串编码（复用 Url 的 pairs 编码器，与前端 encodeURIComponent 同类语义）。
+fn urlencode(text: &str) -> String {
+    let mut u = reqwest::Url::parse("https://local.invalid/").unwrap();
+    u.query_pairs_mut().append_pair("v", text);
+    u.query().unwrap_or_default()
+        .strip_prefix("v=")
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[derive(Deserialize)]
@@ -2682,20 +2883,66 @@ async fn online_play(
     })))
 }
 
-/// 缓存占用展示：总量/文件数/按音源分组 + 配置上限 + 用户保留名单。
+/// 缓存占用展示：总量/文件数/按音源分组 + 运行时上限 + 用户保留名单。
 async fn online_cache_stats(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let stats = crate::online::cache::cache_stats(&state.online_cache_dir()).await;
     let keep = state.keep.lock().await.clone();
-    let max = state.config.online.cache_max_bytes;
+    let max = *state.cache_max.lock().await;
     Ok(Json(serde_json::json!({
         "total_bytes": stats.total_bytes,
         "files": stats.files,
         "by_source": stats.by_source,
+        // 0 = 不限（folia 的 mediaCacheLimitGb=0 同义）。
         "max_bytes": max,
         "keep": keep,
     })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CacheLimitRequest {
+    /// 新上限（字节）。0 = 不限。
+    pub(crate) max_bytes: u64,
+}
+
+/// 设置在线音频缓存上限：settings 表权威 + 运行时即时生效（立刻做一次
+/// LRU 回收，用户改小上限不用等下一首播完才看到效果）。
+async fn online_cache_limit(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CacheLimitRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.max_bytes > 1024 * 1024 * 1024 * 1024 {
+        return Err(bad_request("max_bytes 超出可接受范围（上限 1 TiB）"));
+    }
+    vmusic_store::settings::set(
+        &state.db,
+        "online_cache_max_bytes",
+        &serde_json::json!(body.max_bytes),
+    )
+    .await
+    .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    *state.cache_max.lock().await = body.max_bytes;
+    // 收小上限时立即回收；放大/改不限只更新账本，无需动文件。
+    if body.max_bytes > 0 {
+        let protected = state.protected_all().await;
+        let dir = state.online_cache_dir();
+        let max = body.max_bytes;
+        let removed = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(async {
+                crate::online::cache::enforce_limit(&dir, max, &protected).await
+            })
+        })
+        .await
+        .map_err(|e| internal(e.to_string()))?
+        .map_err(|e| internal(e.to_string()))?;
+        if removed > 0 {
+            tracing::info!("缓存上限调整后回收 {removed} 字节");
+        }
+    }
+    Ok(Json(
+        serde_json::json!({ "ok": true, "max_bytes": body.max_bytes }),
+    ))
 }
 
 #[derive(Deserialize)]

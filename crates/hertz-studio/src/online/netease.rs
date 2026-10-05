@@ -1096,6 +1096,35 @@ pub async fn like(ctx: &Ctx, id: &str, liked: bool) -> ApiResult<()> {
     Ok(())
 }
 
+/// 听歌打卡（scrobble）：把一次「有效收听 ≥30 秒」上报给网易云，计入歌曲
+/// 播放量。走网页端同款 `weapi/feedback/weblog`（action=play、end=playend），
+/// 必须已登录（cookie 含 MUSIC_U）。`seconds` 是 seek-proof 计时器累计的
+/// 有效秒数，由调用方保证 ≥30。
+pub async fn scrobble(ctx: &Ctx, id: &str, seconds: u64) -> ApiResult<()> {
+    let pack = login_pack(ctx).await?;
+    let log = serde_json::json!({
+        "action": "play",
+        "json": {
+            "download": 0,
+            "end": "playend",
+            "id": id,
+            "time": seconds,
+            "type": "song",
+            "url": "",
+        }
+    });
+    let logs = serde_json::to_string(&[log])
+        .map_err(|e| ApiError::internal(format!("序列化打卡日志失败: {e}")))?;
+    let (_, body) = weapi(
+        "feedback/weblog",
+        serde_json::json!({ "logs": logs }),
+        Some(pack.cookie.as_str()),
+    )
+    .await?;
+    expect_200(&body, "听歌打卡")?;
+    Ok(())
+}
+
 /// 推荐歌单：`/api/personalized/playlist`，免登录。result[] 字段 id/name/
 /// picUrl/playCount。端点本身不支持翻页（limit 上限 30），offset 在本地切片：
 /// 超窗返回空页而不是把第一页重复发第二遍。

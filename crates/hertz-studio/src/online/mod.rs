@@ -766,6 +766,18 @@ pub async fn lyric(ctx: &Ctx, source: &str, id: &str) -> ApiResult<vmusic_core::
     }
 }
 
+/// 听歌打卡（网易云专属，state 的 ListenTracker 在有效收听满 30s 后调用）。
+/// 其余音源没有等价的播放量上报端点，如实拒绝而不是静默假装成功。
+pub async fn scrobble(ctx: &Ctx, source: &str, id: &str, seconds: u64) -> ApiResult<()> {
+    if id.trim().is_empty() {
+        return Err(bad_request("缺少曲目 id"));
+    }
+    match source {
+        "netease" => netease::scrobble(ctx, id, seconds).await,
+        other => Err(unsupported(other)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 账号 / 歌单 / 红心 / 推荐 / 扫码 dispatch
 //

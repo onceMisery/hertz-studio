@@ -415,29 +415,62 @@ pub async fn delete_tracks(pool: &SqlitePool, ids: &[String]) -> Result<u64, Sto
     Ok(deleted)
 }
 
-/// 扫描读到的 ReplayGain 曲目增益（dB）。无标签传 NULL。
+/// 一首曲目的完整 ReplayGain 标签组（扫描值，跟文件走）。
+///
+/// 增益是 dB、峰值是线性幅度；四项都可为 NULL（文件没写标签）。播放端按
+/// 「关闭 / 按曲目 / 按专辑」三档挑选，按专辑缺专辑值时回落曲目值。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RgTags {
+    pub track_gain: Option<f64>,
+    pub album_gain: Option<f64>,
+    pub track_peak: Option<f64>,
+    pub album_peak: Option<f64>,
+}
+
+/// 扫描读到的 ReplayGain 标签组。无标签的项为 NULL。
 pub async fn set_track_rg(
     pool: &SqlitePool,
     id: &TrackId,
-    gain: Option<f64>,
+    rg: &RgTags,
 ) -> Result<(), StoreError> {
-    sqlx::query("UPDATE tracks SET rg_gain = ?2 WHERE id = ?1")
-        .bind(id)
-        .bind(gain)
-        .execute(pool)
-        .await
-        .map_err(|e| StoreError::Database(e.to_string()))?;
+    sqlx::query(
+        "UPDATE tracks SET rg_gain = ?2, rg_album_gain = ?3, rg_peak = ?4, rg_album_peak = ?5
+         WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(rg.track_gain)
+    .bind(rg.album_gain)
+    .bind(rg.track_peak)
+    .bind(rg.album_peak)
+    .execute(pool)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
     Ok(())
 }
 
-/// 读取 ReplayGain 增益（播放端响度归一化用）。
-pub async fn get_track_rg(pool: &SqlitePool, id: &TrackId) -> Result<Option<f64>, StoreError> {
-    let row: Option<(Option<f64>,)> = sqlx::query_as("SELECT rg_gain FROM tracks WHERE id = ?1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| StoreError::Database(e.to_string()))?;
-    Ok(row.and_then(|(g,)| g))
+/// 读取 ReplayGain 标签组（播放端响度归一化用）。
+pub async fn get_track_rg(
+    pool: &SqlitePool,
+    id: &TrackId,
+) -> Result<Option<RgTags>, StoreError> {
+    let row: Option<(
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    )> = sqlx::query_as(
+        "SELECT rg_gain, rg_album_gain, rg_peak, rg_album_peak FROM tracks WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(row.map(|(track_gain, album_gain, track_peak, album_peak)| RgTags {
+        track_gain,
+        album_gain,
+        track_peak,
+        album_peak,
+    }))
 }
 
 /// 封面替换后的展示位更新：用户封面已落缓存，has_cover 直接成立。

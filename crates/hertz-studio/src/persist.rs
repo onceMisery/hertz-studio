@@ -79,6 +79,46 @@ pub async fn load_strings(pool: &SqlitePool, key: &str) -> Result<Vec<String>, S
     Ok(serde_json::from_str(&raw).unwrap_or_default())
 }
 
+/// 会话快照（folia 的 last_song / last_queue 合一份）：重启后恢复队列、
+/// 当前曲目与播放进度。播放进度恢复是惰性的——首次 play 时才 seek 回去，
+/// 启动路径不做任何网络/解码动作。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SessionSnapshot {
+    pub queue: Vec<String>,
+    pub cursor: Option<usize>,
+    pub position_ms: u64,
+    pub saved_at: i64,
+}
+
+pub const SESSION_KEY: &str = "session_snapshot";
+
+/// 保存会话快照。写库失败只记日志：快照是尽力而为的恢复，不值得打断播放。
+pub async fn save_session(pool: &SqlitePool, snap: &SessionSnapshot) {
+    let value = match serde_json::to_value(snap) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("序列化会话快照失败: {e}");
+            return;
+        }
+    };
+    if let Err(e) = vmusic_store::settings::set(pool, SESSION_KEY, &value).await {
+        tracing::warn!("持久化会话快照失败: {e}");
+    }
+}
+
+/// 读取会话快照；坏值/缺键/全空按无会话处理（None）。
+pub async fn load_session(pool: &SqlitePool) -> Option<SessionSnapshot> {
+    let value = vmusic_store::settings::get(pool, SESSION_KEY)
+        .await
+        .ok()
+        .flatten()?;
+    let snap: SessionSnapshot = serde_json::from_value(value).ok()?;
+    if snap.queue.is_empty() && snap.cursor.is_none() {
+        return None;
+    }
+    Some(snap)
+}
+
 pub async fn save_strings(
     pool: &SqlitePool,
     key: &str,

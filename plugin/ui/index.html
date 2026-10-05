@@ -184,6 +184,12 @@
     <path d="M9 20v-5H4"/>
     <path d="M15 20v-5h5"/>
   </symbol>
+  <!-- 睡眠定时器：圆钟表盘 + 指针。 -->
+  <symbol id="i-timer" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="13" r="8"/>
+    <path d="M12 9v4l2.5 2.5"/>
+    <path d="M9 2h6"/>
+  </symbol>
 
   <!-- 音源徽标：平台源（网易云/QQ/酷狗/酷我/汽水）统一用官方 app 图标 PNG，
        由 online.js 的 badge() 从 /platform-icons/{id}.png 取（256×256 同一
@@ -408,6 +414,8 @@
         <button id="lib-batch-playlist" class="btn" type="button">加入歌单</button>
         <button id="lib-batch-fav" class="btn" type="button">收藏</button>
         <button id="lib-batch-edit" class="btn" type="button">批量编辑</button>
+        <button id="lib-batch-complete" class="btn" type="button"
+                title="按标题/歌手在网易云匹配，补齐缺失的封面、歌词与专辑（不覆盖已有信息）">联网补全</button>
         <button id="lib-batch-clear" class="btn" type="button" aria-label="取消选择">取消</button>
       </div>
     </div>
@@ -662,7 +670,10 @@
     <div class="view" id="view-queue" hidden>
       <div class="col-head">
         <div class="col-head-left"><h1 class="col-title">播放队列</h1><span class="count" id="queue-count">0 首</span></div>
-        <div class="col-tools"><button id="queue-clear" class="btn">清空队列</button></div>
+        <div class="col-tools">
+          <button id="queue-save" class="btn" title="把当前队列里的本地曲目保存为歌单">存为歌单</button>
+          <button id="queue-clear" class="btn">清空队列</button>
+        </div>
       </div>
       <div class="q-list" id="queue-list"></div>
     </div>
@@ -697,8 +708,13 @@
           <input id="dsp-preamp" type="number" min="-24" max="12" step="0.5" value="0">
         </div>
         <div class="set-row">
-          <label for="dsp-loudness">响度归一化（按 ReplayGain 标签）</label>
-          <input id="dsp-loudness" type="checkbox">
+          <label for="dsp-loudness">响度归一化</label>
+          <select id="dsp-loudness">
+            <option value="off">关闭</option>
+            <option value="track">按曲目</option>
+            <option value="album">按专辑</option>
+          </select>
+          <span class="hint">按曲目=各曲音量拉平；按专辑=保留专辑内动态（缺专辑标签时回落曲目）；增益为正时按峰值防削波</span>
         </div>
         <div class="set-row">
           <label for="dsp-crossfade">交叉淡化 (ms，0 = 默认短淡变)</label>
@@ -734,6 +750,16 @@
             <option value="stage">沉浸声场</option>
             <option value="wall">队列拼接墙（仅清风皮肤）</option>
           </select>
+        </div>
+        <div class="set-row">
+          <label for="set-auto-play">启动后自动恢复播放</label>
+          <input id="set-auto-play" type="checkbox">
+          <span class="hint">重启服务后自动接续上次会话（队列、曲目与进度）；不开则显示恢复的曲目、按播放键手动接续</span>
+        </div>
+        <div class="set-row">
+          <label for="set-scrobble">网易云听歌打卡</label>
+          <input id="set-scrobble" type="checkbox" checked>
+          <span class="hint">在线试听满 30 秒有效收听自动计入播放量（拖动进度不算）；需要已登录网易云</span>
         </div>
         <p class="hint set-note">「加入队列」只管列表行的快捷按钮与右键菜单；点曲名本身总是立即播放那一首。「自动进入」只在手动开始播放时触发，启动恢复与自动接力不算。</p>
       </div>
@@ -778,6 +804,41 @@
           <input id="set-lyric-filter-pattern" type="text" placeholder="如 ^\（.*\）$">
         </div>
         <p class="hint set-note" id="set-lyric-filter-note" hidden></p>
+      </div>
+
+      <!-- 歌词输出：本地 HTTP 歌词 API + OBS 浮层页（folia 的 lyric api / obs
+           overlay）。地址带 token，粘进 OBS 浏览器源即用；插件形态没有本地
+           HTTP 服务，整组隐藏。 -->
+      <div class="set-group" id="overlay-group">
+        <h2 class="set-title">歌词输出（OBS 浮层）</h2>
+        <div class="set-row">
+          <label for="overlay-style">浮层风格</label>
+          <select id="overlay-style">
+            <option value="full">全页歌词（滚动高亮）</option>
+            <option value="line">单行大字（居中）</option>
+            <option value="karaoke">点唱机（封面+进度）</option>
+            <option value="minimal">底部条（左下角）</option>
+          </select>
+          <span class="set-actions">
+            <button id="overlay-copy" class="btn">复制浮层地址</button>
+            <button id="overlay-open" class="btn">预览</button>
+          </span>
+        </div>
+        <p class="hint">复制后粘进 OBS 的「浏览器源」即可；页面 500ms 轮询本地歌词接口，背景透明。风格后可再追加 &amp;scale=1.2、&amp;align=left、&amp;color=%23ffffff 等参数。</p>
+      </div>
+
+      <!-- 歌词视频导出（folia 的 video export）：舞台画面 + 当前歌词行 +
+           可选系统声音录成 MP4/WebM。画幅与起点在弹窗里选；插件形态没有
+           本地歌词接口，整组隐藏。 -->
+      <div class="set-group" id="video-export-group">
+        <h2 class="set-title">歌词视频导出</h2>
+        <div class="set-row">
+          <label for="video-export-open">舞台录制</label>
+          <span class="set-actions">
+            <button id="video-export-open" class="btn">录制歌词视频…</button>
+          </span>
+        </div>
+        <p class="hint">把沉浸声场的画面与当前歌词行录成视频（可选系统声音），横屏 / 竖屏画幅可选。录制开始后自动打开声场，点悬浮的「停止」生成文件。</p>
       </div>
 
       <!-- 海报墙：队列拼接（清风皮肤的特色页）的观感与跟随行为。设置页是
@@ -837,6 +898,20 @@
             <button id="cache-keep-current" class="btn" title="把正在播放的在线曲目加入保留名单">保留当前播放</button>
           </span>
         </div>
+        <div class="set-row">
+          <label for="cache-limit">容量上限</label>
+          <select id="cache-limit">
+            <option value="0">不限</option>
+            <option value="1">1 GB</option>
+            <option value="2">2 GB</option>
+            <option value="5">5 GB</option>
+            <option value="10">10 GB</option>
+            <option value="20">20 GB</option>
+            <option value="50">50 GB</option>
+          </select>
+          <span class="hint">改小立即按 LRU 回收；当前播放与保留名单豁免</span>
+        </div>
+        <div class="cache-breakdown" id="cache-breakdown" hidden></div>
         <div class="hint" id="cache-keep-list" hidden></div>
         <p class="hint">在线试听的音频会先落盘缓存。当前播放与保留名单里的曲目不会被清理。</p>
       </div>
@@ -1191,6 +1266,10 @@
   </div>
 
   <div class="bar-right">
+    <button id="sleep-timer" class="btn-pill st-pill" title="睡眠定时器" aria-label="睡眠定时器" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-timer"/></svg>
+      <span id="sleep-timer-label" class="st-label" hidden></span>
+    </button>
     <button id="mode" class="btn-pill" title="播放模式">列表循环</button>
     <div class="bar-volume">
       <span class="hint">音量</span>
@@ -1627,6 +1706,12 @@
 <script src="favorites.js"></script>
 <script src="daily.js"></script>
 <script src="daily-view.js"></script>
+<!-- 命令面板：只提供引擎与 UI，命令由 app.js 启动时用自己的闭包注册，
+     所以必须在 app.js 之前加载。Ctrl+K 唤起。 -->
+<script src="palette.js"></script>
+<!-- 歌词视频导出：自包含（画幅/弹窗/录制管线都在模块里），只在用户点击时
+     才碰 window.Stage3D 与后端 API，加载顺序无关紧要。 -->
+<script src="video-export.js"></script>
 <!-- 胶囊播放器：最小化态下界面唯一可见的东西（dock 实例里则是唯一内容）。
      信息区（封面 / 「正在播放」/ 标题 / 艺术家）整块可点 = 展开；右侧四个按钮是
      上一首 / 播放暂停 / 下一首 / 展开——不展开也能换歌与控制播放。整块可拖、

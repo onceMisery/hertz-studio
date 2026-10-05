@@ -1769,6 +1769,23 @@ body.reduce-motion .bar { transition: none !important; }
 .btn-pill:hover { color: var(--text); background: var(--hover); }
 .btn-pill:active { transform: scale(0.95); }
 
+/* 睡眠定时器胶囊：平时只有一枚小钟，激活后亮起并追加倒计时文本。
+   数字用 tabular-nums，秒级刷新时宽度不抖。 */
+.st-pill { display: inline-flex; align-items: center; gap: 6px; }
+.st-pill svg { width: 14px; height: 14px; flex: none; }
+.st-pill .st-label { font-variant-numeric: tabular-nums; }
+.st-pill.is-active { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line)); }
+
+/* 在线缓存分项：一行一个音源，徽标 + 名称在左、占用在右。 */
+.cache-breakdown {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-md, 10px);
+  background: color-mix(in srgb, var(--accent) 3%, transparent);
+}
+.cache-source-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12.5px; }
+.cache-source-name { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.cache-source-size { font-variant-numeric: tabular-nums; color: var(--text); }
+
 /* Range _inputs：扁平轨道，hover 变粗 */
 input[type="range"] {
   -webkit-appearance: none; appearance: none;
@@ -3360,3 +3377,170 @@ body[data-rm~="ui"] .t-eq i { animation: none !important; }
 body[data-rm~="ui"] .shelf-card { animation: none; transition-duration: 0s; }
 body[data-rm~="ui"] .bar { transition: none !important; }
 body[data-rm~="ui"] .view:not([hidden]) { animation: none; }
+
+/* ---------------------------------------------------------------------------
+ * 命令面板（palette.js）：Ctrl+K 唤起。浮层 z-index 高于正在播放弹窗与
+ * 三维舞台（沉浸声场里也要能唤起），配色全部走既有令牌。
+ * ------------------------------------------------------------------------- */
+.palette-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(4, 5, 8, 0.55);
+  backdrop-filter: blur(2px);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12vh 16px 16px;
+}
+.palette-scrim[hidden] { display: none; }
+
+.palette {
+  width: min(560px, 100%);
+  border-radius: var(--r-xl);
+  border: 1px solid var(--field-border-strong, var(--line));
+  background: var(--panel-solid, var(--bg));
+  box-shadow: 0 32px 90px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  animation: palette-in 0.16s var(--ease);
+}
+@keyframes palette-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+body.reduce-motion .palette { animation: none; }
+
+.palette-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.palette-head svg { width: 16px; height: 16px; color: var(--muted); flex: none; }
+.palette-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 15px;
+  font-family: inherit;
+}
+.palette-input::placeholder { color: var(--muted); font-size: 12.5px; }
+.palette-hint { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+.palette-list { max-height: 46vh; overflow-y: auto; padding: 6px; }
+.palette-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.palette-item.active { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.palette-item-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.palette-item-title { font-size: 13.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette-item.active .palette-item-title { color: var(--accent); }
+.palette-item-sub { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette-item-group { font-size: 11px; color: var(--muted); flex: none; padding: 2px 8px; border: 1px solid var(--line); border-radius: 99px; }
+.palette-item.batch .palette-item-group { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line)); }
+.palette-empty { padding: 18px 14px; font-size: 12.5px; color: var(--muted); text-align: center; }
+
+/* ---------------------------------------------------------------------------
+ * 歌词视频导出（video-export.js）：设置页「录制歌词视频…」唤起的对话框，
+ * 以及录制中常驻的 REC 悬浮条。z-index 与命令面板同层以上（声场里也要能用），
+ * 配色走既有令牌。
+ * ------------------------------------------------------------------------- */
+.vex-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 310;
+  background: rgba(4, 5, 8, 0.55);
+  backdrop-filter: blur(2px);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 16px;
+}
+.vex-scrim[hidden] { display: none; }
+
+.vex-card {
+  width: min(460px, 100%);
+  border-radius: var(--r-xl);
+  border: 1px solid var(--field-border-strong, var(--line));
+  background: var(--panel-solid, var(--bg));
+  box-shadow: 0 32px 90px rgba(0, 0, 0, 0.6);
+  padding: 18px 20px 16px;
+  animation: palette-in 0.16s var(--ease);
+}
+body.reduce-motion .vex-card { animation: none; }
+.vex-title { margin: 0 0 12px; font-size: 16px; color: var(--text); }
+.vex-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.vex-row > label { flex: none; width: 72px; font-size: 13px; color: var(--muted); }
+.vex-select {
+  flex: 1; min-width: 0;
+  background: var(--field, transparent);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--text);
+  padding: 6px 8px;
+  font-family: inherit;
+}
+.vex-audio { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.vex-audio input[type="checkbox"] { flex: none; }
+.vex-hint { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.vex-note { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin: 8px 0 0; }
+.vex-error { font-size: 12.5px; color: var(--danger, #ff6b6b); line-height: 1.6; margin: 0 0 8px; }
+.vex-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.vex-primary {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+.vex-live { display: flex; align-items: center; gap: 8px; color: var(--text); }
+.vex-dot {
+  width: 9px; height: 9px; flex: none; border-radius: 99px;
+  background: #e5484d;
+  animation: vex-blink 1.2s ease-in-out infinite;
+}
+@keyframes vex-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+body.reduce-motion .vex-dot { animation: none; }
+.vex-elapsed { font-variant-numeric: tabular-nums; }
+
+/* 录制中的悬浮条：舞台 chrome 之上（z-index 高于命令面板遮罩），跟到哪都能
+   看到，随时点停。 */
+.vex-pill {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 99px;
+  border: 1px solid color-mix(in srgb, #e5484d 45%, var(--line));
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  backdrop-filter: blur(10px);
+  color: var(--text);
+  font-size: 12.5px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+}
+.vex-pill .vex-elapsed { font-variant-numeric: tabular-nums; }
+.vex-pill-stop {
+  border: none;
+  background: #e5484d;
+  color: #fff;
+  border-radius: 99px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.vex-pill-stop:hover { filter: brightness(1.1); }

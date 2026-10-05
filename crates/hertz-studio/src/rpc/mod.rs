@@ -228,6 +228,9 @@ impl Rpc {
             // --- 舞台节拍图 ---
             (Op::Get, ["v1", "stage", "beatmap"]) => playback::beatmap(state, query).await,
 
+            // --- OBS 歌词输出 ---
+            (Op::Get, ["v1", "overlay", "lyric"]) => playback::overlay_lyric(state).await,
+
             // --- 曲库：曲目 ---
             // 字面段必须排在 `id` 通配之前：`["v1","tracks",id]` 同样能匹配
             // `/v1/tracks/ids`，顺序反了就是「查无此曲 ids」而不是曲目 id 列表。
@@ -241,6 +244,13 @@ impl Rpc {
             }
             (Op::Post, ["v1", "tracks", "batch-delete"]) => {
                 library::batch_delete_tracks(state, body).await
+            }
+            // 本地歌曲在线补全：逻辑在 complete.rs，HTTP 与 RPC 同一份。
+            (Op::Post, ["v1", "tracks", "complete"]) => {
+                let request: crate::complete::CompleteRequest = body_as(body)?;
+                crate::complete::complete_tracks(state, &request)
+                    .await
+                    .map(Reply::ok)
             }
             (Op::Get, ["v1", "tracks", "missing"]) => library::list_missing_tracks(state).await,
             (Op::Get, ["v1", "tracks", id]) => library::get_track(state, id).await,
@@ -358,6 +368,9 @@ impl Rpc {
             (Op::Get, ["v1", "online", "radio"]) => online::radio_status(state).await,
             (Op::Post, ["v1", "online", "radio"]) => online::radio(state, body).await,
             (Op::Get, ["v1", "online", "cache"]) => online::cache_stats(state).await,
+            (Op::Post, ["v1", "online", "cache", "limit"]) => {
+                online::cache_limit(state, body).await
+            }
             (Op::Post, ["v1", "online", "cache", "clear"]) => {
                 online::cache_clear(state, body).await
             }

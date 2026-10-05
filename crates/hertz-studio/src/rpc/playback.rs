@@ -45,6 +45,20 @@ async fn with_state(state: &Arc<AppState>) -> RpcResult {
 }
 
 pub async fn play(state: &Arc<AppState>) -> RpcResult {
+    // 会话恢复后的首次 play：按恢复的游标起播 + 接续上次进度（见 routes::play）。
+    if state.audio.snapshot().track_id.is_none() {
+        if let Some(index) = state.current_index().await {
+            let outcome = state
+                .play_index_for(index, None, PlayTrigger::Pick)
+                .await
+                .map_err(|e| ApiError::internal(e.to_string()))?;
+            if outcome.committed {
+                state.consume_restore_seek().await;
+                state.post_commit_background();
+            }
+            return with_state(state).await;
+        }
+    }
     let commit = state.play_commit.lock().await;
     state
         .play_generation
@@ -206,6 +220,11 @@ pub async fn get_dsp(state: &Arc<AppState>) -> RpcResult {
     ))
 }
 
+/// OBS 歌词输出：与 HTTP 版共用 `overlay_lyric_data`（永不失败的 200 空文档）。
+pub async fn overlay_lyric(state: &Arc<AppState>) -> RpcResult {
+    Ok(Reply::ok(crate::routes::overlay_lyric_data(state).await))
+}
+
 /// 更新 DSP 并即时下发到音频后端；交叉淡化同步换装/尾淡出时长。
 pub async fn set_dsp(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let request: DspUpdate = body_as(body)?;
@@ -220,8 +239,11 @@ pub async fn set_dsp(state: &Arc<AppState>, body: &Value) -> RpcResult {
     if let Some(preamp) = request.preamp_db {
         config.preamp_db = preamp.clamp(-24.0, 12.0);
     }
-    if let Some(loudness) = request.loudness_norm {
-        config.loudness_norm = loudness;
+    if let Some(mode) = &request.loudness_mode {
+        if !matches!(mode.as_str(), "off" | "track" | "album") {
+            return Err(bad_request("loudness_mode 只接受 off / track / album"));
+        }
+        config.loudness_mode = mode.clone();
     }
     if let Some(ms) = request.crossfade_ms {
         config.crossfade_ms = ms.min(8000);
@@ -232,7 +254,7 @@ pub async fn set_dsp(state: &Arc<AppState>, body: &Value) -> RpcResult {
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     for (key, value) in [
         ("dsp_preamp", serde_json::json!(config.preamp_db)),
-        ("dsp_loudness", serde_json::json!(config.loudness_norm)),
+        ("dsp_loudness_mode", serde_json::json!(config.loudness_mode)),
         ("dsp_crossfade_ms", serde_json::json!(config.crossfade_ms)),
     ] {
         vmusic_store::settings::set(&state.db, key, &value)
@@ -240,8 +262,12 @@ pub async fn set_dsp(state: &Arc<AppState>, body: &Value) -> RpcResult {
             .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     }
     // 即时生效：EQ/增益走 set_dsp，交叉淡化走 set_crossfade。
-    let track_gain = if config.loudness_norm {
-        state.current_rg_gain().await.unwrap_or(0.0) as f32
+    let track_gain = if config.loudness_enabled() {
+        state
+            .current_loudness(&config.loudness_mode)
+            .await
+            .map(|(gain, _)| gain)
+            .unwrap_or(0.0) as f32
     } else {
         0.0
     };

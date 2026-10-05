@@ -261,7 +261,12 @@ impl ScanJob {
                 }
                 let mut metadata = vmusic_library::read_metadata(&file_path)?;
                 let cover = metadata.cover.take();
-                let rg_gain = metadata.rg_gain;
+                let rg = vmusic_store::RgTags {
+                    track_gain: metadata.rg_gain,
+                    album_gain: metadata.rg_album_gain,
+                    track_peak: metadata.rg_peak,
+                    album_peak: metadata.rg_album_peak,
+                };
                 let mut track = vmusic_library::build_track(&file_path, metadata);
                 if file_signature(&file_path)? != signature {
                     return Err(
@@ -275,7 +280,7 @@ impl ScanJob {
                     track.path = stored_path;
                     track.id = id;
                 }
-                Ok(Some((track, cover, updated, rg_gain)))
+                Ok(Some((track, cover, updated, rg)))
             })
             .await
             .map_err(|e| e.to_string())
@@ -285,7 +290,7 @@ impl ScanJob {
             }
             match outcome {
                 Ok(None) => self.progress.lock().await.skipped += 1,
-                Ok(Some((mut track, cover, updated, rg_gain))) => {
+                Ok(Some((mut track, cover, updated, rg))) => {
                     if let Some((data, media_type)) = cover {
                         // 用户替换过封面：跳过内嵌封面落盘，缓存里的用户封面
                         // 保持原样，has_cover 依旧成立。
@@ -308,8 +313,8 @@ impl ScanJob {
                     }
                     match vmusic_store::upsert_track(&self.db, &track).await {
                         Ok(()) => {
-                            // ReplayGain 增益跟文件走：upsert 不含该列，单独落库。
-                            let _ = vmusic_store::set_track_rg(&self.db, &track.id, rg_gain).await;
+                            // ReplayGain 标签组跟文件走：upsert 不含这些列，单独落库。
+                            let _ = vmusic_store::set_track_rg(&self.db, &track.id, &rg).await;
                             let mut progress = self.progress.lock().await;
                             if updated {
                                 progress.updated += 1;

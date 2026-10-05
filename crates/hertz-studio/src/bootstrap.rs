@@ -23,7 +23,7 @@ use crate::diag;
 use crate::online;
 use crate::persist;
 use crate::scan;
-use crate::state::{spawn_event_pump, AppState, DspConfig};
+use crate::state::{spawn_event_pump, spawn_session_saver, AppState, DspConfig};
 
 /// 装配完成的运行时。调用方必须把它保活到进程结束。
 pub struct Booted {
@@ -88,6 +88,14 @@ pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::R
     let keep_list: Vec<String> = persist::load_strings(&db, "online_keep")
         .await
         .unwrap_or_default();
+    // 在线缓存上限：settings 表权威（设置页可热改），缺键回落 config.toml。
+    // 0 = 不限。
+    let cache_max = vmusic_store::settings::get(&db, "online_cache_max_bytes")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_u64())
+        .unwrap_or(config.online.cache_max_bytes);
     // DSP 设置：EQ/响度归一化/交叉淡化，跨重启恢复。
     let dsp_config = DspConfig::from_settings(
         &vmusic_store::settings::get_all(&db)
@@ -96,6 +104,10 @@ pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::R
     );
 
     let (events, _) = broadcast::channel(128);
+    // 会话快照要在 db move 进 AppState 之前读出来。
+    // 恢复是惰性的：队列 + 游标进内存，进度挂到 pending_restore_seek 等首次
+    // play 消费——启动路径零网络零解码，在线曲等真正要播时才取流。
+    let session = persist::load_session(&db).await;
     let state = Arc::new(AppState {
         db,
         audio,
@@ -117,17 +129,39 @@ pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::R
         downloads: Default::default(),
         protected: Default::default(),
         keep: tokio::sync::Mutex::new(keep_list),
+        cache_max: tokio::sync::Mutex::new(cache_max),
         dsp: tokio::sync::Mutex::new(dsp_config.clone()),
         auto_failures: Default::default(),
         skip_walk_from: Default::default(),
         quality: tokio::sync::Mutex::new(quality_prefs),
         stage_beats: Default::default(),
         weak_self: Default::default(),
+        pending_restore_seek: Default::default(),
+        listen: Default::default(),
     });
     // 供 on_track_committed detach 'static 后台任务用；set 失败只可能是
     // 重复注入，启动路径只走一次，忽略即可。
     let _ = state.weak_self.set(Arc::downgrade(&state));
     spawn_event_pump(state.clone());
+    // 会话恢复（folia 的 session restore）：把启动前读出的快照装进运行时。
+    if let Some(session) = session {
+        let queue_len = session.queue.len();
+        let cursor = session.cursor.filter(|i| *i < queue_len);
+        if queue_len > 0 {
+            *state.queue.lock().await = session.queue;
+            *state.cursor.lock().await = cursor;
+            if session.position_ms > 3000 {
+                *state.pending_restore_seek.lock().await = Some(session.position_ms);
+            }
+            tracing::info!(
+                queue = queue_len,
+                cursor = cursor.unwrap_or(0),
+                position_ms = session.position_ms,
+                "已恢复上次会话（首次播放时接续进度）"
+            );
+        }
+    }
+    spawn_session_saver(state.clone());
     // DSP 即时下发（播放时再按曲目追加 track_gain）。
     let _ = state
         .audio
@@ -150,9 +184,11 @@ pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::R
     {
         let cache_dir = state.online_cache_dir();
         online::cache::clean_parts(&cache_dir).await;
-        let max = state.config.online.cache_max_bytes;
-        if let Err(e) = online::cache::enforce_limit(&cache_dir, max, &[]).await {
-            tracing::warn!("缓存 LRU 回收失败: {e}");
+        let max = *state.cache_max.lock().await;
+        if max > 0 {
+            if let Err(e) = online::cache::enforce_limit(&cache_dir, max, &[]).await {
+                tracing::warn!("缓存 LRU 回收失败: {e}");
+            }
         }
     }
 

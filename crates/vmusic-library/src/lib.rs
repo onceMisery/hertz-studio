@@ -91,6 +91,12 @@ pub struct FileMeta {
     pub lyrics: Option<String>,
     /// ReplayGain 曲目增益（dB，来自 REPLAYGAIN_TRACK_GAIN 类标签）。
     pub rg_gain: Option<f64>,
+    /// ReplayGain 专辑增益（dB，来自 REPLAYGAIN_ALBUM_GAIN 类标签）。
+    pub rg_album_gain: Option<f64>,
+    /// ReplayGain 曲目峰值（线性，来自 REPLAYGAIN_TRACK_PEAK 类标签）。
+    pub rg_peak: Option<f64>,
+    /// ReplayGain 专辑峰值（线性，来自 REPLAYGAIN_ALBUM_PEAK 类标签）。
+    pub rg_album_peak: Option<f64>,
 }
 
 pub fn read_metadata(path: &Path) -> Result<FileMeta, String> {
@@ -193,13 +199,44 @@ fn apply_revision(meta: &mut FileMeta, revision: &MetadataRevision) {
         if is_lyrics_tag && meta.lyrics.is_none() {
             meta.lyrics = Some(text.to_string());
         }
-        // ReplayGain 增益：形如 "-6.20 dB"，宽松解析前导浮点。
-        if meta.rg_gain.is_none()
-            && (matches!(tag.std_key, Some(StandardTagKey::ReplayGainTrackGain))
-                || tag.key.eq_ignore_ascii_case("replaygain_track_gain"))
-        {
-            if let Some(v) = parse_leading_f64(text) {
-                meta.rg_gain = Some(v);
+        // ReplayGain 家族：增益形如 "-6.20 dB"、峰值形如 "0.987654"（线性），
+        // 都按宽松解析前导浮点。std_key 覆盖 FLAC/Ogg 与 ID3v2 的规范映射，
+        // 裸键兜底接住不规范写入的标签（大小写不敏感）。
+        match tag.std_key {
+            Some(StandardTagKey::ReplayGainTrackGain) => {
+                if meta.rg_gain.is_none() {
+                    meta.rg_gain = parse_leading_f64(text);
+                }
+            }
+            Some(StandardTagKey::ReplayGainAlbumGain) => {
+                if meta.rg_album_gain.is_none() {
+                    meta.rg_album_gain = parse_leading_f64(text);
+                }
+            }
+            Some(StandardTagKey::ReplayGainTrackPeak) => {
+                if meta.rg_peak.is_none() {
+                    meta.rg_peak = parse_leading_f64(text);
+                }
+            }
+            Some(StandardTagKey::ReplayGainAlbumPeak) => {
+                if meta.rg_album_peak.is_none() {
+                    meta.rg_album_peak = parse_leading_f64(text);
+                }
+            }
+            _ => {
+                let key = tag.key.to_ascii_lowercase();
+                let slot = match key.as_str() {
+                    "replaygain_track_gain" => &mut meta.rg_gain,
+                    "replaygain_album_gain" => &mut meta.rg_album_gain,
+                    "replaygain_track_peak" => &mut meta.rg_peak,
+                    "replaygain_album_peak" => &mut meta.rg_album_peak,
+                    _ => {
+                        continue;
+                    }
+                };
+                if slot.is_none() {
+                    *slot = parse_leading_f64(text);
+                }
             }
         }
     }

@@ -603,8 +603,8 @@ function checkSheenTopbarLayout() {
     'focusSearch 给 body 挂 sheen-search 标记（CSS 据此显形）');
   ok(/e\.key === '\/' && !typing\)\s*\{\s*e\.preventDefault\(\);\s*focusSearch\(false\)/.test(APP),
     '`/` 走 focusSearch()');
-  ok(/e\.key\.toLowerCase\(\) === 'k'\)\s*\{\s*e\.preventDefault\(\);\s*focusSearch\(true\)/.test(APP),
-    'Ctrl+K 走 focusSearch()');
+  ok(/e\.key\.toLowerCase\(\) === 'k'\)\s*\{[\s\S]{0,200}?window\.Palette\) Palette\.open\(\);[\s\S]{0,80}?else focusSearch\(true\)/.test(APP),
+    'Ctrl+K 走命令面板（palette.js 没加载时回落 focusSearch()）');
   ok(/ui\.search\.addEventListener\('blur'[\s\S]{0,120}?classList\.remove\('sheen-search'\)/.test(APP),
     '搜索框失焦时摘掉标记（否则那条覆盖搜索条一直挂在顶栏上）');
   ok(/e\.key === 'Escape'[\s\S]{0,400}?classList\.remove\('sheen-search'\)/.test(APP),

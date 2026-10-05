@@ -16,6 +16,7 @@
 //! 内部才碰得到，所以 `rpc` 在这里而不在 `plugin/backend`。
 
 pub mod bootstrap;
+pub mod complete;
 pub mod config;
 pub mod daily;
 pub mod diag;

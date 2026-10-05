@@ -33,11 +33,10 @@ use serde_json::{json, Value};
 use crate::error::{bad_request, internal, ApiError};
 use crate::online;
 use crate::routes::{
-    online_ctx, pick_index, playlist_scope, qr_session, source_of, tagged, AccountQuery,
-    CacheClearRequest, CacheKeepRequest, CookieRequest, ItemQuery, LikeRequest, OnlinePlayRequest,
-    OnlinePlayTrack, OnlineQualityRequest, PlaylistCreateRequest, PlaylistDeleteRequest,
-    PlaylistQuery, PlaylistTracksRequest, PlaylistsQuery, QrCancelRequest, QrPollQuery,
-    RadioRequest, RecommendQuery, SearchAllQuery, SourceRequest, StreamQuery,
+    online_ctx, pick_index, playlist_scope, qr_session, source_of, tagged, AccountQuery, CacheClearRequest, CacheKeepRequest, CacheLimitRequest, CookieRequest, ItemQuery,
+    LikeRequest, OnlinePlayRequest, OnlinePlayTrack, OnlineQualityRequest, PlaylistCreateRequest,
+    PlaylistDeleteRequest, PlaylistQuery, PlaylistTracksRequest, PlaylistsQuery, QrCancelRequest,
+    QrPollQuery, RadioRequest, RecommendQuery, SearchAllQuery, SourceRequest, StreamQuery,
 };
 use crate::rpc::{body_as, query_as, Reply, RpcResult};
 use crate::state::{AppState, PlayTrigger};
@@ -264,11 +263,11 @@ pub async fn radio(state: &Arc<AppState>, body: &Value) -> RpcResult {
 // 缓存
 // ---------------------------------------------------------------------------
 
-/// 缓存占用展示：总量/文件数/按音源分组 + 配置上限 + 用户保留名单。
+/// 缓存占用展示：总量/文件数/按音源分组 + 运行时上限 + 用户保留名单。
 pub async fn cache_stats(state: &Arc<AppState>) -> RpcResult {
     let stats = crate::online::cache::cache_stats(&state.online_cache_dir()).await;
     let keep = state.keep.lock().await.clone();
-    let max = state.config.online.cache_max_bytes;
+    let max = *state.cache_max.lock().await;
     Ok(Reply::ok(json!({
         "total_bytes": stats.total_bytes,
         "files": stats.files,
@@ -276,6 +275,39 @@ pub async fn cache_stats(state: &Arc<AppState>) -> RpcResult {
         "max_bytes": max,
         "keep": keep,
     })))
+}
+
+/// 设置缓存上限（字节，0 = 不限）：settings 权威 + 立即回收一次。
+pub async fn cache_limit(state: &Arc<AppState>, body: &Value) -> RpcResult {
+    let request: CacheLimitRequest = body_as(body)?;
+    if request.max_bytes > 1024 * 1024 * 1024 * 1024 {
+        return Err(bad_request("max_bytes 超出可接受范围（上限 1 TiB）"));
+    }
+    vmusic_store::settings::set(
+        &state.db,
+        "online_cache_max_bytes",
+        &json!(request.max_bytes),
+    )
+    .await
+    .map_err(store_err)?;
+    *state.cache_max.lock().await = request.max_bytes;
+    if request.max_bytes > 0 {
+        let protected = state.protected_all().await;
+        let dir = state.online_cache_dir();
+        let max = request.max_bytes;
+        let removed = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(async {
+                crate::online::cache::enforce_limit(&dir, max, &protected).await
+            })
+        })
+        .await
+        .map_err(|e| internal(e.to_string()))?
+        .map_err(|e| internal(e.to_string()))?;
+        if removed > 0 {
+            tracing::info!("缓存上限调整后回收 {removed} 字节");
+        }
+    }
+    Ok(Reply::ok(json!({ "ok": true, "max_bytes": request.max_bytes })))
 }
 
 /// 手动清理：当前播放与用户保留项豁免，返回删除字节数。
