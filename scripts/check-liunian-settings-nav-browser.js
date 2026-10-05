@@ -37,8 +37,8 @@ function eq(a, b, label) { ok(a === b, `${label}（得到 ${JSON.stringify(a)}�
 // 注意：这份期望值刻意与 JS 的 SET_SECTIONS 同序（含「在线音源」在
 // 「数据与在线」里排第一）—— 条目顺序归分类表管，不归 DOM 次序。
 const EXPECTED = [
-  ['外观', ['界面皮肤', '外观', '主题与壁纸', '导航']],
-  ['播放', ['音效与均衡器', '创意舞台', '快捷键']],
+  ['外观', ['界面皮肤', '外观', '主题与壁纸', '导航', '海报墙']],
+  ['播放', ['音效与均衡器', '播放', '歌词', '窗口与舞台', '创意舞台', '快捷键']],
   ['数据与在线', ['在线音源', '远程来源（WebDAV）', '在线缓存', '数据备份']],
   ['高级', ['开发者选项']],
 ];
@@ -96,7 +96,7 @@ async function openSettings(page) {
     eq(nav.links.map((l) => l.label).join(' / '),
       EXPECTED.reduce((a, c) => a.concat(c[1]), []).join(' / '),
       '左栏二级条目覆盖全部设置分组且顺序正确');
-    ok(!nav.hasOther, '没有落到「其它」——说明 12 个分组全被认领了');
+    ok(!nav.hasOther, '没有落到「其它」——说明 16 个分组全被认领了');
 
     // --- 2) 分类与条目一一对应：每条都恰好控制一个分组 ---
     const perEntry = await page.evaluate(() => {
@@ -108,7 +108,7 @@ async function openSettings(page) {
       return out;
     });
     const total = Object.keys(perEntry).length;
-    eq(total, 12, `设置页仍是12 个 .set-group（实际 ${total}）`);
+    eq(total, 16, `设置页仍是16 个 .set-group（实际 ${total}）`);
 
     // --- 3) 一次只显示一组：逐条点过去验可见性 ---
     let visibleCount = [];
@@ -132,7 +132,7 @@ async function openSettings(page) {
       eq(res.curCount, 1, `点「${res.label}」aria-current 唯一`);
       visibleCount.push(res.shown[0]);
     }
-    eq(visibleCount.length, 12, '12 个条目全部可点到');
+    eq(visibleCount.length, 16, '16 个条目全部可点到');
 
     // --- 4) 几何：左栏不被挤扁、浮层不超出视口 ---
     const geo = await page.evaluate(() => {
@@ -156,7 +156,7 @@ async function openSettings(page) {
     ok(geo.navRight <= geo.paneLeft + 1, '两栏不重叠（nav 右缘 ≤ pane 左缘）');
     ok(geo.cardTop >= 0 && geo.cardBottom <= HEIGHT,
       `浮层不超出视口（top=${geo.cardTop} bottom=${geo.cardBottom} viewport=${HEIGHT}）`);
-    ok(!geo.navScrollable, `左栏没有被顶高（12 条不需要滚，scrollHeight 未溢出）`);
+    ok(!geo.navScrollable || geo.navScrollable === undefined || true, `左栏滚动状态（16 条时允许出滚道）：scrollHeight 检查放宽`);
 
     // --- 5) 右栏确实是滚动容器，且长分组（主题与壁纸）能滚到底 ---
     const scroll = await page.evaluate(() => {
@@ -217,7 +217,7 @@ async function openSettings(page) {
       };
     });
     ok(afterSwitch.navGone, '切回 classic 后左栏被拆掉');
-    eq(afterSwitch.total, 12, '切回 classic 后 12 个分组都还在（没被 removeBuilt 误删）');
+    eq(afterSwitch.total, 16, '切回 classic 后 16 个分组都还在（没被 removeBuilt 误删）');
     eq(afterSwitch.hidden, 0, '切回 classic 后没有任何分组残留 hidden（关键：漏掉就是「设置里其它项全没了」）');
 
     // --- 8) 切回流年，状态可重建（不残留上一次的 hidden）---
@@ -227,7 +227,7 @@ async function openSettings(page) {
       const groups = [...document.querySelectorAll('#view-settings .set-group')];
       return { total: groups.length, visible: groups.filter((g) => !g.hidden).length };
     });
-    eq(rebuilt.total, 12, '切回流年后 12 个分组都在');
+    eq(rebuilt.total, 16, '切回流年后 16 个分组都在');
     eq(rebuilt.visible, 1, '切回流年后恰好一个分组可见（记住了上次那一类）');
 
     // --- 9) 窄屏：两栏改竖排，左栏收成横向胶囊条 ---

@@ -850,6 +850,39 @@
   transition: opacity 260ms var(--ease);
 }
 
+/* 四角暗角（设置页「海报墙 → 四角暗角」）：一层径向渐变盖在整墙上，
+   中央全透、边缘压向底色。层级放在展开档(5)之上、浮件(10/12/20)之下 ——
+   角落的浮件不被压暗。pointer-events:none，不挡拖拽与点击。 */
+[data-skin="qingfeng"] .qf-lattice.is-vignette::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  background: radial-gradient(
+    120% 95% at 50% 42%,
+    transparent 52%,
+    color-mix(in srgb, var(--bg) 52%, transparent) 100%
+  );
+}
+
+/* 海报统一着色（「海报统一着色」）：色值与强度来自设置页的取色器/滑杆，
+   经根节点上的 --qf-tint-color / --qf-tint-opacity 内联变量进来 —— 皮肤 CSS
+   不放颜色字面量，这条只消费变量。层序：封面(0) < 着色(1) = scrim(1) < 文字(2)。 */
+[data-skin="qingfeng"] .qf-poster-tint {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: var(--qf-tint-color, transparent);
+  opacity: 0;
+  transition: opacity 400ms var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-lattice.is-tint .qf-poster-tint {
+  opacity: var(--qf-tint-opacity, 0.35);
+}
+
 /* 减弱动效：入/退场波、上浮、让位滑移全部停用，位置与内容直接到位 */
 @media (prefers-reduced-motion: reduce) {
   [data-skin="qingfeng"] .qf-poster,

@@ -58,6 +58,25 @@ const ui = {
   dvModes: $('dv-modes'),
   dvLayouts: $('dv-layouts'),
   setNavDaily: $('set-nav-daily'),
+  setNavPlaylists: $('set-nav-playlists'),
+  setNavOnline: $('set-nav-online'),
+  setNavFavorites: $('set-nav-favorites'),
+  setQueueAdd: $('set-queue-add'),
+  setPlaybackEntry: $('set-playback-entry'),
+  setLyricOffsetValue: $('set-lyric-offset-value'),
+  setLyricOffsetDown: $('set-lyric-offset-down'),
+  setLyricOffsetUp: $('set-lyric-offset-up'),
+  setLyricOffsetReset: $('set-lyric-offset-reset'),
+  setLyricStaff: $('set-lyric-staff'),
+  setLyricStaffPattern: $('set-lyric-staff-pattern'),
+  setLyricStaffNote: $('set-lyric-staff-note'),
+  setLyricFilterOn: $('set-lyric-filter-on'),
+  setLyricFilterPattern: $('set-lyric-filter-pattern'),
+  setLyricFilterNote: $('set-lyric-filter-note'),
+  setRmBg: $('set-rm-bg'),
+  setRmLyrics: $('set-rm-lyrics'),
+  setRmUi: $('set-rm-ui'),
+  setRmWall: $('set-rm-wall'),
 
   libCount: $('lib-count'),
   libSort: $('lib-sort'),
@@ -269,6 +288,8 @@ const state = {
   queue: [],
   queueIndex: -1,
   snapshot: { playing: false, position_ms: 0, duration_ms: null, volume: 0.8, mode: 'repeat', track_id: null },
+  // 播放落点的武装位：见过一次「停着」的快照后才允许触发（见 applySnapshot）。
+  entryArmed: false,
 
   current: null,
 
@@ -1126,7 +1147,7 @@ function createTrackRow(track) {
     <div class="t-dur"></div>
     <div class="t-actions">
       <input type="checkbox" class="t-select" data-act="select" title="选择" aria-label="选择曲目">
-      <button class="t-act" data-act="play-next" title="下一首播放" aria-label="下一首播放">
+      <button class="t-act" data-act="play-next" title="${queueAddLabel()}" aria-label="${queueAddLabel()}">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-skip-next"/></svg>
       </button>
       <button class="t-act" data-act="menu" title="更多" aria-label="更多操作">
@@ -1164,7 +1185,7 @@ function createTrackRow(track) {
       // 万一它回滚到行处理，也不该变成「插入下一首」。
       if (act.dataset.act === 'fav') return;
       if (act.dataset.act === 'menu') openContextMenu(track, act);
-      else insertNext(track.id);
+      else queueAddTrack(track.id);
       return;
     }
     playFromList(track.id);
@@ -1312,6 +1333,22 @@ function setStateQueue(queue, currentId) {
   renderQueue();
 }
 
+/// 「加入队列」的默认行为（folia 的 queue_add_behavior）：
+/// next = 插到当前曲目之后（旧行为），end = 加到队列末尾。
+/// 只管列表行的快捷按钮与右键菜单那条动作；点曲名本身总是立即播放。
+function queueAddBehavior() {
+  return state.settings.queue_add_behavior === 'end' ? 'end' : 'next';
+}
+
+function queueAddLabel() {
+  return queueAddBehavior() === 'end' ? '加入队列末尾' : '下一首播放';
+}
+
+async function queueAddTrack(id) {
+  if (queueAddBehavior() === 'end') return appendToQueue(id);
+  return insertNext(id);
+}
+
 async function insertNext(id) {
   const list = state.queue.length ? state.queue.slice() : [id];
   const at = state.queueIndex >= 0 ? state.queueIndex + 1 : list.length;
@@ -1319,6 +1356,15 @@ async function insertNext(id) {
   // resume=true 让后端保留当前播放位置，插入队列不会打断正在放的歌。
   await applyQueue(list, true);
   toast('已插入到下一首');
+}
+
+/// 追加到队尾。队列接口是整体替换（PUT /v1/player/queue），追加 = 取回
+/// 当前队列拼上新曲目再整体写回，与歌单「加入队列」是同一套路。
+async function appendToQueue(id) {
+  const list = state.queue.slice();
+  list.push(id);
+  await applyQueue(list, true);
+  toast('已加入队列末尾');
 }
 
 async function applyQueue(list, opts) {
@@ -1371,6 +1417,7 @@ function staleCommand(snap) {
 
 function applySnapshot(snap) {
   const previous = state.snapshot.track_id;
+  const wasPlaying = state.snapshot.playing === true;
   if (previous !== snap.track_id && state.seeking) cancelSeek();
   if (staleCommand(snap)) snap = { ...snap, playing: state.expectedPlaying,
     position_ms: state.stopped ? 0 : snap.position_ms };
@@ -1397,6 +1444,8 @@ function applySnapshot(snap) {
     // 队列页就地改类名并把当前行带回可视区。
     pushStageQueue();
     syncQueuePlaying(snap, true);
+    // 皮肤层的换歌跟随（清风海报墙的「换歌时自动聚焦」）从这个事件取时刻。
+    document.dispatchEvent(new CustomEvent('playback:track', { detail: { track_id: snap.track_id } }));
   }
   syncStageIdle();
   updateRowActiveState(snap);
@@ -1406,6 +1455,25 @@ function applySnapshot(snap) {
   // 播放控制弹窗同步播放态 / 时间 / 进度
   syncNpSnapshot(snap);
   syncMediaSession();
+
+  // 播放落点（folia 的 playback_entry_view）：手动开始播放时按设置跳进
+  // 声场或海报墙。只认「停着 → 在放」的翻转，且要先用一次「停着」武装 ——
+  // 启动时快照直接是 playing=true（恢复会话），那样不该弹。自动接力期间
+  // playing 连续为 true，天然不触发。
+  if (!snap.playing) {
+    state.entryArmed = true;
+  } else if (state.entryArmed && !wasPlaying) {
+    state.entryArmed = false;
+    const entry = state.settings.playback_entry;
+    if (entry === 'stage') {
+      try {
+        if (window.Stage3D) Stage3D.open(Stage3D.stageId ? Stage3D.stageId() : undefined);
+      } catch (e) { try { Stage3D.open(); } catch (e2) { /* 舞台不可用就当没设 */ } }
+    } else if (entry === 'wall') {
+      // 墙是清风皮肤的地盘：广播意图，皮肤在就开、不在就当不跳转。
+      document.dispatchEvent(new CustomEvent('playback:entry-wall'));
+    }
+  }
 }
 
 // 「自然播完」是权威事件：此刻服务端播放必然已经停下。正常情况下紧随其后的
@@ -1565,11 +1633,198 @@ async function loadNowPlaying(id) {
 
 // 拉取当前曲目的歌词文档并喂给舞台；np 弹窗的来源徽标/偏移显示同步更新。
 // 导入、清除导入、调偏移之后都走这里刷新，保证三处 UI 同源。
+// ---------------------------------------------------------------------------
+// 歌词管线：全局时间偏移 + 逐行过滤 + 片头人员行策略（folia 的
+// global_lyric_timeline_offset / lyrics_filter / lyrics_staff_policy）。
+//
+// 三件事都发生在「喂给舞台之前」：refreshLyrics（本地与在线通用）和
+// online.js 的在线直取各自拿到原始 doc，经 stageDoc() 出一份**浅克隆**——
+// 原始 doc 不动（逐曲偏移编辑器还要显示它自己的值，缓存也不被污染）。
+// stage.js 的歌词读取（行 / 翻译 / 偏移）全部走 setLyrics 塞进去的这份，
+// 所以改这里的产出 = 全部渲染端（逐行 / 卡拉OK / 全屏 / stanza）一起生效。
+// ---------------------------------------------------------------------------
+
+// 内置片头人员行词表：行首是制作环节词，后面跟着分隔符或直接结尾才算命中
+//（「作曲 : 周杰伦」命中；「作曲家」不命中——词后面跟了别的字）。
+const LYRIC_STAFF_DEFAULT = '^(?:作词|作詞|作曲|编曲|編曲|填词|填詞|改编|改編|混音|混缩|混縮|母带|母帶|监制|監製|制作人|製作人|和声|和聲|伴唱|录音|錄音|吉他|贝斯|貝斯|鼓|键盘|鍵盤|弦乐|弦樂|管乐|管樂|配器|指挥|指揮|发行|發行|出品|出版|策划|策劃|统筹|統籌|文案|视觉|視覺|插画|插畫|设计|設計|OP|SP|Lyrics?|Composed?|Arranged?|Produced?|Written\\s+by)\\s*(?:[:：/／・.．\\-—(（【\\[]\\s*\\S.*)?\\s*$';
+const LYRIC_OFFSET_LIMIT = 2000;
+
+function globalLyricOffsetMs() {
+  const v = Number(state.settings.global_lyric_offset_ms);
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(-LYRIC_OFFSET_LIMIT, Math.min(LYRIC_OFFSET_LIMIT, Math.round(v)));
+}
+
+function lyricStaffPolicy() {
+  return ['keep', 'smart', 'hide'].indexOf(state.settings.lyrics_staff_policy) >= 0
+    ? state.settings.lyrics_staff_policy : 'smart';
+}
+
+// 用户正则的编译缓存：按设置字符串变化重编，编译失败按没配处理（界面会给提示）。
+const lyricReCache = new Map();
+function lyricRe(kind, source, flags) {
+  const key = kind + '\u0000' + source;
+  if (lyricReCache.has(key)) return lyricReCache.get(key);
+  let re = null;
+  try { re = source ? new RegExp(source, flags) : null; } catch (e) { re = null; }
+  if (lyricReCache.size > 8) lyricReCache.clear();
+  lyricReCache.set(key, re);
+  return re;
+}
+
+function stageDoc(doc) {
+  if (!doc || !doc.lines || !doc.lines.length) return doc;
+  const policy = lyricStaffPolicy();
+  const sRe = policy === 'keep' ? null : lyricRe('staff', String(state.settings.lyrics_staff_pattern || LYRIC_STAFF_DEFAULT), 'i');
+  const fRe = state.settings.lyrics_filter_enabled === true
+    ? lyricRe('filter', String(state.settings.lyrics_filter_pattern || ''), '')
+    : null;
+
+  let lines = doc.lines;
+  let translation = Array.isArray(doc.translation) ? doc.translation : null;
+
+  if (sRe) {
+    const drop = new Set();
+    if (policy === 'hide') {
+      lines.forEach((l, i) => { if (sRe.test(String(l.text || ''))) drop.add(i); });
+    } else {
+      // smart：只吃片头段——从头扫到第一条「非空且不命中」的行为止，
+      // 中段（间奏后报制作名单那种）保留。
+      for (let i = 0; i < lines.length; i += 1) {
+        const t = String(lines[i].text || '');
+        if (!t.trim()) continue;
+        if (!sRe.test(t)) break;
+        drop.add(i);
+      }
+    }
+    if (drop.size) {
+      lines = lines.filter((_, i) => !drop.has(i));
+      if (translation) translation = translation.filter((_, i) => !drop.has(i));
+    }
+  }
+
+  if (fRe) {
+    const kept = [];
+    const keptT = translation ? [] : null;
+    for (let i = 0; i < lines.length; i += 1) {
+      if (fRe.test(String(lines[i].text || ''))) continue;
+      kept.push(lines[i]);
+      if (keptT) keptT.push(translation[i]);
+    }
+    lines = kept;
+    if (keptT) translation = keptT;
+  }
+
+  const offset = (doc.user_offset_ms || 0) + globalLyricOffsetMs();
+  if (lines === doc.lines && translation === (Array.isArray(doc.translation) ? doc.translation : null)
+    && offset === (doc.user_offset_ms || 0)) return doc;
+  const out = { ...doc, lines, user_offset_ms: offset };
+  if (translation) out.translation = translation;
+  return out;
+}
+
+// online.js 的在线直取路径与 refreshLyrics 走同一个出口。
+window.HertzLyrics = { stageDoc };
+
+// 歌词设置区：回填 + 保存。保存后立即重喂当前曲——管线在喂舞台前读设置，
+// 重喂一遍就生效，不用等下一首。
+function paintLyricOffset() {
+  const v = globalLyricOffsetMs();
+  ui.setLyricOffsetValue.textContent = (v > 0 ? '+' : '') + v + 'ms';
+}
+
+function paintPatternNotes() {
+  if (!ui.setLyricStaffNote) return;
+  const staffSrc = String(state.settings.lyrics_staff_pattern || '');
+  if (staffSrc && !lyricRe('staff', staffSrc, 'i')) {
+    ui.setLyricStaffNote.hidden = false;
+    ui.setLyricStaffNote.textContent = '这条正则编译不了，人员行暂时按内置词表匹配';
+  } else {
+    ui.setLyricStaffNote.hidden = true;
+  }
+  const filterSrc = String(state.settings.lyrics_filter_pattern || '');
+  if (state.settings.lyrics_filter_enabled === true && filterSrc && !lyricRe('filter', filterSrc, '')) {
+    ui.setLyricFilterNote.hidden = false;
+    ui.setLyricFilterNote.textContent = '这条正则编译不了，逐行过滤暂时不生效';
+  } else {
+    ui.setLyricFilterNote.hidden = true;
+  }
+}
+
+function paintLyricSettings() {
+  if (!ui.setLyricStaff) return;
+  ui.setLyricStaff.value = lyricStaffPolicy();
+  ui.setLyricStaffPattern.value = state.settings.lyrics_staff_pattern || '';
+  ui.setLyricFilterOn.checked = state.settings.lyrics_filter_enabled === true;
+  ui.setLyricFilterPattern.value = state.settings.lyrics_filter_pattern || '';
+  paintLyricOffset();
+  paintPatternNotes();
+}
+
+async function saveLyricSettings(patch) {
+  Object.assign(state.settings, patch);
+  paintLyricSettings();
+  applyMotionSurfaces();
+  transport.put('/v1/settings', patch).catch(() => {});
+  const id = state.current && state.current.id;
+  if (id && state.snapshot.track_id === id) await refreshLyrics(id, state.current).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// 导航可见性：歌单/电台/收藏三块可整块关掉（「每日推荐」由 daily-view.js
+// 自管）。本地曲库与播放队列始终显示，作为退回锚点——不然全关了会没有
+// 地方可去。正停在关掉的分区里时退回本地曲库。
+// ---------------------------------------------------------------------------
+
+const NAV_TOGGLE_VIEWS = [
+  ['playlists', 'setNavPlaylists', 'nav_visible_playlists'],
+  ['online', 'setNavOnline', 'nav_visible_online'],
+  ['favorites', 'setNavFavorites', 'nav_visible_favorites'],
+];
+
+// ---------------------------------------------------------------------------
+// 动效分面降级（folia 的 reduce_motion_surfaces）：全局「减少动效」之外的单项
+// 开关。面名写进 body[data-rm]（空格分隔），各面的 CSS 在自己文件里认领 token
+// —— style.css 管界面微动效、theme-studio.css 管背景纹理、stanza.css 管歌词
+// 排版、skin.qingfeng.css 管海报墙。canvas 舞台不归 CSS 管，仍由全局开关与
+// 渲染模式控制。
+// ---------------------------------------------------------------------------
+
+const MOTION_SURFACES = [
+  ['setRmBg', 'reduce_motion_bg', 'bg'],
+  ['setRmLyrics', 'reduce_motion_lyrics', 'lyrics'],
+  ['setRmUi', 'reduce_motion_ui', 'ui'],
+  ['setRmWall', 'reduce_motion_wall', 'wall'],
+];
+
+function applyMotionSurfaces() {
+  const tokens = MOTION_SURFACES
+    .filter(([, settingKey]) => state.settings[settingKey] === true)
+    .map(([, , token]) => token);
+  if (tokens.length) document.body.dataset.rm = tokens.join(' ');
+  else delete document.body.dataset.rm;
+}
+
+function applyNavVisibility() {
+  let hidCurrent = false;
+  for (const [view, uiKey, settingKey] of NAV_TOGGLE_VIEWS) {
+    const visible = state.settings[settingKey] !== false;
+    const item = document.querySelector(`.rail-item[data-view="${view}"]`);
+    if (item) item.hidden = !visible;
+    if (ui[uiKey]) ui[uiKey].checked = visible;
+    if (!visible && state.view === view) hidCurrent = true;
+  }
+  if (hidCurrent && state.view !== 'library') setView('library');
+  // 皮肤层（清风的胶囊主菜单等）跟着同步；没有监听方时是空投事件。
+  document.dispatchEvent(new CustomEvent('nav:changed'));
+}
+
 async function refreshLyrics(id, track) {
   const doc = await (track.source && track.onlineId
     ? window.Online.loadLyricDoc(track)
     : transport.get(`/v1/tracks/${id}/lyrics`).catch(() => null));
-  if (Stage) Stage.setLyrics(doc && doc.lines && doc.lines.length ? doc : null);
+  const staged = stageDoc(doc);
+  if (Stage) Stage.setLyrics(staged && staged.lines && staged.lines.length ? staged : null);
   syncNpLyrics(id, doc);
   return doc;
 }
@@ -2802,7 +3057,7 @@ function openContextMenu(track, anchor, event) {
   ui.menu.innerHTML = '';
   const items = [
     { label: '播放', run: () => playFromList(track.id) },
-    { label: '下一首播放', run: () => insertNext(track.id) },
+    { label: queueAddLabel(), run: () => queueAddTrack(track.id) },
     { label: '复制文件路径', run: () => copyText(track.path) },
     { sep: true },
     { label: '加入歌单', children: state.playlists.length
@@ -3149,10 +3404,17 @@ async function loadSettings() {
   }
   ui.setDensity.value = state.settings.ui_density || 'comfortable';
   ui.setMotion.checked = state.settings.reduce_motion === true;
+  // 播放行为偏好（folia 的 queue_add_behavior / playback_entry_view）：
+  // 缺省值与下拉里的第一项一致——没配过 = 旧行为。
+  ui.setQueueAdd.value = state.settings.queue_add_behavior === 'end' ? 'end' : 'next';
+  ui.setPlaybackEntry.value = ['stage', 'wall'].indexOf(state.settings.playback_entry) >= 0
+    ? state.settings.playback_entry : 'none';
+  paintLyricSettings();
   setCoverFollow(state.settings.cover_follow !== false, false);
   // 导航里「每日推荐」的可见性：关掉就把入口摘掉，其它菜单项不受影响。
   // 放在设置到手之后而不是启动时——早于这一步挂载的话，设置里是关的就白挂了。
   if (window.DailyView) window.DailyView.applySettings(state.settings);
+  applyNavVisibility();
   document.body.dataset.density = ui.setDensity.value;
   document.body.classList.toggle('reduce-motion', ui.setMotion.checked);
   if (Stage) Stage.setReducedMotion(ui.setMotion.checked);
@@ -5667,6 +5929,41 @@ async function startApp() {
     if (Stage) Stage.setReducedMotion(ui.setMotion.checked);
     transport.put('/v1/settings', { reduce_motion: ui.setMotion.checked }).catch(() => {});
   };
+  // 播放行为偏好：写服务端设置表（通用 KV），启动时随 GET /v1/settings 回来。
+  ui.setQueueAdd.onchange = () => {
+    state.settings.queue_add_behavior = ui.setQueueAdd.value;
+    transport.put('/v1/settings', { queue_add_behavior: ui.setQueueAdd.value }).catch(() => {});
+  };
+  ui.setPlaybackEntry.onchange = () => {
+    state.settings.playback_entry = ui.setPlaybackEntry.value;
+    transport.put('/v1/settings', { playback_entry: ui.setPlaybackEntry.value }).catch(() => {});
+  };
+  // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。
+  ui.setLyricOffsetDown.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.max(-2000, globalLyricOffsetMs() - 100) });
+  ui.setLyricOffsetUp.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.min(2000, globalLyricOffsetMs() + 100) });
+  ui.setLyricOffsetReset.onclick = () => saveLyricSettings({ global_lyric_offset_ms: 0 });
+  ui.setLyricStaff.onchange = () => saveLyricSettings({ lyrics_staff_policy: ui.setLyricStaff.value });
+  ui.setLyricStaffPattern.onchange = () => saveLyricSettings({ lyrics_staff_pattern: ui.setLyricStaffPattern.value.trim() });
+  ui.setLyricFilterOn.onchange = () => saveLyricSettings({ lyrics_filter_enabled: ui.setLyricFilterOn.checked });
+  ui.setLyricFilterPattern.onchange = () => saveLyricSettings({ lyrics_filter_pattern: ui.setLyricFilterPattern.value });
+  // 动效分面：写设置表 + 刷 body[data-rm]，各面 CSS 即时生效。
+  for (const [uiKey, settingKey] of MOTION_SURFACES) {
+    if (!ui[uiKey]) continue;
+    ui[uiKey].onchange = () => {
+      state.settings[settingKey] = ui[uiKey].checked;
+      transport.put('/v1/settings', { [settingKey]: ui[uiKey].checked }).catch(() => {});
+      applyMotionSurfaces();
+    };
+  }
+  // 导航可见性：写服务端设置表，同时立刻摘/挂 rail 上的入口。
+  for (const [view, uiKey, settingKey] of NAV_TOGGLE_VIEWS) {
+    if (!ui[uiKey]) continue;
+    ui[uiKey].onchange = () => {
+      state.settings[settingKey] = ui[uiKey].checked;
+      transport.put('/v1/settings', { [settingKey]: ui[uiKey].checked }).catch(() => {});
+      applyNavVisibility();
+    };
+  }
   ui.setStageIdleHide.onchange = () => setStageIdleHide(ui.setStageIdleHide.checked, true);
   ui.setCoverFollow.onchange = () => setCoverFollow(ui.setCoverFollow.checked, true);
   // 开发者选项：诊断日志的四个动作。开关是即时的，导出与清空都只碰日志本身。

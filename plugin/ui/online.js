@@ -778,7 +778,9 @@
       doc = null;
     }
     if ((!isCurrent || isCurrent()) && H.state.current && H.state.current.id === meta.id && window.Stage) {
-      window.Stage.setLyrics(doc && doc.lines && doc.lines.length ? doc : null);
+      // 与本地歌词同一出口：全局偏移 / 逐行过滤 / 片头策略在这里统一生效。
+      var staged = window.HertzLyrics ? window.HertzLyrics.stageDoc(doc) : doc;
+      window.Stage.setLyrics(staged && staged.lines && staged.lines.length ? staged : null);
     }
   }
 

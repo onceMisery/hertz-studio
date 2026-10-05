@@ -412,3 +412,6 @@ body.reduce-motion .ts-wall-scrim {
 .ts-theme-swatch[data-skin="ember"] { border-radius: 11px 11px 4px 4px; }
 .ts-theme-swatch[data-skin="kaleido"] { border-radius: 50%; }
 .ts-theme-swatch[data-skin="dawn"] { border-radius: 7px; }
+
+/* 动效分面降级：背景纹理面（ts-* 纹理动画都挂在 --ts-tex-anim 上）。 */
+body[data-rm~="bg"] .ts-skin-preview::before { animation: none !important; }

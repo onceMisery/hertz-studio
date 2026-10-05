@@ -713,6 +713,104 @@
         </div>
       </div>
 
+      <!-- 播放：与播放行为有关、但与音频处理无关的偏好（DSP 之上一层的语义）。
+           「加入队列的默认行为」管的是列表行的快捷按钮与右键菜单那条动作；
+           「开始播放时自动进入」是播放落点（folia 的 playback_entry_view）：
+           手动开始播放时要不要跳进某个全屏界面。队列拼接墙只有清风皮肤有，
+           其它皮肤下选它等效于不跳转。 -->
+      <div class="set-group">
+        <h2 class="set-title">播放</h2>
+        <div class="set-row">
+          <label for="set-queue-add">加入队列的默认行为</label>
+          <select id="set-queue-add">
+            <option value="next">插到当前曲目之后</option>
+            <option value="end">加到队列末尾</option>
+          </select>
+        </div>
+        <div class="set-row">
+          <label for="set-playback-entry">开始播放时自动进入</label>
+          <select id="set-playback-entry">
+            <option value="none">不跳转</option>
+            <option value="stage">沉浸声场</option>
+            <option value="wall">队列拼接墙（仅清风皮肤）</option>
+          </select>
+        </div>
+        <p class="hint set-note">「加入队列」只管列表行的快捷按钮与右键菜单；点曲名本身总是立即播放那一首。「自动进入」只在手动开始播放时触发，启动恢复与自动接力不算。</p>
+      </div>
+
+      <!-- 歌词：跨曲目都成立的歌词偏好（folia 的 global lyric timeline offset /
+           lyrics filter / staff credits policy）。逐曲偏移在「正在播放」弹窗里，
+           那是每首自己的事；这里只管全局的。三件事都发生在歌词喂给舞台之前，
+           改动立即对当前曲生效。 -->
+      <div class="set-group">
+        <h2 class="set-title">歌词</h2>
+        <div class="set-row">
+          <label>全局时间偏移</label>
+          <span class="set-actions">
+            <button id="set-lyric-offset-down" class="btn" title="提前 100ms">−100ms</button>
+            <span class="count" id="set-lyric-offset-value">0ms</span>
+            <button id="set-lyric-offset-up" class="btn" title="推后 100ms">＋100ms</button>
+            <button id="set-lyric-offset-reset" class="btn">归零</button>
+          </span>
+        </div>
+        <p class="hint set-note">整体提前/推后歌词，补偿蓝牙耳机等设备的音画延迟；与每首自己的偏移（正在播放弹窗里）叠加，上限 ±2000ms。</p>
+        <div class="set-row">
+          <label for="set-lyric-staff">片头制作人员行</label>
+          <select id="set-lyric-staff">
+            <option value="smart">智能隐藏片头段</option>
+            <option value="keep">始终显示</option>
+            <option value="hide">全部隐藏</option>
+          </select>
+        </div>
+        <div class="set-row">
+          <label for="set-lyric-staff-pattern">人员行匹配正则</label>
+          <input id="set-lyric-staff-pattern" type="text" placeholder="留空用内置词表（作词/作曲/编曲…）">
+        </div>
+        <p class="hint set-note" id="set-lyric-staff-note" hidden></p>
+        <p class="hint set-note">「智能」只隐藏第一条正文行之前的制作人员行，中段出现的保留；「全部隐藏」对整首生效。</p>
+        <div class="set-row">
+          <label for="set-lyric-filter-on">逐行过滤</label>
+          <input id="set-lyric-filter-on" type="checkbox">
+          <span class="hint">命中的行整行不进歌词区，与「正在播放」弹窗的原文无关</span>
+        </div>
+        <div class="set-row">
+          <label for="set-lyric-filter-pattern">过滤正则</label>
+          <input id="set-lyric-filter-pattern" type="text" placeholder="如 ^\（.*\）$">
+        </div>
+        <p class="hint set-note" id="set-lyric-filter-note" hidden></p>
+      </div>
+
+      <!-- 海报墙：队列拼接（清风皮肤的特色页）的观感与跟随行为。设置页是
+           各皮肤共享的，这组在任何皮肤下都显示，不生效的项有说明。
+           配置存在皮肤自己的 localStorage 键里（vmusic.qf-wall-*），
+           由 skin.qingfeng.js 读写，不进服务端设置表。 -->
+      <div class="set-group">
+        <h2 class="set-title">海报墙</h2>
+        <div class="set-row">
+          <label for="set-wall-follow">换歌时自动聚焦</label>
+          <input id="set-wall-follow" type="checkbox">
+          <span class="hint">墙开着的时候切歌，相机飞到正在播放那张并展开它（仅清风皮肤）</span>
+        </div>
+        <div class="set-row">
+          <label for="set-wall-vignette">四角暗角</label>
+          <input id="set-wall-vignette" type="checkbox">
+          <span class="hint">整墙边缘压暗一圈，视线更聚在中央（仅清风皮肤）</span>
+        </div>
+        <div class="set-row">
+          <label for="set-wall-tint">海报统一着色</label>
+          <input id="set-wall-tint" type="checkbox">
+          <span class="hint">给所有封面压一层同色调，花哨封面多的时候整墙更整齐（仅清风皮肤）</span>
+        </div>
+        <div class="set-row">
+          <label for="set-wall-tint-color">着色与强度</label>
+          <span class="set-actions">
+            <input id="set-wall-tint-color" type="color" value="#161419">
+            <input id="set-wall-tint-intensity" type="range" min="0" max="100" step="1" value="35">
+            <span class="hint" id="set-wall-tint-intensity-val">35%</span>
+          </span>
+        </div>
+      </div>
+
       <div class="set-group">
         <h2 class="set-title">远程来源（WebDAV）</h2>
         <div class="set-row">
@@ -789,6 +887,26 @@
         <div class="set-row">
           <label for="set-motion">减少动效</label>
           <input id="set-motion" type="checkbox">
+          <span class="hint">全局压掉所有动效；只要某一面不舒服时，用下面的分面开关更合适</span>
+        </div>
+        <!-- 动效分面降级（folia 的 reduce_motion_surfaces）：body[data-rm] 上是
+             面名列表，各面的 CSS 在自己文件里认领 token。canvas 舞台不归 CSS 管，
+             仍由上面的全局开关与「渲染模式」管。 -->
+        <div class="set-row">
+          <label for="set-rm-bg">分面：背景纹理动画</label>
+          <input id="set-rm-bg" type="checkbox">
+        </div>
+        <div class="set-row">
+          <label for="set-rm-lyrics">分面：歌词排版动效</label>
+          <input id="set-rm-lyrics" type="checkbox">
+        </div>
+        <div class="set-row">
+          <label for="set-rm-ui">分面：界面微动效</label>
+          <input id="set-rm-ui" type="checkbox">
+        </div>
+        <div class="set-row">
+          <label for="set-rm-wall">分面：海报墙动效</label>
+          <input id="set-rm-wall" type="checkbox">
         </div>
         <!-- 空闲隐藏是纯布局开关：判据（有没有曲目 / 是否已按停止）在 app.js 的
              stageIdle() 里，CSS 只认 body[data-stage-idle] 这一个标记，不参与判定。
@@ -881,8 +999,9 @@
         <div class="hint" id="ts-note"></div>
       </div>
 
-      <!-- 导航：一级菜单项的可见性。目前只有「每日推荐」这一个可配项——
-           它是后加的入口，不想让所有人都被迫多一个按钮。 -->
+      <!-- 导航：一级菜单项的可见性。「每日推荐」是后加的入口（daily-view.js
+           自己管）；歌单/电台/收藏是可以整块不用的分区，也做成可关——
+           本地曲库与播放队列始终显示，作为退回锚点。 -->
       <div class="set-group">
         <h2 class="set-title">导航</h2>
         <div class="set-row">
@@ -890,6 +1009,19 @@
           <input id="set-nav-daily" type="checkbox" checked>
           <span class="hint">在左侧导航里显示独立的每日推荐入口；关掉后入口消失，不影响其它菜单</span>
         </div>
+        <div class="set-row">
+          <label for="set-nav-playlists">显示「歌单」</label>
+          <input id="set-nav-playlists" type="checkbox" checked>
+        </div>
+        <div class="set-row">
+          <label for="set-nav-online">显示「电台」</label>
+          <input id="set-nav-online" type="checkbox" checked>
+        </div>
+        <div class="set-row">
+          <label for="set-nav-favorites">显示「收藏」</label>
+          <input id="set-nav-favorites" type="checkbox" checked>
+        </div>
+        <span class="hint">关掉的分区从导航里消失；本地曲库与播放队列始终显示。正停在被关掉的分区时退回本地曲库。</span>
       </div>
 
       <!-- 窗口与舞台：沉浸声场与胶囊播放器的入口。

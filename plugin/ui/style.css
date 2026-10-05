@@ -3350,3 +3350,13 @@ body.is-boot-failed > *:not(.boot-failed-card) { display: none !important; }
   padding: 4px 10px;
   cursor: pointer;
 }
+
+/* ---------------------------------------------------------------------------
+ * 动效分面降级：body[data-rm] 的面名由设置页「外观 → 动效分面」写入
+ * （见 app.js 的 MOTION_SURFACES）。这里认领「界面微动效」面：常亮指示、
+ * 卡片悬浮、播放条位移、视图入场。全局「减少动效」的既有规则不受影响。
+ * ------------------------------------------------------------------------- */
+body[data-rm~="ui"] .t-eq i { animation: none !important; }
+body[data-rm~="ui"] .shelf-card { animation: none; transition-duration: 0s; }
+body[data-rm~="ui"] .bar { transition: none !important; }
+body[data-rm~="ui"] .view:not([hidden]) { animation: none; }

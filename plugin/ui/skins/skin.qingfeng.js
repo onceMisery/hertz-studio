@@ -59,6 +59,11 @@
   var refs = {};       // 重编排队列里的 DOM 引用
   var inReflow = false;
   var keyHandler = null;
+  // 播放落点 = 队列拼接墙：app.js 在手动开始播放时广播意图（playback:entry-wall），
+  // 皮肤在就开墙，不在（别的皮肤）就当不跳转。
+  var wallEntryHandler = null;
+  var navChangedHandler = null;
+  var wallTrackHandler = null;
 
   // 设置浮层运行态。viewEl 是被搬进浮层的 #view-settings 本体，
   // lastFocus 用于关闭后把焦点还给触发按钮。
@@ -93,6 +98,12 @@
     raf: 0,
     lightsOut: false,
     entranceDone: false,
+    // 观感/跟随（设置页「海报墙」组，localStorage 持久化，buildWall 时读入）。
+    follow: true,          // 换歌时相机飞到正在播放那张并展开
+    vignette: true,        // 整墙四角暗角
+    tint: false,           // 海报统一着色
+    tintColor: WALL_TINT_DEFAULT_COLOR,
+    tintIntensity: WALL_TINT_DEFAULT_INTENSITY,
     entranceUntil: 0, // 入场波截止时刻（performance.now() 基准）；0 = 不在波内
     // 展开让位表：海报键 'bx:by:slot' → 世界坐标矩形。展开期间这块的卡按它摆，
     // 收起时置回 null。null = 没有展开档，全员原格位。
@@ -117,6 +128,15 @@
 
   var SECTION_KEY = 'vmusic.qf-set-section';
   var WALL_KEY = 'vmusic.qf-wall';
+  // 海报墙的观感/跟随配置（设置页「海报墙」组）。都是皮肤自己的偏好，
+  // 存皮肤前缀的 localStorage，不进服务端设置表 —— 别的皮肤用不上这些键。
+  var WALL_FOLLOW_KEY = 'vmusic.qf-wall-follow';
+  var WALL_VIGNETTE_KEY = 'vmusic.qf-wall-vignette';
+  var WALL_TINT_KEY = 'vmusic.qf-wall-tint';
+  var WALL_TINT_COLOR_KEY = 'vmusic.qf-wall-tint-color';
+  var WALL_TINT_INTENSITY_KEY = 'vmusic.qf-wall-tint-intensity';
+  var WALL_TINT_DEFAULT_COLOR = '#161419';
+  var WALL_TINT_DEFAULT_INTENSITY = 35;
 
   // 墙的入口按钮在每个 tab 下的名字。这个入口开的是**当前视图**的墙，
   // 所以名字也得跟着变 —— 固定叫「队列拼接」会让人以为在所有 tab 下
@@ -237,6 +257,32 @@
   function requestQueue() {
     var out = emit('queue-request');
     return (out && out.queue) || [];
+  }
+
+  /// 皮肤偏好的小读写（localStorage 布尔/数字/字符串，隐私模式静默回落默认）。
+  function readFlag(key, fallback) {
+    try {
+      var v = localStorage.getItem(key);
+      if (v === null) return fallback;
+      if (v === '1') return true;
+      if (v === '0') return false;
+      return fallback;
+    } catch (e) { return fallback; }
+  }
+
+  function writeFlag(key, value) {
+    try { localStorage.setItem(key, value ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
+  }
+
+  function readStr(key, fallback) {
+    try {
+      var v = localStorage.getItem(key);
+      return v === null ? fallback : v;
+    } catch (e) { return fallback; }
+  }
+
+  function writeStr(key, value) {
+    try { localStorage.setItem(key, value); } catch (e) { /* 隐私模式 */ }
   }
 
   // -------------------------------------------------------------------------
@@ -621,6 +667,37 @@
   /// 一首歌在墙上出现很多次：队列去重后按 cell 座位循环铺满（tileForKey）。
   /// 这就是 folia 的「队列不改变地块结构，只改变每格显示哪首歌」。
 
+  /// 墙的动效要不要压：系统偏好或设置页「动效分面：海报墙」（body[data-rm]
+  /// 带 wall token）任一命中即压。CSS 门控在 skin.qingfeng.css；JS 这边只差
+  /// 两处 —— 入场波要不要挂 is-landing、关墙要不要播退场波。
+  function wallMotionReduced() {
+    try {
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return true;
+    } catch (e) { /* 老内核按没设处理 */ }
+    var rm = document.body ? document.body.dataset.rm : '';
+    return !!(rm && rm.split(/\s+/).indexOf('wall') >= 0);
+  }
+
+  /// 把观感偏好落到墙的根节点：暗角是类，着色是两个 CSS 变量
+  /// （色值来自用户的取色器，只能走内联变量——皮肤 CSS 里不许出现颜色字面量）。
+  function applyWallLook() {
+    if (!wall.root) return;
+    wall.root.classList.toggle('is-vignette', wall.vignette);
+    wall.root.classList.toggle('is-tint', wall.tint);
+    wall.root.style.setProperty('--qf-tint-color', wall.tintColor);
+    wall.root.style.setProperty('--qf-tint-opacity', String(wall.tintIntensity / 100));
+  }
+
+  /// 换歌跟随（设置页「换歌时自动聚焦」）：墙开着时切歌，就近挑一张
+  /// 正在播放的实例飞过去并展开。列表里没有 current 项（比如歌单那列
+  /// 停在第二层）就不动 —— 跟随是锦上添花，不是必须。
+  function followCurrent() {
+    if (!mounted || !wall.open || !wall.follow) return;
+    var idx = wall.tiles.findIndex(function (t) { return t.current; });
+    if (idx < 0) return;
+    focusQueueIndex(idx, true);
+  }
+
   /// 墙顶的来源标签。歌单视图要点得进去，所以额外挂一个返回键。
   function paintSourceTag() {
     if (refs.wallTag) {
@@ -849,6 +926,15 @@
     lights.classList.toggle('is-on', wall.lightsOut);
     lights.setAttribute('aria-pressed', String(wall.lightsOut));
 
+    // 观感/跟随偏好（设置页「海报墙」组写的 localStorage，见 wireWallSettings）。
+    wall.follow = readFlag(WALL_FOLLOW_KEY, true);
+    wall.vignette = readFlag(WALL_VIGNETTE_KEY, true);
+    wall.tint = readFlag(WALL_TINT_KEY, false);
+    wall.tintColor = readStr(WALL_TINT_COLOR_KEY, WALL_TINT_DEFAULT_COLOR);
+    var intensity = Number(readStr(WALL_TINT_INTENSITY_KEY, String(WALL_TINT_DEFAULT_INTENSITY)));
+    wall.tintIntensity = Number.isFinite(intensity) ? Math.max(0, Math.min(100, Math.round(intensity))) : WALL_TINT_DEFAULT_INTENSITY;
+    applyWallLook();
+
     window.addEventListener('resize', onWallResize);
   }
 
@@ -1018,8 +1104,7 @@
     // 退场波：卡片按入场延时的补数依次飞回上去（folia 的退出反向波），
     // 墙朝它进来的那个角清空。root 先留着，播完再藏再回收。
     // reduced-motion 或墙上没卡（空态）时没必要演，直接收。
-    var reduced = false;
-    try { reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { /* 老内核 */ }
+    var reduced = wallMotionReduced();
     if (wall.root && wall.posters.length && !reduced) {
       wall.posters.forEach(function (el) {
         el.style.setProperty('--qf-exit-delay', exitDelayFor(posterWorldRect(el)).toFixed(3) + 's');
@@ -1141,6 +1226,12 @@
       el.appendChild(img);
       applyImg(img, tile.cover);
     }
+    // 统一着色层（设置页「海报墙 → 海报统一着色」）：压在封面上、
+    // 文字与 scrim 之下，开关与强度走根节点上的 CSS 变量。
+    var tint = document.createElement('span');
+    tint.className = 'qf-poster-tint';
+    el.appendChild(tint);
+
     var shade = document.createElement('span');
     shade.className = 'qf-poster-shade';
     el.appendChild(shade);
@@ -1167,7 +1258,7 @@
     placePoster(el, resolveRect(entry));
     // 入场波窗口内的卡按到视口左上角的距离依次落下（Metro 着陆）；
     // 窗口外（平移/换源）露出的卡走 CSS 默认的一次轻上浮，不重播整波。
-    if (wall.open && performance.now() < wall.entranceUntil) {
+    if (wall.open && !wallMotionReduced() && performance.now() < wall.entranceUntil) {
       el.classList.add('is-landing');
       el.style.setProperty('--qf-land-delay', entranceDelayFor(entry.rect).toFixed(3) + 's');
     }
@@ -1532,6 +1623,7 @@
         ['look', '外观', '主题色、密度、动效与输出设备'],
         ['wall', '主题与壁纸', '二次元主题与背景图'],
         ['nav', '导航', '导航里显示哪些入口'],
+        ['walllook', '海报墙', '队列拼接的观感与跟随（仅清风生效）'],
       ],
     },
     {
@@ -1539,6 +1631,8 @@
       label: '播放',
       items: [
         ['audio', '音效与均衡器', '均衡器、增益与响度归一'],
+        ['play', '播放', '加入队列的默认行为与播放落点'],
+        ['lyrics', '歌词', '全局偏移、逐行过滤与片头人员行'],
         // 沉浸声场与胶囊播放器原本只有顶栏右上角那两个图标能进。
         // 清风把控制入口统一收进左上角的设置按钮，顶栏图标对它是冗余的，
         // 所以在设置里补了这个分组承接 —— 皮肤只隐藏入口，不禁用功能。
@@ -1905,6 +1999,18 @@
         else button.removeAttribute('aria-current');
       });
     }
+    // 分区可见性跟 rail 同源：设置里关掉的分区（app.js 的 applyNavVisibility
+    // 会摘 rail 入口），胶囊菜单里也不再出现。「每日推荐」那颗是 daily-view
+    // 挂进 rail 的，关掉是整个按钮消失，按「按钮还在不在」判。
+    if (refs.nav && refs.rail) {
+      refs.nav.querySelectorAll('[data-qf-view]').forEach(function (button) {
+        var key = button.dataset.qfView;
+        if (key === 'wall') return;
+        var railItem = refs.rail.querySelector('.rail-item[data-view="' + key + '"]');
+        if (key === 'daily') railItem = document.getElementById('rail-daily');
+        button.hidden = !railItem || railItem.hidden;
+      });
+    }
     // 入口文案跟着当前 tab：这个入口开的是**当前视图**的墙，
     // 固定叫「队列拼接」会让人以为在所有 tab 下看的都是播放队列。
     if (refs.wallBtnText) {
@@ -1958,6 +2064,14 @@
 
     keyHandler = onSheetKeydown;
     document.addEventListener('keydown', onWallKeydown);
+    wallEntryHandler = function () { if (mounted && !wall.open) openWall(); };
+    document.addEventListener('playback:entry-wall', wallEntryHandler);
+    // 设置里关掉分区时 app.js 广播 nav:changed，胶囊菜单同步摘入口。
+    navChangedHandler = function () { if (mounted) reflow(); };
+    document.addEventListener('nav:changed', navChangedHandler);
+    // 换歌跟随：app.js 在换曲时广播 playback:track。
+    wallTrackHandler = function () { followCurrent(); };
+    document.addEventListener('playback:track', wallTrackHandler);
     document.addEventListener('keydown', keyHandler);
 
     observer = new MutationObserver(function () {
@@ -1976,6 +2090,18 @@
     if (!mounted) return;
     if (observer) { observer.disconnect(); observer = null; }
     document.removeEventListener('keydown', onWallKeydown);
+    if (wallEntryHandler) {
+      document.removeEventListener('playback:entry-wall', wallEntryHandler);
+      wallEntryHandler = null;
+    }
+    if (navChangedHandler) {
+      document.removeEventListener('nav:changed', navChangedHandler);
+      navChangedHandler = null;
+    }
+    if (wallTrackHandler) {
+      document.removeEventListener('playback:track', wallTrackHandler);
+      wallTrackHandler = null;
+    }
     if (keyHandler) { document.removeEventListener('keydown', keyHandler); keyHandler = null; }
     window.removeEventListener('resize', onWallResize);
     if (wall.raf) { cancelAnimationFrame(wall.raf); wall.raf = 0; }
@@ -2028,6 +2154,56 @@
   document.addEventListener('skin:changed', onSkinChanged);
 
   if (isActiveSkin()) mount();
+
+  // -------------------------------------------------------------------------
+  // 设置页「海报墙」组：共享页面，无论当前皮肤是否清风都接线 —— 勾选直接写
+  // 皮肤自己的 localStorage，mount 时读回。用 on* 赋值挂接，脚本重复执行也不叠加。
+  // -------------------------------------------------------------------------
+
+  function wireWallSettings() {
+    var follow = document.getElementById('set-wall-follow');
+    if (!follow) return;
+    follow.checked = readFlag(WALL_FOLLOW_KEY, true);
+    follow.onchange = function () { writeFlag(WALL_FOLLOW_KEY, follow.checked); };
+
+    var vignette = document.getElementById('set-wall-vignette');
+    vignette.checked = readFlag(WALL_VIGNETTE_KEY, true);
+    vignette.onchange = function () {
+      writeFlag(WALL_VIGNETTE_KEY, vignette.checked);
+      wall.vignette = vignette.checked;
+      applyWallLook();
+    };
+
+    var tint = document.getElementById('set-wall-tint');
+    var color = document.getElementById('set-wall-tint-color');
+    var intensity = document.getElementById('set-wall-tint-intensity');
+    var intensityVal = document.getElementById('set-wall-tint-intensity-val');
+    tint.checked = readFlag(WALL_TINT_KEY, false);
+    color.value = readStr(WALL_TINT_COLOR_KEY, WALL_TINT_DEFAULT_COLOR);
+    var v = Number(readStr(WALL_TINT_INTENSITY_KEY, String(WALL_TINT_DEFAULT_INTENSITY)));
+    intensity.value = String(Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : WALL_TINT_DEFAULT_INTENSITY);
+    intensityVal.textContent = intensity.value + '%';
+    tint.onchange = function () {
+      writeFlag(WALL_TINT_KEY, tint.checked);
+      wall.tint = tint.checked;
+      applyWallLook();
+    };
+    color.onchange = function () {
+      writeStr(WALL_TINT_COLOR_KEY, color.value);
+      wall.tintColor = color.value;
+      applyWallLook();
+    };
+    intensity.oninput = function () {
+      intensityVal.textContent = intensity.value + '%';
+    };
+    intensity.onchange = function () {
+      writeStr(WALL_TINT_INTENSITY_KEY, intensity.value);
+      wall.tintIntensity = Number(intensity.value);
+      applyWallLook();
+    };
+  }
+
+  wireWallSettings();
 
   // 暴露仅用于排障/契约脚本：返回当前挂载状态。
   window.__qfSkin = {

@@ -248,3 +248,16 @@
   .fl-bg-layer .fl-shape:nth-child(n+7) { display: none !important; }
   .fl-bg-layer .fl-particle { display: none !important; }
 }
+
+/* ---------------------------------------------------------------------------
+ * 动效分面降级：歌词排版面（body[data-rm~="lyrics"]，由设置页「外观 →
+ * 动效分面」写入）。装饰层（形状漂移/粒子/呼吸）整个停掉；行进出保留
+ * 切换语义但瞬时完成。
+ * ------------------------------------------------------------------------- */
+body[data-rm~="lyrics"] .fl-shape,
+body[data-rm~="lyrics"] .fl-particle { animation: none !important; display: none; }
+body[data-rm~="lyrics"] .fl-classic.fl-cbreath { animation: none !important; }
+body[data-rm~="lyrics"] .fl-enter-normal,
+body[data-rm~="lyrics"] .fl-exit-normal,
+body[data-rm~="lyrics"] .fl-enter-fast,
+body[data-rm~="lyrics"] .fl-exit-fast { animation-duration: 1ms !important; }
