@@ -65,6 +65,7 @@ const ui = {
   setPlaybackEntry: $('set-playback-entry'),
   setAutoPlay: $('set-auto-play'),
   setScrobble: $('set-scrobble'),
+  setRelay: $('set-relay'),
   setLyricOffsetValue: $('set-lyric-offset-value'),
   setLyricOffsetDown: $('set-lyric-offset-down'),
   setLyricOffsetUp: $('set-lyric-offset-up'),
@@ -969,6 +970,11 @@ function handleEvent(msg) {
     case 'scrobbled':
       // 网易云听歌打卡成功（有效收听满 30s）：轻提示确认「播放量 +1」。
       toast(`已计入网易云播放量${state.current ? `：${state.current.title}` : ''}`);
+      break;
+    case 'source_switched':
+      // 曲源自动接力：服务端已在其他音源找到同一首并换源续播（队列项与
+      // 封面/标题元数据都已迁到新源名下，界面不跳变）。
+      toast(`原音源不可用，已切换到${msg.to_label || '其他音源'}续播《${msg.title}》`);
       break;
     default: break;
   }
@@ -3477,6 +3483,7 @@ async function loadSettings() {
     ? state.settings.playback_entry : 'none';
   if (ui.setAutoPlay) ui.setAutoPlay.checked = state.settings.startup_auto_play === true;
   if (ui.setScrobble) ui.setScrobble.checked = state.settings.scrobble_enabled !== false;
+  if (ui.setRelay) ui.setRelay.checked = state.settings.online_auto_relay !== false;
   paintLyricSettings();
   setCoverFollow(state.settings.cover_follow !== false, false);
   // 导航里「每日推荐」的可见性：关掉就把入口摘掉，其它菜单项不受影响。
@@ -4565,6 +4572,17 @@ function initPalette() {
         if (ui.setScrobble) ui.setScrobble.checked = next;
         await transport.put('/v1/settings', { scrobble_enabled: next }).catch(() => {});
         toast(next ? '听歌打卡已开启' : '听歌打卡已关闭');
+      },
+    },
+    {
+      id: 'tool-relay-toggle', group: '工具', title: '切换曲源自动接力',
+      keywords: 'relay 接力 换源 失效 音源',
+      run: async () => {
+        const next = state.settings.online_auto_relay === false;
+        state.settings.online_auto_relay = next;
+        if (ui.setRelay) ui.setRelay.checked = next;
+        await transport.put('/v1/settings', { online_auto_relay: next }).catch(() => {});
+        toast(next ? '曲源自动接力已开启' : '曲源自动接力已关闭');
       },
     },
     {
@@ -6477,6 +6495,14 @@ async function startApp() {
     ui.setScrobble.onchange = () => {
       state.settings.scrobble_enabled = ui.setScrobble.checked;
       transport.put('/v1/settings', { scrobble_enabled: ui.setScrobble.checked }).catch(() => {});
+    };
+  }
+  // 曲源失效自动接力：后端每次接力前读设置（缺省开），这里只写开关。
+  if (ui.setRelay) {
+    ui.setRelay.checked = state.settings.online_auto_relay !== false;
+    ui.setRelay.onchange = () => {
+      state.settings.online_auto_relay = ui.setRelay.checked;
+      transport.put('/v1/settings', { online_auto_relay: ui.setRelay.checked }).catch(() => {});
     };
   }
   // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。

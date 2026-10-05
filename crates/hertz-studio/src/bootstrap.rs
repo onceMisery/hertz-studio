@@ -138,6 +138,7 @@ pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::R
         weak_self: Default::default(),
         pending_restore_seek: Default::default(),
         listen: Default::default(),
+        relay_tried: Default::default(),
     });
     // 供 on_track_committed detach 'static 后台任务用；set 失败只可能是
     // 重复注入，启动路径只走一次，忽略即可。

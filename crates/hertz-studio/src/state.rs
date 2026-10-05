@@ -76,6 +76,18 @@ pub enum WsEvent {
     Scrobbled {
         track_id: String,
     },
+    /// 曲源自动接力成功：原音源失效的在线曲已按标题+歌手+时长在其他音源
+    /// 找到同一首并换源续播。前端据此轻提示「已切换到 XX 音源」。
+    SourceSwitched {
+        /// 新的虚拟 id（`新源:平台id`），队列与元数据都已迁到它名下。
+        track_id: String,
+        from_source: String,
+        to_source: String,
+        /// 目标音源的展示名（SOURCES 表 label），前端不必再反查清单。
+        to_label: String,
+        /// 原曲标题（接力候选与原曲同名，取原快照的写法展示）。
+        title: String,
+    },
     LibraryChanged,
 }
 
@@ -386,6 +398,9 @@ pub struct AppState {
     pub(crate) pending_restore_seek: Mutex<Option<u64>>,
     /// 听歌打卡计时器（网易云在线曲，seek-proof，见 [`ListenTracker`]）。
     pub(crate) listen: Mutex<ListenTracker>,
+    /// 曲源接力链中已知放不了的虚拟 id：接力候选排除它们，防止「换源搜
+    /// 回来还是同一个坏流」来回横跳。成功提交或整盘换队即清空。
+    pub(crate) relay_tried: Mutex<Vec<String>>,
 }
 
 impl AppState {
@@ -470,6 +485,8 @@ impl AppState {
         }
         let prev_queue = self.queue.lock().await.clone();
         let prev_cursor = *self.cursor.lock().await;
+        // 整盘换队意味着旧接力链（跟着旧队列的曲）全部作废。
+        self.relay_tried.lock().await.clear();
         let gen = self
             .play_generation
             .fetch_add(1, Ordering::Relaxed)
@@ -1426,6 +1443,8 @@ impl AppState {
         self.auto_failures.store(0, Ordering::Relaxed);
         // 跳曲走结束了：起点锚只在一次「连着跳了好几首」的过程中有意义。
         *self.skip_walk_from.lock().await = None;
+        // 接力链结束了：这一串已试过的坏流不再需要记忆。
+        self.relay_tried.lock().await.clear();
         self.record_history(track_id).await;
         // 实际档位本任务只回传给 /online/play 响应；后续统计/打点再消费。
         let _ = actual;
@@ -1592,6 +1611,191 @@ impl AppState {
         }
     }
 
+    /// 这一类失败值得跨源找同一首接力（folia 失效分类的「可恢复」语义）：
+    /// 曲目下架/删除、VIP 限制、需登录、流被上游拒绝、下载/解码失败——都是
+    /// 「这一首在原音源放不了」。上游整体超时（网络抖动）与能力/参数错误
+    /// 不接力：换一个音源救不了网络，也轮不到接力去修参数。
+    fn relay_eligible(code: &str) -> bool {
+        matches!(
+            code,
+            "not_found"
+                | "vip_required"
+                | "auth_required"
+                | "upstream_rejected"
+                | "internal"
+                | "decode_stalled"
+        )
+    }
+
+    /// 曲源自动接力：原音源失效的在线曲，按「标题+歌手+时长」在其余音源
+    /// 找同一首，找到就把队列这一项换成新源的虚拟 id 并重新走一遍播放。
+    /// 返回 true = 接力已发起（成败由新一轮播放自理，本层不再处置）；
+    /// false = 开关关闭/无元数据/无候选/用户已切走，调用方走原失败路径。
+    ///
+    /// 时序纪律：聚合搜索（单源 6s 预算）全程不持 `play_commit`——提交尾部
+    /// 的串行锁绝不被网络拖住。搜索回来后重新过 `attempt_alive` 闸门再原子
+    /// 替换，用户中途切走则静默放弃。防环靠 [`Self::relay_tried`]：候选池
+    /// 随每次接力单调缩小，穷尽后自然回落到既有跳曲路径。
+    async fn try_relay(
+        &self,
+        gen: usize,
+        index: usize,
+        track_id: String,
+        trigger: PlayTrigger,
+    ) -> bool {
+        let enabled = vmusic_store::settings::get(&self.db, "online_auto_relay")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if !enabled {
+            return false;
+        }
+        let Some(failed_source) = crate::online::split_virtual_id(&track_id).map(|(s, _)| s)
+        else {
+            return false;
+        };
+        // 匹配输入只认入队快照：重启后从歌单直播（无快照）宁可放弃接力，
+        // 也不拿平台 id 当标题去搜。
+        let meta = match self.online_meta.lock().await.get(&track_id).cloned() {
+            Some(m) if !m.title.trim().is_empty() => m,
+            _ => return false,
+        };
+        // 已知坏流先登记：候选排除它自己（虚拟 id 形态），也防接力链回头。
+        {
+            let mut tried = self.relay_tried.lock().await;
+            if !tried.contains(&track_id) {
+                // 上限兜底：极端连环失败下记忆不许无限增长。
+                if tried.len() >= 64 {
+                    tried.clear();
+                }
+                tried.push(track_id.clone());
+            }
+        }
+        let query = match meta.artist.as_deref() {
+            Some(a) if !a.trim().is_empty() => format!("{} {}", meta.title, a),
+            _ => meta.title.clone(),
+        };
+        crate::diaglog!(
+            "relay.begin",
+            idx = index,
+            gen = gen,
+            track = track_id,
+            from = failed_source,
+            title = meta.title,
+            trigger = trigger.as_str()
+        );
+        self.set_buffering(true, None).await;
+        let ctx = crate::online::Ctx {
+            db: self.db.clone(),
+        };
+        let searched = crate::online::search_all(&ctx, &query, 8).await;
+        let agg = match searched {
+            Ok(agg) => agg,
+            Err(e) => {
+                crate::diaglog!("relay.miss", reason = e.message);
+                self.set_buffering(false, None).await;
+                return false;
+            }
+        };
+        let tried = self.relay_tried.lock().await.clone();
+        let mut best: Option<(u32, crate::online::OnlineTrack)> = None;
+        for page in &agg.results {
+            if page.source == failed_source {
+                continue;
+            }
+            for t in &page.tracks {
+                let vid = crate::online::virtual_id(&page.source, &t.id);
+                if tried.contains(&vid) {
+                    continue;
+                }
+                if let Some(score) = relay_score(t, &meta.title, meta.artist.as_deref(), meta.duration_ms)
+                {
+                    if best.as_ref().map_or(true, |(s, _)| score > *s) {
+                        best = Some((score, t.clone()));
+                    }
+                }
+            }
+        }
+        let Some((score, cand)) = best else {
+            crate::diaglog!("relay.miss", idx = index, gen = gen, title = meta.title);
+            self.set_buffering(false, None).await;
+            return false;
+        };
+        let new_id = crate::online::virtual_id(&cand.source, &cand.id);
+        crate::diaglog!(
+            "relay.hit",
+            idx = index,
+            gen = gen,
+            from = failed_source,
+            to = cand.source,
+            score = score,
+            title = cand.title
+        );
+        // 搜索是数秒 await：复核 + 替换必须在提交锁内一次性完成，中途用户
+        // 切走（代际被顶 / 队列该位已不是原曲）就整段放弃。
+        let commit = self.play_commit.lock().await;
+        if !self.attempt_alive(gen, index, &track_id).await {
+            self.set_buffering(false, None).await;
+            return false;
+        }
+        {
+            let mut queue = self.queue.lock().await;
+            if queue.get(index) != Some(&track_id) {
+                self.set_buffering(false, None).await;
+                return false;
+            }
+            queue[index] = new_id.clone();
+        }
+        // 元数据迁到新虚拟 id 名下：title/artist/album/cover 保留原快照写法
+        //（同一首歌，界面不应跳变），时长用候选的实际值校正。
+        {
+            let mut map = self.online_meta.lock().await;
+            let mut snap = map.remove(&track_id).unwrap_or_else(|| OnlineMetaSnap {
+                title: cand.title.clone(),
+                artist: Some(cand.artist.clone()).filter(|s| !s.is_empty()),
+                album: Some(cand.album.clone()).filter(|s| !s.is_empty()),
+                cover: cand.cover.clone(),
+                duration_ms: Some(cand.duration_ms).filter(|d| *d > 0),
+            });
+            if cand.duration_ms > 0 {
+                snap.duration_ms = Some(cand.duration_ms);
+            }
+            map.insert(new_id.clone(), snap);
+        }
+        drop(commit);
+        // 换源续播：接力链再失败会重新进 online_failed，relay_tried 已把旧
+        // id 登记在案，候选池单调缩小直到穷尽，无死循环。成功后新一轮播放
+        // 自己完成提交收口（历史/打卡/预取），这里只补上「接力成功」的告知。
+        let relayed = matches!(
+            Box::pin(self.play_index_for(index, None, trigger)).await,
+            Ok(outcome) if outcome.committed
+        );
+        if relayed {
+            crate::diaglog!(
+                "relay.commit",
+                idx = index,
+                to = cand.source,
+                track = new_id
+            );
+            self.publish(WsEvent::SourceSwitched {
+                track_id: new_id,
+                from_source: failed_source.clone(),
+                to_source: cand.source.clone(),
+                to_label: crate::online::find(&cand.source)
+                    .map(|s| s.label)
+                    .unwrap_or("其他音源")
+                    .to_string(),
+                title: meta.title,
+            });
+            if let Some(arc) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
+                arc.post_commit_background();
+            }
+        }
+        relayed
+    }
+
     /// 在线曲播放失败的统一收口（取流/下载/解码失败都汇到这里）。
     /// 仍属当代时把 cursor 恢复到切入前，不让 next/prev 从一首没播起来的
     /// 曲算起；已被用户切走则整体静默（连 Err 都不回）。
@@ -1602,6 +1806,9 @@ impl AppState {
     ///   找不到才发终态事件；上游整体故障不试，免得一次限流烧穿整队。
     /// - 点播（Pick）：推原始错误（不停服务），返回 Err 交回 HTTP 调用方，由前端
     ///   错误条引导重试。
+    ///
+    /// 接力入口在最前面、且不持 `play_commit`：跨源搜索是数秒 await，提交
+    /// 尾部的串行锁绝不被它拖住；接力失败（含用户中途切走）才落回原路径。
     async fn online_failed(
         &self,
         gen: usize,
@@ -1623,6 +1830,19 @@ impl AppState {
             source = e.source.clone().unwrap_or_default(),
             reason = e.message
         );
+        // F1 曲源自动接力：这首本身放不了时先试跨源救回，救不回才按
+        // trigger 的既有语义跳曲/报错。接力期间 buffering 自理。先做一次
+        // 锁外代际复核（attempt_alive 允许的非提交复核）：用户已切走就不
+        // 白跑数秒的跨源搜索；try_relay 内部复核与替换仍在提交锁内。
+        if Self::relay_eligible(&e.code)
+            && self.attempt_alive(gen, index, &track_id).await
+            && Box::pin(self.try_relay(gen, index, track_id.clone(), trigger)).await
+        {
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
+        }
         let commit = self.play_commit.lock().await;
         if !self.attempt_alive(gen, index, &track_id).await {
             // 被顶代际：为跳过的曲子弹错、抢光标、给迟到的 HTTP 响应塞 404
@@ -1669,6 +1889,8 @@ impl AppState {
                     by = trigger.as_str(),
                     reason = "连续取流失败，停止跳曲"
                 );
+                // 放弃即结束接力链：这一串坏流记忆随跳曲走一起作废。
+                self.relay_tried.lock().await.clear();
                 self.publish(WsEvent::Error {
                     message: "连续多首无法播放，已停止。可检查音源登录或网络后重试。".into(),
                     code: Some("online_unavailable_streak".to_string()),
@@ -1793,6 +2015,8 @@ impl AppState {
             });
             if n >= 3 {
                 crate::diaglog!("play.streak_stop", streak = n, reason = "解码连续早夭");
+                // 放弃即结束接力链：这一串坏流记忆随跳曲走一起作废。
+                self.relay_tried.lock().await.clear();
                 self.publish(WsEvent::Error {
                     message: "连续多首无法播放，已停止。可检查音源登录或网络后重试。".into(),
                     code: Some("online_unavailable_streak".into()),
@@ -1818,6 +2042,24 @@ impl AppState {
         }
         self.set_buffering(false, None).await;
         drop(commit);
+        // F1 曲源接力：解码早夭的在线曲先试跨源救回（坏缓存自愈已失败过一次，
+        // 这条流本身大概率有问题），救不回才按 AutoNext 跳曲。接力成功时新一轮
+        // 播放自理提交收口，这里直接返回。
+        if advance {
+            let index = *self.cursor.lock().await;
+            let relayed = match index {
+                Some(index) => {
+                    Box::pin(
+                        self.try_relay(reservation, index, track_id.clone(), PlayTrigger::AutoNext),
+                    )
+                    .await
+                }
+                None => false,
+            };
+            if relayed {
+                return;
+            }
+        }
         if advance
             && Box::pin(self.step_for(1, PlayTrigger::AutoNext, None, Some(reservation)))
                 .await
@@ -1949,6 +2191,61 @@ impl AppState {
 /// 显示虚拟 id 尾段（平台曲目 id），至少能让用户认出是哪一首。
 fn track_title(track_id: &str) -> String {
     track_id.rsplit(':').next().unwrap_or(track_id).to_string()
+}
+
+/// 接力匹配的文本归一化：去空白与全部标点（中英）、折叠大小写。只求
+/// 「同一首歌的不同平台写法」归到一起，不做括号内容剥离——《歌名 (Live)》
+/// 与《歌名》本就不是同一首，保守归一化宁漏勿错。
+fn normalize_relay_text(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// 歌手串拆键：各平台分隔符不一（逗号/斜杠/顿号/&），归一化后按集合比对。
+fn relay_artist_keys(s: &str) -> std::collections::HashSet<String> {
+    s.split([',', '/', '、', '&', '；', ';', ' '])
+        .map(normalize_relay_text)
+        .filter(|k| !k.is_empty())
+        .collect()
+}
+
+/// 接力候选评分。标题归一化相等是门槛（不等直接出局）；歌手交集与
+/// 时长容差加分；VIP 候选降权不排除（大概率同样放不了，但取流会如实
+/// 报错，交给接力链的既有失败处置）。返回 None = 不够格当候选。
+fn relay_score(
+    track: &crate::online::OnlineTrack,
+    title: &str,
+    artist: Option<&str>,
+    duration_ms: Option<u64>,
+) -> Option<u32> {
+    if !track.playable {
+        return None;
+    }
+    if normalize_relay_text(&track.title) != normalize_relay_text(title) {
+        return None;
+    }
+    let mut score: u32 = 10;
+    if let Some(a) = artist.filter(|a| !a.trim().is_empty()) {
+        let want = relay_artist_keys(a);
+        let got = relay_artist_keys(&track.artist);
+        if !want.is_empty() && want.intersection(&got).next().is_some() {
+            score += 5;
+        }
+    }
+    if let Some(d) = duration_ms.filter(|d| *d > 0) {
+        let diff = track.duration_ms.abs_diff(d);
+        if diff <= 5_000 {
+            score += 5;
+        } else if diff <= 10_000 {
+            score += 2;
+        }
+    }
+    if track.vip_only {
+        score = score.saturating_sub(3);
+    }
+    Some(score)
 }
 
 /// Shuffle without pulling in an RNG crate: xorshift seeded from the clock.
@@ -2163,6 +2460,7 @@ pub(crate) mod tests {
             weak_self: Default::default(),
             pending_restore_seek: Default::default(),
             listen: Default::default(),
+            relay_tried: Default::default(),
         };
         (state, handle)
     }
@@ -2311,5 +2609,105 @@ pub(crate) mod tests {
         assert_eq!(PlayTrigger::Step { delta: 1 }.streak_cap(2), 2);
         assert_eq!(PlayTrigger::Step { delta: -1 }.streak_cap(1), 1);
         assert_eq!(PlayTrigger::Pick.streak_cap(24), 0);
+    }
+
+    fn relay_track(title: &str, artist: &str, duration_ms: u64) -> crate::online::OnlineTrack {
+        crate::online::OnlineTrack {
+            source: "qq".into(),
+            id: "t1".into(),
+            title: title.into(),
+            artist: artist.into(),
+            album: String::new(),
+            duration_ms,
+            cover: None,
+            playable: true,
+            vip_only: false,
+            track_ref: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn relay_score_demands_the_same_normalized_title() {
+        // 标题归一化相等是门槛：全半角标点、空白、大小写差异都抹平。
+        assert!(relay_score(
+            &relay_track("Qing Tian", "周杰伦", 269_000),
+            "晴 天！",
+            Some("周杰伦"),
+            Some(269_000),
+        )
+        .is_none()); // 中文对英文不算同名：归一化只抹标点与大小写，不做翻译
+        assert!(relay_score(
+            &relay_track("晴天", "周杰伦", 269_000),
+            "晴 天！",
+            Some("周杰伦"),
+            Some(269_000),
+        )
+        .is_some());
+        // 《Live》版字样保留在标题里：不是同一首，宁漏勿错。
+        assert_eq!(
+            relay_score(
+                &relay_track("晴天 Live", "周杰伦", 269_000),
+                "晴天",
+                Some("周杰伦"),
+                Some(269_000),
+            ),
+            None
+        );
+        // 不可播放的候选一律出局。
+        let mut dead = relay_track("晴天", "周杰伦", 269_000);
+        dead.playable = false;
+        assert_eq!(relay_score(&dead, "晴天", Some("周杰伦"), Some(269_000)), None);
+    }
+
+    #[test]
+    fn relay_score_prefers_matching_artist_and_duration() {
+        let loose = relay_score(
+            &relay_track("晴天", "群星", 269_000),
+            "晴天",
+            Some("周杰伦"),
+            Some(269_000),
+        )
+        .unwrap();
+        let exact = relay_score(
+            &relay_track("晴天", "周杰伦", 269_000),
+            "晴天",
+            Some("周杰伦"),
+            Some(269_000),
+        )
+        .unwrap();
+        // 歌手交集与时长容差各自 +5：精确匹配（20）必须稳赢群星合辑（15）。
+        assert_eq!(exact, 20);
+        assert!(exact > loose);
+        // 时长差超出 10s 不加分；5s 内满加。
+        let far = relay_score(
+            &relay_track("晴天", "周杰伦", 280_000),
+            "晴天",
+            Some("周杰伦"),
+            Some(269_000),
+        )
+        .unwrap();
+        assert!(far < exact);
+        // VIP 候选降权：同为精确匹配时输给非 VIP。
+        let mut vip = relay_track("晴天", "周杰伦", 269_000);
+        vip.vip_only = true;
+        assert!(relay_score(&vip, "晴天", Some("周杰伦"), Some(269_000)).unwrap() < exact);
+    }
+
+    #[test]
+    fn relay_eligible_tracks_only_unplayable_songs() {
+        // 这首本身放不了 → 接力；网络抖动与参数问题 → 不接力。
+        for code in [
+            "not_found",
+            "vip_required",
+            "auth_required",
+            "upstream_rejected",
+            "internal",
+            "decode_stalled",
+        ] {
+            assert!(AppState::relay_eligible(code), "{code} 应当可接力");
+        }
+        for code in ["upstream_timeout", "bad_request", "capability_unsupported"] {
+            assert!(!AppState::relay_eligible(code), "{code} 不该接力");
+        }
     }
 }
