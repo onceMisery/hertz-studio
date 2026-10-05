@@ -139,6 +139,7 @@ pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::R
         pending_restore_seek: Default::default(),
         overlay_lyric: Default::default(),
         listen: Default::default(),
+        scrobble: Default::default(),
         relay_tried: Default::default(),
     });
     // 供 on_track_committed detach 'static 后台任务用；set 失败只可能是

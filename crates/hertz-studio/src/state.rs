@@ -336,6 +336,73 @@ impl ListenTracker {
     }
 }
 
+/// 听歌打卡频控闸门（folia `playbackReportGate` 的服务端移植）。
+///
+/// 打卡是写用户真实账号的动作，而一阵不合情理的突发请求正是触发平台风控
+/// 的原因。上游的 [`ListenTracker`] 已经拒绝把没有真的播的声音计入时长；
+/// 这里拒绝以任何真实听歌的人都做不出来的速率把报告**发**出去——不管计时
+/// 器当时信了什么。
+///
+/// 只在内存里计数：重启即清空。持久化省不下什么（每份报告背后仍然要有
+/// 30 秒真实音频），而这个上限本来就是防会话内突发，不是耐久配额。
+#[derive(Default)]
+pub(crate) struct ScrobbleGate {
+    /// 本会话内各次「决定发送」的时刻（请求发出前记账，见 try_claim）。
+    recent: std::sync::Mutex<Vec<std::time::Instant>>,
+    /// 有上报在飞：窗口期内的第二份直接丢。15s 超时兜底释放，见 REPORT_TIMEOUT。
+    in_flight: std::sync::atomic::AtomicBool,
+}
+
+impl ScrobbleGate {
+    /// 两次上报之间的最小间隔：没人能在 5 秒内听完两首。
+    const MIN_GAP: std::time::Duration = std::time::Duration::from_secs(5);
+    /// 连着放一小时的 2 分钟短曲是 30 首；翻倍到 60 已是宽松。
+    const MAX_PER_HOUR: usize = 60;
+    /// 单次上报等待上限：reqwest 客户端本身没有总超时，死代理/黑洞防火墙
+    /// 会让请求永远 pending，超时则放弃这一格（不取消请求本身——放弃的是
+    /// 插槽，而插槽绝不能泄漏，否则之后的报告全被判成「在飞」静默丢弃）。
+    const REPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+    /// 计数窗口：一小时外的记录不再占用配额。
+    const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    /// 申领一次上报资格。返回 false = 丢弃（调用方静默记账即可）。
+    ///
+    /// in-flight 用 CAS 抢占，与后续的间隔/计数检查合起来对并发调用保持
+    /// 原子；检查不过则当即归还 in-flight 标志。记账发生在请求**之前**：
+    /// 慢端点或失败端点不能被重试成突发——丢一条记录的代价永远小于账号
+    /// 被风控标记。
+    pub(crate) fn try_claim(&self, now: std::time::Instant) -> bool {
+        use std::sync::atomic::Ordering;
+        if self
+            .in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return false;
+        }
+        let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        recent.retain(|t| now.duration_since(*t) < Self::HOUR);
+        let gap_ok = recent
+            .last()
+            .map(|l| now.duration_since(*l) >= Self::MIN_GAP)
+            .unwrap_or(true);
+        let cap_ok = recent.len() < Self::MAX_PER_HOUR;
+        if !gap_ok || !cap_ok {
+            drop(recent);
+            self.in_flight.store(false, Ordering::SeqCst);
+            return false;
+        }
+        recent.push(now);
+        true
+    }
+
+    /// 归还 in-flight 插槽。请求收尾（成功/失败/超时）后调用一次。
+    pub(crate) fn release(&self) {
+        use std::sync::atomic::Ordering;
+        self.in_flight.store(false, Ordering::SeqCst);
+    }
+}
+
 pub struct AppState {
     pub db: SqlitePool,
     pub audio: AudioHandle,
@@ -398,6 +465,8 @@ pub struct AppState {
     pub(crate) pending_restore_seek: Mutex<Option<u64>>,
     /// 听歌打卡计时器（网易云在线曲，seek-proof，见 [`ListenTracker`]）。
     pub(crate) listen: Mutex<ListenTracker>,
+    /// 打卡上报频控闸门（见 [`ScrobbleGate`]）：发送侧的最后一道防线。
+    pub(crate) scrobble: ScrobbleGate,
     /// 曲源接力链中已知放不了的虚拟 id：接力候选排除它们，防止「换源搜
     /// 回来还是同一个坏流」来回横跳。成功提交或整盘换队即清空。
     pub(crate) relay_tried: Mutex<Vec<String>>,
@@ -543,6 +612,8 @@ impl AppState {
 
     /// 结算上报（detach）：只认网易云在线曲；`scrobble_enabled` 缺省开。
     /// 失败只记 debug——打卡是增益功能，绝不能给播放链路制造错误条。
+    /// 发送前先过 [`ScrobbleGate`] 频控，丢弃同样只记 diaglog（不打扰听众，
+    /// 但控制台留痕）：丢一条记录的代价永远小于账号被风控标记。
     fn spawn_scrobble(state: Arc<AppState>, track_id: String, listened_ms: u64) {
         tokio::spawn(async move {
             let Some((source, id)) = crate::online::split_virtual_id(&track_id) else {
@@ -562,17 +633,32 @@ impl AppState {
             }
             // time 参数封顶 10 分钟：畸形计时（快进外的高频帧）也不至于离谱。
             let seconds = (listened_ms / 1000).clamp(30, 600);
+            if !state.scrobble.try_claim(std::time::Instant::now()) {
+                crate::diaglog!("scrobble.dropped", track = id.as_str(), reason = "rate-gate");
+                return;
+            }
             let ctx = crate::routes::online_ctx(&state);
             crate::diaglog!("scrobble.report", track = id.as_str(), seconds = seconds);
-            match crate::online::scrobble(&ctx, &source, &id, seconds).await {
-                Ok(()) => {
+            // 15s 超时只放弃等待、不取消请求本身；finally 语义由紧随的
+            // release 保证——闸门插槽绝不能因慢请求泄漏。
+            let outcome = tokio::time::timeout(
+                ScrobbleGate::REPORT_TIMEOUT,
+                crate::online::scrobble(&ctx, &source, &id, seconds),
+            )
+            .await;
+            state.scrobble.release();
+            match outcome {
+                Ok(Ok(())) => {
                     tracing::info!("听歌打卡成功：netease:{id}（{seconds}s）");
                     state.publish(WsEvent::Scrobbled {
                         track_id: track_id.clone(),
                     });
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::debug!("听歌打卡失败（不打扰播放）: {e:?}");
+                }
+                Err(_elapsed) => {
+                    tracing::debug!("听歌打卡等待超过 {}s，放弃这一格", ScrobbleGate::REPORT_TIMEOUT.as_secs());
                 }
             }
         });
@@ -2466,6 +2552,7 @@ pub(crate) mod tests {
             pending_restore_seek: Default::default(),
             overlay_lyric: Default::default(),
             listen: Default::default(),
+            scrobble: Default::default(),
             relay_tried: Default::default(),
         };
         (state, handle)
@@ -2715,5 +2802,75 @@ pub(crate) mod tests {
         for code in ["upstream_timeout", "bad_request", "capability_unsupported"] {
             assert!(!AppState::relay_eligible(code), "{code} 不该接力");
         }
+    }
+
+    #[test]
+    fn scrobble_gate_rejects_bursts_within_min_gap() {
+        let gate = ScrobbleGate::default();
+        let t0 = std::time::Instant::now();
+        assert!(gate.try_claim(t0), "会话内第一份放行");
+        gate.release();
+        let one_sec = std::time::Duration::from_secs(1);
+        assert!(!gate.try_claim(t0 + one_sec), "1s 内的第二份太密");
+        assert!(
+            !gate.try_claim(t0 + ScrobbleGate::MIN_GAP - std::time::Duration::from_millis(1)),
+            "差 1ms 满 5s 也拒"
+        );
+        assert!(gate.try_claim(t0 + ScrobbleGate::MIN_GAP), "满 5s 放行");
+        gate.release();
+    }
+
+    #[test]
+    fn scrobble_gate_serializes_in_flight() {
+        let gate = ScrobbleGate::default();
+        let t0 = std::time::Instant::now();
+        assert!(gate.try_claim(t0));
+        assert!(
+            !gate.try_claim(t0 + std::time::Duration::from_secs(10)),
+            "上一份还在飞：即使过了间隔也不并发"
+        );
+        gate.release();
+        assert!(
+            gate.try_claim(t0 + std::time::Duration::from_secs(10)),
+            "归还插槽后放行"
+        );
+        gate.release();
+    }
+
+    #[test]
+    fn scrobble_gate_caps_hourly_quota() {
+        let gate = ScrobbleGate::default();
+        let now = std::time::Instant::now();
+        {
+            // 直接铺满一小时配额（每条都距 now 10s 以上，先绕开间隔检查，
+            // 只隔离验证计数上限）。铺账用锁内写入，不经 try_claim 的间隔门；
+            // 偏移刻意压在 59 分钟整、不碰一小时修剪边界。
+            let mut recent = gate.recent.lock().unwrap();
+            for i in 0..ScrobbleGate::MAX_PER_HOUR {
+                recent.push(now - std::time::Duration::from_secs(10 + 59 * i as u64));
+            }
+        }
+        assert!(!gate.try_claim(now), "一小时满额后拒绝");
+        // 一条一小时前的旧账被窗口修剪，不占额度；配额仍满，继续拒。
+        gate
+            .recent
+            .lock()
+            .unwrap()
+            .push(now - std::time::Duration::from_secs(3601));
+        assert!(!gate.try_claim(now), "旧账修剪后配额仍满");
+    }
+
+    #[test]
+    fn scrobble_gate_prunes_entries_older_than_an_hour() {
+        let gate = ScrobbleGate::default();
+        let now = std::time::Instant::now();
+        {
+            let mut recent = gate.recent.lock().unwrap();
+            for i in 0..ScrobbleGate::MAX_PER_HOUR {
+                recent.push(now - std::time::Duration::from_secs(3601 + 60 * i as u64));
+            }
+        }
+        assert!(gate.try_claim(now), "记录全部过期后额度释放");
+        gate.release();
     }
 }
