@@ -1279,9 +1279,18 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
     let (title, artist, album, cover, mut doc) =
         if let Some((source, ref_id)) = crate::online::split_virtual_id(&track_id) {
             let meta = state.online_meta.lock().await.get(&track_id).cloned();
-            let doc = online::lyric(&online_ctx(&state), &source, &ref_id)
-                .await
-                .unwrap_or_else(|_| vmusic_core::LyricDocument::empty());
+            // 歌词走记忆化（见 overlay_lyric 字段注释）：浮层 500ms 一拍，
+            // 在线歌词不能每拍都打上游。
+            let doc = match cached_overlay_doc(state, &track_id).await {
+                Some(doc) => doc,
+                None => {
+                    let doc = online::lyric(&online_ctx(state), &source, &ref_id)
+                        .await
+                        .unwrap_or_else(|_| vmusic_core::LyricDocument::empty());
+                    *state.overlay_lyric.lock().await = Some((track_id.clone(), doc.clone()));
+                    doc
+                }
+            };
             let cover = meta
                 .as_ref()
                 .and_then(|m| m.cover.as_deref())
@@ -1303,15 +1312,23 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
             // 取词链与 /v1/tracks/{id}/lyrics 相同（imported > embedded >
             // sidecar），但偏移在这里统一叠加后再一次性应用：文件 [offset:] +
             // 每曲用户偏移 + 全局偏移。apply_offset 不是幂等的，绝不能叠加两次。
+            // 缓存存的是叠加用户偏移之前的原始解析文档。
             let saved = vmusic_store::lyrics::get(&state.db, &track.id)
                 .await
                 .ok()
                 .flatten();
             let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
-            let path = Path::new(&track.path);
-            let mut doc = match saved.filter(|s| !s.content.trim().is_empty()) {
-                Some(saved) => vmusic_lyrics::parse_lrc(&saved.content),
-                None => read_embedded_or_sidecar_lyrics(path).await,
+            let mut doc = match cached_overlay_doc(state, &track_id).await {
+                Some(doc) => doc,
+                None => {
+                    let path = Path::new(&track.path);
+                    let doc = match saved.filter(|s| !s.content.trim().is_empty()) {
+                        Some(saved) => vmusic_lyrics::parse_lrc(&saved.content),
+                        None => read_embedded_or_sidecar_lyrics(path).await,
+                    };
+                    *state.overlay_lyric.lock().await = Some((track_id.clone(), doc.clone()));
+                    doc
+                }
             };
             doc.offset_ms += user_offset;
             let cover = track
@@ -1368,6 +1385,15 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
         "wordByWord": word_by_word,
         "lines": lines,
     })
+}
+
+/// OBS 浮层的歌词缓存命中：当前曲的原始解析文档（偏移叠加前）。
+async fn cached_overlay_doc(state: &AppState, track_id: &str) -> Option<vmusic_core::LyricDocument> {
+    let guard = state.overlay_lyric.lock().await;
+    match guard.as_ref() {
+        Some((id, doc)) if id == track_id => Some(doc.clone()),
+        _ => None,
+    }
 }
 
 /// HTTP 壳：`GET /v1/overlay/lyric`。永不失败（空闲/查不到曲都回 200 空文档），

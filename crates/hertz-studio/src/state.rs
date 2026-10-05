@@ -401,6 +401,11 @@ pub struct AppState {
     /// 曲源接力链中已知放不了的虚拟 id：接力候选排除它们，防止「换源搜
     /// 回来还是同一个坏流」来回横跳。成功提交或整盘换队即清空。
     pub(crate) relay_tried: Mutex<Vec<String>>,
+    /// OBS 浮层的歌词记忆化：按 track_id 单槽缓存「源解析后的原始文档」
+    /// （用户/全局偏移叠加之前）。浮层页 500ms 轮询，没有缓存的话在线曲
+    /// 等于每秒打两次上游歌词接口、本地曲每次重开音频文件读标签。换曲
+    /// 自然失效；同一曲播放中导入新歌词要等换曲才反映（OBS 场景可接受）。
+    pub(crate) overlay_lyric: Mutex<Option<(String, vmusic_core::LyricDocument)>>,
 }
 
 impl AppState {
@@ -2459,6 +2464,7 @@ pub(crate) mod tests {
             stage_beats: Default::default(),
             weak_self: Default::default(),
             pending_restore_seek: Default::default(),
+            overlay_lyric: Default::default(),
             listen: Default::default(),
             relay_tried: Default::default(),
         };

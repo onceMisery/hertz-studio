@@ -112,34 +112,30 @@ fn build_query(track: &vmusic_core::Track) -> String {
 }
 
 /// LyricDocument → LRC 原文（导入歌词表存的是原文，读取端再解析）。
+///
+/// 时间戳必须是标准 `[mm:ss.xxx]`：`try_timestamp` 把两段式解析成
+/// 「分:秒」，写成 `[总秒:毫秒]` 会让 2:45.123 变成 167 分钟。
+/// 翻译不导出：LRC 原文里无法无损还原 `translation` 平行数组（同时间戳
+/// 的译文行会被解析端读成两条同刻歌词行），与在线歌词不合并 tlyric 同口径。
 fn doc_to_lrc(doc: &vmusic_core::LyricDocument) -> String {
+    fn stamp(start_ms: u64) -> String {
+        let mm = start_ms / 60_000;
+        let ss = (start_ms % 60_000) / 1000;
+        let ms = start_ms % 1000;
+        format!("[{mm:02}:{ss:02}.{ms:03}]")
+    }
     let mut out = String::new();
     for line in &doc.lines {
-        let cs = line.start_ms / 1000;
-        let ms = line.start_ms % 1000;
-        let text: String = if line.words.is_empty() {
-            line.text.clone()
+        if line.words.is_empty() {
+            out.push_str(&format!("{}{}\n", stamp(line.start_ms), line.text));
         } else {
-            // 逐词时间戳：还原成增强 LRC（[mm:ss.xxx]词…），读取端原生支持。
-            line.words
-                .iter()
-                .map(|w| {
-                    let wcs = w.start_ms / 1000;
-                    let wms = w.start_ms % 1000;
-                    format!("[{wcs:02}:{wms:03}]{}", w.text)
-                })
-                .collect()
-        };
-        out.push_str(&format!("[{cs:02}:{ms:03}]{text}\n"));
-    }
-    if let Some(tr) = &doc.translation {
-        // 翻译行与原文行同时间戳成对输出，解析端按行序对应。
-        for (i, t) in tr.iter().enumerate() {
-            if let Some(line) = doc.lines.get(i) {
-                let cs = line.start_ms / 1000;
-                let ms = line.start_ms % 1000;
-                out.push_str(&format!("[{cs:02}:{ms:03}]{t}\n"));
+            // 逐词行：首个词戳兼任行戳。行戳后紧跟词戳的「空首段」形态会被
+            // 读取端判定为重复戳展开（parse_lyric_line 的空首段规则），词级
+            // 信息就丢了。
+            for w in &line.words {
+                out.push_str(&format!("{}{}", stamp(w.start_ms), w.text));
             }
+            out.push('\n');
         }
     }
     out
@@ -365,4 +361,44 @@ pub(crate) async fn complete_tracks(
         "filled_lyrics": filled_lyrics,
         "results": results,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 导出的 LRC 必须能被读取端原样还原时间轴：`doc_to_lrc` 曾把
+    /// `[总秒:毫秒]` 当 `[分:秒]` 写，2:45.123 被读成 167 分钟。
+    #[test]
+    fn doc_to_lrc_roundtrips_through_parse_lrc() {
+        let doc = vmusic_core::LyricDocument {
+            source: vmusic_core::LyricSource::Imported,
+            offset_ms: 0,
+            lines: vec![
+                vmusic_core::LyricLine {
+                    text: "晴天".into(),
+                    start_ms: 165_123,
+                    end_ms: Some(201_456),
+                    words: vec![
+                        vmusic_core::LyricWord { text: "晴".into(), start_ms: 165_123, end_ms: Some(166_000) },
+                        vmusic_core::LyricWord { text: "天".into(), start_ms: 166_000, end_ms: Some(167_000) },
+                    ],
+                },
+                vmusic_core::LyricLine {
+                    text: "故事的小黄花".into(),
+                    start_ms: 201_456,
+                    end_ms: None,
+                    words: Vec::new(),
+                },
+            ],
+            translation: None,
+        };
+        let parsed = vmusic_lyrics::parse_lrc(&doc_to_lrc(&doc));
+        assert_eq!(parsed.lines.len(), 2);
+        assert_eq!(parsed.lines[0].start_ms, 165_123);
+        assert_eq!(parsed.lines[1].start_ms, 201_456);
+        // 逐词行还原出词级时间戳（词序保持）。
+        let words: Vec<u64> = parsed.lines[0].words.iter().map(|w| w.start_ms).collect();
+        assert_eq!(words, vec![165_123, 166_000]);
+    }
 }

@@ -137,6 +137,7 @@ pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::R
         stage_beats: Default::default(),
         weak_self: Default::default(),
         pending_restore_seek: Default::default(),
+        overlay_lyric: Default::default(),
         listen: Default::default(),
         relay_tried: Default::default(),
     });

@@ -79,11 +79,16 @@ window.VideoExport = (function () {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
   }
 
-  // 设置页同款的后端调用：POST + 查询串 token（require_token 中间件认它）。
+  // 设置页同款的后端调用：Bearer 头鉴权（transport 同款）。查询串 token 只
+  // 对 GET 生效——require_token 明确拒绝 POST 带查询串 token，写控制类请求
+  // 必须走请求头。
   function api(path, body) {
-    return fetch(path + '?token=' + encodeURIComponent(token()), {
+    return fetch(path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token()
+      },
       body: JSON.stringify(body || {})
     }).then(function (res) {
       if (!res.ok) throw new Error(path + ' -> ' + res.status);
