@@ -228,13 +228,54 @@ pub fn apply_offset(doc: &mut LyricDocument) {
         } else {
             line.start_ms.saturating_sub(shift_abs)
         };
+        line.end_ms = line.end_ms.map(|e| if positive {
+            e + shift_abs
+        } else {
+            e.saturating_sub(shift_abs)
+        });
         for word in &mut line.words {
             word.start_ms = if positive {
                 word.start_ms + shift_abs
             } else {
                 word.start_ms.saturating_sub(shift_abs)
             };
+            // 词尾同样要偏移：逐字扫色的「这个词唱完了」判定靠 end_ms，
+            // 只偏起点会让扫色边界整体错开一个偏移量。
+            word.end_ms = word.end_ms.map(|e| if positive {
+                e + shift_abs
+            } else {
+                e.saturating_sub(shift_abs)
+            });
         }
+    }
+}
+
+/// 把翻译 LRC 对齐到已解析文档上，产出与 `doc.lines` 等长的平行数组。
+///
+/// 对齐键是双方**原始** start_ms（解析不施加 offset 标签，调用方应在
+/// `apply_offset` 之前对齐——偏移后 translation 平行数组按下标跟随，无需
+/// 再平移）。某行没有翻译就给空串；一条都对不上或翻译文本本身解析不出
+/// 任何行时返回 None，调用方保持 `translation: None`，而不是挂一个全空
+/// 数组让 API 白白多传字段。
+pub fn align_translation(doc: &LyricDocument, translated_lrc: &str) -> Option<Vec<String>> {
+    let parsed = parse_lrc(translated_lrc);
+    if parsed.lines.is_empty() {
+        return None;
+    }
+    let stamps: std::collections::HashMap<u64, &str> = parsed
+        .lines
+        .iter()
+        .map(|l| (l.start_ms, l.text.as_str()))
+        .collect();
+    let out: Vec<String> = doc
+        .lines
+        .iter()
+        .map(|l| stamps.get(&l.start_ms).copied().unwrap_or("").to_string())
+        .collect();
+    if out.iter().all(String::is_empty) {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -286,6 +327,20 @@ mod tests {
     }
 
     #[test]
+    fn offset_shifts_line_and_word_ends_too() {
+        // 逐字扫色靠 end_ms 判「这个词唱完了」：行尾与词尾漏偏会让扫色
+        // 边界整体错开一个偏移量。
+        let mut doc = parse_lrc("[offset:1000]\n[00:02.00]你[00:02.50]好\n[00:04.00]世界");
+        apply_offset(&mut doc);
+        let line = &doc.lines[0];
+        // 行尾 = 下一行起点，同样要偏移。
+        assert_eq!(line.end_ms, Some(5_000));
+        assert_eq!(line.words[0].start_ms, 3_000);
+        assert_eq!(line.words[0].end_ms, Some(3_500));
+        assert_eq!(line.words[1].end_ms, None, "没有下界的词尾保持 None");
+    }
+
+    #[test]
     fn repeated_timestamps_expand_to_several_lines() {
         let doc = parse_lrc("[00:12.00][00:15.00]same text twice");
         assert_eq!(doc.lines.len(), 2, "one line per timestamp");
@@ -301,5 +356,27 @@ mod tests {
     fn junk_input_never_panics() {
         let doc = parse_lrc("not a lyric\n[[[[]]]\n[99:99.99]\n");
         let _ = doc.lines.len();
+    }
+
+    #[test]
+    fn aligns_translation_by_line_stamp() {
+        let doc = parse_lrc("[00:01.00]hello\n[00:05.00]world\n");
+        let tr = align_translation(&doc, "[00:01.00]你好\n[00:05.00]世界\n")
+            .expect("时间戳对得上就该产出数组");
+        assert_eq!(tr, vec!["你好", "世界"]);
+    }
+
+    #[test]
+    fn partial_translation_pads_with_empty_strings() {
+        let doc = parse_lrc("[00:01.00]a\n[00:02.00]b\n[00:03.00]c\n");
+        let tr = align_translation(&doc, "[00:01.00]甲\n[00:03.00]丙\n").expect("部分对上也该产出");
+        assert_eq!(tr, vec!["甲", "", "丙"]);
+    }
+
+    #[test]
+    fn unmatchable_translation_returns_none() {
+        let doc = parse_lrc("[00:01.00]hello\n");
+        assert!(align_translation(&doc, "[00:09.00]对不上\n").is_none());
+        assert!(align_translation(&doc, "根本不是歌词\n").is_none(), "解析不出任何行也是 None");
     }
 }

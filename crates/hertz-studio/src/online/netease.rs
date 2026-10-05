@@ -433,8 +433,10 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
         .await
         .map_err(|e| ApiError::internal(format!("解析歌词失败: {e}")))?;
 
-    // 翻译歌词（tlyric）目前不合并：舞台的逐字擦除靠原文时间轴，译文混进去
-    // 只会让同一行的字数对不上。
+    // 翻译歌词（tlyric，tv=-1 已随请求带回）：不混进 LRC 文本（那会把同刻
+    // 译文行读进时间轴、毁掉逐字扫色的词级结构），走 LyricDocument.translation
+    // 平行数组——overlay API 已按行透传该字段。对齐必须在 apply_offset 之前
+    // （原始时间轴两侧一致；偏移后 translation 按下标跟随，无需再平移）。
     let text = body
         .get("lrc")
         .and_then(|l| l.get("lyric"))
@@ -446,6 +448,13 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
     }
 
     let mut doc = vmusic_lyrics::parse_lrc(&text);
+    if let Some(tlyric) = body
+        .get("tlyric")
+        .and_then(|t| t.get("lyric"))
+        .and_then(|v| v.as_str())
+    {
+        doc.translation = vmusic_lyrics::align_translation(&doc, tlyric);
+    }
     vmusic_lyrics::apply_offset(&mut doc);
     Ok(doc)
 }

@@ -18,6 +18,10 @@
     &color=%23ffffff  文字主色（十六进制，需 URL 编码 #）
     &dim=0.45         非当前行透明度（0-1，full 模式）
 
+  词级时序（增强 LRC `[00:12.00]词[00:12.50]词`）的曲目自动进入逐字扫色：
+  当前行「已唱亮、未唱暗、正在唱的词从左往右扫亮」；没有词级时序的行
+  回退整行高亮，两种形态按行自动混用。
+
   页面 500ms 轮询一次 /v1/overlay/lyric，两次轮询之间用本地时钟内插进度，
   所以歌词滚动是平滑的、不跟着轮询节拍一跳一跳。背景保持全透明（OBS 浏览器
   源默认透明），需要底色请自行在 OBS 里叠一层。
@@ -101,6 +105,14 @@
   .minimal .cur { font-size: calc(20px * var(--scale)); min-height: calc(28px * var(--scale)); transition: opacity 0.25s; }
   .minimal .cur.empty { opacity: 0.25; }
 
+  /* ---------- 逐字扫色（词级时序） ----------
+     有词级时序的行按「已唱亮、未唱暗、正在唱的词从左往右扫亮」渲染：
+     每个词是 .w 容器，.a 是暗色底本，.b 是亮色副本用 clip-path 裁出
+     已唱部分。行没有词级时序就回退整行高亮。 */
+  .w { position: relative; white-space: pre-wrap; }
+  .w .a { color: var(--fg-dim); }
+  .w .b { position: absolute; inset: 0; color: var(--fg); }
+
   .hidden { display: none !important; }
 </style>
 </head>
@@ -163,6 +175,7 @@
     fetchedAt: 0,
     lastActive: -1,
     coverFor: null,
+    wordByWord: false,
   };
 
   function activeIndexAt(posMs) {
@@ -184,17 +197,59 @@
     return state.positionMs + Math.max(0, performance.now() - state.fetchedAt);
   }
 
-  function lineHtml(line) {
-    var esc = function (s) {
-      return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
-        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
-      });
-    };
-    return esc(line.text)
-      + (line.translation ? '<span class="tr">' + esc(line.translation) + '</span>' : '');
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
   }
 
-  function renderFull(active) {
+  /// 词级时序补全：LRC 词尾常缺（末词 / 源没给），用下一词起点或行尾兜底，
+  /// 运行期就不用再猜边界。少于 2 个词的行没有逐字意义，回退整行。
+  function wordsWithEnds(line) {
+    var ws = line.words || [];
+    if (!state.wordByWord || ws.length < 2) return null;
+    var out = [];
+    for (var i = 0; i < ws.length; i++) {
+      var start = ws[i].startTime || 0;
+      var end = ws[i].endTime;
+      if (end == null) end = (ws[i + 1] && ws[i + 1].startTime) || line.endTime || start + 3;
+      if (end < start) end = start;
+      out.push({ text: ws[i].text || '', start: start, end: end });
+    }
+    return out;
+  }
+
+  /// 行 HTML：words 非空走逐字结构（.a 暗底本 + .b 亮副本，clip 由 sweep
+  /// 每帧更新），否则整行文本。翻译行两种形态都挂在最后。
+  function lineHtml(line, words) {
+    var body;
+    if (words) {
+      body = words.map(function (w) {
+        var t = esc(w.text);
+        return '<span class="w" data-s="' + w.start + '" data-e="' + w.end + '">'
+          + '<span class="a">' + t + '</span>'
+          + '<span class="b" style="clip-path:inset(0 100% 0 0)">' + t + '</span></span>';
+      }).join('');
+    } else {
+      body = esc(line.text);
+    }
+    return body + (line.translation ? '<span class="tr">' + esc(line.translation) + '</span>' : '');
+  }
+
+  /// 逐字扫色：按内插位置把每个词的亮色副本裁到「已唱比例」。posSec 是
+  /// 曲内秒；只动 clip-path 一个属性，一帧几十个词毫无压力。
+  function sweepRow(el, posSec) {
+    if (!el) return;
+    var spans = el.querySelectorAll('.w');
+    for (var i = 0; i < spans.length; i++) {
+      var s = +spans[i].getAttribute('data-s');
+      var e = +spans[i].getAttribute('data-e');
+      var p = posSec <= s ? 0 : posSec >= e ? 1 : (posSec - s) / (e - s || 1);
+      spans[i].children[1].style.clipPath = 'inset(0 ' + ((1 - p) * 100).toFixed(2) + '% 0 0)';
+    }
+  }
+
+  function renderFull(active, posSec) {
     var inner = $('full-inner');
     if (state.trackId == null) { inner.innerHTML = ''; return; }
     if (!inner.childElementCount || inner.dataset.track !== state.trackId) {
@@ -203,41 +258,64 @@
       state.lines.forEach(function (line) {
         var div = document.createElement('div');
         div.className = 'l';
-        div.innerHTML = lineHtml(line);
+        div._line = line;
+        div.innerHTML = lineHtml(line, null);
         inner.appendChild(div);
       });
       state.lastActive = -1;
     }
-    if (active === state.lastActive) return;
-    var rows = inner.children;
-    for (var i = 0; i < rows.length; i++) {
-      var isActive = i === active;
-      rows[i].classList.toggle('active', isActive);
-      rows[i].classList.toggle('past', i < active);
-      rows[i].style.opacity = isActive ? '' : String(Math.max(0.15, DIM));
+    if (active !== state.lastActive) {
+      var rows = inner.children;
+      var prev = state.lastActive;
+      // 只重建新旧两行：active 行换成逐字结构（有词级时序时），失焦行
+      // 恢复整行文本——扫色进度只在当前行有意义，长歌词也不必全量重排。
+      [prev, active].forEach(function (i) {
+        if (i == null || i < 0 || !rows[i]) return;
+        var row = rows[i];
+        var isActive = i === active;
+        row.classList.toggle('active', isActive);
+        row.classList.toggle('past', i < active);
+        row.style.opacity = isActive ? '' : String(Math.max(0.15, DIM));
+        row.innerHTML = lineHtml(
+          row._line,
+          isActive ? wordsWithEnds(row._line) : null
+        );
+      });
+      if (active >= 0) {
+        var viewport = $('full-lines').clientHeight;
+        var row = rows[active];
+        var offset = row.offsetTop - viewport / 2 + row.offsetHeight / 2;
+        inner.style.transform = 'translateY(' + (-Math.max(0, offset)) + 'px)';
+      }
+      state.lastActive = active;
     }
-    if (active >= 0) {
-      var viewport = $('full-lines').clientHeight;
-      var row = rows[active];
-      var offset = row.offsetTop - viewport / 2 + row.offsetHeight / 2;
-      inner.style.transform = 'translateY(' + (-Math.max(0, offset)) + 'px)';
-    }
-    state.lastActive = active;
+    if (active >= 0) sweepRow(inner.children[active], posSec);
   }
 
-  function renderSingle(el, active) {
+  function renderSingle(el, active, posSec) {
     if (state.trackId == null) { el.textContent = '…'; el.classList.add('empty'); return; }
     var line = active >= 0 ? state.lines[active] : null;
     if (line) {
-      el.innerHTML = lineHtml(line);
+      // 词级结构只在（行、曲目、形态）都一致时复用：每帧重建会把扫色
+      // 进度重置掉，这里必须缓存。
+      var words = wordsWithEnds(line);
+      var key = (active === state.lastSingle && el._wordsKey === (words ? 1 : 0) && el._track === state.trackId)
+        ? null : true;
+      if (key) {
+        el._wordsKey = words ? 1 : 0;
+        el._track = state.trackId;
+        state.lastSingle = active;
+        el.innerHTML = lineHtml(line, words);
+      }
       el.classList.remove('empty');
+      sweepRow(el, posSec);
     } else {
       el.textContent = '♪';
       el.classList.add('empty');
     }
   }
 
-  function renderKaraoke(active) {
+  function renderKaraoke(active, posSec) {
     var cover = state.cover;
     var img = $('karaoke-cover'), disc = $('karaoke-disc');
     if (state.trackId == null) {
@@ -261,10 +339,10 @@
       $('karaoke-bar').style.width = dur ? Math.min(100, interpolatedPos() / dur * 100) + '%' : '0%';
     }
     $('karaoke-paused').classList.toggle('hidden', state.playing || state.trackId == null);
-    renderSingle($('karaoke-cur'), active);
+    renderSingle($('karaoke-cur'), active, posSec);
   }
 
-  function renderMinimal(active) {
+  function renderMinimal(active, posSec) {
     if (state.trackId == null) {
       $('min-title').textContent = '未在播放';
       $('min-artist').textContent = '';
@@ -272,15 +350,17 @@
       $('min-title').textContent = state.title || '';
       $('min-artist').textContent = state.artist ? '· ' + state.artist : '';
     }
-    renderSingle($('min-cur'), active);
+    renderSingle($('min-cur'), active, posSec);
   }
 
   function render() {
-    var active = activeIndexAt(interpolatedPos());
-    if (STYLE === 'full') renderFull(active);
-    else if (STYLE === 'line') renderSingle($('line-cur'), active);
-    else if (STYLE === 'karaoke') renderKaraoke(active);
-    else renderMinimal(active);
+    var posMs = interpolatedPos();
+    var posSec = posMs / 1000;
+    var active = activeIndexAt(posMs);
+    if (STYLE === 'full') renderFull(active, posSec);
+    else if (STYLE === 'line') renderSingle($('line-cur'), active, posSec);
+    else if (STYLE === 'karaoke') renderKaraoke(active, posSec);
+    else renderMinimal(active, posSec);
   }
 
   async function poll() {
@@ -296,6 +376,7 @@
         state.playing = !!data.playing;
         state.positionMs = data.position_ms || 0;
         state.durationMs = data.duration_ms || 0;
+        state.wordByWord = !!data.wordByWord;
         state.fetchedAt = performance.now();
       }
     } catch (e) { /* 服务重启等瞬时失败：保持上一帧，下一轮再试 */ }

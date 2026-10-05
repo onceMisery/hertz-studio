@@ -638,6 +638,21 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
             return Ok(vmusic_core::LyricDocument::empty());
         }
         let mut doc = vmusic_lyrics::parse_lrc(&text);
+        // 译文走 translation 平行数组（同一响应里的 trans 也是 base64 LRC）；
+        // 对齐在 apply_offset 之前，用原始时间轴。混进 LRC 文本会毁掉逐字时间轴。
+        if let Some(trans_b64) = j
+            .pointer("/lyric/data/trans")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let trans = super::base64_decode_std(trans_b64)
+                .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+                .unwrap_or_default();
+            if !trans.trim().is_empty() {
+                doc.translation = vmusic_lyrics::align_translation(&doc, &trans);
+            }
+        }
         vmusic_lyrics::apply_offset(&mut doc);
         return Ok(doc);
     }
