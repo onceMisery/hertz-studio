@@ -138,6 +138,33 @@ pub async fn is_cover_edited(pool: &SqlitePool, track_id: &str) -> Result<bool, 
     Ok(row.map(|(v,)| v != 0).unwrap_or(false))
 }
 
+/// 一次取出一批曲目里「封面被用户替换过」的那些 id。
+///
+/// 扫描主循环按批写库，逐曲 `is_cover_edited` 会把每批变成 200 次额外往返；
+/// 这里一次 IN 查询代掉整批。`?` 占位符按 ids 长度动态拼——只有一个 IN
+/// 子句、值全部绑定，没有注入面。
+pub async fn cover_edited_ids(
+    pool: &SqlitePool,
+    ids: &[String],
+) -> Result<std::collections::HashSet<String>, StoreError> {
+    if ids.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let placeholders = vec!["?"; ids.len()].join(", ");
+    let sql = format!(
+        "SELECT track_id FROM track_edits WHERE cover_edited = 1 AND track_id IN ({placeholders})"
+    );
+    let mut query = sqlx::query_as::<_, (String,)>(&sql);
+    for id in ids {
+        query = query.bind(id);
+    }
+    let rows = query
+        .fetch_all(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
 /// 重置编辑：删掉覆盖行，曲目回到文件标签与扫描封面语义。
 pub async fn remove(pool: &SqlitePool, track_id: &str) -> Result<bool, StoreError> {
     let result = sqlx::query("DELETE FROM track_edits WHERE track_id = ?1")
@@ -265,6 +292,14 @@ mod tests {
         assert!(!is_cover_edited(&db, "a").await.unwrap());
         set_cover_edited(&db, "a", true).await.unwrap();
         assert!(is_cover_edited(&db, "a").await.unwrap());
+
+        // 批量取标记：只回被标记的那些；未标记与不存在的 id 都不进结果集。
+        let marked = cover_edited_ids(&db, &["a".into(), "b".into(), "missing".into()])
+            .await
+            .unwrap();
+        assert_eq!(marked.len(), 1);
+        assert!(marked.contains("a"));
+        assert!(cover_edited_ids(&db, &[]).await.unwrap().is_empty());
 
         apply_batch(
             &db,

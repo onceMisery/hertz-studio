@@ -101,10 +101,8 @@ pub async fn open(data_dir: &Path) -> Result<SqlitePool, StoreError> {
 // Tracks
 // ---------------------------------------------------------------------------
 
-pub async fn upsert_track(pool: &SqlitePool, track: &Track) -> Result<(), StoreError> {
-    let now = now_ms();
-    sqlx::query(
-        r#"INSERT INTO tracks
+/// tracks 表的 upsert SQL：单条与批量两个入口共用同一份文本，避免漂移。
+const UPSERT_TRACK_SQL: &str = r#"INSERT INTO tracks
              (id, path, source, title, artist, album, duration_ms, bitrate,
               sample_rate, channels, has_cover, cover_key, file_mtime, file_size,
               added_at, updated_at)
@@ -116,29 +114,56 @@ pub async fn upsert_track(pool: &SqlitePool, track: &Track) -> Result<(), StoreE
              sample_rate = excluded.sample_rate, channels = excluded.channels,
              has_cover = excluded.has_cover, cover_key = excluded.cover_key,
              file_mtime = excluded.file_mtime, file_size = excluded.file_size,
-             updated_at = excluded.updated_at"#,
-    )
-    .bind(&track.id)
-    .bind(&track.path)
-    .bind(match track.source {
-        TrackSource::Local => "local",
-        TrackSource::Remote => "remote",
-    })
-    .bind(&track.title)
-    .bind(&track.artist)
-    .bind(&track.album)
-    .bind(track.duration_ms.map(|v| v as i64))
-    .bind(track.bitrate.map(|v| v as i64))
-    .bind(track.sample_rate.map(|v| v as i64))
-    .bind(track.channels.map(|v| v as i64))
-    .bind(track.has_cover as i32)
-    .bind(Option::<String>::None)
-    .bind(track.file_mtime)
-    .bind(track.file_size)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|e| StoreError::Database(e.to_string()))?;
+             updated_at = excluded.updated_at"#;
+
+/// 绑定并执行一条 track upsert。`executor` 泛型承载连接池与事务连接两种形态，
+/// 让扫描能在自己开的事务里批量写入而不用复制一遍 SQL。
+async fn bind_upsert_track<'a, E>(executor: E, track: &Track, now: i64) -> Result<(), StoreError>
+where
+    E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
+{
+    sqlx::query(UPSERT_TRACK_SQL)
+        .bind(&track.id)
+        .bind(&track.path)
+        .bind(match track.source {
+            TrackSource::Local => "local",
+            TrackSource::Remote => "remote",
+        })
+        .bind(&track.title)
+        .bind(&track.artist)
+        .bind(&track.album)
+        .bind(track.duration_ms.map(|v| v as i64))
+        .bind(track.bitrate.map(|v| v as i64))
+        .bind(track.sample_rate.map(|v| v as i64))
+        .bind(track.channels.map(|v| v as i64))
+        .bind(track.has_cover as i32)
+        .bind(Option::<String>::None)
+        .bind(track.file_mtime)
+        .bind(track.file_size)
+        .bind(now)
+        .execute(executor)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(())
+}
+
+pub async fn upsert_track(pool: &SqlitePool, track: &Track) -> Result<(), StoreError> {
+    bind_upsert_track(pool, track, now_ms()).await
+}
+
+/// 扫描批量落库：一批曲目在调用方开的事务里按序 upsert。
+///
+/// 逐文件一条隐式事务在万首级曲库上就是上万次独立提交（WAL + synchronous
+/// 默认真实落盘也扛不住），这是扫描主循环的分批入口。事务的开与 commit 由
+/// 调用方负责——本函数只负责把这一批写进给定连接，不自行提交。
+pub async fn upsert_tracks_batch(
+    conn: &mut SqliteConnection,
+    tracks: &[Track],
+) -> Result<(), StoreError> {
+    let now = now_ms();
+    for track in tracks {
+        bind_upsert_track(&mut *conn, track, now).await?;
+    }
     Ok(())
 }
 
@@ -428,24 +453,43 @@ pub struct RgTags {
     pub album_peak: Option<f64>,
 }
 
+const SET_TRACK_RG_SQL: &str =
+    "UPDATE tracks SET rg_gain = ?2, rg_album_gain = ?3, rg_peak = ?4, rg_album_peak = ?5
+         WHERE id = ?1";
+
+async fn bind_set_track_rg<'a, E>(executor: E, id: &TrackId, rg: &RgTags) -> Result<(), StoreError>
+where
+    E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
+{
+    sqlx::query(SET_TRACK_RG_SQL)
+        .bind(id)
+        .bind(rg.track_gain)
+        .bind(rg.album_gain)
+        .bind(rg.track_peak)
+        .bind(rg.album_peak)
+        .execute(executor)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(())
+}
+
 /// 扫描读到的 ReplayGain 标签组。无标签的项为 NULL。
 pub async fn set_track_rg(
     pool: &SqlitePool,
     id: &TrackId,
     rg: &RgTags,
 ) -> Result<(), StoreError> {
-    sqlx::query(
-        "UPDATE tracks SET rg_gain = ?2, rg_album_gain = ?3, rg_peak = ?4, rg_album_peak = ?5
-         WHERE id = ?1",
-    )
-    .bind(id)
-    .bind(rg.track_gain)
-    .bind(rg.album_gain)
-    .bind(rg.track_peak)
-    .bind(rg.album_peak)
-    .execute(pool)
-    .await
-    .map_err(|e| StoreError::Database(e.to_string()))?;
+    bind_set_track_rg(pool, id, rg).await
+}
+
+/// ReplayGain 的批量写入口，与 `upsert_tracks_batch` 同一个事务里调用。
+pub async fn set_track_rg_batch(
+    conn: &mut SqliteConnection,
+    rows: &[(TrackId, RgTags)],
+) -> Result<(), StoreError> {
+    for (id, rg) in rows {
+        bind_set_track_rg(&mut *conn, id, rg).await?;
+    }
     Ok(())
 }
 

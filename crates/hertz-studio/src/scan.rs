@@ -15,6 +15,10 @@ use crate::state::{AppState, ScanError, ScanProgress, WsEvent};
 
 const MAX_ERRORS: usize = 50;
 
+/// 扫描落库的批大小：每批一个显式事务，见 `scan_report` 里的分批注释。
+/// 200 一首批：够摊薄逐文件提交的开销，事务持有时间也还短。
+const SCAN_TX_BATCH: usize = 200;
+
 /// Keep the standard absolute Windows spelling used by existing track paths.
 pub fn normalize_root(root: &Path) -> Result<PathBuf, String> {
     let path = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
@@ -53,8 +57,64 @@ async fn start_job(job: ScanJob, root: PathBuf, saved_only: bool) -> Result<(), 
     } else {
         job.reserve(&root).await?;
     }
-    tokio::spawn(job.run(root));
+    let db = job.db.clone();
+    let progress = job.progress.clone();
+    let events = job.events.clone();
+    spawn_guarded(job.run(root.clone()), db, progress, events, root);
     Ok(())
+}
+
+/// 后台扫描入口：接住 panic，别把一个 `running` 卡死的扫描永久留在状态里。
+///
+/// 扫描要过文件系统、第三方解码器与封面进程，panic 面比请求路径宽。若直接
+/// `tokio::spawn(job.run(root))` 并丢掉 JoinHandle，在允许 unwind 的构建（debug /
+/// test）里一次 panic 只炸掉那个任务本身：`running` 永远停在 true，之后每次扫描都
+/// 被 "already running" 拒掉——服务看着还在跑，其实已经扫不动了。这里用监督任务
+/// 接住 `JoinError::is_panic`，把 panic 记成扫描错误条目、落库并补发终态，与普通
+/// 失败路径同构，至少保证状态一致、历史可诊断。
+///
+/// release 是 `panic = "abort"`，硬 abort 时监督任务也没机会运行——所以这只是兜底，
+/// 真正的防线是扫描路径上不留会 panic 的 unwrap。
+fn spawn_guarded(
+    task: impl std::future::Future<Output = ()> + Send + 'static,
+    db: SqlitePool,
+    progress: Arc<Mutex<ScanProgress>>,
+    events: broadcast::Sender<WsEvent>,
+    root: PathBuf,
+) {
+    let handle = tokio::spawn(task);
+    tokio::spawn(async move {
+        let Err(error) = handle.await else { return };
+        // abort 是正常取消（服务关停），不是 panic：不记错误。
+        if !error.is_panic() {
+            return;
+        }
+        let message = "扫描任务异常中断（后台任务 panic）".to_string();
+        {
+            let mut p = progress.lock().await;
+            record_error(&mut p, &root, message.clone());
+            if !p.cancelled {
+                p.phase = "failed".into();
+            }
+            p.running = false;
+        }
+        // 与 `run` 同序：先落库再发终态，保证状态与根目录历史一致。
+        let _ = vmusic_store::scan_roots::record_result(
+            &db,
+            &root.to_string_lossy(),
+            false,
+            Some(message.as_str()),
+        )
+        .await;
+        let snapshot = progress.lock().await;
+        let _ = events.send(WsEvent::Scan {
+            phase: snapshot.phase.clone(),
+            done: snapshot.done,
+            total: snapshot.total,
+        });
+        // 中断前可能已写入一部分曲目，通知前端刷新，别让列表停在陈旧状态。
+        let _ = events.send(WsEvent::LibraryChanged);
+    });
 }
 
 pub async fn cancel(state: &Arc<AppState>) {
@@ -238,99 +298,148 @@ impl ScanJob {
         })
         .await
         .map_err(|e| e.to_string())?;
+        // 分批落库：每批一个显式事务。逐文件一条隐式事务在万首级曲库上就是
+        // 上万次独立提交（WAL + synchronous 默认真实落盘也扛不住），这是首扫
+        // 耗时的大头。批大小见 SCAN_TX_BATCH。
         let mut seen = Vec::with_capacity(report.files.len());
-        for path in report.files {
+        for group in report.files.chunks(SCAN_TX_BATCH) {
             if self.cancel.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let previous = existing.get(&path).cloned();
-            // Parse/stat/store failures retain any previously indexed row.
-            seen.push(
-                previous
-                    .as_ref()
-                    .map(|row| row.0.clone())
-                    .unwrap_or_else(|| path.to_string_lossy().into_owned()),
-            );
-            let file_path = path.clone();
-            let outcome = tokio::task::spawn_blocking(move || {
-                let signature = file_signature(&file_path)?;
-                if let Some((_, _, Some(mtime), Some(size))) = &previous {
-                    if signature == (*mtime, *size) {
-                        return Ok(None);
+            // 批前预取封面编辑标记：本批里「已存在」的曲目才可能有覆盖行；
+            // 新文件刚拿到新 id（build_track 现生成 UUID），必然没有。
+            let batch_ids: Vec<String> = group
+                .iter()
+                .filter_map(|path| existing.get(path).map(|row| row.1.clone()))
+                .collect();
+            let cover_edited = vmusic_store::track_edits::cover_edited_ids(&self.db, &batch_ids)
+                .await
+                .unwrap_or_default();
+
+            // 本批待落库的曲目。封面落盘是文件系统写、不进事务，先做完再统一写库。
+            // 四个平行数组而不是元组 Vec：`upsert_tracks_batch` 要的是 `&[Track]`。
+            let mut pending: Vec<vmusic_core::Track> = Vec::with_capacity(group.len());
+            let mut pending_rg: Vec<(String, vmusic_store::RgTags)> =
+                Vec::with_capacity(group.len());
+            let mut pending_updated: Vec<bool> = Vec::with_capacity(group.len());
+            let mut pending_paths: Vec<PathBuf> = Vec::with_capacity(group.len());
+
+            for path in group {
+                if self.cancel.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                let previous = existing.get(path).cloned();
+                // Parse/stat/store failures retain any previously indexed row.
+                seen.push(
+                    previous
+                        .as_ref()
+                        .map(|row| row.0.clone())
+                        .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+                );
+                let file_path = path.clone();
+                let outcome = tokio::task::spawn_blocking(move || {
+                    let signature = file_signature(&file_path)?;
+                    if let Some((_, _, Some(mtime), Some(size))) = &previous {
+                        if signature == (*mtime, *size) {
+                            return Ok(None);
+                        }
                     }
+                    let mut metadata = vmusic_library::read_metadata(&file_path)?;
+                    let cover = metadata.cover.take();
+                    let rg = vmusic_store::RgTags {
+                        track_gain: metadata.rg_gain,
+                        album_gain: metadata.rg_album_gain,
+                        track_peak: metadata.rg_peak,
+                        album_peak: metadata.rg_album_peak,
+                    };
+                    let mut track = vmusic_library::build_track(&file_path, metadata);
+                    if file_signature(&file_path)? != signature {
+                        return Err(
+                            "file changed while reading; it will be retried on the next scan".into(),
+                        );
+                    }
+                    track.file_mtime = Some(signature.0);
+                    track.file_size = Some(signature.1);
+                    let updated = previous.is_some();
+                    if let Some((stored_path, id, ..)) = previous {
+                        track.path = stored_path;
+                        track.id = id;
+                    }
+                    Ok(Some((track, cover, updated, rg)))
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|result| result);
+                if self.cancel.load(Ordering::Relaxed) {
+                    return Ok(());
                 }
-                let mut metadata = vmusic_library::read_metadata(&file_path)?;
-                let cover = metadata.cover.take();
-                let rg = vmusic_store::RgTags {
-                    track_gain: metadata.rg_gain,
-                    album_gain: metadata.rg_album_gain,
-                    track_peak: metadata.rg_peak,
-                    album_peak: metadata.rg_album_peak,
-                };
-                let mut track = vmusic_library::build_track(&file_path, metadata);
-                if file_signature(&file_path)? != signature {
-                    return Err(
-                        "file changed while reading; it will be retried on the next scan".into(),
-                    );
-                }
-                track.file_mtime = Some(signature.0);
-                track.file_size = Some(signature.1);
-                let updated = previous.is_some();
-                if let Some((stored_path, id, ..)) = previous {
-                    track.path = stored_path;
-                    track.id = id;
-                }
-                Ok(Some((track, cover, updated, rg)))
-            })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|result| result);
-            if self.cancel.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-            match outcome {
-                Ok(None) => self.progress.lock().await.skipped += 1,
-                Ok(Some((mut track, cover, updated, rg))) => {
-                    if let Some((data, media_type)) = cover {
-                        // 用户替换过封面：跳过内嵌封面落盘，缓存里的用户封面
-                        // 保持原样，has_cover 依旧成立。
-                        let cover_edited =
-                            vmusic_store::track_edits::is_cover_edited(&self.db, &track.id)
+                match outcome {
+                    Ok(None) => self.progress.lock().await.skipped += 1,
+                    Ok(Some((mut track, cover, updated, rg))) => {
+                        if let Some((data, media_type)) = cover {
+                            // 用户替换过封面：跳过内嵌封面落盘，缓存里的用户封面
+                            // 保持原样，has_cover 依旧成立。
+                            if cover_edited.contains(&track.id) {
+                                track.has_cover = true;
+                            } else {
+                                let cache = self.cache_dir.clone();
+                                let id = track.id.clone();
+                                track.has_cover = tokio::task::spawn_blocking(move || {
+                                    vmusic_library::save_cover(&cache, &id, &data, &media_type)
+                                        .is_some()
+                                })
                                 .await
                                 .unwrap_or(false);
-                        if cover_edited {
-                            track.has_cover = true;
-                        } else {
-                            let cache = self.cache_dir.clone();
-                            let id = track.id.clone();
-                            track.has_cover = tokio::task::spawn_blocking(move || {
-                                vmusic_library::save_cover(&cache, &id, &data, &media_type)
-                                    .is_some()
-                            })
-                            .await
-                            .unwrap_or(false);
-                        }
-                    }
-                    match vmusic_store::upsert_track(&self.db, &track).await {
-                        Ok(()) => {
-                            // ReplayGain 标签组跟文件走：upsert 不含这些列，单独落库。
-                            let _ = vmusic_store::set_track_rg(&self.db, &track.id, &rg).await;
-                            let mut progress = self.progress.lock().await;
-                            if updated {
-                                progress.updated += 1;
-                            } else {
-                                progress.added += 1;
                             }
                         }
-                        Err(error) => self.error(&path, error).await,
+                        pending_rg.push((track.id.clone(), rg));
+                        pending_updated.push(updated);
+                        pending_paths.push(path.clone());
+                        pending.push(track);
+                    }
+                    Err(error) => self.error(path, error).await,
+                }
+                let mut progress = self.progress.lock().await;
+                progress.done += 1;
+                if progress.done % 10 == 0 || progress.done == progress.total {
+                    self.publish(&progress);
+                }
+            }
+
+            if pending.is_empty() {
+                continue;
+            }
+            // 一批一次提交：曲目行与 ReplayGain 进同一个事务，成功才计进度。
+            let commit = async {
+                let mut tx = self.db.begin().await.map_err(|e| e.to_string())?;
+                vmusic_store::upsert_tracks_batch(&mut tx, &pending)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                vmusic_store::set_track_rg_batch(&mut tx, &pending_rg)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tx.commit().await.map_err(|e| e.to_string())?;
+                Ok::<(), String>(())
+            }
+            .await;
+            match commit {
+                Ok(()) => {
+                    let mut progress = self.progress.lock().await;
+                    for updated in &pending_updated {
+                        if *updated {
+                            progress.updated += 1;
+                        } else {
+                            progress.added += 1;
+                        }
                     }
                 }
-                Err(error) => self.error(&path, error).await,
-            }
-            let mut progress = self.progress.lock().await;
-            progress.done += 1;
-            if progress.done % 10 == 0 || progress.done == progress.total {
-                self.publish(&progress);
+                // 整批回滚：逐条记错误，与逐文件时「这一条没写进去」语义一致，
+                // 下一轮扫描会重试整批。
+                Err(error) => {
+                    for path in &pending_paths {
+                        self.error(path, error.clone()).await;
+                    }
+                }
             }
         }
         // Traversal errors invalidate deletion evidence for the whole root.
@@ -659,6 +768,29 @@ mod tests {
             .unwrap();
         assert!(roots[0].last_scanned_at.is_some());
         assert!(roots[0].last_error.is_none());
+        fixture.cleanup().await;
+    }
+
+    /// 跨批：文件数超过一个写入批时，全部曲目都要落库、计数对得上，
+    /// 且第二批的 id 复用仍然成立（增量重扫全部落到 skipped）。
+    #[tokio::test]
+    async fn scan_spans_multiple_write_batches() {
+        let fixture = Fixture::new().await;
+        let total = SCAN_TX_BATCH + 3;
+        for i in 0..total {
+            wav(&fixture.root.join(format!("s{i:04}.wav")), 80);
+        }
+        let first = fixture.scan().await;
+        assert_eq!(first.added, total);
+        assert_eq!((first.updated, first.skipped, first.failed), (0, 0, 0));
+        assert_eq!(first.phase.as_str(), "done");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE source = 'local'")
+            .fetch_one(&fixture.job.db)
+            .await
+            .unwrap();
+        assert_eq!(rows, total as i64);
+        let second = fixture.scan().await;
+        assert_eq!((second.added, second.updated, second.skipped), (0, 0, total));
         fixture.cleanup().await;
     }
 
@@ -1011,6 +1143,52 @@ mod tests {
             1
         );
         drop(lock);
+        fixture.cleanup().await;
+    }
+
+    /// 后台任务 panic 必须被收敛成一次「失败的扫描」，而不是把 `running` 永久留在
+    /// true——否则之后每次扫描请求都被 "already running" 拒掉，服务再也扫不动。
+    #[tokio::test]
+    async fn panicking_scan_task_is_recorded_and_releases_the_scanner() {
+        let fixture = Fixture::new().await;
+        fixture.job.reserve(&fixture.root).await.unwrap();
+        let mut events = fixture.job.events.subscribe();
+        spawn_guarded(
+            async { panic!("injected scan failure") },
+            fixture.job.db.clone(),
+            fixture.job.progress.clone(),
+            fixture.job.events.clone(),
+            fixture.root.clone(),
+        );
+        let progress = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = fixture.job.progress.lock().await.clone();
+                if !snapshot.running {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("panic guard never released the scanner");
+        assert_eq!((progress.phase.as_str(), progress.failed), ("failed", 1));
+        assert!(
+            progress.errors.iter().any(|e| e.message.contains("panic")),
+            "panic 应登记为扫描错误条目：{:?}",
+            progress.errors
+        );
+        // 终态与刷新事件都要发出来，前端不会卡在「扫描中」。
+        let (mut terminal, mut changed) = (false, false);
+        while let Ok(event) = events.try_recv() {
+            match event {
+                WsEvent::Scan { phase, .. } if phase == "failed" => terminal = true,
+                WsEvent::LibraryChanged => changed = true,
+                _ => {}
+            }
+        }
+        assert!(terminal && changed, "缺终态或刷新事件");
+        // 扫描器回到可以再次预约的状态。
+        fixture.job.reserve(&fixture.root).await.unwrap();
         fixture.cleanup().await;
     }
 }
