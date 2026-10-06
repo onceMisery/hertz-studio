@@ -1344,7 +1344,7 @@ function createTrackRow(track) {
     <div class="t-actions">
       <input type="checkbox" class="t-select" data-act="select" title="选择" aria-label="选择曲目">
       <button class="t-act" data-act="play-next" title="${queueAddLabel()}" aria-label="${queueAddLabel()}">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-skip-next"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue-next"/></svg>
       </button>
       <button class="t-act" data-act="menu" title="更多" aria-label="更多操作">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-more"/></svg>
@@ -5276,7 +5276,10 @@ function initQingfengBridge() {
       // 那一路的项带 queueItem 标记，播放分派与原逻辑逐字一致）。
       d.source = viewSnapshot();
     } else if (d.action === 'activate') {
-      activateSourceItem(d.item);
+      // 传整个 detail：函数签名收的是信封（item + delta 都在里面）。
+      // 传 d.item 的话函数里 `const item = d.item` 拿到 undefined，
+      // `if (!item) return` 静默吞掉——墙上点播放/点海报全部无反应。
+      activateSourceItem(d);
     } else if (d.action === 'playlist-drill') {
       // 歌单墙的第二层：取数，不播。异步，所以这里只发起、把 promise 交回去，
       // 皮肤那边自己管 loading / 失败提示。
@@ -5299,7 +5302,16 @@ function initQingfengBridge() {
       // 序号与队列下标毫无关系），findIndex 返 -1，落到 `delta > 0 ? 0 : …`
       // 那个兜底，于是**永远停在队列第一首**：听感就是「按了没反应」。
       // 用户实测正是这个现象 —— 歌点得开、进度在走、唯独上/下一曲不动。
-      playQueueStep(d.delta);
+      //
+      // 正在放的是在线曲时不能走 playQueueStep：它落到 playQueueIndex，
+      // 队列里的 online: 虚拟 id 会撞上「已失效」守卫，表现为在线队列里
+      // 上/下一曲永远没反应。服务端自己持有队列与游标，next/previous 与
+      // 主播放条 / 键盘 / MediaSession 同一条链路，本地与在线队列都认。
+      if (String(state.snapshot.track_id || '').startsWith('online:')) {
+        post(d.delta > 0 ? '/v1/player/next' : '/v1/player/previous');
+      } else {
+        playQueueStep(d.delta);
+      }
     } else if (d.action === 'toggle-play') {
       // 左下角浮条上的播放/暂停。复用业务既有的 togglePlay —— 它带
       // 「没在放任何东西时先起播当前选中项」的回落，皮肤自己拼 post 会丢。
