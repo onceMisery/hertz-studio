@@ -830,7 +830,28 @@
             <button id="overlay-open" class="btn">预览</button>
           </span>
         </div>
-        <p class="hint">复制后粘进 OBS 的「浏览器源」即可；页面 500ms 轮询本地歌词接口，背景透明。风格后可再追加 &amp;scale=1.2、&amp;align=left、&amp;color=%23ffffff 等参数。</p>
+        <!-- 素材通道：图片没有可分享的地址，塞不进浮层 URL（尤其 OBS 在另一台
+             机器上时），所以压成 data URL 拼一段 CSS，让用户粘进 OBS 浏览器源
+             自己的「自定义 CSS」框。编码与片段形状在 obs-css.js。 -->
+        <div class="set-row">
+          <label for="overlay-bg-pick">自定义素材</label>
+          <span class="set-actions">
+            <button id="overlay-bg-pick" class="btn">选背景图…</button>
+            <button id="overlay-logo-pick" class="btn">选台标…</button>
+            <input type="file" id="overlay-bg-file" accept="image/*" hidden>
+            <input type="file" id="overlay-logo-file" accept="image/*" hidden>
+          </span>
+        </div>
+        <div class="set-row">
+          <label for="overlay-css-copy">素材 CSS</label>
+          <span class="set-actions">
+            <button id="overlay-css-copy" class="btn">复制素材 CSS</button>
+            <button id="overlay-css-clear" class="btn">清空素材</button>
+          </span>
+        </div>
+        <p class="hint">背景图与台标传不进 URL，改走 OBS 自己的通道：在这里选图 → 复制素材 CSS → 粘进 OBS 浏览器源的「自定义 CSS」，再点该源的「刷新页面缓存」。动图会被压成静帧；带透明的 PNG 背景图会填成深色底（JPEG 没有透明通道）。</p>
+        <p class="hint" id="overlay-css-note">还没有素材。</p>
+        <p class="hint">这一组只出素材：页面 500ms 轮询本地歌词接口，默认背景透明；风格后可再追加 &amp;scale=1.2、&amp;align=left、&amp;color=%23ffffff 等参数，那些都走地址。</p>
       </div>
 
       <!-- 歌词视频导出（folia 的 video export）：舞台画面 + 当前歌词行 +
@@ -1718,6 +1739,10 @@
 <!-- 歌词视频导出：自包含（画幅/弹窗/录制管线都在模块里），只在用户点击时
      才碰 window.Stage3D 与后端 API，加载顺序无关紧要。 -->
 <script defer src="video-export.js"></script>
+<!-- OBS 浮层素材通道：把用户选的背景图/台标压成 data URL 并拼成一段 CSS（形状
+     与解析只此一份，浮层页也引这个文件读回来）。app.js 只在设置页里用它，
+     没有它整组退化成「只能用 URL 参数」。 -->
+<script defer src="obs-css.js"></script>
 <!-- 胶囊播放器：最小化态下界面唯一可见的东西（dock 实例里则是唯一内容）。
      信息区（封面 / 「正在播放」/ 标题 / 艺术家）整块可点 = 展开；右侧四个按钮是
      上一首 / 播放暂停 / 下一首 / 展开——不展开也能换歌与控制播放。整块可拖、

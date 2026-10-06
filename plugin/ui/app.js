@@ -107,6 +107,13 @@ const ui = {
   overlayStyle: $('overlay-style'),
   overlayCopy: $('overlay-copy'),
   overlayOpen: $('overlay-open'),
+  overlayBgPick: $('overlay-bg-pick'),
+  overlayBgFile: $('overlay-bg-file'),
+  overlayLogoPick: $('overlay-logo-pick'),
+  overlayLogoFile: $('overlay-logo-file'),
+  overlayCssCopy: $('overlay-css-copy'),
+  overlayCssClear: $('overlay-css-clear'),
+  overlayCssNote: $('overlay-css-note'),
   videoExportGroup: $('video-export-group'),
   videoExportOpen: $('video-export-open'),
   cacheClear: $('cache-clear'),
@@ -904,6 +911,34 @@ function overlayUrlWithKey() {
   if (!overlayKey) return '';
   const style = ui.overlayStyle ? ui.overlayStyle.value : 'full';
   return `${location.origin}/overlay?key=${encodeURIComponent(overlayKey)}&style=${encodeURIComponent(style)}`;
+}
+
+// OBS 浮层的自定义素材（背景图 / 台标）。编码与 CSS 片段的形状都在 obs-css.js，
+// 这里只管「选图 → 记住 → 复制」三段。
+//
+// 为什么记在 localStorage 而不是服务端设置表：它只服务于「复制一次、粘进 OBS」
+// 这个动作，OBS 自己会把那段 CSS 存进场景配置；让几 MB 的 data URL 进 settings
+// 行只会把设置读写拖重。代价是换浏览器要重新选图（与 folia 的 IndexedDB 同量级）。
+const OBS_ASSETS_KEY = 'vmusic.obs.assets.v1';
+
+function loadObsAssets() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(OBS_ASSETS_KEY) || '{}');
+    return { background: raw.background || null, logo: raw.logo || null };
+  } catch (err) {
+    // 手改坏 / 老版本写的键：当没配过。这里不值得打断用户，选了新图就会覆盖。
+    return { background: null, logo: null };
+  }
+}
+
+/// 素材状态一句话（写进设置页那行 hint）。带体积是因为这段 CSS 要进 OBS 的
+/// 输入框：几百 KB 和几 MB 手感差很多，用户看一眼就知道要不要换图。
+function obsAssetsNote(assets) {
+  const parts = [];
+  if (assets.background) parts.push(`背景图 ${Math.round(assets.background.length / 1024)} KB`);
+  if (assets.logo) parts.push(`台标 ${Math.round(assets.logo.length / 1024)} KB`);
+  if (!parts.length) return '还没有素材。';
+  return `已就绪：${parts.join('、')}。换图后要重新复制素材 CSS，并在 OBS 里覆盖掉旧的那段。`;
 }
 
 // 其它表现层模块（创意舞台、工坊、背景层）也要读写服务端设置。与其各自再实现
@@ -6621,6 +6656,69 @@ async function startApp() {
             if (tab) tab.close();
             toast(errText('打不开浮层预览', err), 'error');
           }
+        };
+      }
+      // 素材通道：选图 → obs-css.js 压成 data URL → 拼一段 CSS 让用户粘进 OBS
+      // 浏览器源自己的「自定义 CSS」（图片没有可分享的地址，进不了浮层 URL）。
+      const obsAssets = loadObsAssets();
+      const refreshObsNote = () => {
+        if (ui.overlayCssNote) ui.overlayCssNote.textContent = obsAssetsNote(obsAssets);
+      };
+      refreshObsNote();
+      const bindObsPick = (kind, pickButton, fileInput) => {
+        if (!fileInput) return;
+        if (pickButton) pickButton.onclick = () => fileInput.click();
+        fileInput.onchange = async () => {
+          const file = fileInput.files && fileInput.files[0];
+          // 先清空：不然再选同一张图时不会触发 change。
+          fileInput.value = '';
+          if (!file) return;
+          if (!window.ObsCss) {
+            toast('素材模块没加载出来，刷新一下页面再试', 'error');
+            return;
+          }
+          const label = ObsCss.KINDS[kind].label;
+          try {
+            obsAssets[kind] = await ObsCss.encode(kind, file);
+          } catch (err) {
+            toast(errText(`${label}处理失败`, err), 'error');
+            return;
+          }
+          try {
+            localStorage.setItem(OBS_ASSETS_KEY, JSON.stringify(obsAssets));
+          } catch (err) {
+            // 配额满 / 隐私模式。素材本次会话照样可用，只是刷新后要重选，所以
+            // 这里不是错误而是告知。
+            toast('这张图太大，没能记住：本次可以直接用，但刷新后要重新选', 'error');
+          }
+          refreshObsNote();
+          toast(`${label}已就绪，点「复制素材 CSS」粘进 OBS`);
+        };
+      };
+      bindObsPick('background', ui.overlayBgPick, ui.overlayBgFile);
+      bindObsPick('logo', ui.overlayLogoPick, ui.overlayLogoFile);
+      if (ui.overlayCssCopy) {
+        ui.overlayCssCopy.onclick = async () => {
+          const snippet = window.ObsCss ? ObsCss.buildSnippet(obsAssets) : null;
+          if (!snippet) {
+            toast('先选一张背景图或台标', 'error');
+            return;
+          }
+          try {
+            await writeClipboard(snippet);
+            toast('素材 CSS 已复制，粘进 OBS 浏览器源的「自定义 CSS」');
+          } catch (err) {
+            toast(errText('复制失败', err), 'error');
+          }
+        };
+      }
+      if (ui.overlayCssClear) {
+        ui.overlayCssClear.onclick = () => {
+          obsAssets.background = null;
+          obsAssets.logo = null;
+          try { localStorage.removeItem(OBS_ASSETS_KEY); } catch (err) { /* 清不掉也只是下次再覆盖 */ }
+          refreshObsNote();
+          toast('素材已清空；OBS 里那段 CSS 要自己删掉');
         };
       }
     }

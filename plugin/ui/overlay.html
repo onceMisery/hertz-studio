@@ -20,13 +20,19 @@
     &color=%23ffffff  文字主色（十六进制，需 URL 编码 #）
     &dim=0.45         非当前行透明度（0-1，full 模式）
 
+  自定义素材（背景图 / 台标）不走 URL：上传的图没有可分享的地址，塞不进查询串，
+  远程 OBS 也读不到本应用的存储。它们在应用设置页「歌词输出」里选，由那边压成
+  data URL 拼成一段 CSS，粘进 OBS「浏览器源 → 自定义 CSS」；本页用
+  getComputedStyle 把 --hz-obs-bg / --hz-obs-logo / --hz-obs-logo-pos 读回来
+  （形状与解析都在 obs-css.js）。没有注入就是全透明。
+
   词级时序（增强 LRC `[00:12.00]词[00:12.50]词`）的曲目自动进入逐字扫色：
   当前行「已唱亮、未唱暗、正在唱的词从左往右扫亮」；没有词级时序的行
   回退整行高亮，两种形态按行自动混用。
 
   页面 500ms 轮询一次 /v1/overlay/lyric，两次轮询之间用本地时钟内插进度，
-  所以歌词滚动是平滑的、不跟着轮询节拍一跳一跳。背景保持全透明（OBS 浏览器
-  源默认透明），需要底色请自行在 OBS 里叠一层。
+  所以歌词滚动是平滑的、不跟着轮询节拍一跳一跳。背景默认全透明（OBS 浏览器
+  源默认透明），需要底色请在 OBS 里叠一层，或者用上面那条素材通道送一张背景图。
 -->
 <html lang="zh-CN">
 <head>
@@ -115,6 +121,15 @@
   .w .a { color: var(--fg-dim); }
   .w .b { position: absolute; inset: 0; color: var(--fg); }
 
+  /* ---------- OBS 自定义 CSS 送进来的素材 ----------
+     变量值由下面的脚本从 getComputedStyle 读回来，再落到 body / 台标元素上；
+     这里只管台标怎么摆。四个角对应 --hz-obs-logo-pos 的取值。 */
+  .obs-logo { position: fixed; width: min(14vw, 14vh); max-width: 220px; opacity: 0.85; pointer-events: none; }
+  .obs-logo.top-right { top: 4vh; right: 4vw; }
+  .obs-logo.top-left { top: 4vh; left: 4vw; }
+  .obs-logo.bottom-right { bottom: 4vh; right: 4vw; }
+  .obs-logo.bottom-left { bottom: 4vh; left: 4vw; }
+
   .hidden { display: none !important; }
 </style>
 </head>
@@ -145,6 +160,7 @@
     </div>
   </div>
 
+<script src="/obs-css.js"></script>
 <script>
 'use strict';
 (function () {
@@ -173,6 +189,26 @@
   var views = { full: $('v-full'), line: $('v-line'), karaoke: $('v-karaoke'), minimal: $('v-minimal') };
   views[STYLE].classList.remove('hidden');
   if (STYLE === 'full') views.full.style.textAlign = ALIGN;
+
+  // OBS「自定义 CSS」送进来的素材（背景图 / 台标）：读得到就落上，读不到就当没配。
+  // 这段只在启动时跑一次 —— 素材是静态的，OBS 改完 CSS 会刷新页面缓存重载本页。
+  (function applyObsAssets() {
+    var assets = window.ObsCss ? window.ObsCss.readAssets() : null;
+    if (!assets) return;
+    if (assets.background) {
+      document.body.style.backgroundImage = 'url("' + assets.background + '")';
+      document.body.style.backgroundSize = 'cover';
+      document.body.style.backgroundPosition = 'center';
+      document.body.style.backgroundRepeat = 'no-repeat';
+    }
+    if (assets.logo) {
+      var logo = document.createElement('img');
+      logo.className = 'obs-logo ' + assets.logoPos;
+      logo.alt = '';
+      logo.src = assets.logo;
+      document.body.appendChild(logo);
+    }
+  })();
 
   var state = {
     trackId: null,

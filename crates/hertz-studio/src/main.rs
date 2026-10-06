@@ -112,6 +112,10 @@ const DAILY_VIEW_JS: &str = include_str!("../../../plugin/ui/daily-view.js");
 const PALETTE_JS: &str = include_str!("../../../plugin/ui/palette.js");
 // 歌词视频导出：自包含模块（弹窗/画幅/录制管线），设置页与命令面板唤起。
 const VIDEO_EXPORT_JS: &str = include_str!("../../../plugin/ui/video-export.js");
+// OBS 浮层的素材通道（folia obsCustomCss 的等价物）：把用户选的背景图/台标压成
+// data URL 拼一段 CSS 让用户粘进 OBS 的「自定义 CSS」。形状与解析只此一份，
+// 应用（本文件的路由 + app.js）与浮层页（overlay.html）都引它。
+const OBS_CSS_JS: &str = include_str!("../../../plugin/ui/obs-css.js");
 
 // 主题壁纸。与 JS/CSS 不同，这里是二进制资源，所以用 `include_bytes!`。
 //
@@ -326,6 +330,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/daily-view.js", get(|| asset(JS, DAILY_VIEW_JS)))
         .route("/palette.js", get(|| asset(JS, PALETTE_JS)))
         .route("/video-export.js", get(|| asset(JS, VIDEO_EXPORT_JS)))
+        .route("/obs-css.js", get(|| asset(JS, OBS_CSS_JS)))
         .route("/style.css", get(|| asset(CSS, STYLE_CSS)))
         .route("/stage.css", get(|| asset(CSS, STAGE_CSS)))
         .route("/creative.css", get(|| asset(CSS, CREATIVE_CSS)))
@@ -492,6 +497,7 @@ const ASSET_FINGERPRINT_INPUTS: &[&str] = &[
     DAILY_VIEW_JS,
     PALETTE_JS,
     VIDEO_EXPORT_JS,
+    OBS_CSS_JS,
     SKIN_LIUNIAN_JS,
     SKIN_QINGFENG_JS,
     STYLE_CSS,

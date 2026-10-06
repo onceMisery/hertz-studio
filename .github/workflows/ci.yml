@@ -59,6 +59,10 @@ jobs:
           node scripts/check-online-playlist-view.js
           node scripts/check-stage-control.js
           node scripts/check-stage-idle.js
+          # OBS 浮层的素材通道：生产者（设置页把图压成 data URL 拼 CSS）与消费者
+          # （浮层页 getComputedStyle 读回）只靠变量名与 url("data:…") 的形状耦合，
+          # 任何一端改错都不会报错，只会「选完图浮层没变化」。
+          node scripts/check-obs-css.js
           # 换肤/换主题这类「刷新后还在吗」的失败在本地很难发现（没有报错、只有
           # 观感回到默认），所以也进 CI：不依赖浏览器，纯 Node 沙箱跑真实模块。
           node scripts/check-skins.js
