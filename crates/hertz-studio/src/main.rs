@@ -419,7 +419,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("{warning}");
     }
     println!("  ui       {url}");
-    println!("  health   http://{}/v1/health", host_port(shown, actual_port));
+    println!(
+        "  health   http://{}/v1/health",
+        host_port(shown, actual_port)
+    );
     println!("  discovery {}", discovery.display());
 
     if args.open {
@@ -749,7 +752,10 @@ async fn create_session(
     if body.token != state.token {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
-            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
             "token mismatch",
         )
             .into_response();
@@ -1039,14 +1045,21 @@ mod tests {
             let warning = exposure_warning(ip, 7899).expect("非回环必须告警");
             assert!(warning.contains("警告"), "{}", warning);
             assert!(warning.contains("7899"), "告警要带端口：{}", warning);
-            assert!(warning.contains("127.0.0.1"), "要给可操作的替代方案：{}", warning);
+            assert!(
+                warning.contains("127.0.0.1"),
+                "要给可操作的替代方案：{}",
+                warning
+            );
         }
     }
 
     /// IPv6 要加方括号，否则打印出来的地址点不开。
     #[test]
     fn host_port_brackets_ipv6() {
-        assert_eq!(host_port(IpAddr::from([127, 0, 0, 1]), 8080), "127.0.0.1:8080");
+        assert_eq!(
+            host_port(IpAddr::from([127, 0, 0, 1]), 8080),
+            "127.0.0.1:8080"
+        );
         assert_eq!(
             host_port(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080),
             "[::1]:8080"
@@ -1133,14 +1146,13 @@ mod tests {
 
         // 票据走 redeem：票据表说成立才成立，光有 `?ticket=` 这个参数不算数。
         assert!(credential_ok(TOKEN, &headers, Some("ticket=t1"), |id| id == "t1"));
-        assert!(!credential_ok(
-            TOKEN,
-            &headers,
-            Some("ticket=t1"),
-            |_| false
-        ));
+        assert!(!credential_ok(TOKEN, &headers, Some("ticket=t1"), |_| {
+            false
+        }));
         // 兼容期的长期令牌仍认，但同样要比对值。
-        assert!(credential_ok(TOKEN, &headers, Some("token=abc123"), |_| false));
+        assert!(credential_ok(TOKEN, &headers, Some("token=abc123"), |_| {
+            false
+        }));
         assert!(!credential_ok(
             TOKEN,
             &headers,

@@ -22,8 +22,8 @@
 //! 查什么 id，任意 URL 注入没有入口。字段名对照官方文档（aegis 证据 §6）。
 
 use super::{
-    bad_request, client, const_url, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack, SearchPage,
-    SearchQuery, StreamInfo,
+    bad_request, client, const_url, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack,
+    SearchPage, SearchQuery, StreamInfo,
 };
 
 pub const ID: &str = "jamendo";

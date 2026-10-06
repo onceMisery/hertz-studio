@@ -355,7 +355,8 @@ impl ScanJob {
                     let mut track = vmusic_library::build_track(&file_path, metadata);
                     if file_signature(&file_path)? != signature {
                         return Err(
-                            "file changed while reading; it will be retried on the next scan".into(),
+                            "file changed while reading; it will be retried on the next scan"
+                                .into(),
                         );
                     }
                     track.file_mtime = Some(signature.0);
@@ -790,7 +791,10 @@ mod tests {
             .unwrap();
         assert_eq!(rows, total as i64);
         let second = fixture.scan().await;
-        assert_eq!((second.added, second.updated, second.skipped), (0, 0, total));
+        assert_eq!(
+            (second.added, second.updated, second.skipped),
+            (0, 0, total)
+        );
         fixture.cleanup().await;
     }
 

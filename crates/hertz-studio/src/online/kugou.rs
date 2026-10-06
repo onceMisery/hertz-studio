@@ -14,8 +14,8 @@ use super::cred::CredPack;
 use super::http::absorb_cookies;
 use super::sign::{kugou, kugou_login};
 use super::{
-    bad_request, client, const_url, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack, SearchPage,
-    SearchQuery, StreamInfo,
+    bad_request, client, const_url, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack,
+    SearchPage, SearchQuery, StreamInfo,
 };
 
 pub const ID: &str = "kugou";

@@ -319,10 +319,7 @@ fn indexable_query(query: &str) -> bool {
 /// 三列必须分开 UNION：`title LIKE ? OR artist LIKE ? OR album LIKE ?` 这种同表三列
 /// OR 会让优化器放弃 trigram 约束（计划里只剩 `INDEX 0:`），单列 LIKE 才是
 /// `INDEX 0:L0`（见 `search_plan_uses_the_trigram_index`）。
-async fn search_candidates(
-    pool: &SqlitePool,
-    query: &str,
-) -> Result<Option<Vec<i64>>, StoreError> {
+async fn search_candidates(pool: &SqlitePool, query: &str) -> Result<Option<Vec<i64>>, StoreError> {
     if !indexable_query(query) {
         return Ok(None);
     }
@@ -392,7 +389,10 @@ pub async fn list_tracks_filtered(
                 "{} LIMIT ?3 OFFSET ?4",
                 prefilter_selection(&columns, sort, &filter.sql(5))
             ),
-            vec![serde_json::to_string(ids).unwrap_or_else(|_| "[]".into()), pattern],
+            vec![
+                serde_json::to_string(ids).unwrap_or_else(|_| "[]".into()),
+                pattern,
+            ],
         ),
         None => (
             format!(
@@ -583,11 +583,7 @@ where
 }
 
 /// 扫描读到的 ReplayGain 标签组。无标签的项为 NULL。
-pub async fn set_track_rg(
-    pool: &SqlitePool,
-    id: &TrackId,
-    rg: &RgTags,
-) -> Result<(), StoreError> {
+pub async fn set_track_rg(pool: &SqlitePool, id: &TrackId, rg: &RgTags) -> Result<(), StoreError> {
     bind_set_track_rg(pool, id, rg).await
 }
 
@@ -603,28 +599,22 @@ pub async fn set_track_rg_batch(
 }
 
 /// 读取 ReplayGain 标签组（播放端响度归一化用）。
-pub async fn get_track_rg(
-    pool: &SqlitePool,
-    id: &TrackId,
-) -> Result<Option<RgTags>, StoreError> {
-    let row: Option<(
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-    )> = sqlx::query_as(
+pub async fn get_track_rg(pool: &SqlitePool, id: &TrackId) -> Result<Option<RgTags>, StoreError> {
+    let row: Option<(Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = sqlx::query_as(
         "SELECT rg_gain, rg_album_gain, rg_peak, rg_album_peak FROM tracks WHERE id = ?1",
     )
     .bind(id)
     .fetch_optional(pool)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
-    Ok(row.map(|(track_gain, album_gain, track_peak, album_peak)| RgTags {
-        track_gain,
-        album_gain,
-        track_peak,
-        album_peak,
-    }))
+    Ok(
+        row.map(|(track_gain, album_gain, track_peak, album_peak)| RgTags {
+            track_gain,
+            album_gain,
+            track_peak,
+            album_peak,
+        }),
+    )
 }
 
 /// 封面替换后的展示位更新：用户封面已落缓存，has_cover 直接成立。
@@ -956,12 +946,11 @@ mod tests {
     /// 既不能少行，也不能留下孤儿行）。
     async fn assert_index_mirrors_effective_values(db: &SqlitePool) {
         type Row = (i64, Option<String>, Option<String>, Option<String>);
-        let indexed: Vec<Row> = sqlx::query_as(
-            "SELECT rowid, title, artist, album FROM track_search ORDER BY rowid",
-        )
-        .fetch_all(db)
-        .await
-        .unwrap();
+        let indexed: Vec<Row> =
+            sqlx::query_as("SELECT rowid, title, artist, album FROM track_search ORDER BY rowid")
+                .fetch_all(db)
+                .await
+                .unwrap();
         let expected: Vec<Row> = sqlx::query_as(
             "SELECT t.rowid, COALESCE(NULLIF(TRIM(e.title), ''), t.title),
                     COALESCE(NULLIF(TRIM(e.artist), ''), t.artist),
@@ -1032,7 +1021,12 @@ mod tests {
         assert_index_mirrors_effective_values(&db).await;
 
         // 删除曲目不能留下孤儿索引行。
-        assert!(delete_tracks(&db, std::slice::from_ref(&a.id)).await.unwrap() > 0);
+        assert!(
+            delete_tracks(&db, std::slice::from_ref(&a.id))
+                .await
+                .unwrap()
+                > 0
+        );
         assert_index_mirrors_effective_values(&db).await;
     }
 
@@ -1086,9 +1080,29 @@ mod tests {
         // 无命中的各式查询。前后空白与 `周杰伦 nope` 这两类是实测过的差异点：
         // 只靠 FTS 匹配会给出超集，必须由 LIKE 复核收敛回旧行为。
         for query in [
-            "晴", "晴天", "周杰", "周杰伦", "七里香", "remaster", "REM", "bló", "BLÓ",
-            "sigur rós", "100%", "a_b", "A_B", "mixed", "MIXED", "trailing", "nope",
-            " 晴天", "叶惠美", "spaced", "周杰伦 nope", "晴天 ", "r ó s",
+            "晴",
+            "晴天",
+            "周杰",
+            "周杰伦",
+            "七里香",
+            "remaster",
+            "REM",
+            "bló",
+            "BLÓ",
+            "sigur rós",
+            "100%",
+            "a_b",
+            "A_B",
+            "mixed",
+            "MIXED",
+            "trailing",
+            "nope",
+            " 晴天",
+            "叶惠美",
+            "spaced",
+            "周杰伦 nope",
+            "晴天 ",
+            "r ó s",
         ] {
             for sort in [TrackSort::Title, TrackSort::Artist, TrackSort::Added] {
                 let fts = list_track_ids(&db, Some(query), sort).await.unwrap();
@@ -1108,9 +1122,12 @@ mod tests {
     async fn search_plan_uses_the_trigram_index() {
         let db = pool().await;
         for i in 0..64 {
-            upsert_track(&db, &sample(&format!("/m/{i}.mp3"), &format!("Song {i:03}")))
-                .await
-                .unwrap();
+            upsert_track(
+                &db,
+                &sample(&format!("/m/{i}.mp3"), &format!("Song {i:03}")),
+            )
+            .await
+            .unwrap();
         }
         let sql = format!("EXPLAIN QUERY PLAN {}", legacy_ids_sql(TrackSort::Title));
         type PlanRow = (i64, i64, i64, String);
@@ -1127,10 +1144,7 @@ mod tests {
             .join("\n");
         println!("LEGACY PLAN:\n{text}");
         assert!(text.contains("SCAN t"), "旧 LIKE 语句应全表扫：{text}");
-        assert!(
-            !text.contains("track_search"),
-            "旧语句不该碰索引表：{text}"
-        );
+        assert!(!text.contains("track_search"), "旧语句不该碰索引表：{text}");
 
         // 粗筛语句必须真的落到 trigram 约束上：`INDEX 0:L0` 里的 L0 就是 LIKE 约束；
         // 只有 `INDEX 0:` 表示退化成整表扫索引表（这正是三列写成一个 OR 时的样子）。
@@ -1231,9 +1245,10 @@ mod tests {
                         .unwrap();
                     assert_eq!(got, expected, "ids 不一致：{label}");
 
-                    let page = list_tracks_filtered(&db, Some(query), &filter, TrackSort::Title, 50, 0)
-                        .await
-                        .unwrap();
+                    let page =
+                        list_tracks_filtered(&db, Some(query), &filter, TrackSort::Title, 50, 0)
+                            .await
+                            .unwrap();
                     let page_ids: Vec<String> = page.into_iter().map(|t| t.id).collect();
                     assert_eq!(page_ids, expected, "列表分页不一致：{label}");
 
@@ -1323,14 +1338,19 @@ mod tests {
     async fn search_overflow_falls_back_to_the_like_scan() {
         let db = pool().await;
         for i in 0..SEARCH_PREFILTER_MAX + 5 {
-            upsert_track(&db, &sample(&format!("/big/{i}.mp3"), &format!("Overflow {i:05}")))
-                .await
-                .unwrap();
+            upsert_track(
+                &db,
+                &sample(&format!("/big/{i}.mp3"), &format!("Overflow {i:05}")),
+            )
+            .await
+            .unwrap();
         }
         let query = "Overflow";
         assert!(search_candidates(&db, query).await.unwrap().is_none());
         assert_eq!(
-            list_track_ids(&db, Some(query), TrackSort::Title).await.unwrap(),
+            list_track_ids(&db, Some(query), TrackSort::Title)
+                .await
+                .unwrap(),
             legacy_ids(&db, query, TrackSort::Title).await
         );
         assert_eq!(
@@ -1361,18 +1381,12 @@ mod tests {
         let db = pool().await;
         let started = std::time::Instant::now();
         for i in 0..N {
-            let mut track = sample(
-                &format!("/perf/{i}.mp3"),
-                &format!("Song {i:05}"),
-            );
+            let mut track = sample(&format!("/perf/{i}.mp3"), &format!("Song {i:05}"));
             track.artist = Some(format!("Artist {}", i % 500));
             track.album = Some(format!("Album {}", i % 200));
             upsert_track(&db, &track).await.unwrap();
         }
-        println!(
-            "PERF upsert {N} tracks with index: {:?}",
-            started.elapsed()
-        );
+        println!("PERF upsert {N} tracks with index: {:?}", started.elapsed());
 
         // 生产路径 vs 旧 LIKE 基准：每轮 = 一次计数 + 一次 ids（列表视图真实开销）。
         for (label, query) in [

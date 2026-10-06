@@ -164,7 +164,10 @@ async fn resolve_audio(state: &Arc<AppState>, track_id: &str) -> Option<AudioRef
             let prefs = state.quality.lock().await;
             crate::online::quality::get(&prefs, &source)
         };
-        let path = state.cache_index.find(&source, &id, quality.as_str()).await?;
+        let path = state
+            .cache_index
+            .find(&source, &id, quality.as_str())
+            .await?;
         let key = online_cache_key(track_id);
         audio_ref(path, key).await
     } else {
@@ -471,7 +474,10 @@ mod tests {
         assert!(t.get("k0").is_none(), "最老的格子应被淘汰");
         assert!(t.get("k4").is_none(), "淘汰按写入顺序推进");
         assert!(
-            matches!(t.get(&format!("k{}", crate::state::STAGE_BEATS_CAP + 4)), Some(TaskState::Analyzing)),
+            matches!(
+                t.get(&format!("k{}", crate::state::STAGE_BEATS_CAP + 4)),
+                Some(TaskState::Analyzing)
+            ),
             "最新写入的格子保留"
         );
     }

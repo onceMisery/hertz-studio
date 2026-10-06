@@ -176,7 +176,9 @@ pub async fn load(state: &Arc<AppState>, body: &Value) -> RpcResult {
         .position(|id| *id == request.track_id)
         .unwrap_or(0);
     let (generation, _, _) = state.set_queue(queue, Some(index)).await;
-    state.play_index_for(index, Some(generation), PlayTrigger::Pick).await?;
+    state
+        .play_index_for(index, Some(generation), PlayTrigger::Pick)
+        .await?;
     state.post_commit_background();
     with_state(state).await
 }

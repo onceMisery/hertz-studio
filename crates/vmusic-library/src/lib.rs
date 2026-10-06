@@ -390,7 +390,10 @@ mod symphonia_features {
     #[test]
     fn symphonia_features_cover_every_decodable_extension() {
         let features = symphonia_features();
-        assert!(!features.iter().any(|f| f.starts_with("all")), "别再用 all：{features:?}");
+        assert!(
+            !features.iter().any(|f| f.starts_with("all")),
+            "别再用 all：{features:?}"
+        );
         for (ext, feature) in FEATURE_FOR_EXT {
             assert!(
                 features.iter().any(|f| f == feature),
@@ -415,8 +418,8 @@ mod symphonia_features {
     #[test]
     fn every_extension_is_accounted_for() {
         for ext in AUDIO_EXTENSIONS {
-            let known = FEATURE_FOR_EXT.iter().any(|(e, _)| e == ext)
-                || UNSUPPORTED_EXTS.contains(ext);
+            let known =
+                FEATURE_FOR_EXT.iter().any(|(e, _)| e == ext) || UNSUPPORTED_EXTS.contains(ext);
             assert!(known, "扩展名 {ext} 既没有 feature 映射也没列进不支持名单");
         }
     }

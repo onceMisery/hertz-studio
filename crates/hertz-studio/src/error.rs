@@ -198,12 +198,16 @@ mod tests {
     #[test]
     fn database_errors_do_not_echo_sql_internals() {
         let err: CoreError = vmusic_core::StoreError::Database(
-            "error returned from database: SELECT secret FROM creds — no such column: secret".into(),
+            "error returned from database: SELECT secret FROM creds — no such column: secret"
+                .into(),
         )
         .into();
         let api = ApiError::from(err);
         assert_eq!(api.code, "store_error");
-        assert!(api.source.is_none(), "source 会被序列化给客户端，不能塞明细");
+        assert!(
+            api.source.is_none(),
+            "source 会被序列化给客户端，不能塞明细"
+        );
         assert!(
             !api.message.contains("SELECT") && !api.message.contains("creds"),
             "语句片段与表名不能回显：{}",

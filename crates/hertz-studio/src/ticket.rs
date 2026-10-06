@@ -158,7 +158,11 @@ mod tests {
         // TTL 有 1 秒的下限（见 issue 的 clamp）：更短的票没有任何用处，
         // 所以这里就用下限值，睡过它来验过期。
         let issued = store.issue(Duration::from_millis(20), 5);
-        assert_eq!(issued.ttl, Duration::from_secs(1), "低于下限的 TTL 被抬到下限");
+        assert_eq!(
+            issued.ttl,
+            Duration::from_secs(1),
+            "低于下限的 TTL 被抬到下限"
+        );
         assert!(store.redeem(&issued.id), "下限内仍应可用");
 
         sleep(Duration::from_millis(1100));

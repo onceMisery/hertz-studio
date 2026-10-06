@@ -46,8 +46,10 @@ impl AppState {
                 .filter_map(|id| {
                     let (_, song) = online::split_virtual_id(id)?;
                     let m = metadata.get(id)?;
-                    Some(serde_json::json!({"source":"netease", "id":song, "title":m.title,
-                "artist":m.artist,"album":m.album,"cover":m.cover,"duration_ms":m.duration_ms}))
+                    Some(
+                        serde_json::json!({"source":"netease", "id":song, "title":m.title,
+                "artist":m.artist,"album":m.album,"cover":m.cover,"duration_ms":m.duration_ms}),
+                    )
                 })
                 .collect()
         } else {

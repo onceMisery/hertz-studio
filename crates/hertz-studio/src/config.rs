@@ -172,7 +172,9 @@ pub fn migrate_legacy_data_dir() {
     if std::env::var_os("VMUSIC_DATA_DIR").is_some() {
         return;
     }
-    let Some(base) = dirs::data_local_dir() else { return };
+    let Some(base) = dirs::data_local_dir() else {
+        return;
+    };
     let legacy = base.join("mmusic-studio");
     let current = base.join("hertz-studio");
     if !legacy.is_dir() || current.exists() {

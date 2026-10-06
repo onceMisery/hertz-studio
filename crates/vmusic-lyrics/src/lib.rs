@@ -228,10 +228,12 @@ pub fn apply_offset(doc: &mut LyricDocument) {
         } else {
             line.start_ms.saturating_sub(shift_abs)
         };
-        line.end_ms = line.end_ms.map(|e| if positive {
-            e + shift_abs
-        } else {
-            e.saturating_sub(shift_abs)
+        line.end_ms = line.end_ms.map(|e| {
+            if positive {
+                e + shift_abs
+            } else {
+                e.saturating_sub(shift_abs)
+            }
         });
         for word in &mut line.words {
             word.start_ms = if positive {
@@ -241,10 +243,12 @@ pub fn apply_offset(doc: &mut LyricDocument) {
             };
             // 词尾同样要偏移：逐字扫色的「这个词唱完了」判定靠 end_ms，
             // 只偏起点会让扫色边界整体错开一个偏移量。
-            word.end_ms = word.end_ms.map(|e| if positive {
-                e + shift_abs
-            } else {
-                e.saturating_sub(shift_abs)
+            word.end_ms = word.end_ms.map(|e| {
+                if positive {
+                    e + shift_abs
+                } else {
+                    e.saturating_sub(shift_abs)
+                }
             });
         }
     }
@@ -377,6 +381,9 @@ mod tests {
     fn unmatchable_translation_returns_none() {
         let doc = parse_lrc("[00:01.00]hello\n");
         assert!(align_translation(&doc, "[00:09.00]对不上\n").is_none());
-        assert!(align_translation(&doc, "根本不是歌词\n").is_none(), "解析不出任何行也是 None");
+        assert!(
+            align_translation(&doc, "根本不是歌词\n").is_none(),
+            "解析不出任何行也是 None"
+        );
     }
 }

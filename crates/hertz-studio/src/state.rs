@@ -324,7 +324,11 @@ impl DspConfig {
                     .get("dsp_loudness")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                if legacy { "track".into() } else { "off".into() }
+                if legacy {
+                    "track".into()
+                } else {
+                    "off".into()
+                }
             });
         let crossfade = settings
             .get("dsp_crossfade_ms")
@@ -605,10 +609,7 @@ impl AppState {
     /// 这里再交给 audio actor —— 播放链路本身完全不变。
     /// 当前播放曲目的响度增益（dB，已含防削波）与所选标签来源；响度归一化
     /// 下发用。`mode` 是调用方持有的档位（off 时不该走到这里）。
-    pub(crate) async fn current_loudness(
-        &self,
-        mode: &str,
-    ) -> Option<(f64, &'static str)> {
+    pub(crate) async fn current_loudness(&self, mode: &str) -> Option<(f64, &'static str)> {
         let cursor = match *self.cursor.lock().await {
             Some(i) => i,
             None => return None,
@@ -829,7 +830,11 @@ impl AppState {
             // time 参数封顶 10 分钟：畸形计时（快进外的高频帧）也不至于离谱。
             let seconds = (listened_ms / 1000).clamp(30, 600);
             if !state.scrobble.try_claim(std::time::Instant::now()) {
-                crate::diaglog!("scrobble.dropped", track = id.as_str(), reason = "rate-gate");
+                crate::diaglog!(
+                    "scrobble.dropped",
+                    track = id.as_str(),
+                    reason = "rate-gate"
+                );
                 return;
             }
             let ctx = crate::routes::online_ctx(&state);
@@ -853,7 +858,10 @@ impl AppState {
                     tracing::debug!("听歌打卡失败（不打扰播放）: {e:?}");
                 }
                 Err(_elapsed) => {
-                    tracing::debug!("听歌打卡等待超过 {}s，放弃这一格", ScrobbleGate::REPORT_TIMEOUT.as_secs());
+                    tracing::debug!(
+                        "听歌打卡等待超过 {}s，放弃这一格",
+                        ScrobbleGate::REPORT_TIMEOUT.as_secs()
+                    );
                 }
             }
         });
@@ -1040,35 +1048,33 @@ impl AppState {
                 actual_quality: None,
             });
         }
-        let remote: Option<(String, Option<String>, Box<dyn vmusic_core::AudioSource>)> =
-            if track.source == vmusic_core::TrackSource::Remote {
-                let url = track.path.clone();
-                let auth =
-                    crate::remote::auth_for_url(&self.db, crate::secrets::backend().as_ref(), &url)
-                        .await;
-                let ext = std::path::Path::new(&url)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|s| s.to_string());
-                let open_url = url.clone();
-                let stream = tokio::task::spawn_blocking(move || {
-                    crate::remote::HttpRangeStream::open(&open_url, auth.as_ref())
-                })
-                .await
-                .map_err(|e| {
-                    vmusic_core::CoreError::Audio(vmusic_core::AudioError::BackendInit(
-                        e.to_string(),
-                    ))
-                })?
-                .map_err(|e| {
-                    vmusic_core::CoreError::Audio(vmusic_core::AudioError::BackendInit(
-                        e.to_string(),
-                    ))
-                })?;
-                Some((url, ext, Box::new(stream)))
-            } else {
-                None
-            };
+        let remote: Option<(String, Option<String>, Box<dyn vmusic_core::AudioSource>)> = if track
+            .source
+            == vmusic_core::TrackSource::Remote
+        {
+            let url = track.path.clone();
+            let auth =
+                crate::remote::auth_for_url(&self.db, crate::secrets::backend().as_ref(), &url)
+                    .await;
+            let ext = std::path::Path::new(&url)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_string());
+            let open_url = url.clone();
+            let stream = tokio::task::spawn_blocking(move || {
+                crate::remote::HttpRangeStream::open(&open_url, auth.as_ref())
+            })
+            .await
+            .map_err(|e| {
+                vmusic_core::CoreError::Audio(vmusic_core::AudioError::BackendInit(e.to_string()))
+            })?
+            .map_err(|e| {
+                vmusic_core::CoreError::Audio(vmusic_core::AudioError::BackendInit(e.to_string()))
+            })?;
+            Some((url, ext, Box::new(stream)))
+        } else {
+            None
+        };
 
         // 取流已就绪：锁内只剩复核与 actor 入队。
         let _commit = self.play_commit.lock().await;
@@ -1899,7 +1905,12 @@ impl AppState {
             return;
         }
         let dir = self.online_cache_dir();
-        if self.cache_index.find(&source, &id, quality.as_str()).await.is_some() {
+        if self
+            .cache_index
+            .find(&source, &id, quality.as_str())
+            .await
+            .is_some()
+        {
             return;
         }
         let ctx = crate::online::Ctx {
@@ -1985,8 +1996,7 @@ impl AppState {
         if !enabled {
             return false;
         }
-        let Some(failed_source) = crate::online::split_virtual_id(&track_id).map(|(s, _)| s)
-        else {
+        let Some(failed_source) = crate::online::split_virtual_id(&track_id).map(|(s, _)| s) else {
             return false;
         };
         // 匹配输入只认入队快照：重启后从歌单直播（无快照）宁可放弃接力，
@@ -2043,7 +2053,8 @@ impl AppState {
                 if tried.contains(&vid) {
                     continue;
                 }
-                if let Some(score) = relay_score(t, &meta.title, meta.artist.as_deref(), meta.duration_ms)
+                if let Some(score) =
+                    relay_score(t, &meta.title, meta.artist.as_deref(), meta.duration_ms)
                 {
                     if best.as_ref().map_or(true, |(s, _)| score > *s) {
                         best = Some((score, t.clone()));
@@ -2390,9 +2401,12 @@ impl AppState {
             let index = *self.cursor.lock().await;
             let relayed = match index {
                 Some(index) => {
-                    Box::pin(
-                        self.try_relay(reservation, index, track_id.clone(), PlayTrigger::AutoNext),
-                    )
+                    Box::pin(self.try_relay(
+                        reservation,
+                        index,
+                        track_id.clone(),
+                        PlayTrigger::AutoNext,
+                    ))
                     .await
                 }
                 None => false,
@@ -2807,7 +2821,8 @@ pub(crate) mod tests {
             // 不存在的空目录即可：索引为空，测试都不碰缓存目录（cache_max=0）。
             cache_index: Arc::new(
                 crate::online::cache::CacheIndex::load(
-                    std::env::temp_dir().join(format!("vmusic-state-cache-{}", uuid::Uuid::new_v4())),
+                    std::env::temp_dir()
+                        .join(format!("vmusic-state-cache-{}", uuid::Uuid::new_v4())),
                 )
                 .await,
             ),
@@ -2927,8 +2942,7 @@ pub(crate) mod tests {
         let probe = async {
             // 等到 play_local 真的进入网络建连（服务端已接受连接）再开始计时：
             // 否则可能在它还忙着读 DB 时就量了，测不到锁的行为。
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(5), accepted_rx).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), accepted_rx).await;
             let t0 = std::time::Instant::now();
             state.set_queue(vec!["other".into()], Some(0)).await;
             t0.elapsed()
@@ -3087,7 +3101,10 @@ pub(crate) mod tests {
         // 不可播放的候选一律出局。
         let mut dead = relay_track("晴天", "周杰伦", 269_000);
         dead.playable = false;
-        assert_eq!(relay_score(&dead, "晴天", Some("周杰伦"), Some(269_000)), None);
+        assert_eq!(
+            relay_score(&dead, "晴天", Some("周杰伦"), Some(269_000)),
+            None
+        );
     }
 
     #[test]
@@ -3187,7 +3204,10 @@ pub(crate) mod tests {
             );
         }
         let meta = state.online_meta.lock().await;
-        assert!(meta.get("online:netease:0").is_none(), "超限后最老的快照被淘汰");
+        assert!(
+            meta.get("online:netease:0").is_none(),
+            "超限后最老的快照被淘汰"
+        );
         assert!(
             meta.get(&format!("online:netease:{}", ONLINE_META_CAP + 2))
                 .is_some(),
@@ -3228,7 +3248,10 @@ pub(crate) mod tests {
             .await
             .insert(id.clone(), online_snap(Some(3.5), Some(0.8)));
         // peak=0.8 → 提升上限 −20·log10(0.8) ≈ 1.938 dB，3.5 被压到那儿。
-        let (gain, from) = state.current_loudness("track").await.expect("在线曲应当有响度");
+        let (gain, from) = state
+            .current_loudness("track")
+            .await
+            .expect("在线曲应当有响度");
         assert_eq!(from, "online");
         assert!(
             (gain - 1.9382).abs() < 0.001,
@@ -3241,7 +3264,10 @@ pub(crate) mod tests {
             .lock()
             .await
             .insert(id.clone(), online_snap(Some(12.0), Some(0.5)));
-        let (gain, from) = state.current_loudness("album").await.expect("在线曲应当有响度");
+        let (gain, from) = state
+            .current_loudness("album")
+            .await
+            .expect("在线曲应当有响度");
         assert_eq!(from, "online", "来源要标成 online，别和本地 RG 混为一谈");
         assert!(
             (gain - 6.0206).abs() < 0.01,
@@ -3254,7 +3280,10 @@ pub(crate) mod tests {
             .lock()
             .await
             .insert(id, online_snap(Some(-4.0), None));
-        assert_eq!(state.current_loudness("track").await, Some((-4.0, "online")));
+        assert_eq!(
+            state.current_loudness("track").await,
+            Some((-4.0, "online"))
+        );
     }
 
     /// 存响度标签只在已有条目上改，不凭空造条目 —— 造出来的快照没有标题，
@@ -3266,7 +3295,12 @@ pub(crate) mod tests {
             .store_online_rg("online:netease:missing", Some(3.0), Some(0.9))
             .await;
         assert!(state.online_rg("online:netease:missing").await.is_none());
-        assert!(state.online_meta.lock().await.get("online:netease:missing").is_none());
+        assert!(state
+            .online_meta
+            .lock()
+            .await
+            .get("online:netease:missing")
+            .is_none());
 
         let id = "online:netease:2".to_string();
         state
@@ -3338,8 +3372,7 @@ pub(crate) mod tests {
         }
         assert!(!gate.try_claim(now), "一小时满额后拒绝");
         // 一条一小时前的旧账被窗口修剪，不占额度；配额仍满，继续拒。
-        gate
-            .recent
+        gate.recent
             .lock()
             .unwrap()
             .push(now - std::time::Duration::from_secs(3601));

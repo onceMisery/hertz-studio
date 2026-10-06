@@ -210,7 +210,8 @@ pub async fn get_cover(state: &Arc<AppState>, id: &str) -> RpcResult {
 /// 替换封面：信封里的 base64 即图片字节，`raw_content_type` 决定扩展名。写缓存
 /// 文件并打 cover_edited 标记，增量扫描跳过内嵌封面重写，用户封面不会被盖回去。
 pub async fn replace_cover(state: &Arc<AppState>, id: &str, raw: Option<&RawBody>) -> RpcResult {
-    let id = crate::routes::safe_cover_id(id).ok_or_else(|| bad_request("cover id must be a uuid"))?;
+    let id =
+        crate::routes::safe_cover_id(id).ok_or_else(|| bad_request("cover id must be a uuid"))?;
     let raw = raw.ok_or_else(|| bad_request("cover body must not be empty"))?;
     if raw.bytes.is_empty() {
         return Err(bad_request("cover body must not be empty"));

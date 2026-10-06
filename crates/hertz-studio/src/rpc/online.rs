@@ -33,8 +33,9 @@ use serde_json::{json, Value};
 use crate::error::{bad_request, internal, ApiError};
 use crate::online;
 use crate::routes::{
-    online_ctx, pick_index, playlist_scope, qr_session, source_of, tagged, AccountQuery, CacheClearRequest, CacheKeepRequest, CacheLimitRequest, CookieRequest, ItemQuery,
-    LikeRequest, OnlinePlayRequest, OnlinePlayTrack, OnlineQualityRequest, PlaylistCreateRequest,
+    online_ctx, pick_index, playlist_scope, qr_session, source_of, tagged, AccountQuery,
+    CacheClearRequest, CacheKeepRequest, CacheLimitRequest, CookieRequest, ItemQuery, LikeRequest,
+    OnlinePlayRequest, OnlinePlayTrack, OnlineQualityRequest, PlaylistCreateRequest,
     PlaylistDeleteRequest, PlaylistQuery, PlaylistTracksRequest, PlaylistsQuery, QrCancelRequest,
     QrPollQuery, RadioRequest, RecommendQuery, SearchAllQuery, SourceRequest, StreamQuery,
 };
@@ -187,7 +188,9 @@ pub async fn play(state: &Arc<AppState>, body: &Value) -> RpcResult {
             .await;
     }
 
-    let outcome = state.play_index_for(index, Some(gen), PlayTrigger::Pick).await?;
+    let outcome = state
+        .play_index_for(index, Some(gen), PlayTrigger::Pick)
+        .await?;
     if !outcome.committed {
         // 被更新的代际顶掉：不改队列也不报错，把当下的播放器状态原样回给前端。
         return Ok(Reply::ok(crate::rpc::playback::snapshot(state).await));
@@ -237,7 +240,9 @@ pub async fn radio(state: &Arc<AppState>, body: &Value) -> RpcResult {
     match request.action.as_str() {
         "start" => {
             if let Some(gen) = state.radio_start().await? {
-                state.play_index_for(0, Some(gen), PlayTrigger::Pick).await?;
+                state
+                    .play_index_for(0, Some(gen), PlayTrigger::Pick)
+                    .await?;
                 state.post_commit_background();
             }
         }
@@ -245,7 +250,9 @@ pub async fn radio(state: &Arc<AppState>, body: &Value) -> RpcResult {
             let initial = state.radio.lock().await.initial_generation.is_some();
             if initial {
                 if let Some(gen) = state.radio_start().await? {
-                    state.play_index_for(0, Some(gen), PlayTrigger::Pick).await?;
+                    state
+                        .play_index_for(0, Some(gen), PlayTrigger::Pick)
+                        .await?;
                     state.post_commit_background();
                 }
             } else {
@@ -305,7 +312,9 @@ pub async fn cache_limit(state: &Arc<AppState>, body: &Value) -> RpcResult {
             tracing::info!("缓存上限调整后回收 {removed} 字节");
         }
     }
-    Ok(Reply::ok(json!({ "ok": true, "max_bytes": request.max_bytes })))
+    Ok(Reply::ok(
+        json!({ "ok": true, "max_bytes": request.max_bytes }),
+    ))
 }
 
 /// 手动清理：当前播放与用户保留项豁免，返回删除字节数。

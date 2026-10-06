@@ -97,10 +97,7 @@ fn component_score(haystack: &str, needle: &str, weight: f64) -> (f64, bool) {
 }
 
 /// folia matchScore 的简化版：三分加权 + 缺项封顶 + 时长乘数。
-fn match_score(
-    local: &vmusic_core::Track,
-    candidate: &online::OnlineTrack,
-) -> (f64, bool) {
+fn match_score(local: &vmusic_core::Track, candidate: &online::OnlineTrack) -> (f64, bool) {
     let (title_s, title_hit) = component_score(&candidate.title, &local.title, 45.0);
     let artist = local.artist.as_deref().unwrap_or("");
     let album = local.album.as_deref().unwrap_or("");
@@ -258,11 +255,20 @@ async fn apply_one(
     // 候选详情重新取一次：封面/专辑以平台当前值为准，不信任前端回传的字段。
     let detail = online::detail(&ctx, source, candidate_id).await?;
 
-    let mut filled = Filled { album: false, cover: false, lyrics: false };
+    let mut filled = Filled {
+        album: false,
+        cover: false,
+        lyrics: false,
+    };
 
     // 专辑缺失 → 写覆盖层（不碰文件标签）。
     if slot_enabled(slots, "album")
-        && track.album.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && track
+            .album
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
         && !detail.album.trim().is_empty()
     {
         vmusic_store::track_edits::apply(
@@ -335,13 +341,15 @@ async fn download_cover(state: &AppState, track_id: &str, url: &str) -> ApiResul
     let media_type = url
         .rsplit('.')
         .next()
-        .and_then(|ext| match ext.split(&['?', '/'][..]).next().unwrap_or("") {
-            "png" => Some("image/png"),
-            "webp" => Some("image/webp"),
-            "gif" => Some("image/gif"),
-            "jpg" | "jpeg" => Some("image/jpeg"),
-            _ => None,
-        })
+        .and_then(
+            |ext| match ext.split(&['?', '/'][..]).next().unwrap_or("") {
+                "png" => Some("image/png"),
+                "webp" => Some("image/webp"),
+                "gif" => Some("image/gif"),
+                "jpg" | "jpeg" => Some("image/jpeg"),
+                _ => None,
+            },
+        )
         .unwrap_or("image/jpeg");
     // `save_cover` 自己会接上 `covers/`：这里给缓存根目录，给 `cover_dir()`
     // 会写进 `covers/covers/`，`GET /tracks/{id}/cover` 就再也找不到这张图。
@@ -396,7 +404,8 @@ pub(crate) async fn suggest_tracks(
     for id in &body.track_ids {
         if crate::online::split_virtual_id(id).is_some() {
             skipped += 1;
-            results.push(json!({ "track_id": id, "status": "skipped", "reason": "在线曲目无需补全" }));
+            results
+                .push(json!({ "track_id": id, "status": "skipped", "reason": "在线曲目无需补全" }));
             continue;
         }
         let track = match vmusic_store::get_track(&state.db, id).await {
@@ -475,10 +484,7 @@ pub(crate) async fn suggest_tracks(
 }
 
 /// 落地阶段入口：单曲单候选。用户点一次才写一次，天然原子。
-pub(crate) async fn apply_choice(
-    state: &Arc<AppState>,
-    body: &ApplyRequest,
-) -> ApiResult<Value> {
+pub(crate) async fn apply_choice(state: &Arc<AppState>, body: &ApplyRequest) -> ApiResult<Value> {
     if crate::online::split_virtual_id(&body.track_id).is_some() {
         return Err(crate::error::bad_request("在线曲目无需补全"));
     }
@@ -532,8 +538,16 @@ mod tests {
                     start_ms: 165_123,
                     end_ms: Some(201_456),
                     words: vec![
-                        vmusic_core::LyricWord { text: "晴".into(), start_ms: 165_123, end_ms: Some(166_000) },
-                        vmusic_core::LyricWord { text: "天".into(), start_ms: 166_000, end_ms: Some(167_000) },
+                        vmusic_core::LyricWord {
+                            text: "晴".into(),
+                            start_ms: 165_123,
+                            end_ms: Some(166_000),
+                        },
+                        vmusic_core::LyricWord {
+                            text: "天".into(),
+                            start_ms: 166_000,
+                            end_ms: Some(167_000),
+                        },
                     ],
                 },
                 vmusic_core::LyricLine {

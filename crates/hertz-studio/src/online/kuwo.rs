@@ -18,8 +18,8 @@
 //! （见 aegis 计划「替代与风险」），失败时按登录态给诚实的错误文案。
 
 use super::{
-    bad_request, client, const_url, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack, SearchPage,
-    SearchQuery, StreamInfo,
+    bad_request, client, const_url, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack,
+    SearchPage, SearchQuery, StreamInfo,
 };
 
 pub const ID: &str = "kuwo";

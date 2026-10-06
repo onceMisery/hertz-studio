@@ -333,10 +333,7 @@ pub(crate) struct TicketRequest {
 ///
 /// 回 `{ticket, expires_in_ms, uses}`：后两项是**实际生效值**（超限已被收拢），
 /// 客户端据此决定什么时候重新签，而不是自己假设。
-pub(crate) fn issue_ticket(
-    state: &AppState,
-    req: TicketRequest,
-) -> ApiResult<serde_json::Value> {
+pub(crate) fn issue_ticket(state: &AppState, req: TicketRequest) -> ApiResult<serde_json::Value> {
     let ttl = req
         .ttl_ms
         .map(std::time::Duration::from_millis)
@@ -368,9 +365,7 @@ pub(crate) fn overlay_key_payload(state: &AppState) -> ApiResult<serde_json::Val
     Ok(serde_json::json!({ "key": state.overlay_key }))
 }
 
-async fn get_overlay_key(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn get_overlay_key(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(overlay_key_payload(&state)?))
 }
 
@@ -417,9 +412,7 @@ async fn play(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::
     // 回来——按游标起播，提交成功后把上次进度 seek 回去。此后走正常路径。
     if state.audio.snapshot().track_id.is_none() {
         if let Some(index) = state.current_index().await {
-            let outcome = state
-                .play_index_for(index, None, PlayTrigger::Pick)
-                .await?;
+            let outcome = state.play_index_for(index, None, PlayTrigger::Pick).await?;
             if outcome.committed {
                 state.consume_restore_seek().await;
                 state.post_commit_background();
@@ -514,7 +507,9 @@ async fn load(
         .position(|id| *id == body.track_id)
         .unwrap_or(0);
     let (generation, _, _) = state.set_queue(queue, Some(index)).await;
-    state.play_index_for(index, Some(generation), PlayTrigger::Pick).await?;
+    state
+        .play_index_for(index, Some(generation), PlayTrigger::Pick)
+        .await?;
     state.post_commit_background();
     Ok(get_state(State(state)).await)
 }
@@ -990,11 +985,7 @@ async fn batch_delete_tracks(
     }
     // 清封面缓存文件这一步会拿 id 拼路径：任一个非法就整批拒掉，不给穿越留缝。
     // 前端只回传失效清单里的 id，正常路径不受影响。
-    if let Some(bad) = body
-        .track_ids
-        .iter()
-        .find(|id| safe_cover_id(id).is_none())
-    {
+    if let Some(bad) = body.track_ids.iter().find(|id| safe_cover_id(id).is_none()) {
         return Err(bad_request(format!("invalid cover id: {bad}")));
     }
     let deleted = vmusic_store::delete_tracks(&state.db, &body.track_ids)
@@ -1274,7 +1265,10 @@ pub(crate) async fn lyric_doc_for(
     state: &AppState,
     track: &vmusic_core::Track,
 ) -> vmusic_core::LyricDocument {
-    let saved = vmusic_store::lyrics::get(&state.db, &track.id).await.ok().flatten();
+    let saved = vmusic_store::lyrics::get(&state.db, &track.id)
+        .await
+        .ok()
+        .flatten();
     let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
     let path = Path::new(&track.path);
     let mut doc = match saved.filter(|s| !s.content.trim().is_empty()) {
@@ -1520,7 +1514,10 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
 }
 
 /// OBS 浮层的歌词缓存命中：当前曲的原始解析文档（偏移叠加前）。
-async fn cached_overlay_doc(state: &AppState, track_id: &str) -> Option<vmusic_core::LyricDocument> {
+async fn cached_overlay_doc(
+    state: &AppState,
+    track_id: &str,
+) -> Option<vmusic_core::LyricDocument> {
     let guard = state.overlay_lyric.lock().await;
     match guard.as_ref() {
         Some((id, doc)) if id == track_id => Some(doc.clone()),
@@ -1541,7 +1538,8 @@ fn urlencode(text: &str) -> String {
     // 音源请求已统一走 const_url 降级为 ApiError（见 online/mod.rs）。
     let mut u = reqwest::Url::parse("https://local.invalid/").unwrap();
     u.query_pairs_mut().append_pair("v", text);
-    u.query().unwrap_or_default()
+    u.query()
+        .unwrap_or_default()
         .strip_prefix("v=")
         .unwrap_or_default()
         .to_string()
@@ -2920,7 +2918,9 @@ async fn online_radio(
     match body.action.as_str() {
         "start" => {
             if let Some(gen) = state.radio_start().await? {
-                state.play_index_for(0, Some(gen), PlayTrigger::Pick).await?;
+                state
+                    .play_index_for(0, Some(gen), PlayTrigger::Pick)
+                    .await?;
                 state.post_commit_background();
             }
         }
@@ -2928,7 +2928,9 @@ async fn online_radio(
             let initial = state.radio.lock().await.initial_generation.is_some();
             if initial {
                 if let Some(gen) = state.radio_start().await? {
-                    state.play_index_for(0, Some(gen), PlayTrigger::Pick).await?;
+                    state
+                        .play_index_for(0, Some(gen), PlayTrigger::Pick)
+                        .await?;
                     state.post_commit_background();
                 }
             } else {
@@ -3011,7 +3013,9 @@ async fn online_play(
             .await;
     }
 
-    let outcome = state.play_index_for(index, Some(gen), PlayTrigger::Pick).await?;
+    let outcome = state
+        .play_index_for(index, Some(gen), PlayTrigger::Pick)
+        .await?;
     if !outcome.committed {
         return Ok(get_state(State(state.clone())).await);
     }

@@ -286,7 +286,8 @@ impl CacheIndex {
     pub fn stats(&self) -> CacheStats {
         let idx = self.read();
         let mut stats = CacheStats::default();
-        let mut by_source: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        let mut by_source: std::collections::BTreeMap<String, u64> =
+            std::collections::BTreeMap::new();
         for (name, entry) in idx.files.iter() {
             stats.total_bytes += entry.len;
             stats.files += 1;
@@ -302,11 +303,7 @@ impl CacheIndex {
     ///
     /// `.part` 不在索引里，手动清理是罕见路径，这里顺带扫一遍目录把残骸删掉
     /// （与旧行为一致：残骸不受 protected 豁免，按音源前缀过滤）。
-    pub async fn clear(
-        &self,
-        protected: &[String],
-        source: Option<&str>,
-    ) -> std::io::Result<u64> {
+    pub async fn clear(&self, protected: &[String], source: Option<&str>) -> std::io::Result<u64> {
         let prefix = source.map(|s| format!("{s}-"));
         let mut removed = 0u64;
         let names: Vec<String> = {
@@ -577,7 +574,9 @@ mod tests {
         let idx = CacheIndex::load(dir.clone()).await;
         assert!(idx.find("qq", "a1", "standard").await.is_some());
 
-        fs::remove_file(dir.join("qq-a1-standard.mp3")).await.unwrap();
+        fs::remove_file(dir.join("qq-a1-standard.mp3"))
+            .await
+            .unwrap();
         assert!(idx.find("qq", "a1", "standard").await.is_none());
         assert_eq!(idx.stats().files, 0, "失效条目要跟着剔除");
     }

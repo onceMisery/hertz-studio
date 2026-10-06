@@ -39,15 +39,13 @@ pub async fn clear(pool: &SqlitePool, track_id: &str) -> Result<(), StoreError> 
 }
 
 /// 一次取出一批曲目里被标记过的那些 id（补全候选阶段按批预取）。
-pub async fn marked_ids(
-    pool: &SqlitePool,
-    ids: &[String],
-) -> Result<HashSet<String>, StoreError> {
+pub async fn marked_ids(pool: &SqlitePool, ids: &[String]) -> Result<HashSet<String>, StoreError> {
     if ids.is_empty() {
         return Ok(HashSet::new());
     }
     let placeholders = vec!["?"; ids.len()].join(", ");
-    let sql = format!("SELECT track_id FROM track_no_auto_match WHERE track_id IN ({placeholders})");
+    let sql =
+        format!("SELECT track_id FROM track_no_auto_match WHERE track_id IN ({placeholders})");
     let mut query = sqlx::query_as::<_, (String,)>(&sql);
     for id in ids {
         query = query.bind(id);

@@ -417,8 +417,7 @@ pub fn find(source: &str) -> Option<&'static SourceInfo> {
 /// 降级成 `ApiError` 之后，最坏结果是这一个音源报错，其余音源与本地播放不受影响。
 pub(crate) fn const_url(raw: impl AsRef<str>) -> ApiResult<reqwest::Url> {
     let raw = raw.as_ref();
-    reqwest::Url::parse(raw)
-        .map_err(|e| crate::error::internal(format!("平台地址无效 {raw}: {e}")))
+    reqwest::Url::parse(raw).map_err(|e| crate::error::internal(format!("平台地址无效 {raw}: {e}")))
 }
 
 /// 下载音频时要带的 Referer。
