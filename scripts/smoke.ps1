@@ -54,8 +54,15 @@ try {
 
     if (-not (Test-Path (Join-Path $data vmusicd.json))) { throw "missing discovery file" }
 
-    $ui = Invoke-WebRequest "http://127.0.0.1:$Port/" -UseBasicParsing
-    if (-not $ui.Content.Contains("mmusic")) { throw "ui did not render" }
+    # `/` 已收紧：无凭据时不再把长期令牌注进 HTML，而是回一页「需要凭据」的自救页。
+    try {
+        Invoke-WebRequest "http://127.0.0.1:$Port/" -UseBasicParsing | Out-Null
+        throw "expected 401 for bare /"
+    } catch {
+        if (-not $_.Exception.Message.Contains("401")) { throw }
+    }
+    $ui = Invoke-WebRequest "http://127.0.0.1:$Port/" -Headers $headers -UseBasicParsing
+    if (-not $ui.Content.Contains("window.__VMUSIC_TOKEN__ = `"$token`"")) { throw "ui did not inject the token" }
 
     Write-Host ""
     Write-Host "smoke test passed" -ForegroundColor Green

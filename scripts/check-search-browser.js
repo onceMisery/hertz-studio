@@ -2,6 +2,7 @@
 // Run with SEARCH_UI_URL pointing to an isolated service. Requires Playwright.
 // PLAYWRIGHT_MODULE may point to an existing installation. No real playback is sent.
 const fs = require('node:fs');
+const { uiUrl } = require('./ui-token');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 async function check(page) {
   const errors = [];
@@ -104,7 +105,7 @@ async function check(page) {
         }));
       }
     }
-    await page.goto(process.env.SEARCH_UI_URL || 'http://127.0.0.1:18766');
+    await page.goto(uiUrl(process.env.SEARCH_UI_URL || 'http://127.0.0.1:18766'));
     await page.getByRole('button', { name: '在线曲库', exact: true }).click();
     await check(page);
   } finally { await browser.close(); }

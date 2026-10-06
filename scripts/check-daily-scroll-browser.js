@@ -23,6 +23,7 @@
 'use strict';
 
 const { chromium } = require('playwright');
+const { uiUrl } = require('./ui-token');
 
 const URL = process.env.SETTINGS_NAV_URL || 'http://127.0.0.1:7634/';
 const SHOTS = require('path').join(__dirname, '..', 'output', 'daily-scroll-check');
@@ -127,7 +128,7 @@ const geom = (page, sel) => page.evaluate((s) => {
   page.on('pageerror', (e) => errors.push(String(e)));
 
   try {
-    await page.goto(URL, { timeout: 30000, waitUntil: 'domcontentloaded' });
+    await page.goto(uiUrl(URL), { timeout: 30000, waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.Skins && window.Theme, null, { timeout: 15000 });
 
     // ---------------------------------------------------------- 滚动链

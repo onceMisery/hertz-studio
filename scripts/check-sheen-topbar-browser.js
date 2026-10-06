@@ -23,6 +23,7 @@
 
 const { chromium } = require('playwright');
 const path = require('path');
+const { uiUrl } = require('./ui-token');
 
 const URL = process.env.SETTINGS_NAV_URL || 'http://127.0.0.1:7634/';
 const SHOTS = path.join(__dirname, '..', 'output', 'sheen-topbar-check');
@@ -57,7 +58,7 @@ async function setSkin(page, id) {
   page.on('pageerror', (e) => errors.push(String(e)));
 
   try {
-    await page.goto(URL, { timeout: 30000, waitUntil: 'domcontentloaded' });
+    await page.goto(uiUrl(URL), { timeout: 30000, waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.Skins && window.Theme, null, { timeout: 15000 });
     await setSkin(page, 'sheen');
 

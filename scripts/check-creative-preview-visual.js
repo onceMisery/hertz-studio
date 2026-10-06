@@ -9,6 +9,7 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const zlib = require('zlib');
+const { uiUrl } = require('./ui-token');
 
 const BASE = process.env.BASE || 'http://127.0.0.1:7641';
 
@@ -99,7 +100,7 @@ function check(label, cond, detail) {
 
   // 上一轮可能把 stanzaVisual / 宽屏偏好存进了 localStorage。
   // 起点不干净的话，页面一进来工坊就是锁定态或宽屏态，后面量的就不是默认值了。
-  const resp = await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+  const resp = await page.goto(uiUrl(BASE), { waitUntil: 'domcontentloaded' });
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) { /* 无所谓 */ } });
   await page.reload({ waitUntil: 'domcontentloaded' });
 

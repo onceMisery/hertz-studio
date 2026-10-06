@@ -234,7 +234,7 @@ hertz-studio v0.1.0
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 112 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 89 条 `.route()`），另有 `main.rs` 挂的 4 条路由与 68 条内嵌静态资源路由。
+REST 路由表共 112 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 89 条 `.route()`），另有 `main.rs` 挂的 5 条路由与 68 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -351,7 +351,7 @@ REST 路由表共 112 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | PUT | `/v1/tracks/{id}/lyrics/offset` |
 | POST | `/v1/ui/notice` |
 
-`main.rs` 上另有：GET `/ws`，GET `/wallpapers/{name}`，GET `/platform-icons/{name}`，GET `/`。
+`main.rs` 上另有：GET `/ws`，GET `/wallpapers/{name}`，GET `/platform-icons/{name}`，GET `/`，POST `/v1/auth/session`。
 
 <!-- api-routes:end -->
 

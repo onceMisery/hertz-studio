@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Run against an isolated hertz-studio. Upstream/playback responses are fixtures.
 const fs = require('node:fs');
+const { uiUrl } = require('./ui-token');
 const assert = require('node:assert/strict');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 (async () => {
@@ -32,7 +33,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
       }
       return route.fulfill({json:{active, loading:false,error:null,tracks:active?tracks:[],index:trackIndex}});
     });
-    await page.goto(process.env.SEARCH_UI_URL || 'http://127.0.0.1:18766');
+    await page.goto(uiUrl(process.env.SEARCH_UI_URL || 'http://127.0.0.1:18766'));
     await page.getByRole('button',{name:'在线曲库',exact:true}).click();
     await page.locator('#radio-start').click();
     await page.waitForFunction(() => document.querySelector('#radio-status').textContent.includes('要求登录'));

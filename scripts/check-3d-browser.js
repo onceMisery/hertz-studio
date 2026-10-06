@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const { uiUrl } = require('./ui-token');
 const root = path.join(__dirname, '..');
 const web = path.join(root, 'plugin', 'ui');
 const output = path.join(root, 'output', 'playwright', '3d');
@@ -49,7 +50,7 @@ async function main() {
       if (['GET', 'HEAD'].includes(route.request().method())) return route.continue();
       return route.fulfill({ status: 200, json: {} });
     });
-    await page.goto(base);
+    await page.goto(uiUrl(base));
     await page.waitForFunction(() => window.Stage3D && window.Stage && document.getElementById('conn').textContent === '服务已连接');
     await page.evaluate(() => {
       const original = Stage.presentation.bind(Stage);

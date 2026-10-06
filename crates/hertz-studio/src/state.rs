@@ -581,6 +581,22 @@ impl AppState {
         self.cache_dir().join("covers")
     }
 
+    /// 签一张入口首跳票据（默认寿命与次数），只回票号。
+    ///
+    /// 给二进制入口打印/打开的 URL 用：那条 URL 会进终端 scrollback、浏览器历史
+    /// 与聊天记录，所以带的是短时效、次数有限的票而不是长期 token。寿命/次数上限
+    /// 留在 [`crate::ticket`] 里，bin 侧不需要知道。
+    pub fn issue_entry_ticket(&self) -> String {
+        self.tickets
+            .issue(crate::ticket::TICKET_TTL, crate::ticket::TICKET_USES)
+            .id
+    }
+
+    /// 兑一张首跳票据（未过期且还有剩余次数才成立）。`/` 的凭据闸门用。
+    pub fn redeem_ticket(&self, id: &str) -> bool {
+        self.tickets.redeem(id)
+    }
+
     pub(crate) fn stage_beats_dir(&self) -> PathBuf {
         self.data_dir.join("stage-beats")
     }

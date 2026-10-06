@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const { uiToken } = require('./ui-token');
 const root = path.resolve(__dirname, '..');
 const web = path.join(root, 'plugin/ui');
 const output = path.join(root, 'output/playwright/ios');
@@ -53,9 +54,9 @@ async function fixtures() {
   const health = await fetch(base + '/v1/health').then(r => r.json());
   assert.equal(health.backend, 'null', 'Use a dedicated VMUSIC_BACKEND=null instance');
   console.log('Isolated service ready; loading workspace UI');
-  const html = await fetch(base).then(r => r.text());
-  token = /window\.__VMUSIC_TOKEN__\s*=\s*"([^"]+)"/.exec(html)?.[1];
-  assert.ok(token, 'Test instance must inject its token');
+  // 令牌不再能从页面里抠：`GET /` 现在只在出示凭据时才把它写进 HTML。走
+  // scripts/ui-token.js（VMUSIC_UI_TOKEN 或 VMUSIC_DATA_DIR 下的 token 文件）。
+  token = uiToken();
   await api('PUT', '/v1/settings', { stage_idle_hide: true, reduce_motion: false, cover_follow: false });
   await api('POST', '/v1/player/stop');
   assert.ok(!(await api('GET', '/v1/state')).track_id,

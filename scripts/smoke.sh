@@ -116,10 +116,35 @@ curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/online/sources" \
   | tr ',' '\n' | grep -A0 '"caps"' | head -1
 
 echo "==> ui"
-curl -sf "http://127.0.0.1:$PORT/" | grep -q 'mmusic'
+# `/` 已收紧：无凭据时它不再把长期令牌注进 HTML（那正是「本机任何进程 GET 一下
+# 首页就拿到令牌」的成因），而是回一页自包含的「需要凭据」自救页。
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/")
+[[ "$code" == "401" ]] || { echo "expected 401 for bare /, got $code"; exit 1; }
+# 出示凭据才渲染，且注进去的就是当前服务的令牌。
+curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/" \
+  | grep -qF "window.__VMUSIC_TOKEN__ = \"$TOKEN\""
 # 内嵌资源：新增的两个模块必须能取到，否则界面静默少一块功能。
 curl -sf "http://127.0.0.1:$PORT/favorites.js" | grep -q 'Favorites'
 curl -sf "http://127.0.0.1:$PORT/daily.js" | grep -q 'Daily'
+
+echo "==> 首跳票据：签发 → 兑换 200 → 复用 401（一次性）"
+TICKET="$(curl -sf "${AUTH[@]}" -X POST -d '{}' "http://127.0.0.1:$PORT/v1/auth/ticket" \
+  | sed -n 's/.*"ticket":"\([^"]*\)".*/\1/p')"
+[[ -n "$TICKET" ]] || { echo "ticket issue returned no id"; exit 1; }
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/?ticket=$TICKET")
+[[ "$code" == "200" ]] || { echo "expected 200 for ticket first hop, got $code"; exit 1; }
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/?ticket=$TICKET")
+[[ "$code" == "401" ]] || { echo "expected 401 for replayed ticket, got $code"; exit 1; }
+
+echo "==> 会话 cookie：令牌换 cookie，之后刷新/书签不再需要地址里带凭据"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  -d '{"token":"definitely-not-the-token"}' "http://127.0.0.1:$PORT/v1/auth/session")
+[[ "$code" == "401" ]] || { echo "expected 401 for a wrong token, got $code"; exit 1; }
+JAR="$(mktemp)"
+curl -sf -o /dev/null -c "$JAR" -X POST -H 'Content-Type: application/json' \
+  -d "{\"token\":\"$TOKEN\"}" "http://127.0.0.1:$PORT/v1/auth/session"
+curl -sf -b "$JAR" "http://127.0.0.1:$PORT/" | grep -qF "window.__VMUSIC_TOKEN__ = \"$TOKEN\""
+rm -f "$JAR"
 
 echo
 echo "smoke test passed"

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const { uiToken, uiUrl } = require('./ui-token');
 
 const root = path.resolve(__dirname, '..');
 const web = path.join(root, 'plugin/ui');
@@ -75,7 +76,7 @@ async function routeAssets(page) {
 }
 
 async function ready(page) {
-  await page.goto(base);
+  await page.goto(uiUrl(base));
   try {
     await page.waitForFunction(() => window.Stage && window.Skins && document.getElementById('settings-entry').onclick, null, { timeout: 10000, polling: 100 });
     await page.waitForFunction(() => document.getElementById('conn').textContent === '服务已连接', null, { timeout: 10000, polling: 100 });
@@ -328,9 +329,9 @@ async function appearance(page, tracks) {
     assert.ok((await response.text()).replace(/\r\n/g, '\n') === fs.readFileSync(path.join(web, file), 'utf8').replace(/\r\n/g, '\n'),
       `Stale embedded asset ${file}; rebuild the isolated service`);
   }
-  const html = await fetch(base + '/').then(response => response.text());
-  token = /window\.__VMUSIC_TOKEN__\s*=\s*"([^"]+)"/.exec(html)?.[1];
-  assert.ok(token, 'isolated service did not inject a token');
+  // 令牌不再从页面里抠：`GET /` 只在出示凭据时把令牌写进 HTML，裸请求回的是
+  // 「需要凭据」的自救页。走 scripts/ui-token.js。
+  token = uiToken();
   const tracks = (await fixtures()).tracks;
   await api('PUT', '/v1/settings', { cover_follow: true, stage_idle_hide: true, reduce_motion: false });
   await api('POST', '/v1/player/stop');

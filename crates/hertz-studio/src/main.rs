@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::extract::Path;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 
 use state::AppState;
@@ -367,7 +367,18 @@ async fn main() -> anyhow::Result<()> {
             "/",
             get({
                 let state = state.clone();
-                move || index(state.clone())
+                move |headers: axum::http::HeaderMap, uri: axum::http::Uri| {
+                    index(state.clone(), headers, uri)
+                }
+            }),
+        )
+        // 用长期令牌换会话 cookie：那一页「没有凭据」上的表单打到这里。令牌走
+        // 请求体，不进 URL 历史；校验通过才发 HttpOnly cookie。
+        .route(
+            "/v1/auth/session",
+            post({
+                let state = state.clone();
+                move |body: axum::Json<SessionRequest>| create_session(state.clone(), body)
             }),
         )
         // OBS 浮层页：静态壳不走鉴权（没有数据），数据端点 /v1/overlay/lyric
@@ -391,7 +402,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         local.ip()
     };
-    let url = format!("http://{}/?token={token}", host_port(shown, actual_port));
+    // 打印/打开的入口带**一次性票据**，不是长期 token：这条 URL 会进浏览器历史、
+    // 终端 scrollback、日志与聊天记录。票 TTL 两分钟、只能用一次；换完这次首跳，
+    // 浏览器拿到的是会话 cookie，之后的刷新与书签都不需要凭据出现在地址里。
+    let entry = state.issue_entry_ticket();
+    let url = format!("http://{}/?ticket={}", host_port(shown, actual_port), entry);
     tracing::info!("listening on {bind}:{actual_port}");
     println!("hertz-studio v{}", env!("CARGO_PKG_VERSION"));
     if let Some(warning) = exposure_warning(local.ip(), actual_port) {
@@ -620,15 +635,160 @@ fn render_index(html: &str, token: &str) -> String {
     version_asset_urls(&html.replace(TOKEN_PLACEHOLDER, token))
 }
 
-async fn index(state: Arc<AppState>) -> axum::response::Response {
-    (
+/// 会话 cookie 名。`/` 认它，**接口层不认**（接口仍然要 Bearer）。
+///
+/// 这个分工是刻意的：cookie 只能换来「首页那份 HTML」，换不来任何写操作 —— 于是
+/// 刷新与书签继续可用，而 CSRF 面没有变化（本项目没有 CORS 层，跨站表单也带不上
+/// 这个 SameSite=Strict 的 cookie）。
+const SESSION_COOKIE: &str = "vmusic_session";
+
+fn session_cookie(token: &str) -> String {
+    format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")
+}
+
+/// 取 `Cookie:` 头里某个名字的值。
+fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        (key.trim() == name).then(|| value.trim().to_string())
+    })
+}
+
+/// `/` 的凭据判定（纯函数，便于钉住行为）。
+///
+/// 为什么首页要凭据：`/` 原先无条件把长期 token 注进 HTML，而这条路由**不走鉴权**
+/// —— 本机任何进程（绑了非回环地址时还包括同网段的人）GET 一下首页就拿到了能控制
+/// 播放、读曲库、改设置的令牌。现在令牌只发给「已经出示凭据」的请求。
+///
+/// 判定顺序即优先级：请求头里的长期 token（前端 fetch 走这条，导航请求带不了头）
+/// → 会话 cookie（刷新/书签）→ 查询串（首跳的一次性票据，以及兼容期的长期 token）。
+/// 票据走 `redeem` 而不是存在性检查：它自带次数与 TTL，兑一次少一次，这条 URL 被
+/// 复制出去时泄露面只剩「TTL 内剩下的那几次」。
+fn credential_ok(
+    token: &str,
+    headers: &axum::http::HeaderMap,
+    query: Option<&str>,
+    redeem: impl Fn(&str) -> bool,
+) -> bool {
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .or_else(|| {
+            headers
+                .get("x-vmusic-token")
+                .and_then(|value| value.to_str().ok())
+        });
+    presented == Some(token)
+        || cookie_value(headers, SESSION_COOKIE).as_deref() == Some(token)
+        || query
+            .and_then(|query| query_param(query, "ticket"))
+            .is_some_and(&redeem)
+        || query.and_then(|query| query_param(query, "token")) == Some(token)
+}
+
+/// 首跳没凭据时给的页面。自包含（无外链），并给一条自救路径：把令牌交上来换
+/// 会话 cookie —— 清了 cookie、换了浏览器、或者手敲了裸地址的用户会遇到这一页。
+const NO_CREDENTIAL_HTML: &str = r#"<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>hertz-studio · 需要凭据</title>
+<style>
+body{background:#09090b;color:#f4f4f5;font:14px/1.6 system-ui,-apple-system,sans-serif;margin:0;
+  display:flex;align-items:center;justify-content:center;min-height:100vh}
+main{max-width:34rem;padding:24px;border:1px solid #27272a;border-radius:14px;background:#111113}
+h1{font-size:16px;margin:0 0 12px}
+p{color:#a1a1aa;margin:0 0 12px}
+code{color:#e4e4e7;background:#18181b;padding:2px 6px;border-radius:6px}
+input{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #3f3f46;
+  background:#18181b;color:#f4f4f5;font-family:ui-monospace,monospace;font-size:12px}
+button{margin-top:12px;padding:10px 16px;border-radius:8px;border:0;background:#f4f4f5;color:#09090b;
+  font-weight:600;cursor:pointer}
+#err{color:#f87171;margin-top:12px;min-height:20px}
+</style></head>
+<body><main>
+<h1>这份页面没有凭据</h1>
+<p>服务只在出示凭据时把令牌写进页面 —— 否则本机任何进程打开首页就能拿到它。</p>
+<p>正常情况下启动时打印的那条地址已经带了一次性票据，直接用那条打开即可。也可以把令牌粘进来：
+它在启动日志的 <code>discovery</code> 文件里，或数据目录的 <code>token</code> 文件里。</p>
+<form id="f"><input id="t" placeholder="粘贴服务令牌" autocomplete="off" spellcheck="false">
+<button type="submit">继续</button></form>
+<p id="err"></p>
+</main><script>
+document.getElementById('f').addEventListener('submit', async function (event) {
+  event.preventDefault();
+  var err = document.getElementById('err');
+  err.textContent = '';
+  try {
+    var res = await fetch('/v1/auth/session', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: document.getElementById('t').value.trim() })
+    });
+    if (!res.ok) { err.textContent = '令牌不对，或服务重启过（令牌每次启动都会换）。'; return; }
+    location.reload();
+  } catch (e) { err.textContent = '取不到服务：' + e; }
+});
+</script></body></html>
+"#;
+
+#[derive(serde::Deserialize)]
+struct SessionRequest {
+    token: String,
+}
+
+/// 用长期令牌换会话 cookie。令牌走**请求体**，不进 URL 历史、不进 OBS 配置。
+async fn create_session(
+    state: Arc<AppState>,
+    axum::Json(body): axum::Json<SessionRequest>,
+) -> axum::response::Response {
+    if body.token != state.token {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "token mismatch",
+        )
+            .into_response();
+    }
+    let mut response = axum::http::StatusCode::NO_CONTENT.into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&session_cookie(&state.token)) {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, value);
+    }
+    response
+}
+
+async fn index(
+    state: Arc<AppState>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    if !credential_ok(&state.token, &headers, uri.query(), |id| {
+        state.redeem_ticket(id)
+    }) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            [
+                (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (axum::http::header::CACHE_CONTROL, "no-cache"),
+            ],
+            NO_CREDENTIAL_HTML,
+        )
+            .into_response();
+    }
+    let mut response = (
         [
             (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (axum::http::header::CACHE_CONTROL, "no-cache"),
         ],
         render_index(INDEX_HTML, &state.token),
     )
-        .into_response()
+        .into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&session_cookie(&state.token)) {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, value);
+    }
+    response
 }
 
 /// 内嵌资源的统一出口。
@@ -917,5 +1077,91 @@ mod tests {
         assert_eq!(assets_fingerprint(), assets_fingerprint());
         assert_ne!(hash_inputs(&["a", "b"]), hash_inputs(&["ab"]));
         assert_ne!(hash_inputs(&["x"]), hash_inputs(&["y"]));
+    }
+
+    /// `/` 的凭据闸门：四条信道任一条对上就放行，一条都没对上（或对错了值）必须拒。
+    ///
+    /// 这条是收紧的核心——它一旦松了，`/` 就又变成「谁都能拿到长期令牌」。
+    #[test]
+    fn index_credential_gate_opens_only_for_a_matching_credential() {
+        const TOKEN: &str = "abc123";
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(
+            !credential_ok(TOKEN, &headers, None, |_| false),
+            "裸请求必须被拒"
+        );
+
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer abc123".parse().unwrap(),
+        );
+        assert!(credential_ok(TOKEN, &headers, None, |_| false));
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer abc124".parse().unwrap(),
+        );
+        assert!(
+            !credential_ok(TOKEN, &headers, None, |_| false),
+            "前缀对但值不对不算"
+        );
+        headers.remove(axum::http::header::AUTHORIZATION);
+
+        headers.insert("x-vmusic-token", "abc123".parse().unwrap());
+        assert!(credential_ok(TOKEN, &headers, None, |_| false));
+        headers.remove("x-vmusic-token");
+
+        headers.insert(
+            axum::http::header::COOKIE,
+            "a=1; vmusic_session=abc123; b=2".parse().unwrap(),
+        );
+        assert!(
+            credential_ok(TOKEN, &headers, None, |_| false),
+            "cookie 夹在别的键里也要取得到"
+        );
+        headers.insert(
+            axum::http::header::COOKIE,
+            "vmusic_session=abc124".parse().unwrap(),
+        );
+        assert!(!credential_ok(TOKEN, &headers, None, |_| false));
+        headers.remove(axum::http::header::COOKIE);
+
+        // 票据走 redeem：票据表说成立才成立，光有 `?ticket=` 这个参数不算数。
+        assert!(credential_ok(TOKEN, &headers, Some("ticket=t1"), |id| id == "t1"));
+        assert!(!credential_ok(
+            TOKEN,
+            &headers,
+            Some("ticket=t1"),
+            |_| false
+        ));
+        // 兼容期的长期令牌仍认，但同样要比对值。
+        assert!(credential_ok(TOKEN, &headers, Some("token=abc123"), |_| false));
+        assert!(!credential_ok(
+            TOKEN,
+            &headers,
+            Some("token=abc124"),
+            |_| false
+        ));
+    }
+
+    /// 会话 cookie 的签发与回读要成对：属性少一个（HttpOnly / SameSite），
+    /// 这个能换首页的凭据就会被脚本读到、或被跨站请求带上。
+    #[test]
+    fn session_cookie_carries_hardened_attributes_and_reads_back() {
+        let header = session_cookie("tok-123");
+        assert!(header.starts_with("vmusic_session=tok-123;"), "{header}");
+        for attribute in ["HttpOnly", "SameSite=Strict", "Path=/"] {
+            assert!(header.contains(attribute), "缺 {attribute}：{header}");
+        }
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            header.split(';').next().unwrap().parse().unwrap(),
+        );
+        assert_eq!(
+            cookie_value(&headers, SESSION_COOKIE).as_deref(),
+            Some("tok-123")
+        );
+        assert_eq!(cookie_value(&headers, "other"), None);
     }
 }

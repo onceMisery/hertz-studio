@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const { uiToken, uiUrl } = require('./ui-token');
 const root = path.join(__dirname, '..');
 const web = path.join(root, 'plugin/ui');
 const output = path.join(root, 'output/playwright/stage-visual');
@@ -76,9 +77,7 @@ async function main() {
   fs.mkdirSync(output, { recursive: true });
   const health = await fetch(base + '/v1/health').then(response => response.json());
   assert.equal(health.backend, 'null', 'Use an isolated null backend, never your listening instance');
-  const html = await fetch(base).then(response => response.text());
-  token = /window\.__VMUSIC_TOKEN__\s*=\s*"([^"]+)"/.exec(html)?.[1];
-  assert.ok(token);
+  token = uiToken();
   for (const file of ['stage3d.js', 'app.js', 'stanza/stanza.css', 'stanza/stanza-theme.js', 'stanza/stanza-sonnet.js']) {
     const embedded = await fetch(base + '/' + file).then(response => response.text());
     assert.ok(embedded.replace(/\r\n/g, '\n') === fs.readFileSync(path.join(web, file), 'utf8').replace(/\r\n/g, '\n'), 'Rebuild stale embedded resource: ' + file);
@@ -90,7 +89,7 @@ async function main() {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
-    await page.goto(base);
+    await page.goto(uiUrl(base));
     await page.waitForFunction(() => window.Stage3D && document.getElementById('settings-entry').onclick);
     await page.waitForFunction(() => document.getElementById('conn').textContent === '服务已连接');
     const cover = await page.evaluate(() => {
