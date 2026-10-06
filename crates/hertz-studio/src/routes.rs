@@ -69,8 +69,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/tracks/facets", get(track_facets))
         .route("/v1/tracks/batch-edit", post(batch_edit_tracks))
         .route("/v1/tracks/batch-delete", post(batch_delete_tracks))
-        // 本地歌曲在线补全（folia 的「整理歌曲信息」）：匹配打分 + 补缺。
-        .route("/v1/tracks/complete", post(complete_tracks))
+        // 本地歌曲在线补全（folia 的「整理歌曲信息」）：两阶段——候选只读、
+        // 用户点选后才落地，避免不可回退的静默写库。
+        .route("/v1/tracks/complete/suggest", post(suggest_tracks))
+        .route("/v1/tracks/complete/apply", post(apply_complete))
         .route("/v1/tracks/missing", get(list_missing_tracks))
         .route("/v1/tracks/{id}", get(get_track))
         .route("/v1/tracks/{id}/cover", get(get_cover).post(replace_cover))
@@ -928,16 +930,31 @@ pub(crate) struct BatchDeleteRequest {
     pub(crate) track_ids: Vec<String>,
 }
 
-/// 本地歌曲在线补全（薄壳：逻辑在 `complete.rs`，RPC 门面共用）。
-async fn complete_tracks(
+/// 本地歌曲在线补全的候选阶段（薄壳：逻辑在 `complete.rs`，RPC 门面共用）。
+/// 只搜索打分，不写任何数据——落地走 `/v1/tracks/complete/apply`。
+async fn suggest_tracks(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<crate::complete::CompleteRequest>,
+    Json(body): Json<crate::complete::SuggestRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let report = crate::complete::complete_tracks(&state, &body).await?;
+    let report = crate::complete::suggest_tracks(&state, &body).await?;
+    Ok(Json(report))
+}
+
+/// 补全落地：按用户选中的候选补缺（单曲单候选，用户点一次写一次）。
+async fn apply_complete(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::complete::ApplyRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let report = crate::complete::apply_choice(&state, &body).await?;
     Ok(Json(report))
 }
 
 async fn get_cover(State(state): State<Arc<AppState>>, AxumPath(id): AxumPath<String>) -> Response {
+    // 同一处路径拼接，同样的准入；这里给 404 而不是 204，是为了让非法 id
+    // 明确区别于「这首曲目没有封面」，探测不静默。
+    let Some(id) = safe_cover_id(&id) else {
+        return not_found("cover id must be a uuid").into_response();
+    };
     let dir = state.cover_dir();
     let found = ["jpg", "png", "webp", "gif"].iter().find_map(|ext| {
         let path = dir.join(format!("{id}.{ext}"));

@@ -3234,6 +3234,52 @@ button:focus-visible, [role="button"]:focus-visible,
   gap: 10px;
 }
 
+/* 候选挑选（在线补全）：一行一首曲目 + 一个候选下拉。行数可能上百，
+   滚动容器由 dialogs.js 设 max-height，这里只管排版。 */
+.hz-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.hz-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hz-pick-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.hz-pick-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.hz-pick-select {
+  flex: 0 0 auto;
+  max-width: 52%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--field-border-strong);
+  background: var(--panel-solid);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.hz-pick-select:focus {
+  outline: none;
+  border-color: var(--line-strong);
+}
+
 /* ---------- 胶囊播放器（最小化态） ----------
    最小化时 body 挂 .is-capsule，除胶囊外的顶层节点全部隐藏。不逐个列容器名，
    是因为皮肤会改布局栅格的类名与层级，列名单必然漏；而胶囊是 position: fixed，

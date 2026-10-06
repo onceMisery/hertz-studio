@@ -246,9 +246,16 @@ impl Rpc {
                 library::batch_delete_tracks(state, body).await
             }
             // 本地歌曲在线补全：逻辑在 complete.rs，HTTP 与 RPC 同一份。
-            (Op::Post, ["v1", "tracks", "complete"]) => {
-                let request: crate::complete::CompleteRequest = body_as(body)?;
-                crate::complete::complete_tracks(state, &request)
+            // 候选只读、落地单曲，两个 op 与 HTTP 两条路由一一对应。
+            (Op::Post, ["v1", "tracks", "complete", "suggest"]) => {
+                let request: crate::complete::SuggestRequest = body_as(body)?;
+                crate::complete::suggest_tracks(state, &request)
+                    .await
+                    .map(Reply::ok)
+            }
+            (Op::Post, ["v1", "tracks", "complete", "apply"]) => {
+                let request: crate::complete::ApplyRequest = body_as(body)?;
+                crate::complete::apply_choice(state, &request)
                     .await
                     .map(Reply::ok)
             }

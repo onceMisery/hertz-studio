@@ -3236,23 +3236,118 @@ async function editTrackInfo(track) {
     .catch((err) => toast(errText('编辑失败', err), 'error'));
 }
 
-// 联网补全单曲：右键菜单入口（folia 的 LocalSongMetadataMatchDialog 的
-// 免弹窗版——单曲直接跑，结果用 toast 汇报）。
+// 联网补全：候选先行、用户点选才落地。
+//
+// 分两阶段（后端见 crates/hertz-studio/src/complete.rs）：
+//   complete/suggest 只搜索打分、不写库；complete/apply 按选中的候选补缺。
+// 单曲入口与批量入口共用下面这套——差别只在候选行的数量。
+
+/// 候选下拉的一行文案：标题 - 歌手《专辑》· 分值 时长。
+function candidateLabel(c) {
+  const bits = [c.title || c.id];
+  if (c.artist) bits.push(`- ${c.artist}`);
+  if (c.album) bits.push(`《${c.album}》`);
+  bits.push(`· ${Math.round(c.score || 0)} 分`);
+  if (c.duration_ms) bits.push(fmt(c.duration_ms));
+  return bits.join(' ');
+}
+
+/// suggest 结果 → 候选挑选的一行。默认选中分数最高的候选，末项是「不采纳」
+/// （记下决定，之后不再自动匹配这首）。
+function completionRow(result) {
+  const options = (result.candidates || []).map((c) => ({
+    value: c.id,
+    label: candidateLabel(c),
+  }));
+  options.push({ value: '', label: '不采纳（记住：以后不再自动匹配这首）' });
+  const missing = result.missing || {};
+  const waiting = [];
+  if (missing.album) waiting.push('专辑');
+  if (missing.cover) waiting.push('封面');
+  if (missing.lyrics) waiting.push('歌词');
+  return {
+    key: result.track_id,
+    label: `${result.title || result.track_id}${result.artist ? ' - ' + result.artist : ''}`,
+    sublabel: waiting.length ? `待补：${waiting.join('、')}` : '信息已齐全',
+    options,
+    value: (result.candidates && result.candidates[0] && result.candidates[0].id) || '',
+  };
+}
+
+/// 弹出候选挑选（dialogs.js 的 pick）。取消返回 null。
+async function pickCompletions(rows, message) {
+  const dlg = modal();
+  if (typeof dlg.pick !== 'function') {
+    toast('当前环境不支持候选挑选，无法补全', 'error');
+    return null;
+  }
+  return dlg.pick({ title: '在线补全：选择匹配', message, confirmLabel: '应用选择', rows });
+}
+
+/// 逐曲落地（串行，上游压力可控）。signal 是协作式取消：每曲开始前看一眼，
+/// 已发出的那一曲等它自己收尾。返回统计。
+async function applyCompletions(choices, signal, onProgress) {
+  const stats = { applied: 0, skipped: 0, failed: 0, albums: 0, covers: 0, lyrics: 0 };
+  for (let i = 0; i < choices.length; i++) {
+    if (signal && signal.aborted) break;
+    if (onProgress) onProgress(i + 1, choices.length);
+    const choice = choices[i];
+    try {
+      const res = await transport.post('/v1/tracks/complete/apply', {
+        track_id: choice.key,
+        candidate_id: choice.value || null,
+      }, { signal });
+      if (res.status === 'applied') {
+        stats.applied++;
+        if (res.filled && res.filled.album) stats.albums++;
+        if (res.filled && res.filled.cover) stats.covers++;
+        if (res.filled && res.filled.lyrics) stats.lyrics++;
+      } else {
+        stats.skipped++;
+      }
+    } catch (err) {
+      if (err && err.name === 'AbortError') break;
+      stats.failed++;
+      console.warn('[hertz] 补全落地失败', choice.key, err);
+    }
+  }
+  return stats;
+}
+
+function completionSummary(stats) {
+  const parts = [];
+  if (stats.applied) parts.push(`已补 ${stats.applied} 首`);
+  if (stats.skipped) parts.push(`不匹配 ${stats.skipped} 首`);
+  if (stats.failed) parts.push(`失败 ${stats.failed} 首`);
+  const fills = [];
+  if (stats.albums) fills.push(`${stats.albums} 个专辑`);
+  if (stats.covers) fills.push(`${stats.covers} 张封面`);
+  if (stats.lyrics) fills.push(`${stats.lyrics} 份歌词`);
+  if (!parts.length) return '没有需要落地的选择';
+  return parts.join('、') + (fills.length ? `，补齐了${fills.join('、')}` : '');
+}
+
+// 联网补全单曲：右键菜单入口（folia 的 LocalSongMetadataMatchDialog 的等价物）。
+// 候选先摆出来，用户点了才写库。
 async function completeTrackInfo(track) {
   toast(`正在为《${track.title}》匹配在线信息…`);
   try {
-    const res = await transport.post('/v1/tracks/complete', { track_ids: [track.id] });
+    const res = await transport.post('/v1/tracks/complete/suggest', { track_ids: [track.id] });
     const r = (res.results && res.results[0]) || {};
-    if (r.status !== 'matched') {
-      toast('没有找到足够相似的在线匹配（标题需命中且总分达标）');
+    if (!r.candidates || !r.candidates.length) {
+      toast(r.status === 'skipped'
+        ? (r.reason || '已跳过这首')
+        : '没有找到足够相似的在线匹配（标题需命中且总分达标）');
       return;
     }
-    const fills = [];
-    if (r.filled && r.filled.album) fills.push('专辑');
-    if (r.filled && r.filled.cover) fills.push('封面');
-    if (r.filled && r.filled.lyrics) fills.push('歌词');
-    toast(fills.length ? `已补齐${fills.join('、')}` : '匹配成功，本地信息已齐全、无需补齐');
-    if (fills.length) { loadTracks(true); loadFacets(); }
+    const choices = await pickCompletions(
+      [completionRow(r)],
+      '默认选中分数最高的候选；选「不采纳」会记住这个决定，之后不再自动匹配这首。',
+    );
+    if (!choices) return;
+    const stats = await applyCompletions(choices);
+    toast(completionSummary(stats));
+    if (stats.albums || stats.covers || stats.lyrics) { loadTracks(true); loadFacets(); }
   } catch (err) {
     toast(errText('联网补全失败', err), 'error');
   }
@@ -5903,42 +5998,62 @@ async function startApp() {
   }
   // 联网补全（folia 的「整理歌曲信息」）：匹配网易云，只补缺失的
   // 封面/歌词/专辑，不覆盖已有信息。
+  //
+  // 两阶段：先把整批的候选搜出来（只读、不改库），一次性摆进挑选弹窗，
+  // 用户逐行确认后才逐曲落地。运行中再点一次按钮 = 取消。
   if (ui.libBatchComplete) {
+    let batchAbort = null;
     ui.libBatchComplete.onclick = async () => {
+      if (batchAbort) { batchAbort.abort(); toast('已取消补全'); return; }
       const ids = [...state.selected].filter((id) => !id.startsWith('online:'));
       if (!ids.length) { toast('请先勾选要补全的本地曲目', 'error'); return; }
       const btn = ui.libBatchComplete;
       const original = btn.textContent;
-      btn.disabled = true;
-      btn.textContent = `补全中（0/${ids.length}）…`;
-      // 逐批推进进度提示：一次最多 50 首，超过自动分批串行。
+      const controller = new AbortController();
+      batchAbort = controller;
+      btn.textContent = `匹配中（0/${ids.length}）…`;
       try {
-        let matched = 0, noMatch = 0, failed = 0;
-        let covers = 0, lyrics = 0, albums = 0;
+        // 一次最多 50 首，超过自动分批串行。
+        const rows = [];
+        let suggestFailed = 0;
         for (let i = 0; i < ids.length; i += 50) {
+          if (controller.signal.aborted) return;
           const chunk = ids.slice(i, i + 50);
-          btn.textContent = `补全中（${Math.min(i + chunk.length, ids.length)}/${ids.length}）…`;
-          const res = await transport.post('/v1/tracks/complete', { track_ids: chunk });
-          matched += res.matched || 0;
-          noMatch += res.no_match || 0;
-          failed += res.failed || 0;
-          covers += res.filled_covers || 0;
-          lyrics += res.filled_lyrics || 0;
-          albums += res.filled_albums || 0;
+          btn.textContent = `匹配中（${i}/${ids.length}）…`;
+          const res = await transport.post('/v1/tracks/complete/suggest', { track_ids: chunk }, { signal: controller.signal });
+          for (const r of res.results || []) {
+            if (r.status === 'match' || r.status === 'nothing_to_fill') rows.push(completionRow(r));
+          }
+          suggestFailed += res.failed || 0;
         }
-        const parts = [`匹配 ${matched}`, `未匹配 ${noMatch}`];
-        if (failed) parts.push(`失败 ${failed}`);
-        const fills = [];
-        if (covers) fills.push(`${covers} 张封面`);
-        if (lyrics) fills.push(`${lyrics} 份歌词`);
-        if (albums) fills.push(`${albums} 个专辑`);
-        toast(`整理完成：${parts.join('、')}${fills.length ? `，补齐了${fills.join('、')}` : ''}`);
+        if (controller.signal.aborted) return;
+        if (!rows.length) {
+          toast(suggestFailed
+            ? `有 ${suggestFailed} 首匹配失败，其余没有可用候选`
+            : '没有找到可采纳的匹配');
+          return;
+        }
+        btn.textContent = original;
+        const choices = await pickCompletions(
+          rows,
+          `共 ${rows.length} 首有候选，逐行确认后才会写库；选「不采纳」的曲目以后不再自动匹配。`,
+        );
+        if (!choices) return;
+        btn.disabled = true;
+        btn.textContent = `落地中（0/${choices.length}）…`;
+        const stats = await applyCompletions(choices, controller.signal, (done, total) => {
+          btn.textContent = `落地中（${done}/${total}）…`;
+        });
+        if (suggestFailed) stats.failed += suggestFailed;
+        toast(`整理完成：${completionSummary(stats)}`);
         clearSelection();
         loadTracks(true);
         loadFacets();
       } catch (err) {
-        toast(errText('联网补全失败', err), 'error');
+        if (err && err.name === 'AbortError') toast('已取消补全');
+        else toast(errText('联网补全失败', err), 'error');
       } finally {
+        batchAbort = null;
         btn.disabled = false;
         btn.textContent = original;
       }

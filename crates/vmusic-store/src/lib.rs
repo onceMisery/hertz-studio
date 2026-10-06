@@ -13,12 +13,13 @@
 use std::path::{Component, Path, PathBuf};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use vmusic_core::{Playlist, PlaylistId, StoreError, Track, TrackId, TrackSource};
 
 pub mod backup;
 pub mod favorites;
 pub mod lyrics;
+pub mod no_auto_match;
 pub mod playlists;
 pub mod remote_roots;
 pub mod scan_roots;

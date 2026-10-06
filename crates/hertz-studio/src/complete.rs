@@ -3,11 +3,18 @@
 
 //! 本地歌曲在线补全（folia 的「整理歌曲信息」batchAutoMatch）。
 //!
-//! 流程：按「标题 - 歌手 - 专辑」构造查询词 → 网易云搜索（limit 10）→
-//! 加权打分（标题 45 / 歌手 25 / 专辑 30，缺项封顶 74；时长差 1s 内 1.0、
-//! 3s 内 0.95、5s 内 0.75）→ 过阈值即采纳。
+//! 分两阶段，写入永远是用户点的：
 //!
-//! 采纳后**只补缺、不覆盖**：专辑缺失补专辑（写 track_edits 覆盖层）、
+//! 1. `suggest_tracks`（`POST /v1/tracks/complete/suggest`）只搜索打分、
+//!    返回每首的候选与缺口，**不写任何数据**；
+//! 2. `apply_choice`（`POST /v1/tracks/complete/apply`）按用户选中的候选落地。
+//!
+//! 早期版本在 suggest 的位置直接写库：用户看不见也拦不住，错了只能事后去删。
+//! 打分规则不变——按「标题 - 歌手 - 专辑」构造查询词 → 网易云搜索（limit 10）
+//! → 加权打分（标题 45 / 歌手 25 / 专辑 30，缺项封顶 74；时长差 1s 内 1.0、
+//! 3s 内 0.95、5s 内 0.75）→ 过阈值（标题命中且 ≥60）即算候选。
+//!
+//! 落地时**只补缺、不覆盖**：专辑缺失补专辑（写 track_edits 覆盖层）、
 //! 无封面下载在线封面（落封面缓存 + cover_edited）、无歌词导入在线歌词
 //! （存 LRC 原文）。标题/歌手永远不动——它们是匹配的依据，也是用户文件
 //! 里的既有事实；folia 会整体重写标签，这里选择更保守的路线。
@@ -25,13 +32,46 @@ use crate::state::AppState;
 const ACCEPT_SCORE: f64 = 60.0;
 /// 单批上限：每首都要打一次上游搜索，批太大会把限流踩穿。
 const MAX_BATCH: usize = 50;
+/// 每曲回给前端的候选数：够用户判断，又不至于把响应撑大。
+const MAX_CANDIDATES: usize = 3;
 
+/// 候选阶段请求：只读，不写库。
 #[derive(serde::Deserialize)]
-pub(crate) struct CompleteRequest {
+pub(crate) struct SuggestRequest {
     pub(crate) track_ids: Vec<String>,
     /// 匹配音源；目前只有网易云实现了完整链路，缺省即网易云。
     #[serde(default)]
     pub(crate) source: Option<String>,
+}
+
+/// 落地请求：单曲单候选，用户点一次才写一次。
+#[derive(serde::Deserialize)]
+pub(crate) struct ApplyRequest {
+    pub(crate) track_id: String,
+    #[serde(default)]
+    pub(crate) source: Option<String>,
+    /// 选中的候选 id；`None` = 用户明确「不匹配」，只记决定、不写任何数据。
+    #[serde(default)]
+    pub(crate) candidate_id: Option<String>,
+    /// 允许落地的槽位（`album` / `cover` / `lyrics`），缺省 = 三个都允许。
+    /// 即便允许，服务端仍然只补缺、不覆盖。
+    #[serde(default)]
+    pub(crate) slots: Option<Vec<String>>,
+}
+
+/// 槽位白名单：前端传别的值一律忽略，不认。
+fn slot_enabled(slots: &Option<Vec<String>>, name: &str) -> bool {
+    match slots {
+        None => true,
+        Some(list) => list.iter().any(|s| s == name),
+    }
+}
+
+fn resolve_source(source: &Option<String>) -> String {
+    source
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "netease".to_string())
 }
 
 /// 归一化比对：小写、去空白与标点。中文歌名里的全角括号/空格差异全消。
@@ -147,12 +187,12 @@ struct Filled {
     lyrics: bool,
 }
 
-/// 单曲补全：搜索 → 打分 → 采纳 → 补缺。返回 (状态, 补了什么)。
-async fn complete_one(
+/// 单曲候选：搜索 → 打分 → 取前 N 个过阈值的候选。不写任何数据。
+async fn suggest_one(
     state: &AppState,
     track: &vmusic_core::Track,
     source: &str,
-) -> ApiResult<(String, Filled)> {
+) -> ApiResult<Vec<Value>> {
     let ctx = online_ctx(state);
     let query = online::SearchQuery {
         q: Some(build_query(track)),
@@ -162,29 +202,74 @@ async fn complete_one(
         offset: 0,
     };
     let page = online::search(&ctx, query).await?;
-    let mut best: Option<(f64, &online::OnlineTrack)> = None;
+    let mut scored: Vec<(f64, &online::OnlineTrack)> = Vec::new();
     for candidate in &page.tracks {
         let (score, hit) = match_score(track, candidate);
-        if hit && best.map_or(true, |(s, _)| score > s) {
-            best = Some((score, candidate));
+        if hit {
+            scored.push((score, candidate));
         }
     }
-    let Some((_score, candidate)) = best else {
-        return Ok(("no_match".into(), Filled { album: false, cover: false, lyrics: false }));
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(scored
+        .into_iter()
+        .take(MAX_CANDIDATES)
+        .map(|(score, c)| {
+            json!({
+                "id": c.id,
+                "title": c.title,
+                "artist": c.artist,
+                "album": c.album,
+                "duration_ms": c.duration_ms,
+                "cover": c.cover,
+                "score": score.round(),
+            })
+        })
+        .collect())
+}
+
+/// 缺口：哪些槽位是空的（只有空的才可能被补，服务端落地时再核一次）。
+async fn missing_slots(state: &AppState, track: &vmusic_core::Track) -> Value {
+    let lyrics = crate::routes::lyric_doc_for(state, track).await;
+    json!({
+        "album": track.album.as_deref().map(str::trim).unwrap_or("").is_empty(),
+        "cover": !track.has_cover,
+        "lyrics": lyrics.lines.is_empty(),
+    })
+}
+
+/// 单曲落地：按用户选中的候选补缺。`candidate_id` 为 None 表示「不匹配」，
+/// 只记决定、不写数据。
+async fn apply_one(
+    state: &AppState,
+    track: &vmusic_core::Track,
+    source: &str,
+    candidate_id: Option<&str>,
+    slots: &Option<Vec<String>>,
+) -> ApiResult<Value> {
+    let Some(candidate_id) = candidate_id else {
+        // 用户明确拒绝：记下来，后续候选阶段直接跳过这首。
+        vmusic_store::no_auto_match::mark(&state.db, &track.id)
+            .await
+            .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+        return Ok(json!({ "status": "skipped", "reason": "已标记不再自动匹配" }));
     };
 
+    let ctx = online_ctx(state);
+    // 候选详情重新取一次：封面/专辑以平台当前值为准，不信任前端回传的字段。
+    let detail = online::detail(&ctx, source, candidate_id).await?;
+
     let mut filled = Filled { album: false, cover: false, lyrics: false };
-    let id = candidate.id.clone();
 
     // 专辑缺失 → 写覆盖层（不碰文件标签）。
-    if track.album.as_deref().map(str::trim).unwrap_or("").is_empty()
-        && !candidate.album.trim().is_empty()
+    if slot_enabled(slots, "album")
+        && track.album.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && !detail.album.trim().is_empty()
     {
         vmusic_store::track_edits::apply(
             &state.db,
             &track.id,
             &vmusic_store::track_edits::EditInput {
-                album: Some(candidate.album.clone()),
+                album: Some(detail.album.clone()),
                 ..Default::default()
             },
         )
@@ -193,11 +278,9 @@ async fn complete_one(
         filled.album = true;
     }
 
-    // 无封面 → 详情拿封面地址 → 下载落缓存（失败记 matched-cover-failed，
-    // folia 同款状态，不算整体失败）。
-    if !track.has_cover {
-        let detail = online::detail(&ctx, source, &id).await.ok();
-        if let Some(cover_url) = detail.as_ref().and_then(|d| d.cover.clone()) {
+    // 无封面 → 下载落缓存（失败不拖垮其余槽位，folia 同款状态）。
+    if slot_enabled(slots, "cover") && !track.has_cover {
+        if let Some(cover_url) = detail.cover.clone() {
             match download_cover(state, &track.id, &cover_url).await {
                 Ok(()) => filled.cover = true,
                 Err(e) => tracing::debug!("补全封面下载失败（不影响其余字段）: {e:?}"),
@@ -206,21 +289,31 @@ async fn complete_one(
     }
 
     // 无歌词（三层都空）→ 导入在线歌词原文。
-    let existing = crate::routes::lyric_doc_for(state, track).await;
-    if existing.lines.is_empty() {
-        let doc = online::lyric(&ctx, source, &id)
-            .await
-            .unwrap_or_else(|_| vmusic_core::LyricDocument::empty());
-        if !doc.lines.is_empty() {
-            let lrc = doc_to_lrc(&doc);
-            vmusic_store::lyrics::import(&state.db, &track.id, &lrc)
+    if slot_enabled(slots, "lyrics") {
+        let existing = crate::routes::lyric_doc_for(state, track).await;
+        if existing.lines.is_empty() {
+            let doc = online::lyric(&ctx, source, candidate_id)
                 .await
-                .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-            filled.lyrics = true;
+                .unwrap_or_else(|_| vmusic_core::LyricDocument::empty());
+            if !doc.lines.is_empty() {
+                let lrc = doc_to_lrc(&doc);
+                vmusic_store::lyrics::import(&state.db, &track.id, &lrc)
+                    .await
+                    .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+                filled.lyrics = true;
+            }
         }
     }
 
-    Ok(("matched".into(), filled))
+    // 用户这次接受了候选：之前若有「不匹配」决定，就此撤销。
+    vmusic_store::no_auto_match::clear(&state.db, &track.id)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+
+    Ok(json!({
+        "status": "applied",
+        "filled": { "album": filled.album, "cover": filled.cover, "lyrics": filled.lyrics },
+    }))
 }
 
 /// 下载在线封面到本地封面缓存（与手动替换封面同一落点：cover_edited 置位，
@@ -250,7 +343,9 @@ async fn download_cover(state: &AppState, track_id: &str, url: &str) -> ApiResul
             _ => None,
         })
         .unwrap_or("image/jpeg");
-    let dir = state.cover_dir();
+    // `save_cover` 自己会接上 `covers/`：这里给缓存根目录，给 `cover_dir()`
+    // 会写进 `covers/covers/`，`GET /tracks/{id}/cover` 就再也找不到这张图。
+    let dir = state.cache_dir();
     let tid = track_id.to_string();
     let data = bytes.to_vec();
     let saved = tokio::task::spawn_blocking(move || {
@@ -270,11 +365,11 @@ async fn download_cover(state: &AppState, track_id: &str, url: &str) -> ApiResul
     Ok(())
 }
 
-/// 批量补全入口（HTTP 与 RPC 共用）：逐曲串行、上游压力可控，单首失败
-/// 记 failed 不拖垮整批。
-pub(crate) async fn complete_tracks(
+/// 候选阶段入口（HTTP 与 RPC 共用）：逐曲串行搜索、上游压力可控，
+/// 单首失败记 failed 不拖垮整批。**不写任何数据。**
+pub(crate) async fn suggest_tracks(
     state: &Arc<AppState>,
-    body: &CompleteRequest,
+    body: &SuggestRequest,
 ) -> ApiResult<Value> {
     if body.track_ids.is_empty() {
         return Err(crate::error::bad_request("track_ids must not be empty"));
@@ -284,30 +379,31 @@ pub(crate) async fn complete_tracks(
             "单批最多 {MAX_BATCH} 首，分批再试"
         )));
     }
-    let source = body
-        .source
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "netease".to_string());
+    let source = resolve_source(&body.source);
 
-    let mut matched = 0usize;
+    // 一次性取出被标记「不匹配」的曲目：这些连候选都不再给。
+    let marked = vmusic_store::no_auto_match::marked_ids(&state.db, &body.track_ids)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))
+        .unwrap_or_default();
+
+    let mut suggested = 0usize;
     let mut no_match = 0usize;
+    let mut skipped = 0usize;
     let mut failed = 0usize;
-    let mut filled_albums = 0usize;
-    let mut filled_covers = 0usize;
-    let mut filled_lyrics = 0usize;
     let mut results: Vec<Value> = Vec::with_capacity(body.track_ids.len());
 
     for id in &body.track_ids {
         if crate::online::split_virtual_id(id).is_some() {
+            skipped += 1;
             results.push(json!({ "track_id": id, "status": "skipped", "reason": "在线曲目无需补全" }));
             continue;
         }
         let track = match vmusic_store::get_track(&state.db, id).await {
             Ok(Some(t)) => t,
             Ok(None) => {
-                results.push(json!({ "track_id": id, "status": "no_match" }));
                 no_match += 1;
+                results.push(json!({ "track_id": id, "status": "no_match" }));
                 continue;
             }
             Err(e) => {
@@ -318,54 +414,110 @@ pub(crate) async fn complete_tracks(
                 continue;
             }
         };
-        match complete_one(state, &track, &source).await {
-            Ok((status, filled)) => {
-                if status == "matched" {
-                    matched += 1;
-                    if filled.album {
-                        filled_albums += 1;
-                    }
-                    if filled.cover {
-                        filled_covers += 1;
-                    }
-                    if filled.lyrics {
-                        filled_lyrics += 1;
-                    }
-                } else {
+        if marked.contains(&track.id) {
+            skipped += 1;
+            results.push(json!({
+                "track_id": id,
+                "title": track.title,
+                "artist": track.artist,
+                "status": "skipped",
+                "reason": "已标记不再自动匹配",
+            }));
+            continue;
+        }
+        match suggest_one(state, &track, &source).await {
+            Ok(candidates) => {
+                let missing = missing_slots(state, &track).await;
+                let nothing_missing = missing["album"] == json!(false)
+                    && missing["cover"] == json!(false)
+                    && missing["lyrics"] == json!(false);
+                let status = if candidates.is_empty() {
                     no_match += 1;
-                }
+                    "no_match"
+                } else if nothing_missing {
+                    // 有候选但没有缺口：给用户看，不必落地。
+                    suggested += 1;
+                    "nothing_to_fill"
+                } else {
+                    suggested += 1;
+                    "match"
+                };
                 results.push(json!({
                     "track_id": id,
+                    "title": track.title,
+                    "artist": track.artist,
+                    "album": track.album,
                     "status": status,
-                    "filled": {
-                        "album": filled.album,
-                        "cover": filled.cover,
-                        "lyrics": filled.lyrics,
-                    },
+                    "missing": missing,
+                    "candidates": candidates,
                 }));
             }
             Err(e) => {
-                tracing::debug!("补全失败 {id}: {e:?}");
+                tracing::debug!("补全候选失败 {id}: {e:?}");
                 failed += 1;
-                results.push(json!({ "track_id": id, "status": "failed" }));
+                results.push(json!({
+                    "track_id": id,
+                    "title": track.title,
+                    "artist": track.artist,
+                    "status": "failed",
+                }));
             }
         }
     }
 
     Ok(json!({
-        "matched": matched,
+        "suggested": suggested,
         "no_match": no_match,
+        "skipped": skipped,
         "failed": failed,
-        "filled_albums": filled_albums,
-        "filled_covers": filled_covers,
-        "filled_lyrics": filled_lyrics,
         "results": results,
     }))
+}
+
+/// 落地阶段入口：单曲单候选。用户点一次才写一次，天然原子。
+pub(crate) async fn apply_choice(
+    state: &Arc<AppState>,
+    body: &ApplyRequest,
+) -> ApiResult<Value> {
+    if crate::online::split_virtual_id(&body.track_id).is_some() {
+        return Err(crate::error::bad_request("在线曲目无需补全"));
+    }
+    let track = vmusic_store::get_track(&state.db, &body.track_id)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?
+        .ok_or_else(|| crate::error::not_found(format!("track {}", body.track_id)))?;
+    let source = resolve_source(&body.source);
+    apply_one(
+        state,
+        &track,
+        &source,
+        body.candidate_id.as_deref(),
+        &body.slots,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 槽位白名单：缺省 = 三个都允许（老调用的语义），显式列表则只认列出的
+    /// 名字——前端传别的字符串不该被当成「允许」。
+    #[test]
+    fn slots_default_to_all_and_unknown_names_are_ignored() {
+        assert!(slot_enabled(&None, "album"));
+        assert!(slot_enabled(&None, "cover"));
+        assert!(slot_enabled(&None, "lyrics"));
+
+        let only_cover = Some(vec!["cover".to_string()]);
+        assert!(slot_enabled(&only_cover, "cover"));
+        assert!(!slot_enabled(&only_cover, "album"));
+        assert!(!slot_enabled(&only_cover, "lyrics"));
+
+        let junk = Some(vec!["everything".to_string()]);
+        assert!(!slot_enabled(&junk, "album"));
+        assert!(!slot_enabled(&junk, "cover"));
+    }
 
     /// 导出的 LRC 必须能被读取端原样还原时间轴：`doc_to_lrc` 曾把
     /// `[总秒:毫秒]` 当 `[分:秒]` 写，2:45.123 被读成 167 分钟。
