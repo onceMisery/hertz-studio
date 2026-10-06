@@ -391,14 +391,17 @@ const ServerTransport = {
   // 第 N-1 张的 URL 作废——往下滚一段，上面的封面就集体变空白。
   // 交给浏览器管图片缓存后，这整类生命周期 bug 一次性消失。
   //
-  // token 走查询参数：浏览器不给 <img> 加请求头，和 /ws 用 ?token= 同一个理由。
-  // 服务端把这条通道严格限制在 GET 上（见 routes.rs 的 require_token）。
+  // 凭据走查询参数：浏览器不给 <img> 加请求头，和 /ws 用查询串是同一个理由。
+  // 优先用短时效票据（见 urlCredential），服务端把这条通道严格限制在 GET 上
+  // （见 routes.rs 的 require_token）。
   coverUrl(id) {
-    return `/v1/tracks/${encodeURIComponent(id)}/cover?token=${encodeURIComponent(TOKEN)}`;
+    return `/v1/tracks/${encodeURIComponent(id)}/cover?${urlCredential()}`;
   },
-  connect(onMessage) {
+  /// `credential` 由调用方先签好（一次性票）。**不给就不带凭据** —— 调用方
+  /// （openSocket）在签不出票时选择重试而不是退回长期 token。
+  connect(onMessage, credential) {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
+    const ws = new WebSocket(`${proto}://${location.host}/ws?${credential || ''}`);
     ws.onopen = () => onConnectionChange(true);
     ws.onclose = () => { onConnectionChange(false); scheduleReconnect(); };
     ws.onerror = () => ws.close();
@@ -811,6 +814,94 @@ const modal = () => window.hertzDialog || window;
 
 let transport = ServerTransport;
 
+// ---------------------------------------------------------------------------
+// 首跳票据：凭据只能进 URL 的那几条通道改用短时效的票
+// ---------------------------------------------------------------------------
+//
+// 涉及 `<img src>` 取封面、WebSocket 握手、`window.open` 下载 m3u —— 浏览器不给
+// 它们加请求头，凭据只能写进查询串。而查询串会进浏览器历史、进中间件的访问日志、
+// 进截图与录屏；长期 token 放在那儿，泄露一次就得换 token（连带踢掉所有客户端）。
+// 票是服务端签发的消耗品（见 crates/hertz-studio/src/ticket.rs），泄露只损失
+// TTL 内的剩余次数，换不到长期凭据、也签不出新票。
+//
+// coverUrl() 是**同步契约**——六个文件、十几处调用点把返回值直接塞进 `<img src>`
+// 或 CSS `url()`，改异步要动一大片。所以票先签好放内存里：开机签一张多用途票，
+// 每次取用时顺手检查寿命、该续签就在后台续。签不出来（老后端 / DBX 形态）
+// 就退回 `?token=`，功能一点不受影响。
+const COVER_TICKET_USES = 4096;
+const COVER_TICKET_TTL_MS = 3600 * 1000;
+let coverTicket = null;          // { value, usableUntil }
+let coverTicketInflight = null;
+
+/// 向服务端要一张票。签发本身要长期 token（走请求头），所以 DBX 形态不必签。
+function issueTicket(uses, ttlMs) {
+  if (window.hertzHost && window.hertzHost.isDbx) return Promise.resolve(null);
+  return transport.post('/v1/auth/ticket', { uses, ttl_ms: ttlMs }).catch(() => null);
+}
+
+/// 续签封面票。并发调用共用同一个在途请求，免得一屏图片打出几十张票。
+function refreshCoverTicket() {
+  if (coverTicketInflight) return coverTicketInflight;
+  coverTicketInflight = issueTicket(COVER_TICKET_USES, COVER_TICKET_TTL_MS)
+    .then((issued) => {
+      if (issued && issued.ticket) {
+        // 只按 80% 寿命记账：到期前就续签，不让图片正好卡在过期那一刻。
+        coverTicket = {
+          value: issued.ticket,
+          usableUntil: Date.now() + Math.max(1000, issued.expires_in_ms * 0.8),
+        };
+      }
+      return issued;
+    })
+    .then((issued) => { coverTicketInflight = null; return issued; });
+  return coverTicketInflight;
+}
+
+/// 给「凭据只能进 URL」的通道拼参数。
+///
+/// 续签期间**继续用旧票**：我们只按 80% 寿命记账，服务端那张票其实还有效，
+/// 拿它顶着比退回长期 token 安全（把长期凭据写进 URL 正是这一步要消掉的东西）。
+/// 只有在「一张票都还没签出来」时才退回 `?token=` —— 开机已 await 过一次签发，
+/// 所以现实中基本走不到；真走到也只是那一次请求。
+function urlCredential() {
+  if (coverTicket) {
+    if (Date.now() >= coverTicket.usableUntil) refreshCoverTicket();
+    return `ticket=${encodeURIComponent(coverTicket.value)}`;
+  }
+  refreshCoverTicket();
+  return `token=${encodeURIComponent(TOKEN)}`;
+}
+
+// 浮层只读钥匙：OBS 会把复制给它的 URL **长期**留在自己配置里，所以那里不能放
+// 长期 token（那是整台服务的钥匙）。服务端另发一把权限收窄的钥匙，只认浮层歌词
+// 与曲目封面两条 GET（见 routes.rs 的 overlay_key_allows）。
+//
+// 开机就取回来缓存住：复制/预览都是同步拼 URL 的交互，等一个网络往返既会拖慢，
+// 又会让 window.open 掉出用户手势窗口而被弹窗拦截。
+let overlayKey = '';
+
+async function loadOverlayKey() {
+  if (window.hertzHost && window.hertzHost.isDbx) return '';
+  const res = await transport.get('/v1/auth/overlay-key').catch(() => null);
+  overlayKey = (res && res.key) || '';
+  return overlayKey;
+}
+
+/// 拿浮层钥匙；缓存里没有就问一次。取不到就抛错 —— **不退回 token**：
+/// 静默给出一把全权凭据，比明说「拿不到」坏得多。
+async function ensureOverlayKey() {
+  if (overlayKey) return overlayKey;
+  if (await loadOverlayKey()) return overlayKey;
+  throw new Error('拿不到浮层只读钥匙');
+}
+
+/// 浮层地址（同步）。`key` 为空时返回空串，调用方据此提示重试。
+function overlayUrlWithKey() {
+  if (!overlayKey) return '';
+  const style = ui.overlayStyle ? ui.overlayStyle.value : 'full';
+  return `${location.origin}/overlay?key=${encodeURIComponent(overlayKey)}&style=${encodeURIComponent(style)}`;
+}
+
 // 其它表现层模块（创意舞台、工坊、背景层）也要读写服务端设置。与其各自再实现
 // 一份带 token 的 fetch，不如把同一个 transport 暴露出去 —— 演示模式下的降级、
 // 超时重试、错误归一化都留在这唯一一份实现里。
@@ -912,9 +1003,20 @@ function scheduleReconnect() {
 }
 
 let socket = null;
-function openSocket() {
+async function openSocket() {
   if (socket && socket.close) socket.close();
-  socket = transport.connect(handleEvent);
+  socket = null;
+  // WebSocket 握手只能走查询串，所以每次连接签一张**一次性**票（重连也重新签）：
+  // 一次握手一张票是天然的匹配，泄露了也用不上第二次。
+  const issued = await issueTicket(1, 60 * 1000);
+  if (!issued || !issued.ticket) {
+    // 签不出票（服务正在重启/已断开）时**绝不拿长期 token 顶** —— 那会把长期凭据
+    // 写进 URL，正是这条通道要消掉的东西。服务真回来了签票自然成功，所以这里
+    // 直接走退避重试即可（与断线重连同一条路）。
+    scheduleReconnect();
+    return;
+  }
+  socket = transport.connect(handleEvent, `ticket=${encodeURIComponent(issued.ticket)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -4654,9 +4756,13 @@ function initPalette() {
       description: '粘进 OBS 浏览器源即可显示歌词', keywords: 'obs overlay 歌词 浮层 直播',
       available: () => !(window.hertzHost && window.hertzHost.isDbx),
       run: async () => {
-        const style = ui.overlayStyle ? ui.overlayStyle.value : 'full';
-        const url = `${location.origin}/overlay?token=${encodeURIComponent(TOKEN)}&style=${encodeURIComponent(style)}`;
-        try { await writeClipboard(url); toast('浮层地址已复制'); } catch (e) { toast(errText('复制失败', e), 'error'); }
+        try {
+          await ensureOverlayKey();
+          const url = overlayUrlWithKey();
+          if (!url) throw new Error('浮层钥匙还没就绪');
+          await writeClipboard(url);
+          toast('浮层地址已复制');
+        } catch (e) { toast(errText('复制失败', e), 'error'); }
       },
     },
     {
@@ -6141,11 +6247,14 @@ async function startApp() {
     if (window.hertzHost && window.hertzHost.isDbx) {
       ui.overlayGroup.hidden = true;
     } else {
-      const overlayUrl = () => `${location.origin}/overlay?token=${encodeURIComponent(TOKEN)}&style=${encodeURIComponent(ui.overlayStyle.value)}`;
+      // 凭据是浮层只读钥匙（长期有效但权限只到歌词与封面），见 overlayUrlWithKey。
       if (ui.overlayCopy) {
         ui.overlayCopy.onclick = async () => {
           try {
-            await writeClipboard(overlayUrl());
+            await ensureOverlayKey();
+            const url = overlayUrlWithKey();
+            if (!url) throw new Error('浮层钥匙还没就绪，请稍后重试');
+            await writeClipboard(url);
             toast('浮层地址已复制，粘进 OBS 浏览器源即可');
           } catch (err) {
             toast(errText('复制失败', err), 'error');
@@ -6153,7 +6262,20 @@ async function startApp() {
         };
       }
       if (ui.overlayOpen) {
-        ui.overlayOpen.onclick = () => window.open(overlayUrl(), '_blank');
+        ui.overlayOpen.onclick = async () => {
+          // 先同步开一个空白页，避免 await 之后掉出用户手势窗口被浏览器拦截。
+          const tab = window.open('', '_blank');
+          try {
+            await ensureOverlayKey();
+            const url = overlayUrlWithKey();
+            if (!url) throw new Error('浮层钥匙还没就绪，请稍后重试');
+            if (tab) tab.location.href = url;
+            else window.open(url, '_blank');
+          } catch (err) {
+            if (tab) tab.close();
+            toast(errText('打不开浮层预览', err), 'error');
+          }
+        };
       }
     }
   }
@@ -6534,8 +6656,9 @@ async function startApp() {
         }
         return;
       }
-      // 走带 token 的链接下载：coverUrl 同款 query 参数通道。
-      window.open(`/v1/playlists/${encoded}/m3u?token=${encodeURIComponent(TOKEN)}`, '_blank');
+      // 走带凭据的链接下载：m3u 同 coverUrl 的「凭据只能进查询串」通道，
+      // 同样优先短时效票。
+      window.open(`/v1/playlists/${encoded}/m3u?${urlCredential()}`, '_blank');
     };
   }
   ui.plDetailBack.onclick = () => closeDetail();
@@ -7049,7 +7172,13 @@ async function startApp() {
   bindMediaSession();
 
   setView('library');
+  // 先把封面票签好再拉列表：coverUrl() 是同步契约，票没到位就只能退回 ?token=，
+  // 那第一屏封面又会把长期凭据带进 URL（正是这一步要消掉的东西）。
+  await refreshCoverTicket();
+  // 浮层钥匙同理：复制/预览要同步拼 URL，先取回来缓存住。
+  await loadOverlayKey();
   await refreshAll();
+  // 健康探测失败（服务断开）时不动界面：连接状态由 WS 那条通道负责展示。
   const health = await transport.get('/v1/health').catch(() => null);
   if (health) {
     ui.setBackend.textContent = `${health.backend} · v${health.version} · 协议 ${health.protocol_version}`;

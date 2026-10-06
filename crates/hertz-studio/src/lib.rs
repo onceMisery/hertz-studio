@@ -32,4 +32,5 @@ pub mod scan;
 pub mod secrets;
 pub mod stage_beats;
 pub mod state;
+pub mod ticket;
 pub mod ws;

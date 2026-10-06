@@ -104,7 +104,11 @@ window.VideoExport = (function () {
 
   function pollLyric() {
     if (isDbx()) return; // 插件形态没有本地 HTTP，歌词层静默缺席
-    fetch('/v1/overlay/lyric?token=' + encodeURIComponent(token()), { cache: 'no-store' })
+    // 这里是 fetch，能给请求头 —— 凭据走 Bearer，不必进查询串。
+    fetch('/v1/overlay/lyric', {
+      cache: 'no-store',
+      headers: { Authorization: 'Bearer ' + token() },
+    })
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
         if (!data) return;

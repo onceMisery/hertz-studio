@@ -3,9 +3,10 @@
 
 //! WebSocket transport for state, spectrum and scan progress.
 //!
-//! Browsers cannot set headers on a WebSocket, so the token travels as a query
-//! parameter. That is acceptable here only because the listener is bound to
-//! the loopback interface; the bound address is asserted at startup.
+//! Browsers cannot set headers on a WebSocket, so the credential travels as a
+//! query parameter. 首选是一次性票据（`?ticket=`，见 `crate::ticket`）：握手本来
+//! 就与「一次连接一张票」天然对应。长期 token（`?token=`）仍然接受，留给尚未
+//! 迁移的调用方。查询串只出现在本机回环上的这次请求里，不落盘。
 
 use std::sync::Arc;
 
@@ -21,6 +22,8 @@ use crate::state::{AppState, WsEvent};
 #[derive(Deserialize)]
 pub struct WsQuery {
     pub token: Option<String>,
+    /// 一次性握手票据（推荐）；与 `token` 二选一。
+    pub ticket: Option<String>,
 }
 
 pub async fn ws_handler(
@@ -28,7 +31,14 @@ pub async fn ws_handler(
     Query(query): Query<WsQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    if query.token.as_deref() != Some(state.token.as_str()) {
+    let long_lived = query.token.as_deref() == Some(state.token.as_str());
+    // 票只在长期 token 没出示时才兑：同时带上两者时不该白耗一张票。
+    let ticketed = !long_lived
+        && query
+            .ticket
+            .as_deref()
+            .is_some_and(|ticket| state.tickets.redeem(ticket));
+    if !(long_lived || ticketed) {
         return unauthorized().into_response();
     }
     ws.on_upgrade(move |socket| handle_socket(socket, state))

@@ -37,6 +37,12 @@ use crate::state::{AppState, PlayTrigger, ScanProgress};
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     // Everything except /v1/health and the UI requires the bearer token.
     let api = Router::new()
+        // 签发首跳票据。本条在鉴权层内（要出示长期 token）；拿到票之后
+        // `<img src>`、`/ws` 这些「URL 里发不出请求头」的通道就可以只用票。
+        .route("/v1/auth/ticket", post(create_ticket))
+        // 取浮层只读钥匙。OBS 那边要把它拼进长期保存的 URL，所以给的不是 token
+        // 而是一把权限收窄的钥匙（见 require_token 里的 overlay_key_allows）。
+        .route("/v1/auth/overlay-key", get(get_overlay_key))
         .route("/v1/state", get(get_state))
         .route("/v1/player/load", post(load))
         .route("/v1/player/play", post(play))
@@ -261,29 +267,111 @@ async fn require_token(
             if request.method() != axum::http::Method::GET {
                 return None;
             }
-            query_token(request.uri().query())
+            query_param(request.uri().query(), "token").map(str::to_string)
         });
 
     match presented {
-        Some(token) if token == state.token => next.run(request).await,
-        _ => unauthorized().into_response(),
+        Some(token) if token == state.token => return next.run(request).await,
+        _ => {}
     }
-}
 
-/// 从查询串里取出 `token`。
-///
-/// 不做 percent-decode：token 是两个 `Uuid::simple()` 拼出来的纯小写十六进制
-/// （见 main.rs 的 load_or_create_token），字符集天然 URL 安全。如果哪天换了
-/// token 生成方式引入保留字符，这里要一起改。
-fn query_token(query: Option<&str>) -> Option<String> {
-    let query = query?;
-    for pair in query.split('&') {
-        let mut kv = pair.splitn(2, '=');
-        if kv.next()? == "token" {
-            return Some(kv.next()?.to_string());
+    // 首跳票据：与 `?token=` 共用「查询串」这条弱信道（同样只认 GET），但票是
+    // 短时效、次数有限的消耗品 —— 泄露一张只剩 TTL 内的剩余次数，既换不到长期
+    // token，也签不出新票。见 crate::ticket 的模块注释。
+    if request.method() == axum::http::Method::GET {
+        if let Some(ticket) = query_param(request.uri().query(), "ticket") {
+            if state.tickets.redeem(ticket) {
+                return next.run(request).await;
+            }
         }
     }
-    None
+
+    // 浮层只读钥匙：长期有效（OBS 会把 URL 存进自己的配置），所以权限比票还窄
+    // —— 只认 GET，且只认浮层歌词与曲目封面两条路径。
+    if request.method() == axum::http::Method::GET {
+        if let Some(key) = query_param(request.uri().query(), "key") {
+            if key == state.overlay_key && overlay_key_allows(request.uri().path()) {
+                return next.run(request).await;
+            }
+        }
+    }
+
+    unauthorized().into_response()
+}
+
+/// 浮层钥匙能走哪些路径。
+///
+/// 只有两条：浮层歌词、曲目封面 —— 正好是 OBS 浮层页要用的全部东西。曲库查询、
+/// 播放控制、设置读写一律不放行：那把钥匙会长期躺在 OBS 的配置文件里，权限必须
+/// 小到「就算被人捡到也只泄露封面图和当前歌词」。
+fn overlay_key_allows(path: &str) -> bool {
+    path == "/v1/overlay/lyric" || (path.starts_with("/v1/tracks/") && path.ends_with("/cover"))
+}
+
+/// 从查询串里取出某个参数的值。
+///
+/// 不做 percent-decode：token 是两个 `Uuid::simple()` 拼出来的纯小写十六进制，
+/// 票也是一个 `Uuid::simple()`（见 ticket.rs），字符集天然 URL 安全。如果哪天
+/// 换了生成方式引入保留字符，这里要一起改。
+fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
+    query?.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then_some(v)
+    })
+}
+
+/// 签发一张首跳票据的请求体。两个字段都可省，超限值会被 ticket.rs 收拢。
+#[derive(Deserialize)]
+pub(crate) struct TicketRequest {
+    /// 期望寿命（毫秒）。不给用 [`crate::ticket::TICKET_TTL`]。
+    pub ttl_ms: Option<u64>,
+    /// 期望可用次数。不给用 [`crate::ticket::TICKET_USES`]（一次性）。
+    pub uses: Option<u32>,
+}
+
+/// 签发票据的共用实现（HTTP 与 RPC 两条门面都调它，避免两份漂移）。
+///
+/// 回 `{ticket, expires_in_ms, uses}`：后两项是**实际生效值**（超限已被收拢），
+/// 客户端据此决定什么时候重新签，而不是自己假设。
+pub(crate) fn issue_ticket(
+    state: &AppState,
+    req: TicketRequest,
+) -> ApiResult<serde_json::Value> {
+    let ttl = req
+        .ttl_ms
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(crate::ticket::TICKET_TTL);
+    let uses = req.uses.unwrap_or(crate::ticket::TICKET_USES);
+    let issued = state.tickets.issue(ttl, uses);
+    Ok(serde_json::json!({
+        "ticket": issued.id,
+        "expires_in_ms": issued.ttl.as_millis() as u64,
+        "uses": issued.uses,
+    }))
+}
+
+async fn create_ticket(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TicketRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(issue_ticket(&state, req)?))
+}
+
+/// 浮层只读钥匙的取用（HTTP 与 RPC 共用，避免两份漂移）。
+pub(crate) fn overlay_key_payload(state: &AppState) -> ApiResult<serde_json::Value> {
+    if state.overlay_key.is_empty() {
+        // 插件形态（stdio）没有 HTTP 通道，也就没有浮层这把钥匙。
+        return Err(internal(
+            "浮层钥匙未配置：当前形态没有本地 HTTP 服务".to_string(),
+        ));
+    }
+    Ok(serde_json::json!({ "key": state.overlay_key }))
+}
+
+async fn get_overlay_key(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(overlay_key_payload(&state)?))
 }
 
 // ---------------------------------------------------------------------------

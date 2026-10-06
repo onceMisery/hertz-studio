@@ -97,6 +97,18 @@ impl From<CoreError> for ApiError {
     fn from(err: CoreError) -> Self {
         let status =
             StatusCode::from_u16(err.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        // 数据库错误的原始文本里带得出失败的语句片段与表/列名（sqlx 的 Display
+        // 会附上它们），属于实现细节：客户端只拿一句可定位的通用说明 + request_id，
+        // 明细连同同一个 request_id 进服务端日志，排障链路不受影响。
+        if let CoreError::Store(vmusic_core::StoreError::Database(detail)) = &err {
+            let api = Self::new(status, err.code(), "数据库操作失败（详情见服务端日志）");
+            tracing::error!(
+                request_id = %api.request_id,
+                detail = %detail,
+                "store error"
+            );
+            return api;
+        }
         Self::new(status, err.code(), err.to_string())
     }
 }
@@ -178,6 +190,32 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["error"]["source"], "qq");
+    }
+
+    /// 数据库错误的原文回显收敛：sqlx 的 Display 会带上失败的语句片段与表/列名，
+    /// 不能顺着响应体漏出去；但 code 与 request_id 必须保留（日志里按同一个
+    /// request_id 能捞到明细）。
+    #[test]
+    fn database_errors_do_not_echo_sql_internals() {
+        let err: CoreError = vmusic_core::StoreError::Database(
+            "error returned from database: SELECT secret FROM creds — no such column: secret".into(),
+        )
+        .into();
+        let api = ApiError::from(err);
+        assert_eq!(api.code, "store_error");
+        assert!(api.source.is_none(), "source 会被序列化给客户端，不能塞明细");
+        assert!(
+            !api.message.contains("SELECT") && !api.message.contains("creds"),
+            "语句片段与表名不能回显：{}",
+            api.message
+        );
+        assert!(!api.request_id.is_empty(), "保留 request_id 才能对上日志");
+
+        // 其它 core 错误照旧带原文——它们本来就是写给用户看的话。
+        let invalid: CoreError = CoreError::Invalid("limit must be positive".into());
+        assert!(ApiError::from(invalid)
+            .message
+            .contains("limit must be positive"));
     }
 
     #[test]

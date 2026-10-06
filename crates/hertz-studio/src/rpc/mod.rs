@@ -204,6 +204,16 @@ impl Rpc {
             // --- 元信息 / 状态 ---
             (Op::Get, ["v1", "health"]) => Ok(Reply::ok(self.health())),
             (Op::Get, ["v1", "state"]) => Ok(Reply::ok(playback::snapshot(state).await)),
+            // 首跳票据签发。DBX 形态暂时用不到它（stdio 传输、没有 URL 通道），
+            // 但两条门面保持一一对应：将来前端无差别调用时不会踩空。
+            (Op::Post, ["v1", "auth", "ticket"]) => {
+                let request: crate::routes::TicketRequest = body_as(body)?;
+                crate::routes::issue_ticket(state, request).map(Reply::ok)
+            }
+            // 浮层只读钥匙：DBX 形态没有 HTTP 通道，这里会如实报错（与 HTTP 同一份）。
+            (Op::Get, ["v1", "auth", "overlay-key"]) => {
+                crate::routes::overlay_key_payload(state).map(Reply::ok)
+            }
 
             // --- 播放控制 ---
             (Op::Post, ["v1", "player", "load"]) => playback::load(state, body).await,

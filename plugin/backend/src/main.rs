@@ -212,7 +212,7 @@ async fn boot_plugin() -> anyhow::Result<hertz_studio::bootstrap::Booted> {
     // stdio 天然可信，没有 HTTP 那一层的 bearer token；`AppState` 要求有值，
     // 所以填一个随机串，永不外泄也永不校验。
     let token = uuid::Uuid::new_v4().to_string();
-    let booted = hertz_studio::bootstrap::boot(data_dir, config, token).await?;
+    let booted = hertz_studio::bootstrap::boot(data_dir, config, token, String::new()).await?;
     tracing::info!(backend = %booted.backend_label, "hertz-studio sidecar 就绪");
     Ok(booted)
 }

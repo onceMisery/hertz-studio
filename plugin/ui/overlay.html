@@ -4,8 +4,10 @@
 <!--
   OBS 歌词浮层页（folia 浮层输出的等价物）。
 
-  用法：在 OBS 里添加「浏览器源」，URL 填
-    http://127.0.0.1:7634/overlay?token=<令牌>&style=<风格>
+  用法：在 OBS 里添加「浏览器源」，URL 用应用设置页「歌词输出」里复制的地址：
+    http://127.0.0.1:7634/overlay?key=<浮层只读钥匙>&style=<风格>
+  （`key` 是权限收窄的只读钥匙，只认浮层歌词与曲目封面两条 GET。老的
+  `?token=<长期令牌>` 链接继续可用，但它权限太大，建议换成 key。）
   风格四种：
     full     全页歌词：完整歌词列表滚动，当前行高亮（默认）
     line     单行大字：屏幕中央只显示当前行
@@ -148,6 +150,12 @@
 (function () {
   var params = new URLSearchParams(location.search);
   var TOKEN = params.get('token') || '';
+  // 凭据只走查询串（OBS 里发不出请求头）。优先用**浮层只读钥匙**（`?key=`）：
+  // 它权限窄得多，只认浮层歌词与曲目封面两条 GET —— 粘进 OBS 之后长期留着也
+  // 不至于把整台服务交出去。老链接里的 `?token=` 继续接受，不做破坏性变更。
+  var CRED = params.get('key')
+    ? 'key=' + encodeURIComponent(params.get('key'))
+    : 'token=' + encodeURIComponent(TOKEN);
   var STYLE = ['full', 'line', 'karaoke', 'minimal'].indexOf(params.get('style')) >= 0
     ? params.get('style') : 'full';
   var SCALE = Math.max(0.4, Math.min(4, parseFloat(params.get('scale')) || 1));
@@ -329,7 +337,7 @@
       if (state.coverFor !== state.trackId) {
         state.coverFor = state.trackId;
         if (cover) {
-          img.src = cover + (cover.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
+          img.src = cover + (cover.indexOf('?') >= 0 ? '&' : '?') + CRED;
           img.classList.remove('hidden'); disc.classList.add('hidden');
         } else {
           img.classList.add('hidden'); disc.classList.remove('hidden');
@@ -365,7 +373,7 @@
 
   async function poll() {
     try {
-      var res = await fetch('/v1/overlay/lyric?token=' + encodeURIComponent(TOKEN), { cache: 'no-store' });
+      var res = await fetch('/v1/overlay/lyric?' + CRED, { cache: 'no-store' });
       if (res.ok) {
         var data = await res.json();
         state.trackId = data.track_id || null;

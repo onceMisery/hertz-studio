@@ -226,9 +226,12 @@ async fn main() -> anyhow::Result<()> {
     // The token is the only thing standing between a local web page and full
     // control of playback, so it is generated once and kept with 0600 perms.
     let token = load_or_create_token(&data_dir).await?;
+    // 浮层那把钥匙权限窄得多（只读浮层与封面），所以可以出现在要粘进 OBS 的
+    // URL 里；token 不行。见 load_or_create_overlay_key 的注释。
+    let overlay_key = load_or_create_overlay_key(&data_dir).await?;
 
     // `booted` 必须活到 main 结束：它持有音频 actor 的线程句柄。
-    let booted = bootstrap::boot(data_dir, boot_config, token.clone()).await?;
+    let booted = bootstrap::boot(data_dir, boot_config, token.clone(), overlay_key).await?;
     let state = booted.state.clone();
     let config = &booted.config;
 
@@ -489,25 +492,40 @@ async fn platform_icon(Path(name): Path<String>) -> axum::response::Response {
 }
 
 async fn load_or_create_token(data_dir: &std::path::Path) -> anyhow::Result<String> {
-    let path = data_dir.join("token");
-    if let Ok(existing) = tokio::fs::read_to_string(&path).await {
+    load_or_create_secret(&data_dir.join("token")).await
+}
+
+/// 浮层只读钥匙：给 OBS 那条 URL 用的凭据。
+///
+/// 为什么不是长期 token：OBS 会把浏览器源的 URL 长期留在自己的配置里，而长期
+/// token 能控制播放、读曲库、改设置 —— 粘出去一次就等于把整台服务交出去。这把
+/// 钥匙的权限被收窄到「GET + 浮层歌词 + 曲目封面」（见 routes.rs 的
+/// `overlay_key_allows`），且**独立于 token**：真泄露了只需删掉这个文件重启，
+/// 不必换 token（换 token 会踢掉所有已连上的客户端）。
+async fn load_or_create_overlay_key(data_dir: &std::path::Path) -> anyhow::Result<String> {
+    load_or_create_secret(&data_dir.join("overlay-key")).await
+}
+
+/// 读一个长期凭据文件，没有就生成一个（两个 `Uuid::simple()` 拼成，256 位）。
+async fn load_or_create_secret(path: &std::path::Path) -> anyhow::Result<String> {
+    if let Ok(existing) = tokio::fs::read_to_string(path).await {
         let existing = existing.trim().to_string();
         if !existing.is_empty() {
             return Ok(existing);
         }
     }
-    let token = format!(
+    let secret = format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     );
-    tokio::fs::write(&path, &token).await?;
+    tokio::fs::write(path, &secret).await?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
     }
-    Ok(token)
+    Ok(secret)
 }
 
 fn init_logging(level: &str, format: &str) {
@@ -573,9 +591,39 @@ fn print_help() {
     );
 }
 
+/// `ip:port`，IPv6 要加方括号（否则 `http://::1:8080/` 不是合法 URL）。
+fn host_port(ip: std::net::IpAddr, port: u16) -> String {
+    if ip.is_ipv6() {
+        format!("[{ip}]:{port}")
+    } else {
+        format!("{ip}:{port}")
+    }
+}
+
+/// 绑到非回环接口时要打的警告；回环返回 None。
+///
+/// 为什么必须提示：这套服务的唯一凭据是一个**长期** token（也存在数据目录的
+/// `token` 文件里），而 `?token=` 只对 GET 开口（`<img src>` 加不了请求头）。
+/// 绑到 0.0.0.0/局域网网卡之后，同一网段里任何能访问到端口的人都读得到曲库、
+/// 播放历史与设置——而用户往往只是随手把 bind 改成 0.0.0.0 图个「别的机器也能开」，
+/// 不该在毫不知情的情况下把整个库交出去。这里不阻止（自托管就是要能这么跑），
+/// 但日志和终端都要有一行明确的提醒。
+fn exposure_warning(ip: std::net::IpAddr, port: u16) -> Option<String> {
+    if ip.is_loopback() {
+        return None;
+    }
+    Some(format!(
+        "警告：服务绑定在 {}，已超出本机回环。\n  \
+         它用一个长期 token 鉴权，同网段/公网内任何人访问到这个端口都能读你的曲库、播放历史与设置。\n  \
+         只在本机用请改用 --bind 127.0.0.1；确实要对外提供访问，请放到反向代理 + TLS + 额外鉴权之后。",
+        host_port(ip, port)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv6Addr};
 
     /// Regression: the placeholder used to be identical to the JS variable
     /// name, so `str::replace` also rewrote the assignment target and the page
@@ -597,5 +645,71 @@ mod tests {
             !rendered.contains("window.tok-123"),
             "the variable name was rewritten"
         );
+    }
+
+    /// 回环绑定不该打扰用户——否则每次本机启动都弹一行「警告」，噪音会把真正
+    /// 需要注意的那条（非回环）淹掉。
+    #[test]
+    fn loopback_binds_do_not_warn() {
+        assert!(exposure_warning(IpAddr::from([127, 0, 0, 1]), 8080).is_none());
+        assert!(exposure_warning(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080).is_none());
+    }
+
+    /// 非回环必须告警，且告警里要带上用户真正需要的两个信息：地址与回环之外的
+    /// 具体后果。
+    #[test]
+    fn exposed_binds_warn_with_the_address() {
+        for ip in [
+            IpAddr::from([0, 0, 0, 0]),
+            IpAddr::from([192, 168, 1, 5]),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        ] {
+            let warning = exposure_warning(ip, 7899).expect("非回环必须告警");
+            assert!(warning.contains("警告"), "{}", warning);
+            assert!(warning.contains("7899"), "告警要带端口：{}", warning);
+            assert!(warning.contains("127.0.0.1"), "要给可操作的替代方案：{}", warning);
+        }
+    }
+
+    /// IPv6 要加方括号，否则打印出来的地址点不开。
+    #[test]
+    fn host_port_brackets_ipv6() {
+        assert_eq!(host_port(IpAddr::from([127, 0, 0, 1]), 8080), "127.0.0.1:8080");
+        assert_eq!(
+            host_port(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080),
+            "[::1]:8080"
+        );
+    }
+
+    /// 相对引用的 JS/CSS 要带指纹；内联数据、页面锚点、外链必须原样不动
+    /// ——给 `data:,` 加个查询串会把空图标弄坏。
+    #[test]
+    fn version_asset_urls_only_touches_relative_js_and_css() {
+        let html = "<link rel=\"icon\" href=\"data:,\">\
+                    <link rel=\"stylesheet\" href=\"style.css\">\
+                    <use href=\"#i-play\">\
+                    <script defer src=\"app.js\"></script>\
+                    <script src=\"https://cdn.example.com/x.js\"></script>";
+        let fp = assets_fingerprint();
+        let expected = format!(
+            "<link rel=\"icon\" href=\"data:,\">\
+             <link rel=\"stylesheet\" href=\"style.css?v={fp}\">\
+             <use href=\"#i-play\">\
+             <script defer src=\"app.js?v={fp}\"></script>\
+             <script src=\"https://cdn.example.com/x.js\"></script>"
+        );
+
+        assert_eq!(fp.len(), 16, "指纹应是 16 位十六进制：{fp}");
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(version_asset_urls(html), expected);
+    }
+
+    /// 指纹必须只依赖内容：同内容两次一致（缓存才有意义），内容一变就不同
+    /// （否则改了前端用户拿不到）。
+    #[test]
+    fn fingerprint_is_content_addressed() {
+        assert_eq!(assets_fingerprint(), assets_fingerprint());
+        assert_ne!(hash_inputs(&["a", "b"]), hash_inputs(&["ab"]));
+        assert_ne!(hash_inputs(&["x"]), hash_inputs(&["y"]));
     }
 }
