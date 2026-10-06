@@ -85,7 +85,10 @@ async function openSettings(page) {
     // 可能还没执行完，下面 waitForFunction(window.Skins) 要干等 —— 实测
     // 偶发 20s 超时，而页面本身完全正常（插桩看过：200 + 49 个 script +
     // window.Skins 最终出现）。load 至少保证所有同步脚本已执行。
-    await page.goto(BASE + '/', { timeout: 20000, waitUntil: 'load' });
+    // 带凭据开首页：`/` 只在出示凭据时才渲染界面并把令牌注进页面（见 main.rs 的
+    // credential_ok）。uiUrl() 走的是 ?token= 这条兼容信道，OBS 之外的调用方
+    // 都还能这么用；取不到令牌时它会抛出可照做的说明。
+    await page.goto(uiUrl(BASE), { timeout: 20000, waitUntil: 'load' });
     await page.waitForFunction(() => window.Skins && window.Theme, null, { timeout: 20000 });
     await openSettings(page);
 
