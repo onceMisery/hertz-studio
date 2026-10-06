@@ -357,15 +357,17 @@ let playerCommandQueue = Promise.resolve();
 /// 抽成函数是为了让 HTTP 与 DBX invoke 两条传输共用同一份语义——
 /// check-player-races.js 断言的正是「stop 不等下一首准备完就到后端」，
 /// 两边各写一遍迟早漂移。`send` 是各传输自己的底层请求函数。
-function serializedPlaybackPost(path, body, send) {
+function serializedPlaybackPost(path, body, send, options) {
   PlaybackIntent.command(path);
-  const post = () => send(path, { method: 'POST', body: JSON.stringify(body || {}) });
+  const post = () => send(path, { ...(options || {}), method: 'POST', body: JSON.stringify(body || {}) });
   if (!/^\/v1\/player\/(play|pause|stop|seek)$/.test(path)) return post();
   const revision = PlaybackIntent.sourceRevision;
   const result = playerCommandQueue.then(() => {
     if (revision !== PlaybackIntent.sourceRevision) throw new DOMException('Playback replaced', 'AbortError');
     return post();
   });
+  // 命令失败由调用方处理（result 返回给它），这里接一下只为压掉
+  // 「unhandled promise rejection」——队列本身不是错误消费点。
   playerCommandQueue = result.catch(() => {});
   return result;
 }
@@ -376,8 +378,8 @@ const ServerTransport = {
   async postRaw(path, blob, contentType) {
     return request(path, { method: 'POST', rawBody: blob, headers: { 'Content-Type': contentType || 'application/octet-stream' } });
   },
-  async post(path, body) {
-    return serializedPlaybackPost(path, body, request);
+  async post(path, body, options) {
+    return serializedPlaybackPost(path, body, request, options);
   },
   async put(path, body) {
     PlaybackIntent.command(path);
@@ -709,7 +711,9 @@ const DbxTransport = {
       headers: { 'Content-Type': contentType || 'application/octet-stream' },
     });
   },
-  async post(path, body) { return serializedPlaybackPost(path, body, dbxRequest); },
+  async post(path, body, options) {
+    return serializedPlaybackPost(path, body, dbxRequest, options);
+  },
   async put(path, body) {
     PlaybackIntent.command(path);
     return dbxRequest(path, { method: 'PUT', body: JSON.stringify(body || {}) });
@@ -1032,7 +1036,7 @@ function handleEvent(msg) {
       if (Stage) Stage.setSpectrum(state.spectrum);
       break;
     case 'scan': onScanProgress(msg); break;
-    case 'library_changed': loadTracks(true); loadPlaylists(); break;
+    case 'library_changed': refreshLibraryInPlace(); loadPlaylists(); break;
     case 'ended': reconcileEnded(); break;
     case 'ui_notice':
       // dock 胶囊点了一下：tab 实例解除最小化。dock 实例自己忽略（它永远是最小化态）。
@@ -1108,6 +1112,37 @@ function digestMs(ms) {
 // ---------------------------------------------------------------------------
 
 let libraryEpoch = 0;
+
+/// 就地刷新已加载的那一窗曲库（扫描完成 / WebDAV 导入 / 批量落地之后的
+/// `library_changed`）。
+///
+/// 旧实现在这里调 `loadTracks(true)`：清空 `state.tracks` 与 `state.rows`、
+/// 清掉列表 innerHTML 再重建——用户滚到第 8 屏，一次后台扫描就把他拽回顶部，
+/// 「加载更多」攒出来的窗口也一起丢掉。`renderLibrary` 本来就是按 id 复用行节点、
+/// 只删不在新列表里的行、必要时才搬位置，所以这里只要求「同一窗口的新数据」。
+async function refreshLibraryInPlace() {
+  // 正在分页加载时交给那一轮：它自己会带上最新数据渲染。
+  if (state.loading) return;
+  const epoch = libraryEpoch;
+  // 保持用户已经攒出来的窗口大小，至少一页。
+  const limit = Math.max(PAGE, state.tracks.length);
+  const artist = state.libFilter.artist ? `&artist=${encodeURIComponent(state.libFilter.artist)}` : '';
+  const album = state.libFilter.album ? `&album=${encodeURIComponent(state.libFilter.album)}` : '';
+  try {
+    const page = await transport.get(
+      `/v1/tracks?q=${encodeURIComponent(state.q)}&sort=${encodeURIComponent(state.sort)}${artist}${album}&limit=${limit}&offset=0`);
+    // 期间用户改了查询/排序/筛选：那条路径自己会整体重画，这里不要插一脚。
+    if (epoch !== libraryEpoch) return;
+    state.total = page.total;
+    state.tracks = page.tracks;
+    state.offset = state.tracks.length;
+    for (const t of page.tracks) state.byId.set(t.id, t);
+    renderLibrary();
+  } catch {
+    // 刷新失败就保留现有列表：这只是后台变化，没必要用 toast 打断用户。
+  }
+}
+
 async function loadTracks(reset) {
   if (state.loading && !reset) return;
   if (reset) libraryEpoch += 1;
@@ -1119,7 +1154,7 @@ async function loadTracks(reset) {
   state.loading = true;
   ui.libSentinel.disabled = true;
   ui.libSentinel.textContent = '正在读取曲库…';
-  if (reset) { state.offset = 0; state.tracks = []; state.rows.clear(); ui.libList.innerHTML = ''; }
+  if (reset) { state.offset = 0; state.tracks = []; state.rows.clear(); ui.libList.innerHTML = ''; activeRowMark = null; }
   try {
     const artist = state.libFilter.artist ? `&artist=${encodeURIComponent(state.libFilter.artist)}` : '';
     const album = state.libFilter.album ? `&album=${encodeURIComponent(state.libFilter.album)}` : '';
@@ -1545,8 +1580,11 @@ async function restoreQueue() {
               // 播放落点（开始播放时自动进入）不跟自动恢复走：那是手动
               // 开始播放的行为，启动恢复不算（与 folia 语义一致）。
               state.entryArmed = false;
+              // 开机路径不弹 toast：用户刚打开页面，失败会被随后的 WS 状态帧
+              // 如实反映（没播起来就是没播起来）。
               transport.post('/v1/player/play', {}).catch(() => {});
             }
+            // 取设置失败就不自动播——等同「用户没开这个开关」，无需提示。
           }).catch(() => {});
         }
       } else if (bootAutoPlayArmed) {
@@ -1566,6 +1604,11 @@ function staleCommand(snap) {
     && snap.playing !== state.expectedPlaying;
 }
 
+// 状态帧里「值没变就别写 DOM」的缓存：曲名标题、进度条时间文本。
+// 状态帧约 50fps，这些字符串一秒之内基本不变，逐帧赋值纯属浪费。
+let documentTitleCache = '';
+let progressLabelCache = '';
+
 function applySnapshot(snap) {
   const previous = state.snapshot.track_id;
   const wasPlaying = state.snapshot.playing === true;
@@ -1580,7 +1623,12 @@ function applySnapshot(snap) {
   // 胶囊上的小标签跟着播放态走：停着的时候还写「正在播放」是撒谎。
   ui.capsuleLabel.textContent = snap.playing ? '正在播放' : '已暂停';
   ui.mode.textContent = state.modeLabel[snap.mode] || snap.mode;
-  document.title = state.current ? `${state.current.title} · hertz-studio` : 'hertz-studio';
+  // 标题只在真的变了才写：这行原先每帧赋一次值，而曲名一整个播放周期都不变。
+  const nextTitle = state.current ? `${state.current.title} · hertz-studio` : 'hertz-studio';
+  if (nextTitle !== documentTitleCache) {
+    documentTitleCache = nextTitle;
+    document.title = nextTitle;
+  }
   renderPlaybackProgress(snap);
   syncVolume(snap.volume);
 
@@ -1643,15 +1691,38 @@ function reconcileEnded() {
   transport.get('/v1/state').then((server) => {
     if (epoch !== endedReconcileEpoch) return;
     applySnapshot(server);
+    // 复核失败就保持上一帧状态：这是一条兜底通道，主通道是 WS 状态帧。
   }).catch(() => {});
 }
 
+/// 上一帧落在「正在播放」上的那行（{id, playing} 或 null）。
+///
+/// 状态帧实况约 50fps，而 `updateRowActiveState` 原先每帧遍历整张 `state.rows`
+/// 并对每行做两次 classList.toggle：一页 200 行就是每秒约 2 万次 DOM 操作，
+/// 只为改「旧 active、新 active」这两行。新渲染出来的行由 `updateTrackRow`
+/// 按当前快照落位（滚动分页后重建行走的正是那条路），所以这里只需维护差值。
+let activeRowMark = null;
+
 function updateRowActiveState(snap) {
-  for (const [id, row] of state.rows) {
-    const active = id === snap.track_id;
-    row.classList.toggle('active', active);
-    row.classList.toggle('playing', active && snap.playing);
+  const id = snap.track_id || null;
+  const playing = snap.playing === true;
+  const prev = activeRowMark;
+  if (prev && prev.id === id && prev.playing === playing) return;
+  if (prev && prev.id !== id) {
+    const row = state.rows.get(prev.id);
+    if (row) {
+      row.classList.remove('active');
+      row.classList.remove('playing');
+    }
   }
+  if (id) {
+    const row = state.rows.get(id);
+    if (row) {
+      row.classList.add('active');
+      row.classList.toggle('playing', playing);
+    }
+  }
+  activeRowMark = id ? { id, playing } : null;
 }
 
 async function loadNowPlaying(id) {
@@ -1912,12 +1983,22 @@ function paintLyricSettings() {
   paintPatternNotes();
 }
 
+// 设置项写失败的统一出口。写设置表都是用户动作的收尾（拨了个开关、改了档位），
+// 失败必须让用户知道：否则开关看着是开的、重开后又变回去，用户只会以为
+// 「这个设置没用」。逐次动作触发、不会像状态轮询那样刷屏，所以直接 toast。
+function persistSettings(patch) {
+  return transport.put('/v1/settings', patch)
+    .catch((err) => toast(errText('设置保存失败', err), 'error'));
+}
+
 async function saveLyricSettings(patch) {
   Object.assign(state.settings, patch);
   paintLyricSettings();
   applyMotionSurfaces();
-  transport.put('/v1/settings', patch).catch(() => {});
+  persistSettings(patch);
   const id = state.current && state.current.id;
+  // 重拉歌词失败不提示：它只是拿服务端最新歌词刷新显示，偏移/过滤已经生效，
+  // 失败时保持当前显示比弹一个 toast 更不打扰。
   if (id && state.snapshot.track_id === id) await refreshLyrics(id, state.current).catch(() => {});
 }
 
@@ -1956,6 +2037,43 @@ function applyMotionSurfaces() {
   else delete document.body.dataset.rm;
 }
 
+// ---------------------------------------------------------------------------
+// 换肤后的视图对账
+//
+// 用户最常见的换肤路径是「在设置页里点皮肤」（皮肤列表就在设置页里），于是
+// 换肤那一刻 state.view 停在 'settings'。各皮肤对设置视图的处理完全不同：
+//
+//   · classic / sheen / workbench / ios —— 设置是中栏的一个普通视图，
+//     setView('settings') 把其它视图全藏掉、只留它；
+//   · liunian / qingfeng —— 把 #view-settings **搬进自己的浮层**
+//     （ln-set-pane / qf-set-pane），并把它的 hidden 置 true
+//     （浮层没开时不该露出来）。
+//
+// 于是「设置页里切皮肤」这一步之后，state.view 仍是 'settings'，而：
+//
+//   · 切到流年/清风 → 设置视图被搬走且隐藏，中栏**一个可见视图都没有**
+//     → 首页整片空白（用户报「首页为空」）；
+//   · 切到 OS 风 → 设置视图还在中栏，于是直接停在设置页
+//     → 用户报「直接进入了设置页面」。
+//
+// 症状一模一样，根因同一处：换肤没有重新对账视图。修法是让「换完肤一定落在
+// 一个能看见东西的视图上」成为**统一**规则，而不是让每个皮肤各自在 mount 里
+// 补一遍 —— 后者必然漏（现在就是漏的）。
+//
+// 落点选 library（首页）而不是「原视图」：设置视图在不同皮肤里的物理位置
+// 完全不同（浮层 / 中栏），跨皮肤保持同一个视图号没有意义；而换肤后回到首页
+// 也正是用户期待的动作 —— 他刚换完皮，立刻要看到新皮肤长什么样。
+//
+// 收尾动作放这里而不是「指望每条换肤调用路径都记得调」：换肤入口有设置页
+// 列表、顶栏胶囊、清风左栏等多条，漏一条就复现。
+//
+// 无论原本在哪个视图，换完一律落到首页并重跑 setView：它既是落点，也是把
+// 换肤期间被皮肤改动过的 hidden 统一对回去的唯一入口（跑 setView 而不直接
+// 改 hidden，是为了让曲库/在线/队列的进入钩子照常跑一遍）。
+function onSkinChangedForViews() {
+  setView('library');
+}
+
 function applyNavVisibility() {
   let hidCurrent = false;
   for (const [view, uiKey, settingKey] of NAV_TOGGLE_VIEWS) {
@@ -1971,6 +2089,7 @@ function applyNavVisibility() {
 }
 
 async function refreshLyrics(id, track) {
+  // 拉不到就是「这首没有歌词」：按无歌词处理，不弹提示（切歌时高频发生）。
   const doc = await (track.source && track.onlineId
     ? window.Online.loadLyricDoc(track)
     : transport.get(`/v1/tracks/${id}/lyrics`).catch(() => null));
@@ -2140,7 +2259,7 @@ function setStageIdleHide(on, persist) {
   syncStageIdle();
   if (persist) {
     markSettingsDirty();
-    transport.put('/v1/settings', { stage_idle_hide: want }).catch(() => {});
+    persistSettings({ stage_idle_hide: want });
   }
 }
 
@@ -2154,6 +2273,9 @@ function prefersReducedMotion() {
 
 const spectrumCtx = ui.spectrum.getContext('2d');
 let shapePending = true;
+// 渐变对象与画布尺寸绑定，缓存复用（尺寸变了才重建）。
+let spectrumGradient = null;
+let spectrumGradientKey = '';
 
 function drawSpectrum() {
   const canvas = ui.spectrum;
@@ -2165,19 +2287,29 @@ function drawSpectrum() {
   const bands = state.spectrum.length || 64;
   const gap = 2;
   const bw = Math.max(1, w / bands - gap);
-  const grad = ctx.createLinearGradient(0, h, 0, 0);
-  grad.addColorStop(0, '#1d9e75');
-  grad.addColorStop(1, '#7f77dd');
+  // 渐变对象跟画布尺寸绑定，createLinearGradient 每帧新建纯属浪费；
+  // 首帧之后按 CSS 尺寸重建画布时尺寸会变，所以用尺寸当缓存键。
+  const gradKey = `${w}x${h}`;
+  if (!spectrumGradient || spectrumGradientKey !== gradKey) {
+    spectrumGradient = ctx.createLinearGradient(0, h, 0, 0);
+    spectrumGradient.addColorStop(0, '#1d9e75');
+    spectrumGradient.addColorStop(1, '#7f77dd');
+    spectrumGradientKey = gradKey;
+  }
 
+  // 两趟画：先把所有柱画完（fillStyle 只设一次），再统一画峰值帽。
+  // 逐柱交替切 fillStyle 会让每帧多出上百次状态切换。
+  ctx.fillStyle = spectrumGradient;
   for (let i = 0; i < bands; i += 1) {
     const v = Math.max(0, Math.min(1, state.spectrum[i] || 0));
     // 峰值帽：缓慢回落，让静止段落也有"呼吸"而不是死条的柱子。
     state.peaks[i] = Math.max(state.peaks[i] * 0.94, v);
     const bh = Math.max(2, v * h);
-    const ph = Math.max(2, state.peaks[i] * h);
-    ctx.fillStyle = grad;
     ctx.fillRect(i * (bw + gap), h - bh, bw, bh);
-    ctx.fillStyle = 'rgba(255,255,255,0.42)';
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.42)';
+  for (let i = 0; i < bands; i += 1) {
+    const ph = Math.max(2, state.peaks[i] * h);
     ctx.fillRect(i * (bw + gap), h - ph - 2, bw, 2);
   }
   // 首帧之后按 CSS 尺寸重建画布，避免在大屏上被拉伸成糊图。
@@ -2259,6 +2391,8 @@ async function resolveQueueMissingMeta() {
         if (window.Online) window.Online.remember(id, meta);
         state.byId.set(id, meta);
       } else {
+        // 本地曲查不到（删了/还没扫到）就保持占位：恢复队列是批量过程，
+        // 逐条弹 toast 只会刷屏。
         const t = await transport.get(`/v1/tracks/${id}`).catch(() => null);
         if (t) state.byId.set(id, t);
       }
@@ -3706,6 +3840,7 @@ async function loadSettings() {
     syncRenderModeUi();
   }
   // 播放模式在服务端有状态，但进程重启后要恢复成上次的选择。
+  // 失败不提示：这只是把上次的选择补回后端，当前的播放态不受影响。
   if (state.settings.play_mode && state.settings.play_mode !== state.snapshot.mode) {
     transport.post('/v1/player/mode', { mode: state.settings.play_mode }).catch(() => {});
   }
@@ -3910,6 +4045,7 @@ async function commitRenderMode(next) {
     return;
   }
   // 用户主动改设置就是把生效模式改成了他选的那个，降级记录随之作废。
+  // 清记录失败无碍：它只是给设置页看的历史备注。
   transport.put('/v1/settings', { render_mode_effective: null }).catch(() => {});
   showWarn(mode === 'enhanced' ? 'saved' : null);
   if (mode !== 'enhanced') toast('已切回标准渲染，重新加载后生效');
@@ -4019,6 +4155,7 @@ function refreshAll() {
   loadPlaylists();
   loadSettings();
   loadDevices();
+  // 首帧快照失败不提示：WS 连上后会推一份完整状态，这里只是让界面早点有内容。
   transport.get('/v1/state').then((snap) => { applySnapshot(snap); restoreQueue(); }).catch(() => {});
 }
 
@@ -4332,6 +4469,8 @@ function bindMediaSession() {
     seekbackward: (d) => seekRelative(-(d.seekOffset || 10)),
   };
   for (const [name, fn] of Object.entries(handlers)) {
+    // 内层 .catch 吞的是「系统媒体键触发的动作没成功」（比如没有当前曲目时
+    // 按下一首）：这类失败不该弹到界面上，媒体键本来就没有可报错的落点。
     try { navigator.mediaSession.setActionHandler(name, (e) => Promise.resolve(fn(e || {})).catch(() => {})); } catch { /* 不支持的动作 */ }
   }
 }
@@ -4407,15 +4546,43 @@ function setVolumeFromInput() {
   return volumeRequest;
 }
 
+/// 静音/取消静音：0 ↔ 上一个非零音量。`announce` 为真时给一次 toast——快捷键与
+/// 命令面板执行后需要即时反馈；surface 里按钮文案自己会变，不必再弹一层。
+function toggleMute(announce) {
+  const v = Number(ui.volume.value) > 0 ? 0 : unmutedVolume;
+  ui.volume.value = String(v);
+  setVolumeFromInput();
+  if (announce) toast(v ? '已取消静音' : '已静音');
+  return v;
+}
+
 function playbackDuration(snap) {
   return Math.max(0, Number(snap.duration_ms)
     || (state.current && state.current.id === snap.track_id && Number(state.current.duration_ms)) || 0);
 }
 
+// 进度条重绘门控：状态帧 ~50fps，而滑块与时间文字按 ~10fps 更新肉眼看不出
+// 差别（滑块每步约 0.5%）。拖拽预览与 seek 手势期间一律不节流——那是用户
+// 直接操作，必须跟手；换曲/时长变化也立即重绘，避免状态帧门控拖慢一首歌的
+// 起始画面。
+const PROGRESS_PAINT_MS = 100;
+let progressPaintedAt = 0;
+let progressTrackCache = null;
+let progressDurationCache = -1;
+
 function renderPlaybackProgress(snap, preview) {
   const duration = playbackDuration(snap);
   const position = Math.max(0, Math.min(duration, preview == null ? snap.position_ms || 0 : preview));
   const ratio = duration > 0 ? position / duration : 0;
+  const interactive = preview != null || state.seeking;
+  const now = performance.now();
+  const forced = interactive
+    || snap.track_id !== progressTrackCache
+    || duration !== progressDurationCache;
+  if (!forced && now - progressPaintedAt < PROGRESS_PAINT_MS) return;
+  progressPaintedAt = now;
+  progressTrackCache = snap.track_id || null;
+  progressDurationCache = duration;
   [ui.progress, np.bar].forEach((range) => {
     if (!range) return;
     range.disabled = !snap.track_id || duration <= 0;
@@ -4424,8 +4591,12 @@ function renderPlaybackProgress(snap, preview) {
     range.setAttribute('aria-valuetext', `${fmt(position)} / ${fmt(duration)}`);
   });
   if (state.seeking && preview == null) return;
-  ui.barTime.textContent = `${fmt(position)} / ${fmt(duration)}`;
-  if (np.time) np.time.textContent = ui.barTime.textContent;
+  const label = `${fmt(position)} / ${fmt(duration)}`;
+  if (label !== progressLabelCache) {
+    progressLabelCache = label;
+    ui.barTime.textContent = label;
+    if (np.time) np.time.textContent = label;
+  }
   ui.progressGhost.style.width = `${(ratio * 100).toFixed(2)}%`;
 }
 
@@ -4654,6 +4825,126 @@ function initPalette() {
   const P = window.Palette;
   P.registerQueueBatch(paletteQueueBatch);
 
+  // --- 内联 surface（folia 的 inline surface）：主区常驻、Esc 回命令列表 ---
+
+  P.registerSurface({
+    id: 'volume',
+    title: '音量',
+    hint: '←→ / ↑↓ 调整 · M 静音 · Esc 返回命令列表',
+    render(host) {
+      host.innerHTML = `
+        <div class="palette-surface-head">
+          <span class="palette-surface-title"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg>音量</span>
+          <span class="palette-surface-value" aria-live="polite">0%</span>
+        </div>
+        <div class="palette-surface-body">
+          <input class="ps-range" type="range" min="0" max="100" step="1" aria-label="音量" data-autofocus>
+          <div class="ps-row">
+            <button type="button" class="ps-btn ps-mute">静音</button>
+            <span class="palette-surface-hint"></span>
+          </div>
+        </div>`;
+      const range = host.querySelector('.ps-range');
+      const readout = host.querySelector('.palette-surface-value');
+      const muteBtn = host.querySelector('.ps-mute');
+      const note = host.querySelector('.palette-surface-hint');
+      const paint = () => {
+        const pct = Math.round(Number(ui.volume.value) || 0);
+        range.value = String(pct);
+        range.setAttribute('aria-valuetext', `${pct}%`);
+        readout.textContent = `${pct}%`;
+        muteBtn.textContent = pct > 0 ? '静音' : '取消静音';
+        muteBtn.setAttribute('aria-pressed', String(pct === 0));
+        note.textContent = pct > 0 ? `取消静音后回到 ${unmutedVolume}%` : '当前静音';
+      };
+      // 拖动是 input 事件、频率高；写 ui.volume 让 setVolumeFromInput 的合并提交
+      // 照旧生效（同一时刻只挂一个在途请求）。
+      range.addEventListener('input', () => {
+        ui.volume.value = range.value;
+        setVolumeFromInput();
+        paint();
+      });
+      muteBtn.addEventListener('click', () => { toggleMute(false); paint(); });
+      range.addEventListener('keydown', (e) => {
+        if (e.key === 'm' || e.key === 'M') { e.preventDefault(); toggleMute(false); paint(); }
+      });
+      // 服务端状态帧会持续回写 ui.volume（别处改了音量也要跟上）；定时对齐一次。
+      const tick = setInterval(paint, 500);
+      paint();
+      return () => clearInterval(tick);
+    },
+  });
+
+  P.registerSurface({
+    id: 'sleep',
+    title: '睡眠定时',
+    hint: 'Tab 切换档位 / 输入分钟数 · Enter 确认 · Esc 返回命令列表',
+    render(host) {
+      host.innerHTML = `
+        <div class="palette-surface-head">
+          <span class="palette-surface-title"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-timer"/></svg>睡眠定时</span>
+          <span class="palette-surface-value" aria-live="polite"></span>
+        </div>
+        <div class="palette-surface-body">
+          <div class="ps-row ps-presets"></div>
+          <div class="ps-row">
+            <input class="ps-num" type="number" min="1" max="1440" step="1" inputmode="numeric"
+                   aria-label="自定义分钟数" data-autofocus>
+            <span class="palette-surface-hint">分钟后暂停播放</span>
+            <button type="button" class="ps-btn ps-arm">开始</button>
+            <button type="button" class="ps-btn ps-cancel">取消定时</button>
+          </div>
+          <div class="palette-surface-hint ps-note"></div>
+        </div>`;
+      const readout = host.querySelector('.palette-surface-value');
+      const presetsRow = host.querySelector('.ps-presets');
+      const num = host.querySelector('.ps-num');
+      const note = host.querySelector('.ps-note');
+      const cancel = host.querySelector('.ps-cancel');
+      num.value = String(sleepPresetMinutes());
+      const presets = [15, 30, 45, 60, 90].map((m) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ps-btn ps-preset';
+        btn.textContent = `${m} 分钟`;
+        btn.addEventListener('click', () => {
+          num.value = String(m);
+          armSleepTimer(m);
+          paint();
+        });
+        presetsRow.appendChild(btn);
+        return { m, btn };
+      });
+      const paint = () => {
+        const active = sleepState.deadline > 0;
+        const remaining = sleepRemainingMs();
+        readout.textContent = active ? sleepLabel(remaining) : '未启用';
+        const preset = sleepPresetMinutes();
+        presets.forEach(({ m, btn }) => {
+          btn.classList.toggle('is-active', !active && m === preset);
+          btn.setAttribute('aria-pressed', String(!active && m === preset));
+        });
+        cancel.disabled = !active;
+        note.textContent = active
+          ? `将在 ${sleepLabel(remaining)} 后暂停播放`
+          : '选择档位或填入分钟数后点「开始」';
+      };
+      host.querySelector('.ps-arm').addEventListener('click', () => {
+        const m = Number(num.value);
+        if (!Number.isFinite(m) || m < 1 || m > 1440) {
+          toast('请输入 1–1440 之间的分钟数', 'error');
+          return;
+        }
+        armSleepTimer(Math.round(m));
+        paint();
+      });
+      cancel.addEventListener('click', () => { clearSleepTimer(); paint(); });
+      const tick = setInterval(paint, 500);
+      paint();
+      return () => clearInterval(tick);
+    },
+  });
+
   const cmds = [
     // --- 播放 ---
     { id: 'play-toggle', group: '播放', title: '播放 / 暂停', keywords: 'play pause 播放 暂停', run: () => togglePlay() },
@@ -4668,17 +4959,19 @@ function initPalette() {
       run: () => {
         const order = ['repeat', 'repeat_one', 'shuffle'];
         const next = order[(order.indexOf(state.snapshot.mode) + 1) % order.length];
-        transport.post('/v1/player/mode', { mode: next }).catch(() => {});
+        transport.post('/v1/player/mode', { mode: next })
+          .catch((err) => toast(errText('切换播放模式失败', err), 'error'));
       },
     },
     {
       id: 'play-mute', group: '播放', title: '静音 / 取消静音', keywords: 'mute volume 静音 音量',
-      run: () => {
-        const v = Number(ui.volume.value) > 0 ? 0 : unmutedVolume;
-        ui.volume.value = String(v);
-        setVolumeFromInput();
-        toast(v ? '已取消静音' : '已静音');
-      },
+      run: () => toggleMute(true),
+    },
+    {
+      id: 'play-volume-surface', group: '播放', title: '音量调节…',
+      description: '滑杆 + 静音切换，松开即生效',
+      keywords: 'volume slider 音量 滑杆 大小声 静音',
+      surface: 'volume',
     },
 
     // --- 视图 ---
@@ -4722,6 +5015,12 @@ function initPalette() {
       run: () => armSleepTimer(m),
     })),
     { id: 'sleep-cancel', group: '睡眠定时', title: '取消睡眠定时', keywords: 'sleep cancel 取消', run: () => clearSleepTimer() },
+    {
+      id: 'sleep-surface', group: '睡眠定时', title: '睡眠定时…',
+      description: '预设档位 / 自定义分钟数，并显示剩余倒计时',
+      keywords: 'sleep timer 睡眠 定时 倒计时 剩余 自定义',
+      surface: 'sleep',
+    },
 
     // --- 外观 ---
     ...(window.Theme && Theme.list ? Theme.list().map((t) => ({
@@ -4772,7 +5071,7 @@ function initPalette() {
         const next = state.settings.scrobble_enabled === false;
         state.settings.scrobble_enabled = next;
         if (ui.setScrobble) ui.setScrobble.checked = next;
-        await transport.put('/v1/settings', { scrobble_enabled: next }).catch(() => {});
+        await persistSettings({ scrobble_enabled: next });
         toast(next ? '听歌打卡已开启' : '听歌打卡已关闭');
       },
     },
@@ -4783,7 +5082,7 @@ function initPalette() {
         const next = state.settings.online_auto_relay === false;
         state.settings.online_auto_relay = next;
         if (ui.setRelay) ui.setRelay.checked = next;
-        await transport.put('/v1/settings', { online_auto_relay: next }).catch(() => {});
+        await persistSettings({ online_auto_relay: next });
         toast(next ? '曲源自动接力已开启' : '曲源自动接力已关闭');
       },
     },
@@ -4834,13 +5133,7 @@ function bindShortcuts() {
       case 'ArrowLeft': e.preventDefault(); if (e.shiftKey) post('/v1/player/previous'); else seekRelative(-5); break;
       case 'ArrowUp': e.preventDefault(); ui.volume.value = String(Math.min(100, Number(ui.volume.value) + 5)); setVolumeFromInput(); break;
       case 'ArrowDown': e.preventDefault(); ui.volume.value = String(Math.max(0, Number(ui.volume.value) - 5)); setVolumeFromInput(); break;
-      case 'm': case 'M': {
-        const v = Number(ui.volume.value) > 0 ? 0 : unmutedVolume;
-        ui.volume.value = String(v);
-        setVolumeFromInput();
-        toast(v ? '已取消静音' : '已静音');
-        break;
-      }
+      case 'm': case 'M': toggleMute(true); break;
       case '1': setView('library'); break;
       case '2': setView('playlists'); break;
       case '3': setView('queue'); break;
@@ -4924,6 +5217,22 @@ function initQingfengBridge() {
       playQueueIndex(d.index);
     } else if (d.action === 'play-step') {
       playQueueStep(d.delta);
+    } else if (d.action === 'step-track') {
+      // 「上一首 / 下一首」= 播放队列里前后各一首，与**正在放的那首**相邻，
+      // 不是墙上那一列的前后两项。
+      //
+      // 两者的差别在墙开着的时候最明显：展开卡是 focusPoster 聚焦的那张，
+      // 用户完全可能停在第 3 张上（还没点播）就按了「下一首」，期望是
+      // 播放队列往前走一格。按 activate+delta 走会拿墙上的第 3 项去
+      // queueSnapshot 里 findIndex —— 而队列里根本没有这一项（曲库 tab 的墙
+      // 序号与队列下标毫无关系），findIndex 返 -1，落到 `delta > 0 ? 0 : …`
+      // 那个兜底，于是**永远停在队列第一首**：听感就是「按了没反应」。
+      // 用户实测正是这个现象 —— 歌点得开、进度在走、唯独上/下一曲不动。
+      playQueueStep(d.delta);
+    } else if (d.action === 'toggle-play') {
+      // 左下角浮条上的播放/暂停。复用业务既有的 togglePlay —— 它带
+      // 「没在放任何东西时先起播当前选中项」的回落，皮肤自己拼 post 会丢。
+      togglePlay();
     } else if (d.action === 'seek') {
       // 复用 seekTo：它带了 epoch 竞态保护、时长夹取与失败提示，
       // 自己拼一条 post 会把这三样都丢掉。
@@ -5415,57 +5724,92 @@ function initBarAutohide() {
   if (barRight) barRight.appendChild(toggleBtn);
 
   function persist() {
-    try { localStorage.setItem(STORE_KEY, pinned ? '1' : '0'); } catch (e) { /* ignore */ }
+    // 隐私模式 / 配额满都会抛：这只影响「本机记住的折叠态」，不影响功能。
+    try { localStorage.setItem(STORE_KEY, pinned ? '1' : '0'); } catch (e) { /* 见上 */ }
   }
 
-  // 下滑 → 收起（display:none，空间让给主内容）
+  // 收起 / 展开的**唯一权威是 wantVisible**，动画只是它的一层表现。
+  //
+  // 原来的写法把「正在滑动」当成了拒绝新请求的理由（hideBar 的 `|| sliding`
+  // 早退、showBar 的 `!classList.contains('is-hidden')` 早退），于是动画途中
+  // 改变主意的那一次请求被**静默丢弃**，而兜底 finishHide 照样在 600ms 后
+  // 把 is-hidden 补上：用户想要「显示」，拿到的是「永久消失」。
+  // 实测（快速点两下折叠按钮）稳定复现：bar 上有 is-hidden 而 body.bar-hidden
+  // 不存在 —— 状态认为它该显示，DOM 认为它该收起，两边永久对不上，
+  // 底部热区之外没有任何路径能把它唤回来。
+  //
+  // 所以两条铁律：
+  //   1. 任何时刻 wantVisible 都是最新的期望值，动画结束按它落定，
+  //      而不是按发起这次动画时的意图；
+  //   2. 每次动画领一个世代号，旧世代的 transitionend / 兜底 setTimeout
+  //      一律不认账 —— 否则「收起中改主意要显示」这条路上，
+  //      收起那次的 600ms 兜底会在展开动画播到一半时把行内样式清掉。
+  let wantVisible = true;
+  let slideGen = 0;
+
+  function clearInline() {
+    bar.style.transition = '';
+    bar.style.transform = '';
+    bar.style.opacity = '';
+  }
+
+  // 一次滑动结束：只认当前世代，且按**当前**的 wantVisible 落定。
+  function finishSlide(gen) {
+    if (gen !== slideGen) return;
+    sliding = false;
+    bar.classList.toggle('is-hidden', !wantVisible);
+    clearInline();
+  }
+
+  // 收起：下滑 → display:none，空间让给主内容
   function hideBar() {
-    if (bar.classList.contains('is-hidden') || sliding) return;
     sliding = true;
+    const gen = ++slideGen;
     bar.style.transition = 'transform 0.32s var(--ease-out), opacity 0.25s ease';
     bar.style.transform = 'translateY(calc(100% + 20px))';
     bar.style.opacity = '0';
     bar.addEventListener('transitionend', function onEnd(ev) {
       if (ev.target !== bar) return;
       bar.removeEventListener('transitionend', onEnd);
-      finishHide();
+      finishSlide(gen);
     });
     // 保底：个别环境 transitionend 不可靠时不卡在半空中
-    setTimeout(finishHide, 600);
-  }
-  function finishHide() {
-    if (!sliding) return;
-    sliding = false;
-    bar.classList.add('is-hidden');
-    bar.style.transition = '';
-    bar.style.transform = '';
-    bar.style.opacity = '';
+    setTimeout(() => finishSlide(gen), 600);
   }
 
   // 展开（先离屏布局，再上滑，避免可见的重排跳变）
   function showBar() {
-    if (!bar.classList.contains('is-hidden')) return;
+    sliding = true;
+    const gen = ++slideGen;
     bar.classList.remove('is-hidden');
+    bar.style.transition = '';
     bar.style.transform = 'translateY(calc(100% + 20px))';
     bar.style.opacity = '0';
     void bar.offsetHeight;
     requestAnimationFrame(() => {
+      if (gen !== slideGen) return;
       bar.style.transition = 'transform 0.32s var(--ease-out), opacity 0.3s ease';
       bar.style.transform = '';
       bar.style.opacity = '';
-      setTimeout(() => {
-        bar.style.transition = '';
-        bar.style.transform = '';
-        bar.style.opacity = '';
-      }, 360);
+      setTimeout(() => finishSlide(gen), 360);
     });
   }
 
   function sync() {
     const visible = peek || (pinned && !idle);
+    wantVisible = visible;
     document.body.classList.toggle('bar-hidden', !visible);
     toggleBtn.setAttribute('aria-pressed', String(!visible));
     toggleBtn.title = visible ? '隐藏播放栏' : '显示播放栏';
+    // 已经落到目标态且不在动画中：无事可做。
+    if (!sliding && visible === !bar.classList.contains('is-hidden')) return;
+    // 收起动画途中改主意要显示：先让收起这次动画干净收尾（世代号作废它的
+    // 兜底），再立刻展开。不这么做的话播放条会先滑出视口、再原地跳回来。
+    if (sliding) {
+      slideGen += 1;
+      sliding = false;
+      clearInline();
+    }
     if (visible) showBar();
     else hideBar();
   }
@@ -5619,6 +5963,7 @@ function openNowPlaying() {
   if (state.current) {
     syncNpTrack(state.current, Stage && Stage.coverUrl());
     // 打开时重拉一次歌词：导入/偏移可能在别的会话改过，徽标要跟服务端对齐。
+    // 失败保持现有歌词，不打扰。
     refreshLyrics(state.current.id, state.current).catch(() => {});
   }
 }
@@ -5710,6 +6055,7 @@ function fitFloatingWindowToCapsule() {
   if (!floating || !floating.setSize) return;
   const r = ui.capsule.getBoundingClientRect();
   if (r.width <= 0 || r.height <= 0) return;
+  // 改不了窗口尺寸不提示：这是纯观感补偿（窗口里留白多一点），不影响功能。
   floating.setSize(Math.ceil(r.width), Math.ceil(r.height)).catch(() => {});
 }
 
@@ -5970,7 +6316,7 @@ async function startApp() {
     const next = order[(order.indexOf(state.snapshot.mode) + 1) % order.length];
     // 播放模式写服务端 settings 而不是 localStorage，换浏览器也能保持一致。
     transport.post('/v1/player/mode', { mode: next })
-      .then(() => transport.put('/v1/settings', { play_mode: next }).catch(() => {}))
+      .then(() => persistSettings({ play_mode: next }))
       .catch((err) => toast(errText('切换播放模式失败', err), 'error'));
   };
 
@@ -6748,30 +7094,31 @@ async function startApp() {
     };
   }
 
-  ui.setDevice.onchange = () => transport.post('/v1/devices/select', { id: ui.setDevice.value }).catch(() => {});
+  ui.setDevice.onchange = () => transport.post('/v1/devices/select', { id: ui.setDevice.value })
+    .catch((err) => toast(errText('切换输出设备失败', err), 'error'));
   initRenderMode();
 
   ui.setDensity.onchange = () => {
     markSettingsDirty();
     state.settings.ui_density = ui.setDensity.value;
     document.body.dataset.density = ui.setDensity.value;
-    transport.put('/v1/settings', { ui_density: ui.setDensity.value }).catch(() => {});
+    persistSettings({ ui_density: ui.setDensity.value });
   };
   ui.setMotion.onchange = () => {
     markSettingsDirty();
     state.settings.reduce_motion = ui.setMotion.checked;
     document.body.classList.toggle('reduce-motion', ui.setMotion.checked);
     if (Stage) Stage.setReducedMotion(ui.setMotion.checked);
-    transport.put('/v1/settings', { reduce_motion: ui.setMotion.checked }).catch(() => {});
+    persistSettings({ reduce_motion: ui.setMotion.checked });
   };
   // 播放行为偏好：写服务端设置表（通用 KV），启动时随 GET /v1/settings 回来。
   ui.setQueueAdd.onchange = () => {
     state.settings.queue_add_behavior = ui.setQueueAdd.value;
-    transport.put('/v1/settings', { queue_add_behavior: ui.setQueueAdd.value }).catch(() => {});
+    persistSettings({ queue_add_behavior: ui.setQueueAdd.value });
   };
   ui.setPlaybackEntry.onchange = () => {
     state.settings.playback_entry = ui.setPlaybackEntry.value;
-    transport.put('/v1/settings', { playback_entry: ui.setPlaybackEntry.value }).catch(() => {});
+    persistSettings({ playback_entry: ui.setPlaybackEntry.value });
   };
   // 启动自动播放（folia 的 autoPlayOnLaunch）：会话恢复的收尾开关，服务端
   // 设置表持久化，restoreQueue 里按它决定要不要自动按下播放键。
@@ -6779,7 +7126,7 @@ async function startApp() {
     ui.setAutoPlay.checked = state.settings.startup_auto_play === true;
     ui.setAutoPlay.onchange = () => {
       state.settings.startup_auto_play = ui.setAutoPlay.checked;
-      transport.put('/v1/settings', { startup_auto_play: ui.setAutoPlay.checked }).catch(() => {});
+      persistSettings({ startup_auto_play: ui.setAutoPlay.checked });
     };
   }
   // 网易云听歌打卡：后端在每次结算时读设置（缺省开），这里只写开关。
@@ -6787,7 +7134,7 @@ async function startApp() {
     ui.setScrobble.checked = state.settings.scrobble_enabled !== false;
     ui.setScrobble.onchange = () => {
       state.settings.scrobble_enabled = ui.setScrobble.checked;
-      transport.put('/v1/settings', { scrobble_enabled: ui.setScrobble.checked }).catch(() => {});
+      persistSettings({ scrobble_enabled: ui.setScrobble.checked });
     };
   }
   // 曲源失效自动接力：后端每次接力前读设置（缺省开），这里只写开关。
@@ -6795,7 +7142,7 @@ async function startApp() {
     ui.setRelay.checked = state.settings.online_auto_relay !== false;
     ui.setRelay.onchange = () => {
       state.settings.online_auto_relay = ui.setRelay.checked;
-      transport.put('/v1/settings', { online_auto_relay: ui.setRelay.checked }).catch(() => {});
+      persistSettings({ online_auto_relay: ui.setRelay.checked });
     };
   }
   // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。
@@ -6811,7 +7158,7 @@ async function startApp() {
     if (!ui[uiKey]) continue;
     ui[uiKey].onchange = () => {
       state.settings[settingKey] = ui[uiKey].checked;
-      transport.put('/v1/settings', { [settingKey]: ui[uiKey].checked }).catch(() => {});
+      persistSettings({ [settingKey]: ui[uiKey].checked });
       applyMotionSurfaces();
     };
   }
@@ -6820,7 +7167,7 @@ async function startApp() {
     if (!ui[uiKey]) continue;
     ui[uiKey].onchange = () => {
       state.settings[settingKey] = ui[uiKey].checked;
-      transport.put('/v1/settings', { [settingKey]: ui[uiKey].checked }).catch(() => {});
+      persistSettings({ [settingKey]: ui[uiKey].checked });
       applyNavVisibility();
     };
   }
@@ -6862,7 +7209,10 @@ async function startApp() {
   // 界面皮肤排在 initTheme() 之前：先定布局（data-skin + 启用对应 CSS），
   // 再定配色（主题令牌），皮肤写的是布局属性，两者互不覆盖。
   // 反过来会让第一帧先按默认布局排一遍，再被皮肤推倒重排。
-  if (window.Skins) window.Skins.init();
+  if (window.Skins) {
+    window.Skins.onChange(onSkinChangedForViews);
+    window.Skins.init();
+  }
   initTheme();
   // 主题工作室必须排在 initTheme() 之后：它第一件事就是往 Theme 里注册二次元
   // 主题，而 Theme.init() 已经跑完，于是注册结果会经 Theme.onChange 触发的那次
@@ -6912,6 +7262,7 @@ async function startApp() {
         transport.post('/v1/ui/notice', { action: 'expand-capsule' }),
       ]).then(() => {
         const floating = floatingApi();
+        // 关窗失败也无所谓：主界面已经开出来了，浮动窗是旧壳子。
         if (floating) floating.close().catch(() => {});
       });
       return;
@@ -6989,6 +7340,7 @@ async function startApp() {
       cleanup();
       if (!dragging) return;
       if (dragMode === 'host') {
+        // 拖拽结束通知宿主失败不回滚位置：位置本来就只是为了让窗口跟着卡片走。
         floating.endDrag().catch(() => {});
       } else if (dragMode === 'page') {
         const r = ui.capsule.getBoundingClientRect();

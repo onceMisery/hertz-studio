@@ -495,6 +495,8 @@
         if (!T) return;
         var payload = {};
         payload[NAV.settingKey] = ui.setNavDaily.checked;
+        // 本地已即时生效（下一行 applySettings）；写服务端只是持久化镜像，
+        // 本模块只拿到 H 这个宿主接口、没有 toast 通道，失败就下次拉设置时回退。
         T.put('/v1/settings', payload).catch(function () {});
         applySettings(Object.assign({}, (H.state && H.state.settings) || {}, payload));
       };

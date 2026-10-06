@@ -1281,6 +1281,7 @@
       bar.hidden = true;
       var idx = Number(bar.dataset.index);
       if (bar.dataset.index !== '' && !Number.isNaN(idx)) {
+        // 重试失败就维持错误条原样：用户可以再点，或直接下一首。
         T.post('/v1/player/replay', { index: idx }).catch(function () {});
       }
     };

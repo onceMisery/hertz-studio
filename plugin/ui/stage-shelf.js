@@ -212,6 +212,7 @@
         e.stopPropagation();
         down = { x: e.clientX, y: e.clientY, id: e.pointerId, moved: 0 };
         browseBands = 0;
+        // 指针捕获不是所有内核都支持：拿不到就退化成普通监听，不影响点选。
         try { el.setPointerCapture(e.pointerId); } catch (_) {}
       });
 
@@ -239,6 +240,7 @@
         if (!down || e.pointerId !== down.id) return;
         var moved = Math.max(down.moved, Math.hypot(e.clientX - down.x, e.clientY - down.y));
         down = null;
+        // 同上：没捕获成功就没有要释放的，忽略即可。
         try { el.releasePointerCapture(e.pointerId); } catch (_) {}
         if (cancelled || moved > CLICK_THRESHOLD || browseBands !== 0) return;
         onCardTap(id);

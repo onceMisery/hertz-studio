@@ -221,7 +221,8 @@
     refs.capsuleBtn.setAttribute('aria-expanded', String(!compact));
     refs.capsuleBtn.setAttribute('aria-label', compact ? '展开播放卡' : '收为播放胶囊');
     if (!silent) {
-      try { localStorage.setItem(CAPSULE_KEY, compact ? '1' : '0'); } catch (error) {}
+      // 隐私模式/配额满：记不住本机偏好而已，折叠态本次会话照常生效。
+      try { localStorage.setItem(CAPSULE_KEY, compact ? '1' : '0'); } catch (error) { /* 见上 */ }
     }
   }
 
@@ -248,7 +249,7 @@
     try {
       var saved = localStorage.getItem(CAPSULE_KEY);
       if (saved === '0' || saved === '1') preference = saved === '1';
-    } catch (error) {}
+    } catch (error) { /* 读不到就按默认（收起）走，下一行处理 */ }
     // 播放胶囊默认收起（窄屏原本就收起），用户手动展开/收起后以偏好为准。
     setCapsule(preference === null ? true : preference, true);
   }
@@ -443,7 +444,8 @@
   }
 
   function abortPending() {
-    panel.controllers.forEach(function (c) { try { c.abort(); } catch (e) {} });
+    // abort() 本身不抛；包一层是防个别内核对已结束的 controller 抛异常。
+    panel.controllers.forEach(function (c) { try { c.abort(); } catch (e) { /* 见上 */ } });
     panel.controllers = [];
   }
 
@@ -680,7 +682,8 @@
   }
 
   function writeHistory(list) {
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(list)); } catch (e) {}
+    // 同其他 localStorage 写入：存不下就本次会话少一条历史，不影响搜索。
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(list)); } catch (e) { /* 见上 */ }
   }
 
   function pushHistory(q) {

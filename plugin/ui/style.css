@@ -3498,6 +3498,72 @@ body.reduce-motion .palette { animation: none; }
 .palette-item.batch .palette-item-group { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line)); }
 .palette-empty { padding: 18px 14px; font-size: 12.5px; color: var(--muted); text-align: center; }
 
+/* 行右侧的「群组徽标 + 钉住按钮」簇：主标题吃掉剩余宽度，两者靠右不拉开。 */
+.palette-item-side { display: flex; align-items: center; gap: 8px; flex: none; }
+/* 钉住按钮：默认隐形（不抢标题），悬停/选中/已钉住时显形；键盘聚焦也要能看见。 */
+.palette-pin {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  opacity: 0;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.palette-pin svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; }
+.palette-item:hover .palette-pin,
+.palette-item.active .palette-pin,
+.palette-pin.is-pinned,
+.palette-pin:focus-visible { opacity: 1; }
+.palette-pin.is-pinned { color: var(--accent); }
+.palette-pin.is-pinned svg { fill: currentColor; }
+.palette-pin:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* 内联 surface：命令面板主区就地换成的二级界面（音量 / 睡眠定时）。 */
+.palette-surface { padding: 6px; }
+.palette-surface-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px 4px;
+}
+.palette-surface-title { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text); }
+.palette-surface-title svg { width: 16px; height: 16px; color: var(--accent); flex: none; }
+.palette-surface-value { font-size: 22px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.palette-surface-body { display: flex; flex-direction: column; gap: 12px; padding: 6px 12px 12px; }
+.palette-surface-hint { font-size: 11.5px; color: var(--muted); }
+.ps-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ps-range { width: 100%; accent-color: var(--accent); }
+.ps-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ps-btn:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.ps-btn.is-active { border-color: var(--accent); color: var(--accent); }
+.ps-btn[disabled] { opacity: 0.45; cursor: default; }
+.ps-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ps-num {
+  width: 84px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
 /* ---------------------------------------------------------------------------
  * 歌词视频导出（video-export.js）：设置页「录制歌词视频…」唤起的对话框，
  * 以及录制中常驻的 REC 悬浮条。z-index 与命令面板同层以上（声场里也要能用），

@@ -28,6 +28,35 @@
     return result;
   }
 
+  /// 弹层焦点管理：把弹层**之外**的内容设为 inert（Tab 进不去、点不动、辅助
+  /// 技术跳过），焦点随后交给弹层；返回「收尾」函数，调用后还原背景并把焦点
+  /// 还给打开它的那个元素。
+  ///
+  /// 用 inert 而不是手写 Tab 循环：前者一次堵住 Tab、点击与屏幕阅读器三条路，
+  /// 也不用跟页面里动态增删的可聚焦元素赛跑。不支持 inert 的内核退化成「关闭时
+  /// 还原焦点」，行为不会更差。
+  ///
+  /// 约束：`node` 必须是 `document.body` 的直接子节点——背景是靠「把兄弟节点设
+  /// 成 inert」实现的，嵌在 .app 内部的弹层盖不住自己的父级。
+  function focusScope(node) {
+    var opener = document.activeElement;
+    var muted = [];
+    if ('inert' in HTMLElement.prototype) {
+      Array.prototype.forEach.call(document.body.children, function (child) {
+        if (child === node || child.contains(node)) return;
+        if (child.inert) return;   // 外层弹层已经设过，别记进这次要还原的名单
+        child.inert = true;
+        muted.push(child);
+      });
+    }
+    return function release() {
+      muted.forEach(function (child) { child.inert = false; });
+      if (opener && typeof opener.focus === 'function' && document.contains(opener)) {
+        try { opener.focus(); } catch (e) { /* 打开它的元素可能已经不可聚焦 */ }
+      }
+    };
+  }
+
   /// 弹一个模态。resolve 成原生语义：prompt → string|null，confirm → boolean。
   function showModal(options) {
     return new Promise(function (resolve) {
@@ -83,10 +112,12 @@
       document.body.appendChild(backdrop);
 
       var cancelValue = wantsInput ? null : false;
+      var releaseScope = focusScope(backdrop);
 
       function finish(value) {
         document.removeEventListener('keydown', onKey, true);
         backdrop.remove();
+        releaseScope();
         resolve(value);
       }
       // 捕获阶段拦截并阻断传播：舞台、全屏、弹窗各自都绑了 Escape，
@@ -113,6 +144,117 @@
     });
   }
 
+  /// 候选挑选：多行、每行一个下拉。resolve 成 `[{key, value}]`（value 是
+  /// 空串表示这一行选了「不采纳」），取消返回 null。
+  ///
+  /// 原生弹窗没有对应物（`prompt` 只收一个字符串），所以两种形态都走这套
+  /// 自建模态——独立形态下用户看到的也是同一块卡片。
+  function showPicker(options) {
+    return new Promise(function (resolve) {
+      var backdrop = document.createElement('div');
+      backdrop.className = 'np-modal';
+      backdrop.setAttribute('role', 'dialog');
+      backdrop.setAttribute('aria-modal', 'true');
+
+      var card = document.createElement('div');
+      card.className = 'np-card';
+
+      var head = document.createElement('header');
+      head.className = 'np-head';
+      var headText = document.createElement('div');
+      headText.className = 'np-head-text';
+      var title = document.createElement('div');
+      title.className = 'np-title';
+      title.textContent = options.title || '选择匹配';
+      headText.appendChild(title);
+      head.appendChild(headText);
+      card.appendChild(head);
+
+      if (options.message) {
+        var message = document.createElement('p');
+        message.className = 'hz-dialog-msg';
+        message.textContent = options.message;
+        card.appendChild(message);
+      }
+
+      // 行数可能上百（批量补全），列表自己滚，卡片不动。
+      var list = document.createElement('div');
+      list.className = 'hz-pick-list';
+      list.style.maxHeight = '52vh';
+      list.style.overflowY = 'auto';
+      var selects = [];
+      (options.rows || []).forEach(function (row) {
+        var wrap = document.createElement('div');
+        wrap.className = 'hz-pick-row';
+        var label = document.createElement('div');
+        label.className = 'hz-pick-label';
+        label.textContent = row.label;
+        if (row.sublabel) {
+          var sub = document.createElement('div');
+          sub.className = 'hz-pick-sub';
+          sub.textContent = row.sublabel;
+          label.appendChild(sub);
+        }
+        var select = document.createElement('select');
+        select.className = 'hz-pick-select';
+        (row.options || []).forEach(function (opt) {
+          var option = document.createElement('option');
+          option.value = opt.value;
+          option.textContent = opt.label;
+          select.appendChild(option);
+        });
+        if (row.value != null) select.value = row.value;
+        wrap.appendChild(label);
+        wrap.appendChild(select);
+        list.appendChild(wrap);
+        selects.push({ key: row.key, el: select });
+      });
+      card.appendChild(list);
+
+      var actions = document.createElement('div');
+      actions.className = 'hz-dialog-actions';
+      var cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'btn';
+      cancel.textContent = '取消';
+      var submit = document.createElement('button');
+      submit.type = 'button';
+      submit.className = 'btn primary';
+      submit.textContent = options.confirmLabel || '应用';
+      actions.append(cancel, submit);
+      card.appendChild(actions);
+
+      backdrop.appendChild(card);
+      document.body.appendChild(backdrop);
+
+      var releaseScope = focusScope(backdrop);
+
+      function finish(value) {
+        document.removeEventListener('keydown', onKey, true);
+        backdrop.remove();
+        releaseScope();
+        resolve(value);
+      }
+      function onKey(event) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          finish(null);
+        }
+      }
+      document.addEventListener('keydown', onKey, true);
+
+      cancel.onclick = function () { finish(null); };
+      submit.onclick = function () {
+        finish(selects.map(function (s) { return { key: s.key, value: s.el.value }; }));
+      };
+      backdrop.onclick = function (event) {
+        if (event.target === backdrop) finish(null);
+      };
+      submit.focus();
+    });
+  }
+
   window.hertzDialog = {
     /// 等价于 window.prompt：取消返回 null，确定返回输入的字符串（可能是空串）。
     prompt: function (message, defaultValue) {
@@ -128,5 +270,15 @@
     },
     /// 契约脚本用：当前是否会走自建模态。
     usesCustomModals: function () { return !useNative; },
+    /// 弹层焦点管理（inert 背景 + 关闭还焦）。命令面板等自建弹层共用这一套，
+    /// 免得每处各写一份 Tab 循环。`node` 必须是 body 的直接子节点，细节见上面
+    /// focusScope 的注释。
+    focusScope: focusScope,
+    /// 候选挑选（在线补全用）。options:
+    ///   { title, message, confirmLabel, rows: [{key, label, sublabel, options: [{value, label}], value}] }
+    /// 返回 `[{key, value}]`；取消返回 null。
+    pick: function (options) {
+      return enqueue(function () { return showPicker(options || {}); });
+    },
   };
 })();

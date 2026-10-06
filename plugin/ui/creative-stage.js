@@ -1476,6 +1476,8 @@
       var raw = all && all[SERVER_KEY];
       if (Array.isArray(raw)) { library = raw; writeLocalLibrary(raw); return raw; }
       var local = readLocalLibrary();
+      // 本地积压的作品集往服务端补写一次：失败无碍，本地副本才是权威，
+      // 下次读取会再试一遍。
       if (local.length) t.put('/v1/settings', kv(SERVER_KEY, local)).catch(function () {});
       return local;
     }).catch(function () { return readLocalLibrary(); });
@@ -1498,6 +1500,7 @@
   function persistLibrary() {
     writeLocalLibrary(library);
     var t = api();
+    // 服务端副本是可选同步：本地已写（上一行），写失败不影响任何功能。
     if (t) t.put('/v1/settings', kv(SERVER_KEY, library)).catch(function () {});
   }
 

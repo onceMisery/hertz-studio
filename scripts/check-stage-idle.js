@@ -81,6 +81,9 @@ function makeEnv(settings) {
     // setStageIdleHide 在用户真的动手时会 bump 设置世代号（防远端旧响应把本地
     // 刚点的状态反杀）。这条链路不归本脚本测，沙箱里给个空实现即可。
     markSettingsDirty: () => {},
+    // persistSettings 是 app.js 写设置表的统一出口（失败会 toast）。本脚本只
+    // 关心「写了什么」，所以让它直连那台记账用的 transport。
+    persistSettings: (patch) => transport.put('/v1/settings', patch),
   };
   vm.createContext(sandbox);
   vm.runInContext(CODE, sandbox);

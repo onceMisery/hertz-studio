@@ -48,7 +48,7 @@
     try {
       if (id) localStorage.setItem(TOP_AV_KEY, id);
       else localStorage.removeItem(TOP_AV_KEY);
-    } catch (e) {}
+    } catch (e) { /* 隐私模式/配额满：写不进镜像就只留内存，不影响本次会话 */ }
   }
   /// 落内存 + 本地镜像 + 服务端持久层。
   /// 服务端写入失败不打断交互：镜像还在，本次会话仍按选择展示。
@@ -449,6 +449,7 @@
     T = window.VMusicTransport;
     // 渠道/音源切换重入：先把上一张票作废，避免服务端留孤儿会话。
     if (currentTicket) {
+      // 作废旧票失败不回滚：服务端会随票据过期自行清理，这里只是尽量不留孤儿会话。
       T.post('/v1/online/qr/cancel', {
         source: currentSource,
         ticket: currentTicket,
@@ -502,6 +503,7 @@
       var payload = { source: currentSource, ticket: currentTicket || '' };
       currentSource = null;
       currentTicket = null;
+      // 同上：关窗时的作废是尽力而为，用户已经不需要这个会话了。
       T.post('/v1/online/qr/cancel', payload).catch(function () {});
     }
   }
