@@ -2,9 +2,10 @@
 // 首页每日推荐条到底显不显示：把 index.html 的真实结构 + style.css + daily.js
 // 一起摆进离线页面，用真浏览器量「#daily-list 里有没有卡片、#daily-strip 有多高」。
 //
-// 为什么离线：工作区的鉴权改造（token → ticket）未完成，线上页面拿不到，
-// 页面里没有业务脚本。但这���改动的接线全在 index.html 的 id 与 daily.js 里，
-// 两者都能离线取到 —— 量到的是同一批 id、同一份 CSS。
+// 为什么离线：这条只量 index.html 的接线（id 在不在、daily.js 有没有往里放卡片），
+// 不需要服务、也不需要用凭据开页面（`/` 已收紧，开首页得先出示凭据，见
+// scripts/ui-token.js），离线夹具更快也更稳。而这次改动的接线全在 index.html 的
+// id 与 daily.js 里，两者都能离线取到 —— 量到的是同一批 id、同一份 CSS。
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');

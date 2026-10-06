@@ -66,7 +66,7 @@ const FIXTURE = `
   })();
 `;
 
-// 量几何前先掐掉过渡/动画：否则读到的可能���是过渡起点。
+// 量几何前先掐掉过渡/动画：否则读到的是动画中间值，不是终态。
 const FREEZE = `
   (function () {
     var s = document.createElement('style');

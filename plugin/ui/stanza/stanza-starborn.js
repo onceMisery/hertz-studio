@@ -61,7 +61,7 @@
   }
 
   // 六条候选打分。系数对齐参考项目 music-stage-modes.js:40-64 的量级，
-  // 但把缺失的证据项（chorus / translated / syllables / hintedFast）去���，
+  // 但把缺失的证据项（chorus / translated / syllables / hintedFast）去掉，
   // 并把本项目可得的 rate / marks 作为补偿。
   function scoreAll(stats, audio, rand) {
     // rand 是 0–1 的随机源函数。缺省给常 0，保证调用方忘了传也不会得到 NaN。

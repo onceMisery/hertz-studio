@@ -2,11 +2,10 @@
 // 曲库行操作区实测：把 createTrackRow 的真实 DOM 结构 + style.css 的真实规则
 // 摆进一个页面，量每个控件的几何与命中归属。
 //
-// 为什么绕开服务：当前工作区的鉴权改造（token → ticket）未完成，
-// `/` 与 `/?ticket=` 都只返回「需要凭据」页，页面里没有业务脚本。
-// 但这次改的是**纯 CSS 几何**，与鉴权无关 —— 行的 DOM 由 createTrackRow
-// 产出、样式全部来自 style.css，两者都能离线取到，所以离线量到的
-// 宽度/重叠/命中结论与线上一致。
+// 为什么绕开服务：这条量的是**纯 CSS 几何**，与鉴权、与后端都无关 —— 行的 DOM 由
+// createTrackRow 产出、样式全部来自 style.css，两者都能离线取到，所以离线量到的
+// 宽度/重叠/命中结论与线上一致。离线还省掉「用凭据开首页」这一环（`/` 已收紧，
+// 见 scripts/ui-token.js），跑起来更快也更稳。
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');

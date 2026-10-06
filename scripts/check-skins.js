@@ -1205,7 +1205,7 @@ function checkQingfengChrome() {
     '右下角搬的是业务那颗登录按钮（不是复制一个不会更新的假头像）');
 
   section('清风：播放胶囊钉住位置');
-  // 胶囊是 fixed 浮件：自动隐藏若能改 transform/���acity，鼠标一悬停就会
+  // 胶囊是 fixed 浮件：自动隐藏若能改 transform/opacity，鼠标一悬停就会
   // 先把它甩下去再滑回（上下跳动）。与流年同源，必须钉。
   ok(/\[data-skin="qingfeng"\] \.bar:not\(\.qf-capsule\)\s*\{[^}]*transform:\s*translateX\(-50%\) !important/.test(QINGFENG),
     '播放条钉住 transform，自动隐藏不能把它甩出视口');
