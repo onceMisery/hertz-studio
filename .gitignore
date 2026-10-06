@@ -45,11 +45,12 @@ __pycache__/
 
 # 临时验证工作区（fixture 数据与一次性 token，不入库）
 output/
-# 隔离构建目录（不与运行中的实例抢 target/debug 锁）
-target-verify*/
-target-p2/
-# 本地编译的 dbx-plugin CLI（源码在 dbx 仓库，产物不入库）
-target-plugin-cli/
+# 隔离构建目录（不与运行中的实例抢 target/debug 锁）。写一条通配而不是逐个列：
+# 每起一台验收实例就换一个名字（target-qf / target-skins / target-p2 …），逐个
+# 登记的名单永远慢一步，漏掉的那个就是 git status 里几百 MB 的未跟踪目录，
+# 一次 git add -A 就进库。也顺带盖住本地编译的 dbx-plugin CLI（源码在 dbx 仓库，
+# 产物同样不入库）。
+target-*/
 # dbx-plugin package 的输出与暂存目录
 /plugin/dist/
 # dbx-plugin dev 的开发数据（含它自己的 rust-target）
