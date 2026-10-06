@@ -452,6 +452,8 @@ pub async fn stream(
         bitrate: best.bitrate,
         expires_in_secs: None,
         fallback_urls,
+        rg_gain_db: None,
+        rg_peak: None,
     })
 }
 

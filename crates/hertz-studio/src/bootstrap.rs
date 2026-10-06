@@ -23,7 +23,10 @@ use crate::diag;
 use crate::online;
 use crate::persist;
 use crate::scan;
-use crate::state::{spawn_event_pump, spawn_session_saver, AppState, DspConfig};
+use crate::state::{
+    spawn_event_pump, spawn_session_saver, AppState, BoundedMap, DspConfig, ONLINE_META_CAP,
+    STAGE_BEATS_CAP,
+};
 
 /// 装配完成的运行时。调用方必须把它保活到进程结束。
 pub struct Booted {
@@ -49,7 +52,12 @@ pub async fn prepare(data_dir: &Path) -> anyhow::Result<Config> {
 ///
 /// `token` 只被 HTTP 形态用来鉴权；插件形态的 stdio 天然可信，传什么都行，
 /// 但 `AppState` 的字段要求有值，所以由调用方决定策略而不是在这里生成。
-pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::Result<Booted> {
+pub async fn boot(
+    data_dir: PathBuf,
+    config: Config,
+    token: String,
+    overlay_key: String,
+) -> anyhow::Result<Booted> {
     let db = vmusic_store::open(&data_dir).await?;
 
     let backend = match config.audio.backend.as_str() {
@@ -108,12 +116,19 @@ pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::R
     // 恢复是惰性的：队列 + 游标进内存，进度挂到 pending_restore_seek 等首次
     // play 消费——启动路径零网络零解码，在线曲等真正要播时才取流。
     let session = persist::load_session(&db).await;
+    // 在线缓存目录的内存索引：建索引前先清掉上次崩溃留下的 .part，避免残骸
+    // 混进索引账目。这一步是异步的、启动路径上只做一次，之后所有缓存查询
+    // 都不再遍历目录。
+    let online_cache_dir = data_dir.join("cache").join("online");
+    online::cache::clean_parts(&online_cache_dir).await;
+    let cache_index = Arc::new(online::cache::CacheIndex::load(online_cache_dir).await);
     let state = Arc::new(AppState {
         db,
         audio,
         config: Arc::new(config.clone()),
         data_dir: data_dir.clone(),
         token: token.clone(),
+        overlay_key: overlay_key.clone(),
         events,
         queue: Default::default(),
         cursor: Default::default(),
@@ -125,22 +140,24 @@ pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::R
         play_generation: Default::default(),
         play_commit: Default::default(),
         buffering: Default::default(),
-        online_meta: Default::default(),
+        online_meta: tokio::sync::Mutex::new(BoundedMap::new(ONLINE_META_CAP)),
         downloads: Default::default(),
         protected: Default::default(),
         keep: tokio::sync::Mutex::new(keep_list),
         cache_max: tokio::sync::Mutex::new(cache_max),
+        cache_index,
         dsp: tokio::sync::Mutex::new(dsp_config.clone()),
         auto_failures: Default::default(),
         skip_walk_from: Default::default(),
         quality: tokio::sync::Mutex::new(quality_prefs),
-        stage_beats: Default::default(),
+        stage_beats: tokio::sync::Mutex::new(BoundedMap::new(STAGE_BEATS_CAP)),
         weak_self: Default::default(),
         pending_restore_seek: Default::default(),
         overlay_lyric: Default::default(),
         listen: Default::default(),
         scrobble: Default::default(),
         relay_tried: Default::default(),
+        tickets: crate::ticket::TicketStore::new(),
     });
     // 供 on_track_committed detach 'static 后台任务用；set 失败只可能是
     // 重复注入，启动路径只走一次，忽略即可。
@@ -183,13 +200,11 @@ pub async fn boot(data_dir: PathBuf, config: Config, token: String) -> anyhow::R
     });
     scan::spawn_watcher(state.clone());
 
-    // 清掉上次崩溃留下的半截下载，并按配置做一次缓存容量回收。
+    // 按配置做一次缓存容量回收（.part 清理与建索引已在前面完成）。
     {
-        let cache_dir = state.online_cache_dir();
-        online::cache::clean_parts(&cache_dir).await;
         let max = *state.cache_max.lock().await;
         if max > 0 {
-            if let Err(e) = online::cache::enforce_limit(&cache_dir, max, &[]).await {
+            if let Err(e) = state.cache_index.enforce_limit(max, &[]).await {
                 tracing::warn!("缓存 LRU 回收失败: {e}");
             }
         }

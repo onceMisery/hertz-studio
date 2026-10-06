@@ -262,6 +262,10 @@ pub async fn set_dsp(state: &Arc<AppState>, body: &Value) -> RpcResult {
             .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     }
     // 即时生效：EQ/增益走 set_dsp，交叉淡化走 set_crossfade。
+    //
+    // 与 HTTP 侧同一处修正：内存里的 DspConfig 不跟着换，下一首播放又会从启动
+    // 时的旧档位重算增益（播放落地读的是它，不是 settings 表）。
+    *state.dsp.lock().await = config.clone();
     let track_gain = if config.loudness_enabled() {
         state
             .current_loudness(&config.loudness_mode)

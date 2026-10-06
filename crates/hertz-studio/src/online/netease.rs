@@ -330,6 +330,16 @@ pub async fn stream(ctx: &Ctx, id: &str, quality: u32) -> ApiResult<StreamInfo> 
             )
         })?;
 
+    // 响度标签随取流一起给，语义与本地曲的 ReplayGain 一致：`gain` 是 dB、
+    // `peak` 是线性峰值（实测该接口的 data[0] 确实带 gain/peak，另有
+    // closedGain/closedPeak 供「关闭响度归一化」的客户端用）。peak 为 0 或缺失
+    // 视作没有，别拿 0 去做防削波的分母。
+    let rg_gain_db = entry.get("gain").and_then(|v| v.as_f64());
+    let rg_peak = entry
+        .get("peak")
+        .and_then(|v| v.as_f64())
+        .filter(|p| *p > 0.0);
+
     Ok(StreamInfo {
         url: url.to_string(),
         source: "netease".into(),
@@ -337,6 +347,8 @@ pub async fn stream(ctx: &Ctx, id: &str, quality: u32) -> ApiResult<StreamInfo> 
         bitrate: entry.get("br").and_then(|v| v.as_u64()),
         expires_in_secs: entry.get("expi").and_then(|v| v.as_u64()),
         fallback_urls: Vec::new(),
+        rg_gain_db,
+        rg_peak,
     })
 }
 

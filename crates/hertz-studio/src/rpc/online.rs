@@ -168,10 +168,9 @@ pub async fn play(state: &Arc<AppState>, body: &Value) -> RpcResult {
 
     // 整盘元数据入内存暂存：play_index_for 提交成功后据此写历史（在线曲的 URL
     // 会过期，历史只存元数据快照，重播时重新实时取流）。
-    {
-        let mut meta = state.online_meta.lock().await;
-        for (t, vid) in tracks.iter().zip(vids.iter()) {
-            meta.insert(
+    for (t, vid) in tracks.iter().zip(vids.iter()) {
+        state
+            .remember_online_meta(
                 vid.clone(),
                 crate::state::OnlineMetaSnap {
                     title: t.title.clone().unwrap_or_else(|| t.id.clone()),
@@ -179,9 +178,13 @@ pub async fn play(state: &Arc<AppState>, body: &Value) -> RpcResult {
                     album: t.album.clone(),
                     cover: t.cover.clone(),
                     duration_ms: t.duration_ms.filter(|v| *v > 0),
+                    // 入队时还没有取流，响度标签留空，等取流那一步回填；
+                    // remember_online_meta 会保住同一首曲上一轮已取到的标签。
+                    rg_gain_db: None,
+                    rg_peak: None,
                 },
-            );
-        }
+            )
+            .await;
     }
 
     let outcome = state.play_index_for(index, Some(gen), PlayTrigger::Pick).await?;
@@ -265,7 +268,7 @@ pub async fn radio(state: &Arc<AppState>, body: &Value) -> RpcResult {
 
 /// 缓存占用展示：总量/文件数/按音源分组 + 运行时上限 + 用户保留名单。
 pub async fn cache_stats(state: &Arc<AppState>) -> RpcResult {
-    let stats = crate::online::cache::cache_stats(&state.online_cache_dir()).await;
+    let stats = state.cache_index.stats();
     let keep = state.keep.lock().await.clone();
     let max = *state.cache_max.lock().await;
     Ok(Reply::ok(json!({
@@ -293,16 +296,11 @@ pub async fn cache_limit(state: &Arc<AppState>, body: &Value) -> RpcResult {
     *state.cache_max.lock().await = request.max_bytes;
     if request.max_bytes > 0 {
         let protected = state.protected_all().await;
-        let dir = state.online_cache_dir();
-        let max = request.max_bytes;
-        let removed = tokio::task::spawn_blocking(move || {
-            tokio::runtime::Handle::current().block_on(async {
-                crate::online::cache::enforce_limit(&dir, max, &protected).await
-            })
-        })
-        .await
-        .map_err(|e| internal(e.to_string()))?
-        .map_err(|e| internal(e.to_string()))?;
+        let removed = state
+            .cache_index
+            .enforce_limit(request.max_bytes, &protected)
+            .await
+            .map_err(|e| internal(e.to_string()))?;
         if removed > 0 {
             tracing::info!("缓存上限调整后回收 {removed} 字节");
         }
@@ -319,16 +317,11 @@ pub async fn cache_clear(state: &Arc<AppState>, body: &Value) -> RpcResult {
         }
     }
     let protected = state.protected_all().await;
-    let dir = state.online_cache_dir();
-    let source = request.source.clone();
-    let removed = tokio::task::spawn_blocking(move || {
-        tokio::runtime::Handle::current().block_on(async {
-            crate::online::cache::clear_cache(&dir, &protected, source.as_deref()).await
-        })
-    })
-    .await
-    .map_err(|e| bad_request(e.to_string()))?
-    .map_err(|e| internal(e.to_string()))?;
+    let removed = state
+        .cache_index
+        .clear(&protected, request.source.as_deref())
+        .await
+        .map_err(|e| internal(e.to_string()))?;
     Ok(Reply::ok(json!({ "ok": true, "removed_bytes": removed })))
 }
 

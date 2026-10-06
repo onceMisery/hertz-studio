@@ -595,6 +595,11 @@ async fn set_dsp(
             .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     }
     // 即时生效：EQ/增益走 set_dsp，交叉淡化走 set_crossfade。
+    //
+    // 内存里的 DspConfig 也要一起换：播放落地（play_local / play_online）读的是
+    // 它。不换的话「改设置那一首」按新档位下了增益，下一首又从启动时的旧档位
+    // 重算回去，看起来就是响度归一化只在改设置那一下生效。
+    *state.dsp.lock().await = cfg.clone();
     let track_gain = if cfg.loudness_enabled() {
         state
             .current_loudness(&cfg.loudness_mode)
@@ -2857,10 +2862,9 @@ async fn online_play(
 
     // 整盘元数据入内存暂存：play_index_for 提交成功后据此写历史（在线曲的
     // URL 会过期，历史只存元数据快照，重播时重新实时取流）。
-    {
-        let mut meta = state.online_meta.lock().await;
-        for (t, vid) in tracks.iter().zip(vids.iter()) {
-            meta.insert(
+    for (t, vid) in tracks.iter().zip(vids.iter()) {
+        state
+            .remember_online_meta(
                 vid.clone(),
                 crate::state::OnlineMetaSnap {
                     title: t.title.clone().unwrap_or_else(|| t.id.clone()),
@@ -2868,9 +2872,13 @@ async fn online_play(
                     album: t.album.clone(),
                     cover: t.cover.clone(),
                     duration_ms: t.duration_ms.filter(|v| *v > 0),
+                    // 入队时还没有取流，响度标签留空，等取流那一步回填；
+                    // remember_online_meta 会保住同一首曲上一轮已取到的标签。
+                    rg_gain_db: None,
+                    rg_peak: None,
                 },
-            );
-        }
+            )
+            .await;
     }
 
     let outcome = state.play_index_for(index, Some(gen), PlayTrigger::Pick).await?;
@@ -2913,7 +2921,7 @@ async fn online_play(
 async fn online_cache_stats(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let stats = crate::online::cache::cache_stats(&state.online_cache_dir()).await;
+    let stats = state.cache_index.stats();
     let keep = state.keep.lock().await.clone();
     let max = *state.cache_max.lock().await;
     Ok(Json(serde_json::json!({
@@ -2952,16 +2960,12 @@ async fn online_cache_limit(
     // 收小上限时立即回收；放大/改不限只更新账本，无需动文件。
     if body.max_bytes > 0 {
         let protected = state.protected_all().await;
-        let dir = state.online_cache_dir();
-        let max = body.max_bytes;
-        let removed = tokio::task::spawn_blocking(move || {
-            tokio::runtime::Handle::current().block_on(async {
-                crate::online::cache::enforce_limit(&dir, max, &protected).await
-            })
-        })
-        .await
-        .map_err(|e| internal(e.to_string()))?
-        .map_err(|e| internal(e.to_string()))?;
+        // 淘汰走内存索引，删文件本身是 tokio::fs（线程池），直接 await 即可。
+        let removed = state
+            .cache_index
+            .enforce_limit(body.max_bytes, &protected)
+            .await
+            .map_err(|e| internal(e.to_string()))?;
         if removed > 0 {
             tracing::info!("缓存上限调整后回收 {removed} 字节");
         }
@@ -2988,16 +2992,11 @@ async fn online_cache_clear(
         }
     }
     let protected = state.protected_all().await;
-    let dir = state.online_cache_dir();
-    let source = body.source.clone();
-    let removed = tokio::task::spawn_blocking(move || {
-        tokio::runtime::Handle::current().block_on(async {
-            crate::online::cache::clear_cache(&dir, &protected, source.as_deref()).await
-        })
-    })
-    .await
-    .map_err(|e| bad_request(e.to_string()))?
-    .map_err(|e| internal(e.to_string()))?;
+    let removed = state
+        .cache_index
+        .clear(&protected, body.source.as_deref())
+        .await
+        .map_err(|e| internal(e.to_string()))?;
     Ok(Json(
         serde_json::json!({ "ok": true, "removed_bytes": removed }),
     ))

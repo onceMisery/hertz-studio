@@ -114,6 +114,80 @@ pub struct ScanError {
     pub message: String,
 }
 
+/// 有上限的内存表：插入顺序 FIFO，超限丢「最久没被写入」的那条。
+///
+/// 为什么要它：`AppState::online_meta` 与 `AppState::stage_beats` 都只增不减
+/// ——前者每次整单播放写入一批快照，后者每分析一首歌写一格；长时间运行的实例
+/// 内存会随「用过的曲目数」线性增长。上限只是安全网，取值远高于正常使用规模。
+///
+/// 用「写入即最新」而不是「读到即最新」：这两张表的读取都在关键路径上（写历史、
+/// 打卡、接力匹配、节拍查询），在这里让读也拿写锁不划算；而写入点（入队、起播、
+/// 分析完成）本来就覆盖「最近用过的曲目」。
+///
+/// 与 `relay_tried` 那种「满了就清空」不同：这两张表清空会一次性丢掉当前队列
+/// 全部曲目的标题，所以这里逐条淘汰最旧的一条。
+pub(crate) struct BoundedMap<V> {
+    cap: usize,
+    seq: u64,
+    map: HashMap<String, (u64, V)>,
+}
+
+impl<V> BoundedMap<V> {
+    pub(crate) fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            seq: 0,
+            map: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn insert(&mut self, key: String, value: V) -> Option<V> {
+        self.seq += 1;
+        let seq = self.seq;
+        let replaced = self.map.insert(key, (seq, value)).map(|(_, v)| v);
+        if self.map.len() > self.cap {
+            self.evict_oldest();
+        }
+        replaced
+    }
+
+    pub(crate) fn get(&self, key: &str) -> Option<&V> {
+        self.map.get(key).map(|(_, value)| value)
+    }
+
+    pub(crate) fn get_mut(&mut self, key: &str) -> Option<&mut V> {
+        self.map.get_mut(key).map(|(_, value)| value)
+    }
+
+    pub(crate) fn remove(&mut self, key: &str) -> Option<V> {
+        self.map.remove(key).map(|(_, value)| value)
+    }
+
+    /// 丢弃写入时间最早的一条。只在超限时调用：插入一次最多超一条。
+    fn evict_oldest(&mut self) {
+        let Some(oldest) = self
+            .map
+            .iter()
+            .min_by_key(|(_, (seq, _))| *seq)
+            .map(|(key, _)| key.clone())
+        else {
+            return;
+        };
+        self.map.remove(&oldest);
+    }
+}
+
+/// 在线曲目元数据快照上限。远高于正常使用规模（一张五千首的歌单也只占一半），
+/// 只为兜住「长时间运行 + 反复播放不同在线曲」的线性增长；被淘汰的曲目再次
+/// 入队/起播时会重新写入，写入前它的历史标题会退化成平台 id。
+pub(crate) const ONLINE_META_CAP: usize = 8192;
+
+/// 节拍任务表上限（每格只有几十字节状态，节拍地图本体在磁盘上）。
+pub(crate) const STAGE_BEATS_CAP: usize = 8192;
+
+/// 接力坏流记忆上限：到顶就清空（整盘换队/成功提交也会清）。
+pub(crate) const RELAY_TRIED_CAP: usize = 64;
+
 /// 在线曲目元数据快照（仅在内存，与队列同生命周期）。
 ///
 /// /online/play 入队时随 tracks 写入 [`AppState::online_meta`]，提交成功后
@@ -126,6 +200,12 @@ pub struct OnlineMetaSnap {
     pub album: Option<String>,
     pub cover: Option<String>,
     pub duration_ms: Option<u64>,
+    /// 平台随取流一起给的响度标签（见 [`crate::online::StreamInfo`] 的 rg_*）。
+    /// 缓存在这里是因为**缓存命中那次播放不会再打取流接口**，值只能从上一轮
+    /// 取流时留下；`serde` 对 Option 缺字段默认 None，旧客户端的 /player/load
+    /// 请求体照旧能用。
+    pub rg_gain_db: Option<f64>,
+    pub rg_peak: Option<f64>,
 }
 
 /// 一次播放尝试的结果：是否真正提交（没被更新代际顶掉）与平台实际给到的
@@ -409,6 +489,10 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub data_dir: PathBuf,
     pub token: String,
+    /// 浮层只读钥匙（见 `main.rs` 的 `load_or_create_overlay_key`）。与 token
+    /// 分开是因为它会被粘进 OBS 的配置：权限只到「GET + 浮层歌词 + 曲目封面」。
+    /// 插件形态（stdio）没有 HTTP 通道，填空串即可。
+    pub overlay_key: String,
     pub events: broadcast::Sender<WsEvent>,
     /// Ordered list of track ids the "next / previous" buttons walk through.
     pub queue: Mutex<Vec<String>>,
@@ -433,7 +517,7 @@ pub struct AppState {
     /// 下载缓冲覆盖态（WS 推送与 /v1/state 读取共用）。
     pub(crate) buffering: Mutex<(bool, Option<u8>)>,
     /// /online/play 入队时随 tracks 带来的元数据快照（虚拟 id → 快照）。
-    pub(crate) online_meta: Mutex<HashMap<String, OnlineMetaSnap>>,
+    pub(crate) online_meta: Mutex<BoundedMap<OnlineMetaSnap>>,
     /// 进行中的下载器（缓存键 → 带角色条目），供预取接管与切歌中止。
     pub(crate) downloads: Mutex<HashMap<String, DlEntry>>,
     /// LRU 显式保护名单：在线曲提交成功写入 `{key}.` 前缀（legacy 命中额外
@@ -447,6 +531,11 @@ pub struct AppState {
     /// 在线音频缓存的运行时上限（字节，0 = 不限）。settings 表权威
     /// （`online_cache_max_bytes`），缺键回落 config.toml；设置页热改即时生效。
     pub(crate) cache_max: Mutex<u64>,
+    /// 在线缓存目录的内存索引（启动扫描一次，写时增量维护）。查找/统计/淘汰/
+    /// 手动清理都走它，不再每次遍历目录（见 [`crate::online::cache::CacheIndex`]）。
+    pub(crate) cache_index: Arc<crate::online::cache::CacheIndex>,
+    /// 首跳票据（签发/兑换），见 [`crate::ticket`]。只活在内存里。
+    pub(crate) tickets: crate::ticket::TicketStore,
     /// 自动接力连续失败计数，任一曲成功提交即清零；累计到 3 停止接力。
     pub(crate) auto_failures: AtomicUsize,
     /// 一轮跳曲走的起点：第一次失败时把「当时在播的那首」记下来，放弃时把游标还给
@@ -456,7 +545,7 @@ pub struct AppState {
     /// 逐源音质偏好（启动时从 settings 装载、POST 热切换即时更新）。
     pub(crate) quality: Mutex<crate::online::quality::QualityPrefs>,
     /// 节拍分析幂等表：缓存键 → 任务态。
-    pub(crate) stage_beats: Mutex<HashMap<String, crate::stage_beats::TaskState>>,
+    pub(crate) stage_beats: Mutex<BoundedMap<crate::stage_beats::TaskState>>,
     /// 启动后由 main 注入 Weak：on_track_committed 只有 &self，detach
     /// 'static 任务时凭它拿回 Arc（不改 play_index/step 的签名链）。
     pub(crate) weak_self: std::sync::OnceLock<std::sync::Weak<AppState>>,
@@ -478,8 +567,18 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// 缓存根目录（`cache/`），下面是 `covers/` 与 `online/` 两个子目录。
+    ///
+    /// 需要它而不是 `cover_dir()` 的地方只有一类：调
+    /// `vmusic_library::save_cover(cache_dir, …)`——那个函数会自己接上
+    /// `covers/`，传 `cover_dir()` 会写进 `covers/covers/`（曾把在线补全的
+    /// 封面写到一个取不回来的地方，`has_cover` 置了位却读不到图）。
+    pub fn cache_dir(&self) -> PathBuf {
+        self.data_dir.join("cache")
+    }
+
     pub fn cover_dir(&self) -> PathBuf {
-        self.data_dir.join("cache").join("covers")
+        self.cache_dir().join("covers")
     }
 
     pub(crate) fn stage_beats_dir(&self) -> PathBuf {
@@ -500,7 +599,9 @@ impl AppState {
         };
         let track_id = self.queue.lock().await.get(cursor)?.clone();
         if crate::online::split_virtual_id(&track_id).is_some() {
-            return None; // 在线曲没有 RG 标签
+            // 在线曲的响度来自平台随取流一起给的 gain/peak，存在 online_meta 里
+            // （见 play_online 的落地）；没有标签就报「没有」，调用方按 0 dB 播。
+            return self.online_gain(&track_id).await;
         }
         let rg = vmusic_store::get_track_rg(&self.db, &track_id)
             .await
@@ -516,6 +617,84 @@ impl AppState {
             (rg.track_gain?, rg.track_peak, "track")
         };
         Some((anti_clip_gain(gain, peak), from))
+    }
+
+    /// 在线曲的响度标签（gain dB、peak），来自 online_meta；没记过就是 None。
+    async fn online_rg(&self, track_id: &str) -> Option<(f64, Option<f64>)> {
+        let map = self.online_meta.lock().await;
+        let snap = map.get(track_id)?;
+        snap.rg_gain_db.map(|gain| (gain, snap.rg_peak))
+    }
+
+    /// 在线曲在当前档位下应下的增益（已含防削波），与本地曲同一条规则。
+    ///
+    /// current_loudness（对外汇报「用了多少增益」）与播放落地（apply_online_loudness）
+    /// 都走它：两处各算一遍迟早会漂成不一致的答案。
+    async fn online_gain(&self, track_id: &str) -> Option<(f64, &'static str)> {
+        self.online_rg(track_id)
+            .await
+            .map(|(gain, peak)| (anti_clip_gain(gain, peak), "online"))
+    }
+
+    /// 记下平台给的响度标签。条目不存在就什么都不做 —— 不为了存一个增益
+    /// 捏一条没有标题的元数据（那会让播放历史退化成平台 id）。
+    async fn store_online_rg(&self, track_id: &str, gain: Option<f64>, peak: Option<f64>) {
+        if gain.is_none() && peak.is_none() {
+            return;
+        }
+        let mut map = self.online_meta.lock().await;
+        if let Some(snap) = map.get_mut(track_id) {
+            snap.rg_gain_db = gain;
+            snap.rg_peak = peak;
+        }
+    }
+
+    /// 记一条在线元数据快照。
+    ///
+    /// 与直接 `insert` 的区别只有一条：**保留上一次取流拿到的响度标签**。同一首
+    /// 曲重入队（用户又点了一次、前端重发整盘）时取流那一步未必再发生（文件已经
+    /// 在缓存里，走 cache.hit），而入队带上来的元数据里没有响度——直接覆盖就把
+    /// 它抹掉了，之后每一首都会退化成 0 dB。
+    pub(crate) async fn remember_online_meta(&self, id: String, mut snap: OnlineMetaSnap) {
+        let mut map = self.online_meta.lock().await;
+        if let Some(old) = map.get(&id) {
+            snap.rg_gain_db = old.rg_gain_db.or(snap.rg_gain_db);
+            snap.rg_peak = snap.rg_peak.or(old.rg_peak);
+        }
+        map.insert(id, snap);
+    }
+
+    /// 把在线曲的响度增益推给 audio actor。
+    ///
+    /// 每次提交都要推（哪怕结果为 0 dB）：在线链路原先完全不碰 DSP，上一首
+    /// 本地曲的增益会一直留在链上，切到在线曲时等于套用了别人的增益。
+    /// 与 play_local 同一套规则，含 anti_clip_gain 防削波。
+    async fn apply_online_loudness(&self, track_id: &str) {
+        let dsp = self.dsp.lock().await.clone();
+        let track_gain_db = if dsp.loudness_enabled() {
+            match self.online_gain(track_id).await {
+                Some((gain, from)) => {
+                    crate::diaglog!(
+                        "loudness.apply",
+                        mode = dsp.loudness_mode.as_str(),
+                        from = from,
+                        gain_db = gain
+                    );
+                    gain as f32
+                }
+                None => 0.0,
+            }
+        } else {
+            0.0
+        };
+        let _ = self
+            .audio
+            .set_dsp(vmusic_core::DspParams {
+                eq_gains_db: dsp.eq_gains_db,
+                preamp_db: dsp.preamp_db,
+                track_gain_db,
+            })
+            .await;
     }
 
     /// LRU 回收与手动清理的豁免名单：当前播放 + 用户保留项。
@@ -830,6 +1009,52 @@ impl AppState {
                 track_gain_db,
             })
             .await;
+        // 远程直链的取流准备放在提交锁外：`auth_for_url` 打 DB + 系统钥匙串，
+        // `HttpRangeStream::open` 是真实网络建连——WebDAV 慢源上这两步各自都
+        // 可能是秒级。原先它们连同 `load_source` 一起在 `play_commit` 锁内，
+        // 慢源加载期间切歌/换队会被串行卡住；现在锁内只剩复核与 actor 入队，
+        // 与 `play_online` 同一条纪律（见其文档注释）。
+        //
+        // 建连之前先做一次便宜的存活复核：这个请求可能已经被后续操作作废
+        // （用户连点、自动下一首抢先），不该为一个死请求白付一次网络往返。
+        // 真正决定成败的复核仍在锁内。
+        if !self.attempt_alive(gen, index, &track_id).await {
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
+        }
+        let remote: Option<(String, Option<String>, Box<dyn vmusic_core::AudioSource>)> =
+            if track.source == vmusic_core::TrackSource::Remote {
+                let url = track.path.clone();
+                let auth =
+                    crate::remote::auth_for_url(&self.db, crate::secrets::backend().as_ref(), &url)
+                        .await;
+                let ext = std::path::Path::new(&url)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_string());
+                let open_url = url.clone();
+                let stream = tokio::task::spawn_blocking(move || {
+                    crate::remote::HttpRangeStream::open(&open_url, auth.as_ref())
+                })
+                .await
+                .map_err(|e| {
+                    vmusic_core::CoreError::Audio(vmusic_core::AudioError::BackendInit(
+                        e.to_string(),
+                    ))
+                })?
+                .map_err(|e| {
+                    vmusic_core::CoreError::Audio(vmusic_core::AudioError::BackendInit(
+                        e.to_string(),
+                    ))
+                })?;
+                Some((url, ext, Box::new(stream)))
+            } else {
+                None
+            };
+
+        // 取流已就绪：锁内只剩复核与 actor 入队。
         let _commit = self.play_commit.lock().await;
         if !self.attempt_alive(gen, index, &track_id).await {
             return Ok(PlayOutcome {
@@ -837,51 +1062,34 @@ impl AppState {
                 actual_quality: None,
             });
         }
-        // 远程来源：HTTP Range 直链取流（不落盘）；本地/其余走文件路径。
-        if track.source == vmusic_core::TrackSource::Remote {
-            let url = track.path.clone();
-            let auth =
-                crate::remote::auth_for_url(&self.db, crate::secrets::backend().as_ref(), &url)
-                    .await;
-            let ext = std::path::Path::new(&url)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|s| s.to_string());
-            let open_url = url.clone();
-            let stream = tokio::task::spawn_blocking(move || {
-                crate::remote::HttpRangeStream::open(&open_url, auth.as_ref())
-            })
-            .await
-            .map_err(|e| {
-                vmusic_core::CoreError::Audio(vmusic_core::AudioError::BackendInit(e.to_string()))
-            })?
-            .map_err(|e| {
-                vmusic_core::CoreError::Audio(vmusic_core::AudioError::BackendInit(e.to_string()))
-            })?;
-            // 远程直链的凭据可能在 userinfo 或 query 里，与在线流同规则脱敏。
-            crate::diaglog!(
-                "play.local",
-                idx = index,
-                gen = gen,
-                via = "remote",
-                url = crate::diag::redact_url(&url)
-            );
-            self.audio
-                .load_source(Box::new(stream), ext, Some(track_id.clone()))
-                .await
-                .map_err(vmusic_core::CoreError::Audio)?;
-        } else {
-            crate::diaglog!(
-                "play.local",
-                idx = index,
-                gen = gen,
-                via = "file",
-                path = track.path
-            );
-            self.audio
-                .load(&track.path, Some(track_id.clone()))
-                .await
-                .map_err(vmusic_core::CoreError::Audio)?;
+        match remote {
+            Some((url, ext, stream)) => {
+                // 远程直链的凭据可能在 userinfo 或 query 里，与在线流同规则脱敏。
+                crate::diaglog!(
+                    "play.local",
+                    idx = index,
+                    gen = gen,
+                    via = "remote",
+                    url = crate::diag::redact_url(&url)
+                );
+                self.audio
+                    .load_source(stream, ext, Some(track_id.clone()))
+                    .await
+                    .map_err(vmusic_core::CoreError::Audio)?;
+            }
+            None => {
+                crate::diaglog!(
+                    "play.local",
+                    idx = index,
+                    gen = gen,
+                    via = "file",
+                    path = track.path
+                );
+                self.audio
+                    .load(&track.path, Some(track_id.clone()))
+                    .await
+                    .map_err(vmusic_core::CoreError::Audio)?;
+            }
         }
         // load 已被 actor 处理：若这期间又切了歌，更新一代的命令已排在后面，
         // 本调用绝不能再 play() 或写 cursor。
@@ -973,13 +1181,11 @@ impl AppState {
             }
         };
 
-        // 快路径：正式名（任意扩展名）或旧名缓存已就绪。find_cached_by_key
-        // 是 tokio::fs 的 async 扫描（目录内只有少量缓存文件），直接 await，
-        // 不另开 blocking 任务。缓存命中全程不发 buffering——本地文件 load
-        // 是毫秒级，先亮 loading 再立刻灭只会让播放键闪一下（修 M6）。
-        if let Some(path) =
-            crate::online::cache::find_cached_by_key(&dir, &source, &id, quality.as_str()).await
-        {
+        // 快路径：正式名（任意扩展名）或旧名缓存已就绪。查找走内存索引（命中时
+        // 只做一次 metadata 复核），没有目录遍历，直接 await 即可。缓存命中全程
+        // 不发 buffering——本地文件 load 是毫秒级，先亮 loading 再立刻灭只会让
+        // 播放键闪一下（修 M6）。
+        if let Some(path) = self.cache_index.find(&source, &id, quality.as_str()).await {
             crate::diaglog!(
                 "cache.hit",
                 idx = index,
@@ -987,6 +1193,9 @@ impl AppState {
                 key = key,
                 path = path.display()
             );
+            // 响度先落地再提交：缓存命中不走取流接口，值来自上一轮存在
+            // online_meta 里的标签（没有就是 0 dB）。
+            self.apply_online_loudness(&track_id).await;
             match self
                 .try_commit_cached(gen, index, &track_id, &path, None)
                 .await?
@@ -1081,8 +1290,18 @@ impl AppState {
             let urls: Vec<String> = std::iter::once(info.url)
                 .chain(info.fallback_urls)
                 .collect();
+            // 记下平台给的响度标签：缓存命中那次播放不会再打取流接口，值只能
+            // 从这里留下（随 online_meta 与队列同生命周期）。
+            self.store_online_rg(&track_id, info.rg_gain_db, info.rg_peak)
+                .await;
             let referer = crate::online::referer(&source).map(str::to_string);
-            match crate::online::progressive::start(dir.clone(), key.clone(), urls, referer) {
+            match crate::online::progressive::start(
+                dir.clone(),
+                key.clone(),
+                urls,
+                referer,
+                self.cache_index.clone(),
+            ) {
                 Ok(dl) => (dl, actual),
                 Err(e) => {
                     crate::diaglog!(
@@ -1331,6 +1550,11 @@ impl AppState {
             });
         }
         // load_source 已成功：之后 play() 失败不再删下载/缓存，统一走失败收口。
+        //
+        // 响度要在三条提交路径上都推（缓存命中 / 整首下载 / 这条渐进式），
+        // 漏一条就会出现「有时归一化、有时不归一化」。位置放在存活复核之后：
+        // 只有真要提交的这一首才改链上的增益。
+        self.apply_online_loudness(&track_id).await;
         let play = self.audio.play().await;
         let committed = self.attempt_alive(gen, index, &track_id).await;
         self.set_buffering(false, None).await;
@@ -1424,6 +1648,8 @@ impl AppState {
         trigger: PlayTrigger,
         source: String,
     ) -> Result<PlayOutcome, vmusic_core::CoreError> {
+        // 新鲜取流路径的响度落地：标签已在上游存进 online_meta。
+        self.apply_online_loudness(&track_id).await;
         match self
             .try_commit_cached(gen, index, &track_id, &path, actual)
             .await
@@ -1564,10 +1790,7 @@ impl AppState {
             // 0 = 不限：enforce_limit 会把 0 当成「删到什么都不剩」，这里必须挡。
             let max = *s.cache_max.lock().await;
             if max > 0 {
-                if let Err(e) =
-                    crate::online::cache::enforce_limit(&s.online_cache_dir(), max, &protected)
-                        .await
-                {
+                if let Err(e) = s.cache_index.enforce_limit(max, &protected).await {
                     tracing::warn!("缓存 LRU 回收失败: {e}");
                 }
             }
@@ -1660,10 +1883,7 @@ impl AppState {
             return;
         }
         let dir = self.online_cache_dir();
-        if crate::online::cache::find_cached_by_key(&dir, &source, &id, quality.as_str())
-            .await
-            .is_some()
-        {
+        if self.cache_index.find(&source, &id, quality.as_str()).await.is_some() {
             return;
         }
         let ctx = crate::online::Ctx {
@@ -1677,7 +1897,13 @@ impl AppState {
             .chain(info.fallback_urls)
             .collect();
         let referer = crate::online::referer(&source).map(str::to_string);
-        match crate::online::progressive::start(dir, key.clone(), urls, referer) {
+        match crate::online::progressive::start(
+            dir,
+            key.clone(),
+            urls,
+            referer,
+            self.cache_index.clone(),
+        ) {
             Ok(dl) => {
                 // entry 原子落槽：前面的 contains_key 检查与这里之间隔着
                 // 取流 await，并发预取/播放接管可能已占下同键槽位——先 cancel
@@ -1758,7 +1984,7 @@ impl AppState {
             let mut tried = self.relay_tried.lock().await;
             if !tried.contains(&track_id) {
                 // 上限兜底：极端连环失败下记忆不许无限增长。
-                if tried.len() >= 64 {
+                if tried.len() >= RELAY_TRIED_CAP {
                     tried.clear();
                 }
                 tried.push(track_id.clone());
@@ -1849,10 +2075,18 @@ impl AppState {
                 album: Some(cand.album.clone()).filter(|s| !s.is_empty()),
                 cover: cand.cover.clone(),
                 duration_ms: Some(cand.duration_ms).filter(|d| *d > 0),
+                // 接力候选的元数据里没有响度（要等新源取流），留空。
+                rg_gain_db: None,
+                rg_peak: None,
             });
             if cand.duration_ms > 0 {
                 snap.duration_ms = Some(cand.duration_ms);
             }
+            // 响度标签属于「上一家音源的那份母带」，换源后不再适用：清掉，
+            // 等新源第一次取流时按它的 gain/peak 重新填。不清就会把别家母带的
+            // 增益套到这份音频上（缓存命中那条路尤其明显：它不会再打取流接口）。
+            snap.rg_gain_db = None;
+            snap.rg_peak = None;
             map.insert(new_id.clone(), snap);
         }
         drop(commit);
@@ -2516,17 +2750,27 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) async fn playback_state() -> (AppState, std::thread::JoinHandle<()>) {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        playback_state_with_db(db).await
+    }
+
+    /// 需要真实 schema 的用例（Remote 曲目、设置读取…）自己开一个文件库传进来：
+    /// 上面那个内存池没有建表，任何打 DB 的路径都会在里面失败。
+    pub(crate) async fn playback_state_with_db(
+        db: sqlx::SqlitePool,
+    ) -> (AppState, std::thread::JoinHandle<()>) {
         let (audio, handle) = vmusic_audio::spawn(vmusic_audio::BackendKind::Null)
             .await
             .unwrap();
         let state = AppState {
-            db: sqlx::sqlite::SqlitePoolOptions::new()
-                .connect_lazy("sqlite::memory:")
-                .unwrap(),
+            db,
             audio,
             config: Arc::new(Config::default()),
             data_dir: PathBuf::new(),
             token: String::new(),
+            overlay_key: String::new(),
             events: broadcast::channel(16).0,
             queue: Default::default(),
             cursor: Default::default(),
@@ -2538,22 +2782,30 @@ pub(crate) mod tests {
             play_generation: Default::default(),
             play_commit: Default::default(),
             buffering: Default::default(),
-            online_meta: Default::default(),
+            online_meta: Mutex::new(BoundedMap::new(ONLINE_META_CAP)),
             downloads: Default::default(),
             protected: Default::default(),
             dsp: Mutex::new(DspConfig::from_settings(&Default::default())),
             keep: Default::default(),
             cache_max: Mutex::new(0),
+            // 不存在的空目录即可：索引为空，测试都不碰缓存目录（cache_max=0）。
+            cache_index: Arc::new(
+                crate::online::cache::CacheIndex::load(
+                    std::env::temp_dir().join(format!("vmusic-state-cache-{}", uuid::Uuid::new_v4())),
+                )
+                .await,
+            ),
             auto_failures: Default::default(),
             skip_walk_from: Default::default(),
             quality: Default::default(),
-            stage_beats: Default::default(),
+            stage_beats: Mutex::new(BoundedMap::new(STAGE_BEATS_CAP)),
             weak_self: Default::default(),
             pending_restore_seek: Default::default(),
             overlay_lyric: Default::default(),
             listen: Default::default(),
             scrobble: Default::default(),
             relay_tried: Default::default(),
+            tickets: crate::ticket::TicketStore::new(),
         };
         (state, handle)
     }
@@ -2606,6 +2858,76 @@ pub(crate) mod tests {
         assert_eq!(state.audio.snapshot().track_id.as_deref(), Some("second"));
         state.audio.shutdown();
         handle.join().unwrap();
+    }
+
+    /// 慢 Remote 源加载期间换队不能被卡住。
+    ///
+    /// 复现的是修复前的现场：`play_local` 的凭据读取 + HTTP 建连 + `load_source`
+    /// 原本都在 `play_commit` 锁内，一个卡住的 WebDAV HEAD 会让同样要这把锁的
+    /// `set_queue` 一直等下去。这里用一个「接受连接但永不回应」的服务端把建连
+    /// 钉住 1.5s，并在**确认连接已被接受之后**才计时换队。
+    #[tokio::test]
+    async fn slow_remote_load_does_not_block_queue_swap() {
+        let dir = std::env::temp_dir().join(format!("vmusic-lock-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = accepted_tx.send(());
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                drop(stream);
+            }
+        });
+
+        let track_id = "remote-slow".to_string();
+        vmusic_store::upsert_track(
+            &db,
+            &vmusic_core::Track {
+                id: track_id.clone(),
+                path: format!("http://{addr}/slow.mp3"),
+                source: vmusic_core::TrackSource::Remote,
+                title: "slow".into(),
+                artist: None,
+                album: None,
+                duration_ms: None,
+                bitrate: None,
+                sample_rate: None,
+                channels: None,
+                has_cover: false,
+                file_mtime: None,
+                file_size: None,
+                added_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let (state, handle) = playback_state_with_db(db).await;
+        let (gen, ..) = state.set_queue(vec![track_id], Some(0)).await;
+
+        let play = state.play_index_for(0, Some(gen), PlayTrigger::Pick);
+        let probe = async {
+            // 等到 play_local 真的进入网络建连（服务端已接受连接）再开始计时：
+            // 否则可能在它还忙着读 DB 时就量了，测不到锁的行为。
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(5), accepted_rx).await;
+            let t0 = std::time::Instant::now();
+            state.set_queue(vec!["other".into()], Some(0)).await;
+            t0.elapsed()
+        };
+        let (_, elapsed) = tokio::join!(play, probe);
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "慢源建连期间换队被阻塞了 {elapsed:?}——锁纪律回退了"
+        );
+
+        holder.abort();
+        state.db.close().await;
+        state.audio.shutdown();
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -2802,6 +3124,154 @@ pub(crate) mod tests {
         for code in ["upstream_timeout", "bad_request", "capability_unsupported"] {
             assert!(!AppState::relay_eligible(code), "{code} 不该接力");
         }
+    }
+
+    #[test]
+    fn bounded_map_evicts_the_oldest_write() {
+        let mut map: BoundedMap<u32> = BoundedMap::new(2);
+        map.insert("a".into(), 1);
+        map.insert("b".into(), 2);
+        assert_eq!(map.get("a"), Some(&1));
+        // 超限：丢最老的 a，新写入的 c 留下。
+        map.insert("c".into(), 3);
+        assert!(map.get("a").is_none(), "最老的条目应被淘汰");
+        assert_eq!(map.get("b"), Some(&2));
+        assert_eq!(map.get("c"), Some(&3));
+        // 手工删除腾出空间后，不再触发淘汰。
+        assert_eq!(map.remove("b"), Some(2));
+        map.insert("d".into(), 4);
+        assert_eq!(map.get("c"), Some(&3));
+        assert_eq!(map.get("d"), Some(&4));
+        // 覆盖写算「刚写过」：被覆盖的条目不该成为下一次淘汰的对象。
+        map.insert("c".into(), 30);
+        map.insert("e".into(), 5);
+        assert_eq!(map.get("c"), Some(&30), "被覆盖过的条目刷新了写入时间");
+        assert!(map.get("d").is_none(), "此时最老的是 d");
+        assert_eq!(map.insert("e".into(), 50), Some(5), "覆盖返回旧值");
+        assert_eq!(map.get_mut("e"), Some(&mut 50));
+    }
+
+    /// 字段级接线：AppState 上的那张表必须是**有上限的**那一种（改了类型但忘了
+    /// 换构造点、或将来有人换回 HashMap，就会在这里红）。
+    #[tokio::test]
+    async fn app_state_online_meta_stays_bounded() {
+        let (state, _audio) = playback_state().await;
+        for i in 0..ONLINE_META_CAP + 3 {
+            state.online_meta.lock().await.insert(
+                format!("online:netease:{i}"),
+                OnlineMetaSnap {
+                    title: format!("t{i}"),
+                    artist: None,
+                    album: None,
+                    cover: None,
+                    duration_ms: None,
+                    rg_gain_db: None,
+                    rg_peak: None,
+                },
+            );
+        }
+        let meta = state.online_meta.lock().await;
+        assert!(meta.get("online:netease:0").is_none(), "超限后最老的快照被淘汰");
+        assert!(
+            meta.get(&format!("online:netease:{}", ONLINE_META_CAP + 2))
+                .is_some(),
+            "最新写入的快照仍在"
+        );
+    }
+
+    /// 造一条在线元数据快照（只关心响度两个字段的用例用它）。
+    fn online_snap(rg_gain_db: Option<f64>, rg_peak: Option<f64>) -> OnlineMetaSnap {
+        OnlineMetaSnap {
+            title: "t".into(),
+            artist: None,
+            album: None,
+            cover: None,
+            duration_ms: None,
+            rg_gain_db,
+            rg_peak,
+        }
+    }
+
+    /// F4：在线曲的响度来自平台随取流给的 gain/peak。改之前 `current_loudness`
+    /// 对 `online:` 虚拟 id 直接返回 None（注释原文「在线曲没有 RG 标签」），
+    /// 于是响度归一化对整条在线链路都不生效。
+    #[tokio::test]
+    async fn online_tracks_report_loudness_from_the_platform_tags() {
+        let (state, _audio) = playback_state().await;
+        let id = "online:netease:1".to_string();
+        *state.queue.lock().await = vec![id.clone()];
+        *state.cursor.lock().await = Some(0);
+
+        // 还没取流（没有标签）：报「没有」，调用方按 0 dB 播。
+        assert!(state.current_loudness("track").await.is_none());
+        assert!(state.online_gain(&id).await.is_none());
+
+        state
+            .online_meta
+            .lock()
+            .await
+            .insert(id.clone(), online_snap(Some(3.5), Some(0.8)));
+        // peak=0.8 → 提升上限 −20·log10(0.8) ≈ 1.938 dB，3.5 被压到那儿。
+        let (gain, from) = state.current_loudness("track").await.expect("在线曲应当有响度");
+        assert_eq!(from, "online");
+        assert!(
+            (gain - 1.9382).abs() < 0.001,
+            "3.5 dB 的提升应被峰值余量压到约 1.94 dB，实际 {gain}"
+        );
+
+        // 防削波与本地曲同一条规则：peak=0.5 → 最多提 −20·log10(0.5) ≈ 6.02 dB。
+        state
+            .online_meta
+            .lock()
+            .await
+            .insert(id.clone(), online_snap(Some(12.0), Some(0.5)));
+        let (gain, from) = state.current_loudness("album").await.expect("在线曲应当有响度");
+        assert_eq!(from, "online", "来源要标成 online，别和本地 RG 混为一谈");
+        assert!(
+            (gain - 6.0206).abs() < 0.01,
+            "12 dB 的提升应被峰值余量压到约 6.02 dB，实际 {gain}"
+        );
+
+        // 只有 gain、没有 peak：照常归一化，只是没有防削波余量可用。
+        state
+            .online_meta
+            .lock()
+            .await
+            .insert(id, online_snap(Some(-4.0), None));
+        assert_eq!(state.current_loudness("track").await, Some((-4.0, "online")));
+    }
+
+    /// 存响度标签只在已有条目上改，不凭空造条目 —— 造出来的快照没有标题，
+    /// 播放历史会退化成平台 id。
+    #[tokio::test]
+    async fn storing_online_loudness_never_invents_an_entry() {
+        let (state, _audio) = playback_state().await;
+        state
+            .store_online_rg("online:netease:missing", Some(3.0), Some(0.9))
+            .await;
+        assert!(state.online_rg("online:netease:missing").await.is_none());
+        assert!(state.online_meta.lock().await.get("online:netease:missing").is_none());
+
+        let id = "online:netease:2".to_string();
+        state
+            .online_meta
+            .lock()
+            .await
+            .insert(id.clone(), online_snap(None, None));
+        state.store_online_rg(&id, Some(3.0), Some(0.9)).await;
+        assert_eq!(state.online_rg(&id).await, Some((3.0, Some(0.9))));
+
+        // gain 与 peak 都没给（上游没这两个字段）时不该把已有值抹掉成「有但为空」。
+        state.store_online_rg(&id, None, None).await;
+        assert_eq!(state.online_rg(&id).await, Some((3.0, Some(0.9))));
+    }
+
+    #[test]
+    fn bounded_map_caps_the_two_tables_it_guards() {
+        // 上限必须远高于正常使用规模（一张几千首的歌单不该被截断）。
+        assert!(ONLINE_META_CAP >= 4096, "在线元数据上限太小，会误伤大歌单");
+        assert!(STAGE_BEATS_CAP >= 1024, "节拍任务表上限太小，会重复分析");
+        assert!(RELAY_TRIED_CAP >= 8, "接力坏流记忆太小，防不住回环");
     }
 
     #[test]

@@ -544,6 +544,8 @@ fn stream_info(url: String, id: &str) -> StreamInfo {
         bitrate: None,
         expires_in_secs: None,
         fallback_urls: Vec::new(),
+        rg_gain_db: None,
+        rg_peak: None,
     }
 }
 

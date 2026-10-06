@@ -602,6 +602,8 @@ pub async fn stream(
         bitrate: Some(tiers[hit].1),
         expires_in_secs: None,
         fallback_urls,
+        rg_gain_db: None,
+        rg_peak: None,
     })
 }
 

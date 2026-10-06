@@ -22,25 +22,40 @@ pub(crate) struct Radio {
 }
 
 impl AppState {
+    /// FM 状态快照：只读，**不碰播放提交锁**。
+    ///
+    /// 这里读的四个状态（radio / queue / online_meta / cursor）之间没有跨字段
+    /// 原子性要求——前端拿它画 FM 面板，最坏情况是看到上一拍的组合。原实现为了
+    /// 「一致性读」去拿 `play_commit`，等于让一个 5 秒一次的轮询去和切歌抢锁；
+    /// 而且 tracks 无论 FM 开没开都先把整队拼一遍 JSON 再丢弃。
     pub(crate) async fn radio_status(&self) -> serde_json::Value {
-        let _commit = self.play_commit.lock().await;
-        let radio = self.radio.lock().await;
-        let ids = self.queue.lock().await;
-        let metadata = self.online_meta.lock().await;
-        let tracks: Vec<_> = ids
-            .iter()
-            .filter_map(|id| {
-                let (_, song) = online::split_virtual_id(id)?;
-                let m = metadata.get(id)?;
-                Some(
-                    serde_json::json!({"source":"netease", "id":song, "title":m.title,
-                "artist":m.artist,"album":m.album,"cover":m.cover,"duration_ms":m.duration_ms}),
-                )
-            })
-            .collect();
-        serde_json::json!({"active":radio.active,"loading":radio.loading,"error":radio.error,
-            "source":"netease","tracks": if radio.active && radio.initial_generation.is_none() { tracks } else { vec![] },
-            "index":*self.cursor.lock().await})
+        let (active, loading, error, want_tracks) = {
+            let radio = self.radio.lock().await;
+            (
+                radio.active,
+                radio.loading,
+                radio.error.clone(),
+                // 只有「FM 在播且盘已经就位」时前端才需要曲目清单。
+                radio.active && radio.initial_generation.is_none(),
+            )
+        };
+        let tracks: Vec<_> = if want_tracks {
+            let ids = self.queue.lock().await;
+            let metadata = self.online_meta.lock().await;
+            ids.iter()
+                .filter_map(|id| {
+                    let (_, song) = online::split_virtual_id(id)?;
+                    let m = metadata.get(id)?;
+                    Some(serde_json::json!({"source":"netease", "id":song, "title":m.title,
+                "artist":m.artist,"album":m.album,"cover":m.cover,"duration_ms":m.duration_ms}))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let index = *self.cursor.lock().await;
+        serde_json::json!({"active":active,"loading":loading,"error":error,
+            "source":"netease","tracks":tracks,"index":index})
     }
 
     pub(crate) async fn radio_start(&self) -> ApiResult<Option<usize>> {
@@ -158,6 +173,9 @@ impl AppState {
                     album: Some(t.album),
                     cover: t.cover,
                     duration_ms: Some(t.duration_ms),
+                    // 私人 FM 的曲目信息里没有响度标签；真值要等取流那一步才拿到。
+                    rg_gain_db: None,
+                    rg_peak: None,
                 },
             );
             fresh.push(id);

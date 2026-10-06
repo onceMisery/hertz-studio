@@ -351,6 +351,9 @@ pub async fn stream(
                             bitrate,
                             expires_in_secs: None,
                             fallback_urls: Vec::new(),
+                            // 酷我响应里没有观测到响度字段：按 0 dB 播。
+                            rg_gain_db: None,
+                            rg_peak: None,
                         });
                     }
                     tracing::debug!(

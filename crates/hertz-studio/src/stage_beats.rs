@@ -7,8 +7,6 @@
 //! 一个分析任务；分析跑在 spawn_blocking，不随切歌取消，失败只记进程内态，
 //! 下次播放允许重试一次。
 
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,7 +14,7 @@ use sha1::{Digest, Sha1};
 
 use vmusic_beats::{Beat, BeatMap};
 
-use crate::state::{AppState, WsEvent};
+use crate::state::{AppState, BoundedMap, WsEvent};
 
 /// 幂等表里一格的状态。
 #[derive(Debug, Clone)]
@@ -131,48 +129,42 @@ async fn request(state: &Arc<AppState>, track_id: &str, retry_failed: bool) -> O
 /// 纯状态机：磁盘未命中后，幂等表如何决策。Ready 态在此出现只可能是
 /// 缓存文件被删/mtime 变了（调用方已先查磁盘），重开任务。
 pub(crate) fn table_decide(
-    table: &mut HashMap<String, TaskState>,
+    table: &mut BoundedMap<TaskState>,
     key: &str,
     retry_failed: bool,
 ) -> Action {
-    match table.entry(key.to_string()) {
-        Entry::Vacant(e) => {
-            e.insert(TaskState::Analyzing);
+    match table.get_mut(key) {
+        None => {
+            table.insert(key.to_string(), TaskState::Analyzing);
             Action::Spawn
         }
-        Entry::Occupied(e) => match e.get() {
-            TaskState::Analyzing => Action::Wait,
-            TaskState::Ready(_) => {
-                *e.into_mut() = TaskState::Analyzing;
+        Some(TaskState::Analyzing) => Action::Wait,
+        // 磁盘缓存被删/mtime 变了（调用方已先查磁盘）：重开任务。
+        Some(TaskState::Ready(_)) => {
+            table.insert(key.to_string(), TaskState::Analyzing);
+            Action::Spawn
+        }
+        Some(TaskState::Failed(r)) => {
+            let reason = *r;
+            if retry_failed {
+                table.insert(key.to_string(), TaskState::Analyzing);
                 Action::Spawn
+            } else {
+                Action::Fail(reason)
             }
-            TaskState::Failed(r) => {
-                if retry_failed {
-                    *e.into_mut() = TaskState::Analyzing;
-                    Action::Spawn
-                } else {
-                    Action::Fail(*r)
-                }
-            }
-        },
+        }
     }
 }
 
 async fn resolve_audio(state: &Arc<AppState>, track_id: &str) -> Option<AudioRef> {
     if let Some((source, id)) = crate::online::split_virtual_id(track_id) {
-        // 在线曲：只认下载完成 rename 后的正式缓存（find_cached_by_key 跳过
+        // 在线曲：只认下载完成 rename 后的正式缓存（CacheIndex::find 跳过
         // .part 且要求 >1024 字节）。未完成不分析、不轮询、不挂 rename。
         let quality = {
             let prefs = state.quality.lock().await;
             crate::online::quality::get(&prefs, &source)
         };
-        let path = crate::online::cache::find_cached_by_key(
-            &state.online_cache_dir(),
-            &source,
-            &id,
-            quality.as_str(),
-        )
-        .await?;
+        let path = state.cache_index.find(&source, &id, quality.as_str()).await?;
         let key = online_cache_key(track_id);
         audio_ref(path, key).await
     } else {
@@ -441,7 +433,7 @@ mod tests {
 
     #[test]
     fn idempotent_table_decisions() {
-        let mut t: HashMap<String, TaskState> = HashMap::new();
+        let mut t: BoundedMap<TaskState> = BoundedMap::new(crate::state::STAGE_BEATS_CAP);
         // 首次：建任务。
         assert!(matches!(table_decide(&mut t, "k", false), Action::Spawn));
         assert!(matches!(t.get("k"), Some(TaskState::Analyzing)));
@@ -463,5 +455,24 @@ mod tests {
         // Ready 但磁盘文件没了（被外部删/LRU）：重开任务。
         t.insert("r".into(), TaskState::Ready(PathBuf::from("r.json")));
         assert!(matches!(table_decide(&mut t, "r", false), Action::Spawn));
+    }
+
+    /// 幂等表不能随「分析过的曲目数」无限长：越过上限要淘汰最老的格子，
+    /// 而淘汰只影响幂等性（最坏是重开一次分析），不影响正确性。
+    #[test]
+    fn idempotency_table_is_bounded() {
+        let mut t: BoundedMap<TaskState> = BoundedMap::new(crate::state::STAGE_BEATS_CAP);
+        for i in 0..crate::state::STAGE_BEATS_CAP + 5 {
+            assert!(matches!(
+                table_decide(&mut t, &format!("k{i}"), false),
+                Action::Spawn
+            ));
+        }
+        assert!(t.get("k0").is_none(), "最老的格子应被淘汰");
+        assert!(t.get("k4").is_none(), "淘汰按写入顺序推进");
+        assert!(
+            matches!(t.get(&format!("k{}", crate::state::STAGE_BEATS_CAP + 4)), Some(TaskState::Analyzing)),
+            "最新写入的格子保留"
+        );
     }
 }

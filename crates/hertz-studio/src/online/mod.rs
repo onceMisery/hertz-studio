@@ -688,6 +688,16 @@ pub struct StreamInfo {
     /// 落盘/播放 `url` 失败时调用方按序降级重试（spec §2.2 QQ vkey 决策条）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_urls: Vec<String>,
+    /// 上游随取流一起给的响度标签，语义与本地曲的 ReplayGain track_gain/track_peak
+    /// 一致（dB / 线性峰值）。拿不到就是 None。
+    ///
+    /// 目前**只有网易云实测确认有这两个字段**（`/api/song/enhance/player/url` 的
+    /// `data[0]` 带 `gain`/`peak`，另有 `closedGain`/`closedPeak`）；其余音源没有
+    /// 观测到对应字段，一律 None —— 不猜测、不派生，没有标签就按 0 dB 播。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rg_gain_db: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rg_peak: Option<f64>,
 }
 
 /// 取流。

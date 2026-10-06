@@ -18,6 +18,7 @@ use futures::StreamExt;
 use tokio::task::JoinHandle;
 
 use crate::error::ApiError;
+use crate::online::cache;
 use crate::online::download_client;
 
 /// 预读基础块与封顶：max(256KB, 总长 8%)，封顶 1.5MB。
@@ -36,8 +37,16 @@ pub enum StreamMode {
     WaitFull,
 }
 
-// pub(crate)：state.rs 经 Download::inner / HttpMediaSource::open 跨模块传递
-// Arc<Inner>，类型必须在 crate 内可命名（字段与方法仍保持私有）。
+/// pub(crate)：state.rs 经 Download::inner / HttpMediaSource::open 跨模块传递
+/// Arc<Inner>，类型必须在 crate 内可命名（字段与方法仍保持私有）。
+///
+/// 锁纪律：下面所有访问点都直接 `.lock().unwrap()`，这是有意的。临界区里只有
+/// 赋值、克隆与整数算术，没有任何可能 panic 的操作（不索引、不 unwrap、不格式化），
+/// 因此锁不可能中毒——`PoisonError` 在这里等价于「不可能发生」。若为了消除 unwrap
+/// 把毒化降级成日志/错误，这些方法得集体换签名（其中几个是 `AudioSource` trait
+/// 的实现，签名由 trait 固定），代价远大于收益，还会把真正该修的 panic 掩盖成
+/// 「一次下载失败」。release 是 `panic = "abort"`，守住「临界区不 panic」就守住了
+/// 这一片的安全性。
 pub(crate) struct Inner {
     downloaded: Mutex<u64>,
     cv: Condvar,
@@ -355,11 +364,15 @@ pub fn prebuffer_target(total: Option<u64>) -> u64 {
 }
 
 /// 启动下载。`key` 不含扩展名（如 `qq-a1-lossless`）；urls = [主 url, fallback...]。
+///
+/// `index` 是缓存目录的内存索引：rename 落盘成功后要把正式文件登记进去
+/// （写时增量维护），否则这次下载的成果在本次进程里查不到，会白下一次。
 pub fn start(
     dir: PathBuf,
     key: String,
     urls: Vec<String>,
     referer: Option<String>,
+    index: Arc<cache::CacheIndex>,
 ) -> Result<Download, ApiError> {
     let part_path = dir.join(format!(".{key}.part"));
     let _ = std::fs::remove_file(&part_path);
@@ -581,6 +594,7 @@ pub fn start(
                     written = written,
                     file = final_path.file_name().unwrap_or_default().to_string_lossy()
                 );
+                index.note_written(&final_path).await;
                 inner.finish();
                 return Ok(final_path);
             }
@@ -704,6 +718,52 @@ mod tests {
         late[4..8].copy_from_slice(b"ftyp");
         late[0..4].copy_from_slice(&88u32.to_be_bytes());
         assert_eq!(plan_mode(&late).0, StreamMode::WaitFull);
+    }
+
+    /// 落盘后必须自动进缓存索引——这是「写时增量维护」的端到端证据：少了它，
+    /// 本次进程里刚下完的曲子在查找时看不见，会被判定为未缓存而重复下载。
+    #[tokio::test]
+    async fn finished_download_is_registered_in_the_cache_index() {
+        // 本地 HTTP 服务：一段 >1024 字节的假 mp3（ID3 头让 sniff_ext 认成 mp3）。
+        let payload = {
+            let mut v = b"ID3\x03\x00\x00\x00\x00\x00\x00".to_vec();
+            v.resize(4096, 0x55);
+            v
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/audio",
+            axum::routing::get(move || {
+                let body = payload.clone();
+                async move { body }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dir = std::env::temp_dir().join(format!("vmusic-dl-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
+        let dl = start(
+            dir.clone(),
+            "qq-a1-standard".into(),
+            vec![format!("http://{addr}/audio")],
+            None,
+            index.clone(),
+        )
+        .unwrap();
+        let path = dl.join().await.unwrap();
+
+        assert!(path.exists(), "下载完成后正式缓存文件应在");
+        assert_eq!(
+            index.find("qq", "a1", "standard").await.as_deref(),
+            Some(path.as_path()),
+            "刚落盘的文件必须已被索引登记"
+        );
+        assert_eq!(index.stats().files, 1);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[test]
