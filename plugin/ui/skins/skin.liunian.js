@@ -29,21 +29,17 @@
 (function () {
   'use strict';
 
-  /// <img> 位封面：插件形态下远程地址要经 sidecar 换成 data URL（沙箱 CSP 画不
-  /// 出 https 图）。HertzCovers 由 app.js 挂出；契约检查的沙箱只加载本模块，
-  /// 拿不到时回落成直接赋值，即独立形态的同款行为。
-  function applyImg(img, url) {
-    if (window.HertzCovers) { window.HertzCovers.applyImg(img, url); return; }
-    if (!img) return;
-    if (url) img.src = url;
-    else img.removeAttribute('src');
-  }
+  // 低层工具复用 skins/skin-shared.js（顺序加载保证它先于本模块）：
+  // 封面位图回填、带锚点的搬运与还原、自建节点登记。
+  var applyImg = window.SkinShared.applyImg;
 
   var SKIN_ID = 'liunian';
 
   var mounted = false;
-  var moves = [];     // { node, anchor }：搬运记录，后进先出地还原
-  var built = [];     // 本文件新建的节点，卸载时 remove
+  // 搬运控制器：原位留 <span class="ln-anchor" data-ln="1">，卸载时 LIFO 还原。
+  var moves = window.SkinShared.createMoves('ln-anchor', 'data-ln');
+  // 自建节点登记：卸载时统一 remove。
+  var built = window.SkinShared.createBuilt();
   var observer = null;
   var refs = {};      // 重编排队列里的 DOM 引用
   var savedText = []; // 临时改过的文本，{ node, text }
@@ -149,26 +145,11 @@
   // -------------------------------------------------------------------------
 
   function relocate(node, parent, before) {
-    if (!node || !parent) return node || null;
-    var anchor = document.createElement('span');
-    anchor.className = 'ln-anchor';
-    anchor.setAttribute('data-ln', '1');
-    node.parentNode.insertBefore(anchor, node);
-    if (before) parent.insertBefore(node, before);
-    else parent.appendChild(node);
-    moves.push({ node: node, anchor: anchor });
-    return node;
+    return moves.relocate(node, parent, before);
   }
 
   function restoreMoves() {
-    // 后进先出：被包裹进新节点的（如 disc-wrap 进 .bar-row1、stage 进 .ln-right），
-    // 内层先还原到锚点（锚点在原容器），顺序天然安全。
-    for (var i = moves.length - 1; i >= 0; i -= 1) {
-      var m = moves[i];
-      if (m.anchor.parentNode) m.anchor.parentNode.insertBefore(m.node, m.anchor);
-      if (m.anchor.parentNode) m.anchor.remove();
-    }
-    moves = [];
+    moves.restore();
   }
 
   // -------------------------------------------------------------------------
@@ -176,18 +157,11 @@
   // -------------------------------------------------------------------------
 
   function make(tag, cls, parent) {
-    var n = document.createElement(tag || 'div');
-    if (cls) n.className = cls;
-    if (parent) parent.appendChild(n);
-    built.push(n);
-    return n;
+    return built.make(tag, cls, parent);
   }
 
   function removeBuilt() {
-    built.forEach(function (n) {
-      if (n.parentNode) n.parentNode.removeChild(n);
-    });
-    built = [];
+    built.remove();
   }
 
   // -------------------------------------------------------------------------

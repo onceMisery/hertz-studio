@@ -48,6 +48,7 @@ const SKIN_SHEEN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.sheen.c
 const SKIN_WORKBENCH_CSS: &str = include_str!("../../../plugin/ui/skins/skin.workbench.css");
 const SKIN_LIUNIAN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.css");
 const SKIN_IOS_CSS: &str = include_str!("../../../plugin/ui/skins/skin.ios.css");
+const SKIN_SHARED_JS: &str = include_str!("../../../plugin/ui/skins/skin-shared.js");
 const SKIN_LIUNIAN_JS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.js");
 const SKIN_QINGFENG_CSS: &str = include_str!("../../../plugin/ui/skins/skin.qingfeng.css");
 const SKIN_QINGFENG_JS: &str = include_str!("../../../plugin/ui/skins/skin.qingfeng.js");
@@ -103,6 +104,8 @@ const ONLINE_LOGIN_JS: &str = include_str!("../../../plugin/ui/online-login.js")
 const ONLINE_JS: &str = include_str!("../../../plugin/ui/online.js");
 const ONLINE_PLAYLISTS_JS: &str = include_str!("../../../plugin/ui/online-playlists.js");
 const ONLINE_PLAYLIST_VIEW_JS: &str = include_str!("../../../plugin/ui/online-playlist-view.js");
+// 顶栏全局搜索：下拉面板预览在线结果（歌曲/歌单/歌手/专辑），由 app.js 启动时 bind()。
+const TOPSEARCH_JS: &str = include_str!("../../../plugin/ui/topsearch.js");
 const ONLINE_CSS: &str = include_str!("../../../plugin/ui/online.css");
 // 收藏与每日推荐。两者都先于 app.js 加载，由 app.js 在启动序列里 bind()。
 const FAVORITES_JS: &str = include_str!("../../../plugin/ui/favorites.js");
@@ -325,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
             "/online-playlist-view.js",
             get(|| asset(JS, ONLINE_PLAYLIST_VIEW_JS)),
         )
+        .route("/topsearch.js", get(|| asset(JS, TOPSEARCH_JS)))
         .route("/favorites.js", get(|| asset(JS, FAVORITES_JS)))
         .route("/daily.js", get(|| asset(JS, DAILY_JS)))
         .route("/daily-view.js", get(|| asset(JS, DAILY_VIEW_JS)))
@@ -353,6 +357,7 @@ async fn main() -> anyhow::Result<()> {
             "/skins/skin.qingfeng.css",
             get(|| asset(CSS, SKIN_QINGFENG_CSS)),
         )
+        .route("/skins/skin-shared.js", get(|| asset(JS, SKIN_SHARED_JS)))
         .route("/skins/skin.liunian.js", get(|| asset(JS, SKIN_LIUNIAN_JS)))
         .route(
             "/skins/skin.qingfeng.js",
@@ -495,12 +500,14 @@ const ASSET_FINGERPRINT_INPUTS: &[&str] = &[
     ONLINE_JS,
     ONLINE_PLAYLISTS_JS,
     ONLINE_PLAYLIST_VIEW_JS,
+    TOPSEARCH_JS,
     FAVORITES_JS,
     DAILY_JS,
     DAILY_VIEW_JS,
     PALETTE_JS,
     VIDEO_EXPORT_JS,
     OBS_CSS_JS,
+    SKIN_SHARED_JS,
     SKIN_LIUNIAN_JS,
     SKIN_QINGFENG_JS,
     STYLE_CSS,

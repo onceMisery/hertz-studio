@@ -367,6 +367,77 @@ body::before {
 .search-clear svg { width: 14px; height: 14px; }
 .search-clear:hover { background: var(--hover); color: var(--text); }
 
+/* ---------- 顶栏全局搜索下拉（topsearch.js） ---------- */
+
+/* 面板是 position:fixed 的自由浮层，left/top/width 由 JS 按输入框的实际
+   位置算——五套皮肤各自给 .topsearch 换圆角/底色/摆位，锚在布局流里会被
+   皮肤裁掉或贴错边，JS 定位对所有皮肤一视同仁。 */
+.ts-menu {
+  position: fixed;
+  z-index: 260;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  max-height: min(540px, 72vh);
+  overflow: auto;
+  background: var(--panel-solid, var(--panel));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+}
+.ts-menu[hidden] { display: none; }
+
+/* 档位行：与在线页的类型 chips 同一套 .chip 画法。 */
+.ts-kind {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.ts-kind .chip[hidden] { display: none; }
+
+.ts-body { display: flex; flex-direction: column; min-height: 0; }
+.ts-hint { padding: 6px 4px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+/* 预览里的歌行复用 .track 栅格，但菜单只有半栏宽：专辑/音质两列收掉，
+   行高压到两行内容正好放下——快速起播是这个面板最重要的单点功能。 */
+.ts-menu .track {
+  grid-template-columns: 28px 34px minmax(0, 1fr) auto auto;
+  height: auto;
+  min-height: 46px;
+  padding: 5px 6px;
+  gap: 10px;
+}
+.ts-menu .track .t-album,
+.ts-menu .track .t-quality { display: none; }
+.ts-menu .track .t-art { width: 34px; height: 34px; }
+
+/* 歌单/歌手/专辑预览卡：在线页 .playlist-card 一族的紧凑变体。 */
+.ts-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.ts-card { padding: 8px; gap: 10px; }
+.ts-card .playlist-card-cover { width: 44px; height: 44px; }
+.ts-card.is-openable { cursor: pointer; }
+.ts-card.is-openable:hover { border-color: var(--accent); }
+
+.ts-more {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  padding: 8px 4px 2px;
+  cursor: pointer;
+  border-top: 1px solid var(--line);
+}
+.ts-more:hover { text-decoration: underline; }
+
 .top-right { display: flex; align-items: center; gap: 14px; margin-left: auto; }
 
 .badge-demo {
@@ -905,6 +976,12 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
 .t-act:hover { color: var(--text); background: var(--hover); }
 .t-act.t-act-danger:hover { color: var(--danger); background: var(--danger-wash, rgba(255, 90, 90, 0.14)); }
 .t-act svg { width: 16px; height: 16px; fill: currentColor; }
+
+/* 行内操作区的图标比通用 .t-act 略大：28px 的方钮里 16px 的图标偏小，
+   「插入下一首」那类多笔画符号（列表 + 箭头）尤其糊成一团。18px 是
+   「能看清笔画」与「不撑满方钮」之间的平衡点。
+   只作用于曲库行 —— 队列行 / 歌单行 / 弹层里的同名按钮仍用 16px。 */
+.track .t-act svg { width: 18px; height: 18px; }
 
 /* 正在播放的 equalizer 指示 */
 .t-eq { display: none; gap: 2px; align-items: flex-end; height: 13px; }

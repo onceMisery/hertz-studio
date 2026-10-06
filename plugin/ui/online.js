@@ -32,11 +32,15 @@
     tracks: [],
     total: 0,
     loading: false,
-    // 搜索类型：'song'（单曲，默认）| 'playlist'（歌单）。只有当前音源登记了
-    // playlist_search 能力位时才可能出现 'playlist'（见 renderKind）。
+    // 搜索类型：'song'（单曲，默认）| 'playlist'（歌单）| 'artist'（歌手）|
+    // 'album'（专辑）。非单曲类型只有当前音源登记了对应能力位时才可能出现
+    // （见 renderKind）；顶栏搜索框（topsearch.js）共用这一份 kind。
     kind: 'song',
-    // 歌单搜索结果（仅展示，无歌单详情端点）。
+    // 歌单搜索结果（咪咕只展示不可进详情；网易云可进详情）。
     playlists: [],
+    // 歌手 / 专辑搜索结果，卡片可点进详情页。
+    artists: [],
+    albums: [],
     // All 聚合时为 true：此入口保持单曲试听，跨源队列由宿主的混合队列入口管理。
     aggregate: false,
     // 音源清单由 /v1/online/sources 填；拉不到时下拉框保持 index.html 的静态项。
@@ -558,8 +562,10 @@
   }
 
   async function search(opts) {
-    // 歌单类型走独立端点与渲染路径；单曲（默认）保持既有渐进聚合搜索。
+    // 非单曲类型各走各的端点与渲染路径；单曲（默认）保持既有渐进聚合搜索。
     if (onlineState.kind === 'playlist') return searchPlaylists(opts);
+    if (onlineState.kind === 'artist') return searchArtists(opts);
+    if (onlineState.kind === 'album') return searchAlbums(opts);
     opts = opts || {};
     cancelSearch();
     var epoch = searchEpoch;
@@ -622,25 +628,39 @@
     return !!(info && (info.caps || []).indexOf(cap) >= 0);
   }
 
-  // 只剩单个音源时隐藏「歌单」选项并强制回到单曲，避免留下一个点了必 404 的项。
+  // 搜索类型 → 音源能力位。单曲恒可用；其余类型缺能力位时整个隐藏，
+  // 避免留下一个点了必 404 的项（caps 是 UI 的唯一事实表）。
+  var KIND_CAPS = {
+    song: null,
+    playlist: 'playlist_search',
+    artist: 'artist_search',
+    album: 'album_search',
+  };
+
+  function kindAllowed(kind, source) {
+    var cap = KIND_CAPS[kind];
+    return !cap || (source !== 'all' && sourceHasCap(source, cap));
+  }
+
   function renderKind() {
     var host = $('online-kind');
     if (!host) return;
-    var canPlaylist = onlineState.source !== 'all'
-      && sourceHasCap(onlineState.source, 'playlist_search');
-    if (!canPlaylist) onlineState.kind = 'song';
-    host.hidden = !canPlaylist;
-    if (host.querySelectorAll) {
-      host.querySelectorAll('[data-kind]').forEach(function (btn) {
-        var on = btn.dataset.kind === onlineState.kind;
-        if (btn.classList && btn.classList.toggle) btn.classList.toggle('active', on);
-        else btn.className = 'chip' + (on ? ' active' : '');
-      });
-    }
+    // 当前类型在换源后可能失格：回退到单曲，别让 UI 停在打不出请求的状态。
+    if (!kindAllowed(onlineState.kind, onlineState.source)) onlineState.kind = 'song';
+    var anyExtra = false;
+    host.querySelectorAll('[data-kind]').forEach(function (btn) {
+      var can = kindAllowed(btn.dataset.kind, onlineState.source);
+      btn.hidden = !can;
+      if (can && btn.dataset.kind !== 'song') anyExtra = true;
+      var on = btn.dataset.kind === onlineState.kind;
+      if (btn.classList && btn.classList.toggle) btn.classList.toggle('active', on);
+      else btn.className = 'chip' + (on ? ' active' : '');
+    });
+    host.hidden = !anyExtra;
   }
 
   function setKind(kind) {
-    kind = kind === 'playlist' ? 'playlist' : 'song';
+    if (!Object.prototype.hasOwnProperty.call(KIND_CAPS, kind)) kind = 'song';
     if (kind === onlineState.kind) return;
     onlineState.kind = kind;
     renderKind();
@@ -717,8 +737,8 @@
     body.appendChild(list);
   }
 
-  // 歌单卡片：封面（无则占位）+ 名称 + 曲目数 + 播放量。不做点击进详情、
-  // 不给播放按钮——咪咕没有歌单详情端点，歌单内曲目也取不到流。
+  // 歌单卡片：封面（无则占位）+ 名称 + 曲目数 + 播放量。登记了 playlist_detail
+  // 的音源（网易云）卡片可点进歌单详情；咪咕没有歌单详情端点，只展示不可点。
   function playlistCard(p) {
     var card = document.createElement('div');
     card.className = 'playlist-card';
@@ -744,7 +764,148 @@
     main.appendChild(sub);
     card.appendChild(cover);
     card.appendChild(main);
+    if (p.source && sourceHasCap(p.source, 'playlist_detail')) {
+      attachEntityOpen(card, {
+        kind: 'playlist',
+        source: p.source,
+        id: p.id,
+        name: p.name,
+        cover: p.cover,
+        track_count: p.track_count,
+        play_count: p.play_count,
+        creator: p.creator,
+      });
+    }
     return card;
+  }
+
+  // 歌手/专辑搜索结果卡：与歌单卡同一套类名（.playlist-card 一族），两处
+  // 结果网格因此永远同款。两者都有详情端点，卡片恒可点。
+  function entityCard(kind, item) {
+    var card = document.createElement('div');
+    card.className = 'playlist-card';
+    card.dataset.source = item.source || '';
+    var cover = document.createElement('div');
+    cover.className = 'playlist-card-cover';
+    var url = safeCoverUrl(item.cover);
+    if (url) applyBg(cover, url);
+    else cover.classList.add('is-empty');
+    var main = document.createElement('div');
+    main.className = 'playlist-card-main';
+    var title = document.createElement('div');
+    title.className = 'playlist-card-title';
+    title.textContent = item.name || (kind === 'artist' ? '未知歌手' : '未知专辑');
+    var sub = document.createElement('div');
+    sub.className = 'playlist-card-sub';
+    var bits = [];
+    if (kind === 'album' && item.artist) bits.push(item.artist);
+    if (kind === 'artist' && item.alias) bits.push(item.alias);
+    if (item.track_count != null) bits.push(item.track_count + ' 首');
+    if (kind === 'artist' && item.song_count != null) bits.push(item.song_count + ' 首歌曲');
+    sub.textContent = bits.join(' · ') || '—';
+    main.appendChild(title);
+    main.appendChild(sub);
+    card.appendChild(cover);
+    card.appendChild(main);
+    attachEntityOpen(card, {
+      kind: kind,
+      source: item.source,
+      id: item.id,
+      name: item.name,
+      cover: item.cover,
+      track_count: kind === 'album' ? item.track_count : item.song_count,
+    });
+    return card;
+  }
+
+  // 卡片点开详情：集合详情层住在歌单视图里（OnlinePlaylistView），先切视图
+  // 再开层由它内部的 ensureVisible 收口。回车/空格与点击同义。
+  function attachEntityOpen(card, spec) {
+    card.classList.add('is-openable');
+    card.setAttribute('role', 'button');
+    card.tabIndex = 0;
+    function open() {
+      if (window.OnlinePlaylistView && window.OnlinePlaylistView.openCollection) {
+        window.OnlinePlaylistView.openCollection(spec);
+      }
+    }
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+    });
+  }
+
+  // ── 歌手 / 专辑搜索 ─────────────────────────────────────────────────────
+  //
+  // 与歌单搜索同构：单端点单页，能力位（artist_search / album_search）没有
+  // 的音源到不了这里。结果卡片点开详情页（歌手热门歌曲 / 专辑全部曲目）。
+
+  async function searchArtists(opts) {
+    return searchEntities('artist', '/v1/online/artists/search', opts);
+  }
+
+  async function searchAlbums(opts) {
+    return searchEntities('album', '/v1/online/albums/search', opts);
+  }
+
+  async function searchEntities(kind, endpoint, opts) {
+    opts = opts || {};
+    cancelSearch();
+    var epoch = searchEpoch;
+    var source = onlineState.source;
+    var query = onlineState.q.trim();
+    var label = kind === 'artist' ? '歌手' : '专辑';
+    onlineState.aggregate = false;
+    onlineState.tracks = [];
+    onlineState.total = 0;
+    if (source === 'all') {
+      renderPlaylistHint(label + '搜索需要选定单个音源。');
+      if (H.ui.onlineCount) H.ui.onlineCount.textContent = '0 个' + label;
+      return;
+    }
+    if (!query) {
+      renderPlaylistHint('输入关键词搜索' + label + '。');
+      if (H.ui.onlineCount) H.ui.onlineCount.textContent = '0 个' + label;
+      return;
+    }
+    if (H.ui.onlineCount) H.ui.onlineCount.textContent = '搜索中…';
+    var params = new URLSearchParams({ source: source, q: query, limit: String(PAGE_SIZE) });
+    try {
+      var result = await T.get(endpoint + '?' + params.toString());
+      if (epoch !== searchEpoch) return;
+      renderEntities(kind, result, query);
+    } catch (err) {
+      if (epoch !== searchEpoch) return;
+      renderPlaylistHint(H.errText(label + '搜索失败', err));
+      if (!opts.silent) H.toast(H.errText(label + '搜索失败', err), 'error');
+    }
+  }
+
+  function renderEntities(kind, result, query) {
+    var body = H.ui.onlineBody;
+    if (!body) return;
+    var label = kind === 'artist' ? '歌手' : '专辑';
+    var lists = (result && (kind === 'artist' ? result.artists : result.albums)) || [];
+    if (kind === 'artist') onlineState.artists = lists;
+    else onlineState.albums = lists;
+    body.innerHTML = '';
+    if (H.ui.onlineCount) H.ui.onlineCount.textContent = lists.length + ' 个' + label;
+    var summary = document.createElement('div');
+    summary.className = 'search-summary';
+    summary.setAttribute('role', 'status');
+    summary.textContent = '“' + query + '” · ' + lists.length + ' 个' + label;
+    body.appendChild(summary);
+    if (!lists.length) {
+      var empty = document.createElement('div');
+      empty.className = 'hint';
+      empty.textContent = '没有找到' + label + '，试试别的关键词。';
+      body.appendChild(empty);
+      return;
+    }
+    var list = document.createElement('div');
+    list.className = 'playlist-results';
+    lists.forEach(function (item) { list.appendChild(entityCard(kind, item)); });
+    body.appendChild(list);
   }
 
   function cacheTracks(tracks) {
@@ -1591,6 +1752,10 @@
       search({ silent: true });
     },
     search: search,
+    // 搜索类型切换（song | playlist | artist | album）。顶栏搜索框与在线页
+    // 的类型 chips 共用这一份 kind；切到没有能力位的类型会被 renderKind
+    // 拉回单曲。同类型是空操作。
+    setKind: setKind,
     playAll: playAll,
     // 行工厂：歌单抽屉复用同一套标记/VIP/置灰，activate 由调用方注入。
     row: buildRow,

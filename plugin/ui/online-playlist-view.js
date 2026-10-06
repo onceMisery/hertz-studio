@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 //
-// 在线歌单的两层界面：网格层（歌单卡片）→ 详情层（信息面板 + 曲目）。
+// 在线集合的两层界面：网格层（歌单卡片）→ 详情层（信息面板 + 曲目）。
+//
+// 「集合」有三种：歌单（/v1/online/playlist）、专辑（/v1/online/album）、
+// 歌手热门歌曲（/v1/online/artist）。三者共用同一层 UI 与分页机制，只有
+// 端点与头部信息字段不同——openCollection(kind, …) 是统一入口，旧入口
+// open/openById 仍是歌单语义的便捷包装。
 //
 // 详情层的曲目有两种排布：封面（默认，一眼看得到专辑图）与列表（读专辑/时长
 // 这些文本列）。这与参考实现一致——它默认把曲目铺成封面卡片，文本列表是二级
@@ -11,13 +16,14 @@
 //   · 层级切换只有 `H.setLayer()` 一个出口，由 app.js 收口四层显隐，这里不
 //     自己写 hidden，也不引一套导航栈（深度只有两层）。
 //   · 曲目行走 `Online.row()`，与在线搜索结果同一套 VIP 置灰 / 收藏 / 试听。
-//   · 分页用 `/v1/online/playlist` 现成的 offset+limit，尾哨兵 + 「加载更多」
-//     按钮双保险，与曲库的哨兵分页同一套写法。
-//   · 数据只有 OnlinePlaylists 那一份，这里不复制缓存。
+//   · 分页用集合端点现成的 offset+limit，尾哨兵 + 「加载更多」按钮双保险，
+//     与曲库的哨兵分页同一套写法。
+//   · 歌单数据只有 OnlinePlaylists 那一份，这里不复制缓存；专辑/歌手由
+//     搜索结果直接带齐头部信息，不需要清单。
 //
 // 三条必须如实的地方：
-//   1. 加载失败 ≠ 空歌单。两者渲染成不同内容，绝不让鉴权/网络故障看起来像
-//      「这个歌单是空的」。
+//   1. 加载失败 ≠ 空集合。两者渲染成不同内容，绝不让鉴权/网络故障看起来像
+//      「这个集合是空的」。
 //   2. 错误存判别式而不是成品文案：`state.error = { kind, message }`，渲染时
 //      才翻成中文。后端目前没有「非公开歌单」语义（Capability 里也没有订阅
 //      类能力），所以只有 generic 一支会真的出现；等后端补了错误码，这里加
@@ -43,21 +49,41 @@
   var state = {
     // 网格层
     items: [],        // OnlinePlaylists.all() 的扁平清单
-    sourceFilter: '', // 从某个音源分组进入时只显示该音源
+    sourceFilter: '', // 从某个音源分组进入时只显示该源
     query: '',
     // 详情层
     from: 'arrange',  // 进入详情前的层，返回时回到那里
     source: null,
-    playlist: null,
+    // 集合种类与头部信息。kind: playlist | album | artist；subject 按种类
+    // 装各自有的字段（歌单有 play_count/creator，专辑有 artist，歌手只有
+    // name/cover/track_count）。
+    kind: 'playlist',
+    subject: null,
     tracks: [],
     total: 0,
     offset: 0,
+    // 专辑/歌手端点的翻页标记（上游不给总数时靠它判断「还有没有下一页」）。
+    // 歌单详情没有这个字段，翻页看 tracks.length < total。
+    more: false,
     phase: 'idle',    // idle | loading | ready | error
     error: null,      // { kind: 'generic' | 'not-public', message }
     loadingMore: false,
     trackQuery: '',
     mode: 'cover',    // cover | list
   };
+
+  // 集合种类 → 中文名与取数端点。详情层的一切「歌单」字样都从这里翻。
+  var KIND_META = {
+    playlist: { label: '歌单', endpoint: '/v1/online/playlist' },
+    album: { label: '专辑', endpoint: '/v1/online/album' },
+    artist: { label: '歌手', endpoint: '/v1/online/artist' },
+  };
+  function kindLabel() {
+    return (KIND_META[state.kind] || KIND_META.playlist).label;
+  }
+  function kindEndpoint() {
+    return (KIND_META[state.kind] || KIND_META.playlist).endpoint;
+  }
 
   function el(id) { return document.getElementById(id); }
   function tr() { return window.VMusicTransport; }
@@ -196,13 +222,26 @@
 
   // ── 详情层 ───────────────────────────────────────────────────────────────
 
-  function openDetail(source, p, from) {
+  // 统一入口。spec = { kind, source, id, name, cover, track_count,
+  // play_count, creator, artist }。kind 缺省按歌单处理（旧调用方只给歌单）。
+  function openCollection(spec, from) {
+    spec = spec || {};
+    state.kind = KIND_META[spec.kind] ? spec.kind : 'playlist';
     state.from = from || 'arrange';
-    state.source = source;
-    state.playlist = p;
+    state.source = spec.source;
+    state.subject = {
+      id: spec.id,
+      name: spec.name,
+      cover: spec.cover,
+      track_count: spec.track_count,
+      play_count: spec.play_count,
+      creator: spec.creator,
+      artist: spec.artist,
+    };
     state.tracks = [];
     state.total = 0;
     state.offset = 0;
+    state.more = false;
     state.phase = 'loading';
     state.error = null;
     state.loadingMore = false;
@@ -214,6 +253,11 @@
     renderInfo();
     renderTracks();
     loadPage(0);
+  }
+
+  // 旧歌单入口：签名保持不变（网格层/歌单视图在线行都还在用）。
+  function openDetail(source, p, from) {
+    openCollection(Object.assign({ kind: 'playlist' }, p, { source: source }), from);
   }
 
   // 两层界面挂在歌单视图里。从在线面板的歌单卡片进来时当前视图还是「在线」，
@@ -237,7 +281,7 @@
   }
 
   async function loadPage(offset) {
-    var p = state.playlist;
+    var p = state.subject;
     if (!p) return;
     if (offset === 0) {
       state.phase = 'loading';
@@ -248,7 +292,7 @@
     }
     var d;
     try {
-      d = await tr().get('/v1/online/playlist?source=' + encodeURIComponent(state.source)
+      d = await tr().get(kindEndpoint() + '?source=' + encodeURIComponent(state.source)
         + '&id=' + encodeURIComponent(p.id) + '&limit=' + PAGE + '&offset=' + offset);
     } catch (e) {
       state.loadingMore = false;
@@ -260,6 +304,17 @@
       };
       renderTracks();
       return;
+    }
+    // 歌单端点回 { playlist, total, tracks }；专辑/歌手端点回 CollectionDetail
+    // （name/cover/total/more）。头部信息以端点返回为准——搜索卡片上的快照
+    // 可能过期。
+    if (state.kind === 'playlist') {
+      state.subject.name = (d.playlist && d.playlist.name) || p.name;
+      state.subject.cover = (d.playlist && d.playlist.cover) || p.cover;
+    } else {
+      if (d.name) state.subject.name = d.name;
+      if (d.cover) state.subject.cover = d.cover;
+      state.more = !!d.more;
     }
     var tracks = (d.tracks || []).map(function (t) {
       if (!t.source) t.source = state.source;
@@ -275,7 +330,10 @@
   }
 
   function hasMore() {
-    return state.phase === 'ready' && state.tracks.length < state.total;
+    if (state.phase !== 'ready') return false;
+    // 歌手/专辑端点带 more 布尔（上游不给总数时 total 是保守值），优先用它。
+    if (state.kind !== 'playlist' && typeof state.more === 'boolean') return state.more;
+    return state.tracks.length < state.total;
   }
 
   function loadMore() {
@@ -293,13 +351,13 @@
     });
   }
 
-  // 信息面板：封面 + 标题 + 音源徽标 + 曲目数/播放数/创建者 + 操作按钮。
+  // 信息面板：封面 + 标题 + 音源徽标 + 曲目数/播放数/创建者/主歌手 + 操作按钮。
   // 与参考实现的 cut-in 面板同构，只是不做浮层（歌单视图层内即可）。
   function renderInfo() {
-    var p = state.playlist;
+    var p = state.subject;
     if (!p) return;
     var title = el('opl-detail-title');
-    if (title) title.textContent = p.name;
+    if (title) title.textContent = kindLabel() + ' · ' + (p.name || '');
 
     var box = el('opl-info');
     if (!box) return;
@@ -315,7 +373,7 @@
     var head = document.createElement('div');
     head.className = 'opl-info-title';
     var name = document.createElement('strong');
-    name.textContent = p.name;
+    name.textContent = p.name || '';
     head.appendChild(name);
     // 徽标与在线面板同一套：平台 app 图标（见 online.js 的 badge()）。
     var badge = window.Online && window.Online.badge
@@ -329,8 +387,16 @@
 
     var meta = document.createElement('div');
     meta.className = 'opl-info-meta';
-    var bits = [state.total ? state.total + ' 首' : p.track_count + ' 首'];
+    var bits = [];
+    if (state.kind === 'artist') {
+      // 歌手页的 total 是「热门歌曲」条数，不是全部歌曲数，别冒充「N 首」。
+      if (state.phase === 'ready' && state.total) bits.push('热门歌曲 ' + state.total + ' 首');
+      else if (p.track_count) bits.push('共 ' + p.track_count + ' 首歌曲');
+    } else {
+      bits.push((state.total ? state.total : p.track_count || 0) + ' 首');
+    }
     if (p.play_count) bits.push('播放 ' + p.play_count);
+    if (state.kind === 'album' && p.artist) bits.push(p.artist);
     if (p.creator) bits.push('by ' + p.creator);
     meta.textContent = bits.join(' · ');
     box.appendChild(meta);
@@ -390,7 +456,7 @@
     if (head) head.hidden = cover;
 
     if (state.phase === 'loading') {
-      box.innerHTML = '<div class="hint">正在加载歌单…</div>';
+      box.innerHTML = '<div class="hint">正在加载' + kindLabel() + '…</div>';
       paintTail();
       return;
     }
@@ -406,7 +472,7 @@
       hint.className = 'hint';
       hint.textContent = state.trackQuery.trim()
         ? '已加载的曲目里没有匹配项。'
-        : '这个歌单是空的。';
+        : '这个' + kindLabel() + '是空的。';
       box.appendChild(hint);
       paintTail();
       return;
@@ -418,7 +484,8 @@
       return;
     }
 
-    var canWrite = hasCap(state.source, 'playlist_write');
+    // 写操作只有歌单有（往歌单里加/删曲）；专辑与歌手页是只读集合。
+    var canWrite = state.kind === 'playlist' && hasCap(state.source, 'playlist_write');
     view.forEach(function (t, i) {
       var row = window.Online.row(t, function () {
         // VIP 曲放行：可播与否由后端按账号 cookie 定，失败如实 toast。
@@ -505,8 +572,8 @@
     var hint = document.createElement('div');
     hint.className = 'hint';
     hint.textContent = state.error.kind === 'not-public'
-      ? '这个歌单不是公开歌单，当前音源接口读不到它的内容。'
-      : errText('歌单加载失败', { message: state.error.message })
+      ? '这个' + kindLabel() + '不是公开内容，当前音源接口读不到它。'
+      : errText(kindLabel() + '加载失败', { message: state.error.message })
         + '。登录可能已过期，请回「在线」面板重新登录。';
     wrap.appendChild(hint);
     var retry = actionButton('重试', '', function () { loadPage(0); });
@@ -592,6 +659,8 @@
     init: bindStatic,
     openGrid: openGrid,
     open: openById,
+    // 统一集合入口：歌单 / 专辑 / 歌手页都从这里进（kind 缺省歌单）。
+    openCollection: openCollection,
     close: back,
     // 曲目排布（cover | list）。菜单/命令面板这类外部入口也用它切换。
     setMode: setMode,

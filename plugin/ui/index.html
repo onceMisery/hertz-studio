@@ -163,12 +163,23 @@
     <path d="M8 12l4 4 4-4"/>
     <path d="M5 19h14"/>
   </symbol>
+  <!-- 竖排三点（Kebab 菜单）。横排 ⋯ 在 28px 的方钮里会糊成一条横线，
+       竖排才读得出「这里还有更多项」。 -->
   <symbol id="i-more" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M6 10a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4zm6 0a2 2 0 110 4 2 2 0 010-4z"/>
+    <path d="M12 4.2a2.2 2.2 0 110 4.4 2.2 2.2 0 010-4.4zm0 5.6a2.2 2.2 0 110 4.4 2.2 2.2 0 010-4.4zm0 5.6a2.2 2.2 0 110 4.4 2.2 2.2 0 010-4.4z"/>
+  </symbol>
+  <!-- 插入到队列的下一首：三条横线（队列）+ 一个向下的箭头插进第二行。
+       不要用 i-skip-next（竖条 + 三角）—— 那是「播放下一首」的符号，
+       而这个按钮做的是「把曲目插到队列的下一首位置」，两者语义不同：
+       符号读作「跳到下一首」时用户会以为点它就切歌了。 -->
+  <symbol id="i-queue-next" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 6h12M3 12h7M3 18h12"/>
+    <path d="M17 10v8M13.5 14.5L17 18l3.5-3.5"/>
   </symbol>
   <symbol id="i-skip-next" viewBox="0 0 24 24" fill="currentColor">
     <path d="M7 4h3v16H7zM11.5 12l6 4V8z"/>
   </symbol>
+
   <symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M6 9l6 6 6-6"/>
   </symbol>
@@ -218,7 +229,9 @@
 
   <div class="topsearch">
     <svg class="si" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
-    <input id="search" type="search" placeholder="在本地曲库中搜索标题、艺术家、专辑" autocomplete="off" aria-label="搜索本地曲库">
+    <!-- 顶栏搜索：默认搜在线歌曲，歌单/歌手/专辑/本地档由 topsearch.js 的
+         下拉面板切换，placeholder 跟着档位改写。 -->
+    <input id="search" type="search" placeholder="搜索在线歌曲，回车看全部" autocomplete="off" aria-label="搜索在线曲库">
     <button id="search-clear" class="search-clear" aria-label="清空搜索" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
     </button>
@@ -448,11 +461,13 @@
         </span>
       </div>
       <div class="online-search">
-        <!-- 搜索类型切换。默认「单曲」；只有当前音源登记 playlist_search
-             能力时才显示「歌单」（online.js 的 renderKind 管显隐）。 -->
+        <!-- 搜索类型切换。默认「单曲」；各类型按当前音源的能力位显隐
+             （online.js 的 renderKind 管显隐与回退）。 -->
         <div class="online-kind" id="online-kind" role="group" aria-label="搜索类型" hidden>
           <button class="chip active" type="button" data-kind="song">单曲</button>
           <button class="chip" type="button" data-kind="playlist">歌单</button>
+          <button class="chip" type="button" data-kind="artist">歌手</button>
+          <button class="chip" type="button" data-kind="album">专辑</button>
         </div>
         <input id="online-q" type="search" placeholder="搜索在线音源（网易云 / QQ / 酷狗 / 酷我 / 汽水 / ccmixter / 咪咕）…" autocomplete="off" aria-label="搜索在线曲库">
         <button id="online-go" class="btn primary">搜索</button>
@@ -1675,6 +1690,9 @@
      会自动退到 ServerTransport，不需要这段 script 也能正常工作。
      下面五个是创意舞台：内核 → 表现层 → 编排 → 工坊，顺序即依赖顺序。 -->
 <script defer src="skins/skins.js"></script>
+<!-- 皮肤公共段（锚点搬运 / 自建节点登记 / 封面位图回填）：必须在两张重编排
+     皮肤（流年 / 清风）之前加载。 -->
+<script defer src="skins/skin-shared.js"></script>
 <!-- 流年皮肤的 DOM 重编排层：紧跟 skins.js（要监听 skin:changed），
      且必须在 app.js 之前。 -->
 <script defer src="skins/skin.liunian.js"></script>
@@ -1734,6 +1752,7 @@
 <script defer src="online.js"></script>
 <script defer src="online-playlists.js"></script>
 <script defer src="online-playlist-view.js"></script>
+<script defer src="topsearch.js"></script>
 <!-- 收藏与每日推荐：都依赖 VMusicTransport（app.js 里定义），所以排在 app.js
      之前加载、由 app.js 的启动序列 bind() 注入宿主依赖。 -->
 <script defer src="favorites.js"></script>

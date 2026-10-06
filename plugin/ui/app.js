@@ -5936,8 +5936,18 @@ function initBarAutohide() {
   toggleBtn.addEventListener('click', () => {
     pinned = !pinned;
     persist();
+    // **收起时必须把 peek 一起清掉**：visible = peek || (pinned && !idle)，
+    // 而此刻鼠标正悬在播放条上 → bar 的 pointerenter 已经把 peek 置成 true。
+    // 只改 pinned 的话 visible 仍是 true，**点击的当下看不到任何反应**，
+    // 要等鼠标移开、leaveTimer 800ms 后把 peek 归零才真的收起 ——
+    // 表现为「按钮点了没用」，而且用户把鼠标移到底部热区想唤回来时，
+    // pointermove 又把 peek 置回 true，行为彻底不可预期。
     if (pinned) { idle = false; peek = false; }
-    armIdle();
+    else peek = false;
+    // 收起后别再 armIdle：那条 15s 定时器到点会把 idle 置真，
+    // 与「用户主动收起」这条意图打架（下次 peek 一结束就立刻又藏起来）。
+    if (pinned) armIdle();
+    else clearTimeout(hideTimer);
     sync();
   });
 
@@ -6411,6 +6421,12 @@ async function startApp() {
   let searchTimer = null;
   ui.search.oninput = () => {
     ui.searchClear.hidden = ui.search.value === '';
+    // 顶栏搜索的默认档是「在线歌曲」（topsearch.js 的下拉面板管预览）；
+    // 非本地档时本地筛选不生效，输入转发给面板。档位切回「本地」走旧路径。
+    if (window.TopSearch && window.TopSearch.kind() !== 'local') {
+      window.TopSearch.onInput();
+      return;
+    }
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
       state.q = ui.search.value.trim();
@@ -7561,6 +7577,35 @@ async function startApp() {
       errText,
     });
     window.OnlinePlaylistView.init();
+  }
+  // 顶栏全局搜索（web/topsearch.js）：下拉面板预览在线结果，跳转/本地筛选
+  // 两个落点都在宿主这侧。
+  if (window.TopSearch) {
+    window.TopSearch.bind({
+      setView,
+      // 「回车 / 查看全部」：与流年面板的 view-online 分支同一套语义——
+      // 关键词写回在线页搜索框，kind 走 Online.setKind（没能力位会被拉回
+      // 单曲）；已经在在线页时 onViewEnter 会早退，补一次显式搜索。
+      jumpToOnline(q, kind) {
+        ui.onlineQ.value = q;
+        if (!window.Online) { setView('online'); return; }
+        window.Online.state.q = q;
+        const wasOnline = state.view === 'online';
+        setView('online');
+        if (window.Online.setKind) window.Online.setKind(kind);
+        else window.Online.state.kind = kind;
+        // setKind 同类型是空操作（不触发搜索）：词变了要显式补一发。
+        if (wasOnline && window.Online.state.kind === kind) window.Online.search();
+      },
+      // 面板里切「本地」档时，框里已有的词要立刻生效为本地筛选。
+      applyLocalFilter(value) {
+        state.q = String(value || '').trim();
+        if (state.q && state.view !== 'library') setView('library');
+        loadTracks(true);
+      },
+      toast,
+      errText,
+    });
   }
   // 收藏与每日推荐：同样是「先注入宿主依赖，再 init」。宿主回调里
   // playLocal 走现有播放链路，coverUrl 走带 token 的封面通道。
