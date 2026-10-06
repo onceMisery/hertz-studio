@@ -172,7 +172,7 @@ pub async fn stream(ctx: &Ctx, id: &str, _quality: u32) -> ApiResult<StreamInfo>
         id: id.to_string(),
         bitrate: None,
         expires_in_secs: None,
-        fallback_urls: Vec::new(),
+        fallbacks: Vec::new(),
         rg_gain_db: None,
         rg_peak: None,
     })

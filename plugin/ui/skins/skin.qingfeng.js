@@ -69,7 +69,9 @@
   // 皮肤在就开墙，不在（别的皮肤）就当不跳转。
   var wallEntryHandler = null;
   var navChangedHandler = null;
-  var wallTrackHandler = null;
+  // 播放态实时化：换曲（playback:track）与暂停/续播（stage:playing-changed）都要
+  // 让展开档跟到当前曲、让墙上那两颗播放键翻面。
+  var wallPlayHandler = null;
 
   // 「正在播放」侧卡（.stage）的拖动运行态。
   //
@@ -87,6 +89,7 @@
     startX: 0, startY: 0,
     origX: 0, origY: 0,   // 按下时卡片的视口坐标
     offX: 0, offY: 0,     // 鼠标按下点相对卡片左上角的偏移
+    ro: null,      // 尺寸观察器：没记忆位时按内容高度重新停靠
   };
   var stageDragHandlers = null;   // { move, up }，卸载时解绑
 
@@ -119,6 +122,9 @@
     focusedKey: '',   // 焦点节点的格位键（跨重渲染跟节点走）
     expanded: -1,     // 展开档所在的下标（渲染时重建，仅作簿记）
     expandedKey: '',  // 展开档的格位键 —— 跨重渲染跟节点走，收起按它找节点
+    // 换曲广播进来的「现在在放哪首」。海报上的 current/playing 是**建卡那一刻**
+    // 的快照，暂停/续播/换曲都不会重建卡 —— 播放键要实时翻面就得自己跟一份。
+    trackId: '',
     cam: { x: 0, y: 0, s: 1 },
     raf: 0,
     lightsOut: false,
@@ -687,7 +693,8 @@
   /// 停在第二层）就不动 —— 跟随是锦上添花，不是必须。
   function followCurrent() {
     if (!mounted || !wall.open || !wall.follow) return;
-    var idx = wall.tiles.findIndex(function (t) { return t.current; });
+    // 判据走 posterIsCurrent（换曲广播的 trackId），不吃 tile.current 那份建卡快照。
+    var idx = wall.tiles.findIndex(posterIsCurrent);
     if (idx < 0) return;
     focusQueueIndex(idx, true);
   }
@@ -795,8 +802,10 @@
       var t = peekTile();
       if (!t) return;
       if (t.isPlaylist) { enterDrill(t); return; }
-      // 已经在放这一首 → 播/停切换；否则播它。
-      if (t.current && t.playing) emit('toggle-play');
+      // 已经在放这一首 → 播/停切换；否则播它。判据必须走实时那一份：
+      // tile.current/playing 是建卡快照，暂停和续播都不换曲、不会刷新它 ——
+      // 读快照的话停着的时候点它会发 activate，等于把同一首从头再 load 一遍。
+      if (posterIsCurrent(t)) { emit('toggle-play'); updatePeek(); }
       else emit('activate', { item: t });
     });
     var peekCopy = make('div', 'qf-queue-peek-copy', peek);
@@ -1001,7 +1010,7 @@
     renderWall();
     // 自动聚焦到正在播放那张，墙一开就有主体（就近挑实例，不长途飞行）。
     // 歌单那一份没有「正在播放」的概念（歌单不是曲），聚焦第 0 项即可。
-    var idx = wall.tiles.findIndex(function (t) { return t.current; });
+    var idx = wall.tiles.findIndex(posterIsCurrent);
     if (idx >= 0) focusQueueIndex(idx, true);
     // 没有「正在播放」那张（歌单墙永远没有）时落到第 0 项，并**保证它在
     // 视口内** —— 密排下它的格位可能整个在视口外，那样用户看到一片空白，
@@ -1452,8 +1461,53 @@
     wall.raf = requestAnimationFrame(stepPan);
   }
 
+  /// 这张海报是不是「现在在放的那首」。
+  ///
+  /// 判据与 app.js 自己算 current 时用的是同一个字符串（tile.id 就是快照里的
+  /// track_id），所以皮肤不需要重新发明一套 id 协议。没收到过换曲广播时用建卡
+  /// 那份快照的 current —— 开墙那一下快照是新的。
+  function posterIsCurrent(tile) {
+    if (!tile || tile.isPlaylist) return false;
+    return wall.trackId ? wall.trackId === String(tile.id) : !!tile.current;
+  }
+
+  /// 「在不在放」直接读 body.is-playing：Stage.setSnapshot 每个快照都同步它。
+  /// 自己缓存一份必漏 —— 暂停和续播都不换曲，没有 playback:track 可跟。
+  function posterIsPlaying(tile) {
+    return posterIsCurrent(tile) && document.body.classList.contains('is-playing');
+  }
+
+  /// 只重画那颗按钮，不重建控制条：重建会把展开过渡与相机让位一起卷进来。
+  function paintPosterPlay(el) {
+    var btn = el && $('.qf-chrome-play', el);
+    var tile = el && posterTile(el);
+    if (!btn || !tile || tile.isPlaylist) return;   // 歌单那颗是「打开歌单」，没有播放态
+    var playing = posterIsPlaying(tile);
+    var label = playing ? '暂停' : '播放';
+    btn.innerHTML = icon(playing ? 'pause' : 'play');
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  }
+
+  /// 换曲 / 暂停续播 → 展开档跟到当前曲，墙上那两颗播放键翻面。
+  ///
+  /// 顺序要紧：先记 trackId 再 followCurrent。后者挑卡用的是「现在在放哪首」，
+  /// 而 tile.current 是建卡那一刻的快照（换曲不会重取源），照快照跟就会一直停在
+  /// 上一首那张卡上 —— 表现是「换歌了墙不动」。
+  function onWallPlayback(e) {
+    if (e.type === 'playback:track') {
+      wall.trackId = String((e.detail && e.detail.track_id) || '');
+      followCurrent();
+    }
+    if (!wall.open) return;
+    paintPosterPlay(wall.expandedKey && wall.nodeByKey ? wall.nodeByKey.get(wall.expandedKey) : null);
+    updatePeek();
+  }
+
   function buildPosterControls(el) {
-    if ($('.qf-poster-controls', el)) return;
+    // 节点是键控复用的，展开一张建过的卡不会重跑这里 —— 复用时至少把图标
+    // 按实时态纠正一次，否则收起再展开会看到旧的播放/暂停面。
+    if ($('.qf-poster-controls', el)) { paintPosterPlay(el); return; }
     var tile = posterTile(el);
     var box = document.createElement('div');
     box.className = 'qf-poster-controls';
@@ -1491,14 +1545,19 @@
       var play = document.createElement('button');
       play.type = 'button';
       play.className = 'qf-chrome-play';
-      play.title = tile && tile.current && tile.playing ? '暂停' : '播放';
-      play.setAttribute('aria-label', play.title);
-      play.innerHTML = icon(tile && tile.current && tile.playing ? 'pause' : 'play');
       play.addEventListener('click', function (e) {
         e.stopPropagation();
+        // 已经是当前曲 → 这颗就是播放/暂停键，复用业务 toggle-play（左下角浮条同一条
+        // 路，它带「没在放任何东西时先起播当前选中项」的回落）。再发一次 activate
+        // 等于把同一首重新 load 一遍，用户看到的是「点了没反应」。
+        if (posterIsCurrent(tile)) emit('toggle-play');
         // 走 activate 而不是 play-index：墙上的下标是**本视图**的下标，
         // play-index 按的是播放队列下标，传墙上的数会播错歌。
-        emit('activate', { item: tile });
+        else emit('activate', { item: tile });
+        // toggle-play 不换曲，等不到 playback:track；app.js 的乐观快照
+        // （setPlayback 先 applySnapshot 再 POST）在这条调用链里已经翻过
+        // body.is-playing，所以点完立刻重画拿到的就是新值。
+        paintPosterPlay(el);
       });
 
       var next = document.createElement('button');
@@ -1549,6 +1608,8 @@
     box.appendChild(chrome);
     box.appendChild(progress);
     el.appendChild(box);
+    // 图标按实时态画，不吃 tile.playing 那份建卡快照 —— 快照只在建卡那一帧是新的。
+    paintPosterPlay(el);
   }
 
   /// 上一首/下一首 = **播放队列**里前后各一首，即「正在放的那首」的邻居。
@@ -1583,7 +1644,7 @@
   /// 拆两处的话，按钮点下去播的那首会跟浮条上写着的那首不一致。
   function peekTile() {
     return posterTile(wall.posters[wall.focused])
-      || wall.tiles.find(function (x) { return x.current; }) || wall.tiles[0];
+      || wall.tiles.find(posterIsCurrent) || wall.tiles[0];
   }
 
   function updatePeek() {
@@ -1603,8 +1664,8 @@
     if (refs.wallPeekPlay) {
       // 歌单项：这一列没有「正在放」的概念，按钮是「打开歌单」。
       // 已经在放的那首：图标切成暂停。title/aria-label 一起换，
-      // 屏幕阅读器读到的才不会与图标相反。
-      var playing = !t.isPlaylist && t.current && t.playing;
+      // 屏幕阅读器读到的才不会与图标相反。实时判据与展开卡那颗共用一份。
+      var playing = posterIsPlaying(t);
       var label = t.isPlaylist ? '打开歌单' : (playing ? '暂停' : '播放');
       refs.wallPeekPlay.innerHTML = icon(t.isPlaylist ? 'play' : (playing ? 'pause' : 'play'));
       refs.wallPeekPlay.title = label;
@@ -2025,7 +2086,7 @@
         renderWall();
         // 新来源没有「正在播放」可聚焦时，落在第一张，墙不至于空着没主体。
         if (wall.tiles.length) {
-          var at = wall.tiles.findIndex(function (t) { return t.current; });
+          var at = wall.tiles.findIndex(posterIsCurrent);
           focusAndReveal(at >= 0 ? at : 0);
         }
         if (wasDrill) applyCamera();
@@ -2155,7 +2216,8 @@
     var text = lyricLineText();
     if (text === mini.lyricText) return;
     mini.lyricText = text;
-    // 两份拷贝喂给跑马灯（CSS 无缝循环靠它们），单行显示时第二份在屏外。
+    // 两份拷贝只服务跑马灯的无缝循环；不滚的时候第二份由 CSS 收掉
+    // （.qf-mini-lyric-inner span + span），否则放得下的歌词也会露出重复半句。
     mini.a.textContent = text;
     mini.b.textContent = text;
     el.classList.remove('is-scrolling');
@@ -2208,12 +2270,15 @@
   // 正在播放侧卡（.stage）：缩小 + 可拖动 + 位置持久化
   // -------------------------------------------------------------------------
 
-  var STAGE_POS_KEY = 'vmusic.qf.stage.pos.v1';
+  // key 升到 v2：默认停靠点从「播放胶囊右缘」改成「左下角」，旧记忆里那个
+  // 坐标是按上一版语义摆的，留着等于让用户以为改动没生效。直接换 key，
+  // 不做旧值映射。
+  var STAGE_POS_KEY = 'vmusic.qf.stage.pos.v2';
   // 卡片四周的最小留白，贴边也不算被切掉。
   var STAGE_MARGIN = 12;
-  // 底部不再整体让位（旧版留 84px 防压头像）：播放胶囊和头像胶囊是两块
-  // 具体的矩形，clampStage 按它们的实际位置把卡片推出去 —— 默认停靠点
-  // 就贴着胶囊，把整个下缘封死等于把停靠点也封了。
+  // 底部不整体让位（旧版留 84px 防压头像）：播放胶囊和头像胶囊是两块具体的
+  // 矩形，clampStage 按它们的实际位置把卡片推出去 —— 把整个下缘封死，等于
+  // 把默认停靠点（就在下缘这条带上）也封了。
 
   function stageBounds() {
     var top = parseFloat(getComputedStyle(document.documentElement)
@@ -2226,45 +2291,29 @@
     };
   }
 
-  /// 停靠：没有用户记忆位置时，卡片贴在播放胶囊右缘。
+  /// 停靠：没有用户记忆位置时，卡片贴在视口左下角 —— 左缘留一个最小留白，
+  /// 竖直中心对齐播放胶囊（卡片就挂在胶囊那条带上）。
   ///
-  /// 胶囊右缘优先**实测矩形** —— .bar 从基础样式继承来的 margin 会让
-  /// 「left:50% + translateX(-50%)」的公式与真实落点差出十几像素；胶囊
-  /// 自动隐藏（display:none）时矩形塌成 0，才退回公式。公式里的宽上限
-  /// 860 与 CSS 里 .bar 的 width 是同一组数，改那边记得同步这边。
+  /// 左下角是屏幕上常年空着的那块：内容列在它右边，胶囊居中、头像胶囊靠右，
+  /// 都离它一截 —— 谁都不挡。窄视口下胶囊会涨到压住左缘，那时交给
+  /// clampStage→pushOutFloaters 往上推（≤1100px 整卡已按设计撤掉，真走到
+  /// 这一步的是「比 1100 宽一点、胶囊又顶到左边」的窗口）。
   function dockStage() {
     var el = stageDrag.el;
     if (!el) return;
-    var vw = window.innerWidth;
-    var vh = window.innerHeight;
-    var pad = parseFloat(getComputedStyle(document.documentElement)
-      .getPropertyValue('--skin-pad')) || 28;
     var bar = document.querySelector('.bar');
-    var barVisible = bar && bar.offsetHeight > 0;
-    var barRight = barVisible
-      ? bar.getBoundingClientRect().right
-      : vw / 2 + Math.min(860, vw - 2 * pad) / 2;
-    var barH = barVisible ? bar.offsetHeight : 64;
-    var w = el.offsetWidth || 232;
     var h = el.offsetHeight || 110;
-    var acc = document.querySelector('.qf-account');
-    var accR = acc ? acc.getBoundingClientRect() : null;
-    var accTop = accR && accR.height > 0 ? accR.top : vh - 74;
-    var accLeft = accR && accR.width > 0 ? accR.left : vw - 116;
-    var x = Math.min(barRight + 12, vw - STAGE_MARGIN - w);
-    x = Math.max(x, STAGE_MARGIN);
-    var y;
-    if (x + w <= accLeft - 12) {
-      y = Math.min(vh - 22 - barH / 2 - h / 2, vh - STAGE_MARGIN - h);
-    } else {
-      // x 压到头像那一列时抬到头像上缘之上 —— 窄视口下「贴着胶囊」和
-      // 「不压头像」不可兼得，让竖直方向让步。
-      y = accTop - 12 - h;
-    }
+    var barH = bar && bar.offsetHeight ? bar.offsetHeight : 76;
+    var r = bar && !bar.classList.contains('is-hidden') ? bar.getBoundingClientRect() : null;
+    // 中心优先**实测矩形**：.bar 除了 bottom:22px 还从基础样式继承了 margin，
+    // 照公式算出来的落点比真实位置低十几像素（旧版横向停靠踩过同一条）。
+    // 胶囊自动隐藏时矩形塌成 0 或被移走，才退回公式。
+    var cy = r && r.height > 0 ? r.top + r.height / 2 : window.innerHeight - 22 - barH / 2;
+    var p = clampStage(el, STAGE_MARGIN, cy - h / 2);
     el.style.right = 'auto';
     el.style.bottom = 'auto';
-    el.style.left = Math.round(x) + 'px';
-    el.style.top = Math.round(Math.max(STAGE_MARGIN, y)) + 'px';
+    el.style.left = Math.round(p.x) + 'px';
+    el.style.top = Math.round(p.y) + 'px';
   }
 
   /// 皮肤布局生效后：有记忆位置就恢复（钳制要用真实的卡片尺寸），没有
@@ -2300,8 +2349,8 @@
 
   /// 底部两块浮件（播放胶囊、头像胶囊）用矩形避让而不是封死下缘：
   /// 拖进它们的矩形就把整卡推到最高的那块上缘之外（两块水平错开，
-  /// 取更高的上缘一次推完，两块都让开）。停靠位置不走这里 —— 它本来就
-  /// 停在胶囊旁边，从不与它们相交，所以从停靠位起拖不会有跳位。
+  /// 取更高的上缘一次推完，两块都让开）。停靠位也走这里：卡片就停在胶囊那
+  /// 条带上，宽视口下与它不相交（推不动），窄视口下正是靠这条才不被胶囊压住。
   function pushOutFloaters(p, w, h) {
     var floats = document.querySelectorAll('.bar:not(.is-hidden), .qf-account');
     var top = null;
@@ -2404,11 +2453,21 @@
 
   function onStageResize() {
     if (!stageDrag.el) return;
-    // 没拖过就跟着胶囊重新停靠（胶囊宽度随视口变）；拖过则只把原位置
+    // 没拖过就重新停靠（卡片跟着胶囊那条带走）；拖过则只把原位置
     // 夹回屏内，不落盘，避免污染记忆。
     if (!readStagePos()) { dockStage(); return; }
     var b = stageDrag.el.getBoundingClientRect();
     applyStagePos(stageDrag.el, b.left, b.top);
+  }
+
+  /// 卡片高度会随内容变（歌词行出现/消失），而定位写的是 top —— 不重新停靠
+  /// 的话，歌词一出现卡片就往下长一截，默认位读起来比胶囊那条带低半截。
+  /// 只在没有记忆位时观察：拖过的位置归用户，不该被内容高度改动。
+  function watchStageSize(el) {
+    if (typeof ResizeObserver !== 'function') return null;
+    var ro = new ResizeObserver(function () { if (!readStagePos()) dockStage(); });
+    ro.observe(el);
+    return ro;
   }
 
   function buildStageDrag() {
@@ -2419,10 +2478,11 @@
     stageDrag.el = el;
     stageDrag.head = head;
 
-    // 恢复上次位置；没拖过（无记忆）就停靠到播放胶囊右缘。两条路都等
+    // 恢复上次位置；没拖过（无记忆）就停靠到视口左下角。两条路都等
     // 皮肤布局生效再量（见 restoreOrDock）。
     var saved = readStagePos();
     requestAnimationFrame(function () { restoreOrDock(saved, 240); });
+    stageDrag.ro = watchStageSize(el);
 
     // 拖动入口挂在**整张卡**上：迷你卡只有一百多像素高，只留一条标题带当
     // 把手太难抓（实测抓不满）。控件由 onStageDragDown 的守卫让出来。
@@ -2442,7 +2502,7 @@
     head.setAttribute('tabindex', '0');
     head.setAttribute('aria-label', '正在播放卡片，拖动或用方向键移动，双击复位');
     if (!head.getAttribute('title')) {
-      head.title = '拖动移动这张卡片；双击复位到播放胶囊旁';
+      head.title = '拖动移动这张卡片；双击复位到左下角';
     }
   }
 
@@ -2519,9 +2579,11 @@
     // 设置里关掉分区时 app.js 广播 nav:changed，胶囊菜单同步摘入口。
     navChangedHandler = function () { if (mounted) reflow(); };
     document.addEventListener('nav:changed', navChangedHandler);
-    // 换歌跟随：app.js 在换曲时广播 playback:track。
-    wallTrackHandler = function () { followCurrent(); };
-    document.addEventListener('playback:track', wallTrackHandler);
+    // 换歌跟随 + 播放键实时化：换曲走 app.js 的 playback:track，暂停/续播不换曲、
+    // 只有 Stage 的跳变沿广播（stage.js 在 setSnapshot 里发，不受帧率门控影响）。
+    wallPlayHandler = onWallPlayback;
+    document.addEventListener('playback:track', wallPlayHandler);
+    document.addEventListener('stage:playing-changed', wallPlayHandler);
     document.addEventListener('keydown', keyHandler);
     // 换曲把收起的迷你卡放回来（皮肤自持的唯一状态入口）。
     mini.trackHandler = onMiniTrack;
@@ -2551,9 +2613,10 @@
       document.removeEventListener('nav:changed', navChangedHandler);
       navChangedHandler = null;
     }
-    if (wallTrackHandler) {
-      document.removeEventListener('playback:track', wallTrackHandler);
-      wallTrackHandler = null;
+    if (wallPlayHandler) {
+      document.removeEventListener('playback:track', wallPlayHandler);
+      document.removeEventListener('stage:playing-changed', wallPlayHandler);
+      wallPlayHandler = null;
     }
     if (keyHandler) { document.removeEventListener('keydown', keyHandler); keyHandler = null; }
     window.removeEventListener('resize', onWallResize);
@@ -2568,6 +2631,7 @@
       stageDrag.head.removeEventListener('dblclick', onStageDblClick);
     }
     window.removeEventListener('resize', onStageResize);
+    if (stageDrag.ro) { stageDrag.ro.disconnect(); stageDrag.ro = null; }
     if (mini.trackHandler) {
       document.removeEventListener('playback:track', mini.trackHandler);
       mini.trackHandler = null;

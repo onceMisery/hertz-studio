@@ -2858,7 +2858,7 @@ async fn online_quality_get(
     let prefs = online::quality::load(&state.db)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    let sources = ["netease", "qq", "kugou", "qishui", "ccmixter"];
+    let sources = online::quality_sources();
     Ok(Json(serde_json::json!({
         "prefs": sources.iter().map(|s| {
             let q = online::quality::get(&prefs, s);
@@ -2883,7 +2883,7 @@ async fn online_quality_set(
     State(state): State<Arc<AppState>>,
     Json(body): Json<OnlineQualityRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !["netease", "qq", "kugou", "qishui", "ccmixter"].contains(&body.source.as_str()) {
+    if !online::quality_sources().contains(&body.source.as_str()) {
         return Err(bad_request("不支持的音源"));
     }
     let mut prefs = online::quality::load(&state.db)

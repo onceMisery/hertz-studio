@@ -46,10 +46,6 @@ fn store_err(e: vmusic_core::StoreError) -> ApiError {
     ApiError::from(vmusic_core::CoreError::Store(e))
 }
 
-/// 有音质偏好的平台清单。与 HTTP 版是同一份字面量——两边各写一份，加平台时漏
-/// 一边的表现是「设置页里能选，但选了不生效」。
-const QUALITY_SOURCES: [&str; 5] = ["netease", "qq", "kugou", "qishui", "ccmixter"];
-
 // ---------------------------------------------------------------------------
 // 搜索 / 详情 / 歌词 / 取流
 // ---------------------------------------------------------------------------
@@ -377,10 +373,12 @@ pub async fn cache_keep(state: &Arc<AppState>, body: &Value) -> RpcResult {
 // 音质偏好
 // ---------------------------------------------------------------------------
 
+// 平台清单走 online::quality_sources()，与 HTTP 版同一份派生：两边各抄一份
+// 字面量时，加平台漏一边的表现就是「设置页里能选，但选了不生效」。
 pub async fn quality_get(state: &Arc<AppState>) -> RpcResult {
     let prefs = online::quality::load(&state.db).await.map_err(store_err)?;
     Ok(Reply::ok(json!({
-        "prefs": QUALITY_SOURCES.iter().map(|s| {
+        "prefs": online::quality_sources().iter().map(|s| {
             let q = online::quality::get(&prefs, s);
             json!({
                 "source": s,
@@ -395,7 +393,7 @@ pub async fn quality_get(state: &Arc<AppState>) -> RpcResult {
 
 pub async fn quality_set(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let request: OnlineQualityRequest = body_as(body)?;
-    if !QUALITY_SOURCES.contains(&request.source.as_str()) {
+    if !online::quality_sources().contains(&request.source.as_str()) {
         return Err(bad_request("不支持的音源"));
     }
     let mut prefs = online::quality::load(&state.db).await.map_err(store_err)?;

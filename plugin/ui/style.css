@@ -909,6 +909,12 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
   transition: opacity 0.2s var(--ease);
 }
 .track:hover .t-actions, .track:focus-within .t-actions { opacity: 1; }
+/* 已勾选的行，操作区**一直亮着**。
+   不加这条，勾选框只在鼠标停在那一行（或刚点过它、焦点还在）时才看得见：
+   勾完第一首、鼠标移到第二首，第一首的勾选框就消失 —— 而它仍在选中集合里，
+   底部批量栏还写着「已选 2 首」。用户看到的是"选了却不显示"。
+   :focus-within 只在**最近点过的那一行**成立，靠它兜不住这件事。 */
+.track.is-selected .t-actions { opacity: 1; }
 
 /* 批量选择用的勾选框。之前**完全没有样式**，一直是浏览器默认尺寸：
    13px 见方、带默认边框和底色，在 28px 高的操作区里既不同高也不同宽，
@@ -2255,6 +2261,68 @@ button.btn {
   border-color: rgba(var(--highlight-rgb), 0.34);
 }
 
+/* 界面皮肤弹层：与 .top-more-menu 同一套做法（包一层 relative，菜单绝对定位在
+   按钮下方）。不必像 #theme-menu 那样搬去 <body> —— .topbar 整体已经是
+   z-index:40，顶栏子树里的浮层本来就盖得住后面那几块玻璃面板。 */
+.skin-picker { position: relative; display: flex; }
+
+.skin-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 45;
+  width: 246px;
+  padding: 6px;
+  display: grid;
+  gap: 2px;
+  background: color-mix(in srgb, var(--panel-solid) 92%, transparent);
+  border: var(--glass-border);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow-glow);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+}
+.skin-menu[hidden] { display: none; }
+
+/* 弹层里的行比设置页那张卡矮得多：说明压成一行省略号（全文在 title 里），
+   当前项也不再靠描边表达——1px 描边在这种窄行里几乎看不见，换成名字前一个点。
+   未选中的行同样留着这个点（只是透明），两行名字才对得齐。 */
+.skin-menu .skin-option {
+  gap: 1px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  transition: border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+.skin-menu .skin-option:hover {
+  border-color: var(--line);
+  background: var(--surface-1);
+}
+.skin-menu .skin-option.is-on {
+  border-color: transparent;
+  box-shadow: none;
+  background: rgba(var(--highlight-rgb), 0.1);
+}
+.skin-menu .skin-option-name::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  vertical-align: 1px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0;
+}
+.skin-menu .skin-option.is-on .skin-option-name::before { opacity: 1; }
+.skin-menu .skin-option-note {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--fs-xs);
+}
+
 /* ---------- 胶囊 / 分段控件 ---------- */
 
 .chip,
@@ -2901,6 +2969,42 @@ button:focus-visible, [role="button"]:focus-visible,
 .daily-title { font-size: var(--fs-lg); font-weight: 600; color: var(--text); }
 .daily-sub { font-size: var(--fs-sm); color: var(--muted); }
 .daily-tools { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; }
+
+/* 折叠按钮：一颗方形的图标钮，跟旁边几个胶囊按钮并排。
+   图标用同一份 sprite 的 i-chevron-down 旋转 180° —— 展开时它指向上（点它内容
+   往上收），收起时指向下（点它内容展开）。方向跟"点了会发生什么"一致，
+   比反过来好读。
+   flex:none 和上面 .t-act 的理由一样：这一行是 flex，不给死尺寸时窗口一窄
+   就会被压成一条，只剩一个看不清的图标残影。 */
+.daily-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+}
+.daily-toggle svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+  transition: transform 0.2s var(--ease);
+}
+.daily-strip:not(.is-collapsed) .daily-toggle svg { transform: rotate(180deg); }
+
+/* 收起：只收掉卡片区，标题行（日期 / 来源 / 播放全部 / 刷新）留在原地。
+   折叠的收益是把纵向空间还给曲库列表 —— 收掉整条的话，用户连"今天这份是哪个
+   来源、要不要刷新"都看不到，还得先展开一次才能操作。
+   用 display:none 而不是 max-height:0：卡片是 grid，过渡期间一行行卡片会被
+   压成一条条细缝，比直接切换更难看；而且需要展开动画的是"多出来的内容"，
+   这里没有这个必要。 */
+.daily-strip.is-collapsed .daily-list { display: none; }
+/* 卡片区不在时，标题行下面那 10px 间距会变成一段空档，收起来的条就显得
+   比它承载的内容高。归零即可；条自身的上下内距不动 —— 皮肤还会去改
+   `.daily-strip` 的 padding（同为两段选择器、皮肤文件后加载），在这里再压一次
+   padding 只会跟它们抢优先级，而 2px 的内距差根本看不出来。 */
+.daily-strip.is-collapsed .daily-head { margin-bottom: 0; }
 
 /* 来源切换（在线 / 本地）。画法复用组件层的 .chip / .chip.active，
    这里只补一点垂直对齐——它和两个 .btn 并排，做高不同会显得整条工具行是歪的。 */

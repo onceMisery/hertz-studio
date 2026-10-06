@@ -32,6 +32,10 @@
   /// 那类服务端设置不是一回事。
   var MODE_KEY = 'vmusic.daily.mode';
 
+  /// 折叠态同上：它描述的是"这一屏我想留多少给推荐条"，属于本机偏好。
+  /// 收起之后还占着半屏的话，用户每次回来都得再收一次。
+  var COLLAPSE_KEY = 'vmusic.daily.collapsed';
+
   /// 进「曲库」页就会调一次 load()，而在线汇总最坏要等满服务端的等待预算。
   /// 用户在几个视图之间来回切两下不该每轮都重打上游：手上这份不老于这个秒数
   /// 就直接用。显式刷新走 force，不受这条限制。跨天也顺带覆盖了——过零点后
@@ -77,6 +81,10 @@
     mode: 'auto',
     /// 用户是否显式选过来源。没选过时才允许按"哪路先到"自动落位。
     modePinned: false,
+    /// 推荐条的折叠态。**刻意不参与 render() 的签名比较**：它改的是
+    /// `.daily-strip` 上的一个类，与卡片内容无关，一次折叠不该让 24 张卡
+    /// 全部重建、封面重新走一遍解析（见 render() 的 key）。
+    collapsed: false,
   };
 
   function syncLoading() {
@@ -94,6 +102,14 @@
 
   function writeMode(mode) {
     try { localStorage.setItem(MODE_KEY, mode); } catch (e) { /* 隐私模式 */ }
+  }
+
+  function readCollapsed() {
+    try { return localStorage.getItem(COLLAPSE_KEY) === '1'; } catch (e) { return false; }
+  }
+
+  function writeCollapsed(on) {
+    try { localStorage.setItem(COLLAPSE_KEY, on ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
   }
 
   function load(opts) {
@@ -418,6 +434,31 @@
     }
   }
 
+  /// 折叠态落到 DOM 上：`.daily-strip` 一个类 + 按钮的 aria 三件套。
+  ///
+  /// 与 render() 分开是有意的：render() 会在「卡片 id 没变」时提前 return，
+  /// 而折叠/展开只改容器上的类，本来就不该走那条重绘路径。两者唯一的共同点是
+  /// 都要读 H.ui —— 所以这里对宿主元素逐个判空，缺任何一个都不抛。
+  function renderCollapsed() {
+    if (H.ui.dailyStrip) {
+      H.ui.dailyStrip.classList.toggle('is-collapsed', dailyState.collapsed);
+    }
+    var btn = H.ui.dailyToggle;
+    if (!btn) return;
+    // aria-expanded 报的是**内容的**展开态，与按钮自身的图标方向相反：
+    // 图标在展开时指向上（点了会收），而 aria-expanded 仍是 true。
+    btn.setAttribute('aria-expanded', String(!dailyState.collapsed));
+    var label = dailyState.collapsed ? '展开每日推荐' : '收起每日推荐';
+    btn.setAttribute('aria-label', label);
+    btn.title = label;
+  }
+
+  function setCollapsed(on) {
+    dailyState.collapsed = !!on;
+    writeCollapsed(dailyState.collapsed);
+    renderCollapsed();
+  }
+
   /// 当前来源那一路在不在飞。占位符只看这一路：另一路慢不该让已经有结果
   /// 的这一路也跟着显示「正在挑歌…」。
   function currentBusy() {
@@ -629,6 +670,16 @@
     if (H.ui.dailyPlayAll) {
       H.ui.dailyPlayAll.onclick = function () { playAll(0); };
     }
+    // 折叠：恢复上次的态 → 接线 → 立刻落一次 DOM。
+    //
+    // 读持久化要放在 render() **之前**也可以放在之后：折叠不改卡片内容，
+    // 只改容器上的类，与 render 的签名无关。放这里是为了让「点开就是收起的」
+    // 这件事在首帧就成立，不闪一下再收。
+    dailyState.collapsed = readCollapsed();
+    if (H.ui.dailyToggle) {
+      H.ui.dailyToggle.onclick = function () { setCollapsed(!dailyState.collapsed); };
+    }
+    renderCollapsed();
     // 这里**不**再单独 notifyMode()：上面这行 render() 已经按「生效来源变了
     // 才通知」的规则发过了（notifiedMode 初值是空串，第一次 render 必发）。
     // 再补一次的话启动就是连续两遍 'online'，宿主白白重判一次空态卡。
@@ -651,6 +702,7 @@
     init: init,
     load: load,
     setMode: setMode,
+    setCollapsed: setCollapsed,
     state: dailyState,
   };
 })();

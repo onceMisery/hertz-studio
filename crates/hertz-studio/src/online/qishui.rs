@@ -32,7 +32,7 @@
 
 use super::http::{absorb_cookies, cookie_string, merge_cookie};
 use super::{
-    bad_request, client, https_url, AccountInfo, ApiError, ApiResult, Ctx, OnlineDetail,
+    bad_request, client, https_url, AccountInfo, ApiError, ApiResult, Candidate, Ctx, OnlineDetail,
     OnlineTrack, QrPayload, SearchPage, SearchQuery, StreamInfo, TrackRef,
 };
 
@@ -438,10 +438,15 @@ pub async fn stream(
     };
 
     // 备选直链先算再搬走 best.url：下游按序降级重试，只收非加密档。
-    let fallback_urls: Vec<String> = candidates
+    let fallbacks: Vec<Candidate> = candidates
         .iter()
         .filter(|c| !c.encrypted && c.url != best.url)
-        .map(|c| c.url.clone())
+        .map(|c| Candidate {
+            url: c.url.clone(),
+            bitrate: c.bitrate,
+            container: None,
+            referer: None,
+        })
         .take(3)
         .collect();
 
@@ -451,7 +456,7 @@ pub async fn stream(
         id: id.to_string(),
         bitrate: best.bitrate,
         expires_in_secs: None,
-        fallback_urls,
+        fallbacks,
         rg_gain_db: None,
         rg_peak: None,
     })

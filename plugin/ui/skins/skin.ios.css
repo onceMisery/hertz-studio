@@ -229,7 +229,7 @@
 [data-skin="ios"] .np-card,
 [data-skin="ios"] .menu,
 [data-skin="ios"] .empty-card { border-radius: var(--skin-radius); }
-[data-skin="ios"] :is(.menu, .theme-menu, .top-more-menu, .np-card, .toast) { background: var(--panel-solid); border-color: var(--ios-separator); box-shadow: var(--ios-shadow); }
+[data-skin="ios"] :is(.menu, .theme-menu, .top-more-menu, .skin-menu, .np-card, .toast) { background: var(--panel-solid); border-color: var(--ios-separator); box-shadow: var(--ios-shadow); }
 [data-skin="ios"] .menu { border-radius: var(--r-md); padding: 6px; }
 
 @media (min-width: 1241px) {

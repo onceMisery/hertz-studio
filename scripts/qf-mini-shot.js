@@ -221,7 +221,7 @@ async function waitFor(pred, label, ms = 20000) {
   const after = await page.evaluate(() => {
     const b = document.getElementById('stage').getBoundingClientRect();
     let pos = null;
-    try { pos = JSON.parse(localStorage.getItem('vmusic.qf.stage.pos.v1')); } catch (e) {}
+    try { pos = JSON.parse(localStorage.getItem('vmusic.qf.stage.pos.v2')); } catch (e) {}
     return { x: Math.round(b.left), y: Math.round(b.top), pos };
   });
   const moved = Math.abs(after.x - before.x) > 60 && Math.abs(after.y - before.y) > 60;

@@ -1753,20 +1753,21 @@
    轨道），所以整块脱离文档流。底部胶囊装下了全部播放控制，这张卡只留
    **三样**：封面缩略 + 歌曲信息 + 当前句歌词（放不下由 JS 量宽转跑马灯）。
    进度与播放/暂停不再进卡 —— 卡默认就停在胶囊旁边，重复一套按钮纯属噪音；
-   模式切换 / 全屏 / 队列 / 频谱 / 装饰层照样全部摘掉。
+   模式切换 / 队列 / 频谱 / 装饰层照样全部摘掉，「打开舞台」留着（见下面那条）。
    之前 232×636 的大卡片会盖住曲库右列，是「占位过大」的根因。
    布局用 grid 命名区域把竖排改横排：**不搬节点** —— #now-title /
    #stage-progress 的状态同步是 app.js 按 id 写的，动 DOM 顺序等于让
    其它皮肤一起陪绑，皮肤只该用 CSS 重排。
-   默认停靠点（播放胶囊右缘）由 skin.qingfeng.js 算好写进 left/top，
-   这里的 right/top 只是 JS 没跑起来时的兜底。 */
+   默认停靠点（视口左下角）由 skin.qingfeng.js 算好写进 left/top，
+   这里的 left/bottom 只是 JS 没跑起来时的兜底。 */
 [data-skin="qingfeng"] .stage {
   position: fixed;
-  top: var(--qf-clear);
-  right: 24px;
-  /* 不用 left+bottom 双向锚定：那样高度会被拉满。改成 top 单锚 + max-height，
-     卡片按内容收高。 */
-  bottom: auto;
+  top: auto;
+  right: auto;
+  left: 12px;
+  /* 单锚 bottom + max-height：卡片按内容收高、往上长。再加个 top 就成了
+     双向锚定，高度会被拉满整屏。 */
+  bottom: 12px;
   max-height: calc(100vh - var(--qf-clear) - 96px);
   z-index: 30;
   width: 232px;
@@ -1789,6 +1790,10 @@
   backdrop-filter: saturate(180%) blur(20px);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   overflow: hidden;
+  /* 基础样式在 ≤1240px 把 .stage 做成右侧抽屉（translateX(100%+20px)）。
+     清风这张卡是皮肤自己定位的浮卡，那份位移会把整卡往右推 252px —— 1101~1240px
+     这一带里默认位与拖动落点全歪。复位；拖动中的 scale 由下面更具体的规则给。 */
+  transform: none;
   /* 收起状态下也不能有 transition —— left/top 变化会带上一段补间，
      拖动时整张卡会「追着鼠标跑」，看起来像粘滞。 */
   transition: none;
@@ -1797,9 +1802,10 @@
 /* 非核心块整排摘掉。stage-fx/dots/particles/ripple 是 stage.js 注入的
    装饰层（absolute 铺满整卡）：进了 grid 会变成网格项把行撑开，
    必须显式点名，光靠「卡片变小」盖不住。进度条也是业务节点，胶囊里
-   有同款，迷你卡不再重复一份。 */
+   有同款，迷你卡不再重复一份。
+   唯独 .stage-head-fs（全屏舞台）留下 —— 它是业务既有的沉浸声场入口
+   （与顶栏那颗、F 键同一条路），清风摘掉顶栏图标后，迷你卡是唯一入口。 */
 [data-skin="qingfeng"] .stage-modes,
-[data-skin="qingfeng"] .stage-head-fs,
 [data-skin="qingfeng"] .stage-queue,
 [data-skin="qingfeng"] .stage-tech,
 [data-skin="qingfeng"] .spectrum,
@@ -1877,6 +1883,11 @@
 [data-skin="qingfeng"] .qf-mini-lyric-inner span {
   padding-right: 2.5em;
 }
+/* 第二份拷贝只服务无缝循环，不滚的时候必须收掉：文本放得下时两份是并排
+   渲染的，卡片宽度又装不下两倍 —— 于是右缘露出一截重复歌词，读成「同一句
+   唱两遍」。 */
+[data-skin="qingfeng"] .qf-mini-lyric-inner span + span { display: none; }
+[data-skin="qingfeng"] .qf-mini-lyric.is-scrolling .qf-mini-lyric-inner span + span { display: block; }
 [data-skin="qingfeng"] .qf-mini-lyric.is-scrolling .qf-mini-lyric-inner {
   animation: qf-lyric-marquee var(--qf-lyric-dur, 12s) linear infinite;
 }
@@ -1899,9 +1910,10 @@
   }
 }
 
-/* 卡上唯一的注入控件是关闭（skin.qingfeng.js 注入进把手）：
-   播放控制胶囊里都有，迷你卡不再自带一份。 */
-[data-skin="qingfeng"] .qf-mini-btn {
+/* 卡头上的两颗控件：关闭（skin.qingfeng.js 注入）与「打开舞台」（业务节点
+   #stage-fs，与顶栏那颗、F 键同一条路）。播放控制胶囊里都有，迷你卡不自带一份。 */
+[data-skin="qingfeng"] .qf-mini-btn,
+[data-skin="qingfeng"] .stage-head-fs {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1914,8 +1926,15 @@
   color: var(--muted);
   cursor: pointer;
 }
-[data-skin="qingfeng"] .qf-mini-btn:hover { background: var(--hover); color: var(--text); }
-[data-skin="qingfeng"] .qf-mini-btn svg { width: 12px; height: 12px; }
+[data-skin="qingfeng"] .qf-mini-btn:hover,
+[data-skin="qingfeng"] .stage-head-fs:hover { background: var(--hover); color: var(--text); }
+[data-skin="qingfeng"] .qf-mini-btn svg,
+[data-skin="qingfeng"] .stage-head-fs svg { width: 12px; height: 12px; }
+/* 把手是 flex + space-between，而基础样式给 .stage-modes / .stage-queue 排了
+   order:1 / order:2 —— 注入的关闭按钮默认 order:0，会跑到舞台按钮**前面**（实测
+   摊成「关闭在行中间、舞台靠右」）。这里显式排好这一对的顺序，并把整组推到右端。 */
+[data-skin="qingfeng"] .stage-head-fs { order: 2; margin-left: auto; }
+[data-skin="qingfeng"] .qf-mini-close { order: 3; }
 
 /* 关闭：收起这张卡。位置与「换曲自动回来」的逻辑见 skin.qingfeng.js。 */
 [data-skin="qingfeng"] .stage.qf-mini-closed { display: none !important; }

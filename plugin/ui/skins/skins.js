@@ -12,7 +12,7 @@
 //   1. 新建 `skins/skin.<id>.css`，规则用 `[data-skin="<id>"]` 包起来；
 //   2. 在 CATALOG 里加一行 `{ id, name, note }`，并在 index.html 里补一个
 //      `<link data-skin-css="<id>" disabled>`。
-// 其余（切换、持久化、设置页列表、事件广播）都由这里统一处理。
+// 其余（切换、持久化、设置页列表与顶栏弹层这两个宿主、事件广播）都由这里统一处理。
 
 (function () {
   'use strict';
@@ -127,6 +127,9 @@
     if (!(opts && opts.silent)) {
       try { localStorage.setItem(KEY, id); } catch (e) { /* 隐私模式 */ }
     }
+    // 两处宿主（设置页那张卡列表、顶栏那颗弹层）都在这儿一起重画。放在广播
+    // 之前：订阅者可能会去读已经更新的高亮态。
+    refresh();
     // 舞台画布、3D 场景这些要按新尺寸重排，广播出去让它们自己响应——
     // 与项目里 online-playlists:changed 的做法一致，不在这里硬编码谁要重画。
     try {
@@ -143,26 +146,36 @@
     try { saved = localStorage.getItem(KEY); } catch (e) { saved = null; }
     // 存过但不认识（比如皮肤被删了）就回落 classic，而不是写个无效属性。
     apply(saved && byId(saved) ? saved : DEFAULT_ID, { silent: true });
-    renderList();
+    bindEntry();
     return current;
   }
 
   // ---------------------------------------------------------------------------
-  // 设置页的皮肤列表
+  // 皮肤清单的两个宿主：设置页的卡片列表 + 顶栏的切换弹层
   // ---------------------------------------------------------------------------
 
   function el(id) { return document.getElementById(id); }
 
-  function renderList() {
-    var host = el('skins-list');
+  /// 同一份 CATALOG 渲染成两种宿主：设置页是「一张卡一套皮肤」，顶栏弹层是
+  /// 「一行一个单选项」。只有可访问性语义不同（aria-pressed vs menuitemradio），
+  /// 数据与切换动作共用，所以第二处不再复制一份清单。
+  function renderInto(host, isMenu) {
     if (!host) return;
     host.innerHTML = '';
     CATALOG.forEach(function (def) {
+      var on = def.id === current;
       var b = document.createElement('button');
       b.type = 'button';
-      b.className = 'skin-option' + (def.id === current ? ' is-on' : '');
+      b.className = 'skin-option' + (on ? ' is-on' : '');
       b.setAttribute('data-skin-id', def.id);
-      b.setAttribute('aria-pressed', String(def.id === current));
+      if (isMenu) {
+        b.setAttribute('role', 'menuitemradio');
+        b.setAttribute('aria-checked', String(on));
+        // 弹层里说明被压成一行省略号，全文挂在 title 上。
+        b.title = def.note;
+      } else {
+        b.setAttribute('aria-pressed', String(on));
+      }
       var name = document.createElement('strong');
       name.className = 'skin-option-name';
       name.textContent = def.name;
@@ -173,9 +186,93 @@
       b.appendChild(note);
       b.onclick = function () {
         apply(def.id);
-        renderList();
+        if (isMenu) closeEntry(true);
       };
       host.appendChild(b);
+    });
+  }
+
+  function renderList() { renderInto(el('skins-list'), false); }
+  function renderMenu() { renderInto(entryMenu, true); }
+
+  /// 切肤后两处宿主都要跟上，否则「弹层里已经选了 B，设置页还高亮着 A」。
+  function refresh() {
+    renderList();
+    if (entryMenu) renderMenu();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 顶栏入口：#skin-btn 开合 #skin-menu
+  // ---------------------------------------------------------------------------
+
+  var entryBtn = null;
+  var entryMenu = null;
+  var entryOpen = false;
+
+  function setEntryOpen(open, returnFocus) {
+    if (!entryBtn || !entryMenu) return;
+    entryOpen = !!open;
+    entryMenu.hidden = !entryOpen;
+    entryBtn.classList.toggle('active', entryOpen);
+    entryBtn.setAttribute('aria-expanded', String(entryOpen));
+    if (entryOpen) {
+      renderMenu();
+      // 焦点直接落在当前皮肤那一行：开弹层的意图就是「看看现在是哪套」。
+      var at = entryMenu.querySelector('.skin-option.is-on') || entryMenu.firstElementChild;
+      if (at && at.focus) at.focus();
+    } else if (returnFocus && entryBtn.focus) {
+      entryBtn.focus();
+    }
+  }
+
+  function closeEntry(returnFocus) { setEntryOpen(false, returnFocus); }
+
+  function entryRows() {
+    return Array.prototype.slice.call(entryMenu.querySelectorAll('.skin-option'));
+  }
+
+  function bindEntry() {
+    entryBtn = el('skin-btn');
+    entryMenu = el('skin-menu');
+    // 契约脚本的沙箱只给 #skins-list，这里安静地不绑就行（模块其余部分照旧可用）。
+    if (!entryBtn || !entryMenu) return;
+
+    entryBtn.onclick = function (e) {
+      e.stopPropagation();
+      setEntryOpen(!entryOpen, false);
+    };
+
+    document.addEventListener('click', function (e) {
+      // contains 而不是 ===：按钮里是个 svg，点图标时 target 落在 svg 上。
+      if (entryOpen && !entryMenu.contains(e.target) && !entryBtn.contains(e.target)) {
+        setEntryOpen(false, false);
+      }
+    });
+
+    entryMenu.addEventListener('keydown', function (e) {
+      var rows = entryRows();
+      if (!rows.length) return;
+      var idx = rows.indexOf(document.activeElement);
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        setEntryOpen(false, true);
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        var next = idx < 0 ? 0 : idx + (e.key === 'ArrowDown' ? 1 : -1);
+        if (next < 0) next = rows.length - 1;
+        if (next >= rows.length) next = 0;
+        rows[next].focus();
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        rows[0].focus();
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        rows[rows.length - 1].focus();
+      }
+    });
+
+    window.addEventListener('resize', function () {
+      if (entryOpen) setEntryOpen(false, false);
     });
   }
 

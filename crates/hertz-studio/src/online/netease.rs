@@ -20,7 +20,7 @@ use super::http::{absorb_cookies, cookie_string, merge_cookie};
 use super::playlist_common::{created_playlist, form_map, require_playlist_name, require_tracks};
 use super::{
     bad_request, client, https_url, AccountInfo, AlbumSearchPage, ApiError, ApiResult,
-    ArtistSearchPage, CollectionDetail, Ctx, OnlineAlbum, OnlineArtist, OnlineDetail,
+    ArtistSearchPage, Candidate, CollectionDetail, Ctx, OnlineAlbum, OnlineArtist, OnlineDetail,
     OnlinePlaylist, OnlineTrack, PlaylistDetail, PlaylistSearchPage, QrPayload, SearchPage,
     SearchQuery, StreamInfo, TrackEntry,
 };
@@ -624,14 +624,109 @@ fn with_cookie(req: reqwest::RequestBuilder, cookie: Option<&str>) -> reqwest::R
     }
 }
 
-pub async fn stream(ctx: &Ctx, id: &str, quality: u32) -> ApiResult<StreamInfo> {
-    let cookie = visitor_cookie(ctx).await.unwrap_or(None);
+/// 一档取流响应里的 `data[]` 条目。
+///
+/// `size`/`type` 以前被整个丢掉：容器名是阶梯降级时唯一的落盘旁证（首 32
+/// 字节嗅不出来的话没有依据），码率则是诚实性校验的比较基准。
+struct Rung {
+    url: String,
+    bitrate: Option<u64>,
+    expires_in_secs: Option<u64>,
+    container: Option<&'static str>,
+    gain: Option<f64>,
+    peak: Option<f64>,
+}
+
+/// 上游的容器名 → 本项目认得的扩展名。认不出返回 None，交给字节嗅探。
+fn container_of(raw: &str) -> Option<&'static str> {
+    match raw {
+        "flac" => Some("flac"),
+        "mp3" => Some("mp3"),
+        "m4a" | "aac" => Some("m4a"),
+        "ogg" => Some("ogg"),
+        _ => None,
+    }
+}
+
+/// 解析一个取流条目；没有可用地址返回 None（这一档空着，不是错误）。
+fn parse_rung(entry: &serde_json::Value) -> Option<Rung> {
+    let url = entry
+        .get("url")
+        .and_then(|u| u.as_str())
+        .filter(|s| !s.is_empty())?;
+    // 公开 api 用 `br`，eapi v1 用 `bitrate`，两个都要认。
+    let bitrate = entry
+        .get("br")
+        .or_else(|| entry.get("bitrate"))
+        .and_then(|v| v.as_u64());
+    let container = entry
+        .get("type")
+        .and_then(|v| v.as_str())
+        .and_then(container_of);
+    // peak 为 0 或缺失视作没有，别拿 0 去做防削波的分母。
+    let peak = entry
+        .get("peak")
+        .and_then(|v| v.as_f64())
+        .filter(|p| *p > 0.0);
+    Some(Rung {
+        url: url.to_string(),
+        bitrate,
+        expires_in_secs: entry.get("expi").and_then(|v| v.as_u64()),
+        container,
+        gain: entry.get("gain").and_then(|v| v.as_f64()),
+        peak,
+    })
+}
+
+/// 请求码率 → eapi 的 `level` 名。档位判定复用 `quality::from_bitrate`，
+/// 免得这里再写一套阈值跟档位表漂移。
+fn level_for(quality: u32) -> &'static str {
+    use super::quality::Quality;
+    match super::quality::from_bitrate(Some(u64::from(quality))) {
+        Some(Quality::Hires) => "hires",
+        Some(Quality::Lossless) => "lossless",
+        Some(Quality::Exhigh) => "exhigh",
+        _ => "standard",
+    }
+}
+
+/// eapi 封装：只加密 API 参数（AES-ECB + 固定摘要），不碰音频内容。
+///
+/// 摘要里的路径用 `/api/…` 形式，实际 POST 打到 `/eapi/…`，与游客会话
+/// （[`visitor_cookie`]）用的是同一套签名。
+async fn eapi(
+    path: &str,
+    data: serde_json::Value,
+    cookie: Option<&str>,
+) -> ApiResult<serde_json::Value> {
+    let params = super::sign::netease::eapi(path, &data.to_string());
+    let mut headers = super::http::headers(cookie, Some(W));
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/x-www-form-urlencoded"),
+    );
+    let url = format!(
+        "https://interface.music.163.com/eapi{}",
+        path.trim_start_matches("/api")
+    );
+    let (_, body) = super::http::post_json_with_headers(
+        &client()?,
+        &url,
+        headers,
+        form_urlencoded(&BTreeMap::from([("params".into(), params)])),
+    )
+    .await?;
+    Ok(body)
+}
+
+/// 公开 api 一次请求：游客 cookie 即可，但码率到 320k 封顶。
+async fn api_rung(id: &str, quality: u32, cookie: Option<&str>) -> ApiResult<Option<Rung>> {
     let client = client()?;
     let req = client
         .get("https://music.163.com/api/song/enhance/player/url")
         .query(&[("ids", &format!("[{id}]")), ("br", &quality.to_string())])
-        .header("Referer", "https://music.163.com");
-    let resp = with_cookie(req, cookie.as_deref())
+        .header("Referer", W);
+    let resp = with_cookie(req, cookie)
         .send()
         .await
         .map_err(super::http::send_error)?;
@@ -650,36 +745,104 @@ pub async fn stream(ctx: &Ctx, id: &str, quality: u32) -> ApiResult<StreamInfo> 
         .and_then(|d| d.as_array())
         .and_then(|a| a.first())
         .ok_or_else(|| ApiError::internal("上游未返回试听信息".to_string()))?;
+    Ok(parse_rung(entry))
+}
 
-    let url = entry
-        .get("url")
-        .and_then(|u| u.as_str())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ApiError::upstream_rejected(
-                "这首歌暂无可用音频，可能受版权、地区或账号权益限制；可换一首或登录后重试",
-            )
-        })?;
+/// eapi 取流：显式声明 `level` 与 `encodeType`，无损/Hi-Res 只有这条路会给。
+async fn eapi_rung(id: &str, level: &str, cookie: Option<&str>) -> ApiResult<Option<Rung>> {
+    // header 沿用 minting 这个游客会话时的那套身份（os/appver 一致），
+    // 只换 requestId：换一个设备身份等于用另一台设备去要这条流。
+    let header = serde_json::json!({
+        "os": "ios",
+        "appver": "8.20.21",
+        "osver": "",
+        "deviceId": "",
+        "__csrf": "",
+        "requestId": uuid::Uuid::new_v4().simple().to_string(),
+    });
+    let data = serde_json::json!({
+        "ids": format!("[\"{id}\"]"),
+        "level": level,
+        "encodeType": if level == "lossless" || level == "hires" { "flac" } else { "mp3" },
+        "header": header,
+        "e_r": false,
+    });
+    let body = eapi("/api/song/enhance/player/url/v1", data, cookie).await?;
+    invalidate_visitor(&body).await;
+    if body.get("code").is_some() {
+        expect_200(&body, "获取音频")?;
+    }
+    Ok(body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|a| a.first())
+        .and_then(parse_rung))
+}
+
+pub async fn stream(ctx: &Ctx, id: &str, quality: u32) -> ApiResult<StreamInfo> {
+    let cookie = visitor_cookie(ctx).await.unwrap_or(None);
+    let api = api_rung(id, quality, cookie.as_deref()).await?;
+    // 无损/Hi-Res 得问 eapi（公开 api 封顶 320k）；api 空手而归时也用它兜一次。
+    // 上游请求就到此为止：最多两次，绝不为每个候选各打一次网易的接口。
+    let eapi = if quality >= 600_000 || api.is_none() {
+        match eapi_rung(id, level_for(quality), cookie.as_deref()).await {
+            Ok(rung) => rung,
+            // eapi 失败不毁掉已经到手的 api 地址；但原因要留下，这类
+            // 「游客身份能不能走 eapi」只能靠线上日志判断。
+            Err(e) => {
+                crate::diaglog!(
+                    "netease.eapi_fail",
+                    id = id,
+                    level = level_for(quality),
+                    reason = e.message
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut rungs: Vec<Rung> = [api, eapi].into_iter().flatten().collect();
+    // 声明码率高的排前面：阶梯只会向下降级，反过来等于把无损让给 128k。
+    rungs.sort_by_key(|r| std::cmp::Reverse(r.bitrate.unwrap_or(0)));
+    ladder_from(id, rungs)
+}
+
+/// 把各路取流结果组成阶梯：调用方给的顺序即音质从高到低，第一个是主地址，
+/// 其余进 `fallbacks`（各带自己的码率与容器，降级后档位标注才有依据）。
+///
+/// 排序留在 `stream` 里（那里才知道各上游字段的可信度），这里只管组装与空手
+/// 而归的错误文案。
+fn ladder_from(id: &str, mut rungs: Vec<Rung>) -> ApiResult<StreamInfo> {
+    if rungs.is_empty() {
+        return Err(ApiError::upstream_rejected(
+            "这首歌暂无可用音频，可能受版权、地区或账号权益限制；可换一首或登录后重试",
+        ));
+    }
+    let head = rungs.remove(0);
+    let fallbacks: Vec<Candidate> = rungs
+        .into_iter()
+        .map(|r| Candidate {
+            url: r.url,
+            bitrate: r.bitrate,
+            container: r.container,
+            referer: None,
+        })
+        .collect();
 
     // 响度标签随取流一起给，语义与本地曲的 ReplayGain 一致：`gain` 是 dB、
-    // `peak` 是线性峰值（实测该接口的 data[0] 确实带 gain/peak，另有
-    // closedGain/closedPeak 供「关闭响度归一化」的客户端用）。peak 为 0 或缺失
-    // 视作没有，别拿 0 去做防削波的分母。
-    let rg_gain_db = entry.get("gain").and_then(|v| v.as_f64());
-    let rg_peak = entry
-        .get("peak")
-        .and_then(|v| v.as_f64())
-        .filter(|p| *p > 0.0);
-
+    // `peak` 是线性峰值。实测只有公开 api 那条返回 gain/peak，eapi 档没有
+    // 就是 None —— 不猜、不派生。
     Ok(StreamInfo {
-        url: url.to_string(),
-        source: "netease".into(),
+        url: head.url,
+        source: ID.into(),
         id: id.to_string(),
-        bitrate: entry.get("br").and_then(|v| v.as_u64()),
-        expires_in_secs: entry.get("expi").and_then(|v| v.as_u64()),
-        fallback_urls: Vec::new(),
-        rg_gain_db,
-        rg_peak,
+        bitrate: head.bitrate,
+        expires_in_secs: head.expires_in_secs,
+        fallbacks,
+        rg_gain_db: head.gain,
+        rg_peak: head.peak,
     })
 }
 
@@ -2045,6 +2208,81 @@ mod tests {
                 assert_ne!(term, "热门", "{id} 没有自己的分类词");
             }
         }
+    }
+
+    /// 取流条目要留住档位元数据：`size`/`type`/`br` 以前全被丢掉，而降级后
+    /// 落盘的扩展名与档位标注只能靠它们撑着。两个上游字段名不同（api 用 `br`，
+    /// eapi 用 `bitrate`），都得认。
+    #[test]
+    fn rung_parsing_keeps_tier_metadata() {
+        let api = parse_rung(&serde_json::json!({
+            "url": "https://m10.music.126.net/a.mp3", "br": 320_000, "expi": 1200,
+            "type": "mp3", "gain": -8.4, "peak": 1.02
+        }))
+        .expect("api 条目应解析成候选");
+        assert_eq!(api.bitrate, Some(320_000));
+        assert_eq!(api.container, Some("mp3"));
+        assert_eq!(api.expires_in_secs, Some(1200));
+        assert_eq!(api.gain, Some(-8.4));
+        assert_eq!(api.peak, Some(1.02));
+
+        let eapi = parse_rung(&serde_json::json!({
+            "url": "https://p.music.163.com/b.flac", "bitrate": 999_000,
+            "type": "flac", "peak": 0
+        }))
+        .expect("eapi 条目应解析成候选");
+        assert_eq!(eapi.bitrate, Some(999_000));
+        assert_eq!(eapi.container, Some("flac"));
+        assert!(eapi.peak.is_none(), "peak=0 不能当防削波的分母");
+        assert!(eapi.gain.is_none(), "eapi 不给响度就不编一个");
+
+        // url 为 null / 空串 = 这一档当前身份拿不到，是空格子而不是错误。
+        assert!(parse_rung(&serde_json::json!({"url": null, "br": 0})).is_none());
+        assert!(parse_rung(&serde_json::json!({"url": ""})).is_none());
+        // 认不出的容器名留给字节嗅探，不硬编成 mp3。
+        assert_eq!(container_of("unknown"), None);
+        assert_eq!(container_of("aac"), Some("m4a"));
+    }
+
+    /// 档位名必须由 `quality` 表反推，不能在音源里再写一套阈值。
+    #[test]
+    fn level_names_follow_the_tier_table() {
+        assert_eq!(level_for(999_000), "hires");
+        assert_eq!(level_for(740_000), "lossless");
+        assert_eq!(level_for(320_000), "exhigh");
+        assert_eq!(level_for(128_000), "standard");
+    }
+
+    /// 阶梯组装：主地址带自己的元数据，其余按序进 `fallbacks`；两路都空手
+    /// 才是「暂无可用音频」，且这条文案不能变（前端原样显示）。
+    #[test]
+    fn ladder_head_carries_the_top_tier_and_rest_become_fallbacks() {
+        let rung = |url: &str, bps: u64, c: Option<&'static str>| Rung {
+            url: url.into(),
+            bitrate: Some(bps),
+            expires_in_secs: Some(60),
+            container: c,
+            gain: None,
+            peak: None,
+        };
+        let info = ladder_from(
+            "123",
+            vec![
+                rung("https://p/music.163.com/f.flac", 999_000, Some("flac")),
+                rung("https://m10.music.126.net/a.mp3", 320_000, Some("mp3")),
+            ],
+        )
+        .unwrap();
+        assert_eq!(info.url, "https://p/music.163.com/f.flac");
+        assert_eq!(info.bitrate, Some(999_000));
+        assert_eq!(info.fallbacks.len(), 1);
+        assert_eq!(info.fallbacks[0].bitrate, Some(320_000));
+        assert_eq!(info.fallbacks[0].container, Some("mp3"));
+        // 主地址是 flac 档、备胎是 mp3 档：降级落盘的扩展名据此才不会写错。
+        assert_eq!(
+            ladder_from("123", vec![]).unwrap_err().code,
+            "upstream_rejected"
+        );
     }
 
     // -- Task 12 纯函数 -----------------------------------------------------

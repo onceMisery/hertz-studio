@@ -68,6 +68,10 @@ run() {
 
 run check-skin-fixes SKIN_PORT="$PORT" SKIN_TOKEN="$TOK"
 run check-qf-issues  SKIN_PORT="$PORT" TK="$TOK"
+# 每日推荐折叠按钮 × 五套皮肤 + 曲库行勾选框可见性。它自己拼 URL 与凭据
+#（DAILY_UI_URL + VMUSIC_DATA_DIR 里的 token 文件），所以不接 SKIN_* 那两个变量。
+run check-daily-collapse-browser \
+  DAILY_UI_URL="http://127.0.0.1:$PORT/" VMUSIC_DATA_DIR="$DIR"
 # 这几个自带服务发现逻辑或纯静态，直接跑
 for f in check-daily-strip check-lib-row-actions; do
   run "$f" X=1

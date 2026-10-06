@@ -26,6 +26,20 @@ function rowTemplate() {
   return src.slice(s + 'row.innerHTML = `'.length, e);
 }
 
+// 夹具只补 DOM，**不重写业务逻辑**。勾选这件事的全部语义（写 state.selected、
+// 给行打 is-selected、重排时恢复、取消时两处一起摘）都在 app.js 的这几个函数里。
+// 抠出来跑同一份源码，夹具里手写一份同名逻辑就等于在测自己的仿制品：产品代码
+// 改坏了它照样绿。
+function grab(src, name) {
+  const i = src.indexOf('function ' + name + '(');
+  if (i < 0) throw new Error('找不到 ' + name);
+  // 本仓库的顶格函数一律以顶格 `}` 收尾（同一个约定也是 check-stage-idle 那类
+  // 脚本 g 切段的依据）。找不到它说明格式变了，宁可报错也不要静默切半截。
+  const end = src.indexOf('\n}', i);
+  if (end < 0) throw new Error(name + ' 没有顶格收尾的 }');
+  return src.slice(i, end + 2);
+}
+
 // 把 index.html 里的真实图标 sprite 抠出来注入测试页。
 // 少了它，`<use href="#i-skip-next">` 引用不到任何 symbol 就渲染成空 ——
 // 截图上表现为「两个按钮不见了」，看起来像布局把按钮藏了，其实是环境缺件。
@@ -40,6 +54,11 @@ function iconSprite() {
 (async () => {
   const css = fs.readFileSync(path.join(ROOT, 'plugin/ui/style.css'), 'utf8');
   const tpl = rowTemplate();
+  const appSrc = fs.readFileSync(path.join(ROOT, 'plugin/ui/app.js'), 'utf8');
+  const toggleSrc = grab(appSrc, 'toggleSelect');
+  const batchSrc = grab(appSrc, 'renderBatchBar');
+  const updateSrc = grab(appSrc, 'updateTrackRow');
+  const clearSrc = grab(appSrc, 'clearSelection');
   fs.mkdirSync(OUT, { recursive: true });
 
   const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -51,6 +70,40 @@ body { width: 1080px; margin: 0; padding: 20px; background: #141416; }
 ${iconSprite()}
 <div class="lib-head"><span>#</span><span></span><span>标题</span><span>专辑</span><span>音质</span><span>时长</span><span></span></div>
 <div class="lib-list" id="lib"></div>
+<script>
+// 业务函数的宿主桩：它们只读这几个外部标识符，喂最小的一份就够。
+// ui 留空对象 —— renderBatchBar 见到 ui.libBatchBar 缺失即早退。
+var state = { selected: new Set(), rows: new Map(), snapshot: { playing: false, track_id: null } };
+var ui = {};
+var transport = { coverUrl: function () { return null; } };
+function paintArt() {}   // 封面与这次要验的事无关
+${toggleSrc}
+${batchSrc}
+${updateSrc}
+${clearSrc}
+// 把每行的勾选框接到**真实的** toggleSelect 上。线上是行上的委托监听
+// （closest('.t-select')），这里直接挂在复选框上：等价，且不受夹具缺其它
+// 行事件的影响。
+//
+// 做成一个函数而不是在加载时直接跑：行是下面 page.evaluate 里才建出来的，
+// 页面加载那一刻 document.querySelectorAll('.track') 还是空的。
+window.__fixture = {
+  state: state,
+  ui: ui,
+  wire: function () {
+    document.querySelectorAll('.track').forEach(function (row) {
+      if (row.dataset.wired) return;
+      row.dataset.wired = '1';
+      state.rows.set(row.dataset.id, row);
+      row.querySelector('.t-select').addEventListener('click', function () {
+        var box = row.querySelector('.t-select');
+        // 浏览器已经在这一拍把 checked 翻好了，业务读的就是这个值。
+        toggleSelect(row.dataset.id, box.checked);
+      });
+    });
+  },
+};
+</script>
 </body></html>`;
 
   const file = path.resolve(OUT, 'librow.html');
@@ -90,6 +143,8 @@ ${iconSprite()}
       row.querySelector('.t-actions').appendChild(fav);
       lib.appendChild(row);
     });
+    // 行建好了才接线 —— 见夹具里 window.__fixture.wire 的说明。
+    window.__fixture.wire();
   }, tpl);
   await page.waitForTimeout(300);
 
@@ -154,20 +209,9 @@ ${iconSprite()}
   console.log('  栅格: ' + m.gridCols);
   m.kids.forEach((k) => console.log(`  · ${k.sel.padEnd(22)} w=${String(k.w).padStart(3)} h=${String(k.h).padStart(3)} x=${String(k.x).padStart(4)} 越右=${k.overflowRight} 命中=${k.hitsSelf ? '自己' : '被' + k.hitBy}`));
   if (m.overlaps.length) { console.log('  重叠:'); m.overlaps.forEach((o) => console.log('    ! ' + o)); }
-  // 截图两张：静息态与 hover 态。操作区是 hover 才显形的（.t-actions
-  // opacity:0），只截静息态会看不到那几个按钮 —— 而它们恰恰是这次要验的。
+  // 静息态截图。这张图上操作区那一列是空的 —— 那不是缺陷，正是"未悬停、
+  // 未勾选"的本来样子（见下面判据 10 里"未勾选的行仍保持收起"）。
   await page.screenshot({ path: path.join(OUT, 'librow.png'), clip: { x: 700, y: 0, width: 400, height: 200 } });
-  // 把 hover 态「定格」再截：直接给操作区写死 opacity，而不是靠鼠标悬停
-  // —— 悬停截图在元素移开时容易拍到中间态。
-  await page.evaluate(() => {
-    const st = document.createElement('style');
-    st.textContent = '.t-actions{opacity:1 !important;}';
-    document.head.appendChild(st);
-  });
-  await page.waitForTimeout(200);
-  await page.screenshot({ path: path.join(OUT, 'librow-hover.png'), clip: { x: 700, y: 0, width: 400, height: 200 } });
-  // 勾选态截图：上面判据 10 已经用真实点击勾好了，这里直接拍。
-  await page.screenshot({ path: path.join(OUT, 'librow-checked.png'), clip: { x: 700, y: 0, width: 400, height: 200 } });
 
   // 判据 1：操作区装得下（内容不超容器）
   ok(m.acts.scrollW <= m.acts.clientW + 1,
@@ -208,39 +252,77 @@ ${iconSprite()}
   ok(gaps.length >= 2 && spread <= 2, '控件间隙均匀（勾选框没有多出一截）',
     'gaps=' + JSON.stringify(gaps));
 
-  // 判据 10：勾选后**看得见对勾**。这是纯几何量不到的一层 ——
-  // 对勾是 ::after 画的，得量它的实际盒子与不透明度。
-  // 判据 10：勾选后**看得见对勾**。对勾是 ::after 画的，得量它的实际盒子与不透明度。
+  // ---------------------------------------------------------------------------
+  // ⭐ 判据 10：勾选之后，操作区**不悬停也看得见**
   //
-  // 必须用**真实点击**而不是 `el.checked = true`：设属性不触发样式重算，
-  // 读回来的 opacity 永远是未勾选那档（实测 0），会让人以为对勾没渲染。
-  // 「设属性」与「点一下」在这里表现不同，本身就是容易骗过自己的地方。
-  await page.evaluate(() => {
-    const st = document.createElement('style');
-    st.textContent = '.t-actions{opacity:1 !important;}';
-    document.head.appendChild(st);
-    document.querySelectorAll('.track')[0].classList.add('hover-for-shot');
-  });
+  // 这是本次报障的正题。操作区是 opacity:0，只在 :hover / :focus-within 时显形，
+  // 于是勾完第一首、鼠标挪到第二首，第一首的勾选框跟着消失 —— 而底部批量栏还
+  // 写着「已选 2 首」。用户看到的是"选了却不显示"。
+  //
+  // 这条断言原先写不出来，是因为点击**之前**先注入了
+  // `.t-actions{opacity:1 !important}`（本意是让截图看得见按钮），恰好把被测的
+  // 那条规则整条盖掉 —— 脚本一直是绿的，缺陷一直是红的。
+  // 要量"用户能感知的那一个"，就得在**不注入**的前提下量。
+  //
+  // 三个前置条件缺一不可：真实点击勾选 → 把焦点移走 → 鼠标不压在任何行上。
+  // 只挪鼠标不移焦点的话，:focus-within 会把 opacity 提回 1，量到的还是"看得见"。
+  // ---------------------------------------------------------------------------
   const firstBox = await page.evaluate(() => {
     const b = document.querySelector('.t-select').getBoundingClientRect();
     return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
   });
   await page.mouse.click(firstBox.x, firstBox.y);
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(150);
+  // 点行外的空白处（body 是块级、宽 1080，x=20 落在行的左侧），焦点随之离开
+  // 勾选框；鼠标就停在那里，所以也没有 hover。
+  await page.mouse.click(20, 520);
+  await page.waitForTimeout(150);
+
+  const vis = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.track')];
+    const op = (r) => Number(getComputedStyle(r.querySelector('.t-actions')).opacity);
+    const tickOp = (r) => Number(getComputedStyle(r.querySelector('.t-select'), '::after').opacity);
+    return {
+      firstChecked: rows[0].querySelector('.t-select').checked,
+      firstSelected: rows[0].classList.contains('is-selected'),
+      selectedSize: window.__fixture.state.selected.size,
+      firstOpacity: op(rows[0]),
+      firstTick: tickOp(rows[0]),
+      firstHover: rows[0].matches(':hover'),
+      firstFocusIn: rows[0].matches(':focus-within'),
+      secondChecked: rows[1].querySelector('.t-select').checked,
+      secondOpacity: op(rows[1]),
+    };
+  });
+  ok(vis.firstChecked && vis.firstSelected && vis.selectedSize === 1,
+    '单击勾选框真的切到勾选态，且行上带 is-selected（选中态有可见载体）',
+    `checked=${vis.firstChecked} isSelected=${vis.firstSelected} selected=${vis.selectedSize}`);
+  ok(!vis.firstHover && !vis.firstFocusIn, '（前置）量的时候鼠标与焦点都不在这一行',
+    `hover=${vis.firstHover} focusWithin=${vis.firstFocusIn}`);
+  ok(vis.firstOpacity > 0.9, '未悬停时已勾选行的操作区仍可见（勾选框不会跟着鼠标跑掉）',
+    `opacity=${vis.firstOpacity}`);
+  ok(vis.secondOpacity < 0.1, '未勾选且未悬停的行仍保持收起（不是把每一行都点亮）',
+    `opacity=${vis.secondOpacity} row2Checked=${vis.secondChecked}`);
+  // 「计算出来不透明」不等于「画得出来」：::after 自己的 opacity 是 1，但祖先
+  // .t-actions 是 0 时，渲染出来的乘积仍是 0 —— 这正是下面那条「对勾只在勾选态
+  // 显形」常年绿着、而用户什么都看不见的原因。所以要量的是**有效可见度**，
+  // 即两个 opacity 的乘积，而不是伪元素自己那个数。
+  ok(vis.firstTick * vis.firstOpacity > 0.9,
+    '对勾的有效可见度 = 伪元素 opacity × 操作区 opacity（祖先透明会把它一起抹掉）',
+    `${vis.firstTick} × ${vis.firstOpacity} = ${(vis.firstTick * vis.firstOpacity).toFixed(2)}`);
+  await page.screenshot({ path: path.join(OUT, 'librow-selected.png'), clip: { x: 700, y: 0, width: 400, height: 200 } });
+
+  // 对勾的画法本身：它是「右边 + 下边」两条边框转 42° 画出来的，所以量描边要看
+  // right/bottom，量 borderTopWidth 永远是 0（会让人以为整个对勾没渲染）。
   const tick = await page.evaluate(() => {
     const boxes = [...document.querySelectorAll('.t-select')];
     const cs = (el, pseudo) => getComputedStyle(el, pseudo);
     const on = cs(boxes[0], '::after');   // 刚点过，已勾选
-    // 顺带把勾选态那几行截下来（含坐标，便于对照截图）
     const off = cs(boxes[1], '::after');  // 没点过，未勾选
     return {
-      checked: boxes[0].checked,
       onW: parseFloat(on.width) || 0,
       onH: parseFloat(on.height) || 0,
       onOpacity: Number(on.opacity),
-      // 对勾是「右边 + 下边」两条边转 45° 画出来的，上/左刻意是 0 ——
-      // 所以量描边要看 right/bottom，量 borderTopWidth 永远是 0，
-      // 会让人以为整个对勾没渲染出来（我第一版就写错了这一列）。
       onBorderRight: parseFloat(on.borderRightWidth) || 0,
       onBorderBottom: parseFloat(on.borderBottomWidth) || 0,
       onBorderColor: on.borderRightColor,
@@ -248,7 +330,6 @@ ${iconSprite()}
       anchorPosition: cs(boxes[0], null).position,
     };
   });
-  ok(tick.checked, '单击勾选框真的切到了勾选态（不是只点了没反应）');
   ok(tick.anchorPosition === 'relative', '勾选框是 ::after 的定位锚点（position:relative）',
     'position=' + tick.anchorPosition);
   ok(tick.onOpacity > 0.9 && tick.offOpacity < 0.1, '对勾只在勾选态显形',
@@ -259,6 +340,51 @@ ${iconSprite()}
     `${tick.onW}×${tick.onH} 右${tick.onBorderRight} 下${tick.onBorderBottom}`);
   ok(!!tick.onBorderColor && tick.onBorderColor !== 'rgba(0, 0, 0, 0)',
     '对勾笔画有颜色（不是透明）', tick.onBorderColor);
+
+  // 行是**复用**的：renderLibrary 按 id 取回旧节点、再 updateTrackRow 补状态，
+  // 所以「重排之后选中标记还在不在」是另一条独立通路 —— 只在 toggleSelect 里
+  // 打类是不够的，新行/复用行照样会漏。这里直接调真实的 updateTrackRow：
+  // 先把行上的视觉状态抹掉（模拟一个刚被复用的干净节点），再由它按
+  // state.selected 恢复。
+  const restored = await page.evaluate(() => {
+    const row = document.querySelectorAll('.track')[0];
+    row.classList.remove('is-selected');
+    row.querySelector('.t-select').checked = false;
+    updateTrackRow(row, { id: row.dataset.id, has_cover: false }, 0);
+    return {
+      cls: row.classList.contains('is-selected'),
+      checked: row.querySelector('.t-select').checked,
+      num: row.querySelector('.t-num').textContent,
+    };
+  });
+  ok(restored.cls && restored.checked,
+    '重排时 updateTrackRow 按 state.selected 恢复选中标记与勾选态（复用行不漏）',
+    `is-selected=${restored.cls} checked=${restored.checked} 序号=${restored.num}`);
+
+  // 取消选择要**两处一起摘**：勾选态与 is-selected 少摘一个，症状是
+  // 「取消之后每一行都留着一个空勾选框钉在那里」，而批量栏已经收起来了。
+  const cleared = await page.evaluate(() => {
+    clearSelection();
+    const rows = [...document.querySelectorAll('.track')];
+    return {
+      leftClass: rows.filter((r) => r.classList.contains('is-selected')).length,
+      leftChecked: rows.filter((r) => r.querySelector('.t-select').checked).length,
+      size: window.__fixture.state.selected.size,
+    };
+  });
+  ok(cleared.leftClass === 0 && cleared.leftChecked === 0 && cleared.size === 0,
+    '取消选择时选择集合、勾选态、is-selected 三处一起归零',
+    `is-selected=${cleared.leftClass} checked=${cleared.leftChecked} selected=${cleared.size}`);
+
+  // 最后再把操作区「定格」亮着截一张：悬停截图容易拍到中间态，写死 opacity 更稳。
+  // 这一步必须排在所有断言之后 —— 它注入的 !important 正是会盖掉被测规则的那条。
+  await page.evaluate(() => {
+    const st = document.createElement('style');
+    st.textContent = '.t-actions{opacity:1 !important;}';
+    document.head.appendChild(st);
+  });
+  await page.waitForTimeout(150);
+  await page.screenshot({ path: path.join(OUT, 'librow-hover.png'), clip: { x: 700, y: 0, width: 400, height: 200 } });
 
   console.log('\n' + '─'.repeat(56));
   console.log(`结果：${pass} PASS / ${fail} FAIL`);

@@ -59,14 +59,32 @@ function makeEl(id) {
   const el = {
     id: id || '',
     disabled: false,
+    hidden: false,
     className: '',
     textContent: '',
+    title: '',
+    type: '',
     attrs: {},
     children: [],
     _html: '',
+    // skins.js 的顶栏入口会 toggle 一个 active 类；这里只当开关用，
+    // 断言看的是 aria-expanded / hidden 这两个能直接读到的状态。
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
     setAttribute(k, v) { this.attrs[k] = String(v); },
     getAttribute(k) { return this.attrs[k] || null; },
     appendChild(c) { this.children.push(c); return c; },
+    addEventListener() {},
+    focus() {},
+    // 只服务模块真正用到的那一种选择器：`.a.b`（在直接子节点里找同时带这两个类的）。
+    querySelector(sel) {
+      const want = String(sel).split('.').filter(Boolean);
+      for (let i = 0; i < this.children.length; i += 1) {
+        const cls = (this.children[i].className || '').split(/\s+/);
+        if (want.every((k) => cls.indexOf(k) >= 0)) return this.children[i];
+      }
+      return null;
+    },
+    get firstElementChild() { return this.children[0] || null; },
   };
   Object.defineProperty(el, 'innerHTML', {
     get() { return this._html; },
@@ -91,11 +109,16 @@ function makeSandbox(cssIds, carrier) {
   });
   const root = makeEl('html');
   const listHost = makeEl('skins-list');
+  // 顶栏那颗入口的两个宿主。给齐了 skins.js 才会真去绑定（少一个就安静跳过，
+  // 上面那些只关心切换的用例走的正是这条捷径）。
+  const skinBtn = makeEl('skin-btn');
+  const skinMenu = makeEl('skin-menu');
   const events = [];
   const store = new Map();
   const sandbox = {
     console: { warn: () => {}, log: () => {} },
     Object, Array, JSON, String, Number, Math, Set, Map,
+    addEventListener: () => {},
     CustomEvent: class CustomEvent {
       constructor(type, opts) { this.type = type; this.detail = opts && opts.detail; }
     },
@@ -105,7 +128,9 @@ function makeSandbox(cssIds, carrier) {
     },
     document: {
       documentElement: root,
-      getElementById: (id) => (id === 'skins-list' ? listHost : null),
+      getElementById: (id) => (
+        id === 'skins-list' ? listHost : id === 'skin-btn' ? skinBtn : id === 'skin-menu' ? skinMenu : null
+      ),
       // 组合选择器：只把标签名对得上的那份交给调用方，与浏览器行为一致。
       querySelectorAll: (sel) => (
         String(sel).split(',').some((s) => s.trim() === tag + '[data-skin-css]') ? links : []
@@ -118,7 +143,7 @@ function makeSandbox(cssIds, carrier) {
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(SKINS_JS, sandbox, { filename: 'skins.js' });
-  return { sandbox, root, links, listHost, store, events };
+  return { sandbox, root, links, listHost, skinBtn, skinMenu, store, events };
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +242,50 @@ function checkCatalog() {
   s4.Skins.apply('qingfeng');
   eq(styles[4].disabled, false, 'style 载体下 qingfeng 也能启用');
   eq(styles.every((s, i) => i === 4 || s.disabled), true, '切到 qingfeng 后其余保持禁用');
+}
+
+// ---------------------------------------------------------------------------
+// 顶栏的界面皮肤入口：同一份清单的第二个宿主
+// ---------------------------------------------------------------------------
+
+function checkSkinEntry() {
+  section('顶栏皮肤入口：与设置页同源，切完两处一起跟上');
+
+  const { sandbox, root, listHost, skinBtn, skinMenu } =
+    makeSandbox(['sheen', 'workbench', 'liunian', 'ios', 'qingfeng']);
+  sandbox.Skins.init();
+
+  // 弹层的行是在**展开那一刻**渲染的（init 只绑不画），所以先点按钮再读。
+  // 「初始收起」看的是 index.html 上那个 hidden 属性 —— 桩里的元素没有属性可反射。
+  ok(/id="skin-menu"[^>]*\shidden/.test(HTML), 'index.html 里弹层默认 hidden（开机不挂一份展开的菜单）');
+  skinBtn.onclick({ stopPropagation() {} });
+  eq(skinMenu.hidden, false, '点按钮展开弹层');
+  eq(skinBtn.getAttribute('aria-expanded'), 'true', 'aria-expanded 跟着展开');
+
+  const rows = skinMenu.children;
+  eq(rows.length, sandbox.Skins.catalog().length, '弹层行数等于目录长度（不是各存一份清单）');
+  ok(rows.every((r) => r.getAttribute('role') === 'menuitemradio'), '每行都是 menuitemradio（单选语义）');
+  const on = rows.filter((r) => r.getAttribute('aria-checked') === 'true');
+  eq(on.length, 1, '只标记一个当前项');
+  eq(on[0] && on[0].getAttribute('data-skin-id'), 'classic', '当前项就是当前皮肤');
+
+  const pick = rows.filter((r) => r.getAttribute('data-skin-id') === 'ios')[0];
+  pick.onclick();
+  eq(root.getAttribute('data-skin'), 'ios', '点弹层里的行真的换了皮肤');
+  eq(skinMenu.hidden, true, '选完收起弹层');
+  eq(skinBtn.getAttribute('aria-expanded'), 'false', 'aria-expanded 收回 false');
+  const listOn = listHost.children.filter((r) => (r.className || '').indexOf('is-on') >= 0);
+  eq(listOn.length, 1, '设置页那组也只剩一个高亮（重绘收在 apply 里，不是只改点到的那处）');
+  eq(listOn[0] && listOn[0].getAttribute('data-skin-id'), 'ios', '设置页高亮跟着切到的那套');
+
+  // 一颗按钮只能有一个绑定者。check-assets 的「一条一主」只扫 plugin/ui 顶层，
+  // skins/ 子目录不在它范围内，所以这条得自己钉住。
+  ok(!/skin-btn/.test(APP), 'app.js 不碰 #skin-btn（绑定只在 skins.js）');
+  ok(/<symbol id="i-skin"/.test(HTML), 'i-skin 画在共享 sprite 里（不是又复制一份）');
+  const atTheme = HTML.indexOf('id="theme-btn"');
+  const atSkin = HTML.indexOf('id="skin-btn"');
+  const atMore = HTML.indexOf('id="top-more-btn"');
+  ok(atTheme >= 0 && atTheme < atSkin && atSkin < atMore, '按钮排在主题色之后、「更多」之前');
 }
 
 // ---------------------------------------------------------------------------
@@ -682,7 +751,12 @@ function checkCoverage() {
   //     剩下的缺口会落到这两个可收缩行上（实测行盒 33px→14px、字被切半截）。
   //     浮光干脆不展示它们（信息播放条里一直有），别的皮肤舞台有空间、
   //     本来就得显示曲名与艺人，让它们跟着摘等于砍功能。
-  const GEOMETRY_OPTIONAL = /^\.(dv-name|dv-sub|dv-num|dv-src|topsearch|stage-lyrics|disc-wrap|stage-title|stage-artist)$/;
+  //  e) 顶栏的「界面皮肤」入口（#skin-picker）：浮光把导航做成了一颗 fixed
+  //     胶囊，宽度按「品牌块 + 右侧图标区」算出来（见 .rail 的 max-width），
+  //     右簇每多一颗 36px 的按钮就整体左移 50px —— 实测 1280 还剩 59px 余量，
+  //     1200 就压上胶囊了。所以只有浮光在 ≤1240px 摘掉这颗（皮肤列表在设置页
+  //     里仍然可达）。别的皮肤没有这颗胶囊，要求它们各写一条只等于制造死代码。
+  const GEOMETRY_OPTIONAL = /^\.(dv-name|dv-sub|dv-num|dv-src|topsearch|stage-lyrics|disc-wrap|stage-title|stage-artist)$|^#skin-picker$/;
   const isGeometry = (s) => !GEOMETRY_OPTIONAL.test(s) && !/^[^\s]*\s/.test(s);
 
   const geometryGap = (from, to, fromName, toName) => {
@@ -1503,6 +1577,34 @@ function checkQingfengWall() {
   ok(/emit\('toggle-play'\)/.test(qfCodeWall) && /d\.action === 'toggle-play'/.test(APP)
     && /togglePlay\(\)/.test(APP),
     '浮条播/停走 toggle-play（复用业务路径，不自己拼 post）');
+  // 展开卡与浮条上那两颗播放键要跟着实时播放态翻面。海报节点是键控复用的、
+  // 控制条只建一次，所以「在放哪首 / 在不在放」不能吃建卡时那份快照。
+  ok(/function posterIsCurrent\(/.test(qfCodeWall) && /function posterIsPlaying\(/.test(qfCodeWall)
+    && /document\.body\.classList\.contains\('is-playing'\)/.test(qfCodeWall),
+    '墙上播放态走实时判据（body.is-playing 由 Stage.setSnapshot 同步，不吃建卡快照）');
+  ok(!/t\.current && t\.playing/.test(qfCodeWall)
+    && !/tile && tile\.current && tile\.playing/.test(qfCodeWall),
+    '播放/暂停图标不再读 tile.playing（暂停续播都不换曲，那份快照永远是旧的）');
+  // 已经是当前曲时再发 activate = 把同一首重新 load 一遍，听起来就是「点了没反应」。
+  ok(/if \(posterIsCurrent\(tile\)\) emit\('toggle-play'\)/.test(qfCodeWall),
+    '展开卡上点当前曲走 toggle-play（播放与暂停是同一颗键）');
+  ok(/function paintPosterPlay\(/.test(qfCodeWall)
+    && /paintPosterPlay\(el\);/.test(qfCodeWall)
+    && /paintPosterPlay\(wall\.expandedKey/.test(qfCodeWall),
+    '建卡 / 复用卡 / 播放态跳变三条路径都会重画那颗键');
+  // 「换歌自动跟到当前那张」原来吃的是 tile.current 那份建卡快照 —— 换曲不会重取
+  // 源，快照永远停在上一首，表现是「换歌了墙不动」（浏览器实测抓到）。
+  ok(/function followCurrent\(\)\s*\{[\s\S]*?findIndex\(posterIsCurrent\)/.test(qfCodeWall),
+    '换歌跟随按实时判据挑当前卡（不吃 tile.current 快照）');
+  ok(!/function \([tx]\) \{ return [tx]\.current; \}/.test(qfCodeWall),
+    '墙上找当前项只剩一套判据（不再各读各的建卡快照）');
+  // 换曲只有 playback:track，暂停续播只有 Stage 的跳变沿 —— 少接一条就有一半的
+  // 按钮不翻面。卸载必须两条都摘（.stage 与墙根节点都不随皮肤重建）。
+  ok(/addEventListener\('playback:track', wallPlayHandler\)/.test(QINGFENG_JS)
+    && /addEventListener\('stage:playing-changed', wallPlayHandler\)/.test(QINGFENG_JS)
+    && /removeEventListener\('playback:track', wallPlayHandler\)/.test(QINGFENG_JS)
+    && /removeEventListener\('stage:playing-changed', wallPlayHandler\)/.test(QINGFENG_JS),
+    '播放态两条广播都接上，且卸载时都摘掉');
   ok(/!transport\.post|transport\.post\(/.test(QINGFENG_JS) === false
     || !/transport\.post\('\/v1\/player/.test(QINGFENG_JS),
     '皮肤不自己发 /v1/player 请求（播放路径只有 app.js 一条）');
@@ -1708,12 +1810,18 @@ function checkQingfengSettings() {
   ok(stageRule && /width:\s*2[0-9]{2}px/.test(stageRule[1]),
     '侧卡宽度收窄（300px → 232px，不挤主内容区）',
     stageRule ? (stageRule[1].match(/width:[^;]+/) || [''])[0].trim() : 'no rule');
-  // 纵向必须改成「top 单锚 + max-height」：left/top/bottom 双向锚定会把高度
-  // 拉满整屏 —— 那是「占位过大」的根因，光改 width 治不了。
-  ok(stageRule && /bottom:\s*auto/.test(stageRule[1]) && /max-height:/.test(stageRule[1]),
-    '侧卡高度按内容收（bottom:auto + max-height，不再拉满整屏）');
+  // 纵向必须「单锚 + max-height」：上下双向锚定会把高度拉满整屏 —— 那是
+  // 「占位过大」的根因，光改 width 治不了。默认停靠左下角，所以锚的是 bottom。
+  ok(stageRule && /top:\s*auto/.test(stageRule[1]) && /bottom:\s*\d+px/.test(stageRule[1])
+    && /max-height:/.test(stageRule[1]),
+    '侧卡高度按内容收（bottom 单锚 + max-height，不再拉满整屏）');
   ok(stageRule && /transition:\s*none/.test(stageRule[1]),
     '侧卡禁用 transition（拖动时补间会让卡片粘滞追不上鼠标）');
+  // ≤1240px 基础样式把 .stage 做成右侧抽屉（translateX(100% + 20px)）。清风这张
+  // 卡由皮肤自己定位，那份位移会把整卡推右 252px —— 1101~1240px 这一带停靠位与
+  // 拖动落点全歪（浏览器实测）。拖动中的 scale 在更具体的 .qf-dragging 规则里。
+  ok(stageRule && /transform:\s*none/.test(stageRule[1]),
+    '侧卡复位基础样式的抽屉位移（transform:none，窄视口下位置才不歪）');
   // 拖动反馈：没有视觉反馈的拖拽用户不知道东西抓起来了没。
   ok(/qf-stage-dragging|qf-dragging/.test(QINGFENG) && /scale\(1\.\d\d\)/.test(QINGFENG),
     '拖动中有视觉反馈（抬升 + 轻微放大）');
@@ -1754,18 +1862,24 @@ function checkQingfengSettings() {
 
   // 7d-2) 迷你播放器小卡：封面 + 歌曲信息 + 当前句歌词，高度按内容收。
   //     改前 232×636（歌词 flex:1 把纵向撑满），盖住曲库右列 —— 光收宽度治不了。
-  //     2026-10-06 起卡不再自带进度与播放控制：默认停靠在播放胶囊右缘，
-  //     按钮重复一份纯属噪音；多出来的是当前句歌词（放不下转跑马灯）。
+  //     2026-10-06 起卡不再自带进度与播放控制：默认停在视口左下角、与播放
+  //     胶囊同一水平带，按钮重复一份纯属噪音；多出来的是当前句歌词（放不下转跑马灯）。
   ok(stageRule && /grid-template-areas:/.test(stageRule[1]) && /"lyric/.test(stageRule[1]),
     '迷你卡用 grid 命名区域重排，且给当前句歌词留了 lyric 区');
   ok(stageRule && /display:\s*grid/.test(stageRule[1]),
     '迷你卡是 grid 布局（横排封面+信息，而不是竖排大卡）');
   const qfMiniHide = QINGFENG.match(
-    /\[data-skin="qingfeng"\] \.stage-modes,[\s\S]*?\{([^}]*)\}/);
-  ok(qfMiniHide && /display:\s*none/.test(qfMiniHide[1])
-    && /\.stage-lyrics/.test(qfMiniHide[0]) && /\.spectrum/.test(qfMiniHide[0])
-    && /\.stage-ripple/.test(qfMiniHide[0]) && /\.stage-progress/.test(qfMiniHide[0]),
-    '非核心块（模式/全屏/队列/频谱/歌词/进度/装饰层）在清风整排摘掉');
+    /\[data-skin="qingfeng"\] \.stage-modes,([\s\S]*?)\{([^}]*)\}/);
+  ok(qfMiniHide && /display:\s*none/.test(qfMiniHide[2])
+    && /\.stage-lyrics/.test(qfMiniHide[1]) && /\.spectrum/.test(qfMiniHide[1])
+    && /\.stage-ripple/.test(qfMiniHide[1]) && /\.stage-progress/.test(qfMiniHide[1]),
+    '非核心块（模式/队列/频谱/歌词/进度/装饰层）在清风整排摘掉');
+  // 「打开舞台」是业务节点 #stage-fs（与顶栏那颗、F 键同一条路）。清风把顶栏图标
+  // 收进了左上角那颗设置按钮，再摘掉它，沉浸声场就只剩没人知道的快捷键了。
+  ok(qfMiniHide && qfMiniHide[1].indexOf('.stage-head-fs') < 0,
+    '迷你卡留着「打开舞台」（摘掉顶栏图标后它是沉浸声场的可见入口）');
+  ok(/\[data-skin="qingfeng"\] \.stage-head-fs\s*\{[^}]*margin-left:\s*auto/.test(QINGFENG),
+    '舞台按钮与关闭一起靠右（把手是 space-between，不推会摊在行中间）');
   ok(/function buildStageMini\(/.test(QINGFENG_JS)
     && /qf-mini-lyric/.test(QINGFENG_JS) && /qf-mini-close/.test(QINGFENG_JS),
     '迷你卡注入当前句歌词行与关闭（不再自带播放控制行）');
@@ -1778,6 +1892,16 @@ function checkQingfengSettings() {
   ok(/qf-lyric-marquee/.test(QINGFENG) && /is-scrolling/.test(QINGFENG)
     && /--qf-lyric-dur/.test(QINGFENG_JS),
     '歌词放不下转跑马灯（JS 量宽写时长，CSS 两份拷贝无缝循环）');
+  // 第二份拷贝是跑马灯的循环垫片，不滚时必须收掉：两份并排渲染，卡片又装不
+  // 下两倍宽，右缘就露出重复半句 —— 用户读成「同一句唱两遍」。
+  // 判据要的是**默认那条**（不带 .is-scrolling 前缀），只在 reduced-motion
+  // 分支里藏第二份盖不住常规路径。
+  const lyricDup = QINGFENG.match(
+    /\[data-skin="qingfeng"\] \.qf-mini-lyric-inner span \+ span\s*\{([^}]*)\}/);
+  ok(lyricDup && /display:\s*none/.test(lyricDup[1]),
+    '不滚动时歌词第二份拷贝收掉（默认规则，不是只写在减动效分支里）');
+  ok(/\[data-skin="qingfeng"\] \.qf-mini-lyric\.is-scrolling \.qf-mini-lyric-inner span \+ span\s*\{[^}]*display:/.test(QINGFENG),
+    '滚动时才把第二份拷贝放出来喂给无缝循环');
   // 播放路径只有一条：迷你卡没有按钮，也不允许自己发播放 HTTP。
   const miniFns = (QINGFENG_JS.match(/function buildStageMini\([\s\S]*?\n  \}/) || [''])[0]
     + (QINGFENG_JS.match(/function lyricLineText\([\s\S]*?\n  \}/) || [''])[0]
@@ -1811,16 +1935,32 @@ function checkQingfengSettings() {
     '侧卡有范围约束的边界计算');
   ok(/var p = clampStage\(el, x, y\)/.test(QINGFENG_JS),
     '范围约束被真正应用到位置上（不是定义了没用的空函数）');
-  // 2026-10-06 起卡片默认停靠播放胶囊右缘：没记忆位置就停靠（挂载时与
-  // resize 时），有记忆才恢复原位。挂载路径要等皮肤 CSS 生效再量宽高
-  // （restoreOrDock），否则量到栅格旧布局，停出来的位置是歪的。
-  // 底部胶囊/头像用矩形避让而不是封死下缘。
+  // 默认停靠点是视口左下角（2026-10-06 从「播放胶囊右缘」改过来）：没记忆位置
+  // 就停靠（挂载时与 resize 时），有记忆才恢复原位。挂载路径要等皮肤 CSS 生效
+  // 再量宽高（restoreOrDock），否则量到栅格旧布局，停出来的位置是歪的。
   ok(/function dockStage\(/.test(QINGFENG_JS) && /function restoreOrDock\(/.test(QINGFENG_JS)
     && /restoreOrDock\(saved, 240\)/.test(QINGFENG_JS)
     && /if \(!readStagePos\(\)\) \{ dockStage\(\); return; \}/.test(QINGFENG_JS),
     '迷你卡没记忆位置时默认停靠（等皮肤布局生效再量），resize 重新停靠，有记忆才恢复原位');
+  // 落点本身：左缘贴最小留白、纵向对齐播放胶囊那条带，且必须过 clampStage ——
+  // 卡片就停在下缘带上，不约束的话窄视口会被胶囊压住。胶囊中心要**实测矩形**：
+  // .bar 除了 bottom 还继承了 margin，照公式算低十几像素（旧版横向停靠踩过同一条）。
+  const dockFn = stripJsComments(
+    (QINGFENG_JS.match(/function dockStage\([\s\S]*?\n  \}/) || [''])[0]);
+  ok(/clampStage\(el, STAGE_MARGIN,/.test(dockFn) && /window\.innerHeight\s*-/.test(dockFn)
+    && /getBoundingClientRect\(\)/.test(dockFn),
+    '迷你卡默认停靠视口左下角（左缘留白 + 胶囊中心实测 + 边界约束）');
+  ok(stageRule && /left:\s*12px/.test(stageRule[1]) && /bottom:\s*12px/.test(stageRule[1]),
+    'CSS 兜底位同样锚左下角（JS 没跑起来时不会跳回右上）');
   ok(/function pushOutFloaters\(/.test(QINGFENG_JS) && /pushOutFloaters\(p, w, h\)/.test(QINGFENG_JS),
     '拖动时对播放胶囊/头像胶囊做矩形避让（推到其上缘之外，不封死下缘）');
+  // 歌词行出现/消失会让卡片变高，而停靠写的是 top：不重新停靠的话，默认位比
+  // 胶囊那条带低半截（浏览器实测差 20px）。有记忆位时不能观察 —— 位置归用户。
+  ok(/function watchStageSize\(/.test(QINGFENG_JS)
+    && /new ResizeObserver\(function \(\) \{ if \(!readStagePos\(\)\) dockStage\(\); \}\)/.test(QINGFENG_JS)
+    && /stageDrag\.ro = watchStageSize\(el\)/.test(QINGFENG_JS)
+    && /stageDrag\.ro\.disconnect\(\)/.test(QINGFENG_JS),
+    '没记忆位时卡片高度一变就重新停靠（有记忆不重停，卸载断开观察）');
   // 「动了才记位置」：点一下把手（没拖）不该覆盖用户之前摆好的位置。
   ok(/stageDrag\.moved/.test(QINGFENG_JS) && /if \(stageDrag\.moved/.test(QINGFENG_JS),
     '只有真的拖过才持久化位置（点一下把手不覆盖）');
@@ -2192,6 +2332,7 @@ function checkStageNoHorizontalScroll() {
 (function main() {
   checkCatalog();
   checkExtensibility();
+  checkSkinEntry();
   checkNoColor();
   checkContrast();
   checkIosSkin();

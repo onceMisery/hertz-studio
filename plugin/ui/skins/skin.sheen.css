@@ -84,6 +84,18 @@
   --skin-ctl-radius: var(--r-pill);
   --skin-focus-offset: 3px;   /* 比默认大 1px：胶囊浮在内容上，焦点环要能脱开底色 */
 
+  /* ==== 面板底边到播放条的净空 ====
+     悬浮面板从顶栏往下长，底边不能顶进播放条。这里**不能拿 --bar-h 当播放条
+     的高度**：它只是 min-height，真实高度由内容撑，而且随断点重排变化 ——
+     实测一行 80px、≤900px 两行 117px、≤620px 三行 163px（三处的差值不是
+     --bar-h 的整数倍，所以下面按断点写绝对值，见文件末尾的响应式一节）。
+     按令牌让位的结果是面板底边**插进播放条上沿**（实测 1920×1010：面板
+     bottom 920 / 播放条 top 912，重叠 8px）—— 播放条是浮在面板上的一层，
+     这一插看不出错位，只觉得"播放界面一直拖到播放条里"。
+     留位 = 播放条实高 + 两道 --skin-gap：一道是面板自己的呼吸位，
+     一道留给播放条的下外边距（它和面板是同一个间距节奏）。 */
+  --skin-stage-foot: calc(80px + var(--skin-gap) * 2);
+
   /* ==== 悬浮导航的几何：--skin-rail-clear 由它推导 ====
      胶囊 top = topbar-h + 12，高约 46（padding 5×2 + item 34 + 边框 2）。
      62px 这个旧值只让开了顶栏，胶囊下沿（≈116px）其实是压在内容上的——
@@ -429,8 +441,10 @@
   right: var(--skin-pad);
   top: calc(var(--topbar-h) + var(--skin-clear-wide));
   width: min(420px, 32vw);
-  /* dvh 而非 vh：移动端浏览器地址栏收起/展开时 vh 不变，底边会插进播放栏。 */
-  max-height: calc(100dvh - var(--topbar-h) - var(--skin-clear-wide) - var(--bar-h) - var(--skin-gap));
+  /* dvh 而非 vh：移动端浏览器地址栏收起/展开时 vh 不变，底边会插进播放栏。
+     --skin-stage-foot 见令牌区：它把播放条真实高出 --bar-h 的那一档也算进去，
+     于是底边停在播放条上方一道 --skin-gap。 */
+  max-height: calc(100dvh - var(--topbar-h) - var(--skin-clear-wide) - var(--skin-stage-foot));
   z-index: 58;
   padding: var(--skin-pad);
   border-radius: var(--skin-radius);
@@ -448,8 +462,9 @@
   overflow: hidden;
   /* 内容不足一屏时面板不该半途截断：min-height 让它至少占满「顶栏到播放条」
      之间那段 —— 否则没有歌词时面板只有内容那么高，底边悬在半空、
-     右侧留一大块空面板（用户报「需要对齐 UI」的就是这个）。 */
-  min-height: min(calc(100dvh - var(--topbar-h) - var(--skin-clear-wide) - var(--bar-h) - var(--skin-gap)), 520px);
+     右侧留一大块空面板（用户报「需要对齐 UI」的就是这个）。
+     与 max-height 同一个留位令牌：两者改一处两处同步。 */
+  min-height: min(calc(100dvh - var(--topbar-h) - var(--skin-clear-wide) - var(--skin-stage-foot)), 520px);
 }
 
 /* 余量归属：面板有了 min-height 之后多出来的空间默认**全给唱片盘** ——
@@ -468,6 +483,22 @@
      比基础样式的 min(236px, 66%) 略收一点，把省下的还给歌词区。 */
   width: min(58%, 236px);
   align-self: center;
+}
+
+/* --- 面板里的歌曲名/演唱人：浮光不再展示 --------------------------------
+   这两行在悬浮面板里从出现起就是坏的，而且**看不出来是坏的**：
+   .stage 是定高的 flex 列（max-height 钉住），.stage-lyrics 被压到
+   min-height:96 之后还有余量缺口时，缺口会落到仅剩的两个可收缩项
+   —— 标题行盒实测 33px → 14px、艺人 20px → 9px，21px 的字被切成半截
+   （用户报「歌曲名和演唱人展示不全」）。给它补 flex:none 也能修，
+   但这两条信息播放条（.bar-track 的曲名 + 副标题）任何时刻都有，
+   悬浮面板只保留「封面 → 进度 → 频谱 → 歌词」这条视觉主线更干净：
+   直接摘掉，歌词区顺势多拿 53px。
+   display:none 而不是 visibility —— 摘掉就该把高度让出来，
+   而且它们不参与交互（app.js 只写 textContent），没有隐藏后仍要可达的理由。 */
+[data-skin="sheen"] .stage-title,
+[data-skin="sheen"] .stage-artist {
+  display: none;
 }
 
 /* --- 播放栏：底部悬浮条，两侧内收 --------------------------------------- */
@@ -558,10 +589,35 @@
   [data-skin="sheen"] .stage {
     top: 12px;
     right: 12px;
-    bottom: calc(var(--bar-h) + 24px);
+    /* 抽屉底边同样不能顶进播放条：这里的 `--bar-h + 24px` 与宽屏那处是同
+       一个错误 —— --bar-h 只是播放条的 min-height，实测 1024×768 下抽屉
+       底边（672）压在播放条顶边（670）上 2px。统一换成同一个令牌。 */
+    bottom: var(--skin-stage-foot);
     width: min(420px, 88vw);
     max-height: none;
   }
+
+  /* 顶栏那颗「界面皮肤」在浮光的窄屏段让位。胶囊是 fixed 定位、宽度按
+     「品牌块 + 右侧图标区」算出来的（见 .rail 的 max-width），右簇每多一颗
+     36px 的按钮就整体左移 50px：实测 1280 还剩 59px 余量，1200 就压上了
+     （没有这颗按钮时 1200 是 29px 余量）。皮肤列表在设置页里仍然可达。
+     浮光 900–1150 那段本来就已经挤在一起（不加按钮时 1100 只剩 4px），
+     那是它自己的旧账，不在这里顺手改。 */
+  [data-skin="sheen"] #skin-picker { display: none; }
+}
+
+/* 窄屏的播放条会重排成多行（style.css 的 ≤900px / ≤620px 两处网格改写），
+   实高从 80px 涨到 117px / 163px（实测）。面板的留位必须跟着涨，否则抽屉
+   底边又插回播放条里（实测 900×700 差 -19px、390×844 差 -57px）。
+   写绝对值而不是拿 --bar-h 乘倍数：--bar-h 是 min-height、与行数无关，
+   乘出来的 1.6/2.3 倍只是当下的巧合，改播放条内距就散架。
+   必须排在上面那条 ≤1240px 的**后面**（同为 (0,1,1)，靠源码顺序决胜）。 */
+@media (max-width: 900px) {
+  [data-skin="sheen"] { --skin-stage-foot: calc(117px + var(--skin-gap) * 2); }
+}
+
+@media (max-width: 620px) {
+  [data-skin="sheen"] { --skin-stage-foot: calc(163px + var(--skin-gap) * 2); }
 }
 
 /* 小屏：两侧留白收窄，给主要内容区让出空间。

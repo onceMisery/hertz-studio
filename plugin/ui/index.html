@@ -67,6 +67,15 @@
   <symbol id="i-palette" viewBox="0 0 24 24" fill="currentColor">
     <path d="M12 3a9 9 0 100 18c1.1 0 1.8-.8 1.8-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.1 0-.9.8-1.7 1.7-1.7H16a5 5 0 005-5c0-3.9-4-7.3-9-7.3zm-5.2 9a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm2.6-4a1.4 1.4 0 110-2.8 1.4 1.4 0 110 2.8zm4.6-1.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm3.4 3.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8z"/>
   </symbol>
+  <!-- 界面皮肤：一张带「顶栏 + 侧栏」分区的界面卡，后面叠着另一张 —— 读作
+       同一副骨架换一张皮。不复用 i-library（堆叠圆盘，曲库已占）也不复用
+       i-cube（立方体，沉浸声场已占），两者都在同一簇里挨着放。 -->
+  <symbol id="i-skin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 4h8.5A2.5 2.5 0 0120 6.5V15"/>
+    <rect x="4" y="8" width="12" height="12" rx="2.5"/>
+    <path d="M4 12.5h12M8.5 12.5V20"/>
+  </symbol>
   <symbol id="i-workshop" viewBox="0 0 24 24" fill="currentColor">
     <path d="M12 2.6l2.3 4.9 5.3.7-3.9 3.7 1 5.3-4.7-2.6-4.7 2.6 1-5.3-3.9-3.7 5.3-.7z"/>
     <path d="M4 19.4h6v1.8H4zM14 19.4h6v1.8h-6z"/>
@@ -260,6 +269,15 @@
       <div class="theme-menu" id="theme-menu" role="listbox" aria-label="主题色列表" hidden></div>
     </div>
 
+    <!-- 界面皮肤：顶栏一键换装。菜单项由 skins.js 从同一份 CATALOG 渲染，
+         与设置页那组共用真源，所以这里只留空壳。 -->
+    <div class="skin-picker" id="skin-picker">
+      <button type="button" id="skin-btn" class="iconbtn" title="界面皮肤" aria-label="切换界面皮肤" aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-skin"/></svg>
+      </button>
+      <div class="skin-menu" id="skin-menu" role="menu" aria-label="界面皮肤" hidden></div>
+    </div>
+
     <div class="top-more" id="top-more">
       <button type="button" id="top-more-btn" class="iconbtn" title="更多工具" aria-label="更多工具" aria-haspopup="menu" aria-expanded="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-more"/></svg>
@@ -381,6 +399,14 @@
             </div>
             <button id="daily-play-all" class="btn primary" disabled>播放全部</button>
             <button id="daily-refresh" class="btn" aria-label="重新拉取每日推荐">刷新</button>
+            <!-- 折叠：收起的是**卡片区**，标题行与上面这几个按钮都留在原地
+                 —— 收起之后这一条仍要能表述"今天是哪一天、从哪来"，
+                 也仍要能一键播放全部/刷新。收起态记在本机（见 daily.js）。 -->
+            <button id="daily-toggle" class="btn daily-toggle" type="button"
+                    aria-expanded="true" aria-controls="daily-list"
+                    aria-label="收起每日推荐" title="收起每日推荐">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+            </button>
           </div>
         </div>
         <div class="daily-list" id="daily-list"></div>

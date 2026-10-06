@@ -551,19 +551,16 @@ fn stream_info(url: String, id: &str) -> StreamInfo {
         id: id.to_string(),
         bitrate: None,
         expires_in_secs: None,
-        fallback_urls: Vec::new(),
+        fallbacks: Vec::new(),
         rg_gain_db: None,
         rg_peak: None,
     }
 }
 
-/// 回填实际请求码率，便于上层标注「实际档位」。酷狗无备用直链，fallback
-/// 由 progressive 下载器在传输层处理。
-///
-/// 仅 gateway 通道使用：只有登录网关按 `quality` 参数明确返回对应档位的
-/// 直链；mobile/h5 给的地址实际码率未知，若回填请求档位会把 128k 标成
-/// 「无损」，故那两跳走普通 [`stream_info`]（bitrate=None）。
-fn stream_info_with_fallback(url: String, hash: &str, quality: u32) -> StreamInfo {
+/// 仅 gateway 通道使用：只有登录网关按 `quality` 参数明确返回对应档位的直链，
+/// 所以这一跳敢回填请求档位。mobile/h5 给的地址实际码率未知，回填请求档位会把
+/// 128k 标成「无损」，故那两跳走普通 [`stream_info`]（bitrate=None）。
+fn gateway_stream_info(url: String, hash: &str, quality: u32) -> StreamInfo {
     let mut info = stream_info(url, hash);
     info.bitrate = Some(quality as u64);
     info
@@ -706,7 +703,7 @@ pub async fn stream(
                     business_seen = true;
                     if status_ok(b.get("status")) {
                         if let Some(u) = pick_url(&b) {
-                            return Ok(stream_info_with_fallback(u, hash, quality));
+                            return Ok(gateway_stream_info(u, hash, quality));
                         }
                     }
                     tracing::debug!(channel = "kugou_gateway", status = %status_digest(&b), "酷狗取流通道失败");

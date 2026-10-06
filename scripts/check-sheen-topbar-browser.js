@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 //
-// 浮光：胶囊并入顶栏 + 常驻搜索框摘掉（浏览器验收，需 Playwright + 服务）。
+// 浮光：胶囊并入顶栏 + 常驻搜索框摘掉 + 播放面板的底边留位（浏览器验收，
+// 需 Playwright + 服务）。
 //
 //   SETTINGS_NAV_URL=http://127.0.0.1:18791/ \
 //   NODE_PATH=<装有 playwright 的 node_modules 路径> \
@@ -12,11 +13,13 @@
 // 装在隔离的托管 workspace 里（而非全局），全局 require 会失败，
 // 此时把 NODE_PATH 指到那个 workspace 的 node_modules。
 //
-// 为什么必须浏览器：这两条的失败模式全是**看起来正常**的——
+// 为什么必须浏览器：这几条的失败模式全是**看起来正常**的——
 //   · 留白：内容照样渲染，页面不报错，只是第一屏白扔三分之一。
 //     CSS 里的 padding 写成 0 还是 134px，正则断言与"通过"完全同形。
 //   · 搜索框：`display:none` 会让 `/` 与 Ctrl+K 的 focus() **静默失效**，
 //     按键没反应、控制台干净，契约脚本（只看源码文本）永远抓不到。
+//   · 播放面板：底边插进播放条、曲名被压成半截字，都是"页面不报错、
+//     元素一个不少"的几何问题，只有量 getBoundingClientRect 才分得开。
 // 所以这里量真实几何、并真的按一次键看焦点落在哪。
 
 'use strict';
@@ -292,17 +295,45 @@ async function setSkin(page, id) {
     ok(st.railVis === 'visible' && st.railPE !== 'none',
       `失焦后胶囊回到场上（visibility=${st.railVis} pointer-events=${st.railPE}）`);
 
-    // Ctrl+K 也一样
+    // Ctrl+K 走的**不是**搜索框：app.js 的 bindShortcuts 里这个组合键已经让给
+    // 命令面板（`if (window.Palette) Palette.open(); else focusSearch(true)`）。
+    // 这条断言原来写的是"Ctrl+K 也唤起搜索框"，Palette 接管之后就永远红 ——
+    // 而红的样子和"功能坏了"一模一样（mark=false、focus 是 body），
+    // 排查时得先分清是脚本陈旧还是真缺陷。现在按真实约定验两条路分开：
+    // `/` 叫搜索框，Ctrl+K 开命令面板。
     await page.evaluate(() => document.activeElement.blur());
     await page.keyboard.press('Control+k');
-    await page.waitForTimeout(150);
-    st = await page.evaluate(() => ({
-      mark: document.body.classList.contains('sheen-search'),
-      focused: document.activeElement && document.activeElement.id,
-    }));
-    ok(st.mark && st.focused === 'search', `Ctrl+K 也能唤起（mark=${st.mark} focus='${st.focused}'）`);
+    await page.waitForTimeout(200);
+    const palette = await page.evaluate(() => {
+      const scrim = document.querySelector('.palette-scrim');
+      return {
+        hasPalette: !!window.Palette,
+        open: !!scrim && !scrim.hidden,
+        searchMark: document.body.classList.contains('sheen-search'),
+      };
+    });
+    ok(palette.hasPalette, 'Ctrl+K 由命令面板接管（window.Palette 在）');
+    ok(palette.open, 'Ctrl+K 打开命令面板');
+    ok(!palette.searchMark, 'Ctrl+K 不再顺带把浮光的搜索框叫出来（两条路各走各的）');
 
-    // Esc 收
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(200);
+    const paletteClosed = await page.evaluate(() => {
+      const scrim = document.querySelector('.palette-scrim');
+      const railCs = getComputedStyle(document.getElementById('rail'));
+      return { open: !!scrim && !scrim.hidden, railVis: railCs.visibility };
+    });
+    ok(!paletteClosed.open, 'Esc 关掉命令面板');
+    ok(paletteClosed.railVis === 'visible',
+      `面板与搜索都不在的平时态，浮光胶囊照旧在场（visibility=${paletteClosed.railVis}）`);
+
+    // 收起来：Esc 应摘掉标记，胶囊回场。
+    // 先用 `/` 真的把搜索叫出来 —— 否则下面两条是空转（还没唤起就无所谓收起）。
+    await page.evaluate(() => document.activeElement.blur());
+    await page.keyboard.press('/');
+    await page.waitForTimeout(150);
+    ok(await page.evaluate(() => document.body.classList.contains('sheen-search')),
+      'Esc 前先由 `/` 唤起搜索（下面两条才有对象可测）');
     await page.keyboard.press('Escape');
     await page.waitForTimeout(150);
     const afterEsc = await page.evaluate(() => {
@@ -330,6 +361,82 @@ async function setSkin(page, id) {
     ok(typed.clearVisible, '清空按钮随之出现');
     await page.evaluate(() => { document.getElementById('search').blur(); });
 
+    // ---------------------------------------------------------- 播放面板：底边与两行文字
+    // 面板的高度被 max-height 钉死（fixed 悬浮件），于是两个后果都只能量真实
+    // 盒子、量不出声明：
+    //   · 底边位置 —— 播放条的真实高度不是 --bar-h（那只是它的 min-height：
+    //     内距 14×2 + 内容行 50 + 边框 2 = 80px）。只按令牌让位，底边会插进
+    //     播放条上沿 8px，看上去像"播放界面一直拖进播放条里"。
+    //   · 谁被压扁 —— .stage 是定高 flex 列，歌词区压到 min-height:96 之后
+    //     剩下的缺口会落到仅剩的可收缩项上，曲名/艺人行盒被从 33px 压到 14px。
+    // 这两条在 Node 契约里都只能钉"写了某条声明"，钉不到"真的长这样"。
+    section('浮光：播放面板的底边留位与曲名/艺人');
+
+    await setSkin(page, 'sheen');
+    await page.evaluate(() => {
+      // 空闲时 .stage 是 display:none（body[data-stage-idle="1"]），整列量不到
+      // 任何东西。判据只与布局有关，这里直接放行显示。
+      const st = document.createElement('style');
+      st.id = '__force-stage';
+      st.textContent = 'body[data-stage-idle="1"] .stage{display:flex !important}';
+      document.head.appendChild(st);
+      // 注入歌词前先冻住入口：app.js 在没有在播曲目时会用 setLyrics(null)
+      // 把歌词清掉（注入后约 1 秒就没了），冻住之后才量得到"有词"的面板。
+      const inject = window.Stage.setLyrics.bind(window.Stage);
+      window.Stage.setLyrics = function () {};
+      inject({ lines: Array.from({ length: 24 }, (_, i) => ({ text: '一行歌词 ' + i, start_ms: i * 6000, t: i * 6000 })) });
+    });
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+
+    const panel = await page.evaluate(() => {
+      const box = (sel) => {
+        const el = document.querySelector(sel);
+        const r = el.getBoundingClientRect();
+        return { top: Math.round(r.top), bottom: Math.round(r.bottom), h: Math.round(r.height),
+          display: getComputedStyle(el).display };
+      };
+      return {
+        stage: box('.stage'), bar: box('.bar'),
+        title: box('.stage-title'), artist: box('.stage-artist'), lyrics: box('.stage-lyrics'),
+        trackH: Math.round(document.querySelector('.lyric-track').getBoundingClientRect().height),
+        count: document.querySelectorAll('.lyric').length,
+        inDom: !!document.getElementById('now-title') && !!document.getElementById('now-artist'),
+      };
+    });
+
+    ok(panel.count >= 20, `面板里有歌词内容（${panel.count} 行）—— 空面板量不出"被压扁"的那一档`);
+    ok(panel.trackH > panel.lyrics.h,
+      `歌词内容高于歌词区（${panel.trackH} > ${panel.lyrics.h}）—— 面板确实处在被 max-height 钉住的状态`);
+    ok(panel.inDom, '曲名/艺人元素仍在 DOM 里（app.js 仍按 id 写文本，只是这套皮肤不展示）');
+    ok(panel.title.display === 'none' && panel.artist.display === 'none',
+      `浮光面板不展示曲名/艺人（title=${panel.title.display} artist=${panel.artist.display}，旧版被压成 14px/9px 半截字）`);
+    // 净空上下都要卡：小于 12px = 又贴回播放条（含重叠的负值），
+    // 大于 48px = 把面板削掉了一大截，那是另一回事。
+    const clearance = panel.bar.top - panel.stage.bottom;
+    ok(clearance >= 12 && clearance <= 48,
+      `面板底边停在播放条上方 ${clearance}px（旧版 -8px：底边插进播放条）`);
+    ok(panel.lyrics.h >= 96,
+      `歌词区仍在 min-height 之上（${panel.lyrics.h}px ≥ 96px）—— 面板变矮不能靠压歌词区`);
+
+    await page.screenshot({ path: `${SHOTS}/sheen-stage-panel.png` });
+
+    // 抽屉形态（≤1240px）是同一处错误的另外几个现场 —— 而且播放条自己也会
+    // 重排：≤900px 两行（实高 117px）、≤620px 三行（163px），留位必须跟着涨。
+    // 旧版一律按 `--bar-h + 24px` 让位，实测分别差 -2px / -39px / -77px。
+    for (const [w, h, note] of [[1024, 768, '一行播放条'], [844, 390, '两行播放条'], [390, 844, '三行播放条']]) {
+      await page.setViewportSize({ width: w, height: h });
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      const drawer = await page.evaluate(() => {
+        const st = document.querySelector('.stage').getBoundingClientRect();
+        const bar = document.querySelector('.bar').getBoundingClientRect();
+        return { bottom: Math.round(st.bottom), barTop: Math.round(bar.top), barH: Math.round(bar.height) };
+      });
+      ok(drawer.barTop - drawer.bottom >= 12,
+        `${w}×${h}（${note} ${drawer.barH}px）抽屉底边也停在播放条上方（净空 ${drawer.barTop - drawer.bottom}px）`);
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+
     // ---------------------------------------------------------- 其它皮肤没被带坏
     section('回归：其它皮肤的顶栏搜索框照旧');
 
@@ -344,6 +451,15 @@ async function setSkin(page, id) {
       // 其它皮肤不该带 sheen-search 的显形逻辑
       const marked = await page.evaluate(() => document.body.classList.contains('sheen-search'));
       ok(!marked, `${skin}：没有残留的 sheen-search 标记`);
+      // 曲名/艺人是**浮光专属**的减法。少了 [data-skin="sheen"] 前缀（写出
+      // 一条全局 `.stage-title{display:none}`）时这条会红 —— 那是"其它皮肤
+      // 一起被砍功能"，在浮光的截图里看不出来。
+      // liunian 自己也是摘掉的（skin.liunian.css「标题/艺术家/进度在右栏
+      // 没有位置」），所以按皮肤各自的约定比，而不是一刀切"必须可见"。
+      const titleShown = { classic: true, workbench: true, liunian: false, qingfeng: true }[skin];
+      const shown = await page.evaluate(() => getComputedStyle(document.querySelector('.stage-title')).display);
+      ok(titleShown ? shown !== 'none' : shown === 'none',
+        `${skin}：曲名/艺人${titleShown ? '照旧显示' : '按它自己的设定不显示'}（display=${shown}）`);
     }
 
     // classic 的侧栏仍按老样子吊在顶栏下方（不能被浮光的改动带跑）。

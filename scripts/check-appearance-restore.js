@@ -91,6 +91,9 @@ function makeApp(store) {
     console: { warn() {}, log() {} },
     Object, Array, JSON, Math, String, Number, Boolean, Set, Map, RegExp,
     parseInt, parseFloat, isNaN, Date,
+    // sandbox 本身就是 window（下面 sandbox.window = sandbox）。skins.js 的顶栏
+    // 入口会挂一个 resize 监听（视口一变就收起弹层），浏览器有这个方法，桩也得有。
+    addEventListener() {}, removeEventListener() {},
     CustomEvent: class CustomEvent {
       constructor(type, opts) { this.type = type; this.detail = opts && opts.detail; }
     },

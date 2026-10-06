@@ -284,11 +284,13 @@ const ui = {
   favBadge: $('fav-badge'),
 
   // 每日推荐
+  dailyStrip: $('daily-strip'),
   dailyList: $('daily-list'),
   dailyDate: $('daily-date'),
   dailySub: $('daily-sub'),
   dailyPlayAll: $('daily-play-all'),
   dailyRefresh: $('daily-refresh'),
+  dailyToggle: $('daily-toggle'),
   dailyModes: $('daily-modes'),
 };
 
@@ -1397,6 +1399,14 @@ function updateTrackRow(row, track, index) {
   const active = track.id === state.snapshot.track_id;
   row.classList.toggle('active', active);
   row.classList.toggle('playing', active && state.snapshot.playing);
+  // 「已勾选」必须写在行自己身上。
+  //
+  // 操作区（含勾选框）默认 opacity:0，只在 :hover / :focus-within 时显形。
+  // 于是勾完第一首、鼠标挪到第二首时，**第一首的勾选框跟着消失** ——
+  // 而它仍在 state.selected 里，批量栏还写着「已选 2 首」，用户看到的却是
+  // 一行没有任何选中痕迹的行。这不是「样式没跟上」，是选中态**没有可见载体**。
+  // 有了这个类，CSS 才能把已选行的操作区一直亮着（见 .track.is-selected）。
+  row.classList.toggle('is-selected', state.selected.has(track.id));
   row.querySelector('.t-num').textContent = index + 1;
   const select = row.querySelector('.t-select');
   if (select) select.checked = state.selected.has(track.id);
@@ -1410,6 +1420,10 @@ function updateTrackRow(row, track, index) {
 
 function toggleSelect(id, on) {
   if (on) state.selected.add(id); else state.selected.delete(id);
+  // 行上的 is-selected 要在这里同步，不能只等下一次 renderLibrary()：
+  // 勾选是局部操作，它不触发整表重排，而「已选行的操作区常亮」正是靠这个类。
+  const row = state.rows.get(id);
+  if (row) row.classList.toggle('is-selected', !!on);
   renderBatchBar();
 }
 
@@ -1425,6 +1439,9 @@ function clearSelection() {
   for (const row of state.rows.values()) {
     const select = row.querySelector('.t-select');
     if (select) select.checked = false;
+    // 两处都要摘：复选框是勾选态，is-selected 是「这颗框要一直看得见」。
+    // 只摘一个的症状是——取消选择后空勾选框仍钉在每一行上。
+    row.classList.remove('is-selected');
   }
   renderBatchBar();
 }

@@ -238,6 +238,26 @@ impl CacheIndex {
         None
     }
 
+    /// 按给定的档位顺序（高→低）找第一个已就绪的缓存，返回路径与命中的档位。
+    ///
+    /// 为什么允许向下命中：阶梯降级或码率诚实闸门会把**实测**拿到的低档按它那
+    /// 一档的名字落盘（见 `progressive::relabel_key`）。只查请求档位的话，
+    /// 「请求无损、上游最多给 320k」的曲子每次播放都要重下一遍——而命中的文件
+    /// 本来就明写着自己是 320k，标注跟着它走就不存在说谎。
+    pub async fn find_best<'a>(
+        &self,
+        source: &str,
+        id: &str,
+        tiers: &[&'a str],
+    ) -> Option<(PathBuf, &'a str)> {
+        for tier in tiers {
+            if let Some(path) = self.find(source, id, tier).await {
+                return Some((path, *tier));
+            }
+        }
+        None
+    }
+
     /// 总量超 max_bytes 时按 mtime 从旧到新删到上限的 90%；`.part` 与 protected
     /// （前缀/全名两种形态，见 [`is_protected`]）跳过。无论超容多严重，mtime
     /// 最新的 1 个正式文件始终保留——它通常就是刚 rename 落盘的当前曲，绝不能
@@ -487,6 +507,34 @@ mod tests {
         assert!(idx3.find("qq", "a3", "lossless").await.is_none());
         // 不足门槛的文件仍在账上（占用/淘汰要算它），不是被丢弃。
         assert_eq!(idx3.stats().files, 1);
+    }
+
+    /// 只查请求档位会漏掉「降级落盘」的文件——它名字里写的就是更低的档位。
+    /// `find_best` 从高到低逐级找，并回传命中的那一档：播放标注得用它，
+    /// 不能拿用户请求的档位去报。
+    #[tokio::test]
+    async fn find_best_walks_down_to_the_tier_actually_cached() {
+        let dir = temp_dir("best").await;
+        fs::write(dir.join("qq-a1-standard.mp3"), vec![0u8; 2000])
+            .await
+            .unwrap();
+        let idx = CacheIndex::load(dir.clone()).await;
+        let tiers = ["lossless", "exhigh", "standard"];
+        assert!(idx.find("qq", "a1", "lossless").await.is_none());
+        let (path, tier) = idx.find_best("qq", "a1", &tiers).await.unwrap();
+        assert_eq!(tier, "standard");
+        assert!(path.to_string_lossy().ends_with("qq-a1-standard.mp3"));
+
+        // 高档也在时先取高的（重建索引，模拟新落盘的文件）。
+        fs::write(dir.join("qq-a1-exhigh.mp3"), vec![0u8; 2000])
+            .await
+            .unwrap();
+        let idx = CacheIndex::load(dir.clone()).await;
+        assert_eq!(idx.find_best("qq", "a1", &tiers).await.unwrap().1, "exhigh");
+
+        // 一档都没有 → None，调用方据此回源取流。
+        assert!(idx.find_best("qq", "b2", &tiers).await.is_none());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     /// 性能探针（不设断言，避免抖动变红）：索引 vs 旧「每次遍历目录」的量级差。

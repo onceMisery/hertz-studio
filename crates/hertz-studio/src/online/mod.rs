@@ -47,6 +47,9 @@ mod http;
 mod jamendo;
 mod kugou;
 mod kuwo;
+// 取流候选阶梯：Candidate 出现在 StreamInfo 与 progressive::start 的公开签名里，
+// 所以对外可见；阶梯的构造规则集中在该文件。
+pub mod ladder;
 mod migu;
 mod netease;
 mod playlist_common;
@@ -58,6 +61,10 @@ mod qq;
 pub(crate) mod qr;
 pub mod quality;
 mod sign;
+
+// 候选类型出现在 StreamInfo 与 progressive::start 的签名上，平台模块和上层都
+// 直接按 online::Candidate 引用，不必写 ladder 这段路径。
+pub use ladder::Candidate;
 
 // cred 是 online 的私有子模块，routes 过滤凭据键/手动登录/登出/回读登录态
 // 时需要这些入口。
@@ -525,6 +532,24 @@ pub fn find(source: &str) -> Option<&'static SourceInfo> {
     SOURCES.iter().find(|s| s.id == source)
 }
 
+/// 设置页里「音质可调」的音源清单。
+///
+/// 按 [`quality::allowed_for`] 的档位表派生，而不是按能力位：取流是公共
+/// dispatch、不占能力位（见 [`SourceInfo::caps`] 的说明），而档位表本来就是
+/// 「这个源能让用户选什么」的唯一事实源。之前路由里另抄了一份源名，两边就
+/// 各自漏过不同的项——酷我在表里有三档却在设置页不可达，汽水取流压根不看
+/// quality（`qishui::stream` 忽略入参）却占着一个设置项。
+///
+/// 只暴露单档的源不进这个清单：给了选项也是 `clamp_to_allowed` 夹回标准档，
+/// 等于一个不生效的下拉框。
+pub fn quality_sources() -> Vec<&'static str> {
+    SOURCES
+        .iter()
+        .filter(|s| quality::allowed_for(s.id).len() > 1)
+        .map(|s| s.id)
+        .collect()
+}
+
 /// 平台地址常量 → `Url`，失败返回内部错误而不是 panic。
 ///
 /// 这些地址写死在源码里，解析失败只可能是开发期笔误；但
@@ -814,10 +839,13 @@ pub struct StreamInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<u64>,
     pub expires_in_secs: Option<u64>,
-    /// 同曲其他可用音质的直链，按音质从高到低排（不含 `url` 自身）。
-    /// 落盘/播放 `url` 失败时调用方按序降级重试（spec §2.2 QQ vkey 决策条）。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fallback_urls: Vec<String>,
+    /// 除主地址外的可用直链，按音质从高到低排（不含 `url` 自身）。
+    /// 播放/落盘按 [`StreamInfo::ladder`] 的顺序降级重试（spec §2.2 QQ vkey 决策条）。
+    ///
+    /// 不上 wire：这些是带签名的临时地址，前端一个都不读（已核对 plugin/ui），
+    /// 发出去只是把短效凭据泄给无关的调用方。
+    #[serde(skip)]
+    pub fallbacks: Vec<ladder::Candidate>,
     /// 上游随取流一起给的响度标签，语义与本地曲的 ReplayGain track_gain/track_peak
     /// 一致（dB / 线性峰值）。拿不到就是 None。
     ///
@@ -1592,6 +1620,30 @@ mod tests {
         // 咪咕：只有歌单搜索这一项公开能力；取流响应加密、本项目不解密，
         // 因此不登记任何播放/高音质能力位。
         assert_eq!(caps_of("migu"), &[Capability::PlaylistSearch]);
+    }
+
+    /// 设置页的音质清单由档位表派生：有多档才给入口，单档不给。
+    /// 钉死它是为了防回退成手抄源名——历史上 HTTP 与 RPC 各抄一份，结果漏掉了
+    /// 酷我（表里有三档却在设置页不可达），又带上了汽水（取流压根不看 quality）。
+    #[test]
+    fn quality_settings_lists_only_sources_with_real_tiers() {
+        assert_eq!(quality_sources(), vec!["netease", "qq", "kugou", "kuwo"]);
+        for id in quality_sources() {
+            assert!(
+                quality::allowed_for(id).len() > 1,
+                "{id} 在清单里却没有多档"
+            );
+        }
+        // 单档源不进清单：给了选项也会被 clamp_to_allowed 夹回标准档，
+        // 等于摆了个不生效的下拉框。
+        for id in ["migu", "jamendo", "ccmixter", "qishui"] {
+            assert_eq!(
+                quality::allowed_for(id),
+                &[quality::Quality::Standard],
+                "{id} 的档位表变了，本断言与上面的清单要一起改"
+            );
+            assert!(!quality_sources().contains(&id), "{id} 单档却进了清单");
+        }
     }
 
     #[test]

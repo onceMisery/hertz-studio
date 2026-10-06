@@ -20,6 +20,8 @@ use tokio::task::JoinHandle;
 use crate::error::ApiError;
 use crate::online::cache;
 use crate::online::download_client;
+use crate::online::ladder::Candidate;
+use crate::online::quality::{self, Quality};
 
 /// 预读基础块与封顶：max(256KB, 总长 8%)，封顶 1.5MB。
 pub const FLUSH_STEP: u64 = 256 * 1024;
@@ -55,6 +57,9 @@ pub(crate) struct Inner {
     error: Mutex<Option<String>>,
     /// 首块嗅探出的容器扩展名；下载完成时据此命名正式缓存。
     ext: Mutex<&'static str>,
+    /// **实际开始交付字节的那一档**的标称码率（bps）。阶梯降级后它与主地址
+    /// 的码率不同，而档位标注必须跟着真正下载的那一档走。
+    bitrate: Mutex<Option<u64>>,
 }
 
 impl Inner {
@@ -66,6 +71,7 @@ impl Inner {
             finished: Mutex::new(false),
             error: Mutex::new(None),
             ext: Mutex::new("mp3"),
+            bitrate: Mutex::new(None),
         }
     }
 
@@ -74,6 +80,14 @@ impl Inner {
     }
     fn set_ext(&self, ext: &'static str) {
         *self.ext.lock().unwrap() = ext;
+    }
+
+    /// 记下当前正在交付的档位（候选自己的标称码率，可能为 None=上游没说）。
+    fn set_bitrate(&self, bps: Option<u64>) {
+        *self.bitrate.lock().unwrap() = bps;
+    }
+    fn bitrate(&self) -> Option<u64> {
+        *self.bitrate.lock().unwrap()
     }
 
     fn total(&self) -> Option<u64> {
@@ -90,6 +104,7 @@ impl Inner {
     fn reset(&self) {
         *self.downloaded.lock().unwrap() = 0;
         *self.finished.lock().unwrap() = false;
+        *self.bitrate.lock().unwrap() = None;
         self.cv.notify_all();
     }
     fn finish(&self) {
@@ -319,6 +334,14 @@ impl DownloadView {
         self.inner.ext()
     }
 
+    /// 实际在交付字节的那一档对应的档位标注。
+    ///
+    /// 阶梯降级时它和请求档位不同——这才是「这一曲我到底播的是几 kbps」的
+    /// 依据。还没有候选被接受时为 None（调用方自己决定要不要回落到请求值）。
+    pub fn actual_quality(&self) -> Option<Quality> {
+        quality::from_bitrate(self.inner.bitrate())
+    }
+
     pub fn pct(&self) -> Option<u8> {
         self.inner.pct()
     }
@@ -363,15 +386,65 @@ pub fn prebuffer_target(total: Option<u64>) -> u64 {
     }
 }
 
-/// 启动下载。`key` 不含扩展名（如 `qq-a1-lossless`）；urls = [主 url, fallback...]。
+/// 键里带的档位是**请求**档位，而阶梯降级后实际交付的可能是更矮的一档。
+/// 按实测字节反推档位换掉后缀：`cache_key` 的档位后缀同时就是缓存查找用的
+/// 前缀键（见 [`cache::CacheIndex::find`]），不改名等于把一个 320k 的文件
+/// 挂在无损名下，之后每次「无损」播放都命中它。
+///
+/// 时长未知、或键根本不带合法档位后缀时原样返回——宁可少标注，不猜。
+/// 曲目 id 里含 `-` 也不影响：档位后缀恒在最后一段。
+fn relabel_key(key: &str, duration_ms: Option<u64>, written: u64) -> String {
+    let Some(d) = duration_ms.filter(|d| *d > 0) else {
+        return key.to_string();
+    };
+    let Some((stem, suffix)) = key.rsplit_once('-') else {
+        return key.to_string();
+    };
+    let Some(requested) = Quality::parse(suffix) else {
+        return key.to_string();
+    };
+    match quality::from_bitrate(Some(written * 8 * 1000 / d)) {
+        Some(measured) if measured != requested => format!("{stem}-{}", measured.as_str()),
+        _ => key.to_string(),
+    }
+}
+
+/// 判定「这条候选不行，换下一条」。
+///
+/// 必须把 `written` 归零：下一个候选是从 0 开始的**另一条流**，带着旧偏移去
+/// Range 续传会把两条流拼进同一个缓存文件（`broke` 的中断续传不走这里，那是
+/// 同一条流的延续）。偏移归零后 `Inner::reset` 让解码线程回到等待态，
+/// `.part` 删掉由下一轮重新创建。
+macro_rules! reject_candidate {
+    ($inner:expr, $part_path:expr, $written:expr, $head:expr) => {{
+        $written = 0;
+        $head.clear();
+        $inner.reset();
+        let _ = std::fs::remove_file($part_path);
+        continue;
+    }};
+}
+
+/// 启动下载。`key` 不含扩展名（如 `qq-a1-lossless`）；`ladder` 是按音质
+/// 从高到低排好的候选，**第一个就是主地址**（由 [`StreamInfo::ladder`] 给出）。
+///
+/// 每个候选自带 Referer：跨 CDN 域名时不能共用一条（音质档位本身也各自
+/// 记在候选上，见 [`crate::online::ladder::Candidate`]）。
+///
+/// 候选按序尝试：传输层失败与内容级不合格（过大/过小/不完整/认不出容器）
+/// 都是**换下一个候选**，全部用尽才算这次取流失败。`written > 0` 的候选会带
+/// Range 续传，因此内容被拒时必须先归零偏移。
 ///
 /// `index` 是缓存目录的内存索引：rename 落盘成功后要把正式文件登记进去
 /// （写时增量维护），否则这次下载的成果在本次进程里查不到，会白下一次。
+/// `duration_ms` 是曲目的标称时长（来自平台搜索结果），只用来做两件事：
+/// 校验候选是否真的交付了它所声称的码率、以及按实测反推落盘档位。缺时长
+/// 时两者都跳过——绝不把「不知道」当 0。
 pub fn start(
     dir: PathBuf,
     key: String,
-    urls: Vec<String>,
-    referer: Option<String>,
+    ladder: Vec<Candidate>,
+    duration_ms: Option<u64>,
     index: Arc<cache::CacheIndex>,
 ) -> Result<Download, ApiError> {
     let part_path = dir.join(format!(".{key}.part"));
@@ -399,11 +472,13 @@ pub fn start(
             crate::diaglog!(
                 "download.start",
                 key = key2,
-                urls_total = urls.len(),
-                first_url = crate::diag::redact_url(urls.first().map(String::as_str).unwrap_or("")),
-                referer = referer.is_some()
+                urls_total = ladder.len(),
+                first_url =
+                    crate::diag::redact_url(ladder.first().map(|c| c.url.as_str()).unwrap_or("")),
+                referer = ladder.iter().any(|c| c.referer.is_some())
             );
-            for (i, url) in urls.iter().enumerate() {
+            for (i, cand) in ladder.iter().enumerate() {
+                let url = cand.url.as_str();
                 if abort.load(Ordering::Relaxed) {
                     crate::diaglog!(
                         "download.cancel",
@@ -418,7 +493,7 @@ pub fn start(
                 if written > 0 {
                     req = req.header(reqwest::header::RANGE, format!("bytes={written}-"));
                 }
-                if let Some(rf) = &referer {
+                if let Some(rf) = cand.referer {
                     req = req.header(reqwest::header::REFERER, rf);
                 }
                 let resp = match req.send().await {
@@ -461,11 +536,32 @@ pub fn start(
                     );
                     continue;
                 }
+                // 错误页最常见的形状是 200 + text/html（限流页、登录跳转、网关
+                // 报错都这样）。不挡的话它会被改名成 {key}.mp3 永久落缓存，之后
+                // 每次播放都解码失败——这是投毒缓存，不是重试能救的。
+                if resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|ct| ct.starts_with("text/"))
+                {
+                    tracing::debug!("候选返回文本内容，尝试下一地址");
+                    crate::diaglog!(
+                        "download.reject",
+                        key = key2,
+                        url_index = i,
+                        url = crate::diag::redact_url(url),
+                        reason = "content-type 是文本"
+                    );
+                    reject_candidate!(inner, &part_path, written, head);
+                }
                 if written == 0 {
+                    // 谁从 0 开始交付字节，这一份内容的档位就是它。降级换候选时
+                    // 必须重记，否则「实际档位」还按主地址报。
+                    inner.set_bitrate(cand.bitrate);
                     let total = resp.content_length();
                     if let Some(t) = total {
                         if t > MAX_AUDIO_BYTES {
-                            inner.fail("内容过大".into());
                             crate::diaglog!(
                                 "download.reject",
                                 key = key2,
@@ -473,22 +569,29 @@ pub fn start(
                                 total_bytes = t,
                                 reason = "内容过大"
                             );
-                            let _ = std::fs::remove_file(&part_path);
-                            return Err("内容过大".to_string());
+                            reject_candidate!(inner, &part_path, written, head);
                         }
                     }
                     inner.set_total(total);
                 }
 
                 // 阻塞写在专用下载任务里，8-64KB 的 write 不构成运行时压力。
+                // create 是必需的：内容被拒时 .part 已删掉，下一轮要能重建。
+                // 反过来 truncate 必须显式关掉——断连续传时要保留已写的头一段，
+                // 从 `written` 处覆盖写。
                 let mut file = OpenOptions::new()
                     .write(true)
+                    .create(true)
+                    .truncate(false)
                     .open(&part_path)
                     .map_err(|e| e.to_string())?;
                 file.seek(SeekFrom::Start(written))
                     .map_err(|e| e.to_string())?;
                 let mut stream = resp.bytes_stream();
                 let mut broke = false;
+                // 流中途超出硬上限：标记后先跳出内层循环，统一走候选拒绝
+                // （这里的 `continue` 只能跳出 while，换候选得靠循环外的拒绝）。
+                let mut oversize = false;
                 while let Some(chunk) = stream.next().await {
                     if abort.load(Ordering::Relaxed) {
                         drop(file);
@@ -498,9 +601,8 @@ pub fn start(
                     match chunk {
                         Ok(bytes) => {
                             if written + bytes.len() as u64 > MAX_AUDIO_BYTES {
-                                inner.fail("内容过大".into());
-                                let _ = std::fs::remove_file(&part_path);
-                                return Err("内容过大".to_string());
+                                oversize = true;
+                                break;
                             }
                             if head.len() < 32 {
                                 let take = 32 - head.len();
@@ -535,18 +637,29 @@ pub fn start(
                 if broke {
                     continue; // 下一个 URL 带 Range 续传
                 }
-                if written <= 1024 {
-                    let msg = "内容过小，可能已被版权限制".to_string();
-                    inner.fail(msg.clone());
+                if oversize {
                     crate::diaglog!(
-                        "download.fail",
+                        "download.reject",
                         key = key2,
                         url_index = i,
                         written = written,
-                        reason = msg
+                        reason = "内容过大"
                     );
-                    let _ = std::fs::remove_file(&part_path);
-                    return Err(msg);
+                    reject_candidate!(inner, &part_path, written, head);
+                }
+                // 下面三条判的都是「这条候选不合格」而不是「取流失败」：还有候选就
+                // 换，全部用尽才在循环外 fail。理由只记 diaglog —— inner.fail 是
+                // 终态信号，wait_for / poll_prebuffer 一读到就把还在等字节的解码线程
+                // 判死，非终态调用它会让后来成功的下载带着残留错误。
+                if written <= 1024 {
+                    crate::diaglog!(
+                        "download.reject",
+                        key = key2,
+                        url_index = i,
+                        written = written,
+                        reason = "内容过小，可能已被版权限制"
+                    );
+                    reject_candidate!(inner, &part_path, written, head);
                 }
                 // 截断响应（连接提前断开但没触发续传、或末个 URL 给了短体）
                 // 绝不允许 rename 成正式缓存：否则 find_cached_by_key 会永久
@@ -554,22 +667,55 @@ pub fn start(
                 // 才校验；chunked（total=None）没有可比对的总长，跳过。
                 if let Some(t) = inner.total() {
                     if written != t {
-                        let msg = "下载不完整".to_string();
-                        inner.fail(msg.clone());
                         crate::diaglog!(
-                            "download.fail",
+                            "download.reject",
                             key = key2,
                             url_index = i,
                             written = written,
                             total_bytes = t,
-                            reason = msg
+                            reason = "下载不完整"
                         );
-                        let _ = std::fs::remove_file(&part_path);
-                        return Err(msg);
+                        reject_candidate!(inner, &part_path, written, head);
+                    }
+                }
+                // 落盘名必须有容器证据。Inner 的 ext 默认值恒为 "mp3"，嗅探失败时
+                // 它仍是这个默认值——照它命名等于把一条来历不明的响应伪装成 mp3
+                // 永久缓存；plan_mode 的 WaitFull 兜底只在解码侧保守，救不了缓存命中。
+                let Some(ext) = sniff_ext(&head) else {
+                    crate::diaglog!(
+                        "download.reject",
+                        key = key2,
+                        url_index = i,
+                        written = written,
+                        reason = "认不出容器"
+                    );
+                    reject_candidate!(inner, &part_path, written, head);
+                };
+                // 码率诚实闸门：这一档声称的码率得由实际交付的字节撑起 80%
+                // （0.8 是给 VBR 与容器开销留的余量）。谎称无损、实给 128k 的
+                // 直链在这里就被换掉，而不是落进缓存从此被当无损反复命中。
+                // 时长与档位任一未知都不参与——未知绝不按 0 处理。
+                if let (Some(d), Some(bps)) = (duration_ms.filter(|d| *d > 0), cand.bitrate) {
+                    // 平均 bps×10 与声明 bps×8（=80%）比较；两边同乘 d 消去除法。
+                    if written * 80_000 < bps * d * 8 {
+                        crate::diaglog!(
+                            "download.reject",
+                            key = key2,
+                            url_index = i,
+                            written = written,
+                            declared_bps = bps,
+                            duration_ms = d,
+                            reason = "交付字节撑不起声明的码率"
+                        );
+                        reject_candidate!(inner, &part_path, written, head);
                     }
                 }
                 // 完成：按嗅探扩展名落正式名。Windows 终文件已存在则复用。
-                let final_path = dir2.join(format!("{}.{}", key2, inner.ext()));
+                let final_path = dir2.join(format!(
+                    "{}.{}",
+                    relabel_key(&key2, duration_ms, written),
+                    ext
+                ));
                 match tokio::fs::rename(&part_path, &final_path).await {
                     Ok(()) => {}
                     Err(_) => {
@@ -603,7 +749,7 @@ pub fn start(
             crate::diaglog!(
                 "download.fail",
                 key = key2,
-                urls_total = urls.len(),
+                urls_total = ladder.len(),
                 reason = msg
             );
             let _ = std::fs::remove_file(&part_path);
@@ -633,6 +779,8 @@ pub fn sniff_ext(head: &[u8]) -> Option<&'static str> {
         || (head.len() >= 2 && head[0] == 0xFF && (head[1] & 0xE0) == 0xE0)
     {
         Some("mp3")
+    } else if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WAVE" {
+        Some("wav")
     } else if head.len() > 11 && &head[4..8] == b"ftyp" {
         Some("m4a")
     } else {
@@ -697,7 +845,238 @@ mod tests {
         let mut mp4 = vec![0u8; 64];
         mp4[4..8].copy_from_slice(b"ftyp");
         assert_eq!(sniff_ext(&mp4), Some("m4a"));
+        let mut wav = vec![0u8; 64];
+        wav[0..4].copy_from_slice(b"RIFF");
+        wav[8..12].copy_from_slice(b"WAVE");
+        assert_eq!(sniff_ext(&wav), Some("wav"));
         assert_eq!(sniff_ext(b"xxxx"), None);
+    }
+
+    /// 测试用阶梯：只有地址，档位码率与容器交给默认（未知）值。
+    fn rungs(urls: &[String]) -> Vec<Candidate> {
+        urls.iter().cloned().map(Candidate::bare).collect()
+    }
+
+    /// 假 mp3 载荷：ID3 头让 `sniff_ext` 认成 mp3，长度过 1024 下限。
+    fn mp3_bytes(len: usize) -> Vec<u8> {
+        let mut v = b"ID3\x03\x00\x00\x00\x00\x00\x00".to_vec();
+        v.resize(len.max(9), 0x55);
+        v
+    }
+
+    /// 起一个本地服务，把每条路径变成候选阶梯上的一格。
+    ///
+    /// 状态码一律 200：要构造的是「响应看着合法、内容其实不是音频」这类
+    /// 内容级不合格，非 2xx 早在状态分支被换掉了，测不到这里的判定。
+    async fn spawn_routes(
+        routes: &[(&'static str, &'static str, Vec<u8>)],
+    ) -> std::net::SocketAddr {
+        let mut app = axum::Router::new();
+        for (path, content_type, body) in routes {
+            let body = body.clone();
+            let content_type: &'static str = content_type;
+            app = app.route(
+                path,
+                axum::routing::get(move || {
+                    let body = body.clone();
+                    async move { ([(axum::http::header::CONTENT_TYPE, content_type)], body) }
+                }),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
+    async fn tmp_cache_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vmusic-ladder-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        dir
+    }
+
+    /// 200 + text/html 且长度自洽的错误页（限流页/登录跳转的真实形状）绝不能再
+    /// 被改名成 `{key}.mp3`：那会永久投毒缓存，之后每次播放都解码失败。
+    #[tokio::test]
+    async fn text_body_is_rejected_and_the_next_candidate_wins() {
+        let html = b"<html>429 Too Many Requests</html>".to_vec();
+        let good = mp3_bytes(4096);
+        let addr = spawn_routes(&[
+            ("/bad", "text/html; charset=utf-8", html),
+            ("/good", "audio/mpeg", good.clone()),
+        ])
+        .await;
+        let dir = tmp_cache_dir().await;
+        let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
+        let dl = start(
+            dir.clone(),
+            "netease-1-standard".into(),
+            rungs(&[format!("http://{addr}/bad"), format!("http://{addr}/good")]),
+            None,
+            index.clone(),
+        )
+        .unwrap();
+        let path = dl.join().await.unwrap();
+
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("mp3"));
+        assert_eq!(tokio::fs::metadata(&path).await.unwrap().len(), 4096);
+        assert_eq!(
+            index.find("netease", "1", "standard").await.as_deref(),
+            Some(path.as_path())
+        );
+        // 目录里只该留下这一个正式文件：拒绝路径必须清掉 .part。
+        let mut left = Vec::new();
+        let mut it = tokio::fs::read_dir(&dir).await.unwrap();
+        while let Ok(Some(e)) = it.next_entry().await {
+            left.push(e.file_name().to_string_lossy().into_owned());
+        }
+        assert_eq!(left, vec!["netease-1-standard.mp3".to_string()]);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// 版权限制常见的短响应（小于 1024 下限）不该掐死整条阶梯，且换到的候选
+    /// 从 0 重新落：最终文件长度必须等于获胜候选自己的长度，不能把上一条的
+    /// 字节接进来。
+    #[tokio::test]
+    async fn undersized_stub_restarts_the_offset_for_the_next_candidate() {
+        let addr = spawn_routes(&[
+            ("/stub", "audio/mpeg", mp3_bytes(512)),
+            ("/good", "audio/mpeg", mp3_bytes(4096)),
+        ])
+        .await;
+        let dir = tmp_cache_dir().await;
+        let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
+        let dl = start(
+            dir.clone(),
+            "netease-2-standard".into(),
+            rungs(&[format!("http://{addr}/stub"), format!("http://{addr}/good")]),
+            None,
+            index.clone(),
+        )
+        .unwrap();
+        let path = dl.join().await.unwrap();
+        assert_eq!(tokio::fs::metadata(&path).await.unwrap().len(), 4096);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// 认不出容器就不许落盘：`Inner::ext` 的默认值恒为 mp3，照它命名等于给一条
+    /// 来历不明的响应盖上 mp3 的皮。嗅探到 RIFF/WAVE 的候选则要按真实容器命名。
+    #[tokio::test]
+    async fn unknown_container_is_never_renamed_to_the_default_mp3() {
+        let mut wav = b"RIFF\x00\x00\x00\x00WAVEfmt ".to_vec();
+        wav.resize(4096, 0x11);
+        let addr = spawn_routes(&[
+            // Content-Type 说是 mp3，正文却是没有魔数的裸数据。
+            ("/junk", "audio/mpeg", vec![0x55u8; 4096]),
+            ("/wav", "audio/mpeg", wav),
+        ])
+        .await;
+        let dir = tmp_cache_dir().await;
+        let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
+        let dl = start(
+            dir.clone(),
+            "netease-3-standard".into(),
+            rungs(&[format!("http://{addr}/junk"), format!("http://{addr}/wav")]),
+            None,
+            index.clone(),
+        )
+        .unwrap();
+        let path = dl.join().await.unwrap();
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("wav"));
+
+        // 全阶梯都认不出容器：报错且不留下任何正式缓存。
+        let dir2 = tmp_cache_dir().await;
+        let index2 = Arc::new(cache::CacheIndex::load(dir2.clone()).await);
+        let dl2 = start(
+            dir2.clone(),
+            "netease-4-standard".into(),
+            rungs(&[format!("http://{addr}/junk")]),
+            None,
+            index2.clone(),
+        )
+        .unwrap();
+        assert!(dl2.join().await.is_err());
+        assert!(index2.find("netease", "4", "standard").await.is_none());
+        let mut left2 = tokio::fs::read_dir(&dir2).await.unwrap();
+        assert!(
+            left2.next_entry().await.unwrap().is_none(),
+            "整条阶梯都被拒时不该留下任何文件，含 .part"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let _ = tokio::fs::remove_dir_all(&dir2).await;
+    }
+
+    /// 标称无损、实际只交付一小截的候选要在落盘前就被拒；换上来的低档必须按
+    /// **实测**档位命名——键里那截 `-lossless` 是用户请求的档位，不是拿到手的
+    /// 档位，不改名它就会成为之后每次「无损播放」的命中源。
+    #[tokio::test]
+    async fn lying_bitrate_is_rejected_and_the_file_uses_its_measured_tier() {
+        // 时长 4s：无损 740k 要 ≥296KB，4KB 直接不合格；128k 要 ≥51.2KB，
+        // 64KB 能过（实测 131072bps → 标准档）。
+        let addr = spawn_routes(&[
+            ("/liar", "audio/mpeg", mp3_bytes(4096)),
+            ("/honest", "audio/mpeg", mp3_bytes(65_536)),
+        ])
+        .await;
+        let rung = |path: &'static str, bps: u64| Candidate {
+            url: format!("http://{addr}{path}"),
+            bitrate: Some(bps),
+            container: None,
+            referer: None,
+        };
+        let dir = tmp_cache_dir().await;
+        let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
+        let dl = start(
+            dir.clone(),
+            "netease-6-lossless".into(),
+            vec![rung("/liar", 740_000), rung("/honest", 128_000)],
+            Some(4_000),
+            index.clone(),
+        )
+        .unwrap();
+        let path = dl.join().await.unwrap();
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            "netease-6-standard.mp3",
+            "降级拿到的文件不能继续挂无损的键"
+        );
+        assert!(index.find("netease", "6", "lossless").await.is_none());
+        assert_eq!(
+            index.find("netease", "6", "standard").await.as_deref(),
+            Some(path.as_path())
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// 时长未知时诚实闸门整个跳过：没有分母就不做除法，更不把「不知道」当 0
+    /// （musicdl 的闸门正是栽在这个洞上，等于没有）。
+    #[tokio::test]
+    async fn honesty_gate_stays_out_when_duration_is_unknown() {
+        let addr = spawn_routes(&[("/liar", "audio/mpeg", mp3_bytes(4096))]).await;
+        let dir = tmp_cache_dir().await;
+        let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
+        let dl = start(
+            dir.clone(),
+            "netease-7-lossless".into(),
+            vec![Candidate {
+                url: format!("http://{addr}/liar"),
+                bitrate: Some(740_000),
+                container: None,
+                referer: None,
+            }],
+            None,
+            index.clone(),
+        )
+        .unwrap();
+        let path = dl.join().await.unwrap();
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            "netease-7-lossless.mp3",
+            "没有时长就没有实测档位，键保持原样"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[test]
@@ -749,7 +1128,7 @@ mod tests {
         let dl = start(
             dir.clone(),
             "qq-a1-standard".into(),
-            vec![format!("http://{addr}/audio")],
+            rungs(&[format!("http://{addr}/audio")]),
             None,
             index.clone(),
         )

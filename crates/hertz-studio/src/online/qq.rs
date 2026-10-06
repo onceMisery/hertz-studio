@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use super::cred::CredPack;
 use super::playlist_common::{created_playlist, form_map, require_playlist_name, require_tracks};
 use super::sign::qq::{b64_encode_std, gtk33};
+use super::Candidate;
 use super::{
     bad_request, client, const_url, https_url, AccountInfo, ApiError, ApiResult, Ctx, OnlineDetail,
     OnlinePlaylist, OnlineTrack, PlaylistDetail, QrPayload, SearchPage, SearchQuery, StreamInfo,
@@ -425,14 +426,15 @@ async fn probe_audio_url(http: &reqwest::Client, url: &str) -> bool {
 
 /// 从 vkey 响应构造全部候选 URL，并发 HEAD 探活。
 ///
-/// 返回 `(命中档位下标, 可用 URL, 其余可用 URL 列表)`。命中项是音质最高且
+/// 返回 `(命中档位下标, 可用 URL, 其余可用候选)`。命中项是音质最高且
 /// 真实可下载的第一个候选；fallback 列表保持音质单调下降，并把 https sip
-/// 排在前面。
+/// 排在前面。每个 fallback 带上自己的档位码率与容器，降级重试时档位标注
+/// 才不会拿主地址去猜。
 async fn pick_working_url(
     http: &reqwest::Client,
     data: &Value,
     tiers: &[(String, u64)],
-) -> Option<(usize, String, Vec<String>)> {
+) -> Option<(usize, String, Vec<Candidate>)> {
     let sips: Vec<&str> = data
         .pointer("/sip")
         .and_then(|v| v.as_array())
@@ -499,14 +501,19 @@ async fn pick_working_url(
     let hit = results[first].0;
     let url = results[first].1.clone();
     let hit_bps = tiers[hit].1;
-    let fallback_urls: Vec<String> = results
+    let fallbacks: Vec<Candidate> = results
         .iter()
         .skip(first + 1)
         .filter_map(|(i, u, ok)| {
             if !ok || tiers[*i].1 > hit_bps {
                 return None;
             }
-            Some(u.clone())
+            Some(Candidate {
+                url: u.clone(),
+                bitrate: Some(tiers[*i].1),
+                container: container_of(&tiers[*i].0),
+                referer: None,
+            })
         })
         .collect();
     crate::diaglog!(
@@ -515,10 +522,24 @@ async fn pick_working_url(
         hit_candidate = first,
         hit_tier = hit,
         hit_bps = hit_bps,
-        fallbacks = fallback_urls.len(),
+        fallbacks = fallbacks.len(),
         url = crate::diag::redact_url(&url)
     );
-    Some((hit, url, fallback_urls))
+    Some((hit, url, fallbacks))
+}
+
+/// 档位文件名（`M80000xxxx.mp3`）的后缀 → 容器名。
+///
+/// 只认 `QUALITIES` 用到的三种；认不出返回 None，由首 32 字节嗅探兜底。
+/// 这是给降级重试用的旁证：flac 主档失败换成 mp3 档时，落盘扩展名不能继续
+/// 按主档的容器写。
+fn container_of(filename: &str) -> Option<&'static str> {
+    match filename.rsplit('.').next() {
+        Some("flac") => Some("flac"),
+        Some("m4a") => Some("m4a"),
+        Some("mp3") => Some("mp3"),
+        _ => None,
+    }
 }
 
 /// spec §2.2：一次 CgiGetVkey 带上从请求码率起的全部 filename，
@@ -587,7 +608,7 @@ pub async fn stream(
     let data = j
         .pointer("/req_0/data")
         .ok_or_else(|| ApiError::upstream_rejected("QQ vkey 未返回 data".to_string()))?;
-    let (hit, url, fallback_urls) =
+    let (hit, url, fallbacks) =
         pick_working_url(&http, data, &tiers).await.ok_or_else(|| {
             if signed_in {
                 ApiError::vip_required("该曲目为 VIP 专享或当前账号无可用音质".to_string())
@@ -602,7 +623,7 @@ pub async fn stream(
         id: id.to_string(),
         bitrate: Some(tiers[hit].1),
         expires_in_secs: None,
-        fallback_urls,
+        fallbacks,
         rg_gain_db: None,
         rg_peak: None,
     })

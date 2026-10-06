@@ -66,6 +66,26 @@ impl Quality {
             _ => None,
         }
     }
+
+    /// 从自己这一档起逐级向下（含自身，高→低）。
+    ///
+    /// 缓存查找要用它：阶梯降级或码率诚实闸门会把实际拿到的低档按**实测档位**
+    /// 落盘（见 progressive::relabel_key），只查请求档位的话，「请求无损、上游
+    /// 最多给 320k」的曲子每次播放都会重下一遍。
+    pub fn descending_from(self) -> Vec<Quality> {
+        [
+            Quality::Standard,
+            Quality::Exhigh,
+            Quality::Lossless,
+            Quality::Hires,
+        ]
+        .into_iter()
+        .filter(|q| q.rank() <= self.rank())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+    }
 }
 
 pub fn default_for(source: &str) -> Quality {
@@ -78,6 +98,8 @@ pub fn default_for(source: &str) -> Quality {
     }
 }
 
+/// 这个源允许用户选哪些档。**默认单档 = 不进设置页的音质列表**
+/// （见 [`crate::online::quality_sources`]）：要开放多档选择，就在这里登记源 id。
 pub fn allowed_for(source: &str) -> &'static [Quality] {
     match source {
         "netease" | "qq" => &[
@@ -87,7 +109,8 @@ pub fn allowed_for(source: &str) -> &'static [Quality] {
             Quality::Hires,
         ],
         "kugou" | "kuwo" => &[Quality::Standard, Quality::Exhigh, Quality::Lossless],
-        // 汽水加密档不可播、ccmixter 直链无档位：只暴露标准。
+        // 汽水加密档不可播、ccmixter/jamendo 直链无档位、咪咕取流是有意 stub，
+        // 都落进默认分支。
         _ => &[Quality::Standard],
     }
 }
@@ -179,6 +202,28 @@ mod tests {
         assert_eq!(Quality::parse("FLAC"), Some(Quality::Lossless));
         assert_eq!(Quality::parse("weird"), None);
         assert!(Quality::Hires.rank() > Quality::Standard.rank());
+    }
+
+    /// 向下找缓存时的档位顺序：含自身、高→低，且不能越过请求档位。
+    #[test]
+    fn descending_tiers_start_at_the_requested_one() {
+        assert_eq!(
+            Quality::descending_from(Quality::Hires),
+            vec![
+                Quality::Hires,
+                Quality::Lossless,
+                Quality::Exhigh,
+                Quality::Standard
+            ]
+        );
+        assert_eq!(
+            Quality::descending_from(Quality::Exhigh),
+            vec![Quality::Exhigh, Quality::Standard]
+        );
+        assert_eq!(
+            Quality::descending_from(Quality::Standard),
+            vec![Quality::Standard]
+        );
     }
 
     #[test]

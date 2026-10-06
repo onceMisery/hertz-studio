@@ -18,6 +18,13 @@
 // 档时它的 oninput 转发到这里（onInput），两条路径不会同时生效。
 (function () {
   'use strict';
+  /// 背景图位封面：插件形态下远程地址要经 sidecar 换成 data URL（沙箱 CSP 画不
+  /// 出 https 图）。HertzCovers 由 app.js 挂出；契约检查的沙箱只加载本模块，
+  /// 拿不到时回落成直接赋值，即独立形态的同款行为。
+  function applyBg(el, url) {
+    if (window.HertzCovers) { window.HertzCovers.applyBg(el, url); return; }
+    if (el) el.style.backgroundImage = url ? 'url("' + url + '")' : '';
+  }
 
   // 宿主：{ setView, jumpToOnline(q, kind), toast, errText }。jumpToOnline
   // 由 app.js 实现——它持有 setView 与 onlineQ 输入框，跳转语义（写回
@@ -236,12 +243,8 @@
     var cover = document.createElement('div');
     cover.className = 'playlist-card-cover';
     var url = window.Online ? window.Online.safeCoverUrl(item.cover) : item.cover;
-    if (url) {
-      if (window.HertzCovers) window.HertzCovers.applyBg(cover, url);
-      else cover.style.backgroundImage = 'url("' + url + '")';
-    } else {
-      cover.classList.add('is-empty');
-    }
+    if (url) applyBg(cover, url);
+    else cover.classList.add('is-empty');
     var main = document.createElement('div');
     main.className = 'playlist-card-main';
     var title = document.createElement('div');

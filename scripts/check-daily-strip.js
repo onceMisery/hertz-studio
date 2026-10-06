@@ -84,12 +84,14 @@ ${dailyJs}
     put: function (p) { window.__probe.posts.push(p); return Promise.resolve({}); },
   };
   var ui = {
+    dailyStrip: document.getElementById('daily-strip'),
     dailyList: document.getElementById('daily-list'),
     dailyDate: document.getElementById('daily-date'),
     dailySub: document.getElementById('daily-sub'),
     dailyModes: document.getElementById('daily-modes'),
     dailyPlayAll: document.getElementById('daily-play-all'),
     dailyRefresh: document.getElementById('daily-refresh'),
+    dailyToggle: document.getElementById('daily-toggle'),
   };
   var notified = [];
   window.__probe.notified = notified;
@@ -190,6 +192,126 @@ ${dailyJs}
   ok(m2.cards.length === 3, '落位后是在线那 3 首', JSON.stringify(m2.cards));
   ok(m2.sub.indexOf('已合并') >= 0, '副标题是合并说明', m2.sub);
   ok(m2.playAllDisabled === false, '「播放全部」可点', 'disabled=' + m2.playAllDisabled);
+
+  // ---------------------------------------------------------------------------
+  // 折叠：收起的是**卡片区**，标题行与那几个按钮留在原地
+  // ---------------------------------------------------------------------------
+  //
+  // 这一段必须走**真实点击**：折叠是按钮 onclick 里改的状态 + 一个类，
+  // 直接给元素 classList.add('is-collapsed') 只能证明 CSS 写对了，
+  // 证明不了「按钮接上了」—— 而"点了没反应"正是这类改动最常见的坏法。
+  //
+  // 每一步都要量两个数：容器显示态（list 的 display）与条的高度。
+  // 只量 display 会把"整条被收掉、连标题行都没了"当成通过 ——
+  // 那恰好是这次明确不要的形态。
+  const boxOf = () => page.evaluate(() => {
+    const strip = document.getElementById('daily-strip');
+    const list = document.getElementById('daily-list');
+    const head = document.querySelector('.daily-head');
+    const btn = document.getElementById('daily-toggle');
+    const refresh = document.getElementById('daily-refresh');
+    const bb = btn.getBoundingClientRect();
+    return {
+      stripH: Math.round(strip.getBoundingClientRect().height),
+      listH: Math.round(list.getBoundingClientRect().height),
+      listDisplay: getComputedStyle(list).display,
+      headH: Math.round(head.getBoundingClientRect().height),
+      headVisible: head.getBoundingClientRect().height > 0
+        && getComputedStyle(head).visibility !== 'hidden',
+      refreshVisible: refresh.getBoundingClientRect().height > 0,
+      // 按钮自身还在不在：收起是"内容让位"，不是"按钮陪葬"。
+      toggleVisible: bb.width > 0 && bb.height > 0
+        && getComputedStyle(btn).visibility !== 'hidden',
+      date: (document.getElementById('daily-date') || {}).textContent,
+      expanded: btn.getAttribute('aria-expanded'),
+      label: btn.getAttribute('aria-label'),
+      collapsedClass: strip.classList.contains('is-collapsed'),
+    };
+  });
+
+  // 点按钮一律走真实点击（按钮自己的 onclick），并给一个短超时。
+  // 给超时的原因是：把"按钮不见了"这种坏法变成一条红的断言，而不是把脚本
+  // 挂死成 FATAL —— 后者读起来像"环境坏了"，会把真正的缺陷藏起来。
+  const clickToggle = async () => {
+    try { await page.click('#daily-toggle', { timeout: 3000 }); return ''; }
+    catch (e) { return e.name; }
+  };
+
+  const openBox = await boxOf();
+  ok(openBox.listDisplay !== 'none' && openBox.expanded === 'true',
+    '初始是展开态（列表可见、aria-expanded=true）',
+    `display=${openBox.listDisplay} aria-expanded=${openBox.expanded}`);
+
+  const clickErr = await clickToggle();
+  await page.waitForTimeout(150);
+  const shutBox = await boxOf();
+  ok(!clickErr, '折叠按钮点得动（接到 onclick 上了）', clickErr || '点击成功');
+  ok(shutBox.listDisplay === 'none' && shutBox.listH === 0,
+    '点一次折叠按钮，卡片区真的收起了（display:none，不是只改了类）',
+    `display=${shutBox.listDisplay} listH=${shutBox.listH}`);
+  ok(shutBox.stripH > 0 && shutBox.stripH < openBox.stripH,
+    '收起后变矮，但这条仍在（没有被整条收掉）',
+    `${openBox.stripH} → ${shutBox.stripH}`);
+  ok(shutBox.headVisible && shutBox.refreshVisible && shutBox.headH > 0,
+    '标题行与「刷新」仍在原地（收起后还能看日期、还能刷新）',
+    `headH=${shutBox.headH} refresh=${shutBox.refreshVisible}`);
+  ok(shutBox.toggleVisible, '折叠按钮自己还在（收起来的是内容，不是按钮）',
+    `toggleVisible=${shutBox.toggleVisible}`);
+  ok(shutBox.expanded === 'false' && shutBox.collapsedClass,
+    'aria-expanded 翻到 false，且容器带上了 is-collapsed',
+    `aria-expanded=${shutBox.expanded} class=${shutBox.collapsedClass}`);
+  ok(/展开/.test(shutBox.label || ''),
+    '按钮的无障碍名与 title 跟着翻成「展开每日推荐」', shutBox.label);
+  await page.screenshot({ path: path.join(OUT, 'daily-strip-collapsed.png'), clip: { x: 0, y: 0, width: 1200, height: 420 } });
+
+  // 再点一次要能展开回来，且回到原位（不是"展开但位置/高度变了"）
+  const reopenErr = await clickToggle();
+  await page.waitForTimeout(150);
+  const reopenBox = await boxOf();
+  ok(!reopenErr && reopenBox.listDisplay !== 'none' && reopenBox.expanded === 'true',
+    '再点一次能展开回来',
+    `${reopenErr || 'ok'} display=${reopenBox.listDisplay} aria-expanded=${reopenBox.expanded}`);
+  ok(Math.abs(reopenBox.stripH - openBox.stripH) <= 1,
+    '展开回来高度与收起前一致（折叠不留残余内距）',
+    `${openBox.stripH} vs ${reopenBox.stripH}`);
+
+  // 收起态要记在本机：刷新后仍收起。这里记的是**内容**的展开态，
+  // 存 '1' 表示"用户希望它收着"。
+  const saveErr = await clickToggle();
+  await page.waitForTimeout(120);
+  const saved = await page.evaluate(() => {
+    try { return localStorage.getItem('vmusic.daily.collapsed'); } catch (e) { return 'unavailable:' + e.name; }
+  });
+  ok(!saveErr && saved === '1', '收起态写进了本机偏好',
+    `${saveErr || 'ok'} vmusic.daily.collapsed=${saved}`);
+
+  await page.reload();
+  await page.waitForTimeout(700);
+  const reloadBox = await boxOf();
+  ok(reloadBox.listDisplay === 'none' && reloadBox.expanded === 'false',
+    '刷新后仍是收起态（用户不必每次回来重新收一遍）',
+    `display=${reloadBox.listDisplay} aria-expanded=${reloadBox.expanded}`);
+
+  // ---------------------------------------------------------------------------
+  // 接线：这一组量的是"真机上按钮会不会是死的"
+  // ---------------------------------------------------------------------------
+  //
+  // 上面那些断言跑的是**本脚本自己搭的** ui 桩，所以 app.js 里
+  // `dailyToggle: $('daily-toggle')` 这一行写错（id 打错、或者压根忘了注册）
+  // 在离线夹具里照样全绿 —— 真机上按钮却是点了没反应，且控制台干净。
+  // 这类错误没有别的探测器：夹具只认 index.html 里那份真实 DOM，
+  // app.js 的 ui 映射它一无所知。所以在这里直接对着两份源码钉一次接线。
+  const appJs = fs.readFileSync(path.join(ROOT, 'plugin/ui/app.js'), 'utf8');
+  ok(/id="daily-toggle"/.test(htmlSrc),
+    'index.html 里有 id="daily-toggle"（业务节点真的存在）');
+  ok(/dailyStrip:\s*\$\('daily-strip'\)/.test(appJs),
+    'app.js 的 ui 映射把 daily-strip 交给宿主了',
+    '缺少 dailyStrip: $(\'daily-strip\')');
+  ok(/dailyToggle:\s*\$\('daily-toggle'\)/.test(appJs),
+    'app.js 的 ui 映射把 daily-toggle 交给宿主了（拼错 = 真机上按钮是死的）',
+    '缺少 dailyToggle: $(\'daily-toggle\')');
+  ok(/aria-controls="daily-list"/.test(htmlSrc) && /href="#i-chevron-down"/.test(htmlSrc),
+    '折叠按钮声明了 aria-controls 并引用了图标 sprite 里存在的 chevron');
 
   ok(errs.length === 0, '全程无 JS 报错', errs.join(' | ') || '(无)');
 

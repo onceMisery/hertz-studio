@@ -643,6 +643,29 @@ impl AppState {
         snap.rg_gain_db.map(|gain| (gain, snap.rg_peak))
     }
 
+    /// 在线曲的时长（毫秒），来自入队时写的 online_meta 快照；没记过就是 None。
+    /// 取流候选的码率诚实性校验要用它做分母，缺了就跳过校验而不是按 0 算。
+    async fn online_duration_ms(&self, track_id: &str) -> Option<u64> {
+        let map = self.online_meta.lock().await;
+        map.get(track_id).and_then(|m| m.duration_ms)
+    }
+
+    /// 这首在线曲已缓存的文件：先按请求档位，未命中再逐级向下（见
+    /// [`crate::online::cache::CacheIndex::find_best`]）。返回的档位是**文件
+    /// 自己名字里那档**，播放标注必须用它而不是请求档位。
+    async fn find_online_cached(
+        &self,
+        source: &str,
+        id: &str,
+        want: crate::online::quality::Quality,
+    ) -> Option<(std::path::PathBuf, crate::online::quality::Quality)> {
+        use crate::online::quality::Quality;
+        let tiers = want.descending_from();
+        let names: Vec<&str> = tiers.iter().map(|q| q.as_str()).collect();
+        let (path, tier) = self.cache_index.find_best(source, id, &names).await?;
+        Some((path, Quality::parse(tier).unwrap_or(want)))
+    }
+
     /// 在线曲在当前档位下应下的增益（已含防削波），与本地曲同一条规则。
     ///
     /// current_loudness（对外汇报「用了多少增益」）与播放落地（apply_online_loudness）
@@ -1207,19 +1230,22 @@ impl AppState {
         // 只做一次 metadata 复核），没有目录遍历，直接 await 即可。缓存命中全程
         // 不发 buffering——本地文件 load 是毫秒级，先亮 loading 再立刻灭只会让
         // 播放键闪一下（修 M6）。
-        if let Some(path) = self.cache_index.find(&source, &id, quality.as_str()).await {
+        // 向下逐级找档：降级落盘的文件挂在实测档位下，只查请求档位会让同一首
+        // 曲子每次播放都重下一遍。
+        if let Some((path, hit_quality)) = self.find_online_cached(&source, &id, quality).await {
             crate::diaglog!(
                 "cache.hit",
                 idx = index,
                 gen = gen,
                 key = key,
+                hit_tier = hit_quality.as_str(),
                 path = path.display()
             );
             // 响度先落地再提交：缓存命中不走取流接口，值来自上一轮存在
             // online_meta 里的标签（没有就是 0 dB）。
             self.apply_online_loudness(&track_id).await;
             match self
-                .try_commit_cached(gen, index, &track_id, &path, None)
+                .try_commit_cached(gen, index, &track_id, &path, Some(hit_quality))
                 .await?
             {
                 Commit::Done(outcome) => {
@@ -1255,8 +1281,8 @@ impl AppState {
         // 缓存确认未命中（或刚自愈删掉坏缓存）才亮缓冲覆盖态（修 I8）。
         self.set_buffering(true, None).await;
 
-        // 同键预取在跑则 owned 接管（实际档位无法回填）；否则现场取流并新开
-        // 渐进式下载。
+        // 同键预取在跑则 owned 接管（此时请求侧的 info 根本不存在，档位只能
+        // 从下载视图反查）；否则现场取流并新开渐进式下载。
         let (dl, actual) = if let Some(dl) = takeover {
             crate::diaglog!(
                 "download.takeover",
@@ -1304,24 +1330,24 @@ impl AppState {
                 gen = gen,
                 source = source,
                 url = crate::diag::redact_url(&info.url),
-                extra_urls = info.fallback_urls.len(),
+                extra_urls = info.fallbacks.len(),
                 bitrate = info.bitrate.unwrap_or(0),
                 actual = actual.map(|q| q.as_str()).unwrap_or("unknown"),
                 expires_secs = info.expires_in_secs.unwrap_or(0)
             );
-            let urls: Vec<String> = std::iter::once(info.url)
-                .chain(info.fallback_urls)
-                .collect();
+            // 阶梯把主地址排在第一位，Referer 也已按候选填好；播放与预取都只
+            // 能经 StreamInfo::ladder 组装，别在这里再拼一遍。
+            let ladder = info.ladder();
             // 记下平台给的响度标签：缓存命中那次播放不会再打取流接口，值只能
             // 从这里留下（随 online_meta 与队列同生命周期）。
             self.store_online_rg(&track_id, info.rg_gain_db, info.rg_peak)
                 .await;
-            let referer = crate::online::referer(&source).map(str::to_string);
+            let duration_ms = self.online_duration_ms(&track_id).await;
             match crate::online::progressive::start(
                 dir.clone(),
                 key.clone(),
-                urls,
-                referer,
+                ladder,
+                duration_ms,
                 self.cache_index.clone(),
             ) {
                 Ok(dl) => (dl, actual),
@@ -1394,6 +1420,11 @@ impl AppState {
                 }
             }
         }
+
+        // 档位标注跟着真正交付字节的那一档走：阶梯降级后它比请求档低，拿主地址
+        // 的码率去标就是把 320k 报成无损。到这里预读已达阈值，必有候选从 0 开始
+        // 交付，视图里读得到；仍为 None 才保留取流响应给的请求档。
+        let actual = view.actual_quality().or(actual);
 
         // 容器探测：读 .part 前 1MB（blocking 任务做同步读）；文件打不开时
         // 保守按 WaitFull + 下载器自己嗅探出的扩展名处理。
@@ -1890,12 +1921,14 @@ impl AppState {
                 }
             }
         };
-        let Some((source, id)) = queue
-            .get(next)
-            .and_then(|v| crate::online::split_virtual_id(v))
-        else {
+        let Some(vid) = queue.get(next).cloned() else {
+            return;
+        };
+        let Some((source, id)) = crate::online::split_virtual_id(&vid) else {
             return; // 本地曲无需预取
         };
+        // 时长是码率诚实性校验与实测档位的分母，缺了就跳过校验（不猜）。
+        let duration_ms = self.online_duration_ms(&vid).await;
         let quality = {
             let prefs = self.quality.lock().await;
             crate::online::quality::get(&prefs, &source)
@@ -1905,9 +1938,9 @@ impl AppState {
             return;
         }
         let dir = self.online_cache_dir();
+        // 已缓存（包括只拿到更低档）就不再预热：播放那边会向下命中同一个文件。
         if self
-            .cache_index
-            .find(&source, &id, quality.as_str())
+            .find_online_cached(&source, &id, quality)
             .await
             .is_some()
         {
@@ -1920,15 +1953,11 @@ impl AppState {
         else {
             return;
         };
-        let urls: Vec<String> = std::iter::once(info.url)
-            .chain(info.fallback_urls)
-            .collect();
-        let referer = crate::online::referer(&source).map(str::to_string);
         match crate::online::progressive::start(
             dir,
             key.clone(),
-            urls,
-            referer,
+            info.ladder(),
+            duration_ms,
             self.cache_index.clone(),
         ) {
             Ok(dl) => {
