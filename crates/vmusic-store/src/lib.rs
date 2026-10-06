@@ -281,11 +281,82 @@ impl TrackFilter {
     }
 }
 
+/// 曲库搜索的谓词（照旧）：`COALESCE(...) LIKE '%q%'` 三段 OR。
+///
+/// 前导通配符让任何 B-tree 索引都用不上，所以这条语句本身永远是「整表扫 + 排序」。
+/// 加速走的是 [`search_candidates`] 的预筛路径（见那里的注释）：能用索引的查询先
+/// 取出一小撮候选 rowid，再用 [`SEARCH_PREFILTER_WHERE`] 点查。索引用不上时
+/// （空查询、短查询、含通配符）就退回这条语句 —— 它与改造前逐字一致，所以那些
+/// 路径的代价与行为都没有变化。
+const TRACK_SEARCH_LIKE_PREDICATE: &str = "(?1 = '' OR COALESCE(NULLIF(TRIM(e.title), ''), t.title) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.album), ''), t.album) LIKE ?2)";
+
+/// 预筛路径的谓词：候选 rowid 由调用方以 JSON 数组绑定在 ?1，复核仍在原来的
+/// COALESCE LIKE 上做（?2）。
+///
+/// 为什么还要复核：trigram 的 LIKE 优化是「把模式交给分词器近似匹配」，实测对
+/// 含空白的模式会给出**超集**（`% 晴天%` 能查出「晴天」）。粗筛放松只会多给候选，
+/// 所以「粗筛 ∩ LIKE 复核」= 旧结果；而复核只作用在候选行上，成本与候选数同阶
+/// （实测 100 候选 0.62ms，整表扫 12ms）。
+///
+/// `json_each` 是 SQLite 内置 JSON1（本项目用的是 bundled SQLite，编译期已开）；
+/// 候选作为**顶层约束**才能让计划变成 `SEARCH t USING INTEGER PRIMARY KEY`——
+/// 塞进 `OR ?1 = ''` 里会退回整表扫，实测那样反而比旧语句更慢。
+const SEARCH_PREFILTER_WHERE: &str = "t.rowid IN (SELECT value FROM json_each(?1)) AND (COALESCE(NULLIF(TRIM(e.title), ''), t.title) LIKE ?2 OR COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) LIKE ?2 OR COALESCE(NULLIF(TRIM(e.album), ''), t.album) LIKE ?2)";
+
+/// 预筛候选数上限：超过它就不再预筛（临时索引 + 逐行点查会比整表扫更贵）。
+/// 实测（10k 曲库）：1 个候选 0.23ms、100 个候选 0.62ms、整表扫 12ms，阈值取
+/// 2000 有足够余量；真到几千个候选时结果集本身已经大到用户不会再往下看。
+const SEARCH_PREFILTER_MAX: usize = 2000;
+
+/// 模式能否交给 trigram 索引粗筛：至少 3 个字符（trigram 的最小长度），且不含
+/// LIKE 通配符（`%`/`_` 在 trigram 里不是通配符，含它们会漏配）。
+fn indexable_query(query: &str) -> bool {
+    query.chars().count() >= 3 && !query.contains('%') && !query.contains('_')
+}
+
+/// 索引粗筛：返回候选 rowid；命中数超过上限、或模式用不上索引时返回 None。
+///
+/// 三列必须分开 UNION：`title LIKE ? OR artist LIKE ? OR album LIKE ?` 这种同表三列
+/// OR 会让优化器放弃 trigram 约束（计划里只剩 `INDEX 0:`），单列 LIKE 才是
+/// `INDEX 0:L0`（见 `search_plan_uses_the_trigram_index`）。
+async fn search_candidates(
+    pool: &SqlitePool,
+    query: &str,
+) -> Result<Option<Vec<i64>>, StoreError> {
+    if !indexable_query(query) {
+        return Ok(None);
+    }
+    let pattern = format!("%{query}%");
+    let rows: Vec<i64> = sqlx::query_scalar(
+        "SELECT rowid FROM track_search WHERE title LIKE ?1
+         UNION SELECT rowid FROM track_search WHERE artist LIKE ?1
+         UNION SELECT rowid FROM track_search WHERE album LIKE ?1
+         LIMIT ?2",
+    )
+    .bind(pattern)
+    .bind(SEARCH_PREFILTER_MAX as i64 + 1)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    if rows.len() > SEARCH_PREFILTER_MAX {
+        return Ok(None);
+    }
+    Ok(Some(rows))
+}
+
+/// 预筛路径的 `WHERE` 之后、`ORDER BY` 之前的片段（列表/计数/ids 共用）。
+fn prefilter_selection(columns: &str, sort: TrackSort, filter_sql: &str) -> String {
+    format!(
+        "SELECT {columns} FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE {SEARCH_PREFILTER_WHERE}{filter_sql}          ORDER BY {}",
+        sort.sql()
+    )
+}
+
 /// `filter_sql` 由调用方按本语句的空闲参数编号渲染（列表有 LIMIT/OFFSET，
 /// 从 ?5 起；ids 没有分页子句，从 ?3 起）。
 fn track_selection(columns: &str, sort: TrackSort, filter_sql: &str) -> String {
     format!(
-        "SELECT {columns} FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE (?1 = '' OR COALESCE(NULLIF(TRIM(e.title), ''), t.title) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.album), ''), t.album) LIKE ?2){filter_sql}          ORDER BY {}",
+        "SELECT {columns} FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE {TRACK_SEARCH_LIKE_PREDICATE}{filter_sql}          ORDER BY {}",
         sort.sql()
     )
 }
@@ -312,16 +383,30 @@ pub async fn list_tracks_filtered(
     let columns = format!(
         "t.id, t.path, t.source, {TRACK_COALESCE_COLS}, t.duration_ms, t.bitrate,          t.sample_rate, t.channels, t.has_cover, t.cover_key, t.file_mtime, t.file_size, t.added_at"
     );
-    let filter_sql = filter.sql(5);
-    let sql = format!(
-        "{} LIMIT ?3 OFFSET ?4",
-        track_selection(&columns, sort, &filter_sql)
-    );
-    let mut stmt = sqlx::query_as::<_, TrackRow>(&sql)
-        .bind(query)
-        .bind(format!("%{query}%"))
-        .bind(limit)
-        .bind(offset);
+    let pattern = format!("%{query}%");
+    // 索引可用时走预筛：候选 rowid 作 ?1，复核模式作 ?2，条数参数顺延到 ?3/?4。
+    let candidates = search_candidates(pool, query).await?;
+    let (sql, binds) = match &candidates {
+        Some(ids) => (
+            format!(
+                "{} LIMIT ?3 OFFSET ?4",
+                prefilter_selection(&columns, sort, &filter.sql(5))
+            ),
+            vec![serde_json::to_string(ids).unwrap_or_else(|_| "[]".into()), pattern],
+        ),
+        None => (
+            format!(
+                "{} LIMIT ?3 OFFSET ?4",
+                track_selection(&columns, sort, &filter.sql(5))
+            ),
+            vec![query.to_string(), pattern],
+        ),
+    };
+    let mut stmt = sqlx::query_as::<_, TrackRow>(&sql);
+    for bind in binds {
+        stmt = stmt.bind(bind);
+    }
+    stmt = stmt.bind(limit).bind(offset);
     for bind in filter.binds() {
         stmt = stmt.bind(bind.clone());
     }
@@ -348,11 +433,21 @@ pub async fn list_track_ids_filtered(
     sort: TrackSort,
 ) -> Result<Vec<String>, StoreError> {
     let query = query.unwrap_or("").trim();
-    let filter_sql = filter.sql(3);
-    let sql = track_selection("t.id", sort, &filter_sql);
-    let mut stmt = sqlx::query_scalar(&sql)
-        .bind(query)
-        .bind(format!("%{query}%"));
+    let pattern = format!("%{query}%");
+    let candidates = search_candidates(pool, query).await?;
+    let (sql, first, second) = match &candidates {
+        Some(ids) => (
+            prefilter_selection("t.id", sort, &filter.sql(3)),
+            serde_json::to_string(ids).unwrap_or_else(|_| "[]".into()),
+            pattern,
+        ),
+        None => (
+            track_selection("t.id", sort, &filter.sql(3)),
+            query.to_string(),
+            pattern,
+        ),
+    };
+    let mut stmt = sqlx::query_scalar(&sql).bind(first).bind(second);
     if let Some(artist) = &filter.artist {
         stmt = stmt.bind(artist);
     }
@@ -379,13 +474,27 @@ pub async fn count_tracks_filtered(
         n: i64,
     }
     let query = query.unwrap_or("").trim();
-    let sql = format!(
-        "SELECT COUNT(*) AS n FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE (?1 = '' OR COALESCE(NULLIF(TRIM(e.title), ''), t.title) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.album), ''), t.album) LIKE ?2){}",
-        filter.sql(3)
-    );
-    let mut stmt = sqlx::query_as::<_, CountRow>(&sql)
-        .bind(query)
-        .bind(format!("%{query}%"));
+    let pattern = format!("%{query}%");
+    let candidates = search_candidates(pool, query).await?;
+    let (sql, first, second) = match &candidates {
+        Some(ids) => (
+            format!(
+                "SELECT COUNT(*) AS n FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE {SEARCH_PREFILTER_WHERE}{}",
+                filter.sql(3)
+            ),
+            serde_json::to_string(ids).unwrap_or_else(|_| "[]".into()),
+            pattern,
+        ),
+        None => (
+            format!(
+                "SELECT COUNT(*) AS n FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE {TRACK_SEARCH_LIKE_PREDICATE}{}",
+                filter.sql(3)
+            ),
+            query.to_string(),
+            pattern,
+        ),
+    };
+    let mut stmt = sqlx::query_as::<_, CountRow>(&sql).bind(first).bind(second);
     for bind in filter.binds() {
         stmt = stmt.bind(bind.clone());
     }
@@ -814,6 +923,520 @@ mod tests {
         assert_eq!(count_tracks(&db, None).await.unwrap(), 1);
         let stored = list_tracks(&db, None, 10, 0).await.unwrap();
         assert_eq!(stored[0].title, "A (remaster)");
+    }
+
+    /// 改造前的搜索谓词：等价性与代价对比的语义基准（FTS 索引必须给出同一集合）。
+    const LEGACY_SEARCH_PREDICATE: &str = "(?1 = '' OR COALESCE(NULLIF(TRIM(e.title), ''), t.title) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) LIKE ?2            OR COALESCE(NULLIF(TRIM(e.album), ''), t.album) LIKE ?2)";
+
+    fn legacy_ids_sql(sort: TrackSort) -> String {
+        format!(
+            "SELECT t.id FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE {LEGACY_SEARCH_PREDICATE}          ORDER BY {}",
+            sort.sql()
+        )
+    }
+
+    /// 用改造前的 LIKE 语句取一次命中集合，作为与 FTS 索引结果比对的基准。
+    ///
+    /// 进 SQL 前必须和生产语句走同一条归一（`query.unwrap_or("").trim()`），
+    /// 否则比的是两件事：带前导空格的查询会被生产侧 trim 成另一串。
+    async fn legacy_ids(db: &SqlitePool, query: &str, sort: TrackSort) -> Vec<String> {
+        let query = query.trim();
+        sqlx::query_scalar::<_, String>(&legacy_ids_sql(sort))
+            .bind(query)
+            .bind(format!("%{query}%"))
+            .fetch_all(db)
+            .await
+            .unwrap()
+    }
+
+    /// FTS 索引表的内容必须与「覆盖后展示值」逐行一致。
+    ///
+    /// 这是这套方案唯一的系统性风险：索引是触发器维护的派生数据，漏掉任何一条写
+    /// 路径都会让搜索静默少结果。所以这里把索引内容与回填表达式直接比对（双向：
+    /// 既不能少行，也不能留下孤儿行）。
+    async fn assert_index_mirrors_effective_values(db: &SqlitePool) {
+        type Row = (i64, Option<String>, Option<String>, Option<String>);
+        let indexed: Vec<Row> = sqlx::query_as(
+            "SELECT rowid, title, artist, album FROM track_search ORDER BY rowid",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap();
+        let expected: Vec<Row> = sqlx::query_as(
+            "SELECT t.rowid, COALESCE(NULLIF(TRIM(e.title), ''), t.title),
+                    COALESCE(NULLIF(TRIM(e.artist), ''), t.artist),
+                    COALESCE(NULLIF(TRIM(e.album), ''), t.album)
+               FROM tracks t LEFT JOIN track_edits e ON e.track_id = t.id
+              ORDER BY t.rowid",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap();
+        assert_eq!(indexed, expected, "track_search 与覆盖后展示值不一致");
+    }
+
+    #[tokio::test]
+    async fn search_index_tracks_every_write_path() {
+        let db = pool().await;
+        let a = sample("/m/a.mp3", "Alpha");
+        let b = sample("/m/b.mp3", "Beta");
+        upsert_track(&db, &a).await.unwrap();
+        upsert_track(&db, &b).await.unwrap();
+        assert_index_mirrors_effective_values(&db).await;
+
+        // 全量覆盖 + 部分覆盖（未提供的字段保持 NULL）。
+        track_edits::apply(
+            &db,
+            &a.id,
+            &track_edits::EditInput {
+                title: Some("Alpha (edit)".into()),
+                artist: None,
+                album: Some("Edited Album".into()),
+            },
+        )
+        .await
+        .unwrap();
+        track_edits::apply(
+            &db,
+            &b.id,
+            &track_edits::EditInput {
+                title: None,
+                artist: Some("Beta Artist".into()),
+                album: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_index_mirrors_effective_values(&db).await;
+
+        // 纯空白编辑 = 回退到扫描值（读取端 NULLIF(TRIM(...)) 的语义）。
+        track_edits::apply(
+            &db,
+            &a.id,
+            &track_edits::EditInput {
+                title: Some("   ".into()),
+                artist: None,
+                album: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_index_mirrors_effective_values(&db).await;
+
+        // 重置编辑（删覆盖行）与再次扫描刷新标签。
+        track_edits::remove(&db, &a.id).await.unwrap();
+        assert_index_mirrors_effective_values(&db).await;
+        let mut rescanned = b.clone();
+        rescanned.title = "Beta (rescan)".into();
+        upsert_track(&db, &rescanned).await.unwrap();
+        assert_index_mirrors_effective_values(&db).await;
+
+        // 删除曲目不能留下孤儿索引行。
+        assert!(delete_tracks(&db, std::slice::from_ref(&a.id)).await.unwrap() > 0);
+        assert_index_mirrors_effective_values(&db).await;
+    }
+
+    #[tokio::test]
+    async fn search_index_returns_the_same_rows_as_the_like_scan() {
+        let db = pool().await;
+        let corpus = [
+            ("/m/1.mp3", "晴天", "周杰伦", "叶惠美"),
+            ("/m/2.mp3", "晴天 (Live)", "周杰伦", "演唱会"),
+            ("/m/3.mp3", "七里香", "周杰伦", "七里香"),
+            ("/m/4.mp3", "Blóðberg", "Sigur Rós", "ÁTTA"),
+            ("/m/5.mp3", "100% Love", "A_B", "MiXeD case"),
+            // 元数据缺失：artist/album 为 NULL，覆盖后仍为空。
+            ("/m/6.mp3", "untitled", "", ""),
+            // 末尾空白：TRIM 归一后不应被查询命中。
+            ("/m/7.mp3", "trailing   ", "spaced", "album"),
+        ];
+        for (path, title, artist, album) in corpus {
+            let mut track = sample(path, title);
+            track.artist = if artist.is_empty() {
+                None
+            } else {
+                Some(artist.to_string())
+            };
+            track.album = if album.is_empty() {
+                None
+            } else {
+                Some(album.to_string())
+            };
+            upsert_track(&db, &track).await.unwrap();
+        }
+        // 覆盖一条：索引与旧 LIKE 都必须优先用编辑值。
+        let edited = sqlx::query_scalar::<_, String>("SELECT id FROM tracks WHERE path = ?1")
+            .bind("/m/3.mp3")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        track_edits::apply(
+            &db,
+            &edited,
+            &track_edits::EditInput {
+                title: Some("七里香 (remaster)".into()),
+                artist: None,
+                album: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 含 1~2 字符（trigram 用不上）、大小写、中文、通配符、前后与内部空白、
+        // 无命中的各式查询。前后空白与 `周杰伦 nope` 这两类是实测过的差异点：
+        // 只靠 FTS 匹配会给出超集，必须由 LIKE 复核收敛回旧行为。
+        for query in [
+            "晴", "晴天", "周杰", "周杰伦", "七里香", "remaster", "REM", "bló", "BLÓ",
+            "sigur rós", "100%", "a_b", "A_B", "mixed", "MIXED", "trailing", "nope",
+            " 晴天", "叶惠美", "spaced", "周杰伦 nope", "晴天 ", "r ó s",
+        ] {
+            for sort in [TrackSort::Title, TrackSort::Artist, TrackSort::Added] {
+                let fts = list_track_ids(&db, Some(query), sort).await.unwrap();
+                let like = legacy_ids(&db, query, sort).await;
+                assert_eq!(fts, like, "查询 {query:?} 在 {sort:?} 下与 LIKE 结果不一致");
+            }
+            assert_eq!(
+                count_tracks(&db, Some(query)).await.unwrap() as usize,
+                legacy_ids(&db, query, TrackSort::Title).await.len(),
+                "查询 {query:?} 的计数与 LIKE 基准不一致"
+            );
+        }
+    }
+
+    /// 搜索路径必须真的走 FTS 索引 —— 否则这次改造只是换了个更慢的写法。
+    #[tokio::test]
+    async fn search_plan_uses_the_trigram_index() {
+        let db = pool().await;
+        for i in 0..64 {
+            upsert_track(&db, &sample(&format!("/m/{i}.mp3"), &format!("Song {i:03}")))
+                .await
+                .unwrap();
+        }
+        let sql = format!("EXPLAIN QUERY PLAN {}", legacy_ids_sql(TrackSort::Title));
+        type PlanRow = (i64, i64, i64, String);
+        let plan: Vec<PlanRow> = sqlx::query_as(&sql)
+            .bind("Song 007")
+            .bind("%Song 007%")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        let text = plan
+            .iter()
+            .map(|(_, _, _, detail)| detail.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("LEGACY PLAN:\n{text}");
+        assert!(text.contains("SCAN t"), "旧 LIKE 语句应全表扫：{text}");
+        assert!(
+            !text.contains("track_search"),
+            "旧语句不该碰索引表：{text}"
+        );
+
+        // 粗筛语句必须真的落到 trigram 约束上：`INDEX 0:L0` 里的 L0 就是 LIKE 约束；
+        // 只有 `INDEX 0:` 表示退化成整表扫索引表（这正是三列写成一个 OR 时的样子）。
+        let plan: Vec<PlanRow> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT rowid FROM track_search WHERE title LIKE ?1
+             UNION SELECT rowid FROM track_search WHERE artist LIKE ?1
+             UNION SELECT rowid FROM track_search WHERE album LIKE ?1",
+        )
+        .bind("%Song 007%")
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        let text = plan
+            .iter()
+            .map(|(_, _, _, detail)| detail.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("CANDIDATE PLAN:\n{text}");
+        assert!(
+            text.contains("INDEX 0:L0"),
+            "粗筛没有用上 trigram 索引：{text}"
+        );
+
+        // 预筛后的主语句必须由候选驱动（走主键点查），而不是再扫一遍 tracks。
+        let plan: Vec<PlanRow> = sqlx::query_as(&format!(
+            "EXPLAIN QUERY PLAN SELECT t.id FROM tracks t LEFT JOIN track_edits e ON e.track_id = t.id WHERE {SEARCH_PREFILTER_WHERE} ORDER BY {}",
+            TrackSort::Title.sql()
+        ))
+        .bind("[1,2,3]")
+        .bind("%Song 007%")
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        let text = plan
+            .iter()
+            .map(|(_, _, _, detail)| detail.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("PREFILTER PLAN:\n{text}");
+        assert!(
+            text.contains("SEARCH t USING INTEGER PRIMARY KEY"),
+            "预筛语句没有走主键点查：{text}"
+        );
+    }
+
+    fn legacy_ids_sql_filtered(sort: TrackSort, filter: &TrackFilter) -> String {
+        format!(
+            "SELECT t.id FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE {LEGACY_SEARCH_PREDICATE}{}          ORDER BY {}",
+            filter.sql(3),
+            sort.sql()
+        )
+    }
+
+    /// 查询 + 歌手/专辑筛选的组合：预筛路径与旧路径的**参数编号不同**
+    /// （预筛 ?1=候选 JSON、?2=复核模式；旧路径 ?1=原始查询、?2=模式），
+    /// 编号错位会静默筛错，所以这里把三条语句都对着 LIKE 基准比一遍。
+    #[tokio::test]
+    async fn search_with_facet_filter_matches_the_like_scan() {
+        let db = pool().await;
+        for (i, (title, artist, album)) in [
+            ("晴天", "周杰伦", "叶惠美"),
+            ("晴天 (Live)", "周杰伦", "演唱会"),
+            ("七里香", "周杰伦", "七里香"),
+            ("普通朋友", "陶喆", "I'm OK"),
+            ("元素", "陶喆", "黑色柳丁"),
+            ("奥尔菲斯", "陈奕迅", "Live"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut track = sample(&format!("/f/{i}.mp3"), title);
+            track.artist = Some((*artist).into());
+            track.album = Some((*album).into());
+            upsert_track(&db, &track).await.unwrap();
+        }
+
+        // 覆盖：能走索引的长查询、走不了索引的短查询、以及只命中单曲的查询。
+        for query in ["晴天", "周杰", "七里香", "普通朋友", "Te", "陈", "nope"] {
+            for artist in [None, Some("周杰伦"), Some("陶喆")] {
+                for album in [None, Some("叶惠美"), Some("Live")] {
+                    let filter = TrackFilter {
+                        artist: artist.map(str::to_string),
+                        album: album.map(str::to_string),
+                    };
+                    let label = format!("q={query:?} artist={artist:?} album={album:?}");
+
+                    let sql = legacy_ids_sql_filtered(TrackSort::Title, &filter);
+                    let mut stmt = sqlx::query_scalar::<_, String>(&sql)
+                        .bind(query.trim())
+                        .bind(format!("%{}%", query.trim()));
+                    for bind in filter.binds() {
+                        stmt = stmt.bind(bind);
+                    }
+                    let expected = stmt.fetch_all(&db).await.unwrap();
+
+                    let got = list_track_ids_filtered(&db, Some(query), &filter, TrackSort::Title)
+                        .await
+                        .unwrap();
+                    assert_eq!(got, expected, "ids 不一致：{label}");
+
+                    let page = list_tracks_filtered(&db, Some(query), &filter, TrackSort::Title, 50, 0)
+                        .await
+                        .unwrap();
+                    let page_ids: Vec<String> = page.into_iter().map(|t| t.id).collect();
+                    assert_eq!(page_ids, expected, "列表分页不一致：{label}");
+
+                    let count = count_tracks_filtered(&db, Some(query), &filter)
+                        .await
+                        .unwrap();
+                    assert_eq!(count as usize, expected.len(), "计数不一致：{label}");
+                }
+            }
+        }
+    }
+
+    /// 升级路径：老库（有曲目、没有索引内容与触发器）跑完 0012 之后必须立即同步。
+    ///
+    /// 其余测试都是新建库，0012 执行时 tracks 还是空的 —— 回填那条 `INSERT ...
+    /// SELECT` 从没被真正跑过。这里把索引行清空、触发器删掉来模拟升级前的状态，
+    /// 再**重放迁移文件本身**（不是抄一份 SQL），保证测的就是上线时要执行的东西。
+    #[tokio::test]
+    async fn migration_backfills_existing_rows_and_restores_triggers() {
+        let db = pool().await;
+        for trigger in [
+            "tracks_search_ai",
+            "tracks_search_au",
+            "tracks_search_ad",
+            "track_edits_search_ai",
+            "track_edits_search_au",
+            "track_edits_search_ad",
+        ] {
+            sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger}"))
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let track = sample(&format!("/up/{i}.mp3"), &format!("Upgrade {i}"));
+            upsert_track(&db, &track).await.unwrap();
+            ids.push(track.id);
+        }
+        track_edits::apply(
+            &db,
+            &ids[0],
+            &track_edits::EditInput {
+                title: Some("Upgrade 0 (edited)".into()),
+                artist: None,
+                album: None,
+            },
+        )
+        .await
+        .unwrap();
+        // 前置条件：索引确实是空的（否则这个测试什么也没证明）。
+        let indexed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM track_search")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(indexed, 0, "模拟升级前的库时不该有索引行");
+
+        sqlx::raw_sql(include_str!("../../../migrations/0012_track_search.sql"))
+            .execute(&db)
+            .await
+            .unwrap();
+
+        assert_index_mirrors_effective_values(&db).await;
+        // 触发器也回来了：再改一次标签，索引要跟着变。
+        track_edits::apply(
+            &db,
+            &ids[1],
+            &track_edits::EditInput {
+                title: Some("Upgrade 1 (edited)".into()),
+                artist: None,
+                album: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_index_mirrors_effective_values(&db).await;
+        assert_eq!(
+            list_track_ids(&db, Some("Upgrade 1 (edited)"), TrackSort::Title)
+                .await
+                .unwrap(),
+            vec![ids[1].clone()]
+        );
+    }
+
+    /// 候选数超过上限时必须回落整表扫，且结果与 LIKE 基准一致（阈值两侧都不能少结果）。
+    #[tokio::test]
+    async fn search_overflow_falls_back_to_the_like_scan() {
+        let db = pool().await;
+        for i in 0..SEARCH_PREFILTER_MAX + 5 {
+            upsert_track(&db, &sample(&format!("/big/{i}.mp3"), &format!("Overflow {i:05}")))
+                .await
+                .unwrap();
+        }
+        let query = "Overflow";
+        assert!(search_candidates(&db, query).await.unwrap().is_none());
+        assert_eq!(
+            list_track_ids(&db, Some(query), TrackSort::Title).await.unwrap(),
+            legacy_ids(&db, query, TrackSort::Title).await
+        );
+        assert_eq!(
+            count_tracks(&db, Some(query)).await.unwrap() as usize,
+            legacy_ids(&db, query, TrackSort::Title).await.len()
+        );
+        // 换成只命中 1 首的查询：候选在上限内，必须走预筛且结果一致。
+        assert!(search_candidates(&db, "Overflow 00007")
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            list_track_ids(&db, Some("Overflow 00007"), TrackSort::Title)
+                .await
+                .unwrap(),
+            legacy_ids(&db, "Overflow 00007", TrackSort::Title).await
+        );
+    }
+
+    /// 性能探针（不设断言，避免抖动变成红 CI）：量「搜索提速」与「写入/浏览代价」。
+    /// 手动跑：`$env:VMUSIC_PERF=1; cargo test -p vmusic-store -- --nocapture search_perf`
+    #[tokio::test]
+    async fn search_perf_probe() {
+        if std::env::var("VMUSIC_PERF").is_err() {
+            return;
+        }
+        const N: usize = 10_000;
+        let db = pool().await;
+        let started = std::time::Instant::now();
+        for i in 0..N {
+            let mut track = sample(
+                &format!("/perf/{i}.mp3"),
+                &format!("Song {i:05}"),
+            );
+            track.artist = Some(format!("Artist {}", i % 500));
+            track.album = Some(format!("Album {}", i % 200));
+            upsert_track(&db, &track).await.unwrap();
+        }
+        println!(
+            "PERF upsert {N} tracks with index: {:?}",
+            started.elapsed()
+        );
+
+        // 生产路径 vs 旧 LIKE 基准：每轮 = 一次计数 + 一次 ids（列表视图真实开销）。
+        for (label, query) in [
+            ("3char-narrow", "Song 00123"),
+            ("3char-broad", "Song 001"),
+            ("1char", "7"),
+            ("empty", ""),
+        ] {
+            let t = std::time::Instant::now();
+            for _ in 0..20 {
+                let _ = count_tracks(&db, Some(query)).await.unwrap();
+                let _ = list_track_ids(&db, Some(query), TrackSort::Title)
+                    .await
+                    .unwrap();
+            }
+            let new = t.elapsed() / 20;
+            let t = std::time::Instant::now();
+            for _ in 0..20 {
+                let _ = legacy_count(&db, query).await;
+                let _ = legacy_ids(&db, query, TrackSort::Title).await;
+            }
+            let old = t.elapsed() / 20;
+            println!("PERF {label}: index={new:?} like={old:?}");
+        }
+
+        // 写入代价：去掉触发器再灌一批，差值就是索引维护成本。
+        for trigger in [
+            "tracks_search_ai",
+            "tracks_search_au",
+            "tracks_search_ad",
+            "track_edits_search_ai",
+            "track_edits_search_au",
+            "track_edits_search_ad",
+        ] {
+            sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger}"))
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let started = std::time::Instant::now();
+        for i in 0..N {
+            let track = sample(&format!("/perf2/{i}.mp3"), &format!("Song {i:05}"));
+            upsert_track(&db, &track).await.unwrap();
+        }
+        println!(
+            "PERF upsert {N} tracks without index: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 计数基准（旧 LIKE 语句），只给性能探针用。
+    async fn legacy_count(db: &SqlitePool, query: &str) -> i64 {
+        let query = query.trim();
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM tracks t          LEFT JOIN track_edits e ON e.track_id = t.id          WHERE {LEGACY_SEARCH_PREDICATE}"
+        );
+        type CountRow = (i64,);
+        let row: CountRow = sqlx::query_as(&sql)
+            .bind(query)
+            .bind(format!("%{query}%"))
+            .fetch_one(db)
+            .await
+            .unwrap();
+        row.0
     }
 
     #[tokio::test]
