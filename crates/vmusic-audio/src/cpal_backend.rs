@@ -165,6 +165,11 @@ impl Shared {
     }
 }
 
+/// 解码线程的控制句柄。
+///
+/// `seek_to` 的三处 `.lock().unwrap()` 保留：临界区只有 `Some(..)` 赋值与 `take()`，
+/// 不存在能 panic 的操作，锁不会中毒；而 `seek` 的错误类型是 `AudioError`，也没必要
+/// 把「不可能发生的毒化」映射成一次「解码失败」去误导上层。
 struct DecoderCtl {
     stop: Arc<AtomicBool>,
     /// `Some(ms)` means "seek here as soon as you can".

@@ -640,6 +640,8 @@ fn api_url(path: &str, query: &[(&str, &str)]) -> ApiResult<String> {
 
 /// 与 QQ 模块同形态的表单编码：复用 Url 的 query_pairs，不引新依赖。
 fn form_urlencoded(form: &BTreeMap<String, String>) -> String {
+    // unwrap 安全：常量字面量，解析结果恒定；改成 Result 会把纯编码器签名
+    // 污染成 ApiResult。真正的网络站点已走 const_url 降级。
     let mut u = reqwest::Url::parse("https://local.invalid/").unwrap();
     u.query_pairs_mut()
         .extend_pairs(form.iter().map(|(k, v)| (k.as_str(), v.as_str())));

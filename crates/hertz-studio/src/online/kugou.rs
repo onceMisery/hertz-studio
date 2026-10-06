@@ -14,7 +14,7 @@ use super::cred::CredPack;
 use super::http::absorb_cookies;
 use super::sign::{kugou, kugou_login};
 use super::{
-    bad_request, client, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack, SearchPage,
+    bad_request, client, const_url, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack, SearchPage,
     SearchQuery, StreamInfo,
 };
 
@@ -89,9 +89,12 @@ async fn anonymous_search(
         .unwrap_or_default()
         .as_millis();
     let params = anonymous_search_params(keyword, page, limit, millis);
-    let mut url = reqwest::Url::parse("https://complexsearch.kugou.com/v2/search/song").unwrap();
+    let mut url = const_url("https://complexsearch.kugou.com/v2/search/song")?;
     url.query_pairs_mut().extend_pairs(params.iter());
     let mut headers = super::http::headers(None, None);
+    // 下面两个 unwrap 只作用于常量：key 全是本数组里的字面量（合法 header 名），
+    // value 是字面量或 md5 hex / 十进制毫秒（合法 header 值），解析不可能失败。
+    // 网络地址那一类「可能失败」的常量解析已统一走 const_url 降级为 ApiError。
     for (key, value) in [
         ("user-agent", "Android712-AndroidPhone-11070-18-0-Search"),
         ("kg-rec", "1"),
@@ -416,7 +419,7 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         cred.userid.as_str()
     };
 
-    let mut url = reqwest::Url::parse(SEARCH_URL).unwrap();
+    let mut url = const_url(SEARCH_URL)?;
     {
         let mut p = url.query_pairs_mut();
         p.append_pair("keyword", keyword)
@@ -522,18 +525,22 @@ fn h5_base(cred: &CredPack, mid: &str, dfid: &str) -> BTreeMap<String, String> {
 }
 
 /// 用 BTreeMap 原始值已完成签名后构造请求 URL（append_pair 负责百分号编码）。
-fn signed_url(base: &str, mut params: BTreeMap<String, String>) -> String {
+///
+/// `base` 只由本文件的网关常量与 `format!` 拼出来，没有用户输入；即便写错也只是
+/// 这一个音源报错（返回 `Err`），不会把进程带走（release 是 `panic = "abort"`）。
+fn signed_url(base: &str, mut params: BTreeMap<String, String>) -> ApiResult<String> {
     // signature 必须在签名之后插入：签名输入不含 signature 键。
     let sig = kugou::h5_sign(&params, None);
     params.insert("signature".into(), sig);
-    let mut url = reqwest::Url::parse(base).unwrap();
+    let mut url = reqwest::Url::parse(base)
+        .map_err(|e| crate::error::internal(format!("酷狗网关地址无效 {base}: {e}")))?;
     {
         let mut q = url.query_pairs_mut();
         for (k, v) in &params {
             q.append_pair(k, v);
         }
     }
-    url.to_string()
+    Ok(url.to_string())
 }
 
 fn stream_info(url: String, id: &str) -> StreamInfo {
@@ -619,7 +626,7 @@ pub async fn stream(
 
     macro_rules! try_mobile {
         () => {{
-            let mut mobile_url = reqwest::Url::parse(PLAY_MOBILE).unwrap();
+            let mut mobile_url = const_url(PLAY_MOBILE)?;
             mobile_url
                 .query_pairs_mut()
                 .append_pair("cmd", "playInfo")
@@ -655,7 +662,7 @@ pub async fn stream(
             params.insert("platid".into(), "4".into());
             params.insert("hash".into(), hash.to_lowercase());
             params.insert("album_id".into(), album_id.into());
-            let url = signed_url($endpoint, params);
+            let url = signed_url($endpoint, params)?;
             let h = super::http::headers(Some(&cookie), Some("https://www.kugou.com/"));
             match super::http::get_json(&http, &url, h).await {
                 Ok(b) => {
@@ -687,7 +694,7 @@ pub async fn stream(
             params.insert("cmd".into(), "26".into());
             params.insert("quality".into(), quality_param(quality).to_string());
             params.insert("key".into(), kugou::play_key(hash, &mid, &cred.userid, WEB_APPID));
-            let url = signed_url(&format!("{GATEWAY}/v5/url"), params);
+            let url = signed_url(&format!("{GATEWAY}/v5/url"), params)?;
             let mut h = super::http::headers(Some(&cookie), Some("https://www.kugou.com/"));
             h.insert(
                 "x-router",
@@ -747,7 +754,7 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
     let (mid, _dfid) = device(ctx).await?;
     let cookie = cookie_header(&cred, &mid);
 
-    let mut s_url = reqwest::Url::parse(LYRIC_SEARCH).unwrap();
+    let mut s_url = const_url(LYRIC_SEARCH)?;
     {
         let mut p = s_url.query_pairs_mut();
         p.append_pair("ver", "1")
@@ -772,7 +779,7 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
         return Ok(vmusic_core::LyricDocument::empty());
     }
 
-    let mut d_url = reqwest::Url::parse(LYRIC_DOWNLOAD).unwrap();
+    let mut d_url = const_url(LYRIC_DOWNLOAD)?;
     {
         let mut p = d_url.query_pairs_mut();
         p.append_pair("id", &lid)
@@ -918,7 +925,7 @@ async fn h5_get(
     for (k, v) in extra {
         params.insert(k, v);
     }
-    let url = signed_url(&format!("{GATEWAY}{path}"), params);
+    let url = signed_url(&format!("{GATEWAY}{path}"), params)?;
     let mut h = super::http::headers(Some(&cred.cookie), Some("https://www.kugou.com/"));
     if let Ok(v) = "trackercdn.kugou.com".parse() {
         let _ = h.insert("x-router", v);
@@ -1375,7 +1382,7 @@ pub async fn qr_create(ctx: &Ctx) -> ApiResult<super::QrPayload> {
     p.insert("qrcode_txt".into(), qrcode_txt);
     p.insert("signature".into(), web_signature(&p));
 
-    let mut url = reqwest::Url::parse(&format!("{LOGIN_USER}/v2/qrcode")).unwrap();
+    let mut url = const_url(format!("{LOGIN_USER}/v2/qrcode"))?;
     url.set_query(Some(&raw_query_except_encoded(
         &p,
         &[("qrcode_txt", qrcode_txt_enc)],
@@ -1445,7 +1452,7 @@ async fn qr_login_by_token(
     let params_enc = kugou_login::aes_encrypt(&plain_token, &aes_key);
     let pk_plain =
         serde_json::json!({ "clienttime_ms": clienttime_ms, "key": aes_key }).to_string();
-    let pk = kugou_login::rsa_encrypt(&pk_plain);
+    let pk = kugou_login::rsa_encrypt(&pk_plain)?;
 
     let mut p = BTreeMap::new();
     p.insert("appid".into(), WEB_APPID.into());
@@ -1563,7 +1570,7 @@ pub async fn qr_check(
     p.insert("srcappid".into(), QR_SRCAPPID.into());
     p.insert("signature".into(), web_signature(&p));
 
-    let mut url = reqwest::Url::parse(&format!("{LOGIN_USER}/v2/get_userinfo_qrcode")).unwrap();
+    let mut url = const_url(format!("{LOGIN_USER}/v2/get_userinfo_qrcode"))?;
     url.set_query(Some(&raw_query(&p)));
     let h = super::http::headers(None, Some(LOGIN_REFERER));
     let j = super::http::get_json(&client()?, url.as_str(), h).await?;

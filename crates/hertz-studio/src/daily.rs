@@ -398,6 +398,10 @@ type EntryTable = std::sync::Mutex<std::collections::HashMap<CacheKey, SourceEnt
 type TaskTable =
     std::sync::Mutex<std::collections::HashMap<CacheKey, tokio::sync::watch::Sender<bool>>>;
 
+/// 两张全局表都用 `.lock().unwrap()`（见 `schedule_fetch`/`spawn_fetch`/`FetchGuard`）：
+/// 临界区只做 HashMap 读写与 `Instant::now()`，没有可 panic 的操作，锁不会中毒；
+/// 而且这些点分布在 `Drop` 与 `tokio::spawn` 的任务体里，没有能返回 `ApiError`
+/// 的调用方可以承接毒化。真正该防的是上游 panic，不是锁。
 fn entries() -> &'static EntryTable {
     static SLOTS: std::sync::OnceLock<EntryTable> = std::sync::OnceLock::new();
     SLOTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))

@@ -22,7 +22,7 @@
 //! 查什么 id，任意 URL 注入没有入口。字段名对照官方文档（aegis 证据 §6）。
 
 use super::{
-    bad_request, client, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack, SearchPage,
+    bad_request, client, const_url, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack, SearchPage,
     SearchQuery, StreamInfo,
 };
 
@@ -65,7 +65,7 @@ async fn tracks_call(
     extra: &[(&str, String)],
 ) -> ApiResult<(serde_json::Value, Vec<serde_json::Value>)> {
     let cid = client_id(ctx).await?;
-    let mut url = reqwest::Url::parse(API).unwrap();
+    let mut url = const_url(API)?;
     {
         let mut p = url.query_pairs_mut();
         p.append_pair("client_id", &cid)

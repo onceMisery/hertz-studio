@@ -201,15 +201,25 @@ BBA3C88567B9656E52C9CD5CD95CA735FF2D25F762B133273EEEB7B4F3EA8B6DA29040F3B67CD";
 
     /// 酷狗 NoPadding RSA：明文 UTF-8 大端右对齐进 128 字节块，做教科书
     /// m^e mod n，输出小写 hex（与网页 JS 的 S(d) 一致，前导零自然丢弃）。
-    pub fn rsa_encrypt(plaintext: &str) -> String {
+    ///
+    /// 明文超过 128 字节时返回错误而不是让 `RSA_BLOCK - len` 下溢：调用方的
+    /// `{clienttime_ms,key}` 恒在 60 字节左右、结构性安全，但那是调用方的性质，
+    /// 不该靠一个只在 debug 生效的断言去替这里兜底——release 是 `panic = "abort"`，
+    /// 下溢会把整个进程带走。
+    pub fn rsa_encrypt(plaintext: &str) -> crate::error::ApiResult<String> {
         let bytes = plaintext.as_bytes();
-        debug_assert!(bytes.len() <= RSA_BLOCK);
+        if bytes.len() > RSA_BLOCK {
+            return Err(crate::error::internal(format!(
+                "酷狗登录 RSA 明文超长：{} > {RSA_BLOCK} 字节",
+                bytes.len()
+            )));
+        }
         let mut block = vec![0u8; RSA_BLOCK];
         block[RSA_BLOCK - bytes.len()..].copy_from_slice(bytes);
         let m = BigUint::from_bytes_be(&block);
         let n = BigUint::parse_bytes(RSA_MODULUS_HEX.as_bytes(), 16).expect("模数是合法 hex");
         let c = m.modpow(&BigUint::from(RSA_EXPONENT), &n);
-        super::hex_lower(&c.to_bytes_be())
+        Ok(super::hex_lower(&c.to_bytes_be()))
     }
 
     #[cfg(test)]
@@ -235,13 +245,24 @@ BBA3C88567B9656E52C9CD5CD95CA735FF2D25F762B133273EEEB7B4F3EA8B6DA29040F3B67CD";
 
         #[test]
         fn rsa_block_is_right_aligned_and_deterministic() {
-            let a = rsa_encrypt("{}");
-            let b = rsa_encrypt("{}");
+            let a = rsa_encrypt("{}").unwrap();
+            let b = rsa_encrypt("{}").unwrap();
             assert_eq!(a, b);
             // 模 1024 位的密文 hex 不超过 256 字符；2 字节明文结果通常占满。
             assert!(a.len() <= 256 && a.len() > 200);
             // 不同明文必须产生不同密文。
-            assert_ne!(rsa_encrypt("{}"), rsa_encrypt("{\"x\":1}"));
+            assert_ne!(
+                rsa_encrypt("{}").unwrap(),
+                rsa_encrypt("{\"x\":1}").unwrap()
+            );
+        }
+
+        /// 超长明文必须是错误，而不是 release 下 `RSA_BLOCK - len` 下溢 panic。
+        #[test]
+        fn rsa_rejects_plaintext_longer_than_one_block() {
+            let long = "x".repeat(RSA_BLOCK + 1);
+            assert!(rsa_encrypt(&long).is_err());
+            assert!(rsa_encrypt(&"x".repeat(RSA_BLOCK)).is_ok());
         }
     }
 }

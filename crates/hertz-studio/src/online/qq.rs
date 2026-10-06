@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use super::cred::CredPack;
 use super::sign::qq::{b64_encode_std, gtk33};
 use super::{
-    bad_request, client, https_url, AccountInfo, ApiError, ApiResult, Ctx, OnlineDetail,
+    bad_request, client, const_url, https_url, AccountInfo, ApiError, ApiResult, Ctx, OnlineDetail,
     OnlinePlaylist, OnlineTrack, PlaylistDetail, QrPayload, SearchPage, SearchQuery, StreamInfo,
 };
 
@@ -167,7 +167,7 @@ async fn signed_search(http: &reqwest::Client, payload: Value) -> ApiResult<Valu
     let body_text = serde_json::to_string(&payload)
         .map_err(|e| ApiError::internal(format!("QQ 搜索请求序列化失败: {e}")))?;
     let sign = super::sign::qq::zzc_sign(&body_text);
-    let mut url = reqwest::Url::parse(MUSICS).unwrap();
+    let mut url = const_url(MUSICS)?;
     {
         url.query_pairs_mut().append_pair("sign", &sign);
     }
@@ -820,6 +820,8 @@ async fn fcgi_post(ctx: &Ctx, path: &str, form: &BTreeMap<String, String>) -> Ap
 
 /// 用 Url 的 query 编码器拼表单体：百分号编码与 GET 通道保持一致，不引新依赖。
 fn form_urlencoded(form: &BTreeMap<String, String>) -> String {
+    // unwrap 安全：常量字面量，解析结果恒定；改成 Result 会把纯编码器签名
+    // 污染成 ApiResult。真正的网络站点已走 const_url 降级。
     let mut u = reqwest::Url::parse("https://local.invalid/").unwrap();
     u.query_pairs_mut()
         .extend_pairs(form.iter().map(|(k, v)| (k.as_str(), v.as_str())));
@@ -1655,7 +1657,7 @@ async fn qq_qr_create() -> ApiResult<QrPayload> {
     let nonce = uuid::Uuid::new_v4().as_u128() % 1_000_000;
     let t = format!("{}{nonce}", qr_now_ms());
     let appid = QR_APPID.to_string();
-    let mut url = reqwest::Url::parse(&format!("{PTQR}/ptqrshow")).unwrap();
+    let mut url = const_url(format!("{PTQR}/ptqrshow"))?;
     {
         let mut q = url.query_pairs_mut();
         q.append_pair("appid", &appid)
@@ -1758,7 +1760,7 @@ async fn connect_exchange(uin: &str, sigx: &str) -> ApiResult<CredPack> {
     let appid = QR_APPID.to_string();
 
     // 第 1 段：ptsigx 换 graph.qq.com 站点票据（p_skey/p_uin 等，302 不跟）。
-    let mut check = reqwest::Url::parse(QR_CHECK_SIG).unwrap();
+    let mut check = const_url(QR_CHECK_SIG)?;
     {
         let mut q = check.query_pairs_mut();
         q.append_pair("uin", uin)
@@ -1946,7 +1948,7 @@ fn extract_until(text: &str, marker: &str, end: char) -> Option<String> {
 /// 创建微信扫码握手：qrconnect 页取 uuid → qrcode/{uuid} 取 JPEG 二维码。
 /// 平台票加 `wx:` 前缀，轮询时据此路由回微信长轮询。
 pub async fn qr_create_wx(_ctx: &Ctx) -> ApiResult<QrPayload> {
-    let mut page = reqwest::Url::parse(WX_QRCONNECT).unwrap();
+    let mut page = const_url(WX_QRCONNECT)?;
     {
         let mut q = page.query_pairs_mut();
         q.append_pair("appid", WX_APPID)
@@ -1987,7 +1989,7 @@ pub async fn qr_create_wx(_ctx: &Ctx) -> ApiResult<QrPayload> {
 /// 402=超时，403=拒绝。长轮询本身超时（504）同样按等待处理。
 async fn qr_check_wx(ctx: &Ctx, uuid: &str) -> ApiResult<(String, Option<AccountInfo>)> {
     let c = wx_long_poll_client()?;
-    let mut url = reqwest::Url::parse(WX_LONG_POLL).unwrap();
+    let mut url = const_url(WX_LONG_POLL)?;
     url.query_pairs_mut()
         .append_pair("uuid", uuid)
         .append_pair("_", &qr_now_ms().to_string());
@@ -2058,7 +2060,7 @@ pub async fn qr_check(
     let now = qr_now_ms().to_string();
     let action = format!("0-0-{now}");
     let appid = QR_APPID.to_string();
-    let mut url = reqwest::Url::parse(&format!("{PTQR}/ptqrlogin")).unwrap();
+    let mut url = const_url(format!("{PTQR}/ptqrlogin"))?;
     {
         let mut q = url.query_pairs_mut();
         q.append_pair("u1", QR_U1)

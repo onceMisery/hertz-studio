@@ -18,7 +18,7 @@
 //! （见 aegis 计划「替代与风险」），失败时按登录态给诚实的错误文案。
 
 use super::{
-    bad_request, client, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack, SearchPage,
+    bad_request, client, const_url, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack, SearchPage,
     SearchQuery, StreamInfo,
 };
 
@@ -67,7 +67,7 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
     let pn = (q.offset / limit).to_string();
     let rn = limit.to_string();
 
-    let mut url = reqwest::Url::parse(SEARCH_URL).unwrap();
+    let mut url = const_url(SEARCH_URL)?;
     {
         let mut p = url.query_pairs_mut();
         p.append_pair("all", term)
@@ -248,7 +248,7 @@ async fn mobi_request(
     channel: Channel,
     br: &str,
 ) -> ApiResult<serde_json::Value> {
-    let mut url = reqwest::Url::parse(MOBI_S).unwrap();
+    let mut url = const_url(MOBI_S)?;
     {
         let mut p = url.query_pairs_mut();
         for (k, v) in &query {
@@ -408,7 +408,7 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
         Some(cred.cookie.as_str())
     };
 
-    let mut url = reqwest::Url::parse(SONG_INFO_URL).unwrap();
+    let mut url = const_url(SONG_INFO_URL)?;
     {
         let mut p = url.query_pairs_mut();
         p.append_pair("musicId", id).append_pair("httpsStatus", "1");

@@ -409,6 +409,18 @@ pub fn find(source: &str) -> Option<&'static SourceInfo> {
     SOURCES.iter().find(|s| s.id == source)
 }
 
+/// 平台地址常量 → `Url`，失败返回内部错误而不是 panic。
+///
+/// 这些地址写死在源码里，解析失败只可能是开发期笔误；但
+/// `Url::parse(..).unwrap()` 在 release 构建（`panic = "abort"`）下会把
+/// 「某个音源的请求发不出去」升级成「整个进程退出」——正在听的本地曲也跟着没了。
+/// 降级成 `ApiError` 之后，最坏结果是这一个音源报错，其余音源与本地播放不受影响。
+pub(crate) fn const_url(raw: impl AsRef<str>) -> ApiResult<reqwest::Url> {
+    let raw = raw.as_ref();
+    reqwest::Url::parse(raw)
+        .map_err(|e| crate::error::internal(format!("平台地址无效 {raw}: {e}")))
+}
+
 /// 下载音频时要带的 Referer。
 ///
 /// 多个音源共用一个下载函数，而 Referer 各不相同——CCmixter 对无 Referer 的

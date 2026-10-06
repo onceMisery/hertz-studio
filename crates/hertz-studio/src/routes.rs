@@ -1536,6 +1536,9 @@ async fn overlay_lyric(State(state): State<Arc<AppState>>) -> Json<serde_json::V
 
 /// 查询串编码（复用 Url 的 pairs 编码器，与前端 encodeURIComponent 同类语义）。
 fn urlencode(text: &str) -> String {
+    // 这里的 unwrap 是安全的：地址是字面量常量，`Url::parse` 对它的结果恒定；
+    // 把它改成 Result 只会污染一个纯编码函数的签名。同为常量站点的其余
+    // 音源请求已统一走 const_url 降级为 ApiError（见 online/mod.rs）。
     let mut u = reqwest::Url::parse("https://local.invalid/").unwrap();
     u.query_pairs_mut().append_pair("v", text);
     u.query().unwrap_or_default()
@@ -3494,24 +3497,76 @@ async fn online_account(
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_index, playlist_scope, public_https_url, qr_session, query_token};
+    use super::{
+        overlay_key_allows, pick_index, playlist_scope, public_https_url, qr_session, query_param,
+        safe_cover_id,
+    };
 
     #[test]
-    fn token_is_read_from_a_query_string() {
-        assert_eq!(query_token(Some("token=abc123")).as_deref(), Some("abc123"));
+    fn cover_id_only_accepts_uuids() {
+        assert!(safe_cover_id("6f1e0b7a-1c2d-4e5f-8a9b-0c1d2e3f4a5b").is_some());
+        // 下面这些是 percent-decode 之后真正到达 handler 的字面量：
+        // axum 0.8 先按 `/` 分段匹配 `{id}`，再解码，所以 `..%2f` 会以单段
+        // 身份进来、在这里变成 `../`。校验必须在这之后仍然拦住。
+        assert!(safe_cover_id("../secret").is_none());
+        assert!(safe_cover_id("..%2fsecret").is_none());
+        assert!(safe_cover_id("..\\secret").is_none());
+        assert!(safe_cover_id("..").is_none());
+        assert!(safe_cover_id("a/b").is_none());
+        assert!(safe_cover_id("").is_none());
+        assert!(safe_cover_id("id with space").is_none());
+    }
+
+    #[test]
+    fn overlay_key_only_opens_the_two_read_paths_it_needs() {
+        // 浮层页真正要用的两条：歌词快照 + 曲目封面。
+        assert!(overlay_key_allows("/v1/overlay/lyric"));
+        assert!(overlay_key_allows(
+            "/v1/tracks/6f1e0b7a-1c2d-4e5f-8a9b-0c1d2e3f4a5b/cover"
+        ));
+        // 其余一律不放行：这把钥匙会长期躺在 OBS 的配置里，权限必须小到
+        // 「捡到也只能看到当前歌词与封面图」。
+        for path in [
+            "/v1/state",
+            "/v1/tracks",
+            "/v1/tracks/1",
+            "/v1/settings",
+            "/v1/player/play",
+            "/v1/tracks/1/lyrics",
+            "/v1/tracks/1/cover/extra",
+            "/v1/overlay/lyric/extra",
+            "/v1/auth/ticket",
+        ] {
+            assert!(!overlay_key_allows(path), "{path} 不该被浮层钥匙放行");
+        }
+    }
+
+    #[test]
+    fn query_params_are_read_by_key() {
+        assert_eq!(query_param(Some("token=abc123"), "token"), Some("abc123"));
         assert_eq!(
-            query_token(Some("source=netease&token=abc123&id=9")).as_deref(),
+            query_param(Some("source=netease&token=abc123&id=9"), "token"),
             Some("abc123")
         );
+        // 票与 token 各取各的，一个取不出另一个：这是「票不能被当成长期凭据」
+        // 的最低要求。
+        let both = Some("ticket=t1&token=abc123");
+        assert_eq!(query_param(both, "ticket"), Some("t1"));
+        assert_eq!(query_param(both, "token"), Some("abc123"));
+        assert_eq!(query_param(Some("ticket=t1"), "token"), None);
+        assert_eq!(query_param(Some("token=abc123"), "ticket"), None);
     }
 
     #[test]
     fn absent_or_empty_token_is_none() {
-        assert_eq!(query_token(None), None);
-        assert_eq!(query_token(Some("id=9")).as_deref(), None);
+        assert_eq!(query_param(None, "token"), None);
+        assert_eq!(query_param(Some("id=9"), "token"), None);
         // 空串会被原样取出来，交给上层和真实 token 比对后落到 401 分支。
         // 这里不特殊处理，是为了让"没带 token"和"带了个错的 token"走同一条路径。
-        assert_eq!(query_token(Some("token=")).as_deref(), Some(""));
+        assert_eq!(query_param(Some("token="), "token"), Some(""));
+        // 没有等号的参数（`?token`）不该被当成长度为 0 的值蒙过去。
+        assert_eq!(query_param(Some("token"), "token"), None);
+        assert_eq!(query_param(Some("a=1&token"), "token"), None);
     }
 
     #[test]
