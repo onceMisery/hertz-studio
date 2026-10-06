@@ -2056,7 +2056,7 @@ impl AppState {
                 if let Some(score) =
                     relay_score(t, &meta.title, meta.artist.as_deref(), meta.duration_ms)
                 {
-                    if best.as_ref().map_or(true, |(s, _)| score > *s) {
+                    if best.as_ref().is_none_or(|(s, _)| score > *s) {
                         best = Some((score, t.clone()));
                     }
                 }
@@ -2186,7 +2186,7 @@ impl AppState {
         // trigger 的既有语义跳曲/报错。接力期间 buffering 自理。先做一次
         // 锁外代际复核（attempt_alive 允许的非提交复核）：用户已切走就不
         // 白跑数秒的跨源搜索；try_relay 内部复核与替换仍在提交锁内。
-        if Self::relay_eligible(&e.code)
+        if Self::relay_eligible(e.code)
             && self.attempt_alive(gen, index, &track_id).await
             && Box::pin(self.try_relay(gen, index, track_id.clone(), trigger)).await
         {
@@ -3319,9 +3319,13 @@ pub(crate) mod tests {
     #[test]
     fn bounded_map_caps_the_two_tables_it_guards() {
         // 上限必须远高于正常使用规模（一张几千首的歌单不该被截断）。
-        assert!(ONLINE_META_CAP >= 4096, "在线元数据上限太小，会误伤大歌单");
-        assert!(STAGE_BEATS_CAP >= 1024, "节拍任务表上限太小，会重复分析");
-        assert!(RELAY_TRIED_CAP >= 8, "接力坏流记忆太小，防不住回环");
+        // 这三条是编译期不变量，所以放 const 块里：写成运行时断言时两边都是常量，
+        // clippy::assertions_on_constants 会判它「恒真」（CI 那边是 -D warnings）。
+        const {
+            assert!(ONLINE_META_CAP >= 4096, "在线元数据上限太小，会误伤大歌单");
+            assert!(STAGE_BEATS_CAP >= 1024, "节拍任务表上限太小，会重复分析");
+            assert!(RELAY_TRIED_CAP >= 8, "接力坏流记忆太小，防不住回环");
+        }
     }
 
     #[test]

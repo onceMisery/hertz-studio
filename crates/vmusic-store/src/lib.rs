@@ -562,6 +562,12 @@ pub struct RgTags {
     pub album_peak: Option<f64>,
 }
 
+/// `tracks` 表里那四列 ReplayGain 的行形状。
+///
+/// sqlx 的 `query_as` 只能给元组类型：四个可空 f64 直接摊在签名里既看不出哪一列是
+/// 哪一项，也过不了 `clippy::type_complexity`（CI 那边是 `-D warnings`）。
+type RgColumns = (Option<f64>, Option<f64>, Option<f64>, Option<f64>);
+
 const SET_TRACK_RG_SQL: &str =
     "UPDATE tracks SET rg_gain = ?2, rg_album_gain = ?3, rg_peak = ?4, rg_album_peak = ?5
          WHERE id = ?1";
@@ -600,7 +606,7 @@ pub async fn set_track_rg_batch(
 
 /// 读取 ReplayGain 标签组（播放端响度归一化用）。
 pub async fn get_track_rg(pool: &SqlitePool, id: &TrackId) -> Result<Option<RgTags>, StoreError> {
-    let row: Option<(Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = sqlx::query_as(
+    let row: Option<RgColumns> = sqlx::query_as(
         "SELECT rg_gain, rg_album_gain, rg_peak, rg_album_peak FROM tracks WHERE id = ?1",
     )
     .bind(id)
