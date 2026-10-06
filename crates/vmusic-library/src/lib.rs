@@ -332,6 +332,96 @@ pub fn find_sidecar_lyrics(track_path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// 依赖裁剪的契约（P2-9）：`AUDIO_EXTENSIONS` 里每个 symphonia 支持的扩展名，
+/// 都必须在 workspace `Cargo.toml` 里打开对应的 feature。
+///
+/// 值得一条测试的理由：那行 features 列表是**手写**的裁剪结果，谁删掉一个 feature
+/// （或改回 `all`、或漏掉 `default-features = false`——symphonia 的默认集里带
+/// mkv，漏了就等于没裁）都不会编译失败，症状是「某类文件扫描收得进、播放报
+/// unsupported」，离改动很远才暴露。这里把扩展名表与 feature 列表钉在一起。
+#[cfg(test)]
+mod symphonia_features {
+    use super::AUDIO_EXTENSIONS;
+
+    /// 扩展名 → 需要的 feature。
+    const FEATURE_FOR_EXT: &[(&str, &str)] = &[
+        ("mp3", "mpa"),
+        ("flac", "flac"),
+        ("wav", "wav"),
+        ("aiff", "aiff"),
+        ("aif", "aiff"),
+        ("m4a", "isomp4"),
+        ("aac", "aac"),
+        ("alac", "alac"),
+        ("ogg", "ogg"),
+        ("oga", "ogg"),
+    ];
+
+    /// wav/aiff 里的 PCM 与 ADPCM 载体：没有扩展名单独指向它们，缺了就放不出声。
+    const CODEC_FEATURES: &[&str] = &["pcm", "adpcm"];
+
+    /// symphonia 0.5 没有解码器的扩展名：扫描收得进、播放会报 unsupported，
+    /// 是既有差距，不在本契约内（要支持得先换实现）。
+    const UNSUPPORTED_EXTS: &[&str] = &["opus", "ape", "wma"];
+
+    /// 明确裁掉的容器：扩展名表里没有它们，留着只是白编译。
+    const DROPPED_FORMATS: &[&str] = &["mkv", "caf"];
+
+    /// 取 workspace Cargo.toml 里 symphonia 那条声明中打开的全部 feature。
+    fn symphonia_features() -> Vec<String> {
+        let manifest = include_str!("../../../Cargo.toml");
+        let start = manifest
+            .find("\nsymphonia = ")
+            .expect("Cargo.toml 里应有 symphonia 声明");
+        let rest = &manifest[start..];
+        let end = rest.find(']').expect("symphonia 声明应是 features 数组");
+        let decl = &rest[..end];
+        assert!(
+            decl.contains("default-features = false"),
+            "必须关掉默认特性，否则 symphonia 的默认集会把 mkv 拉回来：{decl}"
+        );
+        decl.split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn symphonia_features_cover_every_decodable_extension() {
+        let features = symphonia_features();
+        assert!(!features.iter().any(|f| f.starts_with("all")), "别再用 all：{features:?}");
+        for (ext, feature) in FEATURE_FOR_EXT {
+            assert!(
+                features.iter().any(|f| f == feature),
+                "扩展名 {ext} 需要 feature {feature}，当前：{features:?}"
+            );
+        }
+        for feature in CODEC_FEATURES {
+            assert!(
+                features.iter().any(|f| f == feature),
+                "wav/aiff 的 PCM/ADPCM 载体重少了 {feature}，当前：{features:?}"
+            );
+        }
+        for dropped in DROPPED_FORMATS {
+            assert!(
+                !features.iter().any(|f| f == dropped),
+                "扩展名表里没有 {dropped} 这种容器，不该再编译它"
+            );
+        }
+    }
+
+    /// 新增扩展名时必须在上面做个决定：要么给它配 feature，要么明确列为不支持。
+    #[test]
+    fn every_extension_is_accounted_for() {
+        for ext in AUDIO_EXTENSIONS {
+            let known = FEATURE_FOR_EXT.iter().any(|(e, _)| e == ext)
+                || UNSUPPORTED_EXTS.contains(ext);
+            assert!(known, "扩展名 {ext} 既没有 feature 映射也没列进不支持名单");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

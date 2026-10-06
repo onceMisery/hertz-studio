@@ -87,7 +87,7 @@
 ## 快速开始
 
 ```bash
-# 构建（需要 Rust 1.85+）
+# 构建（需要 Rust 1.88+；下界由依赖图声明，见 workspace 的 rust-version）
 cargo build --release
 
 # 运行独立形态
@@ -182,9 +182,9 @@ hertz-studio v0.1.0
 | ------ | ------------------------ | ------------------------------------------ |
 | 并发     | 单消费者命令队列 + `arc-swap` 快照 | 播放操作之间有严格的时序约束，用串行化代替加锁；读多写少的状态用无锁快照       |
 | 音频回调   | 独立于 tokio 的 OS 线程        | 回调里 `await`、抢锁或分配内存都会爆音                    |
-| Web 框架 | axum + tower-http        | tower 中间件生态、类型安全 extractor；本服务瓶颈在音频而非路由    |
+| Web 框架 | axum                     | 类型安全 extractor、与 tokio 同源；本服务瓶颈在音频而非路由       |
 | 数据访问   | sqlx 运行时校验（非 `query!` 宏） | 无需 `.sqlx/` 元数据即可离线构建，CI 更简单；所有语句由集成测试覆盖   |
-| 搜索     | SQLite `LIKE`            | 几千首曲库不需要 FTS5，省掉虚表与触发器                     |
+| 搜索     | SQLite FTS5（trigram）+ LIKE 复核 | `%关键词%` 只有 trigram 索引服务得了；索引粗筛后仍由 LIKE 收敛，结果与改造前逐字一致 |
 | 重采样    | 线性插值                     | 依赖轻、代码可审计；`AudioBackend` 是替换成 sinc/FIR 的接缝 |
 | 前端     | 零构建原生 JS                 | `cargo run` 之后就能直接用，不引入 npm 工具链            |
 | 双形态    | 逻辑库 + 两个薄传输壳            | 传输只有三处差异（routes / ws / sidecar），业务只写一份      |
@@ -197,8 +197,7 @@ hertz-studio v0.1.0
 也接受 `x-vmusic-token` 头；GET 另可用 `?token=`（供 `<img src>` 取封面）。
 错误统一返回 `{ "error": { "code", "message", "request_id" } }`。
 
-REST 路由表共 103 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 80 条 `.route()`），
-另有 `main.rs` 挂的 `/ws` 与 60 余条内嵌静态资源路由。常用的一组：
+常用的一组（完整清单见本节末的生成块）：
 
 | 方法                  | 路径                                                 | 说明                                                   |
 | ------------------- | -------------------------------------------------- | ---------------------------------------------------- |
@@ -229,6 +228,132 @@ REST 路由表共 103 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | POST                | `/v1/online/qr/start` · GET `/v1/online/qr/poll`   | 扫码登录                                                 |
 | GET · POST          | `/v1/remote/roots` · `…/browse` · `…/import`       | WebDAV 远程来源                                          |
 | WS                  | `/ws?token=…`                                      | 事件下发，见下                                              |
+
+完整清单由源码生成（`node scripts/api-routes.js` 写回，`--check` 校验）：
+
+<!-- api-routes:begin -->
+<!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
+
+REST 路由表共 112 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 89 条 `.route()`），另有 `main.rs` 挂的 4 条路由与 68 条内嵌静态资源路由。
+
+| 方法 | 路径 |
+| --- | --- |
+| GET | `/v1/auth/overlay-key` |
+| POST | `/v1/auth/ticket` |
+| GET | `/v1/backup` |
+| POST | `/v1/backup/restore` |
+| GET | `/v1/devices` |
+| POST | `/v1/devices/select` |
+| GET | `/v1/diagnostics` |
+| POST | `/v1/diagnostics` |
+| GET | `/v1/diagnostics/log` |
+| DELETE | `/v1/diagnostics/log` |
+| GET | `/v1/favorites` |
+| POST | `/v1/favorites` |
+| POST | `/v1/favorites/membership` |
+| POST | `/v1/favorites/toggle` |
+| DELETE | `/v1/favorites/{id}` |
+| GET | `/v1/health` |
+| GET | `/v1/history` |
+| DELETE | `/v1/history` |
+| DELETE | `/v1/history/{id}` |
+| GET | `/v1/library/roots` |
+| POST | `/v1/library/roots` |
+| PUT | `/v1/library/roots` |
+| DELETE | `/v1/library/roots` |
+| POST | `/v1/library/scan` |
+| POST | `/v1/library/scan/cancel` |
+| GET | `/v1/library/status` |
+| GET | `/v1/online/account` |
+| GET | `/v1/online/cache` |
+| POST | `/v1/online/cache/clear` |
+| POST | `/v1/online/cache/keep` |
+| POST | `/v1/online/cache/limit` |
+| POST | `/v1/online/cookie` |
+| GET | `/v1/online/cover` |
+| GET | `/v1/online/detail` |
+| POST | `/v1/online/like` |
+| GET | `/v1/online/lyric` |
+| POST | `/v1/online/play` |
+| GET | `/v1/online/playlist` |
+| POST | `/v1/online/playlist` |
+| DELETE | `/v1/online/playlist` |
+| POST | `/v1/online/playlist/tracks/add` |
+| POST | `/v1/online/playlist/tracks/remove` |
+| GET | `/v1/online/playlists` |
+| GET | `/v1/online/playlists/search` |
+| POST | `/v1/online/qr/cancel` |
+| GET | `/v1/online/qr/poll` |
+| POST | `/v1/online/qr/start` |
+| GET | `/v1/online/quality` |
+| POST | `/v1/online/quality` |
+| GET | `/v1/online/radio` |
+| POST | `/v1/online/radio` |
+| GET | `/v1/online/recommend/playlists` |
+| GET | `/v1/online/recommend/songs` |
+| GET | `/v1/online/search` |
+| GET | `/v1/online/search/all` |
+| GET | `/v1/online/sources` |
+| GET | `/v1/online/stream` |
+| GET | `/v1/overlay/lyric` |
+| GET | `/v1/player/dsp` |
+| POST | `/v1/player/dsp` |
+| POST | `/v1/player/load` |
+| POST | `/v1/player/mode` |
+| POST | `/v1/player/next` |
+| POST | `/v1/player/pause` |
+| POST | `/v1/player/play` |
+| POST | `/v1/player/previous` |
+| GET | `/v1/player/queue` |
+| PUT | `/v1/player/queue` |
+| POST | `/v1/player/replay` |
+| POST | `/v1/player/seek` |
+| POST | `/v1/player/stop` |
+| POST | `/v1/player/volume` |
+| GET | `/v1/playlists` |
+| POST | `/v1/playlists` |
+| POST | `/v1/playlists/import-m3u` |
+| GET | `/v1/playlists/{id}` |
+| PUT | `/v1/playlists/{id}` |
+| DELETE | `/v1/playlists/{id}` |
+| GET | `/v1/playlists/{id}/m3u` |
+| GET | `/v1/playlists/{id}/tracks` |
+| POST | `/v1/playlists/{id}/tracks` |
+| PUT | `/v1/playlists/{id}/tracks/order` |
+| DELETE | `/v1/playlists/{id}/tracks/{track_id}` |
+| GET | `/v1/recommend/daily` |
+| GET | `/v1/recommend/daily/online` |
+| GET | `/v1/remote/roots` |
+| POST | `/v1/remote/roots` |
+| DELETE | `/v1/remote/roots/{id}` |
+| GET | `/v1/remote/roots/{id}/browse` |
+| POST | `/v1/remote/roots/{id}/import` |
+| GET | `/v1/settings` |
+| PUT | `/v1/settings` |
+| GET | `/v1/stage/beatmap` |
+| GET | `/v1/state` |
+| GET | `/v1/tracks` |
+| POST | `/v1/tracks/batch-delete` |
+| POST | `/v1/tracks/batch-edit` |
+| POST | `/v1/tracks/complete/apply` |
+| POST | `/v1/tracks/complete/suggest` |
+| GET | `/v1/tracks/facets` |
+| GET | `/v1/tracks/ids` |
+| GET | `/v1/tracks/missing` |
+| GET | `/v1/tracks/{id}` |
+| GET | `/v1/tracks/{id}/cover` |
+| POST | `/v1/tracks/{id}/cover` |
+| GET | `/v1/tracks/{id}/edit` |
+| DELETE | `/v1/tracks/{id}/edit` |
+| GET | `/v1/tracks/{id}/lyrics` |
+| PUT | `/v1/tracks/{id}/lyrics` |
+| DELETE | `/v1/tracks/{id}/lyrics` |
+| PUT | `/v1/tracks/{id}/lyrics/offset` |
+| POST | `/v1/ui/notice` |
+
+`main.rs` 上另有：GET `/ws`，GET `/wallpapers/{name}`，GET `/platform-icons/{name}`，GET `/`。
+
+<!-- api-routes:end -->
 
 WebSocket 事件共 8 种（`state` / `spectrum` / `ended` / `error` / `scan` /
 `buffering` / `beatmap_ready` / `library_changed`）；连接建立时先补一帧完整 `state`，
@@ -354,7 +479,7 @@ cargo fmt --all
 
 | 档位 | 脚本 | 说明 |
 | --- | --- | --- |
-| 零依赖静态 | `check-assets.js` `check-css-tokens.js` `check-skins.js` `check-appearance-restore.js` `check-theme-studio.js` `check-creative.js` `check-creative-prompt.js` `check-favorites.js` `check-playlist-views.js` `check-daily-view.js` `check-stanza*.js` `check-stage-backgrounds.js` `check-stage-cinema.js` `check-stage-control.js` `check-stage-idle.js` `check-stage-theme.js` `check-3d-interactions.js` `check-lib-empty.js` `check-library.js` `check-online*.js` `check-player-races.js` `check-scan-ui.js` 等 | 只用 Node 标准库：`include_str!` ↔ 路由 ↔ index.html 的接线、CSS 令牌契约、换肤刷新恢复、主题 WCAG 对比度、逐帧参数解析链 |
+| 零依赖静态 | `check-assets.js` `check-css-tokens.js` `check-skins.js` `api-routes.js --check`（API 清单，见「API」一节）`check-appearance-restore.js` `check-theme-studio.js` `check-creative.js` `check-creative-prompt.js` `check-favorites.js` `check-playlist-views.js` `check-daily-view.js` `check-stanza*.js` `check-stage-backgrounds.js` `check-stage-cinema.js` `check-stage-control.js` `check-stage-idle.js` `check-stage-theme.js` `check-3d-interactions.js` `check-lib-empty.js` `check-library.js` `check-online*.js` `check-player-races.js` `check-scan-ui.js` 等 | 只用 Node 标准库：`include_str!` ↔ 路由 ↔ index.html 的接线、CSS 令牌契约、换肤刷新恢复、主题 WCAG 对比度、逐帧参数解析链、REST 路由清单与源码一致 |
 | 混合 | `check-cover-sphere.js` `check-sonnet-palette.js` | 纯函数断言 + 可选的 WebGL2 / Pixi 实渲段 |
 | 浏览器 + 已运行的服务 | `check-3d-browser.js` `check-player-browser.js` `check-stage-visual-browser.js` `check-search-browser.js` `check-radio-browser.js` | 需 `PLAYWRIGHT_MODULE` 与 `STAGE3D_UI_URL` 等环境变量指向已起的服务；真实鼠标事件与真实渲染帧 |
 | 需要二进制 | `check-plugin-sidecar.js`（stdio JSON-RPC 协议冒烟）、`check-library-api.py`（python 标准库，自起隔离实例） | 前者找 `target/debug/dbx-plugin-hertz`，可用 `HERTZ_PLUGIN_BIN` 覆盖 |

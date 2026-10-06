@@ -47,6 +47,7 @@ __pycache__/
 output/
 # 隔离构建目录（不与运行中的实例抢 target/debug 锁）
 target-verify*/
+target-p2/
 # 本地编译的 dbx-plugin CLI（源码在 dbx 仓库，产物不入库）
 target-plugin-cli/
 # dbx-plugin package 的输出与暂存目录

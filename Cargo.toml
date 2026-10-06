@@ -8,6 +8,11 @@ members = ["crates/*", "plugin/backend", "plugin/vendor/dbx-plugin-sdk"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# 工具链下界。取值来自锁定依赖图里各 crate 自己声明的 rust-version 上界：
+# cookie_store / encoding_rs / home / icu_* 等声明的都是 1.88，所以 README 原先
+# 写的「1.85+」低了一档。改动依赖后请重新核对（把 rust-version 从锁里的每个包
+# 抓出来取最大即可），写低了会让用户拿到一堆看不懂的下游编译错误。
+rust-version = "1.88"
 license = "MIT"
 authors = ["hertz-studio contributors"]
 description = "A local-first, self-hosted music service and player"
@@ -26,7 +31,6 @@ vmusic-beats = { path = "crates/vmusic-beats", version = "0.1.0" }
 # --- async / web ---
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs", "net"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
-tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 futures = "0.3"
 # 在线曲库代理：第三方音乐接口不带 CORS 头，必须由服务端代发请求。
 # 用 rustls 而不是 native-tls，免得在 Windows 上引入 OpenSSL 构建依赖。
@@ -54,7 +58,26 @@ notify = "8"
 dirs = "5"
 
 # --- audio ---
-symphonia = { version = "0.5", features = ["all"] }
+# 按 vmusic-library 的 AUDIO_EXTENSIONS 逐个裁：只留扩展名真的用得到的格式与
+# 解码器，丢掉 mkv / caf（我们的扩展名表里没有这两种容器，扫描都不会收进来）。
+#   mp3 → mpa（含 mp1/mp2）· flac → flac · wav/aiff → wav + aiff + pcm + adpcm
+#   m4a/aac/alac → isomp4 + aac + alac · ogg/oga → ogg + vorbis
+# 扩展名表里的 opus / ape / wma 本来就没有对应解码器（symphonia 0.5 不支持），
+# 属于「扫描收得进、播放会报 unsupported」的既有差距，不在这里假装支持。
+# 改了这行请跑 `cargo test -p vmusic-library --lib symphonia_features`。
+symphonia = { version = "0.5", default-features = false, features = [
+    "aac",
+    "adpcm",
+    "aiff",
+    "alac",
+    "flac",
+    "isomp4",
+    "mpa",
+    "ogg",
+    "pcm",
+    "vorbis",
+    "wav",
+] }
 cpal = "0.15"
 rustfft = "6.2"
 num-complex = "0.4"

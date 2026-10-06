@@ -46,6 +46,10 @@ jobs:
       - name: Frontend contract checks
         run: |
           node scripts/check-assets.js
+          # README 的 REST 清单是生成物（源码里数出来 110 个「方法+路径」）。放开手写
+          # 必然漂移——上一版就写着「共 103 个（routes.rs 的 80 条 .route()）」，
+          # 而源码早就是 87 条了。改了 routes.rs / main.rs 的路由就重跑生成器。
+          node scripts/api-routes.js --check
           node scripts/check-css-tokens.js
           node scripts/check-creative.js
           node scripts/check-favorites.js
