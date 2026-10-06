@@ -947,6 +947,7 @@ fn map_diss(item: &Value, kind: &str) -> OnlinePlaylist {
         play_count,
         creator,
         kind: kind.into(),
+        description: None,
     }
 }
 
@@ -1564,6 +1565,7 @@ pub async fn recommend_playlists(
             play_count,
             creator: String::new(),
             kind: "collected".into(),
+            description: None,
         });
     }
     Ok(out)

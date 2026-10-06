@@ -473,6 +473,17 @@ pub async fn playlists(state: &Arc<AppState>, query: &Value) -> RpcResult {
     )?)
 }
 
+/// 在线歌单搜索（按关键词检索平台侧公开歌单）。取参与 HTTP 版逐字一致：
+/// 复用 `online::SearchQuery`，能力闸门在 dispatch 内。
+pub async fn playlist_search(state: &Arc<AppState>, query: &Value) -> RpcResult {
+    let q: online::SearchQuery = query_as(query)?;
+    let source = q.source.clone();
+    Reply::json(&tagged(
+        &source,
+        online::search_playlists(&online_ctx(state), &source, &q).await,
+    )?)
+}
+
 pub async fn playlist(state: &Arc<AppState>, query: &Value) -> RpcResult {
     let q: PlaylistQuery = query_as(query)?;
     let limit = q.limit.clamp(1, 50);

@@ -39,6 +39,7 @@ const SKINS_CSS = read(path.join(SKINS, 'skins.css'));
 const HTML = read(path.join(WEB, 'index.html'));
 const APP = read(path.join(WEB, 'app.js'));
 const STAGE3D_JS = read(path.join(WEB, 'stage3d.js'));
+const STAGE_CSS = read(path.join(WEB, 'stage.css'));
 const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs'));
 
 let failures = 0;
@@ -670,7 +671,13 @@ function checkCoverage() {
   //     中段给导航胶囊，改用「按 / 或 Ctrl+K 唤起一条覆盖式搜索条」。
   //     别的皮肤没有这个交互、也不该有 —— 要求它们各写一条只等于制造死代码。
   //     它是**皮肤间的真实差异**，不是漏覆盖，所以归这里而不是 must 名单。
-  const GEOMETRY_OPTIONAL = /^\.(dv-name|dv-sub|dv-num|dv-src|topsearch)$/;
+  //  c) 舞台面板内部的余量分配（.stage-lyrics / .disc-wrap）：浮光的舞台是
+  //     fixed 悬浮面板，宽度由 min(420px,32vw) 定，面板有 min-height；
+  //     于是「余量给谁」是它独有的问题 —— 实测没歌词时 .disc-wrap（flex:none、
+  //     宽高比 1）会吃满余量，把歌词区压到 26px、面板底部空 119px。
+  //     别的皮肤舞台是**栅格里的右栏**（高度由栅格给满）或 fixed 抽屉，
+  //     本来就不存在这个余量问题，让它们各写一条等于制造死代码。
+  const GEOMETRY_OPTIONAL = /^\.(dv-name|dv-sub|dv-num|dv-src|topsearch|stage-lyrics|disc-wrap)$/;
   const isGeometry = (s) => !GEOMETRY_OPTIONAL.test(s) && !/^[^\s]*\s/.test(s);
 
   const geometryGap = (from, to, fromName, toName) => {
@@ -1467,11 +1474,30 @@ function checkQingfengWall() {
 
   // 8) 播放路径只有一条：皮肤发意图，app.js 落 play。
   //    这里刻意**不钉 play-index / play-step**：墙上的序号是**本视图**的下标，
-  //    而 play-index 按的是播放队列下标 —— 混用会播错歌。所以墙上走
+  //    而 play-index 按的是播放队列下标 —— 混用会播错歌。所以墙上点歌走
   //    activate（带整项），由 app.js 按 id 的种类分派。
   ok(/emit\('activate'/.test(QINGFENG_JS), '点播放发 activate 意图（带整项，不靠下标猜）');
-  ok(/function step\(delta, tile\)[\s\S]{0,200}?emit\('activate', \{ item: tile, delta: delta \}\)/.test(qfCodeWall),
-    '上一首/下一首也走 activate + delta（同样不碰播放队列下标）');
+  // 「上一首/下一首」必须发 step-track（= 播放队列里前后各一首），
+  // **不能**再走 activate+delta。
+  //
+  // 旧实现发的是 activate + delta，由 app.js 拿**墙上那一项**去
+  // queueSnapshot 里 findIndex —— 而展开卡是 focusPoster 聚焦的那张，
+  // 用户很可能停在第 3 张（还没点播）就按了下一首，曲库/歌单/收藏这些
+  // tab 的墙上序号与队列下标毫无关系，findIndex 必返 -1，落到
+  // 「从头开始」的兜底，于是**永远停在队列第一首**。
+  // 用户实测：歌点得开、进度在走、唯独上/下一曲不动。
+  ok(/function step\(delta\)\s*\{\s*emit\('step-track', \{ delta: delta \}\)/.test(qfCodeWall),
+    '上一首/下一首发 step-track（按播放队列前后走，不按墙上那一列）');
+  ok(!/emit\('activate', \{ item: tile, delta/.test(qfCodeWall),
+    '上一首/下一首不再走 activate+delta（那是「永远停在第一首」的写法）');
+  ok(/d\.action === 'step-track'/.test(APP) && /playQueueStep\(d\.delta\)/.test(APP),
+    'app.js 侧 step-track 落到 playQueueStep（按正在放的那首算邻居）');
+  // 左下角浮条的播放/暂停：走 toggle-play，复用业务既有的 togglePlay。
+  ok(/qf-queue-peek-play/.test(QINGFENG) && /qf-queue-peek-play/.test(qfCodeWall),
+    '左下角浮条有播放/暂停按钮（CSS 与 JS 两侧都在）');
+  ok(/emit\('toggle-play'\)/.test(qfCodeWall) && /d\.action === 'toggle-play'/.test(APP)
+    && /togglePlay\(\)/.test(APP),
+    '浮条播/停走 toggle-play（复用业务路径，不自己拼 post）');
   ok(/!transport\.post|transport\.post\(/.test(QINGFENG_JS) === false
     || !/transport\.post\('\/v1\/player/.test(QINGFENG_JS),
     '皮肤不自己发 /v1/player 请求（播放路径只有 app.js 一条）');
@@ -1792,6 +1818,172 @@ function checkQingfengWiring() {
 
 // ---------------------------------------------------------------------------
 
+/// 换肤后中栏必须有可见视图 + 播放条显隐不许卡死。
+///
+/// 两条都是「不报错、不崩、不少元素，只是界面不对」的类型，
+/// 契约脚本钉得住的是**因果链上的关键环节**，真实几何仍靠浏览器实测。
+///
+/// 1) 换肤时 state.view 停在 'settings'：用户最常见的路径就是「在设置页里
+///    点皮肤」（皮肤列表就在设置页里）。各皮肤对设置视图的处理完全不同 ——
+///    经典系把它当中栏普通视图，流年/清风把它**搬进自己的浮层**并置
+///    hidden。于是换过去之后中栏一个可见视图都没有（首页空白），
+///    或者干脆停在设置页。修法是 app.js 订阅 Skins.onChange 统一回首页。
+///
+/// 2) **启动期那次广播必须挡住**（2026-10-06 踩到，钉在这里防复发）。
+///    `Skins.init()` 自己也会广播 skin:changed，而订阅排在它之前 ——
+///    那次广播必然先到，此时 `Daily.bind()` 还没跑。`setView('library')`
+///    → `Daily.load()` → `render()` 读 `H.ui` 抛错，异常正好打断在
+///    `load()` 发请求那两行**之前**：busy 置上了、请求一个没发。
+///    之后每次 load 都撞 `if (loading && !force) return`，首页永远空白，
+///    而独立页 DailyView 是另一套状态、照常有歌 —— 「独立页有、首页没有」
+///    正是这个 bug 的指纹。所以判据要从「函数体里有 setView」升级为
+///    「有启动期闸门 + 有补跑入口」。
+function checkSkinSwitchViewHandoff() {
+  section('换肤：设置页切皮肤后落到首页，不留空白中栏');
+
+  ok(/Skins\.onChange\(onSkinChangedForViews\)/.test(APP)
+    && /function onSkinChangedForViews\(\)\s*\{[\s\S]{0,400}?setView\('library'\);/.test(APP),
+    'app.js 订阅换肤并统一回首页（收尾动作只有一处，不靠各条调用路径记得调）');
+  // 启动期闸门 + 补跑：两处都要有，缺一个就退回「首页永久空白」。
+  ok(/if \(!dailyStripBound\)\s*\{[\s\S]{0,120}?pendingSkinViewHandoff = true;[\s\S]{0,80}?return;/.test(APP),
+    '启动期的那次换肤广播被闸门挡住（不早于 Daily.bind()）');
+  ok(/function bindDailyStrip\(\)\s*\{[\s\S]{0,200}?dailyStripBound = true;[\s\S]{0,200}?setView\('library'\);/.test(APP),
+    'bind 之后有补跑入口 bindDailyStrip()');
+  ok(/Daily\.bind\(favHost\);[\s\S]{0,200}?bindDailyStrip\(\);/.test(APP),
+    'bindDailyStrip() 排在 Daily.bind() 之后（闸门由 bind 打开）');
+  // 变量声明必须早于函数体执行：函数声明会提升，但 var 赋值不会。
+  // 声明写在 onSkinChangedForViews 之后的话，启动期读它会撞 TDZ。
+  ok(APP.indexOf('var dailyStripBound') < APP.indexOf('function onSkinChangedForViews()')
+    && APP.indexOf('var pendingSkinViewHandoff') < APP.indexOf('function onSkinChangedForViews()'),
+    '两个闸门变量声明在 onSkinChangedForViews 之前（启动期不撞 TDZ）');
+  // 订阅仍要排在 init 之前（init() 会 apply 已存的选择并广播），但**这次
+  // 收到之后不能直接 setView** —— 那正是本条 bug 的成因。两条合起来读：
+  // 「排在前面」+「有闸门」= 启动那次广播被记账，bind 后补跑。
+  //
+  // 定位要用 `window.Skins.` 前缀：函数名 `Skins.init()` 在别处的**注释**里
+  // 也出现过（讲为什么要有启动闸门的那段），裸 indexOf 会撞上注释，
+  // 判出「订阅在 init 之后」的假象。
+  const onChangeAt = APP.indexOf('window.Skins.onChange(onSkinChangedForViews)');
+  const initAt = APP.indexOf('window.Skins.init()');
+  ok(onChangeAt > 0 && initAt > 0 && onChangeAt < initAt,
+    '订阅排在 Skins.init() 之前（启动那一次广播会到，但只记账不 setView）',
+    `onChange@${onChangeAt} init@${initAt}`);
+  // 症状侧的反向断言：流年/清风确实会把设置视图搬走并隐藏 ——
+  // 这正是空白中栏的成因，钉住它才不会有人「顺手改成不搬」，
+  // 那样 setView 里的 hidden 语义会与实际可见性脱节。
+  // 只钉「搬进浮层」这个语义，不钉局部变量名（流年叫 pane、清风叫
+  // sheet.pane，钉死名字就成了改名即失败的死断言）。
+  ok(/relocate\(view,\s*(sheet\.)?pane\)/.test(LIUNIAN_JS)
+    && /relocate\(view,\s*(sheet\.)?pane\)/.test(QINGFENG_JS),
+    '流年/清风都把设置视图搬进浮层（空白中栏的成因，钉住别改回中栏）');
+  ok(/if \(!sheet\.viewEl\.hidden\) sheet\.viewEl\.hidden = true;/.test(LIUNIAN_JS)
+    && /sheet\.viewEl\.hidden = true;/.test(QINGFENG_JS),
+    '浮层关着时设置视图确实被隐藏（换肤对账的就是这个 hidden）');
+}
+
+/// 播放条自动隐藏：显隐的**唯一权威是 wantVisible**，不许再拿「正在滑动」
+/// 当拒绝新请求的理由。
+///
+/// 旧写法 hideBar 开头 `|| sliding` 早退、showBar 开头
+/// `!classList.contains('is-hidden')` 早退，于是动画途中改变主意的那次
+/// 请求被静默丢弃，而兜底 finishHide 照样把 is-hidden 补上：
+/// 用户要「显示」拿到的是「永久消失」。浏览器实测稳定复现 ——
+/// bar 有 is-hidden 而 body.bar-hidden 不存在，两边永久对不上。
+///
+/// 钉「有 wantVisible 变量」不够（可能只是声明了没人用），要钉
+/// finishSlide 按它落定 + 动画有世代号（否则旧定时器会踩新状态）。
+function checkBarAutohideRace() {
+  section('播放条：显隐竞态不会把播放条永久藏掉');
+
+  const init = (() => {
+    const i = APP.indexOf('function initBarAutohide()');
+    if (i < 0) return '';
+    let depth = 0;
+    for (let j = APP.indexOf('{', i); j < APP.length; j += 1) {
+      if (APP[j] === '{') depth += 1;
+      else if (APP[j] === '}') { depth -= 1; if (!depth) return APP.slice(i, j + 1); }
+    }
+    return '';
+  })();
+  ok(!!init, '定位到 initBarAutohide 函数体');
+  if (!init) return;
+
+  ok(/let wantVisible = true;/.test(init), '有 wantVisible 作为显隐的唯一权威');
+  ok(/bar\.classList\.toggle\('is-hidden', !wantVisible\)/.test(init),
+    '落定时按 wantVisible 决定 is-hidden（不是无条件加上）');
+  ok(/let slideGen = 0;/.test(init) && /if \(gen !== slideGen\) return;/.test(init),
+    '动画有世代号守卫（旧 transitionend / 兜底定时器不踩新状态）');
+  ok(!/function hideBar\(\)\s*\{\s*if \(/.test(init)
+    && !/function showBar\(\)\s*\{\s*if \(!bar\.classList\.contains/.test(init),
+    'hideBar/showBar 不再用「正在滑动 / 已经隐藏」早退（那正是竞态来源）');
+}
+
+/// 舞台面板不该长出横向滚动条。
+///
+/// `.stage::before` 是 inset:-30% 的取色光晕（绝对定位），面板一旦
+/// `overflow:auto`，它就把面板撑宽：实测 sheen 420px 面板被撑宽 125px、
+/// workbench 104px 右栏被撑宽 31px，底部那条横滚动条就是它。
+/// 基础样式 style.css 的 .stage 本来就是 overflow:hidden，
+/// sheen/workbench 覆盖成 auto 属于覆盖过头。
+///
+/// 同时钉住 #stage-modes 的 min-width:0 —— 窄栏（workbench 右栏 104px，
+/// 扣 padding 只剩 78px）里两颗按钮至少要 111px，不给 min-width:0
+/// 整颗胶囊会顶出面板边界，是横向溢出的第二个来源。
+function checkStageNoHorizontalScroll() {
+  section('舞台面板：没有多余的横向滚动条');
+
+  // **断言必须跑在剥掉注释的源码上。** 我给这两条 overflow 写的说明注释里
+  // 恰好出现了「基础样式 style.css 的 .stage 本来就是 overflow:hidden」这句话
+  // —— 不剥注释的话 `/overflow:\s*hidden/` 会匹配到**注释自己**，无论实际
+  // 写的是什么值都绿。变异测试（把 overflow 改回 auto）当时就是不红的，
+  // 靠这条才发现。
+  const sheenClean = stripCssComments(SHEEN);
+  const wbClean = stripCssComments(WORKBENCH);
+  const stageClean = stripCssComments(STAGE_CSS);
+
+  // 取一条规则**整块**（含声明体），花括号配平 ——
+  // 只 match 到 `{` 的话拿到的是选择器本身，声明全在匹配之外。
+  //
+  // 必须要求「选择器前面是行首/换行」：stage.css 里 `.stage-lyrics` 有两处，
+  // 前一处是 `.stage[data-mode="cover"] .stage-lyrics { display: none }` ——
+  // indexOf 会先撞上它，于是「歌词区有 overflow:hidden」永远不成立。
+  // sel 传**正则元字符已转义**的选择器字面量（下面两处含 [ ] . 需要手写）。
+  const rule = (src, selRe) => {
+    const re = new RegExp('(?:^|\\n)\\s*' + selRe + '\\s*\\{');
+    const m = re.exec(src);
+    if (!m) return '';
+    const open = src.indexOf('{', m.index);
+    let depth = 0;
+    for (let j = open; j < src.length; j += 1) {
+      if (src[j] === '{') depth += 1;
+      else if (src[j] === '}') { depth -= 1; if (!depth) return src.slice(m.index, j + 1); }
+    }
+    return '';
+  };
+
+  ok(/overflow:\s*hidden/.test(rule(sheenClean, '\\[data-skin="sheen"\\] \\.stage')),
+    '浮光的 .stage 面板不滚（歌词区自己滚）');
+  ok(/overflow:\s*hidden/.test(rule(wbClean, '\\[data-skin="workbench"\\] \\.stage')),
+    '工作台的 .stage 面板不滚（歌词区自己滚）');
+  // 歌词区必须自己有滚动/裁剪能力，否则面板改成 hidden 之后歌词就够不着了。
+  // 注意它不是 overflow-y:auto —— 歌词滚动是 JS 用 translate3d 推
+  // .lyric-track 实现的（用 scrollTop + CSS smooth 会与 transform 打架，
+  // 出现「抖一下又回弹」），所以这里只要求「裁剪 + min-height:0 + flex:1」。
+  const lyricsRule = rule(stageClean, '.stage-lyrics');
+  ok(/overflow:\s*hidden/.test(lyricsRule)
+    && /min-height:\s*0/.test(lyricsRule)
+    && /flex:\s*1/.test(lyricsRule),
+    '歌词区自带裁剪与 flex 占位（面板不滚的前提）');
+  const modes = rule(stageClean, '.stage-modes');
+  ok(!!modes && /min-width:\s*0/.test(modes),
+    '#stage-modes 有 min-width:0（窄栏里能被压缩，不顶破面板）');
+  const mode = rule(stageClean, '.stage-mode');
+  ok(/min-width:\s*0/.test(mode) && /text-overflow:\s*ellipsis/.test(mode),
+    '.stage-mode 可收窄并省略（配合胶囊压缩）');
+}
+
+// ---------------------------------------------------------------------------
+
 (function main() {
   checkCatalog();
   checkExtensibility();
@@ -1809,6 +2001,9 @@ function checkQingfengWiring() {
   checkQingfengWall();
   checkQingfengSettings();
   checkQingfengWiring();
+  checkSkinSwitchViewHandoff();
+  checkBarAutohideRace();
+  checkStageNoHorizontalScroll();
   checkWiring();
 
   console.log('\n' + '─'.repeat(60));

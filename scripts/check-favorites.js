@@ -152,6 +152,15 @@ function attachButtons(host, attr, values) {
     return b;
   });
   host.querySelectorAll = (sel) => (sel.indexOf('button[' + attr + ']') >= 0 ? btns.slice() : []);
+  // 补一个按 class 找的入口：来源切换的「选中态高亮」正是通过
+  // classList.toggle('active') 落的，只按 attr 查的桩看不见它。
+  // makeEl 的通用 querySelector 只会返回 memo 假元素（它只认 #id），
+  // 拿它判高亮会得到「恒为 null」这种假象。
+  host.querySelector = (sel) => {
+    const wantActive = sel.indexOf('.active') >= 0;
+    return btns.find((b) => b.classList.contains('active') === wantActive && wantActive)
+      || (wantActive ? null : btns[0]);
+  };
   host._buttons = btns;
   return btns;
 }
@@ -171,6 +180,7 @@ function makeClock() {
 
 function makeTransport(routes) {
   const calls = [];
+  const held = [];
   let playbackIntent = 0;
   return {
     calls,
@@ -187,12 +197,37 @@ function makeTransport(routes) {
       for (const r of routes) {
         if (r.match(path)) {
           if (r.throw) throw Object.assign(new Error(r.throw), { message: r.throw });
+          // hold：这一路先**不返回**，等测试显式 release(path) 才放行。
+          //
+          // 为什么不用 delay 毫秒数：这份沙箱的 setTimeout 是**同步立即执行**的
+          // 桩（makeClock 里 setTimeout(fn){ fn(); }），没有任何真实延时，
+          // `await sleep(40)` 拿不到时间差；而用 Date.now() 轮询又要求沙箱
+          // 注入 Date（它没有，注入就不是同一个沙箱了）。
+          //
+          // 闸门反过来更贴近要验的东西：「慢的那路还没回」是一个**状态**，
+          // 由测试自己控制何时结束，比掐表准也不脆弱。
+          if (r.hold) {
+            await new Promise((res) => { held.push({ path, res }); });
+          }
           // reply 允许是函数，好按请求路径编排不同响应。
           return typeof r.reply === 'function' ? r.reply(path) : r.reply;
         }
       }
       throw new Error('unexpected GET ' + path);
     },
+    /// 放行所有被 hold 住的请求。返回放行条数。
+    release(part) {
+      let n = 0;
+      for (let i = held.length - 1; i >= 0; i -= 1) {
+        if (!part || held[i].path.indexOf(part) >= 0) {
+          held[i].res();
+          held.splice(i, 1);
+          n += 1;
+        }
+      }
+      return n;
+    },
+    heldCount() { return held.length; },
     async post(path, body) {
       calls.push({ method: 'POST', path, body });
       for (const r of routes) {
@@ -844,6 +879,205 @@ async function checkDailyOnlineDegraded() {
     '上次选了本地，即使这次有已登录平台也保持本地');
 }
 
+/// 起始态用 'auto'：哪一路先到就按哪一路渲染。
+///
+/// 实测两端差两个数量级 —— 本地规则引擎 20ms、在线汇总要顶满服务端 2s 的
+/// 等待预算（网易云 + QQ 并发抓）。曾经**起始 mode 直接写死 'online'**，于是
+/// 本地那份到手后因 mode 不匹配而被无视：`visible()` 走在线分支、本地数据
+/// 根本没人读，用户盯着「正在汇总…」「正在挑歌…」两行整整 2 秒 —— 推荐早就在
+/// 内存里了，只是没画出来。
+///
+/// 这组断言钉的是**因果链上的环节**（起始值 / 生效来源判定 / 各消费点是否用
+/// 生效来源），首屏时间线由 scripts/check-daily-firstpaint.js 在浏览器里量。
+async function checkDailyAutoSettle() {
+  section('每日推荐 · 起始态：先到的那路先渲染（不等在线）');
+
+  // 在线那一路用 hold 闸门扣住不放，本地立刻回。判据是**在线被扣住的那段时间里**
+  // 屏幕上有没有画出本地那批卡 —— 那段时间正是用户白等的那 2 秒。
+  const t = makeTransport([
+    { match: isOnlineDaily, reply: ONLINE_PAGE, hold: true },
+    { match: isLocalDaily, reply: LOCAL_PAGE },
+  ]);
+  const { sandbox, ui } = makeSandbox(t);
+  sandbox.localStorage.removeItem('vmusic.daily.mode');
+  const D = sandbox.window.Daily;
+  D.init();
+
+  eq(D.state.mode, 'auto', '没选过来源时起始是 auto（不是先假定在线）');
+  eq(D.state.modePinned, false, 'auto 不是「用户选过」，仍允许自动落位');
+
+  D.load();
+  await ticks();
+
+  eq(D.state.localBusy, false, '本地那一路已收工');
+  eq(D.state.onlineBusy, true, '在线那一路仍被扣住');
+  eq(t.heldCount(), 1, '确实扣住了在线那一次请求');
+  ok(ui.dailyList.children.length === 2,
+    '在线还没回来时，本地那批已经画出来了（首屏不等在线）',
+    `children=${ui.dailyList.children.length}`);
+  eq(ui.dailyList.children[0].querySelector('.daily-name').textContent, '本地一',
+    '画的是本地曲库那批');
+  eq(D.state.mode, 'auto', '此刻还没落位（要等两路都收工）');
+  eq(ui.dailyDate.textContent, LOCAL_PAGE.date, '日期取的是本地那一份');
+  ok(ui.dailySub.textContent.indexOf('本地规则') >= 0,
+    '副标题说的是本地那份的来历', ui.dailySub.textContent);
+
+  // 高亮必须跟着**生效**来源走。落位之前 mode 是 'auto'，若 renderModes
+  // 拿 dailyState.mode 去比，两个按钮都不亮 —— 用户看着一屏本地推荐，
+  // 却不知道自己在「本地」这个来源下。
+  const chipNow = ui.dailyModes.querySelector('button.active');
+  ok(!!chipNow && chipNow.getAttribute('data-daily-mode') === 'local',
+    '落位前高亮跟着生效来源（不是两个都不亮）',
+    chipNow ? chipNow.getAttribute('data-daily-mode') : 'null');
+
+  // 放行在线 → 两路都收工 → 落位
+  t.release('online');
+  await ticks(14);
+
+  eq(D.state.mode, 'online', '两路都收工后落位到 online（有已登录平台）');
+  eq(D.state.modePinned, false, '自动落位不算「用户选过」');
+  eq(ui.dailyList.children.length, 3, '落位后换成在线那三首',
+    `children=${ui.dailyList.children.length}`);
+  eq(ui.dailyList.children[0].querySelector('.daily-name').textContent, '云一',
+    '落位后卡片内容换成在线曲目');
+  ok(ui.dailySub.textContent.indexOf('已合并') >= 0,
+    '副标题跟着换成在线的合并说明', ui.dailySub.textContent);
+  const chipAfter = ui.dailyModes.querySelector('button.active');
+  ok(!!chipAfter && chipAfter.getAttribute('data-daily-mode') === 'online',
+    '落位后高亮切到在线', chipAfter ? chipAfter.getAttribute('data-daily-mode') : 'null');
+
+  section('每日推荐 · 起始态：两路都扣住时不谎报「本地也没有」');
+
+  const t2 = makeTransport([
+    { match: isOnlineDaily, reply: ONLINE_PAGE, hold: true },
+    { match: isLocalDaily, reply: LOCAL_PAGE, hold: true },
+  ]);
+  const s2 = makeSandbox(t2);
+  s2.sandbox.localStorage.removeItem('vmusic.daily.mode');
+  s2.sandbox.window.Daily.init();
+  s2.sandbox.window.Daily.load();
+  await ticks();
+  // 都还没回：占位该说「在汇总/挑歌」，不该说「曲库是空的」——
+  // 后者会让用户以为自己没扫库，白跑去设置里加目录。
+  const sub2 = s2.ui.dailySub.textContent;
+  ok(sub2.indexOf('汇总') >= 0 || sub2.indexOf('挑歌') >= 0,
+    '两路都在飞时副标题是「正在…」，不是空态断言', sub2);
+  ok(sub2.indexOf('曲库里还没有') < 0, '没有误报「曲库是空的」', sub2);
+  t2.release();
+  await ticks(14);
+
+  section('每日推荐 · 起始态：点卡片按生效来源分派，不按 mode');
+  // 'auto' 期间画的是**在线**那批（在线先到、本地还扣着）。若 playAll 按
+  // dailyState.mode 判（'auto' !== 'online'）就会走本地路径，把 online: 虚拟 id
+  // 喂给 playLocal —— 那是必然 404 的一路。
+  const t3 = makeTransport([
+    { match: isOnlineDaily, reply: ONLINE_PAGE },
+    { match: isLocalDaily, reply: LOCAL_PAGE, hold: true },
+  ]);
+  const s3 = makeSandbox(t3);
+  s3.sandbox.localStorage.removeItem('vmusic.daily.mode');
+  s3.sandbox.window.Daily.init();
+  s3.sandbox.window.Daily.load();
+  await ticks();
+
+  eq(s3.sandbox.window.Daily.state.mode, 'auto', '此刻仍未落位');
+  eq(s3.ui.dailyList.children.length, 3, '画的是在线那三首',
+    `children=${s3.ui.dailyList.children.length}`);
+  const onlineCard = s3.ui.dailyList.children[0];
+  ok(!!onlineCard, '拿到了在线那张卡');
+  onlineCard.onclick();
+  eq(s3.spies.queues.length, 1, '点在线卡走 playQueue（不是 playLocal）');
+  eq(s3.spies.played.length, 0, '没有误走本地路径');
+  ok(s3.spies.queues.length && String(s3.spies.queues[0].ids[0]).indexOf('online:') === 0,
+    '队列里是在线虚拟 id（不是本地 track id）',
+    s3.spies.queues.length ? String(s3.spies.queues[0].ids[0]) : '(无)');
+  t3.release();
+  await ticks(14);
+
+  section('每日推荐 · 宿主还没 bind 时 load 不进（否则卡在永久 loading）');
+
+  // 这条钉的是 2026-10-06 那个「首页推荐空白、独立页正常」的根因：
+  // app.js 的换肤对账 setView('library') 早于 Daily.bind()，load() 里
+  // render() 读 H.ui 抛错，异常正好打断在发请求那两行**之前** ——
+  // busy 置上了、请求一个没发，此后每次 load 都撞 loading 早退。
+  const src = fs.readFileSync(path.join(WEB, 'daily.js'), 'utf8');
+  const loadBody = (() => {
+    const i = src.indexOf('function load(opts)');
+    if (i < 0) return '';
+    let depth = 0;
+    for (let j = src.indexOf('{', i); j < src.length; j += 1) {
+      if (src[j] === '{') depth += 1;
+      else if (src[j] === '}') { depth -= 1; if (!depth) return src.slice(i, j + 1); }
+    }
+    return '';
+  })();
+  ok(/if \(!H \|\| !T\)\s*\{[\s\S]{0,120}?loadPending = true;[\s\S]{0,40}?return;/.test(loadBody),
+    'load() 在宿主未 bind 时记账并早退（不把 busy 置上后卡死）');
+  // 记账必须在置 busy **之前**：反过来的话照样卡在「永远 loading」。
+  ok(loadBody.indexOf('loadPending = true') < loadBody.indexOf('dailyState.localBusy = wantLocal'),
+    '闸门在置 busy 之前（否则请求仍会被打断在同一个位置）');
+  // bind 时补跑，否则那次 load 的意图会静默丢失
+  ok(/bind: function \(host\)[\s\S]{0,240}?if \(loadPending\) load\(\);/.test(src),
+    'bind() 里补跑被挡下的 load（否则调用方以为已发起，不会再来第二次）');
+  ok(/var loadPending = false;/.test(src), 'loadPending 有声明（不是隐式全局）');
+
+  section('每日推荐 · 起始态：notifyMode 报的是生效来源');
+  // 宿主（app.js 的 syncLibEmpty）判据是 `mode === 'online'` 来决定弹不弹
+  // 「本地曲库是空的」大引导卡。落位之前 dailyState.mode 是 'auto'，
+  // 报 'auto' 会被当成非在线 → 屏幕上正显示着一屏推荐，引导卡却弹出来了。
+  const t5 = makeTransport([
+    { match: isOnlineDaily, reply: ONLINE_PAGE, hold: true },
+    { match: isLocalDaily, reply: LOCAL_PAGE },
+  ]);
+  const s5 = makeSandbox(t5);
+  s5.sandbox.localStorage.removeItem('vmusic.daily.mode');
+  const seen = [];
+  s5.sandbox.onDailyModeChangeOf = null;
+  s5.sandbox.window.Daily.bind({
+    ui: s5.ui,
+    state: { view: 'favorites' },
+    fmt: (ms) => String(Math.round((ms || 0) / 1000)),
+    toast: (m, k) => s5.spies.toasts.push({ msg: m, kind: k }),
+    errText: (p, e) => p + '：' + e.message,
+    coverUrl: () => null,
+    // 记录宿主每次收到的来源
+    onDailyModeChange: (m) => seen.push(m),
+  });
+  s5.sandbox.window.Daily.init();
+  s5.sandbox.window.Daily.load();
+  await ticks();
+  ok(seen.indexOf('local') >= 0,
+    '落位前报的是 local（生效来源），宿主据此不弹「曲库是空的」',
+    JSON.stringify(seen));
+  ok(seen.indexOf('auto') < 0, '没有把 auto 报给宿主（那会被当成非在线）',
+    JSON.stringify(seen));
+  t5.release('online');
+  await ticks(14);
+  ok(seen[seen.length - 1] === 'online', '落位后报 online', JSON.stringify(seen));
+  // 逐次比对而不是只比末位：通知**只该在生效来源真的变了时**发。
+  // setMode 里若再补一次 notifyMode，同一次落位会报两遍 'online'，
+  // 宿主白白重判一次空态卡（它会重写 DOM），末位断言却照样绿。
+  const uniq = seen.filter((m, i) => m !== seen[i - 1]);
+  eq(seen.length, uniq.length,
+    '来源没变就不重复通知（宿主每次都要重判空态卡）', JSON.stringify(seen));
+
+  section('每日推荐 · 起始态：显式选过来源时 auto 那套不生效');
+  const t4 = makeTransport([
+    { match: isOnlineDaily, reply: ONLINE_PAGE, hold: true },
+    { match: isLocalDaily, reply: LOCAL_PAGE },
+  ]);
+  const s4 = makeSandbox(t4);
+  s4.sandbox.localStorage.setItem('vmusic.daily.mode', 'local');
+  s4.sandbox.window.Daily.init();
+  s4.sandbox.window.Daily.load();
+  await ticks();
+  eq(s4.sandbox.window.Daily.state.mode, 'local', '存过 local 就直接是 local（不是 auto）');
+  eq(s4.ui.dailyList.children.length, 2, '画的是本地那批',
+    `children=${s4.ui.dailyList.children.length}`);
+  t4.release();
+  await ticks(14);
+}
+
 // ---------------------------------------------------------------------------
 
 (async function main() {
@@ -852,6 +1086,7 @@ async function checkDailyOnlineDegraded() {
   await checkDaily();
   await checkDailyOnline();
   await checkDailyOnlineDegraded();
+  await checkDailyAutoSettle();
 
   console.log('\n' + '─'.repeat(60));
   if (failures) {

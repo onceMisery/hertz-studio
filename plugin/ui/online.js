@@ -32,6 +32,11 @@
     tracks: [],
     total: 0,
     loading: false,
+    // 搜索类型：'song'（单曲，默认）| 'playlist'（歌单）。只有当前音源登记了
+    // playlist_search 能力位时才可能出现 'playlist'（见 renderKind）。
+    kind: 'song',
+    // 歌单搜索结果（仅展示，无歌单详情端点）。
+    playlists: [],
     // All 聚合时为 true：此入口保持单曲试听，跨源队列由宿主的混合队列入口管理。
     aggregate: false,
     // 音源清单由 /v1/online/sources 填；拉不到时下拉框保持 index.html 的静态项。
@@ -89,6 +94,10 @@
     kugou: ['酷狗音乐', '#2ca5f0', '/platform-icons/kugou.png'],
     kuwo: ['酷我音乐', '#f5a623', '/platform-icons/kuwo.png'],
     qishui: ['汽水音乐', '#45d68f', '/platform-icons/qishui.png'],
+    // 咪咕没有随包分发的官方图标文件，不新增图片资源（不动 platform-icons
+    // 与 main.rs 白名单），沿用通用 sprite 字形；品牌名照挂 title/aria-label，
+    // 不占用平台品牌色（与 local 同款处理）。
+    migu: ['咪咕音乐', null, 'i-app-generic'],
     // 本地曲库也走同一套徽标：唱片图标 + 主题色（不占任何平台品牌色）。
     local: ['本地曲库', null, 'i-app-local'],
   };
@@ -549,6 +558,8 @@
   }
 
   async function search(opts) {
+    // 歌单类型走独立端点与渲染路径；单曲（默认）保持既有渐进聚合搜索。
+    if (onlineState.kind === 'playlist') return searchPlaylists(opts);
     opts = opts || {};
     cancelSearch();
     var epoch = searchEpoch;
@@ -598,6 +609,143 @@
   }
 
   function searchOnline(opts) { return search(opts); }
+
+  // ---- 搜索类型（单曲 / 歌单）---------------------------------------------
+  //
+  // 「单曲」走既有的渐进聚合搜索；「歌单」打 /v1/online/playlists/search，
+  // 只对登记了 playlist_search 能力位的音源开放（caps 是 UI 的唯一事实表）。
+  // 咪咕暂无歌单详情端点，所以歌单卡片只展示、不做点击进详情，也不提供
+  // 播放按钮（歌单内曲目同样取不到流）。
+
+  function sourceHasCap(source, cap) {
+    var info = onlineState.sources.find(function (s) { return s.id === source; });
+    return !!(info && (info.caps || []).indexOf(cap) >= 0);
+  }
+
+  // 只剩单个音源时隐藏「歌单」选项并强制回到单曲，避免留下一个点了必 404 的项。
+  function renderKind() {
+    var host = $('online-kind');
+    if (!host) return;
+    var canPlaylist = onlineState.source !== 'all'
+      && sourceHasCap(onlineState.source, 'playlist_search');
+    if (!canPlaylist) onlineState.kind = 'song';
+    host.hidden = !canPlaylist;
+    if (host.querySelectorAll) {
+      host.querySelectorAll('[data-kind]').forEach(function (btn) {
+        var on = btn.dataset.kind === onlineState.kind;
+        if (btn.classList && btn.classList.toggle) btn.classList.toggle('active', on);
+        else btn.className = 'chip' + (on ? ' active' : '');
+      });
+    }
+  }
+
+  function setKind(kind) {
+    kind = kind === 'playlist' ? 'playlist' : 'song';
+    if (kind === onlineState.kind) return;
+    onlineState.kind = kind;
+    renderKind();
+    // 切类型即作废旧结果：有词时立刻按新类型搜索，没词时给对应引导。
+    onlineState.tracks = [];
+    onlineState.total = 0;
+    search();
+  }
+
+  function renderPlaylistHint(text) {
+    var body = H.ui.onlineBody;
+    if (!body) return;
+    body.innerHTML = '';
+    var hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = text;
+    body.appendChild(hint);
+  }
+
+  async function searchPlaylists(opts) {
+    opts = opts || {};
+    cancelSearch();
+    var epoch = searchEpoch;
+    var source = onlineState.source;
+    var query = onlineState.q.trim();
+    onlineState.aggregate = false;
+    onlineState.tracks = [];
+    onlineState.total = 0;
+    if (source === 'all') {
+      renderPlaylistHint('歌单搜索需要选定单个音源。');
+      if (H.ui.onlineCount) H.ui.onlineCount.textContent = '0 个歌单';
+      return;
+    }
+    if (!query) {
+      renderPlaylistHint('输入关键词搜索歌单。');
+      if (H.ui.onlineCount) H.ui.onlineCount.textContent = '0 个歌单';
+      return;
+    }
+    if (H.ui.onlineCount) H.ui.onlineCount.textContent = '搜索中…';
+    var params = new URLSearchParams({ source: source, q: query, limit: String(PAGE_SIZE) });
+    try {
+      var result = await T.get('/v1/online/playlists/search?' + params.toString());
+      if (epoch !== searchEpoch) return;
+      renderPlaylists(result, query);
+    } catch (err) {
+      if (epoch !== searchEpoch) return;
+      renderPlaylistHint(H.errText('歌单搜索失败', err));
+      if (!opts.silent) H.toast(H.errText('歌单搜索失败', err), 'error');
+    }
+  }
+
+  function renderPlaylists(result, query) {
+    var body = H.ui.onlineBody;
+    if (!body) return;
+    var lists = (result && result.playlists) || [];
+    onlineState.playlists = lists;
+    body.innerHTML = '';
+    if (H.ui.onlineCount) H.ui.onlineCount.textContent = lists.length + ' 个歌单';
+    var summary = document.createElement('div');
+    summary.className = 'search-summary';
+    summary.setAttribute('role', 'status');
+    summary.textContent = '“' + query + '” · ' + lists.length + ' 个歌单';
+    body.appendChild(summary);
+    if (!lists.length) {
+      var empty = document.createElement('div');
+      empty.className = 'hint';
+      empty.textContent = '没有找到歌单，试试别的关键词。';
+      body.appendChild(empty);
+      return;
+    }
+    var list = document.createElement('div');
+    list.className = 'playlist-results';
+    lists.forEach(function (p) { list.appendChild(playlistCard(p)); });
+    body.appendChild(list);
+  }
+
+  // 歌单卡片：封面（无则占位）+ 名称 + 曲目数 + 播放量。不做点击进详情、
+  // 不给播放按钮——咪咕没有歌单详情端点，歌单内曲目也取不到流。
+  function playlistCard(p) {
+    var card = document.createElement('div');
+    card.className = 'playlist-card';
+    card.dataset.source = p.source || '';
+    card.dataset.playlistId = p.id || '';
+    var cover = document.createElement('div');
+    cover.className = 'playlist-card-cover';
+    var url = safeCoverUrl(p.cover);
+    if (url) applyBg(cover, url);
+    else cover.classList.add('is-empty');
+    var main = document.createElement('div');
+    main.className = 'playlist-card-main';
+    var title = document.createElement('div');
+    title.className = 'playlist-card-title';
+    title.textContent = p.name || '未知歌单';
+    var sub = document.createElement('div');
+    sub.className = 'playlist-card-sub';
+    var meta = [];
+    if (p.track_count != null) meta.push(p.track_count + ' 首');
+    if (p.play_count != null) meta.push('播放 ' + p.play_count);
+    sub.textContent = meta.join(' · ') || '—';
+    main.appendChild(title);
+    main.appendChild(sub);
+    card.appendChild(cover);
+    card.appendChild(main);
+    return card;
+  }
 
   function cacheTracks(tracks) {
     tracks.forEach(function (t) {
@@ -1124,6 +1272,16 @@
         search();
       };
     }
+    // 搜索类型切换（单曲 / 歌单）。容器只在当前音源登记 playlist_search
+    // 时可见（renderKind 管显隐），事件委托在容器上。
+    var kindHost = $('online-kind');
+    if (kindHost) {
+      kindHost.onclick = function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest('[data-kind]') : null;
+        if (!btn) return;
+        setKind(btn.dataset.kind);
+      };
+    }
     if (H.ui.onlineQ) {
       H.ui.onlineQ.oninput = function () {
         if (H.ui.onlineQ.value.trim() === onlineState.q.trim()) return;
@@ -1143,6 +1301,9 @@
       H.ui.onlineSource.onchange = function () {
         cancelSearch();
         onlineState.source = H.ui.onlineSource.value;
+        // 换源后重算「单曲 / 歌单」切换是否可见（只有带 playlist_search
+        // 能力的音源才显示歌单）。
+        renderKind();
         // 按新音源重建档位选项（All 无档位描述，选择器自动隐藏）。
         renderQualityOptions();
         // All 是音源维度的聚合项：没有分类，也不自动拉取（需要关键词）。
@@ -1331,6 +1492,8 @@
       onlineState.source = H.ui.onlineSource.value;
     }
     renderSourceCaps();
+    // 音源清单变化后重算「单曲 / 歌单」切换（能力位是唯一事实表）。
+    renderKind();
   }
 
   // 当前音源的分类 chips。All 或无分类音源整排隐藏。

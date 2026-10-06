@@ -667,9 +667,14 @@ select option { background: var(--panel-solid); color: var(--text); }
 }
 
 /* 表头与行共用同一套列宽，列才对得齐 */
+/* 末列宽度 = 操作区真身：勾选框 20 + 右边距 6 + 三个 28px 图标按钮 + 三个 2px 间隙
+   = 116px。给少了 flex 就会压窄子项（实测给 60px 时按钮互相叠在一起、
+   96px 时仍被压成 21px 宽的窄条 —— 「插入下一首」单击点不中就是这个原因：
+   命中区被压到只剩一条，第一次点击落在缝隙里，第二次点击时 hover 已显形、
+   命中区才稳定下来，于是表现为「双击才有反应」）。 */
 .lib-head, .track {
   display: grid;
-  grid-template-columns: 30px 40px minmax(0, 1fr) minmax(0, 0.62fr) 88px 52px 60px;
+  grid-template-columns: 30px 40px minmax(0, 1fr) minmax(0, 0.62fr) 88px 52px 116px;
   align-items: center;
   gap: 12px;
   padding: 0 10px;
@@ -821,14 +826,80 @@ body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 
 /* 这几条的字号/字重/颜色已在上方「信息层级令牌」一节里统一到 --skin-h2/h3/h4，
    这里只保留行内布局（对齐方式与等宽数字）。 */
 .t-quality { text-align: right; }
-.t-actions { display: flex; gap: 2px; justify-content: flex-end; opacity: 0; transition: opacity 0.2s var(--ease); }
+/* 操作区：四个控件（勾选 + 下一首 + 更多 + 红心）按固定尺寸排布。
+   width 写死是为了让「勾选框在最左、图标按钮在右」这件事在任何列宽下都成立
+   —— 不写的话容器一旦被栅格压窄，flex 会让它们缩成一团（实测挤成 10px 一条）。 */
+.t-actions {
+  display: flex;
+  gap: 2px;
+  justify-content: flex-end;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 0.2s var(--ease);
+}
 .track:hover .t-actions, .track:focus-within .t-actions { opacity: 1; }
+
+/* 批量选择用的勾选框。之前**完全没有样式**，一直是浏览器默认尺寸：
+   13px 见方、带默认边框和底色，在 28px 高的操作区里既不同高也不同宽，
+   视觉上就是「一个歪的小方块挤在图标按钮中间」。
+   appearance:none 是必需的：留着原生外观时，Chrome 会拿 accent-color
+   去画**未勾选**状态的底色（实测在 accent-color 较亮的主题下就是一个
+   白方块，比默认样式还刺眼）。改成自绘边框 + 勾选时才填色。
+   accent-color 仍然留着：勾选后的那个对勾是浏览器画的，省一份图标资源。 */
+.t-select {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;   /* ::after 画对勾的定位锚点 */
+  width: 20px;
+  height: 20px;
+  flex: none;
+  /* 右边距 0 + gap 2px 就够跟图标按钮分开；再给 margin 会让这一处
+     间隙是其它两处的三倍（实测 8px vs 2px），看着像多出一列。 */
+  margin: 0;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: transparent;
+  accent-color: var(--accent);
+  cursor: pointer;
+  transition: border-color 0.2s var(--ease), background 0.2s var(--ease);
+}
+.t-select:hover { border-color: var(--accent); }
+/* 勾选态：对勾用**边框画**，不用内联 SVG / 背景图。
+   对勾色取 **--accent-ink** 而不是写死色 —— 这个令牌的全站语义就是
+   「压在 --accent 强调色之上的前景色」（按钮文字已经在用它），由各主题
+   各自配好的一套值保证对比。默认主题是纯白 accent + 近黑 accent-ink，
+   写死 #fff 就会变成白底白勾（实测：勾选框变成一个纯白方块，看不出勾没勾）。 */
+.t-select::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border: solid var(--accent-ink);
+  border-width: 0 2px 2px 0;
+  transform: rotate(42deg);
+  /* 未勾选时也占位但不显形 —— display:none 会让勾选瞬间没有过渡。 */
+  opacity: 0;
+  transition: opacity 0.15s var(--ease);
+  pointer-events: none;
+}
+.t-select:checked::after { opacity: 1; }
+
+.t-select:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
 
 .t-act {
   width: 28px; height: 28px; border-radius: 8px;
   border: none; background: transparent; color: var(--muted);
   cursor: pointer; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
+  /* flex:none 是必需的：按钮是 .t-actions 的 flex 子项，默认 flex-shrink:1
+     会在装不下时被压窄（实测列宽给到 96px 仍被压成 21px 宽的窄条，
+     图标挤在中间、点击命中区只剩一条）。压窄的按钮既难看又难点。 */
+  flex: none;
   transition: color 0.2s var(--ease), background 0.2s var(--ease);
 }
 .t-act:hover { color: var(--text); background: var(--hover); }

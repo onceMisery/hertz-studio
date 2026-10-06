@@ -448,7 +448,13 @@
         </span>
       </div>
       <div class="online-search">
-        <input id="online-q" type="search" placeholder="搜索在线音源（网易云 / QQ / 酷狗 / 酷我 / 汽水 / ccmixter）…" autocomplete="off" aria-label="搜索在线曲库">
+        <!-- 搜索类型切换。默认「单曲」；只有当前音源登记 playlist_search
+             能力时才显示「歌单」（online.js 的 renderKind 管显隐）。 -->
+        <div class="online-kind" id="online-kind" role="group" aria-label="搜索类型" hidden>
+          <button class="chip active" type="button" data-kind="song">单曲</button>
+          <button class="chip" type="button" data-kind="playlist">歌单</button>
+        </div>
+        <input id="online-q" type="search" placeholder="搜索在线音源（网易云 / QQ / 酷狗 / 酷我 / 汽水 / ccmixter / 咪咕）…" autocomplete="off" aria-label="搜索在线曲库">
         <button id="online-go" class="btn primary">搜索</button>
       </div>
 

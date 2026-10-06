@@ -47,6 +47,7 @@ mod http;
 mod jamendo;
 mod kugou;
 mod kuwo;
+mod migu;
 mod netease;
 pub mod progressive;
 mod qishui;
@@ -186,6 +187,8 @@ pub enum Capability {
     /// 私人 FM：网易云连续歌曲推荐，游客可用性由上游决定。
     PersonalFm,
     HighQuality,
+    /// 在线歌单搜索：按关键词检索平台侧公开歌单（咪咕首个数据源）。
+    PlaylistSearch,
 }
 
 /// 平台曲目原始引用。写操作/播放取流时平台模块需要平台专有 id，
@@ -231,6 +234,20 @@ pub struct OnlinePlaylist {
     pub creator: String,
     /// created | collected | liked
     pub kind: String,
+    /// 歌单简介。上游多数接口不给（咪咕的歌单搜索就没有该字段），
+    /// 缺省即不序列化，前端按「无简介」处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// 在线歌单搜索结果页。与 [`SearchPage`] 对称：source/keyword/total 是页级
+/// 元信息，playlists 是归一化后的条目。
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaylistSearchPage {
+    pub source: String,
+    pub keyword: String,
+    pub total: usize,
+    pub playlists: Vec<OnlinePlaylist>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -403,6 +420,17 @@ pub const SOURCES: &[SourceInfo] = &[
         // 登记——标了它等于承诺能拿到高音质，而受保护的高音质我们是拒播的。
         caps: &[Capability::CookieLogin, Capability::QrLogin],
     },
+    SourceInfo {
+        id: "migu",
+        label: "咪咕音乐",
+        cats: &[],
+        supports_cookie: false,
+        // 只登记「歌单搜索」这一项公开能力（咪咕 H5 端点，无需签名）。
+        // 单曲搜索/详情/歌词是公共 dispatch，不占能力位；取流响应是 AES 加密
+        // 密文，本项目不解密，因此**不**登记任何播放/高音质能力位，搜索结果的
+        // playable 一律 false（见 migu.rs 模块文档）。
+        caps: &[Capability::PlaylistSearch],
+    },
 ];
 
 pub fn find(source: &str) -> Option<&'static SourceInfo> {
@@ -436,6 +464,8 @@ pub(crate) fn referer(source: &str) -> Option<&'static str> {
         "ccmixter" => Some("https://ccmixter.org/"),
         // 汽水的音频 CDN 校验来源页，缺了直接 403。
         "qishui" => Some("https://www.qishui.com/"),
+        // 咪咕 H5 接口校验来源页。
+        "migu" => Some("https://y.migu.cn/"),
         _ => None,
     }
 }
@@ -647,6 +677,7 @@ pub async fn search(ctx: &Ctx, q: SearchQuery) -> ApiResult<SearchPage> {
         "jamendo" => jamendo::search(ctx, &q).await,
         "ccmixter" => ccmixter::search(ctx, &q).await,
         "qishui" => qishui::search(ctx, &q).await,
+        "migu" => migu::search(ctx, &q).await,
         other => Err(unsupported(other)),
     }
 }
@@ -735,6 +766,7 @@ pub async fn stream(
         "jamendo" => jamendo::stream(ctx, id, q).await,
         "ccmixter" => ccmixter::stream(ctx, id, q).await,
         "qishui" => qishui::stream(ctx, id, track_ref, q).await,
+        "migu" => migu::stream(ctx, id, track_ref, q).await,
         other => Err(unsupported(other)),
     }
 }
@@ -763,6 +795,7 @@ pub async fn detail(ctx: &Ctx, source: &str, id: &str) -> ApiResult<OnlineDetail
         "jamendo" => jamendo::detail(ctx, id).await,
         "ccmixter" => ccmixter::detail(ctx, id).await,
         "qishui" => qishui::detail(ctx, id).await,
+        "migu" => migu::detail(ctx, id).await,
         other => Err(unsupported(other)),
     }
 }
@@ -783,6 +816,7 @@ pub async fn lyric(ctx: &Ctx, source: &str, id: &str) -> ApiResult<vmusic_core::
         "jamendo" => jamendo::lyric(ctx, id).await,
         "ccmixter" => ccmixter::lyric(ctx, id).await,
         "qishui" => qishui::lyric(ctx, id).await,
+        "migu" => migu::lyric(ctx, id).await,
         other => Err(unsupported(other)),
     }
 }
@@ -881,6 +915,21 @@ pub async fn playlist_detail(
         // 真机验收通过后摘开 PlaylistDetail 位即可（端点要求登录）。
         "kugou" => kugou::playlist_detail(ctx, id, offset, limit).await,
         other => Err(not_wired(other, "歌单详情")),
+    }
+}
+
+/// 在线歌单搜索：按关键词检索平台侧公开歌单（与「用户自己的歌单」不同，
+/// 后者走 [`playlists`]）。能力位 [`Capability::PlaylistSearch`] 未开的音源
+/// 在这里就拿到 404。
+pub async fn search_playlists(
+    ctx: &Ctx,
+    source: &str,
+    q: &SearchQuery,
+) -> ApiResult<PlaylistSearchPage> {
+    gate(source, Capability::PlaylistSearch)?;
+    match source {
+        "migu" => migu::search_playlists(ctx, q).await,
+        other => Err(not_wired(other, "歌单搜索")),
     }
 }
 
@@ -1081,7 +1130,7 @@ mod tests {
         let dispatches = |source: &str| {
             matches!(
                 source,
-                "netease" | "qq" | "kugou" | "kuwo" | "jamendo" | "ccmixter" | "qishui"
+                "netease" | "qq" | "kugou" | "kuwo" | "jamendo" | "ccmixter" | "qishui" | "migu"
             )
         };
         for src in SOURCES {
@@ -1246,6 +1295,7 @@ mod tests {
             Capability::RecommendPlaylists,
             Capability::PersonalFm,
             Capability::HighQuality,
+            Capability::PlaylistSearch,
         ];
         for s in SOURCES {
             for cap in all_caps {
@@ -1310,6 +1360,10 @@ mod tests {
                 // 汽水只有扫码这一条操作型能力：官方 Passport 网页接口的
                 // get_qrcode/check_qrconnect，不需要设备指纹或 JS 挑战求解。
                 "qishui", QrLogin
+            ) | (
+                // 咪咕只登记歌单搜索这一条操作型能力（H5 公开端点，无需签名）。
+                "migu",
+                PlaylistSearch
             )
         )
     }
@@ -1384,6 +1438,9 @@ mod tests {
         assert!(caps_of("ccmixter").is_empty());
         // Jamendo 同为 CC 匿名曲库；可用性由 client_id 配置决定，不占能力位。
         assert!(caps_of("jamendo").is_empty());
+        // 咪咕：只有歌单搜索这一项公开能力；取流响应加密、本项目不解密，
+        // 因此不登记任何播放/高音质能力位。
+        assert_eq!(caps_of("migu"), &[Capability::PlaylistSearch]);
     }
 
     #[test]

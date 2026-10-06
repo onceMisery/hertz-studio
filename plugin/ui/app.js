@@ -2105,7 +2105,43 @@ function applyMotionSurfaces() {
 // 无论原本在哪个视图，换完一律落到首页并重跑 setView：它既是落点，也是把
 // 换肤期间被皮肤改动过的 hidden 统一对回去的唯一入口（跑 setView 而不直接
 // 改 hidden，是为了让曲库/在线/队列的进入钩子照常跑一遍）。
+//
+// **必须防住「启动期」**：Skins.init() 自己也会广播一次 skin:changed，
+// 而这个监听是在它之前注册的（同一段 startApp 里），所以启动时必然先走这里
+// —— 那时 Daily.bind() / DailyView.bind() 都还没执行（它们在后面两百行）。
+//
+// 不防的后果很隐蔽：setView('library') → Daily.load() → render() 读 `H.ui`
+// 抛错（`H` 还是 null）→ **异常把 load() 打断在发请求之前**，
+// 于是 `localBusy/onlineBusy` 永远停在 true、`loading` 永远为真。
+// 之后 startApp 自己那次 setView('library') 撞上 `if (loading && !force) return`
+// 被挡掉 → 首页每日推荐**永远不发请求**，而页面上没有任何报错：
+// 副标题停在「正在汇总各平台每日推荐…」，卡片区空白。
+// 独立页 DailyView 是另一套状态、另一条 fetch，所以它照常显示歌曲 ——
+// 「独立页有、首页没有」正是这个 bug 的指纹。
+//
+// 判据用「视图模块是否已就绪」而不是「启动完了没有」：bind 一完成就设标记。
+// 这样即使将来调整 startApp 里各 init 的顺序，闸门也跟着对。
+//
+// 两个变量必须声明在 onSkinChangedForViews **之前**：函数体在启动早期就要执行
+// （Skins.init 的广播），那时若它们还在 TDZ 里，读 `pendingSkinViewHandoff`
+// 会抛 ReferenceError —— 正是这个 bug 最初「无报错」表现不出来的那类坑。
+var dailyStripBound = false;
+var pendingSkinViewHandoff = false;
+
 function onSkinChangedForViews() {
+  // 启动期的换肤广播先记账，等 Daily.bind() 落位后由 bindDailyStrip() 补跑。
+  if (!dailyStripBound) {
+    pendingSkinViewHandoff = true;
+    return;
+  }
+  setView('library');
+}
+
+/// Daily.bind() 之后调用：若启动期攒下了换肤广播，这里补上对账。
+function bindDailyStrip() {
+  dailyStripBound = true;
+  if (!pendingSkinViewHandoff) return;
+  pendingSkinViewHandoff = false;
   setView('library');
 }
 
@@ -7593,6 +7629,9 @@ async function startApp() {
     window.Daily.bind(favHost);
     window.Daily.init();
   }
+  // Daily 视图模块就位了：补跑启动期攒下的换肤对账（见 onSkinChangedForViews）。
+  // 放在 DailyView.bind 之前 —— 它只是 setView('library')，不依赖独立页。
+  bindDailyStrip();
   // 每日推荐独立页：菜单注入与页面初始化。可见性开关等设置到手后再 applied
   // （见 loadSettings），这里先把模块挂上，按钮的点击自己带，不依赖批量绑定。
   if (window.DailyView) {

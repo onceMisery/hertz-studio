@@ -222,7 +222,13 @@
   border-radius: 0;
   padding: var(--skin-pad);
   text-align: left;
-  overflow: auto;
+  /* 面板本身**不滚**，歌词区自己滚（.stage-lyrics 已有 overflow-y:auto）。
+     写 overflow:auto 会同时长出两条滚动条：横向那条是 .stage::before 那个
+     inset:-30% 的取色光晕撑出来的（实测右栏 104px 宽时光晕左右各溢出
+     30px，整条面板被撑宽 31px），纵向那条则与歌词区的滚动重复 ——
+     两条贴在一起读作「面板里套了个能滚的框」，而内容其实只有一屏。
+     基础样式 style.css 的 .stage 本来就是 overflow:hidden，这里是覆盖过头。 */
+  overflow: hidden;
 }
 
 /* --- 播放栏：贴底通栏，不留两侧内收 ------------------------------------ */

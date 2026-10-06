@@ -1153,6 +1153,63 @@
   background-position: center;
 }
 
+/* 浮条上的播放/暂停按钮：悬停浮条才浮现。
+   显隐只切 opacity + pointer-events（不切 display）——
+   display:none 的元素不吃命中测试，切换那一帧指针会落到浮条本体上，
+   点下去变成「聚焦这一项」而不是「播这一首」。 */
+[data-skin="qingfeng"] .qf-queue-peek-play {
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 52px;
+  height: 52px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--skin-surface);
+  color: var(--text);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-2) var(--ease), transform var(--dur-2) var(--ease);
+}
+
+[data-skin="qingfeng"] .qf-queue-peek-play svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+  pointer-events: none;
+}
+
+[data-skin="qingfeng"] .qf-queue-peek:hover .qf-queue-peek-play,
+[data-skin="qingfeng"] .qf-queue-peek:focus-within .qf-queue-peek-play {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 浮现时按钮要盖在封面上，所以给它自己的底；歌单那一档带文字，
+   方形更合适（圆形里两个字会被压扁）。 */
+[data-skin="qingfeng"] .qf-queue-peek-play.is-labelled {
+  width: auto;
+  min-width: 52px;
+  height: 34px;
+  border-radius: 999px;
+  padding: 0 12px;
+  gap: 6px;
+  grid-auto-flow: column;
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow-card);
+}
+
+[data-skin="qingfeng"] .qf-queue-peek-play.is-labelled span {
+  font-size: var(--fs-2xs);
+  white-space: nowrap;
+}
+
 [data-skin="qingfeng"] .qf-queue-peek-copy {
   min-width: 0;
   display: flex;

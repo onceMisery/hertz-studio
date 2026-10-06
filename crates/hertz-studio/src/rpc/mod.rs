@@ -395,6 +395,9 @@ impl Rpc {
             (Op::Get, ["v1", "online", "quality"]) => online::quality_get(state).await,
             (Op::Post, ["v1", "online", "quality"]) => online::quality_set(state, body).await,
             (Op::Post, ["v1", "online", "cookie"]) => online::cookie(state, body).await,
+            (Op::Get, ["v1", "online", "playlists", "search"]) => {
+                online::playlist_search(state, query).await
+            }
             (Op::Get, ["v1", "online", "playlists"]) => online::playlists(state, query).await,
             (Op::Get, ["v1", "online", "playlist"]) => online::playlist(state, query).await,
             (Op::Post, ["v1", "online", "playlist"]) => online::playlist_create(state, body).await,

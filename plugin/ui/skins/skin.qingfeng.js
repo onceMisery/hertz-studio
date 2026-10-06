@@ -782,8 +782,29 @@
     tagBack.addEventListener('click', leaveDrill);
 
     // 左下角：当前队列浮条。
+    //
+    // 悬停浮现播放/暂停按钮：浮条本身是「当前聚焦的那一项」的只读回显，
+    // 鼠标停在它上面时用户最自然的动作就是「播/停这一首」—— 尤其在墙
+    // 开着、海报密密麻麻的时候，回到底部找播放条要移动很远。
+    // 按钮**常驻在 DOM 里**（不是 hover 才插入）：每次 hover 重建节点会
+    // 让指针在按钮出现的瞬间落在新节点上，click 丢失，而且每次都要重挂
+    // 监听。显隐只切 opacity / pointer-events。
     var peek = make('div', 'qf-queue-peek', root);
     var peekArt = make('div', 'qf-queue-peek-art', peek);
+    var peekPlay = make('button', 'qf-queue-peek-play', peek);
+    peekPlay.type = 'button';
+    peekPlay.setAttribute('aria-label', '播放');
+    peekPlay.addEventListener('click', function (e) {
+      // 冒泡到 .qf-queue-peek 就会触发「聚焦这一项」，那会把用户从正在
+      // 看的卡上拽走 —— 播放按钮要的是「只播这一首」。
+      e.stopPropagation();
+      var t = peekTile();
+      if (!t) return;
+      if (t.isPlaylist) { enterDrill(t); return; }
+      // 已经在放这一首 → 播/停切换；否则播它。
+      if (t.current && t.playing) emit('toggle-play');
+      else emit('activate', { item: t });
+    });
     var peekCopy = make('div', 'qf-queue-peek-copy', peek);
     var peekTitle = make('strong', '', peekCopy);
     var peekSub = make('span', '', peekCopy);
@@ -911,6 +932,7 @@
     refs.wallTagBack = tagBack;
     refs.wallPeek = peek;
     refs.wallPeekArt = peekArt;
+    refs.wallPeekPlay = peekPlay;
     refs.wallPeekTitle = peekTitle;
     refs.wallPeekSub = peekSub;
     refs.wallPanelBtn = panelBtn;
@@ -1415,7 +1437,9 @@
     var t0 = 0;
     var DUR = 420;
     if (wall.raf) cancelAnimationFrame(wall.raf);
-    function step(ts) {
+    // 名字带 Pan 是为了跟模块级的 step(delta)（上/下一首）区分开：
+    // 同名局部函数在两处含义完全不同，读代码时极易以为它们是一件事。
+    function stepPan(ts) {
       if (!t0) t0 = ts;
       var t = Math.min(1, (ts - t0) / DUR);
       // easeOutExpo —— 参考项目 useWallCameraPan.ts 用 [0.22,1,0.36,1]，
@@ -1428,10 +1452,10 @@
       // 窗口外是空的，下一次重绘还会把格位键整体错位（实测展开卡被
       // 拍到别人的 2×2 格上）。键控差量每帧增量建/删，代价可控。
       renderWall();
-      if (t < 1) wall.raf = requestAnimationFrame(step);
+      if (t < 1) wall.raf = requestAnimationFrame(stepPan);
       else wall.raf = 0;
     }
-    wall.raf = requestAnimationFrame(step);
+    wall.raf = requestAnimationFrame(stepPan);
   }
 
   function buildPosterControls(el) {
@@ -1468,7 +1492,7 @@
       prev.title = '上一首';
       prev.setAttribute('aria-label', '上一首');
       prev.innerHTML = icon('prev');
-      prev.addEventListener('click', function (e) { e.stopPropagation(); step(-1, tile); });
+      prev.addEventListener('click', function (e) { e.stopPropagation(); step(-1); });
 
       var play = document.createElement('button');
       play.type = 'button';
@@ -1488,7 +1512,7 @@
       next.title = '下一首';
       next.setAttribute('aria-label', '下一首');
       next.innerHTML = icon('next');
-      next.addEventListener('click', function (e) { e.stopPropagation(); step(1, tile); });
+      next.addEventListener('click', function (e) { e.stopPropagation(); step(1); });
 
       var time = document.createElement('span');
       time.className = 'qf-chrome-time';
@@ -1533,11 +1557,19 @@
     el.appendChild(box);
   }
 
-  /// 上一首/下一首。按**当前这一列**走，不碰播放队列 ——
-  /// 墙上的下标是本视图的下标，混进 state.queue 会播错歌。
-  function step(delta, tile) {
-    if (!tile) return;
-    emit('activate', { item: tile, delta: delta });
+  /// 上一首/下一首 = **播放队列**里前后各一首，即「正在放的那首」的邻居。
+  ///
+  /// 曾经发的是 `activate` + delta（按墙上这一列的前后项算），那个语义是错的：
+  /// 展开卡是 focusPoster 聚焦的那张，用户很可能停在第 3 张上（还没点播）
+  /// 就按了下一首，而曲库/歌单/收藏这些 tab 的墙上序号与播放队列下标毫无
+  /// 关系 —— app.js 拿墙上那一项去队列里 findIndex 必然 -1，落到
+  /// 「从头开始」的兜底，于是永远停在队列第一首，听感就是「按了没反应」。
+  /// 而「点歌能播、进度在走、唯独上/下一曲不动」正是用户报的现象。
+  ///
+  /// 所以这里只发意图（step-track），真正按播放队列算的活交给 app.js ——
+  /// 播放路径仍然只有一条。
+  function step(delta) {
+    emit('step-track', { delta: delta });
   }
 
   function fmtDur(ms) {
@@ -1553,10 +1585,16 @@
   /// 不再优先找 current：歌单那列没有「正在播放」的概念（一首歌单不是在放的），
   /// 硬找会退化成永远显示第一张，用户在看第 20 张歌单时浮条还停在第 1 张。
   /// 聚焦优先、没有聚焦才回落到 current，最后才是第一项。
+  /// 浮条当前该显示哪一项。与 updatePeek 共用一份判据 ——
+  /// 拆两处的话，按钮点下去播的那首会跟浮条上写着的那首不一致。
+  function peekTile() {
+    return posterTile(wall.posters[wall.focused])
+      || wall.tiles.find(function (x) { return x.current; }) || wall.tiles[0];
+  }
+
   function updatePeek() {
     if (!refs.wallPeek) return;
-    var t = posterTile(wall.posters[wall.focused])
-      || wall.tiles.find(function (x) { return x.current; }) || wall.tiles[0];
+    var t = peekTile();
     if (!t) {
       refs.wallPeek.hidden = true;
       return;
@@ -1567,6 +1605,17 @@
     if (refs.wallPeek) {
       // 歌单那列的浮条标题要说明它是歌单，否则「点它会怎样」不明确。
       refs.wallPeek.title = t.isPlaylist ? '歌单 · 点开看里面的歌' : (wall.sourceLabel || '当前');
+    }
+    if (refs.wallPeekPlay) {
+      // 歌单项：这一列没有「正在放」的概念，按钮是「打开歌单」。
+      // 已经在放的那首：图标切成暂停。title/aria-label 一起换，
+      // 屏幕阅读器读到的才不会与图标相反。
+      var playing = !t.isPlaylist && t.current && t.playing;
+      var label = t.isPlaylist ? '打开歌单' : (playing ? '暂停' : '播放');
+      refs.wallPeekPlay.innerHTML = icon(t.isPlaylist ? 'play' : (playing ? 'pause' : 'play'));
+      refs.wallPeekPlay.title = label;
+      refs.wallPeekPlay.setAttribute('aria-label', label);
+      refs.wallPeekPlay.classList.toggle('is-labelled', !!t.isPlaylist);
     }
     if (t.cover) {
       refs.wallPeekArt.style.backgroundImage = '';

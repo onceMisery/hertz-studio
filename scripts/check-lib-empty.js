@@ -98,8 +98,13 @@ assert.equal(syncLibEmpty(state.tracks), true, 'returns hidden=true whenever tra
 
 // ---------- 2. daily.js：切来源与初始化都要回传 ----------
 
+// ui 必须给 dailyList 一个能收的宿主：daily.js 的 render() 第一行就是
+// `if (!host) return;`，通知也挂在 render() 里按「生效来源变了才发」——
+// dailyList 缺了它整条渲染链直接早退，宿主一次都收不到来源，
+// 断言会以 `expected ['online'] / actual []` 这种看不出原因的形式崩。
+const listEl = { children: [], innerHTML: '', appendChild(c) { this.children.push(c); } };
 const host = {
-  ui: { dailyModes: { querySelectorAll: () => [] } },
+  ui: { dailyModes: { querySelectorAll: () => [] }, dailyList: listEl },
   calls: [],
   onDailyModeChange(mode) { this.calls.push(mode); },
 };

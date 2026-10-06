@@ -17,6 +17,12 @@
 // 两路请求**各自收尾、各自上屏**，不再等对方。以前是 allSettled 之后统一
 // render 一次：本地那一路是本机纯函数、毫秒级就有结果，却被在线那一路扣住，
 // 用户看到的是「等半天，然后一次性全跳出来」。
+//
+// 「各自上屏」要真的做到，起点就**不能先假定在线**。实测两端耗时差了两个数量级：
+// 本地规则引擎 20ms，在线汇总要顶满服务端的 2s 等待预算（网易云 + QQ 并发抓）。
+// 曾经起始 mode 直接写死 'online'，于是本地那份 20ms 到的数据被无视整整 2 秒 ——
+// 用户盯着两行「正在…」，而一份现成的推荐就躺在内存里。现在起始是 'auto'：
+// **哪一路先到就按哪一路渲染**，两路都到齐后再按 settleMode() 落到最终来源。
 (function () {
   'use strict';
   var T = null;
@@ -44,6 +50,10 @@
   var topupTimer = null;
   var generation = 0;
   var fetchedAt = { local: 0, online: 0 };
+  // 有 load() 撞在「宿主还没 bind」上被挡下了，bind() 落地时补跑一次。
+  // 少了它：那一次 load 的意图会静默丢失，而调用方（app.js 的 setView）
+  // 以为已经发起过了，不会再来第二次 —— 首页就一直空着。
+  var loadPending = false;
 
   var dailyState = {
     /// 两路里任意一路在飞。刷新按钮据它决定要不要作废重来。
@@ -59,9 +69,13 @@
     online: null,
     /// 在线那一路的错误。只用于副标题里如实说明，不弹红——见 fetchOnline()。
     onlineError: null,
-    /// 'online' | 'local'。
-    mode: 'online',
-    /// 用户是否显式选过来源。没选过时才允许按"有没有登录平台"自动落位。
+    /// 'auto' | 'online' | 'local'。
+    ///
+    /// 'auto' 是**起始态**，不是第三种来源：它表示「还没落位，按先到的那路显示」。
+    /// 用户没选过来源时用它起步 —— 一路 20ms、一路 2s 的情况下，先定死任何一路
+    /// 都等于让用户等另一路。落位之后这个值就变成 'online' 或 'local'。
+    mode: 'auto',
+    /// 用户是否显式选过来源。没选过时才允许按"哪路先到"自动落位。
     modePinned: false,
   };
 
@@ -84,6 +98,17 @@
 
   function load(opts) {
     opts = opts || {};
+    // 宿主还没 bind 就先别进：render() 要读 H.ui，H 为 null 时会抛错，
+    // 而异常正好打断在下面发请求那两行**之前** —— localBusy/onlineBusy 已经
+    // 置成 true、loading 已经为真，请求却一个都没发出去。此后每次 load() 都会
+    // 撞上第一行的 loading 早退，状态永远卡在「正在挑歌…」。
+    // 症状是「首页每日推荐空白 + 独立页正常」，且页面上没有任何报错。
+    //
+    // 这不是理论：app.js 的换肤对账 setView('library') 早于 Daily.bind()，
+    // 真的会把这条路径走一遍。根因在 app.js 那边已修（见 bindDailyStrip），
+    // 这里留一道防御：bind() 落地时若发现有 load 被挡过，补跑一次。
+    if (!H || !T) { loadPending = true; return; }
+    loadPending = false;
     // 已经有一轮在飞就不重复发。显式刷新是例外：它要把上一轮整个作废重来。
     if (dailyState.loading && !opts.force) return;
     if (topupTimer) { clearTimeout(topupTimer); topupTimer = null; }
@@ -175,20 +200,46 @@
   ///
   /// 只在用户**没选过**的时候动手：有已登录的平台就用在线，一个都没有就落到
   /// 本地。用户一旦手动切过，之后再怎么登录/登出都不改他的选择。
+  ///
+  /// 落位的前提是「两路都不在飞」——不是「在线回来了」。这里原先写的是
+  /// `if (onlineBusy) return`，那道闸把落位死死卡在在线那一路后面：本地 20ms
+  /// 就到了却因为 mode 还锁在 'auto' 而不被采用（见 effectiveMode），用户白等
+  /// 满 2 秒。现在两路都收工才落位，期间 'auto' 会自动采用先到的那路。
   function settleMode() {
     if (dailyState.modePinned) return;
-    // 在线那一路还在飞就别急着落位。此刻判「没有登录平台」是猜的，等它回来
-    // 又要翻回在线，用户会眼睁睁看着列表从本地整屏跳成在线。
-    if (dailyState.onlineBusy) return;
+    if (dailyState.onlineBusy || dailyState.localBusy) return;
     var ready = dailyState.online && dailyState.online.sources && dailyState.online.sources.length;
     setMode(ready ? 'online' : 'local', false);
   }
 
+  /// 当前该按哪一路渲染。
+  ///
+  /// 落位之前（mode === 'auto'）取**已经有数据的那一路**，谁先到用谁：
+  /// 本地通常 20ms、在线通常 2s，于是首屏几乎总是本地的即时结果，
+  /// 在线回来后再由 settleMode() 翻过去。用户选过来源时不受影响。
+  ///
+  /// 注意判据是「有没有拿到曲子」而不是「在不在飞」—— 落位之前也可能两路都
+  /// 拿到了（在线快、本地慢的少见情况），这时仍按先落位的那路显示，
+  /// 避免为了「更快」把已经画好的列表换掉。
+  function effectiveMode() {
+    if (dailyState.mode !== 'auto') return dailyState.mode;
+    if (dailyState.page && dailyState.page.tracks && dailyState.page.tracks.length) return 'local';
+    if (dailyState.online && dailyState.online.tracks && dailyState.online.tracks.length) return 'online';
+    // 两路都还没到手艺：在线优先（它是最终大概率要落位的那路），
+    // 这样「都空」时占位文案不会先报「本地也没有」再翻成在线。
+    return 'online';
+  }
+
   /// 来源变了要告诉宿主一声：曲库那张「还是空的」引导卡只在**本地**来源下成立
   /// （在线来源时本地库为空是常态），宿主自己管那张卡，这里不替它操心 DOM。
+  ///
+  /// 报的是 **effectiveMode()** 而不是 dailyState.mode：起始态是 'auto'，
+  /// 而 app.js 的判据是 `mode === 'online'` —— 报 'auto' 会被当成非在线，
+  /// 于是落位之前就弹出了「本地曲库是空的」大引导卡，而屏幕上明明正显示着
+  /// 在线/本地那份推荐。报生效来源，宿主看到的与用户看到的始终一致。
   function notifyMode() {
     if (H && typeof H.onDailyModeChange === 'function') {
-      H.onDailyModeChange(dailyState.mode);
+      H.onDailyModeChange(effectiveMode());
     }
   }
 
@@ -198,13 +249,14 @@
       dailyState.modePinned = true;
       writeMode(dailyState.mode);
     }
+    // 通知在 render() 里按「生效来源变了才发」统一做，这里不再单独调 ——
+    // 两处都发的话，setMode 会在来源没变时也让宿主重判一次空态卡。
     render();
-    notifyMode();
   }
 
   /// 当前来源下要显示的那批曲目，统一成界面要的形状。
   function visible() {
-    if (dailyState.mode === 'online') {
+    if (effectiveMode() === 'online') {
       var page = dailyState.online;
       if (!page || !page.tracks.length) return [];
       return page.tracks.map(function (t) {
@@ -285,7 +337,7 @@
   }
 
   function subtitle() {
-    if (dailyState.mode === 'online') {
+    if (effectiveMode() === 'online') {
       var page = dailyState.online;
       if (dailyState.onlineError) {
         // 只报事实，不给红条：本地那一路还在，用户可以自己切过去。
@@ -346,7 +398,7 @@
   }
 
   function dateLabel() {
-    if (dailyState.mode === 'online') {
+    if (effectiveMode() === 'online') {
       return (dailyState.online && dailyState.online.date) || '—';
     }
     return dailyState.page ? dailyState.page.date : '—';
@@ -356,8 +408,11 @@
     var group = H.ui.dailyModes;
     if (!group || !group.querySelectorAll) return;
     var btns = group.querySelectorAll('button[data-daily-mode]');
+    // 按**生效**来源高亮，不是 dailyState.mode：落位之前 mode 是 'auto'，
+    // 两个按钮都不会亮，用户点「本地」时也不知道自己已经处在本地视图上。
+    var mode = effectiveMode();
     for (var i = 0; i < btns.length; i += 1) {
-      var on = btns[i].getAttribute('data-daily-mode') === dailyState.mode;
+      var on = btns[i].getAttribute('data-daily-mode') === mode;
       btns[i].classList.toggle('active', on);
       btns[i].setAttribute('aria-pressed', String(on));
     }
@@ -366,16 +421,35 @@
   /// 当前来源那一路在不在飞。占位符只看这一路：另一路慢不该让已经有结果
   /// 的这一路也跟着显示「正在挑歌…」。
   function currentBusy() {
-    return dailyState.mode === 'online' ? dailyState.onlineBusy : dailyState.localBusy;
+    return effectiveMode() === 'online' ? dailyState.onlineBusy : dailyState.localBusy;
   }
 
   /// 上一次画进 DOM 的那批。补拉常常拿回一模一样的一份（后台刷新完了但内容
   /// 没变），此时重建整墙卡片只会让所有封面重新走一遍解析、闪一下，白折腾。
   var paintedKey = '';
 
+  /// 上一次通知宿主的来源。render() 据此判断「生效来源变了才通知」——
+  /// 'auto' 起始下生效来源会变两次（先到的那路 → 最终落位），
+  /// 漏掉任何一次宿主都会按旧判断留着「曲库是空的」引导卡。
+  var notifiedMode = '';
+
   function render() {
     var host = H.ui.dailyList;
     if (!host) return;
+
+    // 宿主只在 setMode 里被通知过一次，可 'auto' 起始下**生效来源会变两次**：
+    // 哪路先到就切到那一路，等两路都收工再落到最终来源。宿主要靠
+    // onDailyModeChange 决定弹不弹「本地曲库是空的」大引导卡
+    // （app.js 的 syncLibEmpty 判 `mode === 'online'`），漏掉这一次它就一直
+    // 按启动时的判断留着卡 —— 用户看着一屏推荐，头上却盖着「曲库是空的」。
+    //
+    // 放在 render 开头而不是末尾：签名相同的那次 render 会提前 return，
+    // 放末尾就通知不到「来源没变、只是重画」之外的任何情况。
+    var modeNow = effectiveMode();
+    if (notifiedMode !== modeNow) {
+      notifiedMode = modeNow;
+      notifyMode();
+    }
 
     if (H.ui.dailyDate) H.ui.dailyDate.textContent = dateLabel();
     if (H.ui.dailySub) H.ui.dailySub.textContent = subtitle();
@@ -386,7 +460,11 @@
 
     // 空态时把提示文案也算进签名：从「正在挑歌…」换成真正的空态提示，
     // 曲目 id 列表两边都是空的，光看 id 会以为没变化。
-    var key = dailyState.mode + '|' + (items.length
+    //
+    // 签名用**生效来源**而不是 dailyState.mode：'auto' 下两路先后到手会让
+    // 同一个 mode 值画出两批完全不同的卡片（本地那份与在线那份 id 也不同，
+    // 但两路都空时 id 列表一样、只有文案不同）—— 用 mode 会漏掉这一次重绘。
+    var key = effectiveMode() + '|' + (items.length
       ? items.map(function (i) { return i.id; }).join(',')
       : '#' + (currentBusy() ? 'loading' : emptyHint()));
     if (key === paintedKey) return;
@@ -395,14 +473,32 @@
     host.innerHTML = '';
     if (!items.length) {
       host.innerHTML = '<div class="hint">'
-        + (currentBusy() ? '正在挑歌…' : emptyHint()) + '</div>';
+        + (currentBusy() ? pickingHint() : emptyHint()) + '</div>';
       return;
     }
     items.forEach(function (item, index) { host.appendChild(card(item, index)); });
   }
 
+  /// 「正在挑歌…」的占位文案。
+  ///
+  /// 落位之前（'auto'）两路常常**同时**在飞，而正在渲染的那一路未必是在线的
+  /// —— 本地 20ms 就到、在线还要 2s，文案若一律写「正在汇总各平台每日推荐…」
+  /// 就会给本地曲库那批歌配上一句关于「各平台」的话，语义对不上。
+  /// 所以按生效来源分两句：显示本地时说明在线还在汇总（反之亦然），
+  /// 只剩这一路在飞时就说这一路。
+  function pickingHint() {
+    if (effectiveMode() === 'online') {
+      return dailyState.localBusy
+        ? '正在汇总各平台每日推荐，本地推荐已就绪…'
+        : '正在汇总各平台每日推荐…';
+    }
+    return dailyState.onlineBusy
+      ? '正在按本地规则挑歌，在线推荐汇总中…'
+      : '正在挑歌…';
+  }
+
   function emptyHint() {
-    if (dailyState.mode === 'online') {
+    if (effectiveMode() === 'online') {
       if (dailyState.onlineError) return '在线推荐暂时没拿到。点刷新再试，或切到「本地」。';
       // 服务端只等一个预算就返回了，慢的平台还在后台抓。这时 empty 是 false
       // （那不是「没有推荐」，是「还没到齐」），但曲目确实一首都还没有。
@@ -474,7 +570,11 @@
     var ids = items.map(function (i) { return i.id; }).filter(Boolean);
     if (!ids.length) return;
 
-    if (dailyState.mode !== 'online') {
+    // 分派必须和**画卡片时用的那一路**一致（effectiveMode），不是 dailyState.mode。
+    // 落位之前 mode 是 'auto'：若这里按 mode 判，'auto' !== 'online' 会一律走
+    // 本地路径，而屏幕上画的是在线合并歌单 —— 那是 `online:...` 虚拟 id，
+    // 喂给 playLocal 等于拿在线 id 去查本地库，必然 404 / 播不出来。
+    if (effectiveMode() !== 'online') {
       if (typeof H.playLocal === 'function') H.playLocal(ids[at], ids);
       return;
     }
@@ -501,11 +601,16 @@
   }
 
   function init() {
-    // 恢复上次选的来源。没存过就用在线起步，等首次数据到达再决定要不要落到
-    // 本地（见 settleMode）——启动时还不知道有没有登录平台。
+    // 恢复上次选的来源。**没存过就用 'auto' 起步** —— 不再无条件假定在线。
+    //
+    // 实测两路差两个数量级：本地 20ms、在线要顶满服务端 2s 的等待预算。
+    // 起点写死 'online' 时，本地那份到手后因为 mode 不匹配而被无视，用户盯着
+    // 「正在汇总…」「正在挑歌…」两行干等 2 秒 —— 而推荐其实早就在内存里了。
+    // 'auto' 下由 effectiveMode() 采用先到的那一路，两路都到齐后 settleMode()
+    // 再按「有没有登录平台」落到最终来源。
     var saved = readMode();
     // 存过 'local' 也算"用户选过"，不该被自动落位改掉。
-    dailyState.mode = saved === 'local' ? 'local' : 'online';
+    dailyState.mode = saved === 'local' ? 'local' : (saved === 'online' ? 'online' : 'auto');
     dailyState.modePinned = saved === 'online' || saved === 'local';
 
     if (H.ui.dailyModes && H.ui.dailyModes.querySelectorAll) {
@@ -524,14 +629,25 @@
     if (H.ui.dailyPlayAll) {
       H.ui.dailyPlayAll.onclick = function () { playAll(0); };
     }
+    // 这里**不**再单独 notifyMode()：上面这行 render() 已经按「生效来源变了
+    // 才通知」的规则发过了（notifiedMode 初值是空串，第一次 render 必发）。
+    // 再补一次的话启动就是连续两遍 'online'，宿主白白重判一次空态卡。
+    //
+    // 用 render() 而不是 setMode 来恢复上次选择是有意的：setMode 会写
+    // modePinned，把「上次选过」当成「用户刚刚选过」，之后再怎么登录/登出
+    // 都不改他的选择。
     render();
-    // 这里直接赋值而不是走 setMode：恢复上次选择不该被当成"用户刚选过"
-    // 而写进 pinned。但来源确实变了，宿主那边的空态卡仍要跟着落位。
-    notifyMode();
   }
 
   window.Daily = {
-    bind: function (host) { H = host; T = window.VMusicTransport; },
+    // bind() 一落地就把之前被挡下的 load 补上。注意 init() 通常紧跟着 bind()
+    // 被调（app.js 就是这个顺序），而 init() 自己也会 render() —— 两者都要求
+    // H 已就绪，所以补跑放在这里而不是 init 里，避免抢在 init 之前画一遍。
+    bind: function (host) {
+      H = host;
+      T = window.VMusicTransport;
+      if (loadPending) load();
+    },
     init: init,
     load: load,
     setMode: setMode,

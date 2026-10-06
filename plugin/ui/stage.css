@@ -235,7 +235,13 @@
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.05);
   border: var(--glass-border);
-  flex: none;
+  /* min-width:0 是必需的，不是保险：胶囊本身是 flex 子项，默认 min-width:auto
+     会拒绝收缩到内容宽度以下。工作台右栏只有 104px，扣掉 padding 后内容盒
+     78px，而这两个按钮（各 60px）+ gap + padding 至少要 111px —— 不给
+     min-width:0 的话整颗胶囊会顶出面板边界（实测溢出 20px）。
+     配合下面 .stage-mode 的 min-width:0，按钮本身也能一起收窄。 */
+  min-width: 0;
+  flex: 0 1 auto;
   order: 1;
   margin: 0 auto;
 }
@@ -249,6 +255,11 @@
   padding: 5px 10px;
   border-radius: 999px;
   cursor: pointer;
+  /* 跟 .stage-modes 配套：允许按钮本身收窄。窄栏里宁可两个字挤一点、
+     省略号截断，也不能让整颗胶囊顶破面板（横向滚动条的另一个来源）。 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
 }

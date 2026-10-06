@@ -815,6 +815,7 @@ fn map_user_playlist(item: &serde_json::Value, uid: i64) -> OnlinePlaylist {
             .unwrap_or("")
             .to_string(),
         kind: kind.into(),
+        description: None,
     }
 }
 
@@ -1198,6 +1199,7 @@ pub async fn recommend_playlists(
             // spec §1.3 的 kind 枚举封闭（created|collected|liked）；推荐结果走
             // 独立端点，前端不得对它渲染收藏类写操作（与 QQ 推荐广场同口径）。
             kind: "collected".into(),
+            description: None,
         });
     }
     Ok(out.into_iter().skip(offset).take(limit).collect())

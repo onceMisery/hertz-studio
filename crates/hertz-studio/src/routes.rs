@@ -170,6 +170,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(online_quality_get).post(online_quality_set),
         )
         .route("/v1/online/cookie", post(online_cookie))
+        // 在线歌单搜索（按关键词检索平台侧公开歌单，与下面的「我的歌单」不同）
+        .route("/v1/online/playlists/search", get(online_playlist_search))
         // 我的歌单 / 歌单详情 / 写操作
         .route("/v1/online/playlists", get(online_playlists))
         .route(
@@ -3203,6 +3205,20 @@ pub(crate) struct PlaylistsQuery {
 
 pub(crate) fn default_page_limit() -> usize {
     30
+}
+
+/// 在线歌单搜索：source/q/limit/offset 与单曲搜索同形（复用 SearchQuery），
+/// 结果归一化成 PlaylistSearchPage。能力闸门在 dispatch 内。
+async fn online_playlist_search(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<online::SearchQuery>,
+) -> ApiResult<Json<online::PlaylistSearchPage>> {
+    let source = q.source.clone();
+    tagged(
+        &source,
+        online::search_playlists(&online_ctx(&state), &source, &q).await,
+    )
+    .map(Json)
 }
 
 async fn online_playlists(

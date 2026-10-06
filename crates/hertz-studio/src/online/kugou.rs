@@ -1038,6 +1038,7 @@ fn map_playlist(item: &serde_json::Value) -> super::OnlinePlaylist {
         play_count,
         creator,
         kind: kind.into(),
+        description: None,
     }
 }
 
@@ -1186,6 +1187,7 @@ pub async fn playlist_create(ctx: &Ctx, name: &str) -> ApiResult<super::OnlinePl
         // CredPack 不存昵称，creator 留空（允许为空）。
         creator: String::new(),
         kind: "created".into(),
+        description: None,
     })
 }
 
