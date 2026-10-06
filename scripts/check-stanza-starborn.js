@@ -223,7 +223,7 @@ ok(/include_str!\("\.\.\/\.\.\/\.\.\/plugin\/ui\/stanza\/stanza-starborn\.js"\)/
   '后端 include_str! 内嵌星诞脚本');
 // 路由在 main.rs 里是 rustfmt 展开的多行形式，匹配时容忍换行与缩进。
 ok(/route\(\s*"\/stanza\/stanza-starborn\.js"/.test(mainRs), '后端提供 /stanza/stanza-starborn.js 路由');
-ok(/<script src="stanza\/stanza-starborn\.js"><\/script>/.test(indexHtml), 'index.html 加载星诞脚本');
+ok(/<script[^>]*src="stanza\/stanza-starborn\.js"><\/script>/.test(indexHtml), 'index.html 加载星诞脚本');
 // 依赖顺序：星诞要用 StanzaSonnetFX.resolveAudioBands，必须排在 sonnet-fx 之后
 ok(indexHtml.indexOf('stanza-sonnet-fx.js') < indexHtml.indexOf('stanza-starborn.js'),
   '星诞排在 sonnet-fx 之后（要用 resolveAudioBands）');

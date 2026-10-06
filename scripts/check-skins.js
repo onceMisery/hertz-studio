@@ -1110,7 +1110,7 @@ function checkWiring() {
       `skin.${id}.css 默认 disabled（默认不生效）`);
   }
   ok(/src="skins\/skins\.js"/.test(HTML), 'skins.js 引了进来');
-  ok(HTML.indexOf('skins/skins.js') < HTML.indexOf('<script src="app.js"'),
+  ok(HTML.indexOf('skins/skins.js') < HTML.indexOf('src="app.js"'),
     'skins.js 排在 app.js 之前（app.js 启动时要能拿到它）');
   ok(/id="skins-list"/.test(HTML), '设置页有皮肤列表容器');
 
@@ -1133,7 +1133,7 @@ function checkWiring() {
   ok(lnJsAt > 0, 'index.html 引入了 skin.liunian.js');
   ok(lnJsAt > HTML.indexOf('src="skins/skins.js"'),
     'skin.liunian.js 排在 skins.js 之后（要监听 skin:changed）');
-  ok(lnJsAt < HTML.indexOf('<script src="app.js"'),
+  ok(lnJsAt < HTML.indexOf('src="app.js"'),
     'skin.liunian.js 排在 app.js 之前');
   ok(/addEventListener\(['"]skin:changed['"]/.test(LIUNIAN_JS),
     '重编排层挂在 skin:changed 事件上（不主动 hook 业务代码）');
@@ -1763,7 +1763,7 @@ function checkQingfengWiring() {
   ok(qfJsAt > 0, 'index.html 引入了 skin.qingfeng.js');
   ok(qfJsAt > HTML.indexOf('src="skins/skins.js"'),
     'skin.qingfeng.js 排在 skins.js 之后（要监听 skin:changed）');
-  ok(qfJsAt < HTML.indexOf('<script src="app.js"'),
+  ok(qfJsAt < HTML.indexOf('src="app.js"'),
     'skin.qingfeng.js 排在 app.js 之前');
 
   ok(/include_str!\("[^"]*\/skins\/skin\.qingfeng\.css"\)/.test(MAIN_RS),

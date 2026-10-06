@@ -373,19 +373,33 @@ async fn main() -> anyhow::Result<()> {
         // OBS 浮层页：静态壳不走鉴权（没有数据），数据端点 /v1/overlay/lyric
         // 自带 token 校验，页面从 ?token= 读。与 index 同款 no-cache。
         .route("/overlay", get(|| asset(HTML, OVERLAY_HTML)))
+        // 带内容指纹的 JS/CSS 升级成长缓存；其余（含 /v1 接口）不受影响。
+        .layer(axum::middleware::from_fn(asset_cache))
         .with_state(state.clone());
 
     let bind = args.bind.unwrap_or_else(|| config.server.bind.clone());
     let port = args.port.unwrap_or(config.server.port);
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
-    let actual_port = listener.local_addr()?.port();
+    let local = listener.local_addr()?;
+    let actual_port = local.port();
 
     let discovery = state::write_discovery(&state, actual_port).await?;
-    let url = format!("http://127.0.0.1:{actual_port}/?token={token}");
+    // 打印的地址按**实际绑定**的接口来（绑 0.0.0.0 时回落到 127.0.0.1，那是本机
+    // 访问的正确入口；绑具体网卡时给那个地址，否则用户会照着 127.0.0.1 去别的机器上试）。
+    let shown = if local.ip().is_unspecified() {
+        std::net::IpAddr::from([127, 0, 0, 1])
+    } else {
+        local.ip()
+    };
+    let url = format!("http://{}/?token={token}", host_port(shown, actual_port));
     tracing::info!("listening on {bind}:{actual_port}");
     println!("hertz-studio v{}", env!("CARGO_PKG_VERSION"));
+    if let Some(warning) = exposure_warning(local.ip(), actual_port) {
+        eprintln!("{warning}");
+        tracing::warn!("{warning}");
+    }
     println!("  ui       {url}");
-    println!("  health   http://127.0.0.1:{actual_port}/v1/health");
+    println!("  health   http://{}/v1/health", host_port(shown, actual_port));
     println!("  discovery {}", discovery.display());
 
     if args.open {
@@ -407,6 +421,194 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 内容指纹的输入：所有由 `asset()` 出的 JS/CSS。
+///
+/// 这份清单必须与资产路由一一对应 —— 漏一个，那个文件改了内容而指纹不变，
+/// 浏览器就会一直命中旧缓存（`asset()` 注释里警告的正是这个坑）。覆盖关系由
+/// `scripts/check-assets.js` 交叉断言，不靠人记。
+const ASSET_FINGERPRINT_INPUTS: &[&str] = &[
+    HOST_JS,
+    DIALOGS_JS,
+    APP_JS,
+    STAGE_JS,
+    ONSET_JS,
+    STAGE_CTL_JS,
+    STAGE_PARTICLES_JS,
+    STAGE_PARTICLES_GL_JS,
+    THEMES_JS,
+    SHELF_JS,
+    PL_COVERS_JS,
+    THEME_STUDIO_JS,
+    SKINS_JS,
+    CREATIVE_GL_JS,
+    CREATIVE_STAGE_JS,
+    CREATIVE_PROMPT_JS,
+    HANDDRAWN_JS,
+    BACKGROUNDS_JS,
+    BGWALL_JS,
+    LYRIC3D_JS,
+    WORKSHOP_JS,
+    STAGE_CINEMA_JS,
+    STAGE_FREECAM_JS,
+    STAGE_FOCUS_JS,
+    STAGE_LYRICS_JS,
+    STAGE_SHELF_JS,
+    STAGE3D_JS,
+    STAGE_IMMERSIVE_JS,
+    STANZA_UTIL_JS,
+    STANZA_THEME_JS,
+    STANZA_TEXTLAYOUT_JS,
+    STANZA_BG_JS,
+    STANZA_SUBTITLE_JS,
+    STANZA_CLASSIC_JS,
+    STANZA_CADENZA_JS,
+    STANZA_SONNET_FX_JS,
+    STANZA_SONNET_JS,
+    STANZA_TEMPERA_JS,
+    STANZA_STARBORN_JS,
+    PIXI_JS,
+    QRCODE_JS,
+    ONLINE_LOGIN_JS,
+    ONLINE_JS,
+    ONLINE_PLAYLISTS_JS,
+    ONLINE_PLAYLIST_VIEW_JS,
+    FAVORITES_JS,
+    DAILY_JS,
+    DAILY_VIEW_JS,
+    PALETTE_JS,
+    VIDEO_EXPORT_JS,
+    SKIN_LIUNIAN_JS,
+    SKIN_QINGFENG_JS,
+    STYLE_CSS,
+    STAGE_CSS,
+    CREATIVE_CSS,
+    STAGE3D_CSS,
+    STANZA_CSS,
+    ONLINE_CSS,
+    THEME_STUDIO_CSS,
+    SKINS_CSS,
+    SKIN_SHEEN_CSS,
+    SKIN_WORKBENCH_CSS,
+    SKIN_LIUNIAN_CSS,
+    SKIN_IOS_CSS,
+    SKIN_QINGFENG_CSS,
+    STAGE_THEME_STARFALL_CSS,
+    STAGE_THEME_IOS_CSS,
+];
+
+/// 全部内嵌 JS/CSS 的内容指纹（进程内算一次）。
+///
+/// `asset()` 只能发 no-cache（内嵌资源没有 Last-Modified/ETag 可协商），于是
+/// 每次打开页面都要把整套前端重下一遍。这里给内容算一个短指纹，渲染 index.html
+/// 时拼进每个 JS/CSS 的 URL；`asset_cache` 中间件见到 URL 带的指纹与当前一致，
+/// 就把响应升级成 immutable 长缓存。内容一改指纹就变、URL 跟着变，所以不会出现
+/// 「前端修了 bug 用户拿不到」。
+///
+/// 用 FNV-1a：这里只要「内容变则值变」，没有对抗构造的需求，为算个缓存键引入
+/// 密码学哈希不值当。
+fn assets_fingerprint() -> &'static str {
+    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FINGERPRINT.get_or_init(|| hash_inputs(ASSET_FINGERPRINT_INPUTS))
+}
+
+/// FNV-1a over the given bodies, as 16 hex digits.
+fn hash_inputs(inputs: &[&str]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for body in inputs {
+        // 先混入长度，否则 ["ab","c"] 会与 ["a","bc"] 撞成同一个值。
+        hash ^= body.len() as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        for byte in body.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
+/// 只给同源、以 `.js`/`.css` 结尾的相对引用加指纹。
+///
+/// `href="data:,"`（空图标）是内联数据，`href="#i-play"` 是页面内锚点，
+/// 都不是资源 —— 给它们加查询串只会弄坏。
+fn is_versionable_asset(value: &str) -> bool {
+    !value.contains("://")
+        && !value.starts_with('#')
+        && !value.starts_with("data:")
+        && (value.ends_with(".js") || value.ends_with(".css"))
+}
+
+/// 把 index.html 里相对的 JS/CSS 引用改写成带 `?v=<指纹>` 的 URL。
+///
+/// 放在服务端而非手写进 index.html：指纹要运行时才算得出来；六十多处引用手抄
+/// 一遍既容易漏，也会和 check-assets.js 第 3 节（引用必须精确等于路由 path）
+/// 打架。
+fn version_asset_urls(html: &str) -> String {
+    let version = assets_fingerprint();
+    let mut out = String::with_capacity(html.len() + 128);
+    let mut rest = html;
+    while let Some((idx, attr)) = ["href=\"", "src=\""]
+        .iter()
+        .filter_map(|attr| rest.find(attr).map(|i| (i, *attr)))
+        .min_by_key(|(i, _)| *i)
+    {
+        let value_start = idx + attr.len();
+        let Some(value_end) = rest[value_start..].find('"') else {
+            break;
+        };
+        let value = &rest[value_start..value_start + value_end];
+        out.push_str(&rest[..value_start]);
+        out.push_str(value);
+        if is_versionable_asset(value) {
+            out.push_str("?v=");
+            out.push_str(version);
+        }
+        out.push('"');
+        rest = &rest[value_start + value_end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 查询串里某个参数的值。不做 percent-decode：这里只用来比对十六进制指纹，
+/// 与 routes.rs 的 `query_token` 同一取舍。
+fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then_some(v)
+    })
+}
+
+/// 带正确内容指纹的 JS/CSS 响应升级为长缓存。
+///
+/// 只认「查询串里的 v 与当前指纹相等」这一种情况，且只作用于 JS/CSS 响应 ——
+/// 免得某个恰好带 `v` 参数的接口响应被缓存一年。
+async fn asset_cache(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let versioned = request
+        .uri()
+        .query()
+        .and_then(|query| query_param(query, "v"))
+        .map(|v| v == assets_fingerprint())
+        .unwrap_or(false);
+    let mut response = next.run(request).await;
+    let is_asset = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.starts_with("application/javascript") || value.starts_with("text/css")
+        });
+    if versioned && is_asset {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
+    response
+}
+
 /// Placeholder in `web/index.html` that receives the session token.
 ///
 /// It must differ from the JS variable name written next to it: replacing the
@@ -415,7 +617,7 @@ async fn main() -> anyhow::Result<()> {
 const TOKEN_PLACEHOLDER: &str = "__VMUSIC_TOKEN_VALUE__";
 
 fn render_index(html: &str, token: &str) -> String {
-    html.replace(TOKEN_PLACEHOLDER, token)
+    version_asset_urls(&html.replace(TOKEN_PLACEHOLDER, token))
 }
 
 async fn index(state: Arc<AppState>) -> axum::response::Response {
@@ -435,9 +637,13 @@ async fn index(state: Arc<AppState>) -> axum::response::Response {
 /// 一个 handler、一条 route、以及那份复制粘贴的 header 拼装），漏一处就是
 /// 404 或 MIME 不对导致浏览器拒绝执行。现在只剩 const 一行 + route 一行。
 ///
-/// 必须带 `Cache-Control: no-cache`：内嵌资源没有 Last-Modified/ETag 可供
+/// 默认必须带 `Cache-Control: no-cache`：内嵌资源没有 Last-Modified/ETag 可供
 /// 协商，浏览器启发式缓存会把几天前的旧 JS/CSS 一直端出来，前端修了 bug
 /// 用户也拿不到（歌单视图在线分区就栽过这个）。本机回源代价可忽略。
+///
+/// 唯一的例外是 `asset_cache`：index.html 渲染时会给引用挂上 `?v=<内容指纹>`，
+/// 那种 URL 已经随内容变化，中间件把响应升级成 immutable。裸路径（没有指纹）
+/// 仍走这里的 no-cache。
 async fn asset(mime: &'static str, body: &'static str) -> axum::response::Response {
     (
         [

@@ -61,14 +61,34 @@ includes.forEach((inc) => {
 const declared = new Set(includes.map((i) => i.name));
 // 路由可能写成一行，也可能因为行宽被 rustfmt 折成多行 —— 所以空白一律用 \s*
 // 匹配，并允许尾随逗号。asset() 的第一个参数是 MIME 常量、第二个才是资源常量。
-const routeRe = /\.route\(\s*"(\/[^"]+)"\s*,\s*get\(\s*\|\|\s*asset\(\s*[A-Z0-9_]+\s*,\s*([A-Z0-9_]+)\s*\)\s*,?\s*\)\s*,?\s*\)/g;
+const routeRe = /\.route\(\s*"(\/[^"]+)"\s*,\s*get\(\s*\|\|\s*asset\(\s*([A-Z0-9_]+)\s*,\s*([A-Z0-9_]+)\s*\)\s*,?\s*\)\s*,?\s*\)/g;
 const routes = [];
-while ((m = routeRe.exec(mainRs)) !== null) routes.push({ path: m[1], const: m[2] });
+while ((m = routeRe.exec(mainRs)) !== null) routes.push({ path: m[1], mime: m[2], const: m[3] });
 
 console.log('\n路由表');
 ok(routes.length >= 15, `route 条目数量合理（${routes.length}）`);
 routes.forEach((r) => {
   ok(declared.has(r.const), `路由 ${r.path} 引用的 ${r.const} 已在文件顶部声明`);
+});
+
+// 内容指纹表必须与「由 asset() 出的 JS/CSS 路由」严格一一对应。index.html 渲染时
+// 按这张表所覆盖的内容算指纹、给每个资源 URL 挂 ?v=，asset_cache 再据此发
+// immutable —— 漏一个常量，那个文件改了内容而指纹不变，浏览器就会一直命中旧
+// 缓存（正是 main.rs asset() 注释里警告的那个坑）。HTML 页（/overlay）不参与。
+const fpMatch = /const\s+ASSET_FINGERPRINT_INPUTS\s*:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/.exec(mainRs);
+ok(!!fpMatch, 'main.rs 定义了 ASSET_FINGERPRINT_INPUTS');
+const fingerprintNames = new Set();
+if (fpMatch) {
+  let nm;
+  const nmRe = /\b([A-Z][A-Z0-9_]*)\b/g;
+  while ((nm = nmRe.exec(fpMatch[1])) !== null) fingerprintNames.add(nm[1]);
+}
+const assetConsts = new Set(routes.filter((r) => r.mime !== 'HTML').map((r) => r.const));
+assetConsts.forEach((name) => {
+  ok(fingerprintNames.has(name), `资产 ${name} 在内容指纹表 ASSET_FINGERPRINT_INPUTS 里`);
+});
+fingerprintNames.forEach((name) => {
+  ok(assetConsts.has(name), `指纹表里的 ${name} 有对应的资产路由`);
 });
 
 // 每个 JS/CSS 资源常量都必须有一条路由，否则浏览器会 404。

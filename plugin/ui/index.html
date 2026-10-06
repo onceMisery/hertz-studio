@@ -48,10 +48,10 @@
 <!-- 宿主适配层，必须是第一个脚本：app.js 排在最后加载，而 stage3d.js /
      theme-studio.js / online.js 都在它之前，靠不上它定义的东西。独立形态下
      它全是恒等实现，行为与没有这个文件时一致。 -->
-<script src="host.js"></script>
+<script defer src="host.js"></script>
 <!-- 自建 prompt/confirm：插件 iframe 没有 allow-modals，原生弹窗会被静默忽略。
      独立形态下它原样委托给原生，所以排在 host.js 之后、其余模块之前即可。 -->
-<script src="dialogs.js"></script>
+<script defer src="dialogs.js"></script>
 <script>window.__VMUSIC_TOKEN__ = "__VMUSIC_TOKEN_VALUE__";</script>
 
 <!-- 统一图标库：全站只维护这一份 24×24 SVG symbol；页面中通过
@@ -1647,77 +1647,77 @@
 <!-- 演示后端（prototype/mock.js）不随服务发布：app.js 探不到 /v1/health 时
      会自动退到 ServerTransport，不需要这段 script 也能正常工作。
      下面五个是创意舞台：内核 → 表现层 → 编排 → 工坊，顺序即依赖顺序。 -->
-<script src="skins/skins.js"></script>
+<script defer src="skins/skins.js"></script>
 <!-- 流年皮肤的 DOM 重编排层：紧跟 skins.js（要监听 skin:changed），
      且必须在 app.js 之前。 -->
-<script src="skins/skin.liunian.js"></script>
+<script defer src="skins/skin.liunian.js"></script>
 <!-- 清风皮肤的 DOM 重编排层：同样紧跟 skins.js（要监听 skin:changed），
      且必须在 app.js 之前（要向 app.js 发 qf:panel 事件取队列快照）。 -->
-<script src="skins/skin.qingfeng.js"></script>
-<script src="themes.js"></script>
-<script src="stage.js"></script>
+<script defer src="skins/skin.qingfeng.js"></script>
+<script defer src="themes.js"></script>
+<script defer src="stage.js"></script>
 <!-- 起音检测：粒子层与三维层共用同一份"鼓点是哪一刻"，必须排在两者之前 -->
-<script src="onset.js"></script>
-<script src="stage-particles.js"></script>
-<script src="stage-particles-gl.js"></script>
+<script defer src="onset.js"></script>
+<script defer src="stage-particles.js"></script>
+<script defer src="stage-particles-gl.js"></script>
 <!-- 共享 GL 宿主：唯一的画布与上下文，必须排在两个场景模块之前 -->
 <!-- 3D 粒子舞台封面：静态点阵 → 播放时涟漪律动，WebGL 不可用自动退回 CSS 封面 -->
 <!-- 星河背景：星野 + 流动星河，与粒子封面同画布切换 -->
 <!-- 视觉子系统统一控制器：仅注册，初始化由 boot 经 VisualController.init() -->
-<script src="stage-control.js"></script>
-<script src="pl-covers.js"></script>
-<script src="shelf.js"></script>
+<script defer src="stage-control.js"></script>
+<script defer src="pl-covers.js"></script>
+<script defer src="shelf.js"></script>
 <!-- 主题工作室：注册二次元主题 + 铺壁纸背景层。依赖 themes.js 的 Theme.register，
      设置界面由它自己渲染；app.js 在启动序列里调一次 bind/init。 -->
-<script src="theme-studio.js"></script>
-<script src="creative-gl.js"></script>
-<script src="bgwall.js"></script>
-<script src="lyric3d.js"></script>
-<script src="backgrounds.js"></script>
-<script src="handdrawn.js"></script>
-<script src="creative-stage.js"></script>
+<script defer src="theme-studio.js"></script>
+<script defer src="creative-gl.js"></script>
+<script defer src="bgwall.js"></script>
+<script defer src="lyric3d.js"></script>
+<script defer src="backgrounds.js"></script>
+<script defer src="handdrawn.js"></script>
+<script defer src="creative-stage.js"></script>
 <!-- 离线提示词编译器：compile 只读 CreativeStage.scenes/spec，写入走
      CreativeStage.applyIntent；排在编排层之后、工坊之前。 -->
-<script src="creative-prompt.js"></script>
-<script src="workshop.js"></script>
+<script defer src="creative-prompt.js"></script>
+<script defer src="workshop.js"></script>
 <!-- 节拍电影相机：纯时间轴 + 驱动（消费 /v1/stage/beatmap） -->
-<script src="stage-cinema.js"></script>
-<script src="stage-freecam.js"></script>
-<script src="stage-focus.js"></script>
+<script defer src="stage-cinema.js"></script>
+<script defer src="stage-freecam.js"></script>
+<script defer src="stage-focus.js"></script>
 <!-- 沉浸式三维舞台：自建一个 WebGL2 上下文（拿不到就整体降级），逐帧驱动
      仍然走 Stage.gate()。排在 stage-immersive 之前，键盘用捕获阶段抢下 F。 -->
-<script src="stanza/stanza-util.js"></script>
-<script src="stanza/stanza-theme.js"></script>
-<script src="stanza/stanza-textlayout.js"></script>
-<script src="stanza/stanza-bg.js"></script>
-<script src="stanza/stanza-subtitle.js"></script>
-<script src="stanza/stanza-classic.js"></script>
-<script src="stanza/stanza-cadenza.js"></script>
-<script src="stanza/stanza-sonnet-fx.js"></script>
-<script src="stanza/stanza-sonnet.js"></script>
-<script src="stanza/stanza-tempera.js"></script>
-<script src="stanza/stanza-starborn.js"></script>
-<script src="stage-lyrics.js"></script>
+<script defer src="stanza/stanza-util.js"></script>
+<script defer src="stanza/stanza-theme.js"></script>
+<script defer src="stanza/stanza-textlayout.js"></script>
+<script defer src="stanza/stanza-bg.js"></script>
+<script defer src="stanza/stanza-subtitle.js"></script>
+<script defer src="stanza/stanza-classic.js"></script>
+<script defer src="stanza/stanza-cadenza.js"></script>
+<script defer src="stanza/stanza-sonnet-fx.js"></script>
+<script defer src="stanza/stanza-sonnet.js"></script>
+<script defer src="stanza/stanza-tempera.js"></script>
+<script defer src="stanza/stanza-starborn.js"></script>
+<script defer src="stage-lyrics.js"></script>
 <!-- 3D 歌单架（封面流）：只依赖 Stage 只读出口，必须排在 stage3d.js 之前 -->
-<script src="stage-shelf.js"></script>
-<script src="stage3d.js"></script>
-<script src="stage-immersive.js"></script>
-<script src="vendor/qrcode.js"></script>
-<script src="online-login.js"></script>
-<script src="online.js"></script>
-<script src="online-playlists.js"></script>
-<script src="online-playlist-view.js"></script>
+<script defer src="stage-shelf.js"></script>
+<script defer src="stage3d.js"></script>
+<script defer src="stage-immersive.js"></script>
+<script defer src="vendor/qrcode.js"></script>
+<script defer src="online-login.js"></script>
+<script defer src="online.js"></script>
+<script defer src="online-playlists.js"></script>
+<script defer src="online-playlist-view.js"></script>
 <!-- 收藏与每日推荐：都依赖 VMusicTransport（app.js 里定义），所以排在 app.js
      之前加载、由 app.js 的启动序列 bind() 注入宿主依赖。 -->
-<script src="favorites.js"></script>
-<script src="daily.js"></script>
-<script src="daily-view.js"></script>
+<script defer src="favorites.js"></script>
+<script defer src="daily.js"></script>
+<script defer src="daily-view.js"></script>
 <!-- 命令面板：只提供引擎与 UI，命令由 app.js 启动时用自己的闭包注册，
      所以必须在 app.js 之前加载。Ctrl+K 唤起。 -->
-<script src="palette.js"></script>
+<script defer src="palette.js"></script>
 <!-- 歌词视频导出：自包含（画幅/弹窗/录制管线都在模块里），只在用户点击时
      才碰 window.Stage3D 与后端 API，加载顺序无关紧要。 -->
-<script src="video-export.js"></script>
+<script defer src="video-export.js"></script>
 <!-- 胶囊播放器：最小化态下界面唯一可见的东西（dock 实例里则是唯一内容）。
      信息区（封面 / 「正在播放」/ 标题 / 艺术家）整块可点 = 展开；右侧四个按钮是
      上一首 / 播放暂停 / 下一首 / 展开——不展开也能换歌与控制播放。整块可拖、
@@ -1750,6 +1750,6 @@
   </span>
 </div>
 
-<script src="app.js"></script>
+<script defer src="app.js"></script>
 </body>
 </html>
