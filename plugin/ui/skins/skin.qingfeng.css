@@ -291,7 +291,13 @@
   transition: color var(--dur-2) var(--ease);
 }
 
-/* 选中态：实心浅色滑块 + 深色字（folia 的 motion.span layoutId 手感） */
+/* 选中态：实心浅色滑块 + 深色字（folia 的 motion.span layoutId 手感）。
+   滑块底色用 --skin-line-soft（皮肤自己的浅描边色）**不能**用
+   `--surface-hi` —— 那个令牌的值是 `inset 0 1px 0 rgba(255,255,255,.055)`，
+   是给 box-shadow 用的**内高光**（见 style.css 的用法），当颜色解析必然失败，
+   滑块直接变透明；配上的 --accent-ink（#0A0A0A 近黑）就压在深色胶囊上，
+   文字彻底看不见（症状：选中项「本地」隐进背景）。
+   配对关系也重要：滑块是浅的，字就必须是深的，两者要一起换。 */
 [data-skin="qingfeng"] .qf-nav-item.is-active {
   color: var(--accent-ink);
 }
@@ -301,9 +307,22 @@
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: var(--surface-hi);
+  /* 滑块必须**明显亮**才承得住 --accent-ink（#0A0A0A 近黑）那个字。
+     `--skin-surface` 是半透明深色（实测解析成 rgb(18,20,28,.78)），
+     拿它往白里混 14% 出来还是 rgb(55,57,64) 的深灰 —— 配近黑字一样读不出
+     （实测选中项文字与滑块底色几乎同色）。这里反过来以 --text 为主
+     混一点点胶囊底色，得到接近浅灰的实色，深字压上去才清晰。
+     与 --accent-ink 的配对关系要一起看：滑块浅 → 字必须深，反之亦然。 */
+  background: color-mix(in srgb, var(--text) 82%, var(--skin-surface) 18%);
   box-shadow: var(--skin-shadow-card);
-  z-index: -1;
+  /* z-index 不用 -1：.qf-nav 自带 background，负层会沉到它下面去、
+   滑块等于不存在。改用 0 并把文字提到 1。 */
+  z-index: 0;
+}
+
+[data-skin="qingfeng"] .qf-nav-item.is-active > * {
+  position: relative;
+  z-index: 1;
 }
 
 [data-skin="qingfeng"] .qf-nav-item:hover {
@@ -1744,18 +1763,41 @@
   transform: scale(1.25);
 }
 
-/* ===================== 舞台 ============================================ */
+/* ===================== 舞台：迷你播放器小卡 ============================ */
 
 /* 单列外壳下 .stage 若留在栅格里会掉到内容下方变成第二行（.app 只有一个
-   轨道），所以整块脱离文档流，浮在右侧当「正在播放」侧卡。底部 84px 让开
-   右下角的头像控件。 */
+   轨道），所以整块脱离文档流，浮在右侧当「正在播放」小卡。
+   底部胶囊已经装下了全部播放控制，这张卡只保留**核心四件**：
+   封面缩略 + 歌曲信息 + 进度 + 播放/暂停（外加关闭）。
+   模式切换 / 全屏 / 队列 / 频谱 / 歌词 / 装饰层全部摘掉 ——
+   之前 232×636 的大卡片会盖住曲库右列，是「占位过大」的根因；
+   那次只改了 width，纵向仍被歌词(flex:1)撑着，治标不治本。
+   布局用 grid 命名区域把竖排改横排：**不搬节点** —— #now-title /
+   #stage-progress 的状态同步是 app.js 按 id 写的，动 DOM 顺序等于让
+   其它皮肤一起陪绑，皮肤只该用 CSS 重排。 */
 [data-skin="qingfeng"] .stage {
   position: fixed;
   top: var(--qf-clear);
   right: 24px;
-  bottom: 84px;
+  /* 不用 left+bottom 双向锚定：那样高度会被拉满。改成 top 单锚 + max-height，
+     卡片按内容收高。 */
+  bottom: auto;
+  max-height: calc(100vh - var(--qf-clear) - 96px);
   z-index: 30;
-  width: 300px;
+  width: 232px;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "thumb head   head"
+    "thumb title  title"
+    "thumb artist artist"
+    "prog  prog   prog"
+    "ctrl  ctrl   ctrl";
+  align-content: start;
+  gap: 1px 10px;
+  padding: 10px 12px 12px;
+  text-align: left;
+  cursor: default;
   border-radius: var(--skin-radius);
   border: 1px solid var(--skin-line-soft);
   background: var(--skin-surface);
@@ -1763,18 +1805,144 @@
   backdrop-filter: saturate(180%) blur(20px);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   overflow: hidden;
+  /* 收起状态下也不能有 transition —— left/top 变化会带上一段补间，
+     拖动时整张卡会「追着鼠标跑」，看起来像粘滞。 */
+  transition: none;
 }
 
+/* 非核心块整排摘掉。stage-fx/dots/particles/ripple 是 stage.js 注入的
+   装饰层（absolute 铺满整卡）：进了 grid 会变成网格项把行撑开，
+   必须显式点名，光靠「卡片变小」盖不住。 */
+[data-skin="qingfeng"] .stage-modes,
+[data-skin="qingfeng"] .stage-head-fs,
+[data-skin="qingfeng"] .stage-queue,
+[data-skin="qingfeng"] .stage-tech,
+[data-skin="qingfeng"] .spectrum,
+[data-skin="qingfeng"] .stage-lyrics,
+[data-skin="qingfeng"] .stage-fx,
+[data-skin="qingfeng"] .stage-dots,
+[data-skin="qingfeng"] .stage-particles,
+[data-skin="qingfeng"] .stage-ripple {
+  display: none !important;
+}
+
+/* 封面：大唱片盘缩成 48px 缩略图，钉在左侧第一列。
+   .disc 的投影是按 236px 盘子调的（0 18px 44px），缩到 48px 会糊成一团，
+   直接撤掉；环纹在这个尺寸下读不出来，也是纯噪。 */
+[data-skin="qingfeng"] .disc-wrap {
+  grid-area: thumb;
+  width: 48px;
+  margin: 0;
+  align-self: center;
+}
+[data-skin="qingfeng"] .disc { box-shadow: none; }
+[data-skin="qingfeng"] .disc-ring { display: none; }
+
+/* 拖动把手：整张 .stage-head 就是把手（关闭按钮也在把手里，照常可点）。 */
+[data-skin="qingfeng"] .stage-head {
+  grid-area: head;
+  padding: 0 0 2px;
+  min-height: 18px;
+  cursor: grab;
+  touch-action: none;   /* 触屏上让 pointer 事件走我们自己的逻辑，不被浏览器手势抢走 */
+  user-select: none;    /* 拖动时别把歌名选中 */
+}
+[data-skin="qingfeng"] .stage-kicker { font-size: var(--fs-3xs); }
+
+[data-skin="qingfeng"] .stage-title {
+  grid-area: title;
+  margin: 0;
+  font-size: var(--fs-sm);
+  letter-spacing: 0;
+  line-height: 1.3;
+}
+[data-skin="qingfeng"] .stage-artist {
+  grid-area: artist;
+  margin: 0;
+  font-size: var(--fs-xs);
+  line-height: 1.3;
+}
+
+/* 进度：时间右对齐贴着滑块，一行读完「听到哪了 / 一共多长」。 */
+[data-skin="qingfeng"] .stage-progress { grid-area: prog; margin-top: 8px; }
+[data-skin="qingfeng"] .stage-times {
+  justify-content: flex-end;
+  margin-bottom: 3px;
+  font-size: var(--fs-3xs);
+}
+
+/* 控制行由 skin.qingfeng.js 注入（.qf-mini-ctrl），图标态跟 body.is-playing 走。 */
+[data-skin="qingfeng"] .qf-mini-ctrl {
+  grid-area: ctrl;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+[data-skin="qingfeng"] .qf-mini-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--r-pill);
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+[data-skin="qingfeng"] .qf-mini-btn:hover { background: var(--hover); color: var(--text); }
+[data-skin="qingfeng"] .qf-mini-btn svg { width: 14px; height: 14px; }
+[data-skin="qingfeng"] .qf-mini-btn-primary {
+  width: 34px;
+  height: 34px;
+  background: var(--brand);
+  color: var(--accent-ink);
+}
+[data-skin="qingfeng"] .qf-mini-btn-primary:hover { background: var(--brand); color: var(--accent-ink); }
+[data-skin="qingfeng"] .qf-mini-btn-primary svg { width: 16px; height: 16px; }
+[data-skin="qingfeng"] .qf-mini-close {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-sm);
+}
+[data-skin="qingfeng"] .qf-mini-close svg { width: 12px; height: 12px; }
+
+/* 播放/暂停图标切换与底部胶囊同一套判据（body.is-playing）：
+   皮肤自己不持有播放状态 —— 状态只有 app.js 一份。 */
+[data-skin="qingfeng"] .qf-mini-btn .ic-pause { display: none; }
+body.is-playing [data-skin="qingfeng"] .qf-mini-btn .ic-play { display: none; }
+body.is-playing [data-skin="qingfeng"] .qf-mini-btn .ic-pause { display: block; }
+
+/* 关闭：收起这张卡。位置与「换曲自动回来」的逻辑见 skin.qingfeng.js。 */
+[data-skin="qingfeng"] .stage.qf-mini-closed { display: none !important; }
+
+/* 拖动中：抬起来 + 缩一点 + 压深阴影，让「手上有东西」这件事看得见。
+   关键是**不要**给 left/top 加 transition（见上），也不要在这时改宽度 ——
+   宽度一变，鼠标与卡片之间就出现了偏移，松手时卡片会跳一下。 */
+body.qf-stage-dragging [data-skin="qingfeng"] .stage,
+[data-skin="qingfeng"] .stage.qf-dragging {
+  box-shadow: var(--skin-shadow-card);
+  transform: scale(1.02);
+  cursor: grabbing;
+}
+
+[data-skin="qingfeng"] .stage.qf-dragging {
+  /* 拖动时禁用 transition 是另一层保险：CSS 里那条 transition:none 已被
+     上面 .stage 的规则覆盖过，这里再点一次名，避免将来有人在 .stage 上
+     加回 transition 时把粘滞带回来。 */
+  transition: none !important;
+}
+
+/* 窄屏小卡会压住内容右侧，直接撤掉：播放信息在底部胶囊里已经有了。 */
 @media (max-width: 1100px) {
-  /* 窄屏侧卡会压住内容右侧，直接撤掉：播放信息在底部胶囊里已经有了。 */
   [data-skin="qingfeng"] .stage {
     display: none;
   }
 }
 
-[data-skin="qingfeng"] .stage-head {
-  padding: 14px 18px 10px;
-}
 
 /* ===================== 底部播放胶囊 + 右下头像 ======================= */
 
@@ -1787,10 +1955,14 @@
   left: 50%;
   right: auto;
   bottom: 22px;
-  /* 680px 不是随手取的：胶囊里要装下「曲名 + 播放控制 + 进度条 + 模式 +
-     音量」五块。560px 时进度条被压到 27px、音量滑块挤成一条线
-     （实测截图里它们糊成一团）。680px 是五块都不折的最小值。 */
-  width: min(680px, calc(100vw - 2 * var(--skin-pad)));
+  /* 860px 不是随手取的，是**量出来的**：胶囊里要装「曲名/歌手 + 播放控制 +
+     进度条 + 模式 + 音量」五块，而右侧那组（睡眠定时器 + 播放模式 + 音量）
+     实测就占 325px、播放控制 188px、进度条最少 120px —— 三块已经 633px，
+     再加三个 14px 间隙（42px）= 675px，**曲名那格一点不剩**。
+     原来的 680px 正好卡在这条线上，于是 bar-track 被压到 0 宽：
+     文本其实写进了 DOM（实测「海屿你」「马也_Crabbit」都在），界面却一个字都读不到。
+     860px 留出 185px 给曲名/歌手，窄视口再由下面那条 max-width 兜底。 */
+  width: min(860px, calc(100vw - 2 * var(--skin-pad)));
   transform: translateX(-50%);
   display: flex;
   align-items: center;
@@ -1820,9 +1992,26 @@
   display: none !important;
 }
 
+/* 收起后的唤出热区要盖住胶囊**浮起来的那一截**。
+   胶囊是 position:fixed; bottom:22px，而基础 .bar-hover-zone 只有
+   `bottom:0; height:12px` —— 两者不重叠：收起后鼠标停在原来胶囊所在
+   的位置（屏幕底往上 22px 处）根本不落在热区里，唤不回来，表现为
+   「点收起之后播放条彻底没了」。这里把热区加高到 56px，
+   让「鼠标回到原来胶囊附近」就能唤出。 */
+[data-skin="qingfeng"] .bar-hover-zone {
+  height: 56px;
+}
+
 [data-skin="qingfeng"] .bar-track {
   min-width: 0;
-  flex: 1 1 auto;
+  /* flex-basis 必须是 0 之外的确定值。原先写 `flex: 1 1 auto`（basis=auto→0），
+     与 .bar-progress 的 `flex: 1 1 220px` 竞争时**永远输** —— 胶囊只有 680px，
+     进度条按 220px 起步就把剩下的全吃掉，bar-track 被压到 0 宽。
+     症状：bar-title / bar-sub 文本都在（快照里有「海屿你」「马也_Crabbit」），
+     界面上却一个字都读不到。
+     给 150px 起步：够放下「曲名 + 歌手」两行，窄胶囊下它先让位给进度条
+     （min-width:0 保证还能继续压）。 */
+  flex: 1 1 150px;
 }
 
 [data-skin="qingfeng"] .bar-title {

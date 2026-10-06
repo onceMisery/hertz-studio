@@ -1652,17 +1652,190 @@ function checkQingfengSettings() {
   //     子项（默认 static），皮肤只写 left/bottom 而不写 position，偏移量
   //     会被整份忽略，只剩 translateX(-50%) 生效 —— 胶囊被左移半个身位。
   //     这条 Node 测不出来（纯布局），但源码可以钉死。
+  // 7f) 播放栏折叠按钮：点下去必须**当场**收起，且收起后唤得回来。
+  //
+  //     原实现的时序（2026-10-06 实测踩出）：点击时 `pinned = false`，但
+  //     此刻鼠标正悬在播放条上，`bar.addEventListener('pointerenter', beginPeek)`
+  //     早已把 peek 置成 true，而 visible = peek || (pinned && !idle)
+  //     仍是 true → **点击的当下看不到任何反应**；要等鼠标移开、
+  //     leaveTimer 800ms 后把 peek 归零才真的收起。表现就是「按钮点了没用」。
+  //     清风实测（程序化 .click() 有效、真实鼠标点击无效）就是这个原因。
+  //
+  //     收起后唤不回来是第二个坑：胶囊 position:fixed; bottom:22px，
+  //     而基础 .bar-hover-zone 只有 bottom:0; height:12px，两者不重叠。
+  const toggleFn = stripJsComments(
+    (APP.match(/toggleBtn\.addEventListener\('click',[\s\S]*?\n  \}\);/) || [''])[0]);
+  ok(/peek = false/.test(toggleFn),
+    '折叠时清掉 peek（否则鼠标悬停中点了没反应：visible = peek || …）');
+  ok(/else\s+peek = false/.test(toggleFn) || /if \(pinned\)[^{]*\{[^}]*peek = false[^}]*\}\s*else\s+peek = false/.test(toggleFn),
+    '收起的分支也清 peek（不只在展开时清）');
+  ok(/clearTimeout\(hideTimer\)/.test(toggleFn),
+    '收起后不重新 armIdle（15s 定时器会把 idle 置真，与用户意图打架）');
+  const zoneRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar-hover-zone\s*\{([^}]*)\}/);
+  ok(zoneRule && /height:\s*\d+px/.test(zoneRule[1])
+    && parseInt((zoneRule[1].match(/height:\s*(\d+)px/) || [0, 0])[1], 10) >= 40,
+    '清风把唤出热区加高到能盖住浮起的胶囊（bottom:22px，12px 的热区够不到）',
+    zoneRule ? (zoneRule[1].match(/height:[^;]+/) || [''])[0].trim() : 'no rule');
+
   const barRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar\s*\{([^}]*)\}/);
   ok(barRule && /position:\s*fixed/.test(barRule[1]),
     '播放胶囊显式 position: fixed（否则 left/bottom 被忽略、胶囊左移半身）');
   ok(barRule && /left:\s*50%/.test(barRule[1]) && /translateX\(-50%\)/.test(barRule[1]),
     '播放胶囊用 left:50% + translateX(-50%) 居中');
   // 胶囊宽度是算出来的，不是随手取的：里面要装下曲名 + 控制 + 进度条 +
-  // 模式 + 音量五块。560px 时进度条被 flex 压到 27px、音量滑块挤成一条线
-  // （实测截图里糊成一团，DOM 完好、页面不报错）。
-  ok(barRule && /width:\s*min\(6[6-9]\dpx/.test(barRule[1]),
-    '胶囊宽度够放五块（≥660px，否则进度条被压扁）',
+  // 模式 + 音量五块，而且**曲名那一格必须真的拿到宽度**。
+  //
+  // 原来的断言写死成 `min(6[6-9]\dpx ...)`，把 680px 那个具体值当成了
+  // 判据 —— 结果「加宽到 860px」被判红。可那正是修法：实测右侧那组
+  // （睡眠定时器 + 模式 + 音量）325px、控制组 188px、进度条最少 120px，
+  // 三块加间隙已 675px，680px 的胶囊里曲名一格不剩，bar-track 被压到 0 宽
+  // （文本在 DOM 里，界面读不到）。
+  //
+  // 判据改成真正的意图：**宽度下限 ≥ 860px**（曲名有 150px 可分配），
+  // 上界交给视口那道 min(…, 100vw - 2*pad) 去管。
+  ok(barRule && /width:\s*min\((8[6-9]\d|9\d\d|[1-9]\d{3,})px/.test(barRule[1]),
+    '胶囊宽度够放五块（≥860px，否则曲名那格被压到 0 宽）',
     barRule ? (barRule[1].match(/width:[^;]+/) || [''])[0].trim() : 'no rule');
+
+  // 7d) 「正在播放」侧卡（.stage）：可拖动小卡片。
+  //     拖不动 / 位置记不住 / 能被拖出屏幕是三个独立的失效，各钉一条。
+  const stageRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.stage\s*\{([^}]*)\}/);
+  ok(stageRule && /width:\s*2[0-9]{2}px/.test(stageRule[1]),
+    '侧卡宽度收窄（300px → 232px，不挤主内容区）',
+    stageRule ? (stageRule[1].match(/width:[^;]+/) || [''])[0].trim() : 'no rule');
+  // 纵向必须改成「top 单锚 + max-height」：left/top/bottom 双向锚定会把高度
+  // 拉满整屏 —— 那是「占位过大」的根因，光改 width 治不了。
+  ok(stageRule && /bottom:\s*auto/.test(stageRule[1]) && /max-height:/.test(stageRule[1]),
+    '侧卡高度按内容收（bottom:auto + max-height，不再拉满整屏）');
+  ok(stageRule && /transition:\s*none/.test(stageRule[1]),
+    '侧卡禁用 transition（拖动时补间会让卡片粘滞追不上鼠标）');
+  // 拖动反馈：没有视觉反馈的拖拽用户不知道东西抓起来了没。
+  ok(/qf-stage-dragging|qf-dragging/.test(QINGFENG) && /scale\(1\.\d\d\)/.test(QINGFENG),
+    '拖动中有视觉反馈（抬升 + 轻微放大）');
+  // 拖拽实现三件套：把手、持久化、范围约束。缺一条就有一类失效。
+  ok(/onStageDragDown/.test(QINGFENG_JS) && /pointerdown/.test(QINGFENG_JS),
+    '侧卡有 pointerdown 拖动入口');
+  // 捕获必须在**越过阈值之后**才发生，不能在 pointerdown 里。
+  // 同一个文件的海报拖拽（buildWall）踩过：pointerdown 就捕获 →
+  // pointerup/click 被重定向到捕获元素 → 头上的按钮（模式切换/全屏/队列）
+  // 全部收不到 click，表现为「点标题栏没反应」。
+  // ⚠️ 下面两条要**先剥掉注释**再看：onStageDragDown 的注释里就写着
+  // 「绝不能 setPointerCapture」，不剥的话断言会匹配到自己写的警告语，
+  // 永远红 —— 这是本项目踩过的坑（断言跑在带注释的源码上 = 假红）。
+  const stageDownFn = stripJsComments(
+    (QINGFENG_JS.match(/function onStageDragDown\([\s\S]*?\n  \}/) || [''])[0]);
+  const stageMoveFn = stripJsComments(
+    (QINGFENG_JS.match(/function onStageDragMove\([\s\S]*?\n  \}/) || [''])[0]);
+  ok(stageDownFn.indexOf('setPointerCapture') < 0,
+    '侧卡不在 pointerdown 里就捕获指针（会吃掉标题栏按钮的 click）');
+  ok(stageMoveFn.indexOf('setPointerCapture') >= 0 && /!stageDrag\.moved/.test(stageMoveFn),
+    '侧卡越过拖动阈值后才捕获指针');
+  // 把头上的真按钮让出来：它们照常点，不该被当成拖动。
+  ok(/e\.target\.closest\('button, a, input/.test(stageDownFn),
+    '侧卡把手上的真按钮不触发拖动');
+  // ⚠️ 守卫里不能排除 [role="button"]：把手 .stage-head 自己就是 role=button
+  // （键盘可达），写进去等于把手把自己挡死 —— 浏览器实测抓过，症状是
+  // 「整张卡哪儿都拖不动、控制台干净」，契约里所有断言都还绿。
+  ok(stageDownFn.indexOf('[role="button"]') < 0,
+    '拖动守卫不排除 [role="button"]（把手自己就是 role=button，否则整卡拖不动）');
+  // 迷你卡只有一百多像素高，拖动入口必须挂在整张卡上（el），不能只挂标题带。
+  ok(/el\.addEventListener\('pointerdown', onStageDragDown\)/.test(QINGFENG_JS)
+    && !/head\.addEventListener\('pointerdown'/.test(QINGFENG_JS),
+    '拖动入口挂在整张迷你卡上（不只标题带，否则难抓）');
+  // .stage 是业务节点（切皮肤不重建），卸载必须把整卡上的 pointerdown 摘掉，
+  // 否则切走再切回来会叠加第二份拖动逻辑。
+  ok(/stageDrag\.el\.removeEventListener\('pointerdown', onStageDragDown\)/.test(QINGFENG_JS),
+    '卸载时摘掉整卡上的 pointerdown（业务节点不重建，会叠加）');
+
+  // 7d-2) 迷你播放器小卡：只留核心控件，高度按内容收。
+  //     改前 232×636（歌词 flex:1 把纵向撑满），盖住曲库右列 —— 光收宽度治不了。
+  ok(stageRule && /grid-template-areas:/.test(stageRule[1]) && /"ctrl/.test(stageRule[1]),
+    '迷你卡用 grid 命名区域重排（CSS 重排，不搬业务节点）');
+  ok(stageRule && /display:\s*grid/.test(stageRule[1]),
+    '迷你卡是 grid 布局（横排封面+信息，而不是竖排大卡）');
+  const qfMiniHide = QINGFENG.match(
+    /\[data-skin="qingfeng"\] \.stage-modes,[\s\S]*?\{([^}]*)\}/);
+  ok(qfMiniHide && /display:\s*none/.test(qfMiniHide[1])
+    && /\.stage-lyrics/.test(qfMiniHide[0]) && /\.spectrum/.test(qfMiniHide[0])
+    && /\.stage-ripple/.test(qfMiniHide[0]),
+    '非核心块（模式/全屏/队列/频谱/歌词/装饰层）在清风整排摘掉');
+  ok(/function buildStageMini\(/.test(QINGFENG_JS)
+    && /qf-mini-ctrl/.test(QINGFENG_JS) && /qf-mini-btn-primary/.test(QINGFENG_JS),
+    '迷你卡有皮肤注入的控制行（上一首/播放暂停/下一首）');
+  // 播放路径只有一条：皮肤按钮转发到业务原有按钮，不自己发 HTTP。
+  ok(/forwardClick\('playpause'\)/.test(QINGFENG_JS)
+    && /forwardClick\('prev'\)/.test(QINGFENG_JS)
+    && /forwardClick\('next'\)/.test(QINGFENG_JS),
+    '迷你卡按钮转发到业务原有控件（播放路径只有一条）');
+  const miniFns = (QINGFENG_JS.match(/function buildStageMini\([\s\S]*?\n  \}/) || [''])[0]
+    + (QINGFENG_JS.match(/function forwardClick\([\s\S]*?\n  \}/) || [''])[0];
+  ok(miniFns.indexOf('fetch(') < 0 && miniFns.indexOf("post('/v1/") < 0,
+    '迷你卡按钮不自己发 HTTP（绕过 togglePlay 会丢状态同步）');
+  ok(/var MINI_CLOSED_KEY\s*=/.test(QINGFENG_JS)
+    && /localStorage\.setItem\(\s*MINI_CLOSED_KEY/.test(QINGFENG_JS)
+    && /localStorage\.getItem\(\s*MINI_CLOSED_KEY/.test(QINGFENG_JS),
+    '迷你卡收起状态有专用 key 且会写会读');
+  ok(/classList\.toggle\('qf-mini-closed'/.test(QINGFENG_JS),
+    '收起用类不用 hidden（.stage 被钉成 grid，特异性压过 UA 的 [hidden]）');
+  ok(/function onMiniTrack\(/.test(QINGFENG_JS)
+    && /addEventListener\('playback:track', mini\.trackHandler\)/.test(QINGFENG_JS)
+    && /removeEventListener\('playback:track', mini\.trackHandler\)/.test(QINGFENG_JS),
+    '换曲把收起的迷你卡放回来，且卸载时摘掉监听');
+  // 切走皮肤时 .stage 回栅格布局：清风写的内联 left/top 必须清掉。
+  ok(/stageDrag\.el\.style\.left = ''/.test(QINGFENG_JS)
+    && /stageDrag\.el\.style\.top = ''/.test(QINGFENG_JS),
+    '卸载时清掉内联定位（带到别的皮肤上就是一份脏样式）');
+  // 位置持久化：写与读都要有，且**用同一个 key**。
+  // 判据拆成「key 声明 / 写 / 读」三段而不是「setItem(key…) 出现在同一行」——
+  // 写成 `localStorage.setItem(\n  STAGE_POS_KEY, …)`（换行）或
+  // `var k = STAGE_POS_KEY; setItem(k, …)` 都过，跨行匹配会漏。
+  ok(/var STAGE_POS_KEY\s*=/.test(QINGFENG_JS), '侧卡位置有专用 storage key');
+  ok(/localStorage\.setItem\(\s*STAGE_POS_KEY/.test(QINGFENG_JS), '侧卡位置会写进 localStorage');
+  ok(/localStorage\.getItem\(\s*STAGE_POS_KEY/.test(QINGFENG_JS), '侧卡位置刷新后会读回来');
+  // 范围约束：clampStage 必须在，且真的被 applyStagePos 用上
+  //（定义了但没人调 = 有约束函数但没约束效果）。
+  ok(/function clampStage\(/.test(QINGFENG_JS) && /function stageBounds\(/.test(QINGFENG_JS),
+    '侧卡有范围约束的边界计算');
+  ok(/var p = clampStage\(el, x, y\)/.test(QINGFENG_JS),
+    '范围约束被真正应用到位置上（不是定义了没用的空函数）');
+  // 「动了才记位置」：点一下把手（没拖）不该覆盖用户之前摆好的位置。
+  ok(/stageDrag\.moved/.test(QINGFENG_JS) && /if \(stageDrag\.moved/.test(QINGFENG_JS),
+    '只有真的拖过才持久化位置（点一下把手不覆盖）');
+  // 卸载必须摘干净：切到别的皮肤后 document 上不能还挂着 pointermove。
+  ok(/removeEventListener\('pointermove', stageDragHandlers\.move\)/.test(QINGFENG_JS)
+    && /removeEventListener\('pointerup', stageDragHandlers\.up\)/.test(QINGFENG_JS),
+    '卸载时摘掉 document 上的 pointer 监听（切皮肤后不留拖动残影）');
+  // 侧卡变小后，「曲名/歌手」那一格必须真的拿到宽度。
+  const trackRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar-track\s*\{([^}]*)\}/);
+  ok(trackRule && /flex:\s*1 1 \d+px/.test(trackRule[1]),
+    '播放条曲名格有确定 flex-basis（否则被进度条压到 0 宽）',
+    trackRule ? (trackRule[1].match(/flex:[^;]+/) || [''])[0].trim() : 'no rule');
+
+  // 7e) 顶部胶囊导航的选中态：滑块与文字必须都能看见。
+  //     原来写 `background: var(--surface-hi)` —— 那个令牌的值是
+  //     `inset 0 1px 0 rgba(255,255,255,.055)`，是给 box-shadow 用的内高光，
+  //     当颜色解析必然失败、滑块变透明，配上的 --accent-ink（#0A0A0A 近黑）
+  //     就压在深色胶囊上，文字彻底读不出来。
+  const navActive = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-nav-item\.is-active::before\s*\{([^}]*)\}/);
+  ok(navActive && /background:\s*color-mix/.test(navActive[1]),
+    '导航选中态滑块用真颜色（不能拿 box-shadow 内高光当 background）',
+    navActive ? (navActive[1].match(/background:[^;]+/) || [''])[0].trim() : 'no rule');
+  ok(navActive && !/--surface-hi/.test(navActive[1]),
+    '导航选中态不再引用 --surface-hi（那是 box-shadow 值，当颜色必失效）');
+  // 滑块必须**以文字色为主**混，而不是以胶囊底色为主混。
+  // --skin-surface 实测解析成 rgb(18,20,28,.78)（半透明深色），拿它往白里混
+  // 14% 出来是 rgb(55,57,64) 的深灰 —— 配 --accent-ink（#0A0A0A 近黑）
+  // 几乎同色，选中项还是读不出来（实测截图里那格“本地”隐进背景）。
+  // 判据：color-mix 的**第一个**参数得是 --text（占比 ≥60%）。
+  const navBg = navActive ? (navActive[1].match(/background:\s*color-mix\([^;]+/) || [''])[0] : '';
+  const navMix = navBg.match(/color-mix\(in srgb,\s*var\((--[\w-]+)\)\s+(\d+)%/);
+  ok(!!navMix && navMix[1] === '--text' && parseInt(navMix[2], 10) >= 60,
+    '选中态滑块以文字色为主混（深底色混不出承得住近黑字的亮度）',
+    navBg.trim() || 'no rule');
+  // z-index 不能是 -1：.qf-nav 自带 background，负层会沉到它下面去。
+  ok(navActive && /z-index:\s*0/.test(navActive[1]) && !/z-index:\s*-1/.test(navActive[1]),
+    '导航选中态滑块 z-index 不是 -1（负层会沉到胶囊背景之下）');
+
   const progRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar-progress\s*\{([^}]*)\}/);
   ok(progRule && /min-width:\s*(1[2-9]\d|\d{3})px/.test(progRule[1]),
     '进度条有 min-width 下限（否则窄胶囊里先被压没）',

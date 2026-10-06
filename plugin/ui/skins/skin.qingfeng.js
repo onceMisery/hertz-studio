@@ -52,9 +52,15 @@
 
   var SKIN_ID = 'qingfeng';
 
+  // 低层工具复用 skins/skin-shared.js（顺序加载保证它先于本模块）：
+  // 封面位图回填、带锚点的搬运与还原、自建节点登记。
+  var applyImg = window.SkinShared.applyImg;
+
   var mounted = false;
-  var moves = [];      // { node, anchor }：搬运记录，后进先出地还原
-  var built = [];      // 本文件新建的节点，卸载时 remove
+  // 搬运控制器：原位留 <span class="qf-anchor" data-qf="1">，卸载时 LIFO 还原。
+  var moves = window.SkinShared.createMoves('qf-anchor', 'data-qf');
+  // 自建节点登记：卸载时统一 remove。
+  var built = window.SkinShared.createBuilt();
   var observer = null;
   var refs = {};       // 重编排队列里的 DOM 引用
   var inReflow = false;
@@ -64,6 +70,25 @@
   var wallEntryHandler = null;
   var navChangedHandler = null;
   var wallTrackHandler = null;
+
+  // 「正在播放」侧卡（.stage）的拖动运行态。
+  //
+  // 为什么要自己拖而不是交给 CSS：侧卡是 position:fixed 的浮件，要能被拖到
+  // 任意位置并**记住**这个位置（刷新后恢复），必须同时改 left 与 top ——
+  // CSS 只能给 transform，而 transform 叠在 right 定位上不好算落点。
+  //
+  // 记录的是「视口坐标」而不是「距右/距上的距离」：窗口尺寸变了重新 clamp
+  // 一次就行，不用反算偏移（反算在 RTL、缩放、滚动条出现时都会偏）。
+  var stageDrag = {
+    el: null,        // .stage 本体
+    head: null,      // 拖动把手（.stage-head）
+    active: false,
+    moved: false,    // 本次按下是否真的移动过（没动就不该记位置）
+    startX: 0, startY: 0,
+    origX: 0, origY: 0,   // 按下时卡片的视口坐标
+    offX: 0, offY: 0,     // 鼠标按下点相对卡片左上角的偏移
+  };
+  var stageDragHandlers = null;   // { move, up }，卸载时解绑
 
   // 设置浮层运行态。viewEl 是被搬进浮层的 #view-settings 本体，
   // lastFocus 用于关闭后把焦点还给触发按钮。
@@ -183,50 +208,19 @@
   // -------------------------------------------------------------------------
 
   function relocate(node, parent, before) {
-    if (!node || !parent) return node || null;
-    var anchor = document.createElement('span');
-    anchor.className = 'qf-anchor';
-    anchor.setAttribute('data-qf', '1');
-    node.parentNode.insertBefore(anchor, node);
-    if (before) parent.insertBefore(node, before);
-    else parent.appendChild(node);
-    moves.push({ node: node, anchor: anchor });
-    return node;
+    return moves.relocate(node, parent, before);
   }
 
   function restoreMoves() {
-    // 后进先出：被包裹进新节点的，内层先还原到锚点（锚点在原容器），顺序天然安全。
-    for (var i = moves.length - 1; i >= 0; i -= 1) {
-      var m = moves[i];
-      if (m.anchor.parentNode) m.anchor.parentNode.insertBefore(m.node, m.anchor);
-      if (m.anchor.parentNode) m.anchor.remove();
-    }
-    moves = [];
+    moves.restore();
   }
 
   function make(tag, cls, parent) {
-    var n = document.createElement(tag || 'div');
-    if (cls) n.className = cls;
-    if (parent) parent.appendChild(n);
-    built.push(n);
-    return n;
+    return built.make(tag, cls, parent);
   }
 
   function removeBuilt() {
-    built.forEach(function (n) {
-      if (n.parentNode) n.parentNode.removeChild(n);
-    });
-    built = [];
-  }
-
-  // <img> 位封面：插件形态下远程地址要经 sidecar 换成 data URL（沙箱 CSP
-  // 画不出 https 图）。HertzCovers 由 app.js 挂出；契约检查的沙箱只加载本
-  // 模块，拿不到时回落成直接赋值。
-  function applyImg(img, url) {
-    if (window.HertzCovers) { window.HertzCovers.applyImg(img, url); return; }
-    if (!img) return;
-    if (url) img.src = url;
-    else img.removeAttribute('src');
+    built.remove();
   }
 
   function icon(name) {
@@ -2091,6 +2085,297 @@
   }
 
   // -------------------------------------------------------------------------
+  // 迷你播放器控制行：上一首 / 播放暂停 / 下一首 + 关闭
+  //
+  // 卡片本体（#stage）是业务节点，样式重排全在 CSS（grid 命名区域）里做；
+  // 这里只补业务没有的两样东西：一排控制按钮和一颗关闭。
+  // -------------------------------------------------------------------------
+
+  var MINI_CLOSED_KEY = 'vmusic.qf.stage.closed.v1';
+  var mini = { trackHandler: null };
+
+  function svgIcon(name, cls) {
+    return '<svg' + (cls ? ' class="' + cls + '"' : '') +
+      ' viewBox="0 0 24 24" aria-hidden="true"><use href="#i-' + name + '"/></svg>';
+  }
+
+  function miniClosed() {
+    try { return localStorage.getItem(MINI_CLOSED_KEY) === '1'; } catch (e) { return false; }
+  }
+
+  function applyMiniClosed() {
+    var el = stageDrag.el;
+    if (!el) return;
+    // 用类不用 hidden：.stage 被皮肤钉成 display:grid，特异性压过 UA 的
+    // [hidden] 规则，hidden 属性写上去也不会生效（最难查的那种「写了没效果」）。
+    el.classList.toggle('qf-mini-closed', miniClosed());
+  }
+
+  function setMiniClosed(v) {
+    try {
+      if (v) localStorage.setItem(MINI_CLOSED_KEY, '1');
+      else localStorage.removeItem(MINI_CLOSED_KEY);
+    } catch (e) { /* 隐私模式 / 配额满：只影响「记住收起」，不影响功能 */ }
+    applyMiniClosed();
+  }
+
+  /// 点皮肤自己的按钮 = 点业务原有的那颗。播放路径只有一条：app.js 绑在
+  /// #playpause / #prev / #next 上的那份，皮肤只转发意图 —— 自己另发 HTTP
+  /// 会绕过 togglePlay 的状态同步与 seekTo 的竞态保护（皮肤通用纪律）。
+  function forwardClick(id) {
+    var el = byId(id);
+    if (el) el.click();
+  }
+
+  function buildStageMini() {
+    var el = stageDrag.el;
+    var head = stageDrag.head;
+    if (!el || !head) return;
+
+    // 控制行挂在卡片末尾（grid-area: ctrl）。make() 必须传父节点，
+    // 否则节点游离在 DOM 外，样式与事件全不生效且不报错。
+    var ctrl = make('div', 'qf-mini-ctrl', el);
+
+    var prev = make('button', 'qf-mini-btn', ctrl);
+    prev.type = 'button';
+    prev.title = '上一首';
+    prev.setAttribute('aria-label', '上一首');
+    prev.innerHTML = svgIcon('prev');
+
+    var play = make('button', 'qf-mini-btn qf-mini-btn-primary qf-mini-play', ctrl);
+    play.type = 'button';
+    play.title = '播放 / 暂停';
+    play.setAttribute('aria-label', '播放或暂停');
+    // 两颗图标都在，显示哪颗由 body.is-playing 决定（CSS），与底部胶囊同判据。
+    play.innerHTML = svgIcon('play', 'ic-play') + svgIcon('pause', 'ic-pause');
+
+    var next = make('button', 'qf-mini-btn', ctrl);
+    next.type = 'button';
+    next.title = '下一首';
+    next.setAttribute('aria-label', '下一首');
+    next.innerHTML = svgIcon('next');
+
+    // 关闭放进把手（.stage-head）：flex space-between 把它推到最右。
+    // 它是 button，onStageDragDown 的 closest 守卫会把它让出来，照常可点。
+    var close = make('button', 'qf-mini-btn qf-mini-close', head);
+    close.type = 'button';
+    close.title = '收起迷你播放器（换曲会自动回来）';
+    close.setAttribute('aria-label', '收起迷你播放器');
+    close.innerHTML = svgIcon('close');
+
+    prev.addEventListener('click', function () { forwardClick('prev'); });
+    play.addEventListener('click', function () { forwardClick('playpause'); });
+    next.addEventListener('click', function () { forwardClick('next'); });
+    close.addEventListener('click', function () { setMiniClosed(true); });
+
+    applyMiniClosed();
+  }
+
+  /// 换曲 = 「正在播放」的内容换了，收着的卡片重新浮出来 ——
+  /// 否则关掉之后用户没有任何入口能再打开它（清风没有第二个入口指向 .stage）。
+  function onMiniTrack() {
+    if (!mounted) return;
+    if (miniClosed()) setMiniClosed(false);
+  }
+
+  // -------------------------------------------------------------------------
+  // 正在播放侧卡（.stage）：缩小 + 可拖动 + 位置持久化
+  // -------------------------------------------------------------------------
+
+  var STAGE_POS_KEY = 'vmusic.qf.stage.pos.v1';
+  // 侧卡缩到 232px 宽后，最窄的一档。留 12px 边距，贴边也不算被切掉。
+  var STAGE_MARGIN = 12;
+  // 顶部让开顶栏 + 悬浮胶囊导航（--qf-clear 已经算好了这一条）。
+  // 底部额外让开 84px：右下角有头像控件，拖到那儿会互相压。
+  var STAGE_BOTTOM_GAP = 84;
+
+  function stageBounds() {
+    var top = parseFloat(getComputedStyle(document.documentElement)
+      .getPropertyValue('--qf-clear')) || 96;
+    return {
+      left: STAGE_MARGIN,
+      top: top,
+      right: window.innerWidth - STAGE_MARGIN,
+      bottom: window.innerHeight - STAGE_MARGIN - STAGE_BOTTOM_GAP,
+    };
+  }
+
+  /// 把卡片夹回可视区内。**每帧都要做**：拖动时窗口可能被拖动/缩放，
+  /// 只在松手时夹一次的话，中途窗口缩小会让卡片整个跑到屏幕外。
+  function clampStage(el, x, y) {
+    var b = stageBounds();
+    var w = el.offsetWidth || 232;
+    var h = el.offsetHeight || 200;
+    // 卡片比可用区还高时（很矮的窗口）以顶部为准，否则 top 会被算成负数
+    var maxY = Math.max(b.top, b.bottom - h);
+    return {
+      x: Math.min(Math.max(x, b.left), Math.max(b.left, b.right - w)),
+      y: Math.min(Math.max(y, b.top), maxY),
+    };
+  }
+
+  function applyStagePos(el, x, y) {
+    var p = clampStage(el, x, y);
+    // right: auto 是必须的：卡片默认靠 right:24px 定位，不清掉的话
+    // left 与 right 同时生效，宽度会被拉伸变形。
+    el.style.right = 'auto';
+    el.style.left = Math.round(p.x) + 'px';
+    el.style.top = Math.round(p.y) + 'px';
+    el.style.bottom = 'auto';
+    return p;
+  }
+
+  function readStagePos() {
+    try {
+      var raw = localStorage.getItem(STAGE_POS_KEY);
+      if (!raw) return null;
+      var v = JSON.parse(raw);
+      return (v && typeof v.x === 'number' && typeof v.y === 'number') ? v : null;
+    } catch (e) { return null; }
+  }
+
+  function writeStagePos(p) {
+    // 隐私模式 / 配额满都会抛：只影响「记住卡片位置」，不影响功能。
+    try { localStorage.setItem(STAGE_POS_KEY, JSON.stringify(p)); } catch (e) { /* ignore */ }
+  }
+
+  function onStageDragDown(e) {
+    if (e.button !== undefined && e.button !== 0) return;   // 只认左键
+    var el = stageDrag.el;
+    if (!el || el.hidden) return;
+    // 卡片上的真控件（播放/上一首/下一首/关闭/进度滑块）照常点，不当拖动处理。
+    // ⚠️ 守卫里**不能**写 [role="button"]：把手 .stage-head 自己就被设了
+    // role=button（键盘可达），写进去等于把手把自己挡死 —— 实测抓过，
+    // 症状是「整张卡哪儿都拖不动、控制台干净」。
+    if (e.target && e.target.closest('button, a, input, textarea, select, .stage-lyrics')) return;
+
+    var b = el.getBoundingClientRect();
+    stageDrag.active = true;
+    stageDrag.moved = false;
+    stageDrag.startX = e.clientX;
+    stageDrag.startY = e.clientY;
+    stageDrag.origX = b.left;
+    stageDrag.origY = b.top;
+    stageDrag.offX = e.clientX - b.left;
+    stageDrag.offY = e.clientY - b.top;
+    el.classList.add('qf-dragging');
+    document.body.classList.add('qf-stage-dragging');
+    // **这里绝不能 setPointerCapture** —— 捕获后 pointerup/click 会被重定向
+    // 到捕获元素（.stage-head），把头上的真按钮（模式切换 / 全屏 / 队列）
+    // 全部吃掉，表现为「点标题栏上的按钮没反应」。
+    // 本文件下面 buildWall() 的海报拖拽踩过同一个坑，注释在 884 行附近。
+    // 正确做法：越过拖拽阈值**之后**才捕获（见 onStageDragMove）。
+    e.preventDefault();
+  }
+
+  function onStageDragMove(e) {
+    if (!stageDrag.active) return;
+    var el = stageDrag.el;
+    var dx = e.clientX - stageDrag.startX;
+    var dy = e.clientY - stageDrag.startY;
+    // 阈值 3px：抖动不算拖动，否则点一下把手也会把卡片挪走几像素。
+    if (!stageDrag.moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
+    if (!stageDrag.moved) {
+      // 越过阈值才捕获：到这一步才确定用户是在拖卡片而不是点标题栏上的
+      // 按钮。此刻捕获是有意的（拖拽该把指针收进 .stage-head）。
+      stageDrag.moved = true;
+      try { el.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器忽略 */ }
+    }
+    applyStagePos(el, e.clientX - stageDrag.offX, e.clientY - stageDrag.offY);
+  }
+
+  function onStageDragUp(e) {
+    if (!stageDrag.active) return;
+    var el = stageDrag.el;
+    stageDrag.active = false;
+    if (el) {
+      el.classList.remove('qf-dragging');
+      try { el.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    }
+    document.body.classList.remove('qf-stage-dragging');
+    // 只有真的挪过才记位置：点一下把手（没动）不该覆盖用户之前摆好的位置。
+    if (stageDrag.moved && el) {
+      var b = el.getBoundingClientRect();
+      writeStagePos({ x: Math.round(b.left), y: Math.round(b.top) });
+    }
+  }
+
+  function onStageResize() {
+    if (!stageDrag.el) return;
+    var b = stageDrag.el.getBoundingClientRect();
+    // 窗口变小后原位置可能已经在屏幕外，拉回来；不落盘，避免污染记忆。
+    applyStagePos(stageDrag.el, b.left, b.top);
+  }
+
+  function buildStageDrag() {
+    var el = byId('stage');
+    if (!el) return;
+    var head = el.querySelector('.stage-head');
+    if (!head) return;
+    stageDrag.el = el;
+    stageDrag.head = head;
+
+    // 恢复上次位置。读不到就用 CSS 里的默认（right:24px + top）。
+    var saved = readStagePos();
+    if (saved) applyStagePos(el, saved.x, saved.y);
+
+    // 拖动入口挂在**整张卡**上：迷你卡只有一百多像素高，只留一条标题带当
+    // 把手太难抓（实测抓不满）。控件由 onStageDragDown 的守卫让出来。
+    el.addEventListener('pointerdown', onStageDragDown);
+    var move = onStageDragMove;
+    var up = onStageDragUp;
+    // move/up 挂 document：指针可能被 pointercapture 交出去，也可能没交
+    // （老浏览器不支持时），两边都要能收到。
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', up);
+    document.addEventListener('pointercancel', up);
+    window.addEventListener('resize', onStageResize);
+    stageDragHandlers = { move: move, up: up };
+
+    // 键盘可达：把手是 role=button 后，方向键移动、Esc 复位。
+    head.setAttribute('role', 'button');
+    head.setAttribute('tabindex', '0');
+    head.setAttribute('aria-label', '正在播放卡片，拖动或用方向键移动，双击复位');
+    if (!head.getAttribute('title')) {
+      head.title = '拖动移动这张卡片；双击复位到右上角';
+    }
+  }
+
+  function onStageKey(e) {
+    var el = stageDrag.el;
+    if (!el) return;
+    var step = e.shiftKey ? 32 : 8;
+    var b = el.getBoundingClientRect();
+    var x = b.left, y = b.top;
+    if (e.key === 'ArrowLeft') x -= step;
+    else if (e.key === 'ArrowRight') x += step;
+    else if (e.key === 'ArrowUp') y -= step;
+    else if (e.key === 'ArrowDown') y += step;
+    else if (e.key === 'Escape' || e.key === 'Home') {
+      writeStagePos({ x: 0, y: 0 });
+      el.style.left = '';
+      el.style.right = '';
+      el.style.top = '';
+      el.style.bottom = '';
+      e.preventDefault();
+      return;
+    } else return;
+    e.preventDefault();
+    writeStagePos(applyStagePos(el, x, y));
+  }
+
+  function onStageDblClick() {
+    // 双击复位：拖歪之后最直接的「我不要了」。
+    var el = stageDrag.el;
+    if (!el) return;
+    el.style.left = '';
+    el.style.right = '';
+    el.style.top = '';
+    el.style.bottom = '';
+    try { localStorage.removeItem(STAGE_POS_KEY); } catch (e) { /* ignore */ }
+  }
+
+  // -------------------------------------------------------------------------
   // 挂载 / 卸载
   // -------------------------------------------------------------------------
 
@@ -2108,6 +2393,8 @@
     buildSettingsSheet();
     buildWall();
     buildBarChrome();
+    buildStageDrag();
+    buildStageMini();
 
     // 导航点击在 nav 上委托：条目是按钮，冒泡即可，不必逐条挂。
     if (refs.nav) refs.nav.addEventListener('click', onNavClick);
@@ -2115,6 +2402,10 @@
 
     keyHandler = onSheetKeydown;
     document.addEventListener('keydown', onWallKeydown);
+    if (stageDrag.head) {
+      stageDrag.head.addEventListener('keydown', onStageKey);
+      stageDrag.head.addEventListener('dblclick', onStageDblClick);
+    }
     wallEntryHandler = function () { if (mounted && !wall.open) openWall(); };
     document.addEventListener('playback:entry-wall', wallEntryHandler);
     // 设置里关掉分区时 app.js 广播 nav:changed，胶囊菜单同步摘入口。
@@ -2124,6 +2415,9 @@
     wallTrackHandler = function () { followCurrent(); };
     document.addEventListener('playback:track', wallTrackHandler);
     document.addEventListener('keydown', keyHandler);
+    // 换曲把收起的迷你卡放回来（皮肤自持的唯一状态入口）。
+    mini.trackHandler = onMiniTrack;
+    document.addEventListener('playback:track', mini.trackHandler);
 
     observer = new MutationObserver(function () {
       if (inReflow) return;
@@ -2155,6 +2449,38 @@
     }
     if (keyHandler) { document.removeEventListener('keydown', keyHandler); keyHandler = null; }
     window.removeEventListener('resize', onWallResize);
+    if (stageDragHandlers) {
+      document.removeEventListener('pointermove', stageDragHandlers.move);
+      document.removeEventListener('pointerup', stageDragHandlers.up);
+      document.removeEventListener('pointercancel', stageDragHandlers.up);
+      stageDragHandlers = null;
+    }
+    if (stageDrag.head) {
+      stageDrag.head.removeEventListener('keydown', onStageKey);
+      stageDrag.head.removeEventListener('dblclick', onStageDblClick);
+    }
+    window.removeEventListener('resize', onStageResize);
+    if (mini.trackHandler) {
+      document.removeEventListener('playback:track', mini.trackHandler);
+      mini.trackHandler = null;
+    }
+    if (stageDrag.el) {
+      // pointerdown 挂在整张卡上，而 .stage 是业务节点（切皮肤不重建）——
+      // 不摘的话切走再切回来会叠加第二份拖动逻辑。
+      stageDrag.el.removeEventListener('pointerdown', onStageDragDown);
+      stageDrag.el.classList.remove('qf-dragging', 'qf-mini-closed');
+      // 内联定位必须清掉：applyStagePos 写的 left/top 在清风是 fixed 定位用的，
+      // 带到别的皮肤上（.stage 在那边是栅格里的普通子项）就是一份脏样式。
+      // 位置本身记在 localStorage，下次挂载会读回来，这里清的只是现场。
+      stageDrag.el.style.left = '';
+      stageDrag.el.style.top = '';
+      stageDrag.el.style.right = '';
+      stageDrag.el.style.bottom = '';
+    }
+    document.body.classList.remove('qf-stage-dragging');
+    stageDrag.el = null;
+    stageDrag.head = null;
+    stageDrag.active = false;
     if (wall.raf) { cancelAnimationFrame(wall.raf); wall.raf = 0; }
     clearTimeout(sheet.closeTimer);
     sheet.closeTimer = 0;
