@@ -13,9 +13,13 @@
 // 跑法（先起服务）：
 //   NODE_PATH="$W" node scripts/check-liunian-settings-nav-browser.js
 // 端口用 SETTINGS_NAV_URL 覆盖，默认 7634。
+// 还要给一个能开首页的凭据：`/` 已收紧，无凭据只会拿到「需要凭据」的自救页，
+// 下面等 window.Skins 就会干等到超时。用 VMUSIC_UI_TOKEN=<令牌>，或
+// VMUSIC_DATA_DIR=<隔离实例数据目录>（脚本从里面的 token 文件读）。
 
 const path = require('path');
 const { chromium } = require('playwright');
+const { uiUrl } = require('./ui-token');
 
 const ROOT = path.resolve(__dirname, '..');
 const BASE = process.env.SETTINGS_NAV_URL || 'http://127.0.0.1:7634';
