@@ -1816,12 +1816,24 @@ function checkQingfengSettings() {
   //     `inset 0 1px 0 rgba(255,255,255,.055)`，是给 box-shadow 用的内高光，
   //     当颜色解析必然失败、滑块变透明，配上的 --accent-ink（#0A0A0A 近黑）
   //     就压在深色胶囊上，文字彻底读不出来。
-  const navActive = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-nav-item\.is-active::before\s*\{([^}]*)\}/);
+  //
+  //     滑块**直接画在按钮身上**，不再用 ::before 叠一层：按钮里只有
+  //     `textContent` 写的裸文本节点，`.is-active > *` 匹配不到东西，文字就没有
+  //     z-index，而 z-index:0 的定位伪元素绘制顺序排在行内内容之上 ——
+  //     字已经是 #0A0A0A 了，仍被浅色滑块盖成一个空白格（2026-10-06 实测）。
+  ok(!/qf-nav-item\.is-active::before/.test(QINGFENG),
+    '导航选中态不用伪元素叠层（裸文本节点没有 z-index，会被盖成空白格）');
+  ok(!/qf-nav-item\.is-active\s*>\s*\*/.test(QINGFENG),
+    '导航选中态不靠 `> *` 提层（按钮里是裸文本节点，匹配不到任何东西）');
+  const navActive = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-nav-item\.is-active\s*\{([^}]*)\}/);
   ok(navActive && /background:\s*color-mix/.test(navActive[1]),
     '导航选中态滑块用真颜色（不能拿 box-shadow 内高光当 background）',
     navActive ? (navActive[1].match(/background:[^;]+/) || [''])[0].trim() : 'no rule');
   ok(navActive && !/--surface-hi/.test(navActive[1]),
     '导航选中态不再引用 --surface-hi（那是 box-shadow 值，当颜色必失效）');
+  ok(navActive && /color:\s*var\(--accent-ink\)/.test(navActive[1]),
+    '导航选中态文字是深色（浅底 + 深字是配对的，换一个要换另一个）',
+    navActive ? (navActive[1].match(/color:[^;]+/) || [''])[0].trim() : 'no rule');
   // 滑块必须**以文字色为主**混，而不是以胶囊底色为主混。
   // --skin-surface 实测解析成 rgb(18,20,28,.78)（半透明深色），拿它往白里混
   // 14% 出来是 rgb(55,57,64) 的深灰 —— 配 --accent-ink（#0A0A0A 近黑）
@@ -1832,9 +1844,6 @@ function checkQingfengSettings() {
   ok(!!navMix && navMix[1] === '--text' && parseInt(navMix[2], 10) >= 60,
     '选中态滑块以文字色为主混（深底色混不出承得住近黑字的亮度）',
     navBg.trim() || 'no rule');
-  // z-index 不能是 -1：.qf-nav 自带 background，负层会沉到它下面去。
-  ok(navActive && /z-index:\s*0/.test(navActive[1]) && !/z-index:\s*-1/.test(navActive[1]),
-    '导航选中态滑块 z-index 不是 -1（负层会沉到胶囊背景之下）');
 
   const progRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar-progress\s*\{([^}]*)\}/);
   ok(progRule && /min-width:\s*(1[2-9]\d|\d{3})px/.test(progRule[1]),

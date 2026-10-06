@@ -291,38 +291,22 @@
   transition: color var(--dur-2) var(--ease);
 }
 
-/* 选中态：实心浅色滑块 + 深色字（folia 的 motion.span layoutId 手感）。
-   滑块底色用 --skin-line-soft（皮肤自己的浅描边色）**不能**用
-   `--surface-hi` —— 那个令牌的值是 `inset 0 1px 0 rgba(255,255,255,.055)`，
-   是给 box-shadow 用的**内高光**（见 style.css 的用法），当颜色解析必然失败，
-   滑块直接变透明；配上的 --accent-ink（#0A0A0A 近黑）就压在深色胶囊上，
+/* 选中态：实心浅色底 + 深色字（folia 的 motion.span layoutId 手感）。
+   底色用 --skin-line-soft 一类的浅色，**不能**用 `--surface-hi` —— 那个令牌的
+   值是 `inset 0 1px 0 rgba(255,255,255,.055)`，是给 box-shadow 用的**内高光**，
+   当颜色解析必然失败；配上的 --accent-ink（#0A0A0A 近黑）就压在深色胶囊上，
    文字彻底看不见（症状：选中项「本地」隐进背景）。
-   配对关系也重要：滑块是浅的，字就必须是深的，两者要一起换。 */
+   配对关系也重要：底色是浅的，字就必须是深的，两者要一起换。 */
 [data-skin="qingfeng"] .qf-nav-item.is-active {
   color: var(--accent-ink);
-}
-
-[data-skin="qingfeng"] .qf-nav-item.is-active::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  /* 滑块必须**明显亮**才承得住 --accent-ink（#0A0A0A 近黑）那个字。
-     `--skin-surface` 是半透明深色（实测解析成 rgb(18,20,28,.78)），
-     拿它往白里混 14% 出来还是 rgb(55,57,64) 的深灰 —— 配近黑字一样读不出
-     （实测选中项文字与滑块底色几乎同色）。这里反过来以 --text 为主
-     混一点点胶囊底色，得到接近浅灰的实色，深字压上去才清晰。
-     与 --accent-ink 的配对关系要一起看：滑块浅 → 字必须深，反之亦然。 */
+  /* 底色**直接画在按钮自己身上**，不要再用 ::before 叠一层。
+     按钮里只有 `textContent` 写的裸文本节点（实测 childCount=0），
+     `.is-active > *` 匹配不到任何东西，文字就没有 z-index；而
+     `position:absolute; z-index:0` 的伪元素是**定位元素**，绘制顺序排在
+     行内内容**之上** —— 浅色滑块把已经设成近黑的字整个盖住，界面��是
+     「选中项一片空白」。叠层一旦存在，这个坑就会在换文案/换标签时复发。 */
   background: color-mix(in srgb, var(--text) 82%, var(--skin-surface) 18%);
   box-shadow: var(--skin-shadow-card);
-  /* z-index 不用 -1：.qf-nav 自带 background，负层会沉到它下面去、
-   滑块等于不存在。改用 0 并把文字提到 1。 */
-  z-index: 0;
-}
-
-[data-skin="qingfeng"] .qf-nav-item.is-active > * {
-  position: relative;
-  z-index: 1;
 }
 
 [data-skin="qingfeng"] .qf-nav-item:hover {
