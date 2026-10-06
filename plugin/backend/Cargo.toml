@@ -5,6 +5,7 @@
 name = "dbx-plugin-hertz"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "DBX plugin sidecar for hertz-studio: stdio JSON-RPC bridge over the hertz-studio service"
