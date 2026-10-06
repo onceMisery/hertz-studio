@@ -1750,15 +1750,16 @@
 /* ===================== 舞台：迷你播放器小卡 ============================ */
 
 /* 单列外壳下 .stage 若留在栅格里会掉到内容下方变成第二行（.app 只有一个
-   轨道），所以整块脱离文档流，浮在右侧当「正在播放」小卡。
-   底部胶囊已经装下了全部播放控制，这张卡只保留**核心四件**：
-   封面缩略 + 歌曲信息 + 进度 + 播放/暂停（外加关闭）。
-   模式切换 / 全屏 / 队列 / 频谱 / 歌词 / 装饰层全部摘掉 ——
-   之前 232×636 的大卡片会盖住曲库右列，是「占位过大」的根因；
-   那次只改了 width，纵向仍被歌词(flex:1)撑着，治标不治本。
+   轨道），所以整块脱离文档流。底部胶囊装下了全部播放控制，这张卡只留
+   **三样**：封面缩略 + 歌曲信息 + 当前句歌词（放不下由 JS 量宽转跑马灯）。
+   进度与播放/暂停不再进卡 —— 卡默认就停在胶囊旁边，重复一套按钮纯属噪音；
+   模式切换 / 全屏 / 队列 / 频谱 / 装饰层照样全部摘掉。
+   之前 232×636 的大卡片会盖住曲库右列，是「占位过大」的根因。
    布局用 grid 命名区域把竖排改横排：**不搬节点** —— #now-title /
    #stage-progress 的状态同步是 app.js 按 id 写的，动 DOM 顺序等于让
-   其它皮肤一起陪绑，皮肤只该用 CSS 重排。 */
+   其它皮肤一起陪绑，皮肤只该用 CSS 重排。
+   默认停靠点（播放胶囊右缘）由 skin.qingfeng.js 算好写进 left/top，
+   这里的 right/top 只是 JS 没跑起来时的兜底。 */
 [data-skin="qingfeng"] .stage {
   position: fixed;
   top: var(--qf-clear);
@@ -1775,11 +1776,10 @@
     "thumb head   head"
     "thumb title  title"
     "thumb artist artist"
-    "prog  prog   prog"
-    "ctrl  ctrl   ctrl";
+    "lyric lyric  lyric";
   align-content: start;
   gap: 1px 10px;
-  padding: 10px 12px 12px;
+  padding: 8px 12px 10px;
   text-align: left;
   cursor: default;
   border-radius: var(--skin-radius);
@@ -1796,13 +1796,15 @@
 
 /* 非核心块整排摘掉。stage-fx/dots/particles/ripple 是 stage.js 注入的
    装饰层（absolute 铺满整卡）：进了 grid 会变成网格项把行撑开，
-   必须显式点名，光靠「卡片变小」盖不住。 */
+   必须显式点名，光靠「卡片变小」盖不住。进度条也是业务节点，胶囊里
+   有同款，迷你卡不再重复一份。 */
 [data-skin="qingfeng"] .stage-modes,
 [data-skin="qingfeng"] .stage-head-fs,
 [data-skin="qingfeng"] .stage-queue,
 [data-skin="qingfeng"] .stage-tech,
 [data-skin="qingfeng"] .spectrum,
 [data-skin="qingfeng"] .stage-lyrics,
+[data-skin="qingfeng"] .stage-progress,
 [data-skin="qingfeng"] .stage-fx,
 [data-skin="qingfeng"] .stage-dots,
 [data-skin="qingfeng"] .stage-particles,
@@ -1847,58 +1849,73 @@
   line-height: 1.3;
 }
 
-/* 进度：时间右对齐贴着滑块，一行读完「听到哪了 / 一共多长」。 */
-[data-skin="qingfeng"] .stage-progress { grid-area: prog; margin-top: 8px; }
-[data-skin="qingfeng"] .stage-times {
-  justify-content: flex-end;
-  margin-bottom: 3px;
-  font-size: var(--fs-3xs);
+/* 当前句歌词：文本由 skin.qingfeng.js 跟 Stage.lyrics()/Stage.position()
+   同步（同一份歌词文档、同一口插值时钟，用户逐曲偏移已被 app.js 烤进
+   行时间里）。单行放不下时 JS 量宽写 --qf-lyric-dur 并挂 is-scrolling，
+   这里只负责转起来：两份拷贝各自带右内边距，translateX(-50%) 恰好等于
+   一份拷贝的宽，无缝循环。两端 8px 渐隐让词「游」进游出，不生硬。 */
+[data-skin="qingfeng"] .qf-mini-lyric {
+  grid-area: lyric;
+  margin-top: 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--muted);
+  -webkit-mask-image: linear-gradient(90deg, transparent, var(--text) 8px,
+    var(--text) calc(100% - 8px), transparent);
+  mask-image: linear-gradient(90deg, transparent, var(--text) 8px,
+    var(--text) calc(100% - 8px), transparent);
+}
+/* 无歌词 / 还没唱到第一句：整行收起，卡片按内容变矮。 */
+[data-skin="qingfeng"] .qf-mini-lyric.is-empty { display: none; }
+
+[data-skin="qingfeng"] .qf-mini-lyric-inner {
+  display: inline-flex;
+  will-change: transform;
+}
+[data-skin="qingfeng"] .qf-mini-lyric-inner span {
+  padding-right: 2.5em;
+}
+[data-skin="qingfeng"] .qf-mini-lyric.is-scrolling .qf-mini-lyric-inner {
+  animation: qf-lyric-marquee var(--qf-lyric-dur, 12s) linear infinite;
+}
+@keyframes qf-lyric-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
 }
 
-/* 控制行由 skin.qingfeng.js 注入（.qf-mini-ctrl），图标态跟 body.is-playing 走。 */
-[data-skin="qingfeng"] .qf-mini-ctrl {
-  grid-area: ctrl;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  margin-top: 8px;
+/* 减动效：不转，退回省略号截断（第二份拷贝一起藏掉）。 */
+@media (prefers-reduced-motion: reduce) {
+  [data-skin="qingfeng"] .qf-mini-lyric.is-scrolling .qf-mini-lyric-inner {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    animation: none;
+    will-change: auto;
+  }
+  [data-skin="qingfeng"] .qf-mini-lyric.is-scrolling .qf-mini-lyric-inner span + span {
+    display: none;
+  }
 }
+
+/* 卡上唯一的注入控件是关闭（skin.qingfeng.js 注入进把手）：
+   播放控制胶囊里都有，迷你卡不再自带一份。 */
 [data-skin="qingfeng"] .qf-mini-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
   padding: 0;
-  border-radius: var(--r-pill);
+  border-radius: var(--r-sm);
   border: none;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
 }
 [data-skin="qingfeng"] .qf-mini-btn:hover { background: var(--hover); color: var(--text); }
-[data-skin="qingfeng"] .qf-mini-btn svg { width: 14px; height: 14px; }
-[data-skin="qingfeng"] .qf-mini-btn-primary {
-  width: 34px;
-  height: 34px;
-  background: var(--brand);
-  color: var(--accent-ink);
-}
-[data-skin="qingfeng"] .qf-mini-btn-primary:hover { background: var(--brand); color: var(--accent-ink); }
-[data-skin="qingfeng"] .qf-mini-btn-primary svg { width: 16px; height: 16px; }
-[data-skin="qingfeng"] .qf-mini-close {
-  width: 22px;
-  height: 22px;
-  border-radius: var(--r-sm);
-}
-[data-skin="qingfeng"] .qf-mini-close svg { width: 12px; height: 12px; }
-
-/* 播放/暂停图标切换与底部胶囊同一套判据（body.is-playing）：
-   皮肤自己不持有播放状态 —— 状态只有 app.js 一份。 */
-[data-skin="qingfeng"] .qf-mini-btn .ic-pause { display: none; }
-body.is-playing [data-skin="qingfeng"] .qf-mini-btn .ic-play { display: none; }
-body.is-playing [data-skin="qingfeng"] .qf-mini-btn .ic-pause { display: block; }
+[data-skin="qingfeng"] .qf-mini-btn svg { width: 12px; height: 12px; }
 
 /* 关闭：收起这张卡。位置与「换曲自动回来」的逻辑见 skin.qingfeng.js。 */
 [data-skin="qingfeng"] .stage.qf-mini-closed { display: none !important; }

@@ -2092,7 +2092,11 @@
   // -------------------------------------------------------------------------
 
   var MINI_CLOSED_KEY = 'vmusic.qf.stage.closed.v1';
-  var mini = { trackHandler: null };
+  var mini = { trackHandler: null, lyric: null, a: null, b: null, lyricText: null, timer: null };
+  // 当前句歌词的轮询间隔与跑马灯速度。行进是低频事件，用不着进 rAF；
+  // 滚动本身交给 CSS 动画，这里只在上句→下句的瞬间动一次 DOM。
+  var LYRIC_TICK_MS = 250;
+  var LYRIC_SPEED = 28;   // 跑马灯速度 px/s，太快要追、太慢像卡死
 
   function svgIcon(name, cls) {
     return '<svg' + (cls ? ' class="' + cls + '"' : '') +
@@ -2109,6 +2113,12 @@
     // 用类不用 hidden：.stage 被皮肤钉成 display:grid，特异性压过 UA 的
     // [hidden] 规则，hidden 属性写上去也不会生效（最难查的那种「写了没效果」）。
     el.classList.toggle('qf-mini-closed', miniClosed());
+    // 收起期间 tick 一直早退；display:none 里 clientWidth 恒为 0，量出来的
+    // 溢出状态不可信，展开后强制重算一次。
+    if (!miniClosed() && mini.lyric) {
+      mini.lyricText = null;
+      tickMiniLyric();
+    }
   }
 
   function setMiniClosed(v) {
@@ -2119,41 +2129,51 @@
     applyMiniClosed();
   }
 
-  /// 点皮肤自己的按钮 = 点业务原有的那颗。播放路径只有一条：app.js 绑在
-  /// #playpause / #prev / #next 上的那份，皮肤只转发意图 —— 自己另发 HTTP
-  /// 会绕过 togglePlay 的状态同步与 seekTo 的竞态保护（皮肤通用纪律）。
-  function forwardClick(id) {
-    var el = byId(id);
-    if (el) el.click();
+  /// 当前句歌词：Stage.lyrics()（行数组）+ Stage.position()（同一口本地
+  /// 插值时钟），自己二分定位 —— 不读隐藏面板的 DOM（3D 舞台不开时那边的
+  /// 行根本不更新）。用户的逐曲/全局偏移已在 app.js 烤进行时间里，直接用。
+  /// 返回空串表示无歌词或还没唱到第一句（前奏），卡片整行收起。
+  function lyricLineText() {
+    var st = window.Stage;
+    if (!st || !st.lyrics || typeof st.position !== 'function') return '';
+    var doc = st.lyrics();
+    var lines = doc && doc.lines;
+    if (!lines || !lines.length) return '';
+    var pos = st.position();
+    var lo = 0, hi = lines.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (lines[mid].start_ms <= pos) lo = mid + 1; else hi = mid;
+    }
+    if (lo === 0) return '';
+    return lines[lo - 1].text || '· · ·';   // 间奏行没有词，给个呼吸感的占位
+  }
+
+  function tickMiniLyric() {
+    var el = mini.lyric;
+    if (!el || miniClosed()) return;
+    var text = lyricLineText();
+    if (text === mini.lyricText) return;
+    mini.lyricText = text;
+    // 两份拷贝喂给跑马灯（CSS 无缝循环靠它们），单行显示时第二份在屏外。
+    mini.a.textContent = text;
+    mini.b.textContent = text;
+    el.classList.remove('is-scrolling');
+    el.classList.toggle('is-empty', !text);
+    if (!text) return;
+    // 量宽决定是否滚动。文案变化才有这次强制布局，稳态轮询只是比对字符串。
+    var cw = el.clientWidth;
+    var tw = mini.a.offsetWidth;
+    if (cw > 0 && tw > cw) {
+      el.style.setProperty('--qf-lyric-dur', Math.max(6, Math.round(tw / LYRIC_SPEED)) + 's');
+      el.classList.add('is-scrolling');
+    }
   }
 
   function buildStageMini() {
     var el = stageDrag.el;
     var head = stageDrag.head;
     if (!el || !head) return;
-
-    // 控制行挂在卡片末尾（grid-area: ctrl）。make() 必须传父节点，
-    // 否则节点游离在 DOM 外，样式与事件全不生效且不报错。
-    var ctrl = make('div', 'qf-mini-ctrl', el);
-
-    var prev = make('button', 'qf-mini-btn', ctrl);
-    prev.type = 'button';
-    prev.title = '上一首';
-    prev.setAttribute('aria-label', '上一首');
-    prev.innerHTML = svgIcon('prev');
-
-    var play = make('button', 'qf-mini-btn qf-mini-btn-primary qf-mini-play', ctrl);
-    play.type = 'button';
-    play.title = '播放 / 暂停';
-    play.setAttribute('aria-label', '播放或暂停');
-    // 两颗图标都在，显示哪颗由 body.is-playing 决定（CSS），与底部胶囊同判据。
-    play.innerHTML = svgIcon('play', 'ic-play') + svgIcon('pause', 'ic-pause');
-
-    var next = make('button', 'qf-mini-btn', ctrl);
-    next.type = 'button';
-    next.title = '下一首';
-    next.setAttribute('aria-label', '下一首');
-    next.innerHTML = svgIcon('next');
 
     // 关闭放进把手（.stage-head）：flex space-between 把它推到最右。
     // 它是 button，onStageDragDown 的 closest 守卫会把它让出来，照常可点。
@@ -2162,13 +2182,19 @@
     close.title = '收起迷你播放器（换曲会自动回来）';
     close.setAttribute('aria-label', '收起迷你播放器');
     close.innerHTML = svgIcon('close');
-
-    prev.addEventListener('click', function () { forwardClick('prev'); });
-    play.addEventListener('click', function () { forwardClick('playpause'); });
-    next.addEventListener('click', function () { forwardClick('next'); });
     close.addEventListener('click', function () { setMiniClosed(true); });
 
+    // 当前句歌词行挂在卡片末尾（grid-area: lyric）。make() 必须传父节点，
+    // 否则节点游离在 DOM 外，样式全不生效且不报错。
+    var lyric = make('div', 'qf-mini-lyric', el);
+    var inner = make('div', 'qf-mini-lyric-inner', lyric);
+    mini.a = make('span', '', inner);
+    mini.b = make('span', '', inner);
+    mini.lyric = lyric;
+
     applyMiniClosed();
+    tickMiniLyric();
+    mini.timer = setInterval(tickMiniLyric, LYRIC_TICK_MS);
   }
 
   /// 换曲 = 「正在播放」的内容换了，收着的卡片重新浮出来 ——
@@ -2183,11 +2209,11 @@
   // -------------------------------------------------------------------------
 
   var STAGE_POS_KEY = 'vmusic.qf.stage.pos.v1';
-  // 侧卡缩到 232px 宽后，最窄的一档。留 12px 边距，贴边也不算被切掉。
+  // 卡片四周的最小留白，贴边也不算被切掉。
   var STAGE_MARGIN = 12;
-  // 顶部让开顶栏 + 悬浮胶囊导航（--qf-clear 已经算好了这一条）。
-  // 底部额外让开 84px：右下角有头像控件，拖到那儿会互相压。
-  var STAGE_BOTTOM_GAP = 84;
+  // 底部不再整体让位（旧版留 84px 防压头像）：播放胶囊和头像胶囊是两块
+  // 具体的矩形，clampStage 按它们的实际位置把卡片推出去 —— 默认停靠点
+  // 就贴着胶囊，把整个下缘封死等于把停靠点也封了。
 
   function stageBounds() {
     var top = parseFloat(getComputedStyle(document.documentElement)
@@ -2196,8 +2222,65 @@
       left: STAGE_MARGIN,
       top: top,
       right: window.innerWidth - STAGE_MARGIN,
-      bottom: window.innerHeight - STAGE_MARGIN - STAGE_BOTTOM_GAP,
+      bottom: window.innerHeight - STAGE_MARGIN,
     };
+  }
+
+  /// 停靠：没有用户记忆位置时，卡片贴在播放胶囊右缘。
+  ///
+  /// 胶囊右缘优先**实测矩形** —— .bar 从基础样式继承来的 margin 会让
+  /// 「left:50% + translateX(-50%)」的公式与真实落点差出十几像素；胶囊
+  /// 自动隐藏（display:none）时矩形塌成 0，才退回公式。公式里的宽上限
+  /// 860 与 CSS 里 .bar 的 width 是同一组数，改那边记得同步这边。
+  function dockStage() {
+    var el = stageDrag.el;
+    if (!el) return;
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    var pad = parseFloat(getComputedStyle(document.documentElement)
+      .getPropertyValue('--skin-pad')) || 28;
+    var bar = document.querySelector('.bar');
+    var barVisible = bar && bar.offsetHeight > 0;
+    var barRight = barVisible
+      ? bar.getBoundingClientRect().right
+      : vw / 2 + Math.min(860, vw - 2 * pad) / 2;
+    var barH = barVisible ? bar.offsetHeight : 64;
+    var w = el.offsetWidth || 232;
+    var h = el.offsetHeight || 110;
+    var acc = document.querySelector('.qf-account');
+    var accR = acc ? acc.getBoundingClientRect() : null;
+    var accTop = accR && accR.height > 0 ? accR.top : vh - 74;
+    var accLeft = accR && accR.width > 0 ? accR.left : vw - 116;
+    var x = Math.min(barRight + 12, vw - STAGE_MARGIN - w);
+    x = Math.max(x, STAGE_MARGIN);
+    var y;
+    if (x + w <= accLeft - 12) {
+      y = Math.min(vh - 22 - barH / 2 - h / 2, vh - STAGE_MARGIN - h);
+    } else {
+      // x 压到头像那一列时抬到头像上缘之上 —— 窄视口下「贴着胶囊」和
+      // 「不压头像」不可兼得，让竖直方向让步。
+      y = accTop - 12 - h;
+    }
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+    el.style.left = Math.round(x) + 'px';
+    el.style.top = Math.round(Math.max(STAGE_MARGIN, y)) + 'px';
+  }
+
+  /// 皮肤布局生效后：有记忆位置就恢复（钳制要用真实的卡片尺寸），没有
+  /// 就停靠。挂载那一帧皮肤 CSS 可能还没生效（<link> 首次启用要现取），
+  /// #stage 量出来还是栅格里的旧布局（实测 460×748），照那个尺寸停靠/
+  /// 钳位必然歪 —— 等 .stage 的 position 变成 fixed（皮肤布局接管）再动；
+  /// 等不到就维持 CSS 里的默认兜底位，最多等 240 帧（约 4 秒）。
+  function restoreOrDock(saved, tries) {
+    var el = stageDrag.el;
+    if (!el) return;
+    if (getComputedStyle(el).position !== 'fixed') {
+      if (tries > 0) requestAnimationFrame(function () { restoreOrDock(saved, tries - 1); });
+      return;
+    }
+    if (saved) applyStagePos(el, saved.x, saved.y);
+    else dockStage();
   }
 
   /// 把卡片夹回可视区内。**每帧都要做**：拖动时窗口可能被拖动/缩放，
@@ -2208,10 +2291,29 @@
     var h = el.offsetHeight || 200;
     // 卡片比可用区还高时（很矮的窗口）以顶部为准，否则 top 会被算成负数
     var maxY = Math.max(b.top, b.bottom - h);
-    return {
+    var p = {
       x: Math.min(Math.max(x, b.left), Math.max(b.left, b.right - w)),
       y: Math.min(Math.max(y, b.top), maxY),
     };
+    return pushOutFloaters(p, w, h);
+  }
+
+  /// 底部两块浮件（播放胶囊、头像胶囊）用矩形避让而不是封死下缘：
+  /// 拖进它们的矩形就把整卡推到最高的那块上缘之外（两块水平错开，
+  /// 取更高的上缘一次推完，两块都让开）。停靠位置不走这里 —— 它本来就
+  /// 停在胶囊旁边，从不与它们相交，所以从停靠位起拖不会有跳位。
+  function pushOutFloaters(p, w, h) {
+    var floats = document.querySelectorAll('.bar:not(.is-hidden), .qf-account');
+    var top = null;
+    for (var i = 0; i < floats.length; i++) {
+      var r = floats[i].getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      if (p.x + w <= r.left || p.x >= r.right ||
+          p.y + h <= r.top || p.y >= r.bottom) continue;
+      if (top === null || r.top < top) top = r.top;
+    }
+    if (top !== null) p.y = Math.max(stageBounds().top, Math.round(top - h - 8));
+    return p;
   }
 
   function applyStagePos(el, x, y) {
@@ -2302,8 +2404,10 @@
 
   function onStageResize() {
     if (!stageDrag.el) return;
+    // 没拖过就跟着胶囊重新停靠（胶囊宽度随视口变）；拖过则只把原位置
+    // 夹回屏内，不落盘，避免污染记忆。
+    if (!readStagePos()) { dockStage(); return; }
     var b = stageDrag.el.getBoundingClientRect();
-    // 窗口变小后原位置可能已经在屏幕外，拉回来；不落盘，避免污染记忆。
     applyStagePos(stageDrag.el, b.left, b.top);
   }
 
@@ -2315,9 +2419,10 @@
     stageDrag.el = el;
     stageDrag.head = head;
 
-    // 恢复上次位置。读不到就用 CSS 里的默认（right:24px + top）。
+    // 恢复上次位置；没拖过（无记忆）就停靠到播放胶囊右缘。两条路都等
+    // 皮肤布局生效再量（见 restoreOrDock）。
     var saved = readStagePos();
-    if (saved) applyStagePos(el, saved.x, saved.y);
+    requestAnimationFrame(function () { restoreOrDock(saved, 240); });
 
     // 拖动入口挂在**整张卡**上：迷你卡只有一百多像素高，只留一条标题带当
     // 把手太难抓（实测抓不满）。控件由 onStageDragDown 的守卫让出来。
@@ -2337,7 +2442,7 @@
     head.setAttribute('tabindex', '0');
     head.setAttribute('aria-label', '正在播放卡片，拖动或用方向键移动，双击复位');
     if (!head.getAttribute('title')) {
-      head.title = '拖动移动这张卡片；双击复位到右上角';
+      head.title = '拖动移动这张卡片；双击复位到播放胶囊旁';
     }
   }
 
@@ -2352,11 +2457,13 @@
     else if (e.key === 'ArrowUp') y -= step;
     else if (e.key === 'ArrowDown') y += step;
     else if (e.key === 'Escape' || e.key === 'Home') {
-      writeStagePos({ x: 0, y: 0 });
+      // 复位 = 丢掉记忆、回到默认停靠点（与双击复位同语义）。
+      try { localStorage.removeItem(STAGE_POS_KEY); } catch (err) { /* ignore */ }
       el.style.left = '';
       el.style.right = '';
       el.style.top = '';
       el.style.bottom = '';
+      dockStage();
       e.preventDefault();
       return;
     } else return;
@@ -2365,7 +2472,7 @@
   }
 
   function onStageDblClick() {
-    // 双击复位：拖歪之后最直接的「我不要了」。
+    // 双击复位：拖歪之后最直接的「我不要了」。丢掉记忆、回到默认停靠点。
     var el = stageDrag.el;
     if (!el) return;
     el.style.left = '';
@@ -2373,6 +2480,7 @@
     el.style.top = '';
     el.style.bottom = '';
     try { localStorage.removeItem(STAGE_POS_KEY); } catch (e) { /* ignore */ }
+    dockStage();
   }
 
   // -------------------------------------------------------------------------
@@ -2464,6 +2572,8 @@
       document.removeEventListener('playback:track', mini.trackHandler);
       mini.trackHandler = null;
     }
+    if (mini.timer) { clearInterval(mini.timer); mini.timer = null; }
+    mini.lyric = null; mini.a = null; mini.b = null; mini.lyricText = null;
     if (stageDrag.el) {
       // pointerdown 挂在整张卡上，而 .stage 是业务节点（切皮肤不重建）——
       // 不摘的话切走再切回来会叠加第二份拖动逻辑。

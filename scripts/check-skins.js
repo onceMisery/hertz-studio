@@ -677,7 +677,12 @@ function checkCoverage() {
   //     宽高比 1）会吃满余量，把歌词区压到 26px、面板底部空 119px。
   //     别的皮肤舞台是**栅格里的右栏**（高度由栅格给满）或 fixed 抽屉，
   //     本来就不存在这个余量问题，让它们各写一条等于制造死代码。
-  const GEOMETRY_OPTIONAL = /^\.(dv-name|dv-sub|dv-num|dv-src|topsearch|stage-lyrics|disc-wrap)$/;
+  //  d) 面板里的曲名/艺人（.stage-title / .stage-artist）：同一个悬浮面板的
+  //     另一个独有结论 —— 它是定高 flex 列，歌词区压到 min-height:96 之后
+  //     剩下的缺口会落到这两个可收缩行上（实测行盒 33px→14px、字被切半截）。
+  //     浮光干脆不展示它们（信息播放条里一直有），别的皮肤舞台有空间、
+  //     本来就得显示曲名与艺人，让它们跟着摘等于砍功能。
+  const GEOMETRY_OPTIONAL = /^\.(dv-name|dv-sub|dv-num|dv-src|topsearch|stage-lyrics|disc-wrap|stage-title|stage-artist)$/;
   const isGeometry = (s) => !GEOMETRY_OPTIONAL.test(s) && !/^[^\s]*\s/.test(s);
 
   const geometryGap = (from, to, fromName, toName) => {
@@ -1747,30 +1752,38 @@ function checkQingfengSettings() {
   ok(/stageDrag\.el\.removeEventListener\('pointerdown', onStageDragDown\)/.test(QINGFENG_JS),
     '卸载时摘掉整卡上的 pointerdown（业务节点不重建，会叠加）');
 
-  // 7d-2) 迷你播放器小卡：只留核心控件，高度按内容收。
+  // 7d-2) 迷你播放器小卡：封面 + 歌曲信息 + 当前句歌词，高度按内容收。
   //     改前 232×636（歌词 flex:1 把纵向撑满），盖住曲库右列 —— 光收宽度治不了。
-  ok(stageRule && /grid-template-areas:/.test(stageRule[1]) && /"ctrl/.test(stageRule[1]),
-    '迷你卡用 grid 命名区域重排（CSS 重排，不搬业务节点）');
+  //     2026-10-06 起卡不再自带进度与播放控制：默认停靠在播放胶囊右缘，
+  //     按钮重复一份纯属噪音；多出来的是当前句歌词（放不下转跑马灯）。
+  ok(stageRule && /grid-template-areas:/.test(stageRule[1]) && /"lyric/.test(stageRule[1]),
+    '迷你卡用 grid 命名区域重排，且给当前句歌词留了 lyric 区');
   ok(stageRule && /display:\s*grid/.test(stageRule[1]),
     '迷你卡是 grid 布局（横排封面+信息，而不是竖排大卡）');
   const qfMiniHide = QINGFENG.match(
     /\[data-skin="qingfeng"\] \.stage-modes,[\s\S]*?\{([^}]*)\}/);
   ok(qfMiniHide && /display:\s*none/.test(qfMiniHide[1])
     && /\.stage-lyrics/.test(qfMiniHide[0]) && /\.spectrum/.test(qfMiniHide[0])
-    && /\.stage-ripple/.test(qfMiniHide[0]),
-    '非核心块（模式/全屏/队列/频谱/歌词/装饰层）在清风整排摘掉');
+    && /\.stage-ripple/.test(qfMiniHide[0]) && /\.stage-progress/.test(qfMiniHide[0]),
+    '非核心块（模式/全屏/队列/频谱/歌词/进度/装饰层）在清风整排摘掉');
   ok(/function buildStageMini\(/.test(QINGFENG_JS)
-    && /qf-mini-ctrl/.test(QINGFENG_JS) && /qf-mini-btn-primary/.test(QINGFENG_JS),
-    '迷你卡有皮肤注入的控制行（上一首/播放暂停/下一首）');
-  // 播放路径只有一条：皮肤按钮转发到业务原有按钮，不自己发 HTTP。
-  ok(/forwardClick\('playpause'\)/.test(QINGFENG_JS)
-    && /forwardClick\('prev'\)/.test(QINGFENG_JS)
-    && /forwardClick\('next'\)/.test(QINGFENG_JS),
-    '迷你卡按钮转发到业务原有控件（播放路径只有一条）');
+    && /qf-mini-lyric/.test(QINGFENG_JS) && /qf-mini-close/.test(QINGFENG_JS),
+    '迷你卡注入当前句歌词行与关闭（不再自带播放控制行）');
+  ok(QINGFENG_JS.indexOf('qf-mini-ctrl') < 0 && QINGFENG.indexOf('qf-mini-ctrl') < 0
+    && QINGFENG_JS.indexOf('qf-mini-btn-primary') < 0,
+    '迷你卡不再自带播放控制行（胶囊就在旁边，按钮不重复一份）');
+  ok(/function tickMiniLyric\(/.test(QINGFENG_JS)
+    && /Stage\.lyrics\(\)/.test(QINGFENG_JS) && /Stage\.position\(\)/.test(QINGFENG_JS),
+    '当前句歌词读 Stage.lyrics()/Stage.position()（与全屏歌词同一份数据，不读隐藏面板的 DOM）');
+  ok(/qf-lyric-marquee/.test(QINGFENG) && /is-scrolling/.test(QINGFENG)
+    && /--qf-lyric-dur/.test(QINGFENG_JS),
+    '歌词放不下转跑马灯（JS 量宽写时长，CSS 两份拷贝无缝循环）');
+  // 播放路径只有一条：迷你卡没有按钮，也不允许自己发播放 HTTP。
   const miniFns = (QINGFENG_JS.match(/function buildStageMini\([\s\S]*?\n  \}/) || [''])[0]
-    + (QINGFENG_JS.match(/function forwardClick\([\s\S]*?\n  \}/) || [''])[0];
+    + (QINGFENG_JS.match(/function lyricLineText\([\s\S]*?\n  \}/) || [''])[0]
+    + (QINGFENG_JS.match(/function tickMiniLyric\([\s\S]*?\n  \}/) || [''])[0];
   ok(miniFns.indexOf('fetch(') < 0 && miniFns.indexOf("post('/v1/") < 0,
-    '迷你卡按钮不自己发 HTTP（绕过 togglePlay 会丢状态同步）');
+    '迷你卡不自己发 HTTP（播放落点只有胶囊/队列一条路）');
   ok(/var MINI_CLOSED_KEY\s*=/.test(QINGFENG_JS)
     && /localStorage\.setItem\(\s*MINI_CLOSED_KEY/.test(QINGFENG_JS)
     && /localStorage\.getItem\(\s*MINI_CLOSED_KEY/.test(QINGFENG_JS),
@@ -1798,6 +1811,16 @@ function checkQingfengSettings() {
     '侧卡有范围约束的边界计算');
   ok(/var p = clampStage\(el, x, y\)/.test(QINGFENG_JS),
     '范围约束被真正应用到位置上（不是定义了没用的空函数）');
+  // 2026-10-06 起卡片默认停靠播放胶囊右缘：没记忆位置就停靠（挂载时与
+  // resize 时），有记忆才恢复原位。挂载路径要等皮肤 CSS 生效再量宽高
+  // （restoreOrDock），否则量到栅格旧布局，停出来的位置是歪的。
+  // 底部胶囊/头像用矩形避让而不是封死下缘。
+  ok(/function dockStage\(/.test(QINGFENG_JS) && /function restoreOrDock\(/.test(QINGFENG_JS)
+    && /restoreOrDock\(saved, 240\)/.test(QINGFENG_JS)
+    && /if \(!readStagePos\(\)\) \{ dockStage\(\); return; \}/.test(QINGFENG_JS),
+    '迷你卡没记忆位置时默认停靠（等皮肤布局生效再量），resize 重新停靠，有记忆才恢复原位');
+  ok(/function pushOutFloaters\(/.test(QINGFENG_JS) && /pushOutFloaters\(p, w, h\)/.test(QINGFENG_JS),
+    '拖动时对播放胶囊/头像胶囊做矩形避让（推到其上缘之外，不封死下缘）');
   // 「动了才记位置」：点一下把手（没拖）不该覆盖用户之前摆好的位置。
   ok(/stageDrag\.moved/.test(QINGFENG_JS) && /if \(stageDrag\.moved/.test(QINGFENG_JS),
     '只有真的拖过才持久化位置（点一下把手不覆盖）');
