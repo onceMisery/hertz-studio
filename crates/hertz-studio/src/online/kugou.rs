@@ -12,6 +12,7 @@ use serde_json::json;
 
 use super::cred::CredPack;
 use super::http::absorb_cookies;
+use super::playlist_common::{created_playlist, form_map, require_playlist_name, require_tracks};
 use super::sign::{kugou, kugou_login};
 use super::{
     bad_request, client, const_url, ApiError, ApiResult, Ctx, OnlineDetail, OnlineTrack,
@@ -1054,9 +1055,10 @@ pub async fn playlists(
 ) -> ApiResult<Vec<super::OnlinePlaylist>> {
     let limit = limit.clamp(1, 100);
     let page = offset / limit + 1;
-    let mut extra = BTreeMap::new();
-    extra.insert("page".into(), page.to_string());
-    extra.insert("pagesize".into(), limit.to_string());
+    let extra = form_map(&[
+        ("page", &page.to_string()),
+        ("pagesize", &limit.to_string()),
+    ]);
     let j = h5_get(ctx, "/v3/playlist/special/list", extra)
         .await
         .map_err(|e| reject_context(e, "获取酷狗歌单失败"))?;
@@ -1102,11 +1104,12 @@ pub async fn playlist_detail(
     let listid = parse_listid(id)?;
     let limit = limit.clamp(1, 100);
     let page = offset / limit + 1;
-    let mut extra = BTreeMap::new();
-    extra.insert("global_collection_id".into(), id.to_string());
-    extra.insert("listid".into(), listid);
-    extra.insert("page".into(), page.to_string());
-    extra.insert("pagesize".into(), limit.to_string());
+    let extra = form_map(&[
+        ("global_collection_id", id),
+        ("listid", &listid),
+        ("page", &page.to_string()),
+        ("pagesize", &limit.to_string()),
+    ]);
     let j = h5_get(ctx, "/v3/playlist/special/song/list", extra)
         .await
         .map_err(|e| reject_context(e, "获取酷狗歌单详情失败"))?;
@@ -1163,13 +1166,8 @@ pub async fn playlist_detail(
 /// 真机待验证（spec §2.4）：路径/字段以 2026 年客户端为准，Task 22 真机
 /// 验收；不通则摘能力位。
 pub async fn playlist_create(ctx: &Ctx, name: &str) -> ApiResult<super::OnlinePlaylist> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(bad_request("缺少歌单名称"));
-    }
-    let mut extra = BTreeMap::new();
-    extra.insert("name".into(), name.to_string());
-    extra.insert("type".into(), "0".into());
+    let name = require_playlist_name(name)?;
+    let extra = form_map(&[("name", name), ("type", "0")]);
     let j = h5_get(ctx, "/v3/playlist/special/create", extra)
         .await
         .map_err(|e| reject_context(e, "创建酷狗歌单失败"))?;
@@ -1177,18 +1175,7 @@ pub async fn playlist_create(ctx: &Ctx, name: &str) -> ApiResult<super::OnlinePl
     let id = pick_str(j.get("data"), &["global_collection_id", "listid"])
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ApiError::upstream_rejected("创建成功但未取得歌单 id".to_string()))?;
-    Ok(super::OnlinePlaylist {
-        source: ID.into(),
-        id,
-        name: name.to_string(),
-        cover: None,
-        track_count: 0,
-        play_count: None,
-        // CredPack 不存昵称，creator 留空（允许为空）。
-        creator: String::new(),
-        kind: "created".into(),
-        description: None,
-    })
+    Ok(created_playlist(ID, id, name))
 }
 
 /// 删除歌单：GET `/v3/playlist/special/delete`。
@@ -1197,9 +1184,7 @@ pub async fn playlist_create(ctx: &Ctx, name: &str) -> ApiResult<super::OnlinePl
 /// 验收；不通则摘能力位。真机可能只认 ids/listid 其中一键，验收前两键同值都带。
 pub async fn playlist_delete(ctx: &Ctx, id: &str) -> ApiResult<()> {
     let listid = parse_listid(id)?;
-    let mut extra = BTreeMap::new();
-    extra.insert("ids".into(), listid.clone());
-    extra.insert("listid".into(), listid);
+    let extra = form_map(&[("ids", &listid), ("listid", &listid)]);
     h5_get(ctx, "/v3/playlist/special/delete", extra)
         .await
         .map_err(|e| reject_context(e, "删除酷狗歌单失败"))?;
@@ -1212,9 +1197,7 @@ pub async fn playlist_delete(ctx: &Ctx, id: &str) -> ApiResult<()> {
 /// 真机待验证（spec §2.4）：路径/字段以 2026 年客户端为准，Task 22 真机
 /// 验收；不通则摘能力位。
 pub async fn playlist_add(ctx: &Ctx, id: &str, tracks: &[super::TrackEntry]) -> ApiResult<()> {
-    if tracks.is_empty() {
-        return Err(bad_request("没有要加入的曲目"));
-    }
+    require_tracks(tracks, "加入")?;
     let listid = parse_listid(id)?;
     let mut lines = Vec::with_capacity(tracks.len());
     for (n, entry) in tracks.iter().enumerate() {
@@ -1233,10 +1216,11 @@ pub async fn playlist_add(ctx: &Ctx, id: &str, tracks: &[super::TrackEntry]) -> 
         let mixsongid = entry.ref_str("mixsongid").unwrap_or("");
         lines.push(format!("{name}|{hash}|{album_id}|{mixsongid}"));
     }
-    let mut extra = BTreeMap::new();
-    extra.insert("listid".into(), listid);
-    extra.insert("data".into(), lines.join(","));
-    extra.insert("type".into(), "0".into());
+    let extra = form_map(&[
+        ("listid", &listid),
+        ("data", &lines.join(",")),
+        ("type", "0"),
+    ]);
     h5_get(ctx, "/v3/playlist/tracks/add", extra)
         .await
         .map_err(|e| reject_context(e, "酷狗歌单追加曲目失败"))?;
@@ -1248,9 +1232,7 @@ pub async fn playlist_add(ctx: &Ctx, id: &str, tracks: &[super::TrackEntry]) -> 
 /// 真机待验证（spec §2.4）：路径/字段以 2026 年客户端为准，Task 22 真机
 /// 验收；不通则摘能力位。
 pub async fn playlist_remove(ctx: &Ctx, id: &str, tracks: &[super::TrackEntry]) -> ApiResult<()> {
-    if tracks.is_empty() {
-        return Err(bad_request("没有要移除的曲目"));
-    }
+    require_tracks(tracks, "移除")?;
     let listid = parse_listid(id)?;
     // 删曲只认 fileid（hash 无法替代），且它只出现在歌单详情结果里。
     // 逐首校验：缺一首就整体 400，绝不 filter_map 静默丢项造成部分删除。
@@ -1271,9 +1253,7 @@ pub async fn playlist_remove(ctx: &Ctx, id: &str, tracks: &[super::TrackEntry]) 
             }
         }
     }
-    let mut extra = BTreeMap::new();
-    extra.insert("listid".into(), listid);
-    extra.insert("fileids".into(), fileids.join(","));
+    let extra = form_map(&[("listid", &listid), ("fileids", &fileids.join(","))]);
     h5_get(ctx, "/v3/playlist/tracks/delete", extra)
         .await
         .map_err(|e| reject_context(e, "酷狗歌单移除曲目失败"))?;

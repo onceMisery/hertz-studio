@@ -1,6 +1,6 @@
 # hertz-studio 加固与对齐改进计划（基于全面评估）
 
-状态：待用户确认。问题证据与复核记录见 `docs/research/hertz-full-assessment.md`（评估基线 master `acc8707`）。
+状态：已实施；剩余缺口收口跟踪见 `.trae/specs/close-hardening-gaps/`。问题证据与复核记录见 `docs/research/hertz-full-assessment.md`（评估基线 master `acc8707`）。
 
 ## 目标与证据
 
@@ -135,7 +135,7 @@ API 形态（拆两个端点，消除「dry_run 又默认自动采纳」的矛�
 
 ## 验收（批次门）
 
-- **P0**：路径穿越单测五组用例过；扫描批量函数与批边界事务数断言过 + 大库实测提速记录；补全 suggest/apply 双端（HTTP+RPC）演示：候选写库前可见、手动挑选/跳过生效、取消无半写、noAutoMatch 重跑不被覆盖、migration 可上可下。契约脚本与 cargo test 全绿。
+- **P0**：路径穿越单测五组用例过；扫描批量函数与批边界事务数断言过 + 大库实测提速记录；补全 suggest/apply 双端（HTTP+RPC）演示：候选写库前可见、手动挑选/跳过生效、取消无半写、noAutoMatch 重跑不被覆盖、migration 按项目 up-only 约定只验证增量升级。契约脚本与 cargo test 全绿。
 - **P1**：慢源时序测试过 + WebDAV 手动记录；前端 CPU 对比数据；panic 注入测试；面板 pinned/surface 键盘操作演示。全绿同上。
 - **P2**：按项独立验收（表内要点即标准），不设批次门。
 
@@ -143,7 +143,7 @@ API 形态（拆两个端点，消除「dry_run 又默认自动采纳」的矛�
 
 **P0**
 - 路径穿越：`routes.rs::safe_cover_id` 覆盖 **6 个入口** —— HTTP 的 `get_cover` / `replace_cover` / `batch_delete_tracks`，RPC 的 `library::get_cover` / `replace_cover` / `batch_delete`（`rpc/library.rs` 直接复用 `crate::routes::safe_cover_id`，不是各写一份）。单测 `cover_id_only_accepts_uuids` 钉 7 组负例（`../secret`、`..%2fsecret`、`..\secret`、`..`、`a/b`、空串、带空格）+ 1 组正例，超出 spec 要求的 5 组。
-- 扫描批量事务：`scan.rs::SCAN_TX_BATCH = 200`，`report.files.chunks(SCAN_TX_BATCH)` 内 `upsert_tracks_batch` + `set_track_rg_batch` 走同一事务后一次提交；批边界由 `scan_spans_multiple_write_batches` 断言（跑绿）。「大库实测提速记录」在 P2 相关的实测里给过（索引/缓存两项），首扫本身的万首级对比没有留档。
+- 扫描批量事务：`scan.rs::SCAN_TX_BATCH = 200`，`report.files.chunks(SCAN_TX_BATCH)` 内 `upsert_tracks_batch` + `set_track_rg_batch` 走同一事务后一次提交；批边界由 `scan_spans_multiple_write_batches` 断言（跑绿）。「大库实测提速记录」在 P2 相关的实测里给过（索引/缓存两项），首扫本身的万首级对比已补档（本轮实测）：10k wav 夹具、同一机器，A=acc8707 中位 56.2 s / B=1b2d72b 中位 17.1 s（提速 3.28×；排程 A,B,B,A 各两轮，A 极差 26.7 s、B 极差 0.5 s），脚本与原始数据在 `output/scan-bench*`。
 - 补全两阶段：`POST /v1/tracks/complete/suggest|apply` 双端点 + RPC 对等（`rpc/mod.rs` 两个 arm）→ `complete.rs` 的 `no_auto_match::mark/clear/marked_ids`、migration 0011。spec 里写的「migration 可上可下」按项目 up-only 约定不适用（本文档已注明）。
 - 契约与测试：`cargo test --workspace` **379 项全过**；`check-assets` / `check-skins` / `check-css-tokens` / `api-routes --check`（112 条）/ `check-library-api` 全绿。
 

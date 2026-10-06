@@ -10,6 +10,7 @@ use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, LOCATION, SET_COOKIE
 use serde_json::{json, Value};
 
 use super::cred::CredPack;
+use super::playlist_common::{created_playlist, form_map, require_playlist_name, require_tracks};
 use super::sign::qq::{b64_encode_std, gtk33};
 use super::{
     bad_request, client, const_url, https_url, AccountInfo, ApiError, ApiResult, Ctx, OnlineDetail,
@@ -1191,34 +1192,41 @@ pub async fn playlist_detail(
     })
 }
 
+/// 歌单写操作共用的 fcgi 表单前置：校验登录态、取数字 uin，填入各端点一致的
+/// 公共参数（loginUin/hostUin/inCharset/notice/needNewCode/g_tk/uin）。各调用方
+/// 再补自己端点特有的 format/outCharset/platform 等键。
+async fn base_form(ctx: &Ctx) -> ApiResult<BTreeMap<String, String>> {
+    let pack = login_pack(ctx).await?;
+    let uin = numeric_uin(&pack);
+    Ok(form_map(&[
+        ("loginUin", uin.as_str()),
+        ("hostUin", "0"),
+        ("inCharset", "utf8"),
+        ("notice", "0"),
+        ("needNewCode", "0"),
+        ("g_tk", GTK_WEB),
+        ("uin", uin.as_str()),
+    ]))
+}
+
 /// 新建歌单：POST `splcloud/fcgi-bin/create_playlist.fcg`，回包给 dirid。
 ///
 /// 真机待验证（spec §2.2）：code 21=重名、1=未登录来自公开参考实现；
 /// Task 22 真机验收，不通则摘 PlaylistWrite。
 pub async fn playlist_create(ctx: &Ctx, name: &str) -> ApiResult<OnlinePlaylist> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(bad_request("缺少歌单名称"));
-    }
-    let pack = login_pack(ctx).await?;
-    let uin = numeric_uin(&pack);
-    let mut form = BTreeMap::new();
-    let mut put = |k: &str, v: &str| form.insert(k.to_string(), v.to_string());
-    put("loginUin", &uin);
-    put("hostUin", "0");
-    put("format", "json");
-    put("inCharset", "utf8");
-    put("outCharset", "utf8");
-    put("notice", "0");
-    put("platform", "yqq");
-    put("needNewCode", "0");
-    put("g_tk", GTK_WEB);
-    put("uin", &uin);
-    put("name", name);
-    put("show", "1");
-    put("formsender", "1");
-    put("utf8", "1");
-    put("qzreferrer", "https://y.qq.com/portal/profile.html");
+    let name = require_playlist_name(name)?;
+    let mut form = base_form(ctx).await?;
+    form.insert("format".into(), "json".into());
+    form.insert("outCharset".into(), "utf8".into());
+    form.insert("platform".into(), "yqq".into());
+    form.insert("name".into(), name.to_string());
+    form.insert("show".into(), "1".into());
+    form.insert("formsender".into(), "1".into());
+    form.insert("utf8".into(), "1".into());
+    form.insert(
+        "qzreferrer".into(),
+        "https://y.qq.com/portal/profile.html".into(),
+    );
     let j = fcgi_post(
         ctx,
         "/splcloud/fcgi-bin/create_playlist.fcg?g_tk=5381",
@@ -1236,13 +1244,7 @@ pub async fn playlist_create(ctx: &Ctx, name: &str) -> ApiResult<OnlinePlaylist>
         .and_then(val_string)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ApiError::upstream_rejected("创建成功但未取得歌单 dirid".to_string()))?;
-    Ok(OnlinePlaylist {
-        source: ID.into(),
-        id: format!("{dirid}:"),
-        name: name.to_string(),
-        kind: "created".into(),
-        ..Default::default()
-    })
+    Ok(created_playlist(ID, format!("{dirid}:"), name))
 }
 
 /// 删除歌单：POST `splcloud/fcgi-bin/fcg_fav_modsongdir.fcg`，响应是 JSONP。
@@ -1254,25 +1256,15 @@ pub async fn playlist_delete(ctx: &Ctx, id: &str) -> ApiResult<()> {
     if dirid.is_empty() {
         return Err(bad_request("收藏歌单不能删除，缺少 dirid"));
     }
-    let pack = login_pack(ctx).await?;
-    let uin = numeric_uin(&pack);
-    let mut form = BTreeMap::new();
-    let mut put = |k: &str, v: &str| form.insert(k.to_string(), v.to_string());
-    put("loginUin", &uin);
-    put("hostUin", "0");
-    put("format", "fs");
-    put("inCharset", "utf8");
-    put("outCharset", "utf8");
-    put("notice", "0");
-    put("platform", "yqq");
-    put("needNewCode", "0");
-    put("g_tk", GTK_WEB);
-    put("uin", &uin);
-    put("delnum", "1");
-    put("deldirids", &dirid);
-    put("forcedel", "1");
-    put("formsender", "1");
-    put("source", "103");
+    let mut form = base_form(ctx).await?;
+    form.insert("format".into(), "fs".into());
+    form.insert("outCharset".into(), "utf8".into());
+    form.insert("platform".into(), "yqq".into());
+    form.insert("delnum".into(), "1".into());
+    form.insert("deldirids".into(), dirid);
+    form.insert("forcedel".into(), "1".into());
+    form.insert("formsender".into(), "1".into());
+    form.insert("source".into(), "103".into());
     let j = fcgi_post(
         ctx,
         "/splcloud/fcgi-bin/fcg_fav_modsongdir.fcg?g_tk=5381",
@@ -1288,9 +1280,7 @@ pub async fn playlist_delete(ctx: &Ctx, id: &str) -> ApiResult<()> {
 ///
 /// 真机待验证（spec §2.2），Task 22 真机验收，不通则摘 PlaylistWrite。
 pub async fn playlist_add(ctx: &Ctx, id: &str, tracks: &[super::TrackEntry]) -> ApiResult<()> {
-    if tracks.is_empty() {
-        return Err(bad_request("没有要加入的曲目"));
-    }
+    require_tracks(tracks, "加入")?;
     let (dirid, _) = split_playlist_id(id)?;
     if dirid.is_empty() {
         return Err(bad_request("收藏歌单不能加曲，缺少 dirid"));
@@ -1343,15 +1333,13 @@ pub async fn playlist_add(ctx: &Ctx, id: &str, tracks: &[super::TrackEntry]) -> 
 ///
 /// 真机待验证（spec §2.2），Task 22 真机验收。
 pub async fn playlist_remove(ctx: &Ctx, id: &str, tracks: &[super::TrackEntry]) -> ApiResult<()> {
-    if tracks.is_empty() {
-        return Err(bad_request("没有要移除的曲目"));
-    }
+    require_tracks(tracks, "移除")?;
     let (dirid, _) = split_playlist_id(id)?;
     if dirid.is_empty() {
         return Err(bad_request("收藏歌单不能删曲，缺少 dirid"));
     }
-    let pack = login_pack(ctx).await?;
-    let uin = numeric_uin(&pack);
+    // 先过登录态（与原始顺序一致），再逐首校验，最后补端点特有字段。
+    let mut form = base_form(ctx).await?;
     let mut ids = Vec::with_capacity(tracks.len());
     for (n, entry) in tracks.iter().enumerate() {
         // 删曲要的是数字 songid（不是 songmid，songmid 无法替代），它只在
@@ -1373,26 +1361,17 @@ pub async fn playlist_remove(ctx: &Ctx, id: &str, tracks: &[super::TrackEntry]) 
     }
     let ids_csv = ids.join(",");
     let types = vec!["3"; ids.len()].join(",");
-    let mut form = BTreeMap::new();
-    let mut put = |k: &str, v: &str| form.insert(k.to_string(), v.to_string());
-    put("loginUin", &uin);
-    put("hostUin", "0");
-    put("format", "json");
-    put("inCharset", "utf8");
-    put("outCharset", "utf-8");
-    put("notice", "0");
-    put("platform", "yqq.post");
-    put("needNewCode", "0");
-    put("g_tk", GTK_WEB);
-    put("uin", &uin);
-    put("dirid", &dirid);
-    put("ids", &ids_csv);
-    put("source", "103");
-    put("types", &types);
-    put("formsender", "4");
-    put("flag", "2");
-    put("utf8", "1");
-    put("from", "3");
+    form.insert("format".into(), "json".into());
+    form.insert("outCharset".into(), "utf-8".into());
+    form.insert("platform".into(), "yqq.post".into());
+    form.insert("dirid".into(), dirid);
+    form.insert("ids".into(), ids_csv);
+    form.insert("source".into(), "103".into());
+    form.insert("types".into(), types);
+    form.insert("formsender".into(), "4".into());
+    form.insert("flag".into(), "2".into());
+    form.insert("utf8".into(), "1".into());
+    form.insert("from".into(), "3".into());
     let j = fcgi_post(
         ctx,
         "/qzone/fcg-bin/fcg_music_delbatchsong.fcg?g_tk=5381",

@@ -172,6 +172,11 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/online/cookie", post(online_cookie))
         // 在线歌单搜索（按关键词检索平台侧公开歌单，与下面的「我的歌单」不同）
         .route("/v1/online/playlists/search", get(online_playlist_search))
+        // 歌手/专辑搜索与详情页（与歌单搜索同属「在线实体检索」一族）
+        .route("/v1/online/artists/search", get(online_artist_search))
+        .route("/v1/online/albums/search", get(online_album_search))
+        .route("/v1/online/artist", get(online_artist))
+        .route("/v1/online/album", get(online_album))
         // 我的歌单 / 歌单详情 / 写操作
         .route("/v1/online/playlists", get(online_playlists))
         .route(
@@ -3217,6 +3222,69 @@ async fn online_playlist_search(
     tagged(
         &source,
         online::search_playlists(&online_ctx(&state), &source, &q).await,
+    )
+    .map(Json)
+}
+
+/// 歌手搜索：入参与单曲/歌单搜索同形（复用 SearchQuery），能力闸门在 dispatch。
+async fn online_artist_search(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<online::SearchQuery>,
+) -> ApiResult<Json<online::ArtistSearchPage>> {
+    let source = q.source.clone();
+    tagged(
+        &source,
+        online::search_artists(&online_ctx(&state), &source, &q).await,
+    )
+    .map(Json)
+}
+
+/// 专辑搜索：同上。
+async fn online_album_search(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<online::SearchQuery>,
+) -> ApiResult<Json<online::AlbumSearchPage>> {
+    let source = q.source.clone();
+    tagged(
+        &source,
+        online::search_albums(&online_ctx(&state), &source, &q).await,
+    )
+    .map(Json)
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CollectionQuery {
+    pub(crate) source: String,
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) offset: usize,
+    #[serde(default = "default_page_limit")]
+    pub(crate) limit: usize,
+}
+
+/// 歌手页（热门歌曲）。与歌单详情同形态：limit/offset 分页，头部信息由
+/// 本端点给出（name/cover），前端不必自带。
+async fn online_artist(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<CollectionQuery>,
+) -> ApiResult<Json<online::CollectionDetail>> {
+    let limit = q.limit.clamp(1, 100);
+    tagged(
+        &q.source,
+        online::artist_songs(&online_ctx(&state), &q.source, &q.id, limit, q.offset).await,
+    )
+    .map(Json)
+}
+
+/// 专辑页（专辑详情 + 全部曲目）。
+async fn online_album(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<CollectionQuery>,
+) -> ApiResult<Json<online::CollectionDetail>> {
+    let limit = q.limit.clamp(1, 100);
+    tagged(
+        &q.source,
+        online::album_detail(&online_ctx(&state), &q.source, &q.id, limit, q.offset).await,
     )
     .map(Json)
 }

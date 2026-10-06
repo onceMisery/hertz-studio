@@ -17,10 +17,12 @@ use std::collections::BTreeMap;
 use reqwest::header::{HeaderValue, ACCEPT, CONTENT_TYPE};
 
 use super::http::{absorb_cookies, cookie_string, merge_cookie};
+use super::playlist_common::{created_playlist, form_map, require_playlist_name, require_tracks};
 use super::{
-    bad_request, client, https_url, AccountInfo, ApiError, ApiResult, Ctx, OnlineDetail,
-    OnlinePlaylist, OnlineTrack, PlaylistDetail, QrPayload, SearchPage, SearchQuery, StreamInfo,
-    TrackEntry,
+    bad_request, client, https_url, AccountInfo, AlbumSearchPage, ApiError, ApiResult,
+    ArtistSearchPage, CollectionDetail, Ctx, OnlineAlbum, OnlineArtist, OnlineDetail,
+    OnlinePlaylist, OnlineTrack, PlaylistDetail, PlaylistSearchPage, QrPayload, SearchPage,
+    SearchQuery, StreamInfo, TrackEntry,
 };
 
 const ID: &str = "netease";
@@ -61,7 +63,6 @@ const TERM_BY_CAT: &[(&str, &str)] = &[
 ];
 
 pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
-    let client = client()?;
     let keyword = q.q.clone().unwrap_or_default();
     let keyword = keyword.trim();
 
@@ -81,39 +82,7 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
     let limit = q.limit.clamp(1, 60);
     let offset = q.offset.min(500);
 
-    let cookie = visitor_cookie(ctx).await.unwrap_or(None);
-    let mut req = client
-        .get("https://music.163.com/api/search/get/")
-        .query(&[
-            ("s", term.as_str()),
-            ("type", "1"),
-            ("limit", &limit.to_string()),
-            ("offset", &offset.to_string()),
-        ])
-        .header("Referer", "https://music.163.com")
-        .header("Accept", "application/json");
-    req = with_cookie(req, cookie.as_deref());
-
-    let resp = req.send().await.map_err(super::http::send_error)?;
-
-    if !resp.status().is_success() {
-        return Err(ApiError::internal(format!("网易云返回 {}", resp.status())));
-    }
-
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| ApiError::internal(format!("网易云响应解析失败: {e}")))?;
-
-    // 上游在触发风控时会返回 code != 200，或者干脆返回 HTML 登录页。
-    let code = body.get("code").and_then(|v| v.as_i64()).unwrap_or(200);
-    if code != 200 {
-        invalidate_visitor(&body).await;
-        expect_200(&body, "搜索")?;
-        return Err(ApiError::internal(format!(
-            "网易云拒绝了这次搜索（code {code}），稍后重试或换关键词"
-        )));
-    }
+    let body = search_get(ctx, &term, "1", limit, offset).await?;
 
     let songs = body
         .get("result")
@@ -137,6 +106,368 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         total,
         tracks,
         warning: None,
+    })
+}
+
+/// [`search`] 与歌手/专辑/歌单搜索共用的请求端：`/api/search/get` 网页同款
+/// 公开接口，`type` 区分结果组（1 单曲 / 10 专辑 / 100 歌手 / 1000 歌单）。
+/// 风控处理与单曲搜索逐字同源：code != 200 先按游客会话失效归类，登录态
+/// 问题如实报 401，其余统一「上游拒绝」。
+async fn search_get(
+    ctx: &Ctx,
+    term: &str,
+    type_code: &str,
+    limit: usize,
+    offset: usize,
+) -> ApiResult<serde_json::Value> {
+    let cookie = visitor_cookie(ctx).await.unwrap_or(None);
+    let mut req = client()?
+        .get("https://music.163.com/api/search/get/")
+        .query(&[
+            ("s", term),
+            ("type", type_code),
+            ("limit", &limit.to_string()),
+            ("offset", &offset.to_string()),
+        ])
+        .header("Referer", W)
+        .header("Accept", "application/json");
+    req = with_cookie(req, cookie.as_deref());
+
+    let resp = req.send().await.map_err(super::http::send_error)?;
+
+    if !resp.status().is_success() {
+        return Err(ApiError::internal(format!("网易云返回 {}", resp.status())));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ApiError::internal(format!("网易云响应解析失败: {e}")))?;
+
+    // 上游在触发风控时会返回 code != 200，或者干脆返回 HTML 登录页。
+    let code = body.get("code").and_then(|v| v.as_i64()).unwrap_or(200);
+    if code != 200 {
+        invalidate_visitor(&body).await;
+        expect_200(&body, "搜索")?;
+        return Err(ApiError::internal(format!(
+            "网易云拒绝了这次搜索（code {code}），稍后重试或换关键词"
+        )));
+    }
+    Ok(body)
+}
+
+// ---------------------------------------------------------------------------
+// 歌手 / 专辑 / 歌单搜索（与单曲搜索同一个端点，type 区分）
+// ---------------------------------------------------------------------------
+
+/// 关键词必答检查：分类浏览（cat）只有单曲搜索支持，歌手/专辑/歌单搜索
+/// 没有分类语义，空关键词一律 400。
+fn search_term(q: &SearchQuery) -> ApiResult<String> {
+    let term = q.q.clone().unwrap_or_default();
+    let term = term.trim();
+    if term.is_empty() {
+        return Err(bad_request("需要给出搜索关键词"));
+    }
+    Ok(term.to_string())
+}
+
+pub async fn search_artists(ctx: &Ctx, q: &SearchQuery) -> ApiResult<ArtistSearchPage> {
+    let term = search_term(q)?;
+    let limit = q.limit.clamp(1, 60);
+    let offset = q.offset.min(500);
+    let body = search_get(ctx, &term, "100", limit, offset).await?;
+
+    let items = body
+        .pointer("/result/artists")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let total = body
+        .pointer("/result/artistCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(items.len() as u64) as usize;
+
+    Ok(ArtistSearchPage {
+        source: ID.into(),
+        keyword: term,
+        total,
+        artists: items.iter().map(map_artist).collect(),
+    })
+}
+
+/// 搜索结果的歌手条目。封面只认 `picUrl`（真人头像），`img1v1Url` 兜底；
+/// 两者都是完整 URL，无「picId 拼不出来」的单曲封面问题。
+fn map_artist(item: &serde_json::Value) -> OnlineArtist {
+    let alias = item
+        .get("alias")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| a.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("、")
+        })
+        .filter(|s| !s.is_empty());
+    OnlineArtist {
+        source: ID.into(),
+        id: item
+            .get("id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .to_string(),
+        name: item
+            .get("name")
+            .and_then(|n| n.as_str())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or("未知歌手")
+            .to_string(),
+        alias,
+        cover: item
+            .get("picUrl")
+            .or_else(|| item.get("img1v1Url"))
+            .and_then(|v| v.as_str())
+            .and_then(https_url),
+        song_count: item.get("musicSize").and_then(|v| v.as_u64()),
+    }
+}
+
+pub async fn search_albums(ctx: &Ctx, q: &SearchQuery) -> ApiResult<AlbumSearchPage> {
+    let term = search_term(q)?;
+    let limit = q.limit.clamp(1, 60);
+    let offset = q.offset.min(500);
+    let body = search_get(ctx, &term, "10", limit, offset).await?;
+
+    let items = body
+        .pointer("/result/albums")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let total = body
+        .pointer("/result/albumCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(items.len() as u64) as usize;
+
+    Ok(AlbumSearchPage {
+        source: ID.into(),
+        keyword: term,
+        total,
+        albums: items.iter().map(map_album).collect(),
+    })
+}
+
+fn map_album(item: &serde_json::Value) -> OnlineAlbum {
+    OnlineAlbum {
+        source: ID.into(),
+        id: item
+            .get("id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .to_string(),
+        name: item
+            .get("name")
+            .and_then(|n| n.as_str())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or("未知专辑")
+            .to_string(),
+        artist: item
+            .pointer("/artist/name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("未知歌手")
+            .to_string(),
+        cover: item
+            .get("picUrl")
+            .and_then(|v| v.as_str())
+            .and_then(https_url),
+        track_count: item.get("size").and_then(|v| v.as_u64()),
+        publish_time: item.get("publishTime").and_then(|v| v.as_u64()),
+    }
+}
+
+/// 网易云公开歌单搜索（type=1000）。与咪咕的歌单搜索同契约：归一化成
+/// [`OnlinePlaylist`]，kind 恒 "created"（搜索结果没有 created/collected 之别）。
+pub async fn search_playlists(ctx: &Ctx, q: &SearchQuery) -> ApiResult<PlaylistSearchPage> {
+    let term = search_term(q)?;
+    let limit = q.limit.clamp(1, 60);
+    let offset = q.offset.min(500);
+    let body = search_get(ctx, &term, "1000", limit, offset).await?;
+
+    let items = body
+        .pointer("/result/playlists")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let total = body
+        .pointer("/result/playlistCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(items.len() as u64) as usize;
+
+    Ok(PlaylistSearchPage {
+        source: ID.into(),
+        keyword: term,
+        total,
+        playlists: items.iter().filter_map(map_public_playlist).collect(),
+    })
+}
+
+fn map_public_playlist(item: &serde_json::Value) -> Option<OnlinePlaylist> {
+    let id = item
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .filter(|v| *v > 0)
+        .map(|v| v.to_string())?;
+    let name = item
+        .get("name")
+        .and_then(|n| n.as_str())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or("未知歌单")
+        .to_string();
+    Some(OnlinePlaylist {
+        source: ID.into(),
+        id,
+        name,
+        cover: item
+            .get("coverImgUrl")
+            .and_then(|v| v.as_str())
+            .and_then(https_url),
+        track_count: item.get("trackCount").and_then(|v| v.as_u64()).unwrap_or(0),
+        play_count: item.get("playCount").and_then(|v| v.as_u64()),
+        creator: item
+            .pointer("/creator/nickname")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string(),
+        kind: "created".into(),
+        description: None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 歌手页 / 专辑页
+// ---------------------------------------------------------------------------
+
+/// 平台 id 只可能是正整数；先卡死字符集再拼进 URL path，防注入。
+fn valid_platform_id(id: &str) -> ApiResult<&str> {
+    let id = id.trim();
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad_request("id 只能是数字"));
+    }
+    Ok(id)
+}
+
+/// 歌手页：`/api/v1/artist/{id}` 一次给齐头部信息与热门歌曲（上游固定 50
+/// 首封顶）。翻页在返回列表内本地切片；hotSongs 本身就是「热门歌曲」截断
+/// 列表，没有「下一页」语义，more 恒 false。
+pub async fn artist_songs(
+    ctx: &Ctx,
+    id: &str,
+    limit: usize,
+    offset: usize,
+) -> ApiResult<CollectionDetail> {
+    let id = valid_platform_id(id)?;
+    let limit = limit.clamp(1, 100);
+    let j = api_get(ctx, &format!("/api/v1/artist/{id}"), &[], false).await?;
+    expect_200(&j, "获取网易云歌手页")?;
+
+    let artist = j
+        .get("artist")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| ApiError::upstream_rejected("网易云未返回歌手信息".to_string()))?;
+    let songs = j
+        .get("hotSongs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut tracks: Vec<OnlineTrack> = songs
+        .iter()
+        .map(netease_track)
+        .filter(|t| !t.id.is_empty() && t.id != "0")
+        .collect();
+    fill_album_covers(ctx, &mut tracks).await;
+    let total = tracks.len() as u64;
+    let tracks = tracks
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+
+    Ok(CollectionDetail {
+        kind: "artist".into(),
+        source: ID.into(),
+        id: id.to_string(),
+        name: artist
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("未知歌手")
+            .to_string(),
+        cover: artist
+            .get("picUrl")
+            .or_else(|| artist.get("img1v1Url"))
+            .and_then(|v| v.as_str())
+            .and_then(https_url),
+        artist: None,
+        total,
+        more: false,
+        tracks,
+    })
+}
+
+/// 专辑页：`/api/v1/album/{id}` 返回专辑头 + 全部曲目，翻页在返回列表内
+/// 本地切片（专辑曲目天然有界）。
+pub async fn album_detail(
+    ctx: &Ctx,
+    id: &str,
+    limit: usize,
+    offset: usize,
+) -> ApiResult<CollectionDetail> {
+    let id = valid_platform_id(id)?;
+    let limit = limit.clamp(1, 100);
+    let j = api_get(ctx, &format!("/api/v1/album/{id}"), &[], false).await?;
+    expect_200(&j, "获取网易云专辑详情")?;
+
+    let album = j
+        .get("album")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| ApiError::upstream_rejected("网易云未返回专辑详情".to_string()))?;
+    let songs = j
+        .get("songs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut tracks: Vec<OnlineTrack> = songs
+        .iter()
+        .map(netease_track)
+        .filter(|t| !t.id.is_empty() && t.id != "0")
+        .collect();
+    fill_album_covers(ctx, &mut tracks).await;
+    let total = tracks.len() as u64;
+    let tracks = tracks
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+
+    Ok(CollectionDetail {
+        kind: "album".into(),
+        source: ID.into(),
+        id: id.to_string(),
+        name: album
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("未知专辑")
+            .to_string(),
+        cover: album
+            .get("picUrl")
+            .and_then(|v| v.as_str())
+            .and_then(https_url),
+        artist: album
+            .pointer("/artist/name")
+            .and_then(|n| n.as_str())
+            .map(str::to_string),
+        total,
+        more: false,
+        tracks,
     })
 }
 
@@ -916,6 +1247,15 @@ pub async fn playlists(
     Ok(all.into_iter().skip(offset).take(limit).collect())
 }
 
+/// 歌单 id 非空校验（trim 后）；网易云的详情与各写操作共用同一句缺参文案。
+fn require_id(id: &str) -> ApiResult<&str> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(bad_request("缺少网易云歌单 id"));
+    }
+    Ok(id)
+}
+
 /// 歌单详情：`/api/v6/playlist/detail`（n=1000）。1000 首以内曲目随详情一次
 /// 返回，内部按 offset/limit 切片；超过 1000 的大歌单走 `/track/all` 补取，
 /// 对前端始终是统一分页（spec §2.1）。
@@ -925,10 +1265,7 @@ pub async fn playlist_detail(
     offset: usize,
     limit: usize,
 ) -> ApiResult<PlaylistDetail> {
-    let id = id.trim();
-    if id.is_empty() {
-        return Err(bad_request("缺少网易云歌单 id"));
-    }
+    let id = require_id(id)?;
     let limit = limit.clamp(1, 100);
     // 歌单详情匿名可访问（公开歌单）；私密歌单上游会回登录码，由 expect_200 归类。
     let j = api_get(
@@ -996,13 +1333,9 @@ pub async fn playlist_detail(
 
 /// 新建歌单：POST /api/playlist/create。成功回包顶层或 playlist.id 给新 id。
 pub async fn playlist_create(ctx: &Ctx, name: &str) -> ApiResult<OnlinePlaylist> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(bad_request("缺少歌单名称"));
-    }
-    let mut form = BTreeMap::new();
-    form.insert("name".to_string(), name.to_string());
-    form.insert("privacy".to_string(), "0".to_string()); // 0 公开
+    let name = require_playlist_name(name)?;
+    // 0 公开。
+    let form = form_map(&[("name", name), ("privacy", "0")]);
     let j = api_post(ctx, "/api/playlist/create", &form).await?;
     let id = j
         .get("id")
@@ -1011,23 +1344,13 @@ pub async fn playlist_create(ctx: &Ctx, name: &str) -> ApiResult<OnlinePlaylist>
         .filter(|n| *n > 0)
         .map(|n| n.to_string())
         .ok_or_else(|| ApiError::upstream_rejected("创建成功但未取得歌单 id".to_string()))?;
-    Ok(OnlinePlaylist {
-        source: ID.into(),
-        id,
-        name: name.to_string(),
-        kind: "created".into(),
-        ..Default::default()
-    })
+    Ok(created_playlist(ID, id, name))
 }
 
 /// 删除歌单：POST /api/playlist/delete。
 pub async fn playlist_delete(ctx: &Ctx, id: &str) -> ApiResult<()> {
-    let id = id.trim();
-    if id.is_empty() {
-        return Err(bad_request("缺少网易云歌单 id"));
-    }
-    let mut form = BTreeMap::new();
-    form.insert("pid".to_string(), id.to_string());
+    let id = require_id(id)?;
+    let form = form_map(&[("pid", id)]);
     api_post(ctx, "/api/playlist/delete", &form).await?;
     Ok(())
 }
@@ -1067,39 +1390,31 @@ fn track_ids_json(tracks: &[TrackEntry]) -> ApiResult<String> {
 
 /// 加曲：POST /api/playlist/manipulate/tracks，op=add。
 pub async fn playlist_add(ctx: &Ctx, id: &str, tracks: &[TrackEntry]) -> ApiResult<()> {
-    if tracks.is_empty() {
-        return Err(bad_request("没有要加入的曲目"));
-    }
-    let id = id.trim();
-    if id.is_empty() {
-        return Err(bad_request("缺少网易云歌单 id"));
-    }
+    require_tracks(tracks, "加入")?;
+    let id = require_id(id)?;
     let track_ids = track_ids_json(tracks)?;
-    let mut form = BTreeMap::new();
-    form.insert("op".to_string(), "add".to_string());
-    form.insert("pid".to_string(), id.to_string());
-    form.insert("trackIds".to_string(), track_ids);
     // imme=true：跨端立即同步歌单（网页端默认带）。
-    form.insert("imme".to_string(), "true".to_string());
+    let form = form_map(&[
+        ("op", "add"),
+        ("pid", id),
+        ("trackIds", &track_ids),
+        ("imme", "true"),
+    ]);
     api_post(ctx, "/api/playlist/manipulate/tracks", &form).await?;
     Ok(())
 }
 
 /// 移除曲目：同端点 op=del。
 pub async fn playlist_remove(ctx: &Ctx, id: &str, tracks: &[TrackEntry]) -> ApiResult<()> {
-    if tracks.is_empty() {
-        return Err(bad_request("没有要移除的曲目"));
-    }
-    let id = id.trim();
-    if id.is_empty() {
-        return Err(bad_request("缺少网易云歌单 id"));
-    }
+    require_tracks(tracks, "移除")?;
+    let id = require_id(id)?;
     let track_ids = track_ids_json(tracks)?;
-    let mut form = BTreeMap::new();
-    form.insert("op".to_string(), "del".to_string());
-    form.insert("pid".to_string(), id.to_string());
-    form.insert("trackIds".to_string(), track_ids);
-    form.insert("imme".to_string(), "true".to_string());
+    let form = form_map(&[
+        ("op", "del"),
+        ("pid", id),
+        ("trackIds", &track_ids),
+        ("imme", "true"),
+    ]);
     api_post(ctx, "/api/playlist/manipulate/tracks", &form).await?;
     Ok(())
 }
@@ -1563,6 +1878,92 @@ mod tests {
             "album": {"name": "A", "picId": 1, "picUrl": "http://p1.music.126.net/a.jpg"}
         }));
         assert_eq!(t.cover.as_deref(), Some("https://p1.music.126.net/a.jpg"));
+    }
+
+    #[test]
+    fn artist_entries_are_normalised() {
+        let page = map_artist(&serde_json::json!({
+            "id": 6452,
+            "name": "周杰伦",
+            "alias": ["Jay Chou", "周董"],
+            "picUrl": "http://p1.music.126.net/a.jpg",
+            "musicSize": 568
+        }));
+        assert_eq!(page.source, "netease");
+        assert_eq!(page.id, "6452");
+        assert_eq!(page.name, "周杰伦");
+        assert_eq!(page.alias.as_deref(), Some("Jay Chou、周董"));
+        assert_eq!(
+            page.cover.as_deref(),
+            Some("https://p1.music.126.net/a.jpg")
+        );
+        assert_eq!(page.song_count, Some(568));
+
+        // 空别名不序列化成空串；缺封面不兜假图。
+        let bare = map_artist(&serde_json::json!({"id": 1, "name": "某人"}));
+        assert_eq!(bare.alias, None);
+        assert_eq!(bare.cover, None);
+        assert_eq!(bare.song_count, None);
+    }
+
+    #[test]
+    fn album_entries_are_normalised() {
+        let a = map_album(&serde_json::json!({
+            "id": 18909,
+            "name": "Partners 拍档",
+            "picUrl": "http://p1.music.126.net/b.jpg",
+            "size": 13,
+            "publishTime": 1019750400000u64,
+            "artist": {"name": "周杰伦"}
+        }));
+        assert_eq!(a.source, "netease");
+        assert_eq!(a.id, "18909");
+        assert_eq!(a.name, "Partners 拍档");
+        assert_eq!(a.artist, "周杰伦");
+        assert_eq!(a.cover.as_deref(), Some("https://p1.music.126.net/b.jpg"));
+        assert_eq!(a.track_count, Some(13));
+        assert_eq!(a.publish_time, Some(1_019_750_400_000));
+    }
+
+    #[test]
+    fn public_playlist_entries_skip_invalid_ids() {
+        let ok = map_public_playlist(&serde_json::json!({
+            "id": 6792103822i64,
+            "name": "精选",
+            "coverImgUrl": "http://p1.music.126.net/c.jpg",
+            "trackCount": 144,
+            "playCount": 33595024i64,
+            "creator": {"nickname": "Buradarrr"}
+        }))
+        .unwrap();
+        assert_eq!(ok.id, "6792103822");
+        assert_eq!(ok.name, "精选");
+        assert_eq!(ok.track_count, 144);
+        assert_eq!(ok.play_count, Some(33_595_024));
+        assert_eq!(ok.creator, "Buradarrr");
+        assert_eq!(ok.kind, "created");
+
+        // id 缺失/非法的条目整条丢弃，不产出空壳卡片。
+        assert!(map_public_playlist(&serde_json::json!({"name": "无 id"})).is_none());
+        assert!(map_public_playlist(&serde_json::json!({"id": 0, "name": "零"})).is_none());
+    }
+
+    #[test]
+    fn platform_ids_must_be_numeric() {
+        assert!(valid_platform_id("6452").is_ok());
+        assert!(valid_platform_id(" 18909 ").is_ok());
+        assert!(valid_platform_id("").is_err());
+        assert!(valid_platform_id("../settings").is_err());
+        assert!(valid_platform_id("6452;drop").is_err());
+        assert!(valid_platform_id("0").is_ok()); // 0 由上游报错，这里只卡字符集
+    }
+
+    #[test]
+    fn search_term_requires_a_keyword() {
+        let q = |json: serde_json::Value| -> SearchQuery { serde_json::from_value(json).unwrap() };
+        assert!(search_term(&q(serde_json::json!({"q": " 周杰伦 "}))).unwrap() == "周杰伦");
+        assert!(search_term(&q(serde_json::json!({}))).is_err());
+        assert!(search_term(&q(serde_json::json!({"q": "   "}))).is_err());
     }
 
     fn track(id: &str, cover: Option<&str>) -> OnlineTrack {

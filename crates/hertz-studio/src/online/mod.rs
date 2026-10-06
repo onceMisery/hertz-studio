@@ -49,6 +49,7 @@ mod kugou;
 mod kuwo;
 mod migu;
 mod netease;
+mod playlist_common;
 pub mod progressive;
 mod qishui;
 mod qq;
@@ -189,6 +190,10 @@ pub enum Capability {
     HighQuality,
     /// 在线歌单搜索：按关键词检索平台侧公开歌单（咪咕首个数据源）。
     PlaylistSearch,
+    /// 在线歌手搜索：按关键词检索平台侧歌手，可进歌手页取热门歌曲。
+    ArtistSearch,
+    /// 在线专辑搜索：按关键词检索平台侧专辑，可进专辑页取全部曲目。
+    AlbumSearch,
 }
 
 /// 平台曲目原始引用。写操作/播放取流时平台模块需要平台专有 id，
@@ -254,6 +259,83 @@ pub struct PlaylistSearchPage {
 pub struct PlaylistDetail {
     pub playlist: OnlinePlaylist,
     pub total: u64,
+    #[serde(default)]
+    pub tracks: Vec<OnlineTrack>,
+}
+
+/// 归一化后的在线歌手。字段名对齐前端卡片渲染：name 之外的一切都可缺省。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineArtist {
+    pub source: String,
+    pub id: String,
+    pub name: String,
+    /// 别名/外文名（如 "Jay Chou"）；多值折成一个串，缺省不序列化。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
+    /// 平台侧歌曲总数（搜索结果常带，进歌手页后作为分页总数）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub song_count: Option<u64>,
+}
+
+/// 歌手搜索结果页。与 [`PlaylistSearchPage`] 同构。
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtistSearchPage {
+    pub source: String,
+    pub keyword: String,
+    pub total: usize,
+    pub artists: Vec<OnlineArtist>,
+}
+
+/// 归一化后的在线专辑。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineAlbum {
+    pub source: String,
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_count: Option<u64>,
+    /// 发行时间（毫秒时间戳）；上游不给就不序列化，前端也不猜。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_time: Option<u64>,
+}
+
+/// 专辑搜索结果页。与 [`PlaylistSearchPage`] 同构。
+#[derive(Debug, Clone, Serialize)]
+pub struct AlbumSearchPage {
+    pub source: String,
+    pub keyword: String,
+    pub total: usize,
+    pub albums: Vec<OnlineAlbum>,
+}
+
+/// 歌手页 / 专辑页的曲目集合详情。与 [`PlaylistDetail`] 对称但没有平台歌单
+/// 的 kind/creator 语义：头部信息（name/cover）由本端点给出，曲目走与歌单
+/// 详情同一套 `OnlineTrack` 渲染。
+///
+/// `total` 是平台侧已知总数；上游只给 `more` 布尔（不给总数）时，`total` 取
+/// 「已加载数 + (more ? 1 : 0)」的保守值，`more` 原样透传——前端优先用
+/// `more` 判断翻页，`total` 只作展示兜底。
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectionDetail {
+    /// artist | album
+    pub kind: String,
+    pub source: String,
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
+    /// 专辑页给主歌手名，歌手页留空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    pub total: u64,
+    #[serde(default)]
+    pub more: bool,
     #[serde(default)]
     pub tracks: Vec<OnlineTrack>,
 }
@@ -336,6 +418,12 @@ pub const SOURCES: &[SourceInfo] = &[
             Capability::RecommendPlaylists,
             Capability::PersonalFm,
             Capability::HighQuality,
+            // 公开网页 GET 接口（/api/search/get 带 type、/api/v1/artist、
+            // /api/v1/album），无需签名、匿名可用（2026-10 实测）。歌单搜索
+            // 走同一端点的 type=1000；咪咕的歌单搜索是另一条 H5 链路。
+            Capability::PlaylistSearch,
+            Capability::ArtistSearch,
+            Capability::AlbumSearch,
         ],
     },
     SourceInfo {
@@ -929,7 +1017,63 @@ pub async fn search_playlists(
     gate(source, Capability::PlaylistSearch)?;
     match source {
         "migu" => migu::search_playlists(ctx, q).await,
+        "netease" => netease::search_playlists(ctx, q).await,
         other => Err(not_wired(other, "歌单搜索")),
+    }
+}
+
+/// 在线歌手搜索：能力位 [`Capability::ArtistSearch`] 未开的音源在这里拿到
+/// 404，前端按 caps 隐藏「歌手」入口，正常路径到不了这层报错。
+pub async fn search_artists(
+    ctx: &Ctx,
+    source: &str,
+    q: &SearchQuery,
+) -> ApiResult<ArtistSearchPage> {
+    gate(source, Capability::ArtistSearch)?;
+    match source {
+        "netease" => netease::search_artists(ctx, q).await,
+        other => Err(not_wired(other, "歌手搜索")),
+    }
+}
+
+/// 在线专辑搜索：能力位 [`Capability::AlbumSearch`] 同上。
+pub async fn search_albums(ctx: &Ctx, source: &str, q: &SearchQuery) -> ApiResult<AlbumSearchPage> {
+    gate(source, Capability::AlbumSearch)?;
+    match source {
+        "netease" => netease::search_albums(ctx, q).await,
+        other => Err(not_wired(other, "专辑搜索")),
+    }
+}
+
+/// 歌手页：该歌手的热门歌曲列表。与歌手搜索同一条能力位——搜得到歌手就
+/// 应该进得去歌手页，分开两个位只会出现「卡片能搜到、点开 404」的半能力。
+pub async fn artist_songs(
+    ctx: &Ctx,
+    source: &str,
+    id: &str,
+    limit: usize,
+    offset: usize,
+) -> ApiResult<CollectionDetail> {
+    gate(source, Capability::ArtistSearch)?;
+    match source {
+        "netease" => netease::artist_songs(ctx, id, limit, offset).await,
+        other => Err(not_wired(other, "歌手热门歌曲")),
+    }
+}
+
+/// 专辑页：专辑详情 + 全部曲目。与 [`Capability::AlbumSearch`] 同一条能力位，
+/// 理由同上。
+pub async fn album_detail(
+    ctx: &Ctx,
+    source: &str,
+    id: &str,
+    limit: usize,
+    offset: usize,
+) -> ApiResult<CollectionDetail> {
+    gate(source, Capability::AlbumSearch)?;
+    match source {
+        "netease" => netease::album_detail(ctx, id, limit, offset).await,
+        other => Err(not_wired(other, "专辑详情")),
     }
 }
 
@@ -1344,6 +1488,9 @@ mod tests {
                     | RecommendSongs
                     | RecommendPlaylists
                     | PersonalFm
+                    | PlaylistSearch
+                    | ArtistSearch
+                    | AlbumSearch
             ) | (
                 // 每日推荐走雷达端点（qq::recommend_songs），2026-09 真机验证。
                 "qq",
@@ -1391,6 +1538,7 @@ mod tests {
         // 验收结论调整时，必须显式改测试，防止摘位/复位在重构中被悄悄还原。
         let caps_of = |id: &str| find(id).unwrap().caps;
         // 网易云：全部能力（含扫码）已实现，等真机验收确认而非提前摘位。
+        // 歌单/歌手/专辑搜索走公开网页 GET（2026-10 实测匿名可用）。
         assert_eq!(
             caps_of("netease"),
             &[
@@ -1404,6 +1552,9 @@ mod tests {
                 Capability::RecommendPlaylists,
                 Capability::PersonalFm,
                 Capability::HighQuality,
+                Capability::PlaylistSearch,
+                Capability::ArtistSearch,
+                Capability::AlbumSearch,
             ]
         );
         // QQ：无红心实现；扫码走 QQ Connect 链（真机 confirmed 待验收）。
@@ -1461,5 +1612,44 @@ mod tests {
 
         // id 必填。
         assert!(serde_json::from_str::<TrackEntry>(r#"{"ref":{}}"#).is_err());
+    }
+
+    /// 歌单写操作的能力闸门：能力位未登记的音源（含实现已接线、等真机验收的
+    /// 酷狗写歌单）与未注册音源，都必须在 dispatch 入口被 gate 拦成 404，
+    /// 绝不能穿透到平台实现去做真实网络请求。
+    #[tokio::test]
+    async fn playlist_write_ops_stay_behind_the_capability_gate() {
+        let dir = std::env::temp_dir().join(format!("vmusic-pl-gate-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let ctx = Ctx { db };
+
+        // 酷狗转发臂已接线，但 PlaylistWrite 位未登记（真机闸门未过）→ 404。
+        assert!(!find("kugou")
+            .unwrap()
+            .caps
+            .contains(&Capability::PlaylistWrite));
+        assert_eq!(playlist_create(&ctx, "kugou", "x").await.unwrap_err().status, 404);
+        assert_eq!(playlist_delete(&ctx, "kugou", "1").await.unwrap_err().status, 404);
+        // 未注册音源与「平台不支持」不可区分：同样 404，不泄露端点存在性。
+        assert_eq!(
+            playlist_remove(&ctx, "ghost", "1", &[]).await.unwrap_err().status,
+            404
+        );
+
+        ctx.db.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 能力位已登记却没有转发臂是服务端接线缺陷（502 upstream_error）；真·
+    /// 不支持的音源走 unsupported（404 capability_unsupported）。两者不能互换，
+    /// 否则排障会被「不支持的音源」误导到错误方向。
+    #[test]
+    fn playlist_dispatch_keeps_wiring_gaps_distinct_from_unsupported_sources() {
+        let gap = not_wired("migu", "新建歌单");
+        assert_eq!(gap.status, 502);
+        assert!(gap.message.contains("未接线"), "{}", gap.message);
+        let nope = unsupported("ghost");
+        assert_eq!(nope.status, 404);
+        assert!(nope.message.contains("不支持的音源"), "{}", nope.message);
     }
 }
