@@ -154,7 +154,11 @@ API 形态（拆两个端点，消除「dry_run 又默认自动采纳」的矛�
 - 命令面板：`palette.js` 的 `PINNED_KEY = 'vmusic.palette.pinned'` + `registerSurface/openSurface` 内联 surface 机制；音量/睡眠两个 surface 的键盘路径在此前会话里做过浏览器实测。
 
 **仍未验证 / 未做（如实列出，不以「应该没问题」替代证据）**
-- P1 的「**长播放会话前端 CPU 对比数据**」：需要半小时级真机采样，且「对比」还需要已经不在树上的旧实现作基线 —— 本轮没有可复现的取证手段，记为未验证项。可替代的机制证据已归档（增量 diff 与 100ms 进度门控的具体代码位置见上）。
+- P1 的「**长播放会话前端 CPU 对比数据**」：**本轮补了实测，结论与该项的前提相反，如实记录**。方法：A=`acc8707`（优化前）、B=`8e55b03`；同一份夹具（220 首、列表 200 行、null 后端）、同一视口与设置（1440×900 / 经典皮肤），无头 Chrome + CDP `Performance.getMetrics`（TaskDuration / ScriptDuration / LayoutDuration / RecalcStyleDuration）+ rAF 帧计数；两个条件（带 GL 播 3D 舞台 32.3 分钟；`--disable-webgl` 让舞台退化成平面 15 分钟）。三条结论：
+  1. **想优化的那一层确实变轻了**：插桩 6 分钟实测 DOM 变更 503/s → 393/s（−22%）、脚本 44.4 → 37.5ms/s（−16%）。
+  2. **但总的主线程 CPU 反而更高**：改成**单实例顺序测量**（排除两实例互抢 CPU）后，A 跑两遍 0.536 / 0.540 s/s，B 0.659 s/s —— A 自身重复性 0.7%，**B 比 A 高约 22%**；而脚本 / 布局 / 样式三项 B 都不更高（43.8 vs 51.4/68.4ms/s、146 vs 142/120、15.7 vs 14.8/27.8），多出来的时间按 Trace 落在 `Layerize`（合成器侧图层构建：A 111 → B 211ms/s），**不在本次改动的那条路径上**。
+  3. **两实例同时跑的对照组说明该 harness 分辨不了小差异**：同一份二进制、同一批夹具，两侧脚本 67.3 vs 44.3ms/s、样式 24.0 vs 12.3ms/s、帧率 124 vs 137fps —— 噪声底噪与待测效应同量级，所以只有上面第 2 条的单实例顺序结果可用。
+  **待办**：`Layerize` 那 +100ms/s 的来源未查明（怀疑与前端整体 diff 里影响合成层结构的改动有关，最可疑的是脚本改 `defer` 后的初始化时序）；且无头软件渲染的绝对值不能外推到真实 GPU 浏览器。**该项不算通过**，留作下一次性能专项。脚本与报告已归档：`output/cpu-{ab,instrument,trace}.cjs`、`output/cpu-ab-report*.json`、`output/cpu-seq-*.json`。
 - F5 等发布面向。
 
 **WebDAV 场景记录（本轮补上）**：`python scripts/check-library-api.py --remote --binary target-p2/debug/hertz-studio.exe` → `PASS: webdav add/browse/401/import idempotent/direct-link play`（脚本自带 mini DAV 服务器，覆盖远程根的新增/浏览/401 处理/导入幂等/直链播放；与 `slow_remote_load_does_not_block_queue_swap` 那条时序单测互为补充）。
