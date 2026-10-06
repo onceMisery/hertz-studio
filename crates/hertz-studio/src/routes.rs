@@ -799,6 +799,18 @@ async fn clear_track_edit(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// 封面缓存文件名的准入：只接受曲目 UUID。
+///
+/// 这个 id 会被直接拼进 `cover_dir.join(format!("{id}.{ext}"))`，而 axum 0.8
+/// 的 `Path` 参数是 percent-decode 过的、且解码发生在分段匹配**之后**——
+/// `..%2f` 能以单个路径段通过 `{id}` 再解码成 `../`，从封面目录逃出去读、
+/// 写、删任意文件。本地曲目 id 恒为 UUID（`vmusic_library::build_track` 与
+/// 备份导入走同一个生成器），所以「是不是 UUID」就是完整且最严的准入条件，
+/// 比黑名单（拒 `..`、拒分隔符）更难绕过。RPC 形态同源复用这一个校验。
+pub(crate) fn safe_cover_id(id: &str) -> Option<&str> {
+    uuid::Uuid::parse_str(id).ok().map(|_| id)
+}
+
 /// 替换封面：请求体即图片字节，Content-Type 决定扩展名。写缓存文件并打
 /// cover_edited 标记，增量扫描跳过内嵌封面重写，用户封面不会被盖回去。
 async fn replace_cover(
@@ -807,6 +819,7 @@ async fn replace_cover(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let id = safe_cover_id(&id).ok_or_else(|| bad_request("cover id must be a uuid"))?;
     if body.is_empty() {
         return Err(bad_request("cover body must not be empty"));
     }
@@ -821,7 +834,7 @@ async fn replace_cover(
         "image/gif" => "gif",
         _ => "jpg",
     };
-    let file_id = id.clone();
+    let file_id = id.to_string();
     let dir = state.cover_dir();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -833,10 +846,10 @@ async fn replace_cover(
     .await
     .map_err(|e| bad_request(e.to_string()))?
     .map_err(bad_request)?;
-    vmusic_store::track_edits::set_cover_edited(&state.db, &id, true)
+    vmusic_store::track_edits::set_cover_edited(&state.db, id, true)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    vmusic_store::set_has_cover(&state.db, &id, true)
+    vmusic_store::set_has_cover(&state.db, &id.to_string(), true)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     Ok(Json(
@@ -884,6 +897,15 @@ async fn batch_delete_tracks(
 ) -> ApiResult<Json<serde_json::Value>> {
     if body.track_ids.is_empty() {
         return Err(bad_request("track_ids must not be empty"));
+    }
+    // 清封面缓存文件这一步会拿 id 拼路径：任一个非法就整批拒掉，不给穿越留缝。
+    // 前端只回传失效清单里的 id，正常路径不受影响。
+    if let Some(bad) = body
+        .track_ids
+        .iter()
+        .find(|id| safe_cover_id(id).is_none())
+    {
+        return Err(bad_request(format!("invalid cover id: {bad}")));
     }
     let deleted = vmusic_store::delete_tracks(&state.db, &body.track_ids)
         .await

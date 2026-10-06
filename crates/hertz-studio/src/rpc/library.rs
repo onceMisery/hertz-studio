@@ -139,6 +139,14 @@ pub async fn batch_delete_tracks(state: &Arc<AppState>, body: &Value) -> RpcResu
     if request.track_ids.is_empty() {
         return Err(bad_request("track_ids must not be empty"));
     }
+    // 与 HTTP 版同一道准入：清封面缓存会拿 id 拼路径，非法 id 整批拒掉。
+    if let Some(bad) = request
+        .track_ids
+        .iter()
+        .find(|id| crate::routes::safe_cover_id(id).is_none())
+    {
+        return Err(bad_request(format!("invalid cover id: {bad}")));
+    }
     let deleted = vmusic_store::delete_tracks(&state.db, &request.track_ids)
         .await
         .map_err(store_err)?;
@@ -181,6 +189,11 @@ fn cover_mime(ext: &str) -> &'static str {
 /// 没有封面给 204（体为 null），与 HTTP 版同口径：前端 `ensureCover` 把
 /// 「没有 data」和「取失败」都当成无封面，不会让整行渲染失败。
 pub async fn get_cover(state: &Arc<AppState>, id: &str) -> RpcResult {
+    // 非法 id 是真实的参数错误，不能落进 `no_content` 被前端当成「没有封面」咽下去
+    // （同本模块开头对 `Path<i64>` 解析失败给 400 的理由）。
+    let Some(id) = crate::routes::safe_cover_id(id) else {
+        return Err(not_found("cover id must be a uuid"));
+    };
     let found = find_cover(&state.cover_dir(), id);
     let Some((path, ext)) = found else {
         return Ok(Reply::no_content());
@@ -197,6 +210,7 @@ pub async fn get_cover(state: &Arc<AppState>, id: &str) -> RpcResult {
 /// 替换封面：信封里的 base64 即图片字节，`raw_content_type` 决定扩展名。写缓存
 /// 文件并打 cover_edited 标记，增量扫描跳过内嵌封面重写，用户封面不会被盖回去。
 pub async fn replace_cover(state: &Arc<AppState>, id: &str, raw: Option<&RawBody>) -> RpcResult {
+    let id = crate::routes::safe_cover_id(id).ok_or_else(|| bad_request("cover id must be a uuid"))?;
     let raw = raw.ok_or_else(|| bad_request("cover body must not be empty"))?;
     if raw.bytes.is_empty() {
         return Err(bad_request("cover body must not be empty"));
