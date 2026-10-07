@@ -19,7 +19,7 @@
 | --- | --- | --- | --- |
 | 舞台参数撤销历史上限 | 40 | `plugin/ui/stage-control.js::HIST_MAX` | 撤销按钮的可用态与内存 |
 | 同键连按的合并窗（毫秒） | 650 | `plugin/ui/stage-control.js::MERGE_MS` | 与 `HIST_MAX` 一起决定「撤一次退多远」；改小会把一段调参拆成多笔 |
-| 沉浸舞台 chrome 静止隐藏（毫秒） | 2600 | `plugin/ui/stage3d.js::CHROME_HIDE_MS` | 豁免清单（设置/工坊/焦点内/拖拽中）与队列面板的刻意行为 |
+| 沉浸舞台 chrome 静止隐藏（毫秒） | 2600 | `plugin/ui/stage3d.js::CHROME_HIDE_MS` | 豁免清单（设置/工坊/队列焦点/拖拽中）；固定队列独立保留显示 |
 | 搜索关键词历史上限 | 10 | `plugin/ui/search-history.js::MAX` | 流年面板的芯片渲染；键名只在这一处 |
 | 命令面板结果上限 | 10 | `plugin/ui/palette.js::MAX_RESULTS` | 置顶/最近两组的合并顺序 |
 | 进度重绘节流（毫秒） | 100 | `plugin/ui/app.js::PROGRESS_PAINT_MS` | 播放条与封面跑马灯的观感 |

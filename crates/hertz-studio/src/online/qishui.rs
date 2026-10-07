@@ -924,6 +924,7 @@ pub async fn account(ctx: &Ctx) -> ApiResult<AccountInfo> {
         source: ID.to_string(),
         nickname,
         avatar,
+        membership: super::ProfileMembership::Unknown,
         vip_level: 0,
         vip_label: String::new(),
     })

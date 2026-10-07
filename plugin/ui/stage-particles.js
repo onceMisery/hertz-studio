@@ -25,7 +25,7 @@
 
   var SPRITE = 32;          // 2D 光点精灵的画布边长
   var RIPPLE_POOL = 12;     // 涟漪 DOM 节点池：同时最多 12 圈
-  var RIPPLE_MS = 900;
+  var RIPPLE_MS = 1600;
 
   // 每档设备的帧率预算。tier 由 stage.js 按核心数 / 内存 / 渲染像素判一次，
   // 之后只会被帧率探针往下调。粒子数与 DPR 上限由各渲染器自己报，
@@ -131,8 +131,9 @@
     if (el.animate) {
       el.getAnimations().forEach(function (a) { a.cancel(); });
       var anim = el.animate([
-        { transform: 'translate(-50%, -50%) scale(0.35)', opacity: 0.30 * amp },
-        { transform: 'translate(-50%, -50%) scale(1.55)', opacity: 0 }
+        { transform: 'translate(-50%, -50%) scale(0.82)', opacity: 0 },
+        { transform: 'translate(-50%, -50%) scale(0.90)', opacity: 0.10 * amp, offset: 0.18 },
+        { transform: 'translate(-50%, -50%) scale(1.12)', opacity: 0 }
       ], { duration: RIPPLE_MS, easing: 'cubic-bezier(0.30, 0, 0.55, 1)' });
       if (wasLive) ripLive += 1;
       anim.onfinish = function () {
@@ -142,7 +143,7 @@
       };
     } else {
       // 没有 WAAPI 的老内核：退回静态显示，至少不会看不到反馈
-      el.style.opacity = String(0.30 * amp);
+      el.style.opacity = String(0.10 * amp);
       el.style.transform = 'translate(-50%, -50%) scale(1)';
       if (wasLive) ripLive += 1;
       if (el.__rippleTimer) clearTimeout(el.__rippleTimer);
@@ -197,14 +198,24 @@
       v.ry = Math.max(40, dr.height * (isStage ? 0.62 : 0.26));
     }
 
+    // 光尘聚在封面周围，边缘柔和消失。几何随封面和抽屉布局变化。
+    v.canvas.style.setProperty('--particle-cx', v.cx + 'px');
+    v.canvas.style.setProperty('--particle-cy', v.cy + 'px');
+    v.canvas.style.setProperty('--particle-rx', Math.max(v.w * 0.7, v.rx * 1.6) + 'px');
+    v.canvas.style.setProperty('--particle-ry', Math.max(180, v.ry * 1.6) + 'px');
+
     // 歌词占据的纵向区间。粒子在这一带里要主动让位——文字永远优先于氛围。
     // 区间从 DOM 量出来而不是写死比例，所以窄屏抽屉、字号调整、模式切换
     // 都不需要跟着改这里。
     var anchorRatio = parseFloat(cssVar('--lyric-anchor-ratio', '0.382'));
     if (isStage) {
-      // 侧栏里 .stage-lyrics 就是文字区本身，按它的实际矩形让位最准。
+      // 歌曲信息、进度条和歌词共用一条安静区，封面模式也为标题让位。
+      var title = v.el.querySelector('.stage-title');
       var lyr = v.el.querySelector('.stage-lyrics');
-      if (lyr && lyr.clientHeight) {
+      if (title && title.clientHeight) {
+        v.fade0 = title.getBoundingClientRect().top - r.top;
+        v.fade1 = v.h;
+      } else if (lyr && lyr.clientHeight) {
         var lr = lyr.getBoundingClientRect();
         v.fade0 = lr.top - r.top;
         v.fade1 = lr.bottom - r.top;
@@ -277,7 +288,7 @@
 
     return {
       name: 'canvas2d',
-      counts: [90, 240, 420],
+      counts: [36, 72, 120],
       dpr: [1.0, 1.3, 1.6],
       mount: function (v) {
         if (!v.ctx) v.ctx = v.canvas.getContext('2d', { alpha: true });
@@ -307,11 +318,9 @@
         var low = f.bands[0], body = f.bands[1], mid = f.bands[2], air = f.bands[3];
         var pulse = f.pulse * s;
         var t = f.t;
-        var lift = f.drift * (0.018 + mid * 0.05) / 1000;
-        var breathe = Math.sin(t / 2400) * low * 0.010 * s;
-        var push = pulse * 0.055;
-        var flick = air * 0.9;
-        var flickLane = (t / 90 | 0) % 8;
+        var lift = Math.min(100, Math.max(0, f.dt)) / 1000 * f.drift * (0.004 + mid * 0.004);
+        var breathe = Math.sin(t / 5000) * low * 0.002 * s;
+        var push = pulse * 0.012;
 
         // 'lighter' 让重叠的光点累加而不是互相遮挡，这是"舞台灰尘被灯打亮"
         // 的关键一步；代价是密集处会过曝，所以单颗 alpha 压得很低。
@@ -320,7 +329,7 @@
           var z = pz[i];
           py[i] -= lift * (0.4 + z);
           if (py[i] < -0.05) { py[i] = 1.05; px[i] = Math.random(); }
-          var sway = Math.sin(t / 1900 + pseed[i]) * 0.012 * (0.3 + z) * (1 + body);
+          var sway = Math.sin(t / 5000 + pseed[i]) * 0.006 * (0.3 + z) * (1 + body * 0.2);
           var x = (px[i] + sway) * v.w;
           var y = (py[i] + breathe) * v.h;
           if (push > 0.0005) {
@@ -332,11 +341,11 @@
             x += dx / d * k * v.w * 0.14;
             y += dy / d * k * v.h * 0.14;
           }
-          var tw = 0.72 + 0.28 * Math.sin(t / 420 + pseed[i] * 3.1);
-          var a = (0.05 + 0.16 * z + low * 0.10 + pulse * 0.14) * tw * textFade(v, y);
-          if (flick > 0.02 && (i & 7) === flickLane) a += flick * 0.22;
+          var tw = 0.82 + 0.18 * Math.sin(t * 0.00045 + pseed[i] * 3.1);
+          var shimmer = air * 0.025 * (0.5 + 0.5 * Math.sin(t * 0.0007 + pseed[i]));
+          var a = (0.06 + 0.13 * z + low * 0.035 + pulse * 0.04 + shimmer) * tw * textFade(v, y);
           if (a < 0.012) continue;               // 暗到看不出的直接跳过，省下上千次 drawImage
-          var size = psize[i] * (0.7 + z * 0.9) * (1 + low * 0.5 + pulse * 0.35) * 3.2;
+          var size = psize[i] * (0.7 + z * 0.9) * (1 + low * 0.12 + pulse * 0.10) * 3.0;
           g.globalAlpha = a > 1 ? 1 : a;
           g.drawImage(sprites[i & 1], x - size / 2, y - size / 2, size, size);
         }
@@ -544,7 +553,7 @@
   var lastSpectrumAt = 0;
 
   function targetFps() {
-    if (!renderer || Stage.isHidden()) return 0;
+    if (!renderer || !Stage.isStageVisible() || Stage.presentation().reduced) return 0;
     if (probeMuted) return 0;                       // 探测期间本层必须完全不画
     if (!opts.dust && !opts.ripples) return 0;
     var playing = document.body.classList.contains('is-playing');
@@ -639,7 +648,13 @@
       resizeObserver = new ResizeObserver(function () {
         for (var i = 0; i < views.length; i += 1) measureView(views[i]);
       });
-      for (var i = 0; i < views.length; i += 1) if (views[i].el) resizeObserver.observe(views[i].el);
+      for (var i = 0; i < views.length; i += 1) {
+        resizeObserver.observe(views[i].el);
+        // 封面/卡拉OK切换与长标题会改变内部几何，面板本身的尺寸可能不变。
+        views[i].el.querySelectorAll('.disc-wrap, .stage-title').forEach(function (el) {
+          resizeObserver.observe(el);
+        });
+      }
     }
 
     return api;

@@ -45,6 +45,10 @@
 
   var PAGE = 50;
   var H = null; // app.js 注入的宿主（setLayer / caps / enqueue / toast）
+  var trackWindow = null;
+  var pageSentinel = null;
+  var windowFrame = 0;
+  var WINDOW_THRESHOLD = 120;
 
   var state = {
     // 网格层
@@ -517,9 +521,132 @@
     toast('已把 ' + n + ' 首加入队列');
   }
 
+  function trackKey(t) { return String(t.source || state.source) + ':' + String(t.id); }
+
+  function trackNode(t, i, view) {
+    var row;
+    if (state.mode === 'cover') row = trackCard(t, i, view);
+    else {
+      row = window.Online.row(t, function () {
+        if (t.playable) window.Online.playAll(view, i);
+      });
+      if (state.kind === 'playlist' && hasCap(state.source, 'playlist_write')
+          && window.OnlinePlaylists && window.OnlinePlaylists.removeButton) {
+        var actions = row.querySelector('.t-actions');
+        if (actions) actions.appendChild(window.OnlinePlaylists.removeButton(
+          state.source, state.subject, t, function () { loadPage(0); }));
+      }
+    }
+    row.dataset.oplIndex = String(i);
+    row.dataset.oplKey = trackKey(t);
+    return row;
+  }
+
+  function finishTracks(box) {
+    // The observer must live inside the actual scrolling element. Its former
+    // sibling position stayed visible and could fetch every page immediately.
+    if (pageSentinel && box.clientHeight) box.appendChild(pageSentinel);
+    paintTail();
+  }
+
+  function windowSpacer(rows, model) {
+    var spacer = document.createElement('div');
+    spacer.className = 'opl-window-spacer';
+    spacer.setAttribute('aria-hidden', 'true');
+    spacer.style.height = Math.max(0, rows * model.stride - model.gap) + 'px';
+    return spacer;
+  }
+
+  function paintWindow(focusIndex, requestedScroll) {
+    var w = trackWindow;
+    if (!w) return;
+    var box = w.box, scroll = requestedScroll == null ? box.scrollTop : requestedScroll;
+    var first = Math.max(0, Math.min(w.rows - 1, Math.floor(scroll / w.stride) - 3));
+    var end = Math.min(w.rows, Math.ceil((scroll + box.clientHeight) / w.stride) + 3);
+    var active = document.activeElement;
+    var focused = active && active.closest ? active.closest('[data-opl-index]') : null;
+    if (focusIndex == null && focused && box.contains(focused)) focusIndex = Number(focused.dataset.oplIndex);
+    var pinned = focusIndex == null ? -1 : Math.floor(focusIndex / w.columns);
+    var rowNumbers = [];
+    if (pinned >= 0 && pinned < first) rowNumbers.push(pinned);
+    for (var r = first; r < end; r++) rowNumbers.push(r);
+    if (pinned >= end && pinned < w.rows) rowNumbers.push(pinned);
+    var children = [], keep = new Map(), cursor = 0;
+    rowNumbers.forEach(function (r) {
+      if (r > cursor) children.push(windowSpacer(r - cursor, w));
+      for (var i = r * w.columns; i < Math.min(w.view.length, (r + 1) * w.columns); i++) {
+        var node = w.nodes.get(i) || trackNode(w.view[i], i, w.view);
+        keep.set(i, node); children.push(node);
+      }
+      cursor = r + 1;
+    });
+    if (cursor < w.rows) children.push(windowSpacer(w.rows - cursor, w));
+    if (pageSentinel) children.push(pageSentinel);
+    box.replaceChildren.apply(box, children);
+    w.nodes = keep;
+    box.scrollTop = scroll;
+    // A focused row outside the viewport occupies one extra row, with spacers
+    // around it. It keeps its identity without stretching the whole window.
+    if (active && box.contains(active) && document.activeElement !== active) active.focus({ preventScroll: true });
+  }
+
+  function scheduleWindow() {
+    if (!trackWindow || windowFrame) return;
+    windowFrame = requestAnimationFrame(function () { windowFrame = 0; paintWindow(); });
+  }
+
+  function focusTrack(index, lastChild) {
+    var w = trackWindow;
+    if (!w) return;
+    index = Math.max(0, Math.min(w.view.length - 1, index));
+    var top = Math.floor(index / w.columns) * w.stride;
+    if (top < w.box.scrollTop || top + w.stride > w.box.scrollTop + w.box.clientHeight) w.box.scrollTop = top;
+    paintWindow(index);
+    var row = w.nodes.get(index);
+    var buttons = row.querySelectorAll('button:not(:disabled), [tabindex="0"]');
+    var target = lastChild && buttons.length ? buttons[buttons.length - 1]
+      : (row.tabIndex < 0 && buttons.length ? buttons[0] : row);
+    target.focus({ preventScroll: true });
+  }
+
+  function windowKeydown(e) {
+    var w = trackWindow;
+    var row = e.target.closest && e.target.closest('[data-opl-index]');
+    if (!w || !row || !w.box.contains(row) || e.ctrlKey || e.metaKey || e.altKey) return;
+    var i = Number(row.dataset.oplIndex), next = i;
+    if (e.key === 'ArrowDown') next += w.columns;
+    else if (e.key === 'ArrowUp') next -= w.columns;
+    else if (e.key === 'ArrowRight' && w.columns > 1) next++;
+    else if (e.key === 'ArrowLeft' && w.columns > 1) next--;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = w.view.length - 1;
+    else if (e.key === 'PageDown') next += Math.max(1, Math.floor(w.box.clientHeight / w.stride)) * w.columns;
+    else if (e.key === 'PageUp') next -= Math.max(1, Math.floor(w.box.clientHeight / w.stride)) * w.columns;
+    else if (e.key === 'Tab') {
+      var buttons = row.querySelectorAll('button:not(:disabled), [tabindex="0"]');
+      var edge = e.shiftKey ? (row.tabIndex < 0 && buttons.length ? buttons[0] : row)
+        : (buttons.length ? buttons[buttons.length - 1] : row);
+      if (e.target !== edge) return;
+      next += e.shiftKey ? -1 : 1;
+      if (next < 0 || next >= w.view.length) return;
+    } else return;
+    e.preventDefault();
+    focusTrack(next, e.key === 'Tab' && e.shiftKey);
+  }
+
   function renderTracks() {
     var box = el('opl-rows');
     if (!box) return;
+    pageSentinel = pageSentinel || el('opl-sentinel');
+    var old = trackWindow;
+    var active = document.activeElement;
+    var focused = active && active.closest ? active.closest('[data-opl-key]') : null;
+    var focusKey = focused && box.contains(focused) ? focused.dataset.oplKey : null;
+    var focusChild = focusKey ? Array.prototype.indexOf.call(
+      focused.querySelectorAll('button:not(:disabled), [tabindex="0"]'), active) : -1;
+    var anchor = old && old.query === state.trackQuery && old.subject === state.subject
+      ? old.view[Math.min(old.view.length - 1, Math.floor(box.scrollTop / old.stride) * old.columns)] : null;
+    trackWindow = null;
     box.innerHTML = '';
     // 封面排布下"专辑/来源/时长"这几列没有落点（卡片上放不下也读不清），
     // 表头随之收起。
@@ -530,12 +657,12 @@
 
     if (state.phase === 'loading') {
       box.innerHTML = '<div class="hint">正在加载' + kindLabel() + '…</div>';
-      paintTail();
+      finishTracks(box);
       return;
     }
     if (state.phase === 'error') {
       box.appendChild(errorNode());
-      paintTail();
+      finishTracks(box);
       return;
     }
 
@@ -547,35 +674,37 @@
         ? '已加载的曲目里没有匹配项。'
         : '这个' + kindLabel() + '是空的。';
       box.appendChild(hint);
-      paintTail();
+      finishTracks(box);
       return;
     }
 
-    if (state.mode === 'cover') {
-      view.forEach(function (t, i) { box.appendChild(trackCard(t, i, view)); });
-      paintTail();
-      return;
-    }
-
-    // 写操作只有歌单有（往歌单里加/删曲）；专辑与歌手页是只读集合。
-    var canWrite = state.kind === 'playlist' && hasCap(state.source, 'playlist_write');
-    view.forEach(function (t, i) {
-      var row = window.Online.row(t, function () {
-        // VIP 曲放行：可播与否由后端按账号 cookie 定，失败如实 toast。
-        if (!t.playable) return;
-        window.Online.playAll(view, i);
-      });
-      if (canWrite && window.OnlinePlaylists && window.OnlinePlaylists.removeButton) {
-        var actions = row.querySelector('.t-actions');
-        if (actions) {
-          actions.appendChild(window.OnlinePlaylists.removeButton(
-            state.source, state.playlist, t, function () { loadPage(0); }
-          ));
+    if (view.length > WINDOW_THRESHOLD && box.clientHeight > 0) {
+      var sample = trackNode(view[0], 0, view);
+      box.appendChild(sample);
+      var style = getComputedStyle(box);
+      var columns = cover ? style.gridTemplateColumns.split(' ').length : 1;
+      var gap = parseFloat(style.rowGap) || 0;
+      var height = sample.getBoundingClientRect().height;
+      if (height > 0) {
+        trackWindow = { box: box, view: view, columns: columns, gap: gap,
+          stride: height + gap, rows: Math.ceil(view.length / columns), nodes: new Map([[0, sample]]),
+          query: state.trackQuery, subject: state.subject };
+        var anchorIndex = anchor ? view.findIndex(function (t) { return trackKey(t) === trackKey(anchor); }) : 0;
+        var desiredScroll = Math.floor(Math.max(0, anchorIndex) / columns) * trackWindow.stride;
+        var focusIndex = focusKey ? view.findIndex(function (t) { return trackKey(t) === focusKey; }) : -1;
+        paintWindow(focusIndex >= 0 ? focusIndex : null, desiredScroll);
+        if (focusIndex >= 0) {
+          var focusRow = trackWindow.nodes.get(focusIndex);
+          var focusTarget = focusRow.querySelectorAll('button:not(:disabled), [tabindex="0"]')[focusChild] || focusRow;
+          focusTarget.focus({ preventScroll: true });
         }
+        finishTracks(box);
+        return;
       }
-      box.appendChild(row);
-    });
-    paintTail();
+      box.innerHTML = '';
+    }
+    view.forEach(function (t, i) { box.appendChild(trackNode(t, i, view)); });
+    finishTracks(box);
   }
 
   // 封面排布的单张曲目卡：封面 + 歌名 + 歌手·时长。类名沿用在线面板网格那套
@@ -657,7 +786,7 @@
   // 列表尾部：加载中 / 加载更多按钮 / 尾哨兵（滚动到底自动翻页）。
   function paintTail() {
     var more = el('opl-more');
-    var sentinel = el('opl-sentinel');
+    var sentinel = pageSentinel || el('opl-sentinel');
     if (!more || !sentinel) return;
     if (state.phase === 'loading') {
       more.hidden = true;
@@ -683,6 +812,23 @@
   }
 
   function bindStatic() {
+    var rows = el('opl-rows');
+    if (rows && !rows._windowBound) {
+      rows._windowBound = true;
+      rows.addEventListener('scroll', scheduleWindow, { passive: true });
+      rows.addEventListener('keydown', windowKeydown);
+      if (typeof ResizeObserver === 'function') {
+        var dimensions = '';
+        new ResizeObserver(function () {
+          var size = rows.clientWidth + ':' + rows.clientHeight;
+          if (size !== dimensions) { dimensions = size; if (state.phase === 'ready') renderTracks(); }
+        }).observe(rows);
+      }
+      document.addEventListener('skin:changed', function () { if (state.phase === 'ready') renderTracks(); });
+      if (typeof MutationObserver === 'function') new MutationObserver(function () {
+        if (state.phase === 'ready') renderTracks();
+      }).observe(document.body, { attributes: true, attributeFilter: ['data-density'] });
+    }
     var gb = el('opl-grid-back');
     if (gb) gb.onclick = function () { setLayer('arrange'); };
     var db = el('opl-detail-back');
@@ -723,7 +869,7 @@
     if (sentinel && typeof IntersectionObserver === 'function') {
       new IntersectionObserver(function (entries) {
         if (entries[0] && entries[0].isIntersecting) loadMore();
-      }).observe(sentinel);
+      }, { root: rows }).observe(sentinel);
     }
   }
 

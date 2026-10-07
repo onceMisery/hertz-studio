@@ -23,6 +23,37 @@ pub struct MediaInfo {
     pub channels: Option<u8>,
 }
 
+/// Preparing a transition must never prevent the current source from ending.
+#[derive(Debug, Clone)]
+pub enum PrepareResult {
+    Prepared(MediaInfo),
+    Bypassed { reason: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct NextTrack {
+    pub uri: String,
+    pub track_id: String,
+    /// The actor generation for which this preparation is valid.
+    pub generation: u64,
+    /// Zero concatenates samples; a positive duration overlaps the two sources.
+    pub crossfade_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum NextEvent {
+    Transitioned {
+        from_generation: u64,
+        track_id: String,
+        info: MediaInfo,
+    },
+    Bypassed {
+        generation: u64,
+        track_id: String,
+        reason: String,
+    },
+}
+
 /// 可流式读取的音频源：标准库 `Read + Seek + Send + Sync` 的组合。
 ///
 /// Rust 的 trait object 只能含一个非 auto trait，无法直接写
@@ -105,6 +136,19 @@ pub trait AudioBackend {
     /// 可调交叉淡化时长（毫秒）。默认忽略。
     fn set_crossfade(&mut self, _ms: u64) -> Result<(), AudioError> {
         Ok(())
+    }
+
+    /// Prepare a complete local file without changing the current source.
+    fn prepare_next(&mut self, _next: NextTrack) -> Result<PrepareResult, AudioError> {
+        Ok(PrepareResult::Bypassed {
+            reason: "backend does not support prepared transitions".into(),
+        })
+    }
+
+    fn clear_next(&mut self) {}
+
+    fn take_next_event(&mut self) -> Option<NextEvent> {
+        None
     }
 
     fn position_ms(&self) -> u64;

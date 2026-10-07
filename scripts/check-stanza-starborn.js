@@ -461,7 +461,7 @@ ok(/#stage3d\.s3d-starborn\.s3d-no-vignette \.s3d-starborn-grade::before \{ opac
 });
 ok(/href="stanza\/stanza-starborn\.css"/.test(indexHtml), '页面加载独立星诞电影层 CSS');
 ok(/include_str!\("\.\.\/\.\.\/\.\.\/plugin\/ui\/stanza\/stanza-starborn\.css"\)/.test(mainRs)
-  && /route\("\/stanza\/stanza-starborn\.css"/.test(mainRs), '星诞 CSS 同时有后端内嵌与资源路由');
+  && /route\(\s*"\/stanza\/stanza-starborn\.css"/.test(mainRs), '星诞 CSS 同时有后端内嵌与资源路由');
 ['s3d-starborn-grade', 's3d-starborn-transition'].forEach(name => {
   ok(indexHtml.includes('class="' + name + '"') && starbornCss.includes('.' + name), '电影层节点与 CSS 同名：' + name);
 });

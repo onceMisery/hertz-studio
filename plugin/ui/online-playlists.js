@@ -207,10 +207,10 @@
     nick.className = 'op-nick';
     nick.textContent = acc.nickname || sourceLabel(src);
     meta.appendChild(nick);
-    if (acc.vip_label) {
+    if (acc.vip_label || (acc.membership && acc.membership.state === 'unknown')) {
       var vip = document.createElement('div');
       vip.className = 'op-vip';
-      vip.textContent = acc.vip_label;
+      vip.textContent = acc.vip_label || '会员信息暂不可用';
       meta.appendChild(vip);
     }
     card.appendChild(meta);

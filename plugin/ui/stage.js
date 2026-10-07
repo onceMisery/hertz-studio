@@ -905,6 +905,9 @@
     if (Math.abs(hz - snapped) < 1.5) hz = snapped;
     // EMA：稳住读数，但不让它永远停在旧值上（外接显示器被拔掉要能跟上来）。
     displayHz = displayHz ? displayHz + (hz - displayHz) * 0.2 : hz;
+    // EMA 从高刷下降时会停在 60.000000000000014 等浮点尾差；ceil 会因此
+    // 永久多分一档。只合并数值舍入尾差，保留可测的非整数刷新率与预算语义。
+    if (Math.abs(displayHz - hz) < 1e-9) displayHz = hz;
     return displayHz;
   }
 
@@ -970,7 +973,13 @@
       var spent = g.wait;
       g.skip = 0;
       g.wait = 0;
-      g.tickFn(spent);
+      // 在既有帧门边界测实际执行次数与耗时；不增加循环，也不把等待时间当渲染成本。
+      var perfStart = typeof HertzPerf !== 'undefined' && HertzPerf.state.enabled ? HertzPerf.now() : null;
+      try {
+        g.tickFn(spent);
+      } finally {
+        if (perfStart !== null && typeof HertzPerf !== 'undefined') HertzPerf.markSince('gate.' + g.name, perfStart);
+      }
     }
   }
 
@@ -989,13 +998,16 @@
     // dt：lerp 要按真实帧间隔归一化，否则 30fps 的机器滚动会慢一半。
     // 标签页切回来时 dt 可能是几千毫秒，截断掉，免得一帧就冲过整段歌词。
     var t = now();
-    lastDt = lastFrameAt ? clamp(t - lastFrameAt, 1, 200) : 16.7;
+    var frameDt = lastFrameAt ? clamp(t - lastFrameAt, 1, 200) : 16.7;
+    lastDt = frameDt;
     lastFrameAt = t;
 
-    runGates(lastDt);
-    sampleDisplayHz(lastDt);
+    runGates(frameDt);
+    // tickLyrics 会把 lastDt 改成歌词门累计间隔；刷新率只采主循环自己的间隔。
+    sampleDisplayHz(frameDt);
     sampleFrameRate();
     if (!hidden && (playing || energy > 0.005 || anyGateWants())) schedule();
+    else lastFrameAt = 0;
   }
 
   // 歌词更新的目标帧率。好机器上 60 等于不节流（rAF 本来就被显示器限着），
@@ -1049,8 +1061,7 @@
     // dock 胶囊实例不渲染舞台：那个 surface 只有窄条一块地方，跑 60fps 是纯浪费。
     // 标记由 app.js 在拿到 bridge context 之后挂到 window（见 HertzCapsuleOnly）。
     if (rafId || hidden || window.HertzCapsuleOnly) return;
-    // 循环每停一次再起来，中间空掉的那段时间不能算进 dt
-    lastFrameAt = 0;
+    // 续帧保留时钟基准；只在真正停机或从隐藏恢复时重置，才能测到真实刷新率。
     rafId = requestAnimationFrame(frame);
   }
 
@@ -1417,7 +1428,8 @@
 
     // Stage.gate('particles', function(){ return 30; }, function(dt){ ... })
     gate: defineGate,
-    // 帧门的真实换算：声明值、分频数、在当前实测刷新率上实际跑到的帧率。
+    // 帧门预算换算：声明值、分频数、在当前实测刷新率下可兑现的帧率。
+    // 已执行的 runs/s 另由 HertzPerf 的 gate.* 计数在采样窗口内求差。
     // 任何显示「48fps」的界面文案都必须读这里，不许读声明值——旧实现就是靠
     // 声明值报数，60Hz 上写 48 实际跑 30，数字一直在说谎。
     gateRates: function () {

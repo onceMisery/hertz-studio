@@ -7,10 +7,8 @@
 //   node scripts/check-quality-ceiling.js
 //
 // 治的是借鉴清单 §2 B4 那一条：「降档对用户可见，且不会又弹回高档」。上限的
-// 算法本体（只降不升、夹取只往下）在 Rust 单元测试里跑真实代码测过了，但那个
-// 测试是**直接调用** note_quality_failure / online_quality_for 的——它测不到接
-// 线：少接一个失败收口点就是「某一类失败永远不降档」，少接一个取档点就是
-// 「某条路径绕开上限照旧撞高档」，两种都不报错，只表现为音质时好时坏。
+// 算法与真实重试入口由 Rust 单元测试覆盖；这里补充跨模块接线检查，防止某条
+// 路径绕过上限，或把变化后的偏好误当成失败时的实际档位。静态检查不替代行为测试。
 //
 // 所以这里钉的是接线与命名，五件事：
 //
@@ -18,8 +16,8 @@
 //      走 online_quality_for。裸读偏好的话，被夹低的那首会在某一处又去要高档
 //      （节拍分析那处尤其阴：文件挂在夹后的档位下，按原始偏好找就永远找不到，
 //      节拍分析静默不跑，舞台只表现为「这首歌没有镜头变化」）。
-//   2. 两个失败收口点都得记上限：online_failed（取流/下载/提交失败）与
-//      handle_decode_failure（解码线程半路夭夭）。
+//   2. 取流重试只记一次不可变尝试档位；最终失败只接收未记账的实际档位。
+//      解码错误必须消费匹配播放/actor 代际的提交证据，不能再读取当前偏好猜档。
 //   3. 服务端事件名与前端分发名必须对得上。serde 的 rename_all = "snake_case"
 //      把 QualityDowngraded 发成 quality_downgraded，app.js 少一个 case 就是
 //      整条提示静默丢失——不报错、不塌界面，只是从来没人见过降档说明。
@@ -50,7 +48,7 @@ function ok(cond, label) {
   }
 }
 function section(name) { console.log('\n' + name); }
-function read(file) { return fs.readFileSync(file, 'utf8'); }
+function read(file) { return fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n'); }
 
 /// 生产代码部分：单元测试整段挂在 `#[cfg(test)]` 之后，算接线时必须摘掉，
 /// 否则测试里那些合法的直接调用会被数成接线点。
@@ -91,7 +89,7 @@ function grabFn(src, head) {
   {
     const state = shipped(read(STATE));
     const beats = shipped(read(BEATS));
-    // 定义本身占一次，所以「至少 5 次」= 定义 + 播放 + 预取 + 解码收口 + 内部反推。
+    // 计数只作补充；真实入口也要分别检查，新增其他调用不能掩盖一个关键入口漏接。
     const uses = count(state, 'online_quality_for(');
     ok(uses >= 5, `state.rs 里 online_quality_for 的调用/定义共 ${uses} 处，少于 5 处（有一处取档没夹上限）`);
     // 裸读偏好的写法只许留在 online_quality_for 内部与设置页的档位描述里。
@@ -101,28 +99,67 @@ function grabFn(src, head) {
       'stage_beats.rs 的在线曲缓存查找要走夹上限的档位（否则被降档那首永远找不到文件）');
     ok(!/crate::online::quality::get\(&prefs/.test(beats),
       'stage_beats.rs 不许再按原始偏好拼档位');
+    for (const head of ['async fn play_online(', 'async fn spawn_prefetch(', 'async fn handle_decode_failure(']) {
+      ok(/online_quality_for\(/.test(grabFn(state, head)), `${head} 使用夹上限后的档位`);
+    }
   }
 
-  section('失败收口点：两处都得记上限');
+  section('失败证据：固定尝试档位、匹配代际、一次记账');
   {
     const state = shipped(read(STATE));
-    ok(/fn online_failed[\s\S]{0,4000}note_quality_failure\(&track_id, e\.code\)/.test(state),
-      'online_failed 里要记上限（取流/下载/提交失败都收口在这）');
-    ok(/handle_decode_failure[\s\S]{0,6000}note_quality_failure\(&track_id, "decode_stalled"\)/.test(state),
-      'handle_decode_failure 里要记上限（解码线程半路夭夭是最强的档位证据）');
+    const note = grabFn(state, 'async fn note_quality_failure(');
+    ok(/failed_at: crate::online::quality::Quality/.test(note)
+      && /lower_ceiling\(caps\.get\(track_id\)\.copied\(\),\s*failed_at\)/.test(note),
+    '降档 helper 必须接收并使用失败时的档位');
+    ok(!/online_quality_for\(|quality::get\(|online_prefs/.test(note),
+      '降档 helper 不许用此刻偏好反推过去失败的档位');
+    const resolve = grabFn(state, 'async fn resolve_online_stream<');
+    ok(/note_quality_failure\(track_id,\s*e\.code,\s*quality\)/.test(resolve),
+      '真实取流重试使用本次传给 fetch 的档位记账');
+    const guardedFailure = /play_commit\.lock\(\)\.await;\s*if !self\.attempt_alive\(gen,\s*index,\s*track_id\)\.await\s*\{\s*return Ok\(None\);/.exec(resolve);
+    ok(guardedFailure && guardedFailure.index < resolve.indexOf('self.note_quality_failure('),
+      '取流结果在提交锁内复核代际后才能记失败，迟到响应不改上限');
+    ok(resolve.indexOf('let deadline =') < resolve.indexOf('for attempt in')
+      && count(resolve, 'let deadline =') === 1
+      && /timeout_at\(deadline,\s*fetch\(quality\)\)/.test(resolve),
+    '两次尝试共用一个绝对 deadline，重试不能重开总预算');
+    const resolved = grabFn(grabFn(state, 'async fn play_online('), 'let info = match resolved');
+    ok(/online_failed\(\s*gen,\s*index,\s*track_id,\s*prev_cursor,\s*trigger,\s*None,/.test(resolved),
+      '取流失败已在重试 owner 记账，最终收口传 None 避免再降一档');
+    const failed = grabFn(state, 'async fn online_failed(');
+    ok(/if let Some\(tier\) = failed_at\s*\{\s*self\.note_quality_failure\(&track_id,\s*e\.code,\s*tier\)/.test(failed),
+      '最终失败只在收到尚未记账的实际档位时记录上限');
+    const decode = grabFn(state, 'async fn handle_decode_failure(');
+    ok(/take_failed_quality\(&track_id,\s*generation\)\.await/.test(decode)
+      && /let failed_at = failed\.actual/.test(decode)
+      && /if let Some\(tier\) = failed_at\s*\{\s*self\.note_quality_failure\(&track_id,\s*"decode_stalled",\s*tier\)/.test(decode),
+    '解码失败的档位来自匹配提交证据，未知档位不制造音质判决');
+    const take = grabFn(state, 'async fn take_failed_quality(');
+    ok(/c\.track_id == track_id/.test(take)
+      && /c\.actor_generation == actor_generation/.test(take)
+      && /c\.play_generation == self\.play_generation\.load/.test(take)
+      && /committed\.take\(\)/.test(take),
+    '失败证据同时核对曲目与两个代际，并且只能消费一次');
+    const remember = grabFn(state, 'async fn remember_committed_quality(');
+    ok(/play_generation: gen/.test(remember)
+      && /actor_generation: self\.audio\.snapshot\(\)\.generation/.test(remember)
+      && /actual,/.test(remember), '实际档位绑定到 actor 接受播放的那次提交');
+    const play = grabFn(state, 'async fn play_online(');
+    ok(/try_commit_cached\(gen,\s*index,\s*&track_id,\s*&path,\s*Some\(hit_quality\)\)/.test(play),
+      '缓存命中传入文件实际档位，不能传用户请求的更高档');
+    ok(/remember_committed_quality\(gen,\s*&track_id,\s*actual,\s*None\)/.test(play)
+      && /remember_committed_quality\(gen,\s*track_id,\s*actual,\s*Some\(path\.to_path_buf\(\)\)\)/.test(grabFn(state, 'async fn try_commit_cached(')),
+    '渐进播放与缓存播放都在提交处记录实际档位');
     // 上限判定不能顺手把接力那套码表复制过来：auth_required / not_found 在接力
     // 里成立，在降档里恰恰是必须排除的两类（账号级证据归登录流程，曲下架换档无用）。
-    const elig = /fn ceiling_eligible[\s\S]{0,600}?\n    \}/.exec(state);
-    ok(elig, 'ceiling_eligible 还在（哪些失败算「这一档给不出来」的判据）');
-    if (elig) {
-      ok(!/auth_required/.test(elig[0]), 'ceiling_eligible 不许把 auth_required 算进来（账号级失败不该压低整首歌）');
-      ok(!/not_found/.test(elig[0]), 'ceiling_eligible 不许把 not_found 算进来（下架换档也放不了）');
-      ok(!/upstream_timeout/.test(elig[0]), 'ceiling_eligible 不许把 upstream_timeout 算进来（抖动不是档位的错）');
-      for (const code of ['vip_required', 'upstream_rejected', 'decode_stalled']) {
-        ok(elig[0].includes('"' + code + '"'), `ceiling_eligible 该收 ${code}`);
-      }
-      ok(!/relay_eligible/.test(elig[0]), 'ceiling_eligible 不许直接复用接力的码表（两类的判据不同）');
+    const elig = grabFn(state, 'fn ceiling_eligible(');
+    for (const code of ['auth_required', 'not_found', 'upstream_timeout', 'upstream_rejected', 'upstream_error', 'internal', 'rate_limited']) {
+      ok(!elig.includes('"' + code + '"'), `ceiling_eligible 排除 ${code}（账号、曲目或通用上游失败不是档位证据）`);
     }
+    for (const code of ['vip_required', 'decode_stalled']) {
+      ok(elig.includes('"' + code + '"'), `ceiling_eligible 该收 ${code}`);
+    }
+    ok(!/relay_eligible/.test(elig), 'ceiling_eligible 不许直接复用接力的码表（两类的判据不同）');
   }
 
   section('事件名与前端分发必须对得上');

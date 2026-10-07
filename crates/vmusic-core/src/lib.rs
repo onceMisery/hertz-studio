@@ -11,7 +11,9 @@ pub mod audio;
 pub mod error;
 pub mod model;
 
-pub use audio::{AudioBackend, AudioSource, DspParams, MediaInfo};
+pub use audio::{
+    AudioBackend, AudioSource, DspParams, MediaInfo, NextEvent, NextTrack, PrepareResult,
+};
 pub use error::{http_status, AudioError, CoreError, LibraryError, Result, StoreError};
 pub use model::{
     DeviceInfo, Favorite, FavoriteKind, LyricDocument, LyricLine, LyricSource, LyricWord, PlayMode,

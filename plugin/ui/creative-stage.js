@@ -405,6 +405,95 @@
     return !!(b && typeof b.target === 'string' && typeof b.source === 'string');
   }
 
+  // Share v1 is a complete preset, not a delta against today's defaults. The
+  // codec owns bytes only; this owner derives parameter keys from the same specs
+  // as the renderer. Changing this schema/meaning requires a new share version.
+  function normalizeSharePreset(input) {
+    function fail() { throw new Error('分享码中的创意预置不完整或含无效参数'); }
+    function object(value) { return value && typeof value === 'object' && !Array.isArray(value); }
+    function own(value, key) { return object(value) && Object.prototype.hasOwnProperty.call(value, key); }
+    function number(value, min, max) {
+      if (typeof value !== 'number' || !isFinite(value) || value < min || value > max) fail();
+      return value;
+    }
+    if (!object(input) || input.version !== 1 || typeof input.name !== 'string' || input.name.length > 128
+      || !window.CreativeGL || !CreativeGL.sceneById(input.scene) || typeof input.director !== 'boolean') fail();
+    var safe = basePreset();
+    safe.name = input.name; safe.scene = input.scene; safe.director = input.director;
+    safe.sc = sceneDefaults(input.scene);
+    var paths = Object.create(null);
+    BASE_SPEC.forEach(function (group) {
+      (group.items || []).concat(group.selects || []).forEach(function (row) { paths[row[0]] = row; });
+    });
+    (SCENE_SPEC[input.scene] || []).forEach(function (row) { paths['sc.' + row[0]] = row; });
+    function parameter(path, value) {
+      var row = paths[path];
+      number(value, -1000000, 1000000);
+      if (typeof row[2] !== 'number' && !row[2].some(function (option) { return Number(option[0]) === value; })) fail();
+      return clampTo(row, value);
+    }
+    ['cam', 'look', 'stage', 'sc'].forEach(function (group) {
+      Object.keys(safe[group]).forEach(function (key) {
+        if (!own(input[group], key)) fail();
+        safe[group][key] = parameter(group + '.' + key, input[group][key]);
+      });
+    });
+    if (!Array.isArray(input.cues) || input.cues.length > 64
+      || !Array.isArray(input.bindings) || input.bindings.length > 32) fail();
+    safe.cues = input.cues.map(function (cue) {
+      if (!object(cue) || !object(cue.set)) fail();
+      var out = { set: {} };
+      if (own(cue, 'at')) out.at = number(cue.at, 0, 86400);
+      if (own(cue, 'every')) out.every = number(cue.every, 1, 4096);
+      if (!own(out, 'at') && !own(out, 'every')) fail();
+      out.len = own(cue, 'len') ? number(cue.len, 16, 600000) : 600;
+      out.ease = ['linear', 'in', 'out', 'inout'].indexOf(cue.ease) >= 0 ? cue.ease : 'out';
+      Object.keys(cue.set).forEach(function (key) {
+        if (Object.prototype.hasOwnProperty.call(paths, key)) {
+          out.set[key] = parameter(key, cue.set[key]);
+        }
+      });
+      if (!Object.keys(out.set).length) fail();
+      return out;
+    });
+    safe.bindings = input.bindings.map(function (binding) {
+      if (!object(binding) || typeof binding.target !== 'string' || typeof binding.source !== 'string'
+        || !Object.prototype.hasOwnProperty.call(paths, binding.target)
+        || !Object.prototype.hasOwnProperty.call(BIND_SOURCES, binding.source)) fail();
+      return { target: binding.target, source: binding.source,
+        gain: own(binding, 'gain') ? number(binding.gain, -1000, 1000) : 1 };
+    });
+    // URL-bearing media is deliberately outside the share contract. No URL,
+    // filename, thumbnail, library id, arbitrary nested object or credential is copied.
+    var bg = input.bg;
+    if (!object(bg) || ['theme', 'media', 'mesh', 'flow', 'spectrogram', 'cover'].indexOf(bg.type) < 0) fail();
+    safe.bg = { type: bg.type === 'media' ? 'theme' : bg.type };
+    if (safe.bg.type !== 'theme') {
+      safe.bg.opacity = number(bg.opacity, 0, 100); safe.bg.blur = number(bg.blur, 0, 60);
+      if (['normal', 'screen', 'overlay', 'soft-light', 'lighten'].indexOf(bg.blend) < 0
+        || ['flat', 'parallax', 'scene'].indexOf(bg.depthMode) < 0) fail();
+      safe.bg.blend = bg.blend; safe.bg.depthMode = bg.depthMode;
+      if (bg.type === 'mesh' || bg.type === 'cover') safe.bg.hue = number(bg.hue, 0, 360);
+    }
+    var hand = input.hand;
+    if (!object(hand) || !window.HandDrawn
+      || !HandDrawn.presets().some(function (p) { return p.id === hand.style; })) fail();
+    safe.hand = { style: hand.style };
+    ['on', 'frame', 'wave', 'annot', 'paper'].forEach(function (key) {
+      if (typeof hand[key] !== 'boolean') fail(); safe.hand[key] = hand[key];
+    });
+    safe.hand.jitter = number(hand.jitter, 0, 200); safe.hand.speed = number(hand.speed, 25, 200);
+    return normalize(safe);
+  }
+
+  function shareSnapshot() {
+    if (!window.Backgrounds || !window.HandDrawn) throw new Error('背景与手绘模块尚未就绪');
+    var full = normalize(preset);
+    // Materialize effective settings via their existing owners, not a second defaults table.
+    full.bg = Backgrounds.values(); full.hand = HandDrawn.values();
+    return normalizeSharePreset(full);
+  }
+
   // ---------------------------------------------------------------------------
   // 特征提取
   //
@@ -1572,6 +1661,8 @@
 
     // 预置
     preset: function () { return deep(preset); },
+    shareSnapshot: shareSnapshot,
+    normalizeSharePreset: normalizeSharePreset,
     setPreset: function (p, opts) {
       preset = normalize(p);
       if (!(opts && opts.keepName)) { /* 名字随预置走 */ }

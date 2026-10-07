@@ -94,12 +94,37 @@ function variant(src, head) {
     const relay = bodyOf(state, 'async fn try_relay(');
     ok(relay, 'try_relay 抓得到');
     if (relay) {
-      ok(/snap\.ensure_origin\(/.test(relay), '迁移元数据时补出处（在插入新 id 之前）');
-      ok(relay.indexOf('ensure_origin') < relay.indexOf('map.insert(new_id'),
-        '先定出处再落表：反了新 id 名下的快照就没有出处');
+      ok(/self\.commit_relay_target\(gen,\s*index,\s*&track_id,\s*&cand\)\.await/.test(relay),
+        '接力通过原子提交入口迁移队列与出处');
+      ok(/play_index_for\(index,\s*Some\(gen\),\s*trigger\)/.test(relay),
+        '接力续播沿用预留代际，不能覆盖提交之后的新播放意图');
+      ok(!/map\.(?:insert|remove)\(/.test(relay), '搜索入口不另写一套元数据迁移');
       ok(/split_virtual_id\(&track_id\)/.test(relay) && /failed_id/.test(relay),
         '失败那一项的 source 与平台 id 都要拿到（出处需要两个都得是真的）');
     }
+    const commit = bodyOf(state, 'async fn commit_relay_target(');
+    ok(commit, 'commit_relay_target 抓得到');
+    if (commit) {
+      ok(/play_commit\.lock\(\)\.await/.test(commit) && /attempt_alive\(gen,\s*index,\s*track_id\)/.test(commit),
+        '队列与出处提交受提交锁及播放代际保护');
+      const occupied = /slot != index && id == &new_id/.exec(commit);
+      ok(occupied && occupied.index < commit.indexOf('queue[index] ='),
+        '替换前拒绝其他槽已占用的供音 id，防止覆盖另一项出处');
+      ok(/map\s*\.get\(track_id\)\s*\.cloned\(\)/.test(commit) && !/map\.remove\(/.test(commit),
+        '克隆原快照并保留旧 id，重复原曲仍有自己的元数据');
+      ok(/snap\.ensure_origin\(\s*&failed_source,\s*&failed_id,/.test(commit),
+        '迁移元数据时用失败曲的真实 source/id 补出处');
+      ok(commit.indexOf('snap.ensure_origin(') >= 0
+        && commit.indexOf('snap.ensure_origin(') < commit.indexOf('map.insert(new_id, snap)'),
+      '先保留第一家出处再插入新供音 id');
+      ok(/snap\.rg_gain_db = None/.test(commit) && /snap\.rg_peak = None/.test(commit),
+        '换供音后不继承旧文件的响度标签');
+    }
+    const pick = bodyOf(state, 'fn pick_relay_candidate(');
+    ok(pick && /occupied\.contains\(&vid\)/.test(pick), '候选选择同样排除其他槽已占用的 id');
+    const remember = bodyOf(state, 'pub(crate) async fn remember_online_meta(');
+    ok(remember && /if snap\.origin\.is_none\(\)\s*\{\s*snap\.origin = old\.origin\.clone\(\)/.test(remember),
+      '普通旧客户端元数据注入缺 origin 时仍保留已知出处');
   }
 
   section('事件形状：三个 origin 字段与 from_track_id 都要在');
@@ -153,21 +178,36 @@ function variant(src, head) {
     ok(/\.np-origin \{/.test(css), 'style.css 里有 .np-origin 规则（无规则等于没排版）');
   }
 
-  section('两个播放门面都回出处');
+  section('两个播放门面共用同一份出处响应');
   {
     const routes = read('crates/hertz-studio/src/routes.rs');
     const rpc = read('crates/hertz-studio/src/rpc/online.rs');
-    for (const [name, src] of [['HTTP', routes], ['RPC', rpc]]) {
-      ok(/state\.online_origin\(&vids\[index\]\)\.await/.test(src),
-        `${name} 门面从队列快照取出处（同一个入口，不各算一遍）`);
-      ok(/"origin": origin/.test(src) && /"relayed": relayed/.test(src),
-        `${name} 门面的播放响应带 origin 与 relayed（只改一边就是插件形态看不见出处）`);
+    for (const [name, src, head] of [
+      ['HTTP', routes, 'async fn online_play('], ['RPC', rpc, 'pub async fn play('],
+    ]) {
+      const facade = bodyOf(src, head);
+      ok(facade, `${name} 播放门面抓得到`);
+      if (!facade) continue;
+      ok(/state\.start_online_play\((?:body|request)\)\.await\?/.test(facade),
+        `${name} 门面调用共用播放 owner`);
+      ok(/Some\(reply\) => (?:Ok\(Json\(reply\)\)|reply)/.test(facade),
+        `${name} 门面原样转交共用响应，不丢弃出处字段`);
+      ok(!/online_origin\(|"origin"\s*:|"relayed"\s*:|prepare_online_play\(|play_index_for\(/.test(facade),
+        `${name} 门面不再另算出处或复制播放流程`);
     }
+    const owner = read('crates/hertz-studio/src/online_play.rs');
+    const start = bodyOf(owner, 'pub(crate) async fn start_online_play(');
+    ok(start && /self\.online_origin\(&vids\[index\]\)\.await/.test(start),
+      '共用播放 owner 从队列快照读取出处');
+    ok(start && /"origin": origin/.test(start) && /"relayed": relayed/.test(start),
+      '共用播放响应带 origin 与 relayed');
+    ok(start && /None => \(None, false\)/.test(start),
+      '共用响应把「没有快照」显式写成 origin=null + relayed=false');
+    const prepare = bodyOf(owner, 'async fn prepare_online_play');
+    ok(prepare && /origin: Some\(crate::state::OnlineOrigin\s*\{\s*source: source\.clone\(\),\s*id: t\.id\.clone\(\),/.test(prepare),
+      '新用户点播显式设为自己的出处，不能粘住同 id 以前的接力出处');
     ok(/pub\(crate\) async fn online_origin\(/.test(read('crates/hertz-studio/src/state.rs')),
       'AppState::online_origin 是唯一出口');
-    // 没快照与「没换过源」不能混成一种：None 走 is_none 分支，False 走 relayed。
-    ok(/None => \(None, false\)/.test(routes) && /None => \(None, false\)/.test(rpc),
-      '两个门面都把「没有快照」显式写成 origin=null + relayed=false');
     const online = read('plugin/ui/online.js');
     ok(/res\.relayed && res\.origin/.test(online), '前端播放路径会吃服务端给的出处');
   }

@@ -117,6 +117,14 @@ function feedHz(hz, times) {
     // 掉帧与切标签页的异常间隔不许进样本（否则刷新率被算低、档位整体往下掉）。
     for (let i = 0; i < 10; i += 1) s2.sample(3000);
     ok(Math.abs(s2.hz() - 144) < 2, '切回前台的 3000ms 间隔没把估计值拖走');
+    for (const hz of [120, 90, 72, 60]) {
+      for (let i = 0; i < 2000; i += 1) s2.sample(1000 / hz);
+      eq(s2.hz(), hz, '从高刷新率降到 ' + hz + 'Hz 后不残留 EMA 浮点尾差');
+      eq(s2.div(30), Math.ceil(hz / 30), '降刷新率后 30fps 门不永久多分一档');
+      eq(s2.div(60), Math.ceil(hz / 60), '降刷新率后 60fps 门不永久多分一档');
+    }
+    for (let i = 0; i < 2000; i += 1) s2.sample(1000 / 62.5);
+    eq(s2.div(30), 3, '可测的 62.5Hz 不得按浮点误差吸附为 60Hz');
   }
   {
     // 预算的上界性质：1 到 240 之间任何目标，兑现出来的帧率都不许多于请求值。

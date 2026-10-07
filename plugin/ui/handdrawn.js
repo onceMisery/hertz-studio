@@ -357,6 +357,11 @@
     init: init, apply: apply, setStageHost: setStageHost,
     frame: function () {}, // CreativeStage never creates a second drawing driver.
     refresh: tick,
+    // Called after the host updates lyric DOM. The stopped art gate must not
+    // leave an underline attached to a previous or newly hidden lyric.
+    refreshAnnotation: function () {
+      if (targetFps() === 0 && visible() && measure()) drawAnnot(view, jitterAmt(0));
+    },
     values: function () { return Object.assign({}, opts); },
     presets: function () { return PRESETS.map(function (preset) { return Object.assign({}, preset); }); },
     rough: { polyline: roughPolyline, rect: roughRect, ellipse: roughEllipse },

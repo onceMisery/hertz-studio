@@ -463,6 +463,7 @@ pub async fn account(ctx: &Ctx) -> ApiResult<super::AccountInfo> {
         source: ID.into(),
         nickname: format!("酷我用户 {}", cred.userid),
         avatar: None,
+        membership: super::ProfileMembership::Unknown,
         vip_level: 0,
         vip_label: String::new(),
     })

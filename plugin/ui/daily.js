@@ -468,6 +468,7 @@
   /// 上一次画进 DOM 的那批。补拉常常拿回一模一样的一份（后台刷新完了但内容
   /// 没变），此时重建整墙卡片只会让所有封面重新走一遍解析、闪一下，白折腾。
   var paintedKey = '';
+  var paintedCards = new Map();
 
   /// 上一次通知宿主的来源。render() 据此判断「生效来源变了才通知」——
   /// 'auto' 起始下生效来源会变两次（先到的那路 → 最终落位），
@@ -506,18 +507,32 @@
     // 同一个 mode 值画出两批完全不同的卡片（本地那份与在线那份 id 也不同，
     // 但两路都空时 id 列表一样、只有文案不同）—— 用 mode 会漏掉这一次重绘。
     var key = effectiveMode() + '|' + (items.length
-      ? items.map(function (i) { return i.id; }).join(',')
+      ? JSON.stringify(items.map(function (i) { return [i.id, i.title, i.artist, i.note, i.cover]; }))
       : '#' + (currentBusy() ? 'loading' : emptyHint()));
     if (key === paintedKey) return;
     paintedKey = key;
 
-    host.innerHTML = '';
     if (!items.length) {
+      paintedCards.clear();
       host.innerHTML = '<div class="hint">'
         + (currentBusy() ? pickingHint() : emptyHint()) + '</div>';
       return;
     }
-    items.forEach(function (item, index) { host.appendChild(card(item, index)); });
+    if (!paintedCards.size) host.innerHTML = '';
+    var focused = document.activeElement;
+    var restoreFocus = focused && host.contains(focused);
+    var nextCards = new Map();
+    items.forEach(function (item, index) {
+      var el = paintedCards.get(item.id) || card();
+      updateCard(el, item, index);
+      nextCards.set(item.id, el);
+      if (host.children[index] !== el) host.insertBefore(el, host.children[index] || null);
+    });
+    paintedCards.forEach(function (el, id) { if (!nextCards.has(id)) el.remove(); });
+    paintedCards = nextCards;
+    if (restoreFocus && host.contains(focused) && document.activeElement !== focused) {
+      focused.focus({ preventScroll: true });
+    }
   }
 
   /// 「正在挑歌…」的占位文案。
@@ -562,7 +577,7 @@
       : '暂时没有拿到每日推荐，点刷新再试一次。';
   }
 
-  function card(item, index) {
+  function card() {
     var el = document.createElement('button');
     el.className = 'daily-card';
     el.type = 'button';
@@ -575,6 +590,10 @@
         // 一行 5 张时卡片宽度不够再塞一列，标题会被挤成几个省略号。
         '<span class="daily-why"></span>' +
       '</span>';
+    return el;
+  }
+
+  function updateCard(el, item, index) {
     el.querySelector('.daily-name').textContent = item.title || '未知曲目';
     el.querySelector('.daily-artist').textContent = item.artist || '未知艺术家';
     el.querySelector('.daily-why').textContent = item.note || '';
@@ -588,16 +607,15 @@
   }
 
   var cover = el.querySelector('.daily-cover');
-  if (item.cover) {
+  if (el._dailyCover !== (item.cover || '')) {
+    el._dailyCover = item.cover || '';
     // 画的是小图，item.cover 本身仍是全尺寸（playQueue 的元数据要用原图）。
-    applyBg(cover, thumb(item.cover));
-    cover.classList.add('has-art');
-  } else {
-    cover.classList.add('is-missing');
+    applyBg(cover, item.cover ? thumb(item.cover) : '');
+    cover.classList.toggle('has-art', !!item.cover);
+    cover.classList.toggle('is-missing', !item.cover);
   }
 
     el.onclick = function () { playAll(index); };
-    return el;
   }
 
   /// 点一张卡 = 把整份推荐当成一个队列从第 index 首开始播。

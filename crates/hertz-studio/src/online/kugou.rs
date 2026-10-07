@@ -993,11 +993,14 @@ pub async fn account(ctx: &Ctx) -> ApiResult<super::AccountInfo> {
     let d = j.get("data");
     let nickname = pick_str(d, &["nickname", "nick_name", "user_name"]).unwrap_or_default();
     let avatar = pick_str(d, &["avatar", "head_url", "imgurl"]).and_then(|u| super::https_url(&u));
-    let vip_level = pick_u64(d, &["vip_type", "vip_level"]).unwrap_or(0) as u32;
+    let level = pick_u64(d, &["vip_type", "vip_level"]);
+    let membership = super::ProfileMembership::from_level(level);
+    let vip_level = level.and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
     Ok(super::AccountInfo {
         source: ID.into(),
         nickname,
         avatar,
+        membership,
         vip_level,
         vip_label: if vip_level > 0 {
             "VIP".to_string()

@@ -6,7 +6,7 @@
 //! # Thread layout
 //!
 //! ```text
-//!   decoder thread  ──push──►  samples (VecDeque + Mutex)  ──drain──►  cpal callback
+//!   current/next decoders ──push──► per-deck PCM queues ──mix──► cpal callback
 //!                                                                          │
 //!                                                                          └──► tap ──► FFT (called by the actor)
 //! ```
@@ -41,12 +41,15 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
-use vmusic_core::{AudioBackend, AudioError, AudioSource, DeviceInfo, MediaInfo};
+use vmusic_core::{
+    AudioBackend, AudioError, AudioSource, DeviceInfo, MediaInfo, NextEvent, NextTrack,
+    PrepareResult,
+};
 
 /// Number of mono samples kept for spectrum analysis.
 const FFT_SIZE: usize = 2048;
 /// How much decoded audio we buffer ahead (seconds).
-const BUFFER_SECONDS: f32 = 4.0;
+const BUFFER_SECONDS: f32 = 12.0;
 /// Keep every Nth frame in the tap; 4 keeps the tap useful at 48 kHz.
 const TAP_STRIDE: usize = 3;
 const TAP_LEN: usize = FFT_SIZE * 3;
@@ -54,19 +57,73 @@ const TAP_LEN: usize = FFT_SIZE * 3;
 const FADE_IN_MS: u64 = 250;
 /// 暂停 / 停止 / 切歌时的淡出时长。
 const FADE_OUT_MS: u64 = 200;
-/// 自然播放到尾部前提前开始淡出的默认时长；服务端 `crossfade_ms` 设置
-/// 会覆盖它（与淡入共用一个值）。
+/// No prepared successor: retain the short tail fade used by sequential playback.
 const TAIL_FADE_MS: u64 = 500;
 /// EQ 频段中心频率（Hz）。六段峰化滤波，覆盖低频架到高频齿音的常用调节。
 pub const EQ_BANDS: [f32; 6] = [60.0, 150.0, 400.0, 1000.0, 2400.0, 6000.0];
 
-/// State shared between the decoder thread and the audio callback.
-struct Shared {
+/// Each decoder owns its own queue and source clock. The output callback alone
+/// promotes the prepared deck, so a boundary can occur inside an output block.
+struct Deck {
     samples: Mutex<VecDeque<f32>>,
+    frames_played: AtomicU64,
+    decode_error: AtomicBool,
+    eof: AtomicBool,
+}
+
+impl Deck {
+    fn new() -> Self {
+        Self {
+            samples: Mutex::new(VecDeque::with_capacity(1 << 16)),
+            frames_played: AtomicU64::new(0),
+            decode_error: AtomicBool::new(false),
+            eof: AtomicBool::new(false),
+        }
+    }
+
+    fn flag_decode_error(&self) {
+        self.decode_error.store(true, Ordering::Release);
+    }
+}
+
+struct PreparedDeck {
+    deck: Arc<Deck>,
+    request: NextTrack,
+    info: MediaInfo,
+    overlap_frames: Option<u64>,
+    mixed_frames: u64,
+}
+
+enum BypassReason {
+    DecodeFailed,
+    NotReady,
+}
+
+/// The callback moves already allocated metadata here. Human-readable messages
+/// are built only when the actor consumes the event.
+enum RenderEvent {
+    Transitioned {
+        request: NextTrack,
+        info: MediaInfo,
+        retired: Arc<Deck>,
+    },
+    Bypassed {
+        prepared: PreparedDeck,
+        reason: BypassReason,
+    },
+}
+
+/// Output settings are shared by both decks; transport fades are independent
+/// of the track overlap envelope.
+struct Shared {
+    // The callback takes this with try_lock; actor readers clone briefly. This
+    // avoids ArcSwap's first-use thread-local allocation on the audio thread.
+    deck: Mutex<Arc<Deck>>,
+    next: Mutex<Option<PreparedDeck>>,
+    next_event: Mutex<Option<RenderEvent>>,
     tap: Mutex<VecDeque<f32>>,
     volume: AtomicU32,
     playing: AtomicBool,
-    frames_played: AtomicU64,
     /// 增益斜坡（单位：设备声道帧）。fade_frames=0 表示无斜坡，增益恒为 fade_gain。
     fade_gain: AtomicU32,
     fade_from: AtomicU32,
@@ -75,13 +132,11 @@ struct Shared {
     fade_done: AtomicU64,
     /// 解码线程异常早夭标志：仅在「非干净 EOF、非主动 stop」的退出时置位，
     /// actor 经 take_decode_failure 每 tick 取走（换装淡出窗口除外）。
-    decode_error: AtomicBool,
-    eof: AtomicBool,
     /// DSP：EQ 增益（dB bits × 6）与合成增益（preamp+track，dB bits）。
     eq_gains: [AtomicU32; 6],
     dsp_gain_db: AtomicU32,
     device_rate: AtomicU32,
-    /// 可调交叉淡化（毫秒）：换装淡入与尾部淡出共用。
+    /// Requested overlap, also used for the unprepared sequential tail fallback.
     crossfade_ms: AtomicU64,
     /// 回调线程持有的双二阶滤波器组（含各声道状态）。try_lock 拿不到就跳过
     /// 本轮回调的 EQ——丢一段滤波远好过音频线程阻塞。
@@ -91,18 +146,17 @@ struct Shared {
 impl Shared {
     fn new() -> Self {
         Self {
-            samples: Mutex::new(VecDeque::with_capacity(1 << 16)),
+            deck: Mutex::new(Arc::new(Deck::new())),
+            next: Mutex::new(None),
+            next_event: Mutex::new(None),
             tap: Mutex::new(VecDeque::with_capacity(TAP_LEN)),
             volume: AtomicU32::new(1.0f32.to_bits()),
             playing: AtomicBool::new(false),
-            frames_played: AtomicU64::new(0),
             fade_gain: AtomicU32::new(1.0f32.to_bits()),
             fade_from: AtomicU32::new(1.0f32.to_bits()),
             fade_to: AtomicU32::new(1.0f32.to_bits()),
             fade_frames: AtomicU64::new(0),
             fade_done: AtomicU64::new(0),
-            decode_error: AtomicBool::new(false),
-            eof: AtomicBool::new(false),
             eq_gains: [
                 AtomicU32::new(0.0f32.to_bits()),
                 AtomicU32::new(0.0f32.to_bits()),
@@ -116,6 +170,11 @@ impl Shared {
             crossfade_ms: AtomicU64::new(0),
             filters: Mutex::new(None),
         }
+    }
+
+    /// Actor/decoder setup access only. The output callback uses try_lock.
+    fn current_deck(&self) -> Arc<Deck> {
+        self.deck.lock().unwrap().clone()
     }
 
     /// 每帧增益的纯函数（便于单测）。
@@ -143,12 +202,14 @@ impl Shared {
 
     /// 解码线程异常早夭时置位（干净 EOF / 主动 stop 不调）。
     fn flag_decode_error(&self) {
-        self.decode_error.store(true, Ordering::Relaxed);
+        self.current_deck().flag_decode_error();
     }
 
     /// 取走并清零早夭标志；没有早夭返回 false。
     fn take_decode_error(&self) -> bool {
-        self.decode_error.swap(false, Ordering::Relaxed)
+        self.current_deck()
+            .decode_error
+            .swap(false, Ordering::AcqRel)
     }
 
     /// 换装/新曲复位：增益归 0（静音），清掉一切斜坡。
@@ -230,9 +291,11 @@ pub struct CpalBackend {
     config: Option<SupportedStreamConfig>,
     stream: Option<Stream>,
     decoder: Option<(JoinHandle<()>, DecoderCtl)>,
+    next_decoder: Option<(JoinHandle<()>, DecoderCtl)>,
     device_rate: u32,
     device_channels: u16,
     duration_ms: Option<u64>,
+    source_rate: Option<u32>,
     fft: Arc<dyn rustfft::Fft<f32>>,
     spectrum_state: Mutex<Vec<f32>>,
     /// 暂停淡出到 0 的瞬间才真正置 playing=false。
@@ -266,9 +329,11 @@ impl CpalBackend {
             config: Some(config),
             stream: None,
             decoder: None,
+            next_decoder: None,
             device_rate,
             device_channels,
             duration_ms: None,
+            source_rate: None,
             fft,
             spectrum_state: Mutex::new(Vec::new()),
             pending_pause: false,
@@ -286,8 +351,19 @@ impl CpalBackend {
         self.shared
             .device_rate
             .store(self.device_rate, Ordering::Relaxed);
-        if let Ok(mut f) = self.shared.filters.lock() {
-            *f = None;
+        let gains = std::array::from_fn(|i| {
+            f32::from_bits(self.shared.eq_gains[i].load(Ordering::Relaxed))
+        });
+        if let Ok(mut filters) = self.shared.filters.lock() {
+            if !filters.as_ref().is_some_and(|bank| {
+                bank.matches(self.device_rate, &gains, self.device_channels as usize)
+            }) {
+                *filters = Some(EqBank::new(
+                    self.device_rate,
+                    gains,
+                    self.device_channels as usize,
+                ));
+            }
         }
     }
 
@@ -327,7 +403,7 @@ impl CpalBackend {
     }
 
     fn clear_buffers(&self) {
-        if let Ok(mut q) = self.shared.samples.lock() {
+        if let Ok(mut q) = self.shared.current_deck().samples.lock() {
             q.clear();
         }
         if let Ok(mut t) = self.shared.tap.lock() {
@@ -335,7 +411,7 @@ impl CpalBackend {
         }
     }
 
-    /// 立即换装（暂停/停止态）或新曲复位时调用：增益归 1、尾部门闩与
+    /// 立即换装（暂停/停止态）或新曲复位时调用：增益归 0、尾部门闩与
     /// pending 标志全部清掉。pending_load 不在此清：换装路径自己决定存不存。
     fn reset_fade(&mut self) {
         self.shared.reset_fade_shared();
@@ -346,14 +422,17 @@ impl CpalBackend {
 
     /// 起一个解码线程消费 `opened`。立即换装与 pending 换装共用。
     fn spawn_now(&mut self, opened: OpenedReader) -> Result<(), AudioError> {
-        self.shared.eof.store(false, Ordering::Release);
+        self.shared
+            .current_deck()
+            .eof
+            .store(false, Ordering::Release);
         let stop = Arc::new(AtomicBool::new(false));
         let seek_to = Arc::new(Mutex::new(None));
         let ctl = DecoderCtl {
             stop: stop.clone(),
             seek_to: seek_to.clone(),
         };
-        let shared = self.shared.clone();
+        let shared = self.shared.current_deck();
         let device_rate = self.device_rate;
         let device_channels = self.device_channels.max(1) as usize;
         let handle = std::thread::Builder::new()
@@ -366,6 +445,62 @@ impl CpalBackend {
         self.stop_error = None;
         self.transport_error = None;
         Ok(())
+    }
+
+    fn prepare_opened(
+        &mut self,
+        opened: OpenedReader,
+        info: MediaInfo,
+        request: NextTrack,
+    ) -> Result<PrepareResult, AudioError> {
+        self.clear_next();
+        if matches!(
+            *self.shared.next_event.lock().unwrap(),
+            Some(RenderEvent::Transitioned { .. })
+        ) {
+            return Ok(PrepareResult::Bypassed {
+                reason: "previous transition is awaiting its actor commit".into(),
+            });
+        }
+        if self.pending_load.is_some() || self.pending_stop || self.tail_armed {
+            return Ok(PrepareResult::Bypassed {
+                reason: "source is already changing or fading out".into(),
+            });
+        }
+        if request.crossfade_ms == 0
+            && (self.source_rate != Some(self.device_rate)
+                || info.sample_rate != Some(self.device_rate))
+        {
+            return Ok(PrepareResult::Bypassed {
+                reason: "sample-exact gapless requires both sources at the output sample rate"
+                    .into(),
+            });
+        }
+        let deck = Arc::new(Deck::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let seek_to = Arc::new(Mutex::new(None));
+        let ctl = DecoderCtl {
+            stop: stop.clone(),
+            seek_to: seek_to.clone(),
+        };
+        let worker_deck = deck.clone();
+        let rate = self.device_rate;
+        let channels = self.device_channels.max(1) as usize;
+        let handle = std::thread::Builder::new()
+            .name("vmusic-next-decoder".into())
+            .spawn(move || {
+                decode_loop_opened(opened, worker_deck, stop, seek_to, rate, channels);
+            })
+            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
+        self.next_decoder = Some((handle, ctl));
+        *self.shared.next.lock().unwrap() = Some(PreparedDeck {
+            deck,
+            request,
+            info: info.clone(),
+            overlap_frames: None,
+            mixed_frames: 0,
+        });
+        Ok(PrepareResult::Prepared(info))
     }
 
     /// 停止语义的复位动作：seek 回 0、清缓冲、进度归零（duration 保留）。
@@ -396,8 +531,12 @@ impl CpalBackend {
         // pending 期间 take_decode_failure 不消费该位，就等这里清；新解码
         // 器若也早夭，会再置一次并照常上报。
         let _ = self.shared.take_decode_error();
-        self.shared.frames_played.store(0, Ordering::Relaxed);
+        self.shared
+            .current_deck()
+            .frames_played
+            .store(0, Ordering::Relaxed);
         self.duration_ms = pending.info.duration_ms;
+        self.source_rate = pending.info.sample_rate;
         let PendingLoad {
             opened,
             info,
@@ -413,9 +552,7 @@ impl CpalBackend {
         self.tail_armed = false;
         self.shared.reset_fade_shared();
         if play_after {
-            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
-            self.shared
-                .arm_fade(1.0, if cf == 0 { FADE_IN_MS } else { cf }, self.device_rate);
+            self.shared.arm_fade(1.0, FADE_IN_MS, self.device_rate);
             self.shared.playing.store(true, Ordering::Relaxed);
         } else {
             self.shared.playing.store(false, Ordering::Relaxed);
@@ -441,49 +578,8 @@ impl CpalBackend {
         let audible = was_playing
             && (self.shared.fade_active()
                 || f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed)) > 0.001);
-        let mut hint = Hint::new();
-        if let Some(e) = ext {
-            if !e.is_empty() {
-                hint.with_extension(e);
-            }
-        }
-        let probed = symphonia::default::get_probe()
-            .format(
-                &hint,
-                mss,
-                &FormatOptions::default(),
-                &MetadataOptions::default(),
-            )
-            .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
-
-        let track = probed
-            .format
-            .default_track()
-            .ok_or_else(|| AudioError::UnsupportedFormat("no audio track".into()))?;
-        // 直接读 CodecParams 字段（都是 Copy），不要 clone 整个 params。
-        let duration_ms = track
-            .codec_params
-            .time_base
-            .zip(track.codec_params.n_frames)
-            .map(|(tb, frames)| {
-                let time = tb.calc_time(frames);
-                // `Time::seconds` 截断，短于 1 秒的片段会报 0ms，进而让
-                // finished() 一开播就触发——保留小数部分。
-                ((time.seconds as f64 + time.frac) * 1000.0).round() as u64
-            });
-        let sample_rate = track.codec_params.sample_rate;
-        let channels = track.codec_params.channels.map(|c| c.count() as u8);
-        let track_id = track.id;
-        let decoder = symphonia::default::get_codecs()
-            .make(&track.codec_params, &DecoderOptions::default())
-            .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
-
-        let opened: OpenedReader = (probed.format, decoder, track_id);
-        let info = MediaInfo {
-            duration_ms,
-            sample_rate,
-            channels,
-        };
+        let (opened, info) = open_media(mss, ext)?;
+        let duration_ms = info.duration_ms;
 
         if audible {
             // 旧源先淡出 200ms，probe 期间旧曲继续出声；maintain 到点换装并
@@ -491,12 +587,7 @@ impl CpalBackend {
             let play_after = false;
             self.pending_pause = false;
             self.pending_stop = false;
-            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
-            self.shared.arm_fade(
-                0.0,
-                if cf == 0 { FADE_OUT_MS } else { cf.max(60) },
-                self.device_rate,
-            );
+            self.shared.arm_fade(0.0, FADE_OUT_MS, self.device_rate);
             self.pending_load = Some(PendingLoad {
                 opened,
                 info: info.clone(),
@@ -512,9 +603,13 @@ impl CpalBackend {
         self.stop_decoder();
         self.clear_buffers();
         let _ = self.shared.take_decode_error();
-        self.shared.frames_played.store(0, Ordering::Relaxed);
+        self.shared
+            .current_deck()
+            .frames_played
+            .store(0, Ordering::Relaxed);
         self.reset_fade();
         self.duration_ms = duration_ms;
+        self.source_rate = info.sample_rate;
         // 解码线程创建失败不再让 load 报错：置解码错误位，actor 下一 tick
         // 经 DecodeError 事件收口（在线曲自动跳曲），状态仍按已加载发布。
         if let Err(e) = self.spawn_now(opened) {
@@ -522,9 +617,7 @@ impl CpalBackend {
             self.shared.flag_decode_error();
         }
         if was_playing {
-            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
-            self.shared
-                .arm_fade(1.0, if cf == 0 { FADE_IN_MS } else { cf }, self.device_rate);
+            self.shared.arm_fade(1.0, FADE_IN_MS, self.device_rate);
         }
         Ok(info)
     }
@@ -554,11 +647,12 @@ impl CpalBackend {
         // 斜坡进行中（暂停/切歌淡出或本段尾淡出）绝不能覆写斜坡参数。
         if self.shared.playing.load(Ordering::Relaxed)
             && self.pending_load.is_none()
+            && self.shared.next.lock().unwrap().is_none()
             && !self.pending_stop
-            && self.shared.eof.load(Ordering::Acquire)
+            && self.shared.current_deck().eof.load(Ordering::Acquire)
             && !self.shared.fade_active()
         {
-            if let Ok(samples) = self.shared.samples.lock() {
+            if let Ok(samples) = self.shared.current_deck().samples.lock() {
                 let frames = (samples.len() / self.device_channels.max(1) as usize) as u64;
                 let remain = frames_to_ms(frames, self.device_rate);
                 let tail_ms = self.shared.crossfade_ms.load(Ordering::Relaxed);
@@ -601,6 +695,19 @@ struct BiQuad {
 impl BiQuad {
     /// RBJ cookbook peaking EQ，系数已按 a0 归一化。
     fn peaking(center_hz: f32, gain_db: f32, q: f32, rate: u32) -> Self {
+        if gain_db == 0.0 || center_hz >= rate.max(1) as f32 * 0.5 {
+            return Self {
+                b0: 1.0,
+                b1: 0.0,
+                b2: 0.0,
+                a1: 0.0,
+                a2: 0.0,
+                x1: 0.0,
+                x2: 0.0,
+                y1: 0.0,
+                y2: 0.0,
+            };
+        }
         let big_a = 10f64.powf(gain_db as f64 / 40.0);
         let w0 = 2.0 * std::f64::consts::PI * center_hz as f64 / rate.max(1) as f64;
         let alpha = w0.sin() / (2.0 * q as f64);
@@ -690,6 +797,9 @@ impl EqBank {
 
 /// 软限幅：-ceiling..ceiling 之外平滑压缩，线性段完全透明。
 fn soft_limit(sample: f32, ceiling: f32) -> f32 {
+    if !sample.is_finite() {
+        return 0.0;
+    }
     let a = sample.abs();
     if a <= ceiling {
         sample
@@ -704,6 +814,149 @@ fn no_device() -> AudioError {
     AudioError::DeviceUnavailable("output device not initialised".into())
 }
 
+fn overlap_gains(frame: u64, frames: u64) -> (f32, f32) {
+    let t = if frames <= 1 {
+        1.0
+    } else {
+        frame as f32 / (frames - 1) as f32
+    };
+    let theta = t.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
+    let headroom = 1.0 - 0.12 * (std::f32::consts::PI * t).sin();
+    (theta.cos() * headroom, theta.sin() * headroom)
+}
+
+/// Concatenate or mix before EQ and the final output limiter. A promotion is
+/// recorded after the last outgoing frame, never on the actor's timer.
+fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, bool) {
+    let Ok(mut prepared) = shared.next.try_lock() else {
+        return (0, true);
+    };
+    // Reserve notification capacity before consuming either source. Contention
+    // produces an underrun, never a source switch whose event can be lost.
+    let mut notification = if prepared.is_some() {
+        match shared.next_event.try_lock() {
+            Ok(slot) if slot.is_none() => Some(slot),
+            _ => return (0, true),
+        }
+    } else {
+        None
+    };
+    let Ok(mut current) = shared.deck.try_lock() else {
+        return (0, true);
+    };
+    let mut copied = 0;
+    while copied + channels <= data.len() {
+        let Ok(mut outgoing) = current.samples.try_lock() else {
+            return (copied, true);
+        };
+        let eof = current.eof.load(Ordering::Acquire);
+        let Some(next) = prepared.as_mut() else {
+            let count = ((data.len() - copied).min(outgoing.len()) / channels) * channels;
+            for (target, sample) in data[copied..copied + count]
+                .iter_mut()
+                .zip(outgoing.drain(..count))
+            {
+                *target = sample;
+            }
+            current
+                .frames_played
+                .fetch_add((count / channels) as u64, Ordering::Relaxed);
+            copied += count;
+            break;
+        };
+        let Ok(mut incoming) = next.deck.samples.try_lock() else {
+            return (copied, true);
+        };
+        if next.deck.decode_error.load(Ordering::Acquire)
+            || (eof && outgoing.is_empty() && incoming.is_empty())
+        {
+            let reason = if next.deck.decode_error.load(Ordering::Acquire) {
+                BypassReason::DecodeFailed
+            } else {
+                BypassReason::NotReady
+            };
+            drop(incoming);
+            let next = prepared.take().unwrap();
+            **notification.as_mut().unwrap() = Some(RenderEvent::Bypassed {
+                prepared: next,
+                reason,
+            });
+            continue;
+        }
+        let mut promote = false;
+        let start_copied = copied;
+        let start_mixed = next.mixed_frames;
+        while copied + channels <= data.len() {
+            let remain = (outgoing.len() / channels) as u64;
+            if remain == 0 {
+                promote = eof && incoming.len() >= channels;
+                break;
+            }
+            if next.overlap_frames.is_none() && eof {
+                let wanted = ms_to_frames(
+                    next.request.crossfade_ms,
+                    shared.device_rate.load(Ordering::Relaxed),
+                );
+                if wanted > 0 && remain <= wanted && incoming.len() / channels >= remain as usize {
+                    next.overlap_frames = Some(remain);
+                }
+            }
+            let mix = next.overlap_frames.is_some();
+            if mix && incoming.len() < channels {
+                break;
+            }
+            let (a, b) = next.overlap_frames.map_or((1.0, 0.0), |frames| {
+                overlap_gains(next.mixed_frames, frames)
+            });
+            for channel in 0..channels {
+                let old = outgoing.pop_front().unwrap();
+                let new = if mix {
+                    incoming.pop_front().unwrap()
+                } else {
+                    0.0
+                };
+                data[copied + channel] = old * a + new * b;
+            }
+            copied += channels;
+            if mix {
+                next.mixed_frames += 1;
+            }
+            if eof && outgoing.is_empty() {
+                promote = mix || incoming.len() >= channels;
+                break;
+            }
+        }
+        current.frames_played.fetch_add(
+            ((copied - start_copied) / channels) as u64,
+            Ordering::Relaxed,
+        );
+        next.deck
+            .frames_played
+            .fetch_add(next.mixed_frames - start_mixed, Ordering::Relaxed);
+        let exhausted = eof && outgoing.is_empty();
+        drop(incoming);
+        drop(outgoing);
+        if promote {
+            let next = prepared.take().unwrap();
+            let retired = std::mem::replace(&mut *current, next.deck);
+            **notification.as_mut().unwrap() = Some(RenderEvent::Transitioned {
+                request: next.request,
+                info: next.info,
+                retired,
+            });
+        } else {
+            if exhausted {
+                let next = prepared.take().unwrap();
+                **notification.as_mut().unwrap() = Some(RenderEvent::Bypassed {
+                    prepared: next,
+                    reason: BypassReason::NotReady,
+                });
+            }
+            break;
+        }
+    }
+    (copied, false)
+}
 fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
     // Paused means "stop consuming", not "play silence we already decoded":
     // draining the queue here would keep the sound going and keep advancing
@@ -718,17 +971,7 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
     }
 
     let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
-    let mut copied = 0usize;
-
-    if let Ok(mut queue) = shared.samples.lock() {
-        copied = data.len().min(queue.len());
-        for (i, sample) in queue.drain(..copied).enumerate() {
-            data[i] = sample; // 先放原始样本，tap 要在淡变前取
-        }
-        shared
-            .frames_played
-            .fetch_add((copied / channels.max(1)) as u64, Ordering::Relaxed);
-    }
+    let (copied, contended) = render_decks(data, shared, channels.max(1));
 
     // 频谱 tap：淡变前信号（舞台可视化不随淡出塌陷）。cheap, bounded, and
     // skipped entirely under contention.
@@ -745,21 +988,20 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
     }
 
     // DSP 链：EQ（每声道滤波器组）→ 线性增益（用户音量 × 斜坡 × preamp+track）
-    // → 软限幅防削波。滤波器组按 (采样率, 增益) 签名惰性重建；try_lock 失败
-    // 就跳过 EQ，音频线程绝不阻塞。
+    // → 软限幅防削波。actor 预先建立滤波器组；签名不符或 try_lock 失败
+    // 就跳过 EQ，音频线程绝不分配或阻塞。
     let rate = shared.device_rate.load(Ordering::Relaxed);
     let mut eq_gains = [0.0f32; 6];
     for (i, g) in eq_gains.iter_mut().enumerate() {
         *g = f32::from_bits(shared.eq_gains[i].load(Ordering::Relaxed));
     }
     let mut bank_guard = shared.filters.try_lock().ok();
-    if let Some(bank) = bank_guard.as_mut() {
-        if !bank
-            .as_ref()
+    if !bank_guard.as_ref().is_some_and(|bank| {
+        bank.as_ref()
             .is_some_and(|b| b.matches(rate, &eq_gains, channels))
-        {
-            **bank = Some(EqBank::new(rate, eq_gains, channels));
-        }
+    }) {
+        // The actor rebuilds coefficients. Never allocate filters in a callback.
+        bank_guard = None;
     }
     let dsp_gain =
         10f64.powf(f32::from_bits(shared.dsp_gain_db.load(Ordering::Relaxed)) as f64 / 20.0) as f32;
@@ -798,7 +1040,7 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
     // 停在半路后 fade_active 永远为真，maintain 的换装（连同暂停/停止的
     // 收口）全部饿死 —— 表现为自动接力的下一首、以及随后的一切换装，
     // 永远卡在上一首的结束位置，无声。缓冲拿不出帧时直接落到终点收掉斜坡。
-    if copied == 0 && fade_total > 0 {
+    if copied == 0 && fade_total > 0 && !contended {
         fade_total = 0;
         fade_done = 0;
         gain = fade_to;
@@ -862,7 +1104,10 @@ impl AudioBackend for CpalBackend {
         self.device = Some(device);
         self.config = Some(config);
         self.clear_buffers();
-        self.shared.frames_played.store(0, Ordering::Relaxed);
+        self.shared
+            .current_deck()
+            .frames_played
+            .store(0, Ordering::Relaxed);
         Ok(())
     }
 
@@ -899,9 +1144,10 @@ impl AudioBackend for CpalBackend {
             self.do_stop_reset()?;
         }
         self.ensure_stream()?;
-        if self.shared.eof.load(Ordering::Acquire)
+        if self.shared.current_deck().eof.load(Ordering::Acquire)
             && self
                 .shared
+                .current_deck()
                 .samples
                 .lock()
                 .is_ok_and(|samples| samples.is_empty())
@@ -921,9 +1167,7 @@ impl AudioBackend for CpalBackend {
             || f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed)) < 0.999
         {
             // 从淡出中点或零增益恢复也走淡入，不硬拉满。
-            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
-            self.shared
-                .arm_fade(1.0, if cf == 0 { FADE_IN_MS } else { cf }, self.device_rate);
+            self.shared.arm_fade(1.0, FADE_IN_MS, self.device_rate);
         }
         self.shared.playing.store(true, Ordering::Relaxed);
         Ok(())
@@ -931,9 +1175,10 @@ impl AudioBackend for CpalBackend {
 
     fn pause(&mut self) -> Result<(), AudioError> {
         if self.pending_load.is_none()
-            && self.shared.eof.load(Ordering::Acquire)
+            && self.shared.current_deck().eof.load(Ordering::Acquire)
             && self
                 .shared
+                .current_deck()
                 .samples
                 .lock()
                 .is_ok_and(|samples| samples.is_empty())
@@ -943,12 +1188,7 @@ impl AudioBackend for CpalBackend {
             return Ok(());
         }
         if self.shared.playing.load(Ordering::Relaxed) && !self.pending_pause {
-            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
-            self.shared.arm_fade(
-                0.0,
-                if cf == 0 { FADE_OUT_MS } else { cf.max(60) },
-                self.device_rate,
-            );
+            self.shared.arm_fade(0.0, FADE_OUT_MS, self.device_rate);
             self.pending_pause = true;
             // 换装淡出期间暂停：新曲换装后也保持暂停。
             if let Some(pending) = self.pending_load.as_mut() {
@@ -966,12 +1206,7 @@ impl AudioBackend for CpalBackend {
     /// duration 不清：停止后进度条仍应显示总时长。
     fn stop(&mut self) -> Result<(), AudioError> {
         if self.shared.playing.load(Ordering::Relaxed) && !self.pending_stop {
-            let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
-            self.shared.arm_fade(
-                0.0,
-                if cf == 0 { FADE_OUT_MS } else { cf.max(60) },
-                self.device_rate,
-            );
+            self.shared.arm_fade(0.0, FADE_OUT_MS, self.device_rate);
             self.pending_stop = true;
             if let Some(pending) = self.pending_load.as_mut() {
                 pending.play_after = false;
@@ -1024,6 +1259,7 @@ impl AudioBackend for CpalBackend {
         self.shared
             .dsp_gain_db
             .store(total_db.clamp(-24.0, 18.0).to_bits(), Ordering::Relaxed);
+        self.sync_dsp_context();
         Ok(())
     }
 
@@ -1034,12 +1270,90 @@ impl AudioBackend for CpalBackend {
         Ok(())
     }
 
+    fn prepare_next(&mut self, mut next: NextTrack) -> Result<PrepareResult, AudioError> {
+        self.clear_next();
+        // This entry deliberately accepts only a complete file. Network I/O
+        // and cache warming remain the service's responsibility.
+        next.crossfade_ms = next.crossfade_ms.min(8_000);
+        let path = uri_to_path(&next.uri);
+        if !path.is_file() || path.extension().is_some_and(|ext| ext == "part") {
+            return Ok(PrepareResult::Bypassed {
+                reason: "next complete file is unavailable".into(),
+            });
+        }
+        let ext = path.extension().and_then(|ext| ext.to_str());
+        let file = File::open(&path).map_err(|e| AudioError::DecodeFailed(e.to_string()))?;
+        let (opened, info) = open_media(
+            MediaSourceStream::new(Box::new(file), Default::default()),
+            ext,
+        )?;
+        self.prepare_opened(opened, info, next)
+    }
+
+    fn clear_next(&mut self) {
+        self.shared.next.lock().unwrap().take();
+        // Removing the plan synchronizes with the callback. A completed switch
+        // remains observable and is settled by the actor before its next command.
+        if matches!(
+            *self.shared.next_event.lock().unwrap(),
+            Some(RenderEvent::Transitioned { .. })
+        ) {
+            return;
+        }
+        if let Some((handle, ctl)) = self.next_decoder.take() {
+            ctl.stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+    }
+
+    fn take_next_event(&mut self) -> Option<NextEvent> {
+        let event = self.shared.next_event.lock().unwrap().take()?;
+        Some(match event {
+            RenderEvent::Transitioned {
+                request,
+                info,
+                retired,
+            } => {
+                self.stop_decoder();
+                drop(retired);
+                self.decoder = self.next_decoder.take();
+                self.duration_ms = info.duration_ms;
+                self.source_rate = info.sample_rate;
+                self.tail_armed = false;
+                NextEvent::Transitioned {
+                    from_generation: request.generation,
+                    track_id: request.track_id,
+                    info,
+                }
+            }
+            RenderEvent::Bypassed { prepared, reason } => {
+                if let Some((handle, ctl)) = self.next_decoder.take() {
+                    ctl.stop.store(true, Ordering::Relaxed);
+                    let _ = handle.join();
+                }
+                let PreparedDeck { request, .. } = prepared;
+                NextEvent::Bypassed {
+                    generation: request.generation,
+                    track_id: request.track_id,
+                    reason: match reason {
+                        BypassReason::DecodeFailed => "next decoder failed",
+                        BypassReason::NotReady => "next samples were not ready at the boundary",
+                    }
+                    .into(),
+                }
+            }
+        })
+    }
+
     fn position_ms(&self) -> u64 {
         if self.pending_stop || self.pending_load.is_some() {
             return 0;
         }
         frames_to_ms(
-            self.shared.frames_played.load(Ordering::Relaxed),
+            self.shared
+                .current_deck()
+                .frames_played
+                .load(Ordering::Relaxed),
             self.device_rate,
         )
         .min(self.duration_ms.unwrap_or(u64::MAX))
@@ -1055,15 +1369,17 @@ impl AudioBackend for CpalBackend {
         // 换装淡出窗口里旧源耗尽绝不能算「播完」：maintain 马上要换上新源，
         // 此刻报 Ended 会让状态层错误地接力/停播（I1）。
         if self.pending_load.is_some()
+            || self.shared.next.lock().unwrap().is_some()
             || self.pending_stop
             || self.pending_pause
             || !self.shared.playing.load(Ordering::Relaxed)
         {
             return false;
         }
-        self.shared.eof.load(Ordering::Acquire)
+        self.shared.current_deck().eof.load(Ordering::Acquire)
             && self
                 .shared
+                .current_deck()
                 .samples
                 .lock()
                 .is_ok_and(|samples| samples.is_empty())
@@ -1163,6 +1479,8 @@ impl AudioBackend for CpalBackend {
 
 impl Drop for CpalBackend {
     fn drop(&mut self) {
+        self.clear_next();
+        let _ = self.take_next_event();
         self.stop_decoder();
         self.stream = None;
     }
@@ -1228,7 +1546,7 @@ fn pick_config(device: &Device) -> Result<SupportedStreamConfig, AudioError> {
 #[allow(clippy::too_many_arguments)]
 fn decode_loop_opened(
     opened: OpenedReader,
-    shared: Arc<Shared>,
+    shared: Arc<Deck>,
     stop: Arc<AtomicBool>,
     seek_to: Arc<Mutex<Option<SeekRequest>>>,
     device_rate: u32,
@@ -1423,6 +1741,60 @@ fn should_flag_decode_error(stop: bool, interrupted: bool, natural_eof: bool) ->
     !stop && !interrupted && !natural_eof
 }
 
+fn open_media(
+    mss: MediaSourceStream,
+    ext: Option<&str>,
+) -> Result<(OpenedReader, MediaInfo), AudioError> {
+    let mut hint = Hint::new();
+    if let Some(e) = ext {
+        if !e.is_empty() {
+            hint.with_extension(e);
+        }
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions {
+                enable_gapless: true,
+                ..Default::default()
+            },
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+
+    let track = probed
+        .format
+        .default_track()
+        .ok_or_else(|| AudioError::UnsupportedFormat("no audio track".into()))?;
+    // 直接读 CodecParams 字段（都是 Copy），不要 clone 整个 params。
+    let duration_ms = track
+        .codec_params
+        .time_base
+        .zip(track.codec_params.n_frames)
+        .map(|(tb, frames)| {
+            let time = tb.calc_time(frames);
+            // `Time::seconds` 截断，短于 1 秒的片段会报 0ms，进而让
+            // finished() 一开播就触发——保留小数部分。
+            ((time.seconds as f64 + time.frac) * 1000.0).round() as u64
+        });
+    let sample_rate = track.codec_params.sample_rate;
+    let channels = track.codec_params.channels.map(|c| c.count() as u8);
+    let track_id = track.id;
+    let decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+
+    let opened: OpenedReader = (probed.format, decoder, track_id);
+    let info = MediaInfo {
+        duration_ms,
+        sample_rate,
+        channels,
+    };
+
+    Ok((opened, info))
+}
+
 type OpenedReader = (
     Box<dyn FormatReader>,
     Box<dyn symphonia::core::codecs::Decoder>,
@@ -1557,6 +1929,335 @@ fn map_channels(interleaved: &[f32], from: usize, to: usize) -> Vec<f32> {
 mod tests {
     use super::*;
 
+    struct CallbackAllocator;
+
+    thread_local! {
+        static CALLBACK_ALLOCATIONS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+    }
+
+    // Count only the measured callback on its own thread; decoder and parallel
+    // test allocations must not contaminate this real-time regression.
+    unsafe impl std::alloc::GlobalAlloc for CallbackAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let _ = CALLBACK_ALLOCATIONS.try_with(|counts| {
+                if let Some((allocs, frees)) = counts.get() {
+                    counts.set(Some((allocs + 1, frees)));
+                }
+            });
+            unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            let _ = CALLBACK_ALLOCATIONS.try_with(|counts| {
+                if let Some((allocs, frees)) = counts.get() {
+                    counts.set(Some((allocs, frees + 1)));
+                }
+            });
+            unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static CALLBACK_ALLOCATOR: CallbackAllocator = CallbackAllocator;
+
+    fn measure_memory<T>(call: impl FnOnce() -> T) -> (T, (usize, usize)) {
+        CALLBACK_ALLOCATIONS.with(|counts| counts.set(Some((0, 0))));
+        let result = call();
+        let counts = CALLBACK_ALLOCATIONS.with(|counts| counts.take().unwrap());
+        (result, counts)
+    }
+
+    fn prepared_samples(samples: &[f32], overlap_ms: u64) -> PreparedDeck {
+        let deck = Arc::new(Deck::new());
+        deck.samples.lock().unwrap().extend(samples);
+        deck.eof.store(true, Ordering::Release);
+        PreparedDeck {
+            deck,
+            request: NextTrack {
+                uri: "already-allocated.wav".into(),
+                track_id: "next".into(),
+                generation: 7,
+                crossfade_ms: overlap_ms,
+            },
+            info: MediaInfo::default(),
+            overlap_frames: None,
+            mixed_frames: 0,
+        }
+    }
+
+    #[test]
+    fn first_callback_and_transition_callbacks_never_allocate_or_free() {
+        for scenario in [
+            "plain",
+            "gapless",
+            "overlap",
+            "failed",
+            "unready",
+            "eq-change",
+        ] {
+            let shared = Arc::new(Shared::new());
+            shared.device_rate.store(8_000, Ordering::Relaxed);
+            shared.playing.store(true, Ordering::Relaxed);
+            shared
+                .current_deck()
+                .samples
+                .lock()
+                .unwrap()
+                .extend([0.25; 8]);
+            shared.current_deck().eof.store(true, Ordering::Release);
+            *shared.filters.lock().unwrap() = Some(EqBank::new(8_000, [1.0; 6], 1));
+            for gain in &shared.eq_gains {
+                gain.store(1.0f32.to_bits(), Ordering::Relaxed);
+            }
+            if scenario == "eq-change" {
+                shared.eq_gains[0].store(2.0f32.to_bits(), Ordering::Relaxed);
+            }
+            if ["gapless", "overlap", "failed", "unready"].contains(&scenario) {
+                let samples: &[f32] = if scenario == "unready" {
+                    &[]
+                } else {
+                    &[0.5; 16]
+                };
+                let prepared = prepared_samples(samples, u64::from(scenario == "overlap"));
+                if scenario == "failed" {
+                    prepared.deck.flag_decode_error();
+                }
+                *shared.next.lock().unwrap() = Some(prepared);
+            }
+            // A fresh thread proves that first-use lazy initialization cannot
+            // hide an allocation behind a warm-up callback.
+            let callback_shared = shared.clone();
+            let (output, memory) = std::thread::spawn(move || {
+                let mut output = [0.0; 64];
+                let (_, memory) =
+                    measure_memory(|| write_samples(&mut output, &callback_shared, 1));
+                (output, memory)
+            })
+            .join()
+            .unwrap();
+            assert_eq!(memory, (0, 0), "callback allocations/frees for {scenario}");
+            assert!(output.iter().all(|sample| sample.is_finite()));
+        }
+    }
+
+    fn probe_while_locked<T: Send + 'static>(
+        before_ready: impl FnOnce() + Send + 'static,
+        callback: impl FnOnce() -> T + Send + 'static,
+        release_lock: impl FnOnce(),
+    ) -> Result<T, String> {
+        let (ready_send, ready_receive) = std::sync::mpsc::channel();
+        let (start_send, start_receive) = std::sync::mpsc::channel();
+        let (send, receive) = std::sync::mpsc::channel();
+        let entered = Arc::new(AtomicBool::new(false));
+        let returned = Arc::new(AtomicBool::new(false));
+        let worker_entered = entered.clone();
+        let worker_returned = returned.clone();
+        let worker = std::thread::spawn(move || {
+            before_ready();
+            let _ = ready_send.send(());
+            if start_receive.recv().is_ok() {
+                worker_entered.store(true, Ordering::Release);
+                let result = callback();
+                worker_returned.store(true, Ordering::Release);
+                let _ = send.send(result);
+            }
+        });
+        // Thread creation/scheduling is not part of callback lock behavior.
+        // Wait for readiness, then explicitly release the already parked worker.
+        // Both waits are deadlock watchdogs, not audio latency assertions.
+        let result = ready_receive
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|error| format!("callback worker did not become ready: {error}"))
+            .and_then(|()| {
+                start_send.send(()).map_err(|error| error.to_string())?;
+                receive.recv_timeout(std::time::Duration::from_secs(5)).map_err(|error| {
+                    format!(
+                        "callback did not return while lock was held: {error}; entered={}, returned={}",
+                        entered.load(Ordering::Acquire), returned.load(Ordering::Acquire),
+                    )
+                })
+            });
+        // Release before asserting/joining: a regression must fail, not leave
+        // the test process hanging forever in a blocked callback.
+        release_lock();
+        drop(start_send);
+        worker.join().unwrap();
+        result
+    }
+
+    fn callback_returns_while_locked(shared: &Arc<Shared>, release_lock: impl FnOnce()) {
+        let callback_shared = shared.clone();
+        let (output, memory) = probe_while_locked(
+            || {},
+            move || {
+                let mut output = [0.75; 4];
+                let (_, memory) =
+                    measure_memory(|| write_samples(&mut output, &callback_shared, 1));
+                (output, memory)
+            },
+            release_lock,
+        )
+        .expect("callback contention probe failed");
+        assert_eq!(output, [0.0; 4]);
+        assert_eq!(memory, (0, 0));
+    }
+
+    #[test]
+    fn contention_probe_excludes_worker_startup_from_callback_watchdog() {
+        let lock = Arc::new(Mutex::new(()));
+        let guard = lock.lock().unwrap();
+        let callback_lock = lock.clone();
+        let result = probe_while_locked(
+            // Longer than the callback watchdog: counting startup would fail.
+            || std::thread::sleep(std::time::Duration::from_secs(6)),
+            move || callback_lock.try_lock().is_err(),
+            || drop(guard),
+        );
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn contention_probe_rejects_a_callback_that_waits_for_the_lock() {
+        let lock = Arc::new(Mutex::new(()));
+        let guard = lock.lock().unwrap();
+        let callback_lock = lock.clone();
+        let result = probe_while_locked(
+            || {},
+            move || drop(callback_lock.lock().unwrap()),
+            || drop(guard),
+        );
+        assert!(result
+            .unwrap_err()
+            .contains("callback did not return while lock was held"));
+    }
+
+    #[test]
+    fn callback_contention_never_blocks_consumes_samples_or_advances_fades() {
+        for locked in ["plan", "event", "current-slot", "current-pcm", "next-pcm"] {
+            let shared = Arc::new(Shared::new());
+            shared.playing.store(true, Ordering::Relaxed);
+            shared.arm_fade(0.0, 200, 8_000);
+            let current = shared.current_deck();
+            current.samples.lock().unwrap().extend([0.25; 8]);
+            current.eof.store(true, Ordering::Release);
+            *shared.next.lock().unwrap() = Some(prepared_samples(&[0.5; 16], 1));
+            let incoming = shared.next.lock().unwrap().as_ref().unwrap().deck.clone();
+            match locked {
+                "plan" => {
+                    let guard = shared.next.lock().unwrap();
+                    callback_returns_while_locked(&shared, || drop(guard));
+                }
+                "event" => {
+                    let guard = shared.next_event.lock().unwrap();
+                    callback_returns_while_locked(&shared, || drop(guard));
+                }
+                "current-slot" => {
+                    let guard = shared.deck.lock().unwrap();
+                    callback_returns_while_locked(&shared, || drop(guard));
+                }
+                "current-pcm" => {
+                    let guard = current.samples.lock().unwrap();
+                    callback_returns_while_locked(&shared, || drop(guard));
+                }
+                "next-pcm" => {
+                    let guard = incoming.samples.lock().unwrap();
+                    callback_returns_while_locked(&shared, || drop(guard));
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(current.samples.lock().unwrap().len(), 8, "{locked}");
+            assert_eq!(incoming.samples.lock().unwrap().len(), 16, "{locked}");
+            assert_eq!(current.frames_played.load(Ordering::Relaxed), 0, "{locked}");
+            assert_eq!(
+                incoming.frames_played.load(Ordering::Relaxed),
+                0,
+                "{locked}"
+            );
+            assert_eq!(shared.fade_done.load(Ordering::Relaxed), 0, "{locked}");
+            assert_eq!(
+                shared.fade_frames.load(Ordering::Relaxed),
+                1_600,
+                "{locked}"
+            );
+            assert_eq!(
+                shared.fade_gain.load(Ordering::Relaxed),
+                1.0f32.to_bits(),
+                "{locked}"
+            );
+            assert!(shared.next_event.lock().unwrap().is_none(), "{locked}");
+        }
+    }
+
+    #[test]
+    fn empty_outgoing_with_contended_next_defers_end_until_transition() {
+        let mut backend = decoded_fixture();
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        backend
+            .shared
+            .current_deck()
+            .samples
+            .lock()
+            .unwrap()
+            .clear();
+        *backend.shared.next.lock().unwrap() = Some(prepared_samples(&[0.5; 8], 0));
+        let next = backend
+            .shared
+            .next
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .deck
+            .clone();
+        let guard = next.samples.lock().unwrap();
+        callback_returns_while_locked(&backend.shared, || drop(guard));
+        assert!(!backend.finished());
+        assert!(backend.take_next_event().is_none());
+        let mut output = [0.0; 4];
+        write_samples(&mut output, &backend.shared, 1);
+        assert_eq!(output, [0.5; 4]);
+        assert!(matches!(
+            backend.take_next_event(),
+            Some(NextEvent::Transitioned { .. })
+        ));
+        assert!(!backend.finished());
+    }
+
+    #[test]
+    fn actor_reclaims_retired_and_cancelled_decks_after_render_event() {
+        for bypass in [false, true] {
+            let mut backend = decoded_fixture();
+            backend.stop_decoder();
+            backend.shared.playing.store(true, Ordering::Relaxed);
+            backend
+                .shared
+                .current_deck()
+                .samples
+                .lock()
+                .unwrap()
+                .clear();
+            let prepared = prepared_samples(&[0.5; 8], 0);
+            let reclaimed = if bypass {
+                prepared.deck.flag_decode_error();
+                Arc::downgrade(&prepared.deck)
+            } else {
+                Arc::downgrade(&backend.shared.current_deck())
+            };
+            *backend.shared.next.lock().unwrap() = Some(prepared);
+            write_samples(&mut [0.0; 4], &backend.shared, 1);
+            assert!(
+                reclaimed.upgrade().is_some(),
+                "callback freed deck for bypass={bypass}"
+            );
+            let (_, (_, frees)) = measure_memory(|| drop(backend.take_next_event()));
+            assert!(
+                frees >= 2,
+                "actor must free both the PCM buffer and its deck"
+            );
+            assert!(reclaimed.upgrade().is_none());
+        }
+    }
+
     fn decoded_fixture() -> CpalBackend {
         let frames = 8_000u32;
         let mut wav = Vec::new();
@@ -1594,9 +2295,11 @@ mod tests {
             config: None,
             stream: None,
             decoder: None,
+            next_decoder: None,
             device_rate: 8_000,
             device_channels: 1,
             duration_ms: Some(1_000),
+            source_rate: Some(8_000),
             fft: FftPlanner::new().plan_fft_forward(FFT_SIZE),
             spectrum_state: Mutex::new(Vec::new()),
             pending_pause: false,
@@ -1615,7 +2318,7 @@ mod tests {
 
     fn wait_for_eof(backend: &CpalBackend) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !backend.shared.eof.load(Ordering::Acquire) {
+        while !backend.shared.current_deck().eof.load(Ordering::Acquire) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "decoder did not reach EOF"
@@ -1624,10 +2327,331 @@ mod tests {
         }
     }
 
+    #[test]
+    fn long_crossfade_does_not_delay_pause_or_stop() {
+        for stop in [false, true] {
+            let mut backend = decoded_fixture();
+            backend.set_crossfade(8_000).unwrap();
+            backend.shared.playing.store(true, Ordering::Relaxed);
+            if stop {
+                backend.stop().unwrap();
+            } else {
+                backend.pause().unwrap();
+            }
+            assert_eq!(backend.shared.fade_frames.load(Ordering::Relaxed), 1_600);
+        }
+    }
+
+    fn open_pcm(samples: &[i16], rate: u32, channels: u16) -> (OpenedReader, MediaInfo) {
+        let bytes = (samples.len() * 2) as u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * channels as u32 * 2).to_le_bytes());
+        wav.extend_from_slice(&(channels * 2).to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&bytes.to_le_bytes());
+        for sample in samples {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        open_media(
+            MediaSourceStream::new(Box::new(std::io::Cursor::new(wav)), Default::default()),
+            Some("wav"),
+        )
+        .unwrap()
+    }
+
+    fn prepare_pcm(
+        backend: &mut CpalBackend,
+        samples: &[i16],
+        rate: u32,
+        channels: u16,
+        crossfade_ms: u64,
+    ) -> PrepareResult {
+        let (opened, info) = open_pcm(samples, rate, channels);
+        backend
+            .prepare_opened(
+                opened,
+                info,
+                NextTrack {
+                    uri: "memory.wav".into(),
+                    track_id: "next".into(),
+                    generation: 7,
+                    crossfade_ms,
+                },
+            )
+            .unwrap()
+    }
+
+    fn wait_for_prepared(backend: &CpalBackend) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if backend
+                .shared
+                .next
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .deck
+                .eof
+                .load(Ordering::Acquire)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "next decoder did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn gapless_decoded_sources_share_one_callback_without_padding_or_overlap() {
+        let mut backend = decoded_fixture();
+        backend.shared.device_rate.store(8_000, Ordering::Relaxed);
+        let next = [1000, 2000, -3000, 4000];
+        assert!(matches!(
+            prepare_pcm(&mut backend, &next, 8_000, 1, 0),
+            PrepareResult::Prepared(_)
+        ));
+        wait_for_prepared(&backend);
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        let mut out = vec![0.0; 8004];
+        write_samples(&mut out, &backend.shared, 1);
+        for (i, sample) in out[..8000].iter().enumerate() {
+            assert!(
+                (*sample - i as f32 / 32768.0).abs() < 1e-6,
+                "outgoing sample {i}"
+            );
+        }
+        for (actual, expected) in out[8000..].iter().zip(next) {
+            assert!((*actual - expected as f32 / 32768.0).abs() < 1e-6);
+        }
+        assert_eq!(
+            backend
+                .shared
+                .current_deck()
+                .frames_played
+                .load(Ordering::Relaxed),
+            4
+        );
+        assert!(matches!(
+            backend.take_next_event(),
+            Some(NextEvent::Transitioned {
+                from_generation: 7,
+                ..
+            })
+        ));
+        assert!(backend.take_next_event().is_none());
+    }
+
+    #[test]
+    fn crossfade_mixes_two_decoded_sources_and_limits_correlated_peaks() {
+        for incoming in [8192, 32767, -32767] {
+            let mut backend = decoded_fixture();
+            backend.shared.device_rate.store(8_000, Ordering::Relaxed);
+            backend
+                .shared
+                .current_deck()
+                .samples
+                .lock()
+                .unwrap()
+                .clear();
+            backend
+                .shared
+                .current_deck()
+                .samples
+                .lock()
+                .unwrap()
+                .extend([0.999; 8]);
+            assert!(matches!(
+                prepare_pcm(&mut backend, &[incoming; 16], 8_000, 1, 1),
+                PrepareResult::Prepared(_)
+            ));
+            wait_for_prepared(&backend);
+            backend.shared.playing.store(true, Ordering::Relaxed);
+            let mut out = [0.0; 16];
+            write_samples(&mut out, &backend.shared, 1);
+            let (a, b) = overlap_gains(3, 8);
+            let expected = soft_limit(0.999 * a + incoming as f32 / 32768.0 * b, 0.98);
+            assert!((out[3] - expected).abs() < 1e-6);
+            assert!(a > 0.0 && b > 0.0);
+            assert!(out
+                .iter()
+                .all(|sample| sample.is_finite() && sample.abs() <= 1.0));
+            assert_eq!(
+                backend
+                    .shared
+                    .current_deck()
+                    .frames_played
+                    .load(Ordering::Relaxed),
+                16
+            );
+            assert!(matches!(
+                backend.take_next_event(),
+                Some(NextEvent::Transitioned { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn different_rates_gapless_is_explicitly_bypassed_but_crossfade_resamples() {
+        let mut backend = decoded_fixture();
+        backend.shared.device_rate.store(8_000, Ordering::Relaxed);
+        assert!(matches!(
+            prepare_pcm(&mut backend, &[1000; 8], 4_000, 2, 0),
+            PrepareResult::Bypassed { .. }
+        ));
+        assert!(backend.shared.next.lock().unwrap().is_none());
+        assert!(matches!(
+            prepare_pcm(&mut backend, &[1000; 8], 4_000, 2, 1),
+            PrepareResult::Prepared(_)
+        ));
+        wait_for_prepared(&backend);
+        let next = backend.shared.next.lock().unwrap();
+        // Four stereo source frames at 4 kHz become eight mono frames at 8 kHz.
+        let samples = next.as_ref().unwrap().deck.samples.lock().unwrap();
+        assert_eq!(samples.len(), 8);
+        assert!(samples
+            .iter()
+            .all(|sample| (*sample - 1000.0 / 32768.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn crossfade_of_unrelated_tones_tracks_the_sample_clock_without_actor_ticks() {
+        let mut backend = decoded_fixture();
+        backend.shared.device_rate.store(8_000, Ordering::Relaxed);
+        let old: Vec<f32> = (0..800)
+            .map(|i| (i as f32 * 397.0 * std::f32::consts::TAU / 8_000.0).sin())
+            .collect();
+        let new: Vec<i16> = (0..1600)
+            .map(|i| ((i as f32 * 701.0 * std::f32::consts::TAU / 8_000.0).sin() * 32767.0) as i16)
+            .collect();
+        backend
+            .shared
+            .current_deck()
+            .samples
+            .lock()
+            .unwrap()
+            .clear();
+        backend
+            .shared
+            .current_deck()
+            .samples
+            .lock()
+            .unwrap()
+            .extend(old.iter().copied());
+        prepare_pcm(&mut backend, &new, 8_000, 1, 100);
+        wait_for_prepared(&backend);
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        let mut out = vec![0.0; 1600];
+        // Deliberately no maintain()/actor ticks between or during these blocks.
+        for block in out.chunks_mut(113) {
+            write_samples(block, &backend.shared, 1);
+        }
+        for index in 0..800 {
+            let (a, b) = overlap_gains(index as u64, 800);
+            let expected = soft_limit(old[index] * a + new[index] as f32 / 32768.0 * b, 0.98);
+            assert!((out[index] - expected).abs() < 1e-6, "sample {index}");
+        }
+        assert!(out
+            .iter()
+            .all(|sample| sample.is_finite() && sample.abs() <= 1.0));
+        assert!(matches!(
+            backend.take_next_event(),
+            Some(NextEvent::Transitioned { .. })
+        ));
+    }
+
+    #[test]
+    fn failed_next_decoder_preserves_outgoing_audio_and_natural_end() {
+        let mut backend = decoded_fixture();
+        backend.shared.device_rate.store(8_000, Ordering::Relaxed);
+        prepare_pcm(&mut backend, &[1000; 8], 8_000, 1, 0);
+        wait_for_prepared(&backend);
+        backend
+            .shared
+            .next
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .deck
+            .flag_decode_error();
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        let mut out = vec![0.0; 8_000];
+        write_samples(&mut out, &backend.shared, 1);
+        assert!((out[100] - 100.0 / 32768.0).abs() < 1e-6);
+        assert!(backend.finished());
+        assert!(!backend.take_decode_failure());
+        assert!(matches!(
+            backend.take_next_event(),
+            Some(NextEvent::Bypassed { .. })
+        ));
+    }
+
+    #[test]
+    fn unready_next_never_promotes_an_empty_deck() {
+        let mut backend = decoded_fixture();
+        backend.shared.device_rate.store(8_000, Ordering::Relaxed);
+        *backend.shared.next.lock().unwrap() = Some(PreparedDeck {
+            deck: Arc::new(Deck::new()),
+            request: NextTrack {
+                uri: "slow.wav".into(),
+                track_id: "next".into(),
+                generation: 7,
+                crossfade_ms: 0,
+            },
+            info: MediaInfo::default(),
+            overlap_frames: None,
+            mixed_frames: 0,
+        });
+        let current = backend.shared.current_deck();
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        write_samples(&mut vec![0.0; 8004], &backend.shared, 1);
+        assert!(Arc::ptr_eq(&current, &backend.shared.current_deck()));
+        assert!(backend.finished());
+        assert!(matches!(
+            backend.take_next_event(),
+            Some(NextEvent::Bypassed { .. })
+        ));
+    }
+
+    #[test]
+    fn cancellation_preserves_an_already_completed_transition_event() {
+        let mut backend = decoded_fixture();
+        backend.shared.device_rate.store(8_000, Ordering::Relaxed);
+        prepare_pcm(&mut backend, &[1000; 1000], 8_000, 1, 0);
+        wait_for_prepared(&backend);
+        backend.shared.playing.store(true, Ordering::Relaxed);
+        write_samples(&mut vec![0.0; 8001], &backend.shared, 1);
+        backend.clear_next();
+        assert!(backend.next_decoder.is_some());
+        assert!(matches!(
+            backend.take_next_event(),
+            Some(NextEvent::Transitioned { .. })
+        ));
+        assert!(backend.next_decoder.is_none());
+        backend.seek(0).unwrap();
+        assert_eq!(backend.position_ms(), 0);
+    }
+
     fn rejecting_seek_fixture() -> (CpalBackend, Arc<AtomicBool>) {
         let mut backend = decoded_fixture();
         backend.stop_decoder();
-        backend.shared.frames_played.store(4_000, Ordering::Relaxed);
+        backend
+            .shared
+            .current_deck()
+            .frames_played
+            .store(4_000, Ordering::Relaxed);
         let stop = Arc::new(AtomicBool::new(false));
         let seek_to = Arc::new(Mutex::new(None::<SeekRequest>));
         let reject = Arc::new(AtomicBool::new(true));
@@ -1642,7 +2666,10 @@ mod tests {
                     let result = if worker_reject.load(Ordering::Relaxed) {
                         Err(AudioError::DecodeFailed("test seek rejected".into()))
                     } else {
-                        shared.frames_played.store(0, Ordering::Relaxed);
+                        shared
+                            .current_deck()
+                            .frames_played
+                            .store(0, Ordering::Relaxed);
                         Ok(())
                     };
                     let _ = request.reply.send(result);
@@ -1736,7 +2763,8 @@ mod tests {
         backend.seek(637).unwrap();
         wait_for_eof(&backend);
         assert_eq!(backend.position_ms(), 637);
-        let samples = backend.shared.samples.lock().unwrap();
+        let deck = backend.shared.current_deck();
+        let samples = deck.samples.lock().unwrap();
         assert_eq!(samples.len(), 8_000 - 5_096);
         assert!((samples[0] - 5_096.0 / 32_768.0).abs() < 1e-6);
         assert!(!backend.decoder.as_ref().unwrap().0.is_finished());
@@ -1757,7 +2785,10 @@ mod tests {
         let mut output = [1.0; 128];
         write_samples(&mut output, &backend.shared, 1);
         assert_eq!(output, [0.0; 128]);
-        assert_eq!(backend.shared.samples.lock().unwrap().len(), 8_000);
+        assert_eq!(
+            backend.shared.current_deck().samples.lock().unwrap().len(),
+            8_000
+        );
         backend.shared.playing.store(true, Ordering::Relaxed);
         write_samples(&mut output, &backend.shared, 1);
         assert_eq!(backend.position_ms(), 16);
@@ -1782,7 +2813,12 @@ mod tests {
     fn volume_applies_to_already_buffered_samples() {
         let shared = Shared::new();
         shared.playing.store(true, Ordering::Relaxed);
-        shared.samples.lock().unwrap().extend([0.5; 4]);
+        shared
+            .current_deck()
+            .samples
+            .lock()
+            .unwrap()
+            .extend([0.5; 4]);
         shared.volume.store(0.25f32.to_bits(), Ordering::Relaxed);
         let mut output = [0.0; 4];
         write_samples(&mut output, &shared, 1);
@@ -1808,7 +2844,10 @@ mod tests {
         backend.duration_ms = None;
         assert!(backend.seek(10_000).is_err());
         assert_eq!(backend.position_ms(), 0);
-        assert_eq!(backend.shared.samples.lock().unwrap().len(), 8_000);
+        assert_eq!(
+            backend.shared.current_deck().samples.lock().unwrap().len(),
+            8_000
+        );
         backend.shared.playing.store(true, Ordering::Relaxed);
         write_samples(&mut vec![0.0; 8_000], &backend.shared, 1);
         assert!(backend.finished());
@@ -1831,7 +2870,13 @@ mod tests {
         write_samples(&mut output, &backend.shared, 1);
         assert_eq!(output, [0.0; 128]);
         assert_eq!(backend.position_ms(), 0);
-        assert!(backend.shared.samples.lock().unwrap().is_empty());
+        assert!(backend
+            .shared
+            .current_deck()
+            .samples
+            .lock()
+            .unwrap()
+            .is_empty());
         assert!(!backend.finished());
     }
 
@@ -1860,7 +2905,8 @@ mod tests {
         let shared = Shared::new();
         shared.playing.store(false, Ordering::Relaxed);
         {
-            let mut q = shared.samples.lock().unwrap();
+            let deck = shared.current_deck();
+            let mut q = deck.samples.lock().unwrap();
             q.extend([0.5f32; 16]);
         }
 
@@ -1872,12 +2918,12 @@ mod tests {
             "paused output must be silent"
         );
         assert_eq!(
-            shared.frames_played.load(Ordering::Relaxed),
+            shared.current_deck().frames_played.load(Ordering::Relaxed),
             0,
             "position must not advance while paused"
         );
         assert_eq!(
-            shared.samples.lock().unwrap().len(),
+            shared.current_deck().samples.lock().unwrap().len(),
             16,
             "the queue must not be drained while paused"
         );
@@ -1902,7 +2948,12 @@ mod tests {
         shared.reset_fade_shared();
         shared.arm_fade(1.0, FADE_IN_MS, 48_000);
         // 队列里放 8 个样本（4 帧），全为 1。
-        shared.samples.lock().unwrap().extend([1.0f32; 8]);
+        shared
+            .current_deck()
+            .samples
+            .lock()
+            .unwrap()
+            .extend([1.0f32; 8]);
         let mut buf = vec![0.0f32; 8];
         write_samples(&mut buf, &shared, 2);
         // 淡入起点增益≈0：首帧样本幅值小于末帧。
@@ -1928,7 +2979,12 @@ mod tests {
         shared.fade_gain.store(0.8f32.to_bits(), Ordering::Relaxed);
         shared.fade_frames.store(100, Ordering::Relaxed);
         shared.fade_done.store(0, Ordering::Relaxed);
-        shared.samples.lock().unwrap().extend([0.5f32; 4]);
+        shared
+            .current_deck()
+            .samples
+            .lock()
+            .unwrap()
+            .extend([0.5f32; 4]);
         let mut buf = vec![0.0f32; 4];
 
         // 第一轮回调：拷走仅有的 2 帧，斜坡只推进 2/100。
@@ -2040,6 +3096,9 @@ mod dsp_tests {
 
     #[test]
     fn limiter_is_transparent_below_ceiling_and_caps_above() {
+        for nonfinite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(soft_limit(nonfinite, 0.98), 0.0);
+        }
         assert_eq!(soft_limit(0.5, 0.98), 0.5);
         assert_eq!(soft_limit(-0.5, 0.98), -0.5);
         let loud = soft_limit(1.5, 0.98);

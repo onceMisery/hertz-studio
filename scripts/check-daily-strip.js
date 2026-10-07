@@ -193,6 +193,27 @@ ${dailyJs}
   ok(m2.sub.indexOf('已合并') >= 0, '副标题是合并说明', m2.sub);
   ok(m2.playAllDisabled === false, '「播放全部」可点', 'disabled=' + m2.playAllDisabled);
 
+  const stable = await page.evaluate(() => {
+    const card = document.querySelector('#daily-list .daily-card');
+    card.focus();
+    window.Daily.state.online.tracks[0].title = '同曲新标题';
+    window.Daily.setMode('online');
+    return { same: card === document.querySelector('#daily-list .daily-card'),
+      focused: document.activeElement === card,
+      title: card.querySelector('.daily-name').textContent };
+  });
+  ok(stable.same && stable.focused && stable.title === '同曲新标题',
+    '同 id 刷新原位更新标题并保留键盘焦点', JSON.stringify(stable));
+  const reordered = await page.evaluate(() => {
+    const card = document.querySelector('#daily-list .daily-card');
+    card.focus();
+    window.Daily.state.online.tracks.reverse();
+    window.Daily.setMode('online');
+    return { same: card === document.querySelector('#daily-list .daily-card:last-child'),
+      focused: document.activeElement === card };
+  });
+  ok(reordered.same && reordered.focused, '推荐重排保留原卡片和键盘焦点', JSON.stringify(reordered));
+
   // ---------------------------------------------------------------------------
   // 折叠：收起的是**卡片区**，标题行与那几个按钮留在原地
   // ---------------------------------------------------------------------------

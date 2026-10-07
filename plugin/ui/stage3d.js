@@ -799,7 +799,7 @@
   var chromeTimer = 0;
   var motion = 0.65, bloom = 0.80, showLyrics = true;
   var reactivity = 1.35;
-  var queueData = [], queueOpen = false;
+  var queueData = [], queueOpen = false, queuePinned = false;
   // 3D 歌单架（stage-shelf.js）：off/stage/side，默认舞台封面流。
   // 默认「右侧竖向歌单架」：歌曲列表在屏幕右缘纵向排列上下滑动，
   // 不再横向铺开（2026-09 需求变更）。
@@ -1984,7 +1984,7 @@
   // chrome 从此被永久钉住 —— 用户报告的「全屏控制按钮不隐藏」即此。
   // Tab 键盘导航仍受豁免（focus-visible 为真），chrome 不会从键盘用户脚下消失。
   function chromeKeyboardFocus() {
-    var el = root.querySelector('.s3d-head :focus, .s3d-player :focus, .s3d-dock :focus, .s3d-brand :focus, .s3d-hint :focus, .s3d-keys :focus');
+    var el = root.querySelector('.s3d-head :focus, .s3d-player :focus, .s3d-dock :focus, .s3d-brand :focus, .s3d-hint :focus, .s3d-keys :focus, .s3d-queue :focus');
     return !!(el && el.matches && el.matches(':focus-visible'));
   }
 
@@ -2176,9 +2176,39 @@
   // 播放队列浮层：全屏里直接看队列、点行跳播，不再退出声场去队列页
   //（交互对齐参考项目的沉浸播放器面板）。队列数据由 app.js 在
   // renderQueue / 换曲时经 setQueue 推送，这里只渲染并回传意图。
+  function setQueuePinned(on) {
+    queuePinned = !!on;
+    root.classList.toggle('s3d-queue-pinned', queuePinned);
+    var button = $('s3d-queue-pin');
+    if (button) {
+      button.setAttribute('aria-pressed', String(queuePinned));
+      button.textContent = queuePinned ? '已固定' : '固定';
+      button.title = queuePinned ? '取消固定播放队列' : '固定播放队列，静止时保持可见';
+    }
+    pokeChrome();
+  }
+
+  function bindQueuePin() {
+    if ($('s3d-queue-pin')) return;
+    var button = document.createElement('button');
+    button.id = 's3d-queue-pin';
+    button.type = 'button';
+    button.className = 's3d-btn s3d-queue-pin';
+    button.setAttribute('aria-label', '固定播放队列');
+    button.setAttribute('aria-pressed', 'false');
+    button.textContent = '固定';
+    button.title = '固定播放队列，静止时保持可见';
+    var closeButton = $('s3d-queue-close');
+    closeButton.parentNode.insertBefore(button, closeButton);
+    button.addEventListener('click', function () { setQueuePinned(!queuePinned); });
+  }
+
   function setQueuePanel(on) {
+    var panel = $('s3d-queue-panel');
+    var restoreFocus = !on && panel.contains(document.activeElement);
     queueOpen = !!on;
-    $('s3d-queue-panel').hidden = !on;
+    if (!on) setQueuePinned(false);
+    panel.hidden = !on;
     $('s3d-queue').setAttribute('aria-expanded', String(on));
     if (on && !$('s3d-settings').hidden) setSettings(false);
     // 队列面板与歌单架是同一信息的两种形态，面板展开时把架子让出去。
@@ -2189,6 +2219,7 @@
       var current = $('s3d-queue-list').querySelector('.s3d-queue-row.playing') || $('s3d-queue-close');
       if (current) current.focus({ preventScroll: true });
     }
+    if (restoreFocus && active) $('s3d-queue').focus({ preventScroll: true });
   }
 
   function renderQueuePanel() {
@@ -2869,6 +2900,7 @@
       else if (contextLost) showFallback('舞台正在恢复渲染，音乐播放不受影响。');
     }
     syncSettingsState();
+    if (global.HandDrawn && HandDrawn.refreshAnnotation) HandDrawn.refreshAnnotation();
   }
 
   function toggleLayout() {
@@ -3092,6 +3124,7 @@
     text('s3d-sleeve-artist', track ? track.artist || '未知艺术家' : '从曲库开始聆听');
     // 平面布局由 stanza 渲染器接管歌词，GL lyricView 空转 update 没有意义。
     if (lyricView && showLyrics && !stanzaActive()) lyricView.update(data);
+    if (global.HandDrawn && HandDrawn.refreshAnnotation) HandDrawn.refreshAnnotation();
   }
 
   function syncDock() {
@@ -3225,6 +3258,7 @@
     $('s3d-settings').hidden = true;
     $('s3d-settings-toggle').setAttribute('aria-expanded', 'false');
     queueOpen = false;
+    setQueuePinned(false);
     $('s3d-queue-panel').hidden = true;
     $('s3d-queue').setAttribute('aria-expanded', 'false');
     if (shelf) shelf.hide();
@@ -3603,6 +3637,7 @@
     $('s3d-prev').addEventListener('click', function () { control('prev'); });
     $('s3d-next').addEventListener('click', function () { control('next'); });
     $('s3d-queue').addEventListener('click', function () { setQueuePanel($('s3d-queue-panel').hidden); });
+    bindQueuePin();
     $('s3d-favorite').addEventListener('click', toggleFavorite);
     $('s3d-queue-close').addEventListener('click', function () { setQueuePanel(false); $('s3d-queue').focus(); });
     $('s3d-cover').addEventListener('error', function () { this.hidden = true; });

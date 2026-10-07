@@ -60,6 +60,7 @@ pub async fn play(state: &Arc<AppState>) -> RpcResult {
         }
     }
     let commit = state.play_commit.lock().await;
+    state.cancel_prepared_playback().await;
     state
         .play_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -68,12 +69,14 @@ pub async fn play(state: &Arc<AppState>) -> RpcResult {
         .play()
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    state.transport_committed().await;
     drop(commit);
     with_state(state).await
 }
 
 pub async fn pause(state: &Arc<AppState>) -> RpcResult {
     let commit = state.play_commit.lock().await;
+    state.cancel_prepared_playback().await;
     state
         .play_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -83,12 +86,14 @@ pub async fn pause(state: &Arc<AppState>) -> RpcResult {
         .pause()
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    state.transport_committed().await;
     drop(commit);
     with_state(state).await
 }
 
 pub async fn stop(state: &Arc<AppState>) -> RpcResult {
     let commit = state.play_commit.lock().await;
+    state.cancel_prepared_playback().await;
     state
         .play_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -98,6 +103,7 @@ pub async fn stop(state: &Arc<AppState>) -> RpcResult {
         .stop()
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    state.transport_committed().await;
     drop(commit);
     with_state(state).await
 }
@@ -118,6 +124,7 @@ pub async fn previous(state: &Arc<AppState>) -> RpcResult {
 pub async fn seek(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let request: SeekRequest = body_as(body)?;
     let commit = state.play_commit.lock().await;
+    state.cancel_prepared_playback().await;
     state
         .play_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -126,6 +133,7 @@ pub async fn seek(state: &Arc<AppState>, body: &Value) -> RpcResult {
         .seek(request.position_ms)
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    state.transport_committed().await;
     drop(commit);
     with_state(state).await
 }
@@ -146,12 +154,19 @@ pub async fn volume(state: &Arc<AppState>, body: &Value) -> RpcResult {
 
 pub async fn mode(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let request: ModeRequest = body_as(body)?;
+    let commit = state.play_commit.lock().await;
+    state.cancel_prepared_playback().await;
+    state
+        .play_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     state
         .audio
         .set_mode(request.mode)
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
     crate::persist::save_mode(&state.db, request.mode).await;
+    state.transport_committed().await;
+    drop(commit);
     with_state(state).await
 }
 
@@ -287,6 +302,11 @@ pub async fn set_dsp(state: &Arc<AppState>, body: &Value) -> RpcResult {
         .await
         .ok();
     state.audio.set_crossfade(config.crossfade_ms).await.ok();
+    {
+        let _commit = state.play_commit.lock().await;
+        state.cancel_prepared_playback().await;
+    }
+    state.schedule_prepare_next();
     Ok(Reply::ok(
         serde_json::to_value(&config).map_err(|e| internal(e.to_string()))?,
     ))

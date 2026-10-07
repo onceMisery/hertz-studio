@@ -646,29 +646,50 @@ function remoteCoverSlot(url, apply) {
   ensureRemoteCover(url);
 }
 
-/// 背景图位：插件形态先清空、代理落地后回填。
-function applyCoverBg(el, url) {
+// 一个元素只接受最近一次封面选择。代理返回和图片解码都可能乱序，
+// 用元素本身持有的意图校验；只等待本次解析，不持有永久回填订阅。
+const coverAssignments = new WeakMap();
+
+function assignCover(el, url, apply) {
   if (!el) return;
+  const assignment = { revision: 0 };
+  coverAssignments.set(el, assignment);
+  const commit = (resolved) => {
+    const revision = ++assignment.revision;
+    const current = () => coverAssignments.get(el) === assignment && assignment.revision === revision;
+    if (!current()) return;
+    if (!resolved || typeof Image === 'undefined') { apply(resolved || ''); return; }
+    const image = new Image();
+    const done = () => { if (current()) apply(resolved); };
+    const failed = () => { if (current()) apply(''); };
+    if (typeof image.decode === 'function') {
+      image.src = resolved;
+      image.decode().then(done, failed);
+    } else {
+      image.onload = done;
+      image.onerror = failed;
+      image.src = resolved;
+    }
+  };
+  if (!url) { commit(''); return; }
   const resolved = remoteCover(url);
-  if (resolved === null) {
-    el.style.backgroundImage = '';
-    remoteCoverSlot(url, (u) => { el.style.backgroundImage = `url("${u}")`; });
-    return;
-  }
-  el.style.backgroundImage = resolved ? `url("${resolved}")` : '';
+  if (resolved !== null) commit(resolved);
+  // The promise completes on both proxy success and failure. Success-only
+  // subscriptions would retain a stale cover and the element on a failed fetch.
+  else resolveCover(url).then(commit, () => commit(''));
+}
+
+/// 新图解码完成后再替换，代理返回不能覆盖元素的新选择。
+function applyCoverBg(el, url) {
+  assignCover(el, url, (resolved) => { el.style.backgroundImage = resolved ? `url("${resolved}")` : ''; });
 }
 
 /// <img> 位：与 applyCoverBg 同一套解析，只是落在 src 上。
 function applyCoverImg(img, url) {
-  if (!img) return;
-  const resolved = remoteCover(url);
-  if (resolved === null) {
-    img.removeAttribute('src');
-    remoteCoverSlot(url, (u) => { img.src = u; });
-    return;
-  }
-  if (resolved) img.src = resolved;
-  else img.removeAttribute('src');
+  assignCover(img, url, (resolved) => {
+    if (resolved) img.src = resolved;
+    else img.removeAttribute('src');
+  });
 }
 
 // 其它模块（daily / 歌单两层 / 登录头像）拿不到 app.js 的闭包，经这个全局取用；
@@ -1334,6 +1355,7 @@ function syncLibEmpty(list) {
 }
 
 function renderLibrary() {
+  if (typeof HomeDashboard !== 'undefined') HomeDashboard.update();
   const host = ui.libList;
   const list = state.tracks;
 
@@ -1708,6 +1730,7 @@ function applySnapshot(snap) {
   else if (state.commandAt && !state.commandPending) state.commandAt = 0;
   if (volumeTarget !== null) snap = { ...snap, volume: volumeTarget };
   state.snapshot = snap;
+  if (typeof HomeDashboard !== 'undefined') HomeDashboard.update();
   ui.playpause.classList.toggle('is-playing', snap.playing);
   ui.playpause.setAttribute('aria-label', snap.playing ? '暂停' : '播放');
   // 胶囊上的小标签跟着播放态走：停着的时候还写「正在播放」是撒谎。
@@ -1893,6 +1916,7 @@ async function loadNowPlaying(id) {
   if (!isCurrent()) return;
   const prevTrack = state.current;
   state.current = track;
+  if (typeof HomeDashboard !== 'undefined') HomeDashboard.update();
   // 换了曲，那一行答的却是上一首的处境——比不刷新更糟。曲目身份真的变了才补读数
   // （这条路径每个播放状态更新都会走）。
   if (!prevTrack || !track || prevTrack.id !== track.id) loadBeatStatus();
@@ -2540,6 +2564,7 @@ async function resolveQueueMissingMeta() {
 }
 
 function renderQueue() {
+  if (typeof HomeDashboard !== 'undefined') HomeDashboard.update();
   pushStageQueue();
   const list = state.queue;
   ui.queueCount.textContent = `${list.length} 首`;
@@ -3961,6 +3986,7 @@ async function loadSettings() {
   // 导航里「每日推荐」的可见性：关掉就把入口摘掉，其它菜单项不受影响。
   // 放在设置到手之后而不是启动时——早于这一步挂载的话，设置里是关的就白挂了。
   if (window.DailyView) window.DailyView.applySettings(state.settings);
+  if (typeof HomeDashboard !== 'undefined') HomeDashboard.update();
   applyNavVisibility();
   document.body.dataset.density = ui.setDensity.value;
   document.body.classList.toggle('reduce-motion', ui.setMotion.checked);
@@ -4163,29 +4189,43 @@ function beatGated() {
 }
 
 let beatInfo = null;
+let beatInfoTrack = null;
+let beatStatusSeq = 0;
+let beatStatusTimer = null;
 
 function renderBeatStatus() {
   if (!ui.beatRow || !ui.beatText) return;
   const id = state.current && state.current.id;
   // 没在播、或一次读数都没拿到，就不占舞台的一行：这一行只回答「这一首怎么没镜头」。
-  ui.beatRow.hidden = !id || !beatInfo;
-  if (!id || !beatInfo) return;
+  ui.beatRow.hidden = !id || !beatInfo || beatInfoTrack !== id;
+  if (ui.beatRow.hidden) return;
   ui.beatText.textContent = beatStatusText(beatInfo);
   // 档位挡下时按重试也不会出镜头，藏掉比置灰诚实。
   if (ui.beatRetry) ui.beatRetry.hidden = beatGated();
 }
 
-async function loadBeatStatus() {
+async function loadBeatStatus(pollsLeft = 12) {
   if (!ui.beatRow) return;
+  const seq = ++beatStatusSeq;
+  clearTimeout(beatStatusTimer);
+  beatStatusTimer = null;
   const id = state.current && state.current.id;
+  renderBeatStatus();
   const path = id
     ? `/v1/stage/beatmap/status?track=${encodeURIComponent(id)}`
     : '/v1/stage/beatmap/status';
   const v = await transport.get(path).catch(() => null);
+  if (seq !== beatStatusSeq || id !== (state.current && state.current.id)) return;
   // GET 失败不动这一行：停在上一条已知状态比把它清成「—」更接近实情。
   if (v) {
     beatInfo = v;
+    beatInfoTrack = id;
     renderBeatStatus();
+    // Failed analyses do not emit BeatmapReady. Read the same server snapshot
+    // for a bounded period so the row can leave its initial waiting verdict.
+    if (id && v.current && /^(analyzing|idle)$/.test(v.current.state) && pollsLeft > 0) {
+      beatStatusTimer = setTimeout(() => loadBeatStatus(pollsLeft - 1), 4000);
+    }
   }
 }
 
@@ -4193,7 +4233,7 @@ async function loadBeatStatus() {
 /// 开始算」，不说「已修好」——重算完还要几秒。
 function beatRetryText(res) {
   if (!res) return '已重试';
-  if (res.status === 'analyzing') return '已重新开始算，几秒后再看这一行';
+  if (res.status === 'analyzing') return '已请求分析，后台空闲后继续';
   if (res.status === 'unavailable') {
     return `还是算不出来：${BEAT_REASON_TEXT[res.reason] || res.reason || '原因未知'}`;
   }
@@ -4208,9 +4248,13 @@ async function retryBeatmap() {
   }
   if (ui.beatRetry) ui.beatRetry.disabled = true;
   try {
-    toast(beatRetryText(await transport.post('/v1/stage/beatmap/retry', { track_id: id })));
+    const result = await transport.post('/v1/stage/beatmap/retry', { track_id: id });
+    if (id === (state.current && state.current.id)) {
+      toast(beatRetryText(result));
+      if (window.StageCinema && StageCinema.refreshMap) StageCinema.refreshMap(id);
+    }
   } catch (err) {
-    toast(errText('重试失败', err), 'error');
+    if (id === (state.current && state.current.id)) toast(errText('重试失败', err), 'error');
   } finally {
     if (ui.beatRetry) ui.beatRetry.disabled = false;
   }
@@ -4371,7 +4415,7 @@ async function loadDevices() {
 // 导航
 // ---------------------------------------------------------------------------
 
-function setView(name) {
+function setView(name, options) {
   state.view = name;
   for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
   ui.rail.querySelectorAll('.rail-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
@@ -4380,7 +4424,7 @@ function setView(name) {
     ui.settingsEntry.setAttribute('aria-pressed', String(name === 'settings'));
   }
   document.body.classList.remove('column-open');
-  if (name === 'online' && window.Online) window.Online.onViewEnter();
+  if (name === 'online' && window.Online && !(options && options.historyOnly)) window.Online.onViewEnter();
   // 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
   // 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。
   if (name === 'settings') loadDiagnostics();
@@ -4393,6 +4437,7 @@ function setView(name) {
   // 每日推荐独立页：数据与首页那条推荐条同源，只是换了个地方展示。
   if (name === 'daily' && window.DailyView) window.DailyView.onViewEnter();
   if (name === 'library') {
+    if (typeof HomeDashboard !== 'undefined') HomeDashboard.onViewEnter();
     if (window.Daily) window.Daily.load({ silent: true });
     // 专辑/歌手浏览面：编辑/扫描可能改过 facet，进入时对齐一次。
     loadFacets();
@@ -4412,6 +4457,73 @@ function refreshAll() {
   loadDevices();
   // 首帧快照失败不提示：WS 连上后会推一份完整状态，这里只是让界面早点有内容。
   transport.get('/v1/state').then((snap) => { applySnapshot(snap); restoreQueue(); }).catch(() => {});
+}
+
+// 首页是快照视图：播放/队列仍由 PlaybackIntent 和原命令入口持有。
+function homeSnapshot() {
+  const id = state.snapshot.track_id || state.queue[state.queueIndex];
+  const current = id ? ((state.current && state.current.id === id && state.current)
+    || state.byId.get(id) || (window.Online && Online.getMeta(id)) || { id, title: '当前曲目' }) : null;
+  return { current, playing: !!state.snapshot.playing, queueLength: state.queue.length,
+    intent: PlaybackIntent.generation, pending: !!state.loadingTrack || !!state.commandPending,
+    dailyVisible: state.settings.nav_daily_visible !== false,
+    recentVisible: state.settings.nav_visible_online !== false };
+}
+
+async function readHomeRecent() {
+  const intent = PlaybackIntent.generation;
+  const data = await transport.get('/v1/history?limit=20&offset=0');
+  for (const entry of (data && data.items) || []) {
+    if (!PlaybackIntent.current(intent)) return null;
+    if (entry.source === 'local' && entry.track_id && !entry.track_id.startsWith('online:')) {
+      // 历史保留了已从库中删除的id：略过明确404，临时失败则保留错误态供重试。
+      let track;
+      try { track = await transport.get('/v1/tracks/' + encodeURIComponent(entry.track_id)); }
+      catch (error) { if (error.status === 404) continue; throw error; }
+      if (track) return { ...track, source: 'local' };
+    } else if (entry.source && entry.source !== 'local' && entry.ref_id) {
+      return { id: 'online:' + entry.source + ':' + entry.ref_id, source: entry.source,
+        onlineId: entry.ref_id, title: entry.title, artist: entry.artist || '', album: entry.album || '',
+        duration_ms: entry.duration_ms || 0, cover: entry.cover_url || '' };
+    }
+  }
+  return null;
+}
+
+async function homeNavigate(destination) {
+  if (destination === 'recent') {
+    // 复用在线页的历史列表，并等待列表完成再定位到可见的历史区。
+    setView('online', { historyOnly: true });
+    if (window.Online) await Online.reloadHistory();
+    if (state.view !== 'online') return;
+    const history = $('op-history');
+    if (history && !history.hidden) {
+      history.scrollIntoView({ block: 'start' });
+      const source = $('op-history-source');
+      if (source) source.focus({ preventScroll: true });
+    } else toast('还没有可显示的最近播放记录');
+    return;
+  }
+  setView(destination === 'add' ? 'library' : destination);
+  if (destination === 'add') { ui.scanPanel.hidden = false; ui.scanRoot.focus(); }
+  if (destination === 'library') {
+    ui.libList.scrollIntoView({ block: 'start' });
+    const first = ui.libList.querySelector('[tabindex]');
+    if (first) first.focus({ preventScroll: true });
+    else ui.scanToggle.focus();
+  }
+}
+
+function initHomeDashboard() {
+  if (!window.HomeDashboard) return;
+  HomeDashboard.bind({ read: homeSnapshot, readRecent: readHomeRecent,
+    resume: () => setPlayback('play'), navigate: homeNavigate,
+    playRecent: (track) => track.source === 'local' ? playTrack(track.id, [track.id])
+      : Online.playAll([{ ...track, id: track.onlineId, playable: true }], 0),
+    cover: async (track) => track.has_cover
+      ? (await transport.ensureCover(track.id)) || transport.coverUrl(track.id)
+      : window.Online ? Online.safeCoverUrl(track.cover) : track.cover || '',
+    applyCover: applyCoverImg, notify: (message) => toast(message, 'error') });
 }
 
 // ---------------------------------------------------------------------------
@@ -7495,8 +7607,10 @@ async function startApp() {
   if (ui.devDiagCopy) ui.devDiagCopy.onclick = copyDiagLog;
   if (ui.devDiagSave) ui.devDiagSave.onclick = saveDiagLogFromServer;
   if (ui.devDiagClear) ui.devDiagClear.onclick = clearDiagLog;
-  // 舞台节拍分析：这一行只回答「后台现在在忙什么」，重试是唯一一个动作。
+  // 舞台区的节拍镜头行：重试是唯一动作；档位一挡下这一行要多一句、按钮要收掉，
+  // 所以帧率测量那条事件也拿来重画一次（读数本身不重取，档位是客户端的事）。
   if (ui.beatRetry) ui.beatRetry.onclick = retryBeatmap;
+  document.addEventListener('stage:fps', () => renderBeatStatus());
   ui.settingsEntry.onclick = () => {
     setView('settings');
     ui.views.settings.scrollTop = 0;
@@ -7856,6 +7970,7 @@ async function startApp() {
     window.DailyView.bind(favHost);
     window.DailyView.init();
   }
+  initHomeDashboard();
   // 在线歌单（账号区网格）任何变化都同步重绘左侧歌单菜单的在线分区。
   // 在线歌单到达/变化：列表分区重画，架子也换上含在线卡的完整集合——
   // 登录成功是异步的，架子建好后数据才到，不挂这条就会一直缺在线卡。

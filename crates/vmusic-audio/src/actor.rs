@@ -59,6 +59,16 @@ const TICK: Duration = Duration::from_millis(20);
 pub enum AudioEvent {
     Snapshot(PlayerSnapshot),
     Spectrum(Vec<f32>),
+    Transitioned {
+        from_generation: u64,
+        generation: u64,
+        track_id: String,
+    },
+    TransitionBypassed {
+        generation: u64,
+        track_id: String,
+        reason: String,
+    },
     /// The current source played to its end.
     Ended {
         generation: u64,
@@ -104,10 +114,33 @@ enum Command {
     SetVolume(f32, Reply<Result<(), AudioError>>),
     SetDsp(vmusic_core::DspParams, Reply<Result<(), AudioError>>),
     SetCrossfade(u64, Reply<Result<(), AudioError>>),
+    PrepareNext(
+        vmusic_core::NextTrack,
+        Reply<Result<vmusic_core::PrepareResult, AudioError>>,
+    ),
+    ClearNext(Reply<Result<(), AudioError>>),
     SetMode(PlayMode, Reply<Result<(), AudioError>>),
     Devices(Reply<Vec<DeviceInfo>>),
     SelectDevice(Option<String>, Reply<Result<(), AudioError>>),
     Shutdown,
+}
+
+impl Command {
+    fn cancels_next(&self) -> bool {
+        matches!(
+            self,
+            Self::Load { .. }
+                | Self::LoadSource { .. }
+                | Self::Stop(_)
+                | Self::Seek(..)
+                | Self::Pause(_)
+                | Self::Play(_)
+                | Self::SetMode(..)
+                | Self::SelectDevice(..)
+                | Self::ClearNext(_)
+                | Self::Shutdown
+        )
+    }
 }
 
 /// Cheap, cloneable handle to the actor. Safe to keep in axum state.
@@ -181,9 +214,53 @@ impl AudioHandle {
         self.ask(|reply| Command::SetDsp(params, reply)).await
     }
 
-    /// 可调交叉淡化时长（毫秒）。0 = 用后端内建默认淡变。
+    /// 歌曲重叠时长（毫秒）。0 = 无重叠衔接；暂停/停止短淡出独立。
     pub async fn set_crossfade(&self, ms: u64) -> Result<(), AudioError> {
         self.ask(|reply| Command::SetCrossfade(ms, reply)).await
+    }
+
+    pub async fn prepare_next(
+        &self,
+        uri: &str,
+        track_id: String,
+        expected_generation: u64,
+        crossfade_ms: u64,
+    ) -> Result<vmusic_core::PrepareResult, AudioError> {
+        self.begin_prepare_next(uri, track_id, expected_generation, crossfade_ms)?
+            .await
+            .unwrap_or(Err(AudioError::Other("actor gone".into())))
+    }
+
+    /// Enqueue under a service reservation lock, then await outside that lock.
+    /// File probing runs on the actor and must not hold the service's queue lock.
+    pub fn begin_prepare_next(
+        &self,
+        uri: &str,
+        track_id: String,
+        expected_generation: u64,
+        crossfade_ms: u64,
+    ) -> Result<oneshot::Receiver<Result<vmusic_core::PrepareResult, AudioError>>, AudioError> {
+        let (reply, result) = oneshot::channel();
+        self.send(Command::PrepareNext(
+            vmusic_core::NextTrack {
+                uri: uri.to_string(),
+                track_id,
+                generation: expected_generation,
+                crossfade_ms,
+            },
+            reply,
+        ))?;
+        Ok(result)
+    }
+
+    /// Queue edits cancel preparation without waiting behind an active probe.
+    pub fn cancel_next(&self) -> Result<(), AudioError> {
+        let (reply, _) = oneshot::channel();
+        self.send(Command::ClearNext(reply))
+    }
+
+    pub async fn clear_next(&self) -> Result<(), AudioError> {
+        self.ask(Command::ClearNext).await
     }
 
     pub async fn set_mode(&self, mode: PlayMode) -> Result<(), AudioError> {
@@ -292,7 +369,17 @@ fn run(
     let mut ended_emitted = false;
 
     loop {
-        match rx.recv_timeout(TICK) {
+        let command = rx.recv_timeout(TICK);
+        if command.as_ref().is_ok_and(|command| {
+            command.cancels_next()
+                || matches!(command, Command::PrepareNext(next, _) if next.generation == state.generation)
+        }) {
+            backend.clear_next();
+        }
+        if settle_transition(&mut *backend, &mut state, &snapshot, &events) {
+            ended_emitted = false;
+        }
+        match command {
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(cmd) => match apply(&mut *backend, &mut state, &snapshot, cmd) {
                 Ok(source_reset) => {
@@ -311,6 +398,9 @@ fn run(
         // 后端自己线程上的延迟状态机：淡出到点再暂停/停止、换装、尾部淡出。
         // 必须在命令处理之后、Ended 判定之前——换装会复位解码进度与门闩输入。
         backend.maintain();
+        if settle_transition(&mut *backend, &mut state, &snapshot, &events) {
+            ended_emitted = false;
+        }
         if let Some(error) = backend.take_transport_error() {
             state.playing = false;
             let _ = events.send(AudioEvent::Error(error.to_string()));
@@ -332,19 +422,7 @@ fn run(
             let _ = events.send(AudioEvent::Snapshot(state.clone()));
         }
 
-        // Natural end of track: latch it so we emit exactly once.
-        if !ended_emitted && backend.finished() {
-            ended_emitted = true;
-            state.playing = false;
-            if let Err(error) = backend.pause() {
-                let _ = events.send(AudioEvent::Error(error.to_string()));
-            }
-            tracing::debug!("track finished");
-            let _ = events.send(AudioEvent::Ended {
-                generation: state.generation,
-                track_id: state.track_id.clone(),
-            });
-        }
+        emit_ended(&mut *backend, &mut state, &events, &mut ended_emitted);
 
         state.position_ms = backend.position_ms();
         state.duration_ms = backend.duration_ms();
@@ -373,6 +451,66 @@ fn run(
 /// 在机器有负载时能稳定复现失败）。先发布再回复，窗口就不存在了。
 fn publish(sink: &ArcSwap<PlayerSnapshot>, state: &PlayerSnapshot) {
     sink.store(std::sync::Arc::new(state.clone()));
+}
+
+fn emit_ended(
+    backend: &mut dyn AudioBackend,
+    state: &mut PlayerSnapshot,
+    events: &broadcast::Sender<AudioEvent>,
+    emitted: &mut bool,
+) {
+    if !*emitted && backend.finished() {
+        *emitted = true;
+        state.playing = false;
+        if let Err(error) = backend.pause() {
+            let _ = events.send(AudioEvent::Error(error.to_string()));
+        }
+        let _ = events.send(AudioEvent::Ended {
+            generation: state.generation,
+            track_id: state.track_id.clone(),
+        });
+    }
+}
+
+fn settle_transition(
+    backend: &mut dyn AudioBackend,
+    state: &mut PlayerSnapshot,
+    sink: &ArcSwap<PlayerSnapshot>,
+    events: &broadcast::Sender<AudioEvent>,
+) -> bool {
+    match backend.take_next_event() {
+        Some(vmusic_core::NextEvent::Transitioned {
+            from_generation,
+            track_id,
+            info,
+        }) if state.generation == from_generation => {
+            state.generation += 1;
+            state.track_id = Some(track_id.clone());
+            state.duration_ms = info.duration_ms;
+            state.position_ms = backend.position_ms();
+            state.playing = true;
+            publish(sink, state);
+            let _ = events.send(AudioEvent::Transitioned {
+                from_generation,
+                generation: state.generation,
+                track_id,
+            });
+            true
+        }
+        Some(vmusic_core::NextEvent::Bypassed {
+            generation,
+            track_id,
+            reason,
+        }) => {
+            let _ = events.send(AudioEvent::TransitionBypassed {
+                generation,
+                track_id,
+                reason,
+            });
+            false
+        }
+        _ => false,
+    }
 }
 
 /// 应用一条命令。
@@ -485,6 +623,29 @@ fn apply(
             let result = backend.set_crossfade(ms);
             publish(sink, state);
             let _ = reply.send(result);
+            Ok(false)
+        }
+        Command::PrepareNext(next, reply) => {
+            let result = if state.generation != next.generation || !state.playing {
+                Ok(vmusic_core::PrepareResult::Bypassed {
+                    reason: "source generation is no longer playing".into(),
+                })
+            } else {
+                // Preparation is optional. A failed probe or absent capability
+                // leaves normal EOF/Ended auto-advance intact.
+                match backend.prepare_next(next) {
+                    Ok(result) => Ok(result),
+                    Err(error) => Ok(vmusic_core::PrepareResult::Bypassed {
+                        reason: error.to_string(),
+                    }),
+                }
+            };
+            let _ = reply.send(result);
+            Ok(false)
+        }
+        Command::ClearNext(reply) => {
+            backend.clear_next();
+            let _ = reply.send(Ok(()));
             Ok(false)
         }
         Command::SetVolume(v, reply) => {
@@ -615,6 +776,10 @@ mod tests {
         armed: bool,
         load_fails: bool,
         stop_fails: bool,
+        prepare_calls: usize,
+        prepare_fails: bool,
+        next_prepared: bool,
+        next_event: Option<vmusic_core::NextEvent>,
     }
 
     impl AudioBackend for InstantEndBackend {
@@ -666,11 +831,147 @@ mod tests {
         fn spectrum(&self, _out: &mut [f32]) -> bool {
             false
         }
+        fn prepare_next(
+            &mut self,
+            _next: vmusic_core::NextTrack,
+        ) -> Result<vmusic_core::PrepareResult, AudioError> {
+            self.prepare_calls += 1;
+            if self.prepare_fails {
+                return Err(AudioError::UnsupportedFormat(
+                    "test unsupported next source".into(),
+                ));
+            }
+            self.next_prepared = true;
+            Ok(vmusic_core::PrepareResult::Prepared(MediaInfo::default()))
+        }
+        fn clear_next(&mut self) {
+            self.next_prepared = false;
+        }
+        fn take_next_event(&mut self) -> Option<vmusic_core::NextEvent> {
+            self.next_event.take()
+        }
     }
 
     fn unit_reply<T>() -> oneshot::Sender<T> {
         let (tx, _rx) = oneshot::channel();
         tx
+    }
+
+    #[tokio::test]
+    async fn null_transition_capability_is_explicit_and_preserves_current_track() {
+        let (handle, actor) = spawn(BackendKind::Null).await.unwrap();
+        handle
+            .load("current.wav", Some("current".into()))
+            .await
+            .unwrap();
+        handle.play().await.unwrap();
+        let before = handle.snapshot();
+        let result = handle
+            .prepare_next("next.wav", "next".into(), before.generation, 2000)
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            vmusic_core::PrepareResult::Bypassed { .. }
+        ));
+        assert_eq!(handle.snapshot().track_id, before.track_id);
+        assert_eq!(handle.snapshot().generation, before.generation);
+        handle.shutdown();
+        actor.join().unwrap();
+    }
+
+    #[test]
+    fn stale_prepare_and_prepare_failure_leave_natural_end_available() {
+        let mut backend = InstantEndBackend {
+            armed: true,
+            prepare_fails: true,
+            ..Default::default()
+        };
+        let mut state = PlayerSnapshot {
+            generation: 7,
+            playing: true,
+            track_id: Some("current".into()),
+            ..Default::default()
+        };
+        let sink = ArcSwap::from_pointee(state.clone());
+        for generation in [6, 7] {
+            let (reply, mut result) = oneshot::channel();
+            apply(
+                &mut backend,
+                &mut state,
+                &sink,
+                Command::PrepareNext(
+                    vmusic_core::NextTrack {
+                        uri: "next.wav".into(),
+                        track_id: "next".into(),
+                        generation,
+                        crossfade_ms: 0,
+                    },
+                    reply,
+                ),
+            )
+            .unwrap();
+            assert!(matches!(
+                result.try_recv().unwrap().unwrap(),
+                vmusic_core::PrepareResult::Bypassed { .. }
+            ));
+            assert!(backend.finished());
+            assert_eq!(state.generation, 7);
+            assert_eq!(state.track_id.as_deref(), Some("current"));
+        }
+        assert_eq!(backend.prepare_calls, 1);
+        let (events, mut rx) = broadcast::channel(8);
+        let mut emitted = false;
+        emit_ended(&mut backend, &mut state, &events, &mut emitted);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AudioEvent::Ended { generation: 7, .. }
+        ));
+        emit_ended(&mut backend, &mut state, &events, &mut emitted);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn completed_transition_publishes_new_source_once_before_transport_changes() {
+        let mut backend = InstantEndBackend {
+            next_event: Some(vmusic_core::NextEvent::Transitioned {
+                from_generation: 7,
+                track_id: "next".into(),
+                info: MediaInfo {
+                    duration_ms: Some(200),
+                    ..Default::default()
+                },
+            }),
+            next_prepared: true,
+            ..Default::default()
+        };
+        let mut state = PlayerSnapshot {
+            generation: 7,
+            playing: true,
+            track_id: Some("current".into()),
+            ..Default::default()
+        };
+        let sink = ArcSwap::from_pointee(state.clone());
+        let (events, mut rx) = broadcast::channel(8);
+        let command = Command::Stop(unit_reply());
+        assert!(command.cancels_next());
+        backend.clear_next();
+        assert!(settle_transition(&mut backend, &mut state, &sink, &events));
+        assert_eq!(sink.load().track_id.as_deref(), Some("next"));
+        assert_eq!(sink.load().generation, 8);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AudioEvent::Transitioned {
+                from_generation: 7,
+                generation: 8,
+                ..
+            }
+        ));
+        assert!(!settle_transition(&mut backend, &mut state, &sink, &events));
+        apply(&mut backend, &mut state, &sink, command).unwrap();
+        assert!(!state.playing);
+        assert!(!backend.next_prepared);
+        assert_eq!(state.generation, 9);
     }
 
     #[test]
@@ -747,6 +1048,7 @@ mod tests {
             armed: true,
             load_fails: true,
             stop_fails: true,
+            ..Default::default()
         };
         let mut failing_state = PlayerSnapshot::default();
         // 先让它成功装一首，门闩应被复位；随后两个失败命令都不得再报复位。

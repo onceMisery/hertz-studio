@@ -63,9 +63,14 @@ impl AppState {
     pub(crate) async fn radio_start(&self) -> ApiResult<Option<usize>> {
         // 私人 FM 接管队列后，F2 的整单续载必须退场：补页任务按「普通队列」
         // 语义追加，会污染 FM 的推荐队列。
-        self.cancel_collection_load().await;
         let (session, generation) = {
             let _commit = self.play_commit.lock().await;
+            self.cancel_prepared_playback().await;
+            {
+                let mut load = self.playlist_load.lock().await;
+                load.session = load.session.wrapping_add(1);
+                load.active = None;
+            }
             let gen = self.play_generation.fetch_add(1, Ordering::Relaxed) + 1;
             let mut radio = self.radio.lock().await;
             let session = radio.session.wrapping_add(1);
@@ -92,6 +97,7 @@ impl AppState {
 
     pub(crate) async fn radio_stop(&self) {
         let _commit = self.play_commit.lock().await;
+        self.cancel_prepared_playback().await;
         self.play_generation.fetch_add(1, Ordering::Relaxed);
         let mut radio = self.radio.lock().await;
         radio.session = radio.session.wrapping_add(1);
@@ -196,7 +202,9 @@ impl AppState {
             queue.clear();
             *cursor = Some(0);
         }
+        self.cancel_prepared_playback().await;
         queue.extend(fresh);
+        self.schedule_prepare_next();
         // History is compacted by step_for while reserving a new playback generation.
         radio.initial_generation = None;
         radio.error = None;

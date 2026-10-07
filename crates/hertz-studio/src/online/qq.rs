@@ -434,7 +434,7 @@ async fn pick_working_url(
     http: &reqwest::Client,
     data: &Value,
     tiers: &[(String, u64)],
-) -> Option<(usize, String, Vec<Candidate>)> {
+) -> ApiResult<(usize, String, Vec<Candidate>)> {
     let sips: Vec<&str> = data
         .pointer("/sip")
         .and_then(|v| v.as_array())
@@ -478,7 +478,9 @@ async fn pick_working_url(
             sips = sips.len(),
             infos = infos.len()
         );
-        return None;
+        return Err(ApiError::internal(
+            "QQ 暂未返回可用播放地址，请稍后重试；无法据此确认会员权益",
+        ));
     }
 
     let results = futures::future::join_all(
@@ -496,7 +498,9 @@ async fn pick_working_url(
             candidates = candidates.len(),
             tiers = tiers.len()
         );
-        return None;
+        return Err(ApiError::internal(
+            "QQ 返回的播放地址暂时无法访问，请稍后重试",
+        ));
     };
     let hit = results[first].0;
     let url = results[first].1.clone();
@@ -525,7 +529,7 @@ async fn pick_working_url(
         fallbacks = fallbacks.len(),
         url = crate::diag::redact_url(&url)
     );
-    Some((hit, url, fallbacks))
+    Ok((hit, url, fallbacks))
 }
 
 /// 档位文件名（`M80000xxxx.mp3`）的后缀 → 容器名。
@@ -562,7 +566,6 @@ pub async fn stream(
     let guid = ensure_guid(ctx).await?;
     let uin = numeric_uin(&cred);
     let authst = super::cred::cookie_field(&cred.cookie, "qm_keyst");
-    let signed_in = super::cred::is_signed_in(ID, &cred);
 
     // 文件名（M500/M800 前缀里的 mid）用的是 media_mid，个别曲目它与
     // songmid 不相等，拿错会 purl 全空。track_ref 缺失（旧前端/虚拟 id
@@ -608,14 +611,7 @@ pub async fn stream(
     let data = j
         .pointer("/req_0/data")
         .ok_or_else(|| ApiError::upstream_rejected("QQ vkey 未返回 data".to_string()))?;
-    let (hit, url, fallbacks) =
-        pick_working_url(&http, data, &tiers).await.ok_or_else(|| {
-            if signed_in {
-                ApiError::vip_required("该曲目为 VIP 专享或当前账号无可用音质".to_string())
-            } else {
-                ApiError::auth_required("QQ 音乐需要登录后获取该曲目".to_string())
-            }
-        })?;
+    let (hit, url, fallbacks) = pick_working_url(&http, data, &tiers).await?;
 
     Ok(StreamInfo {
         url,
@@ -1025,12 +1021,14 @@ pub async fn account(ctx: &Ctx) -> ApiResult<AccountInfo> {
         .find_map(|p| info.and_then(|v| v.pointer(p)))
         .or_else(|| d.and_then(|v| v.pointer("/vipInfo/type")))
         .or_else(|| d.and_then(|v| v.get("vip_type")))
-        .and_then(val_u64)
-        .unwrap_or(0) as u32;
+        .and_then(val_u64);
+    let membership = super::ProfileMembership::from_level(vip_level);
+    let vip_level = vip_level.and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
     Ok(AccountInfo {
         source: ID.into(),
         nickname,
         avatar,
+        membership,
         vip_level,
         vip_label: if vip_level > 0 {
             "VIP".to_string()
@@ -2572,6 +2570,39 @@ mod tests {
         // 既不是 JSON 也不是 JSONP：必须报错，不能编空成功。
         assert!(parse_fcgi("<html>登录已过期</html>").is_err());
         assert!(parse_fcgi("callback(no-close").is_err());
+    }
+
+    #[tokio::test]
+    async fn missing_or_unreachable_purls_do_not_assert_membership() {
+        let http = reqwest::Client::new();
+        let tiers = [("M800media.mp3".into(), 320_000u64)];
+        let missing = pick_working_url(&http, &json!({"midurlinfo": [{"purl": ""}]}), &tiers)
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, "upstream_error");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/audio.mp3",
+                    axum::routing::get(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let unreachable = pick_working_url(
+            &http,
+            &json!({"sip": [base], "midurlinfo": [{"purl": "audio.mp3"}]}),
+            &tiers,
+        )
+        .await
+        .unwrap_err();
+        server.abort();
+        assert_eq!(unreachable.code, "upstream_error");
+        assert!(!unreachable.message.contains("VIP"));
     }
 
     #[test]

@@ -153,6 +153,7 @@
   if (typeof window === 'undefined' || !global.StageCinemaPure) return;
   var P = global.StageCinemaPure;
   var URL = '/v1/stage/beatmap?track=';
+  var WAIT_RETRIES = 8;
 
   var s = {
     trackId: null,
@@ -167,6 +168,8 @@
     freecamOn: false,
     peek: false,
     seq: 0,
+    waitTimer: null,
+    waitRetries: 0,
     inited: false
   };
 
@@ -192,25 +195,41 @@
   }
 
   function requestMap(trackId) {
+    clearTimeout(s.waitTimer);
+    s.waitTimer = null;
     var transport = global.VMusicTransport;
     if (!transport || !transport.get || tier0()) { s.mode = 'absent'; return; }
     var seq = ++s.seq;
     s.mode = 'waiting';
     transport.get(URL + encodeURIComponent(trackId)).then(function (body) {
       if (seq !== s.seq || trackId !== s.trackId) return;
-      if (body && body.status === 'analyzing') { s.mode = 'waiting'; return; }
+      if (body && body.status === 'analyzing') {
+        // A full server budget may defer demand without starting a task, so no
+        // ready event is guaranteed. Re-read through the existing demand owner.
+        if (s.waitRetries >= WAIT_RETRIES) { s.mode = 'absent'; return; }
+        var delay = Math.min(8000, 1000 * Math.pow(2, s.waitRetries++));
+        s.waitTimer = setTimeout(function () {
+          s.waitTimer = null;
+          if (seq === s.seq && trackId === s.trackId) requestMap(trackId);
+        }, delay);
+        return;
+      }
       // 在途期间若已降到 tier0，地图到达也不激活（下一帧 layer 同样会早退）。
       if (body && body.beats && body.beats.length) {
         if (tier0()) s.mode = 'absent'; else activate(body);
       } else s.mode = 'absent';
     }, function () {
       // 404（failed/unsupported/not_ready）与网络错都静默回落 onset；
-      // 不轮询：分析完成有 beatmap_ready 事件，下次播放也会重新触发。
+      // Terminal errors do not retry; a later ready event may still recover.
       if (seq === s.seq && trackId === s.trackId) s.mode = 'absent';
     });
   }
 
   function onTrack(trackId) {
+    clearTimeout(s.waitTimer);
+    s.waitTimer = null;
+    s.waitRetries = 0;
+    s.seq += 1;
     s.trackId = trackId || null;
     s.map = null;
     s.tl = null;
@@ -235,7 +254,14 @@
   function onBeatmapReady(msg) {
     if (!msg || msg.track_id !== s.trackId) return;
     if (s.mode === 'active') return;
+    s.waitRetries = 0;
     requestMap(s.trackId);
+  }
+
+  function refreshMap(trackId) {
+    if (!trackId || trackId !== s.trackId) return;
+    s.waitRetries = 0;
+    requestMap(trackId);
   }
 
   function layer(ctx) {
@@ -282,6 +308,7 @@
     onTrack: onTrack,
     onSnapshot: onSnapshot,
     onBeatmapReady: onBeatmapReady,
+    refreshMap: refreshMap,
     setFreecam: function (on) { s.freecamOn = !!on; },
     setPeek: function (on) { s.peek = !!on; },
     mode: function () { return s.mode; },

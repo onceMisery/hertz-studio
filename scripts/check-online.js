@@ -1020,6 +1020,19 @@ async function loginScenario(pollStates, opts) {
     eq(findByClass(box, 'op-remove').length, 2, '有 playlist_write → 每行带移除');
   }
 
+  section('会员资料缺失不显示为非会员');
+  {
+    const env = playlistSandbox({
+      sources: [{ id: 'qq', label: 'QQ音乐', caps: ['cookie_login', 'user_playlists'] }],
+      accountRoutes: [{ returns: { source: 'qq', nickname: '测试账号', vip_level: 0,
+        membership: { state: 'unknown' } } }],
+    });
+    await env.doc.fireDCL();
+    await ticks(20);
+    const vip = findByClass(env.doc.getElementById('op-accounts'), 'op-vip')[0];
+    eq(vip && vip.textContent, '会员信息暂不可用', '未知资料有独立状态，不断言无会员');
+  }
+
   section('caps：无写能力详情不出移除按钮');
   {
     const env = playlistSandbox({
@@ -1629,7 +1642,8 @@ async function loginScenario(pollStates, opts) {
     ok(appJs.includes('state.queueIds'), 'app.js：state.queueIds 别名供热切换读队列下标');
     ok(actorRs.includes('LoadSource'), 'vmusic-audio actor.rs：定义 LoadSource 命令');
     ok(stateRs.includes('load_source'), 'state.rs：经 AudioHandle 调用 load_source 喂入解码源');
-    ok(!stateRs.includes('Some(320_000)'), 'state.rs：取流不再硬编码 320k（无 Some(320_000)）');
+    const stateProduction = stateRs.split(/#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod tests\s*\{/)[0];
+    ok(!stateProduction.includes('Some(320_000)'), 'state.rs：生产取流不再硬编码 320k（测试夹具不参与检查）');
     ok(stateRs.includes('progressive::'), 'state.rs：接入 crate::online::progressive 渐进式下载');
     ok(stateRs.includes('cancel_all_downloads'), 'state.rs：统一下载中止入口 cancel_all_downloads 存在');
     ok(stateRs.includes('auto_failures'), 'state.rs：auto_failures 连续失败计数驱动自动跳曲');

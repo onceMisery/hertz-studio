@@ -8,7 +8,7 @@
 //! disagree. Everything happens offline: no tag is ever looked up on the
 //! network.
 
-use std::path::{Component, Prefix, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use symphonia::core::formats::FormatOptions;
@@ -1031,7 +1031,9 @@ mod tests {
             assert_eq!(report.error_count, 1, "网络根 {root:?} 要留下一条错误");
             assert_eq!(report.errors[0].0, root);
             assert!(
-                report.errors[0].1.contains("不支持网络位置，请先映射成本地盘符或复制到本地"),
+                report.errors[0]
+                    .1
+                    .contains("不支持网络位置，请先映射成本地盘符或复制到本地"),
                 "错误消息要给出路，当前：{}",
                 report.errors[0].1
             );
@@ -1075,22 +1077,41 @@ mod tests {
 
     // —— 符号链接策略（`follow_links(false)` 是定值，不是默认值）——
 
-    /// Windows 上造符号链接要权限（开发者模式或管理员），拿不到就返回 false 让调用方
-    /// 跳过 —— 这条断言在缺权限的机器上不该变成假红，兜底是下面的文本断言。
-    fn make_symlink(target: &Path, link: &Path) -> bool {
-        #[cfg(windows)]
-        {
-            let created = if target.is_dir() {
-                std::os::windows::fs::symlink_dir(target, link)
-            } else {
-                std::os::windows::fs::symlink_file(target, link)
-            };
-            created.is_ok()
+    /// 造一个目录级的链接。先试原生符号链接；Windows 上那要额外权限（开发者模式或
+    /// 管理员），提不到权就退化成 junction —— 它同样是重解析点，`follow_links` 对它的
+    /// 作用与符号链接一致，而造它不需要任何特权。少了这层退化，「不跟随」这条行为断言
+    /// 在无权限的 Windows 机器上就永远只是被跳过。
+    #[cfg(windows)]
+    fn make_dir_link(target: &Path, link: &Path) -> bool {
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+            return true;
         }
-        #[cfg(not(windows))]
-        {
-            std::os::unix::fs::symlink(target, link).is_ok()
-        }
+        // mklink 是 cmd 的内置命令，只能借 cmd /C 起。参数逐条给，让 std 去处理带空格的
+        // 路径：把整条命令行塞进一个参数，cmd 并不认 \" 那种转义（探针时就是这么失败的）。
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(not(windows))]
+    fn make_dir_link(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    /// 文件级链接只能走原生符号链接：junction 只有目录形态，拿不到权限时这半条就跳过。
+    #[cfg(windows)]
+    fn make_file_link(target: &Path, link: &Path) -> bool {
+        std::os::windows::fs::symlink_file(target, link).is_ok()
+    }
+
+    #[cfg(not(windows))]
+    fn make_file_link(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
     }
 
     fn scratch_dir(tag: &str) -> PathBuf {
@@ -1099,37 +1120,51 @@ mod tests {
         dir
     }
 
-    /// 只经链接可达的本地曲目就是看不见：这一条钉住 `false` 的代价，改成一边都会红。
+    /// 链接要先逐个摘掉再删整棵树：`remove_dir_all` 撞上重解析点会半途失败，留下的
+    /// 临时目录会让下一次跑在这台机器上的人以为还有别的测试在写盘。
+    fn cleanup(base: &Path, links: &[&Path]) {
+        for link in links {
+            let _ = std::fs::remove_file(link);
+            let _ = std::fs::remove_dir(link);
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 只经链接可达的本地曲目就是看不见：这一条钉住 `false` 的另一半代价（链接指向的
+    /// 歌进不了库），把实参翻成 `true` 它立刻红 —— 红的原因是「根外的歌进了库」。
     #[test]
-    fn tracks_reachable_only_through_a_symlink_stay_out_of_the_library() {
-        let base = scratch_dir("walk-base");
+    fn tracks_reachable_only_through_a_link_stay_out_of_the_library() {
+        let base = scratch_dir("walk-link");
         let root = base.join("root");
         let outside = base.join("outside");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(outside.join("album")).unwrap();
         let real = root.join("real.mp3");
         std::fs::write(&real, b"x").unwrap();
-        let hidden = outside.join("hidden.mp3");
-        std::fs::write(&hidden, b"x").unwrap();
-        let hidden_dir = outside.join("album");
-        std::fs::create_dir_all(&hidden_dir).unwrap();
-        std::fs::write(hidden_dir.join("side.mp3"), b"x").unwrap();
+        std::fs::write(outside.join("hidden.mp3"), b"x").unwrap();
+        std::fs::write(outside.join("album").join("side.mp3"), b"x").unwrap();
 
-        let made_file_link = make_symlink(&hidden, &root.join("link.mp3"));
-        let made_dir_link = make_symlink(&hidden_dir, &root.join("linkdir"));
-        if !made_file_link || !made_dir_link {
-            eprintln!("本平台造不出符号链接，跳过（改由文本断言兜底）");
-            let _ = std::fs::remove_dir_all(&base);
+        let dir_link = root.join("linkdir");
+        let file_link = root.join("link.mp3");
+        let made_dir = make_dir_link(&outside.join("album"), &dir_link);
+        let made_file = make_file_link(&outside.join("hidden.mp3"), &file_link);
+        if !made_dir && !made_file {
+            eprintln!("本机造不出任何链接，行为断言跳过（由文本断言兜底）");
+            cleanup(&base, &[]);
             return;
         }
 
         let report = collect_audio_files_checked(&root, &AtomicBool::new(false));
-        let _ = std::fs::remove_dir_all(&base);
-        assert_eq!(report.files, vec![real], "曲库里只该有根目录里那份真实文件");
+        cleanup(&base, &[&dir_link, &file_link]);
+        assert_eq!(
+            report.files,
+            vec![real],
+            "曲库里只该有根目录里那份真实文件（链接是否建成：dir={made_dir} file={made_file}）"
+        );
         assert_eq!(report.error_count, 0);
     }
 
-    /// 指向祖先目录的链接不会把遍历变成循环，也不会让同一首歌以两条路径进库两遍。
+    /// 指向祖先目录的链接既不产生第二份曲目，也不让遍历停在循环上。
     #[test]
     fn directory_link_back_to_the_root_neither_loops_duplicates_nor_errors() {
         let base = scratch_dir("walk-cycle");
@@ -1137,14 +1172,16 @@ mod tests {
         std::fs::create_dir_all(root.join("album")).unwrap();
         let real = root.join("album").join("real.mp3");
         std::fs::write(&real, b"x").unwrap();
-        if !make_symlink(&root, &root.join("album").join("loop")) {
-            eprintln!("本平台造不出符号链接，跳过（改由文本断言兜底）");
-            let _ = std::fs::remove_dir_all(&base);
+
+        let loop_link = root.join("album").join("loop");
+        if !make_dir_link(&root, &loop_link) {
+            eprintln!("本机造不出目录链接，行为断言跳过（由文本断言兜底）");
+            cleanup(&base, &[]);
             return;
         }
 
         let report = collect_audio_files_checked(&root, &AtomicBool::new(false));
-        let _ = std::fs::remove_dir_all(&base);
+        cleanup(&base, &[&loop_link]);
         assert_eq!(report.files, vec![real], "一份真实文件只该出现一次");
         assert_eq!(report.error_count, 0, "遍历不该停在循环检测的错误上");
         assert!(!report.cancelled);

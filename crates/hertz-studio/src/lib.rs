@@ -16,14 +16,15 @@
 //! 内部才碰得到，所以 `rpc` 在这里而不在 `plugin/backend`。
 
 pub mod bootstrap;
+pub mod collection;
 pub mod complete;
 pub mod config;
-pub mod collection;
 pub mod daily;
 pub mod diag;
 pub mod error;
 pub mod history;
 pub mod online;
+mod online_play;
 pub mod persist;
 pub mod radio;
 pub mod remote;

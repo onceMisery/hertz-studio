@@ -27,6 +27,7 @@
   var helpSeq = 0;
   var target = 'immersive', returnFocus = null, home = null;
   var past = [], future = [], gesture = null;
+  var shareViewRevision = 0, shareEditRevision = 0;
   // 「恢复默认」整表：edit(DEFAULTS) → Stage3D.configure 按键做部分覆盖后 PUT，
   // 故这里要列全 stage3d preferences 的键，漏了的键重置时不会被还原。
   var DEFAULTS = {
@@ -977,8 +978,72 @@
     }
   }
 
+  function renderShareCode(body, CS) {
+    body.appendChild(h('h2', 'sc-group-title', '分享创意预置'));
+    body.appendChild(h('p', 'sc-note', '分享名称、场景参数、编排、绑定与背景／手绘设置。'
+      + '不包含沉浸舞台设置、媒体文件、文件地址或账户信息；媒体背景会改为跟随主题。'));
+    var label = h('label', 'sc-note', '分享码'); label.htmlFor = 'ws-share-code'; body.appendChild(label);
+    var code = h('textarea', 'ws-json'); code.id = 'ws-share-code'; code.spellcheck = false;
+    code.placeholder = '粘贴收到的分享码，或生成当前预置的分享码'; code.maxLength = 180000;
+    body.appendChild(code);
+    var compatibility = h('label', 'ws-row');
+    var plain = h('input'); plain.type = 'checkbox'; plain.id = 'ws-share-compatible';
+    compatibility.append(plain, h('span', null, '兼容码（不压缩，适合不支持解压的设备）'));
+    body.appendChild(compatibility);
+    var row = h('div', 'ws-row'), status = h('p', 'sc-note');
+    status.id = 'ws-share-status'; status.setAttribute('role', 'status');
+    var serial = 0, view = shareViewRevision;
+    function ticket() {
+      var sequence = ++serial, revision = shareEditRevision;
+      return function () {
+        return sequence === serial && view === shareViewRevision && revision === shareEditRevision
+          && isOpen() && target === 'advanced' && tab === 'io' && code.isConnected;
+      };
+    }
+    code.addEventListener('input', function () { serial += 1; status.textContent = ''; });
+    plain.addEventListener('change', function () { serial += 1; });
+    async function copyCode(alive) {
+      code.focus(); code.select();
+      var copied = false;
+      try { copied = document.execCommand('copy'); } catch (e) { /* try the available host channel */ }
+      if (!copied) {
+        try {
+          if (window.hertzHost && window.hertzHost.isDbx && window.dbxPlugin) await window.dbxPlugin.copy(code.value);
+          else if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(code.value);
+          else throw new Error('clipboard unavailable');
+          copied = true;
+        } catch (e) { /* selected text remains available for manual copy */ }
+      }
+      if (alive()) status.textContent = copied ? '分享码已复制' : '自动复制失败，文本已选中；请按 Ctrl+C 或手动复制';
+    }
+    var generate = h('button', 'btn', '生成并复制分享码'); generate.id = 'ws-share-copy';
+    generate.addEventListener('click', async function () {
+      var alive = ticket(); status.textContent = '正在生成分享码…';
+      try {
+        if (!window.CreativeShareCode) throw new Error('分享码模块尚未就绪，请刷新应用');
+        var encoded = await CreativeShareCode.encode(CS.shareSnapshot(), { compress: !plain.checked });
+        if (!alive()) return;
+        code.value = encoded;
+        await copyCode(alive);
+      } catch (e) { if (alive()) status.textContent = e.message || String(e); }
+    });
+    var load = h('button', 'btn primary', '载入分享码'); load.id = 'ws-share-import';
+    load.addEventListener('click', async function () {
+      var alive = ticket(); status.textContent = '正在读取分享码…';
+      try {
+        if (!window.CreativeShareCode) throw new Error('分享码模块尚未就绪，请刷新应用');
+        var decoded = await CreativeShareCode.decode(code.value);
+        if (!alive()) return;
+        CS.setPreset(decoded);
+        flash('已载入「' + decoded.name + '」');
+      } catch (e) { if (alive()) status.textContent = e.message || String(e); }
+    });
+    row.append(generate, load); body.append(row, status);
+  }
+
   function renderIO(body) {
     var CS = stage_api();
+    renderShareCode(body, CS);
     var head = h('div', 'ws-section-head');
     head.appendChild(h('h2', 'sc-group-title', '导出 / 导入'));
     head.appendChild(help('先复制或下载 JSON；把别人的 JSON 粘贴到文本框后点“载入这段 JSON”。'));
@@ -1294,6 +1359,7 @@
 
   function render() {
     if (!refs.body) return;
+    shareViewRevision += 1;
     var scroll = refs.body.scrollTop;
     var focused = document.activeElement;
     var focusId = refs.body.contains(focused) && focused.id;
@@ -1337,6 +1403,7 @@
     var panel = refs.panel;
     if (!panel) return false;
     if (next === isOpen()) return next;
+    shareViewRevision += 1;
     if (next) {
       returnFocus = document.activeElement;
       if (target === 'advanced') activateCreativeStage();
@@ -1426,6 +1493,11 @@
     // 但只在"结构变了"的时候刷：每帧都重排 DOM 会让正在拖的滑块失焦。
     if (window.CreativeStage && CreativeStage.onChange) {
       CreativeStage.onChange(function (kind) {
+        if (['preset', 'param', 'background', 'hand'].indexOf(kind) >= 0) {
+          shareEditRevision += 1;
+          var status = $('ws-share-status');
+          if (status && /^正在/.test(status.textContent)) status.textContent = '预置已修改，本次操作已取消；请重新操作';
+        }
         if (!isOpen() || target !== 'advanced') return;
         syncStageStatus();
         if (kind === 'preset' || kind === 'library') render();

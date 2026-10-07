@@ -92,8 +92,9 @@ function blockAfter(text, marker) {
     const spawn = bodyOf(src, 'fn spawn_blocking_analysis(');
     ok(spawn, 'spawn_blocking_analysis 抓得到');
     if (spawn) {
-      ok(/_permit: tokio::sync::OwnedSemaphorePermit/.test(spawn),
-        '额度必须由分析任务持有（spawn_blocking 一返回就还等于没预算）');
+      ok(/permit: tokio::sync::OwnedSemaphorePermit/.test(spawn)
+        && /tokio::spawn\(async move \{[\s\S]*?let _permit = permit;/.test(spawn),
+        '额度必须显式移进分析 future；只有启动函数参数并不会持有额度');
       ok(/read_cache|write_cache/.test(spawn) && /write_cache\([^)]*\)\.await/.test(spawn),
         '落盘 await 在同一个持额度的任务里');
     }

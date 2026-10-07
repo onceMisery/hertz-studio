@@ -1,0 +1,52 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 hertz-studio contributors */
+.home-dashboard {
+  container-type: inline-size;
+  flex: none;
+  margin-block: var(--sp-6);
+  color: var(--text);
+}
+.home-layout { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); gap: var(--sp-5); }
+.home-primary {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--sp-6);
+  padding: var(--sp-6); border: 1px solid var(--line-strong); border-radius: var(--r-lg);
+  background: var(--panel-2); min-width: 0;
+}
+.home-copy { min-width: 0; }
+.home-status { display: block; color: var(--muted); font-size: var(--fs-base); font-weight: 500; }
+.home-title { font-size: var(--fs-2xl); font-weight: 650; line-height: 1.35; margin: var(--sp-3) 0; overflow-wrap: anywhere; }
+.home-detail { color: var(--muted); font-size: var(--fs-base); line-height: 1.5; margin: 0 0 var(--sp-5); overflow-wrap: anywhere; }
+.home-art-wrap {
+  width: calc(var(--sp-8) * 4); aspect-ratio: 1; position: relative; border-radius: var(--r-md);
+  background: var(--panel-solid); overflow: hidden; color: var(--muted);
+}
+.home-art-wrap > svg { position: absolute; inset: 30%; width: 40%; height: 40%; fill: currentColor; }
+.home-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.home-art:not([src]) { visibility: hidden; }
+.home-actions { display: flex; flex-wrap: wrap; gap: var(--sp-3); }
+.home-actions .btn { min-height: calc(var(--sp-8) + var(--sp-6)); font-size: var(--fs-base); white-space: normal; }
+.home-links { display: grid; gap: var(--sp-2); min-width: 0; }
+.home-link {
+  display: flex; align-items: center; gap: var(--sp-5); text-align: left; width: 100%;
+  padding: var(--sp-4) var(--sp-5); background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--r-md); min-width: 0; cursor: pointer;
+}
+.home-link:hover { background: var(--hover); border-color: var(--line-strong); }
+.home-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.home-link > svg { width: var(--sp-7); height: var(--sp-7); fill: currentColor; flex: none; }
+.home-link > span { min-width: 0; }
+.home-link strong { display: block; font-size: var(--fs-lg); font-weight: 600; }
+.home-link small { display: block; margin-top: var(--sp-1); color: var(--muted); font-size: var(--fs-base); overflow-wrap: anywhere; }
+@container (max-width: 560px) {
+  .home-layout { grid-template-columns: minmax(0, 1fr); }
+  .home-links { grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr)); }
+  .home-link { align-items: flex-start; }
+  .home-link small { display: none; }
+  .home-primary { gap: var(--sp-5); }
+  .home-art-wrap { width: calc(var(--sp-8) * 3); }
+}
+@container (max-width: 340px) {
+  .home-primary { grid-template-columns: minmax(0, 1fr); }
+  .home-links { grid-template-columns: minmax(0, 1fr); }
+  .home-art-wrap { display: none; }
+}

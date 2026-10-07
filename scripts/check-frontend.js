@@ -44,6 +44,18 @@ const SYNTAX_SKIP = new Set(['vendor']);
 // why 字段就是原来贴在 ci.yml 里的判断依据：它解释的是「这条失败意味着什么」，
 // 挪到脚本里才不会和 workflow 的 YAML 缩进互相拖累。
 const STEPS = [
+  { script: 'check-home-dashboard.js', stage: 'behavior',
+    why: '继续播放卡必须只读快照、明确主动作，并拦住迟到历史与封面回填。' },
+  { script: 'check-creative-share-code.js', stage: 'behavior',
+    why: '创意分享码只传递规范化预置，校验版本、长度与损坏内容，导入失败不覆盖当前配置。' },
+  { script: 'check-perf-probe.js', stage: 'behavior',
+    why: '全局性能探针必须真实采样帧门、保护性能字段白名单，并在两种形态中完整接线。' },
+  { script: 'check-cover-lifecycle.js', stage: 'behavior',
+    why: '封面代理与解码乱序不能覆盖新选择，代理失败清理旧内容，不持有永久回填订阅。' },
+  { script: 'check-beat-lifecycle.js', stage: 'behavior',
+    why: '节拍状态绑定当前曲目，未排队分析必须有界补取，迟到响应不能回填。' },
+  { script: 'check-daily-view.js', stage: 'behavior',
+    why: '每日推荐页的部分成功、来源状态与操作必须纳入 CI。' },
   { script: 'check-assets.js', stage: 'guard',
     why: '前端资源接线：文件在不在、id 对不对、脚本加载顺序。这类失败不会报错，只会「某块界面空着」。' },
   { script: 'check-lineage-names.js', stage: 'guard',
@@ -110,7 +122,6 @@ const STEPS = [
 
 // CI 暂不跑、但本地值得随手跑的无浏览器检查。
 const EXTRA = [
-  { script: 'check-daily-view.js', why: '每日推荐独立页：状态解释（pending ≠ 失败、缓存 ≠ 刚抓）与播放接线。' },
   { script: 'check-online-transport.js', why: '在线取流的传输层接缝。' },
   { script: 'check-playlist-views.js', why: '歌单的几种视图形态。' },
   { script: 'check-theme-studio.js', why: '主题工坊参数落盘。' },

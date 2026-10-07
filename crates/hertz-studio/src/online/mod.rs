@@ -376,6 +376,61 @@ pub struct CollectionDetail {
     pub tracks: Vec<OnlineTrack>,
 }
 
+/// 账号资料里的会员提示，不是取流授权。缺字段与平台明确返回 0 必须可区分；
+/// 仅实际取流响应决定能否播放，不用资料端点推断音质权限或有效期。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ProfileMembership {
+    #[default]
+    Unknown,
+    Reported {
+        level: u32,
+    },
+}
+
+impl ProfileMembership {
+    fn from_level(level: Option<u64>) -> Self {
+        match level.and_then(|n| u32::try_from(n).ok()) {
+            Some(level) => Self::Reported { level },
+            None => Self::Unknown,
+        }
+    }
+}
+
+#[cfg(test)]
+mod membership_tests {
+    use super::*;
+
+    #[test]
+    fn missing_profile_membership_is_not_reported_zero() {
+        assert_eq!(
+            ProfileMembership::from_level(None),
+            ProfileMembership::Unknown
+        );
+        assert_eq!(
+            ProfileMembership::from_level(Some(0)),
+            ProfileMembership::Reported { level: 0 }
+        );
+        assert_eq!(
+            ProfileMembership::from_level(Some(11)),
+            ProfileMembership::Reported { level: 11 }
+        );
+        assert_eq!(
+            ProfileMembership::from_level(Some(u64::MAX)),
+            ProfileMembership::Unknown
+        );
+        let legacy: AccountInfo = serde_json::from_value(serde_json::json!({
+            "source": "qq", "vip_level": 0
+        }))
+        .unwrap();
+        assert_eq!(legacy.membership, ProfileMembership::Unknown);
+        assert_eq!(
+            serde_json::to_value(legacy).unwrap()["membership"]["state"],
+            "unknown"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AccountInfo {
     pub source: String,
@@ -383,6 +438,9 @@ pub struct AccountInfo {
     pub nickname: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
+    #[serde(default)]
+    pub membership: ProfileMembership,
+    /// 兼容旧客户端的显示提示。授权不得读取此字段；未知时的 0 不是非会员断言。
     #[serde(default)]
     pub vip_level: u32,
     #[serde(default)]
@@ -1807,11 +1865,26 @@ mod tests {
             .unwrap()
             .caps
             .contains(&Capability::PlaylistWrite));
-        assert_eq!(playlist_create(&ctx, "kugou", "x").await.unwrap_err().status, 404);
-        assert_eq!(playlist_delete(&ctx, "kugou", "1").await.unwrap_err().status, 404);
+        assert_eq!(
+            playlist_create(&ctx, "kugou", "x")
+                .await
+                .unwrap_err()
+                .status,
+            404
+        );
+        assert_eq!(
+            playlist_delete(&ctx, "kugou", "1")
+                .await
+                .unwrap_err()
+                .status,
+            404
+        );
         // 未注册音源与「平台不支持」不可区分：同样 404，不泄露端点存在性。
         assert_eq!(
-            playlist_remove(&ctx, "ghost", "1", &[]).await.unwrap_err().status,
+            playlist_remove(&ctx, "ghost", "1", &[])
+                .await
+                .unwrap_err()
+                .status,
             404
         );
 

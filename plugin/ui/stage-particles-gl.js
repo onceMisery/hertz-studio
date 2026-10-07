@@ -10,7 +10,7 @@
 //              N 超过一千左右，主线程就开始吃掉歌词滚动的帧。
 //   WebGL   ：粒子位置是 (aSeed, aX, aLane, aAng, uTime, 音频 uniform) 的解析函数，
 //              在顶点着色器里算。CPU 每帧只更新十几个 uniform，粒子数与主线程
-//              开销解耦，所以能比标准档密一个数量级。
+//              开销解耦，适合绘制更细的光点与柔和泛光。
 //
 // 泛光沿用「同一份顶点数据画两遍、第二遍点更大更淡」的做法，而不是一趟全屏
 // 后处理：加性混合的两遍点精灵在视觉上都比一次 bloom pass 便宜一个数量级。
@@ -25,15 +25,9 @@
   // 每档粒子上限与 DPR 上限。宿主（stage-particles.js）还会在这之上再按面板
   // 面积缩放一次，所以这里定的是"基准尺寸下该有多少颗"。
   //
-  // 颗数必须和「单颗多大」一起定：屏幕上的总光量 ≈ 颗数 × 直径²，而泛光是
-  // 同一份点数据再画一遍放大版。以前这里是 14000 颗却沿用标准档的 3.2 尺寸
-  // 系数，总光量被抬到标准档的几十倍，在右侧那块小面板上直接糊成一片白噪点。
-  // 现在配平成「直径不到标准档一半、颗数二十多倍」，实测整体亮度与标准档相当，
-  // 增强体现在颗粒更细、闪得更多，而不是更曝。
-  //
-  // 上限仍刻意压在核显稳得住的水位上（泛光那一遍的填充率按 dpr² 涨），
-  // 真正的余量交给下面的 A/B 探测去要。
-  var COUNTS = [1800, 5200, 10400];
+  // 侧栏需要少量可分辨的柔光点。GPU 的容量不应决定视觉密度；
+  // 增强档保留更细的光点与淡泛光，而不是把整个播放器铺成星空噪点。
+  var COUNTS = [120, 220, 360];
   var DPR = [1.0, 1.15, 1.35];
   var STRIDE = 6;          // seed, lane, ang, size, tint, x
 
@@ -41,7 +35,7 @@
 precision highp float;
 in float aSeed; in float aLane; in float aAng; in float aSize; in float aTint; in float aX;
 uniform float uTime; uniform vec2 uRes; uniform float uPixel;
-uniform float uDrift; uniform float uStrength; uniform vec4 uBands;
+uniform float uTravel; uniform float uStrength; uniform vec4 uBands;
 uniform float uPulse; uniform vec2 uCenter; uniform vec3 uFade;
 uniform float uSizeMul;
 out float vAlpha; out float vTint;
@@ -50,20 +44,20 @@ void main() {
   float z = aLane;                       // 深度：越近越大、越快、越亮
   float t = uTime;
 
-  float speed = uDrift * (0.4 + z) * (1.0 + uBands.z * 2.2);
-  float y = 1.06 - fract(aSeed - t * speed) * 1.12;
+  // 位移在宿主按 dt 积分；绝对时间乘实时音量会在频谱变化时瞬移。
+  float y = 1.06 - fract(aSeed + uTravel * (0.4 + z)) * 1.12;
   // 横向必须用独立的一路随机数。以前是 fract(aSeed * 0.6173 + 0.13)：
   // 与 y 同源于 aSeed 且都是线性映射，于是整场粒子塌成一条斜率 -1.12/0.6173
   // 的直线（aSeed < 相位的那部分另成一条），屏幕上就是两道白杠子而不是光尘。
-  float x = aX + sin(t * 0.526 + aAng) * 0.013 * (0.3 + z) * (1.0 + uBands.y);
+  float x = aX + sin(t * 0.2 + aAng) * 0.006 * (0.3 + z) * (1.0 + uBands.y * 0.2);
   vec2 p = vec2(x * uRes.x, y * uRes.y);
-  p.y += sin(t * 0.417) * uBands.x * 0.010 * uRes.y * uStrength;
+  p.y += sin(t * 0.2) * uBands.x * 0.002 * uRes.y * uStrength;
 
   // 节拍把粒子沿「离圆心的方向」推开：越靠近圆心推得越狠，边缘几乎不动，
   // 读起来是冲击波而不是整层平移。
   vec2 d = p - uCenter;
   float dist = length(d) + 1e-4;
-  float k = uPulse * 0.055 * (1.0 - min(1.0, dist / (uRes.x * 0.75))) * 0.07 * uStrength;
+  float k = uPulse * 0.012 * (1.0 - min(1.0, dist / (uRes.x * 0.75))) * 0.07 * uStrength;
   p += (d / dist) * k * uRes;
 
   // 文字让位：uFade = (歌词带上沿, 下沿, 是否启用)。带内压到 0.28，
@@ -75,15 +69,13 @@ void main() {
     fade = 0.28 + 0.72 * clamp(dd / 48.0, 0.0, 1.0);
   }
 
-  float tw = 0.72 + 0.28 * sin(t * 2.381 + aAng * 3.1);
-  float a = (0.028 + 0.085 * z + uBands.x * 0.055 + uPulse * 0.10) * tw * fade;
-  // 高频泛音闪烁：每帧只点亮 1/8 的粒子，制造"空气里有东西在反光"
-  float lane = floor(fract(aSeed * 71.3) * 8.0);
-  float cur = floor(mod(t * 11.0, 8.0));
-  if (uBands.w > 0.02 && abs(lane - cur) < 0.5) a += uBands.w * 0.9 * 0.16;
+  // 慢速、错相的呼吸替代轮转闪点；高频亮度也必须经过文字让位。
+  float tw = 0.82 + 0.18 * sin(t * 0.45 + aAng * 3.1);
+  float shimmer = uBands.w * 0.025 * (0.5 + 0.5 * sin(t * 0.7 + aAng));
+  float a = (0.06 + 0.15 * z + uBands.x * 0.03 + uPulse * 0.035 + shimmer) * tw * fade;
 
-  float sz = aSize * (0.7 + z * 0.9) * (1.0 + uBands.x * 0.5 + uPulse * 0.35)
-           * 1.3 * uPixel * uSizeMul;
+  float sz = aSize * (0.7 + z * 0.9) * (1.0 + uBands.x * 0.12 + uPulse * 0.10)
+           * 2.4 * uPixel * uSizeMul;
   gl_PointSize = clamp(sz, 1.0, 34.0);
   vAlpha = a;
   vTint = aTint;
@@ -223,11 +215,11 @@ void main() {
       }
 
       var u = {};
-      ['uTime', 'uRes', 'uPixel', 'uDrift', 'uStrength', 'uBands', 'uPulse',
+      ['uTime', 'uRes', 'uPixel', 'uTravel', 'uStrength', 'uBands', 'uPulse',
         'uCenter', 'uFade', 'uColorA', 'uColorB', 'uSizeMul', 'uAlphaMul']
         .forEach(function (name) { u[name] = gl.getUniformLocation(prog, name); });
 
-      var ctx = { v: v, gl: gl, prog: prog, vao: vao, buf: buf, u: u, w: 0, h: 0 };
+      var ctx = { v: v, gl: gl, prog: prog, vao: vao, buf: buf, u: u, w: 0, h: 0, travel: 0 };
       v.canvas.addEventListener('webglcontextlost', function (e) {
         e.preventDefault();
         v.__lost = true;
@@ -301,7 +293,8 @@ void main() {
         gl.uniform1f(u.uTime, f.t / 1000);
         gl.uniform2f(u.uRes, v.w, v.h);
         gl.uniform1f(u.uPixel, c.pixel || 1);
-        gl.uniform1f(u.uDrift, f.drift * (0.018 + f.bands[2] * 0.05));
+        c.travel += Math.min(100, Math.max(0, f.dt)) / 1000 * f.drift * (0.004 + f.bands[2] * 0.004);
+        gl.uniform1f(u.uTravel, c.travel);
         gl.uniform1f(u.uStrength, f.strength);
         gl.uniform4f(u.uBands, f.bands[0], f.bands[1], f.bands[2], f.bands[3]);
         gl.uniform1f(u.uPulse, f.pulse * f.strength);
@@ -315,7 +308,7 @@ void main() {
         gl.uniform1f(u.uAlphaMul, 1.0);
         gl.drawArrays(gl.POINTS, 0, count);
         gl.uniform1f(u.uSizeMul, 2.0);
-        gl.uniform1f(u.uAlphaMul, 0.17);
+        gl.uniform1f(u.uAlphaMul, 0.10);
         gl.drawArrays(gl.POINTS, 0, count);
 
         gl.bindVertexArray(null);

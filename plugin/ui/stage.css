@@ -1193,6 +1193,11 @@ html.fx-on body.reduce-motion .disc-wrap::after { display: none; }
   inset: 0;
   z-index: 0;
   pointer-events: none;
+  mask-image: radial-gradient(
+    ellipse var(--particle-rx, 340px) var(--particle-ry, 300px)
+    at var(--particle-cx, 50%) var(--particle-cy, 30%),
+    #000 24%, rgb(0 0 0 / 0.55) 58%, transparent 100%
+  );
   opacity: 0;
   transition: opacity var(--dur-3) var(--ease);
 }
@@ -1206,8 +1211,8 @@ body.is-playing .stage-particles { opacity: 1; }
 .stage-ripple {
   position: absolute;
   border-radius: 50%;
-  border: 1.5px solid rgb(var(--music-highlight-rgb));
-  transform: translate(-50%, -50%) scale(0.35);
+  border: 1px solid rgb(var(--music-highlight-rgb));
+  transform: translate(-50%, -50%) scale(0.82);
   opacity: 0;
   pointer-events: none;
   z-index: 0;
@@ -1219,6 +1224,9 @@ body.is-playing .stage-particles { opacity: 1; }
    那台机器往往还能画几十颗，一刀切反而浪费了还能用的表现力。 */
 body.reduce-motion .stage-particles,
 body.reduce-motion .stage-ripple { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .stage-particles, .stage-ripple { display: none; }
+}
 
 /* ==========================================================================
    10. 主题色切换入口

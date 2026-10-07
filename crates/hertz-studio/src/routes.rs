@@ -243,7 +243,9 @@ async fn beatmap_status(
     State(state): State<Arc<AppState>>,
     Query(q): Query<BeatmapStatusQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(crate::stage_beats::status(&state, q.track.as_deref()).await))
+    Ok(Json(
+        crate::stage_beats::status(&state, q.track.as_deref()).await,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -483,6 +485,7 @@ async fn play(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::
         }
     }
     let commit = state.play_commit.lock().await;
+    state.cancel_prepared_playback().await;
     state
         .play_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -491,12 +494,14 @@ async fn play(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::
         .play()
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    state.transport_committed().await;
     drop(commit);
     Ok(get_state(State(state)).await)
 }
 
 async fn pause(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let commit = state.play_commit.lock().await;
+    state.cancel_prepared_playback().await;
     state
         .play_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -506,12 +511,14 @@ async fn pause(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json:
         .pause()
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    state.transport_committed().await;
     drop(commit);
     Ok(get_state(State(state)).await)
 }
 
 async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let commit = state.play_commit.lock().await;
+    state.cancel_prepared_playback().await;
     state
         .play_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -521,6 +528,7 @@ async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::
         .stop()
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    state.transport_committed().await;
     drop(commit);
     Ok(get_state(State(state)).await)
 }
@@ -632,6 +640,7 @@ async fn seek(
     Json(body): Json<SeekRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let commit = state.play_commit.lock().await;
+    state.cancel_prepared_playback().await;
     state
         .play_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -640,6 +649,7 @@ async fn seek(
         .seek(body.position_ms)
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
+    state.transport_committed().await;
     drop(commit);
     Ok(get_state(State(state)).await)
 }
@@ -674,12 +684,19 @@ async fn mode(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ModeRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let commit = state.play_commit.lock().await;
+    state.cancel_prepared_playback().await;
+    state
+        .play_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     state
         .audio
         .set_mode(body.mode)
         .await
         .map_err(vmusic_core::CoreError::Audio)?;
     crate::persist::save_mode(&state.db, body.mode).await;
+    state.transport_committed().await;
+    drop(commit);
     Ok(get_state(State(state)).await)
 }
 
@@ -703,7 +720,7 @@ pub struct DspUpdate {
     pub crossfade_ms: Option<u64>,
 }
 
-/// 更新 DSP 设置并即时下发到音频后端；交叉淡化同步换装/尾淡出时长。
+/// 更新 DSP 设置并即时下发到音频后端；歌曲重叠时长与暂停/停止淡出独立。
 async fn set_dsp(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DspUpdate>,
@@ -766,6 +783,11 @@ async fn set_dsp(
         .await
         .ok();
     state.audio.set_crossfade(cfg.crossfade_ms).await.ok();
+    {
+        let _commit = state.play_commit.lock().await;
+        state.cancel_prepared_playback().await;
+    }
+    state.schedule_prepare_next();
     Ok(Json(
         serde_json::to_value(&cfg).map_err(|e| internal(e.to_string()))?,
     ))
@@ -2822,6 +2844,7 @@ pub(crate) fn playlist_scope(raw: Option<String>) -> ApiResult<String> {
 /// 整盘播放的起始下标归一：缺省 0；越界夹到最后一首而不是直接 400——
 /// 前端分页/刷新后传来旧 index 是常事，夹一下比播失败友好。
 /// 空列表也安全（当前调用点已保证非空，纯防御）：返回 0 而不是下溢。
+#[cfg(test)]
 pub(crate) fn pick_index(requested: Option<usize>, len: usize) -> usize {
     match requested {
         Some(i) if i < len => i,
@@ -2912,98 +2935,7 @@ async fn online_lyric(
     Ok(Json(online_lyric_body(&state, &source, &q.id).await?))
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct OnlinePlayRequest {
-    pub(crate) source: Option<String>,
-    /// 旧单曲形态的曲目 id；新整盘形态只给 tracks。两者都缺时回 400。
-    #[serde(default)]
-    pub(crate) id: Option<String>,
-    /// 旧单曲形态的元数据回显字段。
-    pub(crate) title: Option<String>,
-    pub(crate) artist: Option<String>,
-    pub(crate) album: Option<String>,
-    pub(crate) duration_ms: Option<u64>,
-    // Task 9 起音质以服务端逐源偏好（settings online_quality）为权威，请求体
-    // 里的单次 quality 不再读取；保留字段以兼容旧客户端入参，待播放端点版本
-    // 演进时连同旧单曲形态一起评估移除。
-    #[allow(dead_code)]
-    pub(crate) quality: Option<u32>,
-    /// 整盘形态：一整首歌单/专辑的曲目列表，当前曲由 index 指定。
-    #[serde(default)]
-    pub(crate) tracks: Option<Vec<OnlinePlayTrack>>,
-    /// F2 集合意图：前端只发 {kind,id}（目前 kind 只认 "playlist"），首页与
-    /// 之后的续载都由服务端取。给了 collection 就忽略 tracks/id 单曲形态。
-    #[serde(default)]
-    pub(crate) collection: Option<OnlinePlayCollection>,
-    #[serde(default)]
-    pub(crate) index: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct OnlinePlayCollection {
-    pub(crate) kind: String,
-    pub(crate) id: String,
-}
-
-/// F2 集合播放的第一页：把平台歌单首页归一成与前端整盘形态相同的
-/// [`OnlinePlayTrack`] 列表，并带回平台侧总数供续载任务翻页。HTTP 与 RPC
-/// 两个门面共用本函数，集合意图的解析只此一份。
-pub(crate) async fn collection_first_page(
-    state: &Arc<AppState>,
-    source: &str,
-    coll: &OnlinePlayCollection,
-) -> ApiResult<(Vec<OnlinePlayTrack>, u64)> {
-    if coll.kind != "playlist" {
-        return Err(bad_request("整单播放目前只支持歌单"));
-    }
-    let id = coll.id.trim();
-    if id.is_empty() {
-        return Err(bad_request("缺少集合 id"));
-    }
-    let detail = online::playlist_detail(
-        &online_ctx(state),
-        source,
-        id,
-        0,
-        crate::collection::PAGE,
-    )
-    .await?;
-    if detail.tracks.is_empty() {
-        return Err(crate::error::not_found("歌单为空或暂不可用"));
-    }
-    let tracks = detail
-        .tracks
-        .into_iter()
-        .map(|t| OnlinePlayTrack {
-            id: t.id,
-            title: Some(t.title),
-            artist: Some(t.artist),
-            album: Some(t.album),
-            duration_ms: Some(t.duration_ms),
-            cover: t.cover,
-            track_ref: None,
-        })
-        .collect();
-    Ok((tracks, detail.total))
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct OnlinePlayTrack {
-    pub(crate) id: String,
-    pub(crate) title: Option<String>,
-    pub(crate) artist: Option<String>,
-    pub(crate) album: Option<String>,
-    pub(crate) duration_ms: Option<u64>,
-    pub(crate) cover: Option<String>,
-    /// 搜索/歌单结果里随曲目带来的平台原始引用（QQ media_mid 等），
-    /// 取流时原样透传给平台模块；JSON 字段名与 OnlineTrack 一致为 ref。
-    ///
-    /// Task 9 起队列只存虚拟 id、播放按稳定 id 取流，暂不读取本字段；
-    /// 仍须接收以免 serde 拒绝前端载荷，后续首曲最优音质透传恢复时启用。
-    #[serde(default, rename = "ref")]
-    #[allow(dead_code)]
-    pub(crate) track_ref: Option<online::TrackRef>,
-}
+pub(crate) use crate::online_play::OnlinePlayRequest;
 
 async fn online_quality_get(
     State(state): State<Arc<AppState>>,
@@ -3111,158 +3043,12 @@ async fn online_play(
     State(state): State<Arc<AppState>>,
     Json(body): Json<OnlinePlayRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let source = source_of(body.source);
-
-    // F2 集合意图：前端只发 {source, collection:{kind,id}}，首页由服务端取，
-    // 之后按页续载（collection.rs）。没有集合意图才走 tracks / 单曲两种形态。
-    let mut collection: Option<(String, u64)> = None;
-    let mut tracks = match &body.collection {
-        Some(coll) => {
-            let (first, total) = collection_first_page(&state, &source, coll).await?;
-            collection = Some((coll.id.trim().to_string(), total));
-            first
-        }
-        None => body.tracks.unwrap_or_default(),
-    };
-    if tracks.is_empty() {
-        let id = body.id.as_deref().unwrap_or("").trim().to_string();
-        if id.is_empty() {
-            return Err(bad_request("缺少曲目 id"));
-        }
-        tracks.push(OnlinePlayTrack {
-            id,
-            title: body.title,
-            artist: body.artist,
-            album: body.album,
-            duration_ms: body.duration_ms,
-            cover: None,
-            track_ref: None,
-        });
+    match state.start_online_play(body).await? {
+        Some(reply) => Ok(Json(reply)),
+        None => Ok(get_state(State(state)).await),
     }
-    // virtual_id 必须能反解出非空 id，任何一项空都在入队前拒绝。
-    if tracks.iter().any(|t| t.id.trim().is_empty()) {
-        return Err(bad_request("tracks 中存在缺少 id 的曲目"));
-    }
-    let index = pick_index(body.index, tracks.len());
-    let current = &tracks[index];
-
-    let vids: Vec<String> = tracks
-        .iter()
-        .map(|t| online::virtual_id(&source, &t.id))
-        .collect();
-
-    // 先占队列再起播（见函数文档）。set_queue 原子地顶代际并挂出新队列；
-    // 起播窗口里被顶代际则由 play_index_for 的预留复核静默收在「当前」播放器
-    // 状态上。占队前的 (queue, cursor) 快照（第 2、3 个返回值）已无消费方：
-    // Task 9 后起播失败由 state::online_failed 收口（cursor 回退由它负责），
-    // 不再整盘还原队列，故这里只取代际。
-    //
-    // 取流与渐进式下载全部在 play_index_for 内按服务端音质偏好完成；首曲不再
-    // 走「先整首下载预热」的旧路径——那会让首曲下两遍。
-    let (gen, _, _) = state.set_queue(vids.clone(), Some(index)).await;
-
-    // F2：登记整单续载。必须落在 set_queue 之后（set_queue 会清旧意图）、
-    // 起播之前；begin 内部凭预留代际核对，被并发点播顶掉就不登记。
-    if let Some((cid, total)) = &collection {
-        state
-            .begin_collection_load(&source, cid, *total, tracks.len(), gen)
-            .await;
-    }
-
-    // 整盘元数据入内存暂存：play_index_for 提交成功后据此写历史（在线曲的
-    // URL 会过期，历史只存元数据快照，重播时重新实时取流）。
-    for (t, vid) in tracks.iter().zip(vids.iter()) {
-        state
-            .remember_online_meta(
-                vid.clone(),
-                crate::state::OnlineMetaSnap {
-                    title: t.title.clone().unwrap_or_else(|| t.id.clone()),
-                    artist: t.artist.clone(),
-                    album: t.album.clone(),
-                    cover: t.cover.clone(),
-                    duration_ms: t.duration_ms.filter(|v| *v > 0),
-                    // 入队时还没有取流，响度标签留空，等取流那一步回填；
-                    // remember_online_meta 会保住同一首曲上一轮已取到的标签。
-                    rg_gain_db: None,
-                    rg_peak: None,
-                    // 出处就是这一项自己：入队那一刻没有被换过家。
-                    origin: None,
-                },
-            )
-            .await;
-    }
-
-    let outcome = state
-        .play_index_for(index, Some(gen), PlayTrigger::Pick)
-        .await?;
-    if !outcome.committed {
-        // 起播被顶代际：刚登记的整单续载意图一并撤回。
-        if collection.is_some() {
-            state.cancel_collection_load().await;
-        }
-        return Ok(get_state(State(state.clone())).await);
-    }
-    // 首曲确认起播：后台预取后一首 + LRU（play_index_for 内部不预取）。
-    state.post_commit_background();
-
-    // 封面：整盘曲目通常已带 cover；缺失时补一次详情。补不到不算失败——
-    // 前端有占位图，不能让一张图片拖垮整次播放。
-    let ctx = online_ctx(&state);
-    let cover = match &current.cover {
-        Some(c) if !c.is_empty() => Some(c.clone()),
-        _ => online::detail(&ctx, &source, &current.id)
-            .await
-            .ok()
-            .and_then(|d| d.cover),
-    };
-
-    // 出处与供音分开回（F3）：这一项如果是接力换过家的，界面要能说出「点的是
-    // 哪家、现在哪家在放」。刷新或换端之后前端自己的暂存可能已经没有这一项，
-    // 服务端的队列快照才是权威来源。
-    let (origin, relayed) = match state.online_origin(&vids[index]).await {
-        Some((o, relayed)) => (Some(o), relayed),
-        None => (None, false),
-    };
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "track_id": vids[index],
-        // 前端 Task 18 用它填充队列 UI，避免再拼一遍虚拟 id。
-        "track_ids": vids,
-        "index": index,
-        "source": source,
-        "id": current.id,
-        "title": current.title.clone().unwrap_or_default(),
-        "artist": current.artist.clone().unwrap_or_default(),
-        "album": current.album.clone().unwrap_or_default(),
-        "duration_ms": current.duration_ms.unwrap_or(0),
-        "cover": cover,
-        // 平台实际给到的音质档位（缓存命中时是给到的那一档；预取接管时可能为 null）。
-        "actual_quality": outcome.actual_quality.map(|q| q.as_str()),
-        "origin": origin,
-        "relayed": relayed,
-        // F2：集合意图时回传续载上下文，前端据此显示「已准备 N / total」。
-        "collection": collection.as_ref().map(|(cid, total)| serde_json::json!({
-            "kind": "playlist",
-            "id": cid,
-            "loaded": tracks.len(),
-            "total": total,
-        })),
-        // F2：集合意图时带首页元数据，前端不必再逐首打详情补队列行。
-        "tracks": collection.as_ref().map(|_| serde_json::json!(
-            tracks.iter().map(|t| serde_json::json!({
-                "id": t.id,
-                "title": t.title,
-                "artist": t.artist,
-                "album": t.album,
-                "duration_ms": t.duration_ms,
-                "cover": t.cover,
-            })).collect::<Vec<_>>()
-        )),
-    })))
 }
 
-/// F2 整单续载的手动重试入口：补页失败（网络抖动、平台 5xx）后用户点
-/// 「继续载入」，force 绕过水位与节流，会话失效时安静地不做任何事。
 async fn online_collection_refresh(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {

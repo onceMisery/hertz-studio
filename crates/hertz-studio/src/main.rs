@@ -33,6 +33,10 @@ const STYLE_CSS: &str = include_str!("../../../plugin/ui/style.css");
 const STAGE_CSS: &str = include_str!("../../../plugin/ui/stage.css");
 const CREATIVE_CSS: &str = include_str!("../../../plugin/ui/creative.css");
 const STAGE_JS: &str = include_str!("../../../plugin/ui/stage.js");
+const PERF_PROBE_JS: &str = include_str!("../../../plugin/ui/perf-probe.js");
+const HOME_DASHBOARD_JS: &str = include_str!("../../../plugin/ui/home-dashboard.js");
+const HOME_DASHBOARD_CSS: &str = include_str!("../../../plugin/ui/home-dashboard.css");
+const CREATIVE_SHARE_CODE_JS: &str = include_str!("../../../plugin/ui/creative-share-code.js");
 const STAGE_PARTICLES_JS: &str = include_str!("../../../plugin/ui/stage-particles.js");
 const STAGE_PARTICLES_GL_JS: &str = include_str!("../../../plugin/ui/stage-particles-gl.js");
 const THEMES_JS: &str = include_str!("../../../plugin/ui/themes.js");
@@ -257,6 +261,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/search-history.js", get(|| asset(JS, SEARCH_HISTORY_JS)))
         .route("/app.js", get(|| asset(JS, APP_JS)))
         .route("/stage.js", get(|| asset(JS, STAGE_JS)))
+        .route("/perf-probe.js", get(|| asset(JS, PERF_PROBE_JS)))
+        .route("/home-dashboard.js", get(|| asset(JS, HOME_DASHBOARD_JS)))
+        .route(
+            "/home-dashboard.css",
+            get(|| asset(CSS, HOME_DASHBOARD_CSS)),
+        )
+        .route(
+            "/creative-share-code.js",
+            get(|| asset(JS, CREATIVE_SHARE_CODE_JS)),
+        )
         .route("/onset.js", get(|| asset(JS, ONSET_JS)))
         .route("/stage-control.js", get(|| asset(JS, STAGE_CTL_JS)))
         .route("/stage-particles.js", get(|| asset(JS, STAGE_PARTICLES_JS)))
@@ -354,7 +368,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/creative.css", get(|| asset(CSS, CREATIVE_CSS)))
         .route("/stage3d.css", get(|| asset(CSS, STAGE3D_CSS)))
         .route("/stanza/stanza.css", get(|| asset(CSS, STANZA_CSS)))
-        .route("/stanza/stanza-starborn.css", get(|| asset(CSS, STANZA_STARBORN_CSS)))
+        .route(
+            "/stanza/stanza-starborn.css",
+            get(|| asset(CSS, STANZA_STARBORN_CSS)),
+        )
         .route("/online.css", get(|| asset(CSS, ONLINE_CSS)))
         .route("/theme-studio.css", get(|| asset(CSS, THEME_STUDIO_CSS)))
         .route("/skins/skins.css", get(|| asset(CSS, SKINS_CSS)))
@@ -475,6 +492,10 @@ const ASSET_FINGERPRINT_INPUTS: &[&str] = &[
     SEARCH_HISTORY_JS,
     APP_JS,
     STAGE_JS,
+    PERF_PROBE_JS,
+    HOME_DASHBOARD_JS,
+    HOME_DASHBOARD_CSS,
+    CREATIVE_SHARE_CODE_JS,
     ONSET_JS,
     STAGE_CTL_JS,
     STAGE_PARTICLES_JS,

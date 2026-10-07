@@ -141,6 +141,10 @@ fn read_varint(bytes: &[u8], i: usize) -> Option<(u64, usize)> {
     loop {
         let b = *bytes.get(i)?;
         i += 1;
+        // The tenth byte has only one payload bit left in a u64.
+        if shift == 63 && b > 1 {
+            return None;
+        }
         v |= ((b & 0x7f) as u64) << shift;
         if b & 0x80 == 0 {
             return Some((v, i));
@@ -178,7 +182,10 @@ fn unpack_beats(bytes: &[u8]) -> Option<Vec<Beat>> {
         i += 1;
         let flags = *bytes.get(i)?;
         i += 1;
-        prev_t += delta as i64;
+        if flags & !7 != 0 || (delta == 0 && !out.is_empty()) {
+            return None;
+        }
+        prev_t = prev_t.checked_add(i64::try_from(delta).ok()?)?;
         out.push(Beat {
             t: prev_t,
             strength,
@@ -218,15 +225,24 @@ pub(crate) async fn retry(state: &Arc<AppState>, track_id: &str) -> Outcome {
     let Some(audio) = resolve_audio(state, track_id).await else {
         return Outcome::Unavailable(Reason::NotReady);
     };
-    forget(state, &audio.key).await;
+    if !forget(state, &audio.key).await {
+        return Outcome::Analyzing;
+    }
     request(state, track_id, Caller::Demand).await
 }
 
 /// 忘掉这一首的既有结论：幂等表里那一格（含「已放弃三次」）与内存里那份没落盘
 /// 的图。只动这一把键——清整张表会把别首正在算的任务也判成没人生。
-async fn forget(state: &Arc<AppState>, key: &str) {
-    state.stage_beats.lock().await.remove(key);
+async fn forget(state: &Arc<AppState>, key: &str) -> bool {
+    let mut table = state.stage_beats.lock().await;
+    // A running spawn_blocking cannot be cancelled. Preserve its reservation:
+    // deleting it would let retry start a second FFT for the same cache key.
+    if matches!(table.get(key), Some(TaskState::Analyzing { .. })) {
+        return false;
+    }
+    table.remove(key);
     state.beat_volatile.lock().await.remove(key);
+    true
 }
 
 /// 状态面板：把任务表按「后台现在在忙什么」数一遍，再列最近几条；带上 `track`
@@ -299,9 +315,7 @@ pub(crate) async fn status(state: &Arc<AppState>, track: Option<&str>) -> serde_
 /// 的曲目挤掉，图其实还在——说「还没开始」会让人白等一次重试。
 async fn verdict(state: &Arc<AppState>, audio: &AudioRef) -> serde_json::Value {
     let found = match state.stage_beats.lock().await.get(&audio.key) {
-        Some(TaskState::Analyzing { attempts }) => {
-            Some(("analyzing", None, *attempts as u64))
-        }
+        Some(TaskState::Analyzing { attempts }) => Some(("analyzing", None, *attempts as u64)),
         Some(TaskState::Ready(_)) => Some(("disk", None, 0)),
         Some(TaskState::NotPersisted) => Some(("memory", None, 0)),
         Some(TaskState::Failed { reason, attempts }) => {
@@ -315,7 +329,10 @@ async fn verdict(state: &Arc<AppState>, audio: &AudioRef) -> serde_json::Value {
             let cache = state.stage_beats_dir().join(format!("{}.json", audio.key));
             // 校验走 `read_cache` 而不是「文件在不在」：曲文件换过一版之后盘上那份
             // 是过期的，说「已有图」会把人引去查错的东西。
-            if read_cache(&cache, audio.mtime_ms, audio.len).await.is_some() {
+            if read_cache(&cache, audio.mtime_ms, audio.len)
+                .await
+                .is_some()
+            {
                 ("disk", None, 0)
             } else if state.beat_volatile.lock().await.get(&audio.key).is_some() {
                 ("memory", None, 0)
@@ -474,7 +491,10 @@ async fn resolve_audio(state: &Arc<AppState>, track_id: &str) -> Option<AudioRef
         let label = format!(
             "{} - {}",
             track.title,
-            track.artist.clone().unwrap_or_else(|| "未知艺术家".to_string())
+            track
+                .artist
+                .clone()
+                .unwrap_or_else(|| "未知艺术家".to_string())
         );
         audio_ref(path, key, label).await
     }
@@ -595,9 +615,12 @@ fn spawn_blocking_analysis(
     state: Arc<AppState>,
     track_id: String,
     audio: AudioRef,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     tokio::spawn(async move {
+        // Explicit capture is required: an unused function argument is dropped
+        // when this launcher returns, even though the inner block is async move.
+        let _permit = permit;
         let AudioRef {
             path,
             key,
@@ -792,17 +815,40 @@ mod tests {
     #[test]
     fn beat_packing_roundtrips_strength_flags_and_big_gaps() {
         let beats = vec![
-            Beat { t: 1, strength: 0.0, downbeat: false, intensity: 0 },
-            Beat { t: 500, strength: 0.8, downbeat: true, intensity: 3 },
+            Beat {
+                t: 1,
+                strength: 0.0,
+                downbeat: false,
+                intensity: 0,
+            },
+            Beat {
+                t: 500,
+                strength: 0.8,
+                downbeat: true,
+                intensity: 3,
+            },
             // 跨过 2 字节、3 字节 varint 边界的大间隔。
-            Beat { t: 500 + 16_384, strength: 1.0, downbeat: false, intensity: 1 },
-            Beat { t: 500 + 16_384 + 2_097_152, strength: 0.42, downbeat: true, intensity: 2 },
+            Beat {
+                t: 500 + 16_384,
+                strength: 1.0,
+                downbeat: false,
+                intensity: 1,
+            },
+            Beat {
+                t: 500 + 16_384 + 2_097_152,
+                strength: 0.42,
+                downbeat: true,
+                intensity: 2,
+            },
         ];
         let back = unpack_beats(&pack_beats(&beats)).unwrap();
         assert_eq!(back.len(), beats.len());
         for (a, b) in beats.iter().zip(back.iter()) {
             assert_eq!(a.t, b.t, "时间戳毫秒级无损");
-            assert!((a.strength - b.strength).abs() < 1.0 / 254.0, "强度量化误差 ≤ 1/255");
+            assert!(
+                (a.strength - b.strength).abs() < 1.0 / 254.0,
+                "强度量化误差 ≤ 1/255"
+            );
             assert_eq!(a.downbeat, b.downbeat);
             assert_eq!(a.intensity, b.intensity);
         }
@@ -810,6 +856,163 @@ mod tests {
         let bin = pack_beats(&beats);
         assert!(unpack_beats(&bin[..bin.len() - 1]).is_none());
         assert!(unpack_beats(&bin[..bin.len() - 2]).is_none());
+    }
+
+    #[test]
+    fn packed_beats_reject_overflow_duplicates_and_unknown_flags() {
+        let mut overflowing_varint = vec![0x80; 9];
+        overflowing_varint.extend([0x02, 255, 0]);
+        assert!(
+            unpack_beats(&overflowing_varint).is_none(),
+            "varint exceeds u64"
+        );
+        let mut negative_time = Vec::new();
+        write_varint(&mut negative_time, i64::MAX as u64 + 1);
+        negative_time.extend([255, 0]);
+        assert!(unpack_beats(&negative_time).is_none(), "time exceeds i64");
+        let mut overflowing_sum = Vec::new();
+        write_varint(&mut overflowing_sum, i64::MAX as u64);
+        overflowing_sum.extend([255, 0, 1, 255, 0]);
+        assert!(unpack_beats(&overflowing_sum).is_none(), "sum exceeds i64");
+        assert!(
+            unpack_beats(&[1, 255, 0, 0, 255, 0]).is_none(),
+            "duplicate beat"
+        );
+        assert!(unpack_beats(&[1, 255, 8]).is_none(), "reserved flag bits");
+        assert!(
+            unpack_beats(&[0, 255, 7]).is_some(),
+            "first beat may be at zero"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawned_analysis_keeps_its_permit_until_task_finishes() {
+        let state = Arc::new(crate::state::tests::playback_state().await.0);
+        let dir = tmp_dir("permit-lifetime");
+        let permit = state.beat_slots.clone().try_acquire_owned().unwrap();
+        // Holding the task table prevents completion even when the missing-file
+        // analysis returns immediately. This exercises the real spawned future.
+        let table = state.stage_beats.lock().await;
+        spawn_blocking_analysis(
+            state.clone(),
+            "missing".into(),
+            probe_audio("permit", &dir, 0),
+            permit,
+        );
+        assert_eq!(
+            state.beat_slots.available_permits(),
+            crate::state::BEAT_ANALYZE_BUDGET - 1
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state.beat_slots.available_permits(),
+            crate::state::BEAT_ANALYZE_BUDGET - 1
+        );
+        drop(table);
+        let all = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            state
+                .beat_slots
+                .clone()
+                .acquire_many_owned(crate::state::BEAT_ANALYZE_BUDGET as u32),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            state.stage_beats.lock().await.get("permit"),
+            Some(TaskState::Failed { .. })
+        ));
+        drop(all);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn spawned_analysis_keeps_budget_through_disk_commit() {
+        let mut base = crate::state::tests::playback_state().await.0;
+        let dir = tmp_dir("permit-disk");
+        base.data_dir = dir.clone();
+        let state = Arc::new(base);
+        let path = dir.join("clicks.wav");
+        let sample_rate = 22_050u32;
+        let samples = sample_rate * 4;
+        let mut wav = Vec::new();
+        wav.extend(b"RIFF");
+        wav.extend((36 + samples * 2).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(sample_rate.to_le_bytes());
+        wav.extend((sample_rate * 2).to_le_bytes());
+        wav.extend(2u16.to_le_bytes());
+        wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend((samples * 2).to_le_bytes());
+        for i in 0..samples {
+            let phase = i % (sample_rate / 2);
+            let value = if phase < sample_rate / 40 {
+                let t = phase as f32 / sample_rate as f32;
+                ((t * 900.0 * std::f32::consts::TAU).sin() * 20_000.0) as i16
+            } else {
+                0
+            };
+            wav.extend(value.to_le_bytes());
+        }
+        std::fs::write(&path, wav).unwrap();
+        let audio = audio_ref(path, "disk-budget".into(), "clicks".into())
+            .await
+            .unwrap();
+        let permit = state.beat_slots.clone().try_acquire_owned().unwrap();
+        let table = state.stage_beats.lock().await;
+        spawn_blocking_analysis(state.clone(), "clicks".into(), audio, permit);
+        let cache = state.stage_beats_dir().join("disk-budget.json");
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !cache.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("real click analysis must persist a beatmap");
+        assert_eq!(
+            state.beat_slots.available_permits(),
+            crate::state::BEAT_ANALYZE_BUDGET - 1,
+            "disk is written but the task verdict has not committed yet"
+        );
+        drop(table);
+        let all = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            state
+                .beat_slots
+                .clone()
+                .acquire_many_owned(crate::state::BEAT_ANALYZE_BUDGET as u32),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            state.stage_beats.lock().await.get("disk-budget"),
+            Some(TaskState::Ready(_))
+        ));
+        drop(all);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn retry_cannot_forget_an_active_analysis() {
+        let state = Arc::new(crate::state::tests::playback_state().await.0);
+        state
+            .stage_beats
+            .lock()
+            .await
+            .insert("active".into(), TaskState::Analyzing { attempts: 2 });
+        forget(&state, "active").await;
+        let mut table = state.stage_beats.lock().await;
+        assert_eq!(table_decide(&mut table, "active", true, 3), Action::Wait);
+        assert!(matches!(
+            table.get("active"),
+            Some(TaskState::Analyzing { attempts: 2 })
+        ));
     }
 
     #[tokio::test]
@@ -826,7 +1029,13 @@ mod tests {
                 intensity: (i % 4) as u8,
             })
             .collect();
-        let map = BeatMap { version: 1, bpm: Some(130.0), offset_ms: 0, truncated: false, beats };
+        let map = BeatMap {
+            version: 1,
+            bpm: Some(130.0),
+            offset_ms: 0,
+            truncated: false,
+            beats,
+        };
         let cache = dir.join("big.json");
         write_cache(&cache, &map, mtime_ms(&file), 1).await.unwrap();
         let size = std::fs::metadata(&cache).unwrap().len();
@@ -858,7 +1067,9 @@ mod tests {
             "v1 信封没有版本闸门的豁免权"
         );
         // 未命中 → 重算落盘后就是新格式，同一文件名原地升级。
-        write_cache(&cache, &sample_map(), mtime_ms(&file), 1).await.unwrap();
+        write_cache(&cache, &sample_map(), mtime_ms(&file), 1)
+            .await
+            .unwrap();
         assert!(read_cache(&cache, mtime_ms(&file), 1).await.is_some());
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
         assert_eq!(v["version"], 2, "新落盘就是新格式版本");
@@ -1092,7 +1303,11 @@ mod tests {
         assert_eq!(text(&recent[0]["state"]), "failed");
         assert_eq!(text(&recent[0]["reason"]), "unsupported");
         assert_eq!(num(&recent[0]["attempts"]), 3);
-        assert_eq!(text(&recent[0]["label"]), "一首不支持的曲", "只写 sha1 等于没写");
+        assert_eq!(
+            text(&recent[0]["label"]),
+            "一首不支持的曲",
+            "只写 sha1 等于没写"
+        );
         assert!(
             recent[1]["label"].is_null(),
             "没记到标题的格子也要出现在面板上，键本身就是线索"
@@ -1203,7 +1418,10 @@ mod tests {
 
         // 曲文件换过一版（mtime 不符）：盘上那份是过期图，不能说「已有图」。
         let changed = probe_audio("deadbeefcafe0000", &dir, audio.mtime_ms + 5_000);
-        assert_eq!(verdict(&state, &changed).await["state"].as_str(), Some("idle"));
+        assert_eq!(
+            verdict(&state, &changed).await["state"].as_str(),
+            Some("idle")
+        );
 
         // 算出来但没落盘的那份：说 memory，不是 failed。
         let other = probe_audio("cafedeadbeef0000", &dir, 1_700_000_000_000);

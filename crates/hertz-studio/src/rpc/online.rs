@@ -33,11 +33,11 @@ use serde_json::{json, Value};
 use crate::error::{bad_request, internal, ApiError};
 use crate::online;
 use crate::routes::{
-    online_ctx, pick_index, playlist_scope, qr_session, source_of, tagged, AccountQuery,
-    CacheClearRequest, CacheKeepRequest, CacheLimitRequest, CookieRequest, ItemQuery, LikeRequest,
-    OnlinePlayRequest, OnlinePlayTrack, OnlineQualityRequest, PlaylistCreateRequest,
-    PlaylistDeleteRequest, PlaylistQuery, PlaylistTracksRequest, PlaylistsQuery, QrCancelRequest,
-    QrPollQuery, RadioRequest, RecommendQuery, SearchAllQuery, SourceRequest, StreamQuery,
+    online_ctx, playlist_scope, qr_session, source_of, tagged, AccountQuery, CacheClearRequest,
+    CacheKeepRequest, CacheLimitRequest, CookieRequest, ItemQuery, LikeRequest, OnlinePlayRequest,
+    OnlineQualityRequest, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistQuery,
+    PlaylistTracksRequest, PlaylistsQuery, QrCancelRequest, QrPollQuery, RadioRequest,
+    RecommendQuery, SearchAllQuery, SourceRequest, StreamQuery,
 };
 use crate::rpc::{body_as, query_as, Reply, RpcResult};
 use crate::state::{AppState, PlayTrigger};
@@ -128,150 +128,13 @@ pub async fn cover_proxy(_state: &Arc<AppState>, query: &Value) -> RpcResult {
 /// 收在当前播放器状态上，绝不允许整盘换回、把用户后来选的曲盖掉。
 pub async fn play(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let request: OnlinePlayRequest = body_as(body)?;
-    let source = source_of(request.source);
-
-    // F2 集合意图：与 HTTP 门面同一段注释与同一条解析路径（collection_first_page）。
-    let mut collection: Option<(String, u64)> = None;
-    let mut tracks = match &request.collection {
-        Some(coll) => {
-            let (first, total) = crate::routes::collection_first_page(state, &source, coll).await?;
-            collection = Some((coll.id.trim().to_string(), total));
-            first
-        }
-        None => request.tracks.unwrap_or_default(),
+    let value = match state.start_online_play(request).await? {
+        Some(reply) => reply,
+        None => crate::rpc::playback::snapshot(state).await,
     };
-    if tracks.is_empty() {
-        let id = request.id.as_deref().unwrap_or("").trim().to_string();
-        if id.is_empty() {
-            return Err(bad_request("缺少曲目 id"));
-        }
-        tracks.push(OnlinePlayTrack {
-            id,
-            title: request.title,
-            artist: request.artist,
-            album: request.album,
-            duration_ms: request.duration_ms,
-            cover: None,
-            track_ref: None,
-        });
-    }
-    // virtual_id 必须能反解出非空 id，任何一项空都在入队前拒绝。
-    if tracks.iter().any(|t| t.id.trim().is_empty()) {
-        return Err(bad_request("tracks 中存在缺少 id 的曲目"));
-    }
-    let index = pick_index(request.index, tracks.len());
-    let current = &tracks[index];
-
-    let vids: Vec<String> = tracks
-        .iter()
-        .map(|t| online::virtual_id(&source, &t.id))
-        .collect();
-
-    let (gen, _, _) = state.set_queue(vids.clone(), Some(index)).await;
-
-    // F2：登记整单续载（与 HTTP 门面同序：set_queue 之后、起播之前）。
-    if let Some((cid, total)) = &collection {
-        state
-            .begin_collection_load(&source, cid, *total, tracks.len(), gen)
-            .await;
-    }
-
-    // 整盘元数据入内存暂存：play_index_for 提交成功后据此写历史（在线曲的 URL
-    // 会过期，历史只存元数据快照，重播时重新实时取流）。
-    for (t, vid) in tracks.iter().zip(vids.iter()) {
-        state
-            .remember_online_meta(
-                vid.clone(),
-                crate::state::OnlineMetaSnap {
-                    title: t.title.clone().unwrap_or_else(|| t.id.clone()),
-                    artist: t.artist.clone(),
-                    album: t.album.clone(),
-                    cover: t.cover.clone(),
-                    duration_ms: t.duration_ms.filter(|v| *v > 0),
-                    // 入队时还没有取流，响度标签留空，等取流那一步回填；
-                    // remember_online_meta 会保住同一首曲上一轮已取到的标签。
-                    rg_gain_db: None,
-                    rg_peak: None,
-                    // 出处就是这一项自己：入队那一刻没有被换过家。
-                    origin: None,
-                },
-            )
-            .await;
-    }
-
-    let outcome = state
-        .play_index_for(index, Some(gen), PlayTrigger::Pick)
-        .await?;
-    if !outcome.committed {
-        // 被更新的代际顶掉：不改队列也不报错，把当下的播放器状态原样回给前端。
-        // 刚登记的整单续载意图一并撤回。
-        if collection.is_some() {
-            state.cancel_collection_load().await;
-        }
-        return Ok(Reply::ok(crate::rpc::playback::snapshot(state).await));
-    }
-    // 首曲确认起播：后台预取后一首 + LRU（play_index_for 内部不预取）。
-    state.post_commit_background();
-
-    // 封面：整盘曲目通常已带 cover；缺失时补一次详情。补不到不算失败——前端有
-    // 占位图，不能让一张图片拖垮整次播放。
-    let ctx = online_ctx(state);
-    let cover = match &current.cover {
-        Some(c) if !c.is_empty() => Some(c.clone()),
-        _ => online::detail(&ctx, &source, &current.id)
-            .await
-            .ok()
-            .and_then(|d| d.cover),
-    };
-
-    // 与 HTTP 门面同口径：出处与供音分开回（见 routes.rs 的同一段注释）。
-    let (origin, relayed) = match state.online_origin(&vids[index]).await {
-        Some((o, relayed)) => (Some(o), relayed),
-        None => (None, false),
-    };
-    Ok(Reply::ok(json!({
-        "ok": true,
-        "track_id": vids[index],
-        // 前端用它填充队列 UI，避免再拼一遍虚拟 id。
-        "track_ids": vids,
-        "index": index,
-        "source": source,
-        "id": current.id,
-        "title": current.title.clone().unwrap_or_default(),
-        "artist": current.artist.clone().unwrap_or_default(),
-        "album": current.album.clone().unwrap_or_default(),
-        "duration_ms": current.duration_ms.unwrap_or(0),
-        "cover": cover,
-        // 平台实际给到的音质档位（缓存命中时是给到的那一档；预取接管时可能为 null）。
-        "actual_quality": outcome.actual_quality.map(|q| q.as_str()),
-        "origin": origin,
-        "relayed": relayed,
-        // F2：集合意图时回传续载上下文（与 HTTP 门面同一形状）。
-        "collection": collection.as_ref().map(|(cid, total)| json!({
-            "kind": "playlist",
-            "id": cid,
-            "loaded": tracks.len(),
-            "total": total,
-        })),
-        // F2：集合意图时带首页元数据（与 HTTP 门面同一形状）。
-        "tracks": collection.as_ref().map(|_| json!(
-            tracks.iter().map(|t| json!({
-                "id": t.id,
-                "title": t.title,
-                "artist": t.artist,
-                "album": t.album,
-                "duration_ms": t.duration_ms,
-                "cover": t.cover,
-            })).collect::<Vec<_>>()
-        )),
-    })))
+    Ok(Reply::ok(value))
 }
 
-// ---------------------------------------------------------------------------
-// FM 电台
-// ---------------------------------------------------------------------------
-
-/// F2 整单续载的手动重试（与 routes.rs 的同名端点同一行为）。
 pub async fn collection_refresh(state: &Arc<AppState>) -> RpcResult {
     let result = state.playlist_refill(true).await;
     let active = state.collection_status().await;

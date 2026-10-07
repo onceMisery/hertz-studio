@@ -27,3 +27,5 @@
 | 0004 | `0004-persisted-payload-bounds.md` | 会进库的载荷先验数量与长度（按字符），全部验完才动手写 |
 | 0005 | `0005-ui-interaction-budgets.md` | 交互层按「一次意图」合并与去重；提示不许用全局一次性布尔 |
 | 0006 | `0006-frame-gates-and-visual-timing.md` | 帧门是整数分频且只往下取，档位表里不许写除不尽的帧率 |
+| 0007 | `0007-playback-transitions-and-intent-ownership.md` | 集合与下一曲准备绑定意图，样本衔接由回调执行，资料会员信息不参与授权 |
+| 0008 | `0008-home-actions-and-creative-share.md` | 首页只发原播放意图，创意分享由原预置规则验证且有字节边界 |

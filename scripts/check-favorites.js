@@ -81,9 +81,20 @@ function makeEl(id) {
     classList: makeClassList(),
     onclick: null,
     _on: {},
-    appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
+    appendChild(c) { return this.insertBefore(c, null); },
     append(...cs) { cs.forEach((c) => this.appendChild(c)); },
-    insertBefore(c) { this.children.unshift(c); return c; },
+    insertBefore(c, ref) {
+      if (c === ref) return c;
+      if (c.parentNode) c.parentNode.children = c.parentNode.children.filter((item) => item !== c);
+      const index = ref ? this.children.indexOf(ref) : this.children.length;
+      this.children.splice(index, 0, c);
+      c.parentNode = this;
+      return c;
+    },
+    remove() {
+      if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((item) => item !== this);
+      this.parentNode = null;
+    },
     replaceChildren(...cs) {
       this.children = [];
       cs.forEach((c) => this.appendChild(c));
@@ -695,6 +706,21 @@ async function checkDaily() {
 
   ui.dailyPlayAll.onclick();
   eq(spies.played[spies.played.length - 1].id, 't1', '「播放全部」从头开始');
+
+  section('每日推荐：同 id 更新和重排保留卡片身份');
+  const original = ui.dailyList.children.slice();
+  D.state.page.tracks[0].title = '更新后的标题';
+  D.state.page.tracks[0].has_cover = false;
+  D.setMode('local');
+  ok(ui.dailyList.children[0] === original[0], '同 id 不重建按钮');
+  eq(original[0].querySelector('.daily-name').textContent, '更新后的标题', '同 id 元数据变化不会被签名跳过');
+  ok(original[0].querySelector('.daily-cover').classList.contains('is-missing'), '移除封面时占位同步');
+  D.state.page.tracks.reverse();
+  D.setMode('local');
+  ok(ui.dailyList.children[0] === original[2], '重排移动原卡片而非复制');
+  ui.dailyList.children[0].onclick();
+  eq(spies.played[spies.played.length - 1].id, 't3', '重排后点击对应当前队列位置');
+  eq(ui.dailyList.children.length, 3, '移动不重复增加 DOM');
 
   section('每日推荐：空结果与静默失败');
   const t2 = makeTransport([

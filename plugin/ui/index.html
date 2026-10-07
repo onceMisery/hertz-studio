@@ -23,6 +23,7 @@
 <link rel="stylesheet" href="stanza/stanza.css">
 <link rel="stylesheet" href="stanza/stanza-starborn.css">
 <link rel="stylesheet" href="online.css">
+<link rel="stylesheet" href="home-dashboard.css">
 <!-- 主题工作室：壁纸背景层与壁纸画廊。排在 style.css 之后（同特异性整块胜出），
      与 online.css 同一层次——都是"在既有布局之上再铺一层"的模块。 -->
 <link rel="stylesheet" href="theme-studio.css">
@@ -409,6 +410,28 @@
         <details id="scan-errors" class="scan-errors" hidden><summary>扫描失败明细</summary><ul></ul></details>
       </div>
 
+      <section class="home-dashboard" id="home-dashboard" aria-label="继续聆听与常用入口">
+        <div class="home-layout">
+          <div class="home-primary">
+            <div class="home-copy">
+              <span class="home-status" id="home-status">开始聆听</span>
+              <h2 class="home-title" id="home-title">从喜欢的音乐开始</h2>
+              <p class="home-detail" id="home-detail">选择本地目录，或浏览已有曲库</p>
+              <div class="home-actions">
+                <button class="btn primary" id="home-action" type="button">去曲库</button>
+                <button class="btn" id="home-retry" type="button" hidden>重试最近播放</button>
+              </div>
+            </div>
+            <div class="home-art-wrap" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#i-library"/></svg><img class="home-art" id="home-art" alt=""></div>
+          </div>
+          <nav class="home-links" aria-label="音乐入口">
+            <button class="home-link" id="home-library" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-library"/></svg><span><strong>音乐库</strong><small>浏览本地歌曲</small></span></button>
+            <button class="home-link" id="home-daily" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-daily"/></svg><span><strong>每日推荐</strong><small>看看今天想听什么</small></span></button>
+            <button class="home-link" id="home-recent" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg><span><strong>最近播放</strong><small>找回听过的歌曲</small></span></button>
+          </nav>
+        </div>
+      </section>
+
       <!-- 每日推荐：服务端按本地规则（种子 = 本地日期）每天出一份，
            点击任一卡片即把整份当成一个队列从该首开始播。 -->
       <div class="daily-strip" id="daily-strip">
@@ -793,8 +816,9 @@
           <span class="hint">按曲目=各曲音量拉平；按专辑=保留专辑内动态（缺专辑标签时回落曲目）；增益为正时按峰值防削波</span>
         </div>
         <div class="set-row">
-          <label for="dsp-crossfade">交叉淡化 (ms，0 = 默认短淡变)</label>
+          <label for="dsp-crossfade">歌曲衔接 (ms，0 = 无重叠衔接)</label>
           <input id="dsp-crossfade" type="number" min="0" max="8000" step="100" value="0">
+          <p class="hint">下一首准备就绪时自动衔接；0 不重叠，其他值为交叉淡化时长。不满足条件时正常切歌，暂停与停止仍为短淡变。</p>
         </div>
         <div class="set-row">
           <span></span>
@@ -1802,6 +1826,7 @@
      且必须在 app.js 之前（要向 app.js 发 qf:panel 事件取队列快照）。 -->
 <script defer src="skins/skin.qingfeng.js"></script>
 <script defer src="themes.js"></script>
+<script defer src="perf-probe.js"></script>
 <script defer src="stage.js"></script>
 <!-- 起音检测：粒子层与三维层共用同一份"鼓点是哪一刻"，必须排在两者之前 -->
 <script defer src="onset.js"></script>
@@ -1823,6 +1848,7 @@
 <script defer src="backgrounds.js"></script>
 <script defer src="handdrawn.js"></script>
 <script defer src="creative-stage.js"></script>
+<script defer src="creative-share-code.js"></script>
 <!-- 离线提示词编译器：compile 只读 CreativeStage.scenes/spec，写入走
      CreativeStage.applyIntent；排在编排层之后、工坊之前。 -->
 <script defer src="creative-prompt.js"></script>
@@ -1863,6 +1889,7 @@
 <script defer src="favorites.js"></script>
 <script defer src="daily.js"></script>
 <script defer src="daily-view.js"></script>
+<script defer src="home-dashboard.js"></script>
 <!-- 命令面板：只提供引擎与 UI，命令由 app.js 启动时用自己的闭包注册，
      所以必须在 app.js 之前加载。Ctrl+K 唤起。 -->
 <script defer src="palette.js"></script>

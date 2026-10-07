@@ -13,3 +13,4 @@ pub mod cpal_backend;
 
 pub use actor::{spawn, AudioEvent, AudioHandle, BackendKind};
 pub use null::NullBackend;
+pub use vmusic_core::PrepareResult;

@@ -5,6 +5,8 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-10-07 | plan | docs/aegis/plans/2026-10-07-sidebar-particles.md | 右侧播放器光尘密度、连续漂移与文字避让优化 |
+| 2026-10-07 | work | docs/aegis/work/2026-10-07-sidebar-particles/90-evidence.md | 光尘优化、位置连续性与减少动效验证证据 |
 | 2026-10-07 | plan | docs/aegis/plans/2026-10-07-stage-compatibility.md | 凝彩色彩、转场、设置能力与星诞电影层实施计划 |
 | 2026-10-07 | work | docs/aegis/work/2026-10-07-stage-compatibility/20-checkpoint.md | 歌词舞台兼容性检查点 |
 | 2026-10-07 | work | docs/aegis/work/2026-10-07-stage-compatibility/90-evidence.md | 五项优化的根因、架构与浏览器／GPU／回归验证 |
@@ -56,3 +58,19 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-07 | adr | docs/aegis/adr/0004-persisted-payload-bounds.md | 持久化载荷的数量与长度边界 |
 | 2026-10-07 | adr | docs/aegis/adr/0005-ui-interaction-budgets.md | 交互层的合并窗、去重键与列表上限 |
 | 2026-10-07 | adr | docs/aegis/adr/0006-frame-gates-and-visual-timing.md | 帧门的整数分频与视觉时序边界 |
+| 2026-10-07 | work | docs/aegis/work/2026-10-07-workshop-stage/10-intent.md | 创意工坊与真实舞台统一范围 |
+| 2026-10-07 | work | docs/aegis/work/2026-10-07-workshop-stage/20-checkpoint.md | 创意舞台续接与完成检查点 |
+| 2026-10-07 | work | docs/aegis/work/2026-10-07-workshop-stage/90-evidence.md | 创意编排、漫画图层与真实内嵌浏览器验收 |
+| 2026-10-07 | work | docs/aegis/work/2026-10-07-workshop-stage/99-reflection.md | 创意工坊架构对齐与收尾 |
+| 2026-10-08 | plan | docs/aegis/plans/2026-10-07-mineradio-follow-through.md | Mineradio实施复核与功能补齐 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-07-mineradio-follow-through/10-intent.md | 本轮范围与兼容边界 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-07-mineradio-follow-through/20-checkpoint.md | 本轮进展与集成检查点 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-07-mineradio-follow-through/90-evidence.md | 当前工作区最终验证与剩余风险 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-07-mineradio-follow-through/online-playback-evidence.md | 在线集合、音质失败与换源出处证据 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-07-mineradio-follow-through/91-beat-ui.md | 节拍任务与长列表、队列验证 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-07-mineradio-follow-through/92-perf.md | 全局探针与真实帧时钟验证 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-07-mineradio-follow-through/93-home.md | 首页继续播放入口及布局验收 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-07-mineradio-follow-through/94-share-code.md | 创意分享码及异步提交验收 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-07-mineradio-follow-through/99-reflection.md | 架构对齐、修复与退役 |
+| 2026-10-08 | adr | docs/aegis/adr/0007-playback-transitions-and-intent-ownership.md | 下一曲预备与集合提交归属 |
+| 2026-10-08 | adr | docs/aegis/adr/0008-home-actions-and-creative-share.md | 首页动作与创意分享契约 |

@@ -1326,8 +1326,9 @@ pub async fn account(ctx: &Ctx) -> ApiResult<AccountInfo> {
     let vip_level = p
         .get("vipType")
         .or_else(|| p.get("vipTypeCode"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .and_then(|v| v.as_u64());
+    let membership = super::ProfileMembership::from_level(vip_level);
+    let vip_level = vip_level.and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
     Ok(AccountInfo {
         source: ID.into(),
         nickname: p
@@ -1339,6 +1340,7 @@ pub async fn account(ctx: &Ctx) -> ApiResult<AccountInfo> {
             .get("avatarUrl")
             .and_then(|v| v.as_str())
             .and_then(https_url),
+        membership,
         vip_level,
         vip_label: if vip_level > 0 {
             "VIP".to_string()
@@ -1987,12 +1989,14 @@ fn account_from_login_body(j: &serde_json::Value) -> Option<AccountInfo> {
     }
     let vip_level = profile
         .and_then(|p| p.get("vipType").or_else(|| p.get("vipTypeCode")))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .and_then(|v| v.as_u64());
+    let membership = super::ProfileMembership::from_level(vip_level);
+    let vip_level = vip_level.and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
     Some(AccountInfo {
         source: ID.into(),
         nickname: nickname.unwrap_or("网易云用户").to_string(),
         avatar,
+        membership,
         vip_level,
         vip_label: if vip_level > 0 {
             "VIP".to_string()

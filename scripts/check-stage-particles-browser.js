@@ -22,7 +22,8 @@ async function main() {
       const cancel = window.cancelAnimationFrame.bind(window);
       window.cancelAnimationFrame = id => { f.rafCancels += 1; return cancel(id); };
       window.Stage = {
-        tier: () => f.tier, isHidden: () => f.hidden, spectrum: () => [], kick() {},
+        tier: () => f.tier, isHidden: () => f.hidden, isStageVisible: () => !f.hidden && !f.drawerClosed,
+        presentation: () => ({ reduced: !!f.reduced }), spectrum: () => [], kick() {},
         gate(name, fps, tick) { f.gateAdds += 1; f.gate = { fps, tick }; },
         removeGate() { f.gateRemoves += 1; }
       };
@@ -57,16 +58,74 @@ async function main() {
         }
         return sums;
       }
-      const dimmed = read(); view.fade1 = -1; const uniform = read();
+      const dimmed = read();
+      frame.t = 500; frame.bands[3] = 1;
+      const air = read();
+      frame.t = 0; frame.bands[3] = 0;
+      view.fade1 = -1; const uniform = read();
       fixture.tier = 2; renderer.resize(view);
       const size = [canvas.width, canvas.height];
       renderer.dispose(); canvas.remove(); fixture.tier = 0;
-      return { dimmed, uniform, size };
+      return { dimmed, air, uniform, size };
     });
     assert.ok(shading.dimmed[1] < shading.dimmed[0] * 0.4, 'GL dims particles in the lyric band');
     assert.equal(shading.dimmed[0], shading.dimmed[2], 'equal particles remain balanced outside lyrics');
     assert.equal(shading.uniform[0], shading.uniform[1], 'disabling the lyric band restores uniform exposure');
     assert.deepEqual(shading.size, [864, 648], 'DPR 2 remains capped to the high-tier 1.35 budget');
+    assert.ok(shading.air[1] < Math.min(shading.air[0], shading.air[2]) * 0.4,
+      'high-frequency shimmer respects lyric clearance');
+
+    const continuity = await page.evaluate(() => {
+      const canvas = document.createElement('canvas'); document.body.append(canvas);
+      const view = { canvas, w: 640, h: 480, cx: 320, cy: 240, fade0: -1, fade1: -1 };
+      const renderer = ParticleGL.create(); renderer.mount(view); renderer.resize(view);
+      renderer.setColors('255,255,255', '255,255,255');
+      const random = Math.random;
+      try { Math.random = () => 0.5; renderer.setCount(1); } finally { Math.random = random; }
+      const frame = { t: 180000, dt: 0, bands: [0, 0, 0, 0], pulse: 0, energy: 0, strength: 1, drift: 1 };
+      function center() {
+        renderer.draw(view, frame);
+        const gl = canvas.getContext('webgl2'), pixels = new Uint8Array(640 * 480 * 4);
+        gl.readPixels(0, 0, 640, 480, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        let mass = 0, x = 0, y = 0;
+        for (let i = 0; i < pixels.length; i += 4) {
+          const alpha = pixels[i + 3]; mass += alpha;
+          x += (i / 4 % 640) * alpha; y += Math.floor(i / 4 / 640) * alpha;
+        }
+        if (!mass) throw new Error('continuity probe must draw a visible particle');
+        return { x: x / mass, y: y / mass };
+      }
+      const before = center(); frame.t += 16; frame.dt = 16; frame.bands[2] = 1;
+      const after = center(); frame.drift = 2; const adjusted = center();
+      renderer.dispose(); canvas.remove();
+      return { jump: Math.hypot(after.x - before.x, after.y - before.y),
+        adjusted: Math.hypot(adjusted.x - after.x, adjusted.y - after.y) };
+    });
+    assert.ok(continuity.jump < 2, 'audio changes must not teleport particles after long playback: ' + continuity.jump);
+    assert.ok(continuity.adjusted < 2, 'changing drift speed must not teleport particles: ' + continuity.adjusted);
+
+    const drift = await page.evaluate(() => {
+      const random = Math.random, now = performance.now, draw = CanvasRenderingContext2D.prototype.drawImage;
+      let position, time;
+      Math.random = () => 0.5; performance.now = () => time;
+      CanvasRenderingContext2D.prototype.drawImage = function (sprite, x, y, w, h) {
+        position = { x: x + w / 2, y: y + h / 2 };
+        return draw.call(this, sprite, x, y, w, h);
+      };
+      try {
+        return [15, 30].map(fps => {
+          time = 100; StageParticles.init(); StageParticles.attach('standard');
+          fixture.gate.tick(0); const start = position.y;
+          for (let i = 0; i < fps; i++) { time += 1000 / fps; fixture.gate.tick(1000 / fps); }
+          const distance = start - position.y; StageParticles.destroy(); return distance;
+        });
+      } finally {
+        Math.random = random; performance.now = now; CanvasRenderingContext2D.prototype.drawImage = draw;
+      }
+    });
+    assert.ok(Math.abs(drift[0] - drift[1]) < 0.001, '2D drift depends on elapsed time, not frame count: ' + drift);
+    // The extra lifecycle probes above intentionally create and release two observers.
+    await page.evaluate(() => { fixture.observers = fixture.disconnects = fixture.gateAdds = fixture.gateRemoves = 0; });
 
     const lifetime = await page.evaluate(() => {
       const f = fixture;
@@ -76,11 +135,13 @@ async function main() {
       gl.deleteBuffer = (...args) => { deleted += 1; return remove(...args); };
       const idle = f.gate.fps(); f.hidden = true; const hidden = f.gate.fps(); f.hidden = false;
       document.body.classList.add('is-playing'); const playing = f.gate.fps();
+      f.reduced = true; const reduced = f.gate.fps(); f.reduced = false;
+      f.drawerClosed = true; const drawerClosed = f.gate.fps(); f.drawerClosed = false;
       f.gate.tick(16); // Starts the short A/B probe; destroy must cancel it before either measurement.
       StageParticles.destroy();
       const after = { deleted, attached: StageParticles.attached(), renderer: StageParticles.renderer(),
         canvases: document.querySelectorAll('#stage canvas').length, disconnects: f.disconnects,
-        gateAdds: f.gateAdds, rafCancels: f.rafCancels, idle, hidden, playing };
+        gateAdds: f.gateAdds, rafCancels: f.rafCancels, idle, hidden, playing, reduced, drawerClosed };
       document.body.classList.remove('is-playing');
       StageParticles.init(); StageParticles.attach('enhanced');
       after.restoredGL = !!document.querySelector('#stage canvas').getContext('webgl2');
@@ -96,6 +157,8 @@ async function main() {
     assert.equal(lifetime.idle, 0, 'paused clean state has no particle frames');
     assert.equal(lifetime.hidden, 0, 'hidden stage has no particle frames');
     assert.ok(lifetime.playing > 0, 'visible playback requests frames');
+    assert.equal(lifetime.reduced, 0, 'reduced motion stops particle rendering');
+    assert.equal(lifetime.drawerClosed, 0, 'closed mobile drawer stops particle rendering');
     assert.ok(lifetime.restoredGL, 'reattach creates a real WebGL renderer');
     await page.evaluate(async () => {
       const canvas = document.querySelector('#stage canvas'), gl = canvas.getContext('webgl2');
@@ -170,9 +233,20 @@ async function main() {
     const currentRipple = await page.evaluate(() => { const count = StageParticles.stats().ripples; StageParticles.destroy(); return count; });
     assert.equal(initialRipple, 1, 'new lifetime starts its own ripple');
     assert.equal(currentRipple, 1, 'queued finish from the old lifetime cannot consume the new ripple');
+    await page.addStyleTag({ path: path.join(web, 'stage.css') });
+    await page.evaluate(() => { StageParticles.init(); StageParticles.attach('standard'); });
+    for (const preference of ['reduce', 'no-preference']) {
+      await page.emulateMedia({ reducedMotion: preference });
+      assert.equal(await page.locator('.stage-particles').evaluate(el => getComputedStyle(el).display),
+        preference === 'reduce' ? 'none' : 'block', 'system motion preference controls the visible layer');
+    }
+    await page.evaluate(() => document.body.classList.add('reduce-motion'));
+    assert.equal(await page.locator('.stage-particles').evaluate(el => getComputedStyle(el).display), 'none',
+      'application motion preference hides the layer');
+    await page.evaluate(() => { document.body.classList.remove('reduce-motion'); StageParticles.destroy(); });
     assert.deepEqual(errors, [], 'no page errors');
     console.log('PASS particles: lyric clearance, DPR budget, idle/hidden gates, probe cancellation, destroy/reattach and GL loss',
-      JSON.stringify({ shading, lifetime, fallback, cancelled, currentRipple }));
+      JSON.stringify({ shading, continuity, drift, lifetime, fallback, cancelled, currentRipple }));
   } finally { await browser.close(); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
