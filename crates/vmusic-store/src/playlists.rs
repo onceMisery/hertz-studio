@@ -95,6 +95,55 @@ pub async fn add_entries(
     id: &PlaylistId,
     entries: &[(TrackId, Option<TrackMeta>)],
 ) -> Result<(), StoreError> {
+    // 批量入单的载荷同样来自外部（整盘「加入歌单」是前端一次性提交的数组）。
+    // 闸门放在任何写入之前：越界的一行都不进库，而不是回滚一个写了一半的歌单。
+    crate::limits::check_count(
+        "一次入单的曲目数",
+        entries.len(),
+        crate::limits::MAX_ENTRIES_PER_BATCH,
+        "单次批量",
+    )?;
+    for (track_id, meta) in entries {
+        crate::limits::check_len(
+            "曲目 id",
+            Some(track_id),
+            crate::limits::MAX_ID_CHARS,
+            "入单条目",
+        )?;
+        if let Some(m) = meta {
+            crate::limits::check_len(
+                "曲目来源",
+                Some(&m.source),
+                crate::limits::MAX_ID_CHARS,
+                "入单快照",
+            )?;
+            crate::limits::check_len(
+                "曲目标题",
+                Some(&m.title),
+                crate::limits::MAX_TEXT_CHARS,
+                "入单快照",
+            )?;
+            crate::limits::check_len(
+                "曲目歌手",
+                m.artist.as_deref(),
+                crate::limits::MAX_TEXT_CHARS,
+                "入单快照",
+            )?;
+            crate::limits::check_len(
+                "曲目专辑",
+                m.album.as_deref(),
+                crate::limits::MAX_TEXT_CHARS,
+                "入单快照",
+            )?;
+            // 快照里的封面只放 URL：整条链路的封面图都在缓存目录，不在数据库。
+            crate::limits::check_len(
+                "曲目封面",
+                m.cover.as_deref(),
+                crate::limits::MAX_URL_CHARS,
+                "入单快照",
+            )?;
+        }
+    }
     let existing = crate::get_playlist_track_ids(pool, id).await?;
     let mut position = existing.len() as i64;
 
@@ -284,6 +333,51 @@ mod tests {
             duration_ms: Some(180_000),
             cover: Some("https://example.invalid/cover.jpg".into()),
         })
+    }
+
+    /// 批量入单的闸门也必须前置：越界的那一批一条都不进，而不是靠回滚收拾一个
+    /// 写了一半的歌单。
+    #[tokio::test]
+    async fn add_entries_rejects_oversize_batch_before_writing() {
+        let db = pool().await;
+        let pl = create(&db, "闸门").await.unwrap();
+        let mut entries: Vec<(TrackId, Option<TrackMeta>)> = (0..2)
+            .map(|i| {
+                (
+                    format!("online:netease:{i}"),
+                    online_meta("netease", "正常"),
+                )
+            })
+            .collect();
+        // 最后一条把封面换成一张 base64 图：前面几条完全合法，闸门若写在写入循环
+        // 里就会先把它们入库。
+        let big = format!(
+            "data:image/png;base64,{}",
+            "A".repeat(crate::limits::MAX_URL_CHARS + 1)
+        );
+        entries.push((
+            "online:netease:bad".into(),
+            Some(TrackMeta {
+                source: "netease".into(),
+                title: "坏条目".into(),
+                artist: None,
+                album: None,
+                duration_ms: None,
+                cover: Some(big),
+            }),
+        ));
+        assert!(
+            add_entries(&db, &pl.id, &entries).await.is_err(),
+            "越界快照要拒绝"
+        );
+        assert!(
+            crate::get_playlist_track_ids(&db, &pl.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "被拒的那一批一条都不该进"
+        );
+        db.close().await;
     }
 
     #[tokio::test]

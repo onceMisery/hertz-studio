@@ -7,7 +7,8 @@
 //
 // 覆盖三块最容易在浏览器里「静默坏掉」的逻辑：
 //   1. online-login.js 扫码状态机（waiting/scanned/confirmed/expired、
-//      cancel 带真实票据、能力位 404 回落 cookie、轮询网络重试、cookie 判定）
+//      cancel 带真实票据、能力位 404 回落 cookie、轮询网络重试、cookie 判定、
+//      登录意图归属：切平台/关窗后迟到的取码不顶掉当前画面也不复活轮询）
 //   2. online.js 渐进聚合、排序、分页、竞态、缓存失效与播放意图
 //   3. online-playlists.js caps 驱动（无 qr_login 不出扫码按钮、无
 //      playlist_write 不出移除按钮、401 安静留在未登录态）
@@ -112,6 +113,17 @@ function walkClasses(root, cls, out) {
   return out;
 }
 function findByClass(root, cls) { return walkClasses(root, cls, []); }
+// 桩里 className 与 classList 是两套（有的代码赋值、有的代码 add），断言两边都看。
+function isIn(node) {
+  if (!node) return false;
+  if (node.classList.contains('is-in')) return true;
+  return String(node.className || '').split(' ').indexOf('is-in') >= 0;
+}
+// 桩的 innerHTML 只存被赋过的字符串（这里代码走 appendChild，不写 innerHTML），
+// 所以读文本要自己整棵子树拼。
+function textOf(node) {
+  return [String(node.textContent || '')].concat((node.children || []).map(textOf)).join(' ');
+}
 
 function makeDocument(readyState) {
   const registry = {};
@@ -334,9 +346,10 @@ function bindOnline(env, extra) {
     ambient: null, ambientImg: { style: {} },
   };
   const setStateQueueCalls = [];
+  const onlineState = { byId: new Map(), current: null };
   env.sandbox.window.Online.bind(Object.assign({
     ui,
-    state: { byId: new Map(), current: null },
+    state: onlineState,
     setStateQueue: (ids, start) => setStateQueueCalls.push({ ids, start }),
     applyQueue() {},
     paintArt() {},
@@ -345,6 +358,7 @@ function bindOnline(env, extra) {
     toast: (m, k) => env.spies.toasts.push({ msg: m, kind: k }),
     errText: (p, e) => p + ':' + (e && e.message),
   }, extra || {}));
+  env.onlineState = onlineState;
   return { ui, setStateQueueCalls };
 }
 
@@ -543,6 +557,71 @@ async function loginScenario(pollStates, opts) {
     eq(env.doc.getElementById('qr-modal').hidden, true, 'signedIn=true 才关窗');
     eq(env.spies.refreshes, 1, 'true 时 refresh 账号区');
     ok(env.spies.toasts.some((t) => t.msg.indexOf('登录成功') >= 0), 'true 时 toast 登录成功');
+  }
+
+  // ---- 1.7 登录意图归属：切平台 / 关窗之后，迟到的取码只许作废自己 ----
+  // 复现的是 2026-10 核对到的两条竞态（原文在 docs/research/mineradio-full-assessment.md §11）：
+  // 旧实现把「当前 source」和「这张迟到的 ticket」拼在一起轮询，平台票跨平台无效；
+  // 关窗只清定时器，撤销不了在途请求，弹窗关掉后后台还多出一个轮询。
+  section('登录意图归属：A→B 切换与关窗后的迟到响应');
+  {
+    function deferred() {
+      let settle;
+      const p = new Promise((res) => { settle = res; });
+      return { promise: p, resolve: settle };
+    }
+
+    function intentEnv(a, b) {
+      const cancelBodies = [];
+      const pollUrls = [];
+      const transport = makeTransport({
+        POST: [
+          { match: '/v1/online/qr/cancel', returns: (url, body) => { cancelBodies.push(body); return { ok: true }; } },
+          { match: '/v1/online/qr/start', returns: (url, body) =>
+              (body.source === a ? qrA.promise : qrB.promise) },
+        ],
+        GET: [{ match: '/v1/online/qr/poll', returns: (url) => { pollUrls.push(url); return { state: 'waiting' }; } }],
+      });
+      const env = makeSandbox({ transport });
+      return { env, cancelBodies, pollUrls };
+    }
+
+    // 情形一：先点网易云（A）再点 QQ（B），B 先返回、A 迟到。
+    var qrA = deferred(); var qrB = deferred();
+    let s = intentEnv('netease', 'qq');
+    const OL = s.env.sandbox.window.OnlineLogin;
+    const callingA = OL.start('netease');
+    await ticks();
+    const callingB = OL.start('qq');
+    await ticks();
+    qrB.resolve({ ticket: 'TK-B', qr_image: 'data:imgB', poll_ms: 2 });
+    await callingB; await ticks();
+    qrA.resolve({ ticket: 'TK-A', qr_image: 'data:imgA', poll_ms: 2 });
+    await callingA; await ticks();
+
+    const canvas = s.env.doc.getElementById('qr-canvas');
+    eq(canvas.children[0] && canvas.children[0].src, 'data:imgB', '画面上留着 B 的二维码');
+    ok(s.env.clock.pending().length === 1, '迟到的 A 不再排第二套轮询');
+    await s.env.clock.flushNext();
+    ok(s.pollUrls.length === 1 && /source=qq/.test(s.pollUrls[0]) && /ticket=TK-B/.test(s.pollUrls[0]),
+      '轮询配对的是 B 的 source + B 的 ticket（不是 qq + TK-A）');
+    ok(s.cancelBodies.some((c) => c.source === 'netease' && c.ticket === 'TK-A'),
+      '迟到的 A 票按它自己的 source 尽力作废');
+
+    // 情形二：取码还在途就关窗，然后响应才回来。
+    qrA = deferred(); qrB = deferred();
+    s = intentEnv('netease', 'qq');
+    const modal = s.env.doc.getElementById('qr-modal');
+    const callingC = s.env.sandbox.window.OnlineLogin.start('netease');
+    await ticks();
+    ok(modal.hidden === false, '取码时弹窗打开');
+    s.env.sandbox.window.OnlineLogin.close();
+    qrA.resolve({ ticket: 'TK-C', qr_image: 'data:imgC', poll_ms: 2 });
+    await callingC; await ticks();
+    eq(modal.hidden, true, '关窗后迟到的取码不把弹窗画回来');
+    eq(s.env.clock.pending().length, 0, '关窗后不注册新的轮询');
+    ok(s.cancelBodies.some((c) => c.source === 'netease' && c.ticket === 'TK-C'),
+      '迟到的票仍然尽力作废，不留孤儿会话');
   }
 
   // -------------------------------------------------------------------------
@@ -848,9 +927,16 @@ async function loginScenario(pollStates, opts) {
     const routes = {
       GET: [
         { match: '/v1/online/sources', returns: { sources: opts.sources } },
-        { match: '/v1/online/account', ...(opts.accountThrow
-          ? { throw: opts.accountThrow }
-          : { returns: { source: opts.sources[0].id, nickname: '张三', vip_label: '黑胶VIP' } }) },
+        // accountRoutes：同一路由排多条，按 times 依次命中，用来演「第一次探到、
+        // 第二次读不到」这种跨次状态变化（A6 的三态只有多次探测才看得出来）。
+        ...(opts.accountRoutes
+          ? opts.accountRoutes.map((r) => ({ match: '/v1/online/account', ...r }))
+          : [{
+              match: '/v1/online/account',
+              ...(opts.accountThrow
+                ? { throw: opts.accountThrow }
+                : { returns: { source: opts.sources[0].id, nickname: '张三', vip_label: '黑胶VIP' } }),
+            }]),
         ...playlistGet,
         { match: '/v1/online/playlist?', ...(opts.detailThrow
           ? { throw: opts.detailThrow }
@@ -858,7 +944,14 @@ async function loginScenario(pollStates, opts) {
       ],
       POST: [
         { match: '/v1/online/playlist/tracks/remove', returns: { ok: true } },
-        { match: '/v1/online/play', returns: { track_ids: ['online:netease:1', 'online:netease:2'], index: 0, cover: null } },
+        { match: '/v1/online/play', returns: {
+          track_ids: ['online:netease:1', 'online:netease:2'], index: 0, cover: null,
+          // F2：集合意图的响应带首页元数据（整盘形态的 playAll 不读它）。
+          tracks: [
+            { id: '1', title: '歌 1', artist: 'A', album: 'L', duration_ms: 1000, cover: null },
+            { id: '2', title: '歌 2', artist: 'A', album: 'L', duration_ms: 1000, cover: null },
+          ],
+        } },
       ],
     };
     const transport = makeTransport(routes);
@@ -982,6 +1075,188 @@ async function loginScenario(pollStates, opts) {
     eq(playlistsCalls.length, 0, '账号态没拿到就不发歌单请求');
   }
 
+  // ---- A6 会话三态：探测没出结果 ≠ 未登录 ---------------------------------
+  section('账号探测三态：上游没应答时保留身份，明确 401 才翻回未登录');
+  {
+    const V = makeSandbox({ transport: makeTransport({ GET: [], POST: [] }) }).sandbox
+      .window.Online.accountVerdict;
+    eq(V({ status: 401, code: 'auth_required' }), 'signed-out', '401 是授权断言');
+    eq(V({ status: 403, code: 'forbidden' }), 'signed-out', '403 同样算明确未登录');
+    eq(V({ status: 504, code: 'upstream_timeout' }), 'unknown', '超出不作授权断言');
+    eq(V({ status: 500, code: 'internal' }), 'unknown', '服务端 5xx 不算未登录');
+    eq(V(new Error('fetch failed')), 'unknown', '没有 status 的网络故障不算未登录');
+    eq(V({ status: 404, code: 'capability_unsupported' }), 'unsupported', '没有账号这件事单独一档');
+  }
+  {
+    const env = playlistSandbox({
+      sources: [{ id: 'netease', label: '网易云音乐', caps: ['cookie_login', 'qr_login', 'user_playlists'] }],
+      playlists: [{ source: 'netease', id: 'p1', name: '我的日常', track_count: 3, kind: 'created' }],
+      detail: { total: 0, tracks: [] },
+      accountRoutes: [
+        { returns: { source: 'netease', nickname: '张三', vip_label: '黑胶VIP' }, times: 1 },
+        { throw: Object.assign(new Error('gw timeout'), { status: 504, code: 'upstream_timeout' }) },
+      ],
+    });
+    await env.doc.fireDCL();
+    await ticks(20);
+
+    const accountsEl = env.doc.getElementById('op-accounts');
+    const first = accountsEl.children.find((c) => c.dataset.source === 'netease');
+    ok(first.classList.contains('is-in'), '首屏探到账号 → 登录卡');
+    ok(textOf(first).indexOf('张三') >= 0, '昵称展示出来');
+    eq(env.doc.getElementById('op-grid').children.length, 1, '歌单网格已就位');
+
+    // 第二次探测：上游 504。这不是「这台没登录」，界面不许塌回未登录。
+    env.sandbox.window.OnlinePlaylists.init();
+    await ticks(20);
+    const again = env.doc.getElementById('op-accounts').children.find((c) => c.dataset.source === 'netease');
+    ok(again.classList.contains('is-in'), '读不到账号状态时仍是登录卡（不塌回未登录）');
+    ok(textOf(again).indexOf('张三') >= 0, '上次的身份保留着');
+    const stale = findByClass(again, 'op-stale');
+    eq(stale.length, 1, '挂一行「暂时读不到」的状态说明');
+    ok(stale.length === 1 && /不代表未登录|仍按上次结果/.test(stale[0].textContent),
+      '说明里不许出现「去登录」这种授权断言');
+    ok(textOf(again).indexOf('扫码登录') < 0, '不许把扫码入口当成当前状态端出来');
+    eq(env.doc.getElementById('op-grid').children.length, 1, '已取到的歌单不被这次故障清掉');
+    const plCalls = env.sandbox.VMusicTransport.calls.get
+      .filter((c) => c.url.indexOf('/v1/online/playlists') >= 0);
+    eq(plCalls.length, 1, '故障那次探测不追发歌单请求');
+
+    // 反过来：明确 401 就是授权断言，必须翻回未登录并丢掉旧身份。
+    const s2 = playlistSandbox({
+      sources: [{ id: 'netease', label: '网易云音乐', caps: ['cookie_login', 'qr_login', 'user_playlists'] }],
+      playlists: [{ source: 'netease', id: 'p1', name: '我的日常', track_count: 3, kind: 'created' }],
+      detail: { total: 0, tracks: [] },
+      accountRoutes: [
+        { returns: { source: 'netease', nickname: '张三' }, times: 1 },
+        { throw: Object.assign(new Error('no session'), { status: 401, code: 'auth_required' }) },
+      ],
+    });
+    await s2.doc.fireDCL();
+    await ticks(20);
+    s2.sandbox.window.OnlinePlaylists.init();
+    await ticks(20);
+    const after401 = s2.doc.getElementById('op-accounts').children.find((c) => c.dataset.source === 'netease');
+    ok(!after401.classList.contains('is-in'), '明确 401 后回到未登录卡（这才是被允许作的断言）');
+    ok(textOf(after401).indexOf('扫码登录') >= 0, '401 后出扫码入口');
+    eq(s2.doc.getElementById('op-grid').children.length, 0, '401 后丢掉旧歌单');
+    eq(findByClass(after401, 'op-stale').length, 0, '明确未登录时不挂「读不到」说明');
+  }
+  {
+    // 登录弹窗那一侧：探测挂掉不许把已登录源翻成「点这里登录」。
+    // 走 open() 而不是 init()：init 只在启动时刷顶栏，源 tab 的登录态是
+    // open() 在账号态拉完之后重画的，测试要看的是那张 tab。
+    let probe = 0;
+    const transport = makeTransport({
+      GET: [
+        { match: '/v1/online/sources', returns: { sources: [{ id: 'netease', label: '网易云音乐', caps: ['qr_login'] }] } },
+        { match: '/v1/settings', returns: {} },
+        { match: '/v1/online/account', returns: () => {
+          probe += 1;
+          if (probe === 1) return { nickname: '张三', avatar: null };
+          throw Object.assign(new Error('gw'), { status: 504, code: 'upstream_timeout' });
+        } },
+      ],
+      POST: [{ match: '/v1/online/qr/', returns: { ok: true } }],
+    });
+    const env = makeSandbox({ transport });
+    await env.sandbox.window.OnlineLogin.open();
+    await ticks(20);
+    const tabs = env.doc.getElementById('qr-sources');
+    eq(tabs.children.length, 1, '源 tab 建出来了');
+    ok(isIn(tabs.children[0]), '首探成功 → 该源标为已登录');
+    ok(textOf(tabs.children[0]).indexOf('张三') >= 0, 'tab 上显示昵称');
+
+    await env.sandbox.window.OnlineLogin.open();
+    await ticks(20);
+    const modal = env.doc.getElementById('qr-sources').children[0];
+    ok(isIn(modal), '第二次探测挂了仍保留登录态（没探到 ≠ 没登录）');
+    ok(textOf(modal).indexOf('张三') >= 0, '昵称没被这次故障抹掉');
+    // 明确未登录才该翻面：同一套路由换成 401。
+    let probe2 = 0;
+    const t2 = makeTransport({
+      GET: [
+        { match: '/v1/online/sources', returns: { sources: [{ id: 'netease', label: '网易云音乐', caps: ['qr_login'] }] } },
+        { match: '/v1/settings', returns: {} },
+        { match: '/v1/online/account', returns: () => {
+          probe2 += 1;
+          if (probe2 === 1) return { nickname: '张三' };
+          throw Object.assign(new Error('no session'), { status: 401, code: 'auth_required' });
+        } },
+      ],
+      POST: [{ match: '/v1/online/qr/', returns: { ok: true } }],
+    });
+    const env2 = makeSandbox({ transport: t2 });
+    await env2.sandbox.window.OnlineLogin.open();
+    await ticks(20);
+    await env2.sandbox.window.OnlineLogin.open();
+    await ticks(20);
+    ok(!isIn(env2.doc.getElementById("qr-sources").children[0]),
+      '401 是授权断言：这时才允许翻回未登录');
+  }
+
+  // ---- A9 能力第三档：登记了但没真机验收过 ≠ 不支持，也 ≠ 已支持 ------------
+  section('能力第三档：未验收的入口照常给，但标注要落在界面上');
+  {
+    const bare = makeSandbox({ transport: makeTransport({ GET: [], POST: [] }) }).sandbox.window.Online;
+    ok(bare.isUnverified({ caps: ['qr_login'], unverified: ['qr_login'] }, 'qr_login'), '登记的未验收能力读得到');
+    ok(!bare.isUnverified({ caps: ['qr_login'] }, 'qr_login'), '没有 unverified 字段就不许凭空长出标注');
+    ok(!bare.isUnverified({ caps: ['qr_login'], unverified: ['qr_login'] }, 'like'), '只标登记的那一位');
+    ok(!bare.isUnverified(null, 'qr_login'), '源对象缺失不报错');
+
+    const env = playlistSandbox({
+      sources: [
+        { id: 'kugou', label: '酷狗音乐', caps: ['cookie_login', 'qr_login'], unverified: ['qr_login'] },
+        { id: 'netease', label: '网易云音乐', caps: ['cookie_login', 'qr_login', 'user_playlists'] },
+      ],
+      accountThrow: Object.assign(new Error('no session'), { status: 401, code: 'auth_required' }),
+    });
+    await env.doc.fireDCL();
+    await ticks(20);
+    const cards = env.doc.getElementById('op-accounts');
+    const kugou = cards.children.find((c) => c.dataset.source === 'kugou');
+    const ne = cards.children.find((c) => c.dataset.source === 'netease');
+    const kQr = kugou.children.find((c) => textOf(c).indexOf('扫码登录') >= 0);
+    const kCookie = kugou.children.find((c) => textOf(c).indexOf('cookie 登录') >= 0);
+    ok(kQr.classList.contains('is-unverified'), '未验收的扫码入口带上标注类');
+    ok(textOf(kQr).indexOf('未验收') >= 0, '标注是看得见的文字，不只是 tooltip');
+    ok(String(kQr.getAttribute('title')).indexOf('真机') >= 0, 'tooltip 说清是缺真机验收记录');
+    ok(!kCookie.classList.contains('is-unverified'), '同源的 cookie 入口没被连带标上');
+    ok(!ne.children.some((c) => c.classList.contains('is-unverified')), '没声明的源一个标注都不该有');
+    // 标注不许随重绘累积：同一个按钮被反复 render 时只应有一个「未验收」。
+    env.sandbox.window.OnlinePlaylists.init();
+    await ticks(20);
+    const kQr2 = env.doc.getElementById('op-accounts').children
+      .find((c) => c.dataset.source === 'kugou')
+      .children.find((c) => textOf(c).indexOf('扫码登录') >= 0);
+    ok(textOf(kQr2).indexOf('未验收') >= 0, '重绘后标注还在');
+  }
+  {
+    // 登录弹窗里的源 tab 用同一份判据（两个入口不该各写一套标注规则）。
+    const transport = makeTransport({
+      GET: [
+        {
+          match: '/v1/online/sources',
+          returns: {
+            sources: [{ id: 'kugou', label: '酷狗音乐', caps: ['qr_login'], unverified: ['qr_login'] }],
+          },
+        },
+        { match: '/v1/settings', returns: {} },
+        {
+          match: '/v1/online/account',
+          throw: Object.assign(new Error('no session'), { status: 401, code: 'auth_required' }),
+        },
+      ],
+      POST: [{ match: '/v1/online/qr/', returns: { ok: true } }],
+    });
+    const env = makeSandbox({ transport });
+    await env.sandbox.window.OnlineLogin.open();
+    await ticks(20);
+    const tab = env.doc.getElementById('qr-sources').children[0];
+    ok(tab.classList.contains('is-unverified'), '弹窗里的未验收源 tab 也带标注');
+    ok(textOf(tab).indexOf('未验收') >= 0, 'tab 上的标注同样看得见');
+  }
+
   section('详情整盘/随机播放走 Online.playAll');
   {
     const env = playlistSandbox({
@@ -1005,6 +1280,29 @@ async function loginScenario(pollStates, opts) {
     playCalls = env.sandbox.VMusicTransport.calls.post.filter((c) => c.url.indexOf('/v1/online/play') >= 0);
     eq(playCalls.length, 2, '随机播放再发一次 play');
     eq(playCalls[1].body.tracks.length, 2, '随机仍是 2 首');
+  }
+
+  section('F2 整单播放：playCollection 只发集合意图，首页元数据直接入缓存');
+  {
+    const env = playlistSandbox({
+      sources: [{ id: 'netease', label: '网易云音乐', caps: ['cookie_login', 'playlist_detail'] }],
+      playlists: [],
+    });
+    await env.doc.fireDCL();
+    await ticks(20);
+    await env.sandbox.window.Online.playCollection('netease', 'pl1');
+    await ticks(20);
+    const playCalls = env.sandbox.VMusicTransport.calls.post.filter((c) => c.url.indexOf('/v1/online/play') >= 0);
+    eq(playCalls.length, 1, 'playCollection 发一次 play');
+    eq(playCalls[0].body.tracks, undefined, '请求体不带整盘 tracks（首页由服务端取）');
+    eq(playCalls[0].body.collection && playCalls[0].body.collection.kind, 'playlist', '带集合意图');
+    eq(playCalls[0].body.collection.id, 'pl1', '集合 id 随意图上送');
+    eq(playCalls[0].body.index, 0, '从头播');
+    // 响应带的首页元数据要落到 byId：队列行不退化成平台 id，也不必逐首打详情。
+    eq(env.onlineState.byId.has('online:netease:1'), true, '首页元数据入缓存（第 1 首）');
+    eq(env.onlineState.byId.has('online:netease:2'), true, '首页元数据入缓存（第 2 首）');
+    eq(env.onlineState.byId.get('online:netease:1').title, '歌 1');
+    eq(env.onlineState.current && env.onlineState.current.id, 'online:netease:1', '当前曲指向起点');
   }
 
   section('收藏歌单整盘打开：playRef 不要求歌单在账号清单里');
@@ -1336,6 +1634,58 @@ async function loginScenario(pollStates, opts) {
     ok(stateRs.includes('cancel_all_downloads'), 'state.rs：统一下载中止入口 cancel_all_downloads 存在');
     ok(stateRs.includes('auto_failures'), 'state.rs：auto_failures 连续失败计数驱动自动跳曲');
     ok(!stateRs.includes('fetch_to_cache'), 'state.rs：旧整曲下载路径 fetch_to_cache 已移除');
+  }
+
+  section('曲源接力后的出处身份（F3：出处与供音分开存）');
+  {
+    const env = makeSandbox({});
+    const O = env.sandbox.window.Online;
+    ok(typeof O.relayMeta === 'function', 'Online.relayMeta 有导出');
+
+    // 换源前：前端只有网易云那一项的元数据。
+    O.remember('online:netease:n1', {
+      id: 'online:netease:n1', source: 'netease', onlineId: 'n1',
+      title: '晴天', artist: '周杰伦', cover: 'https://p/1.jpg',
+    });
+    const moved = O.relayMeta({
+      track_id: 'online:qq:q9', from_track_id: 'online:netease:n1',
+      from_source: 'netease', to_source: 'qq', to_label: 'QQ 音乐', title: '晴天',
+      origin_source: 'netease', origin_id: 'n1', origin_label: '网易云音乐',
+    });
+    eq(moved.source, 'qq', '供音那一家写成新源（取流、封面、歌词都按它走）');
+    eq(moved.onlineId, 'q9', '平台 id 也跟着供音那一家走');
+    eq(moved.id, 'online:qq:q9', 'id 是新的虚拟 id');
+    eq(moved.title, '晴天', '标题沿用原快照，界面不该跳成平台 id');
+    eq(moved.origin && moved.origin.source, 'netease', '出处仍是用户当初点的那一家');
+    eq(moved.origin && moved.origin.id, 'n1', '出处带平台 id（收藏、详情都要它）');
+    eq(moved.origin && moved.origin.label, '网易云音乐', '出处带展示名，前端不必反查清单');
+    ok(moved.relayed === true, '换过源要标出来');
+
+    // 第二跳：出处必须还是第一家，不能跟着挪到 QQ。
+    const again = O.relayMeta({
+      track_id: 'online:kugou:k3', from_track_id: 'online:qq:q9',
+      from_source: 'qq', to_source: 'kugou', title: '晴天',
+      origin_source: 'qq', origin_id: 'q9',
+    });
+    eq(again.origin && again.origin.source, 'netease', '多跳接力记的仍是最初那一家');
+    eq(again.origin && again.origin.id, 'n1', '第二跳不许把出处平台 id 改成 q9');
+    eq(again.source, 'kugou', '而供音那一家跟着最新一跳走');
+
+    // 平台 id 里带冒号时不能被 split 吃掉。
+    const colonish = O.relayMeta({
+      track_id: 'online:qq:a:b', from_track_id: 'online:netease:n2',
+      to_source: 'qq', title: 'X', origin_source: 'netease', origin_id: 'n2',
+    });
+    eq(colonish.onlineId, 'a:b', '平台 id 里的冒号要原样保留（虚拟 id 只切前两段）');
+
+    // 拿不到旧快照（重启后、或前端本来没这条）也不能抛。
+    const cold = O.relayMeta({
+      track_id: 'online:qq:z1', to_source: 'qq', title: '冷启动那首',
+      origin_source: 'netease', origin_id: 'z0',
+    });
+    eq(cold.title, '冷启动那首', '没有旧元数据时按事件带的字段建一条');
+    eq(cold.origin && cold.origin.source, 'netease', '这种时候出处取服务端给的字段');
+    ok(O.relayMeta(null) === null && O.relayMeta({}) === null, '脏事件安静地不迁');
   }
 
   // -------------------------------------------------------------------------

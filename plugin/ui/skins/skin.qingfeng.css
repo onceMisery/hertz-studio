@@ -73,12 +73,18 @@
 
   /* ==== 顶栏与胶囊的几何 ====
      胶囊的 top / 高度都是令牌，--qf-clear 由它们推导，避免「改了胶囊高度
-     却忘了改内容上让量」这类不同步。 */
-  --topbar-h: 58px;
+     却忘了改内容上让量」这类不同步。
+     顶栏 58→48：清风把主导航挪到了顶栏**下面**单独一排，顶栏里只剩品牌、
+     搜索与右侧控件（最高的 .iconbtn 是 36px），58 给了它 11px 的上下余量，
+     整条头部带子显得比别处松；压到 48 后胶囊与内容一起上移 10px。
+     --qf-nav-gap 不再借用 --skin-gap（24px 是卡片之间的栅格节奏）：顶栏下面
+     要的是「贴着这排控件」，24px 实测在内容顶上又空出一条带。 */
+  --topbar-h: 48px;
   --qf-nav-h: 44px;
-  --qf-nav-top: 10px;
+  --qf-nav-top: 6px;
+  --qf-nav-gap: 14px;
   --qf-clear: calc(
-    var(--topbar-h) + var(--qf-nav-top) + var(--qf-nav-h) + var(--skin-gap)
+    var(--topbar-h) + var(--qf-nav-top) + var(--qf-nav-h) + var(--qf-nav-gap)
   );
 
   /* 队列拼接墙的密排参数（海报墙坐标系，见 skin.qingfeng.js 的 LATTICE）。 */
@@ -162,18 +168,19 @@
   gap: 8px;
 }
 
-/* 收掉顶栏右上角的三个控制按钮：最小化胶囊 / 沉浸声场 / 打开设置。
-   清风的控制入口统一在左上角那一个设置按钮里（.qf-settings-btn），
-   这三个对它是冗余的 —— 尤其「打开设置」，左上角已经有一个了。
+/* 收掉顶栏右上角的两颗控制按钮：沉浸声场 / 打开设置。清风的控制入口统一在
+   左上角那一个设置按钮里（.qf-settings-btn），这两颗对它是冗余的 ——
+   「打开设置」左上角已经有一颗，声场另有迷你卡上的 .stage-head-fs。
+   声场那条路在设置浮层的「窗口与舞台」分组里也有承接（#set-stage3d-btn，
+   绑定见 stage3d.js）：皮肤只是隐藏入口，不是禁用功能。取消注释即可恢复。
 
-   这两条路不能因此断掉，所以设置浮层里补了「窗口与舞台」分组承接
-   前两个（#set-capsule-btn / #set-stage3d-btn，绑定见 app.js 与 stage3d.js）：
-   皮肤只是隐藏入口，不是禁用功能。取消注释任一条即可恢复。
+   「最小化为胶囊」（#capsule-entry）**不**收：它收起的是整个窗口，不是切一个
+   视图，收进设置浮层等于把一条即时动作变成三步。留在顶栏时它与主题色 /
+   皮肤 / 更多 同为 .iconbtn 圆钮，不需要额外补样式。
 
-   用 id 选择器 —— 这三个在 index.html 里是 id（#capsule-entry 等），
-   不是 class。写成 .capsule-entry 会一条都匹配不上，规则看起来写了、
+   用 id 选择器 —— 这几颗在 index.html 里是 id（#stage3d-entry 等），
+   不是 class。写成 .stage3d-entry 会一条都匹配不上，规则看起来写了、
    实际不生效，是最难查的那种「覆盖了却没生效」。 */
-[data-skin="qingfeng"] #capsule-entry,
 [data-skin="qingfeng"] #stage3d-entry,
 [data-skin="qingfeng"] #settings-entry {
   display: none;
@@ -236,12 +243,28 @@
   min-width: 0;
   min-height: 0;
   /* 顶部留出让位给悬浮胶囊：胶囊是 fixed，必须由内容区自己让出这条带，
-     否则第一行内容正好被胶囊压住。 */
-  padding-top: var(--qf-clear);
+     否则第一行内容正好被胶囊压住。
+     减掉 --topbar-h 是因为**两个坐标系不是一回事**：--qf-clear 是"内容从视口
+     第几像素开始"（胶囊的 top 就是按视口算的），而 .column 本来就排在顶栏
+     下面（实测它的 top = 58 = --topbar-h）。整条 clear 直接当 padding-top 用
+     会把顶栏那段算两遍 —— 实测胶囊底边到内容顶之间空了 82px，而设计只想要
+     24px 的 --skin-gap。另外两个消费者（.stage 的 max-height、skin.qingfeng.js
+     的 stageBounds().top）都是视口坐标，用法是对的，所以改这里而不是改令牌。 */
+  padding-top: calc(var(--qf-clear) - var(--topbar-h));
   padding-bottom: 96px; /* 让开底部播放胶囊与右下角头像 */
   border: 0;
   background: transparent;
   box-shadow: none;
+}
+
+/* 详情层（在线歌单/本地歌单）打开时，架子那一排的控件全部失效：歌单架/封面/
+   列表 切的是一个已经 hidden 的界面，「新建歌单」也是架子上才用的动作。
+   实测这一排占 53px，而列表区一共才 522px —— 收回来正好多放一首。
+   判据用 app.js 挂在 #view-playlists 上的 data-layer（各层是 .col-head 后面的
+   兄弟节点，CSS 选不到前面的元素）。 */
+[data-skin="qingfeng"] #view-playlists[data-layer="online-detail"] .col-head,
+[data-skin="qingfeng"] #view-playlists[data-layer="local-detail"] .col-head {
+  display: none;
 }
 
 [data-skin="qingfeng"] .view {
@@ -594,7 +617,8 @@
 [data-skin="qingfeng"] body.qf-lattice-open .qf-brand,
 [data-skin="qingfeng"] body.qf-lattice-open .qf-settings-btn,
 [data-skin="qingfeng"] body.qf-lattice-open .qf-account,
-[data-skin="qingfeng"] body.qf-lattice-open .bar {
+[data-skin="qingfeng"] body.qf-lattice-open .bar,
+[data-skin="qingfeng"] body.qf-lattice-open .bar-restore {
   display: none;
 }
 
@@ -1213,6 +1237,31 @@
   white-space: nowrap;
 }
 
+/* 浮条右端的舞台入口。**常驻可见**，不像上面那颗播放键 hover 才浮现 ——
+   墙开着时顶栏与胶囊导航被 .qf-lattice-open 隐藏、迷你卡又被这条浮条压住，
+   藏起来就等于墙上没有进舞台的路（用户报的正是这个）。平时压成 muted，
+   悬停才提亮，不跟歌名抢注意力。 */
+[data-skin="qingfeng"] .qf-queue-peek-stage {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--skin-line-soft);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+[data-skin="qingfeng"] .qf-queue-peek-stage:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--hover);
+}
+[data-skin="qingfeng"] .qf-queue-peek-stage svg { width: 16px; height: 16px; pointer-events: none; }
+
 [data-skin="qingfeng"] .qf-queue-peek-copy {
   min-width: 0;
   display: flex;
@@ -1237,7 +1286,12 @@
   text-overflow: ellipsis;
 }
 
-/* 右下角圆形工具按钮：关灯 / 设置面板入口 */
+/* 右下角工具坞：三颗按钮收进同一条胶囊。
+   原来三颗各自带一份 --skin-surface 与 --skin-shadow、只隔 8px，于是读成三张
+   散落的小卡片而不是一组控件；更糟的是 .qf-tools-panel 也是 .qf-tools 的 flex
+   子项、DOM 排在「返回」与「说明」之间 —— 一展开就把整排挤成上下两截，说明那颗
+   直接跳到底部。现在玻璃材质只有一份（和顶部主导航、迷你卡同一套），按钮退回
+   静止极淡的盘体，面板绝对定位浮在坞上方，展开不再动任何一颗的位置。 */
 [data-skin="qingfeng"] .qf-tools {
   position: absolute;
   right: 24px;
@@ -1245,64 +1299,93 @@
   z-index: 20;
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-}
-
-[data-skin="qingfeng"] .qf-tools-btn {
-  width: 48px;
-  height: 48px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 1px solid var(--skin-line-soft);
+  align-items: center;
+  gap: 5px;
+  padding: 6px;
   border-radius: var(--r-pill);
+  border: 1px solid var(--skin-line-soft);
   background: var(--skin-surface);
-  color: var(--text);
   box-shadow: var(--skin-shadow);
   backdrop-filter: saturate(180%) blur(20px);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+[data-skin="qingfeng"] .qf-tools-btn {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-pill);
+  background-color: color-mix(in srgb, var(--text) 6%, transparent);
+  background-image: linear-gradient(168deg,
+      color-mix(in srgb, var(--text) 12%, transparent), transparent 54%);
+  color: var(--muted);
   cursor: pointer;
   transition: transform var(--dur-press) var(--ease),
-              background var(--dur-1) var(--ease);
+              background-color var(--dur-1) var(--ease),
+              border-color var(--dur-1) var(--ease),
+              color var(--dur-1) var(--ease),
+              box-shadow var(--dur-1) var(--ease),
+              filter var(--dur-1) var(--ease);
 }
 
 [data-skin="qingfeng"] .qf-tools-btn svg {
-  width: 20px;
-  height: 20px;
+  width: 19px;
+  height: 19px;
 }
 
 [data-skin="qingfeng"] .qf-tools-btn:hover {
-  background: var(--hover);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text) 16%, transparent);
+  background-color: color-mix(in srgb, var(--text) 12%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 20%, transparent);
 }
 
 [data-skin="qingfeng"] .qf-tools-btn:active {
-  transform: scale(0.94);
+  transform: scale(0.92);
 }
 
+/* 环收在盘外 2px：3px 会越过坞的 6px 内边距、压到相邻那颗上。 */
 [data-skin="qingfeng"] .qf-tools-btn:focus-visible {
   outline: var(--focus-ring);
-  outline-offset: var(--skin-focus-offset);
+  outline-offset: 2px;
 }
 
+/* 关灯开着：品牌色盘 + 顶缘受光 + 同色外溢，而不是原来那层平涂。
+   这条排在 :hover 之后且同权重，所以实心底不会被 hover 的浅色盖掉。 */
 [data-skin="qingfeng"] .qf-tools-btn.is-on {
-  background: var(--brand);
   color: var(--accent-ink);
   border-color: transparent;
+  background-color: var(--brand);
+  background-image: linear-gradient(168deg,
+      color-mix(in srgb, var(--text) 26%, transparent), transparent 58%);
+  box-shadow: 0 4px 16px -4px color-mix(in srgb, var(--brand) 65%, transparent);
 }
 
+[data-skin="qingfeng"] .qf-tools-btn.is-on:hover {
+  background-color: var(--brand);
+  filter: brightness(1.08);
+}
+
+/* 面板浮在坞上方，绝对定位 —— 留在 flex 流里会把三颗按钮劈成两截。 */
 [data-skin="qingfeng"] .qf-tools-panel {
-  width: min(320px, calc(100vw - 48px));
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  width: max-content;
+  max-width: min(300px, calc(100vw - 48px));
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 12px;
-  border-radius: var(--r-lg);
+  padding: 10px;
+  border-radius: 20px;
   border: 1px solid var(--skin-line-soft);
   background: var(--skin-surface);
   box-shadow: var(--skin-shadow);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: saturate(180%) blur(24px);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
   transform-origin: 100% 100%;
 }
 
@@ -1310,32 +1393,55 @@
   display: none;
 }
 
+/* 键盘说明不是可点项，却复用了设置列表的 .qf-set-subitem —— 那会带上
+   cursor:pointer、hover 底色和 62% 透明度。就地收掉，不改 DOM。 */
+[data-skin="qingfeng"] .qf-tools-panel .qf-set-subitem {
+  padding: 3px 6px 5px;
+  font-size: var(--fs-2xs);
+  letter-spacing: .02em;
+  opacity: .78;
+  cursor: default;
+}
+
+[data-skin="qingfeng"] .qf-tools-panel .qf-set-subitem:hover {
+  background: transparent;
+  opacity: .78;
+}
+
 [data-skin="qingfeng"] .qf-tools-action {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 48px;
-  padding: 0 14px;
+  gap: 10px;
+  min-height: 38px;
+  padding: 0 12px;
   border: 0;
   border-radius: var(--r-md);
   background: transparent;
   color: var(--text);
-  font-size: var(--fs-base);
+  font-size: var(--fs-sm);
   font-weight: 500;
   text-align: left;
   cursor: pointer;
-  transition: background var(--dur-1) var(--ease);
+  transition: background var(--dur-1) var(--ease),
+              color var(--dur-1) var(--ease);
 }
 
 [data-skin="qingfeng"] .qf-tools-action svg {
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
   flex: none;
-  opacity: 0.8;
+  opacity: 0.72;
 }
 
+/* 面板里目前只有「清空队列」这一条动作，它是不可逆的：悬停转危险色，
+   免得和上面那行只读说明用同一种灰。 */
 [data-skin="qingfeng"] .qf-tools-action:hover {
-  background: var(--hover);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+[data-skin="qingfeng"] .qf-tools-action:hover svg {
+  opacity: 1;
 }
 
 [data-skin="qingfeng"] .qf-tools-action:focus-visible {
@@ -1911,9 +2017,16 @@
 }
 
 /* 卡头上的两颗控件：关闭（skin.qingfeng.js 注入）与「打开舞台」（业务节点
-   #stage-fs，与顶栏那颗、F 键同一条路）。播放控制胶囊里都有，迷你卡不自带一份。 */
-[data-skin="qingfeng"] .qf-mini-btn,
-[data-skin="qingfeng"] .stage-head-fs {
+   #stage-fs，与顶栏那颗、F 键同一条路）。播放控制胶囊里都有，迷你卡不自带一份。
+
+   两颗**不共用尺寸**：关闭是次要动作，22px 裸图标够用；舞台这颗在清风里是
+   沉浸声场的**唯一入口**（顶栏那颗被本皮肤摘了），做成 22px 裸 glyph 时用户
+   根本认不出它是按钮（实测命中区 22×22、图标只有 12×12，报「没有快捷入口」）。
+   所以给它一枚 32×32 的牌：描边 + 底色 + 大一号的图标。
+   试过再加「舞台」二字，但这行只有 ~112px（正在播放 40 + 关闭 22 + 两个 gap 20），
+   文字会被挤成竖排一个字，反而更像坏掉 —— 标签放不下的事实在这里记一笔，
+   以后别再加回来。 */
+[data-skin="qingfeng"] .qf-mini-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1926,10 +2039,25 @@
   color: var(--muted);
   cursor: pointer;
 }
-[data-skin="qingfeng"] .qf-mini-btn:hover,
-[data-skin="qingfeng"] .stage-head-fs:hover { background: var(--hover); color: var(--text); }
-[data-skin="qingfeng"] .qf-mini-btn svg,
-[data-skin="qingfeng"] .stage-head-fs svg { width: 12px; height: 12px; }
+[data-skin="qingfeng"] .qf-mini-btn:hover { background: var(--hover); color: var(--text); }
+[data-skin="qingfeng"] .qf-mini-btn svg { width: 12px; height: 12px; }
+
+[data-skin="qingfeng"] .stage-head-fs {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-1);
+  color: var(--text);
+  cursor: pointer;
+}
+[data-skin="qingfeng"] .stage-head-fs:hover { border-color: var(--line-strong); background: var(--hover); }
+[data-skin="qingfeng"] .stage-head-fs svg { width: 18px; height: 18px; flex: none; }
 /* 把手是 flex + space-between，而基础样式给 .stage-modes / .stage-queue 排了
    order:1 / order:2 —— 注入的关闭按钮默认 order:0，会跑到舞台按钮**前面**（实测
    摊成「关闭在行中间、舞台靠右」）。这里显式排好这一对的顺序，并把整组推到右端。 */
@@ -1975,14 +2103,9 @@ body.qf-stage-dragging [data-skin="qingfeng"] .stage,
   left: 50%;
   right: auto;
   bottom: 22px;
-  /* 860px 不是随手取的，是**量出来的**：胶囊里要装「曲名/歌手 + 播放控制 +
-     进度条 + 模式 + 音量」五块，而右侧那组（睡眠定时器 + 播放模式 + 音量）
-     实测就占 325px、播放控制 188px、进度条最少 120px —— 三块已经 633px，
-     再加三个 14px 间隙（42px）= 675px，**曲名那格一点不剩**。
-     原来的 680px 正好卡在这条线上，于是 bar-track 被压到 0 宽：
-     文本其实写进了 DOM（实测「海屿你」「马也_Crabbit」都在），界面却一个字都读不到。
-     860px 留出 185px 给曲名/歌手，窄视口再由下面那条 max-width 兜底。 */
-  width: min(860px, calc(100vw - 2 * var(--skin-pad)));
+  /* 曲名与收藏、传输控制、进度和辅助操作共享这一行。
+     960px 给新增的爱心与「收起」文字留空间，窄屏再切公共栅格。 */
+  width: min(960px, calc(100vw - 2 * var(--skin-pad)));
   transform: translateX(-50%);
   display: flex;
   align-items: center;
@@ -1996,33 +2119,7 @@ body.qf-stage-dragging [data-skin="qingfeng"] .stage,
   -webkit-backdrop-filter: saturate(180%) blur(20px);
 }
 
-/* 胶囊也是固定定位的浮件：钉住 transform/opacity，否则自动隐藏会先把它
-   甩下去再滑回（悬停时整块下坠）。这条与流年同源。 */
-[data-skin="qingfeng"] .bar:not(.qf-capsule) {
-  transform: translateX(-50%) !important;
-  opacity: 1 !important;
-}
-
-[data-skin="qingfeng"] .bar.qf-capsule {
-  transform: translateX(-50%) !important;
-  opacity: 1 !important;
-}
-
-[data-skin="qingfeng"] .bar.is-hidden {
-  display: none !important;
-}
-
-/* 收起后的唤出热区要盖住胶囊**浮起来的那一截**。
-   胶囊是 position:fixed; bottom:22px，而基础 .bar-hover-zone 只有
-   `bottom:0; height:12px` —— 两者不重叠：收起后鼠标停在原来胶囊所在
-   的位置（屏幕底往上 22px 处）根本不落在热区里，唤不回来，表现为
-   「点收起之后播放条彻底没了」。这里把热区加高到 56px，
-   让「鼠标回到原来胶囊附近」就能唤出。 */
-[data-skin="qingfeng"] .bar-hover-zone {
-  height: 56px;
-}
-
-[data-skin="qingfeng"] .bar-track {
+[data-skin="qingfeng"] .bar-summary {
   min-width: 0;
   /* flex-basis 必须是 0 之外的确定值。原先写 `flex: 1 1 auto`（basis=auto→0），
      与 .bar-progress 的 `flex: 1 1 220px` 竞争时**永远输** —— 胶囊只有 680px，
@@ -2182,6 +2279,10 @@ body.qf-stage-dragging [data-skin="qingfeng"] .stage,
 /* ===================== 响应式 ========================================== */
 
 @media (max-width: 900px) {
+  /* 右下角账号入口占用底部一行，播放栏与恢复入口避开它的点击区域。 */
+  [data-skin="qingfeng"] .bar,
+  [data-skin="qingfeng"] .bar-restore { bottom: 84px; }
+
   [data-skin="qingfeng"] .topsearch {
     display: none;
   }
@@ -2236,11 +2337,13 @@ body.qf-stage-dragging [data-skin="qingfeng"] .stage,
     height: 2px;
   }
 
-  /* 窄屏把播放胶囊让出更多空间：进度条换行到第二排 */
+  /* 窄屏使用公共播放栏栅格，让曲名、收藏和各组操作都有完整空间。 */
   [data-skin="qingfeng"] .bar {
-    flex-wrap: wrap;
+    display: grid;
     gap: 8px;
     padding: 10px 14px;
+    margin: 0;
+    border-radius: var(--r-xl);
   }
 
   [data-skin="qingfeng"] .bar-progress {

@@ -30,7 +30,7 @@
   // 「恢复默认」整表：edit(DEFAULTS) → Stage3D.configure 按键做部分覆盖后 PUT，
   // 故这里要列全 stage3d preferences 的键，漏了的键重置时不会被还原。
   var DEFAULTS = {
-    scene: 'resonance', motion: .65, bloom: .8, reactivity: 1.35,
+    scene: 'resonance', sceneSource: 'immersive', motion: .65, bloom: .8, reactivity: 1.35,
     lyrics: true, cruise: true, layout: 'focus', lyricSize: 1, lyricGlow: .45,
     stanzaVisual: 'stage',
     stageTheme: 'classic',
@@ -496,33 +496,29 @@
     body.appendChild(nameRow);
 
     body.appendChild(h('h2', 'sc-group-title', '三维场景'));
-    // 场景目录与沉浸声场共用同一份（Stage3D.stages），卡片同款。点选即时切换
-    // 沉浸声场的舞台并就地预览；下面的「参数 / 编排 / 手绘」仍作用于高级
-    // 渲染层（右栏增强渲染），两套目录不再各画各的。
+    // 场景、参数和编排使用同一份创意预置，直接交给大舞台的渲染器。
     var grid = h('div', 'ws-scene-grid');
-    if (window.Stage3D && Stage3D.stages) {
-      Stage3D.stages().forEach(function (s, i) {
+    if (CS.scenes) {
+      CS.scenes().forEach(function (s) {
         var card = h('button', 'ws-scene-card');
         card.type = 'button';
         card.dataset.scene = s.id;
         card.innerHTML = sceneArt(s.id);
         card.appendChild(h('strong', null, s.label));
-        card.appendChild(h('small', null, s.desc));
-        var on = window.Stage3D.stageId && Stage3D.isActive && Stage3D.isActive()
-          && Stage3D.stageId() === s.id;
+        card.appendChild(h('small', null, SCENE_DESCRIPTIONS[s.id] || '镜头与光影跟随你的编排'));
+        var on = cur.scene === s.id;
         card.classList.toggle('on', on);
         card.setAttribute('aria-pressed', String(on));
         card.addEventListener('click', function () {
-          // 只切舞台、不强行开层：高级编排不该替主页弹出全屏视窗。沉浸声场
-          // 已经开着时这就是实时预览；没开着时下次进入即生效。
-          if (Stage3D.setStage) Stage3D.setStage(i);
+          activateCreativeStage();
+          CS.setScene(s.id);
           render();
         });
         grid.appendChild(card);
       });
       body.appendChild(grid);
       body.appendChild(h('div', 'sc-note',
-        '场景与沉浸声场同目录同渲染；「参数 / 编排 / 绑定 / 背景手绘」调的是高级渲染层（右栏增强渲染）。'));
+        '场景、镜头、编排与电影风格直接呈现在大舞台，关闭工坊后继续演出。'));
     }
 
     var opts = h('div', 'sc-grid');
@@ -828,6 +824,48 @@
     var CS = stage_api();
     var cur = CS.preset();
 
+    body.appendChild(h('h2', 'sc-group-title', '电影风格'));
+    body.appendChild(h('p', 'sc-note', '把舞台变成一格流动的漫画。纸感、墨线与音乐相融，歌词仍是画面的主角。'));
+    var hand = cur.hand || { on: false };
+    function patchHand(values) {
+      CS.setHandDrawn(Object.assign({}, CS.preset().hand || {}, values));
+    }
+    var styles = [{ id: 'off', label: '原始光影', description: '保留三维场景的光与色' }];
+    if (window.HandDrawn && HandDrawn.presets) styles = styles.concat(HandDrawn.presets());
+    var looks = h('div', 'ws-look-grid');
+    styles.forEach(function (style) {
+      var card = h('button', 'ws-look-card');
+      card.type = 'button';
+      card.dataset.style = style.id;
+      card.setAttribute('aria-pressed', String(style.id === (hand.on ? hand.style || 'manga' : 'off')));
+      var swatch = h('span', 'ws-look-swatch');
+      swatch.setAttribute('aria-hidden', 'true');
+      swatch.append(h('i'), h('i'), h('i'));
+      card.append(swatch, h('strong', null, style.label), h('small', null, style.description));
+      card.addEventListener('click', function () {
+        patchHand(style.id === 'off' ? { on: false } : { on: true, style: style.id });
+        render();
+      });
+      looks.appendChild(card);
+    });
+    body.appendChild(looks);
+    if (hand.on) {
+      var opts = h('div', 'sc-grid');
+      [['frame', '分镜边框'], ['wave', '手绘声波'], ['annot', '歌词圈注'], ['paper', '纸张质感']].forEach(function (entry) {
+        opts.appendChild(toggle(entry[1], hand[entry[0]] !== false, function (v) {
+          var update = {}; update[entry[0]] = v;
+          patchHand(update);
+        }));
+      });
+      body.appendChild(opts);
+      var jgrid = h('div', 'sc-grid');
+      jgrid.appendChild(slider(['hand.jitter', '笔触起伏', 0, 200, 5, '%', 100],
+        hand.jitter === undefined ? 100 : hand.jitter, function (v) { patchHand({ jitter: v }); }));
+      jgrid.appendChild(slider(['hand.speed', '笔触节奏', 20, 200, 5, '%', 100],
+        hand.speed === undefined ? 100 : hand.speed, function (v) { patchHand({ speed: v }); }));
+      body.appendChild(jgrid);
+    }
+
     body.appendChild(h('h2', 'sc-group-title', '背景来源'));
     var bg = cur.bg || { type: 'theme' };
     var types = [
@@ -871,8 +909,7 @@
       fileRow.appendChild(file);
       body.appendChild(fileRow);
       body.appendChild(h('div', 'sc-note',
-        '图片与视频都只在本机内存里，不上传、不落库；换台机器打不开是预期行为。'
-        + '视频会自动降速播放并降采样，避免和三维舞台抢解码器。'));
+        '图片与视频仅在本次打开期间可用。重新打开应用后，请再次选择素材。'));
     }
 
     // 以下控件全部走轻量路径：改参数不拆 DOM、不重起视频/生成画布。
@@ -920,7 +957,7 @@
       modegrid.appendChild(select('空间模式', [
         ['flat', '平面'],
         ['parallax', '视差（跟随指针）'],
-        ['scene', '弧形墙（WebGL2）']
+        ['scene', '弧形墙']
       ], fv.depthMode, function (v) {
         patch(function (s) { s.depthMode = v; });
         render();   // 切换空间模式要刷出"生效真相"提示
@@ -934,57 +971,9 @@
           '这台设备不支持 WebGL2（或图形上下文已丢失），弧形墙没有运行；'
           + '实际生效的是「视差」模式，移动鼠标即可看到跟随。'));
       } else if (st.depthEffective === 'scene') {
-        var texInfo = st.wallTex ? '，纹理 ' + st.wallTex[0] + '×' + st.wallTex[1] : '';
         body.appendChild(h('div', 'sc-note',
-          '弧形墙运行中' + texInfo + '，移动指针环顾；墙内亮度随音乐能量起伏。'));
+          '弧形墙运行中，移动指针环顾；墙内亮度随音乐能量起伏。'));
       }
-
-      var info = '当前调色：' + st.palette.join('  ');
-      if (bg.type !== 'media') info += '　（' + st.size + ' 像素的离屏画布放大）';
-      body.appendChild(h('div', 'sc-note', info));
-    }
-
-    body.appendChild(h('h2', 'sc-group-title', '手绘舞台'));
-    var hand = cur.hand || { on: false };
-    var opts = h('div', 'sc-grid');
-    opts.appendChild(toggle('启用手绘风格', hand.on, function (v) {
-      var next = Object.assign({}, hand, { on: v });
-      CS.setHandDrawn(next);
-      render();
-    }));
-    if (hand.on) {
-      opts.appendChild(toggle('手绘边框', hand.frame !== false, function (v) {
-        var next = Object.assign({}, hand, { frame: v, on: true });
-        CS.setHandDrawn(next);
-      }));
-      opts.appendChild(toggle('手绘声波', hand.wave !== false, function (v) {
-        var next = Object.assign({}, hand, { wave: v, on: true });
-        CS.setHandDrawn(next);
-      }));
-      opts.appendChild(toggle('歌词圈注', hand.annot !== false, function (v) {
-        var next = Object.assign({}, hand, { annot: v, on: true });
-        CS.setHandDrawn(next);
-      }));
-      opts.appendChild(toggle('纸张噪点', hand.paper !== false, function (v) {
-        var next = Object.assign({}, hand, { paper: v, on: true });
-        CS.setHandDrawn(next);
-      }));
-    }
-    body.appendChild(opts);
-    if (hand.on) {
-      var jgrid = h('div', 'sc-grid');
-      jgrid.appendChild(slider(['hand.jitter', '抖动幅度', 0, 200, 5, '%', 100],
-        hand.jitter === undefined ? 100 : hand.jitter, function (v) {
-          CS.setHandDrawn(Object.assign({}, hand, { on: true, jitter: v }));
-        }));
-      jgrid.appendChild(slider(['hand.speed', '刷新速度', 20, 200, 5, '%', 100],
-        hand.speed === undefined ? 100 : hand.speed, function (v) {
-          CS.setHandDrawn(Object.assign({}, hand, { on: true, speed: v }));
-        }));
-      body.appendChild(jgrid);
-      body.appendChild(h('div', 'sc-note',
-        '手绘层跑在约 16fps 上。这不是省事，是观感：逐帧全速的"手绘"看起来像噪点，'
-        + '不像笔触。'));
     }
   }
 
@@ -1087,8 +1076,14 @@
   // 骨架
   // -------------------------------------------------------------------------
 
-  // Static visual studies are navigational thumbnails; the adjacent canvas is
-  // the actual renderer. No second animation loop or renderer lives here.
+  var SCENE_DESCRIPTIONS = {
+    towers: '频谱化作光柱，节拍延伸成纵深', orb: '球面随频段呼吸，微光围绕流转',
+    tunnel: '穿行光环，用镜头编排速度', nebula: '星尘缓缓聚散，光随声音展开',
+    terrain: '声音塑造起伏，镜头掠过山脊', lyric: '让歌词成为空间中的光与文字'
+  };
+
+  // Static scene studies are navigational thumbnails; the large stage renders
+  // the actual scene with current music and creative settings.
   function sceneArt(id) {
     var art = '<rect width="320" height="180" fill="#0e191b"/>', shape = '';
     for (var i = 0; i < 75; i++) {
@@ -1099,6 +1094,13 @@
       for (i = 0; i < 11; i++) shape += '<ellipse cx="160" cy="90" rx="' + (id === 'tunnel' ? 12 + i * 13 : 84 + i * 2) + '" ry="' + (id === 'tunnel' ? 8 + i * 8 : 24 + i * 2) + '" transform="rotate(-23 160 90)" fill="none" stroke="currentColor" opacity="' + (.16 + i * .045) + '"/>';
     } else if (id === 'orb') {
       for (i = 0; i < 14; i++) shape += '<ellipse cx="160" cy="90" rx="62" ry="' + (4 + i * 4.3) + '" fill="none" stroke="currentColor" opacity=".55"/>';
+    } else if (id === 'towers') {
+      for (i = 0; i < 17; i++) {
+        var height = 25 + Math.sin(i * .78) * 23 + (i % 4) * 13;
+        shape += '<path d="M' + (24 + i * 16) + ' 148v-' + height.toFixed(1) + 'h7v' + height.toFixed(1) + '" fill="none" stroke="currentColor" opacity=".65"/>';
+      }
+    } else if (id === 'lyric') {
+      for (i = 0; i < 7; i++) shape += '<path d="M' + (60 + i * 16) + ' ' + (42 + i * 14) + 'h' + (190 - i * 17) + '" stroke="currentColor" stroke-width="' + (1 + i * .7) + '" opacity="' + (.2 + i * .08) + '"/>';
     } else if (id === 'silk') {
       for (i = 0; i < 21; i++) shape += '<path d="M' + (98 + i * 6) + ' 38q-25 52 0 104" fill="none" stroke="currentColor" opacity=".65"/>';
     } else if (id === 'terrain') {
@@ -1168,8 +1170,9 @@
     box.id = 'ws-stanza-note';
     box.append(
       h('strong', null, label + '正在接管画面'),
-      h('p', null, '这一套视觉有自己的排版与光影，舞台的律动、镜头与光晕参数不再作用于画面，' +
-        '所以这里只保留选择。想调舞台参数，把「歌词视觉」切回「舞台 3D 歌词轨」。')
+      h('p', null, '这一套视觉有自己的排版与光影，舞台的机位、光晕与背景参数不再作用于画面，' +
+        '所以这里只保留选择。例外是「镜头动态」与「律动强度」：它们通过歌词层的缓慢运镜与起音冲击 ' +
+        '仍然进得到画面。想调回整套舞台参数，把「歌词视觉」切回「舞台 3D 歌词轨」。')
     );
     return box;
   }
@@ -1180,8 +1183,9 @@
     var locked = !!vs;
     lastLock = vs || null;
     var intro = h('div', 'ws-intro');
-    intro.append(h('span', 'ws-kicker', 'THE LISTENING ROOM'), h('h2', null, '给音乐一个空间'), h('p', null, '挑选声场，调整光与节奏。每一次改变，即刻呈现在预览中。'));
+    intro.append(h('span', 'ws-kicker', 'THE LISTENING ROOM'), h('h2', null, '给音乐一个空间'), h('p', null, '挑选声场，调整光与节奏。每一次改变，即刻呈现在大舞台。'));
     body.appendChild(intro);
+    if (prefs.sceneSource === 'creative') body.appendChild(h('p', 'sc-note', '大舞台正在演出高级编排。选择下方声场或心情模板，即可切换为沉浸声场。'));
     if (locked) body.appendChild(stanzaNotice(vs));
     var history = h('div', 'ws-history');
     [['ws-undo', '撤销', function () { travel(true); }], ['ws-redo', '重做', function () { travel(false); }], ['ws-defaults', '恢复默认', function () { edit(DEFAULTS); }]].forEach(function (spec) {
@@ -1213,7 +1217,7 @@
       var b = h('button', 'ws-scene-card'); b.type = 'button'; b.dataset.scene = scene.id; b.id = 'ws-scene-' + scene.id;
       b.setAttribute('aria-pressed', String(scene.id === prefs.scene)); b.innerHTML = sceneArt(scene.id);
       b.append(h('strong', null, scene.label), h('small', null, scene.desc));
-      b.addEventListener('click', function () { edit({ scene: scene.id }); }); scenes.appendChild(b);
+      b.addEventListener('click', function () { edit({ scene: scene.id, sceneSource: 'immersive' }); }); scenes.appendChild(b);
     });
     body.appendChild(scenes);
     body.appendChild(locked
@@ -1253,75 +1257,39 @@
 
   function switchTarget(next) {
     if (target === next) return;
-    // 借来的预览层跨目标切换要记账：切去高级编排不该把用户正在看的沉浸
-    // 声场关掉（那是旧预览面的做法），也不该把「借开」误记成用户自己开的。
-    var borrowed = previewOpenedByWorkshop;
-    previewOpenedByWorkshop = false;
-    setOpen(false);
     target = next;
-    setOpen(true);
-    if (target === 'immersive' && borrowed) previewOpenedByWorkshop = true;
-    syncAdvancedPreview();
+    if (target === 'advanced') activateCreativeStage();
+    render();
   }
 
-  // 高级编排的面板内实时预览：参数/编排的每一次改动直接画在面板里，
-  // 不依赖也不惊动主页右栏的播放视窗。
-  // 高级编排的实时预览：参数/编排的每一次改动直接画在面板里，
-  // 不依赖也不惊动主页右栏的播放视窗。
-  //
-  // 另有宽屏形态（ws-expand）：同一个挂载点、同一个 canvas，只把容器摊成
-  // 两栏。窄面板里那个 16:9 画布约 350x200 —— 场景的空间结构读不出来，
-  // 粗光晕 target 也掉到不足 1/8 分辨率。放大是对症解，不是美化。
-  var WIDE_KEY = 'vmusic.workshop.wide.v1';
-
-  function wideStored() {
-    try { return localStorage.getItem(WIDE_KEY) === '1'; }
-    catch (e) { return false; }
+  function activateCreativeStage() {
+    if (!window.Stage3D) return;
+    if (Stage3D.preferences().sceneSource !== 'creative') {
+      Stage3D.configure({ sceneSource: 'creative' });
+      Stage3D.save();
+    }
+    if (!Stage3D.isActive()) Stage3D.open();
   }
 
-  function applyWide(on) {
-    if (refs.panel) refs.panel.classList.toggle('is-wide', on);
-    // body 上的这个类只给 `body.ws-open.ws-wide #lyric-page` 让位用。
-    // 挂在 body 上而不是让 CSS 去猜面板状态：选择器越短，重排时越稳。
-    document.body.classList.toggle('ws-wide', on);
-    var btn = $('ws-expand');
-    if (btn) {
-      btn.setAttribute('aria-pressed', String(on));
-      btn.title = on ? '收回预览' : '展开预览（宽屏工坊）';
-      btn.setAttribute('aria-label', btn.title);
-      btn.querySelector('use').setAttribute('href', on ? '#i-compress' : '#i-expand');
-    }
-    // 容器尺寸变了，后备缓冲得跟着重设。creative-stage 自己挂了
-    // ResizeObserver，这条只是把首帧提前 —— 否则切换后头一两帧还是旧尺寸。
-    if (window.CreativeStage && CreativeStage.remeasure) CreativeStage.remeasure();
-  }
-
-  function syncAdvancedPreview() {
-    var pv = $('ws-preview');
-    if (!pv) return;
-    pv.hidden = target !== 'advanced';
-    // 展开按钮只在预览真的挂着时可用：点了没反应比不给点强。
-    var btn = $('ws-expand');
-    if (btn) btn.disabled = target !== 'advanced';
-    if (target !== 'advanced') {
-      if (window.CreativeStage && CreativeStage.unmountPreview) CreativeStage.unmountPreview();
-      return;
-    }
-    if (window.CreativeStage && CreativeStage.mountPreview) {
-      var ok = CreativeStage.mountPreview($('ws-preview-host'));
-      var meta = $('ws-preview-meta');
-      if (meta) {
-        var cur = CreativeStage.preset();
-        meta.textContent = ok
-          ? 'LIVE · 实时预览 · ' + (cur && cur.scene ? cur.scene : 'creative') + ' · 只画在这里，不惊动主页右栏'
-          : '预览不可用（WebGL2 不可达或引擎未就绪）· 参数改动仍会保存';
-      }
-    }
+  function syncStageStatus() {
+    var status = $('ws-stage-status');
+    if (!status) return;
+    status.hidden = target !== 'advanced';
+    if (status.hidden || !isOpen()) return;
+    var CS = stage_api();
+    var reason = CS && CS.degradedBecause && CS.degradedBecause();
+    var active = window.Stage3D && Stage3D.isActive() && Stage3D.preferences().sceneSource === 'creative';
+    var playing = document.body.classList.contains('is-playing');
+    status.classList.toggle('is-unavailable', !!reason || !active);
+    status.querySelector('strong').textContent = reason ? '创意舞台暂不可用' : active ? '正在编辑大舞台' : '大舞台尚未开启';
+    status.querySelector('span').textContent = reason
+      ? '图形渲染未就绪，设置已保留。'
+      : active ? (playing ? '随当前音乐演出 · 设置自动保存' : '音乐已暂停 · 播放后继续编排') : '设置已保留，打开大舞台后生效。';
   }
 
   var TABS = [
     ['prompt', '一句成景'], ['scene', '场景'], ['presets', '收藏'], ['params', '参数'],
-    ['cues', '编排'], ['binds', '绑定'], ['look', '背景手绘'], ['io', '导出']
+    ['cues', '编排'], ['binds', '绑定'], ['look', '电影风格'], ['io', '导出']
   ];
 
   function render() {
@@ -1332,7 +1300,7 @@
     refs.panel.dataset.target = target;
     refs.targets.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.target === target)); });
     $('ws-tabs').hidden = target !== 'advanced';
-    syncAdvancedPreview();
+    syncStageStatus();
     refs.body.textContent = '';
     if (target === 'immersive') {
       renderImmersive(refs.body); refs.body.scrollTop = scroll;
@@ -1365,21 +1333,14 @@
     }, 2200);
   }
 
-  var previewOpenedByWorkshop = false;
-
   function setOpen(next) {
     var panel = refs.panel;
     if (!panel) return false;
     if (next === isOpen()) return next;
     if (next) {
       returnFocus = document.activeElement;
-      if (target === 'immersive' && window.Stage3D) {
-        // 沉浸目标以舞台层为实时预览：没开就替用户开一层。但这是"借"的——
-        // 记一笔，关闭工坊时还回去，否则主页（含右侧播放视窗）会一直被
-        // 舞台层盖着；用户本来就看舞台的话，关面板后照常留在舞台。
-        previewOpenedByWorkshop = !Stage3D.isActive();
-        if (previewOpenedByWorkshop) Stage3D.open();
-      }
+      if (target === 'advanced') activateCreativeStage();
+      else if (window.Stage3D && !Stage3D.isActive()) Stage3D.open();
       // 舞台层开着（无论当前目标是沉浸还是高级）：面板都挂进舞台层浮在其上，
       // 否则高级编排的面板会被舞台层整个盖住，什么都看不见。
       if (window.Stage3D && Stage3D.isActive()) {
@@ -1391,11 +1352,6 @@
       if (gesture) { remember(gesture); gesture = null; Stage3D.save(); }
       $('stage3d').classList.remove('s3d-editing');
       if (home) home.after(panel);
-      if (window.CreativeStage && CreativeStage.unmountPreview) CreativeStage.unmountPreview();
-      if (previewOpenedByWorkshop) {
-        previewOpenedByWorkshop = false;
-        if (window.Stage3D && Stage3D.isActive()) Stage3D.close();
-      }
     }
     panel.hidden = !next;
     void panel.offsetWidth;                 // hidden → is-open 同帧合并会吃掉过渡
@@ -1443,15 +1399,6 @@
     }
     var close = $('ws-close');
     if (close) close.addEventListener('click', function () { setOpen(false); });
-    var expand = $('ws-expand');
-    if (expand) {
-      expand.addEventListener('click', function () {
-        var on = !refs.panel.classList.contains('is-wide');
-        try { localStorage.setItem(WIDE_KEY, on ? '1' : '0'); } catch (e) { /* 隐私模式，记住不了就不记 */ }
-        applyWide(on);
-      });
-      applyWide(wideStored());
-    }
     // 顶栏那个按钮不在这里绑：app.js 的 initCreative 同时接顶栏与设置页两个入口，
     // 两边都走 Workshop.toggle。这里再绑一次就等于一次点击翻两遍开关 ——
     // 面板开了立刻被第二个 handler 关掉，看起来就是"按钮没反应"。
@@ -1480,6 +1427,7 @@
     if (window.CreativeStage && CreativeStage.onChange) {
       CreativeStage.onChange(function (kind) {
         if (!isOpen() || target !== 'advanced') return;
+        syncStageStatus();
         if (kind === 'preset' || kind === 'library') render();
       });
     }
@@ -1491,10 +1439,13 @@
     // 「锁定的开/关」翻转时重渲染（每帧重排会打掉正在拖的滑块）。
     if (window.Stage3D && Stage3D.onVisualChange) {
       Stage3D.onVisualChange(function () {
-        if (!isOpen() || target !== 'immersive') return;
+        if (!isOpen()) return;
+        syncStageStatus();
+        if (target !== 'immersive') return;
         if (stanzaVisual() !== lastLock) render();
       });
     }
+    new MutationObserver(function () { syncStageStatus(); }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
     return api;
   }

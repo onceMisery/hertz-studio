@@ -246,6 +246,13 @@ html.qr-modal-open .app{visibility:hidden}
   border:1px solid var(--line)}
 .op-account .op-name{font-size:14px;font-weight:600;color:var(--text)}
 .op-account .btn{padding:5px 12px;font-size:12px}
+/* 探测没出结果（不是未登录）时挂在卡尾的一行状态：占满整行，别挤在按钮旁边 */
+.op-stale{flex:1 1 100%;font-size:12px;line-height:1.5;color:var(--muted)}
+/* 能力第三档（A9）：登记了但没真机验收过。入口照常给，标注要显眼到能改变预期。 */
+.op-trial{margin-left:5px;padding:1px 5px;border-radius:999px;
+  font-size:10px;line-height:1.5;color:var(--muted);
+  border:1px dashed var(--line-strong);vertical-align:middle}
+.btn.is-unverified{border-style:dashed}
 .op-account.is-in{justify-content:flex-start}
 .op-avatar{width:38px;height:38px;flex:none;border-radius:50%;overflow:hidden;
   background:color-mix(in srgb,var(--accent) 18%,var(--panel-2));
@@ -405,6 +412,8 @@ input.opl-filter{flex:none;width:190px;height:30px;padding:0 10px;
 .opl-info-meta{font-size:12px;color:var(--muted);line-height:1.6}
 .opl-info-acts{display:flex;flex-direction:column;gap:6px;margin-top:2px}
 .opl-info-acts .btn{width:100%;padding:7px 10px;font-size:12px}
+.opl-scope-note{font-size:12px;color:var(--muted);line-height:1.5}
+.opl-scope-note[hidden]{display:none}
 
 .opl-tracks{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
 .opl-head{height:30px}

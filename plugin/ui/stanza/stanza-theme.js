@@ -90,12 +90,26 @@
     return null;
   }
 
-  function resolve(reactivity) {
+  function resolve(reactivity, colorfulFallback) {
     var src = readSourceHsl();
     // 无源色，或白/灰等无彩色（s < NEUTRAL_SAT_MAX）：一律走 P2 默认主题，
     // accent 保持 #f4f4f5，不再把低饱和 accent 伪造成粉红色。
+    // 例外：colorfulFallback（彩色氛围背景显式传入）——「彩色氛围」承诺的是颜色，
+    // 中性 UI 主题下不能再把白灰塞给它；回退到与商籁中性回退同族的夜曲蓝调，
+    // 场景三色（stage3d 的 --fl-scene-*）与歌词辉光随之有真彩色。
     if (!src || src[1] < NEUTRAL_SAT_MAX) {
-      return shallow(DEFAULT, intensityFrom(reactivity));
+      if (!colorfulFallback) return shallow(DEFAULT, intensityFrom(reactivity));
+      return {
+        name: 'stage-nocturne',
+        backgroundColor: U.hslToHex(222, 30, 8),
+        primaryColor: '#f5f3ee',
+        accentColor: U.hslToHex(198, 66, 71),
+        secondaryColor: U.hslToHex(244, 42, 64),
+        tertiaryColor: U.hslToHex(162, 40, 60),
+        wordColors: [],
+        animationIntensity: intensityFrom(reactivity),
+        fontStyle: 'sans'
+      };
     }
     return {
       name: 'stage-palette',
@@ -145,6 +159,18 @@
     return fields.join('|');
   }
 
+  // 凝彩的双色/浓彩必须有色料；单色印刷由 renderer 明确转为灰阶。
+  // 仅在源色缺失或中性时用夜曲色板，有彩封面与主题仍决定主色相。
+  function resolveTempera(reactivity) {
+    var t = resolve(reactivity, true);
+    var source = readSourceHsl();
+    if (source && source[1] >= NEUTRAL_SAT_MAX) {
+      t.secondaryColor = U.hslToHex(source[0] + 42, 60, 62);
+      t.tertiaryColor = U.hslToHex(source[0] + 190, 66, 65);
+    }
+    return t;
+  }
+
   function normalizeToken(s) { return String(s || '').toLowerCase().replace(/[^\w]/g, ''); }
   function isCJK(s) { return /[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af]/.test(s); }
 
@@ -169,6 +195,6 @@
 
   function fontStack(style) { return FONT_STACKS[style] || FONT_STACKS.sans; }
 
-  return { DEFAULT: DEFAULT, resolve: resolve, resolveSonnet: resolveSonnet, signature: signature,
+  return { DEFAULT: DEFAULT, resolve: resolve, resolveSonnet: resolveSonnet, resolveTempera: resolveTempera, signature: signature,
     wordColor: wordColor, fontStack: fontStack };
 });

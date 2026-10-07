@@ -44,43 +44,11 @@ jobs:
           node-version: lts/*
 
       - name: Frontend contract checks
-        run: |
-          node scripts/check-assets.js
-          # README 的 REST 清单是生成物（源码里数出来 110 个「方法+路径」）。放开手写
-          # 必然漂移——上一版就写着「共 103 个（routes.rs 的 80 条 .route()）」，
-          # 而源码早就是 87 条了。改了 routes.rs / main.rs 的路由就重跑生成器。
-          node scripts/api-routes.js --check
-          node scripts/check-css-tokens.js
-          node scripts/check-creative.js
-          node scripts/check-favorites.js
-          node scripts/check-library.js
-          node scripts/check-scan-ui.js
-          node scripts/check-online.js
-          node scripts/check-online-playlist-view.js
-          node scripts/check-stage-control.js
-          node scripts/check-stage-idle.js
-          # OBS 浮层的素材通道：生产者（设置页把图压成 data URL 拼 CSS）与消费者
-          # （浮层页 getComputedStyle 读回）只靠变量名与 url("data:…") 的形状耦合，
-          # 任何一端改错都不会报错，只会「选完图浮层没变化」。
-          node scripts/check-obs-css.js
-          # 换肤/换主题这类「刷新后还在吗」的失败在本地很难发现（没有报错、只有
-          # 观感回到默认），所以也进 CI：不依赖浏览器，纯 Node 沙箱跑真实模块。
-          node scripts/check-skins.js
-          node scripts/check-appearance-restore.js
-          # 插件形态下壁纸/图标 404 是同一类「不报错、只是空」的失败，而且独立形态
-          # 与 dev-host 都看不出来，只有真 dbx 才暴露——所以把它钉成契约。
-          node scripts/check-plugin-assets.js
-          # stanza 歌词舞台（流光/心象/商籁/凝彩 + 星诞导演）。这几个模块体量大
-          # （合计约 190KB）、纯逻辑无副作用，最容易在改别处时被无声改坏：
-          # 构图数、逐字时间轴、镜头包络都只表现为"画面变得不对"，不会报错。
-          # 全部是零依赖 Node 沙箱，无需 Playwright。
-          node scripts/check-stanza.js
-          node scripts/check-stanza-sonnet.js
-          node scripts/check-stanza-tempera.js
-          node scripts/check-stanza-starborn.js
-          # check-sonnet-palette 内含真实 Chrome/Pixi 渲染实测，需要 Playwright。
-          # CI 里只跑不需要浏览器的调色板纯函数部分（--browser 留给本地视觉验收）。
-          node scripts/check-sonnet-palette.js
+        # 聚合入口：语法 → 静态 guard（形状/接线/禁用词）→ 行为回归（vm 沙箱跑真实
+        # 模块）→ 活体（默认不跑：要真浏览器与起着的服务，环境不齐只会报环境错）。
+        # 「哪一步在防什么失败」写在 scripts/check-frontend.js 的 why 字段里；本地
+        # 全跑一遍是同一条命令，不用再从 YAML 里复制二十行。默认集合与拆分写法等价。
+        run: node scripts/check-frontend.js
 
       - name: Check formatting
         # 不用 --all：它会把 vendored 的 dbx-plugin-sdk 一起重排，而那份 src/lib.rs

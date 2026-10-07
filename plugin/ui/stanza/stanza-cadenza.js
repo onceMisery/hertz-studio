@@ -14,7 +14,7 @@
     wrap.append(canvas, dom);
     host.append(wrap);
 
-    var theme = StanzaTheme.DEFAULT, fontScale = 1.12, visible = true, eco = false;
+    var theme = StanzaTheme.DEFAULT, fontScale = 1.12, visible = true, eco = false, paused = false;
     // reduced 每帧在 frame 内活读祖先 .s3d-reduced：姿态/辉光瞬时吸附、光束能量按 0 冻结。
     var reduced = false;
     var tuning = { width: 0.72, motion: 1, glow: 1, beam: 0 };
@@ -25,11 +25,13 @@
     // needRepack：下一帧需要重新 packLine+mount；repackSoft=true 为配置类软重排（节点立即吸附，
     // 不走 waiting 低通），false 留给真实换句的硬挂载（节点从 waiting 姿态低通进入）。
     var needRepack = false, repackSoft = false, destroyed = false;
+    var lastTime = null, lastReduced = false, lastEnergy = 0, paintDirty = true;
 
     // 配置类变更（宽度/字号/主题/eco/尺寸）请求下一帧重排。motion/glow/beam 帧内活读，不走这里。
     function requestRepack(soft) {
       needRepack = true;
       repackSoft = !!soft;
+      paintDirty = true;
     }
 
     // force 用于字号/eco 变更：几何尺寸可能未变但仍需软重排（ResizeObserver 回调不传）。
@@ -216,15 +218,22 @@
       if (destroyed) return;
       if (!visible || !global.Stage) return;
       reduced = !!(host.closest && host.closest('.s3d-reduced'));
-      // 光束能量每帧只取一次（reduced 或无 Stage.energy 时按 0 冻结），逐节点透传。
-      var energyNow = (!reduced && global.Stage && Stage.energy) ? Stage.energy() : 0;
-      // reduced：姿态/辉光瞬时吸附 target，不做逐帧低通；非 reduced 行为不变。
-      function dampX(v, target, tau) { return reduced ? target : U.damp(v, target, tau, dtMs); }
       var doc = Stage.lyrics();
       var tMs = Stage.position();
       var lines0 = doc ? doc.lines : [];
       var idx0 = U.activeLineIndex(lines0, tMs);
       var line = idx0 >= 0 ? lines0[idx0] : null;
+      // 低通依赖 dt，不会因为歌词时钟停止就自己冻结。暂停且输入不变时保留已画好的
+      // 姿态/光束，连 clearRect 与样式写入也一起停下；调参/resize/seek 仍允许刷新。
+      if (paused && lastTime === tMs && !needRepack && !paintDirty && reduced === lastReduced
+        && ((cur && cur.line === line) || (!cur && !line))) return;
+      var jumped = lastTime !== null && (tMs < lastTime - 50 || tMs - lastTime > 500);
+      var snap = reduced || paused || jumped;
+      lastTime = tMs; lastReduced = reduced; paintDirty = false;
+      var energyNow = reduced ? 0 : paused ? lastEnergy : Stage.energy ? Stage.energy() : 0;
+      lastEnergy = energyNow;
+      // seek 是定位，不是入场。沿旧姿态插值会让已唱字从新位置飘回、辉光拖到错误的字上。
+      function dampX(v, target, tau) { return snap ? target : U.damp(v, target, tau, dtMs); }
       if (!cur || cur.line !== line) {
         if (!line) {
           // 前奏/尾奏无活动行：首次 clearRect+卸载节点（避免 waiting 半透首行穿帮），
@@ -240,7 +249,7 @@
         }
         cleared = false;
         // 换句（含首帧）：硬挂载，节点从 waiting 姿态经 damp 低通进入。
-        cur = packLine(line); mount(cur, false, energyNow);
+        cur = packLine(line); mount(cur, snap, energyNow);
         needRepack = false; repackSoft = false;
       } else if (needRepack) {
         // 行未变而配置变更：重新 packLine + 软挂载，节点立即吸附当前姿态。
@@ -277,9 +286,10 @@
         if (Math.abs(v - fontScale) < 1e-6) return;
         fontScale = v; resize(true);
       },
+      // 交接淡出用：宿主拿到本层根节点，才能只淡出这一层而不是整条歌词宿主。
+      rootEl: function () { return wrap; },
       setVisible: function (b) { visible = b; wrap.hidden = !b; },
-      // API 保留：暂停时 Stage.position 静止，画面自然冻结，无需内部状态。
-      setPaused: function () {},
+      setPaused: function (b) { paused = !!b; },
       setEco: function (b) { if (eco === b) return; eco = b; resize(true); },
       setTuning: function (t) {
         var next = { width: U.clamp(t.width != null ? t.width : 0.72, 0.5, 0.9),
@@ -291,6 +301,7 @@
         // 只有排版宽度变化需要重排；motion/glow/beam 由 frame 每帧活读 tuning，拖滑杆不重排。
         var widthChanged = next.width !== tuning.width;
         tuning = next;
+        paintDirty = true;
         if (widthChanged) requestRepack(true);
       },
       resize: resize,

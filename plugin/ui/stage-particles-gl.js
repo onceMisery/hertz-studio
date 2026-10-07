@@ -8,9 +8,9 @@
 //
 //   Canvas 2D：每帧在 JS 里逐粒子积分位置 → drawImage × N。
 //              N 超过一千左右，主线程就开始吃掉歌词滚动的帧。
-//   WebGL   ：粒子位置是 (aSeed, aLane, aAng, uTime, 音频 uniform) 的解析函数，
+//   WebGL   ：粒子位置是 (aSeed, aX, aLane, aAng, uTime, 音频 uniform) 的解析函数，
 //              在顶点着色器里算。CPU 每帧只更新十几个 uniform，粒子数与主线程
-//              开销解耦，所以能开到几万颗。
+//              开销解耦，所以能比标准档密一个数量级。
 //
 // 泛光沿用「同一份顶点数据画两遍、第二遍点更大更淡」的做法，而不是一趟全屏
 // 后处理：加性混合的两遍点精灵在视觉上都比一次 bloom pass 便宜一个数量级。
@@ -22,19 +22,24 @@
 (function () {
   'use strict';
 
-  // 每档粒子上限与 DPR 上限。
+  // 每档粒子上限与 DPR 上限。宿主（stage-particles.js）还会在这之上再按面板
+  // 面积缩放一次，所以这里定的是"基准尺寸下该有多少颗"。
   //
-  // 这两个数是量出来的，不是猜的：泛光那一遍把点放大约 2.6 倍，填充率按
-  // dpr² 涨，在 Intel UHD 这类核显上 32000 颗 @dpr1.5 会把帧率从 ~53 拖到 ~37，
-  // 也就是"增强"反而比标准更卡。所以这里刻意压在"核显也稳得住"的水位上，
+  // 颗数必须和「单颗多大」一起定：屏幕上的总光量 ≈ 颗数 × 直径²，而泛光是
+  // 同一份点数据再画一遍放大版。以前这里是 14000 颗却沿用标准档的 3.2 尺寸
+  // 系数，总光量被抬到标准档的几十倍，在右侧那块小面板上直接糊成一片白噪点。
+  // 现在配平成「直径不到标准档一半、颗数二十多倍」，实测整体亮度与标准档相当，
+  // 增强体现在颗粒更细、闪得更多，而不是更曝。
+  //
+  // 上限仍刻意压在核显稳得住的水位上（泛光那一遍的填充率按 dpr² 涨），
   // 真正的余量交给下面的 A/B 探测去要。
-  var COUNTS = [2000, 7000, 14000];
+  var COUNTS = [1800, 5200, 10400];
   var DPR = [1.0, 1.15, 1.35];
-  var STRIDE = 5;          // seed, lane, ang, size, tint
+  var STRIDE = 6;          // seed, lane, ang, size, tint, x
 
   var VERT = `#version 300 es
 precision highp float;
-in float aSeed; in float aLane; in float aAng; in float aSize; in float aTint;
+in float aSeed; in float aLane; in float aAng; in float aSize; in float aTint; in float aX;
 uniform float uTime; uniform vec2 uRes; uniform float uPixel;
 uniform float uDrift; uniform float uStrength; uniform vec4 uBands;
 uniform float uPulse; uniform vec2 uCenter; uniform vec3 uFade;
@@ -47,8 +52,10 @@ void main() {
 
   float speed = uDrift * (0.4 + z) * (1.0 + uBands.z * 2.2);
   float y = 1.06 - fract(aSeed - t * speed) * 1.12;
-  float x = fract(aSeed * 0.6173 + 0.13)
-          + sin(t * 0.526 + aAng) * 0.013 * (0.3 + z) * (1.0 + uBands.y);
+  // 横向必须用独立的一路随机数。以前是 fract(aSeed * 0.6173 + 0.13)：
+  // 与 y 同源于 aSeed 且都是线性映射，于是整场粒子塌成一条斜率 -1.12/0.6173
+  // 的直线（aSeed < 相位的那部分另成一条），屏幕上就是两道白杠子而不是光尘。
+  float x = aX + sin(t * 0.526 + aAng) * 0.013 * (0.3 + z) * (1.0 + uBands.y);
   vec2 p = vec2(x * uRes.x, y * uRes.y);
   p.y += sin(t * 0.417) * uBands.x * 0.010 * uRes.y * uStrength;
 
@@ -65,20 +72,19 @@ void main() {
   float fade = 1.0;
   if (uFade.z > 0.5) {
     float dd = max(uFade.x - p.y, p.y - uFade.y);
-    if (dd > 0.0) fade = 0.28;
-    else fade = 0.28 + 0.72 * (min(-dd, 48.0) / 48.0);
+    fade = 0.28 + 0.72 * clamp(dd / 48.0, 0.0, 1.0);
   }
 
   float tw = 0.72 + 0.28 * sin(t * 2.381 + aAng * 3.1);
-  float a = (0.05 + 0.16 * z + uBands.x * 0.10 + uPulse * 0.14) * tw * fade;
+  float a = (0.028 + 0.085 * z + uBands.x * 0.055 + uPulse * 0.10) * tw * fade;
   // 高频泛音闪烁：每帧只点亮 1/8 的粒子，制造"空气里有东西在反光"
   float lane = floor(fract(aSeed * 71.3) * 8.0);
   float cur = floor(mod(t * 11.0, 8.0));
-  if (uBands.w > 0.02 && abs(lane - cur) < 0.5) a += uBands.w * 0.9 * 0.22;
+  if (uBands.w > 0.02 && abs(lane - cur) < 0.5) a += uBands.w * 0.9 * 0.16;
 
   float sz = aSize * (0.7 + z * 0.9) * (1.0 + uBands.x * 0.5 + uPulse * 0.35)
-           * 3.2 * uPixel * uSizeMul;
-  gl_PointSize = clamp(sz, 1.0, 64.0);
+           * 1.3 * uPixel * uSizeMul;
+  gl_PointSize = clamp(sz, 1.0, 34.0);
   vAlpha = a;
   vTint = aTint;
 
@@ -161,6 +167,7 @@ void main() {
       a[o + 2] = Math.random() * Math.PI * 2;
       a[o + 3] = 0.6 + Math.random() * 1.9;
       a[o + 4] = (i & 1) ? 1 : 0;
+      a[o + 5] = Math.random();
     }
     return a;
   }
@@ -174,9 +181,12 @@ void main() {
     function mountOne(v) {
       var gl;
       try {
+        // premultipliedAlpha 保持默认的 true：片元写的是 vec4(c*o, o)，已经乘过
+        // alpha。声明 false 等于告诉合成器"还要再乘一次"，于是整层按 o² 而不是 o
+        // 落地——单颗越暗掉得越狠，这一层的曝光就跟标准档的调参对不上号了。
         gl = v.canvas.getContext('webgl2', {
           alpha: true, antialias: false, depth: false, stencil: false,
-          premultipliedAlpha: false, preserveDrawingBuffer: false,
+          preserveDrawingBuffer: false,
           powerPreference: 'high-performance'
         });
       } catch (e) { gl = null; }
@@ -201,10 +211,11 @@ void main() {
         aLane: gl.getAttribLocation(prog, 'aLane'),
         aAng: gl.getAttribLocation(prog, 'aAng'),
         aSize: gl.getAttribLocation(prog, 'aSize'),
-        aTint: gl.getAttribLocation(prog, 'aTint')
+        aTint: gl.getAttribLocation(prog, 'aTint'),
+        aX: gl.getAttribLocation(prog, 'aX')
       };
       for (var i = 0; i < STRIDE; i += 1) {
-        var key = ['aSeed', 'aLane', 'aAng', 'aSize', 'aTint'][i];
+        var key = ['aSeed', 'aLane', 'aAng', 'aSize', 'aTint', 'aX'][i];
         var l = loc[key];
         if (l < 0) continue;
         gl.enableVertexAttribArray(l);
@@ -303,8 +314,8 @@ void main() {
         gl.uniform1f(u.uSizeMul, 1.0);
         gl.uniform1f(u.uAlphaMul, 1.0);
         gl.drawArrays(gl.POINTS, 0, count);
-        gl.uniform1f(u.uSizeMul, 2.6);
-        gl.uniform1f(u.uAlphaMul, 0.32);
+        gl.uniform1f(u.uSizeMul, 2.0);
+        gl.uniform1f(u.uAlphaMul, 0.17);
         gl.drawArrays(gl.POINTS, 0, count);
 
         gl.bindVertexArray(null);

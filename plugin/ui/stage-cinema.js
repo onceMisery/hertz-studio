@@ -285,6 +285,9 @@
     setFreecam: function (on) { s.freecamOn = !!on; },
     setPeek: function (on) { s.peek = !!on; },
     mode: function () { return s.mode; },
+    // 档位挡下与后台没算出来是两件事：前者重试多少次都不会有镜头，界面必须能
+    // 问出「这台设备现在根本不开镜头」这一问，否则那一行会把本机设置说成后端故障。
+    beatGated: function () { return tier0(); },
     _pure: P
   };
   init();

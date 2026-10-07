@@ -23,10 +23,30 @@
   // 本模块所有网络调用都发生在 start() 之后，届时再取即可。
   var T = null;
   var pollTimer = null;
-  var currentSource = null;
-  var currentTicket = null;
-  // QQ 当前码渠道：'qq'（手机 QQ 扫）或 'wx'（微信扫）。
-  var currentChannel = 'qq';
+  // 一次登录意图 = source + channel + ticket，随 attempt 一起作废旧的。
+  // 取码、轮询、手动 cookie 提交都属同一次意图：慢请求下 A 的响应可能在切到 B
+  // 之后才回来，若用「当前 source」配「这张迟到的 ticket」去轮询，平台票跨平台
+  // 根本无效；关窗后也还会多出一个后台轮询。所以每次网络收尾都先核对 attempt。
+  var intent = { attempt: 0, source: null, channel: 'qq', ticket: null };
+  var modalOpen = false;
+  function beginIntent(source, channel) {
+    intent = {
+      attempt: intent.attempt + 1,
+      source: source,
+      channel: channel || 'qq',
+      ticket: null,
+    };
+    return intent;
+  }
+  function voidIntent() { intent = beginIntent(null, 'qq'); }
+  function isCurrent(attempt) { return attempt === intent.attempt; }
+  /// 作废服务端会话。source/ticket 一律用调用方自己那份，不读「当前」字段：
+  /// 迟到的票要取消的是它自己的会话。后端对空票按幂等成功处理。
+  function cancelTicket(source, ticket) {
+    if (!source || !T) return;
+    T.post('/v1/online/qr/cancel', { source: source, ticket: ticket || '' })
+      .catch(function () { /* 作废失败不回滚：服务端随票据过期自行清理 */ });
+  }
   // 可登录音源清单（来自 /v1/online/sources，只保留有任一登录能力的源）。
   var loginSources = [];
   // 各源已登录账号：source -> AccountInfo（未登录的源不在表里）。
@@ -98,7 +118,13 @@
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   }
 
-  function renderQr(start) {
+  function renderQr(start, mine) {
+    if (!isCurrent(mine.attempt)) {
+      // 迟到的票：服务端会话已经建起来了，按它自己的 source 尽力作废，
+      // 但不画二维码、也不起轮询——用户早就切走或关窗了。
+      if (start.ticket) cancelTicket(mine.source, start.ticket);
+      return;
+    }
     var box = el('qr-canvas');
     box.innerHTML = '';
     box.style.cursor = 'default';
@@ -117,33 +143,36 @@
       // 空白框等。把原文摆出来至少还能换个扫码工具手动处理。
       box.textContent = start.qr_text || '二维码生成失败';
     }
-    currentTicket = start.ticket;
-    schedulePoll(currentSource, start.ticket, start.poll_ms || 2000);
+    intent.ticket = start.ticket;
+    schedulePoll(mine, start.poll_ms || 2000);
   }
 
-  function schedulePoll(source, ticket, ms) {
+  function schedulePoll(mine, ms) {
+    if (!isCurrent(mine.attempt)) return;
     stopPolling();
-    pollTimer = setTimeout(function () { poll(source, ticket, ms); }, ms);
+    pollTimer = setTimeout(function () { poll(mine, ms); }, ms);
   }
 
-  async function poll(source, ticket, ms) {
+  async function poll(mine, ms) {
     var p;
     try {
-      p = await T.get('/v1/online/qr/poll?source=' + encodeURIComponent(source)
-        + '&ticket=' + encodeURIComponent(ticket));
+      p = await T.get('/v1/online/qr/poll?source=' + encodeURIComponent(mine.source)
+        + '&ticket=' + encodeURIComponent(mine.ticket));
     } catch (e) {
+      if (!isCurrent(mine.attempt)) return;
       // 服务端业务错误（换票失败、风控等）要把原文显示出来，不能笼统当
       // 网络问题无限重试，否则用户无法判断发生了什么。
       el('qr-status').textContent = '请求失败：' + (e && e.message ? e.message : '网络异常') + '（3s 后重试）';
-      schedulePoll(source, ticket, 3000);
+      schedulePoll(mine, 3000);
       return;
     }
+    if (!isCurrent(mine.attempt)) return;
     if (p.state === 'waiting') {
-      el('qr-status').textContent = '请用' + scanApp(source) + '扫码登录';
-      schedulePoll(source, ticket, ms);
+      el('qr-status').textContent = '请用' + scanApp(mine.source) + '扫码登录';
+      schedulePoll(mine, ms);
     } else if (p.state === 'scanned') {
       el('qr-status').textContent = '已扫码，请在手机上确认登录';
-      schedulePoll(source, ticket, ms);
+      schedulePoll(mine, ms);
     } else if (p.state === 'confirmed') {
       stopPolling();
       el('qr-status').textContent = '登录成功';
@@ -165,7 +194,7 @@
       var box = el('qr-canvas');
       box.style.opacity = '.4';
       box.style.cursor = 'pointer';
-      box.onclick = function () { start(source, currentChannel); };
+      box.onclick = function () { start(mine.source, mine.channel); };
     } else {
       // 未约定的票态（平台侧异常串等）：继续轮询只会空转，停下并把原始
       // 状态展示出来，用户可以关掉重开或走 cookie 兜底。
@@ -177,13 +206,13 @@
   function paintChannels() {
     var bar = el('qr-channels');
     // 只有 QQ 有两种码；其余平台隐藏切换条。
-    bar.hidden = currentSource !== 'qq';
+    bar.hidden = intent.source !== 'qq';
     var setActive = function (id, on) {
       var b = el(id);
       if (b) b.classList.toggle('active', on);
     };
-    setActive('qr-ch-qq', currentChannel === 'qq');
-    setActive('qr-ch-wx', currentChannel === 'wx');
+    setActive('qr-ch-qq', intent.channel === 'qq');
+    setActive('qr-ch-wx', intent.channel === 'wx');
   }
 
   // ── 可登录音源清单与选择条 ─────────────────────────────────────────────
@@ -208,17 +237,27 @@
     return s ? s.label : id;
   }
 
-  // 并发拉取各源账号态：未登录/失败一律按未登录（绝不弹错打扰）。
+  // 并发拉取各源账号态。没登录的源（401/403）按未登录处理；**探测没出结果**
+  // （上游 5xx / 超时 / 网络故障）不算授权断言（A6）：留着上一次的账号身份与
+  // 顶栏头像，别把「没探到」显示成「没登录」而催用户重扫。
   async function loadAccounts() {
+    var prev = accountsById;
     accountsById = {};
     await Promise.all(
       loginSources.map(async function (s) {
+        var acc = null;
+        var verdict = 'unknown';
         try {
-          var acc = await T.get(
+          acc = await T.get(
             '/v1/online/account?source=' + encodeURIComponent(s.id)
           );
-          if (acc && (acc.nickname || acc.avatar)) accountsById[s.id] = acc;
-        } catch (e) { /* 未登录，忽略 */ }
+          verdict = 'ok';
+        } catch (e) {
+          verdict = (window.Online && window.Online.accountVerdict)
+            ? window.Online.accountVerdict(e) : 'signed-out';
+        }
+        if (verdict === 'ok' && acc && (acc.nickname || acc.avatar)) accountsById[s.id] = acc;
+        else if (verdict === 'unknown' && prev[s.id]) accountsById[s.id] = prev[s.id];
       })
     );
     refreshTopAvatar();
@@ -295,13 +334,16 @@
         nm.textContent = acc.nickname || s.label;
         b.appendChild(nm);
         b.onclick = function () {
-          if (currentSource !== s.id) enterLoggedIn(s.id);
+          if (intent.source !== s.id) enterLoggedIn(s.id);
         };
       } else {
-        // 未登录：显示平台名，点击走登录取码。
+        // 未登录：显示平台名，点击走登录取码。扫码链路没真机验收过的源照常
+        // 可点，只加标注（A9）——「没验过」不该被画成「不支持」，也不该被当成
+        // 「一定能用」。
         b.textContent = s.label;
+        if (window.Online) window.Online.markUnverified(b, s, 'qr_login');
         b.onclick = function () {
-          if (currentSource !== s.id) start(s.id, 'qq');
+          if (intent.source !== s.id) start(s.id, 'qq');
         };
       }
       box.appendChild(b);
@@ -311,7 +353,7 @@
   function paintSourceActive() {
     var tabs = el('qr-sources').querySelectorAll('.qr-source');
     Array.prototype.forEach.call(tabs, function (b) {
-      b.classList.toggle('active', b.dataset.source === currentSource);
+      b.classList.toggle('active', b.dataset.source === intent.source);
     });
   }
 
@@ -319,6 +361,7 @@
   /// 否则默认选清单第一个源；已登录源直接展示账号信息，不再要求登录。
   async function open(source) {
     T = window.VMusicTransport;
+    modalOpen = true;
     // 标记弹窗打开：隐藏 .app，从根本上杜绝页面内任何元素（含带动画/
     // transform 的层叠上下文）穿透遮挡弹窗。
     document.documentElement.classList.add('qr-modal-open');
@@ -334,6 +377,8 @@
       await loadAccounts();
       // 弹窗里也要以服务端为准（另开标签页改过选择时这里能跟上）。
       await loadSelectedAvatar();
+      // 加载期间用户已经关窗：不要替他再把弹窗打开。
+      if (!modalOpen) return;
       paintSourceTabs();
       refreshTopAvatar();
       // 选目标源：显式指定 > 唯一已登录源 > 清单第一个。
@@ -358,9 +403,12 @@
   /// 进入一个已登录源：不显示二维码，展示头像/昵称与退出按钮。
   function enterLoggedIn(source) {
     var acc = accountsById[source];
+    var prev = intent;
+    // 进入已登录视图也是一次新意图：在途取码回来只许作废自己，不许把二维码
+    // 画到账号面板上。
+    beginIntent(source, 'qq');
+    if (prev.ticket) cancelTicket(prev.source, prev.ticket);
     stopPolling();
-    currentSource = source;
-    currentTicket = null;
     el('qr-title').textContent = sourceLabel(source);
     paintSourceActive();
     // QQ 的 QQ/微信渠道条在已登录态无意义，隐藏。
@@ -447,18 +495,13 @@
     // 账号区按钮直接调 start()（不经 open()），T 必须在这里也绑定一次，
     // 否则首次点「扫码登录」时 T 为 null。
     T = window.VMusicTransport;
+    var prev = intent;
+    var mine = beginIntent(source, channel);
     // 渠道/音源切换重入：先把上一张票作废，避免服务端留孤儿会话。
-    if (currentTicket) {
-      // 作废旧票失败不回滚：服务端会随票据过期自行清理，这里只是尽量不留孤儿会话。
-      T.post('/v1/online/qr/cancel', {
-        source: currentSource,
-        ticket: currentTicket,
-      }).catch(function () {});
-    }
+    // 作废旧票失败不回滚：服务端会随票据过期自行清理，这里只是尽量不留孤儿会话。
+    if (prev.ticket) cancelTicket(prev.source, prev.ticket);
     stopPolling();
-    currentSource = source;
-    currentTicket = null;
-    currentChannel = channel || 'qq';
+    modalOpen = true;
     el('qr-title').textContent = sourceLabel(source) + ' 登录';
     el('qr-status').textContent = '正在生成二维码…';
     paintSourceTabs();
@@ -476,20 +519,26 @@
     try {
       s = await T.post('/v1/online/qr/start', {
         source: source,
-        channel: currentChannel,
+        channel: mine.channel,
       });
     } catch (e) {
+      // 已经被新意图取代（切平台、关窗）：这次的失败不属于当前界面。
+      if (!isCurrent(mine.attempt)) return;
       // 该源此刻取不到扫码（平台侧问题/能力闸门）：保留弹窗，引导走 cookie。
       el('qr-status').textContent =
         '暂取不到二维码：' + (e && e.message ? e.message : '该平台可能限制了扫码') +
         '；可展开下面的 cookie 登录';
       return;
     }
-    renderQr(s);
+    renderQr(s, mine);
   }
 
   function close() {
+    var prev = intent;
+    // 关窗即在途失效：迟到的取码不再渲染，也不再注册轮询。
+    voidIntent();
     stopPolling();
+    modalOpen = false;
     el('qr-modal').hidden = true;
     // 解除背景隔离，恢复 .app 显示。
     document.documentElement.classList.remove('qr-modal-open');
@@ -497,15 +546,9 @@
     box.onclick = null;
     box.style.opacity = '1';
     el('qr-cookie-input').value = '';
-    if (currentSource) {
-      // 传真实票据让服务端立即删掉会话；票据可能为空（start 失败就关窗），
-      // 后端对空票按幂等成功处理。
-      var payload = { source: currentSource, ticket: currentTicket || '' };
-      currentSource = null;
-      currentTicket = null;
-      // 同上：关窗时的作废是尽力而为，用户已经不需要这个会话了。
-      T.post('/v1/online/qr/cancel', payload).catch(function () {});
-    }
+    // 传真实票据让服务端立即删掉会话；票据可能为空（start 失败就关窗），
+    // 后端对空票按幂等成功处理。
+    cancelTicket(prev.source, prev.ticket);
   }
 
   el('qr-close').onclick = close;
@@ -519,13 +562,14 @@
   });
   // QQ/微信切换：用新渠道重新取码（旧会话随 close 逻辑在 start 里弃用）。
   el('qr-ch-qq').onclick = function () {
-    if (currentChannel !== 'qq') start(currentSource, 'qq');
+    if (intent.channel !== 'qq') start(intent.source, 'qq');
   };
   el('qr-ch-wx').onclick = function () {
-    if (currentChannel !== 'wx') start(currentSource, 'wx');
+    if (intent.channel !== 'wx') start(intent.source, 'wx');
   };
   el('qr-cookie-save').onclick = async function () {
-    var source = currentSource;
+    var mine = intent;
+    var source = mine.source;
     var cookie = el('qr-cookie-input').value.trim();
     if (!source || !cookie) return;
     var btn = this;
@@ -534,15 +578,23 @@
     try {
       res = await T.post('/v1/online/cookie', { source: source, cookie: cookie });
     } catch (e) {
-      el('qr-status').textContent = '保存失败：' + e.message;
       btn.disabled = false;
+      if (!isCurrent(mine.attempt)) return;
+      el('qr-status').textContent = '保存失败：' + e.message;
       return;
     }
     btn.disabled = false;
     // 后端回读 cred 包按平台判据给结论：存进去不等于登录成功
     // （缺 MUSIC_U / qm_keyst / token 的包各平台仍按未登录处理）。
     // 绝不能在 false 时关窗假装成功。
-    if (res && res.signedIn) {
+    var signedIn = !!(res && res.signedIn);
+    if (!isCurrent(mine.attempt)) {
+      // 提交期间用户已切平台或关窗：cookie 已在服务端保存，只让账号区跟上，
+      // 不动当前界面（尤其不能把别的源的登录态当成这次的结果）。
+      if (signedIn && window.OnlinePlaylists) window.OnlinePlaylists.refresh();
+      return;
+    }
+    if (signedIn) {
       close();
       if (window.OnlinePlaylists) window.OnlinePlaylists.refresh();
       if (window.toast) window.toast(source + ' 登录成功');

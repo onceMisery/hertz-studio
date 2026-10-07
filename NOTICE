@@ -111,3 +111,32 @@ The non-image platform badges in the web UI (`.src-badge` in
 `plugin/ui/online.js`) reuse the brand-colour palette of the
 Mineradio project's `--source-*` CSS variables. One colour value is not
 copyrightable subject matter; it is recorded here for completeness.
+
+A further batch of 2026-10 work was scoped by reading the *behaviour* of the
+same Mineradio project (GPL-3.0-only): the QR sign-in intent ownership
+(`plugin/ui/online-login.js`), the honest scope wording of the collection
+play/enqueue actions (`plugin/ui/online-playlist-view.js`), the daily page's
+mapping of pending / skipped / stale source state onto `daily.rs`'s existing
+fields (`plugin/ui/daily-view.js`), the stage panel's alias search and
+per-gesture undo over its own `SCHEMA` (`plugin/ui/stage-control.js`), and the
+total deadline around one stream lookup
+(`crates/hertz-studio/src/online/mod.rs`), and the per-track runtime quality
+ceiling that steps down on failure and says so out loud
+(`crates/hertz-studio/src/online/quality.rs`, `crates/hertz-studio/src/state.rs`),
+and the concurrency budget plus the split between "beat map ready" and "beat
+map persisted" for background analysis
+(`crates/hertz-studio/src/stage_beats.rs`), and the per-track lyric calibration
+being opened up to online sources
+(`crates/hertz-studio/src/routes.rs`, `plugin/ui/app.js`), and crash
+observability — a panic hook that records a hand-off report id, plus the
+two-phase log trim
+(`crates/hertz-studio/src/diag.rs`, `crates/hertz-studio/src/bootstrap.rs`),
+and lifting the search-keyword history out of one skin into a shared owner
+(`plugin/ui/search-history.js`), plus the split between a queue item's chosen
+origin and the source actually serving it
+(`crates/hertz-studio/src/state.rs`, `plugin/ui/online.js`).
+Nothing was pasted: an author's
+consent to reuse his code does not reach the behaviour contracts, and each of
+these was re-expressed against this project's own owners (Rust service layer,
+HTTP + RPC facades, single-writer playback actor, front-end IIFE modules).
+No source file of that project is distributed in this repository.

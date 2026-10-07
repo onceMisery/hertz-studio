@@ -95,11 +95,15 @@
   // 旧调用点语义：isPlane() 现在专指「无 GL 纯平面回退」。
   function isPlane() { return isStandalone(); }
   var stanza = { ready: false, bg: null, sub: null, classic: null, cadenza: null, sonnet: null, tempera: null,
-    director: null,          // 星诞元导演实例（仅 visual==='starborn' 时工作）
+    director: null,          // 星诞元导演实例（仅 visual==='starborn' 时被驱动）
     visual: 'stage',
-    autoDirector: false,     // 星诞是否启用（从 UI 持久化读回）
+    // 导演的启用条件只有「歌词视觉选了星诞」这一个。这里曾另有 autoDirector 布尔，
+    // 它在全仓库没有任何赋值点，于是导演一帧都没跑过、画面永远停在兜底的流光。
+    // 不要再为导演加第二个开关。
     autoLock: 4,             // 自动切镜的最小间隔（秒）
     autoAvoidRepeat: true,   // 是否抑制最近用过的模式
+    directorLive: false,     // 上一帧是否由星诞在驱动（离开时据此清一次导演状态）
+    shownVisual: null,       // 真正落到可见性上的生效视觉，切镜沿检测用
     lastDirected: null,      // 最近一次导演决策，供 HUD 显示
     bgMode: 'stage', bgOpacity: 0.75, vignette: true, subtitle: true,
     wallpaper: 'evening-16.jpg', wallpaperDim: 0.48,
@@ -690,10 +694,40 @@
 
   var root = null;
   var wrapEl = null;
+  var sceneSource = 'immersive';
+  var creativeHost = null, artHost = null;
   var canvas = null;
   var gl = null;
   var glFailed = false;
   var contextLost = false;
+  // 渲染恢复预算。上下文丢失多半是一次显存回收或驱动重置，浏览器会自己恢复；
+  // 但两分钟内反复丢就是这台环境放不起来，每丢一次都重建一遍着色器链，只是把
+  // GPU 花在没人看得见的画面上，横幅还在「正在恢复」和画面之间闪。到顶就停用，
+  // 并把话说清楚（原话只有一句「可退出后重新进入」，等于把判断推给用户）。
+  var RECOVERY_WINDOW_MS = 120000, RECOVERY_MAX = 3;
+  var recoveryAt = [], glStopped = false;
+  var RECOVERY_STOPPED_TEXT = '渲染上下文在 2 分钟内已丢失 ' + RECOVERY_MAX
+    + ' 次，三维舞台已停用（音乐播放与歌词不受影响）。可在设置 → 开发者选项 导出日志，把这一段发给开发者。';
+
+  /// 剪掉窗口之外的丢失记录，返回仍在窗口内的时间戳。纯函数：真显卡重置没法
+  /// 按时间表演，预算判断只能这样才量得到。
+  function pruneRecoveries(history, now, windowMs) {
+    var out = [];
+    for (var i = 0; i < history.length; i += 1) {
+      if (now - history[i] < windowMs) out.push(history[i]);
+    }
+    return out;
+  }
+
+  /// 这次丢失还允许恢复吗。允许就把时间戳记进窗口并返回新表；预算用完返回
+  /// null（调用方据此停用，而不是继续重建）。与 prune 分开是为了让「记一次」
+  /// 这件事只有一条路径：先剪窗、再判额、再记。
+  function takeRecovery(history, now, windowMs, max) {
+    var kept = pruneRecoveries(history, now, windowMs);
+    if (kept.length >= max) return null;
+    kept.push(now);
+    return kept;
+  }
 
   var active = false;
   var fade = 0;             // 0..1 开合淡入淡出
@@ -1213,7 +1247,13 @@
 
   function ensureGl() {
     if (gl) return true;
-    if (glFailed || !wrapEl) return false;
+    // 停用是**有期限的**：窗口过去之后用户再进三维就该再给一次机会。永远堵死会
+    // 把一次驱动重置变成整场不可用，而那并非事实所致。
+    if (glStopped && recoveryAt.length) {
+      recoveryAt = pruneRecoveries(recoveryAt, Date.now(), RECOVERY_WINDOW_MS);
+      if (!recoveryAt.length) glStopped = false;
+    }
+    if (glFailed || glStopped || !wrapEl) return false;
     contextLost = false;
     canvas = document.createElement('canvas');
     canvas.className = 's3d-canvas';
@@ -1250,6 +1290,19 @@
   function onContextLost(e) {
     // 不 preventDefault 就永远不会收到 restored。
     if (e && e.preventDefault) e.preventDefault();
+    var next = takeRecovery(recoveryAt, Date.now(), RECOVERY_WINDOW_MS, RECOVERY_MAX);
+    if (next === null) {
+      // 预算用完：不再假装会恢复。releaseGl 摘掉画布与这两个监听，之后所有
+      // 渲染路径都靠 `!gl` 早退；contextLost 必须留 false，否则横幅会一直说
+      // 「正在恢复」，而已经没人恢复了。
+      glStopped = true;
+      contextLost = false;
+      releaseGl();
+      if (!isPlane()) showFallback(RECOVERY_STOPPED_TEXT);
+      pokeChrome();
+      return;
+    }
+    recoveryAt = next;
     contextLost = true;
     cancelGestures();
     // Detach pending cover loads before the restored context invalidates their textures.
@@ -1270,7 +1323,12 @@
       builtStages = {}; sizeDirty = true;
       $('s3d-fallback').hidden = true;
       if (global.Stage && Stage.kick) Stage.kick();
-    } else { releaseGl(); showFallback('舞台暂时无法恢复，可退出后重新进入。'); }
+    } else {
+      // 一次重建失败不构成永久停用（ensureGl 下次进三维还会再试），但措辞得说出
+      // 发生了什么、去哪儿取证，而不是把判断推给用户的「退出后重新进入」。
+      releaseGl();
+      showFallback('舞台的后处理链重建失败，三维画面已暂停（音乐播放与歌词不受影响）。可在设置 → 开发者选项 导出日志，把这一段发给开发者。');
+    }
   }
 
   function releaseGl() {
@@ -1297,9 +1355,10 @@
     gl = null;
   }
 
-  function showFallback(text) {
+  function showFallback(text, source) {
     var el = $('s3d-fallback');
     if (!el) return;
+    el.dataset.source = source || 'immersive';
     el.textContent = text;
     el.hidden = false;
   }
@@ -1537,7 +1596,14 @@
 
   function render(dtMs) {
     // 3D 场景始终渲染：stanza 歌词只是透明叠加层（standalone 无 GL 回退时才没有 GL）。
-    if (!gl || contextLost || sceneCovered()) return;
+    if (!gl || contextLost) return;
+    if (sceneSource === 'creative') {
+      if (global.CreativeStage && CreativeStage.syncPosition) CreativeStage.syncPosition();
+      if (sizeDirty) resize();
+      updateAudio(dtMs); updateCamera(dtMs); paintWords();
+      return;
+    }
+    if (sceneCovered()) return;
     if (sizeDirty) resize();
     if (!post || !post.scene || !post.a || !post.b) return;
     updateAudio(dtMs);
@@ -1913,6 +1979,15 @@
     }
   }
 
+  // chrome 内的焦点只有「键盘来的」（:focus-visible）才豁免自动隐藏。
+  // 之前用 :focus-within：鼠标点一次播放/全屏按钮，焦点残留在按钮上不会自己走，
+  // chrome 从此被永久钉住 —— 用户报告的「全屏控制按钮不隐藏」即此。
+  // Tab 键盘导航仍受豁免（focus-visible 为真），chrome 不会从键盘用户脚下消失。
+  function chromeKeyboardFocus() {
+    var el = root.querySelector('.s3d-head :focus, .s3d-player :focus, .s3d-dock :focus, .s3d-brand :focus, .s3d-hint :focus, .s3d-keys :focus');
+    return !!(el && el.matches && el.matches(':focus-visible'));
+  }
+
   function pokeChrome() {
     if (!root || !active) return;
     var wasVisible = root.classList.contains('s3d-chrome');
@@ -1923,7 +1998,7 @@
       // 队列面板打开不再豁免 chrome：它应与 3D 歌单架一致，
       // 静止后随 chrome 一起淡出（只保留舞台与歌词）。
       // 设置/工坊面板属于显式模态，静止期间仍保留。
-      if ((global.Workshop && Workshop.isOpen()) || !$('s3d-settings').hidden || root.querySelector('.s3d-head:focus-within, .s3d-player:focus-within, .s3d-dock:focus-within') || dragging || seeking) return;
+      if ((global.Workshop && Workshop.isOpen()) || !$('s3d-settings').hidden || chromeKeyboardFocus() || dragging || seeking) return;
       root.classList.remove('s3d-chrome');
     }, CHROME_HIDE_MS);
   }
@@ -1933,6 +2008,7 @@
   // -------------------------------------------------------------------------
 
   function setStage(i, immediate) {
+    if (active && (sceneCovered() || !gl || contextLost)) return false;
     i = Math.round(clamp(num(i, 0), 0, STAGES.length - 1));
     var changed = i !== stageIndex;
     stageIndex = i;
@@ -1960,7 +2036,7 @@
   }
 
   function preferences() {
-    return { scene: STAGES[stageIndex].id, motion: motion, bloom: bloom, reactivity: reactivity, lyrics: showLyrics, cruise: cam.cruise, layout: layout, lyricSize: lyricSize, lyricGlow: lyricGlow,
+    return { scene: STAGES[stageIndex].id, sceneSource: sceneSource, motion: motion, bloom: bloom, reactivity: reactivity, lyrics: showLyrics, cruise: cam.cruise, layout: layout, lyricSize: lyricSize, lyricGlow: lyricGlow,
       shelfMode: shelfMode,
       stageTheme: stageTheme,
       stanzaVisual: stanza.visual,
@@ -1977,6 +2053,7 @@
     if (!value || typeof value !== 'object') return;
     restoring = true;
     try {
+      if (value.sceneSource === 'creative' || value.sceneSource === 'immersive') sceneSource = value.sceneSource;
       if (typeof value.motion === 'number') motion = clamp(num(value.motion, 0.65), 0, 1);
       if (typeof value.bloom === 'number') bloom = clamp(num(value.bloom, 0.8), 0, 1.5);
       if (typeof value.reactivity === 'number') reactivity = clamp(num(value.reactivity, 1.35), 0, 2);
@@ -2212,7 +2289,7 @@
         // 否则关掉星诞后会发现下拉框被导演改成了别的值。
         setVisual: function (id) {
           if (STANZA_VISUALS.indexOf(id) < 0) return;
-          if (effectiveVisual() === id) return;
+          if (stanza.shownVisual === id) return;
           stanza.lastDirected = id;
           applyStanzaConfig();
         },
@@ -2229,16 +2306,96 @@
     applyStanzaConfig();
   }
 
-  function planeApi() {
-    // 走 effectiveVisual 而非 stanza.visual：星诞模式下真正决定画面的是导演当前指向的模式。
-    var v = effectiveVisual();
-    return v === 'classic' ? stanza.classic
-      : v === 'sonnet' ? stanza.sonnet
-      : v === 'tempera' && stanza.tempera ? stanza.tempera : stanza.cadenza;
+  // 生效视觉 → 渲染器实例。回退必须连同「真正在画的是哪个 id」一起回报：只回退实例而不回报
+  // id，就会出现「按 sonnet 收起了歌词宿主、实际在跑的却是 cadenza、而 cadenza 又因为
+  // effVisual!=='cadenza' 被判成隐藏」这种两边都不显示的死角。导演切镜会走到这一步。
+  var RENDERER_IDS = ['classic', 'cadenza', 'sonnet', 'tempera'];
+  function planeFor(v) {
+    var map = { classic: stanza.classic, cadenza: stanza.cadenza, sonnet: stanza.sonnet, tempera: stanza.tempera };
+    if (map[v]) return { id: v, api: map[v] };
+    for (var i = 0; i < RENDERER_IDS.length; i++) if (map[RENDERER_IDS[i]]) return { id: RENDERER_IDS[i], api: map[RENDERER_IDS[i]] };
+    return { id: v, api: null };
   }
+  function planeApi() { return planeFor(effectiveVisual()).api; }
 
   function sceneCovered() {
-    return stanzaActive() && (stanza.bgMode === 'anime' || stanza.bgMode === 'atmosphere');
+    return sceneSource === 'creative' || stanzaActive() && stanza.bgMode !== 'stage';
+  }
+
+  // Stage3D owns presentation; CreativeStage owns the preset and its render clock.
+  // A single host survives editor changes. Closing the editor never tears it down.
+  function syncCreativeStage() {
+    if (!root) return;
+    if (!creativeHost) {
+      creativeHost = document.createElement('div');
+      creativeHost.id = 's3d-creative'; creativeHost.className = 's3d-creative';
+      root.insertBefore(creativeHost, root.firstChild);
+      artHost = document.createElement('div');
+      artHost.id = 's3d-art-overlay'; artHost.className = 's3d-art-overlay';
+      artHost.setAttribute('aria-hidden', 'true');
+      root.insertBefore(artHost, root.querySelector('.s3d-head'));
+    }
+    var useCreative = sceneSource === 'creative';
+    creativeHost.hidden = !useCreative;
+    root.classList.toggle('s3d-creative-source', useCreative);
+    var sourceSelect = $('s3d-scene-source');
+    if (sourceSelect) sourceSelect.value = sceneSource;
+    if (global.CreativeStage && CreativeStage.attachStage) {
+      var ok = CreativeStage.attachStage(active && useCreative ? creativeHost : null);
+      if (active && useCreative && !ok) showFallback(CreativeStage.degradedBecause() || '创意舞台暂不可用，请选择沉浸声场', 'creative');
+      else if (active && (useCreative ? ok : gl && !contextLost)) {
+        var fallback = $('s3d-fallback');
+        if (fallback && (useCreative || fallback.dataset.source === 'creative')) fallback.hidden = true;
+      }
+    }
+    if (global.Backgrounds && Backgrounds.setStageHost) Backgrounds.setStageHost(active && useCreative ? creativeHost : null);
+    if (global.HandDrawn && HandDrawn.setStageHost) HandDrawn.setStageHost(active ? artHost : null);
+  }
+
+  function settingsState() {
+    return global.StageSettings.resolve({ visual: stanza.visual, effective: stanzaActive() ? planeFor(effectiveVisual()).id : 'stage',
+      background: stanza.bgMode, source: sceneSource, webgl: !!gl && !contextLost, lyrics: showLyrics,
+      reduced: reducedMotion(), lyricLayout: stanza.sonnetTuning.lyricLayout });
+  }
+
+  var settingsSignature = '';
+  // 设置值归 preferences 所有；这里只派生可用性，切模式不会清空上次调好的参数。
+  function syncSettingsState() {
+    if (!root) return;
+    var state = settingsState();
+    var sig = JSON.stringify(state);
+    if (sig === settingsSignature) return;
+    settingsSignature = sig;
+    text('s3d-settings-status', state.label + ' · 可用设置即时生效，灰显项保留原值');
+    text('s3d-background-status', state.backgroundNote);
+    RENDERER_IDS.forEach(function (id) {
+      var panel = $('s3d-fl-' + id);
+      if (!panel) return;
+      panel.hidden = !state.stanza || state.effective !== id;
+      panel.querySelectorAll('input, select').forEach(function (input) { input.disabled = !state.lyrics; });
+    });
+    Object.keys(state.rows).forEach(function (id) {
+      var input = $(id), setting = state.rows[id];
+      if (!input) return;
+      input.disabled = !setting.enabled;
+      var label = document.querySelector('label[for="' + id + '"]') || input.closest('label');
+      if (label) label.classList.toggle('s3d-setting-inactive', !setting.enabled);
+      var note = $(id + '-availability');
+      if (!note) {
+        note = document.createElement('small'); note.id = id + '-availability';
+        note.className = 's3d-setting-note';
+        (input.closest('label') || input).insertAdjacentElement('afterend', note);
+        input.setAttribute('aria-describedby', note.id);
+      }
+      note.textContent = setting.reason; note.hidden = setting.enabled;
+    });
+    var dock = $('s3d-dock');
+    if (dock) dock.hidden = !state.scene;
+    var keys = root.querySelector('.s3d-keys');
+    if (keys) keys.textContent = state.scene ? '拖动旋转 · 双击复位 · 1–7 切舞台 · F 全屏 · L 歌词 · Q 队列 · Esc 返回' : 'F 全屏 · L 歌词 · Q 队列 · Esc 返回';
+    var coverToggle = $('s3d-cover-toggle');
+    if (coverToggle) { coverToggle.disabled = state.stanza; coverToggle.title = state.stanza ? '当前歌词视觉使用独立排版' : '封面与歌词 (B)'; }
+    notifyVisualChange();
   }
 
   function stageWallpapers() {
@@ -2254,10 +2411,12 @@
   function syncStageBackdrop() {
     var backdrop = $('s3d-fl-backdrop'), picture = $('s3d-fl-wallpaper');
     var panel = $('s3d-fl-wallpapers'), gallery = $('s3d-fl-wallpaper-grid');
-    var useImage = stanza.bgMode === 'anime';
-    if (backdrop) backdrop.hidden = !sceneCovered();
+    var useImage = sceneSource !== 'creative' && stanza.bgMode === 'anime';
+    if (backdrop) backdrop.hidden = sceneSource === 'creative' || !stanzaActive() || (stanza.bgMode !== 'anime' && stanza.bgMode !== 'atmosphere');
     if (panel) panel.hidden = !useImage;
     if (root) root.classList.toggle('s3d-scene-covered', sceneCovered());
+    if (root) root.classList.toggle('s3d-no-vignette', stanzaActive() && !stanza.vignette);
+    if (backdrop) backdrop.style.setProperty('--fl-bg-vignette', stanza.vignette ? '1' : '0');
     if (backdrop && backdrop.dataset.dim !== String(stanza.wallpaperDim)) {
       backdrop.dataset.dim = String(stanza.wallpaperDim);
       backdrop.style.setProperty('--fl-wallpaper-dim', String(stanza.wallpaperDim));
@@ -2299,19 +2458,242 @@
     }
   }
 
+  // -------------------------------------------------------------------------
+  // 切镜交接：导演（或用户手动换模式）换渲染器时，不做 setVisible 硬切。
+  // 离场那一层多活 0.2–0.46s，用 opacity 淡出，同时进场层淡入 —— 观众看到的是一记
+  // 「叠化」而不是画面凭空闪一下。淡变时长取进场句前的那口空气：空气越长叠化越从容，
+  // 段间几乎没留白时自动收短，避免上一句的尾巴盖住新句的字。
+  // -------------------------------------------------------------------------
+  var HANDOFF_MAX_MS = 460;
+  var handoff = { outId: null, startedAt: null, lastTime: 0, duration: 0, progress: -1 };
+
+  function rendererOf(id) {
+    return id === 'classic' ? stanza.classic : id === 'cadenza' ? stanza.cadenza
+      : id === 'sonnet' ? stanza.sonnet : id === 'tempera' ? stanza.tempera : null;
+  }
+  function layerEl(id) {
+    var api = rendererOf(id);
+    return api && api.rootEl ? api.rootEl() : null;
+  }
+  function handoffDuration() {
+    if (stanza.visual === 'starborn' && stanza.director && stanza.director.cinemaFrame) {
+      var film = stanza.director.cinemaFrame();
+      if (film) return film.transitionMs;
+    }
+    var s = songformNow();
+    var gap = s && s.line ? s.line.gapBefore : 0;
+    if (!(gap > 0)) return 380;
+    return Math.round(clamp(gap * 380, 200, HANDOFF_MAX_MS));
+  }
+  function settleHandoff() {
+    [layerEl(handoff.outId), layerEl(stanza.shownVisual)].forEach(function (el) {
+      if (!el) return;
+      el.classList.remove('fl-hand-out', 'fl-hand-in');
+      el.style.removeProperty('--fl-hand-opacity');
+    });
+    handoff.outId = null;
+    handoff.startedAt = null;
+    handoff.progress = -1;
+  }
+  function beginHandoff(prevId, nextId, durMs) {
+    var out = layerEl(prevId), inn = layerEl(nextId);
+    if (!out || !inn) return false;
+    handoff.outId = prevId;
+    handoff.duration = durMs;
+    out.style.setProperty('--fl-hand-opacity', '1');
+    inn.style.setProperty('--fl-hand-opacity', '0');
+    out.classList.add('fl-hand-out');
+    inn.classList.add('fl-hand-in');
+    return true;
+  }
+
+  // 唯一 Stage 帧循环先绘制进场层，再交接。冷启动保留旧画面，不为不可见模式预热 GPU。
+  // 暂停时的手动切换须可立即使用；播放中的叠化则随播放时钟冻结、seek 收尾。
+  function driveHandoff() {
+    if (!handoff.outId) return;
+    var api = rendererOf(stanza.shownVisual);
+    if (api && api.isReady && !api.isReady()) return;
+    var S = global.Stage;
+    var t = S && S.position ? S.position() : 0;
+    var data = S && S.presentation ? S.presentation() : null;
+    var snap = reducedMotion();
+    if (handoff.startedAt == null) {
+      handoff.startedAt = t;
+      handoff.lastTime = t;
+      snap = snap || !data || !data.playing;
+    }
+    var progress = snap || t < handoff.lastTime ? 1
+      : clamp((t - handoff.startedAt) / handoff.duration, 0, 1);
+    handoff.lastTime = t;
+    if (progress >= 1) {
+      settleHandoff();
+      applyLayerVisibility(stanza.shownVisual, showLyrics);
+      return;
+    }
+    if (progress === handoff.progress) return;
+    handoff.progress = progress;
+    var eased = progress * progress * (3 - 2 * progress);
+    layerEl(handoff.outId).style.setProperty('--fl-hand-opacity', String(1 - eased));
+    layerEl(stanza.shownVisual).style.setProperty('--fl-hand-opacity', String(eased));
+  }
+
+  // 可见性的唯一写入点。applyStanzaConfig 会被 8fps 门控与各种回调反复调用，所以这里
+  // 只按「真正在画的 id」做沿检测：换人才交接，其余帧幂等重放，绝不会把进行中的淡出顶掉。
+  function applyLayerVisibility(nextId, show) {
+    if (!show) settleHandoff();
+    if (stanza.shownVisual !== nextId) {
+      // 连续切换时，尚未提交首帧的中间模式不能成为下一次离场画面。
+      var prev = handoff.outId && handoff.startedAt == null ? handoff.outId : stanza.shownVisual;
+      settleHandoff();
+      if (show && prev && nextId && prev !== nextId) beginHandoff(prev, nextId, handoffDuration());
+    }
+    stanza.shownVisual = nextId;
+    RENDERER_IDS.forEach(function (id) {
+      var api = rendererOf(id);
+      if (api) api.setVisible(show && (id === nextId || id === handoff.outId));
+    });
+    // 两个宿主层各自判断：交接期内离场层所属宿主必须还开着，否则淡出的东西根本看不见。
+    var domActive = show && (nextId === 'classic' || nextId === 'cadenza'
+      || handoff.outId === 'classic' || handoff.outId === 'cadenza');
+    var pixiActive = show && (nextId === 'sonnet' || nextId === 'tempera'
+      || handoff.outId === 'sonnet' || handoff.outId === 'tempera');
+    var lyricHost = $('s3d-fl-lyric');
+    if (lyricHost) lyricHost.hidden = !domActive;
+    var sonnetHost = $('s3d-fl-sonnet-stage');
+    if (sonnetHost) sonnetHost.hidden = !pixiActive;
+  }
+
+  // 曲式层读数：镜头、黑边、颗粒、交接时长都从这里取，一帧内只解析一次。
+  // WeakMap 缓存让「编译」只发生在换歌词时，这里每次只是二分定位。
+  function songformNow() {
+    var S = global.Stage;
+    if (!S || !S.lyrics || !S.position) return null;
+    var doc = S.lyrics();
+    var lines = doc && doc.lines ? doc.lines : null;
+    if (!lines || !lines.length) return null;
+    var form = global.StanzaSongForm
+      ? global.StanzaSongForm.forDoc(lines, S.lyricTokens ? function (l) { return S.lyricTokens(l); } : null)
+      : null;
+    if (!form) return null;
+    var t = (S.position() || 0) / 1000;
+    return {
+      form: form, t: t,
+      line: global.StanzaSongForm.lineAt(form, t),
+      sample: global.StanzaSongForm.sample(form, t)
+    };
+  }
+
+  // 镜头机架：DOM 歌词层（流光/心象）按各自的镜头签名走。Pixi 两层自带相机
+  // （FX.cameraPose），这里必须保持中性，否则两套镜头抢同一个画面。
+  var cameraRig = { transform: '' };
+  function driveCameraRig() {
+    var host = $('s3d-fl-lyric');
+    if (!host || !global.StanzaSongForm) return;
+    var id = stanza.shownVisual;
+    var snap = songformNow();
+    var next = '';
+    // 减弱动效时镜头不漂移：连续运镜正是这类用户要关掉的东西，与交接淡出同一个门。
+    if (snap && snap.line && showLyrics && !reducedMotion() && (id === 'classic' || id === 'cadenza')) {
+      var cam = global.StanzaSongForm.cameraFor(id, snap.line, snap.t);
+      if (cam.active) {
+        next = global.StanzaSongForm.cameraTransform(cam, motion, snap.sample ? snap.sample.openness : 0.4);
+        // onset 冲击只允许推 scale：一记短促的推近比持续的脉动更像「打在节拍上」，
+        // 而持续脉动正是廉价感的最大来源（上游把这条写进了设计手册）。
+        if (next && cinema.kick > 0.001) next += ' scale(' + (1 + cinema.kick * 0.018).toFixed(4) + ')';
+      }
+    }
+    if (next !== cameraRig.transform) {
+      cameraRig.transform = next;
+      host.style.transform = next;
+    }
+  }
+
+  // 全局电影层：黑边随段落景别收放，颗粒按 24fps 量化（位移是播放时间的纯函数，不是每帧随机），
+  // onset 冲击写成 CSS 变量供歌词层与黑边内缘做色散。三处都受 reduced motion 与播放态钳制。
+  var cinema = { kick: 0, onset: null, written: '' };
+  function driveCinema() {
+    if (!root) return;
+    writeStarbornCinema();
+    var snap = songformNow();
+    var pres = global.Stage && Stage.presentation ? Stage.presentation() : null;
+    var playing = !!(pres && pres.playing);
+    if (!snap || !playing || reducedMotion()) {
+      // 不播 / 弱化动效：黑边收到底、颗粒与冲击归零，画面回到什么都不动的静帧。
+      cinema.kick = 0;
+      writeCinema(0, 0, 0);
+      return;
+    }
+    var bands = null;
+    // 引擎全局的实际导出名是 StanzaSonnetFx（小写 x）：大写拼写在浏览器里是
+    // undefined，电影层的起音冲击/色散会恒为 0（2026-10-07 修复的真 bug）。
+    if (global.StanzaSonnetFx && Stage.spectrum) {
+      bands = global.StanzaSonnetFx.resolveAudioBands(Stage.spectrum() || []);
+      if (!cinema.onset) cinema.onset = global.StanzaSonnetFx.createOnsetDetector();
+    }
+    var impact = 0;
+    if (cinema.onset && bands) {
+      var st = cinema.onset.update({
+        playbackTime: snap.t, isPlaying: playing, track: (pres && pres.track) || null,
+        lines: snap.form.lines, audio: bands
+      });
+      impact = st && st.impact ? st.impact : 0;
+    }
+    cinema.kick = clamp(impact * (reactivity / 1.35) * 0.9, 0, 1);
+    // 黑边：2.39:1 的上下遮幅按景别开合 —— 主歌压住、副歌让画面张开。它听的是段落层，
+    // 不听频谱（频谱只负责上面那记冲击），否则黑边会跟着音量呼吸，廉价感就是这么来的。
+    var openness = snap.sample ? snap.sample.openness : 0.4;
+    writeCinema(0.045 + (1 - openness) * 0.075, snap.t, cinema.kick);
+  }
+
+  var starbornCinemaSignature = '';
+  function writeStarbornCinema() {
+    var enabled = stanza.visual === 'starborn' && showLyrics;
+    root.classList.toggle('s3d-starborn', enabled);
+    var film = enabled && stanza.director && stanza.director.cinemaFrame ? stanza.director.cinemaFrame() : null;
+    if (!film) {
+      starbornCinemaSignature = '';
+      root.style.setProperty('--sb-transition', '0');
+      return;
+    }
+    var fields = { shadow: 'shadow', cool: 'cool', warm: 'warm', light: 'light', lightX: 'light-x',
+      lightY: 'light-y', transition: 'transition', transitionX: 'transition-x' };
+    var signature = Object.keys(fields).map(function (key) { return film[key].toFixed(3); }).join(':') + film.transitionKind;
+    if (signature === starbornCinemaSignature) return;
+    starbornCinemaSignature = signature;
+    Object.keys(fields).forEach(function (key) { root.style.setProperty('--sb-' + fields[key], film[key].toFixed(3)); });
+    root.dataset.sbTransition = film.transitionKind;
+  }
+
+  function writeCinema(bars, timeSec, kick) {
+    var grainFrame = Math.floor(timeSec * 24);
+    var sig = bars.toFixed(3) + ':' + grainFrame + ':' + kick.toFixed(2);
+    if (sig === cinema.written) return;
+    cinema.written = sig;
+    root.style.setProperty('--s3d-bars', bars.toFixed(4));
+    // 24fps 量化：颗粒「跳」的频率是胶片的频率。每帧换一张噪声只会读成电视雪花。
+    root.style.setProperty('--s3d-grain-x', String((grainFrame % 5) * -29));
+    root.style.setProperty('--s3d-grain-y', String((grainFrame % 7) * -13));
+    root.style.setProperty('--s3d-kick', kick.toFixed(3));
+  }
+
   function applyStanzaConfig() {
     if (!stanza.ready) return;
     // 星诞用通用主题（resolve）而非商籁专属（resolveSonnet）：导演可能在任意两个模式间切换，
     // 按 stanza.visual 判会让切镜后主题不重算，残留上一个模式的取色。
+    // 彩色氛围背景下传 colorfulFallback：中性 UI 主题（如矿石黑）不能把「彩色氛围」
+    // 褪成白灰 —— 舞台自己带夜曲蓝调回退；有色主题/封面取色仍优先。
     var effForTheme = effectiveVisual();
-    var t = effForTheme === 'sonnet' && global.StanzaTheme.resolveSonnet ? global.StanzaTheme.resolveSonnet(reactivity) : global.StanzaTheme.resolve(reactivity);
-    var sig = effForTheme + ':' + global.StanzaTheme.signature(t);
+    var baseTheme = global.StanzaTheme.resolve(reactivity, stanza.bgMode === 'atmosphere' || stanza.visual === 'starborn');
+    var sonnetTheme = global.StanzaTheme.resolveSonnet(reactivity);
+    var temperaTheme = global.StanzaTheme.resolveTempera(reactivity);
+    var t = effForTheme === 'sonnet' ? sonnetTheme : effForTheme === 'tempera' ? temperaTheme : baseTheme;
+    var sig = effForTheme + ':' + [baseTheme, sonnetTheme, temperaTheme].map(global.StanzaTheme.signature).join(':');
     if (sig !== stanza.themeSig) {
       stanza.themeSig = sig;
       stanza.bg.setTheme(t); stanza.sub.setTheme(t);
-      stanza.classic.setTheme(t); stanza.cadenza.setTheme(t);
-      if (stanza.sonnet) stanza.sonnet.setTheme(t);
-      if (stanza.tempera) stanza.tempera.setTheme(t);
+      stanza.classic.setTheme(baseTheme); stanza.cadenza.setTheme(baseTheme);
+      if (stanza.sonnet) stanza.sonnet.setTheme(sonnetTheme);
+      if (stanza.tempera) stanza.tempera.setTheme(temperaTheme);
       // 商籁 HUD/角标文案的取色跟着主题 accent 走（canvas 内部另有自己的换算）。
       root.style.setProperty('--fl-sonnet-accent', t.accentColor);
       root.style.setProperty('--fl-scene-base', t.backgroundColor);
@@ -2324,7 +2706,7 @@
     [stanza.classic, stanza.cadenza, stanza.sub].forEach(function (a) { a.setFontScale(fs); });
     if (stanza.sonnet) stanza.sonnet.setFontScale(fs);
     if (stanza.tempera) stanza.tempera.setFontScale(fs);
-    stanza.bg.setMode(sceneCovered() ? 'stage' : stanza.bgMode);
+    stanza.bg.setMode(sceneSource === 'creative' || stanza.bgMode === 'anime' || stanza.bgMode === 'atmosphere' ? 'stage' : stanza.bgMode);
     syncStageBackdrop();
     stanza.bg.setOpacity(stanza.bgOpacity);
     stanza.bg.setVignette(stanza.vignette);
@@ -2337,26 +2719,29 @@
       // 背景样式决定 HUD 布景层显隐，暗角开关走光学后期渐晕。
       stanza.sonnet.setMotion(motion);
       stanza.sonnet.setReactivity(reactivity);
-      stanza.sonnet.setBgMode(stanza.bgMode);
+      stanza.sonnet.setBgMode(sceneSource === 'creative' ? 'creative' : stanza.bgMode);
       stanza.sonnet.setVignette(stanza.vignette);
     }
     if (stanza.tempera) {
       stanza.tempera.setTuning(stanza.temperaTuning);
       stanza.tempera.setMotion(motion);
       stanza.tempera.setReactivity(reactivity);
-      stanza.tempera.setBgMode(stanza.bgMode);
+      stanza.tempera.setBgMode(sceneSource === 'creative' ? 'creative' : stanza.bgMode);
       stanza.tempera.setVignette(stanza.vignette);
     }
     // 只有当前歌词视觉对应的渲染器可见，其余必须隐藏（classic/cadenza 共用
     // #s3d-fl-lyric；商籁启用时该宿主整体隐藏，独占 #s3d-fl-sonnet-stage 层）。
-    // 星诞模式下由 effectiveVisual() 给出当前被导演选中的那个。
-    var effVisual = effectiveVisual();
-    stanza.classic.setVisible(showLyrics && effVisual === 'classic');
-    stanza.cadenza.setVisible(showLyrics && effVisual === 'cadenza');
-    var pixiVisual = effVisual === 'sonnet' || effVisual === 'tempera';
-    if ($('s3d-fl-lyric')) $('s3d-fl-lyric').hidden = pixiVisual;
-    if (stanza.sonnet) stanza.sonnet.setVisible(showLyrics && effVisual === 'sonnet');
-    if (stanza.tempera) stanza.tempera.setVisible(showLyrics && effVisual === 'tempera');
+    // 星诞模式下由导演当前指向的模式决定，且必须走 planeFor 的回退结果 —— 回退到谁就显示谁，
+    // 否则会出现「按 sonnet 关了宿主、实际在画的 cadenza 又被判成隐藏」的双黑。
+    if (stanzaActive()) applyLayerVisibility(planeFor(effectiveVisual()).id, showLyrics);
+    else applyLayerVisibility(null, false);
+    // 电影层只在歌词视觉接管画面时出现：舞台 3D 歌词轨（visual==='stage'）保持原来的样子，
+    // 遮幅与颗粒不该悄悄改变用户对「3D 舞台」的预期。
+    var cinemaEl = $('s3d-cinema');
+    var cinemaLive = stanzaActive() && stanza.visual !== 'stage' && showLyrics;
+    if (cinemaEl) cinemaEl.classList.toggle('is-live', cinemaLive);
+    if (!cinemaLive) writeCinema(0, 0, 0);
+    writeStarbornCinema();
     var data = global.Stage && Stage.presentation ? Stage.presentation() : null;
     stanza.bg.setPaused(!data || !data.playing);
     [stanza.classic, stanza.cadenza].forEach(function (a) { a.setPaused(!data || !data.playing); });
@@ -2367,6 +2752,7 @@
     [stanza.classic, stanza.cadenza].forEach(function (a) { a.setEco(eco); });
     if (stanza.sonnet) stanza.sonnet.setEco(eco);
     if (stanza.tempera) stanza.tempera.setEco(eco);
+    syncSettingsState();
     notifyVisualChange();
   }
 
@@ -2376,7 +2762,9 @@
   var visualListeners = [];
   var lastVisualSig = null;
   function notifyVisualChange() {
-    var sig = String(stanzaActive()) + ':' + effectiveVisual();
+    // 播报「真正在画的那个」而不是「配置上写的那个」：导演切镜与回退都走 shownVisual，
+    // 订阅者（创意工坊）据此决定要不要重排面板。
+    var sig = String(stanzaActive()) + ':' + (stanza.shownVisual || effectiveVisual()) + ':' + sceneCovered();
     if (sig === lastVisualSig) return;
     lastVisualSig = sig;
     visualListeners.slice().forEach(function (fn) {
@@ -2388,18 +2776,21 @@
     if (!stanza.ready) return;
     // 导演先决策：它可能调用 setVisual → applyStanzaConfig()，把可见性与调音推到
     // 新选中的渲染器上。顺序反了的话，当帧会驱动一个即将被隐藏的渲染器。
-    if (stanza.director && stanza.visual === 'starborn' && stanza.autoDirector) {
-      stanza.director.setEnabled(true);
+    // 开关就是「歌词视觉===星诞」本身，没有第二个需要外部置位的布尔。
+    if (stanza.visual === 'starborn' && stanza.director) {
+      stanza.directorLive = true;
       stanza.director.frame();
-    } else if (stanza.director) {
-      stanza.director.setEnabled(false);
     }
     // 配置只在 8fps 的 syncStanzaMeta/控件回调里推；帧循环只做动画驱动，避免每帧重建。
     stanza.bg.frame(dtMs);
     if (showLyrics) {
       var api = planeApi();
       if (api && api.frame) api.frame(dtMs);
+      driveHandoff();
     }
+    // 镜头与电影层是每帧的连续量，必须留在帧循环里；它们内部各自去重，值没变就不写 DOM。
+    driveCameraRig();
+    driveCinema();
   }
 
   function syncStanzaMeta() {
@@ -2414,7 +2805,10 @@
       if (stanza.bgMode === 'fluid') stanza.bg.setCover(data.cover || null);
     }
     stanza.sub.update();
-    planeApi().update();
+    // 裸调 planeApi().update() 在渲染器缺失时是每 8fps 抛一次 TypeError（导演切镜之后
+    // 才会走到这条路径，之前从没被跑起来过），这里必须判空。
+    var shownApi = planeApi();
+    if (shownApi && shownApi.update) shownApi.update();
     var serverOff = global.Stage && Stage.lyricOffset ? Stage.lyricOffset() : 0;
     // 乐观值核销：服务端值追上 pending（PUT+refresh 完成）后回归服务端读数；
     // 未追上则继续显示 pending，不让 8fps 节拍把显示刷回旧值。
@@ -2425,22 +2819,20 @@
     var off = stanza.pendingOffset != null ? stanza.pendingOffset : serverOff;
     var ov = $('s3d-fl-off-value');
     if (ov) ov.textContent = (off > 0 ? '+' : '') + (off / 1000).toFixed(1) + 's';
-    // 在线曲目没有偏移语义：两个 nudge 按钮置灰（nudge 源头也会再拦一次）。
-    var offOnline = String(currentTrackId()).indexOf('online:') === 0;
+    // 本地与在线曲目共用校准入口；只有未选择曲目时不能写偏移。
+    var noTrack = !currentTrackId();
     var offDown = $('s3d-fl-off-down'), offUp = $('s3d-fl-off-up');
-    if (offDown) offDown.disabled = offOnline;
-    if (offUp) offUp.disabled = offOnline;
-  }
-
-  // 浓度行只灰显 input 与其 label（二者是兄弟节点），不能压暗整个 #s3d-fl-common。
-  function setOpacityRowEnabled(enabled) {
-    var input = $('s3d-fl-opacity');
-    var label = document.querySelector('label[for="s3d-fl-opacity"]');
-    if (input) { input.disabled = !enabled; input.style.opacity = enabled ? '1' : '.4'; }
-    if (label) label.style.opacity = enabled ? '1' : '.4';
+    if (offDown) offDown.disabled = noTrack;
+    if (offUp) offUp.disabled = noTrack;
   }
 
   function syncLayout() {
+    syncCreativeStage();
+    // 切回 3D 轨后不再调 driveStanza，导演退出必须在配置边界清理，不能等下一帧。
+    if (stanza.visual !== 'starborn' && stanza.directorLive) {
+      stanza.directorLive = false;
+      stanza.director.reset();
+    }
     root.dataset.layout = layout;
     root.dataset.stageTheme = stageTheme;
     root.style.setProperty('--sl-size', lyricSize);
@@ -2450,7 +2842,7 @@
     if (visualSel) visualSel.value = stanza.visual;
     var themeSel = $('s3d-stage-theme');
     if (themeSel) themeSel.value = stageTheme;
-    $('s3d-sleeve').hidden = layout !== 'sleeve';
+    $('s3d-sleeve').hidden = stanzaActive() || layout !== 'sleeve';
     var fa = stanzaActive();
     var standalone = isStandalone();
     if (lyricView) lyricView.configure(showLyrics && !fa);
@@ -2461,41 +2853,26 @@
     $('s3d-stanza').hidden = !fa;
     $('s3d-reading').hidden = fa ? true : !showLyrics;
     $('s3d-fl-common').hidden = !fa;
-    $('s3d-fl-classic').hidden = stanza.visual !== 'classic';
-    $('s3d-fl-cadenza').hidden = stanza.visual !== 'cadenza';
-    var sonnetPanel = $('s3d-fl-sonnet');
-    if (sonnetPanel) sonnetPanel.hidden = stanza.visual !== 'sonnet';
-    var temperaPanel = $('s3d-fl-tempera');
-    if (temperaPanel) temperaPanel.hidden = stanza.visual !== 'tempera';
     var starbornPanel = $('s3d-fl-starborn');
     if (starbornPanel) starbornPanel.hidden = stanza.visual !== 'starborn';
     syncStarbornControls();
     syncTemperaControls();
-    setOpacityRowEnabled(stanza.bgMode === 'fluid');
     syncStageBackdrop();
-    // 镜头动态只在无 GL 纯平面回退时失效；stanza 透明叠加时它仍驱动 3D 相机。
-    var motionInput = $('s3d-motion');
-    if (motionInput) {
-      motionInput.disabled = standalone;
-      var ml = document.querySelector('label[for="s3d-motion"]');
-      if (ml) ml.style.opacity = standalone ? '.5' : '1';
-    }
     // init/configure 时 active=false 不预建 stanza；舞台打开后 open() 会再跑一次
     // syncLayout，届时才创建实例。
     if (fa && active) ensureStanza();
     else if (!fa) {
-      if (stanza.ready) {
-        stanza.classic.setVisible(false); stanza.cadenza.setVisible(false);
-        if (stanza.sonnet) stanza.sonnet.setVisible(false);
-        if (stanza.tempera) stanza.tempera.setVisible(false);
-      }
+      if (stanza.ready) applyLayerVisibility(null, false);
       // 回到舞台歌词轨：GL 已挂掉时把降级提示还给用户。
       if (glFailed) showFallback('当前设备暂不支持三维渲染，仍可播放音乐或返回曲库。');
+      else if (glStopped) showFallback(RECOVERY_STOPPED_TEXT);
       else if (contextLost) showFallback('舞台正在恢复渲染，音乐播放不受影响。');
     }
+    syncSettingsState();
   }
 
   function toggleLayout() {
+    if (stanzaActive()) return;
     layout = layout === 'sleeve' ? 'focus' : 'sleeve';
     syncLayout(); savePreferences(); pokeChrome();
   }
@@ -2565,6 +2942,114 @@
     changingVolume = false;
   }
 
+  // -------------------------------------------------------------------------
+  // 播放舱收藏键
+  //
+  // 真源是 window.Favorites：乐观写、失败回滚、toast 与判红请求都在那里。这里
+  // 只缓存「已经写进 DOM 的那一版」——syncNowPlaying 由 8fps 门控驱动，每拍
+  // 重设 class/innerHTML 会让键一直在重排。
+  // -------------------------------------------------------------------------
+
+  var fav = {
+    key: '',          // 当前展示对象的收藏身份（无曲目时为 ''）
+    track: null,      // 该身份对应的曲目对象，点击时按它取字段
+    on: null,         // 下面三项是 diff 基准，null 表示还没画过
+    busy: null,
+    label: '',
+    checkingKey: '',  // 判红请求在途的身份，'' 表示没有
+    writingKey: '',   // 本按钮发起的写入在途的身份
+    fx: '',           // 'burst' | 'drop'，下一次绘制要放的动效
+  };
+
+  // 收藏身份与播放栏那颗红心必须同一口径（app.js barFavoriteInput）：在线曲目
+  // 认 onlineId，本地曲目认 id；source 缺省即 local。两处不一致就会出现
+  // 「栏里是红的、台上是白的」这种查不出错的状态分裂。
+  function favoriteInput(track) {
+    if (!track || !track.id) return null;
+    return {
+      kind: 'track',
+      source: track.source || 'local',
+      ref_id: String(track.onlineId || track.id),
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      duration_ms: track.duration_ms,
+      cover: track.cover,
+    };
+  }
+
+  function paintFavorite(F, input) {
+    var btn = $('s3d-favorite');
+    if (!btn || !F) return;
+    var refId = input ? input.ref_id : '';
+    var on = !!input && F.has(input.kind, input.source, refId);
+    // busy 只在当前身份自己有待发请求时成立：checkingKey/writingKey 空闲时都是
+    // ''，与「没有曲目」的 key='' 直接相比会把停用误判成请求在途。
+    var busy = !!fav.key && (fav.checkingKey === fav.key || fav.writingKey === fav.key);
+    var label = !input ? '播放歌曲后可收藏' : on ? '取消收藏当前歌曲' : '收藏当前歌曲';
+    if (on === fav.on && busy === fav.busy && label === fav.label) return;
+    fav.on = on; fav.busy = busy; fav.label = label;
+    btn.classList.toggle('is-on', on);
+    btn.setAttribute('aria-pressed', String(on));
+    btn.setAttribute('aria-busy', String(busy));
+    btn.disabled = !input || busy;
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    $('s3d-fav-icon').setAttribute('href', on ? '#i-heart' : '#i-heart-outline');
+    // 动效只认本地意图：切到一首早就收藏过的歌不该爆一次火花。
+    if (fav.fx === 'burst' && on) playFavFx(btn, 'is-burst');
+    else if (fav.fx === 'drop' && !on) playFavFx(btn, 'is-drop');
+    fav.fx = '';
+  }
+
+  // 同名 class 重复添加不会重启关键帧，所以先摘掉并强制一次回流。摘除定时比
+  // 最长的那段动画（涟漪 660ms）留一截余量，动画中途被 class 摘掉会硬切收尾。
+  function playFavFx(btn, name) {
+    btn.classList.remove('is-burst', 'is-drop');
+    void btn.offsetWidth;
+    btn.classList.add(name);
+    setTimeout(function () { btn.classList.remove(name); }, 900);
+  }
+
+  function syncFavorite(track) {
+    var btn = $('s3d-favorite'), F = global.Favorites;
+    if (!btn || !F) return;
+    var input = favoriteInput(track);
+    var key = input ? F.identity(input.kind, input.source, input.ref_id) : '';
+    fav.track = track || null;
+    if (key === fav.key) { paintFavorite(F, input); return; }
+    fav.key = key;
+    fav.fx = '';
+    // 同一身份的写入还在途时不发判红请求：迟到的 membership 响应会把刚乐观点亮
+    // 的身份从 owned 里摘掉，红心静默变白（app.js:5877 是同一道闸）。
+    fav.checkingKey = key && fav.writingKey !== key ? key : '';
+    paintFavorite(F, input);
+    if (!fav.checkingKey) return;
+    F.syncMembership(input.kind, input.source, [input.ref_id]).then(function () {
+      if (fav.checkingKey !== key) return;
+      fav.checkingKey = '';
+      paintFavorite(F, favoriteInput(track));
+    });
+  }
+
+  function toggleFavorite() {
+    var btn = $('s3d-favorite'), F = global.Favorites;
+    if (!btn || !F || btn.disabled) return;
+    var input = favoriteInput(fav.track);
+    if (!input) return;
+    var key = F.identity(input.kind, input.source, input.ref_id);
+    // 抢占在途的判红：写入已经决定不了的结果不该被一份旧读数改写。
+    if (fav.checkingKey === key) fav.checkingKey = '';
+    fav.writingKey = key;
+    fav.fx = F.has(input.kind, input.source, input.ref_id) ? 'drop' : 'burst';
+    // toggle() 在第一个 await 之前就同步写完 owned，所以这次绘制立刻拿到新状态。
+    F.toggle(input).then(function () {
+      if (fav.writingKey === key) fav.writingKey = '';
+      paintFavorite(F, favoriteInput(fav.track));
+    });
+    paintFavorite(F, input);
+  }
+
   function syncNowPlaying() {
     if (!root || !global.Stage || !Stage.presentation) return;
     var data = Stage.presentation(), track = data.track;
@@ -2586,9 +3071,11 @@
     root.classList.toggle('s3d-playing', data.playing);
     root.classList.toggle('s3d-reduced', data.reduced);
     if (stanzaActive()) syncStanzaMeta();
+    syncSettingsState();
     $('s3d-play').setAttribute('aria-label', !track ? '选择音乐' : data.playing ? '暂停' : '播放');
     $('s3d-play-icon').setAttribute('href', data.playing ? '#i-pause' : '#i-play');
     $('s3d-prev').disabled = $('s3d-next').disabled = !track;
+    syncFavorite(track);
     if (!changingVolume) $('s3d-volume').value = Math.round(data.volume * 100);
     var cover = $('s3d-cover');
     if (lastCover !== data.cover) {
@@ -2725,6 +3212,8 @@
     if (lyricView) lyricView.reset();
     fadeTarget = 0;
     active = false;
+    syncCreativeStage();
+    if (stanza.ready) applyLayerVisibility(null, false);
     root.classList.remove('s3d-open');
     root.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('s3d-open');
@@ -2859,7 +3348,6 @@
     if (bgSel && !bgSel._bound) { bgSel._bound = true; bgSel.value = stanza.bgMode;
       bgSel.addEventListener('change', function () {
         stanza.bgMode = bgSel.value;
-        setOpacityRowEnabled(stanza.bgMode === 'fluid');
         applyStanzaConfig();
         // stage 模式不缓存封面，切到 fluid 时立刻补喂当前封面。
         if (stanza.bgMode === 'fluid' && global.Stage && Stage.presentation) {
@@ -2919,8 +3407,8 @@
       var tid = currentTrackId();
       // 无当前曲：不写乐观态、不派发控制。
       if (!tid) return;
-      // 在线曲目没有偏移语义：源头直接拦截，不写乐观暂存、不派发控制。
-      if (String(tid).indexOf('online:') === 0) return;
+      // 在线曲目同样可校准：平台给的时间轴一样会整体偏。键与本地同一个
+      // （虚拟 id 直接进 track_lyrics），所以这里不再按 id 前缀拦截。
       // 基于乐观暂存递增：落库+refresh 完成前 Stage.lyricOffset() 仍是旧值，
       // 直接读它连点会塌缩成一步。
       var base = (stanza.pendingOffset == null) ? Stage.lyricOffset() : stanza.pendingOffset;
@@ -2959,7 +3447,7 @@
       var wallDim = $('s3d-fl-wallpaper-dim'); if (wallDim) wallDim.value = String(stanza.wallpaperDim);
       text('s3d-fl-wallpaper-dim-value', Math.round(stanza.wallpaperDim * 100) + '%');
       syncStageBackdrop();
-      setOpacityRowEnabled(stanza.bgMode === 'fluid');
+      syncSettingsState();
       var vg = $('s3d-fl-vignette'); if (vg) vg.checked = stanza.vignette;
       var st = $('s3d-fl-subtitle'); if (st) st.checked = stanza.subtitle;
       var rot = $('s3d-fl-rotation'); if (rot) rot.checked = stanza.classicTuning.rotation;
@@ -3058,8 +3546,18 @@
     var snap = stanza.director && stanza.director.snapshot ? stanza.director.snapshot() : null;
     if (!snap || !snap.transitionCount) { state.hidden = true; return; }
     var label = (global.StanzaStarborn && global.StanzaStarborn.LABELS[snap.directedMode]) || snap.directedMode || '—';
+    // 把「导演为什么这么切」摊开：段落序号 + 曲式类型 + 这是第几次副歌。只报模式名用户
+    // 无法区分「导演没工作」和「导演判断错了」，这两件事以前只能靠猜。
+    var KIND_LABELS = { intro: '前奏', breath: '呼吸', verse: '主歌', lift: '推进', chorus: '副歌', outro: '尾奏' };
+    var dec = snap.lastDecision;
+    var note = '';
+    if (dec && dec.kind) {
+      note = '（第 ' + (dec.paragraph + 1) + ' 段 · ' + (KIND_LABELS[dec.kind] || dec.kind)
+        + (dec.visit > 1 ? ' · 第 ' + dec.visit + ' 次到来' : '')
+        + (dec.escalating ? ' · 沿用并升档' : '') + '）';
+    }
     state.hidden = false;
-    text('s3d-fl-auto-state', '当前由「' + label + '」演出 · 已自动切镜 ' + snap.transitionCount + ' 次');
+    text('s3d-fl-auto-state', '当前由「' + label + '」演出' + note + ' · 已自动切镜 ' + snap.transitionCount + ' 次');
   }
 
   // 舞台主题与皮肤正交：换主题只改 #stage3d 上的 data-stage-theme，
@@ -3105,6 +3603,7 @@
     $('s3d-prev').addEventListener('click', function () { control('prev'); });
     $('s3d-next').addEventListener('click', function () { control('next'); });
     $('s3d-queue').addEventListener('click', function () { setQueuePanel($('s3d-queue-panel').hidden); });
+    $('s3d-favorite').addEventListener('click', toggleFavorite);
     $('s3d-queue-close').addEventListener('click', function () { setQueuePanel(false); $('s3d-queue').focus(); });
     $('s3d-cover').addEventListener('error', function () { this.hidden = true; });
     $('s3d-seek').addEventListener('pointerdown', beginSeek);
@@ -3126,6 +3625,12 @@
       savePreferences();
     });
     $('s3d-workshop').addEventListener('click', function () { setSettings(false); if (global.Workshop) Workshop.open(); });
+    $('s3d-scene-source').addEventListener('change', function (event) {
+      configure({ sceneSource: event.target.value }); savePreferences();
+    });
+    document.addEventListener('creative:degrade', function (event) {
+      if (active && sceneSource === 'creative') showFallback(event.detail.reason + '；可在舞台设置中切回沉浸声场', 'creative');
+    });
     root.addEventListener('focusin', pokeChrome);
     root.addEventListener('focusout', pokeChrome);
     var fsb = $('s3d-fs');
@@ -3211,7 +3716,9 @@
 
     // 帧门登记。返回 0 时主循环会把自己停掉，不需要帧的时候不烧 CPU。
     if (global.Stage && Stage.gate) Stage.gate(GATE, targetFps, tick);
-    if (global.Stage && Stage.gate) Stage.gate('stage3d-ui', function () { return active && !document.hidden ? 8 : 0; }, syncNowPlaying);
+    // 副门只管「正在播放」那行字的同步：10fps 够，且 10 是 60 与 120 的公因数
+    // （原来写 8，在 60Hz 上实际跑 7.5 —— 档位数字对不上实际帧率）。
+    if (global.Stage && Stage.gate) Stage.gate('stage3d-ui', function () { return active && !document.hidden ? 10 : 0; }, syncNowPlaying);
     // 播放态跳变沿（暂停/起播/曲尾停止）立刻刷一次，不等 8fps 门控。
     document.addEventListener('stage:playing-changed', function () { if (active && !document.hidden) syncNowPlaying(); });
 
@@ -3255,6 +3762,7 @@
 
   function destroy() {
     close();
+    if (stanza.ready) applyLayerVisibility(null, false);
     if (shelf) { shelf.destroy(); shelf = null; }
     if (lyricView) lyricView.destroy();
     lyricView = null;
@@ -3292,7 +3800,8 @@
     setStage: function (i) { return setStage(i, false); },
     setStageById: function (id) { return open(id); },
     stageId: function () { return STAGES[stageIndex].id; },
-    stages: function () {
+    stages: function (catalog) {
+      if (!catalog && active && !settingsState().scene) return [];
       return STAGES.map(function (s) {
         return { id: s.id, label: s.label, desc: s.desc };
       });

@@ -55,6 +55,12 @@
     }).join('');
   }
 
+  function gray(hex) {
+    var c = U.hexToRgb(hex);
+    var level = c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722;
+    return toHex(level, level, level);
+  }
+
   // 染了色相之后把亮度拉回 wanted。按增益缩放 RGB 后若任一通道被裁剪，
   // 说明这档亮度在当前色相下根本达不到 —— 此时退回中性阶，
   // 宁可少一层颜色也不要打乱「四级亮度单调」这个前提。
@@ -109,7 +115,10 @@
     var ink = theme.primaryColor || '#f4f4f5';
     var accent = theme.accentColor || ink;
     var second = theme.secondaryColor || accent;
-    if (mode === 'mono') { accent = ink; second = ink; }
+    if (mode === 'mono') {
+      paper = gray(paper); ink = gray(ink);
+      accent = ink; second = ink;
+    }
     // 染色的力度即「色彩表现」：mono 完全不染（纯灰印刷），
     // duo 轻染（有彩色但仍是同一套灰阶），vivid 重染（接近波普海报）。
     var tintAmount = mode === 'mono' ? 0 : (mode === 'vivid' ? 0.78 : 0.55);
@@ -223,11 +232,22 @@
     }
   };
   var COMPOSITION_KINDS = Object.keys(COMPOSITIONS);
-
-  function compositionKind(seed, tuning) {
+  // 段落类型收窄分镜池（与商籁同一思路：门只关池、不打分）。凝彩只有四种构图，
+  // 所以门槛降到 2 种；副歌走多面爆裂，一口气的空白走两刀分屏。
+  var COMPOSITION_BY_SECTION = {
+    chorus: ['fan-burst', 'quad-grid'],
+    lift: ['quad-grid', 'fan-burst', 'diagonal-cut'],
+    breath: ['split-duo', 'diagonal-cut'],
+    outro: ['split-duo', 'diagonal-cut', 'quad-grid'],
+    verse: COMPOSITION_KINDS,
+    intro: COMPOSITION_KINDS
+  };
+  function compositionKind(seed, tuning, section) {
     var fixed = tuning && tuning.composition;
-    return COMPOSITION_KINDS.indexOf(fixed) >= 0
-      ? fixed : COMPOSITION_KINDS[FX.hashString('tempera:' + seed) % COMPOSITION_KINDS.length];
+    if (COMPOSITION_KINDS.indexOf(fixed) >= 0) return fixed;
+    var pool = COMPOSITION_BY_SECTION[section && section.kind];
+    if (!pool || pool.length < 2) pool = COMPOSITION_KINDS;
+    return pool[FX.hashString('tempera:' + seed) % pool.length];
   }
 
   function buildPanels(kind, width, height, seed) {
@@ -289,6 +309,8 @@
     this.postProcess = null;
     this.optical = null;
     this.retirement = null;
+    this.screenPatterns = Object.create(null);
+    this.patternSize = '';
   }
 
   TemperaDirector.prototype.init = function () {
@@ -316,13 +338,19 @@
         self.scene = new PIXI.Container();
         self.blocks = new PIXI.Container();
         self.screens = new PIXI.Container();
+        self.paper = new PIXI.Container();
         self.decor = new PIXI.Container();
         self.ink = new PIXI.Graphics();
         self.text = new PIXI.Container();
         self.invert = new PIXI.Container();
+        self.sweepGlow = new PIXI.Graphics();
+        // 扫光带的「辉光版」：加色混合，画在色带位置向外扩一圈的柔光。
+        // 印刷套色不会自己发光，但强墨在纸面上会有一圈洇开的反光 —— 这是
+        // 「高级感」里最便宜也最有效的一层：纯 alpha 绘制，零重绘几何。
+        self.sweepGlow.blendMode = 'add';
         self.sweepMask = new PIXI.Graphics();
         self.flash = new PIXI.Graphics();
-        self.scene.addChild(self.blocks, self.screens, self.decor, self.ink,
+        self.scene.addChild(self.blocks, self.screens, self.paper, self.decor, self.ink, self.sweepGlow,
           self.text, self.invert, self.sweepMask);
         self.invert.mask = self.sweepMask;
         application.stage.addChild(self.scene, self.flash);
@@ -350,46 +378,51 @@
   };
 
   function clear(container) {
-    container.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
+    container.removeChildren().forEach(FX.destroyDisplayTree);
   }
 
   // 网屏：圆点网（半调）或斜线网，裁进色块多边形。点数设上限，大屏也不爆顶点。
-  function buildScreen(PIXI, panel, color, rand, dots, w, h) {
+  function buildScreen(PIXI, panel, color, rand, dots, w, h, patterns) {
     var wrap = new PIXI.Container();
-    var g = new PIXI.Graphics();
+    // 网屏的图形只取决于画幅与有限的印刷版型；颜色走 tint，裁切仍由每块自己的 mask 负责。
+    // 共享 GraphicsContext 让换句复用已上传的网点网格，不再同步三角化约 2400 个圆。
+    var ANGLES = [-Math.PI / 4, Math.PI / 4, -Math.PI / 3, Math.PI / 6];
+    var SPACINGS = [10, 14, 19];
+    var angleIndex = Math.floor(rand() * ANGLES.length) % ANGLES.length;
+    var spacingIndex = dots ? 0 : Math.floor(rand() * SPACINGS.length) % SPACINGS.length;
+    var key = dots ? 'dots' : 'lines:' + angleIndex + ':' + spacingIndex;
+    var g = patterns[key];
     var i;
-    if (dots) {
-      // 点距按画幅自适应，目标是全幅约 2400 点：固定 14px 在 4K 上会读作「网格」
-      // 而不是「网点」，在小屏上又太粗糊成一片。
-      var step = Math.max(11, Math.sqrt(w * h / 2400));
-      var radius = step * (0.15 + rand() * 0.07);
-      for (var y = -step; y < h + step; y += step) {
-        var shift = Math.round(y / step) % 2 ? step / 2 : 0;
-        for (var x = -step; x < w + step; x += step) g.circle(x + shift, y, radius);
+    if (!g) {
+      g = patterns[key] = new PIXI.GraphicsContext();
+      if (dots) {
+        // 目标约 2400 点，半格错位；固定覆盖率使不同画幅保持同一网屏观感。
+        var step = Math.max(11, Math.sqrt(w * h / 2400));
+        var radius = step * 0.185;
+        for (var y = -step; y < h + step; y += step) {
+          var shift = Math.round(y / step) % 2 ? step / 2 : 0;
+          for (var x = -step; x < w + step; x += step) g.circle(x + shift, y, radius);
+        }
+        g.fill({ color: 0xffffff, alpha: 0.3 });
+      } else {
+        // 离散角度/间距避免近似网屏叠加产生摩尔纹，最多缓存 4×3 张排线版。
+        var angle = ANGLES[angleIndex];
+        var spacing = SPACINGS[spacingIndex];
+        var diag = Math.hypot(w, h);
+        var dx = Math.cos(angle), dy = Math.sin(angle);
+        for (i = -diag / spacing; i < diag / spacing; i += 1) {
+          var ox = w / 2 - dy * i * spacing, oy = h / 2 + dx * i * spacing;
+          g.moveTo(ox - dx * diag, oy - dy * diag).lineTo(ox + dx * diag, oy + dy * diag);
+        }
+        g.stroke({ color: 0xffffff, width: Math.max(0.9, spacing * 0.15), alpha: 0.36 });
       }
-      g.fill({ color: color, alpha: 0.3 });
-    } else {
-      // 排线角度**只有 4 档**（±45° / ±60°），间距只有 3 档。
-      // 之前是连续随机角度 + 连续随机间距：相邻色块的网屏角度会差出不到 1°，
-      // 交叠处立刻产生摩尔纹 —— 那是「印刷没对齐」而不是「有意为之」，
-      // 观感就是脏。刻度粗跳反而像真的分色版。
-      var ANGLES = [-Math.PI / 4, Math.PI / 4, -Math.PI / 3, Math.PI / 6];
-      var SPACINGS = [10, 14, 19];
-      var angle = ANGLES[Math.floor(rand() * ANGLES.length) % ANGLES.length];
-      var spacing = SPACINGS[Math.floor(rand() * SPACINGS.length) % SPACINGS.length];
-      var diag = Math.hypot(w, h);
-      var dx = Math.cos(angle), dy = Math.sin(angle);
-      for (i = -diag / spacing; i < diag / spacing; i += 1) {
-        var ox = w / 2 - dy * i * spacing, oy = h / 2 + dx * i * spacing;
-        g.moveTo(ox - dx * diag, oy - dy * diag).lineTo(ox + dx * diag, oy + dy * diag);
-      }
-      // 线宽跟着间距走：细间距配细线，间距大时线也粗 —— 覆盖率恒定才不显脏。
-      g.stroke({ color: color, width: Math.max(0.9, spacing * 0.15), alpha: 0.36 });
     }
+    var screen = new PIXI.Graphics(g);
+    screen.tint = color;
     var clip = new PIXI.Graphics().poly(panel.poly).fill(0xffffff);
-    wrap.addChild(g, clip);
-    g.mask = clip;
-    wrap.dataset = { dx: panel.dx, dy: panel.dy, screen: g };
+    wrap.addChild(screen, clip);
+    screen.mask = clip;
+    wrap.dataset = { dx: panel.dx, dy: panel.dy, screen: screen };
     return wrap;
   }
 
@@ -487,16 +520,29 @@
     var PIXI = (typeof globalThis !== 'undefined' ? globalThis : window).PIXI;
     var w = this.width, h = this.height;
     this.colors = colors;
-    this.kind = compositionKind(seed, tuning);
-    this.cameraKind = FX.shotKind(seed, {});
+    tuning.palette = { background: colors.paper, ink: colors.ink };
+    this.kind = compositionKind(seed, tuning, line && line.section);
+    this.cameraKind = FX.shotKind(seed, {}, line && line.section);
     var rand = FX.seededRandom('tempera-screens:' + seed);
+    // 套色错版方向：每块色版一个 {-1,0,1} 的漂移向量（底板除外），起音时
+    // 整版沿它滑出再弹回 —— 印刷机「对版」的瞬间。种子化保证 seek 回来一致。
+    var reg = FX.seededRandom('tempera-reg:' + seed);
 
     this.retirement.capture([this.blocks, this.screens, this.decor], this.scene, line, this.words);
     clear(this.blocks);
     clear(this.screens);
     clear(this.decor);
+    var patternSize = w + 'x' + h;
+    if (patternSize !== this.patternSize) {
+      // capture 已释放旧退场，且当前 screens 已拆下；此时才回收共享几何。
+      Object.keys(this.screenPatterns).forEach(function (key) { this.screenPatterns[key].destroy(); }, this);
+      this.screenPatterns = Object.create(null);
+      clear(this.paper);
+      this.patternSize = patternSize;
+    }
 
-    var panels = buildPanels(this.kind, w, h, seed);
+    // 外部创意背景持有画面底层，歌词只保留文字与局部扫光色版。
+    var panels = tuning.showBlocks === false ? [] : buildPanels(this.kind, w, h, seed);
     var tones = colors.tones.map(function (t) { return hexNum(t, 0x202020); });
     // fills 是色块主填充，见 palette() 里的说明：颜色来自主题 accent/secondary，
     // tones 只用于网屏排线与纸面颗粒。
@@ -520,27 +566,31 @@
         var seamW = Math.max(1, Math.min(3, Math.min(w, h) * 0.0018));
         g.poly(panel.poly).stroke({ color: seamNum, width: seamW, alpha: 0.5, alignment: 0.5 });
       }
-      g.dataset = { dx: panel.dx, dy: panel.dy, delay: i * 0.07, base: i === 0 };
+      g.dataset = { dx: panel.dx, dy: panel.dy, delay: i * 0.07, base: i === 0,
+        seam: i > 0 && tuning.seams !== false,
+        rgx: i === 0 ? 0 : Math.round(reg() * 2 - 1), rgy: i === 0 ? 0 : Math.round(reg() * 2 - 1) };
       self.blocks.addChild(g);
       // 网屏只落在两块上（第二块与最后一块），一屏至多两层，不糊画面。
       if (tuning.screens !== false && tuning.quality !== 'energy-saving'
         && panels.length > 1 && (i === 1 || i === panels.length - 1)) {
         // 网屏用最深那档灰阶而不是 accent：网屏是「压上去的墨点」，
         // 必须压在任何填充色上都可见。参考项目也是用 tone 深档画排线。
-        var s = buildScreen(PIXI, panel, tones[0], rand, i === 1, w, h);
+        var s = buildScreen(PIXI, panel, tones[0], rand, i === 1, w, h, self.screenPatterns);
         s.dataset.delay = i * 0.07 + 0.06;
         self.screens.addChild(s);
       }
     });
     // 纸面颗粒：铺满全画幅的极淡点阵，让平涂面不是「死平」的。
     // 错位半格（奇数行偏移）才读作半调网点，等距会读成方格纸。
-    if (tuning.screens !== false && tuning.quality !== 'energy-saving') {
-      var grain = buildPaperGrain(PIXI, w, h, tones[3], seed);
+    this.paper.visible = tuning.screens !== false && tuning.quality !== 'energy-saving';
+    if (this.paper.visible && !this.paper.children.length) {
+      var grain = buildPaperGrain(PIXI, w, h, 0xffffff, patternSize);
       if (grain) {
         grain.alpha = 0.05;
-        this.screens.addChild(grain);
+        this.paper.addChild(grain);
       }
     }
+    this.paper.tint = tones[3];
     buildDecor(PIXI, this.decor, w, h, colors, lineNo, this.kind);
 
     // 正文：商籁同一条排版管线（字素时间轴 + 词组断行 + 行宽收敛）。
@@ -551,7 +601,7 @@
     this.accents = FX.createAccentChoreography(PIXI, this.text, this.words, accentNum, seed);
     // 反色层：每个字素一个同款克隆，染底色，只在扫光遮罩内可见。
     var paperNum = hexNum(colors.paper, 0x09090b);
-    this.clones = this.words.map(function (node) {
+    this.clones = tuning.inversion === false ? [] : this.words.map(function (node) {
       // 样式克隆一份：原字素销毁时不牵连反色层。
       var c = new PIXI.Text({ text: node.text, style: node.style.clone() });
       c.anchor.set(0.5);
@@ -564,6 +614,8 @@
 
   TemperaDirector.prototype.update = function (frame, tuning) {
     if (!this.initialized || this.destroyed) return null;
+    tuning.palette = { background: this.colors.paper, ink: this.colors.ink };
+    this.paper.visible = tuning.screens !== false && tuning.quality !== 'energy-saving';
     var perf = tuning.performance = this.performance.update(frame, tuning, this.words);
     FX.applyQuality(this.app, this.width, this.height, tuning.quality);
     var w = this.width, h = this.height;
@@ -573,6 +625,9 @@
     var elapsed = Math.max(0, time - start);
     var kick = perf.impact;
     var drift = motion * FX.amount(tuning.performanceIntensity, 1.25);
+    // 频段消费：bass 推呼吸漂移的振幅，vocal 推扫光带的溢光强度。
+    var bass = FX.clamp(FX.num(perf.bass, 0), 0, 1);
+    var vocal = FX.clamp(FX.num(perf.vocal, 0), 0, 1);
 
     var camera = FX.cameraPose(frame, tuning, this.cameraKind, w, h, this.words);
     this.scene.pivot.set(w / 2, h / 2);
@@ -581,6 +636,8 @@
     this.scene.rotation = camera.rotation;
 
     // 色块：错峰滑入（0.5s 三次缓出）+ 慢漂移 + 起音时沿入场方向轻推。
+    // 漂移振幅吃 bass（低频把整摞色版推开再收回）；起音瞬间色版沿自己的
+    // 套色方向滑出再随 impact 包络弹回 —— 印刷机「对版」的一瞬。
     var baseAlpha = tuning.blockAlpha == null ? 1 : tuning.blockAlpha;
     this.blocks.children.forEach(function (b) {
       var d = b.dataset;
@@ -588,14 +645,14 @@
       var e = 1 - Math.pow(1 - p, 3);
       var phase = time * 0.6 + d.delay * 13;
       b.position.set(
-        d.dx * (1 - e) * motion + (d.base ? 0 : Math.sin(phase) * 12 * drift + d.dx * kick * 0.06),
-        d.dy * (1 - e) * motion + (d.base ? 0 : Math.cos(phase * 0.8) * 9 * drift + d.dy * kick * 0.06));
+        d.dx * (1 - e) * motion + (d.base ? 0 : Math.sin(phase) * 12 * (1 + bass * 0.75) * drift
+          + d.dx * kick * 0.06 + kick * d.rgx * w * 0.009),
+        d.dy * (1 - e) * motion + (d.base ? 0 : Math.cos(phase * 0.8) * 9 * (1 + bass * 0.6) * drift
+          + d.dy * kick * 0.06 + kick * d.rgy * h * 0.009));
       b.alpha = e * (d.base ? baseAlpha * 0.9 : baseAlpha);
     });
     this.screens.children.forEach(function (s) {
       var d = s.dataset;
-      // 纸面颗粒没有 .screen 子节点（它本身就是一张整幅点阵），也不参与错峰入场。
-      if (d.paper) return;
       var p = motion > 0 ? FX.clamp((elapsed - d.delay) / 0.55, 0, 1) : 1;
       var e = 1 - Math.pow(1 - p, 3);
       s.position.set(d.dx * (1 - e) * motion, d.dy * (1 - e) * motion);
@@ -611,6 +668,7 @@
 
     // 扫光带 + 反色：带画在正文下方，同一形状做反色层遮罩。
     this.ink.clear();
+    this.sweepGlow.clear();
     this.sweepMask.clear();
     var showSweep = tuning.inversion !== false && frame.activeLine;
     this.invert.visible = !!showSweep;
@@ -636,10 +694,17 @@
           right, bot, l, bot, l - notch, row.y];
         this.ink.poly(chevron);
         this.sweepMask.poly(chevron);
+        // 辉光版：同一条色版向外扩一圈，加色混合。亮度吃 vocal —— 人声越亮，
+        // 强墨在纸面上洇开的反光越大（上游「vocal 推辉光」的凝彩版）。
+        var halo = row.h * 0.55;
+        this.sweepGlow.poly([l - halo, top - halo, right + halo, top - halo,
+          right + notch + halo, row.y, right + halo, bot + halo,
+          l - halo, bot + halo, l - notch - halo, row.y]);
       }
       if (any) {
         this.ink.fill({ color: accentNum, alpha: 0.94 * fade });
         this.sweepMask.fill(0xffffff);
+        this.sweepGlow.fill({ color: accentNum, alpha: (0.09 + vocal * 0.12) * fade });
       }
       this.invert.alpha = fade;
       for (var i = 0; i < this.clones.length; i += 1) {
@@ -656,7 +721,7 @@
     // 起音闪白：整屏一层强调色薄膜。峰值从 0.07 提到 0.1 —— 0.07 在深色构图上
     // 几乎看不见（相当于 18/255 的抬升），重拍时画面「该跳一下」却没跳。
     this.flash.clear();
-    if (motion > 0 && kick > 0.02 && tuning.quality !== 'energy-saving') {
+    if (tuning.backgroundMode !== 'creative' && motion > 0 && kick > 0.02 && tuning.quality !== 'energy-saving') {
     // 二次方映射：弱起音只给极淡的一层，强起音才明显 —— 线性映射会让
     // 持续的能量把整屏常驻提亮成「发灰」。
       this.flash.rect(0, 0, w, h).fill({ color: hexNum(this.colors.accent, 0xffffff),
@@ -669,7 +734,7 @@
     this.screens.visible = tuning.showBlocks !== false;
     this.decor.visible = tuning.showDecor !== false;
     this.decor.alpha = a;
-    this.optical.setTint(this.colors.accent);
+    this.optical.setTint(this.colors.accent, tuning.monochrome);
     this.optical.update(frame, tuning, w, h);
     this.app.render();
     return camera;
@@ -679,8 +744,13 @@
     return {
       initialized: this.initialized, composition: this.kind, camera: this.cameraKind,
       panels: this.blocks ? this.blocks.children.length : 0,
-      screens: this.screens ? this.screens.children.length : 0,
+      seams: this.blocks ? this.blocks.children.filter(function (block) { return block.dataset.seam; }).length : 0,
+      seamsVisible: !!(this.blocks && this.blocks.visible && this.blocks.children.some(function (block) { return block.dataset.seam; })),
+      screens: this.screens ? this.screens.children.length + (this.paper.visible ? this.paper.children.length : 0) : 0,
+      paperGrain: !!(this.paper && this.paper.visible && this.paper.children.length),
+      screenPatterns: Object.keys(this.screenPatterns).length,
       glyphs: this.words.length, clones: this.clones.length, rows: this.rows.length,
+      sweepGlow: this.sweepGlow ? this.sweepGlow.blendMode : null,
       performance: this.performance.snapshot(),
       halation: this.optical ? this.optical.halation.enabled : false,
       retirement: this.retirement ? this.retirement.snapshot() : null
@@ -701,11 +771,16 @@
     if (this.optical) { this.optical.destroy(); this.optical = null; }
     this.postProcess = null;
     if (this.app && this.initialized) {
+      clear(this.app.stage);
       try { this.app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true }); }
       catch (err) { console.warn('[stanza-tempera] PIXI cleanup failed:', err); }
     }
     this.app = null;
+    Object.keys(this.screenPatterns).forEach(function (key) { this.screenPatterns[key].destroy(); }, this);
+    this.screenPatterns = Object.create(null);
+    this.paper = null;
     this.scene = this.blocks = this.screens = this.decor = this.ink = null;
+    this.sweepGlow = null;
     this.text = this.invert = this.sweepMask = this.flash = null;
     this.initialized = false;
   };
@@ -748,39 +823,48 @@
     var theme = G.StanzaTheme ? G.StanzaTheme.DEFAULT : { backgroundColor: '#09090b', primaryColor: '#f4f4f5', accentColor: '#f4f4f5', secondaryColor: '#71717a', animationIntensity: 'normal' };
     var fontScale = 1, visible = false, eco = false, reduced = false;
     var motion = 0.65, reactivity = 1.35, bgMode = 'stage', vignette = true;
-    var tuning = { composition: 'auto', colorMode: 'duo', screens: true, inversion: true };
+    var tuning = { composition: 'auto', colorMode: 'duo', screens: true, inversion: true, halation: 0.5, seams: true };
     var destroyed = false, initStarted = false, initFailed = false;
     var renderedKey = '', themeSig = '', lastNote = '';
     var ro = null;
 
     function engineTuning(frame) {
+      var creativeBackground = bgMode === 'creative';
       return {
         palette: { background: theme.backgroundColor, ink: theme.primaryColor },
+        backgroundMode: bgMode,
         fontScale: fontScale,
         lyricMotion: 'tempera',
         composition: tuning.composition,
+        monochrome: tuning.colorMode === 'mono',
         lyricLayout: 'phrases',
         phraseLength: 12,
-        cameraIntensity: motion * 1.6,
+        // 副歌第 2+ 次到来镜头抬一档（与商籁同一份 chorusLift，星诞「重复但升级」）。
+        cameraIntensity: motion * 1.6
+          * FX.chorusLift(frame && frame.activeLine ? frame.activeLine.section : null),
         animationIntensity: frame && frame.reduced ? 0
           : (theme.animationIntensity === 'calm' ? 0.6 : theme.animationIntensity === 'chaotic' ? 1.6 : 1),
         performanceIntensity: reactivity,
         quality: eco ? 'energy-saving' : 'high',
         reducedMotion: reduced,
-        showBlocks: true,
+        showBlocks: !creativeBackground,
         showDecor: true,
-        screens: tuning.screens,
+        screens: !creativeBackground && tuning.screens,
         inversion: tuning.inversion,
+        halation: tuning.halation,
+        seams: tuning.seams,
         accentEffects: true,
         // 「舞台场景」背景下色块压到 0.62，让 3D 场景从色块间透出来。
         blockAlpha: bgMode === 'stage' ? 0.62 : 0.94,
-        vignette: vignette ? 0.22 : 0,
+        // 创意布景已负责纸面与空间，不再盖一层整屏印相和闪白。
+        postProcess: !creativeBackground,
+        vignette: vignette && !creativeBackground ? 0.22 : 0,
         grain: 0.1,
         contrast: 0.12,
         lensDistortion: 0.18,
         lensDispersion: 0.12,
         opticalImpact: 0.7,
-        sceneTransitions: true,
+        sceneTransitions: !creativeBackground,
         textInversion: true
       };
     }
@@ -788,7 +872,7 @@
     function shotKey(frame, line) {
       var trackId = (frame.track && (frame.track.id || frame.track.title)) || '';
       return [trackId, line.startTime, line.fullText, tuning.composition, tuning.colorMode,
-        tuning.screens, fontScale, themeSig, bgMode].join('|');
+        tuning.screens, tuning.inversion, tuning.seams, fontScale, themeSig, bgMode].join('|');
     }
 
     function updateHot(frame, camera) {
@@ -851,6 +935,7 @@
 
     return {
       frame: frame,
+      isReady: function () { return !destroyed && (initFailed || !!renderedKey); },
       update: function () {},
       setTheme: function (t) {
         if (!t) return;
@@ -866,6 +951,7 @@
         fontScale = v;
         renderedKey = '';
       },
+      rootEl: function () { return root; },
       setVisible: function (b) {
         visible = !!b;
         root.hidden = !visible;
@@ -877,19 +963,23 @@
         }
       },
       setPaused: function () {},
-      setEco: function (b) { eco = !!b; },
+      setEco: function (b) { if (eco !== !!b) { eco = !!b; renderedKey = ''; } },
       setTuning: function (t) {
         if (!t) return;
         var next = {
           composition: COMPOSITION_KINDS.indexOf(t.composition) >= 0 ? t.composition : 'auto',
           colorMode: COLOR_MODES.indexOf(t.colorMode) >= 0 ? t.colorMode : 'duo',
           screens: t.screens !== false,
-          inversion: t.inversion !== false
+          inversion: t.inversion !== false,
+          halation: U.clamp(U.num(t.halation, 0.5), 0, 1),
+          seams: t.seams !== false
         };
-        if (next.composition === tuning.composition && next.colorMode === tuning.colorMode
-          && next.screens === tuning.screens && next.inversion === tuning.inversion) return;
+        var rebuild = next.composition !== tuning.composition || next.colorMode !== tuning.colorMode
+          || next.screens !== tuning.screens || next.inversion !== tuning.inversion || next.seams !== tuning.seams;
+        if (!rebuild && next.halation === tuning.halation) return;
         tuning = next;
-        renderedKey = '';
+        // 光晕强度是逐帧 uniform；拖动滑杆不应重建歌词、纸面或色块。
+        if (rebuild) renderedKey = '';
       },
       setMotion: function (v) { motion = U.clamp(U.num(v, 0.65), 0, 1); },
       setReactivity: function (v) { reactivity = U.clamp(U.num(v, 1.35), 0, 2); },

@@ -91,6 +91,35 @@ const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const READ_TIMEOUT: Duration = Duration::from_secs(12);
 
+/// 一次「取流」（拿到播放地址这一趟）的**总**时限。
+///
+/// 上面两个是单请求上限，而一个平台取一首的地址要连着打好几个接口：换 ticket、
+/// 查权益、按档位依次试地址。每一段都不超时 ≠ 整趟不超时——串起来仍能让首播挂住
+/// 一分多钟，用户看到的只是「点了没声音」。这里给整趟一个总闸，到点取消这次请求
+/// 并如实报 `upstream_timeout`（504，前端给行内重试），队列宁可显式失败也不许无限期等。
+///
+/// 只管取地址这一段：渐进式下载在 [`progressive`] 里按「已收字节 vs 声明码率」与
+/// 读空闲判 stalled，那是另一条独立的上限，两者不可互相替代。
+const STREAM_DEADLINE: Duration = Duration::from_secs(20);
+
+/// 给一次取流套上总时限：到点整体取消并回 [`ApiError::upstream_timeout`]。
+///
+/// 逐段的 `min(段预算, 剩余)` 还没接（要 provider 自己报出它有几段），当前形态是
+/// 「外层取消」：单段仍可能跑满自己的 CONNECT/READ 上限，但整趟不会越过 `total`。
+async fn with_deadline<F, T>(total: Duration, source: &str, fut: F) -> ApiResult<T>
+where
+    F: std::future::Future<Output = ApiResult<T>>,
+{
+    match tokio::time::timeout(total, fut).await {
+        Ok(v) => v,
+        Err(_elapsed) => Err(ApiError::upstream_timeout(format!(
+            "{source} 取流超过 {}s 没有返回，这次请求已取消",
+            total.as_secs()
+        ))
+        .with_source(source)),
+    }
+}
+
 /// 进程级共享 API 客户端（连接池复用）。
 fn shared_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
@@ -405,6 +434,36 @@ pub struct SourceInfo {
     pub caps: &'static [Capability],
 }
 
+/// caps 登记了、但整条链路**没有真机验收记录**的能力位（方案 A9 的第三档）。
+///
+/// 三档要各说各的事，混档就是撒谎：
+/// - 不在 caps 里 = 这个项目在这个平台上不做这件事，dispatch 直接 404；
+/// - 在 caps 里、也在本表里 = 代码接好了、也允许调用，但我们没有证据它在真机上走通；
+/// - 在 caps 里、不在本表里 = 有真机验收记录。
+///
+/// 今天把「实现了但没验过」表达出来的唯一手段是摘能力位（见下面 [`SOURCES`] 的
+/// 注释），于是它和「不支持」在 UI 与诊断里长得一模一样：用户以为一定能用，出了
+/// 问题也分不清该怪平台还是怪我们接线。
+///
+/// 这是**叠加在 caps 上的注解**，不是第二份事实表：每条都必须是该源 caps 的子集，
+/// 由 [`unverified_caps`] 的调用点与测试共同守住（id 写错、能力位写错都会红，
+/// 而不是静默变成「这个源全都验过了」）。
+const UNVERIFIED_CAPS: &[(&str, &[Capability])] = &[
+    // 酷狗：create + waiting 真机正常，confirmed 换票链路没有验收记录（见 kugou 条目注释）。
+    ("kugou", &[Capability::QrLogin]),
+    // QQ：只验到 waiting 态返回正常，scanned/confirmed 没有真机记录。
+    ("qq", &[Capability::QrLogin]),
+];
+
+/// 某源未真机验收的能力位。没登记过的源返回空切片。
+pub fn unverified_caps(source: &str) -> &'static [Capability] {
+    UNVERIFIED_CAPS
+        .iter()
+        .find(|(id, _)| *id == source)
+        .map(|(_, caps)| *caps)
+        .unwrap_or(&[])
+}
+
 /// caps 是前端 UI 与 dispatch 的**唯一事实表**：能力位没开的能力，dispatch
 /// 的 [`gate`] 一律回 capability_unsupported——代码已实现但真机闸门（spec §4.3）
 /// 没过的平台（如当前的 QQ 扫码、酷狗写操作）只摘能力位，不必删代码。
@@ -699,6 +758,8 @@ pub async fn list_sources(ctx: &Ctx) -> Vec<serde_json::Value> {
             "supportsCookie": src.supports_cookie,
             "signedIn": signed_in,
             "caps": src.caps,
+            // 第三档：登记了但没真机验收过的能力。前端要把它与「不支持」分开画。
+            "unverified": unverified_caps(src.id),
         }));
     }
     out
@@ -874,17 +935,22 @@ pub async fn stream(
         return Err(bad_request("缺少曲目 id"));
     }
     let q = quality.unwrap_or(320_000);
-    match source {
-        "netease" => netease::stream(ctx, id, q).await,
-        "qq" => qq::stream(ctx, id, track_ref, q).await,
-        "kugou" => kugou::stream(ctx, id, track_ref, q).await,
-        "kuwo" => kuwo::stream(ctx, id, track_ref, q).await,
-        "jamendo" => jamendo::stream(ctx, id, q).await,
-        "ccmixter" => ccmixter::stream(ctx, id, q).await,
-        "qishui" => qishui::stream(ctx, id, track_ref, q).await,
-        "migu" => migu::stream(ctx, id, track_ref, q).await,
-        other => Err(unsupported(other)),
-    }
+    // 总闸放在 dispatch 这一层，而不是 8 个平台各写一遍：各写必漏，而且以后新增
+    // 音源自动受管。
+    with_deadline(STREAM_DEADLINE, source, async move {
+        match source {
+            "netease" => netease::stream(ctx, id, q).await,
+            "qq" => qq::stream(ctx, id, track_ref, q).await,
+            "kugou" => kugou::stream(ctx, id, track_ref, q).await,
+            "kuwo" => kuwo::stream(ctx, id, track_ref, q).await,
+            "jamendo" => jamendo::stream(ctx, id, q).await,
+            "ccmixter" => ccmixter::stream(ctx, id, q).await,
+            "qishui" => qishui::stream(ctx, id, track_ref, q).await,
+            "migu" => migu::stream(ctx, id, track_ref, q).await,
+            other => Err(unsupported(other)),
+        }
+    })
+    .await
 }
 
 /// 单曲详情。搜索接口返回的字段不全（尤其是封面），播放前用它补齐。
@@ -1666,6 +1732,67 @@ mod tests {
         assert!(serde_json::from_str::<TrackEntry>(r#"{"ref":{}}"#).is_err());
     }
 
+    /// 第三档（A9）的不变量。三条各挡一种静默失效：
+    /// - 注解必须落在 caps 里，否则「未验收」描述的是一个根本不放行的能力，
+    ///   那本该说「不支持」；
+    /// - 源 id 必须存在，写错 id 不会编译失败，只会让那个源悄悄变成「全验过了」；
+    /// - 表不许空着——空表意味着能力真值表又退回二值，这一档白加。
+    #[test]
+    fn unverified_annotations_stay_a_subset_of_registered_capabilities() {
+        for (id, caps) in UNVERIFIED_CAPS {
+            let src = find(id).unwrap_or_else(|| panic!("{id} 不是已登记的音源，注解会静默失效"));
+            for cap in *caps {
+                assert!(
+                    src.caps.contains(cap),
+                    "{id} 把 {cap:?} 标成未验收，但它不在 caps 里：那是「不支持」，不是「没验过」"
+                );
+            }
+            assert_eq!(unverified_caps(id), *caps, "{id} 的注解读不回来");
+        }
+        assert!(
+            !UNVERIFIED_CAPS.is_empty(),
+            "第三档空表＝能力真值表退回二值"
+        );
+        // 未知源与没登记的源一律空表：「我不知道」不许画成「没验过」。
+        assert!(unverified_caps("ghost").is_empty());
+        assert!(unverified_caps("netease").is_empty());
+    }
+
+    /// `/v1/online/sources` 与 RPC 共用这份载荷，所以第三档必须真的出到线上——
+    /// 前端读不到的标注等于没有标注。
+    #[tokio::test]
+    async fn sources_payload_carries_the_unverified_axis() {
+        let dir = std::env::temp_dir().join(format!("vmusic-unverified-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let ctx = Ctx { db };
+        let payload = list_sources(&ctx).await;
+        let kugou = payload
+            .iter()
+            .find(|s| s["id"] == serde_json::json!("kugou"))
+            .expect("酷狗在清单里");
+        assert!(
+            kugou["unverified"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|x| x == &serde_json::json!("qr_login"))),
+            "酷狗扫码要带上 qr_login 的未验收标注，实际载荷：{kugou}"
+        );
+        let netease = payload
+            .iter()
+            .find(|s| s["id"] == serde_json::json!("netease"))
+            .expect("网易云在清单里");
+        assert_eq!(
+            netease["unverified"]
+                .as_array()
+                .map(|v| v.len())
+                .unwrap_or(99),
+            0,
+            "没标注的源要回空数组，而不是缺字段——前端按数组读"
+        );
+
+        ctx.db.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 歌单写操作的能力闸门：能力位未登记的音源（含实现已接线、等真机验收的
     /// 酷狗写歌单）与未注册音源，都必须在 dispatch 入口被 gate 拦成 404，
     /// 绝不能穿透到平台实现去做真实网络请求。
@@ -1703,5 +1830,45 @@ mod tests {
         let nope = unsupported("ghost");
         assert_eq!(nope.status, 404);
         assert!(nope.message.contains("不支持的音源"), "{}", nope.message);
+    }
+
+    /// 取流总时限（A4）：单段都不超时、串起来超限的那一趟必须被整体取消，并且
+    /// 要说清是「这趟太久」而不是「这平台不支持/没登录」——错误码决定前端给行内
+    /// 重试还是跳曲，报反了用户会反复扫码登录才发现不是登录的问题。
+    #[tokio::test]
+    async fn stream_deadline_cancels_an_overrun_attempt_and_keeps_a_fast_one() {
+        let slow = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            Ok::<u32, ApiError>(7)
+        };
+        let e = with_deadline(Duration::from_millis(20), "kugou", slow)
+            .await
+            .expect_err("超过总时限的取流必须报错");
+        assert_eq!(e.code, "upstream_timeout", "超时要说成上游超时");
+        assert_eq!(e.status, 504, "504 而不是 404：能力与登录都没问题，只是慢");
+        assert_eq!(
+            e.source.as_deref(),
+            Some("kugou"),
+            "点名是哪个音源这一趟超了"
+        );
+
+        // 没超限时结果原样透出：总闸不许把成功的取流也掐掉。
+        let fast = async { Ok::<u32, ApiError>(7) };
+        assert_eq!(
+            with_deadline(Duration::from_secs(5), "kugou", fast)
+                .await
+                .unwrap(),
+            7
+        );
+
+        // 失败也照样透传：外层只负责掐时间，不能替平台把错误改写成形。
+        let failed = async { Err::<u32, ApiError>(unsupported("kugou")) };
+        assert_eq!(
+            with_deadline(Duration::from_secs(5), "kugou", failed)
+                .await
+                .unwrap_err()
+                .code,
+            "capability_unsupported"
+        );
     }
 }

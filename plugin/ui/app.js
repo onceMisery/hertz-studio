@@ -203,10 +203,17 @@ const ui = {
   setDevDiag: $('set-dev-diag'),
   devDiagDetail: $('dev-diag-detail'),
   devDiagPath: $('dev-diag-path'),
+  devDiagCrash: $('dev-diag-crash'),
+  devDiagCrashText: $('dev-diag-crash-text'),
   devDiagActions: $('dev-diag-actions'),
   devDiagCopy: $('dev-diag-copy'),
   devDiagSave: $('dev-diag-save'),
   devDiagClear: $('dev-diag-clear'),
+
+  // 舞台区的节拍镜头状态行：后台状态与手动重试。
+  beatRow: $('stage-beat'),
+  beatText: $('stage-beat-text'),
+  beatRetry: $('stage-beat-retry'),
 
   // 创意舞台：细分参数在工坊里调。
   workshopBtn: $('workshop-btn'),
@@ -235,6 +242,7 @@ const ui = {
   stageBtn: $('bar-track'),
   barTitle: $('bar-title'),
   barSub: $('bar-sub'),
+  barFavorite: $('bar-favorite'),
   barTime: $('bar-time'),
   prev: $('prev'),
   playpause: $('playpause'),
@@ -1109,15 +1117,45 @@ function handleEvent(msg) {
     case 'beatmap_ready':
       // 服务端后台分析完成：是否拉取由 StageCinema 自己按当前曲目判断。
       if (window.StageCinema && StageCinema.onBeatmapReady) StageCinema.onBeatmapReady(msg);
+      // 那一行停在「正在算」就是句谎话：算完的消息已经到了。
+      loadBeatStatus();
+      break;
+    case 'collection_load':
+      // F2 整单续载：服务端又往队列补了一批（或补完了/中断了）。拉一次队列
+      // 让右侧队列与 3D 歌单架跟上，并把进度转给在线歌单详情页的状态行——
+      // 它自己比对 source/id，不是它开着的歌单就不动。
+      dispatchEvent(new CustomEvent('online:collection-load', { detail: msg }));
+      restoreQueue().catch(() => {});
       break;
     case 'scrobbled':
-      // 网易云听歌打卡成功（有效收听满 30s）：轻提示确认「播放量 +1」。
-      toast(`已计入网易云播放量${state.current ? `：${state.current.title}` : ''}`);
+      // 网易云听歌打卡（有效收听满 30s）上报成功。措辞只承诺「已提交」：
+      // 接口 200 证明我们发出去了，不能推出平台的累计播放量已经增加。
+      toast(`已提交网易云听歌记录${state.current ? `：${state.current.title}` : ''}`);
       break;
-    case 'source_switched':
+    case 'source_switched': {
       // 曲源自动接力：服务端已在其他音源找到同一首并换源续播（队列项与
       // 封面/标题元数据都已迁到新源名下，界面不跳变）。
       toast(`原音源不可用，已切换到${msg.to_label || '其他音源'}续播《${msg.title}》`);
+      // 前端这一侧也必须迁：新虚拟 id 若没有元数据，队列行与详情会退化成平台 id；
+      // 迁移时把「用户当初点的哪家」一并留下（出处与供音分开存，见 §8 F3）。
+      const moved = window.Online && window.Online.relayMeta ? window.Online.relayMeta(msg) : null;
+      if (moved) {
+        if (state.byId) state.byId.set(msg.track_id, moved);
+        if (state.current && state.current.id === msg.from_track_id) {
+          state.current = moved;
+          window.Online.paintNowPlaying(moved, moved.cover);
+          if (Stage) Stage.setTrack(moved, moved.cover);
+          syncNpTrack(moved, moved.cover);
+          pushStageQueue();
+        }
+      }
+      break;
+    }
+    case 'quality_downgraded':
+      // 每轨的运行时音质上限（服务端内存，只降不升）：这首在高档上失败过，
+      // 之后不会再对它试更高的档。降档必须由服务端说出来——界面上下两行的
+      // 差别只是「听着不太对」，没人会自己想到是档位被夹低了。
+      toast(`《${msg.title}》${msg.from_label}放不出来，已降到${msg.to_label}`);
       break;
     default: break;
   }
@@ -1778,6 +1816,7 @@ function updateRowActiveState(snap) {
 }
 
 async function loadNowPlaying(id) {
+  setBarFavoriteTrack(null);
   const isCurrent = () => state.snapshot.track_id === id;
   // 在线试听的虚拟 id 在本地库里查不到，先回落到搜索时缓存下来的元数据
   //（缓存归 online.js 所有，通过 window.Online 访问）。
@@ -1852,7 +1891,12 @@ async function loadNowPlaying(id) {
     }
   }
   if (!isCurrent()) return;
+  const prevTrack = state.current;
   state.current = track;
+  // 换了曲，那一行答的却是上一首的处境——比不刷新更糟。曲目身份真的变了才补读数
+  // （这条路径每个播放状态更新都会走）。
+  if (!prevTrack || !track || prevTrack.id !== track.id) loadBeatStatus();
+  setBarFavoriteTrack(track);
   if (!track) return;
 
   ui.nowTitle.textContent = track.title;
@@ -2188,7 +2232,9 @@ async function refreshLyrics(id, track) {
 }
 
 // np 弹窗歌词行：来源徽标 + 用户偏移 + 清除导入入口。
-// 在线曲目歌词来自平台接口，没有导入/偏移语义，只显示来源。
+// 在线曲目的歌词来自平台接口：没有「导入/清除」语义（无文件可写），但**校准有**
+// —— 平台给的时间轴一样会整体偏，用户校正的从来是时间不是文本。所以偏移控件
+// 只在「这一首真有歌词」时出现，导入/清除仍对在线曲目隐藏。
 function syncNpLyrics(id, doc) {
   if (!isNpOpen() || !np.modal || !state.current || state.current.id !== id) return;
   const online = id.startsWith('online:');
@@ -2198,8 +2244,9 @@ function syncNpLyrics(id, doc) {
   np.lyricSource.textContent = sourceText;
   np.lyricImport.hidden = online;
   np.lyricClear.hidden = online || !doc || doc.source !== 'imported';
-  np.lyricOffset.hidden = online;
-  np.lyricOffsetMs = online || !doc ? 0 : (doc.user_offset_ms || 0);
+  const hasLines = !!(doc && doc.lines && doc.lines.length);
+  np.lyricOffset.hidden = online ? !hasLines : false;
+  np.lyricOffsetMs = !doc ? 0 : (doc.user_offset_ms || 0);
   np.lyricOffsetValue.textContent = `${np.lyricOffsetMs > 0 ? '+' : ''}${(np.lyricOffsetMs / 1000).toFixed(1)}s`;
 }
 
@@ -2236,10 +2283,11 @@ function onStageControl(e) {
       setVolumeFromInput();
       break;
     case 'lyricOffset': {
-      // stage3d 侧已做乐观暂存（连点不塌缩），这里只负责落库与回填；
-      // 在线曲目没有偏移语义，与 np 弹窗 shiftLyricOffset 同规拦截。
+      // stage3d 侧已做乐观暂存（连点不塌缩），这里只负责落库与回填。
+      // 本地与在线走同一个 `/v1/tracks/{id}/lyrics/offset`：那个键就是播放侧的
+      // 曲目身份，在线曲是虚拟 id，`track_lyrics` 没有外键、由偏移自己建行。
       const id = state.current && state.current.id;
-      if (!id || String(id).startsWith('online:')) break;
+      if (!id) break;
       const offset_ms = Math.max(-60000, Math.min(60000, Number(d.value) || 0));
       transport.put(`/v1/tracks/${encodeURIComponent(id)}/lyrics/offset`, { offset_ms })
         .then(() => { if (state.current && state.current.id === id) refreshLyrics(id, state.current); })
@@ -3117,6 +3165,11 @@ let playlistLayer = 'arrange';
 
 function setPlaylistLayer(layer) {
   playlistLayer = layer;
+  // 把层状态写进 DOM。皮肤要按「详情层开着」收掉架子那一排控件，而这个变量是
+  // 模块私有的；各层又是 .col-head **后面**的兄弟节点，CSS 选不到前面的元素，
+  // 所以只能由这里挂个 data 属性。
+  const viewPlaylists = document.getElementById('view-playlists');
+  if (viewPlaylists) viewPlaylists.dataset.layer = layer;
   ui.plDetail.hidden = layer !== 'local-detail';
   if (ui.oplGrid) ui.oplGrid.hidden = layer !== 'online-grid';
   if (ui.oplDetail) ui.oplDetail.hidden = layer !== 'online-detail';
@@ -3957,6 +4010,15 @@ function renderDiagnostics(info) {
   if (ui.setDevDiag && ui.setDevDiag.checked !== on) ui.setDevDiag.checked = on;
   if (ui.devDiagDetail) ui.devDiagDetail.hidden = !on;
   if (ui.devDiagActions) ui.devDiagActions.hidden = !on;
+  // 崩溃提醒与开关无关：进程异常退出那一次，用户多半根本没开过诊断日志，
+  // 而「它自己没了」是接不住的一句话 —— 有编号才报得上来。
+  const crash = info && info.last_crash;
+  if (ui.devDiagCrash) ui.devDiagCrash.hidden = !crash;
+  if (crash && ui.devDiagCrashText) {
+    ui.devDiagCrashText.textContent =
+      `${crash.at} 异常退出，编号 ${crash.report}（${crash.where}：${crash.message}）。`
+      + '把日志发给开发者时请带上这个编号；日志未开启时它也在同一行里。';
+  }
   if (!ui.devDiagPath) return;
   if (!on) {
     ui.devDiagPath.textContent = '—';
@@ -4048,6 +4110,111 @@ async function clearDiagLog() {
   } catch (err) {
     toast(errText('清空失败', err), 'error');
   }
+}
+
+// ---------------------------------------------------------------------------
+// 舞台区的节拍镜头状态行：后台状态与「重试」
+//
+// 清单 §9 G7：后台任务的状态要附着在任务上，而不是只在算完那一刻闪一条 toast。
+// 「在算 / 已有图 / 只在这轮内存 / 算不出来 / 还没轮到」是五种不同的下一步
+// （等它 / 不用管 / 别关这一轮 / 按重试 / 先播一次），所以文案分开写。合成一句
+// 「没有镜头」就没人能回答「再等等还是重来」。
+//
+// 只此一处：设置页不再放第二份同样的读数，否则两边会在换曲与算完的时刻上漂移。
+// ---------------------------------------------------------------------------
+
+const BEAT_STATE_TEXT = {
+  analyzing: '这首正在算',
+  disk: '这首已有节拍图（在磁盘）',
+  memory: '这首已有节拍图，只在这轮内存里（没能写进磁盘）',
+  failed: '这首算不出来',
+  idle: '后台还没轮到这首',
+  not_ready: '后台还不认识这段音频，先播一次',
+};
+
+const BEAT_REASON_TEXT = {
+  unsupported: '格式不支持',
+  failed: '解码失败',
+  tier0: '性能档位过低',
+  not_ready: '音频未就绪',
+};
+
+function beatStatusText(v) {
+  const cur = v.current;
+  const parts = [cur ? (BEAT_STATE_TEXT[cur.state] || '后台状态未知') : '当前没有播放的曲目'];
+  if (cur && cur.state === 'failed') {
+    parts.push(BEAT_REASON_TEXT[cur.reason] || '原因未知');
+    if (cur.attempts) parts.push(`已试 ${cur.attempts} 次`);
+  }
+  // 全局计数只在后台真有事可说时才跟在后面：舞台上的这一行读不动三个数字。
+  const tally = [];
+  if (v.analyzing) tally.push(`在算 ${v.analyzing} 首`);
+  if (v.abandoned) tally.push(`已放弃 ${v.abandoned} 首`);
+  if (v.deferred) tally.push(`因额度让路 ${v.deferred} 次`);
+  if (tally.length) parts.push(`后台：${tally.join(' · ')}`);
+  // 本机档位挡下时，「后台还没轮到这首」会被读成后端故障。这一问只有客户端知道
+  // 答案（服务端那边算得出图，只是这台设备不放镜头），所以接在最后一句。
+  if (beatGated()) parts.push('本机画质档位已停用节拍镜头');
+  return parts.join('，');
+}
+
+function beatGated() {
+  return !!(window.StageCinema && StageCinema.beatGated && StageCinema.beatGated());
+}
+
+let beatInfo = null;
+
+function renderBeatStatus() {
+  if (!ui.beatRow || !ui.beatText) return;
+  const id = state.current && state.current.id;
+  // 没在播、或一次读数都没拿到，就不占舞台的一行：这一行只回答「这一首怎么没镜头」。
+  ui.beatRow.hidden = !id || !beatInfo;
+  if (!id || !beatInfo) return;
+  ui.beatText.textContent = beatStatusText(beatInfo);
+  // 档位挡下时按重试也不会出镜头，藏掉比置灰诚实。
+  if (ui.beatRetry) ui.beatRetry.hidden = beatGated();
+}
+
+async function loadBeatStatus() {
+  if (!ui.beatRow) return;
+  const id = state.current && state.current.id;
+  const path = id
+    ? `/v1/stage/beatmap/status?track=${encodeURIComponent(id)}`
+    : '/v1/stage/beatmap/status';
+  const v = await transport.get(path).catch(() => null);
+  // GET 失败不动这一行：停在上一条已知状态比把它清成「—」更接近实情。
+  if (v) {
+    beatInfo = v;
+    renderBeatStatus();
+  }
+}
+
+/// 重试的应答就是三态之一（与取地图同一个形状），措辞按状态分开：说「已重新
+/// 开始算」，不说「已修好」——重算完还要几秒。
+function beatRetryText(res) {
+  if (!res) return '已重试';
+  if (res.status === 'analyzing') return '已重新开始算，几秒后再看这一行';
+  if (res.status === 'unavailable') {
+    return `还是算不出来：${BEAT_REASON_TEXT[res.reason] || res.reason || '原因未知'}`;
+  }
+  return res.cached ? '这首的节拍图已经在磁盘上了' : '算好了，但没能写进磁盘（这轮能用）';
+}
+
+async function retryBeatmap() {
+  const id = state.current && state.current.id;
+  if (!id) {
+    toast('先播一首，再重试它的节拍分析');
+    return;
+  }
+  if (ui.beatRetry) ui.beatRetry.disabled = true;
+  try {
+    toast(beatRetryText(await transport.post('/v1/stage/beatmap/retry', { track_id: id })));
+  } catch (err) {
+    toast(errText('重试失败', err), 'error');
+  } finally {
+    if (ui.beatRetry) ui.beatRetry.disabled = false;
+  }
+  loadBeatStatus();
 }
 
 // ---------------------------------------------------------------------------
@@ -4330,11 +4497,16 @@ function closeThemeMenu() {
 
 // 菜单挂在 <body> 上，位置只能自己算：默认与按钮右对齐、落在按钮下方；
 // 下方放不下就翻到上方，右边超出视口就向左收。
-function positionThemeMenu() {
-  if (!ui.themeMenu || ui.themeMenu.hidden || !ui.themeBtn) return;
-  const r = ui.themeBtn.getBoundingClientRect();
-  const w = ui.themeMenu.offsetWidth || 232;
-  const h = ui.themeMenu.offsetHeight || 0;
+/// 顶栏弹层的通用定位：右对齐按钮，下方放不下就翻上去，最后夹进视口。
+///
+/// 三个入口（主题色 / 界面皮肤 / 更多工具）都得把弹层搬出 .topbar 才压得住后面
+/// 那些玻璃面板（顶栏自己就是层叠上下文，见 positionThemeMenu 上方注释），而搬
+/// 出来之后 CSS 的 top/right 就都不成立了，位置只能由 JS 按按钮矩形算。
+function positionAnchoredMenu(btn, menu, fallbackW) {
+  if (!btn || !menu || menu.hidden) return;
+  const r = btn.getBoundingClientRect();
+  const w = menu.offsetWidth || fallbackW;
+  const h = menu.offsetHeight || 0;
   const gap = 8;
   const pad = 8;
 
@@ -4348,8 +4520,12 @@ function positionThemeMenu() {
   }
   top = Math.max(pad, Math.min(top, Math.max(pad, window.innerHeight - h - pad)));
 
-  ui.themeMenu.style.left = `${Math.round(left)}px`;
-  ui.themeMenu.style.top = `${Math.round(top)}px`;
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
+function positionThemeMenu() {
+  positionAnchoredMenu(ui.themeBtn, ui.themeMenu, 232);
 }
 
 function setThemeMenuOpen(open) {
@@ -4433,6 +4609,10 @@ function initTopMoreMenu() {
   const menu = $('top-more-menu');
   if (!root || !btn || !menu) return;
 
+  // 与 #theme-menu / #skin-menu 同一件事：把弹层搬出 .topbar 的层叠上下文。留在
+  // 原处的话浮光那块 fixed + z-index:58 的舞台面板会整块盖住它（实测命中 #stage）。
+  document.body.appendChild(menu);
+
   let open = false;
   const items = () => Array.prototype.slice.call(menu.querySelectorAll('.menu-item'));
 
@@ -4441,6 +4621,7 @@ function initTopMoreMenu() {
     menu.hidden = !open;
     btn.classList.toggle('active', open);
     btn.setAttribute('aria-expanded', String(open));
+    if (open) positionAnchoredMenu(btn, menu, 188);
   }
 
   btn.addEventListener('click', (e) => {
@@ -4457,8 +4638,12 @@ function initTopMoreMenu() {
   });
 
   document.addEventListener('click', (e) => {
-    if (open && !root.contains(e.target)) setOpen(false);
+    // 菜单已经不在 root 里了，判据得把它算上 —— 否则点菜单空白处会先被这里关掉。
+    if (open && !root.contains(e.target) && !menu.contains(e.target)) setOpen(false);
   });
+
+  // 搬出按钮的 relative 盒之后，位置是开层那一刻算的：窗口一变就作废，直接收。
+  window.addEventListener('resize', () => { if (open) setOpen(false); });
 
   menu.addEventListener('keydown', (e) => {
     const list = items();
@@ -5667,22 +5852,32 @@ function queueForSourceItem(item) {
 
 /// 在线项播放。整份原始记录交给 Online.playAll —— 它要 id/artist/album/
 /// duration/cover/ref 全套，海报快照里只留了显示字段。
-function playOnlineItem(item) {
+///
+/// `list` 是发起方**自己那一列**（清风墙会把墙上当前的 tiles 传回来）。不能拿
+/// `state.view` 现推：墙上第二层是「某个在线歌单里的歌」，而 tab 还停在歌单页，
+/// 那一推拿到的是**歌单记录**，`raw.id` 是平台歌单 id —— 发出去就是拿歌单 id
+/// 当曲目 id 去取流，必 404，而且服务端只会回「暂无可用音频」这种误导话术。
+function playOnlineItem(item, list) {
   const Online = window.Online;
   if (!Online || typeof Online.playAll !== 'function') {
     toast('在线播放还没准备好', 'error');
     return;
   }
-  const def = viewSourceDef(state.view);
-  const list = (def ? def.items() : []) || [];
+  const source = (Array.isArray(list) && list.length)
+    ? list
+    : (((viewSourceDef(state.view) || {}).items || (() => []))());
   // 传整份同源列表：playAll 从 tracks[index] 开播，之后 next/prev 才有意义。
-  const tracks = list.map((x) => x.raw || x).filter((x) => x && x.id);
-  if (!tracks.length) {
-    toast('这个来源里没有可播放的曲目', 'error');
+  const tracks = source.map((x) => x.raw || x).filter((x) => x && x.id);
+  const at = tracks.findIndex((x) => onlineItemId(x) === item.id);
+  if (at >= 0) {
+    Online.playAll(tracks, at);
     return;
   }
-  const at = tracks.findIndex((x) => onlineItemId(x) === item.id);
-  Online.playAll(tracks, at >= 0 ? at : 0);
+  // 列表里找不到被点的那一项时，只播它自己 —— 退回 index 0 会播成**另一首歌**，
+  // 用户看到的是"我点的 A 响了 B"，比什么都不响更难查。
+  const one = item.raw || item;
+  if (one && one.id) Online.playAll([one], 0);
+  else toast('这个来源里没有可播放的曲目', 'error');
 }
 
 /// 点开一张海报。歌单是**进第二层**，其余是播放。
@@ -5697,22 +5892,23 @@ function activateSourceItem(d) {
     return;
   }
   if (d.delta) {
-    const list = walllessSourceItems(item);
+    const list = walllessSourceItems(item, d.list);
     if (!list.length) return;
     const at = list.findIndex((x) => x.id === item.id);
     // 当前项不在源里时从头/从末开始，而不是 -1+1=0 这种巧合。
     let next = at < 0 ? (d.delta > 0 ? 0 : list.length - 1) : at + d.delta;
     if (next < 0) next = list.length - 1;
     if (next >= list.length) next = 0;
-    playSourceItem(list[next]);
+    playSourceItem(list[next], d.list);
     return;
   }
-  playSourceItem(item);
+  playSourceItem(item, d.list);
 }
 
-/// 取当前墙上那一列的项。墙上算好了才发 activate，这里按 item 上带的
-/// sourceKey 重新取一次（业务侧唯一权威，避免皮肤自己缓存一份列表）。
-function walllessSourceItems(item) {
+/// 取当前墙上那一列的项。墙传了自己那份就用它（第二层的歌只存在于墙上，
+/// 业务侧没有对应的 sourceKey）；没传才按 item 上的 sourceKey 回业务取。
+function walllessSourceItems(item, list) {
+  if (Array.isArray(list) && list.length) return list;
   const def = item && item.sourceKey ? viewSourceDef(item.sourceKey) : null;
   if (!def) return [];
   return def.items() || [];
@@ -5720,7 +5916,7 @@ function walllessSourceItems(item) {
 
 /// 播放某个源里的一项。分派依据是它带的是哪种 id —— 这层判据必须与
 /// viewSnapshot 造 id 的那几处保持一致（同一条规则，见 onlineItemId）。
-function playSourceItem(item) {
+function playSourceItem(item, list) {
   if (!item) return;
   // 播放队列那一份已经带好了 id，直接走队列路径（顺序播放语义要对）。
   if (item.queueItem) {
@@ -5734,7 +5930,7 @@ function playSourceItem(item) {
   }
   // 在线虚拟 id：本地库里没有，喂 /v1/player/load 必 404。
   if (String(item.id).startsWith('online:')) {
-    playOnlineItem(item);
+    playOnlineItem(item, list);
     return;
   }
   // 本地 id。
@@ -5787,188 +5983,108 @@ function playQueueStep(delta) {
 }
 
 // ---------------------------------------------------------------------------
-// 播放栏显隐：15s 无操作自动隐藏 + 底部热区唤出 + 手动切换
+// 当前歌曲收藏：身份和写入沿用 Favorites；按钮只保存当前展示对象与请求状态。
 // ---------------------------------------------------------------------------
-function initBarAutohide() {
+let barFavoriteTrack = null;
+let barFavoriteKey = '';
+let barFavoriteLoading = false;
+const barFavoritePending = new Set();
+
+function barFavoriteInput() {
+  const track = barFavoriteTrack;
+  if (!track || !track.id) return null;
+  return {
+    kind: 'track',
+    source: track.source || 'local',
+    ref_id: String(track.onlineId || track.id),
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    duration_ms: track.duration_ms,
+    cover: track.cover,
+  };
+}
+
+function renderBarFavorite() {
+  const btn = ui.barFavorite;
+  const F = window.Favorites;
+  const input = barFavoriteInput();
+  if (!btn || !F) return;
+  const on = !!input && F.has(input.kind, input.source, input.ref_id);
+  const busy = barFavoriteLoading || barFavoritePending.has(barFavoriteKey);
+  btn.disabled = !input || busy;
+  btn.classList.toggle('is-on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.setAttribute('aria-busy', String(busy));
+  btn.title = !input ? '播放歌曲后可收藏' : on ? '取消收藏当前歌曲' : '收藏当前歌曲';
+  btn.setAttribute('aria-label', btn.title);
+  btn.innerHTML = F.heartSvg(on);
+}
+
+function setBarFavoriteTrack(track) {
+  barFavoriteTrack = track;
+  const F = window.Favorites;
+  const input = barFavoriteInput();
+  const key = input && F ? F.identity(input.kind, input.source, input.ref_id) : '';
+  if (key === barFavoriteKey) { renderBarFavorite(); return; }
+  barFavoriteKey = key;
+  barFavoriteLoading = !!key;
+  renderBarFavorite();
+  if (!key) return;
+  // 同一首写入尚未完成时切回，等待原写入；避免旧判红请求覆盖乐观更新。
+  if (barFavoritePending.has(key)) { barFavoriteLoading = false; return; }
+  F.syncMembership(input.kind, input.source, [input.ref_id]).then(() => {
+    if (barFavoriteKey !== key) return;
+    barFavoriteLoading = false;
+    renderBarFavorite();
+  });
+}
+
+async function toggleBarFavorite() {
+  const input = barFavoriteInput();
+  const key = barFavoriteKey;
+  if (!input || ui.barFavorite.disabled) return;
+  barFavoritePending.add(key);
+  renderBarFavorite();
+  try {
+    await window.Favorites.toggle(input);
+  } finally {
+    barFavoritePending.delete(key);
+    renderBarFavorite();
+  }
+}
+
+// 播放栏显隐：显式收起 / 展开。鼠标活动、播放状态和计时器不改变用户选择。
+function initBarVisibility() {
   const bar = document.querySelector('.bar');
-  if (!bar) return;
-  const HIDE_MS = 15000;
-  const LEAVE_MS = 800;
+  const toggleBtn = $('bar-pin-toggle');
+  const restoreBtn = $('bar-restore');
   const STORE_KEY = 'vmusic.bar.pinned.v1';
-
-  let pinned = true;
-  try { if (localStorage.getItem(STORE_KEY) === '0') pinned = false; } catch (e) { /* ignore */ }
-  let idle = false;
-  let peek = false;
-  let hideTimer = null;
-  let leaveTimer = null;
-  let sliding = false;
-
-  // 隐藏状态下的底部唤出热区（鼠标移到屏幕最底部即唤出）
-  const zone = document.createElement('div');
-  zone.className = 'bar-hover-zone';
-  zone.setAttribute('aria-hidden', 'true');
-  document.body.appendChild(zone);
-
-  // 手动显隐切换按钮（播放栏最右侧）
-  const toggleBtn = document.createElement('button');
-  toggleBtn.type = 'button';
-  toggleBtn.id = 'bar-pin-toggle';
-  toggleBtn.className = 'btn-pill bar-pin-toggle';
-  toggleBtn.title = '隐藏播放栏';
-  toggleBtn.setAttribute('aria-label', '隐藏或显示播放控制栏');
-  toggleBtn.setAttribute('aria-pressed', 'false');
-  toggleBtn.innerHTML =
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>';
-  const barRight = document.querySelector('.bar-right');
-  if (barRight) barRight.appendChild(toggleBtn);
-
-  function persist() {
-    // 隐私模式 / 配额满都会抛：这只影响「本机记住的折叠态」，不影响功能。
-    try { localStorage.setItem(STORE_KEY, pinned ? '1' : '0'); } catch (e) { /* 见上 */ }
-  }
-
-  // 收起 / 展开的**唯一权威是 wantVisible**，动画只是它的一层表现。
-  //
-  // 原来的写法把「正在滑动」当成了拒绝新请求的理由（hideBar 的 `|| sliding`
-  // 早退、showBar 的 `!classList.contains('is-hidden')` 早退），于是动画途中
-  // 改变主意的那一次请求被**静默丢弃**，而兜底 finishHide 照样在 600ms 后
-  // 把 is-hidden 补上：用户想要「显示」，拿到的是「永久消失」。
-  // 实测（快速点两下折叠按钮）稳定复现：bar 上有 is-hidden 而 body.bar-hidden
-  // 不存在 —— 状态认为它该显示，DOM 认为它该收起，两边永久对不上，
-  // 底部热区之外没有任何路径能把它唤回来。
-  //
-  // 所以两条铁律：
-  //   1. 任何时刻 wantVisible 都是最新的期望值，动画结束按它落定，
-  //      而不是按发起这次动画时的意图；
-  //   2. 每次动画领一个世代号，旧世代的 transitionend / 兜底 setTimeout
-  //      一律不认账 —— 否则「收起中改主意要显示」这条路上，
-  //      收起那次的 600ms 兜底会在展开动画播到一半时把行内样式清掉。
-  let wantVisible = true;
-  let slideGen = 0;
-
-  function clearInline() {
-    bar.style.transition = '';
-    bar.style.transform = '';
-    bar.style.opacity = '';
-  }
-
-  // 一次滑动结束：只认当前世代，且按**当前**的 wantVisible 落定。
-  function finishSlide(gen) {
-    if (gen !== slideGen) return;
-    sliding = false;
-    bar.classList.toggle('is-hidden', !wantVisible);
-    clearInline();
-  }
-
-  // 收起：下滑 → display:none，空间让给主内容
-  function hideBar() {
-    sliding = true;
-    const gen = ++slideGen;
-    bar.style.transition = 'transform 0.32s var(--ease-out), opacity 0.25s ease';
-    bar.style.transform = 'translateY(calc(100% + 20px))';
-    bar.style.opacity = '0';
-    bar.addEventListener('transitionend', function onEnd(ev) {
-      if (ev.target !== bar) return;
-      bar.removeEventListener('transitionend', onEnd);
-      finishSlide(gen);
-    });
-    // 保底：个别环境 transitionend 不可靠时不卡在半空中
-    setTimeout(() => finishSlide(gen), 600);
-  }
-
-  // 展开（先离屏布局，再上滑，避免可见的重排跳变）
-  function showBar() {
-    sliding = true;
-    const gen = ++slideGen;
-    bar.classList.remove('is-hidden');
-    bar.style.transition = '';
-    bar.style.transform = 'translateY(calc(100% + 20px))';
-    bar.style.opacity = '0';
-    void bar.offsetHeight;
-    requestAnimationFrame(() => {
-      if (gen !== slideGen) return;
-      bar.style.transition = 'transform 0.32s var(--ease-out), opacity 0.3s ease';
-      bar.style.transform = '';
-      bar.style.opacity = '';
-      setTimeout(() => finishSlide(gen), 360);
-    });
-  }
+  let collapsed = false;
+  try { collapsed = localStorage.getItem(STORE_KEY) === '0'; } catch (e) { /* 本次会话仍可操作 */ }
 
   function sync() {
-    const visible = peek || (pinned && !idle);
-    wantVisible = visible;
-    document.body.classList.toggle('bar-hidden', !visible);
-    toggleBtn.setAttribute('aria-pressed', String(!visible));
-    toggleBtn.title = visible ? '隐藏播放栏' : '显示播放栏';
-    // 已经落到目标态且不在动画中：无事可做。
-    if (!sliding && visible === !bar.classList.contains('is-hidden')) return;
-    // 收起动画途中改主意要显示：先让收起这次动画干净收尾（世代号作废它的
-    // 兜底），再立刻展开。不这么做的话播放条会先滑出视口、再原地跳回来。
-    if (sliding) {
-      slideGen += 1;
-      sliding = false;
-      clearInline();
-    }
-    if (visible) showBar();
-    else hideBar();
+    // 流年把同一个节点搬成文档流播放卡，其折叠由皮肤自己管理。
+    const inlinePlayer = document.documentElement.dataset.skin === 'liunian';
+    const hidden = collapsed && !inlinePlayer;
+    bar.classList.toggle('is-hidden', hidden);
+    document.body.classList.toggle('bar-hidden', hidden);
+    toggleBtn.hidden = inlinePlayer;
+    toggleBtn.setAttribute('aria-expanded', String(!hidden));
+    restoreBtn.hidden = !hidden;
   }
 
-  function armIdle() {
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => { idle = true; sync(); }, HIDE_MS);
-  }
-
-  function beginPeek() {
-    clearTimeout(leaveTimer);
-    if (!peek) { peek = true; sync(); }
-  }
-  function endPeekSoon() {
-    clearTimeout(leaveTimer);
-    leaveTimer = setTimeout(() => { peek = false; sync(); }, LEAVE_MS);
-  }
-
-  // 底部热区唤出
-  zone.addEventListener('pointerenter', beginPeek);
-  zone.addEventListener('pointermove', beginPeek);
-  // 鼠标/焦点在播放栏上时保持显示，离开再按当前状态收起
-  bar.addEventListener('pointerenter', beginPeek);
-  bar.addEventListener('pointerleave', endPeekSoon);
-  bar.addEventListener('focusin', beginPeek);
-  bar.addEventListener('focusout', endPeekSoon);
-
-  // 全局活动重置 15s 计时（节流，避免 mousemove 风暴）
-  let lastArm = 0;
-  function onActivity() {
-    const now = Date.now();
-    if (now - lastArm < 500) return;
-    lastArm = now;
-    if (idle) { idle = false; if (!peek) sync(); }
-    armIdle();
-  }
-  ['pointerdown', 'keydown', 'mousemove'].forEach((type) =>
-    document.addEventListener(type, onActivity, { passive: true }));
-
-  // 手动切换：用户意图持久化；手动隐藏后只有底部热区能唤出
-  toggleBtn.addEventListener('click', () => {
-    pinned = !pinned;
-    persist();
-    // **收起时必须把 peek 一起清掉**：visible = peek || (pinned && !idle)，
-    // 而此刻鼠标正悬在播放条上 → bar 的 pointerenter 已经把 peek 置成 true。
-    // 只改 pinned 的话 visible 仍是 true，**点击的当下看不到任何反应**，
-    // 要等鼠标移开、leaveTimer 800ms 后把 peek 归零才真的收起 ——
-    // 表现为「按钮点了没用」，而且用户把鼠标移到底部热区想唤回来时，
-    // pointermove 又把 peek 置回 true，行为彻底不可预期。
-    if (pinned) { idle = false; peek = false; }
-    else peek = false;
-    // 收起后别再 armIdle：那条 15s 定时器到点会把 idle 置真，
-    // 与「用户主动收起」这条意图打架（下次 peek 一结束就立刻又藏起来）。
-    if (pinned) armIdle();
-    else clearTimeout(hideTimer);
+  function setCollapsed(value) {
+    collapsed = value;
+    try { localStorage.setItem(STORE_KEY, collapsed ? '0' : '1'); } catch (e) { /* 本次会话仍可操作 */ }
     sync();
-  });
+    // 收起后焦点移到可见的恢复入口，键盘操作不会丢在隐藏的播放栏中。
+    (collapsed ? restoreBtn : toggleBtn).focus({ preventScroll: true });
+  }
 
-  armIdle();
+  toggleBtn.addEventListener('click', () => setCollapsed(true));
+  restoreBtn.addEventListener('click', () => setCollapsed(false));
+  document.addEventListener('skin:changed', sync);
   sync();
 }
 
@@ -6049,6 +6165,7 @@ function stopPlayback() {
 const np = {
   modal: $('np-modal'), scrim: $('np-scrim'), close: $('np-close'),
   art: $('np-art'), name: $('np-name'), artist: $('np-artist'),
+  origin: $('np-origin'),
   time: $('np-time'), bar: $('np-progress-bar'),
   play: $('np-playpause'), prev: $('np-prev'), next: $('np-next'), stop: $('np-stop'),
   volume: $('np-volume'), goto: $('np-goto-stage'),
@@ -6306,6 +6423,16 @@ function syncNpTrack(track, coverUrl) {
   if (!isNpOpen() || !track) return;
   np.name.textContent = track.title || '未命名';
   np.artist.textContent = [track.artist, track.album].filter(Boolean).join(' · ') || '未知艺术家';
+  // 出处说明：换过源才写这一行。措辞讲清「点的是谁、现在谁在放」，因为播放、
+  // 封面、歌词、缓存现在都跟着供音那一家走。
+  if (np.origin) {
+    const from = track.origin && track.origin.label;
+    const to = (window.Online && window.Online.sourceLabel
+      && window.Online.sourceLabel(track.source)) || track.source;
+    const show = !!(track.origin && track.origin.source && track.origin.source !== track.source);
+    np.origin.hidden = !show;
+    if (show) np.origin.textContent = '原音源：' + (from || track.origin.source) + ' · 现由 ' + to + ' 供音';
+  }
   // 调用方有的传已解析的 data URL（换曲主流程），有的传在线元数据里的远程原址
   // （详情补拉回填），所以解析收在这里：插件形态远程地址先占位、代理落地后回填。
   const apply = (u) => { np.art.style.backgroundImage = u ? `url("${u}")` : 'none'; };
@@ -6367,10 +6494,13 @@ function initNowPlayingModal() {
   };
   const shiftLyricOffset = async (delta) => {
     const id = state.current && state.current.id;
-    if (!id || id.startsWith('online:')) return;
+    if (!id) return;
     try {
       const offset_ms = Math.max(-60000, Math.min(60000, np.lyricOffsetMs + delta));
       await transport.put(`/v1/tracks/${encodeURIComponent(id)}/lyrics/offset`, { offset_ms });
+      // 迟到的保存不许改新歌的读数：await 期间用户可能已经切歌，那行读数属于
+      // 现在这首，把刚才那首的偏移写上去会把校准说成谎话。
+      if (!state.current || state.current.id !== id) return;
       np.lyricOffsetMs = offset_ms;
       np.lyricOffsetValue.textContent = `${offset_ms > 0 ? '+' : ''}${(offset_ms / 1000).toFixed(1)}s`;
       await refreshLyrics(id, state.current);
@@ -6458,6 +6588,14 @@ async function startApp() {
   // 浮光下搜索框默认收着（opacity:0），靠 body.sheen-search 显形。
   // blur 时必须摘掉标记让它收回，否则那条覆盖式搜索条会一直挂在顶栏上。
   ui.search.addEventListener('blur', () => { document.body.classList.remove('sheen-search'); });
+  // 本地档的搜索是「边输边查」，没有按钮可记，所以按 Enter 作为提交点：
+  // 与流年面板、在线框同一个历史 owner。逐字输入不进历史——那样每次搜索都会
+  // 留下一串「周」「周杰」这类前缀，最近十条里全是打字中间态。
+  ui.search.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const q = ui.search.value.trim();
+    if (q && window.HertzSearchHistory) window.HertzSearchHistory.push(q);
+  });
 
   // 无结果卡上的「清空搜索 / 清除筛选」：一键撤掉所有让列表变空的条件。
   if (ui.libEmptyNoMatchClear) {
@@ -7357,6 +7495,8 @@ async function startApp() {
   if (ui.devDiagCopy) ui.devDiagCopy.onclick = copyDiagLog;
   if (ui.devDiagSave) ui.devDiagSave.onclick = saveDiagLogFromServer;
   if (ui.devDiagClear) ui.devDiagClear.onclick = clearDiagLog;
+  // 舞台节拍分析：这一行只回答「后台现在在忙什么」，重试是唯一一个动作。
+  if (ui.beatRetry) ui.beatRetry.onclick = retryBeatmap;
   ui.settingsEntry.onclick = () => {
     setView('settings');
     ui.views.settings.scrollTop = 0;
@@ -7561,6 +7701,7 @@ async function startApp() {
   if (capsuleMin && !window.HertzCapsuleOnly) setCapsuleMinimized(true);
   // 在线面板（web/online.js）：先注入宿主依赖，再拉音源清单、绑事件。
   window.Online.bind({
+    onNowPlaying: setBarFavoriteTrack,
     ui,
     state,
     setStateQueue,
@@ -7683,8 +7824,9 @@ async function startApp() {
       if (window.OnlinePlaylists) window.OnlinePlaylists.playRef(f.source, f.ref_id);
       else toast('在线歌单模块未加载，请刷新页面后重试', 'error');
     },
-    // 红心状态变化时让曲库行跟着改色。
+    // 播放栏和曲库行共用收藏状态，包括乐观更新与失败回滚。
     onFavoriteChanged: (kind, source, refId, on) => {
+      renderBarFavorite();
       if (kind !== 'track' || source !== 'local') return;
       const row = state.rows.get(refId);
       if (!row) return;
@@ -7698,6 +7840,8 @@ async function startApp() {
   if (window.Favorites) {
     window.Favorites.bind(favHost);
     window.Favorites.init();
+    ui.barFavorite.onclick = toggleBarFavorite;
+    setBarFavoriteTrack(state.current);
   }
   if (window.Daily) {
     window.Daily.bind(favHost);
@@ -7729,7 +7873,7 @@ async function startApp() {
   bindShortcuts();
   initSleepTimer();
   initPalette();
-  initBarAutohide();
+  initBarVisibility();
   initPanelBridge();
   initQingfengBridge();
   bindMediaSession();

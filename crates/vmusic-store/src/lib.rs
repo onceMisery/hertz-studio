@@ -18,6 +18,7 @@ use vmusic_core::{Playlist, PlaylistId, StoreError, Track, TrackId, TrackSource}
 
 pub mod backup;
 pub mod favorites;
+pub mod limits;
 pub mod lyrics;
 pub mod no_auto_match;
 pub mod playlists;

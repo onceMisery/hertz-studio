@@ -41,7 +41,20 @@ async function main() {
     const colors = tempera.palette(theme, mode);
     assert.equal(colors.tones.length, 4);
     assert.ok(colors.tones.every(color => /^#[a-f\d]{6}$/i.test(color)));
-    assert.equal(colors.ink, theme.primaryColor);
+    if (mode === 'mono') {
+      for (const color of [colors.paper, colors.ink, colors.accent, colors.line].concat(colors.fills, colors.tones)) {
+        const rgb = util.hexToRgb(color);
+        assert.equal(rgb.r, rgb.g, 'mono drops the theme hue');
+        assert.equal(rgb.g, rgb.b, 'mono drops the theme hue');
+      }
+      assert.equal(new Set(colors.fills).size, 4, 'mono retains four distinct print levels');
+    } else {
+      assert.equal(colors.ink, theme.primaryColor);
+      assert.ok(colors.fills.slice(0, 3).every(color => {
+        const { r, g, b } = util.hexToRgb(color);
+        return Math.max(r, g, b) - Math.min(r, g, b) > 20;
+      }), mode + ': colored inks survive the fill mix');
+    }
   }
   for (const kind of tempera.COMPOSITION_KINDS) {
     assert.equal(tempera.compositionKind('track:12', { composition: kind }), kind);
@@ -61,6 +74,7 @@ async function main() {
   assert.equal(tempera.sweepExtent(row, 0.5), null);
 
   const renderer = tempera.init(element(), () => {});
+  assert.equal(renderer.isReady(), false, 'cold renderer has not submitted a frame');
   assert.equal(applications, 0);
   renderer.setVisible(true);
   await Promise.resolve();
@@ -73,13 +87,14 @@ async function main() {
   assert.equal(destroyed, 1);
   renderer.destroy();
   assert.equal(destroyed, 1);
+  assert.equal(renderer.isReady(), false, 'destroyed renderer cannot own an incoming handoff');
 
   const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
   const host = fs.readFileSync(path.join(web, 'stage3d.js'), 'utf8');
   assert.ok(html.indexOf('src="stanza/stanza-tempera.js"') > html.indexOf('src="stanza/stanza-sonnet.js"'));
   assert.ok(html.indexOf('src="stanza/stanza-tempera.js"') < html.indexOf('src="stage3d.js"'));
   assert.match(html, /option value="tempera"/);
-  for (const id of ['composition', 'color-mode', 'screens', 'inversion']) {
+  for (const id of ['composition', 'color-mode', 'screens', 'inversion', 'seams', 'halation-t']) {
     assert.ok(html.includes('id="s3d-fl-' + id + '"'));
     assert.ok(host.includes("'s3d-fl-" + id + "'"));
   }

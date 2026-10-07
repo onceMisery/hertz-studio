@@ -99,6 +99,12 @@
     return semantic + centerBias * 0.18;
   }
 
+  // hero 不给「独笔画/标点」：一字（一）或冒号句读当 hero，画面读作排版事故
+  // （一行歌词中间孤零零漂着一横），而不是强调。全 trivial 时回退原选择。
+  function heroEligible(u) {
+    return !!/\S/.test(u.text) && !/^[一：:，。！？、；,.!?;（）()""''「」]$/.test(u.text);
+  }
+
   // 主入口
   function layout(tokens, opts) {
     tokens = tokens || [];
@@ -119,9 +125,22 @@
       var s = heroScore(u, centerBias);
       if (s > bestScore && /\S/.test(u.text)) { bestScore = s; heroIdx = i; }
     });
+    var eligible = units.filter(heroEligible);
+    if (eligible.length) {
+      var bestEligible = -1, bestEligibleScore = -1;
+      units.forEach(function (u, i) {
+        if (!heroEligible(u)) return;
+        var centerBias = 1 - Math.abs(i - (units.length - 1) / 2) / Math.max(1, units.length / 2);
+        var s = heroScore(u, centerBias);
+        if (s > bestEligibleScore) { bestEligibleScore = s; bestEligible = i; }
+      });
+      if (bestEligible >= 0) { heroIdx = bestEligible; bestScore = bestEligibleScore; }
+    }
     var heroBoost = 1 + U.clamp(bestScore - 0.48, 0, 0.52); // 1.0–1.52
 
-    // 2) 分行（顺序流，hero 独占一行；行宽 maxW，CJK 可任意断，拉丁词整体）
+    // 2) 分行（顺序流；hero 独占一行只留给 ≥8 单元的长句 —— 短句强拆三行
+    //    会把一句词摊满整屏，读作排版破碎而不是排版强调）
+    var heroOwnRow = units.length >= 8;
     var gap = fontPx * 0.12, lineH = fontPx * 1.5;
     var rows = [[]];
     function pushRow(u) {
@@ -132,7 +151,7 @@
       row.push(u);
     }
     units.forEach(function (u, i) {
-      if (i === heroIdx) {
+      if (i === heroIdx && heroOwnRow) {
         if (rows[rows.length - 1].length) rows.push([]);
         rows[rows.length - 1].push(u);
         rows.push([]);
@@ -160,11 +179,15 @@
           x: x, y: y - u.h * 0.5, w: u.w, h: u.h, _ri: ri,
           rotate: (rnd(3) - 0.5) * (isHero ? 0 : 5),
           scale: scale, hero: isHero,
-          entryX: (rnd(4) - 0.5) * fontPx * (isHero ? 0.4 : 0.9),
-          entryY: (rnd(5) - 0.5) * fontPx * 0.9,
-          passedRotate: (rnd(6) - 0.5) * 24,
-          driftX: (rnd(7) - 0.5) * fontPx * 0.5,
-          driftY: (rnd(8) - 0.5) * fontPx * 0.4
+          // 入场只给小幅横向扰动（±0.18em）：±0.45em 会把相邻 waiting 词推进彼此。
+          entryX: (rnd(4) - 0.5) * fontPx * 0.36,
+          entryY: (rnd(5) - 0.5) * fontPx * 0.7,
+          // 唱后漂移是「余烬」不是「四散」：全组同向（右下）、低方差、转角 ±4.5°。
+          // 方差必须小于基准碰撞带的富余（bandOf 的 +2px），否则同行相邻词的
+          // 相对漂移会吃掉间隙重新相撞 —— 用户报告的歌词重叠即源于此。
+          passedRotate: (rnd(6) - 0.5) * 9,
+          driftX: (0.32 + rnd(7) * 0.12) * fontPx * 0.3,
+          driftY: (0.2 + rnd(8) * 0.12) * fontPx * 0.22
         });
         cursor += u.w + gap;
       });

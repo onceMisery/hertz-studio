@@ -56,6 +56,12 @@ impl Quality {
         }
     }
 
+    /// 紧邻的下一档，已是最低档时 None。运行时音质上限用它降档：一次失败只
+    /// 该让这首退一格，一路退到底会把「上游抖了一下」放大成永久降级。
+    pub fn one_down(self) -> Option<Quality> {
+        Quality::descending_from(self).get(1).copied()
+    }
+
     /// 别名归一化：320k/hq → exhigh，flac/sq → lossless，master/svip → hires。
     pub fn parse(raw: &str) -> Option<Quality> {
         match raw.trim().to_ascii_lowercase().as_str() {
@@ -191,6 +197,37 @@ pub fn from_bitrate(bps: Option<u64>) -> Option<Quality> {
     })
 }
 
+// 每轨的**运行时**音质上限怎么动。两个纯函数放在一起，是为了让「只降不升」这条
+// 能被单独钉住：它决定「按第二次重试」会不会又撞上同一档必然失败的取流。
+//
+// 上限只活在内存（见 `crate::state::AppState::quality_caps`），落盘的档位偏好不
+// 受它影响：用户选的那一档永远是他看得见的意图，上限只是这首曲子的证据。进程
+// 重启即忘记，等于给它一次重新尝试高档的机会。
+//
+// 记在**曲目**而不是音源：同一平台上无损对某首 VIP 曲失败、对隔壁普通曲成功，
+// 按源记会把好曲子一起拖低。
+
+/// 记一次失败后这首的上限：退到失败档的下一格。返回 `None` 表示整表不动，
+/// 两种情形各有一半理由：已是最低档（下面没有档可退了），或这次失败的档位
+/// 比现有上限还高（那已经是被夹住的一档，不能再「降」出一个更高的上限——
+/// 抬高上限正是「弹回高档」这个要防的失败）。调用方据返回值决定要不要通知。
+pub fn lower_ceiling(prev: Option<Quality>, failed_at: Quality) -> Option<Quality> {
+    let next = failed_at.one_down()?;
+    match prev {
+        Some(p) if p.rank() <= next.rank() => None,
+        _ => Some(next),
+    }
+}
+
+/// 这次播放该瞄哪一档：把偏好档夹进这首已确认的上限内。播放、预取、解码失败
+/// 收口三处都走它，否则预取会绕开上限把刚失败过的高档请求原样再发一遍。
+pub fn clamp_request(want: Quality, ceiling: Option<Quality>) -> Quality {
+    match ceiling {
+        Some(c) if c.rank() < want.rank() => c,
+        _ => want,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +294,59 @@ mod tests {
         assert_eq!(from_bitrate(Some(320_000)), Some(Quality::Exhigh));
         assert_eq!(from_bitrate(Some(740_000)), Some(Quality::Lossless));
         assert_eq!(from_bitrate(None), None);
+    }
+
+    /// 下一格只走一格，最低档没有下一格。
+    #[test]
+    fn one_down_steps_a_single_rung() {
+        assert_eq!(Quality::Hires.one_down(), Some(Quality::Lossless));
+        assert_eq!(Quality::Lossless.one_down(), Some(Quality::Exhigh));
+        assert_eq!(Quality::Exhigh.one_down(), Some(Quality::Standard));
+        assert_eq!(Quality::Standard.one_down(), None);
+    }
+
+    /// 上限只降不升：更低的证据来了就再退一格，比现有上限高的证据一律不动它。
+    #[test]
+    fn ceiling_only_moves_down() {
+        assert_eq!(lower_ceiling(None, Quality::Hires), Some(Quality::Lossless));
+        // 在现有上限那一档上又失败：继续往下退一格（这才是「失败即降档」）。
+        assert_eq!(
+            lower_ceiling(Some(Quality::Lossless), Quality::Lossless),
+            Some(Quality::Exhigh)
+        );
+        // 更低档失败：收到再下一格。
+        assert_eq!(
+            lower_ceiling(Some(Quality::Lossless), Quality::Exhigh),
+            Some(Quality::Standard)
+        );
+        // 失败发生在比现有上限更低的档：不能把它「抬」回上一格。
+        assert_eq!(
+            lower_ceiling(Some(Quality::Standard), Quality::Lossless),
+            None,
+            "现有上限更低时整表不动"
+        );
+        // 现有上限低于「失败档的下一格」：同样不许抬高。
+        assert_eq!(lower_ceiling(Some(Quality::Exhigh), Quality::Hires), None);
+        // 最低档没有下一格。
+        assert_eq!(lower_ceiling(None, Quality::Standard), None);
+    }
+
+    #[test]
+    fn request_is_clamped_into_the_ceiling() {
+        assert_eq!(
+            clamp_request(Quality::Hires, Some(Quality::Exhigh)),
+            Quality::Exhigh
+        );
+        // 上限比偏好高不构成夹取：不能因为某首曾在无损失败过就把 320k 的偏好
+        // 强行升到无损去试。
+        assert_eq!(
+            clamp_request(Quality::Exhigh, Some(Quality::Lossless)),
+            Quality::Exhigh
+        );
+        assert_eq!(clamp_request(Quality::Hires, None), Quality::Hires);
+        assert_eq!(
+            clamp_request(Quality::Standard, Some(Quality::Standard)),
+            Quality::Standard
+        );
     }
 }

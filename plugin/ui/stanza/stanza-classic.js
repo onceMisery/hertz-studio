@@ -12,9 +12,41 @@
     var theme = StanzaTheme.DEFAULT, fontScale = 1, visible = true, paused = false;
     var tuning = { rotation: true, breathing: 1, spacing: 0.7 };
     var curLine = null, curHints = null, measureCanvas = null;
+    // 音频反应的上一次写入值：变化小于阈值不写 CSS 变量（每帧 setProperty 会让
+    // 样式系统空转，两个变量都卡 0.015 的死区）。
+    var lastVocal = -1, lastBass = -1;
     // soft=true 时下一次 frame 的行切换为"软重建"：配置类变更（主题/调谐/字号/尺寸）只重建节点，
     // 不播 fl-exit/fl-enter，避免拖滑杆时当前行长期半透明模糊与鬼影叠加。
     var softRebuild = false, destroyed = false;
+    var frozenAnimations = [], retiringLines = [], lastTime = null;
+
+    function clearRetiringLines() {
+      retiringLines.forEach(function (entry) { entry.el.remove(); });
+      retiringLines.length = 0;
+    }
+
+    // animation-play-state 不继承：只停 root 的呼吸会让行入场、逐字辉光继续走墙钟。
+    // 只在暂停边沿/节点状态变化时读取动画集合，不在静止帧里扫描 DOM。
+    function syncAnimationPlayback() {
+      if (!root.getAnimations) return;
+      if (paused) {
+        var animations = root.getAnimations({ subtree: true });
+        frozenAnimations = frozenAnimations.filter(function (animation) { return animations.indexOf(animation) >= 0; });
+        animations.forEach(function (animation) {
+          var target = animation.effect && animation.effect.target;
+          // root 的跨渲染器交接归 stage3d；这里仅持有流光自身的呼吸与词/行动画。
+          if (target === root && animation.animationName !== 'fl-breath') return;
+          if (animation.playState === 'running' && frozenAnimations.indexOf(animation) < 0) {
+            animation.pause(); frozenAnimations.push(animation);
+          }
+        });
+      } else {
+        frozenAnimations.forEach(function (animation) {
+          if (animation.playState === 'paused') animation.play();
+        });
+        frozenAnimations.length = 0;
+      }
+    }
 
     // 行级转场档位：renderHints 的 timingClass(micro/short/normal) 映射为 stanza 固定转场名(none/fast/normal)。
     // 转场时长是固定常量，与 enterMs/exitMs 无关（normal 400/300、fast 160/160、none 0/120）。
@@ -202,6 +234,7 @@
     // 配置类变更（主题/调谐/字号/resize）触发的软重建：标记下一帧按 soft 处理，
     // 旧行立即移除、新行不带进入动画。emptyEl 同步清掉，由下一帧按需重建。
     function rebuildSoft() {
+      clearRetiringLines();
       curLine = null;
       softRebuild = true;
       if (emptyEl) { emptyEl.remove(); emptyEl = null; }
@@ -212,9 +245,34 @@
       if (!visible || !global.Stage) return;
       var doc = Stage.lyrics();
       var tMs = Stage.position();
+      var jumped = lastTime !== null && (tMs < lastTime - 50 || tMs - lastTime > 500);
+      lastTime = tMs;
+      if (jumped) rebuildSoft();
+      // 行离场与媒体时钟共用寿命：暂停不会被墙钟定时器卸载；seek 不把上一位置的残影带来。
+      retiringLines = retiringLines.filter(function (entry) {
+        if (tMs - entry.at < entry.duration) return true;
+        entry.el.remove(); return false;
+      });
+      // 音频反应（CSS 变量消费，见 stanza.css）：vocal 推辉光强度、bass 推字号微搏。
+      // classic 不养有状态的检测器 —— 共享引擎的频段均值够用；全局名是 StanzaSonnetFx
+      // （小写 x，UMD 实际导出名）—— 大写拼写是 undefined，频段会静默归零。
+      var bands = (!paused || lastVocal < 0) && global.StanzaSonnetFx && global.StanzaSonnetFx.resolveAudioBands
+        ? global.StanzaSonnetFx.resolveAudioBands(Stage.spectrum ? Stage.spectrum() || [] : [])
+        : null;
+      var vocal = paused && lastVocal >= 0 ? lastVocal : bands ? bands.vocal * 0.78 + bands.power * 0.22 : 0;
+      var bass = paused && lastBass >= 0 ? lastBass : bands ? bands.bass : 0;
+      if (Math.abs(vocal - lastVocal) > 0.015) {
+        lastVocal = vocal;
+        root.style.setProperty('--fl-vocal', vocal.toFixed(3));
+      }
+      if (Math.abs(bass - lastBass) > 0.015) {
+        lastBass = bass;
+        root.style.setProperty('--fl-bass', bass.toFixed(3));
+      }
       var lines = doc ? doc.lines : [];
       var idx = U.activeLineIndex(lines, tMs);
       var line = idx >= 0 ? lines[idx] : null;
+      var animationChanged = line !== curLine;
       if (line !== curLine) {
         if (lineEl) {
           if (softRebuild) {
@@ -231,7 +289,7 @@
             old.classList.remove('fl-enter-' + oldTiming);
             old.classList.add('fl-exit-' + oldTiming);
             old.style.setProperty('--fl-line-dur', LINE_EXIT_DUR[oldTiming]);
-            setTimeout(function () { old.remove(); }, LINE_EXIT_MS[oldTiming]);
+            retiringLines.push({ el: old, at: tMs, duration: LINE_EXIT_MS[oldTiming] });
             lineEl = null;
           }
         }
@@ -246,8 +304,10 @@
       if (!line) {
         // 空状态下触发的软重建没有行切换可消费标记：emptyEl 重建即落地，标记在此核销，
         // 避免残留到下一次真实换句使其误走 soft（漏播进入动画）。
+        if (lineEl) { lineEl.remove(); lineEl = null; }
         softRebuild = false;
         buildEmpty();
+        if (paused && animationChanged) syncAnimationPlayback();
         return;
       }
       if (!lineEl || !curHints) return;
@@ -255,6 +315,7 @@
       for (var i = 0; i < words.length; i += 1) {
         var st = U.wordState(tokens[i], curHints, line, tMs);
         if (words[i].dataset.st !== st) {
+          animationChanged = true;
           var w = tokens[i];
           var mode = curHints.revealMode;
           var wordDur = w.end_ms - w.start_ms;
@@ -278,6 +339,7 @@
           applyPose(words[i], st);
         }
       }
+      if (paused && animationChanged) syncAnimationPlayback();
     }
 
     host.append(root);
@@ -291,13 +353,16 @@
         theme = t; rebuildSoft();
       },
       setFontScale: function (v) { v = U.clamp(v, 0.7, 1.5); if (Math.abs(v - fontScale) < 1e-6) return; fontScale = v; rebuildSoft(); },
+      // 交接淡出用：宿主按元素做 opacity 叠化，隐藏仍走 setVisible。
+      rootEl: function () { return root; },
       setVisible: function (b) { visible = b; root.hidden = !b; },
       setPaused: function (b) {
-        paused = b;
+        var changed = paused !== !!b;
+        paused = !!b;
         // breathing<=0 归一为 paused：目标 playState 没变就不写 DOM（8fps 空转守卫）。
         var want = (tuning.breathing <= 0 || paused) ? 'paused' : 'running';
-        if (want === root.style.animationPlayState) return;
-        root.style.animationPlayState = want;
+        if (want !== root.style.animationPlayState) root.style.animationPlayState = want;
+        if (changed) syncAnimationPlayback();
       },
       setEco: function () {},
       setTuning: function (t) {
@@ -308,7 +373,7 @@
         tuning = next; rebuildSoft();
       },
       resize: function () { rebuildSoft(); },
-      destroy: function () { destroyed = true; root.remove(); }
+      destroy: function () { destroyed = true; frozenAnimations.length = 0; clearRetiringLines(); root.remove(); }
     };
   }
   global.StanzaClassic = { init: init };

@@ -428,8 +428,29 @@
 
   poll();
   setInterval(poll, 500);
-  // 渲染走 rAF：位置内插 + 平滑滚动都在这一层，轮询只负责喂数据。
-  (function loop() { render(); requestAnimationFrame(loop); })();
+  // 渲染走帧门，不是每个 rAF 都画：这一页常被放进 OBS，可能跑在 144Hz 屏上，
+  // 而数据每 500ms 才更新一次，位置内插要的是「够顺」而不是「满帧」。
+  // 规则与 stage.js 的帧门一致：N = ceil(实测刷新率 / 预算)，预算取 60 与 120
+  // 的公因数。两处各留一份估计器是没办法的事——浮层是独立文档，没有构建步骤，
+  // 也 import 不到主应用的模块；改这里的约定时两边要一起改。
+  var BUDGET_FPS = 30;
+  var gapEma = 0;
+  var skip = 0;
+  var lastAt = 0;
+  function loop(t) {
+    requestAnimationFrame(loop);
+    var gap = lastAt ? t - lastAt : 16.7;
+    lastAt = t;
+    // 切标签页回来的巨大间隔与异常小的间隔都不进样本，否则刷新率会被算低。
+    if (gap > 2 && gap < 200) gapEma = gapEma ? gapEma + (gap - gapEma) * 0.2 : gap;
+    var hz = gapEma ? 1000 / gapEma : 60;
+    var n = Math.max(1, Math.ceil(hz / BUDGET_FPS));
+    skip += 1;
+    if (skip < n) return;
+    skip = 0;
+    render();
+  }
+  requestAnimationFrame(loop);
 })();
 </script>
 </body>

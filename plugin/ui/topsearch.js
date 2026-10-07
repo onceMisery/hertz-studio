@@ -451,6 +451,9 @@
       e.preventDefault();
       var q = input.value.trim();
       state.q = q;
+      // 关键词历史按「提交」记，不按逐字输入记：正在搜索与在线框共用同一个
+      // owner（search-history.js），换皮肤也还在。
+      if (q && window.HertzSearchHistory) window.HertzSearchHistory.push(q);
       clearTimeout(state.timer);
       var kind = effectiveKind();
       close();

@@ -155,6 +155,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/online/detail", get(online_detail))
         .route("/v1/online/lyric", get(online_lyric))
         .route("/v1/online/play", post(online_play))
+        .route(
+            "/v1/online/collection/refresh",
+            post(online_collection_refresh),
+        )
         .route("/v1/online/cover", get(online_cover_proxy))
         .route("/v1/ui/notice", post(post_ui_notice))
         .route(
@@ -200,6 +204,9 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/online/account", get(online_account))
         // 节拍地图：200 完整地图 / 202 分析中 / 404 不可用（前端静默回落 onset）。
         .route("/v1/stage/beatmap", get(beatmap))
+        // 后台分析的状态面板（在算 / 已落盘 / 只在这轮内存 / 已放弃 + 让路次数）。
+        .route("/v1/stage/beatmap/status", get(beatmap_status))
+        .route("/v1/stage/beatmap/retry", post(beatmap_retry))
         // OBS 歌词输出：「正在播放」歌词+播放态快照，轮询驱动 /overlay 浮层页。
         .route("/v1/overlay/lyric", get(overlay_lyric))
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
@@ -219,27 +226,75 @@ pub(crate) struct BeatmapQuery {
 /// 三态响应手写状态码与 JSON 体：404 体是 `{status,reason}` 而不是标准
 /// ApiError 的 `{error}`，前端按 err.status / body.status 分流，不弹错。
 async fn beatmap(State(state): State<Arc<AppState>>, Query(q): Query<BeatmapQuery>) -> Response {
-    match crate::stage_beats::request_on_demand(&state, &q.track).await {
-        crate::stage_beats::Outcome::Ready { map, cached } => {
+    let outcome = crate::stage_beats::request_on_demand(&state, &q.track).await;
+    let code = beatmap_outcome_status(&outcome);
+    (code, Json(beatmap_outcome_json(outcome))).into_response()
+}
+
+/// 面板上「这一首」那一问的可选参数：不带 track 就只回全局计数。
+#[derive(Deserialize)]
+pub(crate) struct BeatmapStatusQuery {
+    #[serde(default)]
+    pub(crate) track: Option<String>,
+}
+
+/// 后台节拍分析的状态。给设置里那一行用，不参与播放链路。
+async fn beatmap_status(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<BeatmapStatusQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::stage_beats::status(&state, q.track.as_deref()).await))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct BeatmapRetry {
+    pub(crate) track_id: String,
+}
+
+/// 手动重试某一首的分析：忘掉既有结论（含「已放弃三次」）再跑一次。应答就是
+/// 三态之一，与 `/v1/stage/beatmap` 同一个形状，前端不必另学一套。
+async fn beatmap_retry(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BeatmapRetry>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let track_id = body.track_id.trim().to_string();
+    if track_id.is_empty() {
+        return Err(bad_request("缺少 track_id"));
+    }
+    let outcome = crate::stage_beats::retry(&state, &track_id).await;
+    Ok(Json(beatmap_outcome_json(outcome)))
+}
+
+/// `Outcome` → 面板/前端读的形状。四个调用点（取地图、重试 × HTTP、RPC）共用
+/// 一份，避免插件形态与独立形态对同一次重试给出两种答复。
+pub(crate) fn beatmap_outcome_json(outcome: crate::stage_beats::Outcome) -> serde_json::Value {
+    use crate::stage_beats::Outcome;
+    match outcome {
+        // `cached=false` 是「算出来了但没能写进磁盘缓存」（内存态，这轮可用），
+        // 不是分析失败；两种状态在 404 的 reason 之外另有分工。
+        Outcome::Ready { map, persisted } => {
             let mut value = serde_json::to_value(&map).unwrap_or(serde_json::Value::Null);
             if let Some(obj) = value.as_object_mut() {
-                obj.insert("cached".into(), serde_json::Value::Bool(cached));
+                obj.insert("cached".into(), serde_json::Value::Bool(persisted));
             }
-            (StatusCode::OK, Json(value)).into_response()
+            value
         }
-        crate::stage_beats::Outcome::Analyzing => (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({ "status": "analyzing" })),
-        )
-            .into_response(),
-        crate::stage_beats::Outcome::Unavailable(reason) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "status": "unavailable",
-                "reason": reason.as_str(),
-            })),
-        )
-            .into_response(),
+        Outcome::Analyzing => serde_json::json!({ "status": "analyzing" }),
+        Outcome::Unavailable(reason) => serde_json::json!({
+            "status": "unavailable",
+            "reason": reason.as_str(),
+        }),
+    }
+}
+
+/// 取地图端点的三态状态码。重试端点**不**用它：那是一次动作的回执，结论放在
+/// 体里，前端不该为「重试」这一按多出三种错误分支。
+pub(crate) fn beatmap_outcome_status(outcome: &crate::stage_beats::Outcome) -> StatusCode {
+    use crate::stage_beats::Outcome;
+    match outcome {
+        Outcome::Ready { .. } => StatusCode::OK,
+        Outcome::Analyzing => StatusCode::ACCEPTED,
+        Outcome::Unavailable(_) => StatusCode::NOT_FOUND,
     }
 }
 
@@ -1266,6 +1321,48 @@ async fn get_lyrics(
     Ok(Json(serde_json::Value::Object(body)))
 }
 
+/// 这首已存的每曲用户偏移（毫秒），没有行就是 0。
+///
+/// `track_lyrics.track_id` 用的就是播放侧的曲目身份，在线曲是虚拟 id
+/// `online:<source>:<ref>`；那张表没有外键，偏移行由 `set_offset` 自己 upsert，
+/// 所以校准对本地与在线是同一个 owner、同一个键形状。
+pub(crate) async fn lyrics_user_offset(state: &AppState, track_id: &str) -> i64 {
+    vmusic_store::lyrics::get(&state.db, track_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|saved| saved.offset_ms)
+        .unwrap_or(0)
+}
+
+/// 在线曲取词 + 该曲已存的用户偏移，一次应用。HTTP 与 RPC 两个门面共用这一份：
+/// 只改一边就是「独立形态校准有效、dbx 插件形态按了没反应」那种最难查的错。
+///
+/// 全局偏移不在这里 —— 它由前端 `stageDoc` 叠加（本地那条链也是这个边界）；
+/// 服务端只有浮层那条链在末尾统一加一次。
+pub(crate) async fn online_lyric_body(
+    state: &AppState,
+    source: &str,
+    ref_id: &str,
+) -> ApiResult<serde_json::Value> {
+    let mut doc = tagged(
+        source,
+        online::lyric(&online_ctx(state), source, ref_id).await,
+    )?;
+    let user_offset = lyrics_user_offset(state, &crate::online::virtual_id(source, ref_id)).await;
+    doc.offset_ms += user_offset;
+    vmusic_lyrics::apply_offset(&mut doc);
+    let mut body = serde_json::to_value(&doc).map_err(|e| internal(e.to_string()))?;
+    let Some(map) = body.as_object_mut() else {
+        return Err(internal("歌词文档不是对象"));
+    };
+    map.insert(
+        "user_offset_ms".into(),
+        serde_json::Value::from(user_offset),
+    );
+    Ok(body)
+}
+
 /// 本地曲目的完整取词链（imported > embedded > sidecar，含用户偏移叠加）。
 /// `/v1/tracks/{id}/lyrics` 与 OBS 浮层共用这一份。
 pub(crate) async fn lyric_doc_for(
@@ -1413,7 +1510,8 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
         if let Some((source, ref_id)) = crate::online::split_virtual_id(&track_id) {
             let meta = state.online_meta.lock().await.get(&track_id).cloned();
             // 歌词走记忆化（见 overlay_lyric 字段注释）：浮层 500ms 一拍，
-            // 在线歌词不能每拍都打上游。
+            // 在线歌词不能每拍都打上游。缓存里存的是**未叠加偏移**的原始文档，
+            // 所以用户改了校准不必等缓存过期。
             let doc = match cached_overlay_doc(state, &track_id).await {
                 Some(doc) => doc,
                 None => {
@@ -1424,6 +1522,11 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
                     doc
                 }
             };
+            // 每曲用户偏移对在线曲同样生效：与本地同一个 `track_lyrics` owner、
+            // 同一个虚拟 id 当键。浮层与主页面必须共用这一份时间语义，否则
+            // 「校准只在其中一个窗口有效」——正是清单 §9 G11 说的那件事。
+            let mut doc = doc;
+            doc.offset_ms += lyrics_user_offset(state, &track_id).await;
             let cover = meta
                 .as_ref()
                 .and_then(|m| m.cover.as_deref())
@@ -1982,6 +2085,8 @@ pub(crate) fn diagnostics_json() -> serde_json::Value {
         "exists": exists,
         "size_bytes": size,
         "updated_at": mtime,
+        // 最后一次 panic（进程内，开关关着也有）。没有这个字段时界面不显示那一行。
+        "last_crash": crate::diag::last_crash(),
     })
 }
 
@@ -2802,13 +2907,9 @@ async fn online_detail(
 async fn online_lyric(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ItemQuery>,
-) -> ApiResult<Json<vmusic_core::LyricDocument>> {
+) -> ApiResult<Json<serde_json::Value>> {
     let source = source_of(q.source);
-    tagged(
-        &source,
-        online::lyric(&online_ctx(&state), &source, &q.id).await,
-    )
-    .map(Json)
+    Ok(Json(online_lyric_body(&state, &source, &q.id).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2830,8 +2931,60 @@ pub(crate) struct OnlinePlayRequest {
     /// 整盘形态：一整首歌单/专辑的曲目列表，当前曲由 index 指定。
     #[serde(default)]
     pub(crate) tracks: Option<Vec<OnlinePlayTrack>>,
+    /// F2 集合意图：前端只发 {kind,id}（目前 kind 只认 "playlist"），首页与
+    /// 之后的续载都由服务端取。给了 collection 就忽略 tracks/id 单曲形态。
+    #[serde(default)]
+    pub(crate) collection: Option<OnlinePlayCollection>,
     #[serde(default)]
     pub(crate) index: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OnlinePlayCollection {
+    pub(crate) kind: String,
+    pub(crate) id: String,
+}
+
+/// F2 集合播放的第一页：把平台歌单首页归一成与前端整盘形态相同的
+/// [`OnlinePlayTrack`] 列表，并带回平台侧总数供续载任务翻页。HTTP 与 RPC
+/// 两个门面共用本函数，集合意图的解析只此一份。
+pub(crate) async fn collection_first_page(
+    state: &Arc<AppState>,
+    source: &str,
+    coll: &OnlinePlayCollection,
+) -> ApiResult<(Vec<OnlinePlayTrack>, u64)> {
+    if coll.kind != "playlist" {
+        return Err(bad_request("整单播放目前只支持歌单"));
+    }
+    let id = coll.id.trim();
+    if id.is_empty() {
+        return Err(bad_request("缺少集合 id"));
+    }
+    let detail = online::playlist_detail(
+        &online_ctx(state),
+        source,
+        id,
+        0,
+        crate::collection::PAGE,
+    )
+    .await?;
+    if detail.tracks.is_empty() {
+        return Err(crate::error::not_found("歌单为空或暂不可用"));
+    }
+    let tracks = detail
+        .tracks
+        .into_iter()
+        .map(|t| OnlinePlayTrack {
+            id: t.id,
+            title: Some(t.title),
+            artist: Some(t.artist),
+            album: Some(t.album),
+            duration_ms: Some(t.duration_ms),
+            cover: t.cover,
+            track_ref: None,
+        })
+        .collect();
+    Ok((tracks, detail.total))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2960,8 +3113,17 @@ async fn online_play(
 ) -> ApiResult<Json<serde_json::Value>> {
     let source = source_of(body.source);
 
-    // 归一两种入站形态：整盘 tracks 优先；旧单曲 {id,+元数据} 包成长度 1。
-    let mut tracks = body.tracks.unwrap_or_default();
+    // F2 集合意图：前端只发 {source, collection:{kind,id}}，首页由服务端取，
+    // 之后按页续载（collection.rs）。没有集合意图才走 tracks / 单曲两种形态。
+    let mut collection: Option<(String, u64)> = None;
+    let mut tracks = match &body.collection {
+        Some(coll) => {
+            let (first, total) = collection_first_page(&state, &source, coll).await?;
+            collection = Some((coll.id.trim().to_string(), total));
+            first
+        }
+        None => body.tracks.unwrap_or_default(),
+    };
     if tracks.is_empty() {
         let id = body.id.as_deref().unwrap_or("").trim().to_string();
         if id.is_empty() {
@@ -2999,6 +3161,14 @@ async fn online_play(
     // 走「先整首下载预热」的旧路径——那会让首曲下两遍。
     let (gen, _, _) = state.set_queue(vids.clone(), Some(index)).await;
 
+    // F2：登记整单续载。必须落在 set_queue 之后（set_queue 会清旧意图）、
+    // 起播之前；begin 内部凭预留代际核对，被并发点播顶掉就不登记。
+    if let Some((cid, total)) = &collection {
+        state
+            .begin_collection_load(&source, cid, *total, tracks.len(), gen)
+            .await;
+    }
+
     // 整盘元数据入内存暂存：play_index_for 提交成功后据此写历史（在线曲的
     // URL 会过期，历史只存元数据快照，重播时重新实时取流）。
     for (t, vid) in tracks.iter().zip(vids.iter()) {
@@ -3015,6 +3185,8 @@ async fn online_play(
                     // remember_online_meta 会保住同一首曲上一轮已取到的标签。
                     rg_gain_db: None,
                     rg_peak: None,
+                    // 出处就是这一项自己：入队那一刻没有被换过家。
+                    origin: None,
                 },
             )
             .await;
@@ -3024,6 +3196,10 @@ async fn online_play(
         .play_index_for(index, Some(gen), PlayTrigger::Pick)
         .await?;
     if !outcome.committed {
+        // 起播被顶代际：刚登记的整单续载意图一并撤回。
+        if collection.is_some() {
+            state.cancel_collection_load().await;
+        }
         return Ok(get_state(State(state.clone())).await);
     }
     // 首曲确认起播：后台预取后一首 + LRU（play_index_for 内部不预取）。
@@ -3040,6 +3216,13 @@ async fn online_play(
             .and_then(|d| d.cover),
     };
 
+    // 出处与供音分开回（F3）：这一项如果是接力换过家的，界面要能说出「点的是
+    // 哪家、现在哪家在放」。刷新或换端之后前端自己的暂存可能已经没有这一项，
+    // 服务端的队列快照才是权威来源。
+    let (origin, relayed) = match state.online_origin(&vids[index]).await {
+        Some((o, relayed)) => (Some(o), relayed),
+        None => (None, false),
+    };
     Ok(Json(serde_json::json!({
         "ok": true,
         "track_id": vids[index],
@@ -3053,8 +3236,49 @@ async fn online_play(
         "album": current.album.clone().unwrap_or_default(),
         "duration_ms": current.duration_ms.unwrap_or(0),
         "cover": cover,
-        // 平台实际给到的音质档位（缓存命中/预取接管时为 null）。
+        // 平台实际给到的音质档位（缓存命中时是给到的那一档；预取接管时可能为 null）。
         "actual_quality": outcome.actual_quality.map(|q| q.as_str()),
+        "origin": origin,
+        "relayed": relayed,
+        // F2：集合意图时回传续载上下文，前端据此显示「已准备 N / total」。
+        "collection": collection.as_ref().map(|(cid, total)| serde_json::json!({
+            "kind": "playlist",
+            "id": cid,
+            "loaded": tracks.len(),
+            "total": total,
+        })),
+        // F2：集合意图时带首页元数据，前端不必再逐首打详情补队列行。
+        "tracks": collection.as_ref().map(|_| serde_json::json!(
+            tracks.iter().map(|t| serde_json::json!({
+                "id": t.id,
+                "title": t.title,
+                "artist": t.artist,
+                "album": t.album,
+                "duration_ms": t.duration_ms,
+                "cover": t.cover,
+            })).collect::<Vec<_>>()
+        )),
+    })))
+}
+
+/// F2 整单续载的手动重试入口：补页失败（网络抖动、平台 5xx）后用户点
+/// 「继续载入」，force 绕过水位与节流，会话失效时安静地不做任何事。
+async fn online_collection_refresh(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let result = state.playlist_refill(true).await;
+    let active = state.collection_status().await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "error": result.err().map(|e| e.message),
+        // 仍是活跃意图时回传进度；nil 表示已补完或意图已被换队作废。
+        "collection": active.map(|(source, id, loaded, total, err)| serde_json::json!({
+            "source": source,
+            "id": id,
+            "loaded": loaded,
+            "total": total,
+            "error": err,
+        })),
     })))
 }
 
@@ -3586,9 +3810,35 @@ async fn online_account(
 #[cfg(test)]
 mod tests {
     use super::{
-        overlay_key_allows, pick_index, playlist_scope, public_https_url, qr_session, query_param,
-        safe_cover_id,
+        lyrics_user_offset, overlay_key_allows, pick_index, playlist_scope, public_https_url,
+        qr_session, query_param, safe_cover_id,
     };
+
+    /// 每曲偏移对在线曲同样有效：键就是播放侧的曲目身份（虚拟 id
+    /// `online:<source>:<ref>`），而 `track_lyrics` 没有外键、偏移行由自己 upsert。
+    /// 所以当年那句「在线曲目没有偏移语义」在存储层从来不成立，成立的可能只有
+    /// 「读取端没去查这张表」—— 那正是本次接通的三段读取。
+    #[tokio::test]
+    async fn per_track_offset_reads_the_same_table_for_online_ids_too() {
+        let dir =
+            std::env::temp_dir().join(format!("vmusic-lyric-offset-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let (state, _handle) = crate::state::tests::playback_state_with_db(db).await;
+        let vid = crate::online::virtual_id("netease", "9527");
+
+        assert_eq!(lyrics_user_offset(&state, &vid).await, 0, "没调过就是 0");
+        vmusic_store::lyrics::set_offset(&state.db, &vid, -1200)
+            .await
+            .unwrap();
+        assert_eq!(lyrics_user_offset(&state, &vid).await, -1200);
+
+        // 本地曲走同一条读取路径，不受 id 前缀影响；两首互不牵动。
+        vmusic_store::lyrics::set_offset(&state.db, "t-local", 400)
+            .await
+            .unwrap();
+        assert_eq!(lyrics_user_offset(&state, "t-local").await, 400);
+        assert_eq!(lyrics_user_offset(&state, &vid).await, -1200);
+    }
 
     #[test]
     fn cover_id_only_accepts_uuids() {

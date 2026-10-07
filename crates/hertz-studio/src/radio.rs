@@ -61,6 +61,9 @@ impl AppState {
     }
 
     pub(crate) async fn radio_start(&self) -> ApiResult<Option<usize>> {
+        // 私人 FM 接管队列后，F2 的整单续载必须退场：补页任务按「普通队列」
+        // 语义追加，会污染 FM 的推荐队列。
+        self.cancel_collection_load().await;
         let (session, generation) = {
             let _commit = self.play_commit.lock().await;
             let gen = self.play_generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -178,6 +181,8 @@ impl AppState {
                     // 私人 FM 的曲目信息里没有响度标签；真值要等取流那一步才拿到。
                     rg_gain_db: None,
                     rg_peak: None,
+                    // FM 队列项的出处就是它自己（换源接力才会写这个字段）。
+                    origin: None,
                 },
             );
             fresh.push(id);

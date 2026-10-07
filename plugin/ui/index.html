@@ -21,6 +21,7 @@
 <link rel="stylesheet" href="stage-themes/starfall.css">
 <link rel="stylesheet" href="stage-themes/ios.css">
 <link rel="stylesheet" href="stanza/stanza.css">
+<link rel="stylesheet" href="stanza/stanza-starborn.css">
 <link rel="stylesheet" href="online.css">
 <!-- 主题工作室：壁纸背景层与壁纸画廊。排在 style.css 之后（同特异性整块胜出），
      与 online.css 同一层次——都是"在既有布局之上再铺一层"的模块。 -->
@@ -52,6 +53,9 @@
 <!-- 自建 prompt/confirm：插件 iframe 没有 allow-modals，原生弹窗会被静默忽略。
      独立形态下它原样委托给原生，所以排在 host.js 之后、其余模块之前即可。 -->
 <script defer src="dialogs.js"></script>
+<!-- 搜索关键词历史的唯一 owner：流年面板、顶栏曲库框、在线搜索框都到这里读与记。
+     排在皮肤与 app.js 之前，因为它们都在初始化时就取用这个命名空间。 -->
+<script defer src="search-history.js"></script>
 <script>window.__VMUSIC_TOKEN__ = "__VMUSIC_TOKEN_VALUE__";</script>
 
 <!-- 统一图标库：全站只维护这一份 24×24 SVG symbol；页面中通过
@@ -67,14 +71,13 @@
   <symbol id="i-palette" viewBox="0 0 24 24" fill="currentColor">
     <path d="M12 3a9 9 0 100 18c1.1 0 1.8-.8 1.8-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.1 0-.9.8-1.7 1.7-1.7H16a5 5 0 005-5c0-3.9-4-7.3-9-7.3zm-5.2 9a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm2.6-4a1.4 1.4 0 110-2.8 1.4 1.4 0 110 2.8zm4.6-1.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm3.4 3.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8z"/>
   </symbol>
-  <!-- 界面皮肤：一张带「顶栏 + 侧栏」分区的界面卡，后面叠着另一张 —— 读作
-       同一副骨架换一张皮。不复用 i-library（堆叠圆盘，曲库已占）也不复用
-       i-cube（立方体，沉浸声场已占），两者都在同一簇里挨着放。 -->
+  <!-- 界面皮肤：一件 T 恤 —— 「皮肤」的通用隐喻，一眼读得出「换装」，不会像
+       之前那版两块错位面板那样被读成「复制/粘贴」。不复用 i-palette（调色盘，
+       主题色已占）、i-library（堆叠圆盘，曲库已占）、i-cube（立方体，沉浸声场
+       已占）—— 三颗都在同一簇里挨着放。 -->
   <symbol id="i-skin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
           stroke-linecap="round" stroke-linejoin="round">
-    <path d="M9 4h8.5A2.5 2.5 0 0120 6.5V15"/>
-    <rect x="4" y="8" width="12" height="12" rx="2.5"/>
-    <path d="M4 12.5h12M8.5 12.5V20"/>
+    <path d="M8.5 5.5C9.6 8.2 14.4 8.2 15.5 5.5L20.2 8.2L17.6 12.4V19.6C17.6 20.3 17 20.8 16.4 20.8H7.6C6.9 20.8 6.4 20.3 6.4 19.6V12.4L3.8 8.2Z"/>
   </symbol>
   <symbol id="i-workshop" viewBox="0 0 24 24" fill="currentColor">
     <path d="M12 2.6l2.3 4.9 5.3.7-3.9 3.7 1 5.3-4.7-2.6-4.7 2.6 1-5.3-3.9-3.7 5.3-.7z"/>
@@ -137,8 +140,34 @@
   <symbol id="i-disc" viewBox="0 0 24 24" fill="currentColor">
     <path fill-rule="evenodd" d="M12 2a10 10 0 100 20 10 10 0 000-20zm0 7.4a2.6 2.6 0 100 5.2 2.6 2.6 0 000-5.2z"/>
   </symbol>
+  <!-- 关灯（海报墙把非当前播放的那几张压暗）。不复用 i-disc：那是一枚唱片，
+       放在这颗按钮上读成「切碟/看封面」，和它做的事没有关系。灯泡是「灯」的
+       通用字形，一眼读得出开关的是灯。 -->
+  <symbol id="i-lamp" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/>
+    <path d="M9 18h6"/>
+    <path d="M10 22h4"/>
+  </symbol>
   <symbol id="i-reset" viewBox="0 0 24 24" fill="currentColor">
     <path d="M12 5V2L8 6l4 4V7a5 5 0 11-5 5H5a7 7 0 107-7z"/>
+  </symbol>
+  <!-- 舞台顶栏的两枚描边图标。不复用 i-sliders / i-reset：那两枚是实心填充，
+       而顶栏另外三颗（歌词 / i-expand / i-close）是 2px 描边 —— 实心滑块在一排
+       细线里读起来重一档，这正是「右上角不协调」的主要来源。两枚都是新图形
+       而非同形复制，所以不违反上面「避免同形图标散落多份」。 -->
+  <symbol id="i-tune" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round">
+    <path d="M3 6h4M13 6h8M3 12h9M18 12h3M3 18h2M11 18h10"/>
+    <circle cx="10" cy="6" r="2"/>
+    <circle cx="15" cy="12" r="2"/>
+    <circle cx="8" cy="18" r="2"/>
+  </symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+    <!-- 整体右移 1：原图形贴到 x=0，在一排居中绘制的图标里会明显偏左。 -->
+    <path d="M2 4v6h6"/>
+    <path d="M4.51 15a9 9 0 1 0 2.13-9.36L2 10"/>
   </symbol>
   <!-- 自动 360° 环转：倾斜的轨道环 + 中心焦点 + 卫星，区别于 i-reset 的单箭头复位 -->
   <symbol id="i-orbit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -1245,6 +1274,10 @@
           <input id="set-dev-diag" type="checkbox" aria-describedby="set-dev-diag-note">
           <span class="hint" id="set-dev-diag-note">开启后把播放过程逐条写进日志文件：选了哪个音源与音质、走缓存还是现下载、地址是哪个（隐去签名参数）、以及失败原因。内容只与播放有关，会带上在播曲名与本地文件路径，不含账号凭据。遇到问题时先开启再复现一次，然后把下面的日志发给开发者。</span>
         </div>
+        <div class="set-row" id="dev-diag-crash" hidden>
+          <label>上次异常退出</label>
+          <span class="hint" id="dev-diag-crash-text">—</span>
+        </div>
         <div class="set-row" id="dev-diag-detail" hidden>
           <label>日志文件</label>
           <span class="hint" id="dev-diag-path">—</span>
@@ -1293,6 +1326,15 @@
     <div class="stage-title" id="now-title">未在播放</div>
     <div class="stage-artist" id="now-artist">从左侧曲库里挑一首</div>
 
+    <!-- 节拍镜头这一行答的是「这一首为什么没镜头」：后台在算、已就绪（在磁盘还是
+         只在这轮内存）、算不出来（为什么）、还是被本机画质档位挡下。四种处境的下
+         一步不一样，所以不合并成一句「没有镜头」。显隐与文案由 app.js 决定。 -->
+    <div class="stage-beat" id="stage-beat" hidden>
+      <span class="stage-beat-text" id="stage-beat-text">—</span>
+      <button class="stage-beat-retry" id="stage-beat-retry" type="button"
+              title="忘掉这首的既有结论，重新分析一次">重试</button>
+    </div>
+
     <div class="stage-progress">
       <div class="stage-times"><span id="stage-time">0:00 / 0:00</span></div>
       <input id="stage-progress" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
@@ -1304,15 +1346,21 @@
 
 </div>
 
-<footer class="bar">
+<footer class="bar" id="playback-bar">
   <!-- 空态不写占位符：原来这里放了一个 em dash「—」，在满屏 SVG 图标中间
        它看起来像一个坏掉的图标（笔画、尺寸、风格都和旁边的图标对不上）。
        没有曲目时这一格就该是空的，标题由 app.js 在载入曲目后写入。 -->
   <!-- 正在播放区：点开底部播放控制弹窗（旧 stage-btn 移除后的接替入口）。 -->
-  <div class="bar-track" id="bar-track" role="button" tabindex="0" title="正在播放"
+  <div class="bar-summary" id="bar-summary">
+    <div class="bar-track" id="bar-track" role="button" tabindex="0" title="正在播放"
        aria-label="打开播放控制弹窗">
-    <div id="bar-title" class="bar-title"></div>
-    <div id="bar-sub" class="bar-sub"></div>
+      <div id="bar-title" class="bar-title"></div>
+      <div id="bar-sub" class="bar-sub"></div>
+    </div>
+    <button id="bar-favorite" class="ctrl bar-favorite" type="button" disabled
+            title="播放歌曲后可收藏" aria-label="收藏当前歌曲" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-heart"/></svg>
+    </button>
   </div>
 
   <div class="bar-controls">
@@ -1349,8 +1397,18 @@
       <span class="hint">音量</span>
       <input id="volume" type="range" min="0" max="100" value="80" aria-label="音量">
     </div>
+    <button id="bar-pin-toggle" class="btn-pill bar-pin-toggle" type="button"
+            title="收起播放栏" aria-label="收起播放栏" aria-expanded="true" aria-controls="playback-bar">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+      <span>收起</span>
+    </button>
   </div>
 </footer>
+<button id="bar-restore" class="bar-restore" type="button" hidden
+        aria-label="展开播放栏" aria-expanded="false" aria-controls="playback-bar">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+  <span>展开播放栏</span>
+</button>
 
 <!-- 在线歌单详情抽屉的遮罩与抽屉本体必须是 <body> 直接子级：.column 带
      backdrop-filter，会把内部 fixed 元素的包含块劫持到自身（抽屉整体下移
@@ -1379,16 +1437,19 @@
   <div class="s3d-vignette" aria-hidden="true"></div>
   <div class="s3d-brand"><span class="s3d-brand-mark" aria-hidden="true">h<span>z</span></span><div>hertz studio<small>沉 浸 声 场</small></div></div>
   <div class="s3d-head">
-    <button class="s3d-btn" id="s3d-lyrics-toggle" title="显示歌词 (L)" aria-label="显示歌词" aria-pressed="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 6h16M4 12h16M7 18h10"/></svg></button>
-    <button class="s3d-btn" id="s3d-settings-toggle" title="舞台设置" aria-label="舞台设置" aria-expanded="false" aria-controls="s3d-settings"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg></button>
+    <button class="s3d-btn" id="s3d-lyrics-toggle" title="显示歌词 (L)" aria-label="显示歌词" aria-pressed="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M7 18h10"/></svg></button>
+    <button class="s3d-btn" id="s3d-settings-toggle" title="舞台设置" aria-label="舞台设置" aria-expanded="false" aria-controls="s3d-settings"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-tune"/></svg></button>
+    <!-- 视图组（歌词 / 设置）与窗口组（复位 / 全屏 / 关闭）之间的分隔。
+         五颗等宽等色的圆牌连成一排读不出分组，靠这条淡出细线给视线一个落点。 -->
+    <span class="s3d-head-sep" aria-hidden="true"></span>
     <button class="s3d-btn" id="s3d-reset" title="复位视角 (K / 双击)" aria-label="复位视角">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reset"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-undo"/></svg>
     </button>
     <button class="s3d-btn" id="s3d-fs" title="全屏 (F)" aria-label="全屏" aria-pressed="false">
       <svg class="ic-expand" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
       <svg class="ic-compress" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-compress"/></svg>
     </button>
-    <button class="s3d-btn" id="s3d-close" title="关闭 (Esc)" aria-label="关闭三维舞台">
+    <button class="s3d-btn s3d-btn-x" id="s3d-close" title="关闭 (Esc)" aria-label="关闭三维舞台">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
     </button>
   </div>
@@ -1409,11 +1470,20 @@
     <div class="fl-sonnet-layer" id="s3d-fl-sonnet-stage"></div>
     <div class="fl-lyric" id="s3d-fl-lyric"></div>
     <div class="fl-sub" id="s3d-fl-sub"></div>
+    <!-- 电影层：宽银幕遮幅 + 24fps 量化颗粒 + 起音色散。三个量全部由 stage3d 写成 CSS 变量，
+         纯指针事件透明，且只在歌词视觉接管画面时出现（舞台 3D 歌词轨不动）。 -->
+    <div class="s3d-cinema" id="s3d-cinema" aria-hidden="true">
+      <i class="s3d-cinema-grain"></i>
+      <i class="s3d-cinema-fringe"></i>
+      <i class="s3d-starborn-grade"></i>
+      <i class="s3d-starborn-transition"></i>
+    </div>
   </div>
   <!-- 3D 歌单架（封面流）：卡片由 stage-shelf.js 按队列生成，这里只留锚点 -->
   <div class="s3d-shelf" id="s3d-shelf" aria-hidden="true"><div class="s3d-shelf-plane" id="s3d-shelf-plane"></div></div>
   <aside class="s3d-settings" id="s3d-settings" aria-label="舞台设置" hidden>
     <div class="s3d-settings-heading"><span>舞台设置</span><button class="s3d-btn" id="s3d-settings-close" aria-label="收起舞台设置"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+    <p class="s3d-settings-status" id="s3d-settings-status" role="status" aria-live="polite"></p>
     <label for="s3d-layout">聆听布局</label>
     <select id="s3d-layout"><option value="focus">沉浸歌词</option><option value="sleeve">封面与歌词</option><option value="single">简洁单句</option></select>
     <label for="s3d-lyric-visual">歌词视觉</label>
@@ -1422,9 +1492,11 @@
       <label for="s3d-fl-auto-lock">自动切镜间隔 <output id="s3d-fl-auto-lock-value">4.0s</output></label>
       <input id="s3d-fl-auto-lock" type="range" min="0" max="12" step="0.5" value="4">
       <label for="s3d-fl-auto-avoid"><input id="s3d-fl-auto-avoid" type="checkbox" checked> 抑制最近用过的模式，避免连续重复</label>
-      <p class="s3d-fl-auto-note" id="s3d-fl-auto-note">星诞会按每句的音频特征在流光／心象／商籁／凝彩之间自动切镜；切镜只发生在新句开头，不会打断正在唱的半句。</p>
+      <p class="s3d-fl-auto-note" id="s3d-fl-auto-note">星诞先把整首歌读成段落（句间留白 + 副歌重复 + 逐字画像），再按段落挑渲染器：副歌给凝彩／商籁这类分镜，主歌给流光／商籁，留白给心象。切镜只发生在段落第一句起唱之前，绝不打断正在唱的半句；副歌第二次到来时沿用同一张脸，只把景别与力度抬一档。</p>
       <p class="s3d-fl-auto-state" id="s3d-fl-auto-state" hidden></p>
     </div>
+    <label for="s3d-scene-source">舞台来源</label>
+    <select id="s3d-scene-source"><option value="immersive">沉浸声场</option><option value="creative">创意编排</option></select>
     <label for="s3d-stage-theme">设置风格</label>
     <select id="s3d-stage-theme"><option value="classic">默认</option><option value="starfall">星落</option><option value="ios">iOS</option></select>
     <label for="s3d-shelf-mode">3D 歌单架</label>
@@ -1434,7 +1506,7 @@
     <input id="s3d-reactivity" type="range" min="0" max="200" value="135">
     <label for="s3d-motion">镜头动态 <output id="s3d-motion-value">65%</output></label>
     <input id="s3d-motion" type="range" min="0" max="100" value="65">
-    <label for="s3d-bloom">光晕强度 <output id="s3d-bloom-value">80%</output></label>
+    <label for="s3d-bloom">3D 背景光晕 <output id="s3d-bloom-value">80%</output></label>
     <input id="s3d-bloom" type="range" min="0" max="150" value="80">
     <div id="s3d-fl-common" hidden>
       <label for="s3d-fl-size">歌词字号 <output id="s3d-fl-size-value">100%</output></label>
@@ -1442,6 +1514,7 @@
       <p id="s3d-fl-wordlevel-note" class="s3d-fl-wordlevel-note" role="status" hidden></p>
       <label for="s3d-fl-bg-mode">背景样式</label>
       <select id="s3d-fl-bg-mode"><option value="stage">舞台场景（3D）</option><option value="atmosphere">彩色氛围</option><option value="anime">二次元壁纸</option><option value="geometric">几何</option><option value="fluid">流体</option><option value="solid">纯色</option></select>
+      <p class="s3d-setting-note" id="s3d-background-status" role="status"></p>
       <div id="s3d-fl-wallpapers" hidden>
         <div class="s3d-wallpaper-grid" id="s3d-fl-wallpaper-grid" role="group" aria-label="选择歌词舞台壁纸"></div>
         <label for="s3d-fl-wallpaper-dim">图片压暗 <output id="s3d-fl-wallpaper-dim-value">48%</output></label>
@@ -1516,7 +1589,7 @@
       </div>
       <div class="s3d-timeline"><span id="s3d-elapsed">0:00</span><input id="s3d-seek" type="range" min="0" max="1" value="0" step="100" aria-label="舞台播放进度" disabled><span id="s3d-duration">0:00</span></div>
     </div>
-    <div class="s3d-player-extra"><label class="s3d-volume" title="音量"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4zM17 8c3 2 3 6 0 8"/></svg><input id="s3d-volume" type="range" min="0" max="100" value="80" aria-label="舞台音量"></label><button class="s3d-btn" id="s3d-queue" aria-label="播放队列" title="播放队列 (Q)" aria-expanded="false" aria-controls="s3d-queue-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg></button></div>
+    <div class="s3d-player-extra"><button class="s3d-btn s3d-fav" id="s3d-favorite" aria-label="播放歌曲后可收藏" title="播放歌曲后可收藏" aria-pressed="false" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><use id="s3d-fav-icon" href="#i-heart-outline"/></svg></button><label class="s3d-volume" title="音量"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4zM17 8c3 2 3 6 0 8"/></svg><input id="s3d-volume" type="range" min="0" max="100" value="80" aria-label="舞台音量"></label><button class="s3d-btn" id="s3d-queue" aria-label="播放队列" title="播放队列 (Q)" aria-expanded="false" aria-controls="s3d-queue-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg></button></div>
   </div>
   <div class="s3d-hint" id="s3d-hint"></div>
   <div class="s3d-keys">
@@ -1543,11 +1616,22 @@
     </button>
   </div>
 
+  <div class="sc-search-row">
+    <input class="sc-search" id="sc-search" type="search" autocomplete="off"
+      placeholder="搜参数，支持别名（暗角 / 紫边 / 运镜）"
+      aria-label="搜索舞台参数" aria-controls="sc-results">
+  </div>
+  <div class="sc-results" id="sc-results" role="listbox" aria-label="搜索结果" hidden></div>
+
   <div class="sc-body" id="sc-body">
     <!-- 分组与滑块由 stage.js 依据 SCHEMA 生成，避免 20 组 markup 手写错漏 -->
   </div>
 
   <div class="sc-foot">
+    <button class="sc-undo" id="sc-undo" type="button" disabled title="撤销上一次调参（Ctrl+Z）">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-undo"/></svg>
+      <span>撤销</span>
+    </button>
     <button class="sc-reset" id="sc-reset">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reset"/></svg>
       <span>恢复默认设置</span>
@@ -1567,27 +1651,16 @@
     <span class="ws-badge">W</span>
     <div class="ws-head-text">
       <div class="ws-title">创意工坊</div>
-      <div class="ws-sub">场景 · 收藏 · 参数 · 编排 · 绑定 · 背景 · 导出</div>
+      <div class="ws-sub">你的声音，你的舞台</div>
     </div>
-    <button class="ws-expand" id="ws-expand" title="展开预览（宽屏工坊）" aria-label="展开预览" aria-pressed="false">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
-    </button>
     <button class="ws-close" id="ws-close" title="关闭" aria-label="关闭创意工坊">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
     </button>
   </div>
   <div class="ws-tabs" id="ws-tabs" role="tablist" aria-label="工坊页签"></div>
-  <!-- 实时预览：高级渲染层直接画在这里，不惊动主页右栏。
-
-       窄面板（默认 400px）里它是 16:9 的小画布，约 350x200 —— 那个尺寸下
-       场景的空间结构（灯柱的疏密、纵深的收敛、字阵的呼吸）几乎读不出来。
-       所以加一个宽屏形态：面板摊成「预览 1.2fr + 参数 380px」两栏，
-       预览占满整列高度。参照 folia-major 的 ThemePark 布局比例
-       （grid-cols-[minmax(0,1.2fr)_380px]，预览 min-h-[300px] 且 h-full）。
-       同一个挂载点、同一个 canvas，只是容器变大 —— 不新增第二条渲染链路。 -->
-  <div class="ws-preview" id="ws-preview" hidden>
-    <div class="ws-preview-stage" id="ws-preview-host"></div>
-    <div class="ws-preview-meta" id="ws-preview-meta"></div>
+  <div class="ws-stage-status" id="ws-stage-status" role="status" aria-live="polite" hidden>
+    <strong>正在编辑大舞台</strong>
+    <span>设置自动保存</span>
   </div>
   <div class="ws-body" id="ws-body"></div>
   <div class="ws-toast" id="ws-toast" role="status" aria-live="polite" hidden></div>
@@ -1658,6 +1731,9 @@
       <div class="np-meta">
         <div class="np-name" id="np-name">未在播放</div>
         <div class="np-artist" id="np-artist">从曲库中挑选一首</div>
+        <!-- 曲源接力后的出处说明：用户点的是那一家、现在由这一家供音。没换过家
+             就整行不出现（不占位、不吓人）。 -->
+        <div class="np-origin" id="np-origin" hidden></div>
       </div>
     </div>
 
@@ -1767,10 +1843,13 @@
 <script defer src="stanza/stanza-sonnet-fx.js"></script>
 <script defer src="stanza/stanza-sonnet.js"></script>
 <script defer src="stanza/stanza-tempera.js"></script>
+<!-- 导演层：曲式编译（段落/副歌/句内画像 + 镜头语法）在前，元导演在后 -->
+<script defer src="stanza/stanza-songform.js"></script>
 <script defer src="stanza/stanza-starborn.js"></script>
 <script defer src="stage-lyrics.js"></script>
 <!-- 3D 歌单架（封面流）：只依赖 Stage 只读出口，必须排在 stage3d.js 之前 -->
 <script defer src="stage-shelf.js"></script>
+<script defer src="stage-settings.js"></script>
 <script defer src="stage3d.js"></script>
 <script defer src="stage-immersive.js"></script>
 <script defer src="vendor/qrcode.js"></script>

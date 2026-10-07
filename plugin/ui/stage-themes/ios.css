@@ -37,7 +37,10 @@
   --io-tracking: .18em;
 }
 
-/* --- 顶部栏：与播放舱同一套玻璃，标题左置 -------------------------------- */
+/* --- 顶部栏：与播放舱同一套玻璃，标题左置 --------------------------------
+   盘体结构在 stage3d.css 的 .s3d.s3d-open .s3d-head .s3d-btn 里（那里多带一层
+   .s3d-open，权重高于本文件挂在 .s3d-btn 上的状态规则），这里只把它调成 iOS
+   的口味：不抬起、只按压，选中态用纯色填充而不描边。 */
 .s3d[data-stage-theme="ios"] .s3d-head {
   background: var(--io-glass);
   border-bottom: 1px solid var(--io-hair);
@@ -45,6 +48,12 @@
   -webkit-backdrop-filter: blur(var(--io-blur)) saturate(1.3);
   box-shadow: 0 1px 0 var(--io-hair);
   transition: opacity var(--io-micro), transform var(--io-micro);
+
+  /* iOS 的顶栏盘体不抬起、只按压；选中态是纯色填充，不描边（本文件开头那条
+     「不用内描边环，那是星落的语言」在这里同样成立）。 */
+  --chip-on-edge: color-mix(in srgb, var(--s3d-accent) 12%, transparent);
+  --chip-lift: 0px;
+  --chip-press: scale(.92);
 }
 .s3d[data-stage-theme="ios"] .s3d-brand-mark {
   font-weight: 700;

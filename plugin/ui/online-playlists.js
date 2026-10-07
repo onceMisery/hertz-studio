@@ -50,6 +50,32 @@
     return s ? s.label : id;
   }
 
+  // 三态分流统一在 Online 那一份（登录弹窗读同一个判据），这里只兜独立形态。
+  function accountVerdict(err) {
+    if (window.Online && window.Online.accountVerdict) return window.Online.accountVerdict(err);
+    var code = err && err.code;
+    if (code === 'auth_required' || (err && (err.status === 401 || err.status === 403))) return 'signed-out';
+    if (code === 'capability_unsupported') return 'unsupported';
+    return 'unknown';
+  }
+
+  /// 探测没出结果时的账号卡：有旧身份就照旧展示并加一行状态说明；本来就没有
+  /// 身份（首屏就挂了）也只说「读不到」，不冒充「未登录」引导扫码。
+  function paintProbeUnknown(sourceId) {
+    var card = document.querySelector('.op-account[data-source="' + sourceId + '"]');
+    if (!card) return;
+    if (state.accounts[sourceId]) {
+      paintLoggedIn(sourceId, state.accounts[sourceId]);
+    }
+    var note = document.createElement('div');
+    note.className = 'op-stale';
+    note.textContent = state.accounts[sourceId]
+      ? '账号状态暂时读不到（平台没应答），仍按上次结果展示。'
+      : '账号状态暂时读不到（平台没应答），不代表未登录。';
+    card.appendChild(note);
+    renderGrid();
+  }
+
   // ── 音源清单与账号区 ─────────────────────────────────────────────────────
 
   async function loadSources() {
@@ -93,12 +119,15 @@
 
       // 扫码登录按 qr_login 能力位显示；没有这个位（如 QQ）只剩 cookie 入口，
       // 点开的是同一个弹窗——弹窗里有 cookie 兜底折叠区。
+      // 登记了但没真机验收过的链路（A9）照常给入口，只加标注：用户有权试，
+      // 但我们不该把「没验过」画成「已支持」。
       if (s.caps.indexOf('qr_login') >= 0) {
         var qr = document.createElement('button');
         qr.className = 'btn op-login';
         qr.type = 'button';
         qr.textContent = '扫码登录';
         qr.onclick = function () { window.OnlineLogin.start(s.id); };
+        if (window.Online) window.Online.markUnverified(qr, s, 'qr_login');
         card.appendChild(qr);
       }
       var cookie = document.createElement('button');
@@ -106,19 +135,28 @@
       cookie.type = 'button';
       cookie.textContent = 'cookie 登录';
       cookie.onclick = function () { window.OnlineLogin.start(s.id); };
+      if (window.Online) window.Online.markUnverified(cookie, s, 'cookie_login');
       card.appendChild(cookie);
 
       box.appendChild(card);
     });
   }
 
-  // 拉账号信息 + 歌单。未登录（401/403/上游错误）时静默保留登录按钮——
-  // 这是常态而不是错误，不该弹 toast 吓人；歌单网格相应留空。
+  // 拉账号信息 + 歌单。平台明确说没登录（401/403）时静默保留登录按钮——这是
+  // 常态而不是错误，不该弹 toast 吓人；歌单网格相应留空。
+  //
+  // 「这次没探出结果」是另一种状态（A6）：上游 5xx、超时、网络故障都不构成授权
+  // 断言，于是保留上一次的身份展示、不清歌单缓存，也**不**把卡片翻回「扫码登录」
+  // ——那会催用户白扫一次码，而且顺手丢掉一屏已取到的歌单。
   async function refreshAccount(sourceId) {
     var acc = null;
     try {
       acc = await tr().get('/v1/online/account?source=' + encodeURIComponent(sourceId));
     } catch (e) {
+      if (accountVerdict(e) === 'unknown') {
+        paintProbeUnknown(sourceId);
+        return;
+      }
       delete state.accounts[sourceId];
       delete state.lists[sourceId];
       renderGrid();

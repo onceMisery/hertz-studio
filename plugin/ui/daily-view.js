@@ -324,6 +324,88 @@
     return el;
   }
 
+  // 后端把「这次没有」和「还没到」分成两组字段（skipped / pending），新鲜度另用
+  // age_secs + refreshing 报。这里一一如实映射，不把还在路上算成失败、也不把缓存
+  // 当成刚抓的结果——说反了会推着用户反复扫码登录、反复点刷新。
+  function skipPhrase(s) {
+    var label = s.label || s.source;
+    if (s.kind === 'not_signed_in') return label + ' 未登录';
+    if (s.kind === 'unsupported') return label + ' 不提供每日推荐';
+    if (s.kind === 'unavailable') return label + ' 暂时读不到';
+    if (s.kind === 'timeout') return label + ' 这次超时了';
+    if (s.kind === 'history') return label + ' 只提供当天';
+    if (s.kind === 'failed') return label + ' 这次没拿到';
+    return label + ' 这次没参与';
+  }
+
+  /// 只给时长，「前」由调用方接：拼成「抓于 5 分钟前」。
+  function fmtAge(secs) {
+    if (secs >= 3600) return Math.max(1, Math.round(secs / 3600)) + ' 小时';
+    if (secs >= 90) return Math.max(1, Math.round(secs / 60)) + ' 分钟';
+    return secs + ' 秒';
+  }
+
+  function statusBits() {
+    if (st.mode !== 'online' || !st.online) return [];
+    var p = st.online;
+    var out = [];
+    var pend = (p.pending || []).filter(function (x) { return !!x; });
+    var skip = (p.skipped || []).filter(function (s) {
+      // 历史日期那份必然是 history，日期与空态已经说清，这里不重复一遍。
+      return s.kind !== 'history' || isToday();
+    });
+    if (pend.length) out.push(pend.join('、') + ' 还在取，稍后刷新就有');
+    if (skip.length) out.push(skip.map(skipPhrase).join('；'));
+    // 来源构成只在有平台缺席时才报：曲目行本身就带平台徽标，正常情况再写
+    // 一遍「来自 网易云 12」纯属重复。
+    var degraded = pend.length > 0 || skip.length > 0;
+    var gave = (p.sources || []).filter(function (s) { return s.count > 0; });
+    if (degraded && gave.length) {
+      out.push('已就位：' + gave.map(function (s) { return s.label + ' ' + s.count + ' 首'; }).join('、'));
+    }
+    if (p.age_secs > 0) {
+      out.push(p.refreshing
+        ? '其中有 ' + fmtAge(p.age_secs) + '前的缓存顶上，后台正在重新取'
+        : '这批推荐抓于 ' + fmtAge(p.age_secs) + '前');
+    }
+    return out;
+  }
+
+  function statusActions() {
+    var acts = [];
+    var p = st.mode === 'online' ? st.online : null;
+    if (p && (p.skipped || []).some(function (s) { return s.kind === 'not_signed_in'; })) {
+      acts.push({ text: '去登录', run: function () { if (H && H.setView) H.setView('online'); } });
+    }
+    if (st.mode === 'local' && !items().length) {
+      acts.push({ text: '去曲库', run: function () { if (H && H.setView) H.setView('library'); } });
+    }
+    return acts;
+  }
+
+  function statusNode() {
+    var bits = statusBits();
+    var acts = statusActions();
+    if (!bits.length && !acts.length) return null;
+    var wrap = document.createElement('div');
+    wrap.className = 'dv-status';
+    bits.forEach(function (text) {
+      var line = document.createElement('div');
+      line.className = 'dv-status-bit';
+      line.textContent = text;
+      wrap.appendChild(line);
+    });
+    acts.forEach(function (a) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn dv-status-act';
+      b.textContent = a.text;
+      b.onclick = a.run;
+      wrap.appendChild(b);
+    });
+    return wrap;
+  }
+
   function renderBody() {
     var host = H && H.ui ? H.ui.dvBody : null;
     if (!host) return;
@@ -335,9 +417,16 @@
       host.innerHTML = '<div class="hint">正在挑歌…</div>';
       return;
     }
+    // 缺席来源与新鲜度附在列表前面：曲目已经拿到就要照常能听，解释不能
+    // 只在空态出现。
+    var strip = statusNode();
+    if (strip) host.appendChild(strip);
     var list = items();
     if (!list.length) {
-      host.innerHTML = '<div class="hint">' + emptyText() + '</div>';
+      var hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent = emptyText();
+      host.appendChild(hint);
       return;
     }
     var frag = document.createDocumentFragment();

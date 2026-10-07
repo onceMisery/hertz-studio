@@ -217,11 +217,14 @@
   background: var(--s3d-accent);
 }
 
-/* --- 顶栏：玻璃胶囊 + 44px 圆钮（stanza 的静息 0.65 透明度与按压 0.82 缩放）--- */
+/* --- 顶栏：玻璃胶囊 + 受光小圆牌 -------------------------------------------
+   盘体的结构（三层受光 / 悬停抬起 / 点亮内发光）在 stage3d.css 的
+   .s3d.s3d-open .s3d-head .s3d-btn 里，这里只换配方：星落的玻璃更亮一档、
+   抬起更多一档，按压走弹簧曲线而不是线性缩放。 */
 .s3d[data-stage-theme="starfall"] .s3d-head {
   --s3d-btn: 44px;
   gap: 4px;
-  padding: 6px;
+  padding: 6px 7px;
   border-radius: 999px;
   background: var(--st-glass);
   border: 1px solid var(--st-hair);
@@ -229,8 +232,20 @@
   backdrop-filter: blur(var(--st-blur)) saturate(1.4);
   transform: translateY(-14px) scale(.96);
   transition: opacity var(--st-micro), transform var(--st-spring-dur) var(--st-spring);
+
+  /* 星落只比基础配方差三档：顶缘更亮一点、抬起更多一点、点亮的光晕更散。
+     其余（盘体、描边、回光）跟着 stage3d.css 走，免得两处各调一半。 */
+  --chip-top: color-mix(in srgb, var(--s3d-text) 28%, transparent);
+  --chip-on-glow: color-mix(in srgb, var(--s3d-accent) 44%, transparent);
+  --chip-lift: -2px;
+  --chip-press: scale(.9);
 }
 .s3d[data-stage-theme="starfall"].s3d-chrome .s3d-head { transform: translateY(0) scale(1); }
+.s3d[data-stage-theme="starfall"] .s3d-head .s3d-btn {
+  transition: background-color var(--st-micro), border-color var(--st-micro),
+    color var(--st-micro), box-shadow var(--st-micro),
+    transform var(--st-spring-dur) var(--st-spring);
+}
 
 .s3d[data-stage-theme="starfall"] .s3d-btn {
   border-radius: 999px;

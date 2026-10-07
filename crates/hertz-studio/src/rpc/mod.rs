@@ -237,6 +237,13 @@ impl Rpc {
 
             // --- 舞台节拍图 ---
             (Op::Get, ["v1", "stage", "beatmap"]) => playback::beatmap(state, query).await,
+            // 段数不同，这两条与上面那条不会互相遮蔽（slice pattern 要求全长匹配）。
+            (Op::Get, ["v1", "stage", "beatmap", "status"]) => {
+                playback::beatmap_status(state, query).await
+            }
+            (Op::Post, ["v1", "stage", "beatmap", "retry"]) => {
+                playback::beatmap_retry(state, body).await
+            }
 
             // --- OBS 歌词输出 ---
             (Op::Get, ["v1", "overlay", "lyric"]) => playback::overlay_lyric(state).await,
@@ -382,6 +389,9 @@ impl Rpc {
                 Ok(Reply::ok(serde_json::json!({ "ok": true })))
             }
             (Op::Post, ["v1", "online", "play"]) => online::play(state, body).await,
+            (Op::Post, ["v1", "online", "collection", "refresh"]) => {
+                online::collection_refresh(state).await
+            }
             (Op::Get, ["v1", "online", "radio"]) => online::radio_status(state).await,
             (Op::Post, ["v1", "online", "radio"]) => online::radio(state, body).await,
             (Op::Get, ["v1", "online", "cache"]) => online::cache_stats(state).await,

@@ -416,6 +416,54 @@ function checkEmpty() {
   ok(ui.dvBody.innerHTML.indexOf('在线推荐只提供当天') >= 0,
     '回看历史且选在线时说明只提供当天');
 
+  section('状态解释：pending ≠ 失败，缓存 ≠ 刚抓，缺席来源带可执行动作');
+  const { sandbox: se, ui: seUi, calls: seCalls } = makeSandbox();
+  se.DailyView.init();
+  se.DailyView.state.online = {
+    date: '', total: 0, empty: true, tracks: [],
+    sources: [{ source: 'netease', label: '网易云音乐', count: 12 }],
+    skipped: [{ source: 'kugou', label: '酷狗音乐', kind: 'not_signed_in', message: '' }],
+    ready: ['网易云音乐'],
+    pending: ['汽水音乐'],
+    age_secs: 0,
+    refreshing: false,
+  };
+  se.DailyView.render();
+  const seHtml = seUi.dvBody.innerHTML;
+  ok(seHtml.indexOf('汽水音乐 还在取') >= 0, 'pending 说成「还在取」，不当成失败');
+  ok(seHtml.indexOf('酷狗音乐 未登录') >= 0, 'not_signed_in 点名未登录的平台');
+  ok(seHtml.indexOf('已就位：网易云音乐 12 首') >= 0, '缺席时同时说清谁已经给');
+  const goLogin = seUi.dvBody.querySelectorAll('.dv-status-act')[0];
+  ok(goLogin && goLogin.textContent === '去登录', '未登录提示旁有「去登录」按钮');
+  goLogin.onclick();
+  eq(seCalls.setView.join(','), 'online', '「去登录」切到在线面板（账号入口在那里）');
+
+  // 缓存新鲜度：age_secs 与 refreshing 是两种状态，不能合成一句「推荐已过期」。
+  se.DailyView.state.online = Object.assign({}, se.DailyView.state.online, {
+    pending: [], skipped: [], age_secs: 3000, refreshing: false,
+  });
+  se.DailyView.render();
+  ok(seUi.dvBody.innerHTML.indexOf('这批推荐抓于 50 分钟前') >= 0,
+    '新鲜命中如实报缓存时间，不叫「过期」');
+  ok(seUi.dvBody.querySelectorAll('.dv-status-act').length === 0,
+    '没有未登录平台时不出「去登录」');
+
+  se.DailyView.state.online = Object.assign({}, se.DailyView.state.online, { refreshing: true });
+  se.DailyView.render();
+  ok(seUi.dvBody.innerHTML.indexOf('缓存顶上') >= 0 && /后台正在重新取/.test(seUi.dvBody.innerHTML),
+    'refreshing 时说明是旧缓存顶上、后台在补');
+
+  // 已经拿到曲目时解释照样在场：曲目可用与来源缺席是两件事。
+  se.DailyView.state.online = Object.assign({}, se.DailyView.state.online, {
+    tracks: [{ id: '1', virtual_id: 'online:netease:1', title: '云一', source_label: '网易云音乐' }],
+    total: 1, empty: false, age_secs: 0, refreshing: false,
+    skipped: [{ source: 'qq', label: 'QQ 音乐', kind: 'timeout', message: '' }],
+  });
+  se.DailyView.render();
+  ok(seUi.dvBody.children.length >= 2, '缺席说明与曲目同时在');
+  ok(seUi.dvBody.innerHTML.indexOf('QQ 音乐 这次超时了') >= 0, '非空列表也照报缺席来源');
+  ok(seUi.dvBody.innerHTML.indexOf('云一') >= 0, '缺席说明挤不掉已拿到的曲目');
+
   section('来源切换：本地/在线各自渲染自己的那份');
   const { sandbox: s2, ui: u2 } = makeSandbox();
   s2.DailyView.init();

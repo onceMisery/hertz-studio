@@ -19,6 +19,14 @@
     max = max == null ? 2 : max;
     return clamp(num(v, fallback), 0, max);
   }
+
+  // Pixi 8 的 Graphics.destroy({ children: true }) 不释放 owned GraphicsContext。
+  // 先递归拆开显示树，再无参销毁：节点回收自己的 context，外部共享 context 留给其 owner。
+  function destroyDisplayTree(node) {
+    if (!node || node.destroyed) return;
+    node.removeChildren().forEach(destroyDisplayTree);
+    node.destroy();
+  }
   function ease(v) { var t = clamp(v, 0, 1); return t * t * (3 - 2 * t); }
   function expo(v) { var t = clamp(v, 0, 1); return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t); }
 
@@ -93,13 +101,54 @@
   // 七种镜头调度（shot）：每句按 seed 抽一种，或由调参固定。
   var SHOT_KINDS = ['editorial-column', 'type-impact', 'fragment-collage',
     'tracking-ribbon', 'mask-reveal', 'poster-blocks', 'quiet-tableau'];
-  function shotKind(seed, tuning) {
-    return SHOT_KINDS.indexOf(tuning.shotFlow) >= 0
-      ? tuning.shotFlow : SHOT_KINDS[hashString(seed) % SHOT_KINDS.length];
+  // 段落类型收窄镜头池：门只关池、不打分（与参考项目「a chorus never whispers」同源）。
+  // 副歌不许静像收尾，一口气的空白不许满屏冲击 —— 否则「副歌与主歌看起来一样」，
+  // 而这正是「高级感」最先死掉的地方。池子一律至少留三种，门不许把选择权夺走。
+  var SHOT_BY_SECTION = {
+    chorus: ['type-impact', 'fragment-collage', 'poster-blocks', 'tracking-ribbon', 'mask-reveal'],
+    lift: ['type-impact', 'tracking-ribbon', 'fragment-collage', 'mask-reveal', 'editorial-column'],
+    breath: ['quiet-tableau', 'editorial-column', 'mask-reveal'],
+    outro: ['quiet-tableau', 'editorial-column', 'type-impact'],
+    verse: SHOT_KINDS,
+    intro: SHOT_KINDS
+  };
+  function poolOf(table, section, all) {
+    var kind = section && section.kind;
+    var pool = table[kind];
+    return pool && pool.length >= 3 ? pool : all;
+  }
+  function shotKind(seed, tuning, section) {
+    // 用户钉死某个镜头时优先级最高：段落门只作用于「自动」档。
+    if (SHOT_KINDS.indexOf(tuning && tuning.shotFlow) >= 0) return tuning.shotFlow;
+    var pool = poolOf(SHOT_BY_SECTION, section, SHOT_KINDS);
+    return pool[hashString(seed) % pool.length];
   }
   // 六种背景构图：与镜头独立抽取，同一句的 HUD 布景稳定可复现。
   var SCENE_KINDS = ['orbital', 'constellation', 'perspective', 'wave-score', 'orrery', 'editorial-lattice'];
-  function sceneKind(seed) { return SCENE_KINDS[hashString('scene:' + seed) % SCENE_KINDS.length]; }
+  var SCENE_BY_SECTION = {
+    chorus: ['orbital', 'perspective', 'editorial-lattice', 'wave-score'],
+    lift: ['perspective', 'wave-score', 'orbital', 'constellation'],
+    breath: ['constellation', 'orrery', 'wave-score'],
+    outro: ['orrery', 'constellation', 'editorial-lattice'],
+    verse: SCENE_KINDS,
+    intro: SCENE_KINDS
+  };
+  function sceneKind(seed, section) {
+    var pool = poolOf(SCENE_BY_SECTION, section, SCENE_KINDS);
+    return pool[hashString('scene:' + seed) % pool.length];
+  }
+
+  // 副歌升级的下半句：星诞承诺「重复的副歌沿用同一张脸，只把景别与力度抬一档」。
+  // 曲式层把这份升级烘进段落 openness/intensity（bump = min(0.16,(visit-1)*0.08)），
+  // DOM 层的镜头机架与遮幅已经在消费它；这里是同一公式在 Pixi 相机上的出口 ——
+  // 商籁/凝彩的 cameraIntensity 乘上它，第二次副歌的推拉就真的比第一次大一档。
+  // 两处各写一个数迟早漂移，所以公式只此一份。非副歌/缺 visit 一律回 1：门只加量。
+  function chorusLift(section) {
+    if (!section || section.kind !== 'chorus') return 1;
+    var visit = num(section.visit, 1);
+    if (visit <= 1) return 1;
+    return 1 + Math.min(0.16, (visit - 1) * 0.08);
+  }
 
   // reduced / 动效量统一出口：减少动态直接归零，位移旋转全部冻结在基准位。
   function motionScale(tuning) {
@@ -302,9 +351,9 @@
   // ------------------------------------------------------------------
 
   function buildLyrics(PIXI, container, line, width, height, tuning, seed, fontStack) {
-    container.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
+    container.removeChildren().forEach(destroyDisplayTree);
     container.position.set(0, 0);
-    var kind = shotKind(seed, tuning);
+    var kind = shotKind(seed, tuning, line && line.section);
     var random = seededRandom(seed);
     var fontSize = Math.min(width * 0.08, height * 0.12, 76) * amount(tuning.fontScale, 1, 1.5);
     var maxWidth = width * 0.68;
@@ -643,7 +692,71 @@
       },
       destroy: function () {
         layer.removeFromParent();
-        layer.destroy({ children: true });
+        destroyDisplayTree(layer);
+      }
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // 人声辉光：一团加色混合的柔光垫在「正在唱的那个字」下面，亮度吃 vocal 频段。
+  // 这是上游舞台「bass 推缩放、vocal 推辉光」语言里此前缺失的那一半 ——
+  // 五频段算出来只有 power/impact 被消费。单个 Graphics，播放期只写
+  // position/scale/alpha，不重绘几何。
+  // ------------------------------------------------------------------
+
+  // 正在唱的字素：优先当前时间落在 [start,end) 的最后一个；换气间隙里退而取
+  // 0.35s 内刚唱完的（辉光拖尾，live 线性衰减）。纯函数，Node 可测。
+  function singingGlyph(nodes, time) {
+    var current = null, recent = null, recentAt = -Infinity;
+    for (var i = 0; i < nodes.length; i += 1) {
+      var d = nodes[i] && nodes[i].dataset;
+      if (!d || !String(d.text || '').trim()) continue;
+      if (time >= d.startTime && time < d.endTime) current = nodes[i];
+      if (d.endTime <= time && d.endTime > recentAt) { recentAt = d.endTime; recent = nodes[i]; }
+    }
+    if (current) return { node: current, live: 1 };
+    if (recent && time - recentAt < 0.35) return { node: recent, live: 1 - (time - recentAt) / 0.35 };
+    return null;
+  }
+
+  function createVocalGlow(PIXI, parent, colorNum, nodes) {
+    var layer = new PIXI.Container();
+    layer.blendMode = 'add';
+    layer.visible = false;
+    var disc = new PIXI.Graphics();
+    // 与 buildAtmosphere 同款同心圆逼近径向衰减（Pixi v8 上比 FillGradient 稳），
+    // 指数更陡：辉光要「芯亮边散」，不是氛围光那种大而平的雾。
+    var rings = 9;
+    for (var i = rings; i >= 1; i -= 1) {
+      var t = i / rings;
+      disc.circle(0, 0, t);
+      disc.fill({ color: colorNum, alpha: Math.pow(1 - t, 2.6) * 0.42 });
+    }
+    layer.addChild(disc);
+    // 垫在 textContainer 最底：辉光是「字在纸上投的光」，不是叠在字上的滤镜。
+    parent.addChildAt(layer, 0);
+    return {
+      update: function (frame, tuning) {
+        var perf = tuning.performance || {};
+        var strength = motionScale(tuning) * amount(tuning.accentMotion, 1);
+        var enabled = tuning.accentEffects !== false && tuning.quality !== 'energy-saving' && strength > 0;
+        var pick = enabled ? singingGlyph(nodes, num(frame.playbackTime, 0)) : null;
+        if (!pick) { layer.visible = false; return; }
+        var d = pick.node.dataset;
+        var vocal = clamp(num(perf.vocal, 0), 0, 1);
+        var energy = clamp(num(perf.energy, 0), 0, 1);
+        var amp = (0.14 + vocal * 0.3 + energy * 0.08) * pick.live;
+        layer.visible = amp > 0.02;
+        if (!layer.visible) return;
+        // 跟随字素的动画位姿（含入场位移），辉光跟着字一起落位。
+        layer.position.set(pick.node.position.x, pick.node.position.y);
+        layer.scale.set(Math.max(1, d.fontSize * d.fit) * (1.8 + vocal * 0.8));
+        layer.alpha = Math.min(1, amp);
+      },
+      snapshot: function () { return { visible: layer.visible, glyphs: nodes.length }; },
+      destroy: function () {
+        layer.removeFromParent();
+        destroyDisplayTree(layer);
       }
     };
   }
@@ -712,11 +825,23 @@
 
   function createPerformance() {
     var onset = createOnsetDetector();
-    var state = { impact: 0, phrasePulse: 0, energy: 0, phrase: -1, time: 0, reset: true };
+    // bass/vocal/treble 是「持续状态」而不是瞬态：平滑常数 5/s（约 200ms 跟手，
+    // 又不逐帧抖）。复位（切歌/seek）直接吸附，旧歌的频段不许缓慢漏进新画面。
+    var state = { impact: 0, phrasePulse: 0, energy: 0, bass: 0, vocal: 0, treble: 0,
+      phrase: -1, time: 0, reset: true };
     return {
       update: function (frame, tuning, nodes) {
         var time = num(frame.playbackTime, 0);
         var live = onset.update(frame);
+        var audio = frame.audio || {};
+        var smooth = 1 - Math.exp(-Math.min(0.25, Math.max(0, time - state.time)) * 5);
+        var trackBand = function (current, target) {
+          var v = clamp(num(target, 0), 0, 1);
+          return live.reset ? v : current + (v - current) * smooth;
+        };
+        state.bass = trackBand(state.bass, audio.bass);
+        state.vocal = trackBand(state.vocal, audio.vocal);
+        state.treble = trackBand(state.treble, audio.treble);
         var phrase = -1, phraseStart = -Infinity;
         nodes.forEach(function (node) {
           var d = node.dataset;
@@ -899,7 +1024,7 @@
     '#define RING(r, dx, dy) { vec3 s_ = tap(vTextureCoord + vec2(dx, dy) * texel * r).rgb; glow += s_ * max(0.0, LUMA(s_) - uThreshold) * w_; wsum_ += w_; }',
     'void main() {',
     '  vec2 texel = uInputSize.zw * uSpread;',
-    '  vec3 base = tap(vTextureCoord).rgb;',
+    '  vec4 base = tap(vTextureCoord);',
     '  vec3 glow = vec3(0.0);',
     '  float wsum_ = 0.0;',
     // 外环 8 向：比十字采样贵，但高光的衰减梯度平滑得多。
@@ -921,9 +1046,12 @@
     '  RING(0.5, -0.707, -0.707)',
     '  RING(0.5, 0.707, -0.707)',
     '  glow /= max(wsum_, 1e-3) / max(1.0 - uThreshold, 1e-3);',
-    '  float lum = LUMA(base);',
+    '  float lum = LUMA(base.rgb);',
     '  float over = max(0.0, lum - uThreshold) / max(1.0 - uThreshold, 1e-3);',
-    '  finalColor = vec4(base + glow * uTint * uStrength * (0.35 + over * 0.9), 1.0);',
+    // 输入与输出都为预乘 alpha：只让新增的光扩展覆盖，不把空白像素变成黑色遮板。
+    '  vec3 light = max(glow * uTint * uStrength * (0.35 + over * 0.9), vec3(0.0));',
+    '  float alpha = min(1.0, base.a + max(light.r, max(light.g, light.b)));',
+    '  finalColor = vec4(min(base.rgb + light, vec3(alpha)), alpha);',
     '}'
   ].join('\n');
 
@@ -947,12 +1075,12 @@
       filter: filter,
       // 光晕染色走主题强调色（偏暖），而不是底色：底色染色等于给整屏蒙一层
       // 与背景同色的纱，光晕反而被吃掉。调用方传 hex 字符串或 0xRRGGBB。
-      setTint: function (color) {
-        var n = typeof color === 'number' ? color : parseInt(String(color || '#ffd7b0').slice(1), 16) || 0;
-        if (!n) return;
-        // 往暖色拉一点：纯强调色（如青蓝）做 halation 会读成「屏幕偏色」而非胶片溢光。
+      setTint: function (color, monochrome) {
+        var n = typeof color === 'number' ? color : parseInt(String(color || '#ffd7b0').slice(1), 16);
+        if (!isFinite(n)) return;
+        // 彩色模式略微暖化；单色保留导演提供的灰色色板，不能从光晕重新染出暖边。
         var r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
-        uniforms.uniforms.uTint.set([
+        uniforms.uniforms.uTint.set(monochrome ? [r, g, b] : [
           Math.min(1, r * 0.55 + 0.45),
           Math.min(1, g * 0.55 + 0.28),
           Math.min(1, b * 0.55 + 0.16)
@@ -960,9 +1088,13 @@
       },
       update: function (frame, tuning) {
         var kick = clamp(num(tuning.performance && tuning.performance.impact, 0), 0, 1);
+        // 人声推溢光：vocal 频段高时 halation 阈值不变、强度上浮 —— 上游舞台
+        // 「bass 推缩放、vocal 推辉光」语言的后半句。弱人声段落画面收敛，副歌开口溢光。
+        var vocal = clamp(num(tuning.performance && tuning.performance.vocal, 0), 0, 1);
         // Pixi 的 UniformGroup.uniforms 是**值本身**的映射（不是 {value} 包装），
         // 写成 uniforms.x.value 会静默把数字的 value 属性写坏并抛 TypeError。
-        uniforms.uniforms.uStrength = amount(tuning.halation, 0.5) * (0.72 + kick * 0.5);
+        uniforms.uniforms.uStrength = amount(tuning.halation, 0.5)
+          * (0.72 + kick * 0.5 + vocal * 0.22);
         uniforms.uniforms.uThreshold = amount(tuning.halationThreshold, 0.62, 1);
         uniforms.uniforms.uSpread = amount(tuning.halationSpread, 2.4, 6);
       },
@@ -995,7 +1127,9 @@
           * clamp(num(tuning.performance && tuning.performance.impact, 0), 0, 1);
         var values = {
           Distortion: amount(tuning.lensDistortion, 0.35),
-          Dispersion: clamp(amount(tuning.lensDispersion, 0.18, 1) + kick * 0.45, 0, 1),
+          // 单色印刷不分离 RGB 通道；强拍仍保留镜头/光晕调制，不重新染出彩边。
+          Dispersion: tuning.monochrome ? 0
+            : clamp(amount(tuning.lensDispersion, 0.18, 1) + kick * 0.45, 0, 1),
           Grain: amount(tuning.grain, 0, 1),
           Contrast: amount(tuning.contrast, 0, 1),
           Halftone: amount(tuning.halftone, 0, 1),
@@ -1043,16 +1177,16 @@
     return {
       print: print,
       halation: halation,
-      setTint: function (color) { halation.setTint(color); },
+      setTint: function (color, monochrome) { halation.setTint(color, monochrome); },
       update: function (frame, tuning, width, height) {
         // 缺省 0.5：光晕是这个舞台的默认语言，不是可选项。
         // 之前 fallback 写 0，导致 tuning 不带该键时整条 pass 永不启用 ——
         // 契约脚本在 Node 里跑不到这里，是浏览器实测把它抓出来的。
         var strength = amount(tuning.halation, 0.5);
         var kick = clamp(num(tuning.performance && tuning.performance.impact, 0), 0, 1);
-        // 强度下限 0.04：起音瞬间即便调参为 0 也留一点溢光，读作「画面在呼吸」。
+        // 显式 0 关闭整条 pass；起音只调制已开启的光晕，不能重新打开用户关闭的效果。
         halation.enabled = tuning.postProcess !== false && tuning.quality !== 'energy-saving'
-          && (strength > 0 || kick > 0.05) && strength + kick * 0.35 > 0.04;
+          && strength > 0 && strength + kick * 0.35 > 0.04;
         print.update(frame, tuning, width, height);
         halation.update(frame, tuning);
         sync();
@@ -1072,8 +1206,8 @@
     var layer = null, born = 0, lastFrame = null, lastTuning = null, outgoingLine = null;
     var lyricLayer = null, lyricY = 0, lyricTravel = 0;
     function release() {
-      if (layer) { layer.removeFromParent(); layer.destroy({ children: true }); layer = null; }
-      if (lyricLayer) { lyricLayer.removeFromParent(); lyricLayer.destroy({ children: true }); lyricLayer = null; }
+      if (layer) { layer.removeFromParent(); destroyDisplayTree(layer); layer = null; }
+      if (lyricLayer) { lyricLayer.removeFromParent(); destroyDisplayTree(lyricLayer); lyricLayer = null; }
     }
     return {
       capture: function (containers, scene, nextLine, words) {
@@ -1102,8 +1236,8 @@
           layer.addChild(copy);
         });
         stage.addChildAt(layer, 0);
-        // 只快照已经唱到的正文；短暂上移淡出，不复制遮罩/粒子或尚未唱的词。
-        // 与布景共用生命周期，最多保留一条旧句，seek 时立即一起回收。
+        // 已唱正文直接移交给退场层，保留已上传的文字资源；换句帧不再复制整句 Text。
+        // 调用方随后清空旧正文容器，退场层成为这些节点唯一的销毁 owner。
         if (words && words.length && tuning.lyricLayout !== 'editorial-track') {
           lyricLayer = new PIXI.Container();
           lyricLayer.position.copyFrom(scene.position);
@@ -1112,15 +1246,7 @@
           lyricLayer.rotation = scene.rotation;
           words.forEach(function (word) {
             if (word.visible === false || word.alpha < 0.01 || word.dataset.startTime > frame.playbackTime) return;
-            var copy = new PIXI.Text({ text: word.text, style: word.style.clone() });
-            copy.anchor.copyFrom(word.anchor);
-            copy.position.copyFrom(word.position);
-            copy.scale.copyFrom(word.scale);
-            copy.skew.copyFrom(word.skew);
-            copy.rotation = word.rotation;
-            copy.tint = word.tint;
-            copy.alpha = word.alpha;
-            lyricLayer.addChild(copy);
+            lyricLayer.addChild(word);
           });
           lyricY = lyricLayer.position.y;
           lyricTravel = Math.min(28, words[0].dataset.fontSize * words[0].dataset.fit * 0.35);
@@ -1159,7 +1285,7 @@
               lyricLayer.position.y = lyricY - easeEnter(lyricProgress) * lyricTravel;
               if (lyricProgress >= 1) {
                 lyricLayer.removeFromParent();
-                lyricLayer.destroy({ children: true });
+                destroyDisplayTree(lyricLayer);
                 lyricLayer = null;
               }
             }
@@ -1277,20 +1403,23 @@
       blobs: blobs,
       shade: shade,
       // 播放期只写变换与透明度：不重绘几何。
-      update: function (time, motion, energy) {
+      // vocal 第四参可选（凝彩旧调用不传）：人声把柔光往上托一档，字里行间的
+      // 「空气」随开口变亮 —— 这是氛围层区别于静态贴图的关键。
+      update: function (time, motion, energy, vocal) {
+        vocal = clamp(num(vocal, 0), 0, 1);
         layer.alpha = 1;
         blobs[0].node.position.set(
           blobs[0].x + Math.sin(time * 0.07) * width * 0.03 * motion,
           blobs[0].y + Math.cos(time * 0.05) * height * 0.025 * motion);
-        blobs[0].node.scale.set(1 + energy * 0.06);
-        blobs[0].node.alpha = 0.78 + energy * 0.34;
+        blobs[0].node.scale.set(1 + energy * 0.06 + vocal * 0.05);
+        blobs[0].node.alpha = 0.78 + energy * 0.34 + vocal * 0.2;
         blobs[1].node.position.set(
           blobs[1].x + Math.cos(time * 0.06) * width * 0.025 * motion,
           blobs[1].y + Math.sin(time * 0.045) * height * 0.03 * motion);
         blobs[1].node.scale.set(1 + energy * 0.045);
-        blobs[1].node.alpha = 0.7 + energy * 0.3;
+        blobs[1].node.alpha = 0.7 + energy * 0.3 + vocal * 0.12;
       },
-      destroy: function () { layer.destroy({ children: true }); }
+      destroy: function () { destroyDisplayTree(layer); }
     };
   }
 
@@ -1356,13 +1485,16 @@
     easeSoftBack: easeSoftBack, easeGlide: easeGlide,
     hashString: hashString, seededRandom: seededRandom,
     shotKind: shotKind, sceneKind: sceneKind, motionScale: motionScale,
+    chorusLift: chorusLift,
     buildGlyphTimeline: buildGlyphTimeline, compilePhrases: compilePhrases,
     accentCues: accentCues, computeAccentCues: computeAccentCues,
     cameraPose: cameraPose, releaseOf: releaseOf, resolveAudioBands: resolveAudioBands,
     // PIXI 注入式构建/驱动
+    destroyDisplayTree: destroyDisplayTree,
     buildLyrics: buildLyrics, animateLyrics: animateLyrics,
     buildPhraseStage: buildPhraseStage, animatePhraseStage: animatePhraseStage,
     createAccentChoreography: createAccentChoreography,
+    singingGlyph: singingGlyph, createVocalGlow: createVocalGlow,
     createOnsetDetector: createOnsetDetector, createPerformance: createPerformance,
     applyQuality: applyQuality, createPostProcess: createPostProcess,
     createHalation: createHalation, createOpticalChain: createOpticalChain,

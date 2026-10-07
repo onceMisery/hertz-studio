@@ -40,9 +40,33 @@
     };
   }
 
+  // 曲式读数（段落类型 / 副歌 / 第几次副歌）来自 stanza-songform，与星诞导演共用同一份编译
+  // 结果（WeakMap 按歌词数组身份缓存）。这里刻意不另判一次副歌：两处各判迟早给出不同答案，
+  // 而「导演说这是副歌、渲染器说不是」正是决策与画面脱节的开始。
+  function sectionOf(form, i) {
+    if (!form || !form.paragraphs || !form.lines || !form.lines[i]) return null;
+    var par = null;
+    for (var p = 0; p < form.paragraphs.length; p++) {
+      var q = form.paragraphs[p];
+      if (i >= q.startLine && i <= q.endLine) { par = q; break; }
+    }
+    var rec = form.lines[i];
+    return {
+      kind: par ? par.kind : 'verse',
+      chorus: rec.chorusStrength || 0,
+      visit: par ? par.visit : 0,
+      intensity: par ? par.intensity : 0.42,
+      openness: par ? par.openness : 0.4,
+      firstOfParagraph: !!rec.firstOfParagraph
+    };
+  }
+
   function normalizeLines(rawLines) {
     var cached = lineCache.get(rawLines);
     if (cached) return cached;
+    var form = (global.StanzaSongForm && global.Stage && Stage.lyricTokens)
+      ? global.StanzaSongForm.forDoc(rawLines, function (l) { return Stage.lyricTokens(l); })
+      : null;
     var out = rawLines.map(function (raw, i) {
       var next = rawLines[i + 1];
       var startTime = U.num(raw.start_ms, 0) / 1000;
@@ -58,13 +82,15 @@
         return { text: String(w.text == null ? '' : w.text), startTime: ws, endTime: we, index: wi };
       });
       var fullText = String(raw.text == null ? '' : raw.text);
+      var section = sectionOf(form, i);
       var line = {
         index: i,
         startTime: startTime,
         endTime: endTime,
         fullText: fullText,
         words: words,
-        isChorus: false,
+        isChorus: !!(section && section.chorus > 0),
+        section: section,
         renderHints: hintsFor(raw)
       };
       line.vocalEndTime = words.reduce(function (m, w) { return Math.max(m, w.endTime); }, startTime);
@@ -237,7 +263,7 @@
     this.pendingShot = [line, seed, accentColor, tuning];
     if (!this.initialized || this.destroyed) return;
     var PIXI = global.PIXI;
-    this.activeKind = FX.shotKind(seed, tuning);
+    this.activeKind = FX.shotKind(seed, tuning, line && line.section);
     this.accent = accentColor || { r: 244, g: 244, b: 245 };
     this.numPrimary = (this.accent.r << 16) | (this.accent.g << 8) | this.accent.b;
     var numPrimary = this.numPrimary;
@@ -250,10 +276,10 @@
     var radius = Math.min(width, height) * 0.38;
 
     this.retirement.capture([this.geoContainer, this.hudContainer], this.sceneContainer, line, this.words);
-    this.backgroundKind = FX.sceneKind(seed);
+    this.backgroundKind = FX.sceneKind(seed, line && line.section);
 
     // 1. 外框线系统：四角括标 + 上下标尺刻度（画面常驻的「取景器」）。
-    this.frameDecorContainer.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
+    this.frameDecorContainer.removeChildren().forEach(FX.destroyDisplayTree);
     var frame = new PIXI.Graphics();
     var padX = width * 0.08, padY = height * 0.12;
     var fw = width - padX * 2, fh = height - padY * 2;
@@ -309,7 +335,7 @@
     // 消失，否则换图片背景时画面会从「有空气」突变为「纯贴图」。
     // 固定画幅、不随相机移动：它是「 venue 的灯」而不是「画面里的东西」。
     if (this.atmosphere) this.atmosphere.destroy();
-    this.atmosphereLayer.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
+    this.atmosphereLayer.removeChildren().forEach(FX.destroyDisplayTree);
     this.atmosphere = FX.buildAtmosphere(PIXI, width, height, {
       accent: tuning.palette && tuning.palette.accent,
       secondary: tuning.palette && tuning.palette.secondary
@@ -318,15 +344,15 @@
 
     // 1d. 角标取景器：非对称、只画角不围合。与 1/1b 的框线错开边距（4.5% vs 8%/12%），
     // 两层各管各的：框线是「画幅」，角标是「机身」。
-    this.markLayer.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
+    this.markLayer.removeChildren().forEach(FX.destroyDisplayTree);
     this.markLayer.addChild(FX.buildCornerMarks(PIXI, width, height, {
       primary: tuning.palette && tuning.palette.primary,
       secondary: tuning.palette && tuning.palette.secondary
     }, seed));
 
     // 2. HUD 布景：轨道环系（orbital/orrery）或四种静态线稿，按种子六选一。
-    this.hudContainer.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
-    this.geoContainer.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
+    this.hudContainer.removeChildren().forEach(FX.destroyDisplayTree);
+    this.geoContainer.removeChildren().forEach(FX.destroyDisplayTree);
     this.giantText = null;
     this.orbits = [];
     var hud = new PIXI.Graphics();
@@ -438,18 +464,28 @@
     });
     this.giantText.alpha = 0.12;
     this.giantText.anchor.set(0.5);
-    this.giantText.position.set(cx, cy - 20);
+    // 水印字垫在上带（0.24h）：它的文本就是当前句前 8 字 —— 放在画面中心会与
+    // 正文/站点同位叠印，读作「歌词重影」（用户报告的商籁重叠即此）；挪到
+    // 正文带之上后它才是背景肌理，不再与任何一层歌词抢同一块画布。
+    this.giantText.position.set(cx, height * 0.24);
     this.geoContainer.addChild(this.giantText);
 
     // 4. 正文排版 + 词组舞台 + 重音编舞。
-    this.textContainer.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
+    if (this.accents) { this.accents.destroy(); this.accents = null; }
+    if (this.vocalGlow) { this.vocalGlow.destroy(); this.vocalGlow = null; }
+    this.textContainer.removeChildren().forEach(FX.destroyDisplayTree);
     this.motif = FX.buildMotif(PIXI, this.geoContainer, width, height, numTertiary, seed);
     this.motif.pivot.set(cx, cy);
     this.motif.position.set(cx, cy);
-    this.words = FX.buildLyrics(PIXI, this.textContainer, line, width, height, tuning, seed, this.fontStack);
-    this.phrases = FX.buildPhraseStage(PIXI, this.textContainer, this.words, numSecondary);
-    if (this.accents) this.accents.destroy();
-    this.accents = FX.createAccentChoreography(PIXI, this.textContainer, this.words, numTertiary, seed, numPrimary);
+    this.words = [];
+    this.phrases = [];
+    // 社论轨自己持有可见文字，不能每次换句再构造一套隐藏的普通歌词与粒子。
+    if (tuning.lyricLayout !== 'editorial-track') {
+      this.words = FX.buildLyrics(PIXI, this.textContainer, line, width, height, tuning, seed, this.fontStack);
+      this.phrases = FX.buildPhraseStage(PIXI, this.textContainer, this.words, numSecondary);
+      this.accents = FX.createAccentChoreography(PIXI, this.textContainer, this.words, numTertiary, seed, numPrimary);
+      this.vocalGlow = FX.createVocalGlow(PIXI, this.textContainer, numPrimary, this.words);
+    }
     this.scan = hud;
     this.scan.pivot.set(cx, cy);
     this.scan.position.set(cx, cy);
@@ -460,18 +496,17 @@
 
   SonnetDirector.prototype.update = function (frame, tuning) {
     if (!this.initialized || this.destroyed) return null;
-    var FXp = tuning.performance = this.performance.update(frame, tuning, this.words);
+    var trackMode = tuning.lyricLayout === 'editorial-track';
+    var trackSeed = (frame.track && (frame.track.path || frame.track.title)) || 'sonnet-track';
+    var camera = trackMode
+      ? this.editorialTrack.update(frame, tuning, this.numPrimary, trackSeed, this.width, this.height) : null;
+    var FXp = tuning.performance = this.performance.update(frame, tuning, trackMode ? camera.glyphs : this.words);
     FX.applyQuality(this.app, this.width, this.height, tuning.quality);
     var motion = FX.motionScale(tuning);
     var time = frame.playbackTime;
     var kick = FXp.impact;
     var intensity = motion * FX.amount(tuning.performanceIntensity, 1.25);
-    var trackMode = tuning.lyricLayout === 'editorial-track';
-    var trackSeed = (frame.track && (frame.track.path || frame.track.title)) || 'sonnet-track';
-
-    var camera = trackMode
-      ? this.editorialTrack.update(frame, tuning, this.numPrimary, trackSeed, this.width, this.height)
-      : FX.cameraPose(frame, tuning, this.activeKind, this.width, this.height, this.words);
+    if (!trackMode) camera = FX.cameraPose(frame, tuning, this.activeKind, this.width, this.height, this.words);
     this.textContainer.visible = !trackMode;
     this.trackContainer.visible = trackMode;
     if (trackMode) {
@@ -507,7 +542,11 @@
       orbit.alpha = 0.55 + FXp.energy * 0.35;
     }, this);
     // 尚未 buildShot（无歌词/未定位）时布景对象还不存在：跳过装饰驱动。
-    if (this.scan) this.scan.rotation = time * 0.32 * intensity;
+    if (this.scan) {
+      this.scan.rotation = time * 0.32 * intensity;
+      // 扫描扇区吃 treble：高频亮一下，像仪表指针扫过高能区。
+      this.scan.alpha = 0.72 + FXp.treble * 0.28;
+    }
     if (this.motif) {
       this.motif.visible = circular;
       this.motif.rotation = -time * 0.035 * intensity;
@@ -516,10 +555,11 @@
     this.frameDecorContainer.scale.set(1 + kick * 0.008 * intensity);
     if (this.giantText) {
       this.giantText.alpha = this.backgroundKind === 'editorial-lattice' ? 0.12 : 0.055;
-      this.giantText.scale.set(1 + FXp.energy * 0.06 * intensity);
+      // 巨字吃 bass：低频把水印字轻轻推涨 —— 上游「bass 推缩放」的直接消费。
+      this.giantText.scale.set(1 + (FXp.energy * 0.06 + FXp.bass * 0.05) * intensity);
       this.giantText.position.set(
-        this.width * 0.5 + Math.sin(time * 0.14) * this.width * 0.12 * intensity,
-        this.height * 0.5 - 20 + Math.cos(time * 0.19) * 18 * intensity);
+        this.width * 0.5 + Math.sin(time * 0.14) * this.width * 0.1 * intensity,
+        this.height * 0.24 + Math.cos(time * 0.19) * 14 * intensity);
       this.giantText.rotation = Math.sin(time * 0.12) * 0.035 * intensity;
     }
 
@@ -527,24 +567,25 @@
       FX.animateLyrics(this.words, frame, tuning, this.numPrimary);
       FX.animatePhraseStage(this.phrases, frame, tuning, this.activeKind);
       if (this.accents) this.accents.update(frame, tuning);
+      if (this.vocalGlow) this.vocalGlow.update(frame, tuning);
     }
 
     this.hudContainer.visible = tuning.showBackground !== false && tuning.guideLines !== false;
     this.frameDecorContainer.visible = tuning.showDecor !== false;
-    this.frameDecorContainer.alpha = tuning.backgroundMode === 'anime' ? 0.3 : 1;
+    this.frameDecorContainer.alpha = tuning.backgroundMode === 'anime' || tuning.backgroundMode === 'creative' ? 0.3 : 1;
     this.geoContainer.visible = tuning.showBackground !== false;
     var backgroundAlpha = this.retirement.update(frame, tuning);
     this.geoContainer.alpha = backgroundAlpha == null ? 1 : backgroundAlpha;
     this.hudContainer.alpha = this.geoContainer.alpha;
     // 角标与压边渐隐跟 geo 同步退场：切句时整套画面一起走，不留一层壳。
     this.markLayer.alpha = this.geoContainer.alpha;
-    this.markLayer.visible = this.geoContainer.visible;
-    // 氛围光不吃退场淡出（它是环境不是内容），但吃起音能量：重拍时空气会「亮一下」。
-    if (this.atmosphere) this.atmosphere.update(time, motion, FXp.energy);
-    // 图片背景模式：柔光必须收掉，否则会在照片上蒙一层彩色雾，且角落不再全透明
+    this.markLayer.visible = this.geoContainer.visible && tuning.showDecor !== false;
+    // 氛围光不吃退场淡出（它是环境不是内容），但吃起音能量与人声：重拍/开口时空气会「亮一下」。
+    if (this.atmosphere) this.atmosphere.update(time, motion, FXp.energy, FXp.vocal);
+    // 外部背景模式：柔光必须收掉，否则会在布景上蒙一层彩色雾，且角落不再全透明
     // （契约要求图片模式至少 90% 像素完全透明、角落 alpha 为 0）。
-    this.atmosphereLayer.visible = tuning.backgroundMode !== 'anime'
-      && tuning.showBackground !== false && tuning.quality !== 'energy-saving';
+    this.atmosphereLayer.visible = tuning.backgroundMode !== 'anime' && tuning.backgroundMode !== 'creative'
+      && tuning.atmosphere !== false && tuning.showBackground !== false && tuning.quality !== 'energy-saving';
     this.optical.setTint(tuning.palette && tuning.palette.accent);
     this.optical.update(frame, tuning, this.width, this.height);
     this.app.render();
@@ -557,10 +598,14 @@
       glyphs: this.words.length, phrases: this.phrases.length, orbits: this.orbits.length,
       performance: this.performance.snapshot(),
       accents: this.accents ? this.accents.snapshot() : null,
+      vocalGlow: this.vocalGlow ? this.vocalGlow.snapshot() : null,
       editorial: this.editorialTrack ? this.editorialTrack.snapshot() : null,
       resolution: this.app && this.app.renderer ? this.app.renderer.resolution : null,
       halation: this.optical ? this.optical.halation.enabled : false,
       atmosphere: !!this.atmosphere,
+      atmosphereVisible: !!(this.atmosphereLayer && this.atmosphereLayer.visible),
+      decorationsVisible: !!(this.frameDecorContainer && (this.frameDecorContainer.visible
+        || this.hudContainer.visible || this.markLayer.visible)),
       retirement: this.retirement ? this.retirement.snapshot() : null
     };
   };
@@ -574,6 +619,7 @@
     this.phrases = [];
     this.orbits = [];
     if (this.accents) { this.accents.destroy(); this.accents = null; }
+    if (this.vocalGlow) { this.vocalGlow.destroy(); this.vocalGlow = null; }
     if (this.editorialTrack) { this.editorialTrack.destroy(); this.editorialTrack = null; }
     this.motif = this.scan = this.giantText = null;
     if (this.atmosphere) { this.atmosphere.destroy(); this.atmosphere = null; }
@@ -582,6 +628,7 @@
     this.postProcess = null;
     // init 被打断时 initialized 尚未置位但渲染器可能已分配：无条件回收 WebGL 上下文。
     if (this.app && this.initialized) {
+      this.app.stage.removeChildren().forEach(FX.destroyDisplayTree);
       try { this.app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true }); }
       catch (err) { console.warn('[stanza-sonnet] PIXI cleanup failed:', err); }
     }
@@ -609,8 +656,8 @@
     var activeIndex = -1, width = 1, height = 1, color = 0xffffff;
 
     function release() {
-      decor.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
-      text.removeChildren().forEach(function (c) { c.destroy({ children: true }); });
+      decor.removeChildren().forEach(FX.destroyDisplayTree);
+      text.removeChildren().forEach(FX.destroyDisplayTree);
       entries = [];
       glyphs = [];
     }
@@ -677,7 +724,7 @@
       return { segmentByGlyph: segmentByGlyph, segmentCount: segment + 1 };
     }
 
-    function makeEntry(line, lineIndex, point, tuning, activeIndexNow) {
+    function makeEntry(line, lineIndex, point, tuning) {
       var palette = tuning.palette || {};
       var secondary = colorNumber(palette.secondary, color);
       var tertiary = colorNumber(palette.tertiary, color);
@@ -766,7 +813,8 @@
       var accentLayer = new PIXI.Container();
       entryRoot.addChild(accentLayer);
       var accent = { layer: accentLayer, particles: [] };
-      if (lineIndex === activeIndexNow) {
+      function prepareAccent() {
+        if (accent.particles.length) return;
         var targets = nodes.filter(function (n) { return n.visible; })
           .filter(function (n, i, list) { return i % Math.max(1, Math.floor(list.length / 3)) === 0; })
           .slice(0, 3);
@@ -790,26 +838,35 @@
       }
       accentLayer.visible = false;
       return { root: entryRoot, nodes: nodes, line: line, lineIndex: lineIndex,
-        point: point, entryDecor: entryDecor, entryText: entryText, accent: accent };
+        point: point, entryDecor: entryDecor, entryText: entryText, accent: accent, prepareAccent: prepareAccent };
     }
 
-    function rebuild(frame, tuning, nextColor, seed) {
-      release();
-      source = frame.lines;
+    function syncWindow(frame, tuning) {
       activeIndex = frame.currentLineIndex;
-      color = nextColor;
-      layout = compileLayout(frame.lines, seed, width, height, tuning);
       var before = tuning.quality === 'energy-saving' ? 1 : 2;
       var after = tuning.quality === 'energy-saving' ? 2 : 4;
       var first = Math.max(0, activeIndex - before);
       var last = Math.min(frame.lines.length - 1, Math.max(activeIndex, 0) + after);
+      // 相邻窗口通常共享六行：保留其显示对象与文字纹理，只创建新进入窗口的一行。
+      var retained = new Map();
+      entries.forEach(function (entry) {
+        if (entry.lineIndex >= first && entry.lineIndex <= last) retained.set(entry.lineIndex, entry);
+        else { entry.root.removeFromParent(); FX.destroyDisplayTree(entry.root); }
+      });
+      entries = [];
+      glyphs = [];
       for (var index = first; index <= last; index += 1) {
-        var entry = makeEntry(frame.lines[index], index, layout[index], tuning, activeIndex);
-        text.addChild(entry.root);
+        var entry = retained.get(index);
+        if (!entry) {
+          entry = makeEntry(frame.lines[index], index, layout[index], tuning);
+          text.addChild(entry.root);
+        }
+        text.setChildIndex(entry.root, entries.length);
         entries.push(entry);
         glyphs.push.apply(glyphs, entry.nodes);
       }
       // 稀疏拐点标记暗示路线延续，不画实线铁轨。
+      decor.removeChildren().forEach(FX.destroyDisplayTree);
       for (var j = Math.max(1, first); j <= last; j += 1) {
         var a = layout[j - 1], b = layout[j];
         var elbowX = b.vertical ? b.x : a.x;
@@ -829,26 +886,32 @@
       update: function (frame, tuning, nextColor, seed, nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
-        var nextSignature = [seed, width, height, tuning.fontScale, tuning.trackVerticalChance,
+        var nextSignature = [seed, width, height, tuning.fontScale, tuning.phraseLength, tuning.trackVerticalChance,
           tuning.trackJunction, tuning.trackMinSegment, tuning.quality, nextColor,
           JSON.stringify(tuning.palette)].join(':');
-        if (source !== frame.lines || activeIndex !== frame.currentLineIndex || signature !== nextSignature) {
+        if (source !== frame.lines || signature !== nextSignature) {
+          release();
+          source = frame.lines;
+          color = nextColor;
           signature = nextSignature;
-          rebuild(frame, tuning, nextColor, seed);
+          layout = compileLayout(frame.lines, seed, width, height, tuning);
+          syncWindow(frame, tuning);
+        } else if (activeIndex !== frame.currentLineIndex) {
+          syncWindow(frame, tuning);
         }
         if (activeIndex < 0 || !layout[activeIndex]) {
           root.visible = false;
           return { x: width / 2, y: height / 2, scale: 1, rotation: 0, glyphs: glyphs };
         }
         root.visible = true;
-        decor.visible = tuning.showDecor !== false && tuning.backgroundMode !== 'anime';
+        decor.visible = tuning.showDecor !== false && tuning.backgroundMode !== 'anime' && tuning.backgroundMode !== 'creative';
         var time = frame.playbackTime;
         var motion = FX.motionScale(tuning);
         var glyphStrength = FX.amount(tuning.typographyMotion, 1) * motion;
         var ink = parseInt(String((tuning.palette && tuning.palette.ink) || '#f4f4f5').slice(1), 16);
         entries.forEach(function (entry) {
           entry.entryDecor.visible = tuning.showDecor !== false;
-          entry.entryDecor.alpha = tuning.backgroundMode === 'anime' ? 0.35 : 1;
+          entry.entryDecor.alpha = tuning.backgroundMode === 'anime' || tuning.backgroundMode === 'creative' ? 0.35 : 1;
           var relative = entry.lineIndex - activeIndex;
           // 未唱到的站点按「距开唱的秒数」渐次铺路，唱过的退成暗色残影。
           var lead = Math.max(0.8, Math.min(4.5,
@@ -886,6 +949,7 @@
           var accent = entry.accent;
           accent.layer.visible = accentEnabled;
           if (accentEnabled) {
+            entry.prepareAccent();
             accent.particles.forEach(function (particle) {
               var d = particle.target.dataset;
               var arrivalTime = d.startTime + Math.min(0.12, (d.endTime - d.startTime) * 0.3);
@@ -939,7 +1003,7 @@
       destroy: function () {
         release();
         root.removeFromParent();
-        root.destroy({ children: true });
+        FX.destroyDisplayTree(root);
         source = null;
         layout = [];
       },
@@ -972,10 +1036,16 @@
     eyebrow.textContent = 'SONNET · 商籁';
     var hud = document.createElement('div');
     hud.className = 'fl-sonnet-hud';
+    // NEXT 预告行：画面左下与 HUD 对称的一行小字，预告下一句的前 18 字。
+    // 社论「up next」的印刷惯例 —— 让画面有「正在被读的一本书」的纵深，
+    // 而不是一句孤零零的字浮在黑底上。
+    var nextEl = document.createElement('div');
+    nextEl.className = 'fl-sonnet-next';
+    nextEl.hidden = true;
     var emptyEl = document.createElement('div');
     emptyEl.className = 'fl-empty';
     emptyEl.hidden = true;
-    root.append(eyebrow, hud, emptyEl);
+    root.append(eyebrow, hud, nextEl, emptyEl);
 
     // 寻句热区：主舞台模式盖当前行+后两行的排版包围盒；社论轨模式盖站点框。
     var hotspots = [0, 1, 2].map(function () {
@@ -993,7 +1063,8 @@
     var fontScale = 1, visible = false, eco = false, reduced = false;
     var motion = 0.65, reactivity = 1.35;
     var bgMode = 'stage', vignette = true;
-    var tuning = { shotFlow: 'auto', lyricLayout: 'phrases', phraseLength: 12, decor: true, accents: true };
+    var tuning = { shotFlow: 'auto', lyricLayout: 'phrases', phraseLength: 12, decor: true, accents: true,
+      halation: 0.5, atmosphere: true };
     var destroyed = false;
     var initStarted = false, initFailed = false;
     var renderedKey = '';
@@ -1007,7 +1078,7 @@
     }
 
     function engineTuning(frame) {
-      var imageMode = bgMode === 'anime';
+      var imageMode = bgMode === 'anime' || bgMode === 'creative';
       return {
         palette: { background: theme.backgroundColor, ink: theme.primaryColor,
           accent: theme.accentColor, secondary: theme.secondaryColor,
@@ -1018,19 +1089,23 @@
         shotFlow: tuning.shotFlow,
         lyricLayout: tuning.lyricLayout,
         phraseLength: tuning.phraseLength,
-        // 舞台「镜头动态」滑杆直接驱动商籁镜头强度（0–2）。
-        cameraIntensity: motion * 2,
+        // 舞台「镜头动态」滑杆直接驱动商籁镜头强度（0–2）；
+        // 副歌第 2+ 次到来按曲式层的 visit 抬一档（星诞「重复但升级」的 Pixi 出口）。
+        cameraIntensity: motion * 2
+          * FX.chorusLift(frame && frame.activeLine ? frame.activeLine.section : null),
         animationIntensity: frame && frame.reduced ? 0
           : (theme.animationIntensity === 'calm' ? 0.6 : theme.animationIntensity === 'chaotic' ? 1.6 : 1),
         performanceIntensity: reactivity,
         quality: eco ? 'energy-saving' : 'high',
         reducedMotion: reduced,
-        showBackground: !imageMode && (bgMode !== 'stage' || tuning.decor),
+        showBackground: !imageMode,
         guideLines: !imageMode && tuning.decor,
         showDecor: tuning.decor,
         accentEffects: !imageMode && tuning.accents,
         waitingOpacity: imageMode ? 0.55 : 0.42,
         postProcess: !imageMode,
+        halation: tuning.halation,
+        atmosphere: tuning.atmosphere,
         vignette: vignette && !imageMode ? 0.18 : 0,
         opticalImpact: 0.65,
         sceneTransitions: !imageMode,
@@ -1110,11 +1185,13 @@
     }
 
     var lastEmptyText = '';
+    var lastNextText = null;
     function syncEmpty(frame) {
-      var wantEmpty = !frame.activeLine;
+      var wantEmpty = initFailed || !frame.activeLine;
       emptyEl.hidden = !wantEmpty;
       if (!wantEmpty) { lastEmptyText = ''; return; }
-      var msg = frame.track ? '暂无歌词 · 让旋律继续' : '在声音里，发现另一片宇宙';
+      var msg = initFailed ? '图形引擎不可用 · 请切换其他歌词视觉'
+        : frame.track ? '暂无歌词 · 让旋律继续' : '在声音里，发现另一片宇宙';
       if (msg !== lastEmptyText) {
         lastEmptyText = msg;
         emptyEl.style.color = theme.secondaryColor;
@@ -1133,9 +1210,10 @@
         if (!initStarted && !initFailed) {
           initStarted = true;
           director.init().catch(function (err) {
+            if (destroyed) return;
             initFailed = true;
             console.warn('[stanza-sonnet] 图形引擎不可用：', err);
-            hud.textContent = '图形引擎不可用 · 请切换其他歌词视觉';
+            syncEmpty(f);
           });
         }
         return;
@@ -1155,8 +1233,20 @@
       var hudText = f.activeLine
         ? 'FRAME ' + ('0' + (f.currentLineIndex + 1)).slice(-2)
           + '  /  AUDIO ' + Math.round(U.clamp(f.audio.power, 0, 1) * 100) + '%'
+          + '  /  VOX ' + Math.round(U.clamp(f.audio.vocal, 0, 1) * 100) + '%'
         : '';
       if (hudText !== lastHudText) { hud.textContent = hudText; lastHudText = hudText; }
+      // NEXT 预告：有下一句且它不是紧邻的换行微句才显示。
+      var nextLine = f.activeLine ? (f.nextLines && f.nextLines[0]) : null;
+      var nextText = nextLine && nextLine.fullText && U.hasReadable(nextLine.fullText)
+        ? 'NEXT ▸ ' + U.graphemes(nextLine.fullText).slice(0, 18).join('')
+          + (U.graphemes(nextLine.fullText).length > 18 ? '…' : '')
+        : '';
+      if (nextText !== lastNextText) {
+        lastNextText = nextText;
+        nextEl.textContent = nextText;
+        nextEl.hidden = !nextText;
+      }
     }
 
     if (typeof ResizeObserver === 'function') {
@@ -1178,6 +1268,7 @@
         lastEmptyText = '';
         eyebrow.style.color = t.secondaryColor;
         hud.style.color = t.accentColor;
+        nextEl.style.color = t.secondaryColor;
       },
       setFontScale: function (v) {
         v = U.clamp(v, 0.7, 1.5);
@@ -1185,6 +1276,7 @@
         fontScale = v;
         renderedKey = '';
       },
+      rootEl: function () { return root; },
       setVisible: function (b) {
         visible = !!b;
         root.hidden = !visible;
@@ -1208,13 +1300,18 @@
             ? t.lyricLayout : 'phrases',
           phraseLength: Math.round(U.clamp(U.num(t.phraseLength, 12), 4, 24)),
           decor: t.decor !== false,
-          accents: t.accents !== false
+          accents: t.accents !== false,
+          halation: U.clamp(U.num(t.halation, 0.5), 0, 1),
+          atmosphere: t.atmosphere !== false
         };
-        if (next.shotFlow === tuning.shotFlow && next.lyricLayout === tuning.lyricLayout
-          && next.phraseLength === tuning.phraseLength && next.decor === tuning.decor
-          && next.accents === tuning.accents) return;
+        var rebuild = next.shotFlow !== tuning.shotFlow || next.lyricLayout !== tuning.lyricLayout
+          || next.phraseLength !== tuning.phraseLength;
+        if (!rebuild && next.decor === tuning.decor && next.accents === tuning.accents
+          && next.halation === tuning.halation && next.atmosphere === tuning.atmosphere) return;
         tuning = next;
-        renderedKey = '';
+        eyebrow.hidden = hud.hidden = !tuning.decor;
+        // 装饰/重音与光学设置只改变逐帧状态，保留当前歌词与已经上传的纹理。
+        if (rebuild) renderedKey = '';
       },
       // stage3d 全局滑杆/开关的旁路推送（与 setTuning 分开，来源不同）。
       setMotion: function (v) { motion = U.clamp(U.num(v, 0.65), 0, 1); },
@@ -1222,6 +1319,7 @@
       setBgMode: function (m) { bgMode = m; },
       setVignette: function (b) { vignette = !!b; },
       resize: function () { director.resize(); },
+      isReady: function () { return !destroyed && (initFailed || !!renderedKey); },
       getDebugSnapshot: function () { return director.getDebugSnapshot(); },
       destroy: function () {
         destroyed = true;

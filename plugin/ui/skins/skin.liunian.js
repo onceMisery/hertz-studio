@@ -46,8 +46,6 @@
   var inReflow = false; // reflow 重入保护
 
   var CAPSULE_KEY = 'vmusic.ln-capsule';
-  var HISTORY_KEY = 'vmusic.ln-search-history';
-  var HISTORY_MAX = 10;
   var keyHandler = null;
 
   // 搜索面板运行态。
@@ -172,7 +170,7 @@
     // 行1：唱片（变方封面）+ 曲目信息
     var row1 = make('div', 'bar-row1');
     relocate($('.disc-wrap', refs.stage), row1);
-    relocate(byId('bar-track'), row1);
+    relocate(byId('bar-summary'), row1);
     bar.insertBefore(row1, bar.firstChild);
 
     // 行2：进度（bar-progress 提到 bar-controls 之前；track 移走后 controls 在首）
@@ -191,7 +189,7 @@
 
   function setCapsule(compact, silent) {
     refs.bar.classList.toggle('ln-capsule', compact);
-    refs.capsuleBtn.textContent = compact ? '展开' : '收为胶囊';
+    refs.capsuleBtn.textContent = compact ? '展开' : '收起';
     refs.capsuleBtn.setAttribute('aria-expanded', String(!compact));
     refs.capsuleBtn.setAttribute('aria-label', compact ? '展开播放卡' : '收为播放胶囊');
     if (!silent) {
@@ -646,31 +644,25 @@
   }
 
   // ---------------------------- 搜索历史 -----------------------------------
+  // 存储与规则交给 `search-history.js`（唯一的 owner）：关键词历史属于搜索能力
+  // 本身，不属于这套皮肤。原先这里是 `vmusic.ln-search-history` 私有键，于是
+  // 顶栏与在线框敲的词进不来、换皮肤就看不见。下面四个函数只保留「流年怎么
+  // 渲染与何时记一笔」这一层。
 
   function readHistory() {
-    try {
-      var raw = localStorage.getItem(HISTORY_KEY);
-      var list = raw ? JSON.parse(raw) : [];
-      return Array.isArray(list) ? list : [];
-    } catch (e) { return []; }
-  }
-
-  function writeHistory(list) {
-    // 同其他 localStorage 写入：存不下就本次会话少一条历史，不影响搜索。
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(list)); } catch (e) { /* 见上 */ }
+    return window.HertzSearchHistory ? window.HertzSearchHistory.all() : [];
   }
 
   function pushHistory(q) {
-    q = (q || '').trim();
-    if (!q) return;
-    var list = readHistory().filter(function (x) { return x !== q; });
-    list.unshift(q);
-    writeHistory(list.slice(0, HISTORY_MAX));
+    if (!window.HertzSearchHistory) return;
+    var list = window.HertzSearchHistory.push(q);
+    // 空查询面板才是「历史」视图；已经有输入时不要抢走刚渲染的结果。
     if (!panel.q) renderHistory();
+    return list;
   }
 
   function removeHistory(q) {
-    writeHistory(readHistory().filter(function (x) { return x !== q; }));
+    if (window.HertzSearchHistory) window.HertzSearchHistory.remove(q);
     renderHistory();
   }
 
@@ -699,7 +691,7 @@
     clearAll.textContent = '清空';
     clearAll.hidden = !list.length;
     clearAll.addEventListener('click', function () {
-      writeHistory([]);
+      if (window.HertzSearchHistory) window.HertzSearchHistory.clear();
       renderHistory();
     });
     var chips = make('div', 'ln-sp-hist-chips', block);

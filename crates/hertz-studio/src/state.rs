@@ -63,16 +63,19 @@ pub enum WsEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         pct: Option<u8>,
     },
-    /// 节拍地图后台分析完成：前端仅当 track_id 仍是当前播放曲时拉取。
-    /// bpm 低置信为 None，字段整体不序列化。
+    /// 节拍分析就绪（后台任务完成）。`persisted=false` 是另一种状态：地图算出来
+    /// 了、这轮能用，但没写进磁盘缓存（重启或换一轮就得重算），前端据此把
+    /// 「这次有画面」和「以后也有」分开说。
     BeatmapReady {
         track_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         bpm: Option<f64>,
         beats_n: usize,
+        persisted: bool,
     },
-    /// 听歌打卡成功（网易云在线曲有效收听满 30s 已上报）。前端据此轻提示
-    /// 「已计入播放量」，其余情况保持安静。
+    /// 听歌打卡上报成功（网易云在线曲有效收听满 30s 已发出）。前端据此轻提示
+    /// 「已提交听歌记录」——这条只证明我们发出去了，不证明平台累计播放量已增加；
+    /// 其余情况保持安静。
     Scrobbled {
         track_id: String,
     },
@@ -81,14 +84,49 @@ pub enum WsEvent {
     SourceSwitched {
         /// 新的虚拟 id（`新源:平台id`），队列与元数据都已迁到它名下。
         track_id: String,
+        /// 这次换走的那一家（多跳接力时它是中间家，不是最初那家）。
         from_source: String,
         to_source: String,
         /// 目标音源的展示名（SOURCES 表 label），前端不必再反查清单。
         to_label: String,
         /// 原曲标题（接力候选与原曲同名，取原快照的写法展示）。
         title: String,
+        /// 被换掉那一项的虚拟 id：界面拿它把自己那份元数据迁到新 id 名下
+        /// （否则新 id 在前端没有 title/封面，队列行会退化成平台 id）。
+        from_track_id: String,
+        /// 用户**最初选中**的那一家与它的平台 id（F3 的出处身份）。与
+        /// `from_source` 分开是因为多跳接力里两者不同，而详情、收藏入口、
+        /// 「为什么这家放不了却由别家放」这些都要回答的是最初那一家。
+        origin_source: String,
+        origin_id: String,
+        origin_label: String,
     },
     LibraryChanged,
+    /// 在线音质自动降档：这一首在高档上失败过，它的运行时上限已收到下一档，
+    /// 同一进程内不再对它尝试更高的档。降档必须让用户看见——不然「无损变成
+    /// 320k」只表现为听着不太对，没人会去查是不是登录掉了或这首本来就没货。
+    QualityDowngraded {
+        track_id: String,
+        /// 展示用标题（在线元数据快照，缺失时退化为平台 id 尾段）。
+        title: String,
+        source: String,
+        /// 中文档位名（无损 / 高品 320k / …），前端不必再翻档位表。
+        from_label: String,
+        to_label: String,
+    },
+    /// F2 整单续载进度：服务端按页把集合（歌单）曲目补进当前队列。
+    /// `done` 是终态（平台页耗尽 / 达上限 / 整页重复），`error` 只是
+    /// 「这次没补上」——已准备的曲目不因一次补页失败而消失，下次切曲
+    /// 会自动再试。
+    CollectionLoad {
+        source: String,
+        id: String,
+        loaded: usize,
+        total: u64,
+        done: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -163,6 +201,18 @@ impl<V> BoundedMap<V> {
         self.map.remove(key).map(|(_, value)| value)
     }
 
+    /// 只读遍历（按写入序号排序，新→旧）。给状态面板这类诊断视图用：它要的正是
+    /// 「最近在忙哪几首」，而关键路径上的读取仍然走 `get`，不经过这里。
+    pub(crate) fn newest_first(&self) -> Vec<(&String, &V)> {
+        let mut out: Vec<(u64, (&String, &V))> = self
+            .map
+            .iter()
+            .map(|(k, (seq, v))| (*seq, (k, v)))
+            .collect();
+        out.sort_unstable_by_key(|(seq, _)| std::cmp::Reverse(*seq));
+        out.into_iter().map(|(_, kv)| kv).collect()
+    }
+
     /// 丢弃写入时间最早的一条。只在超限时调用：插入一次最多超一条。
     fn evict_oldest(&mut self) {
         let Some(oldest) = self
@@ -185,8 +235,79 @@ pub(crate) const ONLINE_META_CAP: usize = 8192;
 /// 节拍任务表上限（每格只有几十字节状态，节拍地图本体在磁盘上）。
 pub(crate) const STAGE_BEATS_CAP: usize = 8192;
 
+/// 同时跑的节拍分析数。2 = 「当前这首在算，上一首切走的那份也能收尾」，再多就
+/// 开始和正在解码的音频抢 CPU；一台机器上的音频解码只需要一份。
+pub(crate) const BEAT_ANALYZE_BUDGET: usize = 2;
+
+/// 一首的节拍分析最多试几次。到顶就放弃到进程结束：一首真放不出地图的文件不该
+/// 每次播放都重算几秒 FFT（参考实现同一条纪律，它给的也是三次）。
+pub(crate) const BEAT_ATTEMPTS_MAX: u8 = 3;
+
+/// 未落盘地图的保留条数（见 [`AppState::beat_volatile`]）。
+pub(crate) const BEAT_VOLATILE_CAP: usize = 8;
+
+/// 状态面板上「最近几条」的条数。再多就没法一眼读完 —— 这块是给人看后台在忙什么，
+/// 不是日志替代品（完整过程在 `playback.log` 里）。
+pub(crate) const BEAT_STATUS_RECENT: usize = 6;
+
+/// 缓存键 → 曲名的留档条数。只服务于状态面板的可读性，被淘汰的键在面板上退化成
+/// 短键名，不影响分析本身。
+pub(crate) const BEAT_LABEL_CAP: usize = 256;
+
 /// 接力坏流记忆上限：到顶就清空（整盘换队/成功提交也会清）。
 pub(crate) const RELAY_TRIED_CAP: usize = 64;
+
+/// 每轨运行时音质上限的条数上限。一首只占几十字节，取值远大于一次会话放过的
+/// 在线曲数；被淘汰的那首等于忘掉它的失败证据，会重新试一次高档。
+pub(crate) const QUALITY_CEILING_CAP: usize = 4096;
+
+/// 曲源接力的尝试记忆。两份键各有各的用处，都是到顶整表清（不LRU：这条链
+/// 只在一次故障恢复期间活着，谁先被忘掉都不影响正确性，只影响要不要多试一次）。
+///
+/// - `ids`：这台曲目的虚拟 id。挡住「换源搜回来还是同一个坏流」的原地回环。
+/// - `providers`：`曲目身份键|音源`。**按身份而不是按 id 去重**：同一平台把同一
+///   首歌以两个 id 再列一遍（重编码条目、翻唱条目）不该算第二次机会，而换一家
+///   音源试同一首仍然是正当的下一档 —— 所以身份键必须带上音源。只按 id 去重的
+///   话「同一家第二份同名条目」会被当成新候选，接力链能在一个平台上白等好几轮
+///   数秒的取流。
+#[derive(Clone, Default)]
+pub(crate) struct RelayMemory {
+    ids: Vec<String>,
+    providers: Vec<String>,
+}
+
+impl RelayMemory {
+    /// 记一次尝试。`provider_key` 为 None（拿不到可用身份）时只记 id。
+    pub(crate) fn note(&mut self, id: &str, provider_key: Option<String>) {
+        if !self.ids.iter().any(|x| x == id) {
+            if self.ids.len() >= RELAY_TRIED_CAP {
+                self.ids.clear();
+            }
+            self.ids.push(id.to_string());
+        }
+        let Some(key) = provider_key else { return };
+        if self.providers.contains(&key) {
+            return;
+        }
+        if self.providers.len() >= RELAY_TRIED_CAP {
+            self.providers.clear();
+        }
+        self.providers.push(key);
+    }
+
+    pub(crate) fn holds_id(&self, id: &str) -> bool {
+        self.ids.iter().any(|x| x == id)
+    }
+
+    pub(crate) fn holds_provider(&self, key: &str) -> bool {
+        self.providers.iter().any(|x| x == key)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.ids.clear();
+        self.providers.clear();
+    }
+}
 
 /// 在线曲目元数据快照（仅在内存，与队列同生命周期）。
 ///
@@ -206,6 +327,60 @@ pub struct OnlineMetaSnap {
     /// 请求体照旧能用。
     pub rg_gain_db: Option<f64>,
     pub rg_peak: Option<f64>,
+    /// 用户当初选中的**出处**（哪家平台的哪个 id）。`None` = 出处就是队列里这一项
+    /// 自己；只有曲源接力换过家才会有值，且换第二次仍记第一家（用户选的从来不是
+    /// 「上一家」，是最初那一家）。
+    ///
+    /// 为什么要单独留这一份：换源之后队列项、缓存键、音质、播放历史、打卡都跟着
+    /// **实际供音那家**走，于是「用户明明点的是网易云那一首」这件事在系统里再无
+    /// 处可查。出处与供音必须分开放（借鉴清单 §8 F3）——本结构只负责**保留出处**，
+    /// 业务策略（收藏落到哪家、换源后该不该按原平台打卡）另议，不在这里顺带改。
+    ///
+    /// `Option` 字段 serde 缺省即 `None`，所以旧客户端的 /player/load 请求体不带
+    /// 这个字段也照样能读（那条兼容性由 `snap_without_origin_field_still_deserializes`
+    /// 钉住，而不是靠这里写 `#[serde(default)]` —— 那个属性对 Option 是冗余的）。
+    pub origin: Option<OnlineOrigin>,
+}
+
+/// 队列项的出处身份。字段与队列项自己的 `(source, ref_id)` 同形，调用方不必再拆
+/// 虚拟 id；`label` 是当时那家的展示名，省得前端反查清单。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct OnlineOrigin {
+    pub source: String,
+    pub id: String,
+    pub label: Option<String>,
+}
+
+impl OnlineMetaSnap {
+    /// 这首的出处：没有记录就是它自己。
+    pub(crate) fn origin_of(&self, source: &str, id: &str) -> (String, String, Option<String>) {
+        match &self.origin {
+            Some(o) => (o.source.clone(), o.id.clone(), o.label.clone()),
+            None => (source.to_string(), id.to_string(), None),
+        }
+    }
+
+    /// 是否被换过源（出处与当前供音那家不是同一家）。
+    pub(crate) fn relayed(&self, source: &str) -> bool {
+        self.origin
+            .as_ref()
+            .map(|o| o.source != source)
+            .unwrap_or(false)
+    }
+
+    /// 换源时把出处补齐：**已经有出处就原样带着**。多跳接力
+    /// （网易云 → QQ → 酷狗）记的必须还是网易云 —— 用户点的是那一家，不是
+    /// 「上一家」。中间跳只在诊断日志里留痕。
+    pub(crate) fn ensure_origin(&mut self, source: &str, id: &str, label: Option<String>) {
+        if self.origin.is_some() {
+            return;
+        }
+        self.origin = Some(OnlineOrigin {
+            source: source.to_string(),
+            id: id.to_string(),
+            label,
+        });
+    }
 }
 
 /// 一次播放尝试的结果：是否真正提交（没被更新代际顶掉）与平台实际给到的
@@ -503,6 +678,9 @@ pub struct AppState {
     pub cursor: Mutex<Option<usize>>,
     pub(crate) radio: Mutex<crate::radio::Radio>,
     pub(crate) radio_fetch: Mutex<()>,
+    /// F2 整单续载：活跃的集合补页意图与会话计数，owner 在 [`crate::collection`]。
+    pub(crate) playlist_load: Mutex<crate::collection::PlaylistLoad>,
+    pub(crate) playlist_fetch: Mutex<()>,
     pub scan: Arc<Mutex<ScanProgress>>,
     pub scan_cancel: Arc<AtomicBool>,
     /// 二维码登录会话（票 → 平台握手数据），只活在内存里、TTL 3 分钟。
@@ -548,8 +726,26 @@ pub struct AppState {
     pub(crate) skip_walk_from: Mutex<Option<usize>>,
     /// 逐源音质偏好（启动时从 settings 装载、POST 热切换即时更新）。
     pub(crate) quality: Mutex<crate::online::quality::QualityPrefs>,
+    /// 每轨的运行时音质上限（在线曲虚拟 id → 已证实可得的最高档）。只降不升，
+    /// 键含音源所以换源救回来的那首不受旧源的上限影响。偏好是用户的意图，
+    /// 这张表只是这首曲子在本进程里的证据。
+    pub(crate) quality_caps: Mutex<BoundedMap<crate::online::quality::Quality>>,
     /// 节拍分析幂等表：缓存键 → 任务态。
     pub(crate) stage_beats: Mutex<BoundedMap<crate::stage_beats::TaskState>>,
+    /// 节拍分析的总并发预算：一首的 FFT 是几秒的满核运算，快速连切歌时若每首
+    /// 都立刻开跑，抢的是正在解码那首歌的 CPU（听感是声音发卡，而画面一切正常）。
+    /// 额度只有这么一处，用完之后提交路径直接推迟、GET 路径等一手。
+    pub(crate) beat_slots: Arc<tokio::sync::Semaphore>,
+    /// 「分析出来了但没写进磁盘」的地图（缓存键 → 地图）。这是刻意保留的第二
+    /// 种状态，不是失败：这轮播放能用，重启不能。表本身有界（
+    /// [`BEAT_VOLATILE_CAP`]），落盘长期失败的机器最多占这几首的内存。
+    pub(crate) beat_volatile: Mutex<BoundedMap<std::sync::Arc<vmusic_beats::BeatMap>>>,
+    /// 缓存键 → 曲名。只为「后台节拍分析」那行状态面板服务：任务表里存的是 sha1
+    /// 键，人读不懂；把请求时的标题留一份，才能说清「在算的是哪一首」。
+    pub(crate) beat_labels: Mutex<BoundedMap<String>>,
+    /// 因额度用满被推迟的分析次数。让路这件事必须是**可数的**，否则「为什么这首歌
+    /// 没有镜头」只能靠猜。
+    pub(crate) beat_deferrals: std::sync::atomic::AtomicUsize,
     /// 启动后由 main 注入 Weak：on_track_committed 只有 &self，detach
     /// 'static 任务时凭它拿回 Arc（不改 play_index/step 的签名链）。
     pub(crate) weak_self: std::sync::OnceLock<std::sync::Weak<AppState>>,
@@ -560,9 +756,9 @@ pub struct AppState {
     pub(crate) listen: Mutex<ListenTracker>,
     /// 打卡上报频控闸门（见 [`ScrobbleGate`]）：发送侧的最后一道防线。
     pub(crate) scrobble: ScrobbleGate,
-    /// 曲源接力链中已知放不了的虚拟 id：接力候选排除它们，防止「换源搜
-    /// 回来还是同一个坏流」来回横跳。成功提交或整盘换队即清空。
-    pub(crate) relay_tried: Mutex<Vec<String>>,
+    /// 曲源接力链的已知尝试（见 [`RelayMemory`]）：虚拟 id 防回环，
+    /// `身份|音源` 防同一平台换个 id 再试一遍。成功提交或整盘换队即清空。
+    pub(crate) relay_tried: Mutex<RelayMemory>,
     /// OBS 浮层的歌词记忆化：按 track_id 单槽缓存「源解析后的原始文档」
     /// （用户/全局偏移叠加之前）。浮层页 500ms 轮询，没有缓存的话在线曲
     /// 等于每秒打两次上游歌词接口、本地曲每次重开音频文件读标签。换曲
@@ -666,6 +862,112 @@ impl AppState {
         Some((path, Quality::parse(tier).unwrap_or(want)))
     }
 
+    /// 队列里这一项的**出处**（F3）。第二个返回值 = 它是否被接力换过家。
+    ///
+    /// 两个播放门面都从这里取：刷新或换端之后，前端自己的暂存可能已经没有这一项，
+    /// 而服务端的队列快照才是权威 —— 说不清「点的是谁、现在谁在放」就等于把
+    /// 换源这件事藏起来。没有快照（本地曲、或内存已被淘汰）返回 `None`，调用方
+    /// 按「不是换源来的」处理，不许猜一个。
+    pub(crate) async fn online_origin(&self, track_id: &str) -> Option<(OnlineOrigin, bool)> {
+        let snap = self.online_meta.lock().await.get(track_id).cloned()?;
+        let (source, id) = crate::online::split_virtual_id(track_id)?;
+        let (o_source, o_id, o_label) = snap.origin_of(&source, &id);
+        Some((
+            OnlineOrigin {
+                source: o_source,
+                id: o_id,
+                label: o_label,
+            },
+            snap.relayed(&source),
+        ))
+    }
+
+    /// 这一首本次该瞄哪一档：逐源偏好夹进该曲的运行时音质上限。
+    ///
+    /// 播放、预取、解码失败收口三处共用它。各算各的话，预取会绕开上限去要那个
+    /// 刚失败过的高档（白跑一次数秒的取流），解码收口会按偏好档记错失败档——
+    /// 两者都可能把刚退下来的一格又顶回去。
+    pub(crate) async fn online_quality_for(
+        &self,
+        source: &str,
+        track_id: &str,
+    ) -> crate::online::quality::Quality {
+        let want = {
+            let prefs = self.quality.lock().await;
+            crate::online::quality::get(&prefs, source)
+        };
+        let ceiling = self.quality_caps.lock().await.get(track_id).copied();
+        crate::online::quality::clamp_request(want, ceiling)
+    }
+
+    /// 哪些失败算「这一档给不出来」，因而值得收紧该曲的音质上限。
+    ///
+    /// 不收的三类各有各的理由：上游整体超时/网络抖动——换档救不了网络，把一次
+    /// 抖动记成永久上限会让这首歌在整个会话里再也拿不到高档；曲目下架
+    /// （not_found）——退到哪一档都放不了，该走接力/跳曲；需登录
+    /// （auth_required）——那是**账号**级的证据，owner 是登录流程与 A6 的会话
+    /// 三态，记到每首歌头上会让整批 VIP 曲在一次未登录尝试后被永久压低。参考
+    /// 项目同一条规则：login_required 直接不进降档重试。
+    fn ceiling_eligible(code: &str) -> bool {
+        matches!(
+            code,
+            "vip_required" | "upstream_rejected" | "internal" | "decode_stalled"
+        )
+    }
+
+    /// 记一次「这一档放不出来」：把这首的运行时上限退到下一档，并让用户看见。
+    /// 每退一格提示一次（连续三次失败就是三条，用户看得见音质在一格格掉）；
+    /// 已在最低档时整表不动、也不再重复提示
+    /// （见 [`crate::online::quality::lower_ceiling`]）。
+    ///
+    /// 失败档位由 [`Self::online_quality_for`] 反推而非调用方传入：所有在线失败
+    /// 都汇到 [`Self::online_failed`]，那里只剩错误、没有档位，重算一次既不用改
+    /// 七个调用点的签名，也和刚才那次尝试用的是同一个算法。
+    async fn note_quality_failure(&self, track_id: &str, code: &str) {
+        if !Self::ceiling_eligible(code) {
+            return;
+        }
+        let Some((source, _)) = crate::online::split_virtual_id(track_id) else {
+            return;
+        };
+        let failed_at = self.online_quality_for(&source, track_id).await;
+        let lowered = {
+            let mut caps = self.quality_caps.lock().await;
+            match crate::online::quality::lower_ceiling(caps.get(track_id).copied(), failed_at) {
+                Some(ceiling) => {
+                    caps.insert(track_id.to_string(), ceiling);
+                    Some(ceiling)
+                }
+                None => None,
+            }
+        };
+        let Some(ceiling) = lowered else {
+            return;
+        };
+        crate::diaglog!(
+            "quality.cap",
+            track = track_id,
+            source = source,
+            code = code,
+            from = failed_at.as_str(),
+            to = ceiling.as_str()
+        );
+        // 标题优先入队时的元数据快照，缺失退化到平台 id（与跳曲提示同一取法）。
+        let title = {
+            let meta = self.online_meta.lock().await;
+            meta.get(track_id)
+                .map(|m| m.title.clone())
+                .unwrap_or_else(|| track_title(track_id))
+        };
+        self.publish(WsEvent::QualityDowngraded {
+            track_id: track_id.to_string(),
+            title,
+            source,
+            from_label: failed_at.label().to_string(),
+            to_label: ceiling.label().to_string(),
+        });
+    }
+
     /// 在线曲在当前档位下应下的增益（已含防削波），与本地曲同一条规则。
     ///
     /// current_loudness（对外汇报「用了多少增益」）与播放落地（apply_online_loudness）
@@ -700,6 +1002,12 @@ impl AppState {
         if let Some(old) = map.get(&id) {
             snap.rg_gain_db = old.rg_gain_db.or(snap.rg_gain_db);
             snap.rg_peak = snap.rg_peak.or(old.rg_peak);
+            // 出处同理：新快照没带 origin 不等于「没换过源」，可能是前端自己的
+            // 暂存里没有这一项（刷新之后常见）。已经知道的事不能被一次普通的
+            // 入队/注入忘掉。
+            if snap.origin.is_none() {
+                snap.origin = old.origin.clone();
+            }
         }
         map.insert(id, snap);
     }
@@ -775,6 +1083,13 @@ impl AppState {
             radio.session = radio.session.wrapping_add(1);
             radio.initial_generation = None;
             radio.error = None;
+        }
+        // 整盘换队同样作废 F2 的整单续载意图：新队列来自新的播放意图，
+        // 旧歌单的补页任务不许再往里追加（F2 验收线：旧意图不能覆盖新队列）。
+        {
+            let mut pl = self.playlist_load.lock().await;
+            pl.session = pl.session.wrapping_add(1);
+            pl.active = None;
         }
         let prev_queue = self.queue.lock().await.clone();
         let prev_cursor = *self.cursor.lock().await;
@@ -1176,12 +1491,13 @@ impl AppState {
         trigger: PlayTrigger,
     ) -> Result<PlayOutcome, vmusic_core::CoreError> {
         let dir = self.online_cache_dir();
-        // 读偏好只在块作用域短持锁：tokio Mutex 不能跨后面的网络 await 持有。
-        let quality = {
-            let prefs = self.quality.lock().await;
-            crate::online::quality::get(&prefs, &source)
-        };
-        let key = crate::online::cache::cache_key(&source, &id, quality.as_str());
+        // 档位 = 逐源偏好夹进这首的运行时上限（见 online_quality_for）。上限只
+        // 由这一首自己的失败产生，所以「按第二次重试」不会重走同一档必然失败
+        // 的取流；want 字段带的就是夹后的档，排查时看 diaglog 不必再猜。
+        // mut：就地降档重试（下方 stream.fail 分支）会把这两者换到下一档，
+        // 下载与缓存必须落在实测档位的键下。
+        let mut quality = self.online_quality_for(&source, &track_id).await;
+        let mut key = crate::online::cache::cache_key(&source, &id, quality.as_str());
         crate::diaglog!(
             "play.online",
             idx = index,
@@ -1296,9 +1612,16 @@ impl AppState {
             let ctx = crate::online::Ctx {
                 db: self.db.clone(),
             };
-            let info =
+            // B4：同一次播放里就地降档重试一次。第一跳失败且失败码在
+            // ceiling_eligible 码表里时，先记档（QualityDowngraded 提示随之发
+            // 出），上限真的下移一格才对同一音源再取一次流——用户体感是「降档
+            // 秒开」而不是「又卡一下再失败」。relay 与跳曲的裁量仍全部归
+            // online_failed，这里只省掉「明知高档给不出还硬撞一次」的等待；
+            // 网络/账号类失败换档救不了，照旧直落 online_failed。
+            let mut retried_lower = false;
+            let info = loop {
                 match crate::online::stream(&ctx, &source, &id, None, Some(quality.bps())).await {
-                    Ok(v) => v,
+                    Ok(v) => break v,
                     Err(e) => {
                         crate::diaglog!(
                             "stream.fail",
@@ -1306,8 +1629,29 @@ impl AppState {
                             gen = gen,
                             source = source,
                             code = e.code,
-                            reason = e.message
+                            reason = e.message,
+                            attempt = if retried_lower { 2 } else { 1 }
                         );
+                        let before = quality;
+                        self.note_quality_failure(&track_id, e.code).await;
+                        let lowered = self.online_quality_for(&source, &track_id).await;
+                        if !retried_lower
+                            && Self::ceiling_eligible(e.code)
+                            && lowered.rank() < before.rank()
+                        {
+                            retried_lower = true;
+                            quality = lowered;
+                            key = crate::online::cache::cache_key(&source, &id, quality.as_str());
+                            crate::diaglog!(
+                                "stream.retry_lower",
+                                idx = index,
+                                gen = gen,
+                                source = source,
+                                from = before.as_str(),
+                                to = quality.as_str()
+                            );
+                            continue;
+                        }
                         self.set_buffering(false, None).await;
                         return self
                             .online_failed(
@@ -1320,7 +1664,8 @@ impl AppState {
                             )
                             .await;
                     }
-                };
+                }
+            };
             let actual = crate::online::quality::from_bitrate(info.bitrate);
             // 地址只记 host+path：query 里是签名与临时 token，而这份文件要发给
             // 开发者。域名足以认出 CDN，具体参数开发者查不到也不该查。
@@ -1835,7 +2180,11 @@ impl AppState {
     pub(crate) fn post_commit_background(self: &Arc<Self>) {
         let s = self.clone();
         tokio::spawn(async move {
-            let _ = tokio::join!(s.radio_refill(false), s.spawn_prefetch());
+            let _ = tokio::join!(
+                s.radio_refill(false),
+                s.playlist_refill(false),
+                s.spawn_prefetch()
+            );
             // 显式保护当前播放曲（前缀 + 可能的 legacy 全名），避免它在容量
             // 回收时被删掉——「最新文件始终保留」只在同一次回收内成立，跨次
             // 回收后当前曲可能已不是最新。
@@ -1929,10 +2278,9 @@ impl AppState {
         };
         // 时长是码率诚实性校验与实测档位的分母，缺了就跳过校验（不猜）。
         let duration_ms = self.online_duration_ms(&vid).await;
-        let quality = {
-            let prefs = self.quality.lock().await;
-            crate::online::quality::get(&prefs, &source)
-        };
+        // 预取与播放同一只夹上限的档位：绕开上限预热，等于把刚失败过的高档
+        // 请求原样再发一遍，还要白花一份带宽。
+        let quality = self.online_quality_for(&source, &vid).await;
         let key = crate::online::cache::cache_key(&source, &id, quality.as_str());
         if self.downloads.lock().await.contains_key(&key) {
             return;
@@ -2025,7 +2373,7 @@ impl AppState {
         if !enabled {
             return false;
         }
-        let Some(failed_source) = crate::online::split_virtual_id(&track_id).map(|(s, _)| s) else {
+        let Some((failed_source, failed_id)) = crate::online::split_virtual_id(&track_id) else {
             return false;
         };
         // 匹配输入只认入队快照：重启后从歌单直播（无快照）宁可放弃接力，
@@ -2034,16 +2382,11 @@ impl AppState {
             Some(m) if !m.title.trim().is_empty() => m,
             _ => return false,
         };
-        // 已知坏流先登记：候选排除它自己（虚拟 id 形态），也防接力链回头。
+        // 已知坏流先登记：id 防原地回头，`身份|音源` 防同平台换 id 再试一遍。
+        let identity = relay_identity(&meta.title, meta.artist.as_deref());
         {
             let mut tried = self.relay_tried.lock().await;
-            if !tried.contains(&track_id) {
-                // 上限兜底：极端连环失败下记忆不许无限增长。
-                if tried.len() >= RELAY_TRIED_CAP {
-                    tried.clear();
-                }
-                tried.push(track_id.clone());
-            }
+            tried.note(&track_id, Some(format!("{identity}|{failed_source}")));
         }
         let query = match meta.artist.as_deref() {
             Some(a) if !a.trim().is_empty() => format!("{} {}", meta.title, a),
@@ -2071,27 +2414,10 @@ impl AppState {
                 return false;
             }
         };
-        let tried = self.relay_tried.lock().await.clone();
-        let mut best: Option<(u32, crate::online::OnlineTrack)> = None;
-        for page in &agg.results {
-            if page.source == failed_source {
-                continue;
-            }
-            for t in &page.tracks {
-                let vid = crate::online::virtual_id(&page.source, &t.id);
-                if tried.contains(&vid) {
-                    continue;
-                }
-                if let Some(score) =
-                    relay_score(t, &meta.title, meta.artist.as_deref(), meta.duration_ms)
-                {
-                    if best.as_ref().is_none_or(|(s, _)| score > *s) {
-                        best = Some((score, t.clone()));
-                    }
-                }
-            }
-        }
-        let Some((score, cand)) = best else {
+        let memory = self.relay_tried.lock().await.clone();
+        let Some((score, cand)) =
+            pick_relay_candidate(&agg.results, &memory, &failed_source, &meta)
+        else {
             crate::diaglog!("relay.miss", idx = index, gen = gen, title = meta.title);
             self.set_buffering(false, None).await;
             return false;
@@ -2122,8 +2448,9 @@ impl AppState {
             queue[index] = new_id.clone();
         }
         // 元数据迁到新虚拟 id 名下：title/artist/album/cover 保留原快照写法
-        //（同一首歌，界面不应跳变），时长用候选的实际值校正。
-        {
+        //（同一首歌，界面不应跳变），时长用候选的实际值校正。块表达式的值就是
+        // 这首的出处，稍后要随事件发给界面。
+        let origin: Option<OnlineOrigin> = {
             let mut map = self.online_meta.lock().await;
             let mut snap = map.remove(&track_id).unwrap_or_else(|| OnlineMetaSnap {
                 title: cand.title.clone(),
@@ -2134,17 +2461,27 @@ impl AppState {
                 // 接力候选的元数据里没有响度（要等新源取流），留空。
                 rg_gain_db: None,
                 rg_peak: None,
+                // 下面立刻补上出处，这里 None 只是结构的初值。
+                origin: None,
             });
             if cand.duration_ms > 0 {
                 snap.duration_ms = Some(cand.duration_ms);
             }
+            // 出处只记**最初那一家**（见 ensure_origin）。
+            snap.ensure_origin(
+                &failed_source,
+                &failed_id,
+                crate::online::find(&failed_source).map(|s| s.label.to_string()),
+            );
             // 响度标签属于「上一家音源的那份母带」，换源后不再适用：清掉，
             // 等新源第一次取流时按它的 gain/peak 重新填。不清就会把别家母带的
             // 增益套到这份音频上（缓存命中那条路尤其明显：它不会再打取流接口）。
             snap.rg_gain_db = None;
             snap.rg_peak = None;
+            let origin = snap.origin.clone();
             map.insert(new_id.clone(), snap);
-        }
+            origin
+        };
         drop(commit);
         // 换源续播：接力链再失败会重新进 online_failed，relay_tried 已把旧
         // id 登记在案，候选池单调缩小直到穷尽，无死循环。成功后新一轮播放
@@ -2169,6 +2506,22 @@ impl AppState {
                     .unwrap_or("其他音源")
                     .to_string(),
                 title: meta.title,
+                from_track_id: track_id.clone(),
+                // origin 在上面那个迁移块里必定被写过（is_none 就补），这里拿不到
+                // 只可能是那条路径没走到；退回「就是失败那家」，绝不留空字段。
+                origin_source: origin
+                    .as_ref()
+                    .map(|o| o.source.clone())
+                    .unwrap_or_else(|| failed_source.clone()),
+                origin_id: origin
+                    .as_ref()
+                    .map(|o| o.id.clone())
+                    .unwrap_or_else(|| failed_id.clone()),
+                origin_label: origin
+                    .as_ref()
+                    .and_then(|o| o.label.clone())
+                    .or_else(|| crate::online::find(&failed_source).map(|s| s.label.to_string()))
+                    .unwrap_or_default(),
             });
             if let Some(arc) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
                 arc.post_commit_background();
@@ -2240,6 +2593,12 @@ impl AppState {
             });
         }
         *self.cursor.lock().await = prev_cursor;
+
+        // B4 播放失败即降档：这首在这一档给不出来，上限收到下一档，之后同一
+        // 进程里不再对它试更高的档。放在接力之后、跳曲之前——接力成功时用户
+        // 听到的是另一家音源的同一首，这时补一句「已降到 320k」是自相矛盾的
+        // 假话；放在顶代际复核之后，是因为用户切走那一刀不该被当成曲子的判决。
+        self.note_quality_failure(&track_id, e.code).await;
 
         if let Some(delta) = trigger.skip_direction(e.code) {
             let n = self.auto_failures.fetch_add(1, Ordering::Relaxed) + 1;
@@ -2361,10 +2720,10 @@ impl AppState {
         }
 
         if let Some((source, id)) = crate::online::split_virtual_id(&track_id) {
-            let quality = {
-                let prefs = self.quality.lock().await;
-                crate::online::quality::get(&prefs, &source)
-            };
+            // 解码线程半路夭夭是「这一档的字节放不了」最强的证据（高档文件才
+            // 撞得上的解码器/容器问题），所以这里也记上限。档位同样走
+            // online_quality_for：正在放的这份就是它算出来的那一档。
+            let quality = self.online_quality_for(&source, &track_id).await;
             let key = crate::online::cache::cache_key(&source, &id, quality.as_str());
             // 失败下载随条目一并 cancel（删 .part），避免它继续落坏缓存。
             if let Some(entry) = self.downloads.lock().await.remove(&key) {
@@ -2377,6 +2736,9 @@ impl AppState {
                     .map(|m| m.title.clone())
                     .unwrap_or_else(|| track_title(&track_id))
             };
+            // 播放中断也算「这一档放不出来」：先记上限，再决定跳不跳。用户之后
+            // 手动重播或列表循环回到这首时，不会再撞同一档、再断一次。
+            self.note_quality_failure(&track_id, "decode_stalled").await;
             let n = self.auto_failures.fetch_add(1, Ordering::Relaxed) + 1;
             crate::diaglog!(
                 "decode.fail",
@@ -2495,6 +2857,7 @@ impl AppState {
         };
         if delta > 0 && at_tail {
             let _ = self.radio_refill(false).await;
+            let _ = self.playlist_refill(false).await;
         }
         let commit = self.play_commit.lock().await;
         if self.play_generation.load(Ordering::Relaxed) != before_refill {
@@ -2595,8 +2958,61 @@ fn relay_artist_keys(s: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// 接力候选评分。标题归一化相等是门槛（不等直接出局）；歌手交集与
-/// 时长容差加分；VIP 候选降权不排除（大概率同样放不了，但取流会如实
+/// 接力用的曲目身份键：`归一化标题|排序后的歌手集`。刻意不含时长——同一首歌的
+/// 不同版本时长本就不同，把它们算成两首就会放行重复尝试；歌手缺省时键退化成
+/// 只有标题，此时与 [`relay_score`] 一样保守（宁漏勿错）。
+fn relay_identity(title: &str, artist: Option<&str>) -> String {
+    let mut parts: Vec<String> = artist
+        .map(relay_artist_keys)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    parts.sort();
+    format!("{}|{}", normalize_relay_text(title), parts.join(","))
+}
+
+/// 从聚合搜索结果里挑接力候选。
+///
+/// 抽成纯函数是因为这条链的价值全在去重语义上——「同一首歌换一家音源仍算一次
+/// 机会，在同一平台换个 id 不算」只有把网络那层剥掉才断言得动（不然测试要先有
+/// 一个会失败的平台）。记忆与失败源都作参数传入，函数不碰任何锁。
+fn pick_relay_candidate(
+    pages: &[crate::online::SearchPage],
+    memory: &RelayMemory,
+    failed_source: &str,
+    meta: &OnlineMetaSnap,
+) -> Option<(u32, crate::online::OnlineTrack)> {
+    let mut best: Option<(u32, crate::online::OnlineTrack)> = None;
+    for page in pages {
+        if page.source == failed_source {
+            continue;
+        }
+        for t in &page.tracks {
+            let vid = crate::online::virtual_id(&page.source, &t.id);
+            if memory.holds_id(&vid) {
+                continue;
+            }
+            // 同一身份在这一家已经试过了：换个 id 的同名条目不算第二次机会。
+            if memory.holds_provider(&format!(
+                "{}|{}",
+                relay_identity(&t.title, Some(&t.artist)),
+                page.source
+            )) {
+                continue;
+            }
+            if let Some(score) =
+                relay_score(t, &meta.title, meta.artist.as_deref(), meta.duration_ms)
+            {
+                if best.as_ref().is_none_or(|(s, _)| score > *s) {
+                    best = Some((score, t.clone()));
+                }
+            }
+        }
+    }
+    best
+}
+
+/// 接力候选评分。标题归一化相等是门槛（不等直接出局）；歌手交集与/// 时长容差加分；VIP 候选降权不排除（大概率同样放不了，但取流会如实
 /// 报错，交给接力链的既有失败处置）。返回 None = 不够格当候选。
 fn relay_score(
     track: &crate::online::OnlineTrack,
@@ -2835,6 +3251,8 @@ pub(crate) mod tests {
             cursor: Default::default(),
             radio: Default::default(),
             radio_fetch: Default::default(),
+            playlist_load: Default::default(),
+            playlist_fetch: Default::default(),
             scan: Default::default(),
             scan_cancel: Default::default(),
             qr: crate::online::qr::Registry::new(),
@@ -2858,7 +3276,12 @@ pub(crate) mod tests {
             auto_failures: Default::default(),
             skip_walk_from: Default::default(),
             quality: Default::default(),
+            quality_caps: Mutex::new(BoundedMap::new(QUALITY_CEILING_CAP)),
             stage_beats: Mutex::new(BoundedMap::new(STAGE_BEATS_CAP)),
+            beat_slots: Arc::new(tokio::sync::Semaphore::new(BEAT_ANALYZE_BUDGET)),
+            beat_volatile: Mutex::new(BoundedMap::new(BEAT_VOLATILE_CAP)),
+            beat_labels: Mutex::new(BoundedMap::new(BEAT_LABEL_CAP)),
+            beat_deferrals: std::sync::atomic::AtomicUsize::new(0),
             weak_self: Default::default(),
             pending_restore_seek: Default::default(),
             overlay_lyric: Default::default(),
@@ -3101,6 +3524,161 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn relay_memory_collapses_the_same_identity_on_one_source() {
+        // 身份键：同一首歌的不同写法（标点、空白、分隔符、歌手顺序）归到同一个键。
+        assert_eq!(
+            relay_identity("稻香", Some("周杰伦")),
+            relay_identity(" 稻 香！", Some("周杰伦")),
+            "标题的空白与标点不该造出第二个键"
+        );
+        assert_eq!(
+            relay_identity("稻香", Some("A、B")),
+            relay_identity("稻香", Some("B&A")),
+            "歌手按集合排序，顺序不该造出第二个键"
+        );
+        assert_ne!(
+            relay_identity("稻香", Some("周杰伦")),
+            relay_identity("稻香", Some("其它人")),
+            "同名不同人不是同一首，不许被去重误伤"
+        );
+        assert_ne!(
+            relay_identity("稻香", Some("周杰伦")),
+            relay_identity("稻香", Some("Jay Chou")),
+            "跨语种写法归不到一起是已知边界：同一首仍可能被两家各试一次，\
+             但绝不会在同一家被重复试"
+        );
+
+        // 记忆本身：同一身份在同一平台只登记一次，换平台仍是新键。
+        let mut mem = RelayMemory::default();
+        let key = |src: &str| format!("{}|{}", relay_identity("稻香", Some("周杰伦")), src);
+        mem.note("netease:1", Some(key("netease")));
+        mem.note("netease:1", Some(key("netease")));
+        assert_eq!(mem.ids.len(), 1, "重复登记不涨表");
+        assert_eq!(mem.providers.len(), 1, "同身份同平台只算一次尝试");
+        assert!(mem.holds_provider(&key("netease")));
+        assert!(
+            !mem.holds_provider(&key("qq")),
+            "换一家音源必须是新的尝试机会"
+        );
+        mem.note("netease:2", Some(key("netease")));
+        assert_eq!(
+            mem.providers.len(),
+            1,
+            "同平台换个 id 的同名条目也不增加机会"
+        );
+        assert_eq!(mem.ids.len(), 2, "id 那一份仍然逐条记着，防原地回头");
+
+        // 拿不到身份时只记 id，不许把空键当成「什么都试过」。
+        let mut bare = RelayMemory::default();
+        bare.note("qq:9", None);
+        assert_eq!(bare.providers.len(), 0);
+        assert!(bare.holds_id("qq:9"));
+
+        let mut capped = RelayMemory::default();
+        for i in 0..(RELAY_TRIED_CAP + 5) {
+            capped.note(&format!("qq:{i}"), Some(format!("k{i}")));
+        }
+        assert!(
+            capped.providers.len() <= RELAY_TRIED_CAP && capped.ids.len() <= RELAY_TRIED_CAP,
+            "两张表都受上限约束"
+        );
+        capped.clear();
+        assert!(
+            capped.ids.is_empty() && capped.providers.is_empty(),
+            "清空一起清"
+        );
+    }
+
+    /// 接力候选的去重语义（A5）：同一首歌**换一家音源**仍算一次机会，在**同一家**
+    /// 换个 id 不算第二次。这条不钉住的话，记忆就退化成「按 id 记仇」——同一平台
+    /// 把同一首歌以另一个 id 再列一遍（重编码、翻唱条目）会被当成全新候选，
+    /// 每轮白等数秒取流。
+    #[test]
+    fn relay_candidates_dedup_by_identity_per_source() {
+        fn track(source: &str, id: &str, title: &str, artist: &str) -> crate::online::OnlineTrack {
+            crate::online::OnlineTrack {
+                source: source.into(),
+                id: id.into(),
+                title: title.into(),
+                artist: artist.into(),
+                album: String::new(),
+                duration_ms: 225_000,
+                cover: None,
+                playable: true,
+                vip_only: false,
+                track_ref: serde_json::Value::Null,
+            }
+        }
+        fn page(
+            source: &str,
+            tracks: Vec<crate::online::OnlineTrack>,
+        ) -> crate::online::SearchPage {
+            crate::online::SearchPage {
+                source: source.into(),
+                keyword: "稻香".into(),
+                total: tracks.len(),
+                tracks,
+                warning: None,
+            }
+        }
+        let meta = OnlineMetaSnap {
+            title: "稻香".into(),
+            artist: Some("周杰伦".into()),
+            album: None,
+            cover: None,
+            duration_ms: Some(225_000),
+            rg_gain_db: None,
+            rg_peak: None,
+            origin: None,
+        };
+        // 结果顺序：qq 排在前，且它家有两份同名条目 —— 这样「是否按身份去重」
+        // 会直接改变选中的是哪一家，断言才不会变成空测。
+        let pages = vec![
+            page(
+                "qq",
+                vec![
+                    track("qq", "q1", "稻香", "周杰伦"),
+                    // 同一家把同一首歌以另一个 id 再列一遍。
+                    track("qq", "q2", "稻 香", "周杰伦"),
+                ],
+            ),
+            page("netease", vec![track("netease", "n1", "稻香", "周杰伦")]),
+        ];
+        let qq_identity = relay_identity("稻香", Some("周杰伦"));
+
+        // 干净记忆：分数相同取先出现的那条（结果顺序确定，接力才可复现）。
+        let mem = RelayMemory::default();
+        let hit = pick_relay_candidate(&pages, &mem, "kugou", &meta).expect("应有可用候选");
+        assert_eq!((hit.1.source.as_str(), hit.1.id.as_str()), ("qq", "q1"));
+
+        // 这一家已经试过这首歌：两份同名条目都不算第二次机会，必须落到另一家。
+        let mut tried = RelayMemory::default();
+        tried.note(
+            &crate::online::virtual_id("qq", "q1"),
+            Some(format!("{qq_identity}|qq")),
+        );
+        let hit = pick_relay_candidate(&pages, &tried, "kugou", &meta).expect("换家仍有机会");
+        assert_eq!(
+            hit.1.source, "netease",
+            "同平台换个 id 的同名条目不算第二次机会"
+        );
+
+        // 只按 id 记仇挡不住这件事：这正是身份键存在的理由（记下它，别退回 id-only）。
+        let mut id_only = RelayMemory::default();
+        id_only.note(&crate::online::virtual_id("qq", "q1"), None);
+        let hit = pick_relay_candidate(&pages, &id_only, "kugou", &meta).expect("仍有候选");
+        assert_eq!(
+            (hit.1.source.as_str(), hit.1.id.as_str()),
+            ("qq", "q2"),
+            "只挡 id 时，同一家另一份同名条目会被当成新机会"
+        );
+
+        // 失败源本身永远排除（防搜回来还是同一家）。
+        let hit = pick_relay_candidate(&pages, &mem, "qq", &meta).expect("排除 qq 后仍有 netease");
+        assert_eq!(hit.1.source, "netease");
+    }
+
+    #[test]
     fn relay_score_demands_the_same_normalized_title() {
         // 标题归一化相等是门槛：全半角标点、空白、大小写差异都抹平。
         assert!(relay_score(
@@ -3188,6 +3766,244 @@ pub(crate) mod tests {
         }
     }
 
+    /// 音质上限只由「这一档给不出来」类失败产生。账号级与网络级必须留在门外：
+    /// 前者的 owner 是登录流程（记进来会让整批 VIP 曲在一次未登录尝试后被永久
+    /// 压低），后者换档救不了网络（一次抖动记成永久上限是白丢音质）。
+    #[test]
+    fn ceiling_eligible_keeps_account_and_network_out() {
+        for code in [
+            "vip_required",
+            "upstream_rejected",
+            "internal",
+            "decode_stalled",
+        ] {
+            assert!(
+                AppState::ceiling_eligible(code),
+                "{code} 应当收紧该曲音质上限"
+            );
+        }
+        for code in [
+            "auth_required",
+            "not_found",
+            "upstream_timeout",
+            "bad_request",
+            "capability_unsupported",
+        ] {
+            assert!(!AppState::ceiling_eligible(code), "{code} 不该动音质上限");
+        }
+    }
+
+    /// B4 的验收：降一格、看得见、且不会又弹回高档。
+    #[tokio::test]
+    async fn quality_ceiling_drops_one_rung_and_never_bounces_back() {
+        use crate::online::quality::Quality;
+        let (state, _handle) = playback_state().await;
+        let mut rx = state.events.subscribe();
+        state
+            .quality
+            .lock()
+            .await
+            .insert("netease".to_string(), Quality::Hires);
+        let vid = crate::online::virtual_id("netease", "n1");
+        let other = crate::online::virtual_id("netease", "n2");
+
+        assert_eq!(
+            state.online_quality_for("netease", &vid).await,
+            Quality::Hires
+        );
+
+        state.note_quality_failure(&vid, "vip_required").await;
+        assert_eq!(
+            state.online_quality_for("netease", &vid).await,
+            Quality::Lossless,
+            "一次失败只该让这首退一格"
+        );
+        // 用户必须看得见：措辞带上从高到低两档，且标题不是空串。
+        match rx.try_recv().expect("降档应当发一条提示") {
+            WsEvent::QualityDowngraded {
+                title,
+                from_label,
+                to_label,
+                track_id,
+                ..
+            } => {
+                assert_eq!(track_id, vid);
+                assert_eq!(from_label, "Hi-Res");
+                assert_eq!(to_label, "无损");
+                assert!(!title.is_empty(), "提示得说清是哪首歌");
+            }
+            other => panic!("应当发 QualityDowngraded，收到 {other:?}"),
+        }
+
+        // 在被夹住的那一档上又失败一次：再退一格，并且再说一次——用户看得见
+        // 音质在一格格往下掉，而不是听到一首越听越糊的歌。
+        state.note_quality_failure(&vid, "internal").await;
+        assert_eq!(
+            state.online_quality_for("netease", &vid).await,
+            Quality::Exhigh,
+            "在无损上再失败一次应当退到 320k"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(WsEvent::QualityDowngraded { .. })),
+            "每退一格都要提示一次"
+        );
+
+        // 账号级/网络级失败不改判这首；一首的失败也不牵连同源隔壁那首。
+        state.note_quality_failure(&other, "auth_required").await;
+        state.note_quality_failure(&vid, "upstream_timeout").await;
+        assert_eq!(
+            state.online_quality_for("netease", &other).await,
+            Quality::Hires,
+            "另一首没失败过，不该被一起压低"
+        );
+        assert_eq!(
+            state.online_quality_for("netease", &vid).await,
+            Quality::Exhigh,
+            "一次网络抖动不该让它再掉一格"
+        );
+
+        // 逐级退到最低档后停住：下面没有档可退，也不许清空上限重撞高档。
+        state.note_quality_failure(&vid, "decode_stalled").await;
+        assert_eq!(
+            state.online_quality_for("netease", &vid).await,
+            Quality::Standard
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(WsEvent::QualityDowngraded { .. })
+        ));
+        state.note_quality_failure(&vid, "decode_stalled").await;
+        assert_eq!(
+            state.online_quality_for("netease", &vid).await,
+            Quality::Standard,
+            "最低档之下没有可降的档"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "上限没动就不该再提示，否则每次重试都多一条假降档"
+        );
+
+        // 用户把偏好调回高档也不构成「弹回」：上限只往下夹。
+        state
+            .quality
+            .lock()
+            .await
+            .insert("netease".to_string(), Quality::Hires);
+        assert_eq!(
+            state.online_quality_for("netease", &vid).await,
+            Quality::Standard,
+            "改偏好不是这首能放高档的证据"
+        );
+    }
+
+    /// 上限表按曲目而不是按音源记：同一平台上无损对这首失败、对隔壁那首成功，
+    /// 按源记会把好曲子一起拖低。
+    #[tokio::test]
+    async fn quality_ceiling_is_keyed_per_track() {
+        use crate::online::quality::Quality;
+        let (state, _handle) = playback_state().await;
+        state
+            .quality
+            .lock()
+            .await
+            .insert("netease".to_string(), Quality::Hires);
+        state
+            .note_quality_failure(&crate::online::virtual_id("netease", "a"), "internal")
+            .await;
+        assert_eq!(
+            state
+                .online_quality_for("netease", &crate::online::virtual_id("netease", "b"))
+                .await,
+            Quality::Hires
+        );
+        // 接力换源后的同一首歌挂在另一个源名下，旧源的上限不跟着它：qq 的默认档
+        // 是无损，若 netease 的记录串过去它会掉到高品 320k。
+        assert_eq!(
+            state
+                .online_quality_for("qq", &crate::online::virtual_id("qq", "a"))
+                .await,
+            Quality::Lossless
+        );
+    }
+
+    /// 出处与供音分开（借鉴清单 §8 F3）：换源之后「用户当初点的哪家」必须还查
+    /// 得到，而且多跳接力记的仍是第一家。
+    #[test]
+    fn origin_survives_the_relay_chain_and_names_the_first_source() {
+        let mut snap = online_snap(None, None);
+        assert!(!snap.relayed("netease"), "没换过源不算换源");
+        assert_eq!(
+            snap.origin_of("netease", "n1"),
+            ("netease".to_string(), "n1".to_string(), None),
+            "没有出处记录时，出处就是这一项自己"
+        );
+
+        snap.ensure_origin("netease", "n1", Some("网易云音乐".into()));
+        assert!(snap.relayed("qq"), "换到 QQ 供音之后，出处不再是当前家");
+        assert!(!snap.relayed("netease"), "回到出处那一家就不算换源");
+
+        // 第二跳：出处不许跟着挪到 qq —— 用户点的从来是第一家。
+        snap.ensure_origin("qq", "q9", Some("QQ 音乐".into()));
+        let (source, id, label) = snap.origin_of("kugou", "k3");
+        assert_eq!((source.as_str(), id.as_str()), ("netease", "n1"));
+        assert_eq!(label.as_deref(), Some("网易云音乐"));
+    }
+
+    /// 出处由队列快照回答（两个播放门面共用同一个入口）。
+    #[tokio::test]
+    async fn online_origin_answers_from_the_queue_snapshot() {
+        let (state, _handle) = playback_state().await;
+        let relayed_vid = crate::online::virtual_id("qq", "q9");
+        let mut snap = online_snap(None, None);
+        snap.ensure_origin("netease", "n1", Some("网易云音乐".into()));
+        state.remember_online_meta(relayed_vid.clone(), snap).await;
+        let (origin, relayed) = state.online_origin(&relayed_vid).await.expect("有快照");
+        assert_eq!(
+            (origin.source.as_str(), origin.id.as_str()),
+            ("netease", "n1"),
+            "换过源的那一项要答出最初那一家"
+        );
+        assert!(relayed);
+
+        // 没换过源的曲子：出处就是它自己，且不许报成换过。
+        let own = crate::online::virtual_id("netease", "n7");
+        state
+            .remember_online_meta(own.clone(), online_snap(None, None))
+            .await;
+        let (origin2, relayed2) = state.online_origin(&own).await.unwrap();
+        assert_eq!(
+            (origin2.source.as_str(), origin2.id.as_str()),
+            ("netease", "n7")
+        );
+        assert!(!relayed2);
+
+        // 再记一次（没带 origin，例如刷新后的注入）也不许把已知的出处忘掉。
+        state
+            .remember_online_meta(relayed_vid.clone(), online_snap(None, None))
+            .await;
+        let (origin3, _) = state.online_origin(&relayed_vid).await.unwrap();
+        assert_eq!(origin3.source, "netease", "普通的重新入队不该抹掉出处");
+
+        assert!(
+            state.online_origin("nope").await.is_none(),
+            "没快照就返回 None"
+        );
+        // 本地曲的 id 不是虚拟 id：同样 None，不许猜成「某家的某首」。
+        assert!(state.online_origin("file:/music/a.flac").await.is_none());
+    }
+
+    /// 旧客户端的 /player/load 请求体里没有 `origin` 字段，必须照常接受。
+    #[test]
+    fn snap_without_origin_field_still_deserializes() {
+        let v = serde_json::json!({
+            "title": "稻香", "artist": null, "album": null, "cover": null,
+            "duration_ms": 225000, "rg_gain_db": null, "rg_peak": null,
+        });
+        let snap: OnlineMetaSnap = serde_json::from_value(v).unwrap();
+        assert!(snap.origin.is_none());
+        assert!(!snap.relayed("netease"));
+    }
+
     #[test]
     fn bounded_map_evicts_the_oldest_write() {
         let mut map: BoundedMap<u32> = BoundedMap::new(2);
@@ -3229,6 +4045,7 @@ pub(crate) mod tests {
                     duration_ms: None,
                     rg_gain_db: None,
                     rg_peak: None,
+                    origin: None,
                 },
             );
         }
@@ -3254,6 +4071,7 @@ pub(crate) mod tests {
             duration_ms: None,
             rg_gain_db,
             rg_peak,
+            origin: None,
         }
     }
 

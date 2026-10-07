@@ -806,26 +806,52 @@
       // tile.current/playing 是建卡快照，暂停和续播都不换曲、不会刷新它 ——
       // 读快照的话停着的时候点它会发 activate，等于把同一首从头再 load 一遍。
       if (posterIsCurrent(t)) { emit('toggle-play'); updatePeek(); }
-      else emit('activate', { item: t });
+      // 连墙上这一列一起交出去：第二层的歌只活在墙上（业务侧没有对应的
+      // sourceKey），不带 list 的话业务会按当前 tab 重推一份，播错歌。
+      else emit('activate', { item: t, list: wall.tiles });
     });
     var peekCopy = make('div', 'qf-queue-peek-copy', peek);
     var peekTitle = make('strong', '', peekCopy);
     var peekSub = make('span', '', peekCopy);
     peek.title = '当前队列';
 
+    // 浮条右端的舞台入口。墙开着时顶栏、胶囊导航都被 .qf-lattice-open 隐藏，
+    // 迷你卡又正好被这条浮条压住 —— 墙上够得着的舞台入口一个都不剩，
+    // 所以这颗必须**常驻可见**（不像那颗播放键 hover 才浮现）。
+    var peekStage = make('button', 'qf-queue-peek-stage', peek);
+    peekStage.type = 'button';
+    peekStage.title = '打开舞台';
+    peekStage.setAttribute('aria-label', '打开舞台');
+    peekStage.innerHTML = icon('expand');
+    peekStage.addEventListener('click', function (e) {
+      // 不挡住就会冒泡到浮条本体，那变成「聚焦这一项」而不是进舞台。
+      e.stopPropagation();
+      openStage();
+    });
+
     // 右下角：关灯开关 + 返回。
     var tools = make('div', 'qf-tools', root);
     var lights = make('button', 'qf-tools-btn', tools);
     lights.type = 'button';
-    lights.title = '关灯';
-    lights.setAttribute('aria-label', '关灯：压暗非当前播放的海报');
     lights.setAttribute('aria-pressed', 'false');
-    lights.innerHTML = icon('disc');
-    lights.addEventListener('click', function () {
-      wall.lightsOut = !wall.lightsOut;
+    lights.innerHTML = icon('lamp');
+    // 状态同步只此一份：点击与启动恢复（下面读 WALL_KEY 那处）都走它。
+    // 两处各写一遍，标题与 aria-label 这种「第二份真相」必然漏改一处 ——
+    // 之前就出现过灯已经关着、tooltip 还写着「关灯」。
+    function syncLights() {
       root.classList.toggle('is-lights-out', wall.lightsOut);
       lights.classList.toggle('is-on', wall.lightsOut);
       lights.setAttribute('aria-pressed', String(wall.lightsOut));
+      // 标题说的是「点下去会发生什么」，所以跟着当前状态翻面。
+      lights.title = wall.lightsOut ? '开灯' : '关灯';
+      lights.setAttribute('aria-label', wall.lightsOut
+        ? '开灯：恢复非当前播放海报的亮度'
+        : '关灯：压暗非当前播放的海报');
+    }
+    syncLights();
+    lights.addEventListener('click', function () {
+      wall.lightsOut = !wall.lightsOut;
+      syncLights();
       try { localStorage.setItem(WALL_KEY, wall.lightsOut ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
     });
 
@@ -947,9 +973,7 @@
     var saved = null;
     try { saved = localStorage.getItem(WALL_KEY); } catch (e) { saved = null; }
     wall.lightsOut = saved === '1';
-    root.classList.toggle('is-lights-out', wall.lightsOut);
-    lights.classList.toggle('is-on', wall.lightsOut);
-    lights.setAttribute('aria-pressed', String(wall.lightsOut));
+    syncLights();
 
     // 观感/跟随偏好（设置页「海报墙」组写的 localStorage，见 wireWallSettings）。
     wall.follow = readFlag(WALL_FOLLOW_KEY, true);
@@ -1553,7 +1577,8 @@
         if (posterIsCurrent(tile)) emit('toggle-play');
         // 走 activate 而不是 play-index：墙上的下标是**本视图**的下标，
         // play-index 按的是播放队列下标，传墙上的数会播错歌。
-        else emit('activate', { item: tile });
+        // list 带上墙上这一列，业务才不必按当前 tab 重推（第二层推出来是歌单记录）。
+        else emit('activate', { item: tile, list: wall.tiles });
         // toggle-play 不换曲，等不到 playback:track；app.js 的乐观快照
         // （setPlayback 先 applySnapshot 再 POST）在这条调用链里已经翻过
         // body.is-playing，所以点完立刻重画拿到的就是新值。

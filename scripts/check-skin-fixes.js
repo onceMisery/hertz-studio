@@ -82,15 +82,15 @@ async function applySkin(page, id) {
   const race = await page.evaluate(async () => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const btn = document.getElementById('bar-pin-toggle');
+    const restore = document.getElementById('bar-restore');
     const bar = document.querySelector('.bar');
     const out = [];
-    // 连点两下（第二次落在收起动画途中）—— 旧实现在这里把请求丢掉，
-    // 兜底 finishHide 照样补上 is-hidden，播放条永久消失。
+    // 快速收起后点击独立恢复入口，旧动画的延迟回调不能再把播放栏藏掉。
     for (let i = 0; i < 3; i += 1) {
       btn.click();
-      await sleep(60);            // 动画途中
-      btn.click();
-      await sleep(700);           // 等动画彻底结束
+      await sleep(60);
+      restore.click();
+      await sleep(700);           // 越过旧动画回调曾使用的时间窗口
       out.push({
         round: i + 1,
         isHidden: bar.classList.contains('is-hidden'),
@@ -99,7 +99,7 @@ async function applySkin(page, id) {
       });
     }
     // 最后确保是「显示」态，且真的可见
-    if (bar.classList.contains('is-hidden')) { btn.click(); await sleep(700); }
+    if (bar.classList.contains('is-hidden')) { restore.click(); await sleep(700); }
     const r = bar.getBoundingClientRect();
     return {
       rounds: out,

@@ -740,6 +740,63 @@ body.reduce-motion .stage::before { transition: none; transform: none; }
 }
 .sc-close:hover { color: var(--text); border-color: var(--line-strong); background: var(--hover); }
 
+/* 参数搜索：命中后把用户带到那颗控件上，而不是在结果里再画一份控件。
+   参考实现靠选择器反查旧 DOM 再搬进新分组，我们已由 SCHEMA 生成控件，
+   搜索与结果值读同一张表就够了。 */
+.sc-search-row { flex: none; padding: 0 12px 8px; }
+.sc-search {
+  width: 100%;
+  padding: 6px 9px;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: none;
+  transition: border-color var(--dur-1) var(--ease);
+}
+.sc-search:focus { border-color: var(--line-strong); }
+.sc-search::placeholder { color: var(--muted); }
+
+.sc-results {
+  flex: none;
+  display: grid;
+  gap: 4px;
+  padding: 0 12px 8px;
+  max-height: 168px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.sc-results[hidden] { display: none; }
+.sc-result {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  font-size: 11px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+.sc-result:hover, .sc-result:focus-visible {
+  border-color: var(--line-strong);
+  background: var(--hover);
+}
+.sc-result-path { color: var(--muted); min-width: 0; }
+.sc-result-value {
+  font: 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.sc-result.is-empty { color: var(--muted); border-style: dashed; cursor: default; }
+/* 命中定位后短暂描一下，让眼睛跟得上滚动 */
+.sc-cell.is-found { border-color: var(--accent); }
+
 .sc-body {
   flex: 1;
   min-height: 0;
@@ -962,7 +1019,8 @@ body.reduce-motion .stage::before { transition: none; transform: none; }
   border-top: 1px solid var(--line);
   background: transparent;
 }
-.sc-foot .sc-reset {
+.sc-foot .sc-reset,
+.sc-foot .sc-undo {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -975,8 +1033,12 @@ body.reduce-motion .stage::before { transition: none; transform: none; }
   cursor: pointer;
   transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
 }
-.sc-foot .sc-reset svg { width: 13px; height: 13px; fill: currentColor; }
-.sc-foot .sc-reset:hover { color: var(--text); border-color: var(--line-strong); }
+.sc-foot .sc-reset svg,
+.sc-foot .sc-undo svg { width: 13px; height: 13px; fill: currentColor; }
+.sc-foot .sc-reset:hover,
+.sc-foot .sc-undo:hover { color: var(--text); border-color: var(--line-strong); }
+.sc-foot .sc-undo[disabled] { opacity: .45; cursor: default; }
+.sc-foot .sc-undo[disabled]:hover { color: var(--muted); border-color: var(--line); }
 .sc-foot .sc-ok {
   padding: 5px 14px;
   font-size: 12px;

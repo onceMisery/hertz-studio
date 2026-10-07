@@ -31,6 +31,8 @@ const HARNESS = `<!doctype html><meta charset="utf-8">
   html,body{margin:0;width:100%;height:100%;background:#09090b;overflow:hidden}
   #host{position:absolute;inset:0}
   .fl-sonnet,.fl-tempera{position:absolute;inset:0}
+  .fl-classic{position:absolute;left:0;right:0;top:32vh;display:flex;justify-content:center;
+    color:#f4f4f5;font-weight:700}
   .fl-sonnet-canvas,.fl-tempera-canvas{position:absolute;inset:0;width:100%;height:100%}
   .fl-sonnet-eyebrow,.fl-sonnet-hud,.fl-tempera-eyebrow,.fl-tempera-note{display:none}
 </style>
@@ -98,9 +100,10 @@ async function analyze(page, label) {
     ctx.drawImage(canvas, 0, 0);
     const data = ctx.getImageData(0, 0, off.width, off.height).data;
     let transparent = 0, opaque = 0, colored = 0, bright = 0;
-    let sumL = 0, sumL2 = 0;
+    let sumL = 0, sumL2 = 0, sumAlpha = 0;
     for (let i = 0; i < data.length; i += 4) {
       const a = data[i + 3];
+      sumAlpha += a;
       if (a < 8) { transparent += 1; continue; }
       opaque += 1;
       const r = data[i], g = data[i + 1], b = data[i + 2];
@@ -120,6 +123,7 @@ async function analyze(page, label) {
       width: off.width, height: off.height,
       total, transparent, opaque, colored, bright,
       meanLuma: +mean.toFixed(1),
+      meanOpacity: sumAlpha / (255 * total),
       lumaStd: +std.toFixed(1),
       inkRatio: +(opaque / total).toFixed(4),
       colorRatio: +(colored / total).toFixed(4),
@@ -165,6 +169,78 @@ async function runStage(browser, mode, viewport, shots) {
   return { report, animeReport, errors, warns, anime };
 }
 
+// 流光（classic）是 DOM 舞台：它的「视觉实测」验的是音频反应的接线 ——
+// JS 写 --fl-vocal/--fl-bass 两个变量，CSS calc 消费到辉光透明度与字身缩放。
+// 这条链断了不报错（辉光只是不再呼吸），必须读 computedStyle 钉住两端。
+async function runClassic(browser) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.setContent(HARNESS);
+  for (const file of ['stanza/stanza-util.js', 'stanza/stanza-theme.js',
+    'stanza/stanza-sonnet-fx.js', 'stanza/stanza-classic.js']) {
+    await page.addScriptTag({ path: path.join(web, file) });
+  }
+  // 消费端规则在真 stanza.css 里（calc 读 --fl-vocal/--fl-bass）：
+  // 不加载它，computedStyle 断言只会空转通过（默认 opacity=1 / transform=none）。
+  await page.addStyleTag({ path: path.join(web, 'stanza', 'stanza.css') });
+  // 低音+人声偏重的谱：bass/vocal 频段都在 0.7 上下，两个变量都必须被写起来。
+  const spectrum = new Array(64).fill(0.2).map((v, i) => (i < 38 ? 0.85 : v));
+  await page.evaluate((spec) => {
+    const fx = { position: 2000, reduced: false, spectrum: spec };
+    window.__cfx = fx;
+    fx.lines = [
+      { start_ms: 0, end_ms: 6000, text: '晚风送来一句轻轻的问候' },
+      { start_ms: 6000, end_ms: 13000, text: '我们沿着星光继续向前走' }
+    ];
+    window.Stage = {
+      presentation: () => ({ playing: true, reduced: false, track: { id: 'c', title: 'classic check' } }),
+      position: () => fx.position,
+      lyrics: () => ({ lines: fx.lines }),
+      lyricTokens: line => [{ text: line.text, start_ms: line.start_ms, end_ms: line.end_ms }],
+      spectrum: () => fx.spectrum,
+      kick() {}
+    };
+    fx.renderer = StanzaClassic.init(document.getElementById('host'));
+    fx.renderer.setTheme(StanzaTheme.resolve(1.35));
+    fx.renderer.setVisible(true);
+  }, spectrum);
+  await page.waitForTimeout(120);
+  await page.evaluate(() => { window.__cfx.renderer.frame(); });
+  await page.waitForTimeout(80);
+  const report = await page.evaluate(() => {
+    const root = document.querySelector('.fl-classic');
+    const cs = getComputedStyle(root);
+    const body = document.querySelector('.fl-cword[data-st="active"] .fl-body')
+      || document.querySelector('.fl-cword .fl-body');
+    const glow = document.querySelector('.fl-cword .fl-glow');
+    return {
+      words: document.querySelectorAll('.fl-cword').length,
+      vocalVar: cs.getPropertyValue('--fl-vocal').trim(),
+      bassVar: cs.getPropertyValue('--fl-bass').trim(),
+      bodyTransform: body ? getComputedStyle(body).transform : 'missing',
+      glowOpacity: glow ? getComputedStyle(glow).opacity : 'missing',
+      activeSt: document.querySelectorAll('.fl-cword[data-st="active"]').length
+    };
+  });
+  await page.screenshot({ path: path.join(OUT, 'classic-1440x900.png') });
+  // 降级钉死：歌词面降级标记下，字身缩放与辉光变量反应必须归位。
+  const pinned = await page.evaluate(() => {
+    document.body.dataset.rm = 'lyrics';
+    window.__cfx.renderer.frame();
+    const body = document.querySelector('.fl-cword .fl-body');
+    const glow = document.querySelector('.fl-cword .fl-glow');
+    const out = {
+      bodyTransform: body ? getComputedStyle(body).transform : 'missing',
+      glowOpacity: glow ? getComputedStyle(glow).opacity : 'missing'
+    };
+    delete document.body.dataset.rm;
+    return out;
+  });
+  await page.close();
+  return { report, pinned, errors };
+}
+
 async function main() {
   fs.mkdirSync(OUT, { recursive: true });
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true });
@@ -193,6 +269,11 @@ async function main() {
       });
       if (mode === 'sonnet') {
         report.forEach(r => ok(r.atmosphere === true, tag + ' t=' + r.at + ' 氛围光层已建'));
+        report.forEach(r => ok(r.debug.vocalGlow && r.debug.vocalGlow.glyphs > 0,
+          tag + ' t=' + r.at + ' 人声辉光层已建'));
+      } else {
+        report.forEach(r => ok(r.debug.sweepGlow === 'add',
+          tag + ' t=' + r.at + ' 扫光辉光层为加色混合'));
       }
       ok(report.some(r => r.colorRatio > 0.01), tag + ' 画面有彩色像素（配色未被洗成灰）');
       ok(report.some(r => r.halation === true), tag + ' halation 后期生效');
@@ -204,14 +285,37 @@ async function main() {
       } else {
         // 凝彩图片模式：色块**不会**撤掉，反而更实（blockAlpha 0.62 → 0.94）——
         // 它是海报式 MV，壁纸只是环境，色块本身才是主体。
-        // 所以断言反过来：切到图片模式后亮度应上升，且歌词照旧绘制。
+        // 更实指覆盖度而不是亮度：正确保留 alpha 后，浅色透底可能更亮。
         // 这条验的是 bgMode 真的传进了 engineTuning（shotKey 含 bgMode，会重建镜头）。
-        ok(animeReport.meanLuma > report[0].meanLuma,
-          tag + ' 图片模式色块更实 (meanL ' + report[0].meanLuma + ' → ' + animeReport.meanLuma + ')');
+        const stageReport = report[report.length - 1];
+        ok(animeReport.meanOpacity > stageReport.meanOpacity + 0.1,
+          tag + ' 图片模式色块更实 (alpha ' + stageReport.meanOpacity.toFixed(3) + ' → ' + animeReport.meanOpacity.toFixed(3) + ')');
         ok(animeReport.inkRatio > 0.001, tag + ' 图片模式仍绘制歌词');
       }
     }
   }
+  // 流光：DOM 舞台的音频反应接线（变量两端 + 降级钉死）。
+  const classic = await runClassic(browser);
+  console.log('\n== classic 1440x900 ==');
+  console.log('  words=' + classic.report.words + ' active=' + classic.report.activeSt
+    + ' vocal=' + classic.report.vocalVar + ' bass=' + classic.report.bassVar
+    + ' bodyT=' + classic.report.bodyTransform + ' glowO=' + classic.report.glowOpacity);
+  ok(classic.errors.length === 0, 'classic 无未捕获异常 ' + JSON.stringify(classic.errors.slice(0, 2)));
+  ok(classic.report.words > 0, 'classic 歌词节点已挂载');
+  ok(classic.report.activeSt > 0, 'classic 有正在唱的词（状态机在跑）');
+  ok(classic.report.vocalVar !== '' && parseFloat(classic.report.vocalVar) > 0.3,
+    'classic --fl-vocal 已随谱写入 (got ' + classic.report.vocalVar + ')');
+  ok(classic.report.bassVar !== '' && parseFloat(classic.report.bassVar) > 0.3,
+    'classic --fl-bass 已随谱写入 (got ' + classic.report.bassVar + ')');
+  ok(classic.report.bodyTransform !== 'none' && classic.report.bodyTransform !== 'missing',
+    '字身缩放消费了 bass (got ' + classic.report.bodyTransform + ')');
+  ok(parseFloat(classic.report.glowOpacity) > 0.9,
+    '辉光透明度吃 vocal (got ' + classic.report.glowOpacity + ')');
+  ok(classic.pinned.bodyTransform === 'none',
+    '歌词面降级时字身缩放钉死 (got ' + classic.pinned.bodyTransform + ')');
+  ok(Math.abs(parseFloat(classic.pinned.glowOpacity) - 0.78) < 0.01,
+    '歌词面降级时辉光回到基准 (got ' + classic.pinned.glowOpacity + ')');
+
   await browser.close();
   if (failures.length) { console.error('\n' + failures.length + ' 项失败'); process.exit(1); }
   console.log('\nstanza 视觉后期实测全部通过，截图在 ' + OUT);

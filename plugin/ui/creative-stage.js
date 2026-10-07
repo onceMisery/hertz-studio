@@ -29,7 +29,11 @@
   // 帧门预算。三维 + 后处理比点精灵贵得多；原则是"降 DPR 保帧率"——
   // 快速运动的场景（隧道、副歌的塔林）在 20fps 下是肉眼可见的卡顿，
   // 而 0.55 DPR 的模糊在泛光链路里几乎看不出来。糊一点换流畅，值。
-  var TIERS = [{ fps: 30, dpr: 0.55 }, { fps: 40, dpr: 0.85 }, { fps: 48, dpr: 1.10 }];
+  //
+  // 帧率只取 60 与 120 的公因数（原来写的 48/40 在 60Hz 上实际只能跑 30/20，
+  // 数字从来没兑现过，出处见 docs/research 下那份借鉴清单的 §5.1）。
+  // 高档给满帧、中档 30、eco 档 20，档位之间靠 DPR 继续拉开代价。
+  var TIERS = [{ fps: 20, dpr: 0.55 }, { fps: 30, dpr: 0.85 }, { fps: 60, dpr: 1.10 }];
 
   // 代价探测往下让的档位（见"渲染代价探测"一节）。只降 DPR、不降帧率，
   // 理由与 TIERS 上面那段注释是同一条：快速运动的场景在 20fps 下是肉眼可见的
@@ -197,14 +201,16 @@
   var activeIdx = 0;
   var attached = false;
   var wanted = false;        // 用户是否要求启用三维舞台
-  var previewView = null;    // 工坊高级编排的面板内预览视图（挂在哪里渲染哪里）
-  var pvWatchdog = 0, pvLastFrame = 0, pvStalls = 0;
+  var stageView = null;      // 大舞台正式渲染目标，消费同一预置与真实频谱
+  var stageObserver = null;
   var degradedBecause = null;
   var degradedByProbe = false;   // 这次降级是"量出来太贵"，不是"起不来"
 
   var preset = null;
   var runtime = {};          // 每帧解析结果
   var animations = [];       // 正在跑的 cue 实例
+  var timelineCues = null;
+  var renderedPosition = null;
   var section = 'verse';
   var sectionSince = 0;
 
@@ -218,30 +224,6 @@
   var feat = onset;
   var silent = new Float32Array(64);   // 断供时的静默帧
 
-  // 工坊面板内预览的合成频谱。
-  //
-  // 预览要能独立成立，不能只在"正好有歌在放"时才有反应：用户打开工坊、
-  // 还没播任何东西，此时 Stage.spectrum() 是全 0，走 silent 分支，柱体
-  // 全部贴在最低高度 —— 画面近乎静止，看起来就是"预览没起作用"。
-  //
-  // 所以预览视图改用这条确定性合成频谱。它是纯函数（只吃 t），
-  // 不含 Math.random：同一时刻 seek 回来必须是同一帧，否则预览会"闪"。
-  // 低频重、高频轻，形状接近真实音乐的频谱包络。
-  var previewSpec = new Float32Array(64);
-  function synthSpectrum(t) {
-    for (var i = 0; i < 64; i += 1) {
-      var u = i / 63;
-      // 低频权重高：真实音乐的能量分布就是随频率衰减。
-      var env = Math.exp(-u * 2.6) * 0.72 + 0.06;
-      // 三条不同速率的正弦叠出"律动"，再加一点每拍一次的峰。
-      var wobble = Math.sin(t * 0.0021 + u * 5.1) * 0.18
-        + Math.sin(t * 0.0047 + u * 11.3) * 0.10
-        + Math.sin(t * 0.0093 + u * 2.7) * 0.06;
-      var beat = Math.max(0, Math.sin(t * 0.0042)) ** 3 * 0.30 * (1 - u * 0.6);
-      previewSpec[i] = Math.max(0, Math.min(1, env * (0.62 + wobble) + beat));
-    }
-    return previewSpec;
-  }
   if (onset) onset.onBeat(onBeat);     // onBeat 是函数声明，已提升，这里可以直接引用
 
   var cam = { yaw: 0, pitch: 0, dist: 15, shakeYaw: 0, shakePitch: 0 };
@@ -438,7 +420,7 @@
     for (var i = 0; i < preset.cues.length; i += 1) {
       var c = preset.cues[i];
       if (typeof c.every === 'number' && c.every > 0 && feat.beats % Math.round(c.every) === 0) {
-        fire(c);
+        fire(c, null, true);
       }
     }
   }
@@ -454,7 +436,7 @@
     return 1 - Math.pow(1 - x, 3);          // out，默认
   }
 
-  function fire(cue, lenOverride) {
+  function fire(cue, lenOverride, songClock) {
     var set = cue.set || {};
     var keys = Object.keys(set);
     if (!keys.length) return;
@@ -462,17 +444,21 @@
     keys.forEach(function (k) { from[k] = readPath(runtime, k); });
     animations.push({
       keys: keys, from: from, to: set,
-      start: now(),
+      start: songClock && window.Stage && Stage.position ? Stage.position() : now(),
+      songClock: !!songClock,
       len: Math.max(16, lenOverride || cue.len || 600),
       ease: cue.ease || 'out'
     });
     if (animations.length > 24) animations.shift();
+    kickStaticFrame();
+    if (window.Stage && Stage.kick) Stage.kick();
   }
 
   function stepAnimations(t) {
     for (var i = animations.length - 1; i >= 0; i -= 1) {
       var a = animations[i];
-      var k = clamp((t - a.start) / a.len, 0, 1);
+      var clock = a.songClock && window.Stage && Stage.position ? Stage.position() : t;
+      var k = clamp((clock - a.start) / a.len, 0, 1);
       var e = ease(a.ease, k);
       for (var j = 0; j < a.keys.length; j += 1) {
         var key = a.keys[j];
@@ -552,7 +538,7 @@
       + (Math.random() < 0.5 ? -1 : 1) * (55 + Math.random() * 90);
     mood['cam.yaw'] = clampPath('cam.yaw', mood['cam.yaw']);
     animations.push({ keys: Object.keys(mood), from: null, to: mood,
-      start: t, len: want === 'chorus' ? 420 : 1600, ease: 'inout', mood: want });
+      start: t, len: want === 'chorus' ? 420 : 1600, ease: 'inout', mood: want, songClock: !!stageView });
     // 上面这个动画的 from 要在 stepAnimations 里第一次遇到时补，见下面的补采样。
     document.dispatchEvent(new CustomEvent('creative:section', { detail: { section: want } }));
   }
@@ -569,11 +555,39 @@
     runtime.sc = deep(preset.sc);
 
     // 低频跟随：整体抬高机位注视点。放在绑定之前，所以绑定可以再叠加。
-    var kick = readPath(runtime, 'cam.kick') / 100;
+    var kick = reducedMotion() ? 0 : readPath(runtime, 'cam.kick') / 100;
     runtime.cam.height += agg[0] * kick * 2.2;
 
-    stepBindings();
+    if (!reducedMotion()) stepBindings();
+    stepTimeline();
     stepAnimations(t);
+  }
+
+  // Evaluate song-time cues from the current position, including paused seeks.
+  // Completed cues hold their value; later cues start from the preceding value.
+  // No triggered flags or saved preset mutation: seeking backwards is reversible.
+  function stepTimeline() {
+    var position = window.Stage && Stage.position ? Number(Stage.position()) : 0;
+    if (!Number.isFinite(position)) return;
+    if (!timelineCues) timelineCues = preset.cues.filter(function (c) {
+      return Number.isFinite(c.at) && c.at >= 0;
+    }).slice().sort(function (a, b) { return a.at - b.at; });
+    var tracks = {};
+    function valueAt(track, at) {
+      var progress = clamp((at - track.start) / track.len, 0, 1);
+      return track.from + (track.to - track.from) * ease(track.ease, progress);
+    }
+    timelineCues.forEach(function (cue) {
+      var start = cue.at * 1000;
+      if (start > position) return;
+      Object.keys(cue.set).forEach(function (key) {
+        if (!specFor(key) || !Number.isFinite(cue.set[key])) return;
+        var from = tracks[key] ? valueAt(tracks[key], start) : readPath(runtime, key);
+        tracks[key] = { from: from, to: clampPath(key, cue.set[key]), start: start,
+          len: Math.max(16, Number(cue.len) || 600), ease: cue.ease || 'out' };
+      });
+    });
+    Object.keys(tracks).forEach(function (key) { writePath(runtime, key, valueAt(tracks[key], position)); });
   }
 
   // -------------------------------------------------------------------------
@@ -590,6 +604,8 @@
     px: 0, py: 0, parYaw: 0, parPitch: 0 };
 
   function bindInteraction(el) {
+    if (el.__creativeBound) return;
+    el.__creativeBound = true;
     el.addEventListener('pointerdown', function (e) {
       if (blocked(e)) return;
       if (!interact.on) return;
@@ -651,6 +667,16 @@
   // 每帧的交互连续量：拖拽惯性、滚轮缩放的平滑趋近、指针视差。
   // 全部放在渲染帧里推进，与事件循环解耦 —— 事件是离散的，画面是连续的。
   function stepInteraction(dtMs) {
+    if (reducedMotion()) {
+      interact.vx = interact.vy = interact.parYaw = interact.parPitch = 0;
+      interact.hadInertia = false;
+      if (interact.zoomTarget !== null) {
+        writePath(preset, 'cam.dist', interact.zoomTarget);
+        writePath(runtime, 'cam.dist', interact.zoomTarget);
+        interact.zoomTarget = null;
+      }
+      return;
+    }
     // 交互屏蔽（自由相机开启/飞回中）：事件入口虽已早退，这里仍要把视差目标
     // 归零，让已平滑出去的残差用下面的 520ms 收回；同时解除"拖拽中被切走"
     // 留下的 dragging 闩锁（pointerup 在屏蔽期被吞）。惯性/滚轮不动基线外
@@ -872,27 +898,29 @@
     return t < 0 ? 0 : t > 2 ? 2 : t;
   }
 
+  function reducedMotion() {
+    return !!(window.Stage && Stage.presentation && Stage.presentation().reduced) ||
+      !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  }
+
   function targetFps() {
-    if (!attached || !wanted || !views.length) return 0;
-    // 工坊面板内的预览视图：它挂在面板里，主页可见性门（右栏抽屉收起、
-    // 沉浸声场盖着主页）都不适用于它——面板可见就渲染。
-    if (previewView) return document.hidden ? 0 : TIERS[tierIndex()].fps;
-    if (window.Stage && Stage.isHidden()) return 0;
-    // 活动画布不可见就一帧都不画：窄屏抽屉关着时舞台画布只是被 transform
-    // 移出屏幕，尺寸与上下文都在，不挡这一下 GPU 就一直空烧。
-    if (window.Stage && typeof Stage.isStageVisible === 'function' && !Stage.isStageVisible()) return 0;
+    if (!attached || (!wanted && !stageView) || !views.length || document.hidden) return 0;
+    if (!stageView && window.Stage && Stage.isHidden()) return 0;
+    if (!stageView && window.Stage && typeof Stage.isStageVisible === 'function' && !Stage.isStageVisible()) return 0;
     // 探测期间强制满帧：不画东西的窗口量不到代价，而"暂停且无动画"时帧门本来是 0，
     // 拿它当基准会得出一个自信的错误结论。探测一结束这条就退场，预算恢复原样。
     if (probe.pending || probe.running) return TIERS[tierIndex()].fps;
     var playing = document.body.classList.contains('is-playing');
-    var busy = feat.pulse >= 0.01 || animations.length > 0;
+    var busy = stageView ? animations.some(function (a) { return !a.songClock; })
+      : feat.pulse >= 0.01 || animations.length > 0;
     if (!playing && !busy) return 0;
-    if (!playing) return 8;
+    if (!playing) return 6;   // 暂停只剩余韵：6fps 是 60/120 的公因数（原来写 8，实际跑 7.5）
+    if (reducedMotion()) return Math.min(15, TIERS[tierIndex()].fps);
     return TIERS[tierIndex()].fps;
   }
 
   function pickView() {
-    var want = previewView ? views.indexOf(previewView) : 0;
+    var want = stageView ? views.indexOf(stageView) : 0;
     if (want < 0 || want >= views.length) want = 0;
     if (want !== activeIdx) {
       // 切挂载点时立刻给新视图补一帧：暂停状态下帧门是 0，不补这一帧的话
@@ -945,11 +973,10 @@
     if (!v || !v.eng) return;
     // 纵深第二道：正常路径里帧门 fpsFn 在不可见时已报 0、stage.js 不会把
     // tick 调进来；但补帧等旁路仍可能直接触达这里，挡住，不往不可见画布渲染。
-    // 工坊面板内的预览视图例外：它不在右栏，是否可见由挂载/卸载自己管理。
-    if (v !== previewView && window.Stage
+    // 大舞台有自己的显隐生命周期，不受主页侧栏可见性限制。
+    if (v !== stageView && window.Stage
         && typeof Stage.isStageVisible === 'function' && !Stage.isStageVisible()) return;
     if (!v.w || !v.h) { if (!measure(v)) return; }
-    pvLastFrame = now();
     renderOne(v, dtMs);
   }
 
@@ -957,16 +984,27 @@
   // 留给后处理链；切回去时由 pickView 触发一次即时重绘。
   function renderOne(v, dtMs) {
     var t = now();
+    var playing = document.body.classList.contains('is-playing');
+    var position = window.Stage && Stage.position ? Number(Stage.position()) || 0 : 0;
+    var sceneTime = v === stageView ? position : t;
+    var reduced = reducedMotion();
+    if (!reduced || v.motionTime === undefined) v.motionTime = sceneTime;
+    if (reduced) sceneTime = v.motionTime;
+    if (v === stageView) {
+      if (renderedPosition !== null && (position < renderedPosition || position - renderedPosition > 1500)) {
+        animations = animations.filter(function (a) { return !a.songClock; });
+        energyHist.length = 0; lastHistAt = 0; sectionSince = 0;
+      }
+      renderedPosition = position;
+    }
     var sp = window.Stage ? Stage.spectrum() : null;
     if (sp && sp.length && sp !== lastSpectrum) { lastSpectrum = sp; lastSpectrumAt = t; }
     var fresh = !!(sp && sp.length) && lastSpectrumAt > 0 && (t - lastSpectrumAt < 600);
-    // 预览视图不吃真实频谱：它要的是"任何时刻打开都有反应"，而不是"正好
-    // 在放歌才有反应"。主舞台仍走真实频谱，两者互不影响。
-    if (v.preview) sp = synthSpectrum(t);
-    onset.step(dtMs, sp && sp.length ? sp : silent, now());
+    if (!reduced && (playing || v !== stageView)) onset.step(dtMs, sp && sp.length ? sp : silent, t);
 
+    if (reduced) animations.length = 0;
     resolve(t);
-    stepDirector(t);
+    if (!reduced && (playing || v !== stageView)) stepDirector(sceneTime);
     // 导演推进去的动画没有 from（它是"从当前值到目标值"的相对运动）。
     // 补采样放在这里而不是 fire 里：此刻 runtime 还是上一帧的稳定值，
     // 补出来的起点与屏幕上正在显示的那一帧一致，不会看到一次回跳。
@@ -980,10 +1018,11 @@
 
     // --- 相机：基线 → camLayers（cinema/peek/freecam）→ 漂移 → shake ---
     stepInteraction(dtMs);
-    var driftBase = readPath(runtime, 'cam.drift') / 100;
-    driftPhase += dtMs / 1000 * 0.12 * driftBase;
-    cam.shakeYaw *= Math.exp(-dtMs / 130);
-    cam.shakePitch *= Math.exp(-dtMs / 130);
+    var driftBase = reduced ? 0 : readPath(runtime, 'cam.drift') / 100;
+    if (v === stageView) driftPhase = sceneTime / 1000 * 0.12 * driftBase;
+    else driftPhase += dtMs / 1000 * 0.12 * driftBase;
+    cam.shakeYaw *= reduced ? 0 : Math.exp(-dtMs / 130);
+    cam.shakePitch *= reduced ? 0 : Math.exp(-dtMs / 130);
     var ctx = {
       t: t,
       dtMs: dtMs,
@@ -1010,7 +1049,7 @@
       // 自由相机全开标志（目前只作观测，不参与合成分支）。
       freecam: false
     };
-    for (var li = 0; li < camLayers.length; li += 1) {
+    for (var li = 0; !reduced && li < camLayers.length; li += 1) {
       try { camLayers[li].fn(ctx); } catch (e) { /* 单层抛错不能拖垮帧循环 */ }
     }
 
@@ -1021,13 +1060,13 @@
       + Math.sin(driftPhase * 0.73 + 1.1) * 0.10 * drift + cam.shakePitch + interact.parPitch, -1.35, 1.35);
     // agg kick 是基线音频响应，对所有层生效；near plane 0.1，dist 不得贴到 0.3 以下。
     var dist = Math.max(0.3, ctx.dist
-      * (1 - agg[0] * 0.06 * (readPath(runtime, 'cam.kick') / 100)));
+      * (1 - (reduced ? 0 : agg[0]) * 0.06 * (readPath(runtime, 'cam.kick') / 100)));
 
     var rot = readPath(runtime, 'stage.rotY') * Math.PI / 180 + driftPhase * 0.25 * drift;
     var sc = readPath(runtime, 'stage.scale');
 
     var state = {
-      t: t, dt: dtMs,
+      t: sceneTime, dt: dtMs,
       bands: band, rises: rise, agg: agg,
       pulse: feat.pulse, energy: feat.energy,
       play: document.body.classList.contains('is-playing'),
@@ -1247,11 +1286,12 @@
     var hasPermanent = false;
     for (var i = 0; i < views.length; i += 1) {
       var v = views[i];
-      if (!v.preview) hasPermanent = true;
-      v.el.classList.toggle('creative-on', on);
+      var visible = v === stageView || on;
+      if (v !== stageView) hasPermanent = true;
+      v.el.classList.toggle('creative-on', visible);
       // 关掉时必须把画布一起藏掉。只停渲染、画布留在 DOM 里，最后一帧会一直
       // 糊在舞台上 —— 用户看到的是"三维已经关了，画面还在"。
-      if (v.canvas) v.canvas.style.display = on ? '' : 'none';
+      if (v.canvas) v.canvas.style.display = visible ? '' : 'none';
     }
     // creative-3d 只跟「正式挂载点」走：面板内预览不该改主页右栏的样式。
     document.documentElement.classList.toggle('creative-3d', on && hasPermanent);
@@ -1266,8 +1306,8 @@
       v.el.classList.remove('creative-on', 'creative-interact');
     }
     views = [];
-    previewView = null;
-    if (pvWatchdog) { clearInterval(pvWatchdog); pvWatchdog = 0; }
+    stageView = null;
+    if (stageObserver) { stageObserver.disconnect(); stageObserver = null; }
     attached = false;
     document.documentElement.classList.remove('creative-3d');
   }
@@ -1277,94 +1317,59 @@
   // 空白舞台，非得按下播放才有画面。
   function refreshViews() {
     if (!preset) return;
-    for (var i = 0; i < views.length; i += 1) {
-      if (views[i].eng) { measure(views[i]); renderOne(views[i], 16.7); }
-    }
+    var view = pickView();
+    if (view && view.eng) { measure(view); renderOne(view, 0); }
   }
 
-  // -------------------------------------------------------------------------
-  // 工坊高级编排的面板内预览
-  //
-  // 与右栏/全屏页挂载点完全独立：挂载它不需要也不改动主页的播放视窗——
-  // 增强渲染没开时只挂预览自己，开了则追加一块视图、右栏照常。
-  // 帧门对它有专门的可见性规则（见 targetFps）：面板可见就渲染，不受
-  // 「沉浸声场盖着主页」那道门影响。
-  // -------------------------------------------------------------------------
-
-  function mountPreview(el) {
-    if (!el) return false;
-    if (previewView) return true;   // 已挂载：幂等成功（render 每轮都会来同步状态条）
-    if (!preset) return false;
-    if (!window.CreativeGL || !CreativeGL.isAvailable()) return false;
-    if (!onset && window.Onset && Onset.create) onset = Onset.create({});
-    if (!onset) return false;
-    var v = mountView(el);
-    if (!v) return false;
-    v.preview = true;
-    var wasAttached = attached;
-    if (!wasAttached) {
-      wanted = true;
-      views = [v];
-    } else {
-      views.push(v);
+  // 同一个编排 owner 同时服务侧栏和大舞台；只渲染可见目标。
+  // 大舞台开合不改侧栏增强渲染偏好，也不创建模拟频谱或第二个调度器。
+  function attachStage(el) {
+    if (stageView && stageView.el === el) return true;
+    if (stageView) {
+      var old = stageView;
+      stageView = null;
+      if (stageObserver) { stageObserver.disconnect(); stageObserver = null; }
+      if (old.eng) old.eng.dispose();
+      old.canvas.remove();
+      old.el.classList.remove('creative-on', 'creative-interact');
+      views = views.filter(function (v) { return v !== old; });
+      activeIdx = 0;
+      attached = views.length > 0;
     }
-    try { v.eng = CreativeGL.create(v.canvas, { quality: tierIndex() }); } catch (err) { v.eng = null; }
-    if (!v.eng) {
-      views = views.filter(function (x) { return x !== v; });
-      if (!wasAttached) { attached = false; wanted = false; }
+    if (!el) { showViews(wanted); kickStaticFrame(); return true; }
+    if (!preset || !onset || !window.CreativeGL || !CreativeGL.isAvailable()) {
+      degradedBecause = !onset ? '起音检测未就绪' : '当前设备无法运行创意舞台（需要 WebGL2）';
       return false;
     }
-    v.eng.warmUp();
-    previewView = v;
-    if (!wasAttached) attached = true;
+    var v = mountView(el);
+    try {
+      v.eng = CreativeGL.create(v.canvas, { quality: tierIndex() });
+      if (!v.eng) throw new Error('无法创建图形上下文');
+      v.eng.warmUp();
+    } catch (error) {
+      if (v.eng) v.eng.dispose();
+      v.canvas.remove();
+      degradedBecause = '创意舞台启动失败：' + error.message;
+      return false;
+    }
+    degradedBecause = null;
+    stageView = v;
+    views.push(v);
+    attached = true;
+    activeIdx = views.indexOf(v);
+    // 取消侧栏专属 A/B 探测，避免实际演出出现静默黑帧；保留逐帧 DPR 预算。
+    cancelProbe();
     measure(v);
     bindInteraction(el);
-    showViews(true);
-    refreshViews();
-    pvLastFrame = now();
-    pvStalls = 0;
-    if (!pvWatchdog) pvWatchdog = setInterval(pvWatchdogTick, 1200);
-    if (window.Stage && Stage.kick) Stage.kick();
-    return true;
-  }
-
-  // 预览看门狗：与 stage3d 的同一套思路。宿主环境的 rAF 可能整段挂起
-  // （内嵌视图被判定遮挡、全屏切换重建合成器），主循环叫不醒，预览就是
-  // 一张静帧——用户看到的正是"实时预览没起作用"。每 1.2s 查一次帧时戳：
-  // 先 kick 一次主循环，仍无帧就由这里低频代跑（约 1fps），rAF 恢复后自动静默。
-  function pvWatchdogTick() {
-    if (!previewView || document.hidden) return;
-    var t = now();
-    if (t - pvLastFrame < 1500) { pvStalls = 0; return; }
-    pvStalls += 1;
-    if (window.Stage && Stage.kick) Stage.kick();
-    if (pvStalls >= 2) {
-      measure(previewView);
-      renderOne(previewView, 16.7);
-      pvLastFrame = t;
+    el.classList.toggle('creative-interact', interact.on);
+    showViews(wanted);
+    if (window.ResizeObserver) {
+      stageObserver = new ResizeObserver(function () { measure(v); kickStaticFrame(); });
+      stageObserver.observe(el);
     }
-  }
-
-  function unmountPreview() {
-    if (!previewView) return;
-    var v = previewView;
-    previewView = null;
-    if (v.eng) { try { v.eng.dispose(); } catch (e) { /* 上下文没了就算了 */ } }
-    if (v.canvas && v.canvas.parentNode) v.canvas.parentNode.removeChild(v.canvas);
-    v.el.classList.remove('creative-on', 'creative-interact');
-    views = views.filter(function (x) { return x !== v; });
-    activeIdx = 0;
-    if (pvWatchdog) { clearInterval(pvWatchdog); pvWatchdog = 0; }
-    pvStalls = 0;
-    if (!views.length) {
-      // 预览是唯一视图（右栏增强渲染没开）：整个挂载收摊，wanted 还原为未启用
-      attached = false;
-      wanted = false;
-      document.documentElement.classList.remove('creative-3d');
-    } else {
-      refreshViews();
-    }
+    renderOne(v, 0);
     if (window.Stage && Stage.kick) Stage.kick();
+    return !!stageView;
   }
 
   // 舞台与全屏页是两个挂载点，各自一块画布 —— 一个 canvas 只能有一个 GL 上下文，
@@ -1394,7 +1399,7 @@
       probe.loss = null;
       teardown();
     }
-    if (attached) { showViews(true); refreshViews(); return effective(); }
+    if (views.some(function (v) { return v !== stageView; })) { showViews(true); refreshViews(); return effective(); }
 
     if (!window.CreativeGL || !CreativeGL.isAvailable()) {
       degrade(window.CreativeGL ? '本设备不支持 WebGL2' : '三维舞台模块未加载');
@@ -1407,15 +1412,15 @@
     var stageEl = $('stage');
     var a = mountView(stageEl);
     if (!a) { degrade('找不到舞台容器'); return 'off'; }
-    views = [a];
+    views.push(a);
 
-    views.forEach(function (v) {
+    [a].forEach(function (v) {
       try {
         v.eng = CreativeGL.create(v.canvas, { quality: tierIndex() });
       } catch (e) { v.eng = null; }
       if (v.eng) v.eng.warmUp();
     });
-    if (!views[0].eng) { degrade('创建 WebGL2 上下文失败'); return 'off'; }
+    if (!a.eng) { degrade('创建 WebGL2 上下文失败'); return 'off'; }
 
     attached = true;
     activeIdx = 0;
@@ -1426,8 +1431,6 @@
     showViews(true);
     refreshViews();
 
-    if (window.Stage && Stage.gate) Stage.gate('creative', targetFps, tick);
-
     if (window.ResizeObserver) {
       var ro = new ResizeObserver(function () {
         views.forEach(function (v) { measure(v); });
@@ -1436,7 +1439,7 @@
     }
     // 一次会话只量一次代价（降到的档位是这台机器的属性，不是这一首歌的属性）。
     // 真正的测量等第一次"确实在画"时再开始，见 tick 里的 maybeProbe。
-    if (!probe.skip && probe.loss === null) probe.pending = true;
+    if (!stageView && !probe.skip && probe.loss === null) probe.pending = true;
     return effective();
   }
 
@@ -1522,6 +1525,9 @@
   }
 
   function emit(kind, detail) {
+    if (kind === 'preset') timelineCues = null;
+    kickStaticFrame();
+    if (window.Stage && Stage.kick) Stage.kick();
     listeners.forEach(function (fn) { try { fn(kind, detail); } catch (e) { /* 单个监听器坏了不拖垮整帧 */ } });
   }
 
@@ -1544,14 +1550,19 @@
     loadLibrary();
     applyBackground();
     applyHand();
+    if (window.Stage && Stage.gate) Stage.gate('creative', targetFps, tick);
     return api2;
   }
 
   var api2 = {
     init: init,
     attach: attach,
-    mountPreview: mountPreview,
-    unmountPreview: unmountPreview,
+    attachStage: attachStage,
+    stageActive: function () { return !!stageView; },
+    syncPosition: function () {
+      if (!stageView || !window.Stage || !Stage.position) return;
+      if (Stage.position() !== renderedPosition) kickStaticFrame();
+    },
     // 容器尺寸被外部改掉后强制重设后备缓冲。ResizeObserver 已经会跟，
     // 这条是给「同一帧内改完布局就要出画面」的场景用的（工坊展开/收起预览）。
     remeasure: function () { views.forEach(function (v) { measure(v, true); }); },
@@ -1692,8 +1703,8 @@
     resetView: resetView,
 
     // 背景 / 手绘
-    setBackground: function (spec) { preset.bg = spec || { type: 'theme' }; applyBackground(); saveLocalSoon(); return preset.bg; },
-    setHandDrawn: function (spec) { preset.hand = spec || { on: false }; applyHand(); saveLocalSoon(); return preset.hand; },
+    setBackground: function (spec) { preset.bg = spec || { type: 'theme' }; applyBackground(); saveLocalSoon(); emit('background', preset.bg); return preset.bg; },
+    setHandDrawn: function (spec) { preset.hand = spec || { on: false }; applyHand(); saveLocalSoon(); emit('hand', preset.hand); return preset.hand; },
 
     // 预置库
     library: function () { return deep(library); },
@@ -1739,7 +1750,7 @@
     capture: capture,
     stats: function () {
       return {
-        active: !!wanted, scene: preset.scene, section: section,
+        active: !!wanted || !!stageView, stageActive: !!stageView, scene: preset.scene, section: section,
         fps: targetFps(), tier: tierIndex(), dprScale: DPR_STEPS[dprStep],
         beats: feat.beats, animations: animations.length,
         energy: Number(feat.energy.toFixed(3)),

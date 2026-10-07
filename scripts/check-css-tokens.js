@@ -49,20 +49,9 @@ const SOLID_HOVER_CONTRACT = [
   },
 ];
 
-// 图标按钮的尺寸契约：复用 .btn-pill 外形、但内容只有一个图标的按钮，
-// 必须用**复合选择器**把内边距与尺寸钉死。单类选择器 `.bar-pin-toggle` 与
-// `.btn-pill` 特异性相同，只要它排在 .btn-pill 之前，`padding: 0` 就会被静默
-// 盖回 `7px 14px`——34px 宽的按钮只剩 4px 内容盒，18px 的 svg 作为 flex 子项
-// 被压到最小尺寸（受默认 2:1 内在比例约束），symbol 跟着缩到 0.375 倍。
-// 页面不报错、不崩、元素也在，只是那个按钮变成一个空心圆里一小撮看不清的东西。
-const ICON_BUTTON_CONTRACT = [
-  {
-    file: 'style.css',
-    selector: '.btn-pill.bar-pin-toggle',
-    must: ['width', 'height', 'padding'],
-    why: '它是纯图标按钮。padding 输给 .btn-pill 会把图标压成亚像素，按钮看起来"空了"',
-  },
-];
+// 播放栏收起已改为图标 + 文字按钮，尺寸/命中由 check-bar-browser.js 验收。
+// 此处只登记纯图标按钮，不能对文字按钮强制固定宽度。
+const ICON_BUTTON_CONTRACT = [];
 
 // 音源 chip 的尺寸契约（online.css）：登录弹窗顶部的音源选择条里，
 // 已登录的那块（.is-in）内部是「头像 + 昵称」两个子元素，而音源条本身是 flex 行、

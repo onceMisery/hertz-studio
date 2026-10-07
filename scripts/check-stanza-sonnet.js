@@ -176,5 +176,106 @@ function near(a, b, eps, msg) { ok(Math.abs(a - b) <= eps, msg + ' (got ' + a + 
   ok(/padX \+ corner \+ 8/.test(block) && /padY \+ corner \+ 8/.test(block), '角标附近留出缺口');
 })();
 
+// 9) 分频段平滑：bass/vocal/treble 随帧收敛、复位立即吸附（2026-10-07 起
+//    performance 状态携带三个频段，供巨字呼吸/辉光/扫描扇区消费）
+(function () {
+  const perf = FX.createPerformance();
+  // lines 数组身份参与起音检测的复位判定（真实渲染器按行缓存返回同一数组），
+  // 这里必须复用同一个数组，否则每帧都算「换源复位」。
+  const lines = [];
+  const mk = (t, bands) => ({ playbackTime: t, isPlaying: true, lines: lines, track: { path: 'x' },
+    audio: Object.assign({ power: 0.4, spectrum: new Array(64).fill(0.4) }, bands) });
+  const a = perf.update(mk(0, { bass: 1, vocal: 0.8, treble: 0.2 }), {}, []);
+  ok(a.reset, '频段首帧复位');
+  eq(a.bass, 1, '复位帧直接吸附 bass');
+  eq(a.vocal, 0.8, '复位帧直接吸附 vocal');
+  const b = perf.update(mk(0.033, { bass: 0, vocal: 1, treble: 0.5 }), {}, []);
+  ok(b.bass < 1 && b.bass > 0.8, 'bass 平滑下滑不跳变 (got ' + b.bass.toFixed(3) + ')');
+  ok(b.vocal > 0.8 && b.vocal < 1, 'vocal 平滑上行不跳变 (got ' + b.vocal.toFixed(3) + ')');
+  ok(b.treble > 0.2 && b.treble < 0.5, 'treble 平滑跟随 (got ' + b.treble.toFixed(3) + ')');
+  const c = perf.update(mk(9, { bass: 0.5, vocal: 0, treble: 0 }), {}, []);
+  ok(c.reset, '时间跳变复位');
+  eq(c.bass, 0.5, '复位吸附新值');
+  eq(c.vocal, 0, '复位吸附新值 vocal');
+})();
+
+// 10) singingGlyph：辉光落点选字 —— 正在唱的优先、0.35s 内拖尾、过期熄灭
+(function () {
+  const node = (text, s, e) => ({ dataset: { text, startTime: s, endTime: e } });
+  const nodes = [node('一', 0, 1), node('二', 1, 2), node('三', 3, 4)];
+  eq(FX.singingGlyph(nodes, 1.5).node.dataset.text, '二', '唱到谁光跟谁');
+  eq(FX.singingGlyph(nodes, 2.1).node.dataset.text, '二', '拖尾期仍跟刚唱完的');
+  ok(FX.singingGlyph(nodes, 2.1).live < 1, '拖尾亮度线性衰减');
+  eq(FX.singingGlyph(nodes, 2.6), null, '拖尾过期熄灭');
+  eq(FX.singingGlyph(nodes, 3.5).node.dataset.text, '三', '跨间隙切到当前句');
+  eq(FX.singingGlyph([], 1), null, '空列表安全');
+  eq(FX.singingGlyph([node(' ', 0, 1)], 0.5), null, '空格字素不挂光');
+  eq(typeof FX.createVocalGlow, 'function', 'createVocalGlow 已导出（PIXI 注入式，Node 只验存在）');
+})();
+
+// 11) 副歌升级：chorusLift 与曲式层同一个 bump 公式（星诞「重复但升级」的相机出口）
+(function () {
+  eq(FX.chorusLift(null), 1, '缺段落回 1');
+  eq(FX.chorusLift({ kind: 'verse', visit: 3 }), 1, '非副歌回 1');
+  eq(FX.chorusLift({ kind: 'chorus' }), 1, '缺 visit 回 1');
+  eq(FX.chorusLift({ kind: 'chorus', visit: 1 }), 1, '首次副歌不抬');
+  ok(Math.abs(FX.chorusLift({ kind: 'chorus', visit: 2 }) - 1.08) < 1e-9, '第二次副歌抬 0.08');
+  ok(Math.abs(FX.chorusLift({ kind: 'chorus', visit: 5 }) - 1.16) < 1e-9, '第四次起封顶 0.16');
+})();
+
+// 12) 光晕设置直接驱动共享滤镜链：0 彻底摘除 pass，强拍不能把它重新打开。
+// 这里只替换 Pixi 的资源容器；enabled、uniform 写入与 stage.filters 均执行生产实现。
+(function () {
+  class UniformGroup {
+    constructor(entries) {
+      this.uniforms = Object.fromEntries(Object.entries(entries).map(([key, entry]) => [key, entry.value]));
+    }
+  }
+  class Filter {
+    constructor(options) { Object.assign(this, options); }
+    destroy() { this.destroyed = true; }
+  }
+  const PIXI = { UniformGroup, Filter, GlProgram: { from: value => value }, Rectangle: class {} };
+  const stage = {}, chain = FX.createOpticalChain(PIXI, stage), frame = { playbackTime: 1 };
+  const uniforms = chain.halation.filter.resources.halationUniforms.uniforms;
+  const update = tuning => chain.update(frame, tuning, 1280, 720);
+  update({ halation: 0, performance: { impact: 1, vocal: 1 } });
+  eq(chain.halation.enabled, false, '光晕 0：强拍/人声也保持关闭');
+  ok(!stage.filters.includes(chain.halation.filter), '光晕 0：从实际 filter 链摘除');
+  eq(uniforms.uStrength, 0, '光晕 0：shader 强度归零');
+  ok(stage.filters.includes(chain.print.filter), '单独关闭光晕保留印相');
+  update({ performance: { impact: 0, vocal: 0 } });
+  ok(chain.halation.enabled, '缺省光晕继续开启');
+  near(uniforms.uStrength, 0.5 * 0.72, 1e-9, '缺省强度保留');
+  update({ halation: 0.5, performance: { impact: 1, vocal: 1 } });
+  near(uniforms.uStrength, 0.5 * (0.72 + 0.5 + 0.22), 1e-9, '开启后强拍与人声调制保持原公式');
+  ok(stage.filters[0] === chain.print.filter && stage.filters[1] === chain.halation.filter, '重新开启保留印相→光晕顺序');
+  update({ halation: 0, performance: { impact: 1, vocal: 1 } });
+  ok(!stage.filters.includes(chain.halation.filter), '从开启切到 0 即帧摘除');
+  update({ halation: 0.5, postProcess: false, performance: { impact: 1 } });
+  eq(stage.filters.length, 0, '关闭后期仍关闭全链');
+  update({ halation: 0.5, quality: 'energy-saving', performance: { impact: 1 } });
+  eq(stage.filters.length, 0, '节能档仍关闭全链');
+  chain.setTint('#bfbfbf', true);
+  update({ monochrome: true, halation: 0.5, lensDispersion: 0.8, performance: { impact: 1, vocal: 1 } });
+  const printUniforms = chain.print.filter.resources.opticalUniforms.uniforms;
+  eq(printUniforms.uDispersion, 0, '单色在强拍与非零色散设置下仍不分离RGB');
+  ok(uniforms.uTint[0] === uniforms.uTint[1] && uniforms.uTint[1] === uniforms.uTint[2], '单色光晕保留灰色通道');
+  ok(uniforms.uStrength > 0, '单色仍保留光晕亮度与强拍调制');
+  chain.setTint('#bfbfbf', false);
+  update({ halation: 0.5, lensDispersion: 0.8, performance: { impact: 1 } });
+  ok(printUniforms.uDispersion > 0, '退出单色恢复彩色色散');
+  ok(uniforms.uTint[0] > uniforms.uTint[2], '退出单色恢复暖色光晕');
+  chain.setTint('#000000', true);
+  ok(Array.from(uniforms.uTint).every(value => value === 0), '合法纯黑单色覆盖此前的彩色光晕');
+  chain.setTint('#ffffff', true);
+  chain.setTint(0, true);
+  ok(Array.from(uniforms.uTint).every(value => value === 0), '数值色 0 同样是合法纯黑');
+  chain.setTint('invalid', true);
+  ok(Array.from(uniforms.uTint).every(value => value === 0), '非法色值不会污染上次有效 tint');
+  chain.destroy();
+  ok(chain.print.filter.destroyed && chain.halation.filter.destroyed, '两条滤镜资源一起销毁');
+})();
+
 if (failures) { console.error(failures + ' 项失败'); process.exit(1); }
 console.log('check-stanza-sonnet 全部通过');

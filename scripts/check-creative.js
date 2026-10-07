@@ -92,6 +92,7 @@ function makeEl(tag, size) {
       c.parentNode = null;
       return c;
     },
+    remove() { if (this.parentNode) this.parentNode.removeChild(this); },
     addEventListener() {},
     removeEventListener() {},
     dispatchEvent() { return true; },
@@ -181,15 +182,21 @@ sandbox.globalThis = sandbox;
 
 // Stage 桩：帧门把 tick 收下来，由测试自己按帧调用。
 const gates = {};
+const gateRegistrations = [];
 let stageVisible = true;   // E1：窄屏抽屉开关，默认可见（不影响既有测试）
+let songPosition = 12345;
 sandbox.Stage = {
   tier: () => 2,
   isHidden: () => false,
   isStageVisible: () => stageVisible,
   spectrum: () => spectrum,
   energy: () => 0.4,
-  position: () => 12345,
-  gate: (name, fpsFn, tickFn) => { gates[name] = { fpsFn, tickFn }; return true; }
+  position: () => songPosition,
+  gate: (name, fpsFn, tickFn) => {
+    gateRegistrations.push(name);
+    gates[name] = { fpsFn, tickFn };
+    return true;
+  }
 };
 let spectrum = null;
 
@@ -212,9 +219,11 @@ let nextRenderResult = null;      // 让 render() 在某一帧返回失败，用
 function makeFakeEngine() {
   fakeEngineCount += 1;
   const eng = {
+    calls: [],
     resize(w, h, d) { this.lastResize = { w, h, d }; },
     render(state) {
       renderCalls.push(state);
+      this.calls.push(state);
       if (nextRenderResult) return nextRenderResult;
       return { ok: true, scene: state.scene };
     },
@@ -290,11 +299,14 @@ ok(dirty.cues.length === 1, `坏 cue 被过滤（剩 ${dirty.cues.length} 条）
 ok(dirty.bindings.length === 1, `坏绑定被过滤（剩 ${dirty.bindings.length} 条）`);
 
 section('挂载与帧门');
-ok(gates.creative === undefined, 'attach 之前没有登记帧门');
+ok(!!gates.creative && gates.creative.fpsFn() === 0,
+  '初始化登记 creative 帧门，未挂载时不请求帧');
 const eff = CS.attach(true);
 ok(eff === '3d', 'attach(true) 返回 3d（' + eff + '）');
 ok(fakeEngineCount === 1, `舞台挂载开一个引擎（实际 ${fakeEngineCount}）`);
 ok(!!gates.creative, 'attach 之后登记了 creative 帧门');
+ok(gateRegistrations.filter((name) => name === 'creative').length === 1,
+  '侧栏挂载复用初始化的帧门，不重复登记');
 // 挂上就要有一帧画面：暂停时帧门返回 0，而 stage.js 的主循环此刻可能已经停转，
 // 不补这一帧的话用户拨开开关看到的是一块空白舞台。
 ok(renderCalls.length === 1, `挂载时画布补了一帧（${renderCalls.length}）`);
@@ -524,7 +536,7 @@ ok(round.ok === true, '往返导入成功：' + round.message);
 ok(CS.importJSON('{ 这不是 json').ok === false, '坏 JSON 被拒绝而不是抛异常');
 ok(CS.importJSON('[1,2,3]').ok === false, '错误形状的 JSON 被拒绝');
 
-// 面板内实时预览的过曝防线。
+// 真实创意舞台的过曝防线。
 //
 // 这一组是源码级断言，钉的是"为什么会糊成白团"的三条因果链。改动渲染链
 // 很容易把它们悄悄改回去，而这类改动在 Node 契约里跑不出任何异常——
@@ -558,15 +570,11 @@ ok(CS.importJSON('[1,2,3]').ok === false, '错误形状的 JSON 被拒绝');
   ok(/COARSE_MIN_PX/.test(glSrc) && /coarseShift/.test(glSrc),
     '粗光晕 target 有短边像素地板，不足时退回半分辨率（COARSE_MIN_PX / coarseShift）');
 
-  // 4) 预览必须有自己的频谱来源。
-  //    之前预览吃 Stage.spectrum()，没播歌时走 silent 分支，柱体全部贴地，
-  //    画面近乎静止——用户看到的就是"预览没起作用"。
-  ok(/function\s+synthSpectrum\s*\(/.test(csSrc),
-    '预览有独立的合成频谱（synthSpectrum），不依赖真实播放状态');
-  ok(/v\.preview\s*\)\s*sp\s*=\s*synthSpectrum/.test(csSrc),
-    'renderOne 对预览视图改用合成频谱，主舞台仍走真实频谱');
-  ok(!/function\s+synthSpectrum[\s\S]{0,900}Math\s*\.\s*random/.test(csSrc),
-    '合成频谱是纯函数（不含 Math.random：seek 回同一时刻必须是同一帧）');
+  // 4) 实际演出只消费真实频谱，不能重新引入模拟预览链。
+  ok(!/synthSpectrum|previewView|mountPreview/.test(csSrc),
+    '模拟频谱与独立预览视图已退场');
+  ok(/var\s+sp\s*=\s*window\.Stage\s*\?\s*Stage\.spectrum\(\)/.test(csSrc),
+    '创意舞台从 Stage 读取真实频谱');
 
   // 5) **双色令牌必须真的不同。** 这一条是"白色光晕"的真正根因，
   //    而且它伪装成渲染 bug —— 我先查了泛光、tone mapping、alpha 上限、
@@ -678,69 +686,29 @@ section('沉浸舞台下工坊只允许选择');
     'renderImmersive 记录本次锁定值，供上面的翻转比较');
 }
 
-section('宽屏工坊：预览有真正的展示位');
-// 窄面板里那个 16:9 画布约 350x200。这个尺寸下场景的空间结构读不出来，
-// 粗光晕的后备缓冲也掉到不足 1/8 分辨率 —— 放大容器是对症解，
-// 补曝光或调光晕都是在下游打补丁。
+section('工坊编辑真实大舞台');
 {
   const wsSrc = fs.readFileSync(path.join(WEB, 'workshop.js'), 'utf8');
   const csSrc = fs.readFileSync(path.join(WEB, 'creative-stage.js'), 'utf8');
   const html = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
   const css = fs.readFileSync(path.join(WEB, 'creative.css'), 'utf8');
 
-  ok(/id="ws-expand"/.test(html), '面板头部有展开按钮');
-
-  // 布局比例必须钉住：1.2fr / 380px 是 folia-major ThemePark 的取值，
-  // 不是随手配的数。改比例等于改了设计依据。
-  const wideBlock = (css.match(/\.ws-panel\.is-wide\s*\{[\s\S]*?\}/) || [''])[0];
-  ok(/minmax\(0,\s*1\.2fr\)\s*380px/.test(wideBlock),
-    '宽屏摊成两栏，比例 1.2fr / 380px（与 folia-major 一致）');
-  ok(/--ws-width:\s*min\(1180px,\s*96vw\)/.test(wideBlock),
-    '宽屏面板宽度有个上限，不是无限摊开');
-
-  // 预览这一列必须跟着面板高度走，不能留 aspect-ratio：
-  // 竖屏时 16:9 会变成一个居中的小方块，比不放预览还糟。
-  const stageBlock = (css.match(/\.ws-panel\.is-wide \.ws-preview-stage\s*\{[\s\S]*?\}/) || [''])[0];
-  ok(/aspect-ratio:\s*auto/.test(stageBlock) && /min-height/.test(stageBlock),
-    '宽屏预览去掉 16:9、改为撑满整列并有高度地板');
-  ok(/min-height:\s*300px/.test(css),
-    '预览容器有 300px 高度地板（对照 folia-major 的 min-h-[300px]）');
-
-  // 窄屏必须退回单列：1.2fr + 380px 在 900px 下预览只剩不到 300px 宽，
-  // 比原来的窄面板还小 —— 那就宁可不给宽屏。
-  const mq = (css.match(/@media\s*\(max-width:\s*900px\)\s*\{[\s\S]*?\n\}/) || [''])[0];
-  ok(/is-wide[\s\S]{0,200}?display:\s*flex/.test(mq),
-    '窄屏（≤900px）退回单列，不给一个更差的预览');
-  ok(/is-wide[\s\S]{0,300}?aspect-ratio:\s*16\s*\/\s*9/.test(mq),
-    '退回单列时预览恢复 16:9');
-
-  // 预览不在高级编排页签时，body 得顶上来 —— grid 里少一个格子会空一整列。
-  ok(/is-wide:not\(:has\(\.ws-preview:not\(\[hidden\]\)\)\)/.test(css),
-    '预览缺席时参数栏顶满整行（不留空列）');
-
-  // 主页右栏要跟着让位，否则宽屏工坊会盖住播放视窗。
-  ok(/body\.ws-open\.ws-wide:not\(\.s3d-open\)\s*#lyric-page/.test(css),
-    '宽屏时主页右栏让出宽度');
-
-  // 展开按钮只在预览真的挂着时可用
-  ok(/btn\.disabled\s*=\s*target\s*!==\s*'advanced'/.test(wsSrc),
-    '展开按钮在非高级编排页签下禁用');
-  ok(/function\s+applyWide\s*\(/.test(wsSrc), '工坊有 applyWide');
-  ok(/classList\.toggle\(\s*'ws-wide'/.test(wsSrc),
-    '宽屏态同步到 body（给 #lyric-page 让位用）');
-  ok(/classList\.toggle\(\s*'is-wide'/.test(wsSrc), '宽屏态挂在面板上');
-  ok(/i-compress/.test(wsSrc) && /i-expand/.test(wsSrc),
-    '按钮图标随状态在展开/收起之间切换');
-  ok(/WIDE_KEY/.test(wsSrc) && /localStorage\.setItem/.test(wsSrc),
-    '宽屏偏好持久化');
-
-  // 同一个 canvas：展开不能新开一条渲染链路，那会多一个 WebGL context。
-  ok(!/is-wide[\s\S]{0,300}?mountPreview\s*\(/.test(wsSrc),
-    '展开不新建预览挂载（复用同一个 canvas 与 context）');
-  ok(/remeasure:\s*function\s*\(/.test(csSrc),
-    'creative-stage 暴露 remeasure（容器变大后强制重设后备缓冲）');
-  ok(/CreativeStage\.remeasure/.test(wsSrc),
-    '切换宽屏后立刻重测尺寸，不等 ResizeObserver');
+  ok(!/ws-preview|ws-expand/.test(html), '工坊骨架已删除独立预览与展开按钮');
+  ok(!/ws-preview|ws-wide|\.ws-panel\.is-wide/.test(css),
+    '独立预览与宽屏预览布局已删除');
+  ok(!/mountPreview|applyWide|WIDE_KEY|previewWatchdog/.test(wsSrc + csSrc),
+    '独立预览挂载、宽屏偏好与看门狗已删除');
+  ok(/id="ws-stage-status"[^>]*role="status"/.test(html),
+    '工坊提供真实舞台状态的可访问播报');
+  ok(/Stage3D\.configure\(\{ sceneSource: 'creative' \}\)/.test(wsSrc)
+    && /Stage3D\.save\(\)/.test(wsSrc), '高级编排选择 Stage3D 的创意来源并持久化');
+  const activate = wsSrc.slice(wsSrc.indexOf('  function activateCreativeStage()'),
+    wsSrc.indexOf('  function syncStageStatus()'));
+  ok(/Stage3D\.open\(\)/.test(activate), '高级编排打开实际大舞台');
+  const open = wsSrc.slice(wsSrc.indexOf('  function setOpen(next)'),
+    wsSrc.indexOf('  function isOpen()'));
+  ok(!/Stage3D\.close\(|attachStage\(null\)|\.attach\(false\)/.test(open),
+    '关闭工坊只关闭编辑面板，演出继续');
 }
 
 section('预置库');
@@ -834,6 +802,126 @@ section('起音检测唯一实现');
   }
   const delta = CS.stats().beats - before;
   ok(delta > 0, `三维层随共享检测器数到 ${delta} 拍`);
+}
+
+section('大舞台生命周期与歌曲时间编排');
+{
+  // 独立实例避免既有导演/节拍动画污染时间轴；只替换 GL，不替换解析逻辑。
+  const registrationsBefore = gateRegistrations.length;
+  const oldTimeout = sandbox.setTimeout;
+  const oldClearTimeout = sandbox.clearTimeout;
+  const timers = new Map();
+  let timerId = 0;
+  sandbox.setTimeout = (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; };
+  sandbox.clearTimeout = (id) => timers.delete(id);
+  const flushFrames = () => {
+    for (const [id, timer] of [...timers]) {
+      if (timer.delay === 16) { timers.delete(id); timer.fn(); }
+    }
+  };
+  knownEls.stage.children.length = 0;
+  knownEls.stage.firstChild = null;
+  load('creative-stage.js');
+  const inst = sandbox.CreativeStage;
+  inst.init();
+  inst.attach(true);
+  const sidebarEngine = engines[engines.length - 1];
+  const host = makeEl('div', { w: 1600, h: 900 });
+  const lyric = makeEl('section');
+  host.appendChild(lyric);
+  const countBefore = engines.length;
+  ok(inst.attachStage(host) && inst.stageActive(), '真实大舞台挂载成功');
+  const stageEngine = engines[engines.length - 1];
+  ok(engines.length === countBefore + 1 && host.firstChild.className === 'creative-canvas'
+    && host.children[1] === lyric, '大舞台只创建一个引擎，画布位于歌词之下');
+  inst.attachStage(host);
+  ok(engines.length === countBefore + 1, '重复挂载同一大舞台不新建上下文');
+  ok(gateRegistrations.length - registrationsBefore === 1,
+    '初始化、侧栏与大舞台挂载总共只登记一个帧门');
+  ok(!inst.stats().probe.pending && !inst.stats().probe.running,
+    '实际演出取消侧栏静默探测，避免黑帧');
+
+  inst.setPreset({ scene: 'towers', director: false, look: { bloom: 0.4 },
+    cues: [
+      { at: 3, len: 1000, ease: 'linear', set: { 'look.bloom': 0.4 } },
+      { at: 2, len: 2000, ease: 'linear', set: { 'look.bloom': 2.4 } }
+    ] });
+  const presetBefore = inst.exportJSON();
+  const stageTick = gates.creative.tickFn;
+  const frameAt = (position) => {
+    songPosition = position;
+    fakeNow += 16.7;
+    stageTick(16.7);
+    return stageEngine.calls[stageEngine.calls.length - 1];
+  };
+  const closeTo = (actual, expected) => Math.abs(actual - expected) < 1e-6;
+  stageVisible = false;
+  const sidebarFrames = sidebarEngine.calls.length;
+  const beforeFrames = stageEngine.calls.length;
+  ok(gates.creative.fpsFn() > 0, '侧栏不可见时真实大舞台仍请求帧');
+  const beforeCue = frameAt(1000);
+  ok(stageEngine.calls.length === beforeFrames + 1 && sidebarEngine.calls.length === sidebarFrames,
+    '每 tick 只绘制实际大舞台，侧栏不空跑');
+  ok(beforeCue.t === 1000 && closeTo(beforeCue.post.bloom, 0.4),
+    '渲染时间来自歌曲位置，cue 开始前保留基础值');
+  ok(closeTo(frameAt(2500).post.bloom, 0.9), '定时 cue 按歌曲毫秒位置线性插值');
+  ok(closeTo(frameAt(3500).post.bloom, 0.9),
+    '重叠 cue 按开始时间排序，从前一条在交接时的值继续');
+  ok(closeTo(frameAt(5000).post.bloom, 0.4), '定时 cue 完成后保持目标值');
+  const repeat = frameAt(2500);
+  ok(closeTo(repeat.post.bloom, 0.9), '向后 seek 重新计算相同时间的 cue 值');
+  ok(inst.exportJSON() === presetBefore, '播放与 seek 不改写持久化预置');
+
+  document.body.classList.remove('is-playing');
+  flushFrames();
+  ok(gates.creative.fpsFn() === 0, '暂停中的歌曲时间 cue 不要求空闲帧');
+  const pausedFrames = stageEngine.calls.length;
+  const pausedPosition = songPosition;
+  fakeNow += 10000;
+  inst.syncPosition();
+  flushFrames();
+  ok(stageEngine.calls.length === pausedFrames && songPosition === pausedPosition,
+    '墙钟继续前进但歌曲位置不变时，暂停场景不补帧');
+  songPosition = 3500;
+  inst.syncPosition();
+  flushFrames();
+  ok(stageEngine.calls.length === pausedFrames + 1
+    && closeTo(stageEngine.calls[stageEngine.calls.length - 1].post.bloom, 0.9),
+    '暂停 seek 只补一帧，并按新位置计算编排');
+  inst.updateCue(0, { at: 3, len: 1000, ease: 'linear', set: { 'look.bloom': 3 } });
+  flushFrames();
+  ok(closeTo(stageEngine.calls[stageEngine.calls.length - 1].post.bloom, 2.2),
+    '编辑 cue 后使时间轨缓存失效，暂停时立即重绘');
+  inst.removeCue(0);
+  flushFrames();
+  ok(closeTo(stageEngine.calls[stageEngine.calls.length - 1].post.bloom, 1.9),
+    '删除覆盖 cue 后恢复前一条时间轨');
+  songPosition = 1000;
+  inst.syncPosition();
+  flushFrames();
+  ok(closeTo(stageEngine.calls[stageEngine.calls.length - 1].post.bloom, 0.4),
+    'seek 到所有 cue 之前恢复基础值');
+
+  inst.attach(false);
+  ok(inst.stageActive() && host.classList.contains('creative-on'),
+    '关闭侧栏增强渲染不关闭真实大舞台');
+  inst.attachStage(null);
+  ok(!inst.stageActive() && stageEngine.disposed && host.children.length === 1
+    && host.firstChild === lyric, '关闭大舞台释放其引擎与画布，保留歌词宿主内容');
+  ok(!sidebarEngine.disposed && sidebarEngine.calls.length === sidebarFrames,
+    '大舞台拆卸保留侧栏上下文与原关闭偏好');
+  stageVisible = true;
+  inst.attach(true);
+  ok(engines.length === countBefore + 1 && !sidebarEngine.disposed,
+    '重新开启侧栏复用原上下文');
+  inst.attachStage(host);
+  inst.attachStage(null);
+  ok(gateRegistrations.length - registrationsBefore === 1,
+    '大舞台再次开合仍复用唯一帧门');
+  document.body.classList.add('is-playing');
+  songPosition = 12345;
+  sandbox.setTimeout = oldTimeout;
+  sandbox.clearTimeout = oldClearTimeout;
 }
 
 section('渲染代价探测');
@@ -1235,7 +1323,8 @@ CS3.init();
 const eff3 = CS3.attach(true);
 ok(eff3 === 'off', '拿不到 GL 上下文时返回 off（' + eff3 + '）');
 ok(!!CS3.degradedBecause(), '给出了降级原因：' + CS3.degradedBecause());
-ok(gates.creative === undefined, '降级后没有登记帧门');
+ok(!!gates.creative && gates.creative.fpsFn() === 0,
+  '降级后保留已登记的帧门，但不请求任何帧');
 ok(knownEls.stage.children.every((c) => c.className !== 'creative-canvas'),
   '降级时把画布从 DOM 里摘掉了（否则会留一块永久黑屏）');
 

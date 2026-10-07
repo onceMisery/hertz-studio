@@ -18,6 +18,7 @@
 pub mod bootstrap;
 pub mod complete;
 pub mod config;
+pub mod collection;
 pub mod daily;
 pub mod diag;
 pub mod error;

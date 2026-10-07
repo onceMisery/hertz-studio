@@ -294,3 +294,54 @@ for (const event of ['change', 'pointercancel', 'blur']) {
 }
 check(read('stage3d.js').includes("$('s3d-volume').addEventListener('input', onVolumeInput)"), 'volume input is bound to immediate submission');
 console.log('3D interaction checks passed: ' + checks);
+
+// ---------------------------------------------------------------------------
+// 沉浸模式回归（2026-10-07 用户报告「全屏控制按钮不隐藏」）：chrome 静止自动
+// 隐藏不得被「鼠标点击残留的焦点」永久钉住 —— 焦点豁免只认键盘焦点
+// （:focus-visible）。设置/工坊模态、拖拽中的豁免保持不变。
+{
+  function chromeHarness(keyboardFocus, extra) {
+    const removed = [];
+    let timerFn = null;
+    const focusedEl = { matches: sel => (sel === ':focus-visible') === keyboardFocus };
+    const rootStub = {
+      classList: {
+        set: new Set(['s3d-chrome']),
+        contains(c) { return this.set.has(c); },
+        add(c) { this.set.add(c); },
+        remove(c) { this.set.delete(c); removed.push(c); }
+      },
+      querySelector() { return focusedEl; }
+    };
+    const ctx = load('stage3d.js', ['pokeChrome'], Object.assign({
+      root: rootStub, active: true, chromeTimer: 1, CHROME_HIDE_MS: 2600,
+      dragging: false, seeking: false,
+      chromeKeyboardFocus: () => keyboardFocus,
+      Workshop: { isOpen: () => false },
+      Stage: { kick() {} },
+      global: { Workshop: { isOpen: () => false }, Stage: { kick() {} } },
+      $: () => ({ hidden: true }),
+      setTimeout: fn => { timerFn = fn; return 7; },
+      clearTimeout() {}
+    }, extra || {}));
+    return {
+      fire() { ctx.pokeChrome(); assert.equal(typeof timerFn, 'function', 'hide timer scheduled'); timerFn(); },
+      removed
+    };
+  }
+  const mouse = chromeHarness(false);
+  mouse.fire();
+  check(mouse.removed.includes('s3d-chrome'), 'mouse click residual focus: chrome hides after idle');
+  const keyboard = chromeHarness(true);
+  keyboard.fire();
+  check(!keyboard.removed.includes('s3d-chrome'), 'keyboard focus (:focus-visible): chrome stays');
+  const modal = chromeHarness(false, { $: () => ({ hidden: false }) });
+  modal.fire();
+  check(!modal.removed.includes('s3d-chrome'), 'open settings panel: chrome stays');
+  const drag = chromeHarness(false, { dragging: true });
+  drag.fire();
+  check(!drag.removed.includes('s3d-chrome'), 'camera drag in progress: chrome stays');
+  const pokeBody = (read('stage3d.js').match(/function pokeChrome\(\)[\s\S]*?\n  \}/) || [''])[0];
+  check(pokeBody.length > 0 && pokeBody.indexOf(':focus-within') < 0,
+    'chrome guard no longer pins on :focus-within (mouse leftover focus)');
+}

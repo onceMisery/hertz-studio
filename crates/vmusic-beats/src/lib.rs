@@ -69,7 +69,9 @@ const ANALYZE_MS: u64 = 720_000;
 const LONG_MS: u64 = 480_000;
 const HIGH_RATE: u32 = 22_050;
 const LOW_RATE: u32 = 11_025;
-const MAP_VERSION: u32 = 1;
+/// 拍表本身的版本（分析算法换代才动）。磁盘信封另有自己的编码版本，
+/// 见 hertz-studio stage_beats 的 CACHE_FORMAT_VERSION——两者别混。
+pub const MAP_VERSION: u32 = 1;
 
 /// 解码文件 → 单声道 → [`analyze_mono`]。只解前 720s（推演补尾段），
 /// 避免对整首长曲做无谓解码。

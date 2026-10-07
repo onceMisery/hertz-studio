@@ -341,22 +341,33 @@ pub async fn beatmap(state: &Arc<AppState>, query: &Value) -> RpcResult {
     // track 是必填项：HTTP 版用 Query<BeatmapQuery> 抽取，缺了就是 400。这里走
     // 同一个结构体，免得「没带 track」在插件形态下变成一个 404 unavailable。
     let q: crate::routes::BeatmapQuery = crate::rpc::query_as(query)?;
-    Ok(
-        match crate::stage_beats::request_on_demand(state, &q.track).await {
-            crate::stage_beats::Outcome::Ready { map, cached } => {
-                let mut value = serde_json::to_value(&map).unwrap_or(Value::Null);
-                if let Some(obj) = value.as_object_mut() {
-                    obj.insert("cached".into(), Value::Bool(cached));
-                }
-                Reply::ok(value)
-            }
-            crate::stage_beats::Outcome::Analyzing => {
-                Reply::with_status(202, json!({ "status": "analyzing" }))
-            }
-            crate::stage_beats::Outcome::Unavailable(reason) => Reply::with_status(
-                404,
-                json!({ "status": "unavailable", "reason": reason.as_str() }),
-            ),
-        },
-    )
+    let outcome = crate::stage_beats::request_on_demand(state, &q.track).await;
+    // 状态码与体都取自 `crate::routes` 里那两个共用函数：线格式与 HTTP 门面
+    // 逐字一致，两个宿主不会各自漂移。
+    Ok(Reply::with_status(
+        crate::routes::beatmap_outcome_status(&outcome).as_u16(),
+        crate::routes::beatmap_outcome_json(outcome),
+    ))
+}
+
+/// 后台节拍分析的状态面板（与 `GET /v1/stage/beatmap/status` 同一份）。
+pub async fn beatmap_status(state: &Arc<AppState>, query: &Value) -> RpcResult {
+    // 同一个查询结构体：`track` 缺省时两个宿主都得是「只回全局计数」，
+    // 而不是插件形态下多一个必填参数。
+    let q: crate::routes::BeatmapStatusQuery = crate::rpc::query_as(query)?;
+    Ok(Reply::ok(
+        crate::stage_beats::status(state, q.track.as_deref()).await,
+    ))
+}
+
+/// 手动重试某一首的分析（与 `POST /v1/stage/beatmap/retry` 同一份）：应答是
+/// 三态之一，形状同 `beatmap`，但状态码恒 200 —— 重试是动作，结论在体里。
+pub async fn beatmap_retry(state: &Arc<AppState>, body: &Value) -> RpcResult {
+    let req: crate::routes::BeatmapRetry = crate::rpc::body_as(body)?;
+    let track_id = req.track_id.trim().to_string();
+    if track_id.is_empty() {
+        return Err(bad_request("缺少 track_id"));
+    }
+    let outcome = crate::stage_beats::retry(state, &track_id).await;
+    Ok(Reply::ok(crate::routes::beatmap_outcome_json(outcome)))
 }

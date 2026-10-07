@@ -29,6 +29,12 @@ const PREBUFFER_CAP: u64 = 3 * 512 * 1024;
 /// 单曲下载硬上限。64MiB 会误杀无损/Hi-Res（整轨 flac 常达数十 MiB），
 /// 放宽到 512MiB；超限仍按「内容过大」拒绝，防止异常响应撑爆磁盘。
 const MAX_AUDIO_BYTES: u64 = 512 * 1024 * 1024;
+/// 同一格（同一地址）最多要几次，含第一次。
+///
+/// 断链的绝大多数形态是「这一条连接上的这份字节断了」（CDN 抖动、代理掐断、
+/// 网易那些 20 分钟过期的直链在慢链路上被切），它们都能靠 Range 回同一个地址
+/// 接着要救回来。用尽这三次才向下降级到下一格。
+const RUNG_ATTEMPTS: u32 = 3;
 
 /// 开播模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,11 +223,30 @@ impl Read for HttpMediaSource {
             })?;
         let readable = available.saturating_sub(self.pos) as usize;
         if readable == 0 {
+            // 位置正好等于已交付长度才是文件尾。位置**越过**它只有一种解释：底层
+            // 字节流被换成了一份更短的（换格时 `Inner` 记的是新格自己的长度），
+            // 这个偏移往后永远等不到字节。这种「读不到」绝不能报成自然播完——
+            // 上面会把它当成这一首播完了去跳下一曲，还会顺手把半首计入播放量。
+            if self.pos > available {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "字节流已更换，读取位置越过了交付长度",
+                ));
+            }
             return Ok(0); // 干净 EOF
         }
         self.file.seek(SeekFrom::Start(self.pos))?;
         let take = readable.min(buf.len());
         let n = self.file.read(&mut buf[..take])?;
+        if n == 0 {
+            // `readable` 说这里还有字节，句柄却读出了文件尾：本句柄指向的文件比
+            // 承诺的短（换格时旧 `.part` 被删除重建，这个打开的句柄还挂在旧那份上，
+            // Windows 允许它读完残留内容）。报 EOF 等于谎称「这首播完了」，得报错。
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "缓存文件比已交付长度短",
+            ));
+        }
         self.pos += n as u64;
         Ok(n)
     }
@@ -409,19 +434,20 @@ fn relabel_key(key: &str, duration_ms: Option<u64>, written: u64) -> String {
     }
 }
 
-/// 判定「这条候选不行，换下一条」。
+/// 判定「这条候选不行，换下一条」——本宏只做换条之前的清理，跳转由调用方紧跟着
+/// 写 `continue 'rungs;`：宏体内的 `continue` 受标签卫生限制够不到函数里的
+/// `'rungs`（它只看得见宏体自己声明的标签），写进宏里就编译不过。
 ///
 /// 必须把 `written` 归零：下一个候选是从 0 开始的**另一条流**，带着旧偏移去
-/// Range 续传会把两条流拼进同一个缓存文件（`broke` 的中断续传不走这里，那是
+/// Range 续传会把两条流拼进同一个缓存文件（同一格自己的断续传不走这里，那是
 /// 同一条流的延续）。偏移归零后 `Inner::reset` 让解码线程回到等待态，
-/// `.part` 删掉由下一轮重新创建。
+/// `.part` 删掉由下一格重建。
 macro_rules! reject_candidate {
     ($inner:expr, $part_path:expr, $written:expr, $head:expr) => {{
         $written = 0;
         $head.clear();
         $inner.reset();
         let _ = std::fs::remove_file($part_path);
-        continue;
     }};
 }
 
@@ -432,8 +458,12 @@ macro_rules! reject_candidate {
 /// 记在候选上，见 [`crate::online::ladder::Candidate`]）。
 ///
 /// 候选按序尝试：传输层失败与内容级不合格（过大/过小/不完整/认不出容器）
-/// 都是**换下一个候选**，全部用尽才算这次取流失败。`written > 0` 的候选会带
-/// Range 续传，因此内容被拒时必须先归零偏移。
+/// 都是**换下一个候选**，全部用尽才算这次取流失败。
+///
+/// 续传只发生在**同一格内部**：[`RUNG_ATTEMPTS`] 次打的都是同一个地址，Range
+/// 接着上次要到的地方继续要，断链因而不会惊动正在等的解码线程。一个候选的
+/// `written` 是它自己那份字节的偏移，拿到下一格去就是两份内容的拼接，所以
+/// 换格一律把偏移与嗅探头归零、`.part` 删掉从头重下。
 ///
 /// `index` 是缓存目录的内存索引：rename 落盘成功后要把正式文件登记进去
 /// （写时增量维护），否则这次下载的成果在本次进程里查不到，会白下一次。
@@ -477,272 +507,313 @@ pub fn start(
                     crate::diag::redact_url(ladder.first().map(|c| c.url.as_str()).unwrap_or("")),
                 referer = ladder.iter().any(|c| c.referer.is_some())
             );
-            for (i, cand) in ladder.iter().enumerate() {
+            'rungs: for (i, cand) in ladder.iter().enumerate() {
                 let url = cand.url.as_str();
-                if abort.load(Ordering::Relaxed) {
+                // 换格 = 换一份字节：上一格攒下的偏移对新格毫无意义。带着旧偏移去
+                // Range 新格，要么把两条不同的流拼进同一个缓存文件（那是投毒缓存，
+                // 之后每次播放都解不开），要么让正在读的解码器在新格更短的总长上撞到
+                // 「假的文件尾」——表现就是这一首播到一半被当成播完，接着跳下一曲。
+                // 只有同一格自己的续传才保留偏移（见下面 attempt 那一层）。
+                if written > 0 {
                     crate::diaglog!(
-                        "download.cancel",
+                        "download.rung_restart",
                         key = key2,
                         url_index = i,
-                        written = written
+                        dropped_bytes = written
                     );
+                    written = 0;
+                    head.clear();
+                    inner.reset();
                     let _ = std::fs::remove_file(&part_path);
-                    return Err("download aborted".to_string());
                 }
-                let mut req = client.get(url);
-                if written > 0 {
-                    req = req.header(reqwest::header::RANGE, format!("bytes={written}-"));
-                }
-                if let Some(rf) = cand.referer {
-                    req = req.header(reqwest::header::REFERER, rf);
-                }
-                let resp = match req.send().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::debug!("下载连接失败，尝试下一地址: {e}");
+                for attempt in 1..=RUNG_ATTEMPTS {
+                    if abort.load(Ordering::Relaxed) {
+                        crate::diaglog!(
+                            "download.cancel",
+                            key = key2,
+                            url_index = i,
+                            written = written
+                        );
+                        let _ = std::fs::remove_file(&part_path);
+                        return Err("download aborted".to_string());
+                    }
+                    let mut req = client.get(url);
+                    if written > 0 {
+                        req = req.header(reqwest::header::RANGE, format!("bytes={written}-"));
+                    }
+                    if let Some(rf) = cand.referer {
+                        req = req.header(reqwest::header::REFERER, rf);
+                    }
+                    let resp = match req.send().await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::debug!("下载连接失败，尝试下一地址: {e}");
+                            crate::diaglog!(
+                                "download.retry",
+                                key = key2,
+                                url_index = i,
+                                url = crate::diag::redact_url(url),
+                                reason = e.to_string()
+                            );
+                            continue 'rungs;
+                        }
+                    };
+                    let status = resp.status();
+                    if status == reqwest::StatusCode::OK && written > 0 {
+                        // 服务器无视 Range：从头重下。
+                        crate::diaglog!(
+                            "download.range_ignored",
+                            key = key2,
+                            url_index = i,
+                            url = crate::diag::redact_url(url),
+                            restart_from = written
+                        );
+                        written = 0;
+                        head.clear();
+                        inner.reset();
+                    } else if status != reqwest::StatusCode::OK
+                        && status != reqwest::StatusCode::PARTIAL_CONTENT
+                    {
+                        tracing::debug!("下载返回 {status}，尝试下一地址");
                         crate::diaglog!(
                             "download.retry",
                             key = key2,
                             url_index = i,
                             url = crate::diag::redact_url(url),
-                            reason = e.to_string()
+                            reason = format!("HTTP {status}")
                         );
-                        continue;
+                        continue 'rungs;
                     }
-                };
-                let status = resp.status();
-                if status == reqwest::StatusCode::OK && written > 0 {
-                    // 服务器无视 Range：从头重下。
-                    crate::diaglog!(
-                        "download.range_ignored",
-                        key = key2,
-                        url_index = i,
-                        url = crate::diag::redact_url(url),
-                        restart_from = written
-                    );
-                    written = 0;
-                    head.clear();
-                    inner.reset();
-                } else if status != reqwest::StatusCode::OK
-                    && status != reqwest::StatusCode::PARTIAL_CONTENT
-                {
-                    tracing::debug!("下载返回 {status}，尝试下一地址");
-                    crate::diaglog!(
-                        "download.retry",
-                        key = key2,
-                        url_index = i,
-                        url = crate::diag::redact_url(url),
-                        reason = format!("HTTP {status}")
-                    );
-                    continue;
-                }
-                // 错误页最常见的形状是 200 + text/html（限流页、登录跳转、网关
-                // 报错都这样）。不挡的话它会被改名成 {key}.mp3 永久落缓存，之后
-                // 每次播放都解码失败——这是投毒缓存，不是重试能救的。
-                if resp
-                    .headers()
-                    .get(reqwest::header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .is_some_and(|ct| ct.starts_with("text/"))
-                {
-                    tracing::debug!("候选返回文本内容，尝试下一地址");
-                    crate::diaglog!(
-                        "download.reject",
-                        key = key2,
-                        url_index = i,
-                        url = crate::diag::redact_url(url),
-                        reason = "content-type 是文本"
-                    );
-                    reject_candidate!(inner, &part_path, written, head);
-                }
-                if written == 0 {
-                    // 谁从 0 开始交付字节，这一份内容的档位就是它。降级换候选时
-                    // 必须重记，否则「实际档位」还按主地址报。
-                    inner.set_bitrate(cand.bitrate);
-                    let total = resp.content_length();
-                    if let Some(t) = total {
-                        if t > MAX_AUDIO_BYTES {
+                    // 错误页最常见的形状是 200 + text/html（限流页、登录跳转、网关
+                    // 报错都这样）。不挡的话它会被改名成 {key}.mp3 永久落缓存，之后
+                    // 每次播放都解码失败——这是投毒缓存，不是重试能救的。
+                    if resp
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|ct| ct.starts_with("text/"))
+                    {
+                        tracing::debug!("候选返回文本内容，尝试下一地址");
+                        crate::diaglog!(
+                            "download.reject",
+                            key = key2,
+                            url_index = i,
+                            url = crate::diag::redact_url(url),
+                            reason = "content-type 是文本"
+                        );
+                        reject_candidate!(inner, &part_path, written, head);
+                        continue 'rungs;
+                    }
+                    if written == 0 {
+                        // 谁从 0 开始交付字节，这一份内容的档位就是它。降级换候选时
+                        // 必须重记，否则「实际档位」还按主地址报。
+                        inner.set_bitrate(cand.bitrate);
+                        let total = resp.content_length();
+                        if let Some(t) = total {
+                            if t > MAX_AUDIO_BYTES {
+                                crate::diaglog!(
+                                    "download.reject",
+                                    key = key2,
+                                    url_index = i,
+                                    total_bytes = t,
+                                    reason = "内容过大"
+                                );
+                                reject_candidate!(inner, &part_path, written, head);
+                                continue 'rungs;
+                            }
+                        }
+                        inner.set_total(total);
+                    }
+
+                    // 阻塞写在专用下载任务里，8-64KB 的 write 不构成运行时压力。
+                    // create 是必需的：内容被拒时 .part 已删掉，下一轮要能重建。
+                    // 反过来 truncate 必须显式关掉——断连续传时要保留已写的头一段，
+                    // 从 `written` 处覆盖写。
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(&part_path)
+                        .map_err(|e| e.to_string())?;
+                    file.seek(SeekFrom::Start(written))
+                        .map_err(|e| e.to_string())?;
+                    let mut stream = resp.bytes_stream();
+                    let mut broke = false;
+                    // 流中途超出硬上限：标记后先跳出内层循环，统一走候选拒绝
+                    // （这里的 `continue` 只能跳出 while，换候选得靠循环外的拒绝）。
+                    let mut oversize = false;
+                    while let Some(chunk) = stream.next().await {
+                        if abort.load(Ordering::Relaxed) {
+                            drop(file);
+                            let _ = std::fs::remove_file(&part_path);
+                            return Err("download aborted".to_string());
+                        }
+                        match chunk {
+                            Ok(bytes) => {
+                                if written + bytes.len() as u64 > MAX_AUDIO_BYTES {
+                                    oversize = true;
+                                    break;
+                                }
+                                if head.len() < 32 {
+                                    let take = 32 - head.len();
+                                    head.extend_from_slice(&bytes[..bytes.len().min(take)]);
+                                    if let Some(ext) = sniff_ext(&head) {
+                                        inner.set_ext(ext);
+                                    }
+                                }
+                                file.write_all(&bytes).map_err(|e| {
+                                    inner.fail(e.to_string());
+                                    e.to_string()
+                                })?;
+                                written += bytes.len() as u64;
+                                inner.advance(bytes.len() as u64);
+                            }
+                            Err(e) => {
+                                tracing::debug!("下载中断，尝试续传: {e}");
+                                crate::diaglog!(
+                                    "download.broke",
+                                    key = key2,
+                                    url_index = i,
+                                    url = crate::diag::redact_url(url),
+                                    written = written,
+                                    reason = e.to_string()
+                                );
+                                broke = true;
+                                break;
+                            }
+                        }
+                    }
+                    drop(file);
+                    if broke {
+                        // 断的是这一格自己的连接、这一份字节：拿 Range 回同一个地址接着
+                        // 要。偏移没归零、错误位没置，正在等字节的解码线程只是多等一轮
+                        // poll —— 续上之后这一首照样能播完，这才是「边下边播」该有的样子。
+                        if attempt < RUNG_ATTEMPTS {
+                            crate::diaglog!(
+                                "download.resume",
+                                key = key2,
+                                url_index = i,
+                                attempt = attempt,
+                                from_byte = written
+                            );
+                            continue;
+                        }
+                        // 三次都没能把这份字节要完：这一格放弃，向下降级。下一格的开头
+                        // 会把偏移归零——那是另一份字节，旧偏移对它没有任何意义。
+                        continue 'rungs;
+                    }
+                    if oversize {
+                        crate::diaglog!(
+                            "download.reject",
+                            key = key2,
+                            url_index = i,
+                            written = written,
+                            reason = "内容过大"
+                        );
+                        reject_candidate!(inner, &part_path, written, head);
+                        continue 'rungs;
+                    }
+                    // 下面三条判的都是「这条候选不合格」而不是「取流失败」：还有候选就
+                    // 换，全部用尽才在循环外 fail。理由只记 diaglog —— inner.fail 是
+                    // 终态信号，wait_for / poll_prebuffer 一读到就把还在等字节的解码线程
+                    // 判死，非终态调用它会让后来成功的下载带着残留错误。
+                    if written <= 1024 {
+                        crate::diaglog!(
+                            "download.reject",
+                            key = key2,
+                            url_index = i,
+                            written = written,
+                            reason = "内容过小，可能已被版权限制"
+                        );
+                        reject_candidate!(inner, &part_path, written, head);
+                        continue 'rungs;
+                    }
+                    // 截断响应（连接提前断开但没触发续传、或末个 URL 给了短体）
+                    // 绝不允许 rename 成正式缓存：否则 find_cached_by_key 会永久
+                    // 命中这个坏文件，之后每次播放都解码失败。Content-Length 已知
+                    // 才校验；chunked（total=None）没有可比对的总长，跳过。
+                    if let Some(t) = inner.total() {
+                        if written != t {
                             crate::diaglog!(
                                 "download.reject",
                                 key = key2,
                                 url_index = i,
+                                written = written,
                                 total_bytes = t,
-                                reason = "内容过大"
+                                reason = "下载不完整"
                             );
                             reject_candidate!(inner, &part_path, written, head);
+                            continue 'rungs;
                         }
                     }
-                    inner.set_total(total);
-                }
-
-                // 阻塞写在专用下载任务里，8-64KB 的 write 不构成运行时压力。
-                // create 是必需的：内容被拒时 .part 已删掉，下一轮要能重建。
-                // 反过来 truncate 必须显式关掉——断连续传时要保留已写的头一段，
-                // 从 `written` 处覆盖写。
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(false)
-                    .open(&part_path)
-                    .map_err(|e| e.to_string())?;
-                file.seek(SeekFrom::Start(written))
-                    .map_err(|e| e.to_string())?;
-                let mut stream = resp.bytes_stream();
-                let mut broke = false;
-                // 流中途超出硬上限：标记后先跳出内层循环，统一走候选拒绝
-                // （这里的 `continue` 只能跳出 while，换候选得靠循环外的拒绝）。
-                let mut oversize = false;
-                while let Some(chunk) = stream.next().await {
-                    if abort.load(Ordering::Relaxed) {
-                        drop(file);
-                        let _ = std::fs::remove_file(&part_path);
-                        return Err("download aborted".to_string());
-                    }
-                    match chunk {
-                        Ok(bytes) => {
-                            if written + bytes.len() as u64 > MAX_AUDIO_BYTES {
-                                oversize = true;
-                                break;
-                            }
-                            if head.len() < 32 {
-                                let take = 32 - head.len();
-                                head.extend_from_slice(&bytes[..bytes.len().min(take)]);
-                                if let Some(ext) = sniff_ext(&head) {
-                                    inner.set_ext(ext);
-                                }
-                            }
-                            file.write_all(&bytes).map_err(|e| {
-                                inner.fail(e.to_string());
-                                e.to_string()
-                            })?;
-                            written += bytes.len() as u64;
-                            inner.advance(bytes.len() as u64);
-                        }
-                        Err(e) => {
-                            tracing::debug!("下载中断，尝试续传: {e}");
-                            crate::diaglog!(
-                                "download.broke",
-                                key = key2,
-                                url_index = i,
-                                url = crate::diag::redact_url(url),
-                                written = written,
-                                reason = e.to_string()
-                            );
-                            broke = true;
-                            break;
-                        }
-                    }
-                }
-                drop(file);
-                if broke {
-                    continue; // 下一个 URL 带 Range 续传
-                }
-                if oversize {
-                    crate::diaglog!(
-                        "download.reject",
-                        key = key2,
-                        url_index = i,
-                        written = written,
-                        reason = "内容过大"
-                    );
-                    reject_candidate!(inner, &part_path, written, head);
-                }
-                // 下面三条判的都是「这条候选不合格」而不是「取流失败」：还有候选就
-                // 换，全部用尽才在循环外 fail。理由只记 diaglog —— inner.fail 是
-                // 终态信号，wait_for / poll_prebuffer 一读到就把还在等字节的解码线程
-                // 判死，非终态调用它会让后来成功的下载带着残留错误。
-                if written <= 1024 {
-                    crate::diaglog!(
-                        "download.reject",
-                        key = key2,
-                        url_index = i,
-                        written = written,
-                        reason = "内容过小，可能已被版权限制"
-                    );
-                    reject_candidate!(inner, &part_path, written, head);
-                }
-                // 截断响应（连接提前断开但没触发续传、或末个 URL 给了短体）
-                // 绝不允许 rename 成正式缓存：否则 find_cached_by_key 会永久
-                // 命中这个坏文件，之后每次播放都解码失败。Content-Length 已知
-                // 才校验；chunked（total=None）没有可比对的总长，跳过。
-                if let Some(t) = inner.total() {
-                    if written != t {
+                    // 落盘名必须有容器证据。Inner 的 ext 默认值恒为 "mp3"，嗅探失败时
+                    // 它仍是这个默认值——照它命名等于把一条来历不明的响应伪装成 mp3
+                    // 永久缓存；plan_mode 的 WaitFull 兜底只在解码侧保守，救不了缓存命中。
+                    let Some(ext) = sniff_ext(&head) else {
                         crate::diaglog!(
                             "download.reject",
                             key = key2,
                             url_index = i,
                             written = written,
-                            total_bytes = t,
-                            reason = "下载不完整"
+                            reason = "认不出容器"
                         );
                         reject_candidate!(inner, &part_path, written, head);
-                    }
-                }
-                // 落盘名必须有容器证据。Inner 的 ext 默认值恒为 "mp3"，嗅探失败时
-                // 它仍是这个默认值——照它命名等于把一条来历不明的响应伪装成 mp3
-                // 永久缓存；plan_mode 的 WaitFull 兜底只在解码侧保守，救不了缓存命中。
-                let Some(ext) = sniff_ext(&head) else {
-                    crate::diaglog!(
-                        "download.reject",
-                        key = key2,
-                        url_index = i,
-                        written = written,
-                        reason = "认不出容器"
-                    );
-                    reject_candidate!(inner, &part_path, written, head);
-                };
-                // 码率诚实闸门：这一档声称的码率得由实际交付的字节撑起 80%
-                // （0.8 是给 VBR 与容器开销留的余量）。谎称无损、实给 128k 的
-                // 直链在这里就被换掉，而不是落进缓存从此被当无损反复命中。
-                // 时长与档位任一未知都不参与——未知绝不按 0 处理。
-                if let (Some(d), Some(bps)) = (duration_ms.filter(|d| *d > 0), cand.bitrate) {
-                    // 平均 bps×10 与声明 bps×8（=80%）比较；两边同乘 d 消去除法。
-                    if written * 80_000 < bps * d * 8 {
-                        crate::diaglog!(
-                            "download.reject",
-                            key = key2,
-                            url_index = i,
-                            written = written,
-                            declared_bps = bps,
-                            duration_ms = d,
-                            reason = "交付字节撑不起声明的码率"
-                        );
-                        reject_candidate!(inner, &part_path, written, head);
-                    }
-                }
-                // 完成：按嗅探扩展名落正式名。Windows 终文件已存在则复用。
-                let final_path = dir2.join(format!(
-                    "{}.{}",
-                    relabel_key(&key2, duration_ms, written),
-                    ext
-                ));
-                match tokio::fs::rename(&part_path, &final_path).await {
-                    Ok(()) => {}
-                    Err(_) => {
-                        let ok = matches!(tokio::fs::metadata(&final_path).await, Ok(m) if m.len() > 1024);
-                        let _ = tokio::fs::remove_file(&part_path).await;
-                        if !ok {
+                        continue 'rungs;
+                    };
+                    // 码率诚实闸门：这一档声称的码率得由实际交付的字节撑起 80%
+                    // （0.8 是给 VBR 与容器开销留的余量）。谎称无损、实给 128k 的
+                    // 直链在这里就被换掉，而不是落进缓存从此被当无损反复命中。
+                    // 时长与档位任一未知都不参与——未知绝不按 0 处理。
+                    if let (Some(d), Some(bps)) = (duration_ms.filter(|d| *d > 0), cand.bitrate) {
+                        // 平均 bps×10 与声明 bps×8（=80%）比较；两边同乘 d 消去除法。
+                        if written * 80_000 < bps * d * 8 {
                             crate::diaglog!(
-                                "download.fail",
+                                "download.reject",
                                 key = key2,
                                 url_index = i,
                                 written = written,
-                                reason = "落盘缓存失败"
+                                declared_bps = bps,
+                                duration_ms = d,
+                                reason = "交付字节撑不起声明的码率"
                             );
-                            return Err("落盘缓存失败".to_string());
+                            reject_candidate!(inner, &part_path, written, head);
+                            continue 'rungs;
                         }
                     }
+                    // 完成：按嗅探扩展名落正式名。Windows 终文件已存在则复用。
+                    let final_path = dir2.join(format!(
+                        "{}.{}",
+                        relabel_key(&key2, duration_ms, written),
+                        ext
+                    ));
+                    match tokio::fs::rename(&part_path, &final_path).await {
+                        Ok(()) => {}
+                        Err(_) => {
+                            let ok = matches!(tokio::fs::metadata(&final_path).await, Ok(m) if m.len() > 1024);
+                            let _ = tokio::fs::remove_file(&part_path).await;
+                            if !ok {
+                                crate::diaglog!(
+                                    "download.fail",
+                                    key = key2,
+                                    url_index = i,
+                                    written = written,
+                                    reason = "落盘缓存失败"
+                                );
+                                return Err("落盘缓存失败".to_string());
+                            }
+                        }
+                    }
+                    crate::diaglog!(
+                        "download.done",
+                        key = key2,
+                        url_index = i,
+                        written = written,
+                        file = final_path.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                    index.note_written(&final_path).await;
+                    inner.finish();
+                    return Ok(final_path);
                 }
-                crate::diaglog!(
-                    "download.done",
-                    key = key2,
-                    url_index = i,
-                    written = written,
-                    file = final_path.file_name().unwrap_or_default().to_string_lossy()
-                );
-                index.note_written(&final_path).await;
-                inner.finish();
-                return Ok(final_path);
             }
             let msg = "所有试听地址均失败".to_string();
             inner.fail(msg.clone());
@@ -895,6 +966,197 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vmusic-ladder-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         dir
+    }
+
+    /// 一条路径每次命中要怎么应答。
+    ///
+    /// `Truncate(n)` = 先交付 n 字节、再让 body 流报错（不给 Content-Length，
+    /// 走 chunked 分帧，中断才能原样冒到客户端的 `bytes_stream()` 上）——CDN 抖动
+    /// 与代理掐线的真实形状。客户端因而拿到 Err，正是下载器区分「断链」与
+    /// 「内容不合格」的那条线。
+    #[derive(Clone, Copy)]
+    enum Serve {
+        Full,
+        Truncate(usize),
+    }
+
+    /// 命中日志：每次请求的 (路径, Range 头)——测试靠它断言「谁被问过、要的是哪一段」。
+    type Hits = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+    /// 带脚本的候选服务器：每条路径是一格候选，脚本按命中次数逐条播（用尽后重复
+    /// 最后一条），并认 Range。
+    async fn spawn_scripted(
+        routes: Vec<(&'static str, Vec<u8>, Vec<Serve>)>,
+    ) -> (std::net::SocketAddr, Hits) {
+        let hits: Hits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut app = axum::Router::new();
+        for (path, body, script) in routes {
+            let hits = hits.clone();
+            let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            app = app.route(
+                path,
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let hits = hits.clone();
+                    let counter = counter.clone();
+                    let body = body.clone();
+                    let script = script.clone();
+                    async move {
+                        let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let range = headers
+                            .get(axum::http::header::RANGE)
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_string());
+                        hits.lock().unwrap().push((path.to_string(), range.clone()));
+                        let start = range
+                            .as_deref()
+                            .and_then(|r| r.strip_prefix("bytes="))
+                            .and_then(|r| r.split('-').next())
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(0)
+                            .min(body.len());
+                        let status = if start > 0 {
+                            axum::http::StatusCode::PARTIAL_CONTENT
+                        } else {
+                            axum::http::StatusCode::OK
+                        };
+                        let serve = *script.last().unwrap_or(&Serve::Full);
+                        let serve = script.get(n).copied().unwrap_or(serve);
+                        let builder = axum::response::Response::builder()
+                            .status(status)
+                            .header(axum::http::header::CONTENT_TYPE, "audio/mpeg");
+                        let response = match serve {
+                            Serve::Full => {
+                                let tail: Vec<u8> = body[start..].to_vec();
+                                builder.body(axum::body::Body::from(tail)).unwrap()
+                            }
+                            // 不写 Content-Length：hyper 因此走 chunked，流里的
+                            // Err 才能原样冒到客户端的 `bytes_stream()` 上。
+                            Serve::Truncate(k) => {
+                                let end = start + k.min(body.len() - start);
+                                let part = axum::body::Bytes::from(body[start..end].to_vec());
+                                // 每段之间留一拍：响应头必须先回到客户端，之后的
+                                // 中断才是「流到一半断了」，而不是整个请求失败。
+                                let stream = futures::stream::iter(vec![
+                                    Ok::<_, std::io::Error>(part),
+                                    Err(std::io::Error::other("scripted break")),
+                                ])
+                                .then(|item| async move {
+                                    tokio::time::sleep(Duration::from_millis(60)).await;
+                                    item
+                                });
+                                builder.body(axum::body::Body::from_stream(stream)).unwrap()
+                            }
+                        };
+                        response
+                    }
+                }),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (addr, hits)
+    }
+
+    /// 一格断链后必须在**同一个地址**上 Range 续传，而不是降级到下一格：这是
+    /// 「边下边播的一首歌会不会被网络抖动腰斩」的分界线。
+    #[tokio::test]
+    async fn a_mid_stream_break_resumes_the_same_address() {
+        let full = mp3_bytes(40_000);
+        let other = {
+            let mut v = b"RIFF\x00\x00\x00\x00WAVEfmt ".to_vec();
+            v.resize(40_000, 0x22);
+            v
+        };
+        let (addr, hits) = spawn_scripted(vec![
+            (
+                "/a",
+                full.clone(),
+                vec![Serve::Truncate(20_000), Serve::Full],
+            ),
+            ("/b", other, vec![Serve::Full]),
+        ])
+        .await;
+        let dir = tmp_cache_dir().await;
+        let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
+        let dl = start(
+            dir.clone(),
+            "netease-11-exhigh".into(),
+            rungs(&[format!("http://{addr}/a"), format!("http://{addr}/b")]),
+            None,
+            index.clone(),
+        )
+        .unwrap();
+        let path = dl.join().await.unwrap();
+
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            full,
+            "续传补完的必须是第一格自己那份完整字节"
+        );
+        let log = hits.lock().unwrap().clone();
+        assert_eq!(
+            log.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+            vec!["/a", "/a"],
+            "同一格续传成功就不该降级：{log:?}"
+        );
+        assert_eq!(
+            log[1].1.as_deref(),
+            Some("bytes=20000-"),
+            "第二次要的是断点之后的那一段"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// 降级到下一格时必须从 0 重下：上一格攒下的偏移属于**另一份字节**，拿去
+    /// Range 新格会得到「旧格头部 + 新格尾部」的拼接文件。它闻起来是新格声明的
+    /// 容器、总长又恰好对得上，于是会被当正式缓存永久落盘——之后每次播放都解不开。
+    #[tokio::test]
+    async fn a_downgrade_never_resumes_the_previous_rungs_offset() {
+        let first = mp3_bytes(40_000);
+        let second = {
+            let mut v = b"RIFF\x00\x00\x00\x00WAVEfmt ".to_vec();
+            v.resize(40_000, 0x22);
+            v
+        };
+        // 第一格每次都掐在半途（三次用尽），第二格认 Range——旧实现正是被这里
+        // 的 206 骗出拼接文件的。
+        let (addr, hits) = spawn_scripted(vec![
+            (
+                "/a",
+                first,
+                vec![Serve::Truncate(20_000), Serve::Truncate(20_000)],
+            ),
+            ("/b", second.clone(), vec![Serve::Full]),
+        ])
+        .await;
+        let dir = tmp_cache_dir().await;
+        let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
+        let dl = start(
+            dir.clone(),
+            "netease-12-hires".into(),
+            rungs(&[format!("http://{addr}/a"), format!("http://{addr}/b")]),
+            None,
+            index.clone(),
+        )
+        .unwrap();
+        let path = dl.join().await.unwrap();
+
+        let log = hits.lock().unwrap().clone();
+        let b = log
+            .iter()
+            .find(|(p, _)| p == "/b")
+            .expect("降级要问到第二格");
+        assert_eq!(b.1, None, "换格不许带上一格的偏移：{log:?}");
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            second,
+            "落盘的必须完整是第二格那份字节，不能混进上一格的头部"
+        );
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("wav"));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     /// 200 + text/html 且长度自洽的错误页（限流页/登录跳转的真实形状）绝不能再
@@ -1196,5 +1458,58 @@ mod tests {
         let mut src = HttpMediaSource::open(&part, inner, abort).unwrap();
         let mut out = [0u8; 10];
         assert!(src.read(&mut out).is_err());
+    }
+
+    /// 读到「已交付的最后一个字节之后」才是文件尾；位置**越过**交付长度说明底层
+    /// 字节流被换成了一份更短的（阶梯换格时 `Inner` 记的是新格自己的长度）。
+    /// 后者必须报错：把它报成 `Ok(0)` 等于骗上面说这一首播完了，状态层据此跳下
+    /// 一曲，还会顺手把半首计入播放量——正是「歌没放完就下一曲」的那条路。
+    #[test]
+    fn a_position_past_the_delivered_length_is_not_a_clean_eof() {
+        let dir = std::env::temp_dir().join(format!("vmusic-prog-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("z.part");
+        std::fs::write(&part, b"0123456789").unwrap();
+        let inner = Arc::new(Inner::new());
+        inner.set_total(Some(10));
+        inner.advance(10);
+        inner.finish();
+        let abort = Arc::new(AtomicBool::new(false));
+        let mut src = HttpMediaSource::open(&part, inner, abort).unwrap();
+        let mut out = [0u8; 4];
+
+        src.seek(SeekFrom::Start(10)).unwrap();
+        assert_eq!(src.read(&mut out).unwrap(), 0, "正好读到末尾是自然结束");
+
+        src.seek(SeekFrom::Start(15)).unwrap();
+        let e = src.read(&mut out).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::BrokenPipe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Inner` 承诺还有字节可读、句柄里的文件却已经到尾：这是换格之后旧 `.part`
+    /// 被删、本句柄还挂在旧那份上（Windows 允许它读完残留）。这里读出 0 同样不能
+    /// 报成文件尾——否则进度条走到三分之二的歌会当场「播完」并跳下一曲。
+    #[test]
+    fn a_handle_shorter_than_the_delivered_length_is_not_a_clean_eof() {
+        let dir = std::env::temp_dir().join(format!("vmusic-prog-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("w.part");
+        std::fs::write(&part, b"0123456789").unwrap();
+        let inner = Arc::new(Inner::new());
+        inner.set_total(Some(100));
+        inner.advance(100);
+        let abort = Arc::new(AtomicBool::new(false));
+        let mut src = HttpMediaSource::open(&part, inner, abort).unwrap();
+        let mut out = [0u8; 32];
+
+        assert_eq!(
+            src.read(&mut out).unwrap(),
+            10,
+            "残留的那 10 个字节照常交付"
+        );
+        let e = src.read(&mut out).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::BrokenPipe);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

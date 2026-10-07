@@ -8,7 +8,8 @@
 // 检查的是这套界面最容易静默坏掉的几处：
 //   1. 层级：网格层 / 详情层的进出只走宿主 setLayer，返回回得去
 //   2. 三态：加载中 / 加载失败 / 空歌单 必须是三种渲染，失败不能被画成空
-//   3. 分页：offset 递增、曲目追加、剩余数如实、到底收起「加载更多」
+//   3. 分页：offset 递增、曲目追加、剩余数如实、到底收起「加载更多」；
+//      「播放/加入」按钮只承诺已加载的那一段，未取全时不许写「播放全部」
 //   4. 筛选：作用于已加载曲目，按钮文案跟着切成「播放 N 首 / 加入 N 首」
 //   5. 加入队列：交给宿主的必须是当前可见的那批曲目
 //
@@ -144,9 +145,14 @@ function makeTransport(pages) {
   const calls = [];
   return {
     calls,
+    posts: [],
     async get(url) {
       calls.push(url);
       return pages(url);
+    },
+    async post(url, body) {
+      this.posts.push({ url, body });
+      return { ok: true };
     },
   };
 }
@@ -157,7 +163,7 @@ function makeTransport(pages) {
 
 function makeSandbox(opts) {
   const doc = makeDocument();
-  const spies = { layers: [], toasts: [], enqueued: [], played: [] };
+  const spies = { layers: [], toasts: [], enqueued: [], played: [], collections: [], listeners: {} };
   const sandbox = {
     console, Promise, Object, Array, JSON, Math, String,
     URL, URLSearchParams, encodeURIComponent, decodeURIComponent,
@@ -165,6 +171,13 @@ function makeSandbox(opts) {
   };
   sandbox.window = sandbox;
   sandbox.document = doc;
+  // 事件桩：真实浏览器里有，这里用注册表替——F2 的整单续载进度行靠它驱动。
+  sandbox.addEventListener = (type, fn) => { (spies.listeners[type] = spies.listeners[type] || []).push(fn); };
+  sandbox.removeEventListener = () => {};
+  sandbox.dispatchEvent = (ev) => {
+    (spies.listeners[ev.type] || []).forEach((fn) => fn(ev));
+    return true;
+  };
   sandbox.VMusicTransport = opts.transport;
   sandbox.window.VMusicTransport = opts.transport;
 
@@ -201,6 +214,8 @@ function makeSandbox(opts) {
       return el;
     },
     playAll(tracks, index) { spies.played.push({ tracks: tracks.slice(), index }); },
+    supports(source, cap) { return ((opts.caps && opts.caps[source]) || []).indexOf(cap) >= 0; },
+    playCollection(source, id) { spies.collections.push({ source, id }); },
   };
   sandbox.window.OnlinePlaylists = {
     all() {
@@ -310,12 +325,18 @@ function detailBody(tracks, total) {
     eq(more.hidden, false, '还有剩余时显示「加载更多」');
     has(more.textContent, '还有 3 首', '按钮说清还剩多少首');
 
+    const info = env.doc.getElementById('opl-info');
+    ok(!!btnByText(info, '播放已加载 2 首'), '只加载了首页时按钮说「播放已加载 N 首」');
+    ok(!!btnByText(info, '加入已加载 2 首到队列'), '加入队列也只承诺已加载的那一段');
+    ok(!btnByText(info, '播放全部'), '集合未取全时不许写「播放全部」');
+
     more.onclick();
     await ticks();
     eq(rows.children.length, 5, '加载更多后曲目追加到 5 行');
     ok(n === 2, '只发了两次请求');
     has(transport.calls[1], 'offset=2', '第二页的 offset 递增');
     eq(more.hidden, true, '加载完后收起「加载更多」');
+    ok(!!btnByText(info, '播放全部 5 首'), '取全后按钮改回「播放全部 N 首」');
   }
 
   section('筛选：作用于已加载曲目，按钮文案跟着变');
@@ -326,9 +347,12 @@ function detailBody(tracks, total) {
     env.view.open('netease', 'P1', 'arrange');
     await ticks();
     const info = env.doc.getElementById('opl-info');
-    ok(!!btnByText(info, '播放全部'), '未筛选时按钮是「播放全部」');
-    ok(!!btnByText(info, '加入队列'), '未筛选时按钮是「加入队列」');
-
+    ok(!!btnByText(info, '播放全部 3 首'), '取完且未筛选时按钮才说「播放全部」');
+    ok(!!btnByText(info, '加入全部 3 首到队列'), '取完且未筛选时按钮说「加入全部 N 首」');
+    eq(!!btnByText(info, 'opl-scope-note'), false, '范围说明不是按钮');
+    const note = byClass(info, 'opl-scope-note')[0];
+    ok(!!note, '操作按钮下方带一条范围说明节点');
+    eq(note.hidden, true, '集合已取完时范围说明收起');
     const q = env.doc.getElementById('opl-detail-q');
     q.value = '稻';
     q.oninput();
@@ -453,6 +477,64 @@ function detailBody(tracks, total) {
     eq(coverOnly.spies.rows, undefined, '封面排布下不建表格行');
     eq(byClass(coverOnly.doc.getElementById('opl-rows'), 'op-remove').length, 0,
       '封面卡片上没有移除按钮');
+  }
+
+  // ---------------------------------------------------------------------------
+  // F2 整单播放：集合意图的按钮路由、标签承诺与续载进度行
+  // ---------------------------------------------------------------------------
+
+  {
+    section('F2 整单播放：集合意图、标签承诺与续载进度行');
+    // 一页两首、总 100：永远「未取全」，hasMore 恒真——标签与按钮路由的
+    // 两种分支都站得住。
+    const pages = () => detailBody([T('1', 'A'), T('2', 'B')], 100);
+
+    const withCap = makeSandbox({
+      transport: makeTransport(pages),
+      caps: { netease: ['playlist_detail'] },
+    });
+    withCap.view.openCollection({ kind: 'playlist', source: 'netease', id: 'P1', name: '歌单' }, 'arrange');
+    await ticks();
+    const capInfo = withCap.doc.getElementById('opl-info');
+    const fullBtn = btnByText(capInfo, '播放全部');
+    ok(!!fullBtn, '有 playlist_detail 能力时按钮如实承诺「播放全部」');
+    eq(btnByText(capInfo, '播放已加载'), undefined, '此时不再出现「播放已加载」的旧承诺');
+    fullBtn.onclick();
+    eq(withCap.spies.collections.length, 1, '点击走服务端集合意图');
+    eq(withCap.spies.collections[0].source, 'netease');
+    eq(withCap.spies.collections[0].id, 'P1');
+    eq(withCap.spies.played.length, 0, '这条路径不再把已加载页当整盘发');
+
+    const noCap = makeSandbox({
+      transport: makeTransport(pages),
+      caps: { netease: [] },
+    });
+    noCap.view.openCollection({ kind: 'playlist', source: 'netease', id: 'P1', name: '歌单' }, 'arrange');
+    await ticks();
+    const ncInfo = noCap.doc.getElementById('opl-info');
+    ok(!!btnByText(ncInfo, '播放已加载 2 首'), '缺能力位时退回「播放已加载」的诚实文案');
+    btnByText(ncInfo, '播放已加载 2 首').onclick();
+    eq(noCap.spies.collections.length, 0, '缺能力位不发集合意图（点了必 404 的入口不给）');
+    eq(noCap.spies.played.length, 1, '退回整盘 tracks 路径');
+
+    // 进度行：事件驱动，只有对上的歌单才显示；done 后消失；中断给「继续载入」。
+    const evView = withCap;
+    const note = () => byClass(evView.doc.getElementById('opl-info'), 'opl-load-note')[0];
+    evView.sandbox.dispatchEvent({ type: 'online:collection-load', detail: { source: 'netease', id: 'P9', loaded: 52, total: 100, done: false } });
+    eq(note().hidden, true, '别的歌单的进度不动本页');
+    evView.sandbox.dispatchEvent({ type: 'online:collection-load', detail: { source: 'netease', id: 'P1', loaded: 52, total: 100, done: false } });
+    ok(!note().hidden, '对上的歌单显示续载进度');
+    ok(String(note().textContent).indexOf('52') >= 0, '进度行说清已加入多少首');
+    evView.sandbox.dispatchEvent({ type: 'online:collection-load', detail: { source: 'netease', id: 'P1', loaded: 100, total: 100, done: true } });
+    eq(note().hidden, true, '补完即收行');
+    evView.sandbox.dispatchEvent({ type: 'online:collection-load', detail: { source: 'netease', id: 'P1', loaded: 52, total: 100, done: false, error: '平台超时' } });
+    ok(String(note().textContent).indexOf('中断') >= 0, '中断要如实说');
+    const retry = btnByText(note(), '继续载入');
+    ok(!!retry, '中断时给「继续载入」按钮');
+    retry.onclick();
+    await ticks();
+    eq(withCap.sandbox.VMusicTransport.posts.length, 1, '继续载入要打 refresh 端点');
+    eq(withCap.sandbox.VMusicTransport.posts[0].url, '/v1/online/collection/refresh');
   }
 
   console.log('\n' + '─'.repeat(64));

@@ -30,7 +30,11 @@
   // 每档设备的帧率预算。tier 由 stage.js 按核心数 / 内存 / 渲染像素判一次，
   // 之后只会被帧率探针往下调。粒子数与 DPR 上限由各渲染器自己报，
   // 因为 Canvas 2D 和 WebGL 的开销曲线完全不同。
-  var TIERS = [{ fps: 18 }, { fps: 26 }, { fps: 34 }];
+  //
+  // 档位只取 60 与 120 的公因数（15/20/30）：帧门按「每 N 个 rAF 一帧」兑现，
+  // 声明一个不是整数分频的数（原来写的 18/26/34）在最常见的 60Hz 屏上会被向下
+  // 夹成 15/20/30 —— 数字说谎，而看数字调档的人据此做的判断全错。
+  var TIERS = [{ fps: 15 }, { fps: 20 }, { fps: 30 }];
 
   // 分带边界与起音判据都在 onset.js。这里刻意不抄一份：粒子层和三维层必须
   // 在同一个时刻认同一个鼓点，而"再抄一份"看着只差几行，实际差的是整套阈值
@@ -61,6 +65,8 @@
   // 播放也没开抽屉，帧门报 0、GL 一帧都不画，两轮测出来的差值恒等于 0，
   // 探测会无条件放行 —— 一个永远说"没问题"的检查比没有检查更糟。
   var probePending = false;
+  var resizeObserver = null;
+  var lifecycle = 0;
 
   // ---------------------------------------------------------------------------
   // 音频特征
@@ -112,6 +118,7 @@
   function spawnRipple() {
     var v = active;
     if (!v || !v.pool || !v.w) return;
+    var generation = lifecycle;
     var el = v.pool[ripHead];
     ripHead = (ripHead + 1) % RIPPLE_POOL;
     var wasLive = !el.classList.contains('is-live');
@@ -129,6 +136,7 @@
       ], { duration: RIPPLE_MS, easing: 'cubic-bezier(0.30, 0, 0.55, 1)' });
       if (wasLive) ripLive += 1;
       anim.onfinish = function () {
+        if (generation !== lifecycle) return;
         el.classList.remove('is-live');
         ripLive = Math.max(0, ripLive - 1);
       };
@@ -137,7 +145,10 @@
       el.style.opacity = String(0.30 * amp);
       el.style.transform = 'translate(-50%, -50%) scale(1)';
       if (wasLive) ripLive += 1;
-      setTimeout(function () {
+      if (el.__rippleTimer) clearTimeout(el.__rippleTimer);
+      el.__rippleTimer = setTimeout(function () {
+        if (generation !== lifecycle) return;
+        el.__rippleTimer = 0;
         el.classList.remove('is-live');
         el.style.opacity = '';
         ripLive = Math.max(0, ripLive - 1);
@@ -352,17 +363,33 @@
   // 所以做 A/B：同一台机器、同一个时刻，先量本层不画东西时的帧率，再量按
   // 当前预算画的帧率，比的是差值。
   var probeMuted = false;
+  var probeFrame = 0;
+  var finishProbe = null;
+  var probeGeneration = 0;
+
+  function cancelProbe() {
+    probeGeneration += 1;
+    if (probeFrame) cancelAnimationFrame(probeFrame);
+    probeFrame = 0;
+    if (finishProbe) { var finish = finishProbe; finishProbe = null; finish(0); }
+    probePending = probeMuted = false;
+  }
 
   function measureFps(windowMs) {
     return new Promise(function (resolve) {
+      finishProbe = resolve;
       var frames = 0;
       var t0 = nowMs();
       function step(now) {
         frames += 1;
-        if (now - t0 < windowMs) requestAnimationFrame(step);
-        else resolve(frames / ((nowMs() - t0) / 1000));
+        if (now - t0 < windowMs) probeFrame = requestAnimationFrame(step);
+        else {
+          probeFrame = 0;
+          finishProbe = null;
+          resolve(frames / ((nowMs() - t0) / 1000));
+        }
       }
-      requestAnimationFrame(step);
+      probeFrame = requestAnimationFrame(step);
     });
   }
 
@@ -371,10 +398,13 @@
     // 必须串行：两轮测量若并发跑，probeMuted 会被第二次调用立刻改回 false，
     // "基线"窗口里其实一直在画，量出来的差值恒等于 0，探测就白做了。
     probeMuted = true;
+    var generation = probeGeneration;
     return measureFps(500).then(function (base) {
+      if (generation !== probeGeneration) return null;
       probeMuted = false;
       return measureFps(500).then(function (withGL) { return { base: base, withGL: withGL }; });
     }).then(function (r) {
+      if (!r || generation !== probeGeneration) return false;
       var base = r.base, withGL = r.withGL;
       if (!(base > 0) || !(withGL > 0)) return true;
       var loss = 1 - withGL / base;
@@ -387,7 +417,10 @@
       probeMuted = false;
       degrade('本机 GPU 上这一层反而更卡（帧率下降 ' + Math.round(loss * 100) + '%）');
       return false;
-    }).catch(function () { return true; });
+    }).catch(function () {
+      if (generation === probeGeneration) probeMuted = false;
+      return true;
+    });
   }
 
   // 先真跑一帧，把着色器编译、程序链接、首次 bufferData 这些一次性开销挪到
@@ -408,10 +441,25 @@
 
   function budget() { return TIERS[tierIndex()]; }
 
+  // 颗数按面板面积归一。这一层住在右侧舞台里，窗口大小和皮肤都会改变它的面积，
+  // 而固定颗数意味着观感跟着窗口变：小面板糊成一片白雾、大面板只剩稀星。
+  // 基准取一个常见尺寸的舞台。上下都要夹住：上限之外宁可稀一点，因为标准渲染器
+  // 是逐粒子 drawImage，颗数翻倍就是主线程开销翻倍（2D 那边一千颗左右就开始吃
+  // 歌词滚动的帧）；下限之下不许清零，否则窄屏抽屉里这一层直接消失。
+  //
+  // 还要量化到 1/8 一档：换颗数在两个渲染器里都是整场重播随机位置，跟着
+  // 拖窗口的每一帧重算会让粒子在手里跳来跳去。
+  var REF_AREA = 460 * 780;
+  function areaScale(v) {
+    if (!v || !v.w || !v.h) return 1;
+    var s = Math.round((v.w * v.h) / REF_AREA * 8) / 8;
+    return s < 0.5 ? 0.5 : s > 1.75 ? 1.75 : s;
+  }
+
   function syncCount() {
     if (!renderer) return;
     var caps = renderer.counts;
-    var want = Math.round(caps[tierIndex()] * (opts.density / 100) * countScale);
+    var want = Math.round(caps[tierIndex()] * (opts.density / 100) * countScale * areaScale(active));
     renderer.setCount(want < 0 ? 0 : want);
   }
 
@@ -421,6 +469,8 @@
   }
 
   function useRenderer(next) {
+    cancelProbe();
+    countScale = 1;
     // 先释放上一位的资源：GL 渲染器持有 context、VBO 和 program，
     // 不 dispose 就会一直占着显存，切回 2D 也还占着。
     if (renderer && renderer.dispose) { try { renderer.dispose(); } catch (e) { /* 忽略 */ } }
@@ -563,6 +613,7 @@
   }
 
   function init() {
+    if (views.length) return api;
     stageEl = document.getElementById('stage');
     // onset.js 是硬依赖：没有它就没有"鼓点"，脉冲会永远停在 0，于是涟漪、
     // 律动强度、targetFps 的忙判定一起静默失效——画面还在动，但和音乐脱钩了。
@@ -577,32 +628,44 @@
 
     Stage.gate('particles', targetFps, tick);
 
-    document.addEventListener('stage:retint', function () {
-      if (!renderer) return;
-      var c = colors();
-      renderer.setColors(c[0], c[1]);
-    });
-    document.addEventListener('stagecontrol:change', function (e) { apply(e.detail); });
+    document.addEventListener('stage:retint', retint);
+    document.addEventListener('stagecontrol:change', controlChanged);
     // 主动拉一次当前值，而不是只等 stagecontrol:change。面板的 init 在启动序列里
     // 排在本模块之前，那次初始广播已经过去了；靠事件顺序来保证参数正确，
     // 是那种改一行 boot 顺序就会静默失效的依赖。
     if (window.StageControl) apply(window.StageControl.values());
 
     if (window.ResizeObserver) {
-      var ro = new ResizeObserver(function () {
+      resizeObserver = new ResizeObserver(function () {
         for (var i = 0; i < views.length; i += 1) measureView(views[i]);
       });
-      for (var i = 0; i < views.length; i += 1) if (views[i].el) ro.observe(views[i].el);
+      for (var i = 0; i < views.length; i += 1) if (views[i].el) resizeObserver.observe(views[i].el);
     }
 
     return api;
   }
 
+  function retint() {
+    if (!renderer) return;
+    var c = colors();
+    renderer.setColors(c[0], c[1]);
+  }
+
+  function controlChanged(e) { apply(e.detail); }
+
   // 销毁：移除注入的画布与涟漪节点、注销帧门
   function destroy() {
+    lifecycle += 1;
+    cancelProbe();
+    if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
+    document.removeEventListener('stage:retint', retint);
+    document.removeEventListener('stagecontrol:change', controlChanged);
     if (window.Stage && Stage.removeGate) Stage.removeGate('particles');
+    if (renderer && renderer.dispose) renderer.dispose();
     views.forEach(function (v) {
       if (v.pool) v.pool.forEach(function (n) {
+        if (n.getAnimations) n.getAnimations().forEach(function (animation) { animation.cancel(); });
+        if (n.__rippleTimer) clearTimeout(n.__rippleTimer);
         if (n.parentNode) n.parentNode.removeChild(n);
       });
       if (v.canvas && v.canvas.parentNode) v.canvas.parentNode.removeChild(v.canvas);
@@ -610,6 +673,15 @@
     views = [];
     active = null;
     renderer = null;
+    rendererName = 'none';
+    attached = false;
+    degradedTo = null;
+    countScale = 1;
+    probePending = probeMuted = false;
+    ripLive = ripHead = 0;
+    lastSpectrum = null;
+    lastSpectrumAt = 0;
+    if (onset) onset.reset();
     stageEl = null;
   }
 

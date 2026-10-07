@@ -46,6 +46,9 @@
     mediaUrl: null,               // 用户本地文件的 ObjectURL，切走时要 revoke
     w: 0, h: 0,
     attached: false,
+    stageHost: null,              // 大舞台复用同一背景层，退出后归还原挂点
+    homeParent: null,
+    homeNext: null,
     coverUrl: null,
     palette: null,                // 从封面提出来的一组颜色 [[r,g,b], ...]
     palFor: null,                 // 上面那组颜色属于哪张封面，用来判断要不要重算
@@ -264,7 +267,10 @@
     state.spec = next;
     configureFx();
     configureDepth();
-    if (window.Stage && Stage.kick) Stage.kick();
+    if (state.media && state.media.tagName === 'VIDEO') {
+      state.media.playbackRate = next.rate === undefined ? 0.75 : next.rate;
+    }
+    refresh();
     return state.spec;
   }
 
@@ -283,10 +289,49 @@
     // 插在 body 最前面：它是最底下的一层，DOM 顺序本身就保证了层级，
     // 不需要靠 z-index 跟别的模块比赛谁的数字大。
     document.body.insertBefore(layer, document.body.firstChild);
+    state.homeParent = layer.parentNode;
+    state.homeNext = layer.nextSibling;
+    if (state.stageHost) state.stageHost.appendChild(layer);
     state.layer = layer;
     state.canvas = canvas;
     state.ctx = canvas.getContext('2d');
     return layer;
+  }
+
+  // 只搬 DOM，不重新 apply：本地 ObjectURL、视频进度和 BgWall 的纹理主人都不变。
+  function setStageHost(host) {
+    state.stageHost = host || null;
+    if (state.layer) {
+      var parent = state.stageHost || state.homeParent || document.body;
+      if (state.layer.parentNode !== parent) {
+        var next = !state.stageHost && state.homeNext && state.homeNext.parentNode === parent
+          ? state.homeNext : null;
+        parent.insertBefore(state.layer, next);
+      }
+      if (isCanvasType()) sizeCanvas();
+      if (state.wallApi && state.wallApi.ready()) state.wallApi.resize();
+    }
+    syncMediaPlayback();
+    refresh();
+  }
+
+  function isVisible() {
+    return !document.hidden && !!state.layer && !state.layer.hidden
+      && (!!state.stageHost || !document.body.classList.contains('s3d-open'));
+  }
+
+  function syncMediaPlayback() {
+    var media = state.media;
+    if (!media || media.tagName !== 'VIDEO') return;
+    if (!isVisible()) { media.pause(); return; }
+    var playing = media.play();
+    if (playing && playing.catch) playing.catch(function () { /* 静帧仍可显示 */ });
+  }
+
+  function refresh() {
+    // 暂停时改色相、切背景、搬进舞台都立即补一帧，不等待音频推动帧门。
+    if (state.spec.type !== 'theme' && isVisible()) tick(0);
+    if (window.Stage && Stage.kick) Stage.kick();
   }
 
   function clearMedia() {
@@ -306,8 +351,8 @@
   }
 
   function sizeCanvas() {
-    var vw = Math.max(1, window.innerWidth);
-    var vh = Math.max(1, window.innerHeight);
+    var vw = Math.max(1, state.stageHost && state.stageHost.clientWidth || window.innerWidth);
+    var vh = Math.max(1, state.stageHost && state.stageHost.clientHeight || window.innerHeight);
     var scale = Math.min(1, MAX_EDGE / Math.max(vw, vh));
     var w = Math.max(64, Math.round(vw * scale));
     var h = Math.max(36, Math.round(vh * scale));
@@ -496,8 +541,7 @@
   }
 
   function targetFps() {
-    if (!state.attached) return 0;
-    if (window.Stage && Stage.isHidden()) return 0;
+    if (!state.attached || state.spec.type === 'theme' || !isVisible()) return 0;
     var playing = document.body.classList.contains('is-playing');
     var depth = state.depthEffective;
     // 墙与视差要跟着指针/视频走：30fps 才顺；非播放时降下来省点。
@@ -538,6 +582,10 @@
     window.addEventListener('pointercancel', function () {
       pointer.x = pointer.y = 0;
     }, { passive: true });
+    document.addEventListener('visibilitychange', function () {
+      syncMediaPlayback();
+      if (!document.hidden) refresh();
+    });
   }
 
   function tick(dtMs) {
@@ -585,7 +633,9 @@
         if (state.coverUrl) {
           var target = state.coverUrl;
           var img = new Image();
-          img.onload = function () { if (state.palFor === target) state.palette = extractPalette(img); };
+          img.onload = function () {
+            if (state.palFor === target) { state.palette = extractPalette(img); refresh(); }
+          };
           img.onerror = function () { if (state.palFor === target) state.palette = null; };
           resolveCover(target, function (resolved) { if (resolved) img.src = resolved; });
         }
@@ -676,13 +726,15 @@
       if (window.Stage && Stage.gate) Stage.gate('background', targetFps, tick);
       window.addEventListener('resize', function () {
         if (isCanvasType()) sizeCanvas();
-        if (window.BgWall && BgWall.ready()) BgWall.resize();
+        if (state.wallApi && state.wallApi.ready()) state.wallApi.resize();
+        refresh();
       });
     }
 
     configureFx();
     configureDepth();
-    if (window.Stage && Stage.kick) Stage.kick();
+    syncMediaPlayback();
+    refresh();
     return state.spec;
   }
 
@@ -701,17 +753,18 @@
       el = document.createElement('video');
       el.muted = true;
       el.loop = true;
-      el.autoplay = true;
+      el.autoplay = !document.hidden;
       el.setAttribute('playsinline', '');
       // 降速：背景视频是氛围，不是内容。放慢之后解码压力下降，移动也更耐看。
       el.playbackRate = state.spec.rate === undefined ? 0.75 : state.spec.rate;
       el.addEventListener('loadeddata', function () {
-        try { el.play(); } catch (e) { /* 自动播放被拦时静帧也能看 */ }
+        if (state.media === el) { syncMediaPlayback(); refresh(); }
       });
     } else {
       el = document.createElement('img');
       el.alt = '';
       el.decoding = 'async';
+      el.addEventListener('load', function () { if (state.media === el) refresh(); });
     }
     el.className = 'creative-bg-media';
     el.src = src;
@@ -758,6 +811,7 @@
     init: init,
     apply: apply,
     update: update,
+    setStageHost: setStageHost,
     // 某类型的出厂融合参数（供工坊双击滑块找回默认）
     defaults: function (type) {
       var d = FX_DEFAULTS[type];
@@ -780,6 +834,7 @@
     stats: function () {
       return {
         type: state.spec.type, fps: targetFps(),
+        host: state.stageHost ? 'stage3d' : 'home',
         depthMode: state.spec.depthMode || 'flat',
         depthEffective: state.depthEffective,
         wallReady: !!(state.wallApi && state.wallApi.ready()),

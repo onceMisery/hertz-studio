@@ -725,6 +725,7 @@
   align-items: center;
   gap: 14px;
   width: 100%;
+  min-width: 0;
 }
 
 /* 唱片在播放卡里变成 84px 方形封面：停旋转、去中心孔与外环。
@@ -751,7 +752,7 @@
   display: none;
 }
 
-[data-skin="liunian"] .bar-track {
+[data-skin="liunian"] .bar-summary {
   flex: 1;
   min-width: 0;
 }
@@ -1921,29 +1922,6 @@
   display: none;
 }
 
-/* 播放卡（展开态/胶囊态）位于中栏文档流，不是底部悬浮播放条。全局自动
-   隐藏会写入 translateY + opacity，并在动画结束时清空；流年规则又覆盖了
-   .bar.is-hidden，于是卡片会先下滑再瞬间弹回。两态都钉住可见性。 */
-[data-skin="liunian"] .bar:not(.ln-capsule) {
-  transform: none !important;
-  opacity: 1 !important;
-}
-
-/* 胶囊态同样是中栏文档流卡片，底部播放栏那套 idle 滑出 / pointerenter
-   滑入对它不成立：showBar() 会先瞬间写入 translateY(100%+20px) 再动画
-   归位——不钉住时，鼠标一碰到胶囊就整块下坠再滑回，即悬停时的上下跳动。 */
-[data-skin="liunian"] .bar.ln-capsule {
-  transform: none !important;
-  opacity: 1 !important;
-}
-
-/* is-hidden 期间必须保持 grid：.bar.is-hidden{display:none} 与皮肤的
-   [data-skin] .bar{display:flex} 同为 (0,2,0) 且皮肤文件后加载而落败，
-   卡片会退回 flex 排版、grid 槽位全部失配。显式钉回 grid，杜绝排版切换。 */
-[data-skin="liunian"] .bar.ln-capsule.is-hidden {
-  display: grid !important;
-}
-
 [data-skin="liunian"] .ln-library-tools {
   min-width: 0;
 }
@@ -2180,11 +2158,17 @@
 
   [data-skin="liunian"] .ln-capsule .bar-row1 {
     gap: 8px;
+    grid-column: 1 / -1;
   }
 
   [data-skin="liunian"] .ln-capsule .bar-controls {
     gap: 0;
+    grid-column: 1 / -1;
+    grid-row: 3;
   }
+
+  [data-skin="liunian"] .ln-capsule .bar-progress { grid-row: 4; }
+  [data-skin="liunian"] .ctrl.bar-favorite { width: 44px; height: 44px; }
 
   [data-skin="liunian"] .ln-capsule .ln-player-label {
     font-size: 10px;

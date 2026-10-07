@@ -26,6 +26,8 @@ const INDEX_HTML: &str = include_str!("../../../plugin/ui/index.html");
 const OVERLAY_HTML: &str = include_str!("../../../plugin/ui/overlay.html");
 const HOST_JS: &str = include_str!("../../../plugin/ui/host.js");
 const DIALOGS_JS: &str = include_str!("../../../plugin/ui/dialogs.js");
+// 搜索关键词历史的 owner：皮肤、顶栏、在线框都到这里读与记，所以它排在它们之前。
+const SEARCH_HISTORY_JS: &str = include_str!("../../../plugin/ui/search-history.js");
 const APP_JS: &str = include_str!("../../../plugin/ui/app.js");
 const STYLE_CSS: &str = include_str!("../../../plugin/ui/style.css");
 const STAGE_CSS: &str = include_str!("../../../plugin/ui/stage.css");
@@ -95,7 +97,12 @@ const STANZA_CADENZA_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-c
 const STANZA_SONNET_FX_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-sonnet-fx.js");
 const STANZA_SONNET_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-sonnet.js");
 const STANZA_TEMPERA_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-tempera.js");
+// 曲式层：把整首歌编译成段落/副歌/句内画像，并给每种歌词模式定义镜头语法。纯函数，
+// 星诞导演与 stage3d 的镜头机架都读它，所以必须排在 starborn 之前。
+const STANZA_SONGFORM_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-songform.js");
 const STANZA_STARBORN_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-starborn.js");
+const STANZA_STARBORN_CSS: &str = include_str!("../../../plugin/ui/stanza/stanza-starborn.css");
+const STAGE_SETTINGS_JS: &str = include_str!("../../../plugin/ui/stage-settings.js");
 const PIXI_JS: &str = include_str!("../../../plugin/ui/vendor/pixi.min.js");
 const STANZA_CSS: &str = include_str!("../../../plugin/ui/stanza/stanza.css");
 // 在线曲库（SP1）：vendored MIT 二维码库 + 三个在线模块与样式。
@@ -247,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(routes::router(state.clone()))
         .route("/host.js", get(|| asset(JS, HOST_JS)))
         .route("/dialogs.js", get(|| asset(JS, DIALOGS_JS)))
+        .route("/search-history.js", get(|| asset(JS, SEARCH_HISTORY_JS)))
         .route("/app.js", get(|| asset(JS, APP_JS)))
         .route("/stage.js", get(|| asset(JS, STAGE_JS)))
         .route("/onset.js", get(|| asset(JS, ONSET_JS)))
@@ -310,13 +318,19 @@ async fn main() -> anyhow::Result<()> {
             "/stanza/stanza-tempera.js",
             get(|| asset(JS, STANZA_TEMPERA_JS)),
         )
+        // 曲式层：星诞导演与镜头机架的共同上游，只依赖 StanzaUtil。
+        .route(
+            "/stanza/stanza-songform.js",
+            get(|| asset(JS, STANZA_SONGFORM_JS)),
+        )
         // 星诞元导演：只做模式调度，不产出画面，因此排在 tempera 之后加载
-        // （它要读 StanzaSonnetFX.resolveAudioBands 拿频段数据）。
+        // （它要读 StanzaSongForm 的段落读数与 StanzaSonnetFX.resolveAudioBands 的频段）。
         .route(
             "/stanza/stanza-starborn.js",
             get(|| asset(JS, STANZA_STARBORN_JS)),
         )
         .route("/vendor/pixi.min.js", get(|| asset(JS, PIXI_JS)))
+        .route("/stage-settings.js", get(|| asset(JS, STAGE_SETTINGS_JS)))
         .route("/vendor/qrcode.js", get(|| asset(JS, QRCODE_JS)))
         .route("/online-login.js", get(|| asset(JS, ONLINE_LOGIN_JS)))
         .route("/online.js", get(|| asset(JS, ONLINE_JS)))
@@ -340,6 +354,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/creative.css", get(|| asset(CSS, CREATIVE_CSS)))
         .route("/stage3d.css", get(|| asset(CSS, STAGE3D_CSS)))
         .route("/stanza/stanza.css", get(|| asset(CSS, STANZA_CSS)))
+        .route("/stanza/stanza-starborn.css", get(|| asset(CSS, STANZA_STARBORN_CSS)))
         .route("/online.css", get(|| asset(CSS, ONLINE_CSS)))
         .route("/theme-studio.css", get(|| asset(CSS, THEME_STUDIO_CSS)))
         .route("/skins/skins.css", get(|| asset(CSS, SKINS_CSS)))
@@ -457,6 +472,7 @@ async fn main() -> anyhow::Result<()> {
 const ASSET_FINGERPRINT_INPUTS: &[&str] = &[
     HOST_JS,
     DIALOGS_JS,
+    SEARCH_HISTORY_JS,
     APP_JS,
     STAGE_JS,
     ONSET_JS,
@@ -493,7 +509,10 @@ const ASSET_FINGERPRINT_INPUTS: &[&str] = &[
     STANZA_SONNET_FX_JS,
     STANZA_SONNET_JS,
     STANZA_TEMPERA_JS,
+    STANZA_SONGFORM_JS,
     STANZA_STARBORN_JS,
+    STANZA_STARBORN_CSS,
+    STAGE_SETTINGS_JS,
     PIXI_JS,
     QRCODE_JS,
     ONLINE_LOGIN_JS,

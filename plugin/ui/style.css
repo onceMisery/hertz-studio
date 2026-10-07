@@ -1770,54 +1770,58 @@ kbd {
   gap: 20px;
   padding: 12px 20px;
 }
-/* 播放栏收起态：脱离布局、空间让给主内容 */
-.bar.is-hidden { display: none; }
+/* 隐藏由公共控制器一次落定，优先于各皮肤的 grid / flex 排版。 */
+.bar.is-hidden { display: none !important; }
 
-/* 底部唤出热区：仅播放栏隐藏时存在，屏幕最底一条不可见热区。
-   加厚到 12px 并贴边，鼠标和触摸都容易命中。 */
-.bar-hover-zone {
+.bar-restore {
   position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 12px;
-  z-index: 40;
-  display: none;
-}
-body.bar-hidden .bar-hover-zone { display: block; }
-
-/* 手动显隐按钮与播放模式胶囊并排。它复用 .btn-pill 的外形，但内容只有一个
-   图标，所以尺寸得自己钉死。
-
-   选择器必须写成 `.btn-pill.bar-pin-toggle` 而不是单独的 `.bar-pin-toggle`：
-   .bar-pin-toggle 这一节排在 .btn-pill 之前，两者特异性又都是 (0,1,0)，
-   后出现的 .btn-pill 会把 `padding: 7px 14px` 盖回来 —— 34px 宽的按钮里
-   只剩 4px 内容盒，18px 的 svg 作为 flex 子项被压到最小尺寸（宽度受
-   默认 2:1 内在比例限制 ≈ 9px），symbol 跟着缩到 0.375 倍。
-   结果就是截图里那个「空心圆 + 中间一小撮看不出是什么的东西」：
-   全站其它图标都是实心面（fill:currentColor），压扁了还能看出个色块，
-   而它是唯一的描边图标（#i-chevron-down = fill:none + stroke:currentColor），
-   描边被压成亚像素就彻底消失。
-   flex: none 是第二道保险：图标永远不参与收缩。 */
-.btn-pill.bar-pin-toggle {
-  margin-left: 6px;
+  left: 50%;
+  bottom: max(12px, env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 80;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
-  padding: 0;
+  gap: 8px;
+  min-height: 44px;
+  padding: 10px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--panel-solid, var(--bg));
+  color: var(--text);
+  box-shadow: 0 4px 20px rgb(0 0 0 / 18%);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
 }
-.btn-pill.bar-pin-toggle svg {
-  width: 18px;
-  height: 18px;
-  flex: none;
-  fill: none;
-  stroke: currentColor;
+.bar-restore[hidden], .btn-pill.bar-pin-toggle[hidden] { display: none; }
+.bar-restore svg { width: 18px; height: 18px; transform: rotate(180deg); }
+.bar-restore:hover { border-color: var(--accent); color: var(--accent); }
+.bar-restore:focus-visible, .bar-pin-toggle:focus-visible, .bar-favorite:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
+body.is-capsule .bar-restore, body.s3d-open .bar-restore { display: none; }
 
-/* 减少动效偏好：播放栏显隐不做滑动过渡，瞬间完成 */
-body.reduce-motion .bar { transition: none !important; }
+.btn-pill.bar-pin-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: auto;
+  min-width: 62px;
+  height: 36px;
+  padding: 0 10px;
+  flex: none;
+}
+.btn-pill.bar-pin-toggle svg { width: 16px; height: 16px; flex: none; }
+.bar-summary { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.bar-summary .bar-track { flex: 1; }
+.ctrl.bar-favorite { flex: none; color: var(--muted); }
+.ctrl.bar-favorite.is-on { color: var(--danger, #f0647c); background: rgba(240, 100, 124, 0.10); }
+.ctrl.bar-favorite:disabled { opacity: 0.4; cursor: default; }
+.ctrl.bar-favorite[aria-busy="true"] { opacity: 0.65; }
 
 .bar-track { min-width: 0; cursor: pointer; border-radius: var(--radius-sm, 8px); }
 .bar-track:focus-visible { outline: 2px solid var(--accent, #7c9cff); outline-offset: 2px; }
@@ -1905,7 +1909,7 @@ body.reduce-motion .bar { transition: none !important; }
 }
 #progress { position: relative; z-index: 1; margin: 0; }
 
-.bar-right { display: flex; align-items: center; gap: 16px; justify-self: end; }
+.bar-right { display: flex; align-items: center; gap: 10px; justify-self: end; }
 .bar-volume { display: flex; align-items: center; gap: 9px; }
 .bar-volume input[type="range"] { width: 88px; }
 
@@ -2055,7 +2059,7 @@ input[type="range"]::-moz-range-thumb { width: 13px; height: 13px; border: none;
     grid-template-areas: "track controls right" "progress progress progress";
     gap: 10px 12px; padding: 12px 14px;
   }
-  .bar-track { grid-area: track; }
+  .bar-summary { grid-area: track; }
   .bar-controls { grid-area: controls; }
   .bar-progress { grid-area: progress; }
   .bar-right { grid-area: right; }
@@ -2075,8 +2079,12 @@ input[type="range"]::-moz-range-thumb { width: 13px; height: 13px; border: none;
   .view { padding: 12px 12px 0; }
   .bar {
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas: "track right" "controls controls" "progress progress";
+    grid-template-areas: "track track" "controls controls" "progress progress" "right right";
   }
+  .bar-right { justify-self: center; }
+  .bar-summary { width: 100%; }
+  .btn-pill.bar-pin-toggle { min-height: 44px; }
+  .ctrl.bar-favorite { width: 44px; height: 44px; }
   .stage-title { font-size: 18px; }
   .ctrl { width: 34px; height: 34px; }
   .ctrl-primary { width: 44px; height: 44px; }
@@ -2221,11 +2229,13 @@ button.btn {
 
 .top-more { position: relative; display: flex; }
 
+/* 与 .skin-menu / .theme-menu 同一套：由 app.js 搬去 <body>，fixed + JS 定位。
+   z-index 只要压过浮光舞台面板(58)与控制舱(70/80)即可。 */
 .top-more-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 45;
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 85;
   width: 188px;
   padding: 6px;
   display: grid;
@@ -2261,17 +2271,24 @@ button.btn {
   border-color: rgba(var(--highlight-rgb), 0.34);
 }
 
-/* 界面皮肤弹层：与 .top-more-menu 同一套做法（包一层 relative，菜单绝对定位在
-   按钮下方）。不必像 #theme-menu 那样搬去 <body> —— .topbar 整体已经是
-   z-index:40，顶栏子树里的浮层本来就盖得住后面那几块玻璃面板。 */
+/* 界面皮肤弹层。与 #theme-menu 同一套做法：**由 skins.js 搬去 <body>**，
+   自己 fixed 定位（left/top 由 JS 按按钮矩形算）。
+   留在 .skin-picker 里是错的：.topbar 是 position:relative + z-index:40 +
+   backdrop-filter，本身就是一个层叠上下文，菜单写多高的 z-index 都只在顶栏内部
+   参与比较。浮光的舞台面板是 fixed + z-index:58（skin.sheen.css），于是整张菜单
+   被那块玻璃盖住 —— 实测命中测试在菜单中心与左上角两点都返回 #stage。
+   85 与 #theme-menu 同层：只要压过舞台抽屉(50)与控制舱(70/80)即可。 */
 .skin-picker { position: relative; display: flex; }
 
 .skin-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 45;
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 85;
   width: 246px;
+  max-height: 60vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 6px;
   display: grid;
   gap: 2px;
@@ -2713,6 +2730,16 @@ button:focus-visible, [role="button"]:focus-visible,
 .np-artist {
   margin-top: 3px;
   font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 接力后的出处说明（只在换过源时出现）。用 12px 与 --muted 跟艺术家那行同级，
+   不加边框：这一行是解释，不是警示。 */
+.np-origin {
+  margin-top: 2px;
+  font-size: 12px;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
@@ -3337,6 +3364,24 @@ button:focus-visible, [role="button"]:focus-visible,
   overflow-x: hidden;
   overscroll-behavior-y: contain;
 }
+
+/* 缺席来源 / 新鲜度说明条。整幅占位：卡片排布是多列网格，说明只占一格会
+   看起来像第一张卡片的副标题。 */
+.dv-status {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.dv-status-bit { min-width: 0; }
+.dv-status-act { padding: 4px 10px; font-size: 12px; }
 
 /* --- 列表画法：序号 + 标题/艺术家 + 来源 ------------------------------- */
 

@@ -77,6 +77,18 @@ function checkResolution() {
       assert.equal(theme.resolve(1.35).name, 'stage-palette');
     });
   }
+  // 彩色氛围的显式彩色回退（2026-10-07）：resolve 第二参 colorfulFallback。
+  // 中性 UI 主题（矿石黑）+「彩色氛围」背景不能再拿白灰 palette —— 舞台自己带
+  // 夜曲蓝调回退（与商籁中性回退同族）；不传 flag 时中性回退保持 P2 原状。
+  withColors({ '--music-highlight': '#808080' }, () => {
+    const nocturne = theme.resolve(1.35, true);
+    assert.equal(nocturne.name, 'stage-nocturne');
+    checkPalette(nocturne);
+    assert.notEqual(nocturne.accentColor, theme.DEFAULT.accentColor, '夜曲回退 accent 不是白');
+    const accentHsl = util.rgbToHsl(util.hexToRgb(nocturne.accentColor).r, util.hexToRgb(nocturne.accentColor).g, util.hexToRgb(nocturne.accentColor).b);
+    assert.ok(accentHsl[1] >= 40, '夜曲回退 accent 有真饱和度 (S=' + accentHsl[1].toFixed(1) + ')');
+    assert.deepEqual(theme.resolve(1.35), originalResolved, '无 flag 时中性回退仍是 P2 默认');
+  });
   let minimumActiveContrast = Infinity;
   for (let hue = -360; hue <= 720; hue += 3) {
     for (const saturation of [20, 60, 100]) {

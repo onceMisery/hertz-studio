@@ -88,6 +88,37 @@ fn default_true() -> bool {
     true
 }
 
+/// 快照字段（在线曲目的来源/标题/封面）逐个过长度闸门。
+fn check_optional_text(field: &str, value: Option<&str>) -> Result<(), StoreError> {
+    crate::limits::check_len(field, value, crate::limits::MAX_TEXT_CHARS, field)
+}
+
+fn check_snapshot_strings(t: &BackupPlaylistTrack) -> Result<(), StoreError> {
+    crate::limits::check_len(
+        "曲目 id",
+        Some(&t.track_id),
+        crate::limits::MAX_ID_CHARS,
+        "歌单条目",
+    )?;
+    crate::limits::check_len(
+        "曲目来源",
+        t.source.as_deref(),
+        crate::limits::MAX_ID_CHARS,
+        "歌单条目",
+    )?;
+    check_optional_text("曲目标题", t.title.as_deref())?;
+    check_optional_text("曲目歌手", t.artist.as_deref())?;
+    check_optional_text("曲目专辑", t.album.as_deref())?;
+    // cover 只该放 URL。放得下一张 base64 图的备份能把整个用户库撑大几十倍，
+    // 而且它不是「用户数据」，是缓存 —— 该走封面缓存目录，不该进数据库。
+    crate::limits::check_len(
+        "曲目封面",
+        t.cover.as_deref(),
+        crate::limits::MAX_URL_CHARS,
+        "歌单条目",
+    )
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct ExportedBackup {
     pub version: i64,
@@ -278,10 +309,50 @@ pub async fn restore(pool: &SqlitePool, file: &BackupFile) -> Result<RestoreRepo
         )));
     }
     // 曲目 id 不做存在性校验：备份可能跨机器恢复，曲目尚未扫描是合法状态。
+    // 数量与长度先整体过一遍（`limits` 模块）：**任何写入之前**验完，所以越界的
+    // 载荷一条都进不了库，而不是「写了一半再回滚」。
+    crate::limits::check_count(
+        "备份里的歌单数",
+        file.playlists.len(),
+        crate::limits::MAX_PLAYLISTS_PER_BACKUP,
+        "整个备份",
+    )?;
+    crate::limits::check_count(
+        "备份里的收藏数",
+        file.favorites.len(),
+        crate::limits::MAX_FAVORITES_PER_BACKUP,
+        "整个备份",
+    )?;
+    crate::limits::check_count(
+        "备份里的扫描目录数",
+        file.scan_roots.len(),
+        crate::limits::MAX_SCAN_ROOTS_PER_BACKUP,
+        "整个备份",
+    )?;
+    crate::limits::check_count(
+        "备份里的设置键数",
+        file.settings.len(),
+        crate::limits::MAX_SETTINGS_KEYS,
+        "整个备份",
+    )?;
+    let mut total_tracks = 0usize;
     for playlist in &file.playlists {
         if playlist.name.trim().is_empty() {
             return Err(StoreError::Database("歌单名不能为空".into()));
         }
+        crate::limits::check_len(
+            "歌单名",
+            Some(&playlist.name),
+            crate::limits::MAX_NAME_CHARS,
+            "歌单名",
+        )?;
+        crate::limits::check_count(
+            "单曲库里的曲目数",
+            playlist.tracks.len(),
+            crate::limits::MAX_TRACKS_PER_PLAYLIST,
+            &playlist.name,
+        )?;
+        total_tracks += playlist.tracks.len();
         for track in &playlist.tracks {
             if track.track_id.trim().is_empty() {
                 return Err(StoreError::Database(format!(
@@ -289,12 +360,53 @@ pub async fn restore(pool: &SqlitePool, file: &BackupFile) -> Result<RestoreRepo
                     playlist.name
                 )));
             }
+            check_snapshot_strings(track)?;
         }
     }
+    crate::limits::check_count(
+        "备份里的曲目总数",
+        total_tracks,
+        crate::limits::MAX_TRACKS_PER_BACKUP,
+        "整个备份",
+    )?;
     for favorite in &file.favorites {
         if favorite.ref_id.trim().is_empty() || favorite.title.trim().is_empty() {
             return Err(StoreError::Database("收藏缺少 ref_id 或 title".into()));
         }
+        crate::limits::check_len(
+            "收藏 ref_id",
+            Some(&favorite.ref_id),
+            crate::limits::MAX_ID_CHARS,
+            "收藏",
+        )?;
+        crate::limits::check_len(
+            "收藏 source",
+            Some(&favorite.source),
+            crate::limits::MAX_ID_CHARS,
+            "收藏",
+        )?;
+        crate::limits::check_len(
+            "收藏标题",
+            Some(&favorite.title),
+            crate::limits::MAX_TEXT_CHARS,
+            "收藏",
+        )?;
+        check_optional_text("收藏歌手", favorite.artist.as_deref())?;
+        check_optional_text("收藏专辑", favorite.album.as_deref())?;
+        crate::limits::check_len(
+            "收藏封面",
+            favorite.cover.as_deref(),
+            crate::limits::MAX_URL_CHARS,
+            "收藏",
+        )?;
+    }
+    for root in &file.scan_roots {
+        crate::limits::check_len(
+            "扫描目录路径",
+            Some(&root.path),
+            crate::limits::MAX_PATH_CHARS,
+            "扫描目录",
+        )?;
     }
     for favorite in &file.favorites {
         if favorite.kind != "track" && favorite.kind != "radio" {
@@ -490,6 +602,19 @@ pub async fn import_m3u(
     name: &str,
     content: &str,
 ) -> Result<Option<(String, u64, u64)>, StoreError> {
+    crate::limits::check_len(
+        "歌单名",
+        Some(name),
+        crate::limits::MAX_NAME_CHARS,
+        "m3u 导入",
+    )?;
+    // 行数不单独设上限：一行至少一个字符，字节闸门已经把行数夹住了。
+    if content.len() > crate::limits::MAX_M3U_BYTES {
+        return Err(StoreError::Database(format!(
+            "m3u 内容超过上限 {} 字节",
+            crate::limits::MAX_M3U_BYTES
+        )));
+    }
     let mut lines = content.lines().map(str::trim).filter(|l| !l.is_empty());
     match lines.next() {
         // 宽松识别：BOM 与属性行都容忍，但首行必须是 # 注释（M3U 的标志）。
@@ -691,6 +816,134 @@ mod tests {
         };
         assert!(restore(&db, &file).await.is_err(), "空 id 必须拒绝");
         // 事务回滚：坏歌单没有留下。
+        assert!(crate::list_playlists(&db).await.unwrap().is_empty());
+        db.close().await;
+    }
+
+    /// 数量与长度闸门必须在**任何写入之前**过完。「前半合法、后半越界」的载荷
+    /// 才是危险的那种：它看起来只会失败，实际会留下半库，而事务回滚虽然也能兜住，
+    /// 却要求我们为一次失败付出一整轮的写入与锁。
+    #[tokio::test]
+    async fn restore_rejects_oversize_payloads_before_writing_anything() {
+        use crate::limits as L;
+        let db = pool().await;
+        let good = BackupPlaylist {
+            name: "合法一半".into(),
+            tracks: vec![BackupPlaylistTrack {
+                track_id: "t1".into(),
+                ..Default::default()
+            }],
+        };
+        // 字段类型完全合法，只是体量越界：一张 base64 塞进封面列。
+        let bad_cover = format!(
+            "data:image/png;base64,{}",
+            "A".repeat(L::MAX_URL_CHARS + 10)
+        );
+        let bad = BackupPlaylist {
+            name: "越界一半".into(),
+            tracks: vec![BackupPlaylistTrack {
+                track_id: "t2".into(),
+                cover: Some(bad_cover),
+                ..Default::default()
+            }],
+        };
+        let file = BackupFile {
+            version: BACKUP_VERSION,
+            playlists: vec![good, bad],
+            favorites: vec![],
+            settings: Default::default(),
+            scan_roots: vec![],
+        };
+        let err = restore(&db, &file).await.expect_err("超长封面必须拒绝");
+        assert!(
+            err.to_string().contains("上限"),
+            "报错要说清是越界而不是数据库故障：{err}"
+        );
+        assert!(
+            crate::list_playlists(&db).await.unwrap().is_empty(),
+            "越界载荷一条都不该入库"
+        );
+
+        let many = BackupFile {
+            version: BACKUP_VERSION,
+            playlists: (0..=L::MAX_PLAYLISTS_PER_BACKUP)
+                .map(|i| BackupPlaylist {
+                    name: format!("p{i}"),
+                    tracks: vec![],
+                })
+                .collect(),
+            favorites: vec![],
+            settings: Default::default(),
+            scan_roots: vec![],
+        };
+        assert!(restore(&db, &many).await.is_err(), "歌单条数上限要生效");
+        assert!(
+            crate::list_playlists(&db).await.unwrap().is_empty(),
+            "数量越界同样一条不进"
+        );
+        db.close().await;
+    }
+
+    /// 上限不许贴身裁剪：刚好在界内的真实备份必须照常恢复。
+    #[tokio::test]
+    async fn restore_still_accepts_backups_at_the_bounds() {
+        use crate::limits as L;
+        let db = pool().await;
+        crate::upsert_track(
+            &db,
+            &sample_track("r1", &"长".repeat(L::MAX_TEXT_CHARS), None),
+        )
+        .await
+        .unwrap();
+        let file = BackupFile {
+            version: BACKUP_VERSION,
+            playlists: vec![BackupPlaylist {
+                name: "上限内的歌单".into(),
+                tracks: vec![BackupPlaylistTrack {
+                    track_id: "r1".into(),
+                    source: Some("netease".into()),
+                    title: Some("长".repeat(L::MAX_TEXT_CHARS)),
+                    artist: None,
+                    album: None,
+                    duration_ms: Some(1000),
+                    cover: Some("https://music.163.com/x.jpg?sig=abc".into()),
+                }],
+            }],
+            favorites: vec![],
+            settings: Default::default(),
+            scan_roots: vec![],
+        };
+        let report = restore(&db, &file).await.expect("界内的备份该能恢复");
+        assert_eq!(report.playlists_created, 1);
+        assert_eq!(report.tracks_added, 1);
+        db.close().await;
+    }
+
+    /// m3u 的字节闸门：行数不单独设限（一行至少一个字符，字节闸已经夹住了），
+    /// 歌单名同样过长度闸。
+    #[tokio::test]
+    async fn m3u_import_rejects_oversize_content_and_name() {
+        use crate::limits as L;
+        let db = pool().await;
+        // 一行 9 字节，所以要除 9 才能真越过上限（第一版按 11 算，构造出来的
+        // 载荷其实还没越界，测试于是慢吞吞地真去导入了 70 万行）。
+        let huge = format!("#EXTM3U\n{}", "/m/x.mp3\n".repeat(L::MAX_M3U_BYTES / 9 + 8));
+        assert!(huge.len() > L::MAX_M3U_BYTES, "夹具本身要真的越过上限");
+        assert!(
+            import_m3u(&db, "太大", &huge).await.is_err(),
+            "超过字节上限的 m3u 要拒绝"
+        );
+        assert!(
+            crate::list_playlists(&db).await.unwrap().is_empty(),
+            "拒绝就不该建歌单"
+        );
+        let long_name = "名".repeat(L::MAX_NAME_CHARS + 1);
+        assert!(
+            import_m3u(&db, &long_name, "#EXTM3U\n/m/a.mp3\n")
+                .await
+                .is_err(),
+            "歌单名超长要拒绝"
+        );
         assert!(crate::list_playlists(&db).await.unwrap().is_empty());
         db.close().await;
     }

@@ -221,92 +221,84 @@ html.creative-bg-on body::after {
    3. 手绘层
    --------------------------------------------------------------------------- */
 
+/* Every treatment belongs to the art host. Controls and library rows retain
+   their own skin; the stage owner decides the overlay's stacking position. */
+.hand-target {
+  --hd-ink: 234, 233, 222;
+  --hd-accent: 205, 211, 196;
+  --hd-panel: 7, 13, 17;
+  --hd-frame-alpha: .58;
+  --hd-dot-alpha: .26;
+}
+.hand-target[data-hand-style='pencil'] {
+  --hd-ink: 207, 196, 177;
+  --hd-accent: 239, 226, 199;
+  --hd-panel: 23, 21, 21;
+  --hd-frame-alpha: .47;
+  --hd-dot-alpha: .14;
+}
+.hand-target[data-hand-style='color'] {
+  --hd-ink: 186, 227, 216;
+  --hd-accent: 244, 165, 145;
+  --hd-panel: 12, 20, 28;
+  --hd-frame-alpha: .63;
+  --hd-dot-alpha: .23;
+}
 .hd-layer {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: 3;              /* 压在三维修场景与粒子之上、歌词之下（歌词是 DOM 主体） */
+  z-index: 3;
+  overflow: hidden;
   opacity: 0;
-  transition: opacity 260ms ease;
+  transition: opacity 180ms ease;
+}
+.hand-target.hand-on > .hd-layer { opacity: 1; }
+.hd-layer[hidden] { display: none; }
+.hd-layer::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: var(--hd-paper-image, none);
   background-repeat: repeat;
   background-size: 128px 128px;
-  mix-blend-mode: soft-light;
+  opacity: .55;
+  -webkit-mask-image: radial-gradient(ellipse at 50% 44%, transparent 36%, #000 82%);
+  mask-image: radial-gradient(ellipse at 50% 44%, transparent 36%, #000 82%);
 }
-
-html.hand-on .hd-layer {
-  opacity: 1;
-}
-
-html.hand-paper .hd-layer {
-  background-blend-mode: overlay;
-}
-
-/* 纸张噪点只在手绘模式下出现，而且压得很淡：它是"纸的感觉"，不是"一张贴纸"。 */
-html:not(.hand-paper) .hd-layer {
-  background-image: none !important;
-}
-
+.hand-target:not(.hand-paper) > .hd-layer::before { display: none; }
 .hd-svg {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  overflow: visible;
+  overflow: hidden;
 }
-
 .hd-svg path {
   fill: none;
-  /* 手绘墨色走主题的高亮色：换主题时铅笔线自动跟着变，不需要重做任何图。 */
-  stroke: rgb(var(--music-highlight-rgb, 226, 176, 179));
+  stroke: rgb(var(--hd-ink));
   stroke-linecap: round;
   stroke-linejoin: round;
   vector-effect: non-scaling-stroke;
 }
-
-/* 边框最淡：它只是"框住了这一页"，不该被看见。 */
-.hd-frame {
-  stroke-width: 1.4px;
-  opacity: 0.34;
+.hd-svg .hd-panels {
+  fill: rgba(var(--hd-panel), .34);
+  stroke: none;
 }
-
-/* 声波是主角，给足对比度。 */
-.hd-wave {
-  stroke-width: 1.6px;
-  opacity: 0.72;
+.hd-svg .hd-tone {
+  fill: url('#hd-stage-dots');
+  stroke: none;
+  opacity: var(--hd-dot-alpha);
 }
-
-/* 圈注要在文字上可读，所以最实、最粗。 */
-.hd-annot {
-  stroke-width: 2.2px;
-  opacity: 0.9;
-}
-
-/* 手绘模式下的界面元素：把直角换成不对称圆角，与抖动线条同一套语汇。
-   只动边角，不动配色与排版 —— 手绘是"笔迹"，不是"另一套设计"。 */
-html.hand-on .btn,
-html.hand-on .btn-pill,
-html.hand-on .chip,
-html.hand-on .rail-item,
-html.hand-on .iconbtn {
-  border-radius: 14px 10px 16px 9px;
-}
-
-html.hand-on .lib-list > *,
-html.hand-on .q-list > * {
-  border-radius: 10px 16px 9px 14px;
-}
-
-html.hand-paper body {
-  /* 纸的底色：极淡的暖黄，只在手绘模式下出现，且不覆盖真实背景层。 */
-  background-blend-mode: multiply;
-}
-
-html.hand-paper .column,
-html.hand-paper footer.bar {
-  background-image:
-    linear-gradient(rgba(255, 250, 240, 0.035), rgba(255, 250, 240, 0.035));
-  background-blend-mode: overlay;
-}
+.hd-dot { fill: rgb(var(--hd-ink)); }
+.hd-frame { stroke-width: 1.25px; opacity: var(--hd-frame-alpha); }
+.hd-svg .hd-accent { stroke: rgb(var(--hd-accent)); stroke-width: 1.6px; opacity: .66; }
+.hd-hatch { stroke-width: .9px; opacity: .31; }
+.hd-wave { stroke-width: 1.5px; opacity: .76; }
+.hd-svg .hd-annot { stroke: rgb(var(--hd-accent)); stroke-width: 1.8px; opacity: .85; }
+.hand-target[data-hand-style='pencil'] .hd-frame { stroke-width: .9px; }
+.hand-target[data-hand-style='pencil'] .hd-hatch { opacity: .44; }
+.hand-target[data-hand-style='color'] .hd-wave { stroke: rgb(var(--hd-accent)); }
 
 /* ---------------------------------------------------------------------------
    4. 创意工坊
@@ -391,8 +383,7 @@ html.hand-paper footer.bar {
   margin-top: 2px;
 }
 
-.ws-close,
-.ws-expand {
+.ws-close {
   width: 30px;
   height: 30px;
   border-radius: 9px;
@@ -404,37 +395,13 @@ html.hand-paper footer.bar {
   place-items: center;
 }
 
-.ws-close:hover,
-.ws-expand:hover {
+.ws-close:hover {
   background: var(--hover, rgba(255, 255, 255, 0.07));
 }
 
 .ws-close svg {
   width: 15px;
   height: 15px;
-}
-
-/* 展开按钮：常显但低调，只有「预览真的挂上了」才允许点（见 workshop.js）。
-   用 disabled 而不是 hidden —— 一个会随页签出现/消失的按钮比一个置灰的
-   按钮更难预期。 */
-.ws-expand {
-  flex: none;
-  color: inherit;
-}
-
-.ws-expand svg {
-  width: 15px;
-  height: 15px;
-}
-
-.ws-expand[aria-pressed='true'] {
-  background: rgba(var(--music-highlight-rgb, 226, 176, 113), 0.16);
-  color: rgb(var(--music-highlight-rgb, 226, 176, 113));
-}
-
-.ws-expand:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
 }
 
 .ws-tabs {
@@ -919,7 +886,7 @@ body.stage-lowfx #creative-bg-canvas {
   .hd-layer { transition: none; }
 }
 
-/* Listening workshop: a visible preview and a quiet, dedicated editing surface. */
+/* Listening workshop: edit the performance directly on the large stage. */
 .ws-panel { --ws-width: 400px; width: min(var(--ws-width),100vw); color: var(--text); background: #111b1c; box-shadow: -18px 0 60px rgba(0,0,0,.22); touch-action: pan-y; }
 .ws-head { padding: 24px 24px 18px; border-bottom: 0; }
 .ws-badge { background: #c3dacc; color: #1b3025; border-radius: 50%; width: 34px; height: 34px; font-weight: 500; }
@@ -988,86 +955,30 @@ body.ws-open:not(.s3d-open) #lyric-page { right: 400px; width: auto; }
   body.ws-open:not(.s3d-open) #lyric-page { right: 0; bottom: 63%; height: auto; }
 }
 
-/* 高级编排的面板内实时预览：16:9 画布 + 状态条。画布由 creative-stage 的
-   预览视图挂进 ws-preview-host，只画在这里，不影响主页右栏。 */
-.ws-preview { margin: 0 20px 4px; border: 1px solid rgba(255,255,255,.10); border-radius: 12px; overflow: hidden; background: #0e191b; }
-.ws-preview[hidden] { display: none; }
-.ws-preview-stage { position: relative; aspect-ratio: 16 / 9; }
-.ws-preview-stage .creative-canvas { position: absolute; }
-.ws-preview-meta { padding: 7px 12px; font-size: 10.5px; letter-spacing: .07em; color: #8fa39a; border-top: 1px solid rgba(255,255,255,.08); }
-
-/* 宽屏工坊：面板摊成两栏，预览占主列、参数占侧栏。
-
-   为什么需要这个形态 —— 窄面板里那个 16:9 画布只有约 350x200。这个尺寸下
-   两件事同时成立：一是场景的空间结构读不出来（灯柱的疏密、纵深的收敛），
-   二是后处理链的粗光晕 target 掉到不足 1/8 分辨率，高斯核等效于全屏均匀
-   提升，画面就糊成一片均匀的光。放大容器是唯一对症解 —— 补光晕或改曝光都
-   是在下游打补丁。
-
-   比例 1.2fr / 380px 与 min-h-[300px] 取自 folia-major 的 ThemePark 编辑器
-   （grid-cols-[minmax(0,1.2fr)_380px]，预览 h-full），不是随手配的数。
-   预览这一列不设 aspect-ratio：让它跟着面板高度走，竖屏时才是满屏而不是
-   一个居中的小方块。 */
-.ws-panel.is-wide {
-  --ws-width: min(1180px, 96vw);
-  display: grid;
-  grid-template-columns: minmax(0, 1.2fr) 380px;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  grid-template-areas:
-    'head head'
-    'tabs tabs'
-    'preview body';
-  align-content: start;
-}
-
-.ws-panel.is-wide .ws-head { grid-area: head; }
-.ws-panel.is-wide .ws-tabs { grid-area: tabs; }
-.ws-panel.is-wide .ws-preview { grid-area: preview; }
-.ws-panel.is-wide .ws-body { grid-area: body; }
-
-/* 头与页签要占满两列，且不能被 grid 的行高分配挤扁 */
-.ws-panel.is-wide .ws-head,
-.ws-panel.is-wide .ws-tabs { grid-column: 1 / -1; }
-
-/* 预览不在「高级编排」页签时（hidden）没有 preview 这一格，body 需要顶上来。
-   用 grid-area 而不是 display 覆盖：hidden 的元素不生成盒子，整列会空着。 */
-.ws-panel.is-wide:not(:has(.ws-preview:not([hidden]))) .ws-body {
-  grid-area: body;
-  grid-column: 1 / -1;
-}
-
-.ws-panel.is-wide .ws-preview {
-  margin: 4px 20px 20px;
-  display: flex;
-  flex-direction: column;
-  min-height: 300px;
-}
-
-.ws-panel.is-wide .ws-preview-stage {
-  flex: 1;
-  min-height: 260px;
-  aspect-ratio: auto;
-}
-
-/* 宽屏下右侧参数栏自己滚，头与页签固定。列模板已经给了 minmax(0,1fr)，
-   这里只需把溢出关掉，否则 ws-body 的 padding-bottom 会被算进行高。 */
-.ws-panel.is-wide .ws-body {
-  min-height: 0;
-  overflow-y: auto;
-  border-left: 1px solid rgba(255, 255, 255, 0.06);
-}
-
-/* 主页右栏要跟着让出宽度，否则宽屏工坊会盖住播放视窗 */
-body.ws-open.ws-wide:not(.s3d-open) #lyric-page { right: min(1180px, 96vw); }
-
-@media (max-width: 900px) {
-  /* 窄屏摊不开两栏：1.2fr + 380px 在 900px 下预览只剩不到 300px 宽，
-     比原来的窄面板还小。宁可退回单列，也不要给一个更差的预览。 */
-  .ws-panel.is-wide {
-    display: flex;
-    flex-direction: column;
-  }
-  .ws-panel.is-wide .ws-preview-stage { aspect-ratio: 16 / 9; flex: none; min-height: 0; }
-  .ws-panel.is-wide .ws-body { border-left: 0; }
-  body.ws-open.ws-wide:not(.s3d-open) #lyric-page { right: 0; }
+/* Status describes the real performance; the editor has no separate renderer. */
+.ws-stage-status { flex: none; margin: 0 24px 16px; padding: 12px 0 12px 13px; border-left: 2px solid #a6cbb8; }
+.ws-stage-status strong { display: block; font-size: 12px; font-weight: 500; color: #dce8df; }
+.ws-stage-status span { display: block; margin-top: 5px; font-size: 10px; line-height: 1.6; color: #91a99a; }
+.ws-stage-status.is-unavailable { border-color: #ba9875; }
+.ws-look-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 16px 0 24px; }
+.ws-look-card { padding: 0 0 13px; overflow: hidden; text-align: left; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: #152122; color: #d7e2da; cursor: pointer; transition: border-color 180ms, background-color 180ms; }
+.ws-look-card:hover { border-color: #738f7e; }
+.ws-look-card[aria-pressed='true'] { border-color: #adcab9; background: #263a31; }
+.ws-look-card strong { display: block; padding: 12px 12px 0; font-size: 12px; font-weight: 500; }
+.ws-look-card small { display: block; padding: 6px 12px 0; font-size: 10px; line-height: 1.6; color: #95aa9e; }
+.ws-look-swatch { display: block; position: relative; height: 70px; overflow: hidden; color: #a6cbb8; background: #101b1d; }
+.ws-look-swatch i { position: absolute; display: block; width: 85px; height: 36px; border: 1px solid currentColor; transform: rotate(-19deg); left: 30%; top: 20px; opacity: .5; }
+.ws-look-swatch i:nth-child(2) { left: 20%; top: 30px; opacity: .3; }
+.ws-look-swatch i:nth-child(3) { left: 40%; top: 10px; opacity: .7; }
+.ws-look-card[data-style='off'] .ws-look-swatch i { border-radius: 50%; height: 45px; }
+.ws-look-card[data-style='manga'] .ws-look-swatch { color: #dfdfd4; background: #191d21; }
+.ws-look-card[data-style='manga'] .ws-look-swatch i { border-width: 2px; transform: rotate(-12deg) skewX(-13deg); }
+.ws-look-card[data-style='pencil'] .ws-look-swatch { color: #c5bba4; background: #252727; }
+.ws-look-card[data-style='pencil'] .ws-look-swatch i { border-style: dashed; border-radius: 43% 52% 38% 56%; }
+.ws-look-card[data-style='color'] .ws-look-swatch { color: #b9c5c1; background: #202327; }
+.ws-look-card[data-style='color'] .ws-look-swatch i:first-child { color: #bca3a7; }
+.ws-look-card[data-style='color'] .ws-look-swatch i:nth-child(2) { color: #9eb8bd; }
+.ws-look-card[data-style='color'] .ws-look-swatch i:nth-child(3) { color: #d1bc8c; }
+@media (max-width: 760px) {
+  .ws-stage-status { margin: 0 20px 8px; padding-top: 8px; padding-bottom: 8px; }
 }

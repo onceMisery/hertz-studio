@@ -70,6 +70,9 @@
     loadingMore: false,
     trackQuery: '',
     mode: 'cover',    // cover | list
+    // F2 整单续载进度（队列那一边的）。由 online:collection-load 事件驱动，
+    // 只在 msg 与当前打开的歌单对上时更新；done 后不再显示。
+    collection: null,
   };
 
   // 集合种类 → 中文名与取数端点。详情层的一切「歌单」字样都从这里翻。
@@ -246,6 +249,8 @@
     state.error = null;
     state.loadingMore = false;
     state.trackQuery = '';
+    // 换了集合，上一个歌单的续载进度行作废（服务端意图也已被 set_queue 清掉）。
+    state.collection = null;
     var q = el('opl-detail-q');
     if (q) q.value = '';
     ensureVisible();
@@ -406,6 +411,13 @@
     var view = visibleTracks();
     acts.appendChild(actionButton(playLabel(view), 'primary', function () {
       if (!view.length) return;
+      // F2 整单播放：歌单未取全且未筛选时发集合意图，首页之后由服务端续载
+      // ——只有这条路径上的「播放全部」才真的承诺了全部。专辑/歌手的翻页
+      // 接口不同（more 布尔、无服务端续载），保持只播已加载。
+      if (playSupportsCollection()) {
+        window.Online.playCollection(state.source, state.subject.id);
+        return;
+      }
       window.Online.playAll(view, 0);
     }));
     acts.appendChild(actionButton(queueLabel(view), '', function () {
@@ -413,6 +425,19 @@
       enqueue(view);
     }));
     box.appendChild(acts);
+    box.appendChild(scopeNote());
+    box.appendChild(loadNote());
+  }
+
+  // 整单播放的可用性：歌单、未筛选、还没取全、且音源登记了 playlist_detail
+  // 能力位（caps 是 UI 的唯一事实表，缺了就是点了必 404）。
+  function playSupportsCollection() {
+    return state.kind === 'playlist'
+      && !state.trackQuery.trim()
+      && hasMore()
+      && window.Online
+      && typeof window.Online.supports === 'function'
+      && window.Online.supports(state.source, 'playlist_detail');
   }
 
   function capSourceLabel() {
@@ -420,13 +445,34 @@
     return hit ? hit.sourceLabel : state.source;
   }
 
-  // 参考实现的语义：筛选生效时按钮说清「播放 N 首 / 加入 N 首」，
-  // 否则说「播放全部 / 加入队列」。
+  // 按钮只承诺它实际交出去的那批曲目。分页是惰性的：view 永远不含未加载的页，
+  // 所以「全部」只在确实取完时才可以说。筛选的域同样是已加载部分，另在下方
+  // 用一行说明（见 scopeNote），不把它塞进按钮文案里堆字数。
   function playLabel(view) {
-    return state.trackQuery.trim() ? '播放 ' + view.length + ' 首' : '播放全部';
+    if (state.trackQuery.trim()) return '播放 ' + view.length + ' 首';
+    // F2：歌单有服务端整单续载时，「全部」由后台按页兑现，可以如实说全部；
+    // 其余集合（专辑/歌手）仍只承诺已加载的部分。
+    if (playSupportsCollection()) return '播放全部 ' + (state.total || view.length) + ' 首';
+    return hasMore() ? '播放已加载 ' + view.length + ' 首' : '播放全部 ' + view.length + ' 首';
   }
   function queueLabel(view) {
-    return state.trackQuery.trim() ? '加入 ' + view.length + ' 首到队列' : '加入队列';
+    if (state.trackQuery.trim()) return '加入 ' + view.length + ' 首到队列';
+    return hasMore() ? '加入已加载 ' + view.length + ' 首到队列' : '加入全部 ' + view.length + ' 首到队列';
+  }
+
+  // 筛选生效而集合还没取完时，说清筛选找的是哪一段，并给出取全的动作。
+  function scopeNote() {
+    var box = document.createElement('div');
+    box.className = 'opl-scope-note';
+    if (!state.trackQuery.trim()) {
+      box.hidden = true;
+      return box;
+    }
+    box.hidden = !hasMore();
+    var left = Math.max(0, (state.total || 0) - state.tracks.length);
+    box.textContent = '筛选只在已加载的 ' + state.tracks.length + ' 首里查找'
+      + (left ? '，还有 ' + left + ' 首未加载。' : '。');
+    return box;
   }
 
   function actionButton(text, kind, onclick) {
@@ -436,6 +482,33 @@
     b.textContent = text;
     b.onclick = onclick;
     return b;
+  }
+
+  // F2 整单续载的进度行。它描述的是「队列那一边」的后台补页，与详情页自己的
+  // 分页是两回事；done 之后不再出现。中断时给「继续载入」——force 绕过水位
+  // 与节流，但服务端的会话复核不变：换过队就安静作废。
+  function loadNote() {
+    var box = document.createElement('div');
+    box.className = 'opl-scope-note opl-load-note';
+    var c = state.collection;
+    if (!c || c.done || state.kind !== 'playlist') {
+      box.hidden = true;
+      return box;
+    }
+    if (c.error) {
+      box.textContent = '后台载入中断，已加入 ' + c.loaded + ' 首（' + c.error + '）';
+      box.appendChild(document.createTextNode(' '));
+      box.appendChild(actionButton('继续载入', '', function () {
+        tr().post('/v1/online/collection/refresh').catch(function () {
+          // 失败的进度由下一条 collection_load 事件带回，这里不重复报错。
+        });
+      }));
+      return box;
+    }
+    box.textContent = '正在把整张歌单加入播放队列：已加入 ' + c.loaded + ' 首'
+      + (c.total ? ' / ' + c.total : '')
+      + '。可先听当前曲目，切歌不必等。';
+    return box;
   }
 
   async function enqueue(tracks) {
@@ -652,6 +725,19 @@
         if (entries[0] && entries[0].isIntersecting) loadMore();
       }).observe(sentinel);
     }
+  }
+
+  // F2：整单续载进度事件只影响「队列那一边」。这里把它归到当前打开的歌单
+  // ——不是这个歌单的进度不动界面（切歌串台守卫同一原则）。测试沙箱的
+  // window 没有 addEventListener，守卫掉；接线本身由契约检查钉住。
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('online:collection-load', function (ev) {
+      var msg = ev && ev.detail;
+      if (!msg || state.kind !== 'playlist') return;
+      if (msg.source !== state.source || !state.subject || msg.id !== state.subject.id) return;
+      state.collection = msg;
+      renderInfo();
+    });
   }
 
   window.OnlinePlaylistView = {

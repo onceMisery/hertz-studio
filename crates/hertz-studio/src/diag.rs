@@ -13,6 +13,10 @@
 //! - 写失败一律吞掉——诊断日志不能把播放带崩；
 //! - 在线流地址只留 `scheme://host/path`。网易 / QQ / 酷狗的 vkey、签名与临时
 //!   token 都在 query 里，而这份文件注定要被转发给别人。
+//!
+//! 唯一的例外是崩溃：[`install_panic_hook`] 装的钩子**无视开关**写一条 `panic`
+//! 行并给一个 `report` 编号。开关关着的时候进程照样会崩，而「它自己没了」是用户
+//! 唯一能说的话 —— 没有编号和路径，这句反馈接不住。
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -38,10 +42,20 @@ struct Meta {
     backend: String,
 }
 
+/// 崩溃现场的一条记录（进程内只留最后一次，供诊断面板在开关关着时也读得到）。
+#[derive(Debug, Clone)]
+pub struct CrashRecord {
+    pub report: String,
+    pub at: String,
+    pub location: String,
+    pub message: String,
+}
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static META: OnceLock<Meta> = OnceLock::new();
 /// 串行化追加与裁剪。只在一次小文件写入期间持有，不跨 await。
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+static LAST_CRASH: Mutex<Option<CrashRecord>> = Mutex::new(None);
 
 /// 记录一条诊断。
 ///
@@ -123,6 +137,79 @@ pub fn event(kind: &str, fields: &[(&str, String)]) {
     if enabled() {
         write_line(kind, fields);
     }
+}
+
+/// 记一次崩溃：**无视开关**写一行 `panic`，并把现场留在进程内供诊断面板读。
+/// 写完仍要走默认钩子 —— 终端里的原始 panic 输出是给开发者自己的。
+pub fn crash(report: &str, location: &str, message: &str) {
+    let now = stamp(SystemTime::now());
+    let path = log_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| String::from("未初始化"));
+    write_line(
+        "panic",
+        &[
+            ("report", value(&report)),
+            ("where", value(&location)),
+            ("msg", value(&message)),
+            ("log", value(&path)),
+        ],
+    );
+    let mut last = LAST_CRASH.lock().unwrap_or_else(|e| e.into_inner());
+    *last = Some(CrashRecord {
+        report: report.to_string(),
+        at: now,
+        location: location.to_string(),
+        message: message.to_string(),
+    });
+}
+
+/// 最后一次崩溃（没有则 None）。诊断面板即使开关关着也要显示它：「它自己没了」
+/// 这种反馈必须先有一个可交接的编号，否则下一次崩溃仍然无从对上。
+pub fn last_crash() -> Option<serde_json::Value> {
+    let guard = LAST_CRASH.lock().ok()?;
+    let record = guard.as_ref()?;
+    Some(serde_json::json!({
+        "report": record.report,
+        "at": record.at,
+        "where": record.location,
+        "message": record.message,
+    }))
+}
+
+/// 装 panic 钩子（在 `init` 之后调用一次）。钩子自己绝不能再 panic：只走
+/// `to_string` / 忽略 IO 失败的写法，且写完交回默认钩子。
+pub fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            String::from("panicked（载荷不是字符串）")
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| String::from("未知位置"));
+        crash(&new_report(), &location, &message);
+        previous(info);
+    }));
+}
+
+/// 八位十六进制编号：够一次会话里区分几次崩溃，又短到口头报得出来。
+fn new_report() -> String {
+    let full = uuid::Uuid::new_v4().simple().to_string();
+    full[..8].to_string()
+}
+
+/// 供 `diagnostics_json` 用：测试里可复位，避免用例之间互相看到对方的崩溃。
+#[cfg(test)]
+pub(crate) fn forget_last_crash() {
+    let mut last = LAST_CRASH.lock().unwrap_or_else(|e| e.into_inner());
+    *last = None;
 }
 
 fn write_line(kind: &str, fields: &[(&str, String)]) {
@@ -244,7 +331,13 @@ fn trim_if_over(path: &Path) -> io::Result<()> {
         skip + dropped as u64
     );
     out.push_str(&String::from_utf8_lossy(&buf));
-    File::create(path)?.write_all(out.as_bytes())
+    // 两阶段：先写同目录临时文件再 rename 覆盖。原先直接 `File::create(path)`
+    // 会先把当前日志截断成 0 再写，进程（或杀软、或磁盘满）正卡在这中间时，
+    // 用户发来的就是一份被裁掉的日志**加上**丢失的现场 —— 而裁剪恰恰发生在
+    // 日志最长、最可能有内容的那一刻。
+    let tmp = path.with_extension("log.trim.tmp");
+    File::create(&tmp)?.write_all(out.as_bytes())?;
+    std::fs::rename(&tmp, path)
 }
 
 /// 值写法：折行压成空格、限长、只在必要时加引号并转义。裸值让日志能直接 grep。
@@ -445,6 +538,38 @@ mod tests {
         event("play.begin", &[("idx", value(&9usize))]);
         let (text, _) = read(MAX_BYTES).unwrap();
         assert!(!text.contains("play.begin"), "{text}");
+
+        // 崩溃是唯一的例外：开关关着也必须留下编号与现场，否则「它自己没了」这句
+        // 反馈没有任何可交接的东西，下一次崩溃还是对不上。
+        forget_last_crash();
+        crash(
+            "abcd1234",
+            "crates/hertz-studio/src/state.rs:42",
+            "index 越界",
+        );
+        let (text, _) = read(MAX_BYTES).unwrap();
+        assert!(
+            text.contains(
+                r#"panic report=abcd1234 where=crates/hertz-studio/src/state.rs:42 msg="index 越界""#
+            ),
+            "{text}"
+        );
+        // 同一份现场还要能被诊断面板读到（进程内缓存，不依赖文件被打开过）。
+        let last = last_crash().expect("记过崩溃就该查得到");
+        assert_eq!(last["report"], "abcd1234");
+        assert_eq!(last["where"], "crates/hertz-studio/src/state.rs:42");
+        assert!(last["at"].as_str().unwrap_or_default().starts_with("20"));
+        assert!(!enabled(), "记崩溃不许顺手把诊断开关打开");
+    }
+
+    /// 编号短到口头报得出来，且每次不同（一次会话里可能崩好几回）。
+    #[test]
+    fn crash_reports_are_short_and_distinct() {
+        let a = new_report();
+        let b = new_report();
+        assert_eq!(a.len(), 8, "{a}");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -476,5 +601,14 @@ mod tests {
         std::fs::write(&path, "short\n").unwrap();
         trim_if_over(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "short\n");
+        // 两阶段写完不许留残骸：logs 里多出一个 .tmp，用户就会对着两个文件猜
+        // 哪个是当前的（这个目录的全部意义是「把这一个文件发过来」）。
+        let leftovers: Vec<String> = std::fs::read_dir(&tmp.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "残留临时文件: {leftovers:?}");
     }
 }

@@ -292,5 +292,59 @@ function loadThemeWithVars(vars) {
   eq(ab[1].end_ms, 1000, 'b 终点 1000');
 })();
 
+// 12) 排版姿态边界（2026-10-07 用户报告「心象歌词重叠」后的回归钉）：
+//     基准位零碰撞 §6/§10c 早就断言了，但姿态偏移（入场/唱后漂移/转角）叠在基准位上，
+//     能把相邻已唱字重新撞进彼此 —— 真机「野克」叠字即此。这里钉姿态幅度与 hero 规则。
+(function () {
+  L.configure({ measure: function (text, px) { return Array.from(text).length * px * 0.92; } });
+  // 漂移碰撞钉在 8 单元句上（含 hero 独行的三行位形）。
+  var toks = '作曲：一大野克夫'.split('').map(function (c, i) {
+    return { text: c, start_ms: i * 300, end_ms: i * 300 + 300 };
+  });
+  var r = L.layout(toks, { maxW: 800, fontPx: 60 });
+  var hero = r.placements.filter(function (p) { return p.hero; })[0];
+  ok(hero && !/^[一：]$/.test(hero.text), 'hero 不落在独笔画/标点上（got ' + (hero && hero.text) + '）');
+  ok(r.placements.every(function (p) { return Math.abs(p.entryX) <= 60 * 0.2 + 0.01; }),
+    '入场横扰 ≤0.2em');
+  ok(r.placements.every(function (p) { return p.driftX > 0 && p.driftX <= 60 * 0.15 + 0.01; }),
+    '唱后漂移同向（向右）且有界');
+  ok(r.placements.every(function (p) { return Math.abs(p.passedRotate) <= 5 + 0.01; }),
+    '唱后转角 ≤±4.5°');
+  // 满漂移位形：全部 placement 加上自己的 (driftX,driftY) 后仍零重叠 ——
+  // 余烬低方差同向漂移的数学保证（相对漂移 < 基准碰撞带富余）。
+  var moved = r.placements.map(function (p) {
+    return { x: p.x + p.driftX, y: p.y + p.driftY, w: p.w, h: p.h, scale: p.scale };
+  });
+  var hits = 0;
+  for (var a = 0; a < moved.length; a += 1) {
+    for (var b = 0; b < moved.length; b += 1) {
+      if (a === b) continue;
+      var p = moved[a], q = moved[b];
+      var pa = p.w * (p.scale - 1) / 2, pb = q.w * (q.scale - 1) / 2;
+      if (p.x - pa < q.x + q.w + pb && p.x + p.w + pa > q.x - pb &&
+          p.y - 10 < q.y + q.h + 10 && p.y + p.h + 10 > q.y - 10) hits += 1;
+    }
+  }
+  ok(hits === 0, '满漂移位形零重叠（got ' + hits + '）');
+  // 短句（<8 单元）hero 不独占行：六字句不再被强拆三行。
+  var shortToks = '就让一切随风'.split('').map(function (c, i) {
+    return { text: c, start_ms: i * 300, end_ms: i * 300 + 300 };
+  });
+  var sr = L.layout(shortToks, { maxW: 800, fontPx: 60 });
+  var shero = sr.placements.filter(function (p) { return p.hero; })[0];
+  ok(shero && sr.placements.some(function (p) {
+    return p !== shero && Math.abs(p.y - shero.y) < 1;
+  }), '短句（<8 单元）hero 与其他词同行');
+  // 长句（≥8 单元）hero 独占一行保留
+  var long = '窗外的雨下了一整夜我记得'.split('').map(function (c, i) {
+    return { text: c, start_ms: i * 300, end_ms: i * 300 + 300 };
+  });
+  var lr = L.layout(long, { maxW: 800, fontPx: 60 });
+  var lhero = lr.placements.filter(function (p) { return p.hero; })[0];
+  ok(lr.placements.length >= 8 && lhero &&
+    !lr.placements.some(function (p) { return p !== lhero && Math.abs(p.y - lhero.y) < 1; }),
+    '长句 hero 仍独占一行');
+})();
+
 if (failures) { console.error('\n' + failures + ' 个失败'); process.exit(1); }
 console.log('\n全部通过');

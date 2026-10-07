@@ -56,7 +56,7 @@
     {
       id: 'qingfeng',
       name: '清风',
-      note: '全宽展墙：顶部胶囊主菜单、方形海报墙队列拼接、folia 式设置浮层',
+      note: '全宽展墙：顶部胶囊主菜单、方形海报墙队列拼接、浮层式设置面板',
     },
   ];
 
@@ -217,12 +217,29 @@
     entryBtn.setAttribute('aria-expanded', String(entryOpen));
     if (entryOpen) {
       renderMenu();
+      positionEntryMenu();
       // 焦点直接落在当前皮肤那一行：开弹层的意图就是「看看现在是哪套」。
       var at = entryMenu.querySelector('.skin-option.is-on') || entryMenu.firstElementChild;
       if (at && at.focus) at.focus();
     } else if (returnFocus && entryBtn.focus) {
       entryBtn.focus();
     }
+  }
+
+  /// 菜单已经不在按钮下面了（见 bindEntry 里搬 body 那段），位置只能自己算 ——
+  /// 与 app.js 的 positionThemeMenu 同一套判据：右对齐按钮，下方放不下就翻上去。
+  function positionEntryMenu() {
+    if (!entryMenu || entryMenu.hidden || !entryBtn) return;
+    var r = entryBtn.getBoundingClientRect();
+    var w = entryMenu.offsetWidth || 246;
+    var h = entryMenu.offsetHeight || 0;
+    var gap = 8, pad = 8;
+    var left = Math.max(pad, Math.min(r.right - w, window.innerWidth - w - pad));
+    var top = r.bottom + gap;
+    if (top + h > window.innerHeight - pad && r.top - h - gap >= pad) top = r.top - h - gap;
+    top = Math.max(pad, Math.min(top, Math.max(pad, window.innerHeight - h - pad)));
+    entryMenu.style.left = Math.round(left) + 'px';
+    entryMenu.style.top = Math.round(top) + 'px';
   }
 
   function closeEntry(returnFocus) { setEntryOpen(false, returnFocus); }
@@ -236,6 +253,12 @@
     entryMenu = el('skin-menu');
     // 契约脚本的沙箱只给 #skins-list，这里安静地不绑就行（模块其余部分照旧可用）。
     if (!entryBtn || !entryMenu) return;
+
+    // 关键一步（与 app.js 的 #theme-menu 同源）：把弹层搬出 .topbar。顶栏是
+    // relative + z-index:40 + backdrop-filter，自己就是一个层叠上下文，弹层写多高
+    // 的 z-index 都出不去；浮光的舞台面板是 fixed + z-index:58，整张菜单会被它盖住
+    // （实测两点命中都是 #stage）。搬进 body 后它就是根上下文里的 fixed 元素。
+    document.body.appendChild(entryMenu);
 
     entryBtn.onclick = function (e) {
       e.stopPropagation();

@@ -84,6 +84,33 @@
     } catch (e) { /* 坏数据就当没有 */ }
   }
 
+  // 曲源接力之后的元数据迁移（借鉴清单 §8 F3：出处与供音分开）。
+  //
+  // 服务端把队列这一项换成了另一家的虚拟 id，前端这边必须有对应的一项，否则新
+  // id 没有标题与封面，队列行会退化成平台 id。更要紧的是**出处要留下来**：
+  // `source`/`onlineId` 是实际供音那一家（取流、封面、歌词、缓存都按它走），
+  // `origin` 是用户当初点的那一家（详情与来源说明按它走）。换第二次仍然记第一
+  // 家 —— 用户选的从来不是「上一家」。
+  function relayMeta(msg) {
+    if (!msg || !msg.track_id) return null;
+    var prev = onlineMeta.get(msg.from_track_id) || metaStore[msg.from_track_id] || null;
+    var parts = String(msg.track_id).split(':');   // online:<source>:<平台 id>
+    var refId = parts.length > 2 ? parts.slice(2).join(':') : String(msg.track_id);
+    var next = Object.assign({}, prev || {}, {
+      id: msg.track_id,
+      source: msg.to_source,
+      onlineId: refId,
+      title: msg.title || (prev && prev.title) || refId,
+      origin: (prev && prev.origin) || (msg.origin_source ? {
+        source: msg.origin_source,
+        id: msg.origin_id,
+        label: msg.origin_label || null,
+      } : null),
+      relayed: true,
+    });
+    return rememberMeta(msg.track_id, next);
+  }
+
   // 平台徽标：品牌名 / 品牌色 / app 图标。音源 id 以后端注册表为准，
   // 这里只负责显示。
   // 第三项是图标地址：平台一律用 docs/images 提供的官方 app 图标（经
@@ -562,6 +589,11 @@
   }
 
   async function search(opts) {
+    // 在线搜索只要真的执行就算一次「提交」：按钮、Enter、切类型后的重查都记给
+    // 同一个 owner（search-history.js）。逐字输入不记 —— oninput 那条只取消在途
+    // 请求，记下来会得到一串「周」「周杰」这样的中间态。
+    var committed = (onlineState.q || '').trim();
+    if (committed && window.HertzSearchHistory) window.HertzSearchHistory.push(committed);
     // 非单曲类型各走各的端点与渲染路径；单曲（默认）保持既有渐进聚合搜索。
     if (onlineState.kind === 'playlist') return searchPlaylists(opts);
     if (onlineState.kind === 'artist') return searchArtists(opts);
@@ -1010,14 +1042,65 @@
       if (current()) H.ui.playpause.classList.remove('is-loading');
     }
 
+    await finishOnlinePlay(res, tracks[0].source, tracks, index, current);
+  }
+
+  // F2 整单播放：只发集合意图（{source, collection:{kind,id}}），首页与之后的
+  // 续载都由服务端负责（crates 的 collection.rs）。响应带首页元数据，与整盘
+  // 形态走同一段落地逻辑；进度靠 collection_load 事件推进，这里不轮询。
+  async function playCollection(source, collectionId) {
+    var intentId = 'collection:' + source + ':' + collectionId;
+    var epoch = ++onlinePlayEpoch;
+    var ticket = T.playbackIntent ? T.playbackIntent() : null;
+    function current() { return epoch === onlinePlayEpoch && (!T.isPlaybackIntent || T.isPlaybackIntent(ticket)); }
+    pendingPlay = { id: intentId, current: current };
+    failedPlay = null;
+    H.ui.playpause.classList.add('is-loading');
+    var res;
+    try {
+      var request = T.post('/v1/online/play', {
+        source: source,
+        collection: { kind: 'playlist', id: collectionId },
+        index: 0,
+      });
+      ticket = T.playbackIntent ? T.playbackIntent() : null;
+      refreshPlaybackRows();
+      if (window.Stage) window.Stage.setLyrics(null);
+      res = await request;
+      if (!current()) return;
+    } catch (err) {
+      if (!current()) return;
+      failedPlay = { id: intentId, message: H.errText('试听失败', err) };
+      H.toast(failedPlay.message, 'error');
+      H.ui.playpause.classList.remove('is-loading');
+      return;
+    } finally {
+      if (epoch === onlinePlayEpoch) {
+        pendingPlay = null;
+        refreshPlaybackRows();
+      }
+      if (current()) H.ui.playpause.classList.remove('is-loading');
+    }
+    // 服务端首页自带元数据；补上 source 让落地逻辑与整盘形态同构。
+    var trackList = (res.tracks || []).map(function (t) {
+      t.source = source;
+      return t;
+    });
+    await finishOnlinePlay(res, source, trackList, 0, current);
+  }
+
+  // playAll 与 playCollection 共用的响应落地：元数据入缓存、队列与界面同步、
+  // 封面探照、歌词装载。trackList 与 res.track_ids 按下标对齐（整盘来自前端
+  // 的搜索/歌单对象，集合来自服务端首页）。
+  async function finishOnlinePlay(res, source, trackList, index, current) {
     var ids = (res.track_ids && res.track_ids.length)
       ? res.track_ids
-      : tracks.map(virtualId);
+      : trackList.map(virtualId);
     var startIndex = (res.index != null && res.index < ids.length) ? res.index : index;
     var startId = ids[startIndex];
 
     // 整盘元数据入缓存：切到队列里其他曲目时不再依赖搜索结果对象。
-    tracks.forEach(function (t, i) {
+    trackList.forEach(function (t, i) {
       var meta = {
         id: ids[i],
         source: t.source,
@@ -1036,6 +1119,12 @@
     // 封面以服务端补的详情为准，其次才是搜索结果里带的。
     var cover = safeCoverUrl(res.cover) || (meta && meta.cover) || null;
     if (meta) meta.cover = cover;
+    // 出处由服务端说（F3）：这一项如果是接力换过家的，播放响应带着「用户当初
+    // 点的哪家」。刷新之后前端自己的暂存可能已经没有这条，服务端快照才是权威。
+    if (meta && res.relayed && res.origin && res.origin.source) {
+      meta.origin = res.origin;
+      meta.relayed = true;
+    }
     H.state.current = meta;
     H.setStateQueue(ids, startId);
 
@@ -1046,8 +1135,8 @@
     // paintNowPlaying 之后写 nowTech，否则会被默认的「在线试听」文案盖掉。
     if (res.actual_quality) {
       var requested = qualityMap[source];
-      if (requested && requested !== res.actual_quality && !window.__qtoast) {
-        window.__qtoast = true;
+      if (requested && requested !== res.actual_quality
+        && qualityNoticeOnce(startId + '|' + res.actual_quality)) {
         H.toast('该曲目实际可用：' + qualityLabel(res.actual_quality));
       }
       var tech = H.ui.nowTech;
@@ -1131,6 +1220,7 @@
     H.ui.nowArtist.textContent = [track.artist, track.album].filter(Boolean).join(' · ');
     H.ui.barTitle.textContent = track.title || '未知曲目';
     H.ui.barSub.textContent = [track.artist, track.album].filter(Boolean).join(' · ');
+    if (H.onNowPlaying) H.onNowPlaying(track);
     var isOnline = Boolean(track.source && track.onlineId);
     H.ui.nowTech.textContent = isOnline ? '在线试听' : '';
     H.ui.nowTech.hidden = !isOnline;
@@ -1552,6 +1642,24 @@
 
   function qualityLabel(q) { return QUALITY_LABELS[q] || q; }
 
+  // 降档提示的去重键是「这一首 + 这一档」，不是一个全局布尔。以前用的是
+  // window.__qtoast：第一次提示之后整页都静默，第二首被降档的歌就只表现为
+  // 「听着不太对」，而 B4 的验收要的正是降档看得见。同一首歌同一档反复播放
+  // 不刷屏；换歌、或者同一首又降了一档，都要说。
+  var qualityNoticed = {};
+  var qualityNoticedCount = 0;
+  function qualityNoticeOnce(key) {
+    if (!key || qualityNoticed[key]) return false;
+    // 整表重置只是防内存增长：下次这一首再被降档，键会重新算一遍。
+    if (qualityNoticedCount > 64) {
+      qualityNoticed = {};
+      qualityNoticedCount = 0;
+    }
+    qualityNoticed[key] = true;
+    qualityNoticedCount += 1;
+    return true;
+  }
+
   async function loadQualityPrefs() {
     var data = await T.get('/v1/online/quality').catch(function () { return null; });
     var prefs = (data && data.prefs) || [];
@@ -1757,9 +1865,47 @@
     // 拉回单曲。同类型是空操作。
     setKind: setKind,
     playAll: playAll,
+    playCollection: playCollection,
     // 行工厂：歌单抽屉复用同一套标记/VIP/置灰，activate 由调用方注入。
     row: buildRow,
     loadSources: loadSources,
+    // 账号探测错误分流（A6）：会话状态有三态，不能把「这次没探出结果」说成
+    // 「这台没登录」。只有服务端明确的授权断言算未登录；上游 5xx / 超时 /
+    // 网络故障一律 unknown，界面据此保留身份且**不**催用户重新扫码。
+    // capability_unsupported 是「这个源没有账号这件事」。
+    accountVerdict: function (err) {
+      var code = err && err.code;
+      if (code === 'auth_required' || err && (err.status === 401 || err.status === 403)) return 'signed-out';
+      if (code === 'capability_unsupported') return 'unsupported';
+      return 'unknown';
+    },
+    // —— 能力第三档（A9）——
+    // 后端 `caps` 说的是「放行吗」，`unverified` 说的是「这条链路有没有真机验收
+    // 记录」。两者必须分开画：「不支持」是不给入口，「没验过」是给入口但讲清楚。
+    // 缺字段按空表处理：旧服务端没有这条声明，不许凭空长出标注。
+    isUnverified: function (src, cap) {
+      return !!src && (src.unverified || []).indexOf(cap) >= 0;
+    },
+    // 能力位查询（caps 是 UI 的唯一事实表）。导出给集合详情页用：整单播放
+    // 按钮只对登记了 playlist_detail 的音源承诺「播放全部」。
+    supports: sourceHasCap,
+    /// 降档提示的去重闸门（同一首同一档只说一次）。导出是为了让契约检查真的
+    /// 驱动它：这条规则只看得到一个 toast 有没有重复，不跑代码抓不住。
+    qualityNoticeOnce: qualityNoticeOnce,
+    /// 给按能力位生成的控件补标注。只标一次：按节点 dataset 判重，不走
+    /// querySelector（宿主与契约检查的 DOM 桩对它的实现宽窄不一，靠它判重会失灵）。
+    markUnverified: function (node, src, cap) {
+      if (!node || !window.Online.isUnverified(src, cap)) return node;
+      if (node.dataset && node.dataset.trialMarked) return node;
+      if (node.dataset) node.dataset.trialMarked = '1';
+      node.classList.add('is-unverified');
+      node.setAttribute('title', '该平台这条链路还没有真机验收记录，可能不可用；失败会如实报错');
+      var tag = document.createElement('span');
+      tag.className = 'op-trial';
+      tag.textContent = '未验收';
+      node.appendChild(tag);
+      return node;
+    },
     refreshCookieUi: refreshCookieUi,
     reloadHistory: loadHistory,
     sources: function () { return onlineState.sources; },
@@ -1773,6 +1919,8 @@
     rowCoverUrl: rowCoverUrl,
     fetchCover: fetchOnlineCover,
     loadLyricDoc: loadOnlineLyricDoc,
+    // 接力后的元数据迁移与出处（app.js 的 source_switched 分支调用）。
+    relayMeta: relayMeta,
     loadLyrics: loadOnlineLyrics,
     paintNowPlaying: paintNowPlaying,
     sourceLabel: sourceLabel,

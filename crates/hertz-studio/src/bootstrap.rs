@@ -25,8 +25,9 @@ use crate::persist;
 use crate::scan;
 use crate::state::{
     spawn_event_pump, spawn_session_saver, AppState, BoundedMap, DspConfig, ONLINE_META_CAP,
-    STAGE_BEATS_CAP,
+    QUALITY_CEILING_CAP, STAGE_BEATS_CAP,
 };
+use crate::state::{BEAT_ANALYZE_BUDGET, BEAT_LABEL_CAP, BEAT_VOLATILE_CAP};
 
 /// 装配完成的运行时。调用方必须把它保活到进程结束。
 pub struct Booted {
@@ -76,6 +77,10 @@ pub async fn boot(
 
     // 开发者选项里的播放诊断日志：默认关闭，开着则跨重启继续录（settings 为权威）。
     diag::init(&data_dir, &backend_label);
+    // 崩溃可观测性必须在任何可能 panic 的装配步骤**之前**装好：钩子写的那一行
+    // 无视诊断开关（进程自己没了的时候，用户能说的只有一句「它闪退了」，而那句
+    // 话接不住 —— 有 report 编号和日志路径才对得上）。
+    diag::install_panic_hook();
     let diag_enabled = vmusic_store::settings::get(&db, diag::SETTING_KEY)
         .await
         .ok()
@@ -134,6 +139,8 @@ pub async fn boot(
         cursor: Default::default(),
         radio: Default::default(),
         radio_fetch: Default::default(),
+        playlist_load: Default::default(),
+        playlist_fetch: Default::default(),
         scan: Default::default(),
         scan_cancel: Default::default(),
         qr: online::qr::Registry::new(),
@@ -150,7 +157,12 @@ pub async fn boot(
         auto_failures: Default::default(),
         skip_walk_from: Default::default(),
         quality: tokio::sync::Mutex::new(quality_prefs),
+        quality_caps: tokio::sync::Mutex::new(BoundedMap::new(QUALITY_CEILING_CAP)),
         stage_beats: tokio::sync::Mutex::new(BoundedMap::new(STAGE_BEATS_CAP)),
+        beat_slots: Arc::new(tokio::sync::Semaphore::new(BEAT_ANALYZE_BUDGET)),
+        beat_volatile: tokio::sync::Mutex::new(BoundedMap::new(BEAT_VOLATILE_CAP)),
+        beat_labels: tokio::sync::Mutex::new(BoundedMap::new(BEAT_LABEL_CAP)),
+        beat_deferrals: std::sync::atomic::AtomicUsize::new(0),
         weak_self: Default::default(),
         pending_restore_seek: Default::default(),
         overlay_lyric: Default::default(),

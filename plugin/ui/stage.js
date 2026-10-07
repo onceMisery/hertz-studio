@@ -882,6 +882,42 @@
   // 「关掉一个不影响另一个」的开关，所以弱机降级按它来切。
   var gates = [];
 
+  // 显示刷新率估计（帧门的换算基准）。
+  //
+  // 帧门的语义是「每 N 个 rAF 给一帧」，N 得由**实测**刷新率换算：写死 60 会让
+  // 120/144Hz 屏上所有档位整体偏一档，而 59.94 / 119.88 / 143.98 这类标称值不吸附
+  // 回整数，算出的 N 就会在两档之间来回跳，画面表现为周期性的隔一帧抖。
+  // 取中位数而不是均值：切标签页、GC、掉帧都会造出一个大间隔样本，均值会被拖走。
+  var HZ_WINDOW = 24;
+  var HZ_MIN_SAMPLES = 6;
+  var hzSamples = [];
+  var displayHz = 0;
+
+  function sampleDisplayHz(dt) {
+    // 只采信「像一帧」的间隔：切回前台的几千毫秒、以及小于 2ms 的异常 tick 都不进样本。
+    if (!(dt > 2) || !(dt < 200)) return displayHz;
+    hzSamples.push(dt);
+    if (hzSamples.length > HZ_WINDOW) hzSamples.shift();
+    if (hzSamples.length < HZ_MIN_SAMPLES) return displayHz;
+    var sorted = hzSamples.slice().sort(function (a, b) { return a - b; });
+    var hz = 1000 / sorted[Math.floor(sorted.length / 2)];
+    var snapped = Math.round(hz / 6) * 6;
+    if (Math.abs(hz - snapped) < 1.5) hz = snapped;
+    // EMA：稳住读数，但不让它永远停在旧值上（外接显示器被拔掉要能跟上来）。
+    displayHz = displayHz ? displayHz + (hz - displayHz) * 0.2 : hz;
+    return displayHz;
+  }
+
+  // 目标帧率 → 整数分频数。用 ceil 不用 round：帧率是**预算**（弱机才往下调），
+  // round 会让「48@60Hz」兑现成 60，比用户要的多做 25% 的活；ceil 永远不超过预算，
+  // 代价是拿不到恰好 48 —— 60Hz 上本来就不存在 48fps 这个整数分频，
+  // 这正是旧实现（按毫秒累积再清零）谎报档位的根因。
+  function gateDivisor(target) {
+    if (!(target > 0)) return 0;
+    var hz = displayHz || 60;   // 还没测出来就先按 60 换算，几帧之后自动跟回实测值
+    return Math.max(1, Math.ceil(hz / target));
+  }
+
   // 设备档位：0 eco / 1 balanced / 2 high。启动时判一次，之后运行期只允许
   // 往下修正。阈值不是拍脑袋：4 核以下跑不动大面积 backdrop-filter，
   // 4.2M 渲染像素以上（约 2560×1600@1x 或 1080p@2x）模糊层的填充率就开始吃帧。
@@ -897,7 +933,10 @@
   }
 
   function defineGate(name, fpsFn, tickFn) {
-    gates.push({ name: name, fpsFn: fpsFn, tickFn: tickFn, acc: 0 });
+    // 约定：fpsFn 返回的是**预算**，必须是刷新率的整数分频才兑现得准。
+    // 取 60 与 120 的公因数（60/30/20/15/12/10/6/4）在两种常见屏上都恰好兑现；
+    // 返回 0 是唯一的停机依据（不要改成"很小"，那只会让它满帧空转）。
+    gates.push({ name: name, fpsFn: fpsFn, tickFn: tickFn, skip: 0, wait: 0 });
     // 登记一个「此刻就想要帧」的门时必须踢一脚循环：播放状态下循环本来就在转，
     // 但暂停时没有任何别的事件会来启动它（背景墙/视差在暂停时也得渲染）。
     if (fpsFn() > 0) schedule();
@@ -920,11 +959,17 @@
     for (var i = 0; i < gates.length; i += 1) {
       var g = gates[i];
       var target = g.fpsFn();
-      if (!(target > 0)) { g.acc = 0; continue; }
-      g.acc += dt;
-      if (g.acc < 1000 / target) continue;
-      var spent = g.acc;
-      g.acc = 0;
+      if (!(target > 0)) { g.skip = 0; g.wait = 0; continue; }
+      var n = gateDivisor(target);
+      // wait 累的是真实毫秒（tickFn 里的 lerp 靠它，按帧数换算会在掉帧时走样）；
+      // 到不到点看**帧数**，不看时间：一个周期内每个间隔都是整帧，
+      // 所以跑出来的帧率恰好是刷新率的整数分之一，不会忽快忽慢。
+      g.wait += dt;
+      g.skip += 1;
+      if (g.skip < n) continue;
+      var spent = g.wait;
+      g.skip = 0;
+      g.wait = 0;
       g.tickFn(spent);
     }
   }
@@ -948,17 +993,20 @@
     lastFrameAt = t;
 
     runGates(lastDt);
+    sampleDisplayHz(lastDt);
     sampleFrameRate();
     if (!hidden && (playing || energy > 0.005 || anyGateWants())) schedule();
   }
 
   // 歌词更新的目标帧率。好机器上 60 等于不节流（rAF 本来就被显示器限着），
   // 只有降级档和前后台状态才真的往下压。
+  // 每一档都是 60 与 120 的公因数：帧门只能按整数分频给帧，声明一个除不尽的数
+  // （原来是 24/40）会在 60Hz 上被夹成 20/30，档位表与实际帧率就对不上了。
   function lyricsTargetFps() {
     if (hidden || document.body.classList.contains('s3d-open')) return 0;
     if (!playing) return 12;
     if (reduced) return 15;
-    return tier === 0 ? 24 : tier === 1 ? 40 : 60;
+    return tier === 0 ? 20 : tier === 1 ? 30 : 60;
   }
 
   function tickLyrics(dtMs) {
@@ -1369,6 +1417,24 @@
 
     // Stage.gate('particles', function(){ return 30; }, function(dt){ ... })
     gate: defineGate,
+    // 帧门的真实换算：声明值、分频数、在当前实测刷新率上实际跑到的帧率。
+    // 任何显示「48fps」的界面文案都必须读这里，不许读声明值——旧实现就是靠
+    // 声明值报数，60Hz 上写 48 实际跑 30，数字一直在说谎。
+    gateRates: function () {
+      var hz = displayHz || 60;
+      return gates.map(function (g) {
+        var target = g.fpsFn();
+        var n = gateDivisor(target);
+        return {
+          name: g.name,
+          target: target,
+          divisor: n,
+          achieved: n > 0 ? Math.round((hz / n) * 100) / 100 : 0,
+        };
+      });
+    },
+    // 实测显示刷新率（0 = 样本还不够）。帧门换算、档位文案、诊断都用它。
+    displayHz: function () { return displayHz; },
     // 当前设备档位（0 eco / 1 balanced / 2 high）与降级态。帧率探针只会把它
     // 往下调，所以启动后任何时刻读到的都是「这台机器目前确定扛得住的上限」。
     tier: function () { return lowfx ? 0 : tier; },

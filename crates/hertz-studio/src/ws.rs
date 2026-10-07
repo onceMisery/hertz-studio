@@ -160,25 +160,29 @@ mod tests {
         assert!(json.contains("\"index\":2"));
 
         // beatmap_ready：bpm=None 时字段必须整体缺席（不是 null）。
+        // persisted 不许缺席：「就绪」与「已写进磁盘」是两种状态，消费方要能
+        // 一眼分清（缺席就等于把第二种状态又抹平了）。
         let json = serde_json::to_string(&WsEvent::BeatmapReady {
             track_id: "online:qq:42".into(),
             bpm: Some(128.4),
             beats_n: 412,
+            persisted: true,
         })
         .unwrap();
         assert_eq!(
             json,
-            "{\"type\":\"beatmap_ready\",\"track_id\":\"online:qq:42\",\"bpm\":128.4,\"beats_n\":412}"
+            "{\"type\":\"beatmap_ready\",\"track_id\":\"online:qq:42\",\"bpm\":128.4,\"beats_n\":412,\"persisted\":true}"
         );
         let json = serde_json::to_string(&WsEvent::BeatmapReady {
             track_id: "t1".into(),
             bpm: None,
             beats_n: 0,
+            persisted: false,
         })
         .unwrap();
         assert_eq!(
             json,
-            "{\"type\":\"beatmap_ready\",\"track_id\":\"t1\",\"beats_n\":0}"
+            "{\"type\":\"beatmap_ready\",\"track_id\":\"t1\",\"beats_n\":0,\"persisted\":false}"
         );
         assert!(!json.contains("bpm"));
     }

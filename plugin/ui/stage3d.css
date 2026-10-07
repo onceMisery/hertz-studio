@@ -16,6 +16,13 @@
    结构：全屏遮罩 → 画布 → 顶栏 → 底部舞台坞 → 提示 → 降级文案。
    顶栏与舞台坞默认隐去，由 .s3d-chrome 控制（鼠标静止 2.6s 后摘掉）。 */
 
+.s3d-settings-status { color: var(--s3d-accent); font-size: 12px; line-height: 1.6; }
+.s3d-setting-note { display: block; color: var(--s3d-muted); font-size: 11px; line-height: 1.5; margin: 4px 0 12px; }
+.s3d-setting-note[hidden], .s3d-dock[hidden] { display: none !important; }
+.s3d-setting-inactive { opacity: .5; }
+.s3d-settings :disabled { cursor: not-allowed; opacity: .45; }
+.s3d.s3d-scene-covered::before, .s3d.s3d-scene-covered::after { display: none; }
+
 .s3d {
   /* 自有令牌：只在这一层内生效 */
   --s3d-bg: #040507;
@@ -33,6 +40,9 @@
   --s3d-text: #eef3f0;
   --s3d-muted: #a1aaa8;
   --s3d-accent: #c3e5da;
+  /* 收藏键的点亮色。不复用 --s3d-accent：那颗 40px 实心播放键就是薄荷青，两枚
+     紧邻的同色亮键会读成同一组开关。取播放栏 .bar-favorite.is-on 的同一档心色。 */
+  --s3d-fav: #f0647c;
   --s3d-control-bg: #202c28;
 
   position: fixed;
@@ -231,8 +241,8 @@ body.s3d-open > .bar { display: none; }
   right: max(36px, env(safe-area-inset-right));
   display: flex;
   align-items: center;
-  gap: var(--s3d-gap);
-  padding: 7px 9px;
+  gap: 6px;
+  padding: 6px 7px;
   border-radius: var(--r-pill);
   background: var(--s3d-bar-bg);
   border: var(--s3d-bar-border);
@@ -280,16 +290,21 @@ body.s3d-open > .bar { display: none; }
   padding: 0;
   border-radius: var(--r-pill);
   border: 1px solid transparent;
-  background: transparent;
+  /* 这里三处一律用 background-color 而不是 background 简写：顶栏的盘体靠一条
+     常驻的受光渐变（background-image）撑材质，简写会在更高优先级的状态规则里
+     把它一起重置成 none，于是按下那一刻高光凭空消失。 */
+  background-color: transparent;
   color: var(--s3d-muted);
   cursor: pointer;
-  transition: background var(--dur-1, 0.16s) var(--ease),
+  transition: background-color var(--dur-1, 0.16s) var(--ease),
+    border-color var(--dur-1, 0.16s) var(--ease),
     color var(--dur-1, 0.16s) var(--ease),
+    box-shadow var(--dur-1, 0.16s) var(--ease),
     transform var(--dur-1, 0.16s) var(--ease);
 }
 
 .s3d-btn:hover {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--s3d-text);
 }
 
@@ -299,7 +314,7 @@ body.s3d-open > .bar { display: none; }
 
 .s3d-btn[aria-pressed='true'] {
   color: var(--s3d-accent);
-  background: color-mix(in srgb, var(--s3d-accent) 12%, transparent);
+  background-color: color-mix(in srgb, var(--s3d-accent) 12%, transparent);
   border-color: transparent;
 }
 
@@ -318,6 +333,106 @@ body.s3d-open > .bar { display: none; }
 
 .s3d.s3d-native-fs .s3d-btn .ic-compress {
   display: block;
+}
+
+/* --- 顶栏控件：受光小圆牌 ---------------------------------------------------
+   静止时五颗都带一层极淡的盘体（原来只有点下的那颗有底色，整排于是读成
+   「三个图标 + 两个按钮」），底色本身又是一层平涂，跟右侧歌单架卡片完全无关。
+   这里换成与卡片同一套三层受光：斜向受光 + 顶缘高光 + 底缘压暗 + 接触阴影；
+   悬停抬起并把阴影推深，点亮改走强调色的内发光，关闭键悬停转 --danger。
+
+   材质写成 --chip-* 变量，星落 / iOS 只换配方、不重写结构。选择器多带一层
+   .s3d-open 不是冗余：两个主题挂在 .s3d-btn 上的平涂状态是 (0,3,0)，而
+   stage3d.css 排在它们前面，同权重会被主题盖掉 —— 加一层就把顶栏交还给这里，
+   主题想改的只有颜色。每条状态规则都重述 background-image 同理：主题用
+   background 简写写自己的底色，同权重时后加载的那份会把渐变一起清成 none。 */
+.s3d-head {
+  --chip-body: color-mix(in srgb, var(--s3d-text) 9%, transparent);
+  --chip-sheen: color-mix(in srgb, var(--s3d-text) 15%, transparent);
+  --chip-edge: color-mix(in srgb, var(--s3d-text) 12%, transparent);
+  --chip-top: color-mix(in srgb, var(--s3d-text) 24%, transparent);
+  /* 底缘给一道回光而不是压暗：整排在同一条玻璃胶囊上，底缘一暗就读成凹进去的
+     坑，只有顶缘亮 + 底缘回光 + 落影在盘外，才是浮起来的 puck。 */
+  --chip-bounce: color-mix(in srgb, var(--s3d-text) 7%, transparent);
+  --chip-base: color-mix(in srgb, var(--s3d-bg) 38%, transparent);
+  --chip-drop: color-mix(in srgb, var(--s3d-bg) 60%, transparent);
+  --chip-hover-body: color-mix(in srgb, var(--s3d-text) 13%, transparent);
+  --chip-hover-edge: color-mix(in srgb, var(--s3d-text) 22%, transparent);
+  --chip-on-body: color-mix(in srgb, var(--s3d-accent) 16%, transparent);
+  --chip-on-edge: color-mix(in srgb, var(--s3d-accent) 40%, transparent);
+  --chip-on-glow: color-mix(in srgb, var(--s3d-accent) 32%, transparent);
+  --chip-lift: -1px;
+  --chip-press: scale(.955);
+}
+
+.s3d.s3d-open .s3d-head .s3d-btn {
+  opacity: 1;
+  border-color: var(--chip-edge);
+  background-color: var(--chip-body);
+  background-image: linear-gradient(168deg, var(--chip-sheen), transparent 54%);
+  box-shadow: inset 0 1px 0 var(--chip-top),
+    inset 0 -1px 0 var(--chip-bounce),
+    0 2px 6px -2px var(--chip-drop);
+}
+
+.s3d.s3d-open .s3d-head .s3d-btn:hover {
+  color: var(--s3d-text);
+  border-color: var(--chip-hover-edge);
+  background-color: var(--chip-hover-body);
+  background-image: linear-gradient(168deg, var(--chip-sheen), transparent 54%);
+  box-shadow: inset 0 1px 0 var(--chip-top),
+    inset 0 -1px 0 var(--chip-bounce),
+    0 6px 14px -4px var(--chip-drop);
+  transform: translateY(var(--chip-lift));
+}
+
+.s3d.s3d-open .s3d-head .s3d-btn:active {
+  transform: translateY(0) var(--chip-press);
+  box-shadow: inset 0 2px 6px var(--chip-base);
+}
+
+.s3d.s3d-open .s3d-head .s3d-btn[aria-pressed='true'] {
+  color: var(--s3d-accent);
+  border-color: var(--chip-on-edge);
+  background-color: var(--chip-on-body);
+  background-image: linear-gradient(168deg, var(--chip-sheen), transparent 54%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--s3d-text) 26%, transparent),
+    inset 0 0 14px -2px var(--chip-on-glow),
+    0 4px 12px -4px var(--chip-on-glow);
+}
+
+.s3d.s3d-open .s3d-head .s3d-btn[aria-pressed='true']:hover {
+  color: var(--s3d-accent);
+  border-color: color-mix(in srgb, var(--s3d-accent) 52%, transparent);
+  background-color: color-mix(in srgb, var(--s3d-accent) 23%, transparent);
+  background-image: linear-gradient(168deg, var(--chip-sheen), transparent 54%);
+}
+
+/* 关闭是这一排里唯一不可逆地离开当前画面的动作，悬停时换成危险色，
+   而不是和「显示歌词 / 舞台设置」同一档的白色高亮。 */
+.s3d.s3d-open .s3d-head .s3d-btn-x:hover {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  background-color: color-mix(in srgb, var(--danger) 14%, transparent);
+  background-image: linear-gradient(168deg,
+      color-mix(in srgb, var(--danger) 26%, transparent), transparent 54%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--danger) 24%, transparent),
+    0 6px 16px -6px color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+/* 焦点环收在盘外 2px：5px 的偏移会让环越过胶囊的内边距、糊到相邻控件上。 */
+.s3d.s3d-open .s3d-head .s3d-btn:focus-visible {
+  outline-offset: 2px;
+}
+
+.s3d-head-sep {
+  flex: none;
+  width: 1px;
+  height: 22px;
+  margin: 0 3px;
+  border-radius: 1px;
+  background: linear-gradient(180deg, transparent,
+      color-mix(in srgb, var(--s3d-text) 15%, transparent) 30% 70%, transparent);
 }
 
 /* ---------------------------------------------------------------------------
@@ -621,6 +736,92 @@ body.s3d-open > .bar { display: none; }
 .s3d-volume { display: flex; gap: 10px; align-items: center; color: var(--s3d-muted); }
 .s3d-volume svg { width: 18px; height: 18px; flex: none; }
 .s3d-volume input { width: 70px; }
+
+/* --- 播放舱收藏键 ----------------------------------------------------------
+   材质与状态过渡继承 .s3d-btn，这里只补三件事：点亮色的内发光、点亮/取消瞬间
+   的一次性动效、播放中的呼吸。
+   选择器一律带 .s3d.s3d-open + .s3d-player 两层：星落与 iOS 主题在 .s3d-btn 上
+   写了 (0,4,0) 的点亮态（stage-themes/starfall.css:262、ios.css:235），只写
+   .s3d-fav[...] 会被它们染成薄荷青；多带的两层把颜色交还给这里，与顶栏那组
+   --chip-* 规则同一个手法（见 328 行注释）。涟漪画在键体内（inset 5px 起、
+   最多胀到 1.02 倍）：两个主题把 .s3d-player-extra 写成 overflow:hidden，
+   画到键体外会被整块裁掉。 */
+.s3d.s3d-open .s3d-player .s3d-fav { position: relative; }
+.s3d.s3d-open .s3d-player .s3d-fav svg { pointer-events: none; }
+
+/* 未点亮时悬停先把心染成淡心色：这一排里只有它会变红，读到的是「收藏」，
+   不是与音量、队列同一档的白高亮。 */
+.s3d.s3d-open .s3d-player .s3d-fav:hover {
+  color: color-mix(in srgb, var(--s3d-fav) 62%, var(--s3d-text));
+}
+
+.s3d.s3d-open .s3d-player .s3d-fav[aria-pressed='true'] {
+  color: var(--s3d-fav);
+  background-color: color-mix(in srgb, var(--s3d-fav) 12%, transparent);
+  box-shadow: inset 0 0 12px -3px color-mix(in srgb, var(--s3d-fav) 42%, transparent),
+    0 3px 12px -6px color-mix(in srgb, var(--s3d-fav) 55%, transparent);
+}
+
+.s3d.s3d-open .s3d-player .s3d-fav[aria-pressed='true']:hover {
+  color: color-mix(in srgb, var(--s3d-fav) 82%, var(--s3d-text));
+  background-color: color-mix(in srgb, var(--s3d-fav) 18%, transparent);
+}
+
+/* 判红/写入在途时的弱化，跟「没有曲目」区分开：前者只是慢（.62），后者才是
+   不可点（.35，走 .s3d-btn:disabled）。 */
+.s3d.s3d-open .s3d-player .s3d-fav[aria-busy='true'] { opacity: 0.62; }
+
+.s3d-fav::before,
+.s3d-fav::after {
+  content: '';
+  position: absolute;
+  inset: 5px;
+  border: 1.5px solid var(--s3d-fav);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+}
+.s3d-fav::after { inset: 9px; }
+
+.s3d-fav.is-burst::before { animation: s3d-fav-ring 660ms cubic-bezier(.16, 1, .3, 1) both; }
+.s3d-fav.is-burst::after { animation: s3d-fav-ring 520ms 90ms cubic-bezier(.16, 1, .3, 1) both; }
+/* 心体的弹性落点与 818 行那条 checkbox 曲线同源；按下瞬间的 .94 缩放落在
+   按钮上、这一条落在 svg 上，两者叠乘而不是互相覆盖。 */
+.s3d-fav.is-burst svg { animation: s3d-fav-pop 520ms cubic-bezier(.34, 1.45, .5, 1) both; }
+/* 取消收藏只作一次轻回落：加与减的语义强度不一样，不放涟漪。 */
+.s3d-fav.is-drop svg { animation: s3d-fav-settle 320ms var(--ease-out) both; }
+
+@keyframes s3d-fav-ring {
+  0% { opacity: 0; transform: scale(.62); }
+  22% { opacity: .68; }
+  100% { opacity: 0; transform: scale(1.02); }
+}
+@keyframes s3d-fav-pop {
+  0% { transform: scale(.8); }
+  38% { transform: scale(1.18); }
+  100% { transform: scale(1); }
+}
+@keyframes s3d-fav-settle {
+  from { transform: scale(.9); }
+  to { transform: scale(1); }
+}
+
+/* 点亮且正在播放才呼吸，暂停即静止——与这层「律动只在播放时跑」的语义一致
+   （根类 .s3d-playing 由 syncNowPlaying 维护）。 */
+.s3d-playing .s3d-fav[aria-pressed='true'] {
+  animation: s3d-fav-breathe 3200ms ease-in-out infinite;
+}
+@keyframes s3d-fav-breathe {
+  0%, 100% {
+    box-shadow: inset 0 0 12px -3px color-mix(in srgb, var(--s3d-fav) 42%, transparent),
+      0 3px 12px -6px color-mix(in srgb, var(--s3d-fav) 55%, transparent);
+  }
+  50% {
+    box-shadow: inset 0 0 16px -2px color-mix(in srgb, var(--s3d-fav) 62%, transparent),
+      0 6px 18px -6px color-mix(in srgb, var(--s3d-fav) 72%, transparent);
+  }
+}
+
 /* 面板是浮层里的浮层：z-index 压过歌单架（3）与 chrome（4），任何模式、
    任何切换顺序下都不会再被封面卡盖住。浮凸感由分层落影 + 顶部内高光 +
    微渐变亮面 + 打开时的轻透视入场共同给出；入场动画用 backwards 填充，
@@ -962,7 +1163,9 @@ body.s3d-open > .bar { display: none; }
   .s3d-brand { top: 22px; left: 20px; font-size: 12px; }
   .s3d-brand-mark { font-size: 30px; }
   .s3d-brand small { font-size: 8px; }
-  .s3d-head { gap: 2px; }
+  /* 盘体常驻之后 2px 会把五颗挤成一条，分隔线也省掉腾出宽度。 */
+  .s3d-head { gap: 4px; padding: 5px 6px; }
+  .s3d-head-sep { display: none; }
   .s3d-reading { left: 5%; width: 90%; top: 90px; bottom: 240px; }
   .s3d-eyebrow { margin-bottom: 18px; }
   .s3d-player { width: calc(100% - 28px); bottom: max(16px,env(safe-area-inset-bottom)); padding: 14px 18px; grid-template-columns: minmax(0,1fr) auto; gap: 12px; border-radius: 20px; }
@@ -1339,4 +1542,21 @@ body.s3d-open > .bar { display: none; }
   .s3d-shelf, .s3d-sc, .s3d-sc-cover img, .s3d-sc-hint, .s3d-sc-progress {
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Real creative output and film art share the stage's content rectangle. */
+.s3d-creative, .s3d-art-overlay { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.s3d-creative { z-index: 2; background: var(--s3d-bg); }
+.s3d-creative[hidden] { display: none; }
+.s3d-art-overlay { z-index: 4; }
+.s3d-creative-source .s3d-canvas-wrap > .s3d-canvas { visibility: hidden; }
+.s3d-creative-source::before, .s3d-creative-source::after { display: none; }
+.s3d-creative-source .s3d-reading { z-index: 3; }
+.s3d-creative-source .s3d-sleeve { z-index: 3; }
+.s3d-creative-source #s3d-creative .creative-canvas { visibility: visible; }
+.s3d-creative.creative-interact { pointer-events: auto; cursor: grab; }
+#s3d-creative > #creative-bg { position: absolute; inset: 0; z-index: 1; }
+.s3d-editing .s3d-creative, .s3d-editing .s3d-art-overlay, .s3d-editing #s3d-stanza { right: var(--s3d-editor-width); }
+@media (max-width: 760px) {
+  .s3d-editing .s3d-creative, .s3d-editing .s3d-art-overlay, .s3d-editing #s3d-stanza { right: 0; bottom: 63%; }
 }

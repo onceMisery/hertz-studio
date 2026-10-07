@@ -67,6 +67,12 @@ function makeEl(id) {
     attrs: {},
     children: [],
     _html: '',
+    // 弹层搬进 body 之后位置由 JS 写（left/top），沙箱要给这两个可写属性。
+    style: {},
+    // 定位要读按钮矩形；沙箱不需要真算出位置，给个零矩形让代码走完整条路径。
+    getBoundingClientRect() {
+      return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    },
     // skins.js 的顶栏入口会 toggle 一个 active 类；这里只当开关用，
     // 断言看的是 aria-expanded / hidden 这两个能直接读到的状态。
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
@@ -108,6 +114,7 @@ function makeSandbox(cssIds, carrier) {
     return l;
   });
   const root = makeEl('html');
+  const sandboxBody = makeEl('body');
   const listHost = makeEl('skins-list');
   // 顶栏那颗入口的两个宿主。给齐了 skins.js 才会真去绑定（少一个就安静跳过，
   // 上面那些只关心切换的用例走的正是这条捷径）。
@@ -128,6 +135,9 @@ function makeSandbox(cssIds, carrier) {
     },
     document: {
       documentElement: root,
+      // 顶栏弹层会被搬进 body（.topbar 自己是层叠上下文，弹层留在里面会被后面
+      // 的玻璃面板盖住），沙箱得给出这个宿主，否则 skins.js 绑定阶段就抛。
+      body: sandboxBody,
       getElementById: (id) => (
         id === 'skins-list' ? listHost : id === 'skin-btn' ? skinBtn : id === 'skin-menu' ? skinMenu : null
       ),
@@ -143,7 +153,7 @@ function makeSandbox(cssIds, carrier) {
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(SKINS_JS, sandbox, { filename: 'skins.js' });
-  return { sandbox, root, links, listHost, skinBtn, skinMenu, store, events };
+  return { sandbox, root, body: sandboxBody, links, listHost, skinBtn, skinMenu, store, events };
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +261,7 @@ function checkCatalog() {
 function checkSkinEntry() {
   section('顶栏皮肤入口：与设置页同源，切完两处一起跟上');
 
-  const { sandbox, root, listHost, skinBtn, skinMenu } =
+  const { sandbox, root, body: skinBody, listHost, skinBtn, skinMenu } =
     makeSandbox(['sheen', 'workbench', 'liunian', 'ios', 'qingfeng']);
   sandbox.Skins.init();
 
@@ -286,6 +296,29 @@ function checkSkinEntry() {
   const atSkin = HTML.indexOf('id="skin-btn"');
   const atMore = HTML.indexOf('id="top-more-btn"');
   ok(atTheme >= 0 && atTheme < atSkin && atSkin < atMore, '按钮排在主题色之后、「更多」之前');
+
+  // 弹层必须搬出 .topbar：顶栏是 relative + z-index:40 + backdrop-filter，本身就
+  // 是一个层叠上下文，弹层写多高的 z-index 都只在顶栏内部参与比较。浮光的舞台面板
+  // 是 fixed + z-index:58，整张菜单会被那块玻璃盖掉（浏览器实测：菜单中心与左上角
+  // 两点 elementFromPoint 都返回 #stage，用户读成「浮光把换肤弹窗挡住了」）。
+  ok(skinBody.children.indexOf(skinMenu) >= 0, 'init 把弹层搬进 body（真跑过绑定，不只是源码里有这行）');
+  ok(/\.skin-menu\s*\{[^}]*position:\s*fixed/.test(read(path.join(WEB, 'style.css'))),
+    '.skin-menu 改成 fixed（搬进 body 后不再跟着按钮的 absolute 盒）');
+  const skinMenuZ = (read(path.join(WEB, 'style.css')).match(/\.skin-menu\s*\{[^}]*z-index:\s*(\d+)/) || [])[1];
+  ok(Number(skinMenuZ) > 58, '弹层压过浮光舞台面板的 z-index:58', 'skin-menu z=' + skinMenuZ);
+  // 搬出去之后位置没人算了不行：开层那一刻必须按按钮矩形重算一次。
+  ok(/renderMenu\(\);\s*positionEntryMenu\(\);/.test(SKINS_JS),
+    '开弹层时按按钮矩形算位置（搬进 body 后 CSS 里的 top/right 都不成立了）');
+  // 顶栏三颗弹层是同一个坑：.topbar 自己就是层叠上下文，留在里面的浮层会被浮光
+  // 那块 fixed + z-index:58 的舞台面板整块盖住。#theme-menu 早就搬了 body，另两颗
+  // 照它做 —— 少搬一颗就是「这个弹窗又被挡住了」原地复发。
+  const styleTop = read(path.join(WEB, 'style.css'));
+  ok(/document\.body\.appendChild\(menu\)/.test(APP)
+    && /\.top-more-menu\s*\{[^}]*position:\s*fixed/.test(styleTop),
+    '「更多工具」弹层也搬出顶栏（浮光下实测命中是 #stage）');
+  ok(/document\.body\.appendChild\(ui\.themeMenu\)/.test(APP)
+    && /\.theme-menu\s*\{[^}]*position:\s*fixed/.test(read(path.join(WEB, 'stage.css'))),
+    '主题色弹层保持搬出顶栏（另两颗的判据来源）');
 }
 
 // ---------------------------------------------------------------------------
@@ -888,22 +921,10 @@ function checkDailyScroll() {
 function checkLiunianExpandedBarStability() {
   section('流年：播放卡（展开/胶囊）不参与底部播放栏自动隐藏');
 
-  const rule = LIUNIAN.match(/\[data-skin="liunian"\]\s+\.bar:not\(\.ln-capsule\)\s*\{([^}]*)\}/);
-  ok(rule && /transform:\s*none\s*!important/.test(rule[1]),
-    '展开态钉住 transform，自动隐藏不能把文档流卡片滑出');
-  ok(rule && /opacity:\s*1\s*!important/.test(rule[1]),
-    '展开态钉住 opacity，自动隐藏不能让文档流卡片闪烁');
-  // 胶囊也是文档流卡片：showBar() 先瞬间写 translateY(100%+20px) 再动画
-  // 归位，不钉住则鼠标一悬停胶囊就整块下坠再滑回（上下跳动）。
-  const capRules = LIUNIAN.match(/\[data-skin="liunian"\]\s+\.bar\.ln-capsule\s*\{[^}]*\}/g) || [];
-  ok(capRules.some((r) => /transform:\s*none\s*!important/.test(r)),
-    '胶囊态钉住 transform，悬停不会先下坠再滑回');
-  ok(capRules.some((r) => /opacity:\s*1\s*!important/.test(r)),
-    '胶囊态钉住 opacity，悬停不会闪烁');
-  ok(/\.bar\.ln-capsule\.is-hidden\s*\{[^}]*display:\s*grid\s*!important/.test(LIUNIAN),
-    '胶囊 is-hidden 仍保持 grid 排版，不发生 flex/grid 切换');
-  ok(/\.bar\.is-hidden\s*\{\s*display:\s*none/.test(read(path.join(WEB, 'style.css'))),
-    '其它主题仍保留播放栏自动隐藏规则');
+  // 实际展开/收起、换肤和窄屏命中由 check-bar-browser.js 覆盖。
+  ok(!/\.bar\.ln-capsule\.is-hidden/.test(LIUNIAN),
+    '流年不再用 CSS 强行覆盖公共隐藏状态');
+
 }
 
 // ---------------------------------------------------------------------------
@@ -961,14 +982,20 @@ function checkLiunianNavigation() {
     && /emit\('view-online', \{ q: panel\.q \}\)/.test(LIUNIAN_JS),
     '分区可带词跳转曲库页/在线页查看全部');
 
-  // 7) 搜索历史：持久化、去重置顶、单删/清空。
-  ok(/HISTORY_KEY = 'vmusic\.ln-search-history'/.test(LIUNIAN_JS),
-    '历史记录持久化到 localStorage');
-  ok(/readHistory\(\)\.filter\(function \(x\) \{ return x !== q; \}\)/.test(LIUNIAN_JS)
-    && /list\.unshift\(q\)/.test(LIUNIAN_JS) && /list\.slice\(0, HISTORY_MAX\)/.test(LIUNIAN_JS),
-    '历史去重后置顶，上限 10 条');
-  ok(/function removeHistory/.test(LIUNIAN_JS) && /writeHistory\(\[\]\)/.test(LIUNIAN_JS),
-    '支持单条删除与清空历史');
+  // 7) 搜索历史：规则已归 `search-history.js`（唯一的 owner），皮肤这一侧只剩
+  //    「渲染 + 委托」。这里钉的是不许长回私有存储 —— 关键词历史属于搜索能力
+  //    本身，跟着皮肤走就会让顶栏与在线框敲的词进不来、换皮肤即看不见。
+  ok(!/HISTORY_KEY/.test(LIUNIAN_JS)
+    && !/localStorage\.(setItem|getItem|removeItem)\([^)]*[Hh]istory/.test(LIUNIAN_JS),
+    '流年不再持有私有的历史存储');
+  ok(/window\.HertzSearchHistory\.all\(\)/.test(LIUNIAN_JS)
+    && /window\.HertzSearchHistory\.push\(/.test(LIUNIAN_JS),
+    '历史的读与写都委托给 owner');
+  ok(/function removeHistory/.test(LIUNIAN_JS) && /HertzSearchHistory\.remove\(/.test(LIUNIAN_JS)
+    && /HertzSearchHistory\.clear\(\)/.test(LIUNIAN_JS),
+    '支持单条删除与清空（走 owner，不是自己清 localStorage）');
+  ok(/function renderHistory/.test(LIUNIAN_JS) && /ln-sp-hist-chips/.test(LIUNIAN_JS),
+    '历史芯片仍由流年面板渲染（owner 不管界面）');
 
   // 8) app.js 桥接。
   ok(/function initPanelBridge/.test(APP) && /initPanelBridge\(\)/.test(APP),
@@ -1283,12 +1310,7 @@ function checkQingfengChrome() {
     && /byId\('online-account-btn'\)/.test(QINGFENG_JS),
     '右下角搬的是业务那颗登录按钮（不是复制一个不会更新的假头像）');
 
-  section('清风：播放胶囊钉住位置');
-  // 胶囊是 fixed 浮件：自动隐藏若能改 transform/opacity，鼠标一悬停就会
-  // 先把它甩下去再滑回（上下跳动）。与流年同源，必须钉。
-  ok(/\[data-skin="qingfeng"\] \.bar:not\(\.qf-capsule\)\s*\{[^}]*transform:\s*translateX\(-50%\) !important/.test(QINGFENG),
-    '播放条钉住 transform，自动隐藏不能把它甩出视口');
-  ok(/opacity:\s*1\s*!important/.test(QINGFENG), '播放条钉住 opacity，自动隐藏不能让它闪烁');
+
 }
 
 function checkQingfengWall() {
@@ -1339,6 +1361,33 @@ function checkQingfengWall() {
   const badgeRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-poster-badge\s*\{([^}]*)\}/);
   ok(badgeRule && !/backdrop-filter/.test(badgeRule[1]),
     '序号徽章不用 backdrop-filter（否则每张卡一个合成层）');
+
+  // 5b) 右下角工具坞（关灯 / 返回 / 说明）。两条各钉一个回归：
+  //     · 玻璃材质只有一份、挂在容器上。原来三颗各自带 --skin-surface 与
+  //       --skin-shadow，只隔 8px，读成三张散落的小卡片而不是一组控件。
+  //     · 说明面板必须绝对定位。它是 .qf-tools 的 flex 子项、DOM 排在「返回」
+  //       与「说明」之间，一旦回到流里，展开面板会把三颗劈成上下两截。
+  const toolsRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-tools\s*\{([^}]*)\}/);
+  ok(toolsRule && /background:\s*var\(--skin-surface\)/.test(toolsRule[1]) && /backdrop-filter/.test(toolsRule[1]),
+    '工具坞容器自带一份玻璃材质（三颗按钮不再各浮各的）');
+  const toolsBtnRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-tools-btn\s*\{([^}]*)\}/);
+  ok(toolsBtnRule && !/--skin-surface|--skin-shadow|backdrop-filter/.test(toolsBtnRule[1]),
+    '坞内按钮不带自己的表面与阴影（否则又退回三张散卡）');
+  const toolsPanelRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-tools-panel\s*\{([^}]*)\}/);
+  ok(toolsPanelRule && /position:\s*absolute/.test(toolsPanelRule[1]) && /bottom:\s*calc\(100%/.test(toolsPanelRule[1]),
+    '说明面板绝对定位浮在坞上方（展开不会把三颗按钮劈成两截）');
+
+  // 5c) 关灯这颗：图标要读得出是「灯」，状态同步只能有一份真相。
+  //     原来挂的是 i-disc（唱片），放在这颗按钮上读成「切碟 / 看封面」，和它做
+  //     的事无关；而 class/aria 在「点击」与「启动恢复」各写了一遍，标题就漏在
+  //     恢复那条里 —— 刷新后灯是关着的，tooltip 仍写「关灯」。
+  ok(/icon\('lamp'\)/.test(QINGFENG_JS) && !/lights\.innerHTML = icon\('disc'\)/.test(QINGFENG_JS),
+    '关灯用灯泡图标（不是唱片）');
+  ok(/function syncLights/.test(QINGFENG_JS), '关灯状态同步抽成 syncLights 一处');
+  const syncCalls = (QINGFENG_JS.match(/^[ \t]+syncLights\(\);$/gm) || []).length;
+  ok(syncCalls >= 3, `点击与启动恢复都走 syncLights（调用 ${syncCalls} 处，须 ≥3：建好即同步 + 两处触发）`);
+  ok(!/wall\.lightsOut = saved[\s\S]{0,220}?classList\.toggle\('is-on'/.test(QINGFENG_JS),
+    '启动恢复不再自己写 is-on/aria（那份归 syncLights，否则标题必然漏改）');
 
   // 6) 墙为空要有空态，不能是一片空白墙。
   //    注意：墙已经**不是播放队列专属**了 —— 每个 tab 的墙展示那个 tab 的
@@ -1609,6 +1658,39 @@ function checkQingfengWall() {
     || !/transport\.post\('\/v1\/player/.test(QINGFENG_JS),
     '皮肤不自己发 /v1/player 请求（播放路径只有 app.js 一条）');
 
+  section('清风：墙上点播放必须把墙上那一列一起交给业务');
+  // 曾经的两级故障：皮肤只发 {item}，业务按**当前 tab** 重推一份列表 —— 在歌单
+  // tab 的第二层推出来的是**歌单记录**，于是拿平台歌单 id 当曲目 id 去取流（必
+  // 404，且服务端只会回「暂无可用音频」这种误导话术）；而 findIndex 找不到时
+  // 退回 index 0，用户点的是 A、响的是 B。
+  const wallActivate = QINGFENG_JS.match(/emit\('activate',\s*\{[^}]*\}\)/g) || [];
+  ok(wallActivate.length >= 2, `海报与左下角浮条两处都发 activate（找到 ${wallActivate.length} 处）`);
+  ok(wallActivate.every((s) => /list:\s*wall\.tiles/.test(s)),
+    '每一处 activate 都带 list: wall.tiles（皮肤不缓存列表，交的是墙上当前这一列）');
+  ok(/function playOnlineItem\(item, list\)/.test(APP), 'playOnlineItem 收发起方的列表');
+  ok(!/at >= 0 \? at : 0/.test(APP),
+    '找不到被点的那一项时不再退回第 0 项（那会播成另一首歌）');
+  ok(/Online\.playAll\(\[one\], 0\)/.test(APP), '退而播被点的那一首本身');
+
+  section('清风：顶栏让位与详情层的死控件');
+  // --qf-clear 是视口坐标（胶囊 top 按视口算），.column 本来就排在顶栏下面，
+  // 整条当 padding-top 用会把 --topbar-h 算两遍（实测白吃 58px）。
+  ok(/\.column\s*\{[^}]*padding-top:\s*calc\(var\(--qf-clear\) - var\(--topbar-h\)\)/.test(QINGFENG),
+    '.column 的让位从自身顶部算（减掉重复计算的 --topbar-h）');
+  ok(/#view-playlists\[data-layer="online-detail"\][^{]*\.col-head/.test(QINGFENG)
+    && /dataset\.layer = layer/.test(APP),
+    '详情层打开时收掉架子那一排控件，判据由 app.js 挂在 #view-playlists 上');
+
+  // 墙开着时顶栏与胶囊导航都被隐藏、迷你卡又被浮条压住 —— 浮条那颗舞台入口
+  // 是墙上唯一的通路，所以它必须常驻（不能跟着播放键一起 hover 才出现）。
+  ok(/qf-queue-peek-stage/.test(QINGFENG_JS) && /\.qf-queue-peek-stage\s*\{/.test(QINGFENG),
+    '浮条上有舞台入口（节点与样式都在）');
+  ok(!/\.qf-queue-peek:hover[^{]*\.qf-queue-peek-stage/.test(QINGFENG)
+    && !/\.qf-queue-peek-stage\s*\{[^}]*opacity:\s*0/.test(QINGFENG),
+    '这颗不参与 hover 显隐（常驻可见）');
+  ok(/peekStage\.addEventListener\('click'[\s\S]{0,200}openStage\(\)/.test(QINGFENG_JS),
+    '点它走 openStage（先关墙再进舞台），不是只改样式');
+
   section('清风：与 app.js 的桥接接线');
   ok(/function initQingfengBridge/.test(APP) && /initQingfengBridge\(\)/.test(APP),
     'app.js 定义并启动清风桥接');
@@ -1672,11 +1754,19 @@ function checkQingfengSettings() {
   ok(!/\.qf-modal-tab/.test(qfCssNoComment) && !/function qf-underline/.test(qfCssNoComment),
     '帮助页签的 CSS 样式也已移除');
 
-  // 4) 顶栏那三个控制按钮对清风隐藏了，但功能不能跟着丢：
-  //    沉浸声场与胶囊播放器在设置里必须有可发现的入口。
-  //    只隐藏「设置」那个是安全的（左上角已有 .qf-settings-btn）。
-  ok(/#capsule-entry[\s\S]*#stage3d-entry[\s\S]*#settings-entry/.test(qfCssNoComment),
-    '顶栏三个控制按钮都已隐藏');
+  // 4) 顶栏的沉浸声场 / 打开设置对清风隐藏，但功能不能跟着丢：
+  //    声场在设置里必须有可发现的入口。只隐藏「设置」那颗是安全的
+  //    （左上角已有 .qf-settings-btn）。
+  //    「最小化为胶囊」不在隐藏清单里，而且这是刻意的：它收起的是整个窗口、
+  //    不是切一个视图，藏进设置浮层等于把一步动作变成三步。所以这里反过来
+  //    钉一条 —— 否则下一个人照着「清风把控制入口统一收进设置」那句话，
+  //    会把它一起收掉。
+  const qfHideRule = (qfCssNoComment.match(/\[data-skin="qingfeng"\][^{}]*\{[^}]*display:\s*none[^}]*\}/g) || [])
+    .filter((rule) => /#stage3d-entry|#settings-entry|#capsule-entry/.test(rule)).join('\n');
+  ok(/#stage3d-entry/.test(qfHideRule) && /#settings-entry/.test(qfHideRule),
+    '顶栏的声场与设置按钮对清风 display:none');
+  ok(!/#capsule-entry/.test(qfHideRule) && !/#capsule-entry/.test(qfCssNoComment),
+    '顶栏的胶囊按钮没有被清风隐藏（收起整窗是即时动作，留在顶栏）');
   // 新分组在 index.html 里带了一整块说明注释，正则 #set-capsule-btn 会先撞上
   // 注释里的文字。改成匹配属性赋值，真正的目标节点与 id/class 两种写法都覆盖。
   ok(/(?:id|for)="set-capsule-btn"/.test(HTML) && /(?:id|for)="set-stage3d-btn"/.test(HTML),
@@ -1759,31 +1849,7 @@ function checkQingfengSettings() {
   //     子项（默认 static），皮肤只写 left/bottom 而不写 position，偏移量
   //     会被整份忽略，只剩 translateX(-50%) 生效 —— 胶囊被左移半个身位。
   //     这条 Node 测不出来（纯布局），但源码可以钉死。
-  // 7f) 播放栏折叠按钮：点下去必须**当场**收起，且收起后唤得回来。
-  //
-  //     原实现的时序（2026-10-06 实测踩出）：点击时 `pinned = false`，但
-  //     此刻鼠标正悬在播放条上，`bar.addEventListener('pointerenter', beginPeek)`
-  //     早已把 peek 置成 true，而 visible = peek || (pinned && !idle)
-  //     仍是 true → **点击的当下看不到任何反应**；要等鼠标移开、
-  //     leaveTimer 800ms 后把 peek 归零才真的收起。表现就是「按钮点了没用」。
-  //     清风实测（程序化 .click() 有效、真实鼠标点击无效）就是这个原因。
-  //
-  //     收起后唤不回来是第二个坑：胶囊 position:fixed; bottom:22px，
-  //     而基础 .bar-hover-zone 只有 bottom:0; height:12px，两者不重叠。
-  const toggleFn = stripJsComments(
-    (APP.match(/toggleBtn\.addEventListener\('click',[\s\S]*?\n  \}\);/) || [''])[0]);
-  ok(/peek = false/.test(toggleFn),
-    '折叠时清掉 peek（否则鼠标悬停中点了没反应：visible = peek || …）');
-  ok(/else\s+peek = false/.test(toggleFn) || /if \(pinned\)[^{]*\{[^}]*peek = false[^}]*\}\s*else\s+peek = false/.test(toggleFn),
-    '收起的分支也清 peek（不只在展开时清）');
-  ok(/clearTimeout\(hideTimer\)/.test(toggleFn),
-    '收起后不重新 armIdle（15s 定时器会把 idle 置真，与用户意图打架）');
-  const zoneRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar-hover-zone\s*\{([^}]*)\}/);
-  ok(zoneRule && /height:\s*\d+px/.test(zoneRule[1])
-    && parseInt((zoneRule[1].match(/height:\s*(\d+)px/) || [0, 0])[1], 10) >= 40,
-    '清风把唤出热区加高到能盖住浮起的胶囊（bottom:22px，12px 的热区够不到）',
-    zoneRule ? (zoneRule[1].match(/height:[^;]+/) || [''])[0].trim() : 'no rule');
-
+  // 显隐交互由 check-bar-browser.js 验证，不再保留旧热区/计时器实现断言。
   const barRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar\s*\{([^}]*)\}/);
   ok(barRule && /position:\s*fixed/.test(barRule[1]),
     '播放胶囊显式 position: fixed（否则 left/bottom 被忽略、胶囊左移半身）');
@@ -1969,7 +2035,7 @@ function checkQingfengSettings() {
     && /removeEventListener\('pointerup', stageDragHandlers\.up\)/.test(QINGFENG_JS),
     '卸载时摘掉 document 上的 pointer 监听（切皮肤后不留拖动残影）');
   // 侧卡变小后，「曲名/歌手」那一格必须真的拿到宽度。
-  const trackRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar-track\s*\{([^}]*)\}/);
+  const trackRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar-summary\s*\{([^}]*)\}/);
   ok(trackRule && /flex:\s*1 1 \d+px/.test(trackRule[1]),
     '播放条曲名格有确定 flex-basis（否则被进度条压到 0 宽）',
     trackRule ? (trackRule[1].match(/flex:[^;]+/) || [''])[0].trim() : 'no rule');
@@ -2012,10 +2078,6 @@ function checkQingfengSettings() {
   ok(progRule && /min-width:\s*(1[2-9]\d|\d{3})px/.test(progRule[1]),
     '进度条有 min-width 下限（否则窄胶囊里先被压没）',
     progRule ? (progRule[1].match(/min-width:[^;]+/) || [''])[0].trim() : 'no rule');
-  // 胶囊自己带 !important 的 transform —— 自动隐藏会先把它甩下去再滑回
-  ok(/\[data-skin="qingfeng"\] \.bar:not\(\.qf-capsule\)[\s\S]{0,120}?transform:[^;}]*!important/.test(QINGFENG),
-    '胶囊钉住 transform（自动隐藏时不会先下坠再滑回）');
-
   // 8) 分类表：认领全部设置分组，认领不到的落进「其它」。
   const table = QINGFENG_JS.match(/var SET_SECTIONS = \[[\s\S]*?\n  \];/);
   ok(!!table, '声明了设置分类表 SET_SECTIONS');
@@ -2226,43 +2288,6 @@ function checkSkinSwitchViewHandoff() {
     '浮层关着时设置视图确实被隐藏（换肤对账的就是这个 hidden）');
 }
 
-/// 播放条自动隐藏：显隐的**唯一权威是 wantVisible**，不许再拿「正在滑动」
-/// 当拒绝新请求的理由。
-///
-/// 旧写法 hideBar 开头 `|| sliding` 早退、showBar 开头
-/// `!classList.contains('is-hidden')` 早退，于是动画途中改变主意的那次
-/// 请求被静默丢弃，而兜底 finishHide 照样把 is-hidden 补上：
-/// 用户要「显示」拿到的是「永久消失」。浏览器实测稳定复现 ——
-/// bar 有 is-hidden 而 body.bar-hidden 不存在，两边永久对不上。
-///
-/// 钉「有 wantVisible 变量」不够（可能只是声明了没人用），要钉
-/// finishSlide 按它落定 + 动画有世代号（否则旧定时器会踩新状态）。
-function checkBarAutohideRace() {
-  section('播放条：显隐竞态不会把播放条永久藏掉');
-
-  const init = (() => {
-    const i = APP.indexOf('function initBarAutohide()');
-    if (i < 0) return '';
-    let depth = 0;
-    for (let j = APP.indexOf('{', i); j < APP.length; j += 1) {
-      if (APP[j] === '{') depth += 1;
-      else if (APP[j] === '}') { depth -= 1; if (!depth) return APP.slice(i, j + 1); }
-    }
-    return '';
-  })();
-  ok(!!init, '定位到 initBarAutohide 函数体');
-  if (!init) return;
-
-  ok(/let wantVisible = true;/.test(init), '有 wantVisible 作为显隐的唯一权威');
-  ok(/bar\.classList\.toggle\('is-hidden', !wantVisible\)/.test(init),
-    '落定时按 wantVisible 决定 is-hidden（不是无条件加上）');
-  ok(/let slideGen = 0;/.test(init) && /if \(gen !== slideGen\) return;/.test(init),
-    '动画有世代号守卫（旧 transitionend / 兜底定时器不踩新状态）');
-  ok(!/function hideBar\(\)\s*\{\s*if \(/.test(init)
-    && !/function showBar\(\)\s*\{\s*if \(!bar\.classList\.contains/.test(init),
-    'hideBar/showBar 不再用「正在滑动 / 已经隐藏」早退（那正是竞态来源）');
-}
-
 /// 舞台面板不该长出横向滚动条。
 ///
 /// `.stage::before` 是 inset:-30% 的取色光晕（绝对定位），面板一旦
@@ -2348,7 +2373,6 @@ function checkStageNoHorizontalScroll() {
   checkQingfengSettings();
   checkQingfengWiring();
   checkSkinSwitchViewHandoff();
-  checkBarAutohideRace();
   checkStageNoHorizontalScroll();
   checkWiring();
 

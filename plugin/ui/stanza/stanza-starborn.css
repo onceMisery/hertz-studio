@@ -1,0 +1,65 @@
+/* SPDX-License-Identifier: MIT
+ * 星诞电影层：共享导演色调贯穿子渲染器。冷影、暖色实景光与柔和光擦分层，
+ * 不对整幅歌词做 hue/filter，避免降低文字对比度与额外的全屏离屏缓冲。
+ */
+.s3d-starborn-grade,
+.s3d-starborn-transition { display: none; }
+
+#stage3d.s3d-starborn .s3d-cinema { overflow: hidden; }
+
+#stage3d.s3d-starborn .s3d-starborn-grade,
+#stage3d.s3d-starborn .s3d-starborn-transition {
+  display: block;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+#stage3d.s3d-starborn .s3d-starborn-grade {
+  background:
+    radial-gradient(ellipse at 90% 18%, rgb(224 165 97 / var(--sb-warm, .035)), transparent 62%),
+    linear-gradient(145deg, rgb(19 47 71 / var(--sb-cool, .055)), transparent 62%);
+}
+
+#stage3d.s3d-starborn .s3d-starborn-grade::before,
+#stage3d.s3d-starborn .s3d-starborn-grade::after {
+  content: "";
+  position: absolute;
+  inset: -3%;
+  pointer-events: none;
+}
+
+#stage3d.s3d-starborn .s3d-starborn-grade::before {
+  background: radial-gradient(ellipse at 51% 46%, transparent 28%, #06101b 100%);
+  opacity: var(--sb-shadow, .22);
+}
+
+#stage3d.s3d-starborn.s3d-no-vignette .s3d-starborn-grade::before { opacity: 0; }
+
+#stage3d.s3d-starborn .s3d-starborn-grade::after {
+  background: radial-gradient(ellipse at 84% 12%, #f0c38b 0%, rgb(203 171 125 / .32) 22%, transparent 61%);
+  opacity: var(--sb-light, .1);
+  transform: translate3d(calc(var(--sb-light-x, 0) * 1%), calc(var(--sb-light-y, 0) * 1%), 0);
+}
+
+#stage3d.s3d-starborn .s3d-starborn-transition {
+  inset: -4%;
+  background: linear-gradient(112deg, transparent 24%, rgb(157 188 205 / .12) 43%, rgb(247 210 160 / .30) 52%, transparent 74%);
+  opacity: var(--sb-transition, 0);
+  transform: translate3d(calc(var(--sb-transition-x, 0) * 1%), 0, 0);
+}
+
+#stage3d.s3d-starborn[data-sb-transition="dissolve"] .s3d-starborn-transition {
+  background: radial-gradient(ellipse at 50% 42%, transparent 22%, rgb(8 17 27 / .2));
+  transform: none;
+}
+
+#stage3d.s3d-starborn[data-sb-transition="soft-cut"] .s3d-starborn-transition {
+  background: linear-gradient(110deg, rgb(9 20 32 / .16), transparent 47%, rgb(197 170 128 / .14));
+}
+
+/* 静态分面只保留低透明度调色；不让 CSS 动画在暂停、eco 或减弱动效时另跑一套时钟。 */
+body[data-rm~="lyrics"] #stage3d.s3d-starborn .s3d-starborn-transition,
+#stage3d.s3d-starborn.s3d-reduced .s3d-starborn-transition { display: none; }
+body[data-rm~="lyrics"] #stage3d.s3d-starborn .s3d-starborn-grade::after,
+#stage3d.s3d-starborn.s3d-reduced .s3d-starborn-grade::after { transform: none; }

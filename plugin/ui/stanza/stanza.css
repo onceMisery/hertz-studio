@@ -20,6 +20,12 @@
 }
 .fl-scene-backdrop[hidden], .fl-scene-backdrop img[hidden] { display: none !important; }
 .fl-scene-backdrop img { width: 100%; height: 100%; object-fit: cover; object-position: center; }
+.fl-scene-backdrop::before {
+  content: ''; position: absolute; inset: 0; z-index: 1;
+  background: radial-gradient(ellipse, transparent 40%, rgba(0, 0, 0, .55));
+  opacity: var(--fl-bg-vignette, 1); pointer-events: none;
+}
+.s3d-no-vignette .s3d-vignette { visibility: hidden; }
 .fl-scene-backdrop::after {
   content: '';
   position: absolute;
@@ -78,6 +84,18 @@
 .fl-crot { display: block; transform-origin: center; transition: transform .4s ease; }
 .fl-cword[data-st='passed'] .fl-crot { transition: transform 5s linear; }
 .s3d-reduced .fl-crot { transition: none !important; }
+/* 音频反应：JS 每帧写 --fl-vocal/--fl-bass（0.015 死区），calc 在这里消费。
+   选这两个宿主是因为它们空着 —— .fl-glow 只承担 text-shadow 动画（opacity 自由），
+   .fl-body 没有任何 transform（不会与入场/旋转抢同一属性）。
+   人声把辉光托亮、低频把字身微微推涨：流光的「呼吸」从固定 7s 的 CSS 动画
+   升级成跟着音乐走，这是它此前对频谱零反应的补课。 */
+.fl-cword .fl-glow { opacity: calc(0.78 + var(--fl-vocal, 0) * 0.4); }
+.fl-cword .fl-body { transform: scale(calc(1 + var(--fl-bass, 0) * 0.024)); }
+/* 减弱动效 / 歌词面降级：随频谱变化属于循环运动，一并钉死在无音频的基准位。 */
+.s3d-reduced .fl-cword .fl-glow { opacity: .78; }
+.s3d-reduced .fl-cword .fl-body { transform: none; }
+body[data-rm~="lyrics"] .fl-cword .fl-glow { opacity: .78 !important; }
+body[data-rm~="lyrics"] .fl-cword .fl-body { transform: none !important; }
 .fl-cword[data-st='waiting'] .fl-body { filter: blur(10px); transition: filter .4s ease, color .4s ease; }
 .fl-cword[data-st='active'] .fl-body { transition: color var(--fl-dur, 200ms) linear, filter var(--fl-blur-dur, 200ms) ease; }
 .fl-cword[data-st='passed'] .fl-body { transition: color var(--fl-color-back, 800ms) ease-in-out, filter .5s ease; }
@@ -162,6 +180,12 @@
   font: 700 9px/1.4 "IBM Plex Mono","SFMono-Regular",Consolas,"Microsoft YaHei",monospace;
   letter-spacing: .18em; white-space: nowrap; }
 .fl-sonnet-hot { position: absolute; left: 0; top: 0; pointer-events: auto; cursor: pointer; }
+/* NEXT 预告行：与右侧 HUD 读数对称，落在取景框左缘（8vw 与画幅 padX 对齐）。 */
+.fl-sonnet-next { position: absolute; left: 8vw; bottom: calc(150px + env(safe-area-inset-bottom));
+  max-width: 38vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fl-sonnet-secondary, #71717a); opacity: .52;
+  font: 600 10px/1.6 "IBM Plex Mono","SFMono-Regular",Consolas,"Microsoft YaHei",monospace;
+  letter-spacing: .16em; }
 .fl-sonnet .fl-empty { z-index: 3; }
 
 /* 凝彩 tempera：与商籁共用 .fl-sonnet-layer 宿主（同一时刻只显示其一）。
@@ -236,6 +260,7 @@
   .fl-sub-card { max-width: calc(100vw - 48px); }
   .fl-sub-next ~ .fl-sub-next { display: none; } /* 窄屏预告只留 1 行 */
   .fl-sonnet-hud { right: 16px; bottom: calc(112px + env(safe-area-inset-bottom)); }
+  .fl-sonnet-next { left: 16px; bottom: calc(112px + env(safe-area-inset-bottom)); max-width: 46vw; }
 }
 /* 横屏矮窗：歌词区收高，给底部字幕/播放坞让位 */
 @media (max-height: 500px) {
@@ -261,3 +286,57 @@ body[data-rm~="lyrics"] .fl-enter-normal,
 body[data-rm~="lyrics"] .fl-exit-normal,
 body[data-rm~="lyrics"] .fl-enter-fast,
 body[data-rm~="lyrics"] .fl-exit-fast { animation-duration: 1ms !important; }
+
+/* ---------------------------------------------------------------------------
+ * 星诞导演层：切镜交接、宽银幕遮幅、24fps 颗粒、起音色散。
+ * 四个量里只有 --s3d-bars / --s3d-kick / --s3d-grain-* 由 stage3d 写在 :root 上，
+ * 这里不重复定义默认值以外的任何东西；缺省值必须让画面「什么都不动」，
+ * 否则 JS 一旦没跑起来（插件形态加载顺序问题）就会看到平白的黑边。
+ * ------------------------------------------------------------------------- */
+
+/* 播放时钟由宿主统一推进两层透明度；没有墙钟动画或整屏模糊离屏开销。 */
+.fl-hand-out, .fl-hand-in {
+  opacity: var(--fl-hand-opacity, 1);
+  will-change: opacity;
+  pointer-events: none;
+}
+
+/* 电影层：整层不接指针，且只在歌词视觉接管画面时由宿主加 is-live 出现。 */
+.s3d-cinema { position: absolute; inset: 0; z-index: 6; pointer-events: none; display: none; }
+.s3d-cinema.is-live { display: block; }
+/* 上下遮幅：高度是视口比例，随段落景别收放（主歌压住、副歌张开）。 */
+.s3d-cinema::before, .s3d-cinema::after {
+  content: ''; position: absolute; left: 0; right: 0;
+  height: calc(var(--s3d-bars, 0) * 100vh);
+  background: #04050a;
+  transition: height 620ms cubic-bezier(.22, .61, .36, 1);
+}
+.s3d-cinema::before { top: 0; }
+.s3d-cinema::after { bottom: 0; }
+/* 颗粒：旋转点阵而不是每帧随机噪声。位移只在 24fps 的整数格上跳，
+   所以它读起来像胶片的颗粒，而不是电视雪花。 */
+.s3d-cinema-grain {
+  position: absolute; inset: -18%;
+  background-image:
+    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, .5) .6px, transparent .8px),
+    radial-gradient(circle at 50% 50%, rgba(0, 0, 0, .55) .5px, transparent .7px);
+  background-size: 3px 3px, 4px 4px;
+  transform: translate3d(calc(var(--s3d-grain-x, 0) * 1px), calc(var(--s3d-grain-y, 0) * 1px), 0) rotate(.4deg);
+  opacity: calc(.04 + var(--s3d-kick, 0) * .035);
+  mix-blend-mode: overlay;
+}
+/* 色散：镜头的横向色散只出现在画面边缘（中心本来就没有），
+   所以用两条贴边的补色渐变，透明度跟着起音冲击走。 */
+.s3d-cinema-fringe {
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(90deg, rgba(255, 92, 92, .5), transparent 6%),
+    linear-gradient(270deg, rgba(92, 176, 255, .5), transparent 6%);
+  mix-blend-mode: screen;
+  opacity: var(--s3d-kick, 0);
+}
+
+/* 弱化动效：歌词面降级时整层电影效果撤掉，遮幅也保持为 0 —— 只留静态构图。 */
+body[data-rm~="lyrics"] .s3d-cinema { display: none; }
+body[data-rm~="lyrics"] .fl-hand-out,
+body[data-rm~="lyrics"] .fl-hand-in { transition: none !important; animation: none !important; filter: none !important; }

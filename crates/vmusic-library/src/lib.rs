@@ -8,7 +8,7 @@
 //! disagree. Everything happens offline: no tag is ever looked up on the
 //! network.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Prefix, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use symphonia::core::formats::FormatOptions;
@@ -26,6 +26,47 @@ pub fn is_audio_file(path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| AUDIO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+/// 扫描根目录的本地性闸门：网络位置（UNC）一律拒绝，遍历一步都不许迈出去。
+///
+/// 三条理由，都落在「扫描侧无法自救」这一类故障上：
+///
+/// 1. UNC 根把凭据留在 SMB 会话上。进程是以运行者的身份去开 `\\nas\share` 的，用的
+///    是系统缓存的域凭据，而不是用户在这个请求里明示授权的账号 —— 一次「扫曲库」
+///    于是变成对端整卷的读权限。
+/// 2. 遍历会挂在断开的共享上。walkdir 没有超时，也没有可中断的网络错误：NAS 睡眠、
+///    掉线或权限变动都能让扫描永久停在 running，而调用方的看门狗只会看到「还在跑」，
+///    之后每次扫描都被上一轮的 running 挡掉。
+/// 3. 这类根通常是别人的机器写的，扫描侧判断不了可写性与配额。封面缓存要往根目录里
+///    写，只读共享和满盘只能在遍历中途才暴露，此时库里已经落了一半曲目。
+///
+/// 让用户「映射成本地盘符或复制到本地」不是推卸：映射盘走的是用户自己确认过凭据的
+/// 那条会话，`Z:\Music` 对扫描器而言与本地目录同形，也就能被正常对待。
+///
+/// 平台差异是刻意的：`//server/share` 只在 Windows 上是网络路径，在 Unix 上它是
+/// 一条合法的本地相对/绝对路径，拒绝它就是把用户家的目录结构当 bug 修。判定因此只看
+/// `Path` 解析出的前缀形状（Unix 根本不产生 Prefix 分量），而不是手写字符串前缀 +
+/// `cfg(windows)` —— 后者会随分隔符写法漏判。反过来的差距也要认：Unix 上的 NFS/CIFS
+/// 挂载在语法上与本地目录无从区分，这条闸门在那些平台上只挡不住真网络盘。
+pub fn ensure_local_root(root: &Path) -> Result<(), String> {
+    if is_unc(root) {
+        return Err(format!(
+            "{}: 不支持网络位置，请先映射成本地盘符或复制到本地",
+            root.display()
+        ));
+    }
+    Ok(())
+}
+
+/// UNC（`\\server\share`）与逐字 UNC（`\\?\UNC\server\share`）两种写法都算网络位置；
+/// 其余前缀（盘符、映射盘、`\\.\` 设备名）与无前缀路径都按本地放行。
+fn is_unc(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+    )
 }
 
 /// Walks `root` and returns every file that looks like audio.
@@ -50,6 +91,22 @@ pub struct WalkReport {
 /// must skip pruning if `error_count > 0` or `cancelled` is set.
 pub fn collect_audio_files_checked(root: &Path, cancel: &AtomicBool) -> WalkReport {
     let mut report = WalkReport::default();
+    // 闸门放在这里而不是只放在调用方：调用方会换（HTTP 入口、文件事件、启动自愈是
+    // 三条不同的路），而「别拿网络位置去遍历」是遍历自身的约束，只在某条入口上成立
+    // 就等于没成立。
+    if let Err(message) = ensure_local_root(root) {
+        report.error_count = 1;
+        report.errors.push((root.to_path_buf(), message));
+        return report;
+    }
+    // `false` 是定值，不是「walkdir 默认就这样」：默认的隐式取值一旦被谁顺手改成跟随，
+    // 编译没有任何信号，症状却出现在离改动很远的地方。
+    //
+    // 不跟随换来的是三件确定不进库的东西：跟随会把根外的目录（乃至 UNC 目标，映射盘
+    // 里的符号链接照样指得出去）当成曲库的一部分、会让 `Music/loop -> Music` 这种自引用
+    // 遍历到 walkdir 的循环检测报错为止、并且同一首歌经两条路径进来就是两条曲目记录。
+    // 代价同样确定：链接指向的本地曲目在库里就是看不见 —— 这是设计取舍，不是 bug，
+    // 下面的断言两边都钉住，谁改动这一行都要有一条测试红给他看。
     let mut entries = walkdir::WalkDir::new(root).follow_links(false).into_iter();
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -293,13 +350,23 @@ pub fn build_track(path: &Path, meta: FileMeta) -> Track {
 /// Returns the cache key, or `None` if there is nothing to write. The key is
 /// derived from the track id so a re-scan overwrites in place instead of
 /// accumulating orphaned images.
+///
+/// 两道把关（都来自「缓存里出现过坏封面」这一类真实故障，不是洁癖）：
+///
+/// 1. **按像素尺寸与格式签名拒绝**，不按字节数。内嵌图里常见 1×1 / 32×32 的占位
+///    图与「图标」类型附件，几十~几百字节都算「非空」，按字节拦不住，界面拿到就是
+///    一块糊斑；而 `complete.rs` 那条路是从 URL 后缀猜媒体类型的，服务端回一句
+///    「稍后再试」的 HTML 也会被当成 jpg 存进封面缓存 —— 头部签名这一关同时挡住两者。
+/// 2. **两阶段写**：先写同目录下的 `.part`，成功后 rename 覆盖。直接 `fs::write`
+///    是先截断再写，进程在中间被杀掉就留下一个半截 jpg，而库里 `has_cover=true`，
+///    症状是「封面永远碎掉」，且重扫时文件签名没变就永远不会重写它。
 pub fn save_cover(
     cache_dir: &Path,
     track_id: &str,
     data: &[u8],
     media_type: &str,
 ) -> Option<String> {
-    if data.is_empty() {
+    if data.is_empty() || !plausible_cover(data, media_type) {
         return None;
     }
     let ext = match media_type {
@@ -314,10 +381,139 @@ pub fn save_cover(
     }
     let name = format!("{track_id}.{ext}");
     let path = dir.join(&name);
-    if std::fs::write(&path, data).is_err() {
+    let tmp = dir.join(format!(".{name}.part"));
+    if std::fs::write(&tmp, data).is_err() {
         return None;
     }
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    // 重打标签换了格式（jpg→png）时把同源的旧扩展名删掉：留着就是没人引用的孤儿，
+    // 而封面缓存是按 track_id 命名的，没人会再去读它。
+    for other in ["jpg", "png", "webp", "gif"] {
+        if other == ext {
+            continue;
+        }
+        let _ = std::fs::remove_file(dir.join(format!("{track_id}.{other}")));
+    }
     Some(name)
+}
+
+/// 封面像素边长下限。低于这个数不值得当封面（占位图、图标类型附件都在这一档）。
+const MIN_COVER_EDGE: u32 = 64;
+
+/// 这团字节能不能当封面用：签名对得上声明的格式，且**读得出尺寸时**两边都不小于
+/// [`MIN_COVER_EDGE`]。读不出尺寸的少见分支（认不出的子格式）放行 ——
+/// 宁可留一张糊图，也不要把用户本来有的封面变成没有。
+fn plausible_cover(data: &[u8], media_type: &str) -> bool {
+    match image_dimensions(data, media_type) {
+        Some((w, h)) => w >= MIN_COVER_EDGE && h >= MIN_COVER_EDGE,
+        // 尺寸读不出来：至少声明格式的签名要对得上。放行「签名对但子格式认不出」
+        // 的少数情况，宁可留一张糊图也不要把用户本来有的封面变成没有。
+        None => has_image_signature(data, media_type),
+    }
+}
+
+fn has_image_signature(data: &[u8], media_type: &str) -> bool {
+    match media_type {
+        "image/png" => data.starts_with(&[0x89, b'P', b'N', b'G']),
+        "image/gif" => data.starts_with(b"GIF8"),
+        "image/webp" => data.len() > 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP",
+        _ => data.starts_with(&[0xFF, 0xD8]),
+    }
+}
+
+/// 只读图片头部拿宽高，不引图像解码库（这里只需要「多大、是不是真图」）。
+/// 返回 None = 认不出这个格式的子格式或头部不完整，由调用方决定信不信。
+fn image_dimensions(data: &[u8], media_type: &str) -> Option<(u32, u32)> {
+    let be32 = |at: usize| -> Option<u32> {
+        Some(u32::from_be_bytes([
+            *data.get(at)?,
+            *data.get(at + 1)?,
+            *data.get(at + 2)?,
+            *data.get(at + 3)?,
+        ]))
+    };
+    let le16 = |at: usize| -> Option<u32> {
+        Some(u16::from_le_bytes([*data.get(at)?, *data.get(at + 1)?]) as u32)
+    };
+    match media_type {
+        "image/png" => {
+            if !data.starts_with(&[0x89, b'P', b'N', b'G']) || data.len() < 24 {
+                return None;
+            }
+            Some((be32(16)?, be32(20)?))
+        }
+        "image/gif" => {
+            if !data.starts_with(b"GIF8") {
+                return None;
+            }
+            Some((le16(6)?, le16(8)?))
+        }
+        "image/webp" => webp_dimensions(data),
+        // 其余声明（含 image/jpeg 与来路不明的媒体类型）一律按 JPEG 头读。
+        _ => jpeg_dimensions(data),
+    }
+}
+
+fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if !data.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut i = 2;
+    while i + 9 <= data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        // SOF0–3 / 5–7 / 9–11 / 13–15 都带帧尺寸（渐进式 JPEG 也在其中）。
+        if matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF) {
+            let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
+            let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
+            return (w > 0 && h > 0).then_some((w, h));
+        }
+        if marker == 0xFF {
+            i += 1;
+            continue; // 填充字节
+        }
+        if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+            continue; // 无长度段的标记
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        if len < 2 {
+            return None;
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+fn webp_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 16 || !data.starts_with(b"RIFF") || &data[8..12] != b"WEBP" {
+        return None;
+    }
+    match &data[12..16] {
+        // VP8X：扩展格式，画布尺寸是 24bit 小端、且都是「值 - 1」。
+        b"VP8X" if data.len() >= 30 => {
+            let w = 1 + u32::from_le_bytes([data[24], data[25], data[26], 0]);
+            let h = 1 + u32::from_le_bytes([data[27], data[28], data[29], 0]);
+            Some((w, h))
+        }
+        // VP8：有损格式，帧头里 14bit 小端的宽高（偏移 26 / 28）。
+        b"VP8 " if data.len() >= 30 => Some((
+            u16::from_le_bytes([data[26], data[27]]) as u32 & 0x3FFF,
+            u16::from_le_bytes([data[28], data[29]]) as u32 & 0x3FFF,
+        )),
+        // VP8L：无损格式，0xFF 之后 4 字节里各塞了 14bit 的宽与高。
+        b"VP8L" if data.len() >= 25 && data[20] == 0xFF => {
+            let bits = u32::from_le_bytes([data[21], data[22], data[23], data[24]]);
+            Some((1 + (bits & 0x3FFF), 1 + ((bits >> 14) & 0x3FFF)))
+        }
+        _ => None,
+    }
 }
 
 /// Looks for a sidecar `.lrc` next to the audio file.
@@ -428,6 +624,154 @@ mod symphonia_features {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // —— 封面尺寸读取与落盘（合成头部，只测「多大、是不是真图」这条判断）——
+
+    fn fake_png(w: u32, h: u32) -> Vec<u8> {
+        // PNG 的签名是 8 字节（0x89 P N G \r \x1a \n 之后还有一个 \r\n 对），
+        // IHDR 的宽高因此正好落在偏移 16 / 20。
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        v.extend_from_slice(&[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&[8, 6, 0, 0, 0]);
+        v
+    }
+
+    /// 带一个 APP0 段再跟 SOF2（渐进式）：既验跳过逻辑，也验 SOF 集合。
+    fn fake_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x06];
+        v.extend_from_slice(b"JFIF\0\0");
+        v.extend_from_slice(&[0xFF, 0xC2, 0x00, 0x0B, 0x08]);
+        v.extend_from_slice(&(h as u16).to_be_bytes());
+        v.extend_from_slice(&(w as u16).to_be_bytes());
+        v.push(0x03);
+        v
+    }
+
+    fn fake_gif(w: u16, h: u16) -> Vec<u8> {
+        let mut v = b"GIF89a".to_vec();
+        v.extend_from_slice(&w.to_le_bytes());
+        v.extend_from_slice(&h.to_le_bytes());
+        v.push(0);
+        v
+    }
+
+    /// VP8X：画布尺寸是 24bit 小端且写的是「值 - 1」。
+    fn fake_webp(w: u32, h: u32) -> Vec<u8> {
+        let mut v = b"RIFF".to_vec();
+        v.extend_from_slice(&[0; 4]);
+        v.extend_from_slice(b"WEBPVP8X");
+        v.extend_from_slice(&[10, 0, 0, 0, 0, 0, 0, 0]);
+        v.extend_from_slice(&[(w - 1) as u8, ((w - 1) >> 8) as u8, 0]);
+        v.extend_from_slice(&[(h - 1) as u8, ((h - 1) >> 8) as u8, 0]);
+        v
+    }
+
+    #[test]
+    fn cover_dimensions_come_from_the_header_not_the_byte_count() {
+        assert_eq!(
+            image_dimensions(&fake_png(1200, 800), "image/png"),
+            Some((1200, 800))
+        );
+        assert_eq!(
+            image_dimensions(&fake_jpeg(640, 480), "image/jpeg"),
+            Some((640, 480))
+        );
+        assert_eq!(
+            image_dimensions(&fake_gif(200, 100), "image/gif"),
+            Some((200, 100))
+        );
+        assert_eq!(
+            image_dimensions(&fake_webp(300, 300), "image/webp"),
+            Some((300, 300))
+        );
+        // 认不出头部与签名对不上都算「读不出」，由调用方决定信不信。
+        assert_eq!(image_dimensions(b"not an image at all", "image/png"), None);
+        assert_eq!(
+            image_dimensions(&fake_png(300, 300)[..12], "image/png"),
+            None
+        );
+    }
+
+    #[test]
+    fn tiny_or_mislabeled_covers_are_rejected_by_pixels() {
+        // 32px 的占位图按字节看有几百 B，字节闸门放得住它；像素闸门不放。
+        assert!(!plausible_cover(&fake_png(32, 32), "image/png"));
+        assert!(
+            plausible_cover(&fake_png(64, 64), "image/png"),
+            "下限本身要放行"
+        );
+        assert!(
+            !plausible_cover(&fake_jpeg(300, 40), "image/jpeg"),
+            "任一边过小都不行"
+        );
+        assert!(plausible_cover(&fake_jpeg(500, 320), "image/jpeg"));
+        assert!(plausible_cover(&fake_gif(400, 400), "image/gif"));
+        assert!(plausible_cover(&fake_webp(100, 100), "image/webp"));
+        // complete.rs 按 URL 后缀猜媒体类型：一句「稍后再试」的 HTML 不能当 jpg 存进封面缓存。
+        assert!(!plausible_cover(
+            b"<html><body>try later</body></html>",
+            "image/jpeg"
+        ));
+        // 签名对但子格式认不出：放行，别把用户本来有的封面变成没有。
+        let mut odd = b"RIFF".to_vec();
+        odd.extend_from_slice(&[0; 4]);
+        odd.extend_from_slice(b"WEBPALPH");
+        odd.extend_from_slice(&[0; 16]);
+        assert!(plausible_cover(&odd, "image/webp"));
+    }
+
+    #[test]
+    fn save_cover_writes_atomically_and_leaves_no_orphans() {
+        let dir = std::env::temp_dir().join(format!("vmusic-cover-{}", uuid::Uuid::new_v4()));
+
+        // 被拒的尺寸：什么都不落盘。
+        assert_eq!(save_cover(&dir, "t0", &fake_png(10, 10), "image/png"), None);
+        assert_eq!(
+            cover_names(&dir),
+            Vec::<String>::new(),
+            "拒掉的封面不留文件"
+        );
+
+        let name =
+            save_cover(&dir, "t1", &fake_png(400, 400), "image/png").expect("合法封面要落盘");
+        assert_eq!(
+            cover_names(&dir),
+            vec!["t1.png".to_string()],
+            "只落这一份，不留 .part"
+        );
+        assert_eq!(name, "t1.png");
+        assert_eq!(
+            std::fs::read(dir.join("covers").join(&name)).unwrap(),
+            fake_png(400, 400)
+        );
+
+        // 重打标签换了格式：旧扩展名那份要跟着清掉，否则缓存只增不减。
+        save_cover(&dir, "t1", &fake_jpeg(400, 400), "image/jpeg").expect("jpg 落盘");
+        assert_eq!(
+            cover_names(&dir),
+            vec!["t1.jpg".to_string()],
+            "旧的 png 该被删掉"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// covers/ 里的文件名，排序后返回（目录不存在时给空表）。两阶段写的验收点是
+    /// 「目录里既没有多余 `.part` 残留，也没有上一轮的孤儿」——逐个数比只查
+    /// 目标文件存在要严：残留和孤儿都是「现在没症状、以后占盘又被人读到」的东西。
+    fn cover_names(dir: &Path) -> Vec<String> {
+        let mut out = match std::fs::read_dir(dir.join("covers")) {
+            Ok(entries) => entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            Err(_) => Vec::new(),
+        };
+        out.sort();
+        out
+    }
 
     #[test]
     fn extension_filter_is_case_insensitive() {
@@ -660,5 +1004,171 @@ mod tests {
 
         std::fs::write(dir.join("track01.lrc"), b"[00:01.00]x").unwrap();
         assert_eq!(find_sidecar_lyrics(&audio), Some(dir.join("track01.lrc")));
+    }
+
+    // —— 扫描根目录的本地性（网络位置一律拒绝）——
+
+    /// 网络根要在遍历开始前就拒掉，且拒得像个错误而不是像「扫到 0 首」：调用方按
+    /// `error_count > 0` 跳过清理，把 0 首当成证据就会把整个曲库删空。
+    #[cfg(windows)]
+    #[test]
+    fn network_scan_roots_are_refused_before_the_walk() {
+        for root in [
+            r"\\nas\music",
+            r"\\nas\music\2024",
+            r"\\192.168.1.10\share",
+            "//nas/music",
+            r"\\nas/music",
+            r"\\?\UNC\nas\music",
+        ] {
+            let root = Path::new(root);
+            let report = collect_audio_files_checked(root, &AtomicBool::new(false));
+            assert!(
+                report.files.is_empty(),
+                "网络根 {root:?} 一步都不许遍历：{:?}",
+                report.files
+            );
+            assert_eq!(report.error_count, 1, "网络根 {root:?} 要留下一条错误");
+            assert_eq!(report.errors[0].0, root);
+            assert!(
+                report.errors[0].1.contains("不支持网络位置，请先映射成本地盘符或复制到本地"),
+                "错误消息要给出路，当前：{}",
+                report.errors[0].1
+            );
+        }
+    }
+
+    /// 盘符、映射盘、根目录相对路径都不是网络位置。这一半和上面那一半一样重要：
+    /// 拒绝消息让用户「映射成本地盘符」，闸门要是顺手把映射盘也毙了，就是自己把
+    /// 唯一的出路堵死。
+    #[cfg(windows)]
+    #[test]
+    fn drive_letter_and_local_roots_stay_allowed() {
+        for root in [
+            r"D:\music",
+            r"C:\Users\me\Music",
+            r"Z:\Music on NAS",
+            r"\\?\D:\music",
+            r"\Music",
+            "music/2024",
+        ] {
+            assert!(
+                ensure_local_root(Path::new(root)).is_ok(),
+                "{root} 是本地路径，不该被拒"
+            );
+        }
+    }
+
+    /// `//server/share` 在 Unix 上是合法本地路径（`\\nas\music` 只是名字奇怪的目录）。
+    /// 这条断言必须与上面那条 Windows 断言反向存在 —— 少了它，跨平台的实现就会被
+    /// 一句无条件 `starts_with("//")` 悄悄改成「拒掉用户家目录里的正常路径」。
+    #[cfg(not(windows))]
+    #[test]
+    fn double_slash_is_an_ordinary_local_path_off_windows() {
+        for root in ["//nas/music", r"\\nas\music", "/music", "music/2024"] {
+            assert!(
+                ensure_local_root(Path::new(root)).is_ok(),
+                "{root} 在非 Windows 上不是网络路径"
+            );
+        }
+    }
+
+    // —— 符号链接策略（`follow_links(false)` 是定值，不是默认值）——
+
+    /// Windows 上造符号链接要权限（开发者模式或管理员），拿不到就返回 false 让调用方
+    /// 跳过 —— 这条断言在缺权限的机器上不该变成假红，兜底是下面的文本断言。
+    fn make_symlink(target: &Path, link: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            let created = if target.is_dir() {
+                std::os::windows::fs::symlink_dir(target, link)
+            } else {
+                std::os::windows::fs::symlink_file(target, link)
+            };
+            created.is_ok()
+        }
+        #[cfg(not(windows))]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vmusic-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 只经链接可达的本地曲目就是看不见：这一条钉住 `false` 的代价，改成一边都会红。
+    #[test]
+    fn tracks_reachable_only_through_a_symlink_stay_out_of_the_library() {
+        let base = scratch_dir("walk-base");
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let real = root.join("real.mp3");
+        std::fs::write(&real, b"x").unwrap();
+        let hidden = outside.join("hidden.mp3");
+        std::fs::write(&hidden, b"x").unwrap();
+        let hidden_dir = outside.join("album");
+        std::fs::create_dir_all(&hidden_dir).unwrap();
+        std::fs::write(hidden_dir.join("side.mp3"), b"x").unwrap();
+
+        let made_file_link = make_symlink(&hidden, &root.join("link.mp3"));
+        let made_dir_link = make_symlink(&hidden_dir, &root.join("linkdir"));
+        if !made_file_link || !made_dir_link {
+            eprintln!("本平台造不出符号链接，跳过（改由文本断言兜底）");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+
+        let report = collect_audio_files_checked(&root, &AtomicBool::new(false));
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(report.files, vec![real], "曲库里只该有根目录里那份真实文件");
+        assert_eq!(report.error_count, 0);
+    }
+
+    /// 指向祖先目录的链接不会把遍历变成循环，也不会让同一首歌以两条路径进库两遍。
+    #[test]
+    fn directory_link_back_to_the_root_neither_loops_duplicates_nor_errors() {
+        let base = scratch_dir("walk-cycle");
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("album")).unwrap();
+        let real = root.join("album").join("real.mp3");
+        std::fs::write(&real, b"x").unwrap();
+        if !make_symlink(&root, &root.join("album").join("loop")) {
+            eprintln!("本平台造不出符号链接，跳过（改由文本断言兜底）");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+
+        let report = collect_audio_files_checked(&root, &AtomicBool::new(false));
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(report.files, vec![real], "一份真实文件只该出现一次");
+        assert_eq!(report.error_count, 0, "遍历不该停在循环检测的错误上");
+        assert!(!report.cancelled);
+    }
+
+    /// 上面两条行为断言在没有建链权限的机器上会自己跳过，这一条是唯一的硬兜底：
+    /// `follow_links` 的实参必须写在源码里、且必须是 `false`。改成 `true` 或不写
+    /// 都没有编译期信号，靠人 review 一行 builder 链迟早漏。
+    #[test]
+    fn walk_declares_its_symlink_policy_as_a_literal() {
+        // 针头用 concat! 拼：写成字面量的话这个文件里就有两处匹配（另一处在本测试里），
+        // 谁把调用点改掉断言照样是绿 —— 那条断言只证明它自己存在。
+        let declared = concat!(".follow_", "links", "(false)");
+        let followed = concat!(".follow_", "links", "(true)");
+        let source = include_str!("lib.rs");
+        assert_eq!(
+            source.matches(declared).count(),
+            1,
+            "遍历入口应恰好有一处显式的不跟随声明"
+        );
+        assert_eq!(
+            source.matches(followed).count(),
+            0,
+            "跟随会把根外目录、循环链接与网络目标带进曲库"
+        );
     }
 }
