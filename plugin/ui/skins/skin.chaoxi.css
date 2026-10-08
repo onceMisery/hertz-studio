@@ -1,0 +1,490 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 hertz-studio contributors
+
+   皮肤：chaoxi（潮汐）
+   --------------------------------------------------------------------------
+   名字的来处：潮水一涨一落，中间那段时间是什么都没有的——这套皮肤卖的正是
+   那段落差。信息像潮水一样退下去，把滩涂留给封面和文字；该出现的东西再随
+   下一次涨潮回来。所以它的密度是**刻意压低**的，不是"还没做完"。
+
+   设计稿见 docs/design/skin-chaoxi.md。一句话：**把界面退到最简，让专辑封面
+   和文字成为主角**。与既有四套皮肤的差异不在"多一个功能"，而在密度与注意力
+   的分配：
+
+     · 导航   sheen 顶部悬浮胶囊（横向、脱流）/ workbench 104px 紧凑窄条
+              chaoxi 72px 竖轨，**图标在上、文字在下**，留白比两者都多
+     · 分区   sheen 单列全宽 / workbench 三栏 1px 细线
+              chaoxi 竖轨 + 单列，但内容区**max-width 1080 居中**：
+              宽屏不铺满，两侧留白本身就是分区手段
+     · 密度   sheen 已经很松，chaoxi 再松一档（行内 16px、分区 32px、
+              卡片下限 300px），一屏放得更少、每张封面更大
+     · 形状   圆角 20px 封顶（设计稿纪律：超过 20 就与"克制"冲突），
+              比 sheen 的 22 收一档
+
+   舞台这一块是对设计稿的**唯一一处主动修正**：设计稿 6.0 写的是"全屏覆盖层
+   （z 60），播放页进入时淡入"，但本项目里"有没有播放页"由
+   body[data-stage-idle] 判定——app.js 的注释写明**暂停不算空闲**（曲目还在、
+   进度还在，收起会让歌词和进度条凭空消失）。也就是说只要有曲目，覆盖层就会
+   一直盖住曲库/歌单，浏览路径被整块挡掉。
+   所以这里退一步：舞台做成比 sheen 更宽的"聚焦面板"（min(560px, 42vw)），
+   全屏那件事交回既有的沉浸式舞台（F）。唱片与歌词拿到的空间不减反增
+   （.disc-wrap 放大、.stage-lyrics 兜到 120px），设计稿 5.2 的意图保住了。
+
+   本文件**只写布局，不出现任何颜色字面量**：配色一律走现有主题 token。
+   于是换皮肤不会把主题色带跑，换主题也不会破坏这套皮肤——两者正交。
+
+   再扩展一套皮肤时照抄这个文件的结构即可：先声明 --skin-* 令牌，再按下面
+   的模块顺序（外壳 → 导航 → 内容 → 列表 → 卡片 → 面板 → 浮层）写覆盖。
+
+   --------------------------------------------------------------------------
+   状态样式一律不写
+   五态的**语义**（hover 底色、focus 环、disabled 透明度、loading 转圈）全部
+   由 style.css 提供，全站一份、各套皮肤共享。皮肤层再写一遍会有两个后果：
+     1. 切换皮肤时状态跟着换一套浓淡，用户会误以为"换皮肤顺带改了行为"；
+     2. 皮肤契约要求每个选择器各套皮肤都得有，为一套状态样式给别的皮肤各抄
+        一遍，抄出来的浓淡必然对不上。
+   所以本文件里没有一条 :hover / :active / :focus / :disabled 规则——这是
+   潮汐自己的纪律（设计稿 9.4 第 2 条），由 scripts/check-skins.js 的
+   checkChaoxiSkin 钉住。
+
+   强调色沿用全站分工，本文件不重新定义、也不写 color：--brand 管"正在生效
+   / 正在播放"，--highlight 管"当前选中项"。
+*/
+
+[data-skin="chaoxi"] {
+  /* ==== 布局令牌 ====
+     与 sheen 同一组键，取值整体再松一档。--skin-title 是 34px（设计稿 h1
+     34/42），比 sheen 的 24px 大一档——潮汐靠字号差分层级，标题必须够重。 */
+  --skin-gap: 32px;
+  --skin-pad: 40px;
+  --skin-radius: 20px;      /* 设计稿纪律：任何圆角不得超过 20px */
+  --skin-row-py: 16px;      /* 行内上下留白——信息密度的主要旋钮 */
+  --skin-card-min: 300px;   /* 1080 内容区下恰好 3 列（设计稿的 3/2/1 断点） */
+  --skin-head-pb: 24px;
+  --skin-title: 34px;
+
+  /* ==== 潮汐专属：内容区定宽居中 ====
+     宽屏不铺满：两侧留白本身就是分区手段，比再画一条分隔线更干净。
+     窄屏由 @media 收窄 --skin-pad，内容自然贴边。 */
+  --skin-content-max: 1080px;
+  --skin-rail-w: 72px;
+  --skin-stage-w: min(560px, 42vw);
+
+  /* ==== 排版令牌 ====
+     这几个键与 style.css 的 :root 同名同义（默认主题下像素不变），皮肤只覆盖
+     数值——于是"整屏字号一起动"是改这几个数的必然结果，而不是逐个组件去抄。 */
+  --skin-h1: var(--skin-title); /* 一级：区块标题。与 --skin-title 同值，
+                                    区别是 --skin-h1 会被组件层直接消费。 */
+  --skin-h2: 15px;         /* 二级：曲名、卡片标题 */
+  --skin-h3: 12.5px;       /* 三级：艺人 / 专辑 / 时长 / 索引 */
+  --skin-h4: 11px;         /* 四级：音质徽标、表头小标签 */
+  --skin-h-album: 13px;    /* 专辑名比艺人略大一档 */
+  --skin-h2-w: 500;        /* 正文字重：潮汐靠灰度与字重分层，不上 550 */
+  --skin-line-h: 1.7;      /* 正文行高：低密度下 1.5 会显得挤 */
+  --skin-track-tight: -0.32px; /* 34px 的标题不收字距会散开 */
+  --skin-track-wide: 0.8px;    /* 辅助信息反而要开字距才不糊成一条 */
+
+  --skin-lh-tight: 1.24;   /* 标题行高：1.7 是为多行正文准备的，套到单行标题上
+                               会把标题与下方工具撑得太远 */
+  --skin-w-head: 600;      /* 标题字重：设计稿 h1 是 600，不是 sheen 的 700 */
+
+  /* ==== 表面令牌 ====
+     悬浮件（舞台 / 播放栏）用 --glass-bg-strong：那是 style.css 为"浮起件"
+     准备的档，且 ios-light 主题已把它翻成浅色语义，深浅色都自动正确。 */
+  --skin-surface: var(--glass-bg-strong);
+  --skin-surface-card: var(--surface-1);
+  --skin-line-soft: var(--surface-line);
+  --skin-line-hard: var(--surface-line-strong);
+  --skin-shadow: var(--glass-shadow);
+  --skin-shadow-card: var(--surface-lift);
+  --skin-hi: var(--surface-hi);   /* 顶部内高光：卡片读出厚度而不必加重描边 */
+
+  /* ==== 控件令牌 ==== */
+  --skin-ctl-radius: var(--r-pill);
+  --skin-focus-offset: 3px;
+
+  /* ==== 面板底边到播放条的净空 ====
+     这里**不能拿 --bar-h 当播放条的高度**：它只是 min-height，真实高度由内容
+     撑，而且随断点重排 —— 实测一行 80px、≤900px 两行 117px、≤620px 三行
+     163px。按令牌让位的结果是面板底边**插进播放条上沿**，而两块都是暗玻璃，
+     不量 rect 根本看不出来。留位 = 播放条实高 + 两道 --skin-gap。 */
+  --skin-stage-foot: calc(80px + var(--skin-gap) * 2);
+}
+
+/* --- 外壳：竖轨 + 单列，内容区定宽居中 ---------------------------------- */
+
+[data-skin="chaoxi"] .app {
+  grid-template-columns: var(--skin-rail-w) minmax(0, 1fr);
+  gap: var(--skin-gap);
+  padding: 0 var(--skin-pad) var(--skin-gap);
+}
+
+/* 宽屏：舞台是脱流的 fixed 面板，栅格里的 .column 拿不到它的宽度，
+   必须由外壳显式让位，否则面板会压在内容右侧一列上。
+   让位宽度与 .stage 的宽度同源（--skin-stage-w），改一处两处同步。 */
+@media (min-width: 1241px) {
+  [data-skin="chaoxi"] .app {
+    padding-right: calc(var(--skin-stage-w) + var(--skin-gap) + var(--skin-pad));
+  }
+
+  /* 必须显式钉死栅格：全局 body[data-stage-idle="1"] .app（≥1241px、(0,2,1)）
+     会把外壳改成「86px + 1fr」，本皮肤基础 .app（0,2,0）压不过它 ——
+     不钉则内容落进 86px 窄轨、布局整个错位。此组合选择器 (0,3,1) 钉回。
+     空闲时舞台收起，右侧让位同步收回，内容区自然变宽（留白更宽）。 */
+  [data-skin="chaoxi"] body[data-stage-idle="1"] .app {
+    grid-template-columns: var(--skin-rail-w) minmax(0, 1fr);
+    padding-right: var(--skin-pad);
+  }
+}
+
+/* --- 导航：72px 竖轨，图标在上、文字在下 -------------------------------- */
+
+[data-skin="chaoxi"] .rail {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 10px 8px;
+  border-radius: var(--skin-radius);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface-card);
+  box-shadow: var(--skin-hi);
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  /* 横向不该出现滚动条：竖轨只有一列，横向溢出只可能来自文字。 */
+  scrollbar-width: none;
+}
+
+/* 条目是"图标在上、文字在下"的竖排——72px 容不下横排的图标 + 中文。 */
+[data-skin="chaoxi"] .rail-item {
+  flex: none;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 6px;
+  border-radius: var(--skin-radius);
+  text-align: center;
+}
+
+[data-skin="chaoxi"] .rail-item svg { margin: 0; flex: none; }
+
+/* 标签是次要信息：比 sheen 胶囊里的文字再小一档，靠图标认路。 */
+[data-skin="chaoxi"] .rail-item span {
+  font-size: var(--skin-h4);
+  font-weight: var(--skin-h2-w);
+  line-height: var(--skin-lh-tight);
+  letter-spacing: 0.02em;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 弹簧保留：竖轨里「设置」依然被顶到底部。 */
+[data-skin="chaoxi"] .rail-spacer { flex: 1; }
+
+/* --- 顶栏搜索槽：潮汐把它做成 48px 的胶囊（设计稿 5.4） ----------------- */
+
+[data-skin="chaoxi"] .topsearch {
+  height: 48px;
+  border-radius: var(--skin-ctl-radius);
+}
+
+/* --- 内容：定宽居中，标题独占一行 --------------------------------------- */
+
+[data-skin="chaoxi"] .column {
+  border-radius: var(--skin-radius);
+  padding: 0;
+  /* min-width:0：栅格轨道已经是 minmax(0,1fr)，但 .column 作为子项仍可能按
+     内容最小宽度撑开，长歌名会把整块面板顶出视口。 */
+  min-width: 0;
+}
+
+[data-skin="chaoxi"] .view {
+  /* 定宽居中：margin-inline:auto + width:100% 才能在 flex 列里真的居中，
+     只写 max-width 会靠左。 */
+  width: 100%;
+  max-width: var(--skin-content-max);
+  margin-inline: auto;
+  padding: var(--skin-pad) 0 0;
+  min-width: 0;
+}
+
+[data-skin="chaoxi"] .col-head {
+  padding-bottom: var(--skin-head-pb);
+  margin-bottom: var(--skin-gap);
+  align-items: baseline;
+}
+
+[data-skin="chaoxi"] .col-head-left { flex: 1 1 auto; min-width: 0; }
+
+[data-skin="chaoxi"] .col-title {
+  font-size: var(--skin-title);
+  font-weight: var(--skin-w-head);
+  line-height: var(--skin-lh-tight);
+  letter-spacing: var(--skin-track-tight);
+}
+
+[data-skin="chaoxi"] .col-tools {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--skin-gap);
+  align-items: center;
+}
+
+[data-skin="chaoxi"] .set-row {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+[data-skin="chaoxi"] .online-body { gap: var(--skin-gap); }
+
+/* --- 列表：低密度，分组靠间距而不是分割线 ------------------------------- */
+
+[data-skin="chaoxi"] .lib-head,
+[data-skin="chaoxi"] .fav-head {
+  padding-bottom: 12px;
+  font-size: var(--skin-h4);
+  font-weight: 600;
+  letter-spacing: var(--skin-track-wide);
+  line-height: var(--skin-line-h);
+}
+
+[data-skin="chaoxi"] .track,
+[data-skin="chaoxi"] .q-row,
+[data-skin="chaoxi"] .fav-row,
+[data-skin="chaoxi"] .online-row,
+[data-skin="chaoxi"] .pl-row,
+[data-skin="chaoxi"] .pd-row,
+/* .dv-row 列入六种行之内：它自带 padding/border-radius，漏在这份名单外时
+   每日推荐那 30 首会比同页曲库/队列/歌单挤一号 —— 潮汐尤其明显，大留白里
+   突然插进一片紧凑行。列进来后它自动跟 --skin-row-py 与 --skin-line-h 走。 */
+[data-skin="chaoxi"] .dv-row {
+  padding-top: var(--skin-row-py);
+  padding-bottom: var(--skin-row-py);
+  border-radius: var(--r-lg);
+  /* 行高在行容器上定一次，内部所有文字行继承：比逐个给 .t-title/.t-sub
+     写 line-height 更省，也保证同一行里主副信息的行高不会打架。 */
+  line-height: var(--skin-line-h);
+}
+
+/* 行与行之间留 8px：潮汐的"细线而非卡片"就落在这里 —— 分组靠间距，
+   行本身不带描边（描边由 style.css 的状态层按需给）。 */
+[data-skin="chaoxi"] .lib-list,
+[data-skin="chaoxi"] .q-list,
+[data-skin="chaoxi"] .fav-list {
+  gap: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- 卡片网格：格子更大，一屏放得更少 ---------------------------------- */
+
+[data-skin="chaoxi"] .pl-grid,
+[data-skin="chaoxi"] .dv-body-card {
+  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
+  gap: var(--skin-gap);
+}
+
+[data-skin="chaoxi"] .pl-card-art,
+[data-skin="chaoxi"] .dv-art {
+  border-radius: var(--skin-radius);
+}
+
+[data-skin="chaoxi"] .dv-body {
+  gap: var(--skin-gap);
+}
+
+/* 设计稿：封面是这一屏唯一的视觉锚点，所以封面圆角跟整套皮肤走，
+   不再按 sheen 那样收成 radius * 0.8。 */
+
+[data-skin="chaoxi"] .dv-name { font-size: var(--skin-h2); font-weight: var(--skin-h2-w); }
+[data-skin="chaoxi"] .dv-sub,
+[data-skin="chaoxi"] .dv-num,
+[data-skin="chaoxi"] .dv-src { font-size: var(--skin-h3); }
+[data-skin="chaoxi"] .dv-num,
+[data-skin="chaoxi"] .dv-src { letter-spacing: var(--skin-track-wide); }
+
+[data-skin="chaoxi"] .daily-list {
+  /* 列数公式在 style.css 的 .daily-list 上，皮肤只交下限与间距两个令牌。
+     这里**不写 grid-template-columns**：那是把整条公式盖掉，
+     而契约明确禁止把 .daily-strip 改成网格容器。 */
+  --daily-card-min: var(--skin-card-min);
+  --daily-gap: var(--skin-gap);
+}
+
+[data-skin="chaoxi"] .daily-strip {
+  padding: var(--skin-pad);
+  border-radius: var(--skin-radius);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow-card), var(--skin-hi);
+  line-height: var(--skin-line-h);
+}
+
+/* --- 设置：分组之间靠间距分区 ------------------------------------------- */
+
+[data-skin="chaoxi"] .set-group {
+  padding: var(--skin-gap);
+  border-radius: var(--skin-radius);
+  margin-bottom: var(--skin-gap);
+  background: var(--skin-surface-card);
+  border: 1px solid var(--skin-line-soft);
+  box-shadow: var(--skin-hi);
+}
+
+/* --- 舞台：贴右侧边的"聚焦面板"（比 sheen 更宽） ----------------------- */
+/* 为什么不是设计稿写的全屏覆盖层，见文件头注释：只要有曲目覆盖层就一直
+   在，会把浏览路径整块挡掉。全屏交给既有的沉浸式舞台。 */
+
+[data-skin="chaoxi"] .stage {
+  position: fixed;
+  right: var(--skin-pad);
+  top: calc(var(--topbar-h) + var(--skin-gap));
+  width: var(--skin-stage-w);
+  /* dvh 而非 vh：移动端地址栏收起/展开时 vh 不变，底边会插进播放栏。 */
+  max-height: calc(100dvh - var(--topbar-h) - var(--skin-gap) * 2 - var(--skin-stage-foot));
+  z-index: 58;
+  padding: var(--skin-pad);
+  border-radius: var(--skin-radius);
+  border: 1px solid var(--skin-line-hard);
+  background: var(--skin-surface);
+  backdrop-filter: blur(24px) saturate(1.1);
+  -webkit-backdrop-filter: blur(24px) saturate(1.1);
+  box-shadow: var(--skin-shadow);
+  /* 面板本身不滚，歌词区自己滚。写 overflow:auto 会长出两条贴在一起的滚动条：
+     横向那条是 .stage::before 那个 inset:-30% 的取色光晕撑出来的，纵向那条
+     与歌词区的滚动重复。基础样式本来就是 overflow:hidden，这里守住。 */
+  overflow: hidden;
+  /* 内容不足一屏时面板不该半途截断：min-height 让它至少占满「顶栏到播放条」
+     之间那段，否则底边悬在半空、右侧留一大块空面板。 */
+  min-height: min(
+    calc(100dvh - var(--topbar-h) - var(--skin-gap) * 2 - var(--skin-stage-foot)),
+    560px
+  );
+}
+
+/* 余量归属（设计稿 5.2 的定高 flex 列纪律）：
+   这是一个定高的 flex 列，歌词区有 flex:1 但**没有 min-height 时会被压到
+   内容那么高**；缺口则落到仅剩的可收缩项上 —— sheen 实测曲名行盒 33px→14px、
+   艺人 20px→9px，21px 的字被切成半截。
+   潮汐不靠摘掉曲名来躲这个坑（那是砍功能），而是两头一起钉：歌词区兜
+   120px，曲名/艺人 flex:none 不可收缩，唱片封顶不吃余量。
+   于是余量明确落给歌词 —— 那是唯一会随播放变化、值得拿到空间的区域。 */
+[data-skin="chaoxi"] .stage-lyrics {
+  flex: 1 1 auto;
+  min-height: 120px;
+}
+
+[data-skin="chaoxi"] .stage-title,
+[data-skin="chaoxi"] .stage-artist {
+  flex: none;
+}
+
+/* 唱片是主角：min(72%, 320px) 比 sheen 的 min(58%, 236px) 大一圈，
+   面板 560px 扣掉 80px padding 后 480px 的 72% ≈ 345px，封顶 320px。 */
+[data-skin="chaoxi"] .disc-wrap {
+  width: min(72%, 320px);
+  flex: none;
+  align-self: center;
+}
+
+/* --- 播放栏：底部悬浮胶囊，最轻的一层 ----------------------------------- */
+
+[data-skin="chaoxi"] .bar {
+  margin: 0 var(--skin-pad) var(--skin-gap);
+  border-radius: var(--skin-ctl-radius);
+  padding: 14px var(--skin-pad);
+  gap: var(--skin-gap);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow-card);
+}
+
+/* --- 浮层：圆角跟随整套皮肤，且必须是不透明底 -------------------------- */
+
+[data-skin="chaoxi"] .np-card,
+[data-skin="chaoxi"] .menu,
+[data-skin="chaoxi"] .empty-card {
+  border-radius: var(--skin-radius);
+}
+
+/* 空状态卡浮在内容之上：底色不够实的话，「暂无歌曲」会与背后的封面图混成一片。 */
+[data-skin="chaoxi"] .empty-card {
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow);
+  line-height: var(--skin-line-h);
+}
+
+/* --- 响应式 -------------------------------------------------------------- */
+
+/* 平板/手机：舞台按基础样式的抽屉方式隐藏与滑入（transform 规则不重写），
+   这里只把几何位置/宽度报成抽屉该有的值。 */
+@media (max-width: 1240px) {
+  [data-skin="chaoxi"] .stage {
+    top: 12px;
+    right: 12px;
+    /* 抽屉底边同样不能顶进播放条，用同一个留位令牌。 */
+    bottom: var(--skin-stage-foot);
+    width: min(560px, 92vw);
+    max-height: none;
+  }
+}
+
+/* 触控设备：命中区抬到 44px（iOS HIG / Material 的最小可点尺寸）。
+   竖轨是单列，抬高度不会把条目挤出可视区，比横向胶囊安全。 */
+@media (pointer: coarse) {
+  [data-skin="chaoxi"] .rail-item {
+    min-height: 44px;
+  }
+}
+
+/* 窄屏：两侧留白按设计稿的 40 / 24 / 16 收窄，给内容让出空间。
+   播放条会重排成多行（实高 80 → 117 → 163px），舞台留位必须跟着涨，
+   否则抽屉底边又插回播放条里。写绝对值而不是拿 --bar-h 乘倍数：
+   --bar-h 是 min-height、与行数无关，乘出来的倍数只是当下的巧合。
+   必须排在上面那条 ≤1240px 的**后面**（同为 (0,1,1)，靠源码顺序决胜）。 */
+@media (max-width: 900px) {
+  [data-skin="chaoxi"] {
+    --skin-gap: 24px;
+    --skin-pad: 24px;
+    --skin-stage-foot: calc(117px + var(--skin-gap) * 2);
+  }
+  [data-skin="chaoxi"] .app {
+    padding: 0 var(--skin-pad) var(--skin-gap);
+  }
+  [data-skin="chaoxi"] .view {
+    padding: var(--skin-pad) 0 0;
+  }
+  [data-skin="chaoxi"] .bar {
+    margin: 0 var(--skin-pad) var(--skin-gap);
+  }
+}
+
+@media (max-width: 620px) {
+  [data-skin="chaoxi"] {
+    --skin-gap: 16px;
+    --skin-pad: 16px;
+    --skin-stage-foot: calc(163px + var(--skin-gap) * 2);
+    --skin-rail-w: 60px;
+    --skin-title: 26px;
+  }
+  [data-skin="chaoxi"] .app {
+    grid-template-columns: var(--skin-rail-w) minmax(0, 1fr);
+    gap: 12px;
+  }
+  [data-skin="chaoxi"] .rail {
+    padding: 8px 4px;
+  }
+  [data-skin="chaoxi"] .rail-item {
+    padding: 8px 4px;
+  }
+  [data-skin="chaoxi"] .stage {
+    padding: 20px;
+  }
+  [data-skin="chaoxi"] .bar {
+    padding: 12px 20px;
+  }
+}
