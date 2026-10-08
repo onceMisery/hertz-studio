@@ -76,3 +76,6 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-08 | adr | docs/aegis/adr/0007-playback-transitions-and-intent-ownership.md | 下一曲预备与集合提交归属 |
 | 2026-10-08 | adr | docs/aegis/adr/0008-home-actions-and-creative-share.md | 首页动作与创意分享契约 |
 | 2026-10-08 | plan | docs/aegis/plans/2026-10-08-creative-scene-refinement.md | 创意工坊六场景收敛、歌词去重与 GPU 验证 |
+| 2026-10-08 | spec | docs/aegis/specs/2026-10-08-extension-architecture-design.md | 扩展入口归属与兼容设计 |
+| 2026-10-08 | plan | docs/aegis/plans/2026-10-08-extension-architecture.md | 皮肤、场景、音源与资源扩展实施计划 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-architecture/20-checkpoint.md | 扩展架构实施检查点 |
