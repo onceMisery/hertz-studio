@@ -15,7 +15,7 @@
 
 业务动作通过 `Skins.request(action, extra)` 发给 `app.js::initSkinBridge`，返回值包含同步快照或异步任务。例如 `Skins.request('source-request').source` 读取当前列表，`Skins.request('step-track', { delta: 1 })` 请求下一曲。设置页可使用 `Skins.request('settings-enter', { sections: ['cache', 'dsp', 'remote'] })` 声明额外刷新范围。皮肤不创建另一套队列，不自行判断本地/在线切歌，也不直接订阅专属业务事件。新业务动作仍需在宿主明确实现。
 
-CSS 在 `index.html` 中声明带 `data-skin-css` 的 disabled 样式表；JS 按依赖顺序加载。再按下方资源登记步骤内嵌文件。DBX 的 `<style data-skin-css>` 同样受支持。
+CSS 在 `index.html` 中声明带 `data-skin-css` 的 disabled 样式表；JS 按依赖顺序加载。再按下方资源登记步骤内嵌文件。DBX 的 `<style data-skin-css>` 同样受支持；最低宿主版本为已验收的 0.6.35，0.6.29 会在内联时丢弃此标记。
 
 验证：`node scripts/check-skins.js`、`node scripts/check-appearance-restore.js`，以及真实服务上的 `scripts/check-skin-fixes.js`。需要搬节点的皮肤至少验证正反切换、重复选择、部分挂载失败和业务节点恢复。
 

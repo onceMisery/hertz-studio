@@ -1076,6 +1076,11 @@ let socket = null;
 async function openSocket() {
   if (socket && socket.close) socket.close();
   socket = null;
+  // stdio 与演示模式自己管理事件连接，不经过 HTTP 的一次性握手票。
+  if (transport.kind !== 'server') {
+    socket = transport.connect(handleEvent);
+    return;
+  }
   // WebSocket 握手只能走查询串，所以每次连接签一张**一次性**票（重连也重新签）：
   // 一次握手一张票是天然的匹配，泄露了也用不上第二次。
   const issued = await issueTicket(1, 60 * 1000);

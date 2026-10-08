@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "native-dbx",
+  "type": "integration",
+  "source": "docs/aegis/work/2026-10-08-extension-live-integration/90-evidence.md",
+  "summary": "最终包实际安装到DBX0.6.35；事件、12次换肤、6个原生WebGL场景、7沉浸切换和静音CPAL网易云播放通过；startup及交互页面异常为零；QQ需人工重新登录",
+  "verifier": "主代理运行原生WebView/RPC/截图/包SHA核对，独立代理只读复核"
+}

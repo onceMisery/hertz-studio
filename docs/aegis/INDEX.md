@@ -82,3 +82,16 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-08 | adr | docs/aegis/adr/0009-extension-registries.md | 内置扩展定义、生命周期与运行时归属 |
 | 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-architecture/90-evidence.md | 扩展架构回归、浏览器与独立审查证据 |
 | 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-architecture/99-reflection.md | 扩展架构对齐、退役与交付边界 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-live-integration/10-intent.md | 扩展架构真实账号与 DBX 宿主联调续接 intent |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-live-integration/20-checkpoint.md | 扩展架构真实账号与 DBX 宿主联调续接 checkpoint |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-live-integration/90-evidence.md | 扩展架构真实账号与 DBX 宿主联调续接 evidence |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-live-integration/99-reflection.md | 扩展架构真实账号与 DBX 宿主联调续接 reflection |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-extension-live-integration/task-intent-draft.json | 扩展架构真实账号与 DBX 宿主联调续接 task intent draft |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-extension-live-integration/baseline-read-set-hint.json | 扩展架构真实账号与 DBX 宿主联调续接 baseline read-set hint |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-extension-live-integration/impact-statement-draft.json | 扩展架构真实账号与 DBX 宿主联调续接 impact statement draft |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-extension-live-integration/todo-checkpoint-draft.json | 扩展架构真实账号与 DBX 宿主联调续接 todo checkpoint draft |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-extension-live-integration/drift-check-draft.json | 扩展架构真实账号与 DBX 宿主联调续接 drift check draft |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-extension-live-integration/evidence-bundle-draft-native-dbx.json | 2026-10-08-extension-live-integration evidence native-dbx |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-extension-live-integration/gate-input-pack.json | 2026-10-08-extension-live-integration gate input pack |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-live-integration/proof-bundle.md | 2026-10-08-extension-live-integration proof bundle |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-extension-live-integration/resume-state-hint.json | 2026-10-08-extension-live-integration resume state hint |

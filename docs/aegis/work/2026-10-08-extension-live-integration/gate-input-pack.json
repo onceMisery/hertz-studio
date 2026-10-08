@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "baselineRefs": [
+    "docs/aegis/adr/0009-extension-registries.md"
+  ],
+  "impactStatement": "docs/aegis/work/2026-10-08-extension-live-integration/impact-statement-draft.json",
+  "compatPlan": "HTTP/RPC API 不变；最低已验收 DBX 版本设为 0.6.35",
+  "retirementPlan": "移除DBX对HTTP票据的错误依赖及过期sidecar测试假设；不恢复旧质量源名单",
+  "evidenceBundle": [
+    "docs/aegis/work/2026-10-08-extension-live-integration/evidence-bundle-draft-native-dbx.json"
+  ]
+}

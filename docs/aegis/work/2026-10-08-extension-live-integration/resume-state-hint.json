@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-10-08-extension-live-integration",
+  "lastCheckpointRef": "docs/aegis/work/2026-10-08-extension-live-integration/todo-checkpoint-draft.json",
+  "resumeInstruction": "原架构已在master；待合并本轮DBX连接/最低版本与测试文档。所有平台不等同于均已验收，继续QQ需手机QQ扫码。",
+  "knownPartialWork": [
+    "HTTP/DBX连接边界修复与真实DbxTransport回归",
+    "最终DBX0.6.35包字节核对、原生换肤/场景/网易云播放验证",
+    "前端48、Rust510通过/1忽略、最终包sidecar269、独立服务工坊8组通过",
+    "两轮独立审查及增量复核，无遗留P1/P2"
+  ],
+  "mustReadBeforeContinuing": [
+    "docs/aegis/work/2026-10-08-extension-live-integration/10-intent.md",
+    "docs/aegis/work/2026-10-08-extension-live-integration/20-checkpoint.md",
+    "docs/aegis/work/2026-10-08-extension-live-integration/todo-checkpoint-draft.json"
+  ],
+  "unsafeToAssume": [
+    "本地signedIn=true不证明第三方会话有效；原用户服务7634不属于本次测试"
+  ]
+}

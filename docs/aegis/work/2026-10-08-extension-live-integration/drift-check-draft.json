@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-10-08-extension-live-integration",
+  "taskIntentRef": "docs/aegis/work/2026-10-08-extension-live-integration/task-intent-draft.json",
+  "baselineRefs": [
+    "docs/aegis/adr/0009-extension-registries.md"
+  ],
+  "scopeStatus": "完成既有修复、原生联调和本地合并范围；未扩展上游平台协议",
+  "compatStatus": "aligned；HTTP票据边界、RPC/API、注册ID与保存格式不变；已验收DBX最低版本0.6.35",
+  "retirementStatus": "移除DBX对HTTP票据的错误依赖及过期sidecar测试假设；不恢复旧质量源名单",
+  "newRiskSignals": [
+    "QQ扫码未答复；汽水搜索空结果；Jamendo未联调"
+  ],
+  "decision": "continue"
+}

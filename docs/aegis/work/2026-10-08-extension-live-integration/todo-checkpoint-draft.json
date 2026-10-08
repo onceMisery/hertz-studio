@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-10-08-extension-live-integration",
+  "currentTodo": "验证通过，提交遗留修复并按既有授权本地合并master",
+  "completedTodos": [
+    "HTTP/DBX连接边界修复与真实DbxTransport回归",
+    "最终DBX0.6.35包字节核对、原生换肤/场景/网易云播放验证",
+    "前端48、Rust510通过/1忽略、最终包sidecar269、独立服务工坊8组通过",
+    "两轮独立审查及增量复核，无遗留P1/P2"
+  ],
+  "activeSlice": "本地提交、合并和测试进程收尾",
+  "evidenceRefs": [
+    "docs/aegis/work/2026-10-08-extension-live-integration/90-evidence.md"
+  ],
+  "blockedOn": "QQ资料401/取流失败，人工扫码尚未收到答复；汽水搜索为空；Jamendo未联调",
+  "nextStep": "提交、ff合并master，核对合并后代码与最终包并关闭隔离测试进程",
+  "updatedAt": "2026-10-08"
+}

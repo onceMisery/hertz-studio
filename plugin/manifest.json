@@ -10,7 +10,7 @@
   "source": "https://github.com/onceMisery/hertz-studio",
   "homepage": "https://github.com/onceMisery/hertz-studio",
   "engines": {
-    "dbx": ">=0.6.29",
+    "dbx": ">=0.6.35",
     "host_api": "1"
   },
   "permissions": ["host.events", "host.storage", "host.workbench"],

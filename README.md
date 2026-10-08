@@ -75,12 +75,12 @@
 - 本地 token 鉴权 + 默认只监听回环地址
 - 三档性能预算（eco / balanced / high）+ 分系统帧门，弱机自动降密度与刷新率
 - 协议版本 `PROTOCOL_VERSION` 独立于软件版本演进
+- DBX 插件通过 RPC 共用曲库、播放、在线账号与舞台业务，最低宿主版本为 0.6.35
 
 **规划中**
 
 - DSP 二期：升采样、参数 EQ、卷积 IR、EBU R128 响度归一化、真峰值限幅、噪声整形、交叉馈送、饱和
 - Windows WASAPI 独占模式
-- DBX 插件形态补齐：RPC 门面目前只接了 `v1/health` 与 `v1/state`，其余端点正在平移（见下）
 
 ---
 
@@ -137,8 +137,9 @@ hertz-studio v0.1.0
 插件形态的传输约定：UI 调 `invoke(method, {op, query, body})`，`method` 就是独立形态的 HTTP path
 去掉前导斜杠（如 `v1/player/play`），返回 `{status, body}` 与 HTTP 响应同构；服务端事件经
 `studio/event` 下发，载荷与 WebSocket 的 `WsEvent` 字段口径一致。
-**当前状态**：`crates/hertz-studio/src/rpc/` 门面只实现了 `v1/health` 与 `v1/state`，
-其余端点正在按同一信封平移；协议本身由 `scripts/check-plugin-sidecar.js` 钉住。
+**当前状态**：`crates/hertz-studio/src/rpc/` 已接入曲库、播放、歌单、在线账号及设置等业务，
+与 HTTP 复用服务实现；`scripts/check-plugin-sidecar.js` 验证信封、路由与事件契约。
+真实平台账号和原生宿主的验收范围见[联调记录](docs/aegis/work/2026-10-08-extension-live-integration/90-evidence.md)。
 
 ---
 
@@ -553,7 +554,7 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 - **P1.5（已完成）** 在线曲库：音源注册表、代理归一化、落盘缓存、自有账号 cookie 与扫码
 - **P2（已完成）** 远程音源：WebDAV 管理/浏览/导入，HTTP(S) Range 直链播放，凭据存入系统钥匙串
 - **P3 一期（已完成）** 六段 EQ、ReplayGain 响度归一化、软限幅、可调交叉淡化。二期保留：升采样、卷积 IR、噪声整形
-- **P4（进行中）** DBX 插件形态：sidecar 装配与事件转发已通、协议契约已钉住，RPC 门面正在逐端点平移
+- **P4** DBX 插件形态：sidecar、RPC 门面与事件转发共用服务逻辑；真实平台与宿主验收范围见联调记录
 - **P5（已完成）** 歌词舞台：消费播放时钟、歌词时间轴、频谱与主题四契约的自研演出模式
 - **P6（已完成）** 舞台粒子层与 3D 歌单架：沿用 P5 的四契约与帧门调度，不新增依赖
 - **P7（已完成）** 创意舞台：三维场景与后处理链、可编排的演出数据（参数表 + cue 轨 + 音频绑定 +

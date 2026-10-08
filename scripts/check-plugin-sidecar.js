@@ -406,7 +406,11 @@ async function main() {
     const emptyBatch = await client.send('v1/tracks/batch-edit', { op: 'POST', body: { track_ids: [] } });
     eq(emptyBatch.result && emptyBatch.result.status, 400, 'batch-edit 空 track_ids → 400');
 
-    const noCover = await client.send('v1/tracks/whatever/cover', { op: 'GET' });
+    const invalidCover = await client.send('v1/tracks/whatever/cover', { op: 'GET' });
+    eq(invalidCover.result && invalidCover.result.status, 404, '非法封面 id → 404');
+    eq((invalidCover.result || {}).body?.error?.code, 'not_found', '非法封面 id 保留 not_found 错误契约');
+    // 缺少封面与非法 id 是两条契约；用合法但未使用的 UUID 验证空响应。
+    const noCover = await client.send('v1/tracks/00000000-0000-0000-0000-000000000001/cover', { op: 'GET' });
     eq(noCover.result && noCover.result.status, 204, '没有封面 → 204');
     ok(
       (noCover.result || {}).body === null || (noCover.result || {}).body === undefined,
@@ -1011,10 +1015,15 @@ async function main() {
     const olQuality = await client.send('v1/online/quality', { op: 'GET' });
     eq(olQuality.result && olQuality.result.status, 200, 'GET v1/online/quality → 200');
     const olPrefs = (olQuality.result || {}).body?.prefs || [];
-    eq(olPrefs.length, 5, '音质偏好覆盖 5 个平台');
+    ok(olPrefs.length > 0, '注册表提供可配置音质的音源');
+    eq(new Set(olPrefs.map((p) => p.source)).size, olPrefs.length, '音质偏好没有重复音源');
     ok(
-      olPrefs.every((p) => p.source && p.selected && Array.isArray(p.options) && p.options.length > 0),
-      '每个平台都带 selected 与非空 options',
+      olPrefs.every((p) => olSourceList.some((s) => s.id === p.source)),
+      '音质偏好引用已登记音源',
+    );
+    ok(
+      olPrefs.every((p) => Array.isArray(p.options) && p.options.length > 1 && p.options.some((o) => o.value === p.selected)),
+      '仅可选多档的音源进入设置，且 selected 属于允许档位',
     );
     const olBadSource = await client.send('v1/online/quality', {
       op: 'POST',

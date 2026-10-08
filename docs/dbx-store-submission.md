@@ -112,11 +112,15 @@ Plugin submission: Hertz Studio 0.1.0
   鼠标碰那条边滑出，离开一会儿收回去）。
 - 沉浸式 3D 舞台、逐字歌词、本地曲库扫描与原生出声。
 
-Requires DBX >= 0.6.29. 浮动胶囊窗口需要 DBX 支持 plugin floating surface；不支持时自动
+Requires DBX >= 0.6.35. 浮动胶囊窗口需要 DBX 支持 plugin floating surface；不支持时自动
 退回页内最小化，功能不缺失。
 ```
 
 ## 提交前还缺的材料
+
+2026-10-08 已在 DBX 0.6.35 验证最终候选包的六皮肤切换、创意/沉浸场景、事件链路与网易云原生播放。
+具体包校验和、账号范围及未完成项见[联调记录](aegis/work/2026-10-08-extension-live-integration/90-evidence.md)。
+Windows 下替换同版本插件前，先关闭它的工作台并停止插件进程，避免运行中的 exe 占用导致安装失败。
 
 - [ ] 截图 2–4 张（曲库/播放、3D 舞台、桌面浮动胶囊）。浮动胶囊可用
       `output/dbx-float-dock-shots.js` 现拍（收起态 + 滑出态各一张）。
@@ -125,10 +129,10 @@ Requires DBX >= 0.6.29. 浮动胶囊窗口需要 DBX 支持 plugin floating surf
 
 ## 两个已知的坑
 
-1. **`engines.dbx` 与未发布的宿主能力**：manifest 写的是 `>=0.6.29`，而浮动 surface 是
-   DBX `main` 上尚未发版的能力。当前行为是渐进增强（探测 `capabilities.floating`，没有就
-   页内最小化），所以对已发布宿主无害。等 DBX 正式发版带上该能力后，把 `engines.dbx`
-   提到那个版本，避免用户以为浮窗在旧宿主上应该可用。
+1. **宿主样式内联契约**：最低版本设为已实际联调的 `>=0.6.35`。DBX 0.6.29 内联
+   样式时丢弃 `data-skin-css` 标记，导致所有皮肤退回经典；0.6.35 已保留属性，六套
+   皮肤的正反切换通过。0.6.30–0.6.34 未逐版验收，不推断最早修复版本。浮动 surface
+   仍按 `capabilities.floating` 探测，无该能力时保留页内最小化。
 2. **插件 id 变更的迁移**：本项目早期以 `io.github.mmusic-studio.hertz-studio` 分发过。
    DBX 的插件数据按 id 存放（`plugin-data/<id>/`），换 id 等于换一份全新状态：曲库、
    在线登录态、界面偏好都不继承。老用户升级需要在 release notes 里明确「重装并重新登录」，
