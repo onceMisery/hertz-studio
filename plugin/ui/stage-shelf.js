@@ -27,8 +27,7 @@
   // ---- openmusic 同款常量（GalaxyFloatingSongCard / galaxyFloatingSongCard）
   var CLICK_THRESHOLD = 10;          // 原 6px，触屏略放宽
   var VISIBLE_RADIUS = 5.5;         // |delta| 超过即不渲染
-  var MAX_CARDS = 8;                // 当前曲 + 后续 7 首
-  var COVER_CACHE_CAP = 40;        // 预加载缓存上限（约 5 个歌单窗口，切回去不重拉）
+  var COVER_CACHE_CAP = 40;        // 当前窗口与相邻卡片的预加载缓存上限
   var LERP_CENTER = 0.16;           // 封面流居中平滑
   var LERP_HOVER = 0.14;
   var SUMMON_OPEN_MS = 910;         // shelfSummonOpenDuration
@@ -53,7 +52,10 @@
     var Stage = global.Stage;
 
     // ---- 状态
-    var items = [];                 // [{id,title,artist,album,duration,cover,playing}]  当前曲在首位
+    var items = [];                 // 完整队列，顺序与队列面板一致
+    var playingIndex = 0;
+    var windowStart = -1;
+    var windowEnd = -1;
     var nodes = new Map();          // id -> 卡片节点（含 _pose/_spawn 等运行时态）
     var dying = [];                 // 已离队但正在演出退出动画的节点
     var mode = 'side';              // off | stage(横向封面流) | side(右侧竖向)
@@ -194,9 +196,11 @@
 
     function repaintTags() {
       var ci = currentIndex();
-      items.forEach(function (item, i) {
-        var el = nodes.get(item.id);
-        if (el) setText(el, '.s3d-sc-tag', tagFor(i, ci));
+      nodes.forEach(function (el) {
+        var i = el._queueIndex;
+        var item = items[i];
+        setText(el, '.s3d-sc-tag', tagFor(i, ci) + ' · ' + (i + 1) + ' / ' + items.length);
+        el.setAttribute('aria-label', (item.title || '未知曲目') + '，第 ' + (i + 1) + ' 首，共 ' + items.length + ' 首');
       });
     }
 
@@ -261,9 +265,7 @@
       if (idx === currentIndex()) {
         document.dispatchEvent(new CustomEvent('stage:control', { detail: { action: 'toggle' } }));
       } else {
-        // 不用队列面板的 queue-play：那条链按约束拒绝 online: 虚拟曲目。
-        // shelf-play 在 app.js 里分流本地 playTrack / 在线 Online.playAll。
-        document.dispatchEvent(new CustomEvent('stage:control', { detail: { action: 'shelf-play', value: id } }));
+        document.dispatchEvent(new CustomEvent('stage:control', { detail: { action: 'queue-play', value: id } }));
       }
     }
 
@@ -273,8 +275,7 @@
     }
 
     function currentIndex() {
-      for (var i = 0; i < items.length; i += 1) if (items[i].playing) return i;
-      return 0;
+      return playingIndex;
     }
 
     // ---- 滚轮浏览（在舞台根节点捕获，贴近歌单架区域才截给架子）-------------
@@ -313,56 +314,68 @@
 
     // ---- 数据 --------------------------------------------
 
-    // 以「正在播放」曲为中心取窗口：当前曲永远在列，上下取相邻曲目。
-    // 修复：此前直接 slice(0,MAX_CARDS)，播放越过第 8 首后当前曲消失、
-    // 歌单架退回队首。对齐 openmusic（current 居首重组）。
-    function windowAround(list) {
-      var ci = -1;
-      for (var k = 0; k < list.length; k += 1) {
-        if (list[k] && list[k].playing) { ci = k; break; }
-      }
-      if (ci < 0) return list.slice(0, MAX_CARDS); // 暂无播放态：退回前 N 条
-      // 当前曲 + 后续，占满窗口；前面已播的曲目若窗口有余再补（倒序插前）。
-      var after = list.slice(ci, ci + MAX_CARDS);
-      var room = MAX_CARDS - after.length;
-      if (room > 0) {
-        var before = list.slice(Math.max(0, ci - room), ci).reverse();
-        // 维持「越远离当前曲越靠外」：已播曲目按距当前曲的距离插到最前
-        before.forEach(function (it, bi) {
-          after.splice(0, 0, it);
-        });
-      }
-      return after;
-    }
-
     function setItems(list) {
       if (!root.classList.contains('s3d-chrome')) clearDying();
-      var source = Array.isArray(list) ? list : [];
-      var next = windowAround(source);
-      var nextIds = {};
-      var now = performance.now();
-      var oldIds = {};
-      items.forEach(function (it) { oldIds[String(it.id)] = true; });
-      next.forEach(function (it) { nextIds[String(it.id)] = true; });
+      var oldIndex = currentIndex();
+      var oldCurrent = items[oldIndex];
+      var oldBrowse = items[oldIndex + browseIndex];
+      items = Array.isArray(list) ? list.slice() : [];
+      playingIndex = 0;
+      for (var i = 0; i < items.length; i += 1) {
+        if (items[i].playing) { playingIndex = i; break; }
+      }
+      var current = items[playingIndex];
+      if (oldCurrent && current && oldCurrent.id === current.id) {
+        // 同曲的元数据回填或队列重排不打断浏览；位置仍由完整队列决定。
+        center += playingIndex - oldIndex;
+        var nextBrowse = oldBrowse ? indexOfId(oldBrowse.id) : -1;
+        browseIndex = nextBrowse < 0 ? 0 : nextBrowse - playingIndex;
+      } else {
+        // 相邻切歌保留平滑横移；跳到窗口外的曲目直接定位，避免扫过整条长队列。
+        if (!current || !nodes.has(current.id)) center = playingIndex;
+        browseIndex = 0;
+      }
+      center = clamp(center, 0, Math.max(0, items.length - 1));
+      syncWindow(true);
+      if (!items.length) clearDying();
+      applyVisibility();
+    }
 
-      // 离队卡片交退出动画，不立刻删 DOM（切歌时旧当前曲顺势淡出/滑走）
-      items.forEach(function (it) {
-        if (nextIds[String(it.id)]) return;
-        var el = nodes.get(it.id);
-        if (el) {
-          if (el._cancelDrag) el._cancelDrag();
-          if (!active || blocked || document.hidden || !root.classList.contains('s3d-chrome') || mode === 'off' || reducedMotion()) {
-            if (el.parentNode) el.parentNode.removeChild(el);
-          } else {
-            el._pose.dead = now;
-            dying.push(el);
-          }
-          nodes.delete(it.id);
+    // 只限制节点和预载，不截断队列。窗口跟随浏览中心，最多绘制两侧半径内的卡片。
+    function syncWindow(force) {
+      var radius = Math.ceil(visibleRadius());
+      var anchor = Math.round(center);
+      var start = Math.max(0, anchor - radius);
+      var end = Math.min(items.length, anchor + radius + 1);
+      if (!force && start === windowStart && end === windowEnd) return;
+      windowStart = start;
+      windowEnd = end;
+      var next = items.slice(start, end);
+      var nextIds = new Set(next.map(function (item) { return item.id; }));
+      var now = performance.now();
+
+      nodes.forEach(function (el, id) {
+        if (nextIds.has(id)) return;
+        if (el._cancelDrag) el._cancelDrag();
+        // 滚出窗口直接回收；真正离队的卡片才演出退出动画。
+        if (indexOfId(id) >= 0 || !active || blocked || document.hidden || !root.classList.contains('s3d-chrome') || mode === 'off' || reducedMotion()) {
+          if (el.parentNode) el.parentNode.removeChild(el);
+        } else {
+          el._pose.dead = now;
+          el.style.pointerEvents = 'none';
+          dying.push(el);
         }
+        if (hoverId === id) hoverId = null;
+        nodes.delete(id);
       });
+      while (dying.length > radius * 2 + 1) {
+        var retired = dying.shift();
+        if (retired.parentNode) retired.parentNode.removeChild(retired);
+      }
 
       // 新卡建节点；顺序变动只搬序，不重建（封面 img 缓存不闪）
-      next.forEach(function (item, i) {
+      next.forEach(function (item, offset) {
+        var i = start + offset;
         var el = nodes.get(item.id);
         if (!el) {
           // 正在退出的同 id 卡片「复活」：队列瞬时增删（切歌快照连推）时
@@ -371,6 +384,7 @@
             if (dying[d].dataset.id === String(item.id)) {
               el = dying[d];
               el._pose.dead = 0;
+              el.style.pointerEvents = '';
               dying.splice(d, 1);
               nodes.set(item.id, el);
               break;
@@ -381,9 +395,12 @@
           el = buildNode(item, i);
           el._pose.spawn = active ? now : 0;
           nodes.set(item.id, el);
+          if (item.playing) lastMetaPct = -1;
         } else {
           updateNode(el, item);
         }
+        el._queueIndex = i;
+        el.dataset.index = String(i);
         if (el.parentNode !== plane) plane.appendChild(el);
       });
       // 按数据顺序排 DOM
@@ -392,21 +409,7 @@
         if (el && el.parentNode === plane) plane.appendChild(el);
       });
 
-      items = next;
-      if (!items.length) clearDying();
-      items.forEach(function (it) { if (it.cover) preloadCover(it.cover); });
       repaintTags();
-
-      // 封面流居中跟踪「正在播放」在队列里的实际位置（队列不重排，自然切歌时
-      // 当前曲从 i 走到 i+1，center 从旧值平滑滑过去，形成整排卡片横移的换歌
-      // 动画）。仅当新当前曲是全新节点（队列外直接点歌）时才硬切居中并重跑
-      // 召唤；老节点一律保留 center 旧值交给帧循环插值。
-      var ci = currentIndex();
-      var curIdNow = items[ci] ? String(items[ci].id) : null;
-      var currentIsNew = !(curIdNow && oldIds[curIdNow]);
-      if (currentIsNew || items.length === 0) center = ci;
-      browseIndex = 0;
-      applyVisibility();
     }
 
     function attachCoverLoad(el) {
@@ -519,13 +522,14 @@
       }
       center += (target - center) * (reduced ? 1 : 1 - Math.pow(1 - LERP_CENTER, dtMs / (1000 / 60)));
       if (Math.abs(center - target) < 0.001) center = target;
+      syncWindow();
 
       var now = performance.now();
       var radius = visibleRadius();
 
-      items.forEach(function (item, i) {
-        var el = nodes.get(item.id);
-        if (!el) return;
+      nodes.forEach(function (el) {
+        var i = el._queueIndex;
+        var item = items[i];
         el._wasIndex = i;
         var p = el._pose;
         var delta = i - center;
@@ -539,7 +543,7 @@
 
         // 召唤（含逐卡 stagger）
         if (!p.spawn) p.spawn = now;
-        var stagger = Math.min(STAGGER_CAP, i * SUMMON_STAGGER);
+        var stagger = Math.min(STAGGER_CAP, absD * SUMMON_STAGGER);
         var raw = reduced ? 1 : (now - p.spawn) / SUMMON_OPEN_MS;
         var reveal = clamp(smoothstep(clamp((raw - stagger) / Math.max(0.001, 1 - stagger), 0, 1)), 0, 1);
         var entry = (1 - reveal) * 1.9;
@@ -614,10 +618,7 @@
       // 否则换歌瞬间整排卡片都会重新滑入，和封面流横移互相打架。
       if (on && respawn) {
         var now = performance.now();
-        items.forEach(function (item) {
-          var el = nodes.get(item.id);
-          if (el) el._pose.spawn = now;
-        });
+        nodes.forEach(function (el) { el._pose.spawn = now; });
       }
     }
 

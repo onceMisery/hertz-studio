@@ -1705,9 +1705,18 @@ function checkQingfengWall() {
   ok(/d\.queue = queueSnapshot\(\)/.test(APP)
     && !/d\.queue\s*=\s*await/.test(APP) && !/d\.queue\s*=\s*\w+\.then/.test(APP),
     '队列快照是同步回填（emit 返回即可读，不是异步 Promise）');
-  // 在线虚拟 id 不在本地库里，直接 load 会 404 —— 必须有与队列页同款的提示。
-  ok(/id\.startsWith\('online:'\)/.test(APP) && /在线曲目已失效/.test(APP),
-    '播放在线虚拟 id 时给出与队列页一致的提示，而不是抛 404');
+  // 已有队列保留每项音源身份；皮肤跳播不能拒绝在线曲或重建成单音源歌单。
+  const pickStart = APP.indexOf('function playQueueIndex(');
+  const pickEnd = APP.indexOf('\nfunction playQueueStep(', pickStart);
+  const mixedQueue = ['local-track', 'online:netease:1', 'online:qq:2'];
+  const picks = [];
+  vm.runInNewContext(APP.slice(pickStart, pickEnd) + '\nplayQueueIndex(2); playQueueIndex(0); playQueueIndex(99);', {
+    state: { queue: mixedQueue },
+    playTrack(id, queue) { picks.push({ id, queue }); }
+  });
+  ok(picks.length === 2 && picks[0].id === 'online:qq:2' && picks[1].id === 'local-track'
+    && picks.every((pick) => JSON.stringify(pick.queue) === JSON.stringify(mixedQueue)),
+  '本地和QQ曲目共用队列跳播，保持完整混合队列，无效下标不播放');
   // seek 复用 seekTo：自己拼 post 会丢掉 epoch 竞态保护与失败提示。
   ok(/seekTo\(Math\.round\(total \* d\.ratio\)\)/.test(APP),
     '墙内进度条复用 seekTo（保留竞态保护与错误提示）');

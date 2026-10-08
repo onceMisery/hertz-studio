@@ -311,10 +311,9 @@
   text-transform: uppercase;
 }
 
-/* --- 右侧玻璃面板：设置与队列同一套材质，角落枢轴弹入 ---------------------- */
+/* --- 玻璃面板：设置与队列共用材质，队列位置由舞台布局统一管理 ------------- */
 .s3d[data-stage-theme="starfall"] .s3d-settings,
 .s3d[data-stage-theme="starfall"] .s3d-queue {
-  width: 320px;
   border-radius: var(--st-panel-radius);
   background: var(--st-glass-strong);
   border: 1px solid var(--st-hair);
@@ -323,8 +322,8 @@
   /* 原生下拉跟随深色，避免弹出系统白底列表。 */
   color-scheme: dark;
 }
-.s3d[data-stage-theme="starfall"] .s3d-settings { transform-origin: 100% 0; }
-.s3d[data-stage-theme="starfall"] .s3d-queue { transform-origin: 100% 100%; }
+.s3d[data-stage-theme="starfall"] .s3d-settings { width: 320px; transform-origin: 100% 0; }
+.s3d[data-stage-theme="starfall"] .s3d-queue { border-left: 0; border-radius: 0 var(--st-panel-radius) var(--st-panel-radius) 0; transform-origin: 0 50%; }
 /* hidden 切到显示是一次全新布局，animation 会自然重放 —— 这就是弹入时机。 */
 .s3d[data-stage-theme="starfall"] .s3d-settings:not([hidden]) { animation: st-panel-in 240ms cubic-bezier(.2, .7, .3, 1) both; }
 @keyframes st-panel-in {
@@ -541,12 +540,9 @@
   .s3d[data-stage-theme="starfall"].s3d-chrome #s3d-seek::-moz-range-track { height: 4px; }
   .s3d[data-stage-theme="starfall"] #s3d-seek::-webkit-slider-thumb { width: 12px; height: 12px; }
   .s3d[data-stage-theme="starfall"] #s3d-seek::-moz-range-thumb { width: 12px; height: 12px; }
-  /* 播放舱矮了约 67px：场景坞下沉贴住播放舱，队列/歌单架净空同步收紧，
-     避免控件悬空（封面浮雕 silk 的队列与低高度媒体查询另有更高特异性规则）。 */
+  /* 播放舱矮了约 67px：场景坞下沉贴住播放舱，歌单架净空同步收紧。 */
   .s3d[data-stage-theme="starfall"] .s3d-dock { bottom: 108px; }
-  .s3d[data-stage-theme="starfall"] .s3d-queue { bottom: 112px; }
   .s3d[data-stage-theme="starfall"].s3d-chrome .s3d-shelf-plane { bottom: 232px; }
   .s3d[data-stage-theme="starfall"] .s3d-head { --s3d-btn: 38px; }
-  .s3d[data-stage-theme="starfall"] .s3d-settings,
-  .s3d[data-stage-theme="starfall"] .s3d-queue { width: min(320px, calc(100% - 24px)); }
+  .s3d[data-stage-theme="starfall"] .s3d-settings { width: min(320px, calc(100% - 24px)); }
 }

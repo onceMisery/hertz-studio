@@ -2335,40 +2335,8 @@ function onStageControl(e) {
       break;
     case 'view': setView(d.value); break;
     case 'queue-play':
-      // 与队列视图同规：在线试听的虚拟 id 已失效，load 查不到。
-      if (String(d.value).startsWith('online:')) { toast('在线曲目已失效，请从歌单或收藏重新点播', 'error'); break; }
-      playTrack(String(d.value), state.queue.slice());
+      playQueueIndex(state.queue.indexOf(String(d.value)));
       break;
-    case 'shelf-play': {
-      // 3D 歌单架点卡跳播：本地曲直接走 playTrack；在线曲队列面板的
-      // queue-play 走不通（虚拟 id），用队列里缓存的整盘元数据重组一次
-      // Online.playAll，保持歌单架的队列顺序不塌。
-      const sid = String(d.value);
-      if (sid.startsWith('online:')) {
-        const metas = state.queue
-          .map((qid) => state.byId.get(qid) || (window.Online && window.Online.getMeta(qid)))
-          .filter(Boolean);
-        const idx = metas.findIndex((m) => m.id === sid);
-        if (idx < 0 || !window.Online || !window.Online.playAll) {
-          toast('该在线曲目暂不可跳播', 'error');
-          break;
-        }
-        const tracks = metas.map((m) => ({
-          id: m.onlineId || String(m.id).split(':').slice(2).join(':'),
-          source: m.source,
-          title: m.title,
-          artist: m.artist,
-          album: m.album,
-          duration_ms: m.duration_ms,
-          cover: m.cover,
-          ref: m.ref || {},
-        }));
-        window.Online.playAll(tracks, idx);
-      } else {
-        playTrack(sid, state.queue.slice());
-      }
-      break;
-    }
     case 'queue-remove':
       if (d.value === state.snapshot.track_id) { toast('正在播放的曲目不能移出队列', 'error'); break; }
       applyQueue(state.queue.filter((x) => x !== d.value), true);
@@ -2618,13 +2586,7 @@ function renderQueue() {
         applyQueue(list.filter((x) => x !== id), true);
         return;
       }
-      // 在线试听的虚拟 id 不在本地库里，load 会查不到；提示用户从仍支持
-      // 在线点播的歌单或收藏入口重新发起播放，而不是抛一个看不懂的 404。
-      if (id.startsWith('online:')) {
-        toast('在线曲目已失效，请从歌单或收藏重新点播', 'error');
-        return;
-      }
-      transport.post('/v1/player/load', { track_id: id, queue: list });
+      playQueueIndex(index);
     });
 
     row.addEventListener('dragstart', (e) => {
@@ -5723,7 +5685,7 @@ function queueSnapshot() {
 // ---------------------------------------------------------------------------
 
 /// 单个视图的取源器。kind 决定墙上点一下怎么落播放：
-///   'queue'     播放队列（本地 id，play-index 走 /v1/player/load）
+///   'queue'     播放队列（保留本地/在线身份，play-index 走 /v1/player/load）
 ///   'track'     一列普通曲目（本地或在线都能混，交给各自的播放入口）
 ///   'playlist'  一列**歌单**（点开不是播放，是进歌单内的曲目，见 drillIntoPlaylist）
 function viewSourceDef(view) {
@@ -6058,7 +6020,7 @@ function playSourceItem(item, list) {
     playRadioRef(item.favSource, item.favRefId, item.title);
     return;
   }
-  // 在线虚拟 id：本地库里没有，喂 /v1/player/load 必 404。
+  // 新的在线集合连同平台引用一起提交；已有队列的跳播由上面的 queueItem 处理。
   if (String(item.id).startsWith('online:')) {
     playOnlineItem(item, list);
     return;
@@ -6088,17 +6050,13 @@ function drillIntoPlaylist(item) {
   return { error: '歌单展开功能还没准备好' };
 }
 
-// 从队列里挑一首播。在线虚拟 id 不在本地库里，load 查不到会 404，
-// 与 renderQueue 的点击处理同款提示，避免墙上点一下弹看不懂的错误。
+// 队列、皮肤与沉浸舞台共用跳播入口。后端按每项的完整虚拟 id 选择音源，
+// 不从显示用元数据重建队列，也不把混合队列当成单个平台的在线歌单。
 function playQueueIndex(index) {
   const list = state.queue || [];
   const id = list[index];
   if (!id) return;
-  if (id.startsWith('online:')) {
-    toast('在线曲目已失效，请从歌单或收藏重新点播', 'error');
-    return;
-  }
-  transport.post('/v1/player/load', { track_id: id, queue: list });
+  return playTrack(id, list.slice());
 }
 
 function playQueueStep(delta) {

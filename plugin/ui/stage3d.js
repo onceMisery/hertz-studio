@@ -2282,6 +2282,7 @@
     var panel = $('s3d-queue-panel');
     var restoreFocus = !on && panel.contains(document.activeElement);
     queueOpen = !!on;
+    root.classList.toggle('s3d-queue-open', queueOpen);
     if (!on) setQueuePinned(false);
     panel.hidden = !on;
     $('s3d-queue').setAttribute('aria-expanded', String(on));
@@ -3334,6 +3335,7 @@
     $('s3d-settings').hidden = true;
     $('s3d-settings-toggle').setAttribute('aria-expanded', 'false');
     queueOpen = false;
+    root.classList.remove('s3d-queue-open');
     setQueuePinned(false);
     $('s3d-queue-panel').hidden = true;
     $('s3d-queue').setAttribute('aria-expanded', 'false');
