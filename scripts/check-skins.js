@@ -1334,18 +1334,36 @@ function checkChaoxiSkin() {
   //    否则它被压到内容那么高；缺口则转嫁到仅剩的可收缩项上——sheen 实测
   //    曲名行盒 33px→14px、艺人 20px→9px，21px 的字被切成半截。
   //    潮汐的解法是两头一起钉，而不是像 sheen 那样把曲名摘掉（那是砍功能）。
-  ok(/\[data-skin="chaoxi"\] \.stage-lyrics \{[^}]*min-height:\s*120px/.test(body),
-    '.stage-lyrics 有 120px 兜底（余量明确落给歌词）');
+  ok(/\[data-skin="chaoxi"\] \.stage-lyrics \{[^}]*min-height:\s*100px/.test(body),
+    '.stage-lyrics 有 100px 兜底（余量明确落给歌词）');
   ok(/\[data-skin="chaoxi"\] \.stage-lyrics \{[^}]*flex:\s*1 1 auto/.test(body),
-    '.stage-lyrics 是唯一可伸缩项');
+    '.stage-lyrics 可伸缩');
+
+  // 5b) 唱片尺寸必须跟**视口高度**挂钩。这条是浏览器实测抓出来的：
+  //     第一版写 width: min(72%, 320px) + flex:none —— 面板定高 634、内容区
+  //     554，而 head 30 + 唱片 320 + 曲名 33 + 艺人 20 + 进度 47 + 频谱 44 = 494
+  //     全是不可收缩项，歌词区只剩不到 60px，整块被 overflow:hidden 裁掉
+  //     （scrollHeight 826 / clientHeight 632，溢出的 194px 里装的就是歌词）。
+  //     页面不报错、元素一个不少，只有量 rect 才看得出来。
+  //     第二版换成 flex 收缩更糟：收缩按 basis 比例分配，歌词的 basis 是内容高
+  //     （500px+），缺口大头落在它身上，唱片被一路压到 45×45。
+  //     所以钉 clamp + flex:none：尺寸算得出来，就不该让浏览器按比例猜。
+  ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*clamp\(120px, calc\(100dvh -/.test(body),
+    '唱片尺寸由视口高度算出（写死尺寸必然把歌词挤没，交给 flex 分配会压成 45px）');
+  ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*flex:\s*none/.test(body),
+    '唱片不参与 flex 收缩（尺寸由 clamp 精确给出）');
+  ok(/@media \(max-height: 820px\)/.test(body),
+    '有矮屏断点（宽屏但矮屏同样会把歌词挤没，宽度断点管不到）');
+  ok(/@media \(max-height: 820px\) \{[\s\S]*?\.stage \{[\s\S]*?overflow-y:\s*auto/.test(body),
+    '矮屏下面板自身可滚（宁可滚，也不能让内容被裁掉）');
   ok(/\[data-skin="chaoxi"\] \.stage-title,\s*\n?\s*\[data-skin="chaoxi"\] \.stage-artist \{[^}]*flex:\s*none/.test(body),
     '.stage-title/.stage-artist 是 flex:none（曲名与艺人不可被压缩）');
   ok(!/\[data-skin="chaoxi"\] \.stage-title[^{]*\{[^}]*display:\s*none/.test(body),
     '潮汐不摘掉曲名与艺人（与 sheen 的取舍相反，这是两套皮肤的实质差异）');
 
-  // 6) 唱片是主角：放大到比 sheen 更大。
-  ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*width:\s*min\(72%/.test(body),
-    '.disc-wrap 放大到 72%（封面是这一屏的视觉锚点）');
+  // 6) 唱片是主角：上限比 sheen 的 236px 大一档。
+  ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*320px\)/.test(body),
+    '.disc-wrap 上限 320px（比 sheen 的 236px 大一档，封面是这一屏的视觉锚点）');
 
   // 7) 卡片列宽必须落在 .daily-list，且 .daily-strip 不能被改成网格容器。
   //    .daily-strip 的直接子元素是 .daily-head 与 .daily-list 两个块，
