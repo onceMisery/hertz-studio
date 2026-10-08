@@ -78,6 +78,14 @@ pub async fn put(db: &SqlitePool, source: &str, pack: &CredPack) -> Result<(), S
 /// ERROR 记录，属可观察状态，不构成静默回退）。
 pub async fn get(db: &SqlitePool, source: &str) -> Result<Option<CredPack>, StoreError> {
     let backend = crate::secrets::backend();
+    get_with_backend(db, source, backend.as_ref()).await
+}
+
+async fn get_with_backend(
+    db: &SqlitePool,
+    source: &str,
+    backend: &dyn crate::secrets::SecretBackend,
+) -> Result<Option<CredPack>, StoreError> {
     let entry = backend
         .get(&cred_key(source))
         .map_err(StoreError::Database)?;
@@ -142,6 +150,14 @@ pub async fn put_cookie(db: &SqlitePool, source: &str, cookie: &str) -> Result<(
 /// 迁移失败时的旧值。
 pub async fn get_device(db: &SqlitePool, source: &str) -> Result<Option<String>, StoreError> {
     let backend = crate::secrets::backend();
+    get_device_with_backend(db, source, backend.as_ref()).await
+}
+
+async fn get_device_with_backend(
+    db: &SqlitePool,
+    source: &str,
+    backend: &dyn crate::secrets::SecretBackend,
+) -> Result<Option<String>, StoreError> {
     let entry = backend
         .get(&cred_key(source))
         .map_err(StoreError::Database)?;
@@ -292,62 +308,72 @@ pub(crate) fn normalize_qq_uin(raw: &str) -> String {
 /// 客户端可能只给小写 userid/token 键，两组候选都保留）。
 /// QQ 的 musicu 鉴权要 uin + qm_keyst；uin 从 cookie 的 `uin=o0...` 取。
 fn enrich_from_cookie(source: &str, pack: &mut CredPack) {
-    match source {
-        "kugou" => {
-            if pack.token.is_empty() {
-                pack.token = cookie_field(&pack.cookie, "token")
-                    .or_else(|| cookie_field(&pack.cookie, "KugooPassToken"))
-                    .unwrap_or("")
-                    .to_string();
-            }
-            if pack.userid.is_empty() {
-                pack.userid = ["userid", "KugooID", "uid"]
-                    .iter()
-                    .find_map(|k| cookie_field(&pack.cookie, k))
-                    .unwrap_or("")
-                    .to_string();
-            }
-        }
-        // 酷我的网页会话以 uid cookie 标识（spike 2026-09-27：无账号实贴
-        // 验证，先按字段存在性判态；token 字段名待有账号后核对）。
-        "kuwo" => {
-            if pack.userid.is_empty() {
-                pack.userid = cookie_field(&pack.cookie, "uid").unwrap_or("").to_string();
-            }
-        }
-        "qq" if pack.uin.is_empty() || pack.uin == "0" => {
-            if let Some(raw) = cookie_field(&pack.cookie, "uin") {
-                pack.uin = normalize_qq_uin(raw);
-            }
-        }
-        _ => {}
+    if let Some(rules) = super::provider::find(source).and_then(|p| p.credentials) {
+        (rules.enrich)(pack);
     }
 }
 
-/// 平台登录态判据集中在这里，避免散落在各模块。
-pub fn is_signed_in(source: &str, pack: &CredPack) -> bool {
-    match source {
-        // 空值（MUSIC_U=）等同缺失，与 qq 的 qm_keyst 判法对称。
-        "netease" => cookie_field(&pack.cookie, "MUSIC_U").is_some_and(|v| !v.is_empty()),
-        // spec §2.0：uin != 0 且 qm_keyst 存在（非空）。p_skey/wxuin 是网页态，
-        // musicu.fcg 鉴权实际只认 qm_keyst，不能据此判登录，否则 vkey 失败会
-        // 被误归成 vip_required。
-        "qq" => {
-            !pack.uin.is_empty()
-                && pack.uin != "0"
-                && cookie_field(&pack.cookie, "qm_keyst").is_some_and(|v| !v.is_empty())
-        }
-        "kugou" => !pack.userid.is_empty() && pack.userid != "0" && !pack.token.is_empty(),
-        // 酷我：uid cookie 非空非零即视为登录（与酷狗的 userid 判法对称）。
-        "kuwo" => !pack.userid.is_empty() && pack.userid != "0",
-        // 汽水的 PC 接口认会话 cookie：sessionid / sessionid_ss / sid_guard /
-        // sid_tt 任一存在且非空即认为已登录。空值（sessionid=）等同缺失。
-        "qishui" => SESSION_COOKIES
+pub(super) fn enrich_kugou(pack: &mut CredPack) {
+    if pack.token.is_empty() {
+        pack.token = cookie_field(&pack.cookie, "token")
+            .or_else(|| cookie_field(&pack.cookie, "KugooPassToken"))
+            .unwrap_or("")
+            .to_string();
+    }
+    if pack.userid.is_empty() {
+        pack.userid = ["userid", "KugooID", "uid"]
             .iter()
             .find_map(|k| cookie_field(&pack.cookie, k))
-            .is_some_and(|v| !v.trim().is_empty()),
-        _ => false,
+            .unwrap_or("")
+            .to_string();
     }
+}
+
+pub(super) fn enrich_kuwo(pack: &mut CredPack) {
+    if pack.userid.is_empty() {
+        pack.userid = cookie_field(&pack.cookie, "uid").unwrap_or("").to_string();
+    }
+}
+
+pub(super) fn enrich_qq(pack: &mut CredPack) {
+    if pack.uin.is_empty() || pack.uin == "0" {
+        if let Some(raw) = cookie_field(&pack.cookie, "uin") {
+            pack.uin = normalize_qq_uin(raw);
+        }
+    }
+}
+
+/// 登录态规则由 Provider 绑定，未知音源不判为已登录。
+pub fn is_signed_in(source: &str, pack: &CredPack) -> bool {
+    super::provider::find(source)
+        .and_then(|p| p.credentials)
+        .is_some_and(|rules| (rules.signed_in)(pack))
+}
+
+pub(super) fn signed_in_netease(pack: &CredPack) -> bool {
+    cookie_field(&pack.cookie, "MUSIC_U").is_some_and(|v| !v.is_empty())
+}
+
+pub(super) fn signed_in_qq(pack: &CredPack) -> bool {
+    // musicu.fcg 认 qm_keyst；p_skey/wxuin 不能据此判登录。
+    !pack.uin.is_empty()
+        && pack.uin != "0"
+        && cookie_field(&pack.cookie, "qm_keyst").is_some_and(|v| !v.is_empty())
+}
+
+pub(super) fn signed_in_kugou(pack: &CredPack) -> bool {
+    !pack.userid.is_empty() && pack.userid != "0" && !pack.token.is_empty()
+}
+
+pub(super) fn signed_in_kuwo(pack: &CredPack) -> bool {
+    !pack.userid.is_empty() && pack.userid != "0"
+}
+
+pub(super) fn signed_in_qishui(pack: &CredPack) -> bool {
+    SESSION_COOKIES
+        .iter()
+        .find_map(|k| cookie_field(&pack.cookie, k))
+        .is_some_and(|v| !v.trim().is_empty())
 }
 
 /// 汽水音乐的会话 cookie 字段名（任一存在即视为已登录）。
@@ -560,10 +586,8 @@ mod migrate_tests {
         .await
         .unwrap();
 
-        // get()/put() 走全局单例：测试进程内把它换成 memory，不碰真钥匙串。
-        // 迁移与断言用同一个实例，保证两边看到同一份数据。
+        // 迁移和读取注入同一实例；不与并行的音源列表测试争用全局 OnceLock。
         let backend = std::sync::Arc::new(MemoryStore::default());
-        crate::secrets::set_backend_for_tests(backend.clone());
         migrate_secrets_with(&db, backend.as_ref()).await;
 
         // 钥匙串里有全部秘密，SQLite 明文行清空。
@@ -586,10 +610,16 @@ mod migrate_tests {
                 .is_none());
         }
         // get 走钥匙串：登录态保留。
-        let got = get(&db, "netease").await.unwrap().unwrap();
+        let got = get_with_backend(&db, "netease", backend.as_ref())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got.cookie, "MUSIC_U=secret");
         assert_eq!(
-            get_device(&db, "netease").await.unwrap().as_deref(),
+            get_device_with_backend(&db, "netease", backend.as_ref())
+                .await
+                .unwrap()
+                .as_deref(),
             Some("guid-9")
         );
         // 幂等：再迁移一次无事发生。

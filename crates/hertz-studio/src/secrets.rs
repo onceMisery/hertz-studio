@@ -156,11 +156,6 @@ impl SecretBackend for MemoryStore {
 
 static BACKEND: std::sync::OnceLock<std::sync::Arc<dyn SecretBackend>> = std::sync::OnceLock::new();
 
-#[cfg(test)]
-pub fn set_backend_for_tests(b: std::sync::Arc<dyn SecretBackend>) {
-    BACKEND.set(b).ok();
-}
-
 /// 进程级后端单例。`VMUSIC_SECRETS=memory` 是显式降级——使用者知道它不持久。
 pub fn backend() -> std::sync::Arc<dyn SecretBackend> {
     BACKEND

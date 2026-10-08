@@ -13,13 +13,12 @@
 //!
 //! ## 加一个音源的成本
 //!
-//! 只需要三处，且都不碰前端：
+//! 只需要实现模块并登记 Provider，不碰前端：
 //!
 //!   1. 新建 `online/<id>.rs`，实现 `search` / `stream` / `detail` / `lyric`
 //!      四个函数（音源没有的能力就返回空值，不要编造）；
-//!   2. 在下面的 [`SOURCES`] 里加一条描述，并在 [`search`] 等 dispatch 函数里
-//!      加一个 `match` 分支；
-//!   3. 如果它需要 Referer 才能下载音频，把地址写进 [`referer`]。
+//!   2. 在 `provider.rs` 登记描述、四个函数与需要的可选操作组；
+//!      音质、凭据判态、Referer 与可用性规则也随该 Provider 登记。
 //!
 //! 前端的选择框、分类 chips、登录入口全部由 `GET /v1/online/sources` 驱动，
 //! 所以描述表加完，界面就自动多出一个音源。
@@ -54,6 +53,7 @@ mod migu;
 mod netease;
 mod playlist_common;
 pub mod progressive;
+mod provider;
 mod qishui;
 mod qq;
 // state.rs 的 AppState 持有 qr::Registry，routes.rs 要校验 Session 来源，
@@ -481,7 +481,7 @@ pub struct AggregateSearch {
 }
 
 /// 一个音源对外界的全部自述。前端只认这张表，不硬编码任何音源名。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct SourceInfo {
     pub id: &'static str,
     pub label: &'static str,
@@ -492,161 +492,19 @@ pub struct SourceInfo {
     pub caps: &'static [Capability],
 }
 
-/// caps 登记了、但整条链路**没有真机验收记录**的能力位（方案 A9 的第三档）。
-///
-/// 三档要各说各的事，混档就是撒谎：
-/// - 不在 caps 里 = 这个项目在这个平台上不做这件事，dispatch 直接 404；
-/// - 在 caps 里、也在本表里 = 代码接好了、也允许调用，但我们没有证据它在真机上走通；
-/// - 在 caps 里、不在本表里 = 有真机验收记录。
-///
-/// 今天把「实现了但没验过」表达出来的唯一手段是摘能力位（见下面 [`SOURCES`] 的
-/// 注释），于是它和「不支持」在 UI 与诊断里长得一模一样：用户以为一定能用，出了
-/// 问题也分不清该怪平台还是怪我们接线。
-///
-/// 这是**叠加在 caps 上的注解**，不是第二份事实表：每条都必须是该源 caps 的子集，
-/// 由 [`unverified_caps`] 的调用点与测试共同守住（id 写错、能力位写错都会红，
-/// 而不是静默变成「这个源全都验过了」）。
-const UNVERIFIED_CAPS: &[(&str, &[Capability])] = &[
-    // 酷狗：create + waiting 真机正常，confirmed 换票链路没有验收记录（见 kugou 条目注释）。
-    ("kugou", &[Capability::QrLogin]),
-    // QQ：只验到 waiting 态返回正常，scanned/confirmed 没有真机记录。
-    ("qq", &[Capability::QrLogin]),
-];
-
-/// 某源未真机验收的能力位。没登记过的源返回空切片。
+/// 已登记但尚无整条真机验收记录的能力，随 Provider 一起登记。
+/// 这是 caps 的子集注解；未登记的音源返回空切片。
 pub fn unverified_caps(source: &str) -> &'static [Capability] {
-    UNVERIFIED_CAPS
-        .iter()
-        .find(|(id, _)| *id == source)
-        .map(|(_, caps)| *caps)
-        .unwrap_or(&[])
+    provider::find(source).map(|p| p.unverified).unwrap_or(&[])
 }
 
-/// caps 是前端 UI 与 dispatch 的**唯一事实表**：能力位没开的能力，dispatch
-/// 的 [`gate`] 一律回 capability_unsupported——代码已实现但真机闸门（spec §4.3）
-/// 没过的平台（如当前的 QQ 扫码、酷狗写操作）只摘能力位，不必删代码。
-pub const SOURCES: &[SourceInfo] = &[
-    SourceInfo {
-        id: "netease",
-        label: "网易云音乐",
-        cats: netease::CATS,
-        supports_cookie: true,
-        caps: &[
-            Capability::CookieLogin,
-            Capability::QrLogin,
-            Capability::UserPlaylists,
-            Capability::PlaylistDetail,
-            Capability::PlaylistWrite,
-            Capability::Like,
-            Capability::RecommendSongs,
-            Capability::RecommendPlaylists,
-            Capability::PersonalFm,
-            Capability::HighQuality,
-            // 公开网页 GET 接口（/api/search/get 带 type、/api/v1/artist、
-            // /api/v1/album），无需签名、匿名可用（2026-10 实测）。歌单搜索
-            // 走同一端点的 type=1000；咪咕的歌单搜索是另一条 H5 链路。
-            Capability::PlaylistSearch,
-            Capability::ArtistSearch,
-            Capability::AlbumSearch,
-        ],
-    },
-    SourceInfo {
-        id: "qq",
-        label: "QQ音乐",
-        cats: &[],
-        supports_cookie: true,
-        // 扫码走 QQ Connect 授权链（2026-09 真机验证 waiting 态返回正常）；
-        // Like 暂无平台实现（红心等价 dirid=201 加曲，待真机后补）。
-        // RecommendSongs 走雷达端点（2026-09 真机验证，需登录态）：QQ 这条
-        // Web CGI 上没有叫"每日推荐"的端点，但 GetRadarSong 给的就是个性化
-        // 推荐歌曲，见 qq::recommend_songs 的注释。
-        caps: &[
-            Capability::CookieLogin,
-            Capability::QrLogin,
-            Capability::UserPlaylists,
-            Capability::PlaylistDetail,
-            Capability::PlaylistWrite,
-            Capability::RecommendSongs,
-            Capability::RecommendPlaylists,
-            Capability::HighQuality,
-        ],
-    },
-    SourceInfo {
-        id: "kugou",
-        label: "酷狗音乐",
-        cats: &[],
-        supports_cookie: true,
-        // 扫码走 login-user.kugou.com v2 网页流（2026-09 真机验证
-        // create + waiting 正常）；confirmed 换票链路待真机确认。
-        // 歌单详情/用户歌单/写操作/推荐/红心端点仍待真机后逐个摘开。
-        caps: &[
-            Capability::CookieLogin,
-            Capability::QrLogin,
-            Capability::HighQuality,
-        ],
-    },
-    SourceInfo {
-        id: "kuwo",
-        label: "酷我音乐",
-        cats: &[],
-        supports_cookie: true,
-        // 登录只有 cookie 粘贴一条路（uid 判态，spike 2026-09-27 无账号
-        // 实测，字段名待核对）；匿名档位上限 128k 完整曲/试听片段，登录
-        // 通道对移动接口的效果待实测——不标 HighQuality（标了等于承诺
-        // 拿得到无损）。
-        caps: &[Capability::CookieLogin],
-    },
-    SourceInfo {
-        id: "ccmixter",
-        label: "CCmixter · CC 授权曲库",
-        cats: &[],
-        supports_cookie: false,
-        caps: &[],
-    },
-    SourceInfo {
-        id: "jamendo",
-        label: "Jamendo · CC 授权曲库",
-        cats: &[],
-        // client_id 由用户注册后写入 settings（jamendo::CLIENT_ID_KEY）；
-        // 未配置时 list_sources 与聚合搜索都会跳过，列表里不出现这个源。
-        supports_cookie: false,
-        caps: &[],
-    },
-    SourceInfo {
-        id: "qishui",
-        label: "汽水音乐",
-        cats: &[],
-        supports_cookie: true,
-        // 登录入口有两条：粘贴 cookie，以及官方 Passport 网页接口的扫码。
-        //
-        // 扫码这条曾经是被排除的——参考实现的扫码桥接依赖伪造设备指纹与 JS
-        // 挑战求解（bdms/sdk-glue），属于规避平台风控。实测（2026-09-22）
-        // 发现官方 Passport 的 `get_qrcode` / `check_qrconnect` 裸请求即可用
-        // （error_code 0，二维码由服务端下发），既不需要 a_bogus/msToken，也
-        // 不需要任何设备指纹，所以「不伪造指纹、不求解 JS 挑战」这两条底线
-        // 仍然守住，扫码因此可以登记。唯一做不到的是上游 2046 二次验证要跑
-        // 官方 JS，遇到它回终态 mfa_required 引导走 cookie（见 qishui.rs）。
-        //
-        // 能力位只登记确实接通的东西：搜索/详情/歌词/取流走公共 dispatch；
-        // 加密音质一律不解密（如实报 vip_required），所以连 HighQuality 都不
-        // 登记——标了它等于承诺能拿到高音质，而受保护的高音质我们是拒播的。
-        caps: &[Capability::CookieLogin, Capability::QrLogin],
-    },
-    SourceInfo {
-        id: "migu",
-        label: "咪咕音乐",
-        cats: &[],
-        supports_cookie: false,
-        // 只登记「歌单搜索」这一项公开能力（咪咕 H5 端点，无需签名）。
-        // 单曲搜索/详情/歌词是公共 dispatch，不占能力位；取流响应是 AES 加密
-        // 密文，本项目不解密，因此**不**登记任何播放/高音质能力位，搜索结果的
-        // playable 一律 false（见 migu.rs 模块文档）。
-        caps: &[Capability::PlaylistSearch],
-    },
-];
+/// Provider 描述的兼容视图，顺序与注册表一致。caps 是 UI 与能力门的共同依据；
+/// 已实现但尚未开放的能力（如酷狗写操作）仍保留绑定，未开放时一律回
+/// capability_unsupported。新增源只在 Provider 中登记。
+pub const SOURCES: &[SourceInfo] = &provider::source_infos();
 
 pub fn find(source: &str) -> Option<&'static SourceInfo> {
-    SOURCES.iter().find(|s| s.id == source)
+    provider::find(source).map(|p| &p.info)
 }
 
 /// 设置页里「音质可调」的音源清单。
@@ -685,19 +543,7 @@ pub(crate) fn const_url(raw: impl AsRef<str>) -> ApiResult<reqwest::Url> {
 /// 失败，所以它必须跟着音源走。
 // pub(crate)：渐进式播放接入后，state.rs 的播放/预取流程也要按音源带 Referer。
 pub(crate) fn referer(source: &str) -> Option<&'static str> {
-    match source {
-        "netease" => Some("https://music.163.com"),
-        // QQ/酷狗的 CDN 直链校验 Referer，缺了直接 403（Task 15 落盘播放依赖）。
-        "qq" => Some("https://y.qq.com/"),
-        "kugou" => Some("https://www.kugou.com/"),
-        "kuwo" => Some("https://www.kuwo.cn/"),
-        "ccmixter" => Some("https://ccmixter.org/"),
-        // 汽水的音频 CDN 校验来源页，缺了直接 403。
-        "qishui" => Some("https://www.qishui.com/"),
-        // 咪咕 H5 接口校验来源页。
-        "migu" => Some("https://y.migu.cn/"),
-        _ => None,
-    }
+    provider::find(source).and_then(|p| p.referer)
 }
 
 /// 每次上游请求都要用到的上下文。目前只装设置表的连接，用来读用户自己填的
@@ -781,13 +627,10 @@ pub(crate) fn base64_decode_std(input: &str) -> Option<Vec<u8>> {
 /// 音源当前是否可用：Jamendo 需要 client_id（用户注册后写入 settings），
 /// 未配置时列表与聚合搜索都跳过它；其余音源恒可用。
 async fn source_ready(ctx: &Ctx, src: &SourceInfo) -> bool {
-    if src.id != jamendo::ID {
-        return true;
+    match provider::find(src.id) {
+        Some(provider) => provider.is_ready(ctx).await,
+        None => false,
     }
-    matches!(
-        vmusic_store::settings::get(&ctx.db, jamendo::CLIENT_ID_KEY).await,
-        Ok(Some(v)) if v.as_str().is_some_and(|s| !s.trim().is_empty())
-    )
 }
 
 /// 音源清单。`signedIn` 要查设置表，所以这一步是异步的。
@@ -901,17 +744,7 @@ pub async fn search(ctx: &Ctx, q: SearchQuery) -> ApiResult<SearchPage> {
     if q.q.as_deref().map(str::trim).unwrap_or("").is_empty() && q.cat.is_none() {
         return Err(bad_request("需要给出搜索关键词或分类"));
     }
-    match q.source.as_str() {
-        "netease" => netease::search(ctx, &q).await,
-        "qq" => qq::search(ctx, &q).await,
-        "kugou" => kugou::search(ctx, &q).await,
-        "kuwo" => kuwo::search(ctx, &q).await,
-        "jamendo" => jamendo::search(ctx, &q).await,
-        "ccmixter" => ccmixter::search(ctx, &q).await,
-        "qishui" => qishui::search(ctx, &q).await,
-        "migu" => migu::search(ctx, &q).await,
-        other => Err(unsupported(other)),
-    }
+    provider::registry().search(ctx, &q).await
 }
 
 /// All 聚合搜索：并发打全部已注册音源，单源超时/失败只进 `failed`。
@@ -996,17 +829,7 @@ pub async fn stream(
     // 总闸放在 dispatch 这一层，而不是 8 个平台各写一遍：各写必漏，而且以后新增
     // 音源自动受管。
     with_deadline(STREAM_DEADLINE, source, async move {
-        match source {
-            "netease" => netease::stream(ctx, id, q).await,
-            "qq" => qq::stream(ctx, id, track_ref, q).await,
-            "kugou" => kugou::stream(ctx, id, track_ref, q).await,
-            "kuwo" => kuwo::stream(ctx, id, track_ref, q).await,
-            "jamendo" => jamendo::stream(ctx, id, q).await,
-            "ccmixter" => ccmixter::stream(ctx, id, q).await,
-            "qishui" => qishui::stream(ctx, id, track_ref, q).await,
-            "migu" => migu::stream(ctx, id, track_ref, q).await,
-            other => Err(unsupported(other)),
-        }
+        (provider::require(source)?.core.stream)(ctx, id, track_ref, q).await
     })
     .await
 }
@@ -1027,17 +850,7 @@ pub async fn detail(ctx: &Ctx, source: &str, id: &str) -> ApiResult<OnlineDetail
     if id.trim().is_empty() {
         return Err(bad_request("缺少曲目 id"));
     }
-    match source {
-        "netease" => netease::detail(ctx, id).await,
-        "qq" => qq::detail(ctx, id).await,
-        "kugou" => kugou::detail(ctx, id).await,
-        "kuwo" => kuwo::detail(ctx, id).await,
-        "jamendo" => jamendo::detail(ctx, id).await,
-        "ccmixter" => ccmixter::detail(ctx, id).await,
-        "qishui" => qishui::detail(ctx, id).await,
-        "migu" => migu::detail(ctx, id).await,
-        other => Err(unsupported(other)),
-    }
+    (provider::require(source)?.core.detail)(ctx, id).await
 }
 
 /// 在线歌词。返回的形状和本地 `/v1/tracks/{id}/lyrics` 完全一致，
@@ -1048,17 +861,7 @@ pub async fn lyric(ctx: &Ctx, source: &str, id: &str) -> ApiResult<vmusic_core::
     if id.trim().is_empty() {
         return Err(bad_request("缺少曲目 id"));
     }
-    match source {
-        "netease" => netease::lyric(ctx, id).await,
-        "qq" => qq::lyric(ctx, id).await,
-        "kugou" => kugou::lyric(ctx, id).await,
-        "kuwo" => kuwo::lyric(ctx, id).await,
-        "jamendo" => jamendo::lyric(ctx, id).await,
-        "ccmixter" => ccmixter::lyric(ctx, id).await,
-        "qishui" => qishui::lyric(ctx, id).await,
-        "migu" => migu::lyric(ctx, id).await,
-        other => Err(unsupported(other)),
-    }
+    (provider::require(source)?.core.lyric)(ctx, id).await
 }
 
 /// 听歌打卡（网易云专属，state 的 ListenTracker 在有效收听满 30s 后调用）。
@@ -1067,19 +870,19 @@ pub async fn scrobble(ctx: &Ctx, source: &str, id: &str, seconds: u64) -> ApiRes
     if id.trim().is_empty() {
         return Err(bad_request("缺少曲目 id"));
     }
-    match source {
-        "netease" => netease::scrobble(ctx, id, seconds).await,
-        other => Err(unsupported(other)),
-    }
+    let op = provider::require(source)?
+        .scrobble
+        .ok_or_else(|| unsupported(source))?;
+    op(ctx, id, seconds).await
 }
 
 // ---------------------------------------------------------------------------
 // 账号 / 歌单 / 红心 / 推荐 / 扫码 dispatch
 //
-// 所有能力类入口先过 [gate]：以 SOURCES.caps 为唯一事实，能力位关闭（可能是
+// 所有能力类入口先过 Provider 的 gate：以 caps 为唯一事实，能力位关闭（可能是
 // 真机验收未过，也可能是平台根本不支持）的平台在这一步就拿到 404
-// capability_unsupported，平台实现函数不会被调到。match 里仍然保留代码已就绪
-// 平台的转发臂，真机闸门（spec §4.3）通过后只改 caps、不改逻辑。
+// capability_unsupported，平台实现函数不会被调到。Provider 仍然绑定代码已就绪
+// 的可选操作，真机闸门（spec §4.3）通过后只改 caps、不改逻辑。
 // ---------------------------------------------------------------------------
 
 /// 未知/不支持音源的统一错误：404 capability_unsupported（前端按缺能力隐藏入口）。
@@ -1089,21 +892,13 @@ fn unsupported(source: &str) -> ApiError {
 
 /// 能力闸门：音源已注册但能力位未开 → 404；音源不存在 → 同样 404，
 /// 不向外区分「没这个平台」和「平台不支持该操作」，避免被当作可枚举端点。
+#[cfg(test)]
 fn gate(source: &str, cap: Capability) -> ApiResult<()> {
-    let Some(info) = find(source) else {
-        return Err(unsupported(source));
-    };
-    if info.caps.contains(&cap) {
-        Ok(())
-    } else {
-        Err(ApiError::capability_unsupported(format!(
-            "音源 {source} 当前不支持该操作"
-        )))
-    }
+    provider::require(source)?.gate(cap)
 }
 
-/// gate 已放行、下面的 match 却没有转发臂：能力表与 dispatch 不一致，
-/// 属于服务端接线缺陷（500），不能对外说「不支持的音源」误导排障。
+/// 能力已开放但 Provider 没有操作绑定，属于服务端接线缺陷（502），
+/// 不能对外说「不支持的音源」误导排障。注册校验会提前拒绝这种定义。
 fn not_wired(source: &str, op: &'static str) -> ApiError {
     ApiError::internal(format!(
         "音源 {source} 的 {op} 能力已登记但 dispatch 未接线"
@@ -1112,16 +907,10 @@ fn not_wired(source: &str, op: &'static str) -> ApiError {
 
 /// 当前登录账号信息（支持 cookie 登录的平台都可取，不挂独立能力位）。
 pub async fn account(ctx: &Ctx, source: &str) -> ApiResult<AccountInfo> {
-    match source {
-        "netease" => netease::account(ctx).await,
-        "qq" => qq::account(ctx).await,
-        "kugou" => kugou::account(ctx).await,
-        "kuwo" => kuwo::account(ctx).await,
-        // 汽水：扫码/粘贴 cookie 之后顶栏要显示昵称头像，没有这条臂会让
-        // 「登录成功但界面仍是未登录」——登录态在，回拉却没路可走。
-        "qishui" => qishui::account(ctx).await,
-        other => Err(unsupported(other)),
-    }
+    let op = provider::require(source)?
+        .account
+        .ok_or_else(|| unsupported(source))?;
+    op(ctx).await
 }
 
 pub async fn playlists(
@@ -1131,14 +920,9 @@ pub async fn playlists(
     offset: usize,
     limit: usize,
 ) -> ApiResult<Vec<OnlinePlaylist>> {
-    gate(source, Capability::UserPlaylists)?;
-    match source {
-        "netease" => netease::playlists(ctx, scope, offset, limit).await,
-        "qq" => qq::playlists(ctx, scope, offset, limit).await,
-        // 实现已就绪，真机验收通过后摘开 UserPlaylists 位即可。
-        "kugou" => kugou::playlists(ctx, scope, offset, limit).await,
-        other => Err(not_wired(other, "用户歌单")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(Capability::UserPlaylists, "用户歌单", provider.playlists)?;
+    op(ctx, scope, offset, limit).await
 }
 
 pub async fn playlist_detail(
@@ -1148,14 +932,13 @@ pub async fn playlist_detail(
     offset: usize,
     limit: usize,
 ) -> ApiResult<PlaylistDetail> {
-    gate(source, Capability::PlaylistDetail)?;
-    match source {
-        "netease" => netease::playlist_detail(ctx, id, offset, limit).await,
-        "qq" => qq::playlist_detail(ctx, id, offset, limit).await,
-        // 真机验收通过后摘开 PlaylistDetail 位即可（端点要求登录）。
-        "kugou" => kugou::playlist_detail(ctx, id, offset, limit).await,
-        other => Err(not_wired(other, "歌单详情")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(
+        Capability::PlaylistDetail,
+        "歌单详情",
+        provider.playlist_detail,
+    )?;
+    op(ctx, id, offset, limit).await
 }
 
 /// 在线歌单搜索：按关键词检索平台侧公开歌单（与「用户自己的歌单」不同，
@@ -1166,12 +949,13 @@ pub async fn search_playlists(
     source: &str,
     q: &SearchQuery,
 ) -> ApiResult<PlaylistSearchPage> {
-    gate(source, Capability::PlaylistSearch)?;
-    match source {
-        "migu" => migu::search_playlists(ctx, q).await,
-        "netease" => netease::search_playlists(ctx, q).await,
-        other => Err(not_wired(other, "歌单搜索")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(
+        Capability::PlaylistSearch,
+        "歌单搜索",
+        provider.playlist_search,
+    )?;
+    op(ctx, q).await
 }
 
 /// 在线歌手搜索：能力位 [`Capability::ArtistSearch`] 未开的音源在这里拿到
@@ -1181,20 +965,16 @@ pub async fn search_artists(
     source: &str,
     q: &SearchQuery,
 ) -> ApiResult<ArtistSearchPage> {
-    gate(source, Capability::ArtistSearch)?;
-    match source {
-        "netease" => netease::search_artists(ctx, q).await,
-        other => Err(not_wired(other, "歌手搜索")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(Capability::ArtistSearch, "歌手搜索", provider.artists)?;
+    (op.search)(ctx, q).await
 }
 
 /// 在线专辑搜索：能力位 [`Capability::AlbumSearch`] 同上。
 pub async fn search_albums(ctx: &Ctx, source: &str, q: &SearchQuery) -> ApiResult<AlbumSearchPage> {
-    gate(source, Capability::AlbumSearch)?;
-    match source {
-        "netease" => netease::search_albums(ctx, q).await,
-        other => Err(not_wired(other, "专辑搜索")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(Capability::AlbumSearch, "专辑搜索", provider.albums)?;
+    (op.search)(ctx, q).await
 }
 
 /// 歌手页：该歌手的热门歌曲列表。与歌手搜索同一条能力位——搜得到歌手就
@@ -1206,11 +986,9 @@ pub async fn artist_songs(
     limit: usize,
     offset: usize,
 ) -> ApiResult<CollectionDetail> {
-    gate(source, Capability::ArtistSearch)?;
-    match source {
-        "netease" => netease::artist_songs(ctx, id, limit, offset).await,
-        other => Err(not_wired(other, "歌手热门歌曲")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(Capability::ArtistSearch, "歌手热门歌曲", provider.artists)?;
+    (op.songs)(ctx, id, limit, offset).await
 }
 
 /// 专辑页：专辑详情 + 全部曲目。与 [`Capability::AlbumSearch`] 同一条能力位，
@@ -1222,31 +1000,29 @@ pub async fn album_detail(
     limit: usize,
     offset: usize,
 ) -> ApiResult<CollectionDetail> {
-    gate(source, Capability::AlbumSearch)?;
-    match source {
-        "netease" => netease::album_detail(ctx, id, limit, offset).await,
-        other => Err(not_wired(other, "专辑详情")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(Capability::AlbumSearch, "专辑详情", provider.albums)?;
+    (op.detail)(ctx, id, limit, offset).await
 }
 
 pub async fn playlist_create(ctx: &Ctx, source: &str, name: &str) -> ApiResult<OnlinePlaylist> {
-    gate(source, Capability::PlaylistWrite)?;
-    match source {
-        "netease" => netease::playlist_create(ctx, name).await,
-        "qq" => qq::playlist_create(ctx, name).await,
-        "kugou" => kugou::playlist_create(ctx, name).await,
-        other => Err(not_wired(other, "新建歌单")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(
+        Capability::PlaylistWrite,
+        "新建歌单",
+        provider.playlist_write,
+    )?;
+    (op.create)(ctx, name).await
 }
 
 pub async fn playlist_delete(ctx: &Ctx, source: &str, id: &str) -> ApiResult<()> {
-    gate(source, Capability::PlaylistWrite)?;
-    match source {
-        "netease" => netease::playlist_delete(ctx, id).await,
-        "qq" => qq::playlist_delete(ctx, id).await,
-        "kugou" => kugou::playlist_delete(ctx, id).await,
-        other => Err(not_wired(other, "删除歌单")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(
+        Capability::PlaylistWrite,
+        "删除歌单",
+        provider.playlist_write,
+    )?;
+    (op.delete)(ctx, id).await
 }
 
 pub async fn playlist_add(
@@ -1255,13 +1031,13 @@ pub async fn playlist_add(
     id: &str,
     tracks: &[TrackEntry],
 ) -> ApiResult<()> {
-    gate(source, Capability::PlaylistWrite)?;
-    match source {
-        "netease" => netease::playlist_add(ctx, id, tracks).await,
-        "qq" => qq::playlist_add(ctx, id, tracks).await,
-        "kugou" => kugou::playlist_add(ctx, id, tracks).await,
-        other => Err(not_wired(other, "歌单加曲")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(
+        Capability::PlaylistWrite,
+        "歌单加曲",
+        provider.playlist_write,
+    )?;
+    (op.add)(ctx, id, tracks).await
 }
 
 pub async fn playlist_remove(
@@ -1270,22 +1046,20 @@ pub async fn playlist_remove(
     id: &str,
     tracks: &[TrackEntry],
 ) -> ApiResult<()> {
-    gate(source, Capability::PlaylistWrite)?;
-    match source {
-        "netease" => netease::playlist_remove(ctx, id, tracks).await,
-        "qq" => qq::playlist_remove(ctx, id, tracks).await,
-        "kugou" => kugou::playlist_remove(ctx, id, tracks).await,
-        other => Err(not_wired(other, "歌单移除曲目")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(
+        Capability::PlaylistWrite,
+        "歌单移除曲目",
+        provider.playlist_write,
+    )?;
+    (op.remove)(ctx, id, tracks).await
 }
 
 /// 红心/取消红心。目前仅网易云有平台实现；QQ（dirid=201）/酷狗待真机后补。
 pub async fn like(ctx: &Ctx, source: &str, id: &str, liked: bool) -> ApiResult<()> {
-    gate(source, Capability::Like)?;
-    match source {
-        "netease" => netease::like(ctx, id, liked).await,
-        other => Err(not_wired(other, "红心")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(Capability::Like, "红心", provider.like)?;
+    op(ctx, id, liked).await
 }
 
 pub async fn recommend_songs(
@@ -1294,21 +1068,13 @@ pub async fn recommend_songs(
     offset: usize,
     limit: usize,
 ) -> ApiResult<Vec<OnlineTrack>> {
-    gate(source, Capability::RecommendSongs)?;
-    match source {
-        "netease" => netease::recommend_songs(ctx, offset, limit).await,
-        // QQ 走雷达端点（一次约 10 条，内部翻页凑够 limit），需登录态。
-        "qq" => qq::recommend_songs(ctx, offset, limit).await,
-        // 酷狗端点无分页参数，上游一次给整页后本地切片；真机验收后摘开能力位。
-        "kugou" => kugou::recommend_songs(ctx).await.map(|page| {
-            page.tracks
-                .into_iter()
-                .skip(offset)
-                .take(limit.clamp(1, 100))
-                .collect()
-        }),
-        other => Err(not_wired(other, "每日推荐歌曲")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(
+        Capability::RecommendSongs,
+        "每日推荐歌曲",
+        provider.recommend_songs,
+    )?;
+    op(ctx, offset, limit).await
 }
 
 pub async fn recommend_playlists(
@@ -1317,12 +1083,13 @@ pub async fn recommend_playlists(
     offset: usize,
     limit: usize,
 ) -> ApiResult<Vec<OnlinePlaylist>> {
-    gate(source, Capability::RecommendPlaylists)?;
-    match source {
-        "netease" => netease::recommend_playlists(ctx, offset, limit).await,
-        "qq" => qq::recommend_playlists(ctx, offset, limit).await,
-        other => Err(not_wired(other, "推荐歌单")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(
+        Capability::RecommendPlaylists,
+        "推荐歌单",
+        provider.recommend_playlists,
+    )?;
+    op(ctx, offset, limit).await
 }
 
 /// 发起扫码握手，返回平台握手票 + 二维码载荷；路由层负责把 platform_ticket
@@ -1331,17 +1098,9 @@ pub async fn recommend_playlists(
 /// `channel` 仅 QQ 有意义：缺省/"qq" 走 QQ 互联码（手机 QQ 扫），"wx" 走
 /// 微信开放码（微信扫），两种码确认后都换成同一套 musicid/musickey 凭据。
 pub async fn qr_start(ctx: &Ctx, source: &str, channel: Option<&str>) -> ApiResult<QrPayload> {
-    gate(source, Capability::QrLogin)?;
-    match source {
-        "netease" => netease::qr_create(ctx).await,
-        "qq" => match channel {
-            Some("wx") => qq::qr_create_wx(ctx).await,
-            _ => qq::qr_create(ctx).await,
-        },
-        "kugou" => kugou::qr_create(ctx).await,
-        "qishui" => qishui::qr_create(ctx).await,
-        other => Err(not_wired(other, "扫码登录")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(Capability::QrLogin, "扫码登录", provider.qr)?;
+    (op.start)(ctx, channel).await
 }
 
 /// 轮询扫码结果。状态机由各平台自己归一：waiting|scanned|confirmed|expired。
@@ -1350,14 +1109,9 @@ pub async fn qr_poll(
     source: &str,
     platform_ticket: &str,
 ) -> ApiResult<(String, Option<AccountInfo>)> {
-    gate(source, Capability::QrLogin)?;
-    match source {
-        "netease" => netease::qr_check(ctx, platform_ticket).await,
-        "qq" => qq::qr_check(ctx, platform_ticket).await,
-        "kugou" => kugou::qr_check(ctx, platform_ticket).await,
-        "qishui" => qishui::qr_check(ctx, platform_ticket).await,
-        other => Err(not_wired(other, "扫码登录")),
-    }
+    let provider = provider::require(source)?;
+    let op = provider.operation(Capability::QrLogin, "扫码登录", provider.qr)?;
+    (op.poll)(ctx, platform_ticket).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1388,10 +1142,9 @@ pub fn split_virtual_id(vid: &str) -> Option<(String, String)> {
 
 /// 连续推荐目前仅网易云提供；游客是否可用由上游响应决定。
 pub async fn personal_fm(ctx: &Ctx, source: &str) -> ApiResult<Vec<OnlineTrack>> {
-    gate(source, Capability::PersonalFm)?;
-    netease::personal_fm(ctx)
-        .await
-        .map_err(|e| e.with_source(source))
+    let provider = provider::require(source)?;
+    let op = provider.operation(Capability::PersonalFm, "私人 FM", provider.personal_fm)?;
+    op(ctx).await.map_err(|e| e.with_source(source))
 }
 
 #[cfg(test)]
@@ -1399,7 +1152,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_source_is_dispatchable_and_described() {
+    fn sources_are_described_and_findable() {
         // 描述表和 dispatch 必须同步：漏了一边就是「列表里有这个音源，搜了报错」，
         // 或者反过来——能搜但界面上选不到。
         for src in SOURCES {
@@ -1414,28 +1167,6 @@ mod tests {
     #[test]
     fn default_search_source_is_the_first_registered_one() {
         assert_eq!(default_source(), SOURCES[0].id);
-    }
-
-    /// 描述表与 search dispatch 的第二张事实表。
-    ///
-    /// `every_source_is_dispatchable_and_described` 只验 find() 有结果；这里
-    /// 确保 `search()` 对每个已注册音源都有一条转发臂，而不是落到
-    /// `unsupported(other)`。加音源只改不改测就会在这里失败。
-    #[test]
-    fn search_dispatches_every_registered_source() {
-        let dispatches = |source: &str| {
-            matches!(
-                source,
-                "netease" | "qq" | "kugou" | "kuwo" | "jamendo" | "ccmixter" | "qishui" | "migu"
-            )
-        };
-        for src in SOURCES {
-            assert!(
-                dispatches(src.id),
-                "音源 {} 已注册但 search dispatch 没有转发臂",
-                src.id
-            );
-        }
     }
 
     /// 汽水音乐：能力位与「本项目拒绝做什么」绑定，不能随手加。
@@ -1592,6 +1323,8 @@ mod tests {
             Capability::PersonalFm,
             Capability::HighQuality,
             Capability::PlaylistSearch,
+            Capability::ArtistSearch,
+            Capability::AlbumSearch,
         ];
         for s in SOURCES {
             for cap in all_caps {
@@ -1617,70 +1350,6 @@ mod tests {
                 404,
                 "未注册音源遇到 {cap:?} 应回 404"
             );
-        }
-    }
-
-    /// 某音源的操作型能力位是否已在 dispatch 里有可达转发臂
-    /// （含真机前摘位、但代码已就绪的预留臂）。
-    ///
-    /// 这是 caps ↔ dispatch 的第二张事实表：开能力位而没补转发臂时
-    /// `every_open_cap_has_a_dispatch_backing` 会失败，防止「UI 亮入口、
-    /// 点了 404/500」的漂移。新增臂时同步更新本矩阵。
-    fn has_operation_arm(source: &str, cap: Capability) -> bool {
-        use Capability::*;
-        matches!(
-            (source, cap),
-            (
-                "netease",
-                QrLogin
-                    | UserPlaylists
-                    | PlaylistDetail
-                    | PlaylistWrite
-                    | Like
-                    | RecommendSongs
-                    | RecommendPlaylists
-                    | PersonalFm
-                    | PlaylistSearch
-                    | ArtistSearch
-                    | AlbumSearch
-            ) | (
-                // 每日推荐走雷达端点（qq::recommend_songs），2026-09 真机验证。
-                "qq",
-                QrLogin
-                    | UserPlaylists
-                    | PlaylistDetail
-                    | PlaylistWrite
-                    | RecommendSongs
-                    | RecommendPlaylists
-            ) | (
-                "kugou",
-                QrLogin | UserPlaylists | PlaylistDetail | PlaylistWrite | RecommendSongs
-            ) | (
-                // 汽水只有扫码这一条操作型能力：官方 Passport 网页接口的
-                // get_qrcode/check_qrconnect，不需要设备指纹或 JS 挑战求解。
-                "qishui", QrLogin
-            ) | (
-                // 咪咕只登记歌单搜索这一条操作型能力（H5 公开端点，无需签名）。
-                "migu",
-                PlaylistSearch
-            )
-        )
-    }
-
-    #[test]
-    fn every_open_cap_has_a_dispatch_backing() {
-        // CookieLogin / HighQuality 是描述型能力位：不对应某条操作 dispatch
-        // （凭据走 cred 端点、音质走 stream 公共链路），无需独立转发臂。
-        for s in SOURCES {
-            for cap in s.caps {
-                let backed = matches!(cap, Capability::CookieLogin | Capability::HighQuality)
-                    || has_operation_arm(s.id, *cap);
-                assert!(
-                    backed,
-                    "音源 {} 开了 {:?} 能力位但 dispatch 无转发臂",
-                    s.id, cap
-                );
-            }
         }
     }
 
@@ -1797,7 +1466,12 @@ mod tests {
     /// - 表不许空着——空表意味着能力真值表又退回二值，这一档白加。
     #[test]
     fn unverified_annotations_stay_a_subset_of_registered_capabilities() {
-        for (id, caps) in UNVERIFIED_CAPS {
+        let annotations: Vec<_> = SOURCES
+            .iter()
+            .map(|s| (s.id, unverified_caps(s.id)))
+            .filter(|(_, caps)| !caps.is_empty())
+            .collect();
+        for (id, caps) in &annotations {
             let src = find(id).unwrap_or_else(|| panic!("{id} 不是已登记的音源，注解会静默失效"));
             for cap in *caps {
                 assert!(
@@ -1807,10 +1481,7 @@ mod tests {
             }
             assert_eq!(unverified_caps(id), *caps, "{id} 的注解读不回来");
         }
-        assert!(
-            !UNVERIFIED_CAPS.is_empty(),
-            "第三档空表＝能力真值表退回二值"
-        );
+        assert!(!annotations.is_empty(), "第三档空表＝能力真值表退回二值");
         // 未知源与没登记的源一律空表：「我不知道」不许画成「没验过」。
         assert!(unverified_caps("ghost").is_empty());
         assert!(unverified_caps("netease").is_empty());

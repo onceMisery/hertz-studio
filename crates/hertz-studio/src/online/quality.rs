@@ -95,30 +95,16 @@ impl Quality {
 }
 
 pub fn default_for(source: &str) -> Quality {
-    match source {
-        "netease" => Quality::Hires,
-        "qq" | "kugou" => Quality::Lossless,
-        // 酷我匿名拿不到无损（请求会被降级/给试听），默认档避免每次必失败。
-        "kuwo" => Quality::Exhigh,
-        _ => Quality::Standard,
-    }
+    super::provider::find(source)
+        .map(|p| p.quality.default)
+        .unwrap_or(super::provider::QualityProfile::STANDARD.default)
 }
 
-/// 这个源允许用户选哪些档。**默认单档 = 不进设置页的音质列表**
-/// （见 [`crate::online::quality_sources`]）：要开放多档选择，就在这里登记源 id。
+/// Provider 登记的可选档位；单档源不进入音质设置列表。
 pub fn allowed_for(source: &str) -> &'static [Quality] {
-    match source {
-        "netease" | "qq" => &[
-            Quality::Standard,
-            Quality::Exhigh,
-            Quality::Lossless,
-            Quality::Hires,
-        ],
-        "kugou" | "kuwo" => &[Quality::Standard, Quality::Exhigh, Quality::Lossless],
-        // 汽水加密档不可播、ccmixter/jamendo 直链无档位、咪咕取流是有意 stub，
-        // 都落进默认分支。
-        _ => &[Quality::Standard],
-    }
+    super::provider::find(source)
+        .map(|p| p.quality.allowed)
+        .unwrap_or(super::provider::QualityProfile::STANDARD.allowed)
 }
 
 /// 不允许的档位夹到最近的合法档。

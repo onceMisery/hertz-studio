@@ -35,6 +35,14 @@ fn internal_store(e: vmusic_core::StoreError) -> ApiError {
     ApiError::internal(e.to_string())
 }
 
+/// 列表、聚合搜索与推荐状态共同使用的可用性规则。
+pub(super) async fn ready(ctx: &Ctx) -> bool {
+    matches!(
+        vmusic_store::settings::get(&ctx.db, CLIENT_ID_KEY).await,
+        Ok(Some(v)) if v.as_str().is_some_and(|s| !s.trim().is_empty())
+    )
+}
+
 /// 读 client_id；未配置时报带注册指引的 400。
 async fn client_id(ctx: &Ctx) -> ApiResult<String> {
     let v = vmusic_store::settings::get(&ctx.db, CLIENT_ID_KEY)
