@@ -119,8 +119,9 @@ cardState.onWheelCapture(pointer({ target: { closest: () => card }, deltaX: 40, 
 check(prevented === 1 && nudges.at(-1) === 1, 'horizontal wheel browses actual card');
 
 let chromeVisible = false;
-const shelfGate = load('stage-shelf.js', ['gateFps'], {
+const shelfGate = load('stage-shelf.js', ['canRender', 'gateFps'], {
   active: true, mode: 'side', blocked: false, items: [1], document: { hidden: false },
+  narrowScreen: { matches: false },
   root: { classList: { contains: () => chromeVisible } }, reducedMotion: () => false,
   eco: () => false, Stage: { presentation: () => ({ playing: true }) }
 });

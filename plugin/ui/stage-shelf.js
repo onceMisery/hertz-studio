@@ -53,9 +53,11 @@
 
     // ---- 状态
     var items = [];                 // 完整队列，顺序与队列面板一致
+    var itemIndexes = new Map();    // 数据变化时建索引，滚动时不扫描整条队列
     var playingIndex = 0;
     var windowStart = -1;
     var windowEnd = -1;
+    var windowDirty = true;
     var nodes = new Map();          // id -> 卡片节点（含 _pose/_spawn 等运行时态）
     var dying = [];                 // 已离队但正在演出退出动画的节点
     var mode = 'side';              // off | stage(横向封面流) | side(右侧竖向)
@@ -73,6 +75,7 @@
     var lastCurrentId = null;
     var lastMetaPct = -1;
     var coverCache = new Map();     // url -> HTMLImageElement（预加载）
+    var narrowScreen = global.matchMedia ? global.matchMedia('(max-width: 760px)') : null;
 
     function reducedMotion() {
       var p = Stage && Stage.presentation ? Stage.presentation() : null;
@@ -86,6 +89,12 @@
 
     function visibleRadius() {
       return eco() ? 3.2 : VISIBLE_RADIUS;
+    }
+
+    function canRender() {
+      if (!active || mode === 'off' || !items.length || document.hidden || !root.classList.contains('s3d-chrome')) return false;
+      // 与窄屏 CSS 一致：队列展开时架子完全隐藏；设置面板仍保留实时预览。
+      return !(narrowScreen && narrowScreen.matches && root.classList.contains('s3d-queue-open'));
     }
 
     // ---- 封面地址解析：队列元数据里存的是音源 https 原址（app.js 故意不回写
@@ -102,7 +111,7 @@
       var img = new Image();
       img.decoding = 'async';
       coverCache.set(url, img);
-      resolveCover(url, function (resolved) { if (resolved) img.src = resolved; });
+      resolveCover(url, function (resolved) { if (resolved && coverCache.get(url) === img) img.src = resolved; });
       while (coverCache.size > COVER_CACHE_CAP) coverCache.delete(coverCache.keys().next().value);
     }
 
@@ -270,8 +279,8 @@
     }
 
     function indexOfId(id) {
-      for (var i = 0; i < items.length; i += 1) if (items[i].id === id) return i;
-      return -1;
+      var index = itemIndexes.get(id);
+      return index === undefined ? -1 : index;
     }
 
     function currentIndex() {
@@ -320,10 +329,13 @@
       var oldCurrent = items[oldIndex];
       var oldBrowse = items[oldIndex + browseIndex];
       items = Array.isArray(list) ? list.slice() : [];
-      playingIndex = 0;
+      itemIndexes.clear();
+      playingIndex = -1;
       for (var i = 0; i < items.length; i += 1) {
-        if (items[i].playing) { playingIndex = i; break; }
+        if (!itemIndexes.has(items[i].id)) itemIndexes.set(items[i].id, i);
+        if (playingIndex < 0 && items[i].playing) playingIndex = i;
       }
+      if (playingIndex < 0) playingIndex = 0;
       var current = items[playingIndex];
       if (oldCurrent && current && oldCurrent.id === current.id) {
         // 同曲的元数据回填或队列重排不打断浏览；位置仍由完整队列决定。
@@ -336,18 +348,22 @@
         browseIndex = 0;
       }
       center = clamp(center, 0, Math.max(0, items.length - 1));
-      syncWindow(true);
-      if (!items.length) clearDying();
+      windowDirty = true;
+      if (items.length) syncWindow();
+      else clearWindow();
       applyVisibility();
     }
 
     // 只限制节点和预载，不截断队列。窗口跟随浏览中心，最多绘制两侧半径内的卡片。
-    function syncWindow(force) {
+    function syncWindow() {
+      // 不可见时只接收数据；首次显示或重新唤醒后再创建节点、加载封面。
+      if (!canRender()) return;
       var radius = Math.ceil(visibleRadius());
       var anchor = Math.round(center);
       var start = Math.max(0, anchor - radius);
       var end = Math.min(items.length, anchor + radius + 1);
-      if (!force && start === windowStart && end === windowEnd) return;
+      if (!windowDirty && start === windowStart && end === windowEnd) return;
+      windowDirty = false;
       windowStart = start;
       windowEnd = end;
       var next = items.slice(start, end);
@@ -410,6 +426,16 @@
       });
 
       repaintTags();
+    }
+
+    function clearWindow() {
+      cancelDrags();
+      clearDying();
+      nodes.forEach(function (el) { if (el.parentNode) el.parentNode.removeChild(el); });
+      nodes.clear();
+      hoverId = null;
+      windowStart = windowEnd = -1;
+      windowDirty = true;
     }
 
     function attachCoverLoad(el) {
@@ -491,7 +517,7 @@
       // blocked 只该禁输入（拖拽/滚轮/命中，见 setBlocked 与各输入口），不能停姿态：
       // 设置面板是改「3D 歌单架」的唯一入口，而面板打开即 blocked——姿态若冻住，
       // 切 封面流/侧栏/关闭 就完全没有视觉反馈，观感即设置没反应。
-      if (!active || document.hidden || !root.classList.contains('s3d-chrome') || mode === 'off') return;
+      if (!canRender()) return;
       var reduced = reducedMotion();
       var data = Stage && Stage.presentation ? Stage.presentation() : null;
       var playing = !!(data && data.playing);
@@ -527,6 +553,12 @@
       var now = performance.now();
       var radius = visibleRadius();
 
+      // 先统一读尺寸，再写姿态，避免每张卡片读写交错造成反复布局计算。
+      nodes.forEach(function (el) {
+        if (Math.abs(el._queueIndex - center) > radius) return;
+        el._frameWidth = el.offsetWidth || 260;
+        el._frameHeight = el.offsetHeight || 130;
+      });
       nodes.forEach(function (el) {
         var i = el._queueIndex;
         var item = items[i];
@@ -556,8 +588,8 @@
         if (p.pulse < 0.01) p.pulse = 0;
         p.reveal = reveal;
 
-        var w = el.offsetWidth || 260;
-        var h = el.offsetHeight || 130;
+        var w = el._frameWidth;
+        var h = el._frameHeight;
         var pose = mode === 'side'
           ? poseSide(delta, absD, p.hover, item.playing ? 1 : 0, p.pulse, reveal, entry, w, h)
           : poseStage(delta, absD, p.hover, item.playing ? 1 : 0, p.pulse, reveal, entry, w, h);
@@ -624,14 +656,14 @@
 
     function show() {
       active = true;
+      syncWindow();
       applyVisibility(true);
       if (Stage && Stage.kick) Stage.kick();
     }
 
     function hide() {
-      cancelDrags();
-      clearDying();
       active = false;
+      clearWindow();
       root.classList.remove('s3d-shelf-on');
       plane.hidden = true;
     }
@@ -640,7 +672,8 @@
       cancelDrags();
       if (next !== 'off' && next !== 'stage' && next !== 'side') next = 'stage';
       mode = next;
-      if (mode === 'off') clearDying();
+      if (mode === 'off') clearWindow();
+      else syncWindow();
       applyVisibility(true);
       if (active && mode !== 'off' && Stage && Stage.kick) Stage.kick();
     }
@@ -670,8 +703,7 @@
       // blocked 不在这里出现：面板打开只该让架子「不可交互」（CSS pointer-events
       // 与各输入口收口），不该停帧——停帧等于冻结排布，而「3D 歌单架」这个选项
       // 只能在面板里改，改完看不到任何重排，观感就是设置没反应。
-      if (!active || mode === 'off' || !items.length || document.hidden) return 0;
-      if (!root.classList.contains('s3d-chrome')) return 0;
+      if (!canRender()) return 0;
       if (reducedMotion()) return 20;
       // 暂停时没有频谱律动，30fps 足够呼吸与滑动；eco 档同样压到 30。
       var p = Stage && Stage.presentation ? Stage.presentation() : null;
@@ -691,6 +723,7 @@
       coverCache.clear();
       dying = [];
       items = [];
+      itemIndexes.clear();
     }
 
     // ---- init --------------------------------------------

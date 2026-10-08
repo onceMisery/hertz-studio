@@ -225,18 +225,96 @@ async function main() {
         'metadata must not snap browsing back to the playing song: ' + JSON.stringify({ before, after, beforePose, afterPose }));
     });
 
-    await check('2000-song queue has bounded card DOM and still exposes its true size', async () => {
-      await page.evaluate(() => installQueue(Array.from({ length: 2000 }, (_, index) => ({ id: 'large-' + index, title: '大队列 ' + index })), 1000));
-      const result = await page.evaluate(() => ({
-        count: document.querySelectorAll('.s3d-sc').length,
-        current: document.querySelector('.s3d-sc.is-current')?.dataset.id,
-        label: document.querySelector('.s3d-sc.is-current .s3d-sc-tag')?.textContent,
-        queue: state.queue.length
-      }));
-      assert.ok(result.count <= 16, 'render a small window rather than 2000 DOM nodes');
-      assert.equal(result.current, 'large-1000');
-      assert.equal(result.queue, 2000);
-      assert.match(result.label, /1001\s*\/\s*2000/, 'show the position in the complete queue');
+    await check('hidden shelf defers cards and cover loads until shown, and releases cards when disabled', async () => {
+      const result = await page.evaluate(() => {
+        shelf.hide();
+        var covers = [];
+        window.HertzCovers = { slot: function (url, apply) {
+          covers.push(url);
+          apply('data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'));
+        } };
+        var rows = Array.from({ length: 10000 }, (_, index) => ({
+          id: 'lazy-' + index, title: '延迟加载 ' + index, cover: 'https://covers.test/' + index + '.png', playing: index === 5000
+        }));
+        setQueue(rows);
+        var hidden = { cards: document.querySelectorAll('.s3d-sc').length, coverLoads: covers.length, fps: frames.get('stage3d-shelf').fps() };
+        shelf.show(); tick();
+        var shown = { cards: document.querySelectorAll('.s3d-sc').length, coverLoads: new Set(covers).size };
+        shelf.setMode('off');
+        setQueue(rows.map(item => ({ ...item, cover: item.cover + '?updated' })));
+        var disabled = { cards: document.querySelectorAll('.s3d-sc').length, coverLoads: new Set(covers).size, fps: frames.get('stage3d-shelf').fps() };
+        shelf.setMode('side'); tick();
+        var restored = { cards: document.querySelectorAll('.s3d-sc').length, coverLoads: new Set(covers).size };
+        delete window.HertzCovers;
+        installQueue(fixture, 0);
+        return { hidden, shown, disabled, restored };
+      });
+      assert.deepEqual(result.hidden, { cards: 0, coverLoads: 0, fps: 0 });
+      assert.deepEqual(result.shown, { cards: 13, coverLoads: 13 });
+      assert.deepEqual(result.disabled, { cards: 0, coverLoads: 13, fps: 0 });
+      assert.deepEqual(result.restored, { cards: 13, coverLoads: 26 });
+    });
+
+    await check('mobile queue stops hidden shelf frames and closing it restores rendering', async () => {
+      try {
+        await page.setViewportSize({ width: 390, height: 844 });
+        const result = await page.evaluate(() => {
+          installQueue(fixture, 0); setQueuePanel(true);
+          var stopped = frames.get('stage3d-shelf').fps();
+          var card = document.querySelector('.s3d-sc.is-current');
+          var before = card.style.transform;
+          frames.get('stage3d-shelf').frame(100);
+          var hiddenPoseUnchanged = card.style.transform === before;
+          setQueuePanel(false); tick();
+          var resumed = frames.get('stage3d-shelf').fps();
+          shelf.setBlocked(true);
+          var settingsPreview = frames.get('stage3d-shelf').fps();
+          shelf.setBlocked(false);
+          root.classList.remove('s3d-chrome');
+          var idle = frames.get('stage3d-shelf').fps();
+          root.classList.add('s3d-chrome');
+          return { stopped, hiddenPoseUnchanged, resumed, settingsPreview, idle };
+        });
+        assert.equal(result.stopped, 0);
+        assert.equal(result.hiddenPoseUnchanged, true);
+        assert.ok(result.resumed > 0 && result.settingsPreview > 0);
+        assert.equal(result.idle, 0);
+      } finally { await page.setViewportSize({ width: 1440, height: 960 }); }
+    });
+
+    await check('large queues keep 13 cards, 9 in eco mode, and scrolling avoids a full queue scan', async () => {
+      for (const size of [2000, 10000]) {
+        await page.evaluate(size => {
+          installQueue(Array.from({ length: size }, (_, index) => ({ id: 'large-' + index, title: '大队列 ' + index })), size / 2);
+          window.shelfIdReads = 0;
+          setQueue(queueData.map(item => {
+            var id = item.id;
+            return { ...item, get id() { window.shelfIdReads++; return id; } };
+          }));
+        }, size);
+        const result = await page.evaluate(() => ({
+          count: document.querySelectorAll('.s3d-sc').length,
+          current: document.querySelector('.s3d-sc.is-current')?.dataset.id,
+          label: document.querySelector('.s3d-sc.is-current .s3d-sc-tag')?.textContent,
+          queue: state.queue.length
+        }));
+        assert.equal(result.count, 13, 'card count is independent of queue size');
+        assert.equal(result.current, 'large-' + size / 2);
+        assert.equal(result.queue, size);
+        assert.ok(result.label.includes((size / 2 + 1) + ' / ' + size), 'show position in the complete queue');
+        await page.locator('.s3d-sc.is-current').hover();
+        await page.evaluate(() => { window.shelfIdReads = 0; });
+        await page.mouse.wheel(0, 100);
+        await page.waitForTimeout(195);
+        assert.ok(await page.evaluate(() => window.shelfIdReads < 1000), 'browsing must not scan every queue ID');
+      }
+      const ecoCards = await page.evaluate(() => {
+        Stage.tier = () => 0; tick();
+        var count = document.querySelectorAll('.s3d-sc').length;
+        Stage.tier = () => 2; tick();
+        return count;
+      });
+      assert.equal(ecoCards, 9);
     });
     await check('empty/hidden/destroyed shelf releases cards and its frame gate', async () => {
       const result = await page.evaluate(() => {
