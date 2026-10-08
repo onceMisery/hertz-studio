@@ -1819,11 +1819,11 @@
 <!-- 皮肤公共段（锚点搬运 / 自建节点登记 / 封面位图回填）：必须在两张重编排
      皮肤（流年 / 清风）之前加载。 -->
 <script defer src="skins/skin-shared.js"></script>
-<!-- 流年皮肤的 DOM 重编排层：紧跟 skins.js（要监听 skin:changed），
-     且必须在 app.js 之前。 -->
+<!-- 流年皮肤的 DOM 重编排层：在 Skins 上登记挂载与卸载，
+     必须在 app.js 初始化皮肤宿主之前加载。 -->
 <script defer src="skins/skin.liunian.js"></script>
-<!-- 清风皮肤的 DOM 重编排层：同样紧跟 skins.js（要监听 skin:changed），
-     且必须在 app.js 之前（要向 app.js 发 qf:panel 事件取队列快照）。 -->
+<!-- 清风皮肤同样登记生命周期；队列快照与业务动作经 Skins 公共宿主接口交接，
+     必须在 app.js 初始化皮肤宿主之前加载。 -->
 <script defer src="skins/skin.qingfeng.js"></script>
 <script defer src="themes.js"></script>
 <script defer src="perf-probe.js"></script>

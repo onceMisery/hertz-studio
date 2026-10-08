@@ -229,6 +229,8 @@ vec3 paletteMix(float t) { return mix(uColorA, uColorB, clamp(t, 0.0, 1.0)); }
   var SCENES = [];
   var SCENE_BY_ID = Object.create(null);
   var SCENE_ALIASES = Object.create(null);
+  // 可保存参数的幅度边界。登记范围与 share v1 校验共用，避免可编辑却无法分享的场景。
+  var PARAMETER_LIMIT = 1000000;
   // 入口、复位与预置归一化共用的机位契约；CreativeStage 的面板直接消费这些行。
   var CAMERA_SPEC = Object.freeze([
     ['cam.fov', '视场角', 30, 110, 1, '°', 58],
@@ -281,6 +283,7 @@ vec3 paletteMix(float t) { return mix(uColorA, uColorB, clamp(t, 0.0, 1.0)); }
           || !/^[a-z][a-zA-Z0-9]*$/.test(row[0]) || ['constructor', 'prototype'].indexOf(row[0]) >= 0
           || names[row[0]] || typeof row[1] !== 'string' || !row[1].trim()
           || ![row[2], row[3], row[4], row[6]].every(finite) || row[2] > row[3]
+          || row[2] < -PARAMETER_LIMIT || row[3] > PARAMETER_LIMIT
           || row[4] <= 0 || row[6] < row[2] || row[6] > row[3] || typeof row[5] !== 'string') {
         fail(def.id + ' 无效或重复参数');
       }
@@ -1578,6 +1581,7 @@ void main() {
     create: create,
     register: scene,
     reserveAliases: reserveAliases,
+    parameterLimit: function () { return PARAMETER_LIMIT; },
     cameraSpec: function () { return CAMERA_SPEC.map(function (row) { return row.slice(); }); },
     scenes: function () {
       return SCENES.map(function (s) {

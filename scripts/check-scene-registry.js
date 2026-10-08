@@ -94,6 +94,32 @@ async function creative() {
   }
   equal(box.CreativePrompt.compile('quiet'), quietBefore, 'new prototype-like aliases leave existing prompt compilation unchanged');
 
+  const limit = GL.parameterLimit();
+  equal(limit, 1000000, 'share v1 retains its existing parameter magnitude boundary');
+  for (const [min, max, value] of [
+    [-limit - 1, limit, 0], [-limit, limit + 1, 0],
+    [-limit, limit, -limit - 1], [-limit, limit, limit + 1],
+    [0, limit * 2, limit * 1.5]
+  ]) {
+    rejected(() => GL.register({ ...dummyScene(), id: 'invalid-magnitude', aliases: [],
+      params: [['amount', '强度', min, max, 1, '', value]] }), 'entire parameter range and default must fit the shared magnitude boundary');
+  }
+  for (const [edge, min, max, value] of [
+    ['negative', -limit, limit, -limit], ['positive', -limit, limit, limit],
+    ['fixed-negative', -limit, -limit, -limit], ['fixed-positive', limit, limit, limit]
+  ]) {
+    const id = 'magnitude-' + edge;
+    GL.register({ ...dummyScene(), id, aliases: [], params: [['amount', '强度', min, max, 1, '', value]] });
+    CS.setScene(id);
+    equal(CS.preset().sc.amount, value, 'inclusive parameter default reaches the preset: ' + edge);
+    const full = CS.shareSnapshot();
+    equal(full.sc.amount, value, 'actual shareSnapshot accepts the inclusive boundary: ' + edge);
+    const code = await box.CreativeShareCode.encode(full, { compress: false });
+    equal(await box.CreativeShareCode.decode(code), full, 'boundary parameter roundtrips through real share v1: ' + edge);
+    rejected(() => CS.normalizeSharePreset({ ...full, sc: { amount: value < 0 ? -limit - 1 : limit + 1 } }),
+      'share validation preserves the same strict parameter magnitude boundary: ' + edge);
+  }
+
   const cameraRows = GL.cameraSpec();
   equal(CS.spec().base.find(group => group.id === 'cam').items.slice(0, cameraRows.length), cameraRows, 'registration and parameter panel share one camera contract');
   for (const [path, , min, max] of cameraRows) {

@@ -346,9 +346,10 @@
       (group.items || []).concat(group.selects || []).forEach(function (row) { paths[row[0]] = row; });
     });
     (sceneDefinition(input.scene).params).forEach(function (row) { paths['sc.' + row[0]] = row; });
+    var parameterLimit = CreativeGL.parameterLimit();
     function parameter(path, value) {
       var row = paths[path];
-      number(value, -1000000, 1000000);
+      number(value, -parameterLimit, parameterLimit);
       if (typeof row[2] !== 'number' && !row[2].some(function (option) { return Number(option[0]) === value; })) fail();
       return clampTo(row, value);
     }
