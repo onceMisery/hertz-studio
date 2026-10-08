@@ -108,6 +108,8 @@ const STEPS = [
     why: '扫描目录的控件与终态：进度、取消、失败收口。' },
   { script: 'check-creative.js', stage: 'behavior',
     why: '创意编排的参数解析、歌曲时间 cue、真实舞台挂载与唯一帧门。' },
+  { script: 'check-scene-registry.js', stage: 'behavior',
+    why: '新增场景经真实注册入口进入参数、预置、分享和提示词；歌词渲染器生命周期由宿主统一驱动。' },
   { script: 'check-stanza.js', stage: 'behavior',
     why: '歌词舞台（流光/心象/商籁/凝彩/星诞）：模块大、纯逻辑，最容易在改别处时被无声改坏。' },
   { script: 'check-stanza-sonnet.js', stage: 'behavior',

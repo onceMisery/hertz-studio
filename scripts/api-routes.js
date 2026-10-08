@@ -145,8 +145,8 @@ function render(routesRs, mainRs) {
 
 function main() {
   const check = process.argv.includes('--check');
-  const { block, pairs } = render(parseRoutes(ROUTES_RS), parseRoutes(MAIN_RS));
-  const readme = fs.readFileSync(README, 'utf8');
+  const { block, pairs } = render(parseRoutes(ROUTES_RS), parseRoutes(MAIN_RS).concat(require('./ui-assets').readAssets().map(a => ({ path: a.path, methods: ['GET'], asset: true }))));
+  const readme = fs.readFileSync(README, 'utf8').replace(/\r\n/g, '\n');
   const begin = readme.indexOf(BEGIN);
   const end = readme.indexOf(END);
   if (begin < 0 || end < 0 || end < begin) {

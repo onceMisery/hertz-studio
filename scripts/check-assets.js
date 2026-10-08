@@ -12,7 +12,7 @@
 //   3. index.html 里引了没挂路由的文件     → 编译通过，浏览器 404，页面半死
 //   4. index.html 里引的脚本顺序错了       → 编译通过，运行时 undefined
 //
-// 所以这里把三份清单（磁盘上的文件 / main.rs 的常量与路由 / index.html 的引用）
+// 所以这里把资源目录、磁盘文件与 index.html 的引用
 // 交叉比对，任何一边多出或少掉都报错。
 //
 //   node scripts/check-assets.js
@@ -38,67 +38,30 @@ function ok(cond, label) {
 const mainRs = fs.readFileSync(MAIN_RS, 'utf8');
 const indexHtml = fs.readFileSync(INDEX, 'utf8');
 
-// ---------------------------------------------------------------------------
-// 1. main.rs 里的 include_str! —— 文件是否存在
-// ---------------------------------------------------------------------------
-
-const includes = [];
-const incRe = /const\s+([A-Z0-9_]+)\s*:\s*&str\s*=\s*include_str!\(\s*"([^"]+)"\s*\)/g;
-let m;
-while ((m = incRe.exec(mainRs)) !== null) includes.push({ name: m[1], rel: m[2] });
-
-console.log('\n内嵌资源');
-ok(includes.length >= 15, `include_str! 数量合理（${includes.length}）`);
-includes.forEach((inc) => {
-  const abs = path.resolve(path.join(ROOT, 'crates', 'hertz-studio', 'src'), inc.rel);
-  ok(fs.existsSync(abs), `${inc.name} → ${inc.rel} 文件存在`);
-});
-
-// ---------------------------------------------------------------------------
-// 2. 路由表 —— 每个资源都有挂载点，且用的 const 已定义
-// ---------------------------------------------------------------------------
-
-const declared = new Set(includes.map((i) => i.name));
-// 路由可能写成一行，也可能因为行宽被 rustfmt 折成多行 —— 所以空白一律用 \s*
-// 匹配，并允许尾随逗号。asset() 的第一个参数是 MIME 常量、第二个才是资源常量。
-const routeRe = /\.route\(\s*"(\/[^"]+)"\s*,\s*get\(\s*\|\|\s*asset\(\s*([A-Z0-9_]+)\s*,\s*([A-Z0-9_]+)\s*\)\s*,?\s*\)\s*,?\s*\)/g;
-const routes = [];
-while ((m = routeRe.exec(mainRs)) !== null) routes.push({ path: m[1], mime: m[2], const: m[3] });
-
-console.log('\n路由表');
-ok(routes.length >= 15, `route 条目数量合理（${routes.length}）`);
-routes.forEach((r) => {
-  ok(declared.has(r.const), `路由 ${r.path} 引用的 ${r.const} 已在文件顶部声明`);
-});
-
-// 内容指纹表必须与「由 asset() 出的 JS/CSS 路由」严格一一对应。index.html 渲染时
-// 按这张表所覆盖的内容算指纹、给每个资源 URL 挂 ?v=，asset_cache 再据此发
-// immutable —— 漏一个常量，那个文件改了内容而指纹不变，浏览器就会一直命中旧
-// 缓存（正是 main.rs asset() 注释里警告的那个坑）。HTML 页（/overlay）不参与。
-const fpMatch = /const\s+ASSET_FINGERPRINT_INPUTS\s*:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/.exec(mainRs);
-ok(!!fpMatch, 'main.rs 定义了 ASSET_FINGERPRINT_INPUTS');
-const fingerprintNames = new Set();
-if (fpMatch) {
-  let nm;
-  const nmRe = /\b([A-Z][A-Z0-9_]*)\b/g;
-  while ((nm = nmRe.exec(fpMatch[1])) !== null) fingerprintNames.add(nm[1]);
-}
-const assetConsts = new Set(routes.filter((r) => r.mime !== 'HTML').map((r) => r.const));
-assetConsts.forEach((name) => {
-  ok(fingerprintNames.has(name), `资产 ${name} 在内容指纹表 ASSET_FINGERPRINT_INPUTS 里`);
-});
-fingerprintNames.forEach((name) => {
-  ok(assetConsts.has(name), `指纹表里的 ${name} 有对应的资产路由`);
-});
-
-// 每个 JS/CSS 资源常量都必须有一条路由，否则浏览器会 404。
-// 例外：INDEX_HTML 由 `/` 那条路由用 index() 处理器返回；OVERLAY_HTML 是
-// OBS 浮层独立页（不在 index.html 里引用，由 /overlay 出、自带数据轮询）。
+// The Rust macro derives routes and fingerprint inputs from this single registry.
+const { readAssets } = require('./ui-assets');
+const entries = readAssets();
+const manifest = fs.readFileSync(require('./ui-assets').FILE, 'utf8');
+const includes = entries.map(e => ({ name: e.name, rel: e.rel }));
+const routes = entries.map(e => ({ path: e.path, mime: e.mime, const: e.name }));
 const STANDALONE_PAGES = new Set(['INDEX_HTML', 'OVERLAY_HTML']);
-includes.forEach((inc) => {
-  if (STANDALONE_PAGES.has(inc.name)) return;
-  ok(routes.some((r) => r.const === inc.name), `${inc.name} 有对应的路由`);
+let m;
+console.log('\n内嵌资源目录');
+ok(entries.length >= 15, `资源目录数量合理（${entries.length}）`);
+ok(new Set(entries.map(e => e.path)).size === entries.length, '资源路径唯一');
+ok(new Set(entries.map(e => e.name)).size === entries.length, '资源标识唯一');
+entries.forEach(e => {
+  ok(fs.existsSync(e.file), `${e.path} 的文件存在`);
+  ok(path.resolve(e.file).startsWith(path.resolve(WEB) + path.sep), `${e.path} 来自 UI 目录`);
+  ok(e.path === '/' + path.relative(WEB, e.file).split(path.sep).join('/'), `${e.path} 与打包路径相同`);
+  ok(e.path.endsWith(e.mime === 'JS' ? '.js' : '.css'), `${e.path} 的 MIME 正确`);
 });
+console.log('\n目录消费');
+ok(/\.merge\(ui_asset_router\(\)\)/.test(mainRs), '主路由挂载资源目录');
+ok(/for entry in assets::UI_ASSETS/.test(mainRs), '路由遍历实际目录');
+ok(/router\.route\(entry\.path, get\(move \|\| asset\(entry\.mime, entry\.body\)\)\)/.test(mainRs), '资源路径、类型和内容来自同一条目');
+ok(/hash_inputs\(assets::ASSET_FINGERPRINT_INPUTS\)/.test(mainRs), '缓存使用目录派生指纹');
+ok(/ASSET_FINGERPRINT_INPUTS[^=]*= &\[\$\(\$name,\)\+\]/.test(manifest), '宏从相同条目派生全部指纹输入');
 
 // ---------------------------------------------------------------------------
 // 3. index.html —— 引用与路由一一对应，且脚本顺序满足依赖

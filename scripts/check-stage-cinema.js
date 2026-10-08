@@ -146,7 +146,7 @@ section('跨文件契约：驱动 / 协议 / 开关');
   const cinema = read('stage-cinema.js');
   const control = read('stage-control.js');
   const app = read('app.js');
-  const main = fs.readFileSync(path.join(__dirname, '..', 'crates', 'hertz-studio', 'src', 'main.rs'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'crates', 'hertz-studio', 'src', 'assets.rs'), 'utf8');
   const html = read('index.html');
 
   ok(cinema.indexOf("'absent'") >= 0 && cinema.indexOf("'waiting'") >= 0 && cinema.indexOf("'active'") >= 0,
@@ -276,7 +276,9 @@ section('存量场景参数防护（spec §8：只调参数，不动几何/着�
   const focus = read('stage-focus.js');
   ok(!/uRoll/.test(gl), 'roll 只经视图矩阵，不进着色器 uniform（粒子/星河不受 roll 影响）');
   ok(/perspective\(proj,\s*cam\.fov[^)]*0\.1,\s*400\)/.test(gl), 'near 0.1 / far 400 保持');
-  ok(/tunnel:\s*\{[^}]*'cam\.dist':\s*4\.2/.test(stage), 'tunnel 基线 dist 4.2 保持（最近机位）');
+  const registry = {}; registry.window = registry;
+  require('node:vm').runInNewContext(gl, registry);
+  ok(registry.CreativeGL.sceneById('tunnel').camera['cam.dist'] === 4.2, '创意 tunnel 基线 dist 4.2 保持（最近机位）');
   ok(/Math\.max\(0\.3,/.test(stage), 'renderOne 对 dist 有 0.3 下限防护');
   ok(!/\.style\./.test(focus), 'peek 只动相机 ctx，不碰 shelf-card 的 CSS 3D transform');
 }

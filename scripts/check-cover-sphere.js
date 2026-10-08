@@ -14,7 +14,7 @@ function extract(name) {
   return source.slice(start, end + 4);
 }
 const definitions = {};
-vm.runInNewContext(source.slice(source.indexOf('  var STAGES ='), source.indexOf('  var UNIFORMS =')) +
+vm.runInNewContext(extract('buildField') + extract('buildPrism') + source.slice(source.indexOf('  var STAGES ='), source.indexOf('  var UNIFORMS =')) +
   source.slice(source.indexOf('  var UNIFORMS ='), source.indexOf('  // ---- 舞台 1')),
 definitions);
 const sphere = definitions.STAGES.find(stage => stage.id === 'silk');

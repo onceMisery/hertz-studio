@@ -24,7 +24,7 @@
 //     回锚点再删锚点，原顺序严格保持；
 //   · 视图切换联动用 MutationObserver（观察 .view 的 hidden），不 hook 业务代码；
 //   · 搜索面板自包含取数（直连 REST），播放/跳转经 document 上的
-//     `ln:panel` 自定义事件交给 app.js 分流。
+//     `Skins.request` 通用请求交给 app.js 分流。
 
 (function () {
   'use strict';
@@ -344,8 +344,7 @@
   // -------------------------------------------------------------------------
 
   function emit(action, extra) {
-    var detail = Object.assign({ action: action }, extra || {});
-    document.dispatchEvent(new CustomEvent('ln:panel', { detail: detail }));
+    return window.Skins.request(action, extra);
   }
 
   function buildSearchPanel(host) {
@@ -1126,20 +1125,7 @@
     panel.sources = null;
   }
 
-  function isActiveSkin() {
-    return document.documentElement.getAttribute('data-skin') === SKIN_ID;
-  }
-
-  function onSkinChanged(e) {
-    var id = e && e.detail ? e.detail.id
-      : document.documentElement.getAttribute('data-skin');
-    if (id === SKIN_ID) mount();
-    else unmount();
-  }
-
-  document.addEventListener('skin:changed', onSkinChanged);
-
-  if (isActiveSkin()) mount();
+  window.Skins.registerLifecycle(SKIN_ID, { mount: mount, unmount: unmount });
 
   // 暴露仅用于排障/契约脚本：返回当前挂载状态。
   window.__lnSkin = {

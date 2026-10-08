@@ -33,7 +33,7 @@ const readSrc = (f) => fs.readFileSync(path.join(ROOT, 'crates', 'hertz-studio',
 const SRC = read('daily-view.js');
 const APP = read('app.js');
 const HTML = read('index.html');
-const MAIN_RS = readSrc('main.rs');
+const MAIN_RS = readSrc('assets.rs');
 const DAILY_RS = readSrc('daily.rs');
 const ROUTES_RS = readSrc('routes.rs');
 
@@ -601,7 +601,7 @@ function checkWiring() {
   ok(/symbol id="i-daily"/.test(HTML), '图标 sprite 里有 #i-daily');
   ok(/id="set-nav-daily"/.test(HTML), '设置页有可见性开关');
   ok(/src="daily-view\.js"/.test(HTML), '页面引入了 daily-view.js');
-  ok(/route\("\/daily-view\.js"/.test(MAIN_RS), 'main.rs 注册了 /daily-view.js 路由');
+  ok(require('./ui-assets').hasAsset('/daily-view.js'), 'main.rs 注册了 /daily-view.js 路由');
   // 只匹配文件名后缀，不写死相对深度：前端目录搬过位置（web/ → plugin/ui/）。
   ok(/include_str!\("[^"]*\/daily-view\.js"\)/.test(MAIN_RS), '脚本被 include 进二进制');
 

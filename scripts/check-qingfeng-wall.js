@@ -63,18 +63,16 @@ const ok = (cond, label, extra) => {
       });
     }
     window.__qfProbeQueue = fake;
-    // 拦截取源结果：把 source.items 换成假数据，其余字段（key/label/kind）
-    // 保持 app.js 给的原样 —— 墙上要显示的来源名与按钮组都由它们决定。
-    //
-    // 必须用冒泡阶段且在 app.js 之后注册 —— app.js 的监听器先写 detail.source，
-    // 捕获阶段会排在它前面，结果是被覆盖掉，注入白做。
-    document.addEventListener('qf:panel', (e) => {
-      const d = e.detail;
-      if (!d || d.action !== 'source-request') return;
-      if (!d.source || d.source.key !== 'queue') return;
-      d.source = { key: 'queue', label: d.source.label, kind: 'queue',
-        items: window.__qfProbeQueue, emptyHint: d.source.emptyHint };
-    });
+    // 在真实宿主返回后替换队列快照，保留宿主决定的来源名与按钮组。
+    const request = window.Skins.request;
+    window.Skins.request = function (action, extra) {
+      const d = request(action, extra);
+      if (action === 'source-request' && d.source && d.source.key === 'queue') {
+        d.source = { key: 'queue', label: d.source.label, kind: 'queue',
+          items: window.__qfProbeQueue, emptyHint: d.source.emptyHint };
+      }
+      return d;
+    };
     return fake.length;
   });
   console.log(`注入队列：${injected} 项\n`);

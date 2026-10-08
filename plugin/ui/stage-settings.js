@@ -6,12 +6,15 @@
   else root.StageSettings = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  var LABELS = { stage: '舞台 3D 歌词轨', classic: '流光', cadenza: '心象', sonnet: '商籁', tempera: '凝彩', starborn: '星诞' };
-
   // 与 VCP 的模式配置、Folia 的 visualizer registry 一样，由模式能力决定可编辑项。
   function resolve(state) {
     var visual = state.visual || 'stage';
     var effective = state.effective || visual;
+    var visuals = state.visuals || [];
+    function definition(id) {
+      return visuals.find(function (item) { return item.id === id; }) || { id: id, label: id };
+    }
+    var selected = definition(visual);
     var stanza = visual !== 'stage';
     var creative = state.source === 'creative';
     var covered = creative || stanza && state.background !== 'stage';
@@ -34,9 +37,9 @@
     });
     return { visual: visual, effective: effective, stanza: stanza, covered: covered,
       scene: scene, lyrics: lyrics, rows: rows,
-      label: visual === 'starborn' ? '星诞 · 当前演出：' + (LABELS[effective] || effective) : LABELS[visual] || visual,
+      label: selected.kind === 'director' ? selected.label + ' · 当前演出：' + definition(effective).label : selected.label,
       backgroundNote: creative ? '创意编排正在大舞台演出；场景、背景与音乐响应在创意工坊中调整。' : covered ? '当前使用独立背景，已隐藏 3D 场景；原场景设置已保留。' :
         scene ? '3D 背景与歌词同时生效。' : '当前设备未启用 3D 渲染。' };
   }
-  return { resolve: resolve, labels: LABELS };
+  return { resolve: resolve };
 });

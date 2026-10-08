@@ -222,12 +222,116 @@ vec3 paletteMix(float t) { return mix(uColorA, uColorB, clamp(t, 0.0, 1.0)); }
   //
   // 每个场景 = 一个顶点着色器 + 一个片元着色器 + 一次 drawArrays(Instanced)。
   // `geom` 决定画什么、画多少；`uniforms` 是本场景额外要的 uniform；`setup`
-  // 把它们从 state.p 里读出来塞进 GL。参数名与工坊面板一一对应（见
-  // creative-stage.js 的 SCENE_PARAMS）。
+  // 把它们从 state.p 里读出来塞进 GL。params 是参数规格与默认值的唯一来源；
+  // CreativeStage 消费 camera 与 params，提示词编译器消费 aliases。
   // ---------------------------------------------------------------------------
 
   var SCENES = [];
-  function scene(def) { SCENES.push(def); return def; }
+  var SCENE_BY_ID = Object.create(null);
+  var SCENE_ALIASES = Object.create(null);
+  // 入口、复位与预置归一化共用的机位契约；CreativeStage 的面板直接消费这些行。
+  var CAMERA_SPEC = Object.freeze([
+    ['cam.fov', '视场角', 30, 110, 1, '°', 58],
+    ['cam.dist', '机位距离', 3, 44, 0.5, '', 15],
+    ['cam.yaw', '水平角', -180, 180, 1, '°', 0],
+    ['cam.pitch', '俯仰角', -55, 80, 1, '°', 14],
+    ['cam.height', '注视高度', -6, 10, 0.1, '', 0.6]
+  ].map(function (row) { return Object.freeze(row); }));
+
+  function aliasKey(alias) {
+    if (typeof alias !== 'string') throw new Error('creative-gl: 无效别名');
+    return (alias.normalize ? alias.normalize('NFKC') : alias).toLowerCase()
+      .replace(/[^0-9a-z_\u3400-\u4DBF\u4E00-\u9FFF]+/g, ' ').trim().replace(/\s+/g, ' ');
+  }
+
+  // 提示词等消费者保留自己的词，登记边界统一拒绝冲突；GL 不反向调用消费者。
+  function reserveAliases(aliases) {
+    if (!Array.isArray(aliases)) throw new Error('creative-gl: 别名必须是数组');
+    var pending = Object.create(null);
+    aliases.forEach(function (alias) {
+      var key = aliasKey(alias);
+      if (!key || pending[key] || SCENE_ALIASES[key]) throw new Error('creative-gl: 重复或空别名 ' + alias);
+      pending[key] = true;
+    });
+    Object.keys(pending).forEach(function (key) { SCENE_ALIASES[key] = 'reserved'; });
+  }
+
+  // 登记是唯一写入口。静态描述复制后冻结，调用方不能绕过校验修改参数或机位；
+  // defaults 从参数行派生，不接受另一张可能与面板漂移的默认值表。
+  function scene(def) {
+    function fail(reason) { throw new Error('creative-gl: 场景登记失败：' + reason); }
+    function finite(value) { return typeof value === 'number' && isFinite(value); }
+    function freeze(value) {
+      if (value && typeof value === 'object') {
+        Object.keys(value).forEach(function (key) { freeze(value[key]); });
+        Object.freeze(value);
+      }
+      return value;
+    }
+    if (!def || typeof def.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(def.id)
+        || ['constructor', 'prototype'].indexOf(def.id) >= 0) fail('无效 id');
+    if (SCENE_BY_ID[def.id]) fail('重复 id ' + def.id);
+    if (Object.prototype.hasOwnProperty.call(def, 'defaults')) fail(def.id + ' 默认值必须写入 params');
+    if (typeof def.label !== 'string' || !def.label.trim()) fail(def.id + ' 缺少名称');
+    if (!Array.isArray(def.params) || !Array.isArray(def.aliases)
+        || typeof def.ownsLyrics !== 'boolean') fail(def.id + ' 缺少 params / aliases / ownsLyrics');
+    var defaults = {}, names = Object.create(null);
+    def.params.forEach(function (row) {
+      if (!Array.isArray(row) || row.length !== 7 || typeof row[0] !== 'string'
+          || !/^[a-z][a-zA-Z0-9]*$/.test(row[0]) || ['constructor', 'prototype'].indexOf(row[0]) >= 0
+          || names[row[0]] || typeof row[1] !== 'string' || !row[1].trim()
+          || ![row[2], row[3], row[4], row[6]].every(finite) || row[2] > row[3]
+          || row[4] <= 0 || row[6] < row[2] || row[6] > row[3] || typeof row[5] !== 'string') {
+        fail(def.id + ' 无效或重复参数');
+      }
+      names[row[0]] = true;
+      defaults[row[0]] = row[6];
+    });
+    if (!def.camera || Object.keys(def.camera).length !== CAMERA_SPEC.length
+        || !CAMERA_SPEC.every(function (row) {
+          var value = def.camera[row[0]];
+          return finite(value) && value >= row[2] && value <= row[3];
+        })) {
+      fail(def.id + ' 无效机位');
+    }
+    var aliasNames = Object.create(null);
+    var aliases = def.aliases.map(function (alias) {
+      var key = aliasKey(alias);
+      if (!key || aliasNames[key] || SCENE_ALIASES[key]) fail(def.id + ' 重复或空别名 ' + alias);
+      aliasNames[key] = true;
+      return key;
+    });
+    function geometry(geom) {
+      return geom && ['TRIANGLES', 'POINTS', 'LINES', 'LINE_STRIP', 'TRIANGLE_STRIP'].indexOf(geom.mode) >= 0
+        && Number.isInteger(geom.verts) && geom.verts > 0
+        && Number.isInteger(geom.instances) && geom.instances > 0;
+    }
+    if (!geometry(def.geom) || typeof def.setup !== 'function'
+        || typeof def.vert !== 'string' || !def.vert.trim() || typeof def.frag !== 'string' || !def.frag.trim()
+        || !Array.isArray(def.uniforms) || !def.uniforms.every(function (name) { return typeof name === 'string' && /^u\w+$/.test(name); })
+        || typeof def.depth !== 'boolean' || ['surface', 'add'].indexOf(def.blend) < 0
+        || def.extraPasses != null && typeof def.extraPasses !== 'function'
+        || def.qualityDefs != null && typeof def.qualityDefs !== 'function'
+        || def.decl != null && typeof def.decl !== 'string'
+        || def.bloomScale != null && (!finite(def.bloomScale) || def.bloomScale < 0)
+        || def.exposureScale != null && (!finite(def.exposureScale) || def.exposureScale <= 0)) fail(def.id + ' 无效绘制定义');
+    if (def.qualityGeom && (!Array.isArray(def.qualityGeom) || def.qualityGeom.length !== 3
+        || !def.qualityGeom.every(function (g) {
+          return g && geometry({ mode: g.mode || def.geom.mode, verts: g.verts,
+            instances: g.instances === undefined ? 1 : g.instances });
+        }))) fail(def.id + ' 无效画质几何');
+    var copy = {};
+    Object.keys(def).forEach(function (key) {
+      copy[key] = typeof def[key] === 'function' ? def[key] : JSON.parse(JSON.stringify(def[key]));
+    });
+    copy.defaults = defaults;
+    copy.aliases = aliases;
+    freeze(copy);
+    SCENES.push(copy);
+    SCENE_BY_ID[copy.id] = copy;
+    aliases.forEach(function (key) { SCENE_ALIASES[key] = copy.id; });
+    return copy;
+  }
 
   // --- 1. 频谱塔林 -----------------------------------------------------------
   // 64 根柱体排成一条走廊。高度来自频谱，光晕来自起音差；地面是同一批柱体
@@ -244,7 +348,16 @@ vec3 paletteMix(float t) { return mix(uColorA, uColorB, clamp(t, 0.0, 1.0)); }
     depth: true,
     blend: 'surface',
     uniforms: ['uCount', 'uSpan', 'uHeight', 'uWidth', 'uDepth', 'uAlphaK'],
-    defaults: { span: 24, height: 5.5, width: 0.10, depth: 0.16, mirror: 0.16 },
+    params: [
+      ['height', '柱高', 0.5, 22, 0.1, '', 5.5],
+      ['span', '排列宽度', 6, 60, 0.5, '', 24],
+      ['width', '柱宽', 0.1, 2, 0.02, '', 0.10],
+      ['depth', '柱厚', 0.1, 2, 0.02, '', 0.16],
+      ['mirror', '地面倒影', 0, 1, 0.02, '', 0.16]
+    ],
+    camera: { 'cam.yaw': 0, 'cam.dist': 23, 'cam.pitch': 12, 'cam.fov': 54, 'cam.height': 1.0 },
+    aliases: ['柱阵', '塔林', '频谱塔林', '城市', 'towers'],
+    ownsLyrics: false,
     decl: `
 uniform int uCount;
 uniform float uSpan; uniform float uHeight; uniform float uWidth; uniform float uDepth;
@@ -333,7 +446,15 @@ void main() {
     depth: true,
     blend: 'surface',
     uniforms: ['uRadius', 'uAmp', 'uWire', 'uWobble'],
-    defaults: { radius: 3.0, amp: 0.65, wire: 0.42, wobble: 0.22 },
+    params: [
+      ['radius', '球半径', 1, 8, 0.1, '', 3.0],
+      ['amp', '位移幅度', 0, 4, 0.05, '', 0.65],
+      ['wire', '线框强度', 0, 1.5, 0.02, '', 0.42],
+      ['wobble', '切向抖动', 0, 1.5, 0.02, '', 0.22]
+    ],
+    camera: { 'cam.yaw': 0, 'cam.dist': 13.5, 'cam.pitch': 8, 'cam.fov': 52, 'cam.height': 0 },
+    aliases: ['星球', '球体', '频谱球', 'orb', 'planet'],
+    ownsLyrics: false,
     decl: `
 uniform float uRadius; uniform float uAmp; uniform float uWire; uniform float uWobble;
 `,
@@ -393,7 +514,16 @@ void main() {
     depth: true,
     blend: 'add',
     uniforms: ['uCount', 'uRingRadius', 'uRingLen', 'uSpread', 'uPush'],
-    defaults: { ringRadius: 4.2, ringLen: 28, spread: 0.65, push: 2.4 },
+    params: [
+      ['ringRadius', '隧道半径', 1, 12, 0.1, '', 4.2],
+      ['ringLen', '隧道长度', 6, 48, 0.5, '', 28],
+      ['spread', '光带宽度', 0.2, 5, 0.05, '', 0.65],
+      ['push', '推进力', 0, 20, 0.2, '', 2.4]
+    ],
+    // 机位收进环口内侧，广角视场形成向深处穿越的透视。
+    camera: { 'cam.yaw': 0, 'cam.dist': 4.2, 'cam.pitch': 2, 'cam.fov': 68, 'cam.height': 0 },
+    aliases: ['隧道', '穿梭', '光隧道', 'tunnel'],
+    ownsLyrics: false,
     decl: `
 uniform int uCount;
 uniform float uRingRadius; uniform float uRingLen; uniform float uSpread; uniform float uPush;
@@ -463,7 +593,16 @@ void main() {
     depth: true,
     blend: 'add',
     uniforms: ['uCount', 'uCloudR', 'uSpread3', 'uSize', 'uSpin', 'uDensityK'],
-    defaults: { cloudR: 6.0, spread3: 1.6, size: 1.25, spin: 0.18, densityK: 0.8 },
+    params: [
+      ['cloudR', '星云半径', 1, 16, 0.2, '', 6.0],
+      ['spread3', '垂直铺开', 0, 8, 0.1, '', 1.6],
+      ['size', '颗粒大小', 0.4, 8, 0.05, '', 1.25],
+      ['spin', '公转速度', 0, 3, 0.02, '', 0.18],
+      ['densityK', '密度系数', 0.2, 2, 0.02, '', 0.8]
+    ],
+    camera: { 'cam.yaw': 0, 'cam.dist': 19, 'cam.pitch': 28, 'cam.fov': 54, 'cam.height': 0 },
+    aliases: ['星云', '梦幻', 'nebula'],
+    ownsLyrics: false,
     decl: `
 uniform int uCount;
 uniform float uCloudR; uniform float uSpread3; uniform float uSize;
@@ -549,7 +688,15 @@ void main() {
     depth: true,
     blend: 'surface',
     uniforms: ['uExtent', 'uAmp2', 'uScroll', 'uWire2'],
-    defaults: { extent: 24, amp2: 1.8, scroll: 0.22, wire2: 0.42 },
+    params: [
+      ['extent', '地形尺度', 6, 60, 0.5, '', 24],
+      ['amp2', '起伏幅度', 0, 8, 0.1, '', 1.8],
+      ['scroll', '滚动速度', 0, 3, 0.02, '', 0.22],
+      ['wire2', '网格线强度', 0, 2, 0.05, '', 0.42]
+    ],
+    camera: { 'cam.yaw': 0, 'cam.dist': 23, 'cam.pitch': 30, 'cam.fov': 58, 'cam.height': 0 },
+    aliases: ['地形', '山脉', '频谱地形', 'terrain'],
+    ownsLyrics: false,
     // 网格分辨率 N 是编译期常量而不是 uniform：地形用 gl_VertexID 反解出
     // 单元坐标，N 参与整数除法与取模，放在着色器里算比每帧传进来更省事，
     // 也让顶点数在上屏之前就固定下来（工坊里看得见的"顶点数"才是真的）。
@@ -628,7 +775,18 @@ void main() {
     // 字形需要阅读对比度；提亮发生在泛光提取之后，不扩大笔画光晕。
     exposureScale: 2.4,
     uniforms: ['uLyricTex', 'uSpacing', 'uArc', 'uPWidth', 'uDimK', 'uBob', 'uTint'],
-    defaults: { spacing: 2.5, arc: 0.65, pwidth: 16, dimK: 0.48, bob: 0.18, tint: 0.5 },
+    params: [
+      ['spacing', '行距', 1, 9, 0.1, '', 2.5],
+      ['arc', '弧线', 0, 10, 0.1, '', 0.65],
+      ['pwidth', '文字宽度', 8, 32, 0.5, '', 16],
+      ['dimK', '远句亮度', 0, 1, 0.02, '', 0.48],
+      ['bob', '漂浮幅度', 0, 2, 0.05, '', 0.18],
+      ['tint', '着色强度', 0, 1.5, 0.02, '', 0.5]
+    ],
+    // 入口 yaw 钉在正面：自由环游可以改变它，切回时不能继承背面机位而看到镜像字。
+    camera: { 'cam.yaw': 0, 'cam.dist': 20, 'cam.pitch': 0, 'cam.fov': 58, 'cam.height': 0 },
+    aliases: ['歌词走廊', '三维歌词', '文字', 'lyric corridor', 'lyrics'],
+    ownsLyrics: true,
     decl: `
 uniform sampler2D uLyricTex; uniform float uSpacing; uniform float uArc; uniform float uPWidth;
 uniform float uDimK; uniform float uBob; uniform float uTint;
@@ -1207,7 +1365,7 @@ void main() {
       }
 
       uploadSpectrum(S.bands, S.rises);
-      if (def.id === 'lyric' && S.lyricVisible !== false) uploadLyric(S);
+      if (def.ownsLyrics && S.lyricVisible !== false) uploadLyric(S);
 
       // --- 场景渲染到离屏 ---
       var g = geometryFor(def, q);
@@ -1237,8 +1395,10 @@ void main() {
         if (g.instances > 1) gl.drawArraysInstanced(mode, 0, g.verts, g.instances);
         else gl.drawArrays(mode, 0, g.verts);
       }
-      if (def.id !== 'lyric' || S.lyricVisible !== false) drawIt();
-      if (def.extraPasses) def.extraPasses(gl, U, S, { mirrorMat: mirrorMat, identity: identity }, drawIt);
+      if (!def.ownsLyrics || S.lyricVisible !== false) {
+        drawIt();
+        if (def.extraPasses) def.extraPasses(gl, U, S, { mirrorMat: mirrorMat, identity: identity }, drawIt);
+      }
 
       gl.depthMask(true);
       gl.disable(gl.DEPTH_TEST);
@@ -1416,14 +1576,17 @@ void main() {
   window.CreativeGL = {
     isAvailable: isAvailable,
     create: create,
+    register: scene,
+    reserveAliases: reserveAliases,
+    cameraSpec: function () { return CAMERA_SPEC.map(function (row) { return row.slice(); }); },
     scenes: function () {
       return SCENES.map(function (s) {
-        return { id: s.id, label: s.label, defaults: JSON.parse(JSON.stringify(s.defaults || {})) };
+        return JSON.parse(JSON.stringify({ id: s.id, label: s.label, params: s.params,
+          defaults: s.defaults, camera: s.camera, aliases: s.aliases, ownsLyrics: s.ownsLyrics }));
       });
     },
     sceneById: function (id) {
-      for (var i = 0; i < SCENES.length; i += 1) if (SCENES[i].id === id) return SCENES[i];
-      return null;
+      return typeof id === 'string' ? SCENE_BY_ID[id] || null : null;
     },
     // 场景着色器源码。给两件事用：一是无头校验（着色器里引用了一个从未声明的
     // uniform 时 GL 只在编译期报一句很难定位的话，静态查一遍更早也更清楚），

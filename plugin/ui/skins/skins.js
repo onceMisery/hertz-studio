@@ -3,15 +3,15 @@
 //
 // 界面皮肤：只管**布局**，不管配色。
 //
-// 一套皮肤 = 一个 id + 一份 CSS（`skins/skin.<id>.css`）。切换时只做两件事：
-// 把 `data-skin` 写到 <html> 上、把对应那份 CSS 的 disabled 解开。配色一律
+// 一套皮肤 = 一个 id + 一份 CSS（`skins/skin.<id>.css`）+ 可选布局生命周期。
+// 切换先卸载旧布局，再更新 data-skin / CSS，挂载新布局后通知观察者。配色一律
 // 沿用当前主题的 token，皮肤 CSS 里不出现任何颜色字面量——所以换皮肤不会
 // 把主题色带跑，换主题也不会破坏皮肤。
 //
-// 加一套新皮肤只需两步（扩展点就是 register）：
+// 加一套新皮肤（完整步骤见 docs/extension-guide.md）：
 //   1. 新建 `skins/skin.<id>.css`，规则用 `[data-skin="<id>"]` 包起来；
-//   2. 在 CATALOG 里加一行 `{ id, name, note }`，并在 index.html 里补一个
-//      `<link data-skin-css="<id>" disabled>`。
+//   2. register({ id, name, note, lifecycle? })，并在 index.html 声明 CSS/JS；
+//   3. 在 assets.rs 的资源清单登记文件，自动获得 HTTP 路由和缓存指纹。
 // 其余（切换、持久化、设置页列表与顶栏弹层这两个宿主、事件广播）都由这里统一处理。
 
 (function () {
@@ -62,6 +62,54 @@
 
   var current = DEFAULT_ID;
   var listeners = [];
+  var activeLifecycle = null;
+  var initialized = false;
+  var host = null;
+
+  function validLifecycle(value) {
+    return value && typeof value.mount === 'function' && typeof value.unmount === 'function';
+  }
+
+  function setSurface(id) {
+    var root = document.documentElement;
+    if (root.getAttribute(ATTR) !== id) root.setAttribute(ATTR, id);
+    syncCss(id);
+  }
+
+  // Hooks own their DOM resources; this owner guarantees teardown before mount.
+  // A failed mount is cleaned up before restoring the previous layout.
+  function transition(def) {
+    var next = def.lifecycle || null;
+    if (initialized && current === def.id && activeLifecycle === next) return;
+    var previous = current, old = activeLifecycle;
+    if (old) old.unmount();
+    activeLifecycle = null;
+    setSurface(def.id);
+    current = def.id;
+    try {
+      if (next) next.mount();
+      activeLifecycle = next;
+      initialized = true;
+    } catch (error) {
+      try { if (next) next.unmount(); }
+      finally {
+        current = previous;
+        setSurface(previous);
+        // 恢复也可能只完成部分挂载；先记 owner，后续换肤仍能调用清理。
+        activeLifecycle = old;
+        if (old) old.mount();
+      }
+      throw error;
+    }
+  }
+
+  function registerLifecycle(id, value) {
+    var def = byId(id);
+    if (!def || def.lifecycle || !validLifecycle(value)) return false;
+    def.lifecycle = { mount: value.mount, unmount: value.unmount };
+    if (initialized && current === id) transition(def);
+    return true;
+  }
 
   function byId(id) {
     for (var i = 0; i < CATALOG.length; i += 1) {
@@ -119,10 +167,7 @@
       def = byId(DEFAULT_ID);
     }
 
-    current = id;
-    var root = document.documentElement;
-    if (root.getAttribute(ATTR) !== id) root.setAttribute(ATTR, id);
-    syncCss(id);
+    transition(def);
 
     if (!(opts && opts.silent)) {
       try { localStorage.setItem(KEY, id); } catch (e) { /* 隐私模式 */ }
@@ -302,9 +347,25 @@
   window.Skins = {
     /// 扩展点：新皮肤走这里登记，之后切换/列表/持久化自动生效。
     register: function (def) {
-      if (!def || !def.id || byId(def.id)) return false;
-      CATALOG.push(def);
+      if (!def || typeof def.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(def.id) || byId(def.id)) return false;
+      if (def.lifecycle && !validLifecycle(def.lifecycle)) return false;
+      var entry = { id: def.id, name: def.name || def.id, note: def.note || '' };
+      if (def.lifecycle) entry.lifecycle = { mount: def.lifecycle.mount, unmount: def.lifecycle.unmount };
+      CATALOG.push(entry);
       return true;
+    },
+    registerLifecycle: registerLifecycle,
+    // One synchronous request contract supports actions and read-only snapshots.
+    // The app owns its handler; individual skins never register business listeners.
+    connectHost: function (handler) {
+      if (typeof handler !== 'function') throw new TypeError('Skin host must be a function');
+      host = handler;
+      return function () { if (host === handler) host = null; };
+    },
+    request: function (action, extra) {
+      var detail = Object.assign({}, extra || {}, { action: action });
+      if (host) host(detail);
+      return detail;
     },
     list: function () {
       return CATALOG.map(function (d) { return { id: d.id, name: d.name, note: d.note }; });
@@ -312,7 +373,11 @@
     apply: apply,
     current: function () { return byId(current); },
     currentId: function () { return current; },
-    onChange: function (fn) { if (typeof fn === 'function') listeners.push(fn); },
+    onChange: function (fn) {
+      if (typeof fn !== 'function') return function () {};
+      listeners.push(fn);
+      return function () { var at = listeners.indexOf(fn); if (at >= 0) listeners.splice(at, 1); };
+    },
     init: init,
     render: renderList,
     /// 契约脚本与排障用：皮肤之间的差别必须体现在布局上，不是颜色。

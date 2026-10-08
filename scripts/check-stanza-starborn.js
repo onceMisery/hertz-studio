@@ -441,7 +441,7 @@ eq(filmRun.d.cinemaFrame(), null, '切走星诞时释放电影帧状态');
 
 // ---------------------------------------------------------------------------
 section('接线：资源与宿主');
-const mainRs = fs.readFileSync(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs'), 'utf8');
+const mainRs = fs.readFileSync(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'assets.rs'), 'utf8');
 const indexHtml = fs.readFileSync(path.join(UI, 'index.html'), 'utf8');
 const stage3d = fs.readFileSync(path.join(UI, 'stage3d.js'), 'utf8');
 // 注释里要提这段历史（否则后来人不知道为什么不许再加开关），所以「不存在 autoDirector」
@@ -461,7 +461,7 @@ ok(/#stage3d\.s3d-starborn\.s3d-no-vignette \.s3d-starborn-grade::before \{ opac
 });
 ok(/href="stanza\/stanza-starborn\.css"/.test(indexHtml), '页面加载独立星诞电影层 CSS');
 ok(/include_str!\("\.\.\/\.\.\/\.\.\/plugin\/ui\/stanza\/stanza-starborn\.css"\)/.test(mainRs)
-  && /route\(\s*"\/stanza\/stanza-starborn\.css"/.test(mainRs), '星诞 CSS 同时有后端内嵌与资源路由');
+  && require('./ui-assets').hasAsset('/stanza/stanza-starborn.css'), '星诞 CSS 同时有后端内嵌与资源路由');
 ['s3d-starborn-grade', 's3d-starborn-transition'].forEach(name => {
   ok(indexHtml.includes('class="' + name + '"') && starbornCss.includes('.' + name), '电影层节点与 CSS 同名：' + name);
 });
@@ -484,10 +484,10 @@ ok(/cinemaFrame\(\)/.test(handoffBody) && /transitionMs/.test(handoffBody),
 
 ok(/include_str!\("\.\.\/\.\.\/\.\.\/plugin\/ui\/stanza\/stanza-songform\.js"\)/.test(mainRs),
   '后端 include_str! 内嵌曲式层脚本');
-ok(/route\(\s*"\/stanza\/stanza-songform\.js"/.test(mainRs), '后端提供 /stanza/stanza-songform.js 路由');
+ok(require('./ui-assets').hasAsset('/stanza/stanza-songform.js'), '后端提供 /stanza/stanza-songform.js 路由');
 ok(/include_str!\("\.\.\/\.\.\/\.\.\/plugin\/ui\/stanza\/stanza-starborn\.js"\)/.test(mainRs),
   '后端 include_str! 内嵌星诞脚本');
-ok(/route\(\s*"\/stanza\/stanza-starborn\.js"/.test(mainRs), '后端提供 /stanza/stanza-starborn.js 路由');
+ok(require('./ui-assets').hasAsset('/stanza/stanza-starborn.js'), '后端提供 /stanza/stanza-starborn.js 路由');
 ok(/<script[^>]*src="stanza\/stanza-songform\.js"><\/script>/.test(indexHtml), 'index.html 加载曲式层脚本');
 ok(/<script[^>]*src="stanza\/stanza-starborn\.js"><\/script>/.test(indexHtml), 'index.html 加载星诞脚本');
 // 依赖顺序：曲式层只用 StanzaUtil；星诞要读 StanzaSongForm 与引擎 StanzaSonnetFx。
@@ -513,11 +513,11 @@ ok(/id="s3d-cinema"/.test(indexHtml), '电影层锚点存在');
 ok(/stanza\.autoLock/.test(stage3d) && /stanza\.autoAvoidRepeat/.test(stage3d), '导演参数参与状态与持久化');
 
 // 关键接线：stanzaActive 必须把 starborn 算进去，否则导演一切镜画面就黑。
-ok(/id === 'starborn' \|\| STANZA_VISUALS\.indexOf\(id\) >= 0/.test(stage3d),
+ok(/id === 'starborn' \|\| !!lyricRendererById\[id\]/.test(stage3d),
   'stanzaActive() 把 starborn 视为激活态（否则切镜后宿主被收起）');
 ok(/function effectiveVisual\(\)/.test(stage3d), 'effectiveVisual() 解析导演当前指向');
 const planeBody = (stage3d.match(/function planeFor\([\s\S]*?\n  \}/) || [''])[0];
-ok(/for \(var i = 0; i < RENDERER_IDS\.length/.test(planeBody), 'planeFor() 有回退链（渲染器缺失不至于双黑）');
+ok(/for \(var i = 0; i < LYRIC_RENDERERS\.length/.test(planeBody), 'planeFor() 有回退链（渲染器缺失不至于双黑）');
 const driveBody = (stage3d.match(/function driveStanza\([\s\S]*?\n  \}/) || [''])[0];
 ok(driveBody.indexOf('director.frame()') < driveBody.indexOf('planeApi()'),
   '导演先决策再驱动渲染器（否则当帧驱动即将被隐藏的渲染器）');

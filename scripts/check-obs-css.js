@@ -26,7 +26,7 @@ const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const OBS_JS = read(path.join(WEB, 'obs-css.js'));
 const INDEX_HTML = read(path.join(WEB, 'index.html'));
 const OVERLAY_HTML = read(path.join(WEB, 'overlay.html'));
-const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs'));
+const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'assets.rs'));
 
 let failures = 0;
 let checks = 0;
@@ -228,10 +228,8 @@ section('编码（缩放 / 底色 / 清理 / 拒绝）');
 
   section('接线');
   ok(/<script defer src="obs-css\.js"><\/script>/.test(INDEX_HTML), 'index.html 引了 obs-css.js');
-  ok(/\/obs-css\.js", get\(\|\| asset\(JS, OBS_CSS_JS\)\)/.test(MAIN_RS), 'main.rs 挂了 /obs-css.js 路由');
-  const fingerprint = MAIN_RS.slice(MAIN_RS.indexOf('const ASSET_FINGERPRINT_INPUTS'));
-  ok(/OBS_CSS_JS,\n/.test(fingerprint.slice(0, fingerprint.indexOf('];'))),
-    'OBS_CSS_JS 在内容指纹表里（漏了就会一直命中旧缓存）');
+  const resource = require('./ui-assets').readAssets().find(a => a.path === '/obs-css.js');
+  ok(resource && resource.name === 'OBS_CSS_JS' && resource.mime === 'JS', 'OBS 脚本由资源目录统一挂载并参与指纹');
 
   // 浮层页是同步 <script src>，必须排在它自己的内联脚本之前：内联脚本一跑就要读
   // window.ObsCss，晚一步就是「素材永远读不到」。

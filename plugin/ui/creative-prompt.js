@@ -9,7 +9,7 @@
 // workshop.js，也不进渲染器。
 //
 // 它刻意不持有任何舞台 schema。参数路径、范围、场景默认值的唯一权威是
-// creative-stage.js：这里每次编译都从 CreativeStage.scenes()/spec() 现读合法
+// CreativeGL 的场景描述和 CreativeStage 的基础参数：这里每次编译现读合法
 // 的场景与路径（或接受调用方注入的 context），规则表里只存"语义 → 意图"。
 // 若在这里复制一份 BASE_SPEC，词典就会在参数表演进时静默失配 —— 那是
 // 第二份 schema，属于本模块最要防的事故。
@@ -48,31 +48,10 @@
   // 别名在模块初始化时做重复检查：两个规则抢同一个词是词典事故，宁可开发期
   // 抛错，也不要运行期"最后加载的赢了"这种说不清的行为。
   //
-  // 场景规则只写 scene，不生成任何 sc.* —— 场景私有默认值是 CreativeStage 的
-  // 财产，在这里复制一份就是制造第二份 schema。
+  // 场景规则从 CreativeGL 描述派生，只写 scene；默认值仍由 CreativeStage 消费定义后应用。
   // -------------------------------------------------------------------------
 
   var RULES = [
-    // --- 场景 ---------------------------------------------------------------
-    { id: 'scene.towers', group: 'scene', label: '频谱塔林',
-      aliases: ['柱阵', '塔林', '频谱塔林', '城市', 'towers'],
-      apply: function () { return { scene: 'towers' }; } },
-    { id: 'scene.orb', group: 'scene', label: '频谱球',
-      aliases: ['星球', '球体', '频谱球', 'orb', 'planet'],
-      apply: function () { return { scene: 'orb' }; } },
-    { id: 'scene.tunnel', group: 'scene', label: '光隧道',
-      aliases: ['隧道', '穿梭', '光隧道', 'tunnel'],
-      apply: function () { return { scene: 'tunnel' }; } },
-    { id: 'scene.nebula', group: 'scene', label: '星云',
-      aliases: ['星云', '梦幻', 'nebula'],
-      apply: function () { return { scene: 'nebula' }; } },
-    { id: 'scene.terrain', group: 'scene', label: '频谱地形',
-      aliases: ['地形', '山脉', '频谱地形', 'terrain'],
-      apply: function () { return { scene: 'terrain' }; } },
-    { id: 'scene.lyric', group: 'scene', label: '三维歌词',
-      aliases: ['歌词走廊', '三维歌词', '文字', 'lyric corridor', 'lyrics'],
-      apply: function () { return { scene: 'lyric' }; } },
-
     // --- 能量（氛围：整体的运动量与影调基准） --------------------------------
     { id: 'energy.quiet', group: 'energy', label: '安静',
       aliases: ['安静', '舒缓', '轻柔', 'quiet', 'calm'],
@@ -188,7 +167,7 @@
   // -------------------------------------------------------------------------
 
   function buildIndex(rules) {
-    var seen = {};
+    var seen = Object.create(null);
     var idx = [];
     rules.forEach(function (rule) {
       if (!rule || typeof rule.id !== 'string' || !Array.isArray(rule.aliases)
@@ -217,10 +196,25 @@
     return idx;
   }
 
-  var ALIAS_INDEX = buildIndex(RULES);
+  function sceneRule(def) {
+    return { id: 'scene.' + def.id, group: 'scene', label: def.label,
+      aliases: def.aliases.slice(), apply: function () { return { scene: def.id }; } };
+  }
 
-  function ruleById(id) {
-    for (var i = 0; i < RULES.length; i += 1) if (RULES[i].id === id) return RULES[i];
+  function currentRules() {
+    var definitions = window.CreativeGL ? CreativeGL.scenes()
+      : window.CreativeStage && CreativeStage.scenes ? CreativeStage.scenes() : [];
+    return definitions.filter(function (def) { return Array.isArray(def.aliases); }).map(sceneRule).concat(RULES);
+  }
+
+  // 开发期校验内置词典；之后注册的场景也必须在写入登记表之前通过相同校验。
+  buildIndex(currentRules());
+  if (window.CreativeGL && CreativeGL.reserveAliases) {
+    CreativeGL.reserveAliases(RULES.reduce(function (aliases, rule) { return aliases.concat(rule.aliases); }, []));
+  }
+
+  function ruleById(id, rules) {
+    for (var i = 0; i < rules.length; i += 1) if (rules[i].id === id) return rules[i];
     return null;
   }
 
@@ -270,10 +264,10 @@
     return (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 95;
   }
 
-  function scan(text) {
+  function scan(text, index) {
     var matches = [];
     var claimed = [];
-    ALIAS_INDEX.forEach(function (entry) {
+    index.forEach(function (entry) {
       var alias = entry.alias;
       var from = 0;
       while (from <= text.length - alias.length) {
@@ -342,7 +336,7 @@
     return false;
   }
 
-  function merge(matches, paths, scenes) {
+  function merge(matches, paths, scenes, rules) {
     var warnings = [];
     var ruleIds = [];
     var patch = {};
@@ -377,7 +371,7 @@
       });
       var entries = Object.keys(lastByRule).map(function (k) { return lastByRule[k]; });
       entries.sort(function (a, b) { return a.start - b.start; });
-      entries.forEach(function (m) { m.effect = ruleById(m.ruleId).apply(); });
+      entries.forEach(function (m) { m.effect = ruleById(m.ruleId, rules).apply(); });
 
       if (group === 'negative') {
         // 否定规则各写各的参数，彼此不互斥：逐条生效，压过此前所有组。
@@ -481,7 +475,8 @@
         normalized: normalized, intent: null, matches: [], unknown: [], warnings: [] };
     }
 
-    var found = scan(normalized);
+    var rules = currentRules();
+    var found = scan(normalized, buildIndex(rules));
     if (!found.matches.length) {
       return { ok: false, code: 'no_match', message: '没有命中任何支持的词',
         normalized: normalized, intent: null,
@@ -492,7 +487,7 @@
     var merged = merge(found.matches.map(function (m) {
       return { ruleId: m.ruleId, group: m.group, label: m.label,
         source: m.source, start: m.start, end: m.end };
-    }), ctx.paths, ctx.scenes);
+    }), ctx.paths, ctx.scenes, rules);
     return {
       ok: true,
       normalized: normalized,
@@ -506,9 +501,10 @@
   // 支持词清单（给工坊展示"只认这些"用）。全部深拷贝，调用方改不动规则表。
   function supported() {
     var groups = [];
+    var definitions = currentRules();
     GROUP_ORDER.forEach(function (group) {
       var rules = [];
-      RULES.forEach(function (rule) {
+      definitions.forEach(function (rule) {
         if (rule.group !== group) return;
         rules.push({ id: rule.id, label: rule.label, aliases: rule.aliases.slice() });
       });

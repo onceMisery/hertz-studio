@@ -76,6 +76,35 @@ async function applySkin(page, id) {
     await page.screenshot({ path: `${OUT}/fix-switch-${target}.png` });
   }
 
+  section('生命周期：挂载中途失败后归还真实业务节点');
+  const rollback = await page.evaluate(() => {
+    Skins.apply('classic');
+    const settings = document.getElementById('view-settings');
+    const originalParent = settings.parentNode;
+    const stage = document.getElementById('stage');
+    const originalStageParent = stage.parentNode;
+    Skins.apply('liunian');
+    const Observer = window.MutationObserver;
+    let failure = '';
+    window.MutationObserver = class {
+      constructor() {
+        window.MutationObserver = Observer;
+        throw new Error('injected observer allocation failure');
+      }
+    };
+    try { Skins.apply('qingfeng'); } catch (e) { failure = e.message; }
+    finally { window.MutationObserver = Observer; }
+    const restoredSkin = document.documentElement.getAttribute('data-skin');
+    Skins.apply('classic');
+    return { failure, restoredSkin, settingsRestored: settings.parentNode === originalParent,
+      stageRestored: stage.parentNode === originalStageParent,
+      leftovers: document.querySelectorAll('.qf-anchor, .qf-modal').length };
+  });
+  ok(rollback.failure === 'injected observer allocation failure', '真实挂载错误可见');
+  ok(rollback.restoredSkin === 'liunian', '失败后恢复原皮肤');
+  ok(rollback.settingsRestored && rollback.stageRestored, '离开后设置与舞台回到原位置', JSON.stringify(rollback));
+  ok(rollback.leftovers === 0, '部分挂载未留下浮层与锚点');
+
   // ---------------------------------------------------------------- 问题 1
   section('问题 1：播放条不能永久消失（显隐竞态）');
   await applySkin(page, 'sheen');
@@ -191,15 +220,15 @@ async function applySkin(page, id) {
     }
     window.__qfProbeQueue = fake;
     window.__qfLog = [];
-    document.addEventListener('qf:panel', (e) => {
-      const d = e.detail || {};
+    const request = window.Skins.request;
+    window.Skins.request = function (action, extra) {
+      const d = request(action, extra);
       window.__qfLog.push({ action: d.action, delta: d.delta, itemId: d.item ? d.item.id : null });
-    });
-    document.addEventListener('qf:panel', (e) => {
-      const d = e.detail;
-      if (!d || d.action !== 'source-request' || !d.source || d.source.key !== 'queue') return;
-      d.source = { key: 'queue', label: d.source.label, kind: 'queue', items: window.__qfProbeQueue, emptyHint: d.source.emptyHint };
-    });
+      if (action === 'source-request' && d.source && d.source.key === 'queue') {
+        d.source = { key: 'queue', label: d.source.label, kind: 'queue', items: window.__qfProbeQueue, emptyHint: d.source.emptyHint };
+      }
+      return d;
+    };
     const q = document.querySelector('.rail-item[data-view="queue"]');
     if (q) q.click();
   });
@@ -228,7 +257,7 @@ async function applySkin(page, id) {
     await page.mouse.click(btns[2].x, btns[2].y); await page.waitForTimeout(350);
     await page.mouse.click(btns[0].x, btns[0].y); await page.waitForTimeout(450);
     const evts = await page.evaluate(() => window.__qfLog.slice());
-    console.log('    qf:panel: ' + JSON.stringify(evts));
+    console.log('    Skins.request: ' + JSON.stringify(evts));
     const steps = evts.filter((e) => e.action === 'step-track').map((e) => e.delta);
     ok(steps.includes(1), '下一首发 step-track +1', JSON.stringify(steps));
     ok(steps.includes(-1), '上一首发 step-track -1', JSON.stringify(steps));

@@ -680,33 +680,15 @@ function uiSourceFiles() {
     eq(bare.join(', '), '', 'plugin/ui 里所有探针调用点都必须自带守卫（缺席时静默跳过）');
   }
 
-  section('资源注册：独立形态四处齐全，插件打包同一份 UI');
+  section('资源注册：目录统一挂载与指纹，插件打包同一份 UI');
   {
     const html = read('plugin/ui/index.html');
-    const mainRs = read('crates/hertz-studio/src/main.rs');
-    const points = [
-      { name: 'plugin/ui/index.html 的 <script defer src="perf-probe.js">', present: /<script[^>]+src="perf-probe\.js"/.test(html) },
-      { name: 'main.rs 的 include_str!("../../../plugin/ui/perf-probe.js") 常量', present: /include_str!\("[^"]*perf-probe\.js"\)/.test(mainRs) },
-      { name: 'main.rs 的 .route("/perf-probe.js", …)', present: /\.route\(\s*"\/perf-probe\.js"/.test(mainRs) },
-      { name: 'main.rs 的 ASSET_FINGERPRINT_INPUTS 里的 PERF_PROBE_JS', present: (/(?:^|\n)const\s+PERF_PROBE_JS\s*:\s*&str\s*=\s*include_str!\([^)]*perf-probe\.js[^)]*\)/.test(mainRs) || /const\s+PERF_PROBE_JS\s*:/.test(mainRs)) && /ASSET_FINGERPRINT_INPUTS[\s\S]*?\];/.test(mainRs) && /\bPERF_PROBE_JS\b/.test(/ASSET_FINGERPRINT_INPUTS[\s\S]*?\];/.exec(mainRs)[0]) }
-    ];
-    const present = points.filter((p) => p.present);
-    points.forEach((p) => {
-      console.log('  ' + (p.present ? '✓' : '–') + ' ' + p.name);
-    });
-    eq(present.length, points.length,
-      '注册点必须齐全；缺：'
-      + points.filter((p) => !p.present).map((p) => p.name).join(' / '));
-    if (present.length === points.length) {
-      const at = html.indexOf('src="perf-probe.js"');
-      ok(at < html.indexOf('src="app.js"'),
-        '已接线时探针要排在 app.js 之前（defer 按文档顺序执行，启动者之后没人再取快照就晚了）');
-      ok(at < html.indexOf('src="stage.js"'), '探针在唯一帧门调度器之前加载');
-      const route = /\.route\(\s*"\/perf-probe\.js"\s*,\s*get\(\s*\|\|\s*asset\(\s*([A-Z0-9_]+)\s*,\s*([A-Z0-9_]+)\s*\)/.exec(mainRs);
-      ok(route && route[2] === 'PERF_PROBE_JS', '路由用的是 PERF_PROBE_JS 常量（挂错常量＝发错文件）');
-      ok(/ASSET_FINGERPRINT_INPUTS[\s\S]*?PERF_PROBE_JS[\s\S]*?\];/.test(mainRs),
-        '指纹表里必须有它：漏了就是改了内容而指纹不变，浏览器一直吃旧缓存');
-    }
+    const resource = require('./ui-assets').readAssets().find(a => a.path === '/perf-probe.js');
+    ok(resource && resource.name === 'PERF_PROBE_JS' && resource.mime === 'JS', '探针登记了正确路径、文件与 MIME');
+    ok(resource && resource.file.endsWith('perf-probe.js'), '探针路由返回自己的实现');
+    const at = html.indexOf('src="perf-probe.js"');
+    ok(at >= 0 && at < html.indexOf('src="app.js"'), '探针在 app.js 前加载');
+    ok(at >= 0 && at < html.indexOf('src="stage.js"'), '探针在帧门前加载');
     ok(/include\s*=\s*\[[^\]]*"ui"/.test(read('plugin/dbx-plugin.toml')), '插件包包含 ui 目录（sidecar 不负责静态资源）');
     eq(JSON.parse(read('plugin/manifest.json')).entrypoints.ui.entry, 'ui/index.html', '插件入口复用已接线的 index.html');
   }

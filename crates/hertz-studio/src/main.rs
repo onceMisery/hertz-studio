@@ -18,118 +18,11 @@ use state::AppState;
 
 /// 内嵌的界面资源。
 ///
-/// 用 `include_str!` 而不是 `ServeDir`，是为了让单个 exe 拷出构建目录还能跑
-/// ——这是本地优先分发的基本前提。代价是改 plugin/ui/ 下的任何文件都要重新编译。
-/// 加一个文件在这里加一行、在下面的路由表里加一行，其余不用动。
-const INDEX_HTML: &str = include_str!("../../../plugin/ui/index.html");
-// OBS 歌词浮层页：自包含单文件（样式与脚本都内联），只依赖 /v1/overlay/lyric。
-const OVERLAY_HTML: &str = include_str!("../../../plugin/ui/overlay.html");
-const HOST_JS: &str = include_str!("../../../plugin/ui/host.js");
-const DIALOGS_JS: &str = include_str!("../../../plugin/ui/dialogs.js");
-// 搜索关键词历史的 owner：皮肤、顶栏、在线框都到这里读与记，所以它排在它们之前。
-const SEARCH_HISTORY_JS: &str = include_str!("../../../plugin/ui/search-history.js");
-const APP_JS: &str = include_str!("../../../plugin/ui/app.js");
-const STYLE_CSS: &str = include_str!("../../../plugin/ui/style.css");
-const STAGE_CSS: &str = include_str!("../../../plugin/ui/stage.css");
-const CREATIVE_CSS: &str = include_str!("../../../plugin/ui/creative.css");
-const STAGE_JS: &str = include_str!("../../../plugin/ui/stage.js");
-const PERF_PROBE_JS: &str = include_str!("../../../plugin/ui/perf-probe.js");
-const HOME_DASHBOARD_JS: &str = include_str!("../../../plugin/ui/home-dashboard.js");
-const HOME_DASHBOARD_CSS: &str = include_str!("../../../plugin/ui/home-dashboard.css");
-const CREATIVE_SHARE_CODE_JS: &str = include_str!("../../../plugin/ui/creative-share-code.js");
-const STAGE_PARTICLES_JS: &str = include_str!("../../../plugin/ui/stage-particles.js");
-const STAGE_PARTICLES_GL_JS: &str = include_str!("../../../plugin/ui/stage-particles-gl.js");
-const THEMES_JS: &str = include_str!("../../../plugin/ui/themes.js");
-const STAGE_CTL_JS: &str = include_str!("../../../plugin/ui/stage-control.js");
-const SHELF_JS: &str = include_str!("../../../plugin/ui/shelf.js");
-const PL_COVERS_JS: &str = include_str!("../../../plugin/ui/pl-covers.js");
-// 主题工作室：往 Theme 注册二次元主题，并铺一层壁纸背景。
-const THEME_STUDIO_JS: &str = include_str!("../../../plugin/ui/theme-studio.js");
-const THEME_STUDIO_CSS: &str = include_str!("../../../plugin/ui/theme-studio.css");
-// 界面皮肤：注册表 + 每套皮肤一份 CSS。加新皮肤就在这里多 include 一份，
-// 再往路由表里添一行，剩下的（切换/持久化）由 skins.js 统一处理。
-const SKINS_JS: &str = include_str!("../../../plugin/ui/skins/skins.js");
-const SKINS_CSS: &str = include_str!("../../../plugin/ui/skins/skins.css");
-const SKIN_SHEEN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.sheen.css");
-const SKIN_WORKBENCH_CSS: &str = include_str!("../../../plugin/ui/skins/skin.workbench.css");
-const SKIN_LIUNIAN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.css");
-const SKIN_IOS_CSS: &str = include_str!("../../../plugin/ui/skins/skin.ios.css");
-const SKIN_SHARED_JS: &str = include_str!("../../../plugin/ui/skins/skin-shared.js");
-const SKIN_LIUNIAN_JS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.js");
-const SKIN_QINGFENG_CSS: &str = include_str!("../../../plugin/ui/skins/skin.qingfeng.css");
-const SKIN_QINGFENG_JS: &str = include_str!("../../../plugin/ui/skins/skin.qingfeng.js");
-// 舞台主题：只管沉浸舞台操作层的观感，与皮肤正交、可组合，常驻引入。
-const STAGE_THEME_STARFALL_CSS: &str = include_str!("../../../plugin/ui/stage-themes/starfall.css");
-const STAGE_THEME_IOS_CSS: &str = include_str!("../../../plugin/ui/stage-themes/ios.css");
-// 起音检测。粒子层与三维层共用，所以它必须排在两者之前。
-const ONSET_JS: &str = include_str!("../../../plugin/ui/onset.js");
+mod assets;
 
-// 创意舞台的四件套。加载顺序即依赖顺序：内核 → 编排 → 表现层 → 工坊面板。
-// creative-gl 必须先于 creative-stage（后者建引擎时读 window.CreativeGL），
-// 而 handdrawn / backgrounds 只被 creative-stage 可选地调用，放前放后都行 ——
-// 统一放在前面，这样任何一个失败都不会连带挡住编排层。
-const CREATIVE_GL_JS: &str = include_str!("../../../plugin/ui/creative-gl.js");
-const CREATIVE_STAGE_JS: &str = include_str!("../../../plugin/ui/creative-stage.js");
-const CREATIVE_PROMPT_JS: &str = include_str!("../../../plugin/ui/creative-prompt.js");
-const HANDDRAWN_JS: &str = include_str!("../../../plugin/ui/handdrawn.js");
-const BACKGROUNDS_JS: &str = include_str!("../../../plugin/ui/backgrounds.js");
-const BGWALL_JS: &str = include_str!("../../../plugin/ui/bgwall.js");
-const LYRIC3D_JS: &str = include_str!("../../../plugin/ui/lyric3d.js");
-const WORKSHOP_JS: &str = include_str!("../../../plugin/ui/workshop.js");
-// 舞台相机三件套（电影 → 自由 → 焦点），顺序与 camLayers priority 一致。
-const STAGE_CINEMA_JS: &str = include_str!("../../../plugin/ui/stage-cinema.js");
-const STAGE_FREECAM_JS: &str = include_str!("../../../plugin/ui/stage-freecam.js");
-const STAGE_FOCUS_JS: &str = include_str!("../../../plugin/ui/stage-focus.js");
-// 沉浸式三维舞台：独占一个 WebGL2 上下文的全屏演出层，自带后处理链与舞台坞。
-const STAGE_LYRICS_JS: &str = include_str!("../../../plugin/ui/stage-lyrics.js");
-// 沉浸式 3D 歌单架（封面流），移植自 openmusic GalaxyFloatingSongCard。
-const STAGE_SHELF_JS: &str = include_str!("../../../plugin/ui/stage-shelf.js");
-const STAGE3D_JS: &str = include_str!("../../../plugin/ui/stage3d.js");
-const STAGE3D_CSS: &str = include_str!("../../../plugin/ui/stage3d.css");
-const STAGE_IMMERSIVE_JS: &str = include_str!("../../../plugin/ui/stage-immersive.js");
-// stanza 歌词模式（流光 classic / 心象 cadenza / 商籁 sonnet）：零依赖模块 + 样式表，
-// 在 index.html 中排在 stage-lyrics.js 之前加载。
-const STANZA_UTIL_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-util.js");
-const STANZA_THEME_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-theme.js");
-const STANZA_TEXTLAYOUT_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-textlayout.js");
-const STANZA_BG_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-bg.js");
-const STANZA_SUBTITLE_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-subtitle.js");
-const STANZA_CLASSIC_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-classic.js");
-const STANZA_CADENZA_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-cadenza.js");
-// 商籁 sonnet：全屏 Pixi 电影镜头歌词。图形引擎 + 渲染器两个模块；PixiJS v8
-// （MIT）随包内嵌，但前端只在首次选中商籁时才注入 <script> 惰性加载它。
-const STANZA_SONNET_FX_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-sonnet-fx.js");
-const STANZA_SONNET_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-sonnet.js");
-const STANZA_TEMPERA_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-tempera.js");
-// 曲式层：把整首歌编译成段落/副歌/句内画像，并给每种歌词模式定义镜头语法。纯函数，
-// 星诞导演与 stage3d 的镜头机架都读它，所以必须排在 starborn 之前。
-const STANZA_SONGFORM_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-songform.js");
-const STANZA_STARBORN_JS: &str = include_str!("../../../plugin/ui/stanza/stanza-starborn.js");
-const STANZA_STARBORN_CSS: &str = include_str!("../../../plugin/ui/stanza/stanza-starborn.css");
-const STAGE_SETTINGS_JS: &str = include_str!("../../../plugin/ui/stage-settings.js");
-const PIXI_JS: &str = include_str!("../../../plugin/ui/vendor/pixi.min.js");
-const STANZA_CSS: &str = include_str!("../../../plugin/ui/stanza/stanza.css");
-// 在线曲库（SP1）：vendored MIT 二维码库 + 三个在线模块与样式。
-const QRCODE_JS: &str = include_str!("../../../plugin/ui/vendor/qrcode.js");
-const ONLINE_LOGIN_JS: &str = include_str!("../../../plugin/ui/online-login.js");
-const ONLINE_JS: &str = include_str!("../../../plugin/ui/online.js");
-const ONLINE_PLAYLISTS_JS: &str = include_str!("../../../plugin/ui/online-playlists.js");
-const ONLINE_PLAYLIST_VIEW_JS: &str = include_str!("../../../plugin/ui/online-playlist-view.js");
-// 顶栏全局搜索：下拉面板预览在线结果（歌曲/歌单/歌手/专辑），由 app.js 启动时 bind()。
-const TOPSEARCH_JS: &str = include_str!("../../../plugin/ui/topsearch.js");
-const ONLINE_CSS: &str = include_str!("../../../plugin/ui/online.css");
-// 收藏与每日推荐。两者都先于 app.js 加载，由 app.js 在启动序列里 bind()。
-const FAVORITES_JS: &str = include_str!("../../../plugin/ui/favorites.js");
-const DAILY_JS: &str = include_str!("../../../plugin/ui/daily.js");
-const DAILY_VIEW_JS: &str = include_str!("../../../plugin/ui/daily-view.js");
-// 命令面板：引擎与 UI（命令由 app.js 注册），Ctrl+K 唤起。
-const PALETTE_JS: &str = include_str!("../../../plugin/ui/palette.js");
-// 歌词视频导出：自包含模块（弹窗/画幅/录制管线），设置页与命令面板唤起。
-const VIDEO_EXPORT_JS: &str = include_str!("../../../plugin/ui/video-export.js");
-// OBS 浮层的素材通道（folia obsCustomCss 的等价物）：把用户选的背景图/台标压成
-// data URL 拼一段 CSS 让用户粘进 OBS 的「自定义 CSS」。形状与解析只此一份，
-// 应用（本文件的路由 + app.js）与浮层页（overlay.html）都引它。
-const OBS_CSS_JS: &str = include_str!("../../../plugin/ui/obs-css.js");
+// The UI registry owns JavaScript/CSS; these pages have separate HTTP behavior.
+const INDEX_HTML: &str = include_str!("../../../plugin/ui/index.html");
+const OVERLAY_HTML: &str = include_str!("../../../plugin/ui/overlay.html");
 
 // 主题壁纸。与 JS/CSS 不同，这里是二进制资源，所以用 `include_bytes!`。
 //
@@ -217,8 +110,6 @@ const PLATFORM_ICONS: &[(&str, &[u8])] = &[
     ),
 ];
 
-const JS: &str = "application/javascript; charset=utf-8";
-const CSS: &str = "text/css; charset=utf-8";
 const HTML: &str = "text/html; charset=utf-8";
 
 #[tokio::main]
@@ -256,153 +147,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/ws", get(ws::ws_handler))
         .merge(routes::router(state.clone()))
-        .route("/host.js", get(|| asset(JS, HOST_JS)))
-        .route("/dialogs.js", get(|| asset(JS, DIALOGS_JS)))
-        .route("/search-history.js", get(|| asset(JS, SEARCH_HISTORY_JS)))
-        .route("/app.js", get(|| asset(JS, APP_JS)))
-        .route("/stage.js", get(|| asset(JS, STAGE_JS)))
-        .route("/perf-probe.js", get(|| asset(JS, PERF_PROBE_JS)))
-        .route("/home-dashboard.js", get(|| asset(JS, HOME_DASHBOARD_JS)))
-        .route(
-            "/home-dashboard.css",
-            get(|| asset(CSS, HOME_DASHBOARD_CSS)),
-        )
-        .route(
-            "/creative-share-code.js",
-            get(|| asset(JS, CREATIVE_SHARE_CODE_JS)),
-        )
-        .route("/onset.js", get(|| asset(JS, ONSET_JS)))
-        .route("/stage-control.js", get(|| asset(JS, STAGE_CTL_JS)))
-        .route("/stage-particles.js", get(|| asset(JS, STAGE_PARTICLES_JS)))
-        .route(
-            "/stage-particles-gl.js",
-            get(|| asset(JS, STAGE_PARTICLES_GL_JS)),
-        )
-        .route("/themes.js", get(|| asset(JS, THEMES_JS)))
-        .route("/shelf.js", get(|| asset(JS, SHELF_JS)))
-        .route("/pl-covers.js", get(|| asset(JS, PL_COVERS_JS)))
-        .route("/theme-studio.js", get(|| asset(JS, THEME_STUDIO_JS)))
-        .route("/skins/skins.js", get(|| asset(JS, SKINS_JS)))
-        .route("/creative-gl.js", get(|| asset(JS, CREATIVE_GL_JS)))
-        .route("/creative-stage.js", get(|| asset(JS, CREATIVE_STAGE_JS)))
-        .route("/creative-prompt.js", get(|| asset(JS, CREATIVE_PROMPT_JS)))
-        .route("/handdrawn.js", get(|| asset(JS, HANDDRAWN_JS)))
-        .route("/backgrounds.js", get(|| asset(JS, BACKGROUNDS_JS)))
-        .route("/bgwall.js", get(|| asset(JS, BGWALL_JS)))
-        .route("/lyric3d.js", get(|| asset(JS, LYRIC3D_JS)))
-        .route("/workshop.js", get(|| asset(JS, WORKSHOP_JS)))
-        .route("/stage-cinema.js", get(|| asset(JS, STAGE_CINEMA_JS)))
-        .route("/stage-freecam.js", get(|| asset(JS, STAGE_FREECAM_JS)))
-        .route("/stage-focus.js", get(|| asset(JS, STAGE_FOCUS_JS)))
-        .route("/stage-lyrics.js", get(|| asset(JS, STAGE_LYRICS_JS)))
-        .route("/stage-shelf.js", get(|| asset(JS, STAGE_SHELF_JS)))
-        .route("/stage3d.js", get(|| asset(JS, STAGE3D_JS)))
-        .route("/stage-immersive.js", get(|| asset(JS, STAGE_IMMERSIVE_JS)))
-        .route("/stanza/stanza-util.js", get(|| asset(JS, STANZA_UTIL_JS)))
-        .route(
-            "/stanza/stanza-theme.js",
-            get(|| asset(JS, STANZA_THEME_JS)),
-        )
-        .route(
-            "/stanza/stanza-textlayout.js",
-            get(|| asset(JS, STANZA_TEXTLAYOUT_JS)),
-        )
-        .route("/stanza/stanza-bg.js", get(|| asset(JS, STANZA_BG_JS)))
-        .route(
-            "/stanza/stanza-subtitle.js",
-            get(|| asset(JS, STANZA_SUBTITLE_JS)),
-        )
-        .route(
-            "/stanza/stanza-classic.js",
-            get(|| asset(JS, STANZA_CLASSIC_JS)),
-        )
-        .route(
-            "/stanza/stanza-cadenza.js",
-            get(|| asset(JS, STANZA_CADENZA_JS)),
-        )
-        .route(
-            "/stanza/stanza-sonnet-fx.js",
-            get(|| asset(JS, STANZA_SONNET_FX_JS)),
-        )
-        .route(
-            "/stanza/stanza-sonnet.js",
-            get(|| asset(JS, STANZA_SONNET_JS)),
-        )
-        .route(
-            "/stanza/stanza-tempera.js",
-            get(|| asset(JS, STANZA_TEMPERA_JS)),
-        )
-        // 曲式层：星诞导演与镜头机架的共同上游，只依赖 StanzaUtil。
-        .route(
-            "/stanza/stanza-songform.js",
-            get(|| asset(JS, STANZA_SONGFORM_JS)),
-        )
-        // 星诞元导演：只做模式调度，不产出画面，因此排在 tempera 之后加载
-        // （它要读 StanzaSongForm 的段落读数与 StanzaSonnetFX.resolveAudioBands 的频段）。
-        .route(
-            "/stanza/stanza-starborn.js",
-            get(|| asset(JS, STANZA_STARBORN_JS)),
-        )
-        .route("/vendor/pixi.min.js", get(|| asset(JS, PIXI_JS)))
-        .route("/stage-settings.js", get(|| asset(JS, STAGE_SETTINGS_JS)))
-        .route("/vendor/qrcode.js", get(|| asset(JS, QRCODE_JS)))
-        .route("/online-login.js", get(|| asset(JS, ONLINE_LOGIN_JS)))
-        .route("/online.js", get(|| asset(JS, ONLINE_JS)))
-        .route(
-            "/online-playlists.js",
-            get(|| asset(JS, ONLINE_PLAYLISTS_JS)),
-        )
-        .route(
-            "/online-playlist-view.js",
-            get(|| asset(JS, ONLINE_PLAYLIST_VIEW_JS)),
-        )
-        .route("/topsearch.js", get(|| asset(JS, TOPSEARCH_JS)))
-        .route("/favorites.js", get(|| asset(JS, FAVORITES_JS)))
-        .route("/daily.js", get(|| asset(JS, DAILY_JS)))
-        .route("/daily-view.js", get(|| asset(JS, DAILY_VIEW_JS)))
-        .route("/palette.js", get(|| asset(JS, PALETTE_JS)))
-        .route("/video-export.js", get(|| asset(JS, VIDEO_EXPORT_JS)))
-        .route("/obs-css.js", get(|| asset(JS, OBS_CSS_JS)))
-        .route("/style.css", get(|| asset(CSS, STYLE_CSS)))
-        .route("/stage.css", get(|| asset(CSS, STAGE_CSS)))
-        .route("/creative.css", get(|| asset(CSS, CREATIVE_CSS)))
-        .route("/stage3d.css", get(|| asset(CSS, STAGE3D_CSS)))
-        .route("/stanza/stanza.css", get(|| asset(CSS, STANZA_CSS)))
-        .route(
-            "/stanza/stanza-starborn.css",
-            get(|| asset(CSS, STANZA_STARBORN_CSS)),
-        )
-        .route("/online.css", get(|| asset(CSS, ONLINE_CSS)))
-        .route("/theme-studio.css", get(|| asset(CSS, THEME_STUDIO_CSS)))
-        .route("/skins/skins.css", get(|| asset(CSS, SKINS_CSS)))
-        .route("/skins/skin.sheen.css", get(|| asset(CSS, SKIN_SHEEN_CSS)))
-        .route(
-            "/skins/skin.workbench.css",
-            get(|| asset(CSS, SKIN_WORKBENCH_CSS)),
-        )
-        .route(
-            "/skins/skin.liunian.css",
-            get(|| asset(CSS, SKIN_LIUNIAN_CSS)),
-        )
-        .route("/skins/skin.ios.css", get(|| asset(CSS, SKIN_IOS_CSS)))
-        .route(
-            "/skins/skin.qingfeng.css",
-            get(|| asset(CSS, SKIN_QINGFENG_CSS)),
-        )
-        .route("/skins/skin-shared.js", get(|| asset(JS, SKIN_SHARED_JS)))
-        .route("/skins/skin.liunian.js", get(|| asset(JS, SKIN_LIUNIAN_JS)))
-        .route(
-            "/skins/skin.qingfeng.js",
-            get(|| asset(JS, SKIN_QINGFENG_JS)),
-        )
-        .route(
-            "/stage-themes/starfall.css",
-            get(|| asset(CSS, STAGE_THEME_STARFALL_CSS)),
-        )
-        .route(
-            "/stage-themes/ios.css",
-            get(|| asset(CSS, STAGE_THEME_IOS_CSS)),
-        )
+        .merge(ui_asset_router())
         .route("/wallpapers/{name}", get(wallpaper))
         .route("/platform-icons/{name}", get(platform_icon))
         .route(
@@ -481,91 +226,14 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 内容指纹的输入：所有由 `asset()` 出的 JS/CSS。
-///
-/// 这份清单必须与资产路由一一对应 —— 漏一个，那个文件改了内容而指纹不变，
-/// 浏览器就会一直命中旧缓存（`asset()` 注释里警告的正是这个坑）。覆盖关系由
-/// `scripts/check-assets.js` 交叉断言，不靠人记。
-const ASSET_FINGERPRINT_INPUTS: &[&str] = &[
-    HOST_JS,
-    DIALOGS_JS,
-    SEARCH_HISTORY_JS,
-    APP_JS,
-    STAGE_JS,
-    PERF_PROBE_JS,
-    HOME_DASHBOARD_JS,
-    HOME_DASHBOARD_CSS,
-    CREATIVE_SHARE_CODE_JS,
-    ONSET_JS,
-    STAGE_CTL_JS,
-    STAGE_PARTICLES_JS,
-    STAGE_PARTICLES_GL_JS,
-    THEMES_JS,
-    SHELF_JS,
-    PL_COVERS_JS,
-    THEME_STUDIO_JS,
-    SKINS_JS,
-    CREATIVE_GL_JS,
-    CREATIVE_STAGE_JS,
-    CREATIVE_PROMPT_JS,
-    HANDDRAWN_JS,
-    BACKGROUNDS_JS,
-    BGWALL_JS,
-    LYRIC3D_JS,
-    WORKSHOP_JS,
-    STAGE_CINEMA_JS,
-    STAGE_FREECAM_JS,
-    STAGE_FOCUS_JS,
-    STAGE_LYRICS_JS,
-    STAGE_SHELF_JS,
-    STAGE3D_JS,
-    STAGE_IMMERSIVE_JS,
-    STANZA_UTIL_JS,
-    STANZA_THEME_JS,
-    STANZA_TEXTLAYOUT_JS,
-    STANZA_BG_JS,
-    STANZA_SUBTITLE_JS,
-    STANZA_CLASSIC_JS,
-    STANZA_CADENZA_JS,
-    STANZA_SONNET_FX_JS,
-    STANZA_SONNET_JS,
-    STANZA_TEMPERA_JS,
-    STANZA_SONGFORM_JS,
-    STANZA_STARBORN_JS,
-    STANZA_STARBORN_CSS,
-    STAGE_SETTINGS_JS,
-    PIXI_JS,
-    QRCODE_JS,
-    ONLINE_LOGIN_JS,
-    ONLINE_JS,
-    ONLINE_PLAYLISTS_JS,
-    ONLINE_PLAYLIST_VIEW_JS,
-    TOPSEARCH_JS,
-    FAVORITES_JS,
-    DAILY_JS,
-    DAILY_VIEW_JS,
-    PALETTE_JS,
-    VIDEO_EXPORT_JS,
-    OBS_CSS_JS,
-    SKIN_SHARED_JS,
-    SKIN_LIUNIAN_JS,
-    SKIN_QINGFENG_JS,
-    STYLE_CSS,
-    STAGE_CSS,
-    CREATIVE_CSS,
-    STAGE3D_CSS,
-    STANZA_CSS,
-    ONLINE_CSS,
-    THEME_STUDIO_CSS,
-    SKINS_CSS,
-    SKIN_SHEEN_CSS,
-    SKIN_WORKBENCH_CSS,
-    SKIN_LIUNIAN_CSS,
-    SKIN_IOS_CSS,
-    SKIN_QINGFENG_CSS,
-    STAGE_THEME_STARFALL_CSS,
-    STAGE_THEME_IOS_CSS,
-];
+/// Routes derive directly from the embedded registry; new assets need one entry.
+fn ui_asset_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
+    let mut router = Router::new();
+    for entry in assets::UI_ASSETS {
+        router = router.route(entry.path, get(move || asset(entry.mime, entry.body)));
+    }
+    router
+}
 
 /// 全部内嵌 JS/CSS 的内容指纹（进程内算一次）。
 ///
@@ -579,7 +247,7 @@ const ASSET_FINGERPRINT_INPUTS: &[&str] = &[
 /// 密码学哈希不值当。
 fn assets_fingerprint() -> &'static str {
     static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    FINGERPRINT.get_or_init(|| hash_inputs(ASSET_FINGERPRINT_INPUTS))
+    FINGERPRINT.get_or_init(|| hash_inputs(assets::ASSET_FINGERPRINT_INPUTS))
 }
 
 /// FNV-1a over the given bodies, as 16 hex digits.
@@ -1048,6 +716,60 @@ fn exposure_warning(ip: std::net::IpAddr, port: u16) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn registered_ui_assets_are_served_with_their_own_content() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, ui_asset_router::<()>())
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let mut paths = std::collections::HashSet::new();
+        for entry in assets::UI_ASSETS {
+            assert!(
+                paths.insert(entry.path),
+                "duplicate resource {}",
+                entry.path
+            );
+            let response = client
+                .get(format!("http://{addr}{}", entry.path))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200, "{}", entry.path);
+            assert_eq!(response.headers()["content-type"], entry.mime);
+            assert_eq!(response.headers()["cache-control"], "no-cache");
+            assert_eq!(response.text().await.unwrap(), entry.body, "{}", entry.path);
+        }
+        assert_eq!(
+            client
+                .get(format!("http://{addr}/not-registered.js"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn every_registered_asset_affects_the_cache_fingerprint() {
+        let original = hash_inputs(assets::ASSET_FINGERPRINT_INPUTS);
+        assert_eq!(
+            assets::UI_ASSETS.len(),
+            assets::ASSET_FINGERPRINT_INPUTS.len()
+        );
+        for (i, entry) in assets::UI_ASSETS.iter().enumerate() {
+            assert_eq!(assets::ASSET_FINGERPRINT_INPUTS[i], entry.body);
+            let mut changed = assets::ASSET_FINGERPRINT_INPUTS.to_vec();
+            changed[i] = "changed resource content";
+            assert_ne!(hash_inputs(&changed), original, "{}", entry.path);
+        }
+    }
     use std::net::{IpAddr, Ipv6Addr};
 
     /// Regression: the placeholder used to be identical to the JS variable

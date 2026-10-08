@@ -40,7 +40,7 @@ const HTML = read(path.join(WEB, 'index.html'));
 const APP = read(path.join(WEB, 'app.js'));
 const STAGE3D_JS = read(path.join(WEB, 'stage3d.js'));
 const STAGE_CSS = read(path.join(WEB, 'stage.css'));
-const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs'));
+const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'assets.rs'));
 
 let failures = 0;
 let checks = 0;
@@ -974,8 +974,8 @@ function checkLiunianNavigation() {
   ok(/catch\(function \(\) \{ return \[\]; \}\)/.test(LIUNIAN_JS),
     '单个音源失败时回落空数组，不拖垮整盘搜索');
 
-  // 6) 结果点击：本地/在线直接播放，经 ln:panel 事件交 app.js。
-  ok(/new CustomEvent\('ln:panel'/.test(LIUNIAN_JS), '面板经 ln:panel 自定义事件对外通信');
+  // 6) 结果点击：本地/在线直接播放，经 Skins.request 交 app.js。
+  ok(/window\.Skins\.request\(action, extra\)/.test(LIUNIAN_JS), '面板经通用皮肤宿主请求对外通信');
   ok(/emit\('play-local', \{ id: t\.id \}\)/.test(LIUNIAN_JS), '本地结果点击派发 play-local');
   ok(/emit\('play-online', \{ track: t \}\)/.test(LIUNIAN_JS), '在线结果点击派发 play-online');
   ok(/emit\('view-local', \{ q: panel\.q \}\)/.test(LIUNIAN_JS)
@@ -998,9 +998,9 @@ function checkLiunianNavigation() {
     '历史芯片仍由流年面板渲染（owner 不管界面）');
 
   // 8) app.js 桥接。
-  ok(/function initPanelBridge/.test(APP) && /initPanelBridge\(\)/.test(APP),
+  ok(/function initSkinBridge/.test(APP) && /initSkinBridge\(\)/.test(APP),
     'app.js 定义并启动面板桥接');
-  ok(/document\.addEventListener\('ln:panel'/.test(APP), 'app.js 监听 ln:panel');
+  ok(/window\.Skins\.connectHost\(/.test(APP), 'app.js 连接通用皮肤宿主');
   ok(/playTrack\(String\(d\.id\), state\.queue\.slice\(\)\)/.test(APP)
     && /Online\.playAll\(\[Object\.assign\(\{ playable: true \}, d\.track\)\], 0\)/.test(APP),
     '桥接分流本地 playTrack / 在线 Online.playAll');
@@ -1245,11 +1245,11 @@ function checkWiring() {
   const lnJsAt = HTML.indexOf('src="skins/skin.liunian.js"');
   ok(lnJsAt > 0, 'index.html 引入了 skin.liunian.js');
   ok(lnJsAt > HTML.indexOf('src="skins/skins.js"'),
-    'skin.liunian.js 排在 skins.js 之后（要监听 skin:changed）');
+    'skin.liunian.js 排在 skins.js 之后（要登记生命周期）');
   ok(lnJsAt < HTML.indexOf('src="app.js"'),
     'skin.liunian.js 排在 app.js 之前');
-  ok(/addEventListener\(['"]skin:changed['"]/.test(LIUNIAN_JS),
-    '重编排层挂在 skin:changed 事件上（不主动 hook 业务代码）');
+  ok(/Skins\.registerLifecycle\(SKIN_ID, \{ mount: mount, unmount: unmount \}\)/.test(LIUNIAN_JS),
+    '重编排层向 Skins 注册生命周期，由宿主排序挂卸载');
   ok(/ln-anchor/.test(LIUNIAN_JS),
     '搬运节点带锚点（切走皮肤可还原）');
   ok(/MutationObserver/.test(LIUNIAN_JS),
@@ -1692,9 +1692,9 @@ function checkQingfengWall() {
     '点它走 openStage（先关墙再进舞台），不是只改样式');
 
   section('清风：与 app.js 的桥接接线');
-  ok(/function initQingfengBridge/.test(APP) && /initQingfengBridge\(\)/.test(APP),
+  ok(/function initSkinBridge/.test(APP) && /initSkinBridge\(\)/.test(APP),
     'app.js 定义并启动清风桥接');
-  ok(/document\.addEventListener\('qf:panel'/.test(APP), 'app.js 监听 qf:panel');
+  ok(/window\.Skins\.request\(action, extra\)/.test(QINGFENG_JS), '清风使用同一皮肤请求接口');
   ok(/function queueSnapshot/.test(APP) && /d\.queue = queueSnapshot\(\)/.test(APP),
     'queue-request 回一份队列快照给海报墙');
   ok(/function playQueueIndex/.test(APP) && /d\.action === 'play-index'/.test(APP),
@@ -2195,7 +2195,7 @@ function checkQingfengWiring() {
   const qfJsAt = HTML.indexOf('src="skins/skin.qingfeng.js"');
   ok(qfJsAt > 0, 'index.html 引入了 skin.qingfeng.js');
   ok(qfJsAt > HTML.indexOf('src="skins/skins.js"'),
-    'skin.qingfeng.js 排在 skins.js 之后（要监听 skin:changed）');
+    'skin.qingfeng.js 排在 skins.js 之后（要登记生命周期）');
   ok(qfJsAt < HTML.indexOf('src="app.js"'),
     'skin.qingfeng.js 排在 app.js 之前');
 
@@ -2207,14 +2207,14 @@ function checkQingfengWiring() {
   ok(MAIN_RS.includes('/skins/skin.qingfeng.js'), 'main.rs 注册了 /skins/skin.qingfeng.js 路由');
 
   // 重编排层的挂载机制：不主动 hook 业务代码，挂在 skin:changed 上。
-  ok(/addEventListener\('skin:changed', onSkinChanged\)/.test(QINGFENG_JS),
-    '重编排层挂在 skin:changed 事件上（不主动 hook 业务代码）');
+  ok(/Skins\.registerLifecycle\(SKIN_ID, \{ mount: mount, unmount: unmount \}\)/.test(QINGFENG_JS),
+    '重编排层向 Skins 注册生命周期，由宿主排序挂卸载');
   ok(/qf-anchor/.test(QINGFENG_JS), '搬运节点带锚点（切走皮肤可还原）');
   ok(/MutationObserver/.test(QINGFENG_JS), '视图联动用 MutationObserver');
   ok(/function unmount/.test(QINGFENG_JS) && /removeBuilt\(\)/.test(QINGFENG_JS),
     '卸载时拆掉自建节点');
-  ok(/removeEventListener\('skin:changed'/.test(QINGFENG_JS) === false,
-    'skin:changed 监听常驻（切回清风时要能重新挂载）');
+  ok(!/addEventListener\('skin:changed'/.test(QINGFENG_JS),
+    '挂卸载不再依赖常驻事件监听器的注册顺序');
 
   // 作用域：海报墙与设置浮层只属于清风，别漏进业务 HTML。
   ok(!/qf-nav|qf-lattice|qf-modal|qf-poster/.test(HTML),
@@ -2354,8 +2354,96 @@ function checkStageNoHorizontalScroll() {
 
 // ---------------------------------------------------------------------------
 
+function checkLifecycleAndHost() {
+  section('扩展生命周期：有序切换、重复选择、失败还原与通用业务请求');
+  const { sandbox, root, store } = makeSandbox(['a', 'b', 'bad']);
+  const api = sandbox.Skins;
+  const calls = [];
+  let owner = null;
+  function lifecycle(id) {
+    return {
+      mount() { eq(owner, null, '新皮肤挂载前旧皮肤已释放'); owner = id; calls.push('+' + id); },
+      unmount() { eq(owner, id, '卸载的是正在持有节点的皮肤'); owner = null; calls.push('-' + id); }
+    };
+  }
+  ok(api.register({ id: 'a', lifecycle: lifecycle('a') }), '可直接登记带生命周期的新皮肤');
+  ok(api.register({ id: 'b' }), '可先登记描述');
+  ok(api.registerLifecycle('b', lifecycle('b')), '实现可以附着到已登记描述');
+  eq(api.registerLifecycle('b', lifecycle('b')), false, '重复生命周期不覆盖 owner');
+  eq(api.register({ id: 'invalid', lifecycle: { mount() {} } }), false, '拒绝缺少清理钩子的实现');
+  store.set('vmusic.skin', 'b');
+  api.init();
+  api.apply('b');
+  eq(calls.join(','), '+b', '恢复偏好与重复选择只挂载一次');
+  const unsubscribe = api.onChange(() => calls.push('event:' + owner));
+  api.apply('a');
+  eq(calls.slice(-3).join(','), '-b,+a,event:a', '先卸载再挂载，之后广播新布局');
+  unsubscribe();
+  api.apply('b');
+  eq(calls.slice(-2).join(','), '-a,+b', '反向切换与取消订阅生效');
+  api.register({ id: 'bad', lifecycle: {
+    mount() { owner = 'bad'; throw new Error('mount failure'); },
+    unmount() { owner = null; calls.push('-bad'); }
+  } });
+  let failure = null;
+  try { api.apply('bad'); } catch (error) { failure = error.message; }
+  eq(failure, 'mount failure', '挂载错误可见');
+  eq(owner, 'b', '失败后旧皮肤重新取得节点');
+  eq(root.getAttribute('data-skin'), 'b', '失败后 CSS 与皮肤 ID 还原');
+  eq(store.get('vmusic.skin'), 'b', '失败不污染保存的选择');
+
+  // 原皮肤恢复时也可能分配到一半失败；再次离开仍须找到它的清理钩子。
+  const recovery = makeSandbox(['a', 'bad']).sandbox.Skins;
+  let recoveryOwner = null, mounts = 0;
+  recovery.register({ id: 'a', lifecycle: {
+    mount() { recoveryOwner = 'a'; if (++mounts > 1) throw new Error('restore failure'); },
+    unmount() { recoveryOwner = null; }
+  } });
+  recovery.register({ id: 'bad', lifecycle: {
+    mount() { throw new Error('new failure'); }, unmount() {}
+  } });
+  recovery.apply('a');
+  try { recovery.apply('bad'); } catch (error) { failure = error.message; }
+  eq(failure, 'restore failure', '恢复挂载失败不会被静默吞掉');
+  recovery.apply('classic');
+  eq(recoveryOwner, null, '恢复中途失败的 owner 仍能在离开时释放');
+
+  const business = [];
+  Object.assign(sandbox, {
+    state: { queue: ['local-a'], snapshot: { track_id: 'online:test:1' } },
+    queueSnapshot: () => ['queue-snapshot'], viewSnapshot: () => ({ key: 'library' }),
+    playTrack: (id, queue) => business.push(['local', id, queue]),
+    playQueueStep: delta => business.push(['step', delta]),
+    post: url => business.push(['post', url]),
+    togglePlay: () => business.push(['toggle']),
+    loadDiagnostics: () => business.push(['diagnostics']),
+    __loadCacheStats: () => business.push(['cache'])
+  });
+  const start = APP.indexOf('function initSkinBridge() {');
+  const end = APP.indexOf('\n// 队列快照：', start);
+  vm.runInContext(APP.slice(start, end) + '\ninitSkinBridge();', sandbox);
+  eq(api.request('source-request').source.key, 'library', '快照经真实宿主同步返回');
+  api.request('step-track', { delta: 1 });
+  eq(business[0][1], '/v1/player/next', '在线下一曲复用服务端播放意图');
+  sandbox.state.snapshot.track_id = 'local-a';
+  api.request('step-track', { delta: -1 });
+  eq(business[1][0], 'step', '本地下一曲保留原队列入口');
+  api.request('play-local', { id: 'local-a' });
+  ok(business[2][2] !== sandbox.state.queue, '播放使用队列快照，皮肤不持有业务状态');
+  api.request('settings-enter');
+  eq(business.slice(-1)[0][0], 'diagnostics', '普通设置入口保持原刷新范围');
+  api.request('settings-enter', { sections: ['cache'] });
+  eq(business.slice(-1)[0][0], 'cache', '扩展设置刷新由请求声明，不按皮肤名分支');
+  const disconnect = api.connectHost(() => business.push(['new-host']));
+  disconnect();
+  const before = business.length;
+  api.request('toggle-play');
+  eq(business.length, before, '宿主可清理且不残留旧处理器');
+}
+
 (function main() {
   checkCatalog();
+  checkLifecycleAndHost();
   checkExtensibility();
   checkSkinEntry();
   checkNoColor();

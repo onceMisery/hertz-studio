@@ -622,10 +622,7 @@ ok(CS.importJSON('[1,2,3]').ok === false, '错误形状的 JSON 被拒绝');
   //    宽度（0.62）比它们的间距（span 26 / 64 ≈ 0.41）还大 50%，
   //    从任何角度看都是连成一片的实心墙。泛光只是把这片实心墙糊亮，
   //    不动几何就永远是一团白。数值不写死具体值，只钉「宽 < 间距」这个关系。
-  const twBlock = (csSrc.match(/var\s+SCENE_SPEC\s*=\s*\{[\s\S]*?\n  \};/) || [''])[0];
-  const twRow = (twBlock.match(/\n\s+towers:\s*\[[\s\S]*?\n\s*\],?/) || [''])[0];
-  const spanDef = parseFloat((twRow.match(/\['span',\s*'[^']*',\s*[\d.]+,\s*[\d.]+,\s*[\d.]+,\s*'[^']*',\s*([\d.]+)\s*\]/) || [])[1]);
-  const widthDef = parseFloat((twRow.match(/\['width',\s*'[^']*',\s*[\d.]+,\s*[\d.]+,\s*[\d.]+,\s*'[^']*',\s*([\d.]+)\s*\]/) || [])[1]);
+  const { span: spanDef, width: widthDef } = sandbox.CreativeGL.sceneById('towers').defaults;
   // 柱数按画质档取最多的一档（64），这是最挤的情况。
   const gap = spanDef / 64;
   ok(widthDef * 2 < gap,

@@ -25,7 +25,7 @@
 //   · 每个搬运的节点原位留一个 <span class="qf-anchor">，还原时 insertBefore 回
 //     锚点再删锚点，原顺序严格保持；
 //   · 视图切换联动用 MutationObserver（观察 .view 的 hidden），不 hook 业务代码；
-//   · 播放/取数经 document 上的 `qf:panel` 自定义事件交给 app.js 分流。
+//   · 播放/取数经 document 上的 `Skins.request` 通用请求交给 app.js 分流。
 //
 // 队列拼接页的数据来源
 // --------------------
@@ -143,7 +143,7 @@
     reflowTimer: 0,   // 让位过渡类的回收定时器
     // —— 按视图取源 ——
     // 每个 tab 的墙展示**那个 tab 的内容**：歌单页是歌单、电台页是在线曲库…
-    // 播放队列 tab 仍然是队列（第 6 个来源）。取源走 qf:panel('source-request')，
+    // 播放队列 tab 仍然是队列（第 6 个来源）。取源走 Skins.request('source-request')，
     // 由 app.js 按当前 state.view 统一给一份快照 —— 皮肤不自己读各视图的
     // 内部状态，那些结构分散在五个模块的闭包里，摸了就绑死。
     sourceKey: '',      // 当前列来自哪个视图（'library'/'online'/…）
@@ -238,9 +238,7 @@
   // -------------------------------------------------------------------------
 
   function emit(action, extra) {
-    var detail = Object.assign({ action: action }, extra || {});
-    document.dispatchEvent(new CustomEvent('qf:panel', { detail: detail }));
-    return detail;
+    return window.Skins.request(action, extra);
   }
 
   /// 要「当前 tab 那一列」的项。海报墙不自己读各视图状态（那分散在五个模块的
@@ -1988,7 +1986,7 @@
     var current = sheet.nav.querySelector('.qf-set-link.is-active');
     if (current) current.focus();
     // 设置页的诊断日志大小是「现在有多少内容」：浮层不经 setView，补一次刷新。
-    emit('settings-enter');
+    emit('settings-enter', { sections: ['cache', 'dsp', 'remote'] });
   }
 
   function closeSettingsSheet() {
@@ -2580,6 +2578,8 @@
     refs.column = byId('column');
     if (!refs.rail || !refs.column) return;
 
+    // 从第一次改动 DOM 起就允许卸载，挂载中途失败也能归还业务节点。
+    mounted = true;
     buildNav();
     buildBrandGroup();
     buildAccount();
@@ -2622,7 +2622,6 @@
     observer.observe(refs.column, { attributes: true, attributeFilter: ['hidden'], subtree: true });
     if (sheet.viewEl) observer.observe(sheet.viewEl, { attributes: true, attributeFilter: ['hidden'] });
 
-    mounted = true;
     reflow();
   }
 
@@ -2716,20 +2715,7 @@
     mounted = false;
   }
 
-  function isActiveSkin() {
-    return document.documentElement.getAttribute('data-skin') === SKIN_ID;
-  }
-
-  function onSkinChanged(e) {
-    var id = e && e.detail ? e.detail.id
-      : document.documentElement.getAttribute('data-skin');
-    if (id === SKIN_ID) mount();
-    else unmount();
-  }
-
-  document.addEventListener('skin:changed', onSkinChanged);
-
-  if (isActiveSkin()) mount();
+  window.Skins.registerLifecycle(SKIN_ID, { mount: mount, unmount: unmount });
 
   // -------------------------------------------------------------------------
   // 设置页「海报墙」组：共享页面，无论当前皮肤是否清风都接线 —— 勾选直接写

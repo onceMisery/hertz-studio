@@ -59,16 +59,11 @@
 
   var BASE_SPEC = [
     {
-      id: 'cam', title: '镜头', items: [
-        ['cam.fov', '视场角', 30, 110, 1, '°', 58],
-        ['cam.dist', '机位距离', 3, 44, 0.5, '', 15],
-        ['cam.yaw', '水平角', -180, 180, 1, '°', 0],
-        ['cam.pitch', '俯仰角', -55, 80, 1, '°', 14],
-        ['cam.height', '注视高度', -6, 10, 0.1, '', 0.6],
+      id: 'cam', title: '镜头', items: CreativeGL.cameraSpec().concat([
         ['cam.drift', '自动漂移', 0, 200, 5, '%', 18],
         ['cam.shake', '节拍抖动', 0, 200, 5, '%', 12],
         ['cam.kick', '低频跟随', 0, 200, 5, '%', 24]
-      ]
+      ])
     },
     {
       id: 'look', title: '影调', items: [
@@ -96,53 +91,6 @@
     }
   ];
 
-  // 场景私有参数。每项 = [键, 中文名, min, max, step, 单位, 默认值]。
-  // 路径一律写作 `sc.<键>`，切场景时自动指向当前场景那一份。
-  //
-  // 柱宽是 boxVert 的半宽，实际占宽要乘二；保留柱间负空间。
-  var SCENE_SPEC = {
-    towers: [
-      ['height', '柱高', 0.5, 22, 0.1, '', 5.5],
-      ['span', '排列宽度', 6, 60, 0.5, '', 24],
-      ['width', '柱宽', 0.1, 2, 0.02, '', 0.10],
-      ['depth', '柱厚', 0.1, 2, 0.02, '', 0.16],
-      ['mirror', '地面倒影', 0, 1, 0.02, '', 0.16]
-    ],
-    orb: [
-      ['radius', '球半径', 1, 8, 0.1, '', 3.0],
-      ['amp', '位移幅度', 0, 4, 0.05, '', 0.65],
-      ['wire', '线框强度', 0, 1.5, 0.02, '', 0.42],
-      ['wobble', '切向抖动', 0, 1.5, 0.02, '', 0.22]
-    ],
-    tunnel: [
-      ['ringRadius', '隧道半径', 1, 12, 0.1, '', 4.2],
-      ['ringLen', '隧道长度', 6, 48, 0.5, '', 28],
-      ['spread', '光带宽度', 0.2, 5, 0.05, '', 0.65],
-      ['push', '推进力', 0, 20, 0.2, '', 2.4]
-    ],
-    nebula: [
-      ['cloudR', '星云半径', 1, 16, 0.2, '', 6.0],
-      ['spread3', '垂直铺开', 0, 8, 0.1, '', 1.6],
-      ['size', '颗粒大小', 0.4, 8, 0.05, '', 1.25],
-      ['spin', '公转速度', 0, 3, 0.02, '', 0.18],
-      ['densityK', '密度系数', 0.2, 2, 0.02, '', 0.8]
-    ],
-    terrain: [
-      ['extent', '地形尺度', 6, 60, 0.5, '', 24],
-      ['amp2', '起伏幅度', 0, 8, 0.1, '', 1.8],
-      ['scroll', '滚动速度', 0, 3, 0.02, '', 0.22],
-      ['wire2', '网格线强度', 0, 2, 0.05, '', 0.42]
-    ],
-    lyric: [
-      ['spacing', '行距', 1, 9, 0.1, '', 2.5],
-      ['arc', '弧线', 0, 10, 0.1, '', 0.65],
-      ['pwidth', '文字宽度', 8, 32, 0.5, '', 16],
-      ['dimK', '远句亮度', 0, 1, 0.02, '', 0.48],
-      ['bob', '漂浮幅度', 0, 2, 0.05, '', 0.18],
-      ['tint', '着色强度', 0, 1.5, 0.02, '', 0.5]
-    ]
-  };
-
   // 段落只改变细微的光感和运动；机位以当前场景为基准。
   var MOODS = {
     quiet: { 'look.bloom': 0.18, 'look.vignette': 0.32, 'look.saturation': 0.88,
@@ -151,24 +99,6 @@
       'look.chroma': 0.08, 'cam.drift': 18, 'cam.shake': 12, 'cam.kick': 24, 'stage.scale': 1.0 },
     chorus: { 'look.bloom': 0.42, 'look.vignette': 0.24, 'look.saturation': 1.02,
       'look.chroma': 0.12, 'cam.drift': 26, 'cam.shake': 20, 'cam.kick': 32, 'stage.scale': 1.02 }
-  };
-
-  // 每个场景的入画机位。五个场景共用一个默认机位的结果是：隧道从外面看
-  // （一个转圈的光环，而不是穿越）、星云贴得太近、地形俯视角度不够。
-  // 切场景时基础值直接落位 + 推一条从旧机位出发的补间，镜头"飞过去"。
-  var SCENE_CAM = {
-    // 细柱用接近平视的机位，完整保留高低差和下方的淡倒影。
-    towers: { 'cam.yaw': 0, 'cam.dist': 23, 'cam.pitch': 12, 'cam.fov': 54, 'cam.height': 1.0 },
-    orb: { 'cam.yaw': 0, 'cam.dist': 13.5, 'cam.pitch': 8, 'cam.fov': 52, 'cam.height': 0 },
-    // 隧道要钻进去看：机位收进环口内侧，视场角拉大，透视的"冲向深处"才成立。
-    tunnel: { 'cam.yaw': 0, 'cam.dist': 4.2, 'cam.pitch': 2, 'cam.fov': 68, 'cam.height': 0 },
-    nebula: { 'cam.yaw': 0, 'cam.dist': 19, 'cam.pitch': 28, 'cam.fov': 54, 'cam.height': 0 },
-    terrain: { 'cam.yaw': 0, 'cam.dist': 23, 'cam.pitch': 30, 'cam.fov': 58, 'cam.height': 0 },
-    // 歌词正面入画，纵深由前后行的位置承担。
-    // yaw 必须钉死：用户自由拖拽可以环游，但每次选进这个场景时入口机位要确定，
-    // 不能继承上一个场景（或自己上次环游后）存下的 yaw——否则进场就在走廊
-    // 另一端看到整屏镜像反字。
-    lyric: { 'cam.yaw': 0, 'cam.dist': 20, 'cam.pitch': 0, 'cam.fov': 58, 'cam.height': 0 }
   };
 
   // -------------------------------------------------------------------------
@@ -265,7 +195,7 @@
   }
 
   function sceneRow(sceneId, key) {
-    var rows = SCENE_SPEC[sceneId] || [];
+    var rows = sceneDefinition(sceneId).params;
     for (var i = 0; i < rows.length; i += 1) if (rows[i][0] === key) return rows[i];
     return null;
   }
@@ -276,7 +206,7 @@
     var scene = currentScene();
     if (!sceneSpecCache || sceneSpecScene !== scene) {
       sceneSpecCache = {};
-      (SCENE_SPEC[scene] || []).forEach(function (it) { sceneSpecCache['sc.' + it[0]] = it; });
+      (sceneDefinition(scene).params).forEach(function (it) { sceneSpecCache['sc.' + it[0]] = it; });
       sceneSpecScene = scene;
     }
     return sceneSpecCache[path] || null;
@@ -321,11 +251,13 @@
   // -------------------------------------------------------------------------
   // 预置
   // -------------------------------------------------------------------------
-  function sceneDefaults(sceneId) {
-    var out = {};
-    (SCENE_SPEC[sceneId] || []).forEach(function (row) { out[row[0]] = row[6]; });
-    return out;
+  function sceneDefinition(sceneId) {
+    var def = window.CreativeGL && CreativeGL.sceneById(sceneId);
+    if (!def) throw new Error('creative-stage: 未注册的场景 ' + sceneId);
+    return def;
   }
+
+  function sceneDefaults(sceneId) { return deep(sceneDefinition(sceneId).defaults); }
 
   function basePreset() {
     var p = { version: 1, name: '未命名舞台', scene: 'towers',
@@ -336,7 +268,7 @@
       (g.items || []).forEach(function (it) { writePath(p, it[0], it[6]); });
       (g.selects || []).forEach(function (it) { writePath(p, it[0], it[3]); });
     });
-    Object.keys(SCENE_CAM.towers).forEach(function (key) { writePath(p, key, SCENE_CAM.towers[key]); });
+    Object.keys(sceneDefinition('towers').camera).forEach(function (key) { writePath(p, key, sceneDefinition('towers').camera[key]); });
     return p;
   }
 
@@ -351,7 +283,7 @@
     if (typeof p.thumb === 'string') out.thumb = p.thumb;
     if (p.scene && window.CreativeGL && CreativeGL.sceneById(p.scene)) out.scene = p.scene;
     out.sc = sceneDefaults(out.scene);
-    Object.keys(SCENE_CAM[out.scene]).forEach(function (key) { writePath(out, key, SCENE_CAM[out.scene][key]); });
+    Object.keys(sceneDefinition(out.scene).camera).forEach(function (key) { writePath(out, key, sceneDefinition(out.scene).camera[key]); });
 
     ['cam', 'look', 'stage'].forEach(function (k) {
       if (!p[k] || typeof p[k] !== 'object') return;
@@ -413,7 +345,7 @@
     BASE_SPEC.forEach(function (group) {
       (group.items || []).concat(group.selects || []).forEach(function (row) { paths[row[0]] = row; });
     });
-    (SCENE_SPEC[input.scene] || []).forEach(function (row) { paths['sc.' + row[0]] = row; });
+    (sceneDefinition(input.scene).params).forEach(function (row) { paths['sc.' + row[0]] = row; });
     function parameter(path, value) {
       var row = paths[path];
       number(value, -1000000, 1000000);
@@ -610,7 +542,7 @@
     Object.keys(MOODS[want]).forEach(function (k) {
       mood[k] = clampPath(k, MOODS[want][k]);
     });
-    var home = SCENE_CAM[preset.scene];
+    var home = sceneDefinition(preset.scene).camera;
     mood['cam.dist'] = home['cam.dist'] * (want === 'quiet' ? 1.06 : want === 'chorus' ? 0.98 : 1);
     mood['cam.fov'] = home['cam.fov'];
     mood['cam.yaw'] = home['cam.yaw'] + (want === 'quiet' ? -3 : want === 'chorus' ? 3 : 0);
@@ -830,7 +762,7 @@
   // 双击复位：基础值立刻落到目标（保证动画出栈后不会回弹），同时推一个
   // 从当前值出发的补间 —— 于是看到的是镜头"滑回去"，而不是跳回去。
   function resetView() {
-    var target = SCENE_CAM[preset.scene];
+    var target = sceneDefinition(preset.scene).camera;
     Object.keys(target).forEach(function (k) { writePath(preset, k, target[k]); });
     interact.zoomTarget = null;
     interact.vx = 0;
@@ -918,7 +850,7 @@
     if (sceneSwitched) {
       next.scene = intent.scene;
       next.sc = sceneDefaults(intent.scene);
-      var camTo = SCENE_CAM[intent.scene];
+      var camTo = sceneDefinition(intent.scene).camera;
       if (camTo) {
         Object.keys(camTo).forEach(function (k) {
           writePath(next, k, clampPath(k, camTo[k]));
@@ -1651,6 +1583,7 @@
     // 预置
     preset: function () { return deep(preset); },
     scene: currentScene,
+    ownsLyrics: function () { return !!(preset && sceneDefinition(currentScene()).ownsLyrics); },
     shareSnapshot: shareSnapshot,
     normalizeSharePreset: normalizeSharePreset,
     setPreset: function (p, opts) {
@@ -1669,7 +1602,7 @@
       if (!window.CreativeGL || !CreativeGL.sceneById(id)) return false;
       // 入画补间的起点要在改数据之前采样：之后 resolve 会把 runtime 刷成
       // 新场景的值，那时再补采样拿到的"起点"就是终点，镜头会瞬移。
-      var camTo = SCENE_CAM[id];
+      var camTo = sceneDefinition(id).camera;
       var camFrom = null;
       if (camTo) {
         camFrom = {};
@@ -1724,7 +1657,7 @@
       // 场景行路径必须带 sc. 前缀：setParam/readPath/readRuntime 全都按
       // "sc.键"寻址，runtime() 返回的扁平映射里也是 sc.dimK 这样的键。
       // 工坊拿到前缀后，滑块写值、pathPicker 选值、findRow 反查名称三处才一致。
-      var sceneRows = deep(SCENE_SPEC[currentScene()] || []).map(function (row) {
+      var sceneRows = deep(sceneDefinition(currentScene()).params).map(function (row) {
         var out = row.slice();
         out[0] = 'sc.' + row[0];
         return out;

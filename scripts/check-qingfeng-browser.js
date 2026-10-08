@@ -287,7 +287,7 @@ const { clickPoster } = require('./qf-wall-helpers.js');
   section('每个 tab 的墙取到自己的内容');
 
   // 逐个 tab：切过去 → 开墙 → 读来源标签 + 海报数。
-  // 用 qf:panel 直接问 app.js「这个 tab 的源有几项」，与墙上渲染出的海报数比对。
+  // 用 Skins.request 询问 app.js「这个 tab 的源有几项」，与墙上海报数比对。
   const TABS = [
     { view: 'playlists', key: 'playlists', label: '歌单' },
     { view: 'online', key: 'online', label: '在线曲库' },
@@ -341,8 +341,7 @@ const { clickPoster } = require('./qf-wall-helpers.js');
 
     // 问 app.js 这个 tab 的源里有几项（与墙上应当一致）
     const src = await page.evaluate(() => {
-      const d = { action: 'source-request' };
-      document.dispatchEvent(new CustomEvent('qf:panel', { detail: d }));
+      const d = window.Skins.request('source-request');
       return d.source;
     });
 

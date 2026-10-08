@@ -32,7 +32,7 @@ const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 
 const THEMES_JS = read(path.join(WEB, 'themes.js'));
 const STYLE_CSS = read(path.join(WEB, 'style.css'));
-const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs'));
+const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'assets.rs'));
 
 let failures = 0;
 let checks = 0;

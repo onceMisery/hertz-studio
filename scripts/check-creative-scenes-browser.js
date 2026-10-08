@@ -154,9 +154,39 @@ async function main() {
       }
       return { minGap, maxTerrainDrift, error: gl.getError() };
     });
-    fs.writeFileSync(path.join(out, 'metrics.json'), JSON.stringify({ captures, stress, geometry, errors }, null, 2));
+    const extension = process.env.SCENE_CAPTURE === 'before' ? null : await page.evaluate(() => {
+      let passes = 0;
+      CreativeGL.register({ id: 'registered-probe', label: '注册绘制', aliases: ['registered probe'],
+        params: [['amount', '强度', 0, 1, .1, '', .7]],
+        camera: { 'cam.yaw': 0, 'cam.pitch': 0, 'cam.dist': 15, 'cam.height': 0, 'cam.fov': 60 },
+        ownsLyrics: true, geom: { mode: 'TRIANGLES', verts: 3, instances: 1 }, depth: false, blend: 'add',
+        uniforms: ['uProbe'], decl: 'uniform float uProbe;',
+        vert: 'void main(){vec2 p=gl_VertexID==0?vec2(-.8,-.8):gl_VertexID==1?vec2(.8,-.8):vec2(0.,.8);gl_Position=vec4(p,0.,1.);}',
+        frag: 'out vec4 frag;void main(){frag=vec4(.2,uProbe,.3,1.);}',
+        setup: (gl, U, state) => gl.uniform1f(U.uProbe, state.p.amount),
+        extraPasses() { passes++; } });
+      CreativeStage.setScene('registered-probe');
+      const item = checkStates[0], p = CreativeStage.preset();
+      const state = { ...item.state, scene: p.scene, p: p.sc, lyricVisible: true,
+        post: { ...p.look, bloom: 0, grain: 0, vignette: 0, chroma: 0 } };
+      item.engine.resize(128, 128, 1);
+      const gl = item.canvas.getContext('webgl2'), pixels = new Uint8Array(128 * 128 * 4);
+      function visible() {
+        const result = item.engine.render(state);
+        if (!result.ok) throw new Error(JSON.stringify(result));
+        gl.readPixels(0, 0, 128, 128, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        return pixels.filter((value, i) => i % 4 !== 3 && value > 24).length;
+      }
+      const shown = visible(); state.lyricVisible = false; const hidden = visible();
+      return { shown, hidden, passes, error: gl.getError() };
+    });
+    fs.writeFileSync(path.join(out, 'metrics.json'), JSON.stringify({ captures, stress, geometry, extension, errors }, null, 2));
     console.log(JSON.stringify({ captures, geometry, errors }, null, 2));
     if (process.env.SCENE_CAPTURE !== 'before') {
+      assert.ok(extension.shown > 100, 'registered scene renders through the actual GL dispatcher');
+      assert.equal(extension.hidden, 0, 'registered lyric scene obeys visibility capability');
+      assert.equal(extension.passes, 1, 'lyric visibility also gates descriptor extra passes');
+      assert.equal(extension.error, 0, 'registered scene creates no GL errors');
       assert.ok(geometry.minGap > 0, 'projected lyric glyph strips must remain separated at width/spacing/bob limits');
       assert.ok(geometry.maxTerrainDrift < .001, 'terrain stays framed after ten minutes of playback');
       assert.equal(geometry.error, 0, 'no WebGL errors during real vertex checks');

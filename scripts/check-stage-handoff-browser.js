@@ -8,6 +8,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const ui = path.resolve(__dirname, '../plugin/ui');
 const source = fs.readFileSync(path.join(ui, 'stage3d.js'), 'utf8');
 const host = source.slice(source.indexOf('  var HANDOFF_MAX_MS'), source.indexOf('  // 曲式层读数'));
+const registry = source.slice(source.indexOf('  var LYRIC_RENDERERS'), source.indexOf('  // starborn 是元导演'));
 
 async function run(browser, viewport) {
   const page = await browser.newPage({ viewport });
@@ -20,18 +21,20 @@ async function run(browser, viewport) {
     await page.addScriptTag({ content: `(function () {
       var global=window, showLyrics=true;
       var probe=window.probe={time:1000,playing:true,reduced:false,ready:{classic:true,cadenza:true,sonnet:false,tempera:false}};
-      var RENDERER_IDS=['classic','cadenza','sonnet','tempera'], stanza={shownVisual:null};
+      var stanza={ready:false,shownVisual:null};
       function $(id){return document.getElementById(id)}
       function reducedMotion(){return probe.reduced}
       function songformNow(){return {line:{gapBefore:0.6}}}
       function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+      function sceneOwnsLyrics(){return false}
       window.Stage={position:()=>probe.time,presentation:()=>({playing:probe.playing})};
-      RENDERER_IDS.forEach(id=>stanza[id]={rootEl:()=>$(id),setVisible:b=>$(id).hidden=!b,isReady:()=>probe.ready[id]});
+      ${registry}
+      LYRIC_RENDERERS.forEach(({id})=>rendererInstances[id]={rootEl:()=>$(id),setVisible:b=>$(id).hidden=!b,isReady:()=>probe.ready[id]});
       ${host}
       probe.switchTo=id=>{applyLayerVisibility(id,showLyrics);driveHandoff()};
       probe.frame=time=>{probe.time=time;driveHandoff()};
       probe.show=b=>{showLyrics=b;applyLayerVisibility(stanza.shownVisual,b)};
-      probe.state=()=>Object.fromEntries(RENDERER_IDS.map(id=>[id,{
+      probe.state=()=>Object.fromEntries(LYRIC_RENDERERS.map(({id})=>[id,{
         visible:!$(id).hidden,opacity:Number(getComputedStyle($(id)).opacity),
         filter:getComputedStyle($(id)).filter,classes:$(id).className,
         willChange:getComputedStyle($(id)).willChange

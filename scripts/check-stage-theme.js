@@ -33,7 +33,7 @@ const STAGE3D_CSS = read(path.join(WEB, 'stage3d.css'));
 const STAGE3D_JS = read(path.join(WEB, 'stage3d.js'));
 const SKINS_JS = read(path.join(WEB, 'skins', 'skins.js'));
 const HTML = read(path.join(WEB, 'index.html'));
-const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs'));
+const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'assets.rs'));
 const WORKSHOP = read(path.join(WEB, 'workshop.js'));
 
 let failures = 0;

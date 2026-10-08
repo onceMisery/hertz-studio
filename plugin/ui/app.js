@@ -5563,15 +5563,16 @@ function bindShortcuts() {
 }
 
 // ---------------------------------------------------------------------------
-// 流年搜索面板桥接：播放分流 + 「查看全部」带词跳转
+// 皮肤宿主：通用动作与只读快照，复用现有业务入口
 // ---------------------------------------------------------------------------
-function initPanelBridge() {
-  document.addEventListener('ln:panel', (e) => {
-    const d = e.detail || {};
+function initSkinBridge() {
+  window.Skins.connectHost((d) => {
     if (d.action === 'settings-enter') {
-      // 流年把设置页搬进了浮层，不再经过 setView('settings')，
-      // 这里补上它原本顺带做的诊断日志刷新，否则设置页里的日志大小会停在旧值。
       loadDiagnostics();
+      const refreshers = { cache: window.__loadCacheStats, dsp: window.__loadDspSettings, remote: window.__loadRemoteRoots };
+      (Array.isArray(d.sections) ? d.sections : []).forEach(section => {
+        if (typeof refreshers[section] === 'function') refreshers[section]();
+      });
     } else if (d.action === 'play-local') {
       playTrack(String(d.id), state.queue.slice());
     } else if (d.action === 'play-online') {
@@ -5594,27 +5595,6 @@ function initPanelBridge() {
       setView('online');
       // 已在在线页且已有旧结果时 onViewEnter 早退，补一次显式搜索新关键词。
       if (wasOnline && window.Online) window.Online.search();
-    }
-  });
-}
-
-// 清风皮肤的「队列拼接」海报墙需要两件在闭包里的事：队列里有哪些歌、哪首
-// 在放。皮肤拿不到 state，所以走一条只读请求：它发 qf:panel('queue-request')，
-// 这里同步把快照挂回 detail（同一批 CustomEvent 对象，emit 之后皮肤即可读）。
-//
-// 播放方向相反：皮肤**不自己发播放请求**，只发意图（play-index / play-step），
-// 真正落 play 的还是 app.js —— 播放路径只有一条，不会出现皮肤点一下、app.js
-// 又点一下的双触发。
-function initQingfengBridge() {
-  document.addEventListener('qf:panel', (e) => {
-    const d = e.detail || {};
-    if (d.action === 'settings-enter') {
-      // 清风把设置页搬进了浮层，不再经过 setView('settings')，
-      // 这里补上它原本顺带做的诊断日志刷新，否则设置页里的日志大小会停在旧值。
-      loadDiagnostics();
-      if (window.__loadCacheStats) window.__loadCacheStats();
-      if (window.__loadDspSettings) window.__loadDspSettings();
-      if (window.__loadRemoteRoots) window.__loadRemoteRoots();
     } else if (d.action === 'queue-request') {
       d.queue = queueSnapshot();
     } else if (d.action === 'source-request') {
@@ -5784,7 +5764,7 @@ function viewSourceDef(view) {
   }[view] || null;
 }
 
-/// 当前视图的源快照。皮肤发 qf:panel('source-request') 过来要这个。
+/// 当前视图的源快照。皮肤发 Skins.request('source-request') 过来要这个。
 function viewSnapshot() {
   const def = viewSourceDef(state.view);
   if (!def) return { key: '', label: '', kind: 'track', items: [], emptyHint: '' };
@@ -8022,8 +8002,8 @@ async function startApp() {
   initSleepTimer();
   initPalette();
   initBarVisibility();
-  initPanelBridge();
-  initQingfengBridge();
+  initSkinBridge();
+
   bindMediaSession();
 
   setView('library');

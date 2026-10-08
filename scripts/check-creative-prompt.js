@@ -61,6 +61,8 @@ sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
 const src = fs.readFileSync(path.join(WEB, 'creative-prompt.js'), 'utf8');
+const definitions = fs.readFileSync(path.join(WEB, 'creative-gl.js'), 'utf8');
+vm.runInContext(definitions, sandbox, { filename: 'creative-gl.js' });
 
 section('加载模块（无 DOM / 无存储 / 无网络）');
 // 行为证明的一半：沙箱里根本没有那些全局量，能加载、能编译就说明没碰它们。
@@ -313,6 +315,7 @@ section('重复别名：开发期错误');
   vm.createContext(box);
   let threw = null;
   try {
+    vm.runInContext(definitions, box, { filename: 'creative-gl.js' });
     vm.runInContext(doctored, box, { filename: 'creative-prompt.doctored.js' });
   } catch (e) {
     threw = e;
