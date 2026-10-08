@@ -476,6 +476,8 @@ hertz-studio/
 
 ## 开发
 
+新增皮肤、舞台场景、音乐渠道与内嵌资源请参阅[扩展指南](docs/extension-guide.md)。
+
 ```bash
 cargo test --workspace        # 单元 + 集成测试
 cargo clippy --workspace --all-targets -- -D warnings

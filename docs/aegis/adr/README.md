@@ -29,3 +29,4 @@
 | 0006 | `0006-frame-gates-and-visual-timing.md` | 帧门是整数分频且只往下取，档位表里不许写除不尽的帧率 |
 | 0007 | `0007-playback-transitions-and-intent-ownership.md` | 集合与下一曲准备绑定意图，样本衔接由回调执行，资料会员信息不参与授权 |
 | 0008 | `0008-home-actions-and-creative-share.md` | 首页只发原播放意图，创意分享由原预置规则验证且有字节边界 |
+| 0009 | `0009-extension-registries.md` | 内置扩展定义集中登记，保留原播放、预置、时钟与资源响应归属 |

@@ -79,3 +79,6 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-08 | spec | docs/aegis/specs/2026-10-08-extension-architecture-design.md | 扩展入口归属与兼容设计 |
 | 2026-10-08 | plan | docs/aegis/plans/2026-10-08-extension-architecture.md | 皮肤、场景、音源与资源扩展实施计划 |
 | 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-architecture/20-checkpoint.md | 扩展架构实施检查点 |
+| 2026-10-08 | adr | docs/aegis/adr/0009-extension-registries.md | 内置扩展定义、生命周期与运行时归属 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-architecture/90-evidence.md | 扩展架构回归、浏览器与独立审查证据 |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-architecture/99-reflection.md | 扩展架构对齐、退役与交付边界 |
