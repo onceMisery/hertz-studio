@@ -28,3 +28,27 @@
 - docs/aegis/work/2026-10-08-extension-live-integration/90-evidence.md
 - Blocked on: QQ资料401/取流失败，人工扫码尚未收到答复；汽水搜索为空；Jamendo未联调
 - Next step: 提交、ff合并master，核对合并后代码与最终包并关闭隔离测试进程
+
+## Checkpoint Update
+
+- Current todo: 代码集成完成；真实平台全量验收保留外部待办
+- Active slice: 交付记录收口
+- Completed todos:
+- 79857fd修复提交已ff合并master，原工作树保留
+- 最终包native DBX0.6.35真实换肤、场景与网易云静音CPAL播放通过
+- 前端48、Rust510通过/1忽略、最终包sidecar269、工坊8组通过
+- 合并后前端48与sidecar269再次通过，98个包内资产与master一致
+- 隔离宿主、插件和18784服务停止；绘制与事件探针已恢复；原7634服务保留
+- Evidence refs:
+- docs/aegis/work/2026-10-08-extension-live-integration/90-evidence.md
+- Blocked on: QQ资料401/取流失败，人工扫码尚无答复；汽水搜索为空；Jamendo未联调
+- Next step: 继续QQ验收需在隔离宿主用手机QQ扫码，然后重新验证资料、取流和播放；其余外部边界见证据表
+
+## DriftCheckDraft
+
+- Scope status: 代码收尾和本地合并已完成；全量真实平台验收仍有外部依赖
+- Compatibility status: aligned；HTTP/RPC和现有注册及保存契约保持；DBX已验收下限0.6.35
+- Retirement status: 旧HTTP票据误依赖及过期sidecar断言已退役；临时探针和测试进程已清理
+- New risk signals:
+- QQ人工扫码未完成；汽水搜索空结果；Jamendo未联调
+- Advisory decision: needs-verification

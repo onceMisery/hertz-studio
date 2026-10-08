@@ -68,6 +68,12 @@ Aegis helper 已建立本次工作记录，`bundle` 成功生成结构证据包�
 
 代码收尾和本地合并可以独立完成；真实平台全量验收仍受上述登录/配置/上游结果限制。整体证据置信度 B，不能据此宣称所有平台已验收或已发布。
 
+## 本地集成结果
+
+修复提交 `79857fd` 已快进合并到 `master`。合并后再次运行前端 48 步和最终包 sidecar 269 项，全部通过；主分支 98 个 UI/资产文件在归一换行后与最终包一致，manifest 的平台入口转换也匹配。日志分别为 `output/extension-resume-merged-frontend.log`、`output/extension-resume-merged-sidecar.log`、`output/extension-resume-merged-package.json`。
+
+测试绘制探针和事件观察器已移除，隔离 DBX 插件、宿主及 18784 服务均已停止；端口检查只剩原用户服务 7634。测试数据、截图和插件包保留在 ignored output 中。后续仅收口本记录，不再更改生产代码。
+
 ## EvidenceBundleDraft
 
 - Artifact key: native-dbx

@@ -2,12 +2,13 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-10-08-extension-live-integration",
   "lastCheckpointRef": "docs/aegis/work/2026-10-08-extension-live-integration/todo-checkpoint-draft.json",
-  "resumeInstruction": "原架构已在master；待合并本轮DBX连接/最低版本与测试文档。所有平台不等同于均已验收，继续QQ需手机QQ扫码。",
+  "resumeInstruction": "代码与本地合并已完成，无需重做架构重构。需要真实账号补验时重启output/dbx-0.6.35/DBX.exe并使用output/extension-live-dbx-035，最终包位于output/extension-resume-package。不要把缓存signedIn视为有效登录。",
   "knownPartialWork": [
-    "HTTP/DBX连接边界修复与真实DbxTransport回归",
-    "最终DBX0.6.35包字节核对、原生换肤/场景/网易云播放验证",
-    "前端48、Rust510通过/1忽略、最终包sidecar269、独立服务工坊8组通过",
-    "两轮独立审查及增量复核，无遗留P1/P2"
+    "79857fd修复提交已ff合并master，原工作树保留",
+    "最终包native DBX0.6.35真实换肤、场景与网易云静音CPAL播放通过",
+    "前端48、Rust510通过/1忽略、最终包sidecar269、工坊8组通过",
+    "合并后前端48与sidecar269再次通过，98个包内资产与master一致",
+    "隔离宿主、插件和18784服务停止；绘制与事件探针已恢复；原7634服务保留"
   ],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-10-08-extension-live-integration/10-intent.md",
@@ -15,6 +16,6 @@
     "docs/aegis/work/2026-10-08-extension-live-integration/todo-checkpoint-draft.json"
   ],
   "unsafeToAssume": [
-    "本地signedIn=true不证明第三方会话有效；原用户服务7634不属于本次测试"
+    "没有人工扫码成功证据，不能声称QQ账号/播放通过；未配置或空结果的平台不能列为全量验收成功"
   ]
 }

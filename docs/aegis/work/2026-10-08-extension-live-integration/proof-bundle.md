@@ -21,7 +21,7 @@ This proof bundle is an advisory Aegis Method Pack record. It does not determine
 
 ## Drift Check
 
-- Scope status: 完成既有修复、原生联调和本地合并范围；未扩展上游平台协议
-- Compatibility status: aligned；HTTP票据边界、RPC/API、注册ID与保存格式不变；已验收DBX最低版本0.6.35
-- Retirement status: 移除DBX对HTTP票据的错误依赖及过期sidecar测试假设；不恢复旧质量源名单
-- Advisory decision: continue
+- Scope status: 代码收尾和本地合并已完成；全量真实平台验收仍有外部依赖
+- Compatibility status: aligned；HTTP/RPC和现有注册及保存契约保持；DBX已验收下限0.6.35
+- Retirement status: 旧HTTP票据误依赖及过期sidecar断言已退役；临时探针和测试进程已清理
+- Advisory decision: needs-verification

@@ -5,7 +5,7 @@
   ],
   "impactStatement": "docs/aegis/work/2026-10-08-extension-live-integration/impact-statement-draft.json",
   "compatPlan": "HTTP/RPC API 不变；最低已验收 DBX 版本设为 0.6.35",
-  "retirementPlan": "移除DBX对HTTP票据的错误依赖及过期sidecar测试假设；不恢复旧质量源名单",
+  "retirementPlan": "旧HTTP票据误依赖及过期sidecar断言已退役；临时探针和测试进程已清理",
   "evidenceBundle": [
     "docs/aegis/work/2026-10-08-extension-live-integration/evidence-bundle-draft-native-dbx.json"
   ]
