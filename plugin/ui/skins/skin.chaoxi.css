@@ -57,38 +57,49 @@
   /* ==== 布局令牌 ====
      与 sheen 同一组键，取值整体再松一档。--skin-title 是 34px（设计稿 h1
      34/42），比 sheen 的 24px 大一档——潮汐靠字号差分层级，标题必须够重。 */
-  --skin-gap: 32px;
-  --skin-pad: 40px;
+  /* ⚠ 尺度这一组是**两轮实测**的结果，别凭手感往回加。
+     第一版取 gap 32 / pad 40 / title 34 / card-min 300，看着"留白很足"，
+     实测直接坏掉：曲库页的 .lib-list 被压到 **12px**（clientHeight 12 /
+     scrollHeight 1564）—— 用户看到的"滚不动"就是这个，同一屏的"字体太大"
+     也是同一个根因：一屏总共就那么高，留白吃掉的全是从内容里扣的。
+     留白是**省出来**的，不是**放大**出来的：内容少的一页本来就空，
+     不需要靠往上加 padding 制造空气。 */
+  --skin-gap: 20px;
+  --skin-pad: 24px;
   --skin-radius: 20px;      /* 设计稿纪律：任何圆角不得超过 20px */
-  --skin-row-py: 16px;      /* 行内上下留白——信息密度的主要旋钮 */
-  --skin-card-min: 300px;   /* 1080 内容区下恰好 3 列（设计稿的 3/2/1 断点） */
-  --skin-head-pb: 24px;
-  --skin-title: 34px;
+  --skin-row-py: 10px;      /* 行内上下留白——信息密度的主要旋钮 */
+  --skin-card-min: 200px;   /* 一屏放得下 4~5 张，而不是 2 张 */
+  --skin-head-pb: 16px;
+  --skin-title: 24px;       /* 页标题回到与正文拉得开、又不喧宾夺主的档 */
 
   /* ==== 潮汐专属：内容区定宽居中 ====
      宽屏不铺满：两侧留白本身就是分区手段，比再画一条分隔线更干净。
      窄屏由 @media 收窄 --skin-pad，内容自然贴边。 */
   --skin-content-max: 1080px;
   --skin-rail-w: 72px;
-  --skin-stage-w: min(560px, 42vw);
+  /* 舞台从 560 收到 440：它是**脱流**的，宽度直接从内容区里扣。
+     560 在 1440 屏上要占 39%，内容区只剩 662 —— 卡片掉到 2 列、
+     工具行挤成一团。收到 440 后内容区多出 120px，且唱片依旧是大尺寸
+     （高度由视口算出，与面板宽度无关，只有 70% 的宽度上限会碰它）。 */
+  --skin-stage-w: min(440px, 30vw);
 
   /* ==== 排版令牌 ====
      这几个键与 style.css 的 :root 同名同义（默认主题下像素不变），皮肤只覆盖
      数值——于是"整屏字号一起动"是改这几个数的必然结果，而不是逐个组件去抄。 */
   --skin-h1: var(--skin-title); /* 一级：区块标题。与 --skin-title 同值，
                                     区别是 --skin-h1 会被组件层直接消费。 */
-  --skin-h2: 15px;         /* 二级：曲名、卡片标题 */
-  --skin-h3: 12.5px;       /* 三级：艺人 / 专辑 / 时长 / 索引 */
-  --skin-h4: 11px;         /* 四级：音质徽标、表头小标签 */
-  --skin-h-album: 13px;    /* 专辑名比艺人略大一档 */
+  --skin-h2: 14px;         /* 二级：曲名、卡片标题 */
+  --skin-h3: 12px;         /* 三级：艺人 / 专辑 / 时长 / 索引（与默认同值） */
+  --skin-h4: 11px;         /* 四级：音质徽标、表头小标签（与默认同值） */
+  --skin-h-album: 12.5px;  /* 专辑名比艺人略大一档（与默认同值） */
   --skin-h2-w: 500;        /* 正文字重：潮汐靠灰度与字重分层，不上 550 */
-  --skin-line-h: 1.7;      /* 正文行高：低密度下 1.5 会显得挤 */
-  --skin-track-tight: -0.32px; /* 34px 的标题不收字距会散开 */
-  --skin-track-wide: 0.8px;    /* 辅助信息反而要开字距才不糊成一条 */
+  --skin-line-h: 1.6;      /* 正文行高：比默认 1.5 略松，多了会顶掉一屏的行数 */
+  --skin-track-tight: -0.2px;  /* 24px 的标题收一点字距就够 */
+  --skin-track-wide: 0.7px;    /* 辅助信息开字距才不糊成一条 */
 
-  --skin-lh-tight: 1.24;   /* 标题行高：1.7 是为多行正文准备的，套到单行标题上
+  --skin-lh-tight: 1.3;    /* 标题行高：1.6 是为多行正文准备的，套到单行标题上
                                会把标题与下方工具撑得太远 */
-  --skin-w-head: 600;      /* 标题字重：设计稿 h1 是 600，不是 sheen 的 700 */
+  --skin-w-head: 600;      /* 标题字重：比正文重一档，不用拉到 700 */
 
   /* ==== 表面令牌 ====
      悬浮件（舞台 / 播放栏）用 --glass-bg-strong：那是 style.css 为"浮起件"
@@ -209,8 +220,34 @@
   width: 100%;
   max-width: var(--skin-content-max);
   margin-inline: auto;
-  padding: var(--skin-pad) 0 0;
+  padding: var(--skin-pad) 0 var(--skin-pad);
   min-width: 0;
+  /* 整页滚动：滚动的责任从"各列表体"上移到 .view 一个容器。
+     为什么必须改：默认链路是 .view 固定高 + 每个列表体 flex:1 自己滚，
+     于是列表能拿到的只有**剩余高度**。曲库页里「每日推荐」大卡与快捷卡区
+     先占掉 700+，剩给 .lib-list 的实测只有 12px（clientHeight 12 /
+     scrollHeight 1564）—— 用户报的"旁边无法滚动"就是这个：曲目列表被
+     压成一条缝，看不见也拖不动。这不是把尺寸调小能解决的，得换滚动结构。
+     项目里 .online-body 早就是同一套（它注释写着"不再自己滚动，滚动统一
+     交给外层，避免两层嵌套滚动"），潮汐只是把这条原则推广到全部列表体。
+     overflow-x 必须显式 hidden：内层元素（.stage::before 那类 inset 负值的
+     光晕、长歌名）会把 scrollWidth 撑出去，纵向容器多一条横向滚动条。 */
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+}
+
+/* ⚠ 这一条是 .view 能滚的前提，漏了它上一条等于没写。
+   .view 是 flex 列：内容超出时 flex 会**先把可收缩项压扁**，而不是产生滚动。
+   实测第 3 版就栽在这里 —— 滚动结构已经换对了（.lib-list 拿到了完整 1564px），
+   但 .daily-strip 仍是 style.css 默认的 flex: 0 1 auto，被压成 **50px** 高，
+   而它的 overflow:hidden 把里面 122px 的标题行和 668px 的 24 张卡片一起裁掉。
+   症状是"每日推荐只剩一行标题"，页面不报错、区块在、数据也在。
+   所以：滚动容器里的直接子元素一律不可收缩，高度交给内容自己定。
+   （这是项目里那条"定高 flex 列最后一个可收缩项会被压扁"的同一件事，
+   只是这回被压的是整个区块，而不只是行盒。） */
+[data-skin="chaoxi"] .view > * {
+  flex: none;
 }
 
 [data-skin="chaoxi"] .col-head {
@@ -279,6 +316,19 @@
   gap: 8px;
   display: flex;
   flex-direction: column;
+}
+
+/* 列表体交出滚动权（见 .view 那段）：高度随内容、不再参与 flex 分配。
+   漏掉这条，"整页滚动"只是多了一层：外层 .view 能滚，内层 .lib-list 照样
+   被 flex:1 压成 12px 并自己滚，两层叠着，用户看到两个滚动条。 */
+[data-skin="chaoxi"] .lib-list,
+[data-skin="chaoxi"] .q-list,
+[data-skin="chaoxi"] .pl-list,
+[data-skin="chaoxi"] .fav-list,
+[data-skin="chaoxi"] .dv-body {
+  flex: none;
+  min-height: 0;
+  overflow: visible;
 }
 
 /* --- 卡片网格：格子更大，一屏放得更少 ---------------------------------- */
@@ -410,7 +460,14 @@
 [data-skin="chaoxi"] .disc-wrap {
   width: min(
     70%,
-    clamp(120px, calc(100dvh - 452px - var(--skin-gap) * 3 - var(--skin-pad) * 2), 320px)
+    clamp(
+      110px,
+      calc(
+        100dvh - var(--topbar-h) - var(--skin-gap) * 3 - 80px
+          - var(--skin-pad) * 2 - 174px - 100px
+      ),
+      320px
+    )
   );
   flex: none;
   align-self: center;
@@ -491,15 +548,15 @@
    必须排在上面那条 ≤1240px 的**后面**（同为 (0,1,1)，靠源码顺序决胜）。 */
 @media (max-width: 900px) {
   [data-skin="chaoxi"] {
-    --skin-gap: 24px;
-    --skin-pad: 24px;
+    --skin-gap: 16px;
+    --skin-pad: 18px;
     --skin-stage-foot: calc(117px + var(--skin-gap) * 2);
   }
   [data-skin="chaoxi"] .app {
     padding: 0 var(--skin-pad) var(--skin-gap);
   }
   [data-skin="chaoxi"] .view {
-    padding: var(--skin-pad) 0 0;
+    padding: var(--skin-pad) 0 var(--skin-pad);
   }
   [data-skin="chaoxi"] .bar {
     margin: 0 var(--skin-pad) var(--skin-gap);
@@ -508,11 +565,11 @@
 
 @media (max-width: 620px) {
   [data-skin="chaoxi"] {
-    --skin-gap: 16px;
-    --skin-pad: 16px;
+    --skin-gap: 12px;
+    --skin-pad: 14px;
     --skin-stage-foot: calc(163px + var(--skin-gap) * 2);
     --skin-rail-w: 60px;
-    --skin-title: 26px;
+    --skin-title: 21px;
   }
   [data-skin="chaoxi"] .app {
     grid-template-columns: var(--skin-rail-w) minmax(0, 1fr);

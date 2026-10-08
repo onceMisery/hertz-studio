@@ -1289,20 +1289,27 @@ function checkChaoxiSkin() {
 
   const body = stripCssComments(CHAOXI);
 
-  // 1) 密度：每个间距令牌都要真的比 sheen（已是最松的一套）更松。
+  // 1) 尺度必须**守在可用范围内**，不能靠"更大"来做差异化。
+  //
+  // 第一版取 gap 32 / pad 40 / title 34 / card-min 300，看着"留白很足"，
+  // 浏览器实测直接坏掉：曲库页的 .lib-list 被压到 **12px**
+  // （clientHeight 12 / scrollHeight 1564）——"滚不动"就是这个，
+  // 同一屏的"字体太大"也是同一个根因：一屏总高就那么多，留白吃掉的
+  // 全是从内容里扣的。所以这里钉的是**上限**，不是下限。
   //
   // 只取**基础令牌块**（第一个 `[data-skin=…] {}`）：tokensOf() 抓的是全文件
-  // 所有同名声明，最后一次赋值胜出，而窄屏断点里还覆盖了一次更小的
-  // --skin-gap/--skin-pad —— 拿那个值比"谁更松"会把响应式收窄读成"更紧"，
-  // 断言红在与意图无关的地方。
+  // 所有同名声明、最后一次赋值胜出，而窄屏断点里还覆盖了一次更小的值 ——
+  // 拿那个比会读偏。
   const cx = baseTokens(CHAOXI);
-  const sh = baseTokens(SHEEN);
-  for (const k of ['gap', 'pad', 'row-py', 'card-min']) {
+  const LIMITS = { gap: 24, pad: 28, 'row-py': 12, 'card-min': 220 };
+  for (const k of Object.keys(LIMITS)) {
     const a = num(cx[k]);
-    const b = num(sh[k]);
-    ok(a !== null && b !== null, `chaoxi 声明了 --skin-${k} 且是数值（${cx[k]} / ${b}）`);
-    ok(a > b, `--skin-${k} 比 sheen 更松（${a} > ${b}，否则"再松一档"是空话）`);
+    ok(a !== null, `chaoxi 声明了 --skin-${k}（${cx[k]}）`);
+    ok(a <= LIMITS[k], `--skin-${k} 不超过 ${LIMITS[k]}px（实际 ${a}，超了会把内容挤出可视区）`);
   }
+  ok(num(cx['title']) <= 26, `--skin-title 不超过 26px（实际 ${cx['title']}）`);
+  ok(/--skin-stage-w:\s*min\(4[0-9]{2}px/.test(stripCssComments(CHAOXI)),
+    '舞台宽度收在 440px 以内（脱流件宽度直接从内容区扣，宽了内容就没了）');
   // 圆角反着来：设计稿纪律是"任何圆角不得超过 20px"，超过就与克制冲突，
   // 所以它必须**收**在 sheen（22px）之内。
   ok(num(cx['radius']) <= 20, `--skin-radius 不超过 20px（实际 ${cx['radius']}）`);
@@ -1348,7 +1355,7 @@ function checkChaoxiSkin() {
   //     第二版换成 flex 收缩更糟：收缩按 basis 比例分配，歌词的 basis 是内容高
   //     （500px+），缺口大头落在它身上，唱片被一路压到 45×45。
   //     所以钉 clamp + flex:none：尺寸算得出来，就不该让浏览器按比例猜。
-  ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*clamp\(120px, calc\(100dvh -/.test(body),
+  ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*clamp\(\s*110px,\s*calc\(\s*100dvh -/.test(body),
     '唱片尺寸由视口高度算出（写死尺寸必然把歌词挤没，交给 flex 分配会压成 45px）');
   ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*flex:\s*none/.test(body),
     '唱片不参与 flex 收缩（尺寸由 clamp 精确给出）');
@@ -1362,7 +1369,7 @@ function checkChaoxiSkin() {
     '潮汐不摘掉曲名与艺人（与 sheen 的取舍相反，这是两套皮肤的实质差异）');
 
   // 6) 唱片是主角：上限比 sheen 的 236px 大一档。
-  ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*320px\)/.test(body),
+  ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*320px\s*\)/.test(body),
     '.disc-wrap 上限 320px（比 sheen 的 236px 大一档，封面是这一屏的视觉锚点）');
 
   // 7) 卡片列宽必须落在 .daily-list，且 .daily-strip 不能被改成网格容器。
@@ -1385,6 +1392,23 @@ function checkChaoxiSkin() {
   const need = [...selectorsOf(SHEEN)].filter(isGeom);
   const miss = need.filter((s) => !have.has(s));
   ok(miss.length === 0, `chaoxi 覆盖了 sheen 的全部几何模块（缺：${miss.join(' ') || '无'}）`);
+
+  // 8b) 整页滚动：滚动权必须收在 .view 一个容器上，列表体交出 flex:1。
+  //     默认链路是每个列表体各自 overflow-y:auto + flex:1 —— 它们只能拿
+  //     "剩余高度"，在潮汐这种内容多的首页里被压成 12px（实测 clientHeight 12 /
+  //     scrollHeight 1564），用户报的"旁边无法滚动"正是这个。这不是调尺寸能
+  //     解决的，得换滚动结构；改回去就会重演，所以钉住。
+  ok(/\[data-skin="chaoxi"\] \.view \{[^}]*overflow-y:\s*auto/.test(body),
+    '.view 是滚动容器（整页滚动，而不是各列表各滚一份）');
+  ok(/\.lib-list,[\s\S]{0,320}?\.dv-body \{\s*flex:\s*none/.test(body),
+    '列表体（含 .dv-body）全部交出滚动权（flex:none）');
+  ok(/\.lib-list,[\s\S]{0,320}?\.dv-body \{\s*flex:\s*none[\s\S]{0,80}?overflow:\s*visible/.test(body),
+    '列表体同时把 overflow 放开（留着自己滚 = 两层滚动条）');
+  // 只换滚动结构还不够：.view 是 flex 列，内容超出时 flex 会先把可收缩项
+  // 压扁，根本轮不到滚动。第 3 版就栽在这 —— .lib-list 已经拿到完整高度，
+  // 但 .daily-strip 被压成 50px（overflow:hidden 顺手裁掉里面的标题与 24 张卡）。
+  ok(/\[data-skin="chaoxi"\] \.view > \* \{\s*flex:\s*none/.test(body),
+    '.view 的直接子元素一律不可收缩（否则被压扁，滚动永远不触发）');
 
   // 9) 零交互状态选择器。这是潮汐对设计稿 9.4 第 2 条的承诺：
   //    状态语义由 style.css 全站统一，皮肤再写一遍会让"换皮肤"读成"改行为"，
