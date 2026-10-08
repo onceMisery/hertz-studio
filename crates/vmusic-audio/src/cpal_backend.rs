@@ -90,6 +90,7 @@ struct PreparedDeck {
     deck: Arc<Deck>,
     request: NextTrack,
     info: MediaInfo,
+    gapless_supported: bool,
     overlap_frames: Option<u64>,
     mixed_frames: u64,
 }
@@ -105,6 +106,7 @@ enum RenderEvent {
     Transitioned {
         request: NextTrack,
         info: MediaInfo,
+        gapless_supported: bool,
         retired: Arc<Deck>,
     },
     Bypassed {
@@ -296,6 +298,7 @@ pub struct CpalBackend {
     device_channels: u16,
     duration_ms: Option<u64>,
     source_rate: Option<u32>,
+    gapless_supported: bool,
     fft: Arc<dyn rustfft::Fft<f32>>,
     spectrum_state: Mutex<Vec<f32>>,
     /// 暂停淡出到 0 的瞬间才真正置 playing=false。
@@ -334,6 +337,7 @@ impl CpalBackend {
             device_channels,
             duration_ms: None,
             source_rate: None,
+            gapless_supported: false,
             fft,
             spectrum_state: Mutex::new(Vec::new()),
             pending_pause: false,
@@ -422,6 +426,7 @@ impl CpalBackend {
 
     /// 起一个解码线程消费 `opened`。立即换装与 pending 换装共用。
     fn spawn_now(&mut self, opened: OpenedReader) -> Result<(), AudioError> {
+        self.gapless_supported = opened.gapless_supported;
         self.shared
             .current_deck()
             .eof
@@ -476,6 +481,14 @@ impl CpalBackend {
                     .into(),
             });
         }
+        if request.crossfade_ms == 0 && !(self.gapless_supported && opened.gapless_supported) {
+            return Ok(PrepareResult::Bypassed {
+                reason:
+                    "sample-exact gapless requires verified delay/padding handling for both sources"
+                        .into(),
+            });
+        }
+        let gapless_supported = opened.gapless_supported;
         let deck = Arc::new(Deck::new());
         let stop = Arc::new(AtomicBool::new(false));
         let seek_to = Arc::new(Mutex::new(None));
@@ -497,6 +510,7 @@ impl CpalBackend {
             deck,
             request,
             info: info.clone(),
+            gapless_supported,
             overlap_frames: None,
             mixed_frames: 0,
         });
@@ -942,6 +956,7 @@ fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, b
             **notification.as_mut().unwrap() = Some(RenderEvent::Transitioned {
                 request: next.request,
                 info: next.info,
+                gapless_supported: next.gapless_supported,
                 retired,
             });
         } else {
@@ -1312,6 +1327,7 @@ impl AudioBackend for CpalBackend {
             RenderEvent::Transitioned {
                 request,
                 info,
+                gapless_supported,
                 retired,
             } => {
                 self.stop_decoder();
@@ -1319,6 +1335,7 @@ impl AudioBackend for CpalBackend {
                 self.decoder = self.next_decoder.take();
                 self.duration_ms = info.duration_ms;
                 self.source_rate = info.sample_rate;
+                self.gapless_supported = gapless_supported;
                 self.tail_armed = false;
                 NextEvent::Transitioned {
                     from_generation: request.generation,
@@ -1552,7 +1569,12 @@ fn decode_loop_opened(
     device_rate: u32,
     device_channels: usize,
 ) {
-    let (mut reader, mut decoder, track_id) = opened;
+    let OpenedReader {
+        mut reader,
+        mut decoder,
+        track_id,
+        ..
+    } = opened;
 
     let src_rate = reader
         .default_track()
@@ -1781,11 +1803,17 @@ fn open_media(
     let sample_rate = track.codec_params.sample_rate;
     let channels = track.codec_params.channels.map(|c| c.count() as u8);
     let track_id = track.id;
+    let gapless_supported = supports_gapless(&track.codec_params);
     let decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
 
-    let opened: OpenedReader = (probed.format, decoder, track_id);
+    let opened = OpenedReader {
+        reader: probed.format,
+        decoder,
+        track_id,
+        gapless_supported,
+    };
     let info = MediaInfo {
         duration_ms,
         sample_rate,
@@ -1795,11 +1823,38 @@ fn open_media(
     Ok((opened, info))
 }
 
-type OpenedReader = (
-    Box<dyn FormatReader>,
-    Box<dyn symphonia::core::codecs::Decoder>,
-    u32,
-);
+struct OpenedReader {
+    reader: Box<dyn FormatReader>,
+    decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    track_id: u32,
+    gapless_supported: bool,
+}
+
+/// Capability of the actual Symphonia 0.5 demux/decoder path, not a file suffix.
+/// Keep unverified formats playable, but out of the sample-exact transition path.
+fn supports_gapless(params: &symphonia::core::codecs::CodecParameters) -> bool {
+    use symphonia::core::codecs::*;
+    match params.codec {
+        // These codecs encode exact sample counts without priming or tail padding.
+        CODEC_TYPE_PCM_S32LE | CODEC_TYPE_PCM_S32BE | CODEC_TYPE_PCM_S24LE
+        | CODEC_TYPE_PCM_S24BE | CODEC_TYPE_PCM_S16LE | CODEC_TYPE_PCM_S16BE
+        | CODEC_TYPE_PCM_S8 | CODEC_TYPE_PCM_U32LE | CODEC_TYPE_PCM_U32BE
+        | CODEC_TYPE_PCM_U24LE | CODEC_TYPE_PCM_U24BE | CODEC_TYPE_PCM_U16LE
+        | CODEC_TYPE_PCM_U16BE | CODEC_TYPE_PCM_U8 | CODEC_TYPE_PCM_F32LE
+        | CODEC_TYPE_PCM_F32BE | CODEC_TYPE_PCM_F64LE | CODEC_TYPE_PCM_F64BE
+        | CODEC_TYPE_PCM_ALAW | CODEC_TYPE_PCM_MULAW | CODEC_TYPE_FLAC | CODEC_TYPE_ALAC => true,
+        // MpaReader obtains these from a LAME-compatible header, trims its
+        // packets with enable_gapless, and the MP3 decoder applies both trims.
+        // Xing alone can report Some(0)/Some(0), which is not evidence of trimming.
+        CODEC_TYPE_MP3 => {
+            params.delay.is_some_and(|delay| delay > 0)
+                && params.padding.is_some()
+                && params.n_frames.is_some_and(|frames| frames > 0)
+        }
+        // In particular, IsoMp4Reader/AAC in 0.5 do not apply priming/edit trims.
+        _ => false,
+    }
+}
 
 /// 把标准库 `Read + Seek + Send` 超集（[`AudioSource`]）适配成 symphonia
 /// 的 MediaSource。
@@ -1980,6 +2035,7 @@ mod tests {
                 crossfade_ms: overlap_ms,
             },
             info: MediaInfo::default(),
+            gapless_supported: true,
             overlap_frames: None,
             mixed_frames: 0,
         }
@@ -2259,36 +2315,17 @@ mod tests {
     }
 
     fn decoded_fixture() -> CpalBackend {
-        let frames = 8_000u32;
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&(36 + frames * 2).to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&8_000u32.to_le_bytes());
-        wav.extend_from_slice(&16_000u32.to_le_bytes());
-        wav.extend_from_slice(&2u16.to_le_bytes());
-        wav.extend_from_slice(&16u16.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&(frames * 2).to_le_bytes());
-        for sample in 0..frames {
-            wav.extend_from_slice(&(sample as i16).to_le_bytes());
-        }
-        let probed = symphonia::default::get_probe()
-            .format(
-                &Hint::new(),
-                MediaSourceStream::new(Box::new(std::io::Cursor::new(wav)), Default::default()),
-                &FormatOptions::default(),
-                &MetadataOptions::default(),
-            )
-            .unwrap();
-        let track = probed.format.default_track().unwrap();
-        let track_id = track.id;
-        let decoder = symphonia::default::get_codecs()
-            .make(&track.codec_params, &DecoderOptions::default())
-            .unwrap();
+        let samples: Vec<i16> = (0..8_000).collect();
+        let (opened, info) = open_pcm(&samples, 8_000, 1);
+        decoded_opened_fixture(opened, info, 8_000, 1)
+    }
+
+    fn decoded_opened_fixture(
+        opened: OpenedReader,
+        info: MediaInfo,
+        device_rate: u32,
+        device_channels: u16,
+    ) -> CpalBackend {
         let mut backend = CpalBackend {
             shared: Arc::new(Shared::new()),
             device: None,
@@ -2296,10 +2333,11 @@ mod tests {
             stream: None,
             decoder: None,
             next_decoder: None,
-            device_rate: 8_000,
-            device_channels: 1,
-            duration_ms: Some(1_000),
-            source_rate: Some(8_000),
+            device_rate,
+            device_channels,
+            duration_ms: info.duration_ms,
+            source_rate: info.sample_rate,
+            gapless_supported: false,
             fft: FftPlanner::new().plan_fft_forward(FFT_SIZE),
             spectrum_state: Mutex::new(Vec::new()),
             pending_pause: false,
@@ -2310,8 +2348,10 @@ mod tests {
             pending_load: None,
         };
         backend
-            .spawn_now((probed.format, decoder, track_id))
-            .unwrap();
+            .shared
+            .device_rate
+            .store(device_rate, Ordering::Relaxed);
+        backend.spawn_now(opened).unwrap();
         wait_for_eof(&backend);
         backend
     }
@@ -2410,6 +2450,281 @@ mod tests {
                 "next decoder did not finish"
             );
             std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn compressed_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/compressed")
+            .join(name)
+    }
+
+    fn open_compressed(name: &str) -> (OpenedReader, MediaInfo) {
+        // No extension hint: eligibility must come from the demuxed codec.
+        open_media(
+            MediaSourceStream::new(
+                Box::new(File::open(compressed_path(name)).unwrap()),
+                Default::default(),
+            ),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn decoded_compressed(name: &str) -> CpalBackend {
+        let (opened, info) = open_compressed(name);
+        decoded_opened_fixture(opened, info, 44_100, 1)
+    }
+
+    fn prepare_compressed(
+        backend: &mut CpalBackend,
+        name: &str,
+        crossfade_ms: u64,
+    ) -> PrepareResult {
+        backend
+            .prepare_next(NextTrack {
+                uri: compressed_path(name).to_str().unwrap().into(),
+                track_id: name.into(),
+                generation: 7,
+                crossfade_ms,
+            })
+            .unwrap()
+    }
+
+    fn decoded_samples(backend: &CpalBackend) -> Vec<f32> {
+        backend
+            .shared
+            .current_deck()
+            .samples
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    #[test]
+    fn compressed_decoders_preserve_verified_lengths_and_report_untrimmed_formats() {
+        for (name, frames, delay, padding, gapless) in [
+            ("a.mp3", 10_000, Some(1105), Some(415), true),
+            ("b.mp3", 12_345, Some(1105), Some(374), true),
+            ("a-no-xing.mp3", 11_520, None, None, false),
+            ("a-xing-no-lame.mp3", 11_520, Some(0), Some(0), false),
+            ("a-exact-timescale.m4a", 11_264, None, None, false),
+            ("b-exact-timescale.m4a", 14_336, None, None, false),
+            ("a.flac", 10_000, None, None, true),
+            ("a-alac.m4a", 10_000, None, None, true),
+        ] {
+            let (opened, info) = open_compressed(name);
+            let params = &opened.reader.default_track().unwrap().codec_params;
+            assert_eq!(params.delay, delay, "{name} delay");
+            assert_eq!(params.padding, padding, "{name} padding");
+            assert_eq!(opened.gapless_supported, gapless, "{name} capability");
+            assert_eq!(info.sample_rate, Some(44_100));
+            let backend = decoded_opened_fixture(opened, info, 44_100, 1);
+            assert_eq!(
+                decoded_samples(&backend).len(),
+                frames,
+                "{name} frame count"
+            );
+            assert!(!backend
+                .shared
+                .current_deck()
+                .decode_error
+                .load(Ordering::Acquire));
+            // Bypassed formats remain available to ordinary playback.
+            backend.shared.playing.store(true, Ordering::Relaxed);
+            let mut out = vec![0.0; frames];
+            write_samples(&mut out, &backend.shared, 1);
+            assert!(out.iter().all(|sample| sample.is_finite()));
+            assert!(
+                out.iter().any(|sample| sample.abs() > 0.1),
+                "{name} playback"
+            );
+        }
+    }
+
+    #[test]
+    fn mp3_zero_tail_padding_remains_eligible_but_missing_trim_evidence_does_not() {
+        let (opened, _) = open_compressed("a.mp3");
+        let mut params = opened.reader.default_track().unwrap().codec_params.clone();
+        // A LAME-compatible stream may end at the last decoded sample. Zero
+        // tail padding does not erase the independently established delay.
+        params.padding = Some(0);
+        assert!(supports_gapless(&params));
+        params.padding = None;
+        assert!(!supports_gapless(&params));
+        params.padding = Some(0);
+        params.n_frames = None;
+        assert!(!supports_gapless(&params));
+    }
+
+    #[test]
+    fn gapless_mp3_decodes_join_unequal_lengths_sample_for_sample() {
+        for (current, next) in [("a.mp3", "b.mp3"), ("b.mp3", "a.mp3")] {
+            let mut backend = decoded_compressed(current);
+            let mut expected = decoded_samples(&backend);
+            // Decode the incoming track independently before preparing it again.
+            let incoming = decoded_samples(&decoded_compressed(next));
+            let incoming_frames = incoming.len();
+            expected.extend(incoming);
+            assert!(matches!(
+                prepare_compressed(&mut backend, next, 0),
+                PrepareResult::Prepared(_)
+            ));
+            wait_for_prepared(&backend);
+            backend.shared.playing.store(true, Ordering::Relaxed);
+            let mut out = vec![0.0; expected.len()];
+            for block in out.chunks_mut(257) {
+                write_samples(block, &backend.shared, 1);
+            }
+            for (index, (actual, expected)) in out.iter().zip(expected).enumerate() {
+                assert_eq!(*actual, expected, "{current} -> {next}, sample {index}");
+            }
+            assert_eq!(
+                backend
+                    .shared
+                    .current_deck()
+                    .frames_played
+                    .load(Ordering::Relaxed),
+                incoming_frames as u64
+            );
+            assert!(matches!(
+                backend.take_next_event(),
+                Some(NextEvent::Transitioned { .. })
+            ));
+            assert!(backend.take_next_event().is_none());
+        }
+    }
+
+    #[test]
+    fn unverified_compressed_gapless_bypasses_both_directions_but_crossfade_plays() {
+        for unverified in [
+            "a-no-xing.mp3",
+            "a-xing-no-lame.mp3",
+            "a-exact-timescale.m4a",
+        ] {
+            for (current, next) in [("a.mp3", unverified), (unverified, "a.mp3")] {
+                let mut backend = decoded_compressed(current);
+                assert!(
+                    matches!(
+                        prepare_compressed(&mut backend, next, 0),
+                        PrepareResult::Bypassed { reason } if reason.contains("verified delay/padding")
+                    ),
+                    "{current} -> {next}"
+                );
+                assert!(backend.shared.next.lock().unwrap().is_none());
+                assert!(matches!(
+                    prepare_compressed(&mut backend, next, 5),
+                    PrepareResult::Prepared(_)
+                ));
+                wait_for_prepared(&backend);
+                let outgoing_frames = decoded_samples(&backend).len();
+                let incoming_frames = backend
+                    .shared
+                    .next
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .deck
+                    .samples
+                    .lock()
+                    .unwrap()
+                    .len();
+                let mut out = vec![0.0; outgoing_frames + incoming_frames - 220];
+                backend.shared.playing.store(true, Ordering::Relaxed);
+                write_samples(&mut out, &backend.shared, 1);
+                assert!(out
+                    .iter()
+                    .all(|sample| sample.is_finite() && sample.abs() <= 1.0));
+                assert!(matches!(
+                    backend.take_next_event(),
+                    Some(NextEvent::Transitioned { .. })
+                ));
+                assert_eq!(
+                    backend
+                        .shared
+                        .current_deck()
+                        .frames_played
+                        .load(Ordering::Relaxed),
+                    incoming_frames as u64
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gapless_capability_follows_load_pending_load_and_committed_transition() {
+        let mut backend = decoded_compressed("a.mp3");
+        // spawn_now is the common immediate/pending load commit; both directions
+        // must replace the outgoing source's capability.
+        for name in ["a-exact-timescale.m4a", "a.mp3"] {
+            backend.stop_decoder();
+            backend.clear_buffers();
+            let (opened, info) = open_compressed(name);
+            backend.source_rate = info.sample_rate;
+            backend.duration_ms = info.duration_ms;
+            backend.spawn_now(opened).unwrap();
+            wait_for_eof(&backend);
+            assert_eq!(
+                matches!(
+                    prepare_compressed(&mut backend, "b.mp3", 0),
+                    PrepareResult::Prepared(_)
+                ),
+                name == "a.mp3"
+            );
+            backend.clear_next();
+        }
+        for name in ["a-exact-timescale.m4a", "a.mp3"] {
+            let (opened, info) = open_compressed(name);
+            backend.pending_load = Some(PendingLoad {
+                opened,
+                info,
+                play_after: false,
+            });
+            assert!(matches!(
+                prepare_compressed(&mut backend, "b.mp3", 0),
+                PrepareResult::Bypassed { .. }
+            ));
+            backend.spawn_pending();
+            wait_for_eof(&backend);
+            assert_eq!(
+                matches!(
+                    prepare_compressed(&mut backend, "b.mp3", 0),
+                    PrepareResult::Prepared(_)
+                ),
+                name == "a.mp3"
+            );
+            backend.clear_next();
+        }
+        // Positive crossfade can promote an ineligible track. Its eligibility
+        // becomes current only when the actor consumes the real callback event.
+        for name in ["a-exact-timescale.m4a", "a.mp3"] {
+            assert!(matches!(
+                prepare_compressed(&mut backend, name, 5),
+                PrepareResult::Prepared(_)
+            ));
+            wait_for_prepared(&backend);
+            let frames = decoded_samples(&backend).len();
+            backend
+                .shared
+                .fade_gain
+                .store(1.0f32.to_bits(), Ordering::Relaxed);
+            backend.shared.playing.store(true, Ordering::Relaxed);
+            write_samples(&mut vec![0.0; frames], &backend.shared, 1);
+            assert!(matches!(
+                backend.take_next_event(),
+                Some(NextEvent::Transitioned { .. })
+            ));
+            assert_eq!(
+                matches!(
+                    prepare_compressed(&mut backend, "b.mp3", 0),
+                    PrepareResult::Prepared(_)
+                ),
+                name == "a.mp3"
+            );
+            backend.clear_next();
         }
     }
 
@@ -2523,6 +2838,19 @@ mod tests {
         assert!(samples
             .iter()
             .all(|sample| (*sample - 1000.0 / 32768.0).abs() < 1e-6));
+
+        // The outgoing source's native rate also matters, even though its queue
+        // has already been resampled to the device rate.
+        let (opened, info) = open_pcm(&[1000; 8], 4_000, 1);
+        let mut converted_current = decoded_opened_fixture(opened, info, 8_000, 1);
+        assert!(matches!(
+            prepare_pcm(&mut converted_current, &[1000; 8], 8_000, 1, 0),
+            PrepareResult::Bypassed { .. }
+        ));
+        assert!(matches!(
+            prepare_pcm(&mut converted_current, &[1000; 8], 8_000, 1, 1),
+            PrepareResult::Prepared(_)
+        ));
     }
 
     #[test]
@@ -2611,6 +2939,7 @@ mod tests {
                 crossfade_ms: 0,
             },
             info: MediaInfo::default(),
+            gapless_supported: false,
             overlap_frames: None,
             mixed_frames: 0,
         });

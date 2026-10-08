@@ -242,9 +242,9 @@ vec3 paletteMix(float t) { return mix(uColorA, uColorB, clamp(t, 0.0, 1.0)); }
       { verts: 36, instances: 64 }
     ],
     depth: true,
-    blend: 'add',
+    blend: 'surface',
     uniforms: ['uCount', 'uSpan', 'uHeight', 'uWidth', 'uDepth', 'uAlphaK'],
-    defaults: { span: 26, height: 9, width: 0.62, depth: 0.62, mirror: 0.45 },
+    defaults: { span: 24, height: 5.5, width: 0.10, depth: 0.16, mirror: 0.16 },
     decl: `
 uniform int uCount;
 uniform float uSpan; uniform float uHeight; uniform float uWidth; uniform float uDepth;
@@ -262,12 +262,12 @@ void main() {
   float b = bandIx(id, n);
   float r = riseAt(u);
 
-  float h = 0.22 + b * uHeight + r * uHeight * 0.55;
+  float h = 0.22 + b * uHeight * 0.9 + r * uHeight * 0.12;
   // 柱体沿 x 排开，z 上做一点正弦错位，避免一眼看穿是"一排"。
   float x = (u - 0.5) * uSpan;
-  float z = sin(u * 9.0 + uSeed * 6.28) * 1.9;
+  float z = sin(u * 6.2831853 + uSeed * 6.28) * 0.7;
 
-  vec3 scale = vec3(uWidth, h * 0.5, uDepth * (0.6 + b * 0.8));
+  vec3 scale = vec3(min(uWidth, uSpan / float(n) * 0.32), h * 0.5, uDepth * 0.65);
   // y 从 0 长到 h：底面贴地，所以倒影那一趟只需把模型矩阵沿 y 翻过去，
   // 不必再算一次基准高度差。
   vec3 p = vec3(x + lp.x * scale.x, lp.y * scale.y + h * 0.5, z + lp.z * scale.z);
@@ -275,7 +275,7 @@ void main() {
   vec3 world = (uModel * vec4(p, 1.0)).xyz;
   vN = normalize((uModel * vec4(ln, 0.0)).xyz);
   vW = world;
-  vGlow = 0.35 + b * 1.25 + r * 1.4;
+  vGlow = 0.25 + b * 0.48 + r * 0.16;
   vId = u;
   gl_Position = uViewProj * vec4(world, 1.0);
 }`,
@@ -286,22 +286,11 @@ void main() {
   vec3 V = normalize(uCamPos - vW);
   vec3 N = normalize(vN);
   float fres = pow(1.0 - abs(dot(N, V)), 2.6);
-  // 柱体自身发光：越靠上越亮，模拟"灯从底部打上去"。
-  // 色相随时间缓慢流动（fract 环绕），画面才不会像一张静止的图表。
-  vec3 c = paletteMix(fract(vId * 0.65 + 0.1 + uTime * 0.018)) * (0.5 + vGlow) + vec3(fres) * 0.55;
-  // 顶帽增亮：上表面再叠一层，让柱子的"顶"在俯视机位下读得出来。
-  c += paletteMix(0.85) * clamp(N.y, 0.0, 1.0) * 0.30 * (0.4 + vGlow);
-  // 白热：能量冲破阈值后往暖白推。LDR 链路里这是唯一能让泛光"炸开"的信号——
-  // 颜色通道饱和到白，亮部提取才有足够大的面积可晕。
-  c += vec3(1.0, 0.97, 0.90) * pow(max(vGlow - 1.35, 0.0), 2.0) * 0.4;
-  float a = (0.16 + vGlow * 0.52 + fres * 0.5) * uAlphaK;
-  // 单次贡献的 alpha 硬上限。加性混合（ONE, ONE）的退化根源就是没有上限：
-  // 一个像素上叠了 N 层，光晕再收敛，Σ 也会冲破 1.0。64 根柱体 + 一次
-  // 深度重叠的倒影趟，正好是最坏情况。
-  //
-  // 上限是分辨率无关的：无论一个像素叠了几层，单层贡献永远不超过这个值。
-  // 缩小画布只会让它更暗，不会让它变白 —— 这正是小尺寸预览需要的性质。
-  a = min(a, 0.42);
+  // 有明暗面的细柱；表面写深度，背面不再重复累积亮度。
+  float light = 0.42 + max(dot(N, normalize(vec3(-0.4, 0.8, 0.6))), 0.0) * 0.38;
+  vec3 c = paletteMix(vId * 0.72 + 0.12) * (light + vGlow * 0.32 + fres * 0.10);
+  c += paletteMix(0.8) * max(N.y, 0.0) * 0.12;
+  float a = uAlphaK * exp(-max(-vW.y, 0.0) * 0.8);
   frag = vec4(c * a, a);
 }`,
     setup: function (gl, U, S) {
@@ -318,7 +307,7 @@ void main() {
     // 并压暗——在这个"全是光"的场景里，两者在观感上没有区别。
     extraPasses: function (gl, U, S, eng, drawIt) {
       if (!(S.p.mirror > 0.01)) return;
-      gl.uniform1f(U.uAlphaK, S.p.mirror * 0.7);
+      gl.uniform1f(U.uAlphaK, S.p.mirror * 0.5);
       gl.uniformMatrix4fv(U.uModel, false, eng.mirrorMat);
       drawIt();
       gl.uniformMatrix4fv(U.uModel, false, eng.identity);
@@ -327,8 +316,7 @@ void main() {
   });
 
   // --- 2. 频谱球 -------------------------------------------------------------
-  // UV 球顶点按频谱做球面位移。位移同时在球面法线方向与切向各取一份，
-  // 所以低频段是"呼吸"，高频段是"刺"，比只做法线位移更耐看。
+  // 平滑频谱驱动轻微径向呼吸，连续纬线保留球体轮廓。
   scene({
     id: 'orb',
     label: '频谱球',
@@ -343,48 +331,45 @@ void main() {
       return '#define Q_SEG ' + seg + '\n#define Q_RING ' + ring + '\n';
     },
     depth: true,
-    blend: 'add',
+    blend: 'surface',
     uniforms: ['uRadius', 'uAmp', 'uWire', 'uWobble'],
-    defaults: { radius: 3.0, amp: 1.3, wire: 0.55, wobble: 0.6 },
+    defaults: { radius: 3.0, amp: 0.65, wire: 0.42, wobble: 0.22 },
     decl: `
 uniform float uRadius; uniform float uAmp; uniform float uWire; uniform float uWobble;
 `,
     vert: GEOM + `
 const int SEG = Q_SEG;
 const int RING = Q_RING;
-out vec3 vN; out vec3 vW; out vec3 vBary; out float vE;
+out vec3 vN; out vec3 vW; out float vLatitude; out float vE;
 void main() {
   vec3 bary;
   vec3 dir = sphereVert(gl_VertexID, SEG, RING, bary);
   float u = acos(clamp(dir.y, -1.0, 1.0)) / 3.14159265;
-  float e = bandAt(u);
-  float r = uAmp * (e * 1.25 + uAgg.x * 0.5);
+  float e = (bandAt(u - 0.025) + bandAt(u) * 2.0 + bandAt(u + 0.025)) * 0.25;
+  float r = uAmp * (e * 0.32 + uAgg.x * 0.12);
   // 切向抖动用半球噪声，避免位移只沿法线、看起来像单纯放大。
-  float w = vnoise(vec2(u * 7.0, uTime * 0.35 + uSeed)) - 0.5;
-  vec3 p = dir * (uRadius + r + w * uWobble * (0.25 + e));
+  float w = vnoise(vec2(u * 5.0, uTime * 0.12 + uSeed)) - 0.5;
+  vec3 p = dir * (uRadius + r + w * uWobble * 0.2);
   vN = normalize(dir);
-  vBary = bary;
+  vLatitude = u;
   vE = e;
   vW = (uModel * vec4(p, 1.0)).xyz;
   gl_Position = uViewProj * vec4(vW, 1.0);
 }`,
     frag: `
-in vec3 vN; in vec3 vW; in vec3 vBary; in float vE;
+in vec3 vN; in vec3 vW; in float vLatitude; in float vE;
 out vec4 frag;
 void main() {
   vec3 V = normalize(uCamPos - vW);
   float fres = pow(1.0 - abs(dot(normalize(vN), V)), 3.0);
   float e = vE;
-  vec3 c = paletteMix(0.15 + e * 0.8) * (0.34 + e * 1.5) + vec3(fres) * 1.2;
-  // 线框：重心坐标取最小值，越靠近棱线越亮。地面网格的同一招。
-  float edge = min(min(vBary.x, vBary.y), vBary.z);
-  float wire = smoothstep(0.03, 0.0, edge) * uWire * (0.6 + e * 1.6);
-  float a = 0.10 + e * 0.60 + fres * 0.55 + wire;
-  c += paletteMix(0.9) * wire * 1.4;
-  // 白热核心：能量尖峰烧向暖白，泛光会把这些点晕成球面上的"耀斑"。
-  c += vec3(1.0, 0.97, 0.90) * pow(max(e - 0.58, 0.0), 2.0) * 1.0;
-  a = min(a, 0.42);
-  frag = vec4(c * a, a);
+  // 连续纬线代替发白的三角面，屏幕导数保持细线在各档画质下清楚。
+  float latitude = vLatitude * 32.0;
+  float edge = abs(fract(latitude + 0.5) - 0.5);
+  float aa = max(fwidth(latitude), 0.018);
+  float wire = (1.0 - smoothstep(aa * 0.35, aa * 1.2, edge)) * uWire;
+  vec3 c = paletteMix(0.18 + vLatitude * 0.65) * (0.045 + e * 0.035 + wire * 1.6 + fres * 0.30);
+  frag = vec4(c, 1.0);
 }`,
     setup: function (gl, U, S) {
       gl.uniform1f(U.uRadius, S.p.radius);
@@ -395,21 +380,20 @@ void main() {
   });
 
   // --- 3. 光隧道 -------------------------------------------------------------
-  // 一列朝内发光的四边形沿着 z 轴推进。推进速度由整体能量给，环的半径由低频给，
-  // 于是"鼓点一到，隧道口撑开"。
+  // 连续细光环沿 z 轴缓缓推进；低频只轻微改变半径。
   scene({
     id: 'tunnel',
     label: '光隧道',
-    geom: { mode: 'TRIANGLES', verts: 6, instances: 180 },
+    geom: { mode: 'TRIANGLES', verts: 64 * 6, instances: 32 },
     qualityGeom: [
-      { verts: 6, instances: 96 },
-      { verts: 6, instances: 144 },
-      { verts: 6, instances: 180 }
+      { verts: 64 * 6, instances: 18 },
+      { verts: 64 * 6, instances: 24 },
+      { verts: 64 * 6, instances: 32 }
     ],
     depth: true,
     blend: 'add',
     uniforms: ['uCount', 'uRingRadius', 'uRingLen', 'uSpread', 'uPush'],
-    defaults: { ringRadius: 4.2, ringLen: 22, spread: 1.5, push: 6.5 },
+    defaults: { ringRadius: 4.2, ringLen: 28, spread: 0.65, push: 2.4 },
     decl: `
 uniform int uCount;
 uniform float uRingRadius; uniform float uRingLen; uniform float uSpread; uniform float uPush;
@@ -419,34 +403,21 @@ out vec2 vUV; out float vId; out float vDepth; out vec3 vW;
 void main() {
   int n = uCount;
   int id = gl_InstanceID;
-  vec2 q = quadVert(gl_VertexID);
+  vec2 q = quadVert(gl_VertexID % 6);
   float lane = float(id) / float(n);
   // z 随时间向前推进并取小数回绕：一个实例飞出视锥就自动接回远端。
-  // 推进速度 = 基础流速 + uPush（工坊里的"推进力"旋钮，之前声明了却没接进
-  // 着色器，是个拖了没反应的死参数）+ 整体能量的加成。
-  float speed = 0.03 + uPush * 0.011 + uEnergy * (0.05 + uPush * 0.006);
-  float z = fract(lane - uTime * speed - uPulse * 0.02);
+  // 速度只依赖推进力，避免瞬时能量变化乘上累计时间后让所有环突然跳位。
+  float speed = 0.012 + uPush * 0.003;
+  float z = fract(lane - uTime * speed);
   float zz = z * uRingLen;
-  float ring = float(id) * 0.61803398875;
-  // 相邻两环反向旋转：单方向旋转看久了像"传送带"，双向才有漩涡感。
-  float swirl = ((id / 2) * 2 == id) ? 1.0 : -1.0;
-  float ang = ring * 6.2831853 + uTime * 0.12 * swirl;
-  float rad = uRingRadius * (0.72 + uAgg.x * 0.55 + uPulse * 0.18)
-            + sin(ang * 3.0 + uSeed) * 0.22;
-  // 每个实例一个朝内的切向面片。法线要朝内，所以面片张在「切向 × 轴向」上：
-  // 用 right（径向）去撑宽度，得到的是一片含视轴的平面，沿隧道看过去正好是
-  // 边对面 —— 整个场景会黑成一像素不剩，而着色器编译与链接全是绿的。
-  vec3 right = vec3(cos(ang), sin(ang), 0.0);
-  vec3 tang = vec3(-sin(ang), cos(ang), 0.0);
-  vec3 up = vec3(0.0, 0.0, 1.0);
-  // 名字不能叫 half：它是 GLSL ES 3.00 的保留字，声明即语法错。
-  float hgt = uSpread * (0.5 + bandAt(lane) * 1.6);
-  float wide = hgt * (0.55 + uAgg.w * 0.45);
-  float tilt = 0.10 + uAgg.w * 0.35;          // 右边缘往外偏一点，整圈才看不出是平的
-  vec3 p = right * (rad + q.x * tilt) + tang * (q.x * wide) + up * (q.y * hgt)
-         + vec3(0.0, 0.0, -uRingLen + zz);
-  // 远端收缩：让隧道有尽头而不是无限延伸。
-  p.xy *= 0.35 + 0.65 * (1.0 - z * 0.4);
+  float segment = float(gl_VertexID / 6);
+  float ang = (segment + q.x * 0.5 + 0.5) / 64.0 * 6.2831853;
+  float rad = uRingRadius * (0.94 + uAgg.x * 0.08 + uPulse * 0.025)
+            + sin(ang * 3.0 + uSeed) * 0.08;
+  // 每个实例一圈连续细光环，宽度只改变线厚，不把高能量展开成大面片。
+  float thickness = 0.012 + uSpread * 0.035;
+  vec3 p = vec3(vec2(cos(ang), sin(ang)) * (rad + q.y * thickness), -uRingLen + zz);
+  p.xy += vec2(sin(z * 3.0 + uTime * 0.06), cos(z * 2.0 + uTime * 0.05)) * 0.16;
   vUV = q * 0.5 + 0.5;
   vId = lane;
   vDepth = z;
@@ -459,21 +430,17 @@ out vec4 frag;
 void main() {
   float b = bandAt(vId);
   float r = riseAt(vId);
-  // 沿面片横向做一次软边，纵向做一次收束，得到"光束"而不是"贴纸"。
-  float soft = smoothstep(0.0, 0.35, vUV.x) * smoothstep(1.0, 0.65, vUV.x);
-  float fall = 1.0 - abs(vUV.y - 0.5) * 2.0;
-  fall *= fall;
-  float fade = 1.0 - vDepth;
-  vec3 c = paletteMix(0.25 + b * 0.7) * (0.5 + b * 1.6 + r * 2.0);
-  // 白热：起音冲顶的光带烧白，拉远看就是隧道里一道道闪过的"光浪"。
-  c += vec3(1.0, 0.96, 0.88) * pow(max(b + r - 1.05, 0.0), 2.0) * 0.9;
-  float a = soft * fall * fade * (0.10 + b * 0.55 + r * 0.8) * (0.5 + uAgg.w * 1.2);
+  // 光环两侧软化，远近端淡出后再回绕。
+  float soft = 1.0 - smoothstep(0.25, 0.5, abs(vUV.y - 0.5));
+  float fade = smoothstep(0.0, 0.12, vDepth) * (1.0 - smoothstep(0.8, 1.0, vDepth));
+  vec3 c = paletteMix(0.25 + vDepth * 0.55) * (0.65 + b * 0.25 + r * 0.12);
+  float a = soft * fade * (0.32 + b * 0.20 + r * 0.10);
   a = min(a, 0.42);
   frag = vec4(c * a, a);
 }`,
     setup: function (gl, U, S) {
       var q = qualityOf(S);
-      gl.uniform1i(U.uCount, [96, 144, 180][q]);
+      gl.uniform1i(U.uCount, [18, 24, 32][q]);
       gl.uniform1f(U.uRingRadius, S.p.ringRadius);
       gl.uniform1f(U.uRingLen, S.p.ringLen);
       gl.uniform1f(U.uSpread, S.p.spread);
@@ -496,14 +463,14 @@ void main() {
     depth: true,
     blend: 'add',
     uniforms: ['uCount', 'uCloudR', 'uSpread3', 'uSize', 'uSpin', 'uDensityK'],
-    defaults: { cloudR: 6.0, spread3: 2.4, size: 2.6, spin: 0.5, densityK: 1.0 },
+    defaults: { cloudR: 6.0, spread3: 1.6, size: 1.25, spin: 0.18, densityK: 0.8 },
     decl: `
 uniform int uCount;
 uniform float uCloudR; uniform float uSpread3; uniform float uSize;
 uniform float uSpin; uniform float uDensityK;
 `,
     vert: GEOM + `
-out float vG; out float vTint; out float vSeed; out float vSize;
+out float vG; out float vTint; out float vSeed;
 void main() {
   float i = float(gl_InstanceID);
   vec3 h = hash31(i * 0.7311 + uSeed * 13.0);
@@ -513,47 +480,42 @@ void main() {
 
   // 参考带：每个点归属一段频谱，轨道半径与高度都由那一段的能量决定。
   float b = bandAt(fract(u * 3.0));
-  float r = uCloudR * (0.25 + pow(h.x, 0.7) * 1.0) * (0.75 + b * 0.85);
-  float spin = uSpin * (0.35 + 1.4 / (0.6 + r * 0.35)) * (0.4 + uEnergy * 2.2);
+  float r = uCloudR * (0.18 + pow(h.x, 0.7) * 0.95) * (0.94 + b * 0.12);
+  float spin = uSpin * (0.35 + 0.5 / (0.6 + r * 0.35));
   // 旋臂：相位随半径扭转。同心圆轨道和"银河"之间就差这一项——
   // 内圈与外圈的角速度差把圆拉成螺旋，点云立刻读出"星云"而不是"星环"。
-  float ang = h.y * 6.2831853 + uTime * spin * 0.35 + i * 0.0001 + r * 0.28;
+  float arm = floor(h.y * 3.0);
+  float ang = arm * 2.0943951 + r * 0.52 + (fract(h.y * 3.0) - 0.5) * 0.8 + uTime * spin * 0.16;
   float tilt = (h2.z - 0.5) * uSpread3;
   vec3 p = vec3(cos(ang) * r, tilt * (0.5 + h2.x * 1.6), sin(ang) * r);
   // 轨道面上的抖动，避免看出是"几层同心圆"。
-  p += (hash31(i * 0.377 + 3.0) - 0.5) * (0.5 + b * 1.2);
+  p += (hash31(i * 0.377 + 3.0) - 0.5) * (0.35 + b * 0.2);
 
   vec3 world = (uModel * vec4(p, 1.0)).xyz;
   vec4 clip = uViewProj * vec4(world, 1.0);
   float dist = length(uCamPos - world);
-  // 点大小上限压到 40：24000 个加性点精灵的瓶颈是填充率不是顶点数，
-  // 点群扫过相机时 48px 的上限意味着最坏 55M 像素/帧，集显直接掉帧。
-  float ps = clamp(uSize * uDensityK * (0.6 + b * 1.9) * 26.0 / max(dist, 0.8), 1.0, 40.0);
+  // 小点保留星尘细节，同时限制近镜头的填充率。
+  float ps = clamp(uSize * (0.85 + b * 0.35) * 24.0 / max(dist, 2.0), 1.35, 8.0);
   gl_PointSize = ps;
-  vSize = ps;
-  vG = 0.25 + b * 1.6 + riseAt(fract(u * 3.0)) * 1.2;
+  vG = (0.18 + b * 0.28 + riseAt(fract(u * 3.0)) * 0.12) * uDensityK;
   vTint = h.z;
   vSeed = i;
   gl_Position = clip;
 }`,
     frag: `
-in float vG; in float vTint; in float vSeed; in float vSize;
+in float vG; in float vTint; in float vSeed;
 out vec4 frag;
 void main() {
   vec2 q = gl_PointCoord - 0.5;
   float r = length(q) * 2.0;
   if (r >= 1.0) discard;
   float a = (1.0 - smoothstep(0.0, 1.0, r)) * (1.0 - smoothstep(0.25, 1.0, r));
-  float g = vG * (0.75 + 0.25 * sin(uTime * 2.1 + vSeed * 0.37));
+  float g = vG * (0.9 + 0.1 * sin(uTime * 0.5 + vSeed * 0.37));
   // 颜色随能量偏移：安静的星云是一个色调，炸起来的星云往 uColorB 偏。
   vec3 c = paletteMix(clamp(vTint * 0.72 + g * 0.13, 0.0, 1.0));
-  float o = a * (0.045 + g * 0.32);
-  // 能量守恒：点越大每个像素分摊的亮度越低。否则大点扫过相机时不是
-  // "一团云"而是"一堵白墙"，还把填充率一起拖死。
-  o *= 30.0 / max(vSize, 30.0);
-  // 单次贡献的 alpha 硬上限（与其它场景同一套约定）。星云有能量守恒，
-  // 但那管的是"点的大小"，管不住"一个像素上叠了几千个点"——密度拉满时
-  // 24000 个实例的贡献照样能把该像素推爆。
+  float star = mix(0.65, 2.2, pow(fract(vSeed * 0.61803), 8.0));
+  float o = a * (0.12 + g * 0.55) * star;
+  // 限制单颗亮星的贡献，旋臂之间保留暗部。
   o = min(o, 0.42);
   frag = vec4(c * o, o);
 }`,
@@ -570,7 +532,7 @@ void main() {
 
   // --- 5. 频谱地形 -----------------------------------------------------------
   // 网格高度场。高度 = 沿 z 方向铺开的频谱 × 时间滚动，所以看上去像"声音
-  // 在往前流动"。用重心坐标画棱线，不需要额外的 wireframe program。
+  // 在往前流动"。网格留在原地，只滚动采样相位。
   scene({
     id: 'terrain',
     label: '频谱地形',
@@ -585,9 +547,9 @@ void main() {
       return '#define Q_N ' + n + '\n';
     },
     depth: true,
-    blend: 'add',
+    blend: 'surface',
     uniforms: ['uExtent', 'uAmp2', 'uScroll', 'uWire2'],
-    defaults: { extent: 26, amp2: 2.6, scroll: 0.55, wire2: 0.9 },
+    defaults: { extent: 24, amp2: 1.8, scroll: 0.22, wire2: 0.42 },
     // 网格分辨率 N 是编译期常量而不是 uniform：地形用 gl_VertexID 反解出
     // 单元坐标，N 参与整数除法与取模，放在着色器里算比每帧传进来更省事，
     // 也让顶点数在上屏之前就固定下来（工坊里看得见的"顶点数"才是真的）。
@@ -597,51 +559,48 @@ uniform float uScroll; uniform float uWire2;
 `,
     vert: GEOM + `
 const int N = Q_N;
-out vec3 vW; out vec3 vBary; out float vH; out vec3 vN; out float vZ;
+out vec3 vW; out vec2 vGrid; out float vH; out vec3 vN; out float vZ;
 void main() {
   vec2 cxz; vec3 bary;
   gridCell(gl_VertexID, N, cxz, bary);
   float x = (cxz.x - 0.5) * uExtent;
-  float z = (cxz.y - 0.5) * uExtent + uTime * uScroll * 1.6;
+  float z = (cxz.y - 0.5) * uExtent;
   // 沿 z 的滚动用 fract 包住，保证采样索引永远在 0–1 内。
   float scroll = cxz.y + uTime * uScroll * 0.08;
   float zz = fract(scroll) * 0.5 + 0.12;
-  float e = bandAt(zz);
-  float n = vnoise(vec2(cxz.x * 6.0, cxz.y * 6.0 + uTime * 0.7));
-  float h = e * uAmp2 + (n - 0.5) * 0.5 * uAmp2 + uAgg.x * 0.5;
+  float e = (bandAt(zz - 0.03) + bandAt(zz) * 2.0 + bandAt(zz + 0.03)) * 0.25;
+  float n = vnoise(vec2(cxz.x * 4.0, cxz.y * 4.0 + uTime * uScroll * 0.2));
+  float h = (e * 0.6 + (n - 0.5) * 0.8) * uAmp2 + uAgg.x * 0.12;
   h *= smoothstep(0.0, 0.18, cxz.y) * smoothstep(1.0, 0.75, cxz.y);
   vH = e;
-  vBary = bary;
+  vGrid = cxz;
   // 片元里那道扫描波用的是这个滚动相位，不是网格坐标：地形在滚，波要跟着
   // 贴在地面上走，否则看起来是"一层玻璃罩子在自己动"。
   vZ = scroll;
   vec3 lp = vec3(x, h - 1.2, z);
   vW = (uModel * vec4(lp, 1.0)).xyz;
-  vN = normalize(vec3(-(vnoise(vec2(cxz.x * 6.0 + 0.08, cxz.y * 6.0 + uTime * 0.7)) - n) * 8.0,
+  vN = normalize(vec3(-(vnoise(vec2(cxz.x * 4.0 + 0.08, cxz.y * 4.0 + uTime * uScroll * 0.2)) - n) * 4.0,
                       1.0,
                       -(e - bandAt(zz + 0.05)) * 6.0));
   gl_Position = uViewProj * vec4(vW, 1.0);
 }`,
     frag: `
-in vec3 vW; in vec3 vBary; in float vH; in vec3 vN; in float vZ;
+in vec3 vW; in vec2 vGrid; in float vH; in vec3 vN; in float vZ;
 out vec4 frag;
 void main() {
-  float edge = min(min(vBary.x, vBary.y), vBary.z);
-  float wire = smoothstep(0.045, 0.0, edge) * uWire2;
+  vec2 grid = vGrid * 32.0;
+  vec2 edge = abs(fract(grid + 0.5) - 0.5) / max(fwidth(grid), vec2(0.001));
+  float wire = (1.0 - smoothstep(0.35, 1.0, min(edge.x, edge.y))) * uWire2;
   vec3 V = normalize(uCamPos - vW);
   float fres = pow(1.0 - abs(dot(normalize(vN), V)), 3.0);
-  vec3 c = paletteMix(0.2 + vH * 0.75) * (0.3 + vH * 1.1) + vec3(fres) * 0.8;
-  float a = wire * (0.30 + vH * 1.0) + vH * 0.10 + fres * 0.35;
-  c += paletteMix(0.95) * wire * 1.5;
-  // 白热峰顶：只有最高的山脊烧白，地形才有"高度"的读法——
-  // 否则山谷和峰顶一个亮度，画面是平的。
-  c += vec3(1.0, 0.97, 0.90) * pow(max(vH - 0.55, 0.0), 2.0) * 1.0;
+  vec3 c = paletteMix(0.2 + vH * 0.65) * (0.025 + wire * (0.75 + vH * 0.30) + fres * 0.025);
   // 节拍行波：鼓点一下，一道亮带沿 z 滚过去。频谱让地形"有形状"，
   // 这道波让地形"有节拍"。
   float wave = exp(-pow((fract(vZ * 2.0 - uTime * 0.45) - 0.5) * 7.0, 2.0));
-  c += paletteMix(0.8) * wave * uPulse * 0.4;
-  a = min(a, 0.42);
-  frag = vec4(c * a, a);
+  c += paletteMix(0.8) * wave * uPulse * wire * 0.10;
+  float fade = smoothstep(0.0, 0.12, vGrid.x) * (1.0 - smoothstep(0.88, 1.0, vGrid.x))
+             * smoothstep(0.0, 0.12, vGrid.y) * (1.0 - smoothstep(0.8, 1.0, vGrid.y));
+  frag = vec4(c * fade, fade);
 }`,
     setup: function (gl, U, S) {
       gl.uniform1f(U.uExtent, S.p.extent);
@@ -652,8 +611,8 @@ void main() {
   });
 
   // --- 6. 三维歌词 -----------------------------------------------------------
-  // 歌词走廊：九张文字面片沿 z 排开，当前行锚在原点，未来句伸向 -z 深处、
-  // 唱过的句沿 +z 靠近镜头（深度钳制保证不穿相机）。文字本身由 lyric3d.js
+  // 九张文字面片上下排开，当前行锚在原点，前后句都退向 -z 深处。
+  // 文字本身由 lyric3d.js
   // 烘进图集纹理，这里每帧
   // 只做「按实例摆面片 + 采样图集」，与其它场景同构（零顶点缓冲、加性混合、
   // RGBA8 后处理）。
@@ -666,8 +625,10 @@ void main() {
     // 文字是密集团块：1/4 分辨率的粗光晕会把一整行字平均成实心白条。
     // 场景级泛光折扣——字形保留，只留紧贴笔画的细辉光，不把整行糊成棒。
     bloomScale: 0.25,
+    // 字形需要阅读对比度；提亮发生在泛光提取之后，不扩大笔画光晕。
+    exposureScale: 2.4,
     uniforms: ['uLyricTex', 'uSpacing', 'uArc', 'uPWidth', 'uDimK', 'uBob', 'uTint'],
-    defaults: { spacing: 2.5, arc: 3.2, pwidth: 20, dimK: 0.32, bob: 0.5, tint: 0.8 },
+    defaults: { spacing: 2.5, arc: 0.65, pwidth: 16, dimK: 0.48, bob: 0.18, tint: 0.5 },
     decl: `
 uniform sampler2D uLyricTex; uniform float uSpacing; uniform float uArc; uniform float uPWidth;
 uniform float uDimK; uniform float uBob; uniform float uTint;
@@ -678,19 +639,14 @@ void main() {
   vec2 q = quadVert(gl_VertexID);
   float cell = float(gl_InstanceID);
   float rel = cell - 4.0;
-  // 当前行（rel=0）锚在原点：镜头在 +z 一端朝 -z 取景。
-  // rel>0 是未来句，沿 -z 排向远处；rel<0 是唱过的句，沿 +z 靠近镜头。
-  // 行距是用户参数（最大 9），唱过句若真按它排布，两行外就会穿过相机，
-  // 被近裁剪面切成巨大三角。把 +z 钳在机位安全距离内（默认机位 dist=20）：
-  // 参数拉满时外层句在同一深度叠放，靠 fade 隐去，但绝不会越到相机后面。
-  float z = min(-rel * uSpacing, 16.5);
-  // 轻微 S 形弯曲：直线排列在大视场角下像贴在墙上，弯一点才"包"得过来。
-  float x = sin(rel * 0.24) * uArc;
-  // 高度阶梯 + 随时间漂浮；漂浮相位按行错开，整片句子不会同步上下。
-  float y = -rel * 0.42 + sin(uTime * 1.3 + rel * 1.7) * uBob * 0.16;
+  // 前后句都退向远处；行距跟随文字尺寸，不再把多句钳在相同近景深度。
+  float z = -abs(rel) * uSpacing * 0.55;
+  float x = sin(rel * 0.24) * uArc * 0.35;
   // 当前行随节拍轻推。
-  float pw = uPWidth * (rel == 0.0 ? 1.0 + uPulse * 0.045 : 1.0);
+  float pw = uPWidth * (rel == 0.0 ? 1.0 + uPulse * 0.012 : 1.0);
   float ph = pw / 5.3333;               // 图集条带的宽高比 1024/192
+  float lineStep = max(uSpacing, uPWidth / 5.3333 * 0.85);
+  float y = -rel * lineStep + sin(uTime * 0.45) * uBob * 0.06;
   vec3 p = vec3(x + q.x * pw * 0.5, y + q.y * ph * 0.5, z);
   vUV = q * 0.5 + 0.5;
   vCell = cell;
@@ -712,9 +668,9 @@ void main() {
   float fade = 1.0 - smoothstep(1.5, 4.5, abs(vRel));
   vec3 activeCol = mix(vec3(1.0), uColorA, uTint);
   activeCol = mix(activeCol, uColorB, uEnergy * 0.35);
-  vec3 quietCol = mix(uColorA, uColorB, 0.5) * uDimK;
+  vec3 quietCol = mix(uColorA, uColorB, 0.5) * sqrt(uDimK);
   vec3 c = mix(quietCol, activeCol, isAct);
-  float a = t.a * mix(fade * (0.5 + uDimK * 0.8), 1.0, isAct);
+  float a = t.a * mix(fade * (0.55 + uDimK * 0.6), 1.0, isAct);
   // 与其它场景一致的加性约定：rgb 预乘 alpha。
   frag = vec4(c * a, a);
 }`,
@@ -992,7 +948,7 @@ void main() {
 
     gl.disable(gl.CULL_FACE);
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE);       // 全程加性：舞台是"光"，不是"面"
+    gl.blendFunc(gl.ONE, gl.ONE);
 
     var w = 1, h = 1, dpr = 1;
     var lost = false;
@@ -1231,11 +1187,13 @@ void main() {
 
       // --- 相机 ---
       var cam = S.cam;
+      // 竖屏按同一构图留白，镜头距离仍可由用户缩放。
+      var framedDist = cam.dist * Math.max(1, 1.25 / (w / h));
       var cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
       var eye = [
-        cam.tx + Math.sin(cam.yaw) * cp * cam.dist,
-        cam.ty + sp * cam.dist,
-        cam.tz + Math.cos(cam.yaw) * cp * cam.dist
+        cam.tx + Math.sin(cam.yaw) * cp * framedDist,
+        cam.ty + sp * framedDist,
+        cam.tz + Math.cos(cam.yaw) * cp * framedDist
       ];
       S.eye = eye;
       perspective(proj, cam.fov * Math.PI / 180, w / h, 0.1, 400);
@@ -1249,7 +1207,7 @@ void main() {
       }
 
       uploadSpectrum(S.bands, S.rises);
-      if (def.id === 'lyric') uploadLyric(S);
+      if (def.id === 'lyric' && S.lyricVisible !== false) uploadLyric(S);
 
       // --- 场景渲染到离屏 ---
       var g = geometryFor(def, q);
@@ -1269,16 +1227,17 @@ void main() {
       var U = entry.U;
       bindCommon(U, S, def);
 
-      // 只写深度不写颜色会破坏加性混合的观感，所以半透明几何统一关掉深度写入、
-      // 只保留深度测试：排序问题交给"光本来就该叠加"这一事实。
-      gl.depthMask(false);
+      // 实体表面正常遮挡；光点与文字才做加性混合。材质在各场景声明。
+      var surface = def.blend === 'surface';
+      gl.blendFunc(gl.ONE, surface ? gl.ONE_MINUS_SRC_ALPHA : gl.ONE);
+      gl.depthMask(surface);
 
       var mode = gl[g.mode];
       function drawIt() {
         if (g.instances > 1) gl.drawArraysInstanced(mode, 0, g.verts, g.instances);
         else gl.drawArrays(mode, 0, g.verts);
       }
-      drawIt();
+      if (def.id !== 'lyric' || S.lyricVisible !== false) drawIt();
       if (def.extraPasses) def.extraPasses(gl, U, S, { mirrorMat: mirrorMat, identity: identity }, drawIt);
 
       gl.depthMask(true);
@@ -1366,13 +1325,13 @@ void main() {
       gl.uniform1i(comp.U.uBloom2, 2);
       gl.uniform2f(comp.U.uTexel, 1 / sceneT.w, 1 / sceneT.h);
       gl.uniform1f(comp.U.uBloomK, bloomK);
-      gl.uniform1f(comp.U.uBloom2K, bloomK > 0.001 ? bloomK * 0.85 : 0);
+      gl.uniform1f(comp.U.uBloom2K, bloomK > 0.001 ? bloomK * 0.3 : 0);
       gl.uniform1f(comp.U.uChroma, P.chroma === undefined ? 0.3 : P.chroma);
       gl.uniform1f(comp.U.uVignette, P.vignette === undefined ? 0.25 : P.vignette);
       gl.uniform1f(comp.U.uGrain, P.grain === undefined ? 0.18 : P.grain);
       gl.uniform1f(comp.U.uToon, P.toon === undefined ? 0 : P.toon);
       gl.uniform1f(comp.U.uPaper, P.paper === undefined ? 0 : P.paper);
-      gl.uniform1f(comp.U.uExposure, P.exposure === undefined ? 1.12 : P.exposure);
+      gl.uniform1f(comp.U.uExposure, (P.exposure === undefined ? 1.12 : P.exposure) * (def.exposureScale || 1));
       gl.uniform1f(comp.U.uSaturation, P.saturation === undefined ? 1.1 : P.saturation);
       gl.uniform1i(comp.U.uGrade, P.grade | 0);
       gl.uniform1f(comp.U.uTime, S.t);

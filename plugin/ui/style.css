@@ -201,6 +201,12 @@
   --stage-w: 460px;
   --bar-h: 72px;
   --row-h: 52px;
+
+  /* 封面占位音符的遮罩图。放在 :root 是因为用它的地方不止 .t-art：首页的
+     正在播放位、歌单墙卡片都要画同一个音符。用 mask 而不是 background-image，
+     是因为内联 SVG 里的颜色写不进 var()——烧成字面量就会跟着主题换色时慢半拍。
+     mask 只取形状，颜色交给 background-color: var(--muted)，换肤自动跟随。 */
+  --art-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cellipse cx='8' cy='17' rx='4.4' ry='3.4'/%3E%3Crect x='11.4' y='4' width='1.9' height='13'/%3E%3Cpath d='M11.4 4c3.4.5 6 1.5 7 3.6-1.7-1-4.1-1.4-7-1.5z'/%3E%3C/svg%3E");
 }
 
 /* 不支持 backdrop-filter 的环境（旧内核/企业策略禁用）：强玻璃底退为实色，
@@ -838,10 +844,6 @@ select option { background: var(--panel-solid); color: var(--text); }
   background: var(--panel-2) center/cover no-repeat;
   border: 1px solid var(--line);
   flex: none;
-  /* 占位音符的遮罩图。用 mask 而不是 background-image，是因为内联 SVG 里的
-     颜色写不进 var()——烧成字面量就会跟着主题换色时慢半拍。mask 只取形状，
-     颜色交给 background-color: var(--muted)，换肤自动跟随。 */
-  --art-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cellipse cx='8' cy='17' rx='4.4' ry='3.4'/%3E%3Crect x='11.4' y='4' width='1.9' height='13'/%3E%3Cpath d='M11.4 4c3.4.5 6 1.5 7 3.6-1.7-1-4.1-1.4-7-1.5z'/%3E%3C/svg%3E");
 }
 body[data-density="compact"] .t-art { width: 32px; height: 32px; border-radius: 6px; }
 

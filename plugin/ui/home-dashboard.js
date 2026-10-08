@@ -25,7 +25,15 @@
 
   function text(node, value) { if (node.textContent !== value) node.textContent = value; }
 
-  function update() {
+  // 与 app.js 的 paintArt 同一份哈希：占位色相按曲目 id 稳定取值，
+  // 首页卡片与曲库那一行的「没有封面」才是同一个颜色。
+  function hueOf(seed) {
+    var h = 0;
+    for (var i = 0; i < seed.length; i += 1) h = (h * 31 + seed.charCodeAt(i)) % 360;
+    return String(h);
+  }
+
+  function update(force) {
     if (!host || !el) return;
     var snapshot = host.read(), model = present(snapshot);
     text(el.status, model.status); text(el.title, model.title); text(el.detail, model.detail);
@@ -37,10 +45,14 @@
     el.recent.hidden = snapshot.recentVisible === false;
     var track = model.track;
     var nextKey = track ? [track.id, track.cover || '', !!track.has_cover].join('|') : '';
-    if (nextKey === artKey) return;
+    // force：封面字节换了但封面键没变（给已有封面的曲子再换一张），
+    // 不强制就永远停在旧图上。
+    if (!force && nextKey === artKey) return;
     var oldId = el.art.dataset.trackId || '';
     artKey = nextKey;
     el.art.dataset.trackId = track ? track.id : '';
+    if (track) el.wrap.style.setProperty('--ph', hueOf(track.id));
+    else el.wrap.style.removeProperty('--ph');
     // 换曲先撤下旧图并作废旧解码；同曲新封面仍由共享封面owner解码后提交。
     if (!track || oldId !== track.id) host.applyCover(el.art, '');
     if (!track) return;
@@ -96,7 +108,8 @@
     if (!root) return;
     host = nextHost;
     var find = function (id) { return document.getElementById(id); };
-    el = { root: root, art: find('home-art'), status: find('home-status'), title: find('home-title'),
+    el = { root: root, art: find('home-art'), wrap: find('home-art-wrap'),
+      status: find('home-status'), title: find('home-title'),
       detail: find('home-detail'), action: find('home-action'), retry: find('home-retry'),
       daily: find('home-daily'), recent: find('home-recent') };
     el.action.addEventListener('click', activate);

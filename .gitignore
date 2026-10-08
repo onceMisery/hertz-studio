@@ -37,6 +37,7 @@ Thumbs.db
 # Agent working notes / local verification scratch files
 .workbuddy/
 .zcode/
+.trae/
 /_root.txt
 /_verify.txt
 # Python

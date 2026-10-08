@@ -628,16 +628,13 @@ ok(CS.importJSON('[1,2,3]').ok === false, '错误形状的 JSON 被拒绝');
   const widthDef = parseFloat((twRow.match(/\['width',\s*'[^']*',\s*[\d.]+,\s*[\d.]+,\s*[\d.]+,\s*'[^']*',\s*([\d.]+)\s*\]/) || [])[1]);
   // 柱数按画质档取最多的一档（64），这是最挤的情况。
   const gap = spanDef / 64;
-  ok(widthDef < gap,
+  ok(widthDef * 2 < gap,
     `towers 柱宽 ${widthDef} 小于最挤档的柱间距 ${gap.toFixed(3)}（span ${spanDef} / 64 根）`);
-  ok(widthDef / gap <= 0.8,
+  ok(widthDef * 2 / gap <= 0.8,
     `柱宽不超过间距的八成（${(widthDef / gap * 100).toFixed(0)}%，留得下看得见的缝）`);
 
-  // 入画机位：pitch 太低会把柱高压成一条横带。towers 与 nebula/terrain 同档。
-  const camBlock = (csSrc.match(/towers:\s*\{[^}]*'cam\.pitch'[^}]*\}/) || [''])[0];
-  const pitchDef = parseFloat((camBlock.match(/'cam\.pitch':\s*([\d.]+)/) || [])[1]);
-  ok(pitchDef >= 22,
-    `towers 入画俯角 ${pitchDef}° 不再贴地（14° 时柱高被压成一条带，读不出高低）`);
+  // 构图与遮挡改用 check-creative-scenes-browser.js 的真实 GPU 验证；
+  // 单独要求俯角 >=22 度并不能证明柱体可读性。
 }
 
 section('沉浸舞台下工坊只允许选择');

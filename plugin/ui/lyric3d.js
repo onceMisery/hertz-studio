@@ -93,7 +93,7 @@
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.shadowColor = 'rgba(255,255,255,0.4)';
-      ctx.shadowBlur = 8;
+      ctx.shadowBlur = CELL_H * 0.018;
       ctx.fillStyle = '#ffffff';
       ctx.fillText(text, ATLAS_W / 2, cy, MAX_TEXT_W);
       // 无 shadow 再描一遍实心字：shadow 在字芯下会让字形发虚。
@@ -107,7 +107,7 @@
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.shadowColor = 'rgba(120,140,180,0.5)';
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur = 0;
       ctx.fillStyle = 'rgba(176,188,210,0.9)';
       ctx.fillText(text, ATLAS_W / 2, cy, MAX_TEXT_W);
       ctx.shadowBlur = 0;

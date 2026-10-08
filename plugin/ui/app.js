@@ -210,10 +210,10 @@ const ui = {
   devDiagSave: $('dev-diag-save'),
   devDiagClear: $('dev-diag-clear'),
 
-  // 舞台区的节拍镜头状态行：后台状态与手动重试。
-  beatRow: $('stage-beat'),
-  beatText: $('stage-beat-text'),
-  beatRetry: $('stage-beat-retry'),
+  // 开发者选项里的节拍诊断，不占用正在播放区域。
+  beatRow: $('dev-beat-status'),
+  beatText: $('dev-beat-text'),
+  beatRetry: $('dev-beat-retry'),
 
   // 创意舞台：细分参数在工坊里调。
   workshopBtn: $('workshop-btn'),
@@ -3749,7 +3749,10 @@ async function completeTrackInfo(track) {
     if (!choices) return;
     const stats = await applyCompletions(choices);
     toast(completionSummary(stats));
-    if (stats.albums || stats.covers || stats.lyrics) { loadTracks(true); loadFacets(); }
+    if (stats.albums || stats.covers || stats.lyrics) {
+      loadTracks(true).then(() => refreshHomeArt(track.id));
+      loadFacets();
+    }
   } catch (err) {
     toast(errText('联网补全失败', err), 'error');
   }
@@ -3781,6 +3784,7 @@ function replaceTrackCover(track) {
           const row = state.rows.get(id);
           if (row) paintArt(row, (await transport.ensureCover(id)) || transport.coverUrl(id));
         }
+        refreshHomeArt(id);
       } catch (err) {
         toast(errText('封面替换失败', err), 'error');
       }
@@ -4056,6 +4060,7 @@ function renderDiagnostics(info) {
 }
 
 async function loadDiagnostics() {
+  loadBeatStatus();
   const info = await transport.get('/v1/diagnostics').catch(() => null);
   // 这条 GET 失败（服务断开）时不动界面：勾选框停在用户刚按下的状态比跳回
   // 「关」诚实，反正库里写没写通由下面那次 POST 自己报错。
@@ -4139,23 +4144,17 @@ async function clearDiagLog() {
 }
 
 // ---------------------------------------------------------------------------
-// 舞台区的节拍镜头状态行：后台状态与「重试」
-//
-// 清单 §9 G7：后台任务的状态要附着在任务上，而不是只在算完那一刻闪一条 toast。
-// 「在算 / 已有图 / 只在这轮内存 / 算不出来 / 还没轮到」是五种不同的下一步
-// （等它 / 不用管 / 别关这一轮 / 按重试 / 先播一次），所以文案分开写。合成一句
-// 「没有镜头」就没人能回答「再等等还是重来」。
-//
-// 只此一处：设置页不再放第二份同样的读数，否则两边会在换曲与算完的时刻上漂移。
+// 设置页里的节拍诊断：仅影响舞台效果的后台任务，不是播放错误。
+// 保留唯一状态读数和手动重试入口，避免全局任务失败干扰正在播放的歌曲。
 // ---------------------------------------------------------------------------
 
 const BEAT_STATE_TEXT = {
-  analyzing: '这首正在算',
-  disk: '这首已有节拍图（在磁盘）',
-  memory: '这首已有节拍图，只在这轮内存里（没能写进磁盘）',
-  failed: '这首算不出来',
-  idle: '后台还没轮到这首',
-  not_ready: '后台还不认识这段音频，先播一次',
+  analyzing: '正在准备舞台节拍',
+  disk: '舞台节拍已就绪（已缓存）',
+  memory: '舞台节拍已就绪（本次可用，缓存未保存）',
+  failed: '暂未完成节拍分析，不影响播放',
+  idle: '等待后台空闲后分析',
+  not_ready: '等待音频准备完成',
 };
 
 const BEAT_REASON_TEXT = {
@@ -4172,11 +4171,11 @@ function beatStatusText(v) {
     parts.push(BEAT_REASON_TEXT[cur.reason] || '原因未知');
     if (cur.attempts) parts.push(`已试 ${cur.attempts} 次`);
   }
-  // 全局计数只在后台真有事可说时才跟在后面：舞台上的这一行读不动三个数字。
+  // 全局任务汇总只出现在诊断区域，不作为当前歌曲的播放错误。
   const tally = [];
-  if (v.analyzing) tally.push(`在算 ${v.analyzing} 首`);
-  if (v.abandoned) tally.push(`已放弃 ${v.abandoned} 首`);
-  if (v.deferred) tally.push(`因额度让路 ${v.deferred} 次`);
+  if (v.analyzing) tally.push(`${v.analyzing} 首分析中`);
+  if (v.abandoned) tally.push(`${v.abandoned} 首未完成分析`);
+  if (v.deferred) tally.push(`已延后 ${v.deferred} 次`);
   if (tally.length) parts.push(`后台：${tally.join(' · ')}`);
   // 本机档位挡下时，「后台还没轮到这首」会被读成后端故障。这一问只有客户端知道
   // 答案（服务端那边算得出图，只是这台设备不放镜头），所以接在最后一句。
@@ -4196,12 +4195,14 @@ let beatStatusTimer = null;
 function renderBeatStatus() {
   if (!ui.beatRow || !ui.beatText) return;
   const id = state.current && state.current.id;
-  // 没在播、或一次读数都没拿到，就不占舞台的一行：这一行只回答「这一首怎么没镜头」。
+  // 不显示上一首的诊断；当前歌曲的数据仍由原任务状态接口提供。
   ui.beatRow.hidden = !id || !beatInfo || beatInfoTrack !== id;
   if (ui.beatRow.hidden) return;
-  ui.beatText.textContent = beatStatusText(beatInfo);
-  // 档位挡下时按重试也不会出镜头，藏掉比置灰诚实。
-  if (ui.beatRetry) ui.beatRetry.hidden = beatGated();
+  const title = state.current.title || '当前歌曲';
+  ui.beatText.textContent = `${title}：${beatStatusText(beatInfo)}`;
+  // 已就绪、分析中或本机不启用镜头时，不提示用户做无用的重试。
+  if (ui.beatRetry) ui.beatRetry.hidden = beatGated()
+    || !beatInfo.current || !['failed', 'memory', 'idle', 'not_ready'].includes(beatInfo.current.state);
 }
 
 async function loadBeatStatus(pollsLeft = 12) {
@@ -4229,15 +4230,14 @@ async function loadBeatStatus(pollsLeft = 12) {
   }
 }
 
-/// 重试的应答就是三态之一（与取地图同一个形状），措辞按状态分开：说「已重新
-/// 开始算」，不说「已修好」——重算完还要几秒。
+/// 用户主动重试才提示；分析结果与音乐是否能够播放分开说明。
 function beatRetryText(res) {
   if (!res) return '已重试';
   if (res.status === 'analyzing') return '已请求分析，后台空闲后继续';
   if (res.status === 'unavailable') {
-    return `还是算不出来：${BEAT_REASON_TEXT[res.reason] || res.reason || '原因未知'}`;
+    return `暂时无法分析节拍，不影响播放（${BEAT_REASON_TEXT[res.reason] || '请稍后再试'}）`;
   }
-  return res.cached ? '这首的节拍图已经在磁盘上了' : '算好了，但没能写进磁盘（这轮能用）';
+  return res.cached ? '舞台节拍已就绪' : '舞台节拍已就绪，本次可用，缓存未保存';
 }
 
 async function retryBeatmap() {
@@ -4524,6 +4524,39 @@ function initHomeDashboard() {
       ? (await transport.ensureCover(track.id)) || transport.coverUrl(track.id)
       : window.Online ? Online.safeCoverUrl(track.cover) : track.cover || '',
     applyCover: applyCoverImg, notify: (message) => toast(message, 'error') });
+  bindHomeCoverMenu();
+}
+
+// 首页那一格右键：把曲库行上那对「让封面位有图」的动作搬过来，省得为了补一张
+// 封面回曲库找那一行。在线曲目的封面归平台，这两个写的都是本地曲库
+// （`/v1/tracks/{id}/*`），所以在线曲不弹菜单。
+function bindHomeCoverMenu() {
+  const art = $('home-art-wrap');
+  if (!art) return;
+  art.addEventListener('contextmenu', (event) => {
+    const track = homeSnapshot().current;
+    if (!track || String(track.id).startsWith('online:')) return;
+    event.preventDefault();
+    ui.menu.innerHTML = '';
+    buildMenu(ui.menu, [
+      { label: '联网补全信息', run: () => completeTrackInfo(track) },
+      { label: '替换封面', run: () => replaceTrackCover(track) },
+    ]);
+    showMenu(event.clientX, event.clientY);
+  });
+}
+
+/// 封面落地后重画首页那一格。
+///
+/// 两个坑：`loadTracks` 只换 `state.byId` 里那份引用，卡片读的 `state.current`
+/// 还是旧对象（`has_cover` 停在 0）；而「给已有封面的曲子再换一张」连封面键都没变，
+/// 不强制就永远停在旧图。所以先并回当前曲目这一份，再带 force 重画。
+function refreshHomeArt(id) {
+  if (!window.HomeDashboard || !id) return;
+  if (!state.current || state.current.id !== id) return;
+  const fresh = state.byId.get(id);
+  if (fresh && fresh !== state.current) Object.assign(state.current, fresh);
+  HomeDashboard.update(true);
 }
 
 // ---------------------------------------------------------------------------

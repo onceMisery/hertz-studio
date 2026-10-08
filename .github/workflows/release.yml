@@ -125,40 +125,22 @@ jobs:
         with:
           key: plugin-${{ matrix.os }}
 
-      # 同上：sidecar 依赖 hertz-studio，Linux 上要 ALSA 与 libdbus-1 才编得起来。
-      - name: Install Linux system dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev libdbus-1-dev pkg-config
-
+      # Linux 的 ALSA/libdbus 依赖不在这里装：打包脚本里装，发布链路（可复用 workflow
+      # 没有装系统包的钩子）与这条检视链路才会拿到同一套前置。
       - uses: actions/setup-node@v4
         with:
           node-version: lts/*
 
       - name: Install dbx plugin CLI
-        run: npm install -g @dbx-app/plugin-cli
+        # 与 plugin-release.yml 的 plugin-cli-version 保持一致：CLI 版本一变，同一个
+        # 源码 tag 就会打出字节不同的包，检视用的产物和上架用的候选就对不上了。
+        run: npm install -g @dbx-app/plugin-cli@0.1.2
 
       - name: Package .dbxp
         shell: bash
-        run: |
-          # 不传 --target：CLI 拿「构建宿主」当原生 target，交叉打包它会直接拒绝
-          # （"does not match build host"），所以只能每个 OS 各打各的。
-          # --output-dir 是相对**项目目录**解析的，写 dist 才落在 plugin/dist，
-          # 写 plugin/dist 会得到一个 plugin/plugin/dist。
-          dbx-plugin package plugin --output-dir dist
-          ls -la plugin/dist
-          # artifact.json 的 url 是给插件仓库清单用的下载地址。这里没有发布环节，
-          # 就填成同目录下的文件名；真正上架时由维护者按仓库布局改写。
-          python3 - <<'PY'
-          import json, pathlib
-          for meta in pathlib.Path('plugin/dist').glob('*.artifact.json'):
-              dbxp = meta.with_name(meta.name.replace('.artifact.json', '.dbxp'))
-              data = json.loads(meta.read_text(encoding='utf-8'))
-              data['url'] = dbxp.name
-              meta.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-              print(f"{meta.name}: target={data.get('target')} url={data['url']} sha256={data.get('sha256')}")
-          PY
+        # 与发布链路共用一个脚本：Linux 依赖、打包、元数据核对都在里面。
+        # 不设 PLUGIN_RELEASE ⇒ 元数据里的 url 留裸文件名（这条链路不发布，只检视）。
+        run: bash scripts/ci-package-plugin.sh
 
       - name: Upload plugin package
         uses: actions/upload-artifact@v4

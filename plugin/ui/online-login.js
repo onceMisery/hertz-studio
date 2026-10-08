@@ -28,7 +28,6 @@
   // 之后才回来，若用「当前 source」配「这张迟到的 ticket」去轮询，平台票跨平台
   // 根本无效；关窗后也还会多出一个后台轮询。所以每次网络收尾都先核对 attempt。
   var intent = { attempt: 0, source: null, channel: 'qq', ticket: null };
-  var modalOpen = false;
   function beginIntent(source, channel) {
     intent = {
       attempt: intent.attempt + 1,
@@ -51,6 +50,11 @@
   var loginSources = [];
   // 各源已登录账号：source -> AccountInfo（未登录的源不在表里）。
   var accountsById = {};
+  // 只给已确认的凭据变更排序，防旧账号探测/注销覆盖后来成功的同源登录。
+  // 属于本模块账号快照的提交校验，不参与服务端授权判断。
+  var accountRevisions = {};
+  function accountRevision(source) { return accountRevisions[source] || 0; }
+  function accountChanged(source) { accountRevisions[source] = accountRevision(source) + 1; }
   // 顶栏选中展示头像的音源 id。
   //
   // 权威值存在服务端 settings 表的 `topAvatarSource` 键，跟着数据库走，
@@ -82,13 +86,15 @@
   /// 启动时从服务端读回选择。
   /// 服务端没有而镜像有，说明是只存 localStorage 的旧版本留下的选择——
   /// 顺手迁移到服务端，之后重启就能恢复。
-  async function loadSelectedAvatar() {
+  async function loadSelectedAvatar(attempt) {
+    var selected = selectedAvatarSource;
     var remote = null;
     try {
       var s = await T.get('/v1/settings');
       var v = s ? s[TOP_AV_SETTING] : null;
       if (typeof v === 'string' && v) remote = v;
     } catch (e) { /* 读不到就退回镜像 */ }
+    if (!isCurrent(attempt) || selected !== selectedAvatarSource) return;
     var local = readSelectedAvatar();
     if (remote) {
       selectedAvatarSource = remote;
@@ -174,6 +180,7 @@
       el('qr-status').textContent = '已扫码，请在手机上确认登录';
       schedulePoll(mine, ms);
     } else if (p.state === 'confirmed') {
+      accountChanged(mine.source);
       stopPolling();
       el('qr-status').textContent = '登录成功';
       close();
@@ -225,8 +232,9 @@
   }
 
   // 拉取音源清单（每次打开弹窗刷新一次，保证能力表最新）。
-  async function loadLoginSources() {
+  async function loadLoginSources(attempt) {
     var data = await T.get('/v1/online/sources');
+    if (!isCurrent(attempt)) return [];
     loginSources = (data.sources || []).filter(hasAnyLoginCap);
     paintSourceTabs();
     return loginSources;
@@ -240,11 +248,13 @@
   // 并发拉取各源账号态。没登录的源（401/403）按未登录处理；**探测没出结果**
   // （上游 5xx / 超时 / 网络故障）不算授权断言（A6）：留着上一次的账号身份与
   // 顶栏头像，别把「没探到」显示成「没登录」而催用户重扫。
-  async function loadAccounts() {
+  async function loadAccounts(attempt) {
     var prev = accountsById;
-    accountsById = {};
+    var next = {};
+    var revisions = {};
     await Promise.all(
       loginSources.map(async function (s) {
+        revisions[s.id] = accountRevision(s.id);
         var acc = null;
         var verdict = 'unknown';
         try {
@@ -256,10 +266,18 @@
           verdict = (window.Online && window.Online.accountVerdict)
             ? window.Online.accountVerdict(e) : 'signed-out';
         }
-        if (verdict === 'ok' && acc && (acc.nickname || acc.avatar)) accountsById[s.id] = acc;
-        else if (verdict === 'unknown' && prev[s.id]) accountsById[s.id] = prev[s.id];
+        if (verdict === 'ok' && acc && (acc.nickname || acc.avatar)) next[s.id] = acc;
+        else if (verdict === 'unknown' && prev[s.id]) next[s.id] = prev[s.id];
       })
     );
+    if (!isCurrent(attempt)) return;
+    Object.keys(revisions).forEach(function (source) {
+      if (revisions[source] === accountRevision(source)) return;
+      // 凭据在探测途中发生了已确认的变化，沿用变更后的快照，不复活旧身份。
+      if (accountsById[source]) next[source] = accountsById[source];
+      else delete next[source];
+    });
+    accountsById = next;
     refreshTopAvatar();
   }
 
@@ -361,24 +379,32 @@
   /// 否则默认选清单第一个源；已登录源直接展示账号信息，不再要求登录。
   async function open(source) {
     T = window.VMusicTransport;
-    modalOpen = true;
+    var prev = intent;
+    var mine = beginIntent(source || null, 'qq');
+    if (prev.ticket) cancelTicket(prev.source, prev.ticket);
+    stopPolling();
     // 标记弹窗打开：隐藏 .app，从根本上杜绝页面内任何元素（含带动画/
     // transform 的层叠上下文）穿透遮挡弹窗。
     document.documentElement.classList.add('qr-modal-open');
     el('qr-modal').hidden = false;
     el('qr-status').textContent = '正在加载音源…';
     el('qr-canvas').innerHTML = '';
+    el('qr-canvas').onclick = null;
+    el('qr-cookie-input').value = '';
+    el('qr-channels').hidden = true;
     try {
-      var list = await loadLoginSources();
+      var list = await loadLoginSources(mine.attempt);
+      if (!isCurrent(mine.attempt)) return;
       if (!list.length) {
         el('qr-status').textContent = '当前没有可登录的音源';
         return;
       }
-      await loadAccounts();
+      await loadAccounts(mine.attempt);
+      if (!isCurrent(mine.attempt)) return;
       // 弹窗里也要以服务端为准（另开标签页改过选择时这里能跟上）。
-      await loadSelectedAvatar();
-      // 加载期间用户已经关窗：不要替他再把弹窗打开。
-      if (!modalOpen) return;
+      await loadSelectedAvatar(mine.attempt);
+      // 关闭重开或直接切平台也会取代本次初始化，不能只看弹窗是否开着。
+      if (!isCurrent(mine.attempt)) return;
       paintSourceTabs();
       refreshTopAvatar();
       // 选目标源：显式指定 > 唯一已登录源 > 清单第一个。
@@ -396,6 +422,7 @@
       if (accountsById[pick]) enterLoggedIn(pick);
       else await start(pick, 'qq');
     } catch (e) {
+      if (!isCurrent(mine.attempt)) return;
       el('qr-status').textContent = '加载音源失败：' + (e && e.message ? e.message : '网络错误');
     }
   }
@@ -470,22 +497,28 @@
 
   /// 退出某源：清空后端凭据后重绘弹窗（该源回到未登录入口）。
   async function logoutOf(source) {
+    var mine = intent;
+    var revision = accountRevision(source);
     el('qr-status').textContent = '正在退出…';
     try {
       await T.post('/v1/online/cookie', { source: source, cookie: '' });
     } catch (e) {
+      if (!isCurrent(mine.attempt)) return;
       el('qr-status').textContent = '退出失败：' + (e && e.message ? e.message : '网络错误');
       return;
     }
-    delete accountsById[source];
-    // 若退出的正是顶栏展示头像的源，清掉选择（refreshTopAvatar 会
-    // 自动回退到唯一剩余的已登录源或默认图标）。
-    if (selectedAvatarSource === source) {
-      selectedAvatarSource = null;
-      writeSelectedAvatar(null);
-    }
     if (window.OnlinePlaylists) window.OnlinePlaylists.refresh();
-    refreshTopAvatar();
+    // 已确认注销要同步身份，即使弹窗已关闭/切平台；后来成功的同源登录优先。
+    if (revision === accountRevision(source)) {
+      accountChanged(source);
+      delete accountsById[source];
+      if (selectedAvatarSource === source) {
+        selectedAvatarSource = null;
+        writeSelectedAvatar(null);
+      }
+      refreshTopAvatar();
+    }
+    if (!isCurrent(mine.attempt)) return;
     paintSourceTabs();
     // 回到该源的未登录登录取码视图。
     await start(source, 'qq');
@@ -501,7 +534,6 @@
     // 作废旧票失败不回滚：服务端会随票据过期自行清理，这里只是尽量不留孤儿会话。
     if (prev.ticket) cancelTicket(prev.source, prev.ticket);
     stopPolling();
-    modalOpen = true;
     el('qr-title').textContent = sourceLabel(source) + ' 登录';
     el('qr-status').textContent = '正在生成二维码…';
     paintSourceTabs();
@@ -538,7 +570,6 @@
     // 关窗即在途失效：迟到的取码不再渲染，也不再注册轮询。
     voidIntent();
     stopPolling();
-    modalOpen = false;
     el('qr-modal').hidden = true;
     // 解除背景隔离，恢复 .app 显示。
     document.documentElement.classList.remove('qr-modal-open');
@@ -588,6 +619,7 @@
     // （缺 MUSIC_U / qm_keyst / token 的包各平台仍按未登录处理）。
     // 绝不能在 false 时关窗假装成功。
     var signedIn = !!(res && res.signedIn);
+    if (signedIn) accountChanged(source);
     if (!isCurrent(mine.attempt)) {
       // 提交期间用户已切平台或关窗：cookie 已在服务端保存，只让账号区跟上，
       // 不动当前界面（尤其不能把别的源的登录态当成这次的结果）。
@@ -611,11 +643,15 @@
   /// 顶栏头像属锦上添花，这里失败一律静默，不打扰启动。
   async function init() {
     T = window.VMusicTransport;
+    // 启动恢复只是读取，不能抢走用户已经开始的扫码意图。
+    var attempt = intent.attempt;
     try {
-      var list = await loadLoginSources();
-      if (!list.length) return;
-      await loadAccounts();
-      await loadSelectedAvatar();
+      var list = await loadLoginSources(attempt);
+      if (!isCurrent(attempt) || !list.length) return;
+      await loadAccounts(attempt);
+      if (!isCurrent(attempt)) return;
+      await loadSelectedAvatar(attempt);
+      if (!isCurrent(attempt)) return;
       refreshTopAvatar();
     } catch (e) { /* 静默 */ }
   }

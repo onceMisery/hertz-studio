@@ -18,9 +18,24 @@
 .home-detail { color: var(--muted); font-size: var(--fs-base); line-height: 1.5; margin: 0 0 var(--sp-5); overflow-wrap: anywhere; }
 .home-art-wrap {
   width: calc(var(--sp-8) * 4); aspect-ratio: 1; position: relative; border-radius: var(--r-md);
-  background: var(--panel-solid); overflow: hidden; color: var(--muted);
+  /* 没有内嵌封面时这里必须读作「封面位空着」，而不是一个孤零零的功能图标：
+     与曲库行 .t-art.is-missing 同一套画法（按曲目 id 取色的淡渐变 + 音符遮罩），
+     所以卡片和它下面那一行的占位色是同一个颜色。--ph 由 home-dashboard.js 写。 */
+  background:
+    linear-gradient(135deg,
+      hsl(var(--ph, 160) 32% 26% / .6),
+      hsl(calc(var(--ph, 160) + 40) 30% 15% / .6)),
+    var(--panel-solid);
+  overflow: hidden; color: var(--muted);
 }
-.home-art-wrap > svg { position: absolute; inset: 30%; width: 40%; height: 40%; fill: currentColor; }
+/* ::before 而不是 ::after：它是包裹层的第一个子节点，封面 <img> 在其后绘制，
+   有封面时自然被整张图盖住，不需要再判断状态。 */
+.home-art-wrap::before {
+  content: ""; position: absolute; inset: 0;
+  background-color: var(--muted); opacity: .75;
+  -webkit-mask: var(--art-glyph) center / 52% 52% no-repeat;
+  mask: var(--art-glyph) center / 52% 52% no-repeat;
+}
 .home-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .home-art:not([src]) { visibility: hidden; }
 .home-actions { display: flex; flex-wrap: wrap; gap: var(--sp-3); }

@@ -59,7 +59,7 @@ async function main() {
     const b = env.loadBeatStatus();
     requests[1].resolve({ current: { state: 'disk' } }); await b;
     requests[0].resolve({ current: { state: 'failed', reason: 'unsupported' } }); await a;
-    assert.match(env.ui.beatText.textContent, /磁盘/, 'late A must not overwrite current B');
+    assert.match(env.ui.beatText.textContent, /已缓存/, 'late A must not overwrite current B');
     env.state.current = { id: 'C' };
     const c = env.loadBeatStatus();
     assert.equal(env.ui.beatRow.hidden, true, 'previous track verdict is hidden before new response');
@@ -71,7 +71,7 @@ async function main() {
     const a = env.loadBeatStatus(); const b = env.loadBeatStatus();
     requests[1].resolve({ current: { state: 'disk' } }); await b;
     requests[0].resolve({ current: { state: 'analyzing' } }); await a;
-    assert.match(env.ui.beatText.textContent, /磁盘/, 'same-track older response is stale too');
+    assert.match(env.ui.beatText.textContent, /已缓存/, 'same-track older response is stale too');
     assert.equal(clock.size(), 0);
   }
   {

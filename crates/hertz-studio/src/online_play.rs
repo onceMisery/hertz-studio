@@ -171,6 +171,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_first_pages_preserve_the_previous_collection_and_refill_cursor() {
+        for failure in ["upstream", "empty", "invalid"] {
+            let (state, handle) = playback_state().await;
+            state
+                .prepare_online_play(request("old"), std::future::ready(Ok(page("old"))))
+                .await
+                .unwrap()
+                .unwrap();
+            let status = state.collection_status().await.unwrap();
+            let session = state.playlist_load.lock().await.session;
+            let result = match failure {
+                "upstream" => Err(crate::error::ApiError::upstream_rejected("offline")),
+                "empty" => {
+                    let mut detail = page("new");
+                    detail.tracks.clear();
+                    Ok(detail)
+                }
+                _ => Ok(page(" ")),
+            };
+            assert!(state
+                .prepare_online_play(request("new"), std::future::ready(result))
+                .await
+                .is_err());
+            assert_eq!(*state.queue.lock().await, vec!["online:netease:old"]);
+            assert_eq!(*state.cursor.lock().await, Some(0));
+            assert_eq!(state.collection_status().await, Some(status), "{failure}");
+            {
+                let load = state.playlist_load.lock().await;
+                assert_eq!(load.session, session, "old in-flight page remains valid");
+                let active = load.active.as_ref().unwrap();
+                assert_eq!(active.offset, 1);
+                assert!(active.last_attempt.is_none());
+            }
+            state.audio.shutdown();
+            handle.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_first_page_retires_previous_collection_only_on_queue_commit() {
+        let (state, handle) = playback_state().await;
+        state
+            .prepare_online_play(request("old"), std::future::ready(Ok(page("old"))))
+            .await
+            .unwrap()
+            .unwrap();
+        let session = state.playlist_load.lock().await.session;
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let pending = state.prepare_online_play(request("new"), async {
+            entered.send(()).unwrap();
+            release_rx.await.unwrap();
+            Ok(page("new"))
+        });
+        let inspect = async {
+            entered_rx.await.unwrap();
+            assert_eq!(state.collection_status().await.unwrap().1, "old");
+            assert_eq!(state.playlist_load.lock().await.session, session);
+            assert_eq!(*state.queue.lock().await, vec!["online:netease:old"]);
+            release.send(()).unwrap();
+        };
+        let (prepared, ()) = tokio::join!(pending, inspect);
+        assert!(prepared.unwrap().is_some());
+        assert_eq!(*state.queue.lock().await, vec!["online:netease:new"]);
+        assert_eq!(state.collection_status().await.unwrap().1, "new");
+        assert_eq!(
+            state.playlist_load.lock().await.session,
+            session.wrapping_add(1)
+        );
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn a_new_direct_selection_resets_old_relay_provenance() {
         let (state, handle) = playback_state().await;
         state.remember_online_meta("online:qq:t1".into(), serde_json::from_value(json!({
@@ -231,9 +305,9 @@ impl AppState {
     async fn reserve_online_intent(&self) -> usize {
         let _commit = self.play_commit.lock().await;
         self.cancel_prepared_playback().await;
-        let mut load = self.playlist_load.lock().await;
-        load.session = load.session.wrapping_add(1);
-        load.active = None;
+        // The old collection still owns the current queue until a successful
+        // first page replaces it through set_queue_locked. Failed preparation
+        // must not remove its refill cursor or invalidate an in-flight page.
         self.play_generation
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1)

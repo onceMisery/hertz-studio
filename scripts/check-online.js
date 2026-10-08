@@ -624,6 +624,168 @@ async function loginScenario(pollStates, opts) {
       '迟到的票仍然尽力作废，不留孤儿会话');
   }
 
+  section('登录初始化：音源/账号/头像迟到、重开、直接切换与注销');
+  {
+    function held() {
+      let resolve, reject;
+      const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+      return { promise, resolve, reject };
+    }
+    const sources = { sources: ['netease', 'qq'].map(id => ({ id, label: id, caps: ['qr_login'] })) };
+    function opening(stage, delay) {
+      const match = stage === 'sources' ? '/v1/online/sources'
+        : stage === 'accounts' ? '/v1/online/account?source=netease' : '/v1/settings';
+      const transport = makeTransport({ GET: [
+        { match, times: 1, returns: delay.promise },
+        { match: '/v1/online/sources', returns: sources },
+        { match: '/v1/online/account', throw: { status: 401, code: 'auth_required' } },
+        { match: '/v1/settings', returns: {} },
+      ], POST: [
+        { match: '/v1/online/qr/start', returns: (_, body) => ({ ticket: body.source, qr_image: 'data:' + body.source }) },
+        { match: '/v1/online/qr/cancel', returns: { ok: true } },
+      ] });
+      const puts = [];
+      transport.put = async (url, body) => { puts.push({ url, body }); };
+      const env = makeSandbox({ transport });
+      const mirror = new Map();
+      env.sandbox.localStorage = {
+        getItem: key => mirror.get(key) || null,
+        setItem: (key, value) => mirror.set(key, value),
+        removeItem: key => mirror.delete(key),
+      };
+      return { env, transport, puts, mirror, OL: env.sandbox.OnlineLogin };
+    }
+    function imageOf(env) { return env.doc.getElementById('qr-canvas').children[0]?.src; }
+    function starts(transport) { return transport.calls.post.filter(c => c.url.endsWith('/qr/start')); }
+    for (const stage of ['sources', 'accounts', 'settings']) {
+      for (const outcome of ['success', 'error', ...(stage === 'sources' ? ['empty'] : [])]) {
+        const delay = held(); const x = opening(stage, delay);
+        const old = x.OL.open('netease'); await ticks();
+        x.OL.close(); await x.OL.open('qq');
+        const status = x.env.doc.getElementById('qr-status').textContent;
+        x.mirror.set('vmusic.topAvatarSource', 'qq');
+        const putCount = x.puts.length;
+        if (outcome === 'error') delay.reject(new Error('late failure'));
+        else delay.resolve(outcome === 'empty' ? { sources: [] }
+          : stage === 'sources' ? sources
+            : stage === 'accounts' ? { nickname: 'late-account', avatar: 'https://example.test/old.png' }
+              : { topAvatarSource: 'netease' });
+        await old;
+        const label = stage + '/' + outcome;
+        eq(imageOf(x.env), 'data:qq', label + ' 不覆盖新二维码');
+        eq(x.env.doc.getElementById('qr-status').textContent, status, label + ' 不覆盖新提示');
+        eq(starts(x.transport).length, 1, label + ' 不重新取码');
+        eq(x.env.clock.pending().length, 1, label + ' 只有新轮询');
+        ok(!x.transport.calls.post.some(c => c.url.endsWith('/cancel') && c.body.ticket === 'qq'), label + ' 不取消新票');
+        eq(x.mirror.get('vmusic.topAvatarSource'), 'qq', label + ' 不回写旧头像');
+        eq(x.puts.length, putCount, label + ' 不迁移迟到设置');
+        ok(!x.env.doc.getElementById('online-account-face').classList.contains('has-avatar'), label + ' 不提交旧账号');
+      }
+    }
+    for (const stage of ['sources', 'accounts', 'settings']) {
+      const delay = held(); const x = opening(stage, delay);
+      const boot = x.OL.init(); await ticks();
+      await x.OL.start('qq');
+      delay.resolve(stage === 'sources' ? sources : stage === 'accounts' ? { nickname: 'old' } : { topAvatarSource: 'netease' });
+      await boot;
+      eq(imageOf(x.env), 'data:qq', stage + ' 启动恢复不抢用户意图');
+      eq(starts(x.transport).length, 1, stage + ' 恢复不重新取码');
+      eq(x.env.clock.pending().length, 1, stage + ' 恢复不停止新轮询');
+    }
+    for (const direct of [false, true]) {
+      const delay = held(); const x = opening('sources', delay);
+      const old = x.OL.open('netease'); await ticks();
+      if (direct) await x.OL.start('qq'); else x.OL.close();
+      delay.resolve(sources); await old;
+      eq(x.env.doc.getElementById('qr-modal').hidden, !direct, '初始化后关闭/直接切换维持显隐');
+      eq(starts(x.transport).length, direct ? 1 : 0, '初始化过期不取码');
+      eq(x.env.clock.pending().length, direct ? 1 : 0, '初始化过期不排轮询');
+      if (direct) eq(imageOf(x.env), 'data:qq', '直接start不被旧open覆盖');
+    }
+    // init arriving after an already-started login is read-only and must not invalidate its ticket.
+    {
+      const delay = held(); delay.resolve(sources);
+      const x = opening('sources', delay);
+      await x.OL.start('qq'); await x.OL.init();
+      eq(imageOf(x.env), 'data:qq', '晚调用init不重置扫码');
+      eq(x.env.clock.pending().length, 1, '晚调用init保留轮询');
+      eq(x.transport.calls.post.filter(c => c.url.endsWith('/cancel')).length, 0, 'init不取消票据');
+    }
+    for (const outcome of ['success', 'error', 'closed']) {
+      const delay = held();
+      const transport = makeTransport({ GET: [
+        { match: '/v1/online/sources', returns: sources },
+        { match: 'account?source=netease', returns: { nickname: 'signed-in' } },
+        { match: '/v1/online/account', throw: { status: 401, code: 'auth_required' } },
+        { match: '/v1/settings', returns: {} },
+      ], POST: [
+        { match: '/v1/online/cookie', returns: delay.promise },
+        { match: '/v1/online/qr/start', returns: (_, body) => ({ ticket: body.source, qr_image: 'data:' + body.source }) },
+        { match: '/v1/online/qr/cancel', returns: { ok: true } },
+      ] });
+      const env = makeSandbox({ transport }); const OL = env.sandbox.OnlineLogin;
+      await OL.open('netease');
+      findByClass(env.doc.getElementById('qr-canvas'), 'qr-logged-out')[0].onclick();
+      await ticks(); OL.close();
+      if (outcome !== 'closed') await OL.open('qq');
+      const status = env.doc.getElementById('qr-status').textContent;
+      if (outcome === 'error') delay.reject(new Error('late logout')); else delay.resolve({ ok: true });
+      await ticks();
+      eq(env.doc.getElementById('qr-modal').hidden, outcome === 'closed', outcome + ' 迟到注销不重开');
+      eq(env.doc.getElementById('qr-status').textContent, status, outcome + ' 迟到注销不改提示');
+      eq(starts(transport).length, outcome === 'closed' ? 0 : 1, outcome + ' 迟到注销不重新取码');
+      eq(env.clock.pending().length, outcome === 'closed' ? 0 : 1, outcome + ' 迟到注销不改轮询');
+      if (outcome !== 'closed') eq(imageOf(env), 'data:qq', outcome + ' 注销不改新二维码');
+    }
+    for (const scenario of ['closed', 'new-platform', 'late-profile', 'new-login']) {
+      const logout = held(), profile = held();
+      let accountMode = 'old';
+      const transport = makeTransport({ GET: [
+        { match: '/v1/online/sources', returns: sources },
+        { match: 'account?source=netease', returns: () => {
+          if (accountMode === 'timeout') throw { status: 504, code: 'upstream_timeout' };
+          if (accountMode === 'pending') return profile.promise;
+          return { nickname: accountMode, avatar: 'https://example.test/' + accountMode + '.png' };
+        } },
+        { match: '/v1/online/account', throw: { status: 401, code: 'auth_required' } },
+        { match: '/v1/settings', returns: { topAvatarSource: 'netease' } },
+      ], POST: [
+        { match: '/v1/online/cookie', returns: (_, body) => body.cookie ? { signedIn: true } : logout.promise },
+        { match: '/v1/online/qr/start', returns: (_, body) => ({ ticket: body.source, qr_image: 'data:' + body.source }) },
+        { match: '/v1/online/qr/cancel', returns: { ok: true } },
+      ] });
+      transport.put = async () => {};
+      const env = makeSandbox({ transport }); const OL = env.sandbox.OnlineLogin;
+      await OL.open('netease');
+      ok(env.doc.getElementById('online-account-face').classList.contains('has-avatar'), scenario + ' 起始身份有头像');
+      findByClass(env.doc.getElementById('qr-canvas'), 'qr-logged-out')[0].onclick();
+      await ticks(); OL.close();
+      let opening;
+      if (scenario === 'new-platform') await OL.open('qq');
+      if (scenario === 'late-profile') {
+        accountMode = 'pending'; opening = OL.open('qq'); await ticks();
+      }
+      if (scenario === 'new-login') {
+        await OL.start('netease');
+        const save = env.doc.getElementById('qr-cookie-save');
+        env.doc.getElementById('qr-cookie-input').value = 'new-credential-fixture';
+        await save.onclick();
+        accountMode = 'new'; await OL.open('netease');
+      }
+      logout.resolve({ ok: true }); await ticks();
+      if (opening) {
+        profile.resolve({ nickname: 'old', avatar: 'https://example.test/old.png' });
+        await opening;
+      }
+      eq(env.doc.getElementById('online-account-face').classList.contains('has-avatar'), scenario === 'new-login', scenario + ' 已确认注销清身份，但保留后来成功登录');
+      if (scenario === 'new-platform' || scenario === 'late-profile') eq(imageOf(env), 'data:qq', scenario + ' 身份清理不改新平台');
+      accountMode = 'timeout'; await OL.open('netease');
+      eq(findByClass(env.doc.getElementById('qr-canvas'), 'qr-logged-in').length, scenario === 'new-login' ? 1 : 0, scenario + ' unknown不复活已注销身份');
+      if (scenario === 'new-login') ok(textOf(env.doc.getElementById('qr-canvas')).includes('new'), '旧注销不覆盖新账号');
+      else eq(imageOf(env), 'data:netease', scenario + ' 注销后重新显示登录入口');
+    }
+  }
+
   // -------------------------------------------------------------------------
   // 2. online.js 聚合 / 单源搜索
   // -------------------------------------------------------------------------

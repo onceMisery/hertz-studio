@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: MIT
+#
+# 把插件打成 DBX 市场要的「未签名候选」并挂到 GitHub Release 上。
+#
+# 为什么单独一个 workflow，而不是塞进 release.yml：
+#   release.yml 的边界是「手动触发、产物只供人工检视、绝不自动发布」；上架要的恰恰相反
+#   ——候选必须挂在不可变 URL 上（reviewer 按 release-candidates.json 逐个核对 SHA-256），
+#   并由 DBX 侧统一签名。签名私钥不在我们手里，所以我们只交候选，不交"最终包"。
+#   详见 dbx 仓库 plugins/RELEASING.md。
+#
+# 触发方式：建一个 Release（草稿也行）→ publish → 本 workflow 跑 5 个 target →
+# 把 5 个 .dbxp + 5 个 .artifact.json + 合并的 release-candidates.json 回传到该 Release。
+# 之后去 t8y2/dbx-store 开 submission issue，带上 tag 和 release-candidates.json 的 URL。
+#
+# 不可原地重建：同名版本一旦发布过，改任何字节都得换新 version（RELEASING.md「Immutability」）。
+
+name: release dbx plugin
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@plugin-sdk-v1
+    with:
+      release-tag: ${{ github.event.release.tag_name }}
+      # 脚本内部 cd 进 plugin/ 打包，所以这里保持仓库根为工作目录，
+      # 产物 glob 也按 plugin/dist 写（可复用 workflow 会把两者拼起来找文件）。
+      working-directory: .
+      package-command: PLUGIN_RELEASE=1 bash scripts/ci-package-plugin.sh
+      package-path: plugin/dist/*.dbxp
+      metadata-path: plugin/dist/*.artifact.json
+      # 候选用的 CLI 版本必须钉死：不钉的话，上游发新版就会让我们同一个源码 tag
+      # 打出字节不同的包，直接违反上面的不可变约束。
+      plugin-cli-version: 0.1.2
+      # 插件 sidecar 是 Rust（cpal + ashpd），没有 Go 后端；空字符串让矩阵跳过 Go 安装。
+      go-version: ""

@@ -65,25 +65,25 @@
         ['cam.yaw', '水平角', -180, 180, 1, '°', 0],
         ['cam.pitch', '俯仰角', -55, 80, 1, '°', 14],
         ['cam.height', '注视高度', -6, 10, 0.1, '', 0.6],
-        ['cam.drift', '自动漂移', 0, 200, 5, '%', 40],
-        ['cam.shake', '节拍抖动', 0, 200, 5, '%', 70],
-        ['cam.kick', '低频跟随', 0, 200, 5, '%', 80]
+        ['cam.drift', '自动漂移', 0, 200, 5, '%', 18],
+        ['cam.shake', '节拍抖动', 0, 200, 5, '%', 12],
+        ['cam.kick', '低频跟随', 0, 200, 5, '%', 24]
       ]
     },
     {
       id: 'look', title: '影调', items: [
-        ['look.bloom', '泛光', 0, 3, 0.05, '', 0.55],
+        ['look.bloom', '泛光', 0, 3, 0.05, '', 0.28],
         // 阈值 0.58 太低：柱体自身的亮度就在 0.6 上下，等于整排灯都进了泛光
         // 通道，叠上镜面倒影后就是一条实心白带（实测 towers 默认态）。
         // 0.74 只放真正的亮部过阈，柱体轮廓与双色柱的色差都还在。
         ['look.bloomThresh', '泛光阈值', 0, 1, 0.01, '', 0.74],
-        ['look.chroma', '径向色散', 0, 4, 0.05, '', 0.35],
+        ['look.chroma', '径向色散', 0, 4, 0.05, '', 0.08],
         ['look.vignette', '暗角', 0, 1.2, 0.02, '', 0.28],
-        ['look.grain', '胶片颗粒', 0, 1.2, 0.02, '', 0.20],
+        ['look.grain', '胶片颗粒', 0, 1.2, 0.02, '', 0.06],
         ['look.toon', '手绘描边', 0, 1, 0.02, '', 0],
         ['look.paper', '纸张质感', 0, 1, 0.02, '', 0],
-        ['look.exposure', '曝光', 0.4, 2.4, 0.02, '', 1.12],
-        ['look.saturation', '饱和度', 0, 2, 0.02, '', 1.10]
+        ['look.exposure', '曝光', 0.4, 2.4, 0.02, '', 1.0],
+        ['look.saturation', '饱和度', 0, 2, 0.02, '', 0.95]
       ],
       selects: [['look.grade', '调色', [['0', '原色'], ['1', '双色调'], ['2', '单色'], ['3', '霓虹']], 0]]
     },
@@ -99,90 +99,76 @@
   // 场景私有参数。每项 = [键, 中文名, min, max, step, 单位, 默认值]。
   // 路径一律写作 `sc.<键>`，切场景时自动指向当前场景那一份。
   //
-  // towers 的 width/depth 默认 0.62 是有问题的：柱数 32~64 根（按画质档），
-  // span 26，所以间距约 26/64 ≈ 0.41。**柱宽比间距还大 50%，64 根柱从
-  // 任何角度看都是连成一片的实心墙** —— 之前读作"白色光晕"的那条带，
-  // 根子在这儿：泛光只是把这片实心墙糊亮。改成 0.26（约为间距的六成），
-  // 柱与柱之间才留得出缝，纵深与疏密都读得出来。
+  // 柱宽是 boxVert 的半宽，实际占宽要乘二；保留柱间负空间。
   var SCENE_SPEC = {
     towers: [
-      ['height', '柱高', 0.5, 22, 0.1, '', 9],
-      ['span', '排列宽度', 6, 60, 0.5, '', 26],
-      ['width', '柱宽', 0.1, 2, 0.02, '', 0.26],
-      ['depth', '柱厚', 0.1, 2, 0.02, '', 0.26],
-      ['mirror', '地面倒影', 0, 1, 0.02, '', 0.45]
+      ['height', '柱高', 0.5, 22, 0.1, '', 5.5],
+      ['span', '排列宽度', 6, 60, 0.5, '', 24],
+      ['width', '柱宽', 0.1, 2, 0.02, '', 0.10],
+      ['depth', '柱厚', 0.1, 2, 0.02, '', 0.16],
+      ['mirror', '地面倒影', 0, 1, 0.02, '', 0.16]
     ],
     orb: [
       ['radius', '球半径', 1, 8, 0.1, '', 3.0],
-      ['amp', '位移幅度', 0, 4, 0.05, '', 1.3],
-      ['wire', '线框强度', 0, 1.5, 0.02, '', 0.55],
-      ['wobble', '切向抖动', 0, 1.5, 0.02, '', 0.6]
+      ['amp', '位移幅度', 0, 4, 0.05, '', 0.65],
+      ['wire', '线框强度', 0, 1.5, 0.02, '', 0.42],
+      ['wobble', '切向抖动', 0, 1.5, 0.02, '', 0.22]
     ],
     tunnel: [
       ['ringRadius', '隧道半径', 1, 12, 0.1, '', 4.2],
-      ['ringLen', '隧道长度', 6, 48, 0.5, '', 22],
-      ['spread', '光带宽度', 0.2, 5, 0.05, '', 1.5],
-      ['push', '推进力', 0, 20, 0.2, '', 6.5]
+      ['ringLen', '隧道长度', 6, 48, 0.5, '', 28],
+      ['spread', '光带宽度', 0.2, 5, 0.05, '', 0.65],
+      ['push', '推进力', 0, 20, 0.2, '', 2.4]
     ],
     nebula: [
       ['cloudR', '星云半径', 1, 16, 0.2, '', 6.0],
-      ['spread3', '垂直铺开', 0, 8, 0.1, '', 2.4],
-      ['size', '颗粒大小', 0.4, 8, 0.05, '', 2.6],
-      ['spin', '公转速度', 0, 3, 0.02, '', 0.5],
-      ['densityK', '密度系数', 0.2, 2, 0.02, '', 1.0]
+      ['spread3', '垂直铺开', 0, 8, 0.1, '', 1.6],
+      ['size', '颗粒大小', 0.4, 8, 0.05, '', 1.25],
+      ['spin', '公转速度', 0, 3, 0.02, '', 0.18],
+      ['densityK', '密度系数', 0.2, 2, 0.02, '', 0.8]
     ],
     terrain: [
-      ['extent', '地形尺度', 6, 60, 0.5, '', 26],
-      ['amp2', '起伏幅度', 0, 8, 0.1, '', 2.6],
-      ['scroll', '滚动速度', 0, 3, 0.02, '', 0.55],
-      ['wire2', '网格线强度', 0, 2, 0.05, '', 0.9]
+      ['extent', '地形尺度', 6, 60, 0.5, '', 24],
+      ['amp2', '起伏幅度', 0, 8, 0.1, '', 1.8],
+      ['scroll', '滚动速度', 0, 3, 0.02, '', 0.22],
+      ['wire2', '网格线强度', 0, 2, 0.05, '', 0.42]
     ],
     lyric: [
       ['spacing', '行距', 1, 9, 0.1, '', 2.5],
-      ['arc', '弧线', 0, 10, 0.1, '', 3.2],
-      ['pwidth', '文字宽度', 8, 32, 0.5, '', 20],
-      ['dimK', '远句亮度', 0, 1, 0.02, '', 0.32],
-      ['bob', '漂浮幅度', 0, 2, 0.05, '', 0.5],
-      ['tint', '着色强度', 0, 1.5, 0.02, '', 0.8]
+      ['arc', '弧线', 0, 10, 0.1, '', 0.65],
+      ['pwidth', '文字宽度', 8, 32, 0.5, '', 16],
+      ['dimK', '远句亮度', 0, 1, 0.02, '', 0.48],
+      ['bob', '漂浮幅度', 0, 2, 0.05, '', 0.18],
+      ['tint', '着色强度', 0, 1.5, 0.02, '', 0.5]
     ]
   };
 
-  // 自动导演的三个"段落情绪"。数值刻意拉开：安静段几乎不动、副歌段机位拉近 +
-  // 大幅抖动，用户一眼能看出导演做了什么，再决定要不要改。
-  //
-  // 泛光按新的默认值（0.55 / 阈值 0.74）等比下调过一轮 —— 原来 chorus 的
-  // 1.75 是配阈值 0.58 调的，那个组合下副歌必然是一条白带。数值拉开的设计
-  // 意图没变：0.3 : 0.6 : 1.05，仍是三倍级差。
+  // 段落只改变细微的光感和运动；机位以当前场景为基准。
   var MOODS = {
-    quiet: { 'look.bloom': 0.30, 'look.vignette': 0.55, 'look.saturation': 0.85,
-      'cam.dist': 24, 'cam.drift': 12, 'cam.shake': 20, 'cam.kick': 40,
-      'cam.fov': 48, 'stage.scale': 0.88 },
-    verse: { 'look.bloom': 0.60, 'look.vignette': 0.28, 'look.saturation': 1.10,
-      'cam.dist': 16, 'cam.drift': 45, 'cam.shake': 70, 'cam.kick': 80,
-      'cam.fov': 58, 'stage.scale': 1.0 },
-    chorus: { 'look.bloom': 1.05, 'look.vignette': 0.18, 'look.saturation': 1.32,
-      'look.chroma': 0.72, 'cam.dist': 10.5, 'cam.drift': 95, 'cam.shake': 150,
-      'cam.kick': 140, 'cam.fov': 68, 'stage.scale': 1.16 }
+    quiet: { 'look.bloom': 0.18, 'look.vignette': 0.32, 'look.saturation': 0.88,
+      'look.chroma': 0.04, 'cam.drift': 8, 'cam.shake': 4, 'cam.kick': 12, 'stage.scale': 0.98 },
+    verse: { 'look.bloom': 0.28, 'look.vignette': 0.28, 'look.saturation': 0.95,
+      'look.chroma': 0.08, 'cam.drift': 18, 'cam.shake': 12, 'cam.kick': 24, 'stage.scale': 1.0 },
+    chorus: { 'look.bloom': 0.42, 'look.vignette': 0.24, 'look.saturation': 1.02,
+      'look.chroma': 0.12, 'cam.drift': 26, 'cam.shake': 20, 'cam.kick': 32, 'stage.scale': 1.02 }
   };
 
   // 每个场景的入画机位。五个场景共用一个默认机位的结果是：隧道从外面看
   // （一个转圈的光环，而不是穿越）、星云贴得太近、地形俯视角度不够。
   // 切场景时基础值直接落位 + 推一条从旧机位出发的补间，镜头"飞过去"。
   var SCENE_CAM = {
-    // pitch 14° 几乎与地面齐平：柱高 9 在那个角度下被压成一条横带，
-    // 柱与柱的高度差完全读不出来。抬到 26°（与 nebula/terrain 同档），
-    // 视线俯下去，"一排高低不一的灯柱"这件事才立得住。
-    towers: { 'cam.dist': 17, 'cam.pitch': 26, 'cam.fov': 58, 'cam.height': 1.6 },
-    orb: { 'cam.dist': 10.5, 'cam.pitch': 8, 'cam.fov': 55, 'cam.height': 0.4 },
+    // 细柱用接近平视的机位，完整保留高低差和下方的淡倒影。
+    towers: { 'cam.yaw': 0, 'cam.dist': 23, 'cam.pitch': 12, 'cam.fov': 54, 'cam.height': 1.0 },
+    orb: { 'cam.yaw': 0, 'cam.dist': 13.5, 'cam.pitch': 8, 'cam.fov': 52, 'cam.height': 0 },
     // 隧道要钻进去看：机位收进环口内侧，视场角拉大，透视的"冲向深处"才成立。
-    tunnel: { 'cam.dist': 4.2, 'cam.pitch': 2, 'cam.fov': 74, 'cam.height': 0 },
-    nebula: { 'cam.dist': 17, 'cam.pitch': 26, 'cam.fov': 60, 'cam.height': 0 },
-    terrain: { 'cam.dist': 16, 'cam.pitch': 24, 'cam.fov': 62, 'cam.height': 0.8 },
-    // 歌词走廊：机位放在走廊一端，大视场角让纵深与掠过感成立。
+    tunnel: { 'cam.yaw': 0, 'cam.dist': 4.2, 'cam.pitch': 2, 'cam.fov': 68, 'cam.height': 0 },
+    nebula: { 'cam.yaw': 0, 'cam.dist': 19, 'cam.pitch': 28, 'cam.fov': 54, 'cam.height': 0 },
+    terrain: { 'cam.yaw': 0, 'cam.dist': 23, 'cam.pitch': 30, 'cam.fov': 58, 'cam.height': 0 },
+    // 歌词正面入画，纵深由前后行的位置承担。
     // yaw 必须钉死：用户自由拖拽可以环游，但每次选进这个场景时入口机位要确定，
     // 不能继承上一个场景（或自己上次环游后）存下的 yaw——否则进场就在走廊
     // 另一端看到整屏镜像反字。
-    lyric: { 'cam.yaw': 0, 'cam.dist': 20, 'cam.pitch': 4, 'cam.fov': 64, 'cam.height': 0 }
+    lyric: { 'cam.yaw': 0, 'cam.dist': 20, 'cam.pitch': 0, 'cam.fov': 58, 'cam.height': 0 }
   };
 
   // -------------------------------------------------------------------------
@@ -350,6 +336,7 @@
       (g.items || []).forEach(function (it) { writePath(p, it[0], it[6]); });
       (g.selects || []).forEach(function (it) { writePath(p, it[0], it[3]); });
     });
+    Object.keys(SCENE_CAM.towers).forEach(function (key) { writePath(p, key, SCENE_CAM.towers[key]); });
     return p;
   }
 
@@ -364,6 +351,7 @@
     if (typeof p.thumb === 'string') out.thumb = p.thumb;
     if (p.scene && window.CreativeGL && CreativeGL.sceneById(p.scene)) out.scene = p.scene;
     out.sc = sceneDefaults(out.scene);
+    Object.keys(SCENE_CAM[out.scene]).forEach(function (key) { writePath(out, key, SCENE_CAM[out.scene][key]); });
 
     ['cam', 'look', 'stage'].forEach(function (k) {
       if (!p[k] || typeof p[k] !== 'object') return;
@@ -622,12 +610,12 @@
     Object.keys(MOODS[want]).forEach(function (k) {
       mood[k] = clampPath(k, MOODS[want][k]);
     });
-    // 机位切一刀，而不是慢慢转过去：段落切换要看得出来。
-    mood['cam.yaw'] = readPath(runtime, 'cam.yaw')
-      + (Math.random() < 0.5 ? -1 : 1) * (55 + Math.random() * 90);
-    mood['cam.yaw'] = clampPath('cam.yaw', mood['cam.yaw']);
+    var home = SCENE_CAM[preset.scene];
+    mood['cam.dist'] = home['cam.dist'] * (want === 'quiet' ? 1.06 : want === 'chorus' ? 0.98 : 1);
+    mood['cam.fov'] = home['cam.fov'];
+    mood['cam.yaw'] = home['cam.yaw'] + (want === 'quiet' ? -3 : want === 'chorus' ? 3 : 0);
     animations.push({ keys: Object.keys(mood), from: null, to: mood,
-      start: t, len: want === 'chorus' ? 420 : 1600, ease: 'inout', mood: want, songClock: !!stageView });
+      start: t, len: 2400, ease: 'inout', mood: want, songClock: !!stageView });
     // 上面这个动画的 from 要在 stepAnimations 里第一次遇到时补，见下面的补采样。
     document.dispatchEvent(new CustomEvent('creative:section', { detail: { section: want } }));
   }
@@ -645,7 +633,7 @@
 
     // 低频跟随：整体抬高机位注视点。放在绑定之前，所以绑定可以再叠加。
     var kick = reducedMotion() ? 0 : readPath(runtime, 'cam.kick') / 100;
-    runtime.cam.height += agg[0] * kick * 2.2;
+    runtime.cam.height += agg[0] * kick * 0.45;
 
     if (!reducedMotion()) stepBindings();
     stepTimeline();
@@ -842,7 +830,7 @@
   // 双击复位：基础值立刻落到目标（保证动画出栈后不会回弹），同时推一个
   // 从当前值出发的补间 —— 于是看到的是镜头"滑回去"，而不是跳回去。
   function resetView() {
-    var target = { 'cam.yaw': 0, 'cam.pitch': 14, 'cam.dist': specFor('cam.dist')[6] };
+    var target = SCENE_CAM[preset.scene];
     Object.keys(target).forEach(function (k) { writePath(preset, k, target[k]); });
     interact.zoomTarget = null;
     interact.vx = 0;
@@ -1151,7 +1139,7 @@
     var dist = Math.max(0.3, ctx.dist
       * (1 - (reduced ? 0 : agg[0]) * 0.06 * (readPath(runtime, 'cam.kick') / 100)));
 
-    var rot = readPath(runtime, 'stage.rotY') * Math.PI / 180 + driftPhase * 0.25 * drift;
+    var rot = readPath(runtime, 'stage.rotY') * Math.PI / 180 + Math.sin(driftPhase * 0.5) * 0.08 * drift;
     var sc = readPath(runtime, 'stage.scale');
 
     var state = {
@@ -1165,6 +1153,7 @@
       p: runtime.sc,
       // 三维歌词场景的只读歌词快照（行数组 + 当前行号）；其它场景忽略。
       lyric: (window.Stage && Stage.lyrics) ? Stage.lyrics() : null,
+      lyricVisible: v !== stageView || v.el.dataset.lyrics !== 'false',
       cam: { yaw: yaw, pitch: pitch, dist: dist,
         fov: ctx.fov,
         tx: ctx.tx, ty: ctx.ty, tz: ctx.tz,
@@ -1661,6 +1650,7 @@
 
     // 预置
     preset: function () { return deep(preset); },
+    scene: currentScene,
     shareSnapshot: shareSnapshot,
     normalizeSharePreset: normalizeSharePreset,
     setPreset: function (p, opts) {

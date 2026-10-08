@@ -16,7 +16,7 @@ async function api(method, endpoint, body) {
 }
 async function main() {
   assert.equal((await fetch(base + '/v1/health').then(r => r.json())).backend, 'null');
-  for (const file of ['creative-stage.js', 'creative.css', 'backgrounds.js', 'handdrawn.js', 'workshop.js',
+  for (const file of ['creative-gl.js', 'lyric3d.js', 'creative-stage.js', 'creative.css', 'backgrounds.js', 'handdrawn.js', 'workshop.js',
     'stage3d.js', 'stage3d.css', 'stage-settings.js', 'stanza/stanza-sonnet.js', 'stanza/stanza-tempera.js']) {
     const served = await fetch(base + '/' + file).then(r => r.text());
     assert.equal(served.replace(/\r\n/g, '\n'), fs.readFileSync(path.join(root, 'plugin/ui', file), 'utf8').replace(/\r\n/g, '\n'), 'stale embedded resource: ' + file);
@@ -96,6 +96,23 @@ async function main() {
     const after = await page.locator('#s3d-creative').screenshot();
     assert.notDeepEqual(before, after, 'paused camera adjustment changes actual stage pixels');
     console.log('PASS real creative engine, scene selection and paused parameter pixels');
+    await page.evaluate(() => CreativeStage.setScene('lyric'));
+    await page.waitForFunction(() => __creativeFrames.at(-1)?.scene === 'lyric');
+    assert.equal(await page.locator('#s3d-stanza').isVisible(), false, '3D lyric scene owns the visible lyrics');
+    assert.equal(await page.locator('#s3d-reading').isVisible(), false, 'ordinary reading layer does not duplicate 3D lyrics');
+    assert.equal(await page.evaluate(() => Stage3D.preferences().stanzaVisual), 'tempera', 'original visual preference is preserved');
+    await page.waitForTimeout(1000);
+    await page.screenshot({ path: path.join(out, 'creative-lyrics.png') });
+    const visibleLyrics = await page.locator('#s3d-creative').screenshot();
+    await page.evaluate(() => Stage3D.configure({ lyrics: false }));
+    await page.waitForTimeout(150);
+    const hiddenLyrics = await page.locator('#s3d-creative').screenshot();
+    assert.notDeepEqual(visibleLyrics, hiddenLyrics, 'lyric visibility also controls the GL glyphs');
+    await page.evaluate(() => Stage3D.configure({ lyrics: true, stanzaVisual: 'stage' }));
+    assert.equal(await page.locator('#s3d-reading').isVisible(), false, 'stage lyric layout also yields to 3D glyphs');
+    await page.evaluate(id => { CreativeStage.setScene(id); Stage3D.configure({ stanzaVisual: 'tempera' }); }, scene);
+    assert.equal(await page.locator('#s3d-stanza').isVisible(), true, 'other scenes restore the selected lyric visual');
+    console.log('PASS 3D lyric ownership, paused visibility and restoration');
     await page.evaluate(() => {
       CreativeStage.patch({ 'look.exposure': 1, 'look.bloom': 0, 'cam.dist': 15 });
       CreativeStage.addCue({ at: 5, len: 1000, ease: 'linear', set: { 'look.exposure': 1.8 } });

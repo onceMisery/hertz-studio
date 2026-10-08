@@ -236,7 +236,7 @@
       counts: [14000, 30000, 48000], additive: true, depth: false, field: 4
     },
     {
-      id: 'silk', label: '封面星球', desc: '清晰的封面，随音乐在粒子球面上呼吸',
+      id: 'silk', label: '封面星球', desc: '封面沿球面舒展，在明暗之间随音乐呼吸',
       cam: { theta: 0.0, phi: 0.0, dist: 10.2, look: [0, 0, 0] },
       counts: [14000, 32000, 54000], additive: false, depth: true, field: 0
     }
@@ -386,7 +386,10 @@
     '      normal.xy = direction*sqrt(max(0.0,1.0-normal.z*normal.z));',
     '      coverSpacing = 2.55*sqrt(2.0*PI*(1.0+1.0/reference)/(count-frontCount));',
     '    }',
-    '    vec2 artUv = 0.5+normal.xy*projection/(2.0*(reference-normal.z));',
+    // 按球面弧长贴图：原先用参考相机的投影坐标，正好抵消了球面曲率，
+    // 静止时只剩一张圆形照片。前后半球共用连续的径向映射，不引入经线接缝。
+    '    float arc = acos(clamp(abs(normal.z),0.0,1.0));',
+    '    vec2 artUv = 0.5+direction*arc/PI;',
     '    vec3 art = textureLod(uArt,0.5+(artUv-0.5)*uArtScale,uArtLod).rgb;',
     '    color = mix(mix(colorA,colorB,artUv.x*0.65+artUv.y*0.35),art,uHasArt);',
     '    float yaw = sin(t*0.19)*0.035*uCoverMotion;',
@@ -394,7 +397,6 @@
     '    float breath = 1.0+(sin(t*0.72)*0.006+uBass*0.018+uBeat*0.010)*uCoverMotion;',
     '    pos = normal*2.55*breath;',
     '    coverSpacing *= breath;',
-    '    light = 0.90;',
     '    alpha = 1.0;',
     '  } else if(uField==1){',
     '    float travel = fract(uv.y-t*(0.038+uBass*0.022));',
@@ -485,9 +487,18 @@
     '  float pixel = 44.0/max(1.5,-mv.z)*scale;',
     '  gl_PointSize = clamp(pixel,1.35,5.4)*uPointScale;',
     '  if(uField==0){',
-    '    float facing = dot(normal,normalize(uCamPos-pos));',
+    '    vec3 viewDir = normalize(uCamPos-pos);',
+    '    float facing = dot(normal,viewDir);',
     '    vAlpha *= step(0.012,facing);',
-    '    vColor = color*light*(0.78+0.22*smoothstep(0.0,0.65,facing));',
+    // 固定世界光源随法线变化；亮侧、暗侧和柔和高光在零动效下也成立。
+    // 不把节拍能量叠进曝光，避免整张封面一起闪亮、吞掉明暗层次。
+    '    vec3 keyDir = normalize(vec3(-0.65,0.60,0.80));',
+    '    float diffuse = max(0.0,dot(normal,keyDir));',
+    '    float limb = 0.60+0.40*sqrt(max(0.0,facing));',
+    '    float specular = pow(max(0.0,dot(normal,normalize(keyDir+viewDir))),36.0)*0.16;',
+    '    float rim = pow(1.0-max(0.0,facing),3.0)*smoothstep(-0.15,0.60,dot(normal,keyDir));',
+    '    vColor = color*(0.18+0.92*diffuse)*limb',
+    '           +vec3(1.0,0.95,0.86)*specular+vec3(0.40,0.62,0.82)*rim*0.10;',
     '    float diameter = coverSpacing*uProj[1][1]*uViewportHeight*0.5/max(0.1,-mv.z);',
     '    gl_PointSize = clamp(diameter*1.22,1.25,7.0*uPointScale);',
     '  }',
@@ -2127,7 +2138,6 @@
       $('s3d-bloom').value = Math.round(bloom * 100); text('s3d-bloom-value', Math.round(bloom * 100) + '%');
       $('s3d-reactivity').value = Math.round(reactivity * 100); text('s3d-reactivity-value', Math.round(reactivity * 100) + '%');
       sweepRangeFills();
-      $('s3d-reading').hidden = stanzaActive() ? true : !showLyrics;
       $('s3d-lyrics-toggle').setAttribute('aria-pressed', String(showLyrics));
     } finally { restoring = false; }
   }
@@ -2267,7 +2277,6 @@
   function toggleLyrics() {
     showLyrics = !showLyrics;
     syncLayout();
-    $('s3d-reading').hidden = stanzaActive() ? true : !showLyrics;
     $('s3d-lyrics-toggle').setAttribute('aria-pressed', String(showLyrics));
     if (stanzaActive() && stanza.ready) applyStanzaConfig();
     pokeChrome();
@@ -2353,6 +2362,11 @@
     return sceneSource === 'creative' || stanzaActive() && stanza.bgMode !== 'stage';
   }
 
+  function sceneOwnsLyrics() {
+    return sceneSource === 'creative' && global.CreativeStage && CreativeStage.stageActive()
+      && CreativeStage.scene() === 'lyric';
+  }
+
   // Stage3D owns presentation; CreativeStage owns the preset and its render clock.
   // A single host survives editor changes. Closing the editor never tears it down.
   function syncCreativeStage() {
@@ -2367,6 +2381,7 @@
       root.insertBefore(artHost, root.querySelector('.s3d-head'));
     }
     var useCreative = sceneSource === 'creative';
+    creativeHost.dataset.lyrics = String(showLyrics);
     creativeHost.hidden = !useCreative;
     root.classList.toggle('s3d-creative-source', useCreative);
     var sourceSelect = $('s3d-scene-source');
@@ -2571,6 +2586,7 @@
   // 可见性的唯一写入点。applyStanzaConfig 会被 8fps 门控与各种回调反复调用，所以这里
   // 只按「真正在画的 id」做沿检测：换人才交接，其余帧幂等重放，绝不会把进行中的淡出顶掉。
   function applyLayerVisibility(nextId, show) {
+    show = show && !sceneOwnsLyrics();
     if (!show) settleHandoff();
     if (stanza.shownVisual !== nextId) {
       // 连续切换时，尚未提交首帧的中间模式不能成为下一次离场画面。
@@ -2741,7 +2757,7 @@
     syncStageBackdrop();
     stanza.bg.setOpacity(stanza.bgOpacity);
     stanza.bg.setVignette(stanza.vignette);
-    stanza.sub.setVisible(stanza.subtitle && showLyrics);
+    stanza.sub.setVisible(stanza.subtitle && showLyrics && !sceneOwnsLyrics());
     stanza.classic.setTuning(stanza.classicTuning);
     stanza.cadenza.setTuning(stanza.cadenzaTuning);
     if (stanza.sonnet) {
@@ -2769,7 +2785,7 @@
     // 电影层只在歌词视觉接管画面时出现：舞台 3D 歌词轨（visual==='stage'）保持原来的样子，
     // 遮幅与颗粒不该悄悄改变用户对「3D 舞台」的预期。
     var cinemaEl = $('s3d-cinema');
-    var cinemaLive = stanzaActive() && stanza.visual !== 'stage' && showLyrics;
+    var cinemaLive = stanzaActive() && stanza.visual !== 'stage' && showLyrics && !sceneOwnsLyrics();
     if (cinemaEl) cinemaEl.classList.toggle('is-live', cinemaLive);
     if (!cinemaLive) writeCinema(0, 0, 0);
     writeStarbornCinema();
@@ -2804,7 +2820,7 @@
   }
 
   function driveStanza(dtMs) {
-    if (!stanza.ready) return;
+    if (!stanza.ready || sceneOwnsLyrics()) return;
     // 导演先决策：它可能调用 setVisual → applyStanzaConfig()，把可见性与调音推到
     // 新选中的渲染器上。顺序反了的话，当帧会驱动一个即将被隐藏的渲染器。
     // 开关就是「歌词视觉===星诞」本身，没有第二个需要外部置位的布尔。
@@ -2876,13 +2892,13 @@
     $('s3d-sleeve').hidden = stanzaActive() || layout !== 'sleeve';
     var fa = stanzaActive();
     var standalone = isStandalone();
-    if (lyricView) lyricView.configure(showLyrics && !fa);
+    if (lyricView) lyricView.configure(showLyrics && !fa && !sceneOwnsLyrics());
     // s3d-stanza：stanza 歌词叠加层激活（无论是否有 GL）；s3d-plane：仅无 GL 纯平面回退
     // （该类负责隐藏 3D 画布与禁用手势）。叠加时 3D 场景照常渲染、相机照常工作。
     root.classList.toggle('s3d-stanza', fa);
     root.classList.toggle('s3d-plane', standalone);
-    $('s3d-stanza').hidden = !fa;
-    $('s3d-reading').hidden = fa ? true : !showLyrics;
+    $('s3d-stanza').hidden = !fa || sceneOwnsLyrics();
+    $('s3d-reading').hidden = fa || sceneOwnsLyrics() || !showLyrics;
     $('s3d-fl-common').hidden = !fa;
     var starbornPanel = $('s3d-fl-starborn');
     if (starbornPanel) starbornPanel.hidden = stanza.visual !== 'starborn';
@@ -3665,6 +3681,9 @@
     });
     document.addEventListener('creative:degrade', function (event) {
       if (active && sceneSource === 'creative') showFallback(event.detail.reason + '；可在舞台设置中切回沉浸声场', 'creative');
+    });
+    if (global.CreativeStage) CreativeStage.onChange(function (kind) {
+      if (kind === 'preset' && active && sceneSource === 'creative') syncLayout();
     });
     root.addEventListener('focusin', pokeChrome);
     root.addEventListener('focusout', pokeChrome);

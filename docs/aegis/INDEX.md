@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-10-08 | work | docs/aegis/work/2026-10-07-mineradio-follow-through/95-resume-verification.md | 续接：压缩音频资格、集合失败保留与登录初始化竞态修复及最终验证 |
 | 2026-10-07 | plan | docs/aegis/plans/2026-10-07-sidebar-particles.md | 右侧播放器光尘密度、连续漂移与文字避让优化 |
 | 2026-10-07 | work | docs/aegis/work/2026-10-07-sidebar-particles/90-evidence.md | 光尘优化、位置连续性与减少动效验证证据 |
 | 2026-10-07 | plan | docs/aegis/plans/2026-10-07-stage-compatibility.md | 凝彩色彩、转场、设置能力与星诞电影层实施计划 |
@@ -74,3 +75,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-08 | work | docs/aegis/work/2026-10-07-mineradio-follow-through/99-reflection.md | 架构对齐、修复与退役 |
 | 2026-10-08 | adr | docs/aegis/adr/0007-playback-transitions-and-intent-ownership.md | 下一曲预备与集合提交归属 |
 | 2026-10-08 | adr | docs/aegis/adr/0008-home-actions-and-creative-share.md | 首页动作与创意分享契约 |
+| 2026-10-08 | plan | docs/aegis/plans/2026-10-08-creative-scene-refinement.md | 创意工坊六场景收敛、歌词去重与 GPU 验证 |

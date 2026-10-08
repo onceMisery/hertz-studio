@@ -422,7 +422,7 @@
                 <button class="btn" id="home-retry" type="button" hidden>重试最近播放</button>
               </div>
             </div>
-            <div class="home-art-wrap" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#i-library"/></svg><img class="home-art" id="home-art" alt=""></div>
+            <div class="home-art-wrap" id="home-art-wrap" aria-hidden="true"><img class="home-art" id="home-art" alt=""></div>
           </div>
           <nav class="home-links" aria-label="音乐入口">
             <button class="home-link" id="home-library" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-library"/></svg><span><strong>音乐库</strong><small>浏览本地歌曲</small></span></button>
@@ -1314,6 +1314,15 @@
             <button id="dev-diag-clear" class="btn">清空</button>
           </span>
         </div>
+        <div class="set-row" id="dev-beat-status" hidden>
+          <label>舞台节拍分析</label>
+          <span class="hint" id="dev-beat-text">—</span>
+          <span class="set-actions">
+            <button class="btn" id="dev-beat-retry" type="button"
+                    title="重新分析当前歌曲的舞台节拍">重新分析</button>
+          </span>
+        </div>
+        <p class="set-note">节拍分析仅用于舞台镜头效果，未完成时仍可正常听歌。</p>
       </div>
     </div>
 
@@ -1349,15 +1358,6 @@
 
     <div class="stage-title" id="now-title">未在播放</div>
     <div class="stage-artist" id="now-artist">从左侧曲库里挑一首</div>
-
-    <!-- 节拍镜头这一行答的是「这一首为什么没镜头」：后台在算、已就绪（在磁盘还是
-         只在这轮内存）、算不出来（为什么）、还是被本机画质档位挡下。四种处境的下
-         一步不一样，所以不合并成一句「没有镜头」。显隐与文案由 app.js 决定。 -->
-    <div class="stage-beat" id="stage-beat" hidden>
-      <span class="stage-beat-text" id="stage-beat-text">—</span>
-      <button class="stage-beat-retry" id="stage-beat-retry" type="button"
-              title="忘掉这首的既有结论，重新分析一次">重试</button>
-    </div>
 
     <div class="stage-progress">
       <div class="stage-times"><span id="stage-time">0:00 / 0:00</span></div>

@@ -164,7 +164,8 @@ async function gpuChecks() {
       scalar('uFade', 1); scalar('uPointScale', 1); scalar('uBeatAge', 100);
       scalar('uHasArt', 1); gl.uniform2f(uniform('uArtScale'), 1, 1); gl.uniform3f(uniform('uClick'), 0, 0, 100);
       const texture = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+      // Neutral artwork isolates shape lighting from highlights already in a photo.
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([160, 160, 160, 255]));
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       const summaries = [];
       for (const budget of budgets) {
@@ -183,11 +184,16 @@ async function gpuChecks() {
           gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, feedback);
           gl.enable(gl.RASTERIZER_DISCARD); gl.beginTransformFeedback(gl.POINTS); gl.drawArrays(gl.POINTS, 0, count); gl.endTransformFeedback(); gl.disable(gl.RASTERIZER_DISCARD);
           const samples = new Float32Array(count * 13); gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, samples);
-          let radiusError = 0, mappingError = 0, maxZ = -Infinity, minZ = Infinity, visible = 0, rearVisible = 0, minPoint = Infinity, maxPoint = 0;
+          let radiusError = 0, curvature = 0, maxZ = -Infinity, minZ = Infinity, visible = 0, rearVisible = 0, minPoint = Infinity, maxPoint = 0;
+          let lit = 0, shadow = 0, litCount = 0, shadowCount = 0;
+          let validUv = true, orientedUv = true;
           const referenceProjection = Math.sqrt((distance / 2.55) ** 2 - 1);
           for (let index = 0; index < count; index += 1) {
             const offset = index * 13;
             const posX = samples[offset], posY = samples[offset + 1], posZ = samples[offset + 2];
+            const nx = samples[offset + 3], ny = samples[offset + 4], nz = samples[offset + 5];
+            const u = samples[offset + 6], v = samples[offset + 7];
+            validUv = validUv && Number.isFinite(u) && Number.isFinite(v) && u >= 0 && u <= 1 && v >= 0 && v <= 1;
             radiusError = Math.max(radiusError, Math.abs(Math.hypot(posX, posY, posZ) - 2.55));
             maxZ = Math.max(maxZ, posZ); minZ = Math.min(minZ, posZ);
             const alpha = samples[offset + 9];
@@ -196,12 +202,20 @@ async function gpuChecks() {
             if (index < frontCount) {
               const expectedX = 0.5 + posX / (distance - posZ) * referenceProjection * 0.5;
               const expectedY = 0.5 + posY / (distance - posZ) * referenceProjection * 0.5;
-              mappingError = Math.max(mappingError, Math.abs(expectedX - samples[offset + 6]), Math.abs(expectedY - samples[offset + 7]));
+              curvature = Math.max(curvature, Math.hypot(expectedX - u, expectedY - v));
+              orientedUv = orientedUv && (u - 0.5) * nx >= 0 && (v - 0.5) * ny >= 0;
+              const luma = samples[offset + 10] * 0.2126 + samples[offset + 11] * 0.7152 + samples[offset + 12] * 0.0722;
+              if (nz > 0.6 && nz < 0.9 && nx < -0.25 && ny > 0.25) { lit += luma; litCount += 1; }
+              if (nz > 0.6 && nz < 0.9 && nx > 0.25 && ny < -0.25) { shadow += luma; shadowCount += 1; }
             }
           }
           ensure(radiusError < 0.0001, 'points lie on a real sphere: ' + JSON.stringify({ radiusError, maxZ, minZ, error: gl.getError(), sample: Array.from(samples.slice(0, 13)) }));
           ensure(maxZ - minZ > 5.08, 'full front and rear surface have depth');
-          ensure(mappingError < 0.0001, 'front UV preserves perspective-projected image shape: ' + mappingError);
+          ensure(validUv, 'finite bounded UV, including poles and rear');
+          ensure(orientedUv, 'cover keeps its horizontal and vertical orientation');
+          ensure(curvature > 0.06 && curvature < 0.18, 'art follows the curved surface instead of cancelling perspective: ' + curvature);
+          const lightRatio = (lit / litCount) / (shadow / shadowCount);
+          ensure(litCount > 50 && shadowCount > 50 && lightRatio > 1.8 && lightRatio < 5, 'stationary neutral cover has readable lit and shadow sides: ' + lightRatio);
           ensure(rearVisible === 0 && visible > frontCount * 0.98, 'rear samples are culled and the front stays visible');
           ensure(minPoint >= 1.25 && maxPoint <= 7, 'point footprint respects pixel bounds');
           function recapture() {
@@ -234,10 +248,11 @@ async function gpuChecks() {
           }
           gl.uniform3f(uniform('uCamPos'), 0, 0, distance);
           gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null); gl.deleteBuffer(feedback);
-          summaries.push({ count, aspect, radiusError, mappingError, visible, minPoint, maxPoint });
+          summaries.push({ count, aspect, radiusError, curvature, lightRatio, visible, minPoint, maxPoint });
         }
       }
       scalar('uCoverMotion', 0); scalar('uTime', 900); scalar('uBass', 1); scalar('uBeat', 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
       gl.enable(gl.DEPTH_TEST); gl.depthMask(true); gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.clearColor(0.1, 0.3, 0.7, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       gl.drawArrays(gl.POINTS, 0, summaries.at(-1).count);
