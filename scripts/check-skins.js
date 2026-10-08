@@ -34,6 +34,7 @@ const LIUNIAN = read(path.join(SKINS, 'skin.liunian.css'));
 const IOS = read(path.join(SKINS, 'skin.ios.css'));
 const QINGFENG = read(path.join(SKINS, 'skin.qingfeng.css'));
 const CHAOXI = read(path.join(SKINS, 'skin.chaoxi.css'));
+const CHAOXI_JS = read(path.join(SKINS, 'skin.chaoxi.js'));
 const LIUNIAN_JS = read(path.join(SKINS, 'skin.liunian.js'));
 const QINGFENG_JS = read(path.join(SKINS, 'skin.qingfeng.js'));
 const SKINS_CSS = read(path.join(SKINS, 'skins.css'));
@@ -442,7 +443,13 @@ function checkNoColor() {
   ok(/\bvar\(--/.test(cxBody), 'chaoxi 的着色一律走 var(--…)');
   ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(cxBody),
     'chaoxi 不重定义主题色变量（配色归 themes.js 管）');
-  ok(!/[^-]\bcolor\s*:/.test(cxBody), 'chaoxi 不写 color（文字色仍由主题决定）');
+  // 文字色仍归主题：允许写 color，但值必须引用 token。
+  // （把手那颗按钮是皮肤自造的节点，没有业务样式兜底 —— 不写 color 它会
+  //   拿到浏览器默认的按钮文字色，在深底上直接看不见。）
+  const cxColors = Array.from(cxBody.matchAll(/(?:^|[\s;}])color\s*:\s*([^;}]+)/g));
+  const cxBadColor = cxColors.filter((m) => !/^\s*var\(--/.test(m[1]));
+  ok(cxBadColor.length === 0,
+    `chaoxi 的 color 只能引用主题 token${cxBadColor.length ? '（' + cxBadColor.map((m) => m[1].trim()).join(',') + '）' : ''}`);
 
   section('皮肤只管布局：属性也应该是布局属性');
   for (const [name, css] of [['sheen', SHEEN], ['workbench', WORKBENCH]]) {
@@ -1285,7 +1292,7 @@ function contrastOf(a, b) {
 }
 
 function checkChaoxiSkin() {
-  section('潮汐：低密度、内容定宽居中、余量给歌词');
+  section('潮汐：单列内容流、定宽居中、面板按需浮出、余量给歌词');
 
   const body = stripCssComments(CHAOXI);
 
@@ -1321,11 +1328,16 @@ function checkChaoxiSkin() {
   ok(viewRule && /margin-inline:\s*auto/.test(viewRule[1]),
     '.view 有 margin-inline:auto（只写 max-width 在 flex 列里不会居中）');
 
-  // 3) 竖轨：图标在上、文字在下（72px 容不下横排的图标 + 中文）。
-  ok(/\[data-skin="chaoxi"\] \.rail \{[^}]*flex-direction:\s*column/.test(body),
-    '.rail 是竖向排布');
-  ok(/\[data-skin="chaoxi"\] \.rail-item \{[^}]*flex-direction:\s*column/.test(body),
-    '.rail-item 竖排（图标在上、文字在下）');
+  // 3) 导航是**顶部通栏**，不再占栅格第一轨 —— 这是骨架从"三栏工作台"
+  //    变成"单列内容流"的那一步，也是用户要的 MOO 式首页的前提。
+  ok(/\[data-skin="chaoxi"\] \.rail \{[^}]*position:\s*fixed/.test(body),
+    '.rail 脱离栅格（fixed 顶部通栏，栅格里不再有第一轨）');
+  ok(/\[data-skin="chaoxi"\] \.rail \{[^}]*flex-direction:\s*row/.test(body),
+    '.rail 横向排布');
+  ok(/\[data-skin="chaoxi"\] \.app \{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(body),
+    '.app 是单列（没有留给竖轨的第一轨）');
+  ok(/\[data-skin="chaoxi"\] \.app \{[^}]*padding:\s*var\(--skin-nav-h\)/.test(body),
+    '外壳顶部让出导航条高度（它是 fixed，栅格里没有它的位置）');
 
   // 4) 舞台留位：必须走 --skin-stage-foot，不能拿 --bar-h 当播放条高度。
   //    --bar-h 只是 min-height，实高随断点重排（80 / 117 / 163px），
@@ -1363,6 +1375,14 @@ function checkChaoxiSkin() {
     '有矮屏断点（宽屏但矮屏同样会把歌词挤没，宽度断点管不到）');
   ok(/@media \(max-height: 820px\) \{[\s\S]*?\.stage \{[\s\S]*?overflow-y:\s*auto/.test(body),
     '矮屏下面板自身可滚（宁可滚，也不能让内容被裁掉）');
+
+  // 5c) 播放面板必须**按需浮出**，不能常驻。
+  //     常驻 = 它的宽度直接从内容区里扣，骨架就还是三栏 —— 前两版正是
+  //     这么被否掉的（1440 屏上内容只剩 846）。改回去就会重演。
+  ok(/\[data-skin="chaoxi"\] \.stage \{\s*display:\s*none/.test(body),
+    '播放面板默认收起（不占内容宽度）');
+  ok(/\[data-skin="chaoxi"\] body\.chaoxi-stage-open \.stage \{[^}]*display:\s*flex/.test(body),
+    '展开态才浮出（状态类名由 skin.chaoxi.js 加在 body 上）');
   ok(/\[data-skin="chaoxi"\] \.stage-title,\s*\n?\s*\[data-skin="chaoxi"\] \.stage-artist \{[^}]*flex:\s*none/.test(body),
     '.stage-title/.stage-artist 是 flex:none（曲名与艺人不可被压缩）');
   ok(!/\[data-skin="chaoxi"\] \.stage-title[^{]*\{[^}]*display:\s*none/.test(body),
@@ -1379,8 +1399,18 @@ function checkChaoxiSkin() {
   const strip = /\.daily-strip\s*\{([^}]*)\}/.exec(body);
   ok(strip && !/display\s*:\s*(grid|inline-grid|flex)/.test(strip[1]),
     '没把 .daily-strip 改成网格/弹性容器', strip ? strip[1].trim().slice(0, 60) : '');
-  ok(/\[data-skin="chaoxi"\] \.daily-list \{[^}]*--daily-card-min/.test(body),
-    '卡片列宽落在 .daily-list 上（不是外壳）');
+  // 长廊里每张卡必须定宽且不可压缩：写成 flex:1 会让 24 张卡挤成一屏，
+  // 长廊就退化成一行小方块 —— 那还不如原来的网格。
+  ok(/\[data-skin="chaoxi"\] \.daily-list > \* \{[^}]*flex:\s*0 0 var\(--skin-daily-card-w\)/.test(body),
+    '长廊里每张卡定宽不可压缩（否则退化成一行小方块）');
+  // 光把容器改成横向还不够：业务默认是「40px 小封面 + 右侧文字」的横排小卡，
+  // 扔进长廊就是一排 66px 的缩略卡。得让封面在上、撑满卡片宽度。
+  ok(/\[data-skin="chaoxi"\] \.daily-card \{[^}]*flex-direction:\s*column/.test(body),
+    '长廊卡片改成纵向（封面在上、文字在下）');
+  ok(/\[data-skin="chaoxi"\] \.daily-cover \{[^}]*width:\s*100%/.test(body),
+    '长廊卡片的封面撑满卡片宽度（不是写死的 40px）');
+  ok(/\[data-skin="chaoxi"\] \.daily-cover \{[^}]*aspect-ratio:\s*1/.test(body),
+    '长廊卡片的封面保持正方');
 
   // 8) 覆盖：切过去不能落回默认。比 sheen 的几何模块，但排除交互态选择器
   //    —— 那些是 sheen/workbench 的历史包袱，潮汐主动不写（见下一条）。
@@ -1416,6 +1446,27 @@ function checkChaoxiSkin() {
   const stateful = [...have].filter((s) => /:hover|:active|:focus|:disabled/.test(s));
   ok(stateful.length === 0,
     `chaoxi 不写任何交互状态选择器${stateful.length ? '（' + stateful.join(' ') + '）' : ''}`);
+
+  // 8d) 每日推荐是**横向封面长廊**（用户点的 MOO 式首页那一块），不是网格。
+  ok(/\[data-skin="chaoxi"\] \.daily-list \{[^}]*flex-direction:\s*row/.test(body),
+    '每日推荐是横向长廊（一行铺开，不是多列网格）');
+  ok(/\[data-skin="chaoxi"\] \.daily-list \{[^}]*overflow-x:\s*auto/.test(body),
+    '长廊横向可滚');
+
+  section('潮汐：播放面板把手的生命周期');
+
+  // 展开/收起是一个用户动作，而皮肤 CSS 不许写交互状态选择器，
+  // 所以这件事只能由生命周期来做。造出来的节点必须摘干净。
+  const cxJs = stripJsComments(CHAOXI_JS);
+  ok(/registerLifecycle\(/.test(cxJs) && /mount: mount, unmount: unmount/.test(cxJs),
+    '按 registerLifecycle(SKIN_ID, { mount, unmount }) 登记');
+  ok(/document\.body\.appendChild\(handle\)/.test(cxJs),
+    '把手挂 body（留在 .topbar/.bar 里会落进它们的层叠上下文）');
+  ok(/classList\.remove\(OPEN_CLASS\)/.test(cxJs), 'unmount 摘掉 body 上的状态类');
+  ok(/parentNode\.removeChild\(handle\)/.test(cxJs), 'unmount 摘掉把手节点本身');
+  ok(!/removeItem\(KEY\)/.test(cxJs),
+    'unmount 不清 localStorage（那是用户的选择，切回来该是开着还是开着）');
+  ok(/localStorage\.setItem\(KEY/.test(cxJs), '展开状态被记住');
 
   section('潮汐：配套主题的深浅两套与对比度');
 
@@ -1474,7 +1525,7 @@ function checkWiring() {
     'skins.js 排在 app.js 之前（app.js 启动时要能拿到它）');
   ok(/id="skins-list"/.test(HTML), '设置页有皮肤列表容器');
 
-  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.sheen.css', 'skins/skin.workbench.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js', 'skins/skin.ios.css', 'skins/skin.qingfeng.css', 'skins/skin.qingfeng.js', 'skins/skin.chaoxi.css']) {
+  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.sheen.css', 'skins/skin.workbench.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js', 'skins/skin.ios.css', 'skins/skin.qingfeng.css', 'skins/skin.qingfeng.js', 'skins/skin.chaoxi.js', 'skins/skin.chaoxi.css']) {
     ok(MAIN_RS.includes(`/skins/${p.split('/')[1]}`) || MAIN_RS.includes(p),
       `main.rs 注册了 /${p} 路由`);
   }
