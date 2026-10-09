@@ -3,9 +3,10 @@
 //
 // REST 路由清单生成器 / 契约检查（零依赖）。
 //
-// 起因：README 的 API 一节原来手写「共 103 个方法+路径（routes.rs 的 80 条 .route()）」
-// ——那次统计之后路由改过几轮，数字早就不是 80 了。这类「手写的机器可数事实」必然漂移，
-// 所以清单改成从这里生成，并在 --check 模式下与源码比对。
+// 起因：这份清单原来手写在各项目的 README 里，「共 103 个方法+路径（routes.rs 的
+// 80 条 .route()）」那次统计之后路由改过几轮，数字早就不是 80 了。这类「手写的机器
+// 可数事实」必然漂移，所以清单改成从这里生成，并在 --check 模式下与源码比对。
+// 2026-10 起 README 不再收录接口清单，生成物落在 `docs/api-routes.md`。
 //
 // 解析对象是 `crates/hertz-studio/src/routes.rs`（/v1/* 业务路由）与
 // `crates/hertz-studio/src/main.rs`（/ws + 内嵌静态资源）。做法：
@@ -14,7 +15,7 @@
 //   3. 从调用里取第一个字符串字面量当路径，扫 get/post/put/delete/patch 得方法集合。
 //
 // 用法：
-//   node scripts/api-routes.js          # 把生成块写回 README（锚点之间）
+//   node scripts/api-routes.js          # 把生成块写回 docs/api-routes.md（锚点之间）
 //   node scripts/api-routes.js --check  # 只校验，不一致则退出码 1
 
 'use strict';
@@ -25,7 +26,7 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const ROUTES_RS = path.join(ROOT, 'crates', 'hertz-studio', 'src', 'routes.rs');
 const MAIN_RS = path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs');
-const README = path.join(ROOT, 'README.md');
+const DOC = path.join(ROOT, 'docs', 'api-routes.md');
 
 const BEGIN = '<!-- api-routes:begin -->';
 const END = '<!-- api-routes:end -->';
@@ -146,14 +147,14 @@ function render(routesRs, mainRs) {
 function main() {
   const check = process.argv.includes('--check');
   const { block, pairs } = render(parseRoutes(ROUTES_RS), parseRoutes(MAIN_RS).concat(require('./ui-assets').readAssets().map(a => ({ path: a.path, methods: ['GET'], asset: true }))));
-  const readme = fs.readFileSync(README, 'utf8').replace(/\r\n/g, '\n');
-  const begin = readme.indexOf(BEGIN);
-  const end = readme.indexOf(END);
+  const doc = fs.readFileSync(DOC, 'utf8').replace(/\r\n/g, '\n');
+  const begin = doc.indexOf(BEGIN);
+  const end = doc.indexOf(END);
   if (begin < 0 || end < 0 || end < begin) {
-    console.error(`README 里缺少生成锚点（${BEGIN} / ${END}）`);
+    console.error(`docs/api-routes.md 里缺少生成锚点（${BEGIN} / ${END}）`);
     process.exit(2);
   }
-  const current = readme.slice(begin, end + END.length);
+  const current = doc.slice(begin, end + END.length);
   if (current === block) {
     console.log(`REST 路由清单与源码一致（${pairs.length} 个「方法 + 路径」）`);
     return;
@@ -162,14 +163,14 @@ function main() {
     const cur = current.split('\n');
     const next = block.split('\n');
     const at = cur.findIndex((line, i) => line !== next[i]);
-    console.error('REST 路由清单与源码不一致（README 里是生成物，请跑 `node scripts/api-routes.js`）');
+    console.error('REST 路由清单与源码不一致（docs/api-routes.md 里是生成物，请跑 `node scripts/api-routes.js`）');
     console.error(`  首个差异在第 ${at + 1} 行：`);
-    console.error(`    README: ${cur[at]}`);
-    console.error(`    源码  : ${next[at]}`);
+    console.error(`    清单: ${cur[at]}`);
+    console.error(`    源码: ${next[at]}`);
     process.exit(1);
   }
-  fs.writeFileSync(README, readme.slice(0, begin) + block + readme.slice(end + END.length));
-  console.log(`已更新 README 的 REST 路由清单（${pairs.length} 个「方法 + 路径」）`);
+  fs.writeFileSync(DOC, doc.slice(0, begin) + block + doc.slice(end + END.length));
+  console.log(`已更新 docs/api-routes.md 的 REST 路由清单（${pairs.length} 个「方法 + 路径」）`);
 }
 
 main();

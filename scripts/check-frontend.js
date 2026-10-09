@@ -61,7 +61,7 @@ const STEPS = [
   { script: 'check-lineage-names.js', stage: 'guard',
     why: '改名之后的负面不变量：上游项目名不许回到标识符与界面文案（注释里的历史出处按第二档放行）。' },
   { script: 'api-routes.js', stage: 'guard', args: ['--check'],
-    why: 'README 的 REST 清单是生成物。放开手写必然漂移，改了 routes.rs / main.rs 就重跑生成器。' },
+    why: 'docs/api-routes.md 的 REST 清单是生成物。放开手写必然漂移，改了 routes.rs / main.rs 就重跑生成器。' },
   { script: 'check-css-tokens.js', stage: 'guard',
     why: '颜色/间距只走令牌：硬编码色值在换肤与浅色主题下会变成看不见的字。' },
   { script: 'check-plugin-assets.js', stage: 'guard',
@@ -136,12 +136,12 @@ const EXTRA = [
   { script: 'check-creative-prompt.js', why: '创意提示词。' },
 ];
 
-// 活体检查：需要真实浏览器与已经起着的服务，默认不跑。
+// 活体检查：需要真实浏览器，默认不跑。qf-issues/narrow-topbar 自行起隔离服务。
 // check-lib-row-actions 不在名字里带 browser，但它硬 require playwright，
 // 所以显式列进来——按文件名猜会不会漏。
-const LIVE_EXTRA = ['check-lib-row-actions.js'];
-const LIVE_NOTE = '活体检查需要：① 服务在跑（拿它的端口）② playwright 模块可通过 '
-  + 'PLAYWRIGHT_MODULE 或 NODE_PATH 解析。缺任一条时它们只会报环境错，不报产品错。';
+const LIVE_EXTRA = ['check-lib-row-actions.js', 'check-qf-issues.js'];
+const LIVE_NOTE = '活体检查需要 Playwright（PLAYWRIGHT_MODULE 或 NODE_PATH）。多数检查还需要运行中的服务；'
+  + '清风与窄屏检查自行启动隔离服务，需要先构建 hertz-studio（可设 HERTZ_BIN）。';
 
 // 环境缺件（playwright 没装、服务没起）不是产品坏了。把它们和真实失败分开报，
 // 否则本地一句 --extra 会得到一排假红，而假红会让人开始忽略这套检查。
