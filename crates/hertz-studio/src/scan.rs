@@ -1182,14 +1182,23 @@ mod tests {
             progress.errors
         );
         // 终态与刷新事件都要发出来，前端不会卡在「扫描中」。
+        //
+        // 必须等事件，不能拿「轮询到 running=false」当作事件已到的信号：supervisor
+        // 先置 running=false 再 await 落库，最后才发终态（与 `run` 同序）。磁盘慢的
+        // runner 上这段间隙能超过 25ms 轮询步长，try_recv 当场扑空。
         let (mut terminal, mut changed) = (false, false);
-        while let Ok(event) = events.try_recv() {
-            match event {
-                WsEvent::Scan { phase, .. } if phase == "failed" => terminal = true,
-                WsEvent::LibraryChanged => changed = true,
-                _ => {}
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !(terminal && changed) {
+                match events.recv().await {
+                    Ok(WsEvent::Scan { phase, .. }) if phase == "failed" => terminal = true,
+                    Ok(WsEvent::LibraryChanged) => changed = true,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
             }
-        }
+        })
+        .await
+        .expect("终态或刷新事件从未发出");
         assert!(terminal && changed, "缺终态或刷新事件");
         // 扫描器回到可以再次预约的状态。
         fixture.job.reserve(&fixture.root).await.unwrap();
