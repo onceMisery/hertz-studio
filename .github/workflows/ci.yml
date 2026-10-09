@@ -115,7 +115,9 @@ jobs:
             # （别用 paste -sd'@NL@'：-d 接的是**字符列表**、会循环取用，不是字符串。）
             body="$(
               {
-                grep -nE '(^error|^warning|^[[:space:]]*--> |FAILED|^failures:|panicked at|assertion|test result:)' "${file}.clean" | head -25
+                # left:/right: 必须一起顶出来：断言失败只写「assertion failed」等于
+                # 没写——实际计数与尺寸在紧随其后的两行里（零分配断言靠它分辨「谁分配的」）。
+                grep -nE '(^error|^warning|^[[:space:]]*--> |FAILED|^failures:|panicked at|assertion|^ *left:|^ *right:|test result:)' "${file}.clean" | head -25
                 echo '===== tail ====='
                 tail -35 "${file}.clean"
               } | awk '{ gsub(/%/, "%25"); gsub(/\r/, "%0D"); printf "%s%%0A", $0 }'

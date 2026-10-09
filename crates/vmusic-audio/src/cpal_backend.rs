@@ -1986,8 +1986,28 @@ mod tests {
 
     struct CallbackAllocator;
 
+    /// 窗口内前几笔分配的尺寸。钩子自己不能动堆，所以是定长数组。
+    /// 只看到 `left: (1, 0)` 分不出「谁分配的」，尺寸能：等于某个缓冲/Vec 容量的
+    /// 就是回调真的动了堆，零碎的小尺寸才可能是平台运行时的东西。
+    const RECORDED_ALLOCS: usize = 4;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct CallbackMemory {
+        allocs: usize,
+        frees: usize,
+        alloc_sizes: [usize; RECORDED_ALLOCS],
+    }
+
+    impl CallbackMemory {
+        const ZERO: Self = Self {
+            allocs: 0,
+            frees: 0,
+            alloc_sizes: [0; RECORDED_ALLOCS],
+        };
+    }
+
     thread_local! {
-        static CALLBACK_ALLOCATIONS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+        static CALLBACK_ALLOCATIONS: std::cell::Cell<Option<CallbackMemory>> = const { std::cell::Cell::new(None) };
     }
 
     // Count only the measured callback on its own thread; decoder and parallel
@@ -1995,8 +2015,12 @@ mod tests {
     unsafe impl std::alloc::GlobalAlloc for CallbackAllocator {
         unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
             let _ = CALLBACK_ALLOCATIONS.try_with(|counts| {
-                if let Some((allocs, frees)) = counts.get() {
-                    counts.set(Some((allocs + 1, frees)));
+                if let Some(mut memory) = counts.get() {
+                    if memory.allocs < RECORDED_ALLOCS {
+                        memory.alloc_sizes[memory.allocs] = layout.size();
+                    }
+                    memory.allocs += 1;
+                    counts.set(Some(memory));
                 }
             });
             unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
@@ -2004,8 +2028,9 @@ mod tests {
 
         unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
             let _ = CALLBACK_ALLOCATIONS.try_with(|counts| {
-                if let Some((allocs, frees)) = counts.get() {
-                    counts.set(Some((allocs, frees + 1)));
+                if let Some(mut memory) = counts.get() {
+                    memory.frees += 1;
+                    counts.set(Some(memory));
                 }
             });
             unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, ptr, layout) }
@@ -2015,11 +2040,54 @@ mod tests {
     #[global_allocator]
     static CALLBACK_ALLOCATOR: CallbackAllocator = CallbackAllocator;
 
-    fn measure_memory<T>(call: impl FnOnce() -> T) -> (T, (usize, usize)) {
-        CALLBACK_ALLOCATIONS.with(|counts| counts.set(Some((0, 0))));
+    fn measure_memory<T>(call: impl FnOnce() -> T) -> (T, CallbackMemory) {
+        CALLBACK_ALLOCATIONS.with(|counts| counts.set(Some(CallbackMemory::ZERO)));
         let result = call();
         let counts = CALLBACK_ALLOCATIONS.with(|counts| counts.take().unwrap());
         (result, counts)
+    }
+
+    /// 上面那套计数是零分配断言的唯一依据，所以它本身要先被守住：三个线程同时
+    /// 各分配 1/2/3 笔，每笔都必须只算到自己头上。窗口之间用 sleep 隔开，保证
+    /// 三段窗口是真的重叠的（重叠时计数仍然精确，才说明存储是按线程隔离的）。
+    #[test]
+    fn allocation_counter_only_counts_its_own_thread() {
+        let handles: Vec<_> = (1..=3usize)
+            .map(|count| {
+                std::thread::spawn(move || {
+                    measure_memory(|| {
+                        for _ in 0..count {
+                            let block = vec![0u8; 32];
+                            std::hint::black_box(&block);
+                            // 拉开各笔分配之间的时间，保证三段窗口真的重叠；
+                            // 恰好串行的话共享计数器也测不出来。
+                            std::thread::sleep(std::time::Duration::from_millis(40));
+                        }
+                        count
+                    })
+                })
+            })
+            .collect();
+        for handle in handles {
+            let (expect, memory) = handle.join().unwrap();
+            assert_eq!(memory.allocs, expect, "own-thread allocs");
+            assert_eq!(memory.frees, expect, "own-thread frees");
+            assert!(
+                memory.alloc_sizes[..expect].iter().all(|size| *size == 32),
+                "recorded sizes: {:?}",
+                memory.alloc_sizes
+            );
+        }
+    }
+
+    /// 计数钩子可信吗？空窗口（除了开关计数什么都不做）必须是 0。
+    /// 这条红而零分配断言也红，说明数字里含本平台给新线程的一次性开销，
+    /// 不是回调动堆；这条绿，才轮到 `alloc_sizes` 指认是谁分的。
+    #[test]
+    fn empty_measurement_window_is_free() {
+        let handle = std::thread::spawn(|| measure_memory(|| std::hint::black_box(0u8)));
+        let memory = handle.join().unwrap().1;
+        assert_eq!(memory, CallbackMemory::ZERO, "空窗口就有分配");
     }
 
     fn prepared_samples(samples: &[f32], overlap_ms: u64) -> PreparedDeck {
@@ -2091,7 +2159,11 @@ mod tests {
             })
             .join()
             .unwrap();
-            assert_eq!(memory, (0, 0), "callback allocations/frees for {scenario}");
+            assert_eq!(
+                memory,
+                CallbackMemory::ZERO,
+                "callback allocations for {scenario}"
+            );
             assert!(output.iter().all(|sample| sample.is_finite()));
         }
     }
@@ -2155,7 +2227,7 @@ mod tests {
         )
         .expect("callback contention probe failed");
         assert_eq!(output, [0.0; 4]);
-        assert_eq!(memory, (0, 0));
+        assert_eq!(memory, CallbackMemory::ZERO);
     }
 
     #[test]
@@ -2305,9 +2377,9 @@ mod tests {
                 reclaimed.upgrade().is_some(),
                 "callback freed deck for bypass={bypass}"
             );
-            let (_, (_, frees)) = measure_memory(|| drop(backend.take_next_event()));
+            let (_, memory) = measure_memory(|| drop(backend.take_next_event()));
             assert!(
-                frees >= 2,
+                memory.frees >= 2,
                 "actor must free both the PCM buffer and its deck"
             );
             assert!(reclaimed.upgrade().is_none());
