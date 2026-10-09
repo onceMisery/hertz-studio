@@ -64,6 +64,15 @@ pub const EQ_BANDS: [f32; 6] = [60.0, 150.0, 400.0, 1000.0, 2400.0, 6000.0];
 
 /// Each decoder owns its own queue and source clock. The output callback alone
 /// promotes the prepared deck, so a boundary can occur inside an output block.
+/// macOS 的 std `Mutex` 是 `OnceBox<pthread_mutex_t>`：OS 级互斥量要等**第一次加锁**
+/// 才 `Box::pin` 到堆上（arm64 上一个 64 字节块，之后不再释放）。于是「回调第一次碰
+/// 哪个锁」就变成「回调在那个线程上动一次堆」——正是本文件规则 1 要挡的东西，也解释了
+/// 为什么零分配断言只在 macos 格红（Linux 走 futex、Windows 走 SRWLOCK，都是内联的）。
+/// 构造时各上一次，把这笔一次性分配留在 actor 线程。
+fn prime<T>(lock: &Mutex<T>) {
+    drop(lock.lock().unwrap());
+}
+
 struct Deck {
     samples: Mutex<VecDeque<f32>>,
     frames_played: AtomicU64,
@@ -73,12 +82,14 @@ struct Deck {
 
 impl Deck {
     fn new() -> Self {
-        Self {
+        let deck = Self {
             samples: Mutex::new(VecDeque::with_capacity(1 << 16)),
             frames_played: AtomicU64::new(0),
             decode_error: AtomicBool::new(false),
             eof: AtomicBool::new(false),
-        }
+        };
+        prime(&deck.samples);
+        deck
     }
 
     fn flag_decode_error(&self) {
@@ -147,7 +158,7 @@ struct Shared {
 
 impl Shared {
     fn new() -> Self {
-        Self {
+        let shared = Self {
             deck: Mutex::new(Arc::new(Deck::new())),
             next: Mutex::new(None),
             next_event: Mutex::new(None),
@@ -171,7 +182,15 @@ impl Shared {
             device_rate: AtomicU32::new(48_000),
             crossfade_ms: AtomicU64::new(0),
             filters: Mutex::new(None),
-        }
+        };
+        // 回调会 try_lock 的锁，一把都不留地先暖过（含 current deck 的 samples，已在
+        // Deck::new 里暖过）。
+        prime(&shared.deck);
+        prime(&shared.next);
+        prime(&shared.next_event);
+        prime(&shared.tap);
+        prime(&shared.filters);
+        shared
     }
 
     /// Actor/decoder setup access only. The output callback uses try_lock.
