@@ -1,0 +1,240 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 hertz-studio contributors
+ *
+ * 赛璐璐外观（data-look="cel"）。与 anime-ui.css 共享全部结构装饰
+ * —— 间距 24px、圆角 12/16px、ease-in-out 200–280ms、6.5% 噪点都在那边，
+ * 这里只覆盖**材质**：把玻璃换掉，换成平涂色块 + 明确描边。
+ *
+ * 为什么不能靠主题令牌改完：玻璃这一族的关键词是 backdrop-filter blur()
+ * 与半透明叠层，而赛璐璐要的是**没有模糊**的不透明色块加实边。两者在同一
+ * 条 box-shadow / background 上直接冲突，只能由外观层分叉。这也正是
+ * 「主题只管颜色、外观管材质」的分界线所在。
+ *
+ * 三条赛璐璐原则，逐条对应下面三段：
+ *   1. 平涂色块 —— 面板用不透明底色，不用 backdrop-filter；
+ *   2. 明确描边 —— 1px 深色描边，且比玻璃族的更实；
+ *   3. 不要厚涂 —— 阴影只有一层硬边接触影，不做弥散辉光。
+ */
+
+/* ---- 1. 平涂：不透明面板 + 深色描边 ---------------------------------- */
+
+html[data-look="cel"] :is(.topbar, .rail, .column) {
+  /* 平涂的关键是"不透明"。这里用 color-mix 提到近实色：既保住主题自己的
+     底色相（不引入第二个灰），又让背后壁纸不再透出来——透出来就不是平涂了。 */
+  background: color-mix(in srgb, var(--panel-solid) 96%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bg) 62%, #000);
+  /* 硬边接触影：一层实打实的落影，不叠弥散。厚涂的观感来自多层柔和阴影，
+     赛璐璐要的正是把它去掉。 */
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--bg) 70%, #000);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* 卡片浮在面板上：靠一个更亮一档的平涂色 + 同样明确的描边。
+   两级平涂之间的明度差就是层级——不靠投影堆叠。 */
+html[data-look="cel"] :is(.daily-card, .home-link, :is(.chip, .fav-tab, .daily-modes)) {
+  background: color-mix(in srgb, var(--surface-2) 92%, var(--panel-solid));
+  border: 1px solid color-mix(in srgb, var(--bg) 58%, #000);
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--bg) 62%, #000);
+}
+
+html[data-look="cel"] .set-group,
+html[data-look="cel"] .empty-card,
+html[data-look="cel"] .scan-panel {
+  background: color-mix(in srgb, var(--panel-solid) 96%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bg) 62%, #000);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--bg) 70%, #000);
+}
+
+/* 首页主卡：平涂一整块，不再叠天空图。赛璐璐的卡片是**色块**，不是窗口。 */
+html[data-look="cel"] .home-primary {
+  background: var(--panel-solid);
+  border: 1px solid color-mix(in srgb, var(--bg) 55%, #000);
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--bg) 70%, #000);
+}
+html[data-look="cel"] .home-primary::before { display: none; }
+html[data-look="cel"] .home-primary::after {
+  border: 1px solid color-mix(in srgb, var(--highlight) 34%, transparent);
+}
+
+html[data-look="cel"] .home-art-wrap {
+  background: color-mix(in srgb, var(--brand) 18%, var(--panel-solid));
+  border: 1px solid color-mix(in srgb, var(--bg) 55%, #000);
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--bg) 66%, #000);
+}
+
+/* ---- 2. 描边：控件描边从"玻璃细边"变成实边 ---------------------------- */
+
+html[data-look="cel"] :is(.btn, .iconbtn, .btn-pill) {
+  border: 1px solid color-mix(in srgb, var(--bg) 58%, #000);
+  background: color-mix(in srgb, var(--surface-1) 88%, var(--panel-solid));
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--bg) 62%, #000);
+}
+html[data-look="cel"] :is(.btn, .iconbtn, .btn-pill):hover:not(:disabled):not([aria-disabled="true"]) {
+  background: color-mix(in srgb, var(--brand) 16%, var(--panel-solid));
+  border-color: color-mix(in srgb, var(--brand) 60%, var(--bg));
+  /* 赛璐璐的hover 是"抬起来"：换底色 + 硬投影偏移，而不是玻璃那套内发光。 */
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--bg) 68%, #000);
+}
+html[data-look="cel"] :is(.btn, .iconbtn, .btn-pill):active:not(:disabled):not([aria-disabled="true"]) {
+  /* 按下去 = 投影收回到 0，这是赛璐璐版"按下"的标准手感。 */
+  box-shadow: 0 0 0 color-mix(in srgb, var(--bg) 68%, #000);
+  transform: translate(2px, 2px) scale(1);
+}
+
+html[data-look="cel"] .btn.primary,
+html[data-look="cel"] .btn.primary:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--bg));
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--bg) 72%, #000);
+}
+
+html[data-look="cel"] :is(.iconbtn, .btn-pill).active {
+  background: color-mix(in srgb, var(--highlight) 16%, var(--panel-solid));
+  border-color: var(--highlight);
+}
+
+html[data-look="cel"] .rail-item {
+  border: 1px solid transparent;
+}
+html[data-look="cel"] .rail-item.active {
+  background: color-mix(in srgb, var(--highlight) 14%, var(--panel-solid));
+  border-color: var(--highlight);
+  box-shadow: none;
+}
+html[data-look="cel"] .rail-item.active::before {
+  /* 赛璐璐的选中标记是实心方块，不是玻璃那 2px 细杠。 */
+  width: 6px; height: 20px; border-radius: 1px;
+  background: var(--highlight);
+}
+html[data-look="cel"] .rail-badge { box-shadow: 1px 1px 0 color-mix(in srgb, var(--bg) 60%, #000); }
+
+html[data-look="cel"] .topsearch,
+html[data-look="cel"] input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+html[data-look="cel"] :is(select, textarea) {
+  background-color: color-mix(in srgb, var(--panel-solid) 96%, #000);
+  border: 1px solid color-mix(in srgb, var(--bg) 58%, #000);
+  box-shadow: inset 0 1px 0 rgb(var(--text-rgb) / 8%);
+}
+html[data-look="cel"] .topsearch:focus-within {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 34%, transparent);
+}
+
+html[data-look="cel"] :is(.track, .q-row, .fav-row, .online-row, .pl-row, .pd-row) {
+  border: 1px solid transparent;
+}
+html[data-look="cel"][data-skin="classic"] .track:not(.active):nth-child(even) {
+  /* 平涂色块之间的分隔靠描边，不靠斑马纹底色——斑马纹是"隔行着色"，
+     赛璐璐要的是每块都有明确边界。 */
+  background: color-mix(in srgb, var(--surface-1) 70%, var(--panel-solid));
+  border-color: color-mix(in srgb, var(--bg) 40%, #000);
+}
+html[data-look="cel"][data-skin="classic"] .track.active {
+  background: color-mix(in srgb, var(--brand) 15%, var(--panel-solid));
+  border-color: var(--brand);
+  box-shadow: none;
+}
+
+html[data-look="cel"] .t-art {
+  border: 1px solid color-mix(in srgb, var(--bg) 60%, #000);
+  border-radius: 4px;
+}
+html[data-look="cel"] :is(.theme-menu, .skin-menu, .top-more-menu, .ts-menu, .context-menu,
+  .palette, .vex-card, .op-drawer, .stage-ctl, .toast) {
+  /* 弹层同样平涂：浮起靠硬投影 + 实描边，不靠 backdrop-filter。 */
+  background: var(--panel-solid);
+  border: 1px solid color-mix(in srgb, var(--bg) 55%, #000);
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--bg) 74%, #000);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+html[data-look="cel"] :is(.np-card, .qr-card) {
+  background: var(--panel-solid);
+  border: 1px solid color-mix(in srgb, var(--bg) 55%, #000);
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--bg) 74%, #000);
+}
+html[data-look="cel"] .daily-card,
+html[data-look="cel"] .home-link {
+  transition: background-color 240ms ease-in-out, border-color 240ms ease-in-out, transform 240ms ease-in-out;
+}
+html[data-look="cel"] .home-link:hover {
+  border-color: var(--brand);
+  transform: translate(-2px, -2px);
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--bg) 68%, #000);
+}
+
+/* 舞台：玻璃族有背景图与模糊，赛璐璐版换成纯色舞台 + 实边控制条。 */
+html[data-look="cel"] .stage:not(.creative-on) .stage-head,
+html[data-look="cel"] #workshop .ws-head {
+  background-image: none;
+}
+html[data-look="cel"] :is(.s3d-head, .s3d-player, .s3d-dock, .s3d-settings, .s3d-queue) {
+  background: color-mix(in srgb, var(--panel-solid) 96%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bg) 60%, #000);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--bg) 70%, #000);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+html[data-look="cel"] .bar :is(#progress, #volume)::-webkit-slider-thumb {
+  border: 2px solid color-mix(in srgb, var(--bg) 62%, #000);
+  box-shadow: 1px 1px 0 color-mix(in srgb, var(--bg) 62%, #000);
+}
+html[data-look="cel"] .bar :is(#progress, #volume)::-moz-range-thumb {
+  border: 2px solid color-mix(in srgb, var(--bg) 62%, #000);
+  box-shadow: 1px 1px 0 color-mix(in srgb, var(--bg) 62%, #000);
+}
+
+/* ---- 3. 噪点保留，压得更轻：厚涂颗粒是"材质"，赛璐璐只要一点点 ---- */
+
+html[data-look="cel"] body::after { opacity: .045; }
+
+/* ---- 4. 点击反馈：赛璐璐是「方片迸开」，不是玻璃那套旋转星屑---------- */
+/* 两族的点击反馈必须不同，否则"换族"只换了静态材质，手感还是一套 ——
+   而手感是族的一部分。这里覆盖 anime-interactions.css 的粒子：
+     玻璃族 = 4px 圆角小方片 + 45°→110° 旋转 + 5px 辉光（金/青双色星屑）
+     赛璐璐 = 直角碎片 + **不旋转** + 无辉光 + 沿轴直线迸开
+   形状语言必须跟材质一致：平涂色块配硬边碎片，转动的柔光星屑属于玻璃。 */
+html[data-look="cel"] .anime-interactions-particle {
+  width: 5px;
+  height: 5px;
+  border-radius: 0;
+  background: var(--highlight);
+  /* 不用辉光：赛璐璐的边界靠实色与描边，不靠发光。 */
+  box-shadow: none;
+  /* 旋转归零、位移走完整行程：方片沿点击点向外直线迸开，像平涂动画里的
+     "碎裂"那一帧。端点不带 -5px 的上移——星屑要"炸开"，赛璐璐要"迸开"。
+     scale 收得更狠（0.6 → 0），碎得更干脆。 */
+  animation: cel-button-chip 240ms cubic-bezier(0.19, 1, 0.22, 1) both;
+}
+@keyframes cel-button-chip {
+  0% { transform: translate3d(0, 0, 0) scale(.6); opacity: 0; }
+  18% { opacity: .9; }
+  100% { transform: translate3d(var(--anime-spark-x), var(--anime-spark-y), 0) scale(0); opacity: 0; }
+}
+/* 双色保留：主色用当前选中位（暖调），次色用品牌位（冷调）——与玻璃族同构，
+   免得赛璐璐的碎片全是一个颜色、读成"单色烟花"。 */
+html[data-look="cel"] .anime-interactions-particle:nth-child(3n) {
+  background: var(--brand);
+  box-shadow: none;
+}
+
+/* 禁用动效与降级路径：这一族靠硬投影位移表达状态，冻结时必须连位移一起收，
+   否则按钮会停在"按下去还没弹回来"的中间态。 */
+html[data-look="cel"] :is(body.reduce-motion, body[data-rm~="ui"]) :is(.btn, .iconbtn, .btn-pill, .home-link):is(:hover, :active, :focus-visible) {
+  transform: none !important;
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--bg) 62%, #000);
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-look="cel"] :is(.btn, .iconbtn, .btn-pill, .home-link):is(:hover, :active, :focus-visible) {
+    transform: none !important;
+  }
+}
+html[data-look="cel"] body.stage-lowfx :is(.topbar, .rail, .column) {
+  /* 低特效档本来要把 backdrop-filter 关掉并换成实底——赛璐璐本来就没有模糊，
+     这里只需要保证实底确实生效（去掉 backdrop-filter 后透明底会漏出壁纸）。 */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: var(--panel-solid);
+}

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 //
-// 晴空绘卷的轻量点击反馈。与 anime-interactions.css 一起加载；不依赖主题或宿主 API。
+// 外观族的轻量点击反馈。与 anime-interactions.css 一起加载；不依赖主题或宿主 API。
 (function (global) {
   'use strict';
   if (!global || !global.document || global.AnimeInteractions) return;
@@ -12,6 +12,10 @@
   var MAX_BURSTS = 3;
   var DURATION = 280;
   var MIN_GAP = 90;
+  // 外观族名单，与 anime-interactions.css 的选择器是同一份。
+  // 这里判**族**而不是判主题 id：族是"这套外观有没有星屑反馈"的唯一真值，
+  // 新加的主题只要声明 look 就自动获得，不必回来改这个文件。
+  var LOOKS = ['glass', 'cel'];
   var started = false, waiting = false;
   var layer = null, observer = null;
   var bursts = [];
@@ -20,9 +24,11 @@
 
   function enabled() {
     var html = doc.documentElement, body = doc.body;
-    return started && !!body && !doc.hidden && html.getAttribute('data-theme') === 'celestial'
-      && !(motionQuery && motionQuery.matches) && !body.classList.contains('reduce-motion')
-      && !html.matches('[data-rm~="ui"], [inert]') && !body.matches('[data-rm~="ui"], [inert]');
+    if (!started || !body || doc.hidden) return false;
+    if (LOOKS.indexOf(html.getAttribute('data-look')) < 0) return false;
+    if (motionQuery && motionQuery.matches) return false;
+    if (body.classList.contains('reduce-motion')) return false;
+    return !html.matches('[data-rm~="ui"], [inert]') && !body.matches('[data-rm~="ui"], [inert]');
   }
 
   function removeBurst(burst) {
@@ -46,8 +52,11 @@
 
   function onAttributes(records) {
     // 主题重选也终止旧反馈；只观察 html/body 的少数属性，不扫描业务 DOM。
+    // data-look 与 data-theme 都要看：换族（glass ↔ cel）而 id 不变时，
+    // 只监听 data-theme 会漏掉，那套新外观于是接着放上一族的粒子。
     for (var i = 0; i < records.length; i += 1) {
-      if (records[i].attributeName === 'data-theme') { clear(); break; }
+      var name = records[i].attributeName;
+      if (name === 'data-theme' || name === 'data-look') { clear(); break; }
     }
     sync();
   }
@@ -131,7 +140,7 @@
     global.addEventListener('pagehide', clear);
     if (global.MutationObserver) {
       observer = new global.MutationObserver(onAttributes);
-      observer.observe(doc.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-rm', 'inert'] });
+      observer.observe(doc.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-look', 'data-rm', 'inert'] });
       observer.observe(doc.body, { attributes: true, attributeFilter: ['class', 'data-rm', 'inert'] });
     }
     if (motionQuery) {

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-10-09-narrow-topbar",
+  "currentTodo": "全部完成，交付新构建",
+  "completedTodos": [
+    "原始失败重现",
+    "双行顶栏与浮层搜索修复",
+    "清风自建隔离服务与真实WAV验证",
+    "49组浏览器、10项清风、48步前端、最终构建通过",
+    "证据与架构对齐记录完成"
+  ],
+  "activeSlice": "delivery",
+  "evidenceRefs": [
+    "docs/aegis/work/2026-10-09-narrow-topbar/90-evidence.md"
+  ],
+  "blockedOn": null,
+  "nextStep": "用户启动新构建使用修复界面",
+  "updatedAt": "2026-10-09"
+}

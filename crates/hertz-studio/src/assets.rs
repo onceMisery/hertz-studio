@@ -43,6 +43,7 @@ ui_assets! {
     "/theme-studio.js", JS => const THEME_STUDIO_JS: &str = include_str!("../../../plugin/ui/theme-studio.js");
     "/skins/skins.js", JS => const SKINS_JS: &str = include_str!("../../../plugin/ui/skins/skins.js");
     "/creative-gl.js", JS => const CREATIVE_GL_JS: &str = include_str!("../../../plugin/ui/creative-gl.js");
+    "/creative-anime.js", JS => const CREATIVE_ANIME_JS: &str = include_str!("../../../plugin/ui/creative-anime.js");
     "/creative-stage.js", JS => const CREATIVE_STAGE_JS: &str = include_str!("../../../plugin/ui/creative-stage.js");
     "/creative-prompt.js", JS => const CREATIVE_PROMPT_JS: &str = include_str!("../../../plugin/ui/creative-prompt.js");
     "/handdrawn.js", JS => const HANDDRAWN_JS: &str = include_str!("../../../plugin/ui/handdrawn.js");
@@ -87,6 +88,7 @@ ui_assets! {
     "/style.css", CSS => const STYLE_CSS: &str = include_str!("../../../plugin/ui/style.css");
     "/stage.css", CSS => const STAGE_CSS: &str = include_str!("../../../plugin/ui/stage.css");
     "/creative.css", CSS => const CREATIVE_CSS: &str = include_str!("../../../plugin/ui/creative.css");
+    "/creative-anime.css", CSS => const CREATIVE_ANIME_CSS: &str = include_str!("../../../plugin/ui/creative-anime.css");
     "/stage3d.css", CSS => const STAGE3D_CSS: &str = include_str!("../../../plugin/ui/stage3d.css");
     "/stanza/stanza.css", CSS => const STANZA_CSS: &str = include_str!("../../../plugin/ui/stanza/stanza.css");
     "/stanza/stanza-starborn.css", CSS => const STANZA_STARBORN_CSS: &str = include_str!("../../../plugin/ui/stanza/stanza-starborn.css");
@@ -95,6 +97,10 @@ ui_assets! {
     "/theme-studio.css", CSS => const THEME_STUDIO_CSS: &str = include_str!("../../../plugin/ui/theme-studio.css");
     "/anime-ui.css", CSS => const ANIME_UI_CSS: &str = include_str!("../../../plugin/ui/anime-ui.css");
     "/anime-stage.css", CSS => const ANIME_STAGE_CSS: &str = include_str!("../../../plugin/ui/anime-stage.css");
+    // 赛璐璐材质覆盖。index.html 里排在 anime-ui.css 之后 —— 同特异性靠源码
+    // 顺序决胜，这里只管挂路由，两件事都要做，漏一件症状完全不同
+    // （漏挂路由 = 404，样式全丢；漏排顺序 = 玻璃面板把平涂盖掉，只是不平涂）。
+    "/cel-ui.css", CSS => const CEL_UI_CSS: &str = include_str!("../../../plugin/ui/cel-ui.css");
     "/anime-interactions.css", CSS => const ANIME_INTERACTIONS_CSS: &str = include_str!("../../../plugin/ui/anime-interactions.css");
     "/skins/skins.css", CSS => const SKINS_CSS: &str = include_str!("../../../plugin/ui/skins/skins.css");
     "/skins/skin.sheen.css", CSS => const SKIN_SHEEN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.sheen.css");

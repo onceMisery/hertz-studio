@@ -322,6 +322,7 @@ float celLight(vec3 normal) {
         || def.extraPasses != null && typeof def.extraPasses !== 'function'
         || def.qualityDefs != null && typeof def.qualityDefs !== 'function'
         || def.decl != null && typeof def.decl !== 'string'
+        || def.toneMapped != null && typeof def.toneMapped !== 'boolean'
         || def.bloomScale != null && (!finite(def.bloomScale) || def.bloomScale < 0)
         || def.exposureScale != null && (!finite(def.exposureScale) || def.exposureScale <= 0)) fail(def.id + ' 无效绘制定义');
     if (def.qualityGeom && (!Array.isArray(def.qualityGeom) || def.qualityGeom.length !== 3
@@ -934,6 +935,7 @@ uniform float uVignette;
 uniform float uGrain;
 uniform float uToon;        // >0 时走赛璐璐色阶与墨线
 uniform bool uPreserveGlyphs;
+uniform bool uDirectPaint;  // flat display colours do not use the emissive light curve
 uniform float uPaper;
 uniform float uExposure;
 uniform float uSaturation;
@@ -1018,7 +1020,7 @@ void main() {
 
   // 高光压缩必须在调色之前：grade/saturation/暗角/颗粒全都在 0..1 区间里
   // 设计，喂未压缩的 HDR 值会让霓虹三级色阶全部撞到最亮一档。
-  c = tonemap(c);
+  if (!uDirectPaint) c = tonemap(c);
 
   if (uToon > 0.001 && !uPreserveGlyphs) {
     // Flatten only occupied pixels. The thin transition uses screen derivatives
@@ -1302,7 +1304,7 @@ void main() {
         return failed;
       }
       var U = collect(prog, ['uTex', 'uScene', 'uBloom', 'uBloom2', 'uDir', 'uTexel', 'uThresh',
-        'uKnee', 'uBloomK', 'uBloom2K', 'uChroma', 'uVignette', 'uGrain', 'uToon', 'uPreserveGlyphs', 'uPaper',
+        'uKnee', 'uBloomK', 'uBloom2K', 'uChroma', 'uVignette', 'uGrain', 'uToon', 'uPreserveGlyphs', 'uDirectPaint', 'uPaper',
         'uExposure', 'uSaturation', 'uGrade', 'uTime', 'uColorA', 'uColorB']);
       var entry = { prog: prog, U: U };
       postProgs[key] = entry;
@@ -1385,6 +1387,7 @@ void main() {
     }
 
     var fullscreenVerts = 6;
+    var captureGain = 2.2;
 
     function render(S) {
       if (lost || !sceneT) return { ok: false, reason: 'context-lost' };
@@ -1550,6 +1553,7 @@ void main() {
       // their strokes would erase small characters and duplicate dark fringes.
       gl.uniform1f(comp.U.uToon, P.toon === undefined ? 0 : P.toon);
       gl.uniform1i(comp.U.uPreserveGlyphs, def.ownsLyrics ? 1 : 0);
+      gl.uniform1i(comp.U.uDirectPaint, def.toneMapped === false ? 1 : 0);
       gl.uniform1f(comp.U.uPaper, (P.paper === undefined ? 0 : P.paper) * (def.ownsLyrics ? 0.18 : 1));
       gl.uniform1f(comp.U.uExposure, (P.exposure === undefined ? 1.12 : P.exposure) * (def.exposureScale || 1));
       gl.uniform1f(comp.U.uSaturation, P.saturation === undefined ? 1.1 : P.saturation);
@@ -1561,6 +1565,7 @@ void main() {
       gl.blendFunc(gl.ONE, gl.ONE);
       gl.activeTexture(gl.TEXTURE0);
 
+      captureGain = def.toneMapped === false ? 1 : 2.2;
       return { ok: true, scene: def.id };
     }
 
@@ -1588,9 +1593,9 @@ void main() {
         var src = (sceneT.h - 1 - y) * sceneT.w * 4;
         var dst = y * sceneT.w * 4;
         for (var x = 0; x < sceneT.w * 4; x += 4) {
-          img.data[dst + x] = Math.min(255, buf[src + x] * 2.2);
-          img.data[dst + x + 1] = Math.min(255, buf[src + x + 1] * 2.2);
-          img.data[dst + x + 2] = Math.min(255, buf[src + x + 2] * 2.2);
+          img.data[dst + x] = Math.min(255, buf[src + x] * captureGain);
+          img.data[dst + x + 1] = Math.min(255, buf[src + x + 1] * captureGain);
+          img.data[dst + x + 2] = Math.min(255, buf[src + x + 2] * captureGain);
           img.data[dst + x + 3] = 255;
         }
       }
@@ -1643,7 +1648,8 @@ void main() {
     scenes: function () {
       return SCENES.map(function (s) {
         return JSON.parse(JSON.stringify({ id: s.id, label: s.label, params: s.params,
-          defaults: s.defaults, camera: s.camera, aliases: s.aliases, ownsLyrics: s.ownsLyrics }));
+          defaults: s.defaults, camera: s.camera, aliases: s.aliases, ownsLyrics: s.ownsLyrics,
+          presentation: s.presentation }));
       });
     },
     sceneById: function (id) {

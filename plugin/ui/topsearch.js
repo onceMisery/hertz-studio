@@ -181,7 +181,7 @@
   function place() {
     if (!menu) return;
     var r = input.getBoundingClientRect();
-    var w = Math.min(Math.max(Math.round(r.width), 380), 480);
+    var w = Math.min(Math.max(Math.round(r.width), 380), 480, window.innerWidth - 24);
     var left = Math.round(r.left);
     var maxLeft = window.innerWidth - w - 12;
     if (left > maxLeft) left = Math.max(12, maxLeft);

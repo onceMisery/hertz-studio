@@ -115,3 +115,18 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-09 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/gate-input-pack.json | 2026-10-08-online-accounts-podcasts gate input pack |
 | 2026-10-09 | work | docs/aegis/work/2026-10-08-online-accounts-podcasts/proof-bundle.md | 2026-10-08-online-accounts-podcasts proof bundle |
 | 2026-10-09 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/evidence-bundle-draft-delivery-integrity.json | 2026-10-08-online-accounts-podcasts evidence delivery-integrity |
+| 2026-10-09 | work | docs/aegis/work/2026-10-09-narrow-topbar/10-intent.md | 窄屏双行顶栏与确定性清风检查 intent |
+| 2026-10-09 | work | docs/aegis/work/2026-10-09-narrow-topbar/20-checkpoint.md | 窄屏双行顶栏与确定性清风检查 checkpoint |
+| 2026-10-09 | work | docs/aegis/work/2026-10-09-narrow-topbar/90-evidence.md | 窄屏双行顶栏与确定性清风检查 evidence |
+| 2026-10-09 | work | docs/aegis/work/2026-10-09-narrow-topbar/99-reflection.md | 窄屏双行顶栏与确定性清风检查 reflection |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-09-narrow-topbar/task-intent-draft.json | 窄屏双行顶栏与确定性清风检查 task intent draft |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-09-narrow-topbar/baseline-read-set-hint.json | 窄屏双行顶栏与确定性清风检查 baseline read-set hint |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-09-narrow-topbar/impact-statement-draft.json | 窄屏双行顶栏与确定性清风检查 impact statement draft |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-09-narrow-topbar/todo-checkpoint-draft.json | 窄屏双行顶栏与确定性清风检查 todo checkpoint draft |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-09-narrow-topbar/drift-check-draft.json | 窄屏双行顶栏与确定性清风检查 drift check draft |
+| 2026-10-09 | plan | docs/aegis/plans/2026-10-09-narrow-topbar.md | 窄屏顶栏与清风检查修复 |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-09-narrow-topbar/resume-state-hint.json | 2026-10-09-narrow-topbar resume state hint |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-09-narrow-topbar/evidence-bundle-draft-browser-regressions.json | 2026-10-09-narrow-topbar evidence browser-regressions |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-09-narrow-topbar/evidence-bundle-draft-final-build-frontend.json | 2026-10-09-narrow-topbar evidence final-build-frontend |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-09-narrow-topbar/gate-input-pack.json | 2026-10-09-narrow-topbar gate input pack |
+| 2026-10-09 | work | docs/aegis/work/2026-10-09-narrow-topbar/proof-bundle.md | 2026-10-09-narrow-topbar proof bundle |

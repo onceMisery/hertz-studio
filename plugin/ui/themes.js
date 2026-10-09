@@ -24,6 +24,20 @@
   var STORE_KEY = 'vmusic.theme.v2';
   var ATTR = 'data-theme';
   var DEFAULT_ID = 'celestial';
+  // 外观族：颜色归主题，材质/圆角/间距/动效归外观。
+  //
+  // 为什么需要它：装饰层（anime-ui.css / anime-stage.css / anime-interactions.*）
+  // 曾经把 275 条规则全部锁在 html[data-theme="celestial"] 上，于是"再加几套配色"
+  // 只能加颜色——切过去是默认外观涂了新漆，玻璃、噪点、24px 留白、ease-in-out
+  // 全部不跟过来。这跟项目里「主题只管颜色」的规矩并不矛盾：规矩说的是
+  // **令牌表里不许出现尺度**，不是"每个颜色值都得重写一遍装饰"。
+  //
+  // 现在同一套装饰由 data-look 选族：
+  //   glass —— 半透明毛玻璃 + 暖白高光 + 蓝紫阴影（晴空绘卷 / 星穹铁道 / 璃月）
+  //   cel   —— 赛璐璐：平涂不透明色块 + 深色明确描边，无模糊（你的名字 / 千与千寻）
+  // 两族共享同一份结构装饰（间距、圆角、缓动、噪点），只在材质层分叉。
+  var LOOK_ATTR = 'data-look';
+  var DEFAULT_LOOK = 'plain';
 
   // -------------------------------------------------------------------------
   // 内置主题
@@ -60,6 +74,7 @@
       id: 'celestial',
       name: '晴空绘卷（默认）',
       note: '动画天空 · 靛蓝玻璃、暖金细边与赛璐璐云影',
+      look: 'glass',
       tokens: {
         '--bg': '#0d1530',
         '--panel': 'rgba(23, 34, 63, 0.78)',
@@ -103,6 +118,256 @@
         '--warn-wash': 'rgba(243, 220, 167, 0.10)',
         '--danger': '#f5adb0',
         '--danger-wash': 'rgba(245, 173, 176, 0.11)'
+      }
+    },
+    {
+      id: 'kiminona',
+      name: '逢魔时',
+      note: '新海诚 · 高饱和黄昏天空压在深蓝紫上，暖橙与天青对撞',
+      look: 'cel',
+      // 对比度（自 --bg #1B1B3A 反推，WCAG AA）：
+      //   text ≈ 15.1  muted ≈ 8.2  brand ≈ 8.7  highlight ≈ 11.5
+      // accent-ink 压 accent #FF8A5C：白字只有 3.3:1（暖橙亮底上放白字必然糊），
+      // 深紫墨 #2A1B3D 实得 6.8:1，是暖橙按钮唯一站得住的写法。
+      // ⚠ 改 accent 时这条必须一起重算，别照抄别的主题的 ink。
+      tokens: {
+        '--bg': '#1b1b3a',
+        '--panel': 'rgba(38, 38, 77, 0.94)',
+        '--panel-solid': '#26264d',
+        '--panel-2': 'rgba(255, 214, 177, 0.06)',
+        '--line': 'rgba(20, 18, 46, 0.55)',
+        '--line-strong': 'rgba(16, 14, 38, 0.78)',
+        '--text': '#fdf3e6',
+        '--muted': '#b9b2d8',
+        '--accent': '#ff8a5c',
+        '--accent-2': '#5cc8f0',
+        '--accent-ink': '#2a1b3d',
+        '--brand': '#5cc8f0',
+        '--brand-rgb': '92, 200, 240',
+        '--highlight': '#ffd166',
+        '--highlight-rgb': '255, 209, 102',
+        '--hover': 'rgba(92, 200, 240, 0.14)',
+        '--shadow': '4px 4px 0 rgba(12, 10, 32, 0.62)',
+        // 赛璐璐族不用玻璃：--glass-bg 给不透明平涂，--glass-blur 归零。
+        // 这两个值**必须**由主题覆盖而不留默认——style.css 的默认是半透明渐变，
+        // 留着就等于赛璐璐面板又变回玻璃，而症状只是"看起来不够平涂"。
+        '--glass-bg': 'linear-gradient(180deg, #26264d, #1f1f42)',
+        '--glass-bg-strong': '#26264d',
+        '--glass-border': '1px solid rgba(20, 18, 46, 0.62)',
+        '--glass-line': 'rgba(253, 243, 230, 0.10)',
+        '--glass-shadow': '3px 3px 0 rgba(12, 10, 32, 0.55)',
+        '--glass-shadow-glow': '3px 3px 0 rgba(12, 10, 32, 0.55)',
+        '--glass-blur': '0px',
+        '--surface-1': 'rgba(255, 214, 177, 0.05)',
+        '--surface-2': 'rgba(92, 200, 240, 0.10)',
+        '--surface-line': 'rgba(20, 18, 46, 0.5)',
+        '--surface-line-strong': 'rgba(16, 14, 38, 0.75)',
+        '--surface-hi': 'inset 0 1px 0 rgba(253, 243, 230, 0.08)',
+        '--surface-lift': '2px 2px 0 rgba(12, 10, 32, 0.5)',
+        '--field-bg': 'rgba(92, 200, 240, 0.06)',
+        '--field-bg-hover': 'rgba(92, 200, 240, 0.14)',
+        '--field-border': 'rgba(20, 18, 46, 0.58)',
+        '--field-border-strong': 'rgba(16, 14, 38, 0.8)',
+        '--track': 'rgba(253, 243, 230, 0.16)',
+        '--focus-ring': '2px solid #5cc8f0',
+        '--ok': '#7fd8a8',
+        '--ok-wash': 'rgba(127, 216, 168, 0.12)',
+        '--warn': '#ffc46b',
+        '--warn-wash': 'rgba(255, 196, 107, 0.12)',
+        '--danger': '#ff8b96',
+        '--danger-wash': 'rgba(255, 139, 150, 0.12)'
+      }
+    },
+    {
+      id: 'spirited',
+      name: '汤屋',
+      note: '汤屋 · 琥珀灯火与苔绿，暖金高光压在深棕底上',
+      look: 'cel',
+      // 配色取自吉卜力《千与千寻》汤屋的夜灯：暖褐底 + 琥珀灯 + 苔绿 + 暖白。
+      // 对比度（自 --bg #1E1410 反推，WCAG AA；面板 #2F221A / 卡片 #3A2A20）：
+      //   text/底 ≈ 15.5  text/面板 ≈ 13.2  text/卡片 ≈ 11.8
+      //   muted ≈ 7.8   accent ≈ 8.3   brand ≈ 8.4   highlight ≈ 11.3
+      //
+      // muted 最终取 #C9B498 而非注释里的 #BDA78E：后者在**页面上实测**
+      // 只有 4.97:1 —— 列表行的合成底色（面板 + 半透明斑马纹叠层）比面板
+      // 本身亮，纯色算法按面板算会低估它。4.97 刚过 AA 线、没有余量，
+      // 抬到 #C9B498 后为 5.73:1，且仍与正文（13.3:1）差着一个量级，
+      // 层级不会糊。
+      //
+      // 三处与上一版的差别，都是为了对上汤屋的**光**：
+      //  ① 底色更深（#241A14 → #1E1410）。上一版底偏灰，赛璐璐的平涂色块
+      //     需要底足够暗才立得住，否则暖金与苔绿都发灰。
+      //  ② 琥珀提亮加饱和（#E8913C → #E8A13C）。汤屋的灯是**光源**，
+      //     不是暖色块：更亮一档才读得出"亮着"。
+      //  ③ 苔绿提亮（#8FAE5A → #9DBB63）。上一版压在深棕上偏暗、
+      //     显脏；提亮后仍守住 8.4:1。
+      tokens: {
+        '--bg': '#1e1410',
+        '--panel': 'rgba(47, 34, 26, 0.96)',
+        '--panel-solid': '#2f221a',
+        '--panel-2': 'rgba(240, 200, 106, 0.06)',
+        // 描边是赛璐璐的边界语言：深棕实边，比玻璃族的白色描边更硬。
+        '--line': 'rgba(20, 13, 9, 0.55)',
+        '--line-strong': 'rgba(14, 9, 6, 0.78)',
+        '--text': '#f6ece0',
+        '--muted': '#c9b498',
+        '--accent': '#e8a13c',
+        '--accent-2': '#9dbb63',
+        // 琥珀亮底上放白字只有 ~2.4:1，必须用深棕墨。
+        '--accent-ink': '#2a1608',
+        '--brand': '#9dbb63',
+        '--brand-rgb': '157, 187, 99',
+        '--highlight': '#f0c86a',
+        '--highlight-rgb': '240, 200, 106',
+        '--hover': 'rgba(157, 187, 99, 0.14)',
+        '--shadow': '4px 4px 0 rgba(10, 6, 4, 0.62)',
+        // 赛璐璐不用玻璃：平涂不透明 + 深色实描边，模糊归零。
+        '--glass-bg': 'linear-gradient(180deg, #2f221a, #291d16)',
+        '--glass-bg-strong': '#2f221a',
+        '--glass-border': '1px solid rgba(20, 13, 9, 0.62)',
+        '--glass-line': 'rgba(246, 236, 224, 0.10)',
+        '--glass-shadow': '3px 3px 0 rgba(10, 6, 4, 0.55)',
+        '--glass-shadow-glow': '3px 3px 0 rgba(10, 6, 4, 0.55)',
+        '--glass-blur': '0px',
+        '--surface-1': 'rgba(240, 200, 106, 0.05)',
+        '--surface-2': 'rgba(157, 187, 99, 0.10)',
+        '--surface-line': 'rgba(20, 13, 9, 0.50)',
+        '--surface-line-strong': 'rgba(14, 9, 6, 0.75)',
+        '--surface-hi': 'inset 0 1px 0 rgba(246, 236, 224, 0.08)',
+        '--surface-lift': '2px 2px 0 rgba(10, 6, 4, 0.5)',
+        '--field-bg': 'rgba(157, 187, 99, 0.06)',
+        '--field-bg-hover': 'rgba(157, 187, 99, 0.14)',
+        '--field-border': 'rgba(20, 13, 9, 0.56)',
+        '--field-border-strong': 'rgba(14, 9, 6, 0.80)',
+        '--track': 'rgba(246, 236, 224, 0.16)',
+        '--focus-ring': '2px solid #9dbb63',
+        '--ok': '#a3c96e',
+        '--ok-wash': 'rgba(163, 201, 110, 0.12)',
+        '--warn': '#e8a13c',
+        '--warn-wash': 'rgba(232, 161, 60, 0.12)',
+        '--danger': '#e08076',
+        '--danger-wash': 'rgba(224, 128, 118, 0.12)'
+      }
+    },
+    {
+      id: 'starrail',
+      name: '深空',
+      note: '深空蓝紫渐变底 + 青金描边高光，毛玻璃与内发光',
+      look: 'glass',
+      // 对比度（自 --bg #14122E 反推，WCAG AA）：
+      //   text ≈ 16.3  muted ≈ 7.5  brand ≈ 10.0  highlight ≈ 11.5
+      tokens: {
+        '--bg': '#14122e',
+        '--panel': 'rgba(30, 27, 66, 0.76)',
+        '--panel-solid': '#1e1b42',
+        '--panel-2': 'rgba(95, 208, 224, 0.07)',
+        '--line': 'rgba(198, 190, 255, 0.15)',
+        '--line-strong': 'rgba(210, 204, 255, 0.28)',
+        '--text': '#f4f1ff',
+        '--muted': '#a8a2cc',
+        '--accent': '#f2c879',
+        '--accent-2': '#5fd0e0',
+        '--accent-ink': '#14122e',
+        '--brand': '#5fd0e0',
+        '--brand-rgb': '95, 208, 224',
+        '--highlight': '#f2c879',
+        '--highlight-rgb': '242, 200, 121',
+        '--hover': 'rgba(95, 208, 224, 0.13)',
+        '--shadow': '0 16px 40px rgba(8, 6, 28, 0.44)',
+        '--glass-bg': 'linear-gradient(155deg, rgba(44, 38, 92, 0.82), rgba(20, 18, 46, 0.88))',
+        '--glass-bg-strong': 'rgba(26, 23, 58, 0.96)',
+        // 青金双色描边：这是"深空蓝紫 + 青金"那套的签名做法，不是单纯的白叠层。
+        '--glass-border': '1px solid rgba(120, 216, 230, 0.26)',
+        '--glass-line': 'rgba(244, 241, 255, 0.12)',
+        '--glass-shadow': '0 12px 32px rgba(8, 6, 28, 0.38), inset 0 1px 0 rgba(242, 200, 121, 0.12)',
+        '--glass-shadow-glow': '0 18px 48px rgba(8, 6, 28, 0.5), inset 0 1px 0 rgba(242, 200, 121, 0.16)',
+        '--glass-blur': '28px',
+        '--surface-1': 'rgba(95, 208, 224, 0.06)',
+        '--surface-2': 'rgba(95, 208, 224, 0.11)',
+        '--surface-line': 'rgba(198, 190, 255, 0.15)',
+        '--surface-line-strong': 'rgba(210, 204, 255, 0.28)',
+        '--surface-hi': 'inset 0 1px 0 rgba(244, 241, 255, 0.09)',
+        '--surface-lift': '0 8px 22px rgba(8, 6, 28, 0.32)',
+        '--field-bg': 'rgba(95, 208, 224, 0.06)',
+        '--field-bg-hover': 'rgba(95, 208, 224, 0.13)',
+        '--field-border': 'rgba(198, 190, 255, 0.20)',
+        '--field-border-strong': 'rgba(210, 204, 255, 0.40)',
+        '--track': 'rgba(198, 190, 255, 0.18)',
+        '--focus-ring': '2px solid #5fd0e0',
+        '--ok': '#6fd8b0',
+        '--ok-wash': 'rgba(111, 216, 176, 0.11)',
+        '--warn': '#f2c879',
+        '--warn-wash': 'rgba(242, 200, 121, 0.11)',
+        '--danger': '#ff8095',
+        '--danger-wash': 'rgba(255, 128, 149, 0.11)'
+      }
+    },
+    {
+      id: 'liyue',
+      name: '夜市',
+      note: '夜市 · 璃月青与金，深青玻璃上的暖白灯火',
+      look: 'glass',
+      // 配色取自原神官网璃月主视觉：青玉 + 金棕 + 暖白（实测取到
+      // #69e0ff 青、#ce965f / #815a34 金棕、#ffd49f 暖白、rgb(252,249,254) 暖白底）。
+      // 对比度（自 --bg #0C1E26 反推，WCAG AA；面板 #13303A / 卡片 #173B47）：
+      //   text/底 ≈ 15.8  text/面板 ≈ 12.8  text/卡片 ≈ 11.1
+      //   muted ≈ 8.8   accent ≈ 10.1  brand ≈ 9.8   highlight ≈ 12.4
+      //
+      // 三处与上一版的差别：
+      //  ① 底色由 #0E2A2E 转向**更深更蓝**的 #0C1E26。上一版偏绿，读成"薄荷"；
+      //     璃月的青是**蓝调青**（官网实测 #69e0ff 就是蓝青），带绿就偏了。
+      //  ② 金色降饱和提亮（#E8B862 → #E6C288）。璃月的金是**黄铜/金棕**，
+      //     上一版偏橙黄，橙过头就变成" sunset"而不是"璃月"。
+      //  ③ 青提亮（#5FC9C0 → #5FD4E0）。上一版偏暗偏绿，压在深青底上
+      //     显不出来；官网的青是亮蓝青。
+      //
+      // ⚠ 阴影一律偏**深青**而非蓝紫：底是青调时，蓝紫阴影会显脏
+      //   （记忆里"阴影用蓝紫"那条规矩的前提就是底是蓝紫）。
+      tokens: {
+        '--bg': '#0c1e26',
+        '--panel': 'rgba(19, 48, 58, 0.78)',
+        '--panel-solid': '#13303a',
+        '--panel-2': 'rgba(95, 212, 224, 0.07)',
+        '--line': 'rgba(150, 214, 224, 0.16)',
+        '--line-strong': 'rgba(170, 228, 236, 0.30)',
+        '--text': '#f2f7f6',
+        '--muted': '#a3bfc4',
+        '--accent': '#e6c288',
+        '--accent-2': '#5fd4e0',
+        '--accent-ink': '#0c1e26',
+        '--brand': '#5fd4e0',
+        '--brand-rgb': '95, 212, 224',
+        '--highlight': '#f0d9a8',
+        '--highlight-rgb': '240, 217, 168',
+        '--hover': 'rgba(95, 212, 224, 0.13)',
+        '--shadow': '0 16px 40px rgba(3, 12, 18, 0.46)',
+        // 深青玻璃：155° 斜向，端点是同一色相的两档明度，不是撞色渐变。
+        '--glass-bg': 'linear-gradient(155deg, rgba(20, 58, 70, 0.84), rgba(10, 28, 36, 0.90))',
+        '--glass-bg-strong': 'rgba(15, 40, 49, 0.97)',
+        // 青金双色描边：青提亮做边，金压暗做边 —— 官网的按钮/入口就是这个组合。
+        '--glass-border': '1px solid rgba(122, 216, 228, 0.26)',
+        '--glass-line': 'rgba(242, 247, 246, 0.12)',
+        '--glass-shadow': '0 12px 32px rgba(3, 12, 18, 0.40), inset 0 1px 0 rgba(230, 194, 136, 0.14)',
+        '--glass-shadow-glow': '0 18px 48px rgba(3, 12, 18, 0.52), inset 0 1px 0 rgba(230, 194, 136, 0.18)',
+        '--glass-blur': '26px',
+        '--surface-1': 'rgba(95, 212, 224, 0.06)',
+        '--surface-2': 'rgba(95, 212, 224, 0.12)',
+        '--surface-line': 'rgba(150, 214, 224, 0.16)',
+        '--surface-line-strong': 'rgba(170, 228, 236, 0.30)',
+        '--surface-hi': 'inset 0 1px 0 rgba(242, 247, 246, 0.09)',
+        '--surface-lift': '0 8px 22px rgba(3, 12, 18, 0.34)',
+        '--field-bg': 'rgba(95, 212, 224, 0.06)',
+        '--field-bg-hover': 'rgba(95, 212, 224, 0.13)',
+        '--field-border': 'rgba(150, 214, 224, 0.20)',
+        '--field-border-strong': 'rgba(170, 228, 236, 0.42)',
+        '--track': 'rgba(150, 214, 224, 0.18)',
+        '--focus-ring': '2px solid #5fd4e0',
+        '--ok': '#6fd8b0',
+        '--ok-wash': 'rgba(111, 216, 176, 0.11)',
+        '--warn': '#e6c288',
+        '--warn-wash': 'rgba(230, 194, 136, 0.11)',
+        '--danger': '#f09a9a',
+        '--danger-wash': 'rgba(240, 154, 154, 0.11)'
       }
     },
     {
@@ -617,9 +882,20 @@
     // —— 两者相同时频谱柱全染成一种颜色，加性混合一叠就是一块实心白。
     // 只派生不校验的话，某个主题若没给 --accent-2 就会悄悄退回全局默认青，
     // 在那个主题下重新变成单色。
-    ['--accent', '--accent-2'].forEach(function (key) {
+    //
+    // --text / --bg 也要派生：外观层（cel-ui.css 的描边、anime-ui.css 里
+    // 从"暖白高光"反推的半透明叠层）需要在 rgba() 里用它们的三元组。少了这两份，
+    // 那层就只能写死颜色字面量，于是又变成"只有 celestial 有这个效果"。
+    ['--accent', '--accent-2', '--text', '--bg'].forEach(function (key) {
       var hex = theme.tokens[key];
-      if (!hex || !/^#([0-9a-f]{6})$/i.test(hex)) return;
+      if (!hex || !/^#([0-9a-f]{6})$/i.test(hex)) {
+        // 派生不出来就**清掉**：否则切到没给这个色的主题（例如只声明了
+        // accent 的扩展主题）时，上一套的 rgb 三元组会留在 <html> 上，
+        // 外观层拿它去rgba() 出来的颜色看着完全合理——于是"换皮没换干净"
+        // 这类bug 没有任何症状可查。
+        el.style.removeProperty(key + '-rgb');
+        return;
+      }
       var n = parseInt(hex.slice(1), 16);
       el.style.setProperty(key + '-rgb',
         [(n >> 16) & 255, (n >> 8) & 255, n & 255].join(', '));
@@ -642,6 +918,10 @@
       }
     });
     el.setAttribute(ATTR, theme.id);
+    // 外观族选择器。**必须每次都写**：从 glass 族切到没有 look 的主题
+    // （内置里那些纯换色的）时，若只在有 look 时才 setAttribute，上一套的
+    // data-look 会留在 <html> 上，那套主题于是平白多出一层玻璃装饰。
+    el.setAttribute(LOOK_ATTR, theme.look || DEFAULT_LOOK);
     current = theme;
     if (!(opts && opts.silent)) writeStored(theme.id);
     // 主题色会被舞台取色覆盖到 --music-highlight 上，换主题要让它重新取一次
@@ -653,14 +933,18 @@
   }
 
   // 带上 tokens：渲染主题菜单时要拿 accent 画色点，调用方不该再回头查一次。
-  // 这里是拷贝，外部改不动 CATALOG。
+  // 这里是拷贝，外部改不动 CATALOG。look 一并带出去，菜单才能标出「这套
+  // 自带外观」，也让契约脚本读得到族归属。
   function list() {
     var ordered = CATALOG.filter(function (t) { return t.id === DEFAULT_ID; })
       .concat(CATALOG.filter(function (t) { return t.id !== DEFAULT_ID; }));
     return ordered.map(function (t) {
       var tokens = {};
       Object.keys(t.tokens).forEach(function (k) { tokens[k] = t.tokens[k]; });
-      return { id: t.id, name: t.name, note: t.note, tokens: tokens };
+      return {
+        id: t.id, name: t.name, note: t.note, tokens: tokens,
+        look: t.look || DEFAULT_LOOK
+      };
     });
   }
 
@@ -694,9 +978,13 @@
       Object.keys(base).forEach(function (k) { merged[k] = base[k]; });
       Object.keys(theme.tokens).forEach(function (k) { merged[k] = theme.tokens[k]; });
       var entry = { id: theme.id, name: theme.name || theme.id, note: theme.note || '', tokens: merged };
+      // look 是**主题自己的属性**，不进 tokens（那是令牌表，只许有颜色）。
+      // 不继承已有条目：register 用于"就地改写"同一 id 时，改的正是配色，
+      // 外观族得由调用方显式声明；沿用旧值会把上一套的外观悄悄留给新配色。
+      entry.look = theme.look || DEFAULT_LOOK;
       var at = byId.get(entry.id);
       if (at) {
-        at.tokens = merged; at.name = entry.name; at.note = entry.note;
+        at.tokens = merged; at.name = entry.name; at.note = entry.note; at.look = entry.look;
       } else {
         CATALOG.push(entry);
         byId.set(entry.id, entry);

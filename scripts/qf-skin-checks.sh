@@ -67,7 +67,7 @@ run() {
 }
 
 run check-skin-fixes SKIN_PORT="$PORT" SKIN_TOKEN="$TOK"
-run check-qf-issues  SKIN_PORT="$PORT" TK="$TOK"
+run check-qf-issues HERTZ_BIN="$EXE"
 # 每日推荐折叠按钮 × 五套皮肤 + 曲库行勾选框可见性。它自己拼 URL 与凭据
 #（DAILY_UI_URL + VMUSIC_DATA_DIR 里的 token 文件），所以不接 SKIN_* 那两个变量。
 run check-daily-collapse-browser \

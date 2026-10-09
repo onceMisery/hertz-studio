@@ -1,0 +1,139 @@
+/* SPDX-License-Identifier: MIT
+ * Original flat-painted scenery and its workshop gallery. */
+
+.ws-anime-gallery {
+  --ws-anime-ink: #f0ebdc;
+  --ws-anime-muted: #acb8cf;
+  --ws-anime-gold: #dbc595;
+  --ws-anime-cyan: #91bfcb;
+  margin: 16px 0 32px;
+  color: var(--ws-anime-ink);
+  font-family: var(--font-ui, "Aptos", "Century Gothic", "Microsoft YaHei UI", sans-serif);
+}
+
+.ws-anime-heading { margin-bottom: 24px; }
+.ws-anime-kicker {
+  display: block;
+  margin-bottom: 16px;
+  color: var(--ws-anime-gold);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: .19em;
+}
+.ws-anime-heading h2 {
+  margin: 0;
+  font-size: 25px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: .04em;
+  text-shadow: 0 0 14px rgb(233 216 176 / 10%);
+}
+.ws-anime-heading p {
+  margin: 12px 0 0;
+  color: var(--ws-anime-muted);
+  font-size: 12px;
+  line-height: 1.8;
+}
+.ws-anime-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
+.ws-anime-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgb(148 176 203 / 25%);
+  border-radius: 14px;
+  background: linear-gradient(150deg, rgb(42 56 85 / 80%), rgb(26 33 61 / 86%));
+  box-shadow: inset 0 1px 0 rgb(246 231 200 / 7%), 0 6px 16px rgb(12 20 48 / 10%);
+  color: var(--ws-anime-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transition: transform 240ms ease-in-out, border-color 240ms ease-in-out,
+    box-shadow 240ms ease-in-out, background-color 240ms ease-in-out;
+}
+.ws-anime-card:hover {
+  transform: translateY(-3px);
+  border-color: var(--ws-anime-cyan);
+  box-shadow: inset 0 0 16px rgb(145 191 203 / 9%), 0 10px 24px rgb(12 20 48 / 19%);
+}
+.ws-anime-card:active { transform: translateY(-1px) scale(.985); }
+.ws-anime-card[aria-pressed="true"] {
+  border-color: var(--ws-anime-gold);
+  box-shadow: inset 0 0 18px rgb(219 197 149 / 8%), 0 6px 18px rgb(12 20 48 / 15%);
+}
+.ws-panel .ws-anime-card:focus-visible { outline: 2px solid var(--ws-anime-cyan); outline-offset: 4px; }
+.ws-anime-preview { position: relative; display: block; width: 100%; overflow: hidden; aspect-ratio: 8 / 5; }
+.ws-anime-preview .ws-scene-art { display: block; width: 100%; height: 100%; }
+.ws-anime-selected {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgb(249 237 210 / 50%);
+  border-radius: 50%;
+  background: var(--ws-anime-gold);
+  color: #253551;
+  opacity: 0;
+  transform: scale(.85);
+  transition: opacity 240ms ease-in-out, transform 240ms ease-in-out;
+}
+.ws-anime-selected svg { width: 18px; height: 18px; }
+.ws-anime-card[aria-pressed="true"] .ws-anime-selected { opacity: 1; transform: scale(1); }
+.ws-anime-caption { display: flex; flex: 1; flex-direction: column; padding: 16px 14px 18px; }
+.ws-anime-tag { color: var(--ws-anime-gold); font-size: 8px; font-weight: 500; letter-spacing: .09em; }
+.ws-anime-caption strong { margin-top: 10px; font-size: 14px; font-weight: 500; letter-spacing: .035em; }
+.ws-anime-description { margin-top: 10px; color: var(--ws-anime-muted); font-size: 10px; line-height: 1.8; text-wrap: pretty; }
+.ws-anime-note { margin: 24px 0 0; color: var(--ws-anime-muted); font-size: 10px; letter-spacing: .06em; line-height: 1.8; }
+
+/* These drawings are opaque paint. Additive blending would wash out the ink. */
+.s3d-creative-source #s3d-creative[data-scene-family="anime"] .creative-canvas { mix-blend-mode: normal; }
+.s3d-creative[data-scene-family="anime"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgb(23 33 67 / 8%), transparent 34%, rgb(21 30 60 / 6%) 67%, rgb(18 28 57 / 27%));
+}
+.s3d:has(#s3d-creative.creative-on[data-scene-family="anime"]) .s3d-vignette {
+  background: radial-gradient(ellipse at 50% 43%, transparent 37%, rgb(15 25 55 / 28%) 100%);
+}
+.s3d:has(#s3d-creative.creative-on[data-scene-family="anime"]) :is(.s3d-head, .s3d-player, .s3d-dock, .s3d-settings, .s3d-queue) {
+  --s3d-text: #f2ebda;
+  --s3d-muted: #b8c4d6;
+  --s3d-accent: #dec994;
+  color: var(--s3d-text);
+  border: 1px solid rgb(219 197 149 / 28%);
+  border-radius: 16px;
+  background: linear-gradient(130deg, rgb(26 39 68 / 82%), rgb(29 31 57 / 87%));
+  box-shadow: inset 0 1px 0 rgb(245 227 191 / 8%), 0 12px 36px rgb(20 26 58 / 24%);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.s3d:has(#s3d-creative.creative-on[data-scene-family="anime"]) .s3d-reading {
+  text-shadow: 0 2px 5px rgb(24 37 70 / 65%);
+}
+
+@media (max-width: 359px) {
+  .ws-anime-grid { grid-template-columns: minmax(0, 1fr); }
+  .ws-anime-card { display: grid; grid-template-columns: 44% minmax(0, 1fr); }
+  .ws-anime-preview { height: 100%; min-height: 128px; aspect-ratio: auto; }
+  .ws-anime-preview .ws-scene-art { object-fit: cover; }
+  .ws-anime-caption { padding: 16px 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ws-anime-card, .ws-anime-selected { transition: none; }
+  .ws-anime-card:hover, .ws-anime-card:active { transform: none; }
+}
+body.reduce-motion .ws-anime-card,
+body.reduce-motion .ws-anime-selected,
+html[data-rm~="ui"] .ws-anime-card,
+html[data-rm~="ui"] .ws-anime-selected { transition: none; }
+body.reduce-motion .ws-anime-card:is(:hover, :active),
+html[data-rm~="ui"] .ws-anime-card:is(:hover, :active) { transform: none; }

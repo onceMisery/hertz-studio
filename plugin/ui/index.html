@@ -28,10 +28,20 @@
 <!-- 主题工作室：壁纸背景层与壁纸画廊。排在 style.css 之后（同特异性整块胜出），
      与 online.css 同一层次——都是"在既有布局之上再铺一层"的模块。 -->
 <link rel="stylesheet" href="theme-studio.css">
-<!-- 晴空绘卷：沿用主题令牌和现有业务节点的动画美术外观。 -->
+<!-- 晴空绘卷一族：沿用主题令牌和现有业务节点的动画美术外观。
+     anime-ui.css / anime-stage.css 按 data-look 选族（glass / cel），
+     结构装饰（间距、圆角、缓动、噪点）两族共享。 -->
 <link rel="stylesheet" href="anime-ui.css">
 <link rel="stylesheet" href="anime-stage.css">
 <link rel="stylesheet" href="anime-interactions.css">
+<link rel="stylesheet" href="creative-anime.css">
+<!-- 赛璐璐材质覆盖：**必须排在 anime-ui.css / anime-stage.css /
+     anime-interactions.css 之后**。三者与它的选择器特异性相同
+     （都是 html[data-look="…"] 单类），同优先级靠源码顺序决胜——
+     放前面会被整块盖掉，而症状全是"看起来没换材质"：
+     放 anime-ui 前面 → 面板还是玻璃；放 anime-interactions 前面 →
+     点击粒子还是玻璃那套旋转星屑。两处都不报错、元素齐全。 -->
+<link rel="stylesheet" href="cel-ui.css">
 <!-- 界面皮肤：默认全部 disabled，切到哪套由 skins.js 解开哪套。
      排在其它样式表之后——皮肤做的是覆盖，必须在最后。
      skins.css 是"选皮肤的地方"，常驻加载，不带 data-skin-css。 -->
@@ -1980,6 +1990,9 @@
 <script defer src="backgrounds.js"></script>
 <script defer src="handdrawn.js"></script>
 <script defer src="creative-stage.js"></script>
+<!-- 二次元舞台的绘制层：与 anime-stage.css 配对，负责 canvas 上的手绘风上色。
+     必须排在 creative-stage.js 之后——它读CreativeStage 的场景表。 -->
+<script defer src="creative-anime.js"></script>
 <script defer src="creative-share-code.js"></script>
 <!-- 离线提示词编译器：compile 只读 CreativeStage.scenes/spec，写入走
      CreativeStage.applyIntent；排在编排层之后、工坊之前。 -->

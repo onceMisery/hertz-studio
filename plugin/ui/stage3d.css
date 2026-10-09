@@ -1060,7 +1060,6 @@ body.s3d-open > .bar { display: none; }
    --------------------------------------------------------------------------- */
 
 @media (max-width: 760px) {
-  .top-right { gap: 5px; }
   #stage3d-entry { width: 30px; min-width: 30px; }
   .s3d-head {
     top: 12px;

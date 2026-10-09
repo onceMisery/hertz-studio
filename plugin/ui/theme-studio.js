@@ -114,7 +114,14 @@
     'porcelain': 'morning-09.jpg',
     'snow-dawn': 'morning-01.jpg',
     'acid': 'night-08.jpg',
-    liunian: 'evening-16.jpg'
+    liunian: 'evening-16.jpg',
+    // 晴空绘卷一族的新四套。按底色气质指派，不新增素材——
+    // 赛璐璐族那两套铺的是平涂面板，壁纸只从卡片缝里透出来，
+    // 所以给它们的图不必抢戏（afternoon-20 / afternoon-07 都是中低亮度）。
+    kiminona: 'afternoon-20.jpg',
+    spirited: 'afternoon-07.jpg',
+    starrail: 'night-02.jpg',
+    liyue: 'evening-18.jpg'
   };
   // 自定义配色没有署名素材，与"没声明"的主题同样走兜底那张。
   THEME_WALL[CUSTOM_ID] = DEFAULT_WALL;

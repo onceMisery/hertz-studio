@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "browser-regressions",
+  "type": "test",
+  "source": "output/narrow-topbar-green-2.log; output/playwright/narrow-topbar/geometry.json; output/narrow-qf-final.log",
+  "summary": "新构建通过七皮肤×320/330/390/620/621/700/1440px共49组，页面overflow/scrollX为0，按钮命中、搜索快捷键、弹层定位通过。清风自动隔离空态与真实WAV扫描加载，10通过0失败。",
+  "verifier": "root执行真实Chrome检查并查看截图"
+}

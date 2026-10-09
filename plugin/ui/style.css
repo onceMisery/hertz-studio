@@ -2058,6 +2058,8 @@ input[type="range"]::-moz-range-thumb { width: 13px; height: 13px; border: none;
 
 @media (max-width: 900px) {
   :root { --rail-w: 72px; }
+  .topsearch { min-width: 0; }
+  .top-right { gap: 5px; }
   .topsearch kbd { display: none; }
   .app { grid-template-columns: var(--rail-w) minmax(0, 1fr); padding: 10px; }
   .rail { padding: 10px 6px; }
@@ -2086,12 +2088,18 @@ input[type="range"]::-moz-range-thumb { width: 13px; height: 13px; border: none;
 }
 
 @media (max-width: 620px) {
+  /* 共用顶栏在手机上分为工具行和搜索行。高度令牌也供导航/离线提示定位。 */
+  :root:not([data-skin="qingfeng"]):not([data-skin="sheen"]):not([data-skin="ios"]) { --topbar-h: 100px; }
+  :root:not([data-skin="qingfeng"]):not([data-skin="sheen"]):not([data-skin="ios"]) .topbar {
+    flex-wrap: wrap; gap: 8px; padding-block: 8px;
+  }
+  :root:not([data-skin="qingfeng"]):not([data-skin="sheen"]) .topsearch {
+    order: 3; flex: 1 1 100%; max-width: none;
+  }
   .topbar { gap: 10px; padding: 0 10px; }
   .brand { width: auto; font-size: 14px; min-width: 0; }
   .topsearch { max-width: none; flex: 1 1 60px; min-width: 0; }
-  /* 顶栏右侧是 nowrap 的固定宽度；手机上把连接状态收成一个点，
-     否则 122px 的右侧区块会把搜索框挤出视口，整页横向溢出。 */
-  .top-right { flex: none; gap: 4px; }
+  .topbar .top-right { flex: none; gap: 2px; }
   .conn { font-size: 0; }
   .conn::before { width: 8px; height: 8px; }
   .app { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
@@ -3215,10 +3223,9 @@ button:focus-visible, [role="button"]:focus-visible,
   background: var(--danger-wash, rgba(255, 90, 90, 0.1));
 }
 .conn.bad::before { background: var(--danger); }
-/* 620px 断点里有一条 `.conn { font-size: 0 }`（窄屏把状态收成一个点，
-   否则 nowrap 的右侧区块会把搜索框挤出视口）。媒体查询不增加特异性，
-   本节的 .conn 排在它之后会把它盖掉，所以这里重新声明一遍。 */
-@media (max-width: 620px) { .conn { font-size: 0; } }
+/* 平板和手机把连接状态收成点，去掉文字的 padding/gap，让搜索保持可用宽度。
+   放在组件定义之后，避免基础胶囊规则重新引入空白占位。 */
+@media (max-width: 900px) { .conn { font-size: 0; padding: 0; gap: 0; } }
 
 /* 搜索框聚焦：白色描边在近黑面上和未聚焦的灰描边分不开，换成品牌色 +
    一圈外发光。参考项目的搜索框聚焦也是"整条亮起来"而不是只描一根线。 */

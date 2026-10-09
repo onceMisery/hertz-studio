@@ -304,7 +304,7 @@ async function main() {
   let browser, page;
   try {
     const tracks = await seedLibrary(fixture), current = tracks[0];
-    for (const file of ['themes.js', 'theme-studio.js', 'app.js', 'style.css', 'anime-ui.css', 'anime-stage.css',
+    for (const file of ['themes.js', 'theme-studio.js', 'app.js', 'style.css', 'anime-ui.css', 'anime-stage.css', 'cel-ui.css',
       'anime-interactions.js', 'anime-interactions.css', 'stage3d.css', 'workshop.js', 'skins/skins.js', 'wallpapers/celestial-sky.jpg']) {
       const response = await fetch(fixture.base + '/' + file);
       assert.equal(response.status, 200, 'served asset ' + file);

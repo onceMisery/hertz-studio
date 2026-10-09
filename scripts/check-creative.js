@@ -591,9 +591,13 @@ ok(CS.importJSON('[1,2,3]').ok === false, '错误形状的 JSON 被拒绝');
     '第二支高亮色指向 --accent-2-rgb 而不是 --accent-rgb（指向后者会让两支同色）');
   ok(/--accent-2-rgb:\s*[^;]+;/.test(styleCss),
     '--accent-2-rgb 在 style.css 的 :root 有定义（否则引用悬空，退回固定青）');
-  ok(/'--accent',\s*'--accent-2'\]\.forEach/.test(themesSrc) ||
-     /\['--accent',\s*'--accent-2'\]/.test(themesSrc),
-    'themes.js 换肤时同时派生两支的 rgb（只派生 accent 的话，16 套主题下会退回全局默认色）');
+  // 这一条断言的是「同一个 forEach 里同时派生两支」，所以只认列表字面量。
+  // 列表后来扩到四支（加了 --text / --bg，外观层要在 rgba() 里用它们），
+  // 断言跟着放宽成"前两项仍是 accent 与 accent-2"——放宽的是**长度**，
+  // 不是"两支都必须派生"这条本意。
+  ok(/'--accent',\s*'--accent-2'[\s\S]{0,40}'--text'/.test(themesSrc),
+    "themes.js 换肤时同时派生两支的 rgb（只派生 accent 的话，16 套主题下会退回全局默认色；现列表为 " +
+    ((themesSrc.match(/\['--accent',[\s\S]*?--bg'\]\.forEach/) || [''])[0] || '未解析到列表') + '）');
 
   // 6) 泛光默认值本身也要钉住。上面五条防线全对之后浏览器实测（towers 默认态）
   //    画面仍是一条白带 —— 纯白像素 0%、有结构，但读不清。原因是阈值 0.58 太低：

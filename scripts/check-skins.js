@@ -1474,6 +1474,130 @@ function checkChaoxiSkin() {
     'unmount 不清 localStorage（那是用户的选择，切回来该是开着还是开着）');
   ok(/localStorage\.setItem\(KEY/.test(cxJs), '展开状态被记住');
 
+  // ---- 晴空族 × 潮汐：顶栏必须是扁平通栏，不能是浮起卡片 ----
+  //
+  // 这条规则原先按 `html[data-theme="celestial"]` 写死，于是外观族机制
+  // （data-look）上线后，新增的四套主题全都匹配不上：它们在潮汐下顶栏仍
+  // 保持满宽浮卡、左右各探出一个 --skin-pad，症状是"顶部两张卡浮在内容卡
+  // 上方"。老规则失配不报错、不掉样式，只是安静地不生效。
+  //
+  // 所以这里钉两件事：
+  //   ① 皮肤层不得再按主题 id 写晴空专属规则（该判族）；
+  //   ② 那条还原规则确实存在，且两族都覆盖到。
+  section('潮汐 × 晴空族：顶栏保持扁平通栏');
+
+  ok(!/\[data-theme=["']?celestial/.test(CHAOXI),
+    '潮汐皮肤里没有按 celestial 主题 id 写的规则（外观族机制下这会静默失配：' +
+    '新主题匹配不上，老规则无声失效）');
+  ok(/html:is\(\[data-look="glass"\], \[data-look="cel"\]\)\[data-skin="chaoxi"\] \.topbar/.test(CHAOXI),
+    '顶栏扁平化规则认的是外观族而不是主题 id');
+  ok(/html:is\(\[data-look="glass"\], \[data-look="cel"\]\)\[data-skin="chaoxi"\] \.rail/.test(CHAOXI),
+    '导航条扁平化规则同样认族（漏了它通栏条又会变回浮卡）');
+  // 扁平化的具体形态：圆角归零、只留一条下边框、去掉投影。
+  // 少任何一条，满宽的顶栏就会重新读成"另一张卡"。
+  // 提取声明块时用 [\s\S] 而不是 [^}]*：选择器列表是跨行的，
+  // `[^}]*` 虽然也能跨行，但整个模式里的 `[^}]*`（第一段）会一路吃到
+  // 第二个选择器后面，结果整条匹配不上 —— 而"抓不到块"与"块里没写"
+  // 在断言里长得一模一样，都是红，却指向完全不同的问题。
+  const chaoxiFlat = new RegExp(
+    'html:is\\(\\[data-look="glass"\], \\[data-look="cel"\\]\\)\\[data-skin="chaoxi"\\] \\.topbar,[\\s\\S]*?\\{([\\s\\S]*?)\\n\\}'
+  ).exec(CHAOXI);
+  ok(!!chaoxiFlat, '抓得到顶栏扁平化规则的声明块');
+  if (chaoxiFlat) {
+    ok(/border-radius:\s*0\b/.test(chaoxiFlat[1]), '顶栏圆角归零（满宽浮卡是"顶部没对齐"的直接原因）');
+    ok(/border-width:\s*0 0 1px/.test(chaoxiFlat[1]), '顶栏只保留一条下边框');
+    ok(/box-shadow:\s*none/.test(chaoxiFlat[1]), '顶栏去掉投影（否则仍是浮起件）');
+    // 背景与模糊不能动：fixed 导航条压在滚动内容上仍需要它。
+    ok(!/background[^:]*:/.test(chaoxiFlat[1]) && !/backdrop-filter/.test(chaoxiFlat[1]),
+      '扁平化不动背景与背景模糊（导航条是 fixed，压在滚动内容上仍需要）');
+  }
+
+  // ---- 潮汐 × 晴空族：通栏导航条必须有实底 ----------------------------
+  //
+  // ⚠ 这条曾经写错两次，两次的症状都不同，值得逐条记下来：
+  //
+  // ① 材质规则只写 [data-skin="chaoxi"]（0,2,0），压不过装饰层的
+  //    html:is([data-look=…])（0,2,1）→ 满宽玻璃渐变、通栏看着没底色。
+  //    同一 bug 在两套主题下表现不同：亮壁纸（晴空绘卷的云）现形，
+  //    暗壁纸（夜景）看不出来 —— 于是被当成"这是配色问题"。
+  //
+  // ② 修成 html:is([data-look=…])[data-skin="chaoxi"]（0,3,1）压过了，
+  //    但**把材质绑在了族上**。而 22 套内置主题里有 18 套是 data-look="plain"
+  //    （族是装饰层的概念，不是主题的必选项）—— 161 个「主题 × 皮肤」组合
+  //    里立刻坏掉 18 个，全是"潮汐 × 不带族的主题"，正是用户截图那套。
+  //
+  // 结论：**皮肤材质不该依赖族**。潮汐的通栏是皮肤自己的设计，对每个主题
+  // 都成立。压过装饰层靠 html[data-skin] 前缀拿到 (0,3,1)，与族无关。
+  //
+  // 判据：材质规则里必须有一条**不带 data-look 的**选择器。
+  // 提取"选择器 → 声明"的对应关系。
+  //
+  // ⚠ 两个坑，都踩过：
+  //  ① 切块前必须**先剥注释**，否则注释里出现的 data-look / .rail 会被当成
+  //     选择器的一部分，判断就红在不存在的地方。
+  //  ② 一条规则的**选择器列表**（`a, b { }`）必须按逗号拆开逐项判。
+  //     否则 `html[data-skin="chaoxi"] .rail, html:is([data-look…]) .rail {…}`
+  //     被当成"一个带 data-look 的选择器" → 断言误报"没有不带族的"。
+  //  ③ 只看**紧跟 { 的那一段**判断是否 .rail 块，别把 `.rail-item` 也算进来 ——
+  //     .rail-item 里同样有 `flex-direction: row`，会让"布局重复"误报。
+  const chaoxiNoComment = CHAOXI.replace(/\/\*[\s\S]*?\*\//g, '');
+  // 材质的标志是「用了 --skin-surface」——可能单独用，也可能叠一层遮罩用
+  // （叠遮罩是为了把 0.78 的默认档补到实底）。所以只认这个令牌，不认写法。
+  const SURFACE_RE = new RegExp('var\\(--skin-surface\\)');
+  const VEIL_RE = new RegExp('--skin-rail-veil');
+  const chaoxiRules = (chaoxiNoComment.match(/[^{}]+\{[^{}]*\}/g) || []).map(b => ({
+    selectors: b.slice(0, b.indexOf('{'))
+      .split(',').map(s => s.trim()).filter(Boolean),
+    body: b
+  }));
+  // 只取"选择器里恰好以 .rail 结尾"的规则（排除 .rail-item / .rail-badge …）
+  const isPlainRail = (s) => /\.rail$/.test(s);
+  const railMatRules = chaoxiRules.filter(r =>
+    r.selectors.some(isPlainRail) && SURFACE_RE.test(r.body));
+  ok(railMatRules.length > 0, '抓得到潮汐导航条材质规则');
+  ok(railMatRules.some(r => r.selectors.some(s => isPlainRail(s) && !/data-look/.test(s))),
+    '潮汐导航条的实底材质有一条不带 data-look 的选择器（18 套 plain 主题也要生效：' +
+    '族是装饰层的概念，皮肤依赖它就会漏掉大部分主题）');
+  ok(railMatRules.some(r => r.selectors.some(s => /html\[data-skin="chaoxi"\]/.test(s) && isPlainRail(s))),
+    '材质规则带 html[data-skin] 前缀（0,3,1 才能稳压装饰层的 0,2,1，且不依赖族）');
+  // 通栏是 fixed 且压在滚动内容之上，半透明底会让壁纸/内容从底下透上来 ——
+  // 用户明确要求"参照深空那样留一个底色"，所以必须是 --skin-surface 实底。
+  const chaoxiRail = railMatRules.find(r => r.selectors.some(s => /html\[data-skin="chaoxi"\]/.test(s)));
+  if (chaoxiRail) {
+    ok(/backdrop-filter/.test(chaoxiRail.body),
+      '模糊保留（它负责把底下滚动内容化成色块，不是当遮罩用）');
+    const radius0 = new RegExp('border-radius:\\s*0\\b').test(chaoxiRail.body);
+    const borderOnlyBottom = new RegExp('border-width:\\s*0 0 1px').test(chaoxiRail.body);
+    ok(radius0 && borderOnlyBottom,
+      '导航条是扁平通栏：圆角归零、只留一条下边框',
+      'radius0=' + radius0 + ' border=' + borderOnlyBottom);
+    // ★ 必须叠遮罩。只用 --skin-surface 是不够的：它来自主题的
+    // --glass-bg-strong，而 22 套内置主题里只有 5 套给了 0.96，
+    // 其余 17 套走 style.css 默认的 .78 —— 通栏在 .78 下仍半透明，
+    // 亮壁纸照样透上来（161 个组合里正好坏这 18 个）。
+    ok(VEIL_RE.test(chaoxiRail.body),
+      '导航条叠了补不透明遮罩（单靠 --skin-surface 时那17 套主题只有 .78 透明度）');
+  }
+  // 遮罩色必须走令牌：本皮肤零颜色字面量（见上面「颜色字面量同样全禁」那条），
+  // 且走 --bg 才能深浅自动跟随 —— 写死暗色会把浅色主题的通栏压成脏灰。
+  ok(new RegExp('--skin-rail-veil:\\s*color-mix\\(in srgb,\\s*var\\(--bg\\)').test(chaoxiNoComment),
+    '补不透明遮罩用 color-mix(var(--bg)) 推导（走令牌、深浅自动跟随，且不违反零字面量纪律）');
+  // 顶栏的"浮卡还原成扁平"只对族生效是**对的**——不带族的主题本来就不画
+  // 浮卡，无需还原。这条钉住那个区别，防止有人"顺手"把它也改成全主题。
+  ok(/html:is\(\[data-look="glass"\], \[data-look="cel"\]\)\[data-skin="chaoxi"\] \.topbar/.test(CHAOXI),
+    '顶栏的浮卡还原仍只对族生效（不带族的主题不画浮卡，不需要还原）');
+
+  // 布局（fixed / flex / padding / z-index）不该在两条选择器里各写一遍：
+  // 重复的代价是日后改一处忘另一处，同一条通栏在两套主题下宽度不同。
+  const railLayout = chaoxiRules.filter(r => r.selectors.some(isPlainRail) &&
+    !SURFACE_RE.test(r.body));
+  const layoutProps = ['position: fixed', 'flex-direction: row', 'z-index: 55'];
+  const dupLayout = layoutProps.filter(p =>
+    railLayout.filter(r => r.body.includes(p)).length > 1);
+  ok(dupLayout.length === 0,
+    '潮汐的导航条布局属性没有在两条选择器里重复（实得重复：' + (dupLayout.join(', ') || '无') +
+    '；重复的代价是改一处忘另一处）');
+
   section('潮汐：配套主题的深浅两套与对比度');
 
   const themes = read(path.join(WEB, 'themes.js'));

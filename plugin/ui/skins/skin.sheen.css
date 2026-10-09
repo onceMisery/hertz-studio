@@ -613,6 +613,12 @@
    乘出来的 1.6/2.3 倍只是当下的巧合，改播放条内距就散架。
    必须排在上面那条 ≤1240px 的**后面**（同为 (0,1,1)，靠源码顺序决胜）。 */
 @media (max-width: 900px) {
+  /* 浮层搜索沿用导航下方的手机位置；桌面的预留按钮宽度在此断点已放不下。 */
+  [data-skin="sheen"] .topsearch {
+    top: calc(var(--topbar-h) + 8px);
+    left: 12px;
+    width: calc(100vw - 24px);
+  }
   [data-skin="sheen"] { --skin-stage-foot: calc(117px + var(--skin-gap) * 2); }
 }
 

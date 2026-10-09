@@ -2,19 +2,19 @@
  * Copyright (c) 2026 hertz-studio contributors
  * 晴空绘卷的短暂星屑；按钮内光、浮动和焦点由主题样式统一处理。 */
 
-html[data-theme="celestial"] .anime-interactions-layer {
+html:is([data-look="glass"], [data-look="cel"]) .anime-interactions-layer {
   contain: strict;
   pointer-events: none;
 }
 
-html[data-theme="celestial"] .anime-interactions-burst {
+html:is([data-look="glass"], [data-look="cel"]) .anime-interactions-burst {
   position: absolute;
   width: 0;
   height: 0;
   pointer-events: none;
 }
 
-html[data-theme="celestial"] .anime-interactions-particle {
+html:is([data-look="glass"], [data-look="cel"]) .anime-interactions-particle {
   position: absolute;
   top: -2px;
   left: -2px;
@@ -27,9 +27,9 @@ html[data-theme="celestial"] .anime-interactions-particle {
   animation: anime-button-spark 280ms ease-in-out both;
 }
 
-html[data-theme="celestial"] .anime-interactions-particle:nth-child(3n) {
+html:is([data-look="glass"], [data-look="cel"]) .anime-interactions-particle:nth-child(3n) {
   background: var(--anime-particle-cyan, #71c9d4);
-  box-shadow: 0 0 5px rgb(113 201 212 / 35%);
+  box-shadow: 0 0 5px rgb(var(--brand-rgb) / 35%);
 }
 
 @keyframes anime-button-spark {
@@ -38,12 +38,12 @@ html[data-theme="celestial"] .anime-interactions-particle:nth-child(3n) {
   100% { transform: translate3d(var(--anime-spark-x), var(--anime-spark-y), 0) rotate(110deg) scale(.15); opacity: 0; }
 }
 
-html[data-theme="celestial"][data-rm~="ui"] .anime-interactions-layer,
-html[data-theme="celestial"] body.reduce-motion .anime-interactions-layer,
-html[data-theme="celestial"] body[data-rm~="ui"] .anime-interactions-layer {
+html:is([data-look="glass"], [data-look="cel"])[data-rm~="ui"] .anime-interactions-layer,
+html:is([data-look="glass"], [data-look="cel"]) body.reduce-motion .anime-interactions-layer,
+html:is([data-look="glass"], [data-look="cel"]) body[data-rm~="ui"] .anime-interactions-layer {
   display: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html[data-theme="celestial"] .anime-interactions-layer { display: none; }
+  html:is([data-look="glass"], [data-look="cel"]) .anime-interactions-layer { display: none; }
 }

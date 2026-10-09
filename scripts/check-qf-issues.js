@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: MIT
-// 清风皮肤四问题一次性取证：播放条信息 / 多余箭头 / tab 选中态 / 在线歌单。
+// 清风皮肤回归：自动启动独立 Null 后端，先验空态，再扫描/加载带标签的 WAV。
+// 先 cargo build --locked -p hertz-studio；可用 HERTZ_BIN 指定独立构建。
 //
 // 四个都不是「看一眼觉得不对」，而是能量出来的东西：
 //   · bar-title/bar-sub 的文本与几何（有没有内容、有没有盒子）
 //   · 播放条右端每个可见控件的 id 与命中测试（找出那个「向下箭头」是谁）
 //   · 顶部 tab 选中态的 color 与背景色是否同色（对比度算出来，不靠目测）
 //   · 在线歌单接口的实际返回与页面渲染出来的行数
-const { chromium } = require('playwright');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const fs = require('fs');
 const path = require('path');
+const { startFixture, TITLE, ARTIST } = require('./ui-browser-fixture');
 
 const OUT = process.env.SKIN_SHOT_DIR || 'output/verify-qf';
 let pass = 0, fail = 0;
@@ -17,8 +19,13 @@ function ok(c, n, d) { if (c) { pass++; console.log('  PASS  ' + n + (d ? '   ['
 
 (async () => {
   fs.mkdirSync(OUT, { recursive: true });
-  const browser = await chromium.launch({ channel: 'chrome', args: ['--no-sandbox'] });
-  const page = await browser.newPage({ viewport: { width: 1075, height: 640 } });
+  const fixture = await startFixture();
+  let browser;
+  try {
+  browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome' });
+  const context = await browser.newContext({ viewport: { width: 1075, height: 640 }, reducedMotion: 'reduce' });
+  await fixture.connect(context);
+  const page = await context.newPage();
   const errs = [];
   page.on('pageerror', (e) => errs.push('PAGEERROR: ' + e.message.slice(0, 160)));
   page.on('console', (m) => { if (m.type() === 'error' && m.text().indexOf('401') < 0) errs.push('CONSOLE: ' + m.text().slice(0, 160)); });
@@ -27,12 +34,28 @@ function ok(c, n, d) { if (c) { pass++; console.log('  PASS  ' + n + (d ? '   ['
   await page.addInitScript(() => {
     try { localStorage.setItem('vmusic.skin', 'qingfeng'); } catch (e) {}
   });
-  await page.goto(`http://127.0.0.1:${process.env.SKIN_PORT || 7634}/?token=${process.env.TK}`, { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(8000);
+  await page.goto(fixture.base, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.Skins && document.querySelector('#conn.ok') && window.__qfSkin);
+  await page.evaluate(() => Skins.apply('qingfeng'));
+  await page.waitForFunction(() => !!document.querySelector('link[data-skin-css="qingfeng"]').sheet);
+  await page.evaluate(() => document.fonts.ready);
 
   const skin = await page.evaluate(() => document.documentElement.getAttribute('data-skin'));
   console.log('\n当前皮肤: ' + skin);
   ok(skin === 'qingfeng', '切到清风皮肤', 'data-skin=' + skin);
+
+  const empty = await page.evaluate(() => ({
+    title: document.getElementById('bar-title').textContent,
+    artist: document.getElementById('bar-sub').textContent,
+    width: document.getElementById('bar-title').getBoundingClientRect().width,
+  }));
+  ok(empty.title === '' && empty.artist === '', '空播放器不显示旧歌曲信息');
+  ok(empty.width > 0 && errs.length === 0, '空播放器布局正常且无 JS 报错');
+  await page.screenshot({ path: path.join(OUT, 'qf-empty.png'), animations: 'disabled' });
+  await fixture.seed();
+  await page.waitForFunction(({ title, artist }) =>
+    document.getElementById('bar-title').textContent === title &&
+    document.getElementById('bar-sub').textContent.includes(artist), { title: TITLE, artist: ARTIST });
 
   // ---------- 问题 1：播放条的歌曲/歌手信息 ----------
   const bar = await page.evaluate(() => {
@@ -53,8 +76,8 @@ function ok(c, n, d) { if (c) { pass++; console.log('  PASS  ' + n + (d ? '   ['
   console.log('  bar-title 文本=' + JSON.stringify(bar.titleText) + ' 盒子=' + JSON.stringify(bar.titleBox));
   console.log('  bar-sub  文本=' + JSON.stringify(bar.subText) + ' 盒子=' + JSON.stringify(bar.subBox));
   ok(bar.hasTitleNode && bar.hasSubNode, '播放条有标题与副标题节点');
-  ok(bar.titleText && bar.titleText.length > 0, 'bar-title 有内容', JSON.stringify(bar.titleText));
-  ok(bar.subText && bar.subText.length > 0, 'bar-sub 有内容', JSON.stringify(bar.subText));
+  ok(bar.titleText === TITLE, 'bar-title 显示测试音频的真实标题', JSON.stringify(bar.titleText));
+  ok(bar.subText.includes(ARTIST), 'bar-sub 显示测试音频的真实歌手', JSON.stringify(bar.subText));
   ok(bar.titleBox && bar.titleBox.w > 0, 'bar-title 有实际宽度（没被压成 0）', bar.titleBox ? bar.titleBox.w + 'px' : '(无)');
 
   // ---------- 问题 2：播放条右端那个「向下箭头」 ----------
@@ -148,6 +171,9 @@ function ok(c, n, d) { if (c) { pass++; console.log('  PASS  ' + n + (d ? '   ['
   console.log('\n' + '─'.repeat(52));
   console.log(`结果：${pass} PASS / ${fail} FAIL`);
   if (failures.length) failures.forEach((f) => console.log('  - ' + f));
-  await browser.close();
-  process.exit(fail ? 1 : 0);
-})().catch((e) => { console.error('FATAL', e); process.exit(1); });
+  process.exitCode = fail ? 1 : 0;
+  } finally {
+    if (browser) await browser.close();
+    await fixture.close();
+  }
+})().catch((e) => { console.error('FATAL', e.message); process.exitCode = 1; });

@@ -459,6 +459,8 @@
     var CS = stage_api();
     var cur = CS.preset();
 
+    renderAnimeGallery(body, CS, cur);
+
     var guide = guideCard();
     if (guide) body.appendChild(guide);
 
@@ -490,6 +492,7 @@
     var grid = h('div', 'ws-scene-grid');
     if (CS.scenes) {
       CS.scenes().forEach(function (s) {
+        if (s.presentation && s.presentation.family === 'anime') return;
         var card = h('button', 'ws-scene-card');
         card.type = 'button';
         card.dataset.scene = s.id;
@@ -524,6 +527,55 @@
       '打开舞台交互后：拖拽转视角、滚轮推拉、单击爆闪、双击复位。'
       + '默认关闭是为了不抢歌词行的点击。'));
 
+  }
+
+  function renderAnimeGallery(body, CS, cur) {
+    var scenes = CS.scenes().filter(function (s) { return s.presentation && s.presentation.family === 'anime'; });
+    if (!scenes.length) return;
+    var section = h('section', 'ws-anime-gallery');
+    section.setAttribute('aria-label', '动画绘景');
+    var heading = h('div', 'ws-anime-heading');
+    heading.appendChild(h('span', 'ws-anime-kicker', 'SCENERY COLLECTION'));
+    heading.appendChild(h('h2', null, '动画绘景'));
+    heading.appendChild(h('p', null, '让音乐，停在一帧风景里。'));
+    section.appendChild(heading);
+    var grid = h('div', 'ws-anime-grid');
+    scenes.forEach(function (scene) {
+      var info = scene.presentation;
+      var card = h('button', 'ws-anime-card');
+      card.type = 'button';
+      card.id = 'ws-scene-' + scene.id;
+      card.dataset.scene = scene.id;
+      card.setAttribute('aria-pressed', String(cur.scene === scene.id));
+      card.setAttribute('aria-label', scene.label);
+      var preview = h('span', 'ws-anime-preview');
+      preview.innerHTML = info.art;
+      var check = h('span', 'ws-anime-selected');
+      check.setAttribute('aria-hidden', 'true');
+      check.innerHTML = '<svg viewBox="0 0 20 20" fill="none"><path d="m5 10 3 3 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      preview.appendChild(check);
+      var caption = h('span', 'ws-anime-caption');
+      caption.appendChild(h('span', 'ws-anime-tag', info.tag));
+      caption.appendChild(h('strong', null, scene.label));
+      caption.appendChild(h('span', 'ws-anime-description', info.description));
+      card.append(preview, caption);
+      card.addEventListener('click', function () {
+        activateCreativeStage();
+        if (CS.preset().scene !== scene.id) {
+          CS.setScene(scene.id);
+          // Use the existing art-direction action so a previous monochrome
+          // treatment does not obscure this landscape's original palette.
+          CS.setStyle('off');
+        }
+        flash('已入画 · ' + scene.label);
+        render();
+      });
+      grid.appendChild(card);
+    });
+    section.appendChild(grid);
+    var note = h('p', 'ws-anime-note', '平涂光影 · 细线描边 · 随乐微动');
+    section.appendChild(note);
+    body.appendChild(section);
   }
 
   function renderPresets(body) {

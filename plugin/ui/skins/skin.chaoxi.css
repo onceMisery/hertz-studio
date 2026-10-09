@@ -117,6 +117,22 @@
      准备的档，且 ios-light 主题已把它翻成浅色语义，深浅色都自动正确。 */
   --skin-surface: var(--glass-bg-strong);
   --skin-surface-card: var(--surface-1);
+  /* 通栏导航条的**补不透明**遮罩。
+     为什么需要它：--skin-surface 来自主题的 --glass-bg-strong，22 套内置主题里
+     只有晴空族那 5 套给了 0.96，其余 17 套走 style.css 默认的
+     rgba(18,20,28,.78) —— 通栏在 0.78 下仍半透明，亮壁纸透上来
+     （161 个组合里坏 18 个）。所以这里叠一层把不透明度补满。
+
+     遮罩色用 --bg 而不是写死：--bg 是每套主题都有的实底色，深浅自动跟随
+     （浅色主题的 --bg 是暖白，深色主题是近黑），于是这一条不需要为浅色
+     主题再写覆盖 —— 而写死颜色既违反本文件"零颜色字面量"的纪律，也没法
+     同时服务深浅两端；遮罩与底色同色相，压暗后颜色不脏。
+
+     不透明度取值：合成后 = m + 底·(1-m)。22 套里最淡的 --glass-bg-strong
+     是 .78。实测四档：m=.45→87.9%（不过线） / .55→90.1% / .62→91.6% /
+     .75→94.5%。取 .62：过线且留余量，又不至于把底压到比面板还黑 ——
+     .75 那档会让导航条在深色主题下比内容卡更暗，层级反而塌了。 */
+  --skin-rail-veil: color-mix(in srgb, var(--bg) 62%, transparent);
   --skin-line-soft: var(--surface-line);
   --skin-line-hard: var(--surface-line-strong);
   --skin-shadow: var(--glass-shadow);
@@ -159,6 +175,50 @@
 
 /* --- 导航：顶部通栏的一条标签，不再是竖轨 ------------------------------- */
 
+/* ⚠ 这条材质规则必须对**所有主题**生效，不能按族挑。
+   踩过的坑：先写成 html:is([data-look=…])[data-skin="chaoxi"] .rail，
+   结果 161 个「主题 × 皮肤」组合里有 18 个坏掉 —— 那些不带族的主题
+   （data-look="plain"，共 18 套）压根不匹配，导航条又变回玻璃渐变。
+   而它们恰恰是**用户截图里那套**。教训：族是装饰层的概念，皮肤不该依赖它 ——
+   潮汐的通栏是皮肤自己的设计，对每个主题都成立。
+   压过装饰层靠的是 html[data-skin] 前缀：(0,3,1) > 装饰层的 (0,2,1)，
+   与主题挂在哪个族无关。 */
+html[data-skin="chaoxi"] .rail,
+html:is([data-look="glass"], [data-look="cel"])[data-skin="chaoxi"] .rail {
+  /* 只管**材质**：圆角、边框、底色、模糊、投影。
+     布局（fixed 通栏 / 横排 / 让位 / 不出滚动条）在下面那条规则里，
+     不在这里重复 —— 重复的代价是日后改一处忘另一处，同一条通栏在两套主题下
+     宽度不同，而且这种错不会报错。 */
+  border-radius: 0;
+  border-width: 0 0 1px;
+  border-style: solid;
+  border-color: var(--skin-line-soft);
+  /* 通栏要**实底**，而且这个"实"不能指望 --skin-surface：
+   那个令牌是**皮肤共用**的（面板/播放条/浮层共 7 处），它的值来自主题的
+   --glass-bg-strong —— 而 22 套内置主题里只有晴空族那 5 套在 themes.js 里
+   给了 0.96 的覆盖，其余 17 套走的都是 style.css 的默认 rgba(18,20,28,.78)。
+   于是通栏在 0.78 下依然半透明，亮壁纸照样透上来（161 个组合里坏 18 个）。
+   所以这里叠一层遮罩把不透明度补满：底层还是主题色，只是更实。
+   为什么不用 color-mix 直接改 --skin-surface：那个令牌面板/播放条/浮层共用
+   7 处，改它会连带把面板与播放条一起变实，那是更大的行为变更。
+
+   ⚠ 必须写成**background 简写**而不是 background-color + background-image：
+   简写会把 background-image 一并重置掉，而装饰层给 .rail 设的正是
+   background-image（玻璃渐变）。早先一版为了少写一层改成 background-color，
+   装饰层的 image 就**残留**了下来 —— 于是 23 个组合的通栏又变回玻璃渐变，
+   比修之前还多坏 5 个。症状是"改完更糟了"，根因是简写与长写的语义差别。 */
+  background:
+    linear-gradient(var(--skin-rail-veil), var(--skin-rail-veil)),
+    var(--skin-surface);
+  backdrop-filter: blur(24px) saturate(1.1);
+  -webkit-backdrop-filter: blur(24px) saturate(1.1);
+  box-shadow: var(--skin-shadow);
+}
+
+/* 不带族的选择器：只管**布局**（fixed 通栏 / 横排 / 让位 / 不出滚动条）。
+   材质（底色、圆角、边框、模糊、投影）交给上面那条规则 —— 布局与材质
+   分开写，理由是布局对所有主题一致、材质才需要压过装饰层。写两遍布局的
+   代价是：日后改一处忘了另一处，于是同一条通栏在两套主题下宽度不同。 */
 [data-skin="chaoxi"] .rail {
   position: fixed;
   top: var(--topbar-h);
@@ -169,16 +229,6 @@
   align-items: center;
   gap: 6px;
   padding: 8px var(--skin-pad);
-  /* 通栏：不要圆角、只留一条底边。它是"页面的一段"，
-     不是"浮在上面的一颗"（那是浮光的做法，与其撞车）。 */
-  border-radius: 0;
-  border-width: 0 0 1px;
-  border-style: solid;
-  border-color: var(--skin-line-soft);
-  background: var(--skin-surface);
-  backdrop-filter: blur(24px) saturate(1.1);
-  -webkit-backdrop-filter: blur(24px) saturate(1.1);
-  box-shadow: var(--skin-shadow);
   z-index: 55;
   min-width: 0;
   overflow-x: auto;
@@ -208,6 +258,42 @@
 
 /* 横向栏里没有"把设置顶到底部"这回事，弹簧没有意义。 */
 [data-skin="chaoxi"] .rail-spacer { display: none; }
+
+/* --- 顶栏：左右内距与内容区同源，别再各留各的 -------------------------- */
+/* 基础 .topbar 是 `padding: 0 16px`（style.css），而潮汐的内容外壳 .app 用的是
+   --skin-pad（24px）—— 两者各留各的，顶栏的 logo 左缘、右侧按钮右缘就比下方
+   内容列**各探出 8px**，用户看到的"顶部和下面没对齐"就是这个。这里把顶栏的
+   水平内距拉回 --skin-pad：左 logo 对齐页标题、右按钮对齐工具行。
+   只写水平（padding-inline）：顶栏垂直方向仍走基础样式的 0 上下内距。
+   写 var(--skin-pad) 而不是写死 24：窄屏断点里 --skin-pad 收到 18/14，
+   顶栏与内容一起收，任何宽度都保持对齐。 */
+[data-skin="chaoxi"] .topbar {
+  padding-inline: var(--skin-pad);
+}
+
+/* --- 晴空一族（glass / cel）下：顶栏/导航保持「通栏扁平条」，别变成浮卡 -- */
+/* 晴空族在 anime-ui.css 里把 .topbar/.rail/.column 统一画成 16px 圆角 + 整圈
+   描边 + 阴影的**浮起卡片**（选择器 html:is([data-look=…]) :is(...) 特异性
+   (0,2,1)，压得过本皮肤的 (0,2,0)）。潮汐的 .column 随 .app 的 --skin-pad 内缩，
+   而顶栏/导航是满宽 —— 平时（其它主题）它俩只是「仅一条下边框的满宽扁平条」，
+   满宽本是潮汐「通栏」的设计；可一旦被晴空族画成卡片，满宽卡片就比内缩的内容卡
+   左右各探出一个 --skin-pad，于是又读成「顶部和下面没对齐」。
+   为什么不把顶栏也 margin 内收了事：顶栏同时有 padding-inline:--skin-pad，再叠
+   margin 会让内层内容比 .column（margin 24 + 横向 padding 0）多内缩 24px——
+   卡片对齐了、logo 却歪了；要两全得像 classic 那样再给内容补 24 内距，会改动整套
+   潮汐密度。潮汐本就是「满宽扁平顶栏 + 内缩圆角内容/播放条」，所以这里把晴空族给
+   顶栏/导航加的浮卡外形（圆角/整圈边/阴影）还原成扁平通栏，只保留一条下边框；
+   背景与背景模糊不动（fixed 导航条压在滚动内容上仍需它）。仅对晴空族 + 潮汐生效。
+   ⚠ 这里必须判**族**（data-look）而不是主题 id：按 id 写的话，新加的四套
+   （starrail / liyue / kiminona / spirited）全都匹配不上，于是它们在潮汐下
+   顶栏仍是满宽浮卡、左右各探出 24px —— 症状正是"顶部两张卡浮在内容卡上方"。
+   这类"老规则按 id 写、新机制按族选"的漏配不会报错，只会静默失配。 */
+html:is([data-look="glass"], [data-look="cel"])[data-skin="chaoxi"] .topbar,
+html:is([data-look="glass"], [data-look="cel"])[data-skin="chaoxi"] .rail {
+  border-radius: 0;
+  border-width: 0 0 1px;
+  box-shadow: none;
+}
 
 /* --- 顶栏搜索槽：潮汐把它做成 48px 的胶囊（设计稿 5.4） ----------------- */
 

@@ -993,6 +993,9 @@
   // 一帧只在活动视图的那个引擎上跑：另一个停着不画，省下来的 GPU 时间正好
   // 留给后处理链；切回去时由 pickView 触发一次即时重绘。
   function renderOne(v, dtMs) {
+    var definition = sceneDefinition(preset.scene);
+    var family = definition && definition.presentation && definition.presentation.family || '';
+    if (v.el.dataset.sceneFamily !== family) v.el.dataset.sceneFamily = family;
     var t = now();
     var playing = document.body.classList.contains('is-playing');
     var position = window.Stage && Stage.position ? Number(Stage.position()) || 0 : 0;
@@ -1315,6 +1318,7 @@
       if (v.eng) { try { v.eng.dispose(); } catch (e) { /* 上下文没了就算了 */ } v.eng = null; }
       if (v.canvas && v.canvas.parentNode) v.canvas.parentNode.removeChild(v.canvas);
       v.el.classList.remove('creative-on', 'creative-interact');
+      v.el.removeAttribute('data-scene-family');
     }
     views = [];
     stageView = null;
