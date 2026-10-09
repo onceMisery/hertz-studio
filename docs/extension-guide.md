@@ -27,6 +27,7 @@ CSS 在 `index.html` 中声明带 `data-skin-css` 的 disabled 样式表；JS �
 - `params`：每行 `[key, label, min, max, step, unit, default]`，默认值由这些行生成，勿再手写 `defaults`。编排地址仍使用 `sc.<key>`。完整范围须位于 `CreativeGL.parameterLimit()` 给出的正负上限内，和分享校验共用原有数值边界。
 - `camera`：五个字段 `cam.yaw`、`cam.dist`、`cam.pitch`、`cam.fov`、`cam.height`，作为切换/重置机位的共同基准。字段范围由 `CreativeGL.cameraSpec()` 统一供注册校验与面板消费，越界默认值会被拒绝。
 - 绘制实现：`geom`、`vert`、`frag`、`uniforms`、`setup`、`depth` 和 `blend`，可选画质几何及额外绘制钩子。沿用已有场景的 shader 接口。
+- 二维绘景可声明 `toneMapped: false`，保留已绘制的显示色；默认仍走原发光场景的高光压缩。收藏缩略图沿用相同色彩模式。可选 `presentation` 提供 `family`、`description`、`tag` 和本地 SVG `art`，工坊从登记描述生成导航；`creative-anime.js` 中的四套动画绘景是例子。
 
 描述在登记时校验、复制并冻结；无效/重复 ID、参数和别名不能进入注册表。CreativeStage 的场景列表、参数面板、默认值、预置归一化与提示词由该定义派生，不再新增一份 `SCENE_SPEC` / `SCENE_CAM` 或提示词规则。新增脚本应在宿主初始化前加载；分享 v1 继续使用完整预置，接收方必须包含对应场景实现。
 

@@ -130,3 +130,8 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-09 | artifact | docs/aegis/work/2026-10-09-narrow-topbar/evidence-bundle-draft-final-build-frontend.json | 2026-10-09-narrow-topbar evidence final-build-frontend |
 | 2026-10-09 | artifact | docs/aegis/work/2026-10-09-narrow-topbar/gate-input-pack.json | 2026-10-09-narrow-topbar gate input pack |
 | 2026-10-09 | work | docs/aegis/work/2026-10-09-narrow-topbar/proof-bundle.md | 2026-10-09-narrow-topbar proof bundle |
+| 2026-10-09 | plan | docs/aegis/plans/2026-10-09-anime-stage-gallery.md | 动画绘景舞台扩展 |
+| 2026-10-09 | work | docs/aegis/work/2026-10-09-anime-stage-gallery/10-intent.md | 动画绘景舞台扩展 intent |
+| 2026-10-09 | work | docs/aegis/work/2026-10-09-anime-stage-gallery/20-checkpoint.md | 动画绘景舞台扩展 checkpoint |
+| 2026-10-09 | work | docs/aegis/work/2026-10-09-anime-stage-gallery/90-evidence.md | 动画绘景舞台扩展 evidence |
+| 2026-10-09 | work | docs/aegis/work/2026-10-09-anime-stage-gallery/99-reflection.md | 动画绘景舞台扩展 reflection |
