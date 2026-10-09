@@ -354,14 +354,15 @@
       applyVisibility();
     }
 
-    // 只限制节点和预载，不截断队列。窗口跟随浏览中心，最多绘制两侧半径内的卡片。
+    // 只限制节点和预载，不截断队列；偶数容量时多保留一首后续曲目。
     function syncWindow() {
       // 不可见时只接收数据；首次显示或重新唤醒后再创建节点、加载封面。
       if (!canRender()) return;
-      var radius = Math.ceil(visibleRadius());
+      var capacity = eco() ? 7 : 10;
       var anchor = Math.round(center);
-      var start = Math.max(0, anchor - radius);
-      var end = Math.min(items.length, anchor + radius + 1);
+      var first = anchor - Math.floor((capacity - 1) / 2);
+      var start = Math.max(0, first);
+      var end = Math.min(items.length, first + capacity);
       if (!windowDirty && start === windowStart && end === windowEnd) return;
       windowDirty = false;
       windowStart = start;
@@ -384,7 +385,7 @@
         if (hoverId === id) hoverId = null;
         nodes.delete(id);
       });
-      while (dying.length > radius * 2 + 1) {
+      while (dying.length > capacity) {
         var retired = dying.shift();
         if (retired.parentNode) retired.parentNode.removeChild(retired);
       }

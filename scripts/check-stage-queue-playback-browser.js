@@ -250,9 +250,9 @@ async function main() {
         return { hidden, shown, disabled, restored };
       });
       assert.deepEqual(result.hidden, { cards: 0, coverLoads: 0, fps: 0 });
-      assert.deepEqual(result.shown, { cards: 13, coverLoads: 13 });
-      assert.deepEqual(result.disabled, { cards: 0, coverLoads: 13, fps: 0 });
-      assert.deepEqual(result.restored, { cards: 13, coverLoads: 26 });
+      assert.deepEqual(result.shown, { cards: 10, coverLoads: 10 });
+      assert.deepEqual(result.disabled, { cards: 0, coverLoads: 10, fps: 0 });
+      assert.deepEqual(result.restored, { cards: 10, coverLoads: 20 });
     });
 
     await check('mobile queue stops hidden shelf frames and closing it restores rendering', async () => {
@@ -282,7 +282,7 @@ async function main() {
       } finally { await page.setViewportSize({ width: 1440, height: 960 }); }
     });
 
-    await check('large queues keep 13 cards, 9 in eco mode, and scrolling avoids a full queue scan', async () => {
+    await check('large queues keep 10 cards, 7 in eco mode, and scrolling avoids a full queue scan', async () => {
       for (const size of [2000, 10000]) {
         await page.evaluate(size => {
           installQueue(Array.from({ length: size }, (_, index) => ({ id: 'large-' + index, title: '大队列 ' + index })), size / 2);
@@ -298,7 +298,7 @@ async function main() {
           label: document.querySelector('.s3d-sc.is-current .s3d-sc-tag')?.textContent,
           queue: state.queue.length
         }));
-        assert.equal(result.count, 13, 'card count is independent of queue size');
+        assert.equal(result.count, 10, 'card count is independent of queue size');
         assert.equal(result.current, 'large-' + size / 2);
         assert.equal(result.queue, size);
         assert.ok(result.label.includes((size / 2 + 1) + ' / ' + size), 'show position in the complete queue');
@@ -314,7 +314,7 @@ async function main() {
         Stage.tier = () => 2; tick();
         return count;
       });
-      assert.equal(ecoCards, 9);
+      assert.equal(ecoCards, 7);
     });
     await check('empty/hidden/destroyed shelf releases cards and its frame gate', async () => {
       const result = await page.evaluate(() => {
