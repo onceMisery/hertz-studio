@@ -45,7 +45,7 @@ for _ in $(seq 1 40); do
 done
 
 echo "==> GET /v1/health"
-curl -sf "http://127.0.0.1:$PORT/v1/health" | tee /dev/stderr | grep -q '"status":"ok"'
+curl -sf "http://127.0.0.1:$PORT/v1/health" | tee /dev/stderr | grep '"status":"ok"' >/dev/null
 
 echo "==> unauthenticated request must be rejected"
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/v1/tracks")
@@ -54,12 +54,12 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/v1/tracks"
 TOKEN="$(cat "$DATA/token")"
 
 echo "==> authenticated requests"
-curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/tracks" | grep -q '"tracks"'
-curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/state" | grep -q '"playing"'
+curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/tracks" | grep '"tracks"' >/dev/null
+curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/state" | grep '"playing"' >/dev/null
 curl -sf -H "Authorization: Bearer $TOKEN" -X POST "http://127.0.0.1:$PORT/v1/player/pause" >/dev/null
 curl -sf -H "Authorization: Bearer $TOKEN" -X POST -H 'Content-Type: application/json' \
   -d '{"volume":0.5}' "http://127.0.0.1:$PORT/v1/player/volume" >/dev/null
-curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/playlists" | grep -q '"playlists"'
+curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/v1/playlists" | grep '"playlists"' >/dev/null
 
 echo "==> discovery file"
 [[ -f "$DATA/vmusicd.json" ]] || { echo "missing discovery file"; exit 1; }
@@ -69,26 +69,26 @@ AUTH=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
 echo "==> 收藏：新增 / 列表 / 判红 / 开关 / 删除"
 curl -sf "${AUTH[@]}" -X POST \
   -d '{"kind":"track","source":"local","ref_id":"smoke-1","title":"Smoke One","artist":"QA"}' \
-  "http://127.0.0.1:$PORT/v1/favorites" | grep -q '"favorited":true'
+  "http://127.0.0.1:$PORT/v1/favorites" | grep '"favorited":true' >/dev/null
 # 重复收藏必须落在同一行上，不能变成两条。
 curl -sf "${AUTH[@]}" -X POST \
   -d '{"kind":"track","source":"local","ref_id":"smoke-1","title":"Smoke One","artist":"QA"}' \
-  "http://127.0.0.1:$PORT/v1/favorites" | grep -q '"favorited":true'
+  "http://127.0.0.1:$PORT/v1/favorites" | grep '"favorited":true' >/dev/null
 curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/favorites?kind=track" \
-  | grep -q '"total":1'
+  | grep '"total":1' >/dev/null
 curl -sf "${AUTH[@]}" -X POST \
   -d '{"kind":"track","source":"local","ids":["smoke-1","nope"]}' \
-  "http://127.0.0.1:$PORT/v1/favorites/membership" | grep -q '"smoke-1"'
+  "http://127.0.0.1:$PORT/v1/favorites/membership" | grep '"smoke-1"' >/dev/null
 # 开关到关闭，再开回来；最终态由服务端说了算。
 curl -sf "${AUTH[@]}" -X POST \
   -d '{"kind":"track","source":"local","ref_id":"smoke-1","favorited":false}' \
-  "http://127.0.0.1:$PORT/v1/favorites/toggle" | grep -q '"favorited":false'
+  "http://127.0.0.1:$PORT/v1/favorites/toggle" | grep '"favorited":false' >/dev/null
 curl -sf "${AUTH[@]}" -X POST \
   -d '{"kind":"track","source":"local","ref_id":"smoke-1"}' \
-  "http://127.0.0.1:$PORT/v1/favorites/toggle" | grep -q '"favorited":true'
+  "http://127.0.0.1:$PORT/v1/favorites/toggle" | grep '"favorited":true' >/dev/null
 curl -sf "${AUTH[@]}" -X DELETE \
-  "http://127.0.0.1:$PORT/v1/favorites/track:local:smoke-1" | grep -q '"ok":true'
-curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/favorites" | grep -q '"total":0'
+  "http://127.0.0.1:$PORT/v1/favorites/track:local:smoke-1" | grep '"ok":true' >/dev/null
+curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/favorites" | grep '"total":0' >/dev/null
 
 echo "==> 收藏：非法类型必须 400 而不是静默吞掉"
 code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X POST \
@@ -110,10 +110,10 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" \
 [[ "$code" == "400" ]] || { echo "expected 400 for limit=0, got $code"; exit 1; }
 
 echo "==> 汽水音乐：已注册且能力位如实"
-curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/online/sources" | grep -q '"qishui"'
+curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/online/sources" | grep '"qishui"' >/dev/null
 # 只登记了 CookieLogin：不承诺扫码，也不承诺高音质（受保护音质是拒播的）。
 curl -sf "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/online/sources" \
-  | tr ',' '\n' | grep -A0 '"caps"' | head -1
+  | tr ',' '\n' | grep -A0 '"caps"' | sed -n 1p
 
 echo "==> ui"
 # `/` 已收紧：无凭据时它不再把长期令牌注进 HTML（那正是「本机任何进程 GET 一下
@@ -122,10 +122,10 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/")
 [[ "$code" == "401" ]] || { echo "expected 401 for bare /, got $code"; exit 1; }
 # 出示凭据才渲染，且注进去的就是当前服务的令牌。
 curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/" \
-  | grep -qF "window.__VMUSIC_TOKEN__ = \"$TOKEN\""
+  | grep -F "window.__VMUSIC_TOKEN__ = \"$TOKEN\"" >/dev/null
 # 内嵌资源：新增的两个模块必须能取到，否则界面静默少一块功能。
-curl -sf "http://127.0.0.1:$PORT/favorites.js" | grep -q 'Favorites'
-curl -sf "http://127.0.0.1:$PORT/daily.js" | grep -q 'Daily'
+curl -sf "http://127.0.0.1:$PORT/favorites.js" | grep 'Favorites' >/dev/null
+curl -sf "http://127.0.0.1:$PORT/daily.js" | grep 'Daily' >/dev/null
 
 echo "==> 首跳票据：签发 → 兑换 200 → 复用 401（一次性）"
 TICKET="$(curl -sf "${AUTH[@]}" -X POST -d '{}' "http://127.0.0.1:$PORT/v1/auth/ticket" \
@@ -143,7 +143,7 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: applicat
 JAR="$(mktemp)"
 curl -sf -o /dev/null -c "$JAR" -X POST -H 'Content-Type: application/json' \
   -d "{\"token\":\"$TOKEN\"}" "http://127.0.0.1:$PORT/v1/auth/session"
-curl -sf -b "$JAR" "http://127.0.0.1:$PORT/" | grep -qF "window.__VMUSIC_TOKEN__ = \"$TOKEN\""
+curl -sf -b "$JAR" "http://127.0.0.1:$PORT/" | grep -F "window.__VMUSIC_TOKEN__ = \"$TOKEN\"" >/dev/null
 rm -f "$JAR"
 
 echo
