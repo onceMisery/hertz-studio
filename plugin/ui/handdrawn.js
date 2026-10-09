@@ -11,9 +11,9 @@
   var HZ = 15;                  // 手绘层的目标帧率（60/120 的公因数，见 stage.js 帧门约定）
   var WAVE_POINTS = 40;         // 声波涂鸦的采样点数
 
-  var opts = {
+  var DEFAULTS = {
     on: false,
-    style: 'manga',             // manga / pencil / color
+    style: 'manga',             // manga / anime / pencil / color
     frame: true,                // 手绘边框
     wave: true,                 // 手绘声波
     annot: true,                // 当前歌词行的圈注
@@ -21,6 +21,7 @@
     jitter: 100,                // 抖动幅度（%）
     speed: 100                  // 抖动刷新速度（%）
   };
+  var opts = Object.assign({}, DEFAULTS);
 
   var view = null;
   var stageHost = null;
@@ -31,9 +32,26 @@
   var paperUri = null;
   var rngState = 20260919;
   var PRESETS = [
-    { id: 'manga', label: '暗夜漫画', description: '象牙白墨线、分镜留白与细腻网点' },
-    { id: 'pencil', label: '铅笔分镜', description: '暖灰双线、纸张纤维与克制排线' },
-    { id: 'color', label: '双色漫画', description: '薄荷与珊瑚套色，轻盈的手绘电影感' }
+    { id: 'manga', label: '漫画分镜', caption: '黑白墨线 · 网点阴影',
+      description: '分级灰面、清晰墨线与斜切分镜，像一页正在演出的漫画。',
+      look: { toon: 0.94, paper: 0.54, grade: 2, bloom: 0.02, bloomThresh: 0.74,
+        chroma: 0, grain: 0.025, saturation: 0, exposure: 1.28, vignette: 0.22 },
+      hand: { on: true, style: 'manga', frame: true, wave: true, annot: true, paper: true, jitter: 65, speed: 100 } },
+    { id: 'anime', label: '动画赛璐璐', caption: '清透色块 · 动画光影',
+      description: '有层次的色块、利落轮廓与宽幅取景，把舞台画成动画镜头。',
+      look: { toon: 0.86, paper: 0.08, grade: 0, bloom: 0.08, bloomThresh: 0.74,
+        chroma: 0, grain: 0.015, saturation: 1.14, exposure: 1.35, vignette: 0.18 },
+      hand: { on: true, style: 'anime', frame: true, wave: true, annot: false, paper: false, jitter: 16, speed: 75 } },
+    { id: 'pencil', label: '铅笔分镜', caption: '暖灰线稿 · 纸面笔触',
+      description: '轻柔灰面、纸张纤维与细密排线，保留铅笔起稿的呼吸感。',
+      look: { toon: 0.58, paper: 0.72, grade: 2, bloom: 0.02, bloomThresh: 0.74,
+        chroma: 0, grain: 0.04, saturation: 0.18, exposure: 1.20, vignette: 0.18 },
+      hand: { on: true, style: 'pencil', frame: true, wave: true, annot: true, paper: true, jitter: 95, speed: 75 } },
+    { id: 'color', label: '双色漫画', caption: '双色套印 · 彩色分镜',
+      description: '主题双色铺进明暗面，搭配套印线条与局部网点。',
+      look: { toon: 0.82, paper: 0.30, grade: 1, bloom: 0.06, bloomThresh: 0.74,
+        chroma: 0, grain: 0.02, saturation: 1.05, exposure: 1.30, vignette: 0.20 },
+      hand: { on: true, style: 'color', frame: true, wave: true, annot: true, paper: true, jitter: 45, speed: 75 } }
   ];
 
   // 确定性伪随机：抖动必须是"可复现的噪声"而不是 Math.random()。
@@ -144,7 +162,7 @@
     pattern.appendChild(svgNode('circle', { cx: 2, cy: 2, r: 0.75, 'class': 'hd-dot' }));
     defs.appendChild(pattern); svg.appendChild(defs);
     var paths = {};
-    ['panels', 'tone', 'hatch', 'frame', 'accent', 'wave', 'annot'].forEach(function (key) {
+    ['bars', 'panels', 'tone', 'hatch', 'frame', 'accent', 'focus', 'wave', 'annot'].forEach(function (key) {
       paths[key] = svgNode('path', { 'class': 'hd-' + key, d: '' });
       svg.appendChild(paths[key]);
     });
@@ -197,8 +215,26 @@
     v.frameKey = key; seedAt(stamp * 90 + 900);
     var w = v.w, h = v.h, pad = Math.min(30, Math.max(14, w * 0.026));
     var edge = Math.min(150, w * 0.14), top = Math.min(100, h * 0.14);
-    var frame = [], accents = [], hatch = [];
-    if (opts.frame) {
+    var frame = [], accents = [], hatch = [], focus = [], bars = '';
+    var anime = opts.style === 'anime';
+    var comic = opts.style === 'manga' || opts.style === 'color';
+    if (opts.frame && anime) {
+      var barH = Math.min(40, Math.max(12, h * 0.04));
+      bars = polygon([[0, 0], [w, 0], [w, barH], [0, barH]]) +
+        polygon([[0, h - barH], [w, h - barH], [w, h], [0, h]]);
+      var corner = Math.min(42, w * 0.065), inset = pad + 7, yTop = barH + 12, yBottom = h - barH - 12;
+      [[inset, yTop, 1, 1], [w - inset, yTop, -1, 1],
+        [inset, yBottom, 1, -1], [w - inset, yBottom, -1, -1]].forEach(function (c) {
+        roughSeg(c[0], c[1] + c[3] * corner * 0.5, c[0], c[1], amt * 0.12, frame, true);
+        roughSeg(c[0], c[1], c[0] + c[2] * corner, c[1], amt * 0.12, frame, true);
+      });
+      roughSeg(w * 0.12, barH + 1, w * 0.35, barH + 1, 0, accents, true);
+      roughSeg(w * 0.66, h - barH - 1, w * 0.87, h - barH - 1, 0, accents, true);
+      [[w * 0.13, h * 0.29, 5], [w * 0.87, h * 0.40, 8]].forEach(function (s) {
+        roughSeg(s[0] - s[2], s[1], s[0] + s[2], s[1], 0, focus, true);
+        roughSeg(s[0], s[1] - s[2] * 1.6, s[0], s[1] + s[2] * 1.6, 0, focus, true);
+      });
+    } else if (opts.frame) {
       // Cropped asymmetric panels leave the central lyric field unboxed.
       roughSeg(pad, top + h * 0.15, pad, pad, amt, frame, true);
       roughSeg(pad, pad, w * 0.36, pad + 1, amt, frame, true);
@@ -218,12 +254,30 @@
         roughSeg(pad, yy, pad + length, yy - length * 0.36, amt * 0.5, hatch, true);
         roughSeg(w - pad, h - yy, w - pad - length, h - yy + length * 0.36, amt * 0.5, hatch, true);
       }
+      if (comic) {
+        // Diagonal gutters and rays stay outside the central lyric column.
+        roughSeg(0, h * 0.67, w * 0.25, h, amt * 0.45, frame, true);
+        roughSeg(w * 0.77, 0, w, h * 0.30, amt * 0.45, frame, true);
+        roughSeg(0, h * 0.70, w * 0.22, h, amt * 0.3, accents, true);
+        roughSeg(w * 0.80, 0, w, h * 0.26, amt * 0.3, accents, true);
+        for (var ray = 0; ray < 7; ray += 1) {
+          var ry = h * (0.27 + ray * 0.045), reach = edge * (0.26 + (ray % 3) * 0.14);
+          var innerY = ry + (h * 0.46 - ry) * 0.18;
+          roughSeg(pad, ry, pad + reach, innerY, amt * 0.2, hatch, true);
+          roughSeg(w - pad, ry, w - pad - reach, innerY, amt * 0.2, hatch, true);
+        }
+        var mark = Math.min(34, w * 0.045);
+        roughSeg(w - pad - mark, h * 0.59, w - pad, h * 0.59, 0, focus, true);
+        roughSeg(w - pad - mark * 0.45, h * 0.59 - 5, w - pad - mark * 0.45, h * 0.59 + 5, 0, focus, true);
+      }
     }
+    v.paths.bars.setAttribute('d', bars);
     v.paths.frame.setAttribute('d', frame.join(''));
     v.paths.accent.setAttribute('d', accents.join(''));
     v.paths.hatch.setAttribute('d', hatch.join(''));
-    var panels = opts.paper ? polygon([[0, h * 0.68], [w * 0.16, h * 0.85], [w * 0.29, h], [0, h]]) +
-      polygon([[w * 0.77, 0], [w, 0], [w, h * 0.31], [w * 0.89, h * 0.19]]) : '';
+    v.paths.focus.setAttribute('d', focus.join(''));
+    var panels = opts.paper && !anime ? polygon([[0, h * 0.68], [w * 0.16, h * 0.85], [w * 0.25, h], [0, h]]) +
+      polygon([[w * 0.77, 0], [w, 0], [w, h * 0.30], [w * 0.89, h * 0.19]]) : '';
     v.paths.panels.setAttribute('d', panels); v.paths.tone.setAttribute('d', panels);
   }
 
@@ -231,17 +285,18 @@
     if (!opts.wave) { v.paths.wave.setAttribute('d', ''); return; }
     var n = Math.min(WAVE_POINTS, Math.max(18, Math.round(v.w / 25)));
     var baseY = isImmersive() && v.h > 560 ? v.h - 172 : v.h - 30;
-    var maxH = Math.min(52, v.h * 0.065), out = [], start = v.w * 0.10, width = v.w * 0.80;
+    var maxH = Math.min(52, v.h * 0.065), out = [], points = [], start = v.w * 0.10, width = v.w * 0.80;
     for (var i = 0; i < n; i += 1) {
       // Read all bands from the real spectrum. Silence leaves a fine ink
       // baseline; there is no demo oscillator or fabricated audio envelope.
       var value = bands && bands.length ? Number(bands[Math.min(bands.length - 1, Math.floor((i + 0.5) / n * bands.length))]) : 0;
       var b = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
       var x = start + i / Math.max(1, n - 1) * width, height = 1.5 + b * maxH;
+      if (opts.style === 'anime') { points.push([x, baseY - height * 0.5]); continue; }
       roughSeg(x, baseY, x + jit(amt * 0.18), baseY - height, amt * 0.28, out, true);
       if (b > 0.3) roughSeg(x - 2, baseY - height * 0.45, x + 2, baseY - height * 0.45 - 2, amt * 0.2, out, true);
     }
-    v.paths.wave.setAttribute('d', out.join(''));
+    v.paths.wave.setAttribute('d', opts.style === 'anime' ? roughPolyline(points, amt * 0.12, false) : out.join(''));
   }
 
   function drawAnnot(v, amt) {
@@ -363,7 +418,8 @@
       if (targetFps() === 0 && visible() && measure()) drawAnnot(view, jitterAmt(0));
     },
     values: function () { return Object.assign({}, opts); },
-    presets: function () { return PRESETS.map(function (preset) { return Object.assign({}, preset); }); },
+    defaults: function () { return Object.assign({}, DEFAULTS); },
+    presets: function () { return JSON.parse(JSON.stringify(PRESETS)); },
     rough: { polyline: roughPolyline, rect: roughRect, ellipse: roughEllipse },
     stats: function () {
       return { on: !!opts.on, style: opts.style, views: view ? 1 : 0, fps: targetFps(),

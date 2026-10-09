@@ -134,6 +134,25 @@
     updateSwitchVisibility();
   }
 
+  function reset() {
+    // 舞台恢复默认会卸载创意帧门，不能等待关闭动画来归还相机。
+    enabled = false;
+    pose = null;
+    returning = null;
+    rollBack = null;
+    keys = {};
+    dragging = false;
+    pid = null;
+    lastX = lastY = lastT = 0;
+    releaseLock();
+    removeDomListeners();
+    if (global.StageCinema) StageCinema.setFreecam(false);
+    syncControl(false);
+    updateSwitchVisibility();
+    // 清除失败交给调用方报告，不能把仍会恢复的旧机位宣称为已重置。
+    localStorage.removeItem(POSE_KEY);
+  }
+
   function typingTarget(e) {
     var t = e.target;
     return t && (t.isContentEditable || /^(INPUT|SELECT|TEXTAREA|BUTTON|A)$/.test(t.tagName || ''));
@@ -340,6 +359,7 @@
 
   global.StageFreecam = {
     init: init,
+    reset: reset,
     isEnabled: function () { return enabled; },
     // 含 600ms 飞回中：focus 等覆盖型模块据此避让交班跳切。
     isBusy: function () { return enabled || !!returning; },

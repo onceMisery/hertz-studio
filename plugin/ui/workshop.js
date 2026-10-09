@@ -28,19 +28,8 @@
   var target = 'immersive', returnFocus = null, home = null;
   var past = [], future = [], gesture = null;
   var shareViewRevision = 0, shareEditRevision = 0;
-  // 「恢复默认」整表：edit(DEFAULTS) → Stage3D.configure 按键做部分覆盖后 PUT，
-  // 故这里要列全 stage3d preferences 的键，漏了的键重置时不会被还原。
-  var DEFAULTS = {
-    scene: 'resonance', sceneSource: 'immersive', motion: .65, bloom: .8, reactivity: 1.35,
-    lyrics: true, cruise: true, layout: 'focus', lyricSize: 1, lyricGlow: .45,
-    stanzaVisual: 'stage',
-    stageTheme: 'classic',
-    stanzaBg: 'stage', stanzaBgOpacity: 0.75, stanzaVignette: true, stanzaSubtitle: true,
-    classicTuning: { rotation: true, breathing: 1, spacing: 0.7 },
-    cadenzaTuning: { width: 0.72, motion: 1, glow: 1, beam: 0 },
-    sonnetTuning: { shotFlow: 'auto', lyricLayout: 'phrases', phraseLength: 12, decor: true, accents: true },
-    temperaTuning: { composition: 'auto', colorMode: 'duo', screens: true, inversion: true }
-  };
+  var resetting = false;
+  var renderedPage = null;
 
   function $(id) { return document.getElementById(id); }
 
@@ -821,50 +810,107 @@
     body.appendChild(list);
   }
 
+  // These are static studies of the treatment, not a second live stage.
+  function lookArt(id) {
+    var palettes = {
+      manga: ['#e7e3d8', '#969993', '#3b4547', '#182329', '#f6f1e5'],
+      anime: ['#aec6c8', '#6b9294', '#4b717d', '#243d50', '#f5dfb4'],
+      pencil: ['#c6bbaa', '#a69b87', '#706e64', '#424844', '#eee5d2'],
+      color: ['#c0cfc1', '#879f9c', '#4b7b7c', '#2c454e', '#e7b39f'],
+      off: ['#1b2a2f', '#314951', '#466671', '#203a42', '#acc6b7']
+    };
+    var c = palettes[id] || palettes.off;
+    var ink = id === 'manga' || id === 'pencil';
+    var art = '<rect width="320" height="220" fill="' + c[0] + '"/>';
+    art += '<circle cx="231" cy="62" r="29" fill="' + c[4] + '"/>';
+    art += '<path d="M-12 142L55 70l46 53 68-86 57 74 32-33 76 64v88H-12Z" fill="' + c[1] + '"/>';
+    art += '<path d="M169 37l-7 59 27-21 15 17Z M55 70l-6 51 29-24Z" fill="' + c[4] + '" opacity=".7"/>';
+    art += '<path d="M-12 174L56 129l61 33 67-64 84 55 62-39v116H-12Z" fill="' + c[2] + '"/>';
+    art += '<path d="M-10 219l94-44 78 23 58-43 110 30v45H-10Z" fill="' + c[3] + '"/>';
+    art += '<path d="M-10 159Q105 207 179 141t157 22" fill="none" stroke="' + c[4] + '" stroke-width="2" opacity=".6"/>';
+    if (ink) {
+      art += '<g fill="none" stroke="' + c[3] + '" stroke-width="1.6"><path d="M-12 142L55 70l46 53 68-86 57 74 32-33 76 64M-12 174L56 129l61 33 67-64 84 55 62-39"/></g>';
+      for (var i = 0; i < 58; i++) {
+        var x = (i * 29 + 9) % 320, y = (i * 17 + 7) % 94;
+        art += '<circle cx="' + x + '" cy="' + y + '" r=".85" fill="' + c[3] + '" opacity=".32"/>';
+      }
+      art += '<path d="M25 0L0 70M40 0L0 114M300 146l20-10M279 168l41-16" stroke="' + c[3] + '" stroke-width="1.4"/>';
+    } else {
+      art += '<path d="M21 48h64m-42 9h62m38-33h43" stroke="' + c[4] + '" stroke-width="3" stroke-linecap="round" opacity=".55"/>';
+    }
+    art += id === 'manga'
+      ? '<path d="M-4 0h32L-4 87M298-4l26 0v74M-3 202l112 18" stroke="' + c[3] + '" stroke-width="8" fill="none"/>'
+      : '<path d="M12 32V12h35m226 0h35v20M12 188v20h35m226 0h35v-20" stroke="' + c[4] + '" fill="none" opacity=".7"/>';
+    return '<svg viewBox="0 0 320 220" preserveAspectRatio="xMidYMid slice" aria-hidden="true">' + art + '</svg>';
+  }
+
   function renderLook(body) {
     var CS = stage_api();
     var cur = CS.preset();
 
-    body.appendChild(h('h2', 'sc-group-title', '电影风格'));
-    body.appendChild(h('p', 'sc-note', '把舞台变成一格流动的漫画。纸感、墨线与音乐相融，歌词仍是画面的主角。'));
+    var intro = h('div', 'ws-look-intro');
+    intro.append(h('span', 'ws-kicker', '舞台画册'), h('h2', null, '漫画与动画'),
+      h('p', null, '选择一种画法，色阶、墨线与分镜一起入画。'));
+    body.appendChild(intro);
     var hand = cur.hand || { on: false };
     function patchHand(values) {
       CS.setHandDrawn(Object.assign({}, CS.preset().hand || {}, values));
     }
-    var styles = [{ id: 'off', label: '原始光影', description: '保留三维场景的光与色' }];
-    if (window.HandDrawn && HandDrawn.presets) styles = styles.concat(HandDrawn.presets());
+    var styles = CS.styles();
+    var selected = hand.on ? hand.style || 'manga' : 'off';
+    var selectedStyle = styles.find(function (style) { return style.id === selected; }) || styles[0];
     var looks = h('div', 'ws-look-grid');
+    var alternatives = h('div', 'ws-look-alternatives');
     styles.forEach(function (style) {
       var card = h('button', 'ws-look-card');
       card.type = 'button';
+      card.id = 'ws-look-' + style.id;
       card.dataset.style = style.id;
-      card.setAttribute('aria-pressed', String(style.id === (hand.on ? hand.style || 'manga' : 'off')));
+      card.setAttribute('aria-pressed', String(style.id === selected));
       var swatch = h('span', 'ws-look-swatch');
       swatch.setAttribute('aria-hidden', 'true');
-      swatch.append(h('i'), h('i'), h('i'));
-      card.append(swatch, h('strong', null, style.label), h('small', null, style.description));
+      swatch.innerHTML = lookArt(style.id);
+      var caption = h('span', 'ws-look-caption');
+      caption.append(h('strong', null, style.label), h('small', null, style.description));
+      var check = h('span', 'ws-look-check');
+      check.setAttribute('aria-hidden', 'true');
+      check.innerHTML = '<svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>';
+      card.append(swatch, caption, check);
       card.addEventListener('click', function () {
-        patchHand(style.id === 'off' ? { on: false } : { on: true, style: style.id });
-        render();
+        CS.setStyle(style.id);
+        flash('已应用' + style.label);
       });
-      looks.appendChild(card);
+      (style.id === 'manga' || style.id === 'anime' ? looks : alternatives).appendChild(card);
     });
     body.appendChild(looks);
+    body.appendChild(alternatives);
+    var current = h('div', 'ws-look-current');
+    current.append(h('span', null, '当前画法'), h('strong', null, selectedStyle.label));
+    body.appendChild(current);
     if (hand.on) {
+      var adjustment = h('details', 'ws-look-adjust');
+      adjustment.appendChild(h('summary', null, '微调画面与笔触'));
+      var material = h('div', 'sc-grid ws-look-material');
+      [['look.toon', '色阶与描边'], ['look.paper', '网点与纸感']].forEach(function (entry) {
+        var key = entry[0].split('.')[1];
+        material.appendChild(slider([entry[0], entry[1], 0, 1, .02, '', selectedStyle.look ? selectedStyle.look[key] : 0], cur.look[key], function (v) { CS.setParam(entry[0], v); }));
+      });
+      adjustment.appendChild(material);
       var opts = h('div', 'sc-grid');
-      [['frame', '分镜边框'], ['wave', '手绘声波'], ['annot', '歌词圈注'], ['paper', '纸张质感']].forEach(function (entry) {
+      [['frame', '分镜边框'], ['wave', '手绘声波'], ['annot', '歌词圈注'], ['paper', '边缘纸纹']].forEach(function (entry) {
         opts.appendChild(toggle(entry[1], hand[entry[0]] !== false, function (v) {
           var update = {}; update[entry[0]] = v;
           patchHand(update);
         }));
       });
-      body.appendChild(opts);
+      adjustment.appendChild(opts);
       var jgrid = h('div', 'sc-grid');
       jgrid.appendChild(slider(['hand.jitter', '笔触起伏', 0, 200, 5, '%', 100],
         hand.jitter === undefined ? 100 : hand.jitter, function (v) { patchHand({ jitter: v }); }));
-      jgrid.appendChild(slider(['hand.speed', '笔触节奏', 20, 200, 5, '%', 100],
+      jgrid.appendChild(slider(['hand.speed', '笔触节奏', 25, 200, 5, '%', 100],
         hand.speed === undefined ? 100 : hand.speed, function (v) { patchHand({ speed: v }); }));
-      body.appendChild(jgrid);
+      adjustment.appendChild(jgrid);
+      body.appendChild(adjustment);
     }
 
     body.appendChild(h('h2', 'sc-group-title', '背景来源'));
@@ -1185,6 +1231,38 @@
   function edit(values) {
     var previous = snapshot(); Stage3D.configure(values); remember(previous); Stage3D.save(); render();
   }
+  async function restoreDefaults() {
+    if (resetting) return;
+    resetting = true;
+    refs.defaults.disabled = true;
+    refs.defaults.setAttribute('aria-busy', 'true');
+    // The old history only contains immersive preferences. Keeping it would
+    // bring back half a creative composition after a complete reset.
+    past = []; future = []; gesture = null;
+    target = 'immersive'; tab = 'scene';
+    render();
+    refs.body.inert = true;
+    refs.targets.inert = true;
+    $('ws-tabs').inert = true;
+    flash('正在恢复并保存舞台设置…');
+    try {
+      await Stage3D.resetSettings();
+      flash('已恢复舞台默认，已保存的工坊作品仍保留');
+    } catch (e) {
+      flash('画面已恢复默认，设置暂未保存，请重试');
+    } finally {
+      var focused = document.activeElement;
+      var returnToReset = isOpen() && (focused === document.body || focused === refs.defaults);
+      resetting = false;
+      refs.defaults.disabled = false;
+      refs.defaults.removeAttribute('aria-busy');
+      refs.body.inert = false;
+      refs.targets.inert = false;
+      $('ws-tabs').inert = false;
+      render();
+      if (returnToReset) refs.defaults.focus({ preventScroll: true });
+    }
+  }
   function syncHistory() {
     if ($('ws-undo')) $('ws-undo').disabled = !past.length;
     if ($('ws-redo')) $('ws-redo').disabled = !future.length;
@@ -1253,10 +1331,10 @@
     if (prefs.sceneSource === 'creative') body.appendChild(h('p', 'sc-note', '大舞台正在演出高级编排。选择下方声场或心情模板，即可切换为沉浸声场。'));
     if (locked) body.appendChild(stanzaNotice(vs));
     var history = h('div', 'ws-history');
-    [['ws-undo', '撤销', function () { travel(true); }], ['ws-redo', '重做', function () { travel(false); }], ['ws-defaults', '恢复默认', function () { edit(DEFAULTS); }]].forEach(function (spec) {
+    [['ws-undo', '撤销', function () { travel(true); }], ['ws-redo', '重做', function () { travel(false); }]].forEach(function (spec) {
       var b = h('button', 'btn', spec[1]); b.type = 'button'; b.id = spec[0]; b.addEventListener('click', spec[2]); history.appendChild(b);
     });
-    // 撤销/重做/恢复默认改的是舞台参数，stanza 接管时同样不作用于画面。
+    // Undo/redo edit immersive parameters; the global reset remains available.
     if (locked) history.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
     body.appendChild(history);
     body.appendChild(h('h3', 'ws-section-title', '从一种心情开始'));
@@ -1271,7 +1349,7 @@
       var label = h('span'); label.append(h('strong', null, spec[0]), h('small', null, spec[1])); b.appendChild(label);
       // 模板是一整套舞台参数的预设，锁定时同样不作用：留着能点就等于骗人。
       if (locked) b.disabled = true;
-      b.addEventListener('click', function () { edit(Object.assign({}, DEFAULTS, spec[2])); }); templates.appendChild(b);
+      b.addEventListener('click', function () { edit(Object.assign(Stage3D.defaults(), spec[2])); }); templates.appendChild(b);
     });
     body.appendChild(templates);
     body.appendChild(h('h3', 'ws-section-title', '选择声场'));
@@ -1357,12 +1435,21 @@
     ['cues', '编排'], ['binds', '绑定'], ['look', '电影风格'], ['io', '导出']
   ];
 
+  function revealTab() {
+    if (target === 'advanced' && isOpen() && refs.tabs && refs.tabs[tab]) {
+      refs.tabs[tab].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }
+
   function render() {
     if (!refs.body) return;
     shareViewRevision += 1;
-    var scroll = refs.body.scrollTop;
+    var page = target + ':' + tab;
+    var samePage = renderedPage === page;
+    var scroll = samePage ? refs.body.scrollTop : 0;
     var focused = document.activeElement;
-    var focusId = refs.body.contains(focused) && focused.id;
+    var focusId = samePage && refs.body.contains(focused) && focused.id;
+    renderedPage = page;
     refs.panel.dataset.target = target;
     refs.targets.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.target === target)); });
     $('ws-tabs').hidden = target !== 'advanced';
@@ -1376,6 +1463,7 @@
     TABS.forEach(function (t) {
       if (refs.tabs && refs.tabs[t[0]]) refs.tabs[t[0]].classList.toggle('on', tab === t[0]);
     });
+    revealTab();
     if (tab === 'prompt') renderPrompt(refs.body);
     else if (tab === 'scene') renderScene(refs.body);
     else if (tab === 'presets') renderPresets(refs.body);
@@ -1384,6 +1472,8 @@
     else if (tab === 'binds') renderBindings(refs.body);
     else if (tab === 'look') renderLook(refs.body);
     else renderIO(refs.body);
+    refs.body.scrollTop = scroll;
+    if (focusId && $(focusId)) $(focusId).focus({ preventScroll: true });
   }
 
   var flashTimer = 0;
@@ -1452,6 +1542,11 @@
     });
     $('ws-tabs').before(refs.targets);
     refs.panel.querySelector('.ws-sub').textContent = '你的声音，你的舞台';
+    refs.defaults = h('button', 'ws-defaults', '恢复舞台默认');
+    refs.defaults.type = 'button'; refs.defaults.id = 'ws-defaults';
+    refs.defaults.title = '还原场景、镜头、歌词和工坊效果，保留已保存的作品';
+    refs.defaults.addEventListener('click', restoreDefaults);
+    $('ws-close').before(refs.defaults);
 
     var bar = $('ws-tabs');
     refs.tabs = {};
@@ -1479,7 +1574,7 @@
       }
       if (e.key === 'Tab') {
         var scope = target === 'immersive' ? $('stage3d') : refs.panel;
-        var focusable = Array.from(scope.querySelectorAll('button:not(:disabled),input:not(:disabled),select,textarea')).filter(function (el) { return el.tabIndex >= 0 && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden'; });
+        var focusable = Array.from(scope.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled)')).filter(function (el) { return el.tabIndex >= 0 && !el.closest('[inert]') && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden'; });
         var first = focusable[0], last = focusable[focusable.length - 1];
         if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
         else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
@@ -1518,6 +1613,7 @@
       });
     }
     new MutationObserver(function () { syncStageStatus(); }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    window.addEventListener('resize', revealTab);
 
     return api;
   }

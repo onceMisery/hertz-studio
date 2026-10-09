@@ -9,7 +9,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0a0a0a">
+<meta name="theme-color" content="#0d1530">
 <!-- 空图标：没有 favicon 路由时浏览器会去请求 /favicon.ico 并拿到 401，
      控制台里留一条无意义的红字。 -->
 <link rel="icon" href="data:,">
@@ -28,6 +28,10 @@
 <!-- 主题工作室：壁纸背景层与壁纸画廊。排在 style.css 之后（同特异性整块胜出），
      与 online.css 同一层次——都是"在既有布局之上再铺一层"的模块。 -->
 <link rel="stylesheet" href="theme-studio.css">
+<!-- 晴空绘卷：沿用主题令牌和现有业务节点的动画美术外观。 -->
+<link rel="stylesheet" href="anime-ui.css">
+<link rel="stylesheet" href="anime-stage.css">
+<link rel="stylesheet" href="anime-interactions.css">
 <!-- 界面皮肤：默认全部 disabled，切到哪套由 skins.js 解开哪套。
      排在其它样式表之后——皮肤做的是覆盖，必须在最后。
      skins.css 是"选皮肤的地方"，常驻加载，不带 data-skin-css。 -->
@@ -64,9 +68,9 @@
 <!-- 统一图标库：全站只维护这一份 24×24 SVG symbol；页面中通过
      use 节点引用对应 symbol，避免同形图标散落多份。 -->
 <svg id="icon-sprite" width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
-  <symbol id="i-headphones" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M3 14v-3a9 9 0 0 1 18 0v3"/>
-    <rect x="3" y="12" width="4" height="8" rx="2"/><rect x="17" y="12" width="4" height="8" rx="2"/>
+  <symbol id="i-headphones" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 13v-2a8 8 0 0 1 16 0v2"/>
+    <rect x="3" y="12" width="4" height="8" rx="1.5"/><rect x="17" y="12" width="4" height="8" rx="1.5"/>
   </symbol>
   <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <circle cx="11" cy="11" r="7"/>
@@ -75,8 +79,9 @@
   <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
     <path d="M6 6l12 12M18 6L6 18"/>
   </symbol>
-  <symbol id="i-palette" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M12 3a9 9 0 100 18c1.1 0 1.8-.8 1.8-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.1 0-.9.8-1.7 1.7-1.7H16a5 5 0 005-5c0-3.9-4-7.3-9-7.3zm-5.2 9a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm2.6-4a1.4 1.4 0 110-2.8 1.4 1.4 0 110 2.8zm4.6-1.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8zm3.4 3.4a1.4 1.4 0 110-2.8 1.4 1.4 0 010 2.8z"/>
+  <symbol id="i-palette" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3C6.8 3 3 6.8 3 11.8S6.8 21 11.4 21c1.6 0 2.4-1 2.4-2.1 0-.7-.4-1.2-.4-1.9 0-1.1.9-1.8 2.1-1.8h1.4c2.7 0 4.1-2.1 4.1-4.5C21 6.5 17 3 12 3Z"/>
+    <g fill="currentColor" stroke="none"><circle cx="7" cy="10.5" r="1.2"/><circle cx="9.5" cy="6.8" r="1.2"/><circle cx="14" cy="6.8" r="1.2"/><circle cx="17.2" cy="10.2" r="1.2"/></g>
   </symbol>
   <!-- 界面皮肤：一件 T 恤 —— 「皮肤」的通用隐喻，一眼读得出「换装」，不会像
        之前那版两块错位面板那样被读成「复制/粘贴」。不复用 i-palette（调色盘，
@@ -86,48 +91,56 @@
           stroke-linecap="round" stroke-linejoin="round">
     <path d="M8.5 5.5C9.6 8.2 14.4 8.2 15.5 5.5L20.2 8.2L17.6 12.4V19.6C17.6 20.3 17 20.8 16.4 20.8H7.6C6.9 20.8 6.4 20.3 6.4 19.6V12.4L3.8 8.2Z"/>
   </symbol>
-  <symbol id="i-workshop" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M12 2.6l2.3 4.9 5.3.7-3.9 3.7 1 5.3-4.7-2.6-4.7 2.6 1-5.3-3.9-3.7 5.3-.7z"/>
-    <path d="M4 19.4h6v1.8H4zM14 19.4h6v1.8h-6z"/>
+  <symbol id="i-workshop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3.2l2.4 4.9 5.4.8-3.9 3.8.9 5.3-4.8-2.5L7.2 18l.9-5.3-3.9-3.8 5.4-.8Z"/>
+    <path d="M4 21h4M16 21h4"/>
   </symbol>
-  <symbol id="i-sliders" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M4 7h10v2H4zM18 6.5v3l3-1.5zM4 15h6v2H4zM14 14.5v3l3-1.5zM4 11.2h14v1.6H4zM4 19.2h10v1.6H4z"/>
+  <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5 3v4M5 12v9M12 3v9M12 17v4M19 3v3M19 11v10"/>
+    <circle cx="5" cy="9.5" r="2.5"/><circle cx="19" cy="8.5" r="2.5"/>
+    <circle cx="12" cy="14.5" r="2.5" fill="currentColor" stroke="none"/>
   </symbol>
-  <symbol id="i-user" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M12 12a4 4 0 100-8 4 4 0 000 8zm0 2c-3.3 0-7 1.7-7 5v1h14v-1c0-3.3-3.7-5-7-5z"/>
+  <symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="7.5" r="3.5"/>
+    <path d="M5 20v-1c0-3 3.1-5.5 7-5.5s7 2.5 7 5.5v1Z"/>
   </symbol>
-  <symbol id="i-equalizer" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M4 14h3v6H4zM9.5 9h3v11h-3zM15 4h3v16h-3z"/>
+  <symbol id="i-equalizer" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4.5 13v7M9.5 5v15M14.5 9v11M19.5 3v17"/>
   </symbol>
-  <symbol id="i-library" viewBox="0 0 24 24" fill="currentColor">
-    <path fill-rule="evenodd" d="M12 4C8.4 4 5.4 5.1 5.4 6.5S8.4 9 12 9s6.6-1.1 6.6-2.5S15.6 4 12 4zm0 1.6a.9.9 0 100 1.8.9.9 0 000-1.8z"/>
-    <path d="M5.4 6.5v4.3c0 1.4 3 2.5 6.6 2.5s6.6-1.1 6.6-2.5V6.5"/>
-    <path d="M5.4 10.8v4.4c0 1.4 3 2.5 6.6 2.5s6.6-1.1 6.6-2.5v-4.4"/>
-    <path d="M5.4 15.2c0 1.4 3 2.5 6.6 2.5s6.6-1.1 6.6-2.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <symbol id="i-library" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="12" cy="6" rx="7" ry="3"/>
+    <path d="M5 6v11c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 11c0 1.7 3.1 3 7 3s7-1.3 7-3"/>
+    <circle cx="12" cy="6" r="1.1" fill="currentColor" stroke="none"/>
   </symbol>
-  <symbol id="i-globe" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M12 3a9 9 0 100 18 9 9 0 000-18zm0 2c3.9 0 7 3.1 7 7s-3.1 7-7 7-7-3.1-7-7 3.1-7 7-7zm0 2.5a4.5 4.5 0 100 9 4.5 4.5 0 000-9z"/>
+  <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="3.5" ry="9"/>
+    <path d="M3 12h18"/>
   </symbol>
-  <symbol id="i-playlist" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M4 6h12v2H4zM4 11h12v2H4zM4 16h8v2H4zM18 10l4 5-4 5z"/>
+  <symbol id="i-playlist" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 5h15M4 11h9M4 17h9"/>
+    <path d="M17 10.5v10l5-5Z" fill="currentColor" stroke="none"/>
   </symbol>
-  <symbol id="i-queue" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M3 5h12v2H3zM3 10h12v2H3zM3 15h8v2H3zM17 5h4v2h-4zM17 10h4v2h-4zM17 15h4v2h-4z"/>
+  <symbol id="i-queue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 6h12M8 12h12M8 18h9"/>
+    <g fill="currentColor" stroke="none"><circle cx="3.5" cy="6" r="1.25"/><circle cx="3.5" cy="12" r="1.25"/><circle cx="3.5" cy="18" r="1.25"/></g>
   </symbol>
   <!-- 每日推荐：日历页 + 一颗星，读作「今天挑的那批」。 -->
-  <symbol id="i-daily" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M7 2v2H5a2 2 0 00-2 2v2h18V6a2 2 0 00-2-2h-2V2h-2v2H9V2H7zm12 8H5v10a2 2 0 002 2h10a2 2 0 002-2V10zm-6.2 2.6l1.6 3.3 3.6.5-2.6 2.6.6 3.6-3.2-1.7-3.2 1.7.6-3.6-2.6-2.6 3.6-.5 1.6-3.3z"/>
+  <symbol id="i-daily" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="5" width="18" height="16" rx="2"/>
+    <path d="M3 9h18M7 3v4M17 3v4"/>
+    <path d="m12 11.5 1.05 2.2 2.45.35-1.75 1.7.4 2.4L12 17.05l-2.15 1.1.4-2.4-1.75-1.7 2.45-.35Z" fill="currentColor" stroke="none"/>
   </symbol>
   <!-- 收藏用的红心。fill-rule=evenodd 让它是描边+实心可切换的两态图形：
        实心版（收藏后）用外层路径填充，描边版用空心路径。 -->
   <symbol id="i-heart" viewBox="0 0 24 24" fill="currentColor">
     <path fill-rule="evenodd" d="M12 20.4l-1.1-1C6.7 15.6 3.6 12.8 3.6 9.2 3.6 6.3 5.9 4 8.8 4c1.6 0 3.1.7 4.1 1.9C13.9 4.7 15.4 4 17 4c2.9 0 5.2 2.3 5.2 5.2 0 3.6-3.1 6.4-7.3 10.2L12 20.4z"/>
   </symbol>
-  <symbol id="i-heart-outline" viewBox="0 0 24 24" fill="currentColor">
-    <path fill-rule="evenodd" d="M12 20.4l-1.1-1C6.7 15.6 3.6 12.8 3.6 9.2 3.6 6.3 5.9 4 8.8 4c1.6 0 3.1.7 4.1 1.9C13.9 4.7 15.4 4 17 4c2.9 0 5.2 2.3 5.2 5.2 0 3.6-3.1 6.4-7.3 10.2L12 20.4zm0-2.6c3.6-3.3 6.4-5.9 6.4-8.6 0-1.8-1.4-3.2-3.2-3.2-1.3 0-2.5.8-3.1 2h-1.4c-.6-1.2-1.8-2-3.1-2C6.8 6 5.6 7.4 5.6 9.2c0 2.7 2.8 5.3 6.4 8.6z"/>
+  <symbol id="i-heart-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20.2 5.3c-1.9-1.8-4.8-1.6-6.5.4L12 7.5l-1.7-1.8c-1.7-2-4.6-2.2-6.5-.4-1.9 1.9-1.8 4.8.1 6.7L12 20l8.1-8c1.9-1.9 2-4.8.1-6.7Z"/>
   </symbol>
-  <symbol id="i-settings" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M12 15.5a3.5 3.5 0 110-7 3.5 3.5 0 010 7zM19.4 13a7.7 7.7 0 000-2l2-1.5-2-3.4-2.3 1a7.6 7.6 0 00-1.7-1L15 3H9l-.4 2.1a7.6 7.6 0 00-1.7 1l-2.3 1-2 3.4L4.6 11a7.7 7.7 0 000 2l-2 1.5 2 3.4 2.3-1a7.6 7.6 0 001.7 1L9 21h6l.4-2.1a7.6 7.6 0 001.7-1l2.3 1 2-3.4z"/>
+  <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9.7 3h4.6l.5 2.7a7 7 0 0 1 1.8 1.1l2.6-.9 2.3 4-2.1 1.8v.6l2.1 1.8-2.3 4-2.6-.9a7 7 0 0 1-1.8 1.1l-.5 2.7H9.7l-.5-2.7a7 7 0 0 1-1.8-1.1l-2.6.9-2.3-4 2.1-1.8v-.6L2.5 9.9l2.3-4 2.6.9a7 7 0 0 1 1.8-1.1Z"/>
+    <circle cx="12" cy="12" r="3"/>
   </symbol>
   <symbol id="i-prev" viewBox="0 0 24 24" fill="currentColor">
     <path d="M7 6v12H5V6h2zm12 0v12l-9-6 9-6z"/>
@@ -156,13 +169,12 @@
     <path d="M9 18h6"/>
     <path d="M10 22h4"/>
   </symbol>
-  <symbol id="i-reset" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M12 5V2L8 6l4 4V7a5 5 0 11-5 5H5a7 7 0 107-7z"/>
+  <symbol id="i-reset" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4.5 9a8 8 0 1 1-.3 6M4.5 4v5h5"/>
+    <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none"/>
   </symbol>
-  <!-- 舞台顶栏的两枚描边图标。不复用 i-sliders / i-reset：那两枚是实心填充，
-       而顶栏另外三颗（歌词 / i-expand / i-close）是 2px 描边 —— 实心滑块在一排
-       细线里读起来重一档，这正是「右上角不协调」的主要来源。两枚都是新图形
-       而非同形复制，所以不违反上面「避免同形图标散落多份」。 -->
+  <!-- 舞台顶栏：i-tune 用圆形调节点，i-undo 用向左回转箭头，
+       与通用设置及完整重置的图形区分；统一采用 2px 描边。 -->
   <symbol id="i-tune" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
           stroke-linecap="round">
     <path d="M3 6h4M13 6h8M3 12h9M18 12h3M3 18h2M11 18h10"/>
@@ -189,14 +201,14 @@
     <path d="M12 2.6l8.1 4.7v9.4L12 21.4 3.9 16.7V7.3z"/>
     <path d="M12 12l8.1-4.7M12 12v9.4M12 12L3.9 7.3"/>
   </symbol>
-  <symbol id="i-folder" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M4 6h6l2 2h8v10H4z"/>
+  <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2ZM3 10h18"/>
   </symbol>
-  <symbol id="i-pencil" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M4 20h4L20 8l-4-4L4 16zM14 6l4 4"/>
+  <symbol id="i-pencil" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 16.5 16.1 4.4a2 2 0 0 1 2.8 0l.7.7a2 2 0 0 1 0 2.8L7.5 20H4ZM14.5 6 18 9.5M4 16.5 7.5 20"/>
   </symbol>
-  <symbol id="i-trash" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M6 7h12v13H6zM4 5h16v2H4zM9 3h6v2H9z"/>
+  <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 7h16M9 7V4h6v3M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M10 11v6M14 11v6"/>
   </symbol>
   <symbol id="i-grip" viewBox="0 0 24 24" fill="currentColor">
     <circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/>
@@ -270,7 +282,7 @@
 </div>
 
 <header class="topbar">
-  <div class="brand"><span class="brand-mark" aria-hidden="true">h<span>z</span></span></div>
+  <div class="brand" aria-label="Hertz Studio"><span class="brand-mark" aria-hidden="true">h<span>z</span></span><span class="brand-wordmark" aria-hidden="true"><strong>Hertz</strong><small>STUDIO</small></span></div>
 
   <div class="topsearch">
     <svg class="si" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
@@ -1620,6 +1632,8 @@
   <aside class="s3d-settings" id="s3d-settings" aria-label="舞台设置" hidden>
     <div class="s3d-settings-heading"><span>舞台设置</span><button class="s3d-btn" id="s3d-settings-close" aria-label="收起舞台设置"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
     <p class="s3d-settings-status" id="s3d-settings-status" role="status" aria-live="polite"></p>
+    <button class="btn s3d-workshop" id="s3d-defaults" type="button" aria-describedby="s3d-defaults-note">恢复舞台默认</button>
+    <p class="s3d-setting-note" id="s3d-defaults-note" role="status" aria-live="polite">恢复画面与镜头，保留已存工坊作品。</p>
     <label for="s3d-layout">聆听布局</label>
     <select id="s3d-layout"><option value="focus">沉浸歌词</option><option value="sleeve">封面与歌词</option><option value="single">简洁单句</option></select>
     <label for="s3d-lyric-visual">歌词视觉</label>
@@ -1943,6 +1957,7 @@
      但把手的挂载要在 app.js 之前登记完。 -->
 <script defer src="skins/skin.chaoxi.js"></script>
 <script defer src="themes.js"></script>
+<script defer src="anime-interactions.js"></script>
 <script defer src="perf-probe.js"></script>
 <script defer src="stage.js"></script>
 <!-- 起音检测：粒子层与三维层共用同一份"鼓点是哪一刻"，必须排在两者之前 -->

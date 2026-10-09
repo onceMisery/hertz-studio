@@ -196,7 +196,7 @@ function checkBuiltinThemeRestore() {
   eq(second.html.style.getPropertyValue('--accent'), '#ff8c94', '令牌值跟着主题走');
 
   const unknown = boot(makeApp(new Map([['vmusic.theme.v2', 'not-a-theme']])));
-  eq(unknown.sandbox.Theme.current().id, 'mineral', '不认识的主题 id 回落到默认');
+  eq(unknown.sandbox.Theme.current().id, 'celestial', '不认识的主题 id 回落到默认');
 }
 
 // ---------------------------------------------------------------------------

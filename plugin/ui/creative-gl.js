@@ -185,6 +185,7 @@ uniform vec4 uAgg;            // 低频 / 中低 / 中高 / 高频 聚合
 uniform float uPulse;
 uniform float uEnergy;
 uniform float uPlay;          // 0 停播 1 播放。停播时场景要能自己站住不动
+uniform float uToon;          // 既有 look.toon 同时控制表面色阶与末端墨线
 uniform vec2 uRes;
 uniform vec3 uColorA;
 uniform vec3 uColorB;
@@ -215,6 +216,11 @@ float vnoise(vec2 p) {
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 vec3 paletteMix(float t) { return mix(uColorA, uColorB, clamp(t, 0.0, 1.0)); }
+float celLight(vec3 normal) {
+  float light = dot(normalize(normal), normalize(vec3(-0.45, 0.72, 0.58)));
+  return 0.20 + 0.28 * smoothstep(0.04, 0.07, light)
+    + 0.38 * smoothstep(0.43, 0.46, light) + 0.24 * smoothstep(0.76, 0.79, light);
+}
 `;
 
   // ---------------------------------------------------------------------------
@@ -406,6 +412,10 @@ void main() {
   float light = 0.42 + max(dot(N, normalize(vec3(-0.4, 0.8, 0.6))), 0.0) * 0.38;
   vec3 c = paletteMix(vId * 0.72 + 0.12) * (light + vGlow * 0.32 + fres * 0.10);
   c += paletteMix(0.8) * max(N.y, 0.0) * 0.12;
+  if (uToon > 0.001) {
+    vec3 paint = paletteMix(vId * 0.72 + 0.12) * (celLight(N) + vGlow * 0.12);
+    c = mix(c, paint, smoothstep(0.0, 0.78, uToon));
+  }
   float a = uAlphaK * exp(-max(-vW.y, 0.0) * 0.8);
   frag = vec4(c * a, a);
 }`,
@@ -493,6 +503,11 @@ void main() {
   float aa = max(fwidth(latitude), 0.018);
   float wire = (1.0 - smoothstep(aa * 0.35, aa * 1.2, edge)) * uWire;
   vec3 c = paletteMix(0.18 + vLatitude * 0.65) * (0.045 + e * 0.035 + wire * 1.6 + fres * 0.30);
+  if (uToon > 0.001) {
+    vec3 pigment = paletteMix(0.18 + vLatitude * 0.65);
+    vec3 paint = pigment * celLight(vN) + mix(pigment, vec3(1.0, 0.91, 0.72), 0.28) * fres * 0.16;
+    c = mix(c, paint + pigment * wire * (1.0 - uToon) * 0.07, smoothstep(0.0, 0.78, uToon));
+  }
   frag = vec4(c, 1.0);
 }`,
     setup: function (gl, U, S) {
@@ -744,6 +759,10 @@ void main() {
   vec3 V = normalize(uCamPos - vW);
   float fres = pow(1.0 - abs(dot(normalize(vN), V)), 3.0);
   vec3 c = paletteMix(0.2 + vH * 0.65) * (0.025 + wire * (0.75 + vH * 0.30) + fres * 0.025);
+  if (uToon > 0.001) {
+    vec3 pigment = paletteMix(0.2 + vH * 0.65);
+    c = mix(c, pigment * (celLight(vN) * 0.76 + wire * (1.0 - uToon) * 0.07), smoothstep(0.0, 0.78, uToon));
+  }
   // 节拍行波：鼓点一下，一道亮带沿 z 滚过去。频谱让地形"有形状"，
   // 这道波让地形"有节拍"。
   float wave = exp(-pow((fract(vZ * 2.0 - uTime * 0.45) - 0.5) * 7.0, 2.0));
@@ -913,7 +932,8 @@ uniform float uBloom2K;
 uniform float uChroma;
 uniform float uVignette;
 uniform float uGrain;
-uniform float uToon;        // >0 时走手绘描边
+uniform float uToon;        // >0 时走赛璐璐色阶与墨线
+uniform bool uPreserveGlyphs;
 uniform float uPaper;
 uniform float uExposure;
 uniform float uSaturation;
@@ -953,12 +973,10 @@ void main() {
   c.g = texture(uScene, vUV).g;
   c.b = texture(uScene, vUV - d * k).b;
 
-  // 场景是不透明的"光"，不是不透明的"面"：把离屏缓冲的 alpha 当作覆盖度带出来，
-  // 于是画布背后自定义背景层仍然看得见，泛光还能溢到没有几何的地方。
-  // 手绘模式例外——铅笔稿要压在纸上，那就必须是实心的。
+  // Coverage stays local to the geometry. An illustrated scene must not turn
+  // its empty space into an opaque sheet covering a chosen image or backdrop.
   float cover = texture(uScene, vUV).a;
-  float solid = clamp(max(uToon, uPaper) * 1.4, 0.0, 1.0);
-  float outA = mix(clamp(cover * 1.35, 0.0, 1.0), 1.0, solid);
+  float outA = clamp(cover * 1.35, 0.0, 1.0);
 
   vec3 bloom = texture(uBloom, vUV).rgb;
   c += bloom * uBloomK;
@@ -967,22 +985,24 @@ void main() {
   // 主要靠它。只跑 1/16 的像素量，代价远低于观感收益。
   c += texture(uBloom2, vUV).rgb * uBloom2K;
 
-  // 手绘描边：3x3 Sobel 取亮度梯度，阈值化后叠成墨线。
-  if (uToon > 0.001) {
-    float gx = 0.0; float gy = 0.0;
+  // Reuse the existing nine-tap edge pass. Coverage catches a silhouette even
+  // when its shaded face is dark; normalized luminance catches cel boundaries.
+  float ink = 0.0;
+  if (uToon > 0.001 && !uPreserveGlyphs) {
+    vec2 gradient = vec2(0.0), silhouette = vec2(0.0);
     for (int y = -1; y <= 1; y += 1) {
       for (int x = -1; x <= 1; x += 1) {
-        vec2 o = vec2(float(x), float(y)) * uTexel * 1.6;
-        float l = luma(texture(uScene, vUV + o).rgb);
-        gx += l * float(x);
-        gy += l * float(y);
+        vec2 o = vec2(float(x), float(y)) * uTexel * (1.0 + uPaper * 0.45);
+        vec4 sampleColor = texture(uScene, vUV + o);
+        vec2 weight = vec2(float(x) * (y == 0 ? 2.0 : 1.0), float(y) * (x == 0 ? 2.0 : 1.0));
+        gradient += luma(sampleColor.rgb) * weight;
+        silhouette += sampleColor.a * weight;
       }
     }
-    float g = length(vec2(gx, gy));
-    // 描边本身带抖动，配合手绘层才像铅笔而不是 PS 滤镜。
-    float jit = (h11(floor(vUV * 420.0)) - 0.5) * 0.6;
-    float ink = smoothstep(0.55 + jit * 0.25, 0.95, g) * uToon;
-    c = mix(c, vec3(0.05, 0.045, 0.04), ink * 0.85);
+    float g = length(gradient) * 0.25 / (luma(texture(uScene, vUV).rgb) + 0.16)
+      + length(silhouette) * 0.14;
+    float tooth = (h11(floor(vUV / uTexel * 0.5)) - 0.5) * uPaper * 0.08;
+    ink = smoothstep(0.18 + tooth, 0.52, g) * uToon * (0.52 + uPaper * 0.24);
   }
 
   // 纸张：细纤维 + 低频斑块。乘性叠加，不改变色相。
@@ -1000,6 +1020,19 @@ void main() {
   // 设计，喂未压缩的 HDR 值会让霓虹三级色阶全部撞到最亮一档。
   c = tonemap(c);
 
+  if (uToon > 0.001 && !uPreserveGlyphs) {
+    // Flatten only occupied pixels. The thin transition uses screen derivatives
+    // so low-DPR tiers keep stable edges instead of crawling quantization noise.
+    vec3 straight = c / max(outA, 0.08);
+    float value = luma(straight), aa = max(fwidth(value) * 0.7, 0.004);
+    float shade = 0.095 + 0.18 * smoothstep(0.12 - aa, 0.12 + aa, value)
+      + 0.22 * smoothstep(0.25 - aa, 0.25 + aa, value)
+      + 0.22 * smoothstep(0.44 - aa, 0.44 + aa, value)
+      + 0.16 * smoothstep(0.66 - aa, 0.66 + aa, value);
+    vec3 paint = straight * (shade / max(value, 0.035));
+    c = mix(c, paint * outA, uToon * smoothstep(0.025, 0.22, cover));
+  }
+
   float l = luma(c);
   if (uGrade == 1) c = mix(uColorA, uColorB, clamp(l * 1.25, 0.0, 1.0)) * (0.5 + l);
   else if (uGrade == 2) c = vec3(l);
@@ -1010,6 +1043,20 @@ void main() {
     c = mix(c, neon * (0.35 + l), 0.62);
   }
 
+  if (uToon > 0.001 && uPaper > 0.12 && !uPreserveGlyphs) {
+    // Print dots belong to shaded surfaces, not the center of the lyric field.
+    // Spacing follows the smaller render dimension, with a low-DPR pixel floor.
+    vec2 pixels = vUV / uTexel;
+    float spacing = max(4.0, min(1.0 / uTexel.x, 1.0 / uTexel.y) / 110.0);
+    vec2 grid = mat2(0.866, -0.5, 0.5, 0.866) * pixels / spacing;
+    float radius = 0.10 + 0.22 * (1.0 - smoothstep(0.10, 0.65, l / max(outA, 0.08)));
+    float distanceToDot = length(fract(grid) - 0.5);
+    float dotAA = max(fwidth(distanceToDot), 0.02);
+    float dotInk = 1.0 - smoothstep(radius - dotAA, radius + dotAA, distanceToDot);
+    c *= 1.0 - dotInk * uPaper * uToon * 0.58 * smoothstep(0.12, 0.55, cover);
+    l = luma(c);
+  }
+
   // 颗粒放在调色之后：否则调色会把噪声一起量化掉，颗粒感消失。
   if (uGrain > 0.001) {
     float g = h11(vUV * 900.0 + fract(uTime * 0.07) * 91.0) - 0.5;
@@ -1017,9 +1064,15 @@ void main() {
   }
 
   c = mix(vec3(l), c, uSaturation);
+  if (uToon > 0.001) c = mix(c, vec3(0.021, 0.028, 0.042) * outA, ink);
 
   float vig = 1.0 - uVignette * dot(d, d) * 1.8;
   c *= clamp(vig, 0.0, 1.0);
+
+  // Grade, grain and paper can create color at alpha zero. Keep illustrated
+  // output premultiplied so normal compositing leaves custom backgrounds clear.
+  // The original luminous treatment retains its existing bloom composition.
+  if (uToon > 0.001) c = min(c, vec3(outA));
 
   // 上下文用 premultipliedAlpha（默认），所以这里给的就是"已乘过 alpha 的颜色"，
   // 与上面加性混合累加出来的 rgb 语义一致，浏览器合成时不会再乘一遍。
@@ -1221,7 +1274,7 @@ void main() {
         '#version 300 es\n' + qualityDefs + COMMON + decl + def.vert,
         '#version 300 es\n' + COMMON + decl + def.frag);
       var U = collect(prog, ['uViewProj', 'uModel', 'uCamPos', 'uTime', 'uSeed',
-        'uSpec', 'uAgg', 'uPulse', 'uEnergy', 'uPlay', 'uRes',
+        'uSpec', 'uAgg', 'uPulse', 'uEnergy', 'uPlay', 'uToon', 'uRes',
         'uColorA', 'uColorB'].concat(def.uniforms || []));
       var entry = { prog: prog, U: U };
       progs[key] = entry;
@@ -1249,7 +1302,7 @@ void main() {
         return failed;
       }
       var U = collect(prog, ['uTex', 'uScene', 'uBloom', 'uBloom2', 'uDir', 'uTexel', 'uThresh',
-        'uKnee', 'uBloomK', 'uBloom2K', 'uChroma', 'uVignette', 'uGrain', 'uToon', 'uPaper',
+        'uKnee', 'uBloomK', 'uBloom2K', 'uChroma', 'uVignette', 'uGrain', 'uToon', 'uPreserveGlyphs', 'uPaper',
         'uExposure', 'uSaturation', 'uGrade', 'uTime', 'uColorA', 'uColorB']);
       var entry = { prog: prog, U: U };
       postProgs[key] = entry;
@@ -1324,6 +1377,7 @@ void main() {
       gl.uniform1f(U.uPulse, S.pulse);
       gl.uniform1f(U.uEnergy, S.energy);
       gl.uniform1f(U.uPlay, S.play ? 1 : 0);
+      gl.uniform1f(U.uToon, S.post && S.post.toon || 0);
       gl.uniform2f(U.uRes, w, h);
       gl.uniform3fv(U.uColorA, S.colors[0]);
       gl.uniform3fv(U.uColorB, S.colors[1]);
@@ -1492,8 +1546,11 @@ void main() {
       gl.uniform1f(comp.U.uChroma, P.chroma === undefined ? 0.3 : P.chroma);
       gl.uniform1f(comp.U.uVignette, P.vignette === undefined ? 0.25 : P.vignette);
       gl.uniform1f(comp.U.uGrain, P.grain === undefined ? 0.18 : P.grain);
+      // Atlas glyphs already contain their own edges. Posterizing or inking
+      // their strokes would erase small characters and duplicate dark fringes.
       gl.uniform1f(comp.U.uToon, P.toon === undefined ? 0 : P.toon);
-      gl.uniform1f(comp.U.uPaper, P.paper === undefined ? 0 : P.paper);
+      gl.uniform1i(comp.U.uPreserveGlyphs, def.ownsLyrics ? 1 : 0);
+      gl.uniform1f(comp.U.uPaper, (P.paper === undefined ? 0 : P.paper) * (def.ownsLyrics ? 0.18 : 1));
       gl.uniform1f(comp.U.uExposure, (P.exposure === undefined ? 1.12 : P.exposure) * (def.exposureScale || 1));
       gl.uniform1f(comp.U.uSaturation, P.saturation === undefined ? 1.1 : P.saturation);
       gl.uniform1i(comp.U.uGrade, P.grade | 0);

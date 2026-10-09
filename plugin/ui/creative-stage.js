@@ -75,7 +75,7 @@
         ['look.chroma', '径向色散', 0, 4, 0.05, '', 0.08],
         ['look.vignette', '暗角', 0, 1.2, 0.02, '', 0.28],
         ['look.grain', '胶片颗粒', 0, 1.2, 0.02, '', 0.06],
-        ['look.toon', '手绘描边', 0, 1, 0.02, '', 0],
+        ['look.toon', '色阶与描边', 0, 1, 0.02, '', 0],
         ['look.paper', '纸张质感', 0, 1, 0.02, '', 0],
         ['look.exposure', '曝光', 0.4, 2.4, 0.02, '', 1.0],
         ['look.saturation', '饱和度', 0, 2, 0.02, '', 0.95]
@@ -263,7 +263,7 @@
     var p = { version: 1, name: '未命名舞台', scene: 'towers',
       cam: {}, look: {}, stage: {}, sc: sceneDefaults('towers'),
       cues: [], bindings: [], director: true,
-      bg: { type: 'theme' }, hand: { on: false } };
+      bg: { type: 'theme' }, hand: window.HandDrawn && HandDrawn.defaults ? HandDrawn.defaults() : { on: false } };
     BASE_SPEC.forEach(function (g) {
       (g.items || []).forEach(function (it) { writePath(p, it[0], it[6]); });
       (g.selects || []).forEach(function (it) { writePath(p, it[0], it[3]); });
@@ -311,7 +311,7 @@
     out.bindings = Array.isArray(p.bindings) ? p.bindings.filter(validBinding).slice(0, 32) : [];
     out.director = p.director !== false;
     out.bg = (p.bg && typeof p.bg === 'object' && p.bg.type) ? p.bg : { type: 'theme' };
-    out.hand = (p.hand && typeof p.hand === 'object') ? p.hand : { on: false };
+    out.hand = Object.assign({}, out.hand, p.hand && typeof p.hand === 'object' ? p.hand : {});
     return out;
   }
 
@@ -1519,13 +1519,15 @@
   }
 
   var saveTimer = 0;
+  function saveLocal(strict) {
+    clearTimeout(saveTimer);
+    saveTimer = 0;
+    try { localStorage.setItem(LOCAL_KEY, JSON.stringify(preset)); } catch (e) { if (strict) throw e; }
+    emit('change', preset);
+  }
   function saveLocalSoon() {
     if (saveTimer) return;
-    saveTimer = setTimeout(function () {
-      saveTimer = 0;
-      try { localStorage.setItem(LOCAL_KEY, JSON.stringify(preset)); } catch (e) { /* 忽略 */ }
-      emit('change', preset);
-    }, 400);
+    saveTimer = setTimeout(saveLocal, 400);
   }
 
   function loadLocal() {
@@ -1591,6 +1593,7 @@
       preset = normalize(p);
       if (!(opts && opts.keepName)) { /* 名字随预置走 */ }
       animations.length = 0;
+      timelineCues = null;
       runtime = {};
       resolve(now());
       applyBackground();
@@ -1598,6 +1601,25 @@
       saveLocalSoon();
       emit('preset', preset);
       return deep(preset);
+    },
+    resetSettings: function () {
+      // Stop input that could write the previous camera back on the next frame.
+      api2.setInteract(false);
+      interact.dragging = false;
+      interact.pid = -1;
+      interact.zoomTarget = null;
+      interact.vx = interact.vy = 0;
+      interact.px = interact.py = interact.parYaw = interact.parPitch = 0;
+      interact.hadInertia = false;
+      cam.shakeYaw = cam.shakePitch = 0;
+      driftPhase = 0;
+      section = 'verse'; sectionSince = 0;
+      energyHist.length = 0; lastHistAt = 0;
+      var next = basePreset();
+      var result = api2.setPreset(next);
+      // Reset must survive an immediate reload; ordinary edits remain coalesced.
+      saveLocal(true);
+      return result;
     },
     setScene: function (id) {
       if (!window.CreativeGL || !CreativeGL.sceneById(id)) return false;
@@ -1718,6 +1740,21 @@
     resetView: resetView,
 
     // 背景 / 手绘
+    styles: function () {
+      var styles = [{ id: 'off', label: '原始光影', description: '回到场景原本的光与色' }];
+      return window.HandDrawn ? styles.concat(HandDrawn.presets()) : styles;
+    },
+    setStyle: function (id) {
+      var style = api2.styles().find(function (item) { return item.id === id; });
+      if (!style || !window.HandDrawn) return false;
+      var next = deep(preset);
+      // One preset commit keeps the material and art layer in step. Scene,
+      // camera and authored cues remain owned by the user's composition.
+      next.look = Object.assign({}, basePreset().look, style.look || {});
+      next.hand = Object.assign({}, HandDrawn.defaults(), style.hand || {}, { on: id !== 'off' });
+      if (id !== 'off') next.hand.style = id;
+      return api2.setPreset(next);
+    },
     setBackground: function (spec) { preset.bg = spec || { type: 'theme' }; applyBackground(); saveLocalSoon(); emit('background', preset.bg); return preset.bg; },
     setHandDrawn: function (spec) { preset.hand = spec || { on: false }; applyHand(); saveLocalSoon(); emit('hand', preset.hand); return preset.hand; },
 

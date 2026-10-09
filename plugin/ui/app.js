@@ -2331,12 +2331,14 @@ function onStageControl(e) {
         });
       break;
     }
-    case 'stage3d':
+    case 'stage3d': {
       markSettingsDirty();
       state.settings.stage3d = d.value;
-      stageSettingsWrite = stageSettingsWrite.then(() => transport.put('/v1/settings', { stage3d: d.value }))
-        .catch(() => toast('舞台设置暂未保存', 'error'));
+      const write = stageSettingsWrite.then(() => transport.put('/v1/settings', { stage3d: d.value }));
+      stageSettingsWrite = write.catch(() => toast('舞台设置暂未保存', 'error'));
+      d.completion = write;
       break;
+    }
     case 'view': setView(d.value); break;
     case 'queue-play':
       playQueueIndex(state.queue.indexOf(String(d.value)));

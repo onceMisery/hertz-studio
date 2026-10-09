@@ -124,7 +124,7 @@ ok(/stageTheme/.test(STAGE3D_JS), 'stage3d 持有 stageTheme 偏好');
 ok(/root\.dataset\.stageTheme/.test(STAGE3D_JS), 'stage3d 把主题写进 #stage3d 的 data-stage-theme');
 ok(/stageTheme:\s*stageTheme/.test(STAGE3D_JS), 'stageTheme 随舞台偏好持久化');
 ok(/id="s3d-stage-theme"/.test(HTML), '舞台设置里有「设置风格」下拉');
-ok(/stageTheme:\s*'classic'/.test(WORKSHOP), '创意工坊的恢复默认表里有 stageTheme');
+ok(/Stage3D\.defaults\(\)/.test(WORKSHOP) && /Stage3D\.resetSettings\(\)/.test(WORKSHOP), '工坊模板与完整恢复共用舞台默认值，避免遗漏 stageTheme');
 
 // ---------------------------------------------------------------------------
 // 4. 静默丢弃：混用引擎私有伪元素

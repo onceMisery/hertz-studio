@@ -264,7 +264,7 @@ impl TrackFilter {
         if self.album.is_some() {
             clauses.push(format!(
                 "COALESCE(NULLIF(TRIM(e.album), ''), t.album) = ?{second}",
-                second = first + 1
+                second = first + usize::from(self.artist.is_some())
             ));
         }
         if clauses.is_empty() {
@@ -1264,6 +1264,64 @@ mod tests {
                         .unwrap();
                     assert_eq!(count as usize, expected.len(), "计数不一致：{label}");
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn album_facet_filter_keeps_list_count_and_ids_consistent() {
+        let db = pool().await;
+        let mut ids = Vec::new();
+        for (i, (title, artist, album)) in [
+            ("A 春日", "青空日记", "春日序曲"),
+            ("B 春日", "花间来信", "春日序曲"),
+            ("C 夏日", "青空日记", "云端来信"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut track = sample(&format!("/album-filter/{i}.mp3"), title);
+            track.artist = Some((*artist).into());
+            track.album = Some((*album).into());
+            upsert_track(&db, &track).await.unwrap();
+            ids.push(track.id);
+        }
+
+        // 期望值直接来自曲目，避免与被测查询共用 filter.sql() 而一起漏绑。
+        let cases = [
+            (
+                TrackFilter {
+                    artist: None,
+                    album: Some("春日序曲".into()),
+                },
+                vec![ids[0].clone(), ids[1].clone()],
+            ),
+            (
+                TrackFilter {
+                    artist: Some("青空日记".into()),
+                    album: Some("春日序曲".into()),
+                },
+                vec![ids[0].clone()],
+            ),
+        ];
+        // 无搜索、短词 LIKE 与可走 trigram 预筛的长词都使用同一组筛选参数。
+        for query in [None, Some("春"), Some("春日序曲")] {
+            for (filter, expected) in &cases {
+                let page = list_tracks_filtered(&db, query, filter, TrackSort::Title, 10, 0)
+                    .await
+                    .unwrap();
+                let page_ids: Vec<_> = page.into_iter().map(|track| track.id).collect();
+                assert_eq!(&page_ids, expected, "列表：q={query:?}, {filter:?}");
+                let all_ids = list_track_ids_filtered(&db, query, filter, TrackSort::Title)
+                    .await
+                    .unwrap();
+                assert_eq!(&all_ids, expected, "IDs：q={query:?}, {filter:?}");
+                let count = count_tracks_filtered(&db, query, filter).await.unwrap();
+                assert_eq!(
+                    count as usize,
+                    expected.len(),
+                    "计数：q={query:?}, {filter:?}"
+                );
             }
         }
     }

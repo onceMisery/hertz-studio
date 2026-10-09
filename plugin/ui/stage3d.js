@@ -2084,6 +2084,12 @@
 
   function setStage(i, immediate) {
     if (active && (sceneCovered() || !gl || contextLost)) return false;
+    return applyStageSelection(i, immediate);
+  }
+
+  // 配置恢复始终更新偏好；只把用户直接切场景的能力门留在 setStage。
+  // 无 WebGL 或歌词背景覆盖场景时，恢复默认也必须能保存正确的场景。
+  function applyStageSelection(i, immediate) {
     i = Math.round(clamp(num(i, 0), 0, STAGES.length - 1));
     var changed = i !== stageIndex;
     stageIndex = i;
@@ -2106,8 +2112,10 @@
   }
 
   function control(action, value) {
-    document.dispatchEvent(new CustomEvent('stage:control', { detail: { action: action, value: value } }));
+    var detail = { action: action, value: value };
+    document.dispatchEvent(new CustomEvent('stage:control', { detail: detail }));
     pokeChrome();
+    return detail.completion;
   }
 
   function preferences() {
@@ -2122,7 +2130,41 @@
       autoLock: stanza.autoLock, autoAvoidRepeat: stanza.autoAvoidRepeat };
   }
 
-  function savePreferences() { if (!restoring) control('stage3d', preferences()); }
+  function savePreferences() {
+    if (!restoring) return control('stage3d', JSON.parse(JSON.stringify(preferences())));
+  }
+
+  function defaults() { return JSON.parse(JSON.stringify(DEFAULT_PREFERENCES)); }
+
+  var resetPromise = null;
+  function resetSettings() {
+    if (resetPromise) return resetPromise;
+    var button = $('s3d-defaults');
+    var applied = false;
+    if (button) button.disabled = true;
+    text('s3d-defaults-note', '正在恢复画面并保存舞台设置…');
+    resetPromise = Promise.resolve().then(function () {
+      configure(defaults());
+      if (global.CreativeStage && CreativeStage.resetSettings) CreativeStage.resetSettings();
+      if (global.StageFreecam) StageFreecam.reset();
+      resetView();
+      if (global.Stage && Stage.kick) Stage.kick();
+      applied = true;
+      var restored = JSON.parse(JSON.stringify(preferences()));
+      return Promise.resolve(savePreferences()).then(function () { return restored; });
+    }).then(function (restored) {
+      resetPromise = null;
+      if (button) button.disabled = false;
+      text('s3d-defaults-note', '舞台画面已恢复默认，已存工坊作品仍保留。');
+      return restored;
+    }, function (error) {
+      resetPromise = null;
+      if (button) button.disabled = false;
+      text('s3d-defaults-note', applied ? '画面已恢复默认，舞台设置暂未保存，请重试。' : '舞台恢复未完成，请重试。');
+      throw error;
+    });
+    return resetPromise;
+  }
 
   function configure(value) {
     if (!value || typeof value !== 'object') return;
@@ -2198,7 +2240,7 @@
         seams: value.temperaTuning.seams !== false
       };
       syncLayout();
-      for (var i = 0; i < STAGES.length; i += 1) if (STAGES[i].id === value.scene) setStage(i, true);
+      for (var i = 0; i < STAGES.length; i += 1) if (STAGES[i].id === value.scene) applyStageSelection(i, true);
       $('s3d-motion').value = Math.round(motion * 100); text('s3d-motion-value', Math.round(motion * 100) + '%');
       $('s3d-bloom').value = Math.round(bloom * 100); text('s3d-bloom-value', Math.round(bloom * 100) + '%');
       $('s3d-reactivity').value = Math.round(reactivity * 100); text('s3d-reactivity-value', Math.round(reactivity * 100) + '%');
@@ -3698,6 +3740,10 @@
     $('s3d-lyrics-toggle').addEventListener('click', toggleLyrics);
     $('s3d-settings-toggle').addEventListener('click', function () { setSettings($('s3d-settings').hidden); });
     $('s3d-settings-close').addEventListener('click', function () { setSettings(false); $('s3d-settings-toggle').focus(); });
+    var defaultsButton = $('s3d-defaults');
+    if (defaultsButton) defaultsButton.addEventListener('click', function () {
+      resetSettings().catch(function () { /* 保存结果已显示在按钮说明中。 */ });
+    });
     $('s3d-motion').addEventListener('input', function () {
       motion = Number(this.value) / 100; text('s3d-motion-value', this.value + '%');
       // 商籁的镜头强度直接吃这根滑杆：拖动即时推送，不等 8fps gate。
@@ -3903,6 +3949,10 @@
     return api;
   }
 
+  // 在首次 init/configure 前从真正的初始偏好取样；新增设置自动纳入恢复范围。
+  // 快照和每次返回值都深拷贝，调用方编辑模板不会污染默认值或当前状态。
+  var DEFAULT_PREFERENCES = JSON.parse(JSON.stringify(preferences()));
+
   var api = {
     init: init,
     destroy: destroy,
@@ -3924,6 +3974,8 @@
       });
     },
     resetView: resetView,
+    defaults: defaults,
+    resetSettings: resetSettings,
     configure: configure,
     preferences: preferences,
     save: savePreferences,

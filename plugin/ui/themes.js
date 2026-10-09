@@ -20,10 +20,10 @@
 (function () {
   'use strict';
 
-  // v2：默认主题换成了「星蓝深空」，用新的存储键让所有人从新的默认起步；
-  // 旧键里的选择不会丢，只是不再作为默认值——想找回旧主题在菜单里点一下即可。
+  // 默认外观可以更新，已经保存的主题（包括稍后注册的主题）继续按原选择恢复。
   var STORE_KEY = 'vmusic.theme.v2';
   var ATTR = 'data-theme';
+  var DEFAULT_ID = 'celestial';
 
   // -------------------------------------------------------------------------
   // 内置主题
@@ -34,7 +34,7 @@
   var CATALOG = [
     {
       id: 'mineral',
-      name: '矿石黑（默认）',
+      name: '矿石黑',
       note: '矿石黑 · 近黑底 + 纯白强调 + 薄荷青辉光',
       // 对比度（自 --bg 反推，WCAG AA）：text ≈ 15.6 / muted ≈ 7.4
       tokens: {
@@ -54,6 +54,55 @@
         '--highlight': '#F4D28A',
         '--highlight-rgb': '244, 210, 138',
         '--hover': 'rgba(255, 255, 255, 0.07)'
+      }
+    },
+    {
+      id: 'celestial',
+      name: '晴空绘卷（默认）',
+      note: '动画天空 · 靛蓝玻璃、暖金细边与赛璐璐云影',
+      tokens: {
+        '--bg': '#0d1530',
+        '--panel': 'rgba(23, 34, 63, 0.78)',
+        '--panel-solid': '#182541',
+        '--panel-2': 'rgba(167, 195, 231, 0.07)',
+        '--line': 'rgba(181, 206, 234, 0.16)',
+        '--line-strong': 'rgba(190, 217, 237, 0.30)',
+        '--text': '#f8f2e5',
+        '--muted': '#b4c3dd',
+        '--accent': '#f3dca7',
+        '--accent-2': '#89d5e5',
+        '--accent-ink': '#17243a',
+        '--brand': '#89d5e5',
+        '--brand-rgb': '137, 213, 229',
+        '--highlight': '#f3dca7',
+        '--highlight-rgb': '243, 220, 167',
+        '--hover': 'rgba(169, 214, 239, 0.12)',
+        '--shadow': '0 16px 40px rgba(7, 13, 43, 0.38)',
+        '--glass-bg': 'linear-gradient(155deg, rgba(36, 53, 86, 0.82), rgba(20, 29, 55, 0.86))',
+        '--glass-bg-strong': 'rgba(23, 34, 63, 0.96)',
+        '--glass-border': '1px solid rgba(176, 207, 229, 0.23)',
+        '--glass-line': 'rgba(248, 242, 229, 0.13)',
+        '--glass-shadow': '0 12px 32px rgba(10, 14, 45, 0.32), inset 0 1px 0 rgba(248, 242, 229, 0.09)',
+        '--glass-shadow-glow': '0 18px 48px rgba(10, 14, 45, 0.46), inset 0 1px 0 rgba(248, 242, 229, 0.14)',
+        '--glass-blur': '24px',
+        '--field-bg': 'rgba(143, 180, 216, 0.065)',
+        '--field-bg-hover': 'rgba(157, 205, 228, 0.13)',
+        '--field-border': 'rgba(171, 202, 225, 0.22)',
+        '--field-border-strong': 'rgba(208, 223, 224, 0.44)',
+        '--surface-1': 'rgba(140, 180, 218, 0.065)',
+        '--surface-2': 'rgba(151, 196, 227, 0.12)',
+        '--surface-line': 'rgba(169, 199, 228, 0.16)',
+        '--surface-line-strong': 'rgba(183, 213, 236, 0.30)',
+        '--surface-hi': 'inset 0 1px 0 rgba(248, 242, 229, 0.09)',
+        '--surface-lift': '0 8px 22px rgba(14, 17, 50, 0.28)',
+        '--track': 'rgba(167, 192, 227, 0.19)',
+        '--focus-ring': '2px solid #89d5e5',
+        '--ok': '#a8d6c2',
+        '--ok-wash': 'rgba(168, 214, 194, 0.10)',
+        '--warn': '#f3dca7',
+        '--warn-wash': 'rgba(243, 220, 167, 0.10)',
+        '--danger': '#f5adb0',
+        '--danger-wash': 'rgba(245, 173, 176, 0.11)'
       }
     },
     {
@@ -549,7 +598,7 @@
   // 把一套主题写到 <html> 的行内样式上。先清掉上一套留下的键，再写新的，
   // 否则从"自定义了 X"的主题切到"没定义 X"的主题时，X 会残留。
   function apply(id, opts) {
-    var theme = byId.get(id) || CATALOG[0];
+    var theme = byId.get(id) || byId.get(DEFAULT_ID);
     var el = root();
     var prev = current;
     if (prev) {
@@ -606,7 +655,9 @@
   // 带上 tokens：渲染主题菜单时要拿 accent 画色点，调用方不该再回头查一次。
   // 这里是拷贝，外部改不动 CATALOG。
   function list() {
-    return CATALOG.map(function (t) {
+    var ordered = CATALOG.filter(function (t) { return t.id === DEFAULT_ID; })
+      .concat(CATALOG.filter(function (t) { return t.id !== DEFAULT_ID; }));
+    return ordered.map(function (t) {
       var tokens = {};
       Object.keys(t.tokens).forEach(function (k) { tokens[k] = t.tokens[k]; });
       return { id: t.id, name: t.name, note: t.note, tokens: tokens };
@@ -622,7 +673,7 @@
     // 不认识未必是数据坏了，也可能是这套主题还没登记上来（见 pendingId）。
     // 注意这里不能回写：存储里那个 id 可能晚一步就变得有效了，抹掉它就真的丢了。
     pendingId = saved || null;
-    apply(CATALOG[0].id, { silent: true });
+    apply(DEFAULT_ID, { silent: true });
     return current;
   }
 
@@ -637,6 +688,7 @@
     // tokens 只需给出想覆盖的令牌，其余继承当前主题的默认值。
     register: function (theme) {
       if (!theme || !theme.id || !theme.tokens) return false;
+      // 部分声明的扩展主题沿用稳定的基础令牌，不继承新默认外观的专属玻璃表面。
       var base = CATALOG[0].tokens;
       var merged = {};
       Object.keys(base).forEach(function (k) { merged[k] = base[k]; });

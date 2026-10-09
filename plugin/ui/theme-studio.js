@@ -48,6 +48,7 @@
   //   tone —— 时段，用来分组显示；也是给用户的第一层心理预期。
   // -------------------------------------------------------------------------
   var WALLPAPERS = [
+    { id: 'celestial-sky.jpg', label: '晴空绘卷', tone: '夕', lum: 94, theme: 'celestial' },
     { id: 'morning-01.jpg', label: '晨光', tone: '晨', lum: 188, theme: 'anime-dawn' },
     { id: 'morning-09.jpg', label: '晴日', tone: '晨', lum: 164, theme: 'anime-dawn' },
     { id: 'morning-14.jpg', label: '暮色起', tone: '晨', lum: 49, theme: 'anime-shinobi' },

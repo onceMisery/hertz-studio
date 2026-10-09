@@ -35,6 +35,10 @@ const OVERLAY_HTML: &str = include_str!("../../../plugin/ui/overlay.html");
 // 归 theme-studio.js 管——那些是观感问题，改配色不该动 Rust。
 const WALLPAPERS: &[(&str, &[u8])] = &[
     (
+        "celestial-sky.jpg",
+        include_bytes!("../../../plugin/ui/wallpapers/celestial-sky.jpg"),
+    ),
+    (
         "morning-01.jpg",
         include_bytes!("../../../plugin/ui/wallpapers/morning-01.jpg"),
     ),

@@ -1,0 +1,49 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 hertz-studio contributors
+ * 晴空绘卷的短暂星屑；按钮内光、浮动和焦点由主题样式统一处理。 */
+
+html[data-theme="celestial"] .anime-interactions-layer {
+  contain: strict;
+  pointer-events: none;
+}
+
+html[data-theme="celestial"] .anime-interactions-burst {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+html[data-theme="celestial"] .anime-interactions-particle {
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--anime-particle-gold, #d8b35f);
+  box-shadow: 0 0 5px rgb(235 201 126 / 35%);
+  pointer-events: none;
+  animation: anime-button-spark 280ms ease-in-out both;
+}
+
+html[data-theme="celestial"] .anime-interactions-particle:nth-child(3n) {
+  background: var(--anime-particle-cyan, #71c9d4);
+  box-shadow: 0 0 5px rgb(113 201 212 / 35%);
+}
+
+@keyframes anime-button-spark {
+  0% { transform: translate3d(0, 0, 0) rotate(45deg) scale(.5); opacity: 0; }
+  22% { opacity: .88; }
+  100% { transform: translate3d(var(--anime-spark-x), var(--anime-spark-y), 0) rotate(110deg) scale(.15); opacity: 0; }
+}
+
+html[data-theme="celestial"][data-rm~="ui"] .anime-interactions-layer,
+html[data-theme="celestial"] body.reduce-motion .anime-interactions-layer,
+html[data-theme="celestial"] body[data-rm~="ui"] .anime-interactions-layer {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme="celestial"] .anime-interactions-layer { display: none; }
+}

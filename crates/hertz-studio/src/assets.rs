@@ -37,6 +37,7 @@ ui_assets! {
     "/stage-particles.js", JS => const STAGE_PARTICLES_JS: &str = include_str!("../../../plugin/ui/stage-particles.js");
     "/stage-particles-gl.js", JS => const STAGE_PARTICLES_GL_JS: &str = include_str!("../../../plugin/ui/stage-particles-gl.js");
     "/themes.js", JS => const THEMES_JS: &str = include_str!("../../../plugin/ui/themes.js");
+    "/anime-interactions.js", JS => const ANIME_INTERACTIONS_JS: &str = include_str!("../../../plugin/ui/anime-interactions.js");
     "/shelf.js", JS => const SHELF_JS: &str = include_str!("../../../plugin/ui/shelf.js");
     "/pl-covers.js", JS => const PL_COVERS_JS: &str = include_str!("../../../plugin/ui/pl-covers.js");
     "/theme-studio.js", JS => const THEME_STUDIO_JS: &str = include_str!("../../../plugin/ui/theme-studio.js");
@@ -92,6 +93,9 @@ ui_assets! {
     "/online.css", CSS => const ONLINE_CSS: &str = include_str!("../../../plugin/ui/online.css");
     "/podcasts.css", CSS => const PODCASTS_CSS: &str = include_str!("../../../plugin/ui/podcasts.css");
     "/theme-studio.css", CSS => const THEME_STUDIO_CSS: &str = include_str!("../../../plugin/ui/theme-studio.css");
+    "/anime-ui.css", CSS => const ANIME_UI_CSS: &str = include_str!("../../../plugin/ui/anime-ui.css");
+    "/anime-stage.css", CSS => const ANIME_STAGE_CSS: &str = include_str!("../../../plugin/ui/anime-stage.css");
+    "/anime-interactions.css", CSS => const ANIME_INTERACTIONS_CSS: &str = include_str!("../../../plugin/ui/anime-interactions.css");
     "/skins/skins.css", CSS => const SKINS_CSS: &str = include_str!("../../../plugin/ui/skins/skins.css");
     "/skins/skin.sheen.css", CSS => const SKIN_SHEEN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.sheen.css");
     "/skins/skin.workbench.css", CSS => const SKIN_WORKBENCH_CSS: &str = include_str!("../../../plugin/ui/skins/skin.workbench.css");
