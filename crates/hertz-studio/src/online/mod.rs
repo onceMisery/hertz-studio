@@ -139,7 +139,18 @@ pub fn client() -> ApiResult<reqwest::Client> {
 
 /// 下载用客户端：读空闲超时放宽到 30s，不设整体超时（长曲目慢链路保活）。
 /// 供 [`progressive`] 渐进式下载器使用。
-pub fn download_client() -> ApiResult<reqwest::Client> {
+pub fn download_client(
+    source: &str,
+    candidates: &[ladder::Candidate],
+) -> ApiResult<reqwest::Client> {
+    if let Some(policy) = provider::require(source)?.download {
+        // IP literals bypass DNS resolvers, so validate initial URLs as well as
+        // the policy client's per-connection DNS and redirect destinations.
+        for candidate in candidates {
+            (policy.validate_url)(&candidate.url)?;
+        }
+        return (policy.client)();
+    }
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     Ok(CLIENT
         .get_or_init(|| {
@@ -507,6 +518,14 @@ pub fn find(source: &str) -> Option<&'static SourceInfo> {
     provider::find(source).map(|p| &p.info)
 }
 
+fn music_sources() -> impl Iterator<Item = &'static SourceInfo> {
+    SOURCES.iter().filter(|s| is_music_source(s.id))
+}
+
+pub(crate) fn is_music_source(source: &str) -> bool {
+    provider::find(source).is_some_and(|p| p.kind == provider::MediaKind::Music)
+}
+
 /// 设置页里「音质可调」的音源清单。
 ///
 /// 按 [`quality::allowed_for`] 的档位表派生，而不是按能力位：取流是公共
@@ -653,6 +672,7 @@ pub async fn list_sources(ctx: &Ctx) -> Vec<serde_json::Value> {
         out.push(serde_json::json!({
             "id": src.id,
             "label": src.label,
+            "kind": provider::require(src.id).expect("registered source").kind,
             "cats": src.cats.iter()
                 .map(|(k, v)| serde_json::json!({"id": k, "label": v}))
                 .collect::<Vec<_>>(),
@@ -691,7 +711,7 @@ pub struct DailySourceState {
 /// 批登录态下，结果不会因为并发完成顺序而变。
 pub async fn daily_source_states(ctx: &Ctx) -> Vec<DailySourceState> {
     let mut out = Vec::with_capacity(SOURCES.len());
-    for src in SOURCES {
+    for src in music_sources() {
         let state = if !source_ready(ctx, src).await {
             DailySourceState {
                 source: src.id.to_string(),
@@ -754,7 +774,7 @@ pub async fn search_all(ctx: &Ctx, query: &str, limit: usize) -> ApiResult<Aggre
     }
     let limit = limit.clamp(1, 50);
     let mut ids = Vec::new();
-    for src in SOURCES {
+    for src in music_sources() {
         if source_ready(ctx, src).await {
             ids.push(src.id);
         }
@@ -1410,9 +1430,17 @@ mod tests {
         assert!(caps_of("ccmixter").is_empty());
         // Jamendo 同为 CC 匿名曲库；可用性由 client_id 配置决定，不占能力位。
         assert!(caps_of("jamendo").is_empty());
-        // 咪咕：只有歌单搜索这一项公开能力；取流响应加密、本项目不解密，
-        // 因此不登记任何播放/高音质能力位。
-        assert_eq!(caps_of("migu"), &[Capability::PlaylistSearch]);
+        // 咪咕：公开歌单读与 Cookie 账号验证；取流遵守接口的权限结果。
+        // 有效自有账号尚待验收，不宣称扫码或高音质能力。
+        assert_eq!(
+            caps_of("migu"),
+            &[
+                Capability::CookieLogin,
+                Capability::PlaylistSearch,
+                Capability::PlaylistDetail,
+            ]
+        );
+        assert_eq!(unverified_caps("migu"), &[Capability::CookieLogin]);
     }
 
     /// 设置页的音质清单由档位表派生：有多档才给入口，单档不给。

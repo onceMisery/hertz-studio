@@ -74,9 +74,24 @@ impl QualityProfile {
     };
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum MediaKind {
+    Music,
+    Podcast,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DownloadPolicy {
+    pub client: fn() -> ApiResult<reqwest::Client>,
+    pub validate_url: fn(&str) -> ApiResult<reqwest::Url>,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Provider {
     pub info: SourceInfo,
+    pub kind: MediaKind,
+    pub download: Option<DownloadPolicy>,
     pub core: CoreOps,
     pub quality: QualityProfile,
     pub referer: Option<&'static str>,
@@ -102,6 +117,8 @@ impl Provider {
     const fn new(info: SourceInfo, core: CoreOps) -> Self {
         Self {
             info,
+            kind: MediaKind::Music,
+            download: None,
             core,
             quality: QualityProfile::STANDARD,
             referer: None,
@@ -573,6 +590,7 @@ const PROVIDERS: &[Provider] = &[
     },
     Provider {
         referer: Some("https://www.qishui.com/"),
+        unverified: &[Capability::QrLogin],
         credentials: Some(CredentialRules {
             enrich: |_| {},
             signed_in: cred::signed_in_qishui,
@@ -588,19 +606,8 @@ const PROVIDERS: &[Provider] = &[
                 label: "汽水音乐",
                 cats: &[],
                 supports_cookie: true,
-                // 登录入口有两条：粘贴 cookie，以及官方 Passport 网页接口的扫码。
-                //
-                // 扫码这条曾经是被排除的——参考实现的扫码桥接依赖伪造设备指纹与 JS
-                // 挑战求解（bdms/sdk-glue），属于规避平台风控。实测（2026-09-22）
-                // 发现官方 Passport 的 `get_qrcode` / `check_qrconnect` 裸请求即可用
-                // （error_code 0，二维码由服务端下发），既不需要 a_bogus/msToken，也
-                // 不需要任何设备指纹，所以「不伪造指纹、不求解 JS 挑战」这两条底线
-                // 仍然守住，扫码因此可以登记。唯一做不到的是上游 2046 二次验证要跑
-                // 官方 JS，遇到它回终态 mfa_required 引导走 cookie（见 qishui.rs）。
-                //
-                // 能力位只登记确实接通的东西：搜索/详情/歌词/取流走公共 dispatch；
-                // 加密音质一律不解密（如实报 vip_required），所以连 HighQuality 都不
-                // 登记——标了它等于承诺能拿到高音质，而受保护的高音质我们是拒播的。
+                // Passport 创建/轮询使用原握手票；二维码改为手机授权入口。
+                // 抖音 App 确认尚待本人验收，2046 安全验证继续引导官网 Cookie。
                 caps: &[Capability::CookieLogin, Capability::QrLogin],
             },
             CoreOps {
@@ -612,25 +619,64 @@ const PROVIDERS: &[Provider] = &[
         )
     },
     Provider {
-        referer: Some("https://y.migu.cn/"),
+        referer: Some("https://music.migu.cn/v5/"),
+        unverified: &[Capability::CookieLogin],
+        credentials: Some(CredentialRules {
+            enrich: |_| {},
+            signed_in: migu::signed_in,
+        }),
+        account: Some(|ctx| Box::pin(migu::account(ctx))),
         playlist_search: Some(|ctx, q| Box::pin(migu::search_playlists(ctx, q))),
+        playlist_detail: Some(|ctx, id, offset, limit| {
+            Box::pin(migu::playlist_detail(ctx, id, offset, limit))
+        }),
         ..Provider::new(
             SourceInfo {
                 id: "migu",
                 label: "咪咕音乐",
                 cats: &[],
-                supports_cookie: false,
-                // 只登记「歌单搜索」这一项公开能力（咪咕 H5 端点，无需签名）。
-                // 单曲搜索/详情/歌词是公共 dispatch，不占能力位；取流响应是 AES 加密
-                // 密文，本项目不解密，因此**不**登记任何播放/高音质能力位，搜索结果的
-                // playable 一律 false（见 migu.rs 模块文档）。
-                caps: &[Capability::PlaylistSearch],
+                supports_cookie: true,
+                // v5 的 pacmtoken 账号接口与公开歌单；有效本人账号仍待验收。
+                // 取流使用官方 Web 响应封装，是否有权播放以返回的 URL/权限码为准。
+                caps: &[
+                    Capability::CookieLogin,
+                    Capability::PlaylistSearch,
+                    Capability::PlaylistDetail,
+                ],
             },
             CoreOps {
                 search: |ctx, q| Box::pin(migu::search(ctx, q)),
                 stream: |ctx, id, track_ref, q| Box::pin(migu::stream(ctx, id, track_ref, q)),
                 detail: |ctx, id| Box::pin(migu::detail(ctx, id)),
                 lyric: |ctx, id| Box::pin(migu::lyric(ctx, id)),
+            },
+        )
+    },
+    Provider {
+        kind: MediaKind::Podcast,
+        download: Some(DownloadPolicy {
+            client: crate::podcasts::public_client,
+            validate_url: crate::podcasts::public_url,
+        }),
+        ..Provider::new(
+            SourceInfo {
+                id: "podcast",
+                label: "播客",
+                cats: &[],
+                supports_cookie: false,
+                caps: &[],
+            },
+            CoreOps {
+                search: |_ctx, _q| {
+                    Box::pin(async {
+                        Err(ApiError::capability_unsupported("请在播客栏目搜索节目"))
+                    })
+                },
+                stream: |ctx, id, _track_ref, _q| {
+                    Box::pin(crate::podcasts::episode_stream(ctx, id))
+                },
+                detail: |ctx, id| Box::pin(crate::podcasts::episode_detail(ctx, id)),
+                lyric: |_ctx, _id| Box::pin(async { Ok(vmusic_core::LyricDocument::empty()) }),
             },
         )
     },
@@ -706,12 +752,48 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn podcast_provider_is_visible_but_separate_from_music() {
+        let ctx = lazy_context();
+        let sources = list_sources(&ctx).await;
+        let podcast = sources
+            .iter()
+            .find(|s| s["id"] == "podcast")
+            .expect("podcasts must use the shared playback provider");
+        assert_eq!(podcast["kind"], "podcast");
+        assert_eq!(
+            sources.iter().find(|s| s["id"] == "netease").unwrap()["kind"],
+            "music"
+        );
+        assert!(!daily_source_states(&ctx)
+            .await
+            .iter()
+            .any(|s| s.source == "podcast"));
+        let query = SearchQuery {
+            source: "podcast".into(),
+            q: Some("故事".into()),
+            cat: None,
+            offset: 0,
+            limit: 20,
+        };
+        let error = registry().search(&ctx, &query).await.unwrap_err();
+        assert_eq!(error.code, "capability_unsupported");
+        assert!(error.message.contains("播客"));
+        let lyric = (require("podcast").unwrap().core.lyric)(&ctx, "episode")
+            .await
+            .unwrap();
+        assert!(lyric.lines.is_empty());
+    }
+
     #[test]
     fn builtins_validate_actual_callable_slots_and_preserve_public_order() {
         let registry = Registry::new(PROVIDERS).unwrap();
         assert_eq!(
             SOURCES.iter().map(|s| s.id).collect::<Vec<_>>(),
-            ["netease", "qq", "kugou", "kuwo", "ccmixter", "jamendo", "qishui", "migu"]
+            [
+                "netease", "qq", "kugou", "kuwo", "ccmixter", "jamendo", "qishui", "migu",
+                "podcast"
+            ]
         );
         for info in SOURCES {
             let provider = registry.require(info.id).unwrap();
@@ -915,6 +997,7 @@ mod tests {
         );
         assert!(require("ccmixter").unwrap().is_ready(&ctx).await);
         ctx.db.close().await;
-        std::fs::remove_dir_all(&dir).unwrap();
+        // Windows 上 SQLite worker 可能仍在释放句柄，临时目录清理不是能力验证。
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

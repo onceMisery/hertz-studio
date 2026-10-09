@@ -1781,6 +1781,7 @@ impl AppState {
                 .await;
             let duration_ms = self.online_duration_ms(&track_id).await;
             match crate::online::progressive::start(
+                &source,
                 dir.clone(),
                 key.clone(),
                 ladder,
@@ -2785,6 +2786,7 @@ impl AppState {
             return;
         };
         match crate::online::progressive::start(
+            &source,
             dir,
             key.clone(),
             info.ladder(),
@@ -2848,6 +2850,12 @@ impl AppState {
         track_id: String,
         trigger: PlayTrigger,
     ) -> bool {
+        let Some((failed_source, failed_id)) = crate::online::split_virtual_id(&track_id) else {
+            return false;
+        };
+        if !crate::online::is_music_source(&failed_source) {
+            return false;
+        }
         let enabled = vmusic_store::settings::get(&self.db, "online_auto_relay")
             .await
             .ok()
@@ -2857,9 +2865,6 @@ impl AppState {
         if !enabled {
             return false;
         }
-        let Some((failed_source, failed_id)) = crate::online::split_virtual_id(&track_id) else {
-            return false;
-        };
         // 匹配输入只认入队快照：重启后从歌单直播（无快照）宁可放弃接力，
         // 也不拿平台 id 当标题去搜。
         let meta = match self.online_meta.lock().await.get(&track_id).cloned() {
@@ -3517,9 +3522,12 @@ fn pick_relay_candidate(
     meta: &OnlineMetaSnap,
     occupied: &[String],
 ) -> Option<(u32, crate::online::OnlineTrack)> {
+    if !crate::online::is_music_source(failed_source) {
+        return None;
+    }
     let mut best: Option<(u32, crate::online::OnlineTrack)> = None;
     for page in pages {
-        if page.source == failed_source {
+        if page.source == failed_source || !crate::online::is_music_source(&page.source) {
             continue;
         }
         for t in &page.tracks {
@@ -4497,6 +4505,10 @@ pub(crate) mod tests {
 
         // 干净记忆：分数相同取先出现的那条（结果顺序确定，接力才可复现）。
         let mem = RelayMemory::default();
+        assert!(
+            pick_relay_candidate(&pages, &mem, "podcast", &meta, &[]).is_none(),
+            "a podcast failure must not substitute a similarly named song"
+        );
         let hit = pick_relay_candidate(&pages, &mem, "kugou", &meta, &[]).expect("应有可用候选");
         assert_eq!((hit.1.source.as_str(), hit.1.id.as_str()), ("qq", "q1"));
 

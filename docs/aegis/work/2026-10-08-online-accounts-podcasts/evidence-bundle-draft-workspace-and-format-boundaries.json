@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "workspace-and-format-boundaries",
+  "type": "check",
+  "source": "cargo fmt -p hertz-studio -p vmusic-store -- --check; git diff --check; cargo fmt --all --check; python C:/Users/miracle/.codex/aegis/scripts/aegis-workspace.py check --root .",
+  "summary": "本轮crate格式与差异空白检查退出0。全工作区格式退出1，仅既有vendor SDK lib.rs，内容与f07ac6c相同。结构检查退出1，仅未索引的hardening spec、cover-sphere reflection与并行home-quote plan，本轮记录无结构报错；不改无关文件来使检查变绿。",
+  "verifier": "root 运行并对照基线及任务文件清单"
+}

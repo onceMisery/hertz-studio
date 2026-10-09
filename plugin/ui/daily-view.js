@@ -15,6 +15,10 @@
 (function () {
   'use strict';
 
+  // 列表行里封面格的实际边长（与曲库行 .t-art 同尺寸），拿它去要 CDN 缩略图，
+  // 而不是把卡片那一档的 300px 图塞进 40px 的格子。
+  var ROW_COVER_PX = 90;
+
   /// 背景图位封面：插件形态下远程地址要经 sidecar 换成 data URL（沙箱 CSP 画不
   /// 出 https 图）。HertzCovers 由 app.js 挂出；契约检查的沙箱只加载本模块，
   /// 拿不到时回落成直接赋值，即独立形态的同款行为。
@@ -247,6 +251,13 @@
     return '曲库里还没有可推荐的曲目，先去「曲库」扫描一个音乐目录。';
   }
 
+  // 标记本身由 online.js 统一画（.vip-tag 的样式与那句解释都在那边）：
+  // 在线行、每日推荐页、首页推荐条必须用同一个节点工厂，免得同一个字段在
+  // 两个列表里长得不一样。契约检查的沙箱只加载本模块、拿不到 Online 时留空。
+  function vipTag() {
+    return window.Online && window.Online.vipTag ? window.Online.vipTag() : null;
+  }
+
   function row(item, index) {
     var el = document.createElement('button');
     el.type = 'button';
@@ -256,6 +267,18 @@
     var num = document.createElement('span');
     num.className = 'dv-num';
     num.textContent = String(index + 1);
+    // 行上也要有封面：这一栏此前只画文字，切到「列表」就像少了东西 ——
+    // 与曲库行 / 在线行同一套信息（封面 + 标题/艺术家 + 专辑 + 来源），
+    // 占位画法也共用 .dv-art.is-missing。
+    var art = document.createElement('span');
+    art.className = 'dv-art';
+    var cover = coverOf(item, ROW_COVER_PX);
+    if (cover) {
+      applyBg(art, cover);
+      art.classList.add('has-art');
+    } else {
+      art.classList.add('is-missing');
+    }
     var main = document.createElement('span');
     main.className = 'dv-main';
     var name = document.createElement('span');
@@ -266,11 +289,24 @@
     sub.textContent = item.artist || item.source_label || '未知艺术家';
     main.appendChild(name);
     main.appendChild(sub);
+    var album = document.createElement('span');
+    album.className = 'dv-album';
+    album.textContent = item.album || '—';
     var src = document.createElement('span');
     src.className = 'dv-src';
-    src.textContent = item.source_label || '本地';
+    // 来源用平台徽标而不是品牌名文字：在线行/队列行的来源位一直是图标，
+    // 这里写文字会让同一个字段在两个列表里长得不一样。badge() 自带
+    // title/aria-label，读屏与鼠标悬停仍能拿到平台名。
+    var badge = window.Online && window.Online.badge
+      ? window.Online.badge(item.source, item.source_label) : null;
+    if (badge) src.appendChild(badge);
+    else src.textContent = item.source_label || '本地';
+    var rowVip = item.vip_only ? vipTag() : null;
+    if (rowVip) src.appendChild(rowVip);
     el.appendChild(num);
+    el.appendChild(art);
     el.appendChild(main);
+    el.appendChild(album);
     el.appendChild(src);
     el.onclick = function () { playAt(index); };
     return el;
@@ -280,7 +316,8 @@
   ///   · 在线曲目：后端字段是 **cover**，且必须过 Online.safeCoverUrl——
   ///     平台外链直连会被 Referer/CORS 拦下来，safeCoverUrl 走服务端代发。
   ///   · 本地曲目：没有 cover 字段，要看 has_cover 再用宿主的 coverUrl(id) 拼。
-  function coverOf(item) {
+  /// px 是这一格实际要显示的大小：卡片 300、列表行 90（ROW_COVER_PX）。
+  function coverOf(item, px) {
     var raw = item.cover || item.cover_url || item.coverUrl || null;
     if (raw) {
       var safe = (window.Online && window.Online.safeCoverUrl)
@@ -289,7 +326,7 @@
       // 一屏几十张要等好几秒才浮出来，看起来跟"没有封面"一模一样。
       // rowCoverUrl 给 CDN 加 ?param=300y300，小图约几十 KB，几乎瞬间出现。
       return (window.Online && window.Online.rowCoverUrl)
-        ? window.Online.rowCoverUrl(safe, 300) : safe;
+        ? window.Online.rowCoverUrl(safe, px || 300) : safe;
     }
     if (item.has_cover && H && H.coverUrl && item.id) return H.coverUrl(item.id);
     return '';
@@ -311,6 +348,9 @@
       // 有封面和没封面的占位在视觉上要能分开。
       art.classList.add('is-missing');
     }
+    // 卡片没有来源列，VIP 标记贴在封面右上角（.dv-art 自己是定位锚点）。
+    var cardVip = item.vip_only ? vipTag() : null;
+    if (cardVip) art.appendChild(cardVip);
     var name = document.createElement('span');
     name.className = 'dv-name';
     name.textContent = item.title || '未知曲目';

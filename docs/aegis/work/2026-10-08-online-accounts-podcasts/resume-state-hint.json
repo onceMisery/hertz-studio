@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-10-08-online-accounts-podcasts",
+  "lastCheckpointRef": "docs/aegis/work/2026-10-08-online-accounts-podcasts/todo-checkpoint-draft.json",
+  "resumeInstruction": "当前实现已在 D:/code/github/hertz-studio；先读最终证据。不要重复集成，也不要把未执行的本人授权报告为成功。",
+  "knownPartialWork": [
+    "汽水二维码入口、参数和票据归属回归完成；真实轮询 waiting",
+    "咪咕 Cookie 账号验证、歌单和公开播放完成；无效账号与权限错误回归完成",
+    "中文播客目录、RSS、订阅、稳定单集、分页与共用播放器完成",
+    "独立审查问题全部修复并有 RED/GREEN；已三方合入原工作区",
+    "原目录 Rust 424、前端 48、DBX 280、真实浏览器、MP3/M4A 解码及重启重播通过"
+  ],
+  "mustReadBeforeContinuing": [
+    "docs/aegis/work/2026-10-08-online-accounts-podcasts/10-intent.md",
+    "docs/aegis/work/2026-10-08-online-accounts-podcasts/20-checkpoint.md",
+    "docs/aegis/work/2026-10-08-online-accounts-podcasts/todo-checkpoint-draft.json"
+  ],
+  "unsafeToAssume": [
+    "汽水手机确认与有效咪咕账号尚未验收",
+    "故事FM音频跳转证书在 2026-10-09 过期；此前 Range 成功不能证明目前仍可播",
+    "既有服务未重启；当前可执行构建在 target-online-podcasts/debug"
+  ]
+}

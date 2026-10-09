@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "review-fixes",
+  "type": "test",
+  "source": "crates/hertz-studio/src/podcasts/tests.rs; crates/hertz-studio/src/public_net.rs; scripts/check-podcasts-browser.js; output/podcasts-integrated-rust-tests.log; output/podcasts-subscription-race-red.log; output/podcasts-subscription-race-green.log; output/podcasts-capacity-red.log; output/podcasts-capacity-green.log",
+  "summary": "最终关闭慢刷新期限、分页跨SQLite快照、封面URL/DNS/重定向及6MiB逐块读取、订阅迟到响应和收录上限误报五项；独立质量审查无未关闭代码问题。先前切片406项/目录清理失败及后端待验证状态被最终424项Rust通过替代。",
+  "verifier": "独立审查者复核实现；root独立执行行为回归和最终全套"
+}

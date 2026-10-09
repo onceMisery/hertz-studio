@@ -40,6 +40,7 @@ const ui = {
   views: {
     library: $('view-library'),
     online: $('view-online'),
+    podcasts: $('view-podcasts'),
     playlists: $('view-playlists'),
     // 每日推荐：一级目的地，容器在 index.html，菜单项由 daily-view.js 注入。
     daily: $('view-daily'),
@@ -190,6 +191,9 @@ const ui = {
 
   setDevice: $('set-device'),
   setDensity: $('set-density'),
+  setHomeQuote: $('set-home-quote'),
+  setHomeQuoteCat: $('set-home-quote-cat'),
+  setHomeQuoteClick: $('set-home-quote-click'),
   setMotion: $('set-motion'),
   setCoverFollow: $('set-cover-follow'),
   settingsEntry: $('settings-entry'),
@@ -3943,6 +3947,22 @@ async function loadSettings() {
     ui.scanRoot.value = state.settings.last_scan_root;
   }
   ui.setDensity.value = state.settings.ui_density || 'comfortable';
+  // 首页名言：三项都缺省为「开 / 诗词 / 可换一条」，与下拉第一项一致。
+  // 与其它外观项一样落 settings —— 换设备时跟着走，是设置而不是运行时状态。
+  // 数据本身（名言库）只在本机 localStorage，不进服务端。
+  if (window.HomeQuote) {
+    window.HomeQuote.applySettings({
+      enabled: state.settings.home_quote !== false,
+      clickable: state.settings.home_quote_click !== false,
+    });
+    if (ui.setHomeQuote) ui.setHomeQuote.checked = state.settings.home_quote !== false;
+    if (ui.setHomeQuoteClick) ui.setHomeQuoteClick.checked = state.settings.home_quote_click !== false;
+    if (ui.setHomeQuoteCat) {
+      ui.setHomeQuoteCat.value = ['poem', 'literature', 'philosophy', 'film']
+        .indexOf(state.settings.home_quote_cat) >= 0 ? state.settings.home_quote_cat : 'poem';
+      window.HomeQuote.setCategory(ui.setHomeQuoteCat.value);
+    }
+  }
   ui.setMotion.checked = state.settings.reduce_motion === true;
   // 播放行为偏好（folia 的 queue_add_behavior / playback_entry_view）：
   // 缺省值与下拉里的第一项一致——没配过 = 旧行为。
@@ -4392,6 +4412,7 @@ function setView(name, options) {
   }
   document.body.classList.remove('column-open');
   if (name === 'online' && window.Online && !(options && options.historyOnly)) window.Online.onViewEnter();
+  if (name === 'podcasts' && window.Podcasts) window.Podcasts.onViewEnter();
   // 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
   // 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。
   if (name === 'settings') loadDiagnostics();
@@ -4492,6 +4513,9 @@ function initHomeDashboard() {
       : window.Online ? Online.safeCoverUrl(track.cover) : track.cover || '',
     applyCover: applyCoverImg, notify: (message) => toast(message, 'error') });
   bindHomeCoverMenu();
+  // 名言与播放无关，独立模块：自己读一次缓存画出来，再后台抓一次。
+  // 必须在 HomeDashboard 之后 —— 它要等 #home-quote 已进 DOM。
+  if (window.HomeQuote) window.HomeQuote.load();
 }
 
 // 首页那一格右键：把曲库行上那对「让封面位有图」的动作搬过来，省得为了补一张
@@ -5362,6 +5386,7 @@ function initPalette() {
     // --- 视图 ---
     { id: 'view-library', group: '导航', title: '转到：曲库', keywords: 'library 曲库 本地', run: () => setView('library') },
     { id: 'view-online', group: '导航', title: '转到：在线曲库', keywords: 'online 在线 搜索', run: () => setView('online') },
+    { id: 'view-podcasts', group: '导航', title: '转到：播客', keywords: 'podcast 播客 RSS', run: () => setView('podcasts') },
     { id: 'view-playlists', group: '导航', title: '转到：歌单', keywords: 'playlist 歌单', run: () => setView('playlists') },
     { id: 'view-daily', group: '导航', title: '转到：每日推荐', keywords: 'daily 推荐 每日', run: () => setView('daily') },
     { id: 'view-queue', group: '导航', title: '转到：播放队列', keywords: 'queue 队列', run: () => setView('queue') },
@@ -7516,6 +7541,32 @@ async function startApp() {
     if (Stage) Stage.setReducedMotion(ui.setMotion.checked);
     persistSettings({ reduce_motion: ui.setMotion.checked });
   };
+  // 首页名言三个开关。名言模块自己管渲染，这里只转发意图：
+  // 关掉时它把整块 hidden（不留空 div），换分类时它作废旧缓存并重抓。
+  if (ui.setHomeQuote) {
+    ui.setHomeQuote.onchange = () => {
+      markSettingsDirty();
+      state.settings.home_quote = ui.setHomeQuote.checked;
+      if (window.HomeQuote) window.HomeQuote.applySettings({ enabled: ui.setHomeQuote.checked });
+      persistSettings({ home_quote: ui.setHomeQuote.checked });
+    };
+  }
+  if (ui.setHomeQuoteClick) {
+    ui.setHomeQuoteClick.onchange = () => {
+      markSettingsDirty();
+      state.settings.home_quote_click = ui.setHomeQuoteClick.checked;
+      if (window.HomeQuote) window.HomeQuote.applySettings({ clickable: ui.setHomeQuoteClick.checked });
+      persistSettings({ home_quote_click: ui.setHomeQuoteClick.checked });
+    };
+  }
+  if (ui.setHomeQuoteCat) {
+    ui.setHomeQuoteCat.onchange = () => {
+      markSettingsDirty();
+      state.settings.home_quote_cat = ui.setHomeQuoteCat.value;
+      if (window.HomeQuote) window.HomeQuote.setCategory(ui.setHomeQuoteCat.value);
+      persistSettings({ home_quote_cat: ui.setHomeQuoteCat.value });
+    };
+  }
   // 播放行为偏好：写服务端设置表（通用 KV），启动时随 GET /v1/settings 回来。
   ui.setQueueAdd.onchange = () => {
     state.settings.queue_add_behavior = ui.setQueueAdd.value;
@@ -7805,6 +7856,7 @@ async function startApp() {
     addToPlaylistMenu: openPlaylistMenu,
   });
   window.Online.init();
+  if (window.Podcasts) window.Podcasts.bind({ play: (tracks, index) => Online.playAll(tracks, index), toast });
   // 扫码登录模块（web/online-login.js）：放在 Online.init 之后，头像 URL
   // 归一化要用它挂出的 safeCoverUrl。init() 负责在启动阶段就把顶栏头像按
   // 服务端持久化的选择恢复出来（以前只有打开登录弹窗才恢复）。

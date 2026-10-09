@@ -287,6 +287,9 @@
           // 曲目自身的来源平台。合并歌单里"这首是哪个平台的"必须看得出来，
           // 否则同名曲目来自两个平台时会像重复项。
           note: t.source_label || t.source,
+          // 视图模型自己带上这个标记：卡片由 updateCard 逐格刷新，判据要从
+          // item 上直接读，不能要求渲染层再去摸 raw。
+          vip_only: !!t.vip_only,
           raw: t,
         };
       });
@@ -614,6 +617,23 @@
     cover.classList.toggle('has-art', !!item.cover);
     cover.classList.toggle('is-missing', !item.cover);
   }
+
+    // VIP 标记：与在线行、每日推荐页共用 online.js 那个工厂。卡片会被复用
+    // （updateCard 不重建节点），所以补和摘都要管：漏摘会让上一首的 VIP
+    // 跟着数据一起留在这一格。
+    var tag = el._vipTag;
+    var wantVip = !!item.vip_only && !!(window.Online && window.Online.vipTag);
+    if (wantVip && !tag) {
+      tag = window.Online.vipTag();
+      el.appendChild(tag);
+      el._vipTag = tag;
+    } else if (!wantVip && tag) {
+      if (tag.parentNode) tag.parentNode.removeChild(tag);
+      el._vipTag = null;
+    }
+    // 标记浮在卡片右上角，所以有标记的卡片要给文字让出那一条宽度；
+    // 不腾的话长标题会从标记底下钻过去，两个东西叠在一起。
+    el.classList.toggle('is-vip', wantVip);
 
     el.onclick = function () { playAll(index); };
   }

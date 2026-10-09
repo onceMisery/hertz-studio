@@ -653,8 +653,8 @@ fn urlencode(value: &str) -> String {
 // 这里**不涉及**参考实现里 bdms/sdk-glue 那一套：既不伪造设备指纹，也不执行
 // 或求解任何 JS 挑战。实测（2026-09-22）两个端点在不带 `a_bogus`、`msToken`、
 // `account_sdk_source_info`、`device_id` 的情况下直接返回 `error_code: 0`，
-// 二维码图片还是服务端下发好的 base64 PNG。所以登录入口在「粘贴 cookie」
-// 之外多一条扫码，能力位登记 `QrLogin`。
+// 这只证明可申请握手票。服务端 PNG 指向已下线的 sdk-next 路径，不能直接
+// 展示；使用同次 token 生成官方手机授权入口，由前端二维码库绘制。
 //
 // 上游真正要求的只有 `passport_jssdk_version` 那一组**版本自述字段**：缺了
 // 它们接口回 `4031 当前版本过低，需要 2.8.8 及以上版本`（实测：只补
@@ -717,7 +717,14 @@ pub async fn qr_create(_ctx: &Ctx) -> ApiResult<QrPayload> {
     let headers = super::http::headers(None, Some(REFERER));
     let (resp_headers, payload) =
         super::http::get_json_with_headers(&client()?, &url, headers).await?;
-    let data = passport_data(&payload)?;
+    qr_payload(&payload, &resp_headers)
+}
+
+fn qr_payload(
+    payload: &serde_json::Value,
+    resp_headers: &reqwest::header::HeaderMap,
+) -> ApiResult<QrPayload> {
+    let data = passport_data(payload)?;
     let error_code = data
         .get("error_code")
         .and_then(|v| v.as_i64())
@@ -730,16 +737,24 @@ pub async fn qr_create(_ctx: &Ctx) -> ApiResult<QrPayload> {
     }
     let token = get_str(data, &["token"])
         .ok_or_else(|| ApiError::upstream_rejected("汽水音乐未返回扫码 token".to_string()))?;
-    // 服务端直接给整张 PNG（data URL）。前端 renderQr 优先用 qr_image，
-    // 所以这里不需要本地二维码库，也不需要 qrcode_index_url 那一跳。
-    let image = get_str(data, &["qrcode"]).map(str::to_string);
-    if image.is_none() {
-        return Err(ApiError::upstream_rejected(
-            "汽水音乐未返回二维码图片".to_string(),
-        ));
-    }
+    // Passport 的原图包含 /ucenter_web/app/sdk-next，实测 404。官方 PC
+    // 登录使用这个手机入口接收同一握手 token；不能让优先级更高的旧 PNG
+    // 继续逃逸到客户端。普通浏览器不能代替手机 App 完成授权。
+    let mut scan_url = super::const_url("https://bff-pc.qishui.com/light/invoke/scan_login")?;
+    scan_url.query_pairs_mut().extend_pairs([
+        ("token", token),
+        (
+            "os",
+            if cfg!(target_os = "windows") {
+                "Windows"
+            } else {
+                std::env::consts::OS
+            },
+        ),
+        ("computer_name", "Hertz Studio"),
+    ]);
     let mut jar = std::collections::BTreeMap::new();
-    absorb_cookies(&resp_headers, &mut jar);
+    absorb_cookies(resp_headers, &mut jar);
     let seed = cookie_string(&jar);
     let platform_ticket = if seed.is_empty() {
         token.to_string()
@@ -748,8 +763,8 @@ pub async fn qr_create(_ctx: &Ctx) -> ApiResult<QrPayload> {
     };
     Ok(QrPayload {
         platform_ticket,
-        qr_text: None,
-        qr_image: image,
+        qr_text: Some(scan_url.to_string()),
+        qr_image: None,
         poll_ms: QR_POLL_MS,
     })
 }
@@ -1126,6 +1141,64 @@ mod tests {
             ("tok123".to_string(), String::new())
         );
         assert_eq!(split_qr_ticket("  "), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn qr_payload_uses_mobile_login_instead_of_the_retired_passport_image() {
+        let payload = serde_json::json!({"data": {
+            "error_code": 0, "token": "fixture+/&token",
+            "qrcode": "data:image/png;base64,obsolete",
+            "qrcode_index_url": "https://bff-pc.qishui.com/ucenter_web/app/sdk-next?token=fixture"
+        }});
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::SET_COOKIE,
+            reqwest::header::HeaderValue::from_static(
+                "passport_csrf_token=fixture; Path=/; Secure",
+            ),
+        );
+        let qr = qr_payload(&payload, &headers).unwrap();
+        assert!(
+            qr.qr_image.is_none(),
+            "the client prefers images, so the retired PNG must not escape"
+        );
+        let url = reqwest::Url::parse(qr.qr_text.as_deref().unwrap()).unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("bff-pc.qishui.com"));
+        assert_eq!(url.path(), "/light/invoke/scan_login");
+        let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        assert_eq!(query.get("token").unwrap(), "fixture+/&token");
+        assert_eq!(query.get("computer_name").unwrap(), "Hertz Studio");
+        if cfg!(target_os = "windows") {
+            assert_eq!(query.get("os").unwrap(), "Windows");
+        }
+        assert_eq!(
+            split_qr_ticket(&qr.platform_ticket),
+            (
+                "fixture+/&token".into(),
+                "passport_csrf_token=fixture".into()
+            )
+        );
+    }
+
+    #[test]
+    fn qr_payload_needs_a_handshake_token_but_not_an_obsolete_png() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert!(qr_payload(
+            &serde_json::json!({"data":{"error_code":0,"token":"fixture"}}),
+            &headers
+        )
+        .is_ok());
+        assert!(qr_payload(
+            &serde_json::json!({"data":{"error_code":0,"qrcode":"image"}}),
+            &headers
+        )
+        .is_err());
+        assert!(qr_payload(
+            &serde_json::json!({"data":{"error_code":4031,"token":"fixture"}}),
+            &headers
+        )
+        .is_err());
     }
 
     #[test]

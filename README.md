@@ -51,13 +51,21 @@
 
 **在线曲库**
 
-- 音源注册表驱动：网易云 / QQ 音乐 / 酷狗 / 酷我 / 汽水 / CCmixter / Jamendo，
+- 音源注册表驱动：网易云 / QQ 音乐 / 酷狗 / 酷我 / 汽水 / 咪咕 / CCmixter / Jamendo，
   搜索、详情、歌词、试听与封面全部由本机服务代理并归一化成同一套字段；
   前端的选择框与分类由 `GET /v1/online/sources` 的能力表生成，加一个音源不用改前端
 - 登录：填入**你自己**在该站点的账号 cookie（服务端持久化、永不回显原文），或网易云 / QQ / 酷狗 / 汽水扫码；
   私人 FM 目前仅网易云
 - 在线缓存管理：占用统计、按音源清理、指定曲目豁免 LRU 回收
 - 每日推荐：本地规则引擎 + 各平台每日推荐汇总（只取已登录平台，未登录 / 无接口 / 上游失败写进 `skipped`，HTTP 恒 200）
+- 咪咕：官网登录后导入含 `pacmtoken` 的 Cookie，验证账号；支持公开歌单分页与普通音频播放，权限限制按平台响应显示。
+- 汽水：二维码使用当前手机授权入口；抖音 App 确认仍待本人验收，上游要求安全验证时可在官网登录后导入 Cookie。
+
+**中文点播播客**
+
+- 独立播客栏目，通过 Apple Podcasts 中文目录搜索节目，也可导入发布者公开 RSS。
+- 支持订阅、单集简介、分页、刷新和播放；单集进入原有队列与历史，重启或取消订阅后仍保留单集身份。
+- 支持公开分发的 MP3/M4A 等有限长度音频；直播电台与平台私有付费节目不在此入口。每个 RSS 最多解析 16 MiB、收录 2000 个可播放单集。
 
 ![在线曲库：音源选择、分类与私人 FM](docs/images/ui-online.png)
 
@@ -227,6 +235,9 @@ hertz-studio v0.1.0
 | POST                | `/v1/online/play`                                  | 取地址 → 落盘缓存 → 用 `online:` 虚拟 id 走本地同一套播放链路 |
 | POST                | `/v1/online/cookie`                                | `{ source, cookie }` 保存 / 清除用户自有账号凭据           |
 | POST                | `/v1/online/qr/start` · GET `/v1/online/qr/poll`   | 扫码登录                                                 |
+| GET                 | `/v1/podcasts/search?q=&limit=`                    | 搜索中文播客目录，返回节目列表                              |
+| GET                 | `/v1/podcasts/feed?url=&offset=&limit=&refresh=`   | 读取公开 RSS，返回节目及分页单集                            |
+| GET · POST · DELETE | `/v1/podcasts/subscriptions[/{id}]`                | 订阅列表、导入 RSS（`{feed_url}`）、取消订阅                 |
 | GET · POST          | `/v1/remote/roots` · `…/browse` · `…/import`       | WebDAV 远程来源                                          |
 | WS                  | `/ws?token=…`                                      | 事件下发，见下                                              |
 
@@ -235,7 +246,7 @@ hertz-studio v0.1.0
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 119 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 96 条 `.route()`），另有 `main.rs` 挂的 5 条路由与 79 条内嵌静态资源路由。
+REST 路由表共 124 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 100 条 `.route()`），另有 `main.rs` 挂的 5 条路由与 82 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -327,6 +338,11 @@ REST 路由表共 119 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | POST | `/v1/playlists/{id}/tracks` |
 | PUT | `/v1/playlists/{id}/tracks/order` |
 | DELETE | `/v1/playlists/{id}/tracks/{track_id}` |
+| GET | `/v1/podcasts/feed` |
+| GET | `/v1/podcasts/search` |
+| GET | `/v1/podcasts/subscriptions` |
+| POST | `/v1/podcasts/subscriptions` |
+| DELETE | `/v1/podcasts/subscriptions/{id}` |
 | GET | `/v1/recommend/daily` |
 | GET | `/v1/recommend/daily/online` |
 | GET | `/v1/remote/roots` |
@@ -371,7 +387,7 @@ WebSocket 事件共 8 种（`state` / `spectrum` / `ended` / `error` / `scan` /
 
 ### 在线音源的边界
 
-接入网易云音乐、QQ 音乐、酷狗音乐、酷我音乐、汽水音乐五个平台，以及 CCmixter 与 Jamendo
+接入网易云音乐、QQ 音乐、酷狗音乐、酷我音乐、汽水音乐、咪咕音乐，以及 CCmixter 与 Jamendo
 两个 CC 授权开放曲库（Jamendo 需在 https://devportal.jamendo.com 免费注册 client_id 后经
 `PUT /v1/settings` 写入键 `jamendo_client_id`，未配置时自动隐藏）。对接用的是两类东西：
 平台**网页端/自家客户端公开使用的端点**（含这些端点要求的请求签名，如酷狗的 MD5 签名、
@@ -389,12 +405,13 @@ QQ 的 `zzc` 搜索签名与 vkey 取流、酷我移动端的变形 DES 载荷�
 能力失败一律如实上报：某源不支持的能力返回 `404 capability_unsupported`，
 聚合搜索里失败的源进 `failed` 列表而不是被伪装成空结果。
 
-凭据的处理：`/v1/online/cookie` 写进设置表，`GET /v1/settings` 会把它过滤掉
-（只回 `signedIn` 布尔），`PUT /v1/settings` 直接拒绝写这类键。服务默认只监听回环地址且需要
-bearer token，cookie 只会作为 `Cookie:` 头发给该音源站点自己。
+凭据的处理：`/v1/online/cookie` 写入系统凭据保险库，`GET /v1/settings` 不回显凭据，
+`PUT /v1/settings` 拒绝写这类键。`signedIn` 是兼容的本地凭据形状提示，登录弹窗另查平台账号接口确认有效性。
+服务默认只监听回环地址且需要 bearer token，平台凭据仅发给对应平台的官方接口。
 
 加一个音源的成本写在 `crates/hertz-studio/src/online/mod.rs` 的模块注释里：一个源文件 +
-注册表一行 + dispatch 一个分支，界面由 `/v1/online/sources` 的能力表自动驱动。
+Provider 注册项，界面由 `/v1/online/sources` 的能力表自动驱动。播客 Provider 的媒体种类为
+`podcast`，通过同一播放器取流，但不参加音乐搜索、每日推荐或歌曲换源匹配；节目与 RSS API 独立提供。
 
 ---
 

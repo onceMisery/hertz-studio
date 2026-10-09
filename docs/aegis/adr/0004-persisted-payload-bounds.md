@@ -26,7 +26,7 @@
 | 名称类字段长度（字符） | 1000 | `crates/vmusic-store/src/limits.rs::MAX_NAME_CHARS` | 标题/歌手/专辑/歌单名共用一个上限 |
 | URL 字段长度（字符） | 4096 | `crates/vmusic-store/src/limits.rs::MAX_URL_CHARS` | `cover` 只该放 URL：图本身走封面缓存目录，进库就是把缓存当数据 |
 | m3u 内容上限（字节） | 8388608 | `crates/vmusic-store/src/limits.rs::MAX_M3U_BYTES` | 导入的读文件循环 —— 先验长度再逐行解析 |
-| HTTP 请求体上限（字节） | 6291456 | `crates/hertz-studio/src/routes.rs::MAX_BYTES` | 与上面的载荷上限相乘才是内存峰值 |
+| 远程封面读取上限（字节） | 6291456 | `crates/hertz-studio/src/routes.rs::MAX_REMOTE_IMAGE_BYTES` | 在每个响应块写入前检查，拒绝超大或无结束图片流 |
 | 诊断日志单文件上限（字节） | 2097152 | `crates/hertz-studio/src/diag.rs::MAX_BYTES` | 裁剪保留最新一半；两阶段写不许退回 `File::create` |
 | 诊断字段值上限（字符） | 220 | `crates/hertz-studio/src/diag.rs::MAX_VALUE_CHARS` | 上游错误消息可能整段 HTML |
 | 扫描错误样本上限 | 50 | `crates/hertz-studio/src/scan.rs::MAX_ERRORS` | 进度接口的响应大小 |

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "candidateDocs": [
+    "docs/aegis/specs/2026-10-08-online-accounts-podcasts-brief.md",
+    "docs/aegis/adr/0009-extension-registries.md",
+    "docs/aegis/adr/0001-online-playback-limits.md",
+    "docs/aegis/adr/0004-persisted-payload-bounds.md",
+    "docs/extension-guide.md"
+  ],
+  "whyRelevant": "已核对 Provider/队列归属、扩展注册、持久化预算与网络边界，并回填 ADR-0001/0004/0009。",
+  "missingAuthority": []
+}

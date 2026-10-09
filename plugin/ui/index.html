@@ -23,6 +23,7 @@
 <link rel="stylesheet" href="stanza/stanza.css">
 <link rel="stylesheet" href="stanza/stanza-starborn.css">
 <link rel="stylesheet" href="online.css">
+<link rel="stylesheet" href="podcasts.css">
 <link rel="stylesheet" href="home-dashboard.css">
 <!-- 主题工作室：壁纸背景层与壁纸画廊。排在 style.css 之后（同特异性整块胜出），
      与 online.css 同一层次——都是"在既有布局之上再铺一层"的模块。 -->
@@ -62,6 +63,10 @@
 <!-- 统一图标库：全站只维护这一份 24×24 SVG symbol；页面中通过
      use 节点引用对应 symbol，避免同形图标散落多份。 -->
 <svg id="icon-sprite" width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <symbol id="i-headphones" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 14v-3a9 9 0 0 1 18 0v3"/>
+    <rect x="3" y="12" width="4" height="8" rx="2"/><rect x="17" y="12" width="4" height="8" rx="2"/>
+  </symbol>
   <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <circle cx="11" cy="11" r="7"/>
     <path d="M16 16l5 5" stroke-linecap="round"/>
@@ -347,6 +352,10 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-globe"/></svg>
       <span>在线</span>
     </button>
+    <button class="rail-item" data-view="podcasts" aria-label="播客">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-headphones"/></svg>
+      <span>播客</span>
+    </button>
     <button class="rail-item" data-view="playlists" aria-label="歌单">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-playlist"/></svg>
       <span>歌单</span>
@@ -413,16 +422,43 @@
       <section class="home-dashboard" id="home-dashboard" aria-label="继续聆听与常用入口">
         <div class="home-layout">
           <div class="home-primary">
-            <div class="home-copy">
-              <span class="home-status" id="home-status">开始聆听</span>
-              <h2 class="home-title" id="home-title">从喜欢的音乐开始</h2>
-              <p class="home-detail" id="home-detail">选择本地目录，或浏览已有曲库</p>
+            <!-- 左列：封面 + 主操作。封面是这张卡的视觉锚点，
+                 歌名歌手**不再常驻**（右上那句带过），改成悬停/聚焦时
+                 从封面底部浮出——这样右列整块可以留给名言。 -->
+            <div class="home-left">
+              <div class="home-art-wrap" id="home-art-wrap" tabindex="0" role="img"
+                   aria-label="当前封面，聚焦显示歌名与歌手">
+                <div class="art-tip" aria-hidden="true">
+                  <b id="home-tip-title">—</b><small id="home-tip-artist"></small>
+                </div>
+                <img class="home-art" id="home-art" alt="">
+              </div>
               <div class="home-actions">
                 <button class="btn primary" id="home-action" type="button">去曲库</button>
                 <button class="btn" id="home-retry" type="button" hidden>重试最近播放</button>
               </div>
             </div>
-            <div class="home-art-wrap" id="home-art-wrap" aria-hidden="true"><img class="home-art" id="home-art" alt=""></div>
+            <div class="home-copy">
+              <!-- 状态行右侧带一句「曲名 - 歌手」：封面浮层只在指针/键盘下出现，
+                   没有这一行的兜底，默认状态下就看不出在放哪首。 -->
+              <div class="home-headline">
+                <span class="home-status" id="home-status">开始聆听</span>
+                <span class="home-track" id="home-track" hidden></span>
+              </div>
+              <div class="home-detail" id="home-detail">选择本地目录，或浏览已有曲库</div>
+              <!-- 每日名言：左列定宽之后，右列整块都空着，正好放它。
+                   取不到内容时降级成一句提示（见 home-quote.js），不留白。 -->
+              <div class="home-quote" id="home-quote" hidden>
+                <span class="home-quote-bar" aria-hidden="true"></span>
+                <div class="home-quote-main">
+                  <p class="home-quote-text" id="home-quote-text"></p>
+                  <div class="home-quote-actions" id="home-quote-actions" hidden>
+                    <button class="home-quote-btn" id="home-quote-next" type="button">换一条</button>
+                    <span class="home-quote-count" id="home-quote-count"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
           <nav class="home-links" aria-label="音乐入口">
             <button class="home-link" id="home-library" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-library"/></svg><span><strong>音乐库</strong><small>浏览本地歌曲</small></span></button>
@@ -513,6 +549,59 @@
 
     <!-- 在线曲库：搜索 + 分类浏览 + 试听。数据经服务端代理，
          避开浏览器对第三方音乐接口的 CORS 限制。 -->
+    <!-- 播客 -->
+    <div class="view" id="view-podcasts" hidden>
+      <div class="col-head"><div class="col-head-left"><h2>播客</h2><span class="podcast-intro">中文节目 · 公开 RSS</span></div></div>
+      <p id="podcast-status" class="podcast-status" role="status" aria-live="polite"></p>
+      <div class="podcast-scroll">
+        <div id="podcast-browse">
+          <form id="podcast-search" class="podcast-search" role="search">
+            <input id="podcast-query" type="search" aria-label="搜索播客节目" placeholder="搜索节目名或主播名…" maxlength="200" autocomplete="off">
+            <button class="btn primary" type="submit">搜索节目</button>
+          </form>
+          <div class="podcast-toolbar"><div class="podcast-tabs" aria-label="播客浏览">
+            <button type="button" class="btn active" data-podcast-tab="discover" aria-pressed="true">发现节目</button>
+            <button type="button" class="btn" data-podcast-tab="subscriptions" aria-pressed="false">我的订阅</button>
+          </div></div>
+          <details id="podcast-import-details" class="podcast-import-details">
+            <summary>添加 RSS 订阅</summary>
+            <label for="podcast-feed-url">发布者的公开 RSS 地址</label>
+            <form id="podcast-import" class="podcast-import">
+              <input id="podcast-feed-url" type="url" placeholder="https://…" maxlength="2048" required>
+              <button id="podcast-import-submit" type="submit" class="btn">订阅 RSS</button>
+            </form>
+          </details>
+          <div id="podcast-results" class="podcast-results"></div>
+          <div id="podcast-empty" class="podcast-empty">
+            <h3 id="podcast-empty-title">从一个感兴趣的节目开始</h3>
+            <p id="podcast-empty-text">搜索中文节目，也可以直接添加公开 RSS。</p>
+            <div id="podcast-suggestions" class="podcast-suggestions">
+              <button type="button" class="btn" data-podcast-query="故事FM">故事FM</button>
+              <button type="button" class="btn" data-podcast-query="忽左忽右">忽左忽右</button>
+              <button type="button" class="btn" data-podcast-query="声东击西">声东击西</button>
+            </div>
+          </div>
+        </div>
+        <div id="podcast-detail" hidden>
+          <button id="podcast-back" class="btn" type="button">返回节目</button>
+          <div class="podcast-detail-head">
+            <div id="podcast-show-cover"></div>
+            <div class="podcast-detail-copy"><h2 id="podcast-show-title"></h2><p id="podcast-show-author"></p>
+              <div class="podcast-detail-actions">
+                <button id="podcast-subscribe" class="btn primary" type="button">订阅节目</button>
+                <button id="podcast-feed-refresh" class="btn" type="button">刷新单集</button>
+              </div>
+            </div>
+          </div>
+          <div id="podcast-show-description" class="podcast-show-description"></div>
+          <div class="podcast-episode-heading"><span id="podcast-episode-count">单集</span><button id="podcast-play-loaded" class="btn" type="button">播放已加载单集</button></div>
+          <p id="podcast-capacity" class="podcast-capacity" hidden></p>
+          <div id="podcast-episodes"></div>
+          <button id="podcast-more" class="btn podcast-more" type="button" hidden>加载更多单集</button>
+        </div>
+      </div>
+    </div>
+    <!-- /播客 -->
     <div class="view" id="view-online" hidden>
       <div class="col-head">
         <div class="col-head-left">
@@ -1085,6 +1174,28 @@
             <option value="comfortable">标准</option>
             <option value="compact">紧凑</option>
           </select>
+        </div>
+        <!-- 首页名言：封面左置之后，右列整块空着，正好放一句每日名言。
+             抓一次就存本地，之后「换一条」只在本地缓存里转 —— 一言网限 QPS
+             且会屏蔽大流量站点，不能每次点击都打网络。取不到时用内置兜底，
+             界面上会如实标成兜底（data-fallback），不留空白。 -->
+        <div class="set-row">
+          <label for="set-home-quote">首页显示每日名言</label>
+          <input id="set-home-quote" type="checkbox" checked aria-describedby="set-home-quote-note">
+          <span class="hint" id="set-home-quote-note">在首页「正在播放」卡片右侧显示一句名言；关闭后整块不显示，卡片恢复原样</span>
+        </div>
+        <div class="set-row">
+          <label for="set-home-quote-cat">名言分类</label>
+          <select id="set-home-quote-cat">
+            <option value="poem">诗词</option>
+            <option value="literature">文学</option>
+            <option value="philosophy">哲学</option>
+            <option value="film">影视台词</option>
+          </select>
+        </div>
+        <div class="set-row">
+          <label for="set-home-quote-click">点击名言可换一条</label>
+          <input id="set-home-quote-click" type="checkbox" checked>
         </div>
         <div class="set-row">
           <label for="set-motion">减少动效</label>
@@ -1705,8 +1816,10 @@
     </div>
     <div id="qr-canvas" class="qr-canvas"></div>
     <div id="qr-status" class="qr-status">正在生成二维码…</div>
-    <details class="qr-cookie-fallback">
+    <details id="qr-cookie-panel" class="qr-cookie-fallback">
       <summary>手动粘贴 cookie</summary>
+      <p id="qr-cookie-help">先在平台官网完成登录，再复制该平台的 cookie。</p>
+      <a id="qr-official-login" href="https://music.migu.cn/v5" target="_blank" rel="noopener noreferrer" hidden>打开咪咕音乐官网</a>
       <textarea id="qr-cookie-input" rows="3" placeholder="粘贴该平台的完整 cookie"></textarea>
       <button id="qr-cookie-save" type="button">保存</button>
     </details>
@@ -1881,6 +1994,7 @@
 <script defer src="vendor/qrcode.js"></script>
 <script defer src="online-login.js"></script>
 <script defer src="online.js"></script>
+<script defer src="podcasts.js"></script>
 <script defer src="online-playlists.js"></script>
 <script defer src="online-playlist-view.js"></script>
 <script defer src="topsearch.js"></script>
@@ -1890,6 +2004,7 @@
 <script defer src="daily.js"></script>
 <script defer src="daily-view.js"></script>
 <script defer src="home-dashboard.js"></script>
+<script defer src="home-quote.js"></script>
 <!-- 命令面板：只提供引擎与 UI，命令由 app.js 启动时用自己的闭包注册，
      所以必须在 app.js 之前加载。Ctrl+K 唤起。 -->
 <script defer src="palette.js"></script>

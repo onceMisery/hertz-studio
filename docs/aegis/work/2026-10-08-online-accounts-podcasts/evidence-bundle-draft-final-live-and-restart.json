@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "final-live-and-restart",
+  "type": "test",
+  "source": "output/online-podcasts-live-final.log; output/online-podcasts-integrated-browser.log; output/online-podcasts-restart.log; output/storyfm-tls-diagnostic.log; output/playwright/online-podcasts/",
+  "summary": "隔离CPAL且volume=0，咪咕公共歌曲、声东击西MP3、忽左忽右M4A实际解码推进超过1200ms。合并后构建重启保留订阅和稳定ID重播。最终Chrome六皮肤/搜索/订阅/分页/导入/播放/窄屏/无效咪咕会话通过且无pageerror；上一次Node控制连接超时保留在原日志，独立浏览器重跑成功。手机确认、有效本人会话、人工听音未覆盖；故事FM音频证书过期。置信度B。",
+  "verifier": "root 执行真实服务、Chrome及独立TLS请求，查看最终截图"
+}

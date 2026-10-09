@@ -1009,6 +1009,30 @@ async function main() {
       olSourceList.every((s) => Array.isArray(s.caps)),
       '每个音源都带 caps 能力位数组（前端据此隐藏入口而不是点了才报错）',
     );
+    ok(
+      olSourceList.every((s) => ['music', 'podcast'].includes(s.kind)),
+      '媒体种类由 Provider 注册表输出，DBX 与 HTTP 使用同一载荷',
+    );
+    eq(olSourceList.find((s) => s.id === 'podcast')?.kind, 'podcast', '播客进入共用播放源注册表');
+    const miguSource = olSourceList.find((s) => s.id === 'migu');
+    ok(miguSource?.supportsCookie && miguSource.caps.includes('cookie_login'), '咪咕 Cookie 登录入口可达');
+    ok(miguSource?.caps.includes('playlist_detail') && !miguSource.caps.includes('qr_login'), '咪咕开放歌单详情且不宣称扫码能力');
+    ok(miguSource?.unverified.includes('cookie_login'), '咪咕本人账号授权仍保留待验收标注');
+
+    const podcastSubscriptions = await client.send('v1/podcasts/subscriptions', { op: 'GET' });
+    eq(podcastSubscriptions.result?.status, 200, 'DBX 播客订阅列表路由可达');
+    eq(podcastSubscriptions.result?.body?.shows?.length, 0, '新数据目录初始无播客订阅');
+    const podcastBlankSearch = await client.send('v1/podcasts/search', { op: 'GET', query: { q: '  ' } });
+    eq(podcastBlankSearch.result?.status, 400, '播客空查询在网络请求前拒绝');
+    const podcastPrivateFeed = await client.send('v1/podcasts/feed', {
+      op: 'GET', query: { url: 'http://127.0.0.1/private.xml' },
+    });
+    eq(podcastPrivateFeed.result?.status, 400, '播客 RSS 拒绝本机地址');
+    eq(podcastPrivateFeed.result?.body?.error?.source, 'podcast', '播客 URL 错误携带媒体来源');
+    const podcastPrivateSubscription = await client.send('v1/podcasts/subscriptions', {
+      op: 'POST', body: { feed_url: 'http://10.0.0.1/private.xml' },
+    });
+    eq(podcastPrivateSubscription.result?.status, 400, '播客订阅使用相同的公网地址校验');
     const noCookieSource = olSourceList.find((s) => s.supportsCookie === false);
     ok(!!noCookieSource, '清单里有一个不需要登录的音源可供后续断言');
 

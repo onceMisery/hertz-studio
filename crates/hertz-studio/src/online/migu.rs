@@ -3,42 +3,49 @@
 
 //! 咪咕音乐音源。
 //!
-//! 端点来自咪咕网页/移动 H5（基址 `https://c.musicapp.migu.cn`，2026-10 拿到
-//! 的公开接口），**均无需请求签名**，只需一组固定的移动端请求头即可调用：
+//! 端点来自咪咕官网 v5 / 移动 H5（`https://c.musicapp.migu.cn`）。
 //!
 //!   - 单曲搜索：`/v1.0/content/search_all.do`（`searchSwitch.song=1`）
 //!   - 歌单搜索：同一个 search_all.do（`searchSwitch.songList=1`），本音源
 //!     参与在线歌单搜索的能力就在这里；
 //!   - 单曲详情：`/v1.0/content/resourceinfo.do?copyrightId=&resourceType=2`
 //!   - 歌词：详情里的 `lrcUrl` 直链，就是普通 LRC 文本。
+//!   - 账号：`/user/h5/user-info/v1.0`，用户 Cookie 的 `pacmtoken` 作同名请求头。
+//!   - 歌单：`/resource/playlist/v2.0` 元数据及独立的 1-based 曲目分页接口。
+//!   - 取流：`/strategy/pc/listen/v2.0` 的标准 PQ 普通音频直链。
 //!
-//! ## 为什么明确不支持播放
+//! ## 授权与响应编码
 //!
-//! 取流端点 `/strategy/listen-url/h5/v2.4` 的响应体是 AES 加密的 hex 密文，
-//! 本地无法解析。本项目不碰加密内容（见 `online/mod.rs` 模块文档的边界），
-//! 所以这里**绝不解密、绝不伪造一个能播的地址**：搜索结果的 `playable`
-//! 一律 false，[`stream`] 直接回显式错误。等平台改为下发明文直链时再放开。
+//! 官网 SDK 的 `signature: 1` 是 API JSON 信封编码，不是音频 DRM。
+//! 这里仅按公开协议还原 JSON；先验证平台错误码与 `cannotCode`，再接受 HTTP(S)
+//! 地址。不解密音频、不绕过会员限制。Cookie 形状只表示已保存凭据；账号接口
+//! 验证会话，真实取流结果裁决本首权限。未知会员等级与码率都保持未知。
 //!
 //! ## 其余取舍
 //!
 //! 搜索结果不带时长（`length` 只在详情里有），所以搜索阶段 `duration_ms` 记 0，
-//! 由详情的 `length`（形如 "00:03:02"）折成毫秒补齐。歌单条目上游**没有
-//! description 字段**，`OnlinePlaylist.description` 因此恒为 None。
+//! 由详情的 `length`（形如 "00:03:02"）折成毫秒补齐。歌单搜索无简介，详情的
+//! `summary` 则如实返回。曲目分页的空尾页会把 totalCount 置零，总数以元数据为准。
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use serde_json::Value;
 
 use super::{
-    bad_request, client, const_url, https_url, parse_clock_ms, ApiError, ApiResult, Ctx,
-    OnlineDetail, OnlinePlaylist, OnlineTrack, PlaylistSearchPage, SearchPage, SearchQuery,
-    StreamInfo,
+    bad_request, client, const_url, cred, https_url, parse_clock_ms, AccountInfo, ApiError,
+    ApiResult, Ctx, OnlineDetail, OnlinePlaylist, OnlineTrack, PlaylistDetail, PlaylistSearchPage,
+    ProfileMembership, SearchPage, SearchQuery, StreamInfo, TrackRef,
 };
 
 pub const ID: &str = "migu";
 
 const SEARCH_URL: &str = "https://c.musicapp.migu.cn/v1.0/content/search_all.do";
-const RESOURCE_URL: &str = "https://c.musicapp.migu.cn/v1.0/content/resourceinfo.do";
-const REFERER: &str = "https://y.migu.cn/";
+const API_BASE: &str = "https://c.musicapp.migu.cn/";
+const REFERER: &str = "https://music.migu.cn/v5/";
+const PLAYLIST_PAGE_SIZE: usize = 50;
+/// 与 ADR-0001 的通用上游文本预算一致；累计 chunk 时即拒绝，不先无限读入内存。
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+/// 官网 @migusdk-617e3513.js 的 J5[0]：公开的 JSON 信封种子，不是媒体密钥。
+const ENVELOPE_SEED: &[u8] = b"Jk8qzuePiJ1qE3mDYhLQ3T73DtDoAhLP";
 /// 咪咕 H5 认移动版 UA；桌面 UA 下 search_all.do 可能返回空结果。
 const MOBILE_UA: &str = "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 \
                         (KHTML, like Gecko) Chrome/122.0 Mobile Safari/537.36";
@@ -70,6 +77,358 @@ fn headers() -> HeaderMap {
         HeaderValue::from_static("h5page"),
     );
     h
+}
+
+/// 只检查能作为请求头发送的凭据形状；不据此断言会话有效或账号具有会员权益。
+pub(super) fn signed_in(pack: &cred::CredPack) -> bool {
+    token_header(pack).is_some()
+}
+
+fn token_header(pack: &cred::CredPack) -> Option<HeaderValue> {
+    let token = cred::cookie_field(&pack.cookie, "pacmtoken")?.trim();
+    if token.is_empty()
+        || matches!(token, "null" | "undefined")
+        || !token.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return None;
+    }
+    let mut header = HeaderValue::from_str(token).ok()?;
+    header.set_sensitive(true);
+    Some(header)
+}
+
+/// 平台请求共用现有连接池；基址可由模块测试换成真实的本地 HTTP 服务。
+/// 取流整次 20 秒期限仍由 online::stream 持有，不在每个请求上重新计时。
+struct MiguApi {
+    http: reqwest::Client,
+    base: reqwest::Url,
+    headers: HeaderMap,
+}
+
+impl MiguApi {
+    fn new(pack: Option<&cred::CredPack>) -> ApiResult<Self> {
+        let mut request_headers = headers();
+        if let Some(token) = pack.and_then(token_header) {
+            request_headers.insert(HeaderName::from_static("pacmtoken"), token);
+        }
+        Ok(Self {
+            http: client()?,
+            base: const_url(API_BASE)?,
+            headers: request_headers,
+        })
+    }
+
+    fn url(&self, path: &str, params: &[(&str, &str)]) -> ApiResult<reqwest::Url> {
+        let mut url = self
+            .base
+            .join(path)
+            .map_err(|_| ApiError::internal("咪咕接口地址无效"))?;
+        url.query_pairs_mut().extend_pairs(params.iter().copied());
+        Ok(url)
+    }
+
+    async fn json(&self, path: &str, params: &[(&str, &str)]) -> ApiResult<Value> {
+        let response = self
+            .http
+            .get(self.url(path, params)?)
+            .headers(self.headers.clone())
+            .send()
+            .await
+            .map_err(super::http::send_error)?;
+        let bytes = read_response(response).await?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| ApiError::upstream_rejected("咪咕接口未返回有效 JSON"))
+    }
+
+    async fn resource_info(&self, cid: &str) -> ApiResult<Value> {
+        let body = self
+            .json(
+                "/v1.0/content/resourceinfo.do",
+                &[("copyrightId", cid), ("resourceType", "2")],
+            )
+            .await?;
+        check_code(&body)?;
+        Ok(body
+            .get("resource")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .cloned()
+            .unwrap_or(Value::Null))
+    }
+
+    async fn account(&self) -> ApiResult<AccountInfo> {
+        parse_account(&self.json("/user/h5/user-info/v1.0", &[]).await?)
+    }
+
+    async fn playlist_detail(
+        &self,
+        id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> ApiResult<PlaylistDetail> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(bad_request("缺少歌单 id"));
+        }
+        let body = self
+            .json("/resource/playlist/v2.0", &[("playlistId", id)])
+            .await?;
+        let playlist = parse_playlist_metadata(&body)?;
+        let total = playlist.track_count;
+        let mut remaining = total
+            .saturating_sub(offset as u64)
+            .min(limit.clamp(1, 100) as u64) as usize;
+        let mut tracks = Vec::with_capacity(remaining);
+        let mut page = offset / PLAYLIST_PAGE_SIZE + 1;
+        let mut skip = offset % PLAYLIST_PAGE_SIZE;
+        while remaining > 0 {
+            let page_no = page.to_string();
+            let page_size = PLAYLIST_PAGE_SIZE.to_string();
+            let body = self
+                .json(
+                    "/MIGUM3.0/resource/playlist/song/v2.0",
+                    &[
+                        ("playlistId", id),
+                        ("pageNo", &page_no),
+                        ("pageSize", &page_size),
+                    ],
+                )
+                .await?;
+            let songs = response_data(&body)?
+                .get("songList")
+                .and_then(Value::as_array)
+                .ok_or_else(|| ApiError::upstream_rejected("咪咕未返回歌单曲目列表"))?;
+            let take = remaining.min(songs.len().min(PLAYLIST_PAGE_SIZE).saturating_sub(skip));
+            tracks.extend(
+                songs
+                    .iter()
+                    .skip(skip)
+                    .take(take)
+                    .filter_map(map_playlist_track),
+            );
+            remaining -= take;
+            if songs.len() < PLAYLIST_PAGE_SIZE || take == 0 {
+                break;
+            }
+            page += 1;
+            skip = 0;
+        }
+        Ok(PlaylistDetail {
+            playlist,
+            total,
+            tracks,
+        })
+    }
+
+    async fn stream(&self, cid: &str, track_ref: Option<&TrackRef>) -> ApiResult<StreamInfo> {
+        let cid = cid.trim();
+        if cid.is_empty() {
+            return Err(bad_request("缺少曲目 id"));
+        }
+        let content_id = track_ref
+            .filter(|reference| {
+                reference
+                    .get("copyrightId")
+                    .and_then(val_string)
+                    .is_none_or(|reference_id| reference_id == cid)
+            })
+            .and_then(|reference| reference.get("contentId"))
+            .and_then(val_string)
+            .filter(|value| !value.trim().is_empty());
+        let content_id = match content_id {
+            Some(content_id) => content_id,
+            None => self
+                .resource_info(cid)
+                .await?
+                .get("contentId")
+                .and_then(val_string)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| ApiError::upstream_rejected("咪咕未返回该曲目的内容 ID"))?,
+        };
+        let url = self.url(
+            "/strategy/pc/listen/v2.0",
+            &[
+                ("contentId", &content_id),
+                ("copyrightId", cid),
+                ("resourceType", "2"),
+                ("netType", "01"),
+                ("toneFlag", "PQ"),
+                ("scene", ""),
+            ],
+        )?;
+        let mut request_headers = self.headers.clone();
+        request_headers.insert(
+            HeaderName::from_static("birth"),
+            HeaderValue::from_static("h5page"),
+        );
+        request_headers.insert(
+            HeaderName::from_static("signature"),
+            HeaderValue::from_static("1"),
+        );
+        request_headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json;charset=UTF-8"),
+        );
+        let response = self
+            .http
+            .get(url)
+            .headers(request_headers)
+            .send()
+            .await
+            .map_err(super::http::send_error)?;
+        parse_stream(&decode_envelope(&read_response(response).await?)?, cid)
+    }
+}
+
+async fn read_response(mut response: reqwest::Response) -> ApiResult<Vec<u8>> {
+    let status = response.status();
+    if !status.is_success() {
+        return Err(ApiError::upstream_rejected(format!(
+            "咪咕接口返回 HTTP {status}"
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(ApiError::upstream_rejected("咪咕接口响应超过 2 MiB 上限"));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(super::http::read_error)? {
+        if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+            return Err(ApiError::upstream_rejected("咪咕接口响应超过 2 MiB 上限"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn decode_envelope(bytes: &[u8]) -> ApiResult<Value> {
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(ApiError::upstream_rejected("咪咕接口响应超过 2 MiB 上限"));
+    }
+    if bytes.len() <= 4 || bytes[..3] != [0xab, 0xcd, 0x01] {
+        return Err(ApiError::upstream_rejected("咪咕取流响应信封无效或不完整"));
+    }
+    let offset = bytes[3];
+    let decoded: Vec<u8> = bytes[4..]
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            byte.wrapping_add(offset)
+                .wrapping_sub(ENVELOPE_SEED[index % ENVELOPE_SEED.len()])
+        })
+        .collect();
+    serde_json::from_slice(&decoded)
+        .map_err(|_| ApiError::upstream_rejected("咪咕取流响应不含有效 JSON"))
+}
+
+fn platform_error(code: Option<&str>) -> ApiError {
+    match code {
+        Some("290001") => ApiError::auth_required("请登录咪咕或重新导入有效 Cookie"),
+        Some("440013") => ApiError::vip_required("咪咕要求该曲目具备会员播放权益（440013）"),
+        _ => ApiError::upstream_rejected("咪咕未允许本次请求"),
+    }
+}
+
+fn check_code(body: &Value) -> ApiResult<()> {
+    match body.get("code").and_then(Value::as_str) {
+        Some("000000") => Ok(()),
+        code => Err(platform_error(code)),
+    }
+}
+
+fn response_data(body: &Value) -> ApiResult<&Value> {
+    check_code(body)?;
+    body.get("data")
+        .filter(|data| data.is_object())
+        .ok_or_else(|| ApiError::upstream_rejected("咪咕接口缺少数据"))
+}
+
+fn parse_account(body: &Value) -> ApiResult<AccountInfo> {
+    let data = response_data(body)?;
+    data.get("userId")
+        .and_then(val_string)
+        .filter(|id| !id.trim().is_empty() && id.trim() != "0")
+        .ok_or_else(|| ApiError::upstream_rejected("咪咕未返回有效账号信息"))?;
+    Ok(AccountInfo {
+        source: ID.into(),
+        nickname: data
+            .get("nickName")
+            .and_then(val_string)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "咪咕音乐用户".into()),
+        avatar: data
+            .get("smallIcon")
+            .and_then(Value::as_str)
+            .and_then(image_url),
+        membership: ProfileMembership::Unknown,
+        vip_level: 0,
+        vip_label: String::new(),
+    })
+}
+
+fn parse_stream(body: &Value, cid: &str) -> ApiResult<StreamInfo> {
+    let data = response_data(body)?;
+    if let Some(value) = data.get("cannotCode").filter(|value| !value.is_null()) {
+        let code = val_string(value)
+            .ok_or_else(|| ApiError::upstream_rejected("咪咕返回了无效的播放权限状态"))?;
+        if !matches!(code.trim(), "" | "0" | "000000") {
+            return Err(platform_error(Some(&code)));
+        }
+    }
+    let url = data
+        .get("url")
+        .and_then(Value::as_str)
+        .and_then(web_url)
+        .ok_or_else(|| ApiError::upstream_rejected("咪咕未返回可播放的普通音频地址"))?;
+    Ok(StreamInfo {
+        source: ID.into(),
+        id: cid.into(),
+        url: url.to_string(),
+        bitrate: None,
+        expires_in_secs: None,
+        fallbacks: Vec::new(),
+        rg_gain_db: None,
+        rg_peak: None,
+    })
+}
+
+fn web_url(value: &str) -> Option<reqwest::Url> {
+    let url = reqwest::Url::parse(value.trim()).ok()?;
+    (matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then_some(url)
+}
+
+fn image_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    let url = if value.starts_with('/') && !value.starts_with("//") {
+        format!("https://d.musicapp.migu.cn{value}")
+    } else {
+        https_url(value)?
+    };
+    web_url(&url).map(|url| url.to_string())
+}
+
+pub async fn account(ctx: &Ctx) -> ApiResult<AccountInfo> {
+    let pack = cred::get(&ctx.db, ID)
+        .await
+        .map_err(|_| ApiError::internal("读取咪咕凭据失败"))?
+        .filter(signed_in)
+        .ok_or_else(|| ApiError::auth_required("请先导入咪咕登录 Cookie"))?;
+    MiguApi::new(Some(&pack))?.account().await
+}
+
+pub async fn playlist_detail(
+    _ctx: &Ctx,
+    id: &str,
+    offset: usize,
+    limit: usize,
+) -> ApiResult<PlaylistDetail> {
+    MiguApi::new(None)?.playlist_detail(id, offset, limit).await
 }
 
 /// 上游字段值统一取字符串（同一字段数字/字符串混用是常态）。
@@ -171,8 +530,7 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
 /// 把一条 songResultData.result 折成曲目。id 用 copyrightId（稳定 cid），
 /// 取流/详情都按它索引；contentId 一并塞进 track_ref 备用。
 ///
-/// playable 恒 false：见模块文档，取流响应是加密的。这里如实置灰，
-/// 不因为「搜索能搜到」就假装这首歌能播。
+/// 有稳定 ID 即可请求取流；vip_only 只是标准档标签，实际权限由 listen 裁决。
 fn map_track(item: &Value) -> Option<OnlineTrack> {
     let cid = item
         .get("copyrightId")
@@ -207,10 +565,25 @@ fn map_track(item: &Value) -> Option<OnlineTrack> {
         // 时长只在详情里（length），搜索阶段如实记 0。
         duration_ms: 0,
         cover,
-        playable: false,
-        vip_only: false,
+        playable: true,
+        vip_only: standard_vip(item),
         track_ref: serde_json::json!({ "contentId": content_id, "copyrightId": cid }),
     })
+}
+
+fn has_vip(tags: Option<&Value>) -> bool {
+    tags.and_then(Value::as_array)
+        .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("vip")))
+}
+
+fn standard_vip(item: &Value) -> bool {
+    ["newRateFormats", "rateFormats"]
+        .iter()
+        .filter_map(|field| item.get(field).and_then(Value::as_array))
+        .flatten()
+        .find(|format| format.get("formatType").and_then(Value::as_str) == Some("PQ"))
+        .map(|format| has_vip(format.get("showTag")))
+        .unwrap_or_else(|| has_vip(item.get("showTag")))
 }
 
 /// singers:[{id,name}] → "A、B"；空数组/缺字段回落「未知艺术家」。
@@ -304,25 +677,89 @@ fn map_playlist(item: &Value) -> Option<OnlinePlaylist> {
     })
 }
 
+fn parse_playlist_metadata(body: &Value) -> ApiResult<OnlinePlaylist> {
+    let data = response_data(body)?;
+    let id = data
+        .get("musicListId")
+        .and_then(val_string)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| ApiError::upstream_rejected("咪咕未返回歌单 ID"))?;
+    let track_count = data
+        .get("musicNum")
+        .and_then(val_u64)
+        .ok_or_else(|| ApiError::upstream_rejected("咪咕未返回歌单曲目总数"))?;
+    Ok(OnlinePlaylist {
+        source: ID.into(),
+        id,
+        name: data
+            .get("title")
+            .and_then(val_string)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "未知歌单".into()),
+        cover: data
+            .get("imgItem")
+            .and_then(|item| item.get("img"))
+            .and_then(Value::as_str)
+            .and_then(image_url),
+        track_count,
+        play_count: data
+            .get("opNumItem")
+            .and_then(|item| item.get("playNum"))
+            .and_then(val_u64),
+        creator: data
+            .get("ownerName")
+            .and_then(val_string)
+            .unwrap_or_default(),
+        kind: "created".into(),
+        description: data
+            .get("summary")
+            .and_then(val_string)
+            .filter(|text| !text.trim().is_empty()),
+    })
+}
+
+/// 歌单曲目和搜索 DTO 不同：duration 是秒，图片可能是 d.musicapp.migu.cn 相对路径。
+fn map_playlist_track(item: &Value) -> Option<OnlineTrack> {
+    let cid = item
+        .get("copyrightId")
+        .and_then(val_string)
+        .filter(|id| !id.trim().is_empty())?;
+    let content_id = item
+        .get("contentId")
+        .and_then(val_string)
+        .unwrap_or_default();
+    let song_id = item.get("songId").and_then(val_string).unwrap_or_default();
+    Some(OnlineTrack {
+        source: ID.into(),
+        id: cid.clone(),
+        title: item
+            .get("songName")
+            .and_then(val_string)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "未知曲目".into()),
+        artist: join_singers(item.get("singerList")),
+        album: item.get("album").and_then(val_string).unwrap_or_default(),
+        duration_ms: item
+            .get("duration")
+            .and_then(val_u64)
+            .unwrap_or(0)
+            .saturating_mul(1000),
+        cover: ["img3", "img2", "img1"]
+            .iter()
+            .find_map(|field| item.get(field).and_then(Value::as_str).and_then(image_url)),
+        playable: true,
+        vip_only: has_vip(item.get("showTags")),
+        track_ref: serde_json::json!({"copyrightId": cid, "contentId": content_id, "songId": song_id}),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // 详情 / 歌词
 // ---------------------------------------------------------------------------
 
 /// resourceinfo.do → resource[0]。缺分组时回 Null，由调用方决定怎么退。
 async fn resource_info(cid: &str) -> ApiResult<Value> {
-    let mut url = const_url(RESOURCE_URL)?;
-    {
-        let mut p = url.query_pairs_mut();
-        p.append_pair("copyrightId", cid)
-            .append_pair("resourceType", "2");
-    }
-    let body = super::http::get_json(&client()?, url.as_str(), headers()).await?;
-    Ok(body
-        .get("resource")
-        .and_then(|v| v.as_array())
-        .and_then(|a| a.first())
-        .cloned()
-        .unwrap_or(Value::Null))
+    MiguApi::new(None)?.resource_info(cid).await
 }
 
 pub async fn detail(ctx: &Ctx, id: &str) -> ApiResult<OnlineDetail> {
@@ -392,18 +829,25 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
 // 取流
 // ---------------------------------------------------------------------------
 
-/// 咪咕的取流响应是 AES 加密的 hex 密文，无法解析。这里明确报错，
-/// 绝不为了「看起来能用」而伪造一个地址（见模块文档的边界）。
+/// 标准档普通音频。无 ref 的队列重播先补 contentId；凭据只供平台实际裁决权限。
 pub async fn stream(
-    _ctx: &Ctx,
-    _id: &str,
-    _track_ref: Option<&super::TrackRef>,
+    ctx: &Ctx,
+    id: &str,
+    track_ref: Option<&TrackRef>,
     _quality: u32,
 ) -> ApiResult<StreamInfo> {
-    Err(ApiError::upstream_rejected(
-        "咪咕取流响应为加密内容，暂未支持".to_string(),
-    ))
+    if id.trim().is_empty() {
+        return Err(bad_request("缺少曲目 id"));
+    }
+    let pack = cred::get(&ctx.db, ID)
+        .await
+        .map_err(|_| ApiError::internal("读取咪咕凭据失败"))?;
+    MiguApi::new(pack.as_ref())?.stream(id, track_ref).await
 }
+
+#[cfg(test)]
+#[path = "migu/tests.rs"]
+mod protocol_tests;
 
 #[cfg(test)]
 mod tests {
@@ -474,8 +918,8 @@ mod tests {
         assert_eq!(t.title, "晴天");
         assert_eq!(t.artist, "周杰伦");
         assert_eq!(t.album, "叶惠美");
-        // 明确不可播：取流加密。
-        assert!(!t.playable);
+        // ID 可以请求公开取流；会员权益仍由 listen 接口裁决。
+        assert!(t.playable);
         // 优先取 03 大图并升 https。
         assert_eq!(t.cover.as_deref(), Some("https://img.migu.cn/l.jpg"));
         assert_eq!(
@@ -485,15 +929,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_reports_encrypted_upstream() {
+    async fn stream_rejects_blank_id_before_reading_credentials() {
         let db = sqlx::sqlite::SqlitePoolOptions::new()
             .connect_lazy("sqlite::memory:")
             .expect("lazy sqlite pool");
         let ctx = Ctx { db };
-        let err = stream(&ctx, "600907000002816350", None, 320_000)
-            .await
-            .unwrap_err();
-        assert_eq!(err.status, 502);
-        assert!(err.message.contains("加密"), "错误应说明取流加密: {err:?}");
+        let err = stream(&ctx, "   ", None, 128_000).await.unwrap_err();
+        assert_eq!(err.code, "bad_request");
+    }
+
+    #[test]
+    fn requests_use_current_official_site() {
+        assert_eq!(
+            headers()[reqwest::header::REFERER],
+            "https://music.migu.cn/v5/"
+        );
+    }
+
+    #[test]
+    fn search_marks_standard_quality_vip_without_assuming_membership() {
+        let track = map_track(&serde_json::json!({
+            "copyrightId": "60054701923", "name": "晴天",
+            "rateFormats": [
+                {"formatType": "PQ", "showTag": ["vip"]},
+                {"formatType": "HQ"}
+            ]
+        }))
+        .unwrap();
+        assert!(track.vip_only);
+        assert!(track.playable, "取流接口仍要能验证当前账号的真实权益");
     }
 }

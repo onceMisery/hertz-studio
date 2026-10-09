@@ -23,6 +23,7 @@ reqwest = { workspace = true, features = ["stream", "blocking"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_urlencoded = { workspace = true }
+roxmltree = { version = "=0.21.1", default-features = false, features = ["std"] }
 sqlx = { workspace = true }
 symphonia = { workspace = true }
 md-5 = { workspace = true }

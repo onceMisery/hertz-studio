@@ -74,7 +74,75 @@ async function main() {
         await page.close();
       }
     }
-    console.log('Login Chrome: 7 delayed source/account/settings success/error/empty scenarios preserve reopened QQ, ticket and status; Escape closes; no page errors.');
+    const page = await browser.newPage({ viewport: { width: 900, height: 760 } });
+    await page.setContent('<span id="online-account-face"></span><span id="online-account-dot"></span>' + html.slice(from, to));
+    for (const file of ['style.css', 'online.css']) await page.addStyleTag({ content: read(file) });
+    await page.evaluate(() => {
+      window.calls = [];
+      window.accountMode = 'invalid';
+      window.VMusicTransport = {
+        async get(url) {
+          if (url.endsWith('/sources')) return { sources: [
+            { id: 'migu', label: '咪咕音乐', caps: ['cookie_login'] },
+            { id: 'qishui', label: '汽水音乐', caps: ['cookie_login', 'qr_login'] },
+          ] };
+          if (url.includes('/account?')) {
+            if (accountMode === 'valid') return { source: 'migu', nickname: '测试听众' };
+            if (accountMode === 'timeout') throw { status: 504, code: 'upstream_timeout', message: '连接超时' };
+            if (accountMode === 'pending') return new Promise(resolve => { window.finishAccount = resolve; });
+            throw { status: 401, code: 'auth_required', message: '请先登录' };
+          }
+          if (url.includes('/qr/poll')) return { state: 'waiting' };
+          return {};
+        },
+        async put() {},
+        async post(url, body) {
+          calls.push({ url, body });
+          if (url.endsWith('/qr/start')) return { ticket: 'fixture', poll_ms: 60000,
+            qr_text: 'https://bff-pc.qishui.com/light/invoke/scan_login?token=fixture&os=Windows&computer_name=Hertz+Studio' };
+          return { signedIn: true };
+        },
+      };
+    });
+    await page.addScriptTag({ content: read('vendor/qrcode.js') });
+    await page.addScriptTag({ content: read('online-login.js') });
+    await page.evaluate(() => OnlineLogin.open('migu'));
+    assert.deepEqual(await page.evaluate(() => calls.filter(c => c.url.endsWith('/qr/start'))), [],
+      'cookie-only providers must not request unsupported QR tickets');
+    assert.equal(await page.locator('#qr-cookie-input').isVisible(), true);
+    assert.equal(await page.locator('#qr-canvas').isVisible(), false);
+    assert.match(await page.locator('#qr-status').textContent(), /cookie/i);
+    await page.locator('.qr-source[data-source="qishui"]').click();
+    await page.locator('#qr-canvas svg').waitFor();
+    assert.equal(await page.locator('#qr-canvas').isVisible(), true, 'switching back restores the QR surface');
+    assert.deepEqual(await page.evaluate(() => calls.filter(c => c.url.endsWith('/qr/start')).map(c => c.body.source)), ['qishui']);
+    await page.locator('.qr-source[data-source="migu"]').click();
+    assert.equal(await page.locator('#qr-cookie-input').isVisible(), true);
+    assert.equal(await page.locator('#qr-canvas').isVisible(), false);
+    await page.locator('#qr-cookie-input').fill('pacmtoken=fixture-invalid');
+    await page.locator('#qr-cookie-save').click();
+    assert.equal(await page.locator('#qr-modal').isVisible(), true, 'saving token-shaped data is not authenticated login');
+    await page.waitForFunction(() => !document.querySelector('#qr-cookie-save').disabled);
+    assert.match(await page.locator('#qr-status').textContent(), /未登录|失效|请先登录/);
+    await page.evaluate(() => { accountMode = 'timeout'; });
+    await page.locator('#qr-cookie-save').click();
+    await page.waitForFunction(() => !document.querySelector('#qr-cookie-save').disabled);
+    assert.equal(await page.locator('#qr-modal').isVisible(), true);
+    assert.match(await page.locator('#qr-status').textContent(), /暂时无法验证/);
+    await page.evaluate(() => { accountMode = 'valid'; });
+    await page.locator('#qr-cookie-save').click();
+    await page.waitForFunction(() => document.querySelector('#qr-modal').hidden);
+    await page.evaluate(async () => { await OnlineLogin.start('migu'); accountMode = 'pending'; });
+    await page.locator('#qr-cookie-input').fill('pacmtoken=fixture-delayed');
+    await page.locator('#qr-cookie-save').click();
+    await page.waitForFunction(() => typeof finishAccount === 'function');
+    await page.evaluate(() => OnlineLogin.start('qishui'));
+    await page.evaluate(() => finishAccount({ source: 'migu', nickname: '迟到的听众' }));
+    await page.locator('#qr-canvas svg').waitFor();
+    assert.equal(await page.locator('#qr-modal').isVisible(), true);
+    assert.match(await page.locator('#qr-title').textContent(), /汽水/);
+    await page.close();
+    console.log('Login Chrome: delayed lifecycle responses, cookie-only login and text QR rendering passed.');
   } finally { await browser.close(); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

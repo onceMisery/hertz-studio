@@ -234,7 +234,7 @@
     refs.nav = make('nav', 'ln-nav');
     refs.nav.setAttribute('aria-label', '页面导航');
     refs.column.insertBefore(refs.nav, refs.column.firstChild);
-    [['library', '首页'], ['online', '在线'], ['playlists', '歌单'],
+    [['library', '首页'], ['online', '在线'], ['podcasts', '播客'], ['playlists', '歌单'],
       ['favorites', '收藏'], ['queue', '队列'], ['settings', '设置']].forEach(function (entry) {
       var button = make('button', 'ln-nav-item', refs.nav);
       button.type = 'button';

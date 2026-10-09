@@ -80,9 +80,17 @@
      --qf-nav-gap 不再借用 --skin-gap（24px 是卡片之间的栅格节奏）：顶栏下面
      要的是「贴着这排控件」，24px 实测在内容顶上又空出一条带。 */
   --topbar-h: 48px;
-  --qf-nav-h: 44px;
+  --qf-nav-h: 38px;
   --qf-nav-top: 6px;
   --qf-nav-gap: 14px;
+  /* 胶囊自身的内边距与条目内边距独立成令牌：改任一个不必回算另一个。
+     条目高由三者推导（胶囊高 − 上下内边距 − 两道 1px 描边），写死数值
+     就会出现「改了胶囊高度、条目却探出胶囊」这种不同步。 */
+  --qf-nav-pad: 3px;
+  --qf-nav-item-px: 14px;
+  --qf-nav-item-h: calc(
+    var(--qf-nav-h) - 2 * var(--qf-nav-pad) - 2px
+  );
   --qf-clear: calc(
     var(--topbar-h) + var(--qf-nav-top) + var(--qf-nav-h) + var(--qf-nav-gap)
   );
@@ -278,6 +286,9 @@
 
 /* ===================== 居中胶囊主菜单 ================================ */
 
+/* 容器只负责「浮起来的一层」：表面、描边、投影全部取现成令牌，
+   深浅色由主题自己翻。这一层是全站唯一常驻压在壁纸上的件，
+   颜色一旦写死，换主题就会有一处不跟着走。 */
 [data-skin="qingfeng"] .qf-nav {
   position: fixed;
   top: calc(var(--topbar-h) + var(--qf-nav-top));
@@ -287,7 +298,7 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 4px;
+  padding: var(--qf-nav-pad);
   height: var(--qf-nav-h);
   max-width: calc(100vw - 2 * var(--skin-pad));
   border-radius: var(--r-pill);
@@ -300,8 +311,16 @@
 
 [data-skin="qingfeng"] .qf-nav-item {
   position: relative;
-  height: calc(var(--qf-nav-h) - 10px);
-  padding: 0 18px;
+  /* flex: none 是窄屏的正确性前提，不是排版偏好：≤900px 时胶囊改成
+     left/right 贴边 + overflow-x:auto，flex 子项默认 shrink:1，
+     条目会被压到内边距归零、文字贴边。滚动容器里每个条目的宽度
+     必须由内容决定。 */
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--qf-nav-item-h);
+  padding: 0 var(--qf-nav-item-px);
   border: 0;
   border-radius: var(--r-pill);
   background: transparent;
@@ -309,45 +328,76 @@
   font-size: var(--fs-sm);
   font-weight: 500;
   line-height: 1;
+  /* 12px 中文在胶囊里逐字贴太紧会读成一块。给一点字距而不是加大
+     字号 —— 字号是 --fs-sm，全站统一，不在皮肤里单方面改。 */
+  letter-spacing: 0.02em;
   white-space: nowrap;
   cursor: pointer;
-  transition: color var(--dur-2) var(--ease);
+  /* 底色与文字色一起过渡：只过渡 color 的话底色是瞬切，
+     悬停的「抬起」过程看不见，层次会显得跳。 */
+  transition: color var(--dur-1) var(--ease),
+              background-color var(--dur-1) var(--ease);
 }
 
-/* 选中态：实心浅色底 + 深色字（folia 的 motion.span layoutId 手感）。
-   底色用 --skin-line-soft 一类的浅色，**不能**用 `--surface-hi` —— 那个令牌的
-   值是 `inset 0 1px 0 rgba(255,255,255,.055)`，是给 box-shadow 用的**内高光**，
-   当颜色解析必然失败；配上的 --accent-ink（#0A0A0A 近黑）就压在深色胶囊上，
-   文字彻底看不见（症状：选中项「本地」隐进背景）。
-   配对关系也重要：底色是浅的，字就必须是深的，两者要一起换。 */
-[data-skin="qingfeng"] .qf-nav-item.is-active {
-  color: var(--accent-ink);
-  /* 底色**直接画在按钮自己身上**，不要再用 ::before 叠一层。
-     按钮里只有 `textContent` 写的裸文本节点（实测 childCount=0），
-     `.is-active > *` 匹配不到任何东西，文字就没有 z-index；而
-     `position:absolute; z-index:0` 的伪元素是**定位元素**，绘制顺序排在
-     行内内容**之上** —— 浅色滑块把已经设成近黑的字整个盖住，界面��是
-     「选中项一片空白」。叠层一旦存在，这个坑就会在换文案/换标签时复发。 */
-  background: color-mix(in srgb, var(--text) 82%, var(--skin-surface) 18%);
-  box-shadow: var(--skin-shadow-card);
-}
-
+/* 悬停：给一层 --hover 底 + 文字提到 --text。这是「未选中」这一侧
+   唯一的反馈，必须存在 —— 没有它鼠标扫过一排条目毫无反应，
+   选中与未选中之间就没有台阶可循。 */
 [data-skin="qingfeng"] .qf-nav-item:hover {
   color: var(--text);
+  background: var(--hover);
 }
 
+/* 选中态：浅底 + 深字。这一对是**同色系主题下自动成立**的配对
+   （深色主题 --text 近白 / --accent-ink 近黑；浅色主题由 ios-light
+   把两者整体翻过来），所以换主题不需要在这里补任何分支。
+   底色**直接画在按钮自己身上**，不要再用 ::before 叠一层。
+   按钮里只有 `textContent` 写的裸文本节点（实测 childCount=0），
+   `.is-active > *` 匹配不到任何东西，文字就没有 z-index；而
+   `position:absolute; z-index:0` 的伪元素是**定位元素**，绘制顺序排在
+   行内内容**之上** —— 浅色滑块把已经设成近黑的字整个盖住，界面就变成
+   「选中项一片空白」。叠层一旦存在，这个坑就会在换文案/换标签时复发。 */
+[data-skin="qingfeng"] .qf-nav-item.is-active {
+  color: var(--accent-ink);
+  /* 底色**以文字色为主**混（契约钉住 ≥60%），第二分量给主题的「选中」
+     语义色 --highlight，而不是面板底色 --skin-surface：
+     后者是半透明深色（实测 rgb(18,20,28,.78)），往浅色里混 18%
+     出来是 rgb(55,57,64) 的深灰，配 --accent-ink（近黑）几乎同色，
+     选中项直接隐进背景（2026-10-06 实测截图里那格「本地」）。
+     混 --highlight 之后滑块带主题倾向，选中/未选中之间还多出一层
+     色相差，不再是「一块白 vs 一块灰」。 */
+  background: color-mix(in srgb, var(--text) 82%, var(--highlight) 18%);
+  /* 刻意**不用** --skin-shadow-card：那是 0 8px 20px 的卡片投影，
+     落在 32px 的小块上会糊住相邻条目、并把整条胶囊显得毛糙。
+     层次靠「底色更亮 + 字重更重 + 内描边」三层表达，比外投影干净。 */
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--skin-line-soft);
+}
+
+/* 选中态的悬停不再叠 --hover：那层底是半透明白，叠上去会把主题色
+   洗淡，滑块开始「褪色」。选中时保持自己的底，只把文字稍微提亮。 */
+[data-skin="qingfeng"] .qf-nav-item.is-active:hover {
+  background: color-mix(in srgb, var(--text) 88%, var(--highlight) 12%);
+}
+
+/* 焦点环压在滑块**外面**：内描边已经占了 1px，outline 再贴在同一圈上
+   会互相吃掉，键盘用户只剩一条几乎看不见的边。 */
 [data-skin="qingfeng"] .qf-nav-item:focus-visible {
   outline: var(--focus-ring);
-  outline-offset: 1px;
+  outline-offset: 2px;
 }
 
-/* 队列拼接入口：只有图标，hover 时才展开出文字（folia 的 max-w 展开） */
+/* 队列拼接入口：只有图标，hover 时才展开出文字（folia 的 max-w 展开）。
+   左边留出一道分隔内边距 + 描边：它是这一排里唯一的**异质元素**
+   （带图标、能开浮层），和纯文字条目贴在一起会被读成「第六个 tab」。 */
 [data-skin="qingfeng"] .qf-nav-icon {
   display: flex;
   align-items: center;
-  height: calc(var(--qf-nav-h) - 10px);
+  flex: none;
+  height: var(--qf-nav-item-h);
+  margin-left: 3px;
   padding: 0 10px;
   border: 0;
+  border-left: 1px solid var(--skin-line-soft);
   border-radius: var(--r-pill);
   background: transparent;
   color: var(--muted);
@@ -355,9 +405,11 @@
   transition: color var(--dur-2) var(--ease), background var(--dur-2) var(--ease);
 }
 
+/* 图标 17px 对 12px 字是 1.42:1，视觉上压过文字、抢了标签的注意力。
+   收到 15px（1.25:1）之后两者同属一档，图标是「标记」而不是「第二个标题」。 */
 [data-skin="qingfeng"] .qf-nav-icon svg {
-  width: 17px;
-  height: 17px;
+  width: 15px;
+  height: 15px;
   flex: none;
 }
 
@@ -369,6 +421,7 @@
   margin-left: 0;
   font-size: var(--fs-sm);
   font-weight: 500;
+  letter-spacing: 0.02em;
   transition: max-width var(--dur-2) var(--ease),
               opacity var(--dur-2) var(--ease),
               margin-left var(--dur-2) var(--ease);
@@ -387,9 +440,15 @@
   margin-left: 7px;
 }
 
+/* 展开态（墙开着）必须与选中项同一套配色。这里原来写的是
+   `--surface-hi`，而那个令牌的值是 `inset 0 1px 0 rgba(…)` ——
+   它是给 box-shadow 用的**内高光**，当颜色解析必然失败。
+   症状是墙一开这颗按钮既没有底色、又带着近黑的 --accent-ink 文字
+   压在深色胶囊上，整颗按钮「消失」在导航条里。 */
 [data-skin="qingfeng"] .qf-nav-icon.is-active {
   color: var(--accent-ink);
-  background: var(--surface-hi);
+  background: color-mix(in srgb, var(--text) 82%, var(--highlight) 18%);
+  font-weight: 600;
 }
 
 /* ===================== 区块头 ========================================== */
@@ -2276,6 +2335,19 @@ body.qf-stage-dragging [data-skin="qingfeng"] .stage,
   cursor: default;
 }
 
+/* 导航条上的禁用态要**比通用规则更克制**：通用 :disabled 只降不透明度，
+   选中项降了透明度仍然是「有底色的一块」，在导航条里会读成
+   「选中的但点不动」。这里额外把底色与内描边一并撤掉 ——
+   层次靠形状表达，禁用靠「什么都不是」表达。 */
+[data-skin="qingfeng"] .qf-nav-item:disabled,
+[data-skin="qingfeng"] .qf-nav-icon:disabled {
+  color: var(--muted);
+  background: transparent;
+  box-shadow: none;
+  opacity: 0.38;
+  cursor: default;
+}
+
 /* ===================== 响应式 ========================================== */
 
 @media (max-width: 900px) {
@@ -2294,6 +2366,13 @@ body.qf-stage-dragging [data-skin="qingfeng"] .stage,
     max-width: none;
     overflow-x: auto;
     scrollbar-width: none;
+  }
+
+  /* 贴边铺开时把条目的横向内边距收一档：胶囊变宽了，条目还按
+     宽屏的 14px 排会显得松垮不成组。纵向不动 —— 触摸目标不能
+     因为"看起来更紧凑"而低于可点尺寸。 */
+  [data-skin="qingfeng"] .qf-nav {
+    --qf-nav-item-px: 11px;
   }
 
   [data-skin="qingfeng"] .qf-nav::-webkit-scrollbar {

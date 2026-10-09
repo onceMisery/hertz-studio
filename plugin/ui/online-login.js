@@ -55,6 +55,11 @@
   var accountRevisions = {};
   function accountRevision(source) { return accountRevisions[source] || 0; }
   function accountChanged(source) { accountRevisions[source] = accountRevision(source) + 1; }
+  function accountVerdict(error) {
+    if (window.Online && window.Online.accountVerdict) return window.Online.accountVerdict(error);
+    return error && (error.code === 'auth_required' || error.status === 401 || error.status === 403)
+      ? 'signed-out' : 'unknown';
+  }
   // 顶栏选中展示头像的音源 id。
   //
   // 权威值存在服务端 settings 表的 `topAvatarSource` 键，跟着数据库走，
@@ -263,8 +268,7 @@
           );
           verdict = 'ok';
         } catch (e) {
-          verdict = (window.Online && window.Online.accountVerdict)
-            ? window.Online.accountVerdict(e) : 'signed-out';
+          verdict = accountVerdict(e);
         }
         if (verdict === 'ok' && acc && (acc.nickname || acc.avatar)) next[s.id] = acc;
         else if (verdict === 'unknown' && prev[s.id]) next[s.id] = prev[s.id];
@@ -441,6 +445,7 @@
     // QQ 的 QQ/微信渠道条在已登录态无意义，隐藏。
     el('qr-channels').hidden = true;
     var box = el('qr-canvas');
+    box.hidden = false;
     box.style.opacity = '1';
     box.style.cursor = 'default';
     box.onclick = null;
@@ -540,15 +545,40 @@
     paintSourceActive();
     paintChannels();
     var box = el('qr-canvas');
+    box.hidden = false;
     box.style.opacity = '1';
     box.style.cursor = 'default';
     box.onclick = null;
     box.innerHTML = '';
     el('qr-cookie-input').value = '';
+    el('qr-cookie-save').disabled = false;
     document.documentElement.classList.add('qr-modal-open');
     el('qr-modal').hidden = false;
     var s;
     try {
+      // 直接从账号卡进入时也先取得同一份能力表，不能用一次失败的取码请求
+      // 探测登录方式。Cookie-only 平台直接进入表单。
+      var definition = loginSources.filter(function (item) { return item.id === source; })[0];
+      if (!definition) {
+        await loadLoginSources(mine.attempt);
+        if (!isCurrent(mine.attempt)) return;
+        definition = loginSources.filter(function (item) { return item.id === source; })[0];
+      }
+      if (!definition) throw new Error('音源暂不可用，请重新打开登录窗口');
+      var caps = definition.caps || [];
+      var cookiePanel = el('qr-cookie-panel');
+      cookiePanel.hidden = caps.indexOf('cookie_login') < 0;
+      cookiePanel.open = caps.indexOf('qr_login') < 0;
+      el('qr-official-login').hidden = source !== 'migu';
+      el('qr-cookie-help').textContent = source === 'migu'
+        ? '先在咪咕音乐官网完成登录，再粘贴包含 pacmtoken 的完整 cookie。'
+        : '先在平台官网完成登录，再复制该平台的 cookie。';
+      if (caps.indexOf('qr_login') < 0) {
+        box.hidden = true;
+        el('qr-channels').hidden = true;
+        el('qr-status').textContent = '此平台使用 cookie 登录，请填写下方表单';
+        return;
+      }
       s = await T.post('/v1/online/qr/start', {
         source: source,
         channel: mine.channel,
@@ -563,6 +593,7 @@
       return;
     }
     renderQr(s, mine);
+    if (isCurrent(mine.attempt)) el('qr-status').textContent = '请用' + scanApp(source) + '扫码登录';
   }
 
   function close() {
@@ -609,27 +640,44 @@
     try {
       res = await T.post('/v1/online/cookie', { source: source, cookie: cookie });
     } catch (e) {
-      btn.disabled = false;
       if (!isCurrent(mine.attempt)) return;
+      btn.disabled = false;
       el('qr-status').textContent = '保存失败：' + e.message;
       return;
     }
-    btn.disabled = false;
-    // 后端回读 cred 包按平台判据给结论：存进去不等于登录成功
-    // （缺 MUSIC_U / qm_keyst / token 的包各平台仍按未登录处理）。
-    // 绝不能在 false 时关窗假装成功。
-    var signedIn = !!(res && res.signedIn);
-    if (signedIn) accountChanged(source);
+    // 保存端点只检查凭据形状；账号接口才确认平台是否接受这份凭据。
+    var hasCredentials = !!(res && res.signedIn);
+    accountChanged(source);
+    var revision = accountRevision(source);
+    var account = null, verificationError = null;
+    if (hasCredentials) {
+      if (isCurrent(mine.attempt)) el('qr-status').textContent = '凭据已保存，正在验证账号…';
+      try {
+        account = await T.get('/v1/online/account?source=' + encodeURIComponent(source));
+        if (!account || (!account.source && !account.nickname && !account.avatar)) {
+          account = null;
+          throw new Error('账号响应不完整');
+        }
+      } catch (e) { verificationError = e; }
+    }
+    if (revision === accountRevision(source)) {
+      if (account) accountsById[source] = account;
+      else if (!hasCredentials || accountVerdict(verificationError) === 'signed-out') delete accountsById[source];
+      refreshTopAvatar();
+    }
     if (!isCurrent(mine.attempt)) {
-      // 提交期间用户已切平台或关窗：cookie 已在服务端保存，只让账号区跟上，
-      // 不动当前界面（尤其不能把别的源的登录态当成这次的结果）。
-      if (signedIn && window.OnlinePlaylists) window.OnlinePlaylists.refresh();
+      if (hasCredentials && window.OnlinePlaylists) window.OnlinePlaylists.refresh();
       return;
     }
-    if (signedIn) {
+    btn.disabled = false;
+    if (account) {
       close();
       if (window.OnlinePlaylists) window.OnlinePlaylists.refresh();
-      if (window.toast) window.toast(source + ' 登录成功');
+      if (window.toast) window.toast(sourceLabel(source) + ' 登录成功');
+    } else if (verificationError) {
+      el('qr-status').textContent = accountVerdict(verificationError) === 'signed-out'
+        ? '凭据已失效或账号未登录，请在官网重新登录后导入 Cookie'
+        : '凭据已保存，暂时无法验证账号：' + (verificationError.message || '请稍后重试');
     } else {
       el('qr-status').textContent = 'cookie 已保存，但平台未判定为登录态，请检查后重试';
     }

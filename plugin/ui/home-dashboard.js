@@ -36,7 +36,32 @@
   function update(force) {
     if (!host || !el) return;
     var snapshot = host.read(), model = present(snapshot);
-    text(el.status, model.status); text(el.title, model.title); text(el.detail, model.detail);
+    text(el.status, model.status); text(el.detail, model.detail);
+    // 曲名与歌手不再常驻（封面左置后，歌名只在悬停/聚焦时从封面浮出）。
+    // 但**必须有一行常驻兜底**，否则默认状态下读不到"现在在放什么"，
+    // 而触屏根本没有 hover。所以状态行右侧带一句「曲名 - 歌手」，
+    // 没有当前曲目时整段隐藏（不占位、不留「undefined」）。
+    //
+    // ⚠ 每个写入都要判空：这个函数被 check-home-dashboard.js 拿 vm 沙箱跑，
+    //   那边用 makeEl() 造的 fixture 只认脚本里 getElementById 过的那些 id。
+    //   直接 el.track.hidden = … 会在缺节点时抛 TypeError，把整条契约崩掉
+    //   （症状是「契约脚本 TypeError」，看起来像产品坏了，其实是探针没喂依赖）。
+    if (model.track) {
+      if (el.track) {
+        el.track.hidden = false;
+        var line = model.track.title || '当前曲目';
+        if (model.track.artist) line += ' - ' + model.track.artist;
+        text(el.track, line);
+      }
+    } else if (el.track) {
+      el.track.hidden = true;
+    }
+    // 封面浮层是同一份信息的第二个出口（指针/键盘下才出现），
+    // 必须在换歌时一起更新 —— 否则浮出会露出上一首的歌名。
+    if (el.tipTitle) {
+      text(el.tipTitle, model.track ? (model.track.title || '当前曲目') : '未在播放');
+      text(el.tipArtist, model.track ? (model.track.artist || '') : '');
+    }
     text(el.action, snapshot.pending || acting ? '正在更新播放…' : model.label);
     el.action.disabled = !!snapshot.pending || acting;
     el.action.dataset.action = model.action;
@@ -109,11 +134,17 @@
     host = nextHost;
     var find = function (id) { return document.getElementById(id); };
     el = { root: root, art: find('home-art'), wrap: find('home-art-wrap'),
-      status: find('home-status'), title: find('home-title'),
+      status: find('home-status'), track: find('home-track'),
       detail: find('home-detail'), action: find('home-action'), retry: find('home-retry'),
-      daily: find('home-daily'), recent: find('home-recent') };
+      daily: find('home-daily'), recent: find('home-recent'),
+      tipTitle: find('home-tip-title'), tipArtist: find('home-tip-artist') };
     el.action.addEventListener('click', activate);
     el.retry.addEventListener('click', refreshRecent);
+    // 封面浮层里的歌名/歌手：与状态行同源，改一处两处都要跟。
+    if (el.tipTitle) {
+      el.tipTitle.textContent = '—';
+      el.tipArtist.textContent = '';
+    }
     ['library', 'daily', 'recent'].forEach(function (name) {
       find('home-' + name).addEventListener('click', function () { return navigate(name); });
     });

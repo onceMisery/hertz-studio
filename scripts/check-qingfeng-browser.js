@@ -68,8 +68,8 @@ const { clickPoster } = require('./qf-wall-helpers.js');
 
   section('首页骨架');
   const nav = await page.$$eval('.qf-nav-item', (ns) => ns.map((n) => n.textContent.trim()));
-  ok(JSON.stringify(nav) === JSON.stringify(['歌单', '电台', '专辑', '收藏', '本地']),
-    '主菜单依次为 歌单/电台/专辑/收藏/本地', nav.join(','));
+  ok(JSON.stringify(nav) === JSON.stringify(['歌单', '电台', '每日推荐', '收藏', '本地']),
+    '主菜单依次为 歌单/电台/每日推荐/收藏/本地', nav.join(','));
   ok(await page.$('.qf-nav-icon') !== null, '队列拼接入口图标在菜单里');
   // 图标入口默认收起文字
   const iconLabelW = await page.$eval('.qf-nav-icon span', (n) => n.getBoundingClientRect().width);
@@ -159,6 +159,18 @@ const { clickPoster } = require('./qf-wall-helpers.js');
   ok(await page.$eval('.qf-nav-item[data-qf-view="playlists"]', (n) => n.classList.contains('is-active')),
     '歌单在主菜单里高亮');
   await page.screenshot({ path: path.join(OUT, '02-playlists.png') });
+
+  section('每日推荐页');
+  // 曾经的症状：点「每日推荐」时视图切过去了，高亮却被 reflow 改写成「电台」，
+  // 那颗按钮看着永远选不中。所以两头都要量 —— 自己亮了、别人灭了。
+  await page.click('.qf-nav-item[data-qf-view="daily"]');
+  await page.waitForTimeout(700);
+  ok(await page.$eval('#view-daily', (n) => !n.hidden), '切到了每日推荐视图');
+  ok(await page.$eval('.qf-nav-item[data-qf-view="daily"]', (n) => n.classList.contains('is-active')),
+    '每日推荐在主菜单里高亮');
+  ok(await page.$eval('.qf-nav-item[data-qf-view="online"]', (n) => !n.classList.contains('is-active')),
+    '电台不再被每日推荐抢走高亮');
+  await page.screenshot({ path: path.join(OUT, '02b-daily.png') });
 
   section('队列拼接（海报墙）');
   // **切到在线曲库再开墙**：这一段验的是「点一张**曲** → 展开成大卡 + 播放控件」。

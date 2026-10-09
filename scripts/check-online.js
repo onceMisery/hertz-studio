@@ -205,6 +205,16 @@ function makeClock() {
 // ---------------------------------------------------------------------------
 
 function makeTransport(routes) {
+  // Direct login entry reads capabilities before choosing QR versus Cookie.
+  // Individual tests can replace this fixture with their own source response.
+  if ((routes.POST || []).some(r => r.match === '/v1/online/qr/start')
+      && !(routes.GET || []).some(r => r.match === '/v1/online/sources')) {
+    routes.GET = (routes.GET || []).concat([{ match: '/v1/online/sources', returns: {
+      sources: ['netease', 'qq', 'kugou', 'qishui'].map(id => ({
+        id, label: id, caps: ['qr_login', 'cookie_login'],
+      })),
+    } }]);
+  }
   const calls = { get: [], post: [] };
   async function call(verb, url, body) {
     calls[verb.toLowerCase()].push({ url, body });
@@ -547,6 +557,7 @@ async function loginScenario(pollStates, opts) {
         { match: '/v1/online/qr/start', throw: Object.assign(new Error('cap'), { status: 404 }) },
         { match: '/v1/online/cookie', returns: { signedIn: true } },
       ],
+      GET: [{ match: '/v1/online/account', returns: { source: 'qq', nickname: 'fixture' } }],
     });
     const env = makeSandbox({ transport });
     await env.sandbox.window.OnlineLogin.start('qq');
@@ -554,7 +565,7 @@ async function loginScenario(pollStates, opts) {
     env.doc.getElementById('qr-cookie-input').value = 'MUSIC_U=x';
     await env.doc.getElementById('qr-cookie-save').onclick();
     await ticks();
-    eq(env.doc.getElementById('qr-modal').hidden, true, 'signedIn=true 才关窗');
+    eq(env.doc.getElementById('qr-modal').hidden, true, '账号接口确认成功后关窗');
     eq(env.spies.refreshes, 1, 'true 时 refresh 账号区');
     ok(env.spies.toasts.some((t) => t.msg.indexOf('登录成功') >= 0), 'true 时 toast 登录成功');
   }
@@ -789,6 +800,27 @@ async function loginScenario(pollStates, opts) {
   // -------------------------------------------------------------------------
   // 2. online.js 聚合 / 单源搜索
   // -------------------------------------------------------------------------
+
+  section('媒体种类：播客不进入音乐搜索，队列仍显示播客来源');
+  {
+    const transport = makeTransport({ GET: [
+      { match: '/v1/online/sources', returns: { sources: [
+        { id: 'netease', label: '网易云音乐', kind: 'music', caps: [] },
+        { id: 'podcast', label: '播客', kind: 'podcast', caps: [] },
+      ] } },
+      { match: '/v1/online/search?', returns: { tracks: [], total: 0 } },
+    ] });
+    const env = makeSandbox({ transport });
+    const bound = bindOnline(env);
+    bound.ui.onlineSource.replaceChildren = function (...children) { this.children = children; };
+    const online = env.sandbox.window.Online;
+    await online.loadSources();
+    eq(Array.from(online.state.sources, s => s.id).join(','), 'netease', 'music sources exclude podcast');
+    online.state.source = 'all'; online.state.q = '故事';
+    await online.search();
+    ok(!transport.calls.get.some(c => c.url.includes('/search?') && c.url.includes('source=podcast')), 'All never searches podcast as songs');
+    eq(online.sourceLabel('podcast'), '播客', 'queue identifies podcast episodes');
+  }
 
   section('渐进聚合：独立音源、失败重试、确定性排序');
   {

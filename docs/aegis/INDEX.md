@@ -95,3 +95,23 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-08 | artifact | docs/aegis/work/2026-10-08-extension-live-integration/gate-input-pack.json | 2026-10-08-extension-live-integration gate input pack |
 | 2026-10-08 | work | docs/aegis/work/2026-10-08-extension-live-integration/proof-bundle.md | 2026-10-08-extension-live-integration proof bundle |
 | 2026-10-08 | artifact | docs/aegis/work/2026-10-08-extension-live-integration/resume-state-hint.json | 2026-10-08-extension-live-integration resume state hint |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-online-accounts-podcasts/10-intent.md | 在线账号修复与中文播客 intent |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-online-accounts-podcasts/20-checkpoint.md | 在线账号修复与中文播客 checkpoint |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-online-accounts-podcasts/90-evidence.md | 在线账号修复与中文播客 evidence |
+| 2026-10-08 | work | docs/aegis/work/2026-10-08-online-accounts-podcasts/99-reflection.md | 在线账号修复与中文播客 reflection |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/task-intent-draft.json | 在线账号修复与中文播客 task intent draft |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/baseline-read-set-hint.json | 在线账号修复与中文播客 baseline read-set hint |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/impact-statement-draft.json | 在线账号修复与中文播客 impact statement draft |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/todo-checkpoint-draft.json | 在线账号修复与中文播客 todo checkpoint draft |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/drift-check-draft.json | 在线账号修复与中文播客 drift check draft |
+| 2026-10-08 | spec | docs/aegis/specs/2026-10-08-online-accounts-podcasts-brief.md | 在线账号与中文播客 |
+| 2026-10-08 | plan | docs/aegis/plans/2026-10-08-online-accounts-podcasts.md | 在线账号与中文播客实施 |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/resume-state-hint.json | 2026-10-08-online-accounts-podcasts resume state hint |
+| 2026-10-08 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/evidence-bundle-draft-podcast-api-and-ui.json | 2026-10-08-online-accounts-podcasts evidence podcast-api-and-ui |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/evidence-bundle-draft-review-fixes.json | 2026-10-08-online-accounts-podcasts evidence review-fixes |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/evidence-bundle-draft-final-integrated-regression.json | 2026-10-08-online-accounts-podcasts evidence final-integrated-regression |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/evidence-bundle-draft-final-live-and-restart.json | 2026-10-08-online-accounts-podcasts evidence final-live-and-restart |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/evidence-bundle-draft-workspace-and-format-boundaries.json | 2026-10-08-online-accounts-podcasts evidence workspace-and-format-boundaries |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/gate-input-pack.json | 2026-10-08-online-accounts-podcasts gate input pack |
+| 2026-10-09 | work | docs/aegis/work/2026-10-08-online-accounts-podcasts/proof-bundle.md | 2026-10-08-online-accounts-podcasts proof bundle |
+| 2026-10-09 | artifact | docs/aegis/work/2026-10-08-online-accounts-podcasts/evidence-bundle-draft-delivery-integrity.json | 2026-10-08-online-accounts-podcasts evidence delivery-integrity |

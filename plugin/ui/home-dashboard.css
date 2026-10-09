@@ -7,17 +7,32 @@
   color: var(--text);
 }
 .home-layout { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); gap: var(--sp-5); }
+/* 左列定宽放封面+按钮，右列自适应吃满剩余宽度。
+   原来是 `minmax(0,1fr) auto`（文字列吃满、封面在右），实测曲名/艺人/按钮都很短，
+   文案右侧到封面之间空出约 270px 的一整列 —— 所有主题下都空着。 */
 .home-primary {
-  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--sp-6);
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start;
+  gap: var(--sp-6);
   padding: var(--sp-6); border: 1px solid var(--line-strong); border-radius: var(--r-lg);
   background: var(--panel-2); min-width: 0;
 }
-.home-copy { min-width: 0; }
+/* 左列：封面是这张卡的视觉锚点，主操作落在它正下方、与之同宽 */
+.home-left { display: flex; flex-direction: column; gap: var(--sp-4); width: 132px; flex: none; }
+.home-copy { min-width: 0; align-self: center; }
+
+/* 状态行与「曲名 - 歌手」同行。封面浮层只在指针/键盘下出现，
+   没有这一行兜底，默认状态下就看不出在放哪首（方案 B 的核心）。 */
+.home-headline { display: flex; align-items: baseline; gap: var(--sp-4); flex-wrap: wrap; }
 .home-status { display: block; color: var(--muted); font-size: var(--fs-base); font-weight: 500; }
-.home-title { font-size: var(--fs-2xl); font-weight: 650; line-height: 1.35; margin: var(--sp-3) 0; overflow-wrap: anywhere; }
-.home-detail { color: var(--muted); font-size: var(--fs-base); line-height: 1.5; margin: 0 0 var(--sp-5); overflow-wrap: anywhere; }
+.home-track {
+  color: var(--muted); font-size: var(--fs-base);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.home-track[hidden] { display: none; }
+.home-detail { color: var(--muted); font-size: var(--fs-base); line-height: 1.5; margin: var(--sp-2) 0 0; overflow-wrap: anywhere; }
+
 .home-art-wrap {
-  width: calc(var(--sp-8) * 4); aspect-ratio: 1; position: relative; border-radius: var(--r-md);
+  width: 132px; aspect-ratio: 1; position: relative; border-radius: var(--r-md);
   /* 没有内嵌封面时这里必须读作「封面位空着」，而不是一个孤零零的功能图标：
      与曲库行 .t-art.is-missing 同一套画法（按曲目 id 取色的淡渐变 + 音符遮罩），
      所以卡片和它下面那一行的占位色是同一个颜色。--ph 由 home-dashboard.js 写。 */
@@ -27,7 +42,16 @@
       hsl(calc(var(--ph, 160) + 40) 30% 15% / .6)),
     var(--panel-solid);
   overflow: hidden; color: var(--muted);
+  /* 封面现在是可聚焦的（tabindex=0，键盘用户也要能读到歌名），
+     必须给得起「这是个能按的东西」的反馈。
+     时长直写 180ms 而不是 var(--dur-2)：--dur-* 只在 stage.css 里声明，
+     这个文件用它是跨文件暗依赖（换 stage.css 的加载顺序就静默失效）。 */
+  cursor: default;
+  transition: transform 180ms var(--ease), box-shadow 180ms var(--ease);
 }
+.home-art-wrap:hover,
+.home-art-wrap:focus-visible { transform: translateY(-2px); box-shadow: var(--surface-lift); }
+.home-art-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* ::before 而不是 ::after：它是包裹层的第一个子节点，封面 <img> 在其后绘制，
    有封面时自然被整张图盖住，不需要再判断状态。 */
 .home-art-wrap::before {
@@ -35,11 +59,75 @@
   background-color: var(--muted); opacity: .75;
   -webkit-mask: var(--art-glyph) center / 52% 52% no-repeat;
   mask: var(--art-glyph) center / 52% 52% no-repeat;
+  z-index: 1;
 }
 .home-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .home-art:not([src]) { visibility: hidden; }
-.home-actions { display: flex; flex-wrap: wrap; gap: var(--sp-3); }
-.home-actions .btn { min-height: calc(var(--sp-8) + var(--sp-6)); font-size: var(--fs-base); white-space: normal; }
+
+/* 悬停/聚焦时从封面底部浮出歌名与歌手。
+   必须在封面**内部**：不新开浮层、不改 DOM 结构，卡片高度不受影响。
+   z-index 高于 ::before（占位遮罩）否则会被音符盖住。 */
+.art-tip {
+  position: absolute; inset: auto 0 0 0; z-index: 2;
+  padding: var(--sp-8) var(--sp-3) var(--sp-3);
+  background: linear-gradient(to top, rgba(0,0,0,.86) 42%, rgba(0,0,0,0));
+  opacity: 0; transform: translateY(4px);
+  pointer-events: none;
+  transition: opacity 180ms var(--ease), transform 180ms var(--ease);
+}
+.home-art-wrap:hover .art-tip,
+.home-art-wrap:focus-visible .art-tip { opacity: 1; transform: translateY(0); }
+.art-tip b {
+  display: block; color: #fff; font-size: var(--fs-base); font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.art-tip small {
+  display: block; color: rgba(255,255,255,.72); font-size: var(--fs-2xs);
+  margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 浅色主题：暗色那套黑渐变在浅底上是一块脏污，整条翻成白底深字。 */
+[data-theme="ios-light"] .art-tip {
+  background: linear-gradient(to top, rgba(255,255,255,.95) 42%, rgba(255,255,255,0));
+}
+[data-theme="ios-light"] .art-tip b { color: var(--text); }
+[data-theme="ios-light"] .art-tip small { color: var(--muted); }
+
+/* 主操作在封面正下方、与之同宽 */
+.home-actions { display: grid; gap: var(--sp-2); }
+.home-actions .btn { min-height: calc(var(--sp-8) + var(--sp-2)); font-size: var(--fs-base); white-space: normal; }
+
+/* 每日名言：封面左置之后，右列整块都空着，正好放它。
+   不加「每日名言」标签 —— 位置本身已经说明它是什么，标签是重复信息还占一行高度。
+   分割线也没有：这列右侧本来就是空的，再画一条线只会多一道横向噪声。 */
+.home-quote {
+  display: flex; gap: var(--sp-4); min-width: 0;
+  margin-top: var(--sp-5);
+}
+.home-quote[hidden] { display: none; }
+.home-quote-bar {
+  flex: none; width: 3px; align-self: stretch; border-radius: 2px; margin-top: 4px;
+  background: color-mix(in srgb, var(--highlight) 62%, transparent);
+}
+.home-quote-main { min-width: 0; flex: 1 1 auto; }
+.home-quote-text {
+  margin: 0; font-size: var(--fs-xl); line-height: 1.62; font-weight: 500;
+  color: color-mix(in srgb, var(--text) 88%, var(--muted) 12%);
+  overflow-wrap: anywhere;
+}
+.home-quote-from { color: var(--muted); font-size: var(--fs-base); font-weight: 400; }
+.home-quote-actions { display: flex; align-items: center; gap: var(--sp-3); margin-top: var(--sp-4); }
+.home-quote-actions[hidden] { display: none; }
+.home-quote-btn {
+  font-size: var(--fs-base); color: var(--muted); background: transparent;
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 3px var(--sp-4); cursor: pointer; font-family: inherit;
+  transition: color 160ms var(--ease), border-color 160ms var(--ease),
+              background-color 160ms var(--ease);
+}
+.home-quote-btn:hover { color: var(--text); border-color: var(--line-strong); background: var(--hover); }
+.home-quote-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.home-quote-count { font-size: var(--fs-base); color: var(--muted); opacity: .65; font-variant-numeric: tabular-nums; }
+
 .home-links { display: grid; gap: var(--sp-2); min-width: 0; }
 .home-link {
   display: flex; align-items: center; gap: var(--sp-5); text-align: left; width: 100%;
@@ -58,10 +146,16 @@
   .home-link { align-items: flex-start; }
   .home-link small { display: none; }
   .home-primary { gap: var(--sp-5); }
-  .home-art-wrap { width: calc(var(--sp-8) * 3); }
+  .home-left { width: 96px; }
+  .home-art-wrap { width: 96px; }
+  .home-quote-text { font-size: var(--fs-lg); }
 }
+/* ≤340px：封面左置已经吃掉 96px，右列只剩很窄一条，名言与状态行都放不下。
+   封面与名言一起收掉，只留状态行 —— 那时歌名必须回到状态行（见 .home-track），
+   否则这一档连"在放什么"都读不到。 */
 @container (max-width: 340px) {
-  .home-primary { grid-template-columns: minmax(0, 1fr); }
+  .home-layout { grid-template-columns: minmax(0, 1fr); }
   .home-links { grid-template-columns: minmax(0, 1fr); }
-  .home-art-wrap { display: none; }
+  .home-left { display: none; }
+  .home-quote { display: none; }
 }

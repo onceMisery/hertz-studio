@@ -1283,7 +1283,17 @@ function checkQingfengChrome() {
   ok(nav, '声明了主菜单表 NAV_ITEMS');
   const navBody = nav ? nav[0] : '';
   ok(/'playlists'[\s\S]{0,40}'online'[\s\S]{0,40}'daily'[\s\S]{0,40}'favorites'[\s\S]{0,40}'library'/.test(navBody),
-    '主菜单依次为 歌单 / 电台 / 专辑 / 收藏 / 本地');
+    '主菜单依次为 歌单 / 电台 / 每日推荐 / 收藏 / 本地');
+  // 第三项进的是 daily 视图（每日推荐独立页），名字必须与页面标题一致。
+  // 早先叫「专辑」，点过去看到的是每日推荐，用户按名字找专辑浏览面永远找不到。
+  ok(/'daily',\s*'每日推荐'/.test(navBody),
+    'daily 那一项叫「每日推荐」（不是专辑）');
+  // 高亮键必须直接取自当前视图。曾经有一行把 view-daily 改写成 'online'，
+  // 于是点「每日推荐」时高亮跑到「电台」上，那颗按钮看着就像点不动。
+  const navKeyLine = stripJsComments(QINGFENG_JS).match(/var navKey = ([^\n]*)/);
+  ok(navKeyLine && !/view-daily/.test(navKeyLine[1]),
+    '导航高亮按当前视图取键（daily 不被改写成别的 tab）',
+    navKeyLine ? navKeyLine[1].trim() : 'no navKey assignment');
   ok(!/settings/.test(navBody), '设置不在主菜单里（它在左上角，folia 同款位置关系）');
 
   // 3) 队列拼接是主菜单末尾那个图标入口，hover 才展开文字。

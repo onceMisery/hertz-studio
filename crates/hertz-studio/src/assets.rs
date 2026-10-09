@@ -30,6 +30,7 @@ ui_assets! {
     "/perf-probe.js", JS => const PERF_PROBE_JS: &str = include_str!("../../../plugin/ui/perf-probe.js");
     "/home-dashboard.js", JS => const HOME_DASHBOARD_JS: &str = include_str!("../../../plugin/ui/home-dashboard.js");
     "/home-dashboard.css", CSS => const HOME_DASHBOARD_CSS: &str = include_str!("../../../plugin/ui/home-dashboard.css");
+    "/home-quote.js", JS => const HOME_QUOTE_JS: &str = include_str!("../../../plugin/ui/home-quote.js");
     "/creative-share-code.js", JS => const CREATIVE_SHARE_CODE_JS: &str = include_str!("../../../plugin/ui/creative-share-code.js");
     "/onset.js", JS => const ONSET_JS: &str = include_str!("../../../plugin/ui/onset.js");
     "/stage-control.js", JS => const STAGE_CTL_JS: &str = include_str!("../../../plugin/ui/stage-control.js");
@@ -72,6 +73,7 @@ ui_assets! {
     "/vendor/qrcode.js", JS => const QRCODE_JS: &str = include_str!("../../../plugin/ui/vendor/qrcode.js");
     "/online-login.js", JS => const ONLINE_LOGIN_JS: &str = include_str!("../../../plugin/ui/online-login.js");
     "/online.js", JS => const ONLINE_JS: &str = include_str!("../../../plugin/ui/online.js");
+    "/podcasts.js", JS => const PODCASTS_JS: &str = include_str!("../../../plugin/ui/podcasts.js");
     "/online-playlists.js", JS => const ONLINE_PLAYLISTS_JS: &str = include_str!("../../../plugin/ui/online-playlists.js");
     "/online-playlist-view.js", JS => const ONLINE_PLAYLIST_VIEW_JS: &str = include_str!("../../../plugin/ui/online-playlist-view.js");
     "/topsearch.js", JS => const TOPSEARCH_JS: &str = include_str!("../../../plugin/ui/topsearch.js");
@@ -88,6 +90,7 @@ ui_assets! {
     "/stanza/stanza.css", CSS => const STANZA_CSS: &str = include_str!("../../../plugin/ui/stanza/stanza.css");
     "/stanza/stanza-starborn.css", CSS => const STANZA_STARBORN_CSS: &str = include_str!("../../../plugin/ui/stanza/stanza-starborn.css");
     "/online.css", CSS => const ONLINE_CSS: &str = include_str!("../../../plugin/ui/online.css");
+    "/podcasts.css", CSS => const PODCASTS_CSS: &str = include_str!("../../../plugin/ui/podcasts.css");
     "/theme-studio.css", CSS => const THEME_STUDIO_CSS: &str = include_str!("../../../plugin/ui/theme-studio.css");
     "/skins/skins.css", CSS => const SKINS_CSS: &str = include_str!("../../../plugin/ui/skins/skins.css");
     "/skins/skin.sheen.css", CSS => const SKIN_SHEEN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.sheen.css");

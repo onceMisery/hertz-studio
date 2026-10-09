@@ -771,6 +771,23 @@ select option { background: var(--panel-solid); color: var(--text); }
 
 .lib-list { overflow-y: auto; min-height: 0; flex: 1; padding-bottom: 12px; }
 
+/* 曲库视图整栏滚动，曲库列表不自建滚动条。
+   这一栏从上到下压了四块（工具行、首页卡、日推条、表头 + 列表），前三块的高度
+   由内容决定且都不该压扁：日推条一压就被自己的 overflow:hidden 裁掉几行卡片，
+   列表是 flex:1 + basis 0，负空间下分不到一点，只剩 12px 内边距 —— 既看不见也
+   滚不动，点「音乐库」跳列表于是毫无反应。所以让 .view 收下 overflow-y，列表按
+   内容长高，与 #view-settings 同一套画法。
+   原先这三条挂在 @media (max-width:1240px),(max-height:760px) 下：阈值量的是
+   窗口，而这几块要多少高度由列宽（日推排几列）决定，1707×898 根本命中不了。
+   liunian 的中栏另有排布，用它自己的兜底（见 skins/skin.liunian.css）。 */
+:root:not([data-skin="liunian"]) #view-library {
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+}
+:root:not([data-skin="liunian"]) #view-library > * { flex-shrink: 0; }
+:root:not([data-skin="liunian"]) #lib-list { flex: none; min-height: 240px; overflow: visible; }
+
 .track {
   height: var(--row-h);
   border-radius: var(--radius);
@@ -2092,21 +2109,7 @@ input[type="range"]::-moz-range-thumb { width: 13px; height: 13px; border: none;
   .ctrl-primary { width: 44px; height: 44px; }
 }
 
-@media (max-width: 1240px), (max-height: 760px) {
-  :root:not([data-skin="liunian"]) #view-library {
-    overflow-y: auto;
-    overflow-x: hidden;
-    overscroll-behavior-y: contain;
-  }
-  :root:not([data-skin="liunian"]) #view-library > * {
-    flex-shrink: 0;
-  }
-  :root:not([data-skin="liunian"]) #lib-list {
-    flex: none;
-    min-height: 240px;
-    overflow: visible;
-  }
-}
+/* 曲库视图的整栏滚动见 .lib-list 上方那条规则。 */
 
 /* --------------------------------------------------------------------------
    hidden 兜底
@@ -2459,8 +2462,8 @@ select { cursor: pointer; }
 
    这里一次补齐六种行，并把 active / focus-visible 一并给全：
      · hover    底色与 .track 对齐，不因所在列表不同而深浅不一
-     · active   压下用 --dur-press（80ms）。回弹仍走默认的 --dur-release，
-                与 .btn / .iconbtn 同一套手感
+     · active   压下只换底色（比 hover 强一档的 --hover），80ms 起手、
+                回弹走默认的 --dur-release。
      · focus-visible 走全局焦点环兜底（下方 :where(...) 那条已经覆盖 button 与
                 [role=button]，[tabindex] 的行也在内），这里只保证偏移与行高
                 匹配：行是整条可点的，焦点环贴着相邻行会读成"两行都亮了"。 */
@@ -2475,9 +2478,16 @@ select { cursor: pointer; }
     background: var(--field-bg-hover);
   }
 }
+/* 行按压**不能**沿用 .btn 那套 scale(var(--press-scale))：行是整幅宽的（实测 1067px），
+   0.97 把右端的操作区整体推近约 15px，而压下只有 80ms —— 一次正常长度的点击
+   （按住 60–150ms）在抬起前就走完了，光标于是没压在原来那个控件上。mousedown 与
+   mouseup 目标不同时，浏览器把 click 发到两者最近的共同祖先（.t-actions 或行本身），
+   行处理器里的 closest('.t-select') / closest('.t-act') 双双落空，只剩兜底的
+   playFromList —— 症状即「点勾选/更多/插入下一首都变成播放」。
+   .btn / .rail-item 那些 28px 见方的控件缩 0.97 只挪不到 1px，照旧用缩放。 */
 .track:active, .q-row:active, .fav-row:active,
 .online-row:active:not(.is-disabled), .pl-row:active, .pd-row:active {
-  transform: scale(var(--press-scale));
+  background: var(--hover);
   transition-duration: var(--dur-press);
 }
 
@@ -2503,8 +2513,8 @@ select { cursor: pointer; }
 
 /* 降低动效：缩放是前庭运动最敏感的反馈之一。全局兜底（见本文件末尾的
    prefers-reduced-motion / body.reduce-motion 两段）只把 transition-duration
-   压到 0.01ms，**transform 本身照样发生**——行还是会被缩一下，
-   所以这里要显式把 transform 归零。 */
+   压到 0.01ms，**transform 本身照样发生**，所以要在这里显式归零。
+   行按上条所述已经不参与缩放，这里留着是防以后又把缩放加回行上。 */
 @media (prefers-reduced-motion: reduce) {
   .rail-item:active,
   .track:active, .q-row:active, .fav-row:active,
@@ -3070,6 +3080,7 @@ button:focus-visible, [role="button"]:focus-visible,
   gap: var(--daily-gap);
 }
 .daily-card {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sp-3);
@@ -3083,6 +3094,17 @@ button:focus-visible, [role="button"]:focus-visible,
   transition: background 0.18s var(--ease), border-color 0.18s var(--ease);
 }
 .daily-card:hover { background: var(--hover); border-color: var(--line-strong); }
+/* 首页推荐条的卡片：封面只有 40px，VIP 标记贴在整张卡的右上角，
+   压在封面上会把封面盖掉大半。 */
+.daily-card > .vip-tag {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  margin-left: 0;
+}
+/* 标了 VIP 的卡片给文字让出右上角那一条（宽度=标记 31 + 右边距 6 + 4 余量），
+   否则长标题会从标记底下穿过去。类由 daily.js 的 updateCard 跟着标记一起切。 */
+.daily-card.is-vip .daily-copy { padding-right: 41px; }
 .daily-cover {
   width: 40px;
   height: 40px;
@@ -3354,7 +3376,8 @@ button:focus-visible, [role="button"]:focus-visible,
    .column 又是 overflow:hidden。所以这里必须自己收下 flex:1 /
    min-height:0 / overflow-y —— 少任何一条，30 首推荐就撑到内容全高，
    再被 .column 的 hidden 裁掉，表现为「只能看前 10 首且滚不动」。
-   （.lib-list / .pl-list / .q-list / .fav-list 都是同一套三件套。） */
+   （.pl-list / .q-list / .fav-list 都是同一套三件套；.lib-list 是例外 ——
+     曲库那一栏上面还压着首页卡和日推条，改成整栏滚动，见它那一条规则。） */
 .dv-body {
   display: grid;
   gap: var(--sp-2);
@@ -3385,11 +3408,13 @@ button:focus-visible, [role="button"]:focus-visible,
 .dv-status-bit { min-width: 0; }
 .dv-status-act { padding: 4px 10px; font-size: 12px; }
 
-/* --- 列表画法：序号 + 标题/艺术家 + 来源 ------------------------------- */
+/* --- 列表画法：序号 + 封面 + 标题/艺术家 + 专辑 + 来源徽标 -------------
+   列宽比例与曲库行（.lib-head / .track）对齐：封面 40px、专辑 0.62fr，
+   两种列表之间切换时眼睛不用重新找位置。 */
 
 .dv-row {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  grid-template-columns: 28px 40px minmax(0, 1fr) minmax(0, 0.62fr) auto;
   align-items: center;
   gap: var(--sp-3);
   padding: 8px 10px;
@@ -3435,11 +3460,36 @@ button:focus-visible, [role="button"]:focus-visible,
   white-space: nowrap;
 }
 
+/* 列表行的专辑位：与 .dv-sub 同一档字号与颜色，靠列宽把长专辑名截断，
+   而不是让它把封面和来源挤掉。 */
+.dv-album {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dv-src {
   flex: none;
   font-size: var(--fs-xs);
   color: var(--muted);
   letter-spacing: var(--meta-tracking);
+  /* 来源列现在装两样东西：平台徽标 + VIP 标记。排法与在线行的
+     .online-row .t-quality 同一套（flex + 6px 间隙、右对齐）。 */
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* 卡片画法没有来源列，VIP 标记贴在封面右上角。.dv-art 自己就是
+   position:relative + overflow:hidden 的锚点，标记跟着圆角一起被裁。 */
+.dv-card .dv-art > .vip-tag {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  margin-left: 0;
 }
 
 /* --- 卡片画法：与歌单封面墙同一套网格，只是格子小一点 ------------------ */

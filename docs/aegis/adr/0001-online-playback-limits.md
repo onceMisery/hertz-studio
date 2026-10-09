@@ -23,6 +23,14 @@
 | 单首音频的下载体积上限 | 536870912 | `crates/hertz-studio/src/online/progressive.rs::MAX_AUDIO_BYTES` | 半首个数、`.part` 命名与缓存 LRU 的字节口径 |
 | 上游响应体的读取上限 | 2097152 | `crates/hertz-studio/src/online/http.rs::MAX_TEXT_BYTES` | 搜索/歌词这类大响应的截断行为；别拿它当缓存上限 |
 | 补拉详情的批量条数 | 50 | `crates/hertz-studio/src/complete.rs::MAX_BATCH` | 一次请求的上游调用数与前端等待时间 |
+| 公开播客 RSS 读取上限 | 16777216 | `crates/hertz-studio/src/podcasts.rs::MAX_FEED_BYTES` | 三个真实中文 RSS 均超过通用 2 MiB；只放宽专用 RSS 通道 |
+| 单 RSS 收录单集上限 | 2000 | `crates/hertz-studio/src/podcasts.rs::MAX_EPISODES` | 解析/持久化/分页共用，`FeedPage.episode_limit` 下发界面容量提示 |
+| XML 节点及原始标记上限 | 200000 | `crates/hertz-studio/src/podcasts.rs::MAX_XML_NODES` | `podcasts/parse.rs::preflight_xml` 在分配前检查；CDATA/属性边界回归 |
+| 播放已保存单集时的 RSS 刷新预算（秒） | 3 | `crates/hertz-studio/src/podcasts.rs::STREAM_REFRESH_BUDGET` | 这是共同 20 秒取流期限内的可选刷新；到限仍使用已保存直链 |
+
+播客的专用 XML 预算还限制每标签 128 个属性、深度 64、每作用域 64 个命名空间、全篇 4096 次声明，
+在 roxmltree 分配前检查；描述最多保留 4000 字符，扫描本身保持线性。目录查询缓存最多 64 项，TTL 15 分钟。
+长节目音频仍使用同一个 512 MiB 下载器和实际字节档位判断；RSS 的 enclosure length 不能作为音质证据。
 
 ## 禁止回退
 

@@ -471,12 +471,14 @@ macro_rules! reject_candidate {
 /// 校验候选是否真的交付了它所声称的码率、以及按实测反推落盘档位。缺时长
 /// 时两者都跳过——绝不把「不知道」当 0。
 pub fn start(
+    source: &str,
     dir: PathBuf,
     key: String,
     ladder: Vec<Candidate>,
     duration_ms: Option<u64>,
     index: Arc<cache::CacheIndex>,
 ) -> Result<Download, ApiError> {
+    let client = download_client(source, &ladder)?;
     let part_path = dir.join(format!(".{key}.part"));
     let _ = std::fs::remove_file(&part_path);
     std::fs::create_dir_all(&dir)
@@ -486,7 +488,6 @@ pub fn start(
 
     let inner = Arc::new(Inner::new());
     let abort = Arc::new(AtomicBool::new(false));
-    let client = download_client()?;
 
     let task = tokio::task::spawn({
         let inner = inner.clone();
@@ -898,6 +899,28 @@ pub fn plan_mode(head: &[u8]) -> (StreamMode, &'static str) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn podcast_download_rejects_private_enclosures_before_fetching() {
+        let addr = spawn_routes(&[("/audio", "audio/mpeg", mp3_bytes(4096))]).await;
+        let dir = tmp_cache_dir().await;
+        let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
+        match start(
+            "podcast",
+            dir.clone(),
+            "podcast-fixture-standard".into(),
+            rungs(&[format!("http://{addr}/audio")]),
+            None,
+            index,
+        ) {
+            Ok(download) => assert!(
+                download.join().await.is_err(),
+                "a public RSS must not fetch a private audio address"
+            ),
+            Err(error) => assert_eq!(error.status, 400),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn prebuffer_math() {
         assert_eq!(prebuffer_target(None), FLUSH_STEP);
@@ -1082,6 +1105,7 @@ mod tests {
         let dir = tmp_cache_dir().await;
         let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
         let dl = start(
+            "netease",
             dir.clone(),
             "netease-11-exhigh".into(),
             rungs(&[format!("http://{addr}/a"), format!("http://{addr}/b")]),
@@ -1135,6 +1159,7 @@ mod tests {
         let dir = tmp_cache_dir().await;
         let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
         let dl = start(
+            "netease",
             dir.clone(),
             "netease-12-hires".into(),
             rungs(&[format!("http://{addr}/a"), format!("http://{addr}/b")]),
@@ -1173,6 +1198,7 @@ mod tests {
         let dir = tmp_cache_dir().await;
         let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
         let dl = start(
+            "netease",
             dir.clone(),
             "netease-1-standard".into(),
             rungs(&[format!("http://{addr}/bad"), format!("http://{addr}/good")]),
@@ -1211,6 +1237,7 @@ mod tests {
         let dir = tmp_cache_dir().await;
         let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
         let dl = start(
+            "netease",
             dir.clone(),
             "netease-2-standard".into(),
             rungs(&[format!("http://{addr}/stub"), format!("http://{addr}/good")]),
@@ -1238,6 +1265,7 @@ mod tests {
         let dir = tmp_cache_dir().await;
         let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
         let dl = start(
+            "netease",
             dir.clone(),
             "netease-3-standard".into(),
             rungs(&[format!("http://{addr}/junk"), format!("http://{addr}/wav")]),
@@ -1252,6 +1280,7 @@ mod tests {
         let dir2 = tmp_cache_dir().await;
         let index2 = Arc::new(cache::CacheIndex::load(dir2.clone()).await);
         let dl2 = start(
+            "netease",
             dir2.clone(),
             "netease-4-standard".into(),
             rungs(&[format!("http://{addr}/junk")]),
@@ -1291,6 +1320,7 @@ mod tests {
         let dir = tmp_cache_dir().await;
         let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
         let dl = start(
+            "netease",
             dir.clone(),
             "netease-6-lossless".into(),
             vec![rung("/liar", 740_000), rung("/honest", 128_000)],
@@ -1320,6 +1350,7 @@ mod tests {
         let dir = tmp_cache_dir().await;
         let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
         let dl = start(
+            "netease",
             dir.clone(),
             "netease-7-lossless".into(),
             vec![Candidate {
@@ -1388,6 +1419,7 @@ mod tests {
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let index = Arc::new(cache::CacheIndex::load(dir.clone()).await);
         let dl = start(
+            "netease",
             dir.clone(),
             "qq-a1-standard".into(),
             rungs(&[format!("http://{addr}/audio")]),

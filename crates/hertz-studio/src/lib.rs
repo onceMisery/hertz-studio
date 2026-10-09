@@ -26,6 +26,8 @@ pub mod history;
 pub mod online;
 mod online_play;
 pub mod persist;
+pub mod podcasts;
+pub(crate) mod public_net;
 pub mod radio;
 pub mod remote;
 pub mod routes;

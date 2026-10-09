@@ -13,6 +13,7 @@
 //! 的 `Set-Cookie` 里整罐取 MUSIC_U/__csrf（详见 [`qr_create`] / [`qr_check`]）。
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use reqwest::header::{HeaderValue, ACCEPT, CONTENT_TYPE};
 
@@ -32,6 +33,9 @@ const W: &str = "https://music.163.com";
 const DETAIL_URL: &str = "https://music.163.com/api/song/detail";
 /// 一次详情请求带的曲目数。搜索 limit 上限 60，因此最多两批。
 const DETAIL_BATCH: usize = 40;
+/// 补图失败后的重试间隔。上游限流是秒级的，250ms 足够错开同一瞬；再长就会把
+/// 整次搜索的响应拖到用户能感觉出来的程度。
+const COVER_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 /// 扫码登录的 `type` 参数。与网页端/公开 API 库同参：取 unikey 与轮询状态都
 /// 带它，两个端点必须用同一个值（真机实测 1 与 3 都能取到 unikey，这里统一
@@ -529,7 +533,8 @@ fn netease_track(song: &serde_json::Value) -> OnlineTrack {
 /// 只要一个请求，成本远低于逐首问。
 ///
 /// 补不到就保持原样——封面缺失不是搜索失败，不该让整次搜索报错，也不该把
-/// 失败吞成"没封面"。失败只在日志里留痕。
+/// 失败吞成"没封面"。失败只在日志里留痕；每一批先问一次、拿不到再问一次，
+/// 重试的细节在 [`fetch_detail_covers`]。
 async fn fill_album_covers(ctx: &Ctx, tracks: &mut [OnlineTrack]) {
     let ids = cover_gaps(tracks);
     if ids.is_empty() {
@@ -543,31 +548,59 @@ async fn fill_album_covers(ctx: &Ctx, tracks: &mut [OnlineTrack]) {
     let cookie = login_cookie(ctx).await;
 
     for chunk in ids.chunks(DETAIL_BATCH) {
+        let ids = format!("[{}]", chunk.join(","));
+        if !fetch_detail_covers(&client, cookie.as_deref(), &ids, tracks, DETAIL_URL).await {
+            return;
+        }
+    }
+}
+
+/// 问一次歌曲详情并把 `songs[]` 回填进 `tracks`；没拿到就隔
+/// [`COVER_RETRY_DELAY`] 再问一次，两次都不行才放弃这一批。返回是否拿到了回包。
+///
+/// 「没拿到」含三种：连接/请求失败、响应不是 JSON、以及**回包里根本没有
+/// `songs`** —— 最后一种是网易云对这个端点限流时的实际形态（回 200 加一段
+/// `code` 非 200 的 JSON），它一次重试就能过去；不重试的话整列曲目都顶着
+/// 占位音符，而且只有重新搜索才会恢复。
+async fn fetch_detail_covers(
+    client: &reqwest::Client,
+    cookie: Option<&str>,
+    ids: &str,
+    tracks: &mut [OnlineTrack],
+    url: &str,
+) -> bool {
+    for attempt in 1..=2 {
+        if attempt > 1 {
+            tokio::time::sleep(COVER_RETRY_DELAY).await;
+        }
         let req = client
-            .get(DETAIL_URL)
-            .query(&[("ids", format!("[{}]", chunk.join(",")))])
+            .get(url)
+            .query(&[("ids", ids)])
             .header("Referer", W)
             .header("Accept", "application/json");
-        let resp = match with_cookie(req, cookie.as_deref()).send().await {
+        let resp = match with_cookie(req, cookie).send().await {
             Ok(r) => r,
             Err(e) => {
-                tracing::debug!("封面补全：请求歌曲详情失败: {e}");
-                return;
+                tracing::debug!("封面补全：第 {attempt} 次请求歌曲详情失败: {e}");
+                continue;
             }
         };
         let body: serde_json::Value = match resp.json().await {
             Ok(b) => b,
             Err(e) => {
-                tracing::debug!("封面补全：解析歌曲详情失败: {e}");
-                return;
+                tracing::debug!("封面补全：第 {attempt} 次解析歌曲详情失败: {e}");
+                continue;
             }
         };
-        let songs = match body.get("songs").and_then(|s| s.as_array()) {
-            Some(s) => s,
-            None => return,
-        };
-        apply_detail_covers(tracks, songs);
+        match body.get("songs").and_then(|s| s.as_array()) {
+            Some(songs) => {
+                apply_detail_covers(tracks, songs);
+                return true;
+            }
+            None => continue,
+        }
     }
+    false
 }
 
 /// 哪些曲目需要补封面：缺封面且 id 合法（空串 / "0" 是解析失败的占位，
@@ -2011,6 +2044,7 @@ mod tests {
     use super::*;
     // 只在断言里用到：解析回一罐 cookie 来逐项检查合并结果。
     use super::super::http::parse_cookie;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn song() -> serde_json::Value {
         serde_json::json!({
@@ -2045,6 +2079,96 @@ mod tests {
             "album": {"name": "A", "picId": 1, "picUrl": "http://p1.music.126.net/a.jpg"}
         }));
         assert_eq!(t.cover.as_deref(), Some("https://p1.music.126.net/a.jpg"));
+    }
+
+    /// 按脚本逐次回包的本地详情端点替身，并数出实际收到几次请求。
+    /// 用真 TCP 而不是假客户端：要验的就是「失败之后确实又发了一次」。
+    async fn stub_detail(responses: Vec<&'static str>) -> (String, std::sync::Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定本地端口");
+        let url = format!(
+            "http://127.0.0.1:{}/api/song/detail",
+            listener.local_addr().unwrap().port()
+        );
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            for body in responses {
+                let (mut sock, _) = listener.accept().await.expect("连接");
+                let mut buf = [0u8; 2048];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 || buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                counter.fetch_add(1, Ordering::SeqCst);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (url, hits)
+    }
+
+    #[tokio::test]
+    async fn cover_backfill_retries_once_when_the_first_response_has_no_songs() {
+        // 上游限流时的真实形态：200 + 一段没有 songs 的 JSON。
+        let (url, hits) = stub_detail(vec![
+            r#"{"code":-460,"message":"请重新登录"}"#,
+            r#"{"songs":[{"id":5257138,"album":{"picUrl":"https://p1.music.126.net/a/1.jpg"}}]}"#,
+        ])
+        .await;
+        let mut tracks = vec![netease_track(&song())];
+        assert_eq!(
+            tracks[0].cover, None,
+            "搜索接口只给 picId，进函数时应当还没有封面"
+        );
+        let got = fetch_detail_covers(
+            &reqwest::Client::new(),
+            None,
+            "[5257138]",
+            &mut tracks,
+            &url,
+        )
+        .await;
+        assert!(got, "第二次拿到 songs 就该算成功");
+        assert_eq!(
+            tracks[0].cover.as_deref(),
+            Some("https://p1.music.126.net/a/1.jpg")
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "应当恰好重试一次");
+    }
+
+    #[tokio::test]
+    async fn cover_backfill_gives_up_after_the_single_retry() {
+        // 脚本比尝试次数多一条：不然「改成试三次」这种变异只会让第三次拿到
+        // 连接被拒，计数仍是 2，断言就抓不到多试的那一次。
+        let (url, hits) = stub_detail(vec![
+            r#"{"code":-460}"#,
+            r#"{"code":-460}"#,
+            r#"{"code":-460}"#,
+        ])
+        .await;
+        let mut tracks = vec![netease_track(&song())];
+        let got = fetch_detail_covers(
+            &reqwest::Client::new(),
+            None,
+            "[5257138]",
+            &mut tracks,
+            &url,
+        )
+        .await;
+        assert!(!got, "两次都没有 songs 就该放弃这一批");
+        assert_eq!(tracks[0].cover, None, "放弃时不该留下半张封面");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "重试只有一次，不能越试越多");
     }
 
     #[test]

@@ -146,6 +146,16 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/history", get(history_list).delete(history_clear))
         .route("/v1/history/{id}", axum::routing::delete(history_remove))
         .route("/v1/player/replay", post(replay_index))
+        .route("/v1/podcasts/search", get(podcast_search))
+        .route("/v1/podcasts/feed", get(podcast_feed))
+        .route(
+            "/v1/podcasts/subscriptions",
+            get(podcast_subscriptions).post(podcast_subscribe),
+        )
+        .route(
+            "/v1/podcasts/subscriptions/{id}",
+            axum::routing::delete(podcast_unsubscribe),
+        )
         // 在线曲库：搜索与试听地址都由服务端代发，浏览器绕不开第三方接口的
         // CORS 与 Referer 校验。
         .route("/v1/online/sources", get(online_sources))
@@ -1165,69 +1175,34 @@ pub(crate) struct CoverProxyQuery {
 /// 插件沙箱的 CSP 把 img-src 限死在 `data:` / `blob:` / 插件资源源，音源 CDN 的
 /// https 图在插件形态根本画不出来（独立形态没有这层 CSP，远程 URL 直接进
 /// `<img src>`，所以这个差异只在插件形态出现）。但服务端没有这层限制，不校验
-/// 的话它就是一个能打内网的开放代理：scheme 只认 https；IP 字面量里的环回 /
-/// 私网 / 链路本地一律拒；主机名拒 localhost 与 `.local` / `.internal` / `.lan`
-/// 这类内网后缀，以及不带点的单段名。
+/// 的话它就是一个能打内网的开放代理。URL、实际 DNS 与每次重定向都复用
+/// public_net 的公网策略；图片的首跳和后续跳转只放行 HTTPS。
 pub(crate) fn public_https_url(raw: &str) -> ApiResult<reqwest::Url> {
-    let url = reqwest::Url::parse(raw.trim())
-        .map_err(|_| bad_request("url must be an absolute https URL"))?;
-    if url.scheme() != "https" {
-        return Err(bad_request("only https covers are proxied"));
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| bad_request("url has no host"))?;
-    match host.parse::<std::net::IpAddr>() {
-        Ok(ip) => {
-            // is_private / is_link_local 只存在于 V4/V6 具体类型上，IpAddr 没有，
-            // 所以按枚举分支各问各的。
-            let blocked = match ip {
-                std::net::IpAddr::V4(v4) => {
-                    v4.is_loopback()
-                        || v4.is_private()
-                        || v4.is_link_local()
-                        || v4.is_unspecified()
-                        || v4.is_multicast()
-                        || v4.is_documentation()
-                }
-                std::net::IpAddr::V6(v6) => {
-                    v6.is_loopback()
-                        || v6.is_unspecified()
-                        || v6.is_multicast()
-                        || v6.is_unicast_link_local()
-                        || v6.is_unique_local()
-                }
-            };
-            if blocked {
-                return Err(bad_request("private addresses are not proxied"));
-            }
-        }
-        Err(_) => {
-            let name = host.to_ascii_lowercase();
-            let intranet = name == "localhost"
-                || name.ends_with(".localhost")
-                || name.ends_with(".local")
-                || name.ends_with(".internal")
-                || name.ends_with(".lan")
-                || !name.contains('.');
-            if intranet {
-                return Err(bad_request("intranet hostnames are not proxied"));
-            }
-        }
-    }
-    Ok(url)
+    crate::public_net::public_url(raw, crate::public_net::SchemePolicy::HttpsOnly)
+        .map_err(bad_request)
 }
+
+const MAX_REMOTE_IMAGE_BYTES: usize = 6 * 1024 * 1024;
 
 /// 取回远程图，限大小、限类型。返回字节与 Content-Type，供 HTTP 与 RPC 两边编成
 /// 同一份 `{data, content_type}` 信封——与本地封面端点同形状，前端一条 data-URL
 /// 链路就能同时吃本地与远程两种封面。
 pub(crate) async fn fetch_remote_image(url: &reqwest::Url) -> ApiResult<(Vec<u8>, String)> {
-    const MAX_BYTES: usize = 6 * 1024 * 1024;
-    let resp = crate::online::client()?
-        .get(url.clone())
+    // IP 字面量会绕过 DNS 解析；即使内部调用者已持有 Url，首跳仍必须做准入。
+    let url = public_https_url(url.as_str())?;
+    let resp = remote_image_client()?
+        .get(url)
         .send()
         .await
-        .map_err(|e| bad_request(e.to_string()))?;
+        .map_err(|e| bad_request(e.without_url().to_string()))?;
+    read_remote_image(resp).await
+}
+
+fn remote_image_client() -> ApiResult<reqwest::Client> {
+    crate::public_net::client(crate::public_net::SchemePolicy::HttpsOnly).map_err(bad_request)
+}
+
+async fn read_remote_image(mut resp: reqwest::Response) -> ApiResult<(Vec<u8>, String)> {
     if !resp.status().is_success() {
         return Err(bad_request(format!("upstream returned {}", resp.status())));
     }
@@ -1235,7 +1210,7 @@ pub(crate) async fn fetch_remote_image(url: &reqwest::Url) -> ApiResult<(Vec<u8>
     // is_some_and 而非 map_or(false, …)：clippy 1.99 起 unnecessary_map_or 会红。
     if resp
         .content_length()
-        .is_some_and(|len| len as usize > MAX_BYTES)
+        .is_some_and(|len| len > MAX_REMOTE_IMAGE_BYTES as u64)
     {
         return Err(bad_request("upstream cover is too large"));
     }
@@ -1248,11 +1223,18 @@ pub(crate) async fn fetch_remote_image(url: &reqwest::Url) -> ApiResult<(Vec<u8>
     if !content_type.starts_with("image/") {
         return Err(bad_request("upstream is not an image"));
     }
-    let bytes = resp.bytes().await.map_err(|e| bad_request(e.to_string()))?;
-    if bytes.len() > MAX_BYTES {
-        return Err(bad_request("upstream cover is too large"));
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| bad_request(e.without_url().to_string()))?
+    {
+        if chunk.len() > MAX_REMOTE_IMAGE_BYTES.saturating_sub(bytes.len()) {
+            return Err(bad_request("upstream cover is too large"));
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    Ok((bytes.to_vec(), content_type))
+    Ok((bytes, content_type))
 }
 
 /// 远程封面代理：插件形态下远程封面的唯一通道。独立形态也保留同形状应答，
@@ -2869,6 +2851,91 @@ pub(crate) fn qr_session(
     Ok(sess)
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct PodcastSearchQuery {
+    #[serde(default)]
+    pub q: String,
+    #[serde(default = "podcast_search_limit")]
+    pub limit: usize,
+}
+
+fn podcast_search_limit() -> usize {
+    30
+}
+fn podcast_feed_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PodcastFeedQuery {
+    pub url: String,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "podcast_feed_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PodcastSubscribeRequest {
+    pub feed_url: String,
+}
+
+async fn podcast_search(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<PodcastSearchQuery>,
+) -> ApiResult<Json<crate::podcasts::SearchResult>> {
+    tagged(
+        "podcast",
+        crate::podcasts::search(&online_ctx(&state), &q.q, q.limit).await,
+    )
+    .map(Json)
+}
+
+async fn podcast_feed(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<PodcastFeedQuery>,
+) -> ApiResult<Json<crate::podcasts::FeedPage>> {
+    tagged(
+        "podcast",
+        crate::podcasts::feed(&online_ctx(&state), &q.url, q.offset, q.limit, q.refresh).await,
+    )
+    .map(Json)
+}
+
+async fn podcast_subscriptions(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let shows = tagged(
+        "podcast",
+        crate::podcasts::subscriptions(&online_ctx(&state)).await,
+    )?;
+    Ok(Json(serde_json::json!({ "shows": shows })))
+}
+
+async fn podcast_subscribe(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PodcastSubscribeRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let show = tagged(
+        "podcast",
+        crate::podcasts::subscribe(&online_ctx(&state), &body.feed_url).await,
+    )?;
+    Ok(Json(serde_json::json!({ "show": show })))
+}
+
+async fn podcast_unsubscribe(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    tagged(
+        "podcast",
+        crate::podcasts::unsubscribe(&online_ctx(&state), &id).await,
+    )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// 音源清单：id、显示名、分类、是否支持 cookie、当前是否已登录。
 /// 前端的音源下拉框和分类 chips 全部由它生成。
 async fn online_sources(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
@@ -3595,6 +3662,165 @@ async fn online_account(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn podcast_http_and_rpc_share_subscription_paging_and_playback_identity() {
+        use crate::rpc::{Call, Op, Rpc};
+        use serde_json::{json, Value};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!("hertz-podcast-api-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        sqlx::query("INSERT INTO podcast_shows (id,feed_url,title,author,description,episode_count,fetched_at) VALUES ('show','https://example.com/podcast.xml','中文节目','作者','简介',3,strftime('%s','now'))")
+            .execute(&db).await.unwrap();
+        for n in 0..3 {
+            sqlx::query("INSERT INTO podcast_episodes (id,show_id,identity,enclosure_url,title,artist,album,duration_ms,published_at,description,ordinal) VALUES (?,'show',?,'https://example.com/episode.mp3',?,'作者','中文节目',123000,'2026-10-08','单集简介',?)")
+                .bind(format!("episode{n}")).bind(format!("guid{n}")).bind(format!("第{n}集")).bind(n)
+                .execute(&db).await.unwrap();
+        }
+        let (mut state, audio_handle) = crate::state::tests::playback_state_with_db(db).await;
+        state.token = "podcast-api-fixture".into();
+        let state = Arc::new(state);
+        let rpc = Rpc::new(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = super::router(state.clone()).with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let cases = [
+            (
+                Op::Get,
+                "podcasts/subscriptions",
+                json!({}),
+                Value::Null,
+                200,
+            ),
+            (
+                Op::Get,
+                "podcasts/search",
+                json!({"q":""}),
+                Value::Null,
+                400,
+            ),
+            (
+                Op::Get,
+                "podcasts/feed",
+                json!({"url":"http://127.0.0.1/feed"}),
+                Value::Null,
+                400,
+            ),
+            (
+                Op::Post,
+                "podcasts/subscriptions",
+                json!({}),
+                json!({"feed_url":"file:///private"}),
+                400,
+            ),
+            (
+                Op::Post,
+                "podcasts/subscriptions",
+                json!({}),
+                json!({"feed_url":"https://example.com/podcast.xml"}),
+                200,
+            ),
+            (
+                Op::Get,
+                "podcasts/subscriptions",
+                json!({}),
+                Value::Null,
+                200,
+            ),
+            (
+                Op::Get,
+                "podcasts/feed",
+                json!({"url":"https://example.com/podcast.xml","offset":"1","limit":"1"}),
+                Value::Null,
+                200,
+            ),
+            (
+                Op::Delete,
+                "podcasts/subscriptions/show",
+                json!({}),
+                Value::Null,
+                200,
+            ),
+            (
+                Op::Get,
+                "online/detail",
+                json!({"source":"podcast","id":"episode1"}),
+                Value::Null,
+                200,
+            ),
+            (
+                Op::Get,
+                "online/stream",
+                json!({"source":"podcast","id":"episode1"}),
+                Value::Null,
+                200,
+            ),
+        ];
+        for (op, path, query, body, expected_status) in cases {
+            let path = format!("v1/{path}");
+            let result = rpc
+                .call(Call {
+                    op,
+                    path: &path,
+                    query: query.clone(),
+                    body: body.clone(),
+                    raw: None,
+                })
+                .await;
+            let method = match op {
+                Op::Get => "GET",
+                Op::Post => "POST",
+                Op::Delete => "DELETE",
+                Op::Put => "PUT",
+            };
+            let mut request = client
+                .request(method.parse().unwrap(), format!("http://{address}/{path}"))
+                .bearer_auth("podcast-api-fixture")
+                .query(&query);
+            if !body.is_null() {
+                request = request.json(&body);
+            }
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status().as_u16(), expected_status, "HTTP {path}");
+            let http: Value = response.json().await.unwrap();
+            if expected_status == 200 {
+                let reply = result.unwrap_or_else(|e| panic!("RPC {path}: {e:?}"));
+                assert_eq!(reply.status, 200, "RPC {path}");
+                assert_eq!(http, reply.body, "same contract for {path}");
+                if path.ends_with("/feed") {
+                    assert_eq!(http["total"], 3);
+                    assert_eq!(http["episodes"].as_array().unwrap().len(), 1);
+                    assert_eq!(http["episodes"][0]["id"], "episode1");
+                }
+                if path.ends_with("/stream") {
+                    assert_eq!(http["url"], "https://example.com/episode.mp3");
+                    assert!(http.get("bitrate").is_none());
+                }
+            } else {
+                let error = result.err().expect("invalid input must fail RPC");
+                assert_eq!(error.status, expected_status);
+                assert_eq!(http["error"]["code"], error.code);
+            }
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM podcast_episodes")
+                .fetch_one(&state.db)
+                .await
+                .unwrap(),
+            3
+        );
+        server.abort();
+        let _ = server.await;
+        state.audio.shutdown();
+        audio_handle.join().unwrap();
+        state.db.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     use super::{
         lyrics_user_offset, overlay_key_allows, pick_index, playlist_scope, public_https_url,
         qr_session, query_param, safe_cover_id,
@@ -3782,5 +4008,234 @@ mod tests {
         // 不是绝对 URL
         assert!(public_https_url("p1.music.126.net/a.jpg").is_err());
         assert!(public_https_url("").is_err());
+    }
+
+    #[test]
+    fn cover_proxy_rejects_credentials_and_special_address_ranges() {
+        for url in [
+            "https://user:secret@example.com/image.png",
+            "https://user@example.com/image.png",
+            "https://100.64.0.1/image.png",
+            "https://198.18.0.1/image.png",
+            "https://240.0.0.1/image.png",
+            "https://[::ffff:127.0.0.1]/image.png",
+            "https://[::ffff:192.168.1.1]/image.png",
+            "https://[2002:7f00:1::]/image.png",
+            "https://[2001:db8::1]/image.png",
+            "https://example.com:0/image.png",
+        ] {
+            assert!(public_https_url(url).is_err(), "{url} must be rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn cover_client_rejects_private_dns_before_connecting() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connected = Arc::new(AtomicBool::new(false));
+        let accepted = connected.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            accepted.store(true, Ordering::SeqCst);
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx")
+                .await;
+        });
+        // 绕过首跳字符串准入，仅用本机 DNS 验证图片实际客户端的连接边界。
+        let result = super::remote_image_client()
+            .unwrap()
+            .get(format!("http://localhost:{port}/private"))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await;
+        let reached_private = connected.load(Ordering::SeqCst);
+        server.abort();
+        let _ = server.await;
+        assert!(!reached_private, "图片客户端在 DNS 拒绝前连接了内网");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn cover_client_rejects_private_redirect_before_target_request() {
+        use axum::routing::get;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use std::time::Duration;
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let private_hits = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/start",
+                get(move || async move {
+                    axum::response::Redirect::temporary(&format!("http://{addr}/private"))
+                }),
+            )
+            .route(
+                "/private",
+                get(move || {
+                    private_hits.fetch_add(1, Ordering::SeqCst);
+                    async { "private" }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        // 本机 HTTP 首跳仅用于隔离重定向测试；生产图片入口另行强制 HTTPS。
+        let result = super::remote_image_client()
+            .unwrap()
+            .get(format!("http://{addr}/start"))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await;
+        server.abort();
+        let _ = server.await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "不应向重定向的内网目标发送请求"
+        );
+        assert!(result.unwrap_err().is_redirect());
+    }
+
+    #[tokio::test]
+    async fn cover_reader_stops_and_cancels_an_oversize_chunked_image_without_eof() {
+        use axum::{
+            body::{Body, Bytes},
+            http::header,
+            response::Response,
+            routing::get,
+        };
+        use std::{sync::Arc, time::Duration};
+
+        struct Dropped(Arc<tokio::sync::Notify>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        let dropped = Arc::new(tokio::sync::Notify::new());
+        let signal = dropped.clone();
+        let app = axum::Router::new().route(
+            "/image",
+            get(move || {
+                let guard = Dropped(signal.clone());
+                async move {
+                    let stream = futures::stream::unfold((0, guard), |(index, guard)| async move {
+                        if index > 96 {
+                            std::future::pending::<()>().await;
+                        }
+                        let chunk = Bytes::from(vec![b'x'; 64 * 1024]);
+                        Some((Ok::<_, std::io::Error>(chunk), (index + 1, guard)))
+                    });
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "image/png")
+                        .body(Body::from_stream(stream))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}/image"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.content_length(), None);
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), super::read_remote_image(response)).await;
+        let cancelled = tokio::time::timeout(Duration::from_secs(2), dropped.notified()).await;
+        server.abort();
+        let _ = server.await;
+        let error = result
+            .expect("超过 6 MiB 后必须立即拒绝，不能等待永不结束的响应")
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request");
+        assert_eq!(error.message, "upstream cover is too large");
+        assert!(cancelled.is_ok(), "拒绝后必须取消上游响应体");
+    }
+
+    #[tokio::test]
+    async fn cover_reader_accepts_images_and_rejects_mime_and_declared_overflow() {
+        use axum::{body::Body, http::header, response::Response, routing::get};
+        use std::time::Duration;
+
+        let app = axum::Router::new()
+            .route(
+                "/image",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "image/png")],
+                        b"\x89PNG\r\n\x1a\n".as_slice(),
+                    )
+                }),
+            )
+            .route(
+                "/html",
+                get(|| async {
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/html")
+                        .body(Body::from_stream(futures::stream::pending::<
+                            Result<axum::body::Bytes, std::io::Error>,
+                        >()))
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/too-large",
+                get(|| async {
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "image/png")
+                        .header(header::CONTENT_LENGTH, 6 * 1024 * 1024 + 1)
+                        .body(Body::from_stream(futures::stream::pending::<
+                            Result<axum::body::Bytes, std::io::Error>,
+                        >()))
+                        .unwrap()
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (path, expected_error) in [
+            ("image", None),
+            ("html", Some("upstream is not an image")),
+            ("too-large", Some("upstream cover is too large")),
+        ] {
+            let response = client
+                .get(format!("http://{addr}/{path}"))
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+                .unwrap();
+            let result = super::read_remote_image(response).await;
+            if let Some(message) = expected_error {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, "bad_request");
+                assert_eq!(error.message, message);
+            } else {
+                let (bytes, mime) = result.unwrap();
+                assert_eq!(bytes, b"\x89PNG\r\n\x1a\n");
+                assert_eq!(mime, "image/png");
+            }
+        }
+        server.abort();
+        let _ = server.await;
     }
 }

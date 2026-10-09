@@ -129,6 +129,7 @@
     // 与 main.rs 白名单），沿用通用 sprite 字形；品牌名照挂 title/aria-label，
     // 不占用平台品牌色（与 local 同款处理）。
     migu: ['咪咕音乐', null, 'i-app-generic'],
+    podcast: ['播客', null, 'i-headphones'],
     // 本地曲库也走同一套徽标：唱片图标 + 主题色（不占任何平台品牌色）。
     local: ['本地曲库', null, 'i-app-local'],
   };
@@ -143,7 +144,11 @@
 
   function sourceLabel(id) {
     var info = onlineState.sources.find(function (s) { return s.id === id; });
-    return (info && info.label) || id;
+    return (info && info.label) || (SOURCE_BADGE[id] && SOURCE_BADGE[id][0]) || id;
+  }
+
+  function musicSources(data) {
+    return ((data && data.sources) || []).filter(function (s) { return !s.kind || s.kind === 'music'; });
   }
 
   /// 站内资源 URL。独立形态恒等返回；DBX 插件形态下按宿主的 <base href> 补全，
@@ -190,6 +195,20 @@
   function sourceIcon(id) {
     var b = sourceBadge(id);
     return b ? b.icon : GENERIC_ICON;
+  }
+
+  /// VIP 标记的唯一画法：在线行、每日推荐页（列表与卡片）、首页推荐条共用。
+  /// 判据都是上游给的同一个 `vip_only`，所以它在三个列表里必须长成一个样、
+  /// 说同一句话 —— 各写一份迟早会漂移成「同一个字段在两个列表里不一样」。
+  /// 注意它标的是「上游声明 VIP 专享」，不是「这个账号点不动」：网易云不少
+  /// 标了 VIP 的曲目非会员也能播（只是降档），QQ 那批标了 VIP 的确实取不到地址。
+  var VIP_TITLE = 'VIP 专享，登录会员账号后可完整播放';
+  function vipTag() {
+    var t = document.createElement('span');
+    t.className = 'vip-tag';
+    t.textContent = 'VIP';
+    t.title = VIP_TITLE;
+    return t;
   }
 
   function virtualId(t) {
@@ -254,12 +273,7 @@
 
     var quality = row.querySelector('.t-quality');
     quality.appendChild(badge(track.source));
-    if (track.vip_only) {
-      var vip = document.createElement('span');
-      vip.className = 'vip-tag';
-      vip.textContent = 'VIP';
-      quality.appendChild(vip);
-    }
+    if (track.vip_only) quality.appendChild(vipTag());
 
     // 在线曲目也能收藏：source 是音源 id、ref_id 是该音源内的曲目 id。
     // 收藏列表因此能直接显示快照，不登录也能看到自己收藏过什么。
@@ -299,9 +313,7 @@
 
     var btn = row.querySelector('[data-act="preview"]');
     btn.disabled = disabled;
-    btn.title = track.vip_only
-      ? 'VIP 专享，登录会员账号后可完整播放'
-      : (track.playable ? '在线试听' : '该音源没有可用的试听地址');
+    btn.title = track.vip_only ? VIP_TITLE : (track.playable ? '在线试听' : '该音源没有可用的试听地址');
 
     row.dataset.previewTitle = btn.title;
     btn.onclick = function (e) { e.stopPropagation(); activate(); };
@@ -617,7 +629,7 @@
       try {
         var data = await T.get('/v1/online/sources');
         if (epoch !== searchEpoch) return;
-        onlineState.sources = data.sources || [];
+        onlineState.sources = musicSources(data);
         if (!onlineState.sources.length) throw new Error('没有可用音源');
       } catch (err) {
         if (epoch !== searchEpoch) return;
@@ -1732,7 +1744,7 @@
     searchViews.clear();
     if (searchSession) { cancelSearch(); onlineState.tracks = []; renderOnline(); }
     var data = await T.get('/v1/online/sources').catch(function () { return null; });
-    onlineState.sources = (data && data.sources) || [];
+    onlineState.sources = musicSources(data);
     refreshCookieUi();
     // 档位描述与音源清单同源拉取；失败自吞（选择器保持隐藏），不影响音源加载。
     loadQualityPrefs();
@@ -1837,7 +1849,7 @@
 
       var badgeEl = document.createElement('span');
       badgeEl.className = 'hint';
-      badgeEl.textContent = s.signedIn ? '已登录' : '未登录';
+      badgeEl.textContent = s.signedIn ? '凭据已保存' : '未保存凭据';
 
       row.append(label, input, btn, badgeEl);
       return row;
@@ -1930,6 +1942,8 @@
     isImgIcon: isImgIcon,
     // 徽标节点工厂：歌单菜单/收藏/两层界面都来这里取，避免各处再拼一遍。
     badge: badge,
+    // VIP 标记节点工厂：在线行、每日推荐页、首页推荐条共用（见 vipTag 注释）。
+    vipTag: vipTag,
     // 在线播放错误条（app.js Task 14 的 WS error 分支调用）。
     showOnlineError: showOnlineError,
     hideOnlineError: hideOnlineError,

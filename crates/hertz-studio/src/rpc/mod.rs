@@ -35,6 +35,7 @@ pub mod maintenance;
 pub mod online;
 pub mod playback;
 pub mod playlists;
+pub mod podcasts;
 pub mod recommend;
 pub mod remote;
 
@@ -371,6 +372,16 @@ impl Rpc {
             }
             (Op::Get, ["v1", "recommend", "daily", "online"]) => {
                 recommend::daily_online_recommend(state, query).await
+            }
+
+            (Op::Get, ["v1", "podcasts", "search"]) => podcasts::search(state, query).await,
+            (Op::Get, ["v1", "podcasts", "feed"]) => podcasts::feed(state, query).await,
+            (Op::Get, ["v1", "podcasts", "subscriptions"]) => podcasts::subscriptions(state).await,
+            (Op::Post, ["v1", "podcasts", "subscriptions"]) => {
+                podcasts::subscribe(state, body).await
+            }
+            (Op::Delete, ["v1", "podcasts", "subscriptions", id]) => {
+                podcasts::unsubscribe(state, id).await
             }
 
             // --- 在线曲库（代理）---

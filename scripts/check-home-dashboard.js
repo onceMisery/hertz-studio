@@ -12,7 +12,11 @@ const app = fs.readFileSync(path.join(root, 'plugin/ui/app.js'), 'utf8');
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 function fixture() {
   const nodes = {};
-  for (const name of ['dashboard', 'art', 'art-wrap', 'status', 'title', 'detail', 'action', 'retry', 'daily', 'recent', 'library']) {
+  // 节点清单跟着首页卡片的新结构走：曲名从 #home-title 搬到了 #home-track
+  // （封面左置后，歌名只在悬停/聚焦时从封面浮出，常驻的是状态行右侧那句）。
+  // 'tip-title' / 'tip-artist' 是封面浮层里那份信息的第二个出口。
+  for (const name of ['dashboard', 'art', 'art-wrap', 'status', 'track', 'detail',
+    'action', 'retry', 'daily', 'recent', 'library', 'tip-title', 'tip-artist']) {
     nodes['home-' + name] = { textContent: '', disabled: false, hidden: false, dataset: {}, events: {},
       style: { props: {}, setProperty(key, value) { this.props[key] = value; }, removeProperty(key) { delete this.props[key]; } },
       addEventListener(name, cb) { this.events[name] = cb; } };
@@ -73,15 +77,19 @@ async function main() {
   const old = f.api.onViewEnter(); const fresh = f.api.onViewEnter();
   f.histories[1].resolve({ id: 'fresh', title: '新记录' }); await fresh;
   f.histories[0].resolve({ id: 'stale', title: '旧记录' }); await old;
-  assert.equal(f.nodes['home-title'].textContent, '新记录', 'new history request wins');
+  // 曲名不再常驻（封面左置后只在悬停时浮出），常驻的是状态行右侧那句「曲名 - 歌手」。
+  // 这三条断言验的是「迟到数据不能覆盖当前信息」，信息出口换了，判据也跟着换 ——
+  // 钉在一个已经删掉的节点上，测的就不是这件事了。
+  const trackText = () => f.nodes['home-track'].textContent;
+  assert.equal(trackText(), '新记录', 'new history request wins');
   f.histories.length = 0;
   const changedIntent = f.api.onViewEnter(); f.set({ intent: 3 });
   f.histories.shift().resolve({ id: 'stale-intent', title: '不该出现' }); await changedIntent;
-  assert.notEqual(f.nodes['home-title'].textContent, '不该出现', 'playback intent invalidates history preparation');
+  assert.notEqual(trackText(), '不该出现', 'playback intent invalidates history preparation');
   const restored = f.api.onViewEnter();
   f.set({ current: { id: 'restored', title: '已恢复队列' }, queueLength: 2 });
   f.histories.shift().resolve({ id: 'other', title: '旧历史' }); await restored;
-  assert.equal(f.nodes['home-title'].textContent, '已恢复队列');
+  assert.equal(trackText(), '已恢复队列');
   f.set({ current: null, queueLength: 0, intent: 4 });
   const empty = f.api.onViewEnter(); f.histories.shift().resolve(null); await empty;
   assert.equal(f.nodes['home-action'].textContent, '添加音乐'); await f.click(); assert.equal(f.actions.at(-1), 'add');
