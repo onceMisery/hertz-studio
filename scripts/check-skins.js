@@ -1327,6 +1327,12 @@ function checkChaoxiSkin() {
     '.view 有 max-width（宽屏不铺满，两侧留白本身当分区手段）');
   ok(viewRule && /margin-inline:\s*auto/.test(viewRule[1]),
     '.view 有 margin-inline:auto（只写 max-width 在 flex 列里不会居中）');
+  // 内容区上限别往小里调：第一版取 1080 居中，1440 屏上左右各空 180px，
+  // 用户直接读成"两侧大片留白"。定宽居中是阅读型页面的手段，音乐库不是 ——
+  // 列表与卡片该铺满，留白留在块与块之间。
+  const cm = num(cx['content-max']);
+  ok(cm !== null && cm >= 1440,
+    `内容区上限不低于 1440px（实际 ${cx['content-max']}，太小两侧就会空出一大片）`);
 
   // 3) 导航是**顶部通栏**，不再占栅格第一轨 —— 这是骨架从"三栏工作台"
   //    变成"单列内容流"的那一步，也是用户要的 MOO 式首页的前提。
