@@ -164,13 +164,35 @@ jobs:
         if: steps.smoke.outcome == 'success'
         run: python3 scripts/check-library-api.py --maintenance
       - name: DBX plugin sidecar protocol
+        id: sidecar
         if: steps.smoke.outcome == 'success'
         # 真起 sidecar、用 stdio 喂 JSON-RPC：插件形态唯一的集成守卫（信封、路由表、
         # 错误契约，以及扫描 → 列出曲目 → load → play 的端到端）。null 后端下频谱
         # 断言自动跳过，所以 runner 不需要声卡。每日推荐那一条会真的打一次上游
         # （开放授权平台不需要登录），断言只看形状与判别式，对方限流或离线不会假红。
+        #
+        # shell: bash 是必须的：不写的话 Linux 上是 `bash -e`、不带 pipefail，
+        # `node … | tee` 的退出码会变成 tee 的 0，检查真失败了也会被报成绿。
+        shell: bash
+        continue-on-error: true
         run: |
           cargo build -p dbx-plugin-hertz
-          node scripts/check-plugin-sidecar.js
+          node scripts/check-plugin-sidecar.js 2>&1 | tee sidecar.log
         env:
           VMUSIC_BACKEND: null
+      # 临时诊断（定位完与 test job 那处一起撤）：这一步红时只有「exit code 1」，
+      # 而检查脚本自己打出的 FAIL 条目、中断原因与失败清单都在匿名读不到的日志里。
+      # 注意失败清单在最后，所以要先把带关键词的行顶出来、再补一段尾部。
+      - name: Surface sidecar failure as annotation
+        if: steps.sidecar.outcome == 'failure'
+        shell: bash
+        run: |
+          body="$(
+            {
+              grep -nE '(^  FAIL|检查中断|sidecar stderr|^  - |协议检查：)' sidecar.log | head -25
+              echo '===== tail ====='
+              tail -25 sidecar.log
+            } | sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' | awk '{ gsub(/%/, "%25"); gsub(/\r/, "%0D"); printf "%s%%0A", $0 }'
+          )"
+          echo "::error title=sidecar failed on ubuntu-latest::${body}"
+          exit 1
