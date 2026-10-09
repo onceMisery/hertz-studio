@@ -87,12 +87,17 @@ jobs:
 
       # The audio tests run against the null backend so they do not need a
       # sound card on the runner.
+      #
+      # `VMUSIC_BACKEND` 三处都必须加引号：不带引号的 null 在 YAML 里是 null 标量，
+      # Actions 导出成**空串**，而 bootstrap.rs 只把字面 "null" 当 Null 后端、其余
+      # 一律 cpal，health 于是报出 backend:"" —— 既没有这个后端名，也让
+      # check-plugin-sidecar.js 的「backend=null 就跳过频谱断言」判据失效。
       - name: Test
         id: test
         shell: bash
         continue-on-error: true
         env:
-          VMUSIC_BACKEND: null
+          VMUSIC_BACKEND: "null"
           CARGO_TERM_COLOR: never
         run: cargo test --workspace 2>&1 | tee test.log
 
@@ -150,7 +155,7 @@ jobs:
         continue-on-error: true
         run: bash scripts/smoke.sh 7899 2>&1 | tee smoke.log
         env:
-          VMUSIC_BACKEND: null
+          VMUSIC_BACKEND: "null"
       # 与 test job 同一套临时诊断：smoke 只在 ubuntu 跑，红了没有第二格可对照，
       # 而日志匿名读不到，只能把尾部顶成 annotation。定位完与 test job 那处一起撤。
       - name: Surface smoke failure as annotation
@@ -179,7 +184,7 @@ jobs:
           cargo build -p dbx-plugin-hertz
           node scripts/check-plugin-sidecar.js 2>&1 | tee sidecar.log
         env:
-          VMUSIC_BACKEND: null
+          VMUSIC_BACKEND: "null"
       # 临时诊断（定位完与 test job 那处一起撤）：这一步红时只有「exit code 1」，
       # 而检查脚本自己打出的 FAIL 条目、中断原因与失败清单都在匿名读不到的日志里。
       # 注意失败清单在最后，所以要先把带关键词的行顶出来、再补一段尾部。
