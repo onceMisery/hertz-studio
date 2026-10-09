@@ -1,10 +1,10 @@
 {
-  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/v0.6.38/plugins/manifest.schema.json",
   "manifest_version": 1,
   "id": "io.github.oncemisery.hertz-studio",
   "name": "Hertz Studio",
   "version": "0.1.0",
-  "publisher": "onceMisery",
+  "publisher": "oncemisery",
   "description": "Local-first music service and player: library scanning, native playback, playlists, word-level lyrics and an immersive 3D stage, all running on your own machine.",
   "icon": "assets/plugin.svg",
   "source": "https://github.com/onceMisery/hertz-studio",

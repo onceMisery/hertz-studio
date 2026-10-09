@@ -10,7 +10,8 @@
 #
 # 触发方式：建一个 Release（草稿也行）→ publish → 本 workflow 跑 5 个 target →
 # 把 5 个 .dbxp + 5 个 .artifact.json + 合并的 release-candidates.json 回传到该 Release。
-# 之后去 t8y2/dbx-store 开 submission issue，带上 tag 和 release-candidates.json 的 URL。
+# 之后按 store 仓 CONTRIBUTING.md 提**一个 PR**：candidates/<plugin-id>.json（候选元数据）
+# + publishers/<publisher-id>.json（首次提交才要），签名由维护者在那条 PR 上跑。
 #
 # 不可原地重建：同名版本一旦发布过，改任何字节都得换新 version（RELEASING.md「Immutability」）。
 
@@ -25,7 +26,10 @@ permissions:
 
 jobs:
   release:
-    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@plugin-sdk-v1
+    # 钉到 v0.6.38 那个 tag 背后的 commit（不是 tag 名）：tag 可以被上游挪走，
+    # 挪一次同一个源码 tag 就换了打包步骤，违反下面那条不可变约束。
+    # 上游原先的 plugin-sdk-v1 分支已不存在——用它会让整条链路连调度都调不起来。
+    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@069adbc5860b4b380dfcf32fb303e7e2ba93b51d
     with:
       release-tag: ${{ github.event.release.tag_name }}
       # 脚本内部 cd 进 plugin/ 打包，所以这里保持仓库根为工作目录，
