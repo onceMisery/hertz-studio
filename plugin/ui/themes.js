@@ -417,6 +417,109 @@
         // 但玻璃模糊在浅底上要重一档才压得住背后的彩色封面，这属于材质。
         '--glass-blur': '28px'
       }
+    },
+    {
+      id: 'chaoxi-night',
+      name: '潮汐·夜',
+      note: '留白·夜 · 近黑纸面 + 暖铜色唱片辉光（皮肤「潮汐」的配套深色）',
+      // 对比度（自 --bg #0E0E10 反推，WCAG AA）：
+      //   text ≈ 16.5   muted ≈ 6.4   brand ≈ 8.6
+      // 强调色刻意取 #E8E6E1 而不是纯白：纯白在近黑底上会起光晕，细字尤其明显。
+      // 底色也不用纯黑：纯黑在 OLED 上边界过硬，且让"层级"无处表达。
+      tokens: {
+        '--bg': '#0E0E10',
+        '--panel': 'rgba(24, 24, 27, 0.78)',
+        '--panel-solid': '#18181B',
+        '--panel-2': 'rgba(255, 255, 255, 0.045)',
+        // 暗底上的分隔线必须比底色**亮**：暗线在暗底上等于没有。
+        '--line': '#1F2023',
+        '--line-strong': '#2C2D31',
+        '--text': '#EDEDF0',
+        '--muted': '#92949B',
+        '--accent': '#E8E6E1',
+        '--accent-2': '#C8A96A',
+        '--accent-ink': '#0E0E10',
+        '--brand': '#C8A96A',
+        '--brand-rgb': '200, 169, 106',
+        // 铜色底上放字用墨色：#C8A96A 亮度 0.417，配黑 8.6、配白仅 2.4。
+        '--brand-ink': '#0E0E10',
+        '--highlight': '#E8E6E1',
+        '--highlight-rgb': '232, 230, 225',
+        '--hover': 'rgba(255, 255, 255, 0.06)',
+        '--danger': '#E5484D',
+        '--ok': '#4CAF6D',
+        '--warn': '#E08A3C',
+        '--ok-wash': 'rgba(76, 175, 109, 0.12)',
+        '--warn-wash': 'rgba(224, 138, 60, 0.12)',
+        '--danger-wash': 'rgba(229, 72, 77, 0.12)'
+      }
+    },
+    {
+      id: 'chaoxi-day',
+      name: '潮汐·昼',
+      note: '留白·昼 · 暖白纸面 + 压深铜色（皮肤「潮汐」的配套浅色）',
+      // 对比度（自 --bg #F7F6F4 反推，WCAG AA）：
+      //   text ≈ 16.6   muted ≈ 4.7   brand-ink ≈ 4.6
+      //
+      // ⚠ 铜色在浅底上必须**分两档**：#A98244 只有 3.3:1，够图形/描边/指示条，
+      //   但承载文字不达标；凡是要写字的位置一律用 --brand-ink #8A6A33（4.6:1）。
+      //   这是设计稿里最容易漏的一条，改色时先确认改的是哪一档。
+      //
+      // ⚠ 强调色在浅色下**反转为墨色**而不是反色：深浅不是反色关系，
+      //   是"重排光的来源"—— 浅色下光从环境来，UI 是亮的，强调就必须是暗的。
+      tokens: {
+        '--bg': '#F7F6F4',
+        '--panel': 'rgba(255, 255, 255, 0.78)',
+        '--panel-solid': '#FFFFFF',
+        '--panel-2': 'rgba(20, 20, 22, 0.035)',
+        '--line': '#E4E2DE',
+        '--line-strong': '#D2CFCA',
+        '--text': '#16171A',
+        '--muted': '#6B6E76',
+        '--accent': '#16171A',
+        '--accent-2': '#8A6A33',
+        '--accent-ink': '#F7F6F4',
+        '--brand': '#A98244',
+        '--brand-rgb': '169, 130, 68',
+        '--brand-ink': '#8A6A33',
+        '--highlight': '#16171A',
+        '--highlight-rgb': '22, 23, 26',
+        '--hover': 'rgba(20, 20, 22, 0.05)',
+        '--danger': '#D70015',
+        '--ok': '#1E7B34',
+        '--warn': '#B25000',
+
+        // ==== 白叠层必须翻转（与 ios-light 同一个理由）====
+        // style.css 的玻璃体系是**为暗底写的**：面板比底亮靠叠一层白，描边与
+        // 内高光也全是白叠层。这套方法在浅底上整体失效——白叠白等于什么都没叠，
+        // 卡片糊成一片、描边消失、进度条轨道看不见。这里把同一批令牌逐个翻成
+        // 「暗叠层」：面板靠**更深**的底 + 细描边浮起来，而不是靠更亮。
+        // 但**别一刀切禁白**：--panel / --surface-1 / --glass-line 浅色下本就该
+        // 是白的，只有**分隔类**（--line / --surface-line / --track）必须压暗。
+        '--glass-bg':
+          'linear-gradient(168deg, rgba(255, 255, 255, 0.94), rgba(255, 255, 255, 0.84) 46%, rgba(255, 255, 255, 0.78))',
+        '--glass-border': '1px solid rgba(32, 30, 27, 0.12)',
+        '--glass-line': 'rgba(255, 255, 255, 0.9)',
+        '--glass-shadow': '0 1px 2px rgba(32, 30, 27, 0.04), 0 8px 24px rgba(32, 30, 27, 0.06)',
+        '--glass-shadow-glow': '0 1px 2px rgba(32, 30, 27, 0.05), 0 10px 28px rgba(32, 30, 27, 0.08)',
+        '--glass-bg-strong': 'rgba(255, 255, 255, 0.88)',
+        '--surface-1': 'rgba(255, 255, 255, 0.95)',
+        '--surface-2': 'rgba(255, 255, 255, 1)',
+        '--surface-line': 'rgba(32, 30, 27, 0.10)',
+        '--surface-line-strong': 'rgba(32, 30, 27, 0.18)',
+        '--surface-hi': 'inset 0 1px 0 rgba(255, 255, 255, 0.9)',
+        '--surface-lift': '0 1px 2px rgba(32, 30, 27, 0.05), 0 6px 16px rgba(32, 30, 27, 0.06)',
+        '--field-bg': 'rgba(32, 30, 27, 0.05)',
+        '--field-bg-hover': 'rgba(32, 30, 27, 0.09)',
+        '--field-border': 'rgba(32, 30, 27, 0.14)',
+        '--field-border-strong': 'rgba(32, 30, 27, 0.26)',
+        '--track': 'rgba(32, 30, 27, 0.16)',
+        '--focus-ring': '2px solid rgba(var(--brand-rgb, 138, 106, 51), 0.75)',
+        '--ok-wash': 'rgba(30, 123, 52, 0.1)',
+        '--warn-wash': 'rgba(178, 80, 0, 0.1)',
+        '--danger-wash': 'rgba(215, 0, 21, 0.1)',
+        '--glass-blur': '28px'
+      }
     }
   ];
 

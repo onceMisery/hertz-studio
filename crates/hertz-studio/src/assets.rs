@@ -98,9 +98,11 @@ ui_assets! {
     "/skins/skin.liunian.css", CSS => const SKIN_LIUNIAN_CSS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.css");
     "/skins/skin.ios.css", CSS => const SKIN_IOS_CSS: &str = include_str!("../../../plugin/ui/skins/skin.ios.css");
     "/skins/skin.qingfeng.css", CSS => const SKIN_QINGFENG_CSS: &str = include_str!("../../../plugin/ui/skins/skin.qingfeng.css");
+    "/skins/skin.chaoxi.css", CSS => const SKIN_CHAOXI_CSS: &str = include_str!("../../../plugin/ui/skins/skin.chaoxi.css");
     "/skins/skin-shared.js", JS => const SKIN_SHARED_JS: &str = include_str!("../../../plugin/ui/skins/skin-shared.js");
     "/skins/skin.liunian.js", JS => const SKIN_LIUNIAN_JS: &str = include_str!("../../../plugin/ui/skins/skin.liunian.js");
     "/skins/skin.qingfeng.js", JS => const SKIN_QINGFENG_JS: &str = include_str!("../../../plugin/ui/skins/skin.qingfeng.js");
+    "/skins/skin.chaoxi.js", JS => const SKIN_CHAOXI_JS: &str = include_str!("../../../plugin/ui/skins/skin.chaoxi.js");
     "/stage-themes/starfall.css", CSS => const STAGE_THEME_STARFALL_CSS: &str = include_str!("../../../plugin/ui/stage-themes/starfall.css");
     "/stage-themes/ios.css", CSS => const STAGE_THEME_IOS_CSS: &str = include_str!("../../../plugin/ui/stage-themes/ios.css");
 }

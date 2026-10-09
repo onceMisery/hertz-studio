@@ -1,0 +1,681 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 hertz-studio contributors
+
+   皮肤：chaoxi（潮汐）
+   --------------------------------------------------------------------------
+   名字的来处：潮水一涨一落，中间那段时间是什么都没有的——这套皮肤卖的正是
+   那段落差。信息像潮水一样退下去，把滩涂留给封面和文字；该出现的东西再随
+   下一次涨潮回来。所以它的密度是**刻意压低**的，不是"还没做完"。
+
+   设计稿见 docs/design/skin-chaoxi.md。一句话：**把界面退到最简，让专辑封面
+   和文字成为主角**。与既有四套皮肤的差异不在"多一个功能"，而在密度与注意力
+   的分配：
+
+     · 导航   sheen 顶部悬浮胶囊（横向、脱流）/ workbench 104px 紧凑窄条
+              chaoxi 72px 竖轨，**图标在上、文字在下**，留白比两者都多
+     · 分区   sheen 单列全宽 / workbench 三栏 1px 细线
+              chaoxi 竖轨 + 单列，但内容区**max-width 1080 居中**：
+              宽屏不铺满，两侧留白本身就是分区手段
+     · 密度   sheen 已经很松，chaoxi 再松一档（行内 16px、分区 32px、
+              卡片下限 300px），一屏放得更少、每张封面更大
+     · 形状   圆角 20px 封顶（设计稿纪律：超过 20 就与"克制"冲突），
+              比 sheen 的 22 收一档
+
+   舞台这一块是对设计稿的**唯一一处主动修正**：设计稿 6.0 写的是"全屏覆盖层
+   （z 60），播放页进入时淡入"，但本项目里"有没有播放页"由
+   body[data-stage-idle] 判定——app.js 的注释写明**暂停不算空闲**（曲目还在、
+   进度还在，收起会让歌词和进度条凭空消失）。也就是说只要有曲目，覆盖层就会
+   一直盖住曲库/歌单，浏览路径被整块挡掉。
+   所以这里退一步：舞台做成比 sheen 更宽的"聚焦面板"（min(560px, 42vw)），
+   全屏那件事交回既有的沉浸式舞台（F）。唱片基准比 sheen 大一档
+   （flex-basis 320px vs sheen 的 236px），设计稿 5.2 的意图保住了。
+   但代价是面板**高度**成了瓶颈：做不到"全屏那样放任唱片长到 480"，
+   所以 .disc-wrap 走主轴弹性收缩（见下方那条规则的注释）。
+
+   本文件**只写布局，不出现任何颜色字面量**：配色一律走现有主题 token。
+   于是换皮肤不会把主题色带跑，换主题也不会破坏这套皮肤——两者正交。
+
+   再扩展一套皮肤时照抄这个文件的结构即可：先声明 --skin-* 令牌，再按下面
+   的模块顺序（外壳 → 导航 → 内容 → 列表 → 卡片 → 面板 → 浮层）写覆盖。
+
+   --------------------------------------------------------------------------
+   状态样式一律不写
+   五态的**语义**（hover 底色、focus 环、disabled 透明度、loading 转圈）全部
+   由 style.css 提供，全站一份、各套皮肤共享。皮肤层再写一遍会有两个后果：
+     1. 切换皮肤时状态跟着换一套浓淡，用户会误以为"换皮肤顺带改了行为"；
+     2. 皮肤契约要求每个选择器各套皮肤都得有，为一套状态样式给别的皮肤各抄
+        一遍，抄出来的浓淡必然对不上。
+   所以本文件里没有一条 :hover / :active / :focus / :disabled 规则——这是
+   潮汐自己的纪律（设计稿 9.4 第 2 条），由 scripts/check-skins.js 的
+   checkChaoxiSkin 钉住。
+
+   强调色沿用全站分工，本文件不重新定义、也不写 color：--brand 管"正在生效
+   / 正在播放"，--highlight 管"当前选中项"。
+*/
+
+[data-skin="chaoxi"] {
+  /* ==== 布局令牌 ====
+     与 sheen 同一组键，取值整体再松一档。--skin-title 是 34px（设计稿 h1
+     34/42），比 sheen 的 24px 大一档——潮汐靠字号差分层级，标题必须够重。 */
+  /* ⚠ 尺度这一组是**两轮实测**的结果，别凭手感往回加。
+     第一版取 gap 32 / pad 40 / title 34 / card-min 300，看着"留白很足"，
+     实测直接坏掉：曲库页的 .lib-list 被压到 **12px**（clientHeight 12 /
+     scrollHeight 1564）—— 用户看到的"滚不动"就是这个，同一屏的"字体太大"
+     也是同一个根因：一屏总共就那么高，留白吃掉的全是从内容里扣的。
+     留白是**省出来**的，不是**放大**出来的：内容少的一页本来就空，
+     不需要靠往上加 padding 制造空气。 */
+  --skin-gap: 20px;
+  --skin-pad: 24px;
+  --skin-radius: 20px;      /* 设计稿纪律：任何圆角不得超过 20px */
+  --skin-row-py: 10px;      /* 行内上下留白——信息密度的主要旋钮 */
+  --skin-card-min: 200px;   /* 一屏放得下 4~5 张，而不是 2 张 */
+  --skin-head-pb: 16px;
+  --skin-title: 24px;       /* 页标题回到与正文拉得开、又不喧宾夺主的档 */
+
+  /* ==== 潮汐专属：内容区定宽居中 ====
+     宽屏不铺满：两侧留白本身就是分区手段，比再画一条分隔线更干净。
+     窄屏由 @media 收窄 --skin-pad，内容自然贴边。 */
+  /* 内容区宽度上限。**别往小里调** —— 第一版按设计稿取了 1080 居中，
+     在 1440 屏上左右各空 180px，用户看到的是"两侧大片留白"。
+     定宽居中是给阅读型页面（文章、表单）用的手段，音乐库不是：
+     列表与卡片本来就该铺满，留白应该留在**块与块之间**，不是两侧。
+     1680 这个值只是给超宽屏兜底 —— 1440/1600/1920 都能真正铺满
+     （1920 下可用 1872 > 1680，两侧各 96，读作正常边距而不是"空"）。 */
+  --skin-content-max: 1680px;
+  /* 顶部导航条高度：它是 fixed 的，栅格里没有它的位置，由外壳 padding 让出。
+     与 .rail 的 padding/条目高度同源（8×2 + 32 = 48）。 */
+  --skin-nav-h: 48px;
+  /* 首页「每日推荐」横向长廊里单张封面的宽度。 */
+  --skin-daily-card-w: 190px;
+  --skin-rail-w: 72px;
+  /* 舞台从 560 收到 440：它是**脱流**的，宽度直接从内容区里扣。
+     560 在 1440 屏上要占 39%，内容区只剩 662 —— 卡片掉到 2 列、
+     工具行挤成一团。收到 440 后内容区多出 120px，且唱片依旧是大尺寸
+     （高度由视口算出，与面板宽度无关，只有 70% 的宽度上限会碰它）。 */
+  --skin-stage-w: min(440px, 30vw);
+
+  /* ==== 排版令牌 ====
+     这几个键与 style.css 的 :root 同名同义（默认主题下像素不变），皮肤只覆盖
+     数值——于是"整屏字号一起动"是改这几个数的必然结果，而不是逐个组件去抄。 */
+  --skin-h1: var(--skin-title); /* 一级：区块标题。与 --skin-title 同值，
+                                    区别是 --skin-h1 会被组件层直接消费。 */
+  --skin-h2: 14px;         /* 二级：曲名、卡片标题 */
+  --skin-h3: 12px;         /* 三级：艺人 / 专辑 / 时长 / 索引（与默认同值） */
+  --skin-h4: 11px;         /* 四级：音质徽标、表头小标签（与默认同值） */
+  --skin-h-album: 12.5px;  /* 专辑名比艺人略大一档（与默认同值） */
+  --skin-h2-w: 500;        /* 正文字重：潮汐靠灰度与字重分层，不上 550 */
+  --skin-line-h: 1.6;      /* 正文行高：比默认 1.5 略松，多了会顶掉一屏的行数 */
+  --skin-track-tight: -0.2px;  /* 24px 的标题收一点字距就够 */
+  --skin-track-wide: 0.7px;    /* 辅助信息开字距才不糊成一条 */
+
+  --skin-lh-tight: 1.3;    /* 标题行高：1.6 是为多行正文准备的，套到单行标题上
+                               会把标题与下方工具撑得太远 */
+  --skin-w-head: 600;      /* 标题字重：比正文重一档，不用拉到 700 */
+
+  /* ==== 表面令牌 ====
+     悬浮件（舞台 / 播放栏）用 --glass-bg-strong：那是 style.css 为"浮起件"
+     准备的档，且 ios-light 主题已把它翻成浅色语义，深浅色都自动正确。 */
+  --skin-surface: var(--glass-bg-strong);
+  --skin-surface-card: var(--surface-1);
+  --skin-line-soft: var(--surface-line);
+  --skin-line-hard: var(--surface-line-strong);
+  --skin-shadow: var(--glass-shadow);
+  --skin-shadow-card: var(--surface-lift);
+  --skin-hi: var(--surface-hi);   /* 顶部内高光：卡片读出厚度而不必加重描边 */
+
+  /* ==== 控件令牌 ==== */
+  --skin-ctl-radius: var(--r-pill);
+  --skin-focus-offset: 3px;
+
+  /* ==== 面板底边到播放条的净空 ====
+     这里**不能拿 --bar-h 当播放条的高度**：它只是 min-height，真实高度由内容
+     撑，而且随断点重排 —— 实测一行 80px、≤900px 两行 117px、≤620px 三行
+     163px。按令牌让位的结果是面板底边**插进播放条上沿**，而两块都是暗玻璃，
+     不量 rect 根本看不出来。留位 = 播放条实高 + 两道 --skin-gap。 */
+  --skin-stage-foot: calc(80px + var(--skin-gap) * 2);
+}
+
+/* --- 外壳：导航移到顶部通栏，内容区拿回**整个**可用宽度 ------------------ */
+/* 「三栏工作台」的骨架在这里拆掉：栅格不再有第一轨留给竖轨，也不再为舞台
+   预留右侧让位 —— 内容区先拿到全宽，再由 .view 的 max-width 定宽居中。
+   这是与经典布局最直观的一处区别，也是用户要的 MOO 式首页的前提：
+   一屏里只有内容，没有"栏目"。 */
+
+[data-skin="chaoxi"] .app {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--skin-gap);
+  /* 顶部让出导航条（它是 fixed，栅格里没有它的位置）。 */
+  padding: var(--skin-nav-h) var(--skin-pad) var(--skin-gap);
+}
+
+/* 必须显式钉死栅格：全局 body[data-stage-idle="1"] .app（≥1241px、(0,2,1)）
+   会把外壳改成「86px + 1fr」，本皮肤基础 .app（0,2,0）压不过它 ——
+   不钉则内容落进 86px 窄轨、布局整个错位。此组合选择器 (0,3,1) 钉回单列。 */
+@media (min-width: 1241px) {
+  [data-skin="chaoxi"] body[data-stage-idle="1"] .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* --- 导航：顶部通栏的一条标签，不再是竖轨 ------------------------------- */
+
+[data-skin="chaoxi"] .rail {
+  position: fixed;
+  top: var(--topbar-h);
+  left: 0;
+  right: 0;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  padding: 8px var(--skin-pad);
+  /* 通栏：不要圆角、只留一条底边。它是"页面的一段"，
+     不是"浮在上面的一颗"（那是浮光的做法，与其撞车）。 */
+  border-radius: 0;
+  border-width: 0 0 1px;
+  border-style: solid;
+  border-color: var(--skin-line-soft);
+  background: var(--skin-surface);
+  backdrop-filter: blur(24px) saturate(1.1);
+  -webkit-backdrop-filter: blur(24px) saturate(1.1);
+  box-shadow: var(--skin-shadow);
+  z-index: 55;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* 条目多时横向滚，但不该冒出滚动条（一条横杠贴在通栏里很脏）。 */
+  scrollbar-width: none;
+}
+
+/* 条目横排：整条栏的宽度都可用，图标与文字并排即可。 */
+[data-skin="chaoxi"] .rail-item {
+  flex: none;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: var(--skin-ctl-radius);
+  white-space: nowrap;
+}
+
+[data-skin="chaoxi"] .rail-item svg { margin: 0; flex: none; }
+
+[data-skin="chaoxi"] .rail-item span {
+  font-size: var(--skin-h3);
+  font-weight: var(--skin-h2-w);
+  line-height: var(--skin-lh-tight);
+}
+
+/* 横向栏里没有"把设置顶到底部"这回事，弹簧没有意义。 */
+[data-skin="chaoxi"] .rail-spacer { display: none; }
+
+/* --- 顶栏搜索槽：潮汐把它做成 48px 的胶囊（设计稿 5.4） ----------------- */
+
+[data-skin="chaoxi"] .topsearch {
+  height: 48px;
+  border-radius: var(--skin-ctl-radius);
+}
+
+/* --- 内容：定宽居中，标题独占一行 --------------------------------------- */
+
+[data-skin="chaoxi"] .column {
+  border-radius: var(--skin-radius);
+  padding: 0;
+  /* min-width:0：栅格轨道已经是 minmax(0,1fr)，但 .column 作为子项仍可能按
+     内容最小宽度撑开，长歌名会把整块面板顶出视口。 */
+  min-width: 0;
+}
+
+[data-skin="chaoxi"] .view {
+  /* 定宽居中：margin-inline:auto + width:100% 才能在 flex 列里真的居中，
+     只写 max-width 会靠左。 */
+  width: 100%;
+  max-width: var(--skin-content-max);
+  margin-inline: auto;
+  padding: var(--skin-pad) 0 var(--skin-pad);
+  min-width: 0;
+  /* 整页滚动：滚动的责任从"各列表体"上移到 .view 一个容器。
+     为什么必须改：默认链路是 .view 固定高 + 每个列表体 flex:1 自己滚，
+     于是列表能拿到的只有**剩余高度**。曲库页里「每日推荐」大卡与快捷卡区
+     先占掉 700+，剩给 .lib-list 的实测只有 12px（clientHeight 12 /
+     scrollHeight 1564）—— 用户报的"旁边无法滚动"就是这个：曲目列表被
+     压成一条缝，看不见也拖不动。这不是把尺寸调小能解决的，得换滚动结构。
+     项目里 .online-body 早就是同一套（它注释写着"不再自己滚动，滚动统一
+     交给外层，避免两层嵌套滚动"），潮汐只是把这条原则推广到全部列表体。
+     overflow-x 必须显式 hidden：内层元素（.stage::before 那类 inset 负值的
+     光晕、长歌名）会把 scrollWidth 撑出去，纵向容器多一条横向滚动条。 */
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+}
+
+/* ⚠ 这一条是 .view 能滚的前提，漏了它上一条等于没写。
+   .view 是 flex 列：内容超出时 flex 会**先把可收缩项压扁**，而不是产生滚动。
+   实测第 3 版就栽在这里 —— 滚动结构已经换对了（.lib-list 拿到了完整 1564px），
+   但 .daily-strip 仍是 style.css 默认的 flex: 0 1 auto，被压成 **50px** 高，
+   而它的 overflow:hidden 把里面 122px 的标题行和 668px 的 24 张卡片一起裁掉。
+   症状是"每日推荐只剩一行标题"，页面不报错、区块在、数据也在。
+   所以：滚动容器里的直接子元素一律不可收缩，高度交给内容自己定。
+   （这是项目里那条"定高 flex 列最后一个可收缩项会被压扁"的同一件事，
+   只是这回被压的是整个区块，而不只是行盒。） */
+[data-skin="chaoxi"] .view > * {
+  flex: none;
+}
+
+[data-skin="chaoxi"] .col-head {
+  padding-bottom: var(--skin-head-pb);
+  margin-bottom: var(--skin-gap);
+  align-items: baseline;
+}
+
+[data-skin="chaoxi"] .col-head-left { flex: 1 1 auto; min-width: 0; }
+
+[data-skin="chaoxi"] .col-title {
+  font-size: var(--skin-title);
+  font-weight: var(--skin-w-head);
+  line-height: var(--skin-lh-tight);
+  letter-spacing: var(--skin-track-tight);
+}
+
+[data-skin="chaoxi"] .col-tools {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--skin-gap);
+  align-items: center;
+}
+
+[data-skin="chaoxi"] .set-row {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+[data-skin="chaoxi"] .online-body { gap: var(--skin-gap); }
+
+/* --- 列表：低密度，分组靠间距而不是分割线 ------------------------------- */
+
+[data-skin="chaoxi"] .lib-head,
+[data-skin="chaoxi"] .fav-head {
+  padding-bottom: 12px;
+  font-size: var(--skin-h4);
+  font-weight: 600;
+  letter-spacing: var(--skin-track-wide);
+  line-height: var(--skin-line-h);
+}
+
+[data-skin="chaoxi"] .track,
+[data-skin="chaoxi"] .q-row,
+[data-skin="chaoxi"] .fav-row,
+[data-skin="chaoxi"] .online-row,
+[data-skin="chaoxi"] .pl-row,
+[data-skin="chaoxi"] .pd-row,
+/* .dv-row 列入六种行之内：它自带 padding/border-radius，漏在这份名单外时
+   每日推荐那 30 首会比同页曲库/队列/歌单挤一号 —— 潮汐尤其明显，大留白里
+   突然插进一片紧凑行。列进来后它自动跟 --skin-row-py 与 --skin-line-h 走。 */
+[data-skin="chaoxi"] .dv-row {
+  padding-top: var(--skin-row-py);
+  padding-bottom: var(--skin-row-py);
+  border-radius: var(--r-lg);
+  /* 行高在行容器上定一次，内部所有文字行继承：比逐个给 .t-title/.t-sub
+     写 line-height 更省，也保证同一行里主副信息的行高不会打架。 */
+  line-height: var(--skin-line-h);
+}
+
+/* 行与行之间留 8px：潮汐的"细线而非卡片"就落在这里 —— 分组靠间距，
+   行本身不带描边（描边由 style.css 的状态层按需给）。 */
+[data-skin="chaoxi"] .lib-list,
+[data-skin="chaoxi"] .q-list,
+[data-skin="chaoxi"] .fav-list {
+  gap: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 列表体交出滚动权（见 .view 那段）：高度随内容、不再参与 flex 分配。
+   漏掉这条，"整页滚动"只是多了一层：外层 .view 能滚，内层 .lib-list 照样
+   被 flex:1 压成 12px 并自己滚，两层叠着，用户看到两个滚动条。 */
+[data-skin="chaoxi"] .lib-list,
+[data-skin="chaoxi"] .q-list,
+[data-skin="chaoxi"] .pl-list,
+[data-skin="chaoxi"] .fav-list,
+[data-skin="chaoxi"] .dv-body {
+  flex: none;
+  min-height: 0;
+  overflow: visible;
+}
+
+/* --- 卡片网格：格子更大，一屏放得更少 ---------------------------------- */
+
+[data-skin="chaoxi"] .pl-grid,
+[data-skin="chaoxi"] .dv-body-card {
+  grid-template-columns: repeat(auto-fill, minmax(var(--skin-card-min), 1fr));
+  gap: var(--skin-gap);
+}
+
+[data-skin="chaoxi"] .pl-card-art,
+[data-skin="chaoxi"] .dv-art {
+  border-radius: var(--skin-radius);
+}
+
+[data-skin="chaoxi"] .dv-body {
+  gap: var(--skin-gap);
+}
+
+/* 设计稿：封面是这一屏唯一的视觉锚点，所以封面圆角跟整套皮肤走，
+   不再按 sheen 那样收成 radius * 0.8。 */
+
+[data-skin="chaoxi"] .dv-name { font-size: var(--skin-h2); font-weight: var(--skin-h2-w); }
+[data-skin="chaoxi"] .dv-sub,
+[data-skin="chaoxi"] .dv-num,
+[data-skin="chaoxi"] .dv-src { font-size: var(--skin-h3); }
+[data-skin="chaoxi"] .dv-num,
+[data-skin="chaoxi"] .dv-src { letter-spacing: var(--skin-track-wide); }
+
+/* 每日推荐：从「多列多行网格」改成**横向封面长廊**。
+   一行铺开、横向滑，每张封面都拿到同样的大尺寸 —— 比塞进网格里更接近
+   "唱片架"的隐喻，也是用户点的 MOO 式首页那一块。
+   ⚠ 只改 .daily-list，**绝不碰 .daily-strip**：后者的直接子元素是
+   .daily-head 与 .daily-list 两个块，给它加 grid/flex 会把标题行变成网格项、
+   里面的横向 flex 按内容均分、长文案被压成竖排一条（项目里踩过，契约也钉了）。 */
+[data-skin="chaoxi"] .daily-list {
+  display: flex;
+  flex-direction: row;
+  gap: var(--skin-gap);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x proximity;
+  overscroll-behavior-x: contain;
+  padding-bottom: 10px;
+}
+
+[data-skin="chaoxi"] .daily-list > * {
+  flex: 0 0 var(--skin-daily-card-w);
+  scroll-snap-align: start;
+}
+
+/* 卡片本身也要跟着转：业务默认画法是「40px 小封面 + 右侧文字」的横排小卡
+   （.daily-cover 写死 40×40）。直接扔进长廊会变成一排 66px 高的缩略卡 ——
+   那不是唱片架，是列表。改成封面在上、文字在下，封面撑满卡片宽度并保持
+   正方，长廊才有"一排唱片"的样子。 */
+[data-skin="chaoxi"] .daily-card {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 10px;
+}
+
+[data-skin="chaoxi"] .daily-cover {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  border-radius: var(--skin-radius);
+}
+
+[data-skin="chaoxi"] .daily-strip {
+  padding: var(--skin-pad);
+  border-radius: var(--skin-radius);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow-card), var(--skin-hi);
+  line-height: var(--skin-line-h);
+}
+
+/* --- 设置：分组之间靠间距分区 ------------------------------------------- */
+
+[data-skin="chaoxi"] .set-group {
+  padding: var(--skin-gap);
+  border-radius: var(--skin-radius);
+  margin-bottom: var(--skin-gap);
+  background: var(--skin-surface-card);
+  border: 1px solid var(--skin-line-soft);
+  box-shadow: var(--skin-hi);
+}
+
+/* --- 舞台：不再常驻，收起为一颗把手，点开才是浮层 ----------------------- */
+/* 前两版都把它做成常驻的右侧栏，宽度**直接从内容区里扣** —— 1440 屏上内容
+   只剩 846，这是用户说"基本没啥变化"的直接来源：骨架还是三栏，只是数值变了。
+   现在改成浮层：内容区拿回全宽，想要播放面板时点右下角那颗把手。
+   默认 display:none 而不是 transform 移出 —— 移出后它仍占着 fixed 的命中区，
+   滚动时右上角会挡住一点内容。 */
+[data-skin="chaoxi"] .stage {
+  display: none;
+}
+
+/* 展开态。类名由 skin.chaoxi.js 加在 body 上（见该文件）。
+   注意 z-index 71 > 把手 71 同级但把手在后、且面板要盖过通栏导航（55）。 */
+[data-skin="chaoxi"] body.chaoxi-stage-open .stage {
+  display: flex;
+  position: fixed;
+  right: var(--skin-pad);
+  top: calc(var(--topbar-h) + var(--skin-nav-h) + var(--skin-gap));
+  width: var(--skin-stage-w);
+  /* dvh 而非 vh：移动端地址栏收起/展开时 vh 不变，底边会插进播放栏。 */
+  max-height: calc(
+    100dvh - var(--topbar-h) - var(--skin-nav-h) - var(--skin-gap) * 2 - var(--skin-stage-foot)
+  );
+  z-index: 70;
+  padding: var(--skin-pad);
+  border-radius: var(--skin-radius);
+  border: 1px solid var(--skin-line-hard);
+  background: var(--skin-surface);
+  backdrop-filter: blur(24px) saturate(1.1);
+  -webkit-backdrop-filter: blur(24px) saturate(1.1);
+  box-shadow: var(--skin-shadow);
+  /* 面板本身不滚，歌词区自己滚。写 overflow:auto 会长出两条贴在一起的滚动条：
+     横向那条是 .stage::before 那个 inset:-30% 的取色光晕撑出来的，纵向那条
+     与歌词区的滚动重复。基础样式本来就是 overflow:hidden，这里守住。 */
+  overflow: hidden;
+  min-height: min(
+    calc(100dvh - var(--topbar-h) - var(--skin-nav-h) - var(--skin-gap) * 2 - var(--skin-stage-foot)),
+    560px
+  );
+}
+
+/* --- 舞台把手：右下角的一颗，点开/收起播放面板 --------------------------- */
+/* 这颗按钮是**皮肤自己造的节点**（业务 HTML 里没有），由 skin.chaoxi.js
+   appendChild 到 body —— 与项目里所有弹层同一个理由：留在 .topbar 或
+   .bar 里会落进它们的层叠上下文，压不过 body 层里的浮层。 */
+[data-skin="chaoxi"] .chaoxi-handle {
+  position: fixed;
+  right: var(--skin-pad);
+  bottom: calc(var(--skin-stage-foot) - var(--skin-gap));
+  z-index: 71;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 18px;
+  border-radius: var(--skin-ctl-radius);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow-card);
+  /* 这颗把手是皮肤造的节点，没有业务样式兜底：不写 color 它会拿到浏览器
+     默认的按钮文字色，在深底上直接看不见。值仍来自主题 token，
+     配色依然归 themes.js —— 皮肤只是"引用"，不是"定义"。 */
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--skin-h3);
+  font-weight: var(--skin-h2-w);
+  cursor: pointer;
+}
+
+[data-skin="chaoxi"] .chaoxi-handle-icon {
+  font-size: 16px;
+  line-height: 1;
+  color: var(--brand);
+}
+
+[data-skin="chaoxi"] body.chaoxi-stage-open .chaoxi-handle {
+  border-color: var(--skin-line-hard);
+}
+
+/* 余量归属（设计稿 5.2 的定高 flex 列纪律）：
+   这是一个定高的 flex 列，歌词区有 flex:1 但**没有 min-height 时会被压到
+   内容那么高**；缺口则落到仅剩的可收缩项上 —— sheen 实测曲名行盒 33px→14px、
+   艺人 20px→9px，21px 的字被切成半截。
+   潮汐不靠摘掉曲名来躲这个坑（那是砍功能），而是两头一起钉：歌词区兜
+   120px，曲名/艺人 flex:none 不可收缩，唱片封顶不吃余量。
+   于是余量明确落给歌词 —— 那是唯一会随播放变化、值得拿到空间的区域。 */
+[data-skin="chaoxi"] .stage-lyrics {
+  flex: 1 1 auto;
+  min-height: 100px;
+}
+
+[data-skin="chaoxi"] .stage-title,
+[data-skin="chaoxi"] .stage-artist {
+  flex: none;
+}
+
+/* 唱片是主角，但**必须能被高度收缩** —— 这是实测抓到的第一版缺陷：
+   面板是定高 flex 列（max-height 钉住），第一版写 width: min(72%, 320px)
+   + flex:none，唱片就固定吃掉 320px。面板 634px 扣掉 80px 内距后内容区
+   554px，而 stage-head 30 + 唱片 320 + 曲名 33 + 艺人 20 + 进度 47 +
+   频谱 44 = 494px 全是不可收缩项 —— 歌词区只剩 60px 不到，最后整块被
+   overflow:hidden 裁掉。浏览器实测 scrollHeight 826 / clientHeight 632，
+   溢出的 194px 里装的就是歌词。页面不报错、元素一个不少，
+   只有量 rect 才看得出来。
+
+   第二版试过"让 flex 收缩唱片"（flex: 0 1 320px + width:auto + aspect-ratio），
+   实测更糟：唱片被压成 45×45。原因是 flex 收缩按 **basis 比例**分配缺口，
+   而歌词区的 basis 是它的内容高（可能 500px+），于是缺口大头落在歌词上、
+   唱片被一路压到底 —— shrink 因子算不出"先让唱片、歌词保底"这个优先级。
+
+   第三版（当前）：尺寸由**视口高度直接算**，不交给收缩算法。
+   面板可用高 = 100dvh - topbar - gap(上) - (80px + gap*2)(下留位)，
+   扣掉内距、其余固定项（head 30 + 曲名 33 + 艺人 20 + 进度 47 + 频谱 44）
+   与歌词地板 100px，剩下的才是唱片能用的高度：
+     100dvh - 452 - gap*3 - pad*2  ← 452 = 58 + 80 + 174 + 100 + 40(余量)
+   900 高 → 264px；1080 高 → 封顶 320px；700 高 → 落到 120px 下限。
+   写 clamp 而不是 flex 分配，是因为这个量**可以算出来**：
+   算得出来就不该让浏览器按比例猜。
+   62%→70% 的宽度上限只是防止面板本身很窄时唱片跟着溢出。 */
+[data-skin="chaoxi"] .disc-wrap {
+  width: min(
+    70%,
+    clamp(
+      110px,
+      calc(
+        100dvh - var(--topbar-h) - var(--skin-gap) * 3 - 80px
+          - var(--skin-pad) * 2 - 174px - 100px
+      ),
+      320px
+    )
+  );
+  flex: none;
+  align-self: center;
+  margin-top: 8px;
+}
+
+/* --- 播放栏：底部悬浮胶囊，最轻的一层 ----------------------------------- */
+
+[data-skin="chaoxi"] .bar {
+  margin: 0 var(--skin-pad) var(--skin-gap);
+  border-radius: var(--skin-ctl-radius);
+  padding: 14px var(--skin-pad);
+  gap: var(--skin-gap);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow-card);
+}
+
+/* --- 浮层：圆角跟随整套皮肤，且必须是不透明底 -------------------------- */
+
+[data-skin="chaoxi"] .np-card,
+[data-skin="chaoxi"] .menu,
+[data-skin="chaoxi"] .empty-card {
+  border-radius: var(--skin-radius);
+}
+
+/* 空状态卡浮在内容之上：底色不够实的话，「暂无歌曲」会与背后的封面图混成一片。 */
+[data-skin="chaoxi"] .empty-card {
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow);
+  line-height: var(--skin-line-h);
+}
+
+/* --- 响应式 -------------------------------------------------------------- */
+
+/* 矮屏优先：面板的高度是被 max-height 算出来的，所以"宽屏但矮屏"
+   （1366×768 这类笔记本）同样会把歌词挤没——宽度断点管不到它。
+   唱片尺寸已由上面的 clamp 跟着视口高度走，这里补两件事：
+   放低歌词地板，并让**面板自身可滚**作为最终兜底 —— 视口特别矮时
+   唱片下限 + 固定项 + 歌词地板仍可能超出，宁可让面板滚，
+   也不能让内容被 overflow:hidden 静默裁掉（第一版就是这么丢掉整个歌词区的）。
+   只开 overflow-y：横向那条是 .stage::before 那个 inset:-30% 的取色光晕
+   撑出来的，开了只会多一条无意义的横向滚动条。 */
+@media (max-height: 820px) {
+  [data-skin="chaoxi"] .stage {
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+  [data-skin="chaoxi"] .stage-lyrics { min-height: 80px; }
+}
+
+/* 平板/手机：舞台按基础样式的抽屉方式隐藏与滑入（transform 规则不重写），
+   这里只把几何位置/宽度报成抽屉该有的值。 */
+@media (max-width: 1240px) {
+  [data-skin="chaoxi"] .stage {
+    top: 12px;
+    right: 12px;
+    /* 抽屉底边同样不能顶进播放条，用同一个留位令牌。 */
+    bottom: var(--skin-stage-foot);
+    width: min(560px, 92vw);
+    max-height: none;
+  }
+}
+
+/* 触控设备：命中区抬到 44px（iOS HIG / Material 的最小可点尺寸）。
+   竖轨是单列，抬高度不会把条目挤出可视区，比横向胶囊安全。 */
+@media (pointer: coarse) {
+  [data-skin="chaoxi"] .rail-item {
+    min-height: 44px;
+  }
+}
+
+/* 窄屏：两侧留白按设计稿的 40 / 24 / 16 收窄，给内容让出空间。
+   播放条会重排成多行（实高 80 → 117 → 163px），舞台留位必须跟着涨，
+   否则抽屉底边又插回播放条里。写绝对值而不是拿 --bar-h 乘倍数：
+   --bar-h 是 min-height、与行数无关，乘出来的倍数只是当下的巧合。
+   必须排在上面那条 ≤1240px 的**后面**（同为 (0,1,1)，靠源码顺序决胜）。 */
+@media (max-width: 900px) {
+  [data-skin="chaoxi"] {
+    --skin-gap: 16px;
+    --skin-pad: 18px;
+    --skin-stage-foot: calc(117px + var(--skin-gap) * 2);
+  }
+  [data-skin="chaoxi"] .app {
+    padding: 0 var(--skin-pad) var(--skin-gap);
+  }
+  [data-skin="chaoxi"] .view {
+    padding: var(--skin-pad) 0 var(--skin-pad);
+  }
+  [data-skin="chaoxi"] .bar {
+    margin: 0 var(--skin-pad) var(--skin-gap);
+  }
+}
+
+@media (max-width: 620px) {
+  [data-skin="chaoxi"] {
+    --skin-gap: 12px;
+    --skin-pad: 14px;
+    --skin-stage-foot: calc(163px + var(--skin-gap) * 2);
+    --skin-rail-w: 60px;
+    --skin-title: 21px;
+  }
+  [data-skin="chaoxi"] .app {
+    grid-template-columns: var(--skin-rail-w) minmax(0, 1fr);
+    gap: 12px;
+  }
+  [data-skin="chaoxi"] .rail {
+    padding: 8px 4px;
+  }
+  [data-skin="chaoxi"] .rail-item {
+    padding: 8px 4px;
+  }
+  [data-skin="chaoxi"] .stage {
+    padding: 20px;
+  }
+  [data-skin="chaoxi"] .bar {
+    padding: 12px 20px;
+  }
+}

@@ -37,6 +37,7 @@
 <link rel="stylesheet" href="skins/skin.liunian.css" data-skin-css="liunian" disabled>
 <link rel="stylesheet" href="skins/skin.ios.css" data-skin-css="ios" disabled>
 <link rel="stylesheet" href="skins/skin.qingfeng.css" data-skin-css="qingfeng" disabled>
+<link rel="stylesheet" href="skins/skin.chaoxi.css" data-skin-css="chaoxi" disabled>
 </head>
 <body>
 <script>
@@ -1938,6 +1939,9 @@
 <!-- 清风皮肤同样登记生命周期；队列快照与业务动作经 Skins 公共宿主接口交接，
      必须在 app.js 初始化皮肤宿主之前加载。 -->
 <script defer src="skins/skin.qingfeng.js"></script>
+<!-- 潮汐登记生命周期（播放面板的展开/收起把手）；不重编排业务节点，
+     但把手的挂载要在 app.js 之前登记完。 -->
+<script defer src="skins/skin.chaoxi.js"></script>
 <script defer src="themes.js"></script>
 <script defer src="perf-probe.js"></script>
 <script defer src="stage.js"></script>
