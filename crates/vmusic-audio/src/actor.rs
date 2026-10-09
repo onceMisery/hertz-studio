@@ -149,9 +149,16 @@ pub struct AudioHandle {
     tx: Sender<Command>,
     snapshot: std::sync::Arc<ArcSwap<PlayerSnapshot>>,
     events: broadcast::Sender<AudioEvent>,
+    /// 真正装配成功的那个后端的名字，由 actor 在 init 握手时送回。配置里的
+    /// `audio.backend` 只是「请求」，空值或拼错时它跟跑起来的东西不是一回事。
+    backend: &'static str,
 }
 
 impl AudioHandle {
+    pub fn backend_name(&self) -> &'static str {
+        self.backend
+    }
+
     pub fn snapshot(&self) -> PlayerSnapshot {
         (**self.snapshot.load()).clone()
     }
@@ -301,7 +308,8 @@ impl AudioHandle {
     }
 }
 
-/// Spawn the actor thread and wait until its backend is ready.
+/// Spawn the actor thread and wait until its backend is ready, taking back the
+/// name of the backend that actually got built.
 pub async fn spawn(kind: BackendKind) -> Result<(AudioHandle, JoinHandle<()>), AudioError> {
     let (init_tx, init_rx) = oneshot::channel();
     let (tx, rx) = mpsc::channel::<Command>();
@@ -316,16 +324,19 @@ pub async fn spawn(kind: BackendKind) -> Result<(AudioHandle, JoinHandle<()>), A
         .spawn(move || run(kind, rx, actor_snapshot, actor_events, init_tx))
         .map_err(|e| AudioError::BackendInit(e.to_string()))?;
 
-    let audio = AudioHandle {
-        tx,
-        snapshot,
-        events,
-    };
-
     match init_rx.await {
-        Ok(Ok(())) => Ok((audio, handle)),
+        Ok(Ok(backend)) => Ok((
+            AudioHandle {
+                tx,
+                snapshot,
+                events,
+                backend,
+            },
+            handle,
+        )),
         Ok(Err(e)) => {
-            audio.shutdown();
+            // actor 发完 Err 就 return 了，关掉发送端让它的 rx 断开即可。
+            drop(tx);
             Err(e)
         }
         Err(_) => Err(AudioError::BackendInit("actor died during startup".into())),
@@ -337,13 +348,13 @@ fn run(
     rx: Receiver<Command>,
     snapshot: std::sync::Arc<ArcSwap<PlayerSnapshot>>,
     events: broadcast::Sender<AudioEvent>,
-    init_tx: oneshot::Sender<Result<(), AudioError>>,
+    init_tx: oneshot::Sender<Result<&'static str, AudioError>>,
 ) {
     let mut backend: Box<dyn AudioBackend> = match kind {
         #[cfg(feature = "playback")]
         BackendKind::Cpal => match CpalBackend::new() {
             Ok(b) => {
-                let _ = init_tx.send(Ok(()));
+                let _ = init_tx.send(Ok(b.name()));
                 Box::new(b)
             }
             Err(e) => {
@@ -353,8 +364,9 @@ fn run(
             }
         },
         BackendKind::Null => {
-            let _ = init_tx.send(Ok(()));
-            Box::new(NullBackend::new())
+            let b = NullBackend::new();
+            let _ = init_tx.send(Ok(b.name()));
+            Box::new(b)
         }
     };
 

@@ -468,8 +468,8 @@ impl Rpc {
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
             "protocol_version": PROTOCOL_VERSION,
-            // 快照里没有后端名，从 config 读，口径与 HTTP 版一致。
-            "backend": self.state.config.audio.backend,
+            // 口径与 HTTP 版一致：报的是真正跑着的后端，不是 config 里的请求值。
+            "backend": self.state.audio.backend_name(),
             // 让前端能区分自己跑在哪个宿主上：独立版是 http，插件是 dbx。
             "host": "dbx",
         })

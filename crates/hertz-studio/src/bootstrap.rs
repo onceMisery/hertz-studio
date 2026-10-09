@@ -65,15 +65,17 @@ pub async fn boot(
         "null" => BackendKind::Null,
         _ => BackendKind::cpal(),
     };
-    let mut backend_label = config.audio.backend.clone();
     let (audio, audio_thread) = match spawn(backend).await {
         Ok(pair) => pair,
         Err(e) => {
             tracing::warn!("requested backend unavailable ({e}); falling back to null");
-            backend_label = "null".to_string();
             spawn(BackendKind::Null).await?
         }
     };
+    // 名字取真正装配成功的那个后端，不取配置字符串：`audio.backend` 只是「请求」，
+    // 被写成空串或拼错时，照抄它会让 health、rpc 和播放诊断的头一行报出一个并不
+    // 存在的后端名（CI 上 VMUSIC_BACKEND 被 YAML 当成 null 标量就这么红过一次）。
+    let backend_label = audio.backend_name().to_string();
 
     // 开发者选项里的播放诊断日志：默认关闭，开着则跨重启继续录（settings 为权威）。
     diag::init(&data_dir, &backend_label);

@@ -460,8 +460,9 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Health> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION").to_string(),
         protocol_version: PROTOCOL_VERSION,
-        // The snapshot does not carry the backend name, so read it from config.
-        backend: state.config.audio.backend.clone(),
+        // 取真正跑着的那个后端（actor 在 init 握手时送回）。config 里的
+        // audio.backend 只是「请求」，空值或拼错时报出来的是不存在的后端名。
+        backend: state.audio.backend_name().to_string(),
     })
 }
 
