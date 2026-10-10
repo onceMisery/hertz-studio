@@ -38,6 +38,9 @@ workflow 会在我们那条 PR 上把最终目录生成出来、删掉 `candidat
   （Actions 里 `release dbx plugin` 的历史记录为 0）。钉 tag 名不够，tag 能被上游挪走。
 - CLI 版本钉在 `0.1.2`（workflow 的 `plugin-cli-version`）。CLI 版本一变，同一个源码 tag
   就会打出字节不同的包，直接违反下面的不可变约束。
+  但**钉住 CLI 也不等于逐字节可复现**：2026-10-10 把同一个提交（`plugin/` 一个字节没改）
+  重打一遍，4 个 target 恰好相同，`windows-x64` 却差 5 字节、sha 完全不同。所以「重跑一次
+  应该一样」不能当依据——唯一事实来源是那次发布留下的 `release-candidates.json` 里的 sha/size。
 
 `manifest.json` 的 `publisher` 必须是小写 `oncemisery`：store 的 candidate schema 对
 `id`/`publisher` 都要求 `^[a-z0-9][a-z0-9._-]*$`，而签名环节会拿候选元数据逐字比对包内
@@ -192,7 +195,7 @@ Windows 下替换同版本插件前，先关闭它的工作台并停止插件进
       `output/dbx-float-dock-shots.js` 现拍（收起态 + 滑出态各一张）。
 - [x] support 渠道就用 GitHub Issues（PR 正文里已按这个填）。
 
-## 三个已知的坑
+## 四个已知的坑
 
 1. **宿主样式内联契约**：最低版本设为已实际联调的 `>=0.6.35`。DBX 0.6.29 内联
    样式时丢弃 `data-skin-css` 标记，导致所有皮肤退回经典；0.6.35 已保留属性，六套
@@ -209,3 +212,11 @@ Windows 下替换同版本插件前，先关闭它的工作台并停止插件进
    整个 run **0 个 job、没有日志、`gh run view --log` 回 `log not found`**，只在页面底部
    Annotations 里那一条。所以核对 SHA 要拿 `git ls-remote` 或 API 回读，别凭手抄。
    顺手把「Actions 里这条 workflow 有没有历史运行」当成一项检查。
+4. **附属 release 会把候选重打一遍**：`on: release: types: [published]` 对**任何**新发布都触发。
+   2026-10-10 为了挂 review 截图发了一条 `hertz-plugin-v0.1.0-screenshots`，结果 `release dbx plugin`
+   按 0.1.0 又编了一套塞进去，其中 `windows-x64` 与已提交那套差 5 字节——同一版本号两种字节，
+   reviewer 拿错 URL 就签不过。现在 workflow 里有 `gate` job 兜底：只有 tag 名**精确等于**
+   `hertz-plugin-v` + `manifest.json` 的 `version` 才打候选，其余只留一条 notice 跳过。
+   约定：上架候选只认 `hertz-plugin-v<version>` 那条 release 的 `release-candidates.json`；
+   截图等附属材料另发 tag（本次是 `hertz-plugin-v0.1.0-screenshots`，里面那 6 个候选资产保留但
+   **不作为提交内容**）；独立形态的安装包另发 `hertz-studio-v<version>`，别混进插件那条。
