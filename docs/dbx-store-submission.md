@@ -132,11 +132,27 @@ schema 是 `additionalProperties: false`，所以：没有 `screenshots` 字段�
 - 权限与数据/网络访问：`host.events`、`host.storage`、`host.workbench`。曲库扫描只读用户
   指定的本地目录；在线音源要用户自己登录，凭据进操作系统钥匙串（Windows Credential
   Manager / macOS Keychain / freedesktop Secret Service），不落 SQLite 明文、不上传第三方。
-- 原生 sidecar 行为：自带 `bin/dbx-plugin-hertz`，与 UI 走 stdio JSON-RPC（不用 binary 帧，
-  所以不申请 `host.binary`）；播放发现服务只在 `127.0.0.1` 监听并带本地 token 鉴权。
-  浮动胶囊窗口是渐进增强：宿主没有 `capabilities.floating` 时自动退回页内最小化。
+- 原生 sidecar 行为：自带 `bin/dbx-plugin-hertz`，与宿主走 stdio JSON-RPC。**插件形态不开监听口**——
+  HTTP + token 那一层只存在于独立形态（独立默认绑 `127.0.0.1`，绑到非回环会打警告）。
+  插件路径不 spawn 子进程：全仓唯一的 `Command::new` 是独立 CLI 的 `--open`（`cmd /C start <url>`）。
+  浮动胶囊是渐进增强：宿主没有 `capabilities.floating` 时自动退回页内最小化。
 - License：MIT（仓库 LICENSE；上游第三方署名见 NOTICE）。
 - Support：`https://github.com/onceMisery/hertz-studio/issues`。
+
+### store 校验器实际会卡什么
+
+`scripts/validate.mjs` 是逐条 exact-keys 的，先对齐再提，别拿一轮 review 换一条错：
+
+- 候选文件名必须等于 `<candidate.id>.json`；`publishers/<id>.json` 同理，且发布者记录**只许**
+  `id`/`name`/`status` 三个键。
+- 候选顶层只许 `schemaVersion, id, publisher, version, releaseNotes, name, description, icon,
+  tags, permissions, source, homepage, license, localizations, targets`——多写一个（比如截图）就红；
+  `targets[]` 只许 `target`/`url`/`sha256`/`size`；`localizations.<locale>` 只许 `name`/`description`。
+- `icon` 在候选阶段只要求 HTTP(S)，但结尾必须是 `.svg` 或 `.png`（`iconExtension()` 会抛）。
+  签名时 store 会把它镜像成 `https://dl.dbxio.com/plugins/<id>/<latestVersion>/icon.<ext>`。
+- 已列出或已吊销的版本不能重交；`publisher` 必须已经在 `publishers/` 里注册（所以首次提交要同时带那份记录）。
+- CI 的 `node scripts/validate.mjs` 只要 `candidates/` 非空就**主动抛错**
+  （`open candidate(s) awaiting DBX Store signing`）。那是签名闸门，不是我们把 PR 写坏了。
 
 ## Release notes 模板
 
