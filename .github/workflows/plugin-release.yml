@@ -29,7 +29,7 @@ jobs:
     # 钉到 v0.6.38 那个 tag 背后的 commit（不是 tag 名）：tag 可以被上游挪走，
     # 挪一次同一个源码 tag 就换了打包步骤，违反下面那条不可变约束。
     # 上游原先的 plugin-sdk-v1 分支已不存在——用它会让整条链路连调度都调不起来。
-    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@069adbc5860b4b380dfcf32fb303e7e2ba93b51d
+    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@069adbc5ab35a331a86d199b306bbd2963813ade
     with:
       release-tag: ${{ github.event.release.tag_name }}
       # 脚本内部 cd 进 plugin/ 打包，所以这里保持仓库根为工作目录，

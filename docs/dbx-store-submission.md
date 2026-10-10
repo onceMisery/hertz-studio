@@ -181,6 +181,10 @@ Windows 下替换同版本插件前，先关闭它的工作台并停止插件进
    DBX 的插件数据按 id 存放（`plugin-data/<id>/`），换 id 等于换一份全新状态：曲库、
    在线登录态、界面偏好都不继承。老用户升级需要在 release notes 里明确「重装并重新登录」，
    不要指望自动迁移。`publisher` 只是署名与 provenance 比对项，不参与这个目录，改大小写不丢数据。
-3. **上游 ref 会消失**：`plugin-sdk-v1` 这个分支/标签已经不在 `t8y2/dbx` 上了，早期照它写的
-   `uses:` 让发布链路一次都没跑起来，而且报错发生在调度阶段，日志里什么产物都看不到。
-   所以钉 commit，并且把「Actions 里这条 workflow 有没有历史运行」当成一项检查。
+3. **上游 ref 会消失，而它坏得没有日志**：`plugin-sdk-v1` 这个分支/标签已经不在 `t8y2/dbx` 上了，
+   早期照它写的 `uses:` 让发布链路一次都没跑起来。按完整 commit SHA 引用是对的（官方
+   `t8y2/dbx-plugin-s3` 也这么写），但 SHA 抄错一个字符的报错长这样：
+   `error parsing called workflow … failed to fetch workflow: workflow was not found`——
+   整个 run **0 个 job、没有日志、`gh run view --log` 回 `log not found`**，只在页面底部
+   Annotations 里那一条。所以核对 SHA 要拿 `git ls-remote` 或 API 回读，别凭手抄。
+   顺手把「Actions 里这条 workflow 有没有历史运行」当成一项检查。
