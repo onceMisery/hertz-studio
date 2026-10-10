@@ -220,3 +220,8 @@ Windows 下替换同版本插件前，先关闭它的工作台并停止插件进
    约定：上架候选只认 `hertz-plugin-v<version>` 那条 release 的 `release-candidates.json`；
    截图等附属材料另发 tag（本次是 `hertz-plugin-v0.1.0-screenshots`，里面那 6 个候选资产保留但
    **不作为提交内容**）；独立形态的安装包另发 `hertz-studio-v<version>`，别混进插件那条。
+   **但 gate 不是全能的**：`on: release` 取的是**触发事件那个提交里**的 workflow 文件，不是默认分支
+   那份。给独立形态发 `hertz-studio-v0.1.0`（目标提交 `11454b0`，早于 gate）时它就没生效，
+   5 个 target 全开始编，最后靠手动 `gh run cancel` 停在 Publish 之前才没多出候选包。
+   所以：给**旧提交**补发 release 前，先确认那个提交里有没有 gate；要彻底免疫就把这条 workflow
+   改成只 `workflow_dispatch` 手动触发（代价：每次发版多一步手工启动）。
