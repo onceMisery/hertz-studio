@@ -56,3 +56,10 @@ target-*/
 /plugin/dist/
 # dbx-plugin dev 的开发数据（含它自己的 rust-target）
 /plugin/.dbx-dev/
+
+# 开发过程记录（Aegis 工作区、设计稿、调研、技能笔记）只留在本机：
+# 决策日志已迁到 docs/adr，由 scripts/check-adrs.js 守着与源码数值的一致性。
+/docs/aegis/
+/docs/design/
+/docs/research/
+/docs/superpowers/

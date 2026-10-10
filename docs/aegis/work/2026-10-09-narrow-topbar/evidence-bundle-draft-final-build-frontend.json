@@ -1,8 +1,0 @@
-{
-  "schemaVersion": "aegis.schema.v0",
-  "artifactKey": "final-build-frontend",
-  "type": "test",
-  "source": "output/narrow-topbar-build-final.log; output/narrow-frontend-final.log; git diff --check",
-  "summary": "独立目录最终构建成功；前端聚合48步全通过（包括皮肤795、外观恢复45）；差异空白检查退出0。默认exe文件锁和三份既有未索引文档是已记录边界。",
-  "verifier": "root运行并核对退出码"
-}

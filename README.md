@@ -34,7 +34,7 @@
 - 数据备份：歌单 / 收藏 / 设置 / 曲库目录一键导出导入（JSON，不含凭据，幂等恢复）
 - 音效：六段 EQ、ReplayGain 响度归一化（关 / 按曲 / 按专辑，带预增益）、软限幅、
   已准备本地/缓存曲目的双流衔接与可调交叉淡化；不满足衔接条件时正常切歌，
-  [支持边界](docs/aegis/adr/0007-playback-transitions-and-intent-ownership.md)
+  [支持边界](docs/adr/0007-playback-transitions-and-intent-ownership.md)
 - 播放历史：分页、来源筛选与搜索，可回放
 - 远程来源（WebDAV）：登记服务器（密码进钥匙串）、目录浏览、导入曲库并以 HTTP Range 直链播放
 - 系统凭据：平台 cookie 等秘密存入操作系统钥匙串，启动自动迁移旧明文数据
@@ -178,7 +178,7 @@ sidecar 只做传输：把宿主的调用转成与 HTTP 响应同构的返回值
 两种形态的事件口径一致，业务实现只有一份。
 **当前状态**：`crates/hertz-studio/src/rpc/` 已覆盖曲库、播放、歌单、推荐、播客、远程来源与设置，
 与 HTTP 复用同一套服务实现；`scripts/check-plugin-sidecar.js` 验证信封、路由与事件契约。
-真实平台账号和原生宿主的验收范围见[联调记录](docs/aegis/work/2026-10-08-extension-live-integration/90-evidence.md)。
+真实平台账号和原生宿主的验收范围见[上架手册](docs/dbx-store-submission.md)。
 
 ---
 

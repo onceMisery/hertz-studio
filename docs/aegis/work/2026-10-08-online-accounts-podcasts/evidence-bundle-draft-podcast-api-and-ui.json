@@ -1,8 +1,0 @@
-{
-  "schemaVersion": "aegis.schema.v0",
-  "artifactKey": "podcast-api-and-ui",
-  "type": "test",
-  "source": "cargo test --lib podcast_; node scripts/check-frontend.js --extra; node scripts/check-podcasts-browser.js; node scripts/check-online-login-browser.js",
-  "summary": "Provider/下载初始私网拦截/HTTP-RPC相同订阅分页和持久ID3项GREEN；前端48步通过；Chrome确认刷新失败保留单集、旧订阅/节目响应不覆盖、Cookie必须账号验证",
-  "verifier": "root执行命令并核验输出"
-}

@@ -27,7 +27,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const ADR_DIR = path.join(ROOT, 'docs', 'aegis', 'adr');
+const ADR_DIR = path.join(ROOT, 'docs', 'adr');
 
 let checks = 0;
 let failures = 0;

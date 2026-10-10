@@ -178,14 +178,19 @@ publish Release，机器人只凭 Release 和 `release-candidates.json` 就自�
 
 ## 提交前的材料状态
 
-2026-10-08 已在 DBX 0.6.35 验证最终候选包的六皮肤切换、创意/沉浸场景、事件链路与网易云原生播放。
-具体包校验和、账号范围及未完成项见[联调记录](aegis/work/2026-10-08-extension-live-integration/90-evidence.md)。
+首次提交已发出：**`t8y2/dbx-store` PR #242**（`io.github.oncemisery.hertz-studio@0.1.0`，
+切自 tag `hertz-plugin-v0.1.0`）。它停在维护者侧要两步：先 approve workflow runs，再 review + `/sign`。
+
+2026-10-08 已在 DBX 0.6.35 验证最终候选包的六皮肤切换、创意/沉浸场景、事件链路与网易云原生播放；
+2026-10-10 又把 5 个候选包逐个下载回算过 `sha256`/`size`，与 `release-candidates.json` 一致。
+过程记录（联调细节、账号范围、未完成项）只留在本机 `docs/aegis/`，已从仓库下架——对外能核对的是
+Release 上的 `release-candidates.json`、包内 `manifest.json` 的身份，以及钉到 tag 的源码。
 Windows 下替换同版本插件前，先关闭它的工作台并停止插件进程，避免运行中的 exe 占用导致安装失败。
 
 - [x] store 图标：`plugin/assets/plugin.svg`，用钉到 tag 的 raw URL 即可，无需额外尺寸版本。
-- [ ] 截图 2–4 张（曲库/播放、3D 舞台、桌面浮动胶囊），只作为 review 材料附在 PR 正文。浮动胶囊可用
+- [ ] 截图 2–4 张（曲库/播放、3D 舞台、桌面浮动胶囊），只作为 review 材料附在 PR 评论。浮动胶囊可用
       `output/dbx-float-dock-shots.js` 现拍（收起态 + 滑出态各一张）。
-- [ ] 确认 support 渠道就用 GitHub Issues（若另设邮箱/论坛，替换 PR 正文里的链接）。
+- [x] support 渠道就用 GitHub Issues（PR 正文里已按这个填）。
 
 ## 三个已知的坑
 

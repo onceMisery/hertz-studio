@@ -1,8 +1,0 @@
-{
-  "schemaVersion": "aegis.schema.v0",
-  "artifactKey": "final-integrated-regression",
-  "type": "test",
-  "source": "cargo test --locked -p hertz-studio --target-dir D:/code/github/hertz-studio/target-online-podcasts; cargo build --locked -p hertz-studio -p dbx-plugin-hertz --target-dir D:/code/github/hertz-studio/target-online-podcasts; node scripts/check-frontend.js --extra; node scripts/check-plugin-sidecar.js",
-  "summary": "合并后原目录独立执行：Rust lib 414/bin 10 通过，3 ignored；两程序构建通过；前端48步通过；HERTZ_PLUGIN_BIN指向最终dbx-plugin-hertz.exe，memory凭据/Null协议280项通过。命令均退出0。",
-  "verifier": "root 执行最终命令并核对日志/退出码"
-}

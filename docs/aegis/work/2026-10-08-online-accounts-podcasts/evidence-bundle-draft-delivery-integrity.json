@@ -1,8 +1,0 @@
-{
-  "schemaVersion": "aegis.schema.v0",
-  "artifactKey": "delivery-integrity",
-  "type": "check",
-  "source": "output/podcasts-integrated-delivery.log; output/podcasts-runtime-cleanup.log; output/online-podcasts-evidence-manifest.json",
-  "summary": "34份生产/测试文件与已验证合并一致；安全证据和稳定截图已保存在原目录；隔离运行时按路径校验后关闭，原7634监听仍在。未更改Git索引、refs或推送。",
-  "verifier": "root 比较文件、核对进程并整理交付"
-}

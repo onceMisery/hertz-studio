@@ -1,8 +1,0 @@
-{
-  "schemaVersion": "aegis.schema.v0",
-  "artifactKey": "paging",
-  "type": "tests",
-  "source": "scripts/check-library.js",
-  "summary": "Store10 tests、library JS回归、favorites108检查通过；独立服务205真实WAV API通过；浏览器按艺术家排序、收藏200至205继续加载确认；需求与代码审查PASS。最新submittedRevision保护有JS回归，待与第2项共同构建最终UI。",
-  "verifier": "root"
-}
