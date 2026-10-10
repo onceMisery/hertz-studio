@@ -62,7 +62,10 @@
         var num = function (v, d) { return typeof v === 'number' && isFinite(v) ? v : d; };
         var d = num(p.dist, 6);
         return {
-          yawDeg: p.yawDeg,
+          // 读档同样折回。存档可能来自更早的版本（那时 yaw 是无界值），
+          // 也可能被外部改写成几千度；不折回的话，第一次操作就会跳一下，
+          // 而且跳的时刻取决于存档值——这类 bug 最难复现。
+          yawDeg: wrap180(p.yawDeg),
           pitchDeg: num(p.pitchDeg, 0),
           dist: d < 0.3 ? 0.3 : (d > 100 ? 100 : d),
           tx: num(p.tx, 0),
@@ -260,7 +263,16 @@
   }
 
   function writePoseToCtx(ctx) {
-    ctx.yawDeg = pose.yawDeg;
+    // yaw 在拖拽里是**无界累加**的（见两处 `pose.yawDeg -= …`），而渲染层
+    // 直接拿它去建旋转矩阵 —— 于是它可以一路涨到几千度。两个后果：
+    //   ① 精度：double 只有约 15 位有效数字，角度越大每度代表的浮点间隔越粗，
+    //      同一朝向会算出两个略有差的值，表现为持续微抖；
+    //   ② 边界：存档写的是无界值，读回后与"飞回"路径的 wrap180() 结果
+    //      不是同一个数 —— 于是切风景/复位的那一帧会跳一下（跨过 180° 时最明显）。
+    // 在**交给渲染层之前**折回，两条路径从此给同一个值，跳变从源头消失。
+    // 注意折回只作用于写出去的值：pose.yawDeg 保持无界，连续拖拽时不会
+    // 因为 -180/180 处的回绕而突然反向。
+    ctx.yawDeg = wrap180(pose.yawDeg);
     ctx.pitchDeg = clamp(pose.pitchDeg, -PITCH_LIMIT, PITCH_LIMIT);
     ctx.dist = Math.max(0.3, pose.dist);
     ctx.tx = pose.tx;

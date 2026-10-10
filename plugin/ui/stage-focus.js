@@ -28,6 +28,13 @@
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
   function lerp(a, b, k) { return a + (b - a) * k; }
   function easeOutCubic(x) { return 1 - Math.pow(1 - x, 3); }
+  // 角度折回 (-180,180]。用于把插值起点拉到终点的**最短弧**上。
+  //
+  // 为什么需要：yaw 是角度，179° 与 -179° 只差 2°，但裸 lerp 会算出
+  // "从 179 走到 -179"是 358°，于是聚焦切换时镜头会绕远路转一整圈 ——
+  // 视觉上就是"跨过 180° 时跳一下"。同一模块的 freecam 飞回路径早就有
+  // 折回，唯独这里漏了，于是只有聚焦动画会跳。
+  function wrap180(v) { v = ((v + 180) % 360 + 360) % 360 - 180; return v; }
   // isBusy 含开启与 600ms 飞回中：飞回期 peek 输出会被 freecam 层覆盖，
   // 等它结束再起，否则两层在同一帧交班时会跳切。
   function freecamBusy() {
@@ -161,7 +168,20 @@
     var toYaw = flight.out ? ctx.baseYawDeg : flight.target.yawDeg;
     var toPitch = flight.out ? ctx.basePitchDeg : flight.target.pitchDeg;
     var toDist = flight.out ? ctx.baseDist : ctx.baseDist * flight.target.distMul;
-    ctx.yawDeg = lerp(from.yawDeg, toYaw, e);
+    // yaw 走最短弧。179° 与 -179° 只差 2°，裸 lerp 却会插出 358° 的长途
+    // 旋转 —— 这就是"跨过 180° 时跳动"的来源。
+    //
+    // 折的是**差值**而不是起点：`lerp(from, to, e)` 内部算的是
+    // `(to - from) * e`，把差值折到 (-180,180] 就让行程恒 ≤180°。
+    //
+    // ⚠ 别再折起点一次（试过，会把效果抵消，行程又回到 358°）。
+    // ⚠ 中间值会短暂越出 (-180,180]（如 179→-179 时经过 -181）：这是
+    // **无害的**，别去"修正"。渲染走 sin/cos，而 sin(-181°)=sin(179°)、
+    // cos 同理 —— 越界值与域内值渲染结果完全一致。而且它是每帧从
+    // flight.from 重算的局部量：不回写 pose、不累积，flight.oy 回写的
+    // 是插值**结果**，那个恒在域内。
+    var yawDelta = wrap180(from.yawDeg - toYaw);
+    ctx.yawDeg = lerp(toYaw + yawDelta, toYaw, e);
     ctx.pitchDeg = lerp(from.pitchDeg, toPitch, e);
     ctx.dist = Math.max(0.3, lerp(from.dist, toDist, e));
     ctx.tx = 0;
