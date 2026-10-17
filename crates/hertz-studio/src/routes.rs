@@ -53,6 +53,17 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/ai/grants/{grantId}",
             axum::routing::delete(revoke_ai_grant),
         )
+        // AI 持久生成任务（技术路线 R4-J）：官方 UI 入口，全权 token 后面，
+        // 固定 local-owner 身份；外部 grant 走受限门面的独立路由组。
+        .route("/v1/ai/status", get(ai_status))
+        .route("/v1/ai/jobs", get(ai_list_jobs).post(ai_create_job))
+        .route("/v1/ai/jobs/{jobId}", get(ai_get_job))
+        .route("/v1/ai/jobs/{jobId}/cancel", post(ai_cancel_job))
+        .route("/v1/ai/proposals/{proposalId}", get(ai_get_proposal))
+        .route(
+            "/v1/ai/proposals/{proposalId}/reject",
+            post(ai_reject_proposal),
+        )
         .route("/v1/state", get(get_state))
         .route("/v1/player/load", post(load))
         .route("/v1/player/play", post(play))
@@ -505,6 +516,132 @@ async fn get_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
         }
     }
     Json(v)
+}
+
+// ---- AI 持久生成任务（技术路线 R4-J）：状态机在 crate::ai::jobs，
+// 这里只做取参与应答整形；主体固定为 local-owner（官方 UI 身份）。----
+
+async fn ai_owner_id(state: &Arc<AppState>) -> ApiResult<String> {
+    Ok(vmusic_store::ai::get_or_create_instance(&state.db)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?
+        .owner_instance_id)
+}
+
+async fn ai_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let owner = ai_owner_id(&state).await?;
+    Ok(Json(crate::ai::jobs::status(&state, &owner).await?))
+}
+
+#[derive(Deserialize)]
+pub struct AiCreateJobRequest {
+    pub brief: String,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+async fn ai_create_job(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AiCreateJobRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let outcome = crate::ai::jobs::submit(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &body.brief,
+        body.idempotency_key.as_deref(),
+    )
+    .await?;
+    Ok(Json(
+        serde_json::to_value(outcome).map_err(|e| internal(e.to_string()))?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct AiJobsQuery {
+    #[serde(default)]
+    pub before_created_at: Option<i64>,
+    #[serde(default)]
+    pub before_job_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+async fn ai_list_jobs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AiJobsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let owner = ai_owner_id(&state).await?;
+    let jobs = crate::ai::jobs::list_jobs(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &owner,
+        query.before_created_at,
+        query.before_job_id.as_deref(),
+        query.limit.unwrap_or(20),
+    )
+    .await?;
+    Ok(Json(serde_json::json!({ "jobs": jobs })))
+}
+
+async fn ai_get_job(
+    State(state): State<Arc<AppState>>,
+    AxumPath(job_id): AxumPath<String>,
+) -> ApiResult<Json<crate::ai::jobs::JobView>> {
+    Ok(Json(
+        crate::ai::jobs::get_job(&state, crate::idempotency::LOCAL_OWNER, &job_id).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct AiCancelRequest {
+    pub expected_state_revision: i64,
+}
+
+async fn ai_cancel_job(
+    State(state): State<Arc<AppState>>,
+    AxumPath(job_id): AxumPath<String>,
+    Json(body): Json<AiCancelRequest>,
+) -> ApiResult<Json<crate::ai::jobs::JobView>> {
+    Ok(Json(
+        crate::ai::jobs::cancel(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            &job_id,
+            body.expected_state_revision,
+        )
+        .await?,
+    ))
+}
+
+async fn ai_get_proposal(
+    State(state): State<Arc<AppState>>,
+    AxumPath(proposal_id): AxumPath<String>,
+) -> ApiResult<Json<crate::ai::jobs::ProposalView>> {
+    Ok(Json(
+        crate::ai::jobs::get_proposal(&state, crate::idempotency::LOCAL_OWNER, &proposal_id)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct AiRejectRequest {
+    pub expected_revision: i64,
+}
+
+async fn ai_reject_proposal(
+    State(state): State<Arc<AppState>>,
+    AxumPath(proposal_id): AxumPath<String>,
+    Json(body): Json<AiRejectRequest>,
+) -> ApiResult<Json<crate::ai::jobs::ProposalView>> {
+    Ok(Json(
+        crate::ai::jobs::reject_proposal(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            &proposal_id,
+            body.expected_revision,
+        )
+        .await?,
+    ))
 }
 
 // ---- AI 受限授权（技术路线 R2-G）：官方管理面与受限门面两组入口，

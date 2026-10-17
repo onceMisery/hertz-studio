@@ -865,6 +865,8 @@ pub struct AppState {
     /// 共享搜索闸（§4.1）：HTTP 单源、RPC 单源、旧聚合、内部接力搜索都
     /// 经过同一份入场额度；经 `online_ctx` 随 Ctx 分发。
     pub(crate) search_gate: Arc<crate::online::search_gate::SearchGate>,
+    /// AI 持久任务运行时（R4-J）：有界内存输入 + 当前 provider。
+    pub(crate) ai_runtime: crate::ai::jobs::AiRuntime,
 }
 
 impl AppState {
@@ -4260,6 +4262,7 @@ pub(crate) mod tests {
             short_writes: Default::default(),
             server_instance_id: uuid::Uuid::new_v4().to_string(),
             search_gate: Default::default(),
+            ai_runtime: Default::default(),
         };
         (state, handle)
     }

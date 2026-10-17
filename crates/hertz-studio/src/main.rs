@@ -222,34 +222,27 @@ async fn main() -> anyhow::Result<()> {
     // 时发布，且必须拿到 AI runner 锁——锁被其它进程持有（双开）就不发布，
     // 受限门面保持不可对接；0.0.0.0 / 具体网卡 / IPv6 不发布这个实验入口。
     // 锁以进程生命周期持有（forget 跳过 Drop，OS 在退出时统一释放）。
-    if local.ip() == std::net::IpAddr::from([127, 0, 0, 1]) {
-        match hertz_studio::ai::lock::AiRunnerLock::try_acquire(&state.data_dir) {
-            Ok(Some(lock)) => {
-                lock.leak();
-                let instance = vmusic_store::ai::get_or_create_instance(&state.db).await?;
-                let doc = hertz_studio::ai::mcp::discovery::DiscoveryDoc {
-                    version: hertz_studio::ai::mcp::discovery::DISCOVERY_VERSION,
-                    pid: std::process::id(),
-                    port: actual_port,
-                    protocol_version: vmusic_core::PROTOCOL_VERSION.to_string(),
-                    owner_instance_id: instance.owner_instance_id,
-                    server_instance_id: state.server_instance_id().to_string(),
-                    edition: hertz_studio::edition::NAME.to_string(),
-                };
-                match hertz_studio::ai::mcp::discovery::publish(&state.data_dir, &doc) {
-                    Ok(()) => {
-                        println!(
-                            "  ai-mcp   {}",
-                            hertz_studio::ai::mcp::discovery::path(&state.data_dir).display()
-                        );
-                    }
-                    Err(e) => tracing::warn!("AI 发现文件发布失败: {e}"),
+    if local.ip() == std::net::IpAddr::from([127, 0, 0, 1]) && booted.ai_lock.is_some() {
+        {
+            let instance = vmusic_store::ai::get_or_create_instance(&state.db).await?;
+            let doc = hertz_studio::ai::mcp::discovery::DiscoveryDoc {
+                version: hertz_studio::ai::mcp::discovery::DISCOVERY_VERSION,
+                pid: std::process::id(),
+                port: actual_port,
+                protocol_version: vmusic_core::PROTOCOL_VERSION.to_string(),
+                owner_instance_id: instance.owner_instance_id,
+                server_instance_id: state.server_instance_id().to_string(),
+                edition: hertz_studio::edition::NAME.to_string(),
+            };
+            match hertz_studio::ai::mcp::discovery::publish(&state.data_dir, &doc) {
+                Ok(()) => {
+                    println!(
+                        "  ai-mcp   {}",
+                        hertz_studio::ai::mcp::discovery::path(&state.data_dir).display()
+                    );
                 }
+                Err(e) => tracing::warn!("AI 发现文件发布失败: {e}"),
             }
-            Ok(None) => {
-                tracing::warn!("AI runner 锁被其它进程持有，跳过 AI 发现发布");
-            }
-            Err(e) => tracing::warn!("AI runner 锁获取失败: {e}"),
         }
     }
     // 打印的地址按**实际绑定**的接口来（绑 0.0.0.0 时回落到 127.0.0.1，那是本机

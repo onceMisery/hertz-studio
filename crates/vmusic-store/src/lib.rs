@@ -17,6 +17,7 @@ use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use vmusic_core::{Playlist, PlaylistId, StoreError, Track, TrackId, TrackSource};
 
 pub mod ai;
+pub mod ai_jobs;
 pub mod backup;
 pub mod favorites;
 pub mod limits;
@@ -69,6 +70,17 @@ impl From<TrackRow> for Track {
             added_at: r.added_at,
         }
     }
+}
+
+/// 有界写事务（技术路线 §7.3）：`BEGIN IMMEDIATE` 在 BEGIN 阶段就抢写锁，
+/// 避免「先读后写」的 deferred 事务在并发下直接 SQLITE_BUSY（busy_timeout
+/// 对快照冲突无效）。AI 任务的受理/结算/恢复全部经这里开事务。
+pub async fn begin_immediate(
+    pool: &SqlitePool,
+) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, StoreError> {
+    pool.begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))
 }
 
 pub async fn open(data_dir: &Path) -> Result<SqlitePool, StoreError> {

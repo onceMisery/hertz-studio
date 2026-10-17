@@ -38,6 +38,9 @@ pub struct Booted {
     pub backend_label: String,
     /// 音频 actor 的专属线程。
     pub audio_thread: std::thread::JoinHandle<()>,
+    /// AI runner 锁（§5.5）：拿到才恢复了任务、才允许发布外部对接发现；
+    /// `None` = 同 DataDir 已有别的服务进程在跑。持有期 = Booted 生命周期。
+    pub ai_lock: Option<crate::ai::lock::AiRunnerLock>,
 }
 
 /// 建好数据目录并读出配置。
@@ -178,6 +181,7 @@ pub async fn boot(
         short_writes: Default::default(),
         server_instance_id: uuid::Uuid::new_v4().to_string(),
         search_gate: Default::default(),
+        ai_runtime: Default::default(),
     });
     // 供 on_track_committed detach 'static 后台任务用；set 失败只可能是
     // 重复注入，启动路径只走一次，忽略即可。
@@ -230,10 +234,22 @@ pub async fn boot(
         }
     }
 
+    // AI runner 锁 + 任务恢复（§5.5/§7.2）：官方任务模式即使关闭外部 MCP
+    // 也独立获取锁并恢复未完结任务；拿不到锁则外部对接停用，本地功能不受影响。
+    let ai_lock = crate::ai::lock::AiRunnerLock::try_acquire(&data_dir)?;
+    if ai_lock.is_some() {
+        if let Err(e) = crate::ai::jobs::recover(&state).await {
+            tracing::warn!("AI 任务恢复失败: {}", e.code);
+        }
+    } else {
+        tracing::warn!("AI runner 锁被其它进程持有，AI 外部对接停用");
+    }
+
     Ok(Booted {
         state,
         config,
         backend_label,
         audio_thread,
+        ai_lock,
     })
 }

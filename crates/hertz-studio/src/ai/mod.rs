@@ -23,5 +23,6 @@
 
 pub(crate) mod capability;
 pub(crate) mod facade;
+pub(crate) mod jobs;
 pub mod lock;
 pub mod mcp;
