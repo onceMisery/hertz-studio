@@ -1,0 +1,255 @@
+{
+  "version": 1,
+  "generator": "scripts/export-stage-contract.js",
+  "source": "plugin/ui/creative-gl.js",
+  "scenes": [
+    {
+      "id": "towers",
+      "label": "频谱塔林",
+      "aliases": [
+        "柱阵",
+        "塔林",
+        "频谱塔林",
+        "城市",
+        "towers"
+      ],
+      "ownsLyrics": false,
+      "params": [
+        {
+          "name": "height",
+          "min": 0.5,
+          "max": 22,
+          "default": 5.5
+        },
+        {
+          "name": "span",
+          "min": 6,
+          "max": 60,
+          "default": 24
+        },
+        {
+          "name": "width",
+          "min": 0.1,
+          "max": 2,
+          "default": 0.1
+        },
+        {
+          "name": "depth",
+          "min": 0.1,
+          "max": 2,
+          "default": 0.16
+        },
+        {
+          "name": "mirror",
+          "min": 0,
+          "max": 1,
+          "default": 0.16
+        }
+      ]
+    },
+    {
+      "id": "orb",
+      "label": "频谱球",
+      "aliases": [
+        "星球",
+        "球体",
+        "频谱球",
+        "orb",
+        "planet"
+      ],
+      "ownsLyrics": false,
+      "params": [
+        {
+          "name": "radius",
+          "min": 1,
+          "max": 8,
+          "default": 3
+        },
+        {
+          "name": "amp",
+          "min": 0,
+          "max": 4,
+          "default": 0.65
+        },
+        {
+          "name": "wire",
+          "min": 0,
+          "max": 1.5,
+          "default": 0.42
+        },
+        {
+          "name": "wobble",
+          "min": 0,
+          "max": 1.5,
+          "default": 0.22
+        }
+      ]
+    },
+    {
+      "id": "tunnel",
+      "label": "光隧道",
+      "aliases": [
+        "隧道",
+        "穿梭",
+        "光隧道",
+        "tunnel"
+      ],
+      "ownsLyrics": false,
+      "params": [
+        {
+          "name": "ringRadius",
+          "min": 1,
+          "max": 12,
+          "default": 4.2
+        },
+        {
+          "name": "ringLen",
+          "min": 6,
+          "max": 48,
+          "default": 28
+        },
+        {
+          "name": "spread",
+          "min": 0.2,
+          "max": 5,
+          "default": 0.65
+        },
+        {
+          "name": "push",
+          "min": 0,
+          "max": 20,
+          "default": 2.4
+        }
+      ]
+    },
+    {
+      "id": "nebula",
+      "label": "星云",
+      "aliases": [
+        "星云",
+        "梦幻",
+        "nebula"
+      ],
+      "ownsLyrics": false,
+      "params": [
+        {
+          "name": "cloudR",
+          "min": 1,
+          "max": 16,
+          "default": 6
+        },
+        {
+          "name": "spread3",
+          "min": 0,
+          "max": 8,
+          "default": 1.6
+        },
+        {
+          "name": "size",
+          "min": 0.4,
+          "max": 8,
+          "default": 1.25
+        },
+        {
+          "name": "spin",
+          "min": 0,
+          "max": 3,
+          "default": 0.18
+        },
+        {
+          "name": "densityK",
+          "min": 0.2,
+          "max": 2,
+          "default": 0.8
+        }
+      ]
+    },
+    {
+      "id": "terrain",
+      "label": "频谱地形",
+      "aliases": [
+        "地形",
+        "山脉",
+        "频谱地形",
+        "terrain"
+      ],
+      "ownsLyrics": false,
+      "params": [
+        {
+          "name": "extent",
+          "min": 6,
+          "max": 60,
+          "default": 24
+        },
+        {
+          "name": "amp2",
+          "min": 0,
+          "max": 8,
+          "default": 1.8
+        },
+        {
+          "name": "scroll",
+          "min": 0,
+          "max": 3,
+          "default": 0.22
+        },
+        {
+          "name": "wire2",
+          "min": 0,
+          "max": 2,
+          "default": 0.42
+        }
+      ]
+    },
+    {
+      "id": "lyric",
+      "label": "三维歌词",
+      "aliases": [
+        "歌词走廊",
+        "三维歌词",
+        "文字",
+        "lyric corridor",
+        "lyrics"
+      ],
+      "ownsLyrics": true,
+      "params": [
+        {
+          "name": "spacing",
+          "min": 1,
+          "max": 9,
+          "default": 2.5
+        },
+        {
+          "name": "arc",
+          "min": 0,
+          "max": 10,
+          "default": 0.65
+        },
+        {
+          "name": "pwidth",
+          "min": 8,
+          "max": 32,
+          "default": 16
+        },
+        {
+          "name": "dimK",
+          "min": 0,
+          "max": 1,
+          "default": 0.48
+        },
+        {
+          "name": "bob",
+          "min": 0,
+          "max": 2,
+          "default": 0.18
+        },
+        {
+          "name": "tint",
+          "min": 0,
+          "max": 1.5,
+          "default": 0.5
+        }
+      ]
+    }
+  ]
+}

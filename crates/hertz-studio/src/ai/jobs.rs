@@ -54,10 +54,7 @@ pub(crate) const KEY_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
 pub(crate) const PROPOSAL_TTL_MS: i64 = 24 * 3600 * 1000;
 /// 业务输入上限（§8.3：16 KiB）。
 pub(crate) const MAX_INPUT_BYTES: usize = 16 * 1024;
-/// 当前 CreativeGL 场景表（plugin/ui/creative-gl.js 的 SCENES.id）。这是
-/// R3 正式契约导出落地前的手工窄表：fake provider 只产出这里的场景，
-/// 校验也只接受这里的场景——不在表里的 scene 一律失败，不假装成功。
-pub(crate) const SCENES: &[&str] = &["towers", "orb", "tunnel", "nebula", "terrain", "lyric"];
+use crate::ai::contract;
 
 // ---------------------------------------------------------------------------
 // provider 接口与 fake 实现（R5 换真实 provider；fake 永远免费）
@@ -97,16 +94,20 @@ impl StageIntentProvider for FakeProvider {
         Box::pin(async move {
             let hash = Sha256::digest(brief.as_bytes());
             let seed = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]);
-            // 场景必须来自真实场景表，产物才进得去工坊（R3 契约导出前的窄表）。
-            let scene = SCENES[(seed % SCENES.len() as u32) as usize];
-            // 确定性参数：seed 摊到 patch 里，产出可复现的候选。
+            // 场景与参数都来自内嵌的真实场景契约（creative-gl.js 导出物）：
+            // 取该场景的第一个参数、把它拨到 min/max 之间由 seed 决定的位置，
+            // 产出可复现且必然通过自家校验的候选。
+            let scenes = contract::scenes();
+            let scene = &scenes[(seed % scenes.len() as u32) as usize];
+            let param = &scene.params[0];
+            let value = match (param.min, param.max) {
+                (Some(min), Some(max)) => min + (max - min) * f64::from(seed % 100) / 100.0,
+                _ => 0.0,
+            };
             let intent = json!({
                 "version": 1,
-                "scene": scene,
-                "patch": {
-                    "intensity": (seed % 100) as f64 / 100.0,
-                    "paletteShift": (seed % 360) as i64,
-                },
+                "scene": scene.id,
+                "patch": { param.name.clone(): value },
             });
             Ok(intent)
         })
@@ -288,10 +289,23 @@ fn validate_intent(intent: &Value) -> Result<(), String> {
     if map.get("version").and_then(Value::as_i64) != Some(1) {
         return Err("intent.version 必须是 1".into());
     }
-    match map.get("scene") {
-        Some(Value::String(scene))
-            if !scene.is_empty() && scene.len() <= 64 && SCENES.contains(&scene.as_str()) => {}
-        _ => return Err("intent.scene 必须在当前场景表内".into()),
+    // scene 必须能按真实契约解析（id 或别名），patch 键必须落在该场景的
+    // 参数表内——结构合法但指向不存在参数的候选在这里失败，不假装成功。
+    let scene = match map.get("scene") {
+        Some(Value::String(scene)) if !scene.is_empty() && scene.len() <= 64 => scene,
+        _ => return Err("intent.scene 必须是非空短字符串".into()),
+    };
+    let scene_def = contract::resolve_scene(scene)
+        .ok_or_else(|| format!("intent.scene 不在当前场景契约内: {scene}"))?;
+    if let Some(Value::Object(patch)) = map.get("patch") {
+        for key in patch.keys() {
+            if !contract::scene_has_param(scene_def, key) {
+                return Err(format!(
+                    "intent.patch 含场景 {} 未登记的参数: {key}",
+                    scene_def.id
+                ));
+            }
+        }
     }
     if !matches!(map.get("patch"), Some(Value::Object(_))) {
         return Err("intent.patch 必须是对象".into());
@@ -1493,6 +1507,15 @@ mod tests {
             &json!({ "version": 1, "scene": "towers", "patch": {}, "junk": 1 })
         )
         .is_err());
+        // patch 键必须落在场景参数表内（结构合法但参数不存在也失败）。
+        assert!(validate_intent(
+            &json!({ "version": 1, "scene": "towers", "patch": { "intensity": 1 } })
+        )
+        .is_err());
+        assert!(validate_intent(
+            &json!({ "version": 1, "scene": "towers", "patch": { "height": 5.5 } })
+        )
+        .is_ok());
         let deep = json!({ "version": 1, "scene": "s", "patch": { "a": { "b": { "c": { "d": { "e": { "f": { "g": { "h": { "i": 1 } } } } } } } } } });
         assert!(validate_intent(&deep).is_err());
         let oversized = json!({ "version": 1, "scene": "x".repeat(20000), "patch": {} });
