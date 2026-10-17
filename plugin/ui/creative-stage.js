@@ -835,12 +835,30 @@
     return sceneRow(sceneId, path.slice(3));
   }
 
-  function applyIntent(intent) {
+  // create 模式的规范默认基线（技术路线 §6.2）：版本内建的默认预置 +
+  // 目标场景的参数默认与机位入画点。显式交给 materializeIntent，绝不从
+  // 当前舞台猜——同一份 (基线, 意图) 永远物化出同一个候选。
+  function canonicalBaseline(sceneId) {
+    var p = basePreset();
+    if (sceneId && typeof sceneId === 'string'
+      && window.CreativeGL && CreativeGL.sceneById(sceneId) && sceneId !== p.scene) {
+      p.scene = sceneId;
+      p.sc = sceneDefaults(sceneId);
+      var cam = sceneDefinition(sceneId).camera;
+      Object.keys(cam).forEach(function (k) {
+        writePath(p, k, clampPath(k, cam[k]));
+      });
+    }
+    return p;
+  }
+
+  // 纯物化（R3-K）：显式基线 + 意图 → 候选预置与诊断。不读舞台状态、
+  // 不写任何东西、不发事件、不落盘——applyIntent = 本函数 + 提交，
+  // 工坊导入/AI 候选预览用同一份实现。base 为空时取目标场景的规范
+  // 默认基线（create 模式）。
+  function materializeIntent(base, intent) {
     if (!intent || typeof intent !== 'object' || intent.version !== 1) {
       return { ok: false, code: 'bad_version', message: '意图版本不受支持' };
-    }
-    if (!preset) {
-      return { ok: false, code: 'bad_state', message: '舞台尚未初始化' };
     }
     var hasScene = typeof intent.scene === 'string' && !!intent.scene;
     var hasDirector = typeof intent.director === 'boolean';
@@ -855,15 +873,14 @@
       return { ok: false, code: 'bad_scene', message: '未知场景：' + intent.scene };
     }
 
-    var next = deep(preset);
+    var next = deep(base || canonicalBaseline(intent.scene));
     var applied = [];
     var ignored = [];
-    var changed = false;
-    var sceneSwitched = hasScene && intent.scene !== preset.scene;
+    var sceneSwitched = hasScene && intent.scene !== next.scene;
 
-    // 切场景：私有参数整体换成目标场景的默认值，机位落到入画点。与 setScene
-    // 同语义（含"同场景不算切换、不重置用户调参"），但先建好再上任，中途
-    // 不广播。patch 在机位落位之后应用 —— 意图里明确写了的值优先于场景默认。
+    // 切场景：私有参数整体换成目标场景的默认值，机位落到入画点。与
+    // setScene 同语义（"同场景不算切换、不重置用户调参"）。patch 在
+    // 机位落位之后应用——意图里明确写了的值优先于场景默认。
     if (sceneSwitched) {
       next.scene = intent.scene;
       next.sc = sceneDefaults(intent.scene);
@@ -873,7 +890,6 @@
           writePath(next, k, clampPath(k, camTo[k]));
         });
       }
-      changed = true;
     }
 
     patchKeys.forEach(function (path) {
@@ -890,29 +906,41 @@
       }
       writePath(next, path, val);
       applied.push(path);
-      changed = true;
     });
 
-    if (hasDirector) { next.director = intent.director; changed = true; }
+    if (hasDirector) { next.director = intent.director; }
     if (hasHand) {
       // 首期意图只表达 on；jitter/frame/wave 等用户设置原样保留
       next.hand = Object.assign({}, next.hand, { on: intent.hand.on });
-      changed = true;
     }
 
-    if (!changed) {
+    if (!applied.length && !hasDirector && !hasHand && !sceneSwitched) {
       return { ok: false, code: 'empty',
         message: '意图与当前舞台一致，没有需要应用的改变' };
     }
+    return {
+      ok: true,
+      preset: normalize(next),
+      applied: applied,
+      ignored: ignored,
+      sceneSwitched: sceneSwitched,
+    };
+  }
 
-    if (sceneSwitched) animations.length = 0;   // 旧场景的 cue 动画不跨场景续跑
-    preset = normalize(next);
+  function applyIntent(intent) {
+    if (!preset) {
+      return { ok: false, code: 'bad_state', message: '舞台尚未初始化' };
+    }
+    var m = materializeIntent(preset, intent);
+    if (!m.ok) return m;
+    if (m.sceneSwitched) animations.length = 0;   // 旧场景的 cue 动画不跨场景续跑
+    preset = m.preset;                            // 物化时已 normalize
     runtime = {};
     resolve(now());
     applyHand();
     saveLocalSoon();
     emit('preset', preset);
-    return { ok: true, preset: deep(preset), applied: applied, ignored: ignored };
+    return { ok: true, preset: deep(preset), applied: m.applied, ignored: m.ignored };
   }
 
   // -------------------------------------------------------------------------
@@ -1710,6 +1738,9 @@
     /** 原子应用一份 StageIntent（提示词编译器的产出）。要么整份预置一次性
      *  换掉并广播一次 preset 事件，要么状态零变化返回 {ok:false,...}。 */
     applyIntent: applyIntent,
+    // R3-K：纯物化与规范默认基线——工坊导入/AI 候选预览用，零副作用。
+    materializeIntent: materializeIntent,
+    canonicalBaseline: function (sceneId) { return deep(canonicalBaseline(sceneId)); },
 
     // 场景与参数元数据：工坊用它们生成控件，不自己维护一份表
     scenes: function () { return window.CreativeGL ? CreativeGL.scenes() : []; },
