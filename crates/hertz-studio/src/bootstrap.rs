@@ -182,6 +182,8 @@ pub async fn boot(
         server_instance_id: uuid::Uuid::new_v4().to_string(),
         search_gate: Default::default(),
         ai_runtime: Default::default(),
+        ai_runner_held: Default::default(),
+        ai_external_ready: Default::default(),
     });
     // 供 on_track_committed detach 'static 后台任务用；set 失败只可能是
     // 重复注入，启动路径只走一次，忽略即可。
@@ -237,12 +239,17 @@ pub async fn boot(
     // AI runner 锁 + 任务恢复（§5.5/§7.2）：官方任务模式即使关闭外部 MCP
     // 也独立获取锁并恢复未完结任务；拿不到锁则外部对接停用，本地功能不受影响。
     let ai_lock = crate::ai::lock::AiRunnerLock::try_acquire(&data_dir)?;
+    // 锁是生成受理的门禁：失锁的第二进程即使共享同一个 DataDir，也不得
+    // 受理新任务（§5.5 唯一 AI runner）。
+    state
+        .ai_runner_held
+        .store(ai_lock.is_some(), std::sync::atomic::Ordering::Relaxed);
     if ai_lock.is_some() {
         if let Err(e) = crate::ai::jobs::recover(&state).await {
             tracing::warn!("AI 任务恢复失败: {}", e.code);
         }
     } else {
-        tracing::warn!("AI runner 锁被其它进程持有，AI 外部对接停用");
+        tracing::warn!("AI runner 锁被其它进程持有，AI 生成与外部对接停用");
     }
 
     Ok(Booted {

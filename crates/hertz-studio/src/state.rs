@@ -867,6 +867,11 @@ pub struct AppState {
     pub(crate) search_gate: Arc<crate::online::search_gate::SearchGate>,
     /// AI 持久任务运行时（R4-J）：有界内存输入 + 当前 provider。
     pub(crate) ai_runtime: crate::ai::jobs::AiRuntime,
+    /// AI runner 锁是否由本进程持有（§5.5）：锁失则生成受理停用（bootstrap 置位）。
+    pub(crate) ai_runner_held: std::sync::atomic::AtomicBool,
+    /// 受限门面是否对外开放：锁 + 实际回环绑定双条件，main 在监听后置位；
+    /// 0.0.0.0、具体网卡与 IPv6 一律不开放（§5.5 首发约束）。
+    pub(crate) ai_external_ready: std::sync::atomic::AtomicBool,
 }
 
 impl AppState {
@@ -874,6 +879,24 @@ impl AppState {
     /// 传输层（独立 bin 与插件宿主）经这里只读访问。
     pub fn server_instance_id(&self) -> &str {
         &self.server_instance_id
+    }
+
+    /// AI runner 锁是否在本进程（生成受理的门禁）。
+    pub fn ai_runner_held(&self) -> bool {
+        self.ai_runner_held
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 受限门面对外开放与否（锁 + 回环绑定）。
+    pub fn ai_external_ready(&self) -> bool {
+        self.ai_external_ready
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// main 在监听绑定后置位（bin 不碰 pub(crate) 字段）。
+    pub fn set_ai_external_ready(&self, ready: bool) {
+        self.ai_external_ready
+            .store(ready, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// 缓存根目录（`cache/`），下面是 `covers/` 与 `online/` 两个子目录。
@@ -4263,6 +4286,8 @@ pub(crate) mod tests {
             server_instance_id: uuid::Uuid::new_v4().to_string(),
             search_gate: Default::default(),
             ai_runtime: Default::default(),
+            ai_runner_held: Default::default(),
+            ai_external_ready: Default::default(),
         };
         (state, handle)
     }

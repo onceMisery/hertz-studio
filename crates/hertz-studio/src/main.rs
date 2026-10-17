@@ -216,6 +216,9 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
     let local = listener.local_addr()?;
     let actual_port = local.port();
+    // 受限门面的开放条件（§5.5）：锁在本进程 + 实际绑定回环。0.0.0.0、
+    // 具体网卡与 IPv6 一律不开放——不发布发现，也不挂认证后的受限路由。
+    state.set_ai_external_ready(local.ip().is_loopback() && booted.ai_lock.is_some());
 
     let discovery = state::write_discovery(&state, actual_port).await?;
     // AI 受限门面的发现文件（技术路线 §5.5）：只在**实际绑定** IPv4 回环

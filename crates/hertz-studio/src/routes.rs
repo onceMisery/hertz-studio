@@ -691,6 +691,16 @@ async fn require_grant(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    // 首发约束（§5.5）：锁失或非回环绑定时，受限门面对一切调用方都不可用
+    // ——不发布发现只挡住「找到它」，这里挡住「访问它」。
+    if !state.ai_external_ready() {
+        return ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ai_unavailable",
+            "受限门面未开放（锁失或非回环绑定）",
+        )
+        .into_response();
+    }
     let presented = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -700,6 +710,32 @@ async fn require_grant(
     let Some(presented) = presented else {
         return unauthorized().into_response();
     };
+    // 实例绑定（§5.5）：每个调用必须携带会话建立时看到的 serverInstanceId；
+    // 服务重启后旧适配进程的请求在这里被拒绝，不能自动重放旧写。
+    let bound_instance = request
+        .headers()
+        .get("x-server-instance-id")
+        .and_then(|v| v.to_str().ok());
+    let Some(bound) = bound_instance else {
+        return ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "instance_changed",
+            "缺少 x-server-instance-id，请重新连接获取会话",
+        )
+        .into_response();
+    };
+    if bound != state.server_instance_id() {
+        tracing::warn!(
+            code = "instance_changed",
+            "restricted facade bound to a stale instance"
+        );
+        return ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "instance_changed",
+            "服务已重启，请重新连接后再发起受限调用",
+        )
+        .into_response();
+    }
     match crate::ai::facade::authenticate(&state, &presented).await {
         Ok(ctx) => {
             let mut request = request;
@@ -723,7 +759,9 @@ async fn ai_capabilities_context(
 #[derive(Deserialize)]
 pub struct CapabilityCallRequest {
     pub operation: String,
-    #[serde(default)]
+    // MCP 适配器（camelCase）与既有调用方（snake_case）都收：字段曾被
+    // 静默丢弃，整条短写幂等链路因此失效。
+    #[serde(default, alias = "clientOperationId")]
     pub client_operation_id: Option<String>,
     #[serde(default)]
     pub input: Option<serde_json::Value>,

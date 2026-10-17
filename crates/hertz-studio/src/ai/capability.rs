@@ -155,6 +155,7 @@ pub(crate) async fn execute(
                 ctx,
                 call.client_operation_id.as_deref(),
                 "playback.pause",
+                Value::Null,
                 |s| async move { s.pause_control().await },
             )
             .await
@@ -168,6 +169,7 @@ pub(crate) async fn execute(
                 ctx,
                 call.client_operation_id.as_deref(),
                 "playback.resume",
+                Value::Null,
                 |s| async move { s.resume_control(true).await },
             )
             .await
@@ -179,6 +181,7 @@ pub(crate) async fn execute(
                 ctx,
                 call.client_operation_id.as_deref(),
                 "playback.next",
+                Value::Null,
                 |s| async move { s.step_by_user(1).await },
             )
             .await
@@ -190,6 +193,7 @@ pub(crate) async fn execute(
                 ctx,
                 call.client_operation_id.as_deref(),
                 "playback.previous",
+                Value::Null,
                 |s| async move { s.step_by_user(-1).await },
             )
             .await
@@ -202,6 +206,7 @@ pub(crate) async fn execute(
                 ctx,
                 call.client_operation_id.as_deref(),
                 "playback.seek",
+                json!(position_ms),
                 move |s| async move { s.seek_control(position_ms).await },
             )
             .await
@@ -214,6 +219,7 @@ pub(crate) async fn execute(
                 ctx,
                 call.client_operation_id.as_deref(),
                 "playback.volume_set",
+                json!(value),
                 move |s| async move { s.set_volume_control(value).await },
             )
             .await
@@ -234,6 +240,7 @@ async fn mutate<F, Fut>(
     ctx: &GrantContext,
     client_operation_id: Option<&str>,
     op: &'static str,
+    input: Value,
     exec: F,
 ) -> Result<Value, ApiError>
 where
@@ -242,12 +249,14 @@ where
         + Send
         + 'static,
 {
+    // 幂等输入必须携带真实参数：同键不同参数是冲突，不是回放——
+    // 统一塞 Null 会让「同键把音量从 0.2 改成 0.8」静默变成第二次执行。
     let outcome = short_write(
         state.clone(),
         &ctx.grant_id,
         op,
         client_operation_id,
-        Value::Null,
+        input,
         exec,
     )
     .await

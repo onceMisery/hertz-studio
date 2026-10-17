@@ -107,11 +107,14 @@ async fn authorized_get(
     base_url: &str,
     path: &str,
     credential: &str,
+    server_instance_id: &str,
 ) -> Result<(u16, Value), String> {
     let url = format!("{base_url}{path}");
     let response = client
         .get(url)
         .bearer_auth(credential)
+        // 实例绑定（§5.5）：每个调用附会话建立时看到的实例身份。
+        .header("x-server-instance-id", server_instance_id)
         .send()
         .await
         .map_err(|e| format!("受限服务不可达: {e}"))?;
@@ -158,6 +161,7 @@ pub(crate) async fn open_session(
         &format!("http://127.0.0.1:{}", doc.port),
         "/v1/ai/capabilities/context",
         &credential,
+        &doc.server_instance_id,
     )
     .await
     {
@@ -236,6 +240,7 @@ pub(crate) async fn call_tool(
     let Session::Connected {
         base_url,
         credential,
+        server_instance_id,
         ..
     } = session
     else {
@@ -264,6 +269,7 @@ pub(crate) async fn call_tool(
     let response = client
         .post(url)
         .bearer_auth(credential)
+        .header("x-server-instance-id", server_instance_id)
         .json(&json!({
             "operation": name,
             "clientOperationId": client_operation_id,
@@ -317,7 +323,7 @@ mod tests {
         std::env::temp_dir().join(format!("vmusic-mcp-{}", uuid::Uuid::new_v4()))
     }
 
-    fn write_discovery(dir: &Path, port: u16) {
+    fn write_discovery(dir: &Path, port: u16, server_instance_id: &str) {
         discovery::publish(
             dir,
             &DiscoveryDoc {
@@ -326,7 +332,7 @@ mod tests {
                 port,
                 protocol_version: "1".into(),
                 owner_instance_id: "owner".into(),
-                server_instance_id: "server".into(),
+                server_instance_id: server_instance_id.to_string(),
                 edition: "standard".into(),
             },
         )
@@ -353,7 +359,7 @@ mod tests {
     #[tokio::test]
     async fn two_grants_without_choice_is_an_error_and_one_grant_connects() {
         let dir = temp_data_dir();
-        write_discovery(&dir, 1);
+        write_discovery(&dir, 1, "server");
         let grants = grants_dir(&dir);
         std::fs::create_dir_all(&grants).unwrap();
         std::fs::write(grants.join("grant-a.key"), "secret-a").unwrap();
@@ -389,12 +395,19 @@ mod tests {
         let db = vmusic_store::open(&dir).await.unwrap();
         let (mut state, handle) = crate::state::tests::playback_state_with_db(db).await;
         state.data_dir = dir.clone();
+        // 测试进程模拟「持锁 + 回环绑定」的独立服务：两组门禁都打开。
+        state
+            .ai_runner_held
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        state
+            .ai_external_ready
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let state = Arc::new(state);
         let app = crate::routes::router(state.clone()).with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        write_discovery(&dir, port);
+        write_discovery(&dir, port, &state.server_instance_id().to_string());
         let summary = crate::ai::facade::create_grant(
             &state,
             "e2e",
@@ -431,6 +444,50 @@ mod tests {
         let _ = ctx_snapshot;
 
         // tools/call 走完整链路：require_grant → capability → short_write。
+        // 真实队列上的同键 next：第二次是回放，游标只前进一格——
+        // 空队列上的两次 no-op 无法证明「只执行一次」。
+        vmusic_store::upsert_track(
+            &state.db,
+            &vmusic_core::Track {
+                id: "second".into(),
+                path: "second.wav".into(),
+                source: vmusic_core::TrackSource::Local,
+                title: "second".into(),
+                artist: None,
+                album: None,
+                duration_ms: None,
+                bitrate: None,
+                sample_rate: None,
+                channels: None,
+                has_cover: false,
+                file_mtime: None,
+                file_size: None,
+                added_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+        state
+            .set_queue(vec!["first".into(), "second".into()], Some(0))
+            .await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let next_args = json!({ "clientOperationId": "mcp-next-1" })
+            .as_object()
+            .cloned();
+        let first_next = call_tool(&client, &session, "playback.next", next_args.as_ref()).await;
+        let second_next = call_tool(&client, &session, "playback.next", next_args.as_ref()).await;
+        let first_next = serde_json::to_value(&first_next).unwrap();
+        let second_next = serde_json::to_value(&second_next).unwrap();
+        assert_eq!(
+            first_next["structuredContent"],
+            second_next["structuredContent"]
+        );
+        assert_eq!(state.current_index().await, Some(1), "同键 next 只执行一次");
+
         let result = call_tool(&client, &session, "playback.pause", None).await;
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(value["structuredContent"]["outcome"], "applied");

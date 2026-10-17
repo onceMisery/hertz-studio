@@ -34,6 +34,10 @@ const WINDOW: Duration = Duration::from_secs(10 * 60);
 const CAPACITY: usize = 512;
 /// `clientOperationId` 的字节上限。这是防滥用界限，不是协议字段长度。
 const KEY_MAX_BYTES: usize = 128;
+/// 执行 owner 的独立上限（§8.3）：到点终止卡住的 exec future，记录按
+/// 失败收口——执行中的记录因此永远不会过期（上限 < 窗口），TTL 清理
+/// 也就不可能删掉仍在执行的记录。
+const EXEC_CAP: Duration = Duration::from_secs(30);
 
 /// 官方 UI/本安装调用的主体身份。受限门面（grants，R2-G）的调用以 grantId
 /// 作为 principal 传入 [`short_write`]；两者共享同一张去重表但互不串键。
@@ -83,6 +87,10 @@ impl Record {
 
     fn expired(&self, now: Instant) -> bool {
         now >= self.expires_at
+    }
+
+    fn in_flight(&self) -> bool {
+        matches!(&*self.state.borrow(), RecordState::InFlight)
     }
 
     /// 测试专用：一条已过窗口的记录，用来验证过期清理让位、表满不淘汰。
@@ -181,7 +189,9 @@ where
     let (mut rx, owner_record) = {
         let mut records = state.short_writes.records.lock().await;
         let now = Instant::now();
-        records.retain(|_, record| !record.expired(now));
+        // 过期且已终态的才可清；执行中记录即使过了窗口也不淘汰（§8.3），
+        // 否则同键后来者会注册新记录、造成第二次执行。
+        records.retain(|_, record| !record.expired(now) || record.in_flight());
         match records.get(&key) {
             // 同键同输入：终态回放，执行中合并等待。
             Some(record) => {
@@ -222,7 +232,15 @@ where
     if let Some(record) = owner_record {
         let owner_state = state.clone();
         tokio::spawn(async move {
-            let outcome = exec(owner_state.clone()).await;
+            // 执行上限：到点终止卡住的 owner future，记录按失败收口——
+            // 同键重查拿的是「执行超时」这一事实，而不是无限等待。
+            let outcome = match tokio::time::timeout(EXEC_CAP, exec(owner_state.clone())).await {
+                Ok(outcome) => outcome,
+                Err(_) => Err(vmusic_core::CoreError::Internal(format!(
+                    "短写执行超过 {} 秒上限",
+                    EXEC_CAP.as_secs()
+                ))),
+            };
             record.finalize(outcome);
         });
     }
@@ -431,9 +449,10 @@ mod tests {
                 let (record, _rx) = Record::new(Value::Null);
                 records.insert(fill_key(i), Arc::new(record));
             }
-            // 一条已过期的旧记录 + 512 条未过期：过期者让位，新写仍被拒——
-            // 未过期记录不因表满淘汰。
-            let (stale, _rx) = Record::new_expired(Value::Null);
+            // 一条已过期且已终态的旧记录：过期者让位，新写仍被拒——
+            // 未过期记录不因表满淘汰；执行中记录即使过期也不淘汰（另一测试）。
+            let (mut stale, _rx) = Record::new_expired(Value::Null);
+            stale.finalize(Ok(ControlOutcome::Applied { generation: 0 }));
             records.insert(
                 ShortWriteKey {
                     principal: LOCAL_OWNER.to_string(),
@@ -458,11 +477,12 @@ mod tests {
         assert!(matches!(rejected, Err(ShortWriteError::Capacity)));
         assert_eq!(counter.load(Ordering::SeqCst), 0, "满表必须在执行前拒绝");
 
-        // 换成 512 条全部过期的记录：清理腾位，owner 正常执行。
+        // 换成 512 条全部过期且终态的记录：清理腾位，owner 正常执行。
         {
             let mut records = state.short_writes.records.lock().await;
             for i in 0..CAPACITY {
-                let (stale, _rx) = Record::new_expired(Value::Null);
+                let (mut stale, _rx) = Record::new_expired(Value::Null);
+                stale.finalize(Ok(ControlOutcome::Applied { generation: 0 }));
                 records.insert(fill_key(i), Arc::new(stale));
             }
         }

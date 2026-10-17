@@ -54,6 +54,10 @@ pub(crate) const KEY_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
 pub(crate) const PROPOSAL_TTL_MS: i64 = 24 * 3600 * 1000;
 /// 业务输入上限（§8.3：16 KiB）。
 pub(crate) const MAX_INPUT_BYTES: usize = 16 * 1024;
+/// 当前 CreativeGL 场景表（plugin/ui/creative-gl.js 的 SCENES.id）。这是
+/// R3 正式契约导出落地前的手工窄表：fake provider 只产出这里的场景，
+/// 校验也只接受这里的场景——不在表里的 scene 一律失败，不假装成功。
+pub(crate) const SCENES: &[&str] = &["towers", "orb", "tunnel", "nebula", "terrain", "lyric"];
 
 // ---------------------------------------------------------------------------
 // provider 接口与 fake 实现（R5 换真实 provider；fake 永远免费）
@@ -93,7 +97,8 @@ impl StageIntentProvider for FakeProvider {
         Box::pin(async move {
             let hash = Sha256::digest(brief.as_bytes());
             let seed = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]);
-            let scene = if seed % 2 == 0 { "space" } else { "coast" };
+            // 场景必须来自真实场景表，产物才进得去工坊（R3 契约导出前的窄表）。
+            let scene = SCENES[(seed % SCENES.len() as u32) as usize];
             // 确定性参数：seed 摊到 patch 里，产出可复现的候选。
             let intent = json!({
                 "version": 1,
@@ -258,6 +263,9 @@ fn normalize_key(client_key: Option<&str>, now: i64) -> ApiResult<String> {
     if created > now + 5 * 60_000 {
         return Err(bad_request("idempotencyKey 来自超过 5 分钟的未来，已拒绝"));
     }
+    if now - created > KEY_WINDOW_MS {
+        return Err(bad_request("idempotencyKey 已超出 7 天回放窗口"));
+    }
     Ok(raw.to_string())
 }
 
@@ -281,8 +289,9 @@ fn validate_intent(intent: &Value) -> Result<(), String> {
         return Err("intent.version 必须是 1".into());
     }
     match map.get("scene") {
-        Some(Value::String(scene)) if !scene.is_empty() && scene.len() <= 64 => {}
-        _ => return Err("intent.scene 必须是非空短字符串".into()),
+        Some(Value::String(scene))
+            if !scene.is_empty() && scene.len() <= 64 && SCENES.contains(&scene.as_str()) => {}
+        _ => return Err("intent.scene 必须在当前场景表内".into()),
     }
     if !matches!(map.get("patch"), Some(Value::Object(_))) {
         return Err("intent.patch 必须是对象".into());
@@ -383,6 +392,14 @@ pub(crate) async fn submit(
     brief: &str,
     idempotency_key: Option<&str>,
 ) -> ApiResult<SubmitOutcome> {
+    // 唯一 AI runner（§5.5）：锁失的进程不受理新生成，即使共享 DataDir。
+    if !state.ai_runner_held() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ai_locked",
+            "本进程未持有 AI runner 锁，生成受理停用",
+        ));
+    }
     let brief = brief.trim();
     if brief.is_empty() {
         return Err(bad_request("brief 不能为空"));
@@ -408,6 +425,23 @@ pub(crate) async fn submit(
     }
     let key = normalize_key(idempotency_key, now)?;
     let hash = input_hash(brief);
+    // 幂等回放先于 provider 就绪检查（§7.1 顺序）：已存在任务的合法回放
+    // 不依赖当前 provider——删除或更换模型后旧事实仍可查。
+    if let Some(existing) = store::find_job_by_key(&state.db, principal, CAPABILITY, &key)
+        .await
+        .map_err(store_error)?
+    {
+        if existing.input_hash == hash {
+            return Ok(SubmitOutcome::Replayed {
+                job: JobView::of(&existing),
+            });
+        }
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "idempotency_conflict",
+            "同一 idempotencyKey 携带了不同输入",
+        ));
+    }
     let provider = state.ai_runtime.provider().await;
     if !provider.ready() {
         return Err(ApiError::new(
@@ -423,20 +457,11 @@ pub(crate) async fn submit(
     let mut tx = vmusic_store::begin_immediate(&state.db)
         .await
         .map_err(store_error)?;
-    // 幂等：同键同输入回放（返回原任务当前事实），异输入冲突。
+    // 并发同键在唯一索引上兜底：查无此键的两个提交只有一个能插入。
     if let Some(existing) = store::find_job_by_key(&mut *tx, principal, CAPABILITY, &key)
         .await
         .map_err(store_error)?
     {
-        // 7 天窗口（§7.2）：窗口内同键同输入映射原任务，异输入冲突。
-        // 行还在但窗口已过：如实拒绝，不当作新收费动作。
-        if now - existing.created_at > KEY_WINDOW_MS {
-            return Err(ApiError::new(
-                axum::http::StatusCode::BAD_REQUEST,
-                "idempotency_key_expired",
-                "idempotencyKey 已超出 7 天回放窗口",
-            ));
-        }
         if existing.input_hash == hash {
             return Ok(SubmitOutcome::Replayed {
                 job: JobView::of(&existing),
@@ -493,9 +518,23 @@ pub(crate) async fn submit(
         updated_at: now,
         result_proposal_id: None,
     };
-    store::insert_job(&mut *tx, &job)
-        .await
-        .map_err(store_error)?;
+    if let Err(e) = store::insert_job(&mut *tx, &job).await {
+        // 并发同键撞唯一索引：按回放/冲突如实收口，而不是 500。
+        if matches!(&e, StoreError::Database(detail) if detail.contains("UNIQUE")) {
+            if let Some(existing) =
+                store::find_job_by_key(&mut *tx, principal, CAPABILITY, &job.key)
+                    .await
+                    .map_err(store_error)?
+            {
+                if existing.input_hash == job.input_hash {
+                    return Ok(SubmitOutcome::Replayed {
+                        job: JobView::of(&existing),
+                    });
+                }
+            }
+        }
+        return Err(store_error(e));
+    }
     tx.commit().await.map_err(sql_error)?;
 
     // commit 成功：输入与许可归服务端所有。
@@ -537,10 +576,11 @@ async fn run_job(state: Arc<AppState>, job_id: String) {
         let Ok(mut tx) = vmusic_store::begin_immediate(&state.db).await else {
             return false;
         };
-        let Ok(_marked) = store::mark_dispatched(&mut *tx, &job_id, &attempt_id).await else {
+        let Ok(marked) = store::mark_dispatched(&mut *tx, &job_id, &attempt_id).await else {
             return false;
         };
-        tx.commit().await.is_ok()
+        // 0 行 = 取消/过期已赢（或已派发过）：不能继续执行。
+        marked && tx.commit().await.is_ok()
     }
     .await;
     if !marked {
@@ -550,22 +590,53 @@ async fn run_job(state: Arc<AppState>, job_id: String) {
     let brief = state.ai_runtime.inputs.lock().await.get(&job_id).cloned();
     let Some(brief) = brief else {
         // 输入丢失（不应发生）：如实失败，按 unknown 结算。
-        let _ = transition_and_settle(state.clone(), &job, "failed").await;
+        finish_running(state.clone(), &job_id, "failed").await;
         return;
     };
 
     // 一次调用；不自动修复、不自动重试。取消已赢时这里照常跑完——
     // UI 事实已由取消方给出，资源结束由本任务负责（§8.1）。
-    let outcome = provider.generate(brief).await;
+    // 执行期限（§8.3：30s）到点终止卡住的 future——超时按 provider 失败
+    // 走 failed + 结算，不无限驻留。
+    let outcome = match tokio::time::timeout(
+        std::time::Duration::from_millis(RUN_DEADLINE_MS as u64),
+        provider.generate(brief),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            tracing::warn!("AI provider 调用超过执行期限，已终止");
+            finish_running(state.clone(), &job.job_id, "failed").await;
+            state.ai_runtime.inputs.lock().await.remove(&job_id);
+            return;
+        }
+    };
     match outcome {
         Ok(intent) => match validate_intent(&intent) {
             Ok(()) => {
+                // 事务顺序即事实顺序：先 CAS 终态，赢了才落提案——否则
+                // 「已取消的任务留下可读提案」。CAS 输掉时整个事务回滚，
+                // 结算由赢家（取消/过期方）负责。
                 let proposal_id = uuid::Uuid::new_v4().to_string();
                 let now = now_ms();
                 let mut tx = match vmusic_store::begin_immediate(&state.db).await {
                     Ok(tx) => tx,
                     Err(_) => return,
                 };
+                let won = store::cas_job_state(
+                    &mut *tx,
+                    &job.job_id,
+                    "running",
+                    job.state_revision,
+                    "succeeded",
+                    now,
+                )
+                .await
+                .unwrap_or(false);
+                if !won {
+                    return;
+                }
                 let proposal = store::ProposalRow {
                     proposal_id: proposal_id.clone(),
                     job_id: job.job_id.clone(),
@@ -576,45 +647,33 @@ async fn run_job(state: Arc<AppState>, job_id: String) {
                     created_at: now,
                     expires_at: now + PROPOSAL_TTL_MS,
                 };
-                if store::insert_proposal(&mut *tx, &proposal).await.is_err() {
-                    return;
-                }
-                if store::attach_proposal(&mut *tx, &job.job_id, &proposal_id)
-                    .await
-                    .is_err()
+                if store::insert_proposal(&mut *tx, &proposal).await.is_err()
+                    || store::attach_proposal(&mut *tx, &job.job_id, &proposal_id)
+                        .await
+                        .is_err()
                 {
                     return;
                 }
-                if store::cas_job_state(
+                // fake 免费：预留全额释放，charged 记 0。
+                let _ = store::settle(
                     &mut *tx,
-                    &job.job_id,
-                    "running",
-                    job.state_revision,
-                    "succeeded",
-                    now,
+                    &utc_month_key(job.created_at),
+                    RESERVATION_MICRO_USD,
+                    0,
                 )
-                .await
-                .unwrap_or(false)
-                {
-                    // fake 免费：预留全额释放，charged 记 0。
-                    let _ = store::settle(
-                        &mut *tx,
-                        &utc_month_key(job.created_at),
-                        RESERVATION_MICRO_USD,
-                        0,
-                    )
-                    .await;
+                .await;
+                if tx.commit().await.is_err() {
+                    return;
                 }
-                let _ = tx.commit().await;
             }
             Err(reason) => {
                 tracing::warn!("AI 输出校验失败: {reason}");
-                transition_and_settle(state.clone(), &job, "failed").await;
+                finish_running(state.clone(), &job.job_id, "failed").await;
             }
         },
         Err(reason) => {
             tracing::warn!("AI provider 调用失败: {reason}");
-            transition_and_settle(state.clone(), &job, "failed").await;
+            finish_running(state.clone(), &job.job_id, "failed").await;
         }
     }
     state.ai_runtime.inputs.lock().await.remove(&job_id);
@@ -640,15 +699,25 @@ async fn transition(
     }
 }
 
-/// 终态推进 + 结算（worker 的失败路径）。
-async fn transition_and_settle(state: Arc<AppState>, job: &store::JobRow, to: &str) {
+/// 终态推进 + 结算（worker 的失败路径）。必须重取最新行：派发标记在
+/// transition 之后才落库，拿旧对象结算会把已派发的预留误判成未派发。
+async fn finish_running(state: Arc<AppState>, job_id: &str, to: &str) {
     let mut tx = match vmusic_store::begin_immediate(&state.db).await {
         Ok(tx) => tx,
         Err(_) => return,
     };
+    let Some(job) = (match store::find_job_by_id(&mut *tx, job_id).await {
+        Ok(job) => job,
+        Err(_) => return,
+    }) else {
+        return;
+    };
+    if job.state != "running" {
+        return;
+    }
     if store::cas_job_state(
         &mut *tx,
-        &job.job_id,
+        job_id,
         "running",
         job.state_revision,
         to,
@@ -657,7 +726,7 @@ async fn transition_and_settle(state: Arc<AppState>, job: &store::JobRow, to: &s
     .await
     .unwrap_or(false)
     {
-        let _ = settle_on_terminal(&mut *tx, job).await;
+        let _ = settle_on_terminal(&mut *tx, &job).await;
     }
     let _ = tx.commit().await;
 }
@@ -808,18 +877,34 @@ pub(crate) async fn get_proposal(
     principal: &str,
     proposal_id: &str,
 ) -> ApiResult<ProposalView> {
-    let proposal = store::find_proposal(&state.db, proposal_id)
+    let mut proposal = store::find_proposal(&state.db, proposal_id)
         .await
         .map_err(store_error)?
         .ok_or_else(|| not_found(format!("查无此提案: {proposal_id}")))?;
+    // 过期惰性收口（§7.3 pending→expired）：过期提案不再以 pending 形状
+    // 携带完整内容返回。
+    if proposal.state == "pending" && proposal.expires_at <= now_ms() {
+        if store::cas_proposal_state(&state.db, proposal_id, proposal.revision, "expired")
+            .await
+            .map_err(store_error)?
+        {
+            proposal.state = "expired".into();
+            proposal.revision += 1;
+        }
+    }
     let job = store::find_job_by_id(&state.db, &proposal.job_id)
         .await
         .map_err(store_error)?
         .filter(|job| job.principal == principal)
         .ok_or_else(|| not_found(format!("查无此提案: {proposal_id}")))?;
     let _ = job;
-    let intent: Value =
-        serde_json::from_str(&proposal.validated_intent).map_err(|e| internal(e.to_string()))?;
+    // expired 的提案只留事实，不带内容（与「过期不得以 pending 形状返回」
+    // 同一条规则的另一半）。
+    let intent: Value = if proposal.state == "expired" {
+        Value::Null
+    } else {
+        serde_json::from_str(&proposal.validated_intent).map_err(|e| internal(e.to_string()))?
+    };
     Ok(ProposalView {
         proposal_id: proposal.proposal_id,
         job_id: proposal.job_id,
@@ -937,11 +1022,146 @@ mod tests {
     }
 
     async fn jobs_state() -> (Arc<AppState>, std::thread::JoinHandle<()>) {
-        let _ = tracing_subscriber::fmt().try_init();
         let dir = std::env::temp_dir().join(format!("vmusic-aijobs-{}", uuid::Uuid::new_v4()));
         let db = vmusic_store::open(&dir).await.unwrap();
         let (state, handle) = crate::state::tests::playback_state_with_db(db).await;
+        // 测试进程模拟「持锁服务」：生成受理的门禁打开。
+        state
+            .ai_runner_held
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         (Arc::new(state), handle)
+    }
+
+    #[tokio::test]
+    async fn submit_is_gated_on_the_runner_lock() {
+        let (state, handle) = jobs_state().await;
+        state
+            .ai_runner_held
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let err = submit(&state, crate::idempotency::LOCAL_OWNER, "锁失进程", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status.as_u16(), 503);
+        assert_eq!(err.code, "ai_locked");
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_epoch_key_is_rejected_not_treated_as_new() {
+        let (state, handle) = jobs_state().await;
+        // 1970 年时间戳的键：从未出现过也不能当新收费动作受理（§7.2）。
+        let key = "v1.0.00000000000000000000000000000000";
+        let err = submit(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            "太老的键",
+            Some(key),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "bad_request");
+        assert!(err.message.contains("7 天"));
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_works_even_when_provider_is_not_ready() {
+        struct NotReady;
+        impl StageIntentProvider for NotReady {
+            fn id(&self) -> &'static str {
+                "not-ready"
+            }
+            fn model(&self) -> &'static str {
+                "none"
+            }
+            fn ready(&self) -> bool {
+                false
+            }
+            fn generate(
+                &self,
+                _: String,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>>
+            {
+                Box::pin(async { Err("不该被调用".into()) })
+            }
+        }
+        let (state, handle) = jobs_state().await;
+        let key = format!("v1.{}.{:032x}", now_ms(), 42u128);
+        let SubmitOutcome::Accepted { job } = submit(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            "先正常受理",
+            Some(&key),
+        )
+        .await
+        .unwrap() else {
+            panic!("首次提交必须受理");
+        };
+        for _ in 0..200 {
+            if job_row(&state, &job.job_id).await.state == "succeeded" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // provider 不可用后：同键同输入仍然回放旧事实（§7.1 顺序）。
+        state.ai_runtime.install_provider(Arc::new(NotReady)).await;
+        let replay = submit(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            "先正常受理",
+            Some(&key),
+        )
+        .await
+        .unwrap();
+        let SubmitOutcome::Replayed { job: replayed } = replay else {
+            panic!("回放不得依赖 provider 就绪");
+        };
+        assert_eq!(replayed.job_id, job.job_id);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn expired_proposal_is_swept_and_carries_no_content() {
+        let (state, handle) = jobs_state().await;
+        let SubmitOutcome::Accepted { job } = submit(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            "过期提案候选",
+            None,
+        )
+        .await
+        .unwrap() else {
+            panic!("首次提交必须受理");
+        };
+        for _ in 0..200 {
+            if job_row(&state, &job.job_id).await.state == "succeeded" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let done = job_row(&state, &job.job_id).await;
+        let proposal_id = done.result_proposal_id.clone().unwrap();
+        // 把过期时间拨回过去：读取时惰性收口为 expired。
+        sqlx::query("UPDATE ai_proposals SET expires_at = 0 WHERE proposal_id = ?1")
+            .bind(&proposal_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let view = get_proposal(&state, crate::idempotency::LOCAL_OWNER, &proposal_id)
+            .await
+            .unwrap();
+        assert_eq!(view.state, "expired");
+        assert!(view.validated_intent.is_null(), "过期提案不得携带完整内容");
+        // 过期提案不能再被拒绝（非 pending）。
+        let err = reject_proposal(&state, crate::idempotency::LOCAL_OWNER, &proposal_id, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "state_conflict");
+        state.audio.shutdown();
+        handle.join().unwrap();
     }
 
     async fn job_row(state: &Arc<AppState>, job_id: &str) -> store::JobRow {
@@ -1265,10 +1485,12 @@ mod tests {
 
     #[test]
     fn intent_validation_rejects_unknown_and_oversized() {
-        assert!(validate_intent(&json!({ "version": 1, "scene": "space", "patch": {} })).is_ok());
-        assert!(validate_intent(&json!({ "version": 2, "scene": "space", "patch": {} })).is_err());
+        assert!(validate_intent(&json!({ "version": 1, "scene": "towers", "patch": {} })).is_ok());
+        // 不在当前场景表里的 scene 一律失败（"space" 曾是假场景名）。
+        assert!(validate_intent(&json!({ "version": 1, "scene": "space", "patch": {} })).is_err());
+        assert!(validate_intent(&json!({ "version": 2, "scene": "towers", "patch": {} })).is_err());
         assert!(validate_intent(
-            &json!({ "version": 1, "scene": "space", "patch": {}, "junk": 1 })
+            &json!({ "version": 1, "scene": "towers", "patch": {}, "junk": 1 })
         )
         .is_err());
         let deep = json!({ "version": 1, "scene": "s", "patch": { "a": { "b": { "c": { "d": { "e": { "f": { "g": { "h": { "i": 1 } } } } } } } } } });

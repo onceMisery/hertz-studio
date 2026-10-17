@@ -11,10 +11,23 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 125 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 101 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 116 条内嵌静态资源路由。
+REST 路由表共 138 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 112 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 116 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
+| POST | `/v1/ai/capabilities/call` |
+| GET | `/v1/ai/capabilities/context` |
+| GET | `/v1/ai/grants` |
+| POST | `/v1/ai/grants` |
+| DELETE | `/v1/ai/grants/{grantId}` |
+| POST | `/v1/ai/grants/{grantId}/rotate` |
+| GET | `/v1/ai/jobs` |
+| POST | `/v1/ai/jobs` |
+| GET | `/v1/ai/jobs/{jobId}` |
+| POST | `/v1/ai/jobs/{jobId}/cancel` |
+| GET | `/v1/ai/proposals/{proposalId}` |
+| POST | `/v1/ai/proposals/{proposalId}/reject` |
+| GET | `/v1/ai/status` |
 | GET | `/v1/auth/overlay-key` |
 | POST | `/v1/auth/ticket` |
 | GET | `/v1/backup` |

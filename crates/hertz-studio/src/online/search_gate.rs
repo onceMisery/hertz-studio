@@ -26,6 +26,9 @@ use crate::error::ApiError;
 pub(crate) const PERMITS: usize = 4;
 /// 额度满时的有界等待期（初始候选）：给突发请求一次搭车机会，不排队。
 pub(crate) const WAIT: Duration = Duration::from_secs(2);
+/// 等待人数硬上限：等待期限制的是「等多久」，这里限制的是「多少人同时在
+/// 等」——超过即立刻 busy，不积累无限等待者（§4.1）。
+pub(crate) const MAX_WAITERS: usize = 16;
 /// 单源搜索总期限：入场 → 读完结果。
 pub(crate) const SOURCE_DEADLINE: Duration = Duration::from_secs(6);
 /// 聚合的安全总期限：内部每源各自 6 秒并发执行，这里只防失控驻留。
@@ -33,6 +36,7 @@ pub(crate) const AGGREGATE_DEADLINE: Duration = Duration::from_secs(15);
 
 pub(crate) struct SearchGate {
     permits: Arc<tokio::sync::Semaphore>,
+    waiters: Arc<tokio::sync::Semaphore>,
     wait: Duration,
 }
 
@@ -46,6 +50,7 @@ impl SearchGate {
     pub(crate) fn new(permits: usize, wait: Duration) -> Self {
         Self {
             permits: Arc::new(tokio::sync::Semaphore::new(permits)),
+            waiters: Arc::new(tokio::sync::Semaphore::new(MAX_WAITERS)),
             wait,
         }
     }
@@ -66,6 +71,14 @@ impl SearchGate {
         deadline: Duration,
         fut: impl Future<Output = Result<T, ApiError>>,
     ) -> Result<T, ApiError> {
+        // 等待席位也是硬上限：席位满说明排队人数已到顶，立即 busy。
+        let waiter = self.waiters.try_acquire().map_err(|_| {
+            ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "search_busy",
+                "搜索通道繁忙，请稍后重试",
+            )
+        })?;
         let permit = tokio::time::timeout(self.wait, self.permits.acquire())
             .await
             .map_err(|_| {
@@ -82,6 +95,7 @@ impl SearchGate {
                     "搜索入场闸已关闭",
                 )
             })?;
+        drop(waiter);
         let result = tokio::time::timeout(deadline, fut).await;
         drop(permit);
         match result {
@@ -168,6 +182,41 @@ mod tests {
         // 超时后额度必须已释放：下一次瞬时调用直接成功。
         let value = gate.run(async { ok(2u8) }).await.unwrap();
         assert_eq!(value, 2);
+    }
+
+    #[tokio::test]
+    async fn waiter_seats_are_hard_capped() {
+        // 执行位被长任务占住、16 个等待席全部就位后，第 17 个调用不等、
+        // 立即 busy——等待人数有人数硬上限，而不是只有时长上限。
+        let gate = Arc::new(SearchGate::new(1, Duration::from_millis(300)));
+        let mut holders = Vec::new();
+        for _ in 0..MAX_WAITERS + 1 {
+            let g = gate.clone();
+            holders.push(tokio::spawn(async move {
+                g.run(async {
+                    // 执行位持有者睡得比等待期久：等待者超时退出也占过席位。
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    ok(1u8)
+                })
+                .await
+            }));
+        }
+        // 等席位就位（执行位 + 16 席），第 17 个消费者只能撞席位上限。
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let direct = gate.run(async { ok(2u8) }).await;
+        assert_eq!(direct.unwrap_err().code, "search_busy");
+        // 收尾：只有执行位持有者成功，16 个等待者全部按期限退出。
+        let mut ok = 0;
+        let mut timed_out = 0;
+        for holder in holders {
+            if holder.await.unwrap().is_ok() {
+                ok += 1;
+            } else {
+                timed_out += 1;
+            }
+        }
+        assert_eq!(ok, 1);
+        assert_eq!(timed_out, MAX_WAITERS);
     }
 
     #[tokio::test]

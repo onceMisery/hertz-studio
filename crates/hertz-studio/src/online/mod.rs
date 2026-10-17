@@ -1089,7 +1089,8 @@ pub async fn search_playlists(
         "歌单搜索",
         provider.playlist_search,
     )?;
-    op(ctx, q).await
+    // 辅助搜索与歌曲搜索共用同一把入场闸（§4.1：覆盖全部实际执行中的搜索）。
+    ctx.gate.run(op(ctx, q)).await
 }
 
 /// 在线歌手搜索：能力位 [`Capability::ArtistSearch`] 未开的音源在这里拿到
@@ -1101,14 +1102,14 @@ pub async fn search_artists(
 ) -> ApiResult<ArtistSearchPage> {
     let provider = provider::require(source)?;
     let op = provider.operation(Capability::ArtistSearch, "歌手搜索", provider.artists)?;
-    (op.search)(ctx, q).await
+    ctx.gate.run((op.search)(ctx, q)).await
 }
 
 /// 在线专辑搜索：能力位 [`Capability::AlbumSearch`] 同上。
 pub async fn search_albums(ctx: &Ctx, source: &str, q: &SearchQuery) -> ApiResult<AlbumSearchPage> {
     let provider = provider::require(source)?;
     let op = provider.operation(Capability::AlbumSearch, "专辑搜索", provider.albums)?;
-    (op.search)(ctx, q).await
+    ctx.gate.run((op.search)(ctx, q)).await
 }
 
 /// 歌手页：该歌手的热门歌曲列表。与歌手搜索同一条能力位——搜得到歌手就
