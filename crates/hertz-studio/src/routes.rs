@@ -64,6 +64,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/ai/proposals/{proposalId}/reject",
             post(ai_reject_proposal),
         )
+        .route("/v1/ai/budget-guard/reset", post(ai_budget_guard_reset))
         .route("/v1/state", get(get_state))
         .route("/v1/player/load", post(load))
         .route("/v1/player/play", post(play))
@@ -610,6 +611,20 @@ async fn ai_cancel_job(
             body.expected_state_revision,
         )
         .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct AiGuardResetRequest {
+    pub expected_revision: i64,
+}
+
+async fn ai_budget_guard_reset(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AiGuardResetRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::ai::jobs::budget_guard_reset(&state, body.expected_revision).await?,
     ))
 }
 

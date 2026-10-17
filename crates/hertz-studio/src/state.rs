@@ -30,6 +30,14 @@ pub enum WsEvent {
         bands: Vec<f32>,
     },
     Ended,
+    /// AI 持久任务的状态变化（R4-E，§7.4）：只带 ID、状态与 revision，
+    /// 不携带 brief、歌词、密钥或完整 intent——事件允许丢失/乱序，客户端
+    /// 以查询快照为准，这里只做「有变化了」的提醒。
+    AiTask {
+        job_id: String,
+        state: String,
+        state_revision: i64,
+    },
     /// 界面实例之间的轻量信号。浮动胶囊窗口与 tab 实例是两个 opaque-origin 的
     /// iframe，BroadcastChannel / storage 事件都不通，只能借这条已有的广播管道
     /// 绕一圈：浮窗里点胶囊时发 `expand-capsule`，tab 实例收到就解除最小化。

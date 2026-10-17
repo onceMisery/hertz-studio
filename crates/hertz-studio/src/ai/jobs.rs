@@ -34,7 +34,7 @@ use tokio::sync::{Mutex, RwLock};
 use vmusic_core::StoreError;
 
 use crate::error::{bad_request, internal, not_found, ApiError, ApiResult};
-use crate::state::AppState;
+use crate::state::{AppState, WsEvent};
 use vmusic_store::ai_jobs as store;
 
 /// 能力名（§7.1 完整顺序里的 capability 段）。
@@ -52,6 +52,9 @@ pub(crate) const RUN_DEADLINE_MS: i64 = 30_000;
 pub(crate) const KEY_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
 /// 提案可读窗口（§7.3）：24 小时。
 pub(crate) const PROPOSAL_TTL_MS: i64 = 24 * 3600 * 1000;
+/// in-app 生成同意开关的 settings 键（§8.2）：默认关闭，官方设置里明确
+/// 开启才受理新任务——「已同意 AI」这类笼统开关不做，开关与数据范围一一对应。
+pub(crate) const CONSENT_KEY: &str = "ai_generation_consent";
 /// 业务输入上限（§8.3：16 KiB）。
 pub(crate) const MAX_INPUT_BYTES: usize = 16 * 1024;
 use crate::ai::contract;
@@ -358,7 +361,7 @@ pub(crate) async fn recover(state: &Arc<AppState>) -> ApiResult<usize> {
     for job in candidates {
         // 结算先于状态收口（同事务原子）：not_dispatched 释放预留，
         // may_have_been_sent 按 unknown 保守转已计（§7.2）。
-        settle_on_terminal(&mut *tx, &job).await?;
+        settle_on_terminal(&mut *tx, &job, "interrupted").await?;
         if store::cas_job_state(
             &mut *tx,
             &job.job_id,
@@ -370,6 +373,7 @@ pub(crate) async fn recover(state: &Arc<AppState>) -> ApiResult<usize> {
         .await
         .map_err(store_error)?
         {
+            publish_task(state, "interrupted", &job.job_id, job.state_revision + 1);
             recovered += 1;
         }
     }
@@ -383,7 +387,11 @@ pub(crate) async fn recover(state: &Arc<AppState>) -> ApiResult<usize> {
 
 /// 结算：谁把状态推到终态谁结算。not_dispatched → 全额释放；
 /// may_have_been_sent → 全额按已计（unknown 保守，§8.4）。
-async fn settle_on_terminal(tx: &mut sqlx::SqliteConnection, job: &store::JobRow) -> ApiResult<()> {
+async fn settle_on_terminal(
+    tx: &mut sqlx::SqliteConnection,
+    job: &store::JobRow,
+    to_state: &str,
+) -> ApiResult<()> {
     let month = utc_month_key(job.created_at);
     let (release, charge) = if job.dispatch_state == "may_have_been_sent" {
         // unknown（§8.4）：去预留，同时按预留金额计入已用一次。
@@ -395,6 +403,50 @@ async fn settle_on_terminal(tx: &mut sqlx::SqliteConnection, job: &store::JobRow
     store::settle(&mut *tx, &month, release, charge)
         .await
         .map_err(store_error)?;
+    // 账目（R4-B）：与终态同事务写入，job_id 唯一，可重入对账。
+    // usage_state：已派发未确认 = unknown；成功 = reported（fake 0 费）；
+    // 未派发即终止 = released。
+    let usage_state = if job.dispatch_state == "may_have_been_sent" {
+        "unknown"
+    } else if to_state == "succeeded" {
+        "reported"
+    } else {
+        "released"
+    };
+    store::insert_usage_entry(
+        &mut *tx,
+        &store::UsageEntryRow {
+            job_id: job.job_id.clone(),
+            reservation_micro_usd: RESERVATION_MICRO_USD,
+            accounted_micro_usd: charge,
+            usage_state: usage_state.into(),
+            pricing_snapshot: json!({
+                "provider": job.provider,
+                "model": job.model,
+                "reservationMicroUsd": RESERVATION_MICRO_USD,
+            })
+            .to_string(),
+            revision: 1,
+            created_at: now_ms(),
+        },
+    )
+    .await
+    .map_err(store_error)?;
+    // 熔断（§8.4）：计入已用越过月限额 → 持久闩锁，翻月/重启不自动解除，
+    // 只有官方管理 reset 能恢复。
+    let budget = store::get_or_create_month(&mut *tx, &month)
+        .await
+        .map_err(store_error)?;
+    if budget.charged_micro_usd > MONTHLY_LIMIT_MICRO_USD {
+        store::halt_budget_guard(
+            &mut *tx,
+            &job.owner_instance_id,
+            "计入已用越过月预算限额",
+            &job.job_id,
+        )
+        .await
+        .map_err(store_error)?;
+    }
     Ok(())
 }
 
@@ -424,6 +476,33 @@ pub(crate) async fn submit(
     let now = now_ms();
     // 实例身份先行（会创建 ai_instance 行），水位检查才有落点。
     let owner = instance_owner(state).await?;
+    // 数据同意（§8.2）：默认关闭，settings 里明确置 true 才受理。
+    let consent = vmusic_store::settings::get(&state.db, CONSENT_KEY)
+        .await
+        .map_err(store_error)?
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !consent {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "generation_disabled",
+            "生成功能默认关闭，需在设置中开启 ai_generation_consent",
+        ));
+    }
+    // 熔断闩锁（R4-B）：halted 期间拒绝一切新受理，reset 才能恢复。
+    let guard = {
+        let mut conn = state.db.acquire().await.map_err(sql_error)?;
+        store::ensure_budget_guard(&mut *conn, &owner)
+            .await
+            .map_err(store_error)?
+    };
+    if guard.halted {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "budget_halted",
+            "生成预算已触发熔断，请官方管理端确认后复位",
+        ));
+    }
     let watermark = {
         let mut conn = state.db.acquire().await.map_err(sql_error)?;
         store::accepted_watermark(&mut *conn)
@@ -558,10 +637,20 @@ pub(crate) async fn submit(
         .lock()
         .await
         .insert(job.job_id.clone(), brief.to_string());
+    publish_task(state, "accepted", &job.job_id, job.state_revision);
     tokio::spawn(run_job(state.clone(), job.job_id.clone()));
     Ok(SubmitOutcome::Accepted {
         job: JobView::of(&job),
     })
+}
+
+/// 任务状态事件（R4-E）：先落库后发布；只带 ID/状态/revision（§7.4）。
+fn publish_task(state: &AppState, to_state: &str, job_id: &str, state_revision: i64) {
+    state.publish(WsEvent::AiTask {
+        job_id: job_id.to_string(),
+        state: to_state.to_string(),
+        state_revision,
+    });
 }
 
 /// worker：唯一一次 provider 调用的执行 owner。
@@ -583,6 +672,7 @@ async fn run_job(state: Arc<AppState>, job_id: String) {
         state.ai_runtime.inputs.lock().await.remove(&job_id);
         return;
     };
+    publish_task(&state, "running", &job.job_id, job.state_revision);
     // 派发标记：本地派发线性化点。没抢到说明取消已赢——按 not_dispatched
     // 由取消方结算，这里直接退出。
     let attempt_id = uuid::Uuid::new_v4().to_string();
@@ -668,7 +758,7 @@ async fn run_job(state: Arc<AppState>, job_id: String) {
                 {
                     return;
                 }
-                // fake 免费：预留全额释放，charged 记 0。
+                // fake 免费：预留全额释放，charged 记 0；账目 reported。
                 let _ = store::settle(
                     &mut *tx,
                     &utc_month_key(job.created_at),
@@ -676,9 +766,28 @@ async fn run_job(state: Arc<AppState>, job_id: String) {
                     0,
                 )
                 .await;
+                let _ = store::insert_usage_entry(
+                    &mut *tx,
+                    &store::UsageEntryRow {
+                        job_id: job.job_id.clone(),
+                        reservation_micro_usd: RESERVATION_MICRO_USD,
+                        accounted_micro_usd: 0,
+                        usage_state: "reported".into(),
+                        pricing_snapshot: json!({
+                            "provider": job.provider,
+                            "model": job.model,
+                            "reservationMicroUsd": RESERVATION_MICRO_USD,
+                        })
+                        .to_string(),
+                        revision: 1,
+                        created_at: now_ms(),
+                    },
+                )
+                .await;
                 if tx.commit().await.is_err() {
                     return;
                 }
+                publish_task(&state, "succeeded", &job.job_id, job.state_revision + 1);
             }
             Err(reason) => {
                 tracing::warn!("AI 输出校验失败: {reason}");
@@ -740,7 +849,8 @@ async fn finish_running(state: Arc<AppState>, job_id: &str, to: &str) {
     .await
     .unwrap_or(false)
     {
-        let _ = settle_on_terminal(&mut *tx, &job).await;
+        let _ = settle_on_terminal(&mut *tx, &job, to).await;
+        publish_task(&state, to, &job.job_id, job.state_revision + 1);
     }
     let _ = tx.commit().await;
 }
@@ -786,8 +896,9 @@ pub(crate) async fn cancel(
             "stateRevision 已过期，请重查后再试",
         ));
     }
-    settle_on_terminal(&mut *tx, &job).await?;
+    settle_on_terminal(&mut *tx, &job, "cancelled").await?;
     tx.commit().await.map_err(sql_error)?;
+    publish_task(state, "cancelled", &job.job_id, job.state_revision + 1);
     state.ai_runtime.inputs.lock().await.remove(job_id);
     let mut view = JobView::of(&job);
     view.state = "cancelled".into();
@@ -823,8 +934,9 @@ async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
         .await
         .unwrap_or(false)
         {
-            settle_on_terminal(&mut *tx, &job).await?;
+            settle_on_terminal(&mut *tx, &job, to).await?;
             state.ai_runtime.inputs.lock().await.remove(&job.job_id);
+            publish_task(state, to, &job.job_id, job.state_revision + 1);
         }
     }
     tx.commit().await.map_err(sql_error)?;
@@ -965,6 +1077,37 @@ pub(crate) async fn reject_proposal(
     Ok(view)
 }
 
+/// 熔断复位（官方管理专用，§8.4）：expectedRevision CAS。在飞调用已
+/// 结清的确认属于管理界面的职责，这里只做原子复位。
+pub(crate) async fn budget_guard_reset(
+    state: &Arc<AppState>,
+    expected_revision: i64,
+) -> ApiResult<Value> {
+    let owner = instance_owner(state).await?;
+    let mut tx = vmusic_store::begin_immediate(&state.db)
+        .await
+        .map_err(store_error)?;
+    store::ensure_budget_guard(&mut *tx, &owner)
+        .await
+        .map_err(store_error)?;
+    if !store::reset_budget_guard(&mut *tx, expected_revision)
+        .await
+        .map_err(store_error)?
+    {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "state_conflict",
+            "revision 已过期，请重查后再试",
+        ));
+    }
+    tx.commit().await.map_err(sql_error)?;
+    let guard = store::budget_guard(&state.db).await.map_err(store_error)?;
+    Ok(json!({
+        "halted": guard.as_ref().map(|g| g.halted).unwrap_or(false),
+        "revision": guard.as_ref().map(|g| g.revision).unwrap_or(0),
+    }))
+}
+
 /// 状态摘要（官方 UI 的 `GET /v1/ai/status`）。
 pub(crate) async fn status(state: &Arc<AppState>, owner: &str) -> ApiResult<Value> {
     sweep(state).await?;
@@ -978,6 +1121,17 @@ pub(crate) async fn status(state: &Arc<AppState>, owner: &str) -> ApiResult<Valu
             .await
             .map_err(store_error)?
     };
+    let guard = {
+        let mut conn = state.db.acquire().await.map_err(sql_error)?;
+        store::ensure_budget_guard(&mut *conn, owner)
+            .await
+            .map_err(store_error)?
+    };
+    let consent = vmusic_store::settings::get(&state.db, CONSENT_KEY)
+        .await
+        .map_err(store_error)?
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     Ok(json!({
         "capability": CAPABILITY,
         "provider": { "id": provider.id(), "model": provider.model(), "ready": provider.ready() },
@@ -988,6 +1142,12 @@ pub(crate) async fn status(state: &Arc<AppState>, owner: &str) -> ApiResult<Valu
             "chargedMicroUsd": budget.charged_micro_usd,
             "limitMicroUsd": MONTHLY_LIMIT_MICRO_USD,
         },
+        "guard": {
+            "halted": guard.halted,
+            "reason": guard.reason,
+            "revision": guard.revision,
+        },
+        "consent": { "inAppGeneration": consent },
     }))
 }
 
@@ -1043,6 +1203,9 @@ mod tests {
         state
             .ai_runner_held
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        vmusic_store::settings::set(&state.db, CONSENT_KEY, &serde_json::Value::Bool(true))
+            .await
+            .unwrap();
         (Arc::new(state), handle)
     }
 
@@ -1520,6 +1683,207 @@ mod tests {
         assert!(validate_intent(&deep).is_err());
         let oversized = json!({ "version": 1, "scene": "x".repeat(20000), "patch": {} });
         assert!(validate_intent(&oversized).is_err());
+    }
+
+    #[tokio::test]
+    async fn consent_gate_blocks_when_switch_is_off() {
+        let (state, handle) = jobs_state().await;
+        // jobs_state 已置位：先证明受理可用，再关掉开关验证默认拒绝。
+        let owner = instance_owner(&state).await.unwrap();
+        let status = status(&state, owner.as_str()).await.unwrap();
+        assert_eq!(status["consent"]["inAppGeneration"], json!(true));
+        vmusic_store::settings::set(&state.db, CONSENT_KEY, &serde_json::Value::Bool(false))
+            .await
+            .unwrap();
+        let err = submit(&state, crate::idempotency::LOCAL_OWNER, "未同意", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status.as_u16(), 403);
+        assert_eq!(err.code, "generation_disabled");
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn usage_entries_record_each_terminal_path() {
+        let (state, handle) = jobs_state().await;
+        // 成功路径：reported、accounted 0（fake 免费）。
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, crate::idempotency::LOCAL_OWNER, "成功账目", None)
+                .await
+                .unwrap()
+        else {
+            panic!("受理");
+        };
+        for _ in 0..200 {
+            if job_row(&state, &job.job_id).await.state == "succeeded" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let entry = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .expect("成功任务必须有账目");
+        assert_eq!(entry.usage_state, "reported");
+        assert_eq!(entry.accounted_micro_usd, 0);
+
+        // 已派发后取消：unknown、按预留计（§8.4）。
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state
+            .ai_runtime
+            .install_provider(Arc::new(BlockedProvider {
+                counter: counter.clone(),
+                gate: gate.clone(),
+            }))
+            .await;
+        let SubmitOutcome::Accepted { job: blocked } =
+            submit(&state, crate::idempotency::LOCAL_OWNER, "派发后取消", None)
+                .await
+                .unwrap()
+        else {
+            panic!("受理");
+        };
+        for _ in 0..200 {
+            let row = job_row(&state, &blocked.job_id).await;
+            if row.state == "running" && row.dispatch_state == "may_have_been_sent" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let revision = job_row(&state, &blocked.job_id).await.state_revision;
+        cancel(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            &blocked.job_id,
+            revision,
+        )
+        .await
+        .unwrap();
+        let entry = store::find_usage_entry(&state.db, &blocked.job_id)
+            .await
+            .unwrap()
+            .expect("已派发取消必须有账目");
+        assert_eq!(entry.usage_state, "unknown", "已派发取消按 unknown 计");
+        assert_eq!(entry.accounted_micro_usd, RESERVATION_MICRO_USD);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn budget_guard_halts_persistently_and_resets_by_revision() {
+        let (state, handle) = jobs_state().await;
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state
+            .ai_runtime
+            .install_provider(Arc::new(BlockedProvider {
+                counter: counter.clone(),
+                gate: gate.clone(),
+            }))
+            .await;
+        // 受理一个任务（预留先占住），然后把月账的其他部分灌到限额满——
+        // 这正是「迟到 usage 越界」的形状：预留时还有余量，结算时越界。
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, crate::idempotency::LOCAL_OWNER, "越界候选", None)
+                .await
+                .unwrap()
+        else {
+            panic!("受理");
+        };
+        for _ in 0..200 {
+            let row = job_row(&state, &job.job_id).await;
+            if row.state == "running" && row.dispatch_state == "may_have_been_sent" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let month = utc_month_key(now_ms());
+        {
+            let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
+            store::settle(&mut tx, &month, 0, MONTHLY_LIMIT_MICRO_USD)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        // 取消该任务 → unknown 结算 +50000 → charged 越过限额 → 持久熔断。
+        let revision = job_row(&state, &job.job_id).await.state_revision;
+        cancel(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            &job.job_id,
+            revision,
+        )
+        .await
+        .unwrap();
+        let guard = store::budget_guard(&state.db).await.unwrap().unwrap();
+        assert!(guard.halted, "越过限额必须置位持久熔断");
+        assert_eq!(guard.trigger_job.as_deref(), Some(job.job_id.as_str()));
+        // 熔断期间 submit → 503 budget_halted（先于 reserve）。
+        let err = submit(&state, crate::idempotency::LOCAL_OWNER, "熔断中", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "budget_halted");
+        // reset：错误 revision 冲突；正确 revision 恢复。
+        let err = budget_guard_reset(&state, guard.revision - 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "state_conflict");
+        let result = budget_guard_reset(&state, guard.revision).await.unwrap();
+        assert_eq!(result["halted"], json!(false));
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_state_changes_are_broadcast_as_small_events() {
+        let (state, handle) = jobs_state().await;
+        let mut events = state.events.subscribe();
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, crate::idempotency::LOCAL_OWNER, "事件候选", None)
+                .await
+                .unwrap()
+        else {
+            panic!("受理");
+        };
+        // 收集直到终态事件（顺序允许乱序，内容必须只含 ID/状态/revision）。
+        let mut seen = Vec::new();
+        for _ in 0..200 {
+            while let Ok(event) = events.try_recv() {
+                if let WsEvent::AiTask {
+                    job_id,
+                    state: task_state,
+                    state_revision,
+                } = &event
+                {
+                    assert_eq!(job_id, &job.job_id);
+                    let encoded = serde_json::to_string(&event).unwrap();
+                    assert!(encoded.len() < 2048, "任务事件必须小于 2KiB");
+                    assert!(!encoded.contains("brief"));
+                    seen.push(task_state.clone());
+                    let _ = state_revision;
+                }
+            }
+            if seen.last().map(|s| s.as_str()) == Some("succeeded") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            seen.contains(&"accepted".to_string()),
+            "缺 accepted 事件: {seen:?}"
+        );
+        assert!(
+            seen.contains(&"running".to_string()),
+            "缺 running 事件: {seen:?}"
+        );
+        assert!(
+            seen.contains(&"succeeded".to_string()),
+            "缺终态事件: {seen:?}"
+        );
+        state.audio.shutdown();
+        handle.join().unwrap();
     }
 
     #[test]

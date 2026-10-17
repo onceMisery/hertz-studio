@@ -453,3 +453,155 @@ async fn ensure_instance_row(
     .map_err(|e| StoreError::Database(e.to_string()))?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// usage entries 与熔断（R4-B）：每任务一条账目；熔断是持久闩锁。
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct UsageEntryRow {
+    pub job_id: String,
+    pub reservation_micro_usd: i64,
+    pub accounted_micro_usd: i64,
+    pub usage_state: String,
+    pub pricing_snapshot: String,
+    pub revision: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct BudgetGuardRow {
+    pub owner_instance_id: String,
+    pub halted: bool,
+    pub reason: String,
+    pub trigger_job: Option<String>,
+    pub revision: i64,
+}
+
+/// 结算账目：与任务终态同事务写入。job_id 唯一——重复结算（并发赢家
+/// 竞争的输家不应到达这里，这里再挡一道）以 INSERT OR IGNORE 幂等。
+pub async fn insert_usage_entry<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
+    conn: E,
+    entry: &UsageEntryRow,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO ai_usage_entries (job_id, reservation_micro_usd,
+                                                accounted_micro_usd, usage_state,
+                                                pricing_snapshot, revision, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )
+    .bind(&entry.job_id)
+    .bind(entry.reservation_micro_usd)
+    .bind(entry.accounted_micro_usd)
+    .bind(&entry.usage_state)
+    .bind(&entry.pricing_snapshot)
+    .bind(entry.revision)
+    .bind(entry.created_at)
+    .execute(conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(())
+}
+
+pub async fn find_usage_entry<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
+    conn: E,
+    job_id: &str,
+) -> Result<Option<UsageEntryRow>, StoreError> {
+    sqlx::query_as(
+        "SELECT job_id, reservation_micro_usd, accounted_micro_usd, usage_state,
+                pricing_snapshot, revision, created_at
+         FROM ai_usage_entries WHERE job_id = ?1",
+    )
+    .bind(job_id)
+    .fetch_optional(conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))
+}
+
+/// 熔断闩锁行；没有就建（owner 来自服务端实例身份）。
+pub async fn ensure_budget_guard(
+    conn: &mut sqlx::SqliteConnection,
+    owner_instance_id: &str,
+) -> Result<BudgetGuardRow, StoreError> {
+    let existing: Option<BudgetGuardRow> = sqlx::query_as(
+        "SELECT owner_instance_id, halted, reason, trigger_job, revision
+         FROM ai_budget_guard WHERE id = 1",
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    if let Some(row) = existing {
+        return Ok(row);
+    }
+    sqlx::query("INSERT OR IGNORE INTO ai_budget_guard (id, owner_instance_id) VALUES (1, ?1)")
+        .bind(owner_instance_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    sqlx::query_as(
+        "SELECT owner_instance_id, halted, reason, trigger_job, revision
+         FROM ai_budget_guard WHERE id = 1",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))
+}
+
+/// 熔断置位：幂等闩锁（已 halt 时不重复推进 revision）。`trigger_job`
+/// 记录第一个触发的任务，便于事后对账。
+pub async fn halt_budget_guard(
+    conn: &mut sqlx::SqliteConnection,
+    owner_instance_id: &str,
+    reason: &str,
+    trigger_job: &str,
+) -> Result<BudgetGuardRow, StoreError> {
+    ensure_budget_guard(&mut *conn, owner_instance_id).await?;
+    sqlx::query(
+        "UPDATE ai_budget_guard
+         SET halted = 1, reason = ?2, trigger_job = ?3, revision = revision + 1
+         WHERE id = 1 AND halted = 0",
+    )
+    .bind(owner_instance_id)
+    .bind(reason)
+    .bind(trigger_job)
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    sqlx::query_as(
+        "SELECT owner_instance_id, halted, reason, trigger_job, revision
+         FROM ai_budget_guard WHERE id = 1",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))
+}
+
+/// 熔断复位：官方管理专用，expectedRevision CAS——并发复位只有一个赢家，
+/// 复位必须确认在飞调用已结清（那个判断在服务层）。
+pub async fn reset_budget_guard<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
+    conn: E,
+    expected_revision: i64,
+) -> Result<bool, StoreError> {
+    let result = sqlx::query(
+        "UPDATE ai_budget_guard
+         SET halted = 0, reason = '', trigger_job = NULL, revision = revision + 1
+         WHERE id = 1 AND halted = 1 AND revision = ?1",
+    )
+    .bind(expected_revision)
+    .execute(conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn budget_guard<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
+    conn: E,
+) -> Result<Option<BudgetGuardRow>, StoreError> {
+    sqlx::query_as(
+        "SELECT owner_instance_id, halted, reason, trigger_job, revision
+         FROM ai_budget_guard WHERE id = 1",
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))
+}
