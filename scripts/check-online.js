@@ -967,7 +967,32 @@ async function loginScenario(pollStates, opts) {
     eq(online.state.tracks.length, 2, '跨源不同版本均保留');
     eq(online.state.loading, false, '所有源完成后结束加载');
     eq(env.doc.getElementById('online-count').textContent, '2 首已加载', '显示实际加载数量');
-    eq(transport.calls.get.length, 3, '每源一次并发搜索');
+    eq(transport.calls.get.length, 3, '每源一次搜索（并发受闸，总数不变）');
+  }
+
+  section('并发上限：聚合页初始并发 2 个源（§4.1）');
+  {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let done = 0;
+    const transport = makeTransport({ GET: [{ match: '/v1/online/search?', returns(url) {
+      inFlight += 1;
+      if (inFlight > maxInFlight) maxInFlight = inFlight;
+      // 让请求至少存活几个事件循环，避免同步完成掩盖并发窗口。
+      return new Promise((resolve) => setImmediate(() => {
+        inFlight -= 1;
+        done += 1;
+        resolve({ tracks: [T({ id: String(done) })] });
+      }));
+    } }] });
+    const env = makeSandbox({ transport }); bindOnline(env);
+    const online = env.sandbox.window.Online;
+    online.state.sources = ['a', 'b', 'c', 'd', 'e'].map(id => ({ id }));
+    online.state.source = 'all'; online.state.q = '并发';
+    await online.search();
+    eq(transport.calls.get.length, 5, '五个源全部完成');
+    ok(maxInFlight <= 2, '在途请求不超 2 (max ' + maxInFlight + ')');
+    eq(online.state.tracks.length, 5, '每源各得一条结果');
   }
 
   section('搜索竞态：新查询与清空均作废旧响应');

@@ -474,6 +474,23 @@
   // Use a page size accepted by every registered provider (KuGou caps at 20).
   // Otherwise a valid full KuGou page looks short and pagination stops early.
   var PAGE_SIZE = 20;
+  // 技术路线 §4.1：聚合页初始并发 2 个源，其余进有界队列——服务端闸是
+  // 兜底，客户端先自律；某源完成（含失败）即由队列补位。分页的「加载更多」
+  // 不占这 2 个名额（那是用户显式点的单源请求）。
+  var SEARCH_CONCURRENCY = 2;
+
+  async function runBounded(items, worker) {
+    var cursor = 0;
+    var take = function () { return cursor < items.length ? items[cursor++] : null; };
+    var runners = [];
+    for (var i = 0; i < SEARCH_CONCURRENCY && cursor < items.length; i++) {
+      runners.push((async function () {
+        var next;
+        while ((next = take()) !== null) await worker(next);
+      })());
+    }
+    await Promise.all(runners);
+  }
   var CACHE_TTL = 120000;
   var CACHE_LIMIT = 12;
 
@@ -795,9 +812,9 @@
     searchScroller().scrollTop = 0;
     renderOnline();
     if (view && session.pages.every(function (p) { return p.cached; })) searchScroller().scrollTop = view.scroll;
-    await Promise.all(session.pages.map(function (p) {
-      return p.cached ? Promise.resolve() : loadSearchPage(session, p);
-    }));
+    // §4.1：初始并发 2 个源，其余进有界队列；缓存命中页不占并发名额。
+    var pending = session.pages.filter(function (p) { return !p.cached; });
+    await runBounded(pending, function (p) { return loadSearchPage(session, p); });
   }
 
   function searchOnline(opts) { return search(opts); }
