@@ -7,9 +7,10 @@
 //!
 //! 一批请求体结构与 helper 标了 `pub(crate)`：`rpc` 门面（DBX 插件形态）复用
 //! 的是同一份定义，而不是照着重写。上百个端点两边各写一份，加字段时漏一边
-//! 就是静默的契约漂移。handler 本体没有共享——两边取参与表达应答的方式不同
-//! （axum 抽取器 / HTTP 状态码 vs 信封 / `Reply.status`），强行抽公共层只会
-//! 多一层间接。
+//! 就是静默的契约漂移。handler 本体原则上各自取参与整形应答（axum 抽取器 /
+//! HTTP 状态码 vs 信封 / `Reply.status`），但六种播控（play/pause、上/下一曲、
+//! seek、volume）的命令编排收敛在 `AppState` 的 `*_control` 共享入口里——
+//! 完成事实（applied/无操作/被取代）只有一个出处，两条传输不再各说各话。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -488,47 +489,14 @@ async fn get_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
 }
 
 async fn play(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    // 会话恢复后的首次 play：audio 里还没装任何曲目，但队列/游标已从快照
-    // 回来——按游标起播，提交成功后把上次进度 seek 回去。此后走正常路径。
-    if state.audio.snapshot().track_id.is_none() {
-        if let Some(index) = state.current_index().await {
-            let outcome = state.play_index_for(index, None, PlayTrigger::Pick).await?;
-            if outcome.committed {
-                state.consume_restore_seek().await;
-                state.post_commit_background();
-            }
-            return Ok(get_state(State(state)).await);
-        }
-    }
-    let commit = state.play_commit.lock().await;
-    state.cancel_prepared_playback().await;
-    state
-        .play_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state
-        .audio
-        .play()
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.transport_committed().await;
-    drop(commit);
+    // 完成事实在 resume_control 里；官方 UI 保持既有行为（含会话恢复分支），
+    // 兼容应答不变：非失败一律回快照。
+    state.resume_control(false).await?;
     Ok(get_state(State(state)).await)
 }
 
 async fn pause(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    let commit = state.play_commit.lock().await;
-    state.cancel_prepared_playback().await;
-    state
-        .play_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.set_buffering(false, None).await;
-    state
-        .audio
-        .pause()
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.transport_committed().await;
-    drop(commit);
+    state.pause_control().await?;
     Ok(get_state(State(state)).await)
 }
 
@@ -550,15 +518,13 @@ async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::
 }
 
 async fn next(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    // 成功起播后的预取 + LRU detach 在 step_by_user 里（每首恰好一次）。
     state.step_by_user(1).await?;
-    // 成功起播后在路由入口 detach 预取 + LRU（每首恰好一次）。
-    state.post_commit_background();
     Ok(get_state(State(state)).await)
 }
 
 async fn previous(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     state.step_by_user(-1).await?;
-    state.post_commit_background();
     Ok(get_state(State(state)).await)
 }
 
@@ -655,18 +621,7 @@ async fn seek(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SeekRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let commit = state.play_commit.lock().await;
-    state.cancel_prepared_playback().await;
-    state
-        .play_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state
-        .audio
-        .seek(body.position_ms)
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.transport_committed().await;
-    drop(commit);
+    state.seek_control(body.position_ms).await?;
     Ok(get_state(State(state)).await)
 }
 
@@ -679,15 +634,7 @@ async fn volume(
     State(state): State<Arc<AppState>>,
     Json(body): Json<VolumeRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !(0.0..=1.0).contains(&body.volume) {
-        return Err(bad_request("volume must be between 0.0 and 1.0"));
-    }
-    state
-        .audio
-        .set_volume(body.volume)
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    crate::persist::save_volume(&state.db, body.volume).await;
+    state.set_volume_control(body.volume).await?;
     Ok(get_state(State(state)).await)
 }
 

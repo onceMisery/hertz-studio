@@ -390,6 +390,69 @@ pub(crate) struct PlayOutcome {
     pub actual_quality: Option<crate::online::quality::Quality>,
 }
 
+/// 一次共享播控命令的完成事实。
+///
+/// HTTP/RPC 的 200/Ok 从来不能证明「已播放」——空队列、未装载、被更新意图
+/// 顶掉都曾是静默的 `Ok(())`。这个类型把事实拆开：只有原 owner 确认提交才是
+/// [`ControlOutcome::Applied`]；无操作与被取代各带稳定机器码，需要完成事实的
+/// 调用方据此如实回答，不靠曲目 id 变化反推。它只描述播放事实与代际，不携带
+/// 任何界面或场景引擎概念——传输层（HTTP/RPC/未来的受限门面）与自研引擎的
+/// 控制面复用同一套语义。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ControlOutcome {
+    /// 本次命令已完成提交；不保证之后没有别的操作。
+    Applied {
+        /// 与本次命令关联的应用层播放代际：传输命令（pause/resume/seek）是
+        /// 它制造的新意图代际；换曲（上/下一曲）是它被受理时的预留代际——
+        /// 提交由 `play_index_for` 在提交锁内推进到更新的代际；音量不是
+        /// 播放意图，不 bump 代际，回当前值。
+        generation: usize,
+    },
+    /// 明确没做任何事：原因稳定可分支，既不是失败也不是成功。
+    NoOp { code: NoOpCode },
+    /// 准备期间被更新的播放意图取代：本次命令没有生效，也没有失败。
+    Superseded { generation: usize },
+}
+
+/// [`ControlOutcome::NoOp`] 的稳定机器码。取值会出现在诊断与外部门面应答里：
+/// 新增成员可以，改动既有取值不行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoOpCode {
+    /// 队列为空，没有可切换的目标（上一曲/下一曲）。
+    EmptyQueue,
+    /// 严格模式下播放器里没有已装载曲目（resume）。
+    NoLoadedTrack,
+    /// 私电台已到尾端，不再推进（下一曲）。
+    RadioTail,
+}
+
+impl NoOpCode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            NoOpCode::EmptyQueue => "empty_queue",
+            NoOpCode::NoLoadedTrack => "no_loaded_track",
+            NoOpCode::RadioTail => "radio_tail",
+        }
+    }
+}
+
+impl ControlOutcome {
+    /// 本次命令是否真正提交。HTTP/RPC 的兼容应答一律照旧回快照；
+    /// 只有需要完成事实的调用方才看这个。
+    pub(crate) fn committed(&self) -> bool {
+        matches!(self, ControlOutcome::Applied { .. })
+    }
+
+    /// 稳定机器码，与 [`vmusic_core::CoreError::code`] 同一风格。
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            ControlOutcome::Applied { .. } => "applied",
+            ControlOutcome::NoOp { code } => code.as_str(),
+            ControlOutcome::Superseded { .. } => "superseded",
+        }
+    }
+}
+
 /// 一次播放尝试由什么触发。取流失败后的处置全靠它分流，所以原来那个 `auto: bool`
 /// 必须拆开：「用户点了这一首」和「用户按了下一曲」要的是相反的东西——前者要停在
 /// 原处拿到这一首的报错，后者要跳过放不了的曲子继续找。
@@ -3495,6 +3558,8 @@ impl AppState {
     /// button press: `RepeatOne` only repeats on auto, a user pressing "next"
     /// always moves forward. A failed play attempt is reported back as-is — use
     /// [`Self::step_by_user`] for the 上一曲/下一曲 buttons, which keep looking.
+    /// 内部接力只关心成败，[`ControlOutcome`] 的完成事实在这里丢弃；需要事实
+    /// 的调用方走 [`Self::step_by_user`]。
     pub async fn step(&self, delta: isize, auto: bool) -> Result<(), vmusic_core::CoreError> {
         self.step_for(
             delta,
@@ -3507,14 +3572,152 @@ impl AppState {
             None,
         )
         .await
+        .map(|_| ())
     }
 
     /// 用户按「上一曲/下一曲」。和 [`Self::step`] 的差别只在失败处置：按下按钮要的
     /// 是「换一首能播的」，所以撞上本身放不了的曲子（VIP、需登录、曲目已失效）会按
     /// 同一方向继续找；上游整体不健康时不试，直接把错误交回去。
-    pub async fn step_by_user(&self, delta: isize) -> Result<(), vmusic_core::CoreError> {
-        self.step_for(delta, PlayTrigger::Step { delta }, None, None)
+    ///
+    /// 返回类型化的完成事实（见 [`ControlOutcome`]）；成功提交后在这里 detach
+    /// 一次后台预取 + LRU——挂在原 owner 的 Applied 上而不是传输层，无操作/
+    /// 被取代就不会白跑后台任务。
+    pub(crate) async fn step_by_user(
+        &self,
+        delta: isize,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        let outcome = self
+            .step_for(delta, PlayTrigger::Step { delta }, None, None)
+            .await?;
+        if outcome.committed() {
+            if let Some(arc) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
+                arc.post_commit_background();
+            }
+        } else {
+            // 无操作/被取代不是错误，但要留痕：前端「点了没反应」的报告，
+            // 靠的就是这里的机器码。
+            crate::diaglog!(
+                "play.control",
+                op = "step",
+                delta = delta,
+                code = outcome.code()
+            );
+        }
+        Ok(outcome)
+    }
+
+    /// 共享播控入口：暂停当前播放。
+    ///
+    /// 「lock → 顶掉在途预取 → actor 命令 → 提交收口」的编排只存在于这几个
+    /// `*_control` 方法里，HTTP 与 RPC 各自只做取参与应答整形。
+    pub(crate) async fn pause_control(&self) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        let commit = self.play_commit.lock().await;
+        self.cancel_prepared_playback().await;
+        self.play_generation.fetch_add(1, Ordering::Relaxed);
+        self.set_buffering(false, None).await;
+        self.audio
+            .pause()
             .await
+            .map_err(vmusic_core::CoreError::Audio)?;
+        self.transport_committed().await;
+        drop(commit);
+        Ok(ControlOutcome::Applied {
+            generation: self.play_generation.load(Ordering::Relaxed),
+        })
+    }
+
+    /// 共享播控入口：恢复/开始播放。
+    ///
+    /// `strict` 供受限控制面（外部门面/AI）使用：播放器里没有已装载曲目就明确
+    /// 无操作，绝不走「恢复会话游标起播」的分支——那语义只属于官方 UI 的 play。
+    /// `false` 保持官方 UI play 的既有行为：未装载但队列游标还在时按游标起播，
+    /// 提交成功后接续上次进度。
+    pub(crate) async fn resume_control(
+        &self,
+        strict: bool,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        if self.audio.snapshot().track_id.is_none() {
+            if strict {
+                crate::diaglog!(
+                    "play.control",
+                    op = "resume_strict",
+                    code = NoOpCode::NoLoadedTrack.as_str()
+                );
+                return Ok(ControlOutcome::NoOp {
+                    code: NoOpCode::NoLoadedTrack,
+                });
+            }
+            // 会话恢复后的首次 play：audio 里还没装任何曲目，但队列/游标已从快照
+            // 回来——按游标起播，提交成功后把上次进度 seek 回去。此后走正常路径。
+            if let Some(index) = self.current_index().await {
+                let outcome = self.play_index_for(index, None, PlayTrigger::Pick).await?;
+                if !outcome.committed {
+                    return Ok(ControlOutcome::Superseded {
+                        generation: self.play_generation.load(Ordering::Relaxed),
+                    });
+                }
+                self.consume_restore_seek().await;
+                if let Some(arc) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
+                    arc.post_commit_background();
+                }
+                return Ok(ControlOutcome::Applied {
+                    generation: self.play_generation.load(Ordering::Relaxed),
+                });
+            }
+        }
+        let commit = self.play_commit.lock().await;
+        self.cancel_prepared_playback().await;
+        self.play_generation.fetch_add(1, Ordering::Relaxed);
+        self.audio
+            .play()
+            .await
+            .map_err(vmusic_core::CoreError::Audio)?;
+        self.transport_committed().await;
+        drop(commit);
+        Ok(ControlOutcome::Applied {
+            generation: self.play_generation.load(Ordering::Relaxed),
+        })
+    }
+
+    /// 共享播控入口：在当前曲目内定位。
+    pub(crate) async fn seek_control(
+        &self,
+        position_ms: u64,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        let commit = self.play_commit.lock().await;
+        self.cancel_prepared_playback().await;
+        self.play_generation.fetch_add(1, Ordering::Relaxed);
+        self.audio
+            .seek(position_ms)
+            .await
+            .map_err(vmusic_core::CoreError::Audio)?;
+        self.transport_committed().await;
+        drop(commit);
+        Ok(ControlOutcome::Applied {
+            generation: self.play_generation.load(Ordering::Relaxed),
+        })
+    }
+
+    /// 共享播控入口：设置音量。音量不是播放意图——不动播放代际、不碰预取；
+    /// 越界与非有限值一律拒绝（`CoreError::Invalid` 映射回 400/bad_request，
+    /// 与既有 HTTP 契约一致）。
+    pub(crate) async fn set_volume_control(
+        &self,
+        volume: f32,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        if !volume.is_finite() || !(0.0..=1.0).contains(&volume) {
+            return Err(vmusic_core::CoreError::Invalid(
+                "volume must be between 0.0 and 1.0".into(),
+            ));
+        }
+        self.audio
+            .set_volume(volume)
+            .await
+            .map_err(vmusic_core::CoreError::Audio)?;
+        crate::persist::save_volume(&self.db, volume).await;
+        Ok(ControlOutcome::Applied {
+            generation: self.play_generation.load(Ordering::Relaxed),
+        })
     }
 
     async fn step_for(
@@ -3523,7 +3726,7 @@ impl AppState {
         trigger: PlayTrigger,
         ended: Option<(u64, Option<String>)>,
         reservation: Option<usize>,
-    ) -> Result<(), vmusic_core::CoreError> {
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
         let before_refill = self.play_generation.load(Ordering::Relaxed);
         let at_tail = {
             let queue = self.queue.lock().await;
@@ -3535,22 +3738,30 @@ impl AppState {
         }
         let commit = self.play_commit.lock().await;
         if self.play_generation.load(Ordering::Relaxed) != before_refill {
-            return Ok(());
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
         }
         if reservation
             .is_some_and(|expected| self.play_generation.load(Ordering::Relaxed) != expected)
         {
-            return Ok(());
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
         }
         let snapshot = self.audio.snapshot();
         if let Some((generation, track_id)) = ended {
             if snapshot.generation != generation || snapshot.track_id != track_id {
-                return Ok(());
+                return Ok(ControlOutcome::Superseded {
+                    generation: self.play_generation.load(Ordering::Relaxed),
+                });
             }
             let queue = self.queue.lock().await;
             let current = *self.cursor.lock().await;
             if current.and_then(|index| queue.get(index)) != track_id.as_ref() {
-                return Ok(());
+                return Ok(ControlOutcome::Superseded {
+                    generation: self.play_generation.load(Ordering::Relaxed),
+                });
             }
         }
         let fm = {
@@ -3572,12 +3783,16 @@ impl AppState {
         let mode = self.audio.snapshot().mode;
         let len = self.queue.lock().await.len();
         if len == 0 {
-            return Ok(());
+            return Ok(ControlOutcome::NoOp {
+                code: NoOpCode::EmptyQueue,
+            });
         }
         let current = self.current_index().await.unwrap_or(0);
 
         if fm && delta > 0 && current + 1 >= len {
-            return Ok(());
+            return Ok(ControlOutcome::NoOp {
+                code: NoOpCode::RadioTail,
+            });
         }
         let next = if fm {
             (current as isize + delta).max(0) as usize
@@ -3602,9 +3817,15 @@ impl AppState {
         };
 
         drop(commit);
-        self.play_index_for(next, Some(generation), trigger)
-            .await
-            .map(|_| ())
+        match self.play_index_for(next, Some(generation), trigger).await {
+            Ok(outcome) if outcome.committed => Ok(ControlOutcome::Applied { generation }),
+            // 准备期间被更新意图顶掉（跨源接力救回、点播替换、用户切走）：
+            // 不是失败，但本次命令没有生效。
+            Ok(_) => Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            }),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -3886,7 +4107,7 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                             .step_for(1, PlayTrigger::AutoNext, Some((generation, track_id)), None)
                             .await
                         {
-                            Ok(()) => advance.post_commit_background(),
+                            Ok(_) => advance.post_commit_background(),
                             Err(e) => {
                                 tracing::warn!("auto-advance failed: {e}");
                                 crate::diaglog!("advance.fail", reason = e.to_string());
@@ -5790,5 +6011,188 @@ pub(crate) mod tests {
         }
         assert!(gate.try_claim(now), "记录全部过期后额度释放");
         gate.release();
+    }
+
+    // ---- 共享播控入口的完成事实（R2-C）----
+    // 这些用例守住的是「200/Ok 不等于已播放」的底线：无操作、被取代、严格拒绝
+    // 必须作为独立事实浮出来，而不是静默 Ok。
+
+    #[tokio::test]
+    async fn step_by_user_on_empty_queue_is_a_noop() {
+        let (state, handle) = playback_state().await;
+        let outcome = state.step_by_user(1).await.unwrap();
+        assert_eq!(
+            outcome,
+            ControlOutcome::NoOp {
+                code: NoOpCode::EmptyQueue
+            }
+        );
+        assert_eq!(outcome.code(), "empty_queue");
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn user_step_reports_applied_and_moves_the_cursor() {
+        // 本地播放路径要查 tracks 表：用带 schema 的文件库（见 playback_state_with_db）。
+        let dir = std::env::temp_dir().join(format!("vmusic-step-user-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let (state, handle) = playback_state_with_db(db).await;
+        state
+            .set_queue(vec!["first".into(), "second".into()], Some(0))
+            .await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        vmusic_store::upsert_track(
+            &state.db,
+            &vmusic_core::Track {
+                id: "second".into(),
+                path: "second.wav".into(),
+                source: vmusic_core::TrackSource::Local,
+                title: "second".into(),
+                artist: None,
+                album: None,
+                duration_ms: None,
+                bitrate: None,
+                sample_rate: None,
+                channels: None,
+                has_cover: false,
+                file_mtime: None,
+                file_size: None,
+                added_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let before = state.play_generation.load(Ordering::Relaxed);
+        let outcome = state.step_by_user(1).await.unwrap();
+        let ControlOutcome::Applied { generation } = outcome else {
+            panic!(
+                "可播队列上的用户切歌必须 Applied，实际: {:?}",
+                outcome.code()
+            );
+        };
+        assert_eq!(state.current_index().await, Some(1));
+        // 换曲的 Applied 携带受理时的预留代际：提交本身在 play_index_for 锁内
+        // 再推进一拍，之后的 prepare-next 属于更后面的事，都不回填进这条事实。
+        assert_eq!(generation, before);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn step_for_reports_superseded_when_ended_generation_moved() {
+        // ended 快照与当前播放不一致 = 准备期间被更新意图顶掉：必须如实上报
+        // Superseded，而不是静默 Ok 让调用方以为换曲成功。
+        let (state, handle) = playback_state().await;
+        state
+            .set_queue(vec!["first".into(), "second".into()], Some(0))
+            .await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let stale = (state.audio.snapshot().generation, Some("first".into()));
+        state
+            .audio
+            .load("second.wav", Some("second".into()))
+            .await
+            .unwrap();
+        state.play_generation.fetch_add(1, Ordering::Relaxed);
+        let outcome = state
+            .step_for(1, PlayTrigger::Step { delta: 1 }, Some(stale), None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.code(), "superseded");
+        assert!(matches!(outcome, ControlOutcome::Superseded { .. }));
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn strict_resume_without_loaded_track_refuses_and_touches_nothing() {
+        let (state, handle) = playback_state().await;
+        // 队列和游标都在：严格模式仍然拒绝——恢复会话语义只属于官方 UI 的 play。
+        state
+            .set_queue(vec!["first".into(), "second".into()], Some(0))
+            .await;
+        let generation = state.play_generation.load(Ordering::Relaxed);
+        let outcome = state.resume_control(true).await.unwrap();
+        assert_eq!(
+            outcome,
+            ControlOutcome::NoOp {
+                code: NoOpCode::NoLoadedTrack
+            }
+        );
+        assert_eq!(outcome.code(), "no_loaded_track");
+        // 拒绝不触碰播放器：不 bump 代际、不装载任何曲目。
+        assert_eq!(state.play_generation.load(Ordering::Relaxed), generation);
+        assert!(state.audio.snapshot().track_id.is_none());
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_control_applies_when_track_is_loaded() {
+        let (state, handle) = playback_state().await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let before = state.play_generation.load(Ordering::Relaxed);
+        let outcome = state.resume_control(true).await.unwrap();
+        let ControlOutcome::Applied { generation } = outcome else {
+            panic!("已装载曲目上的 resume 必须 Applied");
+        };
+        assert_eq!(generation, before + 1);
+        assert!(state.audio.snapshot().playing);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn pause_and_seek_report_applied_with_advancing_generation() {
+        let (state, handle) = playback_state().await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let before = state.play_generation.load(Ordering::Relaxed);
+        let ControlOutcome::Applied { generation } = state.pause_control().await.unwrap() else {
+            panic!("pause 必须 Applied");
+        };
+        assert_eq!(generation, before + 1);
+        let ControlOutcome::Applied { generation } = state.seek_control(1500).await.unwrap() else {
+            panic!("seek 必须 Applied");
+        };
+        assert_eq!(generation, before + 2);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn volume_control_validates_range_and_reports_applied() {
+        let (state, handle) = playback_state().await;
+        // 越界与非有限值都是 bad_request（CoreError::Invalid 的机器码）。
+        for bad in [1.5f32, -0.1, f32::NAN, f32::INFINITY] {
+            let err = state.set_volume_control(bad).await.unwrap_err();
+            assert_eq!(err.code(), "bad_request", "音量 {bad} 应被拒绝");
+        }
+        let before = state.play_generation.load(Ordering::Relaxed);
+        let ControlOutcome::Applied { generation } = state.set_volume_control(0.4).await.unwrap()
+        else {
+            panic!("合法音量必须 Applied");
+        };
+        // 音量不是播放意图：不 bump 播放代际。
+        assert_eq!(generation, before);
+        assert_eq!(state.audio.snapshot().volume, 0.4);
+        state.audio.shutdown();
+        handle.join().unwrap();
     }
 }
