@@ -32,7 +32,7 @@ import { clamp, seededRandom } from './util.js';
 
 // 归一化改成「落到 1.78 的设计框」之后，横宽的星座比原来大了约 1.8 倍，
 // 同样的粒子数摊在更大的面积上会显稀 —— 三个池子跟着上调一档。
-const SHAPE_COUNTS = { low: 2600, medium: 4200, high: 6000 };
+const SHAPE_COUNTS = { low: 3200, medium: 5200, high: 7600 };
 const FIGURE_COUNTS = { low: 1000, medium: 1700, high: 2600 };
 const FIELD_COUNTS = { low: 28000, medium: 64000, high: 120000 };
 const SPARKLE_COUNTS = { low: 70, medium: 112, high: 160 };
@@ -173,6 +173,7 @@ const SHAPE_VERT = [
   'attribute vec3 aEntry;',
   'attribute vec3 aShape;',
   'attribute vec3 aExit;',
+  'attribute vec3 aNormal;',
   'attribute float aShine;',
   'attribute float aPhase;',
   'attribute float aSeed;',
@@ -182,12 +183,17 @@ const SHAPE_VERT = [
   'uniform float uTwinkle;',
   'uniform float uMotion;',
   'uniform float uSpin;',
+  'uniform float uLit;',
+  'uniform vec3 uKeyDir;',
   'uniform int uVariant;',
   'uniform int uState;',
   'uniform float uK;',
   'varying float vAlpha;',
   'varying float vShine;',
   'varying float vCore;',
+  'varying float vLight;',
+  'varying float vRim;',
+  'varying float vDepth;',
   'varying vec2 vDirection;',
   'varying float vStretch;',
   'vec3 flight(float t) {',
@@ -243,8 +249,21 @@ const SHAPE_VERT = [
   '  vStretch = uState == 1 ? 1.0 : 1.0+(2.0+arc*5.0)*uMotion;',
   '  float tw = 1.0+uTwinkle*sin(uTime*1.9+aPhase)*0.35;',
   '  float boost = 1.0+(uBoost-1.0)*(0.55+aShine*0.45);',
+  // 体积受光：aNormal 是逐点表面法线。主光固定在世界空间，造型微摆时
+  // 明暗会扫过表面 —— 这才是「3D」的来源，而不是整体变亮或变按。
+  '  vec3 wn = normalize(mat3(modelMatrix)*aNormal);',
+  '  float wrap = dot(wn,uKeyDir)*0.5+0.5;',
+  '  float fill = dot(wn,normalize(vec3(-0.55,0.15,-0.65)))*0.5+0.5;',
+  '  vec3 vn = normalize(mat3(viewMatrix)*wn);',
+  '  float rim = pow(1.0-abs(vn.z),2.0);',
+  '  vLight = mix(1.0,0.20+0.96*wrap*wrap+0.28*fill,uLit)*(0.64+0.36*clamp(aShine,0.0,1.0));',
+  '  vRim = rim*uLit;',
   '  float size = uState == 1 ? 0.34+aShine*0.95 : (0.35+aShine*0.65)*(1.0+arc*1.8*uMotion);',
-  '  gl_PointSize = clamp(size*tw*boost*(46.0/max(1.0,-mv.z))*uPixelRatio,0.6,34.0);',
+  // 前景粒子更大更亮、后景更小更暗：屏幕空间里也读出前后层次。
+  '  float near = clamp((p.z+0.9)/1.8,0.0,1.0);',
+  '  size *= 0.74+0.34*near;',
+  '  vDepth = near;',
+  '  gl_PointSize = clamp(size*tw*boost*(54.0/max(1.0,-mv.z))*uPixelRatio,0.6,40.0);',
   '  vShine = aShine; vCore = clamp(aShine,0.0,1.0);',
   '  gl_Position = clip;',
   '}',
@@ -259,6 +278,9 @@ const SHAPE_FRAG = [
   'varying float vAlpha;',
   'varying float vShine;',
   'varying float vCore;',
+  'varying float vLight;',
+  'varying float vRim;',
+  'varying float vDepth;',
   'varying vec2 vDirection;',
   'varying float vStretch;',
   'void main() {',
@@ -267,13 +289,20 @@ const SHAPE_FRAG = [
   '  float along = dot(q,dir);',
   '  float across = dot(q,vec2(-dir.y,dir.x));',
   '  float d = length(vec2(along,across*vStretch));',
-  '  float halo = exp(-d*d*22.0)*0.22;',
+  '  float halo = exp(-d*d*15.0)*0.34;',
   '  float core = exp(-d*d*240.0);',
   '  float tail = mix(1.0,smoothstep(-0.5,0.15,along),clamp(vStretch-1.0,0.0,1.0));',
   '  float a = min(1.0,halo+core)*vAlpha*(0.45+tail*0.25);',
+  // 近处粒子更实、深处更淡：加法混合下这是唯一能避免「前后叠成一片」的手段。
+  '  a *= 0.52+0.78*vDepth;',
   '  vec3 base = mix(uBody,uRim,vCore);',
   '  vec3 col = mix(base,uAccent,clamp((vShine-0.9)*1.2,0.0,uAccentMix));',
-  '  col += core*vCore*0.3;',
+  // 受光量只乘在颜色上、不乘 alpha：扫过亮带的对比和「聚→停」亮度台阶保持原样。
+  '  col *= vLight;',
+  // 轮廓光用座次亮色提亮边缘，背光面留一点冷调，体积才有正反两面。
+  '  col = mix(col,uRim,clamp(vRim*0.55,0.0,0.6));',
+  '  col *= 0.82+0.24*vDepth;',
+  '  col += core*vCore*0.3*vLight;',
   '  gl_FragColor = vec4(col,a);',
   '}',
 ].join('\n');
@@ -379,6 +408,8 @@ function makeShapeMaterial(THREE) {
       uSpin: { value: 1 },
       uVariant: { value: 0 },
       uK: { value: 0 },
+      uLit: { value: 1 },
+      uKeyDir: { value: new THREE.Vector3(-0.45, 0.52, 0.72).normalize() },
       uAccent: { value: new THREE.Color('#b9d3ff') },
       uBody: { value: new THREE.Color(1, 1, 1) },
       uRim: { value: new THREE.Color(1, 1, 1) },
@@ -700,9 +731,9 @@ export function createWorld(THREE, scene, opts) {
       const tone = 0.55 + hr() * 0.45;
       col[i * 3] = col[i * 3 + 1] = col[i * 3 + 2] = tone;
       // 只补充体积感，保持主粒子的亮核可分辨。
-      size[i] = 0.8 + Math.pow(hr(), 2.4) * 2.4;
+      size[i] = 1.1 + Math.pow(hr(), 2.4) * 3.0;
       phase[i] = hr() * Math.PI * 2;
-      alpha[i] = 0.003 + hr() * 0.008;
+      alpha[i] = 0.006 + hr() * 0.016;
     }
     return softAttrs(THREE, col, size, phase, alpha);
   })();
@@ -761,6 +792,7 @@ export function createWorld(THREE, scene, opts) {
     pgeo.setAttribute('aEntry', new THREE.BufferAttribute(clouds[0], 3));
     pgeo.setAttribute('aShape', new THREE.BufferAttribute(shape.pos, 3));
     pgeo.setAttribute('aExit', new THREE.BufferAttribute(clouds[1], 3));
+    pgeo.setAttribute('aNormal', new THREE.BufferAttribute(shape.normals, 3));
     pgeo.setAttribute('aShine', new THREE.BufferAttribute(shape.shine, 1));
     pgeo.setAttribute('aPhase', poolPhaseAttr);
     pgeo.setAttribute('aSeed', seedAttr);
@@ -942,6 +974,15 @@ export function createWorld(THREE, scene, opts) {
     shapeMat.uniforms.uTime.value = time;
     shapeMat.uniforms.uBoost.value = 1 + bass * 0.6 + onset * 0.8;
     shapeMat.uniforms.uTwinkle.value = reduced ? 0.15 : 1;
+    // 主光缓慢横扫：即使造型摆得很少，明暗也会在体积上移动 —— 静态帧里
+    // 正背面亮度差、播放时高光缓慢扫过，这两件事合起来才是「立体」。
+    const keySwing = reduced ? 0 : Math.sin(time * 0.11) * 0.34;
+    const keyLift = reduced ? 0.52 : 0.44 + Math.sin(time * 0.067 + 0.8) * 0.14;
+    shapeMat.uniforms.uKeyDir.value.set(
+      Math.sin(-0.62 + keySwing) * Math.cos(keyLift),
+      Math.sin(keyLift),
+      Math.cos(-0.62 + keySwing) * Math.cos(keyLift),
+    ).normalize();
     shapeMat.uniforms.uState.value = state === 'gather' ? 0 : state === 'disperse' ? 2 : 1;
     shapeMat.uniforms.uK.value = k;
     const style = transitionStyle(c.cycle || 0);
@@ -960,10 +1001,11 @@ export function createWorld(THREE, scene, opts) {
     sparkleMat.uniforms.uBrightness.value = 0.82 + onset * 0.3;
 
     // 造型自转改成「以播放时间为唯一输入」的微摆：seek 到任意时刻画面一致，
-    // 暂停时冻结；微摆展示立体侧面，同时保持剪影可识别。
-    const sway = reduced ? 0.04 : 0.27;
-    root.rotation.y = Math.sin(time * 0.30) * sway + Math.sin(time * 0.085 + 1.3) * sway * 0.34;
-    root.rotation.x = Math.sin(time * 0.19) * (reduced ? 0 : 0.11);
+    // 暂停时冻结；微摆展示立体侧面，同时保持剪影可识别。幅度比早期版本更大：
+    // 配合逐点法线，摆角一变化明暗就跟着扫过表面，侧脸不再是「一张贴片」。
+    const sway = reduced ? 0.06 : 0.46;
+    root.rotation.y = Math.sin(time * 0.30) * sway + Math.sin(time * 0.085 + 1.3) * sway * 0.42;
+    root.rotation.x = Math.sin(time * 0.19) * (reduced ? 0 : 0.16) + Math.cos(time * 0.075 + 0.5) * (reduced ? 0 : 0.05);
     const pulse = 1 + onset * 0.02 + bass * 0.012;
     root.scale.setScalar(state === 'gather' ? pulse * (0.92 + k * 0.08) : pulse);
 
@@ -972,7 +1014,9 @@ export function createWorld(THREE, scene, opts) {
     figAlpha = figureOpacity(state, k);
     hazeMat.uniforms.uAlpha.value = figAlpha;
     hazeMat.uniforms.uTime.value = time;
-    meshMat.opacity = 0.005 * figAlpha;
+    // 体积层：极低透明度但不再是「等于不存在」的 0.005 —— 逐面明暗 + 主光照
+    // 让它成为一层可读的低多边形体积，同时仍低于「亮度占比 < 10%」的回归线。
+    meshMat.opacity = 0.016 * figAlpha;
     edgeCoreMat.opacity = 0.28 * figAlpha;
     edgeHaloMat.opacity = (0.075 + bass * 0.035) * figAlpha;
     nodeMat.uniforms.uAlpha.value = figAlpha * 0.045;

@@ -126,6 +126,33 @@ function reliefDepth(index, x, y) {
 }
 
 const backDepth = z => -(z-FIGURE_Z)*.8-.08;
+
+// 体积法线：由三角面片按面积加权求和，再把 z 翻正（正面朝机位）。
+// 起伏只来自 reliefDepth 的径向隆起，所以内部法线接近 +z、靠轮廓处向外倾斜 ——
+// 正好让轮廓附近的星尘能吃到轮廓光。一次按座烘焙，采样时只做插值。
+function vertexNormals(points, triangles, depths) {
+  const out = new Float32Array(points.length * 3);
+  for (const [a, b, c] of triangles) {
+    const p = points[a], q = points[b], r = points[c];
+    const ux = q[0]-p[0], uy = q[1]-p[1], uz = depths[b]-depths[a];
+    const vx = r[0]-p[0], vy = r[1]-p[1], vz = depths[c]-depths[a];
+    let nx = uy*vz - uz*vy, ny = uz*vx - ux*vz, nz = ux*vy - uy*vx;
+    if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }
+    for (const v of [a, b, c]) {
+      out[v*3] += nx; out[v*3+1] += ny; out[v*3+2] += nz;
+    }
+  }
+  for (let i = 0; i < out.length; i += 3) {
+    const length = Math.hypot(out[i], out[i+1], out[i+2]);
+    if (length > 1e-9) {
+      out[i] /= length; out[i+1] /= length; out[i+2] /= length;
+    } else {
+      out[i] = 0; out[i+1] = 0; out[i+2] = 1;
+    }
+  }
+  return out;
+}
+
 function artwork(index) {
   if (artworkCache[index]) return artworkCache[index];
   const points = [], triangles = [], contours = [];
@@ -181,7 +208,8 @@ function artwork(index) {
     return totalLength;
   });
   const depths = points.map(([x,y]) => reliefDepth(index,x,y));
-  return (artworkCache[index] = { points, triangles, contours, areas, lengths, totalArea, totalLength, depths });
+  const normals = vertexNormals(points, triangles, depths);
+  return (artworkCache[index] = { points, triangles, contours, areas, lengths, totalArea, totalLength, depths, normals });
 }
 
 function weightedIndex(cumulative, value) {
@@ -193,16 +221,20 @@ function weightedIndex(cumulative, value) {
   return lo;
 }
 
-function sampleArtwork(index, count, seed, surface = false) {
+function sampleArtwork(index, count, seed, surface = false, normalsOut = null) {
   const art = artwork(index), fit = shapeFit(index), rnd = seededRandom(seed);
   const pos = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) {
     let x, y, depth;
+    let nx = 0, ny = 0, nz = 1;
     if (rnd() < .18) {
       const [a,b] = art.contours[weightedIndex(art.lengths, rnd() * art.totalLength)];
       const t = rnd(), p = art.points[a], q = art.points[b];
       x = p[0] + (q[0]-p[0])*t; y = p[1] + (q[1]-p[1])*t;
       depth = art.depths[a]*(1-t)+art.depths[b]*t;
+      nx = art.normals[a*3]*(1-t)+art.normals[b*3]*t;
+      ny = art.normals[a*3+1]*(1-t)+art.normals[b*3+1]*t;
+      nz = art.normals[a*3+2]*(1-t)+art.normals[b*3+2]*t;
     } else {
       const tri = art.triangles[weightedIndex(art.areas, rnd() * art.totalArea)];
       const [p,q,r] = tri.map(v => art.points[v]);
@@ -210,22 +242,39 @@ function sampleArtwork(index, count, seed, surface = false) {
       x = p[0]*(1-u) + q[0]*u*(1-v) + r[0]*u*v;
       y = p[1]*(1-u) + q[1]*u*(1-v) + r[1]*u*v;
       depth = art.depths[tri[0]]*(1-u)+art.depths[tri[1]]*u*(1-v)+art.depths[tri[2]]*u*v;
+      for (let k = 0; k < 3; k += 1) {
+        const w = [1-u, u*(1-v), u*v][k], at = tri[k]*3;
+        nx += art.normals[at]*w; ny += art.normals[at+1]*w; nz += art.normals[at+2]*w;
+      }
     }
     pos[i*3] = (x-fit.cx)*fit.k;
     pos[i*3+1] = (y-fit.cy)*fit.k;
-    const zMix = rnd();
+    // zMix 偏向正面：星尘的「表皮」才是被看见的那一层，均匀铺满厚度会让
+    // 正面和背面叠成同一片亮雾。仍保留少量贴背粒子，侧面才有真正的纵深。
+    const zMix = surface ? 1 : 0.12 + 0.88 * Math.pow(rnd(), 0.58);
     pos[i*3+2] = surface ? depth : backDepth(depth)+(depth-backDepth(depth))*zMix;
+    if (normalsOut) {
+      // 体积内粒子：前半参考正面法线、后半沿深度翻转，中间过渡到侧壁；
+      // 这样从背后看过去也有一致的受光面，而不是一块均匀发光的贴片。
+      const flip = surface ? 1 : zMix * 2 - 1;
+      let nx2 = nx, ny2 = ny, nz2 = nz * flip;
+      const length = Math.hypot(nx2, ny2, nz2);
+      if (length > 1e-6) { nx2 /= length; ny2 /= length; nz2 /= length; }
+      else { nx2 = 0; ny2 = 0; nz2 = 1; }
+      normalsOut[i*3] = nx2; normalsOut[i*3+1] = ny2; normalsOut[i*3+2] = nz2;
+    }
   }
   return pos;
 }
 
 export function buildShape(index, count) {
   const i = ((index % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;
-  const pos = sampleArtwork(i, count, 'zodiac-shape:' + ZODIAC[i].id + ':' + count);
+  const normals = new Float32Array(count * 3);
+  const pos = sampleArtwork(i, count, 'zodiac-shape:' + ZODIAC[i].id + ':' + count, false, normals);
   const rnd = seededRandom('zodiac-shine:' + ZODIAC[i].id + ':' + count);
   const shine = new Float32Array(count);
   for (let k = 0; k < count; k++) shine[k] = .40 + Math.pow(rnd(), 3) * .8;
-  return { pos, shine, sign: ZODIAC[i] };
+  return { pos, normals, shine, sign: ZODIAC[i] };
 }
 
 export const CONSTELLATION = FIGURES.map(({nodes,lines}) => ({nodes,lines}));
