@@ -488,15 +488,63 @@ async fn get_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
     Json(v)
 }
 
-async fn play(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+/// `x-client-operation-id` 请求头：短写幂等键的客户端部分（技术路线 R2-P）。
+/// 不带即旁路，行为与从前一致；带了但非法（空、超长）由幂等入口回 400。
+/// 值本身不承担授权——`principal` 由服务端可信上下文提供。
+#[derive(Debug, Clone)]
+struct ClientOperationId(Option<String>);
+
+impl<S> axum::extract::FromRequestParts<S> for ClientOperationId
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let value = match parts.headers.get("x-client-operation-id") {
+            None => return Ok(Self(None)),
+            // 非可见 ASCII 的头是畸形的：如实拒绝，不静默当没带——
+            // 那会让客户端以为有幂等保护而实际没有。
+            Some(value) => value
+                .to_str()
+                .map_err(|_| bad_request("x-client-operation-id 必须是可见 ASCII"))?,
+        };
+        Ok(Self(Some(value.to_string())))
+    }
+}
+
+async fn play(
+    State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
+) -> ApiResult<Json<serde_json::Value>> {
     // 完成事实在 resume_control 里；官方 UI 保持既有行为（含会话恢复分支），
-    // 兼容应答不变：非失败一律回快照。
-    state.resume_control(false).await?;
+    // 兼容应答不变：非失败一律回快照。带幂等键时由短写层去重（R2-P）。
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.resume",
+        client_op.as_deref(),
+        serde_json::Value::Null,
+        |s| async move { s.resume_control(false).await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
-async fn pause(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    state.pause_control().await?;
+async fn pause(
+    State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.pause",
+        client_op.as_deref(),
+        serde_json::Value::Null,
+        |s| async move { s.pause_control().await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
@@ -517,14 +565,34 @@ async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::
     Ok(get_state(State(state)).await)
 }
 
-async fn next(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+async fn next(
+    State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
+) -> ApiResult<Json<serde_json::Value>> {
     // 成功起播后的预取 + LRU detach 在 step_by_user 里（每首恰好一次）。
-    state.step_by_user(1).await?;
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.next",
+        client_op.as_deref(),
+        serde_json::Value::Null,
+        |s| async move { s.step_by_user(1).await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
-async fn previous(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    state.step_by_user(-1).await?;
+async fn previous(
+    State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.previous",
+        client_op.as_deref(),
+        serde_json::Value::Null,
+        |s| async move { s.step_by_user(-1).await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
@@ -619,9 +687,18 @@ pub struct SeekRequest {
 
 async fn seek(
     State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
     Json(body): Json<SeekRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    state.seek_control(body.position_ms).await?;
+    let position_ms = body.position_ms;
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.seek",
+        client_op.as_deref(),
+        serde_json::json!(position_ms),
+        move |s| async move { s.seek_control(position_ms).await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
@@ -632,9 +709,19 @@ pub struct VolumeRequest {
 
 async fn volume(
     State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
     Json(body): Json<VolumeRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    state.set_volume_control(body.volume).await?;
+    let volume = body.volume;
+    // 非有限值经 json! 归一成 Null：幂等输入与校验错误互不串键。
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.volume_set",
+        client_op.as_deref(),
+        serde_json::json!(volume),
+        move |s| async move { s.set_volume_control(volume).await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
@@ -3754,6 +3841,7 @@ mod tests {
                     query: query.clone(),
                     body: body.clone(),
                     raw: None,
+                    client_operation_id: None,
                 })
                 .await;
             let method = match op {

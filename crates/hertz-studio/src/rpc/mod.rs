@@ -80,6 +80,9 @@ pub struct Call<'a> {
     pub body: Value,
     /// 二进制请求体，见 [`RawBody`]。
     pub raw: Option<RawBody>,
+    /// 短写幂等键的客户端部分（技术路线 R2-P）。与 HTTP 的
+    /// `x-client-operation-id` 头同源同义：不带即旁路，带空/超长由幂等入口回 400。
+    pub client_operation_id: Option<String>,
 }
 
 /// 二进制请求体。
@@ -217,14 +220,27 @@ impl Rpc {
             }
 
             // --- 播放控制 ---
+            // 六种播控带可选 clientOperationId：短写幂等键，见 crate::idempotency。
             (Op::Post, ["v1", "player", "load"]) => playback::load(state, body).await,
-            (Op::Post, ["v1", "player", "play"]) => playback::play(state).await,
-            (Op::Post, ["v1", "player", "pause"]) => playback::pause(state).await,
+            (Op::Post, ["v1", "player", "play"]) => {
+                playback::play(state, call.client_operation_id.as_deref()).await
+            }
+            (Op::Post, ["v1", "player", "pause"]) => {
+                playback::pause(state, call.client_operation_id.as_deref()).await
+            }
             (Op::Post, ["v1", "player", "stop"]) => playback::stop(state).await,
-            (Op::Post, ["v1", "player", "next"]) => playback::next(state).await,
-            (Op::Post, ["v1", "player", "previous"]) => playback::previous(state).await,
-            (Op::Post, ["v1", "player", "seek"]) => playback::seek(state, body).await,
-            (Op::Post, ["v1", "player", "volume"]) => playback::volume(state, body).await,
+            (Op::Post, ["v1", "player", "next"]) => {
+                playback::next(state, call.client_operation_id.as_deref()).await
+            }
+            (Op::Post, ["v1", "player", "previous"]) => {
+                playback::previous(state, call.client_operation_id.as_deref()).await
+            }
+            (Op::Post, ["v1", "player", "seek"]) => {
+                playback::seek(state, body, call.client_operation_id.as_deref()).await
+            }
+            (Op::Post, ["v1", "player", "volume"]) => {
+                playback::volume(state, body, call.client_operation_id.as_deref()).await
+            }
             (Op::Post, ["v1", "player", "mode"]) => playback::mode(state, body).await,
             (Op::Post, ["v1", "player", "replay"]) => playback::replay(state, body).await,
             (Op::Get, ["v1", "player", "queue"]) => playback::get_queue(state).await,

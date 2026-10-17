@@ -105,6 +105,9 @@ impl PluginHandler for Plugin {
             query,
             body,
             raw,
+            // 短写幂等键（技术路线 R2-P）：与 HTTP 的 x-client-operation-id 头
+            // 同源同义，宿主信封可选携带。
+            client_operation_id: envelope_str(&params, "client_operation_id")?.map(str::to_string),
         }));
         Ok(envelope_result(result))
     }

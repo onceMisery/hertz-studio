@@ -856,6 +856,9 @@ pub struct AppState {
     /// 等于每秒打两次上游歌词接口、本地曲每次重开音频文件读标签。换曲
     /// 自然失效；同一曲播放中导入新歌词要等换曲才反映（OBS 场景可接受）。
     pub(crate) overlay_lyric: Mutex<Option<(String, vmusic_core::LyricDocument)>>,
+    /// 短写幂等表（见 [`crate::idempotency`]）：带 `clientOperationId` 的播控
+    /// 命令在 10 分钟窗口内按 `(principal, operation, clientOperationId)` 去重。
+    pub(crate) short_writes: crate::idempotency::ShortWriteStore,
 }
 
 impl AppState {
@@ -4249,6 +4252,7 @@ pub(crate) mod tests {
             scrobble: Default::default(),
             relay_tried: Default::default(),
             tickets: crate::ticket::TicketStore::new(),
+            short_writes: Default::default(),
         };
         (state, handle)
     }

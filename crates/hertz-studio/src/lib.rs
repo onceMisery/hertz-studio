@@ -24,6 +24,7 @@ pub mod diag;
 pub mod edition;
 pub mod error;
 pub mod history;
+pub(crate) mod idempotency;
 pub mod online;
 mod online_play;
 pub mod persist;

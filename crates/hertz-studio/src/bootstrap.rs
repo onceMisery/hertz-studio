@@ -175,6 +175,7 @@ pub async fn boot(
         scrobble: Default::default(),
         relay_tried: Default::default(),
         tickets: crate::ticket::TicketStore::new(),
+        short_writes: Default::default(),
     });
     // 供 on_track_committed detach 'static 后台任务用；set 失败只可能是
     // 重复注入，启动路径只走一次，忽略即可。

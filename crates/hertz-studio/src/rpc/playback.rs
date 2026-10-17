@@ -45,15 +45,29 @@ async fn with_state(state: &Arc<AppState>) -> RpcResult {
     Ok(Reply::ok(snapshot(state).await))
 }
 
-pub async fn play(state: &Arc<AppState>) -> RpcResult {
+pub async fn play(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
     // 完成事实在 resume_control 里；官方 UI 形态保持既有行为（含会话恢复
-    // 分支，见 routes::play）。
-    state.resume_control(false).await?;
+    // 分支，见 routes::play）。带幂等键时由短写层去重（R2-P）。
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.resume",
+        client_op,
+        serde_json::Value::Null,
+        |s| async move { s.resume_control(false).await },
+    )
+    .await?;
     with_state(state).await
 }
 
-pub async fn pause(state: &Arc<AppState>) -> RpcResult {
-    state.pause_control().await?;
+pub async fn pause(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.pause",
+        client_op,
+        serde_json::Value::Null,
+        |s| async move { s.pause_control().await },
+    )
+    .await?;
     with_state(state).await
 }
 
@@ -74,26 +88,57 @@ pub async fn stop(state: &Arc<AppState>) -> RpcResult {
     with_state(state).await
 }
 
-pub async fn next(state: &Arc<AppState>) -> RpcResult {
+pub async fn next(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
     // 成功起播后的预取 + LRU detach 在 step_by_user 里（每首恰好一次）。
-    state.step_by_user(1).await?;
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.next",
+        client_op,
+        serde_json::Value::Null,
+        |s| async move { s.step_by_user(1).await },
+    )
+    .await?;
     with_state(state).await
 }
 
-pub async fn previous(state: &Arc<AppState>) -> RpcResult {
-    state.step_by_user(-1).await?;
+pub async fn previous(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.previous",
+        client_op,
+        serde_json::Value::Null,
+        |s| async move { s.step_by_user(-1).await },
+    )
+    .await?;
     with_state(state).await
 }
 
-pub async fn seek(state: &Arc<AppState>, body: &Value) -> RpcResult {
+pub async fn seek(state: &Arc<AppState>, body: &Value, client_op: Option<&str>) -> RpcResult {
     let request: SeekRequest = body_as(body)?;
-    state.seek_control(request.position_ms).await?;
+    let position_ms = request.position_ms;
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.seek",
+        client_op,
+        serde_json::json!(position_ms),
+        move |s| async move { s.seek_control(position_ms).await },
+    )
+    .await?;
     with_state(state).await
 }
 
-pub async fn volume(state: &Arc<AppState>, body: &Value) -> RpcResult {
+pub async fn volume(state: &Arc<AppState>, body: &Value, client_op: Option<&str>) -> RpcResult {
     let request: VolumeRequest = body_as(body)?;
-    state.set_volume_control(request.volume).await?;
+    let volume = request.volume;
+    // 非有限值经 json! 归一成 Null：幂等输入与校验错误互不串键。
+    crate::idempotency::short_write(
+        state.clone(),
+        "playback.volume_set",
+        client_op,
+        serde_json::json!(volume),
+        move |s| async move { s.set_volume_control(volume).await },
+    )
+    .await?;
     with_state(state).await
 }
 

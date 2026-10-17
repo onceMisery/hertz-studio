@@ -25,7 +25,7 @@ pub struct ErrorDetail {
     pub source: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ApiError {
     pub status: StatusCode,
     pub code: &'static str,
@@ -110,6 +110,27 @@ impl From<CoreError> for ApiError {
             return api;
         }
         Self::new(status, err.code(), err.to_string())
+    }
+}
+
+/// 短写幂等路径的错误映射（技术路线 R2-P）。容量与冲突是本模块的稳定机器码；
+/// owner 的失败已在首次执行时完成 `CoreError` → `ApiError` 的清洗，回放时
+/// 原样透传（保留 code/message/source，request_id 保留首次的值以便对上日志）。
+impl From<crate::idempotency::ShortWriteError> for ApiError {
+    fn from(err: crate::idempotency::ShortWriteError) -> Self {
+        match err {
+            crate::idempotency::ShortWriteError::Capacity => Self::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "short_write_capacity",
+                "短写幂等表已满，请稍后用新的 clientOperationId 重试",
+            ),
+            crate::idempotency::ShortWriteError::Conflict => Self::new(
+                StatusCode::CONFLICT,
+                "idempotency_conflict",
+                "同一 clientOperationId 携带了不同的输入，请换新键重试",
+            ),
+            crate::idempotency::ShortWriteError::Failed(api) => api,
+        }
     }
 }
 
