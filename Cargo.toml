@@ -53,6 +53,8 @@ cbc = { version = "0.1", features = ["alloc"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 uuid = { version = "1", features = ["v4"] }
+getrandom = "0.3"
+sha2 = "0.10"
 walkdir = "2"
 notify = "8"
 dirs = "5"

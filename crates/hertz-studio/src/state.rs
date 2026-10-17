@@ -859,6 +859,9 @@ pub struct AppState {
     /// 短写幂等表（见 [`crate::idempotency`]）：带 `clientOperationId` 的播控
     /// 命令在 10 分钟窗口内按 `(principal, operation, clientOperationId)` 去重。
     pub(crate) short_writes: crate::idempotency::ShortWriteStore,
+    /// 本次服务进程的实例身份（技术路线 §5.5）：每次启动随机，受限门面在
+    /// context 里下发；凭据绑定它的调用在服务重启后必须重新连接。
+    pub(crate) server_instance_id: String,
 }
 
 impl AppState {
@@ -4253,6 +4256,7 @@ pub(crate) mod tests {
             relay_tried: Default::default(),
             tickets: crate::ticket::TicketStore::new(),
             short_writes: Default::default(),
+            server_instance_id: uuid::Uuid::new_v4().to_string(),
         };
         (state, handle)
     }

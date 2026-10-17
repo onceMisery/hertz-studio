@@ -16,6 +16,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use vmusic_core::{Playlist, PlaylistId, StoreError, Track, TrackId, TrackSource};
 
+pub mod ai;
 pub mod backup;
 pub mod favorites;
 pub mod limits;

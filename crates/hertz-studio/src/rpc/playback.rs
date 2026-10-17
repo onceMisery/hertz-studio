@@ -50,6 +50,7 @@ pub async fn play(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
     // 分支，见 routes::play）。带幂等键时由短写层去重（R2-P）。
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.resume",
         client_op,
         serde_json::Value::Null,
@@ -62,6 +63,7 @@ pub async fn play(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
 pub async fn pause(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.pause",
         client_op,
         serde_json::Value::Null,
@@ -92,6 +94,7 @@ pub async fn next(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
     // 成功起播后的预取 + LRU detach 在 step_by_user 里（每首恰好一次）。
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.next",
         client_op,
         serde_json::Value::Null,
@@ -104,6 +107,7 @@ pub async fn next(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
 pub async fn previous(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.previous",
         client_op,
         serde_json::Value::Null,
@@ -118,6 +122,7 @@ pub async fn seek(state: &Arc<AppState>, body: &Value, client_op: Option<&str>) 
     let position_ms = request.position_ms;
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.seek",
         client_op,
         serde_json::json!(position_ms),
@@ -133,6 +138,7 @@ pub async fn volume(state: &Arc<AppState>, body: &Value, client_op: Option<&str>
     // 非有限值经 json! 归一成 Null：幂等输入与校验错误互不串键。
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.volume_set",
         client_op,
         serde_json::json!(volume),

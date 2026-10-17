@@ -44,6 +44,15 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // 取浮层只读钥匙。OBS 那边要把它拼进长期保存的 URL，所以给的不是 token
         // 而是一把权限收窄的钥匙（见 require_token 里的 overlay_key_allows）。
         .route("/v1/auth/overlay-key", get(get_overlay_key))
+        // AI 受限授权的官方管理面（技术路线 §5.4）：全权 token 后面，只回
+        // 安全摘要与凭据文件位置，不回显秘密。受限门面本体在下面的
+        // `ai_restricted` 独立路由组里，两组 handler 走同一应用服务。
+        .route("/v1/ai/grants", get(list_ai_grants).post(create_ai_grant))
+        .route("/v1/ai/grants/{grantId}/rotate", post(rotate_ai_grant))
+        .route(
+            "/v1/ai/grants/{grantId}",
+            axum::routing::delete(revoke_ai_grant),
+        )
         .route("/v1/state", get(get_state))
         .route("/v1/player/load", post(load))
         .route("/v1/player/play", post(play))
@@ -225,7 +234,17 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/overlay/lyric", get(overlay_lyric))
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
 
-    Router::new().route("/v1/health", get(health)).merge(api)
+    // 受限能力门面（技术路线 §5.4）：专用 Authorization header + 独立路由组，
+    // 与全权 require_token 组互不重叠——受限凭据够不到上面任何一条路由。
+    let ai_restricted = Router::new()
+        .route("/v1/ai/capabilities/context", get(ai_capabilities_context))
+        .route("/v1/ai/capabilities/call", post(ai_capabilities_call))
+        .layer(middleware::from_fn_with_state(state.clone(), require_grant));
+
+    Router::new()
+        .route("/v1/health", get(health))
+        .merge(api)
+        .merge(ai_restricted)
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +507,107 @@ async fn get_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
     Json(v)
 }
 
+// ---- AI 受限授权（技术路线 R2-G）：官方管理面与受限门面两组入口，
+// 各自的认证与投影都在这里，应用逻辑下沉到 crate::ai。----
+
+#[derive(Deserialize)]
+pub struct CreateGrantRequest {
+    #[serde(default)]
+    pub label: String,
+    pub scopes: Vec<String>,
+}
+
+async fn list_ai_grants(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let grants = crate::ai::facade::list_grants(&state).await?;
+    Ok(Json(serde_json::json!({ "grants": grants })))
+}
+
+async fn create_ai_grant(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateGrantRequest>,
+) -> ApiResult<Json<crate::ai::facade::GrantSummary>> {
+    let summary = crate::ai::facade::create_grant(&state, &body.label, &body.scopes).await?;
+    Ok(Json(summary))
+}
+
+async fn rotate_ai_grant(
+    State(state): State<Arc<AppState>>,
+    AxumPath(grant_id): AxumPath<String>,
+) -> ApiResult<Json<crate::ai::facade::GrantSummary>> {
+    let summary = crate::ai::facade::rotate_grant(&state, &grant_id).await?;
+    Ok(Json(summary))
+}
+
+async fn revoke_ai_grant(
+    State(state): State<Arc<AppState>>,
+    AxumPath(grant_id): AxumPath<String>,
+) -> ApiResult<Json<crate::ai::facade::GrantSummary>> {
+    let summary = crate::ai::facade::revoke_grant(&state, &grant_id).await?;
+    Ok(Json(summary))
+}
+
+/// 受限门面的认证层（技术路线 §5.4）：只认 `Authorization: Bearer`，不接
+/// 受 query/cookie 传递。凭据换成服务端查询出的 `GrantContext` 才放行；
+/// 失败一律不回显凭据内容，日志也不落明文。
+async fn require_grant(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let Some(presented) = presented else {
+        return unauthorized().into_response();
+    };
+    match crate::ai::facade::authenticate(&state, &presented).await {
+        Ok(ctx) => {
+            let mut request = request;
+            request.extensions_mut().insert(Arc::new(ctx));
+            next.run(request).await
+        }
+        Err(err) => {
+            tracing::warn!(code = %err.code, "restricted facade authentication failed");
+            err.into_response()
+        }
+    }
+}
+
+/// 受限门面：身份、scope、策略水位与能力表投影。
+async fn ai_capabilities_context(
+    axum::Extension(ctx): axum::Extension<Arc<crate::ai::facade::GrantContext>>,
+) -> Json<serde_json::Value> {
+    Json(crate::ai::facade::context_json(&ctx))
+}
+
+#[derive(Deserialize)]
+pub struct CapabilityCallRequest {
+    pub operation: String,
+    #[serde(default)]
+    pub client_operation_id: Option<String>,
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+}
+
+/// 受限门面的能力执行点：scope 核对与分派在 `capability::execute`，
+/// 这里只做信封拆装。
+async fn ai_capabilities_call(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(ctx): axum::Extension<Arc<crate::ai::facade::GrantContext>>,
+    Json(body): Json<CapabilityCallRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let call = crate::ai::capability::CapabilityCall {
+        operation: body.operation,
+        client_operation_id: body.client_operation_id,
+        input: body.input.unwrap_or(serde_json::Value::Null),
+    };
+    let result = crate::ai::capability::execute(&state, &ctx, call).await?;
+    Ok(Json(result))
+}
+
 /// `x-client-operation-id` 请求头：短写幂等键的客户端部分（技术路线 R2-P）。
 /// 不带即旁路，行为与从前一致；带了但非法（空、超长）由幂等入口回 400。
 /// 值本身不承担授权——`principal` 由服务端可信上下文提供。
@@ -524,6 +644,7 @@ async fn play(
     // 兼容应答不变：非失败一律回快照。带幂等键时由短写层去重（R2-P）。
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.resume",
         client_op.as_deref(),
         serde_json::Value::Null,
@@ -539,6 +660,7 @@ async fn pause(
 ) -> ApiResult<Json<serde_json::Value>> {
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.pause",
         client_op.as_deref(),
         serde_json::Value::Null,
@@ -572,6 +694,7 @@ async fn next(
     // 成功起播后的预取 + LRU detach 在 step_by_user 里（每首恰好一次）。
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.next",
         client_op.as_deref(),
         serde_json::Value::Null,
@@ -587,6 +710,7 @@ async fn previous(
 ) -> ApiResult<Json<serde_json::Value>> {
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.previous",
         client_op.as_deref(),
         serde_json::Value::Null,
@@ -693,6 +817,7 @@ async fn seek(
     let position_ms = body.position_ms;
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.seek",
         client_op.as_deref(),
         serde_json::json!(position_ms),
@@ -716,6 +841,7 @@ async fn volume(
     // 非有限值经 json! 归一成 Null：幂等输入与校验错误互不串键。
     crate::idempotency::short_write(
         state.clone(),
+        crate::idempotency::LOCAL_OWNER,
         "playback.volume_set",
         client_op.as_deref(),
         serde_json::json!(volume),

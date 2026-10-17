@@ -35,15 +35,15 @@ const CAPACITY: usize = 512;
 /// `clientOperationId` 的字节上限。这是防滥用界限，不是协议字段长度。
 const KEY_MAX_BYTES: usize = 128;
 
-/// 官方 UI/本安装调用的主体身份。grants（R2-G）落地后由认证上下文给出
-/// 真实主体，这里先固定为 local-owner 占位——它是键的一部分，不是授权。
+/// 官方 UI/本安装调用的主体身份。受限门面（grants，R2-G）的调用以 grantId
+/// 作为 principal 传入 [`short_write`]；两者共享同一张去重表但互不串键。
 pub(crate) const LOCAL_OWNER: &str = "local";
 
 /// 去重键。`principal` 与 `operation` 由服务端可信上下文提供，
 /// 绝不从请求参数接受。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ShortWriteKey {
-    principal: &'static str,
+    principal: String,
     op: &'static str,
     client_op: String,
 }
@@ -148,7 +148,8 @@ fn normalize_client_op(client_op: Option<&str>) -> Result<Option<String>, ApiErr
     Ok(Some(trimmed.to_string()))
 }
 
-/// 六种播控共用的短写执行入口。
+/// 六种播控共用的短写执行入口。`principal` 是去重键的主体段：官方 UI 传
+/// [`LOCAL_OWNER`]，受限门面传 grantId，两边不会互相合并/冲突。
 ///
 /// `client_op` 为 `None` 时完全旁路（现行行为）；否则先查表/注册，再把执行
 /// 交给 detached owner——去重记录先于执行注册并与执行一同保活，等待者断开
@@ -156,6 +157,7 @@ fn normalize_client_op(client_op: Option<&str>) -> Result<Option<String>, ApiErr
 /// `Value::Null`），它与键共同决定「同键」是合并还是冲突。
 pub(crate) async fn short_write<F, Fut>(
     state: Arc<AppState>,
+    principal: &str,
     op: &'static str,
     client_op: Option<&str>,
     input: serde_json::Value,
@@ -171,7 +173,7 @@ where
         return exec(state.clone()).await.map_err(ShortWriteError::from);
     };
     let key = ShortWriteKey {
-        principal: LOCAL_OWNER,
+        principal: principal.to_string(),
         op,
         client_op,
     };
@@ -322,6 +324,7 @@ mod tests {
             |s: Arc<AppState>| Box::pin(async move { s.step_by_user(1).await });
         let first = short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.next",
             Some("op-1"),
             Value::Null,
@@ -331,6 +334,7 @@ mod tests {
         .unwrap();
         let second = short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.next",
             Some("op-1"),
             Value::Null,
@@ -356,6 +360,7 @@ mod tests {
             .unwrap();
         short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.seek",
             Some("op-2"),
             serde_json::json!(100u64),
@@ -365,6 +370,7 @@ mod tests {
         .unwrap();
         let second = short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.seek",
             Some("op-2"),
             serde_json::json!(200u64),
@@ -383,6 +389,7 @@ mod tests {
         // 音量越界：owner 在校验处失败，不产生副作用。
         let first = short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.volume_set",
             Some("op-fail"),
             serde_json::json!(1.5),
@@ -394,6 +401,7 @@ mod tests {
         assert!(first.is_err());
         let second = short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.volume_set",
             Some("op-fail"),
             serde_json::json!(1.5),
@@ -413,7 +421,7 @@ mod tests {
     async fn full_table_rejects_before_executing_and_expired_entries_prune() {
         let (state, handle) = short_state().await;
         let fill_key = |i: usize| ShortWriteKey {
-            principal: LOCAL_OWNER,
+            principal: LOCAL_OWNER.to_string(),
             op: "playback.pause",
             client_op: format!("fill-{i}"),
         };
@@ -428,7 +436,7 @@ mod tests {
             let (stale, _rx) = Record::new_expired(Value::Null);
             records.insert(
                 ShortWriteKey {
-                    principal: LOCAL_OWNER,
+                    principal: LOCAL_OWNER.to_string(),
                     op: "playback.pause",
                     client_op: "stale".into(),
                 },
@@ -438,6 +446,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let rejected = short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.pause",
             Some("fresh"),
             Value::Null,
@@ -459,6 +468,7 @@ mod tests {
         }
         let accepted = short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.pause",
             Some("fresh"),
             Value::Null,
@@ -511,6 +521,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let a = tokio::spawn(short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.pause",
             Some("op-merge"),
             Value::Null,
@@ -519,6 +530,7 @@ mod tests {
         wait_until_registered(&state).await;
         let b = tokio::spawn(short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.pause",
             Some("op-merge"),
             Value::Null,
@@ -547,6 +559,7 @@ mod tests {
         // 等待者模拟客户端断开：整个 runner future 被丢掉。
         let waiter = tokio::spawn(short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.pause",
             Some("op-drop"),
             Value::Null,
@@ -559,6 +572,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let replay = short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.pause",
             Some("op-drop"),
             Value::Null,
@@ -578,6 +592,7 @@ mod tests {
         // 同一 clientOperationId 挂在不同 operation 下互不干扰。
         short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.pause",
             Some("op-x"),
             Value::Null,
@@ -587,6 +602,7 @@ mod tests {
         .unwrap();
         short_write(
             state.clone(),
+            LOCAL_OWNER,
             "playback.volume_set",
             Some("op-x"),
             serde_json::json!(0.5),
@@ -613,6 +629,7 @@ mod tests {
         for _ in 0..2 {
             short_write(
                 state.clone(),
+                LOCAL_OWNER,
                 "playback.pause",
                 None,
                 Value::Null,
