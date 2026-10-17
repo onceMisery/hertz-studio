@@ -445,9 +445,7 @@ impl AppState {
             .as_ref()
             .map(|c| c.id.trim().to_string())
             .unwrap_or_default();
-        let ctx = online::Ctx {
-            db: self.db.clone(),
-        };
+        let ctx = online::Ctx::new(self.db.clone());
         let first_page = online::playlist_detail(&ctx, &source, &id, 0, crate::collection::PAGE);
         let Some(prepared) = self.prepare_online_play(request, first_page).await? else {
             return Ok(None);

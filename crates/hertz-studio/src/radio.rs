@@ -134,13 +134,7 @@ impl AppState {
             radio.last_attempt = Some(std::time::Instant::now());
             (radio.session, radio.initial_generation)
         };
-        let result = online::personal_fm(
-            &online::Ctx {
-                db: self.db.clone(),
-            },
-            "netease",
-        )
-        .await;
+        let result = online::personal_fm(&online::Ctx::new(self.db.clone()), "netease").await;
         self.radio_accept(session, initial, result).await
     }
 

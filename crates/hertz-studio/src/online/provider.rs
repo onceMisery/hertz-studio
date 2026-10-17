@@ -800,9 +800,7 @@ mod tests {
     );
 
     fn lazy_context() -> Ctx {
-        Ctx {
-            db: SqlitePool::connect_lazy("sqlite::memory:").unwrap(),
-        }
+        Ctx::new(SqlitePool::connect_lazy("sqlite::memory:").unwrap())
     }
 
     #[cfg(not(feature = "full"))]
@@ -1054,9 +1052,7 @@ mod tests {
     async fn configured_readiness_reaches_sources_and_daily_state_without_network() {
         let dir =
             std::env::temp_dir().join(format!("hertz-provider-ready-{}", uuid::Uuid::new_v4()));
-        let ctx = Ctx {
-            db: vmusic_store::open(&dir).await.unwrap(),
-        };
+        let ctx = Ctx::new(vmusic_store::open(&dir).await.unwrap());
         let provider = require("jamendo").unwrap();
         assert!(!provider.is_ready(&ctx).await);
         for empty in [serde_json::json!("  "), serde_json::json!(42)] {

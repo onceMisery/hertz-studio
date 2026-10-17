@@ -48,6 +48,7 @@ mod jamendo;
 mod kugou;
 #[cfg(feature = "full")]
 mod kuwo;
+pub(crate) mod search_gate;
 // 取流候选阶梯：Candidate 出现在 StreamInfo 与 progressive::start 的公开签名里，
 // 所以对外可见；阶梯的构造规则集中在该文件。
 pub mod ladder;
@@ -86,6 +87,7 @@ pub(crate) use cred::{
 // 实现，分类白名单与字段归一只有一个 owner。
 pub(crate) use quote::{daily_quote, QuoteQuery};
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -611,6 +613,25 @@ pub(crate) fn referer(source: &str) -> Option<&'static str> {
 #[derive(Clone)]
 pub struct Ctx {
     pub db: SqlitePool,
+    /// 搜索入场限制（§4.1）。真实闸来自 `AppState.search_gate`（见
+    /// `routes::online_ctx`）；内部播放链路经 [`Ctx::new`] 拿一把从不用于
+    /// 搜索的默认闸。字段随 Ctx 走，搜索应用路径之外没有第二个入口。
+    pub(crate) gate: Arc<search_gate::SearchGate>,
+}
+
+impl Ctx {
+    /// 内部链路（取流、探测、补全）用的构造器：不执行用户搜索。
+    pub fn new(db: SqlitePool) -> Self {
+        Self {
+            db,
+            gate: Arc::new(search_gate::SearchGate::default()),
+        }
+    }
+
+    /// 用户可达路径的构造器：携带 AppState 的共享搜索闸。
+    pub(crate) fn with_gate(db: SqlitePool, gate: Arc<search_gate::SearchGate>) -> Self {
+        Self { db, gate }
+    }
 }
 
 /// 封面地址统一升到 https。
@@ -806,10 +827,19 @@ pub async fn daily_source_states(ctx: &Ctx) -> Vec<DailySourceState> {
     out
 }
 
+/// 单源搜索（用户驱动的入口）：先校验输入，再过共享搜索闸——有界等待
+/// 入场 + 从入场到读完结果 6 秒总期限（§4.1）。
 pub async fn search(ctx: &Ctx, q: SearchQuery) -> ApiResult<SearchPage> {
     if q.q.as_deref().map(str::trim).unwrap_or("").is_empty() && q.cat.is_none() {
         return Err(bad_request("需要给出搜索关键词或分类"));
     }
+    ctx.gate.run(provider::registry().search(ctx, &q)).await
+}
+
+/// 未限流的单源搜索：聚合在自身已占一份额度后，内部每源调用走这里，
+/// 不重复占额度（§4.1）；内部每源预算仍由 aggregate::collect 的 6 秒
+/// 外包期限保证。
+pub(crate) async fn search_once(ctx: &Ctx, q: SearchQuery) -> ApiResult<SearchPage> {
     provider::registry().search(ctx, &q).await
 }
 
@@ -825,23 +855,29 @@ pub async fn search_all(ctx: &Ctx, query: &str, limit: usize) -> ApiResult<Aggre
             ids.push(src.id);
         }
     }
-    // spec §2.4：单源 6s 预算，慢源不该拖慢整个聚合页。
-    let agg = aggregate::collect(
-        &ids,
-        query.trim(),
-        limit,
-        move |_src, q| {
-            let ctx = ctx.clone();
-            Box::pin(async move {
-                search(&ctx, q)
-                    .await
-                    .map_err(|e| (e.code.to_string(), e.message))
-            })
-        },
-        std::time::Duration::from_secs(6),
-    )
-    .await;
-    Ok(agg)
+    // spec §2.4：单源 6s 预算，慢源不该拖慢整个聚合页。聚合自身只占
+    // 一份入场额度，内部每源走 search_once；run_with 的总期限只防失控
+    // 驻留（collect 内部已有每源 6 秒预算）。
+    ctx.gate
+        .run_with(search_gate::AGGREGATE_DEADLINE, async move {
+            let agg = aggregate::collect(
+                &ids,
+                query.trim(),
+                limit,
+                move |_src, q| {
+                    let ctx = ctx.clone();
+                    Box::pin(async move {
+                        search_once(&ctx, q)
+                            .await
+                            .map_err(|e| (e.code.to_string(), e.message))
+                    })
+                },
+                std::time::Duration::from_secs(6),
+            )
+            .await;
+            Ok(agg)
+        })
+        .await
 }
 
 /// 试听地址。
@@ -1633,7 +1669,7 @@ mod tests {
     async fn sources_payload_carries_the_unverified_axis() {
         let dir = std::env::temp_dir().join(format!("vmusic-unverified-{}", uuid::Uuid::new_v4()));
         let db = vmusic_store::open(&dir).await.unwrap();
-        let ctx = Ctx { db };
+        let ctx = Ctx::new(db);
         let payload = list_sources(&ctx).await;
         let kugou = payload
             .iter()
@@ -1669,7 +1705,7 @@ mod tests {
     async fn playlist_write_ops_stay_behind_the_capability_gate() {
         let dir = std::env::temp_dir().join(format!("vmusic-pl-gate-{}", uuid::Uuid::new_v4()));
         let db = vmusic_store::open(&dir).await.unwrap();
-        let ctx = Ctx { db };
+        let ctx = Ctx::new(db);
 
         // 酷狗转发臂已接线，但 PlaylistWrite 位未登记（真机闸门未过）→ 404。
         #[cfg(feature = "full")]

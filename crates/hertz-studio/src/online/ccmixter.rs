@@ -284,9 +284,7 @@ mod tests {
     #[ignore = "requires access to the public ccMixter API"]
     async fn live_search_respects_keywords_and_numeric_details() {
         let dir = std::env::temp_dir().join(format!("hertz-ccmixter-{}", uuid::Uuid::new_v4()));
-        let ctx = Ctx {
-            db: vmusic_store::open(&dir).await.unwrap(),
-        };
+        let ctx = Ctx::new(vmusic_store::open(&dir).await.unwrap());
         let q = SearchQuery {
             q: Some("zzhertznonexistent12345678".into()),
             cat: None,

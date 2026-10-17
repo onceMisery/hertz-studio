@@ -934,7 +934,7 @@ mod tests {
         let db = sqlx::sqlite::SqlitePoolOptions::new()
             .connect_lazy("sqlite::memory:")
             .expect("lazy sqlite pool");
-        let ctx = Ctx { db };
+        let ctx = Ctx::new(db);
         let err = stream(&ctx, "   ", None, 128_000).await.unwrap_err();
         assert_eq!(err.code, "bad_request");
     }

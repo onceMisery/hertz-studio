@@ -862,6 +862,9 @@ pub struct AppState {
     /// 本次服务进程的实例身份（技术路线 §5.5）：每次启动随机，受限门面在
     /// context 里下发；凭据绑定它的调用在服务重启后必须重新连接。
     pub(crate) server_instance_id: String,
+    /// 共享搜索闸（§4.1）：HTTP 单源、RPC 单源、旧聚合、内部接力搜索都
+    /// 经过同一份入场额度；经 `online_ctx` 随 Ctx 分发。
+    pub(crate) search_gate: Arc<crate::online::search_gate::SearchGate>,
 }
 
 impl AppState {
@@ -1816,9 +1819,7 @@ impl AppState {
             );
             (dl, None)
         } else {
-            let ctx = crate::online::Ctx {
-                db: self.db.clone(),
-            };
+            let ctx = crate::online::Ctx::new(self.db.clone());
             let resolved = self
                 .resolve_online_stream(
                     gen,
@@ -2886,9 +2887,7 @@ impl AppState {
         {
             return;
         }
-        let ctx = crate::online::Ctx {
-            db: self.db.clone(),
-        };
+        let ctx = crate::online::Ctx::new(self.db.clone());
         let Ok(info) = crate::online::stream(&ctx, &source, &id, None, Some(quality.bps())).await
         else {
             return;
@@ -2999,9 +2998,8 @@ impl AppState {
             trigger = trigger.as_str()
         );
         self.set_buffering(true, None).await;
-        let ctx = crate::online::Ctx {
-            db: self.db.clone(),
-        };
+        // 接力搜索也走共享搜索闸：真闸来自 AppState，不绕过入场限制。
+        let ctx = crate::online::Ctx::with_gate(self.db.clone(), self.search_gate.clone());
         let searched = crate::online::search_all(&ctx, &query, 8).await;
         let agg = match searched {
             Ok(agg) => agg,
@@ -3165,9 +3163,7 @@ impl AppState {
             return None;
         }
         let ids: Vec<String> = candidates.iter().map(|(_, id)| id.clone()).collect();
-        let ctx = crate::online::Ctx {
-            db: self.db.clone(),
-        };
+        let ctx = crate::online::Ctx::new(self.db.clone());
         let quality = self.online_quality_for(source, track_id).await.bps();
         let verdicts = crate::online::probe_playable(&ctx, source, &ids, quality)
             .await
@@ -4263,6 +4259,7 @@ pub(crate) mod tests {
             tickets: crate::ticket::TicketStore::new(),
             short_writes: Default::default(),
             server_instance_id: uuid::Uuid::new_v4().to_string(),
+            search_gate: Default::default(),
         };
         (state, handle)
     }

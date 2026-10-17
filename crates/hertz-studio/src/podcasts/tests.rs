@@ -34,7 +34,7 @@ fn parsed(xml: &str) -> ParsedFeed {
 async fn context() -> (online::Ctx, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("hertz-podcasts-{}", uuid::Uuid::new_v4()));
     let db = vmusic_store::open(&dir).await.unwrap();
-    (online::Ctx { db }, dir)
+    (online::Ctx::new(db), dir)
 }
 
 async fn cleanup(ctx: online::Ctx, dir: std::path::PathBuf) {
@@ -322,9 +322,7 @@ async fn imported_episodes_survive_restart_unsubscribe_and_pagination() {
     unsubscribe(&ctx, &show.id).await.unwrap();
     assert!(subscriptions(&ctx).await.unwrap().is_empty());
     ctx.db.close().await;
-    let ctx = online::Ctx {
-        db: vmusic_store::open(&dir).await.unwrap(),
-    };
+    let ctx = online::Ctx::new(vmusic_store::open(&dir).await.unwrap());
     let detail = episode_detail(&ctx, &id).await.unwrap();
     assert_eq!(detail.title, "第一集：茶 & 故事");
     assert_eq!(detail.source, "podcast");
@@ -390,9 +388,7 @@ async fn feed_page_keeps_one_snapshot_when_refresh_commits_between_its_reads() {
     let (ctx, dir) = context().await;
     persist_feed(&ctx, &parsed(RSS)).await.unwrap();
     // 独立连接池保证刷新提交来自另一个 SQLite 连接。
-    let writer = online::Ctx {
-        db: vmusic_store::open(&dir).await.unwrap(),
-    };
+    let writer = online::Ctx::new(vmusic_store::open(&dir).await.unwrap());
     let page_read = store::begin_page(&ctx, FEED).await.unwrap();
     let mut refreshed = parsed(&RSS.replace("第一集：茶 & 故事", "刷新后的第一集"));
     refreshed.episodes.truncate(1);

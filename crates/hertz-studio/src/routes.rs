@@ -2969,9 +2969,7 @@ async fn online_cookie(
 
 /// 每个上游请求都要摸到设置表（读用户自己填的凭据），所以统一从这里造 Ctx。
 pub(crate) fn online_ctx(state: &AppState) -> online::Ctx {
-    online::Ctx {
-        db: state.db.clone(),
-    }
+    online::Ctx::with_gate(state.db.clone(), state.search_gate.clone())
 }
 
 /// 没带 source 参数时用注册表的第一个音源，而不是把名字再抄一遍进代码。

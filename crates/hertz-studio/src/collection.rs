@@ -167,9 +167,7 @@ impl AppState {
             offset,
         } = next;
         let result = online::playlist_detail(
-            &online::Ctx {
-                db: self.db.clone(),
-            },
+            &online::Ctx::new(self.db.clone()),
             &source,
             &id,
             offset,
