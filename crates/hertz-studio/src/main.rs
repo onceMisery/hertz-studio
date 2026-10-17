@@ -152,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("hertz-studio-ai: --mcp-stdio 需要显式 --data-dir");
             std::process::exit(2);
         };
-        init_logging("info", "plain");
+        init_logging_stderr("info");
         let cfg = hertz_studio::ai::mcp::adapter::AdapterConfig {
             data_dir,
             grant_id: args.grant,
@@ -713,6 +713,17 @@ fn init_logging(level: &str, format: &str) {
             let _ = builder.try_init();
         }
     }
+}
+
+/// MCP 适配进程专用：stdout 是 SDK transport，一行日志污染都会让帧解析
+/// 失败——日志（含 rmcp 自己的）一律去 stderr（技术路线 §5.3）。
+fn init_logging_stderr(level: &str) {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 struct Args {
