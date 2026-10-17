@@ -20,6 +20,8 @@ license, see `cargo deny list` or each crate's own LICENSE file):
   - tracing, tracing-subscriber       (MIT)
   - thiserror, anyhow                 (MIT / Apache-2.0)
   - uuid, rand, walkdir, dirs         (MIT / Apache-2.0)
+  - rmcp                              (Apache-2.0 / MIT)
+  - fslock, getrandom, sha2           (MIT / Apache-2.0)
 
 ---------------------------------------------------------------------------
 Vendored assets

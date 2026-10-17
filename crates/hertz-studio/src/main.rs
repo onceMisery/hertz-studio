@@ -143,6 +143,23 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // MCP 适配进程（技术路线 §5.3）：必须在数据迁移、bootstrap、数据库、
+    // 音频初始化与 HTTP 监听之前分流。它只读显式 DataDir 里的发现与凭据
+    // 文件，业务副作用全在已运行的独立服务里；日志走 stderr，stdout 专属
+    // transport。DataDir 必须显式给出——适配器不猜默认目录。
+    if args.mcp_stdio {
+        let Some(data_dir) = args.data_dir.clone() else {
+            eprintln!("hertz-studio-ai: --mcp-stdio 需要显式 --data-dir");
+            std::process::exit(2);
+        };
+        init_logging("info", "plain");
+        let cfg = hertz_studio::ai::mcp::adapter::AdapterConfig {
+            data_dir,
+            grant_id: args.grant,
+        };
+        return hertz_studio::ai::mcp::server::run_stdio(cfg).await;
+    }
+
     // 改名前的数据目录叫 mmusic-studio；必须在任何读写路径碰到目录之前搬完，
     // 否则 prepare 会先把新目录建成空库。
     config::migrate_legacy_data_dir();
@@ -201,6 +218,40 @@ async fn main() -> anyhow::Result<()> {
     let actual_port = local.port();
 
     let discovery = state::write_discovery(&state, actual_port).await?;
+    // AI 受限门面的发现文件（技术路线 §5.5）：只在**实际绑定** IPv4 回环
+    // 时发布，且必须拿到 AI runner 锁——锁被其它进程持有（双开）就不发布，
+    // 受限门面保持不可对接；0.0.0.0 / 具体网卡 / IPv6 不发布这个实验入口。
+    // 锁以进程生命周期持有（forget 跳过 Drop，OS 在退出时统一释放）。
+    if local.ip() == std::net::IpAddr::from([127, 0, 0, 1]) {
+        match hertz_studio::ai::lock::AiRunnerLock::try_acquire(&state.data_dir) {
+            Ok(Some(lock)) => {
+                lock.leak();
+                let instance = vmusic_store::ai::get_or_create_instance(&state.db).await?;
+                let doc = hertz_studio::ai::mcp::discovery::DiscoveryDoc {
+                    version: hertz_studio::ai::mcp::discovery::DISCOVERY_VERSION,
+                    pid: std::process::id(),
+                    port: actual_port,
+                    protocol_version: vmusic_core::PROTOCOL_VERSION.to_string(),
+                    owner_instance_id: instance.owner_instance_id,
+                    server_instance_id: state.server_instance_id().to_string(),
+                    edition: hertz_studio::edition::NAME.to_string(),
+                };
+                match hertz_studio::ai::mcp::discovery::publish(&state.data_dir, &doc) {
+                    Ok(()) => {
+                        println!(
+                            "  ai-mcp   {}",
+                            hertz_studio::ai::mcp::discovery::path(&state.data_dir).display()
+                        );
+                    }
+                    Err(e) => tracing::warn!("AI 发现文件发布失败: {e}"),
+                }
+            }
+            Ok(None) => {
+                tracing::warn!("AI runner 锁被其它进程持有，跳过 AI 发现发布");
+            }
+            Err(e) => tracing::warn!("AI runner 锁获取失败: {e}"),
+        }
+    }
     // 打印的地址按**实际绑定**的接口来（绑 0.0.0.0 时回落到 127.0.0.1，那是本机
     // 访问的正确入口；绑具体网卡时给那个地址，否则用户会照着 127.0.0.1 去别的机器上试）。
     let shown = if local.ip().is_unspecified() {
@@ -239,6 +290,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("shutting down");
             shutdown_state.audio.shutdown();
             state::remove_discovery(&shutdown_state.data_dir).await;
+            hertz_studio::ai::mcp::discovery::remove(&shutdown_state.data_dir);
         })
         .await?;
 
@@ -674,6 +726,8 @@ struct Args {
     port: Option<u16>,
     data_dir: Option<std::path::PathBuf>,
     version: bool,
+    mcp_stdio: bool,
+    grant: Option<String>,
 }
 
 impl Args {
@@ -685,6 +739,8 @@ impl Args {
             port: None,
             data_dir: None,
             version: false,
+            mcp_stdio: false,
+            grant: None,
         };
         let mut iter = std::env::args().skip(1);
         while let Some(arg) = iter.next() {
@@ -692,6 +748,8 @@ impl Args {
                 "-h" | "--help" => args.help = true,
                 "--version" => args.version = true,
                 "--open" => args.open = true,
+                "--mcp-stdio" => args.mcp_stdio = true,
+                "--grant" => args.grant = iter.next(),
                 "--bind" => args.bind = iter.next(),
                 "--port" => args.port = iter.next().and_then(|v| v.parse().ok()),
                 "--data-dir" => args.data_dir = iter.next().map(std::path::PathBuf::from),

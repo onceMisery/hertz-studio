@@ -865,6 +865,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// 本次服务进程的实例身份（技术路线 §5.5）。字段保持 pub(crate)，
+    /// 传输层（独立 bin 与插件宿主）经这里只读访问。
+    pub fn server_instance_id(&self) -> &str {
+        &self.server_instance_id
+    }
+
     /// 缓存根目录（`cache/`），下面是 `covers/` 与 `online/` 两个子目录。
     ///
     /// 需要它而不是 `cover_dir()` 的地方只有一类：调

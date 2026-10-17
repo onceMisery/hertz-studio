@@ -15,7 +15,7 @@
 //! `downloads`、`quality`、`keep`、`protected` 等），插件的 dispatcher 必须留在本 crate
 //! 内部才碰得到，所以 `rpc` 在这里而不在 `plugin/backend`。
 
-pub(crate) mod ai;
+pub mod ai;
 pub mod bootstrap;
 pub mod collection;
 pub mod complete;
