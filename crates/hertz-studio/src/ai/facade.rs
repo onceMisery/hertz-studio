@@ -577,7 +577,7 @@ mod tests {
         );
         assert_eq!(value["instance"]["edition"], crate::edition::NAME);
         let capabilities = value["capabilities"].as_array().unwrap();
-        assert_eq!(capabilities.len(), 7);
+        assert_eq!(capabilities.len(), 8);
         assert!(capabilities
             .iter()
             .all(|c| c["scope"].is_string() && c["operation"].is_string()));

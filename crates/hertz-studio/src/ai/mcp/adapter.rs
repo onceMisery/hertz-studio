@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use vmusic_core::PROTOCOL_VERSION;
 
 use super::discovery::{self, DiscoveryDoc};
-use crate::ai::capability::{find, Effect, CAPABILITIES, CAPABILITY_VERSION};
+use crate::ai::capability::{find, scope_satisfied, Effect, CAPABILITIES, CAPABILITY_VERSION};
 
 /// 观察者总等待上限（§8.3）：适配进程对门面的每次调用（含认证与排队）
 /// 都在这个期限内给出结果或错误。
@@ -217,11 +217,13 @@ fn input_schema(operation: &str) -> rmcp::model::JsonObject {
 pub(crate) fn tools_for(scopes: &BTreeSet<String>) -> Vec<Tool> {
     CAPABILITIES
         .iter()
-        .filter(|cap| scopes.contains(cap.scope))
+        // 伞 scope（playback:control）在这里同样隐含六种传输播控。
+        .filter(|cap| scope_satisfied(scopes, cap.scope))
         .map(|cap| {
             let mut annotations = ToolAnnotations::default();
             annotations.read_only_hint = Some(cap.effect == Effect::ReadOnly);
-            let mut tool = Tool::new(cap.operation, cap.description, input_schema(cap.operation));
+            // 工具名用 MCP 命名（§5.2 A1 表），门面分派两种名字都认。
+            let mut tool = Tool::new(cap.mcp_name, cap.description, input_schema(cap.operation));
             tool.annotations = Some(annotations);
             tool
         })
@@ -563,7 +565,7 @@ mod tests {
         read_only.insert("playback:read".to_string());
         let tools = tools_for(&read_only);
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "playback.snapshot_get");
+        assert_eq!(tools[0].name, "playback_snapshot_get");
         assert_eq!(
             tools[0].annotations.as_ref().unwrap().read_only_hint,
             Some(true)
@@ -577,7 +579,7 @@ mod tests {
             .iter()
             .all(|t| t.annotations.as_ref().unwrap().read_only_hint == Some(false)));
         // 变更工具的入参 schema 有 additionalProperties:false（投影纪律）。
-        let seek = tools.iter().find(|t| t.name == "playback.seek").unwrap();
+        let seek = tools.iter().find(|t| t.name == "playback_seek").unwrap();
         assert_eq!(
             seek.input_schema.get("additionalProperties"),
             Some(&json!(false))
