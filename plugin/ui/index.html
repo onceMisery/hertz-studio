@@ -493,13 +493,14 @@
 
       <div class="scan-panel" id="scan-panel" hidden>
         <div class="scan-row">
-          <input id="scan-root" type="text" placeholder="音乐目录，例如 D:\Music" autocomplete="off">
+          <input id="scan-root" type="text" placeholder="音乐目录，例如 D:\Music" autocomplete="off" aria-describedby="scan-format-note">
           <button id="scan-btn" class="btn primary">添加并自动同步</button>
           <button id="scan-cancel" class="btn" type="button" hidden>取消扫描</button>
         </div>
         <div class="scan-history" id="scan-history" hidden></div>
         <div id="scan-roots" class="scan-roots" aria-label="已添加音乐目录"></div>
         <p class="hint">启用的目录会自动同步文件变化。移除目录会停止同步，保留已收录歌曲和原文件。</p>
+        <p class="hint" id="scan-format-note">扫描会检查 Opus、APE、WMA，但当前不能解码，无法读取元数据的文件会列入扫描失败。MP3、FLAC、WAV、AAC、ALAC、Vorbis 等也取决于文件完整性和实际编码；修改扩展名不能转换格式。</p>
         <div class="scan-progress"><div class="scan-bar" id="scan-bar"></div></div>
         <div class="hint" id="scan-label" role="status">尚未扫描</div>
         <details id="scan-errors" class="scan-errors" hidden><summary>扫描失败明细</summary><ul></ul></details>
@@ -2114,9 +2115,11 @@
         <span id="np-lyric-offset-value" aria-live="polite">0.0s</span>
         <button type="button" id="np-lyric-offset-up" class="np-lyric-btn" title="歌词延后 0.5 秒" aria-label="歌词延后零点五秒">+0.5s</button>
       </span>
-      <input type="file" id="np-lyric-file" accept=".lrc,text/plain" hidden>
+      <input type="file" id="np-lyric-file" accept=".lrc,.ttml,.xml,text/plain,application/ttml+xml,application/xml" hidden>
       <button type="button" id="np-lyric-import" class="np-lyric-btn">导入歌词</button>
+      <button type="button" id="np-lyric-search" class="np-lyric-btn" hidden>查找在线歌词</button>
       <button type="button" id="np-lyric-clear" class="np-lyric-btn" hidden>清除导入</button>
+      <div id="np-lyric-import-panel" class="np-lyric-import-panel" hidden></div>
     </div>
 
     <!-- 底部播放控制区域：跳转到舞台播放页面 -->
@@ -2182,9 +2185,16 @@
      必须排在 creative-stage.js 之后——它读CreativeStage 的场景表。 -->
 <script defer src="creative-anime.js"></script>
 <script defer src="creative-share-code.js"></script>
+<script defer src="creative-contract.js"></script>
+<script defer src="creative-draft.js"></script>
+<script defer src="creative-project.js"></script>
+<script defer src="creative-arrangement.js"></script>
+<script defer src="creative-pitch.js"></script>
+<script defer src="creative-templates.js"></script>
 <!-- 离线提示词编译器：compile 只读 CreativeStage.scenes/spec，写入走
      CreativeStage.applyIntent；排在编排层之后、工坊之前。 -->
 <script defer src="creative-prompt.js"></script>
+<script defer src="ai-ledger.js"></script>
 <script defer src="workshop.js"></script>
 <!-- 节拍电影相机：纯时间轴 + 驱动（消费 /v1/stage/beatmap） -->
 <script defer src="stage-cinema.js"></script>
@@ -2202,6 +2212,14 @@
 <script defer src="stanza/stanza-sonnet-fx.js"></script>
 <script defer src="stanza/stanza-sonnet.js"></script>
 <script defer src="stanza/stanza-tempera.js"></script>
+<!-- 自研字形引擎：SDF → 图集 → GL → 情绪场，最后是 stanza 渲染器；
+     全部排在 stage3d.js 之前，注册发生在 stage3d 的模块体里。 -->
+<script defer src="lyric-glyph-sdf.js"></script>
+<script defer src="lyric-glyph-atlas.js"></script>
+<script defer src="lyric-glyph-gl.js"></script>
+<script defer src="lyric-emotion-field.js"></script>
+<script defer src="lyric-emotion.js"></script>
+<script defer src="stanza/stanza-glyph.js"></script>
 <!-- Home and stage share one Three.js background and one playback owner. -->
 <div class="sp" id="space3d" data-page="closed" data-fx-zone="stage" aria-hidden="true" aria-modal="true" role="dialog" aria-label="三维空间" tabindex="-1">
   <div class="sp-bg" id="sp-bg" aria-hidden="true"></div>
@@ -2308,6 +2326,7 @@
 <script defer src="stanza/stanza-starborn.js"></script>
 <script defer src="stage-lyrics.js"></script>
 <script defer src="now-playing.js"></script>
+<script defer src="lyric-import.js"></script>
 <!-- 3D 歌单架（封面流）：只依赖 Stage 只读出口，必须排在 stage3d.js 之前 -->
 <script defer src="stage-shelf.js"></script>
 <script defer src="stage-settings.js"></script>
@@ -2335,6 +2354,7 @@
 <script defer src="vendor/qrcode.js"></script>
 <script defer src="online-login.js"></script>
 <!-- edition:end -->
+<script defer src="search-session.js"></script>
 <script defer src="online.js"></script>
 <script defer src="podcasts.js"></script>
 <script defer src="online-playlists.js"></script>

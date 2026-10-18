@@ -31,6 +31,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
 
 const ROOT = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
@@ -129,9 +131,8 @@ function rustBody(src, head) {
     if (overlay) {
       ok(count(overlay, 'lyrics_user_offset(') === 1,
         '浮层的在线分支要加每曲偏移（本地分支那份额外叠加保持原样）');
-      ok(count(overlay, 'global_offset;') === 1, '全局偏移只在末尾统一加这一次');
-      ok(count(overlay, 'apply_offset(&mut doc)') === 1,
-        '浮层这条链应用一次，不多不少（注释里提这个名字不算应用）');
+      ok(count(overlay, 'apply_presentation_offset(&mut doc, global_offset)') === 1,
+        '浮层按主舞台相同顺序应用来源/每曲与全局偏移，包含零点饱和');
     }
     const setter = rustBody(routes, 'async fn set_lyrics_offset(');
     ok(setter, '偏移写入端点抓得到');
@@ -150,8 +151,28 @@ function rustBody(src, head) {
     ok(/doc\.user_offset_ms/.test(stage),
       '舞台侧的偏移读数来自 doc.user_offset_ms（与浮层同一份语义，不是第二次加）');
     const app = read('plugin/ui/app.js');
-    ok(/const offset = \(doc\.user_offset_ms \|\| 0\) \+ globalLyricOffsetMs\(\);/.test(app),
-      '全局偏移在前端 stageDoc 这唯一一处叠加');
+    const state = { settings: { lyrics_staff_policy: 'keep', global_lyric_offset_ms: 500 } };
+    const context = vm.createContext({state, Set, Map});
+    vm.runInContext(app.slice(app.indexOf('const LYRIC_STAFF_DEFAULT ='), app.indexOf('// online.js 的在线直取路径')), context);
+    const doc = {user_offset_ms: 200, lines: [{start_ms:1000,end_ms:2000,text:'hello',words:[{start_ms:1000,end_ms:1500,text:'hello'}]}]};
+    const original = JSON.stringify(doc);
+    context.doc = doc;
+    const shifted = vm.runInContext('stageDoc(doc)', context);
+    assert.equal(shifted.lines[0].start_ms,1500);
+    assert.equal(shifted.lines[0].words[0].end_ms,2000);
+    assert.equal(shifted.user_offset_ms,200,'Global offset must not become a per-track nudge');
+    assert.equal(JSON.stringify(doc),original,'Presentation cannot mutate the cached raw response');
+    assert.equal(vm.runInContext('stageDoc(doc).lines[0].start_ms',context),1500,'Repeated presentation cannot accumulate offsets');
+    state.settings.global_lyric_offset_ms=-2000;
+    assert.equal(vm.runInContext('stageDoc(doc).lines[0].start_ms',context),0);
+    state.settings.global_lyric_offset_ms=0;
+    state.settings.lyrics_staff_policy='hide';
+    context.doc={lines:[{start_ms:0,text:'作词：甲'},{start_ms:1000,text:'keep'},{start_ms:2000,text:'skip'}],translation:['staff','translated','skip'],romanization:['staff','roman','skip']};
+    state.settings.lyrics_filter_enabled=true;state.settings.lyrics_filter_pattern='^skip$';
+    const filtered=vm.runInContext('stageDoc(doc)',context);
+    assert.deepEqual(Array.from(filtered.translation),['translated']);
+    assert.deepEqual(Array.from(filtered.romanization),['roman']);
+    ok(true,'真实 stageDoc：行/词偏移、饱和、重复呈现、校准读数与译文/罗马音过滤保持一致');
   }
 
   console.log(`\n歌词校准契约检查：${checks} 项` + (failures ? `，${failures} 项失败` : '全部通过'));

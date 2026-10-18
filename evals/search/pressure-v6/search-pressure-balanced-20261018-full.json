@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "releaseEligible": false,
+  "startedAt": "2026-10-18T08:44:03.283Z",
+  "environment": {
+    "os": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13620H",
+    "logicalCpus": 16,
+    "totalMemoryBytes": 34049220608,
+    "node": "v22.14.0"
+  },
+  "binaryHash": "c65c38460b11a16c7a3d731413a0f8d9527d3f4838c033a877ab2e44b2fd5b03",
+  "probeFile": "search-pressure-balanced-20261018-full-probe.json",
+  "logFile": "search-pressure-balanced-20261018-full-probe.log",
+  "memoryFile": "search-pressure-balanced-20261018-full-memory.jsonl",
+  "processMemory": {
+    "observed": false,
+    "scope": "test-process-including-driver-and-upstream",
+    "productionServiceRssVerified": false,
+    "phaseCorrelation": "stdout-receipt",
+    "intervalMs": 500,
+    "phasesReceived": [],
+    "samples": [],
+    "processId": 42064
+  },
+  "failure": {
+    "name": "Error",
+    "message": "Memory sampler failed"
+  },
+  "completedAt": "2026-10-18T08:44:03.936Z",
+  "logHash": "684b2bc2eeb080e25f8a9e68b3cd7ba5a7a505ea2b699e1f3d3320056dc1531e",
+  "memoryHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

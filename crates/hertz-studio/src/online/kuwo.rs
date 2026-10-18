@@ -425,9 +425,7 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
     if text.trim().is_empty() {
         return Ok(vmusic_core::LyricDocument::empty());
     }
-    let mut doc = vmusic_lyrics::parse_lrc(&text);
-    vmusic_lyrics::apply_offset(&mut doc);
-    Ok(doc)
+    Ok(vmusic_lyrics::parse_lrc(&text))
 }
 
 /// lrclist → LRC 文本。time 秒（"0.0" / "12.34"）；脏数据按 0 处理。

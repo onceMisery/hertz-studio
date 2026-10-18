@@ -11,6 +11,9 @@ pub mod null;
 #[cfg(feature = "playback")]
 pub mod cpal_backend;
 
+#[cfg(feature = "playback")]
+pub mod resample;
+
 pub use actor::{spawn, AudioEvent, AudioHandle, BackendKind};
 pub use null::NullBackend;
 pub use vmusic_core::PrepareResult;

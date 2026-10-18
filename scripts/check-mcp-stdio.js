@@ -67,13 +67,13 @@ function httpJson(method, url, { body, headers } = {}) {
 
 /** MCP stdio 客户端：行分隔 JSON-RPC，id 关联应答。 */
 class McpClient {
-  constructor(process) {
-    this.process = process;
+  constructor(child) {
+    this.process = child;
     this.buffer = '';
     this.pending = new Map();
     this.nextId = 1;
-    process.stdout.on('data', (chunk) => this.#onData(chunk));
-    process.stderr.on('data', (chunk) => process.stderr.write(`  [adapter] ${chunk}`));
+    child.stdout.on('data', (chunk) => this.#onData(chunk));
+    child.stderr.on('data', (chunk) => process.stderr.write(`  [adapter] ${chunk}`));
   }
 
   #onData(chunk) {
@@ -149,11 +149,16 @@ async function main() {
     const token = fs.readFileSync(path.join(dataDir, 'token'), 'utf8').trim();
     const created = await httpJson('POST', `${base}/v1/ai/grants`, {
       headers: { authorization: `Bearer ${token}` },
-      body: { label: 'e2e', scopes: ['playback:control', 'playback:read', 'library:read'] },
+      body: { label: 'e2e', scopes: ['playback:control', 'playback:read', 'library:read', 'stage:capabilities_read', 'stage:intent_validate'] },
     });
     if (created.status !== 200) fail(`创建 grant 失败: ${created.status}`);
     const credential = fs.readFileSync(created.body.credential_path, 'utf8').trim();
     console.log(`grant: ${created.body.grant_id}`);
+
+    const enabled = await httpJson('PUT', `${base}/v1/settings`, {
+      headers: { authorization: `Bearer ${token}` }, body: { ai_stage_intent_tools: true },
+    });
+    if (enabled.status !== 200) fail('开启舞台契约工具失败');
 
     // 起适配器（真协议客户端这边的「被测服务」）。
     const adapter = spawn(
@@ -174,7 +179,7 @@ async function main() {
     console.log(`initialize: 协议 ${init.result.protocolVersion}, 服务 ${init.result.serverInfo.name}`);
     client.notify('notifications/initialized', {});
 
-    // tools/list：全 scope 会话应看到 8 个工具，命名与 A1 表一致。
+    // tools/list：全 scope + 舞台开关会话应看到 10 个工具，命名与 A1 表一致。
     const listed = await client.request('tools/list', {});
     const names = listed.result.tools.map((tool) => tool.name);
     for (const expected of [
@@ -185,7 +190,7 @@ async function main() {
     ]) {
       if (!names.includes(expected)) fail(`tools/list 缺少 ${expected}（实际: ${names.join(', ')}）`);
     }
-    if (listed.result.tools.length !== 8) fail(`工具数应为 8，实际 ${listed.result.tools.length}`);
+    if (listed.result.tools.length !== 10) fail(`工具数应为 10，实际 ${listed.result.tools.length}`);
     console.log(`tools/list: ${names.length} 个工具`);
 
     // tools/call：同一 clientOperationId 两次 pause 必须是同一事实
@@ -222,6 +227,27 @@ async function main() {
       fail('library_search 应返回 data.tracks 数组');
     }
     console.log('tools/call library_search: ok（空曲库返回空数组）');
+
+    const stage = await client.request('tools/call', {
+      name: 'stage_capabilities_get', arguments: { limit: 2 },
+    });
+    if (stage.result.isError) fail('stage_capabilities_get 失败');
+    const contract = stage.result.structuredContent;
+    if (contract.scenes.length !== 2 || contract.nextOffset !== 2) fail('契约分页不一致');
+    const scene = contract.scenes[0].id;
+    const artifact = { artifactVersion: 1, mode: 'create', intent: { version: 1, scene, patch: {} },
+      schemaVersion: contract.schemaVersion, schemaHash: contract.schemaHash,
+      basePresetHash: contract.basePresetHashes[scene] };
+    const valid = await client.request('tools/call', { name: 'stage_intent_validate', arguments: artifact });
+    if (valid.result.isError || valid.result.structuredContent.validationStage !== 'intent'
+      || valid.result.structuredContent.persisted !== false || valid.result.structuredContent.applied !== false) {
+      fail('intent 校验层次或副作用标记不正确');
+    }
+    const invalid = await client.request('tools/call', {
+      name: 'stage_intent_validate', arguments: { ...artifact, basePresetHash: 'stale' },
+    });
+    if (!invalid.result.isError) fail('旧版本草稿必须拒绝');
+    console.log('tools/call stage: paged contract → intent-only validation → stale hash rejected');
 
     // 未知工具：协议级错误（不是工具级结果）。
     const unknown = await client.request('tools/call', {

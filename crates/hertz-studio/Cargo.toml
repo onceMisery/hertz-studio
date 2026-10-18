@@ -50,3 +50,7 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client"] }
+tokio = { workspace = true, features = ["process"] }

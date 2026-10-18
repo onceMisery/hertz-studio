@@ -291,9 +291,26 @@ function surfaceDepth(index, x, y) {
   return reliefDepth(index,x,y);
 }
 
-export function transitionStyle(cycle) {
+export function transitionStyle(cycle, sign = 0) {
   const n = Math.max(0,Math.floor(Number(cycle)||0));
-  return { gather:n%5, disperse:(n*3+Math.floor(n/5)+1)%5, direction:n%2 ? -1 : 1 };
+  const s = Math.max(0,Math.floor(Number(sign)||0));
+  // 座次也参与配方：同一轮里十二座各有各的轨迹，下一轮同一座又是另一种。
+  // hash 只做确定性的整数混合，跳转回同一时刻仍得到相同配方。
+  const hash = (salt) => {
+    let h = Math.imul(n + 0x9e3779b9, 0x85ebca6b)
+      ^ Math.imul(s + 0x7f4a7c15, 0xc2b2ae35) ^ salt;
+    h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+    h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
+    return ((h ^ (h >>> 15)) >>> 0) / 4294967296;
+  };
+  return {
+    // 八种轨迹：旋涡、纵深星流、波浪、轨道、放射、螺旋、星雨、脉冲。
+    gather: (n*3+s*5)%8, disperse: (n*5+s*3+1)%8,
+    direction: (n+s)%2 ? -1 : 1,
+    stagger: .30+hash(0x1f)*.30,   // 粒子错峰窗口
+    spin: .65+hash(0x2f)*.90,      // 旋进速度
+    arc: .72+hash(0x3f)*.65,       // 飞行弧幅
+  };
 }
 export function buildConstellation(index) {
   const i = ((index % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;

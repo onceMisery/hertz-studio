@@ -60,17 +60,23 @@ sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
 load('creative-gl.js', sandbox);
+load('backgrounds.js', sandbox);
+sandbox.Backgrounds = sandbox.window.Backgrounds;
 load('handdrawn.js', sandbox);
 // creative-stage 的模块顶层用裸标识符引用同伴（BASE_SPEC 构建要
 // CreativeGL.cameraSpec()、basePreset 要 HandDrawn.defaults），镜像成
 // 沙箱全局。
 sandbox.CreativeGL = sandbox.window.CreativeGL;
+load('creative-anime.js', sandbox);
 sandbox.HandDrawn = sandbox.window.HandDrawn;
 load('creative-share-code.js', sandbox);
 load('creative-stage.js', sandbox);
 // share-code 的 encode/decode 用裸 CreativeStage 引用，同样镜像。
 sandbox.CreativeStage = sandbox.window.CreativeStage;
 sandbox.CreativeShareCode = sandbox.window.CreativeShareCode;
+load('creative-contract.js', sandbox);
+load('creative-draft.js', sandbox);
+const Draft = sandbox.window.CreativeDraft;
 
 const GL = sandbox.window.CreativeGL;
 const Stage = sandbox.window.CreativeStage;
@@ -83,6 +89,30 @@ if (typeof Stage.materializeIntent !== 'function' || typeof Stage.canonicalBasel
 function deepEqual(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
+
+// Every server-advertised parameter must be consumed by the actual materializer.
+const contract = JSON.parse(fs.readFileSync(path.join(ROOT,
+  'crates/hertz-studio/src/ai/stage-contract/stage-contract.json'), 'utf8'));
+if (!deepEqual(contract.scenes.map(s => s.id), GL.scenes().map(s => s.id))) {
+  fail('服务端契约必须覆盖全部已注册场景');
+}
+for (const scene of contract.scenes) {
+  const sceneOnly = Stage.materializeIntent(null, { version: 1, scene: scene.id, patch: {} });
+  if (!sceneOnly.ok || !deepEqual(sceneOnly.preset, Stage.canonicalBaseline(scene.id))) {
+    fail(`仅指定场景的创建意图必须物化默认预置: ${scene.id}`);
+  }
+  for (const param of scene.params) {
+    const key = 'sc.' + param.name;
+    const value = (param.min + param.max) / 2;
+    const result = Stage.materializeIntent(null, {
+      version: 1, scene: scene.id, patch: { [key]: value },
+    });
+    if (!result.ok || !result.applied.includes(key) || result.ignored.length) {
+      fail(`契约参数不能物化: ${scene.id}.${key}`);
+    }
+  }
+}
+console.log('0. 全部场景契约参数均可被前端消费 ✓');
 
 // ---- 1. create 模式确定性 + 基线无关 ----
 // patch 值取 orb 半径量程的中点（量程外值的夹位在负例段单独验证）。
@@ -179,6 +209,48 @@ console.log('3. 校验负例 / ignored / 夹位 ✓');
     fail('applyIntent 必须委托 materializeIntent（提交等价的结构保证）');
   }
   console.log('5. applyIntent ≡ materializeIntent + 提交（结构约束）✓');
+
+  // Artifacts use the same real registry/background/hand owners as production.
+  const assert = require('node:assert/strict');
+  const { createHash, webcrypto } = require('node:crypto');
+  const canonical = Draft.canonical;
+  const digest = v => createHash('sha256').update(canonical(v)).digest('hex');
+  for (const value of ['', '中文与 emoji 🎵', { nested: [true, 1.5, null] }, 'a'.repeat(1000)]) {
+    assert.equal(await Draft.hash(value), digest(value), 'opaque-frame SHA-256 fallback');
+  }
+  sandbox.crypto = webcrypto;
+  const untouched = canonical(Stage.preset());
+  for (const scene of contract.scenes) {
+    const p = scene.params[0];
+    const common = contract.commonParams.find(p => p.name === 'look.grade');
+    const input = { version: 1, scene: scene.id,
+      patch: { ['sc.' + p.name]: p.max + 1000, [common.name]: common.default } };
+    const artifact = Draft.artifact(input);
+    const out = await Draft.prepare(JSON.stringify(artifact));
+    assert.equal(out.preset.sc[p.name], p.max);
+    assert.ok(out.diagnostics.find(d => d.path === 'sc.' + p.name).clamped);
+    assert.equal(canonical(await Share.decode(out.shareCode)), canonical(out.preset));
+    assert.equal(out.proposalHash, digest(artifact));
+    assert.equal(canonical(Stage.preset()), untouched, 'preparation must not commit a preset');
+    for (const field of ['schemaVersion', 'schemaHash', 'basePresetHash', 'mode']) {
+      await assert.rejects(Draft.prepare({ ...artifact, [field]: 'stale' }));
+    }
+  }
+  const valid = Draft.artifact(intent);
+  for (const bad of [
+    { ...valid, surprise: 1 }, { ...valid, intent: { ...intent, patch: { 'sc.unknown': 1 } } },
+    { ...valid, intent: { ...intent, patch: { 'sc.radius': '1' } } },
+    { ...valid, intent: { ...intent, hand: { on: true, extra: 1 } } },
+    { ...valid, intent: { ...intent, ruleIds: [1] } },
+    { ...valid, intent: { ...intent, patch: { 'sc.radius': Infinity } } },
+    JSON.parse(JSON.stringify(valid).replace('"patch":{', '"patch":{"__proto__":1,')),
+    ' '.repeat(16385) + JSON.stringify(valid),
+    { ...valid, intent: { ...intent, ruleIds: ['中'.repeat(6000)] } },
+  ]) await assert.rejects(Draft.prepare(bad));
+  const mutated = JSON.parse(JSON.stringify(valid));
+  const pending = Draft.prepare(mutated); mutated.intent.scene = 'unregistered';
+  assert.equal((await pending).artifact.intent.scene, 'orb', 'async preparation snapshots input');
+  console.log('6. 全场景草稿、hash、codec、边界与异步不可变性 ✓');
 
   console.log('✓ R3-K 物化检查全部通过');
   process.exit(0);

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "diagnosticOnly": true,
+  "releaseEligible": false,
+  "rawHash": "d4c4d547c5ff1dfc7d0a84c0692cf2b7e42f46847d3d7d1d58c286b8ecf67b98",
+  "compressedHash": "1e66c1ded5d4ce327ee7a3b6b689d4bd18bf9d98ba98ce1627fb3a98010cb1cc",
+  "binaryHash": "b7b304f642369f4f2c4eb73b01c476a7b806e80b226da22f62adf89add930081",
+  "sourceHashes": {
+    "Cargo.lock": "aee27bb3a1e90730ddbb21da42b4cbfed6abd281b49e42500e82cec5f670cbc1",
+    "crates/vmusic-store/src/lib.rs": "c64c5bf0f221272cfb27fad3d1591a744cc43e6127ea4b4d2dee04f9f0e4d953",
+    "crates/vmusic-store/examples/profile-search-candidates.rs": "8d2b0b86059b46e7476e691528f92c78d426a130097fde7bff87278479d2fc39"
+  },
+  "methods": {
+    "Track": {
+      "separateMeanMs": 156.354775,
+      "pageMeanMs": 96.0046375
+    },
+    "静谧星河": {
+      "separateMeanMs": 150.3302,
+      "pageMeanMs": 76.924025
+    },
+    "晴天": {
+      "separateMeanMs": 388.74563749999993,
+      "pageMeanMs": 74.6060375
+    },
+    "%": {
+      "separateMeanMs": 315.2829375,
+      "pageMeanMs": 96.3314
+    },
+    "": {
+      "separateMeanMs": 277.40688750000004,
+      "pageMeanMs": 88.11919999999999
+    }
+  },
+  "reproductionDriverHash": "584842a5b8e99385c50ad46771d8f7dd1ac26d47c16829911c035a7a8be78794"
+}

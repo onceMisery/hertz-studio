@@ -29,6 +29,11 @@
   var activeIdx = -2;
   var playing = false;
   var track = null;
+  var mediaEpoch = 0, snapshotTrackId = null;
+  function changedMedia() {
+    mediaEpoch++;
+    document.dispatchEvent(new CustomEvent('stage:track-changed'));
+  }
   var lastCover = null;    // 记住封面，换主题时用它重新取色（retint）
   var coverFollow = false;
   var paletteEpoch = 0;
@@ -1386,7 +1391,9 @@
 
     setTrack: function (t, coverUrl) {
       if (!t || !track || t.id !== track.id) cancelStageSeek();
+      var trackChanged = (t && t.id || null) !== (track && track.id || null);
       track = t || null;
+      if (trackChanged) changedMedia();
       if (!durMs && t) durMs = t.duration_ms || 0;
       lastCover = coverUrl || null;
       if (el.disc) {
@@ -1399,6 +1406,7 @@
 
     setSnapshot: function (snap, options) {
       if (!snap) return;
+      if ((snap.track_id || null) !== snapshotTrackId) { snapshotTrackId = snap.track_id || null; changedMedia(); }
       if (typeof snap.volume === 'number') playbackVolume = snap.volume;
       // A decoder can report unknown duration while library metadata is already
       // available (null backend, or loading streams). Keep the same track's known length.
@@ -1490,7 +1498,7 @@
 
     // Read-only presentation data. All stages share this playback clock and track owner.
     presentation: function () {
-      return { track: track, cover: lastCover, playing: playing,
+      return { track: track, cover: lastCover, playing: playing, mediaEpoch:mediaEpoch, mediaTrackId:snapshotTrackId,
         position: currentPos(), duration: durMs, volume: playbackVolume,
         reduced: reduced || !!(systemMotion && systemMotion.matches) };
     },

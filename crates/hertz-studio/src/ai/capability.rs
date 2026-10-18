@@ -45,7 +45,10 @@ pub(crate) const SCOPE_LIBRARY_READ: &str = "library:read";
 
 /// 创建 grant 时允许申请的全部 scope。scope 之外没有暗门：某个 scope
 /// 没被授出，它对应的 operation 对这份凭据就不存在。
+pub(crate) const STAGE_TOOLS_KEY: &str = "ai_stage_intent_tools";
 pub(crate) const SCOPES: &[&str] = &[
+    "stage:capabilities_read",
+    "stage:intent_validate",
     SCOPE_PLAYBACK_PAUSE,
     SCOPE_PLAYBACK_RESUME,
     SCOPE_PLAYBACK_NEXT,
@@ -96,6 +99,20 @@ pub(crate) struct Capability {
 }
 
 pub(crate) const CAPABILITIES: &[Capability] = &[
+    Capability {
+        operation: "stage.capabilities_get",
+        mcp_name: "stage_capabilities_get",
+        scope: "stage:capabilities_read",
+        effect: Effect::ReadOnly,
+        description: "分页查询舞台场景、参数与草稿版本；不读取活动舞台",
+    },
+    Capability {
+        operation: "stage.intent_validate",
+        mcp_name: "stage_intent_validate",
+        scope: "stage:intent_validate",
+        effect: Effect::ReadOnly,
+        description: "校验显式 create 草稿信封；仅 intent 校验，不调用模型、不物化、不应用",
+    },
     Capability {
         operation: "playback.snapshot_get",
         mcp_name: "playback_snapshot_get",
@@ -191,6 +208,22 @@ struct LibrarySearchInput {
     offset: Option<i64>,
 }
 
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct StagePageInput {
+    #[serde(default)]
+    offset: usize,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+pub(crate) async fn stage_tools_enabled(state: &AppState) -> Result<bool, ApiError> {
+    vmusic_store::settings::get(&state.db, STAGE_TOOLS_KEY)
+        .await
+        .map(|v| v.and_then(|v| v.as_bool()).unwrap_or(false))
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))
+}
+
 /// 执行一次受限能力调用。scope 在查表之后、执行之前核对；变更命令统一走
 /// [`short_write`]，principal 绑定 grantId——与官方 UI 的 local-owner 互不
 /// 串键，完成事实就是共享入口给出的那一份，不在这里二次粉饰。
@@ -209,7 +242,35 @@ pub(crate) async fn execute(
             format!("该凭据缺少 scope: {}", capability.scope),
         ));
     }
+    if capability.operation.starts_with("stage.") && !stage_tools_enabled(state).await? {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "stage_tools_disabled",
+            "舞台契约工具尚未开启",
+        ));
+    }
     match capability.operation {
+        "stage.capabilities_get" => {
+            let input: StagePageInput = if call.input.is_null() {
+                StagePageInput::default()
+            } else {
+                parse_input(&call.input)?
+            };
+            let limit = input.limit.unwrap_or(5);
+            if !(1..=10).contains(&limit) || input.offset > 10_000 {
+                return Err(bad_request("limit 必须为 1–10，offset 必须为 0–10000"));
+            }
+            Ok(super::contract::page(input.offset, limit))
+        }
+        "stage.intent_validate" => {
+            super::contract::validate_artifact(&call.input).map_err(|message| {
+                ApiError::new(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "stage_artifact_invalid",
+                    message,
+                )
+            })
+        }
         "playback.snapshot_get" => {
             require_no_input(&call.input)?;
             Ok(snapshot(state).await)

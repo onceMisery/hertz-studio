@@ -251,7 +251,7 @@ async function main() {
     const recipes = [];
     for (const state of ['gather', 'disperse']) {
       const hashes = new Set();
-      for (let cycle = 0; cycle < 5; cycle++) {
+      for (let cycle = 0; cycle < 8; cycle++) {
         const data = await page.evaluate(({ state, cycle }) => {
           const pixels = draw(1.4, { state, cycle, k: .4 });
           let hash = 2166136261, lit = 0;
@@ -269,7 +269,7 @@ async function main() {
         shots.push({ name, png: data.png });
         recipes.push({ state, cycle, hash: data.hash, lit: data.lit, recipe: data.recipe });
       }
-      assert.equal(hashes.size, 5, state + ': all five recipes must produce distinct pixels');
+      assert.equal(hashes.size, 8, state + ': all eight recipes must produce distinct pixels');
     }
     await page.evaluate(() => { world.setFieldVisible(true); });
     for (const [name, yaw] of [['front', 0], ['side', .85]]) {

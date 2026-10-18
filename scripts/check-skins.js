@@ -1072,20 +1072,20 @@ function checkLiunianNavigation() {
     '面板支持全部/本地/在线范围切换');
   ok(/setTimeout\(function \(\) \{ runSearch\(input\.value\); \}, 250\)/.test(LIUNIAN_JS),
     '输入防抖 250ms 后检索');
-  ok(/panel\.epoch \+= 1/.test(LIUNIAN_JS) && /AbortController/.test(LIUNIAN_JS)
+  ok(/panel\.epoch \+= 1/.test(LIUNIAN_JS) && /searchNetwork\.cancel\(\)/.test(LIUNIAN_JS)
     && /epoch !== panel\.epoch/.test(LIUNIAN_JS),
-    '检索带 epoch 竞态保护与 AbortController 取消');
+    '检索带 epoch 竞态保护与共享协调器取消');
 
   // 5) 两源取数与分类分区显示。
   ok(/\/v1\/tracks\?q=' \+ encodeURIComponent\(q\) \+ '&limit=8'/.test(LIUNIAN_JS),
     '本地结果走 /v1/tracks（限 8 条）');
-  ok(/\/v1\/online\/search\?source=/.test(LIUNIAN_JS) && /Promise\.all\(sources\.map/.test(LIUNIAN_JS),
-    '在线结果并行请求各音源 /v1/online/search');
+  ok(/\/v1\/online\/search\?/.test(LIUNIAN_JS) && /network\.get\(/.test(LIUNIAN_JS),
+    '在线结果经共享协调器逐源请求 /v1/online/search');
   ok(/buildSection\(out, '本地歌曲'/.test(LIUNIAN_JS) && /buildSection\(out, '在线曲库'/.test(LIUNIAN_JS),
     '结果按本地歌曲 / 在线曲库两分区显示');
   ok(/window\.Online\.badge\(t\.source\)/.test(LIUNIAN_JS), '在线行挂音源徽标');
-  ok(/catch\(function \(\) \{ return \[\]; \}\)/.test(LIUNIAN_JS),
-    '单个音源失败时回落空数组，不拖垮整盘搜索');
+  ok(/HertzSearch\.failure\(error\)/.test(LIUNIAN_JS) && /group\.more\.onclick = load/.test(LIUNIAN_JS),
+    '单个音源失败保留错误与局部重试，不伪装为空结果');
 
   // 6) 结果点击：本地/在线直接播放，经 Skins.request 交 app.js。
   ok(/window\.Skins\.request\(action, extra\)/.test(LIUNIAN_JS), '面板经通用皮肤宿主请求对外通信');

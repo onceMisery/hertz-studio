@@ -415,20 +415,84 @@ impl vmusic_core::AudioSource for HttpRangeStream {
     }
 }
 
-/// 为直链 URL 找 Basic auth：按 base_url 前缀最长匹配远程来源，
+/// Match credentials only within the same HTTP origin and complete path segments.
+/// Decoding a segment must not introduce separators, dot traversal or another
+/// percent escape (some servers decode twice). Queries never widen the scope.
+fn credential_scope_len(base: &str, target: &str) -> Option<usize> {
+    fn path(url: &reqwest::Url) -> Option<Vec<Vec<u8>>> {
+        let mut out = Vec::new();
+        for segment in url.path().split('/').skip(1) {
+            let mut decoded = Vec::new();
+            let mut bytes = segment.as_bytes().iter().copied();
+            while let Some(b) = bytes.next() {
+                let b = if b == b'%' {
+                    let hi = (bytes.next()? as char).to_digit(16)?;
+                    let lo = (bytes.next()? as char).to_digit(16)?;
+                    (hi * 16 + lo) as u8
+                } else {
+                    b
+                };
+                if b.is_ascii_control() || matches!(b, b'/' | b'\\' | b'%') {
+                    return None;
+                }
+                decoded.push(b);
+            }
+            if decoded == b"." || decoded == b".." {
+                return None;
+            }
+            out.push(decoded);
+        }
+        if out.last().is_some_and(Vec::is_empty) {
+            out.pop();
+        }
+        Some(out)
+    }
+    let base = reqwest::Url::parse(base).ok()?;
+    let target = reqwest::Url::parse(target).ok()?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.origin() != target.origin()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || !target.username().is_empty()
+        || target.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+    {
+        return None;
+    }
+    let base_path = path(&base)?;
+    let target_path = path(&target)?;
+    target_path
+        .starts_with(&base_path)
+        .then_some(base_path.len())
+}
+
+/// 为直链 URL 找 Basic auth：按同 origin 下最长完整路径范围匹配远程来源，
 /// 凭据从钥匙串取（memory 后端在 CI）。
 pub async fn auth_for_url(
     pool: &sqlx::SqlitePool,
     secrets: &dyn crate::secrets::SecretBackend,
     url: &str,
 ) -> Option<BasicAuth> {
+    let key = credential_key_for_url(pool, url).await?;
+    read_auth(secrets, &key)
+}
+
+pub(crate) async fn credential_key_for_url(pool: &sqlx::SqlitePool, url: &str) -> Option<String> {
     let roots = vmusic_store::remote_roots::list(pool).await.ok()?;
-    let lowered = url.to_string();
     let best = roots
         .iter()
-        .filter(|r| lowered.starts_with(&r.base_url))
-        .max_by_key(|r| r.base_url.len())?;
-    let entry = secrets.get(&format!("remote_cred_{}", best.id)).ok()?;
+        .filter_map(|r| credential_scope_len(&r.base_url, url).map(|depth| (r, depth)))
+        .max_by_key(|(_, depth)| *depth)?
+        .0;
+    Some(format!("remote_cred_{}", best.id))
+}
+
+pub(crate) fn read_auth(
+    secrets: &dyn crate::secrets::SecretBackend,
+    key: &str,
+) -> Option<BasicAuth> {
+    let entry = secrets.get(key).ok()?;
     let raw = entry.cred?;
     let (u, p) = raw.split_once(':')?;
     (!u.is_empty() || !p.is_empty()).then(|| BasicAuth {
@@ -440,6 +504,51 @@ pub async fn auth_for_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_scope_requires_origin_and_complete_decoded_segments() {
+        let base = "https://NAS.example:443/dav/music";
+        for target in [
+            "https://nas.example/dav/music",
+            "https://nas.example/dav/music/track.flac?token=private",
+            "https://nas.example/dav/mus%69c/track.flac",
+        ] {
+            assert_eq!(credential_scope_len(base, target), Some(2), "{target}");
+        }
+        for target in [
+            "https://nas.example/dav/music-private/track.flac",
+            "https://nas.example.evil/dav/music/track.flac",
+            "https://nas.example:444/dav/music/track.flac",
+            "http://nas.example/dav/music/track.flac",
+            "https://nas.example/dav/music/../private/track.flac",
+            "https://nas.example/dav/music/%2e%2e/private/track.flac",
+            "https://nas.example/dav/music/%2f../private",
+            "https://nas.example/dav/music/%5c../private",
+            "https://nas.example/dav/music/%252e%252e/private",
+            "https://user:pass@nas.example/dav/music/track.flac",
+            "file:///dav/music/track.flac",
+        ] {
+            assert_eq!(credential_scope_len(base, target), None, "{target}");
+        }
+        assert_eq!(
+            credential_scope_len("https://nas.example/", "https://nas.example/a"),
+            Some(0)
+        );
+        assert_eq!(
+            credential_scope_len(
+                "https://nas.example/dav/a+b",
+                "https://nas.example/dav/a%20b/file"
+            ),
+            None
+        );
+        assert_eq!(
+            credential_scope_len(
+                "https://nas.example/dav?token=secret",
+                "https://nas.example/dav/file"
+            ),
+            None
+        );
+    }
 
     const SAMPLE: &str = r#"<?xml version="1.0"?>
 <D:multistatus xmlns:D="DAV:">

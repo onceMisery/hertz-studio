@@ -30,6 +30,7 @@
 //! 包成 `{status, body}`，`body` 就是原来那个 `{"error":{...}}`。协议级错误
 //! （方法不存在、信封非法）才用真正的 JSON-RPC error。
 
+mod ai;
 pub mod library;
 pub mod maintenance;
 pub mod online;
@@ -205,6 +206,20 @@ impl Rpc {
         let raw = call.raw.as_ref();
 
         match (call.op, segments.as_slice()) {
+            (Op::Get, ["v1", "ai", "status"]) => ai::status(state).await,
+            (Op::Get, ["v1", "ai", "provider-credential"]) => ai::credential_status(state).await,
+            (Op::Put, ["v1", "ai", "provider-credential"]) => ai::put_credential(state, body).await,
+            (Op::Delete, ["v1", "ai", "provider-credential"]) => ai::delete_credential(state).await,
+            (Op::Get, ["v1", "ai", "ledger"]) => ai::ledger(state, query).await,
+            (Op::Get, ["v1", "ai", "jobs"]) => ai::list(state, query).await,
+            (Op::Post, ["v1", "ai", "jobs"]) => ai::create(state, body).await,
+            (Op::Get, ["v1", "ai", "jobs", id]) => ai::get(state, id).await,
+            (Op::Post, ["v1", "ai", "jobs", id, "cancel"]) => ai::cancel(state, id, body).await,
+            (Op::Get, ["v1", "ai", "proposals", id]) => ai::proposal(state, id).await,
+            (Op::Post, ["v1", "ai", "proposals", id, "reject"]) => {
+                ai::reject(state, id, body).await
+            }
+            (Op::Post, ["v1", "ai", "budget-guard", "reset"]) => ai::reset(state, body).await,
             // --- 元信息 / 状态 ---
             (Op::Get, ["v1", "health"]) => Ok(Reply::ok(self.health())),
             (Op::Get, ["v1", "state"]) => Ok(Reply::ok(playback::snapshot(state).await)),
@@ -254,6 +269,17 @@ impl Rpc {
 
             // --- 舞台节拍图 ---
             (Op::Get, ["v1", "stage", "beatmap"]) => playback::beatmap(state, query).await,
+            (Op::Post, ["v1", "stage", "project-media"]) => {
+                let request = body_as(body)?;
+                Ok(Reply::ok(
+                    serde_json::to_value(crate::stage_project::identify(state, request).await?)
+                        .map_err(|_| crate::error::internal("媒体身份编码失败"))?,
+                ))
+            }
+            (Op::Post, ["v1", "stage", "pitch"]) => Ok(Reply::ok(
+                serde_json::to_value(crate::stage_pitch::request(state, body_as(body)?).await?)
+                    .map_err(|_| crate::error::internal("基频轨迹编码失败"))?,
+            )),
             // 段数不同，这两条与上面那条不会互相遮蔽（slice pattern 要求全长匹配）。
             (Op::Get, ["v1", "stage", "beatmap", "status"]) => {
                 playback::beatmap_status(state, query).await
@@ -304,6 +330,18 @@ impl Rpc {
                 library::clear_track_edit(state, id).await
             }
             (Op::Get, ["v1", "tracks", id, "lyrics"]) => library::get_lyrics(state, id).await,
+            (Op::Post, ["v1", "tracks", id, "lyrics", "candidates"]) => Ok(Reply::ok(
+                crate::lyrics::prepare(state, id, body_as(body)?).await?,
+            )),
+            (Op::Post, ["v1", "tracks", id, "lyrics", "candidates", "search"]) => Ok(Reply::ok(
+                crate::lyrics::candidates::search(state, id, body_as(body)?).await?,
+            )),
+            (Op::Post, ["v1", "tracks", id, "lyrics", "candidates", "prepare-online"]) => Ok(
+                Reply::ok(crate::lyrics::candidates::prepare(state, id, body_as(body)?).await?),
+            ),
+            (Op::Post, ["v1", "tracks", id, "lyrics", "candidates", "apply"]) => Ok(Reply::ok(
+                crate::lyrics::apply(state, id, body_as(body)?).await?,
+            )),
             (Op::Put, ["v1", "tracks", id, "lyrics"]) => {
                 library::import_lyrics(state, id, body).await
             }

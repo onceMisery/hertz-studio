@@ -1,0 +1,357 @@
+{
+  "algorithm": "nsdf-lowpass-v1",
+  "caseCount": 37,
+  "cases": [
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.0016719000517757805,
+      "name": "sine-55-8000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.008663734660620682,
+      "name": "sine-60-8000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.0226053648249798,
+      "name": "sine-110-8000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.03887214261191134,
+      "name": "sine-220-8000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.16330988724758827,
+      "name": "sine-440-8000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.6672916098508707,
+      "name": "sine-880-8000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 3.896253078366023,
+      "name": "sine-1200-8000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.00166525752630886,
+      "name": "sine-55-44100",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.01051678685345237,
+      "name": "sine-60-44100",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.025556367585986606,
+      "name": "sine-110-44100",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.043902992175390655,
+      "name": "sine-220-44100",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.16814957974066314,
+      "name": "sine-440-44100",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.6707241117505807,
+      "name": "sine-880-44100",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 3.891633585767184,
+      "name": "sine-1200-44100",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.001665067040339146,
+      "name": "sine-55-48000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.01052396507859425,
+      "name": "sine-60-48000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.02558385826818408,
+      "name": "sine-110-48000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.04392256445754778,
+      "name": "sine-220-48000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.16815164420462586,
+      "name": "sine-440-48000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.6707974030180652,
+      "name": "sine-880-48000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 3.8920731934275654,
+      "name": "sine-1200-48000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.001664956277089004,
+      "name": "sine-55-96000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.010564931540767557,
+      "name": "sine-60-96000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.02564874753067165,
+      "name": "sine-110-96000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.044030532026610565,
+      "name": "sine-220-96000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.16824218948422384,
+      "name": "sine-440-96000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.6708538232794019,
+      "name": "sine-880-96000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 3.8916786804339765,
+      "name": "sine-1200-96000",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.04843247494054193,
+      "name": "missing-fundamental-110",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": 0.20143044152356435,
+      "name": "dc-offset-220",
+      "pass": true,
+      "scored": 22,
+      "voiced": 22
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": null,
+      "name": "silence",
+      "pass": true,
+      "scored": 22,
+      "voiced": 0
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": null,
+      "name": "constant-dc",
+      "pass": true,
+      "scored": 22,
+      "voiced": 0
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": null,
+      "name": "below-floor",
+      "pass": true,
+      "scored": 22,
+      "voiced": 0
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": null,
+      "name": "anti-alias-7500",
+      "pass": true,
+      "scored": 22,
+      "voiced": 0
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": null,
+      "name": "above-range-1800",
+      "pass": true,
+      "scored": 22,
+      "voiced": 0
+    },
+    {
+      "correct": 22,
+      "frames": 22,
+      "meanAbsoluteCents": null,
+      "name": "deterministic-noise",
+      "pass": true,
+      "scored": 22,
+      "voiced": 0
+    },
+    {
+      "correct": 15,
+      "frames": 22,
+      "meanAbsoluteCents": 0.11954444368290296,
+      "name": "frequency-step",
+      "pass": true,
+      "scored": 15,
+      "voiced": 15
+    }
+  ],
+  "elapsedMs": 643,
+  "hopMs": 40,
+  "passed": 37,
+  "rangeHz": [
+    55.0,
+    1200.0
+  ],
+  "realMusicAccepted": false,
+  "reportVersion": 1,
+  "sampleRates": [
+    8000,
+    44100,
+    48000,
+    96000
+  ],
+  "syntheticOnly": true,
+  "version": 1,
+  "windowSamples": 1024
+}

@@ -126,10 +126,29 @@ const PLATFORM_ICONS: &[(&str, &[u8])] = &[
 
 const HTML: &str = "text/html; charset=utf-8";
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let mcp_stdio = args.mcp_stdio;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run(args));
+    if mcp_stdio {
+        // Tokio stdio uses blocking OS reads/writes. Dropping an async wait does
+        // not stop a pipe syscall; default runtime Drop can then wait forever.
+        // This process owns only the thin adapter, so bound runtime shutdown and
+        // let process exit reclaim its stdio threads. Playback lives elsewhere.
+        runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    }
+    result
+}
 
+async fn run(args: Args) -> anyhow::Result<()> {
+    // Evaluation is a separate local-only developer process. Branch before
+    // config migration, DB/audio bootstrap, runner locks and HTTP listeners.
+    if std::env::args().nth(1).as_deref() == Some("--evaluate-stage") {
+        return hertz_studio::ai::evaluation::run_stdio().await;
+    }
     if args.version {
         println!(
             "hertz-studio {} ({})",
@@ -776,6 +795,7 @@ fn print_help() {
          --port PORT      Port, 0 for a random free port (Standard 7635, Full 7634)\n  \
          --data-dir DIR   Where the database, cache and token live\n  \
          --open           Open the UI in the default browser\n  \
+         --evaluate-stage --origin URL --model NAME  Evaluate one local synthetic case from stdin\n  \
          -h, --help       Show this help\n\n\
          Environment: VMUSIC_BIND, VMUSIC_PORT, VMUSIC_BACKEND, VMUSIC_LOG, VMUSIC_DATA_DIR"
     );

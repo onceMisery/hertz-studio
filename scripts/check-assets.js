@@ -112,6 +112,15 @@ const REQUIRE_BEFORE = [
   ['bgwall.js', 'backgrounds.js'],          // 弧形墙内核先于背景模块
   ['pl-covers.js', 'shelf.js'],             // 共享封面解析先于歌单架
   ['lyric3d.js', 'creative-stage.js'],      // 歌词图集先于编排层
+  ['lyric-glyph-sdf.js', 'lyric-glyph-atlas.js'],       // 图集栅格化读 SDF
+  ['lyric-glyph-sdf.js', 'stanza/stanza-glyph.js'],
+  ['lyric-glyph-atlas.js', 'stanza/stanza-glyph.js'],
+  ['lyric-glyph-gl.js', 'stanza/stanza-glyph.js'],      // GL 先于 stanza 渲染器
+  ['lyric-emotion-field.js', 'stanza/stanza-glyph.js'], // 渲染器只消费场采样
+  ['lyric-emotion-field.js', 'lyric-emotion.js'],       // 运行时用同一份场
+  ['lyric-emotion.js', 'stanza/stanza-glyph.js'],       // 渲染器读已提交 Cue
+  ['stanza/stanza-util.js', 'stanza/stanza-glyph.js'],
+  ['stanza/stanza-theme.js', 'stanza/stanza-glyph.js'],
   ['creative-gl.js', 'creative-stage.js'],      // 编排层建引擎时读 window.CreativeGL
   ['stage.js', 'creative-stage.js'],            // 帧门登记在 Stage 上
   ['stage.js', 'handdrawn.js'],

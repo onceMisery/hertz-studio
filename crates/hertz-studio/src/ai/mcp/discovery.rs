@@ -96,8 +96,16 @@ pub fn remove(data_dir: &Path) {
 }
 
 pub(crate) fn read(data_dir: &Path) -> Result<DiscoveryDoc, DiscoveryError> {
-    let bytes =
-        std::fs::read(path(data_dir)).map_err(|e| DiscoveryError::Unreachable(e.to_string()))?;
+    use std::io::Read;
+    let file = std::fs::File::open(path(data_dir))
+        .map_err(|e| DiscoveryError::Unreachable(e.to_string()))?;
+    let mut bytes = Vec::new();
+    file.take(DISCOVERY_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| DiscoveryError::Unreachable(e.to_string()))?;
+    if bytes.len() > DISCOVERY_MAX_BYTES {
+        return Err(DiscoveryError::Malformed("发现文件超出字节上限".into()));
+    }
     let doc: DiscoveryDoc =
         serde_json::from_slice(&bytes).map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
     if doc.version != DISCOVERY_VERSION {
@@ -124,6 +132,20 @@ mod tests {
             server_instance_id: "server-1".into(),
             edition: "standard".into(),
         }
+    }
+
+    #[test]
+    fn discovery_read_enforces_the_documented_byte_limit() {
+        let dir = temp_dir();
+        publish(&dir, &sample(7634)).unwrap();
+        let mut bytes = serde_json::to_vec(&sample(7634)).unwrap();
+        bytes.resize(DISCOVERY_MAX_BYTES, b' ');
+        std::fs::write(path(&dir), &bytes).unwrap();
+        assert_eq!(read(&dir).unwrap(), sample(7634));
+        bytes.push(b' ');
+        std::fs::write(path(&dir), &bytes).unwrap();
+        assert!(matches!(read(&dir), Err(DiscoveryError::Malformed(_))));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

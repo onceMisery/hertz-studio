@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT
+     Copyright (c) 2026 hertz-studio contributors
+
+     字形引擎 G1 比对页（非产品代码，只在检查脚本与人工排查时打开）。
+
+     目的：回答一个问题——SDF 画出来的字，与浏览器原生 fillText 画出来的字，
+     差多少？差太多，整个引擎不该继续（见设计文档 §12 的 G1 退出条件）。
+
+     页面上并排三栏：
+       左：fillText 基准（同一字体栈、同一字号、同一 600 字重）
+       中：SDF 引擎（w = 0.5，即"不平移阈值"的裸字形）
+       右：二值差异图（红=引擎多出来的像素，蓝=引擎缺少的像素）
+
+     判定不看像素相等（抗锯齿必然不同），而是看三件事：
+       1. 重心偏移（centroid）——衡量"字有没有整体挪位"，阈值 0.35px；
+       2. 覆盖率比（areas）——衡量"字有没有变胖变瘦"，阈值 ±9%；
+       3. 交并比（IoU）——综合形状相似度，阈值 0.85。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>lyric glyph G1</title>
+<style>
+  body { margin: 0; background: #0b0b0d; color: #d6d6da; font: 13px/1.5 "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 14px; font-weight: 600; margin: 12px 16px 4px; }
+  p.hint { margin: 0 16px 12px; color: #8a8a93; }
+  #row { display: flex; gap: 16px; padding: 0 16px; align-items: flex-start; }
+  figure { margin: 0; }
+  figcaption { color: #8a8a93; font-size: 12px; margin-top: 6px; }
+  canvas { background: #111114; border: 1px solid #24242a; image-rendering: pixelated; }
+  pre { margin: 16px; padding: 12px; background: #121216; border: 1px solid #24242a;
+        white-space: pre-wrap; font: 12px/1.6 ui-monospace, Consolas, monospace; }
+</style>
+</head>
+<body>
+<h1>G1 · SDF 字形 vs 原生 fillText</h1>
+<p class="hint">同一字体栈、64px 内容盒、600 字重。判定见下方 JSON。</p>
+<div id="row"></div>
+<pre id="result">running…</pre>
+
+<script src="lyric-glyph-sdf.js"></script>
+<script src="lyric-glyph-atlas.js"></script>
+<script src="lyric-glyph-gl.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // 选字：覆盖不同笔画密度与字怀结构。
+  // 「口」「回」测字怀会不会被填平，「一」测细笔画会不会断，「鬱」测高密度糊不糊，「永」测斜向笔画。
+  var GLYPHS = ['口', '回', '一', '永', '鬱'];
+  var FONT_STACK = '"Noto Sans CJK SC","Source Han Sans SC","Microsoft YaHei",system-ui,sans-serif';
+  // 几何一律从图集实例派生。cell 尺寸与基线由字体实测度量决定，
+  // 页面若自己写死一套（历史上写过 96/12/64），验收的就只是"页面自己的那份几何"。
+  var atlas = LyricGlyphAtlas.create(FONT_STACK, 600);
+  var BOX = atlas.CELL;
+  var PAD = atlas.PAD;
+  var CONTENT = atlas.CONTENT;
+  var RENDER_PX = atlas.RENDER_PX;
+  var BASELINE = atlas.BASELINE;
+  document.querySelector('p.hint').textContent =
+    '同一字体栈、' + CONTENT + 'px 内容盒、' + RENDER_PX + 'px 栅格、600 字重。判定见下方 JSON。';
+
+  var out = { glyphs: [], verdict: 'running', fails: [] };
+
+  function newCanvas(w, h) {
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    return c;
+  }
+
+  // ---------- 1. 基准：fillText ----------
+  function drawReference() {
+    var c = newCanvas(CONTENT * GLYPHS.length, CONTENT);
+    var ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff';
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = '600 ' + RENDER_PX + 'px ' + FONT_STACK;
+    GLYPHS.forEach(function (ch, i) {
+      ctx.fillText(ch, i * CONTENT + 0, BASELINE);
+    });
+    return c;
+  }
+
+  // ---------- 2. 引擎：atlas 取 SDF + GL 画到独立画布 ----------
+  function drawEngine() {
+    var atlas = LyricGlyphAtlas.create(FONT_STACK);
+    var c = newCanvas(CONTENT * GLYPHS.length, CONTENT);
+    var gl = LyricGlyphGL.create(c);
+    if (!gl) return null;
+
+    gl.initTexture(atlas.W, atlas.H);
+
+    // w = 0.5 → 阈值偏移为 0，画出来是"裸字形"。
+    // 若这里就与基准差很多，说明 SDF 本身或 UV 对齐有问题，与情绪参数无关。
+    var curveB = new Float32Array(33);          // 全 0：不弯曲
+    var curveW = new Float32Array(33).fill(0.5); // 不平移阈值
+
+    var glyphs = [];
+    GLYPHS.forEach(function (ch, i) {
+      var slot = atlas.acquire(ch);
+      glyphs.push({
+        // cell 左上角 = 内容盒原点 - PAD
+        x: i * CONTENT - PAD,
+        y: -PAD,             // 内容盒顶对齐画布顶
+        w: BOX,
+        h: BOX,
+        u0: slot.u0, v0: slot.v0,
+        uStart: 0, uEnd: 1,
+        startMs: -1e9, durMs: 1   // 激励早已结束，不干扰静态比对
+      });
+    });
+
+    var dirty = atlas.takeDirty();
+    for (var k = 0; k < dirty.length; k += 1) {
+      var o = atlas.cellOrigin(dirty[k]);
+      gl.uploadCell(o.x, o.y, atlas.CELL, atlas.cellBytes(dirty[k]));
+    }
+
+    gl.beginFrame(c.width, c.height);
+    gl.draw(glyphs, glyphs.length, {
+      uvW: atlas.CELL / atlas.W,
+      uvH: atlas.CELL / atlas.H,
+      timeMs: 0,
+      shear: 0,
+      baseY: c.height * 2,      // 行基线在画布下方，剪切为 0 时无影响
+      amp: 0, freq: 0, damp: 2,
+      curveB: curveB, curveW: curveW,
+      range: atlas.RANGE,
+      pxScale: 1,               // 图集 px = 屏幕 px
+      weightGain: 0,            // 见上：w=0.5 且 gain=0 → 阈值不动
+      glowK: 1, glowAmt: 0, rimAmt: 0, rimWidth: 0.001,
+      clipU: 1, soft: 0.001, wobble: 0,
+      turbAmp: 0, opacity: 1,
+      idleColor: [1, 1, 1], sungColor: [1, 1, 1], glowColor: [1, 1, 1]
+    });
+    c.__gl = gl.gl;   // 供 readPixels 回读
+    return c;
+  }
+
+  // ---------- 3. 指标 ----------
+  // 2D 画布直接读；WebGL 画布不能 getContext('2d')（一个 canvas 只有一种上下文），
+  // 必须走 readPixels。这里统一返回「每像素 0..1 覆盖率」。
+  var gl2dCache = null;
+
+  function alphaOf(canvas) {
+    if (canvas.__alpha) return canvas.__alpha;
+    var ctx = canvas.getContext('2d', { willReadFrequently: true });
+    var d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    var a = new Float32Array(canvas.width * canvas.height);
+    for (var i = 0; i < a.length; i += 1) a[i] = d[i * 4 + 3] / 255;
+    canvas.__alpha = a;
+    return a;
+  }
+
+  // 把 WebGL 画布按 readPixels 转成离屏 2D 画布，供差异图与指标使用。
+  function glTo2D(glCanvas) {
+    var g = glCanvas.__gl;
+    if (!g) throw new Error('engine canvas lost its gl context');
+    var w = glCanvas.width, h = glCanvas.height;
+    var px = new Uint8Array(w * h * 4);
+    g.bindFramebuffer(g.FRAMEBUFFER, null);
+    g.readPixels(0, 0, w, h, g.RGBA, g.UNSIGNED_BYTE, px);
+
+    var out = newCanvas(w, h);
+    var ctx = out.getContext('2d', { willReadFrequently: true });
+    var img = ctx.createImageData(w, h);
+    // readPixels 原点在左下，2D 画布原点在左上：逐行翻转。
+    for (var y = 0; y < h; y += 1) {
+      var src = (h - 1 - y) * w * 4;
+      var dst = y * w * 4;
+      for (var x = 0; x < w * 4; x += 1) img.data[dst + x] = px[src + x];
+    }
+    ctx.putImageData(img, 0, 0);
+    return out;
+  }
+
+  function metricsFor(refCanvas, engCanvas, index) {
+    var x0 = index * CONTENT;
+    var ref = alphaOf(refCanvas);
+    var eng = alphaOf(engCanvas);
+    var W = CONTENT;
+    var refBox = bbox(ref, refCanvas.width, x0, 0, W, CONTENT);
+    // 引擎画布的 quad 从 (-PAD, -PAD) 起，内容盒左上角已落在 (i*CONTENT, 0)，
+    // 与基准图逐格对齐。这里不能再加 PAD —— 加了就会读到字的下半截。
+    var engBox = bbox(eng, engCanvas.width, x0, 0, W, CONTENT);
+
+    var refMass = 0, engMass = 0, inter = 0, union = 0;
+    var refCx = 0, refCy = 0, engCx = 0, engCy = 0;
+
+    for (var y = 0; y < CONTENT; y += 1) {
+      for (var x = 0; x < CONTENT; x += 1) {
+        // 只比内容盒：基准画布每格从 0 起，引擎画布整体偏移 -PAD，取内容盒要补回来
+        var r = ref[y * (CONTENT * GLYPHS.length) + x0 + x] > 0.5 ? 1 : 0;
+        var e = eng[y * (CONTENT * GLYPHS.length) + x0 + x] > 0.5 ? 1 : 0;
+        refMass += r; engMass += e;
+        if (r && e) inter += 1;
+        if (r || e) union += 1;
+        if (r) { refCx += x; refCy += y; }
+        if (e) { engCx += x; engCy += y; }
+      }
+    }
+
+    var dx = refMass ? (engCx / engMass - refCx / refMass) : 0;
+    var dy = refMass ? (engCy / engMass - refCy / refMass) : 0;
+    return {
+      glyph: GLYPHS[index],
+      refArea: refMass,
+      engArea: engMass,
+      areaRatio: refMass ? engMass / refMass : 0,
+      iou: union ? inter / union : 0,
+      dxPx: dx,
+      dyPx: dy,
+      refBox: refBox,
+      engBox: engBox
+    };
+  }
+
+  // 在给定矩形内找 alpha>0.5 的包围盒，坐标相对该矩形左上角
+  function bbox(alpha, stride, ox, oy, w, h) {
+    var minX = 1e9, minY = 1e9, maxX = -1, maxY = -1, n = 0;
+    for (var y = 0; y < h; y += 1) {
+      for (var x = 0; x < w; x += 1) {
+        if (alpha[(oy + y) * stride + ox + x] > 0.5) {
+          n += 1;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    return n ? { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, n: n } : null;
+  }
+
+  function diffCanvas(refCanvas, engCanvas) {
+    var c = newCanvas(refCanvas.width, refCanvas.height);
+    var ctx = c.getContext('2d');
+    var ref = alphaOf(refCanvas);
+    var eng = alphaOf(engCanvas);
+    var img = ctx.createImageData(c.width, c.height);
+    for (var i = 0; i < ref.length; i += 1) {
+      var r = ref[i] > 0.5, e = eng[i] > 0.5;
+      var o = i * 4;
+      if (r && e) { img.data[o] = 70; img.data[o + 1] = 70; img.data[o + 2] = 78; img.data[o + 3] = 255; }
+      else if (e) { img.data[o] = 230; img.data[o + 1] = 70; img.data[o + 2] = 70; img.data[o + 3] = 255; }
+      else if (r) { img.data[o] = 70; img.data[o + 1] = 130; img.data[o + 2] = 230; img.data[o + 3] = 255; }
+    }
+    ctx.putImageData(img, 0, 0);
+    return c;
+  }
+
+  // ---------- 4. 跑 ----------
+  try {
+    var refC = drawReference();
+    var engGL = drawEngine();
+    if (!engGL) throw new Error('WebGL2 unavailable');
+    // WebGL 画布不能 getContext('2d')，先回读成 2D 副本再比对。
+    var engC = glTo2D(engGL);
+
+    var row = document.getElementById('row');
+    [[refC, 'fillText 基准'], [engC, 'SDF 引擎'], [diffCanvas(refC, engC), '差异（红=多、蓝=缺）']]
+      .forEach(function (pair) {
+        var fig = document.createElement('figure');
+        var cap = document.createElement('figcaption');
+        fig.appendChild(pair[0]);
+        cap.textContent = pair[1];
+        fig.appendChild(cap);
+        row.appendChild(fig);
+      });
+
+    for (var i = 0; i < GLYPHS.length; i += 1) {
+      var m = metricsFor(refC, engC, i);
+      out.glyphs.push(m);
+      if (Math.abs(m.dxPx) > 0.35 || Math.abs(m.dyPx) > 0.35) {
+        out.fails.push(m.glyph + ' 重心偏移 ' + m.dxPx.toFixed(2) + ',' + m.dyPx.toFixed(2) + 'px');
+      }
+      if (m.areaRatio < 0.91 || m.areaRatio > 1.09) {
+        out.fails.push(m.glyph + ' 面积比 ' + m.areaRatio.toFixed(3));
+      }
+      if (m.iou < 0.85) {
+        out.fails.push(m.glyph + ' IoU ' + m.iou.toFixed(3));
+      }
+    }
+    out.verdict = out.fails.length ? 'FAIL' : 'PASS';
+  } catch (err) {
+    out.verdict = 'ERROR';
+    out.fails.push(String(err && err.message || err));
+  }
+
+  document.getElementById('result').textContent = JSON.stringify(out, null, 2);
+  // 供 headless 检查读取：不依赖 exit code，DOM 里就是结论。
+  window.__glyphG1 = out;
+})();
+</script>
+</body>
+</html>

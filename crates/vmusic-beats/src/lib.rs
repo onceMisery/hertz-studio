@@ -19,6 +19,8 @@ use symphonia::core::probe::Hint;
 
 use rustfft::FftPlanner;
 
+pub mod pitch;
+
 /// 一拍。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Beat {

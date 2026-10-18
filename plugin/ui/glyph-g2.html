@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT
+     Copyright (c) 2026 hertz-studio contributors
+
+     字形引擎 G2 检查页（非产品代码）。
+
+     要回答三个问题：
+
+     A. 粗细场真的能连续调吗？
+        w 从 0.30 扫到 0.90，看同一句话在每一档是否都还"是字"。
+        「口」「回」最脆弱：字怀（内部空白）一旦被填平，字就变成方块。
+
+     B. WEIGHT_GAIN 该取多少？
+        拿原生 fillText 的 400 / 700 两档当锚点，量它们的墨量面积，
+        再扫引擎的 gain，取让两端同时最接近的那个值。这是校准，不是拍脑袋。
+
+     C. 五种情绪长什么样？
+        同一句歌词，joy / sorrow / anger / anxious / tender，
+        场曲线直接决定基线与粗细。截图就是效果图。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>lyric glyph G2</title>
+<style>
+  body { margin: 0; background: #101014; color: #d6d6da; font: 13px/1.5 "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 15px; font-weight: 600; margin: 18px 20px 6px; }
+  h2 { font-size: 13px; font-weight: 600; margin: 18px 20px 6px; color: #9aa0aa; }
+  p.hint { margin: 0 20px 10px; color: #7d828c; font-size: 12px; }
+  canvas { display: block; background: #0b0b0e; border: 1px solid #22222a; margin: 0 20px; }
+  pre { margin: 14px 20px 40px; padding: 12px; background: #14141a; border: 1px solid #22222a;
+        white-space: pre-wrap; font: 12px/1.55 ui-monospace, Consolas, monospace; }
+</style>
+</head>
+<body>
+<h1>G2 · 粗细场与情绪场</h1>
+<p class="hint">上：w 扫描（含字怀检查；情绪场只使用 0.30–0.62 安全区）。下：五种情绪作用在同一句上。</p>
+<h2>A · 粗细扫描</h2>
+<canvas id="sweep"></canvas>
+<h2>C · 情绪效果（同一句歌词）</h2>
+<canvas id="emotion"></canvas>
+<pre id="result">running…</pre>
+
+<script src="lyric-glyph-sdf.js"></script>
+<script src="lyric-glyph-atlas.js"></script>
+<script src="lyric-glyph-gl.js"></script>
+<script src="lyric-emotion-field.js"></script>
+<script>
+// 未捕获异常必须落到结果块里：headless 的 --dump-dom 看不到 console，
+// 一旦脚本在写结果前抛错，页面就只剩 "running…"，等于没有诊断信息。
+window.addEventListener('error', function (e) {
+  var el = document.getElementById('result');
+  if (el) el.textContent = 'ERROR: ' + (e.message || '') + '\n@ ' + (e.filename || '') + ':' + (e.lineno || '');
+});
+</script>
+<script>
+(function () {
+  'use strict';
+
+  var FONT = '"Noto Sans CJK SC","Source Han Sans SC","Microsoft YaHei",system-ui,sans-serif';
+  // 几何全部从图集实例派生：cell 尺寸与基线现在由字体实测度量决定，
+  // 页面若继续写死 96/12/72，测到的就是"页面自己的那份几何"，不是引擎的。
+  var CELL = 128, PAD = 14, CONTENT = 100, BASELINE = 0, RENDER_PX = 96;
+  // 粗细增益是「每 1.0 个 w 对应的图集像素数」。
+  // 8 是实测下限：4 时 0.08 的 w 步长只移动 0.32px，会被 8 位距离场量化吞掉；
+  // 8 在 0.30–0.62 安全区内不堵字怀，0.70 以上才出现高密度字的结构变化。
+  var WEIGHT_GAIN_LO = 8.0;
+  var WEIGHT_GAIN_HI = 8.0;
+  var SAFE_W_MIN = 0.30, SAFE_W_MAX = 0.62;
+  var NEUTRAL_B = new Float32Array(33);
+  var NEUTRAL_W = new Float32Array(33).fill(0.5);
+
+  var out = { calibration: null, sweep: [], holes: [], emotion: [], fails: [], verdict: 'running' };
+
+  // ---------------------------------------------------------------- 工具
+  function canvas2d(w, h) {
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    return c;
+  }
+
+  // 墨量面积：alpha > 0.5 的像素数
+  function inkArea(ctx, w, h) {
+    var d = ctx.getImageData(0, 0, w, h).data;
+    var n = 0;
+    for (var i = 3; i < d.length; i += 4) if (d[i] > 128) n += 1;
+    return n;
+  }
+
+  // 字怀计数：从边框做泛洪，剩下的内部空白就是"洞"。
+  // 口 有 1 个洞、回 有 2 个洞；变成 0 就说明笔画把字怀填平了。
+  function holesOf(ctx, w, h) {
+    var d = ctx.getImageData(0, 0, w, h).data;
+    var solid = new Uint8Array(w * h);
+    for (var i = 0; i < w * h; i += 1) solid[i] = d[i * 4 + 3] > 128 ? 1 : 0;
+
+    var seen = new Uint8Array(w * h);
+    var stack = [];
+    function push(x, y) {
+      if (x < 0 || y < 0 || x >= w || y >= h) return;
+      var k = y * w + x;
+      if (seen[k] || solid[k]) return;
+      seen[k] = 1; stack.push(k);
+    }
+    for (var x = 0; x < w; x += 1) { push(x, 0); push(x, h - 1); }
+    for (var y = 0; y < h; y += 1) { push(0, y); push(w - 1, y); }
+    while (stack.length) {
+      var k = stack.pop(), cx = k % w, cy = (k - cx) / w;
+      push(cx + 1, cy); push(cx - 1, cy); push(cx, cy + 1); push(cx, cy - 1);
+    }
+
+    // 未被泛洪到的空白像素 = 封闭区域；数连通块
+    var holes = 0;
+    var visited = new Uint8Array(w * h);
+    for (var j = 0; j < w * h; j += 1) {
+      if (solid[j] || seen[j] || visited[j]) continue;
+      holes += 1;
+      var q = [j]; visited[j] = 1;
+      while (q.length) {
+        var n = q.pop(), nx = n % w, ny = (n - nx) / w;
+        [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(function (dd) {
+          var ax = nx + dd[0], ay = ny + dd[1];
+          if (ax < 0 || ay < 0 || ax >= w || ay >= h) return;
+          var m = ay * w + ax;
+          // 这里在 forEach 回调里，continue 不合法；用 return 跳过本次。
+          if (solid[m] || seen[m] || visited[m]) return;
+          visited[m] = 1; q.push(m);
+        });
+      }
+    }
+    return holes;
+  }
+
+  // 用 fillText 画一个字到独立 2D 画布（内容盒尺寸）
+  function nativeCell(ch, weight) {
+    var c = canvas2d(CONTENT, CONTENT);
+    var ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff';
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = weight + ' ' + RENDER_PX + 'px ' + FONT;
+    ctx.fillText(ch, 0, BASELINE);
+    return { canvas: c, ctx: ctx };
+  }
+
+  // 用引擎把一组实例画到画布，返回离屏 2D 副本
+  function engineDraw(gl, atlas, items, w, h, opts) {
+    var dirty = atlas.takeDirty();
+    for (var k = 0; k < dirty.length; k += 1) {
+      var o = atlas.cellOrigin(dirty[k]);
+      gl.uploadCell(o.x, o.y, atlas.CELL, atlas.cellBytes(dirty[k]));
+    }
+    // GL 画布按本次输出尺寸重建。图集纹理独立于画布，resize 不会丢纹理；
+    // beginFrame 会把 viewport 对齐到新尺寸，readPixels 才能读到完整图像。
+    var glCanvas = gl.gl.canvas;
+    if (glCanvas.width !== w || glCanvas.height !== h) {
+      glCanvas.width = w;
+      glCanvas.height = h;
+    }
+    gl.beginFrame(w, h);
+    gl.draw(items, items.length, Object.assign({
+      uvW: atlas.CELL / atlas.W,
+      uvH: atlas.CELL / atlas.H,
+      timeMs: 0, shear: 0, baseY: h,
+      amp: 0, freq: 0, damp: 2,
+      curveB: NEUTRAL_B, curveW: NEUTRAL_W,
+      range: atlas.RANGE, pxScale: 1,
+      weightGain: WEIGHT_GAIN_LO, weightGainHi: WEIGHT_GAIN_HI,
+      dual: true,
+      glowK: 1, glowAmt: 0, rimAmt: 0, rimWidth: 0.001,
+      clipU: 1, soft: 0.001, wobble: 0, turbAmp: 0, opacity: 1,
+      idleColor: [1, 1, 1], sungColor: [1, 1, 1], glowColor: [1, 1, 1]
+    }, opts || {}));
+
+    var px = new Uint8Array(w * h * 4);
+    gl.gl.bindFramebuffer(gl.gl.FRAMEBUFFER, null);
+    gl.gl.readPixels(0, 0, w, h, gl.gl.RGBA, gl.gl.UNSIGNED_BYTE, px);
+
+    var copy = canvas2d(w, h);
+    var ctx = copy.getContext('2d', { willReadFrequently: true });
+    var img = ctx.createImageData(w, h);
+    for (var y = 0; y < h; y += 1) {
+      var src = (h - 1 - y) * w * 4, dst = y * w * 4;
+      for (var x = 0; x < w * 4; x += 1) img.data[dst + x] = px[src + x];
+    }
+    ctx.putImageData(img, 0, 0);
+    return { canvas: copy, ctx: ctx };
+  }
+
+  // ---------------------------------------------------- A1. 原生锚点面积
+  // 必须放在图集创建之后：BASELINE / RENDER_PX / CONTENT 现在由字体度量决定，
+  // 在图集之前算锚点会画到画布外，面积恒为 0，校准误差变成 Infinity。
+  var GLYPHS = ['口', '回', '一', '永', '鬱'];
+  var anchors = {};
+  function buildAnchors() {
+    GLYPHS.forEach(function (ch) {
+      anchors[ch] = { w400: inkArea(nativeCell(ch, 400).ctx, CONTENT, CONTENT),
+                      w600: inkArea(nativeCell(ch, 600).ctx, CONTENT, CONTENT),
+                      w700: inkArea(nativeCell(ch, 700).ctx, CONTENT, CONTENT) };
+    });
+  }
+
+  // ---------------------------------------------------- A2. 双图集
+  // 400/700 各生成一张 SDF，交错写进同一张 RG8 图集：
+  // R = 400 基面，G = 700 基面；shader 按 w 混合。
+  // 几何在 atlas 模块里统一反推，保证两张脸同字号、同基线。
+  var atlas = LyricGlyphAtlas.createDual(FONT);
+  // 图集一建立就把真实几何覆盖到页面常量上：CELL / PAD / CONTENT / BASELINE / RENDER_PX
+  // 现在由字体实测度量决定，页面写死的值只用于图集创建之前的占位。
+  CELL = atlas.CELL; PAD = atlas.PAD; CONTENT = atlas.CONTENT;
+  BASELINE = atlas.BASELINE; RENDER_PX = atlas.RENDER_PX;
+  // 几何就绪后再量原生锚点，否则画到画布外、面积恒 0。
+  buildAnchors();
+  var probe = canvas2d(CELL, CELL);
+  var gl = LyricGlyphGL.create(probe);
+  if (!gl) { out.verdict = 'ERROR'; out.fails.push('WebGL2 unavailable'); }
+  if (gl) gl.initTexture(atlas.W, atlas.H, true);
+
+  function drawOne(ch, w) {
+    var slot = atlas.acquire(ch);
+    return engineDraw(gl, atlas, [{
+      x: -PAD, y: -PAD, w: CELL, h: CELL,
+      u0: slot.u0, v0: slot.v0, uStart: 0, uEnd: 1,
+      startMs: -1e9, durMs: 1
+    }], CELL, CELL, {
+      curveW: new Float32Array(33).fill(w),
+      // 双图集端点：0.30 = 常规面（原生 400），0.50 = 粗面（原生 700）。
+      // w > 0.50 之后没有更粗的字面可用，只能靠 SDF 膨胀；增益 8 才能让
+      // 0.08 的 w 步长跨过 8 位距离场的量化台阶。
+      weightGain: WEIGHT_GAIN_LO, weightGainHi: WEIGHT_GAIN_HI,
+      wLo: 0.30, wHi: 0.50,
+      dual: true
+    });
+  }
+
+  // 双图集端点校准：w=0.30 必须是原生 400，w=0.50 必须是原生 700。
+  // 只比面积不够——两张脸若基线或字号不一致，面积能对上、字却错位；
+  // 因此同时比 IoU 与重心。G1 已经证明同字号下 SDF 与 fillText 可到 IoU≈1。
+  function binaryOf(ctx) {
+    var d = ctx.getImageData(0, 0, CONTENT, CONTENT).data;
+    var a = new Uint8Array(CONTENT * CONTENT);
+    for (var i = 0; i < a.length; i += 1) a[i] = d[i * 4 + 3] > 128 ? 1 : 0;
+    return a;
+  }
+
+  function anchorMetrics(ch, w, nativeWeight) {
+    var eng = binaryOf(drawOne(ch, w).ctx);
+    var nat = binaryOf(nativeCell(ch, nativeWeight).ctx);
+    var inter = 0, union = 0, engMass = 0, natMass = 0;
+    var engCx = 0, engCy = 0, natCx = 0, natCy = 0;
+    for (var y = 0; y < CONTENT; y += 1) {
+      for (var x = 0; x < CONTENT; x += 1) {
+        var k = y * CONTENT + x;
+        var e = eng[k], n = nat[k];
+        if (e) { engMass += 1; engCx += x; engCy += y; }
+        if (n) { natMass += 1; natCx += x; natCy += y; }
+        if (e && n) inter += 1;
+        if (e || n) union += 1;
+      }
+    }
+    return {
+      refArea: natMass, engArea: engMass,
+      areaRatio: natMass ? engMass / natMass : 0,
+      iou: union ? inter / union : 0,
+      dxPx: engMass && natMass ? engCx / engMass - natCx / natMass : 0,
+      dyPx: engMass && natMass ? engCy / engMass - natCy / natMass : 0
+    };
+  }
+
+  function alignFails(tag, ch, m) {
+    if (m.iou < 0.85) out.fails.push(tag + ' ' + ch + ' IoU ' + m.iou.toFixed(3));
+    if (m.areaRatio < 0.91 || m.areaRatio > 1.09) {
+      out.fails.push(tag + ' ' + ch + ' 面积比 ' + m.areaRatio.toFixed(3));
+    }
+    if (Math.abs(m.dxPx) > 0.35 || Math.abs(m.dyPx) > 0.35) {
+      out.fails.push(tag + ' ' + ch + ' 重心偏移 ' + m.dxPx.toFixed(2) + ',' + m.dyPx.toFixed(2) + 'px');
+    }
+  }
+
+  var thinError = 0, thickError = 0;
+  var align = { thin: {}, thick: {} };
+  GLYPHS.forEach(function (ch) {
+    var a400 = anchorMetrics(ch, 0.30, 400);
+    var a700 = anchorMetrics(ch, 0.50, 700);
+    thinError += Math.abs(a400.areaRatio - 1);
+    thickError += Math.abs(a700.areaRatio - 1);
+    align.thin[ch] = a400;
+    align.thick[ch] = a700;
+    alignFails('400 锚点', ch, a400);
+    alignFails('700 锚点', ch, a700);
+  });
+  thinError /= GLYPHS.length;
+  thickError /= GLYPHS.length;
+  out.calibration = {
+    note: '双图集：R=400、G=700；两脸共用栅格字号与基线；w=0.30→400、w=0.50→700，0.50–0.62 用 SDF 膨胀',
+    renderPx: RENDER_PX,
+    cell: CELL,
+    baseline: BASELINE,
+    thinMeanError: Math.round(thinError * 1000) / 1000,
+    thickMeanError: Math.round(thickError * 1000) / 1000,
+    meanRelativeError: Math.round((thinError + thickError) / 2 * 1000) / 1000,
+    anchors: anchors,
+    align: align
+  };
+  var CALIBRATION_ERROR_MAX = 0.09;
+  if (Math.max(thinError, thickError) > CALIBRATION_ERROR_MAX) {
+    out.fails.push('双图集端点误差 thin=' + out.calibration.thinMeanError +
+      ' thick=' + out.calibration.thickMeanError + ' > ' + CALIBRATION_ERROR_MAX);
+  }
+
+  // ---------------------------------------------------- A3. w 扫描图
+  // 格距必须从 CELL 派生。之前写死 88，而 cell 实测是 128：
+  // 相邻两字压叠 40px、最右一列还被画布裁掉，看起来就像"字糊成白块"。
+  // 只扫情绪场真正使用的安全区。0.62 以上不是「更粗」，而是开始填塞
+  // 高密度字（鬱）的字怀，不能拿来当演出参数。
+  var W_STEPS = [0.30, 0.34, 0.38, 0.42, 0.46, 0.50, 0.54, 0.58, 0.62];
+  var gap = 6;
+  var cellW = CELL + gap, cellH = CELL + gap + 16;
+  var gutter = 60;
+  // 右侧留 24px：画布宽度是 gutter + 列数 × 格宽，最后一列的字会贴着右边缘，
+  // 浏览器截图时再被页面边距吃掉几像素，看起来就是"第 9 列被裁"。
+  var sweepC = canvas2d(gutter + W_STEPS.length * cellW + 24, GLYPHS.length * cellH + 22);
+  var sctx = sweepC.getContext('2d');
+  sctx.fillStyle = '#0b0b0e';
+  sctx.fillRect(0, 0, sweepC.width, sweepC.height);
+  sctx.font = '11px ui-monospace, Consolas, monospace';
+  sctx.fillStyle = '#6f747e';
+  W_STEPS.forEach(function (w, i) {
+    sctx.fillText('w ' + w.toFixed(2), gutter + i * cellW, 14);
+  });
+
+  GLYPHS.forEach(function (ch, row) {
+    var y0 = 22 + row * cellH;
+    sctx.fillStyle = '#6f747e';
+    sctx.font = '13px "Microsoft YaHei", sans-serif';
+    sctx.fillText(ch, 20, y0 + CELL * 0.62);
+
+    var prevArea = 0;
+    W_STEPS.forEach(function (w, i) {
+      var r = drawOne(ch, w);
+      // 按 1:1 绘制：图集 px 与输出 px 相同，便于人眼判断笔画粗细是否合理。
+      sctx.drawImage(r.canvas, gutter + i * cellW, y0, CELL, CELL);
+
+      var holes = holesOf(r.ctx, CELL, CELL);
+      var area = inkArea(r.ctx, CELL, CELL);
+      out.sweep.push({ glyph: ch, w: w, holes: holes, area: area });
+      if ((ch === '口' || ch === '回') && holes !== (ch === '口' ? 1 : 2)) {
+        out.fails.push(ch + ' 在 w=' + w + ' 字怀 ' + holes + '（应为 ' + (ch === '口' ? 1 : 2) + '）');
+      }
+      if (area === 0) out.fails.push(ch + ' 在 w=' + w + ' 无墨');
+      if (w > SAFE_W_MIN && area < prevArea) {
+        out.fails.push(ch + ' 在 w=' + w + ' 墨量倒退 ' + prevArea + '→' + area);
+      }
+      prevArea = Math.max(prevArea, area);
+    });
+  });
+
+  // ---------------------------------------------------- C. 情绪效果
+  var LINE = '他跑过整个夏天';
+  var PROFILES = [
+    { id: 'neutral', label: 'neutral', field: null },
+    { id: 'joy', label: 'joy · 雀跃', field: { basis: 'joy', anchor: 0.10 } },
+    { id: 'sorrow', label: 'sorrow · 悲伤', field: { basis: 'sorrow', anchor: 0.14 } },
+    { id: 'anger', label: 'anger · 愤怒', field: { basis: 'anger', anchor: 0.08 } },
+    { id: 'anxious', label: 'anxious · 不安', field: { basis: 'anxious', anchor: 0.03 } },
+    { id: 'tender', label: 'tender · 温柔', field: { basis: 'tender', anchor: 0.05 } }
+  ];
+
+  var emPx = RENDER_PX;       // 与图集栅格化字号一致；场幅度按真实字号归一
+
+  // 字号从 64 涨到 112 后，7 个字约 800px；原来写死 980 宽 + 220 左边距会越界。
+  // 画布宽度按「左边距 + 实测总宽 + 右边距」算，字号再变也不会裁。
+  var emGutter = 200;
+  var emMeasure = canvas2d(1, 1).getContext('2d');
+  emMeasure.font = '600 ' + emPx + 'px ' + FONT;
+  var lineWidth = 0;
+  Array.from(LINE).forEach(function (ch) { lineWidth += emMeasure.measureText(ch).width; });
+
+  // 行高要容纳 cell（160）与基线场最大位移（0.155em ≈ 17px），150 不够。
+  var rowH = Math.max(CELL + 24, Math.ceil(emPx * 1.85));
+  // 画布宽度要把三样都算进去：左边距、行宽、以及 cell 溢出（cell 比 advance 宽）。
+  // 原来只留 60px，最后一行会出现"字被右边缘裁掉"的观感。
+  // 高度必须按「参照行 + 每行 rowH」算足，否则最后一行（anxious/tender）被画布底部裁掉。
+  var emTop0 = 46 + emPx;
+  var emC = canvas2d(Math.ceil(emGutter + lineWidth + CELL + 40),
+    Math.ceil(emTop0 + PROFILES.length * rowH + 40));
+  var ectx = emC.getContext('2d');
+  ectx.fillStyle = '#0b0b0e';
+  ectx.fillRect(0, 0, emC.width, emC.height);
+
+  ectx.font = '12px ui-monospace, Consolas, monospace';
+  ectx.fillStyle = '#8a8f99';
+  ectx.fillText('基线与粗细由场决定；同句、同强度 eI=1.0', 24, 18);
+
+  // 原生参照行：同一字体、同一字号、同一 600 字重。
+  // 没有这一行，"引擎好不好"就只能凭感觉；有了它，差异一眼可见。
+  // 颜色不能太暗——参照行看不清，等于没画。
+  var refBase = 38 + emPx * 0.78;
+  ectx.font = '600 ' + emPx + 'px ' + FONT;
+  ectx.textBaseline = 'alphabetic';
+  ectx.fillStyle = '#6a6a74';
+  ectx.fillText(LINE, emGutter, refBase);
+  ectx.font = '12px "Microsoft YaHei", sans-serif';
+  ectx.fillStyle = '#8a8f99';
+  ectx.fillText('原生 600 参照（本机与 700 同面）', 24, refBase - 8);
+
+  // 各行整体下移，给参照行让位
+  var emTop = emTop0;
+
+  PROFILES.forEach(function (p, pi) {
+    var baseY = emTop + pi * rowH + rowH * 0.62;
+
+    ectx.fillStyle = '#6f747e';
+    ectx.font = '12px "Microsoft YaHei", sans-serif';
+    ectx.fillText(p.label, 24, emTop + pi * rowH + 20);
+
+    var chars = Array.from(LINE);
+    var measure = canvas2d(1, 1).getContext('2d');
+    measure.font = '600 ' + emPx + 'px ' + FONT;
+
+    var x = emGutter, total = 0;
+    chars.forEach(function (ch) { total += measure.measureText(ch).width; });
+
+    var field = p.field
+      ? LyricEmotionField.sample({ field: p.field }, 1, emPx, 0, 0)
+      : { b: new Float32Array(33), w: new Float32Array(33).fill(0.5),
+          turb: 0, shearTan: 0, amp: 0, freq: 0, damp: 2 };
+
+    var items = [];
+    var acc = 0;
+    chars.forEach(function (ch, i) {
+      var adv = measure.measureText(ch).width;
+      var slot = atlas.acquire(ch);
+      items.push({
+        x: x + acc - PAD, y: baseY - (PAD + BASELINE),
+        w: CELL, h: CELL,
+        u0: slot.u0, v0: slot.v0,
+        uStart: acc / total + 0.0001 * i,
+        uEnd: (acc + adv) / total + 0.0001 * i,
+        startMs: -1e9, durMs: 1
+      });
+      acc += adv;
+    });
+
+    var rendered = engineDraw(gl, atlas, items, emC.width, emC.height, {
+      pxScale: 1, baseY: baseY,
+      curveB: field.b, curveW: field.w,
+      shear: field.shearTan,
+      amp: field.amp, freq: field.freq, damp: field.damp,
+      turbAmp: field.turb,
+      // 辉光与边缘光都参与 alpha（a = mask + glow*0.55），会把字整体"烘胖"。
+      // 这一页要判断的是字形本身，所以把辉光关掉，只留一层很窄的边缘光；
+      // 辉光的效果在 stanza 真机上看，不在这里评判。
+      glowAmt: 0, glowK: 0.18, rimAmt: 0.06, rimWidth: 0.4,
+      idleColor: [0.78, 0.78, 0.82], sungColor: [1, 0.92, 0.72], glowColor: [1, 0.8, 0.5]
+    });
+
+    // 只把这一行叠回去，避免整块重复绘制
+    ectx.drawImage(rendered.canvas, 0, 0);
+
+    var maxB = 0, maxW = 0;
+    for (var k = 0; k < field.b.length; k += 1) {
+      maxB = Math.max(maxB, Math.abs(field.b[k]));
+      maxW = Math.max(maxW, Math.abs(field.w[k] - 0.5));
+    }
+    out.emotion.push({
+      id: p.id,
+      baselineMaxPx: Math.round(maxB * 100) / 100,
+      weightSpan: Math.round(maxW * 1000) / 1000,
+      shearDeg: Math.round(Math.atan(field.shearTan) * 180 / Math.PI * 100) / 100
+    });
+  });
+
+  // 强度为 0 必须逐项回到中性：b/W/T/剪切/激励都不许残留。
+  // 这一条只看 eI=1 的效果图是发现不了的。
+  out.neutral = { ok: true, fails: [] };
+  PROFILES.forEach(function (p) {
+    if (!p.field) return;
+    var z = LyricEmotionField.sample({ field: p.field }, 0, emPx, 0, 0);
+    var bad = '';
+    for (var k = 0; k < z.b.length; k += 1) {
+      if (z.b[k] !== 0 || z.w[k] !== 0.5) { bad = '曲线残留 @' + k; break; }
+    }
+    if (!bad && z.turb !== 0) bad = 'turb=' + z.turb;
+    if (!bad && z.shearTan !== 0) bad = 'shear=' + z.shearTan;
+    if (!bad && z.amp !== 0) bad = 'amp=' + z.amp;
+    if (bad) {
+      out.neutral.ok = false;
+      out.neutral.fails.push(p.id + ': ' + bad);
+      out.fails.push('eI=0 非中性 ' + p.id + ': ' + bad);
+    }
+  });
+
+  // ---------------------------------------------------- 输出
+  sweepC.id = 'sweep';
+  emC.id = 'emotion';
+  document.getElementById('sweep').replaceWith(sweepC);
+  document.getElementById('emotion').replaceWith(emC);
+
+  out.verdict = out.fails.length ? 'FAIL' : 'PASS';
+  document.getElementById('result').textContent = JSON.stringify(out, null, 2);
+  window.__glyphG2 = out;
+
+  // 没有 Playwright 时也能出单张证据图：?only=sweep / ?only=emotion
+  // 只留目标画布，Chrome --screenshot 的窗口尺寸就等于画布尺寸。
+  var only = new URLSearchParams(location.search).get('only');
+  if (only === 'sweep' || only === 'emotion') {
+    var target = only === 'sweep' ? sweepC : emC;
+    document.body.innerHTML = '';
+    document.body.style.cssText = 'margin:0;background:#0b0b0e;overflow:hidden';
+    target.style.margin = '0';
+    target.style.border = '0';
+    document.body.append(target);
+    document.body.style.width = target.width + 'px';
+    document.body.style.height = target.height + 'px';
+  }
+})();
+</script>
+</body>
+</html>

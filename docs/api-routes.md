@@ -11,7 +11,7 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 139 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 113 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 116 条内嵌静态资源路由。
+REST 路由表共 149 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 121 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 131 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -26,8 +26,12 @@ REST 路由表共 139 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | POST | `/v1/ai/jobs` |
 | GET | `/v1/ai/jobs/{jobId}` |
 | POST | `/v1/ai/jobs/{jobId}/cancel` |
+| GET | `/v1/ai/ledger` |
 | GET | `/v1/ai/proposals/{proposalId}` |
 | POST | `/v1/ai/proposals/{proposalId}/reject` |
+| GET | `/v1/ai/provider-credential` |
+| PUT | `/v1/ai/provider-credential` |
+| DELETE | `/v1/ai/provider-credential` |
 | GET | `/v1/ai/status` |
 | GET | `/v1/auth/overlay-key` |
 | POST | `/v1/auth/ticket` |
@@ -135,6 +139,8 @@ REST 路由表共 139 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | GET | `/v1/stage/beatmap` |
 | POST | `/v1/stage/beatmap/retry` |
 | GET | `/v1/stage/beatmap/status` |
+| POST | `/v1/stage/pitch` |
+| POST | `/v1/stage/project-media` |
 | GET | `/v1/state` |
 | GET | `/v1/tracks` |
 | POST | `/v1/tracks/batch-delete` |
@@ -152,6 +158,10 @@ REST 路由表共 139 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | GET | `/v1/tracks/{id}/lyrics` |
 | PUT | `/v1/tracks/{id}/lyrics` |
 | DELETE | `/v1/tracks/{id}/lyrics` |
+| POST | `/v1/tracks/{id}/lyrics/candidates` |
+| POST | `/v1/tracks/{id}/lyrics/candidates/apply` |
+| POST | `/v1/tracks/{id}/lyrics/candidates/prepare-online` |
+| POST | `/v1/tracks/{id}/lyrics/candidates/search` |
 | PUT | `/v1/tracks/{id}/lyrics/offset` |
 | POST | `/v1/ui/notice` |
 

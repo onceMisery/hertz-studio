@@ -434,6 +434,7 @@
   // One search session owns all source pages. Late responses never mutate a newer session.
   var searchEpoch = 0;
   var searchSession = null;
+  var entityNetwork = null;
   var searchCache = new Map();
   var searchViews = new Map();
   var sourceManuallySelected = false;
@@ -463,6 +464,13 @@
     return fallback ? fallback.id : current === 'all' ? DEFAULT_SOURCE : current;
   }
 
+  function orderedSearchSources() {
+    return loggedSearchSources().concat(onlineState.sources.map(function (source) { return source.id; }))
+      .filter(function (id, index, all) {
+        return all.indexOf(id) === index && onlineState.sources.some(function (source) { return source.id === id; });
+      });
+  }
+
   function prepareSearchSource(kind) {
     var source = searchSource(kind);
     if (source === onlineState.source) return;
@@ -474,23 +482,6 @@
   // Use a page size accepted by every registered provider (KuGou caps at 20).
   // Otherwise a valid full KuGou page looks short and pagination stops early.
   var PAGE_SIZE = 20;
-  // 技术路线 §4.1：聚合页初始并发 2 个源，其余进有界队列——服务端闸是
-  // 兜底，客户端先自律；某源完成（含失败）即由队列补位。分页的「加载更多」
-  // 不占这 2 个名额（那是用户显式点的单源请求）。
-  var SEARCH_CONCURRENCY = 2;
-
-  async function runBounded(items, worker) {
-    var cursor = 0;
-    var take = function () { return cursor < items.length ? items[cursor++] : null; };
-    var runners = [];
-    for (var i = 0; i < SEARCH_CONCURRENCY && cursor < items.length; i++) {
-      runners.push((async function () {
-        var next;
-        while ((next = take()) !== null) await worker(next);
-      })());
-    }
-    await Promise.all(runners);
-  }
   var CACHE_TTL = 120000;
   var CACHE_LIMIT = 12;
 
@@ -552,9 +543,9 @@
       while (searchViews.size > CACHE_LIMIT) searchViews.delete(searchViews.keys().next().value);
     }
     searchEpoch += 1;
-    if (searchSession) searchSession.pages.forEach(function (p) {
-      if (p.controller) p.controller.abort();
-    });
+    if (searchSession && searchSession.network) searchSession.network.cancel();
+    if (entityNetwork) entityNetwork.cancel();
+    entityNetwork = null;
     searchSession = null;
     onlineState.loading = false;
     if (H.ui.onlineSentinel) H.ui.onlineSentinel.hidden = true;
@@ -593,15 +584,16 @@
       return;
     }
     var pages = session.pages;
+    // Keep source groups in the session's captured order. A later source must
+    // not interleave higher-scoring rows through an already focused group.
     var flat = [];
-    pages.forEach(function (p) { flat = flat.concat(p.tracks); });
-    // Account priority is captured for the session; ties retain relevance/page order.
-    if (session.aggregate) flat = flat.map(function (track, index) {
-      var priority = session.preferredSources.indexOf(track.source);
-      return { track: track, index: index, score: relevance(track, session.q),
-        priority: priority < 0 ? session.preferredSources.length : priority };
-    }).sort(function (a, b) { return a.priority - b.priority || b.score - a.score || a.index - b.index; })
-      .map(function (item) { return item.track; });
+    pages.forEach(function (p) {
+      var tracks = p.tracks.map(function (track, index) { return {track:track,index:index}; });
+      if (session.aggregate) tracks.sort(function (a,b) {
+        return relevance(b.track, session.q) - relevance(a.track, session.q) || a.index - b.index;
+      });
+      flat = flat.concat(tracks.map(function (entry) { return entry.track; }));
+    });
     onlineState.tracks = flat;
     onlineState.total = flat.length;
     onlineState.loading = pages.some(function (p) { return p.loading; });
@@ -636,13 +628,23 @@
     var shown = session.filter ? flat.filter(function (t) { return t.source === session.filter; }) : flat;
     var list = document.createElement('div');
     list.className = 'search-results';
+    var lastSource = null;
     shown.forEach(function (t) {
+      if (session.aggregate && t.source !== lastSource) {
+        var heading = document.createElement('h3');
+        heading.className = 'search-source-heading'; heading.textContent = sourceLabel(t.source);
+        list.appendChild(heading); lastSource = t.source;
+      }
       var row = session.rows.get(virtualId(t));
       if (!row) {
         row = onlineRow(t);
         highlight(row.querySelector('.t-title'), t.title, session.q);
         highlight(row.querySelector('.t-sub'), t.artist || '未知艺术家', session.q);
         highlight(row.querySelector('.t-album'), t.album || '—', session.q);
+        row.dataset.searchKey = 'row:' + virtualId(t);
+        row.querySelectorAll('button').forEach(function (button, index) {
+          button.dataset.searchKey = 'row:' + virtualId(t) + ':button:' + index;
+        });
         session.rows.set(virtualId(t), row);
       }
       paintRowPlayback(row);
@@ -675,7 +677,8 @@
         + (p.loading ? ' · 加载中…' : p.error ? ' · ' + p.error : !p.more ? ' · 暂无更多结果' : '')
         + (p.warning ? ' · ' + p.warning : '');
       item.appendChild(text);
-      if (p.error || p.more) {
+      if (p.failure) { item.dataset.errorCode = p.failure.code; item.dataset.requestId = p.failure.requestId; }
+      if ((p.error && (!p.failure || p.failure.retryable)) || (!p.error && p.more)) {
         var more = searchButton(p.error ? '重试' : '加载更多', function () { return loadSearchPage(session, p); });
         more.disabled = p.loading;
         more.dataset.searchKey = 'more:' + p.source;
@@ -701,14 +704,13 @@
     if (session !== searchSession || page.loading || (!page.more && !page.error)) return;
     page.loading = true;
     page.error = '';
-    page.controller = typeof AbortController === 'function' ? new AbortController() : null;
+    page.failure = null;
     renderOnline();
     try {
       var params = new URLSearchParams({ source: page.source, limit: String(PAGE_SIZE), offset: String(page.offset) });
       if (session.q) params.set('q', session.q);
       else if (session.cat) params.set('cat', session.cat);
-      var result = await T.get('/v1/online/search?' + params.toString(),
-        page.controller ? { signal: page.controller.signal } : {});
+      var result = await session.network.get('/v1/online/search?' + params.toString());
       if (session !== searchSession) return;
       var raw = result.tracks || [];
       var seen = new Set(page.tracks.map(virtualId));
@@ -739,12 +741,12 @@
       }
     } catch (err) {
       if (session !== searchSession) return;
-      page.error = H.errText('搜索失败', err);
+      page.failure = HertzSearch.failure(err);
+      page.error = H.errText(page.failure.label, err);
       if (!session.aggregate && !session.silent) H.toast(page.error, 'error');
     } finally {
       if (session === searchSession) {
         page.loading = false;
-        page.controller = null;
         renderOnline();
       }
     }
@@ -795,13 +797,10 @@
       }
     }
     var preferred = loggedSearchSources();
-    var ids = source === 'all' ? preferred.concat(onlineState.sources.map(function (s) { return s.id; }))
-      .filter(function (id, index, all) {
-        return all.indexOf(id) === index && onlineState.sources.some(function (s) { return s.id === id; });
-      }) : [source];
+    var ids = source === 'all' ? orderedSearchSources() : [source];
     var viewKey = JSON.stringify([query, source, query ? '' : onlineState.cat]);
     var view = searchViews.get(viewKey);
-    var session = { key: viewKey, rows: new Map(), q: query, cat: onlineState.cat, aggregate: source === 'all', preferredSources: preferred, filter: view ? view.filter : '', silent: opts.silent, pages: [] };
+    var session = { key: viewKey, network: HertzSearch.create(T), rows: new Map(), q: query, cat: onlineState.cat, aggregate: source === 'all', preferredSources: preferred, filter: view ? view.filter : '', silent: opts.silent, pages: [] };
     session.pages = ids.map(function (id) {
       var cached = query && searchCache.get(JSON.stringify([query, id]));
       if (cached && Date.now() - cached.time >= CACHE_TTL) cached = null;
@@ -812,9 +811,9 @@
     searchScroller().scrollTop = 0;
     renderOnline();
     if (view && session.pages.every(function (p) { return p.cached; })) searchScroller().scrollTop = view.scroll;
-    // §4.1：初始并发 2 个源，其余进有界队列；缓存命中页不占并发名额。
-    var pending = session.pages.filter(function (p) { return !p.cached; });
-    await runBounded(pending, function (p) { return loadSearchPage(session, p); });
+    // The shared coordinator also covers previews, space and explicit page retries.
+    await Promise.all(session.pages.filter(function (p) { return !p.cached; })
+      .map(function (p) { return loadSearchPage(session, p); }));
   }
 
   function searchOnline(opts) { return search(opts); }
@@ -868,6 +867,7 @@
     onlineState.kind = kind;
     prepareSearchSource(kind);
     renderKind();
+    if (window.TopSearch && TopSearch.state.kind !== kind) TopSearch.scopeChanged();
     // 切类型即作废旧结果：有词时立刻按新类型搜索，没词时给对应引导。
     onlineState.tracks = [];
     onlineState.total = 0;
@@ -882,6 +882,14 @@
     hint.className = 'hint';
     hint.textContent = text;
     body.appendChild(hint);
+  }
+
+  function renderSearchFailure(prefix, err, retry) {
+    var failure = HertzSearch.failure(err);
+    renderPlaylistHint(H.errText(prefix + ' · ' + failure.label, err));
+    H.ui.onlineBody.dataset.errorCode = failure.code;
+    H.ui.onlineBody.dataset.requestId = failure.requestId;
+    if (failure.retryable) H.ui.onlineBody.appendChild(searchButton('重试', retry));
   }
 
   async function searchPlaylists(opts) {
@@ -906,12 +914,13 @@
     if (H.ui.onlineCount) H.ui.onlineCount.textContent = '搜索中…';
     var params = new URLSearchParams({ source: source, q: query, limit: String(PAGE_SIZE) });
     try {
-      var result = await T.get('/v1/online/playlists/search?' + params.toString());
+      entityNetwork = HertzSearch.create(T);
+      var result = await entityNetwork.get('/v1/online/playlists/search?' + params.toString());
       if (epoch !== searchEpoch) return;
       renderPlaylists(result, query);
     } catch (err) {
       if (epoch !== searchEpoch) return;
-      renderPlaylistHint(H.errText('歌单搜索失败', err));
+      renderSearchFailure('歌单搜索失败', err, function () { search(opts); });
       if (!opts.silent) H.toast(H.errText('歌单搜索失败', err), 'error');
     }
   }
@@ -1075,12 +1084,13 @@
     if (H.ui.onlineCount) H.ui.onlineCount.textContent = '搜索中…';
     var params = new URLSearchParams({ source: source, q: query, limit: String(PAGE_SIZE) });
     try {
-      var result = await T.get(endpoint + '?' + params.toString());
+      entityNetwork = HertzSearch.create(T);
+      var result = await entityNetwork.get(endpoint + '?' + params.toString());
       if (epoch !== searchEpoch) return;
       renderEntities(kind, result, query);
     } catch (err) {
       if (epoch !== searchEpoch) return;
-      renderPlaylistHint(H.errText(label + '搜索失败', err));
+      renderSearchFailure(label + '搜索失败', err, function () { search(opts); });
       if (!opts.silent) H.toast(H.errText(label + '搜索失败', err), 'error');
     }
   }
@@ -1730,6 +1740,7 @@
         // 换源后重算「单曲 / 歌单」切换是否可见（只有带 playlist_search
         // 能力的音源才显示歌单）。
         renderKind();
+        if (window.TopSearch) TopSearch.scopeChanged();
         // 按新音源重建档位选项（All 无档位描述，选择器自动隐藏）。
         renderQualityOptions();
         // All 是音源维度的聚合项：没有分类，也不自动拉取（需要关键词）。
@@ -2082,12 +2093,14 @@
       // 新记录能置顶（下面的早退只针对搜索预取）。
       loadHistory();
       if (onlineState.loading) return;
-      if (onlineState.tracks.length) return;
+      if (onlineState.tracks.length && searchSession) return;
       if (!onlineState.q.trim() && !onlineState.cat) return;
       search({ silent: true });
     },
     search: search,
+    cancelSearch: cancelSearch,
     searchSource: searchSource,
+    searchSources: orderedSearchSources,
     whenSearchReady: whenSearchReady,
     // 搜索类型切换（song | playlist | artist | album）。顶栏搜索框与在线页
     // 的类型 chips 共用这一份 kind；切到没有能力位的类型会被 renderKind

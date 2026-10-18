@@ -16,8 +16,9 @@ pub use audio::{
 };
 pub use error::{http_status, AudioError, CoreError, LibraryError, Result, StoreError};
 pub use model::{
-    DeviceInfo, Favorite, FavoriteKind, LyricDocument, LyricLine, LyricSource, LyricWord, PlayMode,
-    PlayerSnapshot, Playlist, PlaylistId, Track, TrackId, TrackSource, PROTOCOL_VERSION,
+    DeviceInfo, Favorite, FavoriteKind, LyricDocument, LyricLine, LyricOrigin, LyricSource,
+    LyricWord, PlayMode, PlayerSnapshot, Playlist, PlaylistId, Track, TrackId, TrackSource,
+    PROTOCOL_VERSION,
 };
 
 #[cfg(test)]
@@ -67,6 +68,10 @@ mod tests {
                 },
             ],
             translation: None,
+            format: None,
+            timing_precision: None,
+            romanization: None,
+            origin: None,
         };
         assert_eq!(doc.line_index_at(0), Some(0));
         assert_eq!(doc.line_index_at(999), Some(0));

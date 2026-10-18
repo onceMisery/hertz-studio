@@ -1,0 +1,12 @@
+
+running 1 test
+test online::search_pressure::sustained_shared_search_budget ... FAILED
+
+failures:
+
+failures:
+    online::search_pressure::sustained_shared_search_budget
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 583 filtered out; finished in 0.01s
+
+Error: compiled source changed: crates/hertz-studio/src/online/mod.rs

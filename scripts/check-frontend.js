@@ -44,6 +44,26 @@ const SYNTAX_SKIP = new Set(['vendor']);
 // why 字段就是原来贴在 ci.yml 里的判断依据：它解释的是「这条失败意味着什么」，
 // 挪到脚本里才不会和 workflow 的 YAML 缩进互相拖累。
 const STEPS = [
+  { script: 'check-audio-errors.js', stage: 'behavior',
+    why: '播放格式提示按稳定错误码分流，读取/损坏不冒充格式不支持，并保留 request_id。' },
+  { script: 'export-stage-contract.js', stage: 'guard', args: ['--check'],
+    why: '服务端舞台契约必须与全部注册场景一致。' },
+  { script: 'check-stage-legacy-fixtures.js', stage: 'behavior',
+    why: '物化重构前十场景的完整行为与固定旧分享码必须与历史源码重放一致。' },
+  { script: 'check-stage-materialize.js', stage: 'behavior',
+    why: '服务端契约参数必须可物化，候选必须确定且可分享往返。' },
+  { script: 'check-stage-evaluation.js', stage: 'behavior',
+    why: '冻结评测语料、真实默认值语义、错误接受/拒绝与人工评分分母不能失真；默认离线，不调用模型。' },
+  { script: 'check-stage-project.js', stage: 'behavior',
+    why: '工程版本、媒体绑定、换曲失效与可逆绝对时间轨必须复用真实预置 owner。' },
+  { script: 'check-stage-arrangement.js', stage: 'behavior',
+    why: '手动分段检查无副作用，规则复用原 owner，替换、媒体确认、seek 和工程/分享往返必须一致。' },
+  { script: 'check-stage-pitch.js', stage: 'behavior',
+    why: '基频轨迹按真实版本和时间校验，空点不连线，图形预算与取消选项保持有界。' },
+  { script: 'check-stage-templates.js', stage: 'behavior',
+    why: '模板必须绑定固定契约，从规范基线创建，并通过原 owner 临时预览、显式应用及分享往返。' },
+  { script: 'check-video-export.js', stage: 'behavior',
+    why: '录制启动/停止隔离、迟到共享、最终数据与音轨事实、异常清理和下载重试不能丢失。' },
   { script: 'check-capsule-performance.js', stage: 'behavior',
     why: '小窗口按需滚动、隐藏状态消费、曲目/封面竞态、恢复队列与精简重连。' },
   { script: 'check-home-dashboard.js', stage: 'behavior',
@@ -70,6 +90,10 @@ const STEPS = [
     why: '插件形态（srcdoc + CSP + base href）下壁纸/图标 404 是「不报错、只是空」，独立形态看不出来。' },
   { script: 'check-online.js', stage: 'behavior',
     why: '在线音源：扫码状态机与登录意图归属、聚合搜索、能力闸门、账号态三态、封面与徽标通道。' },
+  { script: 'check-search-session.js', stage: 'behavior',
+    why: '全部搜索入口共用额度，取消后 DBX 真实 invoke 结束才释放，排队有界且错误事实保留。' },
+  { script: 'check-online-transport.js', stage: 'behavior',
+    why: 'HTTP/DBX 传输取消、重试和事件重连恢复。' },
   { script: 'check-quality-ceiling.js', stage: 'behavior',
     why: '每轨音质上限的接线：取档四个入口都夹上限、两处失败收口都记档、服务端事件名与前端分发对得上、降档提示按「这一首+这一档」去重（少接一处只表现为音质时好时坏，不报错）。' },
   { script: 'check-beat-budget.js', stage: 'behavior',
@@ -138,7 +162,6 @@ const STEPS = [
 
 // CI 暂不跑、但本地值得随手跑的无浏览器检查。
 const EXTRA = [
-  { script: 'check-online-transport.js', why: '在线取流的传输层接缝。' },
   { script: 'check-playlist-views.js', why: '歌单的几种视图形态。' },
   { script: 'check-theme-studio.js', why: '主题工坊参数落盘。' },
   { script: 'check-stage-cinema.js', why: '电影镜头与自由相机。' },

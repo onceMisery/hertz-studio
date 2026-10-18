@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT
+     Copyright (c) 2026 hertz-studio contributors
+
+     G3 检查页（非产品代码）：用真实 stanza-glyph 渲染器跑五种情绪场。
+     同一句、同一时间、同一 eI，只变 profile/anchor；双图集 400/700。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>lyric glyph G3 · emotion fields</title>
+<style>
+  body { margin: 0; background: #101014; color: #d6d6da; font: 13px/1.5 "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 15px; font-weight: 600; margin: 18px 20px 4px; }
+  p.hint { margin: 0 20px 14px; color: #7d828c; font-size: 12px; }
+  .controls { display: flex; align-items: center; gap: 12px; margin: 0 20px 14px; color: #8d929c; font-size: 12px; }
+  .controls input[type="range"] { width: 220px; accent-color: #ffd166; }
+  .rows { margin: 0 20px 28px; display: flex; flex-direction: column; gap: 10px; }
+  .g3-row { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 16px; align-items: center; }
+  .g3-label { text-align: right; color: #aab0ba; font-size: 12px; line-height: 1.45; }
+  .g3-label strong { display: block; color: #e6e8ec; font-weight: 600; }
+  .g3-label small { display: block; color: #676d78; font: 10px/1.5 ui-monospace, Consolas, monospace; }
+  .g3-stage {
+    position: relative; height: 150px; overflow: hidden;
+    border: 1px solid #22222a; border-radius: 8px; background: #0b0b0e;
+  }
+  .fl-glyph { position: absolute; inset: 0; }
+  .fl-glyph[hidden] { display: none; }
+  .fl-glyph-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .fl-glyph-a11y { position: absolute; inset: 0; color: transparent; opacity: 0; pointer-events: none; user-select: none; }
+  .fl-glyph-hit { position: absolute; inset: 0; pointer-events: none; }
+  .fl-glyph-hit .fl-glyph-hot { position: absolute; pointer-events: auto; cursor: pointer; background: transparent; }
+  pre { margin: 0 20px 40px; padding: 12px; background: #14141a; border: 1px solid #22222a;
+        white-space: pre-wrap; font: 12px/1.55 ui-monospace, Consolas, monospace; }
+  /* 结果只给检查脚本读 window.__glyphG3；截图里不要占篇幅。 */
+  #result { display: none; }
+</style>
+</head>
+<body>
+<h1>G3 · 情绪场 × 字形引擎</h1>
+<p class="hint">双图集 400/700；同一句、同一时间、eI=1.0。joy/sorrow/anger 使用 C 高能 anchor；本轮只验场层，粒子/装饰未接。</p>
+<div class="controls">
+  <label for="time">时间</label>
+  <input id="time" type="range" min="0" max="6000" step="50" value="3200">
+  <output id="time-value">3200ms</output>
+  <button id="redraw" type="button">重绘</button>
+</div>
+<div id="rows" class="rows"></div>
+<pre id="result">running…</pre>
+
+<script src="stanza/stanza-util.js"></script>
+<script src="stanza/stanza-theme.js"></script>
+<script src="lyric-glyph-sdf.js"></script>
+<script src="lyric-glyph-atlas.js"></script>
+<script src="lyric-glyph-gl.js"></script>
+<script src="lyric-emotion-field.js"></script>
+<script src="stanza/stanza-glyph.js"></script>
+<script>
+window.addEventListener('error', function (e) {
+  var el = document.getElementById('result');
+  if (el) el.textContent = 'ERROR: ' + (e.message || '') + '\n@ ' + (e.filename || '') + ':' + (e.lineno || '');
+});
+</script>
+<script>
+(function () {
+  'use strict';
+
+  var POS = 3200;
+  var TOKENS = [
+    { text: '他', start_ms: 0, end_ms: 700 },
+    { text: '跑', start_ms: 700, end_ms: 1400 },
+    { text: '过', start_ms: 1400, end_ms: 2200 },
+    { text: '整', start_ms: 2200, end_ms: 3100 },
+    { text: '个', start_ms: 3100, end_ms: 3900 },
+    { text: '夏', start_ms: 3900, end_ms: 5000 },
+    { text: '天', start_ms: 5000, end_ms: 6000 }
+  ];
+  var LINE = { start_ms: 0, end_ms: 6000, text: '他跑过整个夏天' };
+  var DOC = { lines: [LINE] };
+
+  window.Stage = {
+    tier: function () { return 2; },
+    lyrics: function () { return DOC; },
+    position: function () { return POS; },
+    beat: function () { return 0.35; },
+    energy: function () { return 0.4; },
+    lyricTokens: function () { return TOKENS; }
+  };
+
+  var ROWS = [
+    { id: 'joy', label: 'joy · 雀跃', anchor: 0.125, primary: '#FFF7D6', accent: '#FFD166', note: 'C 高能' },
+    { id: 'sorrow', label: 'sorrow · 悲伤', anchor: 0.155, primary: '#C9D6E3', accent: '#7FA7D9', note: 'C 高能' },
+    { id: 'anger', label: 'anger · 愤怒', anchor: 0.095, primary: '#FFE8D6', accent: '#FF5A36', note: 'C 高能' },
+    { id: 'anxious', label: 'anxious · 不安', anchor: 0.03, primary: '#E7EDF7', accent: '#9BB7D4', note: '基础档' },
+    { id: 'tender', label: 'tender · 温柔', anchor: 0.05, primary: '#F5EADF', accent: '#D8B28C', note: '基础档' }
+  ];
+
+  function themeFor(row) {
+    return Object.assign({}, window.StanzaTheme.DEFAULT, {
+      name: 'g3-' + row.id,
+      backgroundColor: '#0b0b0e',
+      primaryColor: row.primary,
+      accentColor: row.accent,
+      secondaryColor: '#71717a',
+      wordColors: [],
+      animationIntensity: 'normal',
+      fontStyle: 'sans'
+    });
+  }
+
+  var host = document.getElementById('rows');
+  var renderers = [];
+  var out = { rows: [], verdict: 'running' };
+
+  ROWS.forEach(function (row) {
+    var wrap = document.createElement('div');
+    wrap.className = 'g3-row';
+    var label = document.createElement('div');
+    label.className = 'g3-label';
+    label.innerHTML = '<strong>' + row.label + '</strong><small>anchor ' + row.anchor.toFixed(3) + ' · ' + row.note + '</small>';
+    var stage = document.createElement('div');
+    stage.className = 'g3-stage';
+    stage.id = 'g3-stage-' + row.id;
+    wrap.append(label, stage);
+    host.append(wrap);
+
+    var renderer = window.StanzaGlyph.init(stage, function () {});
+    renderer.setTheme(themeFor(row));
+    renderer.setEmotion({ field: { basis: row.id, anchor: row.anchor } }, 1);
+    renderer.setVisible(true);
+    renderer.frame();
+
+    var field = window.LyricEmotionField.sample(
+      { field: { basis: row.id, anchor: row.anchor } }, 1, 72, 0.35, 0
+    );
+    var maxB = 0, maxW = 0;
+    for (var i = 0; i < field.b.length; i += 1) {
+      maxB = Math.max(maxB, Math.abs(field.b[i]));
+      maxW = Math.max(maxW, Math.abs(field.w[i] - 0.5));
+    }
+    out.rows.push({
+      id: row.id, label: row.label, anchor: row.anchor,
+      baselineMaxPx: Math.round(maxB * 100) / 100,
+      weightSpan: Math.round(maxW * 1000) / 1000,
+      shearTan: Math.round(field.shearTan * 10000) / 10000,
+      turb: field.turb
+    });
+    renderers.push(renderer);
+  });
+
+  function drawAll() {
+    renderers.forEach(function (r) { r.frame(); });
+    document.getElementById('time-value').textContent = POS + 'ms';
+  }
+
+  var time = document.getElementById('time');
+  time.addEventListener('input', function () {
+    POS = Number(time.value) || 0;
+    drawAll();
+  });
+  document.getElementById('redraw').addEventListener('click', drawAll);
+
+  drawAll();
+  out.verdict = 'PASS';
+  document.getElementById('result').textContent = JSON.stringify(out, null, 2);
+  window.__glyphG3 = out;
+})();
+</script>
+</body>
+</html>

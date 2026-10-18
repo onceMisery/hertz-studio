@@ -31,6 +31,8 @@ pub struct JobRow {
     pub attempt_id: Option<String>,
     pub provider: String,
     pub model: String,
+    pub reservation_micro_usd: i64,
+    pub pricing_snapshot: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub result_proposal_id: Option<String>,
@@ -59,7 +61,7 @@ pub struct BudgetRow {
 const JOB_COLUMNS: &str =
     "job_id, owner_instance_id, principal, capability, key, input_hash, state,
         state_revision, dispatch_state, attempt_id, provider, model, created_at, updated_at,
-        result_proposal_id";
+        result_proposal_id, reservation_micro_usd, pricing_snapshot";
 
 pub async fn find_job_by_key<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     conn: E,
@@ -99,8 +101,9 @@ pub async fn insert_job<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     sqlx::query(
         "INSERT INTO ai_jobs (job_id, owner_instance_id, principal, capability, key, input_hash,
                               state, state_revision, dispatch_state, attempt_id, provider,
-                              model, created_at, updated_at, result_proposal_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14)",
+                              model, created_at, updated_at, result_proposal_id,
+                              reservation_micro_usd, pricing_snapshot)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, ?15, ?16)",
     )
     .bind(&job.job_id)
     .bind(&job.owner_instance_id)
@@ -116,6 +119,8 @@ pub async fn insert_job<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     .bind(&job.model)
     .bind(job.created_at)
     .bind(&job.result_proposal_id)
+    .bind(job.reservation_micro_usd)
+    .bind(&job.pricing_snapshot)
     .execute(conn)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -200,6 +205,7 @@ pub async fn attach_proposal<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>
 pub async fn list_jobs<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     conn: E,
     owner_instance_id: &str,
+    principal: &str,
     before_created_at: Option<i64>,
     before_job_id: Option<&str>,
     limit: i64,
@@ -208,10 +214,11 @@ pub async fn list_jobs<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
         (Some(created), Some(job_id)) => {
             sqlx::query_as(&format!(
                 "SELECT {JOB_COLUMNS} FROM ai_jobs
-                 WHERE owner_instance_id = ?1 AND (created_at < ?2 OR (created_at = ?2 AND job_id < ?3))
-                 ORDER BY created_at DESC, job_id DESC LIMIT ?4"
+                 WHERE owner_instance_id = ?1 AND principal = ?2 AND (created_at < ?3 OR (created_at = ?3 AND job_id < ?4))
+                 ORDER BY created_at DESC, job_id DESC LIMIT ?5"
             ))
             .bind(owner_instance_id)
+            .bind(principal)
             .bind(created)
             .bind(job_id)
             .bind(limit)
@@ -222,10 +229,11 @@ pub async fn list_jobs<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
         _ => {
             sqlx::query_as(&format!(
                 "SELECT {JOB_COLUMNS} FROM ai_jobs
-                 WHERE owner_instance_id = ?1
-                 ORDER BY created_at DESC, job_id DESC LIMIT ?2"
+                 WHERE owner_instance_id = ?1 AND principal = ?2
+                 ORDER BY created_at DESC, job_id DESC LIMIT ?3"
             ))
             .bind(owner_instance_id)
+            .bind(principal)
             .bind(limit)
             .fetch_all(conn)
             .await
@@ -313,11 +321,13 @@ pub async fn cas_proposal_state<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlit
 ) -> Result<bool, StoreError> {
     let result = sqlx::query(
         "UPDATE ai_proposals SET state = ?3, revision = revision + 1
-         WHERE proposal_id = ?1 AND state = 'pending' AND revision = ?2",
+         WHERE proposal_id = ?1 AND state = 'pending' AND revision = ?2
+           AND (?3 != 'rejected' OR expires_at > ?4)",
     )
     .bind(proposal_id)
     .bind(expected_revision)
     .bind(to_state)
+    .bind(crate::now_ms())
     .execute(conn)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -362,12 +372,11 @@ pub async fn reserve(
     limit_micro_usd: i64,
 ) -> Result<BudgetRow, StoreError> {
     let current = get_or_create_month(&mut *conn, month).await?;
-    if current
+    let total = current
         .charged_micro_usd
-        .saturating_add(current.reserved_micro_usd)
-        .saturating_add(amount_micro_usd)
-        > limit_micro_usd
-    {
+        .checked_add(current.reserved_micro_usd)
+        .and_then(|total| total.checked_add(amount_micro_usd));
+    if amount_micro_usd < 0 || total.is_none_or(|total| total > limit_micro_usd) {
         return Err(StoreError::Database(format!(
             "budget_exceeded:{limit_micro_usd}"
         )));
@@ -386,23 +395,64 @@ pub async fn reserve(
 }
 
 /// 结算：`release` 部分归还预留，`charge` 部分计入已用（unknown 结算时
-/// 两者之和等于该任务仍占用的预留）。防负由 MAX 保护，revision 前进。
+/// 两者均等于该任务的预留）。差额对账传 release=0；不截断负值或溢出。
 pub async fn settle(
     conn: &mut sqlx::SqliteConnection,
     month: &str,
     release_micro_usd: i64,
     charge_micro_usd: i64,
 ) -> Result<BudgetRow, StoreError> {
+    let current = get_or_create_month(&mut *conn, month).await?;
+    let reserved = current
+        .reserved_micro_usd
+        .checked_sub(release_micro_usd)
+        .filter(|value| *value >= 0 && release_micro_usd >= 0);
+    let charged = current
+        .charged_micro_usd
+        .checked_add(charge_micro_usd)
+        .filter(|value| *value >= 0);
+    let (Some(reserved), Some(charged)) = (reserved, charged) else {
+        return Err(StoreError::Database("invalid AI budget adjustment".into()));
+    };
     sqlx::query(
         "UPDATE ai_budget_months
-         SET reserved_micro_usd = MAX(reserved_micro_usd - ?2, 0),
-             charged_micro_usd = charged_micro_usd + ?3,
+         SET reserved_micro_usd = ?2,
+             charged_micro_usd = ?3,
              revision = revision + 1
          WHERE month = ?1",
     )
     .bind(month)
-    .bind(release_micro_usd)
-    .bind(charge_micro_usd)
+    .bind(reserved)
+    .bind(charged)
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    get_or_create_month(&mut *conn, month).await
+}
+
+/// Mark a monthly total that no longer fits SQLite's signed integer range.
+/// The caller keeps the task reservation estimate and trips the budget guard.
+pub async fn saturate_month_after_overflow(
+    conn: &mut sqlx::SqliteConnection,
+    month: &str,
+    release_micro_usd: i64,
+) -> Result<BudgetRow, StoreError> {
+    let current = get_or_create_month(&mut *conn, month).await?;
+    let reserved = current
+        .reserved_micro_usd
+        .checked_sub(release_micro_usd)
+        .filter(|value| *value >= 0 && release_micro_usd >= 0)
+        .ok_or_else(|| StoreError::Database("invalid AI budget release".into()))?;
+    sqlx::query(
+        "UPDATE ai_budget_months
+         SET reserved_micro_usd = ?2,
+             charged_micro_usd = ?3,
+             revision = revision + 1
+         WHERE month = ?1",
+    )
+    .bind(month)
+    .bind(reserved)
+    .bind(i64::MAX)
     .execute(&mut *conn)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -433,8 +483,9 @@ pub async fn accepted_watermark(conn: &mut sqlx::SqliteConnection) -> Result<i64
 
 async fn read_watermark(conn: &mut sqlx::SqliteConnection) -> Result<i64, StoreError> {
     sqlx::query_scalar("SELECT accepted_watermark FROM ai_instance WHERE id = 1")
-        .fetch_one(&mut *conn)
+        .fetch_optional(&mut *conn)
         .await
+        .map(|v| v.unwrap_or(0))
         .map_err(|e| StoreError::Database(e.to_string()))
 }
 
@@ -461,10 +512,13 @@ async fn ensure_instance_row(
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct UsageEntryRow {
     pub job_id: String,
+    pub accepted_month: String,
+    pub attempt_id: Option<String>,
     pub reservation_micro_usd: i64,
     pub accounted_micro_usd: i64,
     pub usage_state: String,
     pub pricing_snapshot: String,
+    pub reported_usage: Option<String>,
     pub revision: i64,
     pub created_at: i64,
 }
@@ -487,8 +541,13 @@ pub async fn insert_usage_entry<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlit
     sqlx::query(
         "INSERT OR IGNORE INTO ai_usage_entries (job_id, reservation_micro_usd,
                                                 accounted_micro_usd, usage_state,
-                                                pricing_snapshot, revision, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                                                pricing_snapshot, revision, created_at, accepted_month, attempt_id, reported_usage,
+                                                owner_instance_id, principal, task_state, accepted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+             (SELECT owner_instance_id FROM ai_jobs WHERE job_id = ?1),
+             (SELECT principal FROM ai_jobs WHERE job_id = ?1),
+             (SELECT state FROM ai_jobs WHERE job_id = ?1),
+             (SELECT created_at FROM ai_jobs WHERE job_id = ?1))",
     )
     .bind(&entry.job_id)
     .bind(entry.reservation_micro_usd)
@@ -497,6 +556,9 @@ pub async fn insert_usage_entry<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlit
     .bind(&entry.pricing_snapshot)
     .bind(entry.revision)
     .bind(entry.created_at)
+    .bind(&entry.accepted_month)
+    .bind(&entry.attempt_id)
+    .bind(&entry.reported_usage)
     .execute(conn)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -509,13 +571,40 @@ pub async fn find_usage_entry<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>
 ) -> Result<Option<UsageEntryRow>, StoreError> {
     sqlx::query_as(
         "SELECT job_id, reservation_micro_usd, accounted_micro_usd, usage_state,
-                pricing_snapshot, revision, created_at
+                pricing_snapshot, revision, created_at, accepted_month, attempt_id, reported_usage
          FROM ai_usage_entries WHERE job_id = ?1",
     )
     .bind(job_id)
     .fetch_optional(conn)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))
+}
+
+/// Late usage updates only the matching dispatched attempt and estimate revision.
+/// The caller adjusts the original month in the same BEGIN IMMEDIATE transaction.
+pub async fn cas_report_usage(
+    conn: &mut sqlx::SqliteConnection,
+    job_id: &str,
+    attempt_id: &str,
+    expected_revision: i64,
+    amount_micro_usd: i64,
+    reported_usage: &str,
+) -> Result<bool, StoreError> {
+    let result = sqlx::query(
+        "UPDATE ai_usage_entries SET accounted_micro_usd = ?4, reported_usage = ?5,
+            usage_state = 'reported', revision = revision + 1
+         WHERE job_id = ?1 AND attempt_id = ?2 AND revision = ?3
+            AND usage_state IN ('unknown', 'estimated_final')",
+    )
+    .bind(job_id)
+    .bind(attempt_id)
+    .bind(expected_revision)
+    .bind(amount_micro_usd)
+    .bind(reported_usage)
+    .execute(conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(result.rows_affected() == 1)
 }
 
 /// 熔断闩锁行；没有就建（owner 来自服务端实例身份）。
@@ -604,4 +693,152 @@ pub async fn budget_guard<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     .fetch_optional(conn)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))
+}
+
+/// Expire payloads and release history space only after the protection window.
+/// The caller pauses this operation during a significant wall-clock rollback.
+pub async fn retain_ai_history(
+    conn: &mut sqlx::SqliteConnection,
+    now: i64,
+    job_cutoff: i64,
+    ledger_month_cutoff: &str,
+) -> Result<(), StoreError> {
+    let statements = [
+        "UPDATE ai_proposals SET validated_intent = 'null',
+            state = CASE WHEN state = 'pending' THEN 'expired' ELSE state END,
+            revision = revision + 1
+         WHERE expires_at <= ?1 AND (validated_intent != 'null' OR state = 'pending')",
+        "UPDATE ai_usage_entries SET usage_state = 'estimated_final', revision = revision + 1
+         WHERE usage_state = 'unknown' AND created_at <= ?1 - 86400000",
+        "DELETE FROM ai_proposals WHERE job_id IN (
+            SELECT j.job_id FROM ai_jobs j JOIN ai_usage_entries u ON j.job_id = u.job_id
+            WHERE j.created_at < ?1 AND j.updated_at < ?1 AND j.state NOT IN ('accepted', 'running'))",
+        "DELETE FROM ai_jobs WHERE created_at < ?1 AND updated_at < ?1
+            AND state NOT IN ('accepted', 'running') AND EXISTS (
+                SELECT 1 FROM ai_usage_entries u WHERE u.job_id = ai_jobs.job_id)",
+        "DELETE FROM ai_usage_entries WHERE accepted_month < ?1 AND accepted_month != ''
+            AND usage_state != 'unknown' AND NOT EXISTS (
+                SELECT 1 FROM ai_jobs j WHERE j.job_id = ai_usage_entries.job_id)",
+        "DELETE FROM ai_budget_months WHERE month < ?1 AND reserved_micro_usd = 0
+            AND NOT EXISTS (SELECT 1 FROM ai_usage_entries u WHERE u.accepted_month = ai_budget_months.month)",
+    ];
+    for (index, statement) in statements.iter().enumerate() {
+        let query = sqlx::query(statement);
+        let query = match index {
+            0 | 1 => query.bind(now),
+            2 | 3 => query.bind(job_cutoff),
+            _ => query.bind(ledger_month_cutoff),
+        };
+        query
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Conservative logical payload bytes, including field names and numeric text.
+/// This is an application admission limit, not a promise about DB/WAL file size.
+pub async fn ai_history_capacity(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<(i64, i64), StoreError> {
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_jobs")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    let mut bytes = 0i64;
+    #[derive(sqlx::FromRow)]
+    struct ColumnInfo {
+        name: String,
+    }
+    // Only compile-time table names are interpolated. Enumerating actual columns
+    // keeps new accounting metadata inside the bound without a second field list.
+    for table in [
+        "ai_jobs",
+        "ai_proposals",
+        "ai_usage_entries",
+        "ai_budget_months",
+        "ai_grants",
+        "ai_instance",
+        "ai_budget_guard",
+    ] {
+        let columns: Vec<ColumnInfo> = sqlx::query_as(&format!("PRAGMA table_info({table})"))
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+        let fields = columns
+            .iter()
+            .map(|column| {
+                let name = &column.name;
+                format!(
+                    "'{}', \"{}\"",
+                    name.replace('\'', "''"),
+                    name.replace('\"', "\"\"")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let amount: i64 = sqlx::query_scalar(&format!(
+            "SELECT COALESCE(SUM(length(CAST(json_object({fields}) AS BLOB))), 0) FROM {table}"
+        ))
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+        bytes = bytes.saturating_add(amount);
+    }
+    Ok((jobs, bytes))
+}
+
+#[cfg(test)]
+mod retention_migration_tests {
+    use super::*;
+    use sqlx::Connection;
+
+    #[tokio::test]
+    async fn ledger_migration_backfills_the_original_month_and_attempt() {
+        let mut conn = sqlx::SqliteConnection::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for migration in [
+            include_str!("../../../migrations/0014_ai_grants.sql"),
+            include_str!("../../../migrations/0015_ai_jobs.sql"),
+            include_str!("../../../migrations/0016_ai_usage.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&mut conn).await.unwrap();
+        }
+        sqlx::query("INSERT INTO ai_jobs (job_id,owner_instance_id,principal,capability,key,input_hash,state,state_revision,dispatch_state,attempt_id,provider,model,created_at,updated_at)
+            VALUES ('legacy','owner','local-owner','generate','key','hash','cancelled',2,'may_have_been_sent','original-attempt','fake','fake',strftime('%s','2026-09-01')*1000,0)")
+            .execute(&mut conn).await.unwrap();
+        sqlx::query("INSERT INTO ai_usage_entries VALUES ('legacy',50000,50000,'unknown','{}',1,strftime('%s','2026-10-01')*1000)")
+            .execute(&mut conn).await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0017_ai_usage_attribution.sql"
+        ))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0018_ai_pricing_snapshot.sql"
+        ))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        let entry = find_usage_entry(&mut conn, "legacy")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            entry.accepted_month, "2026-09",
+            "attribute to acceptance month, not settlement month"
+        );
+        assert_eq!(entry.attempt_id.as_deref(), Some("original-attempt"));
+        assert_eq!(entry.accounted_micro_usd, 50000);
+        assert_eq!(entry.revision, 1);
+        assert!(entry.reported_usage.is_none());
+        let job = find_job_by_id(&mut conn, "legacy").await.unwrap().unwrap();
+        assert_eq!(job.reservation_micro_usd, 50000);
+        let snapshot: serde_json::Value = serde_json::from_str(&job.pricing_snapshot).unwrap();
+        assert_eq!(snapshot["pricingVersion"], "legacy-unverified");
+        assert!(snapshot.get("inputMicroUsdPerMillion").is_none());
+    }
 }

@@ -469,12 +469,16 @@ const DBX_EVENT_METHOD = 'studio/event';
 const DBX_SUBSCRIBE_METHOD = 'studio/events/subscribe';
 
 /// invoke 只有 timeoutMs，没有中断能力。UI 传 signal 想表达的是「这个结果我不要了」
-/// （典型场景：搜索词变了，作废上一批响应），所以让 signal 与 invoke 竞速：本地立刻
-/// 按 AbortError 拒绝，后端那次调用会跑完但结果被丢弃。对调用方与 HTTP 版的 abort
-/// 等价，代价是白跑一次后端。
-function dbxInvoke(method, params, signal) {
-  const call = window.dbxPlugin.invoke(method, params, { timeoutMs: REQUEST_TIMEOUT });
+/// （典型场景：搜索词变了，作废上一批响应）。普通调用让 signal 与 invoke 竞速；
+/// 搜索协调器指定 waitForSettlement，保持执行槽直到 invoke 真正结束，再丢弃结果。
+function dbxInvoke(method, params, signal, waitForSettlement) {
+  if (signal && signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  const call = window.dbxPlugin.invoke(method, params, { timeoutMs: method === 'v1/stage/pitch' ? 35000 : REQUEST_TIMEOUT });
   if (!signal) return call;
+  if (waitForSettlement) return call.then(value => {
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    return value;
+  });
   if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
   return new Promise((resolve, reject) => {
     const onAbort = () => reject(new DOMException('Aborted', 'AbortError'));
@@ -510,7 +514,7 @@ async function dbxRequest(path, options = {}, attempt = 0) {
   }
 
   try {
-    const envelope = await dbxInvoke(method, params, options.signal);
+    const envelope = await dbxInvoke(method, params, options.signal, options.waitForSettlement);
     if (!envelope || typeof envelope.status !== 'number') {
       throw new Error('sidecar 返回了不认识的结果');
     }
@@ -530,7 +534,7 @@ async function dbxRequest(path, options = {}, attempt = 0) {
   } catch (err) {
     // 与 HTTP 版同一套重试判据：幂等读、瞬时故障、重试一次。
     const transient = !err.status || err.status >= 500 || err.name === 'AbortError' || err.name === 'TypeError';
-    if (op === 'GET' && attempt === 0 && transient && !(options.signal && options.signal.aborted)) {
+    if (op === 'GET' && options.retry !== false && attempt === 0 && transient && !(options.signal && options.signal.aborted)) {
       await new Promise((r) => setTimeout(r, 300));
       return dbxRequest(path, options, attempt + 1);
     }
@@ -808,7 +812,7 @@ async function request(path, options = {}, attempt = 0) {
     if (options.signal.aborted) cancel();
     else options.signal.addEventListener('abort', cancel, { once: true });
   }
-  const timer = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT) : 0;
+  const timer = controller ? setTimeout(() => controller.abort(), path === '/v1/stage/pitch' ? 35000 : REQUEST_TIMEOUT) : 0;
   try {
     // rawBody：封面替换这类二进制上传走这里，不包 JSON、不改 Content-Type。
     const body = options.rawBody !== undefined
@@ -835,7 +839,7 @@ async function request(path, options = {}, attempt = 0) {
   } catch (err) {
     // 网络抖动、超时、服务端 5xx：幂等读重试一次，避免偶发失败直接弹红。
     const transient = !err.status || err.status >= 500 || err.name === 'AbortError' || err.name === 'TypeError';
-    if (method === 'GET' && attempt === 0 && transient && !(options.signal && options.signal.aborted)) {
+    if (method === 'GET' && options.retry !== false && attempt === 0 && transient && !(options.signal && options.signal.aborted)) {
       await new Promise((r) => setTimeout(r, 300));
       return request(path, options, attempt + 1);
     }
@@ -848,7 +852,12 @@ async function request(path, options = {}, attempt = 0) {
 
 // 后端错误契约里有 request_id，没有它就只能靠猜去翻日志。
 function errText(prefix, err) {
-  return `${prefix}：${err.message}${err.requestId ? `（request_id ${err.requestId}）` : ''}`;
+  const guidance = {
+    unsupported_format: '无法识别容器或编码。Opus / APE / WMA 暂不支持，也可能是文件损坏。请检查原文件或另存为 FLAC / WAV，改扩展名无效。',
+    decode_failed: '音频读取或解码失败。请检查文件是否可访问、下载完整，或用其它播放器检查；不代表该格式全部不受支持。',
+  };
+  const message = Object.prototype.hasOwnProperty.call(guidance, err.code) ? guidance[err.code] : err.message;
+  return `${prefix}：${message}${err.requestId ? `（request_id ${err.requestId}）` : ''}`;
 }
 
 /// 弹窗统一走 dialogs.js：DBX 的插件 iframe 没有 allow-modals，原生
@@ -987,7 +996,7 @@ window.VMusicTransport = {
   playbackIntent: () => PlaybackIntent.generation,
   get: (p, options) => transport.get(p, options),
   put: (p, body) => transport.put(p, body),
-  post: (p, body) => transport.post(p, body),
+  post: (p, body, options) => transport.post(p, body, options),
   postRaw: (p, blob, contentType) => transport.postRaw(p, blob, contentType),
   del: (p) => transport.del(p),
   kind: () => transport.kind
@@ -1065,6 +1074,7 @@ function onConnectionChange(ok) {
     if (missedWhileOffline) {
       missedWhileOffline = false;
       refreshAll();
+      if (window.Workshop && Workshop.onAiTask) Workshop.onAiTask();
     }
   } else {
     missedWhileOffline = true;
@@ -1122,6 +1132,12 @@ function handleEvent(msg) {
     case 'scan': onScanProgress(msg); break;
     case 'library_changed': refreshLibraryInPlace(); loadPlaylists(); break;
     case 'ended': reconcileEnded(); break;
+    case 'ai_task':
+    case 'ai_tasks_resync':
+      // R4-E：任务状态变化——工坊的任务面板开着时立刻刷新，其它场合它自己的
+      // 低频轮询兜底。ai_tasks_resync 在广播掉队时覆盖可能丢失的变更提醒；快照是事实。
+      if (window.Workshop && Workshop.onAiTask) Workshop.onAiTask();
+      break;
     case 'ui_notice':
       // dock 胶囊点了一下：tab 实例解除最小化。dock 实例自己忽略（它永远是最小化态）。
       if (msg.action === 'expand-capsule' && !window.HertzCapsuleOnly) setCapsuleMinimized(false);
@@ -2101,6 +2117,7 @@ function stageDoc(doc) {
 
   let lines = doc.lines;
   let translation = Array.isArray(doc.translation) ? doc.translation : null;
+  let romanization = Array.isArray(doc.romanization) ? doc.romanization : null;
 
   if (sRe) {
     const drop = new Set();
@@ -2119,26 +2136,38 @@ function stageDoc(doc) {
     if (drop.size) {
       lines = lines.filter((_, i) => !drop.has(i));
       if (translation) translation = translation.filter((_, i) => !drop.has(i));
+      if (romanization) romanization = romanization.filter((_, i) => !drop.has(i));
     }
   }
 
   if (fRe) {
     const kept = [];
     const keptT = translation ? [] : null;
+    const keptR = romanization ? [] : null;
     for (let i = 0; i < lines.length; i += 1) {
       if (fRe.test(String(lines[i].text || ''))) continue;
       kept.push(lines[i]);
       if (keptT) keptT.push(translation[i]);
+      if (keptR) keptR.push(romanization[i]);
     }
     lines = kept;
     if (keptT) translation = keptT;
+    if (keptR) romanization = keptR;
   }
 
-  const offset = (doc.user_offset_ms || 0) + globalLyricOffsetMs();
+  const offset = globalLyricOffsetMs();
   if (lines === doc.lines && translation === (Array.isArray(doc.translation) ? doc.translation : null)
-    && offset === (doc.user_offset_ms || 0)) return doc;
-  const out = { ...doc, lines, user_offset_ms: offset };
+    && offset === 0) return doc;
+  // Server already applied file/per-track offsets. Shift only the presentation
+  // copy; calibration must continue to display/write the per-track value.
+  const shift = value => value == null ? value : Math.max(0, value + offset);
+  if (offset) lines = lines.map(line => ({ ...line,
+    start_ms: shift(line.start_ms), end_ms: shift(line.end_ms),
+    words: (line.words || []).map(word => ({ ...word, start_ms: shift(word.start_ms), end_ms: shift(word.end_ms) })),
+  }));
+  const out = { ...doc, lines };
   if (translation) out.translation = translation;
+  if (romanization) out.romanization = romanization;
   return out;
 }
 
@@ -4586,6 +4615,7 @@ async function loadDevices() {
 // ---------------------------------------------------------------------------
 
 function setView(name, options) {
+  if (state.view === 'online' && name !== 'online' && window.Online) Online.cancelSearch();
   state.view = name;
   for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
   ui.rail.querySelectorAll('.rail-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
@@ -4766,36 +4796,47 @@ function initSpaceHome(playbackHost) {
         libraryPreview: state.tracks[0] || null, sources: window.Online ? Online.sources() : [] };
     },
     playNext: () => post('/v1/player/next'),
-    library: async ({ q = '', offset = 0, source = 'local', onResults }) => {
-      if (source === 'all') {
-        if (!q) return {items:[]};
-        const sources = [{id:'local'}].concat(window.Online ? Online.sources() : []);
-        const completed = new Map();
-        const aggregate = () => {
-          const good = sources.map(provider => completed.get(provider.id)).filter(Boolean);
-          return {items:good.flatMap(page => page.items),total:good.reduce((max,page) => Math.max(max,page.total),0),nextOffset:offset+20};
-        };
-        const pages = await Promise.allSettled(sources.map(async (provider) => {
-          const local = provider.id === 'local';
-          const page = await transport.get((local ? '/v1/tracks?' : '/v1/online/search?') + new URLSearchParams({q,source:provider.id,sort:'title',limit:20,offset}));
-          const result = {items:remember((page.tracks || []).map(track => local ? track : {...track,source:track.source || provider.id})),total:page.total || 0};
-          completed.set(provider.id,result);
-          if (onResults) onResults(aggregate());
-          return result;
-        }));
-        const good = pages.filter(page => page.status === 'fulfilled').map(page => page.value);
-        if (!good.length) throw pages[0].reason;
-        return {...aggregate(),
-          note:pages.some(page => page.status === 'rejected') ? '部分音源暂不可用，已显示其他搜索结果' : ''};
-      }
-      if (source === 'local') {
-        const page = await transport.get('/v1/tracks?' + new URLSearchParams({ q, sort: 'title', limit: 60, offset }));
-        return { items: remember(page.tracks || []), total: page.total || 0 };
-      }
+    beginSearch: () => HertzSearch.create(transport),
+    library: async ({ q = '', offset = 0, source = 'local', onResults, network }) => {
       if (source === 'online') return { items: [], note: '选择音源并搜索在线音乐' };
-      if (!q) return { items: [], note: '输入歌曲或歌手，搜索当前音源' };
-      const page = await transport.get('/v1/online/search?' + new URLSearchParams({ source, q, limit: 60, offset }));
-      return { items: remember((page.tracks || []).map((track) => ({ ...track, source: track.source || source }))), total: page.total || 0 };
+      if (!q && source !== 'local') return { items: [], note: '输入歌曲或歌手，搜索当前音源' };
+      const reader = network || transport;
+      if (!q && source === 'local') {
+        const page = await reader.get('/v1/tracks?' + new URLSearchParams({ q, sort:'title', limit:60, offset }));
+        return { items:remember(page.tracks || []), total:page.total || 0 };
+      }
+      const sources = source === 'all' ? [{id:'local'}].concat(window.Online ? Online.searchSources().map(id => ({id})) : []) : [{id:source}];
+      const pages = sources.map(provider => ({source:provider.id,items:[],offset,more:true,loading:false,error:null}));
+      const aggregate = () => {
+        const items = pages.flatMap(page => page.items);
+        return {items,total:items.length,nextOffset:items.length,loading:pages.some(page => page.loading),
+          sourceStates:pages.map(page => ({source:page.source,loading:page.loading,error:page.error,more:page.more,
+            count:page.items.length,retry:() => load(page),next:() => load(page)}))};
+      };
+      const publish = () => { if (onResults && (!network || network.active)) onResults(aggregate()); };
+      const load = async page => {
+        if (page.loading || (network && !network.active)) return;
+        page.loading = true; page.error = null; publish();
+        try {
+          const local = page.source === 'local';
+          const result = await reader.get((local ? '/v1/tracks?' : '/v1/online/search?')
+            + new URLSearchParams({q,source:page.source,sort:'title',limit:20,offset:page.offset}));
+          if (network && !network.active) return;
+          const raw = result.tracks || [];
+          const incoming = remember(raw.map(track => ({...track,source:page.source})));
+          const seen = new Set(page.items.map(item => item.id));
+          const before = page.items.length;
+          incoming.forEach(item => { if (!seen.has(item.id)) { seen.add(item.id); page.items.push(item); } });
+          const cursor = result.pagination && result.pagination.next_offset >= page.offset ? result.pagination : null;
+          const next = cursor && Number.isSafeInteger(cursor.next_offset) ? cursor.next_offset : page.offset + raw.length;
+          page.more = next > page.offset && (cursor ? !!cursor.has_more : page.items.length > before && (result.total != null ? next < result.total : raw.length >= 20));
+          page.offset = next;
+        } catch (error) {
+          if (!network || network.active) page.error = {...HertzSearch.failure(error),message:error.message};
+        } finally { page.loading = false; publish(); }
+      };
+      await Promise.all(pages.map(load));
+      return aggregate();
     },
     playlists: async () => {
       const page = await transport.get('/v1/playlists');
@@ -6679,6 +6720,7 @@ const np = {
   lyricOffsetDown: $('np-lyric-offset-down'), lyricOffsetUp: $('np-lyric-offset-up'),
   lyricOffsetMs: 0,
 };
+let lyricImporter = null;
 
 function isNpOpen() {
   return !!np.modal && !np.modal.hidden;
@@ -6700,6 +6742,7 @@ function openNowPlaying() {
 }
 
 function closeNowPlaying(options) {
+  if (lyricImporter) lyricImporter.close();
   if (window.NowPlaying) NowPlaying.close(options);
   np.scrim.hidden = true;
   np.modal.hidden = true;
@@ -6707,6 +6750,7 @@ function closeNowPlaying(options) {
 
 // 播放快照 → 弹窗（播放态 / 时间 / 进度）
 function syncNpSnapshot(snap) {
+  if (lyricImporter) lyricImporter.sync();
   if (!isNpOpen()) return;
   np.play.classList.toggle('is-playing', snap.playing);
   np.play.setAttribute('aria-label', snap.playing ? '暂停' : '播放');
@@ -6948,6 +6992,7 @@ function initCapsuleMarquee() {
 
 // 曲目信息 → 弹窗（标题 / 艺术家 / 封面）
 function syncNpTrack(track, coverUrl) {
+  if (lyricImporter) lyricImporter.sync();
   if (!isNpOpen() || !track) return;
   np.name.textContent = track.title || '未命名';
   np.artist.textContent = [track.artist, track.album].filter(Boolean).join(' · ') || '未知艺术家';
@@ -6985,6 +7030,19 @@ function initNowPlayingModal() {
     modeState: () => ({ label: ui.mode.textContent, icon: state.snapshot.mode === 'shuffle' ? '#i-shuffle' : '#i-repeat' }),
     mute: () => toggleMute(), sleep: openSleepTimerMenu, notice: toast,
     closeTop: () => { if (!ui.menu.hidden) { closeMenu(); return true; } return false; },
+    closeLyricImport: () => { if (lyricImporter) lyricImporter.close(); },
+  });
+  if (window.LyricImport) lyricImporter = LyricImport.create($('np-lyric-import-panel'), {
+    selection: () => {
+      const p = window.Stage && Stage.presentation();
+      return isNpOpen() && p && p.track && p.track.id === p.mediaTrackId && !p.track.id.startsWith('online:')
+        ? { id: p.track.id, epoch: p.mediaEpoch, title: p.track.title || '', artist: p.track.artist || '' } : null;
+    },
+    get: (path, options) => transport.get(path, options),
+    post: (path, body, options) => transport.post(path, body, options),
+    applied: (id) => refreshLyrics(id, state.current),
+    sources: () => window.Online ? Online.sources().filter(source => (source.caps || []).includes('lyric_candidates')) : [],
+    availability: available => { $('np-lyric-search').hidden = !available; },
   });
 
   np.close.onclick = closeNowPlaying;
@@ -7005,24 +7063,16 @@ function initNowPlayingModal() {
   np.next.onclick = () => post('/v1/player/next');
   np.stop.onclick = () => stopPlayback();
 
-  // 歌词控件：导入读 .lrc 文本按原文入库；偏移每次 ±500ms 直接落库；
-  // 两者成功后都重拉歌词，舞台与弹窗徽标一起刷新。
+  // 文件先检查并预览；应用候选才写覆盖层，所有视图仍从原读取出口刷新。
   np.lyricImport.onclick = () => np.lyricFile.click();
-  np.lyricFile.onchange = async () => {
+  $('np-lyric-search').onclick = () => { if (lyricImporter) lyricImporter.search(); };
+  np.lyricFile.onchange = () => {
     const file = np.lyricFile.files && np.lyricFile.files[0];
     np.lyricFile.value = '';
-    const id = state.current && state.current.id;
-    if (!file || !id || id.startsWith('online:')) return;
-    try {
-      const content = await file.text();
-      await transport.put(`/v1/tracks/${encodeURIComponent(id)}/lyrics`, { content });
-      toast('歌词已导入');
-      await refreshLyrics(id, state.current);
-    } catch (err) {
-      toast(errText('歌词导入失败', err), 'error');
-    }
+    if (file && lyricImporter) lyricImporter.choose(file);
   };
   np.lyricClear.onclick = async () => {
+    if (lyricImporter) lyricImporter.close();
     const id = state.current && state.current.id;
     if (!id || id.startsWith('online:')) return;
     try {

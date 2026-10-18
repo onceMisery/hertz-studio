@@ -29,6 +29,8 @@ use crate::ai::capability::{find, scope_satisfied, Effect, CAPABILITIES, CAPABIL
 /// 观察者总等待上限（§8.3）：适配进程对门面的每次调用（含认证与排队）
 /// 都在这个期限内给出结果或错误。
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// Both success and error replies are bounded while streaming, before JSON parse.
+pub(super) const MAX_REPLY_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct AdapterConfig {
@@ -42,6 +44,7 @@ pub(crate) enum Session {
         base_url: String,
         credential: String,
         scopes: BTreeSet<String>,
+        stage_tools_enabled: bool,
         server_instance_id: String,
     },
     NotConnected,
@@ -119,11 +122,25 @@ async fn authorized_get(
         .await
         .map_err(|e| format!("受限服务不可达: {e}"))?;
     let status = response.status().as_u16();
-    let body = response
-        .json::<Value>()
-        .await
-        .map_err(|e| format!("受限服务应答不是合法 JSON: {e}"))?;
+    let body = read_reply(response).await?;
     Ok((status, body))
+}
+
+async fn read_reply(mut response: reqwest::Response) -> Result<Value, String> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_REPLY_BYTES as u64)
+    {
+        return Err("受限服务应答超出字节上限".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| "受限服务应答读取失败")? {
+        if chunk.len() > MAX_REPLY_BYTES - bytes.len() {
+            return Err("受限服务应答超出字节上限".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "受限服务应答不是合法 JSON".into())
 }
 
 /// 打开会话。发现不可达/无凭据/认证失败都不算错误——那正是「未连接」
@@ -183,6 +200,7 @@ pub(crate) async fn open_session(
         base_url: format!("http://127.0.0.1:{}", doc.port),
         credential,
         scopes,
+        stage_tools_enabled: body["stageIntentToolsEnabled"].as_bool().unwrap_or(false),
         server_instance_id: body["instance"]["serverInstanceId"]
             .as_str()
             .unwrap_or_default()
@@ -190,10 +208,10 @@ pub(crate) async fn open_session(
     })
 }
 
-/// 工具入参 schema：登记表里每条能力的输入形状。与 `capability::execute`
-/// 的 `deny_unknown_fields` DTO 逐字对应。
+/// 工具入参 schema：业务输入对应 `capability::execute` 的严格 DTO；
+/// 变更工具另公开适配层消费的可选幂等键，不把它混入业务输入。
 fn input_schema(operation: &str) -> rmcp::model::JsonObject {
-    let schema = match operation {
+    let mut schema = match operation {
         "playback.seek" => json!({
             "type": "object",
             "properties": { "positionMs": { "type": "integer", "minimum": 0 } },
@@ -206,19 +224,38 @@ fn input_schema(operation: &str) -> rmcp::model::JsonObject {
             "required": ["value"],
             "additionalProperties": false,
         }),
+        "library_search" => json!({ "type": "object", "additionalProperties": false,
+            "required": ["q"], "properties": { "q": { "type": "string" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                "offset": { "type": "integer", "minimum": 0, "maximum": 10000 } } }),
+        "stage.capabilities_get" => json!({ "type": "object", "additionalProperties": false,
+            "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 10 },
+                "offset": { "type": "integer", "minimum": 0, "maximum": 10000 } } }),
+        "stage.intent_validate" => json!({ "type": "object", "additionalProperties": false,
+            "required": ["artifactVersion", "mode", "intent", "schemaVersion", "schemaHash", "basePresetHash"],
+            "properties": { "artifactVersion": { "const": 1 }, "mode": { "const": "create" },
+                "intent": { "type": "object" }, "schemaVersion": { "type": "string" },
+                "schemaHash": { "type": "string" }, "basePresetHash": { "type": "string" } } }),
         _ => json!({ "type": "object", "properties": {}, "additionalProperties": false }),
     };
+    if find(operation).is_some_and(|cap| cap.effect == Effect::Mutating) {
+        schema["properties"]["clientOperationId"] = json!({
+            "type": "string", "minLength": 1, "maxLength": 128,
+            "description": "可选幂等键；去除首尾空白后须非空且不超过 128 UTF-8 字节。同一动作重试用同一键，新动作用新键。"
+        });
+    }
     schema.as_object().expect("schema 是 object").clone()
 }
 
 /// 从能力表导出工具定义（技术路线 §5.1/§5.3）：只导出该会话 scope 覆盖的
 /// 能力，不声明 resources/prompts/listChanged。annotations 是提示不是权限：
 /// 只读能力标 readOnlyHint；变更能力保守不标幂等，客户端不应自动重试。
-pub(crate) fn tools_for(scopes: &BTreeSet<String>) -> Vec<Tool> {
+pub(crate) fn tools_for(scopes: &BTreeSet<String>, stage_tools_enabled: bool) -> Vec<Tool> {
     CAPABILITIES
         .iter()
         // 伞 scope（playback:control）在这里同样隐含六种传输播控。
         .filter(|cap| scope_satisfied(scopes, cap.scope))
+        .filter(|cap| !cap.operation.starts_with("stage.") || stage_tools_enabled)
         .map(|cap| {
             let mut annotations = ToolAnnotations::default();
             annotations.read_only_hint = Some(cap.effect == Effect::ReadOnly);
@@ -249,24 +286,29 @@ pub(crate) async fn call_tool(
         return not_connected_result();
     };
     // 未登记的能力在 server.rs 已被拦下；防御到底再查一次。
-    if find(name).is_none() {
+    let Some(capability) = find(name) else {
         return error_result(json!({
             "code": "capability_unsupported",
             "message": format!("未登记的能力: {name}"),
         }));
-    }
-    let arguments = arguments.cloned().unwrap_or_default();
+    };
+    let mut arguments = arguments.cloned().unwrap_or_default();
     // clientOperationId 是适配层的调用身份（§5.2：每个新动作新键）；调用方
     // 不带就每次生成，绝不静默复用上一个键。
-    let client_operation_id = arguments
-        .get("clientOperationId")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let input = arguments
-        .into_iter()
-        .filter(|(k, _)| k != "clientOperationId")
-        .collect::<Value>();
+    let client_operation_id = if capability.effect == Effect::Mutating {
+        match arguments.remove("clientOperationId") {
+            Some(Value::String(id)) => Some(id),
+            Some(_) => {
+                return error_result(json!({
+                    "code": "bad_request", "message": "clientOperationId 必须为字符串",
+                }));
+            }
+            None => Some(uuid::Uuid::new_v4().to_string()),
+        }
+    } else {
+        None
+    };
+    let input = Value::Object(arguments);
     let url = format!("{base_url}/v1/ai/capabilities/call");
     let response = client
         .post(url)
@@ -286,7 +328,7 @@ pub(crate) async fn call_tool(
         }
     };
     let status = response.status().as_u16();
-    let body: Value = match response.json().await {
+    let body = match read_reply(response).await {
         Ok(body) => body,
         Err(e) => return error_result(json!({ "code": "bad_reply", "message": e.to_string() })),
     };
@@ -325,6 +367,91 @@ mod tests {
         std::env::temp_dir().join(format!("vmusic-mcp-{}", uuid::Uuid::new_v4()))
     }
 
+    #[tokio::test]
+    async fn replies_are_limited_during_streaming_for_success_and_error_statuses() {
+        for status in [200, 500] {
+            for extra in [0, 1] {
+                let mut bytes = b"{}".to_vec();
+                bytes.resize(MAX_REPLY_BYTES + extra, b' ');
+                let chunks: Vec<_> = bytes
+                    .chunks(4096)
+                    .map(|chunk| Ok::<_, std::convert::Infallible>(chunk.to_vec()))
+                    .collect();
+                let app = axum::Router::new().route(
+                    "/",
+                    axum::routing::get(move || {
+                        let chunks = chunks.clone();
+                        async move {
+                            axum::response::Response::builder()
+                                .status(status)
+                                .body(axum::body::Body::from_stream(futures::stream::iter(chunks)))
+                                .unwrap()
+                        }
+                    }),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                let response = http_client()
+                    .unwrap()
+                    .get(format!("http://{address}/"))
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(
+                    response.content_length().is_none(),
+                    "exercise chunked response"
+                );
+                let result = read_reply(response).await;
+                server.abort();
+                let _ = server.await;
+                if extra == 0 {
+                    assert_eq!(result.unwrap(), json!({}));
+                } else {
+                    assert!(result.unwrap_err().contains("字节上限"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_reply_header_is_rejected_without_waiting_for_the_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                        MAX_REPLY_BYTES + 1
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            // No body/EOF: the client must reject based on the header alone.
+            let mut byte = [0];
+            socket.read(&mut byte).await.unwrap()
+        });
+        let response = http_client()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        let result = read_reply(response).await;
+        let disconnected = tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.unwrap_err().contains("字节上限"));
+        assert_eq!(disconnected, 0);
+    }
+
     fn write_discovery(dir: &Path, port: u16, server_instance_id: &str) {
         discovery::publish(
             dir,
@@ -355,7 +482,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(session, Session::NotConnected));
-        assert!(tools_for(&BTreeSet::new()).is_empty());
+        assert!(tools_for(&BTreeSet::new(), false).is_empty());
     }
 
     #[tokio::test]
@@ -409,7 +536,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        write_discovery(&dir, port, &state.server_instance_id().to_string());
+        write_discovery(&dir, port, state.server_instance_id());
         let summary = crate::ai::facade::create_grant(
             &state,
             "e2e",
@@ -550,7 +677,7 @@ mod tests {
         .unwrap();
         assert!(matches!(session, Session::NotConnected));
         // 未连接也能拿到（空的）工具目录与明确的 not_connected 调用结论。
-        assert!(tools_for(&BTreeSet::new()).is_empty());
+        assert!(tools_for(&BTreeSet::new(), false).is_empty());
         let result = call_tool(&client, &session, "playback.pause", None).await;
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(value["structuredContent"]["code"], "not_connected");
@@ -563,7 +690,7 @@ mod tests {
     fn tools_are_filtered_by_session_scopes_and_annotated() {
         let mut read_only = BTreeSet::new();
         read_only.insert("playback:read".to_string());
-        let tools = tools_for(&read_only);
+        let tools = tools_for(&read_only, false);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "playback_snapshot_get");
         assert_eq!(
@@ -573,7 +700,7 @@ mod tests {
 
         let mut control = BTreeSet::new();
         control.insert("playback:control".to_string());
-        let tools = tools_for(&control);
+        let tools = tools_for(&control, false);
         assert_eq!(tools.len(), 6);
         assert!(tools
             .iter()
@@ -584,5 +711,18 @@ mod tests {
             seek.input_schema.get("additionalProperties"),
             Some(&json!(false))
         );
+    }
+    #[test]
+    fn stage_tool_advertising_and_search_schema_match_execution() {
+        let scopes = ["stage:capabilities_read", "stage:intent_validate"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert!(tools_for(&scopes, false).is_empty());
+        assert_eq!(tools_for(&scopes, true).len(), 2);
+        let schema = input_schema("library_search");
+        assert_eq!(schema["required"], json!(["q"]));
+        assert!(schema["properties"].get("q").is_some());
+        assert!(schema["properties"].get("limit").is_some());
     }
 }

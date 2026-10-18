@@ -797,9 +797,7 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
     if text.trim().is_empty() {
         return Ok(vmusic_core::LyricDocument::empty());
     }
-    let mut doc = vmusic_lyrics::parse_lrc(&text);
-    vmusic_lyrics::apply_offset(&mut doc);
-    Ok(doc)
+    Ok(vmusic_lyrics::parse_lrc(&text))
 }
 
 /// 没有按 id 查详情的接口。返回错误而不是编一个空壳，调用方（补封面那条路径）

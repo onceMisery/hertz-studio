@@ -451,7 +451,7 @@ mod tests {
             }
             // 一条已过期且已终态的旧记录：过期者让位，新写仍被拒——
             // 未过期记录不因表满淘汰；执行中记录即使过期也不淘汰（另一测试）。
-            let (mut stale, _rx) = Record::new_expired(Value::Null);
+            let (stale, _rx) = Record::new_expired(Value::Null);
             stale.finalize(Ok(ControlOutcome::Applied { generation: 0 }));
             records.insert(
                 ShortWriteKey {
@@ -481,7 +481,7 @@ mod tests {
         {
             let mut records = state.short_writes.records.lock().await;
             for i in 0..CAPACITY {
-                let (mut stale, _rx) = Record::new_expired(Value::Null);
+                let (stale, _rx) = Record::new_expired(Value::Null);
                 stale.finalize(Ok(ControlOutcome::Applied { generation: 0 }));
                 records.insert(fill_key(i), Arc::new(stale));
             }

@@ -57,7 +57,7 @@ worldY = (rawY - cy) * k
 | -90 | 形象图面片 | 极低透明度的正面、背面及侧壁 |
 | -82 / -80 | 轮廓边 | 仅外轮廓及孔洞的宽晕、细芯丝带 |
 | -78 | 网格顶点 | 极弱辅助亮点 |
-| -10 | 主粒子池 | 流动星尘、扫过主体的增辉带；五种汇聚/散开轨迹及方向拖尾 |
+| -10 | 主粒子池 | 流动星尘、扫过主体的增辉带；八种汇聚/散开轨迹及方向拖尾 |
 | 10 / 11 / 12 | 主星层 | 连线宽晕、白色细芯、四芒星及沿连线移动的光点 |
 
 停留时主粒子透明度由窄亮带驱动：`wave = max(0, sin(x*1.6-time*3.1+seed*0.8))^12`，
@@ -81,6 +81,12 @@ worldY = (rawY - cy) * k
 较大四芒星为 `1.2 + random^5 * 4.8`，避免大光斑抢过主体。
 星光用逐星随机相位、约 12–29 秒的缓慢周期改变亮度和光晕尺寸；四芒星在
 呼吸峰值附近轻微增辉，错峰出现。减弱动效降低呼吸幅度，暂停时间保持画面确定。
+远景流星与星场共用背景组和播放时间：低/中/高画质预建 3 / 5 / 7 条细光痕，
+每条飞行 1.25 秒，周期 17–36 秒；首条在播放 2–6 秒后出现，默认横屏、竖屏
+机位均可见。轨迹沿远景球壳切向斜落，光痕头亮尾淡、横向柔化，保持低亮度。
+丝带在视图空间展开，背景旋转、机位平移时仍朝向相机；无额外定时器或逐帧分配。
+暂停冻结，跳转重现；关闭星云或启用减弱动效时隐藏流星。动态画质只调整整条
+流星的 draw range，上限为挂载时预建数量，几何和材质交给现有 scope/销毁列表。
 银河尘埃使用周期 FBM 在挂载时烘焙到 512 / 1024 / 2048 宽的球面纹理，
 细节不依赖球面顶点插值，也不逐帧运行全屏噪声。纹理、细星及柔斑共用银河
 平面方向和缓慢旋转；天空与背景星场跟随机位平移。大部分天空保持近黑，
@@ -96,8 +102,10 @@ worldY = (rawY - cy) * k
 自定义 shader 使用显示色，内置材质使用线性色；应用主题 accent 只少量混入高亮粒子，
 不覆盖座次配色，不染背景。桌面/手机截图验证暖色、绿色、粉紫色均实际渲染。
 
-`transitionStyle(cycle)` 按完整座次选择旋涡、纵深星流、波浪、轨道及放射轨迹，
-汇聚和散开分别选择轨迹与旋转方向。同一座下一轮有不同组合，seek 仍然确定。
+`transitionStyle(cycle, sign)` 按周期和座次选择旋涡、纵深星流、波浪、轨道、放射、
+螺旋、星雨及脉冲八种轨迹，汇聚和散开分别选择轨迹与旋转方向，同时改变错峰、
+旋进速度和弧幅。同一座下一轮有不同组合，seek 仍然确定；错峰在生命周期两端
+归一，确保所有粒子完整落位或散尽。
 粒子错峰飞行、汇聚减速、散开加速，移动时使用沿屏幕速度方向的拉长光点。
 
 ## 机位、生命周期与资源
@@ -108,7 +116,7 @@ resize 重算适配距离但保留用户缩放；双击将 zoom 复位为 1。
 机位与造型按播放时间微摆，避免持续转到侧面后剪影变成一条线。
 
 单座生命周期为 `2.8s gather → 7.6s hold → 2.6s disperse`，共 13 秒。
-十二座预建几何并预热，应用验证中 GPU 驻留为 112 个几何、2 个纹理（含银河尘埃）。
+十二座预建几何并预热，浏览器验证中 GPU 驻留为 113 个几何、2 个纹理（含银河尘埃）。
 换座使用对应几何对象，不反复替换 BufferAttribute；unmount 统一销毁。
 数据层缓存最多十二座，不含 GPU 对象。
 
@@ -122,6 +130,7 @@ node scripts/check-zodiac-stage.js
 node scripts/capture-zodiac-artwork.cjs
 node scripts/check-zodiac-motion-browser.js
 node scripts/check-zodiac-effects-browser.cjs
+node scripts/check-zodiac-meteors-browser.cjs
 cargo build --locked -p hertz-studio
 node scripts/check-zodiac-stage-browser.js
 ```
@@ -131,8 +140,11 @@ node scripts/check-zodiac-stage-browser.js
 生成产物及源码哈希位于 `plugin/ui/vendor/zodiac-stage.js` 和
 `tools/zodiac-stage/.build-manifest.json`。桌面/手机十二座截图及像素报告位于
 `output/playwright/zodiac-reference/after/`，包括 `contact-sheet.jpg`。
-独立相机的星光呼吸像素报告、五种入场/散场和侧面截图位于
+独立相机的星光呼吸像素报告、八种入场/散场和侧面截图位于
 `output/playwright/zodiac-effects/`。
+流星三档画质、横竖屏截图及真实 WebGL 像素验证报告位于
+`output/playwright/zodiac-meteors/`，覆盖移动、暂停、跳转、机位平移、间歇出现、
+减弱动效、星云开关、动态画质以及独立/共享 scope 资源释放。
 流光回归同时检查关闭星点闪烁后的空间条带亮度对比与错峰峰值，以及十二座移动光点的
 端点对齐、真实像素移动、暂停、减弱动效和生命周期。生产 HTML 的连续截图及
 `starlight-flow.gif` 位于 `output/playwright/zodiac-flow/`。

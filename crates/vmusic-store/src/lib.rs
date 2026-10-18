@@ -18,6 +18,7 @@ use vmusic_core::{Playlist, PlaylistId, StoreError, Track, TrackId, TrackSource}
 
 pub mod ai;
 pub mod ai_jobs;
+pub mod ai_ledger;
 pub mod backup;
 pub mod favorites;
 pub mod limits;
@@ -202,12 +203,26 @@ pub const TRACK_COALESCE_COLS: &str =
     "COALESCE(NULLIF(TRIM(e.title), ''), t.title) AS title,      COALESCE(NULLIF(TRIM(e.artist), ''), t.artist) AS artist,      COALESCE(NULLIF(TRIM(e.album), ''), t.album) AS album";
 
 pub async fn get_track(pool: &SqlitePool, id: &TrackId) -> Result<Option<Track>, StoreError> {
+    get_track_on(
+        &mut *pool
+            .acquire()
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?,
+        id,
+    )
+    .await
+}
+
+pub async fn get_track_on(
+    conn: &mut SqliteConnection,
+    id: &str,
+) -> Result<Option<Track>, StoreError> {
     let sql = format!(
         "SELECT t.id, t.path, t.source, {TRACK_COALESCE_COLS}, t.duration_ms, t.bitrate,          t.sample_rate, t.channels, t.has_cover, t.cover_key, t.file_mtime, t.file_size, t.added_at          FROM tracks t LEFT JOIN track_edits e ON e.track_id = t.id WHERE t.id = ?1"
     );
     let row = sqlx::query_as::<_, TrackRow>(&sql)
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(conn)
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
     Ok(row.map(Into::into))
@@ -322,6 +337,22 @@ const SEARCH_PREFILTER_WHERE: &str = "t.rowid IN (SELECT value FROM json_each(?1
 /// 2000 有足够余量；真到几千个候选时结果集本身已经大到用户不会再往下看。
 const SEARCH_PREFILTER_MAX: usize = 2000;
 
+// LIMIT on the compound UNION alone bounds returned rows, not the work needed
+// to build its distinct temporary B-tree. Bound each indexed branch first.
+// This preserves the threshold decision: a branch with > MAX unique rowids
+// already proves overflow; otherwise every branch is complete before UNION.
+// UNION still deduplicates cross-column hits before the final threshold check.
+const SEARCH_CANDIDATE_SQL: &str = "SELECT candidate FROM (
+         SELECT rowid AS candidate FROM track_search WHERE title LIKE ?1 LIMIT ?2
+     )
+     UNION SELECT candidate FROM (
+         SELECT rowid AS candidate FROM track_search WHERE artist LIKE ?1 LIMIT ?2
+     )
+     UNION SELECT candidate FROM (
+         SELECT rowid AS candidate FROM track_search WHERE album LIKE ?1 LIMIT ?2
+     )
+     LIMIT ?2";
+
 /// 模式能否交给 trigram 索引粗筛：至少 3 个字符（trigram 的最小长度），且不含
 /// LIKE 通配符（`%`/`_` 在 trigram 里不是通配符，含它们会漏配）。
 fn indexable_query(query: &str) -> bool {
@@ -338,17 +369,12 @@ async fn search_candidates(pool: &SqlitePool, query: &str) -> Result<Option<Vec<
         return Ok(None);
     }
     let pattern = format!("%{query}%");
-    let rows: Vec<i64> = sqlx::query_scalar(
-        "SELECT rowid FROM track_search WHERE title LIKE ?1
-         UNION SELECT rowid FROM track_search WHERE artist LIKE ?1
-         UNION SELECT rowid FROM track_search WHERE album LIKE ?1
-         LIMIT ?2",
-    )
-    .bind(pattern)
-    .bind(SEARCH_PREFILTER_MAX as i64 + 1)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| StoreError::Database(e.to_string()))?;
+    let rows: Vec<i64> = sqlx::query_scalar(SEARCH_CANDIDATE_SQL)
+        .bind(pattern)
+        .bind(SEARCH_PREFILTER_MAX as i64 + 1)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
     if rows.len() > SEARCH_PREFILTER_MAX {
         return Ok(None);
     }
@@ -429,6 +455,76 @@ pub async fn list_tracks_filtered(
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
     Ok(rows.into_iter().map(Into::into).collect())
+}
+
+/// Return a page and its total without repeating the candidate lookup and scan.
+/// The window covers all matching rowids; metadata is fetched only for the page.
+pub async fn list_tracks_page_filtered(
+    pool: &SqlitePool,
+    query: Option<&str>,
+    filter: &TrackFilter,
+    sort: TrackSort,
+    limit: i64,
+    offset: i64,
+) -> Result<(Vec<Track>, i64), StoreError> {
+    #[derive(FromRow)]
+    struct PageRow {
+        #[sqlx(flatten)]
+        track: TrackRow,
+        search_total: i64,
+    }
+    let query = query.unwrap_or("").trim();
+    let pattern = format!("%{query}%");
+    let candidates = search_candidates(pool, query).await?;
+    let keys = "t.rowid AS track_rowid, COUNT(*) OVER() AS search_total";
+    let (selection, binds) = match &candidates {
+        Some(ids) => (
+            prefilter_selection(keys, sort, &filter.sql(5)),
+            vec![
+                serde_json::to_string(ids).unwrap_or_else(|_| "[]".into()),
+                pattern,
+            ],
+        ),
+        None => (
+            track_selection(keys, sort, &filter.sql(5)),
+            vec![query.to_string(), pattern],
+        ),
+    };
+    let sql = format!(
+        "SELECT t.id, t.path, t.source, {TRACK_COALESCE_COLS}, t.duration_ms, t.bitrate,
+         t.sample_rate, t.channels, t.has_cover, t.cover_key, t.file_mtime, t.file_size,
+         t.added_at, page.search_total
+         FROM ({selection} LIMIT ?3 OFFSET ?4) page
+         JOIN tracks t ON t.rowid = page.track_rowid
+         LEFT JOIN track_edits e ON e.track_id = t.id
+         ORDER BY {}",
+        sort.sql()
+    );
+    let mut stmt = sqlx::query_as::<_, PageRow>(&sql);
+    for bind in binds {
+        stmt = stmt.bind(bind);
+    }
+    stmt = stmt.bind(limit).bind(offset);
+    for bind in filter.binds() {
+        stmt = stmt.bind(bind);
+    }
+    let rows = stmt
+        .fetch_all(pool)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    // An empty first page proves zero matches unless LIMIT itself is zero.
+    // A past-end page has no window row, so retain an exact count fallback.
+    let total = if let Some(row) = rows.first() {
+        row.search_total
+    } else if offset > 0 || limit == 0 {
+        count_tracks_filtered(pool, Some(query), filter).await?
+    } else {
+        0
+    };
+    Ok((
+        rows.into_iter().map(|row| row.track.into()).collect(),
+        total,
+    ))
 }
 
 /// IDs are selected in one database snapshot, independent of UI pagination.
@@ -1168,15 +1264,13 @@ mod tests {
 
         // 粗筛语句必须真的落到 trigram 约束上：`INDEX 0:L0` 里的 L0 就是 LIKE 约束；
         // 只有 `INDEX 0:` 表示退化成整表扫索引表（这正是三列写成一个 OR 时的样子）。
-        let plan: Vec<PlanRow> = sqlx::query_as(
-            "EXPLAIN QUERY PLAN SELECT rowid FROM track_search WHERE title LIKE ?1
-             UNION SELECT rowid FROM track_search WHERE artist LIKE ?1
-             UNION SELECT rowid FROM track_search WHERE album LIKE ?1",
-        )
-        .bind("%Song 007%")
-        .fetch_all(&db)
-        .await
-        .unwrap();
+        let plan: Vec<PlanRow> =
+            sqlx::query_as(&format!("EXPLAIN QUERY PLAN {SEARCH_CANDIDATE_SQL}"))
+                .bind("%Song 007%")
+                .bind(SEARCH_PREFILTER_MAX as i64 + 1)
+                .fetch_all(&db)
+                .await
+                .unwrap();
         let text = plan
             .iter()
             .map(|(_, _, _, detail)| detail.as_str())
@@ -1411,6 +1505,127 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn track_pages_keep_total_order_metadata_and_empty_page_boundaries() {
+        let db = pool().await;
+        let mut original_ids = Vec::new();
+        for (i, title) in [
+            "Track A",
+            "track A",
+            "晴天",
+            "Track B",
+            "Other",
+            "100% Love",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut track = sample(&format!("/pages/{i}.mp3"), title);
+            track.artist = (i % 2 == 0).then(|| "Artist A".into());
+            track.album = (i % 3 == 0).then(|| "Album A".into());
+            track.has_cover = i % 2 == 0;
+            upsert_track(&db, &track).await.unwrap();
+            original_ids.push(track.id);
+        }
+        track_edits::apply(
+            &db,
+            &original_ids[3],
+            &track_edits::EditInput {
+                title: Some("  Edited Track  ".into()),
+                artist: Some("Artist A".into()),
+                album: Some("Album A".into()),
+            },
+        )
+        .await
+        .unwrap();
+        track_edits::apply(
+            &db,
+            &original_ids[0],
+            &track_edits::EditInput {
+                title: Some("   ".into()),
+                artist: None,
+                album: None,
+            },
+        )
+        .await
+        .unwrap();
+        // Include an exact added_at tie so the remaining title/id keys matter.
+        sqlx::query("UPDATE tracks SET added_at = 42 WHERE rowid % 2 = 0")
+            .execute(&db)
+            .await
+            .unwrap();
+        let filters = [
+            TrackFilter::default(),
+            TrackFilter {
+                artist: Some("Artist A".into()),
+                album: None,
+            },
+            TrackFilter {
+                artist: Some("Artist A".into()),
+                album: Some("Album A".into()),
+            },
+        ];
+        for query in [
+            None,
+            Some("   "),
+            Some("Track"),
+            Some("晴天"),
+            Some("%"),
+            Some("absent"),
+        ] {
+            let normalized = query.unwrap_or("").trim();
+            for filter in &filters {
+                for sort in [
+                    TrackSort::Title,
+                    TrackSort::Artist,
+                    TrackSort::Album,
+                    TrackSort::Added,
+                ] {
+                    let sql = legacy_ids_sql_filtered(sort, filter);
+                    let mut stmt = sqlx::query_scalar::<_, String>(&sql)
+                        .bind(normalized)
+                        .bind(format!("%{normalized}%"));
+                    for bind in filter.binds() {
+                        stmt = stmt.bind(bind);
+                    }
+                    let all = stmt.fetch_all(&db).await.unwrap();
+                    for (limit, offset) in [(2, 0), (2, 1), (2, 50), (0, 0), (-1, -1)] {
+                        let (tracks, total) =
+                            list_tracks_page_filtered(&db, query, filter, sort, limit, offset)
+                                .await
+                                .unwrap();
+                        assert_eq!(
+                            total as usize,
+                            all.len(),
+                            "{query:?}/{filter:?}/{sort:?}/{limit}/{offset}"
+                        );
+                        let expected: Vec<_> = all
+                            .iter()
+                            .skip(offset.max(0) as usize)
+                            .take(if limit < 0 {
+                                usize::MAX
+                            } else {
+                                limit as usize
+                            })
+                            .cloned()
+                            .collect();
+                        assert_eq!(
+                            tracks.iter().map(|t| &t.id).collect::<Vec<_>>(),
+                            expected.iter().collect::<Vec<_>>()
+                        );
+                        for track in tracks {
+                            let original = get_track(&db, &track.id).await.unwrap().unwrap();
+                            assert_eq!(
+                                serde_json::to_value(track).unwrap(),
+                                serde_json::to_value(original).unwrap()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// 候选数超过上限时必须回落整表扫，且结果与 LIKE 基准一致（阈值两侧都不能少结果）。
     #[tokio::test]
     async fn search_overflow_falls_back_to_the_like_scan() {
@@ -1445,6 +1660,98 @@ mod tests {
                 .await
                 .unwrap(),
             legacy_ids(&db, "Overflow 00007", TrackSort::Title).await
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_search_branches_preserve_unique_threshold_and_cross_column_matches() {
+        let db = pool().await;
+        for i in 0..=SEARCH_PREFILTER_MAX {
+            let mut track = sample(
+                &format!("/threshold/{i}.mp3"),
+                &format!(
+                    "{} {} {i:05}",
+                    if i < SEARCH_PREFILTER_MAX {
+                        "Overlap"
+                    } else {
+                        "Outside"
+                    },
+                    if i <= SEARCH_PREFILTER_MAX / 2 {
+                        "Split"
+                    } else {
+                        ""
+                    }
+                ),
+            );
+            track.artist = Some(format!(
+                "{} {}",
+                if i < SEARCH_PREFILTER_MAX {
+                    "Overlap"
+                } else {
+                    "Outside"
+                },
+                if i > SEARCH_PREFILTER_MAX / 2 {
+                    "Split"
+                } else {
+                    ""
+                }
+            ));
+            track.album = (i < SEARCH_PREFILTER_MAX).then(|| "Overlap".into());
+            upsert_track(&db, &track).await.unwrap();
+        }
+        // 6000 column hits are exactly 2000 unique tracks, still indexable.
+        assert_eq!(
+            search_candidates(&db, "Overlap")
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            SEARCH_PREFILTER_MAX
+        );
+        // Each individual branch is below the cap, but their union overflows.
+        assert!(search_candidates(&db, "Split").await.unwrap().is_none());
+        for query in ["Overlap", "Split"] {
+            let expected = legacy_ids(&db, query, TrackSort::Title).await;
+            for offset in [0, 1999, 3000] {
+                let (tracks, total) = list_tracks_page_filtered(
+                    &db,
+                    Some(query),
+                    &TrackFilter::default(),
+                    TrackSort::Title,
+                    3,
+                    offset,
+                )
+                .await
+                .unwrap();
+                assert_eq!(total as usize, expected.len());
+                assert_eq!(
+                    tracks.into_iter().map(|t| t.id).collect::<Vec<_>>(),
+                    expected
+                        .iter()
+                        .skip(offset as usize)
+                        .take(3)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(
+                list_track_ids(&db, Some(query), TrackSort::Title)
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                count_tracks(&db, Some(query)).await.unwrap() as usize,
+                expected.len()
+            );
+        }
+        let mut last = sample(&format!("/threshold/{SEARCH_PREFILTER_MAX}.mp3"), "Outside");
+        last.album = Some("Overlap".into());
+        upsert_track(&db, &last).await.unwrap();
+        assert!(search_candidates(&db, "Overlap").await.unwrap().is_none());
+        assert_eq!(
+            count_tracks(&db, Some("Overlap")).await.unwrap() as usize,
+            SEARCH_PREFILTER_MAX + 1
         );
     }
 

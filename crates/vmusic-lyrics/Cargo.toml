@@ -11,3 +11,4 @@ description = "LRC parsing (line and word level) with no network access"
 [dependencies]
 vmusic-core = { workspace = true }
 thiserror = { workspace = true }
+roxmltree = { version = "=0.21.1", default-features = false, features = ["std"] }

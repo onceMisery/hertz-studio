@@ -6,8 +6,7 @@
 //! - **共享入场额度**：HTTP 单源、RPC 单源、旧聚合、内部接力搜索全部经过
 //!   同一把闸——放在应用路径上而不是传输层，未来调用方绕不过去。额度满时
 //!   有界等待一段时间，超时明确返回 `search_busy`（429），绝不累积无限的
-//!   semaphore 等待者。聚合只占**一份**额度，内部每源调用走未限流的
-//!   [`super::search_once`]，不重复占额度。
+//!   semaphore 等待者。聚合本身不占额度，每个源通过同一单源搜索入口。
 //! - **单源总期限**：从入场到读完结果 6 秒，与旧聚合的单源预算一致——
 //!   这个保证过去只包在 `aggregate::collect` 外层，单源路径本来没有。
 //!   超时映射回既有 `upstream_timeout`（504），前端有行内重试。
@@ -31,8 +30,6 @@ pub(crate) const WAIT: Duration = Duration::from_secs(2);
 pub(crate) const MAX_WAITERS: usize = 16;
 /// 单源搜索总期限：入场 → 读完结果。
 pub(crate) const SOURCE_DEADLINE: Duration = Duration::from_secs(6);
-/// 聚合的安全总期限：内部每源各自 6 秒并发执行，这里只防失控驻留。
-pub(crate) const AGGREGATE_DEADLINE: Duration = Duration::from_secs(15);
 
 pub(crate) struct SearchGate {
     permits: Arc<tokio::sync::Semaphore>,
@@ -47,6 +44,14 @@ impl Default for SearchGate {
 }
 
 impl SearchGate {
+    #[cfg(test)]
+    pub(super) fn available(&self) -> (usize, usize) {
+        (
+            self.permits.available_permits(),
+            self.waiters.available_permits(),
+        )
+    }
+
     pub(crate) fn new(permits: usize, wait: Duration) -> Self {
         Self {
             permits: Arc::new(tokio::sync::Semaphore::new(permits)),
@@ -65,12 +70,13 @@ impl SearchGate {
         self.run_with(SOURCE_DEADLINE, fut).await
     }
 
-    /// 指定期限的执行。聚合路径用它放宽总期限（内部每源已有各自预算）。
+    /// 指定总期限的执行（含等待入场），供测试验证短预算。
     pub(crate) async fn run_with<T>(
         &self,
         deadline: Duration,
         fut: impl Future<Output = Result<T, ApiError>>,
     ) -> Result<T, ApiError> {
+        let started = tokio::time::Instant::now();
         // 等待席位也是硬上限：席位满说明排队人数已到顶，立即 busy。
         let waiter = self.waiters.try_acquire().map_err(|_| {
             ApiError::new(
@@ -79,7 +85,7 @@ impl SearchGate {
                 "搜索通道繁忙，请稍后重试",
             )
         })?;
-        let permit = tokio::time::timeout(self.wait, self.permits.acquire())
+        let permit = tokio::time::timeout(self.wait.min(deadline), self.permits.acquire())
             .await
             .map_err(|_| {
                 ApiError::new(
@@ -96,7 +102,7 @@ impl SearchGate {
                 )
             })?;
         drop(waiter);
-        let result = tokio::time::timeout(deadline, fut).await;
+        let result = tokio::time::timeout(deadline.saturating_sub(started.elapsed()), fut).await;
         drop(permit);
         match result {
             Ok(inner) => inner,
@@ -220,9 +226,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_extends_the_deadline_for_the_aggregate() {
+    async fn short_total_budget_allows_a_fast_source() {
         let gate = SearchGate::new(1, Duration::from_secs(2));
-        // run 默认 6 秒期限之外，run_with 可以放宽（内部每源自带预算）。
         let value = gate
             .run_with(Duration::from_millis(50), async {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -231,5 +236,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(value, 7);
+    }
+
+    #[tokio::test]
+    async fn admission_wait_consumes_the_source_deadline() {
+        let gate = Arc::new(SearchGate::new(1, Duration::from_secs(2)));
+        let permit = gate.permits.acquire().await.unwrap();
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let worker_gate = gate.clone();
+        let worker_ready = ready.clone();
+        let worker = tokio::spawn(async move {
+            worker_ready.notify_one();
+            worker_gate
+                .run_with(Duration::from_millis(400), async {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    ok(7u8)
+                })
+                .await
+        });
+        ready.notified().await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        drop(permit);
+        let error = worker.await.unwrap().unwrap_err();
+        assert_eq!(error.code, "upstream_timeout");
+        assert_eq!(gate.run(async { ok(2u8) }).await.unwrap(), 2);
     }
 }

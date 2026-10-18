@@ -42,12 +42,19 @@ async function run() {
 
   // Run the real DBX implementation as well as the generic bootstrap stubs.
   // A reconnect must retire the old listener and ignore its late completion;
-  // a failure on the active subscription must still reach the retry owner.
+  // a failure on the active subscription must still reach the retry owner,
+  // and a recovered subscription must refresh the open AI task panel.
+  const connectionSource = source.slice(source.indexOf('function onConnectionChange(ok)'), source.indexOf('function scheduleReconnect()'));
   const dbxSource = source.slice(source.indexOf('const DbxTransport = {'), source.indexOf('const REQUEST_TIMEOUT'));
-  const subscriptions = [], requests = [], connections = [], messages = [];
+  const subscriptions = [], requests = [], messages = [], recoveryReads = [];
+  const workshop = { onAiTask() { recoveryReads.push('aiTasks'); } };
   let reconnects = 0, removals = 0;
   const dbx = {
     DBX_EVENT_METHOD: 'studio/event', DBX_SUBSCRIBE_METHOD: 'studio/events/subscribe',
+    Workshop: workshop,
+    state: { connected: false },
+    ui: { conn: { textContent: '', className: '' }, offlineBanner: { hidden: true } },
+    refreshAll() { recoveryReads.push('refreshAll'); },
     dbxCoverUrl() {}, ensureCover() {}, console: { warn() {} },
     window: { dbxPlugin: {
       onEvent(listener) {
@@ -59,14 +66,15 @@ async function run() {
         assert.equal(Object.keys(args).length, 0);
         return new Promise((resolve, reject) => requests.push({ resolve, reject }));
       },
-    } },
+    }, Workshop: workshop },
     issueTicket() { throw new Error('DBX must not request an HTTP ticket'); },
     handleEvent(event) { messages.push(event.type); },
-    onConnectionChange(connected) { connections.push(connected); },
     scheduleReconnect() { reconnects++; },
   };
   vm.createContext(dbx);
-  vm.runInContext(dbxSource + '\nconst transport = DbxTransport;\n' + bootstrap + '\nthis.open = openSocket; this.close = () => socket.close();', dbx);
+  vm.runInContext('let retries = 0; let missedWhileOffline = false;\n' + connectionSource + dbxSource
+    + '\nconst transport = DbxTransport;\n' + bootstrap
+    + '\nthis.open = openSocket; this.close = () => socket.close();', dbx);
   const settle = () => new Promise(resolve => setImmediate(resolve));
   await dbx.open();
   assert.equal(requests.length, 1, 'DBX bootstrap invokes the real subscription');
@@ -83,11 +91,14 @@ async function run() {
   requests[1].reject(new Error('active subscription'));
   await settle();
   assert.equal(reconnects, 1, 'active subscription failure schedules a retry');
-  assert.equal(connections.at(-1), false);
+  assert.equal(dbx.state.connected, false);
+  assert.equal(dbx.ui.offlineBanner.hidden, false);
   await dbx.open();
   requests[2].resolve({});
   await settle();
-  assert.equal(connections.at(-1), true, 'successful retry restores connected status');
+  assert.equal(dbx.state.connected, true, 'successful retry restores connected status');
+  assert.equal(dbx.ui.offlineBanner.hidden, true);
+  assert.deepEqual(recoveryReads, ['refreshAll', 'aiTasks'], 'DBX recovery refreshes the open task panel');
   subscriptions[2]({ method: 'studio/event', params: { type: 'spectrum' } });
   assert.deepEqual(messages, ['state', 'spectrum']);
   const beforeClose = removals;

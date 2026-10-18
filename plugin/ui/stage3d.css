@@ -1233,7 +1233,8 @@ body.s3d-open > .bar { display: none; }
 .s3d-sc:not(.is-current):hover .s3d-sc-hint { opacity: 1; transform: translateY(0); }
 
 /* ---------------------------------------------------------------------------
-   歌单架响应式：窄屏 / 竖屏缩小卡片并上抬避让底播条；超短高度整体收小
+   歌单架响应式：窄屏侧架压成横卡，歌词保留上半区、播放条上方留独立卡片带。
+   超短高度通过 max-height 分支再压缩该区域。
    --------------------------------------------------------------------------- */
 
 @media (max-width: 1180px) {
@@ -1261,10 +1262,20 @@ body.s3d-open > .bar { display: none; }
     padding: 3%;
     gap: 5%;
   }
-  /* 竖屏：卡半宽 min(34vw,124) + 12px 净距，当前卡完整在右缘内侧 */
+  /* 侧架当前卡会放大至约 1.3 倍，并向前悬浮。窄屏按变换后的
+     宽度留空间，不能只用原始卡宽的一半定位，否则右缘会被裁切。 */
+  .s3d[data-shelf-mode='side'] .s3d-sc { width: min(62vw, 236px); }
   .s3d[data-shelf-mode='side'] .s3d-shelf-plane {
-    right: calc(min(34vw, 124px) + 12px);
-    top: 45%;
+    right: calc(min(31vw, 118px) + 34px);
+    top: calc(100% - 205px);
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-sc { aspect-ratio: 2.6 / 1; }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-reading {
+    bottom: clamp(300px, 48vh, 340px);
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .fl-classic {
+    top: 15vh;
+    height: calc(100% - 15vh - clamp(300px, 48vh, 340px));
   }
   .s3d-sc-meta { display: none; }
 }
@@ -1272,6 +1283,9 @@ body.s3d-open > .bar { display: none; }
 @media (max-width: 760px) and (orientation: portrait) {
   .s3d-shelf-plane { bottom: 226px; }
   .s3d-sc { width: min(74vw, 260px); }
+  .s3d[data-shelf-mode='side'] .s3d-shelf-plane {
+    top: calc(100% - clamp(252px, 36vh, 286px) - env(safe-area-inset-bottom, 0px));
+  }
 }
 
 @media (max-height: 560px) {
@@ -1280,6 +1294,16 @@ body.s3d-open > .bar { display: none; }
   .s3d-sc { width: clamp(170px, 20vw, 224px); font-size: 9.5px; }
   .s3d-sc-sub, .s3d-sc-meta { display: none; }
   .s3d[data-shelf-mode='side'] .s3d-shelf-plane { top: 50%; }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-shelf-plane { top: 62%; }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-sc { aspect-ratio: 3 / 1; }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-reading {
+    top: 54px;
+    bottom: clamp(250px, 50vh, 300px);
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .fl-classic {
+    top: 15vh;
+    height: calc(100% - 15vh - clamp(250px, 50vh, 300px));
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

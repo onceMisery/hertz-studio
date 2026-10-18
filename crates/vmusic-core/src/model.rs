@@ -198,6 +198,26 @@ pub struct LyricDocument {
     pub offset_ms: i64,
     pub lines: Vec<LyricLine>,
     pub translation: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Source timing only: line, word, or mixed; never inferred word durations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing_precision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub romanization: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<LyricOrigin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LyricOrigin {
+    pub provider: String,
+    pub label: String,
+    pub ref_id: String,
+    /// Provider returned no lyric redistribution license; never inferred from
+    /// availability, an audio license, or possession of account credentials.
+    pub license_status: String,
 }
 
 impl LyricDocument {
@@ -207,6 +227,10 @@ impl LyricDocument {
             offset_ms: 0,
             lines: Vec::new(),
             translation: None,
+            format: None,
+            timing_precision: None,
+            romanization: None,
+            origin: None,
         }
     }
 

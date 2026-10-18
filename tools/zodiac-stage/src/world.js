@@ -188,6 +188,9 @@ const SHAPE_VERT = [
   'uniform int uVariant;',
   'uniform int uState;',
   'uniform float uK;',
+  'uniform float uStagger;',
+  'uniform float uSpinRate;',
+  'uniform float uArcScale;',
   'varying float vAlpha;',
   'varying float vShine;',
   'varying float vCore;',
@@ -202,8 +205,8 @@ const SHAPE_VERT = [
   '  vec3 origin = uState == 2 ? aShape : aEntry;',
   '  vec3 target = uState == 2 ? aExit : aShape;',
   '  vec3 p = mix(origin,target,ease);',
-  '  float arc = sin(t*3.14159265)*uMotion;',
-  '  float angle = aPhase+t*(7.0+aSeed*8.0)*uSpin;',
+  '  float arc = sin(t*3.14159265)*uMotion*uArcScale;',
+  '  float angle = aPhase+t*(7.0+aSeed*8.0)*uSpin*uSpinRate;',
   '  if(uVariant == 0) {',
   '    p.xy += vec2(cos(angle),sin(angle))*arc*(1.2+aSeed*2.6);',
   '    p.z += arc*sin(angle*0.7)*1.8;',
@@ -217,15 +220,29 @@ const SHAPE_VERT = [
   '  } else if(uVariant == 3) {',
   '    p.xz += vec2(cos(angle),sin(angle))*arc*4.2;',
   '    p.y += sin(angle*0.4)*arc*0.8;',
-  '  } else {',
+  '  } else if(uVariant == 4) {',
   '    vec3 direction = normalize(aShape+vec3(sin(aPhase),cos(aPhase),aSeed-0.5));',
   '    p += direction*arc*(2.0+4.0*aSeed);',
+  '  } else if(uVariant == 5) {',
+  '    // 螺旋：绕机位轴旋进，半径一路收到零，落位时正好收束成一点。',
+  '    float radius = (1.0-t)*arc*(2.2+aSeed*3.4);',
+  '    p.xy += vec2(cos(angle*1.35),sin(angle*1.35))*radius;',
+  '    p.z += (1.0-t)*arc*(aSeed*3.0-1.2);',
+  '  } else if(uVariant == 6) {',
+  '    // 星雨：从上方斜落，每颗的下落时刻由 aSeed 错开。',
+  '    float drop = pow(1.0-t,2.0)*arc*(7.0+aSeed*7.0);',
+  '    p.y += drop+(aSeed-0.5)*arc*1.6;',
+  '    p.x += drop*0.34*sin(aPhase);',
+  '    p.z += drop*0.22*cos(aPhase*1.7);',
+  '  } else {',
+  '    // 脉冲：沿目标方向的径向冲击，先冲过头再回弹。',
+  '    vec3 direction = normalize(aShape+vec3(sin(aPhase*1.3),cos(aPhase),aSeed-0.5));',
+  '    p += direction*arc*sin(t*3.14159265*1.5)*(1.4+aSeed*2.2);',
   '  }',
   '  return p;',
   '}',
   'void main() {',
-  '  float stagger = (aSeed-0.5)*0.48;',
-  '  float k = clamp(uK*1.24+stagger,0.0,1.0);',
+  '  float k = clamp(uK*(1.0+uStagger)-aSeed*uStagger,0.0,1.0);',
   '  vec3 p;',
   '  vec3 ahead;',
   '  float arc = 0.0;',
@@ -406,6 +423,9 @@ function makeShapeMaterial(THREE) {
       uState: { value: 0 },
       uMotion: { value: 1 },
       uSpin: { value: 1 },
+      uStagger: { value: 0.48 },
+      uSpinRate: { value: 1 },
+      uArcScale: { value: 1 },
       uVariant: { value: 0 },
       uK: { value: 0 },
       uLit: { value: 1 },
@@ -463,9 +483,63 @@ function makeGlintMaterial(THREE, color) {
   });
 }
 
-// 软圆斑几何（星场/星云/形象图柔光共用）：位置各是各的，色/尺寸/相位/透明
-// 走 shared —— 注意共享的必须是**同一批 BufferAttribute 对象**：three 按包装
-// 对象认 GPU buffer，各建一个新包装看着像共享，实际是每座多传一份。
+// —— 远景流星：一层极暗的细长光痕。低亮度、小尺寸、偶尔掠过 ——
+// 不做成屏幕特效，而是挂在背景星场组里：随星云开关隐现、跟随机位平移，
+// 看起来始终在星海深处。四边形在世界空间里沿飞行方向拉长，小尺寸下也不糊。
+const METEOR_COUNTS = { low: 3, medium: 5, high: 7 };
+
+const METEOR_VERT = [
+  'attribute vec3 aOrigin;',
+  'attribute vec3 aDir;',
+  'attribute vec2 aCorner;',
+  'attribute float aLen;',
+  'attribute float aWidth;',
+  'attribute float aPhase;',
+  'attribute float aPeriod;',
+  'attribute float aBright;',
+  'uniform float uTime;',
+  'uniform float uAlpha;',
+  'varying float vAlong;',
+  'varying float vAcross;',
+  'varying float vAlpha;',
+  'void main() {',
+  // 每颗流星按自己的周期循环：周期长、可见窗口短，所以画面里大多数时候没有。
+  '  float elapsed = mod(uTime-aPhase,aPeriod);',
+  '  float t = clamp(elapsed/1.25,0.0,1.0);',
+  '  vec3 head = aOrigin+aDir*(aLen*(t*0.94));',
+  '  vec3 tail = head-aDir*(aLen*0.30);',
+  // 在同一视图坐标系内展开丝带，机位平移/背景旋转不会把光痕翻到背面。
+  '  vec4 h = modelViewMatrix*vec4(head,1.0);',
+  '  vec4 b = modelViewMatrix*vec4(tail,1.0);',
+  '  vec2 direction = h.xy/max(0.001,-h.z)-b.xy/max(0.001,-b.z);',
+  '  vec2 side = vec2(direction.y,-direction.x)/max(length(direction),0.00001);',
+  '  vec4 p = mix(h,b,aCorner.x);',
+  '  p.xy += side*aWidth*aCorner.y*mix(1.0,0.12,aCorner.x);',
+  '  vAlong = aCorner.x;',
+  '  vAcross = aCorner.y;',
+  // 头亮尾淡、进场出场各有一段柔化；亮度整体压得很低，永远抢不过主体。
+  '  float fade = smoothstep(0.0,0.12,t)*(1.0-smoothstep(0.65,1.0,t));',
+  '  vAlpha = uAlpha*aBright*fade*step(aPhase,uTime);',
+  '  gl_Position = projectionMatrix*p;',
+  '}',
+].join('\n');
+
+const METEOR_FRAG = [
+  'precision mediump float;',
+  'uniform vec3 uColor;',
+  'varying float vAlong;',
+  'varying float vAcross;',
+  'varying float vAlpha;',
+  'void main() {',
+  '  float taper = pow(clamp(1.0-vAlong,0.0,1.0),2.4);',
+  '  float head = exp(-vAlong*vAlong*260.0)*0.85;',
+  '  float edge = 1.0-smoothstep(0.15,1.0,abs(vAcross));',
+  '  float a = (taper*0.55+head)*edge*vAlpha;',
+  '  gl_FragColor = vec4(uColor*(0.72+head*0.6),a);',
+  '}',
+].join('\n');
+
+// 软圆斑几何：共享同一批 BufferAttribute 对象，避免逐座重复上传 GPU buffer。
 function softGeometry(THREE, positions, shared) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -511,6 +585,7 @@ export function createWorld(THREE, scene, opts) {
   let activeQuality = quality;
   function setQuality(mode) {
     activeQuality = SHAPE_COUNTS[mode] ? mode : quality;
+    meteorGeo.setDrawRange(0, Math.min(meteorCount, METEOR_COUNTS[activeQuality]) * 6);
     scene.traverse(object => {
       if (!object.isPoints || !object.geometry) return;
       const total = object.geometry.getAttribute('position').count;
@@ -638,6 +713,79 @@ export function createWorld(THREE, scene, opts) {
   sparklePoints.renderOrder = -880;
   fieldGroup.add(sparklePoints);
   disposables.push(sparkleGeo, sparkleMat);
+
+  // =========================================================================
+  // 2b) 远景流星（背景组内，随星云开关与机位平移）
+  // =========================================================================
+  const meteorCount = METEOR_COUNTS[quality] || METEOR_COUNTS.high;
+  const mrnd = seededRandom('zodiac-meteors-1');
+  const mPos = new Float32Array(meteorCount * 6 * 3);
+  const mOrigin = new Float32Array(meteorCount * 6 * 3);
+  const mDir = new Float32Array(meteorCount * 6 * 3);
+  const mCorner = new Float32Array(meteorCount * 6 * 2);
+  const mLen = new Float32Array(meteorCount * 6);
+  const mWidth = new Float32Array(meteorCount * 6);
+  const mPhase = new Float32Array(meteorCount * 6);
+  const mPeriod = new Float32Array(meteorCount * 6);
+  const mBright = new Float32Array(meteorCount * 6);
+  const CORNERS = [[0, -1], [1, -1], [1, 1], [0, -1], [1, 1], [0, 1]];
+  for (let i = 0; i < meteorCount; i += 1) {
+    // 起点在远星空壳上，方向接近切向：看起来是横掠，不是朝观众飞来。
+    const u = (mrnd() * 2 - 1) * 0.55;
+    // 首颗落在默认机位视野，其余分散到球壳各方，低画质也能偶尔看见。
+    const theta = -Math.PI / 2 + i * 2.399963 + (mrnd() - 0.5) * 0.4;
+    const radius = 62 + mrnd() * 24;
+    const s = Math.sqrt(1 - u * u);
+    const ox = Math.cos(theta) * s * radius;
+    const oy = u * radius * 0.8;
+    const oz = Math.sin(theta) * s * radius;
+    const normal = new THREE.Vector3(ox, oy, oz).normalize();
+    const tangent = new THREE.Vector3(-Math.sin(theta), 0, Math.cos(theta));
+    const slope = 0.25 + mrnd() * 0.4;
+    const dir = tangent.addScaledVector(new THREE.Vector3().crossVectors(normal, tangent), slope).normalize().toArray();
+    const len = 6 + mrnd() * 9;
+    const width = 0.05 + mrnd() * 0.035;
+    const phase = i === 0 ? 2 + mrnd() * 4 : 4 + mrnd() * 32;
+    const period = 17 + mrnd() * 19;
+    const bright = 0.34 + mrnd() * 0.34;
+    for (let v = 0; v < 6; v += 1) {
+      const k = i * 6 + v;
+      mOrigin.set([ox, oy, oz], k * 3);
+      mDir.set(dir, k * 3);
+      mCorner.set(CORNERS[v], k * 2);
+      mLen[k] = len; mWidth[k] = width; mPhase[k] = phase;
+      mPeriod[k] = period; mBright[k] = bright;
+    }
+  }
+  const meteorGeo = new THREE.BufferGeometry();
+  meteorGeo.setAttribute('position', new THREE.BufferAttribute(mPos, 3));
+  meteorGeo.setAttribute('aOrigin', new THREE.BufferAttribute(mOrigin, 3));
+  meteorGeo.setAttribute('aDir', new THREE.BufferAttribute(mDir, 3));
+  meteorGeo.setAttribute('aCorner', new THREE.BufferAttribute(mCorner, 2));
+  meteorGeo.setAttribute('aLen', new THREE.BufferAttribute(mLen, 1));
+  meteorGeo.setAttribute('aWidth', new THREE.BufferAttribute(mWidth, 1));
+  meteorGeo.setAttribute('aPhase', new THREE.BufferAttribute(mPhase, 1));
+  meteorGeo.setAttribute('aPeriod', new THREE.BufferAttribute(mPeriod, 1));
+  meteorGeo.setAttribute('aBright', new THREE.BufferAttribute(mBright, 1));
+  meteorGeo.setDrawRange(0, meteorCount * 6);
+  const meteorMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uAlpha: { value: 0.55 },
+      uColor: { value: new THREE.Color(0.78, 0.86, 1.0) },
+    },
+    vertexShader: METEOR_VERT,
+    fragmentShader: METEOR_FRAG,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const meteors = new THREE.Mesh(meteorGeo, meteorMat);
+  meteors.frustumCulled = false;
+  meteors.renderOrder = -885;
+  fieldGroup.add(meteors);
+  disposables.push(meteorGeo, meteorMat);
 
   // =========================================================================
   // 3) 逐座预建：主粒子池 + 形象图（柔光/面片/网格边）+ 星座骨架（连线/星点）
@@ -985,9 +1133,13 @@ export function createWorld(THREE, scene, opts) {
     ).normalize();
     shapeMat.uniforms.uState.value = state === 'gather' ? 0 : state === 'disperse' ? 2 : 1;
     shapeMat.uniforms.uK.value = k;
-    const style = transitionStyle(c.cycle || 0);
+    const style = transitionStyle(c.cycle || 0, current < 0 ? 0 : current);
     shapeMat.uniforms.uVariant.value = state === 'disperse' ? style.disperse : style.gather;
     shapeMat.uniforms.uSpin.value = style.direction;
+    // 每次汇聚/散开的错峰、旋进与弧幅都不一样：同一座下一轮也不重复。
+    shapeMat.uniforms.uStagger.value = style.stagger;
+    shapeMat.uniforms.uSpinRate.value = style.spin;
+    shapeMat.uniforms.uArcScale.value = style.arc;
     shapeMat.uniforms.uMotion.value = reduced ? .12 : 1;
 
     // 减弱动效降低呼吸幅度，星云与星点常驻。
@@ -999,6 +1151,9 @@ export function createWorld(THREE, scene, opts) {
     sparkleMat.uniforms.uTime.value = time;
     sparkleMat.uniforms.uTwinkle.value = fTw;
     sparkleMat.uniforms.uBrightness.value = 0.82 + onset * 0.3;
+    meteorMat.uniforms.uTime.value = time;
+    meteorMat.uniforms.uAlpha.value = reduced ? 0 : 0.55;
+    meteors.visible = !reduced;
 
     // 造型自转改成「以播放时间为唯一输入」的微摆：seek 到任意时刻画面一致，
     // 暂停时冻结；微摆展示立体侧面，同时保持剪影可识别。幅度比早期版本更大：
@@ -1056,8 +1211,9 @@ export function createWorld(THREE, scene, opts) {
       constellationSegments: current < 0 ? 0 : lines[current].segments,
       figureAlpha: Math.round(figAlpha * 1000) / 1000,
       sky: true,
-      layers: 13,
-      transition: { ...transitionStyle(lastCycle) },
+      layers: 14,
+      meteorCount: meteorGeo.drawRange.count / 6,
+      transition: { ...transitionStyle(lastCycle, current < 0 ? 0 : current) },
     };
   }
 

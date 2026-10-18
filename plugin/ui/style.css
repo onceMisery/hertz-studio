@@ -2036,7 +2036,10 @@ input[type="range"]::-moz-range-thumb { width: 13px; height: 13px; border: none;
 .toast {
   position: fixed; left: 50%; bottom: 106px;
   transform: translateX(-50%) translateY(6px);
+  width: max-content;
   max-width: min(88vw, 520px);
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
   padding: 11px 18px;
   border-radius: 999px;
   border: 1px solid var(--line-strong);
@@ -2569,6 +2572,7 @@ body.reduce-motion .pd-row:active {
   -webkit-backdrop-filter: blur(var(--glass-blur));
 }
 .toast { border-radius: var(--r-pill); font-size: var(--fs-md); }
+.toast.error { border-radius: var(--r-lg); }
 
 /* ---------- 滚动条：细条 + 低调滑块，不抢内容 ---------- */
 
@@ -3967,6 +3971,10 @@ body.reduce-motion .palette { animation: none; }
 
 .vex-card {
   width: min(460px, 100%);
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border-radius: var(--r-xl);
   border: 1px solid var(--field-border-strong, var(--line));
   background: var(--panel-solid, var(--bg));

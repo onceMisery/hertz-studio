@@ -56,6 +56,16 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // AI 持久生成任务（技术路线 R4-J）：官方 UI 入口，全权 token 后面，
         // 固定 local-owner 身份；外部 grant 走受限门面的独立路由组。
         .route("/v1/ai/status", get(ai_status))
+        .route(
+            "/v1/ai/provider-credential",
+            get(ai_credential_status)
+                .put(ai_put_credential)
+                .delete(ai_delete_credential)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::ai::credential::BODY_BYTES,
+                )),
+        )
+        .route("/v1/ai/ledger", get(ai_ledger))
         .route("/v1/ai/jobs", get(ai_list_jobs).post(ai_create_job))
         .route("/v1/ai/jobs/{jobId}", get(ai_get_job))
         .route("/v1/ai/jobs/{jobId}/cancel", post(ai_cancel_job))
@@ -113,6 +123,22 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(get_lyrics).put(import_lyrics).delete(clear_lyrics),
         )
         .route("/v1/tracks/{id}/lyrics/offset", put(set_lyrics_offset))
+        .route(
+            "/v1/tracks/{id}/lyrics/candidates",
+            post(prepare_lyric_candidate),
+        )
+        .route(
+            "/v1/tracks/{id}/lyrics/candidates/apply",
+            post(apply_lyric_candidate),
+        )
+        .route(
+            "/v1/tracks/{id}/lyrics/candidates/search",
+            post(search_lyric_candidates),
+        )
+        .route(
+            "/v1/tracks/{id}/lyrics/candidates/prepare-online",
+            post(prepare_online_lyric_candidate),
+        )
         .route("/v1/library/scan", post(start_scan))
         .route("/v1/library/status", get(scan_status))
         .route("/v1/library/scan/cancel", post(cancel_scan))
@@ -242,6 +268,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // 后台分析的状态面板（在算 / 已落盘 / 只在这轮内存 / 已放弃 + 让路次数）。
         .route("/v1/stage/beatmap/status", get(beatmap_status))
         .route("/v1/stage/beatmap/retry", post(beatmap_retry))
+        .route("/v1/stage/project-media", post(project_media))
+        .route("/v1/stage/pitch", post(stage_pitch))
         // OBS 歌词输出：「正在播放」歌词+播放态快照，轮询驱动 /overlay 浮层页。
         .route("/v1/overlay/lyric", get(overlay_lyric))
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
@@ -296,6 +324,21 @@ async fn beatmap_status(
 #[derive(Debug, Deserialize)]
 pub(crate) struct BeatmapRetry {
     pub(crate) track_id: String,
+}
+
+/// Explicit local file identity for editable stage projects; HTTP/RPC share the reader.
+async fn project_media(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::stage_project::IdentifyRequest>,
+) -> ApiResult<Json<crate::stage_project::MediaIdentity>> {
+    Ok(Json(crate::stage_project::identify(&state, body).await?))
+}
+
+async fn stage_pitch(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::stage_project::MediaRequest>,
+) -> ApiResult<Json<crate::stage_pitch::Reply>> {
+    Ok(Json(crate::stage_pitch::request(&state, body).await?))
 }
 
 /// 手动重试某一首的分析：忘掉既有结论（含「已放弃三次」）再跑一次。应答就是
@@ -534,6 +577,26 @@ async fn ai_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_j
     Ok(Json(crate::ai::jobs::status(&state, &owner).await?))
 }
 
+async fn ai_credential_status(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<crate::ai::credential::CredentialStatus>> {
+    crate::ai::credential::status(&state).await.map(Json)
+}
+
+async fn ai_put_credential(
+    State(state): State<Arc<AppState>>,
+    body: Bytes,
+) -> ApiResult<Json<crate::ai::credential::CredentialStatus>> {
+    let request = crate::ai::credential::CredentialRequest::parse(&body)?;
+    crate::ai::credential::put(&state, request).await.map(Json)
+}
+
+async fn ai_delete_credential(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<crate::ai::credential::CredentialStatus>> {
+    crate::ai::credential::delete(&state).await.map(Json)
+}
+
 #[derive(Deserialize)]
 pub struct AiCreateJobRequest {
     pub brief: String,
@@ -565,6 +628,13 @@ pub struct AiJobsQuery {
     pub before_job_id: Option<String>,
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+async fn ai_ledger(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<crate::ai::ledger::Query>,
+) -> ApiResult<Json<crate::ai::ledger::Page>> {
+    Ok(Json(crate::ai::ledger::read(&state, query).await?))
 }
 
 async fn ai_list_jobs(
@@ -766,9 +836,11 @@ async fn require_grant(
 
 /// 受限门面：身份、scope、策略水位与能力表投影。
 async fn ai_capabilities_context(
+    State(state): State<Arc<AppState>>,
     axum::Extension(ctx): axum::Extension<Arc<crate::ai::facade::GrantContext>>,
-) -> Json<serde_json::Value> {
-    Json(crate::ai::facade::context_json(&ctx))
+) -> ApiResult<Json<serde_json::Value>> {
+    let enabled = crate::ai::capability::stage_tools_enabled(&state).await?;
+    Ok(Json(crate::ai::facade::context_json(&ctx, enabled)))
 }
 
 #[derive(Deserialize)]
@@ -1225,7 +1297,7 @@ async fn list_tracks(
     let offset = query.offset.unwrap_or(0).max(0);
     let sort = parse_track_sort(query.sort.as_deref())?;
     let filter = track_filter_from(&query);
-    let tracks = vmusic_store::list_tracks_filtered(
+    let (tracks, total) = vmusic_store::list_tracks_page_filtered(
         &state.db,
         query.q.as_deref(),
         &filter,
@@ -1235,9 +1307,6 @@ async fn list_tracks(
     )
     .await
     .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    let total = vmusic_store::count_tracks_filtered(&state.db, query.q.as_deref(), &filter)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     Ok(Json(TrackPage { total, tracks }))
 }
 
@@ -1655,38 +1724,7 @@ async fn get_lyrics(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let track = vmusic_store::get_track(&state.db, &id)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?
-        .ok_or_else(|| not_found(format!("track {id}")))?;
-
-    let saved = vmusic_store::lyrics::get(&state.db, &id)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
-    let imported = saved
-        .as_ref()
-        .map(|s| !s.content.trim().is_empty())
-        .unwrap_or(false);
-
-    let doc = lyric_doc_for(&state, &track).await;
-
-    let body = serde_json::to_value(&doc).map_err(|e| internal(e.to_string()))?;
-    let mut body = match body {
-        serde_json::Value::Object(map) => map,
-        _ => unreachable!("LyricDocument serializes to an object"),
-    };
-    if imported {
-        body.insert(
-            "source".into(),
-            serde_json::Value::String("imported".into()),
-        );
-    }
-    body.insert(
-        "user_offset_ms".into(),
-        serde_json::Value::from(user_offset),
-    );
-    Ok(Json(serde_json::Value::Object(body)))
+    Ok(Json(crate::lyrics::read(&state, &id).await?))
 }
 
 /// 这首已存的每曲用户偏移（毫秒），没有行就是 0。
@@ -1718,7 +1756,7 @@ pub(crate) async fn online_lyric_body(
         online::lyric(&online_ctx(state), source, ref_id).await,
     )?;
     let user_offset = lyrics_user_offset(state, &crate::online::virtual_id(source, ref_id)).await;
-    doc.offset_ms += user_offset;
+    doc.offset_ms = doc.offset_ms.saturating_add(user_offset);
     vmusic_lyrics::apply_offset(&mut doc);
     let mut body = serde_json::to_value(&doc).map_err(|e| internal(e.to_string()))?;
     let Some(map) = body.as_object_mut() else {
@@ -1742,12 +1780,8 @@ pub(crate) async fn lyric_doc_for(
         .ok()
         .flatten();
     let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
-    let path = Path::new(&track.path);
-    let mut doc = match saved.filter(|s| !s.content.trim().is_empty()) {
-        Some(saved) => vmusic_lyrics::parse_lrc(&saved.content),
-        None => read_embedded_or_sidecar_lyrics(path).await,
-    };
-    doc.offset_ms += user_offset;
+    let mut doc = crate::lyrics::raw_local(track, saved.as_ref().map(|s| s.content.as_str())).await;
+    doc.offset_ms = doc.offset_ms.saturating_add(user_offset);
     vmusic_lyrics::apply_offset(&mut doc);
     doc
 }
@@ -1784,8 +1818,42 @@ pub(crate) async fn read_embedded_or_sidecar_lyrics(path: &Path) -> vmusic_core:
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct LyricsImport {
     pub(crate) content: String,
+}
+
+async fn prepare_lyric_candidate(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::lyrics::Prepare>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::lyrics::prepare(&state, &id, body).await?))
+}
+async fn search_lyric_candidates(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::lyrics::candidates::Search>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::lyrics::candidates::search(&state, &id, body).await?,
+    ))
+}
+async fn prepare_online_lyric_candidate(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::lyrics::Apply>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::lyrics::candidates::prepare(&state, &id, body).await?,
+    ))
+}
+async fn apply_lyric_candidate(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::lyrics::Apply>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::lyrics::apply(&state, &id, body).await?))
 }
 
 /// 手动导入歌词：存 LRC 原文，读取端按 imported 优先返回。清空内容用 DELETE。
@@ -1794,14 +1862,8 @@ async fn import_lyrics(
     AxumPath(id): AxumPath<String>,
     Json(body): Json<LyricsImport>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if body.content.trim().is_empty() {
-        return Err(bad_request("lyrics content must not be empty"));
-    }
-    vmusic_store::lyrics::import(&state.db, &id, &body.content)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     Ok(Json(
-        serde_json::json!({ "ok": true, "source": "imported" }),
+        crate::lyrics::import(&state, &id, body.content).await?,
     ))
 }
 
@@ -1810,10 +1872,7 @@ async fn clear_lyrics(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    vmusic_store::lyrics::remove(&state.db, &id)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(crate::lyrics::clear(&state, &id).await?))
 }
 
 #[derive(Deserialize)]
@@ -1827,11 +1886,8 @@ async fn set_lyrics_offset(
     AxumPath(id): AxumPath<String>,
     Json(body): Json<LyricsOffset>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    vmusic_store::lyrics::set_offset(&state.db, &id, body.offset_ms)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     Ok(Json(
-        serde_json::json!({ "ok": true, "offset_ms": body.offset_ms }),
+        crate::lyrics::set_offset(&state, &id, body.offset_ms).await?,
     ))
 }
 
@@ -1872,7 +1928,8 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
         .ok()
         .flatten()
         .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .clamp(-2000, 2000);
 
     let (title, artist, album, cover, mut doc) =
         if let Some((source, ref_id)) = crate::online::split_virtual_id(&track_id) {
@@ -1894,7 +1951,9 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
             // 同一个虚拟 id 当键。浮层与主页面必须共用这一份时间语义，否则
             // 「校准只在其中一个窗口有效」——正是清单 §9 G11 说的那件事。
             let mut doc = doc;
-            doc.offset_ms += lyrics_user_offset(state, &track_id).await;
+            doc.offset_ms = doc
+                .offset_ms
+                .saturating_add(lyrics_user_offset(state, &track_id).await);
             let cover = meta
                 .as_ref()
                 .and_then(|m| m.cover.as_deref())
@@ -1914,27 +1973,30 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
                 return overlay_idle();
             };
             // 取词链与 /v1/tracks/{id}/lyrics 相同（imported > embedded >
-            // sidecar），但偏移在这里统一叠加后再一次性应用：文件 [offset:] +
-            // 每曲用户偏移 + 全局偏移。apply_offset 不是幂等的，绝不能叠加两次。
+            // sidecar）。先应用文件+每曲偏移，再与前端一样应用全局呈现偏移；
+            // 两段都只应用一次，零点饱和顺序也必须一致。
             // 缓存存的是叠加用户偏移之前的原始解析文档。
-            let saved = vmusic_store::lyrics::get(&state.db, &track.id)
+            let saved = vmusic_store::lyrics::snapshot(&state.db, &track.id)
                 .await
-                .ok()
-                .flatten();
+                .ok();
             let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
-            let mut doc = match cached_overlay_doc(state, &track_id).await {
+            let cache_key = format!(
+                "{track_id}:lyrics:{}",
+                saved.as_ref().map(|s| s.revision).unwrap_or(0)
+            );
+            let mut doc = match cached_overlay_doc(state, &cache_key).await {
                 Some(doc) => doc,
                 None => {
-                    let path = Path::new(&track.path);
-                    let doc = match saved.filter(|s| !s.content.trim().is_empty()) {
-                        Some(saved) => vmusic_lyrics::parse_lrc(&saved.content),
-                        None => read_embedded_or_sidecar_lyrics(path).await,
-                    };
-                    *state.overlay_lyric.lock().await = Some((track_id.clone(), doc.clone()));
+                    let doc = crate::lyrics::raw_local(
+                        &track,
+                        saved.as_ref().and_then(|s| s.content.as_deref()),
+                    )
+                    .await;
+                    *state.overlay_lyric.lock().await = Some((cache_key, doc.clone()));
                     doc
                 }
             };
-            doc.offset_ms += user_offset;
+            doc.offset_ms = doc.offset_ms.saturating_add(user_offset);
             let cover = track
                 .has_cover
                 .then(|| format!("/v1/tracks/{}/cover", track.id));
@@ -1946,9 +2008,8 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
                 doc,
             )
         };
-    // 全局偏移最后叠加，两种来源都只应用这一次。
-    doc.offset_ms += global_offset;
-    vmusic_lyrics::apply_offset(&mut doc);
+    // Match the main Stage even when the source shift saturates at zero.
+    vmusic_lyrics::apply_presentation_offset(&mut doc, global_offset);
 
     let word_by_word = doc.lines.iter().any(|l| !l.words.is_empty());
     let translation = doc.translation.as_deref();
@@ -1972,6 +2033,14 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
                     v["translation"] = serde_json::Value::String(tr.clone());
                 }
             }
+            if let Some(roman) = doc
+                .romanization
+                .as_ref()
+                .and_then(|r| r.get(i))
+                .filter(|s| !s.trim().is_empty())
+            {
+                v["romanization"] = serde_json::Value::String(roman.clone());
+            }
             v
         })
         .collect();
@@ -1987,6 +2056,9 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
         "duration_ms": snap.duration_ms,
         "offset": doc.offset_ms,
         "wordByWord": word_by_word,
+        "format": doc.format,
+        "origin": doc.origin,
+        "timing_precision": doc.timing_precision,
         "lines": lines,
     })
 }
@@ -2415,10 +2487,10 @@ async fn put_settings(
     State(state): State<Arc<AppState>>,
     Json(body): Json<std::collections::BTreeMap<String, serde_json::Value>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if let Some(key) = body.keys().find(|k| is_credential(k)) {
-        return Err(bad_request(format!(
-            "{key} 属于音源凭据，只能通过 /v1/online/cookie 修改"
-        )));
+    if body.keys().any(|k| is_credential(k)) {
+        return Err(bad_request(
+            "凭据只能通过对应的凭据管理入口修改，不能写入通用设置",
+        ));
     }
     vmusic_store::settings::set_all(&state.db, &body)
         .await
@@ -2432,7 +2504,10 @@ async fn put_settings(
 /// 改它只能走 `/v1/online/cookie`（那里才校验得了音源是否真的支持登录）。
 /// `online_device_*` 是非敏感设备身份，不在此列。
 pub(crate) fn is_credential(key: &str) -> bool {
-    key.starts_with(online::COOKIE_PREFIX) || key.starts_with(online::CRED_PREFIX)
+    key.starts_with(online::COOKIE_PREFIX)
+        || key.starts_with(online::CRED_PREFIX)
+        || key.starts_with("ai_provider_")
+        || matches!(key, "openai_api_key" | "ai_api_key")
 }
 
 // ---------------------------------------------------------------------------

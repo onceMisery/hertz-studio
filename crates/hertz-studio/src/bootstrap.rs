@@ -168,6 +168,8 @@ pub async fn boot(
         committed_quality: Default::default(),
         stage_beats: tokio::sync::Mutex::new(BoundedMap::new(STAGE_BEATS_CAP)),
         beat_slots: Arc::new(tokio::sync::Semaphore::new(BEAT_ANALYZE_BUDGET)),
+        pitch_cache: tokio::sync::Mutex::new(BoundedMap::new(8)),
+        lyric_candidates: Default::default(),
         beat_volatile: tokio::sync::Mutex::new(BoundedMap::new(BEAT_VOLATILE_CAP)),
         beat_labels: tokio::sync::Mutex::new(BoundedMap::new(BEAT_LABEL_CAP)),
         beat_deferrals: std::sync::atomic::AtomicUsize::new(0),
@@ -181,7 +183,7 @@ pub async fn boot(
         short_writes: Default::default(),
         server_instance_id: uuid::Uuid::new_v4().to_string(),
         search_gate: Default::default(),
-        ai_runtime: Default::default(),
+        ai_runtime: crate::ai::jobs::AiRuntime::from_config(&config.ai),
         ai_runner_held: Default::default(),
         ai_external_ready: Default::default(),
     });

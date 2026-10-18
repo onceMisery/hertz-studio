@@ -18,6 +18,8 @@
 //! 未连接时：握手照常，`tools/list` 为空，`tools/call` 返回工具级错误
 //! `not_connected`——不自动启动第二个播放器实例，不伪造结果。
 
+use std::borrow::Cow;
+
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, Implementation, ListToolsResult,
@@ -33,9 +35,16 @@ use crate::ai::capability::find;
 pub(crate) struct FacadeServer {
     session: Session,
     client: reqwest::Client,
+    closed: tokio::sync::watch::Receiver<bool>,
 }
 
 impl ServerHandler for FacadeServer {
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        // get_info 的版本只是 SDK 协商的回退偏好；默认支持列表还包含未来
+        // 生命周期。显式限制列表，避免 SDK 升级绕过本适配器的协议基线。
+        Cow::Borrowed(&[ProtocolVersion::V_2025_11_25])
+    }
+
     fn get_info(&self) -> ServerConfig {
         let mut implementation = Implementation::from_build_env();
         implementation.name = "hertz-studio-ai".into();
@@ -58,7 +67,11 @@ impl ServerHandler for FacadeServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let tools = match &self.session {
-            Session::Connected { scopes, .. } => adapter::tools_for(scopes),
+            Session::Connected {
+                scopes,
+                stage_tools_enabled,
+                ..
+            } => adapter::tools_for(scopes, *stage_tools_enabled),
             Session::NotConnected => Vec::new(),
         };
         Ok(ListToolsResult {
@@ -70,7 +83,7 @@ impl ServerHandler for FacadeServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         // 未登记的工具名是协议级错误（§12.1 MCP 反例：未知工具 → 标准错误）；
         // 已登记的工具失败走工具级错误，机器码原样透传给调用方。
@@ -80,14 +93,24 @@ impl ServerHandler for FacadeServer {
                 None,
             ));
         }
-        let result = adapter::call_tool(
+        let call = adapter::call_tool(
             &self.client,
             &self.session,
             &request.name,
             request.arguments.as_ref(),
-        )
-        .await;
-        Ok(result.into())
+        );
+        let mut closed = self.closed.clone();
+        let cancelled = context
+            .extensions
+            .get::<super::transport::RequestCancellation>()
+            .cloned();
+        tokio::select! {
+            biased;
+            _ = context.ct.cancelled() => Err(McpError::internal_error("调用等待已取消", None)),
+            _ = super::transport::RequestCancellation::cancelled(cancelled) => Err(McpError::internal_error("调用等待已取消", None)),
+            _ = closed.wait_for(|closed| *closed) => Err(McpError::internal_error("适配连接已关闭", None)),
+            result = call => Ok(result.into()),
+        }
     }
 }
 
@@ -112,9 +135,39 @@ pub async fn run_stdio(cfg: AdapterConfig) -> anyhow::Result<()> {
             eprintln!("hertz-studio-ai: not connected; serving handshake only");
         }
     }
-    let server = FacadeServer { session, client };
     let (stdin, stdout) = stdio();
-    let running = server.serve((stdin, stdout)).await?;
+    let (transport, closed) = super::transport::bounded(stdin, stdout);
+    let server = FacadeServer {
+        session,
+        client,
+        closed,
+    };
+    let running = server.serve(transport).await?;
     running.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::ClientConfig;
+
+    #[test]
+    fn sdk_negotiation_and_discovery_stay_on_the_declared_baseline() {
+        let server = FacadeServer {
+            session: Session::NotConnected,
+            client: adapter::http_client().unwrap(),
+            closed: tokio::sync::watch::channel(false).1,
+        };
+        assert_eq!(
+            server.supported_protocol_versions().as_ref(),
+            &[ProtocolVersion::V_2025_11_25]
+        );
+        // get_info alone does not limit what the SDK advertises or negotiates.
+        for version in ProtocolVersion::KNOWN_VERSIONS {
+            let request = ClientConfig::default().with_protocol_version(version.clone());
+            let response = server.negotiate_initialize(&request).unwrap();
+            assert_eq!(response.protocol_version, ProtocolVersion::V_2025_11_25);
+        }
+    }
 }

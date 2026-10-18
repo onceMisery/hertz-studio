@@ -17,10 +17,9 @@
 //! 2. The decoder thread decodes outside the lock and pushes in whole chunks.
 //! 3. The FFT runs on the actor thread, never inside the audio callback.
 //!
-//! Resampling is linear interpolation. It is not the sinc/FIR resampler a
-//! Hi-Fi player would use, but it keeps the first version dependency-light and
-//! the code auditable; the [`AudioBackend`] trait is the seam where a better
-//! one gets dropped in later.
+//! Fixed-rate sinc resampling runs only on each deck's decoder thread, through
+//! the consumed/produced/finish/reset contract in [`crate::resample`]. Device
+//! PCM queues, crossfade and the existing device-domain DSP retain their owners.
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -29,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use crate::resample::{Converter, Format as ResampleFormat, State as ResampleState};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, SupportedStreamConfig};
 use num_complex::Complex;
@@ -1595,11 +1595,14 @@ fn decode_loop_opened(
         ..
     } = opened;
 
-    let src_rate = reader
-        .default_track()
-        .and_then(|t| t.codec_params.sample_rate)
-        .unwrap_or(device_rate);
-    let mut resampler = Resampler::new(src_rate, device_rate);
+    if device_channels == 0 || device_channels > 32 || device_rate == 0 {
+        shared.flag_decode_error();
+        stop.store(true, Ordering::Relaxed);
+        return;
+    }
+    let mut resampler: Option<Converter> = None;
+    let mut converted = Vec::new();
+    let mut mapped = vec![0.0; 512 * device_channels];
     let capacity = (device_rate as f32 * BUFFER_SECONDS) as usize * device_channels;
     // 循环退出原因有三种「正常」：symphonia 的 UnexpectedEof("end of stream")
     // 自然播完；io::ErrorKind::Interrupted（下载 abort / seek-stop 主动中止）；
@@ -1633,7 +1636,9 @@ fn decode_loop_opened(
             };
             discard_until = Some(sought.required_ts);
             decoder.reset();
-            resampler.reset();
+            if let Some(converter) = &mut resampler {
+                converter.reset();
+            }
             if let Ok(mut q) = shared.samples.lock() {
                 q.clear();
                 shared
@@ -1660,53 +1665,85 @@ fn decode_loop_opened(
 
         match reader.next_packet() {
             Ok(packet) if packet.track_id() != track_id => continue,
-            Ok(packet) => match decoder.decode(&packet) {
-                Ok(decoded) => {
-                    let spec = *decoded.spec();
-                    let frames = decoded.frames();
-                    if frames == 0 {
-                        continue;
+            Ok(packet) => {
+                match decoder.decode(&packet) {
+                    Ok(decoded) => {
+                        let spec = *decoded.spec();
+                        let frames = decoded.frames();
+                        if frames == 0 {
+                            continue;
+                        }
+                        let mut sb = SampleBuffer::<f32>::new(frames as u64, spec);
+                        sb.copy_interleaved_ref(decoded);
+                        let skip = discard_until.map_or(0, |target| {
+                            let ticks = target.saturating_sub(packet.ts());
+                            reader
+                                .default_track()
+                                .and_then(|track| track.codec_params.time_base)
+                                .map_or(ticks as usize, |base| {
+                                    let time = base.calc_time(ticks);
+                                    ((time.seconds as f64 + time.frac) * spec.rate as f64).round()
+                                        as usize
+                                })
+                                .min(frames)
+                        });
+                        if skip == frames {
+                            continue;
+                        }
+                        discard_until = None;
+                        let format = ResampleFormat {
+                            input_rate: spec.rate,
+                            output_rate: device_rate,
+                            channels: spec.channels.count(),
+                        };
+                        // Decoded PCM is authoritative: e.g. SBR can expose a
+                        // different rate than the container's codec metadata.
+                        if resampler.as_ref().is_some_and(|r| r.format() != format) {
+                            tracing::warn!("decoded PCM format changed midstream");
+                            break;
+                        }
+                        if resampler.is_none() {
+                            match Converter::new(format) {
+                                Ok(converter) => {
+                                    converted.resize(512 * format.channels, 0.0);
+                                    resampler = Some(converter);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error,"resampler preparation failed");
+                                    break;
+                                }
+                            }
+                        }
+                        if let Err(error) = pump_pcm(
+                            resampler.as_mut().unwrap(),
+                            Some(&sb.samples()[skip * spec.channels.count()..]),
+                            &mut converted,
+                            &mut mapped,
+                            device_channels,
+                            &shared,
+                            &stop,
+                        ) {
+                            tracing::warn!(%error,"PCM conversion failed");
+                            break;
+                        }
                     }
-                    let mut sb = SampleBuffer::<f32>::new(frames as u64, spec);
-                    sb.copy_interleaved_ref(decoded);
-                    let skip = discard_until.map_or(0, |target| {
-                        let ticks = target.saturating_sub(packet.ts());
-                        reader
-                            .default_track()
-                            .and_then(|track| track.codec_params.time_base)
-                            .map_or(ticks as usize, |base| {
-                                let time = base.calc_time(ticks);
-                                ((time.seconds as f64 + time.frac) * spec.rate as f64).round()
-                                    as usize
-                            })
-                            .min(frames)
-                    });
-                    if skip == frames {
-                        continue;
+                    Err(SymError::DecodeError(e)) => {
+                        tracing::debug!("skipping undecodable packet: {e}");
                     }
-                    discard_until = None;
-                    let resampled = resampler.push(
-                        &sb.samples()[skip * spec.channels.count()..],
-                        spec.channels.count(),
-                    );
-                    let mapped = map_channels(&resampled, spec.channels.count(), device_channels);
-                    if let Ok(mut q) = shared.samples.lock() {
-                        q.extend(mapped);
+                    Err(e) => {
+                        tracing::warn!("decode error: {e}");
+                        // 解码器正常不做 I/O，但若主动中止的 Interrupted 从这里
+                        // 冒出来，同样按中止收口，不能误报早夭。
+                        interrupted = is_interrupted(&e);
+                        break;
                     }
                 }
-                Err(SymError::DecodeError(e)) => {
-                    tracing::debug!("skipping undecodable packet: {e}");
-                }
-                Err(e) => {
-                    tracing::warn!("decode error: {e}");
-                    // 解码器正常不做 I/O，但若主动中止的 Interrupted 从这里
-                    // 冒出来，同样按中止收口，不能误报早夭。
-                    interrupted = is_interrupted(&e);
-                    break;
-                }
-            },
+            }
             Err(SymError::ResetRequired) => {
                 decoder.reset();
+                if let Some(converter) = &mut resampler {
+                    converter.reset();
+                }
             }
             Err(e) => {
                 // symphonia 以 IoError(UnexpectedEof) 表示自然播完；
@@ -1718,6 +1755,20 @@ fn decode_loop_opened(
                     SymError::IoError(ioe)
                         if ioe.kind() == std::io::ErrorKind::UnexpectedEof
                 ) {
+                    if let Some(converter) = &mut resampler {
+                        if let Err(error) = pump_pcm(
+                            converter,
+                            None,
+                            &mut converted,
+                            &mut mapped,
+                            device_channels,
+                            &shared,
+                            &stop,
+                        ) {
+                            tracing::warn!(%error,"PCM tail conversion failed");
+                            break;
+                        }
+                    }
                     natural_eof = true;
                     shared.eof.store(true, Ordering::Release);
                     continue;
@@ -1782,6 +1833,17 @@ fn should_flag_decode_error(stop: bool, interrupted: bool, natural_eof: bool) ->
     !stop && !interrupted && !natural_eof
 }
 
+// A failed probe is not always an unsupported codec: damaged headers and I/O
+// failures must remain decode/read errors, including for a supported suffix.
+fn media_open_error(error: symphonia::core::errors::Error) -> AudioError {
+    match error {
+        symphonia::core::errors::Error::Unsupported(_) => {
+            AudioError::UnsupportedFormat(error.to_string())
+        }
+        _ => AudioError::DecodeFailed(error.to_string()),
+    }
+}
+
 fn open_media(
     mss: MediaSourceStream,
     ext: Option<&str>,
@@ -1802,7 +1864,7 @@ fn open_media(
             },
             &MetadataOptions::default(),
         )
-        .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+        .map_err(media_open_error)?;
 
     let track = probed
         .format
@@ -1825,7 +1887,7 @@ fn open_media(
     let gapless_supported = supports_gapless(&track.codec_params);
     let decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+        .map_err(media_open_error)?;
 
     let opened = OpenedReader {
         reader: probed.format,
@@ -1912,91 +1974,75 @@ impl symphonia::core::io::MediaSource for DynMediaSource {
     }
 }
 
-/// Linear-interpolating resampler with carry-over between decode blocks.
-struct Resampler {
-    ratio: f64,
-    frac: f64,
-    prev: Vec<f32>,
-}
-
-impl Resampler {
-    fn new(src_rate: u32, dst_rate: u32) -> Self {
-        Self {
-            ratio: src_rate.max(1) as f64 / dst_rate.max(1) as f64,
-            frac: 0.0,
-            prev: Vec::new(),
+/// Consume a packet or drain finite EOF before publishing the deck EOF flag.
+/// Filter work and channel mapping run outside the PCM queue lock.
+fn pump_pcm(
+    converter: &mut Converter,
+    input: Option<&[f32]>,
+    converted: &mut [f32],
+    mapped: &mut [f32],
+    device_channels: usize,
+    shared: &Deck,
+    stop: &AtomicBool,
+) -> Result<(), AudioError> {
+    let channels = converter.format().channels;
+    let mut at = 0;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
         }
-    }
-
-    fn reset(&mut self) {
-        self.frac = 0.0;
-        self.prev.clear();
-    }
-
-    fn push(&mut self, interleaved: &[f32], channels: usize) -> Vec<f32> {
-        if channels == 0 || interleaved.is_empty() {
-            return Vec::new();
+        let progress = match input {
+            Some(input) => converter.process(&input[at..], converted),
+            None => converter.finish(converted),
         }
-        if (self.ratio - 1.0).abs() < 1e-6 {
-            return interleaved.to_vec();
+        .map_err(|e| AudioError::DecodeFailed(e.to_string()))?;
+        at += progress.consumed_frames * channels;
+        let count = map_channels(
+            &converted[..progress.produced_frames * channels],
+            channels,
+            device_channels,
+            mapped,
+        );
+        if count > 0 {
+            let mut queue = shared
+                .samples
+                .lock()
+                .map_err(|_| AudioError::DecodeFailed("PCM queue unavailable".into()))?;
+            queue.extend(mapped[..count].iter().copied());
         }
-        let frames_in = interleaved.len() / channels;
-        if frames_in == 0 {
-            return Vec::new();
-        }
-        let mut out =
-            Vec::with_capacity((frames_in as f64 / self.ratio) as usize * channels + channels);
-        // The interpolation needs one frame from before this block; keep a
-        // local copy so the loop below can work on plain slices.
-        let prev: Vec<f32> = if self.prev.len() == channels {
-            self.prev.clone()
-        } else {
-            vec![0.0; channels]
-        };
-
-        let mut pos = self.frac;
-        while pos < frames_in as f64 {
-            let i = pos.floor() as i64;
-            let f = (pos - pos.floor()) as f32;
-
-            let cur: &[f32] = if i < 0 {
-                &prev
-            } else {
-                &interleaved[i as usize * channels..(i as usize + 1) * channels]
-            };
-            let next: &[f32] = if i + 1 < frames_in as i64 {
-                &interleaved[(i + 1) as usize * channels..(i as usize + 2) * channels]
-            } else {
-                cur
-            };
-
-            for (a, b) in cur.iter().zip(next) {
-                out.push(a + (b - a) * f);
+        match input {
+            None if progress.state == ResampleState::Finished => break,
+            Some(input) if at == input.len() && progress.state != ResampleState::NeedOutput => {
+                break
             }
-            pos += self.ratio;
+            Some(_) if progress.consumed_frames == 0 && progress.produced_frames == 0 => {
+                return Err(AudioError::DecodeFailed(
+                    "PCM conversion made no progress".into(),
+                ));
+            }
+            _ => {}
         }
-        self.frac = pos - frames_in as f64;
-        self.prev = interleaved[(frames_in - 1) * channels..].to_vec();
-        out
     }
+    Ok(())
 }
 
-fn map_channels(interleaved: &[f32], from: usize, to: usize) -> Vec<f32> {
-    if from == to || from == 0 || to == 0 {
-        return interleaved.to_vec();
-    }
-    let frames = interleaved.len() / from;
-    let mut out = Vec::with_capacity(frames * to);
-    for frame in interleaved.chunks_exact(from) {
+fn map_channels(interleaved: &[f32], from: usize, to: usize, out: &mut [f32]) -> usize {
+    let samples = interleaved.len() / from * to;
+    for (frame, mapped) in interleaved
+        .chunks_exact(from)
+        .zip(out[..samples].chunks_exact_mut(to))
+    {
         if from == 1 {
-            out.extend(std::iter::repeat_n(frame[0], to));
+            mapped.fill(frame[0]);
         } else if to == 1 {
-            out.push(frame.iter().sum::<f32>() / from as f32);
+            mapped[0] = (frame.iter().map(|v| f64::from(*v)).sum::<f64>() / from as f64) as f32;
         } else {
-            out.extend((0..to).map(|c| frame[c % from]));
+            for (c, value) in mapped.iter_mut().enumerate() {
+                *value = frame[c % from];
+            }
         }
     }
-    out
+    samples
 }
 
 #[cfg(test)]
@@ -2498,6 +2544,44 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn media_open_classification_uses_actual_container_and_codec() {
+        fn wave(tag: u16, bits: u16) -> Vec<u8> {
+            let mut bytes = b"RIFF".to_vec();
+            bytes.extend_from_slice(&52u32.to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&44100u32.to_le_bytes());
+            bytes.extend_from_slice(&88200u32.to_le_bytes());
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&bits.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&[0; 16]);
+            bytes
+        }
+        let open = |bytes: Vec<u8>, suffix| {
+            open_media(
+                MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes)), Default::default()),
+                suffix,
+            )
+        };
+        // Extensions are probe hints, not a playback capability decision.
+        assert!(open(wave(1, 16), Some("opus")).is_ok());
+        let malformed = open(wave(1, 12), Some("wav")).err().unwrap();
+        let malformed = vmusic_core::CoreError::from(malformed);
+        assert_eq!(malformed.code(), "decode_failed");
+        assert_ne!(malformed.status(), 415);
+        let unsupported = open(wave(0xffff, 16), Some("wav")).err().unwrap();
+        let unsupported = vmusic_core::CoreError::from(unsupported);
+        assert_eq!(unsupported.code(), "unsupported_format");
+        assert_eq!(unsupported.status(), 415);
+        let truncated = open(wave(1, 16)[..24].to_vec(), Some("wav")).err().unwrap();
+        assert!(matches!(truncated, AudioError::DecodeFailed(_)));
+    }
+
     fn prepare_pcm(
         backend: &mut CpalBackend,
         samples: &[i16],
@@ -2926,9 +3010,10 @@ mod tests {
         // Four stereo source frames at 4 kHz become eight mono frames at 8 kHz.
         let samples = next.as_ref().unwrap().deck.samples.lock().unwrap();
         assert_eq!(samples.len(), 8);
-        assert!(samples
-            .iter()
-            .all(|sample| (*sample - 1000.0 / 32768.0).abs() < 1e-6));
+        // A finite four-frame source is zero-extended for sinc filtering; its
+        // boundary transient is not the old repeated-last-sample interpolation.
+        assert!(samples.iter().all(|sample| sample.is_finite()));
+        assert!(samples.iter().any(|sample| sample.abs() > 0.01));
 
         // The outgoing source's native rate also matters, even though its queue
         // has already been resampled to the device rate.
@@ -3312,9 +3397,13 @@ mod tests {
     #[test]
     fn channel_mapping_covers_the_common_cases() {
         let stereo = vec![1.0f32, 2.0, 3.0, 4.0];
-        assert_eq!(map_channels(&stereo, 2, 2), stereo);
-        assert_eq!(map_channels(&stereo, 2, 1), vec![1.5, 3.5]);
-        assert_eq!(map_channels(&[1.0, 2.0], 1, 2), vec![1.0, 1.0, 2.0, 2.0]);
+        let mut out = [0.0; 4];
+        assert_eq!(map_channels(&stereo, 2, 2, &mut out), 4);
+        assert_eq!(out, stereo.as_slice());
+        assert_eq!(map_channels(&stereo, 2, 1, &mut out), 2);
+        assert_eq!(&out[..2], &[1.5, 3.5]);
+        assert_eq!(map_channels(&[1.0, 2.0], 1, 2, &mut out), 4);
+        assert_eq!(out, [1.0, 1.0, 2.0, 2.0]);
     }
 
     /// Regression: the callback used to ignore `playing`, so pausing only
@@ -3430,30 +3519,79 @@ mod tests {
     }
 
     #[test]
-    fn resampler_passes_through_when_rates_match() {
-        let mut r = Resampler::new(48_000, 48_000);
-        let input = vec![0.1f32, 0.2, 0.3, 0.4];
-        assert_eq!(r.push(&input, 2), input);
+    fn resampler_process_finish_and_reset_do_not_allocate_or_free() {
+        for (src, dst) in [(44100, 48000), (96000, 44100), (48000, 48000)] {
+            let mut r = Converter::new(ResampleFormat {
+                input_rate: src,
+                output_rate: dst,
+                channels: 2,
+            })
+            .unwrap();
+            let input = vec![0.1; 3002];
+            let mut output = [0.0; 254];
+            let (_, memory) = measure_memory(|| {
+                for _ in 0..3 {
+                    let mut at = 0;
+                    loop {
+                        let p = r.process(&input[at..], &mut output).unwrap();
+                        at += p.consumed_frames * 2;
+                        if at == input.len() && p.state != ResampleState::NeedOutput {
+                            break;
+                        }
+                    }
+                    while r.finish(&mut output).unwrap().state != ResampleState::Finished {}
+                    r.reset();
+                }
+            });
+            assert_eq!(memory, CallbackMemory::ZERO, "resampler {src}->{dst}");
+        }
     }
 
     #[test]
-    fn resampler_changes_length_when_rates_differ() {
-        let (src, dst) = (44_100u32, 48_000u32);
-        let channels = 2;
-        let frames_in = 2_205usize;
-        let mut r = Resampler::new(src, dst);
-        // `push` takes interleaved samples, so the buffer holds frames * channels.
-        let input: Vec<f32> = (0..frames_in * channels)
-            .map(|i| (i % 97) as f32 / 97.0)
+    fn decoded_sinc_eof_seek_and_channel_mapping_share_the_device_clock() {
+        let rate = 44100;
+        let n = 5003;
+        let samples: Vec<i16> = (0..n)
+            .flat_map(|i| {
+                let v = ((i as f64 * std::f64::consts::TAU * 997.0 / rate as f64).sin() * 16000.0)
+                    as i16;
+                [v, -v]
+            })
             .collect();
-        let out = r.push(&input, channels);
-        let out_frames = out.len() / channels;
-        // Expect the rate ratio, not a hand-copied constant: 2205 frames at
-        // 44.1 kHz is 50 ms, which is 2400 frames at 48 kHz.
-        let expected = (frames_in as f64 * dst as f64 / src as f64).round() as i64;
+        let (opened, info) = open_pcm(&samples, rate, 2);
+        let mut backend = decoded_opened_fixture(opened, info, 48000, 1);
+        let output = decoded_samples(&backend);
+        assert_eq!(
+            output.len(),
+            (n as u64 * 48000).div_ceil(rate as u64) as usize
+        );
         assert!(
-            (out_frames as i64 - expected).abs() <= 2,
-            "unexpected frame count {out_frames}, expected about {expected}"
+            output.iter().all(|v| v.abs() < 1e-6),
+            "independent stereo filters must cancel when downmixed"
+        );
+        backend.seek(50).unwrap();
+        wait_for_eof(&backend);
+        let after = decoded_samples(&backend);
+        let skipped = 2205;
+        assert_eq!(
+            after.len(),
+            ((n - skipped) as u64 * 48000).div_ceil(rate as u64) as usize
+        );
+        assert!(after.iter().all(|v| v.abs() < 1e-6));
+        assert_eq!(
+            backend
+                .shared
+                .current_deck()
+                .frames_played
+                .load(Ordering::Relaxed),
+            2400
+        );
+        backend.seek(0).unwrap();
+        wait_for_eof(&backend);
+        assert_eq!(
+            decoded_samples(&backend),
+            output,
+            "seek must reset both sinc and trim/length history"
         );
     }
 

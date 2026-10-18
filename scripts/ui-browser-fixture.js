@@ -89,7 +89,7 @@ async function startFixture({ backend = 'null', prepareData } = {}) {
     }
     assert.equal((await api('/v1/health')).backend, backend, 'Fixture must use the requested backend');
     return {
-      base, api, close, dataDir: data,
+      base, api, close, dataDir: data, processId: child.pid,
       async connect(context) {
         await context.addCookies([{ name: 'vmusic_session', value: discovery.token,
           url: base, httpOnly: true, sameSite: 'Strict' }]);
@@ -119,4 +119,4 @@ async function startFixture({ backend = 'null', prepareData } = {}) {
   }
 }
 
-module.exports = { startFixture, TITLE, ARTIST };
+module.exports = { startFixture, writeTaggedWav, TITLE, ARTIST };

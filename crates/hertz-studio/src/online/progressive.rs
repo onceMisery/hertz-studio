@@ -66,6 +66,9 @@ pub(crate) struct Inner {
     /// **实际开始交付字节的那一档**的标称码率（bps）。阶梯降级后它与主地址
     /// 的码率不同，而档位标注必须跟着真正下载的那一档走。
     bitrate: Mutex<Option<u64>>,
+    /// Only published after successful final rename/index registration. Never a
+    /// .part path or a guessed quality-key lookup.
+    completed_path: Mutex<Option<PathBuf>>,
 }
 
 impl Inner {
@@ -78,6 +81,7 @@ impl Inner {
             error: Mutex::new(None),
             ext: Mutex::new("mp3"),
             bitrate: Mutex::new(None),
+            completed_path: Mutex::new(None),
         }
     }
 
@@ -350,6 +354,10 @@ pub struct DownloadView {
 }
 
 impl DownloadView {
+    pub(crate) fn completed_path(&self) -> Option<PathBuf> {
+        self.inner.completed_path.lock().unwrap().clone()
+    }
+
     pub fn part_path(&self) -> &Path {
         &self.part_path
     }
@@ -799,8 +807,8 @@ pub fn start(
                         relabel_key(&key2, duration_ms, written),
                         ext
                     ));
-                    match tokio::fs::rename(&part_path, &final_path).await {
-                        Ok(()) => {}
+                    let renamed = match tokio::fs::rename(&part_path, &final_path).await {
+                        Ok(()) => true,
                         Err(_) => {
                             let ok = matches!(tokio::fs::metadata(&final_path).await, Ok(m) if m.len() > 1024);
                             let _ = tokio::fs::remove_file(&part_path).await;
@@ -814,8 +822,9 @@ pub fn start(
                                 );
                                 return Err("落盘缓存失败".to_string());
                             }
+                            false
                         }
-                    }
+                    };
                     crate::diaglog!(
                         "download.done",
                         key = key2,
@@ -824,6 +833,9 @@ pub fn start(
                         file = final_path.file_name().unwrap_or_default().to_string_lossy()
                     );
                     index.note_written(&final_path).await;
+                    if renamed {
+                        *inner.completed_path.lock().unwrap() = Some(final_path.clone());
+                    }
                     inner.finish();
                     return Ok(final_path);
                 }
@@ -1347,7 +1359,17 @@ mod tests {
             index.clone(),
         )
         .unwrap();
+        let view = dl.view();
+        assert!(
+            view.completed_path().is_none(),
+            "partial bytes have no identity"
+        );
         let path = dl.join().await.unwrap();
+        assert_eq!(
+            view.completed_path().as_ref(),
+            Some(&path),
+            "use the actual relabelled final path"
+        );
         assert_eq!(
             path.file_name().unwrap().to_string_lossy(),
             "ccmixter-6-standard.mp3",

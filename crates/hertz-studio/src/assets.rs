@@ -27,6 +27,7 @@ ui_assets! {
     "/search-history.js", JS => const SEARCH_HISTORY_JS: &str = edition_ui!("search-history.js");
     "/app.js", JS => const APP_JS: &str = edition_ui!("app.js");
     "/now-playing.js", JS => const NOW_PLAYING_JS: &str = edition_ui!("now-playing.js");
+    "/lyric-import.js", JS => const LYRIC_IMPORT_JS: &str = edition_ui!("lyric-import.js");
     "/now-playing.css", CSS => const NOW_PLAYING_CSS: &str = edition_ui!("now-playing.css");
     "/skins/skin.classic.css", CSS => const CLASSIC_CSS: &str = edition_ui!("skins/skin.classic.css");
     "/stage.js", JS => const STAGE_JS: &str = edition_ui!("stage.js");
@@ -34,6 +35,12 @@ ui_assets! {
     "/home-dashboard.js", JS => const HOME_DASHBOARD_JS: &str = edition_ui!("home-dashboard.js");
     "/home-dashboard.css", CSS => const HOME_DASHBOARD_CSS: &str = edition_ui!("home-dashboard.css");
     "/home-quote.js", JS => const HOME_QUOTE_JS: &str = edition_ui!("home-quote.js");
+    "/creative-contract.js", JS => const CREATIVE_CONTRACT_JS: &str = edition_ui!("creative-contract.js");
+    "/creative-draft.js", JS => const CREATIVE_DRAFT_JS: &str = edition_ui!("creative-draft.js");
+    "/creative-project.js", JS => const CREATIVE_PROJECT_JS: &str = edition_ui!("creative-project.js");
+    "/creative-arrangement.js", JS => const CREATIVE_ARRANGEMENT_JS: &str = edition_ui!("creative-arrangement.js");
+    "/creative-pitch.js", JS => const CREATIVE_PITCH_JS: &str = edition_ui!("creative-pitch.js");
+    "/creative-templates.js", JS => const CREATIVE_TEMPLATES_JS: &str = edition_ui!("creative-templates.js");
     "/creative-share-code.js", JS => const CREATIVE_SHARE_CODE_JS: &str = edition_ui!("creative-share-code.js");
     "/onset.js", JS => const ONSET_JS: &str = edition_ui!("onset.js");
     "/stage-control.js", JS => const STAGE_CTL_JS: &str = edition_ui!("stage-control.js");
@@ -54,7 +61,13 @@ ui_assets! {
     "/backgrounds.js", JS => const BACKGROUNDS_JS: &str = edition_ui!("backgrounds.js");
     "/bgwall.js", JS => const BGWALL_JS: &str = edition_ui!("bgwall.js");
     "/lyric3d.js", JS => const LYRIC3D_JS: &str = edition_ui!("lyric3d.js");
+    "/lyric-glyph-sdf.js", JS => const LYRIC_GLYPH_SDF_JS: &str = edition_ui!("lyric-glyph-sdf.js");
+    "/lyric-glyph-atlas.js", JS => const LYRIC_GLYPH_ATLAS_JS: &str = edition_ui!("lyric-glyph-atlas.js");
+    "/lyric-glyph-gl.js", JS => const LYRIC_GLYPH_GL_JS: &str = edition_ui!("lyric-glyph-gl.js");
+    "/lyric-emotion-field.js", JS => const LYRIC_EMOTION_FIELD_JS: &str = edition_ui!("lyric-emotion-field.js");
+    "/lyric-emotion.js", JS => const LYRIC_EMOTION_JS: &str = edition_ui!("lyric-emotion.js");
     "/workshop.js", JS => const WORKSHOP_JS: &str = edition_ui!("workshop.js");
+    "/ai-ledger.js", JS => const AI_LEDGER_JS: &str = edition_ui!("ai-ledger.js");
     "/stage-cinema.js", JS => const STAGE_CINEMA_JS: &str = edition_ui!("stage-cinema.js");
     "/stage-freecam.js", JS => const STAGE_FREECAM_JS: &str = edition_ui!("stage-freecam.js");
     "/stage-focus.js", JS => const STAGE_FOCUS_JS: &str = edition_ui!("stage-focus.js");
@@ -84,6 +97,7 @@ ui_assets! {
     "/stanza/stanza-sonnet-fx.js", JS => const STANZA_SONNET_FX_JS: &str = edition_ui!("stanza/stanza-sonnet-fx.js");
     "/stanza/stanza-sonnet.js", JS => const STANZA_SONNET_JS: &str = edition_ui!("stanza/stanza-sonnet.js");
     "/stanza/stanza-tempera.js", JS => const STANZA_TEMPERA_JS: &str = edition_ui!("stanza/stanza-tempera.js");
+    "/stanza/stanza-glyph.js", JS => const STANZA_GLYPH_JS: &str = edition_ui!("stanza/stanza-glyph.js");
     "/stanza/stanza-songform.js", JS => const STANZA_SONGFORM_JS: &str = edition_ui!("stanza/stanza-songform.js");
     "/stanza/stanza-starborn.js", JS => const STANZA_STARBORN_JS: &str = edition_ui!("stanza/stanza-starborn.js");
     "/vendor/pixi.min.js", JS => const PIXI_JS: &str = edition_ui!("vendor/pixi.min.js");
@@ -92,6 +106,7 @@ ui_assets! {
     "/vendor/qrcode.js", JS => const QRCODE_JS: &str = edition_ui!("vendor/qrcode.js");
     #[cfg(feature = "full")]
     "/online-login.js", JS => const ONLINE_LOGIN_JS: &str = edition_ui!("online-login.js");
+    "/search-session.js", JS => const SEARCH_SESSION_JS: &str = edition_ui!("search-session.js");
     "/online.js", JS => const ONLINE_JS: &str = edition_ui!("online.js");
     "/podcasts.js", JS => const PODCASTS_JS: &str = edition_ui!("podcasts.js");
     "/online-playlists.js", JS => const ONLINE_PLAYLISTS_JS: &str = edition_ui!("online-playlists.js");

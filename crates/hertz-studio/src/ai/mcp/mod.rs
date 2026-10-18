@@ -17,3 +17,4 @@
 pub mod adapter;
 pub mod discovery;
 pub mod server;
+mod transport;

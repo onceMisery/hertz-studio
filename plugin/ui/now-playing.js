@@ -23,6 +23,7 @@
     else { positionLine(); el.queue.focus(); }
   }
   function showTools(show) {
+    if (!show && actions.closeLyricImport) actions.closeLyricImport();
     el.tools.hidden = !show; el.more.setAttribute('aria-expanded', String(show));
     if (show) el.toolsClose.focus();
     else { el.eqPane.hidden = true; restore(eqMoves); el.more.focus(); }

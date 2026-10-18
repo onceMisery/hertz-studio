@@ -832,7 +832,6 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
                 doc.translation = vmusic_lyrics::align_translation(&doc, &trans);
             }
         }
-        vmusic_lyrics::apply_offset(&mut doc);
         return Ok(doc);
     }
 

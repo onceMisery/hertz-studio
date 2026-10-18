@@ -34,7 +34,6 @@ use hertz_studio::error::{ErrorBody, ErrorDetail};
 use hertz_studio::rpc::{decode_base64, Call, Op, RawBody, Rpc, RpcResult};
 use hertz_studio::state::AppState;
 use serde_json::{json, Value};
-use tokio::sync::broadcast;
 
 /// 必须与 `plugin/manifest.json` 的 `id` 一致：宿主按它过滤事件，不一致的话
 /// UI 一个事件都收不到。
@@ -126,32 +125,15 @@ impl Plugin {
         let state = self.state.clone();
         let emitter = emitter.clone();
         self.runtime.spawn(async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        let Ok(params) = serde_json::to_value(&event) else {
-                            continue;
-                        };
-                        if let Err(error) = emitter.event(EVENT_METHOD, params) {
-                            tracing::warn!("事件转发失败，停止下发: {}", error.message);
-                            break;
-                        }
+            'forward: while let Some(events) = state.next_event_batch(&mut receiver).await {
+                for event in events.into_iter().flatten() {
+                    let Ok(params) = serde_json::to_value(event) else {
+                        continue;
+                    };
+                    if let Err(error) = emitter.event(EVENT_METHOD, params) {
+                        tracing::warn!("事件转发失败，停止下发: {}", error.message);
+                        break 'forward;
                     }
-                    // 宿主侧 broadcast 队列只有 256 深，UI 卡住时会走到这里。
-                    // 丢掉积压帧继续跑正是频谱这类流式数据想要的语义。
-                    // 例外是 buffering：边沿事件不随状态帧重发，掉了 active=false
-                    // 播放键就永久转圈，所以按服务端真值补一帧。
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::debug!("事件积压，丢弃 {skipped} 帧");
-                        let Ok(params) = serde_json::to_value(state.buffering_event().await) else {
-                            continue;
-                        };
-                        if let Err(error) = emitter.event(EVENT_METHOD, params) {
-                            tracing::warn!("事件转发失败，停止下发: {}", error.message);
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });

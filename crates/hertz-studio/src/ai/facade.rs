@@ -275,19 +275,20 @@ pub(crate) async fn authenticate(
 
 /// 受限门面的身份与能力投影（§5.4）：主体、scope、策略水位、实例身份与
 /// 能力表。调用方拿它与本地快照比对，revision 变了就重新对接。
-pub(crate) fn context_json(ctx: &GrantContext) -> Value {
+pub(crate) fn context_json(ctx: &GrantContext, stage_tools_enabled: bool) -> Value {
     json!({
         "protocolVersion": CAPABILITY_VERSION,
         "principal": { "kind": "grant", "grantId": ctx.grant_id },
         "scopes": ctx.scopes.iter().collect::<Vec<_>>(),
         "policyRevision": ctx.policy_revision,
+        "stageIntentToolsEnabled": stage_tools_enabled,
         "instance": {
             "ownerInstanceId": ctx.owner_instance_id,
             "serverInstanceId": ctx.server_instance_id,
             "edition": crate::edition::NAME,
             "transport": "http",
         },
-        "capabilities": CAPABILITIES.iter().map(|c| json!({
+        "capabilities": CAPABILITIES.iter().filter(|c| !c.operation.starts_with("stage.") || stage_tools_enabled).map(|c| json!({
             "operation": c.operation,
             "scope": c.scope,
             "effect": c.effect.as_str(),
@@ -301,6 +302,69 @@ mod tests {
     use super::*;
     use crate::ai::capability::{execute, CapabilityCall};
     use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn stage_tools_require_scopes_and_switch_and_do_not_create_jobs() {
+        let (state, handle) = ai_state().await;
+        let no_scope = ctx_of("reader", &["playback:read"]);
+        let ctx = ctx_of(
+            "stage-reader",
+            &["stage:capabilities_read", "stage:intent_validate"],
+        );
+        let request = || CapabilityCall {
+            operation: "stage_capabilities_get".into(),
+            client_operation_id: None,
+            input: json!({"limit": 2}),
+        };
+        assert_eq!(
+            execute(&state, &no_scope, request())
+                .await
+                .unwrap_err()
+                .code,
+            "scope_required"
+        );
+        assert_eq!(
+            execute(&state, &ctx, request()).await.unwrap_err().code,
+            "stage_tools_disabled"
+        );
+        vmusic_store::settings::set(
+            &state.db,
+            crate::ai::capability::STAGE_TOOLS_KEY,
+            &json!(true),
+        )
+        .await
+        .unwrap();
+        let page = execute(&state, &ctx, request()).await.unwrap();
+        assert_eq!(page["scenes"].as_array().unwrap().len(), 2);
+        assert_eq!(page["nextOffset"], 2);
+        let a = crate::ai::contract::artifact(
+            &json!({"version": 1, "scene": "orb", "patch": {"sc.radius": 9999}}),
+        );
+        let validate = |input| CapabilityCall {
+            operation: "stage_intent_validate".into(),
+            client_operation_id: None,
+            input,
+        };
+        let out = execute(&state, &ctx, validate(a.clone())).await.unwrap();
+        assert_eq!(out["validationStage"], "intent");
+        assert_eq!(out["applied"], false);
+        let mut stale = a;
+        stale["basePresetHash"] = json!("old");
+        assert_eq!(
+            execute(&state, &ctx, validate(stale))
+                .await
+                .unwrap_err()
+                .code,
+            "stage_artifact_invalid"
+        );
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ai_jobs")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
 
     /// 门面测试用真实文件库 + 真实 DataDir：grants 表要 schema，
     /// 凭据文件要落在能被清理的目录里。
@@ -568,7 +632,7 @@ mod tests {
         let (state, handle) = ai_state().await;
         let (_id, secret) = make_grant(&state, "ui", &["playback:read"]).await;
         let ctx = authenticate(&state, &secret).await.unwrap();
-        let value = context_json(&ctx);
+        let value = context_json(&ctx, false);
         assert_eq!(value["protocolVersion"], "1");
         assert_eq!(value["principal"]["kind"], "grant");
         assert_eq!(

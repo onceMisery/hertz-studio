@@ -516,6 +516,548 @@
     renderResult();
   }
 
+  // -------------------------------------------------------------------------
+  // AI 生成（R4-E 任务面板）：服务端持久任务 + 提案。离线「一句成景」覆盖
+  // 不到的云端生成走这里：submit → 任务列表（WS 事件 + 轮询双通道）→
+  // succeeded 后读提案 → 应用到舞台或拒绝。离开面板任务继续跑，回来看结果。
+  // 面板消费 /v1/ai/*，候选经同一草稿校验与临时预览入口，确认后由原 owner 提交。
+  // -------------------------------------------------------------------------
+
+  // Local draft state never creates a server job or writes the preset until confirmation.
+  var draftState = { text: '', prepared: null, token: null, source: null, error: '', busy: false, serial: 0 };
+  function isTemplateSource(source) { return typeof source === 'string' && source.indexOf('template:') === 0; }
+  function isAiDraftSource(source) { return !!source && source !== 'import' && !isTemplateSource(source); }
+  function prepareDraftSource(input, source) {
+    return isTemplateSource(source) ? CreativeTemplates.prepare(source.slice(9)) : CreativeDraft.prepare(input);
+  }
+  function discardDraft() {
+    draftState.serial += 1; draftState.prepared = null; draftState.token = null;
+    draftState.busy = false; draftState.error = '';
+    var CS = stage_api(); if (CS && CS.cancelPreview) CS.cancelPreview();
+  }
+  async function previewDraft(input, source) {
+    discardDraft(); draftState.source = source; draftState.busy = true;
+    var serial = draftState.serial, page = target + ':' + tab, CS = stage_api(), revision = CS.revision();
+    render();
+    try {
+      var prepared = await prepareDraftSource(input,source);
+      if (serial !== draftState.serial || !isOpen() || document.hidden || page !== target + ':' + tab) return;
+      if (revision !== CS.revision()) throw new Error('舞台已修改，请重新预览');
+      var current = CS.preset();
+      prepared.diff = [{ path: 'name', before: current.name, after: prepared.preset.name },
+        { path: 'scene', before: current.scene, after: prepared.preset.scene },
+        { path: 'director', before: current.director, after: prepared.preset.director },
+        { path: 'hand.on', before: current.hand.on, after: prepared.preset.hand.on }];
+      prepared.diagnostics.forEach(function (d) {
+        var parts = d.path.split('.');
+        prepared.diff.push({ path: d.path, before: current[parts[0]][parts[1]], after: d.normalized });
+      });
+      draftState.prepared = prepared;
+      draftState.token = CS.beginPreview(prepared.preset, prepared.proposalHash);
+    } catch (e) { if (serial === draftState.serial) draftState.error = String(e.message || e); }
+    finally { if (serial === draftState.serial) { draftState.busy = false; render(); } }
+  }
+  function renderDraftControls(body, source) {
+    if (draftState.source !== source) return;
+    if (draftState.error) body.appendChild(h('div', 'sc-note ws-warn', draftState.error));
+    var prepared = draftState.prepared, token = draftState.token, CS = stage_api();
+    if (!prepared || !token || !CS.preview() || CS.preview().previewId !== token.previewId) return;
+    if (prepared.template) {
+      body.appendChild(h('p','sc-note',prepared.template.source + ' · ' + prepared.template.title + ' v'
+        + prepared.template.version + ' · 舞台契约 v' + prepared.template.schemaVersion + ' · 待视觉验收'));
+      body.appendChild(h('p','sc-note','从模板的默认基线创建。应用会替换整份预置，包括旧 cue、绑定和工程上下文；原曲目不会自动播放或切换。'));
+    }
+    body.appendChild(h('div', 'sc-note', '正在临时预览。确认应用后才会保存；切页、关闭或取消会恢复已提交的舞台。'));
+    (prepared.diff || []).filter(function (d) { return d.before !== d.after; }).forEach(function (d) {
+      body.appendChild(h('div', 'ws-kv', d.path + '：当前 ' + d.before + ' → 候选 ' + d.after));
+    });
+    prepared.diagnostics.forEach(function (d) {
+      body.appendChild(h('div', d.clamped ? 'ws-kv ws-warn' : 'ws-kv',
+        d.path + '：' + d.requested + ' → ' + d.normalized + (d.clamped ? '（已调整到支持范围）' : '')));
+    });
+    var detail = h('details'), title = h('summary', null, '查看完整候选与分享码');
+    var code = h('textarea', 'ws-json'); code.readOnly = true; code.value = prepared.shareCode;
+    code.setAttribute('aria-label', '草稿分享码');
+    var json = h('pre', 'sc-note', JSON.stringify(prepared.preset, null, 2));
+    detail.append(title, code, json); body.appendChild(detail);
+    var row = h('div', 'ws-prompt-actions');
+    var apply = h('button', 'btn primary', '应用到当前舞台'); apply.type = 'button';
+    apply.addEventListener('click', async function () {
+      if (draftState.busy) return;
+      var serial = draftState.serial;
+      draftState.busy = true; apply.disabled = true;
+      try {
+        var checked = await prepareDraftSource(prepared.artifact,source);
+        if (isAiDraftSource(source)) {
+          var latest = await VMusicTransport.get('/v1/ai/proposals/' + source);
+          if (latest.state !== 'pending' || latest.expiresAt <= Date.now()
+            || CreativeDraft.canonical(latest.artifact) !== CreativeDraft.canonical(prepared.artifact)) {
+            throw new Error('提案已失效，请重新读取');
+          }
+        }
+        if (serial !== draftState.serial) return;
+        if (!isOpen() || document.hidden || checked.proposalHash !== token.proposalHash) throw new Error('预览已失效');
+        var previous = CS.preset();
+        var result = CS.applyPreview(token.previewId, checked.proposalHash);
+        if (!result.ok) throw new Error(result.message);
+        if (isAiDraftSource(source)) aiState.undo = previous;
+        discardDraft(); flash('已应用到本页面；收藏请使用原收藏入口');
+      } catch (e) {
+        if (serial === draftState.serial) { draftState.error = String(e.message || e); }
+      } finally {
+        if (serial === draftState.serial) draftState.busy = false;
+        render();
+      }
+    });
+    var cancel = h('button', 'btn', '取消预览'); cancel.type = 'button';
+    cancel.addEventListener('click', function () { discardDraft(); render(); });
+    row.append(apply, cancel); body.appendChild(row);
+  }
+  function renderDraftImport(body) {
+    body.appendChild(h('h2', 'sc-group-title', '导入舞台意图草稿'));
+    body.appendChild(h('div', 'sc-note', '粘贴带版本信息的草稿 JSON（最多 16 KiB）。本地校验并临时预览，无需开启生成或外部连接。'));
+    var ta = h('textarea', 'ws-json'); ta.id = 'ws-draft-json'; ta.spellcheck = false;
+    ta.value = draftState.text; ta.setAttribute('aria-label', '舞台意图草稿 JSON');
+    ta.addEventListener('input', function () {
+      var active = draftState.token || draftState.busy || draftState.error;
+      draftState.text = ta.value; discardDraft(); if (active) render();
+    });
+    var preview = h('button', 'btn primary', draftState.busy ? '正在校验…' : '校验并预览草稿');
+    preview.type = 'button'; preview.id = 'ws-draft-preview'; preview.disabled = draftState.busy;
+    preview.addEventListener('click', function () { previewDraft(draftState.text, 'import'); });
+    body.append(ta, preview); renderDraftControls(body, 'import');
+  }
+
+  var aiState = {
+    jobs: [], consent: false, guard: null, budget: null, provider: null, expanded: null,
+    proposal: null, brief: '', loading: false, error: '',
+    snapshot: '', undo: null, pendingSubmit: null,
+  };
+  var aiTimer = 0, aiRefresh = null, aiRefreshAgain = false;
+  var aiErrorRetryDelay = 2500, aiErrorRetryAt = 0;
+
+  function aiVisible() {
+    return isOpen() && target === 'advanced' && tab === 'ai' && !document.hidden;
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { discardDraft(); if (isOpen()) render(); }
+    if (aiVisible()) refreshAi();
+  });
+
+  function aiStateLabel(state) {
+    return {
+      accepted: '排队中', running: '生成中', succeeded: '已完成',
+      failed: '失败', cancelled: '已取消', expired: '已超时', interrupted: '已中断',
+    }[state] || state;
+  }
+
+  function aiShortId(id) {
+    return String(id || '').slice(0, 8);
+  }
+
+  function aiTime(ms) {
+    var d = new Date(Number(ms) || 0);
+    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+  }
+
+  function refreshAi() {
+    var T = window.VMusicTransport;
+    if (!T) return Promise.resolve();
+    if (aiRefresh) { aiRefreshAgain = true; return aiRefresh; }
+    aiRefresh = T.get('/v1/ai/status')
+      .then(function (status) {
+        aiState.consent = !!(status.consent && status.consent.inAppGeneration);
+        aiState.guard = status.guard || null;
+        aiState.budget = status.budget || null;
+        aiState.provider = status.provider || null;
+        return T.get('/v1/ai/jobs?limit=20');
+      })
+      .then(function (data) {
+        aiState.jobs = (data && data.jobs) || [];
+        if (aiState.expanded) {
+          var id = aiState.expanded;
+          return T.get('/v1/ai/proposals/' + id).then(function (proposal) {
+            if (aiState.expanded === id) aiState.proposal = proposal;
+          });
+        }
+      })
+      .then(function () {
+        aiState.error = '';
+        aiErrorRetryDelay = 2500;
+        aiErrorRetryAt = 0;
+        renderIfChanged();
+      })
+      .catch(function (e) {
+        aiState.error = String((e && e.message) || e);
+        aiErrorRetryAt = Date.now() + aiErrorRetryDelay;
+        aiErrorRetryDelay = Math.min(15000, aiErrorRetryDelay * 2);
+        renderIfChanged();
+      })
+      .then(function () {
+        aiRefresh = null;
+        var again = aiRefreshAgain;
+        aiRefreshAgain = false;
+        if (again && aiVisible()) return refreshAi();
+      });
+    return aiRefresh;
+  }
+
+  /// 快照比较：轮询拿到同样的事实就不重画——2.5 秒撕一次 DOM 会把用户
+  /// 正在点的按钮从手底下抽走。展开态与错误信息都参与比较。
+  function renderIfChanged() {
+    var fingerprint = JSON.stringify([
+      aiState.jobs.map(function (job) {
+        return [job.jobId, job.state, job.stateRevision, job.resultProposalId, job.usage];
+      }),
+      aiState.consent, aiState.guard, aiState.budget, aiState.provider, aiState.error,
+      aiState.expanded, aiState.proposal, aiState.undo,
+    ]);
+    if (fingerprint === aiState.snapshot) return;
+    aiState.snapshot = fingerprint;
+    if (aiVisible()) render();
+  }
+
+  function clearAiCredential() {
+    var input = document.getElementById('ws-ai-key');
+    if (input) input.value = '';
+  }
+
+  function renderAiCredential(body, T) {
+    var details = h('details', 'ws-ai-credential');
+    details.appendChild(h('summary', 'sc-label', 'OpenAI 密钥设置（接入准备）'));
+    details.appendChild(h('p', 'sc-note',
+      '密钥保存在系统钥匙串，仅绑定本安装与 https://api.openai.com。模型与费用上限尚未确定，保存密钥不会开启云端生成。'));
+    var status = h('p', 'sc-note', '展开后只显示是否已配置，服务端不回传密钥。');
+    status.setAttribute('aria-live', 'polite');
+    var label = h('label', 'sc-label', 'OpenAI API key');
+    label.setAttribute('for', 'ws-ai-key');
+    var input = h('input', 'ws-prompt-text');
+    input.id = 'ws-ai-key'; input.type = 'password'; input.autocomplete = 'off';
+    input.maxLength = 4096; input.spellcheck = false;
+    input.setAttribute('autocapitalize', 'none');
+    var actions = h('div', 'ws-prompt-actions');
+    var save = h('button', 'btn', '保存 OpenAI 密钥');
+    var remove = h('button', 'btn', '删除 OpenAI 密钥');
+    var query = h('button', 'btn', '查询密钥状态');
+    [save, remove, query].forEach(function (button) { button.type = 'button'; actions.appendChild(button); });
+    var busy = false, revision = 0;
+    function valid(serial) { return serial === revision && details.isConnected && details.open && aiVisible(); }
+    function buttons() { save.disabled = busy || !input.value; remove.disabled = query.disabled = input.disabled = busy; }
+    function run(method) {
+      if (busy) return;
+      var serial = ++revision;
+      busy = true; buttons(); status.textContent = '正在操作系统钥匙串…';
+      var task;
+      if (method === 'PUT') {
+        task = T.put('/v1/ai/provider-credential', { api_key: input.value });
+        input.value = ''; // No secret in module state, retry state or browser storage.
+      } else if (method === 'DELETE') {
+        input.value = '';
+        task = T.del('/v1/ai/provider-credential');
+      } else task = T.get('/v1/ai/provider-credential', { retry: false });
+      Promise.resolve(task).then(function (reply) {
+        if (valid(serial)) status.textContent = reply.configured ? '已配置 OpenAI 密钥；云端生成尚未启用。' : '尚未配置 OpenAI 密钥。';
+      }).catch(function (error) {
+        if (!valid(serial)) return;
+        var messages = {
+          ai_locked: '请在持有 AI 服务锁的 Hertz 实例中管理模型密钥；当前实例无法执行。',
+          ai_credential_invalid: '密钥格式不合法，请重新输入；不允许空白或控制字符。',
+          ai_credential_busy: '钥匙串操作仍在执行，请稍后手动查询状态。',
+          ai_credential_timeout: '钥匙串操作尚未结束，结果待确认；请稍后手动查询状态。',
+          ai_credential_unavailable: '系统钥匙串不可用，请检查系统凭据服务。',
+        };
+        status.textContent = (messages[error.code] || '操作未确认，请手动查询状态后再决定是否重新提交。')
+          + (error.requestId ? '（request_id ' + error.requestId + '）' : '');
+      }).then(function () { busy = false; if (details.isConnected) buttons(); });
+    }
+    input.addEventListener('input', buttons);
+    save.addEventListener('click', function () { run('PUT'); });
+    remove.addEventListener('click', function () { run('DELETE'); });
+    query.addEventListener('click', function () { run('GET'); });
+    details.addEventListener('toggle', function () {
+      if (details.open) run('GET');
+      else { input.value = ''; revision += 1; }
+    });
+    buttons(); details.append(status, label, input, actions); body.appendChild(details);
+  }
+
+  function renderAi(body) {
+    var T = window.VMusicTransport;
+    if (!T) {
+      body.appendChild(h('div', 'sc-note ws-warn', 'transport 未就绪，本页暂不可用。'));
+      return;
+    }
+    if (!aiTimer && aiVisible()) {
+      // 事件是提示，轮询是事实来源（§7.4）：事件允许丢失/乱序，列表以
+      // 查询快照为准；面板开着时低频轮询兜底。
+      aiTimer = setInterval(function () {
+        if (!aiVisible()) return;
+        if (aiState.error) {
+          if (Date.now() >= aiErrorRetryAt) refreshAi();
+          return;
+        }
+        if (aiState.expanded || aiState.jobs.some(function (j) {
+          return j.state === 'accepted' || j.state === 'running' || (j.usage && j.usage.usageState === 'unknown');
+        })) refreshAi();
+      }, 2500);
+      refreshAi();
+    }
+
+    body.appendChild(h('div', 'sc-note',
+      '把描述交给服务端生成（实验）：任务在后台跑，离开面板不影响，回来在这里看结果。'
+      + '功能默认关闭，开关在下方；先查看候选参数，点「应用」才上舞台，且可整体撤销。'));
+
+    if (aiState.error) {
+      body.appendChild(h('div', 'sc-note ws-warn', aiState.error));
+    }
+
+    var consentRow = h('div', 'ws-kv');
+    consentRow.appendChild(h('span', null, '生成开关'));
+    consentRow.appendChild(h('span', 'sc-value', aiState.consent ? '已开启' : '已关闭'));
+    body.appendChild(consentRow);
+    var toggle = h('button', 'btn', aiState.consent ? '关闭生成' : '开启生成');
+    toggle.type = 'button';
+    toggle.disabled = aiState.loading;
+    toggle.addEventListener('click', function () {
+      setLoading(true);
+      T.put('/v1/settings', { ai_generation_consent: !aiState.consent })
+        .then(function () { return refreshAi(); })
+        .catch(function (e) { flash('保存失败：' + String((e && e.message) || e)); })
+        .then(function () { setLoading(false); });
+    });
+    body.appendChild(toggle);
+
+    function usd(micro) {
+      return Number.isSafeInteger(micro) && micro >= 0
+        ? '$' + (micro / 1000000).toFixed(6) + ' USD' : '金额暂不可显示';
+    }
+    if (aiState.provider && aiState.provider.id === 'fake') {
+      body.appendChild(h('div', 'sc-note', '当前为本地模拟生成，不调用真实模型，费用为零。'));
+    } else if (aiState.provider && aiState.provider.id === 'ollama-local') {
+      body.appendChild(h('div', 'sc-note', '当前使用本地 Ollama 模型：' + aiState.provider.model
+        + '。仅发送生成描述与舞台参数契约，不读取歌曲、歌词或音频；Hertz 不计云端费用。'));
+    } else if (aiState.provider && !aiState.provider.ready) {
+      body.appendChild(h('div', 'sc-note ws-warn', '生成服务配置不可用：'
+        + (aiState.provider.diagnostic || '请检查服务配置')));
+    }
+    renderAiCredential(body, T);
+    if (aiState.budget) {
+      var budget = aiState.budget;
+      var charged = budget.chargedTotalOverflowed ? '超出可表示范围' : usd(budget.chargedMicroUsd);
+      var budgetLine = h('div', 'sc-note ws-ai-budget',
+        '预算周期：' + budget.month + '（UTC 自然月） · 已计 ' + charged
+        + ' · 在途预留 ' + usd(budget.reservedMicroUsd) + ' · 月限额 ' + usd(budget.limitMicroUsd));
+      body.appendChild(budgetLine);
+    }
+    var refreshBtn = h('button', 'btn', '刷新任务与费用');
+    refreshBtn.type = 'button';
+    refreshBtn.addEventListener('click', function () { refreshAi(); });
+    body.appendChild(refreshBtn);
+
+    if (aiState.guard && aiState.guard.halted) {
+      body.appendChild(h('div', 'sc-note ws-warn',
+        '生成已熔断（' + (aiState.guard.reason || '预算越界') + '），复位后才能继续。'));
+      var resetBtn = h('button', 'btn', '复位熔断');
+      resetBtn.type = 'button';
+      resetBtn.addEventListener('click', function () {
+        T.post('/v1/ai/budget-guard/reset', { expected_revision: aiState.guard.revision })
+          .then(function () { return refreshAi(); })
+          .catch(function (e) { flash('复位失败：' + String((e && e.message) || e)); });
+      });
+      body.appendChild(resetBtn);
+    }
+
+    var label = h('label', 'sc-label');
+    label.setAttribute('for', 'ws-ai-brief');
+    label.appendChild(h('span', null, '生成描述'));
+    body.appendChild(label);
+    var ta = h('textarea', 'ws-prompt-text');
+    ta.id = 'ws-ai-brief';
+    ta.maxLength = 2000;
+    ta.spellcheck = false;
+    ta.value = aiState.brief;
+    ta.placeholder = '例：星云缓慢推进，霓虹颗粒，跟随音乐律动';
+    ta.addEventListener('input', function () {
+      aiState.brief = String(ta.value).slice(0, 2000);
+      syncAiButtons();
+    });
+    body.appendChild(ta);
+
+    var actions = h('div', 'ws-prompt-actions');
+    var submitBtn = h('button', 'btn primary', '提交生成任务');
+    submitBtn.type = 'button';
+    // consent 关闭时输入框与提交一起禁用：面板状态本身就是开关的可见面。
+    function syncAiButtons() {
+      ta.disabled = !aiState.consent;
+      submitBtn.disabled = !aiState.consent || aiState.loading || !aiState.brief.trim()
+        || !!(aiState.provider && !aiState.provider.ready);
+    }
+    submitBtn.disabled = !aiState.consent || aiState.loading || !aiState.brief.trim();
+    submitBtn.addEventListener('click', function () {
+      var brief = aiState.brief.trim();
+      if (!aiState.pendingSubmit || aiState.pendingSubmit.brief !== brief) {
+        var hex = '';
+        Array.prototype.forEach.call(crypto.getRandomValues(new Uint8Array(16)), function (b) {
+          hex += ('0' + b.toString(16)).slice(-2);
+        });
+        aiState.pendingSubmit = { brief: brief, key: 'v1.' + Date.now() + '.' + hex };
+      }
+      var pending = aiState.pendingSubmit;
+      setLoading(true);
+      T.post('/v1/ai/jobs', { brief: pending.brief, idempotency_key: pending.key })
+        .then(function () {
+          aiState.pendingSubmit = null;
+          if (aiState.brief.trim() === pending.brief) aiState.brief = '';
+          ta.value = aiState.brief;
+          return refreshAi();
+        })
+        .catch(function (e) { flash('提交失败：' + String((e && e.message) || e)); })
+        .then(function () { setLoading(false); });
+    });
+    actions.appendChild(submitBtn);
+    body.appendChild(actions);
+
+    var list = h('div', 'ws-ai-jobs');
+    list.setAttribute('aria-live', 'polite');
+    body.appendChild(list);
+    if (!aiState.jobs.length) {
+      list.appendChild(h('div', 'sc-note', '还没有任务。'));
+    }
+    aiState.jobs.forEach(function (job) {
+      var row = h('div', 'ws-ai-job');
+      row.appendChild(h('span', 'ws-ai-state', aiStateLabel(job.state)));
+      row.appendChild(h('span', 'sc-value',
+        aiShortId(job.jobId) + ' · ' + aiTime(job.createdAt) + ' · ' + job.provider + '/' + job.model));
+      list.appendChild(row);
+      if (job.usage) {
+        var usage = job.usage;
+        var usageText = {
+          reserved: '在途预留 ' + usd(usage.reservationMicroUsd),
+          reported: '已报告费用 ' + usd(usage.accountedMicroUsd),
+          released: '未派发，预留已释放',
+          unknown: '费用未确认，暂按 ' + usd(usage.accountedMicroUsd) + ' 计入预算，后续可能校正',
+          estimated_final: '估算费用 ' + usd(usage.accountedMicroUsd) + '，已停止自动等待；取得可信记录后仍可校正',
+        }[usage.usageState] || '费用状态待查询';
+        list.appendChild(h('div', 'sc-note ws-ai-usage', usageText + ' · 归属 ' + usage.acceptedMonth + '（UTC）'));
+      }
+
+      var ops = h('div', 'ws-ai-ops');
+      if (job.state === 'accepted' || job.state === 'running') {
+        var cancelBtn = h('button', 'btn', '取消');
+        cancelBtn.type = 'button';
+        cancelBtn.addEventListener('click', function () {
+          T.post('/v1/ai/jobs/' + job.jobId + '/cancel',
+            { expected_state_revision: job.stateRevision })
+            .then(function () { return refreshAi(); })
+            .catch(function (e) { flash('取消失败：' + String((e && e.message) || e)); });
+        });
+        ops.appendChild(cancelBtn);
+      }
+      if (job.state === 'succeeded' && job.resultProposalId) {
+        var viewBtn = h('button', 'btn primary',
+          aiState.expanded === job.resultProposalId ? '收起提案' : '查看提案');
+        viewBtn.type = 'button';
+        viewBtn.addEventListener('click', function () {
+          if (aiState.expanded === job.resultProposalId) {
+            discardDraft();
+            aiState.expanded = null;
+            aiState.proposal = null;
+            render();
+            return;
+          }
+          discardDraft();
+          aiState.expanded = job.resultProposalId;
+          aiState.proposal = null;
+          renderIfChanged();
+          T.get('/v1/ai/proposals/' + job.resultProposalId)
+            .then(function (proposal) {
+              if (aiState.expanded !== job.resultProposalId) return;
+              aiState.proposal = proposal;
+              renderIfChanged();
+            })
+            .catch(function (e) { flash('读取提案失败：' + String((e && e.message) || e)); });
+        });
+        ops.appendChild(viewBtn);
+      }
+      if (ops.children.length) list.appendChild(ops);
+
+      if (aiState.expanded && aiState.expanded === job.resultProposalId) {
+        var box = h('div', 'ws-ai-proposal');
+        box.setAttribute('aria-live', 'polite');
+        var proposal = aiState.proposal && aiState.proposal.proposalId === job.resultProposalId
+          ? aiState.proposal : null;
+        if (!proposal) {
+          box.appendChild(h('div', 'sc-note', '读取提案中…'));
+        } else if (proposal.state !== 'pending') {
+          box.appendChild(h('div', 'sc-note', '提案状态：' + proposal.state));
+        } else {
+          var intent = proposal.validatedIntent || {};
+          box.appendChild(h('div', 'ws-prompt-head', '提案 · 场景：' + (intent.scene || '—')));
+          var patch = intent.patch || {};
+          Object.keys(patch).forEach(function (key) {
+            var line = h('div', 'ws-kv');
+            line.appendChild(h('span', null, key));
+            line.appendChild(h('span', 'sc-value', String(patch[key])));
+            box.appendChild(line);
+          });
+          var proposalOps = h('div', 'ws-prompt-actions');
+          var applyBtn = h('button', 'btn primary', '预览候选舞台');
+          applyBtn.type = 'button'; applyBtn.disabled = draftState.busy;
+          applyBtn.addEventListener('click', function () {
+            if (proposal.expiresAt <= Date.now()) { refreshAi(); flash('提案已过期'); return; }
+            if (!proposal.artifact) { flash('旧提案缺少版本信息，请重新生成'); return; }
+            previewDraft(proposal.artifact, proposal.proposalId);
+          });
+          var rejectBtn = h('button', 'btn', '拒绝');
+          rejectBtn.type = 'button';
+          rejectBtn.addEventListener('click', function () {
+            if (draftState.source === proposal.proposalId) discardDraft();
+            T.post('/v1/ai/proposals/' + proposal.proposalId + '/reject',
+              { expected_revision: proposal.revision })
+              .then(function (updated) {
+                if (aiState.expanded === updated.proposalId) aiState.proposal = updated;
+                renderIfChanged();
+                return refreshAi();
+              })
+              .catch(function (e) { flash('拒绝失败：' + String((e && e.message) || e)); });
+          });
+          proposalOps.append(applyBtn, rejectBtn);
+          box.appendChild(proposalOps);
+          renderDraftControls(box, proposal.proposalId);
+          box.appendChild(h('div', 'sc-note',
+            '候选从默认基线物化后整体应用，可整体撤销；提案 24 小时后过期。'));
+        }
+        list.appendChild(box);
+      }
+    });
+
+    function setLoading(on) {
+      var changed = aiState.loading !== on;
+      aiState.loading = on;
+      toggle.disabled = on;
+      syncAiButtons();
+      if (changed && aiVisible()) render();
+    }
+    if (aiState.undo) {
+      var undo = h('button', 'btn', '撤销本次应用');
+      undo.type = 'button';
+      undo.addEventListener('click', function () {
+        var previous = aiState.undo;
+        aiState.undo = null;
+        try { stage_api().setPreset(previous); render(); flash('已撤销本次应用'); }
+        catch (e) { aiState.undo = previous; flash('撤销失败：' + String(e && e.message || e)); }
+      });
+      body.appendChild(undo);
+    }
+    setLoading(aiState.loading);
+  }
+
+  /// 任务事件（WS ai_task）到达：面板开着就立刻刷新，其余场合等下次轮询。
+  function onAiTask() {
+    if (aiVisible()) refreshAi();
+  }
+
   function renderScene(body) {
     var CS = stage_api();
     var cur = CS.preset();
@@ -547,6 +1089,11 @@
     });
     nameRow.appendChild(saveBtn);
     body.appendChild(nameRow);
+
+    body.appendChild(h('p','sc-note','当前编排已提交并自动保存在本机，预置格式 v' + cur.version
+      + (cur.project ? '，工程 / 时间线 v' + cur.project.version + ' / v' + cur.project.timelineVersion : '')
+      + '。存进工坊会另建收藏；模板与草稿须先预览、确认应用，才会替换当前编排。'));
+    renderCreativeTemplates(body);
 
     body.appendChild(h('h2', 'sc-group-title', '三维场景'));
     // 场景、参数和编排使用同一份创意预置，直接交给大舞台的渲染器。
@@ -588,6 +1135,30 @@
       '打开舞台交互后：拖拽转视角、滚轮推拉、单击爆闪、双击复位。'
       + '默认关闭是为了不抢歌词行的点击。'));
 
+  }
+
+  function renderCreativeTemplates(body) {
+    if (!window.CreativeTemplates) return;
+    var catalog = h('section','ws-template-catalog');
+    catalog.appendChild(h('h2','sc-group-title','创作模板候选'));
+    catalog.appendChild(h('p','sc-note','内置配方，先在舞台临时预览，确认后才应用。卡片插图仅示意场景；模板尚待人工视觉验收，不保证跨设备画面一致。'));
+    var grid = h('div','ws-creative-templates');
+    CreativeTemplates.list().forEach(function (t) {
+      var card = h('article','ws-creative-template'); card.dataset.templateCard = t.id;
+      var art = h('div','ws-creative-template-art'); art.innerHTML = sceneArt(t.scene); art.setAttribute('aria-hidden','true');
+      card.append(art,h('h3',null,t.title),h('p','sc-note',t.mood + ' · ' + t.motion),h('p','sc-note',t.boundary),
+        h('p','sc-note',t.source + ' · 模板 v' + t.version + ' · ' + (t.compatible ? '与本版本兼容' : '版本不兼容')));
+      var details = h('details'), summary = h('summary',null,'来源与兼容信息');
+      details.append(summary,h('p','sc-note','预置格式 v1 · 舞台契约 v' + t.schemaVersion + ' · 待视觉验收'),
+        h('p','sc-note','契约 ' + t.schemaHash),h('p','sc-note','默认基线 ' + t.basePresetHash));
+      var preview = h('button','btn','预览「' + t.title + '」'); preview.type = 'button'; preview.dataset.template = t.id;
+      preview.disabled = !t.compatible || draftState.busy;
+      preview.addEventListener('click',function () { previewDraft(null,'template:' + t.id); });
+      card.append(details,preview); grid.appendChild(card);
+    });
+    catalog.appendChild(grid);
+    if (isTemplateSource(draftState.source)) renderDraftControls(catalog,draftState.source);
+    body.appendChild(catalog);
   }
 
   function renderAnimeGallery(body, CS, cur) {
@@ -665,6 +1236,7 @@
     head.appendChild(h('h2', 'sc-group-title', '工坊收藏'));
     head.appendChild(help('收藏只保存在本机；载入会立即替换当前舞台，删除前会再次确认。'));
     body.appendChild(head);
+    body.appendChild(h('p','sc-note','本机收藏是另存的完整预置快照；载入会立即替换当前编排。旧收藏未记录来源与契约 hash 时，不推断其作者或兼容性。收藏不保存本次媒体确认，工程执行状态以导出页为准。'));
     renderPresetGallery(body, stage_api());
   }
 
@@ -687,6 +1259,8 @@
         card.appendChild(h('div', 'ws-shot-empty', '无预览'));
       }
       card.appendChild(h('div', 'ws-shot-name', p.name || '未命名'));
+      card.appendChild(h('p','sc-note','本机收藏 · 预置格式 v' + (p.version || '未知')
+        + (p.project ? ' · 工程契约 v' + p.project.schemaVersion : ' · 未记录契约版本')));
       var btns = h('div', 'ws-shot-btns');
       var load = h('button', 'btn', '载入并应用');
       load.addEventListener('click', function () {
@@ -747,10 +1321,86 @@
       '这里调整基础值；自动导演、绑定和编排会在演出时叠加变化。点击重置可恢复单项默认值。'));
   }
 
+  var arrangementState = {sections:[
+    {at:0,mode:'quiet',fade:1000},{at:30,mode:'verse',fade:1200},
+    {at:60,mode:'chorus',fade:1600},{at:90,mode:'original',fade:1600}
+  ],plan:null,message:''};
+  function renderArrangement(body) {
+    if (!window.CreativeArrangement || !window.CreativeProject) return;
+    var A = CreativeArrangement, state = arrangementState;
+    if (state.plan && state.plan.revision !== stage_api().revision()) {
+      state.plan = null; state.message = '舞台已改变，请重新检查分段。';
+    }
+    var box = h('details','ws-arrangement');
+    box.appendChild(h('summary',null,'按分段生成编排'));
+    box.appendChild(h('p','sc-note','手动填写歌曲分段，再选择平静、叙述、增强或原始参数。示例秒数需按歌曲修改，不会自动识别前奏或副歌。检查不改变舞台。'));
+    box.appendChild(h('p','sc-note','应用将替换全部 cue 并关闭自动导演，保留场景、基础参数与音频绑定。分段只用于生成，下方 cue 是保存和继续编辑的结果；需在“导出”确认媒体后执行，末段结束后保持目标值。'));
+    var list = h('div'), actions = h('div','ws-row');
+    var message = h('p','sc-note',state.message); message.setAttribute('role','status'); message.dataset.arrangementStatus = '';
+    var preview = h('div','sc-note'); preview.dataset.arrangementPreview = '';
+    var check = h('button','btn','检查分段'), apply = h('button','btn primary','替换当前编排');
+    check.dataset.arrangement = 'check'; apply.dataset.arrangement = 'apply';
+    function showPlan() {
+      apply.disabled = !state.plan;
+      preview.textContent = state.plan ? '将生成 ' + state.plan.sections.length + ' 条歌曲时间 cue，替换现有 '
+        + state.plan.replacedCueCount + ' 条 cue；自动导演关闭，保留 ' + state.plan.bindingCount + ' 条音频绑定。'
+        + state.plan.prepared.warnings.join(' ') : '';
+    }
+    function invalidate() { state.plan = null; state.message = ''; message.textContent = ''; showPlan(); }
+    var add = h('button','btn','增加分段'); add.dataset.arrangement = 'add';
+    function paintRows() {
+      list.replaceChildren(); add.disabled = state.sections.length >= 32;
+      state.sections.forEach(function (s,i) {
+        var row = h('div','ws-row');
+        var timeLabel = h('label',null,'开始秒数 '), at = h('input','ws-mini');
+        at.type = 'number'; at.min = '0'; at.max = '86400'; at.step = '0.1'; at.value = String(s.at);
+        at.setAttribute('aria-label','分段 ' + (i+1) + ' 开始秒数'); timeLabel.appendChild(at);
+        var mode = h('select'); mode.setAttribute('aria-label','分段 ' + (i+1) + ' 规则');
+        A.modes().forEach(function (m) { var o = h('option',null,m[1]); o.value = m[0]; mode.appendChild(o); });
+        mode.value = s.mode;
+        var fadeLabel = h('label',null,'过渡毫秒 '), fade = h('input','ws-mini');
+        fade.type = 'number'; fade.min = '16'; fade.max = '600000'; fade.step = '100'; fade.value = String(s.fade);
+        fade.setAttribute('aria-label','分段 ' + (i+1) + ' 过渡毫秒'); fadeLabel.appendChild(fade);
+        at.addEventListener('input',function () { s.at = at.value === '' ? NaN : Number(at.value); invalidate(); });
+        fade.addEventListener('input',function () { s.fade = fade.value === '' ? NaN : Number(fade.value); invalidate(); });
+        mode.addEventListener('change',function () { s.mode = mode.value; invalidate(); });
+        var remove = h('button','ws-icon','删'); remove.disabled = state.sections.length === 1;
+        remove.setAttribute('aria-label','删除分段 ' + (i+1));
+        remove.addEventListener('click',function () { state.sections.splice(i,1); invalidate(); paintRows(); });
+        row.append(timeLabel,mode,fadeLabel,remove); list.appendChild(row);
+      });
+    }
+    add.addEventListener('click',function () {
+      if (state.sections.length >= 32) return;
+      var last = state.sections[state.sections.length-1];
+      state.sections.push({at:Math.min(86400,(Number.isFinite(last.at) ? last.at : 0)+30),mode:'verse',fade:1000});
+      invalidate(); paintRows();
+    });
+    check.addEventListener('click',function () {
+      try { state.plan = A.prepare(state.sections); state.message = '检查通过，请核对替换范围后应用。'; }
+      catch (e) { state.plan = null; state.message = e.message; }
+      message.textContent = state.message; showPlan();
+    });
+    apply.addEventListener('click',function () {
+      var plan = state.plan; state.plan = null;
+      try {
+        state.message = '已生成工程 cue，可在下方继续编辑；请到“导出”确认媒体并保存工程。';
+        A.apply(plan); render();
+      } catch (e) { state.message = e.message; message.textContent = e.message; showPlan(); }
+    });
+    var project = h('button','btn','媒体确认与工程保存');
+    project.addEventListener('click',function () { api.setTab('io'); });
+    paintRows(); showPlan(); actions.append(add,check,apply,project);
+    box.append(list,actions,preview,message); body.appendChild(box);
+  }
+
   function renderCues(body) {
     var CS = stage_api();
     var cur = CS.preset();
     var rt = CS.runtime();
+
+    renderArrangement(body);
+    if (window.CreativePitch) CreativePitch.mount(body);
 
     var head = h('div', 'ws-section-head');
     head.appendChild(h('h2', 'sc-group-title', '编排轨'));
@@ -797,7 +1447,10 @@
       if (kind.value === 'at') cue.at = Number(amount.value) || 0;
       else cue.every = Math.max(1, Math.round(Number(amount.value) || 4));
       cue.set[target.value] = Number(valueInput.value);
-      CS.addCue(cue);
+      if (!Number.isFinite(cue.set[target.value]) || cue.len < 16 || cue.len > 600000
+        || (cue.at !== undefined && (cue.at < 0 || cue.at > 86400))
+        || (cue.every !== undefined && cue.every > 4096)) { flash('请检查时间、时长与目标数值。'); return; }
+      if (!CS.addCue(cue)) { flash('编排最多 64 条，请先删除一条或检查输入。'); return; }
       render();
     });
     addRow.append(kind, amount, len, target, valueInput, add);
@@ -827,6 +1480,23 @@
       row.appendChild(head);
 
       var detail = h('div', 'ws-item-body');
+      var timeLine = h('label','ws-kv');
+      timeLine.appendChild(h('span',null,typeof cue.at === 'number' ? '歌曲秒数' : '每几拍'));
+      var timeInput = h('input','ws-mini'); timeInput.type = 'number';
+      timeInput.min = typeof cue.at === 'number' ? '0' : '1';
+      timeInput.max = typeof cue.at === 'number' ? '86400' : '4096';
+      timeInput.step = typeof cue.at === 'number' ? '0.1' : '1';
+      timeInput.value = String(typeof cue.at === 'number' ? cue.at : cue.every);
+      timeInput.addEventListener('change',function () {
+        var v = Number(timeInput.value);
+        if (!Number.isFinite(v) || v < Number(timeInput.min) || v > Number(timeInput.max)) { flash('触发时间超出范围'); return; }
+        if (typeof cue.at === 'number') cue.at = v; else cue.every = Math.round(v);
+        CS.updateCue(i,cue);
+      });
+      timeLine.appendChild(timeInput); detail.appendChild(timeLine);
+      detail.appendChild(select('缓动曲线',[['linear','线性'],['in','渐入'],['out','渐出'],['inout','渐入渐出']],cue.ease || 'out',function (v) {
+        cue.ease = v; CS.updateCue(i,cue);
+      }));
       keys.forEach(function (k) {
         var r = findRow(k);
         var line = h('div', 'ws-kv');
@@ -848,7 +1518,9 @@
       lenInp.type = 'number';
       lenInp.value = String(cue.len || 600);
       lenInp.addEventListener('change', function () {
-        cue.len = Number(lenInp.value) || 600;
+        var v = Number(lenInp.value);
+        if (!Number.isFinite(v) || v < 16 || v > 600000) { flash('缓动时长需为 16–600000 毫秒'); return; }
+        cue.len = v;
         CS.updateCue(i, cue);
       });
       lenLine.appendChild(lenInp);
@@ -892,7 +1564,7 @@
       var list = cur.bindings.concat([{
         target: target.value, source: source.value, gain: Number(gain.value) || 1
       }]);
-      CS.setBindings(list);
+      if (!CS.setBindings(list)) { flash('绑定最多 32 条，请先删除一条。'); return; }
       render();
     });
     addRow.append(target, source, gain, add);
@@ -1221,8 +1893,92 @@
     row.append(generate, load); body.append(row, status);
   }
 
+  var projectState = {text:'',prepared:null,revision:0,message:''};
+  function renderProject(body) {
+    if (!window.CreativeProject) return;
+    var P = CreativeProject, CS = stage_api();
+    body.appendChild(h('h2','sc-group-title','可编辑工程'));
+    body.appendChild(h('div','sc-note','工程保存完整参数、cue 轨和可选的媒体内容身份，不包含音乐文件或自定义图片/视频。在线曲目需先完成缓存；远程文件需允许完整读取。cue 轨需确认媒体后才执行，换曲或刷新后须重新确认。'));
+    var remoteRead = h('input'); remoteRead.type = 'checkbox'; remoteRead.dataset.project = 'remote-read';
+    var remoteLabel = h('label','sc-note');
+    remoteLabel.append(remoteRead,document.createTextNode('允许读取远程完整音频以核对内容（最多 2 GiB / 10 秒，可能消耗流量）'));
+    body.appendChild(remoteLabel);
+    var status = h('p','sc-note',P.status()); status.dataset.projectStatus = '';
+    body.appendChild(status);
+    var ta = h('textarea','ws-json'); ta.id = 'ws-project-json'; ta.setAttribute('aria-label','舞台工程 JSON');
+    ta.spellcheck = false; ta.value = projectState.text;
+    var message = h('p','sc-note',projectState.message); message.setAttribute('role','status');
+    var row = h('div','ws-row');
+    var check = h('button','btn','检查工程'), apply = h('button','btn primary','应用已检查工程');
+    check.dataset.project = 'check'; apply.dataset.project = 'apply'; apply.disabled = !projectState.prepared;
+    function valid() { return check.isConnected && isOpen() && target === 'advanced' && tab === 'io' && !document.hidden; }
+    function say(text) { projectState.message = text; message.textContent = text; }
+    ta.addEventListener('input',function () { projectState.text = ta.value; projectState.prepared = null; apply.disabled = true; say(''); });
+    check.addEventListener('click',function () {
+      try {
+        projectState.prepared = P.prepare(ta.value); projectState.revision = CS.revision();
+        apply.disabled = false;
+        var p = projectState.prepared;
+        say('检查通过：' + p.project.preset.scene + ' · ' + p.project.preset.cues.length + ' 条 cue。'
+          + (p.project.media ? '包含媒体内容身份。' : '未绑定媒体。') + p.warnings.join(' '));
+      } catch (e) { projectState.prepared = null; apply.disabled = true; say(e.message); }
+    });
+    apply.addEventListener('click',function () {
+      try {
+        var prepared = projectState.prepared;
+        projectState.prepared = null;
+        projectState.message = '工程已应用，参数与编排可继续编辑；请确认绑定当前曲目后执行 cue。';
+        P.apply(prepared,projectState.revision);
+        render();
+      } catch (e) { say(e.message); }
+    });
+    var bind = h('button','btn','确认绑定当前曲目'); bind.dataset.project = 'bind';
+    bind.addEventListener('click',async function () {
+      bind.disabled = true; say('正在核对完整媒体内容…');
+      try { await P.bindCurrent(valid,remoteRead.checked); if (valid()) { status.textContent = P.status(); say('媒体内容已确认；本次曲目 cue 轨已启用。'); } }
+      catch (e) { if (valid()) { status.textContent = P.status(); say(e.message); } }
+      finally { if (valid()) bind.disabled = false; }
+    });
+    row.append(check,apply,bind);
+    var file = h('input'); file.type = 'file'; file.accept = '.json,.hertz-stage,application/json'; file.setAttribute('aria-label','打开舞台工程文件');
+    file.addEventListener('change',async function () {
+      var selected = file.files && file.files[0]; if (!selected) return;
+      if (selected.size > 256 * 1024) { say('工程超过 256 KiB'); return; }
+      try { var text = await selected.text(); if (valid() && file.files[0] === selected) { ta.value = text; ta.dispatchEvent(new Event('input')); say('文件已读取，请检查后应用。'); } }
+      catch (_) { if (valid()) say('无法读取工程文件'); }
+    });
+    var exportRow = h('div','ws-row');
+    var include = h('input'); include.type = 'checkbox'; include.checked = true;
+    var label = h('label'); label.append(include,document.createTextNode('包含当前曲目内容指纹'));
+    var save = h('button','btn','下载可编辑工程'); save.dataset.project = 'save';
+    save.addEventListener('click',async function () {
+      save.disabled = true; say('正在生成工程…');
+      try {
+        var prepared = await P.capture(include.checked,valid,remoteRead.checked);
+        if (!valid()) return;
+        var text = JSON.stringify(prepared.project,null,2), blob = new Blob([text],{type:'application/json'});
+        var url = URL.createObjectURL(blob), a = h('a');
+        a.href = url; a.download = (prepared.project.preset.name || 'stage').replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').slice(0,80) + '.hertz-stage.json';
+        try { document.body.appendChild(a); a.click(); }
+        finally { a.remove(); setTimeout(function () { URL.revokeObjectURL(url); },30000); }
+        say('工程下载已发起，请确认保存。' + prepared.warnings.join(' '));
+      } catch (e) { if (valid()) say(e.message); }
+      finally { if (valid()) save.disabled = false; }
+    });
+    exportRow.append(label,save); body.append(exportRow,file,ta,row,message);
+  }
+
+  document.addEventListener('stage:track-changed',function () {
+    if (!refs.body || !window.CreativeProject) return;
+    var status = refs.body.querySelector('[data-project-status]');
+    if (status) status.textContent = CreativeProject.status();
+  });
+
   function renderIO(body) {
     var CS = stage_api();
+    body.appendChild(h('p','sc-note','草稿是待确认的候选；分享码携带完整预置并在载入时立即应用；工程另含时间线版本与媒体身份；视频是成片。收藏只由“存进工坊”另存，预览不会替换已保存内容。'));
+    renderProject(body);
+    renderDraftImport(body);
     renderShareCode(body, CS);
     var head = h('div', 'ws-section-head');
     head.appendChild(h('h2', 'sc-group-title', '导出 / 导入'));
@@ -1230,7 +1986,7 @@
     body.appendChild(head);
     body.appendChild(h('div', 'sc-note',
       '一份预置就是一段 JSON：场景、全部参数、cue 轨、绑定、背景与手绘设置。'
-      + '把这段文字发给别人，对面粘进来就能得到一模一样的舞台。'));
+      + '它是普通预置；媒体绑定请使用上方工程文件，外部素材与跨设备画面需另行确认。'));
 
     var ta = h('textarea', 'ws-json');
     ta.spellcheck = false;
@@ -1565,7 +2321,7 @@
   }
 
   var TABS = [
-    ['prompt', '一句成景'], ['scene', '场景'], ['presets', '收藏'], ['params', '参数'],
+    ['prompt', '一句成景'], ['ai', 'AI 生成'], ['ledger', '费用账本'], ['scene', '场景'], ['presets', '收藏'], ['params', '参数'],
     ['cues', '编排'], ['binds', '绑定'], ['look', '电影风格'], ['io', '导出']
   ];
 
@@ -1577,10 +2333,17 @@
 
   function render() {
     if (!refs.body) return;
+    clearAiCredential();
+    if (window.CreativePitch) CreativePitch.unmount();
+    if (window.AiLedger && (target !== 'advanced' || tab !== 'ledger' || !isOpen())) AiLedger.unmount();
+    if (!aiVisible() && aiTimer) { clearInterval(aiTimer); aiTimer = 0; }
     releaseSceneArt();
     shareViewRevision += 1;
     var page = target + ':' + tab;
     var samePage = renderedPage === page;
+    if (!samePage) discardDraft();
+    if (isAiDraftSource(draftState.source) && aiState.proposal
+      && aiState.proposal.proposalId === draftState.source && aiState.proposal.state !== 'pending') discardDraft();
     var scroll = samePage ? refs.body.scrollTop : 0;
     var focused = document.activeElement;
     var focusId = samePage && refs.body.contains(focused) && focused.id;
@@ -1599,7 +2362,10 @@
       if (refs.tabs && refs.tabs[t[0]]) refs.tabs[t[0]].classList.toggle('on', tab === t[0]);
     });
     revealTab();
+    if (tab !== 'ai' && aiTimer) { clearInterval(aiTimer); aiTimer = 0; }
     if (tab === 'prompt') renderPrompt(refs.body);
+    else if (tab === 'ai') renderAi(refs.body);
+    else if (tab === 'ledger' && window.AiLedger) AiLedger.mount(refs.body, window.VMusicTransport);
     else if (tab === 'scene') renderScene(refs.body);
     else if (tab === 'presets') renderPresets(refs.body);
     else if (tab === 'params') renderParams(refs.body);
@@ -1629,6 +2395,10 @@
     var panel = refs.panel;
     if (!panel) return false;
     if (next === isOpen()) return next;
+    if (!next) clearAiCredential();
+    if (!next && aiTimer) { clearInterval(aiTimer); aiTimer = 0; }
+    if (!next && window.AiLedger) AiLedger.unmount();
+    if (!next && window.CreativePitch) CreativePitch.unmount();
     shareViewRevision += 1;
     if (next) {
       returnFocus = document.activeElement;
@@ -1642,6 +2412,7 @@
       }
       panel.inert = false;
     } else {
+      discardDraft();
       releaseSceneArt();
       if (gesture) { remember(gesture); gesture = null; Stage3D.save(); }
       $('stage3d').classList.remove('s3d-editing');
@@ -1726,6 +2497,15 @@
     // 但只在"结构变了"的时候刷：每帧都重排 DOM 会让正在拖的滑块失焦。
     if (window.CreativeStage && CreativeStage.onChange) {
       CreativeStage.onChange(function (kind) {
+        if (arrangementState.plan && arrangementState.plan.revision !== CreativeStage.revision()) {
+          arrangementState.plan = null; arrangementState.message = '舞台已改变，请重新检查分段。';
+          var arrangementApply = refs.body.querySelector('[data-arrangement="apply"]');
+          var arrangementPreview = refs.body.querySelector('[data-arrangement-preview]');
+          var arrangementMessage = refs.body.querySelector('[data-arrangement-status]');
+          if (arrangementApply) arrangementApply.disabled = true;
+          if (arrangementPreview) arrangementPreview.textContent = '';
+          if (arrangementMessage) arrangementMessage.textContent = arrangementState.message;
+        }
         if (['preset', 'param', 'background', 'hand'].indexOf(kind) >= 0) {
           shareEditRevision += 1;
           var status = $('ws-share-status');
@@ -1733,7 +2513,10 @@
         }
         if (!isOpen() || target !== 'advanced') return;
         syncStageStatus();
-        if (kind === 'preset' || kind === 'library') render();
+        var invalidated = draftState.token && (!CreativeStage.preview()
+          || CreativeStage.preview().previewId !== draftState.token.previewId);
+        if (invalidated) { discardDraft(); }
+        if (kind === 'preset' || kind === 'library' || invalidated) render();
       });
     }
 
@@ -1769,6 +2552,7 @@
       return tab;
     },
     render: render,
+    onAiTask: onAiTask,
     tabs: function () { return TABS.map(function (t) { return t[0]; }); }
   };
 

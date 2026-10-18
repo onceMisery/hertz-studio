@@ -68,6 +68,7 @@
     open: false,
     epoch: 0,
     timer: 0,
+    network: null,
     q: '',
     // 预览里的歌列表：点行播歌时按这套顺序整盘入队。
     previewTracks: [],
@@ -191,7 +192,7 @@
     menu.style.width = w + 'px';
   }
 
-  function open() {
+  function open(skipPreview) {
     if (!menu || state.open) return;
     state.open = true;
     renderChips();
@@ -199,10 +200,18 @@
     menu.hidden = false;
     place();
     renderEmptyState();
-    if (state.q) runPreview(state.q);
+    if (state.q && !skipPreview) runPreview(state.q);
+  }
+
+  function invalidate() {
+    state.epoch += 1;
+    clearTimeout(state.timer);
+    if (state.network) state.network.cancel();
+    state.network = null;
   }
 
   function close() {
+    invalidate();
     if (!menu || !state.open) return;
     state.open = false;
     menu.hidden = true;
@@ -227,12 +236,13 @@
     var q = input.value.trim();
     if (q === state.q) return;
     state.q = q;
-    clearTimeout(state.timer);
+    invalidate();
+    if (state.open) renderEmptyState();
     if (!q) {
       if (state.open) renderEmptyState();
       return;
     }
-    if (!state.open) open();
+    if (!state.open) open(true);
     state.timer = setTimeout(function () { runPreview(q); }, 300);
   }
 
@@ -332,58 +342,84 @@
   }
 
   async function runPreview(q) {
-    if (effectiveKind() === 'local' || !q) return;
-    var epoch = ++state.epoch;
-    var o = online();
+    if (!state.open || effectiveKind() === 'local' || !q) return;
+    invalidate();
+    var epoch = state.epoch, o = online();
     if (!o || !transport()) return;
     if (o.whenSearchReady) await o.whenSearchReady();
-    if (epoch !== state.epoch || q !== state.q) return;
-    var kind = effectiveKind();
+    if (epoch !== state.epoch || q !== state.q || !state.open) return;
+    var kind = effectiveKind(), scopeSource = o.state.source;
     renderChips();
-    // Preview and full search share account and capability priorities.
     var source = o.searchSource ? o.searchSource(kind, true) : o.state.source;
-    if (source === 'all') {
-      var first = (o.sources() || [])[0];
-      source = first ? first.id : 'ccmixter';
-    }
+    var sources = kind === 'song' && o.state.source === 'all' ? (o.searchSources ? o.searchSources() : o.sources().map(function (s) { return s.id; })) : [source];
+    var network = state.network = HertzSearch.create(transport());
     var endpoint = kind === 'song' ? '/v1/online/search'
       : kind === 'playlist' ? '/v1/online/playlists/search'
-        : kind === 'artist' ? '/v1/online/artists/search'
-          : '/v1/online/albums/search';
-    var params = new URLSearchParams({
-      source: source,
-      q: q,
-      limit: kind === 'song' ? '8' : '6',
+        : kind === 'artist' ? '/v1/online/artists/search' : '/v1/online/albums/search';
+    body.textContent = ''; state.previewTracks = [];
+    moreBtn.hidden = false;
+    moreBtn.textContent = '在「在线」页查看全部「' + q + '」→';
+    var groups = sources.map(function (id) {
+      var container = document.createElement('section'); container.dataset.source = id;
+      var status = document.createElement('div'); status.className = 'ts-hint';
+      status.textContent = o.sourceLabel(id) + ' · 搜索中…'; container.appendChild(status); body.appendChild(container);
+      return { source: id, container: container, tracks: [] };
     });
-    body.textContent = '';
-    var loading = document.createElement('div');
-    loading.className = 'ts-hint';
-    loading.textContent = '搜索中…';
-    body.appendChild(loading);
-    try {
-      var data = await transport().get(endpoint + '?' + params.toString());
-      if (epoch !== state.epoch || q !== state.q) return;
-      renderPreview(kind, q, data);
-      moreBtn.hidden = false;
-      moreBtn.textContent = '在「在线」页查看全部「' + q + '」→';
-    } catch (err) {
-      if (epoch !== state.epoch) return;
-      body.textContent = '';
-      var hint = document.createElement('div');
-      hint.className = 'ts-hint';
-      hint.textContent = errText('搜索失败', err);
-      body.appendChild(hint);
+    async function load(group) {
+      if (!network.active || group.loading) return;
+      group.loading = true; group.container.textContent = '';
+      var status = document.createElement('div'); status.className = 'ts-hint';
+      status.textContent = o.sourceLabel(group.source) + ' · 搜索中…'; group.container.appendChild(status);
+      try {
+        var params = new URLSearchParams({ source:group.source, q:q, limit:kind === 'song' ? '8' : '6' });
+        var data = await network.get(endpoint + '?' + params.toString());
+        if (epoch !== state.epoch || q !== state.q || !state.open || effectiveKind() !== kind || o.state.source !== scopeSource) return;
+        if (kind !== 'song') {
+          var key = kind === 'playlist' ? 'playlists' : kind === 'artist' ? 'artists' : 'albums';
+          data[key] = (data[key] || []).map(function (item) { return Object.assign({}, item, {source:group.source}); });
+          renderPreview(kind, q, data); return;
+        }
+        group.tracks = (data.tracks || []).map(function (t) { return Object.assign({}, t, { source:group.source }); });
+        state.previewTracks = groups.reduce(function (all, g) { return all.concat(g.tracks); }, []);
+        status.textContent = o.sourceLabel(group.source) + ' · ' + (group.tracks.length ? group.tracks.length + ' 首' : '没有匹配的歌曲');
+        group.tracks.forEach(function (t) {
+          var row = o.row(t, function () {
+            if (!t.playable) return;
+            o.playAll(state.previewTracks, state.previewTracks.indexOf(t)); close();
+          });
+          row.classList.add('ts-row'); group.container.appendChild(row);
+        });
+      } catch (err) {
+        if (epoch !== state.epoch || q !== state.q || !state.open || effectiveKind() !== kind || o.state.source !== scopeSource) return;
+        var failure = HertzSearch.failure(err);
+        status.textContent = o.sourceLabel(group.source) + ' · ' + errText(failure.label, err);
+        status.dataset.errorCode = failure.code;
+        status.dataset.requestId = failure.requestId;
+        if (failure.retryable) {
+          var retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn';
+          retry.textContent = '重试 ' + o.sourceLabel(group.source);
+          retry.addEventListener('click', function () { load(group); }); group.container.appendChild(retry);
+        }
+      } finally { group.loading = false; }
     }
+    groups.forEach(function (group) { load(group); });
   }
 
   // ── 档位切换 ─────────────────────────────────────────────────────────────
+
+  function scopeChanged() {
+    invalidate(); renderChips(); syncPlaceholder();
+    if (state.open) {
+      renderEmptyState();
+      if (state.q) runPreview(state.q);
+    }
+  }
 
   function setKind(kind) {
     if (KINDS.every(function (k) { return k.id !== kind; })) return;
     if (kind === state.kind) return;
     state.kind = kind;
-    state.epoch += 1; // 作废在途预览
-    clearTimeout(state.timer);
+    invalidate(); // 作废在途预览
     syncPlaceholder();
     renderChips();
     if (kind === 'local') {
@@ -465,8 +501,7 @@
     if (clearBtn) {
       clearBtn.addEventListener('click', function () {
         state.q = '';
-        state.epoch += 1;
-        clearTimeout(state.timer);
+        invalidate();
         if (state.open) renderEmptyState();
       });
     }
@@ -485,6 +520,7 @@
     setKind: setKind,
     open: open,
     close: close,
+    scopeChanged: scopeChanged,
     isOpen: function () { return state.open; },
     state: state,
   };

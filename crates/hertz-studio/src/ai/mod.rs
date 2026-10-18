@@ -23,7 +23,13 @@
 
 pub(crate) mod capability;
 pub(crate) mod contract;
+pub(crate) mod credential;
+pub mod evaluation;
 pub(crate) mod facade;
 pub(crate) mod jobs;
+pub(crate) mod ledger;
 pub mod lock;
 pub mod mcp;
+pub(crate) mod provider;
+mod strict_json;
+pub(crate) mod usage;

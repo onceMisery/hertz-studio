@@ -43,6 +43,7 @@
   var observer = null;
   var refs = {};      // 重编排队列里的 DOM 引用
   var savedText = []; // 临时改过的文本，{ node, text }
+  var searchNetwork = null;
   var inReflow = false; // reflow 重入保护
 
   var CAPSULE_KEY = 'vmusic.ln-capsule';
@@ -55,7 +56,6 @@
     input: '',
     epoch: 0,
     debounce: 0,
-    controllers: [],
     sources: null,
   };
 
@@ -390,7 +390,9 @@
     refs.panelOut = make('div', 'ln-sp-out', sp);
 
     input.addEventListener('input', function () {
+      abortPending(); panel.epoch += 1;
       panel.input = input.value;
+      refs.panelOut.textContent = '';
       clearBtn.hidden = input.value === '';
       clearTimeout(panel.debounce);
       panel.debounce = setTimeout(function () { runSearch(input.value); }, 250);
@@ -416,16 +418,8 @@
   }
 
   function abortPending() {
-    // abort() 本身不抛；包一层是防个别内核对已结束的 controller 抛异常。
-    panel.controllers.forEach(function (c) { try { c.abort(); } catch (e) { /* 见上 */ } });
-    panel.controllers = [];
-  }
-
-  function makeSignal() {
-    if (typeof AbortController !== 'function') return null;
-    var c = new AbortController();
-    panel.controllers.push(c);
-    return c.signal;
+    if (searchNetwork) searchNetwork.cancel();
+    searchNetwork = null;
   }
 
   function runSearch(raw) {
@@ -440,6 +434,7 @@
       renderHistory();
       return;
     }
+    searchNetwork = HertzSearch.create(transport());
     clearHistoryView();
     var out = refs.panelOut;
     out.textContent = '';
@@ -481,19 +476,24 @@
   }
 
   function searchLocal(epoch, q) {
+    if (epoch !== panel.epoch || !searchNetwork || !searchNetwork.active || refs.localSec.loading) return;
+    var sec = refs.localSec;
+    sec.loading = true; sec.more.hidden = true; sec.status.onclick = null;
     setSectionStatus(refs.localSec, '搜索中…', 'loading');
-    var signal = makeSignal();
     var url = '/v1/tracks?q=' + encodeURIComponent(q) + '&limit=8';
-    transport().get(url, signal ? { signal: signal } : {})
+    searchNetwork.get(url)
       .then(function (page) {
         if (epoch !== panel.epoch) return;
         renderLocalRows(page.tracks || []);
       })
       .catch(function (err) {
         if (epoch !== panel.epoch || (err && err.name === 'AbortError')) return;
-        setSectionStatus(refs.localSec, '本地搜索失败，点击重试', 'error');
-        refs.localSec.status.onclick = function () { searchLocal(epoch, q); };
-      });
+        var failure = HertzSearch.failure(err);
+        setSectionStatus(sec, failure.label + '：' + err.message, 'error');
+        sec.status.dataset.errorCode = failure.code; sec.status.dataset.requestId = failure.requestId;
+        sec.more.textContent = '重试'; sec.more.hidden = !failure.retryable;
+        sec.more.onclick = function () { searchLocal(epoch, q); };
+      }).finally(function () { sec.loading = false; });
   }
 
   function renderLocalRows(tracks) {
@@ -535,55 +535,57 @@
       })
       .catch(function () {
         if (epoch !== panel.epoch) return null;
-        return [];
+        return null;
       });
   }
 
   function searchOnline(epoch, q) {
     setSectionStatus(refs.onlineSec, '正在读取音源…', 'loading');
-    var signal = makeSignal();
+    var network = searchNetwork;
     ensureSources(epoch).then(function (sources) {
-      if (epoch !== panel.epoch) return;
+      if (epoch !== panel.epoch || !network.active) return;
       if (!sources) {
         setSectionStatus(refs.onlineSec, '音源列表读取失败，点击重试', 'error');
-        refs.onlineSec.status.onclick = function () {
-          panel.sources = null; searchOnline(epoch, q);
-        };
+        refs.onlineSec.status.onclick = function () { panel.sources = null; searchOnline(epoch, q); };
         return;
       }
-      if (!sources.length) {
-        setSectionStatus(refs.onlineSec, '没有可用音源', 'empty');
-        return;
-      }
-      setSectionStatus(refs.onlineSec, '搜索中…', 'loading');
-      var perSource = Promise.all(sources.map(function (s) {
-        var url = '/v1/online/search?source=' + encodeURIComponent(s.id)
-          + '&q=' + encodeURIComponent(q) + '&limit=3';
-        return transport().get(url, signal ? { signal: signal } : {})
-          .then(function (d) {
-            return (d.tracks || []).map(function (t) {
-              return Object.assign({}, t, { source: s.id });
-            });
-          })
-          .catch(function () { return []; });
-      }));
-      perSource.then(function (bySource) {
-        if (epoch !== panel.epoch) return;
-        // 交错合并：各源第 1 条、各源第 2 条……更像聚合搜索的混排结果。
-        var flat = [];
-        for (var i = 0; i < 3; i += 1) {
-          bySource.forEach(function (list) { if (list[i]) flat.push(list[i]); });
+      sources = sources.filter(function (source) { return !source.kind || source.kind === 'music'; });
+      if (!sources.length) { setSectionStatus(refs.onlineSec, '没有可用音源', 'empty'); return; }
+      setSectionStatus(refs.onlineSec, '', ''); refs.onlineSec.rows.textContent = '';
+      sources.forEach(function (source) {
+        var label = window.Online ? Online.sourceLabel(source.id) : source.label || source.id;
+        var group = buildSection(refs.onlineSec.rows, label);
+        async function load() {
+          if (!network.active) return;
+          group.more.hidden = true;
+          setSectionStatus(group, '搜索中…', 'loading');
+          try {
+            var data = await network.get('/v1/online/search?' + new URLSearchParams({source:source.id,q:q,limit:3}));
+            if (epoch !== panel.epoch || !network.active) return;
+            renderOnlineRows((data.tracks || []).map(function (track) {
+              return Object.assign({}, track, {source:source.id});
+            }), q, group);
+          } catch (error) {
+            if (epoch !== panel.epoch || !network.active) return;
+            var failure = HertzSearch.failure(error);
+            setSectionStatus(group, failure.label + '：' + error.message, 'error');
+            group.status.dataset.errorCode = failure.code;
+            group.status.dataset.requestId = failure.requestId;
+            group.more.textContent = '重试'; group.more.hidden = !failure.retryable;
+            group.more.onclick = load;
+          }
         }
-        renderOnlineRows(flat, q);
+        load();
       });
     });
   }
 
-  function renderOnlineRows(tracks, q) {
+  function renderOnlineRows(tracks, q, group) {
     if (!refs.onlineSec) return;
-    setSectionStatus(refs.onlineSec, tracks.length ? '' : '在线曲库没有匹配的结果', tracks.length ? '' : 'empty');
-    setSectionCount(refs.onlineSec, tracks.length);
-    refs.onlineSec.rows.textContent = '';
+    var sec = group || refs.onlineSec;
+    setSectionStatus(sec, tracks.length ? '' : '在线曲库没有匹配的结果', tracks.length ? '' : 'empty');
+    setSectionCount(sec, tracks.length);
+    sec.rows.textContent = '';
     tracks.forEach(function (t) {
       var cover = '';
       if (window.Online) cover = window.Online.rowCoverUrl(window.Online.safeCoverUrl(t.cover));
@@ -600,16 +602,16 @@
         pushHistory(panel.q);
         emit('play-online', { track: t });
       });
-      refs.onlineSec.rows.appendChild(row);
+      sec.rows.appendChild(row);
     });
     if (tracks.length) {
-      refs.onlineSec.more.textContent = '在在线页查看全部 →';
-      refs.onlineSec.more.hidden = false;
-      refs.onlineSec.more.onclick = function () {
+      sec.more.textContent = '在在线页查看全部 →';
+      sec.more.hidden = false;
+      sec.more.onclick = function () {
         emit('view-online', { q: panel.q });
       };
     } else {
-      refs.onlineSec.more.hidden = true;
+      sec.more.hidden = true;
     }
   }
 

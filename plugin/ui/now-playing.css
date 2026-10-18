@@ -89,6 +89,15 @@
 .np-tools { position: absolute; right: 24px; top: 80px; width: min(440px, calc(100% - 32px)); max-height: calc(100% - 120px); overflow: auto; padding: 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-solid); z-index: 2; box-shadow: var(--shadow); }
 .np-tool-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-block: 20px; }
 #np-modal .np-lyrics { flex-wrap: wrap; padding-block: 16px; }
+.np-lyric-import-panel { flex: 1 0 100%; min-width: 0; border-top: 1px solid var(--line); padding-top: 12px; overflow-wrap: anywhere; }
+.np-lyric-import-panel p, .np-lyric-import-panel li { font-size: 12px; line-height: 1.6; }
+.np-lyric-import-panel ol { padding-inline-start: 20px; }
+.np-lyric-import-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.np-lyric-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-block: 12px; }
+.np-lyric-search select { grid-column: 1 / -1; }
+.np-lyric-search input, .np-lyric-search select { min-width: 0; width: 100%; color: var(--text); background: var(--field-bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px; font: inherit; }
+.np-lyric-candidates { list-style: none; padding: 0; }
+.np-lyric-candidates > li { border-top: 1px solid var(--line); padding-block: 12px; }
 #np-modal .np-goto { margin-top: 12px; }
 .np-expanded .topbar, .np-expanded .app, .np-expanded .bar, .np-expanded #bar-restore, .np-expanded #capsule, .np-expanded .qf-stage-dragging, .np-expanded .chaoxi-handle { visibility: hidden; pointer-events: none; }
 .np-expanded #ctx-menu { z-index: 110; }

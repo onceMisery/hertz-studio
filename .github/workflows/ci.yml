@@ -139,6 +139,32 @@ jobs:
           if [ "${{ steps.test.outcome }}" = "failure" ]; then emit test test.log; fi
           exit 1
 
+  msrv:
+    name: Rust 1.88 · ${{ matrix.edition }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        edition: [standard, full]
+    env:
+      EDITION_FEATURES: ${{ matrix.edition == 'full' && 'hertz-studio/full,dbx-plugin-hertz/full' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libdbus-1-dev pkg-config
+      # Dependency rust-version metadata alone does not verify our own code,
+      # build scripts, native target paths or test code against the lower bound.
+      # Each edition gets a separate job so Cargo cannot merge Full into Standard.
+      - name: Check declared minimum compiler
+        shell: bash
+        run: cargo check --locked --workspace --all-targets --features "$EDITION_FEATURES"
+
   smoke:
     name: end-to-end smoke
     runs-on: ubuntu-latest

@@ -20,9 +20,9 @@ Jamendo、ccMixter 和公开播客；显式开启 `full` feature 的 **Full** �
 
 **播放与曲库**
 
-- 真实的本地播放：`symphonia` 解码 → `cpal` 输出。扫描收录 mp3 / flac / wav / m4a / aac /
-  alac / ogg / aiff 等 13 种扩展名；其中 opus、ape、wma 只是收得进库，symphonia 0.5 没有对应
-  解码器，点播会如实报错而不是假装在播
+- 真实的本地播放：`symphonia` 解码 → `cpal` 输出。扫描检查 mp3 / flac / wav / m4a / aac /
+  alac / ogg / aiff 等 13 种扩展名；检查不等于成功入库或可播放。Opus、APE、WMA 当前没有对应
+  解码器，元数据读取失败会列入扫描失败；已导入的记录也不保证可播。详见[格式与错误说明](docs/audio-format-support.md)
 - 播放控制：播放、暂停、停止、跳转、音量、上一首 / 下一首、三种播放模式（重复 / 单曲 / 随机），
   一首结束自动续播；睡眠定时到点自动暂停
 - 实时频谱：64 段 FFT，约 30 fps 推到界面
@@ -31,7 +31,8 @@ Jamendo、ccMixter 和公开播客；显式开启 `full` feature 的 **Full** �
 - 音乐目录管理：添加、启停、移除目录，监听文件变化自动增量扫描；支持手动扫描、取消与失败明细，
   移除目录不删音乐原文件
 - 歌词：读取音频同目录 `.lrc`，支持普通歌词与**逐字时间轴**（enhanced LRC）、`[offset:]`；
-  来源优先级为手动导入 > 音频内嵌标签 > 同名 `.lrc`，支持每曲 ±0.5s 偏移（持久化）
+  来源优先级为手动导入 > 音频内嵌标签 > 同名 `.lrc`，支持每曲 ±0.5s 偏移（持久化）。
+  [歌词候选](docs/lyric-import.md)支持本地 LRC/受控 TTML 检查、预览与确认；Full 可手动检索既有音源并选词预览，许可与真实来源仍待验收，不自动采纳
 - 自定义歌单：增删改、曲目增删与顺序维护；M3U 导入导出；可混存本地与在线曲目（元数据快照随单持久）
 - 曲库管理：专辑 / 歌手筛选、曲目信息编辑（覆盖层，重扫保留）、批量编辑 / 收藏 / 加入歌单、
   替换封面、失效文件整理；缺失的歌手与专辑可以从在线音源联网补全
@@ -71,9 +72,11 @@ Jamendo、ccMixter 和公开播客；显式开启 `full` feature 的 **Full** �
 - 创意舞台：手写 WebGL2 内核（零顶点缓冲、频谱走纹理、RGBA8 后处理链）+ 可寻址参数表 +
   编排 cue 轨 + 音频绑定 + 自动导演 + 创意工坊 + 手绘风格 + 自定义背景；歌词本身也是一种三维场景；
   「一句成景」用离线规则编译器把一句描述确定性地编成舞台意图，无网络、无模型、无随机数，
-  编排结果可编成一段分享码交给另一个人
+  编排结果可编成一段分享码交给另一个人；[可编辑工程](docs/stage-projects.md) 可保存完整参数、cue 和本地媒体指纹，
+  重开后确认媒体并继续编辑；[三个内置创作模板候选](docs/stage-templates.md)可先预览再应用，人工视觉验收仍待完成
 - 录制歌词视频：把当前舞台导出 720p / 1080p / 竖屏，可带系统声音。仅独立形态可用——
-  插件沙箱里没有本地歌词数据源，导出请改用浏览器打开的主界面
+  插件沙箱里没有本地歌词数据源，导出请改用浏览器打开的主界面；
+  [支持范围、实际音轨与异常保存](docs/video-export.md)
 - 歌词输出到直播 / 录屏软件：一个只读的歌词浮层页配一把只读钥匙（只能读浮层与封面，
   碰不到播放控制与曲库），三种排版，可挂自定义背景与台标
 
@@ -141,7 +144,7 @@ Jamendo、ccMixter 和公开播客；显式开启 `full` feature 的 **Full** �
 ## 快速开始
 
 ```bash
-# 构建（需要 Rust 1.88+；下界由依赖图声明，见 workspace 的 rust-version）
+# 构建（需要 Rust 1.88+；workspace 下界由固定 1.88.0 的 CI 编译检查守护）
 cargo build --release -p hertz-studio
 
 # 运行独立形态（Windows 下产物是 target\release\hertz-studio.exe）
@@ -234,8 +237,8 @@ sidecar 只做传输：把宿主的调用转成与 HTTP 响应同构的返回值
 | 事件下发   | 广播队列满时**丢帧**而不是断开     | 状态帧每拍全量重发，缺几帧增量无所谓；断开会让客户端走指数退避，退避窗口里界面停在旧状态 |
 | Web 框架 | axum                     | 类型安全 extractor、与 tokio 同源；本服务瓶颈在音频而非路由       |
 | 数据访问   | sqlx 运行时校验（非 `query!` 宏） | 无需 `.sqlx/` 元数据即可离线构建，CI 更简单；所有语句由集成测试覆盖   |
-| 搜索     | SQLite FTS5（trigram）+ LIKE 复核 | `%关键词%` 只有 trigram 索引服务得了；索引粗筛后仍由 LIKE 收敛，结果与改造前逐字一致 |
-| 重采样    | 线性插值                     | 依赖轻、代码可审计；`AudioBackend` 是替换成 sinc/FIR 的接缝 |
+| 搜索     | SQLite FTS5（trigram）+ LIKE 复核 | 三列候选有界合并，LIKE 复核保持原搜索语义；[五万曲本机性能基线](docs/search-performance.md) |
+| 重采样    | 固定参数流式 sinc（Rubato）   | 解码线程转换，同率直接复制；已有离线验证，真实设备/听测待验，见[实现边界](docs/audio-resampling.md) |
 | 前端     | 零构建原生 JS                 | `cargo run` 之后就能直接用，不引入 npm 工具链            |
 | 双形态    | 逻辑库 + 两个薄传输壳            | 传输只有三处差异（routes / ws / sidecar），业务只写一份      |
 
@@ -301,12 +304,19 @@ follow_symlinks = false
 [online]
 cache_max_bytes = 2147483648   # 在线音频缓存上限，默认 2 GiB
 
+[ai]
+provider = "fake"       # fake（模拟）或 ollama（本地模型，实验）
+origin = "http://127.0.0.1:11434"
+model = ""              # ollama 必填：已安装的本地模型名
+
 [log]
 level = "info"          # 例如 "hertz_studio=debug,vmusic_audio=info"
 format = "pretty"       # pretty | json
 ```
 
 （生成的文件里还有一个 `server.expose_ui`，目前没有任何代码读它，属于预留键。）
+
+AI provider 修改后重启服务，并在工坊中另行开启生成；启动和查看状态不调用模型。Ollama 只接受数字回环 origin，需由操作者在 Ollama 服务端禁用云功能（`OLLAMA_NO_CLOUD=1`）并选择已安装的本地模型，不支持云模型或自动下载。详见[本地模型与草稿说明](docs/ai-stage-drafts.md)。配置文件语法或字段类型错误会阻止启动并报告文件位置，避免静默切回默认 provider。
 
 Standard 数据目录默认位置：Windows `%LOCALAPPDATA%\hertz-studio-standard`，
 macOS `~/Library/Application Support/hertz-studio-standard`，Linux `~/.local/share/hertz-studio-standard`。
@@ -389,7 +399,7 @@ cargo fmt -p hertz-studio -p vmusic-core -p vmusic-audio -p vmusic-store \
 | 前端契约（CI 那一组） | `node scripts/check-frontend.js` | 只用 Node 标准库，一条命令跑完语法 → 静态 guard（资源接线、CSS 令牌、改名后的负面不变量）→ 行为回归（vm 沙箱跑真实模块）。加 `--extra` 跑本地才跑的那批，`--only <名字>` 单跑一条 |
 | 接口清单 | `node scripts/api-routes.js --check` | 校验 `docs/api-routes.md` 的生成清单与路由源码一致（这条已经收进上面那一组） |
 | 活体 | `node scripts/check-frontend.js --live` | 需要真浏览器与一个起着的服务：`PLAYWRIGHT_MODULE` 指向 playwright 模块，各脚本另有自己的地址变量。缺环境时它们只报环境错，不报产品错 |
-| 需要二进制 | `check-plugin-sidecar.js`、`check-library-api.py` | 前者真起 sidecar 走 stdio 冒烟（找 `target/debug/dbx-plugin-hertz`，可用 `HERTZ_PLUGIN_BIN` 覆盖）；后者用 python 标准库自起隔离实例 |
+| 需要二进制 | `check-plugin-sidecar.js`、`check-library-api.py` | 前者真起 sidecar 走 stdio 冒烟（找 `target/debug/dbx-plugin-hertz`，可用 `HERTZ_PLUGIN_BIN` 覆盖）；`HERTZ_SIDECAR_LAG_PROBE=1` 会额外停读 stdout 90 秒验事件恢复；后者用 python 标准库自起隔离实例 |
 | 端到端 | `smoke.sh` / `smoke.ps1` / `smoke-online.ps1` | 构建 → 启动 → 调一轮服务 → 关闭；online 版对着已运行的服务打真实上游 |
 
 **换肤的验证边界**：这一类功能的失败没有报错、没有红字，只有「刷新后又变回去了」。
@@ -447,6 +457,12 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 
 ## 路线图
 
+下一阶段的详细规划见[产品路线图](docs/product-roadmap.md)与[技术实施方案](docs/technical-roadmap.md)，
+UI、歌词、音频与 AI 集成的对照依据见[VCPChat 参考评估](docs/vcpchat-reference-assessment.md)。
+架构取舍、源码依据与本轮修订见[架构复核记录](docs/architecture-review.md)。
+当前实施与缺口见[路线图进度](docs/roadmap-progress.md)及[发布验收矩阵](docs/release-validation.md)。歌词专项已有[本地 LRC/受控 TTML 候选导入](docs/lyric-import.md)，完整在线候选与质量验收仍待完成。
+这些是设计与交付建议；以下 P1–P8 保留为历史演进记录。
+
 - **P1（已完成）** 可运行骨架：播放、频谱、曲库扫描、歌词、歌单、Web UI
 - **P1.5（已完成）** 在线曲库：音源注册表、代理归一化、落盘缓存、自有账号 cookie 与扫码
 - **P2（已完成）** 远程音源：WebDAV 管理/浏览/导入，HTTP(S) Range 直链播放，凭据存入系统钥匙串
@@ -457,7 +473,7 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 - **P6（已完成）** 舞台粒子层与 3D 歌单架：沿用 P5 的四契约与帧门调度，不新增依赖
 - **P7（已完成）** 创意舞台：三维场景与后处理链、可编排的演出数据（参数表 + cue 轨 + 音频绑定 +
   自动导演）、创意工坊、手绘风格、自定义背景。仍然是**零运行时依赖、零构建步骤**
-- **P8** 创意舞台二期：旋律轨迹（服务端基频估计）、录制回放、色谱进度条仍在计划内；
+- **P8** 创意舞台二期：[基频候选轨迹](docs/pitch-track.md)已有实验性本地分析与只读查看；真实音乐质量未验收，录制回放、色谱进度条仍在计划内；
   三维歌词排版已上线。「一句成景」首期（离线规则编译器 + 舞台意图协议 + 原子写入口）与
   编排分享码已完成
 

@@ -17,6 +17,7 @@ license, see `cargo deny list` or each crate's own LICENSE file):
   - symphonia                         (MPL-2.0)
   - cpal                              (Apache-2.0 / MIT)
   - rustfft, num-complex              (MIT / Apache-2.0)
+  - rubato                            (MIT)
   - tracing, tracing-subscriber       (MIT)
   - thiserror, anyhow                 (MIT / Apache-2.0)
   - uuid, rand, walkdir, dirs         (MIT / Apache-2.0)

@@ -192,6 +192,11 @@ function makeClock() {
     async flushNext() {
       const t = this.pending()[0];
       if (!t) return false;
+      return this.flush(t.id);
+    },
+    async flush(id) {
+      const t = this.pending().find(t => t.id === id);
+      if (!t) return false;
       t.cancelled = true;
       t.fn();
       await ticks();
@@ -301,6 +306,7 @@ function makeSandbox(opts) {
     const src = fs.readFileSync(path.join(WEB, file), 'utf8');
     vm.runInContext(src, sandbox, { filename: file });
   }
+  load('search-session.js');
   load('online.js');
   load('online-login.js');
   load('online-playlists.js');
@@ -901,14 +907,16 @@ async function loginScenario(pollStates, opts) {
       online.state.source = 'netease'; online.state.kind = kind;
       top.state.kind = kind; top.close();
       env.doc.getElementById('search').value = '顶栏' + kind;
-      top.onInput(); await ticks(30);
+      top.onInput(); await env.clock.flush(top.state.timer); await ticks(30);
       ok(searches().at(-1).url.includes('source=' + source), '顶栏 ' + kind + ' 与完整搜索共用平台优先级');
     }
     online.state.source = 'all'; online.state.kind = 'song';
     top.state.kind = 'song'; top.close();
     env.doc.getElementById('search').value = '顶栏综合';
-    top.onInput(); await ticks(30);
-    ok(searches().at(-1).url.includes('source=qq'), 'All 顶栏预览优先已登录平台');
+    const beforePreview = searches().length;
+    top.onInput(); await env.clock.flush(top.state.timer); await ticks(30);
+    ok(searches()[beforePreview].url.includes('source=qq'), 'All 顶栏预览优先已登录平台');
+    eq(searches().length - beforePreview, 3, 'All 顶栏分源渐进查询全部音乐源');
 
     online.state.q = ''; online.state.kind = 'song';
     online.init(); await ticks(30);
@@ -916,7 +924,7 @@ async function loginScenario(pollStates, opts) {
     online.state.q = '手动选择'; await online.search();
     ok(searches().at(-1).url.includes('source=netease'), '手动选源后优先级不覆盖用户选择');
     top.close(); env.doc.getElementById('search').value = '顶栏手动选择';
-    top.onInput(); await ticks(30);
+    top.onInput(); await env.clock.flush(top.state.timer); await ticks(30);
     ok(searches().at(-1).url.includes('source=netease'), '顶栏同样尊重手动选源');
   }
 
@@ -963,7 +971,7 @@ async function loginScenario(pollStates, opts) {
     eq(findByClass(body, 'all-failed').length, 1, '失败源独立显示');
     finishSlow({ tracks: [T({ source: 'qq', id: '9', title: '晴天' })] });
     await pending;
-    eq(online.state.tracks[0].source, 'qq', '精确歌名优先于 Live 版本');
+    eq(online.state.tracks[0].source, 'netease', '来源分组顺序固定，迟到精确匹配不插入已显示来源组');
     eq(online.state.tracks.length, 2, '跨源不同版本均保留');
     eq(online.state.loading, false, '所有源完成后结束加载');
     eq(env.doc.getElementById('online-count').textContent, '2 首已加载', '显示实际加载数量');

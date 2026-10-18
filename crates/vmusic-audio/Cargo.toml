@@ -12,7 +12,7 @@ description = "Audio backends and the command actor that serialises playback"
 default = ["playback"]
 # Turning this off leaves only the null backend, which needs no sound card and
 # is what CI and the headless integration tests run against.
-playback = ["cpal", "symphonia", "rustfft", "num-complex"]
+playback = ["cpal", "symphonia", "rustfft", "num-complex", "rubato"]
 
 [dependencies]
 vmusic-core = { workspace = true }
@@ -26,3 +26,12 @@ cpal = { workspace = true, optional = true }
 symphonia = { workspace = true, optional = true }
 rustfft = { workspace = true, optional = true }
 num-complex = { workspace = true, optional = true }
+rubato = { version = "=0.16.2", default-features = false, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[[example]]
+name = "resample_probe"
+required-features = ["playback"]

@@ -7,7 +7,7 @@
   var recent = [], discovery = [], quoteEpoch = 0, homeEpoch = 0, continueKey = '';
   var searchSource = 'all', searchTimer = null, searchComposing = false, restoringSearchFocus = false, videoUrl = '';
   var playAction = null, playGeneration = 0;
-  var surface = null;
+  var surface = null, panelNetwork = null;
 
   var iconNames = { play: 'i-play', library: 'i-library', daily: 'i-daily', timer: 'i-timer',
     search: 'i-search', reset: 'i-reset', next: 'i-next', undo: 'i-undo',
@@ -140,7 +140,16 @@
     });
     el.searchModes.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-selected',String(b.dataset.source === searchSource)); });
   }
-  function scheduleSearch() { clearTimeout(searchTimer); if (!searchComposing) searchTimer = setTimeout(function () { search(false); }, 400); }
+  function scheduleSearch() {
+    cancelPanelSearch(); clearTimeout(searchTimer);
+    if (panel && panel.kind === 'search') {
+      panel.items = null; panel.sourceStates = null; panel.loading = true; renderPanelItems();
+    }
+    if (!searchComposing) {
+      if (!el.query.value.trim()) search(false);
+      else searchTimer = setTimeout(function () { search(false); }, 400);
+    }
+  }
   function search(commit) {
     clearTimeout(searchTimer); if (searchComposing || !host) return;
     var q = el.query.value.trim(); el.searchDock.classList.add('is-expanded');
@@ -168,14 +177,19 @@
   function open(spec) {
     if (!host) return;
     if (callbacks.beforeOpenPanel) callbacks.beforeOpenPanel();
-    remember(); releaseSurface(); if (el.panelLayer.hidden) returnFocus = document.activeElement;
+    remember(); cancelPanelSearch(); releaseSurface(); if (el.panelLayer.hidden) returnFocus = document.activeElement;
     var saved = contexts.get(contextKey(spec)); panel = saved || Object.assign({ scroll: 0, items: null }, spec);
     lastViews.set(panel.kind === 'playlist' ? 'library' : panel.kind, panel);
     el.panelLayer.hidden = false; drawPanel();
     syncSelection();
     if (spec.kind !== 'search') el.panelBody.focus({ preventScroll: true });
     if (spec.kind === 'radio' || spec.kind === 'podcasts') return;
-    if (!panel.items || panel.loading) loadPanel();
+    if (!panel.items || panel.loading || spec.kind === 'search') loadPanel();
+  }
+  function cancelPanelSearch() {
+    generation += 1;
+    if (panelNetwork) panelNetwork.cancel();
+    panelNetwork = null;
   }
   function releaseSurface() { if (surface) { surface.dispose(); surface = null; } }
   function syncSelection() {
@@ -190,7 +204,7 @@
     if (!root) return false;
     el.searchDock.classList.remove('is-expanded'); clearTimeout(searchTimer);
     if (el.panelLayer.hidden) return false;
-    remember(); releaseSurface(); el.panelLayer.hidden = true; syncSelection();
+    remember(); cancelPanelSearch(); releaseSurface(); el.panelLayer.hidden = true; syncSelection();
     restoringSearchFocus = true;
     try { if ((!options || options.restoreFocus !== false) && returnFocus && returnFocus.isConnected) returnFocus.focus({ preventScroll: true }); }
     finally { restoringSearchFocus = false; }
@@ -205,7 +219,7 @@
     }); return row;
   }
   function drawPanel() {
-    var spec = panel; generation += 1;
+    var spec = panel;
     el.panelLayer.dataset.kind = spec.kind;
     el.panelLayer.classList.toggle('is-search', spec.kind === 'search');
     el.panelTitle.textContent = spec.kind === 'playlist' ? spec.playlist.name : { library: '音乐库', search: '搜索 · ' + (spec.q || ''), daily: '每日推荐', recent: '最近播放', radio: '电台 · 私人 FM', podcasts: 'RSS · 播客' }[spec.kind];
@@ -246,7 +260,14 @@
     renderPanelItems();
   }
   function renderPanelItems() {
-    var spec = panel; el.panelBody.replaceChildren();
+    var spec = panel, body = el.panelBody, focused = document.activeElement;
+    var focusKey = focused && focused.dataset && focused.dataset.searchKey;
+    var oldScroll = body.scrollTop;
+    var anchor = Array.from(body.querySelectorAll('.sh-track')).find(function (row) {
+      return row.getBoundingClientRect().bottom > body.getBoundingClientRect().top;
+    });
+    var anchorId = anchor && anchor.dataset.trackId, anchorTop = anchor && anchor.getBoundingClientRect().top;
+    el.panelBody.replaceChildren();
     el.panelBody.setAttribute('aria-busy', String(!!spec.loading));
     if (!spec.items) { el.panelBody.appendChild(node('p', 'sh-state', '正在读取音乐…')); return; }
     if (spec.note) el.panelBody.appendChild(node('p', 'sh-state', spec.note));
@@ -260,9 +281,28 @@
         var b = node('button', 'sh-playlist'); b.type = 'button'; b.appendChild(art(item, true)); b.appendChild(node('strong', '', item.name)); b.appendChild(node('span', '', (item.sourceLabel || '本地') + ' · ' + (item.track_count || 0) + ' 首'));
         b.addEventListener('click', function () { remember(); open({ kind: 'playlist', playlist: item, parent: spec, offset: 0 }); }); grid.appendChild(b);
       }); el.panelBody.appendChild(grid);
-    } else trackList(el.panelBody, spec.items);
+    } else if (spec.sourceStates) {
+      spec.sourceStates.forEach(function (source) {
+        var label = source.source === 'local' ? '本地' : global.Online ? Online.sourceLabel(source.source) : source.source;
+        var section = node('section', 'sh-search-source'); section.dataset.source = source.source;
+        section.appendChild(node('h3', 'sh-state', label));
+        trackList(section, spec.items.filter(function (item) { return item.source === source.source; }), spec);
+        var text = source.loading ? '搜索中…' : source.error ? source.error.label + '：' + source.error.message
+          : source.count ? source.count + ' 首已加载' : '没有匹配的音乐';
+        var status = node('p', 'sh-state', text);
+        if (source.error) status.dataset.errorCode = source.error.code;
+        if (source.error) status.dataset.requestId = source.error.requestId;
+        section.appendChild(status);
+        if (!source.loading && ((source.error && source.error.retryable) || (!source.error && source.more))) {
+          var more = node('button', 'sh-retry', source.error ? '重试 ' + label : '加载更多 · ' + label);
+          more.type = 'button'; more.dataset.searchKey = 'source:' + source.source;
+          more.addEventListener('click', source.error ? source.retry : source.next); section.appendChild(more);
+        }
+        el.panelBody.appendChild(section);
+      });
+    } else trackList(el.panelBody, spec.items, spec);
     if (spec.loading) el.panelBody.appendChild(node('p', 'sh-state', '正在搜索其他音源…'));
-    if (spec.nextOffset < spec.total || spec.offset) {
+    if (!spec.sourceStates && (spec.nextOffset < spec.total || spec.offset)) {
       var pages = node('div', 'sh-pages');
       var pagePrev = node('button', '', '上一页'), pageNext = node('button', '', '下一页'); pagePrev.type = pageNext.type = 'button'; pagePrev.disabled = !spec.offset; pageNext.disabled = spec.nextOffset >= spec.total || spec.nextOffset <= spec.offset;
       pagePrev.addEventListener('click', function () {
@@ -273,31 +313,46 @@
         open(Object.assign({}, spec, { offset: spec.nextOffset, previousOffsets: (spec.previousOffsets || []).concat(spec.offset), items: null, scroll: 0 }));
       }); pages.append(pagePrev, node('span', '', (spec.offset + 1) + '–' + spec.nextOffset + ' / ' + spec.total), pageNext); el.panelBody.appendChild(pages);
     }
-    el.panelBody.scrollTop = spec.scroll || 0; updateRows();
+    el.panelBody.scrollTop = oldScroll || spec.scroll || 0;
+    if (anchorId) {
+      var restored = spec.rows && spec.rows.get(anchorId);
+      if (restored && restored.isConnected) body.scrollTop += restored.getBoundingClientRect().top - anchorTop;
+    }
+    if (focusKey) body.querySelectorAll('[data-search-key]').forEach(function (control) {
+      if (control.dataset.searchKey === focusKey) control.focus({preventScroll:true});
+    });
+    updateRows();
   }
   async function loadPanel() {
-    var spec = panel, ticket = ++generation; spec.error = false; spec.loading = true; spec.items = null; spec.note = ''; renderPanelItems();
+    cancelPanelSearch();
+    var spec = panel, ticket = ++generation;
+    panelNetwork = host.beginSearch ? host.beginSearch() : null;
+    var network = panelNetwork;
+    spec.sourceStates = null; spec.rows = new Map(); spec.error = false; spec.loading = true; spec.items = null; spec.note = ''; renderPanelItems();
     try {
       var result;
       if (spec.kind === 'playlist') result = await host.playlist(spec.playlist, spec.offset);
       else if (spec.kind === 'daily') result = await host.daily(spec.source);
       else if (spec.kind === 'recent') result = await host.recent(spec.offset);
       else if (spec.kind === 'library' && spec.source === 'playlists') result = await host.playlists();
-      else result = await host.library({ q: spec.q || '', offset: spec.offset, source: spec.provider || spec.source,
+      else result = await host.library({ q: spec.q || '', offset: spec.offset, source: spec.provider || spec.source, network:network,
         onResults: function (partial) {
           if (ticket !== generation || panel !== spec) return;
           spec.items = partial.items; spec.total = partial.total; spec.nextOffset = partial.nextOffset;
+          spec.sourceStates = partial.sourceStates; spec.loading = partial.loading;
           renderPanelItems();
         } });
       if (ticket !== generation || panel !== spec) return;
       spec.items = result.items || []; spec.total = result.total || spec.items.length; spec.note = result.note || '';
+      spec.sourceStates = result.sourceStates;
       spec.nextOffset = result.nextOffset == null ? spec.offset + spec.items.length : result.nextOffset;
     } catch (error) { if (ticket !== generation || panel !== spec) return; spec.items = []; spec.error = true; spec.note = error.message || '读取失败，请重试'; }
     spec.loading = false; contexts.set(contextKey(spec), spec);
     if (ticket === generation && panel === spec) drawPanel();
   }
-  function trackList(container, items) {
+  function trackList(container, items, spec) {
     items.forEach(function (item) {
+      if (spec && spec.rows && spec.rows.has(item.id)) { container.appendChild(spec.rows.get(item.id)); return; }
       var row = node('div', 'sh-track'); row.dataset.trackId = item.id;
       var play = node('button', 'sh-track-main'); play.type = 'button'; play.setAttribute('aria-label', '播放 ' + item.title);
       var artwork = art(item), cue = node('span', 'sh-track-cue'); cue.innerHTML = icon('play'); artwork.appendChild(cue); play.appendChild(artwork);
@@ -315,8 +370,11 @@
       meta.append(origin, node('span', 'sh-track-artist', artist));
       var albumText = node('span', 'sh-track-album', album); albumText.title = album; meta.appendChild(albumText);
       text.appendChild(meta); var status = node('span', 'sh-track-status'); status.setAttribute('role','status'); status.hidden = true; text.appendChild(status); play.appendChild(text);
-      play.addEventListener('click', function () { activateTrack(item, items); });
+      play.dataset.searchKey = 'track:' + item.id;
+      play.addEventListener('click', function () { activateTrack(item, spec ? spec.items : items); });
       var queue = button('加入队列 · ' + item.title, 'queue-next', function () { run(function () { return host.enqueue(item); }, queue); });
+      queue.dataset.searchKey = 'queue:' + item.id;
+      if (spec && spec.rows) spec.rows.set(item.id, row);
       row.append(play, queue); container.appendChild(row);
     });
   }

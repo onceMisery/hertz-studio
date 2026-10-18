@@ -140,6 +140,15 @@
   registerLyricRenderer({ id: 'classic', label: '流光', host: 's3d-fl-lyric',
     create: function (host, seek) { return global.StanzaClassic && global.StanzaClassic.init(host, seek); },
     theme: baseLyricTheme, tuning: 'classicTuning', cameraRig: true, viewportResize: true });
+  // 自研字形渲染器：与 classic 共用歌词宿主，但不设 cameraRig，避免机位互相污染。
+  // tier0 不建上下文，直接让 planeFor 回退到已有渲染器。
+  registerLyricRenderer({ id: 'glyph', label: '字形', host: 's3d-fl-lyric',
+    create: function (host, seek) {
+      if (!global.StanzaGlyph || !global.LyricGlyphGL) return null;
+      if (global.Stage && Stage.tier && Stage.tier() === 0) return null;
+      return global.StanzaGlyph.init(host, seek);
+    },
+    theme: baseLyricTheme, tuning: 'classicTuning', viewportResize: true });
   registerLyricRenderer({ id: 'cadenza', label: '心象', host: 's3d-fl-lyric',
     create: function (host, seek) { return global.StanzaCadenza && global.StanzaCadenza.init(host, seek); },
     theme: baseLyricTheme, tuning: 'cadenzaTuning', cameraRig: true });
@@ -4274,6 +4283,16 @@
     open: open,
     close: close,
     isActive: isActive,
+    // The exporter must capture the actual scene owner, never a hidden canvas
+    // left behind by a different source. DOM/SVG renderers need their own path.
+    recordingSurface: function () {
+      if (!active) return null;
+      if (sceneSource === 'creative' && global.CreativeStage && CreativeStage.recordingSurface) {
+        return CreativeStage.recordingSurface();
+      }
+      return sceneSource === 'immersive' && !sceneCovered() && gl && !contextLost && canvas
+        ? {canvas:canvas,source:'immersive',ownsLyrics:false} : null;
+    },
     setQueue: setQueue,
     // 全屏舞台入口（stage-immersive / 模式键）统一走这里申请原生全屏；
     // 此前这两个方法没导出，外部调用静默失效，全屏链路整个断了。

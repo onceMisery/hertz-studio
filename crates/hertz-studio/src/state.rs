@@ -38,6 +38,9 @@ pub enum WsEvent {
         state: String,
         state_revision: i64,
     },
+    /// AI 任务广播可能在慢客户端积压时丢失。此提示不携带任务内容，消费端应重查
+    /// 持久快照；独立 WS 与 DBX 转发器在各自广播队列掉队时发送。
+    AiTasksResync,
     /// 界面实例之间的轻量信号。浮动胶囊窗口与 tab 实例是两个 opaque-origin 的
     /// iframe，BroadcastChannel / storage 事件都不通，只能借这条已有的广播管道
     /// 绕一圈：浮窗里点胶囊时发 `expand-capsule`，tab 实例收到就解除最小化。
@@ -243,8 +246,8 @@ pub(crate) const ONLINE_META_CAP: usize = 8192;
 /// 节拍任务表上限（每格只有几十字节状态，节拍地图本体在磁盘上）。
 pub(crate) const STAGE_BEATS_CAP: usize = 8192;
 
-/// 同时跑的节拍分析数。2 = 「当前这首在算，上一首切走的那份也能收尾」，再多就
-/// 开始和正在解码的音频抢 CPU；一台机器上的音频解码只需要一份。
+/// 节拍与显式基频分析共用的并发数。当前曲与切走的工作能收尾，基频最多占一槽；
+/// 再多会和正在解码的音频抢 CPU。
 pub(crate) const BEAT_ANALYZE_BUDGET: usize = 2;
 
 /// 一首的节拍分析最多试几次。到顶就放弃到进程结束：一首真放不出地图的文件不该
@@ -739,6 +742,7 @@ pub(crate) struct CommittedQuality {
     actor_generation: u64,
     actual: Option<crate::online::quality::Quality>,
     cached_path: Option<PathBuf>,
+    download: Option<crate::online::progressive::DownloadView>,
 }
 
 /// One optional actor preparation tied to existing queue positions, not a
@@ -832,10 +836,13 @@ pub struct AppState {
     pub(crate) committed_quality: Mutex<Option<CommittedQuality>>,
     /// 节拍分析幂等表：缓存键 → 任务态。
     pub(crate) stage_beats: Mutex<BoundedMap<crate::stage_beats::TaskState>>,
-    /// 节拍分析的总并发预算：一首的 FFT 是几秒的满核运算，快速连切歌时若每首
+    /// 节拍与基频分析的总并发预算：一首的 FFT 是几秒的满核运算，快速连切歌时若每首
     /// 都立刻开跑，抢的是正在解码那首歌的 CPU（听感是声音发卡，而画面一切正常）。
-    /// 额度只有这么一处，用完之后提交路径直接推迟、GET 路径等一手。
+    /// 提交路径直接推迟、节拍 GET 路径等一手；显式基频分析拿不到就返回 busy。
     pub(crate) beat_slots: Arc<tokio::sync::Semaphore>,
+    /// Content identity + algorithm/version; eight bounded, rebuildable pitch maps.
+    pub(crate) pitch_cache: Mutex<BoundedMap<Arc<vmusic_beats::pitch::PitchMap>>>,
+    pub(crate) lyric_candidates: Mutex<crate::lyrics::Candidates>,
     /// 「分析出来了但没写进磁盘」的地图（缓存键 → 地图）。这是刻意保留的第二
     /// 种状态，不是失败：这轮播放能用，重启不能。表本身有界（
     /// [`BEAT_VOLATILE_CAP`]），落盘长期失败的机器最多占这几首的内存。
@@ -2188,6 +2195,9 @@ impl AppState {
         if committed && play.is_ok() {
             self.remember_committed_quality(gen, &track_id, actual, None)
                 .await;
+            if let Some(committed) = self.committed_quality.lock().await.as_mut() {
+                committed.download = Some(view.clone());
+            }
         }
         self.set_buffering(false, None).await;
         if let Err(e) = play {
@@ -2354,14 +2364,29 @@ impl AppState {
         self.publish(WsEvent::Buffering { active, pct });
     }
 
-    /// 按服务端真值现取一帧缓冲态事件，供事件泵**掉队时补发**。
-    ///
-    /// `Buffering` 是边沿事件：状态帧每拍全量重发，所以别的帧掉了无所谓，唯独它
-    /// 掉了 `active=false` 会把播放键的转圈永久留在屏幕上。两条泵（独立形态的
-    /// WS、插件形态的 stdio 转发）在 `Lagged` 分支各调一次这里。
-    pub async fn buffering_event(&self) -> WsEvent {
+    /// 为慢客户端从当前真值重建非周期事件。buffering 是边沿状态，AI 任务事件是
+    /// 持久快照的失效提示；两条事件泵在广播掉队时必须一起补发。
+    pub async fn resync_events(&self) -> [WsEvent; 2] {
         let (active, pct) = *self.buffering.lock().await;
-        WsEvent::Buffering { active, pct }
+        [WsEvent::Buffering { active, pct }, WsEvent::AiTasksResync]
+    }
+
+    /// Read one event or recover from broadcast loss. Resubscribe before taking
+    /// the snapshot so stale queued edges cannot overwrite the recovered truth.
+    pub async fn next_event_batch(
+        &self,
+        receiver: &mut broadcast::Receiver<WsEvent>,
+    ) -> Option<[Option<WsEvent>; 2]> {
+        match receiver.recv().await {
+            Ok(event) => Some([Some(event), None]),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::debug!(skipped, "event consumer lagged; resynchronizing");
+                *receiver = receiver.resubscribe();
+                let [buffering, tasks] = self.resync_events().await;
+                Some([Some(buffering), Some(tasks)])
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
     }
 
     /// 中止全部在途下载并清空注册表（切到本地曲/换队预留时调用）。
@@ -2767,7 +2792,25 @@ impl AppState {
             actor_generation: self.audio.snapshot().generation,
             actual,
             cached_path,
+            download: None,
         });
+    }
+
+    /// Exact bytes selected by the playback owner, independent of later quality
+    /// preferences and cache relabelling. An unfinished download has no identity.
+    pub(crate) async fn project_online_media(&self, track_id: &str) -> Option<PathBuf> {
+        let snapshot = self.audio.snapshot();
+        let committed = self.committed_quality.lock().await;
+        let current = committed.as_ref().filter(|c| {
+            c.track_id == track_id
+                && snapshot.track_id.as_deref() == Some(track_id)
+                && c.play_generation == self.play_generation.load(Ordering::Relaxed)
+                && c.actor_generation == snapshot.generation
+        })?;
+        current
+            .cached_path
+            .clone()
+            .or_else(|| current.download.as_ref().and_then(|d| d.completed_path()))
     }
 
     /// The caller holds play_commit. Consume exactly one failure from the matching attempt.
@@ -4280,6 +4323,8 @@ pub(crate) mod tests {
             committed_quality: Default::default(),
             stage_beats: Mutex::new(BoundedMap::new(STAGE_BEATS_CAP)),
             beat_slots: Arc::new(tokio::sync::Semaphore::new(BEAT_ANALYZE_BUDGET)),
+            pitch_cache: Mutex::new(BoundedMap::new(8)),
+            lyric_candidates: Default::default(),
             beat_volatile: Mutex::new(BoundedMap::new(BEAT_VOLATILE_CAP)),
             beat_labels: Mutex::new(BoundedMap::new(BEAT_LABEL_CAP)),
             beat_deferrals: std::sync::atomic::AtomicUsize::new(0),
@@ -4579,22 +4624,29 @@ pub(crate) mod tests {
         let probe = async {
             // 等到 play_local 真的进入网络建连（服务端已接受连接）再开始计时：
             // 否则可能在它还忙着读 DB 时就量了，测不到锁的行为。
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), accepted_rx).await;
+            let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), accepted_rx)
+                .await
+                .is_ok_and(|result| result.is_ok());
             let t0 = std::time::Instant::now();
             state.set_queue(vec!["other".into()], Some(0)).await;
-            t0.elapsed()
+            (accepted, t0.elapsed())
         };
-        let (_, elapsed) = tokio::join!(play, probe);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            tokio::join!(play, probe)
+        })
+        .await;
+        holder.abort();
+        let _ = holder.await;
+        state.audio.shutdown();
+        handle.join().unwrap();
+        state.db.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let (_, (accepted, elapsed)) = result.expect("慢源检查超过总期限");
+        assert!(accepted, "未观察到真实慢源连接，不能证明换队锁边界");
         assert!(
             elapsed < std::time::Duration::from_millis(500),
             "慢源建连期间换队被阻塞了 {elapsed:?}——锁纪律回退了"
         );
-
-        holder.abort();
-        state.db.close().await;
-        state.audio.shutdown();
-        handle.join().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -5680,27 +5732,65 @@ pub(crate) mod tests {
         handle.join().unwrap();
     }
 
-    /// 掉队补发的帧必须读实时标志，而不是某个边沿值：补发的意义就是「客户端
-    /// 错过了切换，把现在的真值告诉它」。
+    /// 掉队恢复批次使用实时 buffering 真值，并附带任务快照失效提示。
     #[tokio::test]
-    async fn buffering_event_resyncs_from_the_live_flag() {
+    async fn resync_events_include_live_buffering_and_ai_tasks_hint() {
         let (state, handle) = playback_state().await;
         state.set_buffering(true, Some(40)).await;
+        let events = state.resync_events().await;
         assert!(matches!(
-            state.buffering_event().await,
+            &events[0],
             WsEvent::Buffering {
                 active: true,
                 pct: Some(40)
             }
         ));
+        assert!(matches!(&events[1], WsEvent::AiTasksResync));
         state.set_buffering(false, None).await;
+        let events = state.resync_events().await;
         assert!(matches!(
-            state.buffering_event().await,
+            &events[0],
             WsEvent::Buffering {
                 active: false,
                 pct: None
             }
         ));
+        assert!(matches!(&events[1], WsEvent::AiTasksResync));
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn lagged_event_batch_discards_stale_edges_and_keeps_receiving() {
+        let (state, handle) = playback_state().await;
+        let (events, mut receiver) = broadcast::channel(1);
+        events
+            .send(WsEvent::Buffering {
+                active: true,
+                pct: Some(40),
+            })
+            .unwrap();
+        events.send(WsEvent::Ended).unwrap();
+
+        let batch = state.next_event_batch(&mut receiver).await.unwrap();
+        assert!(matches!(
+            batch[0].as_ref(),
+            Some(WsEvent::Buffering {
+                active: false,
+                pct: None
+            })
+        ));
+        assert!(matches!(batch[1].as_ref(), Some(WsEvent::AiTasksResync)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        events.send(WsEvent::Ended).unwrap();
+        let batch = state.next_event_batch(&mut receiver).await.unwrap();
+        assert!(matches!(batch[0].as_ref(), Some(WsEvent::Ended)));
+        assert!(batch[1].is_none());
+
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -5767,6 +5857,39 @@ pub(crate) mod tests {
         assert_eq!(result.unwrap_err().code, "upstream_rejected");
         assert_eq!(attempts, 1);
         assert!(state.quality_caps.lock().await.get(vid).is_none());
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_media_keeps_exact_cached_path_and_rejects_stale_playback() {
+        use crate::online::quality::Quality;
+        let (state, handle) = playback_state().await;
+        let vid = "online:ccmixter:project";
+        let path = Path::new("exact-standard.wav");
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        state
+            .try_commit_cached(gen, 0, vid, path, Some(Quality::Standard))
+            .await
+            .unwrap();
+        state
+            .quality
+            .lock()
+            .await
+            .insert("ccmixter".into(), Quality::Hires);
+        assert_eq!(state.project_online_media(vid).await.as_deref(), Some(path));
+        assert!(state
+            .project_online_media("online:ccmixter:other")
+            .await
+            .is_none());
+        state.audio.seek(100).await.unwrap();
+        state.transport_committed().await;
+        assert_eq!(state.project_online_media(vid).await.as_deref(), Some(path));
+        state.set_queue(vec![vid.into()], Some(0)).await;
+        assert!(
+            state.project_online_media(vid).await.is_none(),
+            "new same-track intent cannot inherit the old bytes"
+        );
         state.audio.shutdown();
         handle.join().unwrap();
     }
