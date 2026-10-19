@@ -1153,6 +1153,24 @@
           <input id="set-emotion-ai-authorized" type="checkbox">
           <span class="hint" id="set-emotion-ai-note">仅自动分类需要；未授权时不发送歌词</span>
         </div>
+        <div class="set-row">
+          <label for="set-emotion-lock">手动锁定当前行</label>
+          <span class="set-actions">
+            <select id="set-emotion-lock">
+              <option value="joy">雀跃</option>
+              <option value="sorrow">悲伤</option>
+              <option value="anger">愤怒</option>
+              <option value="anxious">不安</option>
+              <option value="tender">温柔</option>
+              <option value="triumph">胜利</option>
+              <option value="lonely">孤独</option>
+              <option value="neutral">中性</option>
+            </select>
+            <button id="set-emotion-lock-apply" class="btn" type="button">锁定</button>
+            <button id="set-emotion-lock-clear" class="btn" type="button">清除</button>
+          </span>
+          <span class="hint" id="set-emotion-lock-note">手动覆盖优先于 auto 结果；关闭情绪演出时不生效</span>
+        </div>
         <p class="hint set-note" id="set-emotion-note">关闭时与当前版本完全一致；手动预览只用于调试，自动分类需要模型 provider 和显式授权。</p>
       </div>
 

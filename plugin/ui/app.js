@@ -85,6 +85,10 @@ const ui = {
   setEmotionPalette: $('set-emotion-palette'),
   setEmotionAiAuthorized: $('set-emotion-ai-authorized'),
   setEmotionAiNote: $('set-emotion-ai-note'),
+  setEmotionLock: $('set-emotion-lock'),
+  setEmotionLockApply: $('set-emotion-lock-apply'),
+  setEmotionLockClear: $('set-emotion-lock-clear'),
+  setEmotionLockNote: $('set-emotion-lock-note'),
   setEmotionNote: $('set-emotion-note'),
   setRmBg: $('set-rm-bg'),
   setRmLyrics: $('set-rm-lyrics'),
@@ -2269,11 +2273,50 @@ function paintEmotionSettings() {
           ? (lyricEmotionReady() ? '模型已就绪；授权后会在每首歌载入时分类' : '授权前不会发送歌词')
           : ((provider && provider.diagnostic) || '模型未就绪；不会发送歌词');
   }
+  if (ui.setEmotionLockNote) {
+    var lockCount = Array.isArray(state.settings.lyrics_emotion_locks) ? state.settings.lyrics_emotion_locks.length : 0;
+    ui.setEmotionLockNote.textContent = lockCount
+      ? '已锁定 ' + lockCount + ' 行；手动覆盖优先于 auto 结果'
+      : '手动覆盖优先于 auto 结果；关闭情绪演出时不生效';
+  }
   if (ui.setEmotionNote) {
     ui.setEmotionNote.textContent = auto
       ? '自动分类使用已配置的模型 provider；失败时保持中性，不影响播放。'
       : '关闭时与当前版本完全一致；手动预览只用于调试，自动分类需要模型 provider 和显式授权。';
   }
+}
+
+function emotionLocks(hash) {
+  return (Array.isArray(state.settings.lyrics_emotion_locks)
+    ? state.settings.lyrics_emotion_locks
+    : []).filter(function (lock) {
+    return lock && Number.isFinite(lock.from) && Number.isFinite(lock.to) &&
+      lock.emotion && typeof lock.emotion === 'string' &&
+      (hash == null || lock.hash === hash);
+  });
+}
+
+function applyEmotionLocks(cue) {
+  if (!cue) return cue;
+  var locks = emotionLocks(cue.lyricsHash);
+  if (!locks.length) return cue;
+  var doc = Stage && Stage.lyrics ? Stage.lyrics() : null;
+  var count = doc && doc.lines ? doc.lines.length : 0;
+  if (!count) return cue;
+  var lines = Array.isArray(cue.lines) ? cue.lines.filter(function (line) {
+    return !locks.some(function (lock) { return line.index >= lock.from && line.index <= lock.to; });
+  }) : [];
+  locks.forEach(function (lock) {
+    var to = Math.min(count - 1, lock.to);
+    for (var i = Math.max(0, lock.from); i <= to; i += 1) {
+      lines.push({
+        index: i, emotion: lock.emotion,
+        intensity: Number.isFinite(lock.intensity) ? lock.intensity : 1,
+        confidence: Number.isFinite(lock.confidence) ? lock.confidence : 1
+      });
+    }
+  });
+  return Object.assign({}, cue, { lines: lines });
 }
 
 async function refreshEmotionAiStatus() {
@@ -2312,7 +2355,8 @@ async function maybeAutoEmotion() {
     var cue = await transport.post('/v1/ai/lyrics/emotion',
       { lyricsHash: hash, lines: lines }, { signal: controller.signal });
     if (requestToken !== emotionAutoToken || lyricEmotionMode() !== 'auto' || !cue || cue.version !== 1) return;
-    if (Stage.setEmotionCueDoc(cue)) emotionAutoAppliedHash = hash;
+    var merged = applyEmotionLocks(cue);
+    if (Stage.setEmotionCueDoc(merged)) emotionAutoAppliedHash = hash;
   } catch (error) {
     // Provider 未就绪/授权撤销/超时都保持中性；播放不受影响。
   } finally {
@@ -8438,6 +8482,26 @@ async function startApp() {
         }
         await saveLyricSettings({ lyrics_emotion_ai_authorized: authorized });
         await refreshEmotionAiStatus();
+      };
+    }
+    if (ui.setEmotionLockApply && ui.setEmotionLockClear) {
+      ui.setEmotionLockApply.onclick = async () => {
+        if (!Stage || !Stage.lyrics || !window.LyricEmotion) return;
+        var doc = Stage.lyrics();
+        var index = doc && Number.isFinite(doc.index) ? doc.index : -1;
+        if (index < 0 || !doc.lines || index >= doc.lines.length) return;
+        var lines = doc.lines.map(function (line, i) {
+          return { index: i, start_ms: line.start_ms, text: String(line.text == null ? '' : line.text).normalize('NFC') };
+        });
+        var hash = await LyricEmotion.hashLyrics(lines);
+        var locks = emotionLocks(hash).filter(function (lock) { return !(lock.from <= index && lock.to >= index); });
+        locks.push({ hash: hash, from: index, to: index, emotion: ui.setEmotionLock.value, intensity: 1, confidence: 1 });
+        invalidateEmotionAuto();
+        await saveLyricSettings({ lyrics_emotion_locks: locks });
+      };
+      ui.setEmotionLockClear.onclick = async () => {
+        invalidateEmotionAuto();
+        await saveLyricSettings({ lyrics_emotion_locks: [] });
       };
     }
   }

@@ -276,6 +276,17 @@ async function main() {
     await page.waitForTimeout(200);
     await page.evaluate(() => { const b = document.querySelector('.skset-link[data-skset-key="lyrics"]'); if (b) b.click(); });
     await page.waitForTimeout(150);
+    await page.selectOption('#set-emotion-lock', 'anger');
+    await page.click('#set-emotion-lock-apply');
+    await page.waitForFunction(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return line && line.getAttribute('data-emotion') === 'anger';
+    }, null, { timeout: 15000 });
+    await page.click('#set-emotion-lock-clear');
+    await page.waitForFunction(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return line && line.getAttribute('data-emotion') && line.getAttribute('data-emotion') !== 'anger';
+    }, null, { timeout: 15000 });
     await page.selectOption('#set-emotion-mode', 'off');
     await page.uncheck('#set-emotion-ai-authorized');
     await page.evaluate(() => { const b = document.querySelector('.skset-modal-close'); if (b) b.click(); });
@@ -290,7 +301,7 @@ async function main() {
       pageErrors: errors
     }, null, 2));
 
-    console.log('✓ 侧栏 P0/P1：无 Cue 不写属性；joy/sorrow/anger 写入 data-*、--emo-dy、translate、字体参数；清除后全部移除');
+    console.log('✓ 侧栏 P0/P1/P2b/P3：手动/classic 场、fixture auto、手动锁定覆盖 auto、清除与默认关闭');
     console.log('  hash ' + prepared.hash + ' line ' + prepared.index + ' words ' + snapshots.joy.words);
     console.log('  weight ' + [snapshots.joy.fontWeight, snapshots.sorrow.fontWeight, snapshots.anger.fontWeight].join('/') +
       '  spacing ' + [snapshots.joy.letterSpacing, snapshots.sorrow.letterSpacing, snapshots.anger.letterSpacing].join('/'));
