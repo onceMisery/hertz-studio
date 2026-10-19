@@ -153,6 +153,16 @@
       return [c.r / 255, c.g / 255, c.b / 255];
     }
 
+    function decorAllowed() {
+      if (!document.body) return false;
+      if (document.body.classList.contains('reduce-motion') ||
+          document.body.classList.contains('stage-lowfx')) return false;
+      var rm = document.body.getAttribute('data-rm') || '';
+      if (rm.split(/\s+/).indexOf('lyrics') >= 0) return false;
+      if (root.closest && root.closest('.s3d-reduced')) return false;
+      return true;
+    }
+
     function pulse() {
       if (global.Stage && Stage.beat) return U.clamp(Stage.beat(), 0, 1);
       if (global.Stage && Stage.energy) return U.clamp(Stage.energy(), 0, 1);
@@ -182,6 +192,7 @@
       var eI = profile ? emotionScale : (st ? st.intensity : 1);
       var pal = st && (!global.LyricEmotion || !global.LyricEmotion.paletteEnabled ||
         global.LyricEmotion.paletteEnabled()) ? st.palette : null;
+      var decorKind = 0, decorStride = 1, decorSeed = 0, decorDur = 1800, decorColor = null;
       var f = (prof && global.LyricEmotionField)
         ? global.LyricEmotionField.sample(prof, eI, em, pulse(), 0)
         : { b: new Float32Array(33), w: new Float32Array(33).fill(0.5),
@@ -202,6 +213,19 @@
           uStart: it.uStart, uEnd: it.uEnd,
           startMs: it.startMs, durMs: Math.max(1, it.endMs - it.startMs)
         });
+      }
+
+      if (st && st.intensity >= 0.75 && st.decor && st.decor.length && decorAllowed()) {
+        var dec = st.decor[0];
+        var kindMap = { spark: 1, tear: 2, ember: 3 };
+        var count = Math.min(6, dec.climaxCount != null ? dec.climaxCount : (dec.count || 0));
+        decorKind = kindMap[dec.kind] || 0;
+        if (decorKind && count > 0 && glyphs.length) {
+          decorStride = Math.max(1, Math.ceil(glyphs.length / count));
+          decorSeed = layout.line.start_ms || 0;
+          decorDur = decorKind === 2 ? 4000 : 1800;
+          decorColor = toVec3(pal ? pal.accent : theme.accentColor);
+        }
       }
 
       var dirty = atlas.takeDirty();
@@ -231,6 +255,8 @@
         rimWidth: RIM_PX / scale,
         clipU: clipU, soft: 0.012, wobble: 0.004,
         turbAmp: f.turb,
+        decorKind: decorKind, decorStride: decorStride, decorSeed: decorSeed,
+        decorDur: decorDur, decorColor: decorColor,
         opacity: 1,
         idleColor: toVec3(pal ? pal.ink : theme.primaryColor),
         sungColor: toVec3(pal ? pal.accent : theme.accentColor),

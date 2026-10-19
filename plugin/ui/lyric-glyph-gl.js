@@ -27,11 +27,16 @@
     'uniform float uDamp;',
     'uniform float uCurveB[33];',
     'uniform float uCurveW[33];',
+    'uniform float uDecorKind;',
+    'uniform float uDecorStride;',
+    'uniform float uDecorSeed;',
     'out vec2  vUV;',
     'out float vU;',
     'out float vW;',
     'out vec4  vBox;',
     'out vec2  vLocal;',
+    'flat out float vDecor;',
+    'flat out float vSeed;',
     'void main() {',
     '  vec2 quad = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));',
     '  float u = mix(aUVU.z, aUVU.w, quad.x);',
@@ -55,6 +60,8 @@
     '  vBox = aBox;',
     // 内容盒坐标（0..CONTENT），与图集里算出的 aBox 同一坐标系。
     '  vLocal = quad * uCellPx - vec2(uPadPx);',
+    '  vDecor = (uDecorKind > 0.5 && mod(float(gl_InstanceID), max(uDecorStride, 1.0)) < 0.5) ? 1.0 : 0.0;',
+    '  vSeed = uDecorSeed + float(gl_InstanceID) * 17.0;',
     '}'
   ].join('\n');
 
@@ -66,6 +73,8 @@
     'in float vW;',
     'in vec4  vBox;',
     'in vec2  vLocal;',
+    'flat in float vDecor;',
+    'flat in float vSeed;',
     'uniform sampler2D uAtlas;',
     'uniform float uRange;',
     'uniform float uPxScale;',
@@ -90,6 +99,9 @@
     'uniform vec3  uIdleColor;',
     'uniform vec3  uSungColor;',
     'uniform vec3  uGlowColor;',
+    'uniform float uDecorKind;',
+    'uniform float uDecorDur;',
+    'uniform vec3  uDecorColor;',
     'out vec4 frag;',
     'void main() {',
     '  vec2 uv = vUV;',
@@ -136,6 +148,23 @@
     '  float glow = exp(-glowD * uGlowK) * uGlowAmt * (1.0 - mask);',
     '  float a = clamp(mask + glow * 0.55, 0.0, 1.0);',
     '  vec3  c = col * mask + uGlowColor * glow + col * rim;',
+    // P2a 片元粒子：每个 stride 字格画一颗，不新增 draw call。
+    // 1 spark / 2 tear / 3 ember；t 从 0 到 1 循环，t=0/1 时淡出。
+    '  if (uDecorKind > 0.5 && vDecor > 0.5) {',
+    '    float t = fract((uTimeMs + vSeed * 137.0) / max(uDecorDur, 1.0));',
+    '    float h1 = fract(vSeed * 0.371);',
+    '    float dx = (h1 - 0.5) * 18.0;',
+    // 从该字实墨迹盒的底边发射，而不是格子中心；这样粒子不会被字身盖住。
+    '    vec2 center = vec2(vBox.x + (h1 - 0.5) * vBox.z * 2.2, vBox.y + vBox.w + 2.0);',
+    '    float travel = uDecorKind > 2.5 ? -34.0 : (uDecorKind > 1.5 ? 78.0 : -24.0);',
+    '    center += vec2(dx, travel) * t;',
+    '    vec2 q = vLocal - center;',
+    '    if (uDecorKind > 1.5 && uDecorKind < 2.5) q.y /= 2.4;',
+    '    float radius = uDecorKind > 2.5 ? 4.0 : (uDecorKind > 1.5 ? 3.2 : 3.6);',
+    '    float particle = smoothstep(radius, radius - 0.9, length(q)) * sin(3.1415926 * t);',
+    '    c += uDecorColor * particle;',
+    '    a = max(a, particle * 0.9);',
+    '  }',
     '  frag = vec4(c, a * uOpacity);',
     '}'
   ].join('\n');
@@ -163,7 +192,7 @@
   // 取 location 时数组必须写 'name[0]'：部分驱动对裸数组名返回 null，
   // 而 uniform1fv(null) 是静默 no-op —— 表现是「场完全没生效」。
   var UNIFORMS = ['uResolution', 'uUVSize', 'uTimeMs', 'uShear', 'uBaseY',
-    'uCellPx', 'uPadPx',
+    'uCellPx', 'uPadPx', 'uDecorKind', 'uDecorStride', 'uDecorSeed', 'uDecorDur', 'uDecorColor',
     'uAmp', 'uFreq', 'uDamp', 'uCurveB[0]', 'uCurveW[0]',
     'uAtlas', 'uRange', 'uPxScale', 'uWeightGain', 'uWeightGainHi', 'uGlowK', 'uGlowAmt',
     'uRimAmt', 'uRimWidth', 'uClipU', 'uSoft', 'uWobble', 'uTurbAmp', 'uOpacity', 'uDual',
@@ -253,6 +282,11 @@
       gl.uniform2f(U.uUVSize, o.uvW, o.uvH);
       gl.uniform1f(U.uCellPx, cellPx);
       gl.uniform1f(U.uPadPx, padPx);
+      gl.uniform1f(U.uDecorKind, o.decorKind || 0);
+      gl.uniform1f(U.uDecorStride, o.decorStride || 1);
+      gl.uniform1f(U.uDecorSeed, o.decorSeed || 0);
+      gl.uniform1f(U.uDecorDur, o.decorDur || 1800);
+      gl.uniform3fv(U.uDecorColor, o.decorColor || o.glowColor || [1, 1, 1]);
       gl.uniform1f(U.uTimeMs, o.timeMs);
       gl.uniform1f(U.uShear, o.shear);
       gl.uniform1f(U.uBaseY, o.baseY);
