@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use unicode_normalization::UnicodeNormalization;
 
 pub(crate) const PROMPT_VERSION: u32 = 1;
@@ -438,15 +438,67 @@ impl EmotionProvider for FakeEmotionProvider {
     }
 }
 
+struct AiRuntimeEmotionProvider {
+    provider: Arc<dyn crate::ai::jobs::StageIntentProvider>,
+    credentials: Arc<crate::ai::credential::Service>,
+    owner: String,
+}
+
+impl EmotionProvider for AiRuntimeEmotionProvider {
+    fn id(&self) -> &'static str {
+        self.provider.id()
+    }
+    fn model(&self) -> &str {
+        self.provider.model()
+    }
+    fn ready(&self) -> bool {
+        self.provider.ready()
+    }
+    fn diagnostic(&self) -> Option<&str> {
+        self.provider.diagnostic()
+    }
+    fn classify(
+        &self,
+        system: String,
+        user: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+        let provider = self.provider.clone();
+        let credentials = self.credentials.clone();
+        let owner = self.owner.clone();
+        Box::pin(async move {
+            let credential = if provider.requires_openai_credential() {
+                Some(
+                    credentials
+                        .snapshot(&owner)
+                        .await
+                        .map_err(|error| error.message)?
+                        .into_secret(),
+                )
+            } else {
+                None
+            };
+            let reply = provider
+                .complete(
+                    system,
+                    user,
+                    credential,
+                    crate::ai::jobs::ProviderCancellation::default(),
+                )
+                .await?;
+            Ok(reply.text)
+        })
+    }
+}
+
 pub(crate) struct EmotionService {
-    provider: Arc<dyn EmotionProvider>,
+    provider: RwLock<Arc<dyn EmotionProvider>>,
     cache: Mutex<Cache>,
 }
 
 impl EmotionService {
     pub(crate) fn new(provider: Arc<dyn EmotionProvider>) -> Self {
         Self {
-            provider,
+            provider: RwLock::new(provider),
             cache: Mutex::new(Cache::new()),
         }
     }
@@ -459,28 +511,66 @@ impl EmotionService {
         }
     }
 
+    fn provider(&self) -> Result<Arc<dyn EmotionProvider>, EmotionError> {
+        self.provider
+            .read()
+            .map(|guard| guard.clone())
+            .map_err(|_| EmotionError::unavailable("provider lock unavailable"))
+    }
+
+    pub(crate) fn install_ai_provider(
+        &self,
+        provider: Arc<dyn crate::ai::jobs::StageIntentProvider>,
+        credentials: Arc<crate::ai::credential::Service>,
+        owner: String,
+    ) {
+        let adapter: Arc<dyn EmotionProvider> = Arc::new(AiRuntimeEmotionProvider {
+            provider,
+            credentials,
+            owner,
+        });
+        if let Ok(mut slot) = self.provider.write() {
+            *slot = adapter;
+        }
+    }
+
     pub(crate) fn status(&self, authorized: bool) -> Value {
-        json!({
-            "provider": {
-                "id": self.provider.id(),
-                "model": self.provider.model(),
-                "ready": self.provider.ready(),
-                "simulated": self.provider.simulated(),
-                "diagnostic": self.provider.diagnostic(),
-            },
-            "promptVersion": PROMPT_VERSION,
-            "catalogVersion": CATALOG_VERSION,
-            "authorized": authorized,
-        })
+        match self.provider() {
+            Ok(provider) => json!({
+                "provider": {
+                    "id": provider.id(),
+                    "model": provider.model(),
+                    "ready": provider.ready(),
+                    "simulated": provider.simulated(),
+                    "diagnostic": provider.diagnostic(),
+                },
+                "promptVersion": PROMPT_VERSION,
+                "catalogVersion": CATALOG_VERSION,
+                "authorized": authorized,
+            }),
+            Err(_) => json!({
+                "provider": {
+                    "id": "unavailable",
+                    "model": "",
+                    "ready": false,
+                    "simulated": false,
+                    "diagnostic": "provider lock unavailable",
+                },
+                "promptVersion": PROMPT_VERSION,
+                "catalogVersion": CATALOG_VERSION,
+                "authorized": authorized,
+            }),
+        }
     }
 
     pub(crate) async fn classify(&self, request: ClassifyRequest) -> Result<CueDoc, EmotionError> {
         validate_request(&request)?;
+        let provider = self.provider()?;
         let key = format!(
             "{}|{}|{}|{}|{}",
             request.lyrics_hash,
-            self.provider.id(),
-            self.provider.model(),
+            provider.id(),
+            provider.model(),
             PROMPT_VERSION,
             CATALOG_VERSION
         );
@@ -492,15 +582,14 @@ impl EmotionService {
         {
             return Ok(doc);
         }
-        if !self.provider.ready() {
+        if !provider.ready() {
             return Err(EmotionError::unavailable("歌词情绪 provider 未就绪"));
         }
         let chunks = chunks(request.lines.len());
         let mut lines = Vec::new();
         let mut sections = Vec::new();
         for chunk in chunks {
-            let text = self
-                .provider
+            let text = provider
                 .classify(system_prompt(), user_prompt(&request, &chunk))
                 .await
                 .map_err(EmotionError::unavailable)?;
@@ -540,14 +629,14 @@ impl EmotionService {
             lyrics_hash: request.lyrics_hash,
             sections: merged,
             lines,
-            source: if self.provider.simulated() {
+            source: if provider.simulated() {
                 "fixture"
             } else {
                 "llm"
             }
             .to_string(),
-            provider_id: self.provider.id().to_string(),
-            model_id: self.provider.model().to_string(),
+            provider_id: provider.id().to_string(),
+            model_id: provider.model().to_string(),
             prompt_version: PROMPT_VERSION,
             catalog_version: CATALOG_VERSION,
         };
@@ -717,6 +806,100 @@ mod tests {
         assert_eq!(doc.source, "fixture");
         assert_eq!(doc.provider_id, "fake");
         assert_eq!(doc.lines.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn ai_runtime_adapter_classifies_through_generic_completion() {
+        struct CompletionFixture {
+            calls: AtomicUsize,
+            system: Mutex<Option<String>>,
+        }
+
+        impl crate::ai::jobs::StageIntentProvider for CompletionFixture {
+            fn id(&self) -> &'static str {
+                "fixture-llm"
+            }
+            fn model(&self) -> &str {
+                "fixture-llm-v1"
+            }
+            fn ready(&self) -> bool {
+                true
+            }
+            fn quote(&self, _brief: &str) -> Result<crate::ai::usage::PriceQuote, String> {
+                Err("not used".to_string())
+            }
+            fn generate(
+                &self,
+                _brief: String,
+                _pricing: crate::ai::usage::PricingSnapshot,
+                _credential: Option<crate::ai::credential::ProviderCredential>,
+                _cancellation: crate::ai::jobs::ProviderCancellation,
+            ) -> Pin<Box<dyn Future<Output = crate::ai::jobs::ProviderReply> + Send>> {
+                Box::pin(async {
+                    crate::ai::jobs::ProviderReply {
+                        intent: Err("not used".to_string()),
+                        usage: None,
+                    }
+                })
+            }
+            fn complete(
+                &self,
+                system: String,
+                user: String,
+                _credential: Option<crate::ai::credential::ProviderCredential>,
+                _cancellation: crate::ai::jobs::ProviderCancellation,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<crate::ai::jobs::CompletionReply, String>> + Send>,
+            > {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                *self.system.lock().unwrap() = Some(system);
+                Box::pin(async move {
+                    let input: Value =
+                        serde_json::from_str(&user).map_err(|_| "bad prompt".to_string())?;
+                    let hash = input["lyricsHash"]
+                        .as_str()
+                        .ok_or_else(|| "hash missing".to_string())?;
+                    let from = input["CORE_FROM"]
+                        .as_u64()
+                        .ok_or_else(|| "range missing".to_string())?
+                        as u32;
+                    Ok(crate::ai::jobs::CompletionReply {
+                        text: json!({
+                            "version": 1,
+                            "lyricsHash": hash,
+                            "sections": [],
+                            "lines": [{ "index": from, "emotion": "joy", "intensity": 0.75, "confidence": 0.9 }],
+                        })
+                        .to_string(),
+                    })
+                })
+            }
+        }
+
+        let provider = Arc::new(CompletionFixture {
+            calls: AtomicUsize::new(0),
+            system: Mutex::new(None),
+        });
+        let service = EmotionService::new(Arc::new(AiRuntimeEmotionProvider {
+            provider: provider.clone(),
+            credentials: crate::ai::credential::Service::isolated(),
+            owner: "test-owner".into(),
+        }));
+        let doc = service.classify(request(lines(1))).await.unwrap();
+        assert_eq!(doc.source, "llm");
+        assert_eq!(doc.provider_id, "fixture-llm");
+        assert_eq!(doc.lines[0].emotion, "joy");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert!(provider
+            .system
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|system| system.contains("classify lyric lines")));
+        let status = service.status(true);
+        assert_eq!(status["provider"]["id"], "fixture-llm");
+        assert_eq!(status["provider"]["ready"], true);
+        assert_eq!(status["provider"]["simulated"], false);
     }
 
     #[tokio::test]

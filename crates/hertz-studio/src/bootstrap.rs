@@ -251,6 +251,18 @@ pub async fn boot(
         if let Err(e) = crate::ai::jobs::recover(&state).await {
             tracing::warn!("AI 任务恢复失败: {}", e.code);
         }
+        if config.ai.provider != "fake" {
+            match crate::ai::jobs::instance_owner(&state).await {
+                Ok(owner) => state.ai_emotion.install_ai_provider(
+                    state.ai_runtime.provider().await,
+                    state.ai_runtime.credentials.clone(),
+                    owner,
+                ),
+                Err(error) => {
+                    tracing::warn!("歌词情绪 provider 未能绑定实例: {}", error.code)
+                }
+            }
+        }
     } else {
         tracing::warn!("AI runner 锁被其它进程持有，AI 生成与外部对接停用");
     }

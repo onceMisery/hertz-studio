@@ -90,6 +90,21 @@ pub(crate) trait StageIntentProvider: Send + Sync {
         credential: Option<crate::ai::credential::ProviderCredential>,
         cancellation: ProviderCancellation,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ProviderReply> + Send>>;
+
+    /// Generic text completion for non-stage capabilities (lyric emotion
+    /// classification). It reuses this provider's transport, credentials and
+    /// cancellation; providers that only implement StageIntent keep the safe
+    /// default rejection. Classification does not own a second HTTP client.
+    fn complete(
+        &self,
+        _system: String,
+        _user: String,
+        _credential: Option<crate::ai::credential::ProviderCredential>,
+        _cancellation: ProviderCancellation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CompletionReply, String>> + Send>>
+    {
+        Box::pin(async { Err("provider does not support generic completion".to_string()) })
+    }
 }
 
 /// Generation validity and billing are independent: even a rejected candidate
@@ -97,6 +112,10 @@ pub(crate) trait StageIntentProvider: Send + Sync {
 pub(crate) struct ProviderReply {
     pub intent: Result<Value, String>,
     pub usage: Option<TrustedUsage>,
+}
+
+pub(crate) struct CompletionReply {
+    pub text: String,
 }
 
 /// One task's terminal signal, independent of its HTTP/RPC observer. Removing

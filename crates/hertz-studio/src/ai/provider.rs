@@ -210,6 +210,69 @@ impl Ollama {
         }
         parse_reply(&bytes, &self.model)
     }
+
+    fn completion_request(&self, system: &str, user: &str) -> Result<Vec<u8>, &'static str> {
+        let request = json!({
+            "model": self.model,
+            "stream": false,
+            "think": false,
+            "format": "json",
+            "messages": [{ "role": "system", "content": system },
+                { "role": "user", "content": user }],
+            "options": { "num_predict": OUTPUT_TOKENS, "temperature": 0 },
+        });
+        let bytes = serde_json::to_vec(&request).map_err(|_| "cannot encode model request")?;
+        if bytes.len() > REQUEST_BYTES {
+            return Err("complete model request exceeds byte limit");
+        }
+        Ok(bytes)
+    }
+
+    async fn completion_execute(&self, body: Vec<u8>) -> Result<String, String> {
+        let mut response = match self
+            .client
+            .post(self.endpoint.clone())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .body(body)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => return Err("local model request failed or timed out".to_string()),
+        };
+        let status = response.status();
+        if response
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .is_some_and(|v| v != "identity")
+        {
+            return Err("local model returned an unsupported content encoding".to_string());
+        }
+        let mut bytes = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) if chunk.len() <= RESPONSE_BYTES - bytes.len() => {
+                    bytes.extend_from_slice(&chunk)
+                }
+                Ok(Some(_)) => return Err("local model response exceeds 256 KiB".to_string()),
+                Ok(None) => break,
+                Err(_) => return Err("local model response read failed".to_string()),
+            }
+        }
+        if !status.is_success() {
+            return Err(format!("local model HTTP status {}", status.as_u16()));
+        }
+        let envelope =
+            super::strict_json::parse(&bytes, RESPONSE_BYTES, 8).map_err(str::to_owned)?;
+        envelope
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "local model completion text is missing".to_string())
+    }
 }
 
 impl StageIntentProvider for Ollama {
@@ -265,6 +328,26 @@ impl StageIntentProvider for Ollama {
                 biased;
                 _ = cancellation.cancelled() => failed("local model request cancelled"),
                 reply = provider.execute(body) => reply,
+            }
+        })
+    }
+
+    fn complete(
+        &self,
+        system: String,
+        user: String,
+        _credential: Option<super::credential::ProviderCredential>,
+        mut cancellation: super::jobs::ProviderCancellation,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<super::jobs::CompletionReply, String>> + Send>,
+    > {
+        let provider = self.clone();
+        Box::pin(async move {
+            let body = provider.completion_request(&system, &user)?;
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err("local model request cancelled".to_string()),
+                text = provider.completion_execute(body) => text.map(|text| super::jobs::CompletionReply { text }),
             }
         })
     }
@@ -410,6 +493,74 @@ impl OpenAi {
         }
         parse_openai_reply(&bytes, &self.model)
     }
+
+    fn completion_request(&self, system: &str, user: &str) -> Result<Vec<u8>, &'static str> {
+        let quote = self.pricing.as_ref().ok_or(OPENAI_DISABLED)?;
+        if quote.max_output_tokens == 0 || quote.max_output_tokens > OUTPUT_TOKENS {
+            return Err("OpenAI output token limit is not supported");
+        }
+        let request = json!({
+            "model": self.model,
+            "instructions": system,
+            "input": user,
+            "store": false,
+            "stream": false,
+            "max_output_tokens": quote.max_output_tokens,
+        });
+        let bytes = serde_json::to_vec(&request).map_err(|_| "cannot encode model request")?;
+        if bytes.len() > REQUEST_BYTES {
+            return Err("complete model request exceeds byte limit");
+        }
+        Ok(bytes)
+    }
+
+    async fn completion_execute(
+        &self,
+        body: Vec<u8>,
+        credential: super::credential::ProviderCredential,
+    ) -> Result<String, String> {
+        let mut authorization =
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", credential.as_ref()))
+                .map_err(|_| "OpenAI credential cannot be encoded as an HTTP header".to_string())?;
+        authorization.set_sensitive(true);
+        let mut response = match self
+            .client
+            .post(self.endpoint.clone())
+            .header(reqwest::header::AUTHORIZATION, authorization)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .body(body)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => return Err("OpenAI request failed or timed out".to_string()),
+        };
+        let status = response.status();
+        if response
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .is_some_and(|value| value != "identity")
+        {
+            return Err("OpenAI returned an unsupported content encoding".to_string());
+        }
+        let mut bytes = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) if chunk.len() <= RESPONSE_BYTES - bytes.len() => {
+                    bytes.extend_from_slice(&chunk)
+                }
+                Ok(Some(_)) => return Err("OpenAI response exceeds 256 KiB".to_string()),
+                Ok(None) => break,
+                Err(_) => return Err("OpenAI response read failed".to_string()),
+            }
+        }
+        if !status.is_success() {
+            return Err(format!("OpenAI HTTP status {}", status.as_u16()));
+        }
+        parse_openai_completion(&bytes, &self.model)
+    }
 }
 
 impl StageIntentProvider for OpenAi {
@@ -482,6 +633,82 @@ impl StageIntentProvider for OpenAi {
             }
         })
     }
+
+    fn complete(
+        &self,
+        system: String,
+        user: String,
+        credential: Option<super::credential::ProviderCredential>,
+        mut cancellation: super::jobs::ProviderCancellation,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<super::jobs::CompletionReply, String>> + Send>,
+    > {
+        let provider = self.clone();
+        Box::pin(async move {
+            if provider.pricing.is_none() {
+                return Err(OPENAI_DISABLED.to_string());
+            }
+            let Some(credential) = credential else {
+                return Err("OpenAI credential is unavailable".to_string());
+            };
+            let body = provider.completion_request(&system, &user)?;
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err("OpenAI request cancelled".to_string()),
+                text = provider.completion_execute(body, credential) => {
+                    text.map(|text| super::jobs::CompletionReply { text })
+                }
+            }
+        })
+    }
+}
+
+fn parse_openai_completion(bytes: &[u8], model: &str) -> Result<String, String> {
+    let envelope = super::strict_json::parse(bytes, RESPONSE_BYTES, 16).map_err(str::to_owned)?;
+    if envelope["model"].as_str() != Some(model) {
+        return Err("OpenAI returned a different model".to_string());
+    }
+    if !envelope["error"].is_null()
+        || envelope["status"].as_str() != Some("completed")
+        || !envelope["incomplete_details"].is_null()
+    {
+        return Err("OpenAI did not complete the requested model response".to_string());
+    }
+    let output = envelope["output"]
+        .as_array()
+        .ok_or_else(|| "OpenAI response output is missing".to_string())?;
+    let mut message = None;
+    for item in output {
+        match item["type"].as_str() {
+            Some("reasoning") => {}
+            Some("message") if item["role"] == "assistant" => {
+                if message.replace(item).is_some() {
+                    return Err("OpenAI returned multiple assistant messages".to_string());
+                }
+            }
+            _ => return Err("OpenAI returned an unsupported response item".to_string()),
+        }
+    }
+    let message = message.ok_or_else(|| "OpenAI assistant message is missing".to_string())?;
+    if message["status"] != "completed" {
+        return Err("OpenAI assistant message is incomplete".to_string());
+    }
+    let content = message["content"]
+        .as_array()
+        .filter(|content| content.len() == 1)
+        .ok_or_else(|| "OpenAI assistant content is missing or ambiguous".to_string())?;
+    let part = &content[0];
+    if part["type"] != "output_text"
+        || part["annotations"]
+            .as_array()
+            .is_none_or(|items| !items.is_empty())
+    {
+        return Err("OpenAI response is not plain structured text".to_string());
+    }
+    part["text"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "OpenAI output text is missing".to_string())
 }
 
 fn openai_client() -> Result<Client, &'static str> {
