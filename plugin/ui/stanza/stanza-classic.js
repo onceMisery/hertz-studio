@@ -122,6 +122,15 @@
       emotion.decor.forEach(function (decor, di) {
         var min = decor.minIntensity == null ? 0.75 : decor.minIntensity;
         if (emotion.intensity < min) return;
+        if (decor.kind === 'fog') {
+          if (!container.querySelector('.fl-emo-fog')) {
+            var fog = document.createElement('div');
+            fog.className = 'fl-emo-fog';
+            fog.setAttribute('aria-hidden', 'true');
+            container.append(fog);
+          }
+          return;
+        }
         var count = decor.climaxCount != null && emotion.intensity >= 0.75 ? decor.climaxCount : decor.count;
         count = Math.min(6, count || 0);
         for (var i = 0; i < count && total < 6; i += 1, total += 1) {

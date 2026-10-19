@@ -7,8 +7,8 @@
 // 把状态写成 DOM 属性。场的求值不在本文件——它来自 LyricEmotionField，
 // DOM 与字形引擎都只消费同一份采样。
 //
-// 尚未实现（按情绪设计文档的分期）：模型分类、持久缓存、设置 UI、
-// 段落平滑/run 合并、装饰件。这些不影响 G4 的场一致性。
+// 自动分类和授权设置由 app.js 与 sidecar API 提供；本文件只定义契约、
+// Cue 校验和播放时的解析，不负责 provider 接入或持久化。
 (function (root, factory) {
   var field = root.LyricEmotionField;
   if (!field && typeof require === 'function') {
@@ -207,7 +207,7 @@
     type: { weight: 400, tracking: '0.02em', leading: 1.6 },
     palette: { ink: '#E7EDF7', accent: '#9BB7D4', accent2: '#7C93AD' }
   }, {
-    id: 'tender', label: '温柔', aliases: [], archetype: 'drift',
+    id: 'tender', label: '温柔', aliases: [], archetype: 'float',
     field: { basis: 'tender', anchor: 0.05 },
     type: { weight: 400, tracking: '0.03em', leading: 1.7 },
     palette: { ink: '#F5EADF', accent: '#D8B28C', accent2: '#C9A07A' }
@@ -223,6 +223,7 @@
     id: 'lonely', label: '孤独', aliases: [], archetype: 'sink',
     field: { basis: 'lonely', anchor: 0.13 },
     type: { weight: 400, tracking: '0.05em', leading: 1.8 },
+    decor: [{ kind: 'fog', count: 1, climaxCount: 1, minIntensity: 0.75 }],
     palette: { ink: '#C9D6E3', accent: '#7FA7D9', accent2: '#8CA0B8' }
   }].forEach(register);
 
@@ -298,6 +299,10 @@
       state.hash = 'sha256:' + hash;
       return { generation: generation, hash: state.hash, stale: false };
     });
+  }
+
+  function hashLyrics(lines) {
+    return digest(canonicalLines(lines)).then(function (hash) { return 'sha256:' + hash; });
   }
 
   function validateCueDoc(doc) {
@@ -529,6 +534,7 @@
     register: register,
     list: list,
     bindLyrics: bindLyrics,
+    hashLyrics: hashLyrics,
     setCueDoc: setCueDoc,
     commitAtBoundary: commitAtBoundary,
     clearCues: clearCues,

@@ -150,3 +150,31 @@ body.stage-lowfx .fl-emo-decor {
 .fl-cadz[data-emo-active="true"] {
   translate: 0 var(--emo-dy, 0px);
 }
+
+/* P3：tender 的慢速浮动动作族；场位移仍由 --emo-dy 提供。 */
+@keyframes emo-float {
+  0%, 100% { translate: 0 var(--emo-dy, 0px); }
+  50% { translate: 0 calc(var(--emo-dy, 0px) - 0.8px); }
+}
+.fl-cline[data-emo-active="true"][data-emo-arch="float"] .fl-cword {
+  animation: emo-float 5.5s ease-in-out infinite;
+}
+body.reduce-motion .fl-cline[data-emo-active="true"][data-emo-arch="float"] .fl-cword,
+body[data-rm~="lyrics"] .fl-cline[data-emo-active="true"][data-emo-arch="float"] .fl-cword,
+.s3d-reduced .fl-cline[data-emo-active="true"][data-emo-arch="float"] .fl-cword,
+body.stage-lowfx .fl-cline[data-emo-active="true"][data-emo-arch="float"] .fl-cword {
+  animation: none;
+}
+
+/* P3：lonely 的雾层（单例背景装饰，不占粒子预算）。 */
+.fl-emo-fog {
+  position: absolute; inset: 8% 0 0; z-index: 0; pointer-events: none;
+  background: radial-gradient(ellipse at 50% 100%, var(--fl-accent, currentColor), transparent 72%);
+  opacity: .14; filter: blur(18px);
+}
+body.reduce-motion .fl-emo-fog,
+body[data-rm~="lyrics"] .fl-emo-fog,
+.s3d-reduced .fl-emo-fog,
+body.stage-lowfx .fl-emo-fog {
+  display: none;
+}

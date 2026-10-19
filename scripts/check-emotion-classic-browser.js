@@ -95,6 +95,7 @@ async function main() {
           animation: words.map((w) => getComputedStyle(w).animationName),
           climax: line.getAttribute('data-emo-climax'),
           decor: Array.from(line.querySelectorAll('.fl-emo-particle')).map((el) => el.className),
+          fog: line.querySelectorAll('.fl-emo-fog').length,
           weight: words.map((w) => getComputedStyle(w).fontWeight),
           spacing: words.map((w) => getComputedStyle(w).letterSpacing),
           waitingColor: waiting ? (waiting.querySelector('.fl-body').style.color ||
@@ -106,14 +107,14 @@ async function main() {
     }
 
     const snapshots = {};
-    for (const id of ['joy', 'sorrow', 'anger']) {
+    for (const id of ['joy', 'sorrow', 'anger', 'lonely', 'tender']) {
       const snapshot = await apply(id);
       if (snapshot.emotion !== id || snapshot.profile !== id) throw new Error('classic 未解析到 ' + id);
       if (!snapshot.words) throw new Error('classic 没有词节点');
       if (!snapshot.dy.every((v) => /^-?\d+(\.\d+)?px$/.test(v))) throw new Error('classic --emo-dy 非 px：' + JSON.stringify(snapshot.dy));
       if (!snapshot.dy.some((v) => Math.abs(parseFloat(v)) > 0.01)) throw new Error(id + ' 场位移全为 0');
       if (!snapshot.translate.some((v) => v && v !== 'none')) throw new Error(id + ' 没有 translate');
-      const expectedWeight = id === 'sorrow' ? '400' : '700';
+      const expectedWeight = ['sorrow', 'lonely', 'tender'].indexOf(id) >= 0 ? '400' : '700';
       if (!snapshot.weight.every((w) => w === expectedWeight)) throw new Error(id + ' 字重错误：' + snapshot.weight.join('/'));
       if (id === 'anger' && !(parseFloat(snapshot.spacing[0]) < 0)) throw new Error('anger 字距应为负');
       if (id !== 'anger' && !(parseFloat(snapshot.spacing[0]) > 0)) throw new Error(id + ' 字距应为正');
@@ -123,15 +124,19 @@ async function main() {
       if (snapshot.activeColor !== rgb(snapshot.palette.accent)) {
         throw new Error(id + ' 活动字色 ' + snapshot.activeColor + ' != ' + rgb(snapshot.palette.accent));
       }
-      var expectedAnim = { joy: 'emo-bob', sorrow: 'emo-sink', anger: 'emo-impact' }[id];
+      var expectedAnim = { joy: 'emo-bob', sorrow: 'emo-sink', anger: 'emo-impact',
+        lonely: 'emo-sink', tender: 'emo-float' }[id];
       if (!snapshot.animation.every((a) => a === expectedAnim)) {
         throw new Error(id + ' 循环动画错误：' + snapshot.animation.join('/'));
       }
       var expectedDecor = { joy: 'emo-spark', sorrow: 'emo-tear', anger: 'emo-ember' }[id];
-      var expectedCount = { joy: 6, sorrow: 3, anger: 6 }[id];
+      var expectedCount = { joy: 6, sorrow: 3, anger: 6, lonely: 0, tender: 0 }[id];
       if (snapshot.climax !== 'true' || snapshot.decor.length !== expectedCount ||
-          !snapshot.decor.every((c) => c.indexOf(expectedDecor) >= 0)) {
+          (expectedDecor && !snapshot.decor.every((c) => c.indexOf(expectedDecor) >= 0))) {
         throw new Error(id + ' 装饰件错误：climax=' + snapshot.climax + ' ' + snapshot.decor.join('|'));
+      }
+      if (id === 'lonely' ? snapshot.fog !== 1 : snapshot.fog !== 0) {
+        throw new Error(id + ' 雾层数量错误：' + snapshot.fog);
       }
       snapshots[id] = snapshot;
       // 500ms 时只有开头几个词可见；跳到行尾让整行进入 passed/active，便于看场形状。
@@ -154,17 +159,19 @@ async function main() {
       document.body.classList.add('reduce-motion');
       const word = document.querySelector('.fl-classic .fl-cword');
       const decor = document.querySelector('.fl-emo-decor');
+      const fog = document.querySelector('.fl-emo-fog');
       const result = {
         animation: getComputedStyle(word).animationName,
         translate: getComputedStyle(word).translate,
         dy: getComputedStyle(word).getPropertyValue('--emo-dy').trim(),
-        decor: decor ? getComputedStyle(decor).display : null
+        decor: decor ? getComputedStyle(decor).display : null,
+        fog: fog ? getComputedStyle(fog).display : null
       };
       document.body.classList.remove('reduce-motion');
       return result;
     });
     if (reduced.animation !== 'none' || reduced.translate === 'none' || !reduced.dy ||
-        reduced.decor !== 'none') {
+        (reduced.decor && reduced.decor !== 'none') || (reduced.fog && reduced.fog !== 'none')) {
       throw new Error('减少动效下未保留静态场或未停循环/装饰：' + JSON.stringify(reduced));
     }
 
@@ -175,10 +182,11 @@ async function main() {
         active: line.hasAttribute('data-emo-active'),
         dy: Array.from(line.querySelectorAll('.fl-cword')).map((w) => getComputedStyle(w).getPropertyValue('--emo-dy').trim()),
         translate: Array.from(line.querySelectorAll('.fl-cword')).map((w) => getComputedStyle(w).translate),
-        decor: document.querySelectorAll('.fl-emo-decor').length
+        decor: document.querySelectorAll('.fl-emo-decor').length,
+        fog: document.querySelectorAll('.fl-emo-fog').length
       } : null;
     });
-    if (!cleared || cleared.active || cleared.dy.some(Boolean) || cleared.translate.some((v) => v !== 'none') || cleared.decor) {
+    if (!cleared || cleared.active || cleared.dy.some(Boolean) || cleared.translate.some((v) => v !== 'none') || cleared.decor || cleared.fog) {
       throw new Error('清除后 classic 仍残留情绪：' + JSON.stringify(cleared));
     }
 
@@ -191,10 +199,10 @@ async function main() {
       pageErrors: errors
     }, null, 2));
 
-    console.log('✓ classic P1：joy/sorrow/anger 写入场位移、translate、配色、字重/字距；清除后恢复默认');
+    console.log('✓ classic P1/P3：joy/sorrow/anger/lonely/tender 的场、配色、字重/字距、循环/雾层；清除后恢复默认');
     console.log('  hash ' + prepared.hash + ' line ' + prepared.index + ' words ' + snapshots.joy.words);
-    console.log('  weights ' + [snapshots.joy.weight[0], snapshots.sorrow.weight[0], snapshots.anger.weight[0]].join('/') +
-      '  spacing ' + [snapshots.joy.spacing[0], snapshots.sorrow.spacing[0], snapshots.anger.spacing[0]].join('/'));
+    console.log('  weights ' + ['joy', 'sorrow', 'anger', 'lonely', 'tender'].map((id) => snapshots[id].weight[0]).join('/') +
+      '  spacing ' + ['joy', 'sorrow', 'anger', 'lonely', 'tender'].map((id) => snapshots[id].spacing[0]).join('/'));
     if (errors.length) throw new Error('页面异常：' + errors.join('；'));
     console.log('  证据: ' + path.relative(root, out));
   } finally {
