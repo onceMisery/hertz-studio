@@ -47,6 +47,19 @@ function cue(hash, extra) {
   const lut = F.sample(joy.profile, joy.intensity, 72, 0, 0);
   assert(lut.b.length === F.SAMPLE_N, 'LUT 长度异常');
 
+  // P3 扩展档案：triumph 复用 joy 基函数，lonely 新增 u^1.6 基函数。
+  const ids = EM.list().map((profile) => profile.id);
+  assert(ids.indexOf('triumph') >= 0 && ids.indexOf('lonely') >= 0, 'P3 档案未注册');
+  assert(F.BASIS.lonely && F.BASIS.joy, 'lonely/joy 基函数缺失');
+  for (const id of ['triumph', 'lonely']) {
+    assert(EM.setCueDoc(cue(a2.hash, {
+      lines: [{ index: 0, emotion: id, intensity: 1, confidence: 1 }]
+    })) && EM.commitAtBoundary(), id + ' Cue 失败');
+    const state = EM.resolveForLine(0, {});
+    assert(state.id === id, id + ' 解析成 ' + state.id);
+    assert(F.sample(state.profile, state.intensity, 72, 0, 0).b.length === F.SAMPLE_N, id + ' 采样长度异常');
+  }
+
   // 缓存命中：同一 hash/provider/model 取回并提交。
   const cached = EM.loadCached(a2.hash, { providerId: 'fixture', modelId: 'm' });
   assert(cached === true, '缓存未命中');
