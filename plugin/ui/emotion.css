@@ -6,11 +6,11 @@
    场的可变部分不做 transition；换行时直接换值（设计文档 §6.0 / §附录 B）。 */
 
 .lyric[data-emo-active="true"] {
-  --lyric-highlight: var(--emo-accent);
-  --lyric-idle: var(--emo-ink);
-  --lyric-highlight-rgb: var(--emo-accent-rgb);
-  --lyric-active: var(--emo-ink);
-  color: var(--emo-ink);
+  --lyric-highlight: var(--emo-accent, var(--accent));
+  --lyric-idle: var(--emo-ink, var(--text));
+  --lyric-highlight-rgb: var(--emo-accent-rgb, 244, 244, 245);
+  --lyric-active: var(--emo-ink, var(--text));
+  color: var(--emo-ink, inherit);
   font-weight: var(--emo-weight, inherit);
   letter-spacing: var(--emo-track, normal);
   line-height: var(--emo-leading, inherit);
@@ -20,4 +20,52 @@
    不会像写进 transform 那样互相覆盖。--emo-dy 是逐词基线场采样值。 */
 .lyric[data-emo-active="true"] .word {
   translate: 0 var(--emo-dy, 0px);
+}
+
+/* classic stanza：位移写在独立的 translate 上，和 applyPose 的 transform
+   （translate/scale）与 .fl-crot 的 rotate 各自合成，互不覆盖。 */
+.fl-cline[data-emo-active="true"] .fl-cword {
+  translate: 0 var(--emo-dy, 0px);
+}
+
+/* 时间维度：只作用于 classic 的词，场位移始终在 keyframe 里保留。
+   span 的呼吸/入场动画在 .fl-cline 上，词级循环用 translate，不会互抢。 */
+@keyframes emo-bob {
+  0%, 100% { translate: 0 var(--emo-dy, 0px); }
+  50% { translate: 0 calc(var(--emo-dy, 0px) - 2px); }
+}
+@keyframes emo-sink {
+  0%, 100% { translate: 0 var(--emo-dy, 0px); }
+  50% { translate: 0 calc(var(--emo-dy, 0px) + 1.5px); }
+}
+@keyframes emo-impact {
+  0%, 100% { translate: 0 var(--emo-dy, 0px); }
+  25% { translate: 1.2px var(--emo-dy, 0px); }
+  50% { translate: -1.2px var(--emo-dy, 0px); }
+  75% { translate: 0.6px var(--emo-dy, 0px); }
+}
+@keyframes emo-drift {
+  0%, 100% { translate: 0 var(--emo-dy, 0px); }
+  33% { translate: 0.8px calc(var(--emo-dy, 0px) - 0.6px); }
+  66% { translate: -0.8px calc(var(--emo-dy, 0px) + 0.6px); }
+}
+.fl-cline[data-emo-active="true"][data-emo-arch="bounce"] .fl-cword {
+  animation: emo-bob 2.8s ease-in-out infinite;
+}
+.fl-cline[data-emo-active="true"][data-emo-arch="sink"] .fl-cword {
+  animation: emo-sink 6.8s ease-in-out infinite;
+}
+.fl-cline[data-emo-active="true"][data-emo-arch="impact"] .fl-cword {
+  animation: emo-impact .7s cubic-bezier(.36,.07,.19,.97) 1;
+}
+.fl-cline[data-emo-active="true"][data-emo-arch="drift"] .fl-cword {
+  animation: emo-drift 3.6s ease-in-out infinite;
+}
+
+/* 减少动效 / 低性能：停循环，但场的静态位移保留（设计文档 §10.2）。 */
+body.reduce-motion .fl-cline[data-emo-active="true"] .fl-cword,
+body[data-rm~="lyrics"] .fl-cline[data-emo-active="true"] .fl-cword,
+.s3d-reduced .fl-cline[data-emo-active="true"] .fl-cword,
+body.stage-lowfx .fl-cline[data-emo-active="true"] .fl-cword {
+  animation: none;
 }

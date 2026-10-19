@@ -28,6 +28,7 @@
   var emotionReadyDoc = null;   // 已绑定摘要的歌词快照（null = 情绪层关闭）
   var emotionCueDoc = null;     // 摘要就绪前暂存的 Cue
   var emotionRevisionSeen = -1;
+  var emotionSettings = { mode: 'off', preview: 'joy', scale: 1, palette: true };
   var mode = 'karaoke';
   var activeIdx = -2;
   var playing = false;
@@ -691,6 +692,61 @@
       schedule();
     }
     emotionCueDoc = null;
+  }
+
+  // 手动预览：用一条覆盖整首的 section Cue，播放时每一行都能看到同一情绪。
+  // 这是 P1 的调试/预览入口；自动分类（P2b）未就绪，不作为正式自动模式。
+  function setManualEmotion(id) {
+    var E = emotionApi();
+    if (!E || !doc || !doc.lines.length) return false;
+    var emotion = E.profiles && E.profiles[id] ? id : 'joy';
+    function commit() {
+      try {
+        E.setCueDoc({
+          version: 1, lyricsHash: E.lyricsHash(), source: 'manual',
+          sections: [{ from: 0, to: doc.lines.length - 1, emotion: emotion,
+            intensity: 1, confidence: 1 }]
+        }, E.generation());
+        E.commitAtBoundary(E.generation());
+      } catch (err) {
+        return false;
+      }
+      emotionRevisionSeen = E.revision();
+      applyEmotionAll(activeIdx);
+      schedule();
+      return true;
+    }
+    if (emotionReadyDoc === doc) return commit();
+    E.bindLyrics({ lines: doc.lines }).then(function (res) {
+      if (res.stale) return;
+      emotionReadyDoc = doc;
+      commit();
+    }).catch(function () { /* 摘要失败：保持中性 */ });
+    return true;
+  }
+
+  function setEmotionSettings(next) {
+    var patch = next || {};
+    if (patch.scale != null) {
+      var scale = Number(patch.scale);
+      if (isFinite(scale) && scale >= 0 && scale <= 1.5) emotionSettings.scale = scale;
+    }
+    if (patch.palette != null) emotionSettings.palette = patch.palette !== false;
+    if (patch.preview != null) {
+      var E = emotionApi();
+      if (E && E.profiles && E.profiles[patch.preview]) emotionSettings.preview = patch.preview;
+    }
+    if (patch.mode != null) emotionSettings.mode = patch.mode === 'manual' ? 'manual' : 'off';
+    var api = emotionApi();
+    if (api) {
+      try {
+        api.setScale(emotionSettings.scale);
+        if (api.setPaletteEnabled) api.setPaletteEnabled(emotionSettings.palette);
+      } catch (err) { /* 设置值越界时保留上一档 */ }
+    }
+    if (!doc) return;
+    if (emotionSettings.mode === 'manual') setManualEmotion(emotionSettings.preview);
+    else clearEmotionCues();
   }
 
   // 只刷「变了的那几行」。换行时真正需要动的元素是：下放的旧当前行、新当前行，
@@ -1572,6 +1628,7 @@
       var i = resolveIndex(doc, pos);
       update(i, pos, true, true);
       activeIdx = i;
+      if (emotionSettings.mode === 'manual') setManualEmotion(emotionSettings.preview);
       schedule();
     },
 
@@ -1649,6 +1706,13 @@
     },
     setEmotionCueDoc: function (cueDoc) { return setEmotionCueDoc(cueDoc); },
     clearEmotionCues: function () { clearEmotionCues(); },
+    setEmotionSettings: function (next) { setEmotionSettings(next); },
+    previewEmotion: function (id) {
+      emotionSettings.mode = 'manual';
+      if (id) emotionSettings.preview = id;
+      if (!doc) return false;
+      return setManualEmotion(emotionSettings.preview);
+    },
 
     // stanza 歌词模式：翻译行与每曲偏移（数据已在 doc 内，只读暴露，不复制）。
     lyricTranslation: function (i) {

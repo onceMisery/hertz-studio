@@ -77,6 +77,13 @@ const ui = {
   setLyricFilterOn: $('set-lyric-filter-on'),
   setLyricFilterPattern: $('set-lyric-filter-pattern'),
   setLyricFilterNote: $('set-lyric-filter-note'),
+  setEmotionMode: $('set-emotion-mode'),
+  setEmotionPreviewRow: $('set-emotion-preview-row'),
+  setEmotionPreview: $('set-emotion-preview'),
+  setEmotionScale: $('set-emotion-scale'),
+  setEmotionScaleValue: $('set-emotion-scale-value'),
+  setEmotionPalette: $('set-emotion-palette'),
+  setEmotionNote: $('set-emotion-note'),
   setRmBg: $('set-rm-bg'),
   setRmLyrics: $('set-rm-lyrics'),
   setRmUi: $('set-rm-ui'),
@@ -2199,6 +2206,46 @@ function paintPatternNotes() {
   }
 }
 
+function lyricEmotionMode() {
+  return state.settings.lyrics_emotion_mode === 'manual' ? 'manual' : 'off';
+}
+function lyricEmotionPreview() {
+  var id = state.settings.lyrics_emotion_preview;
+  return ['joy', 'sorrow', 'anger', 'anxious', 'tender'].indexOf(id) >= 0 ? id : 'joy';
+}
+function lyricEmotionScale() {
+  var v = Number(state.settings.lyrics_emotion_scale);
+  return isFinite(v) ? Math.max(0, Math.min(1.5, v)) : 1;
+}
+function lyricEmotionPalette() {
+  return state.settings.lyrics_emotion_palette !== false;
+}
+function applyEmotionSettings() {
+  if (!window.Stage || !Stage.setEmotionSettings) return;
+  Stage.setEmotionSettings({
+    mode: lyricEmotionMode(),
+    preview: lyricEmotionPreview(),
+    scale: lyricEmotionScale(),
+    palette: lyricEmotionPalette()
+  });
+}
+function paintEmotionSettings() {
+  if (!ui.setEmotionMode) return;
+  var mode = lyricEmotionMode();
+  var auto = state.settings.lyrics_emotion_mode === 'auto';
+  ui.setEmotionMode.value = auto ? 'auto' : mode;
+  ui.setEmotionPreview.value = lyricEmotionPreview();
+  ui.setEmotionPreviewRow.hidden = mode !== 'manual';
+  ui.setEmotionScale.value = lyricEmotionScale();
+  if (ui.setEmotionScaleValue) ui.setEmotionScaleValue.textContent = lyricEmotionScale().toFixed(2);
+  ui.setEmotionPalette.checked = lyricEmotionPalette();
+  if (ui.setEmotionNote) {
+    ui.setEmotionNote.textContent = auto
+      ? '自动分类需要模型授权，尚未开放；当前按关闭处理。'
+      : '关闭时与当前版本完全一致；手动预览只用于调试，自动分类需要模型授权，尚未开放。';
+  }
+}
+
 function paintLyricSettings() {
   if (!ui.setLyricStaff) return;
   ui.setLyricStaff.value = lyricStaffPolicy();
@@ -2207,6 +2254,8 @@ function paintLyricSettings() {
   ui.setLyricFilterPattern.value = state.settings.lyrics_filter_pattern || '';
   paintLyricOffset();
   paintPatternNotes();
+  paintEmotionSettings();
+  applyEmotionSettings();
 }
 
 // 设置项写失败的统一出口。写设置表都是用户动作的收尾（拨了个开关、改了档位），
@@ -8275,6 +8324,15 @@ async function startApp() {
   ui.setLyricStaffPattern.onchange = () => saveLyricSettings({ lyrics_staff_pattern: ui.setLyricStaffPattern.value.trim() });
   ui.setLyricFilterOn.onchange = () => saveLyricSettings({ lyrics_filter_enabled: ui.setLyricFilterOn.checked });
   ui.setLyricFilterPattern.onchange = () => saveLyricSettings({ lyrics_filter_pattern: ui.setLyricFilterPattern.value });
+  if (ui.setEmotionMode) {
+    ui.setEmotionMode.onchange = () => saveLyricSettings({ lyrics_emotion_mode: ui.setEmotionMode.value });
+    ui.setEmotionPreview.onchange = () => saveLyricSettings({ lyrics_emotion_preview: ui.setEmotionPreview.value });
+    ui.setEmotionScale.oninput = () => {
+      if (ui.setEmotionScaleValue) ui.setEmotionScaleValue.textContent = Number(ui.setEmotionScale.value).toFixed(2);
+    };
+    ui.setEmotionScale.onchange = () => saveLyricSettings({ lyrics_emotion_scale: Number(ui.setEmotionScale.value) });
+    ui.setEmotionPalette.onchange = () => saveLyricSettings({ lyrics_emotion_palette: ui.setEmotionPalette.checked });
+  }
   // 动效分面：写设置表 + 刷 body[data-rm]，各面 CSS 即时生效。
   for (const [uiKey, settingKey] of MOTION_SURFACES) {
     if (!ui[uiKey]) continue;

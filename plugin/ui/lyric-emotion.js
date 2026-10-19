@@ -39,7 +39,8 @@
     scale: 1,
     committed: null,
     pending: null,
-    revision: 0
+    revision: 0,
+    paletteEnabled: true
   };
 
   // P0/P2b 的模型 Cue 缓存：50 首与 1 MiB 双限，先到先淘汰。
@@ -169,27 +170,27 @@
     field: { basis: null, anchor: 0 }, type: null,
     palette: { ink: '#F4F4F5', accent: '#E4E4E7', accent2: '#A1A1AA' }
   }, {
-    id: 'joy', label: '雀跃', aliases: ['happy', 'excited'],
+    id: 'joy', label: '雀跃', aliases: ['happy', 'excited'], archetype: 'bounce',
     field: { basis: 'joy', anchor: 0.10 },
     type: { weight: 700, tracking: '0.025em', leading: 1.55 },
     palette: { ink: '#FFF7D6', accent: '#FFD166', accent2: '#FF8A5B' }
   }, {
-    id: 'sorrow', label: '悲伤', aliases: ['sad'],
+    id: 'sorrow', label: '悲伤', aliases: ['sad'], archetype: 'sink',
     field: { basis: 'sorrow', anchor: 0.14 },
     type: { weight: 400, tracking: '0.06em', leading: 1.85 },
     palette: { ink: '#C9D6E3', accent: '#7FA7D9', accent2: '#8CA0B8' }
   }, {
-    id: 'anger', label: '愤怒', aliases: ['angry'],
+    id: 'anger', label: '愤怒', aliases: ['angry'], archetype: 'impact',
     field: { basis: 'anger', anchor: 0.08 },
     type: { weight: 700, tracking: '-0.01em', leading: 1.35 },
     palette: { ink: '#FFE8D6', accent: '#FF5A36', accent2: '#D7261E' }
   }, {
-    id: 'anxious', label: '不安', aliases: [],
+    id: 'anxious', label: '不安', aliases: [], archetype: 'drift',
     field: { basis: 'anxious', anchor: 0.03 },
     type: { weight: 400, tracking: '0.02em', leading: 1.6 },
     palette: { ink: '#E7EDF7', accent: '#9BB7D4', accent2: '#7C93AD' }
   }, {
-    id: 'tender', label: '温柔', aliases: [],
+    id: 'tender', label: '温柔', aliases: [], archetype: 'drift',
     field: { basis: 'tender', anchor: 0.05 },
     type: { weight: 400, tracking: '0.03em', leading: 1.7 },
     palette: { ink: '#F5EADF', accent: '#D8B28C', accent2: '#C9A07A' }
@@ -387,6 +388,7 @@
     return frozen({
       id: profile.id, profile: profile, intensity: 0,
       field: profile.field, type: profile.type || null, palette: profile.palette,
+      archetype: profile.archetype || 'drift',
       revision: state.revision, confidence: 1, cue: null
     });
   }
@@ -401,6 +403,7 @@
     return frozen({
       id: profile.id, profile: profile, intensity: eI,
       field: profile.field, type: profile.type || null, palette: profile.palette,
+      archetype: profile.archetype || 'drift',
       revision: state.revision, confidence: cue.confidence, cue: cue
     });
   }
@@ -422,6 +425,7 @@
     if (!lineEl) return;
     lineEl.removeAttribute('data-emotion');
     lineEl.removeAttribute('data-emo-active');
+    lineEl.removeAttribute('data-emo-arch');
     ['--emo-i', '--emo-ink', '--emo-accent', '--emo-accent-2',
       '--emo-ink-rgb', '--emo-accent-rgb',
       '--emo-weight', '--emo-track', '--emo-leading'].forEach(function (name) {
@@ -442,12 +446,18 @@
     }
     lineEl.setAttribute('data-emotion', emotionState.id);
     lineEl.setAttribute('data-emo-active', 'true');
+    lineEl.setAttribute('data-emo-arch', emotionState.archetype || 'drift');
     setVar(lineEl, '--emo-i', emotionState.intensity.toFixed(3));
-    setVar(lineEl, '--emo-ink', emotionState.palette.ink);
-    setVar(lineEl, '--emo-accent', emotionState.palette.accent);
-    setVar(lineEl, '--emo-accent-2', emotionState.palette.accent2);
-    setVar(lineEl, '--emo-ink-rgb', rgbText(emotionState.palette.ink));
-    setVar(lineEl, '--emo-accent-rgb', rgbText(emotionState.palette.accent));
+    if (state.paletteEnabled) {
+      setVar(lineEl, '--emo-ink', emotionState.palette.ink);
+      setVar(lineEl, '--emo-accent', emotionState.palette.accent);
+      setVar(lineEl, '--emo-accent-2', emotionState.palette.accent2);
+      setVar(lineEl, '--emo-ink-rgb', rgbText(emotionState.palette.ink));
+      setVar(lineEl, '--emo-accent-rgb', rgbText(emotionState.palette.accent));
+    } else {
+      ['--emo-ink', '--emo-accent', '--emo-accent-2', '--emo-ink-rgb', '--emo-accent-rgb']
+        .forEach(function (name) { clearVar(lineEl, name); });
+    }
     if (emotionState.type) {
       if (emotionState.type.weight != null) setVar(lineEl, '--emo-weight', String(emotionState.type.weight));
       if (emotionState.type.tracking != null) setVar(lineEl, '--emo-track', emotionState.type.tracking);
@@ -473,9 +483,12 @@
     if (typeof v !== 'number' || !isFinite(v) || v < 0 || v > 1.5) fail('情绪强度必须在 0..1.5');
     state.scale = v;
   }
+  function setPaletteEnabled(v) { state.paletteEnabled = v !== false; }
+  function paletteEnabled() { return state.paletteEnabled; }
   function reset() {
     state.lines = null; state.hash = null; state.generation += 1;
     state.committed = null; state.pending = null; state.revision += 1; state.scale = 1;
+    state.paletteEnabled = true;
   }
 
   return {
@@ -501,6 +514,8 @@
     lyricsHash: lyricsHash,
     revision: revision,
     setScale: setScale,
+    setPaletteEnabled: setPaletteEnabled,
+    paletteEnabled: paletteEnabled,
     reset: reset,
     profiles: PROFILES,
     PROFILE_IDS: profileOrder.slice(),

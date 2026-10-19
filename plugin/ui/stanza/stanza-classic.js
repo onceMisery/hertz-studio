@@ -12,6 +12,7 @@
     var theme = StanzaTheme.DEFAULT, fontScale = 1, visible = true, paused = false;
     var tuning = { rotation: true, breathing: 1, spacing: 0.7 };
     var curLine = null, curHints = null, measureCanvas = null;
+    var emotionState = null, emotionRevision = -1;
     // 音频反应的上一次写入值：变化小于阈值不写 CSS 变量（每帧 setProperty 会让
     // 样式系统空转，两个变量都卡 0.015 的死区）。
     var lastVocal = -1, lastBass = -1;
@@ -68,8 +69,55 @@
     function measure(text, px) {
       if (!measureCanvas) measureCanvas = document.createElement('canvas');
       var ctx = measureCanvas.getContext('2d');
-      ctx.font = '700 ' + px + 'px ' + StanzaTheme.fontStack(theme.fontStyle);
-      return ctx.measureText(text).width;
+      var weight = emotionState && emotionState.type && emotionState.type.weight || 700;
+      ctx.font = weight + ' ' + px + 'px ' + StanzaTheme.fontStack(theme.fontStyle);
+      var width = ctx.measureText(text).width;
+      var tracking = emotionState && emotionState.type && emotionState.type.tracking;
+      if (tracking && /em$/.test(tracking)) {
+        width += parseFloat(tracking) * px * Array.from(String(text || '')).length;
+      }
+      return width;
+    }
+
+    function syncEmotion(idx) {
+      var E = global.LyricEmotion;
+      emotionRevision = E && E.revision ? E.revision() : -1;
+      var state = (E && idx >= 0 && E.resolveForLine) ? E.resolveForLine(idx, { host: 'classic' }) : null;
+      emotionState = state && state.id !== 'neutral' ? state : null;
+    }
+
+    function emotionPaletteOn() {
+      if (!emotionState) return false;
+      var E = global.LyricEmotion;
+      return !E || !E.paletteEnabled || E.paletteEnabled();
+    }
+
+    function emotionInk() {
+      return emotionState && emotionPaletteOn() ? emotionState.palette.ink : theme.primaryColor;
+    }
+
+    function emotionAccent(text) {
+      if (!emotionState || !emotionPaletteOn()) return StanzaTheme.wordColor(text, theme);
+      if (theme.wordColors && theme.wordColors.length) return StanzaTheme.wordColor(text, theme);
+      return emotionState.palette.accent;
+    }
+
+    // 基线场按词中心采样；total 用词宽 + 词距，避免行尾的间距把 u 拉偏。
+    function applyEmotionField(words, px) {
+      if (!emotionState || !global.LyricEmotionField) return;
+      var total = 0, i;
+      for (i = 0; i < words.length; i += 1) total += words[i]._advance || 0;
+      var acc = 0;
+      for (i = 0; i < words.length; i += 1) {
+        var word = words[i];
+        var center = acc + (word._wordWidth || 0) / 2;
+        var u = total > 0 ? center / total : 0.5;
+        var b = global.LyricEmotionField.evaluate(
+          emotionState.profile, u, emotionState.intensity, px, 0, 0
+        ).b;
+        word.style.setProperty('--emo-dy', b.toFixed(3) + 'px');
+        acc += word._advance || 0;
+      }
     }
 
     function rand(seed, off) { return U.srand(seed + off); }
@@ -91,7 +139,14 @@
       root.style.setProperty('--fl-bs1', (0.01 * tuning.breathing) + '');
       root.style.setProperty('--fl-bs2', (0.005 * tuning.breathing) + '');
       root.style.animationPlayState = (tuning.breathing <= 0 || paused) ? 'paused' : 'running';
-      container.style.setProperty('--fl-accent', theme.accentColor);
+      var emotion = emotionState;
+      container.style.setProperty('--fl-accent',
+        emotion && emotionPaletteOn() ? emotion.palette.accent : theme.accentColor);
+      if (emotion) {
+        container.setAttribute('data-emo-active', 'true');
+        container.setAttribute('data-emotion', emotion.id);
+        container.setAttribute('data-emo-arch', emotion.archetype || 'drift');
+      }
       curHints = U.renderHints(line);
       var lineTiming = lineTimingOf(curHints);
       // soft（配置类软重建）时不挂任何 fl-enter-* 类：新行直接稳态呈现，无进入动画。
@@ -154,7 +209,11 @@
         wordEl.dataset.st = 'waiting';
         wordEl.style.fontSize = px + 'px';
         wordEl.style.fontFamily = StanzaTheme.fontStack(theme.fontStyle);
+        wordEl.style.fontWeight = String(emotion && emotion.type && emotion.type.weight || 700);
+        if (emotion && emotion.type && emotion.type.tracking) wordEl.style.letterSpacing = emotion.type.tracking;
         wordEl.style.marginRight = (isInterlude ? 48 /* stanza: 3rem */ : margin) + 'px';
+        wordEl._wordWidth = wi;
+        wordEl._advance = wi + (isInterlude ? 48 : margin);
         wordEl.style.setProperty('--fl-x', x + 'px');
         wordEl.style.setProperty('--fl-y', y + 'px');
         wordEl.style.setProperty('--fl-rot', rotate + 'deg');
@@ -166,8 +225,8 @@
         wordEl._crot = crot;
         var glow = document.createElement('span'); glow.className = 'fl-glow';
         var body = document.createElement('span'); body.className = 'fl-body';
-        var color = StanzaTheme.wordColor(w.text, theme);
-        body.style.color = theme.primaryColor;
+        var color = emotionAccent(w.text);
+        body.style.color = emotionInk();
         glow.style.setProperty('--fl-accent', color);
         wordEl.style.setProperty('--fl-accent', color);
 
@@ -197,6 +256,7 @@
       lineEl._lineTiming = lineTiming;
       lineEl._tokens = dispTokens;
       lineEl._words = Array.prototype.slice.call(container.querySelectorAll('.fl-cword'));
+      applyEmotionField(lineEl._words, px);
     }
 
     function applyPose(el, st) {
@@ -272,6 +332,15 @@
       var lines = doc ? doc.lines : [];
       var idx = U.activeLineIndex(lines, tMs);
       var line = idx >= 0 ? lines[idx] : null;
+      // 情绪状态只跟着行号或已提交 Cue 的 revision 变；同一行内提交时软重建，
+      // 不播入场动画，也不把旧状态的节点留在台上。
+      var E = global.LyricEmotion;
+      if (line !== curLine) {
+        syncEmotion(idx);
+      } else if (E && E.revision && E.revision() !== emotionRevision) {
+        syncEmotion(idx);
+        rebuildSoft();
+      }
       var animationChanged = line !== curLine;
       if (line !== curLine) {
         if (lineEl) {
@@ -333,8 +402,8 @@
           words[i].style.setProperty('--fl-blur-dur', mode === 'instant' ? '80ms' : mode === 'fast' ? '120ms' : '200ms');
           words[i].style.setProperty('--fl-color-back', mode === 'instant' ? '120ms' : mode === 'fast' ? '240ms' : '800ms');
           words[i].style.setProperty('--fl-glow-back', mode === 'instant' ? '120ms' : mode === 'fast' ? '220ms' : '900ms');
-          words[i].querySelector('.fl-body').style.color = st === 'waiting' ? theme.primaryColor :
-            (st === 'active' ? StanzaTheme.wordColor(w.text, theme) : theme.primaryColor);
+          words[i].querySelector('.fl-body').style.color = st === 'waiting' ? emotionInk() :
+            (st === 'active' ? emotionAccent(w.text) : emotionInk());
           if (st !== 'passed') words[i].style.opacity = '';
           applyPose(words[i], st);
         }

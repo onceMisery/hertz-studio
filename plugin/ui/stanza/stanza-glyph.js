@@ -180,7 +180,8 @@
       var st = (!profile && emotionState && emotionState.id !== 'neutral') ? emotionState : null;
       var prof = profile || (st ? st.profile : null);
       var eI = profile ? emotionScale : (st ? st.intensity : 1);
-      var pal = st ? st.palette : null;
+      var pal = st && (!global.LyricEmotion || !global.LyricEmotion.paletteEnabled ||
+        global.LyricEmotion.paletteEnabled()) ? st.palette : null;
       var f = (prof && global.LyricEmotionField)
         ? global.LyricEmotionField.sample(prof, eI, em, pulse(), 0)
         : { b: new Float32Array(33), w: new Float32Array(33).fill(0.5),

@@ -159,6 +159,86 @@ async function main() {
       throw new Error('清除后仍残留视觉参数：' + JSON.stringify(cleared));
     }
 
+    // 设置路径：manual 预览 -> 关闭 -> scale=0 中性 -> palette 关闭。
+    await page.evaluate(() => Stage.setEmotionSettings({ mode: 'manual', preview: 'sorrow', scale: 1, palette: true }));
+    await page.waitForFunction(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return line && line.getAttribute('data-emotion') === 'sorrow';
+    }, null, { timeout: 15000 });
+    const settingsSorrow = await page.evaluate(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return { emotion: line.getAttribute('data-emotion'), weight: getComputedStyle(line).fontWeight };
+    });
+    if (settingsSorrow.emotion !== 'sorrow' || settingsSorrow.weight !== '400') {
+      throw new Error('设置 manual 预览未生效：' + JSON.stringify(settingsSorrow));
+    }
+    await page.evaluate(() => Stage.setEmotionSettings({ mode: 'off' }));
+    await page.waitForFunction(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return line && !line.hasAttribute('data-emotion');
+    }, null, { timeout: 10000 });
+    await page.evaluate(() => Stage.setEmotionSettings({ mode: 'manual', preview: 'joy', scale: 0, palette: true }));
+    await page.waitForTimeout(250);
+    if (await page.evaluate(() => document.querySelector('.stage-lyrics .lyric.active').hasAttribute('data-emotion'))) {
+      throw new Error('scale=0 仍写情绪属性');
+    }
+    await page.evaluate(() => Stage.setEmotionSettings({ mode: 'manual', preview: 'joy', scale: 1, palette: false }));
+    await page.waitForFunction(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return line && line.getAttribute('data-emotion') === 'joy';
+    }, null, { timeout: 15000 });
+    const noPalette = await page.evaluate(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return { ink: line.style.getPropertyValue('--emo-ink'), dy: Array.from(line.querySelectorAll('.word')).map((w) => getComputedStyle(w).getPropertyValue('--emo-dy').trim()) };
+    });
+    if (noPalette.ink || !noPalette.dy.some((v) => Math.abs(parseFloat(v)) > 0.01)) {
+      throw new Error('palette=off 未只关闭配色：' + JSON.stringify(noPalette));
+    }
+    await page.evaluate(() => Stage.setEmotionSettings({ mode: 'off' }));
+
+    // 设置抽屉真实 UI：manual + sorrow 落库并生效，再切回 off。
+    await page.evaluate(() => { const b = document.querySelector('.rail-item[data-view="settings"]'); if (b) b.click(); });
+    await page.waitForFunction(() => {
+      const v = document.getElementById('view-settings');
+      return v && !v.hidden && getComputedStyle(v).display !== 'none';
+    }, null, { timeout: 10000 });
+    await page.waitForTimeout(200);
+    await page.evaluate(() => { const b = document.querySelector('.skset-link[data-skset-key="lyrics"]'); if (b) b.click(); });
+    await page.waitForTimeout(150);
+    await page.selectOption('#set-emotion-mode', 'manual');
+    await page.waitForTimeout(300);
+    await page.selectOption('#set-emotion-preview', 'sorrow');
+    await page.waitForTimeout(400);
+    await page.evaluate(() => { const b = document.querySelector('.skset-modal-close'); if (b) b.click(); });
+    await page.waitForTimeout(200);
+    await page.evaluate(() => document.body.classList.add('stage-open'));
+    await page.waitForFunction(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return line && line.getAttribute('data-emotion') === 'sorrow';
+    }, null, { timeout: 15000 });
+    const fromUi = await page.evaluate(() => ({
+      emotion: document.querySelector('.stage-lyrics .lyric.active').getAttribute('data-emotion'),
+      mode: document.getElementById('set-emotion-mode').value
+    }));
+    if (fromUi.emotion !== 'sorrow' || fromUi.mode !== 'manual') {
+      throw new Error('设置抽屉未把 manual/sorrow 接到舞台：' + JSON.stringify(fromUi));
+    }
+    await page.evaluate(() => { const b = document.querySelector('.rail-item[data-view="settings"]'); if (b) b.click(); });
+    await page.waitForFunction(() => {
+      const v = document.getElementById('view-settings');
+      return v && !v.hidden && getComputedStyle(v).display !== 'none';
+    }, null, { timeout: 10000 });
+    await page.waitForTimeout(200);
+    await page.evaluate(() => { const b = document.querySelector('.skset-link[data-skset-key="lyrics"]'); if (b) b.click(); });
+    await page.waitForTimeout(150);
+    await page.selectOption('#set-emotion-mode', 'off');
+    await page.evaluate(() => { const b = document.querySelector('.skset-modal-close'); if (b) b.click(); });
+    await page.waitForTimeout(200);
+    await page.waitForFunction(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return line && !line.hasAttribute('data-emotion');
+    }, null, { timeout: 15000 });
+
     fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify({
       generatedAt: new Date().toISOString(),
       hash: prepared.hash,
