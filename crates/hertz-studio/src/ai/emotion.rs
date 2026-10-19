@@ -3,17 +3,16 @@
 
 //! Lyric emotion classification (P2b).
 //!
-//! The model transport is intentionally *not* implemented here. The existing
-//! AI runtime owns model HTTP clients, credentials and budget accounting; this
-//! module owns only the classification contract: input hash/chunking, prompt,
-//! strict output validation, deterministic merge and the bounded cache.
-//! A provider adapter (wrapping the existing AI provider once it exposes a
-//! generic completion call) can implement [`EmotionProvider`] without
-//! duplicating that transport.
+//! The existing AI runtime owns model HTTP clients and credentials; this module
+//! owns the classification contract: input hash/chunking, prompt, strict output
+//! validation, deterministic merge and the bounded cache. Its generic adapter
+//! currently allows only zero-remote-cost providers. Metered completions must
+//! first join the shared task and usage ledger path.
 //!
 //! Without a configured provider the service is unavailable and the auto mode
 //! stays disabled. Tests use a scripted provider; no real key is required.
 
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -22,6 +21,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use unicode_normalization::UnicodeNormalization;
+
+const METERED_COMPLETION_DISABLED: &str =
+    "歌词情绪云端请求尚未接入共享 AI 费用账本";
+const AI_EXECUTION_BUSY: &str = "shared AI execution slot is busy";
 
 pub(crate) const PROMPT_VERSION: u32 = 1;
 pub(crate) const CATALOG_VERSION: u32 = 1;
@@ -34,6 +37,12 @@ pub(crate) const MAX_REPLY_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_SECTIONS: usize = 256;
 pub(crate) const CACHE_ENTRIES: usize = 50;
 pub(crate) const CACHE_BYTES: usize = 1024 * 1024;
+pub(crate) const PERSIST_CUE_BYTES: i64 = 4 * 1024 * 1024;
+pub(crate) const PERSIST_LOCK_BYTES: i64 = 4 * 1024 * 1024;
+pub(crate) const MAX_LOCKS: usize = 2000;
+pub(crate) const CHUNK_CONCURRENCY: usize = 2;
+pub(crate) const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const CLASSIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 pub(crate) const EMOTION_IDS: [&str; 8] = [
     "joy", "sorrow", "anger", "anxious", "tender", "triumph", "lonely", "neutral",
 ];
@@ -73,7 +82,7 @@ pub(crate) struct CueSection {
     pub confidence: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CueDoc {
     pub version: u32,
@@ -85,6 +94,19 @@ pub(crate) struct CueDoc {
     pub model_id: String,
     pub prompt_version: u32,
     pub catalog_version: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct LocksQuery {
+    pub lyrics_hash: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct LocksRequest {
+    pub lyrics_hash: String,
+    pub locks: Vec<vmusic_store::emotion::EmotionLockRow>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +129,9 @@ impl EmotionError {
     }
     fn unavailable(message: impl Into<String>) -> Self {
         Self::new(503, "emotion_provider_unavailable", message)
+    }
+    fn busy() -> Self {
+        Self::new(429, "ai_busy", "AI 通道繁忙，请稍后重试")
     }
 }
 
@@ -218,12 +243,53 @@ fn valid_emotion(id: &str) -> bool {
     EMOTION_IDS.contains(&id)
 }
 
+fn valid_hash(hash: &str) -> bool {
+    hash.len() == 71
+        && hash.starts_with("sha256:")
+        && hash[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_locks(
+    hash: &str,
+    locks: &[vmusic_store::emotion::EmotionLockRow],
+) -> Result<(), EmotionError> {
+    if !valid_hash(hash) {
+        return Err(EmotionError::invalid("lyricsHash 格式非法"));
+    }
+    if locks.len() > MAX_LOCKS {
+        return Err(EmotionError::invalid("手动覆盖超过 2000 条"));
+    }
+    let mut ordered = locks.to_vec();
+    ordered.sort_by_key(|lock| (lock.from, lock.to));
+    let mut previous_to = None;
+    for lock in &ordered {
+        if lock.from < 0
+            || lock.to < lock.from
+            || lock.to >= MAX_LINES as i64
+            || !valid_emotion(&lock.emotion)
+            || !lock.intensity.is_finite()
+            || !(0.0..=1.0).contains(&lock.intensity)
+            || !lock.confidence.is_finite()
+            || !(0.0..=1.0).contains(&lock.confidence)
+        {
+            return Err(EmotionError::invalid("手动覆盖字段非法"));
+        }
+        if previous_to.is_some_and(|to| lock.from <= to) {
+            return Err(EmotionError::invalid("手动覆盖区间重叠"));
+        }
+        previous_to = Some(lock.to);
+    }
+    Ok(())
+}
+
 fn parse_reply(
     text: &str,
     request: &ClassifyRequest,
     chunk: &Chunk,
 ) -> Result<(Vec<CueLine>, Vec<CueSection>), EmotionError> {
-    if text.as_bytes().len() > MAX_REPLY_BYTES {
+    if text.len() > MAX_REPLY_BYTES {
         return Err(EmotionError::invalid("模型响应超过 16 KiB"));
     }
     let value = super::strict_json::parse(text.as_bytes(), MAX_REPLY_BYTES, 8)
@@ -281,6 +347,55 @@ fn parse_reply(
         return Err(EmotionError::invalid("模型 section 超过 256 条"));
     }
     Ok((reply.lines, sections))
+}
+
+/// Re-validate a persisted cue before trusting it. A schema change or a
+/// corrupted row must behave like a cache miss, never like model output.
+fn parse_cached_doc(text: &str, request: &ClassifyRequest) -> Result<CueDoc, EmotionError> {
+    if text.len() > PERSIST_CUE_BYTES as usize {
+        return Err(EmotionError::invalid("缓存 Cue 超限"));
+    }
+    let doc: CueDoc =
+        serde_json::from_str(text).map_err(|_| EmotionError::invalid("缓存 Cue 无法解析"))?;
+    if doc.version != 1
+        || doc.lyrics_hash != request.lyrics_hash
+        || doc.prompt_version != PROMPT_VERSION
+        || doc.catalog_version != CATALOG_VERSION
+    {
+        return Err(EmotionError::invalid("缓存 Cue 版本不匹配"));
+    }
+    if doc.lines.len() > request.lines.len() || doc.sections.len() > MAX_SECTIONS {
+        return Err(EmotionError::invalid("缓存 Cue 行数超限"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for line in &doc.lines {
+        if line.index as usize >= request.lines.len()
+            || !valid_emotion(&line.emotion)
+            || !line.intensity.is_finite()
+            || !(0.0..=1.0).contains(&line.intensity)
+            || !line.confidence.is_finite()
+            || !(0.0..=1.0).contains(&line.confidence)
+            || !seen.insert(line.index)
+        {
+            return Err(EmotionError::invalid("缓存 Cue 行非法"));
+        }
+    }
+    let mut previous_to = None;
+    for section in &doc.sections {
+        if section.from > section.to
+            || section.to as usize >= request.lines.len()
+            || !valid_emotion(&section.emotion)
+            || !section.intensity.is_finite()
+            || !(0.0..=1.0).contains(&section.intensity)
+            || !section.confidence.is_finite()
+            || !(0.0..=1.0).contains(&section.confidence)
+            || previous_to.is_some_and(|to| section.from <= to)
+        {
+            return Err(EmotionError::invalid("缓存 Cue section 非法"));
+        }
+        previous_to = Some(section.to);
+    }
+    Ok(doc)
 }
 
 struct Cache {
@@ -441,6 +556,7 @@ impl EmotionProvider for FakeEmotionProvider {
 struct AiRuntimeEmotionProvider {
     provider: Arc<dyn crate::ai::jobs::StageIntentProvider>,
     credentials: Arc<crate::ai::credential::Service>,
+    execution_slots: Arc<tokio::sync::Semaphore>,
     owner: String,
 }
 
@@ -452,10 +568,14 @@ impl EmotionProvider for AiRuntimeEmotionProvider {
         self.provider.model()
     }
     fn ready(&self) -> bool {
-        self.provider.ready()
+        self.provider.ready() && self.provider.supports_zero_cost_completion()
     }
     fn diagnostic(&self) -> Option<&str> {
-        self.provider.diagnostic()
+        if self.provider.ready() && !self.provider.supports_zero_cost_completion() {
+            Some(METERED_COMPLETION_DISABLED)
+        } else {
+            self.provider.diagnostic()
+        }
     }
     fn classify(
         &self,
@@ -464,8 +584,12 @@ impl EmotionProvider for AiRuntimeEmotionProvider {
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
         let provider = self.provider.clone();
         let credentials = self.credentials.clone();
+        let execution_slots = self.execution_slots.clone();
         let owner = self.owner.clone();
         Box::pin(async move {
+            let _permit = execution_slots
+                .try_acquire_owned()
+                .map_err(|_| AI_EXECUTION_BUSY.to_string())?;
             let credential = if provider.requires_openai_credential() {
                 Some(
                     credentials
@@ -522,16 +646,30 @@ impl EmotionService {
         &self,
         provider: Arc<dyn crate::ai::jobs::StageIntentProvider>,
         credentials: Arc<crate::ai::credential::Service>,
+        execution_slots: Arc<tokio::sync::Semaphore>,
         owner: String,
     ) {
         let adapter: Arc<dyn EmotionProvider> = Arc::new(AiRuntimeEmotionProvider {
             provider,
             credentials,
+            execution_slots,
             owner,
         });
         if let Ok(mut slot) = self.provider.write() {
             *slot = adapter;
         }
+    }
+
+    pub(crate) fn cache_key(&self, lyrics_hash: &str) -> Result<String, EmotionError> {
+        let provider = self.provider()?;
+        Ok(format!(
+            "{}|{}|{}|{}|{}",
+            lyrics_hash,
+            provider.id(),
+            provider.model(),
+            PROMPT_VERSION,
+            CATALOG_VERSION
+        ))
     }
 
     pub(crate) fn status(&self, authorized: bool) -> Value {
@@ -566,14 +704,7 @@ impl EmotionService {
     pub(crate) async fn classify(&self, request: ClassifyRequest) -> Result<CueDoc, EmotionError> {
         validate_request(&request)?;
         let provider = self.provider()?;
-        let key = format!(
-            "{}|{}|{}|{}|{}",
-            request.lyrics_hash,
-            provider.id(),
-            provider.model(),
-            PROMPT_VERSION,
-            CATALOG_VERSION
-        );
+        let key = self.cache_key(&request.lyrics_hash)?;
         if let Some(doc) = self
             .cache
             .lock()
@@ -586,16 +717,70 @@ impl EmotionService {
             return Err(EmotionError::unavailable("歌词情绪 provider 未就绪"));
         }
         let chunks = chunks(request.lines.len());
+        let mut outcomes = tokio::time::timeout(
+            CLASSIFY_TIMEOUT,
+            futures::stream::iter(chunks.into_iter().map(|chunk| {
+                let provider = provider.clone();
+                let request = &request;
+                async move {
+                    let text = match tokio::time::timeout(
+                        CHUNK_TIMEOUT,
+                        provider.classify(system_prompt(), user_prompt(request, &chunk)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(text)) => text,
+                        Ok(Err(reason)) if reason == AI_EXECUTION_BUSY => {
+                            return (chunk, Err(EmotionError::busy()));
+                        }
+                        Ok(Err(reason)) => {
+                            return (chunk, Err(EmotionError::unavailable(reason)));
+                        }
+                        Err(_) => {
+                            return (chunk, Err(EmotionError::unavailable("歌词分类分块超时")));
+                        }
+                    };
+                    match parse_reply(&text, request, &chunk) {
+                        Ok((lines, sections)) => (chunk, Ok((lines, sections))),
+                        Err(error) => (chunk, Err(error)),
+                    }
+                }
+            }))
+            .buffer_unordered(CHUNK_CONCURRENCY)
+            .collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|_| EmotionError::unavailable("歌词分类超过 120s 期限"))?;
+
+        outcomes.sort_by_key(|(chunk, _)| chunk.core_from);
         let mut lines = Vec::new();
         let mut sections = Vec::new();
-        for chunk in chunks {
-            let text = provider
-                .classify(system_prompt(), user_prompt(&request, &chunk))
-                .await
-                .map_err(EmotionError::unavailable)?;
-            let (chunk_lines, chunk_sections) = parse_reply(&text, &request, &chunk)?;
-            lines.extend(chunk_lines);
-            sections.extend(chunk_sections);
+        let mut first_error = None;
+        let mut succeeded = 0;
+        for (chunk, outcome) in outcomes {
+            match outcome {
+                Ok((chunk_lines, chunk_sections)) => {
+                    succeeded += 1;
+                    lines.extend(chunk_lines);
+                    sections.extend(chunk_sections);
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    for index in chunk.core_from..=chunk.core_to {
+                        lines.push(CueLine {
+                            index,
+                            emotion: "neutral".into(),
+                            intensity: 0.0,
+                            confidence: 0.0,
+                        });
+                    }
+                }
+            }
+        }
+        if succeeded == 0 {
+            return Err(first_error.unwrap_or_else(|| EmotionError::unavailable("歌词分类无结果")));
         }
         lines.sort_by_key(|line| line.index);
         for i in 1..lines.len() {
@@ -655,13 +840,26 @@ pub(crate) async fn status(state: &crate::state::AppState) -> crate::error::ApiR
     Ok(state.ai_emotion.status(authorized))
 }
 
+fn api_error(error: EmotionError) -> crate::error::ApiError {
+    crate::error::ApiError::new(
+        axum::http::StatusCode::from_u16(error.status)
+            .unwrap_or(axum::http::StatusCode::BAD_REQUEST),
+        error.code,
+        error.message,
+    )
+}
+
+fn store_api_error(error: vmusic_core::StoreError) -> crate::error::ApiError {
+    crate::error::ApiError::from(vmusic_core::CoreError::Store(error))
+}
+
 pub(crate) async fn classify(
     state: &crate::state::AppState,
     request: ClassifyRequest,
 ) -> crate::error::ApiResult<CueDoc> {
     let value = vmusic_store::settings::get(&state.db, "lyrics_emotion_ai_authorized")
         .await
-        .map_err(|error| crate::error::ApiError::from(vmusic_core::CoreError::Store(error)))?;
+        .map_err(store_api_error)?;
     if !matches!(value, Some(Value::Bool(true))) {
         return Err(crate::error::ApiError::new(
             axum::http::StatusCode::FORBIDDEN,
@@ -669,14 +867,83 @@ pub(crate) async fn classify(
             "歌词情绪自动分类需要显式授权",
         ));
     }
-    state.ai_emotion.classify(request).await.map_err(|error| {
-        crate::error::ApiError::new(
-            axum::http::StatusCode::from_u16(error.status)
-                .unwrap_or(axum::http::StatusCode::BAD_REQUEST),
-            error.code,
-            error.message,
+    validate_request(&request).map_err(api_error)?;
+    let key = state
+        .ai_emotion
+        .cache_key(&request.lyrics_hash)
+        .map_err(api_error)?;
+    match vmusic_store::emotion::get_cue(&state.db, &key).await {
+        Ok(Some(record)) => match parse_cached_doc(&record.doc_json, &request) {
+            Ok(doc) => return Ok(doc),
+            Err(_) => {
+                let _ = vmusic_store::emotion::delete_cue(&state.db, &key).await;
+            }
+        },
+        Ok(None) => {}
+        Err(error) => tracing::warn!("lyric emotion cache read failed: {error}"),
+    }
+    let doc = state
+        .ai_emotion
+        .classify(request)
+        .await
+        .map_err(api_error)?;
+    if let Ok(encoded) = serde_json::to_string(&doc) {
+        if let Err(error) = vmusic_store::emotion::put_cue(
+            &state.db,
+            &key,
+            &doc.lyrics_hash,
+            &encoded,
+            PERSIST_CUE_BYTES,
         )
-    })
+        .await
+        {
+            // Persistence is a cache: a write failure must not fail playback.
+            tracing::warn!("lyric emotion cache write failed: {error}");
+        }
+    }
+    Ok(doc)
+}
+
+pub(crate) async fn read_locks(
+    state: &crate::state::AppState,
+    query: LocksQuery,
+) -> crate::error::ApiResult<Value> {
+    if !valid_hash(&query.lyrics_hash) {
+        return Err(api_error(EmotionError::invalid("lyricsHash 格式非法")));
+    }
+    let locks = vmusic_store::emotion::list_locks(&state.db, &query.lyrics_hash)
+        .await
+        .map_err(store_api_error)?;
+    Ok(json!({ "lyricsHash": query.lyrics_hash, "locks": locks }))
+}
+
+pub(crate) async fn write_locks(
+    state: &crate::state::AppState,
+    request: LocksRequest,
+) -> crate::error::ApiResult<Value> {
+    validate_locks(&request.lyrics_hash, &request.locks).map_err(api_error)?;
+    vmusic_store::emotion::replace_locks(
+        &state.db,
+        &request.lyrics_hash,
+        &request.locks,
+        PERSIST_LOCK_BYTES,
+    )
+    .await
+    .map_err(store_api_error)?;
+    Ok(json!({ "lyricsHash": request.lyrics_hash, "locks": request.locks }))
+}
+
+pub(crate) async fn clear_locks(
+    state: &crate::state::AppState,
+    query: LocksQuery,
+) -> crate::error::ApiResult<Value> {
+    if !valid_hash(&query.lyrics_hash) {
+        return Err(api_error(EmotionError::invalid("lyricsHash 格式非法")));
+    }
+    vmusic_store::emotion::clear_locks(&state.db, &query.lyrics_hash)
+        .await
+        .map_err(store_api_error)?;
+    Ok(json!({ "lyricsHash": query.lyrics_hash, "locks": [] }))
 }
 
 #[cfg(test)]
@@ -768,6 +1035,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_chunk_publishes_neutral_for_its_range_only() {
+        let req = request(lines(100));
+        let hash = req.lyrics_hash.clone();
+        let provider = Arc::new(Scripted::new(vec![
+            reply(&hash, 0),
+            "not a model reply".into(),
+            reply(&hash, 80),
+        ]));
+        let doc = EmotionService::new(provider).classify(req).await.unwrap();
+        assert_eq!(doc.lines.len(), 42);
+        assert_eq!(doc.lines[0].emotion, "joy");
+        let failed: Vec<_> = doc
+            .lines
+            .iter()
+            .filter(|line| (40..=79).contains(&line.index))
+            .collect();
+        assert_eq!(failed.len(), 40);
+        assert!(failed
+            .iter()
+            .all(|line| line.emotion == "neutral" && line.intensity == 0.0));
+        let tail = doc
+            .lines
+            .iter()
+            .find(|line| line.index == 80)
+            .expect("third chunk cue");
+        assert_eq!(tail.emotion, "joy");
+    }
+
+    #[tokio::test]
     async fn rejects_bad_hash_range_and_unknown_emotion() {
         let req = request(lines(3));
         let hash = req.lyrics_hash.clone();
@@ -813,6 +1109,7 @@ mod tests {
         struct CompletionFixture {
             calls: AtomicUsize,
             system: Mutex<Option<String>>,
+            zero_cost: bool,
         }
 
         impl crate::ai::jobs::StageIntentProvider for CompletionFixture {
@@ -824,6 +1121,9 @@ mod tests {
             }
             fn ready(&self) -> bool {
                 true
+            }
+            fn supports_zero_cost_completion(&self) -> bool {
+                self.zero_cost
             }
             fn quote(&self, _brief: &str) -> Result<crate::ai::usage::PriceQuote, String> {
                 Err("not used".to_string())
@@ -879,12 +1179,23 @@ mod tests {
         let provider = Arc::new(CompletionFixture {
             calls: AtomicUsize::new(0),
             system: Mutex::new(None),
+            zero_cost: true,
         });
+        let runtime = crate::ai::jobs::AiRuntime::new();
+        let execution_slots = runtime.completion_slots();
         let service = EmotionService::new(Arc::new(AiRuntimeEmotionProvider {
             provider: provider.clone(),
             credentials: crate::ai::credential::Service::isolated(),
+            execution_slots: execution_slots.clone(),
             owner: "test-owner".into(),
         }));
+        let occupied = execution_slots.clone().try_acquire_owned().unwrap();
+        let busy = service.classify(request(lines(1))).await.unwrap_err();
+        assert_eq!(busy.status, 429);
+        assert_eq!(busy.code, "ai_busy");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        drop(occupied);
+
         let doc = service.classify(request(lines(1))).await.unwrap();
         assert_eq!(doc.source, "llm");
         assert_eq!(doc.provider_id, "fixture-llm");
@@ -900,6 +1211,147 @@ mod tests {
         assert_eq!(status["provider"]["id"], "fixture-llm");
         assert_eq!(status["provider"]["ready"], true);
         assert_eq!(status["provider"]["simulated"], false);
+    }
+
+    #[tokio::test]
+    async fn metered_completion_is_not_advertised_or_dispatched_without_shared_ledger() {
+        struct MeteredCompletionFixture {
+            calls: AtomicUsize,
+        }
+
+        impl crate::ai::jobs::StageIntentProvider for MeteredCompletionFixture {
+            fn id(&self) -> &'static str {
+                "metered-fixture"
+            }
+            fn model(&self) -> &str {
+                "metered-fixture-v1"
+            }
+            fn ready(&self) -> bool {
+                true
+            }
+            fn quote(&self, _brief: &str) -> Result<crate::ai::usage::PriceQuote, String> {
+                Err("not used".to_string())
+            }
+            fn generate(
+                &self,
+                _brief: String,
+                _pricing: crate::ai::usage::PricingSnapshot,
+                _credential: Option<crate::ai::credential::ProviderCredential>,
+                _cancellation: crate::ai::jobs::ProviderCancellation,
+            ) -> Pin<Box<dyn Future<Output = crate::ai::jobs::ProviderReply> + Send>> {
+                Box::pin(async {
+                    crate::ai::jobs::ProviderReply {
+                        intent: Err("not used".to_string()),
+                        usage: None,
+                    }
+                })
+            }
+            fn complete(
+                &self,
+                _system: String,
+                _user: String,
+                _credential: Option<crate::ai::credential::ProviderCredential>,
+                _cancellation: crate::ai::jobs::ProviderCancellation,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<crate::ai::jobs::CompletionReply, String>> + Send>,
+            > {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Ok(crate::ai::jobs::CompletionReply {
+                        text: String::new(),
+                    })
+                })
+            }
+        }
+
+        let provider = Arc::new(MeteredCompletionFixture {
+            calls: AtomicUsize::new(0),
+        });
+        let service = EmotionService::new(Arc::new(AiRuntimeEmotionProvider {
+            provider: provider.clone(),
+            credentials: crate::ai::credential::Service::isolated(),
+            execution_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            owner: "test-owner".into(),
+        }));
+
+        let status = service.status(true);
+        assert_eq!(status["provider"]["ready"], false);
+        assert_eq!(
+            status["provider"]["diagnostic"],
+            METERED_COMPLETION_DISABLED
+        );
+        let error = service.classify(request(lines(1))).await.unwrap_err();
+        assert_eq!(error.status, 503);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn cached_docs_are_revalidated_before_use() {
+        let req = request(lines(2));
+        let doc = CueDoc {
+            version: 1,
+            lyrics_hash: req.lyrics_hash.clone(),
+            sections: vec![CueSection {
+                from: 0,
+                to: 1,
+                emotion: "joy".into(),
+                intensity: 0.8,
+                confidence: 0.9,
+            }],
+            lines: vec![
+                CueLine {
+                    index: 0,
+                    emotion: "joy".into(),
+                    intensity: 0.8,
+                    confidence: 0.9,
+                },
+                CueLine {
+                    index: 1,
+                    emotion: "neutral".into(),
+                    intensity: 0.0,
+                    confidence: 1.0,
+                },
+            ],
+            source: "llm".into(),
+            provider_id: "fixture".into(),
+            model_id: "fixture-v1".into(),
+            prompt_version: PROMPT_VERSION,
+            catalog_version: CATALOG_VERSION,
+        };
+        let encoded = serde_json::to_string(&doc).unwrap();
+        assert_eq!(parse_cached_doc(&encoded, &req).unwrap().lines.len(), 2);
+
+        let mut wrong_hash: Value = serde_json::from_str(&encoded).unwrap();
+        wrong_hash["lyricsHash"] = json!(format!("sha256:{}", "0".repeat(64)));
+        assert!(parse_cached_doc(&wrong_hash.to_string(), &req).is_err());
+
+        let mut bad_index: Value = serde_json::from_str(&encoded).unwrap();
+        bad_index["lines"][0]["index"] = json!(9);
+        assert!(parse_cached_doc(&bad_index.to_string(), &req).is_err());
+
+        let mut overlapping: Value = serde_json::from_str(&encoded).unwrap();
+        overlapping["sections"][0]["to"] = json!(1);
+        overlapping["sections"] = json!([
+            { "from": 0, "to": 1, "emotion": "joy", "intensity": 0.8, "confidence": 0.9 },
+            { "from": 1, "to": 1, "emotion": "sorrow", "intensity": 0.8, "confidence": 0.9 }
+        ]);
+        assert!(parse_cached_doc(&overlapping.to_string(), &req).is_err());
+    }
+
+    #[test]
+    fn lock_validation_rejects_overlap_and_unknown_emotion() {
+        let hash = canonical_hash(&lines(2));
+        let lock = |from, to, emotion: &str| vmusic_store::emotion::EmotionLockRow {
+            from,
+            to,
+            emotion: emotion.into(),
+            intensity: 0.8,
+            confidence: 1.0,
+        };
+        assert!(validate_locks(&hash, &[lock(0, 0, "joy")]).is_ok());
+        assert!(validate_locks(&hash, &[lock(0, 1, "nope")]).is_err());
+        assert!(validate_locks(&hash, &[lock(0, 1, "joy"), lock(1, 2, "sorrow")]).is_err());
+        assert!(validate_locks("sha256:short", &[lock(0, 0, "joy")]).is_err());
     }
 
     #[tokio::test]

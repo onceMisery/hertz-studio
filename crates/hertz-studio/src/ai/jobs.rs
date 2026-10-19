@@ -80,6 +80,11 @@ pub(crate) trait StageIntentProvider: Send + Sync {
     fn requires_openai_credential(&self) -> bool {
         false
     }
+    /// Generic completions outside the persistent task/ledger path may only
+    /// run on providers whose requests have no remote monetary cost.
+    fn supports_zero_cost_completion(&self) -> bool {
+        false
+    }
     /// Freeze a reliable bound for the complete request, not just the brief.
     /// No network or model call is allowed while producing this quote.
     fn quote(&self, brief: &str) -> Result<PriceQuote, String>;
@@ -227,6 +232,10 @@ impl AiRuntime {
 
     pub(crate) async fn provider(&self) -> Arc<dyn StageIntentProvider> {
         self.provider.read().await.clone()
+    }
+
+    pub(crate) fn completion_slots(&self) -> Arc<tokio::sync::Semaphore> {
+        self.execution_slots.clone()
     }
 
     /// 测试与将来的运行时换装入口；R5 真实 provider 落地后由配置驱动。

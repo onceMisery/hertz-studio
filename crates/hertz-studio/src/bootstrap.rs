@@ -256,6 +256,7 @@ pub async fn boot(
                 Ok(owner) => state.ai_emotion.install_ai_provider(
                     state.ai_runtime.provider().await,
                     state.ai_runtime.credentials.clone(),
+                    state.ai_runtime.completion_slots(),
                     owner,
                 ),
                 Err(error) => {

@@ -20,6 +20,7 @@ pub mod ai;
 pub mod ai_jobs;
 pub mod ai_ledger;
 pub mod backup;
+pub mod emotion;
 pub mod favorites;
 pub mod limits;
 pub mod lyrics;

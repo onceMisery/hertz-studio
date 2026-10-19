@@ -285,6 +285,9 @@ impl StageIntentProvider for Ollama {
     fn ready(&self) -> bool {
         true
     }
+    fn supports_zero_cost_completion(&self) -> bool {
+        true
+    }
     fn quote(&self, brief: &str) -> Result<PriceQuote, String> {
         self.request(brief).map_err(str::to_owned)?;
         // Local zero-price accounting is not a tokenizer/cost bound for cloud.
