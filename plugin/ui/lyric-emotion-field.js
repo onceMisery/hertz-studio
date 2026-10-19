@@ -45,12 +45,15 @@
                w: function () { return 0.52; }, anchor: 0.03 },
     // 极浅的波浪
     tender:  { b: function (u) { return 0.18 * Math.sin(2 * Math.PI * u); },
-               w: function () { return 0.44; }, anchor: 0.05 }
+               w: function () { return 0.44; }, anchor: 0.05 },
+    // P3：sorrow 去掉正弦后的纯幂下沉；验证「新增形状」只需加一条基函数。
+    lonely:  { b: function (u) { return Math.pow(u, 1.6); },
+               w: function (u) { return 0.42 - 0.10 * u; }, anchor: 0.13 }
   };
 
   // 扰动场（UV 空间振幅）与整行剪切（角度，度）
-  var TURB  = { joy: 0,     sorrow: 0.004, anger: 0.012, anxious: 0.020, tender: 0.002 };
-  var SHEAR = { joy: 0,     sorrow: 0,     anger: -1.0,  anxious: 0,     tender: 0 };
+  var TURB  = { joy: 0,     sorrow: 0.004, anger: 0.012, anxious: 0.020, tender: 0.002, lonely: 0.003 };
+  var SHEAR = { joy: 0,     sorrow: 0,     anger: -1.0,  anxious: 0,     tender: 0,     lonely: 0 };
 
   // 逐字激励：e = amp * (1-x)^damp * sin(2π·freq·x)，x 是该字素已过的时长比例。
   // freq = 0 时 sin = 0，整条式子退化为纯衰减 —— 悲伤不需要第二种分支。

@@ -211,6 +211,19 @@
     field: { basis: 'tender', anchor: 0.05 },
     type: { weight: 400, tracking: '0.03em', leading: 1.7 },
     palette: { ink: '#F5EADF', accent: '#D8B28C', accent2: '#C9A07A' }
+  }, {
+    // P3：复用 joy 的 (2u-1)^2，只换系数与配色；不需要改求值器。
+    id: 'triumph', label: '胜利', aliases: ['victory'], archetype: 'bounce',
+    field: { basis: 'joy', anchor: 0.11 },
+    type: { weight: 700, tracking: '0.03em', leading: 1.5 },
+    decor: [{ kind: 'spark', count: 4, climaxCount: 6, minIntensity: 0.75 }],
+    palette: { ink: '#FFF7D6', accent: '#FFD166', accent2: '#FF8A5B' }
+  }, {
+    // P3：新增 lonely 场基函数，验证「加形状」的成本高于「加档案」。
+    id: 'lonely', label: '孤独', aliases: [], archetype: 'sink',
+    field: { basis: 'lonely', anchor: 0.13 },
+    type: { weight: 400, tracking: '0.05em', leading: 1.8 },
+    palette: { ink: '#C9D6E3', accent: '#7FA7D9', accent2: '#8CA0B8' }
   }].forEach(register);
 
   // ---- 哈希 ----

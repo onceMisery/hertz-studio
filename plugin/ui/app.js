@@ -2211,7 +2211,7 @@ function lyricEmotionMode() {
 }
 function lyricEmotionPreview() {
   var id = state.settings.lyrics_emotion_preview;
-  return ['joy', 'sorrow', 'anger', 'anxious', 'tender'].indexOf(id) >= 0 ? id : 'joy';
+  return ['joy', 'sorrow', 'anger', 'anxious', 'tender', 'triumph', 'lonely'].indexOf(id) >= 0 ? id : 'joy';
 }
 function lyricEmotionScale() {
   var v = Number(state.settings.lyrics_emotion_scale);

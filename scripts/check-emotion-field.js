@@ -21,7 +21,7 @@ function close(a, b, eps) {
   return Math.abs(a - b) <= (eps == null ? 1e-9 : eps);
 }
 
-const PROFILES = ['joy', 'sorrow', 'anger', 'anxious', 'tender'];
+const PROFILES = ['joy', 'sorrow', 'anger', 'anxious', 'tender', 'lonely'];
 const profileOf = (id) => ({ field: { basis: id, anchor: 0.12 } });
 
 check('SAMPLE_N 为 33', F.SAMPLE_N === 33, String(F.SAMPLE_N));
@@ -74,6 +74,14 @@ let prev = -Infinity;
 for (let i = 0; i <= 16; i += 1) {
   const v = F.evaluate(profileOf('sorrow'), i / 16, 1, 100, 0, 0).b;
   check('sorrow 单调', v >= prev - 1e-6, 'u=' + (i / 16) + ' b=' + v);
+  prev = v;
+}
+
+// lonely：纯幂下沉，越到行尾越沉；这是 P3 新增的场基函数
+prev = -Infinity;
+for (let i = 0; i <= 16; i += 1) {
+  const v = F.evaluate(profileOf('lonely'), i / 16, 1, 100, 0, 0).b;
+  check('lonely 单调', v >= prev - 1e-6, 'u=' + (i / 16) + ' b=' + v);
   prev = v;
 }
 
