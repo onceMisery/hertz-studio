@@ -324,7 +324,12 @@
         wordEl.dataset.st = 'waiting';
         wordEl.style.fontSize = px + 'px';
         wordEl.style.fontFamily = StanzaTheme.fontStack(theme.fontStyle);
-        wordEl.style.fontWeight = String(emotion && emotion.type && emotion.type.weight || 700);
+        var baseWeight = emotion && emotion.type && emotion.type.weight || 700;
+        var accentWord = !!(emotion && global.LyricEmotion && LyricEmotion.accentFor &&
+          LyricEmotion.accentFor(w.text));
+        if (accentWord) wordEl.setAttribute('data-emo-accent', 'true');
+        wordEl.style.fontWeight = String(accentWord && LyricEmotion.accentWeight
+          ? LyricEmotion.accentWeight(baseWeight, emotion.intensity) : baseWeight);
         if (emotion && emotion.type && emotion.type.tracking) wordEl.style.letterSpacing = emotion.type.tracking;
         wordEl.style.marginRight = (isInterlude ? 48 /* stanza: 3rem */ : margin) + 'px';
         wordEl._wordWidth = wi;

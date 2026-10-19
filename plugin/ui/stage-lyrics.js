@@ -58,6 +58,8 @@
         el.removeAttribute('data-emotion');
         el.style.removeProperty('font-weight');
         el.style.removeProperty('letter-spacing');
+        el.style.removeProperty('--emo-accent-weight');
+        row.nodes.forEach(function (node) { node.removeAttribute('data-emo-accent'); });
         ['--sl-emotion-ink', '--sl-emotion-accent', '--sl-emotion-dim'].forEach(function (name) {
           el.style.removeProperty(name);
         });
@@ -68,6 +70,16 @@
       el.style.fontWeight = String(emotion.type && emotion.type.weight || 600);
       el.style.letterSpacing = emotion.type && emotion.type.tracking ? emotion.type.tracking : '';
       var E = global.LyricEmotion;
+      if (E && E.accentFor && E.accentWeight) {
+        el.style.setProperty('--emo-accent-weight', String(E.accentWeight(
+          emotion.type && emotion.type.weight || 600, emotion.intensity)));
+        row.nodes.forEach(function (node) {
+          if (E.accentFor(node.textContent)) node.setAttribute('data-emo-accent', 'true');
+          else node.removeAttribute('data-emo-accent');
+        });
+      } else {
+        el.style.removeProperty('--emo-accent-weight');
+      }
       var paletteOn = !E || !E.paletteEnabled || E.paletteEnabled();
       if (paletteOn) {
         el.style.setProperty('--sl-emotion-ink', emotion.palette.ink);

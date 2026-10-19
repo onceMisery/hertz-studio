@@ -71,6 +71,7 @@ async function main() {
     });
     if (before.emotion !== null) throw new Error('无 Cue 时侧栏不应有 data-emotion');
 
+    await page.evaluate(() => Stage.setEmotionSettings({ mode: 'auto' }));
     const prepared = await page.evaluate(async () => {
       const lines = Stage.lyrics().lines.map((line) => ({ start_ms: line.start_ms, text: line.text }));
       const bound = await LyricEmotion.bindLyrics({ lines });
@@ -159,6 +160,15 @@ async function main() {
       throw new Error('清除后仍残留视觉参数：' + JSON.stringify(cleared));
     }
 
+    const offRejected = await page.evaluate(() => {
+      Stage.setEmotionSettings({ mode: 'off' });
+      return Stage.setEmotionCueDoc({
+        version: 1, lyricsHash: window.__sidebarHash, source: 'fixture',
+        lines: [{ index: Stage.lyrics().index, emotion: 'anger', intensity: 1, confidence: 1 }]
+      });
+    });
+    if (offRejected) throw new Error('off 模式仍接受自动 Cue');
+
     // 设置路径：manual 预览 -> 关闭 -> scale=0 中性 -> palette 关闭。
     await page.evaluate(() => Stage.setEmotionSettings({ mode: 'manual', preview: 'sorrow', scale: 1, palette: true }));
     await page.waitForFunction(() => {
@@ -172,6 +182,11 @@ async function main() {
     if (settingsSorrow.emotion !== 'sorrow' || settingsSorrow.weight !== '400') {
       throw new Error('设置 manual 预览未生效：' + JSON.stringify(settingsSorrow));
     }
+    const manualRejected = await page.evaluate(() => Stage.setEmotionCueDoc({
+      version: 1, lyricsHash: window.__sidebarHash, source: 'fixture',
+      lines: [{ index: Stage.lyrics().index, emotion: 'anger', intensity: 1, confidence: 1 }]
+    }));
+    if (manualRejected) throw new Error('manual 模式仍接受自动 Cue');
     await page.evaluate(() => Stage.setEmotionSettings({ mode: 'off' }));
     await page.waitForFunction(() => {
       const line = document.querySelector('.stage-lyrics .lyric.active');
@@ -304,6 +319,39 @@ async function main() {
     if (clearedLocks.locks && clearedLocks.locks.length) {
       throw new Error('手动覆盖清除后服务端仍有记录：' + JSON.stringify(clearedLocks));
     }
+    const accentTarget = await page.evaluate(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      const words = Array.from(line.querySelectorAll('.word'));
+      const target = words.find((word) => word.textContent.trim()) || null;
+      return target ? target.textContent.trim() : null;
+    });
+    if (!accentTarget) throw new Error('侧栏没有可标记的重音词');
+    await page.check('#set-emotion-accent');
+    await page.fill('#set-emotion-accent-words', accentTarget);
+    await page.press('#set-emotion-accent-words', 'Tab');
+    await page.waitForFunction((needle) => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return line && Array.from(line.querySelectorAll('.word[data-emo-accent="true"]'))
+        .some((word) => word.textContent.indexOf(needle) >= 0);
+    }, accentTarget, { timeout: 10000 });
+    const accent = await page.evaluate(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      const words = Array.from(line.querySelectorAll('.word'));
+      const marked = words.find((word) => word.hasAttribute('data-emo-accent'));
+      const plain = words.find((word) => !word.hasAttribute('data-emo-accent'));
+      return {
+        marked: !!marked,
+        markedWeight: marked ? getComputedStyle(marked).fontWeight : null,
+        plainWeight: plain ? getComputedStyle(plain).fontWeight : null
+      };
+    });
+    if (!accent.marked || !accent.plainWeight ||
+        !(parseFloat(accent.markedWeight) > parseFloat(accent.plainWeight))) {
+      throw new Error('侧栏重音词未生效：' + JSON.stringify(accent));
+    }
+    await page.uncheck('#set-emotion-accent');
+    await page.fill('#set-emotion-accent-words', '');
+    await page.press('#set-emotion-accent-words', 'Tab');
     await page.selectOption('#set-emotion-mode', 'off');
     await page.uncheck('#set-emotion-ai-authorized');
     await page.evaluate(() => { const b = document.querySelector('.skset-modal-close'); if (b) b.click(); });

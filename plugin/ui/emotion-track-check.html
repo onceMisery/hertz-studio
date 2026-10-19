@@ -35,9 +35,10 @@
     [{ text: '星光', start_ms: 5000, end_ms: 6200 }, { text: '落在', start_ms: 6200, end_ms: 7600 },
      { text: '你我', start_ms: 7600, end_ms: 8600 }, { text: '之间', start_ms: 8600, end_ms: 9000 }]
   ];
+  var position = 500;
   window.Stage = {
-    lyrics: function () { return { lines: LINES, index: 0 }; },
-    position: function () { return 500; },
+    lyrics: function () { return { lines: LINES, index: position >= 5000 ? 1 : 0 }; },
+    position: function () { return position; },
     lyricTokens: function (line) { return TOKENS[LINES.indexOf(line)] || []; }
   };
   var host = document.getElementById('s3d-reading');
@@ -58,6 +59,13 @@
       spacing: getComputedStyle(line).letterSpacing,
       dy: words.map(function (w) { return getComputedStyle(w).getPropertyValue('--emo-dy').trim(); }),
       translate: words.map(function (w) { return getComputedStyle(w).translate; }),
+      accents: words.map(function (w) {
+        return {
+          text: w.textContent,
+          marked: w.hasAttribute('data-emo-accent'),
+          weight: getComputedStyle(w).fontWeight
+        };
+      }),
       colors: words.map(function (w) { return getComputedStyle(w).color; }),
       bg: words.length ? getComputedStyle(words[0]).backgroundImage : null
     };
@@ -73,14 +81,30 @@
     });
     EM.commitAtBoundary();
     current = id;
-    view.update({ position: 500, reduced: false, track: null });
-    view.paint(500);
+    position = 500;
+    view.update({ position: position, reduced: false, track: null });
+    view.paint(position);
     await new Promise(function (r) { requestAnimationFrame(r); });
     document.getElementById('out').textContent = JSON.stringify(snapshot(), null, 2);
     return snapshot();
   }
   view.update({ position: 500, reduced: false, track: null });
-  window.__trackCheck = { ready: true, select: select, snapshot: snapshot };
+  function advance() {
+    position = 5500;
+    view.update({ position: position, reduced: false, track: null });
+    view.paint(position);
+    var previous = host.querySelector('.sl-line[data-index="0"]');
+    return previous ? Array.prototype.map.call(previous.querySelectorAll('.sl-word'), function (word) {
+      return word.style.getPropertyValue('--emo-dy');
+    }) : null;
+  }
+  function accent(pattern) {
+    EM.setAccent(true, pattern);
+    view.update({ position: position, reduced: false, track: null });
+    view.paint(position);
+    return snapshot();
+  }
+  window.__trackCheck = { ready: true, select: select, advance: advance, accent: accent, snapshot: snapshot };
 })();
 </script>
 </body>

@@ -13,7 +13,9 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
 const root = path.join(__dirname, '..');
 const PAGE = path.join(root, 'plugin', 'ui', 'emotion-track-check.html');
-const OUT = path.join(root, 'output', 'emotion-track');
+const OUT = process.env.HERTZ_EMOTION_TRACK_OUT
+  ? path.resolve(process.env.HERTZ_EMOTION_TRACK_OUT)
+  : path.join(root, 'output', 'emotion-track');
 
 function rgb(hex) {
   const n = parseInt(hex.slice(1), 16);
@@ -49,6 +51,21 @@ function rgb(hex) {
       if (!snap.bg || snap.bg.indexOf(rgb(snap.palette.accent)) < 0) throw new Error(id + ' 活动渐变未使用强调色');
       snapshots[id] = snap;
       await page.screenshot({ path: path.join(OUT, id + '.png'), fullPage: false });
+    }
+    const accent = await page.evaluate(() => window.__trackCheck.accent('晚风'));
+    const marked = accent && accent.accents.filter((word) => word.marked);
+    const plain = accent && accent.accents.find((word) => !word.marked);
+    if (!marked || marked.length !== 1 || marked[0].text !== '晚风' ||
+        marked[0].weight !== '780' || !plain || plain.weight !== '700') {
+      throw new Error('3D 轨重音词字重错误：' + JSON.stringify(accent && accent.accents));
+    }
+    await page.evaluate(() => {
+      LyricEmotion.setAccent(false, '');
+      window.__trackCheck.select('joy');
+    });
+    const previousLineDy = await page.evaluate(() => window.__trackCheck.advance());
+    if (!previousLineDy || previousLineDy.some(Boolean)) {
+      throw new Error('切换到下一句后，上一句仍残留 --emo-dy：' + JSON.stringify(previousLineDy));
     }
     const neutral = await page.evaluate(() => window.__trackCheck.select('neutral'));
     if (!neutral || neutral.emotion || neutral.translate.some((v) => v !== 'none')) {

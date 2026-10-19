@@ -38,6 +38,8 @@
     hash: null,
     scale: 1,
     curve: 1,
+    accentEnabled: false,
+    accentWords: [],
     committed: null,
     pending: null,
     revision: 0,
@@ -422,6 +424,39 @@
     return clamp01(power === 1 ? base : Math.pow(base, power));
   }
 
+  function parseAccentWords(value) {
+    var list = Array.isArray(value) ? value : String(value == null ? '' : value)
+      .split(/[,，;；\n]+/);
+    var seen = Object.create(null);
+    return list.map(function (word) {
+      return String(word == null ? '' : word).normalize('NFC').trim().toLowerCase();
+    }).filter(function (word) {
+      if (!word || seen[word]) return false;
+      seen[word] = true;
+      return true;
+    }).slice(0, 64);
+  }
+
+  function accentFor(text) {
+    if (!state.accentEnabled || !state.accentWords.length) return false;
+    var normalized = String(text == null ? '' : text).normalize('NFC').toLowerCase()
+      .trim();
+    if (!normalized) return false;
+    // 词级宿主直接命中；逐字素宿主（中文 classic）只有单字 token，反向包含
+    // 让“星光”也能命中“星/光”两个 token。
+    return state.accentWords.some(function (word) {
+      return normalized.indexOf(word) >= 0 || word.indexOf(normalized) >= 0;
+    });
+  }
+
+  function accentWeight(base, intensity) {
+    var weight = Number(base);
+    if (!isFinite(weight)) weight = 700;
+    var eI = Number(intensity);
+    if (!isFinite(eI)) eI = 1;
+    return Math.min(900, Math.round(weight + 80 * clamp01(eI)));
+  }
+
   function neutralState() {
     var profile = neutralProfile();
     return frozen({
@@ -468,12 +503,15 @@
     lineEl.removeAttribute('data-emo-climax');
     ['--emo-i', '--emo-ink', '--emo-accent', '--emo-accent-2',
       '--emo-ink-rgb', '--emo-accent-rgb',
-      '--emo-weight', '--emo-track', '--emo-leading'].forEach(function (name) {
+      '--emo-weight', '--emo-track', '--emo-leading', '--emo-accent-weight'].forEach(function (name) {
       clearVar(lineEl, name);
     });
     (words || []).forEach(function (word) {
       var el = word && word.el ? word.el : word;
-      if (el) clearVar(el, '--emo-dy');
+      if (el) {
+        clearVar(el, '--emo-dy');
+        el.removeAttribute('data-emo-accent');
+      }
     });
   }
 
@@ -505,6 +543,12 @@
       if (emotionState.type.tracking != null) setVar(lineEl, '--emo-track', emotionState.type.tracking);
       if (emotionState.type.leading != null) setVar(lineEl, '--emo-leading', String(emotionState.type.leading));
     }
+    if (state.accentEnabled && state.accentWords.length) {
+      setVar(lineEl, '--emo-accent-weight', String(accentWeight(
+        emotionState.type && emotionState.type.weight, emotionState.intensity)));
+    } else {
+      clearVar(lineEl, '--emo-accent-weight');
+    }
     (words || []).forEach(function (word, i) {
       var el = word && word.el ? word.el : word;
       if (!el) return;
@@ -514,6 +558,11 @@
       var b = sampleAt(emotionState, u, emPx).b;
       setVar(el, '--emo-dy', b.toFixed(3) + 'px');
       if (emotionState) el.setAttribute('data-emo-i', emotionState.intensity.toFixed(3));
+      if (state.accentEnabled && state.accentWords.length && accentFor(el.textContent)) {
+        el.setAttribute('data-emo-accent', 'true');
+      } else {
+        el.removeAttribute('data-emo-accent');
+      }
     });
   }
 
@@ -529,11 +578,22 @@
     if (typeof v !== 'number' || !isFinite(v) || v < 0.5 || v > 1.5) fail('情绪曲线必须在 0.5..1.5');
     state.curve = v;
   }
+  function setAccent(enabled, words) {
+    var nextEnabled = enabled === true;
+    var nextWords = parseAccentWords(words);
+    var changed = nextEnabled !== state.accentEnabled ||
+      nextWords.length !== state.accentWords.length ||
+      nextWords.some(function (word, i) { return word !== state.accentWords[i]; });
+    state.accentEnabled = nextEnabled;
+    state.accentWords = nextWords;
+    if (changed) state.revision += 1;
+  }
   function setPaletteEnabled(v) { state.paletteEnabled = v !== false; }
   function paletteEnabled() { return state.paletteEnabled; }
   function reset() {
     state.lines = null; state.hash = null; state.generation += 1;
     state.committed = null; state.pending = null; state.revision += 1; state.scale = 1; state.curve = 1;
+    state.accentEnabled = false; state.accentWords = [];
     state.paletteEnabled = true;
   }
 
@@ -554,6 +614,9 @@
     resolveForLine: resolve,
     effectiveIntensity: effectiveIntensity,
     setCurve: setCurve,
+    setAccent: setAccent,
+    accentFor: accentFor,
+    accentWeight: accentWeight,
     sampleAt: sampleAt,
     applyLine: applyLine,
     clearLine: clearLine,

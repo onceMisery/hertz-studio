@@ -21,6 +21,10 @@
 .lyric[data-emo-active="true"] .word {
   translate: 0 var(--emo-dy, 0px);
 }
+/* P3 重音词：只加粗匹配词，不改变行级字重/字距。 */
+.lyric[data-emo-active="true"] .word[data-emo-accent="true"] {
+  font-weight: var(--emo-accent-weight, 800);
+}
 
 /* classic stanza：位移写在独立的 translate 上，和 applyPose 的 transform
    （translate/scale）与 .fl-crot 的 rotate 各自合成，互不覆盖。 */
@@ -133,6 +137,9 @@ body.stage-lowfx .fl-emo-decor {
    transform 各自合成。配色走当前行的渐变，不覆盖周边句。 */
 .sl-line[data-emo-active="true"] .sl-word {
   translate: 0 var(--emo-dy, 0px);
+}
+.sl-line[data-emo-active="true"] .sl-word[data-emo-accent="true"] {
+  font-weight: var(--emo-accent-weight, 700);
 }
 .sl-line[data-emo-active="true"] {
   color: var(--sl-emotion-ink, #dbe4e0);

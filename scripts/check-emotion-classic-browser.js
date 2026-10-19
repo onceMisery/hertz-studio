@@ -55,6 +55,7 @@ async function main() {
     });
     await page.waitForFunction(() => document.querySelector('.fl-classic .fl-cword'), null, { timeout: 20000 });
 
+    await page.evaluate(() => Stage.setEmotionSettings({ mode: 'auto' }));
     const prepared = await page.evaluate(async () => {
       const lines = Stage.lyrics().lines.map((line) => ({ start_ms: line.start_ms, text: line.text }));
       const bound = await LyricEmotion.bindLyrics({ lines });
@@ -206,6 +207,28 @@ async function main() {
         entrance.running < 1) {
       throw new Error('逐词入场未生效：' + JSON.stringify(entrance));
     }
+    await page.evaluate(() => LyricEmotion.setAccent(true, '星光'));
+    await page.waitForFunction(() => {
+      const accent = document.querySelector('.fl-classic .fl-cword[data-emo-accent="true"]');
+      return accent && /星|光/.test(accent.textContent);
+    }, null, { timeout: 10000 });
+    const accent = await page.evaluate(() => {
+      const words = Array.from(document.querySelectorAll('.fl-classic .fl-cword'));
+      const marked = words.filter((word) => word.hasAttribute('data-emo-accent'));
+      const plain = words.find((word) => !word.hasAttribute('data-emo-accent'));
+      return {
+        marked: marked.map((word) => ({
+          text: word.textContent,
+          weight: word.style.fontWeight || getComputedStyle(word).fontWeight
+        })),
+        plainWeight: plain && (plain.style.fontWeight || getComputedStyle(plain).fontWeight)
+      };
+    });
+    if (!accent.marked.length || accent.marked.some((word) => word.weight !== '780') ||
+        accent.plainWeight !== '700') {
+      throw new Error('重音词字重错误：' + JSON.stringify(accent));
+    }
+    await page.evaluate(() => LyricEmotion.setAccent(false, ''));
     await fixture.api('/v1/player/pause', 'POST', {});
     await fixture.api('/v1/player/seek', 'POST', { position_ms: 500 });
     await page.waitForTimeout(180);

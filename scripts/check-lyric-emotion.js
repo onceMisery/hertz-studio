@@ -78,6 +78,18 @@ function cue(hash, extra) {
   assert(curveRejected, '非法强度曲线未拒绝');
   EM.setCurve(1);
 
+  // P3 重音词：按逗号/中文逗号分隔、去重、子串匹配，字重随有效强度插值。
+  const revisionBeforeAccent = EM.revision();
+  EM.setAccent(true, ' 星光，眼睛,星光 ');
+  assert(EM.accentFor('星光'), '重音词未匹配 星光');
+  assert(EM.accentFor('你的眼睛'), '重音词未匹配子串');
+  assert(!EM.accentFor('晚风'), '非重音词被误匹配');
+  assert(EM.accentWeight(700, 1) === 780, '重音字重插值错误');
+  assert(EM.accentWeight(400, 0.5) === 440, '低强度重音字重错误');
+  assert(EM.revision() > revisionBeforeAccent, '重音设置未推进 revision');
+  EM.setAccent(false, '星光');
+  assert(!EM.accentFor('星光'), '关闭后重音词仍匹配');
+
   // 清除只清 Cue，不清歌词绑定。
   assert(EM.clearCues() === true, 'clearCues 未改变状态');
   assert(EM.resolveForLine(0).id === 'neutral', 'clearCues 后未回中性');

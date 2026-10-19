@@ -84,6 +84,8 @@ const ui = {
   setEmotionScaleValue: $('set-emotion-scale-value'),
   setEmotionCurve: $('set-emotion-curve'),
   setEmotionCurveValue: $('set-emotion-curve-value'),
+  setEmotionAccent: $('set-emotion-accent'),
+  setEmotionAccentWords: $('set-emotion-accent-words'),
   setEmotionPalette: $('set-emotion-palette'),
   setEmotionAiAuthorized: $('set-emotion-ai-authorized'),
   setEmotionAiNote: $('set-emotion-ai-note'),
@@ -2242,6 +2244,13 @@ function lyricEmotionCurve() {
   var v = Number(state.settings.lyrics_emotion_curve);
   return isFinite(v) ? Math.max(0.5, Math.min(1.5, v)) : 1;
 }
+function lyricEmotionAccent() {
+  return state.settings.lyrics_emotion_accent === true;
+}
+function lyricEmotionAccentWords() {
+  return typeof state.settings.lyrics_emotion_accent_words === 'string'
+    ? state.settings.lyrics_emotion_accent_words : '';
+}
 function lyricEmotionPalette() {
   return state.settings.lyrics_emotion_palette !== false;
 }
@@ -2254,6 +2263,8 @@ function applyEmotionSettings() {
     preview: lyricEmotionPreview(),
     scale: lyricEmotionScale(),
     curve: lyricEmotionCurve(),
+    accent: lyricEmotionAccent(),
+    accentWords: lyricEmotionAccentWords(),
     palette: lyricEmotionPalette()
   });
 }
@@ -2268,6 +2279,8 @@ function paintEmotionSettings() {
   if (ui.setEmotionScaleValue) ui.setEmotionScaleValue.textContent = lyricEmotionScale().toFixed(2);
   if (ui.setEmotionCurve) ui.setEmotionCurve.value = lyricEmotionCurve();
   if (ui.setEmotionCurveValue) ui.setEmotionCurveValue.textContent = lyricEmotionCurve().toFixed(2);
+  if (ui.setEmotionAccent) ui.setEmotionAccent.checked = lyricEmotionAccent();
+  if (ui.setEmotionAccentWords) ui.setEmotionAccentWords.value = lyricEmotionAccentWords();
   ui.setEmotionPalette.checked = lyricEmotionPalette();
   if (ui.setEmotionAiAuthorized) ui.setEmotionAiAuthorized.checked = state.settings.lyrics_emotion_ai_authorized === true;
   var autoOption = ui.setEmotionMode.querySelector('option[value="auto"]');
@@ -8563,6 +8576,14 @@ async function startApp() {
         if (ui.setEmotionCurveValue) ui.setEmotionCurveValue.textContent = Number(ui.setEmotionCurve.value).toFixed(2);
       };
       ui.setEmotionCurve.onchange = () => saveLyricSettings({ lyrics_emotion_curve: Number(ui.setEmotionCurve.value) });
+    }
+    if (ui.setEmotionAccent) {
+      ui.setEmotionAccent.onchange = () => saveLyricSettings({ lyrics_emotion_accent: ui.setEmotionAccent.checked });
+    }
+    if (ui.setEmotionAccentWords) {
+      ui.setEmotionAccentWords.onchange = () => saveLyricSettings({
+        lyrics_emotion_accent_words: ui.setEmotionAccentWords.value.trim()
+      });
     }
     ui.setEmotionPalette.onchange = () => saveLyricSettings({ lyrics_emotion_palette: ui.setEmotionPalette.checked });
     if (ui.setEmotionAiAuthorized) {

@@ -28,7 +28,7 @@
   var emotionReadyDoc = null;   // 已绑定摘要的歌词快照（null = 情绪层关闭）
   var emotionCueDoc = null;     // 摘要就绪前暂存的 Cue
   var emotionRevisionSeen = -1;
-  var emotionSettings = { mode: 'off', preview: 'joy', scale: 1, curve: 1, palette: true };
+  var emotionSettings = { mode: 'off', preview: 'joy', scale: 1, curve: 1, accent: false, accentWords: '', palette: true };
   var mode = 'karaoke';
   var activeIdx = -2;
   var playing = false;
@@ -736,6 +736,8 @@
       var curve = Number(patch.curve);
       if (isFinite(curve) && curve >= 0.5 && curve <= 1.5) emotionSettings.curve = curve;
     }
+    if (patch.accent != null) emotionSettings.accent = patch.accent === true;
+    if (patch.accentWords != null) emotionSettings.accentWords = String(patch.accentWords);
     if (patch.palette != null) emotionSettings.palette = patch.palette !== false;
     if (patch.preview != null) {
       var E = emotionApi();
@@ -749,9 +751,12 @@
       try {
         api.setScale(emotionSettings.scale);
         if (api.setCurve) api.setCurve(emotionSettings.curve);
+        if (api.setAccent) api.setAccent(emotionSettings.accent, emotionSettings.accentWords);
         if (api.setPaletteEnabled) api.setPaletteEnabled(emotionSettings.palette);
       } catch (err) { /* 设置值越界时保留上一档 */ }
     }
+    applyEmotionAll(activeIdx);
+    schedule();
     if (!doc) return;
     if (emotionSettings.mode === 'manual') {
       setManualEmotion(emotionSettings.preview);
