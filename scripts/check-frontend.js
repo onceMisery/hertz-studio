@@ -78,6 +78,8 @@ const STEPS = [
     why: '节拍状态绑定当前曲目，未排队分析必须有界补取，迟到响应不能回填。' },
   { script: 'check-daily-view.js', stage: 'behavior',
     why: '每日推荐页的部分成功、来源状态与操作必须纳入 CI。' },
+  { script: 'check-lyric-emotion.js', stage: 'behavior',
+    why: '情绪 Cue 的摘要/generation、A→B→A、缓存双限与清除不能串歌；无 Cue 时保持中性。' },
   { script: 'check-assets.js', stage: 'guard',
     why: '前端资源接线：文件在不在、id 对不对、脚本加载顺序。这类失败不会报错，只会「某块界面空着」。' },
   { script: 'check-lineage-names.js', stage: 'guard',

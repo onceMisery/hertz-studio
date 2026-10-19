@@ -1,0 +1,23 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 hertz-studio contributors
+
+   歌词情绪演出层：只消费 LyricEmotion 写在行/词上的变量与属性。
+   没有 data-emo-active 的行完全不受影响，默认关闭时与现有样式逐像素一致。
+   场的可变部分不做 transition；换行时直接换值（设计文档 §6.0 / §附录 B）。 */
+
+.lyric[data-emo-active="true"] {
+  --lyric-highlight: var(--emo-accent);
+  --lyric-idle: var(--emo-ink);
+  --lyric-highlight-rgb: var(--emo-accent-rgb);
+  --lyric-active: var(--emo-ink);
+  color: var(--emo-ink);
+  font-weight: var(--emo-weight, inherit);
+  letter-spacing: var(--emo-track, normal);
+  line-height: var(--emo-leading, inherit);
+}
+
+/* translate 是独立变换属性，与 .word 的 scale 和行级 transform 各自合成，
+   不会像写进 transform 那样互相覆盖。--emo-dy 是逐词基线场采样值。 */
+.lyric[data-emo-active="true"] .word {
+  translate: 0 var(--emo-dy, 0px);
+}

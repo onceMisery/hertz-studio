@@ -42,6 +42,59 @@
     revision: 0
   };
 
+  // P0/P2b 的模型 Cue 缓存：50 首与 1 MiB 双限，先到先淘汰。
+  // 手动覆盖不在这里——它按 lyricsHash 独立存储，不能被自动 LRU 挤掉。
+  var CACHE_MAX_ENTRIES = 50;
+  var CACHE_MAX_BYTES = 1024 * 1024;
+  var cache = { map: Object.create(null), order: [], bytes: 0 };
+
+  function cacheKey(doc, hash) {
+    return [hash || doc.lyricsHash || '', doc.providerId || '', doc.modelId || '',
+      doc.promptVersion == null ? '' : doc.promptVersion,
+      doc.catalogVersion == null ? '' : doc.catalogVersion].join('|');
+  }
+  function cacheBytes(text) { return new TextEncoder().encode(text).length; }
+  function cacheDrop(key) {
+    var row = cache.map[key];
+    if (!row) return;
+    cache.bytes -= row.bytes;
+    delete cache.map[key];
+    var i = cache.order.indexOf(key);
+    if (i >= 0) cache.order.splice(i, 1);
+  }
+  function cachePut(doc) {
+    var key = cacheKey(doc);
+    var text = JSON.stringify(doc);
+    var bytes = cacheBytes(text);
+    if (bytes > CACHE_MAX_BYTES) return false;
+    cacheDrop(key);
+    cache.map[key] = { doc: JSON.parse(text), bytes: bytes };
+    cache.order.push(key);
+    cache.bytes += bytes;
+    while (cache.order.length > CACHE_MAX_ENTRIES || cache.bytes > CACHE_MAX_BYTES) {
+      cacheDrop(cache.order[0]);
+    }
+    return true;
+  }
+  function cacheGet(hash, meta) {
+    var key = cacheKey(Object.assign({ lyricsHash: hash }, meta || {}), hash);
+    var row = cache.map[key];
+    if (!row) return null;
+    var i = cache.order.indexOf(key);
+    if (i >= 0) { cache.order.splice(i, 1); cache.order.push(key); }
+    return JSON.parse(JSON.stringify(row.doc));
+  }
+  function loadCached(hash, meta) {
+    var doc = cacheGet(hash, meta);
+    if (!doc) return false;
+    setCueDoc(doc);
+    return true;
+  }
+  function cacheStats() {
+    return { entries: cache.order.length, bytes: cache.bytes,
+      maxEntries: CACHE_MAX_ENTRIES, maxBytes: CACHE_MAX_BYTES };
+  }
+
   function fail(message) { throw new Error(message); }
   function isObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
   function isSafeInt(v) { return typeof v === 'number' && isFinite(v) && Math.floor(v) === v && Math.abs(v) <= 9007199254740991; }
@@ -58,10 +111,20 @@
   // ---- 档案 ----
   function validateProfile(profile) {
     if (!isObject(profile)) fail('情绪档案必须是对象');
-    keys(profile, ['id', 'label', 'aliases', 'field', 'palette', 'archetype']);
+    keys(profile, ['id', 'label', 'aliases', 'field', 'palette', 'archetype', 'type']);
     if (typeof profile.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(profile.id)) fail('情绪 ID 非法');
     if (PROFILES[profile.id]) fail('情绪 ID 重复：' + profile.id);
     if (!isObject(profile.field)) fail('情绪档案缺少 field');
+    if (profile.type != null) {
+      if (!isObject(profile.type)) fail('type 必须是对象');
+      if (profile.type.weight != null && (!isFinite(profile.type.weight) || profile.type.weight < 100 || profile.type.weight > 900)) {
+        fail('type.weight 必须在 100..900');
+      }
+      if (profile.type.tracking != null && typeof profile.type.tracking !== 'string') fail('type.tracking 必须是字符串');
+      if (profile.type.leading != null && (!isFinite(profile.type.leading) || profile.type.leading < 1 || profile.type.leading > 2.5)) {
+        fail('type.leading 必须在 1..2.5');
+      }
+    }
     if (profile.field.basis !== null && (!F || !F.BASIS[profile.field.basis])) {
       fail('未注册的场基函数：' + profile.field.basis);
     }
@@ -103,27 +166,32 @@
 
   [{
     id: 'neutral', label: '中性', aliases: [],
-    field: { basis: null, anchor: 0 },
+    field: { basis: null, anchor: 0 }, type: null,
     palette: { ink: '#F4F4F5', accent: '#E4E4E7', accent2: '#A1A1AA' }
   }, {
     id: 'joy', label: '雀跃', aliases: ['happy', 'excited'],
     field: { basis: 'joy', anchor: 0.10 },
+    type: { weight: 700, tracking: '0.025em', leading: 1.55 },
     palette: { ink: '#FFF7D6', accent: '#FFD166', accent2: '#FF8A5B' }
   }, {
     id: 'sorrow', label: '悲伤', aliases: ['sad'],
     field: { basis: 'sorrow', anchor: 0.14 },
+    type: { weight: 400, tracking: '0.06em', leading: 1.85 },
     palette: { ink: '#C9D6E3', accent: '#7FA7D9', accent2: '#8CA0B8' }
   }, {
     id: 'anger', label: '愤怒', aliases: ['angry'],
     field: { basis: 'anger', anchor: 0.08 },
+    type: { weight: 700, tracking: '-0.01em', leading: 1.35 },
     palette: { ink: '#FFE8D6', accent: '#FF5A36', accent2: '#D7261E' }
   }, {
     id: 'anxious', label: '不安', aliases: [],
     field: { basis: 'anxious', anchor: 0.03 },
+    type: { weight: 400, tracking: '0.02em', leading: 1.6 },
     palette: { ink: '#E7EDF7', accent: '#9BB7D4', accent2: '#7C93AD' }
   }, {
     id: 'tender', label: '温柔', aliases: [],
     field: { basis: 'tender', anchor: 0.05 },
+    type: { weight: 400, tracking: '0.03em', leading: 1.7 },
     palette: { ink: '#F5EADF', accent: '#D8B28C', accent2: '#C9A07A' }
   }].forEach(register);
 
@@ -262,6 +330,7 @@
   function setCueDoc(doc, token) {
     if (token != null && token !== state.generation) fail('generation 已过期');
     state.pending = validateCueDoc(doc);
+    cachePut(doc);
     return true;
   }
 
@@ -272,6 +341,15 @@
     state.pending = null;
     state.revision += 1;
     return true;
+  }
+
+  // 显式关闭情绪：保留歌词绑定与缓存，只清掉已提交/待提交的 Cue。
+  function clearCues() {
+    var changed = !!(state.committed || state.pending);
+    state.committed = null;
+    state.pending = null;
+    if (changed) state.revision += 1;
+    return changed;
   }
 
   function sectionAt(index) {
@@ -308,7 +386,7 @@
     var profile = neutralProfile();
     return frozen({
       id: profile.id, profile: profile, intensity: 0,
-      field: profile.field, palette: profile.palette,
+      field: profile.field, type: profile.type || null, palette: profile.palette,
       revision: state.revision, confidence: 1, cue: null
     });
   }
@@ -322,7 +400,7 @@
     if (!profile) return neutralState();
     return frozen({
       id: profile.id, profile: profile, intensity: eI,
-      field: profile.field, palette: profile.palette,
+      field: profile.field, type: profile.type || null, palette: profile.palette,
       revision: state.revision, confidence: cue.confidence, cue: cue
     });
   }
@@ -335,15 +413,20 @@
   // ---- DOM 后端 ----
   function setVar(el, name, value) { el.style.setProperty(name, value); }
   function clearVar(el, name) { el.style.removeProperty(name); }
+  function rgbText(hex) {
+    var n = parseInt(hex.slice(1), 16);
+    return ((n >> 16) & 255) + ', ' + ((n >> 8) & 255) + ', ' + (n & 255);
+  }
 
   function clearLine(lineEl, words) {
     if (!lineEl) return;
     lineEl.removeAttribute('data-emotion');
     lineEl.removeAttribute('data-emo-active');
-    clearVar(lineEl, '--emo-i');
-    clearVar(lineEl, '--emo-ink');
-    clearVar(lineEl, '--emo-accent');
-    clearVar(lineEl, '--emo-accent-2');
+    ['--emo-i', '--emo-ink', '--emo-accent', '--emo-accent-2',
+      '--emo-ink-rgb', '--emo-accent-rgb',
+      '--emo-weight', '--emo-track', '--emo-leading'].forEach(function (name) {
+      clearVar(lineEl, name);
+    });
     (words || []).forEach(function (word) {
       var el = word && word.el ? word.el : word;
       if (el) clearVar(el, '--emo-dy');
@@ -363,6 +446,13 @@
     setVar(lineEl, '--emo-ink', emotionState.palette.ink);
     setVar(lineEl, '--emo-accent', emotionState.palette.accent);
     setVar(lineEl, '--emo-accent-2', emotionState.palette.accent2);
+    setVar(lineEl, '--emo-ink-rgb', rgbText(emotionState.palette.ink));
+    setVar(lineEl, '--emo-accent-rgb', rgbText(emotionState.palette.accent));
+    if (emotionState.type) {
+      if (emotionState.type.weight != null) setVar(lineEl, '--emo-weight', String(emotionState.type.weight));
+      if (emotionState.type.tracking != null) setVar(lineEl, '--emo-track', emotionState.type.tracking);
+      if (emotionState.type.leading != null) setVar(lineEl, '--emo-leading', String(emotionState.type.leading));
+    }
     (words || []).forEach(function (word, i) {
       var el = word && word.el ? word.el : word;
       if (!el) return;
@@ -395,6 +485,10 @@
     bindLyrics: bindLyrics,
     setCueDoc: setCueDoc,
     commitAtBoundary: commitAtBoundary,
+    clearCues: clearCues,
+    loadCached: loadCached,
+    cacheGet: cacheGet,
+    cacheStats: cacheStats,
     cueAt: cueAt,
     resolve: resolve,
     resolveForLine: resolve,

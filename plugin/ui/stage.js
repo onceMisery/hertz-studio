@@ -25,6 +25,9 @@
   var el = {};
   var doc = null;          // LyricDocument
   var views = [];          // [{ container, nodes, big }]
+  var emotionReadyDoc = null;   // 已绑定摘要的歌词快照（null = 情绪层关闭）
+  var emotionCueDoc = null;     // 摘要就绪前暂存的 Cue
+  var emotionRevisionSeen = -1;
   var mode = 'karaoke';
   var activeIdx = -2;
   var playing = false;
@@ -587,6 +590,109 @@
     }
   }
 
+  // 情绪层默认关闭：只有 setEmotionCueDoc() 被调用时才绑定歌词并算摘要，
+  // 没有 Cue 时不写任何属性、不做摘要。P0 只写 data-*/--emo-*，不加视觉。
+  function emotionApi() {
+    return typeof window !== 'undefined' ? window.LyricEmotion : null;
+  }
+
+  function emotionWords(node) {
+    var words = node && node.words ? node.words : [];
+    if (!words.length) return [];
+    var first = words[0].offsetLeft;
+    var last = words[words.length - 1].offsetLeft + words[words.length - 1].offsetWidth;
+    var total = last - first;
+    // 舞台隐藏时布局为 0；用序号兜底，避免所有词都采到 u=0。
+    if (!(total > 0)) {
+      return words.map(function (word, i) {
+        return { el: word, uStart: i / words.length, uEnd: (i + 1) / words.length };
+      });
+    }
+    return words.map(function (word) {
+      var x = word.offsetLeft - first;
+      return { el: word, uStart: x / total, uEnd: (x + word.offsetWidth) / total };
+    });
+  }
+
+  function applyEmotion(view, idx) {
+    var E = emotionApi();
+    if (!E || !doc || emotionReadyDoc !== doc || !view.track || view.empty || idx < 0) return;
+    var node = view.nodes[idx];
+    if (!node) return;
+    if (view._emoIdx != null && view._emoIdx !== idx) {
+      var old = view.nodes[view._emoIdx];
+      if (old) E.clearLine(old.el, old.words);
+      view._emoIdx = null;
+      view._emoSign = null;
+    }
+    var state = E.resolveForLine(idx, { host: 'sidebar' });
+    var emPx = parseFloat(getComputedStyle(node.el).fontSize) || 14.5;
+    var sign = state.id + ':' + state.intensity.toFixed(3) + ':' + state.revision + ':' +
+      emPx.toFixed(2) + ':' + (node.words ? node.words.length : 0);
+    if (view._emoSign === sign) return;
+    view._emoSign = sign;
+    view._emoIdx = idx;
+    E.applyLine(node.el, emotionWords(node), state, emPx);
+  }
+
+  function applyEmotionAll(current) {
+    var idx = current == null ? activeIdx : current;
+    views.forEach(function (view) { applyEmotion(view, idx); });
+  }
+
+  function bindEmotionForCue() {
+    var E = emotionApi();
+    if (!E || !doc || emotionReadyDoc === doc) return;
+    E.bindLyrics({ lines: doc.lines }).then(function (res) {
+      if (res.stale) return;
+      emotionReadyDoc = doc;
+      if (emotionCueDoc) {
+        try {
+          E.setCueDoc(emotionCueDoc, res.generation);
+          E.commitAtBoundary(res.generation);
+        } catch (err) {
+          emotionCueDoc = null;
+          return;
+        }
+        emotionCueDoc = null;
+        emotionRevisionSeen = E.revision();
+        applyEmotionAll();
+        schedule();
+      }
+    }).catch(function () { /* 摘要失败时保持中性，不阻塞播放 */ });
+  }
+
+  function setEmotionCueDoc(cueDoc) {
+    var E = emotionApi();
+    if (!E || !doc || !cueDoc) return false;
+    if (emotionReadyDoc === doc) {
+      try {
+        E.setCueDoc(cueDoc, E.generation());
+        E.commitAtBoundary(E.generation());
+      } catch (err) {
+        return false;
+      }
+      emotionRevisionSeen = E.revision();
+      applyEmotionAll();
+      schedule();
+      return true;
+    }
+    emotionCueDoc = cueDoc;
+    bindEmotionForCue();
+    return true;
+  }
+
+  function clearEmotionCues() {
+    var E = emotionApi();
+    if (E && emotionReadyDoc === doc) {
+      E.clearCues();
+      emotionRevisionSeen = E.revision();
+      applyEmotionAll();
+      schedule();
+    }
+    emotionCueDoc = null;
+  }
+
   // 只刷「变了的那几行」。换行时真正需要动的元素是：下放的旧当前行、新当前行，
   // 以及两个索引之间那一段的 past 位——而不是像以前那样遍历整首歌。
   function markRows(view, idx) {
@@ -605,6 +711,7 @@
       if (nodes[i]) nodes[i].el.classList.toggle('past', prev < idx);
     }
     view.shownIdx = idx;
+    applyEmotion(view, idx);
   }
 
   // 每帧一次地把「当前行」这件事刷到所有视图上。动的三样东西：
@@ -614,6 +721,15 @@
   // snap=true 时跳过动画直接落位，用于切歌、开全屏页、改尺寸。
   function update(idx, pos, snap, changed) {
     if (!doc) return;
+    // Cue 可以在同一行内提交/清除；revision 变一次就重写一次属性，不逐帧写。
+    var emotion = emotionApi();
+    if (emotion && emotionReadyDoc === doc) {
+      var rev = emotion.revision();
+      if (rev !== emotionRevisionSeen) {
+        emotionRevisionSeen = rev;
+        applyEmotionAll(idx);
+      }
+    }
     views.forEach(function (view) {
       if (view.empty) return;
       // 先改类再量：--lyric-active-weight 会改行高，量早了拿到的还是旧几何
@@ -647,6 +763,7 @@
       if (!view.track || view.empty) return;
       if (changed) markRows(view, idx);
       view.measure();
+      applyEmotion(view, idx);
       view.aim(idx, pos);
       if (snap) view.jump();
       view.dim(idx);
@@ -1440,6 +1557,12 @@
     },
 
     setLyrics: function (d) {
+      var previousEmotionDoc = emotionReadyDoc;
+      var emotion = emotionApi();
+      if (previousEmotionDoc && emotion) emotion.clearCues();
+      emotionReadyDoc = null;
+      emotionCueDoc = null;
+      emotionRevisionSeen = -1;
       doc = (d && d.lines && d.lines.length) ? d : null;
       activeIdx = -2;
       guardPos = -1;
@@ -1514,6 +1637,18 @@
       return doc ? { lines: doc.lines, index: Math.max(0, rawIndex(doc,
         Number.isFinite(position) ? position : currentPos())) } : null;
     },
+
+    // 情绪层手动注入（P0 只写属性、默认无 Cue；设置 UI 留到 P1）。
+    // 传入的 Cue 必须回显当前歌词的 lyricsHash；摘要就绪后自动提交。
+    emotion: function () {
+      var E = emotionApi();
+      return E ? {
+        bound: E.bound(), ready: emotionReadyDoc === doc,
+        hash: E.lyricsHash(), generation: E.generation(), revision: E.revision()
+      } : null;
+    },
+    setEmotionCueDoc: function (cueDoc) { return setEmotionCueDoc(cueDoc); },
+    clearEmotionCues: function () { clearEmotionCues(); },
 
     // stanza 歌词模式：翻译行与每曲偏移（数据已在 doc 内，只读暴露，不复制）。
     lyricTranslation: function (i) {

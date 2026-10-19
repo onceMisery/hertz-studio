@@ -120,6 +120,7 @@ ui_assets! {
     "/obs-css.js", JS => const OBS_CSS_JS: &str = edition_ui!("obs-css.js");
     "/style.css", CSS => const STYLE_CSS: &str = edition_ui!("style.css");
     "/stage.css", CSS => const STAGE_CSS: &str = edition_ui!("stage.css");
+    "/emotion.css", CSS => const EMOTION_CSS: &str = edition_ui!("emotion.css");
     "/creative.css", CSS => const CREATIVE_CSS: &str = edition_ui!("creative.css");
     "/creative-anime.css", CSS => const CREATIVE_ANIME_CSS: &str = edition_ui!("creative-anime.css");
     "/stage3d.css", CSS => const STAGE3D_CSS: &str = edition_ui!("stage3d.css");
