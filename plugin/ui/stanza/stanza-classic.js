@@ -102,6 +102,69 @@
       return emotionState.palette.accent;
     }
 
+    // 装饰件只在 climax 出现；减少动效/低性能/歌词分面降级时整层不创建。
+    function decorationAllowed() {
+      if (!document.body) return false;
+      if (document.body.classList.contains('reduce-motion') ||
+          document.body.classList.contains('stage-lowfx')) return false;
+      var rm = document.body.getAttribute('data-rm') || '';
+      if (rm.split(/\s+/).indexOf('lyrics') >= 0) return false;
+      if (root.closest && root.closest('.s3d-reduced')) return false;
+      return true;
+    }
+
+    function buildDecor(container, emotion, line) {
+      if (!emotion || !emotion.decor || !emotion.decor.length || !decorationAllowed()) return;
+      var words = container.querySelectorAll('.fl-cword');
+      if (!words.length) return;
+      var layer = null, total = 0;
+      var accent = emotionPaletteOn() ? emotion.palette.accent : theme.accentColor;
+      emotion.decor.forEach(function (decor, di) {
+        var min = decor.minIntensity == null ? 0.75 : decor.minIntensity;
+        if (emotion.intensity < min) return;
+        var count = decor.climaxCount != null && emotion.intensity >= 0.75 ? decor.climaxCount : decor.count;
+        count = Math.min(6, count || 0);
+        for (var i = 0; i < count && total < 6; i += 1, total += 1) {
+          var word = words[Math.floor(i * words.length / Math.max(1, count)) % words.length];
+          var seed = (line && line.start_ms || 0) + i * 31 + di * 7;
+          var r1 = U.srand(seed + 1), r2 = U.srand(seed + 2);
+          var cfg = word._cfg || { x: 0, y: 0 };
+          var dy = parseFloat(word.style.getPropertyValue('--emo-dy')) || 0;
+          var left = word.offsetLeft + cfg.x + (word.offsetWidth * (0.25 + r1 * 0.5));
+          var bottom = word.offsetTop + cfg.y + word.offsetHeight + dy;
+          if (!layer) {
+            layer = document.createElement('div');
+            layer.className = 'fl-emo-decor';
+            layer.setAttribute('aria-hidden', 'true');
+            container.append(layer);
+          }
+          var particle = document.createElement('span');
+          particle.className = 'fl-emo-particle emo-' + decor.kind;
+          particle.setAttribute('aria-hidden', 'true');
+          particle.style.left = left.toFixed(1) + 'px';
+          particle.style.top = bottom.toFixed(1) + 'px';
+          particle.style.setProperty('--emo-color', accent);
+          if (decor.kind === 'tear') {
+            particle.style.width = (2.2 + r1 * 1.2).toFixed(2) + 'px';
+            particle.style.height = (7 + r2 * 3).toFixed(2) + 'px';
+            particle.style.setProperty('--emo-dx', ((r2 - 0.5) * 8).toFixed(1) + 'px');
+            particle.style.setProperty('--emo-fall', (70 + r1 * 26).toFixed(1) + 'px');
+            particle.style.animationDuration = (3.4 + r2 * 1.2).toFixed(2) + 's';
+            particle.style.animationDelay = (r1 * 0.9).toFixed(2) + 's';
+          } else {
+            var spark = decor.kind === 'spark';
+            particle.style.width = (spark ? 2 + r1 * 1.2 : 2.5 + r1 * 1.5).toFixed(2) + 'px';
+            particle.style.height = particle.style.width;
+            particle.style.setProperty('--emo-dx', ((r2 - 0.5) * (spark ? 24 : 30)).toFixed(1) + 'px');
+            particle.style.setProperty('--emo-rise', ((spark ? 18 : 28) + r1 * (spark ? 10 : 18)).toFixed(1) + 'px');
+            particle.style.animationDuration = (spark ? 1.4 + r2 * 0.8 : 0.7 + r2 * 0.4).toFixed(2) + 's';
+            particle.style.animationDelay = (r1 * (spark ? 0.6 : 0.35)).toFixed(2) + 's';
+          }
+          layer.append(particle);
+        }
+      });
+    }
+
     // 基线场按词中心采样；total 用词宽 + 词距，避免行尾的间距把 u 拉偏。
     function applyEmotionField(words, px) {
       if (!emotionState || !global.LyricEmotionField) return;
@@ -146,6 +209,7 @@
         container.setAttribute('data-emo-active', 'true');
         container.setAttribute('data-emotion', emotion.id);
         container.setAttribute('data-emo-arch', emotion.archetype || 'drift');
+        if (emotion.intensity >= 0.75) container.setAttribute('data-emo-climax', 'true');
       }
       curHints = U.renderHints(line);
       var lineTiming = lineTimingOf(curHints);
@@ -257,6 +321,7 @@
       lineEl._tokens = dispTokens;
       lineEl._words = Array.prototype.slice.call(container.querySelectorAll('.fl-cword'));
       applyEmotionField(lineEl._words, px);
+      buildDecor(container, emotion, line);
     }
 
     function applyPose(el, st) {

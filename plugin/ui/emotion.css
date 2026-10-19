@@ -69,3 +69,84 @@ body[data-rm~="lyrics"] .fl-cline[data-emo-active="true"] .fl-cword,
 body.stage-lowfx .fl-cline[data-emo-active="true"] .fl-cword {
   animation: none;
 }
+
+/* P2a 装饰件：只在 climax 出现；层在字后，粒子不接指针。 */
+.fl-cline[data-emo-active="true"] .fl-cword { z-index: 1; }
+.fl-emo-decor {
+  position: absolute; inset: 0; z-index: 0;
+  pointer-events: none; overflow: visible;
+}
+.fl-emo-particle {
+  position: absolute; display: block; border-radius: 50%;
+  background: var(--emo-color, var(--fl-accent, currentColor));
+  opacity: 0; animation-fill-mode: both; animation-timing-function: ease-out;
+}
+.fl-emo-particle.emo-spark {
+  box-shadow: 0 0 6px var(--emo-color, var(--fl-accent));
+  animation-name: emo-spark-rise;
+}
+.fl-emo-particle.emo-tear {
+  border-radius: 50% 50% 55% 55%;
+  opacity: 0; animation-name: emo-tear-fall; animation-timing-function: ease-in;
+}
+.fl-emo-particle.emo-ember {
+  border-radius: 50%;
+  box-shadow: 0 0 7px var(--emo-color, var(--fl-accent));
+  animation-name: emo-ember-rise;
+  animation-timing-function: ease-out;
+}
+@keyframes emo-spark-rise {
+  0% { opacity: 0; transform: translate3d(0, 0, 0) scale(.4); }
+  18% { opacity: .95; }
+  70% { opacity: .7; }
+  100% { opacity: 0; transform: translate3d(var(--emo-dx, 0px), calc(var(--emo-rise, 22px) * -1), 0) scale(.15); }
+}
+@keyframes emo-tear-fall {
+  0% { opacity: 0; transform: translate3d(0, 0, 0) scale(.6); }
+  18% { opacity: .78; }
+  82% { opacity: .5; }
+  100% { opacity: 0; transform: translate3d(var(--emo-dx, 0px), var(--emo-fall, 80px), 0) scale(.9); }
+}
+@keyframes emo-ember-rise {
+  0% { opacity: 0; transform: translate3d(0, 0, 0) scale(.35); }
+  22% { opacity: 1; }
+  100% { opacity: 0; transform: translate3d(var(--emo-dx, 0px), calc(var(--emo-rise, 36px) * -1), 0) scale(.2); }
+}
+/* C 档静态辉光：climax 才点亮，减少动效仍保留。 */
+.fl-cline[data-emo-active="true"][data-emo-climax="true"] .fl-cword .fl-body {
+  text-shadow: 0 0 14px var(--fl-accent, currentColor);
+}
+/* 愤怒热光带：单例背景装饰，不占粒子预算。 */
+.fl-cline[data-emo-active="true"][data-emotion="anger"][data-emo-climax="true"]::before {
+  content: ''; position: absolute; left: 4%; right: 4%; bottom: 0; height: 42%;
+  z-index: 0; pointer-events: none; opacity: .18;
+  background: radial-gradient(ellipse at 50% 100%, var(--fl-accent, currentColor), transparent 70%);
+}
+body.reduce-motion .fl-emo-decor,
+body[data-rm~="lyrics"] .fl-emo-decor,
+.s3d-reduced .fl-emo-decor,
+body.stage-lowfx .fl-emo-decor {
+  display: none;
+}
+
+/* 3D 歌词轨：只给当前行；场位移用独立 translate，与 --sl-rise/scatter 的
+   transform 各自合成。配色走当前行的渐变，不覆盖周边句。 */
+.sl-line[data-emo-active="true"] .sl-word {
+  translate: 0 var(--emo-dy, 0px);
+}
+.sl-line[data-emo-active="true"] {
+  color: var(--sl-emotion-ink, #dbe4e0);
+}
+.sl-line[data-emo-active="true"].is-active .sl-word {
+  background-image: linear-gradient(
+    90deg,
+    var(--sl-emotion-accent, #f4fff9) calc(var(--sl-fill, -10%) - 10%),
+    var(--sl-emotion-ink, #83958d) calc(var(--sl-fill, -10%) + 10%)
+  );
+  filter: drop-shadow(0 0 calc(var(--sl-glow, .45) * 14px) var(--sl-emotion-accent, rgba(221, 255, 237, .32)));
+}
+
+/* 心象 cadenza：静态场位移；姿态 transform 由渲染器持有，独立 translate 叠加。 */
+.fl-cadz[data-emo-active="true"] {
+  translate: 0 var(--emo-dy, 0px);
+}

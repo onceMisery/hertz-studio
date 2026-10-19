@@ -93,10 +93,14 @@ async function main() {
           dy: words.map((w) => getComputedStyle(w).getPropertyValue('--emo-dy').trim()),
           translate: words.map((w) => getComputedStyle(w).translate),
           animation: words.map((w) => getComputedStyle(w).animationName),
+          climax: line.getAttribute('data-emo-climax'),
+          decor: Array.from(line.querySelectorAll('.fl-emo-particle')).map((el) => el.className),
           weight: words.map((w) => getComputedStyle(w).fontWeight),
           spacing: words.map((w) => getComputedStyle(w).letterSpacing),
-          waitingColor: waiting ? getComputedStyle(waiting.querySelector('.fl-body')).color : null,
-          activeColor: active ? getComputedStyle(active.querySelector('.fl-body')).color : null
+          waitingColor: waiting ? (waiting.querySelector('.fl-body').style.color ||
+            getComputedStyle(waiting.querySelector('.fl-body')).color) : null,
+          activeColor: active ? (active.querySelector('.fl-body').style.color ||
+            getComputedStyle(active.querySelector('.fl-body')).color) : null
         };
       });
     }
@@ -123,6 +127,12 @@ async function main() {
       if (!snapshot.animation.every((a) => a === expectedAnim)) {
         throw new Error(id + ' 循环动画错误：' + snapshot.animation.join('/'));
       }
+      var expectedDecor = { joy: 'emo-spark', sorrow: 'emo-tear', anger: 'emo-ember' }[id];
+      var expectedCount = { joy: 6, sorrow: 3, anger: 6 }[id];
+      if (snapshot.climax !== 'true' || snapshot.decor.length !== expectedCount ||
+          !snapshot.decor.every((c) => c.indexOf(expectedDecor) >= 0)) {
+        throw new Error(id + ' 装饰件错误：climax=' + snapshot.climax + ' ' + snapshot.decor.join('|'));
+      }
       snapshots[id] = snapshot;
       // 500ms 时只有开头几个词可见；跳到行尾让整行进入 passed/active，便于看场形状。
       await fixture.api('/v1/player/seek', 'POST', { position_ms: 4300 });
@@ -132,20 +142,30 @@ async function main() {
       await page.waitForTimeout(180);
     }
 
+    // 播放态下装饰动画才可见：暂停帧里粒子按设计停在 0 透明度。
+    await fixture.api('/v1/player/play', 'POST', {});
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: path.join(out, 'anger-motion.png'), fullPage: false });
+    await fixture.api('/v1/player/pause', 'POST', {});
+    await fixture.api('/v1/player/seek', 'POST', { position_ms: 500 });
+
     // 减少动效：循环必须停，但静态场位移必须保留。
     const reduced = await page.evaluate(() => {
       document.body.classList.add('reduce-motion');
       const word = document.querySelector('.fl-classic .fl-cword');
+      const decor = document.querySelector('.fl-emo-decor');
       const result = {
         animation: getComputedStyle(word).animationName,
         translate: getComputedStyle(word).translate,
-        dy: getComputedStyle(word).getPropertyValue('--emo-dy').trim()
+        dy: getComputedStyle(word).getPropertyValue('--emo-dy').trim(),
+        decor: decor ? getComputedStyle(decor).display : null
       };
       document.body.classList.remove('reduce-motion');
       return result;
     });
-    if (reduced.animation !== 'none' || reduced.translate === 'none' || !reduced.dy) {
-      throw new Error('减少动效下未保留静态场或未停循环：' + JSON.stringify(reduced));
+    if (reduced.animation !== 'none' || reduced.translate === 'none' || !reduced.dy ||
+        reduced.decor !== 'none') {
+      throw new Error('减少动效下未保留静态场或未停循环/装饰：' + JSON.stringify(reduced));
     }
 
     await page.evaluate(() => Stage.clearEmotionCues());
@@ -154,10 +174,11 @@ async function main() {
       return line ? {
         active: line.hasAttribute('data-emo-active'),
         dy: Array.from(line.querySelectorAll('.fl-cword')).map((w) => getComputedStyle(w).getPropertyValue('--emo-dy').trim()),
-        translate: Array.from(line.querySelectorAll('.fl-cword')).map((w) => getComputedStyle(w).translate)
+        translate: Array.from(line.querySelectorAll('.fl-cword')).map((w) => getComputedStyle(w).translate),
+        decor: document.querySelectorAll('.fl-emo-decor').length
       } : null;
     });
-    if (!cleared || cleared.active || cleared.dy.some(Boolean) || cleared.translate.some((v) => v !== 'none')) {
+    if (!cleared || cleared.active || cleared.dy.some(Boolean) || cleared.translate.some((v) => v !== 'none') || cleared.decor) {
       throw new Error('清除后 classic 仍残留情绪：' + JSON.stringify(cleared));
     }
 

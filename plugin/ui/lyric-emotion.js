@@ -112,10 +112,24 @@
   // ---- 档案 ----
   function validateProfile(profile) {
     if (!isObject(profile)) fail('情绪档案必须是对象');
-    keys(profile, ['id', 'label', 'aliases', 'field', 'palette', 'archetype', 'type']);
+    keys(profile, ['id', 'label', 'aliases', 'field', 'palette', 'archetype', 'type', 'decor']);
     if (typeof profile.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(profile.id)) fail('情绪 ID 非法');
     if (PROFILES[profile.id]) fail('情绪 ID 重复：' + profile.id);
     if (!isObject(profile.field)) fail('情绪档案缺少 field');
+    if (profile.decor != null) {
+      if (!Array.isArray(profile.decor)) fail('decor 必须是数组');
+      profile.decor.forEach(function (decor) {
+        keys(decor, ['kind', 'count', 'climaxCount', 'minIntensity']);
+        if (['spark', 'tear', 'ember', 'fog'].indexOf(decor.kind) < 0) fail('未知装饰件：' + decor.kind);
+        if (!isSafeInt(decor.count) || decor.count < 0 || decor.count > 6) fail('decor.count 必须在 0..6');
+        if (decor.climaxCount != null && (!isSafeInt(decor.climaxCount) || decor.climaxCount < 0 || decor.climaxCount > 6)) {
+          fail('decor.climaxCount 必须在 0..6');
+        }
+        if (decor.minIntensity != null && (!isFinite(decor.minIntensity) || decor.minIntensity < 0 || decor.minIntensity > 1)) {
+          fail('decor.minIntensity 必须在 0..1');
+        }
+      });
+    }
     if (profile.type != null) {
       if (!isObject(profile.type)) fail('type 必须是对象');
       if (profile.type.weight != null && (!isFinite(profile.type.weight) || profile.type.weight < 100 || profile.type.weight > 900)) {
@@ -173,16 +187,19 @@
     id: 'joy', label: '雀跃', aliases: ['happy', 'excited'], archetype: 'bounce',
     field: { basis: 'joy', anchor: 0.10 },
     type: { weight: 700, tracking: '0.025em', leading: 1.55 },
+    decor: [{ kind: 'spark', count: 3, climaxCount: 6, minIntensity: 0.75 }],
     palette: { ink: '#FFF7D6', accent: '#FFD166', accent2: '#FF8A5B' }
   }, {
     id: 'sorrow', label: '悲伤', aliases: ['sad'], archetype: 'sink',
     field: { basis: 'sorrow', anchor: 0.14 },
     type: { weight: 400, tracking: '0.06em', leading: 1.85 },
+    decor: [{ kind: 'tear', count: 2, climaxCount: 3, minIntensity: 0.75 }],
     palette: { ink: '#C9D6E3', accent: '#7FA7D9', accent2: '#8CA0B8' }
   }, {
     id: 'anger', label: '愤怒', aliases: ['angry'], archetype: 'impact',
     field: { basis: 'anger', anchor: 0.08 },
     type: { weight: 700, tracking: '-0.01em', leading: 1.35 },
+    decor: [{ kind: 'ember', count: 4, climaxCount: 6, minIntensity: 0.75 }],
     palette: { ink: '#FFE8D6', accent: '#FF5A36', accent2: '#D7261E' }
   }, {
     id: 'anxious', label: '不安', aliases: [], archetype: 'drift',
@@ -388,7 +405,7 @@
     return frozen({
       id: profile.id, profile: profile, intensity: 0,
       field: profile.field, type: profile.type || null, palette: profile.palette,
-      archetype: profile.archetype || 'drift',
+      archetype: profile.archetype || 'drift', decor: profile.decor || [],
       revision: state.revision, confidence: 1, cue: null
     });
   }
@@ -403,7 +420,7 @@
     return frozen({
       id: profile.id, profile: profile, intensity: eI,
       field: profile.field, type: profile.type || null, palette: profile.palette,
-      archetype: profile.archetype || 'drift',
+      archetype: profile.archetype || 'drift', decor: profile.decor || [],
       revision: state.revision, confidence: cue.confidence, cue: cue
     });
   }
@@ -426,6 +443,7 @@
     lineEl.removeAttribute('data-emotion');
     lineEl.removeAttribute('data-emo-active');
     lineEl.removeAttribute('data-emo-arch');
+    lineEl.removeAttribute('data-emo-climax');
     ['--emo-i', '--emo-ink', '--emo-accent', '--emo-accent-2',
       '--emo-ink-rgb', '--emo-accent-rgb',
       '--emo-weight', '--emo-track', '--emo-leading'].forEach(function (name) {
@@ -447,6 +465,8 @@
     lineEl.setAttribute('data-emotion', emotionState.id);
     lineEl.setAttribute('data-emo-active', 'true');
     lineEl.setAttribute('data-emo-arch', emotionState.archetype || 'drift');
+    if (emotionState.intensity >= 0.75) lineEl.setAttribute('data-emo-climax', 'true');
+    else lineEl.removeAttribute('data-emo-climax');
     setVar(lineEl, '--emo-i', emotionState.intensity.toFixed(3));
     if (state.paletteEnabled) {
       setVar(lineEl, '--emo-ink', emotionState.palette.ink);

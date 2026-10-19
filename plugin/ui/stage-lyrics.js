@@ -13,6 +13,7 @@
     var documentRef = null, lines = [], rows = new Map(), active = -1, center = -2;
     var browsing = null, until = 0, dirty = true;
     var reduced = false, enabled = true;
+    var emotionRevision = -1;
     function resume() { browsing = null; back.hidden = true; center = -2; }
     back.addEventListener('click', resume);
     function browse(delta) {
@@ -43,6 +44,54 @@
       var x = Math.sin(a * 127.1 + b * 311.7 + k * 74.7) * 43758.5453;
       return x - Math.floor(x);
     }
+    function emotionFor(index) {
+      var E = global.LyricEmotion;
+      if (!E || !E.resolveForLine) return null;
+      var state = E.resolveForLine(index, { host: 'stage-lyrics' });
+      return state && state.id !== 'neutral' ? state : null;
+    }
+
+    function setEmotionStyle(row, emotion) {
+      var el = row.el;
+      if (!emotion) {
+        el.removeAttribute('data-emo-active');
+        el.removeAttribute('data-emotion');
+        el.style.removeProperty('font-weight');
+        el.style.removeProperty('letter-spacing');
+        ['--sl-emotion-ink', '--sl-emotion-accent', '--sl-emotion-dim'].forEach(function (name) {
+          el.style.removeProperty(name);
+        });
+        return;
+      }
+      el.setAttribute('data-emo-active', 'true');
+      el.dataset.emotion = emotion.id;
+      el.style.fontWeight = String(emotion.type && emotion.type.weight || 600);
+      el.style.letterSpacing = emotion.type && emotion.type.tracking ? emotion.type.tracking : '';
+      var E = global.LyricEmotion;
+      var paletteOn = !E || !E.paletteEnabled || E.paletteEnabled();
+      if (paletteOn) {
+        el.style.setProperty('--sl-emotion-ink', emotion.palette.ink);
+        el.style.setProperty('--sl-emotion-accent', emotion.palette.accent);
+        el.style.setProperty('--sl-emotion-dim', emotion.palette.accent2);
+      } else {
+        ['--sl-emotion-ink', '--sl-emotion-accent', '--sl-emotion-dim'].forEach(function (name) {
+          el.style.removeProperty(name);
+        });
+      }
+    }
+
+    function applyEmotionField(row, emotion) {
+      if (!emotion || !row.nodes.length || !global.LyricEmotionField) return;
+      var px = parseFloat(getComputedStyle(row.el).fontSize) || 48;
+      row.nodes.forEach(function (node, i) {
+        var u = (i + 0.5) / row.nodes.length;
+        var b = global.LyricEmotionField.evaluate(
+          emotion.profile, u, emotion.intensity, px, 0, 0
+        ).b;
+        node.style.setProperty('--emo-dy', b.toFixed(3) + 'px');
+      });
+    }
+
     function buildRow(index) {
       var line = lines[index], button = document.createElement('button');
       button.type = 'button'; button.className = 'sl-line'; button.dataset.index = index;
@@ -77,6 +126,9 @@
       wanted.forEach(function (index) { if (!rows.has(index)) rows.set(index, buildRow(index)); });
       wanted.forEach(function (index) {
         var row = rows.get(index);
+        var emotion = index === active ? emotionFor(index) : null;
+        row.emotion = emotion;
+        setEmotionStyle(row, emotion);
         row.el.style.removeProperty('font-size');
         var maxHeight = Math.max(72, rail.clientHeight * .66);
         var size = parseFloat(getComputedStyle(row.el).fontSize);
@@ -88,6 +140,7 @@
         row.el.classList.toggle('is-past', index < active);
         row.el.setAttribute('aria-current', index === active ? 'true' : 'false');
         row.el.tabIndex = index === focus ? 0 : -1;
+        applyEmotionField(row, emotion);
       });
       var focusRow = rows.get(focus); if (!focusRow) return;
       var gap = rail.clientHeight < 300 ? 18 : 28, positions = {};
@@ -110,6 +163,14 @@
     }
     function update(data) {
       var doc = Stage.lyrics();
+      var E = global.LyricEmotion;
+      var revision = E && E.revision ? E.revision() : -1;
+      if (revision !== emotionRevision) {
+        emotionRevision = revision;
+        rows.forEach(function (row) { row.el.remove(); });
+        rows.clear();
+        dirty = true;
+      }
       if (reduced !== data.reduced) { dirty = true; reduced = data.reduced; rows.forEach(function (row) { row.nodes.forEach(function (n) { n._fill = null; }); }); }
       var nextLines = doc && doc.lines;
       if (nextLines !== documentRef) {

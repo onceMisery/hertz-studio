@@ -26,6 +26,7 @@
     // 不走 waiting 低通），false 留给真实换句的硬挂载（节点从 waiting 姿态低通进入）。
     var needRepack = false, repackSoft = false, destroyed = false;
     var lastTime = null, lastReduced = false, lastEnergy = 0, paintDirty = true;
+    var emotionRevision = -1, measureWeight = 700;
 
     // 配置类变更（宽度/字号/主题/eco/尺寸）请求下一帧重排。motion/glow/beam 帧内活读，不走这里。
     function requestRepack(soft) {
@@ -66,7 +67,7 @@
       measureCanvas = document.createElement('canvas');
       measureCtx = measureCanvas.getContext('2d');
       StanzaTextLayout.configure({ measure: function (text, px) {
-        measureCtx.font = '700 ' + px + 'px ' + StanzaTheme.fontStack(theme.fontStyle);
+        measureCtx.font = measureWeight + ' ' + px + 'px ' + StanzaTheme.fontStack(theme.fontStyle);
         return measureCtx.measureText(text).width;
       }});
       return measureCtx;
@@ -75,11 +76,12 @@
     // 成本远低于新建 canvas。
     function setMeasureFont(fontStack) {
       if (!ensureMeasure()) return;
-      measureCtx.font = '700 ' + baseFontPx() + 'px ' + fontStack;
+      measureCtx.font = measureWeight + ' ' + baseFontPx() + 'px ' + fontStack;
     }
 
-    function packLine(line) {
+    function packLine(line, emotion) {
       var tokens = Stage.lyricTokens(line);
+      measureWeight = emotion && emotion.type && emotion.type.weight || 700;
       var fontPx = baseFontPx();
       var graphemeCount = tokens.reduce(function (a, t) { return a + U.graphemes(t.text).length; }, 0);
       if (graphemeCount > 12) fontPx *= U.clamp(0.92 - (graphemeCount - 12) * 0.018, 0.62, 0.92);
@@ -88,7 +90,7 @@
       var maxW = W * widthRatio;
       setMeasureFont(StanzaTheme.fontStack(theme.fontStyle));
       var laid = StanzaTextLayout.layout(tokens, { maxW: maxW, fontPx: fontPx });
-      return { line: line, hints: U.renderHints(line), tokens: tokens, laid: laid, fontPx: fontPx };
+      return { line: line, hints: U.renderHints(line), tokens: tokens, laid: laid, fontPx: fontPx, emotion: emotion };
     }
 
     // soft=true：配置触发的软重排。挂载后把每个节点立即吸附到当前 tMs 的目标姿态，
@@ -104,14 +106,29 @@
         var narrowHero = p.hero && W < 760 ? 0.85 : 1;   // 窄屏 hero 尺寸上限收 15%
         el.style.fontSize = (pack.fontPx * p.scale * narrowHero) + 'px';
         el.style.fontFamily = StanzaTheme.fontStack(theme.fontStyle);
-        el.style.fontWeight = '700';
+        var emotion = pack.emotion;
+        el.style.fontWeight = String(emotion && emotion.type && emotion.type.weight || 700);
+        if (emotion && emotion.type && emotion.type.tracking) el.style.letterSpacing = emotion.type.tracking;
+        var paletteOn = !global.LyricEmotion || !global.LyricEmotion.paletteEnabled || global.LyricEmotion.paletteEnabled();
+        if (emotion) {
+          el.setAttribute('data-emo-active', 'true');
+          el.setAttribute('data-emotion', emotion.id);
+          el.style.color = paletteOn ? emotion.palette.ink : theme.primaryColor;
+        }
         var glow = document.createElement('span'); glow.className = 'fl-glow';
         var body = document.createElement('span'); body.className = 'fl-body';
         glow.textContent = p.text; body.textContent = p.text;
         el.append(glow, body);
         el.dataset.st = 'waiting';
-        el.style.color = theme.primaryColor;
+        if (!emotion) el.style.color = theme.primaryColor;
         el.addEventListener('click', function () { if (onSeek) onSeek(pack.line.start_ms); });
+        if (emotion && global.LyricEmotionField) {
+          var u = (p.x + p.w / 2) / Math.max(1, pack.laid.width);
+          var b = global.LyricEmotionField.evaluate(
+            emotion.profile, u, emotion.intensity, pack.fontPx * p.scale, 0, 0
+          ).b;
+          el.style.setProperty('--emo-dy', b.toFixed(3) + 'px');
+        }
         dom.append(el);
         var state = { x: p.x + p.entryX, y: p.y + p.entryY, rot: p.rotate - 4, scale: 0.97, alpha: 0.65, glowA: 0 };
         return { p: p, el: el, glow: glow, body: body, state: state, target: state, heroMul: narrowHero };
@@ -175,7 +192,12 @@
     function writeNode(node, tMs, tg, energyNow) {
       var p = node.p, s = node.state;
       node.el.dataset.st = tg.st;
-      var color = tg.st === 'active' ? StanzaTheme.wordColor(p.text, theme) : theme.primaryColor;
+      var emotion = cur && cur.emotion;
+      var paletteOn = !global.LyricEmotion || !global.LyricEmotion.paletteEnabled || global.LyricEmotion.paletteEnabled();
+      var ink = emotion && paletteOn ? emotion.palette.ink : theme.primaryColor;
+      var accent = emotion && paletteOn && !(theme.wordColors && theme.wordColors.length)
+        ? emotion.palette.accent : StanzaTheme.wordColor(p.text, theme);
+      var color = tg.st === 'active' ? accent : ink;
       // 当前色写元素变量，供 CSS reduced 回退规则（静态 9px 辉光）与其它 var(--fl-accent) 规则取用。
       node.el.style.setProperty('--fl-accent', color);
       // 总缩放 = 排版缩放 × 窄屏 hero 收敛 × 姿态缩放。layout 以盒心建模而 DOM 从左上锚生长，
@@ -214,12 +236,22 @@
       }
     }
 
+    function emotionFor(idx) {
+      var E = global.LyricEmotion;
+      if (!E || !E.resolveForLine || idx < 0) return null;
+      var state = E.resolveForLine(idx, { host: 'cadenza' });
+      return state && state.id !== 'neutral' ? state : null;
+    }
+
     function frame(dtMs) {
       if (destroyed) return;
       if (!visible || !global.Stage) return;
       reduced = !!(host.closest && host.closest('.s3d-reduced'));
       var doc = Stage.lyrics();
       var tMs = Stage.position();
+      var E = global.LyricEmotion;
+      var revision = E && E.revision ? E.revision() : -1;
+      if (revision !== emotionRevision) { emotionRevision = revision; requestRepack(true); }
       var lines0 = doc ? doc.lines : [];
       var idx0 = U.activeLineIndex(lines0, tMs);
       var line = idx0 >= 0 ? lines0[idx0] : null;
@@ -249,11 +281,11 @@
         }
         cleared = false;
         // 换句（含首帧）：硬挂载，节点从 waiting 姿态经 damp 低通进入。
-        cur = packLine(line); mount(cur, snap, energyNow);
+        cur = packLine(line, emotionFor(idx0)); mount(cur, snap, energyNow);
         needRepack = false; repackSoft = false;
       } else if (needRepack) {
         // 行未变而配置变更：重新 packLine + 软挂载，节点立即吸附当前姿态。
-        cur = packLine(line); mount(cur, repackSoft, energyNow);
+        cur = packLine(line, emotionFor(idx0)); mount(cur, repackSoft, energyNow);
         needRepack = false; repackSoft = false;
       }
       ctx.clearRect(0, 0, W, H);

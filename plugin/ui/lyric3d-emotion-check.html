@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT
+     Copyright (c) 2026 hertz-studio contributors
+     GL 歌词图集情绪检查夹具（非产品页）。 -->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>lyric3d emotion check</title></head>
+<body>
+<pre id="out">running…</pre>
+<script src="lyric-emotion-field.js"></script>
+<script src="lyric-emotion.js"></script>
+<script src="lyric3d.js"></script>
+<script>
+(function () {
+  'use strict';
+  var EM = window.LyricEmotion;
+  var LINES = [
+    { start_ms: 0, end_ms: 5000, text: '晚风 吹过 你的 眼睛' },
+    { start_ms: 5000, end_ms: 9000, text: '星光 落在 你我 之间' }
+  ];
+  var lyric = { lines: LINES, index: 0 };
+  var hash = null;
+
+  function warmStats() {
+    var size = window.Lyric3D.size();
+    var ctx = window.Lyric3D.canvas.getContext('2d');
+    var y = size.mid * size.cellH;
+    var data = ctx.getImageData(0, y, size.cellH * 5.33 | 0, size.cellH).data;
+    var warm = 0, cool = 0, ink = 0;
+    for (var i = 0; i < data.length; i += 4) {
+      var r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+      if (a < 16) continue;
+      ink++;
+      if (r > b + 24 && r > 120) warm++;
+      if (b > r + 24 && b > 120) cool++;
+    }
+    return { warm: warm, cool: cool, ink: ink };
+  }
+
+  async function select(id) {
+    if (!hash) {
+      var bound = await EM.bindLyrics({ lines: LINES });
+      hash = bound.hash;
+    }
+    EM.setCueDoc({
+      version: 1, lyricsHash: hash, source: 'fixture',
+      lines: id === 'neutral' ? [] : [{ index: 0, emotion: id, intensity: 1, confidence: 1 }]
+    });
+    EM.commitAtBoundary();
+    window.Lyric3D.frame(lyric, true);
+    window.Lyric3D.frame(lyric, true);
+    var stats = warmStats();
+    var state = EM.resolveForLine(0, { host: 'lyric3d' });
+    var result = { id: id, sig: window.Lyric3D.sig(lyric), stats: stats,
+      state: state ? { id: state.id, weight: state.type && state.type.weight, palette: state.palette } : null };
+    document.getElementById('out').textContent = JSON.stringify(result, null, 2);
+    return result;
+  }
+  var c = window.Lyric3D.canvas;
+  c.style.cssText = 'display:block;width:1024px;height:auto;background:#050708';
+  document.body.appendChild(c);
+  select('neutral');
+  window.__lyric3dCheck = { ready: true, select: select, warmStats: warmStats };
+})();
+</script>
+</body>
+</html>
