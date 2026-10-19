@@ -1252,6 +1252,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_completion_http_fixture_returns_plain_text() {
+        use axum::{extract::State, http::HeaderMap, routing::post, Json};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route(
+                "/v1/responses",
+                post(
+                    |State(calls): State<Arc<AtomicUsize>>,
+                     headers: HeaderMap,
+                     Json(body): Json<Value>| async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(
+                            headers[reqwest::header::AUTHORIZATION],
+                            "Bearer fixture-openai-key"
+                        );
+                        assert_eq!(body["model"], "test-openai");
+                        assert_eq!(body["input"], "{\"lyricsHash\":\"sha256:fixture\"}");
+                        assert!(body["instructions"]
+                            .as_str()
+                            .unwrap()
+                            .contains("classify lyric lines"));
+                        assert_eq!(body["store"], false);
+                        assert_eq!(body["stream"], false);
+                        assert_eq!(body["max_output_tokens"], OUTPUT_TOKENS);
+                        assert!(body.get("text").is_none());
+                        Json(openai_response("{\"version\":1}"))
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let (origin, task) = server(app).await;
+        let provider = openai_for_server(&origin, Some(openai_quote()));
+        let reply = provider
+            .complete(
+                "You classify lyric lines".into(),
+                "{\"lyricsHash\":\"sha256:fixture\"}".into(),
+                Some(super::super::credential::test_provider_credential(
+                    "fixture-openai-key",
+                )),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.text, "{\"version\":1}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn openai_transport_never_redirects_retries_or_reads_unbounded_bodies() {
         use axum::{
             body::Body,
