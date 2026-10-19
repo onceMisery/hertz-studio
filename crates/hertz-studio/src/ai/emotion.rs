@@ -12,7 +12,6 @@
 //! Without a configured provider the service is unavailable and the auto mode
 //! stays disabled. Tests use a scripted provider; no real key is required.
 
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -22,8 +21,6 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use unicode_normalization::UnicodeNormalization;
 
-const METERED_COMPLETION_DISABLED: &str =
-    "歌词情绪云端请求尚未接入共享 AI 费用账本";
 const AI_EXECUTION_BUSY: &str = "shared AI execution slot is busy";
 
 pub(crate) const PROMPT_VERSION: u32 = 1;
@@ -40,9 +37,8 @@ pub(crate) const CACHE_BYTES: usize = 1024 * 1024;
 pub(crate) const PERSIST_CUE_BYTES: i64 = 4 * 1024 * 1024;
 pub(crate) const PERSIST_LOCK_BYTES: i64 = 4 * 1024 * 1024;
 pub(crate) const MAX_LOCKS: usize = 2000;
-pub(crate) const CHUNK_CONCURRENCY: usize = 2;
-pub(crate) const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-pub(crate) const CLASSIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub(crate) const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+pub(crate) const CLASSIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 pub(crate) const EMOTION_IDS: [&str; 8] = [
     "joy", "sorrow", "anger", "anxious", "tender", "triumph", "lonely", "neutral",
 ];
@@ -132,6 +128,9 @@ impl EmotionError {
     }
     fn busy() -> Self {
         Self::new(429, "ai_busy", "AI 通道繁忙，请稍后重试")
+    }
+    fn budget() -> Self {
+        Self::new(429, "budget_exceeded", "本月 AI 预算已用尽")
     }
 }
 
@@ -557,7 +556,33 @@ struct AiRuntimeEmotionProvider {
     provider: Arc<dyn crate::ai::jobs::StageIntentProvider>,
     credentials: Arc<crate::ai::credential::Service>,
     execution_slots: Arc<tokio::sync::Semaphore>,
+    db: Option<sqlx::SqlitePool>,
     owner: String,
+}
+
+/// Charge the full request bound before dispatch. Prepaying (rather than
+/// reserving and settling later) keeps the monthly counter correct when the
+/// caller disappears or the process exits mid-request: unknown usage is
+/// conservatively charged, and no reserved amount can leak.
+async fn charge_budget(db: &sqlx::SqlitePool, amount: i64) -> Result<(), String> {
+    let month = crate::ai::jobs::utc_month_key(vmusic_store::now_ms());
+    let mut tx = vmusic_store::begin_immediate(db)
+        .await
+        .map_err(|error| format!("budget unavailable: {error}"))?;
+    vmusic_store::ai_jobs::reserve(
+        &mut tx,
+        &month,
+        amount,
+        crate::ai::jobs::MONTHLY_LIMIT_MICRO_USD,
+    )
+    .await
+    .map_err(|error| format!("budget_exceeded: {error}"))?;
+    vmusic_store::ai_jobs::settle(&mut tx, &month, amount, amount)
+        .await
+        .map_err(|error| format!("budget unavailable: {error}"))?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("budget unavailable: {error}"))
 }
 
 impl EmotionProvider for AiRuntimeEmotionProvider {
@@ -568,14 +593,10 @@ impl EmotionProvider for AiRuntimeEmotionProvider {
         self.provider.model()
     }
     fn ready(&self) -> bool {
-        self.provider.ready() && self.provider.supports_zero_cost_completion()
+        self.provider.ready()
     }
     fn diagnostic(&self) -> Option<&str> {
-        if self.provider.ready() && !self.provider.supports_zero_cost_completion() {
-            Some(METERED_COMPLETION_DISABLED)
-        } else {
-            self.provider.diagnostic()
-        }
+        self.provider.diagnostic()
     }
     fn classify(
         &self,
@@ -585,12 +606,13 @@ impl EmotionProvider for AiRuntimeEmotionProvider {
         let provider = self.provider.clone();
         let credentials = self.credentials.clone();
         let execution_slots = self.execution_slots.clone();
+        let db = self.db.clone();
         let owner = self.owner.clone();
         Box::pin(async move {
             let _permit = execution_slots
                 .try_acquire_owned()
                 .map_err(|_| AI_EXECUTION_BUSY.to_string())?;
-            let credential = if provider.requires_openai_credential() {
+            let credential = if provider.requires_credential() {
                 Some(
                     credentials
                         .snapshot(&owner)
@@ -601,6 +623,17 @@ impl EmotionProvider for AiRuntimeEmotionProvider {
             } else {
                 None
             };
+            if !provider.supports_zero_cost_completion() {
+                let quote = provider
+                    .quote(&user)
+                    .map_err(|reason| format!("pricing_unavailable: {reason}"))?;
+                quote
+                    .validate()
+                    .map_err(|reason| format!("pricing_unavailable: {reason}"))?;
+                if let Some(db) = db.as_ref() {
+                    charge_budget(db, quote.reservation_micro_usd).await?;
+                }
+            }
             let reply = provider
                 .complete(
                     system,
@@ -647,12 +680,14 @@ impl EmotionService {
         provider: Arc<dyn crate::ai::jobs::StageIntentProvider>,
         credentials: Arc<crate::ai::credential::Service>,
         execution_slots: Arc<tokio::sync::Semaphore>,
+        db: sqlx::SqlitePool,
         owner: String,
     ) {
         let adapter: Arc<dyn EmotionProvider> = Arc::new(AiRuntimeEmotionProvider {
             provider,
             credentials,
             execution_slots,
+            db: Some(db),
             owner,
         });
         if let Ok(mut slot) = self.provider.write() {
@@ -717,40 +752,31 @@ impl EmotionService {
             return Err(EmotionError::unavailable("歌词情绪 provider 未就绪"));
         }
         let chunks = chunks(request.lines.len());
-        let mut outcomes = tokio::time::timeout(
-            CLASSIFY_TIMEOUT,
-            futures::stream::iter(chunks.into_iter().map(|chunk| {
-                let provider = provider.clone();
-                let request = &request;
-                async move {
-                    let text = match tokio::time::timeout(
-                        CHUNK_TIMEOUT,
-                        provider.classify(system_prompt(), user_prompt(request, &chunk)),
-                    )
-                    .await
-                    {
-                        Ok(Ok(text)) => text,
-                        Ok(Err(reason)) if reason == AI_EXECUTION_BUSY => {
-                            return (chunk, Err(EmotionError::busy()));
-                        }
-                        Ok(Err(reason)) => {
-                            return (chunk, Err(EmotionError::unavailable(reason)));
-                        }
-                        Err(_) => {
-                            return (chunk, Err(EmotionError::unavailable("歌词分类分块超时")));
-                        }
-                    };
-                    match parse_reply(&text, request, &chunk) {
-                        Ok((lines, sections)) => (chunk, Ok((lines, sections))),
-                        Err(error) => (chunk, Err(error)),
+        let mut outcomes = tokio::time::timeout(CLASSIFY_TIMEOUT, async {
+            let mut outcomes = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
+                let outcome = match tokio::time::timeout(
+                    CHUNK_TIMEOUT,
+                    provider.classify(system_prompt(), user_prompt(&request, &chunk)),
+                )
+                .await
+                {
+                    Ok(Ok(text)) => parse_reply(&text, &request, &chunk),
+                    Ok(Err(reason)) if reason == AI_EXECUTION_BUSY => {
+                        return Err(EmotionError::busy());
                     }
-                }
-            }))
-            .buffer_unordered(CHUNK_CONCURRENCY)
-            .collect::<Vec<_>>(),
-        )
+                    Ok(Err(reason)) if reason.starts_with("budget_exceeded") => {
+                        return Err(EmotionError::budget());
+                    }
+                    Ok(Err(reason)) => Err(EmotionError::unavailable(reason)),
+                    Err(_) => Err(EmotionError::unavailable("歌词分类分块超时")),
+                };
+                outcomes.push((chunk, outcome));
+            }
+            Ok::<_, EmotionError>(outcomes)
+        })
         .await
-        .map_err(|_| EmotionError::unavailable("歌词分类超过 120s 期限"))?;
+        .map_err(|_| EmotionError::unavailable("歌词分类超过 300s 期限"))??;
 
         outcomes.sort_by_key(|(chunk, _)| chunk.core_from);
         let mut lines = Vec::new();
@@ -984,7 +1010,14 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let reply = self.replies.lock().unwrap().pop_front();
-            Box::pin(async move { reply.ok_or_else(|| "no scripted reply".to_string()) })
+            Box::pin(async move {
+                let reply = reply.ok_or_else(|| "no scripted reply".to_string())?;
+                if reply == AI_EXECUTION_BUSY {
+                    Err(reply)
+                } else {
+                    Ok(reply)
+                }
+            })
         }
     }
 
@@ -1061,6 +1094,26 @@ mod tests {
             .find(|line| line.index == 80)
             .expect("third chunk cue");
         assert_eq!(tail.emotion, "joy");
+    }
+
+    #[tokio::test]
+    async fn busy_chunk_rejects_whole_classification_without_caching_partial_result() {
+        let req = request(lines(100));
+        let hash = req.lyrics_hash.clone();
+        let provider = Arc::new(Scripted::new(vec![
+            reply(&hash, 0),
+            AI_EXECUTION_BUSY.into(),
+            reply(&hash, 80),
+        ]));
+        let service = EmotionService::new(provider.clone());
+
+        let error = service.classify(req).await.unwrap_err();
+
+        assert_eq!(error.status, 429);
+        assert_eq!(error.code, "ai_busy");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        let key = service.cache_key(&hash).unwrap();
+        assert!(service.cache.lock().unwrap().get(&key).is_none());
     }
 
     #[tokio::test]
@@ -1187,6 +1240,7 @@ mod tests {
             provider: provider.clone(),
             credentials: crate::ai::credential::Service::isolated(),
             execution_slots: execution_slots.clone(),
+            db: None,
             owner: "test-owner".into(),
         }));
         let occupied = execution_slots.clone().try_acquire_owned().unwrap();
@@ -1214,7 +1268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metered_completion_is_not_advertised_or_dispatched_without_shared_ledger() {
+    async fn metered_completion_is_advertised_and_dispatched() {
         struct MeteredCompletionFixture {
             calls: AtomicUsize,
         }
@@ -1230,7 +1284,7 @@ mod tests {
                 true
             }
             fn quote(&self, _brief: &str) -> Result<crate::ai::usage::PriceQuote, String> {
-                Err("not used".to_string())
+                Ok(crate::ai::usage::PriceQuote::fake())
             }
             fn generate(
                 &self,
@@ -1249,16 +1303,31 @@ mod tests {
             fn complete(
                 &self,
                 _system: String,
-                _user: String,
+                user: String,
                 _credential: Option<crate::ai::credential::ProviderCredential>,
                 _cancellation: crate::ai::jobs::ProviderCancellation,
             ) -> Pin<
                 Box<dyn Future<Output = Result<crate::ai::jobs::CompletionReply, String>> + Send>,
             > {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async {
+                Box::pin(async move {
+                    let input: Value =
+                        serde_json::from_str(&user).map_err(|_| "bad prompt".to_string())?;
+                    let hash = input["lyricsHash"]
+                        .as_str()
+                        .ok_or_else(|| "hash missing".to_string())?;
+                    let from = input["CORE_FROM"]
+                        .as_u64()
+                        .ok_or_else(|| "range missing".to_string())?
+                        as u32;
                     Ok(crate::ai::jobs::CompletionReply {
-                        text: String::new(),
+                        text: json!({
+                            "version": 1,
+                            "lyricsHash": hash,
+                            "sections": [],
+                            "lines": [{ "index": from, "emotion": "joy", "intensity": 0.75, "confidence": 0.9 }],
+                        })
+                        .to_string(),
                     })
                 })
             }
@@ -1267,22 +1336,21 @@ mod tests {
         let provider = Arc::new(MeteredCompletionFixture {
             calls: AtomicUsize::new(0),
         });
-        let service = EmotionService::new(Arc::new(AiRuntimeEmotionProvider {
+        let adapter = Arc::new(AiRuntimeEmotionProvider {
             provider: provider.clone(),
             credentials: crate::ai::credential::Service::isolated(),
             execution_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            db: None,
             owner: "test-owner".into(),
-        }));
+        });
+        let service = EmotionService::new(adapter);
 
         let status = service.status(true);
-        assert_eq!(status["provider"]["ready"], false);
-        assert_eq!(
-            status["provider"]["diagnostic"],
-            METERED_COMPLETION_DISABLED
-        );
-        let error = service.classify(request(lines(1))).await.unwrap_err();
-        assert_eq!(error.status, 503);
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(status["provider"]["ready"], true);
+        assert_eq!(status["provider"]["diagnostic"], Value::Null);
+        let doc = service.classify(request(lines(1))).await.unwrap();
+        assert_eq!(doc.provider_id, "metered-fixture");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

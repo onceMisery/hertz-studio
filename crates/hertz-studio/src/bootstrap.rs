@@ -257,6 +257,7 @@ pub async fn boot(
                     state.ai_runtime.provider().await,
                     state.ai_runtime.credentials.clone(),
                     state.ai_runtime.completion_slots(),
+                    state.db.clone(),
                     owner,
                 ),
                 Err(error) => {

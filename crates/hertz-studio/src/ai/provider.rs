@@ -34,6 +34,7 @@ pub(super) fn configured(config: &AiConfig) -> Arc<dyn StageIntentProvider> {
             Ok(provider) => Arc::new(provider),
             Err(reason) => Arc::new(Unavailable(reason)),
         },
+        "stepfun" => super::stepfun::configured(config),
         _ => Arc::new(Unavailable("unsupported AI provider configuration")),
     }
 }
@@ -666,7 +667,7 @@ impl StageIntentProvider for OpenAi {
     }
 }
 
-fn parse_openai_completion(bytes: &[u8], model: &str) -> Result<String, String> {
+pub(super) fn parse_openai_completion(bytes: &[u8], model: &str) -> Result<String, String> {
     let envelope = super::strict_json::parse(bytes, RESPONSE_BYTES, 16).map_err(str::to_owned)?;
     if envelope["model"].as_str() != Some(model) {
         return Err("OpenAI returned a different model".to_string());

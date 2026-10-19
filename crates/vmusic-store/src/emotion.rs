@@ -42,11 +42,15 @@ pub async fn get_cue(pool: &SqlitePool, key: &str) -> Result<Option<CueRecord>, 
             .map_err(database)?;
     if row.is_some() {
         // Touch the LRU position; a failed touch only affects future eviction.
-        let _ = sqlx::query("UPDATE lyric_emotion_cues SET updated_at = ?2 WHERE cache_key = ?1")
-            .bind(key)
-            .bind(now_ms())
-            .execute(pool)
-            .await;
+        // +1 keeps same-millisecond hits strictly newer than earlier writes.
+        let _ = sqlx::query(
+            "UPDATE lyric_emotion_cues
+             SET updated_at = MAX(updated_at + 1, ?2) WHERE cache_key = ?1",
+        )
+        .bind(key)
+        .bind(now_ms())
+        .execute(pool)
+        .await;
     }
     Ok(row.map(|(doc_json,)| CueRecord { doc_json }))
 }
@@ -67,6 +71,11 @@ pub async fn put_cue(
     }
     let now = now_ms();
     let mut tx = pool.begin().await.map_err(database)?;
+    let latest: Option<i64> = sqlx::query_scalar("SELECT MAX(updated_at) FROM lyric_emotion_cues")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database)?;
+    let stamp = now.max(latest.unwrap_or(0).saturating_add(1));
     sqlx::query(
         "INSERT INTO lyric_emotion_cues
            (cache_key, lyrics_hash, doc_json, byte_size, created_at, updated_at)
@@ -81,7 +90,7 @@ pub async fn put_cue(
     .bind(lyrics_hash)
     .bind(doc_json)
     .bind(bytes)
-    .bind(now)
+    .bind(stamp)
     .execute(&mut *tx)
     .await
     .map_err(database)?;
