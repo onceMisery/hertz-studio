@@ -82,6 +82,8 @@ const ui = {
   setEmotionPreview: $('set-emotion-preview'),
   setEmotionScale: $('set-emotion-scale'),
   setEmotionScaleValue: $('set-emotion-scale-value'),
+  setEmotionCurve: $('set-emotion-curve'),
+  setEmotionCurveValue: $('set-emotion-curve-value'),
   setEmotionPalette: $('set-emotion-palette'),
   setEmotionAiAuthorized: $('set-emotion-ai-authorized'),
   setEmotionAiNote: $('set-emotion-ai-note'),
@@ -2236,6 +2238,10 @@ function lyricEmotionScale() {
   var v = Number(state.settings.lyrics_emotion_scale);
   return isFinite(v) ? Math.max(0, Math.min(1.5, v)) : 1;
 }
+function lyricEmotionCurve() {
+  var v = Number(state.settings.lyrics_emotion_curve);
+  return isFinite(v) ? Math.max(0.5, Math.min(1.5, v)) : 1;
+}
 function lyricEmotionPalette() {
   return state.settings.lyrics_emotion_palette !== false;
 }
@@ -2247,6 +2253,7 @@ function applyEmotionSettings() {
     mode,
     preview: lyricEmotionPreview(),
     scale: lyricEmotionScale(),
+    curve: lyricEmotionCurve(),
     palette: lyricEmotionPalette()
   });
 }
@@ -2259,6 +2266,8 @@ function paintEmotionSettings() {
   ui.setEmotionPreviewRow.hidden = mode !== 'manual';
   ui.setEmotionScale.value = lyricEmotionScale();
   if (ui.setEmotionScaleValue) ui.setEmotionScaleValue.textContent = lyricEmotionScale().toFixed(2);
+  if (ui.setEmotionCurve) ui.setEmotionCurve.value = lyricEmotionCurve();
+  if (ui.setEmotionCurveValue) ui.setEmotionCurveValue.textContent = lyricEmotionCurve().toFixed(2);
   ui.setEmotionPalette.checked = lyricEmotionPalette();
   if (ui.setEmotionAiAuthorized) ui.setEmotionAiAuthorized.checked = state.settings.lyrics_emotion_ai_authorized === true;
   var autoOption = ui.setEmotionMode.querySelector('option[value="auto"]');
@@ -2274,7 +2283,9 @@ function paintEmotionSettings() {
           : ((provider && provider.diagnostic) || '模型未就绪；不会发送歌词');
   }
   if (ui.setEmotionLockNote) {
-    var lockCount = Array.isArray(state.settings.lyrics_emotion_locks) ? state.settings.lyrics_emotion_locks.length : 0;
+    var lockCount = Object.keys(emotionLockCache).reduce(function (sum, hash) {
+      return sum + (emotionLockCache[hash] ? emotionLockCache[hash].length : 0);
+    }, 0);
     ui.setEmotionLockNote.textContent = lockCount
       ? '已锁定 ' + lockCount + ' 行；手动覆盖优先于 auto 结果'
       : '手动覆盖优先于 auto 结果；关闭情绪演出时不生效';
@@ -2286,19 +2297,94 @@ function paintEmotionSettings() {
   }
 }
 
-function emotionLocks(hash) {
-  return (Array.isArray(state.settings.lyrics_emotion_locks)
-    ? state.settings.lyrics_emotion_locks
-    : []).filter(function (lock) {
+let emotionLockCache = Object.create(null);
+let emotionLockLoading = Object.create(null);
+
+function validEmotionHash(hash) {
+  return typeof hash === 'string' && /^sha256:[0-9a-f]{64}$/.test(hash);
+}
+
+function normalEmotionLocks(locks) {
+  return (Array.isArray(locks) ? locks : []).filter(function (lock) {
     return lock && Number.isFinite(lock.from) && Number.isFinite(lock.to) &&
-      lock.emotion && typeof lock.emotion === 'string' &&
-      (hash == null || lock.hash === hash);
+      lock.to >= lock.from && lock.emotion && typeof lock.emotion === 'string';
+  }).map(function (lock) {
+    return {
+      from: lock.from, to: lock.to, emotion: lock.emotion,
+      intensity: Number.isFinite(lock.intensity) ? lock.intensity : 1,
+      confidence: Number.isFinite(lock.confidence) ? lock.confidence : 1
+    };
   });
 }
 
-function applyEmotionLocks(cue) {
+async function emotionLocks(hash) {
+  if (!validEmotionHash(hash)) return [];
+  if (emotionLockCache[hash]) return emotionLockCache[hash];
+  if (!emotionLockLoading[hash]) {
+    emotionLockLoading[hash] = transport.get('/v1/ai/lyrics/emotion/locks?lyricsHash=' +
+      encodeURIComponent(hash)).then(function (result) {
+      var locks = normalEmotionLocks(result && result.locks);
+      emotionLockCache[hash] = locks;
+      return locks;
+    }).catch(function () {
+      // 读取失败不阻断播放；下一次请求会重试。
+      delete emotionLockCache[hash];
+      return [];
+    }).finally(function () {
+      delete emotionLockLoading[hash];
+    });
+  }
+  return emotionLockLoading[hash];
+}
+
+async function persistEmotionLocks(hash, locks) {
+  if (!validEmotionHash(hash)) return [];
+  var next = normalEmotionLocks(locks);
+  var saved = await transport.put('/v1/ai/lyrics/emotion/locks', {
+    lyricsHash: hash, locks: next
+  });
+  next = normalEmotionLocks(saved && saved.locks);
+  emotionLockCache[hash] = next;
+  paintEmotionSettings();
+  return next;
+}
+
+async function clearEmotionLocks(hash) {
+  if (!validEmotionHash(hash)) return;
+  await transport.del('/v1/ai/lyrics/emotion/locks?lyricsHash=' + encodeURIComponent(hash));
+  emotionLockCache[hash] = [];
+  paintEmotionSettings();
+}
+
+/// 旧版本把锁定存在 settings 数组里；服务端表上线后一次性搬过去。
+async function migrateEmotionLocks() {
+  var legacy = state.settings && state.settings.lyrics_emotion_locks;
+  if (!Array.isArray(legacy) || !legacy.length) return;
+  var grouped = Object.create(null);
+  legacy.forEach(function (lock) {
+    if (!lock || !validEmotionHash(lock.hash) || !Number.isFinite(lock.from) ||
+        !Number.isFinite(lock.to)) return;
+    (grouped[lock.hash] || (grouped[lock.hash] = [])).push({
+      from: lock.from, to: lock.to, emotion: lock.emotion,
+      intensity: Number.isFinite(lock.intensity) ? lock.intensity : 1,
+      confidence: Number.isFinite(lock.confidence) ? lock.confidence : 1
+    });
+  });
+  var hashes = Object.keys(grouped);
+  try {
+    for (var i = 0; i < hashes.length; i += 1) {
+      await persistEmotionLocks(hashes[i], grouped[hashes[i]]);
+    }
+    await transport.put('/v1/settings', { lyrics_emotion_locks: [] });
+    state.settings.lyrics_emotion_locks = [];
+  } catch (error) {
+    // 迁移失败保留旧数据，下次启动重试；不影响当前播放。
+  }
+}
+
+async function applyEmotionLocks(cue) {
   if (!cue) return cue;
-  var locks = emotionLocks(cue.lyricsHash);
+  var locks = await emotionLocks(cue.lyricsHash);
   if (!locks.length) return cue;
   var doc = Stage && Stage.lyrics ? Stage.lyrics() : null;
   var count = doc && doc.lines ? doc.lines.length : 0;
@@ -2355,7 +2441,7 @@ async function maybeAutoEmotion() {
     var cue = await transport.post('/v1/ai/lyrics/emotion',
       { lyricsHash: hash, lines: lines }, { signal: controller.signal });
     if (requestToken !== emotionAutoToken || lyricEmotionMode() !== 'auto' || !cue || cue.version !== 1) return;
-    var merged = applyEmotionLocks(cue);
+    var merged = await applyEmotionLocks(cue);
     if (Stage.setEmotionCueDoc(merged)) emotionAutoAppliedHash = hash;
   } catch (error) {
     // Provider 未就绪/授权撤销/超时都保持中性；播放不受影响。
@@ -7491,6 +7577,7 @@ async function refreshFloatingCapsule() {
     state.settings = s || {};
     document.body.classList.toggle('reduce-motion', state.settings.reduce_motion === true);
     refreshCapsuleMarquee();
+    migrateEmotionLocks().catch(function () {});
   }).catch(() => {});
   const snapshot = transport.get('/v1/state').then(applySnapshot).catch(() => {});
   await Promise.all([settings, snapshot]);
@@ -8471,6 +8558,12 @@ async function startApp() {
       if (ui.setEmotionScaleValue) ui.setEmotionScaleValue.textContent = Number(ui.setEmotionScale.value).toFixed(2);
     };
     ui.setEmotionScale.onchange = () => saveLyricSettings({ lyrics_emotion_scale: Number(ui.setEmotionScale.value) });
+    if (ui.setEmotionCurve) {
+      ui.setEmotionCurve.oninput = () => {
+        if (ui.setEmotionCurveValue) ui.setEmotionCurveValue.textContent = Number(ui.setEmotionCurve.value).toFixed(2);
+      };
+      ui.setEmotionCurve.onchange = () => saveLyricSettings({ lyrics_emotion_curve: Number(ui.setEmotionCurve.value) });
+    }
     ui.setEmotionPalette.onchange = () => saveLyricSettings({ lyrics_emotion_palette: ui.setEmotionPalette.checked });
     if (ui.setEmotionAiAuthorized) {
       ui.setEmotionAiAuthorized.onchange = async () => {
@@ -8494,14 +8587,32 @@ async function startApp() {
           return { index: i, start_ms: line.start_ms, text: String(line.text == null ? '' : line.text).normalize('NFC') };
         });
         var hash = await LyricEmotion.hashLyrics(lines);
-        var locks = emotionLocks(hash).filter(function (lock) { return !(lock.from <= index && lock.to >= index); });
-        locks.push({ hash: hash, from: index, to: index, emotion: ui.setEmotionLock.value, intensity: 1, confidence: 1 });
+        var locks = await emotionLocks(hash);
+        locks = locks.filter(function (lock) { return !(lock.from <= index && lock.to >= index); });
+        locks.push({ from: index, to: index, emotion: ui.setEmotionLock.value, intensity: 1, confidence: 1 });
         invalidateEmotionAuto();
-        await saveLyricSettings({ lyrics_emotion_locks: locks });
+        try {
+          await persistEmotionLocks(hash, locks);
+          if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
+        } catch (error) {
+          toast(errText('手动覆盖保存失败', error), 'error');
+        }
       };
       ui.setEmotionLockClear.onclick = async () => {
+        if (!Stage || !Stage.lyrics || !window.LyricEmotion) return;
+        var doc = Stage.lyrics();
+        var lines = doc && doc.lines ? doc.lines.map(function (line, i) {
+          return { index: i, start_ms: line.start_ms, text: String(line.text == null ? '' : line.text).normalize('NFC') };
+        }) : [];
+        if (!lines.length) return;
+        var hash = await LyricEmotion.hashLyrics(lines);
         invalidateEmotionAuto();
-        await saveLyricSettings({ lyrics_emotion_locks: [] });
+        try {
+          await clearEmotionLocks(hash);
+          if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
+        } catch (error) {
+          toast(errText('手动覆盖清除失败', error), 'error');
+        }
       };
     }
   }

@@ -28,7 +28,7 @@
   var emotionReadyDoc = null;   // 已绑定摘要的歌词快照（null = 情绪层关闭）
   var emotionCueDoc = null;     // 摘要就绪前暂存的 Cue
   var emotionRevisionSeen = -1;
-  var emotionSettings = { mode: 'off', preview: 'joy', scale: 1, palette: true };
+  var emotionSettings = { mode: 'off', preview: 'joy', scale: 1, curve: 1, palette: true };
   var mode = 'karaoke';
   var activeIdx = -2;
   var playing = false;
@@ -695,7 +695,7 @@
   }
 
   // 手动预览：用一条覆盖整首的 section Cue，播放时每一行都能看到同一情绪。
-  // 这是 P1 的调试/预览入口；自动分类（P2b）未就绪，不作为正式自动模式。
+  // 这是 P1 的手动预览入口；正式自动分类由 app.js 在显式授权后驱动。
   function setManualEmotion(id) {
     var E = emotionApi();
     if (!E || !doc || !doc.lines.length) return false;
@@ -732,6 +732,10 @@
       var scale = Number(patch.scale);
       if (isFinite(scale) && scale >= 0 && scale <= 1.5) emotionSettings.scale = scale;
     }
+    if (patch.curve != null) {
+      var curve = Number(patch.curve);
+      if (isFinite(curve) && curve >= 0.5 && curve <= 1.5) emotionSettings.curve = curve;
+    }
     if (patch.palette != null) emotionSettings.palette = patch.palette !== false;
     if (patch.preview != null) {
       var E = emotionApi();
@@ -744,6 +748,7 @@
     if (api) {
       try {
         api.setScale(emotionSettings.scale);
+        if (api.setCurve) api.setCurve(emotionSettings.curve);
         if (api.setPaletteEnabled) api.setPaletteEnabled(emotionSettings.palette);
       } catch (err) { /* 设置值越界时保留上一档 */ }
     }

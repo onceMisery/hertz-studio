@@ -66,6 +66,18 @@ function cue(hash, extra) {
   assert(EM.commitAtBoundary() === true, '缓存 Cue commit 失败');
   assert(EM.resolveForLine(0).id === 'joy', '缓存 Cue 未生效');
 
+  // P3 强度曲线：<1 放大弱情绪，>1 拉开强弱差；非法值拒绝。
+  const weak = { intensity: 0.4, confidence: 1 };
+  EM.setCurve(0.5);
+  const boosted = EM.effectiveIntensity(weak, 1);
+  EM.setCurve(1.5);
+  const suppressed = EM.effectiveIntensity(weak, 1);
+  assert(boosted > suppressed, '强度曲线未改变弱情绪：' + boosted + '/' + suppressed);
+  let curveRejected = false;
+  try { EM.setCurve(2); } catch (err) { curveRejected = true; }
+  assert(curveRejected, '非法强度曲线未拒绝');
+  EM.setCurve(1);
+
   // 清除只清 Cue，不清歌词绑定。
   assert(EM.clearCues() === true, 'clearCues 未改变状态');
   assert(EM.resolveForLine(0).id === 'neutral', 'clearCues 后未回中性');

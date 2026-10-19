@@ -282,11 +282,28 @@ async function main() {
       const line = document.querySelector('.stage-lyrics .lyric.active');
       return line && line.getAttribute('data-emotion') === 'anger';
     }, null, { timeout: 15000 });
+    const lockedHash = await page.evaluate(async () => {
+      const lines = Stage.lyrics().lines.map((line, index) => ({
+        index, start_ms: line.start_ms, text: line.text.normalize('NFC')
+      }));
+      return await LyricEmotion.hashLyrics(lines);
+    });
+    const savedLocks = await fixture.api('/v1/ai/lyrics/emotion/locks?lyricsHash=' +
+      encodeURIComponent(lockedHash));
+    if (!savedLocks.locks || savedLocks.locks.length !== 1 ||
+        savedLocks.locks[0].emotion !== 'anger') {
+      throw new Error('手动覆盖未持久化到服务端：' + JSON.stringify(savedLocks));
+    }
     await page.click('#set-emotion-lock-clear');
     await page.waitForFunction(() => {
       const line = document.querySelector('.stage-lyrics .lyric.active');
       return line && line.getAttribute('data-emotion') && line.getAttribute('data-emotion') !== 'anger';
     }, null, { timeout: 15000 });
+    const clearedLocks = await fixture.api('/v1/ai/lyrics/emotion/locks?lyricsHash=' +
+      encodeURIComponent(lockedHash));
+    if (clearedLocks.locks && clearedLocks.locks.length) {
+      throw new Error('手动覆盖清除后服务端仍有记录：' + JSON.stringify(clearedLocks));
+    }
     await page.selectOption('#set-emotion-mode', 'off');
     await page.uncheck('#set-emotion-ai-authorized');
     await page.evaluate(() => { const b = document.querySelector('.skset-modal-close'); if (b) b.click(); });

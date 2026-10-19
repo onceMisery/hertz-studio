@@ -21,6 +21,21 @@ pub(super) async fn emotion_classify(state: &Arc<AppState>, body: &Value) -> Rpc
     Reply::json(&crate::ai::emotion::classify(state, request).await?)
 }
 
+pub(super) async fn emotion_locks(state: &Arc<AppState>, query: &Value) -> RpcResult {
+    let query: crate::ai::emotion::LocksQuery = query_as(query)?;
+    Reply::json(&crate::ai::emotion::read_locks(state, query).await?)
+}
+
+pub(super) async fn put_emotion_locks(state: &Arc<AppState>, body: &Value) -> RpcResult {
+    let request: crate::ai::emotion::LocksRequest = body_as(body)?;
+    Reply::json(&crate::ai::emotion::write_locks(state, request).await?)
+}
+
+pub(super) async fn delete_emotion_locks(state: &Arc<AppState>, query: &Value) -> RpcResult {
+    let query: crate::ai::emotion::LocksQuery = query_as(query)?;
+    Reply::json(&crate::ai::emotion::clear_locks(state, query).await?)
+}
+
 pub(super) async fn credential_status(state: &Arc<AppState>) -> RpcResult {
     Reply::json(&crate::ai::credential::status(state).await?)
 }

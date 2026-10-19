@@ -213,6 +213,15 @@ impl Rpc {
             (Op::Post, ["v1", "ai", "lyrics", "emotion"]) => {
                 ai::emotion_classify(state, body).await
             }
+            (Op::Get, ["v1", "ai", "lyrics", "emotion", "locks"]) => {
+                ai::emotion_locks(state, query).await
+            }
+            (Op::Put, ["v1", "ai", "lyrics", "emotion", "locks"]) => {
+                ai::put_emotion_locks(state, body).await
+            }
+            (Op::Delete, ["v1", "ai", "lyrics", "emotion", "locks"]) => {
+                ai::delete_emotion_locks(state, query).await
+            }
             (Op::Get, ["v1", "ai", "provider-credential"]) => ai::credential_status(state).await,
             (Op::Put, ["v1", "ai", "provider-credential"]) => ai::put_credential(state, body).await,
             (Op::Delete, ["v1", "ai", "provider-credential"]) => ai::delete_credential(state).await,

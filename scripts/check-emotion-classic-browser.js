@@ -17,7 +17,8 @@ const root = path.join(__dirname, '..');
 const out = path.join(root, 'output', 'emotion-classic');
 const LRC = [
   '[00:00.00]晚风 吹过 你的 眼睛',
-  '[00:05.00]星光 落在 你我 之间'
+  '[00:05.00]星光 落在 你我 之间',
+  '[00:10.00]夜色 慢慢 落下'
 ].join('\n');
 
 function rgb(hex) {
@@ -174,6 +175,40 @@ async function main() {
         (reduced.decor && reduced.decor !== 'none') || (reduced.fog && reduced.fog !== 'none')) {
       throw new Error('减少动效下未保留静态场或未停循环/装饰：' + JSON.stringify(reduced));
     }
+
+    // P1 逐词激励：切到下一行时，已激活词必须挂上对应档案的入场动画。
+    await page.evaluate(() => Stage.setEmotionCueDoc({
+      version: 1, lyricsHash: window.__classicHash, source: 'fixture',
+      lines: [
+        { index: 0, emotion: 'joy', intensity: 1, confidence: 1 },
+        { index: 1, emotion: 'joy', intensity: 1, confidence: 1 }
+      ]
+    }));
+    await fixture.api('/v1/player/seek', 'POST', { position_ms: 4800 });
+    await page.waitForTimeout(350);
+    await fixture.api('/v1/player/play', 'POST', {});
+    await page.waitForFunction(() => {
+      const line = document.querySelector('.fl-classic .fl-cline[data-emo-active="true"]');
+      return line && line.getAttribute('data-emotion') === 'joy' &&
+        line.querySelector('.fl-cword[data-st="active"] .fl-emo-motion[data-emo-enter="bounce"]');
+    }, null, { timeout: 15000 });
+    await page.waitForTimeout(180);
+    const entrance = await page.evaluate(() => {
+      const motions = Array.from(document.querySelectorAll('.fl-classic .fl-emo-motion'));
+      return {
+        armed: motions.filter((m) => m.getAttribute('data-emo-enter') === 'bounce').length,
+        durs: motions.map((m) => m.style.getPropertyValue('--emo-enter-dur')),
+        running: motions.map((m) => getComputedStyle(m).animationName)
+          .filter((name) => name === 'emo-enter-bounce').length
+      };
+    });
+    if (!entrance.armed || !entrance.durs.some((dur) => parseFloat(dur) >= 80) ||
+        entrance.running < 1) {
+      throw new Error('逐词入场未生效：' + JSON.stringify(entrance));
+    }
+    await fixture.api('/v1/player/pause', 'POST', {});
+    await fixture.api('/v1/player/seek', 'POST', { position_ms: 500 });
+    await page.waitForTimeout(180);
 
     await page.evaluate(() => Stage.clearEmotionCues());
     await page.waitForFunction(() => !document.querySelector('.fl-classic .fl-cline[data-emo-active="true"]'), null, { timeout: 10000 });    const cleared = await page.evaluate(() => {

@@ -37,6 +37,7 @@
     generation: 0,
     hash: null,
     scale: 1,
+    curve: 1,
     committed: null,
     pending: null,
     revision: 0,
@@ -412,10 +413,13 @@
     return null;
   }
 
-  function effectiveIntensity(cue, scale) {
+  function effectiveIntensity(cue, scale, curve) {
     if (!cue) return 0;
     var userScale = scale == null ? state.scale : scale;
-    return clamp01(cue.intensity * (0.4 + 0.6 * cue.confidence) * userScale);
+    var base = clamp01(cue.intensity * (0.4 + 0.6 * cue.confidence) * userScale);
+    var power = curve == null ? state.curve : curve;
+    if (typeof power !== 'number' || !isFinite(power) || power < 0.5 || power > 1.5) power = 1;
+    return clamp01(power === 1 ? base : Math.pow(base, power));
   }
 
   function neutralState() {
@@ -521,11 +525,15 @@
     if (typeof v !== 'number' || !isFinite(v) || v < 0 || v > 1.5) fail('情绪强度必须在 0..1.5');
     state.scale = v;
   }
+  function setCurve(v) {
+    if (typeof v !== 'number' || !isFinite(v) || v < 0.5 || v > 1.5) fail('情绪曲线必须在 0.5..1.5');
+    state.curve = v;
+  }
   function setPaletteEnabled(v) { state.paletteEnabled = v !== false; }
   function paletteEnabled() { return state.paletteEnabled; }
   function reset() {
     state.lines = null; state.hash = null; state.generation += 1;
-    state.committed = null; state.pending = null; state.revision += 1; state.scale = 1;
+    state.committed = null; state.pending = null; state.revision += 1; state.scale = 1; state.curve = 1;
     state.paletteEnabled = true;
   }
 
@@ -545,6 +553,7 @@
     resolve: resolve,
     resolveForLine: resolve,
     effectiveIntensity: effectiveIntensity,
+    setCurve: setCurve,
     sampleAt: sampleAt,
     applyLine: applyLine,
     clearLine: clearLine,

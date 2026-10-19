@@ -64,6 +64,15 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             )),
         )
         .route(
+            "/v1/ai/lyrics/emotion/locks",
+            get(ai_emotion_locks)
+                .put(ai_put_emotion_locks)
+                .delete(ai_delete_emotion_locks)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::ai::emotion::MAX_BODY_BYTES,
+                )),
+        )
+        .route(
             "/v1/ai/provider-credential",
             get(ai_credential_status)
                 .put(ai_put_credential)
@@ -595,6 +604,33 @@ async fn ai_emotion_classify(
     Json(body): Json<crate::ai::emotion::ClassifyRequest>,
 ) -> ApiResult<Json<crate::ai::emotion::CueDoc>> {
     crate::ai::emotion::classify(&state, body).await.map(Json)
+}
+
+async fn ai_emotion_locks(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<crate::ai::emotion::LocksQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::emotion::read_locks(&state, query)
+        .await
+        .map(Json)
+}
+
+async fn ai_put_emotion_locks(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::ai::emotion::LocksRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::emotion::write_locks(&state, body)
+        .await
+        .map(Json)
+}
+
+async fn ai_delete_emotion_locks(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<crate::ai::emotion::LocksQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::emotion::clear_locks(&state, query)
+        .await
+        .map(Json)
 }
 
 async fn ai_credential_status(

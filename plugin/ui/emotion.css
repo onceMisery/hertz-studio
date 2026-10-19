@@ -166,6 +166,49 @@ body.stage-lowfx .fl-cline[data-emo-active="true"][data-emo-arch="float"] .fl-cw
   animation: none;
 }
 
+/* P1：逐词激励。独立 motion 层承载入场/词级位移，
+   不与 .fl-cword 的循环 translate、.fl-crot 的 rotate、.fl-body 的音频 scale 抢属性。 */
+.fl-emo-motion { display: block; transform-origin: center; }
+@keyframes emo-enter-bounce {
+  0% { translate: 0 10px; scale: .94; rotate: -1.5deg; opacity: 0; }
+  35% { translate: 0 -9px; scale: 1.02; rotate: 1deg; opacity: 1; }
+  55% { translate: 0 -2px; scale: 1.02; rotate: 0deg; }
+  100% { translate: 0 0; scale: 1; rotate: 0deg; opacity: 1; }
+}
+@keyframes emo-enter-sink {
+  0% { translate: 0 -8px; opacity: 0; }
+  70% { translate: 0 3px; opacity: 1; }
+  100% { translate: 0 0; opacity: 1; }
+}
+@keyframes emo-enter-impact {
+  0% { translate: 0 0; scale: .86; opacity: 0; }
+  40% { translate: 1.2px 0; scale: 1.14; opacity: 1; }
+  70% { translate: -0.8px 0; scale: 1; }
+  100% { translate: 0 0; scale: 1; opacity: 1; }
+}
+@keyframes emo-enter-drift {
+  0% { translate: 0 4px; rotate: 1deg; opacity: 0; }
+  100% { translate: 0 0; rotate: 0deg; opacity: 1; }
+}
+@keyframes emo-enter-float {
+  0% { translate: 0 6px; scale: .96; opacity: 0; }
+  100% { translate: 0 0; scale: 1; opacity: 1; }
+}
+.fl-emo-motion.fl-emo-enter-bounce { animation: emo-enter-bounce var(--emo-enter-dur, 620ms) cubic-bezier(.34,1.56,.64,1) both; }
+.fl-emo-motion.fl-emo-enter-sink { animation: emo-enter-sink var(--emo-enter-dur, 900ms) cubic-bezier(.45,0,.55,1) both; }
+.fl-emo-motion.fl-emo-enter-impact { animation: emo-enter-impact var(--emo-enter-dur, 180ms) cubic-bezier(.2,.9,.2,1) both; }
+.fl-emo-motion.fl-emo-enter-drift { animation: emo-enter-drift var(--emo-enter-dur, 420ms) ease-out both; }
+.fl-emo-motion.fl-emo-enter-float { animation: emo-enter-float var(--emo-enter-dur, 560ms) ease-out both; }
+body.reduce-motion .fl-emo-motion,
+body[data-rm~="lyrics"] .fl-emo-motion,
+.s3d-reduced .fl-emo-motion,
+body.stage-lowfx .fl-emo-motion {
+  animation: none !important;
+  translate: 0 0 !important;
+  scale: 1 !important;
+  rotate: 0deg !important;
+}
+
 /* P3：lonely 的雾层（单例背景装饰，不占粒子预算）。 */
 .fl-emo-fog {
   position: absolute; inset: 8% 0 0; z-index: 0; pointer-events: none;

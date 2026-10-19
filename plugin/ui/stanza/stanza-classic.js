@@ -194,6 +194,48 @@
 
     function rand(seed, off) { return U.srand(seed + off); }
 
+    var EMO_ENTER_MS = { bounce: 620, sink: 900, impact: 180, drift: 420, float: 560 };
+
+    function prepareEmotionWordMotion(words, emotion, line) {
+      if (!emotion || !words.length) return;
+      var arch = emotion.archetype || 'drift';
+      var target = EMO_ENTER_MS[arch] || 420;
+      var now = Stage.position();
+      var lineEnd = typeof line.end_ms === 'number' ? line.end_ms : 0;
+      words.forEach(function (word) {
+        var motion = word._motion;
+        var w = word._word;
+        if (!motion || !w) return;
+        var wordDur = Math.max(0, (w.end_ms || 0) - (w.start_ms || 0));
+        var remain = lineEnd > now ? lineEnd - now : target * 2;
+        // 与短句策略一致：剩余/词长不足 180ms 时不排情绪入场。
+        if (remain <= 180 || (wordDur > 0 && wordDur <= 180)) {
+          motion.style.setProperty('--emo-enter-dur', '0ms');
+          return;
+        }
+        var dur = Math.round(Math.min(target, (wordDur > 0 ? wordDur : target * 2) * 0.5));
+        if (dur < 80) {
+          motion.style.setProperty('--emo-enter-dur', '0ms');
+          return;
+        }
+        motion.style.setProperty('--emo-enter-dur', dur + 'ms');
+        motion.setAttribute('data-emo-enter', arch);
+      });
+    }
+
+    function flashEmotionWord(wordEl) {
+      var motion = wordEl && wordEl._motion;
+      if (!motion) return;
+      var arch = motion.getAttribute('data-emo-enter');
+      if (!arch) return;
+      var dur = parseFloat(motion.style.getPropertyValue('--emo-enter-dur'));
+      if (!Number.isFinite(dur) || dur < 80) return;
+      motion.classList.remove('fl-emo-enter-bounce', 'fl-emo-enter-sink',
+        'fl-emo-enter-impact', 'fl-emo-enter-drift', 'fl-emo-enter-float');
+      void motion.offsetWidth;
+      motion.classList.add('fl-emo-enter-' + arch);
+    }
+
     function buildLine(line, soft) {
       if (lineEl) { lineEl.remove(); lineEl = null; }
       var tokens = Stage.lyricTokens(line);
@@ -296,6 +338,7 @@
         // 旋转分层：glow/body 挂到内层 .fl-crot，外层 wordEl 只承担 translate/scale/opacity。
         var crot = document.createElement('span'); crot.className = 'fl-crot';
         wordEl._crot = crot;
+        var motion = document.createElement('span'); motion.className = 'fl-emo-motion';
         var glow = document.createElement('span'); glow.className = 'fl-glow';
         var body = document.createElement('span'); body.className = 'fl-body';
         var color = emotionAccent(w.text);
@@ -315,7 +358,14 @@
         });
         body.textContent = w.text;
         crot.append(glow, body);
-        wordEl.append(crot);
+        motion.append(crot);
+        wordEl.append(motion);
+        wordEl._motion = motion;
+        motion.addEventListener('animationend', function () {
+          motion.classList.remove('fl-emo-word-hop', 'fl-emo-word-jitter',
+            'fl-emo-enter-bounce', 'fl-emo-enter-sink', 'fl-emo-enter-impact',
+            'fl-emo-enter-drift', 'fl-emo-enter-float');
+        });
         wordEl.addEventListener('click', function (e) {
           e.stopPropagation();
           if (typeof line.start_ms === 'number' && onSeek) onSeek(line.start_ms);
@@ -330,6 +380,7 @@
       lineEl._tokens = dispTokens;
       lineEl._words = Array.prototype.slice.call(container.querySelectorAll('.fl-cword'));
       applyEmotionField(lineEl._words, px);
+      if (!soft) prepareEmotionWordMotion(lineEl._words, emotion, line);
       buildDecor(container, emotion, line);
     }
 
@@ -457,7 +508,8 @@
       var words = lineEl._words, tokens = lineEl._tokens;
       for (var i = 0; i < words.length; i += 1) {
         var st = U.wordState(tokens[i], curHints, line, tMs);
-        if (words[i].dataset.st !== st) {
+        var previousSt = words[i].dataset.st;
+        if (previousSt !== st) {
           animationChanged = true;
           var w = tokens[i];
           var mode = curHints.revealMode;
@@ -480,6 +532,7 @@
             (st === 'active' ? emotionAccent(w.text) : emotionInk());
           if (st !== 'passed') words[i].style.opacity = '';
           applyPose(words[i], st);
+          if (st === 'active' && previousSt !== 'active') flashEmotionWord(words[i]);
         }
       }
       if (paused && animationChanged) syncAnimationPlayback();
