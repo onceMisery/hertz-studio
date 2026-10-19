@@ -509,8 +509,8 @@ async fn ensure_instance_row(
 // usage entries 与熔断（R4-B）：每任务一条账目；熔断是持久闩锁。
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
-pub struct UsageEntryRow {
+#[derive(Debug, Clone)]
+pub struct UsageEntryInsert {
     pub job_id: String,
     pub accepted_month: String,
     pub attempt_id: Option<String>,
@@ -524,11 +524,47 @@ pub struct UsageEntryRow {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct UsageEntryRow {
+    pub job_id: String,
+    pub owner_instance_id: Option<String>,
+    pub accepted_month: String,
+    pub attempt_id: Option<String>,
+    pub reservation_micro_usd: i64,
+    pub accounted_micro_usd: i64,
+    pub usage_state: String,
+    pub pricing_snapshot: String,
+    pub reported_usage: Option<String>,
+    pub revision: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingUsageInsert {
+    pub job_id: String,
+    pub attempt_id: String,
+    pub owner_instance_id: String,
+    pub usage_json: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PendingUsageRow {
+    pub job_id: String,
+    pub attempt_id: String,
+    pub owner_instance_id: String,
+    pub usage_json: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct BudgetGuardRow {
     pub owner_instance_id: String,
     pub halted: bool,
     pub reason: String,
     pub trigger_job: Option<String>,
+    pub token_halted: bool,
+    pub token_reason: String,
+    pub token_trigger_job: Option<String>,
     pub revision: i64,
 }
 
@@ -536,7 +572,7 @@ pub struct BudgetGuardRow {
 /// 竞争的输家不应到达这里，这里再挡一道）以 INSERT OR IGNORE 幂等。
 pub async fn insert_usage_entry<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     conn: E,
-    entry: &UsageEntryRow,
+    entry: &UsageEntryInsert,
 ) -> Result<(), StoreError> {
     sqlx::query(
         "INSERT OR IGNORE INTO ai_usage_entries (job_id, reservation_micro_usd,
@@ -570,8 +606,8 @@ pub async fn find_usage_entry<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>
     job_id: &str,
 ) -> Result<Option<UsageEntryRow>, StoreError> {
     sqlx::query_as(
-        "SELECT job_id, reservation_micro_usd, accounted_micro_usd, usage_state,
-                pricing_snapshot, revision, created_at, accepted_month, attempt_id, reported_usage
+        "SELECT job_id, owner_instance_id, accepted_month, attempt_id, reservation_micro_usd,
+                accounted_micro_usd, usage_state, pricing_snapshot, reported_usage, revision, created_at
          FROM ai_usage_entries WHERE job_id = ?1",
     )
     .bind(job_id)
@@ -588,19 +624,90 @@ pub async fn cas_report_usage(
     attempt_id: &str,
     expected_revision: i64,
     amount_micro_usd: i64,
+    usage_state: &str,
     reported_usage: &str,
 ) -> Result<bool, StoreError> {
     let result = sqlx::query(
         "UPDATE ai_usage_entries SET accounted_micro_usd = ?4, reported_usage = ?5,
-            usage_state = 'reported', revision = revision + 1
+            usage_state = ?6, revision = revision + 1
          WHERE job_id = ?1 AND attempt_id = ?2 AND revision = ?3
-            AND usage_state IN ('unknown', 'estimated_final')",
+            AND (usage_state IN ('unknown', 'estimated_final')
+                 OR (usage_state = 'unpriced' AND reported_usage IS NULL))",
     )
     .bind(job_id)
     .bind(attempt_id)
     .bind(expected_revision)
     .bind(amount_micro_usd)
     .bind(reported_usage)
+    .bind(usage_state)
+    .execute(conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Stage provider-verified counters independently of task terminal settlement.
+/// The first observation for an attempt is immutable and wins duplicates.
+pub async fn insert_pending_usage<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
+    conn: E,
+    pending: &PendingUsageInsert,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO ai_pending_usage
+            (job_id, attempt_id, owner_instance_id, usage_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(&pending.job_id)
+    .bind(&pending.attempt_id)
+    .bind(&pending.owner_instance_id)
+    .bind(&pending.usage_json)
+    .bind(pending.created_at)
+    .execute(conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(())
+}
+
+pub async fn find_pending_usage(
+    conn: &mut sqlx::SqliteConnection,
+    job_id: &str,
+    attempt_id: &str,
+) -> Result<Option<PendingUsageRow>, StoreError> {
+    sqlx::query_as(
+        "SELECT job_id, attempt_id, owner_instance_id, usage_json, created_at
+         FROM ai_pending_usage WHERE job_id = ?1 AND attempt_id = ?2",
+    )
+    .bind(job_id)
+    .bind(attempt_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))
+}
+
+pub async fn list_pending_usage(
+    conn: &mut sqlx::SqliteConnection,
+    limit: i64,
+) -> Result<Vec<PendingUsageRow>, StoreError> {
+    sqlx::query_as(
+        "SELECT job_id, attempt_id, owner_instance_id, usage_json, created_at
+         FROM ai_pending_usage ORDER BY created_at, job_id, attempt_id LIMIT ?1",
+    )
+    .bind(limit.clamp(1, 1000))
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))
+}
+
+pub async fn delete_pending_usage<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
+    conn: E,
+    job_id: &str,
+    attempt_id: &str,
+) -> Result<bool, StoreError> {
+    let result = sqlx::query(
+        "DELETE FROM ai_pending_usage WHERE job_id = ?1 AND attempt_id = ?2",
+    )
+    .bind(job_id)
+    .bind(attempt_id)
     .execute(conn)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -613,7 +720,8 @@ pub async fn ensure_budget_guard(
     owner_instance_id: &str,
 ) -> Result<BudgetGuardRow, StoreError> {
     let existing: Option<BudgetGuardRow> = sqlx::query_as(
-        "SELECT owner_instance_id, halted, reason, trigger_job, revision
+        "SELECT owner_instance_id, halted, reason, trigger_job,
+                token_halted, token_reason, token_trigger_job, revision
          FROM ai_budget_guard WHERE id = 1",
     )
     .fetch_optional(&mut *conn)
@@ -628,7 +736,8 @@ pub async fn ensure_budget_guard(
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
     sqlx::query_as(
-        "SELECT owner_instance_id, halted, reason, trigger_job, revision
+        "SELECT owner_instance_id, halted, reason, trigger_job,
+                token_halted, token_reason, token_trigger_job, revision
          FROM ai_budget_guard WHERE id = 1",
     )
     .fetch_one(&mut *conn)
@@ -657,7 +766,39 @@ pub async fn halt_budget_guard(
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
     sqlx::query_as(
-        "SELECT owner_instance_id, halted, reason, trigger_job, revision
+        "SELECT owner_instance_id, halted, reason, trigger_job,
+                token_halted, token_reason, token_trigger_job, revision
+         FROM ai_budget_guard WHERE id = 1",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))
+}
+
+/// Halt only token-only requests after a provider reports usage beyond the
+/// accepted per-request bounds. Monetary guard state remains independent.
+pub async fn halt_token_guard(
+    conn: &mut sqlx::SqliteConnection,
+    owner_instance_id: &str,
+    reason: &str,
+    trigger_job: &str,
+) -> Result<BudgetGuardRow, StoreError> {
+    ensure_budget_guard(&mut *conn, owner_instance_id).await?;
+    sqlx::query(
+        "UPDATE ai_budget_guard
+         SET token_halted = 1, token_reason = ?2, token_trigger_job = ?3,
+             revision = revision + 1
+         WHERE id = 1 AND token_halted = 0",
+    )
+    .bind(owner_instance_id)
+    .bind(reason)
+    .bind(trigger_job)
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    sqlx::query_as(
+        "SELECT owner_instance_id, halted, reason, trigger_job,
+                token_halted, token_reason, token_trigger_job, revision
          FROM ai_budget_guard WHERE id = 1",
     )
     .fetch_one(&mut *conn)
@@ -673,8 +814,10 @@ pub async fn reset_budget_guard<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlit
 ) -> Result<bool, StoreError> {
     let result = sqlx::query(
         "UPDATE ai_budget_guard
-         SET halted = 0, reason = '', trigger_job = NULL, revision = revision + 1
-         WHERE id = 1 AND halted = 1 AND revision = ?1",
+         SET halted = 0, reason = '', trigger_job = NULL,
+             token_halted = 0, token_reason = '', token_trigger_job = NULL,
+             revision = revision + 1
+         WHERE id = 1 AND (halted = 1 OR token_halted = 1) AND revision = ?1",
     )
     .bind(expected_revision)
     .execute(conn)
@@ -683,11 +826,36 @@ pub async fn reset_budget_guard<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlit
     Ok(result.rows_affected() > 0)
 }
 
+pub async fn insert_budget_guard_reset_audit<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
+    conn: E,
+    event_id: &str,
+    owner_instance_id: &str,
+    previous_revision: i64,
+    config_fingerprint: &str,
+    created_at: i64,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO ai_budget_guard_reset_audit
+            (event_id, owner_instance_id, previous_revision, new_revision, config_fingerprint, created_at)
+         VALUES (?1, ?2, ?3, ?3 + 1, ?4, ?5)",
+    )
+    .bind(event_id)
+    .bind(owner_instance_id)
+    .bind(previous_revision)
+    .bind(config_fingerprint)
+    .bind(created_at)
+    .execute(conn)
+    .await
+    .map_err(|error| StoreError::Database(error.to_string()))?;
+    Ok(())
+}
+
 pub async fn budget_guard<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     conn: E,
 ) -> Result<Option<BudgetGuardRow>, StoreError> {
     sqlx::query_as(
-        "SELECT owner_instance_id, halted, reason, trigger_job, revision
+        "SELECT owner_instance_id, halted, reason, trigger_job,
+                token_halted, token_reason, token_trigger_job, revision
          FROM ai_budget_guard WHERE id = 1",
     )
     .fetch_optional(conn)
@@ -715,10 +883,14 @@ pub async fn retain_ai_history(
             WHERE j.created_at < ?1 AND j.updated_at < ?1 AND j.state NOT IN ('accepted', 'running'))",
         "DELETE FROM ai_jobs WHERE created_at < ?1 AND updated_at < ?1
             AND state NOT IN ('accepted', 'running') AND EXISTS (
-                SELECT 1 FROM ai_usage_entries u WHERE u.job_id = ai_jobs.job_id)",
+                SELECT 1 FROM ai_usage_entries u WHERE u.job_id = ai_jobs.job_id)
+            AND NOT EXISTS (
+                SELECT 1 FROM ai_pending_usage p WHERE p.job_id = ai_jobs.job_id)",
         "DELETE FROM ai_usage_entries WHERE accepted_month < ?1 AND accepted_month != ''
             AND usage_state != 'unknown' AND NOT EXISTS (
-                SELECT 1 FROM ai_jobs j WHERE j.job_id = ai_usage_entries.job_id)",
+                SELECT 1 FROM ai_jobs j WHERE j.job_id = ai_usage_entries.job_id)
+            AND NOT EXISTS (
+                SELECT 1 FROM ai_pending_usage p WHERE p.job_id = ai_usage_entries.job_id)",
         "DELETE FROM ai_budget_months WHERE month < ?1 AND reserved_micro_usd = 0
             AND NOT EXISTS (SELECT 1 FROM ai_usage_entries u WHERE u.accepted_month = ai_budget_months.month)",
     ];
@@ -761,6 +933,7 @@ pub async fn ai_history_capacity(
         "ai_grants",
         "ai_instance",
         "ai_budget_guard",
+        "ai_pending_usage",
     ] {
         let columns: Vec<ColumnInfo> = sqlx::query_as(&format!("PRAGMA table_info({table})"))
             .fetch_all(&mut *conn)
@@ -823,10 +996,17 @@ mod retention_migration_tests {
         .execute(&mut conn)
         .await
         .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0019_ai_ledger_browse.sql"
+        ))
+        .execute(&mut conn)
+        .await
+        .unwrap();
         let entry = find_usage_entry(&mut conn, "legacy")
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(entry.owner_instance_id.as_deref(), Some("owner"));
         assert_eq!(
             entry.accepted_month, "2026-09",
             "attribute to acceptance month, not settlement month"

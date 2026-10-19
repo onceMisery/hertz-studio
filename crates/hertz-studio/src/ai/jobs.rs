@@ -6,7 +6,8 @@
 //! 完整顺序（§7.1）：认证/实例/授权（传输层）→ 幂等键查询 → 新键的时间
 //! 窗口、排队容量、provider 就绪与预算就绪 → 事务写 job + 费用预留 →
 //! 返回 accepted → worker 复核派发授权 → 事务登记唯一派发标记 →
-//! provider 一次调用 → 校验 intent → 事务写提案与终态。
+//! provider 一次调用 → 校验 intent → 事务写提案与终态。已核价任务同时冻结
+//! 金额预留；token-only 任务只冻结有限请求与 token 上界。
 //!
 //! 不变量与约定：
 //! - **输入不持久化**：brief 只存活在 [`AiRuntime`] 的有界内存里（容量受
@@ -17,13 +18,15 @@
 //!   转已计），这是避免低估费用的代价。
 //! - **终态赢家负责初次结算**：worker 与 cancel 先 CAS 再按派发事实和
 //!   可信 usage 结算；终态输家只允许在同 attempt 下独立校正迟到 usage。
-//! - 价格快照与预留在受理时冻结。缺失 usage 按预留计 unknown；成功、
-//!   失败、非法输出和取消均不决定实际费用。运行时仍是免费 fake provider。
+//! - 价格快照在受理时冻结。已核价任务缺失 usage 按预留计 unknown；
+//!   token-only 任务不预留金额，可信 usage 只记 token，缺失时保持未知。
+//!   默认 provider 是免费 fake；Ollama 需显式配置，OpenAI 在具体模型与
+//!   费率 profile 确定前保持不可派发。
 //! - 任务最小记录保留 7 天，过期提案清除载荷；账本独立保留 13 个月。
 //!   500 条任务与 20 MiB 逻辑数据满额时拒绝新受理，不淘汰受保护记录。
 //!   明显校时回跳暂停新受理与清理；过期旧 key 绝不作为新收费动作。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::FutureExt;
@@ -48,6 +51,7 @@ pub(crate) const QUEUE_CAPACITY: i64 = 9;
 /// 排队 / 执行期限（§8.3）：60s / 30s。
 pub(crate) const QUEUE_DEADLINE_MS: i64 = 60_000;
 pub(crate) const RUN_DEADLINE_MS: i64 = 30_000;
+const INTERRUPTED_SETTLEMENT_RETRY_DELAYS_MS: [u64; 3] = [100, 250, 500];
 /// 幂等键窗口（§7.2）：7 天。
 pub(crate) const KEY_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
 pub(crate) const HISTORY_JOB_LIMIT: i64 = 500;
@@ -64,7 +68,7 @@ use crate::ai::contract::{self, validate_intent};
 use crate::ai::usage::{self, PriceQuote, PricingSnapshot, TrustedUsage};
 
 // ---------------------------------------------------------------------------
-// provider 接口与 fake 实现（R5 换真实 provider；fake 永远免费）
+// provider 接口与 fake 实现（fake 保留作默认及本地联调 provider）
 // ---------------------------------------------------------------------------
 
 /// 生成一份 StageIntent 候选。一次任务最多一次调用（§8.1）：
@@ -72,21 +76,19 @@ use crate::ai::usage::{self, PriceQuote, PricingSnapshot, TrustedUsage};
 pub(crate) trait StageIntentProvider: Send + Sync {
     fn id(&self) -> &'static str;
     fn model(&self) -> &str;
+    fn endpoint_identity(&self) -> Option<&str> {
+        None
+    }
     fn diagnostic(&self) -> Option<&'static str> {
         None
     }
     /// 就绪检查：cloud 凭据缺失/被禁用时返回 false，受理直接拒绝。
     fn ready(&self) -> bool;
-    fn requires_openai_credential(&self) -> bool {
+    fn requires_credential(&self) -> bool {
         false
     }
-    /// Generic completions outside the persistent task/ledger path may only
-    /// run on providers whose requests have no remote monetary cost.
-    fn supports_zero_cost_completion(&self) -> bool {
-        false
-    }
-    /// Freeze a reliable bound for the complete request, not just the brief.
-    /// No network or model call is allowed while producing this quote.
+    /// Freeze a metered price or explicit token-only request bounds for the
+    /// complete request. No network or model call is allowed while quoting.
     fn quote(&self, brief: &str) -> Result<PriceQuote, String>;
     fn generate(
         &self,
@@ -120,7 +122,8 @@ pub(crate) struct ProviderReply {
 }
 
 pub(crate) struct CompletionReply {
-    pub text: String,
+    pub text: Result<String, String>,
+    pub usage: Option<TrustedUsage>,
 }
 
 /// One task's terminal signal, independent of its HTTP/RPC observer. Removing
@@ -143,6 +146,16 @@ impl ProviderCancellation {
             None => std::future::pending().await,
         }
     }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|receiver| !matches!(receiver.has_changed(), Ok(false)))
+    }
+}
+
+fn cancellation_pending(receiver: &tokio::sync::watch::Receiver<()>) -> bool {
+    !matches!(receiver.has_changed(), Ok(false))
 }
 
 /// fake provider：从 brief 派生确定性候选，零费用、零网络。供本切片的
@@ -223,7 +236,7 @@ impl AiRuntime {
 
     pub(crate) fn from_config(config: &crate::config::AiConfig) -> Self {
         Self {
-            credentials: super::credential::Service::shared(),
+            credentials: super::credential::Service::configured(config),
             inputs: Mutex::new(HashMap::new()),
             provider: RwLock::new(super::provider::configured(config)),
             execution_slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -289,6 +302,8 @@ pub(crate) struct JobUsageView {
     pub accounted_micro_usd: Option<i64>,
     pub usage_state: String,
     pub usage_revision: i64,
+    pub pricing_known: bool,
+    pub reported_usage: Option<TrustedUsage>,
 }
 
 impl JobView {
@@ -311,6 +326,10 @@ impl JobView {
                 accounted_micro_usd: None,
                 usage_state: "reserved".into(),
                 usage_revision: 0,
+                pricing_known: serde_json::from_str::<PricingSnapshot>(&row.pricing_snapshot)
+                    .ok()
+                    .is_some_and(|snapshot| snapshot.pricing_known()),
+                reported_usage: None,
             },
         }
     }
@@ -327,9 +346,17 @@ impl JobView {
             view.usage = JobUsageView {
                 accepted_month: entry.accepted_month,
                 reservation_micro_usd: entry.reservation_micro_usd,
-                accounted_micro_usd: Some(entry.accounted_micro_usd),
+                accounted_micro_usd: (entry.usage_state != "unpriced")
+                    .then_some(entry.accounted_micro_usd),
                 usage_state: entry.usage_state,
                 usage_revision: entry.revision,
+                pricing_known: serde_json::from_str::<PricingSnapshot>(&entry.pricing_snapshot)
+                    .ok()
+                    .is_some_and(|snapshot| snapshot.pricing_known()),
+                reported_usage: entry
+                    .reported_usage
+                    .as_deref()
+                    .and_then(|usage| serde_json::from_str(usage).ok()),
             };
         }
         Ok(view)
@@ -412,42 +439,211 @@ fn normalize_key(client_key: Option<&str>, now: i64) -> ApiResult<String> {
 /// 重启恢复：accepted/running → interrupted，并按派发标记结算预留。
 /// 必须在持有 AI runner 锁的进程里调用（bootstrap 已保证）。
 pub(crate) async fn recover(state: &Arc<AppState>) -> ApiResult<usize> {
-    let mut tx = vmusic_store::begin_immediate(&state.db)
-        .await
-        .map_err(store_error)?;
-    let candidates = store::recovery_candidates(&mut *tx)
+    let candidates = store::recovery_candidates(&state.db)
         .await
         .map_err(store_error)?;
     let now = now_ms();
     let mut events = Vec::new();
-    for job in candidates {
-        // 结算先于状态收口（同事务原子）：not_dispatched 释放预留，
-        // may_have_been_sent 按 unknown 保守转已计（§7.2）。
-        settle_on_terminal(&mut tx, &job, "interrupted").await?;
-        if store::cas_job_state(
-            &mut *tx,
-            &job.job_id,
-            &job.state,
-            job.state_revision,
-            "interrupted",
-            now,
-        )
-        .await
-        .map_err(store_error)?
-        {
-            events.push((job.job_id, job.state_revision + 1));
+    let mut first_error = None;
+    for candidate in candidates {
+        let result: ApiResult<Option<(String, i64)>> = async {
+            let mut tx = vmusic_store::begin_immediate(&state.db)
+                .await
+                .map_err(store_error)?;
+            let Some(job) = store::find_job_by_id(&mut *tx, &candidate.job_id)
+                .await
+                .map_err(store_error)?
+            else {
+                return Ok(None);
+            };
+            if !matches!(job.state.as_str(), "accepted" | "running") {
+                return Ok(None);
+            }
+            // Each task's state transition and settlement stay atomic, while a
+            // corrupt row or transient failure cannot roll back other recovery.
+            if !store::cas_job_state(
+                &mut *tx,
+                &job.job_id,
+                &job.state,
+                job.state_revision,
+                "interrupted",
+                now,
+            )
+            .await
+            .map_err(store_error)?
+            {
+                return Ok(None);
+            }
+            settle_on_terminal(&mut tx, &job, "interrupted").await?;
+            tx.commit().await.map_err(sql_error)?;
+            Ok(Some((job.job_id, job.state_revision + 1)))
+        }
+        .await;
+        match result {
+            Ok(Some(event)) => events.push(event),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    "AI task recovery failed for {}: {}",
+                    candidate.job_id,
+                    error.code
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
         }
     }
-    tx.commit().await.map_err(sql_error)?;
-    let recovered = events.len();
+    let mut recovered = events.len();
     for (id, revision) in events {
+        state.ai_runtime.inputs.lock().await.remove(&id);
         publish_task(state, "interrupted", &id, revision);
     }
-    state.ai_runtime.inputs.lock().await.clear();
+    match drain_pending_usage(state).await {
+        Ok(additional) => recovered += additional,
+        Err(error) => {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
     if recovered > 0 {
         tracing::warn!("AI 恢复：{recovered} 个未完结任务收敛为 interrupted");
     }
     Ok(recovered)
+}
+
+async fn drain_pending_usage(state: &Arc<AppState>) -> ApiResult<usize> {
+    let candidates = {
+        let mut conn = state
+            .db
+            .acquire()
+            .await
+            .map_err(|error| store_error(StoreError::Database(error.to_string())))?;
+        store::list_pending_usage(&mut conn, 1000)
+            .await
+            .map_err(store_error)?
+    };
+    let mut interrupted = 0;
+    let mut first_error = None;
+    for candidate in candidates {
+        let result: ApiResult<Option<(String, i64)>> = async {
+            let mut tx = vmusic_store::begin_immediate(&state.db)
+                .await
+                .map_err(store_error)?;
+            let Some(pending) = store::find_pending_usage(
+                &mut *tx,
+                &candidate.job_id,
+                &candidate.attempt_id,
+            )
+            .await
+            .map_err(store_error)?
+            else {
+                return Ok(None);
+            };
+            let decoded = serde_json::from_str::<TrustedUsage>(&pending.usage_json)
+                .map_err(|error| internal(format!("invalid pending trusted usage: {error}")))?;
+            let Some(job) = store::find_job_by_id(&mut *tx, &pending.job_id)
+                .await
+                .map_err(store_error)?
+            else {
+                let Some(entry) = store::find_usage_entry(&mut *tx, &pending.job_id)
+                    .await
+                    .map_err(store_error)?
+                else {
+                    tracing::error!(job_id = %pending.job_id, "pending AI usage has neither task nor ledger");
+                    return Ok(None);
+                };
+                if entry.owner_instance_id.as_deref()
+                    != Some(pending.owner_instance_id.as_str())
+                    || entry.attempt_id.as_deref() != Some(pending.attempt_id.as_str())
+                {
+                    return Ok(None);
+                }
+                let applied = usage::reconcile(
+                    &mut *tx,
+                    &pending.owner_instance_id,
+                    &pending.job_id,
+                    &pending.attempt_id,
+                    entry.revision,
+                    &decoded,
+                )
+                .await?;
+                if applied {
+                    store::delete_pending_usage(
+                        &mut *tx,
+                        &pending.job_id,
+                        &pending.attempt_id,
+                    )
+                    .await
+                    .map_err(store_error)?;
+                }
+                tx.commit().await.map_err(sql_error)?;
+                return Ok(None);
+            };
+            if job.owner_instance_id != pending.owner_instance_id
+                || job.attempt_id.as_deref() != Some(pending.attempt_id.as_str())
+            {
+                return Ok(None);
+            }
+            let live_worker = state
+                .ai_runtime
+                .inputs
+                .lock()
+                .await
+                .contains_key(&job.job_id);
+            if live_worker && matches!(job.state.as_str(), "accepted" | "running") {
+                return Ok(None);
+            }
+            let state_event = if matches!(job.state.as_str(), "accepted" | "running") {
+                if !store::cas_job_state(
+                    &mut *tx,
+                    &job.job_id,
+                    &job.state,
+                    job.state_revision,
+                    "interrupted",
+                    now_ms(),
+                )
+                .await
+                .map_err(store_error)?
+                {
+                    return Ok(None);
+                }
+                Some((job.job_id.clone(), job.state_revision + 1))
+            } else {
+                None
+            };
+            usage::settle_terminal(&mut tx, &job, None, now_ms()).await?;
+            tx.commit().await.map_err(sql_error)?;
+            Ok(state_event)
+        }
+        .await;
+        match result {
+            Ok(Some((id, revision))) => {
+                interrupted += 1;
+                state.ai_runtime.inputs.lock().await.remove(&id);
+                publish_task(state, "interrupted", &id, revision);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    job_id = %candidate.job_id,
+                    error = %error.code,
+                    "pending AI usage settlement failed"
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(interrupted)
 }
 
 /// 结算：谁把状态推到终态谁结算。not_dispatched → 全额释放；
@@ -477,11 +673,7 @@ pub(crate) async fn submit(
         .map_err(|e| internal(format!("AI acceptance failed: {e}")))?
 }
 
-async fn check_generation(
-    conn: &mut sqlx::SqliteConnection,
-    owner: &str,
-    now: i64,
-) -> ApiResult<()> {
+async fn check_generation(conn: &mut sqlx::SqliteConnection, now: i64) -> ApiResult<()> {
     let consent: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?1")
         .bind(CONSENT_KEY)
         .fetch_optional(&mut *conn)
@@ -498,17 +690,10 @@ async fn check_generation(
             "生成功能已关闭",
         ));
     }
-    if store::ensure_budget_guard(conn, owner)
-        .await
-        .map_err(store_error)?
-        .halted
-    {
-        return Err(ApiError::new(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "budget_halted",
-            "生成预算已触发熔断",
-        ));
-    }
+    check_clock(conn, now).await
+}
+
+pub(crate) async fn check_clock(conn: &mut sqlx::SqliteConnection, now: i64) -> ApiResult<()> {
     if now.saturating_add(5 * 60_000)
         < store::accepted_watermark(&mut *conn)
             .await
@@ -517,10 +702,63 @@ async fn check_generation(
         return Err(ApiError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "clock_skew",
-            "系统时间明显回跳，生成受理已暂停",
+            "系统时间明显回跳，AI 请求受理已暂停",
         ));
     }
     Ok(())
+}
+
+pub(crate) async fn check_history_capacity(
+    conn: &mut sqlx::SqliteConnection,
+    owner: &str,
+) -> ApiResult<i64> {
+    let (history_jobs, history_bytes) = store::ai_history_capacity(&mut *conn)
+        .await
+        .map_err(store_error)?;
+    let pending = store::count_incomplete_jobs(&mut *conn, owner)
+        .await
+        .map_err(store_error)?;
+    let projected_bytes = history_bytes.saturating_add(
+        pending
+            .saturating_add(1)
+            .saturating_mul(HISTORY_TASK_HEADROOM_BYTES),
+    );
+    if history_jobs >= HISTORY_JOB_LIMIT || projected_bytes > HISTORY_BYTE_LIMIT {
+        return Err(ApiError::new(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "history_capacity_exceeded",
+            "AI 受保护记录或逻辑数据容量已满，请等待保留期结束",
+        ));
+    }
+    Ok(pending)
+}
+
+pub(crate) async fn retain_history(db: &sqlx::SqlitePool, now: i64) -> ApiResult<()> {
+    let mut tx = vmusic_store::begin_immediate(db)
+        .await
+        .map_err(store_error)?;
+    let watermark = store::accepted_watermark(&mut *tx)
+        .await
+        .map_err(store_error)?;
+    if now.saturating_add(5 * 60_000) >= watermark {
+        let month = utc_month_key(now);
+        let year: i32 = month[..4]
+            .parse()
+            .map_err(|_| internal("invalid UTC month"))?;
+        let month: i32 = month[5..]
+            .parse()
+            .map_err(|_| internal("invalid UTC month"))?;
+        let index = year * 12 + month - 1 - 12;
+        let cutoff = format!(
+            "{:04}-{:02}",
+            index.div_euclid(12),
+            index.rem_euclid(12) + 1
+        );
+        store::retain_ai_history(&mut tx, now, now.saturating_sub(KEY_WINDOW_MS), &cutoff)
+            .await
+            .map_err(store_error)?;
+    }
+    tx.commit().await.map_err(sql_error)
 }
 
 async fn submit_owned(
@@ -589,7 +827,7 @@ async fn submit_owned(
             reason,
         )
     })?;
-    let credential = if provider.requires_openai_credential() {
+    let credential = if provider.requires_credential() {
         Some(state.ai_runtime.credentials.snapshot(&owner).await?)
     } else {
         None
@@ -623,24 +861,25 @@ async fn submit_owned(
             "同一 idempotencyKey 携带了不同输入",
         ));
     }
-    check_generation(&mut tx, &owner, now).await?;
-    let (history_jobs, history_bytes) = store::ai_history_capacity(&mut tx)
+    check_generation(&mut tx, now).await?;
+    let guard = store::ensure_budget_guard(&mut tx, &owner)
         .await
         .map_err(store_error)?;
-    // Reserve enough logical space for each admitted task's bounded proposal and metadata.
-    let pending = store::count_incomplete_jobs(&mut *tx, &owner)
-        .await
-        .map_err(store_error)?;
-    if history_jobs >= HISTORY_JOB_LIMIT
-        || history_bytes.saturating_add((pending + 1) * HISTORY_TASK_HEADROOM_BYTES)
-            > HISTORY_BYTE_LIMIT
-    {
+    if pricing.pricing_known() && guard.halted {
         return Err(ApiError::new(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "history_capacity_exceeded",
-            "AI 受保护记录或逻辑数据容量已满，请等待保留期结束",
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "budget_halted",
+            "生成预算已触发熔断",
         ));
     }
+    if !pricing.pricing_known() && guard.token_halted {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "token_bounds_halted",
+            "可信 token 用量曾超出受理上界，token-only 生成已暂停",
+        ));
+    }
+    let pending = check_history_capacity(&mut tx, &owner).await?;
     if pending >= QUEUE_CAPACITY {
         return Err(ApiError::new(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
@@ -648,21 +887,29 @@ async fn submit_owned(
             "排队容量已满，请稍后重试",
         ));
     }
-    store::reserve(
-        &mut tx,
-        &utc_month_key(now),
-        pricing.quote.reservation_micro_usd,
-        MONTHLY_LIMIT_MICRO_USD,
-    )
-    .await
-    .map_err(|e| match e {
-        StoreError::Database(ref detail) if detail.starts_with("budget_exceeded") => ApiError::new(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "budget_exceeded",
-            "本月生成预算已用尽",
-        ),
-        other => store_error(other),
-    })?;
+    if pricing.pricing_known() {
+        store::reserve(
+            &mut tx,
+            &utc_month_key(now),
+            pricing.quote.reservation_micro_usd,
+            MONTHLY_LIMIT_MICRO_USD,
+        )
+        .await
+        .map_err(|e| match e {
+            StoreError::Database(ref detail) if detail.starts_with("budget_exceeded") => {
+                ApiError::new(
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    "budget_exceeded",
+                    "本月生成预算已用尽",
+                )
+            }
+            other => store_error(other),
+        })?;
+    } else {
+        store::get_or_create_month(&mut *tx, &utc_month_key(now))
+            .await
+            .map_err(store_error)?;
+    }
     store::advance_watermark(&mut tx, &owner, now)
         .await
         .map_err(store_error)?;
@@ -765,7 +1012,14 @@ async fn run_job_inner(
     // 运行槽：§7.1 状态图里 accepted→running 的条件就是「worker 获得运行槽」。
     // 取消/过期在槽外赢走终态时，这里拿槽后 CAS 失败即安静退出。
     let _slot = tokio::select! {
-        slot = state.ai_runtime.execution_slots.acquire() => match slot { Ok(slot) => slot, Err(_) => return },
+        slot = state.ai_runtime.execution_slots.acquire() => match slot {
+            Ok(slot) => slot,
+            Err(error) => {
+                tracing::error!("AI execution slot unavailable: {error:?}");
+                interrupt_worker_failure(&state, &job_id).await;
+                return;
+            }
+        },
         _ = cancelled.changed() => return,
         _ = tokio::time::sleep_until(queue_deadline) => {
             if let Err(error) = start_running(&state, &job_id, queue_deadline).await {
@@ -791,10 +1045,21 @@ async fn run_job_inner(
     let run_deadline =
         tokio::time::Instant::now() + std::time::Duration::from_millis(RUN_DEADLINE_MS as u64);
     // 重取：running 的 CAS 已把 revision 推进，后续终态 CAS 必须用新值。
-    let mut job = match store::find_job_by_id(&state.db, &job_id)
-        .await
-        .map_err(store_error)
+    let loaded = match tokio::time::timeout_at(
+        run_deadline,
+        store::find_job_by_id(&state.db, &job_id),
+    )
+    .await
     {
+        Ok(loaded) => loaded,
+        Err(_) => {
+            tracing::warn!("AI running task reload exceeded its execution deadline");
+            finish_running(state.clone(), &job_id, "failed").await;
+            state.ai_runtime.inputs.lock().await.remove(&job_id);
+            return;
+        }
+    };
+    let mut job = match loaded.map_err(store_error) {
         Ok(Some(job)) => job,
         Ok(None) => {
             state.ai_runtime.inputs.lock().await.remove(&job_id);
@@ -817,7 +1082,7 @@ async fn run_job_inner(
                 if pricing.quote.validate().is_ok()
                     && pricing.provider == provider.id()
                     && pricing.model == provider.model()
-                    && pricing.credential.is_some() == provider.requires_openai_credential() =>
+                    && pricing.credential.is_some() == provider.requires_credential() =>
             {
                 pricing
             }
@@ -830,14 +1095,23 @@ async fn run_job_inner(
     // Keep the read lease through the dispatch commit. Management cannot rotate
     // the stored key between this comparison and the local dispatch marker.
     let credential = if let Some(expected) = &pricing.credential {
-        match state
-            .ai_runtime
-            .credentials
-            .for_dispatch(&job.owner_instance_id, expected)
-            .await
-        {
-            Ok(lease) => Some(lease),
-            Err(error) => {
+        let lease = tokio::time::timeout_at(
+            run_deadline,
+            state
+                .ai_runtime
+                .credentials
+                .for_dispatch(&job.owner_instance_id, expected),
+        )
+        .await;
+        match lease {
+            Ok(Ok(lease)) => Some(lease),
+            Err(_) => {
+                tracing::warn!("AI credential lease exceeded its execution deadline");
+                finish_running(state.clone(), &job_id, "failed").await;
+                state.ai_runtime.inputs.lock().await.remove(&job_id);
+                return;
+            }
+            Ok(Err(error)) => {
                 let terminal = if matches!(
                     error.code,
                     "ai_credential_missing" | "ai_credential_changed"
@@ -857,39 +1131,71 @@ async fn run_job_inner(
     // 派发标记：本地派发线性化点。没抢到说明取消已赢——按 not_dispatched
     // 由取消方结算，这里直接退出。
     let attempt_id = uuid::Uuid::new_v4().to_string();
-    let marked = async {
+    let dispatch = tokio::time::timeout_at(run_deadline, async {
         let Ok(mut tx) = vmusic_store::begin_immediate(&state.db).await else {
-            return false;
+            return Err("failed");
         };
-        if tokio::time::Instant::now() >= run_deadline
-            || check_generation(&mut tx, &job.owner_instance_id, now_ms())
-                .await
-                .is_err()
-            || !provider.ready()
-        {
-            return false;
+        if tokio::time::Instant::now() >= run_deadline || !provider.ready() {
+            return Err("failed");
+        }
+        if let Err(error) = check_generation(&mut tx, now_ms()).await {
+            return Err(if error.code == "generation_disabled" {
+                "cancelled"
+            } else {
+                "failed"
+            });
+        }
+        let guard = match store::ensure_budget_guard(&mut tx, &job.owner_instance_id).await {
+            Ok(guard) => guard,
+            Err(_) => return Err("failed"),
+        };
+        if pricing.pricing_known() && guard.halted {
+            return Err("failed");
+        }
+        if !pricing.pricing_known() && guard.token_halted {
+            return Err("cancelled");
         }
         let Ok(marked) = store::mark_dispatched(&mut *tx, &job_id, &attempt_id).await else {
-            return false;
+            return Err("failed");
         };
         // 0 行 = 取消/过期已赢（或已派发过）：不能继续执行。
-        marked && tx.commit().await.is_ok()
-    }
-    .await;
-    if !marked {
-        finish_running(state.clone(), &job_id, "failed").await;
+        if !marked {
+            return Err("cancelled");
+        }
+        tx.commit().await.map_err(|_| "failed")?;
+        Ok(true)
+    })
+    .await
+    .unwrap_or(Err("failed"));
+    if !matches!(dispatch, Ok(true)) {
+        let terminal = match dispatch {
+            Err("cancelled") => "cancelled",
+            _ => "failed",
+        };
+        finish_running(state.clone(), &job_id, terminal).await;
         state.ai_runtime.inputs.lock().await.remove(&job_id);
         return;
     }
     job.dispatch_state = "may_have_been_sent".into();
     job.attempt_id = Some(attempt_id.clone());
-    let brief = state
-        .ai_runtime
-        .inputs
-        .lock()
-        .await
-        .get(&job_id)
-        .map(|input| input.0.clone());
+    let brief = match tokio::time::timeout_at(run_deadline, async {
+        state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .get(&job_id)
+            .map(|input| input.0.clone())
+    })
+    .await
+    {
+        Ok(brief) => brief,
+        Err(_) => {
+            finish_running(state.clone(), &job_id, "failed").await;
+            state.ai_runtime.inputs.lock().await.remove(&job_id);
+            return;
+        }
+    };
     let Some(brief) = brief else {
         // 输入丢失（不应发生）：如实失败，按 unknown 结算。
         finish_running(state.clone(), &job_id, "failed").await;
@@ -899,7 +1205,7 @@ async fn run_job_inner(
     let credential = credential.map(super::credential::Lease::into_secret);
     // A terminal winner removes the input sender after its commit. Observe
     // known cancellation once more before constructing any provider request.
-    if cancelled.has_changed().is_err() {
+    if cancellation_pending(&cancelled) {
         return;
     }
 
@@ -913,7 +1219,7 @@ async fn run_job_inner(
             brief,
             pricing,
             credential,
-            ProviderCancellation::from_receiver(cancelled),
+            ProviderCancellation::from_receiver(cancelled.clone()),
         ),
     )
     .await
@@ -927,6 +1233,21 @@ async fn run_job_inner(
         }
     };
     let trusted_usage = outcome.usage;
+    if let Some(usage) = trusted_usage.as_ref() {
+        if let Err(error) = usage::persist_pending_usage(&state.db, &job, usage).await {
+            tracing::warn!(
+                job_id = %job.job_id,
+                error = %error.code,
+                "trusted AI usage could not be staged"
+            );
+        }
+    }
+    if cancellation_pending(&cancelled) {
+        finish_running_with_usage(state.clone(), &job_id, "cancelled", trusted_usage.as_ref())
+            .await;
+        state.ai_runtime.inputs.lock().await.remove(&job_id);
+        return;
+    }
     match outcome.intent {
         Ok(intent) => match validate_intent(&intent)
             .and_then(|_| contract::validate_artifact(&contract::artifact(&intent)).map(|_| ()))
@@ -941,6 +1262,27 @@ async fn run_job_inner(
                     let mut tx = vmusic_store::begin_immediate(&state.db)
                         .await
                         .map_err(store_error)?;
+                    if let Err(error) = check_generation(&mut tx, now).await {
+                        if error.code != "generation_disabled" {
+                            return Err(error);
+                        }
+                        let cancelled = store::cas_job_state(
+                            &mut *tx,
+                            &job.job_id,
+                            "running",
+                            job.state_revision,
+                            "cancelled",
+                            now,
+                        )
+                        .await
+                        .map_err(store_error)?;
+                        usage::settle_terminal(&mut tx, &job, trusted_usage.as_ref(), now).await?;
+                        tx.commit().await.map_err(sql_error)?;
+                        if cancelled {
+                            publish_task(&state, "cancelled", &job.job_id, job.state_revision + 1);
+                        }
+                        return Ok::<(), ApiError>(());
+                    }
                     let won = store::cas_job_state(
                         &mut *tx,
                         &job.job_id,
@@ -980,7 +1322,13 @@ async fn run_job_inner(
                 .await;
                 if let Err(error) = result {
                     tracing::error!("AI result transaction failed: {error:?}");
-                    finish_running(state.clone(), &job_id, "failed").await;
+                    finish_running_with_usage(
+                        state.clone(),
+                        &job_id,
+                        "failed",
+                        trusted_usage.as_ref(),
+                    )
+                    .await;
                 }
             }
             Err(reason) => {
@@ -1089,49 +1437,91 @@ async fn finish_running_with_usage(
     }
     .await;
     if let Err(error) = result {
-        tracing::error!("AI terminal settlement failed; leaving facts recoverable: {error:?}");
+        tracing::error!(
+            "AI terminal settlement failed; attempting conservative interruption: {error:?}"
+        );
+        interrupt_worker_failure_with_usage(&state, job_id, trusted_usage).await;
     }
 }
 
-/// A panic ends the only in-process worker. Persist an interrupted terminal
-/// state and settle from the durable dispatch marker before releasing its input.
+/// A worker that can no longer make progress must persist an interrupted state
+/// and settle from the durable dispatch marker before releasing its input. A
+/// short bounded retry handles transient SQLite failures without orphaning the
+/// task until its normal expiry sweep.
 async fn interrupt_worker_failure(state: &Arc<AppState>, job_id: &str) {
-    let result = async {
-        let mut tx = vmusic_store::begin_immediate(&state.db)
-            .await
-            .map_err(store_error)?;
-        let Some(job) = store::find_job_by_id(&mut *tx, job_id)
-            .await
-            .map_err(store_error)?
-        else {
-            return Ok::<(), ApiError>(());
-        };
-        if !matches!(job.state.as_str(), "accepted" | "running") {
-            return Ok(());
+    interrupt_worker_failure_with_usage(state, job_id, None).await;
+}
+
+async fn interrupt_worker_failure_with_usage(
+    state: &Arc<AppState>,
+    job_id: &str,
+    trusted_usage: Option<&TrustedUsage>,
+) {
+    let attempts = INTERRUPTED_SETTLEMENT_RETRY_DELAYS_MS.len() + 1;
+    for (attempt, retry_delay_ms) in INTERRUPTED_SETTLEMENT_RETRY_DELAYS_MS
+        .iter()
+        .copied()
+        .map(Some)
+        .chain(std::iter::once(None))
+        .enumerate()
+    {
+        match interrupt_worker_failure_once(state, job_id, trusted_usage).await {
+            Ok(()) => break,
+            Err(error) => match retry_delay_ms {
+                Some(delay_ms) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        total_attempts = attempts,
+                        retry_in_ms = delay_ms,
+                        "AI worker interruption settlement failed; retrying: {error:?}"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                None => tracing::error!(
+                    attempt = attempt + 1,
+                    total_attempts = attempts,
+                    "AI worker interruption settlement failed; leaving facts recoverable: {error:?}"
+                ),
+            },
         }
-        if !store::cas_job_state(
-            &mut *tx,
-            job_id,
-            &job.state,
-            job.state_revision,
-            "interrupted",
-            now_ms(),
-        )
-        .await
-        .map_err(store_error)?
-        {
-            return Ok(());
-        }
-        usage::settle_terminal(&mut tx, &job, None, now_ms()).await?;
-        tx.commit().await.map_err(sql_error)?;
-        publish_task(state, "interrupted", job_id, job.state_revision + 1);
-        Ok(())
-    }
-    .await;
-    if let Err(error) = result {
-        tracing::error!("AI worker panic settlement failed; leaving facts recoverable: {error:?}");
     }
     state.ai_runtime.inputs.lock().await.remove(job_id);
+}
+
+async fn interrupt_worker_failure_once(
+    state: &Arc<AppState>,
+    job_id: &str,
+    trusted_usage: Option<&TrustedUsage>,
+) -> ApiResult<()> {
+    let mut tx = vmusic_store::begin_immediate(&state.db)
+        .await
+        .map_err(store_error)?;
+    let Some(job) = store::find_job_by_id(&mut *tx, job_id)
+        .await
+        .map_err(store_error)?
+    else {
+        return Ok(());
+    };
+    if !matches!(job.state.as_str(), "accepted" | "running") {
+        return Ok(());
+    }
+    if !store::cas_job_state(
+        &mut *tx,
+        job_id,
+        &job.state,
+        job.state_revision,
+        "interrupted",
+        now_ms(),
+    )
+    .await
+    .map_err(store_error)?
+    {
+        return Ok(());
+    }
+    usage::settle_terminal(&mut tx, &job, trusted_usage, now_ms()).await?;
+    tx.commit().await.map_err(sql_error)?;
+    publish_task(state, "interrupted", job_id, job.state_revision + 1);
+    Ok(())
 }
 
 /// 取消：expectedStateRevision 下的 CAS 竞争；赢家负责结算与输入清理。
@@ -1141,6 +1531,13 @@ pub(crate) async fn cancel(
     job_id: &str,
     expected_state_revision: i64,
 ) -> ApiResult<JobView> {
+    if !state.ai_runner_held() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ai_locked",
+            "本进程未持有 AI runner 锁",
+        ));
+    }
     sweep(state).await?;
     let mut tx = vmusic_store::begin_immediate(&state.db)
         .await
@@ -1183,6 +1580,63 @@ pub(crate) async fn cancel(
     view.state = "cancelled".into();
     view.state_revision = job.state_revision + 1;
     Ok(view)
+}
+
+/// Consent revocation is a task cancellation, not merely an admission flag.
+/// Settle each official generation task from its durable dispatch marker, then
+/// drop its input sender so an in-flight provider observes cancellation.
+pub(crate) async fn revoke_generation_consent(state: &Arc<AppState>) -> ApiResult<()> {
+    if !state.ai_runner_held() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ai_locked",
+            "请在持有 AI 服务锁的 Hertz 实例中撤回生成同意",
+        ));
+    }
+    // Settings have already been persisted by the caller. Signal workers before
+    // any fallible ledger work so a DB error cannot leave an authorized request
+    // running after consent was withdrawn.
+    {
+        let mut inputs = state.ai_runtime.inputs.lock().await;
+        for (_, cancel) in inputs.values() {
+            let _ = cancel.send(());
+        }
+        inputs.clear();
+    }
+    let owner = instance_owner(state).await?;
+    let mut tx = vmusic_store::begin_immediate(&state.db)
+        .await
+        .map_err(store_error)?;
+    let candidates = store::recovery_candidates(&mut *tx)
+        .await
+        .map_err(store_error)?;
+    let mut events = Vec::new();
+    for job in candidates {
+        if job.owner_instance_id != owner || job.capability != CAPABILITY {
+            continue;
+        }
+        if store::cas_job_state(
+            &mut *tx,
+            &job.job_id,
+            &job.state,
+            job.state_revision,
+            "cancelled",
+            now_ms(),
+        )
+        .await
+        .map_err(store_error)?
+        {
+            settle_on_terminal(&mut tx, &job, "cancelled").await?;
+            events.push((job.job_id, job.state_revision + 1));
+        }
+    }
+    tx.commit().await.map_err(sql_error)?;
+    let mut inputs = state.ai_runtime.inputs.lock().await;
+    for (id, revision) in events {
+        inputs.remove(&id);
+        publish_task(state, "cancelled", &id, revision);
+    }
+    Ok(())
 }
 
 /// Called under the credential service's exclusive lifecycle guard, before OS
@@ -1232,70 +1686,104 @@ pub(super) async fn invalidate_credentials(state: &Arc<AppState>, owner: &str) -
 /// 过期清扫：排队超期（accepted >60s）与执行超期（running >30s）。
 /// 惰性触发（submit/cancel/查询入口先扫一遍），无后台定时器。
 pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
+    // Only the runner can know which persisted tasks still have live workers
+    // and cancellation senders in this process. Non-runners keep query paths
+    // read-only instead of expiring another process's active work.
+    if !state.ai_runner_held() {
+        return Ok(());
+    }
     let now = now_ms();
-    let candidates =
-        store::expired_candidates(&state.db, now - QUEUE_DEADLINE_MS, now - RUN_DEADLINE_MS)
-            .await
-            .map_err(store_error)?;
-    let owned_jobs: HashSet<String> = state
-        .ai_runtime
-        .inputs
-        .lock()
-        .await
-        .keys()
-        .cloned()
-        .collect();
-    let mut tx = vmusic_store::begin_immediate(&state.db)
+    let queue_cutoff = now - QUEUE_DEADLINE_MS;
+    let run_cutoff = now - RUN_DEADLINE_MS;
+    let candidates = store::expired_candidates(&state.db, queue_cutoff, run_cutoff)
         .await
         .map_err(store_error)?;
     let mut events = Vec::new();
+    let mut first_error = None;
     for job in candidates {
-        // Active in-process owners use monotonic deadlines. Wall time only
-        // sweeps orphaned persisted rows, such as work left after a DB error.
-        if owned_jobs.contains(&job.job_id) {
-            continue;
-        }
-        let to = "expired";
-        if store::cas_job_state(
-            &mut *tx,
-            &job.job_id,
-            &job.state,
-            job.state_revision,
-            to,
-            now,
-        )
-        .await
-        .map_err(store_error)?
-        {
-            settle_on_terminal(&mut tx, &job, to).await?;
-            events.push((job.job_id, job.state_revision + 1));
-        }
-    }
-    let watermark = store::accepted_watermark(&mut tx)
-        .await
-        .map_err(store_error)?;
-    if now.saturating_add(5 * 60_000) >= watermark {
-        let month = utc_month_key(now);
-        let year: i32 = month[..4]
-            .parse()
-            .map_err(|_| internal("invalid UTC month"))?;
-        let m: i32 = month[5..]
-            .parse()
-            .map_err(|_| internal("invalid UTC month"))?;
-        let index = year * 12 + m - 1 - 12;
-        let cutoff = format!(
-            "{:04}-{:02}",
-            index.div_euclid(12),
-            index.rem_euclid(12) + 1
-        );
-        store::retain_ai_history(&mut tx, now, now.saturating_sub(KEY_WINDOW_MS), &cutoff)
+        let result: ApiResult<Option<(String, i64)>> = async {
+            let mut tx = vmusic_store::begin_immediate(&state.db)
+                .await
+                .map_err(store_error)?;
+            let Some(job) = store::find_job_by_id(&mut *tx, &job.job_id)
+                .await
+                .map_err(store_error)?
+            else {
+                return Ok(None);
+            };
+            let is_expired = match job.state.as_str() {
+                "accepted" => job.created_at < queue_cutoff,
+                "running" => job.updated_at < run_cutoff,
+                _ => false,
+            };
+            if !is_expired {
+                return Ok(None);
+            }
+            // Submission takes the input lock before committing the row and
+            // inserts the owner before releasing it, serializing this check.
+            if state
+                .ai_runtime
+                .inputs
+                .lock()
+                .await
+                .contains_key(&job.job_id)
+            {
+                return Ok(None);
+            }
+            if !store::cas_job_state(
+                &mut *tx,
+                &job.job_id,
+                &job.state,
+                job.state_revision,
+                "expired",
+                now,
+            )
             .await
-            .map_err(store_error)?;
+            .map_err(store_error)?
+            {
+                return Ok(None);
+            }
+            settle_on_terminal(&mut tx, &job, "expired").await?;
+            tx.commit().await.map_err(sql_error)?;
+            Ok(Some((job.job_id, job.state_revision + 1)))
+        }
+        .await;
+        match result {
+            Ok(Some(event)) => events.push(event),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    "AI orphan task sweep failed for {}: {}",
+                    job.job_id,
+                    error.code
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
     }
-    tx.commit().await.map_err(sql_error)?;
+    match drain_pending_usage(state).await {
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!("AI pending usage sweep failed: {}", error.code);
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    let retention_result = retain_history(&state.db, now).await;
+    if let Err(error) = retention_result {
+        tracing::warn!("AI history retention failed: {}", error.code);
+        if first_error.is_none() {
+            first_error = Some(error);
+        }
+    }
     for (id, revision) in events {
-        state.ai_runtime.inputs.lock().await.remove(&id);
         publish_task(state, "expired", &id, revision);
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     Ok(())
 }
@@ -1452,6 +1940,7 @@ pub(crate) async fn reject_proposal(
 pub(crate) async fn budget_guard_reset(
     state: &Arc<AppState>,
     expected_revision: i64,
+    expected_config_fingerprint: &str,
 ) -> ApiResult<Value> {
     if !state.ai_runner_held() {
         return Err(ApiError::new(
@@ -1460,11 +1949,33 @@ pub(crate) async fn budget_guard_reset(
             "本进程未持有 AI runner 锁",
         ));
     }
+    if expected_config_fingerprint.len() != 64
+        || !expected_config_fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(bad_request("config_fingerprint 必须是小写 SHA-256"));
+    }
+    let provider = state.ai_runtime.provider().await;
+    let config_fingerprint = guard_reset_fingerprint(provider.as_ref()).map_err(|_| {
+        ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "configuration_unavailable",
+            "当前 provider 配置尚不可核对，请先修复配置并刷新状态",
+        )
+    })?;
+    if config_fingerprint != expected_config_fingerprint {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "configuration_changed",
+            "provider 或有效价格配置已变化，请刷新状态后重新确认",
+        ));
+    }
     let owner = instance_owner(state).await?;
     let mut tx = vmusic_store::begin_immediate(&state.db)
         .await
         .map_err(store_error)?;
-    store::ensure_budget_guard(&mut tx, &owner)
+    let guard = store::ensure_budget_guard(&mut tx, &owner)
         .await
         .map_err(store_error)?;
     if !store::reset_budget_guard(&mut *tx, expected_revision)
@@ -1503,10 +2014,11 @@ pub(crate) async fn budget_guard_reset(
     let budget = store::get_or_create_month(&mut tx, &utc_month_key(now_ms()))
         .await
         .map_err(store_error)?;
-    if budget
-        .charged_micro_usd
-        .saturating_add(budget.reserved_micro_usd)
-        > MONTHLY_LIMIT_MICRO_USD
+    if guard.halted
+        && budget
+            .charged_micro_usd
+            .saturating_add(budget.reserved_micro_usd)
+            > MONTHLY_LIMIT_MICRO_USD
     {
         return Err(ApiError::new(
             axum::http::StatusCode::CONFLICT,
@@ -1514,18 +2026,56 @@ pub(crate) async fn budget_guard_reset(
             "当前月账仍超出预算，暂不能复位",
         ));
     }
+    let audit_id = uuid::Uuid::new_v4().to_string();
+    store::insert_budget_guard_reset_audit(
+        &mut *tx,
+        &audit_id,
+        &owner,
+        expected_revision,
+        &config_fingerprint,
+        now_ms(),
+    )
+    .await
+    .map_err(store_error)?;
     tx.commit().await.map_err(sql_error)?;
     let guard = store::budget_guard(&state.db).await.map_err(store_error)?;
     Ok(json!({
         "halted": guard.as_ref().map(|g| g.halted).unwrap_or(false),
+        "tokenHalted": guard.as_ref().map(|g| g.token_halted).unwrap_or(false),
         "revision": guard.as_ref().map(|g| g.revision).unwrap_or(0),
+        "auditId": audit_id,
     }))
+}
+
+fn guard_reset_fingerprint(provider: &dyn StageIntentProvider) -> Result<String, String> {
+    let quote = provider.quote("")?;
+    quote.validate().map_err(str::to_owned)?;
+    let material = serde_json::to_vec(&(
+        provider.id(),
+        provider.model(),
+        provider.endpoint_identity(),
+        provider.requires_credential(),
+        quote,
+    ))
+    .map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(material)))
 }
 
 /// 状态摘要（官方 UI 的 `GET /v1/ai/status`）。
 pub(crate) async fn status(state: &Arc<AppState>, owner: &str) -> ApiResult<Value> {
     sweep(state).await?;
     let provider = state.ai_runtime.provider().await;
+    let reset_fingerprint = guard_reset_fingerprint(provider.as_ref()).ok();
+    let pricing_mode = match provider.quote("") {
+        Ok(quote) if quote.validate().is_ok() => {
+            if quote.pricing_version == usage::TOKEN_ONLY_PRICING_VERSION {
+                "token_only"
+            } else {
+                "metered"
+            }
+        }
+        _ => "unavailable",
+    };
     let incomplete = store::count_incomplete_jobs(&state.db, owner)
         .await
         .map_err(store_error)?;
@@ -1549,7 +2099,8 @@ pub(crate) async fn status(state: &Arc<AppState>, owner: &str) -> ApiResult<Valu
     Ok(json!({
         "capability": CAPABILITY,
         "provider": { "id": provider.id(), "model": provider.model(), "ready": provider.ready(),
-            "diagnostic": provider.diagnostic() },
+            "diagnostic": provider.diagnostic(), "pricingMode": pricing_mode,
+            "resetConfigFingerprint": reset_fingerprint },
         "queue": { "incomplete": incomplete, "capacity": QUEUE_CAPACITY },
         "budget": {
             "month": budget.month,
@@ -1561,6 +2112,9 @@ pub(crate) async fn status(state: &Arc<AppState>, owner: &str) -> ApiResult<Valu
         "guard": {
             "halted": guard.halted,
             "reason": guard.reason,
+            "tokenHalted": guard.token_halted,
+            "tokenReason": guard.token_reason,
+            "tokenTriggerJob": guard.token_trigger_job,
             "revision": guard.revision,
         },
         "consent": { "inAppGeneration": consent },
@@ -1577,6 +2131,18 @@ pub(crate) async fn instance_owner(state: &Arc<AppState>) -> ApiResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_dispatch_cancellation_detects_notified_and_closed_watch_channels() {
+        let (sender, receiver) = tokio::sync::watch::channel(());
+        assert!(!cancellation_pending(&receiver));
+        sender.send(()).unwrap();
+        assert!(cancellation_pending(&receiver));
+
+        let (sender, receiver) = tokio::sync::watch::channel(());
+        drop(sender);
+        assert!(cancellation_pending(&receiver));
+    }
 
     struct PanickingProvider {
         panic_before_dispatch: bool,
@@ -1620,6 +2186,97 @@ mod tests {
         gate: Arc<std::sync::atomic::AtomicBool>,
     }
 
+    struct TokenOnlyProvider;
+
+    struct BlockedTokenOnlyProvider {
+        counter: Arc<std::sync::atomic::AtomicUsize>,
+        gate: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl StageIntentProvider for TokenOnlyProvider {
+        fn id(&self) -> &'static str {
+            "token-only-fixture"
+        }
+        fn model(&self) -> &'static str {
+            "bounded-v1"
+        }
+        fn ready(&self) -> bool {
+            true
+        }
+        fn quote(&self, _: &str) -> Result<PriceQuote, String> {
+            Ok(PriceQuote {
+                pricing_version: usage::TOKEN_ONLY_PRICING_VERSION.into(),
+                reservation_micro_usd: 0,
+                input_micro_usd_per_million: 0,
+                output_micro_usd_per_million: 0,
+                max_input_tokens: 20_000,
+                max_output_tokens: 8_000,
+            })
+        }
+        fn generate(
+            &self,
+            _: String,
+            _: PricingSnapshot,
+            _: Option<crate::ai::credential::ProviderCredential>,
+            _: ProviderCancellation,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ProviderReply> + Send>> {
+            Box::pin(async {
+                ProviderReply {
+                    intent: Ok(json!({ "version": 1, "scene": "orb", "patch": {} })),
+                    usage: Some(TrustedUsage {
+                        input_tokens: 345,
+                        output_tokens: 67,
+                    }),
+                }
+            })
+        }
+    }
+
+    impl StageIntentProvider for BlockedTokenOnlyProvider {
+        fn id(&self) -> &'static str {
+            "token-only-blocked-fixture"
+        }
+        fn model(&self) -> &'static str {
+            "bounded-v1"
+        }
+        fn ready(&self) -> bool {
+            true
+        }
+        fn quote(&self, _: &str) -> Result<PriceQuote, String> {
+            Ok(PriceQuote {
+                pricing_version: usage::TOKEN_ONLY_PRICING_VERSION.into(),
+                reservation_micro_usd: 0,
+                input_micro_usd_per_million: 0,
+                output_micro_usd_per_million: 0,
+                max_input_tokens: 20_000,
+                max_output_tokens: 8_000,
+            })
+        }
+        fn generate(
+            &self,
+            _: String,
+            _: PricingSnapshot,
+            _: Option<crate::ai::credential::ProviderCredential>,
+            _: ProviderCancellation,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ProviderReply> + Send>> {
+            let counter = self.counter.clone();
+            let gate = self.gate.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                while !gate.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                ProviderReply {
+                    intent: Ok(json!({ "version": 1, "scene": "orb", "patch": {} })),
+                    usage: Some(TrustedUsage {
+                        input_tokens: 345,
+                        output_tokens: 67,
+                    }),
+                }
+            })
+        }
+    }
+
     impl StageIntentProvider for BlockedProvider {
         fn id(&self) -> &'static str {
             "test"
@@ -1649,7 +2306,7 @@ mod tests {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
                 ProviderReply {
-                    intent: Ok(json!({ "version": 1, "scene": "space", "patch": {} })),
+                    intent: Ok(json!({ "version": 1, "scene": "orb", "patch": {} })),
                     usage: None,
                 }
             })
@@ -1686,7 +2343,7 @@ mod tests {
         fn ready(&self) -> bool {
             true
         }
-        fn requires_openai_credential(&self) -> bool {
+        fn requires_credential(&self) -> bool {
             true
         }
         fn quote(&self, _: &str) -> Result<PriceQuote, String> {
@@ -2272,6 +2929,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closed_execution_slot_interrupts_and_releases_accepted_task() {
+        let (state, handle) = jobs_state().await;
+        let held_slot = state.ai_runtime.execution_slots.acquire().await.unwrap();
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, "local-owner", "closed slot fixture", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+
+        state.ai_runtime.execution_slots.close();
+        let terminal = await_terminal(&state, &job.job_id).await;
+        assert_eq!(terminal.state, "interrupted");
+        assert_eq!(terminal.dispatch_state, "not_dispatched");
+        let usage = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage_state, "released");
+        assert_eq!(usage.accounted_micro_usd, 0);
+        assert!(
+            !state
+                .ai_runtime
+                .inputs
+                .lock()
+                .await
+                .contains_key(&job.job_id)
+        );
+
+        drop(held_slot);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn running_transition_storage_error_interrupts_accepted_task() {
         let (state, handle) = jobs_state().await;
         sqlx::query("CREATE TRIGGER fail_running_transition BEFORE UPDATE OF state ON ai_jobs WHEN OLD.state = 'accepted' AND NEW.state = 'running' BEGIN SELECT RAISE(ABORT, 'fixture transition failure'); END")
@@ -2308,6 +3001,210 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_settlement_error_interrupts_and_conservatively_charges_dispatched_task() {
+        let (state, handle) = jobs_state().await;
+        state
+            .ai_runtime
+            .install_provider(Arc::new(metered(
+                true,
+                Err("fixture provider failure".into()),
+                None,
+            )))
+            .await;
+        sqlx::query("CREATE TRIGGER fail_failed_transition BEFORE UPDATE OF state ON ai_jobs WHEN OLD.state = 'running' AND NEW.state = 'failed' BEGIN SELECT RAISE(ABORT, 'fixture terminal failure'); END")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, "local-owner", "terminal failure fixture", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+
+        let terminal = await_terminal(&state, &job.job_id).await;
+        assert_eq!(terminal.state, "interrupted");
+        assert_eq!(terminal.dispatch_state, "may_have_been_sent");
+        let usage = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage_state, "unknown");
+        assert_eq!(usage.accounted_micro_usd, terminal.reservation_micro_usd);
+        assert!(
+            !state
+                .ai_runtime
+                .inputs
+                .lock()
+                .await
+                .contains_key(&job.job_id)
+        );
+        assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
+
+        sqlx::query("DROP TRIGGER fail_failed_transition")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transient_interruption_settlement_error_retries_before_releasing_worker() {
+        let (state, handle) = jobs_state().await;
+        let provider = metered(false, Err("fixture provider failure".into()), None);
+        let gate = provider.gate.clone();
+        state.ai_runtime.install_provider(Arc::new(provider)).await;
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, "local-owner", "transient terminal fixture", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+
+        let mut dispatched = false;
+        for _ in 0..400 {
+            let row = job_row(&state, &job.job_id).await;
+            if row.state == "running" && row.dispatch_state == "may_have_been_sent" {
+                dispatched = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(dispatched, "fixture provider must be held after dispatch");
+
+        let fail_until = now_ms() + 500;
+        let trigger = format!(
+            "CREATE TRIGGER fail_transient_terminal BEFORE UPDATE OF state ON ai_jobs \
+             WHEN OLD.state = 'running' AND NEW.state IN ('failed', 'interrupted') \
+             AND NEW.updated_at < {fail_until} \
+             BEGIN SELECT RAISE(ABORT, 'fixture transient terminal failure'); END"
+        );
+        sqlx::query(&trigger).execute(&state.db).await.unwrap();
+        let retry_started = std::time::Instant::now();
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let terminal = await_terminal(&state, &job.job_id).await;
+        assert_eq!(terminal.state, "interrupted");
+        assert_eq!(terminal.dispatch_state, "may_have_been_sent");
+        assert!(
+            retry_started.elapsed() >= std::time::Duration::from_millis(750),
+            "the persisted time window must force multiple bounded attempts"
+        );
+        let usage = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage_state, "unknown");
+        assert_eq!(usage.accounted_micro_usd, terminal.reservation_micro_usd);
+        assert!(
+            !state
+                .ai_runtime
+                .inputs
+                .lock()
+                .await
+                .contains_key(&job.job_id)
+        );
+        assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
+
+        sqlx::query("DROP TRIGGER fail_transient_terminal")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exhausted_interruption_retries_are_swept_by_status_query() {
+        let (state, handle) = jobs_state().await;
+        let provider = metered(false, Err("fixture provider failure".into()), None);
+        let gate = provider.gate.clone();
+        state.ai_runtime.install_provider(Arc::new(provider)).await;
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, "local-owner", "persistent terminal fixture", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+
+        let mut dispatched = false;
+        for _ in 0..400 {
+            let row = job_row(&state, &job.job_id).await;
+            if row.state == "running" && row.dispatch_state == "may_have_been_sent" {
+                dispatched = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(dispatched, "fixture provider must be held after dispatch");
+
+        let fail_until = now_ms() + 10_000;
+        let trigger = format!(
+            "CREATE TRIGGER fail_persistent_terminal BEFORE UPDATE OF state ON ai_jobs \
+             WHEN OLD.state = 'running' AND NEW.state IN ('failed', 'interrupted') \
+             AND NEW.updated_at < {fail_until} \
+             BEGIN SELECT RAISE(ABORT, 'fixture persistent terminal failure'); END"
+        );
+        sqlx::query(&trigger).execute(&state.db).await.unwrap();
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut worker_released = false;
+        for _ in 0..600 {
+            let owns_input = state
+                .ai_runtime
+                .inputs
+                .lock()
+                .await
+                .contains_key(&job.job_id);
+            if !owns_input && state.ai_runtime.execution_slots.available_permits() == 1 {
+                worker_released = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(worker_released, "worker must release after bounded retries");
+        let stranded = job_row(&state, &job.job_id).await;
+        assert_eq!(stranded.state, "running");
+        assert_eq!(stranded.dispatch_state, "may_have_been_sent");
+        assert!(
+            store::find_usage_entry(&state.db, &job.job_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let owner = instance_owner(&state).await.unwrap();
+        sqlx::query("DROP TRIGGER fail_persistent_terminal")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE ai_jobs SET updated_at = ?1 WHERE job_id = ?2")
+            .bind(now_ms() - RUN_DEADLINE_MS - 1)
+            .bind(&job.job_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let snapshot = status(&state, &owner).await.unwrap();
+        assert_eq!(snapshot["queue"]["incomplete"], json!(0));
+        let recovered = job_row(&state, &job.job_id).await;
+        assert_eq!(recovered.state, "expired");
+        let usage = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage_state, "unknown");
+        assert_eq!(usage.accounted_micro_usd, recovered.reservation_micro_usd);
+
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -2661,16 +3558,42 @@ mod tests {
             quote: metered_quote(),
             credential: None,
         };
+        let owner = instance_owner(state).await.unwrap();
+        let pricing_snapshot = serde_json::to_string(&snapshot).unwrap();
+        store::insert_job(
+            &state.db,
+            &store::JobRow {
+                job_id: id.into(),
+                owner_instance_id: owner,
+                principal: "local-owner".into(),
+                capability: CAPABILITY.into(),
+                key: format!("fixture-{id}"),
+                input_hash: "fixture-hash".into(),
+                state: "cancelled".into(),
+                state_revision: 2,
+                dispatch_state: "may_have_been_sent".into(),
+                attempt_id: Some("original-attempt".into()),
+                provider: snapshot.provider.clone(),
+                model: snapshot.model.clone(),
+                reservation_micro_usd: 30_000,
+                pricing_snapshot: pricing_snapshot.clone(),
+                created_at: 0,
+                updated_at: 0,
+                result_proposal_id: None,
+            },
+        )
+        .await
+        .unwrap();
         store::insert_usage_entry(
             &state.db,
-            &store::UsageEntryRow {
+            &store::UsageEntryInsert {
                 job_id: id.into(),
                 accepted_month: "2026-09".into(),
                 attempt_id: Some("original-attempt".into()),
                 reservation_micro_usd: 30_000,
                 accounted_micro_usd: 30_000,
                 usage_state: "estimated_final".into(),
-                pricing_snapshot: serde_json::to_string(&snapshot).unwrap(),
+                pricing_snapshot,
                 reported_usage: None,
                 revision: 2,
                 created_at: 0,
@@ -2678,6 +3601,11 @@ mod tests {
         )
         .await
         .unwrap();
+        sqlx::query("DELETE FROM ai_jobs WHERE job_id = ?1")
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .unwrap();
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
         store::settle(&mut tx, "2026-09", 0, 30_000).await.unwrap();
         tx.commit().await.unwrap();
@@ -2694,6 +3622,33 @@ mod tests {
         };
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
         store::settle(&mut tx, "2026-10", 0, 42).await.unwrap();
+        assert!(
+            !usage::reconcile(
+                &mut tx,
+                "wrong-owner",
+                "retained-ledger",
+                "original-attempt",
+                2,
+                &TrustedUsage {
+                    input_tokens: 10_001,
+                    output_tokens: 7,
+                }
+            )
+            .await
+            .unwrap()
+        );
+        let unchanged = store::find_usage_entry(&mut *tx, "retained-ledger")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.revision, 2);
+        assert_eq!(unchanged.accounted_micro_usd, 30_000);
+        assert!(
+            store::budget_guard(&mut *tx)
+                .await
+                .unwrap()
+                .is_none_or(|guard| !guard.halted)
+        );
         for (attempt, revision) in [("wrong-attempt", 2), ("original-attempt", 1)] {
             assert!(
                 !usage::reconcile(
@@ -3195,7 +4150,13 @@ mod tests {
             .unwrap();
         assert_eq!(entry.accounted_micro_usd, 30_000);
         assert_eq!(entry.usage_state, "unknown");
-        assert!(entry.reported_usage.is_none());
+        assert_eq!(
+            serde_json::from_str::<TrustedUsage>(entry.reported_usage.as_deref().unwrap()).unwrap(),
+            TrustedUsage {
+                input_tokens: 123,
+                output_tokens: 7,
+            }
+        );
         let task = job_row(&state, &job.job_id).await;
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
         assert!(
@@ -3242,7 +4203,7 @@ mod tests {
         estimated_entry(&state, "overflow").await;
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
         assert!(
-            !usage::reconcile(
+            usage::reconcile(
                 &mut tx,
                 &owner,
                 "overflow",
@@ -3262,7 +4223,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry.accounted_micro_usd, 30_000);
-        assert_eq!(entry.revision, 2);
+        assert_eq!(entry.revision, 3);
+        assert_eq!(
+            serde_json::from_str::<TrustedUsage>(entry.reported_usage.as_deref().unwrap()).unwrap(),
+            TrustedUsage {
+                input_tokens: u64::MAX,
+                output_tokens: u64::MAX,
+            }
+        );
         assert!(
             store::budget_guard(&state.db)
                 .await
@@ -3306,7 +4274,13 @@ mod tests {
             .unwrap();
         assert_eq!(entry.usage_state, "unknown");
         assert_eq!(entry.accounted_micro_usd, 30_000);
-        assert!(entry.reported_usage.is_none());
+        assert_eq!(
+            serde_json::from_str::<TrustedUsage>(entry.reported_usage.as_deref().unwrap()).unwrap(),
+            TrustedUsage {
+                input_tokens: u64::MAX,
+                output_tokens: 0,
+            }
+        );
         let mut conn = state.db.acquire().await.unwrap();
         let month = store::get_or_create_month(&mut conn, &utc_month_key(now_ms()))
             .await
@@ -3316,6 +4290,70 @@ mod tests {
         let guard = store::budget_guard(&mut *conn).await.unwrap().unwrap();
         assert!(guard.halted);
         assert_eq!(guard.reason, "usage amount overflow");
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn retention_keeps_tasks_with_pending_trusted_usage() {
+        let (state, handle) = jobs_state().await;
+        let owner = instance_owner(&state).await.unwrap();
+        let now = now_ms();
+        let created = now - 8 * 86_400_000;
+        sqlx::query("INSERT INTO ai_jobs (job_id,owner_instance_id,principal,capability,key,input_hash,state,state_revision,dispatch_state,attempt_id,provider,model,created_at,updated_at) VALUES ('pending-retention',?1,'local-owner',?2,'retained-key','hash','interrupted',3,'may_have_been_sent','actual-attempt','stepfun','step-5-preview',?3,?3)")
+            .bind(&owner)
+            .bind(CAPABILITY)
+            .bind(created)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        store::insert_usage_entry(
+            &state.db,
+            &store::UsageEntryInsert {
+                job_id: "pending-retention".into(),
+                accepted_month: utc_month_key(created),
+                attempt_id: Some("actual-attempt".into()),
+                reservation_micro_usd: 0,
+                accounted_micro_usd: 0,
+                usage_state: "unpriced".into(),
+                pricing_snapshot: "{}".into(),
+                reported_usage: None,
+                revision: 1,
+                created_at: created,
+            },
+        )
+        .await
+        .unwrap();
+        store::insert_pending_usage(
+            &state.db,
+            &store::PendingUsageInsert {
+                job_id: "pending-retention".into(),
+                attempt_id: "unresolved-attempt".into(),
+                owner_instance_id: owner,
+                usage_json: serde_json::to_string(&TrustedUsage {
+                    input_tokens: 345,
+                    output_tokens: 67,
+                })
+                .unwrap(),
+                created_at: now,
+            },
+        )
+        .await
+        .unwrap();
+
+        retain_history(&state.db, now).await.unwrap();
+        assert!(
+            store::find_job_by_id(&state.db, "pending-retention")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store::find_usage_entry(&state.db, "pending-retention")
+                .await
+                .unwrap()
+                .is_some()
+        );
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -3347,7 +4385,7 @@ mod tests {
             .unwrap();
             store::insert_usage_entry(
                 &state.db,
-                &store::UsageEntryRow {
+                &store::UsageEntryInsert {
                     job_id: id.into(),
                     accepted_month: utc_month_key(created),
                     attempt_id: Some("attempt".into()),
@@ -3452,7 +4490,7 @@ mod tests {
             .unwrap();
         store::insert_usage_entry(
             &state.db,
-            &store::UsageEntryRow {
+            &store::UsageEntryInsert {
                 job_id: "large-ledger".into(),
                 accepted_month: utc_month_key(now_ms()),
                 attempt_id: None,
@@ -3525,7 +4563,7 @@ mod tests {
             for (id, month) in [("past", "2025-09"), ("boundary", "2025-10")] {
                 store::insert_usage_entry(
                     &mut *c,
-                    &store::UsageEntryRow {
+                    &store::UsageEntryInsert {
                         job_id: id.into(),
                         accepted_month: month.into(),
                         attempt_id: Some("retained-attempt".into()),
@@ -3545,7 +4583,7 @@ mod tests {
                 .bind(&owner).bind(now).execute(&mut *c).await.unwrap();
             store::insert_usage_entry(
                 &mut *c,
-                &store::UsageEntryRow {
+                &store::UsageEntryInsert {
                     job_id: "held".into(),
                     accepted_month: "2025-08".into(),
                     attempt_id: Some("held-attempt".into()),
@@ -3607,6 +4645,67 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.status.as_u16(), 503);
         assert_eq!(err.code, "ai_locked");
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_runner_queries_cannot_expire_or_cancel_another_process_worker() {
+        let (state, handle) = jobs_state().await;
+        let provider = BlockedProvider {
+            counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let calls = provider.counter.clone();
+        let gate = provider.gate.clone();
+        state.ai_runtime.install_provider(Arc::new(provider)).await;
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, "local-owner", "runner ownership fixture", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        for _ in 0..400 {
+            let row = job_row(&state, &job.job_id).await;
+            if row.state == "running"
+                && row.dispatch_state == "may_have_been_sent"
+                && calls.load(std::sync::atomic::Ordering::SeqCst) == 1
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        state
+            .ai_runner_held
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let error = cancel(&state, "local-owner", &job.job_id, 2)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status.as_u16(), 503);
+        assert_eq!(error.code, "ai_locked");
+
+        sqlx::query("UPDATE ai_jobs SET updated_at = ?1 WHERE job_id = ?2")
+            .bind(now_ms() - RUN_DEADLINE_MS - 1)
+            .bind(&job.job_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        // A second process has no in-memory owner for this row. The blocked
+        // fixture ignores cancellation so the real owner remains observable.
+        state.ai_runtime.inputs.lock().await.remove(&job.job_id);
+        let observed = get_job(&state, "local-owner", &job.job_id).await.unwrap();
+        assert_eq!(observed.state, "running");
+        assert_eq!(observed.usage.usage_state, "reserved");
+
+        state
+            .ai_runner_held
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+        let terminal = await_terminal(&state, &job.job_id).await;
+        assert_eq!(terminal.state, "succeeded");
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -4035,6 +5134,135 @@ mod tests {
         handle.join().unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn token_only_recovery_marks_interrupted_without_charge_and_keeps_late_tokens() {
+        let (state, handle) = jobs_state().await;
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state
+            .ai_runtime
+            .install_provider(Arc::new(BlockedTokenOnlyProvider {
+                counter: counter.clone(),
+                gate: gate.clone(),
+            }))
+            .await;
+        let SubmitOutcome::Accepted { job } = submit(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            "token-only recovery",
+            None,
+        )
+        .await
+        .unwrap() else {
+            panic!("首次提交必须受理");
+        };
+        for _ in 0..200 {
+            let row = job_row(&state, &job.job_id).await;
+            if row.state == "running" && row.dispatch_state == "may_have_been_sent" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        assert_eq!(recover(&state).await.unwrap(), 1);
+        let after = job_row(&state, &job.job_id).await;
+        assert_eq!(after.state, "interrupted");
+        let usage = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage_state, "unpriced");
+        assert_eq!(usage.accounted_micro_usd, 0);
+        assert!(usage.reported_usage.is_none());
+        let budget = status(&state, &after.owner_instance_id).await.unwrap();
+        assert_eq!(budget["budget"]["chargedMicroUsd"], json!(0));
+        assert_eq!(budget["budget"]["reservedMicroUsd"], json!(0));
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut late_usage = None;
+        for _ in 0..200 {
+            late_usage = store::find_usage_entry(&state.db, &job.job_id)
+                .await
+                .unwrap()
+                .and_then(|entry| entry.reported_usage);
+            if late_usage.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let late_usage: TrustedUsage = serde_json::from_str(&late_usage.unwrap()).unwrap();
+        assert_eq!(late_usage.input_tokens, 345);
+        assert_eq!(late_usage.output_tokens, 67);
+        assert_eq!(job_row(&state, &job.job_id).await.state, "interrupted");
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_recovery_failure_does_not_roll_back_other_tasks() {
+        let (state, handle) = jobs_state().await;
+        state
+            .ai_runtime
+            .install_provider(Arc::new(FakeProvider))
+            .await;
+        let slot = state.ai_runtime.execution_slots.acquire().await.unwrap();
+        let SubmitOutcome::Accepted { job: failed } =
+            submit(&state, "local-owner", "recovery failure fixture", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        let SubmitOutcome::Accepted { job: healthy } =
+            submit(&state, "local-owner", "healthy recovery fixture", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        let trigger = format!(
+            "CREATE TRIGGER fail_one_recovery BEFORE UPDATE OF state ON ai_jobs \
+             WHEN OLD.job_id = '{}' AND NEW.state = 'interrupted' \
+             BEGIN SELECT RAISE(ABORT, 'fixture recovery failure'); END",
+            failed.job_id
+        );
+        sqlx::query(&trigger).execute(&state.db).await.unwrap();
+
+        assert!(recover(&state).await.is_err());
+        assert_eq!(job_row(&state, &healthy.job_id).await.state, "interrupted");
+        assert_eq!(job_row(&state, &failed.job_id).await.state, "accepted");
+        let healthy_usage = store::find_usage_entry(&state.db, &healthy.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(healthy_usage.usage_state, "released");
+        assert!(
+            store::find_usage_entry(&state.db, &failed.job_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        sqlx::query("DROP TRIGGER fail_one_recovery")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(recover(&state).await.unwrap(), 1);
+        assert_eq!(job_row(&state, &failed.job_id).await.state, "interrupted");
+        let failed_usage = store::find_usage_entry(&state.db, &failed.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed_usage.usage_state, "released");
+
+        drop(slot);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
     #[tokio::test]
     async fn expired_jobs_are_swept_and_reservation_released() {
         let (state, handle) = jobs_state().await;
@@ -4245,18 +5473,28 @@ mod tests {
         let guard = store::budget_guard(&state.db).await.unwrap().unwrap();
         assert!(guard.halted, "越过限额必须置位持久熔断");
         assert_eq!(guard.trigger_job.as_deref(), Some(job.job_id.as_str()));
+        let provider = state.ai_runtime.provider().await;
+        let fingerprint = guard_reset_fingerprint(provider.as_ref()).unwrap();
         // 熔断期间 submit → 503 budget_halted（先于 reserve）。
         let err = submit(&state, crate::idempotency::LOCAL_OWNER, "熔断中", None)
             .await
             .unwrap_err();
         assert_eq!(err.code, "budget_halted");
-        // reset：错误 revision 冲突；正确 revision 恢复。
-        let err = budget_guard_reset(&state, guard.revision - 1)
+        // 未确认当前配置时拒绝，不改变持久闩锁。
+        let err = budget_guard_reset(&state, guard.revision, &"0".repeat(64))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "configuration_changed");
+        let unchanged = store::budget_guard(&state.db).await.unwrap().unwrap();
+        assert!(unchanged.halted);
+        assert_eq!(unchanged.revision, guard.revision);
+        // reset：错误 revision 冲突；正确 revision 仍需无在途工作且月账健康。
+        let err = budget_guard_reset(&state, guard.revision - 1, &fingerprint)
             .await
             .unwrap_err();
         assert_eq!(err.code, "state_conflict");
         assert_eq!(
-            budget_guard_reset(&state, guard.revision)
+            budget_guard_reset(&state, guard.revision, &fingerprint)
                 .await
                 .unwrap_err()
                 .code,
@@ -4266,7 +5504,7 @@ mod tests {
         let slot = state.ai_runtime.execution_slots.acquire().await.unwrap();
         drop(slot);
         assert_eq!(
-            budget_guard_reset(&state, guard.revision)
+            budget_guard_reset(&state, guard.revision, &fingerprint)
                 .await
                 .unwrap_err()
                 .code,
@@ -4276,8 +5514,48 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
-        let result = budget_guard_reset(&state, guard.revision).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_guard_reset_audit BEFORE INSERT ON ai_budget_guard_reset_audit
+             BEGIN SELECT RAISE(ABORT, 'fixture audit failure'); END",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        assert!(
+            budget_guard_reset(&state, guard.revision, &fingerprint)
+                .await
+                .is_err()
+        );
+        let unchanged = store::budget_guard(&state.db).await.unwrap().unwrap();
+        assert!(unchanged.halted, "audit failure must roll the reset back");
+        assert_eq!(unchanged.revision, guard.revision);
+        let audit_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ai_budget_guard_reset_audit")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(audit_count, 0);
+        sqlx::query("DROP TRIGGER reject_guard_reset_audit")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let result = budget_guard_reset(&state, guard.revision, &fingerprint)
+            .await
+            .unwrap();
         assert_eq!(result["halted"], json!(false));
+        assert_eq!(result["auditId"].as_str().unwrap().len(), 36);
+        let audit: (String, i64, i64, String) = sqlx::query_as(
+            "SELECT owner_instance_id, previous_revision, new_revision, config_fingerprint
+             FROM ai_budget_guard_reset_audit WHERE event_id = ?1",
+        )
+        .bind(result["auditId"].as_str().unwrap())
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(audit.0, instance_owner(&state).await.unwrap());
+        assert_eq!(audit.1, guard.revision);
+        assert_eq!(audit.2, guard.revision + 1);
+        assert_eq!(audit.3, fingerprint);
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -4380,6 +5658,488 @@ mod tests {
         handle.join().unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_failure_preserves_token_only_usage() {
+        let (state, handle) = jobs_state().await;
+        state
+            .ai_runtime
+            .install_provider(Arc::new(TokenOnlyProvider))
+            .await;
+        sqlx::query("CREATE TRIGGER fail_proposal BEFORE INSERT ON ai_proposals BEGIN SELECT RAISE(ABORT, 'injected proposal failure'); END")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let SubmitOutcome::Accepted { job } = submit(&state, "local-owner", "proposal fault", None)
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        let terminal = await_terminal(&state, &job.job_id).await;
+        assert_eq!(terminal.state, "failed");
+        assert!(terminal.result_proposal_id.is_none());
+        let usage = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage_state, "unpriced");
+        assert_eq!(
+            serde_json::from_str::<TrustedUsage>(usage.reported_usage.as_deref().unwrap()).unwrap(),
+            TrustedUsage {
+                input_tokens: 345,
+                output_tokens: 67,
+            }
+        );
+        let owner = instance_owner(&state).await.unwrap();
+        let budget = status(&state, &owner).await.unwrap();
+        assert_eq!(budget["budget"]["chargedMicroUsd"], 0);
+        assert_eq!(budget["budget"]["reservedMicroUsd"], 0);
+
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_ledger_retry_preserves_token_only_usage() {
+        let (state, handle) = jobs_state().await;
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state
+            .ai_runtime
+            .install_provider(Arc::new(BlockedTokenOnlyProvider {
+                counter: counter.clone(),
+                gate: gate.clone(),
+            }))
+            .await;
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, "local-owner", "token ledger retry", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+
+        let mut dispatched = false;
+        for _ in 0..400 {
+            let row = job_row(&state, &job.job_id).await;
+            if row.state == "running" && row.dispatch_state == "may_have_been_sent" {
+                dispatched = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(dispatched, "fixture provider must be held after dispatch");
+
+        let fail_until = now_ms() + 750;
+        let trigger = format!(
+            "CREATE TRIGGER fail_initial_unpriced_ledger BEFORE INSERT ON ai_usage_entries \
+             WHEN NEW.usage_state = 'unpriced' AND NEW.created_at < {fail_until} \
+             BEGIN SELECT RAISE(ABORT, 'fixture transient token ledger failure'); END"
+        );
+        sqlx::query(&trigger).execute(&state.db).await.unwrap();
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let terminal = await_terminal(&state, &job.job_id).await;
+        assert_eq!(terminal.state, "interrupted");
+        assert_eq!(terminal.dispatch_state, "may_have_been_sent");
+        let usage = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage_state, "unpriced");
+        assert_eq!(usage.accounted_micro_usd, 0);
+        assert_eq!(
+            serde_json::from_str::<TrustedUsage>(usage.reported_usage.as_deref().unwrap()).unwrap(),
+            TrustedUsage {
+                input_tokens: 345,
+                output_tokens: 67,
+            }
+        );
+        assert!(counter.load(std::sync::atomic::Ordering::SeqCst) == 1);
+        assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
+
+        sqlx::query("DROP TRIGGER fail_initial_unpriced_ledger")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_usage_survives_terminal_ledger_failure_until_recovery() {
+        let (state, handle) = jobs_state().await;
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state
+            .ai_runtime
+            .install_provider(Arc::new(BlockedTokenOnlyProvider {
+                counter: counter.clone(),
+                gate: gate.clone(),
+            }))
+            .await;
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, "local-owner", "persistent token ledger", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        for _ in 0..400 {
+            let row = job_row(&state, &job.job_id).await;
+            if row.state == "running" && row.dispatch_state == "may_have_been_sent" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let task = job_row(&state, &job.job_id).await;
+        assert_eq!(task.dispatch_state, "may_have_been_sent");
+        let attempt = task.attempt_id.as_deref().unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_unpriced_ledger_until_recovery
+             BEFORE INSERT ON ai_usage_entries WHEN NEW.usage_state = 'unpriced'
+             BEGIN SELECT RAISE(ABORT, 'fixture persistent token ledger failure'); END",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut worker_stopped = false;
+        for _ in 0..500 {
+            let live_input = state
+                .ai_runtime
+                .inputs
+                .lock()
+                .await
+                .contains_key(&job.job_id);
+            if state.ai_runtime.execution_slots.available_permits() == 1 && !live_input {
+                worker_stopped = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            worker_stopped,
+            "provider worker should stop after bounded retries"
+        );
+        assert_eq!(job_row(&state, &job.job_id).await.state, "running");
+        assert!(
+            store::find_usage_entry(&state.db, &job.job_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let pending =
+            store::find_pending_usage(&mut state.db.acquire().await.unwrap(), &job.job_id, attempt)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<TrustedUsage>(&pending.usage_json).unwrap(),
+            TrustedUsage {
+                input_tokens: 345,
+                output_tokens: 67,
+            }
+        );
+
+        sqlx::query("DROP TRIGGER fail_unpriced_ledger_until_recovery")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(recover(&state).await.unwrap(), 1);
+        let terminal = job_row(&state, &job.job_id).await;
+        assert_eq!(terminal.state, "interrupted");
+        let usage = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage_state, "unpriced");
+        assert_eq!(
+            serde_json::from_str::<TrustedUsage>(usage.reported_usage.as_deref().unwrap()).unwrap(),
+            TrustedUsage {
+                input_tokens: 345,
+                output_tokens: 67,
+            }
+        );
+        assert!(store::find_pending_usage(
+            &mut state.db.acquire().await.unwrap(),
+            &job.job_id,
+            attempt,
+        )
+        .await
+        .unwrap()
+        .is_none());
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_usage_drain_continues_after_one_settlement_failure() {
+        let (state, handle) = jobs_state().await;
+        let owner = instance_owner(&state).await.unwrap();
+        let now = now_ms();
+        let month = utc_month_key(now);
+        let pricing_snapshot = serde_json::to_string(&PricingSnapshot {
+            provider: "stepfun".into(),
+            model: "step-5-preview".into(),
+            quote: PriceQuote {
+                pricing_version: usage::TOKEN_ONLY_PRICING_VERSION.into(),
+                reservation_micro_usd: 0,
+                input_micro_usd_per_million: 0,
+                output_micro_usd_per_million: 0,
+                max_input_tokens: 20_000,
+                max_output_tokens: 8_000,
+            },
+            credential: None,
+        })
+        .unwrap();
+        let trusted = TrustedUsage {
+            input_tokens: 345,
+            output_tokens: 67,
+        };
+
+        for job_id in ["pending-usage-01-fail", "pending-usage-02-healthy"] {
+            let attempt_id = format!("{job_id}-attempt");
+            store::insert_job(
+                &state.db,
+                &store::JobRow {
+                    job_id: job_id.into(),
+                    owner_instance_id: owner.clone(),
+                    principal: "local-owner".into(),
+                    capability: CAPABILITY.into(),
+                    key: format!("fixture-{job_id}"),
+                    input_hash: format!("hash-{job_id}"),
+                    state: "interrupted".into(),
+                    state_revision: 3,
+                    dispatch_state: "may_have_been_sent".into(),
+                    attempt_id: Some(attempt_id.clone()),
+                    provider: "stepfun".into(),
+                    model: "step-5-preview".into(),
+                    reservation_micro_usd: 0,
+                    pricing_snapshot: pricing_snapshot.clone(),
+                    created_at: now,
+                    updated_at: now,
+                    result_proposal_id: None,
+                },
+            )
+            .await
+            .unwrap();
+            store::insert_usage_entry(
+                &state.db,
+                &store::UsageEntryInsert {
+                    job_id: job_id.into(),
+                    accepted_month: month.clone(),
+                    attempt_id: Some(attempt_id.clone()),
+                    reservation_micro_usd: 0,
+                    accounted_micro_usd: 0,
+                    usage_state: "unpriced".into(),
+                    pricing_snapshot: pricing_snapshot.clone(),
+                    reported_usage: None,
+                    revision: 1,
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+            store::insert_pending_usage(
+                &state.db,
+                &store::PendingUsageInsert {
+                    job_id: job_id.into(),
+                    attempt_id,
+                    owner_instance_id: owner.clone(),
+                    usage_json: serde_json::to_string(&trusted).unwrap(),
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        sqlx::query(
+            "CREATE TRIGGER fail_one_pending_usage_reconcile
+             BEFORE UPDATE OF reported_usage ON ai_usage_entries
+             WHEN OLD.job_id = 'pending-usage-01-fail'
+             BEGIN SELECT RAISE(ABORT, 'fixture pending usage failure'); END",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        assert!(recover(&state).await.is_err());
+        for (job_id, pending, expected_usage) in [
+            ("pending-usage-01-fail", true, None),
+            ("pending-usage-02-healthy", false, Some(trusted.clone())),
+        ] {
+            let mut conn = state.db.acquire().await.unwrap();
+            let entry = store::find_usage_entry(&mut *conn, job_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry.usage_state, "unpriced");
+            assert_eq!(
+                entry
+                    .reported_usage
+                    .as_deref()
+                    .map(serde_json::from_str::<TrustedUsage>)
+                    .transpose()
+                    .unwrap(),
+                expected_usage
+            );
+            assert_eq!(
+                store::find_pending_usage(&mut *conn, job_id, &format!("{job_id}-attempt"))
+                    .await
+                    .unwrap()
+                    .is_some(),
+                pending
+            );
+        }
+
+        sqlx::query("DROP TRIGGER fail_one_pending_usage_reconcile")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(recover(&state).await.unwrap(), 0);
+        assert_eq!(recover(&state).await.unwrap(), 0);
+        for job_id in ["pending-usage-01-fail", "pending-usage-02-healthy"] {
+            let mut conn = state.db.acquire().await.unwrap();
+            let entry = store::find_usage_entry(&mut *conn, job_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry.usage_state, "unpriced");
+            assert_eq!(entry.revision, 2);
+            assert_eq!(
+                serde_json::from_str::<TrustedUsage>(entry.reported_usage.as_deref().unwrap())
+                    .unwrap(),
+                trusted
+            );
+            assert!(
+                store::find_pending_usage(&mut *conn, job_id, &format!("{job_id}-attempt"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn orphan_sweep_continues_after_one_ledger_failure() {
+        let (state, handle) = jobs_state().await;
+        let slot = state.ai_runtime.execution_slots.acquire().await.unwrap();
+        state
+            .ai_runtime
+            .install_provider(Arc::new(BlockedProvider {
+                counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }))
+            .await;
+        let SubmitOutcome::Accepted { job: failed } =
+            submit(&state, "local-owner", "orphan sweep failure fixture", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        let SubmitOutcome::Accepted { job: healthy } =
+            submit(&state, "local-owner", "orphan sweep healthy fixture", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+
+        let stale = now_ms() - QUEUE_DEADLINE_MS - 1000;
+        for job in [&failed, &healthy] {
+            sqlx::query("UPDATE ai_jobs SET created_at = ?1 WHERE job_id = ?2")
+                .bind(stale)
+                .bind(&job.job_id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        {
+            let mut inputs = state.ai_runtime.inputs.lock().await;
+            inputs.remove(&failed.job_id);
+            inputs.remove(&healthy.job_id);
+        }
+        let trigger = format!(
+            "CREATE TRIGGER fail_one_orphan_sweep BEFORE INSERT ON ai_usage_entries \
+             WHEN NEW.job_id = '{}' AND NEW.usage_state = 'released' \
+             BEGIN SELECT RAISE(ABORT, 'fixture sweep failure'); END",
+            failed.job_id
+        );
+        sqlx::query(&trigger).execute(&state.db).await.unwrap();
+        let mut events = state.events.subscribe();
+
+        assert!(sweep(&state).await.is_err());
+        assert_eq!(job_row(&state, &failed.job_id).await.state, "accepted");
+        assert_eq!(job_row(&state, &healthy.job_id).await.state, "expired");
+        assert!(
+            store::find_usage_entry(&state.db, &failed.job_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let healthy_usage = store::find_usage_entry(&state.db, &healthy.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(healthy_usage.usage_state, "released");
+        let month = utc_month_key(stale);
+        let reserved: i64 =
+            sqlx::query_scalar("SELECT reserved_micro_usd FROM ai_budget_months WHERE month = ?1")
+                .bind(month)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(reserved, failed.usage.reservation_micro_usd);
+        let mut expired_events = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let WsEvent::AiTask { job_id, state, .. } = event {
+                expired_events.push((job_id, state));
+            }
+        }
+        assert_eq!(
+            expired_events,
+            vec![(healthy.job_id.clone(), "expired".to_string())]
+        );
+
+        sqlx::query("DROP TRIGGER fail_one_orphan_sweep")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sweep(&state).await.unwrap();
+        assert_eq!(job_row(&state, &failed.job_id).await.state, "expired");
+        let failed_usage = store::find_usage_entry(&state.db, &failed.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed_usage.usage_state, "released");
+        let reserved: i64 =
+            sqlx::query_scalar("SELECT reserved_micro_usd FROM ai_budget_months WHERE month = ?1")
+                .bind(utc_month_key(stale))
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(reserved, 0);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            WsEvent::AiTask { job_id, state, .. }
+                if job_id == failed.job_id && state == "expired"
+        ));
+
+        drop(slot);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
     #[tokio::test]
     async fn failed_terminal_transactions_publish_no_events_and_orphan_sweep_rolls_back() {
         let (state, handle) = jobs_state().await;
@@ -4395,12 +6155,14 @@ mod tests {
             .execute(&state.db).await.unwrap();
         assert!(cancel(&state, "local-owner", &job.job_id, 1).await.is_err());
         assert!(recover(&state).await.is_err());
-        assert!(state
-            .ai_runtime
-            .inputs
-            .lock()
-            .await
-            .contains_key(&job.job_id));
+        assert!(
+            state
+                .ai_runtime
+                .inputs
+                .lock()
+                .await
+                .contains_key(&job.job_id)
+        );
         sqlx::query("UPDATE ai_jobs SET created_at = ?1 WHERE job_id = ?2")
             .bind(now_ms() - QUEUE_DEADLINE_MS - 1000)
             .bind(&job.job_id)
@@ -4480,6 +6242,143 @@ mod tests {
                 .usage_state,
             "released"
         );
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consent_revoked_before_success_commit_cannot_create_proposal() {
+        let (state, handle) = jobs_state().await;
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state
+            .ai_runtime
+            .install_provider(Arc::new(BlockedProvider {
+                counter: counter.clone(),
+                gate: gate.clone(),
+            }))
+            .await;
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, "local-owner", "revoke before commit", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        for _ in 0..200 {
+            if counter.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        vmusic_store::settings::set(&state.db, CONSENT_KEY, &json!(false))
+            .await
+            .unwrap();
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let terminal = await_terminal(&state, &job.job_id).await;
+        assert_eq!(terminal.state, "cancelled");
+        assert_eq!(terminal.result_proposal_id, None);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consent_revocation_signals_provider_before_ledger_failure() {
+        use tokio::sync::Notify;
+
+        struct CancellationObserver {
+            started: Arc<Notify>,
+            observed: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+        impl StageIntentProvider for CancellationObserver {
+            fn id(&self) -> &'static str {
+                "consent-revoke-fixture"
+            }
+            fn model(&self) -> &str {
+                "consent-revoke-v1"
+            }
+            fn ready(&self) -> bool {
+                true
+            }
+            fn quote(&self, _: &str) -> Result<PriceQuote, String> {
+                Ok(metered_quote())
+            }
+            fn generate(
+                &self,
+                _: String,
+                _: PricingSnapshot,
+                _: Option<crate::ai::credential::ProviderCredential>,
+                mut cancellation: ProviderCancellation,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ProviderReply> + Send>>
+            {
+                let started = self.started.clone();
+                let observed = self.observed.clone();
+                let release = self.release.clone();
+                started.notify_one();
+                Box::pin(async move {
+                    cancellation.cancelled().await;
+                    observed.notify_one();
+                    release.notified().await;
+                    ProviderReply {
+                        intent: Err("cancelled transport finished cleanup".into()),
+                        usage: None,
+                    }
+                })
+            }
+        }
+
+        let (state, handle) = jobs_state().await;
+        let provider = Arc::new(CancellationObserver {
+            started: Arc::new(Notify::new()),
+            observed: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        });
+        state.ai_runtime.install_provider(provider.clone()).await;
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, "local-owner", "revoke under ledger failure", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            provider.started.notified(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("CREATE TRIGGER fail_revoke_settlement BEFORE INSERT ON ai_usage_entries BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        vmusic_store::settings::set(&state.db, CONSENT_KEY, &json!(false))
+            .await
+            .unwrap();
+
+        assert!(revoke_generation_consent(&state).await.is_err());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            provider.observed.notified(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("DROP TRIGGER fail_revoke_settlement")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        provider.release.notify_one();
+
+        let terminal = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            await_terminal(&state, &job.job_id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(terminal.state, "cancelled");
+        assert_eq!(terminal.result_proposal_id, None);
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -4580,6 +6479,182 @@ mod tests {
             )
             .await["state"],
             "rejected"
+        );
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn token_only_settlement_records_over_bound_usage_without_claiming_cost() {
+        let (state, handle) = jobs_state().await;
+        let owner = instance_owner(&state).await.unwrap();
+        let month = utc_month_key(now_ms());
+        let pricing = PricingSnapshot {
+            provider: "stepfun".into(),
+            model: "step-5-preview".into(),
+            quote: PriceQuote {
+                pricing_version: super::super::usage::TOKEN_ONLY_PRICING_VERSION.into(),
+                reservation_micro_usd: 0,
+                input_micro_usd_per_million: 0,
+                output_micro_usd_per_million: 0,
+                max_input_tokens: 20_000,
+                max_output_tokens: 8_000,
+            },
+            credential: None,
+        };
+        let make_job = |id: &str| store::JobRow {
+            job_id: id.into(),
+            owner_instance_id: owner.clone(),
+            principal: "local-owner".into(),
+            capability: CAPABILITY.into(),
+            key: id.into(),
+            input_hash: "fixture-hash".into(),
+            state: "running".into(),
+            state_revision: 2,
+            dispatch_state: "may_have_been_sent".into(),
+            attempt_id: Some(format!("{id}-attempt")),
+            provider: pricing.provider.clone(),
+            model: pricing.model.clone(),
+            reservation_micro_usd: 0,
+            pricing_snapshot: serde_json::to_string(&pricing).unwrap(),
+            created_at: now_ms(),
+            updated_at: now_ms(),
+            result_proposal_id: None,
+        };
+        let immediate_usage = TrustedUsage {
+            input_tokens: 20_001,
+            output_tokens: 321,
+        };
+        let late_usage = TrustedUsage {
+            input_tokens: 1_234,
+            output_tokens: 8_001,
+        };
+        let first = make_job("token-only-immediate");
+        let late = make_job("token-only-late");
+        let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
+        store::get_or_create_month(&mut *tx, &month).await.unwrap();
+        store::insert_job(&mut *tx, &first).await.unwrap();
+        store::insert_job(&mut *tx, &late).await.unwrap();
+        usage::settle_terminal(&mut tx, &first, Some(&immediate_usage), now_ms())
+            .await
+            .unwrap();
+        let guard = store::budget_guard(&mut *tx).await.unwrap().unwrap();
+        assert!(guard.token_halted);
+        assert!(!guard.halted);
+        assert_eq!(guard.token_reason, "可信 token usage 超出受理时的上界");
+        assert!(
+            store::reset_budget_guard(&mut *tx, guard.revision)
+                .await
+                .unwrap()
+        );
+        usage::settle_terminal(&mut tx, &late, None, now_ms())
+            .await
+            .unwrap();
+        assert!(
+            usage::reconcile(
+                &mut tx,
+                &owner,
+                &late.job_id,
+                late.attempt_id.as_deref().unwrap(),
+                1,
+                &late_usage,
+            )
+            .await
+            .unwrap()
+        );
+        tx.commit().await.unwrap();
+
+        for (id, expected_usage) in [
+            (&first.job_id, &immediate_usage),
+            (&late.job_id, &late_usage),
+        ] {
+            let entry = store::find_usage_entry(&state.db, id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry.usage_state, "unpriced");
+            assert_eq!(entry.accounted_micro_usd, 0);
+            assert_eq!(
+                serde_json::from_str::<TrustedUsage>(entry.reported_usage.as_deref().unwrap())
+                    .unwrap(),
+                expected_usage.clone()
+            );
+        }
+        let mut conn = state.db.acquire().await.unwrap();
+        let budget = store::get_or_create_month(&mut conn, &month).await.unwrap();
+        assert_eq!(budget.charged_micro_usd, 0);
+        assert_eq!(budget.reserved_micro_usd, 0);
+        let guard = store::budget_guard(&mut *conn).await.unwrap().unwrap();
+        assert!(guard.token_halted);
+        assert!(!guard.halted);
+        assert_eq!(guard.token_reason, "可信 token usage 超出受理时的上界");
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn token_only_generation_is_not_blocked_by_amount_guard() {
+        let (state, handle) = jobs_state().await;
+        state
+            .ai_runtime
+            .install_provider(Arc::new(TokenOnlyProvider))
+            .await;
+        let owner = instance_owner(&state).await.unwrap();
+        let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
+        store::halt_budget_guard(&mut tx, &owner, "metered fixture", "priced-task")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let state_view = status(&state, &owner).await.unwrap();
+        assert_eq!(state_view["provider"]["pricingMode"], "token_only");
+        assert_eq!(
+            state_view["provider"]["resetConfigFingerprint"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
+        assert_eq!(state_view["guard"]["halted"], true);
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, crate::idempotency::LOCAL_OWNER, "继续生成", None)
+                .await
+                .unwrap()
+        else {
+            panic!("token-only 请求应被受理");
+        };
+        let mut view = get_job(&state, crate::idempotency::LOCAL_OWNER, &job.job_id)
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if view.state == "succeeded" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            view = get_job(&state, crate::idempotency::LOCAL_OWNER, &job.job_id)
+                .await
+                .unwrap();
+        }
+        assert_eq!(view.state, "succeeded");
+        let entry = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.usage_state, "unpriced");
+        let usage: TrustedUsage =
+            serde_json::from_str(entry.reported_usage.as_deref().unwrap()).unwrap();
+        assert_eq!(usage.input_tokens, 345);
+        assert_eq!(usage.output_tokens, 67);
+        let mut conn = state.db.acquire().await.unwrap();
+        let budget = store::get_or_create_month(&mut conn, &utc_month_key(now_ms()))
+            .await
+            .unwrap();
+        assert_eq!(budget.charged_micro_usd, 0);
+        assert_eq!(budget.reserved_micro_usd, 0);
+        let guard = store::budget_guard(&mut *conn).await.unwrap().unwrap();
+        assert!(
+            guard.halted,
+            "token-only dispatch must not reset a metered guard"
         );
         state.audio.shutdown();
         handle.join().unwrap();

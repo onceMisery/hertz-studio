@@ -27,6 +27,7 @@
   var views = [];          // [{ container, nodes, big }]
   var emotionReadyDoc = null;   // 已绑定摘要的歌词快照（null = 情绪层关闭）
   var emotionCueDoc = null;     // 摘要就绪前暂存的 Cue
+  var emotionRequestGeneration = 0;
   var emotionRevisionSeen = -1;
   var emotionSettings = { mode: 'off', preview: 'joy', scale: 1, curve: 1, accent: false, accentWords: '', palette: true };
   var mode = 'karaoke';
@@ -644,9 +645,11 @@
   function bindEmotionForCue() {
     var E = emotionApi();
     if (!E || !doc || emotionReadyDoc === doc) return;
-    E.bindLyrics({ lines: doc.lines }).then(function (res) {
-      if (res.stale) return;
-      emotionReadyDoc = doc;
+    var targetDoc = doc;
+    var request = ++emotionRequestGeneration;
+    E.bindLyrics({ lines: targetDoc.lines }).then(function (res) {
+      if (res.stale || request !== emotionRequestGeneration || doc !== targetDoc || emotionSettings.mode !== 'auto') return;
+      emotionReadyDoc = targetDoc;
       if (emotionCueDoc) {
         try {
           E.setCueDoc(emotionCueDoc, res.generation);
@@ -665,7 +668,7 @@
 
   function setEmotionCueDoc(cueDoc) {
     var E = emotionApi();
-    if (!E || !doc || !cueDoc) return false;
+    if (!E || !doc || !cueDoc || emotionSettings.mode !== 'auto') return false;
     if (emotionReadyDoc === doc) {
       try {
         E.setCueDoc(cueDoc, E.generation());
@@ -684,6 +687,7 @@
   }
 
   function clearEmotionCues() {
+    emotionRequestGeneration += 1;
     var E = emotionApi();
     if (E && emotionReadyDoc === doc) {
       E.clearCues();
@@ -699,12 +703,15 @@
   function setManualEmotion(id) {
     var E = emotionApi();
     if (!E || !doc || !doc.lines.length) return false;
+    var targetDoc = doc;
+    var request = ++emotionRequestGeneration;
     var emotion = E.profiles && E.profiles[id] ? id : 'joy';
     function commit() {
+      if (request !== emotionRequestGeneration || doc !== targetDoc || emotionSettings.mode !== 'manual') return false;
       try {
         E.setCueDoc({
           version: 1, lyricsHash: E.lyricsHash(), source: 'manual',
-          sections: [{ from: 0, to: doc.lines.length - 1, emotion: emotion,
+          sections: [{ from: 0, to: targetDoc.lines.length - 1, emotion: emotion,
             intensity: 1, confidence: 1 }]
         }, E.generation());
         E.commitAtBoundary(E.generation());
@@ -716,10 +723,10 @@
       schedule();
       return true;
     }
-    if (emotionReadyDoc === doc) return commit();
-    E.bindLyrics({ lines: doc.lines }).then(function (res) {
-      if (res.stale) return;
-      emotionReadyDoc = doc;
+    if (emotionReadyDoc === targetDoc) return commit();
+    E.bindLyrics({ lines: targetDoc.lines }).then(function (res) {
+      if (res.stale || request !== emotionRequestGeneration || doc !== targetDoc || emotionSettings.mode !== 'manual') return;
+      emotionReadyDoc = targetDoc;
       commit();
     }).catch(function () { /* 摘要失败：保持中性 */ });
     return true;
@@ -759,6 +766,7 @@
     schedule();
     if (!doc) return;
     if (emotionSettings.mode === 'manual') {
+      emotionCueDoc = null;
       setManualEmotion(emotionSettings.preview);
     } else if (emotionSettings.mode === 'off' || previousMode !== emotionSettings.mode) {
       // auto：由 app 的异步分类任务写入 Cue；模式切换时先清掉旧模型/manual 结果。
@@ -1630,6 +1638,7 @@
     },
 
     setLyrics: function (d) {
+      emotionRequestGeneration += 1;
       var previousEmotionDoc = emotionReadyDoc;
       var emotion = emotionApi();
       if (previousEmotionDoc && emotion) emotion.clearCues();

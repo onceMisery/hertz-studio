@@ -11,6 +11,7 @@ const { once } = require('node:events');
 
 const TITLE = 'Layout Audit Fixture';
 const ARTIST = 'Hertz Audit Artist';
+const ALBUM = 'Hertz Audit Album';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function until(probe, label, timeout = 20000) {
@@ -40,7 +41,8 @@ function writeTaggedWav(file) {
   const payload = Buffer.concat([
     Buffer.from('WAVE'), chunk('fmt ', format),
     chunk('LIST', Buffer.concat([Buffer.from('INFO'),
-      chunk('INAM', Buffer.from(TITLE + '\0')), chunk('IART', Buffer.from(ARTIST + '\0'))])),
+      chunk('INAM', Buffer.from(TITLE + '\0')), chunk('IART', Buffer.from(ARTIST + '\0')),
+      chunk('IPRD', Buffer.from(ALBUM + '\0'))])),
     chunk('data', Buffer.alloc(44100 * 2 * 30)),
   ]);
   fs.writeFileSync(file, chunk('RIFF', payload));
@@ -107,6 +109,7 @@ async function startFixture({ backend = 'null', prepareData } = {}) {
         const track = (await api('/v1/tracks?limit=10')).tracks.find(t => t.title === TITLE);
         assert.ok(track, 'Scanner read WAV title');
         assert.equal(track.artist, ARTIST, 'Scanner read WAV artist');
+        assert.equal(track.album, ALBUM, 'Scanner read WAV album');
         await api('/v1/player/volume', 'POST', { volume: 0 });
         await api('/v1/player/load', 'POST', { track_id: track.id });
         await api('/v1/player/pause', 'POST', {});

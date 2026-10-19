@@ -102,6 +102,6 @@ pub(super) async fn reject(state: &Arc<AppState>, id: &str, body: &Value) -> Rpc
 pub(super) async fn reset(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let body: routes::AiGuardResetRequest = body_as(body)?;
     Ok(Reply::ok(
-        jobs::budget_guard_reset(state, body.expected_revision).await?,
+        jobs::budget_guard_reset(state, body.expected_revision, &body.config_fingerprint).await?,
     ))
 }

@@ -134,7 +134,7 @@
     '  float wob  = uWobble * sin(vUV.y * 40.0 + uTimeMs * 0.0029);',
     '  float sung = smoothstep(uClipU - uSoft + wob, uClipU + uSoft + wob, vU);',
     '  vec3  col  = mix(uIdleColor, uSungColor, sung);',
-    '  float rim  = smoothstep(uRimWidth, 0.0, abs(dpx - wpx)) * uRimAmt;',
+    '  float rim  = (1.0 - smoothstep(0.0, uRimWidth, abs(dpx - wpx))) * uRimAmt;',
     '  float outD = max(0.0, wpx - dpx);',
     // SDF 只编码到 uRange（8px）。再远的像素全饱和成同一个值，直接算
     // exp(-outD*K) 会给整格 quad 一个常数亮度——就是“每个字后面一块方格”。
@@ -161,7 +161,7 @@
     '    vec2 q = vLocal - center;',
     '    if (uDecorKind > 1.5 && uDecorKind < 2.5) q.y /= 2.4;',
     '    float radius = uDecorKind > 2.5 ? 4.0 : (uDecorKind > 1.5 ? 3.2 : 3.6);',
-    '    float particle = smoothstep(radius, radius - 0.9, length(q)) * sin(3.1415926 * t);',
+    '    float particle = (1.0 - smoothstep(radius - 0.9, radius, length(q))) * sin(3.1415926 * t);',
     '    c += uDecorColor * particle;',
     '    a = max(a, particle * 0.9);',
     '  }',

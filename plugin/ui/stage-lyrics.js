@@ -93,7 +93,11 @@
     }
 
     function applyEmotionField(row, emotion) {
-      if (!emotion || !row.nodes.length || !global.LyricEmotionField) return;
+      if (!row.nodes.length) return;
+      if (!emotion || !global.LyricEmotionField) {
+        row.nodes.forEach(function (node) { node.style.removeProperty('--emo-dy'); });
+        return;
+      }
       var px = parseFloat(getComputedStyle(row.el).fontSize) || 48;
       row.nodes.forEach(function (node, i) {
         var u = (i + 0.5) / row.nodes.length;

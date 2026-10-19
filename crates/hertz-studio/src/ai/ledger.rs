@@ -39,7 +39,7 @@ impl Query {
         if self.usage_state.as_deref().is_some_and(|state| {
             !matches!(
                 state,
-                "reserved" | "reported" | "released" | "unknown" | "estimated_final"
+                "reserved" | "reported" | "released" | "unknown" | "estimated_final" | "unpriced"
             )
         }) {
             return Err(bad_request("不支持的费用状态"));
@@ -121,8 +121,20 @@ pub(crate) async fn read(state: &Arc<AppState>, query: Query) -> ApiResult<Page>
                 "limitMicroUsd":jobs::MONTHLY_LIMIT_MICRO_USD.to_string(),
             })
         });
-    let guard = vmusic_store::ai_jobs::budget_guard(&mut *tx).await.map_err(db_error)?
-        .map(|guard| json!({"halted":guard.halted,"reason":guard.reason,"triggerJob":guard.trigger_job,"revision":guard.revision}));
+    let guard = vmusic_store::ai_jobs::budget_guard(&mut *tx)
+        .await
+        .map_err(db_error)?
+        .map(|guard| {
+            json!({
+                "halted": guard.halted,
+                "reason": guard.reason,
+                "triggerJob": guard.trigger_job,
+                "tokenHalted": guard.token_halted,
+                "tokenReason": guard.token_reason,
+                "tokenTriggerJob": guard.token_trigger_job,
+                "revision": guard.revision,
+            })
+        });
     let mut rows = store::list(
         &mut tx,
         store::LedgerFilter {
@@ -170,7 +182,10 @@ fn project(row: store::LedgerRow) -> Value {
             price.quote.validate().is_ok()
                 && price.quote.reservation_micro_usd == row.reservation_micro_usd
         });
-    let pricing = snapshot.as_ref().map(|price| json!({
+    let pricing_known = snapshot
+        .as_ref()
+        .is_some_and(PricingSnapshot::pricing_known);
+    let pricing = snapshot.as_ref().filter(|_| pricing_known).map(|price| json!({
         "provider":price.provider,"model":price.model,"pricingVersion":price.quote.pricing_version,
         "inputMicroUsdPerMillion":price.quote.input_micro_usd_per_million.to_string(),
         "outputMicroUsdPerMillion":price.quote.output_micro_usd_per_million.to_string(),
@@ -183,9 +198,9 @@ fn project(row: store::LedgerRow) -> Value {
         "taskRetained":row.task_retained,"acceptedAt":row.accepted_at,"sortAt":row.sort_at,
         "recordedAt":row.recorded_at,"attemptId":row.attempt_id,
         "reservationMicroUsd":row.reservation_micro_usd.to_string(),
-        "accountedMicroUsd":row.accounted_micro_usd.map(|amount| amount.to_string()),
+        "accountedMicroUsd":if row.usage_state == "unpriced" { None } else { row.accounted_micro_usd.map(|amount| amount.to_string()) },
         "usageState":row.usage_state,"revision":row.revision,
-        "pricingVerified":snapshot.is_some(),"pricing":pricing,"reportedUsage":reported,
+        "pricingVerified":snapshot.is_some(),"pricingKnown":pricing_known,"pricing":pricing,"reportedUsage":reported,
         "reportedUsageInvalid":row.reported_usage.is_some() && reported.is_none(),
         "provider":identity("provider"),"model":identity("model"),"pricingVersion":identity("pricingVersion"),
     })
@@ -218,6 +233,45 @@ mod tests {
         .unwrap()
         .validate()
         .is_ok());
+    }
+
+    #[test]
+    fn token_only_projection_does_not_expose_placeholder_zero_as_a_price() {
+        let snapshot = PricingSnapshot {
+            provider: "stepfun".into(),
+            model: "step-5-preview".into(),
+            quote: super::super::usage::PriceQuote {
+                pricing_version: super::super::usage::TOKEN_ONLY_PRICING_VERSION.into(),
+                reservation_micro_usd: 0,
+                input_micro_usd_per_million: 0,
+                output_micro_usd_per_million: 0,
+                max_input_tokens: 20_000,
+                max_output_tokens: 8_000,
+            },
+            credential: None,
+        };
+        let row = store::LedgerRow {
+            job_id: "unpriced".into(),
+            principal: Some("official-lyric-emotion".into()),
+            task_state: Some("succeeded".into()),
+            task_retained: true,
+            accepted_at: Some(1),
+            sort_at: 1,
+            recorded_at: 2,
+            attempt_id: Some("attempt".into()),
+            reservation_micro_usd: 0,
+            accounted_micro_usd: Some(0),
+            usage_state: "unpriced".into(),
+            revision: 1,
+            pricing_snapshot: serde_json::to_string(&snapshot).unwrap(),
+            reported_usage: Some(r#"{"inputTokens":12,"outputTokens":3}"#.into()),
+        };
+        let entry = project(row);
+        assert_eq!(entry["accountedMicroUsd"], Value::Null);
+        assert_eq!(entry["pricingVerified"], true);
+        assert_eq!(entry["pricingKnown"], false);
+        assert_eq!(entry["pricing"], Value::Null);
+        assert_eq!(entry["reportedUsage"]["inputTokens"], "12");
     }
 
     #[tokio::test]

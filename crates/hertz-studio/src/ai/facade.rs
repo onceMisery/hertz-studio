@@ -288,10 +288,18 @@ pub(crate) fn context_json(ctx: &GrantContext, stage_tools_enabled: bool) -> Val
             "edition": crate::edition::NAME,
             "transport": "http",
         },
-        "capabilities": CAPABILITIES.iter().filter(|c| !c.operation.starts_with("stage.") || stage_tools_enabled).map(|c| json!({
-            "operation": c.operation,
+        "capabilities": CAPABILITIES.iter().filter(|c| !c.handler.is_stage() || stage_tools_enabled).map(|c| json!({
+            "operation": c.handler.operation(),
+            "mcpName": c.mcp_name,
+            "inputSchema": c.input_schema.value(),
+            "outputSchema": c.output_schema.value(),
             "scope": c.scope,
+            "requiredScopes": [c.scope],
+            "allowedProjection": c.allowed_projection,
             "effect": c.effect.as_str(),
+            "budgetClass": c.budget_class.as_str(),
+            "handler": c.handler.operation(),
+            "capabilityVersion": c.version,
             "description": c.description,
         })).collect::<Vec<_>>(),
     })

@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "sourceRef": "b8aff4a89dc3f1e43981d2227838e497e65ea9b2",
   "fixturesHash": "64bd8aa347e280cf750f07b309c85916fbd48662293a9c2a269ac0a1dadb731d",
+  "compressedFramesHash": "64aaa8758bd8e82401cfc12a5d85d5361d039fe57e0472695bedd131d1231a8e",
   "compressedSourcesHash": "e10843b8c5112c8d2750731782f5936616479eeaa84d7d37fa69f0b2dc40bea7",
   "sourcesHash": "d2b70a347235f72980733abfdf2ac5d872d0c2f5ebc489c38fdc539e600c6869",
   "scenes": 10,

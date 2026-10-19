@@ -237,6 +237,15 @@ console.log('3. 校验负例 / ignored / 夹位 ✓');
     }
   }
   const valid = Draft.artifact(intent);
+  const changedRange = JSON.parse(JSON.stringify(contract));
+  changedRange.scenes[0].params[0].max += 1;
+  changedRange.schemaHash = await Draft.hash(Draft.schemaFingerprint(changedRange));
+  assert.notEqual(changedRange.schemaHash, contract.schemaHash,
+    'changing a materialization range must change the contract fingerprint');
+  sandbox.window.CreativeStageContract = changedRange;
+  await assert.rejects(Draft.prepare(valid),
+    'artifacts created against old parameter ranges must be rejected');
+  sandbox.window.CreativeStageContract = contract;
   for (const bad of [
     { ...valid, surprise: 1 }, { ...valid, intent: { ...intent, patch: { 'sc.unknown': 1 } } },
     { ...valid, intent: { ...intent, patch: { 'sc.radius': '1' } } },

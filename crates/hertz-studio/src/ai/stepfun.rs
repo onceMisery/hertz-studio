@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 
-//! Explicit StepFun Responses adapter. Availability comes first: pricing is
-//! not modeled yet, so completion dispatch only enforces model, origin,
-//! credential and request-size bounds. Stage proposals use the shared strict
-//! contract, usage and durable runner.
+//! Explicit StepFun Responses adapter. Unknown pricing does not block dispatch:
+//! bounded requests use the durable token-only usage ledger and never claim a
+//! zero-dollar price.
 
 use super::jobs::{CompletionReply, ProviderCancellation, ProviderReply, StageIntentProvider};
-use super::usage::{PriceQuote, PricingSnapshot};
+use super::usage::{PriceQuote, PricingSnapshot, TOKEN_ONLY_PRICING_VERSION};
 use crate::config::AiConfig;
 use reqwest::{Client, Url};
 use serde_json::json;
@@ -17,8 +16,7 @@ use std::time::Duration;
 const RESPONSE_BYTES: usize = 256 * 1024;
 const REQUEST_BYTES: usize = 64 * 1024;
 const COMPLETION_OUTPUT_TOKENS: u64 = 8_000;
-const DISABLED: &str =
-    "StepFun requests are disabled until a supported model and request bounds are selected";
+const DISABLED: &str = "StepFun model or bounded request configuration is unsupported";
 
 fn origin(input: &str) -> Result<(&'static str, Url), &'static str> {
     let invalid = "StepFun origin must be https://api.stepfun.com/{v1|step_plan/v1}";
@@ -64,18 +62,17 @@ fn client() -> Result<Client, &'static str> {
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(120))
         .user_agent("HertzStudio/0.1 stepfun")
+        .dns_resolver(crate::public_net::public_dns_resolver())
         .build()
         .map_err(|_| "cannot create isolated StepFun HTTP client")
 }
 
-fn availability_quote(model: &str) -> Option<PriceQuote> {
-    // Availability-first placeholder: cost accounting is deliberately not
-    // modeled yet, so the quote is free but keeps the request-size bounds.
+fn token_only_quote(model: &str) -> Option<PriceQuote> {
     if model != "step-5-preview" {
         return None;
     }
     Some(PriceQuote {
-        pricing_version: "stepfun-availability-v1".into(),
+        pricing_version: TOKEN_ONLY_PRICING_VERSION.into(),
         reservation_micro_usd: 0,
         input_micro_usd_per_million: 0,
         output_micro_usd_per_million: 0,
@@ -99,6 +96,33 @@ pub(crate) fn configured(config: &AiConfig) -> Arc<dyn StageIntentProvider> {
     }
 }
 
+#[cfg(test)]
+pub(super) fn configured_for_loopback(
+    config: &AiConfig,
+    loopback_origin: &str,
+) -> Result<Arc<dyn StageIntentProvider>, &'static str> {
+    let mut provider = StepFun::new(&config.origin, &config.model)?;
+    let mut endpoint = Url::parse(loopback_origin).map_err(|_| "invalid test loopback origin")?;
+    let loopback = endpoint
+        .host_str()
+        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|address| address.is_loopback());
+    if endpoint.scheme() != "http"
+        || !loopback
+        || endpoint.port().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || !matches!(endpoint.path(), "" | "/")
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err("test provider endpoint must be a numeric HTTP loopback origin");
+    }
+    endpoint.set_path(provider.endpoint.path());
+    provider.endpoint = endpoint;
+    Ok(Arc::new(provider))
+}
+
 impl StepFun {
     fn new(origin: &str, model: &str) -> Result<Self, &'static str> {
         if model.is_empty()
@@ -114,7 +138,7 @@ impl StepFun {
             endpoint,
             model: model.into(),
             client: client()?,
-            pricing: availability_quote(model),
+            pricing: token_only_quote(model),
         })
     }
 
@@ -170,7 +194,7 @@ impl StepFun {
         &self,
         body: Vec<u8>,
         credential: super::credential::ProviderCredential,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), String> {
         let mut authorization =
             reqwest::header::HeaderValue::from_str(&format!("Bearer {}", credential.as_ref()))
                 .map_err(|_| "StepFun credential cannot be encoded as an HTTP header")?;
@@ -205,16 +229,17 @@ impl StepFun {
             }
             bytes.extend_from_slice(&chunk);
         }
-        if !status.is_success() {
-            return Err(format!("StepFun HTTP status {}", status.as_u16()));
-        }
-        Ok(bytes)
+        Ok((status, bytes))
     }
 }
 
 impl StageIntentProvider for StepFun {
     fn id(&self) -> &'static str {
         "stepfun"
+    }
+
+    fn endpoint_identity(&self) -> Option<&str> {
+        Some(self.endpoint.as_str())
     }
 
     fn model(&self) -> &str {
@@ -234,12 +259,6 @@ impl StageIntentProvider for StepFun {
     }
 
     fn requires_credential(&self) -> bool {
-        true
-    }
-
-    fn supports_zero_cost_completion(&self) -> bool {
-        // Availability-first: pricing is not modeled yet, so lyric emotion
-        // dispatch must not depend on a budget reservation.
         true
     }
 
@@ -282,7 +301,17 @@ impl StageIntentProvider for StepFun {
                 biased;
                 _ = cancellation.cancelled() => failed("StepFun request cancelled"),
                 response = provider.execute(body, credential) => match response {
-                    Ok(bytes) => super::provider::parse_openai_reply(&bytes, &provider.model),
+                    Ok((status, bytes)) => {
+                        let mut reply = super::provider::parse_openai_reply_with_pricing(
+                            &bytes,
+                            &provider.model,
+                            pricing.pricing_known(),
+                        );
+                        if !status.is_success() {
+                            reply.intent = Err(format!("StepFun HTTP status {}", status.as_u16()));
+                        }
+                        reply
+                    }
                     Err(reason) => failed(&reason),
                 },
             }
@@ -311,9 +340,16 @@ impl StageIntentProvider for StepFun {
                 biased;
                 _ = cancellation.cancelled() => Err("StepFun request cancelled".into()),
                 response = provider.execute(body, credential) => {
-                    let bytes = response?;
-                    super::provider::parse_openai_completion(&bytes, &provider.model)
-                        .map(|text| CompletionReply { text })
+                    let (status, bytes) = response?;
+                    let mut reply = super::provider::parse_openai_completion_with_pricing(
+                        &bytes,
+                        &provider.model,
+                        false,
+                    )?;
+                    if !status.is_success() {
+                        reply.text = Err(format!("StepFun HTTP status {}", status.as_u16()));
+                    }
+                    Ok(reply)
                 }
             }
         })
@@ -441,6 +477,36 @@ mod tests {
         for model in ["", "step 5", "step-5/other", "x\nheader"] {
             assert!(StepFun::new("https://api.stepfun.com/step_plan/v1", model).is_err());
         }
+    }
+
+    #[test]
+    fn production_quote_marks_cost_unknown_but_keeps_token_bounds() {
+        let provider =
+            StepFun::new("https://api.stepfun.com/step_plan/v1", "step-5-preview").unwrap();
+        let quote = provider.quote("dark orb").unwrap();
+        assert_eq!(quote.pricing_version, TOKEN_ONLY_PRICING_VERSION);
+        assert_eq!(quote.reservation_micro_usd, 0);
+        assert_eq!(quote.input_micro_usd_per_million, 0);
+        assert_eq!(quote.output_micro_usd_per_million, 0);
+        assert_eq!(quote.max_input_tokens, 20_000);
+        assert_eq!(quote.max_output_tokens, COMPLETION_OUTPUT_TOKENS);
+    }
+
+    #[test]
+    fn production_response_keeps_verified_tokens_without_a_price() {
+        let result = super::super::provider::parse_openai_reply_with_pricing(
+            &serde_json::to_vec(&response(r#"{"version":1,"scene":"orb","patch":{}}"#)).unwrap(),
+            "step-5-preview",
+            false,
+        );
+        assert!(result.intent.is_ok());
+        assert_eq!(
+            result.usage,
+            Some(super::super::usage::TrustedUsage {
+                input_tokens: 33,
+                output_tokens: 3,
+            })
+        );
     }
 
     #[test]
@@ -629,20 +695,29 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn durable_stage_job_uses_scoped_key_and_settles_once() {
-        use super::super::{credential as credentials, jobs};
-        use axum::{http::HeaderMap, routing::post, Json};
+    #[tokio::test]
+    async fn non_success_responses_keep_only_verified_stage_usage() {
+        use axum::{http::StatusCode, routing::post, Json};
         use std::sync::atomic::{AtomicUsize, Ordering};
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
         let app = axum::Router::new().route(
             "/responses",
-            post(move |headers: HeaderMap| {
-                seen.fetch_add(1, Ordering::SeqCst);
+            post(move || {
+                let index = seen.fetch_add(1, Ordering::SeqCst);
                 async move {
-                    assert_eq!(headers["authorization"], "Bearer stepfun-fixture-key");
-                    Json(response(r#"{"version":1,"scene":"orb","patch":{}}"#))
+                    let content = if index < 2 {
+                        r#"{"version":1,"scene":"orb","patch":{}}"#
+                    } else {
+                        r#"{"version":1}"#
+                    };
+                    let mut body = response(content);
+                    match index {
+                        1 => body["model"] = serde_json::json!("unexpected-model"),
+                        3 => body["error"] = serde_json::json!({"code":"server_error"}),
+                        _ => {}
+                    }
+                    (StatusCode::SERVICE_UNAVAILABLE, Json(body))
                 }
             }),
         );
@@ -653,6 +728,77 @@ mod tests {
         ))
         .unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = fixture(endpoint);
+
+        let trusted = provider
+            .generate(
+                "dark orb".into(),
+                snapshot(&provider),
+                credential(),
+                Default::default(),
+            )
+            .await;
+        assert!(trusted.intent.unwrap_err().contains("HTTP status 503"));
+        assert_eq!(trusted.usage.unwrap().input_tokens, 33);
+
+        let untrusted = provider
+            .generate(
+                "dark orb".into(),
+                snapshot(&provider),
+                credential(),
+                Default::default(),
+            )
+            .await;
+        assert!(untrusted.intent.unwrap_err().contains("HTTP status 503"));
+        assert!(untrusted.usage.is_none());
+        for index in [2, 3] {
+            let reply = provider
+                .complete(
+                    "classify".into(),
+                    "{}".into(),
+                    credential(),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            assert!(reply.text.unwrap_err().contains("HTTP status 503"));
+            if index == 2 {
+                assert_eq!(reply.usage.unwrap().input_tokens, 33);
+            } else {
+                assert!(reply.usage.is_none());
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configured_token_only_http_job_records_usage_without_amount_gate() {
+        use super::super::{credential as credentials, jobs};
+        use axum::{http::HeaderMap, routing::post, Json};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let app = axum::Router::new().route(
+            "/step_plan/v1/responses",
+            post(
+                move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        assert_eq!(headers["authorization"], "Bearer stepfun-fixture-key");
+                        assert!(!headers.contains_key("cookie"));
+                        assert_eq!(body["model"], "step-5-preview");
+                        assert_eq!(body["store"], false);
+                        assert_eq!(body["stream"], false);
+                        assert_eq!(body["max_output_tokens"], COMPLETION_OUTPUT_TOKENS);
+                        Json(response(r#"{"version":1,"scene":"orb","patch":{}}"#))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let loopback_origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let dir = std::env::temp_dir().join(format!("hertz-stepfun-{}", uuid::Uuid::new_v4()));
         let db = vmusic_store::open(&dir).await.unwrap();
         let (mut state, handle) = crate::state::tests::playback_state_with_db(db).await;
@@ -662,12 +808,25 @@ mod tests {
             model: "step-5-preview".into(),
         };
         state.ai_runtime = jobs::AiRuntime::from_config(&config);
+        let configured_provider = state.ai_runtime.provider().await;
+        assert_eq!(configured_provider.id(), "stepfun");
+        assert_eq!(configured_provider.model(), "step-5-preview");
+        assert!(configured_provider.ready());
+        let production_quote = configured_provider.quote("dark orb").unwrap();
+        assert_eq!(production_quote.pricing_version, TOKEN_ONLY_PRICING_VERSION);
+        assert_eq!(production_quote.reservation_micro_usd, 0);
+        assert_eq!(production_quote.max_input_tokens, 20_000);
+        assert_eq!(production_quote.max_output_tokens, COMPLETION_OUTPUT_TOKENS);
         state.ai_runtime.credentials = credentials::Service::isolated_for_config(&config);
-        state
-            .ai_runtime
-            .install_provider(Arc::new(fixture(endpoint)))
-            .await;
+        let provider = configured_for_loopback(&config, &loopback_origin).unwrap();
+        let loopback_quote = provider.quote("dark orb").unwrap();
+        assert_eq!(
+            serde_json::to_value(loopback_quote).unwrap(),
+            serde_json::to_value(production_quote).unwrap()
+        );
+        state.ai_runtime.install_provider(provider).await;
         state.ai_runner_held.store(true, Ordering::Relaxed);
+        state.token = "stepfun-http-fixture-token".into();
         let state = Arc::new(state);
         vmusic_store::settings::set(&state.db, jobs::CONSENT_KEY, &json!(true))
             .await
@@ -694,31 +853,90 @@ mod tests {
             serde_json::to_value(credentials::put(&state, request).await.unwrap()).unwrap();
         assert_eq!(stored["provider"], "stepfun");
         assert_eq!(stored["origin"], config.origin);
+        let owner = jobs::instance_owner(&state).await.unwrap();
+        let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
+        vmusic_store::ai_jobs::halt_budget_guard(
+            &mut tx,
+            &owner,
+            "metered provider exceeded its limit",
+            "metered-task",
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_address = api_listener.local_addr().unwrap();
+        let api_state = state.clone();
+        let api = crate::routes::router(api_state.clone()).with_state(api_state);
+        let api_server = tokio::spawn(async move {
+            axum::serve(api_listener, api).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let api_origin = format!("http://{api_address}");
+        let status: serde_json::Value = client
+            .get(format!("{api_origin}/v1/ai/status"))
+            .bearer_auth("stepfun-http-fixture-token")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["provider"]["id"], "stepfun");
+        assert_eq!(status["provider"]["pricingMode"], "token_only");
+        assert_eq!(status["guard"]["halted"], true);
+        let budget_before = status["budget"].clone();
         let key = format!(
             "v1.{}.{}",
             vmusic_store::now_ms(),
             uuid::Uuid::new_v4().simple()
         );
-        let jobs::SubmitOutcome::Accepted { job } =
-            jobs::submit(&state, "local-owner", "dark orb", Some(&key))
-                .await
-                .unwrap()
-        else {
-            panic!("not accepted")
+        let submit = || {
+            client
+                .post(format!("{api_origin}/v1/ai/jobs"))
+                .bearer_auth("stepfun-http-fixture-token")
+                .json(&json!({"brief":"dark orb", "idempotency_key":key}))
         };
+        let first: serde_json::Value = submit()
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(first["outcome"], "accepted");
+        let job_id = first["job"]["jobId"].as_str().unwrap().to_owned();
+        let second: serde_json::Value = submit()
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(second["outcome"], "replayed");
+        assert_eq!(second["job"]["jobId"], job_id);
+        let job_url = format!("{api_origin}/v1/ai/jobs/{job_id}");
+        let mut job: serde_json::Value = serde_json::Value::Null;
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                let row: (String, Option<String>, String) = sqlx::query_as(
-                    "SELECT state, result_proposal_id, dispatch_state FROM ai_jobs WHERE job_id=?",
-                )
-                .bind(&job.job_id)
-                .fetch_one(&state.db)
-                .await
-                .unwrap();
-                if row.0 != "accepted" && row.0 != "running" {
-                    assert_eq!(row.0, "succeeded");
-                    assert!(row.1.is_some());
-                    assert_eq!(row.2, "may_have_been_sent");
+                job = client
+                    .get(&job_url)
+                    .bearer_auth("stepfun-http-fixture-token")
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if !matches!(job["state"].as_str(), Some("accepted" | "running")) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -726,29 +944,72 @@ mod tests {
         })
         .await
         .unwrap();
-        let entry = vmusic_store::ai_jobs::find_usage_entry(&state.db, &job.job_id)
+        assert_eq!(job["state"], "succeeded");
+        assert_eq!(job["provider"], "stepfun");
+        assert_eq!(job["model"], "step-5-preview");
+        assert_eq!(job["usage"]["usageState"], "unpriced");
+        assert_eq!(job["usage"]["pricingKnown"], false);
+        assert_eq!(job["usage"]["accountedMicroUsd"], serde_json::Value::Null);
+        assert_eq!(job["usage"]["reportedUsage"]["inputTokens"], 33);
+        assert_eq!(job["usage"]["reportedUsage"]["outputTokens"], 3);
+        let month = job["usage"]["acceptedMonth"].as_str().unwrap();
+        let ledger: serde_json::Value = client
+            .get(format!(
+                "{api_origin}/v1/ai/ledger?month={month}&usage_state=unpriced"
+            ))
+            .bearer_auth("stepfun-http-fixture-token")
+            .send()
             .await
             .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
             .unwrap();
-        assert_eq!(entry.usage_state, "reported");
-        assert_eq!(entry.accounted_micro_usd, 2);
-        let owner = jobs::instance_owner(&state).await.unwrap();
-        let status = jobs::status(&state, &owner).await.unwrap();
-        assert_eq!(status["budget"]["reservedMicroUsd"], 0);
-        assert_eq!(status["budget"]["chargedMicroUsd"], 2);
-        let jobs::SubmitOutcome::Replayed { job: replay } =
-            jobs::submit(&state, "local-owner", "dark orb", Some(&key))
-                .await
+        assert_eq!(ledger["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(ledger["entries"][0]["jobId"], job_id);
+        assert_eq!(
+            ledger["entries"][0]["accountedMicroUsd"],
+            serde_json::Value::Null
+        );
+        assert_eq!(ledger["entries"][0]["reportedUsage"]["inputTokens"], "33");
+        assert_eq!(ledger["entries"][0]["reportedUsage"]["outputTokens"], "3");
+        assert_eq!(
+            ledger["budget"]["chargedMicroUsd"],
+            budget_before["chargedMicroUsd"]
+                .as_i64()
                 .unwrap()
-        else {
-            panic!("not replayed")
-        };
-        assert_eq!(replay.job_id, job.job_id);
+                .to_string()
+        );
+        assert_eq!(
+            ledger["budget"]["reservedMicroUsd"],
+            budget_before["reservedMicroUsd"]
+                .as_i64()
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(ledger["guard"]["halted"], true);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let final_status: serde_json::Value = client
+            .get(format!("{api_origin}/v1/ai/status"))
+            .bearer_auth("stepfun-http-fixture-token")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(final_status["budget"], budget_before);
+        assert_eq!(final_status["guard"]["halted"], true);
         state.audio.shutdown();
         handle.join().unwrap();
         state.db.close().await;
+        api_server.abort();
+        let _ = api_server.await;
         server.abort();
+        let _ = server.await;
         drop(state);
         std::fs::remove_dir_all(dir).unwrap();
     }

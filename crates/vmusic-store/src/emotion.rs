@@ -55,15 +55,15 @@ pub async fn get_cue(pool: &SqlitePool, key: &str) -> Result<Option<CueRecord>, 
     Ok(row.map(|(doc_json,)| CueRecord { doc_json }))
 }
 
-/// Insert or replace one cue and evict the oldest entries until the byte bound
-/// holds. A single oversized document is rejected up front.
+/// Insert or replace one authorized cue and evict the oldest entries until the
+/// byte bound holds. A single oversized document is rejected up front.
 pub async fn put_cue(
     pool: &SqlitePool,
     key: &str,
     lyrics_hash: &str,
     doc_json: &str,
     max_bytes: i64,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     let bytes = i64::try_from(doc_json.len())
         .map_err(|_| StoreError::Database("emotion_cue_too_large".into()))?;
     if max_bytes <= 0 || bytes > max_bytes {
@@ -76,10 +76,14 @@ pub async fn put_cue(
         .await
         .map_err(database)?;
     let stamp = now.max(latest.unwrap_or(0).saturating_add(1));
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO lyric_emotion_cues
            (cache_key, lyrics_hash, doc_json, byte_size, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?5
+         WHERE EXISTS (
+             SELECT 1 FROM settings
+             WHERE key = 'lyrics_emotion_ai_authorized' AND value = 'true'
+         )
          ON CONFLICT(cache_key) DO UPDATE SET
            lyrics_hash = excluded.lyrics_hash,
            doc_json = excluded.doc_json,
@@ -94,6 +98,9 @@ pub async fn put_cue(
     .execute(&mut *tx)
     .await
     .map_err(database)?;
+    if inserted.rows_affected() == 0 {
+        return Ok(false);
+    }
 
     loop {
         let total: i64 =
@@ -121,7 +128,8 @@ pub async fn put_cue(
             .await
             .map_err(database)?;
     }
-    tx.commit().await.map_err(database)
+    tx.commit().await.map_err(database)?;
+    Ok(true)
 }
 
 pub async fn delete_cue(pool: &SqlitePool, key: &str) -> Result<(), StoreError> {
@@ -234,6 +242,16 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES ('lyrics_emotion_ai_authorized', 'true')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         pool
     }
 
@@ -260,6 +278,20 @@ mod tests {
         assert!(super::put_cue(&db, "d", "h4", "12345678901", 10)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn cue_write_is_skipped_after_lyric_consent_is_revoked() {
+        let db = pool().await;
+        sqlx::query(
+            "UPDATE settings SET value = 'false' WHERE key = 'lyrics_emotion_ai_authorized'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        assert!(!super::put_cue(&db, "a", "h1", "cue", 10).await.unwrap());
+        assert!(super::get_cue(&db, "a").await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -25,7 +25,8 @@
 //! 任何日志都不能写 stdout，否则会把帧写花。这里显式把 tracing 接到 stderr。
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use dbx_plugin_sdk::{
     PluginEmitter, PluginError, PluginHandler, PluginMetadata, PluginServer, RequestContext,
@@ -57,8 +58,16 @@ struct Plugin {
     /// 保活音频 actor 的线程句柄。丢掉句柄只会 detach 而不会杀线程，但显式持有
     /// 到进程结束更贴近独立形态的语义。
     _booted: hertz_studio::bootstrap::Booted,
-    /// 事件转发器是否已启动。
-    forwarded: OnceLock<()>,
+    /// Whether the current event-forwarding task is still active.
+    event_forwarder_running: Arc<AtomicBool>,
+}
+
+struct EventForwarderGuard(Arc<AtomicBool>);
+
+impl Drop for EventForwarderGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl PluginHandler for Plugin {
@@ -113,18 +122,24 @@ impl PluginHandler for Plugin {
 }
 
 impl Plugin {
-    /// 把 `state.events` 上的服务端事件转发到 UI。幂等：只有第一次调用真正起任务。
+    /// 把 `state.events` 上的服务端事件转发到 UI。运行中幂等，任务退出后可重启。
     ///
     /// 订阅之前产生的事件会丢，这与独立形态的 WS 语义一致（连接建立时补发一帧
     /// 完整 state，UI 启动时也会主动拉一次 `/v1/state`），所以不影响正确性。
     fn start_event_forwarder(&self, emitter: &PluginEmitter) {
-        if self.forwarded.set(()).is_err() {
+        if self
+            .event_forwarder_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return;
         }
         let mut receiver = self.state.events.subscribe();
         let state = self.state.clone();
         let emitter = emitter.clone();
+        let running = self.event_forwarder_running.clone();
         self.runtime.spawn(async move {
+            let _guard = EventForwarderGuard(running);
             'forward: while let Some(events) = state.next_event_batch(&mut receiver).await {
                 for event in events.into_iter().flatten() {
                     let Ok(params) = serde_json::to_value(event) else {
@@ -237,7 +252,7 @@ fn main() -> std::io::Result<()> {
     let plugin = Plugin {
         rpc: Rpc::new(booted.state.clone()),
         state: booted.state.clone(),
-        forwarded: OnceLock::new(),
+        event_forwarder_running: Arc::new(AtomicBool::new(false)),
         runtime,
         _booted: booted,
     };

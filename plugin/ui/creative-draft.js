@@ -101,6 +101,24 @@
           then: { properties: { patch: { type: 'object', properties: properties, additionalProperties: false } } } };
       }) };
   }
+  function schemaFingerprint(contract) {
+    return {
+      intentSchema: contract.intentSchema,
+      commonParams: contract.commonParams.map(function (param) {
+        return { name: param.name, min: param.min, max: param.max, default: param.default };
+      }),
+      scenes: contract.scenes.map(function (scene) {
+        return {
+          id: scene.id,
+          aliases: (scene.aliases || []).slice(),
+          ownsLyrics: !!scene.ownsLyrics,
+          params: scene.params.map(function (param) {
+            return { name: param.name, min: param.min, max: param.max, default: param.default };
+          }),
+        };
+      }),
+    };
+  }
   function manifest() {
     if (!window.CreativeStageContract) fail('舞台草稿契约尚未加载');
     return window.CreativeStageContract;
@@ -142,7 +160,7 @@
     if (value.schemaVersion !== c.schemaVersion || value.schemaHash !== c.schemaHash
       || value.basePresetHash !== c.basePresetHashes[value.intent.scene]) fail('草稿与当前舞台版本不兼容，请重新生成');
     if (await hash(CreativeStage.canonicalBaseline(value.intent.scene)) !== value.basePresetHash
-      || await hash(c.intentSchema) !== value.schemaHash) fail('当前舞台资源与契约不一致，请刷新或更新应用');
+      || await hash(schemaFingerprint(c)) !== value.schemaHash) fail('当前舞台资源与契约不一致，请刷新或更新应用');
     var out = CreativeStage.materializeIntent(null, value.intent);
     if (!out.ok || out.ignored.length) fail(out.message || '草稿存在未消费参数');
     var preset = CreativeStage.normalizeSharePreset(out.preset);
@@ -157,5 +175,6 @@
       proposalHash: await hash(value), persisted: false, applied: false };
   }
   window.CreativeDraft = { prepare: prepare, artifact: artifact, validateIntent: validateIntent,
-    canonical: canonical, hash: hash, commonParams: commonParams, schema: schema };
+    canonical: canonical, hash: hash, commonParams: commonParams, schema: schema,
+    schemaFingerprint: schemaFingerprint };
 })();

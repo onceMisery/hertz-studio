@@ -462,15 +462,14 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
                 .collect()
         })
         .unwrap_or_default();
-    let total = body
-        .pointer("/data/total")
-        .and_then(val_u64)
-        .unwrap_or(tracks.len() as u64) as usize;
+    let reported_total = body.pointer("/data/total").and_then(val_u64);
+    let total = reported_total.unwrap_or(tracks.len() as u64) as usize;
 
     Ok(SearchPage {
         source: ID.into(),
         keyword: keyword.to_string(),
         total,
+        total_is_exact: reported_total.is_some(),
         tracks,
         warning: None,
         pagination: None,
@@ -1285,6 +1284,7 @@ pub async fn recommend_songs(ctx: &Ctx) -> ApiResult<super::SearchPage> {
         source: ID.into(),
         keyword: String::new(),
         total: tracks.len(),
+        total_is_exact: false,
         tracks,
         warning: None,
         pagination: None,

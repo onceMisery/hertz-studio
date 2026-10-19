@@ -269,10 +269,24 @@
     var anchorId = anchor && anchor.dataset.trackId, anchorTop = anchor && anchor.getBoundingClientRect().top;
     el.panelBody.replaceChildren();
     el.panelBody.setAttribute('aria-busy', String(!!spec.loading));
-    if (!spec.items) { el.panelBody.appendChild(node('p', 'sh-state', '正在读取音乐…')); return; }
+    if (!spec.items) {
+      var loading = node('p', 'sh-state', '正在读取音乐…');
+      if (focusKey === 'panel:retry') {
+        loading.tabIndex = -1;
+        loading.dataset.searchKey = focusKey;
+      }
+      el.panelBody.appendChild(loading);
+      if (focusKey === 'panel:retry') loading.focus({ preventScroll: true });
+      return;
+    }
     if (spec.note) el.panelBody.appendChild(node('p', 'sh-state', spec.note));
     if (spec.error) {
-      var retry = node('button', 'sh-retry', '重试'); retry.addEventListener('click', function () { loadPanel(); }); el.panelBody.appendChild(retry); return;
+      var retry = node('button', 'sh-retry', '重试');
+      retry.dataset.searchKey = 'panel:retry';
+      retry.addEventListener('click', function () { loadPanel(); });
+      el.panelBody.appendChild(retry);
+      if (focusKey === 'panel:retry') retry.focus({ preventScroll: true });
+      return;
     }
     if (!spec.items.length && !spec.note && !spec.loading) el.panelBody.appendChild(node('p', 'sh-state', spec.kind === 'search' ? '没有找到匹配的音乐' : spec.kind === 'recent' ? '还没有播放记录' : '这里还没有音乐'));
     if (spec.kind === 'library' && spec.source === 'playlists') {
@@ -287,9 +301,11 @@
         var section = node('section', 'sh-search-source'); section.dataset.source = source.source;
         section.appendChild(node('h3', 'sh-state', label));
         trackList(section, spec.items.filter(function (item) { return item.source === source.source; }), spec);
-        var text = source.loading ? '搜索中…' : source.error ? source.error.label + '：' + source.error.message
+        var text = source.loading ? '搜索中…' : source.error ? source.error.label
           : source.count ? source.count + ' 首已加载' : '没有匹配的音乐';
         var status = node('p', 'sh-state', text);
+        status.tabIndex = -1;
+        status.dataset.searchStatus = 'true';
         if (source.error) status.dataset.errorCode = source.error.code;
         if (source.error) status.dataset.requestId = source.error.requestId;
         section.appendChild(status);
@@ -318,9 +334,23 @@
       var restored = spec.rows && spec.rows.get(anchorId);
       if (restored && restored.isConnected) body.scrollTop += restored.getBoundingClientRect().top - anchorTop;
     }
+    var restoredFocus = false;
     if (focusKey) body.querySelectorAll('[data-search-key]').forEach(function (control) {
-      if (control.dataset.searchKey === focusKey) control.focus({preventScroll:true});
+      if (control.dataset.searchKey === focusKey) {
+        control.focus({preventScroll:true});
+        restoredFocus = true;
+      }
     });
+    if (!restoredFocus && focusKey && focusKey.indexOf('source:') === 0) {
+      var focusSource = focusKey.slice('source:'.length);
+      body.querySelectorAll('.sh-search-source').forEach(function (section) {
+        if (section.dataset.source === focusSource) {
+          var status = section.querySelector('[data-search-status]');
+          if (status) status.focus({preventScroll:true});
+        }
+      });
+    }
+    if (!restoredFocus && focusKey === 'panel:retry') body.focus({ preventScroll: true });
     updateRows();
   }
   async function loadPanel() {

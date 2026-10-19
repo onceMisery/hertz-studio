@@ -219,6 +219,9 @@ pub struct SearchPage {
     pub source: String,
     pub keyword: String,
     pub total: usize,
+    /// True only when `total` came from an explicit upstream count field.
+    #[serde(skip)]
+    pub total_is_exact: bool,
     pub tracks: Vec<OnlineTrack>,
     /// 上游返回的错误或降级说明；为空表示一切正常
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1380,6 +1383,7 @@ mod tests {
                     source: source.into(),
                     keyword: "x".into(),
                     total: 0,
+                    total_is_exact: false,
                     tracks: Vec::new(),
                     warning: None,
                     pagination: None,

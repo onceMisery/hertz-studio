@@ -71,6 +71,31 @@ async function main() {
     });
     if (before.emotion !== null) throw new Error('无 Cue 时侧栏不应有 data-emotion');
 
+    const lateManual = await page.evaluate(async () => {
+      if (Stage.emotion().ready) throw new Error('late-manual fixture requires an unbound lyric document');
+      const original = LyricEmotion.bindLyrics;
+      let ready;
+      const bindReady = new Promise((resolve) => { ready = resolve; });
+      LyricEmotion.bindLyrics = function (snapshot) {
+        return original.call(this, snapshot).then((result) => new Promise((resolve) => {
+          window.__releaseManualEmotionBind = () => resolve(result);
+          ready();
+        }));
+      };
+      Stage.setEmotionSettings({ mode: 'manual', preview: 'sorrow' });
+      await bindReady;
+      Stage.setEmotionSettings({ mode: 'off' });
+      window.__releaseManualEmotionBind();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      LyricEmotion.bindLyrics = original;
+      delete window.__releaseManualEmotionBind;
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return { emotion: line && line.getAttribute('data-emotion'), ready: Stage.emotion().ready };
+    });
+    if (lateManual.emotion !== null || lateManual.ready) {
+      throw new Error('切到 off 后迟到的 manual 摘要仍提交了 Cue：' + JSON.stringify(lateManual));
+    }
+
     await page.evaluate(() => Stage.setEmotionSettings({ mode: 'auto' }));
     const prepared = await page.evaluate(async () => {
       const lines = Stage.lyrics().lines.map((line) => ({ start_ms: line.start_ms, text: line.text }));

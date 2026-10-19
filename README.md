@@ -305,9 +305,9 @@ follow_symlinks = false
 cache_max_bytes = 2147483648   # 在线音频缓存上限，默认 2 GiB
 
 [ai]
-provider = "fake"       # fake（模拟）或 ollama（本地模型，实验）
-origin = "http://127.0.0.1:11434"
-model = ""              # ollama 必填：已安装的本地模型名
+provider = "fake"       # fake | ollama（本地实验）| stepfun（Step Plan token-only）| openai（具体模型/费率未确认，关闭）
+origin = "http://127.0.0.1:11434" # StepFun: https://api.stepfun.com/step_plan/v1 或 https://api.stepfun.com/v1
+model = ""              # ollama 填已安装模型名；StepFun 固定为 step-5-preview。API key 只存钥匙串
 
 [log]
 level = "info"          # 例如 "hertz_studio=debug,vmusic_audio=info"
@@ -317,6 +317,8 @@ format = "pretty"       # pretty | json
 （生成的文件里还有一个 `server.expose_ui`，目前没有任何代码读它，属于预留键。）
 
 AI provider 修改后重启服务，并在工坊中另行开启生成；启动和查看状态不调用模型。Ollama 只接受数字回环 origin，需由操作者在 Ollama 服务端禁用云功能（`OLLAMA_NO_CLOUD=1`）并选择已安装的本地模型，不支持云模型或自动下载。详见[本地模型与草稿说明](docs/ai-stage-drafts.md)。配置文件语法或字段类型错误会阻止启动并报告文件位置，避免静默切回默认 provider。
+
+StepFun Plan（`step-5-preview`）启用后采用 token-only 账目：未知费用不阻止请求，也不显示为零费用；可信响应提供用量时记录输入/输出 token。密钥通过工坊的“模型密钥设置”单独保存到系统钥匙串。启动服务不会自动请求模型，仍需在工坊显式开启应用内生成。详见[模型密钥接入准备](docs/ai-provider-credential.md)。
 
 Standard 数据目录默认位置：Windows `%LOCALAPPDATA%\hertz-studio-standard`，
 macOS `~/Library/Application Support/hertz-studio-standard`，Linux `~/.local/share/hertz-studio-standard`。

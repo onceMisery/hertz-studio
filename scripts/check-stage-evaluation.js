@@ -12,10 +12,14 @@ const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { loadCorpus, stageHarness, assess, summarize, validateRow, loadRun, compareRuns, exportReview, childCase,
-  driverFingerprint } = require('./evaluate-ai-stage');
+  main:runEvaluation, driverFingerprint } = require('./evaluate-ai-stage');
 
 async function main() {
   const corpus = loadCorpus();
+  assert.equal(corpus.version,'v2','Current evaluation corpus must follow the active contract');
+  assert.equal(loadCorpus('v2').manifest.schemaHash,corpus.contract.schemaHash);
+  assert.throws(()=>loadCorpus('v1'),/Unsupported stage-intent corpus version/,
+    'Historical v1 evidence must be reproduced with its original evaluator revision');
   const harness = stageHarness();
   const positive = corpus.cases.find(c=>c.id==='dev-common-01');
   const negative = corpus.cases.find(c=>c.id==='dev-neg-01');
@@ -63,6 +67,7 @@ async function main() {
     schemaHash:corpus.contract.schemaHash,protocolFingerprint:harness.fingerprint,requestHash:harness.fingerprint,
     usage:null,reservationMicroUsd:'0',localPriceMicroUsd:'0',externalInvoiceVerified:false };
   let savedMeta = { ...meta,provider:'offline-rules',model:'offline-rules',sampleComplete:false,
+    corpusVersion:corpus.version,
     corpusSha256:corpus.manifest.corpusSha256,schemaHash:corpus.contract.schemaHash,
     materializerFingerprint:harness.fingerprint,protocolFingerprint:harness.fingerprint,
     evaluatorFingerprint:driverFingerprint,
@@ -125,10 +130,20 @@ async function main() {
   process.env.VMUSIC_DATA_DIR = dataDir;
   const requests = [];
   const serverErrors = [];
+  let nextHold = null;
   const server = http.createServer(async(req,res)=>{
     try {
       const chunks=[]; for await(const chunk of req) chunks.push(chunk);
       const body=JSON.parse(Buffer.concat(chunks)); requests.push(body);
+      if(nextHold){
+        if(nextHold.skip > 0) nextHold.skip--;
+        else {
+          const held=nextHold; nextHold=null;
+          res.on('close',held.closed);
+          held.seen(body);
+          return;
+        }
+      }
       const brief=body.messages[1].content;
       const content=brief==='refuse'?' {"unsupported":true}':JSON.stringify({version:1,scene:'orb',patch:{}});
       res.setHeader('Content-Type','application/json');
@@ -177,12 +192,48 @@ async function main() {
     assert.equal(fs.existsSync(dataDir),false);
     for(const file of ['run.json','results.jsonl','reviews.json','report.json']) fs.unlinkSync(path.join(runDir,file));
     fs.rmdirSync(runDir);
+
+    const interruptedDir=path.join(temp,'interrupted-driver-run');
+    let heldResolve,closedResolve;
+    const heldRequest=new Promise(resolve=>{heldResolve=resolve;});
+    const closedRequest=new Promise(resolve=>{closedResolve=resolve;});
+    nextHold={skip:1,seen:heldResolve,closed:closedResolve};
+    const interrupted=runEvaluation(['--run-local','--model','fixture-local','--origin',origin,'--round','1',
+      '--limit','2','--out',interruptedDir,'--binary',binary]).then(
+        value=>({value}), error=>({error}));
+    let signalSent=false;
+    const interrupt=()=>{if(!signalSent){signalSent=true;process.emit('SIGINT');}};
+    try {
+      await Promise.race([heldRequest,new Promise((_,reject)=>setTimeout(()=>reject(Error('Interrupted-run fixture was not reached')),5000))]);
+      interrupt();
+      const outcome=await interrupted;
+      assert.match(outcome.error?.message || '',/interrupted/i,'SIGINT should stop the active CLI child');
+      await Promise.race([closedRequest,new Promise((_,reject)=>setTimeout(()=>reject(Error('SIGINT did not close the local provider connection')),5000))]);
+      const partial=loadRun(interruptedDir,corpus,harness);
+      assert.equal(partial.meta.status,'interrupted');
+      assert.equal(partial.rows.length,1,'Completed samples before SIGINT must remain saved');
+      assert.equal(partial.rows[0].caseId,corpus.cases[0].id);
+      assert.equal(partial.report.sampleComplete,false);
+      assert.equal(partial.report.candidateChecks,'failed');
+      const partialReport=await driver('--report',interruptedDir);
+      assert.equal(JSON.parse(partialReport.stdout).sampleComplete,false,
+        'A signal-interrupted run must still be reportable from its saved results');
+    } finally {
+      interrupt();
+      await interrupted;
+      for(const file of ['run.json','results.jsonl','reviews.json','report.json']) {
+        const filePath=path.join(interruptedDir,file);
+        if(fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      }
+      if(fs.existsSync(interruptedDir)) fs.rmdirSync(interruptedDir);
+    }
+    assert.equal(requests.length,7,'SIGINT interrupts after saving one result and sending the next local POST');
     assert.deepEqual(serverErrors,[]);
-    console.log('Stage evaluation CLI: real adapter, one local POST, stable protocol/request fingerprints, preserved counters, refusal/truncation separation, forbidden origin and zero DataDir side effects passed');
+    console.log('Stage evaluation CLI: real adapter, one local POST, stable protocol/request fingerprints, preserved counters, refusal/truncation separation, resumable SIGINT report, forbidden origin and zero DataDir side effects passed');
   } finally {
     server.closeAllConnections(); await new Promise(resolve=>server.close(resolve));
     if(originalDataDir===undefined) delete process.env.VMUSIC_DATA_DIR; else process.env.VMUSIC_DATA_DIR=originalDataDir;
-    fs.rmdirSync(temp);
+    fs.rmSync(temp,{recursive:true,force:true});
   }
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

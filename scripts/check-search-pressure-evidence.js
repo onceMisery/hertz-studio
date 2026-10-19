@@ -16,6 +16,26 @@ function distribution(values) {
   return { count: sorted.length, p50Ms: sorted[Math.ceil(sorted.length * .5) - 1],
     p95Ms: sorted[Math.ceil(sorted.length * .95) - 1], maxMs: sorted.at(-1) };
 }
+function verifyAlternatingActualStart(rowsByKind, counts) {
+  for (const [httpKind, rpcKind] of [[0, 1], [2, 3]]) {
+    assert.equal(counts[httpKind], counts[rpcKind], 'Paired entries must have equal schedules');
+    const bySequence = kind => new Map(rowsByKind[kind].map(row => [row.sequence, row]));
+    const httpRows = bySequence(httpKind), rpcRows = bySequence(rpcKind);
+    assert.equal(httpRows.size, counts[httpKind]);
+    assert.equal(rpcRows.size, counts[rpcKind]);
+    for (let sequence = 0; sequence < counts[httpKind]; sequence++) {
+      const http = httpRows.get(sequence), rpc = rpcRows.get(sequence);
+      assert.ok(http && rpc, `Missing paired observation ${httpKind}/${rpcKind}:${sequence}`);
+      const httpStart = http.scheduledMs + http.startLagMs;
+      const rpcStart = rpc.scheduledMs + rpc.startLagMs;
+      const firstStart = sequence % 2 === 0 ? httpStart : rpcStart;
+      const secondStart = sequence % 2 === 0 ? rpcStart : httpStart;
+      assert.ok(firstStart <= secondStart,
+        `Actual dispatch order reversed for ${httpKind}/${rpcKind}:${sequence} ` +
+        `(HTTP ${httpStart}ms, RPC ${rpcStart}ms)`);
+    }
+  }
+}
 function verifyBalanced(b, verifySources = false, verifyFailureCodes = false, verifySchedule = false) {
   assert.ok(b && typeof b === 'object');
   assert.equal(b.durationSeconds, 60);
@@ -89,6 +109,7 @@ function verifyBalanced(b, verifySources = false, verifyFailureCodes = false, ve
     }
     rowsByKind[row.kind].push(row);
   }
+  if (verifySchedule) verifyAlternatingActualStart(rowsByKind, counts);
   const entries = b.entries.map((entry, kind) => {
     const rows = rowsByKind[kind].sort((a, c) => a.sequence - c.sequence);
     assert.equal(rows.length, counts[kind]);
@@ -297,4 +318,4 @@ if (require.main === module) {
     console.log(JSON.stringify(verify(positional[0], { binary: positional[1], current }), null, 2));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
-module.exports = { verify };
+module.exports = { verify, verifyAlternatingActualStart };

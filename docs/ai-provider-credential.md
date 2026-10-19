@@ -1,10 +1,10 @@
-# OpenAI 密钥接入准备
+# 模型密钥接入准备（OpenAI / StepFun）
 
-本页对应 R5 的凭据管理增量。用户已选择 OpenAI、质量优先，并明确先完成不收费的准备；具体模型、单任务与月费用上限尚未确认。官方模型/计价页当前返回 HTTP 403，尚无可核实的当期型号与价格。本增量不启用云 provider，不发起模型请求，也不验证 API key 的远端有效性。
+本页对应 R5 的凭据管理增量。StepFun Plan 的 `step-5-preview` 已接入舞台生成和歌词情绪 completion；价格未知时采用 token-only 快照，不阻挡派发、不预留或统计未知金额，并在取得可信用量时记录输入/输出 token。价格金额、真实用量字段和模型质量仍待后续验证。OpenAI 的具体模型尚未确定，因此 OpenAI 仍保持关闭。保存密钥只完成本地存储操作，不代表远端鉴权成功。
 
 ## 操作
 
-工坊 → AI 生成 →「OpenAI 密钥设置（接入准备）」中，展开时查询状态，输入后显式保存或删除。持有 DataDir AI runner 锁的实例在生成开关关闭、当前仍使用 fake/本地模型时也能管理密钥。共享同一 DataDir 但没有拿到 runner 锁的第二实例返回 `ai_locked`（包括可能触发旧格式迁移的查询），界面提示切换到持锁实例，避免跨进程绕过凭据生命周期锁。成功仅表示本地存储操作完成，不能解释成 OpenAI 已鉴权或云生成就绪。
+工坊 → AI 生成 →「模型密钥设置（接入准备）」中，展开时查询当前服务及绑定地址，输入后显式保存或删除。查询成功后显示 OpenAI 或 StepFun 名称；目标未确认或查询失败时禁用保存/删除，需手动重新查询。持有 DataDir AI runner 锁的实例在生成开关关闭时也能管理密钥。共享同一 DataDir 但没有拿到 runner 锁的第二实例返回 `ai_locked`（包括可能触发旧格式迁移的查询），界面提示切换到持锁实例，避免跨进程绕过凭据生命周期锁。成功仅表示本地存储操作完成，不能解释成远端已鉴权或云生成就绪。
 
 输入为密码框，只用于本次提交；提交、收起、关闭、切页、隐藏或界面重建时清空。不放入模块状态、重试状态、localStorage/sessionStorage、设置、工程、分享或备份。保存/删除不自动重试；查询不轮询，也不自动重试。界面只展示是否已配置和稳定错误码对应的说明。
 
@@ -14,11 +14,13 @@
 
 | 方法 | 路径 | 输入/结果 |
 | --- | --- | --- |
-| GET | `/v1/ai/provider-credential` | 返回 `{provider:"openai",origin:"https://api.openai.com",configured:boolean}` |
+| GET | `/v1/ai/provider-credential` | 返回 `{provider,origin,configured}`，不含密钥或密钥摘要 |
 | PUT | `/v1/ai/provider-credential` | 仅 `{api_key:string}`，返回同一安全摘要 |
 | DELETE | `/v1/ai/provider-credential` | 幂等删除，返回 `configured:false` |
 
-不接收调用方提供的 owner、provider、origin 或钥匙串 key。固定 OpenAI HTTPS origin 与 DataDir 持久 owner、provider 一起构成版本化 SHA-256 命名空间；仍使用现有 `secrets::SecretBackend` 和发行版钥匙串 service。Standard/Full、不同安装的 owner 隔离。缺钥匙串明确失败，不回退到明文。
+不接收调用方提供的 owner、provider、origin 或钥匙串 key。服务启动配置固定目标；DataDir 持久 owner、provider 与规范地址共同构成版本化 SHA-256 命名空间。OpenAI 保留原 `https://api.openai.com` 命名空间和旧记录迁移；fake/Ollama 配置继续提供该准备入口。`ai.provider = "stepfun"` 时，只接受 `https://api.stepfun.com/v1` 或 `https://api.stepfun.com/step_plan/v1`（可带一个末尾斜线）；两条 API 路径的密钥互相隔离，也不读取或迁移 OpenAI 密钥。切换服务须为对应目标重新保存自己的密钥，删除只影响该目标。非法 StepFun 地址拒绝读写。
+
+仍复用现有 `secrets::SecretBackend`、发行版钥匙串 service，以及全进程共享的阻塞许可和生命周期锁。Standard/Full、不同安装的 owner 隔离。缺钥匙串明确失败，不回退到明文。歌词情绪 completion 已接入持久任务、派发标记与逐次用量账本；StepFun 的费用未知时按 token-only 记录，OpenAI 仍因具体模型未定而关闭。
 
 HTTP 请求体最多 8 KiB；key 最多 4096 字节，仅非空可见 ASCII，不猜测密钥前缀，不自动 trim。RPC 在复制 key 前检查类型和长度。重复/未知字段、非法 JSON、后端错误均不反射输入或系统诊断。`SecretEntry` 的 Debug 对凭据和设备内容脱敏。通用 settings 的 HTTP/RPC 同时拒绝并隐藏 `ai_provider_*`、`openai_api_key` 与 `ai_api_key`，沿用原音源凭据过滤。
 
@@ -40,19 +42,19 @@ Full 的底层兼容读会在当前发行版 service 下找不到值时回读旧
 
 ## 任务绑定与管理失效
 
-需要 OpenAI 凭据的 provider 在受理时读取受管钥匙串，任务价格快照只冻结非秘密的作用域和代际，不包含密钥或密钥摘要。无凭据的 fake/Ollama 不读取模型密钥。旧的无凭据快照保持兼容；需要凭据的 provider 不接受缺少绑定的旧快照。
+需要凭据的 OpenAI/StepFun provider 在受理时读取对应作用域的受管钥匙串，任务价格快照只冻结非秘密的作用域和代际，不包含密钥或密钥摘要。无凭据的 fake/Ollama 不读取模型密钥。旧的无凭据快照保持兼容；需要凭据的 provider 不接受缺少绑定的旧快照。
 
 受理的快照读租约持有到任务事务与输入交接结束；派发前重新读取同一作用域，严格比较冻结代际，读租约覆盖派发标记事务。两次读取均使用原单槽阻塞执行边界，超时或观察者离开后，实际系统调用仍持有执行许可和生命周期锁。代际缺失/变化使任务取消且不派发，后端不可用则失败且不派发。密钥仅作为不可调试、不可序列化的内存参数交给 provider。钥匙串准备与派发耗时计入原执行期限。
 
 显式保存（含相同值）或删除先获得不排队的生命周期写锁，再事务性取消该 owner 已有的凭据绑定任务并结算；free/local 任务独立工作。事务失败时不执行钥匙串变更。未派发任务释放预留，已标记可能发送的任务按未知费用保守结算，随后可信 usage 仍可按冻结价格校正。钥匙串变更失败也不会恢复已取消任务；用户需重新创建。管理 owner 在拿锁后由服务端持有，HTTP/RPC 等待者离开或超时不撤销已接受的管理操作。
 
-正在运行的 provider 继续由原执行 owner 持有，槽位直到本地调用结束或执行期限终止才释放，取消终态不会变成成功提案。真实云 adapter 仍需实现并验证发送前/发送中的协作取消、DNS/origin、usage 与远端未知费用；目前没有生产云 adapter，受控零网络 fixture 的验证不能替代这些验收。
+正在运行的 provider 继续由原执行 owner 持有，槽位直到本地调用结束或执行期限终止才释放，取消终态不会变成成功提案。OpenAI/StepFun adapter 的发送前/发送中取消已有回环 fixture。StepFun 在明确选择 provider、配置模型密钥并开启应用内生成后可按 token-only 模式派发；默认仍是 fake，当前不代表已经完成真实应用内请求验收。真实 endpoint 的取消、DNS/origin、usage 字段与实际账单仍待验证。
 
 ## 验证与剩余
 
 实现后检查涵盖隔离内存后端的 owner 作用域、脱敏错误、输入边界、超时/观察者取消后实际阻塞工作仍占槽，以及 RPC 设置过滤。存储代际另检查重复保存/删除后重建、最大转义长度旧密钥的稳定迁移、损坏/跨 owner 记录拒绝及后端部分成功后密钥与代际配对。`scripts/check-ai-credential-browser.js` 用隔离服务、显式内存凭据后端和真实 Chrome 检查管理认证、保存/删除、输入清理、无生成请求、浏览器/服务文件未保存合成密钥、错误不回显和窄屏。
 
-上述内存后端检查不接触真实密钥或系统钥匙串，不能证明 OS 凭据服务持久性、跨 OS 兼容或 OpenAI 认证；本机 Windows 系统后端另有下节的合成条目验收。模型选型、预算确认、完整请求可靠 token/费用上界、云端 DNS/请求边界、实际 usage/账单、隐私/条款及真实模型质量仍待完成，见[路线进度](./roadmap-progress.md)与[发布矩阵](./release-validation.md)。
+上述内存后端检查不接触真实密钥或系统钥匙串，不能证明 OS 凭据服务持久性、跨 OS 兼容或 OpenAI 认证；本机 Windows 系统后端另有下节的合成条目验收。StepFun token-only 路径不等待价格核实，剩余验收集中在真实应用内调用、usage 字段、云端 DNS/请求边界、隐私/条款和模型质量；OpenAI 仍待具体模型选择及其后续验证，见[路线进度](./roadmap-progress.md)与[发布矩阵](./release-validation.md)。
 
 入口初次增量（2026-10-18）：Standard / Full 服务端库 402 / 559 项通过（另 3 / 5 忽略），两版全 target Clippy 与 Rust 1.88.0 编译通过；前端默认 56 步、隔离 Standard 二进制的本页浏览器旅程、本地 Ollama fixture 回归及原 AI 任务面板 13 项通过。320px 与 390px 实际截图已检查。二进制构建在独立 `target/mcp-sdk-check`，未覆盖运行中的开发播放器；未提交或发布。
 

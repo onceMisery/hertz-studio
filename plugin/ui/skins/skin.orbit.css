@@ -394,6 +394,10 @@
   [data-skin="orbit"] .bar-volume input[type="range"] { width: 62px; }
 }
 @media (max-width: 380px) {
+  [data-skin="orbit"] .topbar { grid-template-columns: 34px minmax(0, 1fr); }
+  [data-skin="orbit"] .orbit-mobile-brand { grid-column: 2; grid-row: 1; }
+  [data-skin="orbit"] .topsearch { grid-column: 1 / -1; grid-row: 2; }
+  [data-skin="orbit"] .top-right { grid-row: 3; }
   [data-skin="orbit"] body .orbit-main > .stage { height: 160px; }
   [data-skin="orbit"] .orbit-info .stage-title { font-size: 20px; }
   [data-skin="orbit"] .orbit-actions { gap: 5px; margin-top: 10px; }

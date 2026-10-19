@@ -9,15 +9,24 @@ const { startFixture } = require('./ui-browser-fixture');
 const { uiToken, uiUrl } = require('./ui-token');
 const endpoint = '/v1/ai/provider-credential';
 const synthetic = 'fixture-credential-never-a-real-key';
-const output = path.resolve(__dirname, '../output/playwright/ai-credential');
+const stepfun = process.argv.includes('--stepfun');
+const providerId = stepfun ? 'stepfun' : 'openai';
+const providerName = stepfun ? 'StepFun' : 'OpenAI';
+const origin = stepfun ? 'https://api.stepfun.com/step_plan/v1' : 'https://api.openai.com';
+const output = path.resolve(__dirname, '../output/playwright/ai-credential' + (stepfun ? '-stepfun' : ''));
 
 async function main() {
   fs.mkdirSync(output, { recursive: true });
-  const fixture = await startFixture();
+  const fixture = await startFixture(stepfun ? {
+    prepareData(data) {
+      fs.mkdirSync(data, { recursive: true });
+      fs.writeFileSync(path.join(data, 'config.toml'), '[ai]\nprovider="stepfun"\norigin="' + origin + '"\nmodel="step-5-preview"\n');
+    }
+  } : {});
   process.env.VMUSIC_DATA_DIR = fixture.dataDir;
   let browser;
   try {
-    const expected = configured => ({ provider: 'openai', origin: 'https://api.openai.com', configured });
+    const expected = configured => ({ provider: providerId, origin, configured });
     assert.deepEqual(await fixture.api(endpoint), expected(false));
     assert.equal((await fetch(fixture.base + endpoint)).status, 401);
     const grant = await fixture.api('/v1/ai/grants', 'POST', { label: 'credential-denied-fixture', scopes: ['playback:read'] });
@@ -62,12 +71,13 @@ async function main() {
     await page.evaluate(() => { Workshop.open(); Workshop.setTab('ai'); });
     const panel = page.locator('.ws-ai-credential');
     await panel.locator('summary').click();
-    await page.getByText('尚未配置 OpenAI 密钥。', { exact: true }).waitFor();
-    const input = page.getByLabel('OpenAI API key', { exact: true });
+    await page.getByText(`尚未配置 ${providerName} 密钥。`, { exact: true }).waitFor();
+    const input = page.getByLabel(`${providerName} API key`, { exact: true });
     assert.equal(await input.getAttribute('type'), 'password');
+    assert.ok((await panel.innerText()).includes(origin), 'display the bound credential destination');
     await input.fill(synthetic);
-    await page.getByRole('button', { name: '保存 OpenAI 密钥', exact: true }).click();
-    await page.getByText('已配置 OpenAI 密钥；云端生成尚未启用。', { exact: true }).waitFor();
+    await page.getByRole('button', { name: `保存 ${providerName} 密钥`, exact: true }).click();
+    await page.getByText(`已配置 ${providerName} 密钥；云端生成尚未启用。`, { exact: true }).waitFor();
     assert.equal(await input.inputValue(), '');
     assert.deepEqual(await fixture.api(endpoint), expected(true));
     assert.equal((await fixture.api('/v1/ai/status')).consent.inAppGeneration, false);
@@ -81,13 +91,13 @@ async function main() {
     assert.equal(await input.inputValue(), '');
     await page.evaluate(() => { Workshop.open(); Workshop.setTab('ai'); });
     await panel.locator('summary').click();
-    await page.getByText('已配置 OpenAI 密钥；云端生成尚未启用。', { exact: true }).waitFor();
+    await page.getByText(`已配置 ${providerName} 密钥；云端生成尚未启用。`, { exact: true }).waitFor();
     await input.fill(synthetic);
     await page.evaluate(() => Workshop.setTab('io'));
     assert.equal(await page.locator('#ws-ai-key').count(), 0);
     await page.evaluate(() => Workshop.setTab('ai'));
     await panel.locator('summary').click();
-    await page.getByText('已配置 OpenAI 密钥；云端生成尚未启用。', { exact: true }).waitFor();
+    await page.getByText(`已配置 ${providerName} 密钥；云端生成尚未启用。`, { exact: true }).waitFor();
 
     await input.fill(synthetic);
     await page.evaluate(() => {
@@ -96,9 +106,10 @@ async function main() {
       delete document.hidden;
       document.dispatchEvent(new Event('visibilitychange'));
     });
-    assert.equal(await input.inputValue(), '', 'controlled hide event clears the input');
+    // Hiding rebuilds the panel before its destination has been queried again.
+    assert.equal(await page.locator('#ws-ai-key').inputValue(), '', 'controlled hide event clears the input');
     await panel.locator('summary').click();
-    await page.getByText('已配置 OpenAI 密钥；云端生成尚未启用。', { exact: true }).waitFor();
+    await page.getByText(`已配置 ${providerName} 密钥；云端生成尚未启用。`, { exact: true }).waitFor();
 
     let getCount = 0;
     await page.route('**' + endpoint, async route => {
@@ -111,9 +122,12 @@ async function main() {
     await page.getByText(/系统钥匙串不可用.*credential-fixture/).waitFor();
     assert.equal(getCount, 1, 'keyring errors are not automatically retried');
     assert.ok(!(await panel.innerText()).includes(synthetic), 'even a hostile error body cannot echo the key');
+    assert.equal(await page.getByRole('button', { name: `删除 ${providerName} 密钥`, exact: true }).isDisabled(), true, 'unknown destination disables mutation');
     await page.unroute('**' + endpoint);
-    await page.getByRole('button', { name: '删除 OpenAI 密钥', exact: true }).click();
-    await page.getByText('尚未配置 OpenAI 密钥。', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '查询密钥状态', exact: true }).click();
+    await page.getByText(`已配置 ${providerName} 密钥；云端生成尚未启用。`, { exact: true }).waitFor();
+    await page.getByRole('button', { name: `删除 ${providerName} 密钥`, exact: true }).click();
+    await page.getByText(`尚未配置 ${providerName} 密钥。`, { exact: true }).waitFor();
     assert.deepEqual(await fixture.api(endpoint), expected(false));
     assert.deepEqual(await fixture.api(endpoint, 'DELETE'), expected(false));
     assert.deepEqual(writes.map(item => item.method), ['PUT', 'DELETE']);

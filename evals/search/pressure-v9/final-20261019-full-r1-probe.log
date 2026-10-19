@@ -1,0 +1,13 @@
+
+running 1 test
+test online::search_pressure::sustained_shared_search_budget ... HERTZ_SEARCH_PRESSURE_PHASE {"name":"boundary-matrix","startedMs":0.9803999999999999}
+HERTZ_SEARCH_PRESSURE_PHASE {"name":"balanced-throughput","startedMs":14054.337500000001}
+HERTZ_SEARCH_PRESSURE_PHASE {"name":"baseline-idle","startedMs":74677.9559}
+HERTZ_SEARCH_PRESSURE_PHASE {"name":"load-0","startedMs":74686.351}
+HERTZ_SEARCH_PRESSURE_PHASE {"name":"idle-0","startedMs":135045.8547}
+HERTZ_SEARCH_PRESSURE_PHASE {"name":"complete","startedMs":135147.3221}
+{"edition":"full","finalAvailable":[4,16],"peakUpstream":4,"requests":4640,"waves":145}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 608 filtered out; finished in 136.59s
+

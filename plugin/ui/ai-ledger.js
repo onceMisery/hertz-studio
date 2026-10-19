@@ -5,7 +5,7 @@
   'use strict';
   var root = null, transport = null, epoch = 0, controller = null;
   var month = '', state = '', cursor = null, previous = [], page = null, pending = false, error = '';
-  var labels = {reserved:'在途预留',reported:'已报告费用',released:'未派发，预留已释放',unknown:'费用未确认',estimated_final:'估算费用'};
+  var labels = {reserved:'在途预留',reported:'已报告费用',released:'未派发，预留已释放',unknown:'费用未确认',estimated_final:'估算费用',unpriced:'费用未知，已记录 token'};
   function h(tag, cls, text) {
     var el = document.createElement(tag); if (cls) el.className = cls;
     if (text != null) el.textContent = text; return el;
@@ -70,8 +70,9 @@
     if (page && page.budget) {
       var budget=page.budget;
       var charged=budget.chargedTotalOverflowed?'超出可表示范围':amount(budget.chargedMicroUsd);
-      root.appendChild(h('p','sc-note ws-ledger-budget','当月总账（不随状态筛选变化）：已计 ' + charged
-        + ' · 在途预留 ' + amount(budget.reservedMicroUsd) + ' · 限额 ' + amount(budget.limitMicroUsd)));
+      root.appendChild(h('p','sc-note ws-ledger-budget','当月核价总额（不随状态筛选变化）：已核价 ' + charged
+        + ' · 在途预留 ' + amount(budget.reservedMicroUsd) + ' · 限额 ' + amount(budget.limitMicroUsd)
+        + ' · 未核价请求不计入金额总额'));
     } else if (!pending && page) root.appendChild(h('p','sc-note','该月没有总账记录；不能据此推断账目费用为零。'));
     if (error) {
       root.appendChild(h('p','sc-note ws-warn',error));
@@ -81,18 +82,30 @@
     if (page && page.guard && page.guard.halted) {
       root.appendChild(h('p','sc-note ws-warn','当前生成已熔断：'+page.guard.reason+'；关联任务 '+(page.guard.triggerJob || '未记录')+'。请在 AI 生成页核对配置后处理。'));
     }
+    if (page && page.guard && page.guard.tokenHalted) {
+      root.appendChild(h('p','sc-note ws-warn','token-only 生成已暂停：可信 token 用量超出受理上界；关联任务 '+(page.guard.tokenTriggerJob || '未记录')+'。请在 AI 生成页核对配置后复位。'));
+    }
     if (page && !pending && !error) {
       if (!page.entries.length) root.appendChild(h('p','sc-note','该月没有符合条件的账目。'));
       page.entries.forEach(function(entry){
         var card=h('article','ws-ledger-entry'); card.dataset.jobId=entry.jobId;
         var text=labels[entry.usageState] || '费用状态待核实';
-        if (entry.usageState==='reserved') text+=' · '+amount(entry.reservationMicroUsd);
-        else if (entry.usageState!=='released') text+=' · '+amount(entry.accountedMicroUsd);
+        if (entry.usageState==='reserved') text+=entry.pricingKnown
+          ? ' · '+amount(entry.reservationMicroUsd)
+          : ' · 等待 token 用量';
+        else if (entry.usageState!=='released' && entry.usageState!=='unpriced') text+=' · '+amount(entry.accountedMicroUsd);
         card.appendChild(h('strong',null,text));
         var time=entry.acceptedAt==null ? '历史受理时间缺失；记账时间 ' : '受理时间 ';
         time+=new Date(entry.acceptedAt==null?entry.recordedAt:entry.acceptedAt).toLocaleString();
         card.appendChild(h('p','sc-note',time+' · '+(entry.taskRetained?'任务仍保留':'任务已清理')+(entry.taskState?' · '+entry.taskState:'')));
-        if (entry.usageState==='unknown' || entry.usageState==='estimated_final') {
+        if (entry.reportedUsage) {
+          var usage=entry.reportedUsage;
+          var accounting=entry.usageState==='unpriced'?'金额未核价'
+            :entry.usageState==='reported'?'费用已按可信用量核算':'费用仍按预留估算';
+          card.appendChild(h('p','sc-note',
+            '输入 '+usage.inputTokens+' tokens · 输出 '+usage.outputTokens+' tokens · '+accounting));
+        }
+        if ((entry.usageState==='unknown' || entry.usageState==='estimated_final') && !entry.reportedUsage) {
           card.appendChild(h('p','sc-note','当前金额按预留估算；可信计量迟到时仍可校正，不代表供应商已结清。'));
         }
         if (!entry.pricingVerified) card.appendChild(h('p','sc-note ws-warn','历史价格依据不完整，未用当前价格重算。'));

@@ -59,6 +59,10 @@ async function main() {
   for (const status of [401, 403, 404]) assert.equal(coordinator.failure({status}).retryable, false);
   assert.equal(coordinator.failure({code:'provider_not_configured'}).retryable, false);
   assert.equal(coordinator.failure({status:429}).retryable, true);
+  assert.equal(coordinator.failure({status:502,code:'upstream_rejected'}).label, '音源拒绝了搜索请求');
+  assert.equal(coordinator.failure({status:502,code:'upstream_error'}).label, '音源连接失败，请检查网络');
+  assert.equal(coordinator.failure(Object.assign(new TypeError('Failed to fetch'), {name:'TypeError'})).label,
+    '音源连接失败，请检查网络');
 
   const capped = setup(), owner = capped.coordinator.create(capped.transport);
   const pending = Array.from({length:66}, (_, i) => owner.get('/search?source=' + i).catch(e => e.code || e.name));

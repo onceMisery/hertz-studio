@@ -668,9 +668,12 @@
     }
     var statuses = document.createElement('div');
     statuses.className = 'search-source-statuses';
+    var focusRestored = false;
     visiblePages.forEach(function (p) {
       var item = document.createElement('div');
       item.className = 'search-source-status' + (p.error ? ' all-failed' : '');
+      item.dataset.source = p.source;
+      item.tabIndex = -1;
       item.appendChild(badge(p.source));
       var text = document.createElement('span');
       text.textContent = sourceLabel(p.source) + ' · ' + p.tracks.length + ' 首已加载'
@@ -696,12 +699,32 @@
       }
     }
     if (focusKey) body.querySelectorAll('[data-search-key]').forEach(function (el) {
-      if (el.dataset.searchKey === focusKey) el.focus({ preventScroll: true });
+      if (el.dataset.searchKey === focusKey) {
+        el.focus({ preventScroll: true });
+        focusRestored = true;
+      }
     });
+    if (!focusRestored && session.focusFallbackSource) {
+      var fallback = Array.from(statuses.children).find(function (item) {
+        return item.dataset.source === session.focusFallbackSource;
+      });
+      // Restore only when replacing the result tree dropped focus to body. A
+      // user who moved to the search input or another control owns that focus.
+      if (fallback && document.activeElement === document.body) {
+        fallback.focus({ preventScroll: true });
+      }
+      session.focusFallbackSource = null;
+    } else if (focusRestored && session.focusFallbackSource) {
+      var focusPage = pages.find(function (page) { return page.source === session.focusFallbackSource; });
+      if (focusPage && !focusPage.loading) session.focusFallbackSource = null;
+    }
   }
 
   async function loadSearchPage(session, page) {
     if (session !== searchSession || page.loading || (!page.more && !page.error)) return;
+    var focusKey = 'more:' + page.source;
+    session.focusFallbackSource = document.activeElement && document.activeElement.dataset
+      && document.activeElement.dataset.searchKey === focusKey ? page.source : null;
     page.loading = true;
     page.error = '';
     page.failure = null;
@@ -742,7 +765,7 @@
     } catch (err) {
       if (session !== searchSession) return;
       page.failure = HertzSearch.failure(err);
-      page.error = H.errText(page.failure.label, err);
+      page.error = page.failure.label;
       if (!session.aggregate && !session.silent) H.toast(page.error, 'error');
     } finally {
       if (session === searchSession) {
@@ -1209,6 +1232,7 @@
       ticket = T.playbackIntent ? T.playbackIntent() : null;
       refreshPlaybackRows();
       if (window.Stage) window.Stage.setLyrics(null);
+      if (window.HertzEmotionAuto) window.HertzEmotionAuto.onLyricsChanged();
       res = await request;
       if (!current()) return;
     } catch (err) {
@@ -1249,6 +1273,7 @@
       ticket = T.playbackIntent ? T.playbackIntent() : null;
       refreshPlaybackRows();
       if (window.Stage) window.Stage.setLyrics(null);
+      if (window.HertzEmotionAuto) window.HertzEmotionAuto.onLyricsChanged();
       res = await request;
       if (!current()) return;
     } catch (err) {
@@ -1363,6 +1388,7 @@
       // 与本地歌词同一出口：全局偏移 / 逐行过滤 / 片头策略在这里统一生效。
       var staged = window.HertzLyrics ? window.HertzLyrics.stageDoc(doc) : doc;
       window.Stage.setLyrics(staged && staged.lines && staged.lines.length ? staged : null);
+      if (window.HertzEmotionAuto) window.HertzEmotionAuto.onLyricsChanged();
     }
   }
 

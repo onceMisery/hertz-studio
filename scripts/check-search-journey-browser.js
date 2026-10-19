@@ -31,6 +31,9 @@ async function main() {
     requests.push({q,source,offset}); active++; maxActive = Math.max(maxActive, active);
     try {
       if (q.includes('slow') && source === 'qq') await new Promise(resolve => releases.set(q, resolve));
+      if (q === 'R1 online slow' && source === 'netease' && offset > 0) {
+        await new Promise(resolve => releases.set(q + ':page', resolve));
+      }
       const attempt = requests.filter(r => r.q === q && r.source === source && r.offset === offset).length;
       if (source === 'kugou' && attempt === 1) {
         await route.fulfill({status:504,json:{error:{code:'upstream_timeout',request_id:'r1-timeout',message:'fixture timeout'}}}); return;
@@ -61,9 +64,18 @@ async function main() {
     assert.equal(await failed.getAttribute('data-request-id'),'r1-timeout');
     await failed.getByRole('button',{name:'重试',exact:true}).click();
     await page.waitForFunction(() => Online.state.tracks.length===24);
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.source), 'kugou',
+      'successful source retry moves focus to its status when retry control disappears');
     assert.equal(count('R1 online slow','netease'),1,'source retry retains successful response');
-    await page.locator('.search-source-status').filter({hasText:'网易云音乐'}).getByRole('button',{name:'加载更多',exact:true}).click();
+    const loadMore = page.locator('.search-source-status').filter({hasText:'网易云音乐'}).getByRole('button',{name:'加载更多',exact:true});
+    await loadMore.focus();
+    await loadMore.click();
+    await page.waitForFunction(() => document.querySelector('.search-source-status[data-source="netease"] button')?.disabled);
+    await page.locator('#online-q').focus();
+    release('R1 online slow:page');
     await page.waitForFunction(() => Online.state.tracks.length===26);
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'online-q',
+      'last-page completion does not steal focus after the user moves to the search input');
     assert.ok(requests.some(r=>r.q==='R1 online slow' && r.source==='netease' && r.offset===20));
     assert.ok(maxActive<=2,'actual initial/retry/page source reads share limit');
     await page.screenshot({path:path.join(output,'online.png')});
@@ -74,8 +86,12 @@ async function main() {
     const tsNet = page.locator('.ts-menu section[data-source="netease"] .ts-row').first();
     await tsNet.evaluate(el=>{window.r1TopRow=el;});
     release('R1 top slow');
-    await page.locator('.ts-menu').getByRole('button',{name:'重试 酷狗音乐',exact:true}).click();
+    const topRetry = page.locator('.ts-menu').getByRole('button',{name:'重试 酷狗音乐',exact:true});
+    await topRetry.focus();
+    await topRetry.click();
     await page.waitForFunction(() => TopSearch.state.previewTracks.length===12);
+    assert.equal(await page.evaluate(() => document.activeElement.classList.contains('ts-hint')), true,
+      'topbar retry keeps focus on its source status');
     assert.equal(await page.evaluate(()=>r1TopRow.isConnected),true);
     assert.equal(count('R1 top slow','netease'),1);
     await page.locator('#search').fill('R1 top canceled slow');
@@ -98,8 +114,12 @@ async function main() {
     await page.locator('.sh-search-source[data-source="qq"] .sh-track').first().waitFor();
     assert.equal(await page.evaluate(()=>r1SpaceRow.isConnected && r1SpaceRow.contains(document.activeElement)),true);
     const spaceError = page.locator('.sh-search-source[data-source="kugou"]');
-    await spaceError.getByRole('button',{name:'重试 酷狗音乐',exact:true}).click();
+    const spaceRetry = spaceError.getByRole('button',{name:'重试 酷狗音乐',exact:true});
+    await spaceRetry.focus();
+    await spaceRetry.click();
     await spaceError.locator('.sh-track').first().waitFor();
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.searchStatus), 'true',
+      'space source retry transfers focus to its status when the action is removed');
     assert.equal(await spaceError.locator('.sh-track').count(),2,'retry after initial completion still publishes');
     assert.equal(count('R1 space slow','netease'),1);
     await page.getByRole('button',{name:'加载更多 · 网易云音乐',exact:true}).click();
@@ -119,8 +139,12 @@ async function main() {
     await page.evaluate(()=>Skins.apply('liunian'));
     await page.locator('.ln-sp-q').fill('R1 liunian');
     const lnError = page.locator('.ln-sp-sec').filter({has:page.locator('[data-error-code="upstream_timeout"]')}).last();
-    await lnError.getByRole('button',{name:'重试',exact:true}).click();
+    const lnRetry = lnError.getByRole('button',{name:'重试',exact:true});
+    await lnRetry.focus();
+    await lnRetry.click();
     await page.waitForFunction(()=>document.querySelectorAll('.ln-sp-row').length===8);
+    assert.equal(await lnRetry.evaluate(el => document.activeElement === el), true,
+      'Liunian keeps the retry control focused while converting it to the next action');
     assert.equal(count('R1 liunian','netease'),1);
     await page.locator('.ln-sp-q').fill('R1 liunian canceled slow');
     await page.waitForFunction(()=>document.querySelectorAll('.ln-sp-row').length===4);

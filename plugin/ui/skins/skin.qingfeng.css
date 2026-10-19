@@ -2426,6 +2426,15 @@ body.qf-stage-dragging [data-skin="qingfeng"] .stage,
   }
 }
 
+@media (max-width: 380px) {
+  [data-skin="qingfeng"] .topbar {
+    gap: 8px;
+    padding-inline: 16px;
+  }
+
+  [data-skin="qingfeng"] .top-right { gap: 4px; }
+}
+
 @media (max-width: 720px) {
   [data-skin="qingfeng"] .qf-modal-body {
     flex-direction: column;

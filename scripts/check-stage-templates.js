@@ -39,7 +39,7 @@ async function main(){
   CS.savePreset('Template copy');assert.equal(CS.library()[0].name,'Template copy');
   assert.equal(CS.library()[0].scene,'orb');
   assert.equal(h.requests(),0,'Templates never read media or call a model');
-  const info=T.list();info[0].version=999;assert.equal(T.list()[0].version,1);
+  const info=T.list();info[0].version=999;assert.equal(T.list()[0].version,2);
   draft.artifact.intent.patch['look.bloom']=99;
   assert.equal((await T.prepare('quiet-orb')).preset.look.bloom,.12);
   await assert.rejects(()=>T.prepare('missing'),/未知/);

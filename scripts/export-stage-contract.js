@@ -71,10 +71,11 @@ function generate() {
   const common = draft.commonParams();
   const digest = v => createHash('sha256').update(draft.canonical(v)).digest('hex');
   const intentSchema = draft.schema(scenes, common);
+  const contract = { intentSchema, commonParams: common, scenes };
   const basePresetHashes = {};
   for (const scene of scenes) basePresetHashes[scene.id] = digest(ctx.CreativeStage.canonicalBaseline(scene.id));
   return {
-    version: 1, schemaVersion: '1', schemaHash: digest(intentSchema), basePresetHashes,
+    version: 1, schemaVersion: '1', schemaHash: digest(draft.schemaFingerprint(contract)), basePresetHashes,
     generator: 'scripts/export-stage-contract.js',
     source: ['plugin/ui/creative-gl.js', 'plugin/ui/creative-anime.js', 'plugin/ui/creative-stage.js', 'plugin/ui/handdrawn.js'],
     commonParams: common, intentSchema, scenes,

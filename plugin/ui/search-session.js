@@ -68,7 +68,9 @@
     var label = status === 401 ? '需要登录' : status === 403 ? '无权访问'
       : /config|credential|disabled|unsupported/.test(code) || status === 404 ? '当前音源未就绪'
         : status === 429 ? '请求过于频繁' : status === 504 || /timeout/.test(code) ? '搜索超时'
-          : '搜索暂不可用';
+          : code === 'upstream_rejected' ? '音源拒绝了搜索请求'
+            : code === 'upstream_error' || (error && error.name === 'TypeError') ? '音源连接失败，请检查网络'
+              : '搜索暂不可用';
     return { code: code, requestId: error && error.requestId || '', retryable: retryable, label: label };
   }
   global.HertzSearch = { create: create, failure: failure };

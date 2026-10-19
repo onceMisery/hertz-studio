@@ -5,9 +5,8 @@
 //!
 //! The existing AI runtime owns model HTTP clients and credentials; this module
 //! owns the classification contract: input hash/chunking, prompt, strict output
-//! validation, deterministic merge and the bounded cache. Its generic adapter
-//! currently allows only zero-remote-cost providers. Metered completions must
-//! first join the shared task and usage ledger path.
+//! validation, deterministic merge and the bounded cache. Managed completions
+//! use the shared persistent task and usage ledger path.
 //!
 //! Without a configured provider the service is unavailable and the auto mode
 //! stays disabled. Tests use a scripted provider; no real key is required.
@@ -18,6 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use unicode_normalization::UnicodeNormalization;
 
@@ -131,6 +131,27 @@ impl EmotionError {
     }
     fn budget() -> Self {
         Self::new(429, "budget_exceeded", "本月 AI 预算已用尽")
+    }
+    fn history_capacity() -> Self {
+        Self::new(
+            429,
+            "history_capacity_exceeded",
+            "AI 受保护记录或逻辑数据容量已满，请等待保留期结束",
+        )
+    }
+    fn consent_revoked() -> Self {
+        Self::new(
+            403,
+            "emotion_consent_required",
+            "歌词情绪自动分类授权已撤回",
+        )
+    }
+    fn cancelled() -> Self {
+        Self::new(
+            409,
+            "emotion_cancelled",
+            "歌词情绪请求已取消；请确认授权或模型密钥后重试",
+        )
     }
 }
 
@@ -285,7 +306,7 @@ fn validate_locks(
 
 fn parse_reply(
     text: &str,
-    request: &ClassifyRequest,
+    lyrics_hash: &str,
     chunk: &Chunk,
 ) -> Result<(Vec<CueLine>, Vec<CueSection>), EmotionError> {
     if text.len() > MAX_REPLY_BYTES {
@@ -298,7 +319,7 @@ fn parse_reply(
     if reply.version != 1 {
         return Err(EmotionError::invalid("模型 version 必须为 1"));
     }
-    if reply.lyrics_hash != request.lyrics_hash {
+    if reply.lyrics_hash != lyrics_hash {
         return Err(EmotionError::invalid("模型 lyricsHash 不一致"));
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -346,6 +367,37 @@ fn parse_reply(
         return Err(EmotionError::invalid("模型 section 超过 256 条"));
     }
     Ok((reply.lines, sections))
+}
+
+fn validate_reply_for_prompt(text: &str, prompt: &str) -> Result<(), EmotionError> {
+    let prompt: Value =
+        serde_json::from_str(prompt).map_err(|_| EmotionError::invalid("模型输入契约无法解析"))?;
+    let lyrics_hash = prompt
+        .get("lyricsHash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| EmotionError::invalid("模型输入缺少 lyricsHash"))?;
+    let core_from = prompt
+        .get("CORE_FROM")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| EmotionError::invalid("模型输入 CORE_FROM 非法"))?;
+    let core_to = prompt
+        .get("CORE_TO")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value >= core_from)
+        .ok_or_else(|| EmotionError::invalid("模型输入 CORE_TO 非法"))?;
+    parse_reply(
+        text,
+        lyrics_hash,
+        &Chunk {
+            core_from,
+            core_to,
+            from: core_from,
+            to: core_to,
+        },
+    )?;
+    Ok(())
 }
 
 /// Re-validate a persisted cue before trusting it. A schema change or a
@@ -463,6 +515,7 @@ pub(crate) trait EmotionProvider: Send + Sync {
         &self,
         system: String,
         user: String,
+        cancellation: crate::ai::jobs::ProviderCancellation,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
 }
 
@@ -485,6 +538,7 @@ impl EmotionProvider for Unavailable {
         &self,
         _system: String,
         _user: String,
+        _cancellation: crate::ai::jobs::ProviderCancellation,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
         Box::pin(async { Err("no lyric emotion provider configured".to_string()) })
     }
@@ -509,6 +563,7 @@ impl EmotionProvider for FakeEmotionProvider {
         &self,
         _system: String,
         user: String,
+        _cancellation: crate::ai::jobs::ProviderCancellation,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
         Box::pin(async move {
             let input: Value = serde_json::from_str(&user)
@@ -560,29 +615,211 @@ struct AiRuntimeEmotionProvider {
     owner: String,
 }
 
-/// Charge the full request bound before dispatch. Prepaying (rather than
-/// reserving and settling later) keeps the monthly counter correct when the
-/// caller disappears or the process exits mid-request: unknown usage is
-/// conservatively charged, and no reserved amount can leak.
-async fn charge_budget(db: &sqlx::SqlitePool, amount: i64) -> Result<(), String> {
-    let month = crate::ai::jobs::utc_month_key(vmusic_store::now_ms());
+const EMOTION_CAPABILITY: &str = "lyrics.emotion.classify";
+const EMOTION_PRINCIPAL: &str = "official-lyric-emotion";
+
+async fn begin_completion_job(
+    db: &sqlx::SqlitePool,
+    owner: &str,
+    pricing: &crate::ai::usage::PricingSnapshot,
+) -> Result<vmusic_store::ai_jobs::JobRow, String> {
+    use vmusic_store::ai_jobs as store;
+
+    let now = vmusic_store::now_ms();
+    let id = uuid::Uuid::new_v4().to_string();
+    let month = crate::ai::jobs::utc_month_key(now);
+    let job = store::JobRow {
+        job_id: id.clone(),
+        owner_instance_id: owner.to_string(),
+        principal: EMOTION_PRINCIPAL.into(),
+        capability: EMOTION_CAPABILITY.into(),
+        key: id.clone(),
+        input_hash: id.clone(),
+        state: "accepted".into(),
+        state_revision: 1,
+        dispatch_state: "not_dispatched".into(),
+        attempt_id: None,
+        provider: pricing.provider.clone(),
+        model: pricing.model.clone(),
+        reservation_micro_usd: pricing.quote.reservation_micro_usd,
+        pricing_snapshot: serde_json::to_string(pricing)
+            .map_err(|error| format!("cannot encode pricing snapshot: {error}"))?,
+        created_at: now,
+        updated_at: now,
+        result_proposal_id: None,
+    };
+    let attempt_id = uuid::Uuid::new_v4().to_string();
+    crate::ai::jobs::retain_history(db, now)
+        .await
+        .map_err(|error| format!("{}: {}", error.code, error.message))?;
     let mut tx = vmusic_store::begin_immediate(db)
         .await
-        .map_err(|error| format!("budget unavailable: {error}"))?;
-    vmusic_store::ai_jobs::reserve(
-        &mut tx,
-        &month,
-        amount,
-        crate::ai::jobs::MONTHLY_LIMIT_MICRO_USD,
-    )
-    .await
-    .map_err(|error| format!("budget_exceeded: {error}"))?;
-    vmusic_store::ai_jobs::settle(&mut tx, &month, amount, amount)
+        .map_err(|error| format!("usage ledger unavailable: {error}"))?;
+    crate::ai::jobs::check_clock(&mut tx, now)
+        .await
+        .map_err(|error| format!("{}: {}", error.code, error.message))?;
+    let authorized: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'lyrics_emotion_ai_authorized'")
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("usage ledger unavailable: {error}"))?;
+    if authorized
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        != Some(Value::Bool(true))
+    {
+        return Err("emotion_consent_revoked: lyric authorization is disabled".into());
+    }
+    crate::ai::jobs::check_history_capacity(&mut tx, owner)
+        .await
+        .map_err(|error| format!("{}: {}", error.code, error.message))?;
+    let guard = store::ensure_budget_guard(&mut tx, owner)
+        .await
+        .map_err(|error| format!("usage ledger unavailable: {error}"))?;
+    if pricing.pricing_known() && guard.halted {
+        return Err("budget_halted: shared AI generation is paused".into());
+    }
+    if !pricing.pricing_known() && guard.token_halted {
+        return Err("token_bounds_halted: token-only generation is paused".into());
+    }
+    if pricing.pricing_known() {
+        store::reserve(
+            &mut tx,
+            &month,
+            job.reservation_micro_usd,
+            crate::ai::jobs::MONTHLY_LIMIT_MICRO_USD,
+        )
         .await
         .map_err(|error| format!("budget unavailable: {error}"))?;
+    } else {
+        store::get_or_create_month(&mut *tx, &month)
+            .await
+            .map_err(|error| format!("usage ledger unavailable: {error}"))?;
+    }
+    store::advance_watermark(&mut tx, owner, now)
+        .await
+        .map_err(|error| format!("usage ledger unavailable: {error}"))?;
+    store::insert_job(&mut *tx, &job)
+        .await
+        .map_err(|error| format!("usage ledger unavailable: {error}"))?;
+    if !store::cas_job_state(&mut *tx, &id, "accepted", 1, "running", now)
+        .await
+        .map_err(|error| format!("usage ledger unavailable: {error}"))?
+        || !store::mark_dispatched(&mut *tx, &id, &attempt_id)
+            .await
+            .map_err(|error| format!("usage ledger unavailable: {error}"))?
+    {
+        return Err("usage ledger could not mark completion for dispatch".into());
+    }
     tx.commit()
         .await
-        .map_err(|error| format!("budget unavailable: {error}"))
+        .map_err(|error| format!("usage ledger unavailable: {error}"))?;
+
+    let mut job = job;
+    job.state = "running".into();
+    job.state_revision = 2;
+    job.dispatch_state = "may_have_been_sent".into();
+    job.attempt_id = Some(attempt_id);
+    Ok(job)
+}
+
+async fn finish_completion_job(
+    db: &sqlx::SqlitePool,
+    job: &vmusic_store::ai_jobs::JobRow,
+    succeeded: bool,
+    usage: Option<&crate::ai::usage::TrustedUsage>,
+) -> Result<(), String> {
+    use vmusic_store::ai_jobs as store;
+
+    let result = async {
+        let now = vmusic_store::now_ms();
+        let terminal = if succeeded { "succeeded" } else { "failed" };
+        let mut tx = vmusic_store::begin_immediate(db)
+            .await
+            .map_err(|error| format!("usage ledger unavailable: {error}"))?;
+        let won = store::cas_job_state(
+            &mut *tx,
+            &job.job_id,
+            "running",
+            job.state_revision,
+            terminal,
+            now,
+        )
+        .await
+        .map_err(|error| format!("usage ledger unavailable: {error}"))?;
+        let mut settled_job = job.clone();
+        if won {
+            settled_job.state = terminal.into();
+            settled_job.state_revision += 1;
+            settled_job.updated_at = now;
+        }
+        crate::ai::usage::settle_terminal(&mut tx, &settled_job, usage, now)
+            .await
+            .map_err(|error| format!("usage settlement failed: {}", error.message))?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("usage ledger unavailable: {error}"))
+    }
+    .await;
+
+    if let Err(reason) = result {
+        tracing::error!("lyric completion settlement failed; attempting interruption: {reason}");
+        let mut interruption = Err(String::from("completion interruption was not attempted"));
+        for delay_ms in [0, 10, 50, 200] {
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            interruption = interrupt_completion_job(db, job, usage).await;
+            if interruption.is_ok() {
+                break;
+            }
+        }
+        if let Err(error) = interruption {
+            tracing::error!("lyric completion interruption settlement failed: {error}");
+        }
+        return Err(reason);
+    }
+
+    Ok(())
+}
+
+async fn interrupt_completion_job(
+    db: &sqlx::SqlitePool,
+    job: &vmusic_store::ai_jobs::JobRow,
+    usage: Option<&crate::ai::usage::TrustedUsage>,
+) -> Result<(), String> {
+    use vmusic_store::ai_jobs as store;
+
+    let mut tx = vmusic_store::begin_immediate(db)
+        .await
+        .map_err(|error| format!("usage ledger unavailable: {error}"))?;
+    let mut current = store::find_job_by_id(&mut *tx, &job.job_id)
+        .await
+        .map_err(|error| format!("usage ledger unavailable: {error}"))?
+        .ok_or_else(|| "completion task disappeared before interruption".to_string())?;
+    let now = vmusic_store::now_ms();
+    if current.state == "running"
+        && store::cas_job_state(
+            &mut *tx,
+            &current.job_id,
+            "running",
+            current.state_revision,
+            "interrupted",
+            now,
+        )
+        .await
+        .map_err(|error| format!("usage ledger unavailable: {error}"))?
+    {
+        current.state = "interrupted".into();
+        current.state_revision += 1;
+        current.updated_at = now;
+    }
+    crate::ai::usage::settle_terminal(&mut tx, &current, usage, now)
+        .await
+        .map_err(|error| format!("usage settlement failed: {}", error.message))?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("usage ledger unavailable: {error}"))
 }
 
 impl EmotionProvider for AiRuntimeEmotionProvider {
@@ -602,47 +839,131 @@ impl EmotionProvider for AiRuntimeEmotionProvider {
         &self,
         system: String,
         user: String,
+        cancellation: crate::ai::jobs::ProviderCancellation,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
         let provider = self.provider.clone();
         let credentials = self.credentials.clone();
         let execution_slots = self.execution_slots.clone();
         let db = self.db.clone();
         let owner = self.owner.clone();
+        let recovery_db = db.clone();
+        let recovery_job = Arc::new(Mutex::new(None));
+        let task_recovery_job = recovery_job.clone();
         Box::pin(async move {
-            let _permit = execution_slots
-                .try_acquire_owned()
-                .map_err(|_| AI_EXECUTION_BUSY.to_string())?;
-            let credential = if provider.requires_credential() {
-                Some(
-                    credentials
-                        .snapshot(&owner)
-                        .await
-                        .map_err(|error| error.message)?
-                        .into_secret(),
-                )
-            } else {
-                None
-            };
-            if !provider.supports_zero_cost_completion() {
+            let task = async move {
+                if cancellation.is_cancelled() {
+                    return Err("emotion_cancelled: lyric completion was cancelled".into());
+                }
+                let _permit = execution_slots
+                    .try_acquire_owned()
+                    .map_err(|_| AI_EXECUTION_BUSY.to_string())?;
+                if !provider.ready() {
+                    return Err(provider
+                        .diagnostic()
+                        .unwrap_or("lyric emotion provider is unavailable")
+                        .to_string());
+                }
                 let quote = provider
                     .quote(&user)
                     .map_err(|reason| format!("pricing_unavailable: {reason}"))?;
                 quote
                     .validate()
                     .map_err(|reason| format!("pricing_unavailable: {reason}"))?;
-                if let Some(db) = db.as_ref() {
-                    charge_budget(db, quote.reservation_micro_usd).await?;
+                let credential = if provider.requires_credential() {
+                    Some(
+                        credentials
+                            .snapshot(&owner)
+                            .await
+                            .map_err(|error| error.message)?,
+                    )
+                } else {
+                    None
+                };
+                let pricing = crate::ai::usage::PricingSnapshot {
+                    provider: provider.id().to_string(),
+                    model: provider.model().to_string(),
+                    quote,
+                    credential: credential.as_ref().map(|lease| lease.identity()),
+                };
+                let job = if let Some(db) = db.as_ref() {
+                    Some(begin_completion_job(db, &owner, &pricing).await?)
+                } else {
+                    None
+                };
+                if let Some(job) = job.as_ref() {
+                    if let Ok(mut tracked) = task_recovery_job.lock() {
+                        *tracked = Some(job.clone());
+                    }
+                }
+                let credential = credential.map(crate::ai::credential::Lease::into_secret);
+                let validation_prompt = user.clone();
+                if cancellation.is_cancelled() {
+                    if let (Some(db), Some(job)) = (db.as_ref(), job.as_ref()) {
+                        finish_completion_job(db, job, false, None).await?;
+                    }
+                    return Err("emotion_cancelled: lyric completion was cancelled".into());
+                }
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_millis(crate::ai::jobs::RUN_DEADLINE_MS as u64),
+                    provider.complete(system, user, credential, cancellation),
+                )
+                .await;
+                let (reply, usage) = match result {
+                    Ok(Ok(reply)) => (reply.text, reply.usage),
+                    Ok(Err(error)) => (Err(error), None),
+                    Err(_) => (Err("lyric emotion provider timed out".into()), None),
+                };
+                if let (Some(db), Some(job), Some(usage)) = (db.as_ref(), job.as_ref(), usage.as_ref()) {
+                    if let Err(error) =
+                        crate::ai::usage::persist_pending_usage(db, job, usage).await
+                    {
+                        tracing::warn!(
+                            error = %error.code,
+                            "lyric completion trusted usage could not be staged"
+                        );
+                    }
+                }
+                if let (Some(db), Some(job)) = (db.as_ref(), job.as_ref()) {
+                    let output_valid = reply.as_ref().is_ok_and(|text| {
+                        validate_reply_for_prompt(text, &validation_prompt).is_ok()
+                    });
+                    finish_completion_job(db, job, output_valid, usage.as_ref()).await?;
+                }
+                reply
+            };
+            match tokio::spawn(task).await {
+                Ok(result) => result,
+                Err(error) => {
+                    let tracked_job = recovery_job
+                        .lock()
+                        .ok()
+                        .and_then(|tracked| tracked.clone());
+                    if let (Some(db), Some(job)) = (recovery_db.as_ref(), tracked_job.as_ref()) {
+                        let mut settled = Err("completion interruption was not attempted".into());
+                        for delay_ms in [0, 10, 50, 200] {
+                            if delay_ms > 0 {
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            }
+                            settled = interrupt_completion_job(db, job, None).await;
+                            if settled.is_ok() {
+                                break;
+                            }
+                        }
+                        if let Err(settle_error) = settled {
+                            tracing::error!(
+                                "lyric completion worker recovery failed: {settle_error}"
+                            );
+                        }
+                    }
+                    let reason = if error.is_panic() {
+                        "lyric emotion worker panicked"
+                    } else {
+                        "lyric emotion worker was cancelled"
+                    };
+                    tracing::error!("{reason}: {error}");
+                    Err(reason.into())
                 }
             }
-            let reply = provider
-                .complete(
-                    system,
-                    user,
-                    credential,
-                    crate::ai::jobs::ProviderCancellation::default(),
-                )
-                .await?;
-            Ok(reply.text)
         })
     }
 }
@@ -650,6 +971,21 @@ impl EmotionProvider for AiRuntimeEmotionProvider {
 pub(crate) struct EmotionService {
     provider: RwLock<Arc<dyn EmotionProvider>>,
     cache: Mutex<Cache>,
+    active: Mutex<HashMap<u64, tokio::sync::watch::Sender<()>>>,
+    next_active: AtomicU64,
+}
+
+struct ActiveEmotionCall<'a> {
+    calls: &'a Mutex<HashMap<u64, tokio::sync::watch::Sender<()>>>,
+    id: u64,
+}
+
+impl Drop for ActiveEmotionCall<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.remove(&self.id);
+        }
+    }
 }
 
 impl EmotionService {
@@ -657,6 +993,8 @@ impl EmotionService {
         Self {
             provider: RwLock::new(provider),
             cache: Mutex::new(Cache::new()),
+            active: Mutex::new(HashMap::new()),
+            next_active: AtomicU64::new(1),
         }
     }
 
@@ -707,6 +1045,14 @@ impl EmotionService {
         ))
     }
 
+    pub(crate) fn cancel_active(&self) {
+        if let Ok(calls) = self.active.lock() {
+            for sender in calls.values() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
     pub(crate) fn status(&self, authorized: bool) -> Value {
         match self.provider() {
             Ok(provider) => json!({
@@ -751,26 +1097,52 @@ impl EmotionService {
         if !provider.ready() {
             return Err(EmotionError::unavailable("歌词情绪 provider 未就绪"));
         }
+        let id = self.next_active.fetch_add(1, Ordering::Relaxed);
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
+        self.active
+            .lock()
+            .map_err(|_| EmotionError::unavailable("active classification registry unavailable"))?
+            .insert(id, cancel_tx);
+        let _active_call = ActiveEmotionCall {
+            calls: &self.active,
+            id,
+        };
         let chunks = chunks(request.lines.len());
         let mut outcomes = tokio::time::timeout(CLASSIFY_TIMEOUT, async {
             let mut outcomes = Vec::with_capacity(chunks.len());
             for chunk in chunks {
+                if !matches!(cancel_rx.has_changed(), Ok(false)) {
+                    return Err(EmotionError::cancelled());
+                }
                 let outcome = match tokio::time::timeout(
                     CHUNK_TIMEOUT,
-                    provider.classify(system_prompt(), user_prompt(&request, &chunk)),
+                    provider.classify(
+                        system_prompt(),
+                        user_prompt(&request, &chunk),
+                        crate::ai::jobs::ProviderCancellation::from_receiver(cancel_rx.clone()),
+                    ),
                 )
                 .await
                 {
-                    Ok(Ok(text)) => parse_reply(&text, &request, &chunk),
+                    Ok(Ok(text)) => parse_reply(&text, &request.lyrics_hash, &chunk),
                     Ok(Err(reason)) if reason == AI_EXECUTION_BUSY => {
                         return Err(EmotionError::busy());
+                    }
+                    Ok(Err(reason)) if reason.starts_with("history_capacity_exceeded") => {
+                        return Err(EmotionError::history_capacity());
                     }
                     Ok(Err(reason)) if reason.starts_with("budget_exceeded") => {
                         return Err(EmotionError::budget());
                     }
+                    Ok(Err(reason)) if reason.starts_with("emotion_cancelled") => {
+                        return Err(EmotionError::cancelled());
+                    }
                     Ok(Err(reason)) => Err(EmotionError::unavailable(reason)),
                     Err(_) => Err(EmotionError::unavailable("歌词分类分块超时")),
                 };
+                if !matches!(cancel_rx.has_changed(), Ok(false)) {
+                    return Err(EmotionError::cancelled());
+                }
                 outcomes.push((chunk, outcome));
             }
             Ok::<_, EmotionError>(outcomes)
@@ -908,13 +1280,25 @@ pub(crate) async fn classify(
         Ok(None) => {}
         Err(error) => tracing::warn!("lyric emotion cache read failed: {error}"),
     }
-    let doc = state
-        .ai_emotion
-        .classify(request)
-        .await
-        .map_err(api_error)?;
+    let doc = match state.ai_emotion.classify(request).await {
+        Ok(doc) => doc,
+        Err(error) if error.code == "emotion_cancelled" => {
+            let value = vmusic_store::settings::get(&state.db, "lyrics_emotion_ai_authorized")
+                .await
+                .map_err(store_api_error)?;
+            if !matches!(value, Some(Value::Bool(true))) {
+                return Err(api_error(EmotionError::consent_revoked()));
+            }
+            return Err(crate::error::ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                "emotion_cancelled",
+                "模型密钥已变更，歌词分类请求已取消；请重试",
+            ));
+        }
+        Err(error) => return Err(api_error(error)),
+    };
     if let Ok(encoded) = serde_json::to_string(&doc) {
-        if let Err(error) = vmusic_store::emotion::put_cue(
+        match vmusic_store::emotion::put_cue(
             &state.db,
             &key,
             &doc.lyrics_hash,
@@ -923,8 +1307,12 @@ pub(crate) async fn classify(
         )
         .await
         {
-            // Persistence is a cache: a write failure must not fail playback.
-            tracing::warn!("lyric emotion cache write failed: {error}");
+            Ok(true) => {}
+            Ok(false) => return Err(api_error(EmotionError::consent_revoked())),
+            Err(error) => {
+                // Persistence is a cache: a write failure must not fail playback.
+                tracing::warn!("lyric emotion cache write failed: {error}");
+            }
         }
     }
     Ok(doc)
@@ -1007,6 +1395,7 @@ mod tests {
             &self,
             _system: String,
             _user: String,
+            _cancellation: crate::ai::jobs::ProviderCancellation,
         ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let reply = self.replies.lock().unwrap().pop_front();
@@ -1162,7 +1551,6 @@ mod tests {
         struct CompletionFixture {
             calls: AtomicUsize,
             system: Mutex<Option<String>>,
-            zero_cost: bool,
         }
 
         impl crate::ai::jobs::StageIntentProvider for CompletionFixture {
@@ -1175,11 +1563,8 @@ mod tests {
             fn ready(&self) -> bool {
                 true
             }
-            fn supports_zero_cost_completion(&self) -> bool {
-                self.zero_cost
-            }
             fn quote(&self, _brief: &str) -> Result<crate::ai::usage::PriceQuote, String> {
-                Err("not used".to_string())
+                Ok(crate::ai::usage::PriceQuote::fake())
             }
             fn generate(
                 &self,
@@ -1217,13 +1602,14 @@ mod tests {
                         .ok_or_else(|| "range missing".to_string())?
                         as u32;
                     Ok(crate::ai::jobs::CompletionReply {
-                        text: json!({
+                        text: Ok(json!({
                             "version": 1,
                             "lyricsHash": hash,
                             "sections": [],
                             "lines": [{ "index": from, "emotion": "joy", "intensity": 0.75, "confidence": 0.9 }],
                         })
-                        .to_string(),
+                        .to_string()),
+                        usage: None,
                     })
                 })
             }
@@ -1232,7 +1618,6 @@ mod tests {
         let provider = Arc::new(CompletionFixture {
             calls: AtomicUsize::new(0),
             system: Mutex::new(None),
-            zero_cost: true,
         });
         let runtime = crate::ai::jobs::AiRuntime::new();
         let execution_slots = runtime.completion_slots();
@@ -1267,10 +1652,546 @@ mod tests {
         assert_eq!(status["provider"]["simulated"], false);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn credential_rotation_cancels_active_lyric_completion() {
+        use tokio::sync::Notify;
+
+        struct RotationFixture {
+            calls: AtomicUsize,
+            started: Arc<Notify>,
+            observed_cancel: Arc<Notify>,
+            release: Arc<Notify>,
+            credential_seen: Mutex<Option<String>>,
+        }
+        impl crate::ai::jobs::StageIntentProvider for RotationFixture {
+            fn id(&self) -> &'static str {
+                "stepfun"
+            }
+            fn model(&self) -> &str {
+                "step-5-preview"
+            }
+            fn ready(&self) -> bool {
+                true
+            }
+            fn requires_credential(&self) -> bool {
+                true
+            }
+            fn quote(&self, _brief: &str) -> Result<crate::ai::usage::PriceQuote, String> {
+                Ok(crate::ai::usage::PriceQuote {
+                    pricing_version: crate::ai::usage::TOKEN_ONLY_PRICING_VERSION.into(),
+                    reservation_micro_usd: 0,
+                    input_micro_usd_per_million: 0,
+                    output_micro_usd_per_million: 0,
+                    max_input_tokens: 20_000,
+                    max_output_tokens: 8_000,
+                })
+            }
+            fn generate(
+                &self,
+                _brief: String,
+                _pricing: crate::ai::usage::PricingSnapshot,
+                _credential: Option<crate::ai::credential::ProviderCredential>,
+                _cancellation: crate::ai::jobs::ProviderCancellation,
+            ) -> Pin<Box<dyn Future<Output = crate::ai::jobs::ProviderReply> + Send>> {
+                Box::pin(async {
+                    crate::ai::jobs::ProviderReply {
+                        intent: Err("not used".into()),
+                        usage: None,
+                    }
+                })
+            }
+            fn complete(
+                &self,
+                _system: String,
+                _user: String,
+                credential: Option<crate::ai::credential::ProviderCredential>,
+                mut cancellation: crate::ai::jobs::ProviderCancellation,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<crate::ai::jobs::CompletionReply, String>> + Send>,
+            > {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                *self.credential_seen.lock().unwrap() =
+                    credential.map(|key| key.as_ref().to_owned());
+                let started = self.started.clone();
+                let observed_cancel = self.observed_cancel.clone();
+                let release = self.release.clone();
+                Box::pin(async move {
+                    started.notify_one();
+                    cancellation.cancelled().await;
+                    observed_cancel.notify_one();
+                    release.notified().await;
+                    Err("lyric completion cancelled".into())
+                })
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("hertz-emotion-rotate-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let (mut state, handle) = crate::state::tests::playback_state_with_db(db).await;
+        let config = crate::config::AiConfig {
+            provider: "stepfun".into(),
+            origin: "https://api.stepfun.com/step_plan/v1".into(),
+            model: "step-5-preview".into(),
+        };
+        let credentials = crate::ai::credential::Service::isolated_for_config(&config);
+        state.ai_runtime.credentials = credentials.clone();
+        let fixture = Arc::new(RotationFixture {
+            calls: AtomicUsize::new(0),
+            started: Arc::new(Notify::new()),
+            observed_cancel: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            credential_seen: Mutex::new(None),
+        });
+        let provider: Arc<dyn crate::ai::jobs::StageIntentProvider> = fixture.clone();
+        state
+            .ai_runtime
+            .install_provider(provider.clone())
+            .await;
+        let owner = vmusic_store::ai::get_or_create_instance(&state.db)
+            .await
+            .unwrap()
+            .owner_instance_id;
+        state.ai_emotion.install_ai_provider(
+            provider,
+            credentials.clone(),
+            state.ai_runtime.completion_slots(),
+            state.db.clone(),
+            owner,
+        );
+        state
+            .ai_runner_held
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        vmusic_store::settings::set(&state.db, "lyrics_emotion_ai_authorized", &json!(true))
+            .await
+            .unwrap();
+        let state = Arc::new(state);
+        crate::ai::credential::put(
+            &state,
+            crate::ai::credential::CredentialRequest::from_value(&json!({
+                "api_key": "old-fixture-key"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let request = request(lines(1));
+        let cache_key = state.ai_emotion.cache_key(&request.lyrics_hash).unwrap();
+        let classify_state = state.clone();
+        let classification = tokio::spawn(async move { super::classify(&classify_state, request).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fixture.started.notified(),
+        )
+        .await
+        .unwrap();
+
+        crate::ai::credential::put(
+            &state,
+            crate::ai::credential::CredentialRequest::from_value(&json!({
+                "api_key": "new-fixture-key"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fixture.observed_cancel.notified(),
+        )
+        .await
+        .unwrap();
+        fixture.release.notify_one();
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(3), classification)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, "emotion_cancelled");
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.credential_seen.lock().unwrap().as_deref(),
+            Some("old-fixture-key")
+        );
+        let state_value: String = sqlx::query_scalar(
+            "SELECT state FROM ai_jobs WHERE capability = ?1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(EMOTION_CAPABILITY)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(state_value, "cancelled");
+        assert!(vmusic_store::emotion::get_cue(&state.db, &cache_key)
+            .await
+            .unwrap()
+            .is_none());
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_settings_revocation_cancels_active_lyric_classification() {
+        use tokio::sync::Notify;
+
+        struct RevocationFixture {
+            started: Arc<Notify>,
+            observed_cancel: Arc<Notify>,
+        }
+        impl EmotionProvider for RevocationFixture {
+            fn id(&self) -> &'static str {
+                "revocation-fixture"
+            }
+            fn model(&self) -> &str {
+                "revocation-fixture-v1"
+            }
+            fn ready(&self) -> bool {
+                true
+            }
+            fn classify(
+                &self,
+                _system: String,
+                _user: String,
+                mut cancellation: crate::ai::jobs::ProviderCancellation,
+            ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+                let started = self.started.clone();
+                let observed_cancel = self.observed_cancel.clone();
+                Box::pin(async move {
+                    started.notify_one();
+                    cancellation.cancelled().await;
+                    observed_cancel.notify_one();
+                    Err("emotion_cancelled: authorization revoked".into())
+                })
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "hertz-emotion-rpc-revoke-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let (mut state, handle) = crate::state::tests::playback_state_with_db(db).await;
+        let fixture = Arc::new(RevocationFixture {
+            started: Arc::new(Notify::new()),
+            observed_cancel: Arc::new(Notify::new()),
+        });
+        state.ai_emotion = EmotionService::new(fixture.clone());
+        state
+            .ai_runner_held
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        vmusic_store::settings::set(&state.db, "lyrics_emotion_ai_authorized", &json!(true))
+            .await
+            .unwrap();
+        let state = Arc::new(state);
+        let request = request(lines(1));
+        let cache_key = state.ai_emotion.cache_key(&request.lyrics_hash).unwrap();
+        let classify_state = state.clone();
+        let classification =
+            tokio::spawn(async move { super::classify(&classify_state, request).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fixture.started.notified(),
+        )
+        .await
+        .unwrap();
+
+        crate::rpc::library::put_settings(
+            &state,
+            &json!({"lyrics_emotion_ai_authorized": false}),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fixture.observed_cancel.notified(),
+        )
+        .await
+        .unwrap();
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(3), classification)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, "emotion_consent_required");
+        let authorized: String = sqlx::query_scalar(
+            "SELECT value FROM settings WHERE key = 'lyrics_emotion_ai_authorized'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&authorized).unwrap(), json!(false));
+        assert!(vmusic_store::emotion::get_cue(&state.db, &cache_key)
+            .await
+            .unwrap()
+            .is_none());
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_settings_revokes_both_ai_capabilities_before_generation_ledger_failure() {
+        use tokio::sync::Notify;
+
+        struct LyricFixture {
+            started: Arc<Notify>,
+            observed_cancel: Arc<Notify>,
+        }
+        impl EmotionProvider for LyricFixture {
+            fn id(&self) -> &'static str {
+                "combined-revocation-lyrics-fixture"
+            }
+            fn model(&self) -> &str {
+                "combined-revocation-lyrics-v1"
+            }
+            fn ready(&self) -> bool {
+                true
+            }
+            fn classify(
+                &self,
+                _: String,
+                _: String,
+                mut cancellation: crate::ai::jobs::ProviderCancellation,
+            ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+                let started = self.started.clone();
+                let observed_cancel = self.observed_cancel.clone();
+                Box::pin(async move {
+                    started.notify_one();
+                    cancellation.cancelled().await;
+                    observed_cancel.notify_one();
+                    Err("emotion_cancelled: authorization revoked".into())
+                })
+            }
+        }
+
+        struct GenerationFixture {
+            started: Arc<Notify>,
+            observed_cancel: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+        impl crate::ai::jobs::StageIntentProvider for GenerationFixture {
+            fn id(&self) -> &'static str {
+                "combined-revocation-fixture"
+            }
+            fn model(&self) -> &str {
+                "combined-revocation-v1"
+            }
+            fn ready(&self) -> bool {
+                true
+            }
+            fn quote(&self, _: &str) -> Result<crate::ai::usage::PriceQuote, String> {
+                Ok(crate::ai::usage::PriceQuote::fake())
+            }
+            fn generate(
+                &self,
+                _: String,
+                _: crate::ai::usage::PricingSnapshot,
+                _: Option<crate::ai::credential::ProviderCredential>,
+                mut cancellation: crate::ai::jobs::ProviderCancellation,
+            ) -> Pin<
+                Box<dyn Future<Output = crate::ai::jobs::ProviderReply> + Send>,
+            > {
+                let started = self.started.clone();
+                let observed_cancel = self.observed_cancel.clone();
+                let release = self.release.clone();
+                Box::pin(async move {
+                    started.notify_one();
+                    cancellation.cancelled().await;
+                    observed_cancel.notify_one();
+                    release.notified().await;
+                    crate::ai::jobs::ProviderReply {
+                        intent: Err("combined revocation fixture cancelled".into()),
+                        usage: None,
+                    }
+                })
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "hertz-emotion-combined-revoke-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let (mut state, handle) = crate::state::tests::playback_state_with_db(db).await;
+        let lyric_fixture = Arc::new(LyricFixture {
+            started: Arc::new(Notify::new()),
+            observed_cancel: Arc::new(Notify::new()),
+        });
+        state.ai_emotion = EmotionService::new(lyric_fixture.clone());
+        let generation_fixture = Arc::new(GenerationFixture {
+            started: Arc::new(Notify::new()),
+            observed_cancel: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        });
+        state
+            .ai_runtime
+            .install_provider(generation_fixture.clone())
+            .await;
+        state
+            .ai_runner_held
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        vmusic_store::settings::set(&state.db, "lyrics_emotion_ai_authorized", &json!(true))
+            .await
+            .unwrap();
+        vmusic_store::settings::set(
+            &state.db,
+            crate::ai::jobs::CONSENT_KEY,
+            &json!(true),
+        )
+        .await
+        .unwrap();
+        let state = Arc::new(state);
+
+        let crate::ai::jobs::SubmitOutcome::Accepted { job } = crate::ai::jobs::submit(
+            &state,
+            "combined-revocation-test",
+            "wait for settings revocation",
+            None,
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("generation fixture was not accepted");
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            generation_fixture.started.notified(),
+        )
+        .await
+        .unwrap();
+
+        let request = request(lines(1));
+        let cache_key = state.ai_emotion.cache_key(&request.lyrics_hash).unwrap();
+        let classify_state = state.clone();
+        let classification =
+            tokio::spawn(async move { super::classify(&classify_state, request).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            lyric_fixture.started.notified(),
+        )
+        .await
+        .unwrap();
+
+        sqlx::query("CREATE TRIGGER fail_combined_generation_revocation BEFORE UPDATE OF state ON ai_jobs WHEN OLD.capability = 'stage.intent.generate' AND OLD.state IN ('accepted', 'running') AND NEW.state = 'cancelled' BEGIN SELECT RAISE(ABORT, 'injected combined revocation failure'); END")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let revoke_result = crate::rpc::library::put_settings(
+            &state,
+            &json!({
+                "lyrics_emotion_ai_authorized": false,
+                "ai_generation_consent": false,
+            }),
+        )
+        .await;
+        let lyric_cancelled_before_failure = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            lyric_fixture.observed_cancel.notified(),
+        )
+        .await
+        .is_ok();
+        let generation_cancelled_before_failure = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            generation_fixture.observed_cancel.notified(),
+        )
+        .await
+        .is_ok();
+
+        sqlx::query("DROP TRIGGER fail_combined_generation_revocation")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let settlement = crate::ai::jobs::revoke_generation_consent(&state).await;
+        generation_fixture.release.notify_one();
+
+        let classification_result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            classification,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let terminal_state = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let row = vmusic_store::ai_jobs::find_job_by_id(&state.db, &job.job_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if row.state == "cancelled" {
+                    break row.state;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(revoke_result.is_err());
+        assert!(settlement.is_ok());
+        assert!(lyric_cancelled_before_failure);
+        assert!(generation_cancelled_before_failure);
+        assert_eq!(terminal_state, "cancelled");
+        assert_eq!(
+            classification_result.unwrap_err().code,
+            "emotion_consent_required"
+        );
+        for key in [
+            "lyrics_emotion_ai_authorized",
+            crate::ai::jobs::CONSENT_KEY,
+        ] {
+            let raw: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?1")
+                .bind(key)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&raw).unwrap(), json!(false));
+        }
+        assert!(vmusic_store::emotion::get_cue(&state.db, &cache_key)
+            .await
+            .unwrap()
+            .is_none());
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
     #[tokio::test]
-    async fn metered_completion_is_advertised_and_dispatched() {
+    async fn rpc_settings_rejects_lyric_revocation_on_non_owner() {
+        let dir = std::env::temp_dir().join(format!(
+            "hertz-emotion-rpc-nonowner-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let (state, handle) = crate::state::tests::playback_state_with_db(db).await;
+        vmusic_store::settings::set(&state.db, "lyrics_emotion_ai_authorized", &json!(true))
+            .await
+            .unwrap();
+        let state = Arc::new(state);
+
+        let error = crate::rpc::library::put_settings(
+            &state,
+            &json!({"lyrics_emotion_ai_authorized": false}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "ai_locked");
+        let authorized: String = sqlx::query_scalar(
+            "SELECT value FROM settings WHERE key = 'lyrics_emotion_ai_authorized'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&authorized).unwrap(), json!(true));
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn completion_records_token_only_usage_in_the_persistent_ledger() {
         struct MeteredCompletionFixture {
             calls: AtomicUsize,
+            invalid_output: std::sync::atomic::AtomicBool,
+            panic_next: std::sync::atomic::AtomicBool,
         }
 
         impl crate::ai::jobs::StageIntentProvider for MeteredCompletionFixture {
@@ -1284,7 +2205,14 @@ mod tests {
                 true
             }
             fn quote(&self, _brief: &str) -> Result<crate::ai::usage::PriceQuote, String> {
-                Ok(crate::ai::usage::PriceQuote::fake())
+                Ok(crate::ai::usage::PriceQuote {
+                    pricing_version: crate::ai::usage::TOKEN_ONLY_PRICING_VERSION.into(),
+                    reservation_micro_usd: 0,
+                    input_micro_usd_per_million: 0,
+                    output_micro_usd_per_million: 0,
+                    max_input_tokens: 20_000,
+                    max_output_tokens: 8_000,
+                })
             }
             fn generate(
                 &self,
@@ -1310,7 +2238,12 @@ mod tests {
                 Box<dyn Future<Output = Result<crate::ai::jobs::CompletionReply, String>> + Send>,
             > {
                 self.calls.fetch_add(1, Ordering::SeqCst);
+                let invalid_output = self.invalid_output.load(Ordering::SeqCst);
+                let panic = self.panic_next.swap(false, Ordering::SeqCst);
                 Box::pin(async move {
+                    if panic {
+                        panic!("fixture completion panic");
+                    }
                     let input: Value =
                         serde_json::from_str(&user).map_err(|_| "bad prompt".to_string())?;
                     let hash = input["lyricsHash"]
@@ -1321,13 +2254,27 @@ mod tests {
                         .ok_or_else(|| "range missing".to_string())?
                         as u32;
                     Ok(crate::ai::jobs::CompletionReply {
-                        text: json!({
-                            "version": 1,
-                            "lyricsHash": hash,
-                            "sections": [],
-                            "lines": [{ "index": from, "emotion": "joy", "intensity": 0.75, "confidence": 0.9 }],
-                        })
-                        .to_string(),
+                        text: Ok(if invalid_output {
+                            json!({
+                                "version": 1,
+                                "lyricsHash": format!("{hash}x"),
+                                "sections": [],
+                                "lines": [{ "index": from, "emotion": "joy", "intensity": 0.75, "confidence": 0.9 }],
+                            })
+                            .to_string()
+                        } else {
+                            json!({
+                                "version": 1,
+                                "lyricsHash": hash,
+                                "sections": [],
+                                "lines": [{ "index": from, "emotion": "joy", "intensity": 0.75, "confidence": 0.9 }],
+                            })
+                            .to_string()
+                        }),
+                        usage: Some(crate::ai::usage::TrustedUsage {
+                            input_tokens: 17,
+                            output_tokens: 5,
+                        }),
                     })
                 })
             }
@@ -1335,12 +2282,24 @@ mod tests {
 
         let provider = Arc::new(MeteredCompletionFixture {
             calls: AtomicUsize::new(0),
+            invalid_output: std::sync::atomic::AtomicBool::new(false),
+            panic_next: std::sync::atomic::AtomicBool::new(false),
         });
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../../migrations").run(&db).await.unwrap();
+        vmusic_store::settings::set(&db, "lyrics_emotion_ai_authorized", &json!(true))
+            .await
+            .unwrap();
+        let execution_slots = Arc::new(tokio::sync::Semaphore::new(1));
         let adapter = Arc::new(AiRuntimeEmotionProvider {
             provider: provider.clone(),
             credentials: crate::ai::credential::Service::isolated(),
-            execution_slots: Arc::new(tokio::sync::Semaphore::new(1)),
-            db: None,
+            execution_slots: execution_slots.clone(),
+            db: Some(db.clone()),
             owner: "test-owner".into(),
         });
         let service = EmotionService::new(adapter);
@@ -1351,6 +2310,184 @@ mod tests {
         let doc = service.classify(request(lines(1))).await.unwrap();
         assert_eq!(doc.provider_id, "metered-fixture");
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        let job_id: String = sqlx::query_scalar(
+            "SELECT job_id FROM ai_jobs WHERE capability = ?1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(EMOTION_CAPABILITY)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let job = vmusic_store::ai_jobs::find_job_by_id(&db, &job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.state, "succeeded");
+        assert_eq!(job.dispatch_state, "may_have_been_sent");
+        let usage = vmusic_store::ai_jobs::find_usage_entry(&db, &job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage_state, "unpriced");
+        assert_eq!(usage.accounted_micro_usd, 0);
+        let counters: crate::ai::usage::TrustedUsage =
+            serde_json::from_str(usage.reported_usage.as_deref().unwrap()).unwrap();
+        assert_eq!(counters.input_tokens, 17);
+        assert_eq!(counters.output_tokens, 5);
+        let month = crate::ai::jobs::utc_month_key(job.created_at);
+        let mut conn = db.acquire().await.unwrap();
+        let budget = vmusic_store::ai_jobs::get_or_create_month(&mut conn, &month)
+            .await
+            .unwrap();
+        assert_eq!(budget.charged_micro_usd, 0);
+        assert_eq!(budget.reserved_micro_usd, 0);
+        drop(conn);
+
+        sqlx::query("CREATE TRIGGER fail_completion_success BEFORE UPDATE OF state ON ai_jobs WHEN OLD.capability = 'lyrics.emotion.classify' AND OLD.state = 'running' AND NEW.state = 'succeeded' BEGIN SELECT RAISE(ABORT, 'injected completion state failure'); END")
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut fault_request = request(lines(1));
+        fault_request.lines[0]
+            .text
+            .push_str(" completion transaction fault");
+        fault_request.lyrics_hash = canonical_hash(&fault_request.lines);
+        assert!(service.classify(fault_request).await.is_err());
+        let interrupted_job_id: String = sqlx::query_scalar(
+            "SELECT job_id FROM ai_jobs WHERE capability = ?1 ORDER BY rowid DESC LIMIT 1",
+        )
+        .bind(EMOTION_CAPABILITY)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let interrupted_job = vmusic_store::ai_jobs::find_job_by_id(&db, &interrupted_job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(interrupted_job.state, "interrupted");
+        let interrupted_usage = vmusic_store::ai_jobs::find_usage_entry(&db, &interrupted_job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(interrupted_usage.usage_state, "unpriced");
+        let interrupted_counters: crate::ai::usage::TrustedUsage =
+            serde_json::from_str(interrupted_usage.reported_usage.as_deref().unwrap()).unwrap();
+        assert_eq!(interrupted_counters.input_tokens, 17);
+        assert_eq!(interrupted_counters.output_tokens, 5);
+        sqlx::query("DROP TRIGGER fail_completion_success")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        provider.invalid_output.store(true, Ordering::SeqCst);
+        let mut invalid_request = request(lines(1));
+        invalid_request.lines[0].text.push_str(" mismatch test");
+        invalid_request.lyrics_hash = canonical_hash(&invalid_request.lines);
+        assert!(service.classify(invalid_request).await.is_err());
+        let failed_job_id: String = sqlx::query_scalar(
+            "SELECT job_id FROM ai_jobs WHERE capability = ?1 ORDER BY rowid DESC LIMIT 1",
+        )
+        .bind(EMOTION_CAPABILITY)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let failed_job = vmusic_store::ai_jobs::find_job_by_id(&db, &failed_job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed_job.state, "failed");
+        let failed_usage = vmusic_store::ai_jobs::find_usage_entry(&db, &failed_job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed_usage.usage_state, "unpriced");
+        let failed_counters: crate::ai::usage::TrustedUsage =
+            serde_json::from_str(failed_usage.reported_usage.as_deref().unwrap()).unwrap();
+        assert_eq!(failed_counters.input_tokens, 17);
+        assert_eq!(failed_counters.output_tokens, 5);
+
+        provider.panic_next.store(true, Ordering::SeqCst);
+        let mut panic_request = request(lines(1));
+        panic_request.lines[0].text.push_str(" provider panic test");
+        panic_request.lyrics_hash = canonical_hash(&panic_request.lines);
+        assert!(service.classify(panic_request).await.is_err());
+        let panic_job_id: String = sqlx::query_scalar(
+            "SELECT job_id FROM ai_jobs WHERE capability = ?1 ORDER BY rowid DESC LIMIT 1",
+        )
+        .bind(EMOTION_CAPABILITY)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let panic_job = vmusic_store::ai_jobs::find_job_by_id(&db, &panic_job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(panic_job.state, "interrupted");
+        let panic_usage = vmusic_store::ai_jobs::find_usage_entry(&db, &panic_job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(panic_usage.usage_state, "unpriced");
+        assert_eq!(execution_slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn completion_admission_respects_shared_history_capacity() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../../migrations").run(&db).await.unwrap();
+        let now = vmusic_store::now_ms();
+        sqlx::query(
+            "WITH RECURSIVE sequence(n) AS (
+                 SELECT 1 UNION ALL SELECT n + 1 FROM sequence WHERE n < ?1
+             )
+             INSERT INTO ai_jobs (
+                 job_id, owner_instance_id, principal, capability, key, input_hash,
+                 state, state_revision, dispatch_state, provider, model, created_at, updated_at
+             )
+             SELECT 'history-' || n, ?2, 'fixture', 'fixture-capability',
+                 'key-' || n, 'hash-' || n, 'succeeded', 2, 'may_have_been_sent',
+                 'fixture', 'fixture-v1', ?3, ?3 FROM sequence",
+        )
+        .bind(crate::ai::jobs::HISTORY_JOB_LIMIT)
+        .bind("test-owner")
+        .bind(now)
+        .execute(&db)
+        .await
+        .unwrap();
+        let pricing = crate::ai::usage::PricingSnapshot {
+            provider: "stepfun".into(),
+            model: "step-5-preview".into(),
+            quote: crate::ai::usage::PriceQuote {
+                pricing_version: crate::ai::usage::TOKEN_ONLY_PRICING_VERSION.into(),
+                reservation_micro_usd: 0,
+                input_micro_usd_per_million: 0,
+                output_micro_usd_per_million: 0,
+                max_input_tokens: 20_000,
+                max_output_tokens: 8_000,
+            },
+            credential: None,
+        };
+
+        let error = begin_completion_job(&db, "test-owner", &pricing)
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("history_capacity_exceeded"));
+        let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_jobs")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let months: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_budget_months")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(jobs, crate::ai::jobs::HISTORY_JOB_LIMIT);
+        assert_eq!(
+            months, 0,
+            "rejected completion must not create budget facts"
+        );
     }
 
     #[test]

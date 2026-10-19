@@ -54,6 +54,8 @@ const STEPS = [
     why: '服务端契约参数必须可物化，候选必须确定且可分享往返。' },
   { script: 'check-stage-evaluation.js', stage: 'behavior',
     why: '冻结评测语料、真实默认值语义、错误接受/拒绝与人工评分分母不能失真；默认离线，不调用模型。' },
+  { script: 'check-stage-intent-label-review.js', stage: 'behavior',
+    why: '标签审阅包必须隐藏原标签、保留完整覆盖并拒绝不完整或无效的审阅答案。' },
   { script: 'check-stage-project.js', stage: 'behavior',
     why: '工程版本、媒体绑定、换曲失效与可逆绝对时间轨必须复用真实预置 owner。' },
   { script: 'check-stage-arrangement.js', stage: 'behavior',

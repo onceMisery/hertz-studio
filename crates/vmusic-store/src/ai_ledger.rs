@@ -118,8 +118,8 @@ mod tests {
             dispatch_state,provider,model,created_at,updated_at) VALUES (?1,'owner','grant-original','generate',?1,'private-input-hash',?2,1,'not_dispatched','fake','fake',1000,1000)")
             .bind(id).bind(state).execute(conn).await.unwrap();
     }
-    fn entry(id: &str) -> crate::ai_jobs::UsageEntryRow {
-        crate::ai_jobs::UsageEntryRow {
+    fn entry(id: &str) -> crate::ai_jobs::UsageEntryInsert {
+        crate::ai_jobs::UsageEntryInsert {
             job_id: id.into(),
             accepted_month: "1970-01".into(),
             attempt_id: None,

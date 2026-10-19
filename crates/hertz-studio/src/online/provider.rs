@@ -769,6 +769,7 @@ mod tests {
                         source: q.source.clone(),
                         keyword: q.q.clone().unwrap_or_default(),
                         total: q.offset + q.limit,
+                        total_is_exact: false,
                         tracks: vec![],
                         warning: q.cat.clone(),
                     })

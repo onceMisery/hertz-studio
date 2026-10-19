@@ -2367,10 +2367,14 @@ impl AppState {
     }
 
     /// 为慢客户端从当前真值重建非周期事件。buffering 是边沿状态，AI 任务事件是
-    /// 持久快照的失效提示；两条事件泵在广播掉队时必须一起补发。
-    pub async fn resync_events(&self) -> [WsEvent; 2] {
+    /// 持久快照的失效提示，曲库事件要求前端刷新查询快照。
+    pub async fn resync_events(&self) -> [WsEvent; 3] {
         let (active, pct) = *self.buffering.lock().await;
-        [WsEvent::Buffering { active, pct }, WsEvent::AiTasksResync]
+        [
+            WsEvent::Buffering { active, pct },
+            WsEvent::AiTasksResync,
+            WsEvent::LibraryChanged,
+        ]
     }
 
     /// Read one event or recover from broadcast loss. Resubscribe before taking
@@ -2378,14 +2382,14 @@ impl AppState {
     pub async fn next_event_batch(
         &self,
         receiver: &mut broadcast::Receiver<WsEvent>,
-    ) -> Option<[Option<WsEvent>; 2]> {
+    ) -> Option<[Option<WsEvent>; 3]> {
         match receiver.recv().await {
-            Ok(event) => Some([Some(event), None]),
+            Ok(event) => Some([Some(event), None, None]),
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::debug!(skipped, "event consumer lagged; resynchronizing");
                 *receiver = receiver.resubscribe();
-                let [buffering, tasks] = self.resync_events().await;
-                Some([Some(buffering), Some(tasks)])
+                let [buffering, tasks, library] = self.resync_events().await;
+                Some([Some(buffering), Some(tasks), Some(library)])
             }
             Err(broadcast::error::RecvError::Closed) => None,
         }
@@ -4117,16 +4121,30 @@ pub fn spawn_session_saver(state: Arc<AppState>) {
 /// Bridges audio-actor events onto the WebSocket bus and drives auto-advance.
 pub fn spawn_event_pump(state: Arc<AppState>) {
     let mut rx = state.audio.subscribe();
+    let Some(mut control_rx) = state.audio.take_control_events() else {
+        tracing::error!("audio control event receiver is already owned");
+        return;
+    };
     tokio::spawn(async move {
+        let mut audio_open = true;
+        let mut last_transition_generation = 0;
+        let mut last_ended_generation = None;
         loop {
-            let event = match rx.recv().await {
-                Ok(event) => event,
-                // 这是状态帧/频谱/自动接力的唯一转发任务。状态+频谱约 80 条/秒，
-                // 而广播容量只有 64：在线曲自动接力要在 Ended 分支里现取流数秒，
-                // 一旦消费停顿必然 Lagged。丢几帧增量无所谓，退泵才是致命的——
-                // 退了之后整条 WS 链路静默全灭，所以 Lagged 只 continue。
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            let event = tokio::select! {
+                control = control_rx.recv() => match control {
+                    Some(event) => event,
+                    None => break,
+                },
+                event = rx.recv(), if audio_open => match event {
+                    Ok(event) => event,
+                    // Snapshot/spectrum are lossy; transition and natural-end
+                    // control edges have their own unbounded single-consumer queue.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        audio_open = false;
+                        continue;
+                    }
+                },
             };
             match event {
                 AudioEvent::Transitioned {
@@ -4134,6 +4152,10 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     generation,
                     track_id,
                 } => {
+                    if generation <= last_transition_generation {
+                        continue;
+                    }
+                    last_transition_generation = generation;
                     // Commit the queue before reading the next event: an extremely
                     // short successor can emit Ended in this very actor tick.
                     if let Some(next) = state
@@ -4174,6 +4196,10 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     generation,
                     track_id,
                 } => {
+                    if last_ended_generation.is_some_and(|handled| generation <= handled) {
+                        continue;
+                    }
+                    last_ended_generation = Some(generation);
                     state.publish(WsEvent::Ended);
                     // 自然播完是听歌打卡的收口点之一（换曲帧在 Snapshot 里收）。
                     state.harvest_listen().await;
@@ -4778,6 +4804,7 @@ pub(crate) mod tests {
             source: "qq".into(),
             keyword: String::new(),
             total: 1,
+            total_is_exact: false,
             tracks: vec![candidate],
             warning: None,
         };
@@ -4960,6 +4987,7 @@ pub(crate) mod tests {
                 source: source.into(),
                 keyword: "稻香".into(),
                 total: tracks.len(),
+                total_is_exact: false,
                 tracks,
                 warning: None,
             }
@@ -5737,7 +5765,7 @@ pub(crate) mod tests {
         handle.join().unwrap();
     }
 
-    /// 掉队恢复批次使用实时 buffering 真值，并附带任务快照失效提示。
+    /// 掉队恢复批次重建 buffering 真值，并失效化任务与曲库快照。
     #[tokio::test]
     async fn resync_events_include_live_buffering_and_ai_tasks_hint() {
         let (state, handle) = playback_state().await;
@@ -5751,6 +5779,7 @@ pub(crate) mod tests {
             }
         ));
         assert!(matches!(&events[1], WsEvent::AiTasksResync));
+        assert!(matches!(&events[2], WsEvent::LibraryChanged));
         state.set_buffering(false, None).await;
         let events = state.resync_events().await;
         assert!(matches!(
@@ -5761,6 +5790,7 @@ pub(crate) mod tests {
             }
         ));
         assert!(matches!(&events[1], WsEvent::AiTasksResync));
+        assert!(matches!(&events[2], WsEvent::LibraryChanged));
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -5786,6 +5816,7 @@ pub(crate) mod tests {
             })
         ));
         assert!(matches!(batch[1].as_ref(), Some(WsEvent::AiTasksResync)));
+        assert!(matches!(batch[2].as_ref(), Some(WsEvent::LibraryChanged)));
         assert!(matches!(
             receiver.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
@@ -5795,6 +5826,7 @@ pub(crate) mod tests {
         let batch = state.next_event_batch(&mut receiver).await.unwrap();
         assert!(matches!(batch[0].as_ref(), Some(WsEvent::Ended)));
         assert!(batch[1].is_none());
+        assert!(batch[2].is_none());
 
         state.audio.shutdown();
         handle.join().unwrap();

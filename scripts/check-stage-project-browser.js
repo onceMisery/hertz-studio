@@ -24,6 +24,9 @@ async function main(){
       p.cues=[{at:1,len:1000,ease:'linear',set:{'look.bloom':1}}];CreativeStage.setPreset(p);
       Workshop.open();Workshop.setTab('io');
     });
+    await page.evaluate(()=>Workshop.setTab('cues'));
+    await page.getByText('当前为普通预置',{exact:true}).waitFor();
+    await page.evaluate(()=>Workshop.setTab('io'));
     const original=await page.evaluate(()=>CreativeStage.shareSnapshot());
     const event=page.waitForEvent('download');await page.locator('[data-project="save"]').click();
     const download=await event;
@@ -43,6 +46,7 @@ async function main(){
     await page.locator('[data-project="bind"]').click();
     await page.getByText('本次曲目已确认，工程 cue 轨已启用',{exact:true}).waitFor();
     await page.evaluate(()=>Workshop.setTab('cues'));
+    await page.getByText('本次曲目已确认，工程 cue 轨已启用',{exact:true}).waitFor();
     await page.getByText('歌曲秒数',{exact:true}).locator('..').locator('input').fill('1.2');
     await page.getByText('歌曲秒数',{exact:true}).locator('..').locator('input').dispatchEvent('change');
     assert.equal(await page.evaluate(()=>CreativeStage.preset().cues[0].at),1.2);
@@ -67,6 +71,9 @@ async function main(){
     await page.getByText('工程已载入，cue 轨等待媒体内容确认',{exact:true}).waitFor();
     await page.waitForFunction(()=>Stage.presentation().track?.id && Stage.presentation().track.id===Stage.presentation().mediaTrackId);
     assert.equal(await page.evaluate(()=>CreativeStage.runtime()['look.bloom']),0);
+    await page.evaluate(()=>Workshop.setTab('cues'));
+    await page.getByText('工程已载入，cue 轨等待媒体内容确认',{exact:true}).waitFor();
+    await page.evaluate(()=>Workshop.setTab('io'));
     await page.locator('[data-project="bind"]').click();await page.getByText('本次曲目已确认，工程 cue 轨已启用',{exact:true}).waitFor();
     const otherPath=path.join(path.dirname(track.path),'another.wav');fs.copyFileSync(track.path,otherPath);
     await fixture.api('/v1/library/scan','POST',{root:path.dirname(track.path)});
@@ -75,11 +82,15 @@ async function main(){
       other=(await fixture.api('/v1/tracks?limit=10')).tracks.find(t=>t.id!==track.id);
       if(other)break;await page.waitForTimeout(100);
     }
-    assert.ok(other);await fixture.api('/v1/player/load','POST',{track_id:other.id});
+    assert.ok(other);await page.evaluate(()=>Workshop.setTab('cues'));
+    await page.getByText('本次曲目已确认，工程 cue 轨已启用',{exact:true}).waitFor();
+    await fixture.api('/v1/player/load','POST',{track_id:other.id});
     await page.waitForFunction(id=>Stage.presentation().track?.id===id,other.id);
     await page.getByText('工程已载入，cue 轨等待媒体内容确认',{exact:true}).waitFor();
     await fixture.api('/v1/player/load','POST',{track_id:track.id});
     await page.waitForFunction(id=>Stage.presentation().track?.id===id,track.id);
+    await page.getByText('工程已载入，cue 轨等待媒体内容确认',{exact:true}).waitFor();
+    await page.evaluate(()=>Workshop.setTab('io'));
     await fixture.api('/v1/player/pause','POST',{});
     await page.waitForFunction(()=>!Stage.presentation().playing);
     assert.match(await page.evaluate(()=>CreativeProject.status()),/等待/,'Returning to original track never silently restores binding');

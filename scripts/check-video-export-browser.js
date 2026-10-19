@@ -18,7 +18,10 @@ async function main() {
   const page = await context.newPage(), errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   try {
-    await fixture.seed();
+    const track = await fixture.seed();
+    await fixture.api(`/v1/tracks/${encodeURIComponent(track.id)}/lyrics`, 'PUT', {
+      content: '[00:00.00]Hertz video export lyric sentinel',
+    });
     await page.goto(uiUrl(fixture.base),{waitUntil:'domcontentloaded'});
     await page.waitForFunction(()=>window.VideoExport && window.Stage3D && window.CreativeStage);
     await page.evaluate(()=>{
@@ -40,10 +43,16 @@ async function main() {
         captureTracks.push(...dest.stream.getTracks());return dest.stream;
       }});
       const draw=CanvasRenderingContext2D.prototype.drawImage;
+      const fillText=CanvasRenderingContext2D.prototype.fillText;
       window.outputDraws=0;
+      window.outputHasLyric=false;
       CanvasRenderingContext2D.prototype.drawImage=function(...args){
         if(this.canvas===captureCanvases.at(-1)) outputDraws++;
         return draw.apply(this,args);
+      };
+      CanvasRenderingContext2D.prototype.fillText=function(...args){
+        if(this.canvas===captureCanvases.at(-1) && String(args[0])==='Hertz video export lyric sentinel') outputHasLyric=true;
+        return fillText.apply(this,args);
       };
       Stage3D.configure({sceneSource:'immersive',stanzaVisual:'stage',stanzaBg:'stage'});Stage3D.open();
     });
@@ -116,6 +125,8 @@ async function main() {
     }
 
     await start();
+    assert.equal(await page.evaluate(()=>outputHasLyric),true,
+      'Imported lyric must be drawn to the canvas captured by MediaRecorder');
     await page.evaluate(()=>{VideoExport.open();VideoExport.close();VideoExport.open();});
     await page.getByRole('button',{name:'停止并保存',exact:true}).waitFor();
     const horizontal=await save(1280,720,false);

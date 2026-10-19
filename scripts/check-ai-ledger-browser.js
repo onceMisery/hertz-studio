@@ -6,7 +6,7 @@ const {execFileSync}=require('node:child_process');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const {startFixture}=require('./ui-browser-fixture');
 const {uiUrl}=require('./ui-token');
-const output=path.resolve(__dirname,'../output/playwright/ai-ledger');
+const output=path.resolve(process.env.AI_LEDGER_OUTPUT || path.join(__dirname,'../output/playwright/ai-ledger'));
 async function main(){
   fs.mkdirSync(output,{recursive:true});
   const fixture=await startFixture();process.env.VMUSIC_DATA_DIR=fixture.dataDir;
@@ -26,6 +26,9 @@ db.execute('INSERT INTO ai_usage_entries (job_id,accepted_month,reservation_micr
  ('legacy-orphan',month,50000,9007199254740993,'reported',json.dumps(dict(provider='old',model='old-v0',pricingVersion='legacy-unverified',secret='DO-NOT-RETURN')),now))
 db.execute('INSERT INTO ai_usage_entries (job_id,accepted_month,reservation_micro_usd,accounted_micro_usd,usage_state,pricing_snapshot,created_at,owner_instance_id,principal,task_state,accepted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
  ('unknown-bill',month,50000,50000,'unknown',snapshot,now,owner,'local-owner','failed',accepted+100))
+token_snapshot=json.dumps(dict(provider='stepfun',model='step-5-preview',pricingVersion='token-usage-unpriced-v1',reservationMicroUsd=0,inputMicroUsdPerMillion=0,outputMicroUsdPerMillion=0,maxInputTokens=20000,maxOutputTokens=8000))
+db.execute('INSERT INTO ai_usage_entries (job_id,accepted_month,reservation_micro_usd,accounted_micro_usd,usage_state,pricing_snapshot,revision,created_at,owner_instance_id,principal,task_state,accepted_at,reported_usage) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+ ('unpriced-stepfun',month,0,0,'unpriced',token_snapshot,2,now,owner,'official-stage-draft','succeeded',accepted+101,json.dumps(dict(inputTokens=23,outputTokens=7))))
 db.execute('INSERT INTO ai_budget_months (month,charged_micro_usd,reserved_micro_usd,revision) VALUES (?,?,0,2)',(month,9007199254740993+22*137+50000))
 db.execute("UPDATE ai_budget_guard SET halted=1,reason='历史费用超过预留',trigger_job='legacy-orphan',revision=revision+1")
 db.commit();db.close()
@@ -47,10 +50,14 @@ db.commit();db.close()
     assert.equal(first.entries[0].acceptedAt,null);assert.equal(first.entries[0].principal,null);
     assert.ok(!JSON.stringify(first).includes('DO-NOT-RETURN'));
     const next=await fixture.api('/v1/ai/ledger?'+new URLSearchParams({month,limit:'20',before_sort_at:first.nextCursor.sortAt,before_job_id:first.nextCursor.jobId}));
-    assert.equal(next.entries.length,4);assert.equal(next.nextCursor,null);
-    assert.equal(new Set(first.entries.concat(next.entries).map(entry=>entry.jobId)).size,24);
+    assert.equal(next.entries.length,5);assert.equal(next.nextCursor,null);
+    assert.equal(new Set(first.entries.concat(next.entries).map(entry=>entry.jobId)).size,25);
     assert.equal(next.budget.chargedMicroUsd,first.budget.chargedMicroUsd);
     assert.ok(first.entries.concat(next.entries).every(entry=>!entry.taskRetained));
+    const unpricedApi=await fixture.api('/v1/ai/ledger?'+new URLSearchParams({month,usage_state:'unpriced'}));
+    assert.equal(unpricedApi.entries.length,1);
+    assert.equal(unpricedApi.entries[0].accountedMicroUsd,null);
+    assert.deepEqual(unpricedApi.entries[0].reportedUsage,{inputTokens:'23',outputTokens:'7'});
 
     await page.goto(uiUrl(fixture.base),{waitUntil:'domcontentloaded'});
     await page.evaluate(()=>{Workshop.open();Workshop.setTab('ledger');});
@@ -65,7 +72,7 @@ db.commit();db.close()
     assert.ok(!(await legacy.locator('pre').innerText()).includes('DO-NOT-RETURN'));
     const budgetText=await page.locator('.ws-ledger-budget').innerText();
     await page.getByRole('button',{name:'下一页账本',exact:true}).click();
-    await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===4);
+    await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===5);
     assert.equal(await page.getByRole('button',{name:'下一页账本',exact:true}).isDisabled(),true);
     await page.getByRole('button',{name:'上一页账本',exact:true}).click();
     await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===20);
@@ -73,6 +80,18 @@ db.commit();db.close()
     await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===1);
     assert.match(await page.locator('.ws-ledger-entry').innerText(),/费用未确认[\s\S]*可信计量迟到时仍可校正/);
     assert.equal(await page.locator('.ws-ledger-budget').innerText(),budgetText,'state filter never replaces the monthly total');
+    await page.getByRole('combobox',{name:'费用状态',exact:true}).selectOption('unpriced');
+    await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===1);
+    const unpriced=page.locator('.ws-ledger-entry[data-job-id="unpriced-stepfun"]');
+    const unpricedText=await unpriced.innerText();
+    assert.match(unpricedText,/费用未知，已记录 token/);
+    assert.match(unpricedText,/输入 23 tokens · 输出 7 tokens · 金额未核价/);
+    assert.doesNotMatch(unpricedText,/\$0(?:\.0+)? USD/);
+    await unpriced.locator('summary').click();
+    const unpricedDiagnostic=JSON.parse(await unpriced.locator('pre').innerText());
+    assert.equal(unpricedDiagnostic.accountedMicroUsd,null);
+    assert.deepEqual(unpricedDiagnostic.reportedUsage,{inputTokens:'23',outputTokens:'7'});
+    assert.equal(await page.locator('.ws-ledger-budget').innerText(),budgetText,'unpriced tokens never change the monetary total');
     await page.getByRole('combobox',{name:'费用状态',exact:true}).selectOption('reported');
     await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===20);
     for(const width of [1440,390,320]){
@@ -101,7 +120,7 @@ db.commit();db.close()
     assert.equal(requests.length,stopped,'ledger has no background polling after close');
     assert.equal(requests.filter(request=>request.method!=='GET').length,0,'browsing never mutates fees or submits jobs');
     assert.deepEqual(errors,[]);
-    console.log('AI ledger: real historical/purged facts, manager authorization, exact integer amounts, stable pages, month/state filters, diagnostics/redaction, stale-read isolation, 320/390px layout and no model calls/polling passed');
+    console.log('AI ledger: historical/purged facts, manager authorization, exact amounts, token-only unknown pricing, stable pages, filters, diagnostics/redaction, stale-read isolation, responsive layout and no model calls/polling passed');
   }finally{await browser.close();await fixture.close();}
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

@@ -741,8 +741,10 @@ async fn ai_cancel_job(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AiGuardResetRequest {
     pub expected_revision: i64,
+    pub config_fingerprint: String,
 }
 
 async fn ai_budget_guard_reset(
@@ -750,7 +752,12 @@ async fn ai_budget_guard_reset(
     Json(body): Json<AiGuardResetRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(
-        crate::ai::jobs::budget_guard_reset(&state, body.expected_revision).await?,
+        crate::ai::jobs::budget_guard_reset(
+            &state,
+            body.expected_revision,
+            &body.config_fingerprint,
+        )
+        .await?,
     ))
 }
 
@@ -2543,15 +2550,42 @@ async fn put_settings(
     State(state): State<Arc<AppState>>,
     Json(body): Json<std::collections::BTreeMap<String, serde_json::Value>>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    apply_settings(&state, &body).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub(crate) async fn apply_settings(
+    state: &Arc<AppState>,
+    body: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> ApiResult<()> {
     if body.keys().any(|k| is_credential(k)) {
         return Err(bad_request(
             "凭据只能通过对应的凭据管理入口修改，不能写入通用设置",
         ));
     }
+    let revoke_generation = body
+        .get(crate::ai::jobs::CONSENT_KEY)
+        .is_some_and(|value| value != &serde_json::Value::Bool(true));
+    let revoke_lyrics = body
+        .get("lyrics_emotion_ai_authorized")
+        .is_some_and(|value| value != &serde_json::Value::Bool(true));
+    if (revoke_generation || revoke_lyrics) && !state.ai_runner_held() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ai_locked",
+            "请在持有 AI 服务锁的 Hertz 实例中撤回 AI 授权",
+        ));
+    }
     vmusic_store::settings::set_all(&state.db, &body)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    if revoke_lyrics {
+        state.ai_emotion.cancel_active();
+    }
+    if revoke_generation {
+        crate::ai::jobs::revoke_generation_consent(&state).await?;
+    }
+    Ok(())
 }
 
 /// 设置表里存的是「用户在音源站点的登录凭据」（旧版裸 cookie 键

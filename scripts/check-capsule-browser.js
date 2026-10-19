@@ -29,7 +29,9 @@ function contrast(foreground, background) {
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const engine = process.env.CAPSULE_BROWSER || 'chromium';
-  const browser = await playwright[engine].launch({ headless: true });
+  const launchOptions = { headless: true };
+  if (process.env.PLAYWRIGHT_EXECUTABLE_PATH) launchOptions.executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+  const browser = await playwright[engine].launch(launchOptions);
   const evidence = [];
   try {
     for (const scale of [1, 2]) {

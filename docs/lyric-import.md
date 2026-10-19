@@ -1,6 +1,6 @@
 # 歌词候选与结构化导入
 
-R1-L 沿用 `LyricDocument`、曲库覆盖层与 Stage 原时钟。已实现本地 LRC/受控 TTML 导入，以及 Full 既有音源的手动检索、选择、取词预览和显式应用。来源许可、严格自动采纳与真实音源/歌曲验收仍未完成，完整专项保持未完成。
+R1-L 沿用 `LyricDocument`、曲库覆盖层与 Stage 原时钟。已实现本地 LRC/受控 TTML 导入、Full 既有音源的手动检索/预览/应用，以及用户主动启用的严格自动应用。真实来源、歌词许可和真实歌曲验收仍未完成，完整专项保持未完成。
 
 ## 设计与实施顺序
 
@@ -24,7 +24,7 @@ R1-L 沿用 `LyricDocument`、曲库覆盖层与 Stage 原时钟。已实现本�
 
 Full 正在播放的本地曲目 → 更多操作 → 查找在线歌词。打开表单不联网；显式搜索才将所选检索词发给既有音源。候选来自注册表 `lyric_candidates` 能力，目前为网易云、QQ、酷狗、酷我、咪咕，均标记未完成真实来源验收；Standard 不编译这些协议，也不显示入口。其它来源没有实际歌词实现时不宣称支持。
 
-搜索最多检查十条元数据，去重、排序后返回至多三份。展示曲名、歌手、专辑、时长差与版本差异；同名、缺字段和 live/cover/remix 不得到强匹配。即使元数据完全符合，也只是比对证据，不代表质量或授权评分，`automaticApplyAllowed` 始终为 false。每次由用户选择「检查这份歌词」后才取词，看到预览后还需单独应用。
+搜索最多检查十条元数据，去重、排序后返回至多三份。展示曲名、歌手、专辑、时长差与版本差异；同名、缺字段和 live/cover/remix 不得到强匹配。元数据证据不代表歌词质量或授权评分。自动应用默认关闭，用户必须主动勾选；服务端只有在上游明确给出完整且无警告的候选总数（不超过十条）、没有无效/重复条目、全体候选没有版本冲突、恰有一个强元数据匹配且当前无可见歌词时，才把该候选标记为可自动应用。可见歌词按现有读取优先级判断：手动导入覆盖层、容器内嵌歌词、同目录 sidecar LRC；写事务前再次检查，若歌词已变为可见则拒绝自动应用。UI 仍先取词并通过本地解析检查，再提交自动应用。任何条件不满足时都只显示候选，沿用手动检查和单独应用流程。该规则不判定歌词内容质量、平台条款或再分发许可。无锁定本地歌词文件与数据库写入之间的外部文件竞态仍可能发生。
 
 服务端保存选择与来源 ID，客户端仅提交候选 ID，不能自行指定 provider ref。搜索和取词各自共享两个网络槽、不排队，总等待八秒且不在此层重试；复用音源原有协议，失败需要显式重试。音源内部既有游客/封面回退不因本入口变成严格单请求。搜索后、取词后和写入事务分别复查元数据及歌词修订；十分钟期限自搜索产生候选起计算，不被取词或重试延长。同一候选并发取词以第一份检查通过的结果为准，后返回的正文不能更换已展示预览。
 
@@ -38,10 +38,10 @@ Full 正在播放的本地曲目 → 更多操作 → 查找在线歌词。打�
 
 `POST /v1/tracks/{id}/lyrics/candidates` 接收 `{content, format, expectedMetadataRevision, expectedLyricsRevision}`，format 为 `auto/lrc/ttml`；这是本地导入契约。返回候选 ID、来源、格式、精度、计数、短预览和有效期。
 
-`POST /v1/tracks/{id}/lyrics/candidates/search` 接收 `{source, query?, expectedMetadataRevision, expectedLyricsRevision}`，query 为 1–192 字符/最多 768 字节的单行文本；省略时组合当前曲名和歌手。返回至多三份候选、元数据证据、许可缺失状态及原修订。`POST /v1/tracks/{id}/lyrics/candidates/prepare-online` 接收 `{candidateId, expectedLyricsRevision}`，读取所选歌词并返回预览，不写覆盖层。
+`POST /v1/tracks/{id}/lyrics/candidates/search` 接收 `{source, query?, expectedMetadataRevision, expectedLyricsRevision, allowAutomaticApply?}`，query 为 1–192 字符/最多 768 字节的单行文本；省略时组合当前曲名和歌手。返回至多三份候选、元数据证据、许可缺失状态及原修订；`automaticApplyAllowed` 仅在服务端严格条件全部满足时为 true。`POST /v1/tracks/{id}/lyrics/candidates/prepare-online` 接收 `{candidateId, expectedLyricsRevision}`，读取所选歌词并返回预览，不写覆盖层。
 
-`POST /v1/tracks/{id}/lyrics/candidates/apply` 对两类已准备候选共用 `{candidateId, expectedLyricsRevision}`，在写事务中再次核对目标、元数据、持久修订和期限；直接应用未取词候选得到 `lyrics_not_prepared`（409）。上述为官方 HTTP/RPC，不加入受限 MCP 工具目录。
+`POST /v1/tracks/{id}/lyrics/candidates/apply` 对两类已准备候选共用 `{candidateId, expectedLyricsRevision, automaticApply?}`，在写事务中再次核对目标、元数据、持久修订和期限；自动模式额外要求服务端保存的候选资格及当前无可见歌词（导入覆盖层、内嵌歌词和 sidecar LRC）。直接应用未取词候选得到 `lyrics_not_prepared`（409）。上述为官方 HTTP/RPC，不加入受限 MCP 工具目录。
 
 HTTP/RPC 共用服务。旧结果为 `lyrics_conflict`（409），过期为 `lyrics_candidate_expired`（410），解析/容量忙为 `lyrics_busy`（429），解析等待超时为 `lyrics_timeout`（408），格式/结构/大小错误为 `lyrics_unsupported/invalid/empty/limit`（422）；错误保留 request_id。现有在线补全也捕获网络等待前的修订，迟到结果遇到手工变更会跳过歌词槽。
 
-验证在实现后执行，覆盖恶意/伪 TTML、时间边界、词/译文/罗马音、偏移只应用一次、旧库迁移与删除墓碑、并发修订冲突、HTTP/RPC 一致、切歌/关闭/迟到响应及窄屏布局。整个增量不调用模型、不接入新商业歌词协议、不自动覆盖用户原文件。
+验证在实现后执行，覆盖恶意/伪 TTML、时间边界、词/译文/罗马音、偏移只应用一次、旧库迁移与删除墓碑、并发修订冲突、HTTP/RPC 一致、切歌/关闭/迟到响应及窄屏布局。受控 fixture 覆盖用户未启用时不发送自动许可、唯一一致元数据候选的检查/应用请求，以及既有手动预览流程；不代表真实音源候选总数可信度或歌曲质量验收。整个增量不调用模型、不接入新商业歌词协议、不自动覆盖用户原文件。

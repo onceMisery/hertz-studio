@@ -95,11 +95,11 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         .cloned()
         .unwrap_or_default();
 
-    let total = body
+    let reported_total = body
         .get("result")
         .and_then(|r| r.get("songCount"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(songs.len() as u64) as usize;
+        .and_then(|v| v.as_u64());
+    let total = reported_total.unwrap_or(songs.len() as u64) as usize;
 
     let mut tracks = songs.iter().map(netease_track).collect::<Vec<_>>();
     fill_album_covers(ctx, &mut tracks).await;
@@ -108,6 +108,7 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         source: "netease".into(),
         keyword: term,
         total,
+        total_is_exact: reported_total.is_some(),
         tracks,
         warning: None,
         pagination: None,

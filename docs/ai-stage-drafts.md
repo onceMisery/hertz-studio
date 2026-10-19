@@ -32,7 +32,7 @@ AI 提案使用同一校验、预览、确认路径，应用前重新查询提�
 }
 ```
 
-示例中的版本/hash 占位必须替换为契约查询返回的实际值。hash 用于版本一致性，不是作者签名。`schemaHash` 是排序对象键后的 canonical JSON 的 SHA-256；数组顺序保持不变。`basePresetHash` 来自原前端 owner 的 `canonicalBaseline(scene)`，Rust 不复制完整基线、物化或分享 codec。浏览器不提供 WebCrypto 时使用相同算法的本地实现。
+示例中的版本/hash 占位必须替换为契约查询返回的实际值。hash 用于版本一致性，不是作者签名。`schemaHash` 是排序对象键后的 canonical JSON 的 SHA-256，覆盖 `intentSchema`、公共参数与各场景参数的名称、范围、默认值，以及场景 id/别名/歌词归属；数组顺序保持不变。仅改动会影响校验或物化的这些约束也会使旧草稿失效。`basePresetHash` 来自原前端 owner 的 `canonicalBaseline(scene)`，Rust 不复制完整基线、物化或分享 codec。浏览器不提供 WebCrypto 时使用相同算法的本地实现。
 
 ## 外部工具
 
@@ -47,7 +47,7 @@ AI 提案使用同一校验、预览、确认路径，应用前重新查询提�
 
 ## 费用账本
 
-打开工坊 → 高级编排 →「费用账本」，按 UTC 受理月和费用状态查看当前实例的所有费用入口。任务清理后，十三个月内的账目仍可查询。unknown/estimated_final 是保守估算，不代表供应商已经结清；released 表示未派发即终止，reported 表示收到可信计量。默认运行时为本地 fake；可显式选择实验性的本地 Ollama，尚无可用的付费云 adapter。
+打开工坊 → 高级编排 →「费用账本」，按 UTC 受理月和费用状态查看当前实例的所有费用入口。任务清理后，十三个月内的账目仍可查询。unknown/estimated_final 是保守估算，不代表供应商已经结清；released 表示未派发即终止，reported 表示收到可信计量。默认运行时为本地 fake；可显式选择实验性的本地 Ollama。StepFun 可在用户明确选择、配置密钥并开启生成后按 token-only 模式派发；金额未知不阻挡功能，也不进入金额总账。
 
 「诊断详情」可查任务编号、主体、终态、价格版本、规范化 token 计数和费用 revision。旧库缺少可回填事实时显示历史归因或价格不完整，不按当前配置重算历史。筛选只影响列表，当月总账保持全实例口径。浏览、翻页和刷新不调用模型，不存在客户端修改费用接口。
 
@@ -72,7 +72,7 @@ Ollama 必须已运行、已有支持结构化输出的本地模型；Hertz 不�
 
 任务终态提交后关闭该任务的取消信号；Ollama adapter 在首次发送前和整个 HTTP 发送/读取期间监听它。取消停止本地等待并丢弃受管请求 future，不重试 POST；执行槽仍由 worker 持有，直到 adapter 实际返回或三十秒总期限结束，不能仅凭 UI 终态提前归还。断开连接不能证明 Ollama 已停止计算，也不会凭空补出 usage；已有完整可信计量仍可独立结算，未得到计量保持 unknown。本地费用为零不改变这些事实。独立评测没有交互取消入口，仍受原总期限约束。
 
-本地 adapter 的价格与预留为零，记录 Ollama 的 prompt/eval 计数；这不计算电费，也不是任何云模型的可靠 token/价格上界。输入 token 上限的 `u64::MAX` 仅表示该零价本地 adapter 未承诺 tokenizer 上界，不能挪作 cloud 报价。已有[凭据接入准备](./ai-provider-credential.md)，Windows 两版已有系统钥匙串合成条目验收，其它 OS/锁定与拒绝访问、云 adapter、完整请求计价上界与真实模型两轮评测仍待完成。
+本地 adapter 的价格与预留为零，记录 Ollama 的 prompt/eval 计数；这不计算电费，也不是任何云模型的可靠 token/价格上界。输入 token 上限的 `u64::MAX` 仅表示该零价本地 adapter 未承诺 tokenizer 上界。StepFun 云 adapter 已支持有限请求和 token-only 账本；真实应用内 usage、其它 OS/锁定与拒绝访问、云端边界及模型评测仍待完成。
 
 配置错误显示 provider unavailable，不回退 fake；TOML 语法或字段类型错误阻止服务启动，错误不回显文件正文。恢复 fake 需显式设 `provider = "fake"` 并重启。官方 UI 展示当前模型与数据范围，受限工具不能改变 provider 配置。
 
@@ -84,7 +84,7 @@ Ollama 必须已运行、已有支持结构化输出的本地模型；Hertz 不�
 
 ## 模型评测
 
-独立评测入口复用真实 adapter、提示和校验，在播放器 bootstrap 前运行，不读取用户曲库或创建生产任务。已有 120 条开发集与 40 条预留合成样本、离线规则基线、自动检查及待人工评分模板。标签独立复核、实际模型、两轮评测和正式发布阈值仍待验收；单轮报告不会自动宣布可发布。运行命令、人工评分规则与指标分母见 [StageIntent 评测](../evals/stage-intent/v1/README.md)。
+独立评测入口复用真实 adapter、提示和校验，在播放器 bootstrap 前运行，不读取用户曲库或创建生产任务。当前语料 v2 保留 120 条开发集与 40 条预留合成样本；标签独立复核、实际模型、两轮评测和正式发布阈值仍待验收，单轮报告不会自动宣布可发布。运行命令、人工评分规则与指标分母见 [StageIntent v2](../evals/stage-intent/v2/README.md)。v1 基线仅作为历史证据。
 
 ## 工程验证
 
@@ -107,6 +107,6 @@ cargo test --locked -p hertz-studio --test mcp_sdk --target-dir target/mcp-sdk-c
 
 官方 Rust SDK 与真实 stdio 子进程的协议、授权、幂等和生命周期检查见 [MCP 互操作说明](./mcp-interoperability.md)，Standard / Full 应分别执行；SDK 检查不代替目标应用中的正式连接验收。
 
-OpenAI 已选择为首个云端 provider，当前只交付[密钥接入准备](./ai-provider-credential.md)；模型、预算与云端调用仍未确定或启用。凭据浏览器检查使用合成密钥与显式内存后端，不代表真实系统钥匙串或 OpenAI 验收。
+StepFun `step-5-preview` 已通过独立最小 Responses 连通性检查，并接入静态 create、严格输出、持久任务及 token-only 账本；价格未知时不做金额预留或金额门槛，可信 usage 只记录 token 数。默认仍使用 fake，需显式配置 StepFun、凭据和生成同意后才会发请求；本机尚未完成真实应用内调用、实际 usage 字段或模型质量验收。OpenAI 仍因模型尚未选定而关闭。凭据浏览器检查使用合成密钥与显式内存后端；StepFun 的界面路径可用 `node scripts/check-ai-credential-browser.js --stepfun` 定向检查。
 
 浏览器检查需要 Playwright 和已构建服务，可通过 `PLAYWRIGHT_MODULE`、`HERTZ_BIN` 指定。独立账本检查另需 Python 标准库 sqlite3 写入隔离测试数据，可通过 `PYTHON` 指定解释器；产品运行不依赖 Python。生成契约时运行 `node scripts/export-stage-contract.js`，服务端 JSON 和浏览器材料必须一起更新。全场景检查加载真实 GL、动画场景、背景、手绘、舞台及分享 codec；浏览器检查覆盖待执行的 400ms 保存、取消、切页、关闭、编辑失效和确认保存。自动化结论不代替真实 DBX、弱机 GPU 或正式 MCP 客户端验收。

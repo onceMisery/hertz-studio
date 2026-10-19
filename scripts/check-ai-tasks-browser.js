@@ -19,7 +19,9 @@ const { startFixture } = require('./ui-browser-fixture');
 const { uiUrl } = require('./ui-token');
 
 const root = path.resolve(__dirname, '..');
-const output = path.join(root, 'output/playwright/ai-tasks');
+const output = process.env.AI_TASKS_OUTPUT
+  ? path.resolve(process.env.AI_TASKS_OUTPUT)
+  : path.join(root, 'output/playwright/ai-tasks');
 const errors = [];
 let passed = 0;
 const pass = (name) => { passed += 1; console.log('PASS ' + name); };
@@ -236,6 +238,79 @@ async function main() {
     await page.locator('.ws-ai-job').filter({ hasText: disconnectedJobId.slice(0, 8) }).waitFor({ timeout: 5000 });
     pass('AI 面板打开时断线，重连后找回另一入口完成的任务');
 
+    const pageOne = Array.from({ length: 20 }, (_, index) => ({
+      ...job,
+      jobId: 'newer-' + String(index).padStart(2, '0') + '-fixture',
+      createdAt: job.createdAt + 100000 + (20 - index) * 1000,
+      state: 'failed',
+      resultProposalId: null,
+      usage: null,
+    }));
+    let latestPage = pageOne;
+    const olderJob = {
+      ...job,
+      jobId: 'fixture-older-proposal',
+      createdAt: job.createdAt - 1000,
+    };
+    const historyPage = await context.newPage();
+    let historyRouteHits = 0;
+    historyPage.on('pageerror', error => console.error('AI history page error: ' + error.message));
+    historyPage.on('console', message => {
+      if (message.type() === 'error') console.error('AI history console: ' + message.text());
+    });
+    historyPage.on('request', request => {
+      if (new URL(request.url()).pathname.includes('/v1/ai/')) {
+        console.log('AI history request ' + request.method() + ' ' + request.url());
+      }
+    });
+    await historyPage.routeWebSocket(url => url.pathname === '/ws', ws => ws.connectToServer());
+    await historyPage.route('**/v1/ai/jobs?limit=20*', async route => {
+      historyRouteHits += 1;
+      const url = new URL(route.request().url());
+      if (url.searchParams.has('before_created_at')) {
+        assert.ok(url.searchParams.has('before_job_id'), 'older page carries the stable compound cursor');
+        await route.fulfill({ json: { jobs: [olderJob] } });
+      } else await route.fulfill({ json: { jobs: latestPage } });
+    });
+    await historyPage.goto(uiUrl(fixture.base), { waitUntil: 'domcontentloaded' });
+    // app.js finishes several asynchronous startup steps before Workshop.init().
+    // DOMContentLoaded only guarantees that the scripts were loaded, not that the
+    // workshop API has bound its panel refs yet.
+    await historyPage.waitForFunction(() => document.querySelector('#workshop .ws-targets'));
+    await historyPage.evaluate(() => { Workshop.open(); Workshop.setTab('ai'); });
+    try {
+      await historyPage.waitForFunction(() => document.querySelectorAll('.ws-ai-job').length === 20, null, { timeout: 8000 });
+    } catch (error) {
+      console.error('AI history URL: ' + historyPage.url());
+      console.error('AI history route hits: ' + historyRouteHits);
+      console.error('AI history prompt: ' + await historyPage.locator('#ws-ai-brief').count());
+      console.error('AI history text: ' + (await historyPage.locator('body').innerText()).slice(0, 1200));
+      throw error;
+    }
+    await historyPage.getByRole('button', { name: '加载更早任务', exact: true }).click();
+    await historyPage.waitForFunction(() => document.querySelectorAll('.ws-ai-job').length === 21);
+    const olderRow = historyPage.locator('.ws-ai-job').filter({ hasText: olderJob.jobId.slice(0, 8) });
+    const olderOps = olderRow.locator('xpath=following-sibling::div[contains(@class,"ws-ai-ops")]').first();
+    await olderOps.getByRole('button', { name: '查看提案', exact: true }).click();
+    await historyPage.locator('.ws-ai-proposal .ws-prompt-head').waitFor();
+    assert.match(await historyPage.locator('.ws-ai-proposal .ws-prompt-head').innerText(), /提案 · 场景：/);
+    pass('AI 任务历史使用稳定游标翻页并能读取较早提案');
+    await olderOps.getByRole('button', { name: '收起提案', exact: true }).click();
+
+    latestPage = [
+      { ...pageOne[0], jobId: 'recent-00-fixture', createdAt: pageOne[0].createdAt + 2000 },
+      { ...pageOne[0], jobId: 'recent-01-fixture', createdAt: pageOne[0].createdAt + 1000 },
+      ...pageOne.slice(0, 18),
+    ];
+    await historyPage.getByRole('button', { name: '刷新任务与费用', exact: true }).click();
+    await historyPage.waitForFunction(() => document.querySelectorAll('.ws-ai-job').length === 23);
+    for (const shiftedJob of pageOne.slice(18)) {
+      assert.equal(await historyPage.locator('.ws-ai-job').filter({ hasText: shiftedJob.jobId.slice(0, 8) }).count(), 1,
+        'refresh must retain tasks shifted out of the latest page: ' + shiftedJob.jobId);
+    }
+    pass('刷新时保留已加载历史中被新任务挤出最近页的记录');
+    await historyPage.unroute('**/v1/ai/jobs?limit=20*');
+
     // A delayed response must not redraw a closed panel or restart polling.
     let aiRequests = 0;
     let release;
@@ -275,6 +350,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('✗ ' + (error && error.message || error));
+  console.error('✗ ' + (error && error.stack || error && error.message || error));
   process.exit(1);
 });

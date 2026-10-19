@@ -369,14 +369,7 @@ pub async fn get_settings(state: &Arc<AppState>) -> RpcResult {
 
 pub async fn put_settings(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let request: std::collections::BTreeMap<String, Value> = body_as(body)?;
-    if request.keys().any(|k| is_credential(k)) {
-        return Err(bad_request(
-            "凭据只能通过对应的凭据管理入口修改，不能写入通用设置",
-        ));
-    }
-    vmusic_store::settings::set_all(&state.db, &request)
-        .await
-        .map_err(store_err)?;
+    crate::routes::apply_settings(state, &request).await?;
     Ok(Reply::ok(json!({ "ok": true })))
 }
 

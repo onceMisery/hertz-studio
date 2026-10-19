@@ -397,10 +397,21 @@ impl CpalBackend {
         }
         let device = self.device.as_ref().ok_or_else(no_device)?;
         let config = self.config.as_ref().ok_or_else(no_device)?;
-        let shared = self.shared.clone();
-        let channels = config.channels().max(1) as usize;
+        let stream = Self::build_stream(device, config, self.shared.clone())?;
+        stream
+            .play()
+            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
+        self.stream = Some(stream);
+        Ok(())
+    }
 
-        let stream = device
+    fn build_stream(
+        device: &Device,
+        config: &SupportedStreamConfig,
+        shared: Arc<Shared>,
+    ) -> Result<Stream, AudioError> {
+        let channels = config.channels().max(1) as usize;
+        device
             .build_output_stream(
                 &config.config(),
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
@@ -409,13 +420,7 @@ impl CpalBackend {
                 |err| tracing::warn!("audio output error: {err}"),
                 None,
             )
-            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
-
-        stream
-            .play()
-            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
-        self.stream = Some(stream);
-        Ok(())
+            .map_err(|e| AudioError::BackendInit(e.to_string()))
     }
 
     fn stop_decoder(&mut self) {
@@ -1130,18 +1135,43 @@ impl AudioBackend for CpalBackend {
         };
         let config = pick_config(&device)?;
 
-        // Rebuilding the device means rebuilding the stream and re-decoding.
-        self.stop_decoder();
-        self.stream = None;
+        let next_rate = config.sample_rate().0;
+        let next_channels = config.channels();
+        let has_prepared_audio =
+            self.decoder.is_some() || self.next_decoder.is_some() || self.pending_load.is_some();
+        if has_prepared_audio
+            && (next_rate != self.device_rate || next_channels != self.device_channels)
+        {
+            return Err(AudioError::BackendInit(format!(
+                "所选设备格式为 {next_rate} Hz/{next_channels} 声道，当前播放链为 {} Hz/{} 声道；为保留播放状态，本次未切换设备",
+                self.device_rate, self.device_channels
+            )));
+        }
+
+        let next_stream = if self.stream.is_some() {
+            Some(Self::build_stream(&device, &config, self.shared.clone())?)
+        } else {
+            None
+        };
+        if let Some(stream) = &next_stream {
+            if let Some(current) = &self.stream {
+                current
+                    .pause()
+                    .map_err(|error| AudioError::BackendInit(error.to_string()))?;
+            }
+            if let Err(error) = stream.play() {
+                if let Some(current) = &self.stream {
+                    let _ = current.play();
+                }
+                return Err(AudioError::BackendInit(error.to_string()));
+            }
+        }
+        self.stream = next_stream;
         self.device_rate = config.sample_rate().0;
         self.device_channels = config.channels();
         self.device = Some(device);
         self.config = Some(config);
-        self.clear_buffers();
-        self.shared
-            .current_deck()
-            .frames_played
-            .store(0, Ordering::Relaxed);
+        self.sync_dsp_context();
         Ok(())
     }
 
@@ -2048,6 +2078,13 @@ fn map_channels(interleaved: &[f32], from: usize, to: usize, out: &mut [f32]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
+    use std::collections::VecDeque;
+    use std::sync::Barrier;
+    use symphonia::core::audio::{AudioBuffer, AudioBufferRef, Channels, Signal, SignalSpec};
+    use symphonia::core::codecs::{CodecDescriptor, CodecParameters, Decoder, FinalizeResult};
+    use symphonia::core::formats::{Cue, Packet, SeekedTo, Track};
+    use symphonia::core::meta::{Metadata, MetadataLog};
 
     struct CallbackAllocator;
 
@@ -2491,6 +2528,256 @@ mod tests {
         backend.spawn_now(opened).unwrap();
         wait_for_eof(&backend);
         backend
+    }
+
+    enum ScriptedReaderEvent {
+        Packet(Packet),
+        Error(SymError),
+        Gate(Arc<Barrier>, Arc<Barrier>),
+    }
+
+    struct ScriptedReader {
+        source: Option<MediaSourceStream>,
+        tracks: Vec<Track>,
+        events: VecDeque<ScriptedReaderEvent>,
+        metadata: MetadataLog,
+    }
+
+    impl FormatReader for ScriptedReader {
+        fn try_new(
+            _: MediaSourceStream,
+            _: &FormatOptions,
+        ) -> symphonia::core::errors::Result<Self> {
+            Err(SymError::Unsupported("scripted test reader"))
+        }
+
+        fn cues(&self) -> &[Cue] {
+            &[]
+        }
+
+        fn metadata(&mut self) -> Metadata<'_> {
+            self.metadata.metadata()
+        }
+
+        fn seek(&mut self, _: SeekMode, _: SeekTo) -> symphonia::core::errors::Result<SeekedTo> {
+            Err(SymError::SeekError(
+                symphonia::core::errors::SeekErrorKind::Unseekable,
+            ))
+        }
+
+        fn tracks(&self) -> &[Track] {
+            &self.tracks
+        }
+
+        fn next_packet(&mut self) -> symphonia::core::errors::Result<Packet> {
+            while let Some(event) = self.events.pop_front() {
+                match event {
+                    ScriptedReaderEvent::Packet(packet) => return Ok(packet),
+                    ScriptedReaderEvent::Error(error) => return Err(error),
+                    ScriptedReaderEvent::Gate(entered, release) => {
+                        entered.wait();
+                        release.wait();
+                    }
+                }
+            }
+            Err(SymError::IoError(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "end of stream",
+            )))
+        }
+
+        fn into_inner(mut self: Box<Self>) -> MediaSourceStream {
+            self.source.take().unwrap()
+        }
+    }
+
+    struct ScriptedDecoder {
+        params: CodecParameters,
+        reset_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Decoder for ScriptedDecoder {
+        fn try_new(
+            _: &CodecParameters,
+            _: &DecoderOptions,
+        ) -> symphonia::core::errors::Result<Self> {
+            Err(SymError::Unsupported("scripted test decoder"))
+        }
+
+        fn supported_codecs() -> &'static [CodecDescriptor] {
+            &[]
+        }
+
+        fn reset(&mut self) {
+            self.reset_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn codec_params(&self) -> &CodecParameters {
+            &self.params
+        }
+
+        fn decode(
+            &mut self,
+            packet: &Packet,
+        ) -> symphonia::core::errors::Result<AudioBufferRef<'_>> {
+            let (rate, frames, value) = match packet.buf().first().copied() {
+                Some(1) => (44_100, 512, 0.75),
+                Some(2) => (44_100, 32, 0.0),
+                Some(3) => (48_000, 512, -0.75),
+                _ => return Err(SymError::DecodeError("unknown scripted packet")),
+            };
+            let mut buffer =
+                AudioBuffer::<f32>::new(frames as u64, SignalSpec::new(rate, Channels::FRONT_LEFT));
+            buffer.render_reserved(Some(frames));
+            buffer.chan_mut(0).fill(value);
+            Ok(AudioBufferRef::F32(Cow::Owned(buffer)))
+        }
+
+        fn finalize(&mut self) -> FinalizeResult {
+            FinalizeResult::default()
+        }
+
+        fn last_decoded(&self) -> AudioBufferRef<'_> {
+            AudioBufferRef::F32(Cow::Owned(AudioBuffer::unused()))
+        }
+    }
+
+    fn scripted_opened_reader(
+        events: Vec<ScriptedReaderEvent>,
+    ) -> (OpenedReader, Arc<std::sync::atomic::AtomicUsize>) {
+        let mut params = CodecParameters::new();
+        params
+            .for_codec(symphonia::core::codecs::CODEC_TYPE_PCM_F32LE)
+            .with_sample_rate(44_100)
+            .with_channels(Channels::FRONT_LEFT);
+        let track = Track::new(1, params.clone());
+        let reader = ScriptedReader {
+            source: Some(MediaSourceStream::new(
+                Box::new(std::io::Cursor::new(Vec::<u8>::new())),
+                Default::default(),
+            )),
+            tracks: vec![track],
+            events: events.into(),
+            metadata: MetadataLog::default(),
+        };
+        let reset_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let decoder = ScriptedDecoder {
+            params,
+            reset_count: reset_count.clone(),
+        };
+        (
+            OpenedReader {
+                reader: Box::new(reader),
+                decoder: Box::new(decoder),
+                track_id: 1,
+                gapless_supported: false,
+            },
+            reset_count,
+        )
+    }
+
+    fn start_scripted_decoder(
+        opened: OpenedReader,
+    ) -> (Arc<Deck>, Arc<AtomicBool>, JoinHandle<()>) {
+        let deck = Arc::new(Deck::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_deck = deck.clone();
+        let worker_stop = stop.clone();
+        let seek_to = Arc::new(Mutex::new(None));
+        let worker_seek = seek_to.clone();
+        let handle = std::thread::spawn(move || {
+            decode_loop_opened(opened, worker_deck, worker_stop, worker_seek, 48_000, 1);
+        });
+        (deck, stop, handle)
+    }
+
+    fn wait_for_decoder_result(deck: &Deck) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !deck.eof.load(Ordering::Acquire) && !deck.decode_error.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "decoder did not report EOF or a decode error"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn scripted_packet(marker: u8) -> Packet {
+        Packet::new_from_slice(1, 0, 1, &[marker])
+    }
+
+    #[test]
+    fn reset_required_clears_decoder_and_resampler_history() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let (opened, reset_count) = scripted_opened_reader(vec![
+            ScriptedReaderEvent::Packet(scripted_packet(1)),
+            ScriptedReaderEvent::Gate(entered.clone(), release.clone()),
+            ScriptedReaderEvent::Error(SymError::ResetRequired),
+            ScriptedReaderEvent::Packet(scripted_packet(2)),
+            ScriptedReaderEvent::Error(SymError::IoError(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "end of stream",
+            ))),
+        ]);
+        let (deck, stop, handle) = start_scripted_decoder(opened);
+
+        entered.wait();
+        let first_segment_len = deck.samples.lock().unwrap().len();
+        assert!(
+            first_segment_len > 0,
+            "first decoded segment must be queued"
+        );
+        release.wait();
+
+        wait_for_decoder_result(&deck);
+        assert!(deck.eof.load(Ordering::Acquire));
+        assert!(!deck.decode_error.load(Ordering::Acquire));
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        assert_eq!(reset_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let samples = deck.samples.lock().unwrap();
+        let tail_len = samples.len() - first_segment_len;
+        assert_eq!(tail_len, (32usize * 48_000).div_ceil(44_100));
+        assert!(
+            samples
+                .iter()
+                .skip(first_segment_len)
+                .all(|sample| sample.abs() < 1e-6),
+            "ResetRequired must prevent prior nonzero filter history from bleeding into the next segment"
+        );
+    }
+
+    #[test]
+    fn decoded_format_change_fails_before_mixing_new_pcm() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let (opened, reset_count) = scripted_opened_reader(vec![
+            ScriptedReaderEvent::Packet(scripted_packet(1)),
+            ScriptedReaderEvent::Gate(entered.clone(), release.clone()),
+            ScriptedReaderEvent::Packet(scripted_packet(3)),
+        ]);
+        let (deck, stop, handle) = start_scripted_decoder(opened);
+
+        entered.wait();
+        let first_segment_len = deck.samples.lock().unwrap().len();
+        assert!(
+            first_segment_len > 0,
+            "first decoded segment must be queued"
+        );
+        release.wait();
+
+        wait_for_decoder_result(&deck);
+        let decode_error = deck.decode_error.load(Ordering::Acquire);
+        let eof = deck.eof.load(Ordering::Acquire);
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        assert!(decode_error);
+        assert!(!eof);
+        assert_eq!(reset_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(deck.samples.lock().unwrap().len(), first_segment_len);
     }
 
     fn wait_for_eof(backend: &CpalBackend) {

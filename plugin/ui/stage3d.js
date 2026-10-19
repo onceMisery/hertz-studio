@@ -782,7 +782,7 @@
     '  col = max(mix(vec3(lum), col, 1.10), vec3(0.0));',
     //   指数 tonemap：比 ACES 便宜，且不会把 LDR 场景压暗太多
     '  col = vec3(1.0) - exp(-max(col, 0.0));',
-    '  float vig = smoothstep(1.18, 0.16, length(c*vec2(1.06, 1.0)));',
+    '  float vig = 1.0 - smoothstep(0.16, 1.18, length(c*vec2(1.06, 1.0)));',
     '  col *= mix(1.0, vig, uVignette);',
     '  float n = fract(sin(dot(vUv*uRes + uTime*13.7, vec2(12.9898, 78.233)))*43758.5453);',
     '  col += (n - 0.5)*uGrain;',

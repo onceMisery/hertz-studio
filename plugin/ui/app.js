@@ -1189,12 +1189,7 @@ function handleEvent(msg) {
     }
     case 'buffering': {
       // 在线曲边下边播：播放键转 loading 态，title 提示缓冲进度；收口时清空。
-      const active = !!msg.active;
-      const button = window.HertzCapsuleOnly ? ui.capsulePlay : ui.playpause;
-      button.classList.toggle('is-loading', active);
-      button.title = active
-        ? (msg.pct != null ? `缓冲中 ${msg.pct}%` : '缓冲中…')
-        : '';
+      syncBufferingIndicator(msg.active, msg.pct);
       break;
     }
     case 'beatmap_ready':
@@ -1789,7 +1784,19 @@ let documentTitleCache = '';
 let progressLabelCache = '';
 let capsuleMediaKey = '';
 
+function syncBufferingIndicator(active, pct) {
+  const loading = !!active;
+  const button = window.HertzCapsuleOnly ? ui.capsulePlay : ui.playpause;
+  button.classList.toggle('is-loading', loading);
+  button.title = loading
+    ? (pct != null ? `缓冲中 ${pct}%` : '缓冲中…')
+    : '';
+}
+
 function applySnapshot(snap) {
+  if (Object.prototype.hasOwnProperty.call(snap, 'buffering')) {
+    syncBufferingIndicator(snap.buffering, snap.pct);
+  }
   const previous = state.snapshot.track_id;
   const wasPlaying = state.snapshot.playing === true;
   if (previous !== snap.track_id && state.seeking) cancelSeek();
@@ -2461,6 +2468,7 @@ async function maybeAutoEmotion() {
       { lyricsHash: hash, lines: lines }, { signal: controller.signal });
     if (requestToken !== emotionAutoToken || lyricEmotionMode() !== 'auto' || !cue || cue.version !== 1) return;
     var merged = await applyEmotionLocks(cue);
+    if (requestToken !== emotionAutoToken || lyricEmotionMode() !== 'auto') return;
     if (Stage.setEmotionCueDoc(merged)) emotionAutoAppliedHash = hash;
   } catch (error) {
     // Provider 未就绪/授权撤销/超时都保持中性；播放不受影响。
@@ -5126,7 +5134,7 @@ function initSpaceHome(playbackHost) {
           page.more = next > page.offset && (cursor ? !!cursor.has_more : page.items.length > before && (result.total != null ? next < result.total : raw.length >= 20));
           page.offset = next;
         } catch (error) {
-          if (!network || network.active) page.error = {...HertzSearch.failure(error),message:error.message};
+          if (!network || network.active) page.error = HertzSearch.failure(error);
         } finally { page.loading = false; publish(); }
       };
       await Promise.all(pages.map(load));

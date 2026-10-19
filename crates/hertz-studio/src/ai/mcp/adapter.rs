@@ -18,13 +18,16 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use rmcp::model::{CallToolResult, Tool, ToolAnnotations};
+use rmcp::model::{CallToolResult, MetaObject, Tool, ToolAnnotations};
 use serde_json::{json, Value};
 use vmusic_core::PROTOCOL_VERSION;
 
 use super::discovery::{self, DiscoveryDoc};
-use crate::ai::capability::{find, scope_satisfied, Effect, CAPABILITIES, CAPABILITY_VERSION};
+use crate::ai::capability::{CAPABILITIES, CAPABILITY_VERSION, Effect, find, scope_satisfied};
+#[cfg(test)]
+use crate::ai::capability::{Handler, SCOPES};
 
 /// 观察者总等待上限（§8.3）：适配进程对门面的每次调用（含认证与排队）
 /// 都在这个期限内给出结果或错误。
@@ -211,40 +214,35 @@ pub(crate) async fn open_session(
 /// 工具入参 schema：业务输入对应 `capability::execute` 的严格 DTO；
 /// 变更工具另公开适配层消费的可选幂等键，不把它混入业务输入。
 fn input_schema(operation: &str) -> rmcp::model::JsonObject {
-    let mut schema = match operation {
-        "playback.seek" => json!({
-            "type": "object",
-            "properties": { "positionMs": { "type": "integer", "minimum": 0 } },
-            "required": ["positionMs"],
-            "additionalProperties": false,
-        }),
-        "playback.volume_set" => json!({
-            "type": "object",
-            "properties": { "value": { "type": "number", "minimum": 0, "maximum": 1 } },
-            "required": ["value"],
-            "additionalProperties": false,
-        }),
-        "library_search" => json!({ "type": "object", "additionalProperties": false,
-            "required": ["q"], "properties": { "q": { "type": "string" },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
-                "offset": { "type": "integer", "minimum": 0, "maximum": 10000 } } }),
-        "stage.capabilities_get" => json!({ "type": "object", "additionalProperties": false,
-            "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 10 },
-                "offset": { "type": "integer", "minimum": 0, "maximum": 10000 } } }),
-        "stage.intent_validate" => json!({ "type": "object", "additionalProperties": false,
-            "required": ["artifactVersion", "mode", "intent", "schemaVersion", "schemaHash", "basePresetHash"],
-            "properties": { "artifactVersion": { "const": 1 }, "mode": { "const": "create" },
-                "intent": { "type": "object" }, "schemaVersion": { "type": "string" },
-                "schemaHash": { "type": "string" }, "basePresetHash": { "type": "string" } } }),
-        _ => json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+    let Some(capability) = find(operation) else {
+        return json!({ "type": "object", "properties": {}, "additionalProperties": false })
+            .as_object()
+            .expect("schema 是 object")
+            .clone();
     };
-    if find(operation).is_some_and(|cap| cap.effect == Effect::Mutating) {
+    let mut schema = capability.input_schema.value();
+    if capability.effect == Effect::Mutating {
         schema["properties"]["clientOperationId"] = json!({
             "type": "string", "minLength": 1, "maxLength": 128,
             "description": "可选幂等键；去除首尾空白后须非空且不超过 128 UTF-8 字节。同一动作重试用同一键，新动作用新键。"
         });
     }
     schema.as_object().expect("schema 是 object").clone()
+}
+
+fn output_schema(operation: &str) -> rmcp::model::JsonObject {
+    let Some(capability) = find(operation) else {
+        return json!({ "type": "object", "properties": {}, "additionalProperties": false })
+            .as_object()
+            .expect("schema 是 object")
+            .clone();
+    };
+    capability
+        .output_schema
+        .value()
+        .as_object()
+        .expect("schema 是 object")
+        .clone()
 }
 
 /// 从能力表导出工具定义（技术路线 §5.1/§5.3）：只导出该会话 scope 覆盖的
@@ -255,13 +253,32 @@ pub(crate) fn tools_for(scopes: &BTreeSet<String>, stage_tools_enabled: bool) ->
         .iter()
         // 伞 scope（playback:control）在这里同样隐含六种传输播控。
         .filter(|cap| scope_satisfied(scopes, cap.scope))
-        .filter(|cap| !cap.operation.starts_with("stage.") || stage_tools_enabled)
+        .filter(|cap| !cap.handler.is_stage() || stage_tools_enabled)
         .map(|cap| {
             let mut annotations = ToolAnnotations::default();
             annotations.read_only_hint = Some(cap.effect == Effect::ReadOnly);
             // 工具名用 MCP 命名（§5.2 A1 表），门面分派两种名字都认。
-            let mut tool = Tool::new(cap.mcp_name, cap.description, input_schema(cap.operation));
+            let mut tool = Tool::new(
+                cap.mcp_name,
+                cap.description,
+                input_schema(cap.handler.operation()),
+            )
+            .with_raw_output_schema(Arc::new(output_schema(cap.handler.operation())));
             tool.annotations = Some(annotations);
+            tool.meta = Some(MetaObject(
+                json!({
+                    "operation": cap.handler.operation(),
+                    "handler": cap.handler.operation(),
+                    "requiredScopes": [cap.scope],
+                    "allowedProjection": cap.allowed_projection,
+                    "effect": cap.effect.as_str(),
+                    "budgetClass": cap.budget_class.as_str(),
+                    "capabilityVersion": cap.version,
+                })
+                .as_object()
+                .expect("元数据是 object")
+                .clone(),
+            ));
             tool
         })
         .collect()
@@ -724,5 +741,65 @@ mod tests {
         assert_eq!(schema["required"], json!(["q"]));
         assert!(schema["properties"].get("q").is_some());
         assert!(schema["properties"].get("limit").is_some());
+    }
+
+    #[test]
+    fn every_registered_capability_has_one_advertised_schema_and_handler() {
+        let scopes = SCOPES.iter().map(|scope| (*scope).to_string()).collect();
+        let tools = tools_for(&scopes, true);
+        assert_eq!(tools.len(), CAPABILITIES.len());
+
+        let handlers = [
+            Handler::StageCapabilitiesGet,
+            Handler::StageIntentValidate,
+            Handler::PlaybackSnapshotGet,
+            Handler::PlaybackPause,
+            Handler::PlaybackResume,
+            Handler::PlaybackNext,
+            Handler::PlaybackPrevious,
+            Handler::PlaybackSeek,
+            Handler::PlaybackVolumeSet,
+            Handler::LibrarySearch,
+        ];
+        for handler in handlers {
+            assert_eq!(
+                CAPABILITIES
+                    .iter()
+                    .filter(|capability| capability.handler == handler)
+                    .count(),
+                1,
+                "handler must have one registered tool: {handler:?}"
+            );
+        }
+
+        for (capability, tool) in CAPABILITIES.iter().zip(tools) {
+            assert_eq!(tool.name, capability.mcp_name);
+            let actual = serde_json::to_value(&tool.input_schema).unwrap();
+            let output = serde_json::to_value(tool.output_schema.as_ref().unwrap()).unwrap();
+            assert_eq!(output, capability.output_schema.value());
+            assert_eq!(
+                tool.meta.as_ref().unwrap().0["capabilityVersion"],
+                json!(capability.version)
+            );
+            assert_eq!(
+                tool.meta.as_ref().unwrap().0["budgetClass"],
+                json!(capability.budget_class.as_str())
+            );
+            assert_eq!(
+                tool.meta.as_ref().unwrap().0["allowedProjection"],
+                json!(capability.allowed_projection)
+            );
+            let mut expected = capability.input_schema.value();
+            if capability.effect == Effect::Mutating {
+                expected["properties"]["clientOperationId"] =
+                    actual["properties"]["clientOperationId"].clone();
+            }
+            assert_eq!(
+                actual,
+                expected,
+                "schema drift for {}",
+                capability.handler.operation()
+            );
+        }
     }
 }

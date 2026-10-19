@@ -8,13 +8,17 @@ async function main(){
   const fixture=await startFixture();process.env.VMUSIC_DATA_DIR=fixture.dataDir;
   const browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL || 'chrome',headless:true});
   const context=await browser.newContext({viewport:{width:1280,height:850}});await fixture.connect(context);
-  const page=await context.newPage(),errors=[];let aiRequests=0;
-  const output=path.resolve('output/playwright/stage-templates');fs.mkdirSync(output,{recursive:true});
+  const page=await context.newPage(),errors=[];let modelDispatches=0;
+  const output=path.resolve(process.env.STAGE_TEMPLATES_SHOT_DIR || 'output/playwright/stage-templates');fs.mkdirSync(output,{recursive:true});
   page.on('pageerror',e=>errors.push(e.message));
   try{
     const track=await fixture.seed();await page.goto(uiUrl(fixture.base));
     await page.waitForFunction(()=>window.CreativeTemplates && window.Workshop);
-    await page.route('**/v1/ai/**',route=>{aiRequests++;return route.abort();});
+    await page.route('**/v1/ai/**',route=>{
+      const request=route.request();
+      if(request.method()==='POST'&&new URL(request.url()).pathname==='/v1/ai/jobs')modelDispatches++;
+      return route.abort();
+    });
     await page.evaluate(()=>{Workshop.open();Workshop.setTab('scene');
       const shelfMode=document.getElementById('s3d-shelf-mode');
       shelfMode.value='side';shelfMode.dispatchEvent(new Event('change',{bubbles:true}));
@@ -22,14 +26,35 @@ async function main(){
       p.cues=[{at:1,len:500,set:{'look.bloom':1}}];CreativeStage.setPreset(p);
     });
     assert.equal(await page.locator('.s3d[data-shelf-mode="side"]').count(),1,'The real side-shelf mode must be active');
-    async function checkSideShelf(viewport){
+    async function checkSideShelf(viewport,label){
       await page.setViewportSize(viewport);await page.waitForTimeout(400);
-      await page.locator('.s3d-sc').first().hover();await page.waitForTimeout(700);
+      await page.locator('.s3d').evaluate(el=>el.style.setProperty('--s3d-safe-bottom','24px'));
+      await page.mouse.move(viewport.width/2,viewport.height/2);
+      await page.evaluate(()=>{
+        const stage=document.querySelector('.s3d');
+        stage.classList.add('s3d-chrome');
+        StageShelf.api().show();
+        StageShelf.api().setMode('side');
+        Stage.kick();
+      });
+      await page.waitForTimeout(800);
+      const rendered=await page.evaluate(()=>{
+        const stage=document.querySelector('.s3d'),card=stage.querySelector('.s3d-sc.is-current'),shelf=stage.querySelector('.s3d-shelf');
+        const style=getComputedStyle(card),bounds=card.getBoundingClientRect();
+        return{stage:stage.className,shelfOn:stage.classList.contains('s3d-shelf-on'),hidden:card.hidden,
+          visibility:style.visibility,opacity:style.opacity,inlineOpacity:card.style.opacity,transform:card.style.transform,
+          bounds:{x:bounds.x,y:bounds.y,width:bounds.width,height:bounds.height},shelfOpacity:getComputedStyle(shelf).opacity};
+      });
+      if(rendered.visibility!=='visible'||Number.parseFloat(rendered.opacity)<.5)
+        throw new Error('Side-shelf frame did not reveal its current card: '+JSON.stringify(rendered));
+      await page.locator('.s3d-sc.is-current').hover();await page.waitForTimeout(700);
       const layout=await page.evaluate(()=>{
-        const card=document.querySelector('.s3d-sc:hover')||document.querySelector('.s3d-sc');
+        const card=document.querySelector('.s3d-sc.is-current');
         const rectOf=el=>{const r=el.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,right:r.right,bottom:r.bottom};};
         const visible=el=>{
           if(!el.textContent.trim()||!el.getClientRects().length)return false;
+          const rect=el.getBoundingClientRect();
+          if(rect.right<=0||rect.bottom<=0||rect.x>=innerWidth||rect.y>=innerHeight)return false;
           for(let node=el;node;node=node.parentElement){
             const style=getComputedStyle(node);
             if(style.display==='none'||style.visibility==='hidden'||Number(style.opacity)<=.02)return false;
@@ -37,12 +62,15 @@ async function main(){
           }
           return true;
         };
-        const text=[...document.querySelectorAll('.s3d-reading .sl-empty strong,.s3d-reading .sl-empty span,.s3d-reading .sl-line[aria-current="true"],#s3d-stanza .fl-classic .fl-cword[data-st="active"] .fl-body,#s3d-stanza .fl-classic .fl-cword[data-st="passed"] .fl-body,#s3d-stanza .fl-classic .fl-empty')].filter(visible);
+        const text=[...document.querySelectorAll('.s3d-reading .sl-empty strong,.s3d-reading .sl-empty span,.s3d-reading .sl-line,#s3d-stanza .fl-classic .fl-cword .fl-body,#s3d-stanza .fl-classic .fl-empty')].filter(visible);
         const cardRect=rectOf(card),controls=[...document.querySelectorAll('#s3d-settings-toggle,#s3d-player')].filter(visible).map(rectOf);
-        const safeArea=document.createElement('div');safeArea.style.cssText='position:absolute;visibility:hidden;padding-bottom:env(safe-area-inset-bottom, 0px)';
-        document.body.appendChild(safeArea);const safeBottom=parseFloat(getComputedStyle(safeArea).paddingBottom)||0;safeArea.remove();
-        return{card:cardRect,text:text.map(el=>({value:el.textContent.trim(),rect:rectOf(el)})),controls,safeBottom};
+        const safeBottom=parseFloat(getComputedStyle(document.querySelector('.s3d')).getPropertyValue('--s3d-safe-bottom'))||0;
+        return{card:cardRect,cardOpacity:Number.parseFloat(getComputedStyle(card).opacity),
+          cardVisibility:getComputedStyle(card).visibility,shelfOpacity:Number.parseFloat(getComputedStyle(card.parentElement).opacity),
+          text:text.map(el=>({value:el.textContent.trim(),rect:rectOf(el)})),controls,safeBottom};
       });
+      assert.ok(layout.card.width>0&&layout.card.height>0&&layout.cardOpacity>=.5&&layout.cardVisibility==='visible'&&layout.shelfOpacity>=.95,
+        'Hovered side card must be visibly rendered at '+viewport.width+'x'+viewport.height+': '+JSON.stringify(layout));
       assert.ok(layout.card.x>=0&&layout.card.right<=viewport.width+1,'Hovered side card must stay inside '+viewport.width+'px viewport: '+JSON.stringify(layout.card));
       const bottomClearance=viewport.height<=560?120:180;
       assert.ok(layout.card.bottom<=viewport.height-bottomClearance-layout.safeBottom,
@@ -52,6 +80,13 @@ async function main(){
       assert.deepEqual(overlaps,[],'Hovered side card must not cover visible song/lyric text at '+viewport.width+'x'+viewport.height+': '+JSON.stringify({card:layout.card,overlaps}));
       const controlOverlaps=layout.controls.filter(rect=>rect.x<layout.card.right&&rect.right>layout.card.x&&rect.y<layout.card.bottom&&rect.bottom>layout.card.y);
       assert.deepEqual(controlOverlaps,[],'Hovered side card must not cover the settings button or player at '+viewport.width+'x'+viewport.height+': '+JSON.stringify({card:layout.card,controlOverlaps}));
+      await page.screenshot({path:path.join(output,'side-shelf-'+label+'-'+viewport.width+'x'+viewport.height+'.png')});
+      await page.evaluate(()=>{
+        StageShelf.api().hide();
+        const stage=document.querySelector('.s3d');
+        stage.classList.remove('s3d-chrome');
+        stage.style.removeProperty('--s3d-safe-bottom');
+      });
       return layout;
     }
     const catalog=await page.evaluate(()=>CreativeTemplates.list());assert.equal(catalog.length,3);
@@ -95,7 +130,7 @@ async function main(){
         // Resize and workshop transitions replace WebGL render targets. Check
         // actual scene pixels after they settle, rather than treating a canvas
         // with nonzero dimensions as proof that it has rendered.
-        if(viewport.width<=390)await checkSideShelf(viewport);
+        if(viewport.width<=390)await checkSideShelf(viewport,'template');
         else{await page.setViewportSize(viewport);await page.waitForTimeout(400);}
         await page.waitForFunction(async()=>{
           const data=CreativeStage.capture();if(!data)return false;
@@ -140,18 +175,18 @@ async function main(){
     const firstLyric=await page.evaluate(()=>Stage.lyrics().lines[0].text);
     assert.ok(firstLyric.includes('第一句歌词'),'The isolated service must supply the active lyric fixture');
     for(const viewport of [{width:390,height:760},{width:320,height:760},{width:390,height:500},{width:320,height:500}]){
-      const layout=await checkSideShelf(viewport);
+      const layout=await checkSideShelf(viewport,'stage-lyrics');
       assert.ok(layout.text.some(item=>item.value.includes('第一句歌词')),'The active stage lyric must be the checked text target');
       if(viewport.width===390)await page.screenshot({path:path.join(output,'lyrics-stage-390x'+viewport.height+'.png')});
     }
     await page.evaluate(()=>{const visual=document.getElementById('s3d-lyric-visual');visual.value='classic';visual.dispatchEvent(new Event('change',{bubbles:true}));});
     await page.waitForFunction(()=>document.querySelector('#s3d-stanza .fl-classic .fl-cword[data-st="active"] .fl-body'));
     for(const viewport of [{width:390,height:760},{width:320,height:760},{width:390,height:500},{width:320,height:500}]){
-      const layout=await checkSideShelf(viewport);
+      const layout=await checkSideShelf(viewport,'stanza');
       assert.ok(layout.text.map(item=>item.value).join('').includes('第一句歌词'),'The visible stanza line must contain the checked lyric: '+JSON.stringify(layout.text));
       if(viewport.width===390)await page.screenshot({path:path.join(output,'lyrics-stanza-390x'+viewport.height+'.png')});
     }
-    assert.deepEqual(errors,[]);assert.equal(aiRequests,0);
+    assert.deepEqual(errors,[]);assert.equal(modelDispatches,0);
     console.log('PASS 3 template candidates, real preview/cancel/apply, late validation isolation, persistence/collection, fixed-version rejection, hovered side-shelf clearance for empty state, active stage lyrics and stanza lyrics at 320/390px and 500/760px; no AI calls or human acceptance claimed');
   }finally{await context.close();await browser.close();await fixture.close();}
 }

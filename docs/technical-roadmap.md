@@ -1,6 +1,6 @@
 # Hertz Studio 下一阶段技术实施方案
 
-> 编制：2026-10-16；补充 VCPChat 对照：2026-10-17。状态：建议实施设计，文中的新增模块、API、表与测试均未因本文而实现。
+> 编制：2026-10-16；补充 VCPChat 对照：2026-10-17。本文是持续更新的设计基线，不单独代表实现或验收状态；已实现范围、局部验证与仍待验收项见[路线图进度](./roadmap-progress.md)。
 >
 > 配套：[产品路线图](./product-roadmap.md)、[VCPChat 参考评估](./vcpchat-reference-assessment.md)。Hertz 初次核对提交 `aa77af10dc3a9693cc646e55e14186cb1a453c8b`，后续核对时 HEAD 为 `79b15d48c2e072342e7efac3c5b723e62623de9f`；期间仓库还有独立进行的修改，实施前应再次核对。
 >
@@ -343,6 +343,10 @@ stateDiagram-v2
 
 brief、歌词和完整原始模型响应默认不持久化，输入只在有界内存中。拿到唯一 runner 锁后，重启把 accepted/running 标记 interrupted；不自动再次发送 POST。客户端重连查询原任务，不能因没有成功结果就用旧 key 重开。
 
+恢复逐任务使用短事务：单个 job 的派发态结算与 interrupted CAS 必须原子提交；一条记录恢复失败不能回滚同批其它任务。继续处理剩余候选后向启动方报告首个错误，失败行保留为非终态，供后续启动恢复或到期清扫重试；只清理已成功收敛任务的进程内 owner，避免失败项在仍有 worker 时被误当孤儿。
+
+到期清扫同样逐任务使用独立事务：每项重读状态、复核期限与进程内 owner，再原子提交 expired CAS 和派发态结算。单项失败不回滚其它孤儿；历史保留独立提交，清扫发布已提交事件后再返回首个错误。
+
 仅凭 running 无法判断是否已产生远端费用。发出前必须在短事务写入单向派发标记 `dispatchState=may_have_been_sent`、attemptId 与费用快照；事务提交后才允许调用网络，且一个 job 只允许一个 attempt。真正发出前崩溃也可能被保守计费，这是避免低估的代价。恢复时 `not_dispatched` 可释放预留；`may_have_been_sent` 无可信 usage 时按 unknown 计预留一次，不能因任务改为 interrupted 就释放额度或重新发送。数据库写和远端扣费无法组成原子事务，本方案不承诺远端 exactly-once。
 
 同一 owner/principal/capability 的 key 格式为 `v1.<createdAtUnixMs>.<128-bit-random-hex>`；7 天内同 key 同输入映射原任务，异输入冲突，provider/model/pricing 改变不改变该事实。输入 hash 包含规范化业务输入、能力版本和授权数据范围，配置快照另存。
@@ -395,7 +399,7 @@ brief、歌词和完整原始模型响应默认不持久化，输入只在有界
 
 ### 8.1 provider 接口
 
-服务端 `ModelProvider` 负责就绪、严格结构化输出能力、一次请求、取消、usage 解析、价格上界和 origin 策略。一次任务最多一次模型调用，不自动修复、不自动重试 POST；DB 事务重试不得包住外部模型调用。
+服务端 `ModelProvider` 负责就绪、严格结构化输出能力、一次请求、取消、usage 解析、已核价模式的价格上界或 token-only 模式的有限请求边界，以及 origin 策略。一次任务最多一次模型调用，不自动修复、不自动重试 POST；DB 事务重试不得包住外部模型调用。
 
 任务终态与资源结束分开。cancelled/expired 可以先成为 UI 事实，执行 owner 仍持有模型许可、连接和 usage 观察责任，直到本地网络 future 确认结束或被中止并完成回收；不能一写终态就释放槽位再派发下一次。清理必须有界，失控时停止新生成并显式诊断，不持续 spawn 脱管任务。关闭连接不能证明远端停止推理，单并发只保证本地受管请求数；远端费用继续按派发标记与 unknown 处理。
 
@@ -411,9 +415,13 @@ cloud 仅显式配置的 HTTPS origin，复用 public_net 的 URL/DNS 地址检�
 
 凭据准备已实现存储与任务绑定：同一 `:cred` 记录绑定版本、作用域、随机代际与密钥，每次保存（含相同值）更换代际，旧原始密钥首次读取原位迁移；不把代际分放到非事务的 `:device` 字段。任务只冻结非秘密身份，派发前重新匹配并持读租约到派发标记提交；保存/删除在生命周期写锁下先事务性取消绑定任务，再变更钥匙串，等待者离开不丢弃管理 owner。凭据查询和变更均要求持有 DataDir 唯一 AI runner 锁，避免第二进程绕过进程内生命周期锁；生成同意开关独立。Windows 两版系统钥匙串的合成条目持久/隔离/删除已实际验证；其它 OS 与锁定/拒绝访问、真实云 adapter 的网络协作取消和费用边界仍待验，不代表云调用可用；见[凭据说明](./ai-provider-credential.md)。
 
+StepFun 的 Responses adapter 已接入相同的静态 StageIntent、持久任务与账本路径。只允许 `https://api.stepfun.com/v1` 和 `https://api.stepfun.com/step_plan/v1`；保留所选 API 路径，使用专用单次 HTTP 请求、响应限额与协作取消。OpenAI 与这两条 StepFun 路径各自使用独立凭据作用域，共享原有钥匙串执行许可及生命周期锁；不跨 provider 迁移密钥。设置界面显示当前目标，目标查询失败时禁止变更，重新查询成功后恢复。
+
+用户提供的 `step-5-preview` Plan 地址已通过独立最小文本直连检查；这没有经过真实云调用或模型质量验收。StepFun 费用尚未核价，但舞台生成与歌词情绪请求可按明确的 token-only 快照派发：仍限制模型、请求/响应大小和输出 token 上界，保存可信输入/输出 token，金额字段保持未知且不进入费用总额；这不是零价声明，也不设月费用门槛。没有完整 token 响应就保留 token 未知。舞台任务和歌词 completion 共用持久派发标记与逐次账本。OpenAI 因模型与价格仍未确认而继续关闭；回环 fixture 使用的合成费率只验证已知价格路径，不代表真实计价依据。
+
 ### 8.2 发送数据与开关
 
-首期只发送 brief、选定场景参数、默认基线、版本与输出要求；不自动取当前歌曲、历史、歌词、封面或音频。云启用需要单独同意与可靠价格快照。扩展到歌词/音频必须新增具体授权与数据说明，不能沿用“已同意 AI”的笼统开关。
+舞台请求只发送 brief、选定场景参数、默认基线、版本与输出要求；不自动读取当前歌曲、历史、歌词、封面或音频。provider 可用性需要明确选择和授权；费用已知时冻结可靠价格快照并受月预算控制，费用未知时只能进入显式 token-only 模式，不能把未知金额折算为零费用。扩展到歌词/音频必须新增具体授权与数据说明，不能沿用“已同意 AI”的笼统开关。
 
 建议功能拆成 `externalCapabilitiesEnabled`、`stageIntentToolsEnabled`、`inAppGenerationEnabled` 与 provider 模式，均默认关闭。前两者分别控制外部接入和契约查询/intent 校验工具；官方本地草稿导入不依赖外部连接开关。底层禁用不破坏本地规则编译器；已认证官方 UI 仍可查询事实、取消未完成任务与删除凭据，不能发新模型请求。
 
@@ -434,14 +442,16 @@ cloud 仅显式配置的 HTTPS origin，复用 public_net 的 URL/DNS 地址检�
 | AI 逻辑数据 | 总 20 MiB | 含提案、幂等元数据；不承诺 DB/WAL 物理大小 |
 | 账本保留 | 13 个月 | 独立于 job/提案清理 |
 | 模型输出 | 512 output tokens 初值 | 必须核对 provider 的计量/推理 token 语义和截断率 |
-| 单任务费用 | 50000 micro-USD（0.05 USD） | 可靠的最坏费用上界；无法上界时不启用 cloud |
-| 月预算 | 每 DataDir 总额 5000000 micro-USD（5 USD） | 官方 UI 与所有 grant 共用；固定受理月，不是整个设备跨发行版共享上限 |
+| 单任务费用 | 50000 micro-USD（0.05 USD） | 适用于已核价模式；token-only 跳过金额预留，但必须有有限请求与输入/输出 token 上界 |
+| 月预算 | 每 DataDir 总额 5000000 micro-USD（5 USD） | 已核价任务由官方 UI 与所有 grant 共用；token-only 金额未知，不进入费用总额或月预算 |
 
-若 512 tokens 与合法产物的实际需要冲突，先评测输出协议、模型与价格，再评审调整。不能通过截断 preset、隐式多轮调用或虚构成本来“满足”表格。
+若 512 tokens 与合法产物的实际需要冲突，先评测输出协议、模型与合法输出所需的 token 上界，再评审调整。价格无法核实不阻挡 token-only 功能，但不能伪造金额或移除请求边界；不能通过截断 preset 或隐式多轮调用来“满足”表格。
+
+歌词情绪等不经过持久 job/账本的通用 completion 也必须共享同一个 DataDir 执行槽，不能以第二条 provider 入口绕过并发上限。首期使用 `try_acquire`，任务或 completion 已占槽时立即以 429 `ai_busy` 返回，不再创建无界等待；许可覆盖凭据读取与整个 provider future，并在 future 被取消/丢弃时释放。将来接入计费 completion 时，除共享执行槽外还必须迁入同一 job、预算预留与 usage 对账 owner；共用模型 HTTP adapter 本身不代表共用账本。
 
 ### 8.4 费用结算
 
-受理时固定 provider/model/pricingVersion 与价格快照，按最终请求中的系统提示、场景契约、基线、用户描述及输出/推理上限计算可靠费用上界；不能只估用户输入，也不能将字符数除以 4 当作跨语言可靠上界。需使用指定模型适配的计数器或经验证的保守上界，无法覆盖计量语义时拒绝 cloud。预算公式为 `charged + reserved + newReservation <= limit`；数额用整数 micro-USD，费率计算向上取整。建议月键统一按 UTC 自然月，由服务端生成并在 UI 标明预算周期，避免切换系统时区重置额度；旧任务始终记回受理月。
+已核价模式在受理时固定 provider/model/pricingVersion 与价格快照，按最终请求中的系统提示、场景契约、基线、用户描述及输出/推理上限计算可靠费用上界；不能只估用户输入，也不能将字符数除以 4 当作跨语言可靠上界。StepFun `step-5-preview` 使用独立 token-only 快照：价格未知不阻挡功能，不预留或统计金额，仍受有限请求与输入/输出 token 上界约束，收到可信 usage 时只记录 token 数，缺失时保持未知。当前 OpenAI adapter 以完整序列化请求的 UTF-8 字节数作为派发前输入 token 上界，并在报价和 worker 请求构造两处拒绝超过 `maxInputTokens` 的请求；该检查涵盖可见 instructions、契约、用户文本与 JSON 包装，不代替指定模型 tokenizer、服务端隐藏开销、价格维度及真实 usage 的验证。OpenAI 仍因具体模型和已核价 profile 未确定而不可派发。已核价任务的预算公式为 `charged + reserved + newReservation <= limit`；数额用整数 micro-USD，费率计算向上取整。旧任务始终记回受理月。
 
 该公式首先作用于 owner/month 的 DataDir 总账，创建/轮换 grant、换模型或切官方 UI 都不获得另一份月额度。首期 principal 只用于授权、查询过滤和归因，不建立每主体独立资金池；未来若增加 grant 子限额，必须与总额同时通过，而非替代总额。
 
@@ -457,7 +467,7 @@ cloud 仅显式配置的 HTTPS origin，复用 public_net 的 URL/DNS 地址检�
 
 迟到对账只依赖已存在的受管响应，或指定 provider 确实支持、可按 attempt/request ID 关联的只读 usage 查询；没有该接口时显示估算状态，不承诺靠重试生成或通用轮询拿到实际账单。24 小时是停止自动尝试的上限，不能据此推断 provider 已结清；之后获得可验证实际记录仍可做幂等差额校正。
 
-实际金额超过承诺上界，记录真实金额并触发持久 guard，停止新 cloud 受理；翻月、换 provider、重启都不自动解除。官方管理 `POST /v1/ai/budget-guard/reset` 带 expectedRevision、已生效价格与配置指纹；确认无旧调用在飞、账本满足限制后原子恢复并留脱敏审计。模型工具不能调用它。
+实际金额超过承诺上界，记录真实金额并触发持久 guard，停止新的已核价任务；翻月、换 provider、重启都不自动解除。官方管理 `POST /v1/ai/budget-guard/reset` 带 expectedRevision 和已生效 provider/model/endpoint/quote 指纹；服务端复核无旧调用在飞、账本满足限制后，在同一事务中恢复并写入只含 owner、revision、配置指纹和时间的脱敏审计。模型工具不能调用它。
 
 ### 8.5 模型效果验收
 
@@ -475,14 +485,14 @@ cloud 仅显式配置的 HTTPS origin，复用 public_net 的 URL/DNS 地址检�
 
 ### 9.1 歌词专项 R1-L：候选与结构化导入
 
-已在原 `vmusic-lyrics` 增加本地 LRC/受控 TTML 解析，在 `hertz-studio` 新增共用候选应用服务。Full 在线检索复用既有 Provider 的显式能力门，选择后取词、预览后单独应用，Standard 不带这些协议。当前范围与验证边界见[歌词导入](./lyric-import.md)；许可、严格自动采纳及真实环境验收仍未完成。
+已在原 `vmusic-lyrics` 增加本地 LRC/受控 TTML 解析，在 `hertz-studio` 新增共用候选应用服务。Full 在线检索复用既有 Provider 的显式能力门，默认手动检查；用户主动开启后，仅完整无歧义候选集中的唯一强匹配可自动取词、解析并应用，写入前再次核对修订与当前可见歌词为空（导入覆盖层、内嵌歌词和 sidecar LRC 均为空）。Standard 不带这些协议。当前范围与验证边界见[歌词导入](./lyric-import.md)；真实来源、歌词许可和真实环境验收仍未完成。
 
 | 接口 | 输入 | 输出与边界 |
 | --- | --- | --- |
 | `POST /v1/tracks/{id}/lyrics/candidates` | 本地：content、format、expectedMetadataRevision、expectedLyricsRevision | 有界候选 ID、来源、格式、真实时间精度、行/词数与短预览 |
-| `POST /v1/tracks/{id}/lyrics/candidates/search` | source、query?、expectedMetadataRevision、expectedLyricsRevision | 至多三份服务端保存的候选；曲名/歌手/专辑/时长/版本证据，不自动应用 |
+| `POST /v1/tracks/{id}/lyrics/candidates/search` | source、query?、expectedMetadataRevision、expectedLyricsRevision、allowAutomaticApply? | 至多三份服务端保存的候选；自动资格要求精确完整候选集唯一强匹配、无版本冲突且当前无可见歌词 |
 | `POST /v1/tracks/{id}/lyrics/candidates/prepare-online` | candidateId、expectedLyricsRevision | 选择后读取并检查歌词、返回预览；不写覆盖层，不延长原候选期限 |
-| `POST /v1/tracks/{id}/lyrics/candidates/apply` | candidateId、expectedLyricsRevision | 在同一事务核验目标与候选后写歌词覆盖层；冲突不覆盖 |
+| `POST /v1/tracks/{id}/lyrics/candidates/apply` | candidateId、expectedLyricsRevision、automaticApply? | 写入前复核当前可见歌词为空（导入覆盖层、内嵌歌词和 sidecar LRC）；同一事务核验目标与候选，冲突不覆盖 |
 
 HTTP/RPC 复用同一服务函数。candidateId 绑定目标 trackId、元数据指纹、过期时间和已解析内容；不能把用户输入的文件路径作为写入目标。自动和手动获取复用候选管线，自动应用额外需要更严格匹配与可证明未被手工修改。
 
@@ -557,7 +567,7 @@ S1 验证必须覆盖 44.1/48/96kHz、不整块输入、单/双声道、极短�
 | R4-J | 独立 AiService、store 迁移、fake provider | MCP 关闭、输入交接/派发前后崩溃、取消/清理、容量/7 天窗口/校时 | 任务可恢复查询 |
 | R4-B | DataDir 总账、usage entries、guard、管理 API | 多 grant/官方入口共用额度、跨月、unknown、重复/迟到 usage | 费用不重复且可解释 |
 | R4-E | WS/RPC 事件、查询、官方任务 UI | 漏事件/乱序/重连/终态查询 | 离开后可回来看结果 |
-| R5-P | 指定 provider、keyring、origin、数据同意 | 真实价格与最坏费用、取消与无重试 | 可控调用模型 |
+| R5-P | 指定 provider、keyring、origin、数据同意 | 真实 token 用量语义、取消与无重试；未知价格采用有界 token-only 模式 | 可控调用模型 |
 | R5-E | 冻结语料与评测报告 | 两轮数据、人工评分、独立保留样本 | 决定正式发布或继续实验 |
 | R6-W | 模板、工程协议试点、现有 VideoExport | 重开编辑/seek/导出/停止与回收 | 一个作品完成全程 |
 
@@ -585,20 +595,26 @@ S1 验证必须覆盖 44.1/48/96kHz、不整块输入、单/双声道、极短�
 | 任务 | DB commit/内存交接失败、派发标记前后崩溃、成功/取消竞争、第二 runner | 单终态、原任务可查、不重复 POST、可能已发出的费用不释放 |
 | 资源 | cancelled 已终态而 provider 尚未退出、慢清理、连续取消 | 槽位覆盖执行和回收，无脱管任务；不假称远端停止 |
 | 费用 | 未发取消、发出未知、重复 usage、迟到实际、跨月/重启 | reserved/charged 不双计；旧月差额一次；guard 持续 |
-| 预算归属 | 多 grant、轮换 grant、官方 UI 与 MCP 交替提交、长系统提示 | 总额不会按主体倍增，最终请求全部计入可靠上界 |
+| 预算归属 | 多 grant、轮换 grant、官方 UI 与 MCP 交替提交、长系统提示 | 已核价请求不按主体倍增且计入可靠费用上界；token-only 请求受 token 上界约束并记录 token 数 |
 | 时间 | 墙钟回跳、休眠、排队过期 | 不重开旧 key，不把 UI 超时当服务端终态 |
-| provider | 非法输出、截断、HTTP 超时、无价格/推理费上界 | 无 apply、无 POST 自动重试、cloud 无上界即拒绝 |
+| provider | 非法输出、截断、HTTP 超时、未知价格、请求或输出超界 | 无 apply、无 POST 自动重试；未知价格只允许显式 token-only 且有界的配置 |
 | 音频/视觉 | 进入退出、换曲/seek、长时运行、硬件降档 | 原时钟与资源 scope 正确，无新循环/回调阻塞 |
 
 ### 12.2 现有检查的执行入口
 
-以下是**实施与候选发布时**应运行的现有命令，本轮仅编辑文档，没有声称运行通过：
+日常修改优先运行与变更面匹配的局部检查；只有跨 workspace 契约变化、发行版边界变化或候选发布验收时，才运行全量矩阵。以下命令是可选入口，不表示本轮均已运行：
 
 ```powershell
-# 在 Hertz 仓库根目录；null 仅验证控制与确定性时序
+# 在 Hertz 仓库根目录；只运行覆盖本次修改的检查
 $env:VMUSIC_BACKEND = 'null'
-node scripts/check-frontend.js
-node scripts/check-editions.js
+cargo test --locked -p hertz-studio ai::jobs::tests -- --test-threads=1
+cargo test --locked -p hertz-studio ai::provider::tests -- --test-threads=1
+cargo test --locked -p hertz-studio ai::emotion::tests -- --test-threads=1
+node scripts/check-ai-tasks-browser.js
+node scripts/check-ai-provider-browser.js
+node scripts/check-stage-draft-browser.js
+
+# workspace / Standard + Full 全量测试只用于跨包契约或候选发布验收
 cargo test --locked --workspace
 cargo test --locked --workspace --features hertz-studio/full,dbx-plugin-hertz/full
 
@@ -636,7 +652,7 @@ pwsh -File scripts/smoke.ps1 7899
 | Windows ACL、内核锁库、路径别名 | R2-G / R4-J | 阻止外部授权/持久 runner 正式开放 |
 | 窄契约导出一致、人工导入和全场景前端物化兼容 | R3 | 阻止草稿入口发布，不复制默认值与 codec |
 | 播放器关闭时离线合成完整预置/分享码 | 主线外另评估 | 未证实用户需求前不新增执行环境，不计入 R0–R6 |
-| 指定模型、价格上界、数据条款、质量阈值 | R5 | 仅 fake/local 实验，cloud 关闭 |
+| 指定模型、数据条款、质量阈值 | R5 | StepFun 仅用户明确启用的有界 token-only 试验；OpenAI 仍因模型未定关闭 |
 | DBX 外部 MCP 本地桥接 | 单独后续项目 | A0/A1 不宣传支持 DBX 外部连接 |
 | 单曲点播/队列替换、原子收藏、远程视觉应用 | 对应扩展实施前 | 不提前登记模型工具 |
 | VCP 具体模块的复用授权 | 选择直接迁移前 | 继续独立实现设计与测试场景，不复制源码/素材 |

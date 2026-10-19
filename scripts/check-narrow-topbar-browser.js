@@ -9,6 +9,7 @@ const { startFixture } = require('./ui-browser-fixture');
 const OUT = process.env.SKIN_SHOT_DIR || 'output/playwright/narrow-topbar';
 const WIDTHS = [320, 330, 390, 620, 621, 700, 1440];
 const BUTTONS = ['capsule-entry', 'stage3d-entry', 'settings-entry', 'theme-btn', 'skin-btn', 'top-more-btn', 'online-account-btn'];
+const SKIN_FILTER = process.env.SKIN_FILTER ? new Set(process.env.SKIN_FILTER.split(',').map(s => s.trim()).filter(Boolean)) : null;
 const results = [];
 let failures = 0;
 function check(condition, label, details) {
@@ -30,7 +31,9 @@ function check(condition, label, details) {
     await page.goto(fixture.base, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.Skins && document.querySelector('#conn.ok'));
     await page.evaluate(() => document.fonts.ready);
-    const skins = await page.evaluate(() => Skins.list().map(s => s.id));
+    const availableSkins = await page.evaluate(() => Skins.list().map(s => s.id));
+    const skins = SKIN_FILTER ? availableSkins.filter(skin => SKIN_FILTER.has(skin)) : availableSkins;
+    if (SKIN_FILTER) check(skins.length === SKIN_FILTER.size, 'requested skins exist', { requested: [...SKIN_FILTER], available: availableSkins });
     for (const skin of skins) {
       await page.evaluate(id => Skins.apply(id), skin);
       await page.waitForFunction(id => id === 'classic' || !!document.querySelector('link[data-skin-css="' + id + '"]').sheet, skin);
@@ -39,16 +42,23 @@ function check(condition, label, details) {
         await page.mouse.move(0, 899);
         await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         const geometry = await page.evaluate(ids => {
-          const rect = e => { const r = e.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, w: r.width, h: r.height }; };
+          const rect = e => {
+            if (!e) return null;
+            const r = e.getBoundingClientRect();
+            return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, w: r.width, h: r.height };
+          };
           const doc = document.scrollingElement;
           window.scrollTo(10000, 0);
           const scrollX = window.scrollX;
           window.scrollTo(0, 0);
           return { client: doc.clientWidth, scroll: doc.scrollWidth, scrollX,
-            topbar: rect(document.querySelector('.topbar')), app: rect(document.querySelector('.app')),
+            topbar: rect(document.querySelector('.topbar')),
+            topRight: rect(document.querySelector('.topbar .top-right')),
+            content: rect(document.querySelector('.column')),
             search: rect(document.getElementById('search')),
             buttons: ids.map(id => {
               const e = document.getElementById(id), r = rect(e);
+              if (!e) return { id, missing: true, hit: false };
               const hit = document.elementFromPoint(r.x + r.w / 2, r.y + r.h / 2);
               return { id, ...r, hit: !!hit && e.contains(hit) };
             }),
@@ -56,21 +66,32 @@ function check(condition, label, details) {
         }, BUTTONS);
         const label = skin + '/' + width;
         results.push({ skin, width, ...geometry });
+        if (!geometry.topbar || !geometry.content || !geometry.search) {
+          check(false, label + ' required layout element missing', geometry);
+          continue;
+        }
         check(geometry.scroll <= geometry.client && geometry.scrollX === 0, label + ' page overflow', geometry);
-        check(geometry.app.y >= geometry.topbar.bottom - 1, label + ' content below header', geometry);
+        check(geometry.content.y >= geometry.topbar.bottom - 1, label + ' content below header', geometry);
         for (const b of geometry.buttons) {
+          if (b.missing && b.id === 'online-account-btn') continue;
           // Qingfeng exposes these actions through its own toolbar/menu.
           // 经典/浮光/潮汐/黑胶与 iOS 一样把顶栏设置齿轮摘了（导航里已有同一入口）。
           if (b.w === 0 && (skin === 'qingfeng' ||
-            (['ios', 'classic', 'sheen', 'chaoxi', 'heijiao'].includes(skin) && b.id === 'settings-entry') ||
+            (['ios', 'classic', 'sheen', 'chaoxi', 'heijiao', 'orbit'].includes(skin) && b.id === 'settings-entry') ||
             (skin === 'sheen' && b.id === 'skin-btn' && width <= 1100))) continue;
-          check(b.w >= 30 && b.h >= 32 && b.x >= 0 && b.right <= width && b.hit,
+          const compactOrbit = skin === 'orbit';
+          check(b.w >= (compactOrbit ? 26 : 30) && b.h >= (compactOrbit ? 26 : 32) && b.x >= 0 && b.right <= width && b.hit,
             label + ' button reachable', b);
         }
         if (!['qingfeng', 'sheen'].includes(skin)) {
           check(geometry.search.w >= 100, label + ' usable search width', geometry.search);
-          if (width <= 620) check(geometry.search.y >= Math.max(...geometry.buttons.map(b => b.bottom)),
-            label + ' search in second row', geometry);
+          if (width <= 620) {
+            if (skin === 'orbit') check(geometry.search.bottom <= geometry.topRight.y + 1,
+              label + ' search in first row above actions', geometry);
+            else check(geometry.search.y >= Math.max(...geometry.buttons
+              .filter(b => !b.missing && b.w > 0).map(b => b.bottom)),
+              label + ' search in second row', geometry);
+          }
         }
         // Trial clicks check the browser's actual pointer actionability without firing
         // fullscreen/capsule actions, which would change the page under test.

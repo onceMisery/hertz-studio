@@ -628,8 +628,11 @@
     body.append(ta, preview); renderDraftControls(body, 'import');
   }
 
+  var AI_JOBS_PAGE_SIZE = 20;
   var aiState = {
-    jobs: [], consent: false, guard: null, budget: null, provider: null, expanded: null,
+    jobs: [], jobsHasMore: false, jobsHistoryExhausted: false,
+    jobsLoadingMore: false, jobsHistoryError: '',
+    consent: false, guard: null, budget: null, provider: null, expanded: null,
     proposal: null, brief: '', loading: false, error: '',
     snapshot: '', undo: null, pendingSubmit: null,
   };
@@ -661,6 +664,45 @@
     return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
   }
 
+  function mergeAiJobs(primary, older) {
+    var byId = new Map();
+    primary.concat(older).forEach(function (job) {
+      if (job && job.jobId) byId.set(job.jobId, job);
+    });
+    return Array.from(byId.values()).sort(function (a, b) {
+      return Number(b.createdAt) - Number(a.createdAt) || String(b.jobId).localeCompare(String(a.jobId));
+    });
+  }
+
+  function loadOlderAiJobs(button) {
+    if (aiState.jobsLoadingMore || aiState.jobsHistoryExhausted) return;
+    var cursor = aiState.jobs[aiState.jobs.length - 1];
+    if (!cursor) return;
+    aiState.jobsLoadingMore = true;
+    aiState.jobsHistoryError = '';
+    if (button) { button.disabled = true; button.textContent = '读取中…'; }
+    var query = new URLSearchParams({
+      limit: String(AI_JOBS_PAGE_SIZE),
+      before_created_at: String(cursor.createdAt),
+      before_job_id: cursor.jobId,
+    });
+    window.VMusicTransport.get('/v1/ai/jobs?' + query.toString())
+      .then(function (data) {
+        var page = (data && data.jobs) || [];
+        aiState.jobs = mergeAiJobs(page, aiState.jobs);
+        aiState.jobsHistoryExhausted = page.length < AI_JOBS_PAGE_SIZE;
+        aiState.jobsHasMore = !aiState.jobsHistoryExhausted;
+      })
+      .catch(function (error) {
+        aiState.jobsHistoryError = String((error && error.message) || error);
+      })
+      .then(function () {
+        aiState.jobsLoadingMore = false;
+        aiState.snapshot = '';
+        renderIfChanged();
+      });
+  }
+
   function refreshAi() {
     var T = window.VMusicTransport;
     if (!T) return Promise.resolve();
@@ -674,7 +716,16 @@
         return T.get('/v1/ai/jobs?limit=20');
       })
       .then(function (data) {
-        aiState.jobs = (data && data.jobs) || [];
+        var latest = (data && data.jobs) || [];
+        if (latest.length < AI_JOBS_PAGE_SIZE) {
+          aiState.jobs = latest;
+          aiState.jobsHistoryExhausted = true;
+          aiState.jobsHasMore = false;
+        } else {
+          aiState.jobs = mergeAiJobs(aiState.jobs, latest);
+          aiState.jobsHasMore = !aiState.jobsHistoryExhausted;
+        }
+        aiState.jobsHistoryError = '';
         if (aiState.expanded) {
           var id = aiState.expanded;
           return T.get('/v1/ai/proposals/' + id).then(function (proposal) {
@@ -710,6 +761,8 @@
       aiState.jobs.map(function (job) {
         return [job.jobId, job.state, job.stateRevision, job.resultProposalId, job.usage];
       }),
+      aiState.jobsHasMore, aiState.jobsHistoryExhausted,
+      aiState.jobsLoadingMore, aiState.jobsHistoryError,
       aiState.consent, aiState.guard, aiState.budget, aiState.provider, aiState.error,
       aiState.expanded, aiState.proposal, aiState.undo,
     ]);
@@ -725,25 +778,31 @@
 
   function renderAiCredential(body, T) {
     var details = h('details', 'ws-ai-credential');
-    details.appendChild(h('summary', 'sc-label', 'OpenAI 密钥设置（接入准备）'));
-    details.appendChild(h('p', 'sc-note',
-      '密钥保存在系统钥匙串，仅绑定本安装与 https://api.openai.com。模型与费用上限尚未确定，保存密钥不会开启云端生成。'));
+    var summary = h('summary', 'sc-label', '模型密钥设置（接入准备）');
+    details.appendChild(summary);
+    var destination = h('p', 'sc-note',
+      '展开后查询当前模型服务与接收地址。密钥保存在系统钥匙串；保存密钥不会开启云端生成。');
+    details.appendChild(destination);
     var status = h('p', 'sc-note', '展开后只显示是否已配置，服务端不回传密钥。');
     status.setAttribute('aria-live', 'polite');
-    var label = h('label', 'sc-label', 'OpenAI API key');
+    var label = h('label', 'sc-label', '模型 API key');
     label.setAttribute('for', 'ws-ai-key');
     var input = h('input', 'ws-prompt-text');
     input.id = 'ws-ai-key'; input.type = 'password'; input.autocomplete = 'off';
     input.maxLength = 4096; input.spellcheck = false;
     input.setAttribute('autocapitalize', 'none');
     var actions = h('div', 'ws-prompt-actions');
-    var save = h('button', 'btn', '保存 OpenAI 密钥');
-    var remove = h('button', 'btn', '删除 OpenAI 密钥');
+    var save = h('button', 'btn', '保存模型密钥');
+    var remove = h('button', 'btn', '删除模型密钥');
     var query = h('button', 'btn', '查询密钥状态');
     [save, remove, query].forEach(function (button) { button.type = 'button'; actions.appendChild(button); });
-    var busy = false, revision = 0;
+    var busy = false, revision = 0, targetReady = false;
     function valid(serial) { return serial === revision && details.isConnected && details.open && aiVisible(); }
-    function buttons() { save.disabled = busy || !input.value; remove.disabled = query.disabled = input.disabled = busy; }
+    function buttons() {
+      save.disabled = busy || !targetReady || !input.value;
+      remove.disabled = busy || !targetReady;
+      query.disabled = input.disabled = busy;
+    }
     function run(method) {
       if (busy) return;
       var serial = ++revision;
@@ -757,9 +816,19 @@
         task = T.del('/v1/ai/provider-credential');
       } else task = T.get('/v1/ai/provider-credential', { retry: false });
       Promise.resolve(task).then(function (reply) {
-        if (valid(serial)) status.textContent = reply.configured ? '已配置 OpenAI 密钥；云端生成尚未启用。' : '尚未配置 OpenAI 密钥。';
+        if (!valid(serial)) return;
+        var provider = reply.provider === 'stepfun' ? 'StepFun' : reply.provider === 'openai' ? 'OpenAI' : null;
+        targetReady = !!provider;
+        if (!provider) { status.textContent = '当前模型服务的密钥设置不可用。'; return; }
+        summary.textContent = provider + ' 密钥设置（接入准备）';
+        label.textContent = provider + ' API key';
+        save.textContent = '保存 ' + provider + ' 密钥';
+        remove.textContent = '删除 ' + provider + ' 密钥';
+        destination.textContent = '密钥保存在系统钥匙串，仅绑定本安装与 ' + reply.origin + '。保存密钥不会开启云端生成。';
+        status.textContent = reply.configured ? '已配置 ' + provider + ' 密钥；云端生成尚未启用。' : '尚未配置 ' + provider + ' 密钥。';
       }).catch(function (error) {
         if (!valid(serial)) return;
+        targetReady = false;
         var messages = {
           ai_locked: '请在持有 AI 服务锁的 Hertz 实例中管理模型密钥；当前实例无法执行。',
           ai_credential_invalid: '密钥格式不合法，请重新输入；不允许空白或控制字符。',
@@ -798,7 +867,11 @@
           return;
         }
         if (aiState.expanded || aiState.jobs.some(function (j) {
-          return j.state === 'accepted' || j.state === 'running' || (j.usage && j.usage.usageState === 'unknown');
+          var usage = j.usage;
+          var waitingForUsage = usage && (usage.usageState === 'unknown'
+            || (usage.usageState === 'unpriced' && !usage.reportedUsage));
+          return j.state === 'accepted' || j.state === 'running'
+            || (waitingForUsage && Date.now() - j.createdAt < 24 * 60 * 60 * 1000);
         })) refreshAi();
       }, 2500);
       refreshAi();
@@ -837,6 +910,8 @@
     } else if (aiState.provider && aiState.provider.id === 'ollama-local') {
       body.appendChild(h('div', 'sc-note', '当前使用本地 Ollama 模型：' + aiState.provider.model
         + '。仅发送生成描述与舞台参数契约，不读取歌曲、歌词或音频；Hertz 不计云端费用。'));
+    } else if (aiState.provider && aiState.provider.pricingMode === 'token_only') {
+      body.appendChild(h('div', 'sc-note ws-warn', '当前模型价格未知，不会因此阻止生成；会记录可信输入/输出 token，金额未知且不计入费用总额。'));
     } else if (aiState.provider && !aiState.provider.ready) {
       body.appendChild(h('div', 'sc-note ws-warn', '生成服务配置不可用：'
         + (aiState.provider.diagnostic || '请检查服务配置')));
@@ -846,8 +921,9 @@
       var budget = aiState.budget;
       var charged = budget.chargedTotalOverflowed ? '超出可表示范围' : usd(budget.chargedMicroUsd);
       var budgetLine = h('div', 'sc-note ws-ai-budget',
-        '预算周期：' + budget.month + '（UTC 自然月） · 已计 ' + charged
-        + ' · 在途预留 ' + usd(budget.reservedMicroUsd) + ' · 月限额 ' + usd(budget.limitMicroUsd));
+        '预算周期：' + budget.month + '（UTC 自然月） · 已核价 ' + charged
+        + ' · 在途预留 ' + usd(budget.reservedMicroUsd) + ' · 月限额 ' + usd(budget.limitMicroUsd)
+        + ' · 未核价请求的金额不计入总额');
       body.appendChild(budgetLine);
     }
     var refreshBtn = h('button', 'btn', '刷新任务与费用');
@@ -855,13 +931,31 @@
     refreshBtn.addEventListener('click', function () { refreshAi(); });
     body.appendChild(refreshBtn);
 
-    if (aiState.guard && aiState.guard.halted) {
-      body.appendChild(h('div', 'sc-note ws-warn',
-        '生成已熔断（' + (aiState.guard.reason || '预算越界') + '），复位后才能继续。'));
+    if (aiState.guard && (aiState.guard.halted || aiState.guard.tokenHalted)) {
+      if (aiState.guard.halted) {
+        body.appendChild(h('div', 'sc-note ws-warn',
+          '金额熔断：' + (aiState.guard.reason || '预算越界') + '；关联任务 '
+          + (aiState.guard.triggerJob || '未记录') + '。'));
+      }
+      if (aiState.guard.tokenHalted) {
+        body.appendChild(h('div', 'sc-note ws-warn',
+          'token-only 请求已暂停：可信 token 用量曾超过受理上界；关联任务 '
+          + (aiState.guard.tokenTriggerJob || '未记录') + '。'));
+      }
       var resetBtn = h('button', 'btn', '复位熔断');
       resetBtn.type = 'button';
+      var resetFingerprint = aiState.provider && aiState.provider.resetConfigFingerprint;
+      resetBtn.disabled = aiState.loading || !resetFingerprint;
+      resetBtn.title = resetFingerprint ? '核对当前模型与价格配置后复位' : '当前配置无法核对，暂不能复位';
       resetBtn.addEventListener('click', function () {
-        T.post('/v1/ai/budget-guard/reset', { expected_revision: aiState.guard.revision })
+        if (!resetFingerprint) return;
+        var summary = aiState.provider.id + ' / ' + aiState.provider.model
+          + ' · 配置指纹 ' + resetFingerprint.slice(0, 12);
+        if (!window.confirm('将复位持久生成保护标记。请确认当前 provider 与配置：\n' + summary)) return;
+        T.post('/v1/ai/budget-guard/reset', {
+          expected_revision: aiState.guard.revision,
+          config_fingerprint: resetFingerprint,
+        })
           .then(function () { return refreshAi(); })
           .catch(function (e) { flash('复位失败：' + String((e && e.message) || e)); });
       });
@@ -932,13 +1026,22 @@
       list.appendChild(row);
       if (job.usage) {
         var usage = job.usage;
-        var usageText = {
-          reserved: '在途预留 ' + usd(usage.reservationMicroUsd),
-          reported: '已报告费用 ' + usd(usage.accountedMicroUsd),
-          released: '未派发，预留已释放',
-          unknown: '费用未确认，暂按 ' + usd(usage.accountedMicroUsd) + ' 计入预算，后续可能校正',
-          estimated_final: '估算费用 ' + usd(usage.accountedMicroUsd) + '，已停止自动等待；取得可信记录后仍可校正',
-        }[usage.usageState] || '费用状态待查询';
+        var usageText;
+        if (!usage.pricingKnown) {
+          usageText = usage.usageState === 'unpriced'
+            ? usage.reportedUsage
+              ? '费用未核价；输入 ' + usage.reportedUsage.inputTokens + ' tokens，输出 ' + usage.reportedUsage.outputTokens + ' tokens'
+              : '费用与 token 数未知，供应商可能已处理请求'
+            : '价格未核实；请求只记录 token 数，费用未知';
+        } else {
+          usageText = {
+            reserved: '在途预留 ' + usd(usage.reservationMicroUsd),
+            reported: '已报告费用 ' + usd(usage.accountedMicroUsd),
+            released: '未派发，预留已释放',
+            unknown: '费用未确认，暂按 ' + usd(usage.accountedMicroUsd) + ' 计入预算，后续可能校正',
+            estimated_final: '估算费用 ' + usd(usage.accountedMicroUsd) + '，已停止自动等待；取得可信记录后仍可校正',
+          }[usage.usageState] || '费用状态待查询';
+        }
         list.appendChild(h('div', 'sc-note ws-ai-usage', usageText + ' · 归属 ' + usage.acceptedMonth + '（UTC）'));
       }
 
@@ -1031,6 +1134,15 @@
         list.appendChild(box);
       }
     });
+
+    if (aiState.jobsHasMore || aiState.jobsHistoryError) {
+      var olderBtn = h('button', 'btn', aiState.jobsHistoryError ? '重试读取更早任务' : '加载更早任务');
+      olderBtn.type = 'button';
+      olderBtn.disabled = aiState.jobsLoadingMore;
+      olderBtn.addEventListener('click', function () { loadOlderAiJobs(olderBtn); });
+      list.appendChild(olderBtn);
+      if (aiState.jobsHistoryError) list.appendChild(h('div', 'sc-note ws-warn', aiState.jobsHistoryError));
+    }
 
     function setLoading(on) {
       var changed = aiState.loading !== on;
@@ -1409,6 +1521,14 @@
     body.appendChild(h('div', 'sc-note',
       '一条 cue = 在某个时刻（或每 N 拍）把一组参数缓动到目标值。'
       + '秒级 cue 跟着歌曲进度走，节拍 cue 跟着鼓点走。'));
+
+    if (window.CreativeProject) {
+      var trackStatus = h('p', 'sc-note', CreativeProject.status());
+      trackStatus.dataset.cueTrackStatus = '';
+      trackStatus.setAttribute('role', 'status');
+      trackStatus.setAttribute('aria-live', 'polite');
+      body.appendChild(trackStatus);
+    }
 
     var addRow = h('div', 'ws-row');
     var kind = h('select', 'ws-mini');
@@ -1970,8 +2090,9 @@
 
   document.addEventListener('stage:track-changed',function () {
     if (!refs.body || !window.CreativeProject) return;
-    var status = refs.body.querySelector('[data-project-status]');
-    if (status) status.textContent = CreativeProject.status();
+    refs.body.querySelectorAll('[data-project-status], [data-cue-track-status]').forEach(function (status) {
+      status.textContent = CreativeProject.status();
+    });
   });
 
   function renderIO(body) {

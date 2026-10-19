@@ -478,7 +478,10 @@
   function searchLocal(epoch, q) {
     if (epoch !== panel.epoch || !searchNetwork || !searchNetwork.active || refs.localSec.loading) return;
     var sec = refs.localSec;
-    sec.loading = true; sec.more.hidden = true; sec.status.onclick = null;
+    var restoreFocus = document.activeElement === sec.more;
+    sec.restoreFocusOnResult = restoreFocus;
+    sec.loading = true; sec.more.hidden = !restoreFocus; sec.more.disabled = restoreFocus; sec.status.onclick = null;
+    if (restoreFocus) sec.more.textContent = '搜索中…';
     setSectionStatus(refs.localSec, '搜索中…', 'loading');
     var url = '/v1/tracks?q=' + encodeURIComponent(q) + '&limit=8';
     searchNetwork.get(url)
@@ -489,15 +492,19 @@
       .catch(function (err) {
         if (epoch !== panel.epoch || (err && err.name === 'AbortError')) return;
         var failure = HertzSearch.failure(err);
-        setSectionStatus(sec, failure.label + '：' + err.message, 'error');
+        setSectionStatus(sec, failure.label, 'error');
         sec.status.dataset.errorCode = failure.code; sec.status.dataset.requestId = failure.requestId;
+        sec.more.disabled = false;
         sec.more.textContent = '重试'; sec.more.hidden = !failure.retryable;
         sec.more.onclick = function () { searchLocal(epoch, q); };
+        if (!failure.retryable && restoreFocus) { sec.status.tabIndex = -1; sec.status.focus({ preventScroll: true }); }
       }).finally(function () { sec.loading = false; });
   }
 
   function renderLocalRows(tracks) {
     if (!refs.localSec) return;
+    var restoreFocus = !!refs.localSec.restoreFocusOnResult;
+    refs.localSec.restoreFocusOnResult = false;
     setSectionStatus(refs.localSec, tracks.length ? '' : '本地曲库没有匹配的歌曲', tracks.length ? '' : 'empty');
     setSectionCount(refs.localSec, tracks.length);
     refs.localSec.rows.textContent = '';
@@ -515,6 +522,7 @@
       refs.localSec.rows.appendChild(row);
     });
     if (tracks.length) {
+      refs.localSec.more.disabled = false;
       refs.localSec.more.textContent = '在曲库页查看全部 →';
       refs.localSec.more.hidden = false;
       refs.localSec.more.onclick = function () {
@@ -522,6 +530,7 @@
       };
     } else {
       refs.localSec.more.hidden = true;
+      if (restoreFocus) { refs.localSec.status.tabIndex = -1; refs.localSec.status.focus({ preventScroll: true }); }
     }
   }
 
@@ -557,7 +566,11 @@
         var group = buildSection(refs.onlineSec.rows, label);
         async function load() {
           if (!network.active) return;
-          group.more.hidden = true;
+          var restoreFocus = document.activeElement === group.more;
+          group.restoreFocusOnResult = restoreFocus;
+          group.more.hidden = !restoreFocus;
+          group.more.disabled = restoreFocus;
+          if (restoreFocus) group.more.textContent = '搜索中…';
           setSectionStatus(group, '搜索中…', 'loading');
           try {
             var data = await network.get('/v1/online/search?' + new URLSearchParams({source:source.id,q:q,limit:3}));
@@ -568,11 +581,13 @@
           } catch (error) {
             if (epoch !== panel.epoch || !network.active) return;
             var failure = HertzSearch.failure(error);
-            setSectionStatus(group, failure.label + '：' + error.message, 'error');
+            setSectionStatus(group, failure.label, 'error');
             group.status.dataset.errorCode = failure.code;
             group.status.dataset.requestId = failure.requestId;
+            group.more.disabled = false;
             group.more.textContent = '重试'; group.more.hidden = !failure.retryable;
             group.more.onclick = load;
+            if (!failure.retryable && restoreFocus) { group.status.tabIndex = -1; group.status.focus({ preventScroll: true }); }
           }
         }
         load();
@@ -583,6 +598,8 @@
   function renderOnlineRows(tracks, q, group) {
     if (!refs.onlineSec) return;
     var sec = group || refs.onlineSec;
+    var restoreFocus = !!sec.restoreFocusOnResult;
+    sec.restoreFocusOnResult = false;
     setSectionStatus(sec, tracks.length ? '' : '在线曲库没有匹配的结果', tracks.length ? '' : 'empty');
     setSectionCount(sec, tracks.length);
     sec.rows.textContent = '';
@@ -605,6 +622,7 @@
       sec.rows.appendChild(row);
     });
     if (tracks.length) {
+      sec.more.disabled = false;
       sec.more.textContent = '在在线页查看全部 →';
       sec.more.hidden = false;
       sec.more.onclick = function () {
@@ -612,6 +630,7 @@
       };
     } else {
       sec.more.hidden = true;
+      if (restoreFocus) { sec.status.tabIndex = -1; sec.status.focus({ preventScroll: true }); }
     }
   }
 

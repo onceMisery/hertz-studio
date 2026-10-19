@@ -5,6 +5,7 @@ use crate::online as providers;
 use serde::{Deserialize, Serialize};
 
 const RESULT_CAP: usize = 3;
+const SEARCH_RESULT_CAP: usize = 10;
 const SAVED_BYTES: usize = 2 * 1024 * 1024;
 const NETWORK_DEADLINE: Duration = Duration::from_secs(8);
 static NETWORK: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
@@ -16,6 +17,8 @@ pub(crate) struct Search {
     query: Option<String>,
     expected_metadata_revision: String,
     expected_lyrics_revision: String,
+    #[serde(default)]
+    allow_automatic_apply: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -134,6 +137,34 @@ fn rank(e: &Evidence) -> i32 {
         + i32::from(e.duration_delta_ms.is_some_and(|d| d <= 1000)) * 20
         - i32::from(e.version_mismatch) * 40
 }
+fn automatic_choice_index(choices: &[Choice], eligible_set: bool) -> Option<usize> {
+    if !eligible_set
+        || choices
+            .iter()
+            .any(|choice| choice.evidence.version_mismatch)
+    {
+        return None;
+    }
+    let mut strong = choices
+        .iter()
+        .enumerate()
+        .filter(|(_, choice)| choice.evidence.strong_metadata_match);
+    let (index, _) = strong.next()?;
+    strong.next().is_none().then_some(index)
+}
+pub(super) async fn visible_lyrics_are_empty(track: &Track, overlay_is_empty: bool) -> bool {
+    overlay_is_empty && crate::lyrics::raw_local(track, None).await.lines.is_empty()
+}
+fn is_complete_search_page(page: &providers::SearchPage) -> bool {
+    page.total_is_exact
+        && page.total == page.tracks.len()
+        && page.total <= SEARCH_RESULT_CAP
+        && page.warning.is_none()
+        && page
+            .pagination
+            .as_ref()
+            .is_none_or(|pagination| !pagination.has_more)
+}
 async fn current(
     state: &AppState,
     id: &str,
@@ -166,7 +197,12 @@ async fn network<T>(
 pub(crate) async fn search(state: &Arc<AppState>, id: &str, body: Search) -> ApiResult<Value> {
     let info = providers::lyric_candidate_source(&body.source)?;
     let expected = revision(&body.expected_lyrics_revision)?;
-    let track = current(state, id, &body.expected_metadata_revision, expected).await?;
+    let (track, saved) = snapshot(state, id).await?;
+    if metadata(&track)? != body.expected_metadata_revision || saved.revision != expected {
+        return Err(conflict());
+    }
+    let allow_automatic_apply = body.allow_automatic_apply
+        && visible_lyrics_are_empty(&track, saved.content.is_none()).await;
     let query = body.query.unwrap_or_else(|| {
         [track.title.as_str(), track.artist.as_deref().unwrap_or("")]
             .into_iter()
@@ -191,7 +227,7 @@ pub(crate) async fn search(state: &Arc<AppState>, id: &str, body: Search) -> Api
                 q: Some(query.into()),
                 cat: None,
                 source: body.source.clone(),
-                limit: 10,
+                limit: SEARCH_RESULT_CAP,
                 offset: 0,
             },
         ),
@@ -205,6 +241,7 @@ pub(crate) async fn search(state: &Arc<AppState>, id: &str, body: Search) -> Api
         expected,
         info,
         page,
+        allow_automatic_apply,
     )
     .await
 }
@@ -217,14 +254,17 @@ async fn publish(
     expected: i64,
     info: providers::SourceInfo,
     page: providers::SearchPage,
+    allow_automatic_apply: bool,
 ) -> ApiResult<Value> {
     let source = info.id;
     if page.source != source {
         return Err(ApiError::upstream_rejected("歌词搜索返回了错误的来源身份"));
     }
+    let complete = is_complete_search_page(&page);
     let mut seen = std::collections::HashSet::new();
     let mut choices = Vec::new();
-    for item in page.tracks.into_iter().take(10) {
+    let mut rejected_item = false;
+    for item in page.tracks.into_iter().take(SEARCH_RESULT_CAP) {
         if item.source != source
             || item.id.is_empty()
             || item.id.len() > 256
@@ -235,6 +275,7 @@ async fn publish(
             || item.title.trim().is_empty()
             || !seen.insert(item.id.clone())
         {
+            rejected_item = true;
             continue;
         }
         let evidence = evidence(
@@ -255,6 +296,11 @@ async fn publish(
             evidence,
         });
     }
+    let auto_index = automatic_choice_index(
+        &choices,
+        allow_automatic_apply && complete && !rejected_item,
+    );
+    let auto_ref_id = auto_index.map(|index| choices[index].ref_id.clone());
     choices.sort_by_key(|c| std::cmp::Reverse(rank(&c.evidence)));
     choices.truncate(RESULT_CAP);
     current(state, id, fingerprint, expected).await?;
@@ -265,7 +311,11 @@ async fn publish(
         return Err(busy());
     }
     let mut results = Vec::new();
-    for choice in choices {
+    let mut automatic_apply_allowed = false;
+    for mut choice in choices {
+        let is_automatic = auto_ref_id.as_deref() == Some(choice.ref_id.as_str());
+        choice.evidence.automatic_apply_allowed = is_automatic;
+        automatic_apply_allowed |= is_automatic;
         let candidate_id = uuid::Uuid::new_v4().to_string();
         let mut out = serde_json::to_value(&choice).map_err(|_| internal("歌词搜索投影失败"))?;
         out["candidateId"] = json!(candidate_id);
@@ -277,13 +327,14 @@ async fn publish(
                 metadata: fingerprint.into(),
                 revision: expected,
                 expires: now + TTL,
+                automatic_apply_allowed: is_automatic,
                 payload: Payload::Online(choice),
             },
         );
         results.push(out);
     }
     Ok(
-        json!({"candidates":results,"metadataRevision":fingerprint,"lyricsRevision":expected.to_string(),"expiresInMs":TTL.as_millis(),"automaticApplyAllowed":false}),
+        json!({"candidates":results,"metadataRevision":fingerprint,"lyricsRevision":expected.to_string(),"expiresInMs":TTL.as_millis(),"automaticApplyAllowed":automatic_apply_allowed}),
     )
 }
 
@@ -464,13 +515,108 @@ mod tests {
         }
     }
     fn page() -> providers::SearchPage {
-        serde_json::from_value(json!({"source":"fixture","keyword":"Olive","total":12,"tracks":(0..12).map(|i| json!({"source":"fixture","id":i.to_string(),"title":"Olive","artist":if i==9 {"Artist"} else {"Other"},"album":"Album","duration_ms":30000,"cover":null,"playable":false,"ref":{"private":"must-not-project"}})).collect::<Vec<_>>()})).unwrap()
+        let mut page: providers::SearchPage = serde_json::from_value(json!({"source":"fixture","keyword":"Olive","total":12,"tracks":(0..12).map(|i| json!({"source":"fixture","id":i.to_string(),"title":"Olive","artist":if i==9 {"Artist"} else {"Other"},"album":"Album","duration_ms":30000,"cover":null,"playable":false,"ref":{"private":"must-not-project"}})).collect::<Vec<_>>()})).unwrap();
+        page.total_is_exact = true;
+        page
+    }
+    fn complete_page() -> providers::SearchPage {
+        let mut page = page();
+        page.total = 1;
+        page.tracks.truncate(1);
+        page.tracks[0].artist = "Artist".into();
+        page
     }
     fn apply_body(id: &str, revision: i64) -> Apply {
         Apply {
             candidate_id: id.into(),
             expected_lyrics_revision: revision.to_string(),
+            automatic_apply: false,
         }
+    }
+
+    fn automatic_apply_body(id: &str, revision: i64) -> Apply {
+        Apply {
+            automatic_apply: true,
+            ..apply_body(id, revision)
+        }
+    }
+
+    #[test]
+    fn automatic_selection_requires_one_complete_unambiguous_strong_match() {
+        let track = track();
+        let choice = |id: &str, title: &str| Choice {
+            source: "fixture".into(),
+            source_label: "受控来源".into(),
+            ref_id: id.into(),
+            title: title.into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            duration_ms: 30_000,
+            evidence: evidence(&track, title, "Artist", "Album", 30_000),
+        };
+        let exact = choice("one", "Olive");
+        assert_eq!(
+            automatic_choice_index(std::slice::from_ref(&exact), true),
+            Some(0)
+        );
+        assert_eq!(
+            automatic_choice_index(std::slice::from_ref(&exact), false),
+            None
+        );
+        assert_eq!(
+            automatic_choice_index(&[exact.clone(), exact.clone()], true),
+            None
+        );
+        assert_eq!(
+            automatic_choice_index(&[exact, choice("live", "Olive (Live)")], true),
+            None
+        );
+    }
+
+    #[test]
+    fn automatic_selection_requires_a_provably_complete_page() {
+        let complete = complete_page();
+        assert!(is_complete_search_page(&complete));
+
+        let mut page = complete.clone();
+        page.total_is_exact = false;
+        assert!(!is_complete_search_page(&page));
+
+        let mut page = complete.clone();
+        page.total += 1;
+        assert!(!is_complete_search_page(&page));
+
+        let mut too_many = complete.clone();
+        too_many.tracks = self::page().tracks;
+        too_many.tracks.truncate(SEARCH_RESULT_CAP + 1);
+        too_many.total = too_many.tracks.len();
+        assert!(!is_complete_search_page(&too_many));
+
+        let mut page = complete.clone();
+        page.warning = Some("partial provider response".into());
+        assert!(!is_complete_search_page(&page));
+
+        let mut page = complete;
+        page.pagination = Some(providers::SearchPagination {
+            next_offset: 1,
+            has_more: true,
+        });
+        assert!(!is_complete_search_page(&page));
+    }
+
+    #[tokio::test]
+    async fn visible_lyrics_gate_includes_sidecar_lrc() -> Result<()> {
+        let dir =
+            std::env::temp_dir().join(format!("hertz-sidecar-lyrics-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir)?;
+        let mut track = track();
+        track.path = dir.join("track.wav").to_string_lossy().into_owned();
+        assert!(visible_lyrics_are_empty(&track, true).await);
+        std::fs::write(dir.join("track.lrc"), "[00:01.00]sidecar lyric")?;
+        assert!(!visible_lyrics_are_empty(&track, true).await);
+        assert!(!visible_lyrics_are_empty(&track, false).await);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 
     #[test]
@@ -541,6 +687,130 @@ mod tests {
         std::fs::remove_dir_all(dir)?;
         result
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn strict_automatic_apply_only_writes_unchanged_empty_lyrics() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("hertz-auto-lyrics-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await?;
+        std::fs::create_dir_all(dir.join("media"))?;
+        let (state, audio) = crate::state::tests::playback_state_with_db(db).await;
+        let state = Arc::new(state);
+        let result = async {
+            let mut track = track();
+            track.path = dir
+                .join("media")
+                .join("track.wav")
+                .to_string_lossy()
+                .into_owned();
+            vmusic_store::upsert_track(&state.db, &track).await?;
+            let fingerprint = checked(metadata(&track))?;
+            let (_, baseline) = checked(snapshot(&state, &track.id).await)?;
+            let reply = checked(
+                publish(
+                    &state,
+                    &track.id,
+                    &track,
+                    &fingerprint,
+                    baseline.revision,
+                    source(),
+                    complete_page(),
+                    true,
+                )
+                .await,
+            )?;
+            assert_eq!(reply["automaticApplyAllowed"], true);
+            let candidate_id = reply["candidates"][0]["candidateId"].as_str().unwrap();
+            assert_eq!(
+                reply["candidates"][0]["evidence"]["automaticApplyAllowed"],
+                true
+            );
+            let pending = state.lyric_candidates.lock().await[candidate_id].clone();
+            assert!(pending.automatic_apply_allowed);
+            let Payload::Online(choice) = &pending.payload else {
+                panic!("online candidate")
+            };
+            let doc = vmusic_lyrics::parse_import("[00:01.00]受控歌词", "lrc")?;
+            checked(finish_prepare(&state, &track.id, candidate_id, &pending, choice, doc).await)?;
+            checked(
+                super::super::apply(
+                    &state,
+                    &track.id,
+                    automatic_apply_body(candidate_id, baseline.revision),
+                )
+                .await,
+            )?;
+            assert!(checked(snapshot(&state, &track.id).await)?
+                .1
+                .content
+                .is_some());
+
+            checked(super::super::clear(&state, &track.id).await)?;
+            let (_, baseline) = checked(snapshot(&state, &track.id).await)?;
+            let reply = checked(
+                publish(
+                    &state,
+                    &track.id,
+                    &track,
+                    &fingerprint,
+                    baseline.revision,
+                    source(),
+                    complete_page(),
+                    true,
+                )
+                .await,
+            )?;
+            let candidate_id = reply["candidates"][0]["candidateId"].as_str().unwrap();
+            let pending = state.lyric_candidates.lock().await[candidate_id].clone();
+            let Payload::Online(choice) = &pending.payload else {
+                panic!("online candidate")
+            };
+            let doc = vmusic_lyrics::parse_import("[00:01.00]受控歌词", "lrc")?;
+            checked(finish_prepare(&state, &track.id, candidate_id, &pending, choice, doc).await)?;
+            let sidecar = dir.join("media").join("track.lrc");
+            std::fs::write(&sidecar, "[00:01.00]sidecar lyric")?;
+            assert_eq!(
+                super::super::apply(
+                    &state,
+                    &track.id,
+                    automatic_apply_body(candidate_id, baseline.revision),
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "lyrics_conflict"
+            );
+            std::fs::remove_file(sidecar)?;
+            let user_content = "[00:02.00]用户修改";
+            vmusic_store::lyrics::import(&state.db, &track.id, user_content).await?;
+            assert_eq!(
+                super::super::apply(
+                    &state,
+                    &track.id,
+                    automatic_apply_body(candidate_id, baseline.revision),
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "lyrics_conflict"
+            );
+            assert_eq!(
+                checked(snapshot(&state, &track.id).await)?
+                    .1
+                    .content
+                    .as_deref(),
+                Some(user_content)
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        state.audio.shutdown();
+        audio.join().unwrap();
+        state.db.close().await;
+        drop(state);
+        std::fs::remove_dir_all(dir)?;
+        result
+    }
+
     async fn exercise(state: &Arc<AppState>, base: &str) -> Result<()> {
         let mut t = track();
         vmusic_store::upsert_track(&state.db, &t).await?;
@@ -572,15 +842,23 @@ mod tests {
         assert_eq!(unsupported["error"]["code"], "capability_unsupported");
         let mut wrong = page();
         wrong.source = "wrong".into();
-        assert!(
-            publish(state, &t.id, &t, &fingerprint, initial, source(), wrong)
-                .await
-                .is_err()
-        );
+        assert!(publish(
+            state,
+            &t.id,
+            &t,
+            &fingerprint,
+            initial,
+            source(),
+            wrong,
+            false
+        )
+        .await
+        .is_err());
         let mut p = page();
         p.tracks[1].id = "0".into();
         p.tracks[2].source = "wrong".into();
-        let reply = checked(publish(state, &t.id, &t, &fingerprint, initial, source(), p).await)?;
+        let reply =
+            checked(publish(state, &t.id, &t, &fingerprint, initial, source(), p, false).await)?;
         assert_eq!(reply["candidates"].as_array().unwrap().len(), 3);
         assert_eq!(reply["candidates"][0]["refId"], "9");
         assert!(!reply.to_string().contains("must-not-project"));
@@ -681,6 +959,7 @@ mod tests {
                 baseline.revision,
                 source(),
                 page(),
+                false,
             )
             .await,
         )?;
@@ -719,6 +998,7 @@ mod tests {
                 baseline.revision,
                 source(),
                 page(),
+                false,
             )
             .await,
         )?;

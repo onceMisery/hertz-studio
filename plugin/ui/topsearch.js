@@ -367,9 +367,12 @@
     });
     async function load(group) {
       if (!network.active || group.loading) return;
+      var restoreFocus = document.activeElement && group.container.contains(document.activeElement);
       group.loading = true; group.container.textContent = '';
       var status = document.createElement('div'); status.className = 'ts-hint';
+      status.tabIndex = -1;
       status.textContent = o.sourceLabel(group.source) + ' · 搜索中…'; group.container.appendChild(status);
+      if (restoreFocus) status.focus({ preventScroll: true });
       try {
         var params = new URLSearchParams({ source:group.source, q:q, limit:kind === 'song' ? '8' : '6' });
         var data = await network.get(endpoint + '?' + params.toString());
@@ -392,7 +395,7 @@
       } catch (err) {
         if (epoch !== state.epoch || q !== state.q || !state.open || effectiveKind() !== kind || o.state.source !== scopeSource) return;
         var failure = HertzSearch.failure(err);
-        status.textContent = o.sourceLabel(group.source) + ' · ' + errText(failure.label, err);
+        status.textContent = o.sourceLabel(group.source) + ' · ' + failure.label;
         status.dataset.errorCode = failure.code;
         status.dataset.requestId = failure.requestId;
         if (failure.retryable) {

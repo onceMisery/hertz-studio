@@ -512,16 +512,17 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         .cloned()
         .unwrap_or_default();
     let tracks: Vec<OnlineTrack> = items.iter().filter_map(map_track).collect();
-    let total = data
+    let reported_total = data
         .and_then(|d| d.get("totalCount"))
         .and_then(val_u64)
-        .map(|n| n as usize)
-        .unwrap_or(tracks.len());
+        .map(|n| n as usize);
+    let total = reported_total.unwrap_or(tracks.len());
 
     Ok(SearchPage {
         source: ID.into(),
         keyword: term.to_string(),
         total,
+        total_is_exact: reported_total.is_some(),
         tracks,
         warning: None,
         pagination: None,

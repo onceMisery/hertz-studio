@@ -3,20 +3,20 @@
 // contract: incompatible templates need a deliberate catalog revision.
 (function () {
   'use strict';
-  var SCHEMA_HASH = '2f540ae172eede00ebad1bb00921b02b8c77743fa2aae40c110fe5bdc80d33ec';
+  var SCHEMA_HASH = '9eeda3eea3c20f2526c6180269944ae437c9289cc321206e0a1db4ea6754ff6e';
   var CATALOG = [
-    {id:'quiet-orb',version:1,title:'静夜星球',scene:'orb',mood:'克制、留白',motion:'低 · 无节拍抖动',
+    {id:'quiet-orb',version:2,title:'静夜星球',scene:'orb',mood:'克制、留白',motion:'低 · 无节拍抖动',
       boundary:'适合舒缓音乐与大段歌词；球体仍响应实时频谱，不是完全静止的画面。',
       base:'0d84301863cb08d3ce7c54ed8314a56e97eb54288908f31515ac789c8421c790',
       patch:{'cam.dist':15,'cam.drift':4,'cam.shake':0,'cam.kick':0,'look.bloom':.12,
         'look.chroma':0,'look.grain':.04,'look.saturation':.8,'sc.wobble':.08,'sc.amp':.3,'sc.radius':2.8}},
-    {id:'neon-towers',version:1,title:'霓虹律动',scene:'towers',mood:'清晰、明亮',motion:'中 · 频谱起伏与缓慢漂移',
+    {id:'neon-towers',version:2,title:'霓虹律动',scene:'towers',mood:'清晰、明亮',motion:'中 · 频谱起伏与缓慢漂移',
       boundary:'适合节奏清晰的音乐；画面随实际频谱变化，低配置设备可能降低分辨率。',
       base:'b41c53f82d41e64f3323bf511b06a45da50c5e778a15db05dd54f0af2dc50c67',
       patch:{'cam.dist':18,'cam.pitch':12,'cam.drift':14,'cam.shake':6,'cam.kick':16,
         'look.bloom':.38,'look.chroma':.1,'look.grain':.04,'look.saturation':1.05,'look.grade':3,
         'sc.height':5,'sc.span':24,'sc.mirror':.12}},
-    {id:'ink-terrain',version:1,title:'墨线地形',scene:'terrain',mood:'单色、纸感',motion:'低 · 缓慢地形移动',
+    {id:'ink-terrain',version:2,title:'墨线地形',scene:'terrain',mood:'单色、纸感',motion:'低 · 缓慢地形移动',
       boundary:'适合器乐与低密度歌词；纸感和线条属于后处理，横竖屏构图须分别确认。',
       base:'31e8a2269f8b216ec13197a3994ed30442ead089f7b713f987a7117993608bb9',
       patch:{'cam.dist':17,'cam.height':.8,'cam.pitch':18,'cam.shake':0,'cam.drift':6,'cam.kick':0,

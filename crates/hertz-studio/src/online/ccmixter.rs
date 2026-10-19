@@ -57,6 +57,7 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         source: "ccmixter".into(),
         keyword: term.to_string(),
         total,
+        total_is_exact: false,
         tracks,
         warning: None,
         pagination: Some(SearchPagination {

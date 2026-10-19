@@ -34,7 +34,7 @@ async function main(){
     await page.reload();await page.waitForFunction(id=>Stage.presentation().mediaTrackId===id,track.id);
     await tools();await page.locator('#np-lyric-search').waitFor();
     const panel=page.locator('#np-lyric-import-panel'),status=panel.locator('[data-lyric-import-status]');
-    const apply=panel.locator('[data-lyric-import-apply]'),submit=panel.locator('[data-lyric-search]'),query=panel.locator('[data-lyric-query]');
+    const apply=panel.locator('[data-lyric-import-apply]'),submit=panel.locator('[data-lyric-search]'),query=panel.locator('[data-lyric-query]'),auto=panel.locator('[data-lyric-auto-apply]');
     let prepared,reply,searchFailure=false,prepareFailure=false,searches=0,fetches=0;
     async function reset(){
       const baseline=await fixture.api(root);
@@ -52,8 +52,28 @@ async function main(){
     assert.equal(searches,0,'Opening is not search consent');assert.equal(fetches,0);
     await query.fill('明确发送的检索词');await search();
     assert.equal(writes.filter(w=>w.url.endsWith('/search')).at(-1).body.query,'明确发送的检索词');
+    assert.equal(writes.filter(w=>w.url.endsWith('/search')).at(-1).body.allowAutomaticApply,false);
     assert.equal(fetches,0,'Search cannot fetch lyrics');assert.equal(await apply.isEnabled(),false);
     assert.match(await panel.textContent(),/曲名一致.*歌手一致.*时长差 1.200/s);
+
+    await auto.check();
+    reply.candidates[0]={...reply.candidates[0],title:track.title,artist:track.artist,album:track.album,durationMs:track.duration_ms,
+      evidence:{titleEqual:true,artistEqual:true,albumEqual:true,durationDeltaMs:0,versionMismatch:false,strongMetadataMatch:true,automaticApplyAllowed:true,reasons:['title_equal','artist_equal','album_equal','duration_close']}};
+    reply.automaticApplyAllowed=true;
+    const automaticRequests=[];
+    const automaticApplyRoute=async route=>{
+      const body=route.request().postDataJSON();
+      if(body.automaticApply){automaticRequests.push(body);await route.fulfill({json:{ok:true,source:'imported',format:'lrc',lyricsRevision:initial.lyricsRevision}});}
+      else await route.fallback();
+    };
+    await page.route('**/lyrics/candidates/apply',automaticApplyRoute);
+    await submit.click();await status.filter({hasText:'歌词已应用'}).waitFor();
+    assert.equal(writes.filter(w=>w.url.endsWith('/search')).at(-1).body.allowAutomaticApply,true);
+    assert.equal(automaticRequests.length,1);assert.equal(automaticRequests[0].automaticApply,true);
+    assert.equal((await fixture.api(root)).lyricsRevision,initial.lyricsRevision,'auto UI flow is fixture-routed and does not mutate the service');
+    await page.unroute('**/lyrics/candidates/apply',automaticApplyRoute);
+    reply.automaticApplyAllowed=false;await auto.uncheck();await reset();await search();
+
     await preview();assert.equal((await fixture.api(root)).lyricsRevision,initial.lyricsRevision);
     assert.match(await panel.textContent(),/未提供歌词再分发许可/);assert.equal(await apply.isEnabled(),true);
     await page.setViewportSize({width:390,height:760});await panel.scrollIntoViewIfNeeded();
@@ -63,7 +83,9 @@ async function main(){
     await page.screenshot({path:path.resolve('output/playwright/lyric-online-390.png')});
     await apply.click();await status.filter({hasText:'歌词已应用'}).waitFor();
     assert.equal((await fixture.api(root)).lines[0].text,'受控预览');
-    assert.equal(writes.filter(w=>w.url.endsWith('/candidates/apply')).length,1);
+    const applyWrites=writes.filter(w=>w.url.endsWith('/candidates/apply'));
+    assert.equal(applyWrites.length,2,'fixture covers one automatic and one confirmed manual apply');
+    assert.deepEqual(applyWrites.map(w=>w.body.automaticApply),[true,false]);
     assert.equal(writes.filter(w=>w.method==='PUT' && w.url.endsWith('/lyrics')).length,0);
     await page.setViewportSize({width:1280,height:850});
     await reset();await open();searchFailure=true;await submit.click();await status.filter({hasText:'受控搜索失败'}).waitFor();

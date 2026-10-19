@@ -90,6 +90,7 @@ mod tests {
             source: source.into(),
             keyword: "x".into(),
             total: 1,
+            total_is_exact: false,
             tracks: vec![OnlineTrack {
                 source: source.into(),
                 id: "1".into(),

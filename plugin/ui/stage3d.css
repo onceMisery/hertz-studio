@@ -17,6 +17,7 @@
   --s3d-btn: 38px;
   --s3d-dock-h: 54px;
   --s3d-gap: 10px;
+  --s3d-safe-bottom: env(safe-area-inset-bottom, 0px);
   --s3d-text: #eef3f0;
   --s3d-muted: #a1aaa8;
   --s3d-accent: #c3e5da;
@@ -1284,7 +1285,7 @@ body.s3d-open > .bar { display: none; }
   .s3d-shelf-plane { bottom: 226px; }
   .s3d-sc { width: min(74vw, 260px); }
   .s3d[data-shelf-mode='side'] .s3d-shelf-plane {
-    top: calc(100% - clamp(252px, 36vh, 286px) - env(safe-area-inset-bottom, 0px));
+    top: calc(100% - clamp(252px, 36vh, 286px) - var(--s3d-safe-bottom));
   }
 }
 
@@ -1293,8 +1294,8 @@ body.s3d-open > .bar { display: none; }
   .s3d-chrome .s3d-shelf-plane { bottom: 226px; }
   .s3d-sc { width: clamp(170px, 20vw, 224px); font-size: 9.5px; }
   .s3d-sc-sub, .s3d-sc-meta { display: none; }
-  .s3d[data-shelf-mode='side'] .s3d-shelf-plane { top: 50%; }
-  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-shelf-plane { top: 62%; }
+  .s3d[data-shelf-mode='side'] .s3d-shelf-plane { top: calc(50% - var(--s3d-safe-bottom)); }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-shelf-plane { top: calc(63% - var(--s3d-safe-bottom)); }
   .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-sc { aspect-ratio: 3 / 1; }
   .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-reading {
     top: 54px;
@@ -1303,6 +1304,25 @@ body.s3d-open > .bar { display: none; }
   .s3d.s3d-shelf-on[data-shelf-mode='side'] .fl-classic {
     top: 15vh;
     height: calc(100% - 15vh - clamp(250px, 50vh, 300px));
+  }
+}
+
+@media (max-width: 760px) and (orientation: portrait) and (max-height: 560px) {
+  /* Lift the shelf slightly; reserve the lyric gap and move settings opposite the close button. */
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-shelf-plane {
+    top: calc(61.5% - var(--s3d-safe-bottom));
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-reading {
+    bottom: clamp(300px, 60vh, 340px);
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .fl-classic {
+    height: calc(100% - 15vh - clamp(300px, 60vh, 340px));
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] #s3d-settings-toggle {
+    top: 12px;
+    right: auto;
+    bottom: auto;
+    left: 12px;
   }
 }
 

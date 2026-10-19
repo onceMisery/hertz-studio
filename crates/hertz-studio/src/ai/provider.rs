@@ -229,7 +229,10 @@ impl Ollama {
         Ok(bytes)
     }
 
-    async fn completion_execute(&self, body: Vec<u8>) -> Result<String, String> {
+    async fn completion_execute(
+        &self,
+        body: Vec<u8>,
+    ) -> Result<super::jobs::CompletionReply, String> {
         let mut response = match self
             .client
             .post(self.endpoint.clone())
@@ -267,12 +270,23 @@ impl Ollama {
         }
         let envelope =
             super::strict_json::parse(&bytes, RESPONSE_BYTES, 8).map_err(str::to_owned)?;
-        envelope
+        let usage = match (
+            envelope.get("prompt_eval_count").and_then(Value::as_u64),
+            envelope.get("eval_count").and_then(Value::as_u64),
+        ) {
+            (Some(input_tokens), Some(output_tokens)) => Some(super::usage::TrustedUsage {
+                input_tokens,
+                output_tokens,
+            }),
+            _ => None,
+        };
+        let text = envelope
             .get("message")
             .and_then(|message| message.get("content"))
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .ok_or_else(|| "local model completion text is missing".to_string())
+            .ok_or_else(|| "local model completion text is missing".to_string());
+        Ok(super::jobs::CompletionReply { text, usage })
     }
 }
 
@@ -280,13 +294,13 @@ impl StageIntentProvider for Ollama {
     fn id(&self) -> &'static str {
         "ollama-local"
     }
+    fn endpoint_identity(&self) -> Option<&str> {
+        Some(self.endpoint.as_str())
+    }
     fn model(&self) -> &str {
         &self.model
     }
     fn ready(&self) -> bool {
-        true
-    }
-    fn supports_zero_cost_completion(&self) -> bool {
         true
     }
     fn quote(&self, brief: &str) -> Result<PriceQuote, String> {
@@ -351,7 +365,7 @@ impl StageIntentProvider for Ollama {
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => Err("local model request cancelled".to_string()),
-                text = provider.completion_execute(body) => text.map(|text| super::jobs::CompletionReply { text }),
+                reply = provider.completion_execute(body) => reply,
             }
         })
     }
@@ -443,6 +457,7 @@ impl OpenAi {
         if bytes.len() > REQUEST_BYTES {
             return Err("complete model request exceeds byte limit");
         }
+        ensure_input_budget(&bytes, quote)?;
         Ok(bytes)
     }
 
@@ -492,10 +507,11 @@ impl OpenAi {
                 Err(_) => return failed("OpenAI response read failed"),
             }
         }
+        let mut reply = parse_openai_reply(&bytes, &self.model);
         if !status.is_success() {
-            return failed(&format!("OpenAI HTTP status {}", status.as_u16()));
+            reply.intent = Err(format!("OpenAI HTTP status {}", status.as_u16()));
         }
-        parse_openai_reply(&bytes, &self.model)
+        reply
     }
 
     fn completion_request(&self, system: &str, user: &str) -> Result<Vec<u8>, &'static str> {
@@ -515,6 +531,7 @@ impl OpenAi {
         if bytes.len() > REQUEST_BYTES {
             return Err("complete model request exceeds byte limit");
         }
+        ensure_input_budget(&bytes, quote)?;
         Ok(bytes)
     }
 
@@ -522,7 +539,7 @@ impl OpenAi {
         &self,
         body: Vec<u8>,
         credential: super::credential::ProviderCredential,
-    ) -> Result<String, String> {
+    ) -> Result<super::jobs::CompletionReply, String> {
         let mut authorization =
             reqwest::header::HeaderValue::from_str(&format!("Bearer {}", credential.as_ref()))
                 .map_err(|_| "OpenAI credential cannot be encoded as an HTTP header".to_string())?;
@@ -560,16 +577,32 @@ impl OpenAi {
                 Err(_) => return Err("OpenAI response read failed".to_string()),
             }
         }
+        let mut reply = parse_openai_completion(&bytes, &self.model)?;
         if !status.is_success() {
-            return Err(format!("OpenAI HTTP status {}", status.as_u16()));
+            reply.text = Err(format!("OpenAI HTTP status {}", status.as_u16()));
         }
-        parse_openai_completion(&bytes, &self.model)
+        Ok(reply)
     }
+}
+
+fn ensure_input_budget(bytes: &[u8], quote: &PriceQuote) -> Result<(), &'static str> {
+    // Every input token covers at least one UTF-8 byte. Counting the entire
+    // serialized request, including fixed instructions and JSON overhead, is
+    // deliberately conservative and keeps dispatch within the quoted ceiling.
+    let max_input_bytes = usize::try_from(quote.max_input_tokens).unwrap_or(usize::MAX);
+    if bytes.len() > max_input_bytes {
+        return Err("OpenAI request exceeds the quoted input-token budget");
+    }
+    Ok(())
 }
 
 impl StageIntentProvider for OpenAi {
     fn id(&self) -> &'static str {
         "openai"
+    }
+
+    fn endpoint_identity(&self) -> Option<&str> {
+        Some(self.endpoint.as_str())
     }
 
     fn model(&self) -> &str {
@@ -591,7 +624,7 @@ impl StageIntentProvider for OpenAi {
         })
     }
 
-    fn requires_openai_credential(&self) -> bool {
+    fn requires_credential(&self) -> bool {
         true
     }
 
@@ -659,60 +692,87 @@ impl StageIntentProvider for OpenAi {
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => Err("OpenAI request cancelled".to_string()),
-                text = provider.completion_execute(body, credential) => {
-                    text.map(|text| super::jobs::CompletionReply { text })
-                }
+                reply = provider.completion_execute(body, credential) => reply
             }
         })
     }
 }
 
-pub(super) fn parse_openai_completion(bytes: &[u8], model: &str) -> Result<String, String> {
+pub(super) fn parse_openai_completion(
+    bytes: &[u8],
+    model: &str,
+) -> Result<super::jobs::CompletionReply, String> {
+    parse_openai_completion_with_pricing(bytes, model, true)
+}
+
+pub(super) fn parse_openai_completion_with_pricing(
+    bytes: &[u8],
+    model: &str,
+    pricing_known: bool,
+) -> Result<super::jobs::CompletionReply, String> {
     let envelope = super::strict_json::parse(bytes, RESPONSE_BYTES, 16).map_err(str::to_owned)?;
-    if envelope["model"].as_str() != Some(model) {
-        return Err("OpenAI returned a different model".to_string());
-    }
-    if !envelope["error"].is_null()
-        || envelope["status"].as_str() != Some("completed")
-        || !envelope["incomplete_details"].is_null()
-    {
-        return Err("OpenAI did not complete the requested model response".to_string());
-    }
-    let output = envelope["output"]
-        .as_array()
-        .ok_or_else(|| "OpenAI response output is missing".to_string())?;
-    let mut message = None;
-    for item in output {
-        match item["type"].as_str() {
-            Some("reasoning") => {}
-            Some("message") if item["role"] == "assistant" => {
-                if message.replace(item).is_some() {
-                    return Err("OpenAI returned multiple assistant messages".to_string());
-                }
-            }
-            _ => return Err("OpenAI returned an unsupported response item".to_string()),
+    let response_valid_for_usage = envelope["model"].as_str() == Some(model)
+        && envelope["error"].is_null()
+        && matches!(
+            envelope["status"].as_str(),
+            Some("completed" | "incomplete")
+        );
+    let usage = if response_valid_for_usage {
+        if pricing_known {
+            parse_openai_usage(&envelope["usage"])
+        } else {
+            parse_openai_token_usage(&envelope["usage"])
         }
-    }
-    let message = message.ok_or_else(|| "OpenAI assistant message is missing".to_string())?;
-    if message["status"] != "completed" {
-        return Err("OpenAI assistant message is incomplete".to_string());
-    }
-    let content = message["content"]
-        .as_array()
-        .filter(|content| content.len() == 1)
-        .ok_or_else(|| "OpenAI assistant content is missing or ambiguous".to_string())?;
-    let part = &content[0];
-    if part["type"] != "output_text"
-        || part["annotations"]
+    } else {
+        None
+    };
+    let text = (|| {
+        if envelope["model"].as_str() != Some(model) {
+            return Err("OpenAI returned a different model".to_string());
+        }
+        if !envelope["error"].is_null()
+            || envelope["status"].as_str() != Some("completed")
+            || !envelope["incomplete_details"].is_null()
+        {
+            return Err("OpenAI did not complete the requested model response".to_string());
+        }
+        let output = envelope["output"]
             .as_array()
-            .is_none_or(|items| !items.is_empty())
-    {
-        return Err("OpenAI response is not plain structured text".to_string());
-    }
-    part["text"]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| "OpenAI output text is missing".to_string())
+            .ok_or_else(|| "OpenAI response output is missing".to_string())?;
+        let mut message = None;
+        for item in output {
+            match item["type"].as_str() {
+                Some("reasoning") => {}
+                Some("message") if item["role"] == "assistant" => {
+                    if message.replace(item).is_some() {
+                        return Err("OpenAI returned multiple assistant messages".to_string());
+                    }
+                }
+                _ => return Err("OpenAI returned an unsupported response item".to_string()),
+            }
+        }
+        let message = message.ok_or_else(|| "OpenAI assistant message is missing".to_string())?;
+        if message["status"] != "completed" {
+            return Err("OpenAI assistant message is incomplete".to_string());
+        }
+        let content = message["content"]
+            .as_array()
+            .filter(|content| content.len() == 1)
+            .ok_or_else(|| "OpenAI assistant content is missing or ambiguous".to_string())?;
+        let part = &content[0];
+        if part["type"] != "output_text"
+            || part["annotations"]
+                .as_array()
+                .is_none_or(|items| !items.is_empty())
+        {
+            return Err("OpenAI response is not plain structured text".to_string());
+        }
+        part["text"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "OpenAI output text is missing".to_string())
+    })();
+    Ok(super::jobs::CompletionReply { text, usage })
 }
 
 fn openai_client() -> Result<Client, &'static str> {
@@ -731,7 +791,7 @@ fn openai_client() -> Result<Client, &'static str> {
         .map_err(|_| "cannot create isolated OpenAI HTTP client")
 }
 
-fn stage_instructions() -> String {
+pub(super) fn stage_instructions() -> String {
     let contract = contract::page(0, contract::scenes().len());
     format!(
         "Create one STATIC Hertz StageIntent v1 from canonical scene defaults. Return only JSON. \
@@ -744,7 +804,7 @@ fn stage_instructions() -> String {
     )
 }
 
-fn same_quote(left: &PriceQuote, right: &PriceQuote) -> bool {
+pub(super) fn same_quote(left: &PriceQuote, right: &PriceQuote) -> bool {
     left.pricing_version == right.pricing_version
         && left.reservation_micro_usd == right.reservation_micro_usd
         && left.input_micro_usd_per_million == right.input_micro_usd_per_million
@@ -753,7 +813,15 @@ fn same_quote(left: &PriceQuote, right: &PriceQuote) -> bool {
         && left.max_output_tokens == right.max_output_tokens
 }
 
-fn parse_openai_reply(bytes: &[u8], model: &str) -> ProviderReply {
+pub(super) fn parse_openai_reply(bytes: &[u8], model: &str) -> ProviderReply {
+    parse_openai_reply_with_pricing(bytes, model, true)
+}
+
+pub(super) fn parse_openai_reply_with_pricing(
+    bytes: &[u8],
+    model: &str,
+    pricing_known: bool,
+) -> ProviderReply {
     let envelope = match strict_json::parse(bytes, RESPONSE_BYTES, 16) {
         Ok(value) => value,
         Err(reason) => return failed(reason),
@@ -763,7 +831,11 @@ fn parse_openai_reply(bytes: &[u8], model: &str) -> ProviderReply {
     let status = envelope["status"].as_str().unwrap_or_default();
     let has_error = !envelope["error"].is_null();
     let usage = if model_matches && !has_error && matches!(status, "completed" | "incomplete") {
-        parse_openai_usage(&envelope["usage"])
+        if pricing_known {
+            parse_openai_usage(&envelope["usage"])
+        } else {
+            parse_openai_token_usage(&envelope["usage"])
+        }
     } else {
         None
     };
@@ -820,6 +892,19 @@ fn parse_openai_reply(bytes: &[u8], model: &str) -> ProviderReply {
     ProviderReply { intent, usage }
 }
 
+fn parse_openai_token_usage(value: &Value) -> Option<TrustedUsage> {
+    let input_tokens = value.get("input_tokens")?.as_u64()?;
+    let output_tokens = value.get("output_tokens")?.as_u64()?;
+    let total_tokens = value.get("total_tokens")?.as_u64()?;
+    if input_tokens.checked_add(output_tokens)? != total_tokens {
+        return None;
+    }
+    Some(TrustedUsage {
+        input_tokens,
+        output_tokens,
+    })
+}
+
 fn parse_openai_usage(value: &Value) -> Option<TrustedUsage> {
     let input_tokens = value.get("input_tokens")?.as_u64()?;
     let output_tokens = value.get("output_tokens")?.as_u64()?;
@@ -829,7 +914,10 @@ fn parse_openai_usage(value: &Value) -> Option<TrustedUsage> {
     }
     let input_details = value.get("input_tokens_details")?;
     let cached = input_details.get("cached_tokens")?.as_u64()?;
-    let cache_write = input_details.get("cache_write_tokens")?.as_u64()?;
+    let cache_write = match input_details.get("cache_write_tokens") {
+        Some(value) => value.as_u64()?,
+        None => 0,
+    };
     if cached.checked_add(cache_write)? > input_tokens {
         return None;
     }
@@ -851,7 +939,7 @@ fn parse_openai_usage(value: &Value) -> Option<TrustedUsage> {
     })
 }
 
-fn output_schema() -> Value {
+pub(super) fn output_schema() -> Value {
     let contract = contract::page(0, contract::scenes().len());
     let mut alternatives = Vec::new();
     for scene in contract::scenes() {
@@ -1118,7 +1206,7 @@ mod tests {
             "test-openai",
         );
         assert!(parsed.intent.is_ok());
-        assert!(parsed.usage.is_none());
+        assert_eq!(parsed.usage.unwrap().input_tokens, 1234);
 
         let mut cache_write = openai_response(valid);
         cache_write["usage"]["input_tokens_details"]["cache_write_tokens"] = json!(12);
@@ -1256,6 +1344,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_non_success_responses_keep_only_verified_usage() {
+        use axum::{http::StatusCode, routing::post, Json};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let app = axum::Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let index = seen.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let content = if index < 2 {
+                        r#"{"version":1,"scene":"orb","patch":{}}"#
+                    } else {
+                        r#"{"version":1}"#
+                    };
+                    let mut body = openai_response(content);
+                    match index {
+                        1 => body["model"] = json!("unexpected-model"),
+                        3 => body["error"] = json!({"code":"server_error"}),
+                        _ => {}
+                    }
+                    (StatusCode::SERVICE_UNAVAILABLE, Json(body))
+                }
+            }),
+        );
+        let (origin, task) = server(app).await;
+        let quote = openai_quote();
+        let provider = openai_for_server(&origin, Some(quote.clone()));
+        let credential = || {
+            Some(super::super::credential::test_provider_credential(
+                "fixture-openai-key",
+            ))
+        };
+
+        let trusted = provider
+            .generate(
+                "dark static orb".into(),
+                openai_snapshot(&provider, quote.clone()),
+                credential(),
+                Default::default(),
+            )
+            .await;
+        assert!(trusted.intent.unwrap_err().contains("HTTP status 503"));
+        assert_eq!(trusted.usage.unwrap().input_tokens, 1234);
+
+        let untrusted = provider
+            .generate(
+                "dark static orb".into(),
+                openai_snapshot(&provider, quote),
+                credential(),
+                Default::default(),
+            )
+            .await;
+        assert!(untrusted.intent.unwrap_err().contains("HTTP status 503"));
+        assert!(untrusted.usage.is_none());
+
+        for index in [2, 3] {
+            let reply = provider
+                .complete(
+                    "classify".into(),
+                    "{}".into(),
+                    credential(),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            assert!(reply.text.unwrap_err().contains("HTTP status 503"));
+            if index == 2 {
+                assert_eq!(reply.usage.unwrap().input_tokens, 1234);
+            } else {
+                assert!(reply.usage.is_none());
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn openai_completion_http_fixture_returns_plain_text() {
         use axum::{extract::State, http::HeaderMap, routing::post, Json};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1301,7 +1468,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(reply.text, "{\"version\":1}");
+        assert_eq!(reply.text.unwrap(), "{\"version\":1}");
+        assert_eq!(reply.usage.unwrap().input_tokens, 1234);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         task.abort();
     }
@@ -1493,6 +1661,47 @@ mod tests {
             .await;
         assert_eq!(reply.intent.unwrap_err(), OPENAI_DISABLED);
         assert!(reply.usage.is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_rejects_requests_larger_than_the_quoted_input_budget_before_dispatch() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Url::parse(&format!(
+            "http://{}/v1/responses",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let mut quote = openai_quote();
+        quote.max_input_tokens = 1;
+        let provider =
+            OpenAi::with_test_endpoint("test-openai", endpoint, Some(quote.clone())).unwrap();
+        assert!(provider.ready());
+        assert!(provider
+            .quote("dark static orb")
+            .unwrap_err()
+            .contains("quoted input-token budget"));
+
+        let reply = provider
+            .generate(
+                "dark static orb".into(),
+                openai_snapshot(&provider, quote),
+                Some(super::super::credential::test_provider_credential(
+                    "fixture-openai-key",
+                )),
+                Default::default(),
+            )
+            .await;
+        assert!(reply
+            .intent
+            .unwrap_err()
+            .contains("quoted input-token budget"));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), listener.accept())
                 .await

@@ -82,7 +82,7 @@ async function browserContract() {
     await page.addStyleTag({ content: ':root { --bg:#171a1c; --text:#eff1f3; --muted:#a0a6ae; --accent:#71ceac; --sp-line:#42494e; --sp-line-soft:#292f33; } body {margin:0;font-family:Arial,sans-serif;} * {box-sizing:border-box;}' + read('space-home.css') });
     await page.addScriptTag({ content: read('space-home.js') });
     await page.evaluate(() => {
-      window.actions = []; window.searches = [];
+      window.actions = []; window.searches = []; window.libraryFailures = 0;
       window.snapshot = { current: { id: 'a', title: '当前音乐', artist: '歌手' }, playing: false, pending: false, queueLength: 1, sources: [{ id: 'netease', label: '网易云' }] };
       const items = [{ id: 'a', title: '当前音乐', artist: '歌手' }, { id: 'b', title: '这是很长的歌曲名称需要保持曲目列表布局和按钮可用', artist: '很长的艺术家名字' }];
       const png = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="red"/></svg>');
@@ -90,6 +90,10 @@ async function browserContract() {
       SpaceHome.init(document.querySelector('#sp-home'), {});
       SpaceHome.bind({ read: () => snapshot, library: async (spec) => {
         searches.push(spec);
+        if (window.libraryFailures > 0) {
+          window.libraryFailures -= 1;
+          throw new Error('fixture library failure');
+        }
         if (spec.source === 'netease') return { items: Array.from({ length: Math.min(20, 45 - spec.offset) }, (_, i) => ({ id: 'remote-' + (spec.offset + i), title: 'Remote ' + (spec.offset + i), artist: 'Artist' })), total: 45 };
         return { items, total: 2 };
       }, playlists: async () => ({ items: [{ id: 'p', name: '收藏歌单', track_count: 2 }] }), playlist: async () => ({ items }), daily: async () => ({ items }), recent: async () => ({ items }), quote: async () => ({ text: '每日内容来自共享服务', source: '来源' }),
@@ -104,6 +108,19 @@ async function browserContract() {
     await page.locator('.sh-panel-body .sh-track-main').first().click(); assert.equal(await page.evaluate(() => actions.at(-1)[0]), 'play');
     assert.equal(await page.locator('.sh-panel-layer').isVisible(), true, 'play remains inside panel');
     await page.locator('.sh-panel-body .sh-track .sh-icon').first().click(); assert.equal(await page.evaluate(() => actions.at(-1)[0]), 'enqueue');
+    await page.evaluate(() => { window.libraryFailures = 2; });
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
+    await page.waitForSelector('.sh-panel-body .sh-retry');
+    await page.locator('.sh-panel-body .sh-retry').focus();
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.activeElement && document.activeElement.dataset.searchKey === 'panel:retry'
+      && document.activeElement.matches('button'));
+    assert.equal(await page.locator('.sh-panel-body .sh-retry').count(), 1, 'failed retry remains available');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelectorAll('.sh-panel-body .sh-track').length === 2);
+    assert.equal(await page.evaluate(() => document.activeElement.classList.contains('sh-panel-body')),
+      'successful retry returns focus to the loaded panel');
+    console.log('SpaceHome generic retry restores keyboard focus after failure and success');
     await page.getByRole('button', { name: '歌单', exact: true }).click(); await page.waitForSelector('.sh-playlist');
     await page.locator('.sh-playlist').click(); await page.waitForSelector('.sh-playlist-summary');
     assert.equal(await page.locator('#sh-panel-title').textContent(), '收藏歌单');

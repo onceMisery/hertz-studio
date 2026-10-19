@@ -35,6 +35,7 @@ pub(crate) struct Candidate {
     metadata: String,
     revision: i64,
     expires: Instant,
+    automatic_apply_allowed: bool,
     payload: Payload,
 }
 pub(crate) type Candidates = HashMap<String, Candidate>;
@@ -55,6 +56,8 @@ fn auto() -> String {
 pub(crate) struct Apply {
     candidate_id: String,
     expected_lyrics_revision: String,
+    #[serde(default)]
+    automatic_apply: bool,
 }
 fn conflict() -> ApiError {
     ApiError::new(
@@ -207,6 +210,7 @@ pub(crate) async fn prepare(state: &Arc<AppState>, id: &str, body: Prepare) -> A
             metadata: fingerprint,
             revision: expected,
             expires: now + TTL,
+            automatic_apply_allowed: false,
             payload: Payload::Ready { content, doc },
         },
     );
@@ -245,6 +249,9 @@ pub(crate) async fn apply(state: &Arc<AppState>, id: &str, body: Apply) -> ApiRe
     if candidate.id != id || candidate.revision != expected {
         return Err(conflict());
     }
+    if body.automatic_apply && !candidate.automatic_apply_allowed {
+        return Err(conflict());
+    }
     let Payload::Ready { content, doc } = &candidate.payload else {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -252,6 +259,15 @@ pub(crate) async fn apply(state: &Arc<AppState>, id: &str, body: Apply) -> ApiRe
             "请先检查并预览所选歌词",
         ));
     };
+    if body.automatic_apply {
+        let (track, saved) = snapshot(state, id).await?;
+        if saved.revision != expected || metadata(&track)? != candidate.metadata {
+            return Err(conflict());
+        }
+        if !candidates::visible_lyrics_are_empty(&track, saved.content.is_none()).await {
+            return Err(conflict());
+        }
+    }
     let mut tx = vmusic_store::begin_immediate(&state.db)
         .await
         .map_err(vmusic_core::CoreError::from)?;
@@ -262,7 +278,10 @@ pub(crate) async fn apply(state: &Arc<AppState>, id: &str, body: Apply) -> ApiRe
     let current = vmusic_store::lyrics::snapshot_on(&mut tx, id)
         .await
         .map_err(vmusic_core::CoreError::from)?;
-    if current.revision != expected || metadata(&track)? != candidate.metadata {
+    if current.revision != expected
+        || metadata(&track)? != candidate.metadata
+        || (body.automatic_apply && current.content.is_some())
+    {
         return Err(conflict());
     }
     if candidate.expires <= Instant::now() {
@@ -324,6 +343,7 @@ pub(crate) async fn import_if_unchanged(
                         .ok_or_else(|| internal("缺少歌词候选"))?
                         .into(),
                     expected_lyrics_revision: saved.revision.to_string(),
+                    automatic_apply: false,
                 },
             )
             .await
@@ -373,6 +393,7 @@ mod tests {
         Apply {
             candidate_id: candidate["candidateId"].as_str().unwrap().into(),
             expected_lyrics_revision: candidate["lyricsRevision"].as_str().unwrap().into(),
+            automatic_apply: false,
         }
     }
 

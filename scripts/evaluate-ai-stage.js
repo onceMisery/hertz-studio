@@ -11,7 +11,9 @@ const { performance } = require('node:perf_hooks');
 const { isIP } = require('node:net');
 
 const ROOT = path.resolve(__dirname, '..');
-const DATA = path.join(ROOT, 'evals/stage-intent/v1');
+const DATA_ROOT = path.join(ROOT, 'evals/stage-intent');
+const DEFAULT_CORPUS_VERSION = 'v2';
+const CORPUS_VERSIONS = Object.freeze({ v2: 'v2' });
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const clone = value => JSON.parse(JSON.stringify(value));
 const THRESHOLDS = Object.freeze({ supportedSchemaRate: 0.98, protocolStructureRate: 0.98,
@@ -26,13 +28,23 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-function loadCorpus() {
-  const manifest = readJson(path.join(DATA, 'manifest.json'));
-  const bytes = fs.readFileSync(path.join(DATA, 'cases.jsonl'));
+function loadCorpus(version = DEFAULT_CORPUS_VERSION) {
+  ensure(Object.hasOwn(CORPUS_VERSIONS, version), 'Unsupported stage-intent corpus version: ' + version);
+  const data = path.join(DATA_ROOT, CORPUS_VERSIONS[version]);
+  const manifest = readJson(path.join(data, 'manifest.json'));
+  const bytes = fs.readFileSync(path.join(data, 'cases.jsonl'));
   ensure(sha(bytes) === manifest.corpusSha256, 'Frozen corpus hash changed: create a new corpus version');
   const cases = bytes.toString('utf8').trim().split(/\r?\n/).map(line => JSON.parse(line));
   const contract = readJson(path.join(ROOT, 'crates/hertz-studio/src/ai/stage-contract/stage-contract.json'));
+  ensure(manifest.corpusVersion === 'stage-intent-' + version, 'Manifest corpus version mismatch');
   ensure(contract.schemaHash === manifest.schemaHash, 'Corpus contract version changed: review labels before refreezing');
+  if (version === 'v2') {
+    const audit = manifest.mechanicalAudit;
+    ensure(audit && audit.status === 'passed' && audit.contractHash === manifest.schemaHash
+      && audit.candidateLabelsChecked === 89 && audit.candidateLabelsMaterialized === 89
+      && audit.refusalLabelsStructurallyConflicted === 0 && audit.semanticReviewComplete === false,
+    'Invalid v2 mechanical audit or semantic review status');
+  }
   const ids = new Set();
   const briefs = new Set();
   const counts = { development: 0, holdout: 0 };
@@ -70,7 +82,7 @@ function loadCorpus() {
   ensure(dev.filter(c => ['negation','conflict'].includes(c.category)).length >= 20, 'Missing negation/conflict coverage');
   ensure(dev.filter(c => ['boundary','cross_scene','unknown','injection'].includes(c.category)).length >= 20,
     'Missing illegal/injection/range coverage');
-  return { manifest, cases, contract };
+  return { version, manifest, cases, contract };
 }
 
 function stageHarness() {
@@ -185,6 +197,7 @@ function summarize(cases, rows, reviews, meta, harness) {
   if (metrics.humanSemanticPassRate !== null && metrics.humanSemanticPassRate < THRESHOLDS.humanSemanticPassRate) reasons.push('human_semantics_below_candidate_threshold');
   if (!complete) reasons.push('incomplete_sample');
   return { reportVersion: 1, runId: meta.runId, provider: meta.provider, split: meta.split,
+    corpusVersion: meta.corpusVersion,
     model:meta.model, round:meta.round, protocolFingerprint:meta.protocolFingerprint,
     materializerFingerprint:meta.materializerFingerprint, evaluatorFingerprint:meta.evaluatorFingerprint,
     binarySha256:meta.binarySha256,
@@ -223,7 +236,8 @@ function validateRow(row, meta, contract) {
 
 function loadRun(dir, corpus, harness, reviewFile) {
   const meta = readJson(path.join(dir,'run.json'));
-  ensure(meta.corpusSha256 === corpus.manifest.corpusSha256 && meta.schemaHash === corpus.manifest.schemaHash,
+  ensure(meta.corpusVersion === corpus.version && meta.corpusSha256 === corpus.manifest.corpusSha256
+    && meta.schemaHash === corpus.manifest.schemaHash,
     'Run corpus/contract mismatch');
   ensure(meta.materializerFingerprint === harness.fingerprint,
     'Evaluation sources changed: use the original revision or create a new run');
@@ -255,11 +269,16 @@ function loadRun(dir, corpus, harness, reviewFile) {
   return { meta, rows, report };
 }
 
-async function childCase(binary, origin, model, item) {
+async function childCase(binary, origin, model, item, signal, contract = loadCorpus().contract) {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, ['--evaluate-stage','--origin',origin,'--model',model],
       { windowsHide: true, stdio: ['pipe','pipe','pipe'] });
     let stdout = '', stderr = '', failed;
+    const interrupt = () => {
+      failed ||= Error('Evaluation interrupted; no automatic retry');
+      child.kill();
+    };
+    const cleanup = () => signal?.removeEventListener('abort', interrupt);
     const timer = setTimeout(() => { failed = Error('Evaluation process deadline exceeded; no automatic retry'); child.kill(); },45000);
     child.stdout.on('data', chunk => {
       if (failed) return;
@@ -268,25 +287,28 @@ async function childCase(binary, origin, model, item) {
     });
     child.stderr.on('data', chunk => { if (stderr.length < 8192) stderr += chunk; });
     child.stdin.on('error', () => {});
-    child.on('error', error => { clearTimeout(timer); reject(error); });
+    child.on('error', error => { clearTimeout(timer); cleanup(); reject(error); });
     child.on('close', code => {
       clearTimeout(timer);
+      cleanup();
       if (failed) return reject(failed);
       if (code !== 0) return reject(Error('Evaluation process failed for ' + item.id + ' (stderr withheld; no automatic retry)'));
       try {
         const result = JSON.parse(stdout);
         ensure(result.caseId === item.id, 'Evaluator case identity mismatch');
-        validateRow(result,{provider:'ollama-local',model},loadCorpus().contract);
+        validateRow(result,{provider:'ollama-local',model},contract);
         resolve(result);
       } catch (error) { reject(error); }
     });
+    if (signal?.aborted) interrupt();
+    else signal?.addEventListener('abort', interrupt, { once:true });
     child.stdin.end(JSON.stringify({ caseId: item.id, brief: item.brief }));
   });
 }
 
 function options(argv) {
   const flags = new Set(['--validate','--baseline','--run-local','--allow-holdout']);
-  const values = new Set(['--out','--split','--model','--origin','--binary','--limit','--round','--report','--reviews','--export-review',
+  const values = new Set(['--corpus','--out','--split','--model','--origin','--binary','--limit','--round','--report','--reviews','--export-review',
     '--compare','--against','--before-reviews','--after-reviews']);
   const result = {};
   for (let i=0; i<argv.length; i++) {
@@ -336,7 +358,8 @@ function compareRuns(before, after, corpus, harness) {
   const side = run => ({ runId:run.meta.runId, provider:run.meta.provider, model:run.meta.model,
     round:run.meta.round, protocolFingerprint:run.meta.protocolFingerprint,
     candidateChecks:run.report.candidateChecks, metrics:run.report.metrics });
-  return { comparisonVersion:1, corpusSha256:corpus.manifest.corpusSha256, split:before.meta.split,
+  return { comparisonVersion:1, corpusVersion:corpus.version,
+    corpusSha256:corpus.manifest.corpusSha256, split:before.meta.split,
     before:side(before), after:side(after), automaticExpectations:{improved,regressed,bothMatched,bothUnmatched},
     changedCases, releaseEligible:false,
     note:'Paired synthetic expectation comparison; human semantics and formal release evidence remain separate' };
@@ -369,7 +392,8 @@ async function exportReview(dir, run, corpus, harness) {
     entries.push({caseId:row.caseId,category:item.category,brief:item.brief,expect:item.expect,
       kind:row.kind,automatic:check,preparation,artifactFile});
   }
-  const index = { reviewBundleVersion:1,runId:run.meta.runId,corpusSha256:run.meta.corpusSha256,
+  const index = { reviewBundleVersion:1,runId:run.meta.runId,corpusVersion:run.meta.corpusVersion,
+    corpusSha256:run.meta.corpusSha256,
     resultsSha256:run.meta.resultsSha256,sampleComplete:run.report.sampleComplete,
     note:'Import each ready artifact into the official draft preview; do not apply it for scoring. Score the original run reviews.json.',
     entries };
@@ -383,16 +407,17 @@ async function main(argv = process.argv.slice(2)) {
   ensure(modes.length <= 1, 'Choose exactly one evaluation mode');
   if (modes.length) {
     const allowed = {
-      '--validate': [], '--baseline':['--split','--allow-holdout','--out','--limit'],
-      '--run-local':['--split','--allow-holdout','--out','--limit','--binary','--origin','--model','--round'],
-      '--report':['--reviews'], '--compare':['--against','--before-reviews','--after-reviews'],
-      '--export-review':['--out'],
+      '--validate': ['--corpus'], '--baseline':['--corpus','--split','--allow-holdout','--out','--limit'],
+      '--run-local':['--corpus','--split','--allow-holdout','--out','--limit','--binary','--origin','--model','--round'],
+      '--report':['--corpus','--reviews'], '--compare':['--corpus','--against','--before-reviews','--after-reviews'],
+      '--export-review':['--corpus','--out'],
     }[modes[0]];
     ensure(Object.keys(opts).every(key => key === modes[0] || allowed.includes(key)), 'Option does not apply to selected mode');
   }
-  const corpus = loadCorpus();
+  const corpus = loadCorpus(opts['--corpus'] || DEFAULT_CORPUS_VERSION);
   if (opts['--validate'] || !argv.length) {
-    console.log('Frozen stage evaluation: ' + corpus.cases.length + ' unique synthetic cases, 120 development / 40 reserved; hash and contract labels passed');
+    console.log('Frozen stage evaluation ' + corpus.version + ': ' + corpus.cases.length
+      + ' unique synthetic cases, 120 development / 40 reserved; corpus hash and contract hash passed');
     return;
   }
   const harness = stageHarness();
@@ -436,6 +461,7 @@ async function main(argv = process.argv.slice(2)) {
     opts['--origin'] = localOrigin(opts['--origin']);
   }
   const meta = { runId:crypto.randomUUID(), startedAt:new Date().toISOString(), split,
+    corpusVersion:corpus.version,
     corpusSha256:corpus.manifest.corpusSha256, schemaHash:corpus.manifest.schemaHash,
     provider:opts['--baseline']?'offline-rules':'ollama-local', model:opts['--model'] || 'offline-rules',
     round:opts['--round'] || 'baseline', selectedCases:cases.map(item=>item.id), sampleComplete:cases.length === allCases.length,
@@ -450,8 +476,13 @@ async function main(argv = process.argv.slice(2)) {
   const rows = [];
   const results = path.join(dir,'results.jsonl');
   fs.writeFileSync(results,'');
+  const interruption = new AbortController();
+  const stop = () => interruption.abort();
+  process.on('SIGINT',stop);
+  process.on('SIGTERM',stop);
   try {
     for (const item of cases) {
+      ensure(!interruption.signal.aborted, 'Evaluation interrupted; no automatic retry');
       let row;
       if (opts['--baseline']) {
         const started = performance.now();
@@ -468,7 +499,7 @@ async function main(argv = process.argv.slice(2)) {
           kind:compiled.ok?'candidate':'baseline_no_match', intent, usage:null,
           reservationMicroUsd:'0', localPriceMicroUsd:'0', externalInvoiceVerified:false,
           baselineWarnings:clone(compiled.warnings) };
-      } else row = await childCase(binary,opts['--origin'],opts['--model'],item);
+      } else row = await childCase(binary,opts['--origin'],opts['--model'],item,interruption.signal,corpus.contract);
       validateRow(row,meta,corpus.contract);
       if (rows.length) ensure(row.protocolFingerprint === rows[0].protocolFingerprint, 'Model protocol changed within a round');
       if (rows.length && opts['--run-local']) ensure(row.buildVersion === rows[0].buildVersion, 'CLI build changed within a round');
@@ -477,9 +508,12 @@ async function main(argv = process.argv.slice(2)) {
       process.stderr.write(item.id + ': ' + row.kind + '\n');
     }
     if (opts['--run-local']) ensure(await fileSha(binary) === meta.binarySha256, 'CLI executable changed within a round');
+    ensure(!interruption.signal.aborted, 'Evaluation interrupted; no automatic retry');
     meta.status = 'completed';
   } catch (error) { meta.status = 'interrupted'; meta.failure = 'evaluator_failed_without_retry'; throw error; }
   finally {
+    process.off('SIGINT',stop);
+    process.off('SIGTERM',stop);
     meta.completedCases = rows.length;
     meta.finishedAt = new Date().toISOString();
     meta.resultsSha256 = sha(fs.readFileSync(results));

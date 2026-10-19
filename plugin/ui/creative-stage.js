@@ -959,12 +959,12 @@
   }
 
   function applyIntent(intent) {
-    invalidatePreview();
     if (!preset) {
       return { ok: false, code: 'bad_state', message: '舞台尚未初始化' };
     }
     var m = materializeIntent(preset, intent);
     if (!m.ok) return m;
+    invalidatePreview();
     if (m.sceneSwitched) animations.length = 0;   // 旧场景的 cue 动画不跨场景续跑
     preset = m.preset;                            // 物化时已 normalize
     runtime = {};

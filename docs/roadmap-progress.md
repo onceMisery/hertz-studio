@@ -1,20 +1,20 @@
 # 路线图实施状态
 
-核对日期：2026-10-19。对应 [产品路线图](./product-roadmap.md) 和 [技术实施方案](./technical-roadmap.md)。本文件记录当前源码与实际验证，不改写原路线范围；**路线图尚未全部完成**。
+核对日期：2026-10-20。对应 [产品路线图](./product-roadmap.md) 和 [技术实施方案](./technical-roadmap.md)。本文件记录当前源码与实际验证，不改写原路线范围；**路线图尚未全部完成**。
 
 | 阶段 | 已有实现与证据 | 仍需完成或验证 |
 | --- | --- | --- |
 | R0 | 已有自动化检查、发行版裁剪与既有发布资料；格式边界与错误提示；能力/发行版/形态/OS/验收类型矩阵；当前 Standard tag 与发布文档对齐；五万曲真实本地 HTTP 与受控 Chrome 首结果基线 | 矩阵中真实声卡/账号、原生宿主、弱机、跨平台与候选发布证据仍未齐备 |
-| R1-S | 服务端共享 admission 与含排队的六秒总期限；四个 UI 入口共用有界协调器；来源分组、渐进结果、局部重试、分页与失效隔离；修复 FTS 宽泛候选预筛，五万曲本地与受控来源首结果达到本机目标；Rust、DBX 可控调用与 Chrome 旅程；两版六十秒及三轮各两分钟的受控 HTTP/RPC/旧聚合压力、期限和回收检查通过，后者含测试进程内存；两版独立五万曲/五分钟本地查询及实际服务进程内存已记录；分页匹配与总数合并后，两版顺序查询/受控首结果复测均通过；两版各两轮 60 秒均衡 source-op 负载、独立源码/二进制指纹复核通过 | 真实账号/弱网与原生 DBX 完整旅程；独立生产服务的混合负载 RSS、四入口有效吞吐/公平性与弱机固定候选额度；真实负载下的重复稳定性、长期内存、小时级负载/空闲、其它 OS 与发布矩阵验收 |
-| R1-L 候选导入 | LRC/受控 TTML 检查、短预览、显式确认；Full 既有音源的手动检索/元数据证据/选择后取词；持久歌词修订/删除墓碑；HTTP/RPC 同源、并发与手工修改保护；Chrome 实际本地导入及受控在线 UI 旅程通过 | 在线真实来源/账号与许可、严格自动选择、真实歌曲和完整视觉/导出/原生宿主验收；窄 TTML 子集不能代表全部格式兼容 |
+| R1-S | 服务端共享 admission 与含排队的六秒总期限；四个 UI 入口共用有界协调器；来源分组、渐进结果、局部重试、分页与失效隔离；修复 FTS 宽泛候选预筛，五万曲本地与受控来源首结果达到本机目标；Rust、DBX 可控调用与 Chrome 旅程；两版六十秒及三轮各两分钟的受控 HTTP/RPC/旧聚合压力、期限和回收检查通过，后者含测试进程内存；两版独立五万曲/五分钟本地查询及实际服务进程内存已记录；分页匹配与总数合并后，两版顺序查询/受控首结果复测均通过；两版各两轮 60 秒交替顺序均衡 source-op 负载；12 份 v9 报告的基础指标、sidecar hash、计数和内存样本均已复核，全部恢复 gate `[4,16]`；新增实际派发顺序检查后 11 份通过，早期 Standard R1 因 6 组实际顺序反转被拒，未影响最终八份 current/final 报告；入口/轮次波动较大，证据不足以证明公平 SLO，候选 gate 保持 4 执行/16 等待/2 秒入场/6 秒总期限 | 真实账号/弱网与原生 DBX 完整旅程；独立生产服务的混合负载 RSS、四入口有效吞吐/公平性与弱机固定候选额度；真实负载下的重复稳定性、长期内存、小时级负载/空闲、其它 OS 与发布矩阵验收 |
+| R1-L 候选导入 | LRC/受控 TTML 检查、短预览、显式确认；Full 既有音源的手动检索/元数据证据/选择后取词；默认关闭的严格自动应用；持久歌词修订/删除墓碑；HTTP/RPC 同源、并发与手工修改保护；Chrome 实际本地导入及受控在线 UI 旅程通过；LRC fixture 歌词已验证绘入视频导出录制画布 | 在线真实来源/账号与歌词许可、真实歌曲和完整视觉/原生宿主验收；窄 TTML 子集不能代表全部格式兼容 |
 | R2-C/G/M/P | 受限 registry、共享播控、grant/发现/锁、Rust stdio adapter、短写去重；实际 JSON-RPC 与官方 Rust SDK 的 stdio 子进程检查；幂等 schema/类型与协议支持列表修正；输入/输出帧和写入期限、直到回复 flush 的八请求上限、取消回收与重复 ID 关闭；Windows Rust 1.88.0 两版工作区全 target 编译与三 OS/两版 MSRV CI | 目标应用中的正式客户端、远端 OS/MSRV 结果、长时间压力/进程内存与完整取消/超时、逐发行形态运行矩阵，以及全部发布门槛的逐项验收 |
 | R3-K/U | 全部十个场景契约、通用参数、纯 create 物化、版本/hash 信封、本地导入、原 owner 临时预览与确认、候选分享；人工与模型提案复用同一路径；十场景20组历史行为/固定旧分享码回溯检查 | 原生 DBX 的完整导入旅程、真实 GPU/弱机与视觉模板人工验收；全部历史用户预置与发布清单仍需继续核对 |
 | R3 外部工具 | 分页 `stage_capabilities_get` 和 `stage_intent_validate`，各自 scope，独立默认关闭开关；真实 stdio 与官方 Rust SDK 调用、会话开关边界通过 | 目标应用中的正式 MCP 客户端可用性与发布说明 |
-| R4-J/E | 持久任务、取消、恢复、输入交接、事务性终态/提案/费用、WS/RPC 与官方任务 UI；fake 完整浏览器旅程通过；Standard 隔离 Chrome 在断线期间由另一入口创建并完成的任务，可在 WebSocket 重连后被打开的 AI 面板找回；DBX 受控订阅失败/重试路径调用生产连接回调并刷新 AI 任务；状态快照错误后按 2.5 秒起步、最高 15 秒退避重试；Windows Standard / Full 两个真实服务进程共享 DataDir 时，第二进程任务提交被 runner 锁拒绝且持锁进程的任务/预算不变；两个真实 Windows DBX sidecar 进程强退重启后分别恢复 running/accepted 任务且不重发请求；worker unwind panic 与状态推进存储错误均收敛为 interrupted；活动 worker 只按单调 deadline 决定队列超时，墙钟清扫仅处理无内存 owner 的持久孤儿，状态与预留结算原子提交 | 其余运行时异常继续审计、桌面 DBX 宿主与 sidecar 的实际启动/关闭/恢复集成、其它 OS 双进程与其它发布边界 |
-| R4-B | 保留/容量控制；受理时冻结价格与预留；可信计数按快照结算；取消后迟到 usage 的原月差额 CAS；重复/并发去重；超预留或月总额熔断；任务费用、UTC 预算及独立十三个月账本浏览/诊断入口 | 真实 provider 计量接入与价格上界验证；完整异常矩阵、真实宿主与发布验收 |
-| R5-P | 默认 FakeProvider；可配置实验性本地 Ollama，专用回环 HTTP、单次 POST、任务协作取消与执行槽回收、严格 JSON/流量边界、静态 create 提示与结构化输出、零价本地计量；OpenAI Responses adapter 骨架、回环 HTTP fixture 的请求/解析/取消检查；官方 HTTP/RPC 与界面的钥匙串凭据准备入口、存储代际/任务绑定/派发匹配与管理失效；Windows 两版系统钥匙串合成条目持久/隔离/删除验收 | 真实安装的 Ollama/模型兼容；OpenAI 的具体模型与预算、其它 OS/锁定与拒绝访问/跨登录会话的钥匙串验收、云端 DNS/origin 与真实 endpoint 取消验收、完整请求可靠成本上界、真实账单计量、隐私/条款 |
-| R5-E | 160 条冻结合成样本（120 开发/40 预留）、复用真实 adapter 的独立评测 CLI、自动与人工评分分离、模型/请求/二进制/驱动/物化指纹、完整性检查、成对比较与离线基线证据 | 标签独立人工复核、独立采集保留样本、实际模型 digest/runtime/硬件确认、正式阈值冻结、真实模型两轮运行与人工评分；现有预留集不能冒充已独立验收 |
-| R6-W | 版本化可编辑工程、本地完整文件 SHA-256、在线播放确切完整缓存与显式远程完整响应 SHA-256；导入检查/显式应用/媒体确认、手动分段与同源规则生成 cue、preset/cue 编辑与暂停/seek/换曲语义试点；三个固定版本的内置模板候选；视频导出加固与本机 Chrome 原生编解码；实验性本地基频轨迹的合成/服务/浏览器检查通过 | 经视觉验收的创作模板；真实来源/NAS/账号的媒体身份与内容变更验收、基频真实音乐质量/编码时间对齐与导演模板专项；真实系统音频、其它画幅/浏览器/GPU/DBX、完整工程/时间线异常矩阵与候选发行版验收 |
+| R4-J/E | 持久任务、取消、恢复、输入交接、事务性终态/提案/费用、WS/RPC 与官方任务 UI；fake 完整浏览器旅程通过；Standard 隔离 Chrome 在断线期间由另一入口创建并完成的任务，可在 WebSocket 重连后被打开的 AI 面板找回；DBX 受控订阅失败/重试路径调用生产连接回调并刷新 AI 任务；状态快照错误后按 2.5 秒起步、最高 15 秒退避重试；Windows Standard / Full 两个真实服务进程共享 DataDir 时，第二进程任务提交被 runner 锁拒绝且持锁进程的任务/预算不变；两个真实 Windows DBX sidecar 进程强退重启后分别恢复 running/accepted 任务且不重发请求；worker unwind panic、状态推进存储错误及终态事务错误按持久派发标记尝试保守收敛为 interrupted，终态失败后立即尝试并按 100/250/500ms 再试三次；活动 worker 只按单调 deadline 决定队列超时，墙钟清扫仅处理无内存 owner 的持久孤儿，状态与预留结算原子提交；四次回退尝试耗尽后，存储恢复时由状态查询清扫无内存 owner 的孤儿任务，回归覆盖保守 usage 结算；启动恢复按 job 隔离事务，单项失败不回滚其它任务并保留重试 | 其它运行时异常继续审计、桌面 DBX 宿主与 sidecar 的实际启动/关闭/恢复集成、其它 OS 双进程与其它发布边界 |
+| R4-B | 保留/容量控制；受理时冻结价格与预留；可信计数按快照结算（缓存计量维度未定价时不伪报精确账单）；token-only 跳过金额门槛并记录可信 token；provider 返回后先独立持久化到 `ai_pending_usage`，账务失败由恢复/清扫重试且保留期保护；pending usage 恢复按行事务隔离，单条账务失败仍继续处理其他记录且保留原条目供重试；取消后迟到 usage 的原月差额 CAS；重复/并发去重；超预留或月总额熔断；任务费用、UTC 预算及独立十三个月账本浏览/诊断入口；熔断复位要求当前 provider/有效 quote 指纹并与脱敏审计原子提交 | StepFun 真实应用内 token 用量语义；完整异常矩阵、真实宿主与发布验收 |
+| R5-P | 默认 FakeProvider；可配置实验性本地 Ollama，专用回环 HTTP、单次 POST、任务协作取消与执行槽回收、严格 JSON/流量边界、静态 create 提示与结构化输出、零价本地计量；歌词情绪 completion 与持久任务共用每 DataDir 单执行槽，忙时 429 拒绝，不排队；OpenAI Responses 固定端点、单次请求、严格解析、取消与边界已由回环 fixture 验证（缺少 `cache_write_tokens` 时仍接受可计费用量）；StepFun `step-5-preview` 支持未知价格下的 token-only 派发，可信输入/输出 token 写入逐次账本，金额不伪装为零、不进入费用总额；舞台与歌词 completion 共用持久派发标记和账本；报价与派发阶段按完整序列化请求字节数执行输入 token 上界检查；官方 HTTP/RPC 与界面的钥匙串凭据准备、存储代际/任务绑定/派发匹配与管理失效；Windows 两版系统钥匙串合成条目持久/隔离/删除验收 | 真实安装的 Ollama/模型兼容；OpenAI 的具体模型、真实 token 用量语义与预算；StepFun 真实应用内调用、响应计量字段和模型质量；其它 OS/锁定与拒绝访问/跨登录会话的钥匙串验收、云端 DNS/origin 与真实 endpoint 取消验收、真实账单计量、隐私/条款 |
+| R5-E | 160 条冻结合成样本的 v2 契约指纹（120 开发/40 预留，样本与 v1 字节一致）、复用真实 adapter 的独立评测 CLI、自动与人工评分分离、模型/请求/二进制/驱动/物化指纹、完整性检查、成对比较与 v2 离线基线；新增盲化标签审阅包导出与答案核验 | v2 机械核对：89/89 个 candidate 通过当前校验和物化，71 个 refusal 无结构冲突；离线基线 32/120 自动匹配，人工语义仍为 null、releaseEligible=false。盲审流程尚未由人执行；仍需独立采集保留样本、实际模型 digest/runtime/硬件确认、正式阈值冻结、真实模型两轮运行与人工评分；现有预留集不能冒充已独立验收 |
+| R6-W | 版本化可编辑工程、本地完整文件 SHA-256、在线播放确切完整缓存与显式远程完整响应 SHA-256；导入检查/显式应用/媒体确认、手动分段与同源规则生成 cue、preset/cue 编辑与暂停/seek/换曲语义试点；cue 编辑页实时显示工程轨待确认/已启用状态，切曲后同步失效；三个固定版本的内置模板候选；真实 Chrome 竖屏侧架上移至歌词与播放控件安全区，320/390px 宽、500/760px 高普通及逐字歌词视口的卡片边界/遮挡检查通过；视频导出加固与本机 Chrome 原生编解码；实验性本地基频轨迹的合成/服务/浏览器检查通过 | 经视觉验收的创作模板；真实来源/NAS/账号的媒体身份与内容变更验收、基频真实音乐质量/编码时间对齐与导演模板专项；真实系统音频、其它画幅/浏览器/GPU/DBX、完整工程/时间线异常矩阵与候选发行版验收 |
 | S1 音频重采样 | 固定参数 Rubato sinc 取代解码线程线性插值；流式 consumed/produced、有限 finish、reset 与延迟域；离线质量、实际 PCM EOF/seek 和零分配检查 | 真实声卡/持续听测/切设备、真实歌曲与更多格式、弱机/其它 OS 和发布产物验收；不扩大精确 gapless 条件 |
 
 R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完成；S1 已有重采样实现与离线增量，完整音频质量及其它独立专项仍按原路线安排，不因 AI 主线推进就自动算作完成。
@@ -30,7 +30,7 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 
 - 分析两版默认调度慢查询时，实际诊断排除了候选逐行传输作为主要解释；列表和计数各自预筛、扫描/关联编辑表则存在重复工作。HTTP/RPC 已共用单次分页匹配与窗口总数查询，完整元数据只为该页 rowid 读取；末尾后空页和零 limit 保留准确计数回退。不改变 schema、缓存、队列 owner、线程调度或候选搜索额度，边界见[分页诊断](../evals/search/page-v1/README.md)。新产物在默认调度下独立复测：Standard / Full 顺序查询最慢类别 P95 为 208.54 / 207.28 ms，受控首结果为 286.10 / 290.90 ms，两版均通过原门槛。五分钟负载完成9535 / 8994次核对，逐类最慢P95为278.73 / 291.46 ms；各793条实际服务内存样本仍显示负载后空闲增长，长期稳定性保持待验。两版原始报告/截图、源码/产物指纹与十二份构建/验证日志已归档；失效的源码变化轮次单独保留，不计入通过证据。
 - 实现后存储库 52 项、Standard / Full Hertz 库 421 / 578 项通过（另 4 / 6 忽略），两版全 target Clippy、Rust 1.88.0 工作区全 target 编译、fmt 与 ADR 285 项通过。新增真实 HTTP/RPC 检查保留相同响应、编辑筛选总数、空页与原参数限制；存储检查覆盖四种排序、覆盖/null/空白、分页和候选阈值两侧。均为 null 音频和隔离数据，没有真实模型、账号或原生宿主结论。
-- 从物化提取前的真实历史提交回溯冻结十场景20组切换/编辑行为：归档七个模块原始源码、完整预置、applied/ignored 和固定旧 HSCP1.J 分享帧；历史源码重放、当前纯物化、规则应用与旧分享导入均一致，纯物化不改 owner。默认无 Git 依赖的检查已加入前端聚合，当前 57 步通过；本机另与 Git 历史原字节核对通过。该证据是事后补齐，不宣称采用先写测试的开发顺序，不代替全部历史用户预置、真实 GPU/弱机、原生 DBX 或独立人工视觉验收，详见[历史 fixture](../evals/stage/legacy-v1/README.md)。
+- 从物化提取前的真实历史提交回溯冻结十场景20组切换/编辑行为：归档七个模块原始源码、完整预置、applied/ignored 和固定旧 HSCP1.J 分享帧；另固定一份旧 codec 发出的 HSCP1.G 压缩帧，并验证新旧 decoder 均能读取，双方 encoder 产物也可交叉读取。历史源码重放、当前纯物化与规则应用均一致，纯物化不改 owner。`node scripts/check-stage-legacy-fixtures.js --git` 通过，核对 Git 历史原字节。该证据是事后补齐，不宣称采用先写测试的开发顺序，不代替全部历史用户预置、真实 GPU/弱机、原生 DBX 或独立人工视觉验收，详见[历史 fixture](../evals/stage/legacy-v1/README.md)。
 
 ## 双发行版搜索持续负载与进程内存增量（分页修复前）
 
@@ -41,9 +41,17 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 - 针对实际服务 PID 按约 500 ms 采样，保留负载前后各十秒空闲、顺序/并发/持续/浏览器阶段，共 777 / 1012 条记录。负载后空闲工作集/私有提交量均高于之前；没有冻结内存预算，不宣称无泄漏或长期稳定，浏览器/驱动/采样器不计入服务内存。
 - 交替查询两版仍出现默认调度慢查询；将两个隔离进程固定同一逻辑核后，多数类别耗时接近。该诊断表明调度条件需要继续定位，不能用它替代默认条件验收或据此强制产品 affinity。Full 失败、两份诊断、截图、二进制/源码/原始与压缩报告指纹及独立统计均已保留在[双发行版证据](../evals/search/editions-v1/README.md)。本增量没有改动 Rust 产品逻辑、放宽阈值、启用真实来源或付费模型，R0/R1-S 与路线图整体保持未完成。
 
-## 云端 provider 选择
+## StepFun 接入与凭据隔离增量（2026-10-19）
 
-- 首个云端 provider 已由用户选择为 OpenAI、质量优先；费用上限的后续答复为「暂不确定，先完成不收费的接入准备」。具体模型与预算均未确定，现有预算常量不因该选择自动变更或成为已确认的云费用承诺；官方模型/计价页在普通 HTTPS 和 Chrome 中均返回 HTTP 403，不能据此填写模型价格、可用性或可靠费用上界。尚无云端调用、真实账单或质量成绩，云端能力仍未交付。
+- 用户提供的 StepFun Plan 地址 `https://api.stepfun.com/step_plan/v1`、模型 `step-5-preview` 已完成独立最小 Responses 直连，两次 HTTP 200，第二次完成并返回短文本；合计 61 输入 / 11 输出 tokens。这只证明当次地址、认证和短文本响应，不是应用内 StageIntent、实际账单或模型质量验收；密钥未写入源码、配置或报告。
+- 补齐 StepFun 静态舞台生成 adapter，复用原严格输出校验、可信 usage、持久任务与账本。专用单次 HTTP、无代理/重定向/重试、64 KiB 请求 / 256 KiB 响应与三十秒期限、发送前和响应头/正文期间取消已由回环 fixture 验证。生产使用 token-only 价格快照：金额未知，不伪装成零价或进入费用总额；有限请求按可信输入/输出 token 记账，不因缺少费率阻挡功能。真实调用、实际计量字段及模型质量尚未验证。
+- 修复 StepFun 可能读取 OpenAI 凭据的问题：启动配置固定 provider 与规范 API 路径，OpenAI、StepFun 标准和 Plan 三个作用域互不读取/删除；保留原 OpenAI 命名空间与旧记录迁移，共享原 OS 执行许可及生命周期锁。管理界面展示实际目标，查询失败时禁用保存/删除，手动查询成功后恢复。
+- 歌词情绪 completion 已接入共同的持久 `ai_jobs`/usage entry：先提交可能派发标记，结束时结算可信 token，进程中断保留为未核实；不持久化歌词正文。费用未知时跳过费用预留和预算 gate，token-only 账目不显示 `$0`，也不计入费用总额。
+- D 盘局部验证：StepFun 10 项、歌词情绪 12 项、provider 14 项、token-only 账本结算 1 项通过；`cargo check -p hertz-studio --lib` 通过。`node scripts/check-frontend.js` 默认 59 步通过；后续遵循局部验证。Standard 当前源码构建配合隔离 DataDir 运行 `node scripts/check-ai-ledger-browser.js` 通过：token-only 记录显示输入/输出 token，金额保持未知、不显示 `$0` 且不计入月金额；API 精度、诊断脱敏、窄屏与无模型请求检查均通过。独立 StepFun 直连已返回短文本，但应用内真实调用、实际计量字段、Full 与发布验收仍待完成；本次不发起云请求或费用查询。OpenAI 仍因具体模型未确定而关闭。
+
+## 云端 provider 选择（早期 OpenAI 准备记录）
+
+- 首个云端 provider 已由用户选择为 OpenAI、质量优先；费用上限的后续答复为「暂不确定，先完成不收费的接入准备」。具体模型与预算均未确定，现有预算常量不因该选择自动变更或成为已确认的云费用承诺；官方模型/计价页在普通 HTTPS 和 Chrome 中均返回 HTTP 403，不能据此填写模型价格、可用性或可靠费用上界。该早期增量未调用 OpenAI，也没有真实账单或质量成绩；后续 StepFun 独立直连记录见上节，云端能力仍未交付。
 - 新增[凭据准备入口](./ai-provider-credential.md)：复用原 SecretBackend 与发行版 service，固定 OpenAI origin、绑定安装 owner；单槽无排队的有界阻塞读写在超时/观察者离开后仍持许可至实际退出。官方 HTTP/RPC 与工坊支持安全摘要、保存/幂等删除，密钥不回显/不入通用设置或界面持久状态；Debug 脱敏。存储代际后续增量见下文；尚未接通云派发；Windows 系统钥匙串的后续验收见下文，不把凭据准备标记为云 provider 可用。
 - 本增量 Windows Standard / Full 库分别 402 / 559 项通过，另 3 / 5 项按既有条件忽略；两版服务端全 target Clippy 与 Rust 1.88.0 全 target 编译通过。实现后新增凭据五项及 Debug 脱敏回归，前端默认 56 步、实际隔离服务的凭据浏览器旅程、原本地 provider 与任务面板 13 项回归通过；320/390px 截图已检查。全量检查暴露 Windows 接收 socket 继承非阻塞模式的夹具缺陷，已恢复阻塞读并重跑两版库通过；不是媒体读取逻辑修复。浏览器使用内存后端与合成密钥，无真实钥匙串、模型或付费调用，也未覆盖用户正在运行的播放器。
 
@@ -74,7 +82,7 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 - 需要 OpenAI 凭据的任务在受理时冻结非秘密作用域/代际；派发前重新读取并匹配，读租约覆盖本地派发标记提交。密钥只通过内存参数传给 provider；fake/Ollama 不读取云密钥，旧无凭据快照兼容。准备耗时计入运行期限，已知取消在构造请求前再次检查。
 - 保存或删除先拿不排队的生命周期写锁，再事务性取消该 owner 的绑定任务并结算，之后才变更钥匙串；DB 失败不写系统凭据，OS 失败不恢复已取消任务。服务端管理 owner 在观察者离开后继续执行；原钥匙串工作实际结束前持续持有执行许可和生命周期锁。
 - 复核发现进程内生命周期锁不能保护共享 DataDir 的第二实例；现在凭据 GET/PUT/DELETE 均要求持有该目录唯一 AI runner 锁，未持锁实例返回 `ai_locked`。GET 也受约束，因为查询可能迁移旧凭据；生成同意开关关闭不妨碍持锁实例管理密钥。
-- 未派发取消释放预留；已派发按未知费用保守计账，原执行 owner 仍持槽到本地调用结束，迟到可信 usage 可修正费用而不能恢复成功提案。零网络 provider fixture 检查这些边界；OpenAI Responses adapter 已实现，但请求与取消只用回环 HTTP fixture 验证。真实 endpoint 下的取消结果、其它 OS 系统钥匙串、DNS/origin、价格上界和实际账单仍待验，生产派发保持关闭。详见[凭据说明](./ai-provider-credential.md)。
+- 未派发取消释放预留；已派发按未知费用保守计账，原执行 owner 仍持槽到本地调用结束，迟到可信 usage 可修正费用而不能恢复成功提案。零网络 provider fixture 检查这些边界；OpenAI Responses adapter 已实现，但请求与取消只用回环 HTTP fixture 验证。该 OpenAI 增量时期生产派发保持关闭；后续 StepFun 按 token-only 快照启用有界派发。真实 endpoint 下的取消结果、其它 OS 系统钥匙串、DNS/origin、实际账单和模型质量仍待验。详见[凭据说明](./ai-provider-credential.md)。
 - 本增量在 D 盘独立 target 验证：Standard / Full 完整库 417 / 574 项通过（另 4 / 6 忽略），两版全 target Clippy、Rust 1.88.0 工作区全 target 编译、fmt、285 项 ADR 契约和前端默认 56 步通过。最新 Standard 二进制通过 `scripts/check-ai-credential-owner.js` 的双真实进程同 DataDir 检查及凭据浏览器回归，320/390px 截图已检查；内存凭据、null 音频，无真实模型请求。双实例报告 `target/mcp-sdk-check/credential-lifecycle-http.json` 记录二进制、五份 Rust 源码、工坊和检查脚本 SHA-256；不替代真实系统钥匙串或云端验收。
 
 ## OpenAI Responses adapter 准备增量
@@ -134,7 +142,7 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 - 候选绑定目标、元数据指纹、歌词修订与原十分钟期限；取词期间发生变更也拒绝旧结果。同一候选第一份检查通过的正文固定预览，后返回内容不能替换。网络两个槽不排队、八秒总等待；解析继续持有原实际工作许可，未准备候选不能写入。
 - 来源与 `not_provided` 许可状态随版本化内部文档保存到原覆盖层，保留译文/罗马音、文件偏移和词结束时间。没有新增商业协议、账户或付费调用；缺少再分发许可不能解释成授权。共享 HTTP 助手修复先完整读入才检查/JSON 不限大小的问题，成功与错误分块正文均在读取中限制为 2 MiB；网易云直接 JSON 读取一并接入。
 - 实现后的 Rust 检查覆盖元数据差异、发行版能力门、实际持久应用与 HTTP/RPC、旧修订/元数据/删除/过期、第一预览固定、结构化往返和无排队/取消/真实八秒期限；真实回环 HTTP 覆盖分块/声明长度超限、错误正文、恰好边界和 Cookie 头。实际隔离 Chrome 的本地导入回归及受控在线 UI 旅程通过，含错误重试、检索词/来源/本地选择/关闭失效与 390px 布局。
-- 在线 UI 的搜索、取词和来源为明确 fixture，本地解析/写入使用真实服务，存储链路另由 Rust 检查；它们不是五个真实来源或账号验收。来源许可、严格自动采纳、真实歌曲与全部歌词视觉/导出/原生宿主仍未完成，使用方式见[歌词导入](./lyric-import.md)。
+- 在线 UI 的搜索、取词和来源为明确 fixture，本地解析/写入使用真实服务，存储链路另由 Rust 检查；它们不是五个真实来源或账号验收。新增严格自动应用仅接受用户主动启用且满足精确总数、候选集完整、唯一强匹配、无版本冲突、导入/内嵌/sidecar 均无可见歌词且修订未变化的请求；隔离 Rust 回归覆盖通过/拒绝、sidecar 可见歌词与中途修改保护，Chrome fixture 覆盖一致的唯一匹配候选及自动应用请求。来源许可、真实歌曲与全部歌词视觉/导出/原生宿主仍未完成，使用方式见[歌词导入](./lyric-import.md)。
 
 ## 歌词本地导入增量
 
@@ -161,6 +169,7 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 - managed response 迟到时只按相同 job/attempt 和 usage revision 校正原受理月，不复活任务、不产生提案。estimated_final 仍允许可信校正；同一计数重复回调不推进 revision，冲突或错误 attempt 不覆盖事实。
 - 费用用整数 micro-USD，输入/输出各向上取整。超出预留、token 上界或月总额（含其它在途预留）触发持久 guard；不能表示的可信费用保留估算并停用生成。月累计超出 SQLite `i64` 范围时账目保留任务估算、月汇总饱和并显式标记，终态仍提交、预留仍回收，迟到回调不能改写饱和汇总。差额更新不再次释放预留，负数和整数溢出不靠 SQLite 自动截断。
 - 费用异常路径覆盖迟到对账正溢出/下溢、其它任务预留保留，以及首次终态 usage 金额不可表示时按 `unknown` 保留预留估算并熔断；`ai::jobs::tests` 45 项通过。
+- 迟到 usage 对账现在先核对持久账目的 `owner_instance_id`，再检查 attempt/revision 与价格；错 owner（包括带越界 usage 的调用）不会改月总额或触发熔断。Standard / Full `ai::jobs::tests` 各 53/53、`vmusic-store ai_ledger::tests` 各 2/2 通过，均为本地 SQLite fixture；未新增外部账单入口，也未调用真实 provider。
 - 工坊显示 UTC 月预算、在途预留、任务归属月和 released/reported/unknown/estimated_final。unknown 在任务终态后仍刷新，24 小时后停止自动等待，允许手动刷新。任务查询先按 principal 授权，再附费用；不开放客户端账单写入接口。
 - 当前计价契约只支持未缓存输入和包含推理的计费输出两个维度。其它计费维度需扩展专用 adapter；此基础设施不代表任意真实模型已有可靠费用上界。
 
@@ -185,7 +194,7 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 - 冻结集覆盖十一类需求。标签为项目编写，尚待独立复核；40 条仅为同源合成预留样本。人工语义率在全部支持样本完成具名、有说明的评分前为 null；自动检查对实际物化预置断言，不能凭省略参数推定满足否定要求。
 - 缺结果、中断、错模型/协议/契约、旧物化器/驱动和结果 hash 不符不能通过报告复核。完整 split 才允许成对比较；人工材料通过原草稿版本/hash、基线和分享往返后导出可导入文件，不代填评分。单轮满足建议门槛也不自动获得发布资格。正式阈值和两轮真实模型质量仍未验收。
 - 现有离线编辑规则的完整开发基线为 32/120 自动断言匹配、66/70 支持结构通过、31 个预期拒绝却有候选、53 个关键断言失败；未填人工成绩。这是扩大后的静态 create 契约对照，不是实际模型结果或外部工具权限执行证据。固定 context 和 120 字符旧编译器限制均保留在说明中。
-- 工作流、人工规则、指标分母与已保存基线见 [StageIntent 评测](../evals/stage-intent/v1/README.md)。当前环境未发现 Ollama 可执行文件，受控 HTTP 检查不能替代真实模型运行。
+- 工作流、人工规则、指标分母与当前语料说明见 [StageIntent v2](../evals/stage-intent/v2/README.md)。当前环境未发现 Ollama 可执行文件，受控 HTTP 检查不能替代真实模型运行。
 
 ## 搜索增量
 
@@ -207,7 +216,7 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 - 录制仅采集当前舞台 owner 的画布，拒绝不支持的来源，不使用遗留隐藏画布。暂停创意舞台由 owner 补画首帧，不改变播放状态；画布自带歌词时避免重复合成。外部背景与 DOM 效果不冒充已采集。
 - 准备、录制和结束均排除重复开始；屏幕共享在原点击授权内请求。实际音轨、静音原因和编码 MIME 可见，静音文件名带标记；编码器原生 start 前维持准备状态，修复慢启动时误报录制而停止得到零字节的问题。
 - 停止保留最终数据块，异常/切曲/换来源/离开前台尝试保留片段；有界结束、10 分钟/256 MiB 保护、下载失败重试、全部轨/视频/轮询/监听清理。页面销毁仍不保证保存，零数据不会下载空文件。操作与限制见 [舞台视频导出](./video-export.md)。
-- 本机 Chrome 隔离旅程通过横屏静音 MP4、暂停创意舞台竖屏 WebM 的实际下载/视频解码；WebM 合成音频另解码为非零波形。系统声音来源受控，不能解释为真实声卡共享或跨 GPU 验收。版本化工程与时间线试点见下一节。
+- 本机 Chrome 隔离旅程通过横屏静音 MP4、暂停创意舞台竖屏 WebM 的实际下载/视频解码；WebM 合成音频另解码为非零波形。新增 LRC sentinel 并由隔离服务导入，确认歌词 `fillText` 命中 MediaRecorder 捕获的合成画布；窄屏对话框、下载重试与视频/音频轨清理检查通过。系统声音来源受控，不能解释为真实声卡共享、真实歌曲或跨 GPU 验收。版本化工程与时间线试点见下一节。
 
 ## 可编辑工程增量
 
@@ -227,6 +236,16 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 - 新增静夜星球、霓虹律动、墨线地形三个固定版本的本地配方，分别绑定场景契约与默认基线 hash；不动态给旧配方补签。候选复用原草稿物化、临时预览和显式应用路径，完整具名内容参与预览身份校验，不调用模型或读取媒体。
 - 工坊说明模板、草稿、当前编排、收藏、分享、工程和视频的动作区别。应用模板替换完整预置与旧 cue/绑定/工程上下文，不自动收藏或播放；普通预置与收藏不伪造可信模板来源。三个配方仍为候选，不能代替正式视觉验收。
 - 实际截图检查发现窄屏侧边歌单的三维缩放与悬停投影超出 CSS 留边；已收紧窄屏卡片宽度并调整锚点。浏览器按悬停后的真实边界验证 320px、390px 视口，截图前另检查实际场景像素。操作与限制见 [创作模板候选](./stage-templates.md)。
+- 2026-10-19 针对当前源码重建 Standard `hertz-studio` 后，`scripts/check-stage-templates-browser.js` 通过：三个候选的异步预览/取消/应用与保存、真实 WebGL 像素、320/390px 宽 × 500/760px 高侧架避让，以及实际导入歌词和 stanza 歌词遮挡检查；没有 AI 派发。当前截图位于 `output/playwright/roadmap-stage-template-check-current/`。这是本机 Chrome/null 音频布局与渲染证据，不包含真实歌曲听感、跨 GPU/弱机或人工模板验收，候选状态不变。
+
+## 舞台 shader 边界修正
+
+- 修复创意地形渐隐与 Stage3D 暗角中反序边界的 `smoothstep`（GLSL 对此输入的结果未定义）。Chrome/WebGL 实测六个创意场景可见且无 GL 错误；Stage3D 合成 shader 编译、链接通过，64×64 fixture 中心亮度 101、边缘亮度 46。该结果仅覆盖本机 Chrome/WebGL，不代表其它 GPU、系统或发行包验收。
+
+## R5 通用 completion 并发边界
+
+- 发现歌词情绪 zero-cost completion 虽复用 provider 与凭据，却绕过 R4 任务的 DataDir 单执行槽；并发分类可能与持久任务同时启动模型请求。现由 `AiRuntime` 暴露同一执行槽，completion 用 `try_acquire` 覆盖凭据读取和 provider 调用；被任务或其它 completion 占用时立即返回 `429 ai_busy`，不排队。定向回归先通过 runtime 占槽，确认 provider 调用数仍为零，再释放后完成分类；Standard 与 Full 的 `ai::emotion::tests` 各 8/8 通过。该约束与“计费 completion 必须加入持久 job/共享账本”一并写入技术方案；无模型 key、无云调用，尚不证明远端取消/费用或真实歌曲分类质量。
+- 2026-10-19 复查发现多块歌词仍会并行争用同一个执行槽；其中一块收到 `ai_busy` 时，已成功的其它块会让整首部分结果以 neutral 补齐并进入缓存。现改为分块串行，任一块遇到槽忙即返回 429 且不缓存部分结果；普通 provider/解析失败的 neutral 降级保持不变。另修复自动 Cue 等待人工锁读取期间被切到手动/关闭或撤销授权后仍迟到写入：锁读取后复核请求代际与 auto 模式，Stage 接口及异步绑定回调再校验模式。`ai::emotion::tests` 12/12、前端 `node --check` 与 `check-lyric-emotion.js` 通过；侧栏和经典样式浏览器回归已按新契约显式启用 auto，侧栏增加 off/manual 拒收断言，但本机缺少 Playwright，未执行。无模型 key、无云调用。
 
 ## 格式边界与错误增量
 
@@ -263,7 +282,7 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 - R1-S gate 决策：用户确认先补均衡负载探针，再依据结果决定是否改 gate。v7 修正索引循环后重测 Standard / Full 四入口；受控 fixture 仍出现入口成功率差异和 `search_busy`，不足以代表真实来源限流或目标用户负载，所以保留 4 执行、16 等待、2 秒入场等待、6 秒总期限。需要真实 provider 负载及可接受成功率/延迟 SLO 后再决定，不把候选额度标为已冻结。
 - pressure-v7 是修正探针索引循环后的 Standard / Full 同配置复测；独立复核均通过当前源码与测试二进制指纹。四入口成功率依次为 Standard 67.40% / 59.90% / 52.81% / 46.15%，Full 71.04% / 74.27% / 49.38% / 22.81%；失败仍全部为 `search_busy`，两版均达到 4 个执行位峰值并归还全部 gate 容量 `[4,16]`。结果仍支持保留候选 gate，不能替代真实 provider/DBX、公平性重复性或用户 SLO 验收，release eligibility 仍为 false。原始报告、探针日志和内存样本见[pressure-v7 记录](../evals/search/pressure-v7/README.md)。
 - pressure-v8 使用隔离 D 盘 target，为 Standard / Full 各重建同一探针二进制并各跑两轮 60 秒均衡负载；四份报告的当前源码及精确二进制指纹复核通过。Full 四入口成功率两轮分别为 86.88/86.35%、84.06/84.90%、66.88/64.90%、31.25/32.40%；Standard 分别为 67.92/79.17%、62.92/66.98%、51.88/68.96%、41.98/53.12%（顺序为 HTTP 单源、RPC 单源、HTTP 聚合、RPC 聚合）。失败均为 source 级 `search_busy`，聚合外层 200 可含失败 source；所有运行峰值 4、结束后执行/连接归零并恢复 `[4,16]`。Full RPC 聚合低成功率在两轮中稳定，但仅为回环 fixture；Standard 波动明显。该证据不定义用户 SLO或生产限额，继续保留 4/16/2s/6s 候选 gate，release eligibility 仍为 false；详见[pressure-v8 重复观察](../evals/search/pressure-v8/README.md)。
-- R1-S 均衡调度复测：pressure-v9 schema 7 / schedule version 2 在每个同速 HTTP/RPC 配对窗内轮换先后，独立检查器验证每条 `scheduledMs`。Standard 两轮四入口成功率为 72.40/55.31/53.85/54.90% 与 85.42/50.73/68.96/63.23%；Full 为 88.23/71.88/48.54/59.38% 与 88.13/68.44/50.00/60.73%（HTTP 单源、RPC 单源、HTTP 聚合、RPC 聚合）。Full RPC 聚合由 v8 中明显落后转为高于 HTTP 聚合约 10–11 个百分点，说明固定时序会影响入口对比；Standard 重复间仍有明显波动。失败均为 fixture source 级 `search_busy`，四轮执行峰值 4、结束后恢复 `[4,16]`。保留 4 执行、16 等待、2 秒入场等待、6 秒总期限候选 gate，不基于受控过载调整；真实 provider、DBX 和用户成功率/延迟 SLO 仍是 gate 决策所需证据。四份报告及 SHA-256 复核见[pressure-v9](../evals/search/pressure-v9/README.md)，release eligibility 仍为 false。
+- R1-S 均衡调度复测：pressure-v9 schema 7 / schedule version 2 在每个同速 HTTP/RPC 配对窗内轮换先后。独立检查器按 `scheduledMs + startLagMs` 重建实际派发顺序，不新增延迟门槛。早期构建 Standard 两轮四入口成功率为 72.40/55.31/53.85/54.90% 与 85.42/50.73/68.96/63.23%；Full 为 88.23/71.88/48.54/59.38% 与 88.13/68.44/50.00/60.73%（HTTP 单源、RPC 单源、HTTP 聚合、RPC 聚合）。最终源码构建的 Standard 两轮为 83.54/60.94/71.46/68.96% 与 84.48/62.29/71.04/66.77%；Full 两轮为 88.75/71.88/57.81/65.31% 与 88.23/71.15/56.35/63.23%。Full 最终 R2 另完成三轮各约 120 秒混合负载，共 26,208 次请求并采集 936 个测试进程内存样本。current/final 八份报告均通过新顺序检查；12 份中另有三份早期报告通过，早期 Standard R1 因六组实际顺序反转被拒。所有运行执行峰值 4 且结束后恢复 `[4,16]`；失败均为 loopback fixture source 级 `search_busy`，成功率重复间仍有变化。保留 4 执行、16 等待、2 秒入场等待、6 秒总期限候选 gate；不据受控 fixture 过载调整。真实 provider、DBX 与用户成功率/延迟 SLO 仍是 gate 决策所需证据，release eligibility 仍为 false。报告与边界见[pressure-v9](../evals/search/pressure-v9/README.md)。
 - R4-E 事件掉队恢复：WS 与 DBX 事件泵共用 `AppState::next_event_batch()`。容量为 1 的真实 Tokio broadcast 测试验证接收器移至广播尾部、旧 buffering 边沿不重放、当前 buffering 真值与不含任务内容的 `ai_tasks_resync` 发出，后续事件仍可接收；Standard / Full 回归和两版包含 DBX sidecar 的 all-target Clippy 通过。既有 Standard Chrome AI 任务旅程 16 项、默认前端检查 58 步通过。Standard sidecar 的既有 stdio/RPC 与频谱旅程 307/307 通过；新增显式 `HERTZ_SIDECAR_LAG_PROBE=1` 的真实子进程检查在 stdout 停读 90 秒后收到 `ai_tasks_resync`，完整协议检查 306/306 通过，使用 null 音频，不作为实际声音验收。它证明子进程 stdio 管道背压触发恢复路径，不等同于正式 DBX 宿主应用或发布环境验收；任务快照和重连查询仍是状态事实恢复路径。
 - MCP 请求占用增量：Windows Standard / Full 各七项真实 stdio 集成通过；MCP 模块 21 项、两版 Hertz 库 406 / 563 项通过，另 3 / 5 项按既有条件忽略。覆盖第九个/重复 ID 不转发、已有 socket 关闭、二十四轮取消与同会话八并发 1024 次目录请求、真实大成功/错误响应的完整协议替换。两版服务端全 target Clippy、Windows Rust 1.88.0 工作区全 target 编译、fmt、285 项 ADR 契约及四份说明的链接/围栏/表格检查通过；不是长期 RSS、正式客户端、其它 OS 或远端副作用回滚证据。
 - 在线歌词增量：Windows Standard / Full 的 Hertz 库测试分别 381 / 538 项通过，另有 3 / 5 项按既有条件忽略；core 3 项、歌词库 11 项与结构化集成 4 项、存储库 50 项通过。两版 Hertz/歌词库全 target Clippy、Rust 1.88.0 工作区全 target 检查、前端默认 56 步、发行版资源隔离、fmt 与差异空白检查通过。最新隔离 Standard 二进制上的实际本地导入回归及受控在线 UI 浏览器检查通过，两张 390px 截图已检查，临时服务已清理。Full 旧能力/未验收列表断言已显式更新，保留完整列表与子集约束；无实际音源/账号/许可或模型验收。
@@ -271,7 +290,7 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 - MCP 互操作增量：Windows 上锁定依赖的 Standard / Full 各 2 个官方 Rust SDK 真实子进程集成场景通过；适配层/发现/协商 9 个单测通过。两版 Hertz 全 target Clippy、fmt，以及 Rust 1.88.0 工作区全 target 检查均通过，覆盖新增 dev feature 和集成代码；四份相关说明的本地链接/围栏/表格及 diff 空白检查通过。运行使用隔离 `target/mcp-sdk-check`，没有覆盖开发播放器；子进程均已回收，隔离 DataDir 已清理。两版运行覆盖的是 standalone 服务与 stdio adapter，不代表原生 DBX、目标客户端、真实声音或候选包验收。
 - 编译器/矩阵增量：本机实际安装并使用 Rust 1.88.0，`cargo +1.88.0 check --locked --workspace --all-targets` 与单独启用 `hertz-studio/full,dbx-plugin-hertz/full` 均通过，覆盖 standalone、DBX、共享库与测试代码的编译；不代表这些产物已运行或真实声卡通过。`check-editions.js` 两版 UI/资源/身份/版本与转换器检查通过；CI YAML 解析、固定编译器与六组合命令接线核对通过。远端 Linux/macOS/MSRV job 没有当期执行结果，保持未验。
 - 格式增量：前端默认 55 步、`vmusic-audio` 61 项、扫描扩展名/编译 feature 契约 2 项，以及音频/Hertz 全目标 Clippy 通过。真实内存解码验证改后缀仍按内容识别、坏 WAV/截断与不支持编码分流；最新隔离二进制的浏览器检查覆盖两种受控错误、request_id、无 POST 自动重试、加载态清理、失败不替换当前曲目与后续成功换曲。390px 说明与长提示截图已检查，实际宽度和无横向溢出通过；不代表实际声卡、原生 DBX 或跨 OS 验收。
-- 模板候选增量：前端默认 54 步、Hertz 全目标 Clippy、最新隔离 D 盘二进制的模板浏览器旅程、草稿回归与 AI 任务 13 项通过。覆盖三个模板的预览/取消/应用、迟到准备隔离、保存/收藏/重开、版本禁用、无 AI 请求、实际场景像素；新增修正窄屏侧架卡片遮挡歌名/歌词的问题，使用响应式歌词安全区和横向卡片带，并在 320/390px 宽、500/760px 高检查无歌词标题、导入 LRC 活动句及 stanza 流光歌词的文本/设置按钮/播放条遮挡。横竖屏与两种歌词层截图已检查。该检查用 null 音频和合成 LRC；真实歌曲频谱、独立人工视觉验收、硬件与原生 DBX 矩阵仍待完成。评测报告按当前源码重读通过，仍为离线规则基线，人工评分为 null、发布资格为 false。
+- 模板候选增量：前端默认 54 步、Hertz 全目标 Clippy、最新隔离 D 盘二进制的模板浏览器旅程、草稿回归与 AI 任务 13 项通过。覆盖三个模板的预览/取消/应用、迟到准备隔离、保存/收藏/重开、版本禁用、无 AI 请求、实际场景像素；新增修正窄屏侧架卡片遮挡歌名/歌词的问题，使用响应式歌词安全区和横向卡片带，并在 320/390px 宽、500/760px 高检查无歌词标题、导入 LRC 活动句及 stanza 流光歌词的文本/设置按钮/播放条遮挡。横竖屏与两种歌词层截图已检查。最新复核扩展到所有可见歌词词元后发现 390x500 短竖屏还会擦到活动歌词并覆盖设置按钮；已将此视口的设置按钮移至左上、歌词轨上移并留白，侧架锚点同步上移，当前嵌入资源重建后的模板浏览器旅程通过，320/390x500 截图已目检。该检查用 null 音频和合成 LRC；真实歌曲频谱、独立人工视觉验收、硬件与原生 DBX 矩阵仍待完成。评测报告按当前源码重读通过，仍为离线规则基线，人工评分为 null、发布资格为 false。
 - 分段增量：前端默认 53 步、Hertz 全目标 Clippy、最新隔离二进制的工程浏览器旅程与草稿浏览器回归通过。VM 覆盖规则同源、纯检查、输入/容量、过期方案、原参数恢复、工程/分享往返；真实 Chrome 覆盖表单编辑、非法/过期替换隔离、媒体确认、保存/重开/修改、暂停/前后 seek、同一工程视频下载/解码及 390px 无横向溢出。评测离线基线按最新源码重新生成、报告重读与归档一致性通过，人工评分仍为 null，发布资格仍为 false。
 - 可编辑工程增量：前端默认 52 步、`stage_project` Rust 2 项和 Hertz 全目标 Clippy 通过。最新隔离二进制上的 `check-stage-project-browser.js`、`check-stage-draft-browser.js`、`check-video-export-browser.js` 均通过，覆盖真实文件指纹、工程重开与编辑、媒体确认失效、暂停/seek、预览与保存隔离、同一工程原生视频下载/解码，以及 MP4/WebM 和合成音频回归；不代表真实系统音频、跨 GPU 或原生 DBX 验收。评测报告按当前源码重读通过，归档 run/report 与原始结果一致，仍为离线规则基线，无真实模型或人工成绩。
 - `cargo test -p hertz-studio -p vmusic-store --lib -- --test-threads=1`，使用 null 音频后端；不代表实际声音或真实模型质量。
@@ -289,17 +308,190 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 - 评测增量：前端默认集合 50 步、AI Rust 模块 63 项、两包 Clippy 通过；`check-stage-evaluation.js --live` 验证真实 CLI、单次本地请求、计数/截断/拒绝分类、驱动保存/重读、缺样本不通过及零 DataDir 副作用。离线检查另覆盖缺结果分母、错误拒绝信用、评分边界、结果/模型/协议/源码不一致和比较限制。已重跑 provider 浏览器检查；均使用受控 fixture，无实际模型或人工评分。
 - `check-mcp-stdio.js`：真实 Rust 子进程与 JSON-RPC，十个授权工具、播控幂等、曲库搜索、契约分页、intent 层校验和旧 hash 拒绝。
 - 旧库迁移、提案内容清除、七天记录保护、历史容量拒绝、校时回跳暂停清理及账本十三个月保留，以及快照冻结、取消后迟到计费、成功/失败/非法输出收费、重复/并发/过期 revision/错误 attempt、跨月无 job 对账、正负差额、熔断、整数溢出和事务回滚的 Rust 回归。
-- R4-B 溢出回归扩展为同时验证其他任务的 20,000 micro-USD 预留不会被终态饱和处理释放；AI job 用例 45/45、provider 用例 12/12 通过。R3 物化、十场景二十组历史 fixture 与离线评测检查重跑通过。Hertz/store 全量库测试分别 432 项通过、4 项忽略和 52 项通过；前端默认 58 步全部通过，101 项活体检查按默认配置跳过。两包全 target Clippy、workspace fmt 与差异空白检查通过；OpenAI 检查全部使用回环 fixture，不发真实请求。
+- R4-B 溢出回归扩展为同时验证其他任务的 20,000 micro-USD 预留不会被终态饱和处理释放；AI jobs 生命周期回归现为 51/51、provider 用例 12/12 通过。R3 物化、十场景二十组历史 fixture 与离线评测检查重跑通过。Hertz/store 全量库测试分别 432 项通过、4 项忽略和 52 项通过；前端默认 58 步全部通过，101 项活体检查按默认配置跳过。两包全 target Clippy、workspace fmt 与差异空白检查通过；OpenAI 检查全部使用回环 fixture，不发真实请求。
+- OpenAI usage 解析回归：Responses fixture 的 `input_tokens_details` 缺少 `cache_write_tokens` 时仍接受 `cached_tokens: 0` 的 usage；显式缓存用量仍因当前快照缺少对应费率而保守保持未知。Standard / Full provider tests 各 12/12 通过，均为本地 fixture。模型、价格及计量字段未获官方页面核实（当前均返回 HTTP 403），OpenAI 仍不可派发，未发起云请求。
 - Rust 1.88.0 MSRV 下重跑 AI 生命周期/账本回归：Standard 与 Full 各有 jobs 45/45、provider 12/12、service/RPC ledger 2/2 通过；D 盘 Standard target 的 `vmusic-store` 历史账本迁移归因 1 项和 stable-cursor ledger 2 项通过。覆盖取消/完成竞争、恢复、注入事务失败、unknown/迟到 usage、OpenAI 无验证价格不派发和账本迁移/分页；全部是本地 SQLite、provider fixture 与 null 音频，不证明真实云计量或原生 DBX 宿主恢复。
 - worker 异常新增隔离 SQLite 检查：派发前 unwind panic 收敛为 `interrupted/released`，provider 调用内 panic 收敛为 `interrupted/unknown`，状态推进存储故障立即收敛为 `interrupted/released`；均回收执行槽和内存输入。另修复 worker 延迟抢槽造成过期任务先进入 running/被误记 failed，以及墙钟回拨后单调队列计时器只调用墙钟清扫的问题；现在受理时捕获单调 deadline，CAS 同事务决定 `expired` 或 `running`，未派发过期按 `released` 结算。派发前移除了重复的 `created_at` 墙钟年龄判断，避免墙钟前跳把仍由 worker 持有的队列任务误判失败；惰性墙钟 sweep 会跳过仍有内存 owner 的任务，只为持久孤儿兜底。回归覆盖墙钟年龄不影响活 worker、孤儿 sweep 释放预留和账本失败回滚；`cargo test -p hertz-studio ai::jobs::tests -- --test-threads=1` 49/49、`cargo clippy --workspace --all-targets -- -D warnings` 通过，构建与临时数据均在 D 盘。`cargo fmt --check --all` 仍报告该已有大幅修改文件中的格式差异；本次新增断言已按 rustfmt 排版。进程内捕获只适用于 unwind panic；release 配置使用 `panic=abort`，由进程启动恢复收敛，不据此宣称进程内恢复发布崩溃。
 - 技术方案 §5.3 的 `rmcp` 选型和 `--mcp-stdio` 实现状态已按当前代码与 Windows Standard/Full SDK 子进程证据更新；真实目标客户端、其它 OS 与发布矩阵仍待验收。
 
 ## R4-J Windows 真实服务进程重启验收
 
-- `scripts/check-ai-process-recovery.js` 使用隔离 D 盘 DataDir、真实 Hertz 服务进程、null 音频、memory secrets 与 loopback Ollama HTTP fixture，在 Standard 和 Full 各执行一次强制终止后同目录重启。每轮都验证恢复发生在 HTTP 接受请求前；已派发 running 任务恢复为 `interrupted/unknown`，未派发 accepted 任务恢复为 `interrupted/released`；在途 loopback 连接随宿主退出而关闭，重启不重发 POST，两个 brief 均未持久化。报告及二进制/源码/脚本 SHA-256 在 `target/ai-runner-recovery/standard-v2.json`、`full-v2.json`；无云调用。该结果覆盖 Windows 独立服务进程，不替代原生 DBX 宿主重启或其它 OS 验收。
+- `scripts/check-ai-process-recovery.js` 使用隔离 D 盘 DataDir、真实 Hertz 服务进程、null 音频、memory secrets 与 loopback Ollama HTTP fixture，在 Standard 和 Full 各执行一次强制终止后同目录重启。每轮都验证恢复发生在 HTTP 接受请求前；已派发 running 任务恢复为 `interrupted/unknown`，未派发 accepted 任务恢复为 `interrupted/released`；在途 loopback 连接随宿主退出而关闭，重启不重发 POST，两个 brief 均未持久化。报告及二进制/源码/脚本 SHA-256 原保存在 `target/ai-runner-recovery/standard-v2.json`、`full-v2.json`，已于 2026-10-19 随 target 清理删除；当前仅保留本文件中的历史验收摘要，原始 JSON 无法本地复核。该结果覆盖 Windows 独立服务进程，不替代原生 DBX 宿主重启或其它 OS 验收；无云调用。
 
 ## R4-J Windows DBX sidecar 重启验收
 
-- `scripts/check-ai-sidecar-recovery.js` 使用隔离 D 盘 DataDir、真实 Standard / Full DBX Rust sidecar 子进程、SDK JSON-RPC stdio、null 音频、memory secrets 与 loopback Ollama HTTP fixture，分别强制退出并以相同 DataDir 重启。两版都验证已派发任务恢复为 `interrupted/unknown`、排队任务恢复为 `interrupted/released`，在途 provider 连接关闭、重启没有再次发送 POST，brief 不写入持久文件。报告为 `target/ai-sidecar-recovery/standard.json`（SHA-256 `6b9d92b88845c4431b22a21b20012cae33933dd5abf1a90556409ecb88b0495d`）和 `full.json`（`dd853acd8647639d90255a8bfdb01a1c61760f1982bf7d8e965df7508e2d955e`）；报告中的二进制、harness 与 plugin main/bootstrap/jobs/usage 指纹已对照当前文件逐项复核，临时 `run-*` 目录已清空。无云调用。证据覆盖真实 Rust sidecar 进程，不代表桌面 DBX 宿主的启动、关闭和恢复集成已经验收；真实 DBX 宿主及其它 OS 仍待验证。
+- `scripts/check-ai-sidecar-recovery.js` 使用隔离 D 盘 DataDir、真实 Standard / Full DBX Rust sidecar 子进程、SDK JSON-RPC stdio、null 音频、memory secrets 与 loopback Ollama HTTP fixture，分别强制退出并以相同 DataDir 重启。两版都验证已派发任务恢复为 `interrupted/unknown`、排队任务恢复为 `interrupted/released`，在途 provider 连接关闭、重启没有再次发送 POST，brief 不写入持久文件。终态失败重试及状态查询孤儿清扫实现后，曾用当前源码重建两版 sidecar 并复跑；当时 JSON 中的报告及二进制、harness 与 plugin main/bootstrap/jobs/usage 指纹已逐项对照源码。报告原保存在 `target/ai-sidecar-recovery/standard-retry-v2.json` 和 `full-retry-v2.json`，已于 2026-10-19 随 target 清理删除；原 SHA-256 分别为 `ece596fa14a45ecde1c7aabad25ed2968df5130dee19ab3b89b61ef34a408b0b` 和 `95d162a59bf990068afc6b6727982050a72a92506af2c1c42b44676874083223`，当前仅作为历史文本保留，原始 JSON 无法本地复核。无云调用。该结果覆盖真实 Rust sidecar 进程，不代表桌面 DBX 宿主的启动、关闭和恢复集成已经验收；真实 DBX 宿主及其它 OS 仍待验证。
+- R4-J worker 终态失败回退：若 provider 返回后，终态 CAS/账本事务发生错误，worker 会按持久 `dispatch_state` 尝试 `interrupted` 结算；已派发任务按 `unknown` 保守计入 reservation，未派发任务释放 reservation。失败后立即写入一次，再按 100/250/500ms 延迟重试三次；可恢复的终态 fallback 重试期间保留 worker 输入与执行槽。`terminal_settlement_error_interrupts_and_conservatively_charges_dispatched_task` 覆盖单次终态事务失败，`transient_interruption_settlement_error_retries_before_releasing_worker` 以持续 500ms 的 SQLite trigger 验证重试后转为 `interrupted/unknown`，`exhausted_interruption_retries_are_swept_by_status_query` 验证持续故障耗尽四次尝试后，存储恢复且任务超期时 status 查询会清扫无内存 owner 的孤儿并保守计入预留。当前 Standard / Full `ai::jobs::tests` 各 53/53 通过，两版 `cargo clippy --locked -p hertz-studio --all-targets -- -D warnings`（Full 加 `--features full`）通过，构建位于 D 盘独立 target 目录。持续存储故障期间仍不能保证立即终态；未发起云请求。
+- R4-J runner 所有权边界：非 runner 的任务查询不执行过期清扫；非 runner 的取消返回 `503 ai_locked`，避免没有该进程的 worker/cancellation sender 时，跨进程请求改写仍在执行的任务。回归将另一进程的内存 owner 视为不可见并把运行中任务时间戳推过期限，确认查询仍返回 `running/reserved`、取消被拒绝；恢复 runner 后释放 provider fixture，原 worker 正常完成。`BlockedProvider` fixture 已改用有效契约场景 `orb`，避免无效的 `space` 令成功终态测试实际走失败路径。Standard / Full `ai::jobs::tests` 各 53/53 通过；两版全 target Clippy 和 `git diff --check` 通过。`cargo fmt --check --all` 仍报告 `jobs.rs` 的既有格式差异；未对未相关测试代码做批量重排。无云请求。
+- 执行槽关闭回归：worker 等待运行许可期间 semaphore 被关闭时，任务现在立即按 `interrupted/released` 收敛并清理内存输入；`ai::jobs::tests::closed_execution_slot_interrupts_and_releases_accepted_task` 1/1 通过。使用本地 SQLite/null 音频，未调用 provider；其余运行时异常、原生 DBX 宿主及其它 OS 边界仍待审计或验收。
 
 前端检查自动发现新增的浏览器检查；需要真实环境的检查仍按发布矩阵另行执行。使用方式见 [舞台意图草稿](./ai-stage-drafts.md)，约束见 [ADR-0010](./adr/0010-ai-drafts-and-retention.md)。
+
+## R5-P OpenAI 输入费用上界预检
+
+- OpenAI 舞台生成与 completion 请求构造都按完整序列化请求的 UTF-8 字节数保守检查 `maxInputTokens`；超限在 HTTP dispatch 前返回诊断。该检查避免明显低于请求规模的报价仍发出网络调用，不依赖未确认的具体模型 tokenizer；固定回环回归将输入上界设为 1 token，分别验证报价和 `generate` 派发入口均拒绝，loopback listener 收到零连接。定向 Rust 测试 `ai::provider::tests::openai_rejects_requests_larger_than_the_quoted_input_budget_before_dispatch` 1/1 通过，无 API key、无 OpenAI 请求。
+- 为该单项测试临时构建 4.1 GiB 到 `target/ai-input-bound-check`，随后用对应 `cargo clean --target-dir` 删除；常规 `target` 未重建。UTF-8 字节数是针对可见请求文本的保守上界假设，尚未证明指定 tokenizer 与服务端隐藏开销，不能作为价格/模型核验完成或解除 OpenAI 派发关闭的证据。
+
+## R4-J 启动恢复故障隔离
+
+- 启动恢复原先把整批 accepted/running job 放在一个 SQLite 事务；单行状态写或费用结算失败会回滚所有正常行。现在候选逐项重读并用独立事务完成派发态结算与 interrupted CAS；失败项保留待重试，其它项继续收敛，处理完向启动方返回首个错误。每项账务与状态仍保持原子。
+- `one_recovery_failure_does_not_roll_back_other_tasks` 用只拒绝一条任务状态更新的 SQLite trigger 验证另一条任务已中断并释放预留，失败项保持 accepted 且预留不动；移除 trigger 后第二次恢复成功。该用例与既有 `recovery_marks_incomplete_jobs_interrupted_and_settles` 均 1/1 通过；未跑全量测试、无模型请求。两个用例使用独立 `target/ai-recovery-isolation-check`，4.1 GiB 构建已清理。
+
+## R4-J 到期清扫故障隔离
+
+- 到期孤儿现在逐项重读状态，并用独立 SQLite 事务提交 expired 状态与费用结算；提交后继续处理其余候选。历史保留另开事务，任何失败都不会撤销已过期任务；清扫完成后发布已提交事件，再返回首个错误。
+- 新增两条孤儿任务的账本故障注入回归：trigger 只阻断其中一条 released 账本插入，验证另一条任务正常过期并释放预留、失败项保持 accepted 且不发布事件；移除 trigger 后失败项可重试收敛。旧的单任务回滚测试继续保证失败任务自身的状态和结算原子性。`orphan_sweep` 过滤器 2/2、恢复过滤器 2/2 通过；未跑全量测试。隔离 target 构建 5.9 GiB 后已清理，无模型请求。
+
+## R5-E 评测信号中断恢复
+
+- 本地评测驱动现在监听 SIGINT/SIGTERM；中断时取消当前 evaluator 子进程并等待其关闭，再将已保存的连续样本前缀、结果 hash 和 `interrupted` 状态写入 run metadata。之后可用 `--report` 重算不完整报告，不自动续跑或重试。
+- `node scripts/check-stage-evaluation.js --live` 使用现有 CLI 与回环 Ollama fixture：第一条样本先完成并落盘，第二条请求挂起时注入 SIGINT；检查确认 provider 连接关闭、首条结果保留、报告可重算且仍判为不完整。脚本语法与离线检查通过；无真实模型/key，无全量测试。本检查不覆盖进程强杀、断电或操作系统崩溃。
+
+## R4-J 派发前取消信号复查
+
+- worker 的最后一道派发前检查现在同时识别 watch channel 已通知和 sender 已关闭；此前只识别关闭状态。若取消通知先于 sender 移除到达，worker 会在创建 provider 请求体之前退出。
+- `cargo test -p hertz-studio --lib ai::jobs::tests::pre_dispatch_cancellation_detects_notified_and_closed_watch_channels -- --exact --test-threads=1` 1/1 通过，`git diff --check` 通过。只运行该定向测试；无真实 provider 或模型请求。
+
+## R5-P StepFun token-only 边界
+
+- 未核实价格时，StepFun `step-5-preview` 仍可进入受限派发，不做金额预留或月费用门槛；响应中的可信输入/输出 token 以 `unpriced` 写入任务和逐次账本，金额保持未知、不进入费用汇总。立即结算和迟到对账都检查受理时的 token 上界；超界仍保留原始 token 计数，并设置保护标记，不伪造费用。
+- `cargo test -p hertz-studio token_only -- --nocapture` 5/5、`cargo test -p hertz-studio ai::stepfun::tests -- --nocapture` 10/10 通过。使用 D 盘独立 target 和 loopback HTTP/SQLite fixture，没有真实 StepFun 请求；真实应用内 usage 字段与计量语义仍待验证。
+
+## R5-E StageIntent v2 契约迁移
+
+- 保留 `evals/stage-intent/v1` 原样，v2 的 160 条 `cases.jsonl` 与 v1 字节一致，只更新到当前 stage-contract hash。当前机械审计中 89/89 个 candidate 标签均通过当前校验和物化，71 个 refusal 标签没有结构冲突；这不证明中文描述与标签语义相符。
+- 离线评测和规则基线默认使用 v2，并支持显式 `--corpus v2`；每次运行、报告、比较及人工预览包都带语料版本。旧 v1 报告需用原评测器 revision 复现，不能只换 schema hash 重算。
+- v2 离线规则基线 32/120 自动匹配、66/70 预期 candidate 通过结构/物化、31 个 false acceptance、53 个 critical failure；人工语义分为 null，`releaseEligible=false`。报告快照见 [baseline-20261020.json](../evals/stage-intent/v2/baseline-20261020.json)。
+- 独立标签复核、预留集独立采集/验收、真实模型两轮评测仍未完成，v2 不改变 release gate。验证限于离线评测器与受控本地 fixture，不调用真实模型或云服务。
+- 新增盲化标签复核工具：随机 opaque ID 与打乱顺序，审阅包只包含 brief 和当前契约；原 case ID 映射单独写在同级私有文件。核验器要求 160 条完整唯一答案、检查场景/字段并输出逐项差异；审阅人名称自报，结果不会自动改写冻结语料或解除 `releaseEligible=false`。`node scripts/check-stage-intent-label-review.js` 局部检查通过；生成流程见[v2 评测说明](../evals/stage-intent/v2/README.md)。
+
+## R4-B/R5-P 歌词 completion 容量与终态校验
+
+- 歌词情绪 completion 现在复用舞台任务的历史容量上限与到期账本保留，在任务受理事务中核对时钟水位、容量和预算；满额时返回 `history_capacity_exceeded`，不会先写 job 或预算记录。费用未知的 token-only 模式仍跳过金额熔断和金额预留。
+- completion 账务 owner 在终态提交前使用同一 `parse_reply` 契约检查模型文本。hash/范围/情绪字段非法时持久任务记为 `failed`；adapter 已返回的可信 token 仍按 `unpriced` 保存，不因业务结果失败而丢弃。
+- 定向用例验证满 500 条时拒绝且不建预算行；有效分类与错误歌词 hash 分别验证成功/失败终态及输入/输出 token 留存。另以受控阻塞 provider 检查 token-only 已派发任务经恢复转为 `interrupted/unpriced`、charged/reserved 为零、不重发，并在迟到 fixture 响应后补记可信 token。它不是独立进程重启验收。
+- `cargo test -p hertz-studio completion_records_token_only_usage_in_the_persistent_ledger`、`completion_admission_respects_shared_history_capacity`、`token_only_recovery_marks_interrupted_without_charge_and_keeps_late_tokens`、`token_only`（6/6）及 `ai::stepfun::tests`（10/10）通过；相关 Rust 文件 rustfmt 与 `git diff --check` 通过。本次没有真实云调用；D 盘一次性测试 target 构建 11.0 GiB 后已清理。
+
+## R4-B/R5-P 终态事务故障下保留可信 token
+
+- 舞台任务已收到合法输出和可信 usage、但成功事务因提案写入失败时，现在使用同一组可信 token 执行失败终态结算；此前此回退遗漏 usage，会把 token-only 账目留成 token 数未知。completion 终态提交失败时会短暂重试独立的 `interrupted` 事务，并在可提交时结算已收到的 token，不把失败的业务响应作为成功返回。
+- `proposal_failure_preserves_token_only_usage` 及扩展后的 `completion_records_token_only_usage_in_the_persistent_ledger` 各 1/1 通过；两项均用 SQLite trigger 注入事务失败并检查 `unpriced` 账本 token，未请求云模型。只构建两个定向 Rust 测试，独立目录为 `D:\hertz-target\ai-usage-audit`，验证后清理。
+
+## R1-S 搜索交互与 R3 历史 fixture 检查
+
+- 搜索失败按稳定错误码区分上游拒绝、音源连接失败和超时；无状态 `TypeError` 显示网络连接提示，不把浏览器原始英文异常拼进用户消息。顶栏、空间搜索、在线页和流年重试/加载更多在操作控件消失时把焦点移至对应来源状态；流年可继续使用的操作则保留原按钮焦点。
+- `node scripts/check-search-session.js`、`node scripts/check-online.js`（464 checks）和 `node scripts/check-stage-legacy-fixtures.js` 通过，前端相关文件及检查脚本 `node --check` 通过，`git diff --check` 通过。历史舞台 fixture 现在记录历史/current `apply` 调用及参数，并验证 `materializeIntent` 不触发 presentation side effect。
+- 使用已有 Playwright 与 Chrome 执行 AI 任务浏览器旅程，18 项通过；搜索浏览器旅程与空间首页浏览器检查未运行。真实来源/弱网、原生 DBX 和人工视觉验收仍未完成。此次没有全量测试或真实 provider 请求。工作区现有 Rust 脏文件包含既有 rustfmt 差异，本次未执行全文件重排。
+
+## R4-E 工坊任务历史游标翻页
+
+- 官方工坊任务列表在已有最近 20 条后，现在使用后端 `before_created_at` / `before_job_id` 复合游标读取更早任务，合并快照并保留已加载历史页；加载失败可单独重试。后端路由和稳定排序未变。
+- 隔离 Chrome 浏览器旅程通过：稳定复合游标读取较早任务、打开较早提案，并在新任务挤出最近页后保留已加载历史。该旅程属于下方 18 项 AI 任务契约检查；只使用 fake provider，没有真实模型或云调用。
+
+## R3-K 失败意图保留活动预览
+
+- `CreativeStage.applyIntent` 现在先检查舞台状态并物化 intent；校验失败直接返回，不清除用户已有的临时预览。成功物化后才使预览失效并提交变更。
+- 已增加真实浏览器回归断言：无效版本应用期间活动预览 ID 保持不变。`check-stage-materialize.js`、历史舞台 fixture 与隔离 Chrome 预览旅程均通过；后者现在覆盖实际 reload 与 `pagehide` 丢弃预览。
+
+## R4-E 刷新时保留已加载任务历史
+
+- AI 任务快照刷新现在将最新 20 条与全部已加载页面去重合并。新任务把旧第一页记录挤到更早页后，刷新不会丢弃这些已加载任务。
+- 已扩展 AI 任务浏览器旅程覆盖新任务挤页后的历史保留；隔离 Chrome 旅程 18 项全部通过。测试等待异步 `Workshop.init()` 完成，并为短 ID 展示断言使用唯一前缀，避免把 fixture 启动时序或重复 ID 前缀误判为产品失败。
+
+## R4-B/R5-P Responses 错误响应 usage
+
+- StepFun 与 OpenAI Responses adapter 现在对有界响应体继续执行现有严格解析。非 2xx 仍使任务失败；只有模型、响应 envelope/状态与 token 总数均通过校验时才保留 usage。HTTP 错误 JSON、模型不匹配及畸形计数仍保持 usage 未知。
+- 新增 StepFun 与 OpenAI loopback fixture 覆盖舞台与歌词 completion；`cargo test --target-dir D:\hertz-target\roadmap-token-usage -p hertz-studio --lib non_success_responses_keep_only_verified -- --test-threads=1` 两项通过。构建没有访问真实 provider；临时 target 已清理 4.2 GiB。
+
+## R1-S SpaceHome 全面板重试焦点
+
+- SpaceHome 全面板重试现在有稳定焦点键；请求期间焦点移至加载状态，重复失败后回到重试按钮，成功后回到面板内容。新增浏览器回归覆盖“失败后再次失败”和随后成功。
+- 本机缺少 Playwright，该浏览器交互尚未执行；当前仅计划运行脚本语法和不依赖浏览器的邻近检查，不将其记为浏览器验收通过。
+
+## R4-B/R5-P 暂时性账本故障保留可信 token
+
+- 新增 `ai_pending_usage`，以 job/attempt 唯一保存 adapter 已验证的 token JSON。舞台生成和歌词 completion 都在终态结算前先单独提交队列记录；账本与任务状态成功提交后再同事务删除。首次记录优先，冲突计数不覆盖已有事实。
+- 启动恢复会用待结算 token 收敛活动任务并校正已终态账目；惰性清扫也会重试，且跳过仍有内存 owner 的 worker。历史保留不会删除仍有 pending usage 的任务或账目。费用无法表示或总额溢出时保留可信 token，金额仍按既有保守估算/熔断处理；账本 UI 展示可用 token 与对应费用状态。
+- D 盘定向测试通过：待结算恢复与保留期保护 2/2、不可计价 token 3/3、歌词 completion token-only 1/1、既有暂时性账本重试 1/1；`node --check plugin/ui/ai-ledger.js` 与 `git diff --check` 通过。使用隔离 target，无真实 provider 或云调用。
+- 队列只能保证已成功提交到 SQLite 的 provider usage；进程若在响应返回与首次队列提交之间崩溃，或 SQLite 持续不可写，仍无法保证 token 持久化。上述故障注入覆盖的是队列已提交后账本持续失败的窗口。
+
+## R2 能力 handler 与 MCP 输入 schema 对齐
+
+- MCP 能力条目现在将输入 schema 分类与 typed `Handler` 绑定；operation 名由 handler 导出，执行分派改为穷尽 enum match，移除了适配层独立维护的按字符串 schema 表。HTTP capabilities context 和 MCP 工具目录都从同一 handler 导出能力名。
+- `cargo test --locked --target-dir D:\hertz-target\roadmap-capability-registry -p hertz-studio --lib ai::mcp::adapter::tests::every_registered_capability_has_one_advertised_schema_and_handler -- --exact --test-threads=1` 通过（1/1），覆盖十个已登记工具的唯一 handler、工具名及实际发布 schema。首次隔离编译后清理 5.9 GiB；未访问网络 provider。
+- 输出投影仍由各 handler 显式构造，没有集中登记 output schema；此修改不代表整份 R2 技术路线声明的 registry 元数据全部收敛。
+
+## R6 解码器 reset 与 PCM 格式切换回归
+
+- 使用脚本化 Symphonia `FormatReader` / `Decoder` 驱动真实 decoder loop，并在首段入队后用 barrier 固定检查边界。`ResetRequired` 用例验证 decoder reset 恰好一次，后续静音段按预期长度输出且没有旧 sinc 历史残留；实际采样率变化用例验证 worker 标记 decode error、未声明 EOF，且新格式 PCM 未进入同一队列。
+- `cargo test --locked --target-dir D:\hertz-target\roadmap-audio-decoder -p vmusic-audio --lib cpal_backend::tests::reset_required_clears_decoder_and_resampler_history -- --exact --test-threads=1` 与 `decoded_format_change_fails_before_mixing_new_pcm` 各 1/1 通过。无声卡、外部媒体或模型调用；隔离 target 构建后清理 603.8 MiB。
+- `git diff --check` 通过。整文件 `rustfmt --check` 仍报告此既有脏文件中其它代码段的格式差异；新增测试段已按 formatter 输出整理，未批量重排原有内容。
+
+## R2 曲库搜索分页输入边界
+
+- `library_search` 之前会把超出 MCP schema 声明范围的 `limit` / `offset` 静默夹回范围，造成执行参数与调用方意图不同。现在服务端与 schema 使用相同的 1–50 / 0–10000 边界，越界明确返回输入错误。
+- 新增默认值、上下界及越界拒绝的局部单测；没有读取曲库数据、运行全量测试或访问模型/provider。
+
+## R1 搜索分页焦点归属
+
+- 聚合在线搜索的加载更多完成后，来源状态仅在结果区重绘确实把焦点退回 `body` 时接管焦点；用户在等待期间主动移到搜索框或其它区域时不再被抢焦。
+- 浏览器旅程已增加可控慢分页及移焦断言；本机缺少 Playwright 时只做脚本语法与搜索协调器的局部检查，不把未执行的浏览器旅程记为通过。
+
+## R4-J 生成同意撤回竞态
+
+- 设置关闭生成同意后，服务端现在先向所有在途任务发取消并释放内存输入，再尝试任务与账本终态事务；账本事务失败也不会延迟 provider 的取消信号。worker 在处理模型响应后和写入提案的事务内再次检查同意，撤权后到达的合法响应不会生成提案。
+- `cargo test --locked --target-dir D:\hertz-target\r2-library-bounds -p hertz-studio --lib consent_ -- --test-threads=1` 3/3 通过，包含撤权后响应、账本写失败时取消传播及既有授权门用例。没有真实 provider 请求；全量测试未运行。
+
+## R5-P 凭据轮换取消歌词 completion
+
+- 凭据变更取得独占生命周期锁后，会先通知活动歌词 completion 取消，再使当前实例绑定凭据的任务失效并执行密钥存储变更；不再只更新数据库任务状态而让 provider 请求继续运行。
+- `cargo test --locked --target-dir D:\hertz-target\ai-credential-rotation -p hertz-studio --lib credential_rotation_cancels_active_lyric_completion -- --test-threads=1` 通过（1/1），覆盖 provider 收到取消、任务落入 `cancelled` 且不写歌词缓存。测试使用数据库中的实际实例 owner；隔离 target 已清理 4.2 GiB。没有真实 provider 请求或费用验证。
+
+## R4-B/R5-P HTTP 与 RPC 歌词授权撤回一致性
+
+- HTTP 与 DBX/RPC 的通用设置写入现在共用同一个应用函数。非 runner 进程不能撤回生成或歌词 AI 授权，避免它只改共享设置、却无法向唯一 runner 的在途任务发送取消；runner 处理撤回时先取消活动歌词分类，再执行可能失败的生成同意终态结算。
+- `cargo test --locked --target-dir D:\hertz-target\rpc-consent-revocation -p hertz-studio --lib rpc_settings_ -- --test-threads=1` 通过（2/2）：非 owner 撤回被拒且授权值不变；owner 撤回使在途 provider 取消，分类以授权撤回结束且不写缓存。使用本地 SQLite 与受控 provider fixture；隔离 target 已清理 4.2 GiB。没有真实歌词、模型或云调用。
+
+## R4-B/R5-P 双授权撤回与结算故障顺序
+
+- 新增 RPC 设置入口组合回归：同一请求撤回歌词分类与舞台生成授权，并注入舞台任务终态/账本写失败。即使请求以结算错误返回，在途歌词和舞台 provider 都已先观察到取消；歌词分类不会写缓存。移除故障后，舞台任务仍可收敛到 cancelled。
+- `cargo test --target-dir D:\hertz-target\combined-ai-revocation -p hertz-studio --lib ai::emotion::tests::rpc_settings_revokes_both_ai_capabilities_before_generation_ledger_failure -- --exact --test-threads=1` 1/1 通过。使用本地 SQLite 与受控 provider fixture，无真实模型/key/云调用；独立 target 已清理。
+
+## R3-K/R5-E 当前 fixture 复核
+
+- 当前工作树重新通过 `node scripts/check-stage-materialize.js`、`node scripts/check-stage-legacy-fixtures.js --git`、`node scripts/check-stage-templates.js`、`node scripts/evaluate-ai-stage.js --validate --corpus v2` 与 `node scripts/check-stage-intent-label-review.js`。覆盖物化、十场景历史兼容、模板隔离、160 条语料及盲审答案校验器；均为离线本地检查，没有 provider 调用。
+- 盲审工具通过不代表人工语义复核已完成；`output/evals/stage-intent-v2-label-review` 仍只有模板，没有 `answers` 文件，R5-E `releaseEligible` 继续为 false。
+
+## R3-U Chromium 草稿预览旅程（2026-10-20）
+
+- 隔离服务配合本机 Chromium 执行 `node scripts/check-stage-draft-browser.js`，七项通过：临时渲染与隔离、非法版本不丢预览、取消/切页/关闭/普通编辑失效、隐藏文档清理临时层、实际 `pagehide`/reload 清理未确认预览并保留已提交 preset、拒绝不兼容草稿、显式应用并持久化完整草稿。刷新用例在 unload 时保留一个 committed-save timer，并通过同源 `sessionStorage` 观察清理钩子执行后的预览状态。检查只将 `POST /v1/ai/jobs` 与 `POST /v1/ai/lyrics/emotion` 计作模型派发；本旅程派发数为零，状态和任务列表读取正常放行。
+- `cargo check --locked --target-dir D:\hertz-target\stage-preview-browser -p hertz-studio --lib` 通过；此前 `adapter.rs` 的 `Handler`、`SCOPES` unused-import 警告已随测试专用导入收窄而消失。`node --check scripts/check-stage-draft-browser.js` 与相关 `git diff --check` 通过。
+- 这是本地 Chromium 与隔离服务 fixture 证据，不覆盖 DBX 原生导入、真实 GPU/弱机视觉验收或真实 provider。R5-E 人工盲审仍缺，因此 `releaseEligible=false`，路线图整体未完成。StepFun 未核实价格继续按 token-only 记账：费用未知不构造金额门槛或伪零金额，只保存 provider 返回并经 adapter 验证的 token usage；本次浏览器旅程未调用模型。
+
+## R4-B/R5-P 任务 panic 收敛与事件掉队恢复（2026-10-20）
+
+- 歌词 completion worker panic 或 join 失败时，现在用已追踪的持久任务记录重试保守收敛为 `interrupted`；执行槽随 worker 退出释放，终态结算沿用可信 pending usage。token-only fixture 注入 provider panic，检查任务终态、账本和执行槽。
+- WebSocket/RPC 事件广播掉队后的恢复批次现在同时触发曲库刷新，避免 `library_changed` 边沿丢失后前端长期持有旧列表。`/v1/state` 明确带有 `buffering` 时也会修正播放键 loading 态，修复断线期间漏掉清理边沿后的残留转圈；普通 WS 状态帧不覆盖此字段。
+- 定向验证：歌词 token-only 账本与 provider panic 测试 1/1，事件掉队恢复测试 1/1，`node --check plugin/ui/app.js` 和相关 `git diff --check` 通过。5.9 GiB 隔离 target 已清理。没有真实 provider/key/云调用；StepFun 价格仍可未知，功能不以金额核算为前置条件，只记录 adapter 验证过的 token usage。
+- 音频 `Transitioned` / `Ended` 另走单消费者控制队列，快照和频谱仍用有界广播；服务事件泵消费两路并按代际去重。DBX 转发任务退出会释放运行标记，后续订阅可重启它。
+- 追加定向验证：音频控制边沿覆盖广播掉队测试 1/1、`cargo check --locked -p dbx-plugin-hertz` 通过；Standard / Full Windows sidecar 协议 smoke 分别为 306/306、290/290。两版都覆盖 stdout 停读 90 秒后的恢复，恢复后收到 340 条事件（82,500 B）并收到 `ai_tasks_resync`。使用 null 音频，频谱断言跳过；这是 Windows sidecar 子进程验收，不代表原生 DBX 宿主、真实声卡、其它平台或发布验收。`cargo clean` 已清理隔离 target `D:\hertz-target\sidecar-lifecycle`，释放 10.3 GiB。
+- 这不覆盖 GPU/弱机验收，也不代表路线图完成；R5-E 人工盲审仍缺。
+
+## R2 能力 registry 输出契约与投影（2026-10-20）
+
+- 十个已登记能力现在都在同一 registry 声明成功输出 schema、允许投影字段、`no_provider_call` 预算类别和独立能力版本；HTTP 能力目录与 MCP `tools/list` 从 registry 导出，MCP 公布 `outputSchema` 及对应元数据。
+- 受限门面执行后先用严格 DTO 校验 registry 成功输出的必填字段、类型和未知字段，再按投影路径检查；缺字段、错类型及额外字段失败关闭，空集合保持有效。曲库搜索仍不含文件路径。动态舞台参数键允许点号，投影通配只匹配单个完整 JSON 对象键，不接受其下的任意嵌套路径。
+- 定向验证：注册表输出 DTO/投影测试 1/1、MCP 十项能力 schema/handler/元数据一致性测试 1/1、StepFun token-only 不受金额 gate 阻挡并记录可信输入/输出 token 测试 1/1 通过；fixture 覆盖带点号参数、缺失/类型错误/未知字段、嵌套动态路径及空集合。未运行全量测试，无云 provider 请求。`cargo fmt --all -- --check` 仍被工作树中既有的其它未格式化改动阻塞。
+- StepFun HTTP 回归使用 `AiRuntime::from_config` 生产工厂核验 provider 配置与 token-only 报价，再由仅测试可用的数值 loopback fixture 走官方 `POST /v1/ai/jobs`、任务查询和 `GET /v1/ai/ledger`；验证幂等只派发一次、可信 input/output token 入账、费用保持 `unpriced`/金额未知且预算不变。fixture 只替换测试请求目的地，没有真实云调用或真实 key。
+- StepFun 未核实价格继续采用 token-only 记录：费用未知不阻挡 adapter 派发能力，也不伪记为 `$0`；本轮没有执行云调用。
+
+## R6-W cue 编辑页工程轨状态
+
+- cue 编辑页现在持续显示当前工程 cue 轨状态；切换曲目时，确认状态会即时清除并显示待重新确认，刷新后也保持待确认。普通预置与已确认工程轨显示不同状态。
+- 隔离 Chromium 的 `scripts/check-stage-project-browser.js` 通过，覆盖普通预置、确认启用、重载后待确认、切曲后失效及回到原曲不自动恢复；同一旅程还验证原有工程导入、时间线编辑和导出，未发起模型请求。
+- 为该浏览器旅程使用的独立 Windows 服务构建已清理，释放 5.8 GiB。结果只覆盖本机隔离 UI/服务夹具，不代表真实 DBX 宿主或发布验收。
+
+## R4-B 多条 pending usage 的隔离恢复
+
+- 新增 SQLite 故障注入回归：两条 token-only pending usage 中首条账本 CAS 更新失败时，恢复仍提交第二条并保留首条 pending；移除故障后首条成功对账并删除 pending，重复恢复保持账目 revision 不变。
+- `cargo test --locked --target-dir D:\hertz-target\pending-usage-drain -p hertz-studio --lib ai::jobs::tests::pending_usage_drain_continues_after_one_settlement_failure -- --exact --test-threads=1` 通过（1/1）。只运行该定向测试；没有 provider 或云请求。隔离测试 target 后续已清理。

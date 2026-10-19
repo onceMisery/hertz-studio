@@ -737,7 +737,7 @@ void main() {
   float e = (bandAt(zz - 0.03) + bandAt(zz) * 2.0 + bandAt(zz + 0.03)) * 0.25;
   float n = vnoise(vec2(cxz.x * 4.0, cxz.y * 4.0 + uTime * uScroll * 0.2));
   float h = (e * 0.6 + (n - 0.5) * 0.8) * uAmp2 + uAgg.x * 0.12;
-  h *= smoothstep(0.0, 0.18, cxz.y) * smoothstep(1.0, 0.75, cxz.y);
+  h *= smoothstep(0.0, 0.18, cxz.y) * (1.0 - smoothstep(0.75, 1.0, cxz.y));
   vH = e;
   vGrid = cxz;
   // 片元里那道扫描波用的是这个滚动相位，不是网格坐标：地形在滚，波要跟着
