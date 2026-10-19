@@ -727,6 +727,7 @@
 
   function setEmotionSettings(next) {
     var patch = next || {};
+    var previousMode = emotionSettings.mode;
     if (patch.scale != null) {
       var scale = Number(patch.scale);
       if (isFinite(scale) && scale >= 0 && scale <= 1.5) emotionSettings.scale = scale;
@@ -736,7 +737,9 @@
       var E = emotionApi();
       if (E && E.profiles && E.profiles[patch.preview]) emotionSettings.preview = patch.preview;
     }
-    if (patch.mode != null) emotionSettings.mode = patch.mode === 'manual' ? 'manual' : 'off';
+    if (patch.mode != null) {
+      emotionSettings.mode = ['manual', 'auto', 'off'].indexOf(patch.mode) >= 0 ? patch.mode : 'off';
+    }
     var api = emotionApi();
     if (api) {
       try {
@@ -745,8 +748,12 @@
       } catch (err) { /* 设置值越界时保留上一档 */ }
     }
     if (!doc) return;
-    if (emotionSettings.mode === 'manual') setManualEmotion(emotionSettings.preview);
-    else clearEmotionCues();
+    if (emotionSettings.mode === 'manual') {
+      setManualEmotion(emotionSettings.preview);
+    } else if (emotionSettings.mode === 'off' || previousMode !== emotionSettings.mode) {
+      // auto：由 app 的异步分类任务写入 Cue；模式切换时先清掉旧模型/manual 结果。
+      clearEmotionCues();
+    }
   }
 
   // 只刷「变了的那几行」。换行时真正需要动的元素是：下放的旧当前行、新当前行，

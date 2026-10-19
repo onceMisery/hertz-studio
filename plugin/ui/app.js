@@ -83,6 +83,8 @@ const ui = {
   setEmotionScale: $('set-emotion-scale'),
   setEmotionScaleValue: $('set-emotion-scale-value'),
   setEmotionPalette: $('set-emotion-palette'),
+  setEmotionAiAuthorized: $('set-emotion-ai-authorized'),
+  setEmotionAiNote: $('set-emotion-ai-note'),
   setEmotionNote: $('set-emotion-note'),
   setRmBg: $('set-rm-bg'),
   setRmLyrics: $('set-rm-lyrics'),
@@ -2206,8 +2208,21 @@ function paintPatternNotes() {
   }
 }
 
+let emotionAiStatus = null;
+let emotionAutoToken = 0;
+let emotionAutoScanToken = 0;
+let emotionAutoController = null;
+let emotionAutoPendingHash = null;
+let emotionAutoAppliedHash = null;
+let emotionStatusEpoch = 0;
+function lyricEmotionReady() {
+  return !!(emotionAiStatus && emotionAiStatus.provider && emotionAiStatus.provider.ready &&
+    emotionAiStatus.authorized === true && state.settings.lyrics_emotion_ai_authorized === true);
+}
 function lyricEmotionMode() {
-  return state.settings.lyrics_emotion_mode === 'manual' ? 'manual' : 'off';
+  if (state.settings.lyrics_emotion_mode === 'manual') return 'manual';
+  if (state.settings.lyrics_emotion_mode === 'auto' && lyricEmotionReady()) return 'auto';
+  return 'off';
 }
 function lyricEmotionPreview() {
   var id = state.settings.lyrics_emotion_preview;
@@ -2222,8 +2237,10 @@ function lyricEmotionPalette() {
 }
 function applyEmotionSettings() {
   if (!window.Stage || !Stage.setEmotionSettings) return;
+  const mode = lyricEmotionMode();
+  if (mode !== 'auto') invalidateEmotionAuto();
   Stage.setEmotionSettings({
-    mode: lyricEmotionMode(),
+    mode,
     preview: lyricEmotionPreview(),
     scale: lyricEmotionScale(),
     palette: lyricEmotionPalette()
@@ -2239,12 +2256,88 @@ function paintEmotionSettings() {
   ui.setEmotionScale.value = lyricEmotionScale();
   if (ui.setEmotionScaleValue) ui.setEmotionScaleValue.textContent = lyricEmotionScale().toFixed(2);
   ui.setEmotionPalette.checked = lyricEmotionPalette();
+  if (ui.setEmotionAiAuthorized) ui.setEmotionAiAuthorized.checked = state.settings.lyrics_emotion_ai_authorized === true;
+  var autoOption = ui.setEmotionMode.querySelector('option[value="auto"]');
+  if (autoOption) autoOption.disabled = !lyricEmotionReady();
+  if (ui.setEmotionAiNote) {
+    var provider = emotionAiStatus && emotionAiStatus.provider;
+    ui.setEmotionAiNote.textContent = !emotionAiStatus
+      ? '正在检查模型状态…'
+      : provider && provider.simulated
+        ? (lyricEmotionReady() ? '本地模拟 provider 已就绪，不访问云端；结果仅用于联调' : '启用后只运行本地模拟分类，不访问云端')
+        : provider && provider.ready
+          ? (lyricEmotionReady() ? '模型已就绪；授权后会在每首歌载入时分类' : '授权前不会发送歌词')
+          : ((provider && provider.diagnostic) || '模型未就绪；不会发送歌词');
+  }
   if (ui.setEmotionNote) {
     ui.setEmotionNote.textContent = auto
-      ? '自动分类需要模型授权，尚未开放；当前按关闭处理。'
-      : '关闭时与当前版本完全一致；手动预览只用于调试，自动分类需要模型授权，尚未开放。';
+      ? '自动分类使用已配置的模型 provider；失败时保持中性，不影响播放。'
+      : '关闭时与当前版本完全一致；手动预览只用于调试，自动分类需要模型 provider 和显式授权。';
   }
 }
+
+async function refreshEmotionAiStatus() {
+  const epoch = ++emotionStatusEpoch;
+  let nextStatus = null;
+  try {
+    nextStatus = await transport.get('/v1/ai/lyrics/emotion/status');
+  } catch (error) {
+    nextStatus = null;
+  }
+  if (epoch !== emotionStatusEpoch) return;
+  emotionAiStatus = nextStatus;
+  paintEmotionSettings();
+  applyEmotionSettings();
+  if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
+}
+
+async function maybeAutoEmotion() {
+  if (lyricEmotionMode() !== 'auto' || !window.LyricEmotion || !Stage || !Stage.lyrics) return;
+  var doc = Stage.lyrics();
+  if (!doc || !doc.lines || !doc.lines.length) return;
+  var scanToken = ++emotionAutoScanToken;
+  var lines = doc.lines.map(function (line, index) {
+    return { index: index, start_ms: line.start_ms, text: String(line.text == null ? '' : line.text).normalize('NFC') };
+  });
+  var requestToken = null;
+  try {
+    var hash = await LyricEmotion.hashLyrics(lines);
+    if (scanToken !== emotionAutoScanToken || lyricEmotionMode() !== 'auto') return;
+    if (hash === emotionAutoAppliedHash || hash === emotionAutoPendingHash) return;
+    if (emotionAutoController) emotionAutoController.abort();
+    requestToken = ++emotionAutoToken;
+    var controller = new AbortController();
+    emotionAutoController = controller;
+    emotionAutoPendingHash = hash;
+    var cue = await transport.post('/v1/ai/lyrics/emotion',
+      { lyricsHash: hash, lines: lines }, { signal: controller.signal });
+    if (requestToken !== emotionAutoToken || lyricEmotionMode() !== 'auto' || !cue || cue.version !== 1) return;
+    if (Stage.setEmotionCueDoc(cue)) emotionAutoAppliedHash = hash;
+  } catch (error) {
+    // Provider 未就绪/授权撤销/超时都保持中性；播放不受影响。
+  } finally {
+    if (requestToken != null && requestToken === emotionAutoToken) {
+      emotionAutoPendingHash = null;
+      emotionAutoController = null;
+    }
+  }
+}
+
+function invalidateEmotionAuto() {
+  emotionAutoScanToken += 1;
+  emotionAutoToken += 1;
+  if (emotionAutoController) emotionAutoController.abort();
+  emotionAutoController = null;
+  emotionAutoPendingHash = null;
+  emotionAutoAppliedHash = null;
+}
+
+window.HertzEmotionAuto = {
+  onLyricsChanged: function () {
+    invalidateEmotionAuto();
+    if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
+  }
+};
 
 function paintLyricSettings() {
   if (!ui.setLyricStaff) return;
@@ -2270,11 +2363,12 @@ async function saveLyricSettings(patch) {
   Object.assign(state.settings, patch);
   paintLyricSettings();
   applyMotionSurfaces();
-  persistSettings(patch);
+  await persistSettings(patch);
   const id = state.current && state.current.id;
   // 重拉歌词失败不提示：它只是拿服务端最新歌词刷新显示，偏移/过滤已经生效，
   // 失败时保持当前显示比弹一个 toast 更不打扰。
   if (id && state.snapshot.track_id === id) await refreshLyrics(id, state.current).catch(() => {});
+  if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
 }
 
 // ---------------------------------------------------------------------------
@@ -2445,6 +2539,7 @@ async function refreshLyrics(id, track) {
   const staged = stageDoc(doc);
   if (epoch !== lyricRefreshEpoch || !state.current || state.current.id !== id) return doc;
   if (Stage) Stage.setLyrics(staged && staged.lines && staged.lines.length ? staged : null);
+  if (window.HertzEmotionAuto) window.HertzEmotionAuto.onLyricsChanged();
   if (window.NowPlaying) NowPlaying.lyricState(doc ? 'ready' : 'empty');
   syncNpLyrics(id, doc);
   return doc;
@@ -4229,6 +4324,7 @@ async function loadSettings() {
   if (ui.setScrobble) ui.setScrobble.checked = state.settings.scrobble_enabled !== false;
   if (ui.setRelay) ui.setRelay.checked = state.settings.online_auto_relay !== false;
   paintLyricSettings();
+  refreshEmotionAiStatus();
   // 封面取色会盖掉用户选的主题，默认不这么做：设置表里没有这项时按关闭回填。
   setCoverFollow(state.settings.cover_follow === true, false);
   // 导航里「每日推荐」的可见性：关掉就把入口摘掉，其它菜单项不受影响。
@@ -8332,6 +8428,18 @@ async function startApp() {
     };
     ui.setEmotionScale.onchange = () => saveLyricSettings({ lyrics_emotion_scale: Number(ui.setEmotionScale.value) });
     ui.setEmotionPalette.onchange = () => saveLyricSettings({ lyrics_emotion_palette: ui.setEmotionPalette.checked });
+    if (ui.setEmotionAiAuthorized) {
+      ui.setEmotionAiAuthorized.onchange = async () => {
+        var authorized = ui.setEmotionAiAuthorized.checked;
+        if (!authorized) {
+          emotionAiStatus = emotionAiStatus ? Object.assign({}, emotionAiStatus, { authorized: false }) : null;
+          invalidateEmotionAuto();
+          applyEmotionSettings();
+        }
+        await saveLyricSettings({ lyrics_emotion_ai_authorized: authorized });
+        await refreshEmotionAiStatus();
+      };
+    }
   }
   // 动效分面：写设置表 + 刷 body[data-rm]，各面 CSS 即时生效。
   for (const [uiKey, settingKey] of MOTION_SURFACES) {

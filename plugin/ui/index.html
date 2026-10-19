@@ -1148,7 +1148,12 @@
           <input id="set-emotion-palette" type="checkbox" checked>
           <span class="hint" id="set-emotion-palette-note">关闭时保留场位移与字体参数，尊重自定义歌词色</span>
         </div>
-        <p class="hint set-note" id="set-emotion-note">关闭时与当前版本完全一致；手动预览只用于调试，自动分类需要模型授权，尚未开放。</p>
+        <div class="set-row">
+          <label for="set-emotion-ai-authorized">允许歌词发送给模型</label>
+          <input id="set-emotion-ai-authorized" type="checkbox">
+          <span class="hint" id="set-emotion-ai-note">仅自动分类需要；未授权时不发送歌词</span>
+        </div>
+        <p class="hint set-note" id="set-emotion-note">关闭时与当前版本完全一致；手动预览只用于调试，自动分类需要模型 provider 和显式授权。</p>
       </div>
 
       <!-- 歌词输出：本地 HTTP 歌词 API + OBS 浮层页（folia 的 lyric api / obs

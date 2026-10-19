@@ -56,6 +56,13 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // AI 持久生成任务（技术路线 R4-J）：官方 UI 入口，全权 token 后面，
         // 固定 local-owner 身份；外部 grant 走受限门面的独立路由组。
         .route("/v1/ai/status", get(ai_status))
+        .route("/v1/ai/lyrics/emotion/status", get(ai_emotion_status))
+        .route(
+            "/v1/ai/lyrics/emotion",
+            post(ai_emotion_classify).layer(axum::extract::DefaultBodyLimit::max(
+                crate::ai::emotion::MAX_BODY_BYTES,
+            )),
+        )
         .route(
             "/v1/ai/provider-credential",
             get(ai_credential_status)
@@ -575,6 +582,19 @@ async fn ai_owner_id(state: &Arc<AppState>) -> ApiResult<String> {
 async fn ai_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let owner = ai_owner_id(&state).await?;
     Ok(Json(crate::ai::jobs::status(&state, &owner).await?))
+}
+
+async fn ai_emotion_status(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::emotion::status(&state).await.map(Json)
+}
+
+async fn ai_emotion_classify(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::ai::emotion::ClassifyRequest>,
+) -> ApiResult<Json<crate::ai::emotion::CueDoc>> {
+    crate::ai::emotion::classify(&state, body).await.map(Json)
 }
 
 async fn ai_credential_status(
