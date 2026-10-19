@@ -490,7 +490,10 @@ const DBX_SUBSCRIBE_METHOD = 'studio/events/subscribe';
 /// 搜索协调器指定 waitForSettlement，保持执行槽直到 invoke 真正结束，再丢弃结果。
 function dbxInvoke(method, params, signal, waitForSettlement) {
   if (signal && signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  const call = window.dbxPlugin.invoke(method, params, { timeoutMs: method === 'v1/stage/pitch' ? 35000 : REQUEST_TIMEOUT });
+  // StepFun step-5 分类实测 14–67s；服务端总期限 300s，客户端留 30s 余量。
+  const timeoutMs = method === 'v1/stage/pitch' ? 35000
+    : method === 'v1/ai/lyrics/emotion' ? 330000 : REQUEST_TIMEOUT;
+  const call = window.dbxPlugin.invoke(method, params, { timeoutMs });
   if (!signal) return call;
   if (waitForSettlement) return call.then(value => {
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -829,7 +832,10 @@ async function request(path, options = {}, attempt = 0) {
     if (options.signal.aborted) cancel();
     else options.signal.addEventListener('abort', cancel, { once: true });
   }
-  const timer = controller ? setTimeout(() => controller.abort(), path === '/v1/stage/pitch' ? 35000 : REQUEST_TIMEOUT) : 0;
+  const timer = controller ? setTimeout(() => controller.abort(),
+    path === '/v1/stage/pitch' ? 35000
+      : (path === '/v1/ai/lyrics/emotion' && method === 'POST') ? 330000
+        : REQUEST_TIMEOUT) : 0;
   try {
     // rawBody：封面替换这类二进制上传走这里，不包 JSON、不改 Content-Type。
     const body = options.rawBody !== undefined
