@@ -184,6 +184,7 @@ pub async fn boot(
         server_instance_id: uuid::Uuid::new_v4().to_string(),
         search_gate: Default::default(),
         ai_runtime: crate::ai::jobs::AiRuntime::from_config(&config.ai),
+        ai_emotion: crate::ai::emotion::EmotionService::configured(&config.ai),
         ai_runner_held: Default::default(),
         ai_external_ready: Default::default(),
     });

@@ -239,6 +239,48 @@ async function main() {
       return line && !line.hasAttribute('data-emotion');
     }, null, { timeout: 15000 });
 
+    // 无真实 key 的 auto 端到端：默认 fake provider + 显式授权，应能返回 fixture cues。
+    await page.evaluate(() => { const b = document.querySelector('.rail-item[data-view="settings"]'); if (b) b.click(); });
+    await page.waitForFunction(() => {
+      const v = document.getElementById('view-settings');
+      return v && !v.hidden && getComputedStyle(v).display !== 'none';
+    }, null, { timeout: 10000 });
+    await page.waitForTimeout(200);
+    await page.evaluate(() => { const b = document.querySelector('.skset-link[data-skset-key="lyrics"]'); if (b) b.click(); });
+    await page.waitForTimeout(150);
+    await page.check('#set-emotion-ai-authorized');
+    await page.waitForTimeout(500);
+    const autoEnabled = await page.evaluate(() => {
+      const option = document.querySelector('#set-emotion-mode option[value="auto"]');
+      return option ? !option.disabled : false;
+    });
+    if (!autoEnabled) throw new Error('fake provider + 授权后 auto 仍不可用');
+    await page.selectOption('#set-emotion-mode', 'auto');
+    await page.evaluate(() => { const b = document.querySelector('.skset-modal-close'); if (b) b.click(); });
+    await page.waitForTimeout(200);
+    await page.evaluate(() => document.body.classList.add('stage-open'));
+    await page.waitForFunction(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return line && line.hasAttribute('data-emotion');
+    }, null, { timeout: 15000 });
+    const auto = await page.evaluate(() => {
+      const line = document.querySelector('.stage-lyrics .lyric.active');
+      return { emotion: line.getAttribute('data-emotion'), intensity: getComputedStyle(line).getPropertyValue('--emo-i').trim() };
+    });
+    await page.screenshot({ path: path.join(out, 'auto.png'), fullPage: false });
+    await page.evaluate(() => { const b = document.querySelector('.rail-item[data-view="settings"]'); if (b) b.click(); });
+    await page.waitForFunction(() => {
+      const v = document.getElementById('view-settings');
+      return v && !v.hidden && getComputedStyle(v).display !== 'none';
+    }, null, { timeout: 10000 });
+    await page.waitForTimeout(200);
+    await page.evaluate(() => { const b = document.querySelector('.skset-link[data-skset-key="lyrics"]'); if (b) b.click(); });
+    await page.waitForTimeout(150);
+    await page.selectOption('#set-emotion-mode', 'off');
+    await page.uncheck('#set-emotion-ai-authorized');
+    await page.evaluate(() => { const b = document.querySelector('.skset-modal-close'); if (b) b.click(); });
+    await page.waitForTimeout(200);
+
     fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify({
       generatedAt: new Date().toISOString(),
       hash: prepared.hash,

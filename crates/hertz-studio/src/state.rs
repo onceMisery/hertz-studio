@@ -882,6 +882,8 @@ pub struct AppState {
     pub(crate) search_gate: Arc<crate::online::search_gate::SearchGate>,
     /// AI 持久任务运行时（R4-J）：有界内存输入 + 当前 provider。
     pub(crate) ai_runtime: crate::ai::jobs::AiRuntime,
+    /// 歌词情绪服务与其进程内 Cue 缓存。
+    pub(crate) ai_emotion: crate::ai::emotion::EmotionService,
     /// AI runner 锁是否由本进程持有（§5.5）：锁失则生成受理停用（bootstrap 置位）。
     pub(crate) ai_runner_held: std::sync::atomic::AtomicBool,
     /// 受限门面是否对外开放：锁 + 实际回环绑定双条件，main 在监听后置位；
@@ -4339,6 +4341,9 @@ pub(crate) mod tests {
             server_instance_id: uuid::Uuid::new_v4().to_string(),
             search_gate: Default::default(),
             ai_runtime: Default::default(),
+            ai_emotion: crate::ai::emotion::EmotionService::configured(
+                &crate::config::Config::default().ai,
+            ),
             ai_runner_held: Default::default(),
             ai_external_ready: Default::default(),
         };

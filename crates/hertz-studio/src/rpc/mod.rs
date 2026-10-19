@@ -207,6 +207,12 @@ impl Rpc {
 
         match (call.op, segments.as_slice()) {
             (Op::Get, ["v1", "ai", "status"]) => ai::status(state).await,
+            (Op::Get, ["v1", "ai", "lyrics", "emotion", "status"]) => {
+                ai::emotion_status(state).await
+            }
+            (Op::Post, ["v1", "ai", "lyrics", "emotion"]) => {
+                ai::emotion_classify(state, body).await
+            }
             (Op::Get, ["v1", "ai", "provider-credential"]) => ai::credential_status(state).await,
             (Op::Put, ["v1", "ai", "provider-credential"]) => ai::put_credential(state, body).await,
             (Op::Delete, ["v1", "ai", "provider-credential"]) => ai::delete_credential(state).await,

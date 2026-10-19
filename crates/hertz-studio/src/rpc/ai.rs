@@ -12,6 +12,15 @@ pub(super) async fn status(state: &Arc<AppState>) -> RpcResult {
     Ok(Reply::ok(jobs::status(state, &owner).await?))
 }
 
+pub(super) async fn emotion_status(state: &Arc<AppState>) -> RpcResult {
+    Reply::json(&crate::ai::emotion::status(state).await?)
+}
+
+pub(super) async fn emotion_classify(state: &Arc<AppState>, body: &Value) -> RpcResult {
+    let request: crate::ai::emotion::ClassifyRequest = body_as(body)?;
+    Reply::json(&crate::ai::emotion::classify(state, request).await?)
+}
+
 pub(super) async fn credential_status(state: &Arc<AppState>) -> RpcResult {
     Reply::json(&crate::ai::credential::status(state).await?)
 }

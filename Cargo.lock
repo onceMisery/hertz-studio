@@ -1094,6 +1094,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "uuid",
  "vmusic-audio",
  "vmusic-beats",
