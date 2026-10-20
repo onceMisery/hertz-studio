@@ -36,6 +36,7 @@ pub struct JobRow {
     pub created_at: i64,
     pub updated_at: i64,
     pub result_proposal_id: Option<String>,
+    pub failure_code: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
@@ -61,7 +62,7 @@ pub struct BudgetRow {
 const JOB_COLUMNS: &str =
     "job_id, owner_instance_id, principal, capability, key, input_hash, state,
         state_revision, dispatch_state, attempt_id, provider, model, created_at, updated_at,
-        result_proposal_id, reservation_micro_usd, pricing_snapshot";
+        result_proposal_id, reservation_micro_usd, pricing_snapshot, failure_code";
 
 pub async fn find_job_by_key<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     conn: E,
@@ -102,8 +103,8 @@ pub async fn insert_job<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
         "INSERT INTO ai_jobs (job_id, owner_instance_id, principal, capability, key, input_hash,
                               state, state_revision, dispatch_state, attempt_id, provider,
                               model, created_at, updated_at, result_proposal_id,
-                              reservation_micro_usd, pricing_snapshot)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, ?15, ?16)",
+                              reservation_micro_usd, pricing_snapshot, failure_code)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, ?15, ?16, ?17)",
     )
     .bind(&job.job_id)
     .bind(&job.owner_instance_id)
@@ -121,9 +122,24 @@ pub async fn insert_job<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     .bind(&job.result_proposal_id)
     .bind(job.reservation_micro_usd)
     .bind(&job.pricing_snapshot)
+    .bind(&job.failure_code)
     .execute(conn)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(())
+}
+
+pub async fn set_job_failure_code<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
+    conn: E,
+    job_id: &str,
+    failure_code: &str,
+) -> Result<(), StoreError> {
+    sqlx::query("UPDATE ai_jobs SET failure_code = ?2 WHERE job_id = ?1 AND state = 'failed'")
+        .bind(job_id)
+        .bind(failure_code)
+        .execute(conn)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
     Ok(())
 }
 
@@ -998,6 +1014,12 @@ mod retention_migration_tests {
         .unwrap();
         sqlx::raw_sql(include_str!(
             "../../../migrations/0019_ai_ledger_browse.sql"
+        ))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0026_ai_job_failure_code.sql"
         ))
         .execute(&mut conn)
         .await

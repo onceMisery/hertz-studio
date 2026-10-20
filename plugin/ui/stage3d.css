@@ -553,6 +553,9 @@ body.s3d-open > .bar { display: none; }
 .sl-line:active { cursor: grabbing; }
 .sl-line:hover { opacity: 1; filter: none; }
 .sl-word { display: inline-block; white-space: pre-wrap; }
+.sl-translation, .sl-romanization { display: block; font-weight: 450; letter-spacing: 0; }
+.sl-translation { margin-top: .12em; color: #acbcb5; font-size: .42em; line-height: 1.35; }
+.sl-romanization { margin-top: .06em; color: #82958c; font-size: .32em; line-height: 1.3; }
 .sl-line.is-active .sl-word { color: transparent; background: linear-gradient(90deg,#f4fff9 calc(var(--sl-fill,-10%) - 10%),#83958d calc(var(--sl-fill,-10%) + 10%)); background-clip: text; -webkit-background-clip: text; transform: translateY(var(--sl-rise,0px)); filter: drop-shadow(0 0 calc(var(--sl-glow,.45) * 14px) rgba(221,255,237,.32)); }
 .sl-line.is-past .sl-word { color: #d9e8e0; }
 .sl-return { position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%); border-radius: 30px; padding: 9px 18px; border: 1px solid rgba(255,255,255,.14); background: #182521; color: #d6eade; font-size: 12px; pointer-events: auto; cursor: pointer; }

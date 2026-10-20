@@ -45,6 +45,7 @@
 .podcast-episode-play{padding:0;border:0;background:transparent;text-align:left;font:inherit;font-size:var(--fs-base);font-weight:600;line-height:1.7;color:var(--text);cursor:pointer;overflow-wrap:anywhere}
 .podcast-episode-play:hover{color:var(--accent)}
 .podcast-episode-play:disabled{color:var(--muted);cursor:default}
+.podcast-episode-progress{display:block;margin-top:var(--sp-2);color:var(--accent);font-size:var(--fs-sm);font-variant-numeric:tabular-nums}
 .podcast-episode-description{margin-top:var(--sp-3);font-size:var(--fs-md);color:var(--muted)}
 .podcast-episode-description summary{cursor:pointer;width:fit-content}
 .podcast-episode-description p{white-space:pre-line;overflow-wrap:anywhere;line-height:1.8}

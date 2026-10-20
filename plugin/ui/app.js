@@ -1080,10 +1080,8 @@ function toast(message, kind = 'info') {
 
 let retries = 0;
 let reconnectTimer = 0;
-// 只有「真的断过线」才需要在重连时补一次全量拉取。启动流程自己会
-// await refreshAll()，WebSocket 的首次 onopen 不该再补一遍——那第二遍
-// loadSettings 的响应是异步到达的，落在用户已经开始操作的时刻，会把刚点
-// 下的即时开关按服务端旧值覆盖回去（症状：舞台上的按钮点了没反应）。
+let hasConnected = false;
+// 首次连接只补事件驱动数据；全量重连会重载设置，可能覆盖用户刚做的即时修改。
 let missedWhileOffline = false;
 
 function onConnectionChange(ok) {
@@ -1098,7 +1096,15 @@ function onConnectionChange(ok) {
       missedWhileOffline = false;
       refreshAll();
       if (window.Workshop && Workshop.onAiTask) Workshop.onAiTask();
+    } else if (!hasConnected) {
+      // Startup queries begin before this subscription. Reconcile event-backed
+      // data after the listener is live, without reloading settings mid-edit.
+      restoreQueue();
+      refreshLibraryInPlace();
+      loadPlaylists();
+      if (window.Workshop && Workshop.onAiTask) Workshop.onAiTask();
     }
+    hasConnected = true;
   } else {
     missedWhileOffline = true;
   }
@@ -1146,6 +1152,7 @@ function handleEvent(msg) {
   }
   switch (msg.type) {
     case 'state': applySnapshot(msg); break;
+    case 'queue_changed': restoreQueue().catch(() => {}); break;
     case 'spectrum':
       state.spectrum = msg.bands || [];
       spectrumDirty = true;
@@ -1154,7 +1161,10 @@ function handleEvent(msg) {
       break;
     case 'scan': onScanProgress(msg); break;
     case 'library_changed': refreshLibraryInPlace(); loadPlaylists(); break;
-    case 'ended': reconcileEnded(); break;
+    case 'ended':
+      document.dispatchEvent(new CustomEvent('playback:ended', { detail: state.snapshot }));
+      reconcileEnded();
+      break;
     case 'ai_task':
     case 'ai_tasks_resync':
       // R4-E：任务状态变化——工坊的任务面板开着时立刻刷新，其它场合它自己的
@@ -1270,6 +1280,8 @@ function digestMs(ms) {
 // ---------------------------------------------------------------------------
 
 let libraryEpoch = 0;
+let libraryRefreshPending = false;
+let libraryRefreshSequence = 0;
 
 /// 就地刷新已加载的那一窗曲库（扫描完成 / WebDAV 导入 / 批量落地之后的
 /// `library_changed`）。
@@ -1279,9 +1291,10 @@ let libraryEpoch = 0;
 /// 「加载更多」攒出来的窗口也一起丢掉。`renderLibrary` 本来就是按 id 复用行节点、
 /// 只删不在新列表里的行、必要时才搬位置，所以这里只要求「同一窗口的新数据」。
 async function refreshLibraryInPlace() {
-  // 正在分页加载时交给那一轮：它自己会带上最新数据渲染。
-  if (state.loading) return;
+  // 初次查询可能早于事件订阅且仍在途；等它结束后再补读，不能丢掉边沿。
+  if (state.loading) { libraryRefreshPending = true; return; }
   const epoch = libraryEpoch;
+  const sequence = ++libraryRefreshSequence;
   // 保持用户已经攒出来的窗口大小，至少一页。
   const limit = Math.max(PAGE, state.tracks.length);
   const artist = state.libFilter.artist ? `&artist=${encodeURIComponent(state.libFilter.artist)}` : '';
@@ -1290,7 +1303,7 @@ async function refreshLibraryInPlace() {
     const page = await transport.get(
       `/v1/tracks?q=${encodeURIComponent(state.q)}&sort=${encodeURIComponent(state.sort)}${artist}${album}&limit=${limit}&offset=0`);
     // 期间用户改了查询/排序/筛选：那条路径自己会整体重画，这里不要插一脚。
-    if (epoch !== libraryEpoch) return;
+    if (epoch !== libraryEpoch || sequence !== libraryRefreshSequence) return;
     state.total = page.total;
     state.tracks = page.tracks;
     state.offset = state.tracks.length;
@@ -1304,6 +1317,7 @@ async function refreshLibraryInPlace() {
 async function loadTracks(reset) {
   if (state.loading && !reset) return;
   if (reset) libraryEpoch += 1;
+  if (reset) libraryRefreshPending = false;
   const epoch = libraryEpoch;
   const offset = reset ? 0 : state.tracks.length;
   const q = state.q;
@@ -1334,6 +1348,10 @@ async function loadTracks(reset) {
       ui.libSentinel.disabled = false;
       ui.libSentinel.textContent = failed ? '重试读取曲库' : '加载更多歌曲';
       ui.libSentinel.hidden = !failed && state.tracks.length >= state.total;
+      if (libraryRefreshPending) {
+        libraryRefreshPending = false;
+        refreshLibraryInPlace();
+      }
     }
   }
 }
@@ -1805,6 +1823,7 @@ function applySnapshot(snap) {
   else if (state.commandAt && !state.commandPending) state.commandAt = 0;
   if (volumeTarget !== null) snap = { ...snap, volume: volumeTarget };
   state.snapshot = snap;
+  document.dispatchEvent(new CustomEvent('playback:snapshot', { detail: snap }));
   if (window.HertzCapsuleOnly) {
     const label = snap.playing ? '正在播放' : '已暂停';
     if (ui.capsuleLabel.textContent !== label) ui.capsuleLabel.textContent = label;
@@ -3139,8 +3158,12 @@ function paintRowArt(art, id) {
   }
 }
 
+let playlistLoadSequence = 0;
+
 async function loadPlaylists() {
+  const sequence = ++playlistLoadSequence;
   const data = await transport.get('/v1/playlists').catch(() => ({ playlists: [] }));
+  if (sequence !== playlistLoadSequence) return;
   state.playlists = data.playlists || [];
   if (ui.playlistCount) ui.playlistCount.textContent = state.playlists.length
     ? `${state.playlists.length} 个歌单` : '';
@@ -4383,9 +4406,10 @@ async function loadScanRoots() {
 
 let scanStatusTimer = 0;
 let scanStatusPending = false;
-function scheduleScanStatus() {
+let scanStatusRetryCount = 0;
+function scheduleScanStatus(delay = 1000) {
   clearTimeout(scanStatusTimer);
-  scanStatusTimer = setTimeout(() => { scanStatusTimer = 0; refreshScanStatus(); }, 1000);
+  scanStatusTimer = setTimeout(() => { scanStatusTimer = 0; refreshScanStatus(); }, delay);
 }
 
 async function refreshScanStatus() {
@@ -4394,6 +4418,7 @@ async function refreshScanStatus() {
   clearTimeout(scanStatusTimer); scanStatusTimer = 0;
   try {
     const status = await transport.get('/v1/library/status');
+    scanStatusRetryCount = 0;
     ui.scanCancel.hidden = !status.running;
     ui.scanCancel.disabled = !!status.cancelled;
     ui.scanCancel.textContent = status.cancelled ? '正在取消…' : '取消扫描';
@@ -4418,6 +4443,11 @@ async function refreshScanStatus() {
     else await loadScanRoots();
   } catch (err) {
     ui.scanLabel.textContent = errText('扫描状态读取失败', err);
+    if (!ui.scanPanel.hidden) {
+      const delay = Math.min(15000, 1000 * 2 ** scanStatusRetryCount);
+      scanStatusRetryCount = Math.min(scanStatusRetryCount + 1, 4);
+      scheduleScanStatus(delay);
+    }
   } finally { scanStatusPending = false; }
 }
 
@@ -8742,7 +8772,9 @@ async function startApp() {
     addToPlaylistMenu: openPlaylistMenu,
   });
   window.Online.init();
-  if (window.Podcasts) window.Podcasts.bind({ play: (tracks, index) => Online.playAll(tracks, index), toast });
+  if (window.Podcasts) window.Podcasts.bind({
+    play: (tracks, index) => Online.playAll(tracks, index), seek: seekTo, toast,
+  });
   // 扫码登录模块（web/online-login.js）：放在 Online.init 之后，头像 URL
   // 归一化要用它挂出的 safeCoverUrl。init() 负责在启动阶段就把顶栏头像按
   // 服务端持久化的选择恢复出来（以前只有打开登录弹窗才恢复）。

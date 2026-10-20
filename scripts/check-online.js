@@ -74,6 +74,7 @@ function makeEl(id) {
     classList: makeClassList(),
     appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
     append(...cs) { cs.forEach((c) => this.appendChild(c)); },
+    contains(c) { while (c) { if (c === this) return true; c = c.parentNode; } return false; },
     replaceChildren(...cs) {
       this.children = [];
       cs.forEach((c) => this.appendChild(c));

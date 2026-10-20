@@ -1744,6 +1744,9 @@
     lyricTranslation: function (i) {
       return doc && doc.translation ? (doc.translation[i] || null) : null;
     },
+    lyricRomanization: function (i) {
+      return doc && doc.romanization ? (doc.romanization[i] || null) : null;
+    },
     lyricOffset: function () {
       return doc && typeof doc.user_offset_ms === 'number' ? doc.user_offset_ms : 0;
     },

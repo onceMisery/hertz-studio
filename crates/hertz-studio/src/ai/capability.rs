@@ -184,109 +184,20 @@ pub(crate) enum OutputSchema {
 impl OutputSchema {
     pub(crate) fn value(self) -> Value {
         match self {
-            Self::StagePage => json!({
-                "type": "object", "additionalProperties": false,
-                "required": ["artifactVersion", "mode", "schemaVersion", "schemaHash", "basePresetHashes", "commonParams", "scenes", "total", "offset", "nextOffset", "intentFields", "limits", "persisted", "applied"],
-                "properties": {
-                    "artifactVersion": { "const": 1 }, "mode": { "const": "create" },
-                    "schemaVersion": { "type": "string" }, "schemaHash": { "type": "string" },
-                    "basePresetHashes": { "type": "object", "additionalProperties": { "type": "string" } },
-                    "commonParams": { "type": "array", "items": { "$ref": "#/$defs/sceneParam" } },
-                    "scenes": { "type": "array", "items": { "$ref": "#/$defs/scene" } },
-                    "total": { "type": "integer", "minimum": 0 }, "offset": { "type": "integer", "minimum": 0 },
-                    "nextOffset": { "type": ["integer", "null"], "minimum": 0 },
-                    "intentFields": { "type": "array", "items": { "type": "string" } },
-                    "limits": { "type": "object", "required": ["maxBytes", "maxDepth"], "properties": {
-                        "maxBytes": { "type": "integer", "const": 16384 }, "maxDepth": { "type": "integer", "const": 8 }
-                    }, "additionalProperties": false },
-                    "persisted": { "const": false }, "applied": { "const": false }
-                },
-                "$defs": {
-                    "sceneParam": { "type": "object", "required": ["name", "min", "max", "default"], "properties": {
-                        "name": { "type": "string" }, "min": { "type": ["number", "null"] },
-                        "max": { "type": ["number", "null"] }, "default": {}
-                    }, "additionalProperties": false },
-                    "scene": { "type": "object", "required": ["id", "label", "aliases", "ownsLyrics", "params"], "properties": {
-                        "id": { "type": "string" }, "label": { "type": "string" },
-                        "aliases": { "type": "array", "items": { "type": "string" } },
-                        "ownsLyrics": { "type": "boolean" },
-                        "params": { "type": "array", "items": { "$ref": "#/$defs/sceneParam" } }
-                    }, "additionalProperties": false }
-                }
-            }),
-            Self::StageValidation => json!({
-                "type": "object", "additionalProperties": false,
-                "required": ["validationStage", "validatedIntent", "schemaVersion", "schemaHash", "basePresetHash", "artifact", "diagnostics", "persisted", "applied"],
-                "properties": {
-                    "validationStage": { "const": "intent" }, "validatedIntent": { "$ref": "#/$defs/intent" },
-                    "schemaVersion": { "type": "string" }, "schemaHash": { "type": "string" },
-                    "basePresetHash": { "type": "string" }, "artifact": { "$ref": "#/$defs/artifact" },
-                    "diagnostics": { "const": [] }, "persisted": { "const": false }, "applied": { "const": false }
-                },
-                "$defs": {
-                    "intent": { "type": "object", "required": ["version", "scene", "patch"], "properties": {
-                        "version": { "const": 1 }, "scene": { "type": "string" },
-                        "patch": { "type": "object", "additionalProperties": { "type": "number" } },
-                        "director": { "type": "boolean" }, "hand": { "type": "object", "required": ["on"],
-                            "properties": { "on": { "type": "boolean" } }, "additionalProperties": false },
-                        "ruleIds": { "type": "array", "items": { "type": "string" } }
-                    }, "additionalProperties": false },
-                    "artifact": { "type": "object", "required": ["artifactVersion", "mode", "intent", "schemaVersion", "schemaHash", "basePresetHash"], "properties": {
-                        "artifactVersion": { "const": 1 }, "mode": { "const": "create" },
-                        "intent": { "$ref": "#/$defs/intent" }, "schemaVersion": { "type": "string" },
-                        "schemaHash": { "type": "string" }, "basePresetHash": { "type": "string" }
-                    }, "additionalProperties": false }
-                }
-            }),
-            Self::PlaybackSnapshot => json!({
-                "type": "object", "additionalProperties": false,
-                "required": ["outcome", "code", "data"],
-                "properties": {
-                    "outcome": { "const": "ok" }, "code": { "const": "ok" },
-                    "data": { "type": "object", "additionalProperties": false,
-                        "required": ["trackId", "positionMs", "durationMs", "playing", "volume", "mode", "generation", "queueLength", "queueIndex"],
-                        "properties": {
-                            "trackId": { "type": ["string", "null"] }, "positionMs": { "type": "integer", "minimum": 0 },
-                            "durationMs": { "type": ["integer", "null"], "minimum": 0 }, "playing": { "type": "boolean" },
-                            "volume": { "type": "number", "minimum": 0, "maximum": 1 },
-                            "mode": { "enum": ["repeat", "repeat_one", "shuffle"] },
-                            "generation": { "type": "integer", "minimum": 0 }, "queueLength": { "type": "integer", "minimum": 0 },
-                            "queueIndex": { "type": ["integer", "null"], "minimum": 0 }
-                        }
-                    }
-                }
-            }),
-            Self::ControlOutcome => json!({
-                "type": "object", "additionalProperties": false,
-                "required": ["outcome", "code", "generation"],
-                "properties": {
-                    "outcome": { "enum": ["applied", "no_op", "superseded"] },
-                    "code": { "type": "string" }, "generation": { "type": ["integer", "null"], "minimum": 0 }
-                }
-            }),
-            Self::LibrarySearch => json!({
-                "type": "object", "additionalProperties": false,
-                "required": ["outcome", "code", "data"],
-                "properties": {
-                    "outcome": { "const": "ok" }, "code": { "const": "ok" },
-                    "data": { "type": "object", "additionalProperties": false, "required": ["tracks"],
-                        "properties": { "tracks": { "type": "array", "items": { "type": "object", "additionalProperties": false,
-                            "required": ["id", "title", "artist", "album", "durationMs", "source"],
-                            "properties": {
-                                "id": { "type": "string" }, "title": { "type": "string" },
-                                "artist": { "type": ["string", "null"] }, "album": { "type": ["string", "null"] },
-                                "durationMs": { "type": ["integer", "null"], "minimum": 0 },
-                                "source": { "enum": ["local", "remote"] }
-                            }
-                        } } }
-                    }
-                }
-            }),
+            Self::StagePage => schema_value::<RegisteredStagePage>(),
+            Self::StageValidation => schema_value::<RegisteredStageValidation>(),
+            Self::PlaybackSnapshot => schema_value::<RegisteredPlaybackSnapshot>(),
+            Self::ControlOutcome => schema_value::<RegisteredControlResult>(),
+            Self::LibrarySearch => schema_value::<RegisteredLibrarySearch>(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+fn schema_value<T: schemars::JsonSchema>() -> Value {
+    serde_json::to_value(schemars::schema_for!(T)).expect("typed output schema serializes")
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum RegisteredControlOutcome {
     Applied,
@@ -294,7 +205,7 @@ enum RegisteredControlOutcome {
     Superseded,
 }
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum RegisteredPlaybackMode {
     Repeat,
@@ -302,27 +213,28 @@ enum RegisteredPlaybackMode {
     Shuffle,
 }
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum RegisteredTrackSource {
     Local,
     Remote,
 }
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, schemars::JsonSchema)]
 enum RegisteredCreateMode {
     #[serde(rename = "create")]
     Create,
 }
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, schemars::JsonSchema)]
 enum RegisteredIntentValidationStage {
     #[serde(rename = "intent")]
     Intent,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
+#[schemars(transparent)]
 struct RequiredNullable<T>(Option<T>);
 
 fn deserialize_optional_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -333,7 +245,7 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredParam {
@@ -343,7 +255,7 @@ struct RegisteredParam {
     default: Value,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredScene {
@@ -354,17 +266,20 @@ struct RegisteredScene {
     params: Vec<RegisteredParam>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RegisteredLimits {
+    #[schemars(extend("const" = 16_384))]
     max_bytes: usize,
+    #[schemars(extend("const" = 8))]
     max_depth: usize,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredStagePage {
+    #[schemars(extend("const" = 1))]
     artifact_version: u32,
     mode: RegisteredCreateMode,
     schema_version: String,
@@ -377,36 +292,43 @@ struct RegisteredStagePage {
     next_offset: RequiredNullable<usize>,
     intent_fields: Vec<String>,
     limits: RegisteredLimits,
+    #[schemars(extend("const" = false))]
     persisted: bool,
+    #[schemars(extend("const" = false))]
     applied: bool,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredHand {
     on: bool,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredStageIntent {
+    #[schemars(extend("const" = 1))]
     version: u32,
     scene: String,
     patch: BTreeMap<String, f64>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[schemars(with = "bool")]
     director: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[schemars(with = "RegisteredHand")]
     hand: Option<RegisteredHand>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[schemars(with = "Vec::<String>")]
     rule_ids: Option<Vec<String>>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredArtifact {
+    #[schemars(extend("const" = 1))]
     artifact_version: u32,
     mode: RegisteredCreateMode,
     intent: RegisteredStageIntent,
@@ -415,7 +337,7 @@ struct RegisteredArtifact {
     base_preset_hash: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredStageValidation {
@@ -425,12 +347,15 @@ struct RegisteredStageValidation {
     schema_hash: String,
     base_preset_hash: String,
     artifact: RegisteredArtifact,
+    #[schemars(length(equal = 0))]
     diagnostics: Vec<Value>,
+    #[schemars(extend("const" = false))]
     persisted: bool,
+    #[schemars(extend("const" = false))]
     applied: bool,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredPlaybackData {
@@ -438,6 +363,7 @@ struct RegisteredPlaybackData {
     position_ms: u64,
     duration_ms: RequiredNullable<u64>,
     playing: bool,
+    #[schemars(range(min = 0.0, max = 1.0))]
     volume: f64,
     mode: RegisteredPlaybackMode,
     generation: u64,
@@ -445,13 +371,13 @@ struct RegisteredPlaybackData {
     queue_index: RequiredNullable<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
 enum RegisteredOk {
     #[serde(rename = "ok")]
     Ok,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RegisteredPlaybackSnapshot {
     outcome: RegisteredOk,
@@ -459,7 +385,7 @@ struct RegisteredPlaybackSnapshot {
     data: RegisteredPlaybackData,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredControlResult {
@@ -468,7 +394,7 @@ struct RegisteredControlResult {
     generation: RequiredNullable<u64>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredTrack {
@@ -480,14 +406,14 @@ struct RegisteredTrack {
     source: RegisteredTrackSource,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredLibraryData {
     tracks: Vec<RegisteredTrack>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct RegisteredLibrarySearch {

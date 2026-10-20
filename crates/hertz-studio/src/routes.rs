@@ -215,6 +215,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/player/replay", post(replay_index))
         .route("/v1/podcasts/search", get(podcast_search))
         .route("/v1/podcasts/feed", get(podcast_feed))
+        .route("/v1/podcasts/progress", post(podcast_progress))
         .route(
             "/v1/podcasts/subscriptions",
             get(podcast_subscriptions).post(podcast_subscribe),
@@ -3454,6 +3455,14 @@ pub(crate) struct PodcastSubscribeRequest {
     pub feed_url: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct PodcastProgressRequest {
+    pub episode_id: String,
+    pub position_ms: u64,
+    #[serde(default)]
+    pub completed: bool,
+}
+
 async fn podcast_search(
     State(state): State<Arc<AppState>>,
     Query(q): Query<PodcastSearchQuery>,
@@ -3472,6 +3481,23 @@ async fn podcast_feed(
     tagged(
         "podcast",
         crate::podcasts::feed(&online_ctx(&state), &q.url, q.offset, q.limit, q.refresh).await,
+    )
+    .map(Json)
+}
+
+async fn podcast_progress(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PodcastProgressRequest>,
+) -> ApiResult<Json<crate::podcasts::EpisodeProgress>> {
+    tagged(
+        "podcast",
+        crate::podcasts::save_progress(
+            &online_ctx(&state),
+            &body.episode_id,
+            body.position_ms,
+            body.completed,
+        )
+        .await,
     )
     .map(Json)
 }
@@ -4290,6 +4316,20 @@ mod tests {
                 200,
             ),
             (
+                Op::Post,
+                "podcasts/progress",
+                json!({}),
+                json!({"episode_id":"episode1","position_ms":60000,"completed":false}),
+                200,
+            ),
+            (
+                Op::Get,
+                "podcasts/feed",
+                json!({"url":"https://example.com/podcast.xml","offset":"1","limit":"1"}),
+                Value::Null,
+                200,
+            ),
+            (
                 Op::Delete,
                 "podcasts/subscriptions/show",
                 json!({}),
@@ -4311,6 +4351,7 @@ mod tests {
                 200,
             ),
         ];
+        let mut progress_saved = false;
         for (op, path, query, body, expected_status) in cases {
             let path = format!("v1/{path}");
             let result = rpc
@@ -4347,6 +4388,15 @@ mod tests {
                     assert_eq!(http["total"], 3);
                     assert_eq!(http["episodes"].as_array().unwrap().len(), 1);
                     assert_eq!(http["episodes"][0]["id"], "episode1");
+                    if progress_saved {
+                        assert_eq!(http["episodes"][0]["progress_ms"], 60_000);
+                        assert_eq!(http["episodes"][0]["completed"], false);
+                    }
+                }
+                if path.ends_with("/progress") {
+                    assert_eq!(http["progress_ms"], 60_000);
+                    assert_eq!(http["completed"], false);
+                    progress_saved = true;
                 }
                 if path.ends_with("/stream") {
                     assert_eq!(http["url"], "https://example.com/episode.mp3");

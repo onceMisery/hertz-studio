@@ -4,7 +4,8 @@
 use super::{body_as, query_as, Reply, RpcResult};
 use crate::podcasts;
 use crate::routes::{
-    online_ctx, tagged, PodcastFeedQuery, PodcastSearchQuery, PodcastSubscribeRequest,
+    online_ctx, tagged, PodcastFeedQuery, PodcastProgressRequest, PodcastSearchQuery,
+    PodcastSubscribeRequest,
 };
 use crate::state::AppState;
 use serde_json::{json, Value};
@@ -23,6 +24,20 @@ pub async fn feed(state: &Arc<AppState>, query: &Value) -> RpcResult {
     Reply::json(&tagged(
         "podcast",
         podcasts::feed(&online_ctx(state), &q.url, q.offset, q.limit, q.refresh).await,
+    )?)
+}
+
+pub async fn progress(state: &Arc<AppState>, body: &Value) -> RpcResult {
+    let body: PodcastProgressRequest = body_as(body)?;
+    Reply::json(&tagged(
+        "podcast",
+        podcasts::save_progress(
+            &online_ctx(state),
+            &body.episode_id,
+            body.position_ms,
+            body.completed,
+        )
+        .await,
     )?)
 }
 

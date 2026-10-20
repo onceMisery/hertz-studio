@@ -5,7 +5,7 @@
   'use strict';
   var root = null, transport = null, epoch = 0, controller = null;
   var month = '', state = '', cursor = null, previous = [], page = null, pending = false, error = '';
-  var labels = {reserved:'在途预留',reported:'已报告费用',released:'未派发，预留已释放',unknown:'费用未确认',estimated_final:'估算费用',unpriced:'费用未知，已记录 token'};
+  var labels = {reserved:'在途预留',reported:'已报告费用',released:'未派发，预留已释放',unknown:'费用未确认',estimated_final:'估算费用',unpriced:'费用未知'};
   function h(tag, cls, text) {
     var el = document.createElement(tag); if (cls) el.className = cls;
     if (text != null) el.textContent = text; return el;
@@ -104,6 +104,9 @@
             :entry.usageState==='reported'?'费用已按可信用量核算':'费用仍按预留估算';
           card.appendChild(h('p','sc-note',
             '输入 '+usage.inputTokens+' tokens · 输出 '+usage.outputTokens+' tokens · '+accounting));
+        }
+        if (entry.usageState==='unpriced' && !entry.reportedUsage) {
+          card.appendChild(h('p','sc-note','当前尚无可核实的供应商 token 用量，账目未记录 token 数。'));
         }
         if ((entry.usageState==='unknown' || entry.usageState==='estimated_final') && !entry.reportedUsage) {
           card.appendChild(h('p','sc-note','当前金额按预留估算；可信计量迟到时仍可校正，不代表供应商已结清。'));

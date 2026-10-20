@@ -102,6 +102,9 @@ mod tests {
     /// 状态帧却一切正常，界面只是安静地不动。
     #[test]
     fn data_carrying_events_serialise_with_a_type_tag() {
+        let json = serde_json::to_string(&WsEvent::QueueChanged).unwrap();
+        assert_eq!(json, "{\"type\":\"queue_changed\"}");
+
         let json = serde_json::to_string(&WsEvent::Spectrum {
             bands: vec![0.5, 0.25],
         })

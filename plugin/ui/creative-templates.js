@@ -3,7 +3,7 @@
 // contract: incompatible templates need a deliberate catalog revision.
 (function () {
   'use strict';
-  var SCHEMA_HASH = '9eeda3eea3c20f2526c6180269944ae437c9289cc321206e0a1db4ea6754ff6e';
+  var SCHEMA_HASH = 'b21f66f38c39f600319cb68754ab273e52fc454bfbbc080abc2d7eceaa052337';
   var CATALOG = [
     {id:'quiet-orb',version:2,title:'静夜星球',scene:'orb',mood:'克制、留白',motion:'低 · 无节拍抖动',
       boundary:'适合舒缓音乐与大段歌词；球体仍响应实时频谱，不是完全静止的画面。',

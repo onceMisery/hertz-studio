@@ -145,6 +145,75 @@ window.VideoExport = (function () {
     return found;
   }
 
+  var lyricGraphemeSegmenter = null;
+  function graphemes(text) {
+    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+      if (!lyricGraphemeSegmenter) {
+        lyricGraphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+      }
+      return Array.from(lyricGraphemeSegmenter.segment(text), function (part) { return part.segment; });
+    }
+    return Array.from(text);
+  }
+
+  function wrapLyricText(ctx, text, maxWidth) {
+    var words = String(text || '').trim().split(/\s+/).filter(Boolean);
+    var lines = [];
+    var line = '';
+    words.forEach(function (word) {
+      var candidate = line ? line + ' ' + word : word;
+      if (ctx.measureText(candidate).width <= maxWidth) {
+        line = candidate;
+        return;
+      }
+      if (line) {
+        lines.push(line);
+        line = '';
+      }
+      if (ctx.measureText(word).width <= maxWidth) {
+        line = word;
+        return;
+      }
+      graphemes(word).forEach(function (part) {
+        var next = line + part;
+        if (line && ctx.measureText(next).width > maxWidth) {
+          lines.push(line);
+          line = part;
+        } else {
+          line = next;
+        }
+      });
+    });
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  function limitLyricLines(ctx, lines, maxLines, maxWidth) {
+    if (lines.length <= maxLines) return lines;
+    var limited = lines.slice(0, maxLines);
+    var lastIndex = limited.length - 1;
+    var last = graphemes(limited[lastIndex]);
+    var suffix = '…';
+    while (last.length && ctx.measureText(last.join('') + suffix).width > maxWidth) last.pop();
+    limited[lastIndex] = last.join('') + suffix;
+    return limited;
+  }
+
+  function fitLyricWatermark(ctx, text, maxWidth) {
+    var parts = graphemes(String(text || '').trim());
+    if (ctx.measureText(parts.join('')).width <= maxWidth) return parts.join('');
+    var lo = 0, hi = parts.length;
+    while (lo < hi) {
+      var mid = Math.ceil((lo + hi) / 2);
+      var candidate = parts.slice(0, mid).join('').replace(/\s+$/, '') + '…';
+      if (ctx.measureText(candidate).width <= maxWidth) lo = mid;
+      else hi = mid - 1;
+    }
+    var prefix = parts.slice(0, lo).join('').replace(/\s+$/, '');
+    if (!prefix && ctx.measureText('…').width > maxWidth) return '';
+    return prefix + '…';
+  }
+
   // -------------------------------------------------------------------------
   // 对话框（模块自管 DOM，palette.js 同款路数）
   // -------------------------------------------------------------------------
@@ -518,7 +587,9 @@ window.VideoExport = (function () {
           ctx.shadowBlur = Math.round(base * 0.6);
           ctx.textAlign = 'right';
           ctx.textBaseline = 'alphabetic';
-          ctx.fillText(lyric.title + (lyric.artist ? ' · ' + lyric.artist : ''), w - Math.round(w * 0.04), h - Math.round(h * 0.045));
+          var margin = Math.round(w * 0.04);
+          var watermark = lyric.title + (lyric.artist ? ' · ' + lyric.artist : '');
+          ctx.fillText(fitLyricWatermark(ctx, watermark, w - margin * 2), w - margin, h - Math.round(h * 0.045));
           ctx.restore();
         }
         if (idx < 0) return;
@@ -538,19 +609,43 @@ window.VideoExport = (function () {
         ctx.shadowColor = 'rgba(0,0,0,0.65)';
         var font = '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
         var cur = String(line.text || '').trim();
+        var currentFontSize = Math.round(h * 0.052);
+        var currentLineHeight = Math.round(currentFontSize * 1.2);
+        var currentLines = [];
         if (cur) {
+          ctx.font = '700 ' + currentFontSize + 'px ' + font;
+          currentLines = limitLyricLines(ctx, wrapLyricText(ctx, cur, w * 0.88), 3, w * 0.88);
+        }
+        var nextFontSize = Math.round(h * 0.034);
+        var nextLineHeight = Math.round(nextFontSize * 1.2);
+        var nextLines = [];
+        if (next && next.text) {
+          ctx.font = '400 ' + nextFontSize + 'px ' + font;
+          nextLines = limitLyricLines(ctx, wrapLyricText(ctx, String(next.text).trim(), w * 0.84), 2, w * 0.84);
+        }
+        var bottom = Math.round(h * 0.875);
+        var nextFirstBaseline = bottom - Math.max(0, nextLines.length - 1) * nextLineHeight;
+        var currentBottom = nextLines.length
+          ? nextFirstBaseline - (currentLines.length ? Math.round(currentFontSize * 1.1) : 0)
+          : bottom;
+        var currentFirstBaseline = currentBottom - Math.max(0, currentLines.length - 1) * currentLineHeight;
+        if (currentLines.length) {
           ctx.globalAlpha = alpha;
           ctx.fillStyle = '#f5f6f7';
-          ctx.font = '700 ' + Math.round(h * 0.052) + 'px ' + font;
+          ctx.font = '700 ' + currentFontSize + 'px ' + font;
           ctx.shadowBlur = Math.round(h * 0.02);
-          ctx.fillText(cur, w / 2, Math.round(h * 0.84), w * 0.88);
+          currentLines.forEach(function (text, index) {
+            ctx.fillText(text, w / 2, currentFirstBaseline + index * currentLineHeight);
+          });
         }
-        if (next && next.text) {
+        if (nextLines.length) {
           ctx.globalAlpha = alpha * 0.55;
           ctx.fillStyle = '#f5f6f7';
-          ctx.font = '400 ' + Math.round(h * 0.034) + 'px ' + font;
+          ctx.font = '400 ' + nextFontSize + 'px ' + font;
           ctx.shadowBlur = Math.round(h * 0.012);
-          ctx.fillText(String(next.text).trim(), w / 2, Math.round(h * 0.9), w * 0.84);
+          nextLines.forEach(function (text, index) {
+            ctx.fillText(text, w / 2, nextFirstBaseline + index * nextLineHeight);
+          });
         }
         ctx.restore();
       }

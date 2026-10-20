@@ -808,7 +808,7 @@ void main() {
     ],
     // 入口 yaw 钉在正面：自由环游可以改变它，切回时不能继承背面机位而看到镜像字。
     camera: { 'cam.yaw': 0, 'cam.dist': 20, 'cam.pitch': 0, 'cam.fov': 58, 'cam.height': 0 },
-    aliases: ['歌词走廊', '三维歌词', '文字', 'lyric corridor', 'lyrics'],
+    aliases: ['歌词走廊', '三维歌词', '文字', 'lyric corridor', 'lyric scene', 'lyrics'],
     ownsLyrics: true,
     decl: `
 uniform sampler2D uLyricTex; uniform float uSpacing; uniform float uArc; uniform float uPWidth;

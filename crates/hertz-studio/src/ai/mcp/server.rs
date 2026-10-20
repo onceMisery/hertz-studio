@@ -93,12 +93,13 @@ impl ServerHandler for FacadeServer {
                 None,
             ));
         }
-        let call = adapter::call_tool(
-            &self.client,
-            &self.session,
-            &request.name,
-            request.arguments.as_ref(),
-        );
+        let mut arguments = request.arguments.clone().unwrap_or_default();
+        let client_operation_id = match adapter::ensure_operation_id(&request.name, &mut arguments)
+        {
+            Ok(id) => id,
+            Err(result) => return Ok(result.into()),
+        };
+        let call = adapter::call_tool(&self.client, &self.session, &request.name, Some(&arguments));
         let mut closed = self.closed.clone();
         let cancelled = context
             .extensions
@@ -106,9 +107,9 @@ impl ServerHandler for FacadeServer {
             .cloned();
         tokio::select! {
             biased;
-            _ = context.ct.cancelled() => Err(McpError::internal_error("调用等待已取消", None)),
-            _ = super::transport::RequestCancellation::cancelled(cancelled) => Err(McpError::internal_error("调用等待已取消", None)),
-            _ = closed.wait_for(|closed| *closed) => Err(McpError::internal_error("适配连接已关闭", None)),
+            _ = context.ct.cancelled() => Ok(adapter::cancelled_result(&request.name, client_operation_id.as_deref()).into()),
+            _ = super::transport::RequestCancellation::cancelled(cancelled) => Ok(adapter::cancelled_result(&request.name, client_operation_id.as_deref()).into()),
+            _ = closed.wait_for(|closed| *closed) => Ok(adapter::cancelled_result(&request.name, client_operation_id.as_deref()).into()),
             result = call => Ok(result.into()),
         }
     }

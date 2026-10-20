@@ -262,6 +262,12 @@ body[data-rm~="lyrics"] .fl-cword .fl-body { transform: none !important; }
 
 @media (max-width: 760px) {
   .fl-classic { padding: 0 16px; }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .fl-classic .fl-cline {
+    left: 28px;
+    right: 28px;
+    width: auto;
+    max-width: none;
+  }
   .fl-sub { padding: 0 16px; bottom: calc(104px + env(safe-area-inset-bottom)); }
   .fl-sub-card { max-width: calc(100vw - 48px); }
   .fl-sub-next ~ .fl-sub-next { display: none; } /* 窄屏预告只留 1 行 */

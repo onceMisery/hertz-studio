@@ -19,7 +19,13 @@ async function main() {
   try {
     await page.goto(uiUrl(fixture.base), { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.querySelector('#workshop .ws-targets'));
-    await page.evaluate(() => { Workshop.open(); Workshop.setTab('io'); });
+    await page.evaluate(() => { Workshop.open(); Workshop.setTab('prompt'); });
+    await page.locator('#ws-prompt-text').fill('十秒后切换到星云');
+    await page.getByRole('button', { name: '解析', exact: true }).click();
+    const timelineMessage = await page.locator('.ws-prompt-result').innerText();
+    assert.match(timelineMessage, /不支持时间轴或自动切换编排/);
+    assert.doesNotMatch(timelineMessage, /只认这些词/);
+    await page.evaluate(() => Workshop.setTab('io'));
     const original = await page.evaluate(() => {
       // Leave a normal edit's save timer pending when the preview begins.
       CreativeStage.setPreset(CreativeStage.canonicalBaseline('orb'));
@@ -66,6 +72,42 @@ async function main() {
     assert.deepEqual(during.share, original.share, 'preview backgrounds never enter committed share snapshot');
     assert.deepEqual(during.library, original.library);
     console.log('PASS temporary rendering, pending autosave, share and library isolation');
+
+    const mediaPreview = await page.evaluate(() => {
+      window.revokedBackgroundUrls = [];
+      const revoke = URL.revokeObjectURL.bind(URL);
+      URL.revokeObjectURL = url => { window.revokedBackgroundUrls.push(url); revoke(url); };
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#0f0"/></svg>';
+      const spec = Backgrounds.setLocalFile(new File([svg], 'local.svg', { type: 'image/svg+xml' }));
+      CreativeStage.setBackground(spec);
+      return spec;
+    });
+    await page.waitForFunction(() => {
+      const image = document.querySelector('#creative-bg .creative-bg-media');
+      return image && image.naturalWidth === 24;
+    });
+    await page.evaluate(async a => {
+      const prepared = await CreativeDraft.prepare(a);
+      CreativeStage.beginPreview(prepared.preset, prepared.proposalHash);
+    }, artifact);
+    assert.equal(await page.evaluate(url => window.revokedBackgroundUrls.includes(url), mediaPreview.url), false,
+      'preview must retain the committed local media URL');
+    await page.evaluate(() => CreativeStage.cancelPreview());
+    await page.waitForFunction(url => {
+      const image = document.querySelector('#creative-bg .creative-bg-media');
+      return image && image.src === url && image.naturalWidth === 24;
+    }, mediaPreview.url);
+    assert.equal(await page.evaluate(url => Backgrounds.values().url === url, mediaPreview.url), true);
+    await page.evaluate(async a => {
+      const prepared = await CreativeDraft.prepare(a);
+      CreativeStage.beginPreview(prepared.preset, prepared.proposalHash);
+    }, artifact);
+    const mediaPreviewToken = await page.evaluate(() => CreativeStage.preview());
+    await page.evaluate(token => CreativeStage.applyPreview(token.previewId, token.proposalHash), mediaPreviewToken);
+    assert.equal(await page.evaluate(url => window.revokedBackgroundUrls.includes(url), mediaPreview.url), true,
+      'confirming the replacement must release the old local media URL');
+    assert.equal(await page.evaluate(() => Backgrounds.values().type), 'theme');
+    console.log('PASS local media survives preview cancellation and is released after confirmation');
 
     await page.evaluate(() => CreativeStage.cancelPreview());
     await preview();
@@ -144,6 +186,38 @@ async function main() {
     assert.deepEqual(await page.evaluate(() => CreativeStage.preset()), prior);
     assert.equal(await page.getByRole('button', { name: '应用到当前舞台', exact: true }).count(), 0);
     console.log('PASS incompatible artifact rejects without writes');
+
+    const sameScene = await page.evaluate(() => {
+      const current = CreativeStage.canonicalBaseline('orb');
+      current.look.grade = 3;
+      current.look.bloom = 0.9;
+      CreativeStage.setPreset(current);
+      return {
+        preset: CreativeStage.preset(),
+        artifact: CreativeDraft.artifact({ version: 1, scene: 'orb', patch: { 'cam.drift': 10 } }),
+      };
+    });
+    await page.waitForFunction(expected => JSON.stringify(JSON.parse(localStorage.getItem('vmusic.creative.preset'))) === JSON.stringify(expected), sameScene.preset);
+    const sameSceneText = JSON.stringify(sameScene.artifact);
+    await page.locator('#ws-draft-json').fill(sameSceneText);
+    await page.locator('#ws-draft-preview').click();
+    await page.getByRole('button', { name: '取消预览', exact: true }).waitFor();
+    const draftPreview = await page.locator('#ws-body').innerText();
+    assert.match(draftPreview, /look\.grade：当前 3 → 候选 0/);
+    assert.match(draftPreview, /look\.bloom：当前 0\.9 → 候选 0\.28/);
+    assert.match(draftPreview, /应用会替换整份当前预置/);
+    assert.deepEqual(await page.evaluate(() => CreativeStage.preset()), sameScene.preset,
+      'preview must leave the edited preset unchanged until confirmation');
+    await page.getByRole('button', { name: '应用到当前舞台', exact: true }).click();
+    await page.waitForFunction(() => !CreativeStage.preview());
+    const sameSceneExpected = await page.evaluate(async a => (await CreativeDraft.prepare(a)).preset, sameScene.artifact);
+    assert.deepEqual(await page.evaluate(() => CreativeStage.preset()), sameSceneExpected,
+      'confirmed create applies its full canonical candidate, including defaulted values');
+    await page.getByRole('button', { name: '撤销本次应用', exact: true }).click();
+    await page.waitForFunction(expected => JSON.stringify(CreativeStage.preset()) === JSON.stringify(expected), sameScene.preset);
+    assert.deepEqual(await page.evaluate(() => CreativeStage.preset()), sameScene.preset,
+      'confirmed imported drafts can restore the complete prior preset');
+    console.log('PASS create preview lists every reset value and explains full-preset replacement');
 
     await preview();
     const expected = await page.evaluate(async a => (await CreativeDraft.prepare(a)).preset, artifact);

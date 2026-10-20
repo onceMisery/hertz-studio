@@ -29,6 +29,8 @@ db.execute('INSERT INTO ai_usage_entries (job_id,accepted_month,reservation_micr
 token_snapshot=json.dumps(dict(provider='stepfun',model='step-5-preview',pricingVersion='token-usage-unpriced-v1',reservationMicroUsd=0,inputMicroUsdPerMillion=0,outputMicroUsdPerMillion=0,maxInputTokens=20000,maxOutputTokens=8000))
 db.execute('INSERT INTO ai_usage_entries (job_id,accepted_month,reservation_micro_usd,accounted_micro_usd,usage_state,pricing_snapshot,revision,created_at,owner_instance_id,principal,task_state,accepted_at,reported_usage) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
  ('unpriced-stepfun',month,0,0,'unpriced',token_snapshot,2,now,owner,'official-stage-draft','succeeded',accepted+101,json.dumps(dict(inputTokens=23,outputTokens=7))))
+db.execute('INSERT INTO ai_usage_entries (job_id,accepted_month,reservation_micro_usd,accounted_micro_usd,usage_state,pricing_snapshot,revision,created_at,owner_instance_id,principal,task_state,accepted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+ ('unpriced-interrupted',month,0,0,'unpriced',token_snapshot,2,now,owner,'official-stage-draft','interrupted',accepted+102))
 db.execute('INSERT INTO ai_budget_months (month,charged_micro_usd,reserved_micro_usd,revision) VALUES (?,?,0,2)',(month,9007199254740993+22*137+50000))
 db.execute("UPDATE ai_budget_guard SET halted=1,reason='历史费用超过预留',trigger_job='legacy-orphan',revision=revision+1")
 db.commit();db.close()
@@ -50,14 +52,16 @@ db.commit();db.close()
     assert.equal(first.entries[0].acceptedAt,null);assert.equal(first.entries[0].principal,null);
     assert.ok(!JSON.stringify(first).includes('DO-NOT-RETURN'));
     const next=await fixture.api('/v1/ai/ledger?'+new URLSearchParams({month,limit:'20',before_sort_at:first.nextCursor.sortAt,before_job_id:first.nextCursor.jobId}));
-    assert.equal(next.entries.length,5);assert.equal(next.nextCursor,null);
-    assert.equal(new Set(first.entries.concat(next.entries).map(entry=>entry.jobId)).size,25);
+    assert.equal(next.entries.length,6);assert.equal(next.nextCursor,null);
+    assert.equal(new Set(first.entries.concat(next.entries).map(entry=>entry.jobId)).size,26);
     assert.equal(next.budget.chargedMicroUsd,first.budget.chargedMicroUsd);
     assert.ok(first.entries.concat(next.entries).every(entry=>!entry.taskRetained));
     const unpricedApi=await fixture.api('/v1/ai/ledger?'+new URLSearchParams({month,usage_state:'unpriced'}));
-    assert.equal(unpricedApi.entries.length,1);
-    assert.equal(unpricedApi.entries[0].accountedMicroUsd,null);
-    assert.deepEqual(unpricedApi.entries[0].reportedUsage,{inputTokens:'23',outputTokens:'7'});
+    assert.equal(unpricedApi.entries.length,2);
+    const unpricedWithUsage=unpricedApi.entries.find(entry=>entry.jobId==='unpriced-stepfun');
+    assert.equal(unpricedWithUsage.accountedMicroUsd,null);
+    assert.deepEqual(unpricedWithUsage.reportedUsage,{inputTokens:'23',outputTokens:'7'});
+    assert.equal(unpricedApi.entries.find(entry=>entry.jobId==='unpriced-interrupted').reportedUsage,null);
 
     await page.goto(uiUrl(fixture.base),{waitUntil:'domcontentloaded'});
     await page.evaluate(()=>{Workshop.open();Workshop.setTab('ledger');});
@@ -81,10 +85,10 @@ db.commit();db.close()
     assert.match(await page.locator('.ws-ledger-entry').innerText(),/费用未确认[\s\S]*可信计量迟到时仍可校正/);
     assert.equal(await page.locator('.ws-ledger-budget').innerText(),budgetText,'state filter never replaces the monthly total');
     await page.getByRole('combobox',{name:'费用状态',exact:true}).selectOption('unpriced');
-    await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===1);
+    await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===2);
     const unpriced=page.locator('.ws-ledger-entry[data-job-id="unpriced-stepfun"]');
     const unpricedText=await unpriced.innerText();
-    assert.match(unpricedText,/费用未知，已记录 token/);
+    assert.match(unpricedText,/费用未知/);
     assert.match(unpricedText,/输入 23 tokens · 输出 7 tokens · 金额未核价/);
     assert.doesNotMatch(unpricedText,/\$0(?:\.0+)? USD/);
     await unpriced.locator('summary').click();
@@ -92,6 +96,11 @@ db.commit();db.close()
     assert.equal(unpricedDiagnostic.accountedMicroUsd,null);
     assert.deepEqual(unpricedDiagnostic.reportedUsage,{inputTokens:'23',outputTokens:'7'});
     assert.equal(await page.locator('.ws-ledger-budget').innerText(),budgetText,'unpriced tokens never change the monetary total');
+    const interrupted=page.locator('.ws-ledger-entry[data-job-id="unpriced-interrupted"]');
+    const interruptedText=await interrupted.innerText();
+    assert.match(interruptedText,/费用未知/);
+    assert.match(interruptedText,/当前尚无可核实的供应商 token 用量，账目未记录 token 数/);
+    assert.doesNotMatch(interruptedText,/输入 \d+ tokens/);
     await page.getByRole('combobox',{name:'费用状态',exact:true}).selectOption('reported');
     await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===20);
     for(const width of [1440,390,320]){

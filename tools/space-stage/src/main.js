@@ -76,7 +76,8 @@ export function create(canvas, options = {}) {
       textures: info.memory.textures, programs: info.programs ? info.programs.length : 0,
       physicalPixels: canvas.width * canvas.height, memorySource: 'tracked-resource-estimate',
       ...scoped, resources: scoped.resources + lyricStats.resources, estimatedBytes: scoped.estimatedBytes + lyricStats.estimatedBytes + shared.bytes + post.bytes,
-      textTextures: shared.textTextures, coverTextures: shared.coverTextures, tasks: scoped.tasks + lyricStats.tasks + shared.queued };
+      textTextures: shared.textTextures, coverTextures: shared.coverTextures, tasks: scoped.tasks + lyricStats.tasks + shared.queued,
+      sceneStats: active?.instance?.stats?.() || null };
   }
   function notify() { if (typeof options.onStatus === 'function') options.onStatus(stats()); }
   function releaseActive() {

@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use vmusic_core::PROTOCOL_VERSION;
 
 use super::discovery::{self, DiscoveryDoc};
-use crate::ai::capability::{CAPABILITIES, CAPABILITY_VERSION, Effect, find, scope_satisfied};
+use crate::ai::capability::{find, scope_satisfied, Effect, CAPABILITIES, CAPABILITY_VERSION};
 #[cfg(test)]
 use crate::ai::capability::{Handler, SCOPES};
 
@@ -53,12 +53,75 @@ pub(crate) enum Session {
     NotConnected,
 }
 
+fn context_matches_discovery(
+    body: &Value,
+    doc: &DiscoveryDoc,
+    grant_id: &str,
+) -> Result<(BTreeSet<String>, bool, String), String> {
+    let protocol_version = body["protocolVersion"]
+        .as_str()
+        .ok_or_else(|| "context 缺少 protocolVersion".to_string())?;
+    if protocol_version != CAPABILITY_VERSION {
+        return Err(format!(
+            "protocolVersion {protocol_version} 与支持版本 {CAPABILITY_VERSION} 不匹配"
+        ));
+    }
+    if body["principal"]["kind"].as_str() != Some("grant")
+        || body["principal"]["grantId"].as_str() != Some(grant_id)
+        || body["policyRevision"].as_u64().is_none()
+    {
+        return Err("context 的授权主体或策略版本不合法".into());
+    }
+    let scopes = body["scopes"]
+        .as_array()
+        .ok_or_else(|| "context 缺少 scopes 数组".to_string())?;
+    let mut parsed_scopes = BTreeSet::new();
+    for scope in scopes {
+        let scope = scope
+            .as_str()
+            .filter(|scope| !scope.is_empty())
+            .ok_or_else(|| "context scopes 必须全部是非空字符串".to_string())?;
+        parsed_scopes.insert(scope.to_string());
+    }
+    let instance = &body["instance"];
+    let owner_instance_id = instance["ownerInstanceId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "context 缺少 ownerInstanceId".to_string())?;
+    let server_instance_id = instance["serverInstanceId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "context 缺少 serverInstanceId".to_string())?;
+    let edition = instance["edition"]
+        .as_str()
+        .ok_or_else(|| "context 缺少 edition".to_string())?;
+    let transport = instance["transport"]
+        .as_str()
+        .ok_or_else(|| "context 缺少 transport".to_string())?;
+    if owner_instance_id != doc.owner_instance_id
+        || server_instance_id != doc.server_instance_id
+        || edition != doc.edition
+        || transport != "http"
+    {
+        return Err("context 实例身份与发现文件不一致".into());
+    }
+    Ok((
+        parsed_scopes,
+        body["stageIntentToolsEnabled"]
+            .as_bool()
+            .ok_or_else(|| "context 缺少 stageIntentToolsEnabled".to_string())?,
+        server_instance_id.to_string(),
+    ))
+}
+
 #[derive(Debug)]
 pub(crate) enum SessionError {
     /// 多个凭据文件又没有 `--grant`：不猜，要求用户显式选择。
     AmbiguousGrants(Vec<String>),
     /// 显式指定的 grant 没有对应凭据文件。
     GrantNotFound(String),
+    /// 服务响应与适配器能理解的能力协议或发现身份不兼容。
+    ContextIncompatible(String),
 }
 
 impl std::fmt::Display for SessionError {
@@ -72,6 +135,9 @@ impl std::fmt::Display for SessionError {
             ),
             SessionError::GrantNotFound(id) => {
                 write!(f, "指定的 grant 没有凭据文件: {id}")
+            }
+            SessionError::ContextIncompatible(reason) => {
+                write!(f, "受限服务握手不兼容: {reason}")
             }
         }
     }
@@ -156,6 +222,13 @@ pub(crate) async fn open_session(
         Ok(doc) => doc,
         Err(_) => return Ok(Session::NotConnected),
     };
+    let supported_protocol_version = PROTOCOL_VERSION.to_string();
+    if doc.protocol_version != supported_protocol_version {
+        return Err(SessionError::ContextIncompatible(format!(
+            "发现文件 protocolVersion {} 与支持版本 {} 不匹配",
+            doc.protocol_version, supported_protocol_version
+        )));
+    }
     let ids = grant_files(&cfg.data_dir);
     let grant_id = match (&cfg.grant_id, ids.as_slice()) {
         (Some(id), _) => {
@@ -191,23 +264,15 @@ pub(crate) async fn open_session(
     if status != 200 {
         return Ok(Session::NotConnected);
     }
-    let scopes: BTreeSet<String> = body["scopes"]
-        .as_array()
-        .map(|list| {
-            list.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    let (scopes, stage_tools_enabled, server_instance_id) =
+        context_matches_discovery(&body, &doc, &grant_id)
+            .map_err(SessionError::ContextIncompatible)?;
     Ok(Session::Connected {
         base_url: format!("http://127.0.0.1:{}", doc.port),
         credential,
         scopes,
-        stage_tools_enabled: body["stageIntentToolsEnabled"].as_bool().unwrap_or(false),
-        server_instance_id: body["instance"]["serverInstanceId"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
+        stage_tools_enabled,
+        server_instance_id,
     })
 }
 
@@ -325,6 +390,27 @@ pub(crate) async fn call_tool(
     } else {
         None
     };
+    call_tool_with_operation_id(
+        client,
+        base_url,
+        credential,
+        server_instance_id,
+        name,
+        arguments,
+        client_operation_id,
+    )
+    .await
+}
+
+async fn call_tool_with_operation_id(
+    client: &reqwest::Client,
+    base_url: &str,
+    credential: &str,
+    server_instance_id: &str,
+    name: &str,
+    arguments: rmcp::model::JsonObject,
+    client_operation_id: Option<String>,
+) -> CallToolResult {
     let input = Value::Object(arguments);
     let url = format!("{base_url}/v1/ai/capabilities/call");
     let response = client
@@ -341,16 +427,29 @@ pub(crate) async fn call_tool(
     let response = match response {
         Ok(response) => response,
         Err(e) => {
-            return error_result(json!({ "code": "not_connected", "message": e.to_string() }))
+            return uncertain_result(
+                name,
+                client_operation_id.as_deref(),
+                "not_connected",
+                e.to_string(),
+            )
         }
     };
     let status = response.status().as_u16();
     let body = match read_reply(response).await {
         Ok(body) => body,
-        Err(e) => return error_result(json!({ "code": "bad_reply", "message": e.to_string() })),
+        Err(e) => return uncertain_result(name, client_operation_id.as_deref(), "bad_reply", e),
     };
     if status == 200 {
         return CallToolResult::structured(body);
+    }
+    if status >= 500 {
+        return uncertain_result(
+            name,
+            client_operation_id.as_deref(),
+            "upstream_error",
+            format!("受限服务返回 HTTP {status}，执行结果无法确认"),
+        );
     }
     // 门面错误体是 {"error":{code,message,...}}；工具级错误保留机器码。
     let detail = &body["error"];
@@ -359,6 +458,74 @@ pub(crate) async fn call_tool(
         "message": detail["message"].as_str().unwrap_or("受限调用失败"),
         "status": status,
     }))
+}
+
+fn uncertain_result(
+    operation: &str,
+    client_operation_id: Option<&str>,
+    fallback_code: &str,
+    message: String,
+) -> CallToolResult {
+    if let Some(client_operation_id) = client_operation_id {
+        unknown_result(operation, client_operation_id, message)
+    } else {
+        error_result(json!({ "code": fallback_code, "message": message }))
+    }
+}
+
+pub(crate) fn unknown_result(
+    operation: &str,
+    client_operation_id: &str,
+    message: String,
+) -> CallToolResult {
+    error_result(json!({
+        "outcome": "unknown",
+        "code": "unknown",
+        "operation": operation,
+        "clientOperationId": client_operation_id,
+        "message": message,
+    }))
+}
+
+pub(crate) fn ensure_operation_id(
+    operation: &str,
+    arguments: &mut rmcp::model::JsonObject,
+) -> Result<Option<String>, CallToolResult> {
+    let Some(capability) = find(operation) else {
+        return Err(error_result(json!({
+            "code": "capability_unsupported", "message": format!("未登记的能力: {operation}"),
+        })));
+    };
+    if capability.effect != Effect::Mutating {
+        return Ok(None);
+    }
+    match arguments.get("clientOperationId") {
+        Some(Value::String(id)) if !id.trim().is_empty() && id.len() <= 128 => Ok(Some(id.clone())),
+        Some(_) => Err(error_result(json!({
+            "code": "bad_request", "message": "clientOperationId 必须为 1–128 字节的非空字符串",
+        }))),
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            arguments.insert("clientOperationId".into(), Value::String(id.clone()));
+            Ok(Some(id))
+        }
+    }
+}
+
+pub(crate) fn cancelled_result(
+    operation: &str,
+    client_operation_id: Option<&str>,
+) -> CallToolResult {
+    match client_operation_id {
+        Some(id) => unknown_result(
+            operation,
+            id,
+            "调用方取消或连接关闭；请求可能已经提交，请用同一 clientOperationId 重查".into(),
+        ),
+        None => error_result(json!({
+            "code": "request_cancelled", "message": "只读调用已取消",
+        })),
+    }
 }
 
 fn not_connected_result() -> CallToolResult {
@@ -382,6 +549,111 @@ mod tests {
 
     fn temp_data_dir() -> PathBuf {
         std::env::temp_dir().join(format!("vmusic-mcp-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn context_handshake_checks_version_required_fields_and_discovery_identity() {
+        let doc = DiscoveryDoc {
+            version: discovery::DISCOVERY_VERSION,
+            pid: 1,
+            port: 1,
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            owner_instance_id: "owner".into(),
+            server_instance_id: "server".into(),
+            edition: "standard".into(),
+        };
+        let valid = json!({
+            "protocolVersion": CAPABILITY_VERSION,
+            "principal": { "kind": "grant", "grantId": "grant-a" },
+            "scopes": ["playback:pause"],
+            "policyRevision": 1,
+            "stageIntentToolsEnabled": false,
+            "instance": {
+                "ownerInstanceId": "owner",
+                "serverInstanceId": "server",
+                "edition": "standard",
+                "transport": "http"
+            }
+        });
+        assert!(context_matches_discovery(&valid, &doc, "grant-a").is_ok());
+
+        let mut future_version = valid.clone();
+        future_version["protocolVersion"] = json!("2");
+        assert!(context_matches_discovery(&future_version, &doc, "grant-a")
+            .unwrap_err()
+            .contains("protocolVersion"));
+
+        let mut missing_scopes = valid.clone();
+        missing_scopes.as_object_mut().unwrap().remove("scopes");
+        assert!(context_matches_discovery(&missing_scopes, &doc, "grant-a")
+            .unwrap_err()
+            .contains("scopes"));
+
+        let mut wrong_instance = valid;
+        wrong_instance["instance"]["serverInstanceId"] = json!("different-server");
+        assert!(context_matches_discovery(&wrong_instance, &doc, "grant-a")
+            .unwrap_err()
+            .contains("身份"));
+    }
+
+    #[tokio::test]
+    async fn mutation_without_reply_returns_unknown_with_retry_identity() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 2048];
+            let mut content_length = 0usize;
+            let mut header_end = None;
+            loop {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0, "request should contain a JSON body");
+                request.extend_from_slice(&chunk[..read]);
+                if header_end.is_none() {
+                    if let Some(position) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    {
+                        let headers = String::from_utf8_lossy(&request[..position]);
+                        content_length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        header_end = Some(position + 4);
+                    }
+                }
+                if header_end.is_some_and(|end| request.len() >= end + content_length) {
+                    break;
+                }
+            }
+            let start = header_end.unwrap();
+            let body: Value =
+                serde_json::from_slice(&request[start..start + content_length]).unwrap();
+            drop(socket);
+            body
+        });
+        let session = Session::Connected {
+            base_url: format!("http://{address}"),
+            credential: "fixture".into(),
+            scopes: BTreeSet::new(),
+            stage_tools_enabled: false,
+            server_instance_id: "server".into(),
+        };
+        let result = call_tool(&http_client().unwrap(), &session, "playback.pause", None).await;
+        let reply = serde_json::to_value(result).unwrap();
+        let received = server.await.unwrap();
+        assert_eq!(reply["structuredContent"]["outcome"], "unknown");
+        assert_eq!(reply["structuredContent"]["operation"], "playback.pause");
+        assert_eq!(
+            reply["structuredContent"]["clientOperationId"],
+            received["clientOperationId"]
+        );
+        assert!(!received["clientOperationId"].as_str().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -469,7 +741,7 @@ mod tests {
         assert_eq!(disconnected, 0);
     }
 
-    fn write_discovery(dir: &Path, port: u16, server_instance_id: &str) {
+    fn write_discovery(dir: &Path, port: u16, owner_instance_id: &str, server_instance_id: &str) {
         discovery::publish(
             dir,
             &DiscoveryDoc {
@@ -477,7 +749,7 @@ mod tests {
                 pid: 1,
                 port,
                 protocol_version: "1".into(),
-                owner_instance_id: "owner".into(),
+                owner_instance_id: owner_instance_id.to_string(),
                 server_instance_id: server_instance_id.to_string(),
                 edition: "standard".into(),
             },
@@ -505,7 +777,7 @@ mod tests {
     #[tokio::test]
     async fn two_grants_without_choice_is_an_error_and_one_grant_connects() {
         let dir = temp_data_dir();
-        write_discovery(&dir, 1, "server");
+        write_discovery(&dir, 1, "owner", "server");
         let grants = grants_dir(&dir);
         std::fs::create_dir_all(&grants).unwrap();
         std::fs::write(grants.join("grant-a.key"), "secret-a").unwrap();
@@ -553,7 +825,6 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        write_discovery(&dir, port, state.server_instance_id());
         let summary = crate::ai::facade::create_grant(
             &state,
             "e2e",
@@ -562,6 +833,15 @@ mod tests {
         .await
         .unwrap();
         let credential = std::fs::read_to_string(&summary.credential_path).unwrap();
+        let instance = vmusic_store::ai::get_or_create_instance(&state.db)
+            .await
+            .unwrap();
+        write_discovery(
+            &dir,
+            port,
+            &instance.owner_instance_id,
+            state.server_instance_id(),
+        );
         (state, handle, credential)
     }
 

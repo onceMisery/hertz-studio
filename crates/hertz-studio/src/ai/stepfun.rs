@@ -67,18 +67,15 @@ fn client() -> Result<Client, &'static str> {
         .map_err(|_| "cannot create isolated StepFun HTTP client")
 }
 
-fn token_only_quote(model: &str) -> Option<PriceQuote> {
-    if model != "step-5-preview" {
-        return None;
-    }
-    Some(PriceQuote {
+fn token_only_quote() -> PriceQuote {
+    PriceQuote {
         pricing_version: TOKEN_ONLY_PRICING_VERSION.into(),
         reservation_micro_usd: 0,
         input_micro_usd_per_million: 0,
         output_micro_usd_per_million: 0,
         max_input_tokens: 20_000,
         max_output_tokens: COMPLETION_OUTPUT_TOKENS,
-    })
+    }
 }
 
 #[derive(Clone)]
@@ -138,7 +135,7 @@ impl StepFun {
             endpoint,
             model: model.into(),
             client: client()?,
-            pricing: token_only_quote(model),
+            pricing: Some(token_only_quote()),
         })
     }
 
@@ -174,11 +171,9 @@ impl StepFun {
             }});
         }
         let bytes = serde_json::to_vec(&body).map_err(|_| "cannot encode StepFun request")?;
+        // Token usage is recorded from the provider reply; enforce serialized bytes separately.
         if bytes.len() > REQUEST_BYTES {
             return Err("StepFun request exceeds 64 KiB".into());
-        }
-        if bytes.len() as u64 > quote.max_input_tokens {
-            return Err("StepFun request exceeds the quoted input-token budget".into());
         }
         Ok(bytes)
     }
@@ -480,16 +475,18 @@ mod tests {
     }
 
     #[test]
-    fn production_quote_marks_cost_unknown_but_keeps_token_bounds() {
-        let provider =
-            StepFun::new("https://api.stepfun.com/step_plan/v1", "step-5-preview").unwrap();
-        let quote = provider.quote("dark orb").unwrap();
-        assert_eq!(quote.pricing_version, TOKEN_ONLY_PRICING_VERSION);
-        assert_eq!(quote.reservation_micro_usd, 0);
-        assert_eq!(quote.input_micro_usd_per_million, 0);
-        assert_eq!(quote.output_micro_usd_per_million, 0);
-        assert_eq!(quote.max_input_tokens, 20_000);
-        assert_eq!(quote.max_output_tokens, COMPLETION_OUTPUT_TOKENS);
+    fn configured_models_are_available_with_bounded_token_only_quotes() {
+        for model in ["step-5-preview", "step-3.5-flash-2603", "step-3.5-flash"] {
+            let provider = StepFun::new("https://api.stepfun.com/step_plan/v1", model).unwrap();
+            let quote = provider.quote("dark orb").unwrap();
+            assert!(provider.ready(), "{model}");
+            assert_eq!(quote.pricing_version, TOKEN_ONLY_PRICING_VERSION, "{model}");
+            assert_eq!(quote.reservation_micro_usd, 0, "{model}");
+            assert_eq!(quote.input_micro_usd_per_million, 0, "{model}");
+            assert_eq!(quote.output_micro_usd_per_million, 0, "{model}");
+            assert_eq!(quote.max_input_tokens, 20_000, "{model}");
+            assert_eq!(quote.max_output_tokens, COMPLETION_OUTPUT_TOKENS, "{model}");
+        }
     }
 
     #[test]
@@ -526,18 +523,23 @@ mod tests {
     }
 
     #[test]
-    fn request_checks_complete_input_and_output_bounds() {
+    fn request_enforces_byte_bounds_without_treating_bytes_as_tokens() {
         let provider = StepFun::new("https://api.stepfun.com/v1", "step-5-preview").unwrap();
-        let mut quote = quote();
-        quote.max_input_tokens = 1;
+        let quote = provider.quote("dark orb").unwrap();
+        assert_eq!(quote.max_input_tokens, 20_000);
         assert!(provider
-            .stage_request("dark orb", &quote)
-            .unwrap_err()
-            .contains("input-token budget"));
+            .stage_request(&"x".repeat(2_000), &quote)
+            .is_ok());
         assert!(provider
-            .request("long system", "x", &quote, false)
-            .unwrap_err()
-            .contains("input-token budget"));
+            .stage_request(&"测".repeat(2_000), &quote)
+            .is_ok());
+        assert!(
+            provider
+                .request(&"x".repeat(REQUEST_BYTES), "x", &quote, false)
+                .unwrap_err()
+                .contains("request exceeds 64 KiB")
+        );
+        let mut quote = quote;
         quote.max_output_tokens = COMPLETION_OUTPUT_TOKENS + 1;
         assert!(provider.stage_request("dark orb", &quote).is_err());
     }
@@ -608,19 +610,22 @@ mod tests {
             )
             .await;
         assert_eq!(reply.intent.unwrap_err(), "StepFun request cancelled");
-        provider.pricing.as_mut().unwrap().max_input_tokens = 1;
+        provider.pricing.as_mut().unwrap().max_input_tokens = 0;
+        assert!(!provider.ready());
         assert!(provider.quote("orb").is_err());
-        assert!(provider
-            .generate(
-                "orb".into(),
-                snapshot(&provider),
-                credential(),
-                Default::default()
-            )
-            .await
-            .intent
-            .unwrap_err()
-            .contains("input-token budget"));
+        assert_eq!(
+            provider
+                .generate(
+                    "orb".into(),
+                    snapshot(&provider),
+                    credential(),
+                    Default::default()
+                )
+                .await
+                .intent
+                .unwrap_err(),
+            DISABLED
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(30), listener.accept())
                 .await
@@ -775,8 +780,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn configured_token_only_http_job_records_usage_without_amount_gate() {
         use super::super::{credential as credentials, jobs};
-        use axum::{http::HeaderMap, routing::post, Json};
+        use axum::{Json, http::HeaderMap, routing::post};
         use std::sync::atomic::{AtomicUsize, Ordering};
+        const MODEL: &str = "step-3.5-flash-2603";
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
         let app = axum::Router::new().route(
@@ -787,11 +793,13 @@ mod tests {
                     async move {
                         assert_eq!(headers["authorization"], "Bearer stepfun-fixture-key");
                         assert!(!headers.contains_key("cookie"));
-                        assert_eq!(body["model"], "step-5-preview");
+                        assert_eq!(body["model"], MODEL);
                         assert_eq!(body["store"], false);
                         assert_eq!(body["stream"], false);
                         assert_eq!(body["max_output_tokens"], COMPLETION_OUTPUT_TOKENS);
-                        Json(response(r#"{"version":1,"scene":"orb","patch":{}}"#))
+                        let mut result = response(r#"{"version":1,"scene":"orb","patch":{}}"#);
+                        result["model"] = body["model"].clone();
+                        Json(result)
                     }
                 },
             ),
@@ -805,12 +813,12 @@ mod tests {
         let config = AiConfig {
             provider: "stepfun".into(),
             origin: "https://api.stepfun.com/step_plan/v1".into(),
-            model: "step-5-preview".into(),
+            model: MODEL.into(),
         };
         state.ai_runtime = jobs::AiRuntime::from_config(&config);
         let configured_provider = state.ai_runtime.provider().await;
         assert_eq!(configured_provider.id(), "stepfun");
-        assert_eq!(configured_provider.model(), "step-5-preview");
+        assert_eq!(configured_provider.model(), MODEL);
         assert!(configured_provider.ready());
         let production_quote = configured_provider.quote("dark orb").unwrap();
         assert_eq!(production_quote.pricing_version, TOKEN_ONLY_PRICING_VERSION);
@@ -946,7 +954,7 @@ mod tests {
         .unwrap();
         assert_eq!(job["state"], "succeeded");
         assert_eq!(job["provider"], "stepfun");
-        assert_eq!(job["model"], "step-5-preview");
+        assert_eq!(job["model"], MODEL);
         assert_eq!(job["usage"]["usageState"], "unpriced");
         assert_eq!(job["usage"]["pricingKnown"], false);
         assert_eq!(job["usage"]["accountedMicroUsd"], serde_json::Value::Null);

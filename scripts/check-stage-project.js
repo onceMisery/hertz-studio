@@ -38,6 +38,19 @@ async function main(){
   base.cues=[{at:1,len:2000,ease:'linear',set:{'look.bloom':1}},
     {at:2,len:1000,ease:'linear',set:{'look.bloom':0}}];CS.setPreset(base);
   const original=JSON.stringify(CS.preset()),file=h.file();
+  const originalCue=CS.preset().cues[0];
+  assert.equal(CS.updateCue(0,{...originalCue,set:{'look.bloom':999}}),false,'Cue targets outside the parameter contract are rejected');
+  assert.equal(CS.addCue({at:3,set:{'look.bloom':-1}}),false,'New cues reject out-of-range parameter targets');
+  assert.equal(CS.addCue({every:1.5,set:{'look.bloom':.5}}),false,'Beat intervals must be whole numbers');
+  assert.equal(CS.addCue({at:3,set:{'look.grade':.5}}),false,'Enum parameters reject values outside their options');
+  assert.equal(CS.addCue({at:3,every:2,set:{'look.bloom':.5}}),false,'A cue must choose exactly one trigger');
+  assert.equal(JSON.stringify(CS.preset().cues[0]),JSON.stringify(originalCue),'Rejected edits leave the stored cue untouched');
+  assert.equal((await P.capture(false)).project.preset.cues[0].set['look.bloom'],1,'Export preserves the accepted cue target exactly');
+  const detachedCue={at:5,set:{'look.bloom':.5}};
+  assert.equal(CS.addCue(detachedCue),true);
+  detachedCue.set['look.bloom']=999;
+  assert.equal(CS.preset().cues[2].set['look.bloom'],.5,'Accepted cue data is copied into the stage owner');
+  assert.equal(CS.removeCue(2),true);
   const prepared=P.prepare(JSON.stringify(file));assert.equal(JSON.stringify(CS.preset()),original);
   assert.equal(h.requests(),0,'Checking files never reads audio or calls a provider');
   assert.deepEqual(Object.keys(prepared.project).sort(),['projectVersion','timelineVersion','schemaVersion','schemaHash','preset','media'].sort());
@@ -50,6 +63,8 @@ async function main(){
   assert.throws(()=>P.prepare(' '.repeat(262145)),/256 KiB/);
   let bad=structuredClone(file);bad.media.sha256=['a'.repeat(64)];assert.throws(()=>P.prepare(bad),/身份/);
   bad=structuredClone(file);delete bad.preset.cam.yaw;assert.throws(()=>P.prepare(bad),/预置不完整/);
+  bad=structuredClone(file);bad.preset.look.bloom=8;assert.throws(()=>P.prepare(bad),/参数超出可用范围/);
+  bad=structuredClone(file);bad.preset.look.unknown=.5;assert.throws(()=>P.prepare(bad),/未知工程字段/);
   P.apply(prepared,CS.revision());h.position(2500);assert.equal(CS.runtime()['look.bloom'],0,'Imported cue track stays off before media confirmation');
   await P.bindCurrent();assert.match(P.status(),/已启用/);
   for(const [ms,want]of [[0,0],[1500,.25],[2000,.5],[2500,.25],[4000,0],[1500,.25]]){
@@ -97,7 +112,15 @@ async function main(){
   for(let i=CS.preset().cues.length;i<64;i++)assert.equal(CS.addCue({at:i,len:100,set:{'look.bloom':.2}}),true);
   assert.equal(CS.addCue({at:65,set:{'look.bloom':.2}}),false);
   assert.equal(CS.setBindings(Array(33).fill({target:'look.bloom',source:'energy',gain:1})),false);
-  bad=structuredClone(file);bad.preset.cues[0].every=4;assert.throws(()=>P.prepare(bad),/明确选择/);
+  bad=structuredClone(file);bad.preset.cues[0].every=4;assert.throws(()=>P.prepare(bad),/cue 列表无效/);
+  const beforeInvalidCue=JSON.stringify(CS.preset());
+  bad=structuredClone(file);bad.preset.cues[0].ease='linear-ish';assert.throws(()=>P.prepare(bad),/缓动无效/);
+  bad=structuredClone(file);bad.preset.cues[0].set['look.bloomTypo']=.9;assert.throws(()=>P.prepare(bad),/参数未知/);
+  bad=structuredClone(file);bad.preset.cues[0].set['look.bloom']=8;assert.throws(()=>P.prepare(bad),/参数超出可用范围/);
+  bad=structuredClone(file);delete bad.preset.cues[0].at;bad.preset.cues[0].every=1.4;
+  assert.throws(()=>P.prepare(bad),/cue 列表无效/);
+  bad=structuredClone(file);bad.preset.cues[0].comment='ignored before';assert.throws(()=>P.prepare(bad),/未知工程字段/);
+  assert.equal(JSON.stringify(CS.preset()),beforeInvalidCue,'Rejected cue data never mutates the current preset');
   CS.setBackground({type:'media',url:'file:///private/image.png'});
   const safeExport=await P.capture(false);assert.equal(safeExport.project.preset.bg.type,'theme');
   assert.ok(safeExport.warnings.some(s=>s.includes('另选素材')));
@@ -107,6 +130,30 @@ async function main(){
   CS.fire({set:{'__proto__.polluted':1,'look.bloom':'not a number'}});h.position(1200);
   assert.equal(vm.runInContext('Object.prototype.polluted',h.sandbox),undefined);
   assert.ok(Object.values(CS.runtime()).every(Number.isFinite));
+
+  const sceneEdit=harness(), scenePreset=sceneEdit.CS.canonicalBaseline('orb');
+  scenePreset.cues=[
+    {at:1,len:1000,set:{'sc.radius':4,'look.bloom':.7}},
+    {at:2,len:1000,set:{'sc.amp':.4}}
+  ];
+  scenePreset.bindings=[
+    {target:'sc.radius',source:'energy',gain:1},
+    {target:'look.bloom',source:'pulse',gain:.5}
+  ];
+  sceneEdit.CS.setPreset(scenePreset);
+  assert.equal(sceneEdit.CS.setScene('lyric'),true);
+  const switched=sceneEdit.CS.preset();
+  assert.equal(switched.cues.length,1,'Scene switch removes cues that only target old-scene parameters');
+  assert.equal(Object.keys(switched.cues[0].set).length,1,'Scene switch removes incompatible cue targets');
+  assert.equal(switched.cues[0].set['look.bloom'],.7,'Scene switch retains shared cue targets');
+  assert.equal(switched.bindings.length,1,'Scene switch removes incompatible bindings');
+  assert.equal(switched.bindings[0].target,'look.bloom');
+  const sceneExport=await sceneEdit.P.capture(false);
+  assert.equal(sceneExport.project.preset.scene,'lyric','Scene edits remain exportable');
+  const reopened=harness(), reopenedProject=reopened.P.prepare(sceneExport.project);
+  reopened.P.apply(reopenedProject,reopened.CS.revision());
+  assert.equal(reopened.CS.preset().scene,'lyric','Switched scene project can be reopened');
+  assert.equal(reopened.CS.preset().cues.length,1);
   console.log('Stage projects: strict envelope, pure import, media confirmation/races, persistent metadata, refresh/switch invalidation, ordered overlapping cues and reversible seeks passed');
 }
 if(require.main===module)main().catch(e=>{console.error(e);process.exitCode=1;});

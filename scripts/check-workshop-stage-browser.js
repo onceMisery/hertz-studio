@@ -93,6 +93,9 @@ async function main() {
     const before = await page.locator('#s3d-creative').screenshot();
     await page.evaluate(() => CreativeStage.setParam('cam.dist', 6));
     await page.waitForTimeout(1100);
+    await cards.nth(1).click();
+    assert.equal(await page.evaluate(() => CreativeStage.preset().cam.dist), 6,
+      'clicking the selected scene keeps the user-adjusted camera distance');
     const after = await page.locator('#s3d-creative').screenshot();
     assert.notDeepEqual(before, after, 'paused camera adjustment changes actual stage pixels');
     console.log('PASS real creative engine, scene selection and paused parameter pixels');

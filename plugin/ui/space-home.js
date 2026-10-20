@@ -51,6 +51,9 @@
     var img = node('img'); img.alt = ''; img.loading = 'lazy'; frame.appendChild(img);
     cover(img, item, playlist); return frame;
   }
+  function equalizer() {
+    return '<span class="sh-equalizer" aria-hidden="true"><i></i><i></i><i></i><i></i></span>';
+  }
   function clock() {
     var d = new Date();
     el.time.textContent = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -61,9 +64,10 @@
     root = container; callbacks = nextCallbacks || {}; root.classList.add('space-home');
     root.innerHTML = [
       '<header class="sh-header"><form class="sh-search" role="search"><button type="submit" title="搜索" aria-label="搜索">' + icon('search') + '</button><label class="sh-sr" for="sh-query">搜索音乐</label><input id="sh-query" type="search" placeholder="搜索歌曲、歌手..." autocomplete="off" spellcheck="false"></form><div class="sh-search-modes" role="tablist" aria-label="搜索来源"></div></header>',
-      '<div class="sh-shell"><section class="sh-daily-review"><video class="sh-video" muted loop playsinline hidden></video><div class="sh-date"></div><div class="sh-time"></div><blockquote class="sh-quote" aria-live="polite"></blockquote><div class="sh-quote-foot"><span class="sh-quote-source"></span></div><div class="sh-review-actions"><button type="button" class="sh-quote-next" title="换一条每日内容" aria-label="换一条每日内容">' + icon('reset') + '</button><button type="button" class="sh-video-choose" title="选择 MP4" aria-label="选择 MP4">' + icon('disc') + '</button><button type="button" class="sh-video-clear" hidden title="移除视频" aria-label="移除视频">' + icon('close') + '</button><button type="button" class="sh-player-open" title="展开播放器控制台" aria-label="展开播放器控制台">' + icon('play') + '</button></div><input class="sh-video-input" type="file" accept=".mp4,video/mp4" hidden></section>',
+      '<div class="sh-shell"><div class="sh-home-aside"><section class="sh-daily-review"><video class="sh-video" muted loop playsinline hidden></video><div class="sh-date"></div><div class="sh-time"></div><blockquote class="sh-quote" aria-live="polite"></blockquote><div class="sh-quote-foot"><span class="sh-quote-source"></span></div><div class="sh-review-actions"><button type="button" class="sh-quote-next" title="换一条每日内容" aria-label="换一条每日内容">' + icon('reset') + '</button><button type="button" class="sh-video-choose" title="选择 MP4" aria-label="选择 MP4">' + icon('disc') + '</button><button type="button" class="sh-video-clear" hidden title="移除视频" aria-label="移除视频">' + icon('close') + '</button><button type="button" class="sh-player-open" title="展开播放器控制台" aria-label="展开播放器控制台">' + icon('play') + '</button></div><input class="sh-video-input" type="file" accept=".mp4,video/mp4" hidden></section>',
+      '<section class="sh-recent"><header><div><span class="sh-eyebrow">RECENT</span><h2>最近聆听</h2></div><button type="button" class="sh-recent-more">全部记录 ' + icon('next') + '</button></header><div class="sh-recent-list" aria-live="polite"></div></section></div>',
       '<div class="sh-home-content"><div class="sh-actions" aria-label="音乐入口"></div><button class="sh-next-up" type="button"><span class="sh-next-art"></span><span class="sh-next-copy"><span class="sh-eyebrow">NEXT UP · 接下来播放</span><strong></strong><small></small></span>' + icon('next') + '</button>',
-      '<section class="sh-discovery"><header><div><span class="sh-eyebrow">FOR YOU</span><h2>为你挑选</h2></div><button type="button" class="sh-discovery-more">每日推荐 ' + icon('next') + '</button></header><div class="sh-discovery-list" aria-live="polite"></div></section><section class="sh-recent"><header><div><span class="sh-eyebrow">RECENT</span><h2>最近聆听</h2></div><button type="button" class="sh-recent-more">全部记录 ' + icon('next') + '</button></header><div class="sh-recent-list" aria-live="polite"></div></section></div></div>',
+      '<section class="sh-discovery"><header><div><span class="sh-eyebrow">FOR YOU</span><h2>为你挑选</h2></div><button type="button" class="sh-discovery-more">每日推荐 ' + icon('next') + '</button></header><div class="sh-discovery-list" aria-live="polite"></div></section></div></div>',
       '<div class="sh-panel-layer" hidden><div class="sh-scrim"></div><section class="sh-panel" id="sh-panel" role="dialog" aria-modal="true" aria-labelledby="sh-panel-title"><header class="sh-panel-head"><div class="sh-panel-leading"></div><h2 id="sh-panel-title"></h2><div class="sh-panel-tools"></div></header><div class="sh-panel-controls"></div><div class="sh-panel-body" tabindex="-1"></div></section></div>'
     ].join('');
     ['time', 'date', 'quote', 'quote-source', 'quote-next', 'actions', 'search', 'discovery-list', 'recent-list', 'panel-layer', 'panel', 'panel-leading', 'panel-tools', 'panel-controls', 'panel-body'].forEach(function (key) { el[key.replace(/-([a-z])/g, function (_, c) { return c.toUpperCase(); })] = root.querySelector('.sh-' + key); });
@@ -112,11 +116,15 @@
       if (event.shiftKey && (document.activeElement === first || !el.panel.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     });
-    [['continue', 'CONTINUE', '继续播放', 'play'], ['library', 'LIBRARY', '音乐库', 'library'], ['daily', 'DAILY MIX', '每日推荐', 'daily'], ['recent', 'RECENT', '最近播放', 'timer'], ['radio', 'RADIO', '电台', 'radio'], ['podcasts', 'PODCASTS', 'RSS · 播客', 'rss']].forEach(function (entry) {
+    [['continue', 'NOW PLAYING', '继续播放', 'play'], ['library', 'LIBRARY', '音乐库', 'library'], ['daily', 'DAILY MIX', '每日推荐', 'daily'], ['recent', 'HISTORY', '最近播放', 'timer'], ['radio', 'RADIO', '电台', 'radio'], ['podcasts', 'PODCAST', 'RSS · 播客', 'rss']].forEach(function (entry) {
       var b = node('button', 'sh-action sh-action-' + entry[0]); b.type = 'button';
       b.dataset.entry = entry[0];
       if (entry[0] !== 'continue') { b.setAttribute('aria-haspopup', 'dialog'); b.setAttribute('aria-controls', 'sh-panel'); b.setAttribute('aria-expanded', 'false'); }
-      b.innerHTML = '<span class="sh-action-copy"><span class="sh-eyebrow">' + entry[1] + '</span><strong>' + entry[2] + '</strong><span class="sh-action-detail"></span></span><span class="sh-action-cover">' + icon(entry[3]) + '<img alt=""></span>';
+      b.innerHTML = '<span class="sh-action-depth" aria-hidden="true"></span><span class="sh-action-glare" aria-hidden="true"></span><span class="sh-action-scan" aria-hidden="true"></span>'
+        + ['top-left', 'top-right', 'bottom-left', 'bottom-right'].map(function (corner) { return '<span class="sh-action-corner is-' + corner + '" aria-hidden="true"></span>'; }).join('')
+        + '<span class="sh-action-copy"><span class="sh-eyebrow">' + entry[1] + '</span><strong>' + entry[2] + '</strong><span class="sh-action-detail"></span></span>'
+        + '<span class="sh-action-foot"><span class="sh-action-open">→ 打开</span>' + (entry[0] === 'continue' || entry[0] === 'radio' ? equalizer() : '') + '</span>'
+        + '<span class="sh-action-cover">' + icon(entry[3]) + '<img alt=""></span>';
       b.addEventListener('click', function () {
         if (entry[0] === 'continue') return continuePlayback(b);
         openEntry({ kind: entry[0], source: entry[0] === 'daily' ? 'online' : 'local', offset: 0 });
@@ -166,7 +174,7 @@
     if (!items.length) el.panelBody.appendChild(node('p','sh-state','还没有搜索记录'));
     items.forEach(function (q) { var b = node('button','sh-history-item',q); b.type='button'; b.addEventListener('click',function () { el.query.value=q; search(true); }); el.panelBody.appendChild(b); });
   }
-  function contextKey(spec) { return [spec.kind, spec.source || '', spec.provider || '', spec.q || '', spec.playlist ? spec.playlist.id : '', spec.offset || 0].join('|'); }
+  function contextKey(spec) { return [spec.kind, spec.source || '', spec.provider || '', spec.q || '', spec.playlist ? spec.playlist.id : '', spec.offset || 0, spec.history ? 'history' : ''].join('|'); }
   function remember() {
     if (panel) { panel.scroll = el.panelBody.scrollTop; contexts.set(contextKey(panel), panel); }
   }
@@ -184,7 +192,7 @@
     syncSelection();
     if (spec.kind !== 'search') el.panelBody.focus({ preventScroll: true });
     if (spec.kind === 'radio' || spec.kind === 'podcasts') return;
-    if (!panel.items || panel.loading || spec.kind === 'search') loadPanel();
+    if (!panel.history && (!panel.items || panel.loading || spec.kind === 'search')) loadPanel();
   }
   function cancelPanelSearch() {
     generation += 1;
@@ -225,7 +233,7 @@
     el.panelTitle.textContent = spec.kind === 'playlist' ? spec.playlist.name : { library: '音乐库', search: '搜索 · ' + (spec.q || ''), daily: '每日推荐', recent: '最近播放', radio: '电台 · 私人 FM', podcasts: 'RSS · 播客' }[spec.kind];
     el.panelLeading.replaceChildren(); el.panelTools.replaceChildren(); el.panelControls.replaceChildren();
     if (spec.kind === 'playlist') el.panelLeading.appendChild(button('返回歌单', 'undo', function () { open(spec.parent); }));
-    el.panelTools.appendChild(button('刷新', 'reset', function () { if (spec.kind === 'radio' || spec.kind === 'podcasts') { if (surface) return run(surface.refresh); return drawPanel(); } panel.items = null; loadPanel(); }));
+    el.panelTools.appendChild(button('刷新', 'reset', function () { if (spec.kind === 'radio' || spec.kind === 'podcasts') { if (surface) return run(surface.refresh); return drawPanel(); } if (spec.history) return searchHistory(); panel.items = null; loadPanel(); }));
     el.panelTools.appendChild(button('关闭', 'close', closePanel));
     if (spec.kind === 'radio' || spec.kind === 'podcasts') {
       el.panelBody.replaceChildren(); el.panelBody.setAttribute('aria-busy', 'false');
@@ -271,12 +279,12 @@
     el.panelBody.setAttribute('aria-busy', String(!!spec.loading));
     if (!spec.items) {
       var loading = node('p', 'sh-state', '正在读取音乐…');
-      if (focusKey === 'panel:retry') {
+      if (focusKey === 'panel:retry' || (focusKey && focusKey.indexOf('source:') === 0)) {
         loading.tabIndex = -1;
         loading.dataset.searchKey = focusKey;
       }
       el.panelBody.appendChild(loading);
-      if (focusKey === 'panel:retry') loading.focus({ preventScroll: true });
+      if (loading.dataset.searchKey) loading.focus({ preventScroll: true });
       return;
     }
     if (spec.note) el.panelBody.appendChild(node('p', 'sh-state', spec.note));
@@ -306,6 +314,7 @@
         var status = node('p', 'sh-state', text);
         status.tabIndex = -1;
         status.dataset.searchStatus = 'true';
+        if (source.loading && focusKey === 'source:' + source.source) status.dataset.searchKey = focusKey;
         if (source.error) status.dataset.errorCode = source.error.code;
         if (source.error) status.dataset.requestId = source.error.requestId;
         section.appendChild(status);
@@ -381,10 +390,11 @@
     if (ticket === generation && panel === spec) drawPanel();
   }
   function trackList(container, items, spec) {
-    items.forEach(function (item) {
+    items.forEach(function (item, index) {
       if (spec && spec.rows && spec.rows.has(item.id)) { container.appendChild(spec.rows.get(item.id)); return; }
-      var row = node('div', 'sh-track'); row.dataset.trackId = item.id;
+      var row = node('div', 'sh-track' + (spec ? '' : ' sh-home-track')); row.dataset.trackId = item.id;
       var play = node('button', 'sh-track-main'); play.type = 'button'; play.setAttribute('aria-label', '播放 ' + item.title);
+      if (!spec) { var number = node('span', 'sh-track-index', String(index + 1).padStart(2, '0')); number.setAttribute('aria-hidden', 'true'); play.appendChild(number); }
       var artwork = art(item), cue = node('span', 'sh-track-cue'); cue.innerHTML = icon('play'); artwork.appendChild(cue); play.appendChild(artwork);
       var title = item.title || '未知曲目', artist = item.artist || '未知艺术家', album = item.album || '未知专辑';
       var source = item.source || (String(item.id).startsWith('online:') ? String(item.id).split(':')[1] : 'local');
@@ -404,6 +414,7 @@
       play.addEventListener('click', function () { activateTrack(item, spec ? spec.items : items); });
       var queue = button('加入队列 · ' + item.title, 'queue-next', function () { run(function () { return host.enqueue(item); }, queue); });
       queue.dataset.searchKey = 'queue:' + item.id;
+      if (!spec) { var live = node('span', 'sh-track-live'); live.innerHTML = equalizer(); play.appendChild(live); queue.appendChild(node('span', 'sh-queue-label', '+Q')); }
       if (spec && spec.rows) spec.rows.set(item.id, row);
       row.append(play, queue); container.appendChild(row);
     });
@@ -453,6 +464,7 @@
     var detail = current ? (current.artist || '未知艺术家') + (snap.playing ? ' · 正在播放' : ' · 接着听') : snap.queueLength ? snap.queueLength + ' 首歌曲在队列中' : item ? item.title : '从喜欢的音乐开始';
     el.continueAction.querySelector('.sh-action-detail').textContent = detail;
     el.continueAction.querySelector('strong').textContent = current ? current.title || '当前曲目' : '继续播放'; el.continueAction.disabled = !!snap.pending;
+    el.continueAction.dataset.playing = String(!!current && !!snap.playing);
     el.continueAction.title = current ? (snap.playing ? '打开播放队列：' : '继续播放：') + (current.title || '当前曲目') : '继续播放';
     el.libraryAction.querySelector('.sh-action-detail').textContent = '本地音乐与收藏歌单';
     el.dailyAction.querySelector('.sh-action-detail').textContent = discovery.length ? discovery.length + ' 首今日推荐' : '今天的新声音';

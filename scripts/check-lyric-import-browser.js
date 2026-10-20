@@ -50,6 +50,21 @@ async function main(){
     assert.deepEqual(saved.translation,['Hello']);assert.deepEqual(saved.romanization,['nǐ hǎo']);
     assert.equal(saved.lines[0].start_ms,2250);assert.equal(saved.lines[0].words[1].start_ms,3250);
     await page.waitForFunction(()=>Stage.lyrics()?.lines[0].start_ms===2750 && Stage.lyricTranslation(0)==='Hello');
+    assert.equal(await page.evaluate(()=>Stage.lyricRomanization(0)),'nǐ hǎo');
+    const stageLyrics=await page.evaluate(()=>{
+      const host=document.createElement('div');document.body.appendChild(host);
+      const view=StageLyrics.init(host,()=>{});
+      view.update({position:3000,reduced:false,track:{title:'Fixture'}});
+      const row=host.querySelector('.sl-line.is-active');
+      const result=row ? {text:Array.from(row.querySelectorAll('.sl-word')).map(word=>word.textContent).join(''),
+        label:row.getAttribute('aria-label'),
+        translation:row.querySelector('.sl-translation')?.textContent,
+        romanization:row.querySelector('.sl-romanization')?.textContent} : null;
+      view.destroy();host.remove();return result;
+    });
+    assert.deepEqual(stageLyrics,{text:'你好',label:'播放这一句：你好；翻译：Hello；罗马音：nǐ hǎo',
+      translation:'Hello',romanization:'nǐ hǎo'},
+      '3D stage reading rail must render imported translation and romanization');
     obs=await fixture.api('/v1/overlay/lyric');assert.equal(obs.lines[0].startTime,2.75);assert.equal(obs.lines[0].romanization,'nǐ hǎo');
 
     await choose('bad.ttml','<bad>not lyrics</bad>');

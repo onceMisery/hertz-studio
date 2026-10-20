@@ -162,6 +162,7 @@ function verifyBalanced(b, verifySources = false, verifyFailureCodes = false, ve
     releaseEligible: false };
 }
 function verify(file, { binary, current = false } = {}) {
+  assert.ok(!current || binary, '--current requires the library test executable for hash verification');
   const raw = bytes(file), r = JSON.parse(raw), p = r.probe, v = p?.results, m = r.processMemory;
   assert.equal(r.schemaVersion, 1); assert.equal(r.failure, undefined);
   assert.equal(r.releaseEligible, false); assert.ok([2, 3, 4, 5, 6, 7].includes(p.schemaVersion));

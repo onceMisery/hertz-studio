@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 
-//! Explicit provider adapters. OpenAI stays unavailable until model pricing is verified.
+//! Explicit provider adapters. Unknown cloud pricing uses bounded token-only usage.
 //! Only this module owns the model HTTP client; ordinary online/public clients
 //! must not acquire model credentials or issue model POSTs.
 
 use super::contract;
-use super::jobs::{FakeProvider, ProviderReply, StageIntentProvider, RUN_DEADLINE_MS};
+use super::jobs::{FakeProvider, ProviderReply, RUN_DEADLINE_MS, StageIntentProvider};
 use super::strict_json;
-use super::usage::{PriceQuote, PricingSnapshot, TrustedUsage};
+use super::usage::{PriceQuote, PricingSnapshot, TOKEN_ONLY_PRICING_VERSION, TrustedUsage};
 use crate::config::AiConfig;
 use reqwest::{Client, Url};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,8 +19,7 @@ const RESPONSE_BYTES: usize = 256 * 1024;
 const REQUEST_BYTES: usize = 128 * 1024;
 const OUTPUT_TOKENS: u64 = 512;
 const LOCAL_PRICE_VERSION: &str = "ollama-local-zero-usd-v1";
-const OPENAI_DISABLED: &str =
-    "OpenAI requests are disabled until a model and verified pricing are selected";
+const OPENAI_DISABLED: &str = "OpenAI model or bounded request configuration is unsupported";
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 
 pub(super) fn configured(config: &AiConfig) -> Arc<dyn StageIntentProvider> {
@@ -206,10 +205,7 @@ impl Ollama {
             }
         }
         // The body limit applies to every status, including errors/redirects.
-        if !status.is_success() {
-            return failed(&format!("local model HTTP status {}", status.as_u16()));
-        }
-        parse_reply(&bytes, &self.model)
+        parse_http_reply(&bytes, &self.model, status)
     }
 
     fn completion_request(&self, system: &str, user: &str) -> Result<Vec<u8>, &'static str> {
@@ -265,28 +261,7 @@ impl Ollama {
                 Err(_) => return Err("local model response read failed".to_string()),
             }
         }
-        if !status.is_success() {
-            return Err(format!("local model HTTP status {}", status.as_u16()));
-        }
-        let envelope =
-            super::strict_json::parse(&bytes, RESPONSE_BYTES, 8).map_err(str::to_owned)?;
-        let usage = match (
-            envelope.get("prompt_eval_count").and_then(Value::as_u64),
-            envelope.get("eval_count").and_then(Value::as_u64),
-        ) {
-            (Some(input_tokens), Some(output_tokens)) => Some(super::usage::TrustedUsage {
-                input_tokens,
-                output_tokens,
-            }),
-            _ => None,
-        };
-        let text = envelope
-            .get("message")
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| "local model completion text is missing".to_string());
-        Ok(super::jobs::CompletionReply { text, usage })
+        parse_completion_reply(&bytes, &self.model, status)
     }
 }
 
@@ -311,7 +286,7 @@ impl StageIntentProvider for Ollama {
             reservation_micro_usd: 0,
             input_micro_usd_per_million: 0,
             output_micro_usd_per_million: 0,
-            max_input_tokens: u64::MAX,
+            max_input_tokens: REQUEST_BYTES as u64,
             max_output_tokens: OUTPUT_TOKENS,
         })
     }
@@ -394,7 +369,7 @@ impl OpenAi {
             endpoint,
             model: model.into(),
             client: openai_client()?,
-            pricing: None,
+            pricing: Some(openai_token_only_quote()),
         })
     }
 
@@ -507,7 +482,7 @@ impl OpenAi {
                 Err(_) => return failed("OpenAI response read failed"),
             }
         }
-        let mut reply = parse_openai_reply(&bytes, &self.model);
+        let mut reply = parse_openai_reply_with_pricing(&bytes, &self.model, false);
         if !status.is_success() {
             reply.intent = Err(format!("OpenAI HTTP status {}", status.as_u16()));
         }
@@ -577,7 +552,7 @@ impl OpenAi {
                 Err(_) => return Err("OpenAI response read failed".to_string()),
             }
         }
-        let mut reply = parse_openai_completion(&bytes, &self.model)?;
+        let mut reply = parse_openai_completion_with_pricing(&bytes, &self.model, false)?;
         if !status.is_success() {
             reply.text = Err(format!("OpenAI HTTP status {}", status.as_u16()));
         }
@@ -594,6 +569,17 @@ fn ensure_input_budget(bytes: &[u8], quote: &PriceQuote) -> Result<(), &'static 
         return Err("OpenAI request exceeds the quoted input-token budget");
     }
     Ok(())
+}
+
+fn openai_token_only_quote() -> PriceQuote {
+    PriceQuote {
+        pricing_version: TOKEN_ONLY_PRICING_VERSION.into(),
+        reservation_micro_usd: 0,
+        input_micro_usd_per_million: 0,
+        output_micro_usd_per_million: 0,
+        max_input_tokens: REQUEST_BYTES as u64,
+        max_output_tokens: OUTPUT_TOKENS,
+    }
 }
 
 impl StageIntentProvider for OpenAi {
@@ -615,11 +601,13 @@ impl StageIntentProvider for OpenAi {
 
     fn ready(&self) -> bool {
         self.pricing.as_ref().is_some_and(|quote| {
-            quote.max_input_tokens > 0
+            quote.pricing_version == TOKEN_ONLY_PRICING_VERSION
+                && quote.reservation_micro_usd == 0
+                && quote.input_micro_usd_per_million == 0
+                && quote.output_micro_usd_per_million == 0
+                && quote.max_input_tokens > 0
                 && quote.max_output_tokens > 0
                 && quote.max_output_tokens <= OUTPUT_TOKENS
-                && quote.input_micro_usd_per_million > 0
-                && quote.output_micro_usd_per_million > 0
                 && quote.validate().is_ok()
         })
     }
@@ -696,13 +684,6 @@ impl StageIntentProvider for OpenAi {
             }
         })
     }
-}
-
-pub(super) fn parse_openai_completion(
-    bytes: &[u8],
-    model: &str,
-) -> Result<super::jobs::CompletionReply, String> {
-    parse_openai_completion_with_pricing(bytes, model, true)
 }
 
 pub(super) fn parse_openai_completion_with_pricing(
@@ -787,6 +768,7 @@ fn openai_client() -> Result<Client, &'static str> {
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_millis(RUN_DEADLINE_MS as u64))
         .user_agent("HertzStudio/0.1 openai-stage-intent")
+        .dns_resolver(crate::public_net::public_dns_resolver())
         .build()
         .map_err(|_| "cannot create isolated OpenAI HTTP client")
 }
@@ -973,22 +955,10 @@ fn parse_reply(bytes: &[u8], model: &str) -> ProviderReply {
         Ok(value) => value,
         Err(reason) => return failed(reason),
     };
-    let response_model = envelope["model"].as_str().unwrap_or_default();
-    let matching_model = response_model == model || response_model == format!("{model}:latest");
     // Partial/error responses or a different model cannot attest final counters
     // for this attempt. A completed-but-truncated response can still report them.
-    let usage = if matching_model && envelope["done"] == true && envelope["error"].is_null() {
-        envelope
-            .get("prompt_eval_count")
-            .and_then(Value::as_u64)
-            .zip(envelope.get("eval_count").and_then(Value::as_u64))
-            .map(|(input_tokens, output_tokens)| TrustedUsage {
-                input_tokens,
-                output_tokens,
-            })
-    } else {
-        None
-    };
+    let matching_model = local_model_matches(&envelope, model);
+    let usage = parse_local_usage(&envelope, model);
     let intent = (|| {
         if matching_model && envelope["done"] == true && envelope["done_reason"] == "length" {
             return Err("local model output was truncated".to_owned());
@@ -1020,6 +990,57 @@ fn parse_reply(bytes: &[u8], model: &str) -> ProviderReply {
     ProviderReply { intent, usage }
 }
 
+fn parse_http_reply(bytes: &[u8], model: &str, status: reqwest::StatusCode) -> ProviderReply {
+    let mut reply = parse_reply(bytes, model);
+    if !status.is_success() {
+        reply.intent = Err(format!("local model HTTP status {}", status.as_u16()));
+    }
+    reply
+}
+
+fn parse_completion_reply(
+    bytes: &[u8],
+    model: &str,
+    status: reqwest::StatusCode,
+) -> Result<super::jobs::CompletionReply, String> {
+    let envelope = super::strict_json::parse(bytes, RESPONSE_BYTES, 8).map_err(str::to_owned)?;
+    let usage = parse_local_usage(&envelope, model);
+    let text = if !status.is_success() {
+        Err(format!("local model HTTP status {}", status.as_u16()))
+    } else {
+        envelope
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "local model completion text is missing".to_string())
+    };
+    Ok(super::jobs::CompletionReply { text, usage })
+}
+
+fn local_model_matches(envelope: &Value, model: &str) -> bool {
+    envelope["model"].as_str().is_some_and(|response_model| {
+        response_model == model || response_model.strip_suffix(":latest") == Some(model)
+    })
+}
+
+fn parse_local_usage(envelope: &Value, model: &str) -> Option<TrustedUsage> {
+    if !local_model_matches(envelope, model)
+        || envelope["done"] != true
+        || !envelope["error"].is_null()
+    {
+        return None;
+    }
+    let (input_tokens, output_tokens) = envelope
+        .get("prompt_eval_count")
+        .and_then(Value::as_u64)
+        .zip(envelope.get("eval_count").and_then(Value::as_u64))?;
+    Some(TrustedUsage {
+        input_tokens,
+        output_tokens,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1040,11 +1061,11 @@ mod tests {
 
     fn openai_quote() -> PriceQuote {
         PriceQuote {
-            pricing_version: "fixture-openai-prices-v1".into(),
-            reservation_micro_usd: 50_000,
-            input_micro_usd_per_million: 100_000,
-            output_micro_usd_per_million: 5_000_000,
-            max_input_tokens: 100_000,
+            pricing_version: TOKEN_ONLY_PRICING_VERSION.into(),
+            reservation_micro_usd: 0,
+            input_micro_usd_per_million: 0,
+            output_micro_usd_per_million: 0,
+            max_input_tokens: REQUEST_BYTES as u64,
             max_output_tokens: OUTPUT_TOKENS,
         }
     }
@@ -1080,6 +1101,28 @@ mod tests {
                 "total_tokens":1276
             }
         })
+    }
+
+    #[tokio::test]
+    async fn openai_client_rejects_loopback_dns_results_before_connecting() {
+        let client = openai_client().unwrap();
+        let error = client
+            .get("https://localhost:1/v1/responses")
+            .send()
+            .await
+            .expect_err("localhost must be rejected by the public DNS resolver");
+        let error_chain = std::iter::successors(
+            Some(&error as &dyn std::error::Error),
+            |cause| cause.source(),
+        )
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        assert!(
+            error_chain.contains("public URL resolved to a local or special-use address"),
+            "unexpected resolver failure: {error_chain}"
+        );
     }
 
     #[test]
@@ -1123,18 +1166,24 @@ mod tests {
             model: "candidate-not-selected".into(),
             ..AiConfig::default()
         });
-        assert!(!openai.ready());
+        assert!(openai.ready());
         assert_eq!(openai.id(), "openai");
         assert_eq!(openai.model(), "candidate-not-selected");
-        assert_eq!(openai.diagnostic(), Some(OPENAI_DISABLED));
-        assert!(openai.quote("dark static orb").is_err());
-        assert!(configured(&AiConfig {
-            provider: "openai".into(),
-            model: String::new(),
-            ..AiConfig::default()
-        })
-        .diagnostic()
-        .is_some());
+        assert_eq!(openai.diagnostic(), None);
+        let quote = openai.quote("dark static orb").unwrap();
+        assert_eq!(quote.pricing_version, TOKEN_ONLY_PRICING_VERSION);
+        assert_eq!(quote.reservation_micro_usd, 0);
+        assert_eq!(quote.max_input_tokens, REQUEST_BYTES as u64);
+        assert_eq!(quote.max_output_tokens, OUTPUT_TOKENS);
+        assert!(
+            configured(&AiConfig {
+                provider: "openai".into(),
+                model: String::new(),
+                ..AiConfig::default()
+            })
+            .diagnostic()
+            .is_some()
+        );
     }
 
     #[test]
@@ -1178,6 +1227,58 @@ mod tests {
         assert!(parsed.usage.is_none());
         let duplicate = br#"{"prompt_eval_count":1,"prompt_eval_count":2}"#;
         assert!(parse_reply(duplicate, "test-local").usage.is_none());
+    }
+
+    #[test]
+    fn ollama_failure_responses_keep_only_verified_usage() {
+        let content = r#"{"version":1,"scene":"orb","patch":{}}"#;
+        let bytes = serde_json::to_vec(&response(content)).unwrap();
+        let failed = parse_http_reply(
+            &bytes,
+            "test-local",
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        );
+        assert!(failed.intent.unwrap_err().contains("HTTP status 503"));
+        assert_eq!(failed.usage.unwrap().input_tokens, 1234);
+
+        let completion = parse_completion_reply(
+            &bytes,
+            "test-local",
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        )
+        .unwrap();
+        assert!(completion.text.unwrap_err().contains("HTTP status 503"));
+        assert_eq!(completion.usage.unwrap().output_tokens, 42);
+
+        let mut untrusted_response = response(content);
+        untrusted_response["model"] = json!("other-model");
+        let untrusted = serde_json::to_vec(&untrusted_response).unwrap();
+        assert!(
+            parse_http_reply(
+                &untrusted,
+                "test-local",
+                reqwest::StatusCode::SERVICE_UNAVAILABLE
+            )
+            .usage
+            .is_none()
+        );
+        assert!(
+            parse_completion_reply(
+                &untrusted,
+                "test-local",
+                reqwest::StatusCode::SERVICE_UNAVAILABLE
+            )
+            .unwrap()
+            .usage
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn ollama_input_token_bound_matches_complete_request_byte_limit() {
+        let provider = Ollama::new("http://127.0.0.1:11434", "test-local").unwrap();
+        let quote = provider.quote("dark static orb").unwrap();
+        assert_eq!(quote.max_input_tokens, REQUEST_BYTES as u64);
     }
 
     #[test]
@@ -1276,7 +1377,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_responses_http_fixture_checks_request_and_usage() {
-        use axum::{extract::State, http::HeaderMap, routing::post, Json};
+        use axum::{Json, extract::State, http::HeaderMap, routing::post};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1295,10 +1396,12 @@ mod tests {
                         assert!(!headers.contains_key(reqwest::header::COOKIE));
                         assert_eq!(body["model"], "test-openai");
                         assert_eq!(body["input"], "dark static orb");
-                        assert!(body["instructions"]
-                            .as_str()
-                            .unwrap()
-                            .contains("basePresetHashes"));
+                        assert!(
+                            body["instructions"]
+                                .as_str()
+                                .unwrap()
+                                .contains("basePresetHashes")
+                        );
                         assert_eq!(body["store"], false);
                         assert_eq!(body["stream"], false);
                         assert_eq!(body["max_output_tokens"], OUTPUT_TOKENS);
@@ -1315,9 +1418,18 @@ mod tests {
                         for key in ["tools", "conversation", "previous_response_id"] {
                             assert!(body.get(key).is_none(), "unexpected request field {key}");
                         }
-                        Json(openai_response(
+                        let mut response = openai_response(
                             r#"{"version":1,"scene":"orb","patch":{"sc.radius":2}}"#,
-                        ))
+                        );
+                        response["usage"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("input_tokens_details");
+                        response["usage"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("output_tokens_details");
+                        Json(response)
                     },
                 ),
             )
@@ -1325,6 +1437,8 @@ mod tests {
         let (origin, task) = server(app).await;
         let quote = openai_quote();
         quote.validate().unwrap();
+        assert_eq!(quote.pricing_version, TOKEN_ONLY_PRICING_VERSION);
+        assert_eq!(quote.reservation_micro_usd, 0);
         let provider = openai_for_server(&origin, Some(quote.clone()));
         let snapshot = openai_snapshot(&provider, quote);
         let result = provider
@@ -1338,14 +1452,173 @@ mod tests {
             )
             .await;
         assert!(result.intent.is_ok());
-        assert_eq!(result.usage.unwrap().output_tokens, 42);
+        let usage = result.usage.unwrap();
+        assert_eq!(usage.input_tokens, 1234);
+        assert_eq!(usage.output_tokens, 42);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         task.abort();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configured_openai_token_only_job_settles_usage_without_amount_gate() {
+        use super::super::{credential as credentials, jobs, ledger};
+        use axum::{Json, http::HeaderMap, routing::post};
+        use std::sync::atomic::Ordering;
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let app = axum::Router::new().route(
+            "/v1/responses",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(
+                        headers[reqwest::header::AUTHORIZATION],
+                        "Bearer fixture-openai-key"
+                    );
+                    assert!(!headers.contains_key(reqwest::header::COOKIE));
+                    assert_eq!(body["model"], "test-openai");
+                    Json(openai_response(r#"{"version":1,"scene":"orb","patch":{}}"#))
+                }
+            }),
+        );
+        let (origin, server_task) = server(app).await;
+        let dir = std::env::temp_dir().join(format!("hertz-openai-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let (mut state, audio_thread) = crate::state::tests::playback_state_with_db(db).await;
+        let config = AiConfig {
+            provider: "openai".into(),
+            model: "test-openai".into(),
+            ..AiConfig::default()
+        };
+        state.ai_runtime = super::super::jobs::AiRuntime::from_config(&config);
+        state.ai_runtime.credentials = credentials::Service::isolated_for_config(&config);
+        state.ai_runner_held.store(true, Ordering::Relaxed);
+        state.token = "openai-http-fixture-token".into();
+
+        let configured_provider = state.ai_runtime.provider().await;
+        assert_eq!(configured_provider.id(), "openai");
+        assert_eq!(configured_provider.model(), "test-openai");
+        assert!(configured_provider.ready());
+        let production_quote = configured_provider.quote("dark orb").unwrap();
+        assert_eq!(production_quote.pricing_version, TOKEN_ONLY_PRICING_VERSION);
+        assert_eq!(production_quote.reservation_micro_usd, 0);
+        assert_eq!(production_quote.max_input_tokens, REQUEST_BYTES as u64);
+        assert_eq!(production_quote.max_output_tokens, OUTPUT_TOKENS);
+
+        let endpoint = Url::parse(&format!("{origin}/v1/responses")).unwrap();
+        let fixture_provider =
+            OpenAi::with_test_endpoint("test-openai", endpoint, Some(production_quote.clone()))
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(fixture_provider.quote("dark orb").unwrap()).unwrap(),
+            serde_json::to_value(production_quote).unwrap()
+        );
+        state
+            .ai_runtime
+            .install_provider(Arc::new(fixture_provider))
+            .await;
+        let state = Arc::new(state);
+        vmusic_store::settings::set(&state.db, jobs::CONSENT_KEY, &Value::Bool(true))
+            .await
+            .unwrap();
+        credentials::put(
+            &state,
+            credentials::CredentialRequest::from_value(&json!({
+                "api_key":"fixture-openai-key"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let owner = jobs::instance_owner(&state).await.unwrap();
+        let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
+        vmusic_store::ai_jobs::halt_budget_guard(
+            &mut tx,
+            &owner,
+            "fixture metered budget halt",
+            "fixture-metered-task",
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let before = jobs::status(&state, &owner).await.unwrap();
+        assert_eq!(before["provider"]["pricingMode"], "token_only");
+        assert_eq!(before["guard"]["halted"], true);
+
+        let key = format!(
+            "v1.{}.{}",
+            vmusic_store::now_ms(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let accepted = jobs::submit(&state, "local-owner", "dark orb", Some(&key))
+            .await
+            .unwrap();
+        let accepted = match accepted {
+            jobs::SubmitOutcome::Accepted { job } => job,
+            jobs::SubmitOutcome::Replayed { .. } => panic!("first OpenAI submission replayed"),
+        };
+        let job_id = accepted.job_id;
+        let mut job = jobs::get_job(&state, "local-owner", &job_id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while matches!(job.state.as_str(), "accepted" | "running") {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                job = jobs::get_job(&state, "local-owner", &job_id).await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            job.state,
+            "succeeded",
+            "dispatch={}, usage={:?}, fixture_calls={}",
+            job.dispatch_state,
+            job.usage.reported_usage,
+            calls.load(Ordering::SeqCst)
+        );
+        assert_eq!(job.provider, "openai");
+        assert_eq!(job.model, "test-openai");
+        assert_eq!(job.usage.usage_state, "unpriced");
+        assert!(!job.usage.pricing_known);
+        assert_eq!(job.usage.accounted_micro_usd, None);
+        let usage = job.usage.reported_usage.unwrap();
+        assert_eq!(usage.input_tokens, 1234);
+        assert_eq!(usage.output_tokens, 42);
+
+        let page = ledger::read(
+            &state,
+            ledger::Query {
+                month: Some(job.usage.accepted_month.clone()),
+                usage_state: Some("unpriced".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let page = serde_json::to_value(page).unwrap();
+        assert_eq!(page["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(page["entries"][0]["jobId"], job_id);
+        assert_eq!(page["entries"][0]["accountedMicroUsd"], Value::Null);
+        assert_eq!(page["entries"][0]["reportedUsage"]["inputTokens"], "1234");
+        assert_eq!(page["entries"][0]["reportedUsage"]["outputTokens"], "42");
+        assert_eq!(page["budget"]["chargedMicroUsd"], "0");
+        assert_eq!(page["budget"]["reservedMicroUsd"], "0");
+        assert_eq!(page["guard"]["halted"], true);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        state.audio.shutdown();
+        audio_thread.join().unwrap();
+        state.db.close().await;
+        server_task.abort();
+        let _ = server_task.await;
+        drop(state);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn openai_non_success_responses_keep_only_verified_usage() {
-        use axum::{http::StatusCode, routing::post, Json};
+        use axum::{Json, http::StatusCode, routing::post};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1424,7 +1697,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_completion_http_fixture_returns_plain_text() {
-        use axum::{extract::State, http::HeaderMap, routing::post, Json};
+        use axum::{Json, extract::State, http::HeaderMap, routing::post};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1442,10 +1715,12 @@ mod tests {
                         );
                         assert_eq!(body["model"], "test-openai");
                         assert_eq!(body["input"], "{\"lyricsHash\":\"sha256:fixture\"}");
-                        assert!(body["instructions"]
-                            .as_str()
-                            .unwrap()
-                            .contains("classify lyric lines"));
+                        assert!(
+                            body["instructions"]
+                                .as_str()
+                                .unwrap()
+                                .contains("classify lyric lines")
+                        );
                         assert_eq!(body["store"], false);
                         assert_eq!(body["stream"], false);
                         assert_eq!(body["max_output_tokens"], OUTPUT_TOKENS);
@@ -1638,7 +1913,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openai_without_verified_pricing_cannot_dispatch() {
+    async fn openai_without_token_only_quote_cannot_dispatch() {
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1683,10 +1958,12 @@ mod tests {
         let provider =
             OpenAi::with_test_endpoint("test-openai", endpoint, Some(quote.clone())).unwrap();
         assert!(provider.ready());
-        assert!(provider
-            .quote("dark static orb")
-            .unwrap_err()
-            .contains("quoted input-token budget"));
+        assert!(
+            provider
+                .quote("dark static orb")
+                .unwrap_err()
+                .contains("quoted input-token budget")
+        );
 
         let reply = provider
             .generate(
@@ -1698,10 +1975,12 @@ mod tests {
                 Default::default(),
             )
             .await;
-        assert!(reply
-            .intent
-            .unwrap_err()
-            .contains("quoted input-token budget"));
+        assert!(
+            reply
+                .intent
+                .unwrap_err()
+                .contains("quoted input-token budget")
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(50), listener.accept())
                 .await
@@ -1711,7 +1990,7 @@ mod tests {
 
     #[tokio::test]
     async fn real_http_post_sends_only_description_and_contract_once() {
-        use axum::{extract::State, http::HeaderMap, routing::post, Json};
+        use axum::{Json, extract::State, http::HeaderMap, routing::post};
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let app = axum::Router::new()
             .route(
@@ -1729,10 +2008,12 @@ mod tests {
                         let messages = body["messages"].as_array().unwrap();
                         assert_eq!(messages.len(), 2);
                         assert_eq!(messages[1]["content"], "dark static orb");
-                        assert!(messages[0]["content"]
-                            .as_str()
-                            .unwrap()
-                            .contains("basePresetHashes"));
+                        assert!(
+                            messages[0]["content"]
+                                .as_str()
+                                .unwrap()
+                                .contains("basePresetHashes")
+                        );
                         assert!(body.get("tools").is_none());
                         assert_eq!(
                             body["format"]["oneOf"].as_array().unwrap().len(),
@@ -1760,16 +2041,18 @@ mod tests {
         assert_eq!(result.usage.unwrap().output_tokens, 42);
         let mut bad_price = quote;
         bad_price.quote.reservation_micro_usd = 1;
-        assert!(provider
-            .generate(
-                "dark static orb".into(),
-                bad_price,
-                None,
-                Default::default()
-            )
-            .await
-            .intent
-            .is_err());
+        assert!(
+            provider
+                .generate(
+                    "dark static orb".into(),
+                    bad_price,
+                    None,
+                    Default::default()
+                )
+                .await
+                .intent
+                .is_err()
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         task.abort();
     }

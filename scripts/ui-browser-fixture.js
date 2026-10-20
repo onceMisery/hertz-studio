@@ -63,9 +63,23 @@ async function startFixture({ backend = 'null', prepareData } = {}) {
   child.on('error', error => { launchError = error; });
   async function close() {
     if (child.exitCode === null && child.signalCode === null && !launchError) {
-      const exited = once(child, 'exit');
+      const exited = once(child, 'exit').then(() => true, () => true);
       child.kill();
-      await exited;
+      const stopped = await Promise.race([exited, delay(1500).then(() => false)]);
+      if (!stopped) {
+        if (process.platform === 'win32') {
+          await new Promise(resolve => {
+            const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+              windowsHide: true, stdio: 'ignore',
+            });
+            killer.once('error', resolve);
+            killer.once('exit', resolve);
+          });
+        } else {
+          child.kill('SIGKILL');
+        }
+        await Promise.race([exited, delay(1500).then(() => false)]);
+      }
     }
     const resolved = fs.realpathSync(dir);
     assert.equal(path.dirname(resolved), fs.realpathSync(os.tmpdir()), 'Cleanup stays in the temporary directory');

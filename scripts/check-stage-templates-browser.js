@@ -53,8 +53,6 @@ async function main(){
         const rectOf=el=>{const r=el.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,right:r.right,bottom:r.bottom};};
         const visible=el=>{
           if(!el.textContent.trim()||!el.getClientRects().length)return false;
-          const rect=el.getBoundingClientRect();
-          if(rect.right<=0||rect.bottom<=0||rect.x>=innerWidth||rect.y>=innerHeight)return false;
           for(let node=el;node;node=node.parentElement){
             const style=getComputedStyle(node);
             if(style.display==='none'||style.visibility==='hidden'||Number(style.opacity)<=.02)return false;
@@ -76,6 +74,8 @@ async function main(){
       assert.ok(layout.card.bottom<=viewport.height-bottomClearance-layout.safeBottom,
         'Hovered side card must stay above the portrait bottom safe area at '+viewport.width+'x'+viewport.height+': '+JSON.stringify({card:layout.card,safeBottom:layout.safeBottom,bottomClearance}));
       assert.ok(layout.text.length>0,'A visible song/lyric text target must be present');
+      const outsideViewport=layout.text.filter(item=>item.rect.x<0||item.rect.y<0||item.rect.right>viewport.width||item.rect.bottom>viewport.height);
+      assert.deepEqual(outsideViewport,[],'Visible lyric text must stay inside '+viewport.width+'x'+viewport.height+': '+JSON.stringify(outsideViewport));
       const overlaps=layout.text.filter(item=>item.rect.x<layout.card.right&&item.rect.right>layout.card.x&&item.rect.y<layout.card.bottom&&item.rect.bottom>layout.card.y);
       assert.deepEqual(overlaps,[],'Hovered side card must not cover visible song/lyric text at '+viewport.width+'x'+viewport.height+': '+JSON.stringify({card:layout.card,overlaps}));
       const controlOverlaps=layout.controls.filter(rect=>rect.x<layout.card.right&&rect.right>layout.card.x&&rect.y<layout.card.bottom&&rect.bottom>layout.card.y);
@@ -110,6 +110,8 @@ async function main(){
       const before=await page.evaluate(()=>({preset:CreativeStage.preset(),library:CreativeStage.library()}));
       await page.locator('[data-template="'+template.id+'"]').click();
       await page.getByRole('button',{name:'取消预览',exact:true}).waitFor();
+      assert.equal(await page.getByRole('button',{name:'存进工坊',exact:true}).isDisabled(),true,
+        'a temporary template candidate must not expose collection of the committed preset');
       await page.waitForTimeout(550);
       assert.deepEqual(await page.evaluate(()=>CreativeStage.preset()),before.preset);
       assert.deepEqual(await page.evaluate(()=>CreativeStage.library()),before.library);
@@ -117,6 +119,8 @@ async function main(){
       assert.equal(await page.evaluate(()=>CreativeStage.scene()),template.scene);
       await page.getByRole('button',{name:'取消预览',exact:true}).click();
       assert.equal(await page.evaluate(()=>CreativeStage.scene()),before.preset.scene);
+      assert.equal(await page.getByRole('button',{name:'存进工坊',exact:true}).isDisabled(),false,
+        'cancelling the candidate restores the normal collection action');
       await page.locator('[data-template="'+template.id+'"]').click();
       await page.getByRole('button',{name:'应用到当前舞台',exact:true}).waitFor();
       const expected=await page.evaluate(async id=>(await CreativeTemplates.prepare(id)).preset,template.id);

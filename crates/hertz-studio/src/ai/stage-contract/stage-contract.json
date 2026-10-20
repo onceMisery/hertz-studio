@@ -1,7 +1,7 @@
 {
   "version": 1,
   "schemaVersion": "1",
-  "schemaHash": "9eeda3eea3c20f2526c6180269944ae437c9289cc321206e0a1db4ea6754ff6e",
+  "schemaHash": "b21f66f38c39f600319cb68754ab273e52fc454bfbbc080abc2d7eceaa052337",
   "basePresetHashes": {
     "towers": "b41c53f82d41e64f3323bf511b06a45da50c5e778a15db05dd54f0af2dc50c67",
     "orb": "0d84301863cb08d3ce7c54ed8314a56e97eb54288908f31515ac789c8421c790",
@@ -1351,6 +1351,7 @@
         "三维歌词",
         "文字",
         "lyric corridor",
+        "lyric scene",
         "lyrics"
       ],
       "ownsLyrics": true,

@@ -3,9 +3,11 @@ import { commonParams, number, select, createParticles, createTowers, createRing
 import { createSpatialLyrics, createCoverWall } from './text.js';
 import { createCoverSphere } from './cover-sphere.js';
 import { createCoverParticles } from './cover-particles.js';
+import { createReactor } from './reactor.js';
 import { createEffects, postSpecs } from '../effects/index.js';
 
 const definitions = [
+  ['reactor', '粒子反应堆', 'particles', createReactor],
   ['particle-silk', '粒子绸带', 'particles', ctx => createParticles(ctx, 'silk')],
   ['gravity-sphere', '引力星球', 'particles', ctx => createParticles(ctx, 'sphere'), ['immersive/orb', 'orb']],
   ['warp-tunnel', '折跃隧道', 'particles', ctx => createParticles(ctx, 'tunnel'), ['immersive/tunnel']],
@@ -47,6 +49,7 @@ function definition([id, label, category, factory, aliases = []]) {
         pointSize: number('粒子大小', 1, .6, 1.8), pointerStrength: number('悬停凹陷', 1, 0, 2)
       } : {}),
       ...(id === 'cover-particles' ? { relief: number('封面起伏', 1, 0, 2.5) } : {}),
+      ...(id === 'reactor' ? { trackRecipes: toggle('按曲换场'), queuePreview: toggle('悬停预览') } : {}),
       ...(lyrics ? { textWidth: number('文字宽度', 12, 6, 18, .5), spacing: number('行距', 2.1, 1.4, 4, .1), arc: number('歌词弧度', .7, 0, 3, .1), karaoke: { type: 'boolean', label: '逐字高亮', default: true },
         layout: select('舞台主题', 'venue', ['venue', 'diorama', 'tempo', 'still']) } : {}),
       ...(stanzaRenderer ? { scale: number('歌词字号', 1, .5, 2), reactivity: number('律动强度', 1.35, 0, 2), speed: number('镜头动态', .65, 0, 2) } : {}),
@@ -64,9 +67,9 @@ function definition([id, label, category, factory, aliases = []]) {
         phraseLength: number('短句长度', 12, 4, 24, 1), decor: toggle('画面装饰'), accents: toggle('强调特效'), atmosphere: toggle('氛围光'), halation: number('光晕强度', .5, 0, 1)
       } : {}),
       ...(id === 'cover-wall' ? { radius: number('曲面半径', 11, 7, 18, .5), coverIndex: number('当前封面', 0, 0, 100000, 1) } : {}) },
-    camera: { theta: galaxy || towers ? .3 : 0, phi: id === 'cover-particles' ? 0 : terrain || towers ? .35 : galaxy ? .35 : .06, radius: tunnel ? 5 : lyrics ? 15 : galaxy ? 21 : terrain ? 22 : sphere ? 9.2 : id === 'cover-wall' ? 8 : id === 'cover-particles' ? 9.6 : 13,
+    camera: id === 'reactor' ? { theta: 0, phi: .06, radius: 15, fov: 48, lookAt: [0, 0, 0], minRadius: 3, maxRadius: 36, orbit: true, zoom: true, fit: { halfWidth: 6.2, halfHeight: 5.4 } } : { theta: galaxy || towers ? .3 : 0, phi: id === 'cover-particles' ? 0 : terrain || towers ? .35 : galaxy ? .35 : .06, radius: tunnel ? 5 : lyrics ? 15 : galaxy ? 21 : terrain ? 22 : sphere ? 9.2 : id === 'cover-wall' ? 8 : id === 'cover-particles' ? 9.6 : 13,
       lookAt: terrain ? [0, -1, -2] : tunnel ? [0, 0, -4] : [0, 0, 0], fov: id === 'cover-particles' ? 54 : 58, minRadius: 3, maxRadius: 36, orbit: true, zoom: true },
-    capabilities: { interaction: true, threejs: true, depth: true, lyrics, ownsLyrics: lyrics, ...(stanzaRenderer ? { stanzaRenderer } : {}), effects: true, director: true, cues: true, cover: id.includes('cover') },
+    capabilities: { interaction: true, threejs: true, depth: true, lyrics, ownsLyrics: lyrics, ...(stanzaRenderer ? { stanzaRenderer } : {}), ...(id === 'reactor' ? { queuePreview: true } : {}), effects: true, director: true, cues: true, cover: id.includes('cover') },
     quality: id === 'cover-particles' ? { low: { particles: 9216, drawCalls: 16 }, medium: { particles: 20736, drawCalls: 20 }, high: { particles: 36864, drawCalls: 24 } } :
       { low: { particles: 4000, drawCalls: 16 }, medium: { particles: 7000, drawCalls: 20 }, high: { particles: 10000, drawCalls: 24 } },
     create(ctx) {
@@ -82,6 +85,7 @@ function definition([id, label, category, factory, aliases = []]) {
           }
         }, resize(w, h) { primary.resize(w, h); effects.resize(w, h); },
         setParams(next) { params = next; primary.setParams(next); effects.setParams(next); }, setQuality(profile) { primary.setQuality(profile); effects.setQuality(profile); },
+        ...(primary.setRig ? { setRig(pose) { primary.setRig(pose); } } : {}),
         dispose() { effects.dispose(); primary.dispose(); }, stats: () => ({ primary: primary.stats?.(), effects: effects.stats() })
       };
     }

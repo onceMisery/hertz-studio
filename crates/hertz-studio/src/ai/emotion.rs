@@ -647,6 +647,7 @@ async fn begin_completion_job(
         created_at: now,
         updated_at: now,
         result_proposal_id: None,
+        failure_code: None,
     };
     let attempt_id = uuid::Uuid::new_v4().to_string();
     crate::ai::jobs::retain_history(db, now)

@@ -111,8 +111,12 @@
     function buildRow(index) {
       var line = lines[index], button = document.createElement('button');
       button.type = 'button'; button.className = 'sl-line'; button.dataset.index = index;
-      button.setAttribute('aria-label', '播放这一句：' + (line.text || '间奏'));
       var tokens = Stage.lyricTokens(line), nodes = [], cursor = 0, source = line.text || '· · ·';
+      var translation = Stage.lyricTranslation && Stage.lyricTranslation(index);
+      var romanization = Stage.lyricRomanization && Stage.lyricRomanization(index);
+      button.setAttribute('aria-label', '播放这一句：' + (line.text || '间奏')
+        + (translation ? '；翻译：' + translation : '')
+        + (romanization ? '；罗马音：' + romanization : ''));
       tokens.forEach(function (token, k) {
         // Preserve source spaces/punctuation omitted by the shared tokenizer.
         var at = source.indexOf(token.text, cursor);
@@ -132,6 +136,18 @@
         button.appendChild(node); nodes.push(node);
       });
       if (cursor < source.length) button.appendChild(document.createTextNode(source.slice(cursor)));
+      if (translation) {
+        var translated = document.createElement('span');
+        translated.className = 'sl-translation';
+        translated.textContent = translation;
+        button.appendChild(translated);
+      }
+      if (romanization) {
+        var romanized = document.createElement('span');
+        romanized.className = 'sl-romanization';
+        romanized.textContent = romanization;
+        button.appendChild(romanized);
+      }
       rail.appendChild(button);
       return { el: button, tokens: tokens, nodes: nodes, height: 0 };
     }

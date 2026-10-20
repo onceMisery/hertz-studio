@@ -1,4 +1,4 @@
-// 顶栏在线搜索（topsearch.js）的六皮肤浏览器实测（验收脚本，非契约）。
+// 顶栏在线搜索（topsearch.js）的七套公开皮肤浏览器实测（验收脚本，非契约）。
 // 逐肤验证：下拉面板出现、定位锚在输入框下方且不出视口、歌曲/歌手预览渲染、
 // 档位 chips、回车跳在线页（classic 抽查）、无 JS 异常。
 //
@@ -26,7 +26,7 @@ const TOKEN = fs
 const OUT = process.env.TS_OUT || path.resolve(__dirname, '..', 'output', 'topsearch-shots');
 fs.mkdirSync(OUT, { recursive: true });
 
-const SKINS = (process.env.TS_SKINS || 'classic,sheen,workbench,liunian,ios,qingfeng').split(',');
+const SKINS = (process.env.TS_SKINS || 'classic,sheen,liunian,qingfeng,chaoxi,heijiao,orbit').split(',');
 
 let failures = 0;
 const ok = (cond, label, extra) => {

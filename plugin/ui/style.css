@@ -380,7 +380,7 @@ body::before {
 /* ---------- 顶栏全局搜索下拉（topsearch.js） ---------- */
 
 /* 面板是 position:fixed 的自由浮层，left/top/width 由 JS 按输入框的实际
-   位置算——五套皮肤各自给 .topsearch 换圆角/底色/摆位，锚在布局流里会被
+   位置算——各套皮肤分别给 .topsearch 换圆角/底色/摆位，锚在布局流里会被
    皮肤裁掉或贴错边，JS 定位对所有皮肤一视同仁。 */
 .ts-menu {
   position: fixed;
@@ -408,7 +408,7 @@ body::before {
 }
 .ts-kind .chip[hidden] { display: none; }
 
-.ts-body { display: flex; flex-direction: column; min-height: 0; }
+.ts-body { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
 .ts-hint { padding: 6px 4px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 
 /* 预览里的歌行复用 .track 栅格，但菜单只有半栏宽：专辑/音质两列收掉，

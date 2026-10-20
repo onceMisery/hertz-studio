@@ -391,6 +391,8 @@ pub(super) fn parse_feed(
                 },
                 published_at,
                 description: description(item, atom),
+                progress_ms: 0,
+                completed: false,
             },
             identity,
             enclosure_url,

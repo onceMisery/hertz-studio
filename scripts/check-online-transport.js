@@ -46,6 +46,29 @@ async function run() {
   // and a recovered subscription must refresh the open AI task panel.
   const connectionSource = source.slice(source.indexOf('function onConnectionChange(ok)'), source.indexOf('function scheduleReconnect()'));
   const dbxSource = source.slice(source.indexOf('const DbxTransport = {'), source.indexOf('const REQUEST_TIMEOUT'));
+
+  const initialRecovery = [];
+  const firstConnection = {
+    state: { connected: false },
+    ui: { conn: { textContent: '', className: '' }, offlineBanner: { hidden: true } },
+    window: { Workshop: { onAiTask() { initialRecovery.push('aiTasks'); } } },
+    Workshop: { onAiTask() { initialRecovery.push('aiTasks'); } },
+    refreshAll() { initialRecovery.push('fullRefresh'); },
+    refreshLibraryInPlace() { initialRecovery.push('library'); },
+    loadPlaylists() { initialRecovery.push('playlists'); },
+  };
+  vm.createContext(firstConnection);
+  vm.runInContext('let retries = 0; let missedWhileOffline = false; let hasConnected = false;\n'
+    + connectionSource + '\nthis.connectionChanged = onConnectionChange;', firstConnection);
+  firstConnection.connectionChanged(true);
+  assert.deepEqual(initialRecovery, ['library', 'playlists', 'aiTasks'],
+    'first event connection reconciles event-backed data without reloading settings');
+  firstConnection.connectionChanged(false);
+  firstConnection.connectionChanged(true);
+  assert.deepEqual(initialRecovery,
+    ['library', 'playlists', 'aiTasks', 'fullRefresh', 'aiTasks'],
+    'later reconnect keeps the full state refresh path');
+
   const subscriptions = [], requests = [], messages = [], recoveryReads = [];
   const workshop = { onAiTask() { recoveryReads.push('aiTasks'); } };
   let reconnects = 0, removals = 0;
@@ -100,12 +123,52 @@ async function run() {
   assert.equal(dbx.ui.offlineBanner.hidden, true);
   assert.deepEqual(recoveryReads, ['refreshAll', 'aiTasks'], 'DBX recovery refreshes the open task panel');
   subscriptions[2]({ method: 'studio/event', params: { type: 'spectrum' } });
-  assert.deepEqual(messages, ['state', 'spectrum']);
+  subscriptions[2]({ method: 'studio/event', params: { type: 'queue_changed' } });
+  assert.deepEqual(messages, ['state', 'spectrum', 'queue_changed']);
   const beforeClose = removals;
   dbx.close(); dbx.close();
   assert.equal(removals, beforeClose + 1, 'close releases the active listener exactly once');
   subscriptions[2]({ method: 'studio/event', params: { type: 'closed' } });
-  assert.deepEqual(messages, ['state', 'spectrum']);
+  assert.deepEqual(messages, ['state', 'spectrum', 'queue_changed']);
+
+  const eventHandlerSource = source.slice(
+    source.indexOf('function handleEvent(msg)'),
+    source.indexOf('function fmt(ms)'));
+  let queueReads = 0;
+  const eventHandler = {
+    window: { HertzCapsuleOnly: false },
+    restoreQueue() { queueReads++; return Promise.resolve(); },
+  };
+  vm.createContext(eventHandler);
+  vm.runInContext(eventHandlerSource + '\nthis.routeEvent = handleEvent;', eventHandler);
+  eventHandler.routeEvent({ type: 'queue_changed' });
+  assert.equal(queueReads, 1, 'queue invalidation reloads the authoritative queue');
+
+  const librarySource = source.slice(source.indexOf('let libraryEpoch = 0;'), source.indexOf('async function libraryTrackIds()'));
+  const trackPages = [];
+  const library = {
+    state: {
+      loading: false, q: '', sort: 'title', libFilter: { artist: '', album: '' },
+      tracks: [], total: 0, offset: 0, rows: new Set(), byId: new Map(),
+    },
+    ui: { libSentinel: { disabled: false, textContent: '', hidden: false }, libList: { innerHTML: '' } },
+    transport: { get(path) { return new Promise(resolve => trackPages.push({ path, resolve })); } },
+    renderLibrary() {}, toast() {}, errText(_prefix, error) { return String(error); },
+  };
+  vm.createContext(library);
+  vm.runInContext('const PAGE = 24; let activeRowMark = null;\n' + librarySource
+    + '\nthis.startInitialLoad = () => loadTracks(true); this.reconcileLibrary = () => refreshLibraryInPlace();', library);
+  const initialLoad = library.startInitialLoad();
+  assert.equal(trackPages.length, 1, 'startup starts the first library snapshot');
+  await library.reconcileLibrary();
+  assert.equal(trackPages.length, 1, 'reconciliation waits for the in-flight startup snapshot');
+  trackPages[0].resolve({ total: 0, tracks: [] });
+  await initialLoad;
+  assert.equal(trackPages.length, 2, 'a fresh snapshot starts after the startup query settles');
+  trackPages[1].resolve({ total: 1, tracks: [{ id: 'after-subscribe' }] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(library.state.tracks.length, 1, 'the post-subscription snapshot replaces stale startup data');
+  assert.equal(library.state.tracks[0].id, 'after-subscribe');
 
   let calls = 0;
   const pending = setup(async (_url, options) => {

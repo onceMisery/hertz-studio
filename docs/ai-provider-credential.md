@@ -1,6 +1,6 @@
 # 模型密钥接入准备（OpenAI / StepFun）
 
-本页对应 R5 的凭据管理增量。StepFun Plan 的 `step-5-preview` 已接入舞台生成和歌词情绪 completion；价格未知时采用 token-only 快照，不阻挡派发、不预留或统计未知金额，并在取得可信用量时记录输入/输出 token。价格金额、真实用量字段和模型质量仍待后续验证。OpenAI 的具体模型尚未确定，因此 OpenAI 仍保持关闭。保存密钥只完成本地存储操作，不代表远端鉴权成功。
+本页对应 R5 的凭据管理增量。StepFun adapter 将启动配置中显式选择的模型 ID（例如 `step-5-preview`、`step-3.5-flash-2603`、`step-3.5-flash`）用于舞台生成和歌词情绪 completion；OpenAI 型号同样由配置显式指定。StepFun 模型 ID 只做格式校验，远端是否可用仍由实际 provider 结果决定。费用未知时采用 token-only 请求边界，不阻挡派发、不要求金额预留、核价或汇总。可信用量可供记录输入/输出 token，但用量与费用统计不是功能门槛。真实 key、型号兼容性、实际用量字段和模型质量仍待后续验证。保存密钥只完成本地存储操作，不代表远端鉴权成功。
 
 ## 操作
 
@@ -20,7 +20,7 @@
 
 不接收调用方提供的 owner、provider、origin 或钥匙串 key。服务启动配置固定目标；DataDir 持久 owner、provider 与规范地址共同构成版本化 SHA-256 命名空间。OpenAI 保留原 `https://api.openai.com` 命名空间和旧记录迁移；fake/Ollama 配置继续提供该准备入口。`ai.provider = "stepfun"` 时，只接受 `https://api.stepfun.com/v1` 或 `https://api.stepfun.com/step_plan/v1`（可带一个末尾斜线）；两条 API 路径的密钥互相隔离，也不读取或迁移 OpenAI 密钥。切换服务须为对应目标重新保存自己的密钥，删除只影响该目标。非法 StepFun 地址拒绝读写。
 
-仍复用现有 `secrets::SecretBackend`、发行版钥匙串 service，以及全进程共享的阻塞许可和生命周期锁。Standard/Full、不同安装的 owner 隔离。缺钥匙串明确失败，不回退到明文。歌词情绪 completion 已接入持久任务、派发标记与逐次用量账本；StepFun 的费用未知时按 token-only 记录，OpenAI 仍因具体模型未定而关闭。
+仍复用现有 `secrets::SecretBackend`、发行版钥匙串 service，以及全进程共享的阻塞许可和生命周期锁。Standard/Full、不同安装的 owner 隔离。缺钥匙串明确失败，不回退到明文。歌词情绪 completion 已接入持久任务、派发标记与逐次用量账本；StepFun 与 OpenAI 的费用未知时均按 token-only 记录。
 
 HTTP 请求体最多 8 KiB；key 最多 4096 字节，仅非空可见 ASCII，不猜测密钥前缀，不自动 trim。RPC 在复制 key 前检查类型和长度。重复/未知字段、非法 JSON、后端错误均不反射输入或系统诊断。`SecretEntry` 的 Debug 对凭据和设备内容脱敏。通用 settings 的 HTTP/RPC 同时拒绝并隐藏 `ai_provider_*`、`openai_api_key` 与 `ai_api_key`，沿用原音源凭据过滤。
 

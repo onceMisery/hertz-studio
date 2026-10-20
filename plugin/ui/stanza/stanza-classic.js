@@ -61,9 +61,10 @@
     }
 
     function fontPx(viewportW) {
-      var minPx = 2.25 * fontScale * 16;
+      var narrow = viewportW < 760;
+      var minPx = (narrow ? 1.5 : 2.25) * fontScale * 16;
       var valPx = 6 * fontScale * viewportW / 100;
-      var maxPx = 4.5 * fontScale * 16;
+      var maxPx = (narrow ? 3 : 4.5) * fontScale * 16;
       return Math.max(minPx, Math.min(valPx, maxPx));
     }
     function measure(text, px) {

@@ -48,6 +48,14 @@ pub struct Episode {
     pub track: OnlineTrack,
     pub published_at: String,
     pub description: String,
+    pub progress_ms: u64,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpisodeProgress {
+    pub progress_ms: u64,
+    pub completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +226,18 @@ pub async fn subscribe(ctx: &online::Ctx, feed_url: &str) -> ApiResult<Show> {
 
 pub async fn unsubscribe(ctx: &online::Ctx, show_id: &str) -> ApiResult<()> {
     store::set_subscribed(ctx, show_id, false).await
+}
+
+pub async fn save_progress(
+    ctx: &online::Ctx,
+    episode_id: &str,
+    position_ms: u64,
+    completed: bool,
+) -> ApiResult<EpisodeProgress> {
+    if episode_id.is_empty() || episode_id.len() > 128 || episode_id.chars().any(char::is_control) {
+        return Err(bad_request("无效的播客单集编号").with_source("podcast"));
+    }
+    store::save_progress(ctx, episode_id, position_ms, completed).await
 }
 
 pub async fn episode_detail(ctx: &online::Ctx, id: &str) -> ApiResult<online::OnlineDetail> {

@@ -40,6 +40,11 @@ async function main(){
     await page.getByText('文件已读取，请检查后应用。',{exact:true}).waitFor();
     await page.locator('[data-project="check"]').click();
     assert.deepEqual(await page.evaluate(()=>CreativeStage.preset()),before,'Checking must not write stage');
+    await page.evaluate(()=>CreativeStage.setParam('look.grain',.12));
+    assert.equal(await page.locator('[data-project="apply"]').isDisabled(),true,
+      'A checked project is invalidated as soon as the stage revision changes');
+    await page.getByText('舞台已修改，请重新检查工程',{exact:true}).waitFor();
+    await page.locator('[data-project="check"]').click();
     await page.locator('[data-project="apply"]').click();
     await page.getByText('工程已载入，cue 轨等待媒体内容确认',{exact:true}).waitFor();
     assert.equal(await page.evaluate(()=>CreativeStage.preset().scene),'orb');
@@ -65,8 +70,9 @@ async function main(){
     }
     await seek(1500,.5);await seek(0,0);await seek(1500,.5);
     await page.waitForTimeout(300);assert.equal(await page.evaluate(()=>CreativeStage.runtime()['look.bloom']),.5,'Paused song clock freezes absolute cue');
-    await page.waitForTimeout(450);
+    await page.evaluate(()=>CreativeStage.setParam('look.grain',.137));
     await page.reload();await page.waitForFunction(()=>window.CreativeProject && CreativeStage.preset().project);
+    assert.equal(await page.evaluate(()=>CreativeStage.preset().look.grain),.137,'pagehide flushes an edit made inside the autosave delay');
     await page.evaluate(()=>{Workshop.open();Workshop.setTab('io');});
     await page.getByText('工程已载入，cue 轨等待媒体内容确认',{exact:true}).waitFor();
     await page.waitForFunction(()=>Stage.presentation().track?.id && Stage.presentation().track.id===Stage.presentation().mediaTrackId);

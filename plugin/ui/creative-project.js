@@ -68,12 +68,46 @@
     return context({version:1,timelineVersion:1,schemaVersion:CreativeStageContract.schemaVersion,
       schemaHash:CreativeStageContract.schemaHash,media:identity});
   }
+  function validateProjectCues(source, normalized) {
+    if (!object(source) || !Array.isArray(source.cues) || source.cues.length !== normalized.cues.length) fail('工程 cue 列表无效');
+    var cueFields = ['at','every','len','ease','set'];
+    var eases = ['linear','in','out','inout'];
+    source.cues.forEach(function (cue, index) {
+      keys(cue,cueFields);
+      if (Object.prototype.hasOwnProperty.call(cue,'ease') && eases.indexOf(cue.ease) < 0) fail('工程 cue 缓动无效');
+      if (Object.prototype.hasOwnProperty.call(cue,'every') && !Number.isInteger(cue.every)) fail('工程 cue 节拍间隔必须为整数');
+      var normalizedSet = normalized.cues[index].set;
+      Object.keys(cue.set).forEach(function (path) {
+        if (!Object.prototype.hasOwnProperty.call(normalizedSet,path)) fail('工程 cue 参数未知：' + path);
+        if (cue.set[path] !== normalizedSet[path]) fail('工程 cue 参数超出可用范围：' + path);
+      });
+    });
+  }
+  function validateProjectPreset(source, normalized) {
+    keys(source,['version','name','scene','director','cam','look','stage','sc','cues','bindings','bg','hand']);
+    ['cam','look','stage','sc'].forEach(function (group) {
+      keys(source[group],Object.keys(normalized[group]));
+      Object.keys(normalized[group]).forEach(function (key) {
+        if (source[group][key] !== normalized[group][key]) fail('工程参数超出可用范围：' + group + '.' + key);
+      });
+    });
+    if (!Array.isArray(source.bindings) || source.bindings.length !== normalized.bindings.length) fail('工程绑定列表无效');
+    source.bindings.forEach(function (binding) { keys(binding,['target','source','gain']); });
+    if (source.bg.type !== 'media') {
+      var bgFields = source.bg.type === 'theme' ? ['type'] : ['type','opacity','blur','blend','depthMode'];
+      if (source.bg.type === 'mesh' || source.bg.type === 'cover') bgFields.push('hue');
+      keys(source.bg,bgFields);
+    }
+    keys(source.hand,['style','on','frame','wave','annot','paper','jitter','speed']);
+    validateProjectCues(source,normalized);
+  }
   function prepare(input) {
     var value = parse(input);
     keys(value,['projectVersion','timelineVersion','schemaVersion','schemaHash','preset','media']);
     var meta = context({version:value.projectVersion,timelineVersion:value.timelineVersion,
       schemaVersion:value.schemaVersion,schemaHash:value.schemaHash,media:value.media});
     var preset = CreativeStage.normalizeSharePreset(value.preset);
+    validateProjectPreset(value.preset,preset);
     if (preset.cues.some(function (c) { return c.at !== undefined && c.every !== undefined; })) fail('工程 cue 必须明确选择歌曲时间或节拍触发');
     var warnings = [];
     if (value.preset.bg.type === 'media') warnings.push('外部图片/视频不进入工程，已转为主题背景，需另选素材。');

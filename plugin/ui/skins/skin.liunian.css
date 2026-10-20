@@ -1063,7 +1063,6 @@
 
 [data-skin="liunian"] .ln-sp-status.is-error {
   color: var(--accent);
-  cursor: pointer;
 }
 
 /* 结果行 */

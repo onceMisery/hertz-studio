@@ -70,15 +70,36 @@ async function main() {
     await page.goto(uiUrl(fixture.base), { waitUntil: 'domcontentloaded' });
     await page.evaluate(() => { Workshop.open(); Workshop.setTab('ai'); });
     const panel = page.locator('.ws-ai-credential');
-    await panel.locator('summary').click();
+    async function openCredentialPanel() {
+      if (!await panel.evaluate(element => element.open)) await panel.locator('summary').click();
+    }
+    if (stepfun) {
+      await page.getByText('尚未配置当前模型所需密钥，请展开模型密钥设置后再提交。', { exact: true }).waitFor();
+      await page.getByRole('button', { name: '开启生成', exact: true }).click();
+      await page.waitForFunction(() => !document.querySelector('#ws-ai-brief').disabled);
+      await page.locator('#ws-ai-brief').fill('credential readiness check');
+      assert.equal(await page.getByRole('button', { name: '提交生成任务', exact: true }).isDisabled(), true,
+        'a configured cloud provider without a credential cannot submit a task');
+    }
+    await openCredentialPanel();
     await page.getByText(`尚未配置 ${providerName} 密钥。`, { exact: true }).waitFor();
     const input = page.getByLabel(`${providerName} API key`, { exact: true });
     assert.equal(await input.getAttribute('type'), 'password');
     assert.ok((await panel.innerText()).includes(origin), 'display the bound credential destination');
     await input.fill(synthetic);
     await page.getByRole('button', { name: `保存 ${providerName} 密钥`, exact: true }).click();
-    await page.getByText(`已配置 ${providerName} 密钥；云端生成尚未启用。`, { exact: true }).waitFor();
+    await page.getByText(`已配置 ${providerName} 密钥。`, { exact: true }).waitFor();
     assert.equal(await input.inputValue(), '');
+    if (stepfun) {
+      await page.waitForFunction(() => {
+        const button = Array.from(document.querySelectorAll('button')).find(item => item.textContent.trim() === '提交生成任务');
+        return button && !button.disabled;
+      });
+      await page.getByRole('button', { name: '关闭生成', exact: true }).click();
+      await page.getByRole('button', { name: '开启生成', exact: true }).waitFor();
+      await openCredentialPanel();
+      await page.getByText(`已配置 ${providerName} 密钥。`, { exact: true }).waitFor();
+    }
     assert.deepEqual(await fixture.api(endpoint), expected(true));
     assert.equal((await fixture.api('/v1/ai/status')).consent.inAppGeneration, false);
     assert.deepEqual((await fixture.api('/v1/ai/jobs')).jobs, []);
@@ -90,27 +111,33 @@ async function main() {
     await page.evaluate(() => Workshop.close());
     assert.equal(await input.inputValue(), '');
     await page.evaluate(() => { Workshop.open(); Workshop.setTab('ai'); });
-    await panel.locator('summary').click();
-    await page.getByText(`已配置 ${providerName} 密钥；云端生成尚未启用。`, { exact: true }).waitFor();
+    await openCredentialPanel();
+    await page.getByText(`已配置 ${providerName} 密钥。`, { exact: true }).waitFor();
     await input.fill(synthetic);
     await page.evaluate(() => Workshop.setTab('io'));
     assert.equal(await page.locator('#ws-ai-key').count(), 0);
     await page.evaluate(() => Workshop.setTab('ai'));
-    await panel.locator('summary').click();
-    await page.getByText(`已配置 ${providerName} 密钥；云端生成尚未启用。`, { exact: true }).waitFor();
+    await openCredentialPanel();
+    await page.getByText(`已配置 ${providerName} 密钥。`, { exact: true }).waitFor();
 
     await input.fill(synthetic);
     await page.evaluate(() => {
       Object.defineProperty(document, 'hidden', { configurable: true, value: true });
       document.dispatchEvent(new Event('visibilitychange'));
-      delete document.hidden;
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false });
       document.dispatchEvent(new Event('visibilitychange'));
     });
     // Hiding rebuilds the panel before its destination has been queried again.
     assert.equal(await page.locator('#ws-ai-key').inputValue(), '', 'controlled hide event clears the input');
-    await panel.locator('summary').click();
-    await page.getByText(`已配置 ${providerName} 密钥；云端生成尚未启用。`, { exact: true }).waitFor();
+    await openCredentialPanel();
+    await page.getByText(`已配置 ${providerName} 密钥。`, { exact: true }).waitFor();
 
+    if (stepfun) {
+      await page.getByRole('button', { name: '开启生成', exact: true }).click();
+      await page.waitForFunction(() => !document.querySelector('#ws-ai-brief').disabled);
+      await openCredentialPanel();
+      await page.getByText(`已配置 ${providerName} 密钥。`, { exact: true }).waitFor();
+    }
     let getCount = 0;
     await page.route('**' + endpoint, async route => {
       if (route.request().method() === 'GET') {
@@ -121,13 +148,52 @@ async function main() {
     await page.getByRole('button', { name: '查询密钥状态', exact: true }).click();
     await page.getByText(/系统钥匙串不可用.*credential-fixture/).waitFor();
     assert.equal(getCount, 1, 'keyring errors are not automatically retried');
+    if (stepfun) {
+      assert.equal(await page.getByRole('button', { name: '提交生成任务', exact: true }).isDisabled(), true,
+        'an unreadable credential status fails closed');
+    }
     assert.ok(!(await panel.innerText()).includes(synthetic), 'even a hostile error body cannot echo the key');
     assert.equal(await page.getByRole('button', { name: `删除 ${providerName} 密钥`, exact: true }).isDisabled(), true, 'unknown destination disables mutation');
     await page.unroute('**' + endpoint);
     await page.getByRole('button', { name: '查询密钥状态', exact: true }).click();
-    await page.getByText(`已配置 ${providerName} 密钥；云端生成尚未启用。`, { exact: true }).waitFor();
+    await page.getByText(`已配置 ${providerName} 密钥。`, { exact: true }).waitFor();
+    if (stepfun) {
+      await page.waitForFunction(() => {
+        const button = Array.from(document.querySelectorAll('button')).find(item => item.textContent.trim() === '提交生成任务');
+        return button && !button.disabled;
+      });
+    }
+    let releaseDelete;
+    let deleteStarted;
+    const deleteGate = new Promise(resolve => { releaseDelete = resolve; });
+    const deleteIntercepted = new Promise(resolve => { deleteStarted = resolve; });
+    if (stepfun) {
+      await page.route('**' + endpoint, async route => {
+        if (route.request().method() === 'DELETE') {
+          deleteStarted();
+          await deleteGate;
+        }
+        await route.continue();
+      });
+    }
     await page.getByRole('button', { name: `删除 ${providerName} 密钥`, exact: true }).click();
+    if (stepfun) {
+      await deleteIntercepted;
+      assert.equal(await page.getByRole('button', { name: '提交生成任务', exact: true }).isDisabled(), true,
+        'task submission is blocked while deleting a configured credential');
+      const deletionDone = page.waitForResponse(response => response.url().endsWith(endpoint)
+        && response.request().method() === 'DELETE');
+      releaseDelete();
+      await deletionDone;
+      await page.unroute('**' + endpoint);
+    }
     await page.getByText(`尚未配置 ${providerName} 密钥。`, { exact: true }).waitFor();
+    if (stepfun) {
+      assert.equal(await page.getByRole('button', { name: '提交生成任务', exact: true }).isDisabled(), true,
+        'deleting the credential disables future task submission');
+      await page.getByRole('button', { name: '关闭生成', exact: true }).click();
+      await page.getByRole('button', { name: '开启生成', exact: true }).waitFor();
+    }
     assert.deepEqual(await fixture.api(endpoint), expected(false));
     assert.deepEqual(await fixture.api(endpoint, 'DELETE'), expected(false));
     assert.deepEqual(writes.map(item => item.method), ['PUT', 'DELETE']);
@@ -151,7 +217,7 @@ async function main() {
     }
     inspectFiles(fixture.dataDir);
     assert.deepEqual(errors, []);
-    console.log('AI credential: auth, write-only memory backend, secret clearing, errors, no jobs, storage and narrow UI passed; no OS keyring/cloud acceptance.');
+    console.log('AI credential: auth, write-only memory backend, readiness gating, secret clearing, errors, no jobs, storage and narrow UI passed; no OS keyring/cloud acceptance.');
   } finally {
     if (browser) await browser.close();
     await fixture.close();

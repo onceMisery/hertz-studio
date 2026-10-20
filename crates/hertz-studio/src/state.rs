@@ -22,6 +22,8 @@ use crate::config::Config;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsEvent {
     State(PlayerSnapshot),
+    /// Queue contents remain on the queue endpoint; this invalidates client snapshots.
+    QueueChanged,
     /// 必须是命名变体。`#[serde(tag = "type")]` 是内部标签表示法，serde 只
     /// 允许它包住 struct/map 形状的数据；newtype 变体（`Spectrum(Vec<f32>)`）
     /// 会在序列化时直接报错，而 ws.rs 对 `to_string` 失败是 `continue`，
@@ -30,16 +32,7 @@ pub enum WsEvent {
         bands: Vec<f32>,
     },
     Ended,
-    /// AI 持久任务的状态变化（R4-E，§7.4）：只带 ID、状态与 revision，
-    /// 不携带 brief、歌词、密钥或完整 intent——事件允许丢失/乱序，客户端
-    /// 以查询快照为准，这里只做「有变化了」的提醒。
-    AiTask {
-        job_id: String,
-        state: String,
-        state_revision: i64,
-    },
-    /// AI 任务广播可能在慢客户端积压时丢失。此提示不携带任务内容，消费端应重查
-    /// 持久快照；独立 WS 与 DBX 转发器在各自广播队列掉队时发送。
+    /// AI 任务状态变化只发送无载荷提示；消费端重查经过授权过滤的持久快照。
     AiTasksResync,
     /// 界面实例之间的轻量信号。浮动胶囊窗口与 tab 实例是两个 opaque-origin 的
     /// iframe，BroadcastChannel / storage 事件都不通，只能借这条已有的广播管道
@@ -1256,7 +1249,10 @@ impl AppState {
         // 且「顶代际 + 换队列 + 写 cursor」要相对某个提交原子地发生，否则旧盘
         // 的下载晚于新盘的 load 完成时，会把新歌盖掉。
         let _commit = self.play_commit.lock().await;
-        self.set_queue_locked(ids, start).await
+        let result = self.set_queue_locked(ids, start).await;
+        drop(_commit);
+        self.publish(WsEvent::QueueChanged);
+        result
     }
 
     /// Caller holds play_commit; shared online preparation adds metadata in that same transaction.
@@ -2366,14 +2362,21 @@ impl AppState {
         self.publish(WsEvent::Buffering { active, pct });
     }
 
-    /// 为慢客户端从当前真值重建非周期事件。buffering 是边沿状态，AI 任务事件是
-    /// 持久快照的失效提示，曲库事件要求前端刷新查询快照。
-    pub async fn resync_events(&self) -> [WsEvent; 3] {
+    /// 为慢客户端从当前真值重建非周期事件。buffering 是边沿状态，其余事件要求
+    /// 前端刷新各自的事实快照。
+    pub async fn resync_events(&self) -> [WsEvent; 5] {
         let (active, pct) = *self.buffering.lock().await;
+        let scan = self.scan.lock().await;
         [
             WsEvent::Buffering { active, pct },
             WsEvent::AiTasksResync,
             WsEvent::LibraryChanged,
+            WsEvent::Scan {
+                phase: scan.phase.clone(),
+                done: scan.done,
+                total: scan.total,
+            },
+            WsEvent::QueueChanged,
         ]
     }
 
@@ -2382,14 +2385,20 @@ impl AppState {
     pub async fn next_event_batch(
         &self,
         receiver: &mut broadcast::Receiver<WsEvent>,
-    ) -> Option<[Option<WsEvent>; 3]> {
+    ) -> Option<[Option<WsEvent>; 5]> {
         match receiver.recv().await {
-            Ok(event) => Some([Some(event), None, None]),
+            Ok(event) => Some([Some(event), None, None, None, None]),
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::debug!(skipped, "event consumer lagged; resynchronizing");
                 *receiver = receiver.resubscribe();
-                let [buffering, tasks, library] = self.resync_events().await;
-                Some([Some(buffering), Some(tasks), Some(library)])
+                let [buffering, tasks, library, scan, queue] = self.resync_events().await;
+                Some([
+                    Some(buffering),
+                    Some(tasks),
+                    Some(library),
+                    Some(scan),
+                    Some(queue),
+                ])
             }
             Err(broadcast::error::RecvError::Closed) => None,
         }
@@ -3221,6 +3230,10 @@ impl AppState {
         snap.rg_peak = None;
         let origin = snap.origin.clone();
         map.insert(new_id, snap);
+        drop(map);
+        drop(queue);
+        drop(_commit);
+        self.publish(WsEvent::QueueChanged);
         origin
     }
 
@@ -4861,10 +4874,12 @@ pub(crate) mod tests {
         state
             .remember_online_meta(old.into(), online_snap(Some(2.0), None))
             .await;
+        let mut events = state.events.subscribe();
         let origin = state
             .commit_relay_target(gen, 0, old, &relay_track("song", "artist", 1000))
             .await
             .unwrap();
+        assert!(matches!(events.try_recv(), Ok(WsEvent::QueueChanged)));
         assert_eq!(origin.source, "netease");
         assert_eq!(origin.id, "n1");
         assert_eq!(*state.queue.lock().await, vec!["online:qq:t1", old]);
@@ -5765,11 +5780,36 @@ pub(crate) mod tests {
         handle.join().unwrap();
     }
 
-    /// 掉队恢复批次重建 buffering 真值，并失效化任务与曲库快照。
+    /// 整盘换队提交后发布失效提示，供各播放界面重读权威队列。
     #[tokio::test]
-    async fn resync_events_include_live_buffering_and_ai_tasks_hint() {
+    async fn set_queue_publishes_invalidation_after_replacing_the_queue() {
+        let (state, handle) = playback_state().await;
+        let mut events = state.events.subscribe();
+
+        state
+            .set_queue(vec!["first".into(), "second".into()], Some(1))
+            .await;
+
+        assert!(matches!(events.try_recv(), Ok(WsEvent::QueueChanged)));
+        assert_eq!(
+            *state.queue.lock().await,
+            vec!["first".to_string(), "second".to_string()]
+        );
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    /// 掉队恢复批次重建 buffering 与扫描真值，并失效化任务、曲库和队列快照。
+    #[tokio::test]
+    async fn resync_events_include_live_buffering_scan_and_ai_tasks_hint() {
         let (state, handle) = playback_state().await;
         state.set_buffering(true, Some(40)).await;
+        {
+            let mut scan = state.scan.lock().await;
+            scan.phase = "walking".into();
+            scan.done = 2;
+            scan.total = 9;
+        }
         let events = state.resync_events().await;
         assert!(matches!(
             &events[0],
@@ -5780,6 +5820,10 @@ pub(crate) mod tests {
         ));
         assert!(matches!(&events[1], WsEvent::AiTasksResync));
         assert!(matches!(&events[2], WsEvent::LibraryChanged));
+        assert!(
+            matches!(&events[3], WsEvent::Scan { phase, done: 2, total: 9 } if phase == "walking")
+        );
+        assert!(matches!(&events[4], WsEvent::QueueChanged));
         state.set_buffering(false, None).await;
         let events = state.resync_events().await;
         assert!(matches!(
@@ -5791,6 +5835,10 @@ pub(crate) mod tests {
         ));
         assert!(matches!(&events[1], WsEvent::AiTasksResync));
         assert!(matches!(&events[2], WsEvent::LibraryChanged));
+        assert!(
+            matches!(&events[3], WsEvent::Scan { phase, done: 2, total: 9 } if phase == "walking")
+        );
+        assert!(matches!(&events[4], WsEvent::QueueChanged));
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -5798,6 +5846,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn lagged_event_batch_discards_stale_edges_and_keeps_receiving() {
         let (state, handle) = playback_state().await;
+        {
+            let mut scan = state.scan.lock().await;
+            scan.phase = "failed".into();
+            scan.done = 5;
+            scan.total = 5;
+        }
         let (events, mut receiver) = broadcast::channel(1);
         events
             .send(WsEvent::Buffering {
@@ -5817,6 +5871,10 @@ pub(crate) mod tests {
         ));
         assert!(matches!(batch[1].as_ref(), Some(WsEvent::AiTasksResync)));
         assert!(matches!(batch[2].as_ref(), Some(WsEvent::LibraryChanged)));
+        assert!(
+            matches!(batch[3].as_ref(), Some(WsEvent::Scan { phase, done: 5, total: 5 }) if phase == "failed")
+        );
+        assert!(matches!(batch[4].as_ref(), Some(WsEvent::QueueChanged)));
         assert!(matches!(
             receiver.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
@@ -5827,6 +5885,8 @@ pub(crate) mod tests {
         assert!(matches!(batch[0].as_ref(), Some(WsEvent::Ended)));
         assert!(batch[1].is_none());
         assert!(batch[2].is_none());
+        assert!(batch[3].is_none());
+        assert!(batch[4].is_none());
 
         state.audio.shutdown();
         handle.join().unwrap();

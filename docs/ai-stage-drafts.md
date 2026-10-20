@@ -84,7 +84,7 @@ Ollama 必须已运行、已有支持结构化输出的本地模型；Hertz 不�
 
 ## 模型评测
 
-独立评测入口复用真实 adapter、提示和校验，在播放器 bootstrap 前运行，不读取用户曲库或创建生产任务。当前语料 v2 保留 120 条开发集与 40 条预留合成样本；标签独立复核、实际模型、两轮评测和正式发布阈值仍待验收，单轮报告不会自动宣布可发布。运行命令、人工评分规则与指标分母见 [StageIntent v2](../evals/stage-intent/v2/README.md)。v1 基线仅作为历史证据。
+独立评测入口复用真实 adapter、提示和校验，在播放器 bootstrap 前运行，不读取用户曲库或创建生产任务。当前语料 v3 保留 120 条开发集与 40 条预留合成样本；标签独立复核、实际模型、两轮评测和正式发布阈值仍待验收，单轮报告不会自动宣布可发布。运行命令、人工评分规则与指标分母见 [StageIntent v3](../evals/stage-intent/v3/README.md)。v1/v2 基线保留为历史证据。
 
 ## 工程验证
 
@@ -107,6 +107,6 @@ cargo test --locked -p hertz-studio --test mcp_sdk --target-dir target/mcp-sdk-c
 
 官方 Rust SDK 与真实 stdio 子进程的协议、授权、幂等和生命周期检查见 [MCP 互操作说明](./mcp-interoperability.md)，Standard / Full 应分别执行；SDK 检查不代替目标应用中的正式连接验收。
 
-StepFun `step-5-preview` 已通过独立最小 Responses 连通性检查，并接入静态 create、严格输出、持久任务及 token-only 账本；价格未知时不做金额预留或金额门槛，可信 usage 只记录 token 数。默认仍使用 fake，需显式配置 StepFun、凭据和生成同意后才会发请求；本机尚未完成真实应用内调用、实际 usage 字段或模型质量验收。OpenAI 仍因模型尚未选定而关闭。凭据浏览器检查使用合成密钥与显式内存后端；StepFun 的界面路径可用 `node scripts/check-ai-credential-browser.js --stepfun` 定向检查。
+StepFun `step-5-preview` 已通过独立最小 Responses 连通性检查，并接入静态 create、严格输出、持久任务及 token-only 账本；OpenAI Responses 也可在显式配置 `ai.model` 后走相同有界链路。费用未知时两者均不做金额预留或金额门槛，只记录可信 token，不表示免费。默认仍使用 fake，需显式配置 provider、型号、凭据和生成同意后才会发请求；本机尚未完成真实应用内调用、真实 usage 字段或模型质量验收。凭据浏览器检查使用合成密钥与显式内存后端；StepFun 的界面路径可用 `node scripts/check-ai-credential-browser.js --stepfun` 定向检查。
 
 浏览器检查需要 Playwright 和已构建服务，可通过 `PLAYWRIGHT_MODULE`、`HERTZ_BIN` 指定。独立账本检查另需 Python 标准库 sqlite3 写入隔离测试数据，可通过 `PYTHON` 指定解释器；产品运行不依赖 Python。生成契约时运行 `node scripts/export-stage-contract.js`，服务端 JSON 和浏览器材料必须一起更新。全场景检查加载真实 GL、动画场景、背景、手绘、舞台及分享 codec；浏览器检查覆盖待执行的 400ms 保存、取消、切页、关闭、编辑失效和确认保存。自动化结论不代替真实 DBX、弱机 GPU 或正式 MCP 客户端验收。

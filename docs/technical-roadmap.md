@@ -6,9 +6,11 @@
 >
 > AI 依据：关联聊天「优化 AI 接入设计文档」的 [v3 方案](./research/ai-capability-entrypoints.final.md)。该研究目录被 Git 忽略，本文保留实施必须知道的约束；正式落地时，以实际 ADR、契约定义和测试固定决定。旧 v2 DDL 不直接执行。
 
-> 2026-10-17 架构修订：采用 Rust AI 服务与 Rust MCP 传输适配层，新增能力不引入 Node 运行时；完整舞台物化、预览与分享码继续由现有浏览器前端负责。本次修订覆盖 v3 中 Node 适配器与离线完整预置合成的相关设想，其余授权、任务和费用约束继续沿用。
+> 2026-10-17 架构修订：采用 Rust AI 服务与 Rust MCP 传输适配层，新增能力不引入 Node 运行时；完整舞台物化、预览与分享码继续由现有浏览器前端负责。本次修订覆盖 v3 中 Node 适配器与离线完整预置合成的相关设想，授权、任务恢复和请求边界继续沿用。
 
-> 同日架构复核：进一步修正共享播控入口、确定性草稿基线、预览落盘、收费派发恢复、资源回收、预算归属和 MCP 依赖方向。修正点与源码依据见[架构复核记录](./architecture-review.md)；发生冲突时以本文修订后的明确约束为准。
+> 同日架构复核：进一步修正共享播控入口、确定性草稿基线、预览落盘、派发恢复、资源回收和 MCP 依赖方向。修正点与源码依据见[架构复核记录](./architecture-review.md)；发生冲突时以本文修订后的明确约束为准。
+
+> 2026-10-20 范围优先级：任务生成、授权、请求边界、取消、恢复与防重复派发是功能要求；token 用量记录、费用核算、价格核对、金额预算和账单界面都是可选能力，不构成功能交付前置条件。现有账本可继续使用，但不需要扩展或验收统计面。
 
 ## 1. 实施目标与边界
 
@@ -16,7 +18,7 @@
 
 1. 现有播放器的质量、搜索、歌词和恢复能力逐步完善，保持 Standard / Full、独立 / DBX 共用业务。
 2. 外部 MCP 客户端通过 Rust 传输适配层与受限能力门面检索、播控、查询场景契约和校验 StageIntent。
-3. 应用内 Rust provider 通过持久任务生成 StageIntent，经服务端窄校验后交给官方 UI 完整物化与预览；任务和费用可查询恢复。
+3. 应用内 Rust provider 通过持久任务生成 StageIntent，经服务端窄校验后交给官方 UI 完整物化与预览；任务状态可查询恢复，用量/费用统计可选。
 
 本轮架构不引入通用 Agent 执行器、远程多租户 MCP、任意代码工具、动态视觉插件或第二个播放器服务。既有 API 不因新增 AI 门面而整体重写；只把新路径需要复用的应用逻辑收敛到明确函数。
 
@@ -27,7 +29,7 @@
 | 最高 | 原业务 owner 与单一播放时序 | AI/皮肤/搜索维护另一份队列，迟到结果覆盖新播放 |
 | 最高 | 实时音频与视觉时钟不承担推理 | provider、解析、FFT/索引或落盘堵塞音频回调 |
 | 最高 | 服务端强制授权与可靠完成语义 | 工具隐藏但仍可直调；收到请求就声称已播放 |
-| 高 | 幂等、任务与费用可恢复 | 丢回复后重复 next 或重复收费 |
+| 高 | 幂等与任务状态可恢复 | 丢回复后重复 next 或重复派发模型请求 |
 | 高 | 单一舞台物化与分享实现 | Rust 复制 UI 默认值或分享 codec，形成两套不一致预置 |
 | 高 | 发行版、形态和身份隔离 | Standard 泄漏 Full 模块、DBX 错连独立实例 |
 | 中 | 易安装和可诊断 | AI/MCP 另需安装 Node 或 JS 引擎；日志包含密钥与完整曲库 |
@@ -61,7 +63,7 @@ flowchart TD
   CP --> APP
   APP --> AUDIO[音频 actor 与 backend]
   APP --> STORE[vmusic-store 与 SQLite]
-  APP --> AI[AiService：任务、预算、取消]
+  APP --> AI[AiService：任务、授权、取消与容量]
   AI --> MODEL[受限 provider]
   AI --> CONTRACT
   AI --> STORE
@@ -84,7 +86,7 @@ AiService 由两种形态的原 bootstrap 装配，可直接服务官方 HTTP/RP
 
 ### 2.3 对 AI v3 的增补与范围收敛
 
-- v3 的领域契约、任务、权限、幂等与费用语义沿用；本文不引入另一套冲突数值。
+- v3 的领域契约、任务、权限、幂等与恢复边界沿用；费用统计不作为本轮功能约束。
 - 实现语言与 A2 交付范围以本修订为准：Rust MCP 替代 TypeScript/Node 适配器；R3 交付 intent 校验、人工导入和前端草稿闭环，不交付播放器未启动时的完整预置/分享码合成。不以 QuickJS、V8 或隐藏 Node sidecar 替代已移除的依赖。
 - v3 设想两种形态复用服务端能力。**复用处理器与具备外部可达传输是两件事**：现有 DBX sidecar 只有宿主拥有的 stdio，未启动可供适配器连接的 HTTP listener。A0/A1 正式外部连接先支持独立形态。
 - DBX 的应用内 B 阶段继续经原 RPC 共用处理器。将来外部控制 DBX，新增受限回环 listener 或受保护本地 IPC，必须独立评审、限制接口、管理生命周期；不能读发现文件后拿全权令牌，也不能再启动一个后端抢占同一音频与 DataDir。
@@ -226,7 +228,7 @@ grant 使用 256 位随机 opaque 凭据；服务端只存摘要、策略、revi
 
 | 字段 | 生命周期 | 校验目的 |
 | --- | --- | --- |
-| `ownerInstanceId` | 每 DataDir 首次创建，持久 | 任务/授权/预算归属 |
+| `ownerInstanceId` | 每 DataDir 首次创建，持久 | 任务与授权归属 |
 | `serverInstanceId` | 每服务启动随机 UUID | 拒绝旧实例写请求 |
 | `policyRevision` | 授权策略变化递增 | 拒绝过期授权上下文 |
 | `edition` / `transport` | 构建身份 / 当前入口 | 告知用户所连 Standard/Full、standalone；不提供认证 |
@@ -312,7 +314,7 @@ B 首期服务端 proposal 仍没有 applied 状态。官方 UI 的“已应用�
 
 ```mermaid
 stateDiagram-v2
-  [*] --> accepted: 授权与预算校验后事务受理
+  [*] --> accepted: 授权、容量与请求限制校验后事务受理
   accepted --> running: worker 获得运行槽
   accepted --> cancelled
   accepted --> expired: 排队过期
@@ -329,13 +331,13 @@ stateDiagram-v2
   interrupted --> [*]
 ```
 
-终态不可复活。取消、超时、成功通过数据库 stateRevision 的 CAS 竞争，只有一个任务终态；provider 迟到 usage 可独立更新 usageRevision，不能重新发布 succeeded。
+终态不可复活。取消、超时、成功通过数据库 stateRevision 的 CAS 竞争，只有一个任务终态；用量记录若启用，可独立更新其 revision，不能重新发布 succeeded。
 
-完整顺序：认证/实例/授权/输入 → 查幂等 → 新 key 时间窗口、容量、当前 provider 和预算就绪 → 事务写 job + 费用预留 → 返回 accepted → worker 消费有界内存输入并复核派发授权 → 事务登记唯一派发标记 → provider 一次调用 → 校验 intent → 事务写提案与终态 → 发布小事件。
+完整顺序：认证/实例/授权/输入 → 查幂等 → 新 key 时间窗口、容量与当前 provider 就绪 → 事务写 job → 返回 accepted → worker 消费有界内存输入并复核派发授权 → 事务登记唯一派发标记 → provider 一次调用 → 校验 intent → 事务写提案与终态 → 发布小事件。记录 token 或费用可作为旁路可选项，不改变任务受理、取消或恢复。
 
-官方 UI 的可信主体由原认证生成稳定的本安装 local-owner 身份；它不需要外部 grant。外部调用只有启用相应收费 scope 时才映射为 grant 主体；worker 复核对应身份的实际策略，不能无条件要求 grantId。两条入口最终进入同一个 AiService 和预算 admission。部署/线程数不扩大模型槽位，MCP 只是可选调用入口。
+官方 UI 的可信主体由原认证生成稳定的本安装 local-owner 身份；它不需要外部 grant。外部调用只有显式授权相应 AI 生成能力时才映射为 grant 主体；worker 复核对应身份的实际策略，不能无条件要求 grantId。两条入口最终进入同一个 AiService、授权检查与有界容量控制。部署/线程数不扩大模型槽位，MCP 只是可选调用入口。
 
-**内存输入交接也属于受理协议。** 先取得排队容量许可、构造有界输入并计算最终请求费用上界，再提交 DB；commit 成功后由服务端拥有输入与许可，不因 HTTP waiter 消失而丢失。取消入口只通知服务端 owner，不能丢弃待执行输入留下 accepted。进程仍活着但交接/worker 异常时将任务收敛为 interrupted 并结算，不能等到下次重启才恢复；提交失败立即释放内存与许可。
+**内存输入交接也属于受理协议。** 先取得排队容量许可并构造有界输入，再提交 DB；如果启用了费用统计，可同时准备结算所需快照。commit 成功后由服务端拥有输入与许可，不因 HTTP waiter 消失而丢失。取消入口只通知服务端 owner，不能丢弃待执行输入留下 accepted。进程仍活着但交接/worker 异常时将任务收敛为 interrupted，不能等到下次重启才恢复；提交失败立即释放内存与许可。
 
 已存在任务的合法幂等回放应在当前 provider 就绪检查前，因此删除或更换模型后仍能查询旧事实。只有新任务才要求 provider 当前可用。
 
@@ -343,11 +345,11 @@ stateDiagram-v2
 
 brief、歌词和完整原始模型响应默认不持久化，输入只在有界内存中。拿到唯一 runner 锁后，重启把 accepted/running 标记 interrupted；不自动再次发送 POST。客户端重连查询原任务，不能因没有成功结果就用旧 key 重开。
 
-恢复逐任务使用短事务：单个 job 的派发态结算与 interrupted CAS 必须原子提交；一条记录恢复失败不能回滚同批其它任务。继续处理剩余候选后向启动方报告首个错误，失败行保留为非终态，供后续启动恢复或到期清扫重试；只清理已成功收敛任务的进程内 owner，避免失败项在仍有 worker 时被误当孤儿。
+恢复逐任务使用短事务：单个 job 的派发态结算与 interrupted CAS 必须原子提交；一条记录恢复失败不能回滚同批其它任务。继续处理剩余候选后向启动方报告首个错误，失败行保留为非终态；进程内后续惰性清扫会重试没有 live worker owner 的任务，启动恢复与到期清扫也继续兜底。只清理已成功收敛任务的进程内 owner，避免失败项在仍有 worker 时被误当孤儿。
 
-到期清扫同样逐任务使用独立事务：每项重读状态、复核期限与进程内 owner，再原子提交 expired CAS 和派发态结算。单项失败不回滚其它孤儿；历史保留独立提交，清扫发布已提交事件后再返回首个错误。
+惰性清扫逐任务使用独立事务：每项重读状态并复核进程内 owner；超期任务原子提交 expired CAS 和派发态结算，未超期但已无 owner 的任务原子提交 interrupted CAS 和结算。仍有 owner 的任务不受清扫影响。单项失败不回滚其它孤儿；历史保留独立提交，清扫发布已提交事件后再返回首个错误，无后台定时器。
 
-仅凭 running 无法判断是否已产生远端费用。发出前必须在短事务写入单向派发标记 `dispatchState=may_have_been_sent`、attemptId 与费用快照；事务提交后才允许调用网络，且一个 job 只允许一个 attempt。真正发出前崩溃也可能被保守计费，这是避免低估的代价。恢复时 `not_dispatched` 可释放预留；`may_have_been_sent` 无可信 usage 时按 unknown 计预留一次，不能因任务改为 interrupted 就释放额度或重新发送。数据库写和远端扣费无法组成原子事务，本方案不承诺远端 exactly-once。
+发出前必须在短事务写入单向派发标记 `dispatchState=may_have_been_sent` 和 attemptId。事务提交后才允许调用网络，且一个 job 只允许一个 attempt。即使崩溃发生在实际发出前，恢复也不得再次发送，因为远端是否收到请求无法证明；任务是否重放与费用统计无关。
 
 同一 owner/principal/capability 的 key 格式为 `v1.<createdAtUnixMs>.<128-bit-random-hex>`；7 天内同 key 同输入映射原任务，异输入冲突，provider/model/pricing 改变不改变该事实。输入 hash 包含规范化业务输入、能力版本和授权数据范围，配置快照另存。
 
@@ -361,13 +363,13 @@ brief、歌词和完整原始模型响应默认不持久化，输入只在有界
 | --- | --- | --- |
 | `ai_instance` | ownerInstanceId、受理时间水位、schemaVersion | 单 DataDir 身份与时间策略稳定 |
 | `ai_grants` | grantId、credentialDigest、policy、policyRevision、revoked | 不持久明文凭据；操作与数据投影明确 |
-| `ai_jobs` | jobId、owner/principal、capability、key、inputHash、state/stateRevision、dispatchState、attemptId、usageRevision、provider 快照、时间、结果引用 | `(owner,principal,capability,key)` 唯一，终态单向，最多一次派发 |
+| `ai_jobs` | jobId、owner/principal、capability、key、inputHash、state/stateRevision、dispatchState、attemptId、provider 快照、时间、结果引用；用量 revision 可选 | `(owner,principal,capability,key)` 唯一，终态单向，最多一次派发 |
 | `ai_proposals` | proposalId、jobId、validatedIntent、schema/base hashes、revision、expiresAt、状态 | pending→rejected/expired；24 小时可读，应用不归本表 |
-| `ai_budget_months` | owner/month、charged、reserved、revision | DataDir 总预算；所有入口共同占用，整数 micro-USD，受理月归属固定 |
-| `ai_usage_entries` | jobId、reservation、accountedAmount、usageState、pricingSnapshot、revision | 每笔费用可重入结算与差额调整，不重复计账 |
-| `ai_budget_guard` | owner、halted、revision、reason、triggerJob | 安装级熔断跨月、重启、换模型和新增 grant 保留 |
+| `ai_budget_months`（可选） | owner/month、charged、reserved、revision | 仅在启用金额预算时使用；不是任务受理前置条件 |
+| `ai_usage_entries`（可选） | jobId、reservation、accountedAmount、usageState、pricingSnapshot、revision | 仅在启用用量/费用记录时结算 |
+| `ai_budget_guard`（可选） | owner、halted、revision、reason、triggerJob | 仅在启用金额预算时熔断 |
 
-7 天保护期内可以删敏感/大载荷，必须保留最小 key/hash/任务与费用事实。容量满拒绝新任务，不 FIFO 淘汰受保护记录。SQLite 事务通过一个 store helper 使用有界 `BEGIN IMMEDIATE`；短事务内不等待网络、GPU 或模型。
+用量、费用和预算表均为可选。即使完全不记录 token 或金额，job 唯一键、持久派发状态和恢复规则仍需保留，以保证任务可查询、取消后不重放。7 天保护期内可以删敏感/大载荷，必须保留最小 key/hash/任务事实。容量满拒绝新任务，不 FIFO 淘汰受保护记录。SQLite 事务通过一个 store helper 使用有界 `BEGIN IMMEDIATE`；短事务内不等待网络、GPU 或模型。
 
 ### 7.4 查询与事件
 
@@ -375,7 +377,7 @@ brief、歌词和完整原始模型响应默认不持久化，输入只在有界
 
 | 计划接口 | 作用 |
 | --- | --- |
-| `GET /v1/ai/status` | 模式、就绪、安全配置摘要、预算与 guard 状态 |
+| `GET /v1/ai/status` | 模式、就绪与安全配置摘要；预算/统计状态仅在对应可选能力启用时返回 |
 | `POST /v1/ai/jobs` | 明确的 stage.intent.generate 提交，返回持久受理结果 |
 | `GET /v1/ai/jobs`、`GET /v1/ai/jobs/{jobId}` | 稳定游标查询与单任务恢复 |
 | `POST /v1/ai/jobs/{jobId}/cancel` | expectedStateRevision 下的取消 |
@@ -385,29 +387,29 @@ brief、歌词和完整原始模型响应默认不持久化，输入只在有界
 
 这些官方入口与受限 capability handler 共用应用服务，但有独立认证上下文；受限 AI 凭据不能借此绕过 capability 门面。
 
-`WsEvent::AiTask { event }` 仅含 ID、状态、revision、validationStage、过期时间，最大 2 KiB，先落库再发布；不携带描述、歌词、密钥或完整 intent。
+`WsEvent::AiTasksResync` 是无载荷提示。每次任务状态变更在事务提交后发布，事件不包含任务 ID、状态、revision、描述、歌词、密钥或 intent；客户端收到后通过自身已授权的任务接口重查快照。
 
 事件允许丢失、重复、乱序。UI 先订阅再查快照，期间事件作脏标记合并；重连、重新可见、revision 跳号与终态通知后重查。活动任务通常 5 秒查询，长等退避 10–15 秒；无活动任务不轮询。状态快照读取失败时保留错误提示，以 2.5 秒起步、15 秒封顶的退避自动重试；成功后重置退避状态。
 
-两个广播消费端（独立 WS 和 DBX sidecar）若收到 `Lagged`，必须一起恢复非周期边沿状态：按实时值补发 buffering，并发送无数据的 `ai_tasks_resync`，提示 AI 面板在打开时重查受授权过滤的任务快照。该提示不包含任务 ID、brief、歌词或 proposal；客户端不得把事件当状态事实。事件泵的普通背压仍可丢弃频谱帧，不能因某一种非周期事件扩展为全量事件持久化队列。
+两个广播消费端（独立 WS 和 DBX sidecar）若收到 `Lagged`，必须一起恢复非周期边沿状态：按实时值补发 buffering 与扫描进度，并发送无数据的 `ai_tasks_resync`，提示 AI 面板在打开时重查受授权过滤的任务快照。扫描和任务事件都只是刷新提示，客户端仍以状态接口为事实来源；任务提示不包含任务 ID、brief、歌词或 proposal。事件泵的普通背压仍可丢弃频谱帧，不能因某一种非周期事件扩展为全量事件持久化队列。
 
 超过排队+执行预计期限后做最终核对；后端仍非终态就显示延迟并有界退避，只有请求失败才显示“状态暂时无法确认”。UI 不自行宣布后台成功，也不自动新建任务。
 
 `jobs.list` 用稳定 `(createdAt,jobId)` 游标，服务端每次强制 owner/principal/权限过滤。游标签名不能代替授权；事件和提案读取也不能越过同样边界。短输入无效、未授权、容量不足、conflict 与 runner 不可用要有稳定机器码。
 
-## 8. R5：provider、隐私、费用与评测
+## 8. R5：provider、隐私与评测
 
 ### 8.1 provider 接口
 
-服务端 `ModelProvider` 负责就绪、严格结构化输出能力、一次请求、取消、usage 解析、已核价模式的价格上界或 token-only 模式的有限请求边界，以及 origin 策略。一次任务最多一次模型调用，不自动修复、不自动重试 POST；DB 事务重试不得包住外部模型调用。
+服务端 `ModelProvider` 负责就绪、严格结构化输出能力、一次请求、取消和 origin 策略；token 用量解析与价格核算为可选能力，有限请求/输出边界始终必需。一次任务最多一次模型调用，不自动修复、不自动重试 POST；DB 事务重试不得包住外部模型调用。
 
-任务终态与资源结束分开。cancelled/expired 可以先成为 UI 事实，执行 owner 仍持有模型许可、连接和 usage 观察责任，直到本地网络 future 确认结束或被中止并完成回收；不能一写终态就释放槽位再派发下一次。清理必须有界，失控时停止新生成并显式诊断，不持续 spawn 脱管任务。关闭连接不能证明远端停止推理，单并发只保证本地受管请求数；远端费用继续按派发标记与 unknown 处理。
+任务终态与资源结束分开。cancelled/expired 可以先成为 UI 事实，执行 owner 仍持有模型许可与连接，直到本地网络 future 确认结束或被中止并完成回收；不能一写终态就释放槽位再派发下一次。清理必须有界，失控时停止新生成并显式诊断，不持续 spawn 脱管任务。关闭连接不能证明远端停止推理，单并发只保证本地受管请求数；如启用账本，远端结果按派发标记与 unknown 处理。
 
-本地 Ollama 已按此边界接入任务取消信号：终态事务提交后才通知 adapter，发送前与整个 HTTP 等待均可停止；worker 不另起脱管清理，也不在外层取消时丢弃仍需清理/计量的 provider owner。adapter 退出后才归还执行槽，未知计量不因连接关闭变成零计量。真实云 adapter 仍需单独实现并验证自己的取消、连接回收与 usage 语义。
+本地 Ollama 已按此边界接入任务取消信号：终态事务提交后才通知 adapter，发送前与整个 HTTP 等待均可停止；worker 不另起脱管清理，也不在外层取消时丢弃仍需清理的 provider owner。adapter 退出后才归还执行槽。真实云 adapter 仍需单独实现并验证自己的取消和连接回收；usage 语义只在选择启用统计时需要验证。
 
 系统提示只给必要的场景定义、默认值、版本和输出约束，描述作为不可信数据；模型返回不能改变能力、权限、目标 endpoint 或读取文件。未知字段、危险键、重复 JSON 键、非有限数值、跨场景路径、深度和长度超限在受控入口拒绝。
 
-排队后派发前再次检查 enabled、对应主体策略/policyRevision、凭据代际与预算 guard；派发标记通过 running/stateRevision 的事务条件提交，取消已经赢得终态的任务不能再派发。撤权、删除凭据或禁用使 not_dispatched 任务取消并释放预留；may_have_been_sent 的请求尽力取消，费用仍按实际/未知状态处理。派发标记是本地派发线性化点，不是远端已收请求的证明；其后仍在发出前发现撤权时应停止网络步骤，但没有可信事实不能在崩溃恢复时乐观释放费用。
+排队后派发前再次检查 enabled、对应主体策略/policyRevision 与凭据代际。派发标记通过 running/stateRevision 的事务条件提交，取消已经赢得终态的任务不能再派发。撤权、删除凭据或禁用使 not_dispatched 任务取消；may_have_been_sent 的请求尽力取消。派发标记是本地派发线性化点，不是远端已收请求的证明；其后仍在发出前发现撤权时应停止网络步骤，恢复时绝不自动重放。
 
 cloud 仅显式配置的 HTTPS origin，复用 public_net 的 URL/DNS 地址检查规则，但使用专用无 cookie 客户端；首期关闭自动重定向与环境代理，凭据仅用于该 origin。现有 public_net 客户端允许跨公网重定向，online 客户端也不持有模型策略，不能直接拿来发付费 POST。local 仅明确允许的回环地址，亦禁代理和重定向。每条响应包括失败响应都按实际流式累计字节限额读取，不能仅信 Content-Length 或先 bytes() 再检查；总期限覆盖读取、解析与本地校验。local 失败不会自动切 cloud。
 
@@ -417,17 +419,17 @@ cloud 仅显式配置的 HTTPS origin，复用 public_net 的 URL/DNS 地址检�
 
 StepFun 的 Responses adapter 已接入相同的静态 StageIntent、持久任务与账本路径。只允许 `https://api.stepfun.com/v1` 和 `https://api.stepfun.com/step_plan/v1`；保留所选 API 路径，使用专用单次 HTTP 请求、响应限额与协作取消。OpenAI 与这两条 StepFun 路径各自使用独立凭据作用域，共享原有钥匙串执行许可及生命周期锁；不跨 provider 迁移密钥。设置界面显示当前目标，目标查询失败时禁止变更，重新查询成功后恢复。
 
-用户提供的 `step-5-preview` Plan 地址已通过独立最小文本直连检查；这没有经过真实云调用或模型质量验收。StepFun 费用尚未核价，但舞台生成与歌词情绪请求可按明确的 token-only 快照派发：仍限制模型、请求/响应大小和输出 token 上界，保存可信输入/输出 token，金额字段保持未知且不进入费用总额；这不是零价声明，也不设月费用门槛。没有完整 token 响应就保留 token 未知。舞台任务和歌词 completion 共用持久派发标记与逐次账本。OpenAI 因模型与价格仍未确认而继续关闭；回环 fixture 使用的合成费率只验证已知价格路径，不代表真实计价依据。
+用户提供的 `step-5-preview` Plan 地址已通过独立最小文本直连检查；这没有经过真实云调用或模型质量验收。OpenAI 与 StepFun 的 token/费用统计不是任务功能前置条件，provider 可不返回或持久化 usage；请求/响应字节、输出上界、期限、取消和单次派发限制仍必需。舞台任务和歌词 completion 共用任务派发与恢复规则。OpenAI 使用现有 `ai.model` 显式配置，不内置未经确认的默认型号；回环 fixture 仅验证协议与本地任务链路，不代表真实 key、模型可用性或质量。
 
 ### 8.2 发送数据与开关
 
-舞台请求只发送 brief、选定场景参数、默认基线、版本与输出要求；不自动读取当前歌曲、历史、歌词、封面或音频。provider 可用性需要明确选择和授权；费用已知时冻结可靠价格快照并受月预算控制，费用未知时只能进入显式 token-only 模式，不能把未知金额折算为零费用。扩展到歌词/音频必须新增具体授权与数据说明，不能沿用“已同意 AI”的笼统开关。
+舞台请求只发送 brief、选定场景参数、默认基线、版本与输出要求；不自动读取当前歌曲、历史、歌词、封面或音频。provider 可用性需要明确选择和授权；有限请求/输出边界始终生效。token/费用统计无需启用。扩展到歌词/音频必须新增具体授权与数据说明，不能沿用“已同意 AI”的笼统开关。
 
 建议功能拆成 `externalCapabilitiesEnabled`、`stageIntentToolsEnabled`、`inAppGenerationEnabled` 与 provider 模式，均默认关闭。前两者分别控制外部接入和契约查询/intent 校验工具；官方本地草稿导入不依赖外部连接开关。底层禁用不破坏本地规则编译器；已认证官方 UI 仍可查询事实、取消未完成任务与删除凭据，不能发新模型请求。
 
-### 8.3 预算数值：沿用 v3，集中定义
+### 8.3 可选的金额预算候选值（当前不要求）
 
-这些是初始候选限制，**不是当前已实现或真实成本承诺**。实施时单一常量定义并进入 ADR，调整需同步测试、文案和评测。
+以下金额限制仅供未来主动启用财务预算功能时评估，当前路线不要求实现或验收。请求体/响应体、输出上界、期限与并发属于功能安全边界，始终需要保留；表中的非金额资源限制仍可按具体功能需要评估。
 
 | 分类 | 初始约束 | 语义 |
 | --- | --- | --- |
@@ -440,18 +442,20 @@ StepFun 的 Responses adapter 已接入相同的静态 StageIntent、持久任�
 | job 与持久幂等 | 7 天、完整 job 最多 500；最小保护记录保留至窗口结束 | 不能为腾出新任务清掉未过期保护 |
 | proposal | 24 小时、intent ≤16384 字符 | 传输仍有独立字节限制 |
 | AI 逻辑数据 | 总 20 MiB | 含提案、幂等元数据；不承诺 DB/WAL 物理大小 |
-| 账本保留 | 13 个月 | 独立于 job/提案清理 |
-| 模型输出 | 512 output tokens 初值 | 必须核对 provider 的计量/推理 token 语义和截断率 |
-| 单任务费用 | 50000 micro-USD（0.05 USD） | 适用于已核价模式；token-only 跳过金额预留，但必须有有限请求与输入/输出 token 上界 |
-| 月预算 | 每 DataDir 总额 5000000 micro-USD（5 USD） | 已核价任务由官方 UI 与所有 grant 共用；token-only 金额未知，不进入费用总额或月预算 |
+| 账本保留 | 可选 | 不属于任务记录的功能保留期要求 |
+| 模型输出 | 512 output tokens 初值 | 作为请求大小边界候选；无需读取或保存 provider 实际 token 计数 |
+| 单任务费用 | 可选 | 当前不核价、不预留金额 |
+| 月预算 | 可选 | 当前不要求设置或执行金额预算 |
 
-若 512 tokens 与合法产物的实际需要冲突，先评测输出协议、模型与合法输出所需的 token 上界，再评审调整。价格无法核实不阻挡 token-only 功能，但不能伪造金额或移除请求边界；不能通过截断 preset 或隐式多轮调用来“满足”表格。
+若输出上界与合法产物的实际需要冲突，先用功能样例评估合法输出所需范围，再评审调整；不能通过截断 preset 或隐式多轮调用来“满足”限制。
 
-歌词情绪等不经过持久 job/账本的通用 completion 也必须共享同一个 DataDir 执行槽，不能以第二条 provider 入口绕过并发上限。首期使用 `try_acquire`，任务或 completion 已占槽时立即以 429 `ai_busy` 返回，不再创建无界等待；许可覆盖凭据读取与整个 provider future，并在 future 被取消/丢弃时释放。将来接入计费 completion 时，除共享执行槽外还必须迁入同一 job、预算预留与 usage 对账 owner；共用模型 HTTP adapter 本身不代表共用账本。
+歌词情绪等不经过持久 job 的通用 completion 也必须共享同一个 DataDir 执行槽，不能以第二条 provider 入口绕过并发上限。首期使用 `try_acquire`，任务或 completion 已占槽时立即以 429 `ai_busy` 返回，不再创建无界等待；许可覆盖凭据读取与整个 provider future，并在 future 被取消/丢弃时释放。将来若产品另行启用计费 completion，再单独评估是否接入同一 job owner；这不是本轮任务功能要求。
 
-### 8.4 费用结算
+### 8.4 可选的费用结算
 
-已核价模式在受理时固定 provider/model/pricingVersion 与价格快照，按最终请求中的系统提示、场景契约、基线、用户描述及输出/推理上限计算可靠费用上界；不能只估用户输入，也不能将字符数除以 4 当作跨语言可靠上界。StepFun `step-5-preview` 使用独立 token-only 快照：价格未知不阻挡功能，不预留或统计金额，仍受有限请求与输入/输出 token 上界约束，收到可信 usage 时只记录 token 数，缺失时保持未知。当前 OpenAI adapter 以完整序列化请求的 UTF-8 字节数作为派发前输入 token 上界，并在报价和 worker 请求构造两处拒绝超过 `maxInputTokens` 的请求；该检查涵盖可见 instructions、契约、用户文本与 JSON 包装，不代替指定模型 tokenizer、服务端隐藏开销、价格维度及真实 usage 的验证。OpenAI 仍因具体模型和已核价 profile 未确定而不可派发。已核价任务的预算公式为 `charged + reserved + newReservation <= limit`；数额用整数 micro-USD，费率计算向上取整。旧任务始终记回受理月。
+本节是将来可选的财务统计设计，不属于当前功能交付范围。当前任务不需要展示或持久化 token/金额；无需为费用核算编写新的 provider 解析、存储、账单 UI 或对账逻辑。
+
+已核价模式在受理时固定 provider/model/pricingVersion 与价格快照，按最终请求中的系统提示、场景契约、基线、用户描述及输出/推理上限计算可靠费用上界；不能只估用户输入，也不能将字符数除以 4 当作跨语言可靠上界。StepFun 启动配置显式选择的型号与 OpenAI 使用 token-only 请求边界：价格未知不阻挡功能，金额预留、核价与汇总均为可选能力；请求仍受有限输入/输出 token 上界约束。可信 usage 可记录，缺失时保持未知；用量统计不作为功能门槛。OpenAI 以完整序列化请求的 UTF-8 字节数作为派发前输入 token 上界，并在报价和 worker 请求构造两处拒绝超过 `maxInputTokens` 的请求；该检查涵盖可见 instructions、契约、用户文本与 JSON 包装，不代替指定模型 tokenizer、服务端隐藏开销、价格维度及真实 usage 的验证。OpenAI 与 StepFun 型号由用户显式配置；真实 key、指定型号可用性和模型质量仍待验证。已核价任务的预算公式为 `charged + reserved + newReservation <= limit`；数额用整数 micro-USD，费率计算向上取整。旧任务始终记回受理月。
 
 该公式首先作用于 owner/month 的 DataDir 总账，创建/轮换 grant、换模型或切官方 UI 都不获得另一份月额度。首期 principal 只用于授权、查询过滤和归因，不建立每主体独立资金池；未来若增加 grant 子限额，必须与总额同时通过，而非替代总额。
 
@@ -473,9 +477,9 @@ StepFun 的 Responses adapter 已接入相同的静态 StageIntent、持久任�
 
 先用至少 120 条输入形成冻结集，覆盖：合法常用描述、词典外参数、否定、冲突、未知场景、数值边界、跨场景参数、长文本、提示注入、时间顺序和相对编辑。至少包含 20 条否定/冲突，20 条非法/注入/范围反例；记录样本分类和人工评分规则。评测输入不包含用户私人歌词。
 
-比较离线规则与候选模型：schema 合法率、语义匹配、错误接受/拒绝、截断率、P50/P95、实际与估算费用、失败分类和样本量。schema 通过不等于语义正确；不支持的 v1 时序需求应明确拒绝，不能按静态参数假装完成。
+比较离线规则与候选模型：schema 合法率、语义匹配、错误接受/拒绝、截断率、P50/P95、失败分类和样本量。schema 通过不等于语义正确；不支持的 v1 时序需求应明确拒绝，不能按静态参数假装完成。
 
-建议候选发布门槛：结构合法率 ≥98%、支持范围内人工语义通过率 ≥90%、截断率 ≤1%、P95 在 30 秒执行期限内；对已知否定反向执行、权限越界与非法结构零误接受，费用全部满足可靠预留上界。**这些是建议阈值**：指定模型与代表语料试验后先冻结正式阈值，再在独立保留样本和第二轮运行上验收，不能测完降低门槛。
+建议候选发布门槛：结构合法率 ≥98%、支持范围内人工语义通过率 ≥90%、截断率 ≤1%、P95 在 30 秒执行期限内；对已知否定反向执行、权限越界与非法结构零误接受。**这些是建议阈值**：指定模型与代表语料试验后先冻结正式阈值，再在独立保留样本和第二轮运行上验收，不能测完降低门槛。
 
 两轮未通过保持实验关闭，分析模型、提示词、schema 与任务价值；不得静默退回可能反向理解的离线结果，fallback 需要用户明确选择并重新预览。
 
@@ -565,9 +569,9 @@ S1 验证必须覆盖 44.1/48/96kHz、不整块输入、单/双声道、极短�
 | R3-K | 无副作用的显式基线物化、版本化窄契约导出 | 不同当前预置下 create 产物一致、Rust 窄校验、CI 导出一致、旧分享往返 | intent 导入后可预览与分享 |
 | R3-U | committed preset 与临时预览层 | 400ms 保存定时器、刷新/退出、编辑/切页/取消竞争 | 未确认预览不落盘，应用与收藏分开 |
 | R4-J | 独立 AiService、store 迁移、fake provider | MCP 关闭、输入交接/派发前后崩溃、取消/清理、容量/7 天窗口/校时 | 任务可恢复查询 |
-| R4-B | DataDir 总账、usage entries、guard、管理 API | 多 grant/官方入口共用额度、跨月、unknown、重复/迟到 usage | 费用不重复且可解释 |
+| R4-B（可选） | DataDir usage entries、账单/guard API | 仅在产品需要统计时验证重复/迟到 usage 与多入口归属 | 财务统计可解释；不阻塞 R4/R5 功能 |
 | R4-E | WS/RPC 事件、查询、官方任务 UI | 漏事件/乱序/重连/终态查询 | 离开后可回来看结果 |
-| R5-P | 指定 provider、keyring、origin、数据同意 | 真实 token 用量语义、取消与无重试；未知价格采用有界 token-only 模式 | 可控调用模型 |
+| R5-P | 指定 provider、keyring、origin、数据同意 | 请求/输出边界、取消、无自动重试、合法结果校验 | 可控调用模型；token/费用记录可跳过 |
 | R5-E | 冻结语料与评测报告 | 两轮数据、人工评分、独立保留样本 | 决定正式发布或继续实验 |
 | R6-W | 模板、工程协议试点、现有 VideoExport | 重开编辑/seek/导出/停止与回收 | 一个作品完成全程 |
 
@@ -592,12 +596,10 @@ S1 验证必须覆盖 44.1/48/96kHz、不整块输入、单/双声道、极短�
 | 播控事实 | 空队列、未装载 resume、新意图取代旧换曲、8 秒后仍在准备 | 不把 Ok/200 当 applied；waiter 消失不破坏 cursor/缓冲清理 |
 | 草稿 | 错场景/路径/hash、过大分享、目标版本未知 | 无活状态写入，完整往返或明确拒绝 |
 | 预览 | 不同当前基线、保存定时器在途、预览超 400ms、用户调参/切目标/刷新 | create 结果确定，未确认候选不进 localStorage，不覆盖较新编辑 |
-| 任务 | DB commit/内存交接失败、派发标记前后崩溃、成功/取消竞争、第二 runner | 单终态、原任务可查、不重复 POST、可能已发出的费用不释放 |
+| 任务 | DB commit/内存交接失败、派发标记前后崩溃、成功/取消竞争、第二 runner | 单终态、原任务可查、不重复 POST、资源回收正确 |
 | 资源 | cancelled 已终态而 provider 尚未退出、慢清理、连续取消 | 槽位覆盖执行和回收，无脱管任务；不假称远端停止 |
-| 费用 | 未发取消、发出未知、重复 usage、迟到实际、跨月/重启 | reserved/charged 不双计；旧月差额一次；guard 持续 |
-| 预算归属 | 多 grant、轮换 grant、官方 UI 与 MCP 交替提交、长系统提示 | 已核价请求不按主体倍增且计入可靠费用上界；token-only 请求受 token 上界约束并记录 token 数 |
 | 时间 | 墙钟回跳、休眠、排队过期 | 不重开旧 key，不把 UI 超时当服务端终态 |
-| provider | 非法输出、截断、HTTP 超时、未知价格、请求或输出超界 | 无 apply、无 POST 自动重试；未知价格只允许显式 token-only 且有界的配置 |
+| provider | 非法输出、截断、HTTP 超时、请求或输出超界 | 无 apply、无 POST 自动重试；统计与价格信息不参与任务可用性 |
 | 音频/视觉 | 进入退出、换曲/seek、长时运行、硬件降档 | 原时钟与资源 scope 正确，无新循环/回调阻塞 |
 
 ### 12.2 现有检查的执行入口
@@ -638,11 +640,11 @@ pwsh -File scripts/smoke.ps1 7899
 
 ### 12.3 观测、开关与回滚
 
-本地诊断只记 operation、可信非敏感 ID、状态、revision、耗时、容量、预算与错误码；不记 prompt、歌词、原响应、Cookie、密钥、签名流 URL。聚合指标标签不用 requestId、曲名等无界值。默认不外发遥测。
+本地诊断只记 operation、可信非敏感 ID、状态、revision、耗时、容量与错误码；不要求记录 token 或金额，也不记 prompt、歌词、原响应、Cookie、密钥、签名流 URL。聚合指标标签不用 requestId、曲名等无界值。默认不外发遥测。
 
-观察拒绝/接受、槽位、队列、取消、unknown、schema 错误、usage unknown/estimated、重连查询和迟到结果，区分 provider、契约、授权、存储和 UI 故障。
+观察拒绝/接受、槽位、队列、取消、schema 错误、重连查询与迟到任务结果，区分 provider、契约、授权、存储和 UI 故障。usage unknown/estimated 只在启用统计时适用。
 
-候选发布默认关闭新能力，明确矩阵并使用隔离实例。撤权/禁用拒绝新操作；非终态任务尽力取消并如实结算已发费用；确认事实仍可从官方 UI 查询。故障回滚按第 3.2 节的数据兼容规则执行。
+候选发布默认关闭新能力，明确矩阵并使用隔离实例。撤权/禁用拒绝新操作；非终态任务尽力取消；任务事实仍可从官方 UI 查询。费用结算仅在另行启用统计时适用。故障回滚按第 3.2 节的数据兼容规则执行。
 
 ## 13. 尚待实测、但不阻止当前文档落地的事项
 
@@ -652,7 +654,7 @@ pwsh -File scripts/smoke.ps1 7899
 | Windows ACL、内核锁库、路径别名 | R2-G / R4-J | 阻止外部授权/持久 runner 正式开放 |
 | 窄契约导出一致、人工导入和全场景前端物化兼容 | R3 | 阻止草稿入口发布，不复制默认值与 codec |
 | 播放器关闭时离线合成完整预置/分享码 | 主线外另评估 | 未证实用户需求前不新增执行环境，不计入 R0–R6 |
-| 指定模型、数据条款、质量阈值 | R5 | StepFun 仅用户明确启用的有界 token-only 试验；OpenAI 仍因模型未定关闭 |
+| 指定模型、数据条款、质量阈值 | R5 | StepFun 与 OpenAI 均按显式选择及有界 token-only 方式试验；真实 key、具体型号与质量阈值验收未完成 |
 | DBX 外部 MCP 本地桥接 | 单独后续项目 | A0/A1 不宣传支持 DBX 外部连接 |
 | 单曲点播/队列替换、原子收藏、远程视觉应用 | 对应扩展实施前 | 不提前登记模型工具 |
 | VCP 具体模块的复用授权 | 选择直接迁移前 | 继续独立实现设计与测试场景，不复制源码/素材 |

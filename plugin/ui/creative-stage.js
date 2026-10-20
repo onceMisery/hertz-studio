@@ -313,7 +313,7 @@
         out.sc[kk] = clampTo(sceneRow(out.scene, kk), sv);
       });
     }
-    out.cues = Array.isArray(p.cues) ? p.cues.filter(validCue).slice(0, 64) : [];
+    out.cues = Array.isArray(p.cues) ? p.cues.filter(function (cue) { return validCue(cue, out.scene); }).slice(0, 64) : [];
     out.bindings = Array.isArray(p.bindings) ? p.bindings.filter(validBinding).slice(0, 32) : [];
     out.director = p.director !== false;
     out.bg = (p.bg && typeof p.bg === 'object' && p.bg.type) ? p.bg : { type: 'theme' };
@@ -325,14 +325,36 @@
     return out;
   }
 
-  function validCue(c) {
+  function validCue(c, sceneId) {
     if (!c || typeof c !== 'object') return false;
-    if (typeof c.at !== 'number' && typeof c.every !== 'number') return false;
+    var fields = ['at', 'every', 'len', 'ease', 'set'];
+    if (Object.keys(c).some(function (key) { return fields.indexOf(key) < 0; })) return false;
+    if ((typeof c.at === 'number') === (typeof c.every === 'number')) return false;
     if (c.at !== undefined && (!Number.isFinite(c.at) || c.at < 0 || c.at > 86400)) return false;
-    if (c.every !== undefined && (!Number.isFinite(c.every) || c.every < 1 || c.every > 4096)) return false;
+    if (c.every !== undefined && (!Number.isInteger(c.every) || c.every < 1 || c.every > 4096)) return false;
     if (c.len !== undefined && (!Number.isFinite(c.len) || c.len < 16 || c.len > 600000)) return false;
+    if (c.ease !== undefined && ['linear', 'in', 'out', 'inout'].indexOf(c.ease) < 0) return false;
+    var activeScene = sceneId || currentScene();
     return !!c.set && typeof c.set === 'object' && !Array.isArray(c.set)
-      && Object.keys(c.set).length > 0 && Object.keys(c.set).every(function (key) { return Number.isFinite(c.set[key]); });
+      && Object.keys(c.set).length > 0 && Object.keys(c.set).every(function (key) {
+        var row;
+        if (key.slice(0, 3) === 'sc.') {
+          row = sceneRow(activeScene, key.slice(3));
+        } else {
+          row = specFor(key);
+        }
+        var value = c.set[key];
+        if (!row || typeof value !== 'number' || !Number.isFinite(value)) return false;
+        if (key.slice(0, 3) === 'sc.') {
+          var sceneParam = row.slice();
+          sceneParam[0] = key;
+          row = sceneParam;
+        }
+        if (typeof row[2] === 'number') return value >= row[2] && value <= row[3];
+        return Array.isArray(row[2]) && row[2].some(function (option) {
+          return Number(option[0]) === value;
+        });
+      });
   }
 
   function validBinding(b) {
@@ -1630,6 +1652,13 @@
     saveTimer = setTimeout(saveLocal, 400);
   }
 
+  function flushLocalSave() {
+    if (!saveTimer) return;
+    clearTimeout(saveTimer);
+    saveTimer = 0;
+    try { localStorage.setItem(LOCAL_KEY, JSON.stringify(preset)); } catch (e) { /* 隐私模式 */ }
+  }
+
   function loadLocal() {
     try {
       var raw = localStorage.getItem(LOCAL_KEY);
@@ -1661,6 +1690,7 @@
   }
 
   function init() {
+    if (window.Backgrounds && Backgrounds.cancelTemporaryApply) Backgrounds.cancelTemporaryApply();
     preview = null; presetRevision += 1;
     preset = loadLocal() || basePreset();
     loadLibrary();
@@ -1684,6 +1714,7 @@
   function invalidatePreview() {
     if (!preview) return;
     preview = null;
+    if (window.Backgrounds && Backgrounds.cancelTemporaryApply) Backgrounds.cancelTemporaryApply();
     refreshPresentation();
   }
 
@@ -1698,6 +1729,7 @@
     // Only complete, share-safe presets may enter the temporary presentation layer.
     var next = normalizeSharePreset(candidate);
     var committed = shareSnapshot();
+    if (window.Backgrounds && Backgrounds.beginTemporaryApply) Backgrounds.beginTemporaryApply();
     preview = { committedBg: committed.bg, committedHand: committed.hand, previewId: 'preview-' + (++previewSerial), baseRevision: presetRevision,
       proposalHash: String(proposalHash || ''), preset: next };
     refreshPresentation();
@@ -1718,12 +1750,17 @@
     var next = preview.preset;
     preview = null;
     api2.setPreset(next);
+    if (window.Backgrounds && Backgrounds.commitTemporaryApply) Backgrounds.commitTemporaryApply();
     emit('preview', null);
     return { ok: true, preset: deep(preset) };
   }
 
-  document.addEventListener('visibilitychange', function () { if (document.hidden) cancelPreview(); });
-  if (window.addEventListener) window.addEventListener('pagehide', function () { cancelPreview(); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { flushLocalSave(); cancelPreview(); }
+  });
+  if (window.addEventListener) window.addEventListener('pagehide', function () {
+    flushLocalSave(); cancelPreview();
+  });
 
   var api2 = {
     init: init,
@@ -1807,6 +1844,16 @@
       }
       preset.scene = id;
       preset.sc = sceneDefaults(id);
+      preset.cues = preset.cues.map(function (cue) {
+        var set = {};
+        Object.keys(cue.set).forEach(function (key) {
+          if (specFor(key)) set[key] = cue.set[key];
+        });
+        return Object.assign({}, cue, { set: set });
+      }).filter(function (cue) { return validCue(cue, id); });
+      preset.bindings = preset.bindings.filter(function (binding) {
+        return specFor(binding.target) && Object.prototype.hasOwnProperty.call(BIND_SOURCES, binding.source);
+      });
       animations.length = 0;
       if (camTo) {
         Object.keys(camTo).forEach(function (k) { writePath(preset, k, clampPath(k, camTo[k])); });
@@ -1856,15 +1903,17 @@
     baseSpec: function () { return deep(BASE_SPEC); },
     // Manual section authoring and the live director use the same bounded rules.
     sectionRules: function () { return deep(MOODS); },
-    spec: function () {
+    spec: function (sceneId) {
       // 场景行路径必须带 sc. 前缀：setParam/readPath/readRuntime 全都按
       // "sc.键"寻址，runtime() 返回的扁平映射里也是 sc.dimK 这样的键。
       // 工坊拿到前缀后，滑块写值、pathPicker 选值、findRow 反查名称三处才一致。
-      var sceneRows = deep(sceneDefinition(currentScene()).params).map(function (row) {
+      var selectedScene = typeof sceneId === 'string' ? sceneId
+        : sceneId === null ? null : currentScene();
+      var sceneRows = selectedScene ? deep(sceneDefinition(selectedScene).params).map(function (row) {
         var out = row.slice();
         out[0] = 'sc.' + row[0];
         return out;
-      });
+      }) : [];
       return { base: deep(BASE_SPEC),
         scene: sceneRows,
         binds: Object.keys(BIND_SOURCES) };
@@ -1873,15 +1922,15 @@
 
     // 编排轨与绑定
     addCue: function (cue) {
-      if (!validCue(cue) || preset.cues.length >= 64) return false;
-      preset.cues.push(cue);
+      if (!validCue(cue, preset.scene) || preset.cues.length >= 64) return false;
+      preset.cues.push(deep(cue));
       saveLocalSoon();
       emit('preset', preset);
       return true;
     },
     updateCue: function (i, cue) {
-      if (!preset.cues[i] || !validCue(cue)) return false;
-      preset.cues[i] = cue;
+      if (!preset.cues[i] || !validCue(cue, preset.scene)) return false;
+      preset.cues[i] = deep(cue);
       saveLocalSoon();
       emit('preset', preset);
       return true;

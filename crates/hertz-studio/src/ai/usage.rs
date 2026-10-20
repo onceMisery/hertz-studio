@@ -304,7 +304,15 @@ pub(crate) async fn settle_terminal(
                             halt_token_bounds(conn, &job.owner_instance_id, &job.job_id).await?;
                         }
                     }
-                    Err(reason) => halt(conn, &job.owner_instance_id, &job.job_id, reason).await?,
+                    Err(reason) => {
+                        halt(conn, &job.owner_instance_id, &job.job_id, reason).await?;
+                        if pricing
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.token_bounds_exceeded(usage))
+                        {
+                            halt_token_bounds(conn, &job.owner_instance_id, &job.job_id).await?;
+                        }
+                    }
                 }
             }
         }
@@ -438,7 +446,7 @@ pub(crate) async fn reconcile(
         Ok(amount) => amount,
         Err(reason) => {
             halt(conn, owner, job_id, reason).await?;
-            return store::cas_report_usage(
+            let updated = store::cas_report_usage(
                 conn,
                 job_id,
                 attempt,
@@ -448,7 +456,15 @@ pub(crate) async fn reconcile(
                 &encoded,
             )
             .await
-            .map_err(db_error);
+            .map_err(db_error)?;
+            if updated
+                && snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.token_bounds_exceeded(usage))
+            {
+                halt_token_bounds(conn, owner, job_id).await?;
+            }
+            return Ok(updated);
         }
     };
     let delta = amount

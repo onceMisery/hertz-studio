@@ -44,9 +44,17 @@ async function run({ binary, out, long = false }) {
   fs.mkdirSync(path.dirname(out), { recursive: true });
   const tmp = path.join(ROOT, 'target', 'search-pressure-v2', 'tmp');
   fs.mkdirSync(tmp, { recursive: true });
-  const reportFd = fs.openSync(out, 'wx');
-  const logFd = fs.openSync(logPath, 'wx');
-  const memoryFd = fs.openSync(memoryPath, 'wx');
+  let reportFd, logFd, memoryFd;
+  const createdOutputs = [];
+  try {
+    reportFd = fs.openSync(out, 'wx'); createdOutputs.push(out);
+    logFd = fs.openSync(logPath, 'wx'); createdOutputs.push(logPath);
+    memoryFd = fs.openSync(memoryPath, 'wx'); createdOutputs.push(memoryPath);
+  } catch (error) {
+    for (const fd of [reportFd, logFd, memoryFd]) if (fd !== undefined) fs.closeSync(fd);
+    for (const file of createdOutputs) fs.rmSync(file, { force: true });
+    throw error;
+  }
   const report = { schemaVersion: 1, releaseEligible: false, startedAt: new Date().toISOString(),
     environment: { os: process.platform, release: os.release(), arch: process.arch,
       cpu: os.cpus()[0]?.model, logicalCpus: os.cpus().length, totalMemoryBytes: os.totalmem(), node: process.version },

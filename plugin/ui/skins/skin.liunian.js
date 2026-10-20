@@ -376,6 +376,7 @@
     field.innerHTML = '<svg class="ln-sp-ico" viewBox="0 0 24 24" aria-hidden="true">'
       + '<use href="#i-search"/></svg>';
     var input = make('input', 'ln-sp-q', field);
+    refs.query = input;
     input.type = 'search';
     input.placeholder = '搜索本地与在线曲库';
     input.autocomplete = 'off';
@@ -457,6 +458,7 @@
     make('span', 'ln-sp-sec-count', head);
     var more = make('button', 'ln-sp-more', head);
     more.type = 'button';
+    more.hidden = true;
     var rows = make('div', 'ln-sp-rows', sec);
     var status = make('div', 'ln-sp-status', sec);
     return { sec: sec, head: head, rows: rows, status: status, more: more };
@@ -528,6 +530,7 @@
       refs.localSec.more.onclick = function () {
         emit('view-local', { q: panel.q });
       };
+      if (restoreFocus) refs.localSec.more.focus({ preventScroll: true });
     } else {
       refs.localSec.more.hidden = true;
       if (restoreFocus) { refs.localSec.status.tabIndex = -1; refs.localSec.status.focus({ preventScroll: true }); }
@@ -549,15 +552,29 @@
   }
 
   function searchOnline(epoch, q) {
+    var retry = refs.onlineSec.more;
+    var restoreFocus = document.activeElement === retry;
+    if (restoreFocus) {
+      retry.disabled = true;
+      retry.textContent = '正在读取音源…';
+      refs.query.focus({ preventScroll: true });
+    }
     setSectionStatus(refs.onlineSec, '正在读取音源…', 'loading');
     var network = searchNetwork;
     ensureSources(epoch).then(function (sources) {
       if (epoch !== panel.epoch || !network.active) return;
       if (!sources) {
-        setSectionStatus(refs.onlineSec, '音源列表读取失败，点击重试', 'error');
-        refs.onlineSec.status.onclick = function () { panel.sources = null; searchOnline(epoch, q); };
+        setSectionStatus(refs.onlineSec, '音源列表读取失败', 'error');
+        retry.disabled = false;
+        retry.hidden = false;
+        retry.textContent = '重试读取音源';
+        retry.onclick = function () { panel.sources = null; searchOnline(epoch, q); };
+        if (restoreFocus && document.activeElement === refs.query) retry.focus({ preventScroll: true });
         return;
       }
+      retry.disabled = false;
+      retry.hidden = true;
+      retry.onclick = null;
       sources = sources.filter(function (source) { return !source.kind || source.kind === 'music'; });
       if (!sources.length) { setSectionStatus(refs.onlineSec, '没有可用音源', 'empty'); return; }
       setSectionStatus(refs.onlineSec, '', ''); refs.onlineSec.rows.textContent = '';
@@ -628,6 +645,7 @@
       sec.more.onclick = function () {
         emit('view-online', { q: panel.q });
       };
+      if (restoreFocus) sec.more.focus({ preventScroll: true });
     } else {
       sec.more.hidden = true;
       if (restoreFocus) { sec.status.tabIndex = -1; sec.status.focus({ preventScroll: true }); }

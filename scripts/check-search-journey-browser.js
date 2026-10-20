@@ -19,9 +19,24 @@ async function main() {
   page.on('pageerror', e => errors.push(e.message));
   const sources = ['netease','qq','kugou'].map((id,i) => ({id,label:['网易云音乐','QQ音乐','酷狗音乐'][i],kind:'music',caps:[],cats:[]}));
   const track = (source, id, q) => ({source,id:String(id),title:q + ' ' + source + ' ' + id,artist:'Fixture',album:'Search',duration_ms:180000,playable:true,track_ref:{source,id:String(id)}});
-  await page.route('**/v1/online/sources', route => route.fulfill({json:{sources}}));
+  let failSourcesOnce = false;
+  await page.route('**/v1/online/sources', route => {
+    if (failSourcesOnce) {
+      failSourcesOnce = false;
+      return route.fulfill({status:400,json:{error:{code:'fixture_sources_unavailable',message:'fixture source list failure'}}});
+    }
+    return route.fulfill({json:{sources}});
+  });
+  let emptySearchRequests = [];
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if ((url.pathname === '/v1/tracks' || url.pathname === '/v1/online/search') && url.searchParams.get('q') === '') {
+      emptySearchRequests.push(url.pathname);
+    }
+  });
   await page.route('**/v1/tracks?**', route => {
     const q = new URL(route.request().url()).searchParams.get('q') || '';
+    if (!q) return route.fulfill({json:{tracks:[],total:0}});
     if (!q.startsWith('R1')) return route.continue();
     return route.fulfill({json:{tracks:[track('local','local-1',q)],total:1}});
   });
@@ -30,13 +45,14 @@ async function main() {
     const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 20);
     requests.push({q,source,offset}); active++; maxActive = Math.max(maxActive, active);
     try {
+      if (!q) { await route.fulfill({json:{tracks:[],total:0}}); return; }
       if (q.includes('slow') && source === 'qq') await new Promise(resolve => releases.set(q, resolve));
       if (q === 'R1 online slow' && source === 'netease' && offset > 0) {
         await new Promise(resolve => releases.set(q + ':page', resolve));
       }
       const attempt = requests.filter(r => r.q === q && r.source === source && r.offset === offset).length;
       if (source === 'kugou' && attempt === 1) {
-        await route.fulfill({status:504,json:{error:{code:'upstream_timeout',request_id:'r1-timeout',message:'fixture timeout'}}}); return;
+        await route.fulfill({status:400,json:{error:{code:'upstream_timeout',request_id:'r1-timeout',message:'fixture timeout'}}}); return;
       }
       const count = offset ? 2 : source === 'netease' ? limit : 2;
       await route.fulfill({json:{tracks:Array.from({length:count},(_,i)=>track(source,offset+i,q)),total:source==='netease'?22:2}});
@@ -94,6 +110,24 @@ async function main() {
       'topbar retry keeps focus on its source status');
     assert.equal(await page.evaluate(()=>r1TopRow.isConnected),true);
     assert.equal(count('R1 top slow','netease'),1);
+    const tsQqRows = page.locator('.ts-menu section[data-source="qq"] .ts-row');
+    const selectedQqTitle = await tsQqRows.nth(1).locator('.t-title').textContent();
+    await page.evaluate(() => {
+      window.r1TopPlayCapture = null;
+      Online.playAll = (tracks, index) => {
+        window.r1TopPlayCapture = {
+          sources: tracks.map(track => track.source),
+          titles: tracks.map(track => track.title),
+          index,
+        };
+      };
+    });
+    await tsQqRows.nth(1).click();
+    const topPlayCapture = await page.evaluate(() => window.r1TopPlayCapture);
+    assert.deepEqual(topPlayCapture.sources, ['qq', 'qq'],
+      'topbar playback queue contains only the clicked source');
+    assert.equal(topPlayCapture.titles[topPlayCapture.index], selectedQqTitle,
+      'topbar playback starts from the clicked row in its source queue');
     await page.locator('#search').fill('R1 top canceled slow');
     assert.equal(await page.locator('.ts-menu .ts-row').count(),0,'new input clears stale selectable rows before debounce');
     await page.waitForFunction(()=>TopSearch.state.previewTracks.length===8);
@@ -101,8 +135,39 @@ async function main() {
     release('R1 top canceled slow');
     assert.equal(await page.evaluate(()=>TopSearch.state.network===null && !TopSearch.isOpen()),true);
 
+    // Local mode keeps the library's type-to-filter behavior while preserving
+    // a reachable way back to the online search ranges.
+    await page.locator('#search').fill('R1 top mode switch');
+    await page.waitForFunction(() => TopSearch.state.previewTracks.length >= 8);
+    await page.keyboard.press('Escape');
+    await page.locator('#search').click();
+    await page.locator('.ts-chip[data-kind="local"]').click();
+    assert.equal(await page.evaluate(() => !TopSearch.isOpen() && TopSearch.kind() === 'local'),true);
+    await page.locator('#search').click();
+    await page.waitForSelector('.ts-menu:not([hidden])');
+    assert.equal(await page.locator('.ts-chip[data-kind="local"]').getAttribute('aria-pressed'),'true');
+    const localFilterRequest = page.waitForRequest(request => {
+      const url = new URL(request.url());
+      return url.pathname === '/v1/tracks' && url.searchParams.get('q') === 'R1 local mode filter';
+    });
+    await page.locator('#search').fill('R1 local mode filter');
+    await page.waitForFunction(() => !TopSearch.isOpen());
+    await localFilterRequest;
+    await page.locator('#search').click();
+    await page.locator('.ts-chip[data-kind="song"]').click();
+    await page.waitForFunction(() => TopSearch.kind() === 'song' && TopSearch.state.previewTracks.length > 0);
+    assert.equal(await page.evaluate(() => TopSearch.isOpen()),true,'topbar can return from local filtering to online search');
+
     // Space uses the actual app host, including local normalization and retry closures.
+    await page.evaluate(() => localStorage.setItem('vmusic.search-history', JSON.stringify({v:1,items:['R1 saved history']})));
+    emptySearchRequests = [];
     await page.locator('#space3d-entry').click();
+    await page.locator('#sh-query').focus();
+    await page.getByRole('button', {name:'R1 saved history',exact:true}).waitFor();
+    await page.waitForTimeout(150);
+    assert.equal(await page.getByRole('button', {name:'R1 saved history',exact:true}).count(),1,
+      'space search history remains visible while the query is empty');
+    assert.deepEqual(emptySearchRequests,[], 'opening space search history does not issue empty local or online queries');
     await page.locator('#sh-query').fill('R1 space slow');
     await page.waitForFunction(()=>document.querySelectorAll('.sh-panel-body .sh-track').length===21);
     const local = page.locator('.sh-search-source[data-source="local"] .sh-track');
@@ -136,14 +201,25 @@ async function main() {
     await page.evaluate(()=>Space3D.close());
 
     // The persistent Liunian panel joins the same coordinator and exposes source failures.
+    failSourcesOnce = true;
     await page.evaluate(()=>Skins.apply('liunian'));
     await page.locator('.ln-sp-q').fill('R1 liunian');
-    const lnError = page.locator('.ln-sp-sec').filter({has:page.locator('[data-error-code="upstream_timeout"]')}).last();
-    const lnRetry = lnError.getByRole('button',{name:'重试',exact:true});
+    const sourcesRetry = page.getByRole('button',{name:'重试读取音源',exact:true});
+    await sourcesRetry.focus();
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(()=>document.querySelectorAll('.ln-sp-row').length===6
+      && document.querySelector('[data-error-code="upstream_timeout"]'));
+    assert.equal(await page.evaluate(() => document.activeElement.classList.contains('ln-sp-q')),true,
+      'Liunian source-list retry returns focus to the search field after recovery');
+    const lnError = page.locator('.ln-sp-sec').filter({hasText:'酷狗音乐'}).last();
+    assert.equal(await lnError.locator('[data-error-code="upstream_timeout"]').count(),1,
+      'Liunian provider failure belongs to the Kugou result group');
+    const lnRetry = lnError.locator('button.ln-sp-more');
+    await lnRetry.evaluate(el => { window.r1LiunianRetry = el; });
     await lnRetry.focus();
     await lnRetry.click();
     await page.waitForFunction(()=>document.querySelectorAll('.ln-sp-row').length===8);
-    assert.equal(await lnRetry.evaluate(el => document.activeElement === el), true,
+    assert.equal(await page.evaluate(() => document.activeElement === window.r1LiunianRetry && !window.r1LiunianRetry.hidden), true,
       'Liunian keeps the retry control focused while converting it to the next action');
     assert.equal(count('R1 liunian','netease'),1);
     await page.locator('.ln-sp-q').fill('R1 liunian canceled slow');
@@ -151,8 +227,58 @@ async function main() {
     await page.evaluate(()=>Skins.apply('default'));
     release('R1 liunian canceled slow');
     await page.waitForFunction(()=>!document.querySelector('.ln-sp'));
+
+    const visibleSkins = await page.evaluate(() => Skins.list().map(skin => skin.id));
+    assert.deepEqual(visibleSkins, ['classic','sheen','liunian','qingfeng','chaoxi','heijiao','orbit'],
+      'the public skin list matches the seven supported layouts');
+    await page.setViewportSize({width:390,height:420});
+    for (const skin of visibleSkins) {
+      await page.evaluate(id => Skins.apply(id), skin);
+      await page.waitForFunction(id => id === 'classic' || !!document.querySelector('link[data-skin-css="' + id + '"]').sheet, skin);
+      if (skin === 'sheen') await page.keyboard.press('/');
+      const search = page.locator('#search');
+      if (skin === 'qingfeng') {
+        assert.equal(await search.isVisible(),false,'Qingfeng intentionally hides topbar search below 900px');
+        await page.setViewportSize({width:1440,height:420});
+      }
+      await search.evaluate(el => el.focus({preventScroll:true}));
+      await search.fill('R1 skin ' + skin);
+      await page.waitForSelector('.ts-menu:not([hidden]) .ts-row');
+      const geometry = await page.evaluate(() => {
+        const menu = document.querySelector('.ts-menu').getBoundingClientRect();
+        const body = document.querySelector('.ts-body');
+        return {left:menu.left,right:menu.right,bottom:menu.bottom,
+          scrollHeight:body.scrollHeight,clientHeight:body.clientHeight,
+          viewportWidth:innerWidth,viewportHeight:innerHeight};
+      });
+      assert.ok(geometry.left >= 0 && geometry.right <= geometry.viewportWidth,
+        skin + ' top-search panel stays within the narrow viewport');
+      assert.ok(geometry.bottom <= geometry.viewportHeight,
+        skin + ' top-search panel stays above the viewport bottom');
+      assert.ok(geometry.scrollHeight >= geometry.clientHeight,
+        skin + ' top-search results remain in a scrollable panel');
+      const keyboardKind = await page.evaluate(() => TopSearch.state.kind === 'playlist' ? 'artist' : 'playlist');
+      await page.locator('.ts-chip[data-kind="' + keyboardKind + '"]').evaluate(el => el.focus({preventScroll:true}));
+      await page.keyboard.press('Enter');
+      assert.equal(await page.evaluate(() => document.activeElement.dataset.kind), keyboardKind,
+        skin + ' keyboard activation keeps focus on the newly rendered range chip');
+      const chipFocus = await page.evaluate(() => ({
+        id: document.activeElement.id, className: document.activeElement.className,
+        insideMenu: document.querySelector('.ts-menu').contains(document.activeElement),
+      }));
+      assert.ok(chipFocus.insideMenu, skin + ' search chip receives focus before Escape: ' + JSON.stringify(chipFocus));
+      await page.keyboard.press('Escape');
+      const escapeState = await page.evaluate(() => ({
+        open: TopSearch.isOpen(), activeId: document.activeElement.id,
+        activeClass: document.activeElement.className,
+        menuHidden: document.querySelector('.ts-menu').hidden,
+        spaceActive: !!(Space3D && Space3D.isActive && Space3D.isActive()),
+      }));
+      assert.equal(!escapeState.open && escapeState.activeId === 'search',true,
+        skin + ' Escape closes the panel and restores focus to search: ' + JSON.stringify(escapeState));
+    }
     assert.deepEqual(errors,[]);
-    console.log('Search browser journeys passed: online/topbar/space/Liunian progressive groups, local identity, source retry/paging, preserved rows/focus, immediate invalidation, close/unmount and shared two-call admission');
+    console.log('Search browser journeys passed: online/topbar/space/Liunian progressive groups, seven public skins, narrow viewport bounds, Escape focus restoration, local identity, source retry/paging, preserved rows/focus, immediate invalidation, close/unmount and shared two-call admission');
   } finally {
     releases.forEach(fn=>fn());
     await browser.close(); await fixture.close();

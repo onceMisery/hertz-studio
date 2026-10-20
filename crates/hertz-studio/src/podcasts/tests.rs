@@ -334,6 +334,53 @@ async fn imported_episodes_survive_restart_unsubscribe_and_pagination() {
 }
 
 #[tokio::test]
+async fn episode_progress_is_stable_independent_and_marks_completion_from_duration() {
+    let (ctx, dir) = context().await;
+    let parsed_feed = parsed(RSS);
+    let id = parsed_feed.episodes[0].episode.track.id.clone();
+    let duration_ms = parsed_feed.episodes[0].episode.track.duration_ms;
+    persist_feed(&ctx, &parsed_feed).await.unwrap();
+
+    let saved = save_progress(&ctx, &id, 1_234_567, false).await.unwrap();
+    assert_eq!(saved.progress_ms, 1_234_567);
+    assert!(!saved.completed);
+    let page = feed(&ctx, FEED, 0, 1, false).await.unwrap();
+    assert_eq!(page.episodes[0].progress_ms, 1_234_567);
+    assert!(!page.episodes[0].completed);
+
+    let mut refreshed = parsed(&RSS.replace("token=old", "token=new"));
+    refreshed.episodes.truncate(1);
+    refreshed.show.episode_count = 1;
+    persist_feed(&ctx, &refreshed).await.unwrap();
+    let retained = feed(&ctx, FEED, 0, 1, false).await.unwrap();
+    assert_eq!(retained.episodes[0].progress_ms, 1_234_567);
+
+    let nearly_complete = save_progress(&ctx, &id, duration_ms * 95 / 100, false)
+        .await
+        .unwrap();
+    assert!(nearly_complete.completed);
+    let completed = save_progress(&ctx, &id, duration_ms * 94 / 100, true)
+        .await
+        .unwrap();
+    assert!(completed.completed);
+    let replayed = save_progress(&ctx, &id, 0, false).await.unwrap();
+    assert_eq!(replayed.progress_ms, 0);
+    assert!(!replayed.completed);
+    let reset = feed(&ctx, FEED, 0, 1, false).await.unwrap();
+    assert_eq!(reset.episodes[0].progress_ms, 0);
+    assert!(!reset.episodes[0].completed);
+
+    assert_eq!(
+        save_progress(&ctx, "missing-episode", 10_000, false)
+            .await
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    cleanup(ctx, dir).await;
+}
+
+#[tokio::test]
 async fn refresh_updates_signed_urls_but_preserves_old_queue_id_and_subscription() {
     let (ctx, dir) = context().await;
     let first = parsed(RSS);

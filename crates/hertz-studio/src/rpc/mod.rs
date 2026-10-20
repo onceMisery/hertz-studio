@@ -445,6 +445,7 @@ impl Rpc {
 
             (Op::Get, ["v1", "podcasts", "search"]) => podcasts::search(state, query).await,
             (Op::Get, ["v1", "podcasts", "feed"]) => podcasts::feed(state, query).await,
+            (Op::Post, ["v1", "podcasts", "progress"]) => podcasts::progress(state, body).await,
             (Op::Get, ["v1", "podcasts", "subscriptions"]) => podcasts::subscriptions(state).await,
             (Op::Post, ["v1", "podcasts", "subscriptions"]) => {
                 podcasts::subscribe(state, body).await

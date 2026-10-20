@@ -16,6 +16,7 @@
     { "source": "Stage3D.STAGES", "oldId": "resonance", "plugin": "resonant-rings", "component": "instanced rotated torus rings", "state": "removed", "note": "Removed from Space3D; saved selections fall back to coast" },
     { "source": "Stage3D.STAGES", "oldId": "off", "component": "old background visibility setting", "state": "not-a-scene" },
     { "source": "Design.7.4", "oldId": "particle-silk", "plugin": "particle-silk", "component": "spatial silk point ribbon", "state": "implemented", "note": "additional explicit preset; old silk ID denotes the cover sphere" },
+    { "source": "Prototype", "oldId": "particle-reactor", "plugin": "reactor", "component": "per-track hue/shell/shot recipes, GPU shell morph, queue satellite nodes", "state": "implemented", "note": "ported from the musichomepage ParticleStage prototype" },
     { "source": "CreativeGL", "oldId": "towers", "plugin": "spectrum-towers", "component": "instanced spectrum columns", "state": "implemented" },
     { "source": "CreativeGL", "oldId": "orb", "plugin": "spectrum-sphere", "component": "shared sphere sampling, warm spectrum palette", "state": "implemented" },
     { "source": "CreativeGL", "oldId": "tunnel", "plugin": "light-tunnel", "component": "instanced torus path", "state": "implemented" },

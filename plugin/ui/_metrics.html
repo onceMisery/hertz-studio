@@ -1,0 +1,11 @@
+<!DOCTYPE html><meta charset="utf-8"><pre id="r">running</pre>
+<script src="lyric-glyph-atlas.js"></script>
+<script>
+var FONT = '"Noto Sans CJK SC","Source Han Sans SC","Microsoft YaHei",system-ui,sans-serif';
+var a = LyricGlyphAtlas.create(FONT, 400), b = LyricGlyphAtlas.create(FONT, 700), c = LyricGlyphAtlas.create(FONT, 600);
+document.getElementById('r').textContent = JSON.stringify({
+  a400:{px:a.RENDER_PX,base:a.BASELINE,cell:a.CELL,pad:a.PAD,content:a.CONTENT,m:a.metrics},
+  a700:{px:b.RENDER_PX,base:b.BASELINE,cell:b.CELL,pad:b.PAD,content:b.CONTENT,m:b.metrics},
+  a600:{px:c.RENDER_PX,base:c.BASELINE,cell:c.CELL,pad:c.PAD,content:c.CONTENT,m:c.metrics}
+}, null, 2);
+</script>

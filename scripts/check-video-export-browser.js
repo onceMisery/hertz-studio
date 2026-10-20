@@ -19,8 +19,10 @@ async function main() {
   page.on('pageerror',error=>errors.push(error.message));
   try {
     const track = await fixture.seed();
+    const currentLyric = 'Hertz video export lyric sentinel 这一句混合中英文的长歌词用于验证导出不会被横向压扁 '.repeat(5);
+    const nextLyric = 'Next lyric 下一句较长的歌词也需要按画布宽度换行保持清晰 '.repeat(5);
     await fixture.api(`/v1/tracks/${encodeURIComponent(track.id)}/lyrics`, 'PUT', {
-      content: '[00:00.00]Hertz video export lyric sentinel',
+      content: '[00:00.00]' + currentLyric + '\n[00:05.00]' + nextLyric,
     });
     await page.goto(uiUrl(fixture.base),{waitUntil:'domcontentloaded'});
     await page.waitForFunction(()=>window.VideoExport && window.Stage3D && window.CreativeStage);
@@ -43,15 +45,37 @@ async function main() {
         captureTracks.push(...dest.stream.getTracks());return dest.stream;
       }});
       const draw=CanvasRenderingContext2D.prototype.drawImage;
+      const fillRect=CanvasRenderingContext2D.prototype.fillRect;
       const fillText=CanvasRenderingContext2D.prototype.fillText;
       window.outputDraws=0;
       window.outputHasLyric=false;
+      window.outputLyricDraws={current:[],next:[]};
+      let lyricGroup=null;
+      CanvasRenderingContext2D.prototype.fillRect=function(...args){
+        if(this.canvas===captureCanvases.at(-1)) lyricGroup='current';
+        return fillRect.apply(this,args);
+      };
       CanvasRenderingContext2D.prototype.drawImage=function(...args){
         if(this.canvas===captureCanvases.at(-1)) outputDraws++;
         return draw.apply(this,args);
       };
       CanvasRenderingContext2D.prototype.fillText=function(...args){
-        if(this.canvas===captureCanvases.at(-1) && String(args[0])==='Hertz video export lyric sentinel') outputHasLyric=true;
+        if(this.canvas===captureCanvases.at(-1)) {
+          const text=String(args[0]);
+          if(text.startsWith('Next lyric')) lyricGroup='next';
+          else if(text.startsWith('Layout Audit Fixture')) lyricGroup='current';
+          const group=lyricGroup;
+          if(group && !text.startsWith('Layout Audit Fixture')) {
+            outputHasLyric=true;
+            const metrics=this.measureText(text);
+            const row={text,width:metrics.width,y:args[2],top:args[2]-metrics.actualBoundingBoxAscent,
+              bottom:args[2]+metrics.actualBoundingBoxDescent,height:this.canvas.height,
+              maxWidth:this.canvas.width*(group==='current'?0.88:0.84),argCount:args.length};
+            if(!outputLyricDraws[group].some(existing=>existing.text===row.text&&existing.y===row.y)) {
+              outputLyricDraws[group].push(row);
+            }
+          }
+        }
         return fillText.apply(this,args);
       };
       Stage3D.configure({sceneSource:'immersive',stanzaVisual:'stage',stanzaBg:'stage'});Stage3D.open();
@@ -61,12 +85,33 @@ async function main() {
 
     async function start({systemAudio=false,preset='720p',format='auto'}={}) {
       await page.evaluate(options=>{
+        window.outputHasLyric=false;window.outputLyricDraws={current:[],next:[]};
         window.recordingDone=VideoExport.begin({preset:{id:options.preset},systemAudio:options.systemAudio,format:options.format});
         recordingDone.catch(error=>{window.recordingError=error.message;});
       },{systemAudio,preset,format});
-      await page.waitForFunction(()=>VideoExport.status().phase==='recording' || window.recordingError,{},{timeout:15000});
+      await page.waitForFunction(()=>VideoExport.status().phase==='recording' || window.recordingError,{},{timeout:15000})
+        .catch(async error=>{
+          console.error('Recording startup state:',JSON.stringify(await page.evaluate(()=>({
+            status:VideoExport.status(),error:window.recordingError,visibility:document.hidden,
+            recorders:capturedRecorders.map(recorder=>({state:recorder.state,mimeType:recorder.mimeType,events:recorder.auditEvents})),
+          }))));
+          throw error;
+        });
       assert.equal(await page.evaluate(()=>window.recordingError || VideoExport.status().phase),'recording');
       await page.waitForTimeout(1700);
+    }
+    function assertLyricLayout(layout,height) {
+      for(const [group,limit] of [['current',3],['next',2]]) {
+        assert.ok(layout[group].length>1,group+' long lyric must wrap into multiple canvas rows');
+        assert.ok(layout[group].length<=limit,group+' rows must fit its vertical budget');
+        assert.ok(layout[group].every(row=>row.argCount===3),group+' lyric must not use Canvas maxWidth compression');
+        assert.ok(layout[group].every(row=>row.width<=row.maxWidth+1),group+' wrapped rows must fit the safe width');
+        assert.ok(layout[group].every(row=>row.top>=0&&row.bottom<=height&&row.height===height),
+          group+' glyph bounds must stay inside the recorded canvas');
+      }
+      const currentBottom=Math.max(...layout.current.map(row=>row.bottom));
+      const nextTop=Math.min(...layout.next.map(row=>row.top));
+      assert.ok(currentBottom<nextTop,'current and next lyric glyphs must not overlap');
     }
     async function save(width,height,audio) {
       assert.equal(await page.evaluate(()=>VideoExport.status().phase),'recording','Session must still be active before explicit stop');
@@ -127,6 +172,7 @@ async function main() {
     await start();
     assert.equal(await page.evaluate(()=>outputHasLyric),true,
       'Imported lyric must be drawn to the canvas captured by MediaRecorder');
+    assertLyricLayout(await page.evaluate(()=>outputLyricDraws),720);
     await page.evaluate(()=>{VideoExport.open();VideoExport.close();VideoExport.open();});
     await page.getByRole('button',{name:'停止并保存',exact:true}).waitFor();
     const horizontal=await save(1280,720,false);
@@ -147,6 +193,11 @@ async function main() {
     assert.equal(await page.evaluate(()=>Stage3D.recordingSurface().canvas.classList.contains('creative-canvas')),true,
       'Creative recordings must use the creative owner canvas');
     await start({systemAudio:true,preset:'portrait',format:'webm'});
+    assertLyricLayout(await page.evaluate(()=>outputLyricDraws),1920);
+    assert.ok(await page.evaluate(()=>outputLyricDraws.current.some(row=>row.text.endsWith('…'))),
+      'portrait current lyric must visibly truncate overflow rows');
+    assert.ok(await page.evaluate(()=>outputLyricDraws.next.some(row=>row.text.endsWith('…'))),
+      'portrait next lyric must visibly truncate overflow rows');
     await page.evaluate(()=>VideoExport.open());
     await page.getByText('已包含系统音轨（可能包含其它应用声音）',{exact:true}).waitFor();
     const portrait=await save(1080,1920,true);

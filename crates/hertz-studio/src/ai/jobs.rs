@@ -51,7 +51,7 @@ pub(crate) const QUEUE_CAPACITY: i64 = 9;
 /// 排队 / 执行期限（§8.3）：60s / 30s。
 pub(crate) const QUEUE_DEADLINE_MS: i64 = 60_000;
 pub(crate) const RUN_DEADLINE_MS: i64 = 30_000;
-const INTERRUPTED_SETTLEMENT_RETRY_DELAYS_MS: [u64; 3] = [100, 250, 500];
+const TERMINAL_SETTLEMENT_RETRY_DELAYS_MS: [u64; 3] = [100, 250, 500];
 /// 幂等键窗口（§7.2）：7 天。
 pub(crate) const KEY_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
 pub(crate) const HISTORY_JOB_LIMIT: i64 = 500;
@@ -291,6 +291,7 @@ pub(crate) struct JobView {
     pub created_at: i64,
     pub updated_at: i64,
     pub result_proposal_id: Option<String>,
+    pub failure_code: Option<String>,
     pub usage: JobUsageView,
 }
 
@@ -320,6 +321,7 @@ impl JobView {
             created_at: row.created_at,
             updated_at: row.updated_at,
             result_proposal_id: row.result_proposal_id.clone(),
+            failure_code: row.failure_code.clone(),
             usage: JobUsageView {
                 accepted_month: utc_month_key(row.created_at),
                 reservation_micro_usd: row.reservation_micro_usd,
@@ -446,7 +448,7 @@ pub(crate) async fn recover(state: &Arc<AppState>) -> ApiResult<usize> {
     let mut events = Vec::new();
     let mut first_error = None;
     for candidate in candidates {
-        let result: ApiResult<Option<(String, i64)>> = async {
+        let result: ApiResult<Option<String>> = async {
             let mut tx = vmusic_store::begin_immediate(&state.db)
                 .await
                 .map_err(store_error)?;
@@ -476,7 +478,7 @@ pub(crate) async fn recover(state: &Arc<AppState>) -> ApiResult<usize> {
             }
             settle_on_terminal(&mut tx, &job, "interrupted").await?;
             tx.commit().await.map_err(sql_error)?;
-            Ok(Some((job.job_id, job.state_revision + 1)))
+            Ok(Some(job.job_id))
         }
         .await;
         match result {
@@ -495,9 +497,9 @@ pub(crate) async fn recover(state: &Arc<AppState>) -> ApiResult<usize> {
         }
     }
     let mut recovered = events.len();
-    for (id, revision) in events {
+    for id in events {
         state.ai_runtime.inputs.lock().await.remove(&id);
-        publish_task(state, "interrupted", &id, revision);
+        publish_task(state);
     }
     match drain_pending_usage(state).await {
         Ok(additional) => recovered += additional,
@@ -530,7 +532,7 @@ async fn drain_pending_usage(state: &Arc<AppState>) -> ApiResult<usize> {
     let mut interrupted = 0;
     let mut first_error = None;
     for candidate in candidates {
-        let result: ApiResult<Option<(String, i64)>> = async {
+        let result: ApiResult<Option<String>> = async {
             let mut tx = vmusic_store::begin_immediate(&state.db)
                 .await
                 .map_err(store_error)?;
@@ -612,7 +614,7 @@ async fn drain_pending_usage(state: &Arc<AppState>) -> ApiResult<usize> {
                 {
                     return Ok(None);
                 }
-                Some((job.job_id.clone(), job.state_revision + 1))
+                Some(job.job_id.clone())
             } else {
                 None
             };
@@ -622,10 +624,10 @@ async fn drain_pending_usage(state: &Arc<AppState>) -> ApiResult<usize> {
         }
         .await;
         match result {
-            Ok(Some((id, revision))) => {
+            Ok(Some(id)) => {
                 interrupted += 1;
                 state.ai_runtime.inputs.lock().await.remove(&id);
-                publish_task(state, "interrupted", &id, revision);
+                publish_task(state);
             }
             Ok(None) => {}
             Err(error) => {
@@ -767,14 +769,6 @@ async fn submit_owned(
     brief: &str,
     idempotency_key: Option<&str>,
 ) -> ApiResult<SubmitOutcome> {
-    // 唯一 AI runner（§5.5）：锁失的进程不受理新生成，即使共享 DataDir。
-    if !state.ai_runner_held() {
-        return Err(ApiError::new(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "ai_locked",
-            "本进程未持有 AI runner 锁，生成受理停用",
-        ));
-    }
     let brief = brief.trim();
     if brief.is_empty() {
         return Err(bad_request("brief 不能为空"));
@@ -783,8 +777,6 @@ async fn submit_owned(
         return Err(bad_request("brief 超过 16 KiB 上限"));
     }
     let now = now_ms();
-    // 实例身份先行（会创建 ai_instance 行），水位检查才有落点。
-    let owner = instance_owner(state).await?;
     let key = normalize_key(idempotency_key, now)?;
     let hash = input_hash(brief);
     // 幂等回放先于 provider 就绪检查（§7.1 顺序）：已存在任务的合法回放
@@ -804,6 +796,17 @@ async fn submit_owned(
             "同一 idempotencyKey 携带了不同输入",
         ));
     }
+    // Existing work remains replayable after the runner lock moves. Only new
+    // admissions require this process to own the shared DataDir runner.
+    if !state.ai_runner_held() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ai_locked",
+            "本进程未持有 AI runner 锁，生成受理停用",
+        ));
+    }
+    // 实例身份先行（会创建 ai_instance 行），水位检查才有落点。
+    let owner = instance_owner(state).await?;
     let provider = state.ai_runtime.provider().await;
     if !provider.ready() {
         return Err(ApiError::new(
@@ -931,6 +934,7 @@ async fn submit_owned(
         created_at: now,
         updated_at: now,
         result_proposal_id: None,
+        failure_code: None,
     };
     if let Err(e) = store::insert_job(&mut *tx, &job).await {
         // 并发同键撞唯一索引：按回放/冲突如实收口，而不是 500。
@@ -955,7 +959,7 @@ async fn submit_owned(
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
     inputs.insert(job.job_id.clone(), (brief.to_string(), cancel_tx));
     drop(inputs);
-    publish_task(state, "accepted", &job.job_id, job.state_revision);
+    publish_task(state);
     let queue_deadline =
         tokio::time::Instant::now() + std::time::Duration::from_millis(QUEUE_DEADLINE_MS as u64);
     tokio::spawn(run_job(
@@ -970,13 +974,9 @@ async fn submit_owned(
     })
 }
 
-/// 任务状态事件（R4-E）：先落库后发布；只带 ID/状态/revision（§7.4）。
-fn publish_task(state: &AppState, to_state: &str, job_id: &str, state_revision: i64) {
-    state.publish(WsEvent::AiTask {
-        job_id: job_id.to_string(),
-        state: to_state.to_string(),
-        state_revision,
-    });
+/// 任务状态变化已提交后发布无载荷提示，UI 再查询其有权访问的快照。
+fn publish_task(state: &AppState) {
+    state.publish(WsEvent::AiTasksResync);
 }
 
 /// worker：唯一一次 provider 调用的执行 owner。
@@ -1020,7 +1020,10 @@ async fn run_job_inner(
                 return;
             }
         },
-        _ = cancelled.changed() => return,
+        _ = cancelled.changed() => {
+            cancel_worker_after_signal(&state, &job_id).await;
+            return;
+        },
         _ = tokio::time::sleep_until(queue_deadline) => {
             if let Err(error) = start_running(&state, &job_id, queue_deadline).await {
                 tracing::error!("AI queue expiry failed: {error:?}");
@@ -1075,7 +1078,7 @@ async fn run_job_inner(
         state.ai_runtime.inputs.lock().await.remove(&job_id);
         return;
     }
-    publish_task(&state, "running", &job.job_id, job.state_revision);
+    publish_task(&state);
     let pricing: PricingSnapshot =
         match serde_json::from_str::<PricingSnapshot>(&job.pricing_snapshot) {
             Ok(pricing)
@@ -1172,8 +1175,12 @@ async fn run_job_inner(
             Err("cancelled") => "cancelled",
             _ => "failed",
         };
-        finish_running(state.clone(), &job_id, terminal).await;
-        state.ai_runtime.inputs.lock().await.remove(&job_id);
+        if terminal == "cancelled" {
+            cancel_worker_after_signal(&state, &job_id).await;
+        } else {
+            finish_running(state.clone(), &job_id, terminal).await;
+            state.ai_runtime.inputs.lock().await.remove(&job_id);
+        }
         return;
     }
     job.dispatch_state = "may_have_been_sent".into();
@@ -1203,9 +1210,10 @@ async fn run_job_inner(
     };
 
     let credential = credential.map(super::credential::Lease::into_secret);
-    // A terminal winner removes the input sender after its commit. Observe
-    // known cancellation once more before constructing any provider request.
+    // Consent revocation can signal before its ledger transaction commits.
+    // Settle cancellation before constructing any provider request.
     if cancellation_pending(&cancelled) {
+        cancel_worker_after_signal(&state, &job_id).await;
         return;
     }
 
@@ -1279,7 +1287,7 @@ async fn run_job_inner(
                         usage::settle_terminal(&mut tx, &job, trusted_usage.as_ref(), now).await?;
                         tx.commit().await.map_err(sql_error)?;
                         if cancelled {
-                            publish_task(&state, "cancelled", &job.job_id, job.state_revision + 1);
+                            publish_task(&state);
                         }
                         return Ok::<(), ApiError>(());
                     }
@@ -1316,7 +1324,7 @@ async fn run_job_inner(
                         .map_err(store_error)?;
                     usage::settle_terminal(&mut tx, &job, trusted_usage.as_ref(), now).await?;
                     tx.commit().await.map_err(sql_error)?;
-                    publish_task(&state, "succeeded", &job.job_id, job.state_revision + 1);
+                    publish_task(&state);
                     Ok(())
                 }
                 .await;
@@ -1333,19 +1341,26 @@ async fn run_job_inner(
             }
             Err(reason) => {
                 tracing::warn!("AI 输出校验失败: {reason}");
-                finish_running_with_usage(
+                finish_running_with_failure_code(
                     state.clone(),
                     &job.job_id,
                     "failed",
                     trusted_usage.as_ref(),
+                    "invalid_output",
                 )
                 .await;
             }
         },
         Err(reason) => {
             tracing::warn!("AI provider 调用失败: {reason}");
-            finish_running_with_usage(state.clone(), &job.job_id, "failed", trusted_usage.as_ref())
-                .await;
+            finish_running_with_failure_code(
+                state.clone(),
+                &job.job_id,
+                "failed",
+                trusted_usage.as_ref(),
+                "provider_error",
+            )
+            .await;
         }
     }
     state.ai_runtime.inputs.lock().await.remove(&job_id);
@@ -1381,7 +1396,7 @@ async fn start_running(
         }
         tx.commit().await.map_err(sql_error)?;
         if to == "expired" {
-            publish_task(state, to, job_id, job.state_revision + 1);
+            publish_task(state);
             Ok(None)
         } else {
             Ok(Some(job))
@@ -1402,6 +1417,27 @@ async fn finish_running_with_usage(
     job_id: &str,
     to: &str,
     trusted_usage: Option<&TrustedUsage>,
+) {
+    let failure_code = (to == "failed").then_some("internal_error");
+    finish_running_with_failure(state, job_id, to, trusted_usage, failure_code).await;
+}
+
+async fn finish_running_with_failure_code(
+    state: Arc<AppState>,
+    job_id: &str,
+    to: &str,
+    trusted_usage: Option<&TrustedUsage>,
+    failure_code: &'static str,
+) {
+    finish_running_with_failure(state, job_id, to, trusted_usage, Some(failure_code)).await;
+}
+
+async fn finish_running_with_failure(
+    state: Arc<AppState>,
+    job_id: &str,
+    to: &str,
+    trusted_usage: Option<&TrustedUsage>,
+    failure_code: Option<&str>,
 ) {
     let result = async {
         let mut tx = vmusic_store::begin_immediate(&state.db)
@@ -1424,6 +1460,13 @@ async fn finish_running_with_usage(
             )
             .await
             .map_err(store_error)?;
+        if won {
+            if let Some(code) = failure_code {
+                store::set_job_failure_code(&mut *tx, job_id, code)
+                    .await
+                    .map_err(store_error)?;
+            }
+        }
         if !won && trusted_usage.is_none() {
             return Ok(());
         }
@@ -1431,7 +1474,7 @@ async fn finish_running_with_usage(
         usage::settle_terminal(&mut tx, &job, trusted_usage, now_ms()).await?;
         tx.commit().await.map_err(sql_error)?;
         if won {
-            publish_task(&state, to, job_id, job.state_revision + 1);
+            publish_task(&state);
         }
         Ok(())
     }
@@ -1442,6 +1485,73 @@ async fn finish_running_with_usage(
         );
         interrupt_worker_failure_with_usage(&state, job_id, trusted_usage).await;
     }
+}
+
+/// A cancellation signal may arrive before the revoker's ledger transaction
+/// commits. The worker retries the same cancelled transition so a transient
+/// settlement failure cannot strand accepted/running work without an owner.
+async fn cancel_worker_after_signal(state: &Arc<AppState>, job_id: &str) {
+    let attempts = TERMINAL_SETTLEMENT_RETRY_DELAYS_MS.len() + 1;
+    for (attempt, retry_delay_ms) in TERMINAL_SETTLEMENT_RETRY_DELAYS_MS
+        .iter()
+        .copied()
+        .map(Some)
+        .chain(std::iter::once(None))
+        .enumerate()
+    {
+        match cancel_worker_once(state, job_id).await {
+            Ok(()) => break,
+            Err(error) => match retry_delay_ms {
+                Some(delay_ms) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        total_attempts = attempts,
+                        retry_in_ms = delay_ms,
+                        "AI cancellation settlement failed; retrying: {error:?}"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                None => tracing::error!(
+                    attempt = attempt + 1,
+                    total_attempts = attempts,
+                    "AI cancellation settlement failed; task remains recoverable: {error:?}"
+                ),
+            },
+        }
+    }
+    state.ai_runtime.inputs.lock().await.remove(job_id);
+}
+
+async fn cancel_worker_once(state: &Arc<AppState>, job_id: &str) -> ApiResult<()> {
+    let mut tx = vmusic_store::begin_immediate(&state.db)
+        .await
+        .map_err(store_error)?;
+    let Some(job) = store::find_job_by_id(&mut *tx, job_id)
+        .await
+        .map_err(store_error)?
+    else {
+        return Ok(());
+    };
+    if !matches!(job.state.as_str(), "accepted" | "running") {
+        return Ok(());
+    }
+    if !store::cas_job_state(
+        &mut *tx,
+        job_id,
+        &job.state,
+        job.state_revision,
+        "cancelled",
+        now_ms(),
+    )
+    .await
+    .map_err(store_error)?
+    {
+        return Ok(());
+    }
+    usage::settle_terminal(&mut tx, &job, None, now_ms()).await?;
+    tx.commit().await.map_err(sql_error)?;
+    publish_task(state);
+    Ok(())
 }
 
 /// A worker that can no longer make progress must persist an interrupted state
@@ -1457,8 +1567,8 @@ async fn interrupt_worker_failure_with_usage(
     job_id: &str,
     trusted_usage: Option<&TrustedUsage>,
 ) {
-    let attempts = INTERRUPTED_SETTLEMENT_RETRY_DELAYS_MS.len() + 1;
-    for (attempt, retry_delay_ms) in INTERRUPTED_SETTLEMENT_RETRY_DELAYS_MS
+    let attempts = TERMINAL_SETTLEMENT_RETRY_DELAYS_MS.len() + 1;
+    for (attempt, retry_delay_ms) in TERMINAL_SETTLEMENT_RETRY_DELAYS_MS
         .iter()
         .copied()
         .map(Some)
@@ -1520,7 +1630,7 @@ async fn interrupt_worker_failure_once(
     }
     usage::settle_terminal(&mut tx, &job, trusted_usage, now_ms()).await?;
     tx.commit().await.map_err(sql_error)?;
-    publish_task(state, "interrupted", job_id, job.state_revision + 1);
+    publish_task(state);
     Ok(())
 }
 
@@ -1538,7 +1648,13 @@ pub(crate) async fn cancel(
             "本进程未持有 AI runner 锁",
         ));
     }
-    sweep(state).await?;
+    if let Err(error) = sweep(state).await {
+        tracing::warn!(
+            "AI task sweep failed before cancellation of {}: {}",
+            job_id,
+            error.code
+        );
+    }
     let mut tx = vmusic_store::begin_immediate(&state.db)
         .await
         .map_err(store_error)?;
@@ -1574,7 +1690,7 @@ pub(crate) async fn cancel(
     }
     settle_on_terminal(&mut tx, &job, "cancelled").await?;
     tx.commit().await.map_err(sql_error)?;
-    publish_task(state, "cancelled", &job.job_id, job.state_revision + 1);
+    publish_task(state);
     state.ai_runtime.inputs.lock().await.remove(job_id);
     let mut view = JobView::with_usage(&job, &state.db).await?;
     view.state = "cancelled".into();
@@ -1594,14 +1710,13 @@ pub(crate) async fn revoke_generation_consent(state: &Arc<AppState>) -> ApiResul
         ));
     }
     // Settings have already been persisted by the caller. Signal workers before
-    // any fallible ledger work so a DB error cannot leave an authorized request
-    // running after consent was withdrawn.
+    // fallible ledger work, but keep their owner markers until settlement or
+    // worker cleanup completes so a concurrent lazy sweep cannot steal the CAS.
     {
-        let mut inputs = state.ai_runtime.inputs.lock().await;
+        let inputs = state.ai_runtime.inputs.lock().await;
         for (_, cancel) in inputs.values() {
             let _ = cancel.send(());
         }
-        inputs.clear();
     }
     let owner = instance_owner(state).await?;
     let mut tx = vmusic_store::begin_immediate(&state.db)
@@ -1627,14 +1742,14 @@ pub(crate) async fn revoke_generation_consent(state: &Arc<AppState>) -> ApiResul
         .map_err(store_error)?
         {
             settle_on_terminal(&mut tx, &job, "cancelled").await?;
-            events.push((job.job_id, job.state_revision + 1));
+            events.push(job.job_id);
         }
     }
     tx.commit().await.map_err(sql_error)?;
     let mut inputs = state.ai_runtime.inputs.lock().await;
-    for (id, revision) in events {
+    for id in events {
         inputs.remove(&id);
-        publish_task(state, "cancelled", &id, revision);
+        publish_task(state);
     }
     Ok(())
 }
@@ -1672,19 +1787,19 @@ pub(super) async fn invalidate_credentials(state: &Arc<AppState>, owner: &str) -
         .map_err(store_error)?
         {
             settle_on_terminal(&mut tx, &job, "cancelled").await?;
-            events.push((job.job_id, job.state_revision + 1));
+            events.push(job.job_id);
         }
     }
     tx.commit().await.map_err(sql_error)?;
-    for (id, revision) in events {
+    for id in events {
         state.ai_runtime.inputs.lock().await.remove(&id);
-        publish_task(state, "cancelled", &id, revision);
+        publish_task(state);
     }
     Ok(())
 }
 
-/// 过期清扫：排队超期（accepted >60s）与执行超期（running >30s）。
-/// 惰性触发（submit/cancel/查询入口先扫一遍），无后台定时器。
+/// 惰性清扫（submit/cancel/查询入口触发），无后台定时器。超期任务转为 expired；
+/// 仍未超期但已没有本进程 worker owner 的任务转为 interrupted。
 pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
     // Only the runner can know which persisted tasks still have live workers
     // and cancellation senders in this process. Non-runners keep query paths
@@ -1695,13 +1810,13 @@ pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
     let now = now_ms();
     let queue_cutoff = now - QUEUE_DEADLINE_MS;
     let run_cutoff = now - RUN_DEADLINE_MS;
-    let candidates = store::expired_candidates(&state.db, queue_cutoff, run_cutoff)
+    let candidates = store::recovery_candidates(&state.db)
         .await
         .map_err(store_error)?;
     let mut events = Vec::new();
     let mut first_error = None;
     for job in candidates {
-        let result: ApiResult<Option<(String, i64)>> = async {
+        let result: ApiResult<Option<String>> = async {
             let mut tx = vmusic_store::begin_immediate(&state.db)
                 .await
                 .map_err(store_error)?;
@@ -1714,13 +1829,10 @@ pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
             let is_expired = match job.state.as_str() {
                 "accepted" => job.created_at < queue_cutoff,
                 "running" => job.updated_at < run_cutoff,
-                _ => false,
+                _ => return Ok(None),
             };
-            if !is_expired {
-                return Ok(None);
-            }
-            // Submission takes the input lock before committing the row and
-            // inserts the owner before releasing it, serializing this check.
+            // Submission commits the row and inserts the owner while holding
+            // this lock, so a recent task without an owner is a stranded worker.
             if state
                 .ai_runtime
                 .inputs
@@ -1730,12 +1842,13 @@ pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
             {
                 return Ok(None);
             }
+            let next_state = if is_expired { "expired" } else { "interrupted" };
             if !store::cas_job_state(
                 &mut *tx,
                 &job.job_id,
                 &job.state,
                 job.state_revision,
-                "expired",
+                next_state,
                 now,
             )
             .await
@@ -1743,9 +1856,9 @@ pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
             {
                 return Ok(None);
             }
-            settle_on_terminal(&mut tx, &job, "expired").await?;
+            settle_on_terminal(&mut tx, &job, next_state).await?;
             tx.commit().await.map_err(sql_error)?;
-            Ok(Some((job.job_id, job.state_revision + 1)))
+            Ok(Some(job.job_id))
         }
         .await;
         match result {
@@ -1779,8 +1892,8 @@ pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
             first_error = Some(error);
         }
     }
-    for (id, revision) in events {
-        publish_task(state, "expired", &id, revision);
+    for _ in events {
+        publish_task(state);
     }
     if let Some(error) = first_error {
         return Err(error);
@@ -1792,12 +1905,22 @@ pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
 // 查询
 // ---------------------------------------------------------------------------
 
+async fn sweep_before_query(state: &Arc<AppState>, query: &'static str) {
+    if let Err(error) = sweep(state).await {
+        tracing::warn!(
+            "AI task sweep failed before {} query: {}",
+            query,
+            error.code
+        );
+    }
+}
+
 pub(crate) async fn get_job(
     state: &Arc<AppState>,
     principal: &str,
     job_id: &str,
 ) -> ApiResult<JobView> {
-    sweep(state).await?;
+    sweep_before_query(state, "get job").await;
     let job = store::find_job_by_id(&state.db, job_id)
         .await
         .map_err(store_error)?
@@ -1814,7 +1937,7 @@ pub(crate) async fn list_jobs(
     before_job_id: Option<&str>,
     limit: i64,
 ) -> ApiResult<Vec<JobView>> {
-    sweep(state).await?;
+    sweep_before_query(state, "list jobs").await;
     let rows = store::list_jobs(
         &state.db,
         owner,
@@ -2063,7 +2186,7 @@ fn guard_reset_fingerprint(provider: &dyn StageIntentProvider) -> Result<String,
 
 /// 状态摘要（官方 UI 的 `GET /v1/ai/status`）。
 pub(crate) async fn status(state: &Arc<AppState>, owner: &str) -> ApiResult<Value> {
-    sweep(state).await?;
+    sweep_before_query(state, "status").await;
     let provider = state.ai_runtime.provider().await;
     let reset_fingerprint = guard_reset_fingerprint(provider.as_ref()).ok();
     let pricing_mode = match provider.quote("") {
@@ -3307,10 +3430,11 @@ mod tests {
     async fn trusted_usage_charges_success_invalid_output_and_provider_error() {
         let (state, handle) = jobs_state().await;
         let valid = json!({"version":1,"scene":"orb","patch":{}});
-        for (reply, expected, counters) in [
+        for (reply, expected, failure_code, counters) in [
             (
                 Ok(valid.clone()),
                 "succeeded",
+                None,
                 Some(TrustedUsage {
                     input_tokens: 123,
                     output_tokens: 7,
@@ -3319,6 +3443,7 @@ mod tests {
             (
                 Ok(json!({"bad":"candidate"})),
                 "failed",
+                Some("invalid_output"),
                 Some(TrustedUsage {
                     input_tokens: 123,
                     output_tokens: 7,
@@ -3327,12 +3452,13 @@ mod tests {
             (
                 Err("truncated response".into()),
                 "failed",
+                Some("provider_error"),
                 Some(TrustedUsage {
                     input_tokens: 123,
                     output_tokens: 7,
                 }),
             ),
-            (Ok(valid), "succeeded", None),
+            (Ok(valid), "succeeded", None, None),
         ] {
             state
                 .ai_runtime
@@ -3346,7 +3472,9 @@ mod tests {
             };
             let terminal = await_terminal(&state, &job.job_id).await;
             assert_eq!(terminal.state, expected);
+            assert_eq!(terminal.failure_code.as_deref(), failure_code);
             let view = get_job(&state, "local-owner", &job.job_id).await.unwrap();
+            assert_eq!(view.failure_code.as_deref(), failure_code);
             assert_eq!(view.usage.reservation_micro_usd, 30_000);
             assert_eq!(
                 view.usage.usage_state,
@@ -3422,7 +3550,7 @@ mod tests {
         assert_eq!(latest.usage.usage_revision, 2);
         assert_eq!(latest.usage.usage_state, "reported");
         while let Ok(event) = events.try_recv() {
-            assert!(!matches!(event, WsEvent::AiTask { state, .. } if state == "succeeded"));
+            assert!(matches!(event, WsEvent::AiTasksResync));
         }
         let row = job_row(&state, &job.job_id).await;
         let snapshot: PricingSnapshot = serde_json::from_str(&row.pricing_snapshot).unwrap();
@@ -3580,6 +3708,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 result_proposal_id: None,
+                failure_code: None,
             },
         )
         .await
@@ -3818,13 +3947,10 @@ mod tests {
             .unwrap();
         assert_eq!(entry.accounted_micro_usd, 40_014);
         assert_eq!(entry.usage_state, "reported");
-        assert!(
-            store::budget_guard(&state.db)
-                .await
-                .unwrap()
-                .unwrap()
-                .halted
-        );
+        let guard = store::budget_guard(&state.db).await.unwrap().unwrap();
+        assert!(guard.halted);
+        assert!(guard.token_halted);
+        assert_eq!(guard.token_reason, "可信 token usage 超出受理时的上界");
         assert_eq!(
             submit(&state, "local-owner", "blocked", None)
                 .await
@@ -4231,13 +4357,10 @@ mod tests {
                 output_tokens: u64::MAX,
             }
         );
-        assert!(
-            store::budget_guard(&state.db)
-                .await
-                .unwrap()
-                .unwrap()
-                .halted
-        );
+        let guard = store::budget_guard(&state.db).await.unwrap().unwrap();
+        assert!(guard.halted);
+        assert!(guard.token_halted);
+        assert_eq!(guard.token_reason, "可信 token usage 超出受理时的上界");
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -4290,6 +4413,18 @@ mod tests {
         let guard = store::budget_guard(&mut *conn).await.unwrap().unwrap();
         assert!(guard.halted);
         assert_eq!(guard.reason, "usage amount overflow");
+        assert!(guard.token_halted);
+        assert_eq!(guard.token_reason, "可信 token usage 超出受理时的上界");
+        drop(conn);
+
+        state
+            .ai_runtime
+            .install_provider(Arc::new(TokenOnlyProvider))
+            .await;
+        assert!(matches!(
+            submit(&state, "local-owner", "token bound guard fixture", None).await,
+            Err(error) if error.code == "token_bounds_halted"
+        ));
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -4695,7 +4830,14 @@ mod tests {
             .unwrap();
         // A second process has no in-memory owner for this row. The blocked
         // fixture ignores cancellation so the real owner remains observable.
-        state.ai_runtime.inputs.lock().await.remove(&job.job_id);
+        let cancel_owner = state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .remove(&job.job_id)
+            .unwrap()
+            .1;
         let observed = get_job(&state, "local-owner", &job.job_id).await.unwrap();
         assert_eq!(observed.state, "running");
         assert_eq!(observed.usage.usage_state, "reserved");
@@ -4704,6 +4846,7 @@ mod tests {
             .ai_runner_held
             .store(true, std::sync::atomic::Ordering::Relaxed);
         gate.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(cancel_owner);
         let terminal = await_terminal(&state, &job.job_id).await;
         assert_eq!(terminal.state, "succeeded");
         state.audio.shutdown();
@@ -4730,7 +4873,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn replay_works_even_when_provider_is_not_ready() {
+    async fn replay_works_without_runner_lock_or_ready_provider() {
         struct NotReady;
         impl StageIntentProvider for NotReady {
             fn id(&self) -> &'static str {
@@ -4781,6 +4924,9 @@ mod tests {
         }
         // provider 不可用后：同键同输入仍然回放旧事实（§7.1 顺序）。
         state.ai_runtime.install_provider(Arc::new(NotReady)).await;
+        state
+            .ai_runner_held
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let replay = submit(
             &state,
             crate::idempotency::LOCAL_OWNER,
@@ -4793,6 +4939,16 @@ mod tests {
             panic!("回放不得依赖 provider 就绪");
         };
         assert_eq!(replayed.job_id, job.job_id);
+        let locked = submit(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            "新任务",
+            Some(&format!("v1.{}.{:032x}", now_ms(), 43u128)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(locked.status.as_u16(), 503);
+        assert_eq!(locked.code, "ai_locked");
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -5289,7 +5445,14 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
-        state.ai_runtime.inputs.lock().await.remove(&job.job_id);
+        let cancel_owner = state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .remove(&job.job_id)
+            .unwrap()
+            .1;
         sweep(&state).await.unwrap();
         let after = job_row(&state, &job.job_id).await;
         assert_eq!(after.state, "expired");
@@ -5297,6 +5460,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status["budget"]["reservedMicroUsd"], json!(0));
+        drop(cancel_owner);
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -5571,41 +5735,23 @@ mod tests {
         else {
             panic!("受理");
         };
-        // 收集直到终态事件（顺序允许乱序，内容必须只含 ID/状态/revision）。
-        let mut seen = Vec::new();
+        // State transitions publish an empty hint; details stay behind the authorized API.
+        let mut seen = 0;
         for _ in 0..200 {
             while let Ok(event) = events.try_recv() {
-                if let WsEvent::AiTask {
-                    job_id,
-                    state: task_state,
-                    state_revision,
-                } = &event
-                {
-                    assert_eq!(job_id, &job.job_id);
-                    let encoded = serde_json::to_string(&event).unwrap();
-                    assert!(encoded.len() < 2048, "任务事件必须小于 2KiB");
-                    assert!(!encoded.contains("brief"));
-                    seen.push(task_state.clone());
-                    let _ = state_revision;
-                }
+                assert!(matches!(event, WsEvent::AiTasksResync));
+                assert_eq!(
+                    serde_json::to_string(&event).unwrap(),
+                    "{\"type\":\"ai_tasks_resync\"}"
+                );
+                seen += 1;
             }
-            if seen.last().map(|s| s.as_str()) == Some("succeeded") {
+            if job_row(&state, &job.job_id).await.state == "succeeded" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert!(
-            seen.contains(&"accepted".to_string()),
-            "缺 accepted 事件: {seen:?}"
-        );
-        assert!(
-            seen.contains(&"running".to_string()),
-            "缺 running 事件: {seen:?}"
-        );
-        assert!(
-            seen.contains(&"succeeded".to_string()),
-            "缺终态事件: {seen:?}"
-        );
+        assert!(seen >= 3, "每次任务状态变化都应发布无载荷提示");
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -5923,6 +6069,7 @@ mod tests {
                     created_at: now,
                     updated_at: now,
                     result_proposal_id: None,
+                    failure_code: None,
                 },
             )
             .await
@@ -6029,6 +6176,178 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_proceeds_when_unrelated_orphan_sweep_fails() {
+        let (state, handle) = jobs_state().await;
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state
+            .ai_runtime
+            .install_provider(Arc::new(BlockedProvider {
+                counter,
+                gate: gate.clone(),
+            }))
+            .await;
+        let SubmitOutcome::Accepted { job: running } =
+            submit(&state, "local-owner", "cancel despite orphan failure", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        for _ in 0..200 {
+            let row = job_row(&state, &running.job_id).await;
+            if row.state == "running" && row.dispatch_state == "may_have_been_sent" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let running_row = job_row(&state, &running.job_id).await;
+        assert_eq!(running_row.state, "running");
+        assert_eq!(running_row.dispatch_state, "may_have_been_sent");
+
+        let SubmitOutcome::Accepted { job: orphan } =
+            submit(&state, "local-owner", "unrelated orphan", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        sqlx::query("UPDATE ai_jobs SET created_at = ?1 WHERE job_id = ?2")
+            .bind(now_ms() - QUEUE_DEADLINE_MS - 1000)
+            .bind(&orphan.job_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let cancel_owner = state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .remove(&orphan.job_id)
+            .unwrap()
+            .1;
+        let trigger = format!(
+            "CREATE TRIGGER fail_cancel_orphan_sweep BEFORE INSERT ON ai_usage_entries \
+             WHEN NEW.job_id = '{}' AND NEW.usage_state = 'released' \
+             BEGIN SELECT RAISE(ABORT, 'fixture sweep failure'); END",
+            orphan.job_id
+        );
+        sqlx::query(&trigger).execute(&state.db).await.unwrap();
+        let mut events = state.events.subscribe();
+
+        let cancelled = cancel(
+            &state,
+            "local-owner",
+            &running.job_id,
+            running_row.state_revision,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cancelled.state, "cancelled");
+        assert_eq!(job_row(&state, &running.job_id).await.state, "cancelled");
+        assert_eq!(job_row(&state, &orphan.job_id).await.state, "accepted");
+        assert!(store::find_usage_entry(&state.db, &orphan.job_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(matches!(events.try_recv().unwrap(), WsEvent::AiTasksResync));
+        assert!(events.try_recv().is_err());
+
+        sqlx::query("DROP TRIGGER fail_cancel_orphan_sweep")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sweep(&state).await.unwrap();
+        assert_eq!(job_row(&state, &orphan.job_id).await.state, "expired");
+        assert_eq!(
+            store::find_usage_entry(&state.db, &orphan.job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .usage_state,
+            "released"
+        );
+        assert!(matches!(events.try_recv().unwrap(), WsEvent::AiTasksResync));
+
+        drop(cancel_owner);
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recent_ownerless_task_recovers_after_lazy_sweep_failure() {
+        let (state, handle) = jobs_state().await;
+        let slot = state.ai_runtime.execution_slots.acquire().await.unwrap();
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state
+            .ai_runtime
+            .install_provider(Arc::new(BlockedProvider {
+                counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                gate: gate.clone(),
+            }))
+            .await;
+        let SubmitOutcome::Accepted { job: orphan } =
+            submit(&state, "local-owner", "query despite orphan failure", None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        let cancel_owner = state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .remove(&orphan.job_id)
+            .unwrap()
+            .1;
+        let trigger = format!(
+            "CREATE TRIGGER fail_query_orphan_sweep BEFORE INSERT ON ai_usage_entries \
+             WHEN NEW.job_id = '{}' AND NEW.usage_state = 'released' \
+             BEGIN SELECT RAISE(ABORT, 'fixture sweep failure'); END",
+            orphan.job_id
+        );
+        sqlx::query(&trigger).execute(&state.db).await.unwrap();
+
+        let fetched = get_job(&state, "local-owner", &orphan.job_id)
+            .await
+            .unwrap();
+        assert_eq!(fetched.state, "accepted");
+        let owner = instance_owner(&state).await.unwrap();
+        let listed = list_jobs(&state, "local-owner", &owner, None, None, 10)
+            .await
+            .unwrap();
+        assert!(listed.iter().any(|job| job.job_id == orphan.job_id));
+        let snapshot = status(&state, &owner).await.unwrap();
+        assert_eq!(snapshot["queue"]["incomplete"], 1);
+
+        sqlx::query("DROP TRIGGER fail_query_orphan_sweep")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sweep(&state).await.unwrap();
+        let recovered = job_row(&state, &orphan.job_id).await;
+        assert_eq!(recovered.state, "interrupted");
+        assert_eq!(
+            store::find_usage_entry(&state.db, &orphan.job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .usage_state,
+            "released"
+        );
+
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(cancel_owner);
+        drop(slot);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn orphan_sweep_continues_after_one_ledger_failure() {
         let (state, handle) = jobs_state().await;
         let slot = state.ai_runtime.execution_slots.acquire().await.unwrap();
@@ -6063,11 +6382,13 @@ mod tests {
                 .await
                 .unwrap();
         }
-        {
+        let cancel_owners = {
             let mut inputs = state.ai_runtime.inputs.lock().await;
-            inputs.remove(&failed.job_id);
-            inputs.remove(&healthy.job_id);
-        }
+            [&failed, &healthy]
+                .into_iter()
+                .map(|job| inputs.remove(&job.job_id).unwrap().1)
+                .collect::<Vec<_>>()
+        };
         let trigger = format!(
             "CREATE TRIGGER fail_one_orphan_sweep BEFORE INSERT ON ai_usage_entries \
              WHEN NEW.job_id = '{}' AND NEW.usage_state = 'released' \
@@ -6099,16 +6420,12 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(reserved, failed.usage.reservation_micro_usd);
-        let mut expired_events = Vec::new();
+        let mut expired_events = 0;
         while let Ok(event) = events.try_recv() {
-            if let WsEvent::AiTask { job_id, state, .. } = event {
-                expired_events.push((job_id, state));
-            }
+            assert!(matches!(event, WsEvent::AiTasksResync));
+            expired_events += 1;
         }
-        assert_eq!(
-            expired_events,
-            vec![(healthy.job_id.clone(), "expired".to_string())]
-        );
+        assert_eq!(expired_events, 1);
 
         sqlx::query("DROP TRIGGER fail_one_orphan_sweep")
             .execute(&state.db)
@@ -6128,12 +6445,9 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(reserved, 0);
-        assert!(matches!(
-            events.try_recv().unwrap(),
-            WsEvent::AiTask { job_id, state, .. }
-                if job_id == failed.job_id && state == "expired"
-        ));
+        assert!(matches!(events.try_recv().unwrap(), WsEvent::AiTasksResync));
 
+        drop(cancel_owners);
         drop(slot);
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         state.audio.shutdown();
@@ -6169,11 +6483,18 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
-        state.ai_runtime.inputs.lock().await.remove(&job.job_id);
+        let cancel_owner = state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .remove(&job.job_id)
+            .unwrap()
+            .1;
         assert!(sweep(&state).await.is_err());
         assert_eq!(job_row(&state, &job.job_id).await.state, "accepted");
         while let Ok(event) = events.try_recv() {
-            assert!(!matches!(event, WsEvent::AiTask { .. }));
+            assert!(!matches!(event, WsEvent::AiTasksResync));
         }
         sqlx::query("DROP TRIGGER fail_usage")
             .execute(&state.db)
@@ -6181,9 +6502,8 @@ mod tests {
             .unwrap();
         assert_eq!(recover(&state).await.unwrap(), 1);
         assert_eq!(job_row(&state, &job.job_id).await.state, "interrupted");
-        assert!(
-            matches!(events.try_recv().unwrap(), WsEvent::AiTask { state, .. } if state == "interrupted")
-        );
+        assert!(matches!(events.try_recv().unwrap(), WsEvent::AiTasksResync));
+        drop(cancel_owner);
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -6369,6 +6689,14 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
+        sweep(&state).await.unwrap();
+        assert_eq!(job_row(&state, &job.job_id).await.state, "running");
+        assert!(state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .contains_key(&job.job_id));
         provider.release.notify_one();
 
         let terminal = tokio::time::timeout(
@@ -6379,6 +6707,80 @@ mod tests {
         .unwrap();
         assert_eq!(terminal.state, "cancelled");
         assert_eq!(terminal.result_proposal_id, None);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consent_revocation_cancels_queued_worker_after_ledger_failure() {
+        let (state, handle) = jobs_state().await;
+        let slot = state.ai_runtime.execution_slots.acquire().await.unwrap();
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state
+            .ai_runtime
+            .install_provider(Arc::new(MeteredProvider {
+                gate: gate.clone(),
+                rate: Arc::new(std::sync::atomic::AtomicU64::new(1_000_000)),
+                reply: Ok(json!({ "version": 1, "scene": "orb", "patch": {} })),
+                usage: None,
+            }))
+            .await;
+        let SubmitOutcome::Accepted { job } = submit(
+            &state,
+            "local-owner",
+            "queued revoke under ledger failure",
+            None,
+        )
+        .await
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(job_row(&state, &job.job_id).await.state, "accepted");
+        assert_eq!(
+            job_row(&state, &job.job_id).await.dispatch_state,
+            "not_dispatched"
+        );
+
+        sqlx::query("CREATE TRIGGER fail_queued_revoke_settlement BEFORE INSERT ON ai_usage_entries BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        vmusic_store::settings::set(&state.db, CONSENT_KEY, &json!(false))
+            .await
+            .unwrap();
+        assert!(revoke_generation_consent(&state).await.is_err());
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert_eq!(job_row(&state, &job.job_id).await.state, "accepted");
+        sqlx::query("DROP TRIGGER fail_queued_revoke_settlement")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let terminal = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            await_terminal(&state, &job.job_id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(terminal.state, "cancelled");
+        assert_eq!(terminal.dispatch_state, "not_dispatched");
+        assert_eq!(terminal.result_proposal_id, None);
+        let usage = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage_state, "released");
+        assert_eq!(usage.accounted_micro_usd, 0);
+        assert!(!state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .contains_key(&job.job_id));
+
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(slot);
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -6520,6 +6922,7 @@ mod tests {
             created_at: now_ms(),
             updated_at: now_ms(),
             result_proposal_id: None,
+            failure_code: None,
         };
         let immediate_usage = TrustedUsage {
             input_tokens: 20_001,

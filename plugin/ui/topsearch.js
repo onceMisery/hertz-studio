@@ -6,7 +6,7 @@
 // 为什么是下拉面板：顶栏只有一行的高度，五档类型塞不进去；而预览结果
 // （歌能直接播、歌单/歌手/专辑能直接进详情）让这个框成为真正的全局搜索，
 // 而不是「回车才见结果」的跳转器。面板是 position:fixed 的自由浮层，坐标
-// 由 JS 按输入框的实际位置算 —— 五套皮肤各自给 .topsearch 换了圆角/底色/
+// 由 JS 按输入框的实际位置算 —— 各套皮肤分别给 .topsearch 换圆角/底色/
 // 摆位（清风把它挪到顶栏右侧、流年换底色），锚在布局流里要么被皮肤裁掉
 // 要么贴错边，只有 JS 定位对所有皮肤一视同仁。
 //
@@ -37,6 +37,7 @@
   var kindHost = null;
   var body = null;      // 预览结果滚动区
   var moreBtn = null;   // 「在「在线」页查看全部」脚注
+  var suppressFocusOpen = false;
 
   var KINDS = [
     { id: 'song', label: '歌曲' },
@@ -155,6 +156,7 @@
 
   function renderChips() {
     if (!kindHost) return;
+    var focusedKind = kindHost.contains(document.activeElement) && document.activeElement.dataset.kind;
     kindHost.textContent = '';
     var active = effectiveKind();
     KINDS.forEach(function (k) {
@@ -169,6 +171,10 @@
       b.addEventListener('click', function () { setKind(k.id); });
       kindHost.appendChild(b);
     });
+    if (focusedKind) {
+      var replacement = kindHost.querySelector('[data-kind="' + focusedKind + '"]');
+      if (replacement) replacement.focus({ preventScroll: true });
+    }
   }
 
   function syncPlaceholder() {
@@ -187,9 +193,11 @@
     var left = Math.round(r.left);
     var maxLeft = window.innerWidth - w - 12;
     if (left > maxLeft) left = Math.max(12, maxLeft);
+    var top = Math.round(r.bottom + 8);
     menu.style.left = left + 'px';
-    menu.style.top = Math.round(r.bottom + 8) + 'px';
+    menu.style.top = top + 'px';
     menu.style.width = w + 'px';
+    menu.style.maxHeight = Math.max(0, window.innerHeight - top - 12) + 'px';
   }
 
   function open(skipPreview) {
@@ -237,6 +245,10 @@
     if (q === state.q) return;
     state.q = q;
     invalidate();
+    if (effectiveKind() === 'local') {
+      if (state.open) close();
+      return;
+    }
     if (state.open) renderEmptyState();
     if (!q) {
       if (state.open) renderEmptyState();
@@ -388,7 +400,7 @@
         group.tracks.forEach(function (t) {
           var row = o.row(t, function () {
             if (!t.playable) return;
-            o.playAll(state.previewTracks, state.previewTracks.indexOf(t)); close();
+            o.playAll(group.tracks, group.tracks.indexOf(t)); close();
           });
           row.classList.add('ts-row'); group.container.appendChild(row);
         });
@@ -427,7 +439,9 @@
     renderChips();
     if (kind === 'local') {
       close();
+      suppressFocusOpen = true;
       input.focus();
+      if (document.activeElement === input) suppressFocusOpen = false;
       // 框里已有的词立刻生效为本地筛选（app.js 的 oninput 不会因程序化
       // 改值而触发，这里手动补一发）。
       if (input.value.trim()) notifyLocalFilter();
@@ -463,7 +477,14 @@
 
   function onDocumentKeyDown(e) {
     if (e.key !== 'Escape' || !state.open) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var restoreFocus = menu && menu.contains(document.activeElement);
     close();
+    if (restoreFocus) {
+      suppressFocusOpen = true;
+      input.focus({ preventScroll: true });
+    }
   }
 
   function onReflow(e) {
@@ -480,13 +501,15 @@
     if (!input) return;
     build();
     input.addEventListener('focus', function () {
-      if (effectiveKind() !== 'local') open();
+      if (suppressFocusOpen) { suppressFocusOpen = false; return; }
+      open();
     });
     // 焦点已在输入框时再点不会重发 focus（回车跳转后、点外面收起后都是
     // 这样），click 兜底把面板重新拉开。
     input.addEventListener('click', function () {
-      if (!state.open && effectiveKind() !== 'local' && document.activeElement === input) open();
+      if (!state.open && document.activeElement === input) open();
     });
+    input.addEventListener('input', onInput);
     input.addEventListener('keydown', function (e) {
       if (e.key !== 'Enter') return;
       if (effectiveKind() === 'local') return; // 本地行为归 app.js
@@ -509,7 +532,7 @@
       });
     }
     document.addEventListener('pointerdown', onDocumentPointerDown, true);
-    document.addEventListener('keydown', onDocumentKeyDown);
+    window.addEventListener('keydown', onDocumentKeyDown, true);
     // 固定定位的面板不跟着布局走：页面滚动/窗口变形时直接收起，最省心。
     window.addEventListener('scroll', onReflow, true);
     window.addEventListener('resize', onReflow);

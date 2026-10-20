@@ -12,18 +12,62 @@ const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { loadCorpus, stageHarness, assess, summarize, validateRow, loadRun, compareRuns, exportReview, childCase,
-  main:runEvaluation, driverFingerprint } = require('./evaluate-ai-stage');
+  offlineOutcome, main:runEvaluation, driverFingerprint } = require('./evaluate-ai-stage');
 
 async function main() {
   const corpus = loadCorpus();
-  assert.equal(corpus.version,'v2','Current evaluation corpus must follow the active contract');
-  assert.equal(loadCorpus('v2').manifest.schemaHash,corpus.contract.schemaHash);
+  assert.equal(corpus.version,'v3','Current evaluation corpus must follow the active contract');
+  assert.equal(loadCorpus('v3').manifest.schemaHash,corpus.contract.schemaHash);
+  const historicalCases = fs.readFileSync(path.join(__dirname,'../evals/stage-intent/v2/cases.jsonl'));
+  const activeCases = fs.readFileSync(path.join(__dirname,'../evals/stage-intent/v3/cases.jsonl'));
+  assert.equal(historicalCases.compare(activeCases),0,'v3 must preserve the frozen v2 sample lines byte-for-byte');
+  assert.equal(crypto.createHash('sha256').update(activeCases).digest('hex'),corpus.manifest.corpusSha256);
+  assert.throws(()=>loadCorpus('v2'),/Unsupported stage-intent corpus version/,
+    'Frozen v2 evidence must not be silently loaded under the current contract');
   assert.throws(()=>loadCorpus('v1'),/Unsupported stage-intent corpus version/,
     'Historical v1 evidence must be reproduced with its original evaluator revision');
   const harness = stageHarness();
+  const contractContext = {
+    scenes: corpus.contract.scenes.map(scene=>scene.id),
+    paths: [...corpus.contract.commonParams.map(param=>param.name),
+      ...corpus.contract.scenes.flatMap(scene=>scene.params.map(param=>'sc.'+param.name))],
+  };
+  let candidateLabelsChecked = 0, candidateLabelsMaterialized = 0, refusalLabelsStructurallyConflicted = 0;
+  for (const item of corpus.cases) {
+    if (item.expect.kind === 'candidate') {
+      candidateLabelsChecked++;
+      const intent = { version:1,scene:item.expect.scene,patch:{} };
+      for (const [key,,value] of item.expect.checks || []) {
+        if (key === 'director') intent.director = value;
+        else if (key === 'hand.on') intent.hand = { on:value };
+        else intent.patch[key] = value;
+      }
+      harness.draft.validateIntent(intent);
+      const result = harness.stage.materializeIntent(null,intent);
+      assert.ok(result.ok && result.ignored.length === 0,`Candidate label did not fully materialize: ${item.id}`);
+      candidateLabelsMaterialized++;
+    } else {
+      const compiled = harness.prompt.compile(item.brief,contractContext);
+      if (compiled.ok) refusalLabelsStructurallyConflicted++;
+    }
+  }
+  assert.equal(candidateLabelsChecked,corpus.manifest.mechanicalAudit.candidateLabelsChecked);
+  assert.equal(candidateLabelsMaterialized,corpus.manifest.mechanicalAudit.candidateLabelsMaterialized);
+  assert.equal(refusalLabelsStructurallyConflicted,corpus.manifest.mechanicalAudit.refusalLabelsStructurallyConflicted);
   const positive = corpus.cases.find(c=>c.id==='dev-common-01');
   const negative = corpus.cases.find(c=>c.id==='dev-neg-01');
   const unsupported = corpus.cases.find(c=>c.id==='dev-inject-01');
+  const conflict = corpus.cases.find(c=>c.id==='dev-conflict-06');
+  const temporal = corpus.cases.find(c=>c.id==='hold-time-01');
+  assert.equal(offlineOutcome({ok:false,code:'unrecognized_constraints'}),'refused',
+    'An explicit fail-closed constraint result must count as a refusal, not a missing parse');
+  assert.equal(offlineOutcome({ok:false,code:'unsafe_instruction'}),'refused',
+    'An out-of-domain instruction must count as a refusal');
+  assert.equal(offlineOutcome({ok:false,code:'unsupported_edit'}),'refused',
+    'An unsupported relative edit must count as a refusal');
+  assert.equal(offlineOutcome({ok:false,code:'unsupported_timeline'}),'refused',
+    'An unsupported temporal plan must count as a refusal');
+  assert.equal(offlineOutcome({ok:false,code:'no_match'}),'baseline_no_match');
   const candidate = { caseId:positive.id, kind:'candidate',elapsedMs:12,
     intent:{version:1,scene:'orb',patch:{}}, usage:{withinOutputBound:true} };
   const noShake = { ...candidate, caseId:negative.id, intent:{version:1,scene:'orb',patch:{'cam.shake':0}} };
@@ -66,6 +110,22 @@ async function main() {
   const valid = { ...candidate,evaluationVersion:1,caseId:corpus.cases[0].id,provider:'offline-rules',model:'offline-rules',
     schemaHash:corpus.contract.schemaHash,protocolFingerprint:harness.fingerprint,requestHash:harness.fingerprint,
     usage:null,reservationMicroUsd:'0',localPriceMicroUsd:'0',externalInvoiceVerified:false };
+  const conflictCompile = harness.prompt.compile(conflict.brief, {
+    scenes: corpus.contract.scenes.map(scene=>scene.id),
+    paths: [...corpus.contract.commonParams.map(param=>param.name),
+      ...corpus.contract.scenes.flatMap(scene=>scene.params.map(param=>'sc.'+param.name))],
+  });
+  assert.equal(conflictCompile.code,'unsatisfiable_constraints');
+  const temporalCompile = harness.prompt.compile(temporal.brief, {
+    scenes: corpus.contract.scenes.map(scene=>scene.id),
+    paths: [...corpus.contract.commonParams.map(param=>param.name),
+      ...corpus.contract.scenes.flatMap(scene=>scene.params.map(param=>'sc.'+param.name))],
+  });
+  assert.equal(temporalCompile.code,'unsupported_timeline');
+  const offlineRefusal = { ...valid,caseId:conflict.id,kind:'refused',intent:null };
+  validateRow(offlineRefusal,{provider:'offline-rules',model:'offline-rules'},corpus.contract);
+  assert.equal(assess(conflict,offlineRefusal,harness).matched,true,
+    'An explicit compiler refusal must match the frozen impossible-constraint case');
   let savedMeta = { ...meta,provider:'offline-rules',model:'offline-rules',sampleComplete:false,
     corpusVersion:corpus.version,
     corpusSha256:corpus.manifest.corpusSha256,schemaHash:corpus.contract.schemaHash,

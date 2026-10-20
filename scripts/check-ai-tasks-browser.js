@@ -7,7 +7,7 @@
 //   2. 提交 → 任务到 succeeded（fake 即时）→ 查看提案 → 应用到舞台
 //      → 舞台场景随提案切换；
 //   3. 拒绝：提案进入 rejected，内容不再可应用；
-//   4. WS ai_task 事件驱动刷新（事件比轮询先到也不重复渲染崩溃）。
+//   4. 无载荷 WS ai_tasks_resync 提示刷新任务快照（事件比轮询先到也不重复渲染崩溃）。
 //
 //   node scripts/check-ai-tasks-browser.js
 'use strict';
@@ -87,6 +87,52 @@ async function main() {
     assert.ok(aiStatusRequests > statusBeforeResync, '掉队提示应触发任务快照重查');
     pass('ai_tasks_resync 事件触发任务快照重查');
 
+    // A repeated click while cancellation is in flight is ignored. If another
+    // actor wins the state transition, a fresh terminal snapshot must suppress
+    // the stale-request error toast.
+    const cancelSource = (await fixture.api('/v1/ai/jobs?limit=20')).jobs[0];
+    const cancelJobId = 'cancel-race-fixture';
+    let cancelState = 'running';
+    let cancelRevision = 4;
+    let cancelRequests = 0;
+    let releaseCancel;
+    const cancelGate = new Promise(resolve => { releaseCancel = resolve; });
+    await page.route('**/v1/ai/jobs?limit=20', async route => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      payload.jobs = [{ ...cancelSource, jobId: cancelJobId, state: cancelState,
+        stateRevision: cancelRevision, resultProposalId: null, usage: null },
+      ...payload.jobs.filter(item => item.jobId !== cancelJobId)];
+      await route.fulfill({ response, json: payload });
+    });
+    await page.route('**/v1/ai/jobs/' + cancelJobId + '/cancel', async route => {
+      cancelRequests += 1;
+      await cancelGate;
+      cancelState = 'cancelled'; cancelRevision += 1;
+      await route.fulfill({ status: 409, contentType: 'application/json',
+        body: JSON.stringify({ error: { code: 'state_conflict', message: '任务已是终态: cancelled' } }) });
+    });
+    const cancelRow = page.locator('.ws-ai-job').filter({ hasText: cancelJobId.slice(0, 8) });
+    const cancelOps = cancelRow.locator('xpath=following-sibling::div[contains(@class,"ws-ai-ops")]').first();
+    const cancelButton = cancelOps.getByRole('button', { name: '取消', exact: true });
+    await page.getByRole('button', { name: '刷新任务与费用', exact: true }).click();
+    await cancelRow.waitFor();
+    await cancelButton.click();
+    const cancellingButton = cancelOps.getByRole('button', { name: '正在取消…', exact: true });
+    await cancellingButton.waitFor();
+    await cancellingButton.evaluate(button => button.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    assert.equal(cancelRequests, 1, '重复点击期间每个任务只发送一次取消请求');
+    releaseCancel();
+    await page.waitForFunction(id => {
+      const row = Array.from(document.querySelectorAll('.ws-ai-job')).find(item => item.textContent.includes(id));
+      return row && row.textContent.includes('已取消');
+    }, cancelJobId.slice(0, 8));
+    assert.doesNotMatch(await page.locator('#ws-toast').innerText(), /取消失败/,
+      'a terminal state conflict is reconciled from the refreshed task snapshot');
+    pass('取消请求去重，状态冲突后按终态刷新且不误报失败');
+    await page.unroute('**/v1/ai/jobs/' + cancelJobId + '/cancel');
+    await page.unroute('**/v1/ai/jobs?limit=20');
+
     await page.locator('.ws-ai-budget').waitFor();
     assert.match(await page.locator('.ws-ai-budget').innerText(), /UTC 自然月/);
     assert.match(await page.locator('.ws-ai-usage').first().innerText(), /已报告费用 \$0\.000000 USD/);
@@ -119,16 +165,46 @@ async function main() {
     assert.deepEqual(await page.evaluate(() => CreativeStage.preset()), before);
     pass('应用可整体撤销');
 
+    await page.locator('.ws-ai-proposal').getByRole('button', { name: '预览候选舞台' }).click();
+    await page.locator('.ws-ai-proposal').getByRole('button', { name: '应用到当前舞台' }).waitFor();
+    await page.locator('.ws-ai-proposal').getByRole('button', { name: '应用到当前舞台' }).click();
+    await page.waitForFunction(() => !CreativeStage.preview());
+    await page.evaluate(() => CreativeStage.setParam('cam.yaw', CreativeStage.preset().cam.yaw + 5));
+    assert.equal(await page.locator('#ws-draft-undo').isHidden(), true,
+      'a manual edit invalidates the AI proposal undo snapshot');
+    pass('手动修改舞台后 AI 提案撤销失效');
+
     // 拒绝另一单：提交第二个任务，拒绝其提案，行内状态转为已拒绝。
     await page.evaluate(() => Workshop.setTab('ai'));
     await page.locator('#ws-ai-brief').fill('第二单，随后拒绝');
     await page.getByRole('button', { name: '提交生成任务', exact: true }).click();
     await page.locator('.ws-ai-job').nth(1).waitFor({ timeout: 15000 });
     await page.getByRole('button', { name: '查看提案', exact: true }).first().click();
+    let rejectRequests = 0, releaseReject, rejectStarted;
+    const rejectGate = new Promise(resolve => { releaseReject = resolve; });
+    const rejectIntercepted = new Promise(resolve => { rejectStarted = resolve; });
+    await page.route('**/v1/ai/proposals/*/reject', async route => {
+      rejectRequests += 1;
+      rejectStarted();
+      await rejectGate;
+      await route.continue();
+    });
+    const rejectButton = page.locator('.ws-ai-proposal')
+      .getByRole('button', { name: '拒绝', exact: true }).last();
+    await rejectButton.click();
+    await rejectIntercepted;
+    await page.waitForFunction(() => {
+      const button = Array.from(document.querySelectorAll('.ws-ai-proposal button'))
+        .find(item => item.textContent.trim() === '拒绝');
+      return button && button.disabled;
+    });
     await page.locator('.ws-ai-proposal').getByRole('button', { name: '拒绝', exact: true })
-      .last().click();
+      .last().evaluate(button => button.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    assert.equal(rejectRequests, 1, 'a proposal only sends one rejection while the request is pending');
+    releaseReject();
     await page.waitForFunction(() => document.body.innerText.includes('提案状态：rejected'),
       null, { timeout: 5000 });
+    await page.unroute('**/v1/ai/proposals/*/reject');
     pass('提案拒绝后状态转为 rejected');
 
     assert.equal(await page.locator('.ws-ai-proposal').getByRole('button', { name: '应用到当前舞台' }).count(), 0);
@@ -240,12 +316,16 @@ async function main() {
 
     const pageOne = Array.from({ length: 20 }, (_, index) => ({
       ...job,
-      jobId: 'newer-' + String(index).padStart(2, '0') + '-fixture',
+      jobId: index === 19 ? 'offpage-running-fixture' : 'newer-' + String(index).padStart(2, '0') + '-fixture',
       createdAt: job.createdAt + 100000 + (20 - index) * 1000,
-      state: 'failed',
+      state: index === 19 ? 'running' : 'failed',
+      stateRevision: index === 19 ? 1 : job.stateRevision,
+      failureCode: index === 19 ? null : 'provider_error',
+      providerFailureText: index === 19 ? null : 'fixture secret response body',
       resultProposalId: null,
       usage: null,
     }));
+    let offPageJob = pageOne[19];
     let latestPage = pageOne;
     const olderJob = {
       ...job,
@@ -272,6 +352,8 @@ async function main() {
         await route.fulfill({ json: { jobs: [olderJob] } });
       } else await route.fulfill({ json: { jobs: latestPage } });
     });
+    await historyPage.route('**/v1/ai/jobs/offpage-running-fixture', route =>
+      route.fulfill({ json: offPageJob }));
     await historyPage.goto(uiUrl(fixture.base), { waitUntil: 'domcontentloaded' });
     // app.js finishes several asynchronous startup steps before Workshop.init().
     // DOMContentLoaded only guarantees that the scripts were loaded, not that the
@@ -287,6 +369,9 @@ async function main() {
       console.error('AI history text: ' + (await historyPage.locator('body').innerText()).slice(0, 1200));
       throw error;
     }
+    assert.match(await historyPage.locator('.ws-ai-failure').first().innerText(), /检查密钥、网络与服务状态后重试/);
+    assert.doesNotMatch(await historyPage.locator('.ws-ai-failure').first().innerText(), /fixture secret response body/);
+    pass('失败任务显示受限类别提示且不暴露 provider 响应');
     await historyPage.getByRole('button', { name: '加载更早任务', exact: true }).click();
     await historyPage.waitForFunction(() => document.querySelectorAll('.ws-ai-job').length === 21);
     const olderRow = historyPage.locator('.ws-ai-job').filter({ hasText: olderJob.jobId.slice(0, 8) });
@@ -297,6 +382,12 @@ async function main() {
     pass('AI 任务历史使用稳定游标翻页并能读取较早提案');
     await olderOps.getByRole('button', { name: '收起提案', exact: true }).click();
 
+    offPageJob = {
+      ...offPageJob,
+      state: 'succeeded',
+      stateRevision: 2,
+      resultProposalId: job.resultProposalId,
+    };
     latestPage = [
       { ...pageOne[0], jobId: 'recent-00-fixture', createdAt: pageOne[0].createdAt + 2000 },
       { ...pageOne[0], jobId: 'recent-01-fixture', createdAt: pageOne[0].createdAt + 1000 },
@@ -304,6 +395,14 @@ async function main() {
     ];
     await historyPage.getByRole('button', { name: '刷新任务与费用', exact: true }).click();
     await historyPage.waitForFunction(() => document.querySelectorAll('.ws-ai-job').length === 23);
+    const shiftedActiveRow = historyPage.locator('.ws-ai-job').filter({ hasText: offPageJob.jobId.slice(0, 8) });
+    await historyPage.waitForFunction(id => {
+      const row = Array.from(document.querySelectorAll('.ws-ai-job')).find(item => item.textContent.includes(id));
+      return row && row.textContent.includes('已完成');
+    }, offPageJob.jobId.slice(0, 8));
+    await shiftedActiveRow.locator('xpath=following-sibling::div[contains(@class,"ws-ai-ops")]').first()
+      .getByRole('button', { name: '查看提案', exact: true }).waitFor();
+    pass('活跃任务被挤出最近页后按 ID 刷新终态与提案');
     for (const shiftedJob of pageOne.slice(18)) {
       assert.equal(await historyPage.locator('.ws-ai-job').filter({ hasText: shiftedJob.jobId.slice(0, 8) }).count(), 1,
         'refresh must retain tasks shifted out of the latest page: ' + shiftedJob.jobId);

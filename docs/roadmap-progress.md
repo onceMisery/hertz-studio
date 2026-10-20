@@ -1,23 +1,32 @@
 # 路线图实施状态
 
-核对日期：2026-10-20。对应 [产品路线图](./product-roadmap.md) 和 [技术实施方案](./technical-roadmap.md)。本文件记录当前源码与实际验证，不改写原路线范围；**路线图尚未全部完成**。
+核对日期：2026-10-21。对应 [产品路线图](./product-roadmap.md) 和 [技术实施方案](./technical-roadmap.md)。本文件记录当前源码与实际验证，不改写原路线范围；**路线图尚未全部完成**。
 
 | 阶段 | 已有实现与证据 | 仍需完成或验证 |
 | --- | --- | --- |
 | R0 | 已有自动化检查、发行版裁剪与既有发布资料；格式边界与错误提示；能力/发行版/形态/OS/验收类型矩阵；当前 Standard tag 与发布文档对齐；五万曲真实本地 HTTP 与受控 Chrome 首结果基线 | 矩阵中真实声卡/账号、原生宿主、弱机、跨平台与候选发布证据仍未齐备 |
-| R1-S | 服务端共享 admission 与含排队的六秒总期限；四个 UI 入口共用有界协调器；来源分组、渐进结果、局部重试、分页与失效隔离；修复 FTS 宽泛候选预筛，五万曲本地与受控来源首结果达到本机目标；Rust、DBX 可控调用与 Chrome 旅程；两版六十秒及三轮各两分钟的受控 HTTP/RPC/旧聚合压力、期限和回收检查通过，后者含测试进程内存；两版独立五万曲/五分钟本地查询及实际服务进程内存已记录；分页匹配与总数合并后，两版顺序查询/受控首结果复测均通过；两版各两轮 60 秒交替顺序均衡 source-op 负载；12 份 v9 报告的基础指标、sidecar hash、计数和内存样本均已复核，全部恢复 gate `[4,16]`；新增实际派发顺序检查后 11 份通过，早期 Standard R1 因 6 组实际顺序反转被拒，未影响最终八份 current/final 报告；入口/轮次波动较大，证据不足以证明公平 SLO，候选 gate 保持 4 执行/16 等待/2 秒入场/6 秒总期限 | 真实账号/弱网与原生 DBX 完整旅程；独立生产服务的混合负载 RSS、四入口有效吞吐/公平性与弱机固定候选额度；真实负载下的重复稳定性、长期内存、小时级负载/空闲、其它 OS 与发布矩阵验收 |
+| R1-S | 服务端共享 admission 与含排队的六秒总期限；四个 UI 入口共用有界协调器；来源分组、渐进结果、局部重试、分页与失效隔离；修复 FTS 宽泛候选预筛，五万曲本地与受控来源首结果达到本机目标；Rust、DBX 可控调用与 Chrome 旅程；两版六十秒及三轮各两分钟的受控 HTTP/RPC/旧聚合压力、期限和回收检查通过，后者含测试进程内存；两版独立五万曲/五分钟本地查询及实际服务进程内存已记录；分页匹配与总数合并后，两版顺序查询/受控首结果复测均通过；两版各两轮 60 秒交替顺序均衡 source-op 负载；12 份 v9 报告的基础指标、sidecar hash、计数和内存样本均已复核，全部恢复 gate `[4,16]`；新增实际派发顺序检查后 11 份通过，早期 Standard R1 因 6 组实际顺序反转被拒，未影响最终八份 current/final 报告；修复空间首页空查询覆盖搜索历史与顶栏键盘切档丢焦点，浏览器 fixture 已补回归但本机缺 Playwright 未运行；入口/轮次波动较大，证据不足以证明公平 SLO，候选 gate 保持 4 执行/16 等待/2 秒入场/6 秒总期限 | 真实账号/弱网与原生 DBX 完整旅程；独立生产服务的混合负载 RSS、四入口有效吞吐/公平性与弱机固定候选额度；真实负载下的重复稳定性、长期内存、小时级负载/空闲、其它 OS 与发布矩阵验收 |
 | R1-L 候选导入 | LRC/受控 TTML 检查、短预览、显式确认；Full 既有音源的手动检索/元数据证据/选择后取词；默认关闭的严格自动应用；持久歌词修订/删除墓碑；HTTP/RPC 同源、并发与手工修改保护；Chrome 实际本地导入及受控在线 UI 旅程通过；LRC fixture 歌词已验证绘入视频导出录制画布 | 在线真实来源/账号与歌词许可、真实歌曲和完整视觉/原生宿主验收；窄 TTML 子集不能代表全部格式兼容 |
-| R2-C/G/M/P | 受限 registry、共享播控、grant/发现/锁、Rust stdio adapter、短写去重；实际 JSON-RPC 与官方 Rust SDK 的 stdio 子进程检查；幂等 schema/类型与协议支持列表修正；输入/输出帧和写入期限、直到回复 flush 的八请求上限、取消回收与重复 ID 关闭；Windows Rust 1.88.0 两版工作区全 target 编译与三 OS/两版 MSRV CI | 目标应用中的正式客户端、远端 OS/MSRV 结果、长时间压力/进程内存与完整取消/超时、逐发行形态运行矩阵，以及全部发布门槛的逐项验收 |
+| R2-C/G/M/P | 受限 registry、共享播控、grant/发现/锁、Rust stdio adapter、短写去重；实际 JSON-RPC 与官方 Rust SDK 的 stdio 子进程检查；幂等 schema/类型与协议支持列表修正；输入/输出帧和写入期限、直到回复 flush 的八请求上限、取消回收与重复 ID 关闭；写请求取消/断线/无效回复保守返回 `unknown` 并保留可重查操作键；握手严格核对能力版本、grant 主体与发现实例身份，定向 adapter 测试 11/11 通过；Windows Rust 1.88.0 两版工作区全 target 编译与三 OS/两版 MSRV CI | 目标应用中的正式客户端、远端 OS/MSRV 结果、长时间压力/进程内存与完整取消/超时、逐发行形态运行矩阵，以及全部发布门槛的逐项验收 |
 | R3-K/U | 全部十个场景契约、通用参数、纯 create 物化、版本/hash 信封、本地导入、原 owner 临时预览与确认、候选分享；人工与模型提案复用同一路径；十场景20组历史行为/固定旧分享码回溯检查 | 原生 DBX 的完整导入旅程、真实 GPU/弱机与视觉模板人工验收；全部历史用户预置与发布清单仍需继续核对 |
 | R3 外部工具 | 分页 `stage_capabilities_get` 和 `stage_intent_validate`，各自 scope，独立默认关闭开关；真实 stdio 与官方 Rust SDK 调用、会话开关边界通过 | 目标应用中的正式 MCP 客户端可用性与发布说明 |
 | R4-J/E | 持久任务、取消、恢复、输入交接、事务性终态/提案/费用、WS/RPC 与官方任务 UI；fake 完整浏览器旅程通过；Standard 隔离 Chrome 在断线期间由另一入口创建并完成的任务，可在 WebSocket 重连后被打开的 AI 面板找回；DBX 受控订阅失败/重试路径调用生产连接回调并刷新 AI 任务；状态快照错误后按 2.5 秒起步、最高 15 秒退避重试；Windows Standard / Full 两个真实服务进程共享 DataDir 时，第二进程任务提交被 runner 锁拒绝且持锁进程的任务/预算不变；两个真实 Windows DBX sidecar 进程强退重启后分别恢复 running/accepted 任务且不重发请求；worker unwind panic、状态推进存储错误及终态事务错误按持久派发标记尝试保守收敛为 interrupted，终态失败后立即尝试并按 100/250/500ms 再试三次；活动 worker 只按单调 deadline 决定队列超时，墙钟清扫仅处理无内存 owner 的持久孤儿，状态与预留结算原子提交；四次回退尝试耗尽后，存储恢复时由状态查询清扫无内存 owner 的孤儿任务，回归覆盖保守 usage 结算；启动恢复按 job 隔离事务，单项失败不回滚其它任务并保留重试 | 其它运行时异常继续审计、桌面 DBX 宿主与 sidecar 的实际启动/关闭/恢复集成、其它 OS 双进程与其它发布边界 |
-| R4-B | 保留/容量控制；受理时冻结价格与预留；可信计数按快照结算（缓存计量维度未定价时不伪报精确账单）；token-only 跳过金额门槛并记录可信 token；provider 返回后先独立持久化到 `ai_pending_usage`，账务失败由恢复/清扫重试且保留期保护；pending usage 恢复按行事务隔离，单条账务失败仍继续处理其他记录且保留原条目供重试；取消后迟到 usage 的原月差额 CAS；重复/并发去重；超预留或月总额熔断；任务费用、UTC 预算及独立十三个月账本浏览/诊断入口；熔断复位要求当前 provider/有效 quote 指纹并与脱敏审计原子提交 | StepFun 真实应用内 token 用量语义；完整异常矩阵、真实宿主与发布验收 |
-| R5-P | 默认 FakeProvider；可配置实验性本地 Ollama，专用回环 HTTP、单次 POST、任务协作取消与执行槽回收、严格 JSON/流量边界、静态 create 提示与结构化输出、零价本地计量；歌词情绪 completion 与持久任务共用每 DataDir 单执行槽，忙时 429 拒绝，不排队；OpenAI Responses 固定端点、单次请求、严格解析、取消与边界已由回环 fixture 验证（缺少 `cache_write_tokens` 时仍接受可计费用量）；StepFun `step-5-preview` 支持未知价格下的 token-only 派发，可信输入/输出 token 写入逐次账本，金额不伪装为零、不进入费用总额；舞台与歌词 completion 共用持久派发标记和账本；报价与派发阶段按完整序列化请求字节数执行输入 token 上界检查；官方 HTTP/RPC 与界面的钥匙串凭据准备、存储代际/任务绑定/派发匹配与管理失效；Windows 两版系统钥匙串合成条目持久/隔离/删除验收 | 真实安装的 Ollama/模型兼容；OpenAI 的具体模型、真实 token 用量语义与预算；StepFun 真实应用内调用、响应计量字段和模型质量；其它 OS/锁定与拒绝访问/跨登录会话的钥匙串验收、云端 DNS/origin 与真实 endpoint 取消验收、真实账单计量、隐私/条款 |
-| R5-E | 160 条冻结合成样本的 v2 契约指纹（120 开发/40 预留，样本与 v1 字节一致）、复用真实 adapter 的独立评测 CLI、自动与人工评分分离、模型/请求/二进制/驱动/物化指纹、完整性检查、成对比较与 v2 离线基线；新增盲化标签审阅包导出与答案核验 | v2 机械核对：89/89 个 candidate 通过当前校验和物化，71 个 refusal 无结构冲突；离线基线 32/120 自动匹配，人工语义仍为 null、releaseEligible=false。盲审流程尚未由人执行；仍需独立采集保留样本、实际模型 digest/runtime/硬件确认、正式阈值冻结、真实模型两轮运行与人工评分；现有预留集不能冒充已独立验收 |
+| R4-B | 保留/容量控制；受理时冻结价格与预留；可信计数按快照结算；token-only 派发；pending usage 独立持久化、逐行恢复、迟到 usage 与重复/并发处理；超预留或月总额熔断；任务费用、UTC 预算及账本浏览/诊断入口 | 账本与费用统计已作为可选能力实现；异常矩阵、真实宿主与发布验收仍待继续，均不阻挡任务功能 |
+| R5-P | 默认 FakeProvider；可配置实验性本地 Ollama，专用回环 HTTP、单次 POST、任务协作取消与执行槽回收、严格 JSON/流量边界、静态 create 提示与结构化输出；歌词情绪 completion 与持久任务共用每 DataDir 单执行槽；OpenAI 与 StepFun 固定 origin、有限单次请求、严格解析、取消与请求边界由本地 fixture 验证；provider/model 由启动配置显式选择；凭据准备、代际/任务绑定与管理失效已接入 | StepFun 真实应用内调用、具体型号可用性与模型质量；真实安装的 Ollama/模型兼容；其它 OS/锁定与拒绝访问/跨登录会话的钥匙串验收、云端 DNS/origin 与真实 endpoint 取消验收、隐私/条款。用量统计与计费字段语义不作为功能门槛 |
+| R5-E | 160 条冻结合成样本的 v3 当前契约指纹（120 开发/40 预留，样本行与 v2 字节一致）、复用真实 adapter 的独立评测 CLI、自动与人工评分分离、模型/请求/二进制/驱动/物化指纹、完整性检查、成对比较与 v3 离线规则基线；盲化标签审阅包导出与答案核验 | v3 标签机械核对：89/89 个 candidate 校验并物化，71 个 refusal 无结构冲突；当前工作树源码的一次纯内存开发集核对为 109/120 自动匹配、支持意图 60/70、误接受 0、误拒绝 10、关键失败 0，人工语义仍为 null、`releaseEligible=false`。已提交 `baseline-20261020.json` 是此前 101/120、52/70 的旧快照，不代表当前源码。修复 `hold-time-01` 将完整时间轴请求误作静态场景。盲审仍未由人执行；仍需独立收集保留样本、实际模型 digest/runtime/硬件确认、正式阈值冻结、真实模型两轮运行与人工评分；现有预留集不能冒充已独立验收 |
 | R6-W | 版本化可编辑工程、本地完整文件 SHA-256、在线播放确切完整缓存与显式远程完整响应 SHA-256；导入检查/显式应用/媒体确认、手动分段与同源规则生成 cue、preset/cue 编辑与暂停/seek/换曲语义试点；cue 编辑页实时显示工程轨待确认/已启用状态，切曲后同步失效；三个固定版本的内置模板候选；真实 Chrome 竖屏侧架上移至歌词与播放控件安全区，320/390px 宽、500/760px 高普通及逐字歌词视口的卡片边界/遮挡检查通过；视频导出加固与本机 Chrome 原生编解码；实验性本地基频轨迹的合成/服务/浏览器检查通过 | 经视觉验收的创作模板；真实来源/NAS/账号的媒体身份与内容变更验收、基频真实音乐质量/编码时间对齐与导演模板专项；真实系统音频、其它画幅/浏览器/GPU/DBX、完整工程/时间线异常矩阵与候选发行版验收 |
 | S1 音频重采样 | 固定参数 Rubato sinc 取代解码线程线性插值；流式 consumed/produced、有限 finish、reset 与延迟域；离线质量、实际 PCM EOF/seek 和零分配检查 | 真实声卡/持续听测/切设备、真实歌曲与更多格式、弱机/其它 OS 和发布产物验收；不扩大精确 gapless 条件 |
 
 R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完成；S1 已有重采样实现与离线增量，完整音频质量及其它独立专项仍按原路线安排，不因 AI 主线推进就自动算作完成。
+
+## 播客单集续播增量
+
+- 新迁移 `0025_podcast_episode_progress.sql` 按稳定单集 ID 保存播放位置和已听状态；feed 读取进度，刷新 RSS 不清除旧单集记录，取消订阅也不删除收听记录。
+- HTTP 与 RPC 共用 `POST /v1/podcasts/progress` 契约。位置受单集时长与 SQLite 整数范围约束；自然结束可显式标记完成，达到时长 95% 也会标记完成，重播回到开头会清除旧进度。
+- 播客界面显示“继续收听/已听完”；恢复时等播放器快照切到目标单集再 seek，暂停、切集、每十秒检查点和自然结束保存进度。
+- 修复启动快照把已暂停的 0 位置误写成重置、删除服务器续播点的问题；首次观察以快照位置建立基线。隔离 Chrome 旅程覆盖已有续播记录在初始 paused/0 快照后仍保留，且没有发出进度写入。
+- 局部验证：`scripts/check-podcasts-browser.js`、相关 JavaScript 语法检查与 `git diff --check` 通过；未运行全量测试或真实音源请求。
+- 定向播客进度单测、HTTP/RPC 播客契约测试及 Chrome 播客旅程通过；Chrome 检查覆盖恢复 seek、暂停/切集、检查点与自然结束。费用统计不属于此功能。
 
 ## 长时混合搜索压力与内存观测增量
 
@@ -479,7 +488,7 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 
 ## R2 能力 registry 输出契约与投影（2026-10-20）
 
-- 十个已登记能力现在都在同一 registry 声明成功输出 schema、允许投影字段、`no_provider_call` 预算类别和独立能力版本；HTTP 能力目录与 MCP `tools/list` 从 registry 导出，MCP 公布 `outputSchema` 及对应元数据。
+- 十个已登记能力现在都在同一 registry 声明成功输出 DTO、允许投影字段、`no_provider_call` 预算类别和独立能力版本；JSON Schema 直接从严格输出 DTO 派生，HTTP 能力目录与 MCP `tools/list` 从 registry 导出，MCP 公布派生的 `outputSchema` 及对应元数据。
 - 受限门面执行后先用严格 DTO 校验 registry 成功输出的必填字段、类型和未知字段，再按投影路径检查；缺字段、错类型及额外字段失败关闭，空集合保持有效。曲库搜索仍不含文件路径。动态舞台参数键允许点号，投影通配只匹配单个完整 JSON 对象键，不接受其下的任意嵌套路径。
 - 定向验证：注册表输出 DTO/投影测试 1/1、MCP 十项能力 schema/handler/元数据一致性测试 1/1、StepFun token-only 不受金额 gate 阻挡并记录可信输入/输出 token 测试 1/1 通过；fixture 覆盖带点号参数、缺失/类型错误/未知字段、嵌套动态路径及空集合。未运行全量测试，无云 provider 请求。`cargo fmt --all -- --check` 仍被工作树中既有的其它未格式化改动阻塞。
 - StepFun HTTP 回归使用 `AiRuntime::from_config` 生产工厂核验 provider 配置与 token-only 报价，再由仅测试可用的数值 loopback fixture 走官方 `POST /v1/ai/jobs`、任务查询和 `GET /v1/ai/ledger`；验证幂等只派发一次、可信 input/output token 入账、费用保持 `unpriced`/金额未知且预算不变。fixture 只替换测试请求目的地，没有真实云调用或真实 key。
@@ -495,3 +504,224 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 
 - 新增 SQLite 故障注入回归：两条 token-only pending usage 中首条账本 CAS 更新失败时，恢复仍提交第二条并保留首条 pending；移除故障后首条成功对账并删除 pending，重复恢复保持账目 revision 不变。
 - `cargo test --locked --target-dir D:\hertz-target\pending-usage-drain -p hertz-studio --lib ai::jobs::tests::pending_usage_drain_continues_after_one_settlement_failure -- --exact --test-threads=1` 通过（1/1）。只运行该定向测试；没有 provider 或云请求。隔离测试 target 后续已清理。
+
+## R4-J 目标取消隔离与 R4-E 首次订阅补查（2026-10-20）
+
+- `cancel()` 遇到无关孤儿任务的 `sweep()` 结算错误时会记录诊断并继续执行目标任务自己的 CAS 与结算；目标任务自身事务错误仍按原语义失败。回归确认活任务成功取消、账本故障孤儿保持可恢复，移除故障后下一次 sweep 能将其收敛为 `expired`。
+- 首次 WebSocket/DBX 事件连接成功后补查曲库、歌单与已打开的 AI 任务面板；初始曲库请求若仍在途，则在它结束后再发起一轮补查，避免错过 `library_changed`。重连的全量刷新行为保持不变。
+- 局部验证：`ai::jobs::tests` 的 `orphan_sweep` 过滤用例 3/3、`node scripts/check-online-transport.js`、`node --check plugin/ui/app.js` 与 `git diff --check` 通过。未运行全量测试、完整浏览器旅程或真实 provider；R5-E 人工盲审、真实宿主及硬件验收仍未完成。
+
+## R4-J/R4-E 查询故障隔离与 AI 状态文案（2026-10-20）
+
+- `get_job`、`list_jobs` 与 `status` 在读取前遇到后台 sweep 错误时，现在保留告警并继续查询持久事实。任务受理仍要求 sweep 成功，避免用未回收的容量或预算受理新任务。
+- 新增 SQLite trigger 回归：过期孤儿账本结算失败期间，任务详情、历史列表与状态摘要仍可读取；移除故障后下一次 sweep 将任务收敛为 `expired`。`cargo test -p hertz-studio --lib job_queries_proceed_when_orphan_sweep_fails -- --nocapture` 通过（1/1）。
+- token-only 账本不再把无可信用量的记录标成“已记录 token”；仅在 `reportedUsage` 存在时展示 token 数。凭据页的状态只陈述密钥配置，不再错误断言云端生成关闭。四个相关 JS 文件 `node --check` 与 `git diff --check` 通过。
+- 未运行浏览器旅程：当前 `target/debug/hertz-studio.exe --open` 正在运行并锁定该二进制，重建/替换会影响正在使用的进程。未停止该进程，也未发起真实 provider 请求；需在服务可重启后补做账本和凭据浏览器检查。
+
+## R4-J 撤销同意时的 worker 收敛（2026-10-20）
+
+- 排队 worker 收到撤权信号时不再直接退出；派发前观察到撤权、或本地派发门禁判定取消时，也执行 `accepted/running -> cancelled` CAS 与账本结算。短暂 SQLite 结算失败按现有退避节奏重试，避免任务在 worker 退出后长期残留为非终态。
+- 新增账本写入故障回归：撤权事务失败时，排队 worker 在移除故障后将任务结为 `cancelled`，释放未派发预留且不产生提案。撤权下 provider 在途取消回归一并复跑。
+- 局部验证：`cargo test --locked -p hertz-studio --lib consent_revocation_ -- --nocapture --test-threads=1` 通过（2/2），`git diff --check` 通过。`rustfmt --check` 仍会报告此文件中已有的其它格式差异；未运行全量测试、云 provider 或浏览器旅程。
+
+## R4-E 扫描状态掉队恢复（2026-10-20）
+
+- WebSocket 广播掉队后的真值重同步批次现在包含当前扫描阶段、进度与总量；DBX 事件泵复用同一批次。前端状态 GET 暂时失败时按 1 至 15 秒退避重试，且仅在扫描面板打开期间保持重试。
+- 定向验证通过：扫描状态恢复 Rust 测试 2/2、`node scripts/check-scan-ui.js`、`node --check plugin/ui/app.js`、`node --check scripts/check-scan-ui.js`、`rustfmt --edition 2021 --check crates/hertz-studio/src/state.rs` 与 `git diff --check`。未运行全量测试、真实 DBX 宿主或 provider 调用。
+
+## R4-J 无 owner 任务的惰性恢复（2026-10-20）
+
+- worker 结算在有限重试后失败时，后续受理、取消或查询触发的惰性清扫现在会扫描非终态任务并核对进程内 owner：仍活跃任务保持原样，近期无 owner 任务转 `interrupted`，超期无 owner 任务转 `expired`。状态 CAS 与派发态费用结算在同一逐任务事务内完成，不引入后台定时器。
+- 撤销生成同意时先发取消信号，但保留 worker owner 标记直到事务结算或 worker 自行收敛，防止 provider 做取消清理期间并发 sweep 抢先提交 `interrupted`。持有 provider 清理的回归会在清理窗口内触发 sweep 并确认终态仍由取消路径收敛。
+- SQLite trigger 回归验证结算首次失败后查询不丢失事实；移除故障后下一次惰性清扫将近期孤儿转为 `interrupted` 并释放未派发预留。`recent_ownerless_task_recovers_after_lazy_sweep_failure` 1/1、`orphan_sweep` 3/3、`consent_revocation_` 2/2 通过。
+
+## R1-S 搜索压力证据工具 fail-closed 修正（2026-10-20）
+
+- `--current` 现在必须提供库测试可执行文件，以实际核对二进制哈希；压力运行器若创建报告/日志/内存文件中途失败，只删除本次已成功创建的文件。
+- `node --check` 两个工具通过；缺二进制的 `--current` 调用按预期拒绝，历史报告的非 current 证据校验通过。未重新运行压力负载或改动未确定 SLO 的启动延迟门槛。
+
+## R4-E 队列跨 surface 同步（2026-10-20）
+
+- 新增不携带队列数据的 `queue_changed` 失效事件。整盘换队、在线歌单点播、FM 补队和接力换源在提交后通知所有已连接界面；歌单分页继续由现有 `collection_load` 事件触发刷新。广播掉队重同步批次也包含队列失效提示，因此 WS 与 DBX sidecar 都能通过队列查询端点恢复权威快照。
+- 前端收到事件后复用 `restoreQueue()`，沿用已有读取 epoch 与本地队列 revision 保护，忽略过期查询结果。队列内容不经事件复制，事件只承担失效通知。
+- 定向验证：换队通知、FM 替换/追加、接力更新、掉队重同步及事件序列化六个 Rust 测试通过；在线点播准备测试 7/7 通过，其中首次队列提交断言检查通知。`cargo check --locked -p dbx-plugin-hertz`、`node scripts/check-online-transport.js`（含 DBX 透传和真实 UI handler 路由）、相关 Rust/JS 语法、格式与 `git diff --check` 通过。未运行完整浏览器旅程或原生 DBX 宿主验收；路线图仍未完成。
+
+## R4-B/R5-P 用量边界核对（2026-10-20）
+
+- 定价算术溢出时仍按冻结 token 上界独立触发 token 熔断；即时结算与迟到 usage CAS 均覆盖，保留已知估算金额和可信 token 记录。token-only 仍只受 token 熔断控制。
+- Ollama 的输入 token 上界绑定完整序列化请求字节上限；HTTP 失败响应仅在返回模型匹配、已完成且无错误的可信计数时保留 usage，任务结果仍按 HTTP 失败处理。
+- 局部验证：`unrepresentable_usage` 2/2、`ollama_` 2/2 通过；搜索证据工具缺少 binary 的 `--current` 拒绝检查、JS 语法与 `git diff --check` 通过。未运行全量测试、真实模型或云调用；全工作区 rustfmt 检查仍报告已有未格式化改动，本轮未批量重排文件。整体路线图仍未完成。
+
+## R5-P OpenAI token-only 派发准备（2026-10-20）
+
+- OpenAI Responses provider 现在按现有 `ai.model` 配置启用 token-only 任务与歌词 completion，不要求核实报价或设置金额上限；不预留或统计金额，费用保持未知，不代表免费。仍限制完整序列化请求 128 KiB、输出 512 tokens、响应 256 KiB、单次请求与既有期限/取消规则。
+- 对同模型且响应状态可信的 Responses 回包，按一致的 `input_tokens + output_tokens == total_tokens` 记录 token；真实模型及 key 尚不可用，本地 loopback fixture 仅验证请求和任务适配器，不宣称云端验收。
+- 用户需显式在 `ai.model` 配置 OpenAI 接受的型号；未写入未经确认的默认型号。
+
+## R6-W 页面离开时刷新待保存工程（2026-10-20）
+
+- 舞台预置的本地自动保存仍做 400ms 合并；页面进入后台或触发 `pagehide` 时会立即写入待保存快照，再清理未确认预览，避免快速刷新/关闭丢掉最后一次参数编辑。
+- 使用隔离 Standard 服务和 Chrome 运行 `scripts/check-stage-project-browser.js`：在自动保存窗口内修改 `look.grain` 后立即刷新，重载值保持为新参数；工程检查、导入、媒体绑定、cue 编辑/重开与现有视频导出旅程一并通过。`creative-stage.js` 与检查脚本语法、`git diff --check` 通过；没有模型调用。
+- 常规 `target/debug/hertz-studio.exe` 正由运行中的 Hertz 进程使用，因此在可复用的 `target/stage-pagehide-check` 构建并运行隔离服务，没有停止现有进程或清理 target。该本地浏览器验收不覆盖浏览器进程强杀、断电、真实 DBX 宿主或发布矩阵；R6 与整条路线仍未完成。
+
+## R5-P 无凭据时阻止提交空任务（2026-10-20）
+
+- AI 工坊打开时对就绪的 OpenAI/StepFun provider 查询一次非秘密凭据状态；缺少密钥、状态读取失败或目标不匹配时禁用生成提交并提示用户处理。密钥保存/删除立即同步可提交状态；钥匙串结果不确定时需主动重新查询，状态轮询不会重复访问钥匙串。
+- `scripts/check-ai-credential-browser.js --stepfun` 使用隔离 Standard 服务、内存凭据和 Chrome 验证未配置时禁用、保存合成 key 后恢复、读取状态报错时禁用、手动查询恢复、删除后再次禁用、密钥清除/窄屏与错误不回显；没有创建 AI 任务或调用 StepFun。JS 语法和 `git diff --check` 通过。
+- provider/model 目前仍由启动配置确定，实际系统钥匙串、真实 key、云端请求和模型质量尚未验收；不统计费用不阻挡功能，但 R5 与整体路线仍未完成。
+
+## R1-S 搜索焦点与七皮肤弹层验收（2026-10-20）
+
+- 空间搜索的来源重试在加载过渡渲染中保留来源焦点键，完成后聚焦同源状态或下一步操作。流年面板的本地/在线重试成功后，重新聚焦恢复可用的“查看全部”按钮。
+- 顶栏搜索 Escape 由窗口捕获阶段优先关闭当前搜索弹层；从搜索范围按钮退出时恢复输入框焦点，且不会因输入框 focus 自动重开。弹层最大高度受剩余视口约束，结果区可滚动。
+- Chrome 隔离旅程覆盖七套公开皮肤（含动态注册的 orbit）、390×420 窄屏弹层边界与 Escape 焦点；清风在 900px 以下隐藏顶栏搜索按现有响应式约定单独断言，并在窄高桌面视口验证弹层。在线、空间、流年搜索旅程通过；fixture 不访问真实音源或云服务。
+- 局部验证：复用 `target/stage-pagehide-check` 完成 `cargo build --locked -p hertz-studio`，`node scripts/check-search-journey-browser.js`、相关 JS `node --check` 与 `git diff --check` 通过。未运行全量测试；R1-S 真实 DBX/弱网、公平性与长期负载验收仍未完成，路线图整体未完成。
+
+## R6-W 窄屏侧架逐字歌词边界（2026-10-20）
+
+- 经典逐词歌词在窄屏下不再强制至少 36px 字号；侧架模式的歌词行改用明确的左右安全边距，避免逐词缩放和位移把字形推到视口外。
+- 模板 Chrome 检查现在保留所有实际可见的歌词词元，包括完全落在屏幕外的词元，并逐个断言其边界位于视口内，同时继续检查侧架卡片与播放控件遮挡。
+- 复用 `target/stage-pagehide-check` 隔离构建后，`scripts/check-stage-templates-browser.js` 在 320/390px 宽、500/760px 高视口通过；`node --check` 与 `git diff --check` 通过。未运行全量测试或模型调用；其它浏览器/GPU 和原生 DBX 验收仍待进行，整体路线图未完成。
+
+## R3-D 强制矛盾拒绝与评测归类（2026-10-20）
+
+- 离线提示词编译器识别“必须同时满足/不能二选一”等强制措辞与互斥规则；明确不可满足时返回 `unsatisfiable_constraints`，不产出意图，工坊提示用户明确选择。普通场景修订仍保留最后提及者优先。
+- 离线评测将该显式拒绝记为 `refused`，不再与“未命中支持词”混为一类。开发集前 56 条局部评测把冻结案例 `dev-conflict-06` 计为正确拒绝；存档基线未改。
+- `scripts/check-creative-prompt.js` 93/93 与 `scripts/check-stage-evaluation.js` 通过，相关 JS 语法和 `git diff --check` 通过。局部评测仍显示其它否定/冲突案例未通过；这不构成模型质量或发布验收，R3/R5 和整体路线未完成。
+
+## R1-L 3D 歌词侧架呈现平行文本（2026-10-20）
+
+- `StageLyrics` 逐句显示已导入的翻译和罗马音，并将两者纳入歌词行可访问名称；新增只读 `Stage.lyricRomanization` 接口。
+- 扩展现有歌词导入浏览器旅程，使用真实 LRC/TTML 导入流程断言 3D 歌词侧架同时呈现原文、翻译和罗马音。隔离构建 `target/stage-pagehide-check` 后浏览器旅程通过，当前运行中的 Hertz 实例未停止。
+- 未运行全量测试或真实模型调用；浏览器/GPU、原生 DBX 与其它本地化歌词宿主仍待验收，路线图整体未完成。
+
+## R4-J AI 任务失败原因展示（2026-10-20）
+
+- AI 任务只持久化 allowlist 类别 `provider_error`、`invalid_output`、`internal_error`，与失败终态、usage 收口放在同一 SQLite 事务中；任务详情与历史列表返回 `failureCode`。provider 原始错误不进入任务记录。
+- 工坊按失败类别提示检查密钥/网络、调整描述或检查服务日志；未知类别使用安全通用文案。
+- 局部 Rust 回归 `trusted_usage_charges_success_invalid_output_and_provider_error` 通过；`cargo build --locked -p hertz-studio`（复用 `target/stage-pagehide-check`）、相关 JS `node --check` 和 `git diff --check` 通过。AI 任务浏览器旅程已通过失败提示及不回显 provider 原文等断言，但在既有延迟刷新尾部检查处未能结束，故不记为完整通过。
+- 未发起真实 provider 调用，也未把费用或用量统计作为功能前置；整体路线图仍未完成。
+
+## R6-W 拒绝被静默改写的工程 cue（2026-10-20）
+
+- 工程导入现在拒绝未知 cue 字段、无效缓动和未知参数路径。修复前，共享预置清洗器会把无效 `ease` 改为 `out`，并静默删除拼错但与有效字段共存的参数，导入检查仍会通过。
+- 仅收紧版本化工程导入，不改变旧分享码的兼容清洗；拒绝不会修改当前预置。
+- 局部验证：`check-stage-project.js`、`check-stage-arrangement.js`、`check-stage-templates.js` 与 `check-creative-share-code.js`（44 项）通过；相关 JS 语法与 `git diff --check` 通过。完整工程/时间线异常矩阵及外部宿主、硬件、发行验收仍未完成。
+
+## R5-P StepFun 实际接入探针（2026-10-20）
+
+- 使用隔离 Standard 服务、临时 DataDir 和内存凭据验证 `stepfun` / `https://api.stepfun.com/step_plan/v1` / `step-5-preview` 配置、凭据写入与生成同意开关；没有重启或修改正在运行的 Hertz 实例。
+- 一次带阶段标记的真实舞台任务终态为 `failed/provider_error`，未生成提案；该探针的 `/models` 响应只列出两个 3.5 型号。另有同日保存的 StepFun `/models` 响应包含 `step-5-preview` 并声明支持 Responses，独立 Responses 文本请求也成功。因此探针上下文的型号目录结果冲突，不能据失败任务或单份目录断言目标型号不可用；StageIntent 的结构化请求仍待在同一配置下定位和验证，不应静默换型号。
+- 临时凭据仅存于内存 backend，成功关闭的夹具清理了 DataDir；没有记录用量或费用。R5 的真实模型请求、型号兼容性和输出质量仍未验收。
+
+## R5-P StepFun 显式型号兼容准备（2026-10-20）
+
+- adapter 不再把 token-only 派发限定在 `step-5-preview`，允许启动配置显式指定格式合法的 StepFun model ID；请求/输出上界和固定官方 origin 保持不变，不会自动替换型号。此举允许配置 `/models` 探针实际返回的型号继续做单独验证。
+- 本地 StepFun provider 测试覆盖 `step-5-preview`、`step-3.5-flash-2603`、`step-3.5-flash` 均可构造有界 token-only 报价；不代表这些型号可用、质量合格或已完成真实请求验收。用量/费用统计不是功能门槛。
+
+## R4-J AI 任务面板浏览器旅程复验（2026-10-20）
+
+- 复用 `target/stage-pagehide-check` 隔离服务二进制执行 `scripts/check-ai-tasks-browser.js`，19 项全部通过。覆盖任务生成/应用/拒绝、幂等重试、快照竞争、状态退避重试、断线重连、历史翻页与错误原因不回显。
+- 先前未结束的尾部检查本次完成；关闭工坊后迟到响应没有重开面板或继续轮询。没有修改代码、运行全量测试或调用真实模型。
+
+## R6-W 工程 cue 导入拒绝语义变化（2026-10-20）
+
+- 版本化工程导入现在拒绝被归一化器丢弃或截断的 preset 参数及 cue 目标值、未知 preset/嵌套字段，并要求节拍间隔 `every` 为整数；外部媒体背景仍按既有规则转为主题背景并提示用户，旧分享码兼容行为保持不变。
+- 定向验证：`node scripts/check-stage-project.js` 覆盖基础参数与 cue 越界、未知嵌套字段、小数节拍和拒绝后当前预置不变；相关 JavaScript 语法与 `git diff --check` 通过。未运行全量测试或真实模型调用；完整时间线异常矩阵、外部宿主、硬件与发行验收仍未完成。
+
+## R3 一句成景约束与相对编辑边界（2026-10-20）
+
+- 离线提示词编译器补齐镜头漂移、低频跟随、色散、暗角等否定效果，并覆盖冻结开发样例中的中英文表述；未识别的禁止/必须条件或新场景要求会拒绝产出意图，避免工坊应用部分结果。越界数据/网络访问、秘密读取及命令执行要求返回独立 `unsafe_instruction`；对当前或已保存预置的相对修改返回 `unsupported_edit`，不把它重解释为新建候选。普通未识别修饰词仍可提示后继续应用已识别效果。
+- 参数路径/数值如果没有被当前意图精确覆盖会拒绝部分应用；与已识别效果相同的单值标注可以保留。导演开关更正和手绘关闭按明确结论处理；歌词/歌曲/文件访问限制等安全范围声明不再误判成视觉硬约束。离线评测将显式的冲突、硬约束、越界指令和相对编辑拒绝归为 `refused`，普通 `no_match` 仍单独记录。
+- `node scripts/check-creative-prompt.js` 140/140；`node scripts/check-stage-evaluation.js`、相关脚本语法检查与 `git diff --check` 通过。当前源码对冻结开发集的纯离线核对为 101/120 自动匹配、拒绝样例误接受 0；否定 20/20、注入 10/10、相对编辑 5/5 命中预期。冲突 7/10，3 个需要理解先前/最终自由数值的候选按规则编译器能力边界拒绝；长描述 3/10，剩余样例含未支持自由数值或超过 120 字规则输入范围。该临时核对不落盘、不改冻结语料；已有 `baseline-20261020.json` 早于本次实现，仍是历史证据，不能代表当前实现或真实模型质量，R5-E 仍需按原门槛做模型两轮和人工验收。
+
+## R4-E 无载荷任务状态提示（2026-10-20）
+
+- 任务状态事务提交后统一广播无载荷 `ai_tasks_resync`；任务 ID、状态和 revision 只通过受授权过滤的任务快照接口读取。独立 WS、DBX 转发器和工坊仍使用现有刷新路径。
+- 定向 Rust 测试 `task_state_changes_are_broadcast_as_small_events`、`recent_ownerless_task_recovers_after_lazy_sweep_failure` 与 `failed_terminal_transactions_publish_no_events_and_orphan_sweep_rolls_back` 通过。更新后的 AI 面板浏览器旅程至少 17 项检查通过，包含无载荷事件触发快照重查；最后的延迟关闭检查未结束，本次不记为完整通过。
+
+## R6 视频导出长歌词换行（2026-10-20）
+
+- 当前行与下一行按画布实测宽度换行，过长无空格文本按 grapheme 边界拆分；不再用 `fillText(maxWidth)` 压缩字形。
+- `scripts/check-video-export-browser.js` 在真实 Chrome 完成横屏 MP4、竖屏 WebM 编码和解码，并验证长中英文当前行/下一行换行且各行宽度在安全范围内。未运行全量测试。
+
+## R1-S/R3 本地功能缺口修复（2026-10-20）
+
+- 顶栏聚合搜索点击某来源的歌曲时，只把该来源的结果交给单来源播放接口，并按该来源列表计算起播索引；不再把多来源混合列表交给会按首曲确定来源的播控链路。
+- CreativeGL 新增的 `lyric scene` 别名已同步导出到 Rust/前端舞台契约，并更新内置模板使用的 schema hash，避免模板被误标为不兼容。
+- 局部验证：复用 `target/stage-pagehide-check` 的增量 `cargo build --locked -p hertz-studio` 通过；契约导出一致性、R3 物化、模板兼容和 10 场景历史 fixture 检查通过；相关 JS 语法与 `git diff --check` 通过。搜索浏览器旅程输出了 PASS，新增断言通过；Playwright 清理阶段挂起并手动中断，因此不记为干净的进程退出。没有运行全量测试或云端模型调用；路线图仍未完成。
+
+## 本地功能缺口修复（2026-10-20）
+
+- 播客已听完单集从工坊重播时，首次 0 秒播放快照现在会清除旧完成状态并同步到服务端；周期进度写入仍只更新目标单集徽标。
+- 离线提示词按 Unicode code point 执行 120 字限制与计数。离线和 AI 提案的撤销快照绑定应用后的舞台 revision，后续参数、场景或预置修改会立即使旧撤销失效，避免覆盖新编辑。
+- AI 幂等提交先查询已存在的 key：共享 DataDir 的非 runner 可回放已受理任务；runner 锁仍拒绝新 key 的任务。
+- 局部验证：Rust `replay_works_without_runner_lock_or_ready_provider` 测试通过；`check-creative-prompt.js` 140/140、工坊提示词 Chrome 旅程、相关 JS 语法与 `git diff --check` 通过。播客 Chrome 旅程输出 PASS，但浏览器关闭阶段挂起并中断；AI 任务旅程通过新增 AI 撤销断言和多项任务断言，尾部出现 504 后未完成延迟刷新检查，均不记为完整浏览器旅程通过。
+- 未跑全量测试、真实模型调用或费用验收；用量/费用统计不作为功能验收门槛，路线图仍未完成。
+
+## R6-W 场景切换后的工程轨道修复（2026-10-20）
+
+- 工坊切换舞台场景时移除新场景不支持的 cue 参数与绑定目标；仍适用的通用参数保留，目标全部失效的 cue 才移除，避免工程无法继续导出或重开。
+- `node scripts/check-stage-project.js`、两个改动文件的 `node --check` 与 `git diff --check` 通过；未运行全量测试或云模型调用。
+- token 用量、费用核算、价格核对、金额预算与账单界面均按用户最新优先级列为可选能力。任务身份/授权、输入输出边界、执行容量、取消恢复与防重复派发仍是功能要求。
+
+## R5/R6 工坊功能边界修复（2026-10-20）
+
+- cue owner 按当前场景参数契约拒绝越界值、无效枚举、未知路径、小数节拍和双触发；新增/更新均复制输入，工程导出保留已接受的原值。工坊范围输入与失败回滚保持一致。
+- AI 任务取消按 job ID 去重并显示禁用中的状态；请求出错后刷新任务事实，已进入终态时不再误报取消失败。AI 任务浏览器 fixture 已加入快速重复点击与终态冲突断言。
+- 定向验证：`node scripts/check-stage-project.js`、相关 JavaScript `node --check` 与 `git diff --check` 通过。浏览器 fixture 未执行：当前环境缺少 Playwright Node 模块。未运行全量测试或真实模型调用；R5 真实模型/质量、外部宿主、硬件及发布矩阵验收仍未完成。用量费用统计不作为功能门槛。
+
+## R3/R5 StageIntent v3 与静态候选边界（2026-10-20）
+
+- 评测入口曾因当前 contract hash 更新而拒绝加载 v2；保留 v2 样本、manifest 与旧基线不变，新增 v3 并以当前契约作为活动版本。v3 复用相同 160 行样本，hash、120/40 分割和标签结构通过核验。
+- 机械复核：89/89 candidate 标签可校验并由真实物化器完整物化；对 71 条 refusal 运行当前离线编译器，找到 `hold-time-01` 会被部分接受为 `anime-coast` 静态候选。编译器现在对明确的延时切换、自动时间轴与多段编排返回 `unsupported_timeline`，不再产出部分意图。
+- 当前开发集规则基线 101/120 自动匹配，70 条候选意图中 52 条匹配；误接受 0、误拒绝 18、关键失败 0，协议结构率 118/120。报告快照见 [StageIntent v3 基线](../evals/stage-intent/v3/baseline-20261020.json)。此前 v2 的 32/120 反映旧拒绝分类与旧源码，不能直接与 v3 的自动匹配率比较。人工语义仍未复核，发布资格为 false。
+- 定向检查：`check-creative-prompt.js` 143/143、`check-stage-evaluation.js`（含全部 160 条标签机械审计）、`check-stage-intent-label-review.js`、v3 corpus validation、相关 JavaScript 语法检查通过。未调用真实模型、未执行全量测试；费用和 token 统计未作为验收条件。
+
+## R3/R6 草稿全量差异与竖屏歌词布局（2026-10-20）
+
+- create 草稿预览递归比较当前预置与完整候选，并在导入、AI 提案和模板确认前说明整份替换及未指定字段按候选默认值写入。静态时间轴拒绝 `unsupported_timeline` 归入受限错误，不再显示普通未命中词表。
+- 视频歌词使用共享纵向区域；当前行最多三行、下一行最多两行，超出时以省略号收束，并按字形实际边界保持两组分离且位于画布内。
+- 定向验证：StageIntent 草稿浏览器 fixture 通过，覆盖重置参数可见、预览不写入、确认后应用完整候选及时间轴拒绝提示；新增 Chromium 布局 fixture 通过 720p 和 1080×1920 的边界、行数、溢出和不重叠检查；离线提示词 143/143，相关 JS 语法与 `git diff --check` 通过。
+- 真实视频导出 fixture 完成横屏 MP4；当前 Chrome 在竖屏 WebM 加合成系统音轨时未发出编码器启动事件，10 秒后超时且无 JS 异常，因此不记为完整编码验收。未运行全量测试、真实模型调用或费用统计；跨 GPU/宿主及路线图整体仍待验收。
+
+## R4-E 首次连接队列补查与 R6 视频署名边界（2026-10-20）
+
+- 首次事件订阅成功后补读队列快照，修复启动时队列 GET 完成、WebSocket/DBX 订阅建立前另一 surface 换队导致永久漏同步的问题；新增隔离服务浏览器 fixture 暂停启动健康检查并精确复现该竞态。
+- 视频导出的曲名/歌手水印按字素截短并显示省略号，文本保持在画布水平安全边距内；Chromium fixture 使用长中文标题与歌手名检查横屏和竖屏边界。
+- 定向验证：`check-queue-cross-surface-browser.js`、`check-video-export-layout-browser.js`、`check-stage-project.js`、`check-creative-share-code.js`（44 项）、相关 JavaScript 语法及 `git diff --check` 通过。浏览器 fixture 复用现有服务二进制并从工作树载入本次前端源码；未重编或清理 `target`。
+- 未运行全量测试、真实模型调用或用量/费用核算；这两项统计不作为功能门槛。真实媒体/GPU、DBX 宿主与发行环境验收仍待完成，路线图整体未完成。
+
+## 工坊候选撤销、场景选择与播客续播（2026-10-20）
+
+- 工坊重复点击当前场景卡片时不再调用会重置场景默认值的 `setScene`，保留用户已调整的机位与参数；真正切换场景的 cue/绑定清理逻辑不变。
+- 导入草稿、创作模板和 AI 提案共用应用撤销快照；保存前校验舞台 revision，后续编辑会使撤销失效。草稿浏览器 fixture 增加完整预置应用后撤销检查。
+- 播客恢复进度等待当前 `H.play` 完成后才 seek；播放完成前的同曲旧快照不会误触发 seek，旧播放请求失败也不会清空后续请求的恢复状态。浏览器 fixture 覆盖同曲快照与延迟播放完成顺序。
+- 局部验证：`check-stage-project.js`、`check-creative-prompt.js`（143/143）、相关 JS 语法及 `git diff --check` 通过。新增/更新的浏览器 fixture 因当前环境缺少 Playwright Node 模块未能运行；未运行全量测试、真实模型调用或用量/费用核算。
+
+## R4-J/R5-P 工坊刷新与 StepFun 输入边界（2026-10-21）
+
+- 工坊刷新现在会按 ID 补查最近 20 条之外已加载的活跃任务，终态和提案不会因新任务挤出首页而长期陈旧；AI 撤销浏览器 fixture 改用实际共享撤销按钮 ID，并新增页外活跃任务完成回归。
+- StepFun 的 20,000 token 上限不再与完整 JSON 请求的 UTF-8 字节数直接比较；输入 token 由 provider 回报时记录，序列化请求继续独立受 64 KiB 限制。2,000 字符英文及中文输入在生产报价下通过局部回归。
+- `cargo test -p hertz-studio --lib ai::stepfun::tests`（11 项）、相关 JavaScript `node --check` 与 `git diff --check` 通过。浏览器 fixture 因环境缺少 Playwright Node 模块未运行；未运行全量测试、真实模型调用或费用核算。用量/费用不是功能门槛；真实模型兼容与质量、R1-S 和硬件/宿主发布验收仍未完成，路线图整体未完成。
+
+## R3 本地媒体预览回滚与 R5 OpenAI DNS 限制（2026-10-21）
+
+- 舞台草稿、模板或 AI 候选预览暂时替换本地媒体背景时，延迟撤销原 ObjectURL；取消/失效预览会恢复原背景，确认应用替代背景后释放旧 URL。选择新本地文件前先取消预览，避免回滚误撤新文件 URL。
+- OpenAI 专用 HTTP client 接入公共 DNS 解析器，拒绝 localhost 等 special-use 解析结果；新增本地拒绝回归。
+- 定向验证：`check-stage-materialize.js`、`check-stage-templates.js`、`check-stage-project.js`、相关 JS 语法和 `git diff --check` 通过；OpenAI DNS resolver 单测 1/1 通过。草稿浏览器夹具新增本地媒体预览/取消/确认场景，但本环境缺少 Playwright Node 模块，尚未运行。
+- 未运行全量测试、真实模型调用或用量费用核算；用量/费用统计不是功能门槛。真实 provider 型号兼容与质量、DBX/其它 OS 宿主及硬件发布验收仍未完成，路线图整体未完成。
+
+## R1/R3/R5 本地交互闭环补缺（2026-10-21）
+
+- 顶栏本地档可重新切回在线搜索；流年音源列表失败提示改为可键盘操作的重试按钮。模板候选预览开始/取消时工坊同步刷新收藏按钮，避免把旧的已提交舞台另存为收藏。
+- 保存或删除模型凭据期间立即将凭据标记为待确认并禁用任务提交；面板因任务刷新重绘时从共享凭据快照恢复状态与展开态，操作锁跨重绘保留。提案拒绝按 proposal ID 去重，响应期间按钮禁用。
+- 定向验证：复用 `target/stage-pagehide-check` 构建服务；模板浏览器旅程、StepFun 凭据浏览器旅程通过。AI 任务浏览器旅程中，任务取消去重、提案物化/应用/撤销/拒绝、幂等重试、快照恢复与历史翻页断言通过；尾部关闭面板后的延迟刷新检查未完成，隔离测试进程未返回退出码后被停止，因此不记为完整旅程通过。JavaScript 语法和 `git diff --check` 通过。
+- 未运行全量测试或真实模型调用；用量与费用统计可跳过，不作为功能验收门槛。真实 StepFun 型号/输出质量、DBX/其它 OS 宿主、硬件和发布矩阵验收仍未完成，路线图整体未完成。
+
+## R3 schema 范围数值参数与长描述（2026-10-21）
+
+- 离线 StageIntent 编译器按目标场景现读 `CreativeStage.spec(sceneId)`，现在接受参数路径或控件名称后的明确数值；范围型参数核对 min/max，离散下拉值只接受其 schema 选项。越界值、未知字段和未识别硬约束仍整条拒绝，不产出部分候选。
+- 同一路径有多次赋值时采用最后一个未否决值，并在解释中列出参数名和值及冲突说明；工坊输入上限从 120 提至 512 个 Unicode code point，解析结果展示具体参数值，应用与撤销仍走原有舞台 owner。
+- 定向验证：`check-creative-prompt.js` 157/157、`check-stage-evaluation.js`（冻结样本和拒绝集机械核对）、相关 JavaScript 语法及 `git diff --check` 通过。当前源码一次不落盘的离线开发集核对为 109/120，支持意图 60/70，误接受 0、误拒绝 10、关键失败 0，协议结构率 119/120；人工语义未评分，正式基线文件未覆盖。扩展后的工坊浏览器检查因环境缺少 Playwright Node 模块未运行。
+- 未运行全量测试或模型调用；用量/费用核算跳过。剩余误拒绝主要是词典外审美与超长自然语言复合约束；真实模型质量、人工盲审、R1-S、DBX/其它 OS 宿主、硬件与发布矩阵仍未验收，路线图整体未完成。

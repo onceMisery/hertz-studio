@@ -12,8 +12,8 @@ const { isIP } = require('node:net');
 
 const ROOT = path.resolve(__dirname, '..');
 const DATA_ROOT = path.join(ROOT, 'evals/stage-intent');
-const DEFAULT_CORPUS_VERSION = 'v2';
-const CORPUS_VERSIONS = Object.freeze({ v2: 'v2' });
+const DEFAULT_CORPUS_VERSION = 'v3';
+const CORPUS_VERSIONS = Object.freeze({ v3: 'v3' });
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const clone = value => JSON.parse(JSON.stringify(value));
 const THRESHOLDS = Object.freeze({ supportedSchemaRate: 0.98, protocolStructureRate: 0.98,
@@ -38,13 +38,11 @@ function loadCorpus(version = DEFAULT_CORPUS_VERSION) {
   const contract = readJson(path.join(ROOT, 'crates/hertz-studio/src/ai/stage-contract/stage-contract.json'));
   ensure(manifest.corpusVersion === 'stage-intent-' + version, 'Manifest corpus version mismatch');
   ensure(contract.schemaHash === manifest.schemaHash, 'Corpus contract version changed: review labels before refreezing');
-  if (version === 'v2') {
-    const audit = manifest.mechanicalAudit;
-    ensure(audit && audit.status === 'passed' && audit.contractHash === manifest.schemaHash
-      && audit.candidateLabelsChecked === 89 && audit.candidateLabelsMaterialized === 89
-      && audit.refusalLabelsStructurallyConflicted === 0 && audit.semanticReviewComplete === false,
-    'Invalid v2 mechanical audit or semantic review status');
-  }
+  const audit = manifest.mechanicalAudit;
+  ensure(audit && audit.status === 'passed' && audit.contractHash === manifest.schemaHash
+    && audit.candidateLabelsChecked === 89 && audit.candidateLabelsMaterialized === 89
+    && audit.refusalLabelsStructurallyConflicted === 0 && audit.semanticReviewComplete === false,
+  'Invalid v3 mechanical audit or semantic review status');
   const ids = new Set();
   const briefs = new Set();
   const counts = { development: 0, holdout: 0 };
@@ -105,6 +103,15 @@ function stageHarness() {
   const stage = sandbox.window.CreativeStage;
   return { stage, prompt: sandbox.window.CreativePrompt, draft: sandbox.window.CreativeDraft,
     fingerprint: sha(sources.join('\0')) };
+}
+
+function offlineOutcome(compiled) {
+  if (compiled.ok) return 'candidate';
+  return compiled.code === 'unsatisfiable_constraints'
+    || compiled.code === 'unrecognized_constraints'
+    || compiled.code === 'unsafe_instruction'
+    || compiled.code === 'unsupported_edit'
+    || compiled.code === 'unsupported_timeline' ? 'refused' : 'baseline_no_match';
 }
 
 function assess(item, result, harness) {
@@ -215,7 +222,7 @@ function validateRow(row, meta, contract) {
   ensure(row.schemaHash === contract.schemaHash && isHash(row.protocolFingerprint) && isHash(row.requestHash),
     'Evaluator contract/fingerprint mismatch');
   ensure(Number.isFinite(row.elapsedMs) && row.elapsedMs >= 0, 'Invalid elapsed time');
-  ensure((meta.provider === 'ollama-local' ? LOCAL_KINDS : ['candidate','baseline_no_match']).includes(row.kind),
+  ensure((meta.provider === 'ollama-local' ? LOCAL_KINDS : ['candidate','refused','baseline_no_match']).includes(row.kind),
     'Unknown evaluation outcome');
   ensure(row.kind === 'candidate' ? row.intent && typeof row.intent === 'object' : row.intent === null,
     'Outcome and intent disagree');
@@ -496,7 +503,7 @@ async function main(argv = process.argv.slice(2)) {
         row = { evaluationVersion:1, caseId:item.id, provider:'offline-rules', model:'offline-rules',
           protocolFingerprint:harness.fingerprint, requestHash:sha(item.brief),
           schemaHash:corpus.manifest.schemaHash, elapsedMs:performance.now()-started,
-          kind:compiled.ok?'candidate':'baseline_no_match', intent, usage:null,
+          kind:offlineOutcome(compiled), intent, usage:null,
           reservationMicroUsd:'0', localPriceMicroUsd:'0', externalInvoiceVerified:false,
           baselineWarnings:clone(compiled.warnings) };
       } else row = await childCase(binary,opts['--origin'],opts['--model'],item,interruption.signal,corpus.contract);
@@ -526,6 +533,6 @@ async function main(argv = process.argv.slice(2)) {
   console.log(JSON.stringify(report,null,2));
 }
 
-module.exports = { loadCorpus, stageHarness, assess, summarize, validateRow, loadRun, compareRuns, exportReview, childCase, main,
+module.exports = { loadCorpus, stageHarness, offlineOutcome, assess, summarize, validateRow, loadRun, compareRuns, exportReview, childCase, main,
   driverFingerprint:DRIVER_FINGERPRINT };
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode=1; });

@@ -217,6 +217,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let mut events = state.events.subscribe();
         let session = state.playlist_load.lock().await.session;
         let (entered, entered_rx) = tokio::sync::oneshot::channel();
         let (release, release_rx) = tokio::sync::oneshot::channel();
@@ -234,6 +235,17 @@ mod tests {
         };
         let (prepared, ()) = tokio::join!(pending, inspect);
         assert!(prepared.unwrap().is_some());
+        let mut queue_invalidated = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, crate::state::WsEvent::QueueChanged) {
+                queue_invalidated = true;
+                break;
+            }
+        }
+        assert!(
+            queue_invalidated,
+            "committed online queue must invalidate clients"
+        );
         assert_eq!(*state.queue.lock().await, vec!["online:netease:new"]);
         assert_eq!(state.collection_status().await.unwrap().1, "new");
         assert_eq!(
@@ -421,6 +433,7 @@ impl AppState {
             self.begin_collection_load_locked(&source, id, *total, tracks.len())
                 .await;
         }
+        self.publish(crate::state::WsEvent::QueueChanged);
         Ok(Some(PreparedOnlinePlay {
             source,
             tracks,
