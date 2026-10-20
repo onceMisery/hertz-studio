@@ -169,7 +169,7 @@ async function fixtures() {
     await page.waitForFunction(() => !document.fullscreenElement);
     await page.locator('#bar-track').click();
     await page.locator('#np-more').click(); await page.locator('#np-sleep').click();
-    await page.evaluate(() => Skins.apply('ios'));
+    await page.evaluate(() => Skins.apply('classic'));
     check(!await page.locator('#ctx-menu').isVisible() && !await page.locator('#np-modal').isVisible(), 'skin switch dismisses the open sleep menu');
     await page.evaluate(() => Skins.apply('classic'));
     await page.locator('#bar-track').click();
@@ -180,7 +180,7 @@ async function fixtures() {
     await api('POST', '/v1/player/load', { track_id: queue[0], queue });
     await api('POST', '/v1/player/pause');
     await until(() => page.evaluate(() => Stage.presentation().track?.id), id => id === queue[0]);
-    const skins = ['classic', 'ios', 'sheen', 'chaoxi', 'qingfeng', 'liunian', 'heijiao'];
+    const skins = ['classic', 'sheen', 'chaoxi', 'qingfeng', 'liunian', 'heijiao'];
     const sizes = [[1366,768], [1920,1080], [2560,1080], [1024,600], [390,844]];
     for (const skin of skins) {
       await page.evaluate(skin => Skins.apply(skin), skin);

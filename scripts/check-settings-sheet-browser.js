@@ -285,10 +285,10 @@ async function openViaRail(page, skin) {
     eq(restored.anchors, 1, '切回 classic 后原位锚点恰好一个（没有累积）');
     ok(restored.viewInPane, 'classic 下设置视图重新住进共享浮层');
 
-    // --- 9) 剩余皮肤逐个过一遍：workbench 由本模块代管，chaoxi 在自己的
+    // --- 9) 剩余皮肤逐个过一遍：chaoxi 在自己的
     // 生命周期里调 mount/unmount（卸载顺序要求更严：先还视图再拆浮层）。
     // 每个皮肤都完整走一遍 开 → 关 → 回首页。
-    for (const skin of ['workbench', 'chaoxi']) {
+    for (const skin of ['chaoxi']) {
       await openViaRail(page, skin);
       const leg = await page.evaluate(() => {
         const modal = document.querySelector('.skset-modal');
@@ -314,10 +314,10 @@ async function openViaRail(page, skin) {
     await page.evaluate(() => { window.Skins.apply('classic'); });
     await page.waitForFunction(() => !!document.querySelector('.skset-pane #view-settings'));
     // 挂载期间分组保持 hidden（只露当前组）是设计行为；契约是**卸载时清干净**
-    // —— 连续挂过 workbench / chaoxi 再回到 classic，一组都不许带着 hidden。
+    // —— 挂过 chaoxi 再回到 classic，一组都不许带着 hidden。
     const drained = await page.evaluate(() =>
       [...document.querySelectorAll('#view-settings .set-group')].filter((g) => g.hidden).length);
-    eq(drained, 0, '轮换 workbench/chaoxi 后回到 classic，分组无 hidden 残留');
+    eq(drained, 0, '轮换 chaoxi 后回到 classic，分组无 hidden 残留');
 
     await page.screenshot({ path: path.join(SHOT_DIR, 'settings-sheet-rebuilt.png') });
 

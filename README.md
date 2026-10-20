@@ -115,9 +115,7 @@ Jamendo、ccMixter 和公开播客；显式开启 `full` feature 的 **Full** �
 - 布局皮肤（界面可选七套）：经典 classic（默认）/ 浮光 sheen / 流年 liunian /
   清风 qingfeng / 潮汐 chaoxi / 黑胶 heijiao / 星轨 orbit。星轨提供单张立体黑胶、鼠标透视跟随、
   浮雕列表与常驻队列，配套「星轨雾白」主题还原参考界面。皮肤只管布局，配色一律跟当前主题走，
-  所以换皮肤不会把主题色带跑，换主题也不破坏布局。工作台 workbench 与 OS 风 ios
-  暂不开放（OS 风与经典是同一套读法）：目录里保留定义，界面上（设置页 / 顶栏弹层 /
-  命令面板）都不给入口
+  所以换皮肤不会把主题色带跑，换主题也不破坏布局。
 - 18 套内置主题色 + 7 套二次元主题 + 自定义配色；文字色由底色按 WCAG 反推，不是手写
 - 主题工作室：壁纸背景（内置 12 张，缩略图选择与独立压暗）、自定义配色、自动压暗
 - 设置持久化在服务端 SQLite，不依赖浏览器 localStorage
@@ -369,8 +367,8 @@ hertz-studio/
 │       ├── creative-*.js          创意舞台：WebGL2 内核、编排、离线提示词编译、工坊、分享码
 │       ├── lyric3d.js / video-export.js / overlay.html    三维歌词、视频导出、歌词浮层
 │       ├── themes.js / theme-studio.*  主题色目录与主题工作室
-│       ├── skins/                 布局皮肤：classic / sheen / workbench / liunian / ios /
-│       │                          qingfeng / chaoxi
+│       ├── skins/                 布局皮肤：classic / sheen / liunian / qingfeng / chaoxi /
+│       │                          heijiao / orbit
 │       ├── online*.js / podcasts.js  在线音源、扫码登录、在线歌单、播客
 │       └── wallpapers/            内嵌壁纸（12 张，已按长边 1600px 预压）
 ├── docs/                    扩展指南、设计记录、ADR、接口清单（api-routes.md）

@@ -110,7 +110,7 @@ async function openSettings(page) {
 }
 
 async function skins(page) {
-  for (const skin of ['classic', 'sheen', 'workbench', 'liunian']) {
+  for (const skin of ['classic', 'sheen', 'liunian']) {
     for (const [width, height] of [[1440, 900], [1024, 700], [390, 844], [320, 640]]) {
       await page.setViewportSize({ width, height });
       await page.evaluate(value => Skins.apply(value), skin);
@@ -261,7 +261,7 @@ async function listScrolling(page, tracks) {
   const playlist = await api('POST', '/v1/playlists', { name: 'Skin scroll audit' });
   await api('POST', `/v1/playlists/${playlist.id}/tracks`, { track_ids: queue });
   await ready(page);
-  for (const skin of ['classic', 'sheen', 'workbench', 'liunian']) {
+  for (const skin of ['classic', 'sheen', 'liunian']) {
     await page.setViewportSize({ width: 1024, height: 700 });
     await page.evaluate(value => Skins.apply(value), skin);
     for (const [view, selector] of [['library', '#lib-list'], ['queue', '#queue-list'], ['favorites', '#fav-list']]) {
@@ -334,7 +334,7 @@ async function appearance(page, tracks) {
   fs.mkdirSync(output, { recursive: true });
   const health = await fetch(base + '/v1/health').then(response => response.json());
   assert.equal(health.backend, 'null', 'Use an isolated VMUSIC_BACKEND=null service for this check');
-  for (const file of ['app.js', 'stage.js', 'style.css', ...['sheen', 'workbench', 'liunian'].map(skin => `skins/skin.${skin}.css`)]) {
+  for (const file of ['app.js', 'stage.js', 'style.css', ...['sheen', 'liunian'].map(skin => `skins/skin.${skin}.css`)]) {
     const response = await fetch(new URL(file, base));
     assert.ok(response.ok, `Cannot fetch ${file}`);
     assert.ok((await response.text()).replace(/\r\n/g, '\n') === fs.readFileSync(path.join(web, file), 'utf8').replace(/\r\n/g, '\n'),

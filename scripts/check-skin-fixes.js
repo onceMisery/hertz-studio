@@ -45,7 +45,7 @@ async function applySkin(page, id) {
 
   // ---------------------------------------------------------------- 问题 3/4/5
   section('问题 3/4/5：在设置页里切皮肤，首页必须有内容（不空白、不停在设置页）');
-  for (const target of ['liunian', 'qingfeng', 'ios', 'sheen', 'workbench', 'classic']) {
+  for (const target of ['liunian', 'qingfeng', 'sheen', 'classic']) {
     // 每轮都先回到 classic 并进入设置页 —— 这才是用户的真实路径
     await applySkin(page, 'classic');
     await page.evaluate(() => {
@@ -157,7 +157,7 @@ async function applySkin(page, id) {
 
   // ---------------------------------------------------------------- 问题 1/2
   section('问题 1/2：舞台面板没有多余的横向滚动条，几何对齐');
-  for (const target of ['sheen', 'workbench']) {
+  for (const target of ['sheen']) {
     await applySkin(page, target);
     await page.evaluate(() => { const b = document.querySelector('.bar'); b.classList.remove('is-hidden'); b.style.transform = ''; b.style.opacity = ''; });
     await page.waitForTimeout(300);

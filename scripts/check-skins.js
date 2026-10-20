@@ -30,9 +30,7 @@ const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const SKINS_JS = read(path.join(SKINS, 'skins.js'));
 const CLASSIC = read(path.join(SKINS, 'skin.classic.css'));
 const SHEEN = read(path.join(SKINS, 'skin.sheen.css'));
-const WORKBENCH = read(path.join(SKINS, 'skin.workbench.css'));
 const LIUNIAN = read(path.join(SKINS, 'skin.liunian.css'));
-const IOS = read(path.join(SKINS, 'skin.ios.css'));
 const QINGFENG = read(path.join(SKINS, 'skin.qingfeng.css'));
 const CHAOXI = read(path.join(SKINS, 'skin.chaoxi.css'));
 const CHAOXI_JS = read(path.join(SKINS, 'skin.chaoxi.js'));
@@ -168,98 +166,51 @@ function makeSandbox(cssIds, carrier) {
 function checkCatalog() {
   section('皮肤目录：经典默认布局与可选皮肤');
 
-  const { sandbox, root, links, listHost } = makeSandbox(['sheen', 'workbench', 'liunian', 'ios', 'qingfeng', 'classic']);
+  const { sandbox, root, links, listHost } = makeSandbox(['sheen', 'liunian', 'qingfeng', 'classic']);
   const ids = sandbox.Skins.catalog().map((s) => s.id);
   ok(ids.indexOf('classic') >= 0, '有 classic（仓库原本那套布局）');
   ok(ids.indexOf('sheen') >= 0, '有 sheen');
-  ok(ids.indexOf('workbench') >= 0, '有 workbench');
   ok(ids.indexOf('liunian') >= 0, '有 liunian');
-  ok(ids.indexOf('ios') >= 0, '有 ios');
   ok(ids.indexOf('qingfeng') >= 0, '有 qingfeng');
   ok(sandbox.Skins.catalog().every((s) => s.name && s.note),
     '每套皮肤都有可读的名字与说明（设置页要靠它做选择）');
-
-  section('隐藏的皮肤：目录里还在，界面上不给入口');
-
-  // workbench 与 ios（OS风，与经典同一套读法故下架）都是隐藏的：CATALOG 里留着
-  // 定义（apply 能切过去，排障与老用户都不会被困住），但三处宿主一律不渲染它。
-  // 判据取**渲染结果**，不是源码里有没有那个字段——字段写了但宿主忘了过滤，
-  // 界面上照样会出现。
-  const shown = sandbox.Skins.list().map((s) => s.id);
-  for (const hiddenId of ['workbench', 'ios']) {
-    ok(shown.indexOf(hiddenId) < 0, `Skins.list() 里没有 ${hiddenId}（命令面板靠它建命令）`);
-    sandbox.Skins.apply(hiddenId);
-    eq(root.getAttribute('data-skin'), hiddenId, `apply() 仍能把隐藏的 ${hiddenId} 切出来（排障用）`);
-    sandbox.Skins.apply('classic');
-  }
-  ok(shown.indexOf('classic') >= 0 && shown.indexOf('sheen') >= 0,
-    '其余皮肤不受影响（隐藏一套不是把整张清单关掉）');
-  sandbox.Skins.render();
-  const cardIds = listHost.children.map((r) => r.getAttribute('data-skin-id'));
-  ok(cardIds.indexOf('workbench') < 0 && cardIds.indexOf('ios') < 0, '设置页那组卡片里没有隐藏的皮肤');
-  ok(cardIds.indexOf('sheen') >= 0, '设置页那组卡片照旧渲染其余皮肤');
-
-  // 界面上没有入口，开页就不能停在它上面——否则用户换不回来，只能去清
-  // localStorage。回落的同时要把存档冲掉，不然下次开页又读回同一套。
-  const { sandbox: sh, root: rh, store: shStore } = makeSandbox(['sheen', 'workbench']);
-  shStore.set('vmusic.skin', 'workbench');
-  sh.Skins.init();
-  eq(rh.getAttribute('data-skin'), 'classic', '存档是隐藏皮肤时开页回落 classic');
-  eq(shStore.get('vmusic.skin'), 'classic', '回落同时把存档冲掉（下次开页不再读回它）');
 
   section('切换：写 data-skin，并只启用对应那份 CSS');
 
   sandbox.Skins.apply('sheen');
   eq(root.getAttribute('data-skin'), 'sheen', 'html 上写了当前皮肤');
   eq(links[0].disabled, false, 'sheen 的 CSS 被启用');
-  eq(links[1].disabled, true, 'workbench 的 CSS 保持禁用（两套不能同时生效）');
-  eq(links[2].disabled, true, 'liunian 的 CSS 保持禁用');
-
-  sandbox.Skins.apply('workbench');
-  eq(links[0].disabled, true, '切走后 sheen 的 CSS 收起');
-  eq(links[1].disabled, false, 'workbench 的 CSS 启用');
+  eq(links[1].disabled && links[2].disabled && links[3].disabled, true,
+    '其余皮肤 CSS 保持禁用（不能同时生效）');
 
   sandbox.Skins.apply('liunian');
-  eq(links[0].disabled, true, '切到 liunian 后 sheen 的 CSS 收起');
-  eq(links[1].disabled, true, 'workbench 的 CSS 收起');
-  eq(links[2].disabled, false, 'liunian 的 CSS 启用');
+  eq(root.getAttribute('data-skin'), 'liunian', '切到 liunian');
+  eq(links[1].disabled, false, 'liunian 的 CSS 启用');
+  eq(links[0].disabled && links[2].disabled && links[3].disabled, true, 'sheen/qingfeng/classic 收起');
 
-  sandbox.Skins.apply('ios');
-  eq(links[2].disabled, true, '切到 ios 后 liunian 的 CSS 收起（两套不能同时生效）');
-  eq(links[3].disabled, false, 'ios 的 CSS 启用');
-
-  // 清风与其余四套并存：切过去只亮它那一份，回切后其余四份仍然互不干扰。
   sandbox.Skins.apply('qingfeng');
   eq(root.getAttribute('data-skin'), 'qingfeng', '切到 qingfeng');
-  eq(links[4].disabled, false, 'qingfeng 的 CSS 被启用');
-  eq(links.every((l, i) => i === 4 || l.disabled), true, '其余四份全部收起（不能同时生效）');
-
-  sandbox.Skins.apply('liunian');
-  eq(links[4].disabled, true, '切回 liunian 后 qingfeng 的 CSS 收起');
-  eq(links[2].disabled, false, 'liunian 重新启用');
-  eq(links[0].disabled && links[1].disabled && links[3].disabled, true,
-    '来回切之后 sheen/workbench/ios 仍保持禁用（syncCss 没有累积状态）');
+  eq(links[2].disabled, false, 'qingfeng 的 CSS 被启用');
+  eq(links.every((l, i) => i === 2 || l.disabled), true, '其余皮肤全部收起');
 
   sandbox.Skins.apply('classic');
-  eq(links[5].disabled, false, 'classic 启用默认浏览布局 CSS');
-  eq(links.every((l, i) => i === 5 || l.disabled), true, 'classic 只启用自己的布局 CSS');
+  eq(links[3].disabled, false, 'classic 启用默认浏览布局 CSS');
+  eq(links.every((l, i) => i === 3 || l.disabled), true, 'classic 只启用自己的布局 CSS');
 
   section('切换：广播事件让画布类模块自己重排');
-  const { sandbox: s2, events } = makeSandbox(['sheen', 'workbench', 'liunian']);
-  s2.Skins.apply('workbench');
-  ok(events.some((e) => e.type === 'skin:changed' && e.detail && e.detail.id === 'workbench'),
+  const { sandbox: s2, events } = makeSandbox(['sheen', 'liunian']);
+  s2.Skins.apply('liunian');
+  ok(events.some((e) => e.type === 'skin:changed' && e.detail && e.detail.id === 'liunian'),
     '切肤后广播 skin:changed（舞台/3D 这类要按新尺寸重排）');
 
   section('持久化：选择被记住，坏数据回落而不是写个无效值');
-  const { sandbox: s3, store } = makeSandbox(['sheen', 'workbench', 'liunian']);
-  s3.Skins.apply('workbench');
-  eq(store.get('vmusic.skin'), 'workbench', '选择写进 localStorage');
+  const { sandbox: s3, store } = makeSandbox(['sheen', 'liunian']);
+  s3.Skins.apply('liunian');
+  eq(store.get('vmusic.skin'), 'liunian', '选择写进 localStorage');
   store.set('vmusic.skin', 'no-such-skin');
   s3.Skins.init();
   eq(s3.Skins.currentId(), 'classic', '存了不认识的皮肤时回落 classic');
 
-  // 清风的 localStorage 往返：它有自己的重编排层，持久化错了会导致
-  // 「开机停在 classic 但墙的开关状态是开的」这种半开状态。
   section('持久化：清风的选择能被记住并复原');
   const { sandbox: s5, root: r5, store: st5 } = makeSandbox(['sheen', 'qingfeng']);
   s5.Skins.apply('qingfeng');
@@ -267,25 +218,23 @@ function checkCatalog() {
   s5.Skins.init();
   eq(r5.getAttribute('data-skin'), 'qingfeng', '重开后落回 qingfeng（不是 classic）');
 
-  // 插件形态：宿主把样式表内联成 <style>，标记还在但载体换了。认不出来就会
-  // hasCss() 恒假、apply() 一律回落 classic，表现是"设置里点皮肤没反应"。
   section('插件形态：皮肤 CSS 被内联成 <style>，切换照样生效');
   const { sandbox: s4, root: r4, links: styles } =
-    makeSandbox(['sheen', 'workbench', 'liunian', 'ios', 'qingfeng'], 'style');
+    makeSandbox(['sheen', 'liunian', 'qingfeng'], 'style');
   eq(styles.every((s) => s.disabled === false), true,
-    'style 的 disabled 内容属性不生效，进来时五份都是启用的');
+    'style 的 disabled 内容属性不生效，进来时三份都是启用的');
   s4.Skins.init();
   eq(r4.getAttribute('data-skin'), 'classic', '启动落位在 classic');
   eq(styles.every((s) => s.disabled === true), true,
-    '启动就把五份皮肤 CSS 全关掉（同时生效会把五套布局叠在一起）');
+    '启动就把三份皮肤 CSS 全关掉（同时生效会把三套布局叠在一起）');
   s4.Skins.apply('liunian');
   eq(r4.getAttribute('data-skin'), 'liunian', 'style 载体也认得出皮肤，没有回落 classic');
-  eq(styles[2].disabled, false, 'liunian 的 CSS 被启用');
-  eq(styles.every((s, i) => i === 2 || s.disabled), true, '其余四份保持禁用');
+  eq(styles[1].disabled, false, 'liunian 的 CSS 被启用');
+  eq(styles.every((s, i) => i === 1 || s.disabled), true, '其余两份保持禁用');
   eq(s4.Skins.currentId(), 'liunian', 'currentId 跟着走（不是嘴上说切了）');
   s4.Skins.apply('qingfeng');
-  eq(styles[4].disabled, false, 'style 载体下 qingfeng 也能启用');
-  eq(styles.every((s, i) => i === 4 || s.disabled), true, '切到 qingfeng 后其余保持禁用');
+  eq(styles[2].disabled, false, 'style 载体下 qingfeng 也能启用');
+  eq(styles.every((s, i) => i === 2 || s.disabled), true, '切到 qingfeng 后其余保持禁用');
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +245,7 @@ function checkSkinEntry() {
   section('顶栏皮肤入口：与设置页同源，切完两处一起跟上');
 
   const { sandbox, root, body: skinBody, listHost, skinBtn, skinMenu } =
-    makeSandbox(['sheen', 'workbench', 'liunian', 'ios', 'qingfeng']);
+    makeSandbox(['sheen', 'liunian', 'qingfeng']);
   sandbox.Skins.init();
 
   // 弹层的行是在**展开那一刻**渲染的（init 只绑不画），所以先点按钮再读。
@@ -308,8 +257,6 @@ function checkSkinEntry() {
 
   const rows = skinMenu.children;
   eq(rows.length, sandbox.Skins.list().length, '弹层行数等于对外可见的皮肤数（不是各存一份清单）');
-  ok(!rows.some((r) => r.getAttribute('data-skin-id') === 'workbench' || r.getAttribute('data-skin-id') === 'ios'),
-    '顶栏弹层里没有隐藏的皮肤（workbench / OS风）');
   ok(rows.every((r) => r.getAttribute('role') === 'menuitemradio'), '每行都是 menuitemradio（单选语义）');
   const on = rows.filter((r) => r.getAttribute('aria-checked') === 'true');
   eq(on.length, 1, '只标记一个当前项');
@@ -364,7 +311,7 @@ function checkSkinEntry() {
 function checkExtensibility() {
   section('扩展：register 一套新皮肤后，切换/列表自动生效');
 
-  const { sandbox, root, links } = makeSandbox(['sheen', 'workbench', 'compact']);
+  const { sandbox, root, links } = makeSandbox(['sheen', 'compact']);
   const okReg = sandbox.Skins.register({ id: 'compact', name: '紧凑', note: '测试用的第三套' });
   ok(okReg === true, 'register 接受新皮肤');
   ok(sandbox.Skins.register({ id: 'compact', name: '重复' }) === false, '重复 id 被拒绝');
@@ -372,15 +319,16 @@ function checkExtensibility() {
 
   sandbox.Skins.apply('compact');
   eq(root.getAttribute('data-skin'), 'compact', '新皮肤可以切换过去');
-  eq(links[2].disabled, false, '新皮肤的 CSS 被启用');
+  eq(links[1].disabled, false, '新皮肤的 CSS 被启用');
 
   sandbox.Skins.render();
   const opts = sandbox.Skins.list();
   ok(opts.length >= 4, `设置页列表会多出这一项（${opts.length} 套）`);
 
   section('扩展：声明了皮肤但漏了 CSS 要显式回落，不能静默装作切成功');
-  const { sandbox: s2, root: r2 } = makeSandbox(['sheen']); // 没有 workbench 的 link
-  s2.Skins.apply('workbench');
+  const { sandbox: s2, root: r2 } = makeSandbox(['sheen']);
+  s2.Skins.register({ id: 'compact', name: '紧凑', note: '测试用的第三套' });
+  s2.Skins.apply('compact');
   eq(r2.getAttribute('data-skin'), 'classic', '缺 CSS 的皮肤回落到 classic');
   eq(s2.Skins.currentId(), 'classic', 'currentId 也是 classic（不是嘴上说切了）');
 }
@@ -392,7 +340,7 @@ function checkExtensibility() {
 function checkNoColor() {
   section('皮肤只管布局：CSS 里不许有颜色字面量');
 
-  for (const [name, css] of [['sheen', SHEEN], ['workbench', WORKBENCH]]) {
+  for (const [name, css] of [['sheen', SHEEN]]) {
     // 去掉注释再扫：注释里会提到"不出现颜色"这类字样。
     const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
     const hex = body.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
@@ -426,24 +374,6 @@ function checkNoColor() {
   ok(badColor.length === 0,
     `liunian 的 color 只能引用主题 token${badColor.length ? '（' + badColor.map((m) => m[1].trim()).join(',') + '）' : ''}`);
   ok(lnColors.length >= 2, 'liunian 确实做了激活行翻色（VMusic 实心底 + 深字）');
-
-  section('iOS：颜色字面量同样全禁，选中态只准引用主题 token');
-
-  // iOS 皮肤用 color-mix(var(--brand)) 做选中态填充（iOS 分段控件的
-  // 「淡主色填充」），所以允许写 color/background，但值必须来自主题。
-  const ioBody = IOS.replace(/\/\*[\s\S]*?\*\//g, '');
-  const ioHex = ioBody.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
-  const ioRgb = ioBody.match(/\brgba?\(/g) || [];
-  const ioNamed = ioBody.replace(/white-space|grey|gray/g, '')
-    .match(/\b(?:red|blue|green|white|black)\b/g) || [];
-  ok(ioHex.length === 0, `ios 没有十六进制颜色${ioHex.length ? '（' + ioHex.join(',') + '）' : ''}`);
-  ok(ioRgb.length === 0, 'ios 没有 rgb()/rgba()');
-  ok(ioNamed.length === 0, `ios 没有颜色关键字${ioNamed.length ? '（' + ioNamed.join(',') + '）' : ''}`);
-  ok(/\bvar\(--/.test(ioBody), 'ios 的着色一律走 var(--…)');
-  ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(ioBody),
-    'ios 不重定义主题色变量（配色归 themes.js 管）');
-  ok(/color-mix\(in srgb, var\(--brand\)/.test(ioBody),
-    'ios 的选中态用主色派生填充，而不是写死一个颜色');
 
   section('清风：颜色字面量同样全禁，且不重定义主题色变量');
 
@@ -486,7 +416,7 @@ function checkNoColor() {
     `chaoxi 的 color 只能引用主题 token${cxBadColor.length ? '（' + cxBadColor.map((m) => m[1].trim()).join(',') + '）' : ''}`);
 
   section('皮肤只管布局：属性也应该是布局属性');
-  for (const [name, css] of [['sheen', SHEEN], ['workbench', WORKBENCH]]) {
+  for (const [name, css] of [['sheen', SHEEN]]) {
     const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
     // 这两条是"改配色"的典型入口，皮肤不该碰。
     ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(body),
@@ -512,115 +442,9 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-function checkContrast() {
-  section('区分度：两套皮肤的布局令牌要真的反向取值');
-
-  const a = tokensOf(SHEEN);
-  const b = tokensOf(WORKBENCH);
-  const keys = ['gap', 'pad', 'radius', 'row-py', 'card-min', 'head-pb', 'title'];
-  for (const k of keys) {
-    ok(k in a && k in b, `两套皮肤都声明了 --skin-${k}`);
-  }
-
-  // 间距/圆角/格子：sheen 宽松，workbench 紧凑。要求至少差 1.8 倍，
-  // 差个 10% 只能算微调，换皮肤没有意义。
-  for (const k of ['gap', 'pad', 'radius', 'row-py', 'card-min', 'head-pb']) {
-    const va = num(a[k]);
-    const vb = num(b[k]);
-    ok(va !== null && vb !== null, `--skin-${k} 是数值（${a[k]} / ${b[k]}）`);
-    const ratio = Math.max(va, vb) / Math.min(va, vb);
-    ok(ratio >= 1.8, `--skin-${k} 两套相差 ${ratio.toFixed(2)} 倍（要求 ≥1.8，否则只是微调）`);
-  }
-  ok(num(a['row-py']) > num(b['row-py']), 'sheen 的行更高（低信息密度）');
-  ok(num(a['card-min']) > num(b['card-min']), 'sheen 的卡片格子更大（一屏放更少）');
-
-  section('区分度：导航形式与分区方式也不能一样');
-  // sheen：导航脱离栅格悬浮在顶部；workbench：导航留在栅格里、贴左侧。
-  ok(/\[data-skin="sheen"\] \.rail \{[^}]*position:\s*fixed/.test(SHEEN),
-    'sheen 的导航是悬浮定位');
-  ok(/flex-direction:\s*row/.test(SHEEN), 'sheen 的导航横向排布');
-  ok(!/position:\s*fixed/.test(WORKBENCH.replace(/\/\*[\s\S]*?\*\//g, '')),
-    'workbench 的导航不悬浮（留在栅格里）');
-  ok(/flex-direction:\s*column/.test(WORKBENCH) || !/flex-direction/.test(WORKBENCH),
-    'workbench 的导航仍是竖向（沿用默认布局的竖轨）');
-
-  // 分区：sheen 单列全宽，workbench 三栏。
-  ok(/grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(SHEEN), 'sheen 是单列全宽');
-  ok(/grid-template-columns:\s*104px/.test(WORKBENCH), 'workbench 是固定三栏');
-  ok(/gap:\s*1px/.test(WORKBENCH), 'workbench 用 1px 细线分隔（不是靠间距）');
-}
-
 // ---------------------------------------------------------------------------
 // 4b. iOS / macOS：分层圆角、正常分栏与原生状态
 // ---------------------------------------------------------------------------
-
-function checkIosSkin() {
-  section('iOS / macOS：分层圆角与可读的列表');
-
-  const t = tokensOf(IOS);
-  // 不再把“比浮光更圆、更松”当作正确性。桌面采用 macOS 密度，
-  // 面板必须仍大于内部控件；几何和触控尺寸由浏览器验收。
-  const rawToken = key => Number(new RegExp(key + ':\\s*([\\d.]+)px').exec(IOS)?.[1]);
-  ok(rawToken('--r-sm') < rawToken('--r-lg'), '控件圆角小于分组圆角');
-  ok(rawToken('--r-lg') < num(t['radius']), '分组圆角小于面板圆角');
-  // 行高：iOS 的行比工作台高得多，但不该比浮光还松（否则与浮光没区分）。
-  ok(num(t['row-py']) > num(tokensOf(WORKBENCH)['row-py']),
-    'iOS 的行比工作台高');
-  ok(num(t['row-py']) <= num(tokensOf(SHEEN)['row-py']) + 4,
-    'iOS 的行高与浮光同一档（两者都属低密度，不能互相没区分）');
-
-  // 就地覆盖圆角梯度：只声明 --skin-* 不够，组件层的 --r-* 也要跟着圆。
-  const ioBody = IOS.replace(/\/\*[\s\S]*?\*\//g, '');
-  for (const k of ['--r-md', '--r-lg', '--r-xl']) {
-    ok(new RegExp('\\' + k + '\\s*:').test(ioBody), `iOS 覆盖了 ${k}（按钮/输入框/弹窗一起变圆）`);
-  }
-  // 行高令牌必须真的被行消费，否则声明了也不生效。
-  ok(/line-height:\s*var\(--skin-line\)/.test(ioBody), 'iOS 把行高令牌接到列表行上');
-  ok(/--skin-line:\s*1\.5/.test(ioBody), 'iOS 的行高约 1.5（正文可读性）');
-
-  section('iOS：布局与真实状态接线');
-  ok(/body\[data-stage-idle="1"\] \.app\s*\{\s*grid-template-columns:\s*var\(--rail-w\) minmax\(0, 1fr\)/.test(ioBody),
-    '空闲时保留导航列并释放舞台列');
-  ok(/\[data-skin="ios"\] \.stage\s*\{\s*position:\s*relative/.test(ioBody),
-    '桌面舞台留在正常流，避免固定定位与三列占位叠加');
-  // 导航形态：iOS 保留竖排（与工作台一致），但选中态是淡色填充而非左条。
-  ok(!/\[data-skin="ios"\] \.rail \{[^}]*position:\s*fixed/.test(IOS),
-    'iOS 的导航留在栅格里（不悬浮）');
-  ok(/\[data-skin="ios"\] \.rail-item\.active/.test(IOS),
-    'iOS 的导航选中态匹配 app.js 使用的 .active');
-  ok(/--ios-selected:\s*color-mix\(in srgb, var\(--brand\)/.test(IOS),
-    '选中填充从主题主色派生');
-  ok(/:focus-visible/.test(ioBody) && /:disabled/.test(ioBody), '皮肤覆盖键盘焦点与禁用状态');
-  ok(/safe-area-inset-bottom/.test(ioBody) && /100dvh/.test(ioBody), '包含安全区和动态视口适配');
-
-  // 顶栏那个齿轮是冗余的：侧栏底部已有 data-view="settings" 入口。
-  // 这里钉死"用 display:none 而不是 visibility:hidden"——后者仍占位（把后面的
-  // 图标顶偏）且留在 Tab 序里，会变成看不见却能聚焦的按钮。
-  ok(/\[data-skin="ios"\]\s*#settings-entry\s*\{\s*display:\s*none/.test(IOS),
-    'iOS 摘掉顶栏的设置齿轮（侧栏已有同一入口）');
-  ok(!/\[data-skin="ios"\][^{}]*#settings-entry[^{}]*\{[^}]*visibility/.test(IOS),
-    '摘齿轮用 display:none（visibility 仍占位、且留在 Tab 序里）');
-  // 摘的是"不长出来"，不是"功能消失"：业务侧引用必须留着，键盘/快捷键
-  // 路径仍要能开设置。index.html 的按钮与 app.js 的缓存引用都不该被改。
-  ok(HTML.indexOf('id="settings-entry"') > 0, '业务 HTML 仍保留 #settings-entry（iOS 只是 CSS 层不显示）');
-  ok(/rail-item" data-view="settings"/.test(HTML), '侧栏保留设置入口（摘掉顶栏齿轮后仍可达）');
-
-  // 同一件事在另外四套「导航里已经带设置条目」的皮肤里也成立：经典（侧栏底部）、
-  // 浮光与潮汐（顶部导航末尾）、黑胶（横向抽屉末尾）。工作台与流年留着顶栏齿轮。
-  for (const [id, src, name] of [['classic', CLASSIC, '经典'], ['sheen', SHEEN, '浮光'],
-    ['chaoxi', CHAOXI, '潮汐'], ['heijiao', HEIJIAO, '黑胶']]) {
-    ok(new RegExp('\\[data-skin="' + id + '"\\]\\s*#settings-entry\\s*\\{\\s*display:\\s*none').test(stripCssComments(src)),
-      name + ' 摘掉顶栏的设置齿轮（导航里已有同一入口）');
-  }
-
-  // 显示名与持久化键是两件事：name 只进设置列表，localStorage 靠 id。
-  // 钉死"id 仍是 ios"是为了防止有人连 id 一起改，那会让已经存了
-  // vmusic.skin='ios' 的用户切皮肤时静默回落到 classic。
-  ok(/id:\s*'ios',\s*\n(?:\s*\/\/[^\n]*\n)*\s*name:\s*'OS风'/.test(SKINS_JS),
-    "iOS 皮肤显示名为 'OS风'");
-  ok(/id:\s*'ios'/.test(SKINS_JS), "id 仍是 'ios'（持久化键 vmusic.skin 靠它）");
-  ok(!/name:\s*'iOS'/.test(SKINS_JS), "皮肤显示名不再叫 'iOS'（避免像 Apple 官方出品）");
-}
 
 /// 浮光：胶囊并入顶栏 + 摘掉常驻搜索框。
 ///
@@ -869,18 +693,11 @@ function checkCoverage() {
   };
 
   const a = selectorsOf(SHEEN);
-  const b = selectorsOf(WORKBENCH);
   const c = selectorsOf(LIUNIAN);
-  const d = selectorsOf(IOS);
   const e = selectorsOf(QINGFENG);
-  const missingInB = [...a].filter((s) => isGeometry(s) && !b.has(s));
-  const missingInA = [...b].filter((s) => isGeometry(s) && !a.has(s));
-  ok(missingInB.length === 0, `sheen 覆盖的几何模块 workbench 也都有（缺：${missingInB.join(' ') || '无'}）`);
-  ok(missingInA.length === 0, `workbench 覆盖的几何模块 sheen 也都有（缺：${missingInA.join(' ') || '无'}）`);
 
-  // 其余三套与 sheen 比几何模块（多覆盖如 body::after、.qf-* 允许）。
+  // 其余皮肤与 sheen 比几何模块（多覆盖如 body::after、.qf-* 允许）。
   geometryGap(SHEEN, LIUNIAN, 'sheen', 'liunian');
-  geometryGap(SHEEN, IOS, 'sheen', 'ios');
   geometryGap(SHEEN, QINGFENG, 'sheen', 'qingfeng');
 
   // 这些是主要模块，一套皮肤漏了任何一个，切过去那块就是"没换皮肤"。
@@ -895,7 +712,7 @@ function checkCoverage() {
     '.dv-row',
   ];
   for (const m of must) {
-    for (const [set, name] of [[a, 'sheen'], [b, 'workbench'], [c, 'liunian'], [d, 'ios'], [e, 'qingfeng']]) {
+    for (const [set, name] of [[a, 'sheen'], [c, 'liunian'], [e, 'qingfeng']]) {
       ok([...set].some((s) => s.indexOf(m) >= 0), `${name} 覆盖了 ${m}`);
     }
   }
@@ -914,7 +731,7 @@ function checkCoverage() {
     const m = /\.daily-strip\s*\{([^}]*)\}/.exec(stripCssComments(src));
     return m ? m[1] : '';
   };
-  for (const [src, name] of [[SHEEN, 'sheen'], [WORKBENCH, 'workbench'], [LIUNIAN, 'liunian'], [IOS, 'ios'], [QINGFENG, 'qingfeng']]) {
+  for (const [src, name] of [[SHEEN, 'sheen'], [LIUNIAN, 'liunian'], [QINGFENG, 'qingfeng']]) {
     const body = stripRule(src);
     ok(!/display\s*:\s*(grid|inline-grid|flex)/.test(body),
       `${name} 没把 .daily-strip 改成网格/弹性容器`, `实际：${body.trim().slice(0, 60)}`);
@@ -1119,7 +936,7 @@ function checkLiunianNavigation() {
     '桥接分流本地 playTrack / 在线 Online.playAll');
 
   // 9) 作用域：搜索面板只属于流年。
-  ok(!/ln-sp/.test(SHEEN) && !/ln-sp/.test(WORKBENCH), '其它皮肤不引入遮罩浮层');
+  ok(!/ln-sp/.test(SHEEN), '其它皮肤不引入遮罩浮层');
   ok(!/ln-right|ln-sp/.test(HTML), '业务 HTML 不内置右栏面板（皮肤自持，切走即消失）');
 }
 
@@ -1509,7 +1326,7 @@ function checkChaoxiSkin() {
     '长廊卡片的封面保持正方');
 
   // 8) 覆盖：切过去不能落回默认。比 sheen 的几何模块，但排除交互态选择器
-  //    —— 那些是 sheen/workbench 的历史包袱，潮汐主动不写（见下一条）。
+  //    —— 那些是历史包袱，潮汐主动不写（见下一条）。
   const OPTIONAL = /^\.(dv-name|dv-sub|dv-num|dv-src|topsearch|stage-lyrics|disc-wrap|stage-title|stage-artist|sheen-player-handle)$|^#skin-picker$/;
   const isGeom = (s) => !OPTIONAL.test(s)
     && !/^[^\s]*\s/.test(s)
@@ -1734,7 +1551,7 @@ function checkWiring() {
   section('接线：HTML / 路由 / 启动');
 
   ok(/<link rel="stylesheet" href="skins\/skins\.css">/.test(HTML), 'skins.css 常驻引入');
-  for (const id of ['sheen', 'workbench', 'liunian', 'ios', 'qingfeng', 'chaoxi', 'heijiao']) {
+  for (const id of ['sheen', 'liunian', 'qingfeng', 'chaoxi', 'heijiao']) {
     ok(new RegExp('href="skins/skin\\.' + id + '\\.css"[^>]*data-skin-css="' + id + '"').test(HTML),
       `skin.${id}.css 引了进来并带上 data-skin-css`);
     ok(new RegExp('data-skin-css="' + id + '"[^>]*disabled').test(HTML),
@@ -1745,7 +1562,7 @@ function checkWiring() {
     'skins.js 排在 app.js 之前（app.js 启动时要能拿到它）');
   ok(/id="skins-list"/.test(HTML), '设置页有皮肤列表容器');
 
-  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.sheen.css', 'skins/skin.workbench.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js', 'skins/skin.ios.css', 'skins/skin.qingfeng.css', 'skins/skin.qingfeng.js', 'skins/skin.chaoxi.js', 'skins/skin.chaoxi.css', 'skins/skin.heijiao.js', 'skins/skin.heijiao.css']) {
+  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.sheen.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js', 'skins/skin.qingfeng.css', 'skins/skin.qingfeng.js', 'skins/skin.chaoxi.js', 'skins/skin.chaoxi.css', 'skins/skin.heijiao.js', 'skins/skin.heijiao.css']) {
     ok(MAIN_RS.includes(`/skins/${p.split('/')[1]}`) || MAIN_RS.includes(p),
       `main.rs 注册了 /${p} 路由`);
   }
@@ -1756,8 +1573,6 @@ function checkWiring() {
     'skin.liunian.css 编进二进制');
   ok(/edition_ui!\("skins\/skin\.liunian\.js"\)/.test(MAIN_RS),
     'skin.liunian.js 编进二进制');
-  ok(/edition_ui!\("skins\/skin\.ios\.css"\)/.test(MAIN_RS),
-    'skin.ios.css 编进二进制');
 
   section('接线：流年重编排 JS 的加载顺序与机制');
   const lnJsAt = HTML.indexOf('src="skins/skin.liunian.js"');
@@ -2756,7 +2571,7 @@ function checkQingfengWiring() {
   // 作用域：海报墙与设置浮层只属于清风，别漏进业务 HTML。
   ok(!/qf-nav|qf-lattice|qf-modal|qf-poster/.test(HTML),
     '业务 HTML 不内置清风的结构（皮肤自持，切走即消失）');
-  ok(!/qf-nav|qf-lattice|qf-modal|qf-poster/.test(SHEEN) && !/qf-nav|qf-lattice|qf-modal|qf-poster/.test(WORKBENCH),
+  ok(!/qf-nav|qf-lattice|qf-modal|qf-poster/.test(SHEEN),
     '其它皮肤不引入清风的结构');
 }
 
@@ -2833,12 +2648,12 @@ function checkSkinSwitchViewHandoff() {
 ///
 /// `.stage::before` 是 inset:-30% 的取色光晕（绝对定位），面板一旦
 /// `overflow:auto`，它就把面板撑宽：实测 sheen 420px 面板被撑宽 125px、
-/// workbench 104px 右栏被撑宽 31px，底部那条横滚动条就是它。
+/// 窄栏里被撑宽，底部那条横滚动条就是它。
 /// 基础样式 style.css 的 .stage 本来就是 overflow:hidden，
-/// sheen/workbench 覆盖成 auto 属于覆盖过头。
+/// 皮肤覆盖成 auto 属于覆盖过头。
 ///
-/// 同时钉住 #stage-modes 的 min-width:0 —— 窄栏（workbench 右栏 104px，
-/// 扣 padding 只剩 78px）里两颗按钮至少要 111px，不给 min-width:0
+/// 同时钉住 #stage-modes 的 min-width:0 —— 窄栏（右栏扣掉 padding
+/// 只剩几十像素）里两颗按钮至少要 111px，不给 min-width:0
 /// 整颗胶囊会顶出面板边界，是横向溢出的第二个来源。
 function checkStageNoHorizontalScroll() {
   section('舞台面板：没有多余的横向滚动条');
@@ -2849,7 +2664,6 @@ function checkStageNoHorizontalScroll() {
   // 写的是什么值都绿。变异测试（把 overflow 改回 auto）当时就是不红的，
   // 靠这条才发现。
   const sheenClean = stripCssComments(SHEEN);
-  const wbClean = stripCssComments(WORKBENCH);
   const stageClean = stripCssComments(STAGE_CSS);
 
   // 取一条规则**整块**（含声明体），花括号配平 ——
@@ -2874,8 +2688,6 @@ function checkStageNoHorizontalScroll() {
 
   ok(/overflow:\s*hidden/.test(rule(sheenClean, '\\[data-skin="sheen"\\] \\.stage')),
     '浮光的 .stage 面板不滚（歌词区自己滚）');
-  ok(/overflow:\s*hidden/.test(rule(wbClean, '\\[data-skin="workbench"\\] \\.stage')),
-    '工作台的 .stage 面板不滚（歌词区自己滚）');
   // 歌词区必须自己有滚动/裁剪能力，否则面板改成 hidden 之后歌词就够不着了。
   // 注意它不是 overflow-y:auto —— 歌词滚动是 JS 用 translate3d 推
   // .lyric-track 实现的（用 scrollTop + CSS smooth 会与 transform 打架，
@@ -3293,8 +3105,6 @@ function checkHeijiaoSkin() {
   checkExtensibility();
   checkSkinEntry();
   checkNoColor();
-  checkContrast();
-  checkIosSkin();
   checkSheenTopbarLayout();
   checkCoverage();
   checkDailyScroll();

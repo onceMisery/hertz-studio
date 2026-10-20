@@ -77,7 +77,7 @@ function check(condition, label, details) {
           // Qingfeng exposes these actions through its own toolbar/menu.
           // 经典/浮光/潮汐/黑胶与 iOS 一样把顶栏设置齿轮摘了（导航里已有同一入口）。
           if (b.w === 0 && (skin === 'qingfeng' ||
-            (['ios', 'classic', 'sheen', 'chaoxi', 'heijiao', 'orbit'].includes(skin) && b.id === 'settings-entry') ||
+            (['classic', 'sheen', 'chaoxi', 'heijiao', 'orbit'].includes(skin) && b.id === 'settings-entry') ||
             (skin === 'sheen' && b.id === 'skin-btn' && width <= 1100))) continue;
           const compactOrbit = skin === 'orbit';
           check(b.w >= (compactOrbit ? 26 : 30) && b.h >= (compactOrbit ? 26 : 32) && b.x >= 0 && b.right <= width && b.hit,

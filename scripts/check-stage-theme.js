@@ -170,7 +170,7 @@ ok(/<link rel="stylesheet" href="stage-themes\/starfall\.css">/.test(HTML),
 ok(HTML.indexOf('href="stage3d.css"') < HTML.indexOf('href="stage-themes/starfall.css"'),
   'starfall.css 排在 stage3d.css 之后（同特异性下覆盖基础样式）');
 // 只匹配文件名后缀，不写死相对深度：前端目录搬过位置（web/ → plugin/ui/）。
-ok(/include_str!\("[^"]*\/stage-themes\/starfall\.css"\)/.test(MAIN_RS), 'starfall.css 编进二进制');
+ok(/edition_ui!\("stage-themes\/starfall\.css"\)/.test(MAIN_RS), 'starfall.css 编进二进制');
 ok(/"\/stage-themes\/starfall\.css"/.test(MAIN_RS), 'main.rs 注册了 /stage-themes/starfall.css 路由');
 
 // ---------------------------------------------------------------------------
@@ -226,12 +226,8 @@ ok(ioPlayerBase && /border-radius:\s*999px/.test(ioPlayerBase[1]), 'iOS 播放�
 // 与皮肤正交：iOS 这个 id 在两层里各出现一次（皮肤 + 舞台主题），这是
 // **允许且预期的**——两层各自登记、各自持久化，互不派生。真正要防的是
 // 任一层去引用另一层的选择器，那会让两个维度互相污染。
-const IOS_SKIN_CSS = read(path.join(WEB, 'skins', 'skin.ios.css'));
-ok(!/data-stage-theme/.test(IOS_SKIN_CSS), 'iOS 皮肤不引用舞台主题选择器（两层互不感知）');
 ok(!/data-skin/.test(ioBody), 'iOS 舞台主题不引用皮肤选择器（两层互不感知）');
-// 两层各自登记：皮肤在 Skins 目录 + data-skin-css link；舞台主题在下拉里。
-ok(/id:\s*'ios'/.test(SKINS_JS) && /data-skin-css="ios"/.test(HTML),
-  'iOS 皮肤在 Skins 目录与 link 上独立登记');
+// 皮肤 iOS 已删除；舞台主题独立登记在下拉里。
 ok(/<option value="ios">/.test(HTML), 'iOS 舞台主题在下拉里独立登记');
 
 // 接线。
@@ -239,7 +235,7 @@ ok(/<link rel="stylesheet" href="stage-themes\/ios\.css">/.test(HTML),
   'stage-themes/ios.css 常驻引入');
 ok(HTML.indexOf('href="stage3d.css"') < HTML.indexOf('href="stage-themes/ios.css"'),
   'ios.css 排在 stage3d.css 之后（同特异性下覆盖基础样式）');
-ok(/include_str!\("[^"]*\/stage-themes\/ios\.css"\)/.test(MAIN_RS), 'ios.css 编进二进制');
+ok(/edition_ui!\("stage-themes\/ios\.css"\)/.test(MAIN_RS), 'ios.css 编进二进制');
 ok(/"\/stage-themes\/ios\.css"/.test(MAIN_RS), 'main.rs 注册了 /stage-themes/ios.css 路由');
 ok(/<option value="ios">/.test(HTML), '舞台设置的下拉里有 iOS 选项');
 // 白名单：加一档而不改白名单的话，选中它会被静默回落成默认档——页面不报错，

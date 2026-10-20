@@ -94,7 +94,7 @@
 
   // 本模块服务哪些皮肤：它们没有自己的生命周期脚本，由这里代管。
   // liunian / qingfeng / chaoxi 各有自己的 skin.<id>.js，不在此列。
-  var MANAGED_SKINS = ['classic', 'sheen', 'workbench', 'ios'];
+  var MANAGED_SKINS = ['classic', 'sheen'];
 
   var mounted = false;
   var st = {

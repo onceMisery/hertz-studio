@@ -440,7 +440,7 @@ async function setSkin(page, id) {
     // ---------------------------------------------------------- 其它皮肤没被带坏
     section('回归：其它皮肤的顶栏搜索框照旧');
 
-    for (const skin of ['classic', 'workbench', 'liunian', 'qingfeng']) {
+    for (const skin of ['classic', 'liunian', 'qingfeng']) {
       await setSkin(page, skin);
       const r = await page.evaluate(() => {
         const cs = getComputedStyle(document.querySelector('.topsearch'));
@@ -456,7 +456,7 @@ async function setSkin(page, id) {
       // 一起被砍功能"，在浮光的截图里看不出来。
       // liunian 自己也是摘掉的（skin.liunian.css「标题/艺术家/进度在右栏
       // 没有位置」），所以按皮肤各自的约定比，而不是一刀切"必须可见"。
-      const titleShown = { classic: true, workbench: true, liunian: false, qingfeng: true }[skin];
+      const titleShown = { classic: true, liunian: false, qingfeng: true }[skin];
       const shown = await page.evaluate(() => getComputedStyle(document.querySelector('.stage-title')).display);
       ok(titleShown ? shown !== 'none' : shown === 'none',
         `${skin}：曲名/艺人${titleShown ? '照旧显示' : '按它自己的设定不显示'}（display=${shown}）`);

@@ -39,30 +39,9 @@
       note: '顶部悬浮胶囊导航 + 全宽卡片网格，舞台贴右侧边',
     },
     {
-      id: 'workbench',
-      name: '工作台',
-      note: '固定窄侧栏 + 内容分栏，直角细线、高信息密度',
-      // 隐藏：界面上不给入口（设置页那组卡片、顶栏弹层、命令面板三处宿主都
-      // 按 visible() 渲染），但 CATALOG 里留着这份定义 —— 已经设成它的用户
-      // 不会被困住，apply() 也照旧能把它调出来排障。解除隐藏 = 删这一个字段。
-      hidden: true,
-    },
-    {
       id: 'liunian',
       name: '流年',
       note: '清晰导航、暖调播放卡与凝彩舞台，可收为胶囊，手机端直接浏览歌曲',
-    },
-    {
-      id: 'ios',
-      // 显示名不写「iOS」：这套皮肤卖的是 macOS 侧栏 + iOS 分组列表的观感，
-      // 与 Apple 官方无关；沿用商标名会让设置列表看着像官方出品。id 仍是
-      // 'ios'（持久化键 vmusic.skin 靠它，改名只动这一处）。
-      name: 'OS风',
-      note: 'macOS 式侧栏与工具栏、iOS 分组列表；小屏横向导航，支持浅色与深色主题',
-      // 隐藏：与经典是同一套读法（侧栏 + 全宽内容 + 底栏），两边走下来重叠的
-      // 控件（如侧栏收起）就得在两个地方各改一遍。定义与 CSS 都留着，
-      // 已设成它的老用户开页回落经典；排障仍可 apply('ios')。
-      hidden: true,
     },
     {
       id: 'qingfeng',
@@ -92,7 +71,7 @@
   function syncSidebar(id) {
     var button = document.getElementById('rail-toggle');
     if (!button) return;
-    var supported = id === 'classic' || id === 'ios';
+    var supported = id === 'classic';
     if (supported && !(id in railPreferences)) {
       var saved = null;
       try { saved = localStorage.getItem(RAIL_KEY + id); } catch (e) { /* Privacy mode. */ }
@@ -100,7 +79,7 @@
     }
     var state = supported && railPreferences[id] || (id === 'classic' && window.innerWidth <= 1100 ? 'collapsed' : 'expanded');
     document.documentElement.setAttribute('data-rail-state', supported ? state : '');
-    button.hidden = !supported || (id === 'ios' && window.innerWidth <= 620);
+    button.hidden = !supported;
     button.setAttribute('aria-expanded', String(state === 'expanded'));
     var label = state === 'expanded' ? '收缩导航' : '展开导航';
     button.setAttribute('aria-label', label);
@@ -115,7 +94,7 @@
       item.title = item.getAttribute('aria-label');
     });
     button.onclick = function () {
-      if (current !== 'classic' && current !== 'ios') return;
+      if (current !== 'classic') return;
       var state = button.getAttribute('aria-expanded') === 'true' ? 'collapsed' : 'expanded';
       railPreferences[current] = state;
       try { localStorage.setItem(RAIL_KEY + current, state); } catch (e) { /* Keep the in-memory preference. */ }

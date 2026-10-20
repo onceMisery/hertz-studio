@@ -30,10 +30,9 @@ const THEMES = ['mineral', 'celestial', 'kiminona', 'spirited', 'starrail', 'liy
   'starblue', 'emerald', 'midnight-neon', 'mono', 'aero', 'codeide', 'sakura',
   'crimson', 'paper-ink', 'forest', 'porcelain', 'snow-dawn', 'acid', 'liunian',
   'ios-light', 'chaoxi-night', 'chaoxi-day'];
-// workbench 不在矩阵里：它是隐藏皮肤（设置页/顶栏都不给入口），开页会被主动
 // 回落到 classic —— 这里靠写 localStorage + reload 起皮肤，写上它只会报
 // 「皮肤切不过去」。组合矩阵只跑界面上真能选到的那几套。
-const SKINS = ['classic', 'sheen', 'liunian', 'ios', 'qingfeng', 'chaoxi', 'heijiao'];
+const SKINS = ['classic', 'sheen', 'liunian', 'qingfeng', 'chaoxi', 'heijiao'];
 
 const issues = [];
 let combos = 0;

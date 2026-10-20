@@ -142,9 +142,7 @@ ui_assets! {
     "/anime-interactions.css", CSS => const ANIME_INTERACTIONS_CSS: &str = edition_ui!("anime-interactions.css");
     "/skins/skins.css", CSS => const SKINS_CSS: &str = edition_ui!("skins/skins.css");
     "/skins/skin.sheen.css", CSS => const SKIN_SHEEN_CSS: &str = edition_ui!("skins/skin.sheen.css");
-    "/skins/skin.workbench.css", CSS => const SKIN_WORKBENCH_CSS: &str = edition_ui!("skins/skin.workbench.css");
     "/skins/skin.liunian.css", CSS => const SKIN_LIUNIAN_CSS: &str = edition_ui!("skins/skin.liunian.css");
-    "/skins/skin.ios.css", CSS => const SKIN_IOS_CSS: &str = edition_ui!("skins/skin.ios.css");
     "/skins/skin.qingfeng.css", CSS => const SKIN_QINGFENG_CSS: &str = edition_ui!("skins/skin.qingfeng.css");
     "/skins/skin.chaoxi.css", CSS => const SKIN_CHAOXI_CSS: &str = edition_ui!("skins/skin.chaoxi.css");
     "/skins/skin.heijiao.css", CSS => const SKIN_HEIJIAO_CSS: &str = edition_ui!("skins/skin.heijiao.css");

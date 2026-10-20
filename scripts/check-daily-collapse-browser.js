@@ -432,8 +432,8 @@ async function checkRowCheckbox(page) {
     // ------------------------------------------------------- 逐皮肤
     section('五套皮肤都要拿得到这颗按钮');
     for (const [id, label] of [
-      ['classic', '经典'], ['sheen', '浮光'], ['workbench', '工作台'],
-      ['liunian', '流年'], ['ios', 'OS风'], ['qingfeng', '清风'],
+      ['classic', '经典'], ['sheen', '浮光'],
+      ['liunian', '流年'], ['qingfeng', '清风'],
     ]) {
       await checkSkin(page, id, label);
     }
@@ -443,7 +443,7 @@ async function checkRowCheckbox(page) {
     // 「三列还撑着、但内容栏已经很紧」的一档。
     section('窄窗口：按钮不能被压掉、文案不能竖排');
     await page.setViewportSize({ width: 969, height: 800 });
-    for (const [id, label] of [['classic', '经典'], ['ios', 'OS风'], ['qingfeng', '清风']]) {
+    for (const [id, label] of [['classic', '经典'], ['qingfeng', '清风']]) {
       await setSkin(page, id);
       await gotoLibrary(page);
       const s = await stripState(page);

@@ -79,7 +79,7 @@ function makeEl(tag, id) {
 function makeApp(store) {
   const html = makeEl('html');
   const body = makeEl('body');
-  const links = ['sheen', 'workbench', 'liunian'].map((id) => {
+  const links = ['sheen', 'liunian'].map((id) => {
     const l = makeEl('link');
     l.setAttribute('data-skin-css', id);
     l.disabled = true;
@@ -154,8 +154,6 @@ function enabledSkin(app) {
 function checkSkinRestore() {
   section('布局皮肤：刷新后 data-skin 与配套 CSS 的启用状态都还在');
 
-  // 样本取 sheen 而不是 workbench：后者是隐藏皮肤（界面上没有入口），开页会
-  // 主动回落到 classic，用它当样本测的就不是"刷新恢复"了。
   const store = new Map();
   const first = boot(makeApp(store));
   first.sandbox.Skins.apply('sheen');

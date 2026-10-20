@@ -567,7 +567,7 @@ async function main() {
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => Skins.currentId() === 'sheen' && document.querySelector('[data-skin-css="sheen"]').sheet);
     assert.equal(await page.evaluate(() => Theme.current().id), 'celestial', 'keyboard skin selection retains theme');
-    for (const skin of ['liunian', 'ios', 'qingfeng', 'classic']) {
+    for (const skin of ['liunian', 'qingfeng', 'classic']) {
       await page.evaluate(id => Skins.apply(id), skin);
       await page.waitForFunction(id => Skins.currentId() === id && (id === 'classic' || document.querySelector('[data-skin-css="' + id + '"]').sheet), skin);
       await settle(page);
@@ -591,12 +591,6 @@ async function main() {
         active.subtitleContrast = (Math.max(background, subtitle) + .05) / (Math.min(background, subtitle) + .05);
         report.liunianActive = active;
         assert.ok(active.subtitleContrast >= 4.5, 'liunian active row subtitle remains readable: ' + JSON.stringify(active));
-      }
-      if (skin === 'ios') {
-        await page.setViewportSize({ width: 390, height: 1000 });
-        await settle(page);
-        report.iosSearchFontSize = await page.locator('#search').evaluate(el => parseFloat(getComputedStyle(el).fontSize));
-        assert.ok(report.iosSearchFontSize >= 16, 'mobile OS skin search keeps a 16px input font');
       }
       if (skin === 'qingfeng') {
         await page.setViewportSize({ width: 320, height: 1000 });
