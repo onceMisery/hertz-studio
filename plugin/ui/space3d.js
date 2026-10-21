@@ -13,6 +13,9 @@
   var shelf = null, shelfShown = false;
   var floatTarget = null;
   var panelPreview = null, nodePreview = null, previewTimer = 0, hud = null, hudRecipe = null, hudUntil = 0, hudTimer = 0;
+  var zodiacHud = null, zodiacStarCard = null, zodiacSignIndex = -1;
+  var zodiacHover = null, zodiacPinTimer = 0, zodiacPinIndex = -1, zodiacSwapTimer = 0;
+  var CN_HOUSES = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '十一', '十二'];
   var clickSerial = 0, lastClickAt = 0, downPoint = null, holdTimer = 0, charging = false;
   var prefs = { sceneSource: 'coast', sceneStates: {}, lyrics: true, lyricStyle: 'subtitle', cinema: true,
     qualityMode: 'auto', playerAutoHide: true, shelfMode: 'side', freeCam: null, schemaVersion: 3 };
@@ -135,6 +138,115 @@
     hudTimer = setTimeout(function () { hudTimer = 0; syncHud(); }, 2700);
     syncHud(); touch(1800);
   }
+  function pad2(value) { return (value < 10 ? '0' : '') + value; }
+  function zodiacMetaText(info) {
+    return '黄道第' + (CN_HOUSES[info.signIndex] || (info.signIndex + 1)) + '宫 · 主星 '
+      + info.constellationNodes + ' · 星线 ' + info.constellationSegments;
+  }
+  function paintZodiacInfo(info) {
+    if (!info) return;
+    var index = Number(info.signIndex) || 0;
+    var plate = pad2(index + 1) + ' — XII';
+    var meta = zodiacMetaText(info);
+    if ($('sp-zodiac-index')) $('sp-zodiac-index').textContent = plate;
+    if ($('sp-zodiac-name')) $('sp-zodiac-name').textContent = info.signCn || '';
+    if ($('sp-zodiac-latin')) $('sp-zodiac-latin').textContent = String(info.signEn || '').toUpperCase();
+    if ($('sp-zodiac-meta')) $('sp-zodiac-meta').textContent = meta;
+    if (zodiacHud) zodiacHud.setAttribute('aria-label', '星座观测：' + (info.signCn || '') + '，第' + (index + 1) + '宫');
+    var ticks = $('sp-zodiac-ticks');
+    if (ticks) Array.prototype.forEach.call(ticks.children, function (tick, i) { tick.classList.toggle('is-on', i === index); });
+    if ($('sp-zodiac-console-index')) $('sp-zodiac-console-index').textContent = plate;
+    if ($('sp-zodiac-console-name')) $('sp-zodiac-console-name').textContent = info.signCn || '';
+    if ($('sp-zodiac-console-meta')) $('sp-zodiac-console-meta').textContent = meta + ' · 13s 生命周期';
+  }
+  function setZodiacInfo(info, animate) {
+    if (!info || info.signIndex == null) return;
+    var changed = info.signIndex !== zodiacSignIndex;
+    if (!changed) return;
+    zodiacSignIndex = info.signIndex;
+    hideZodiacStar(true);
+    if (!animate || !zodiacHud || zodiacHud.hidden) { paintZodiacInfo(info); return; }
+    if (zodiacSwapTimer) clearTimeout(zodiacSwapTimer);
+    zodiacHud.classList.add('is-changing');
+    zodiacSwapTimer = setTimeout(function () {
+      zodiacSwapTimer = 0;
+      paintZodiacInfo(info);
+      requestAnimationFrame(function () { if (zodiacHud) zodiacHud.classList.remove('is-changing'); });
+    }, 150);
+  }
+  function zodiacPrimary() {
+    if (!host) return null;
+    var measured = host.stats();
+    return measured && measured.sceneStats && measured.sceneStats.primary || null;
+  }
+  function zodiacActive() {
+    return page === 'stage' && prefs.sceneSource === 'zodiac' && status.state === 'ready'
+      && !root.classList.contains('sp-immersive');
+  }
+  function syncZodiacHud() {
+    if (!zodiacHud) return;
+    var consoleBlock = $('sp-zodiac-console');
+    if (consoleBlock) consoleBlock.hidden = prefs.sceneSource !== 'zodiac';
+    var info = zodiacActive() ? zodiacPrimary() : null;
+    zodiacHud.hidden = !info;
+    if (!info) { hideZodiacStar(true); return; }
+    setZodiacInfo(info, zodiacSignIndex >= 0);
+    if (zodiacHover && zodiacStarCard && !zodiacStarCard.hidden) positionZodiacStar(zodiacHover.x, zodiacHover.y);
+  }
+  function positionZodiacStar(x, y) {
+    if (!zodiacStarCard || !root) return;
+    zodiacStarCard.hidden = false;
+    var width = root.clientWidth, height = root.clientHeight;
+    var cardW = zodiacStarCard.offsetWidth || 148, cardH = zodiacStarCard.offsetHeight || 62;
+    var flipped = x + cardW + 36 > width;
+    var left = flipped ? x - cardW - 18 : x + 18;
+    var top = clamp(y - cardH / 2, 88, Math.max(88, height - cardH - 96));
+    zodiacStarCard.style.left = clamp(left, 14, Math.max(14, width - cardW - 14)) + 'px';
+    zodiacStarCard.style.top = top + 'px';
+    zodiacStarCard.classList.toggle('is-left', flipped);
+  }
+  function showZodiacStar(event, pinned) {
+    if (!zodiacStarCard || !event || event.index == null) return;
+    zodiacHover = event;
+    var name = '主星 ' + pad2(event.index + 1);
+    var meta = '亮度 ' + Number(event.magnitude || 0).toFixed(2) + ' · 连线 ' + (event.links || 0);
+    if ($('sp-zodiac-star-name')) $('sp-zodiac-star-name').textContent = name;
+    if ($('sp-zodiac-star-meta')) $('sp-zodiac-star-meta').textContent = meta;
+    zodiacStarCard.classList.toggle('is-pinned', !!pinned);
+    positionZodiacStar(event.x, event.y);
+  }
+  function hideZodiacStar(force) {
+    if (!zodiacStarCard) return;
+    if (!force && zodiacPinTimer) return;
+    if (zodiacPinTimer) { clearTimeout(zodiacPinTimer); zodiacPinTimer = 0; }
+    zodiacPinIndex = -1;
+    zodiacHover = null;
+    zodiacStarCard.hidden = true;
+    zodiacStarCard.classList.remove('is-pinned');
+  }
+  function onZodiacEvent(event) {
+    if (!event || prefs.sceneSource !== 'zodiac' || page !== 'stage') return;
+    if (event.type === 'sign') { syncZodiacHud(); return; }
+    if (event.type === 'hover') {
+      if (!event.hovered) { if (!zodiacPinTimer) hideZodiacStar(); return; }
+      if (zodiacPinTimer) {
+        if (zodiacPinIndex !== event.index) return;
+        zodiacHover = event;
+        positionZodiacStar(event.x, event.y);
+        return;
+      }
+      showZodiacStar(event, false);
+      return;
+    }
+    if (event.type === 'select' && event.index != null) {
+      zodiacPinIndex = event.index;
+      if (zodiacPinTimer) clearTimeout(zodiacPinTimer);
+      zodiacPinTimer = setTimeout(function () {
+        zodiacPinTimer = 0; zodiacPinIndex = -1; hideZodiacStar(true);
+      }, 2600);
+      showZodiacStar(event, true);
+    }
+  }
   function hidePlayer(force) {
     if (page === 'closed' || (!force && (panels.length || loginOpen() || seeking || (global.SpaceHome && SpaceHome.isPanelOpen()) || $('sp-bar').matches(':hover') || $('sp-bar').contains(document.activeElement)))) return;
     root.classList.add('sp-player-hidden'); $('sp-bar').inert = true;
@@ -158,7 +270,7 @@
       immersiveNodes.forEach(function(item){item.node.inert=item.inert;});immersiveNodes=[];
     }
     root.classList.toggle('sp-immersive',on);
-    syncShelf();
+    syncShelf(); syncZodiacHud();
     ['sp-immersive','sp-stage-immersive'].forEach(function(id){$(id).setAttribute('aria-pressed',String(on));});
     $('sp-immersive-toggle').checked=on;
     if(!on){
@@ -262,7 +374,7 @@
     var toggle=$('sp-page-toggle'),destination=next==='stage'?'首页':'三维舞台';
     toggle.title=destination;toggle.setAttribute('aria-label',destination);
     toggle.querySelector('use').setAttribute('href',next==='stage'?'#i-home':'#i-cube');
-    $('sp-reading').hidden = next !== 'stage'; syncSettings(); syncPlayer(); syncShelf();
+    $('sp-reading').hidden = next !== 'stage'; syncSettings(); syncPlayer(); syncShelf(); syncZodiacHud();
   }
   function releaseInput() {
     lockRequest++;
@@ -319,7 +431,7 @@
     status = next;
     $('sp-failure').hidden = !failed;
     $('sp-error-message').textContent = failed ? String(next.error && next.error.message || next.error || '场景加载失败') : '';
-    $('sp-loading').hidden = next.state !== 'loading'; root.dataset.sceneState=next.state||'idle'; syncSettings(); syncShelf(); syncHud(); kick();
+    $('sp-loading').hidden = next.state !== 'loading'; root.dataset.sceneState=next.state||'idle'; syncSettings(); syncShelf(); syncHud(); syncZodiacHud(); kick();
   }
   async function enterStage(id) {
     if (page === 'closed') open();
@@ -336,7 +448,7 @@
         host.setServices({coverUrl:function(){return present().cover||'';},coverItems:function(){return queue.filter(function(t){return t.cover;});},
           resolveCover:function(url){return global.HertzCovers&&HertzCovers.resolve?HertzCovers.resolve(url):url;},
           queue:function(){return queue;},previewTrack:function(id){nodePreview=trackById(id);syncHud();touch(1800);},
-          playTrack:function(id){control('queue-play',id);touch();},onRecipe:onRecipe,invalidate:function(){if(page!=='closed')touch(300);}}); resize();
+          playTrack:function(id){control('queue-play',id);touch();},onRecipe:onRecipe,zodiacEvent:onZodiacEvent,invalidate:function(){if(page!=='closed')touch(300);}}); resize();
         syncLyrics();
       } catch (error) { disposeStage(); showStatus({state:'error',error:error.message}); return false; }
     }
@@ -484,6 +596,7 @@
     $('sp-autohide').setAttribute('aria-pressed',String(prefs.playerAutoHide));
     if(document.activeElement!==$('sp-volume'))$('sp-volume').value=Math.round((p.volume==null?.8:p.volume)*100);
     if(page==='stage')subtitles(p);
+    syncZodiacHud();
   }
   function buildQueue(){
     var body=$('sp-playlist-body');body.textContent='';
@@ -533,10 +646,12 @@
     renderParams(prefs.lyricStyle,$('sp-lyric-params'),true);
   }
   function renderParams(id,container,lyric){
-    container.textContent='';var scene=def(id);if(!scene)return;
+    container.textContent='';container.dataset.scene=id;var scene=def(id);if(!scene)return;
     var state=normalize(scene.id,prefs.sceneStates[scene.id]);prefs.sceneStates[scene.id]=state;
     var specs=Array.isArray(scene.params)?scene.params:Object.keys(scene.params||{}).map(function(key){return Object.assign({key:key},scene.params[key]);});
     var advanced=document.createElement('details'),summary=document.createElement('summary');summary.textContent='光效与质感';advanced.appendChild(summary);
+    var advancedBody=document.createElement('div');advancedBody.className='sp-param-body';advanced.appendChild(advancedBody);
+    var advancedCount=0;
     var effectKeys=['dust','discRing','ripples','halftone','grain','vignette','softness','bokeh','chroma','aberration','distort','bloom'];
     var lyricKeys=['speed','reduced','textWidth','spacing','arc','karaoke','layout','colorMode','composition','shotFlow','sceneKind'];
     var kind = performanceKind(id);
@@ -547,7 +662,7 @@
     }[kind]);
     specs.forEach(function(spec){
       var key=spec.key||spec.id;if(lyric&&lyricKeys.indexOf(key)<0)return;
-      var target=!lyric&&effectKeys.indexOf(key)>=0?advanced:container;
+      var target=!lyric&&effectKeys.indexOf(key)>=0?advancedBody:container;
       var label=document.createElement('label'),input;label.textContent=spec.label||key;label.htmlFor=(lyric?'sp-lyric-param-':'sp-param-')+key;
       if(spec.type==='select'||spec.type==='enum'){
         input=document.createElement('select');(spec.options||[]).forEach(function(choice){var option=document.createElement('option');option.value=Array.isArray(choice)?choice[0]:typeof choice==='object'?choice.value:choice;option.textContent=Array.isArray(choice)?choice[1]:typeof choice==='object'?choice.label:choice;input.appendChild(option);});
@@ -566,9 +681,12 @@
         next[key]=value;
         try{state=SpaceStagePure.normalizeState(scene.id,{stateVersion:scene.stateVersion,params:next});prefs.sceneStates[scene.id]=state;if(host){if(lyric){if(kind)syncPerformance(0);else host.setLyricParams(state.params);}else host.setParams(state.params);}display();scheduleSave();touch();}
         catch(error){showStatus({state:'error',error:error.message});}
-      },{signal:paramEvents.signal});target.append(label,input,output);
+      },{signal:paramEvents.signal});
+      var field=document.createElement('div');field.className='sp-param-field'+(input.type==='checkbox'?' is-toggle':'');
+      field.append(label,output,input);target.appendChild(field);
+      if(target===advancedBody)advancedCount++;
     });
-    if(advanced.childElementCount>1)container.appendChild(advanced);
+    if(advancedCount)container.appendChild(advanced);
   }
   function consoleTab(name,focus){
     root.querySelectorAll('[data-console-tab]').forEach(function(tab){
@@ -718,6 +836,9 @@
     var feedback=document.createElement('div');feedback.id='sp-click-feedback';feedback.setAttribute('aria-hidden','true');root.appendChild(feedback);
     hud=document.createElement('div');hud.id='sp-scene-hud';hud.className='sp-scene-hud';hud.setAttribute('role','status');hud.setAttribute('aria-live','polite');hud.hidden=true;
     hud.innerHTML='<i aria-hidden="true"></i><span class="sp-scene-hud-tag"></span><strong></strong><small></small>';root.appendChild(hud);
+    zodiacHud=$('sp-zodiac-hud'); zodiacStarCard=$('sp-zodiac-star');
+    var zodiacTicks=$('sp-zodiac-ticks');
+    if(zodiacTicks) for(var zi=0;zi<12;zi++) zodiacTicks.appendChild(document.createElement('i'));
     var telemetry=document.createElement('aside');telemetry.id='sp-reactor-telemetry';telemetry.className='sp-reactor-telemetry';telemetry.hidden=true;
     telemetry.innerHTML='<span class="sp-reactor-label">PARTICLE REACTOR</span><strong>粒子反应堆</strong><dl><div><dt>能量</dt><dd data-reactor-energy>—</dd></div><div><dt>偏航</dt><dd data-reactor-yaw>—</dd></div><div><dt>缩放</dt><dd data-reactor-zoom>—</dd></div><div><dt>FPS</dt><dd data-reactor-fps>—</dd></div></dl><p>拖拽环绕 · 滚轮缩放<br>点击脉冲 · 按住充能<br>悬停队列预览 · 点击切歌</p>';root.appendChild(telemetry);
     bindChrome();bindGestures();buildCatalog();syncSettings();['sp-sheet','sp-playlist','sp-player-options','sp-volume-panel'].forEach(function(id){$(id).inert=true;});

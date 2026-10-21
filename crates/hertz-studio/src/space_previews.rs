@@ -20,7 +20,6 @@ pub(super) const PREVIEWS: &[(&str, &[u8])] = &[
     ("light-tunnel.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/light-tunnel.jpg")),
     ("lyric-cadenza.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/lyric-cadenza.jpg")),
     ("lyric-classic.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/lyric-classic.jpg")),
-    ("lyric-corridor.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/lyric-corridor.jpg")),
     ("lyric-sonnet.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/lyric-sonnet.jpg")),
     ("lyric-tempera.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/lyric-tempera.jpg")),
     ("particle-silk.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/particle-silk.jpg")),
@@ -33,6 +32,5 @@ pub(super) const PREVIEWS: &[(&str, &[u8])] = &[
     ("spectrum-terrain.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/spectrum-terrain.jpg")),
     ("spectrum-towers.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/spectrum-towers.jpg")),
     ("warp-tunnel.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/warp-tunnel.jpg")),
-    ("word-wipe.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/word-wipe.jpg")),
     ("zodiac.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/zodiac.jpg")),
 ];

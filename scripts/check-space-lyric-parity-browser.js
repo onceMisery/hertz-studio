@@ -106,8 +106,8 @@ const scripts = ['vendor/stage-runtime.js', 'vendor/space-stage.js', 'space-came
         await page.evaluate(() => draw(2));
       }
     }
-    await page.evaluate(() => { Space3D.setLyricStyle('lyric-corridor'); draw(8); });
-    assert.equal(await page.locator('#sp-stanza > *').count(), 0, 'native spatial lyrics release the shared renderer');
+    await page.evaluate(() => { Space3D.setLyricStyle('subtitle'); draw(8); });
+    assert.equal(await page.locator('#sp-stanza > *').count(), 0, 'plain subtitle releases the shared renderer');
     await page.evaluate(() => { Space3D.setLyricStyle('lyric-classic'); draw(); document.getElementById('sp-lyric-button').click(); draw(); });
     assert.equal(await page.locator('#sp-stanza').isVisible(), false, 'global lyric toggle hides shared performance');
     await page.evaluate(() => Space3D.close());

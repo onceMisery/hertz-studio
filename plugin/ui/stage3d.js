@@ -2676,6 +2676,15 @@
     zodiacHost.hidden = !useZodiac;
     root.classList.toggle('s3d-zodiac-source', useZodiac);
     zodiacHost.classList.toggle('zodiac-interact', useZodiac && zodiacInteract);
+    // 切到星座时立刻把左下角提示换成交互说明；syncNowPlaying 只在曲目帧更新，
+    // 提前把这句话补上，用户不必等下一帧才知道「按住蓄能」。
+    var hintEl = $('s3d-hint');
+    if (hintEl) {
+      if (useZodiac) hintEl.textContent = '星座 · 拖拽环绕 / 悬停主星 / 按住蓄能 · 松开引爆';
+      else if (hintEl.textContent.indexOf('星座 ·') === 0) {
+        hintEl.textContent = ('0' + (stageIndex + 1)).slice(-2) + ' / ' + STAGES[stageIndex].label;
+      }
+    }
     var tuning = $('s3d-zodiac-tuning');
     if (tuning) {
       tuning.hidden = !useZodiac;
@@ -3466,7 +3475,9 @@
     }
     text('s3d-title', track ? track.title || '未知曲目' : '还没有播放音乐');
     text('s3d-artist', track ? track.artist || '未知艺术家' : '从曲库选择一首喜欢的歌');
-    text('s3d-hint', ('0' + (stageIndex + 1)).slice(-2) + ' / ' + STAGES[stageIndex].label);
+    text('s3d-hint', sceneSource === 'zodiac'
+    ? '星座 · 拖拽环绕 / 悬停主星 / 按住蓄能 · 松开引爆'
+    : ('0' + (stageIndex + 1)).slice(-2) + ' / ' + STAGES[stageIndex].label);
     syncSeek(data);
     text('s3d-duration', fmt(data.duration));
     text('s3d-status', track ? (data.playing ? '正在聆听' : '已暂停') : '让音乐，拥有形状');

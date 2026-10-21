@@ -79,7 +79,7 @@ Stage 是唯一时钟；音频位置用于歌词，`sceneTime/dynamicDt` 用于�
 只供开发；旧 `check-space3d-browser.js` 的 SpaceFields 路径已被该入口替代。
 普通电脑性能和原生 DBX 需另行实测，软件 WebGL 截图不证明硬件 FPS。
 
-空间菜单将 registry 分为 24 个舞台与 6 个 ownsLyrics 歌词效果；普通字幕另外提供。
+空间菜单从 registry 派生，把可挂载的舞台场景与 `ownsLyrics` 歌词效果分成两组；普通字幕另外提供。
 宿主 selectLyrics(id|null, savedState) 与 setLyricParams(patch) 独立控制歌词，
 切换歌词保留舞台及机位，切换舞台保留歌词。工厂通过 ctx.layer === 'lyrics'
 识别叠加挂载，使用透明场景并省略底图效果；宿主负责稳定阅读机位、清深度与

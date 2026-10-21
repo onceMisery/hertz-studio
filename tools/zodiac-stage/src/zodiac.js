@@ -22,8 +22,17 @@ export const FIG_HALF = 2.50;
 export const FIG_ASPECT = 1.78;
 // 设计框半宽。缩放是等比的（x/y 同一个 k），所以横宽的星座会撑满宽度、顶到 ±这里。
 export const FIG_HALF_W = FIG_HALF * FIG_ASPECT;
-// 体积深度上限；正面依轮廓距离隆起，背面与侧壁封闭体积。
-export const FIGURE_DEPTH = 0.85;
+// 体积深度上限。正面按「离轮廓的距离」指数饱和隆起（肢体薄、躯干厚），
+// 背面镜像同一曲面 —— 两头夹出的是一枚可读的浮雕体，不是一层贴片。
+export const FIGURE_DEPTH = 2.05;
+// 隆起饱和半径：0.42 让 0.15 宽的细肢只吃到三成厚度，0.8 以上的躯干接近满值。
+const RELIEF_TAU = 0.42;
+// 星尘皮肤比实体面罩往外抬的量；面罩往里收的量。两者合起来让亮星始终
+// 浮在体积表面之上，转动时不会被自己挡住。
+const SKIN_LIFT = 0.16;
+const MESH_INSET = 0.07;
+// 主星网浮在皮肤外的高度：四芒星要能读成「挂在体量前面的灯」。
+const NODE_LIFT = 0.14;
 // 公开的画框边界，留量供呼吸与交互使用。
 export const SHAPE_BOX = FIG_HALF_W * 1.06;
 export const SHAPE_BOX_V = FIG_HALF * 1.06;
@@ -122,10 +131,12 @@ function reliefDepth(index, x, y) {
     }
     distance = Math.max(distance, nearest * shapeFit(index).k);
   }
-  return FIGURE_Z + .06 + Math.min(FIGURE_DEPTH-FIGURE_Z-.08, Math.sqrt(distance)*.52);
+  return FIGURE_Z + .06 + (FIGURE_DEPTH - FIGURE_Z - .08) * (1 - Math.exp(-distance / RELIEF_TAU));
 }
 
-const backDepth = z => -(z-FIGURE_Z)*.8-.08;
+// 背面是正面的镜像壳体（略浅），世界层与着色器都按这个范围算纵深比。
+export const figureBackDepth = z => -(z - FIGURE_Z) * .82 - .12;
+const backDepth = figureBackDepth;
 
 // 体积法线：由三角面片按面积加权求和，再把 z 翻正（正面朝机位）。
 // 起伏只来自 reliefDepth 的径向隆起，所以内部法线接近 +z、靠轮廓处向外倾斜 ——
@@ -249,10 +260,13 @@ function sampleArtwork(index, count, seed, surface = false, normalsOut = null) {
     }
     pos[i*3] = (x-fit.cx)*fit.k;
     pos[i*3+1] = (y-fit.cy)*fit.k;
-    // zMix 偏向正面：星尘的「表皮」才是被看见的那一层，均匀铺满厚度会让
-    // 正面和背面叠成同一片亮雾。仍保留少量贴背粒子，侧面才有真正的纵深。
-    const zMix = surface ? 1 : 0.12 + 0.88 * Math.pow(rnd(), 0.58);
-    pos[i*3+2] = surface ? depth : backDepth(depth)+(depth-backDepth(depth))*zMix;
+    // 三层星尘：前壳浮在体积表面之上、中层补体积、背层只在转动时露出来。
+    const layer = rnd();
+    const zMix = surface ? 1 : layer < .62 ? .64 + .36 * Math.sqrt(rnd())
+      : layer < .9 ? .2 + .44 * rnd() : .02 + .22 * rnd();
+    const back = backDepth(depth);
+    pos[i*3+2] = surface ? depth + SKIN_LIFT * .6
+      : back + (depth - back) * zMix + SKIN_LIFT * Math.pow(zMix, 6);
     if (normalsOut) {
       // 体积内粒子：前半参考正面法线、后半沿深度翻转，中间过渡到侧壁；
       // 这样从背后看过去也有一致的受光面，而不是一块均匀发光的贴片。
@@ -316,13 +330,14 @@ export function buildConstellation(index) {
   const i = ((index % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;
   const src = CONSTELLATION[i], fit = shapeFit(i);
   const x = new Float32Array(src.nodes.length), y = new Float32Array(src.nodes.length);
-  const m = new Float32Array(src.nodes.length);
+  const m = new Float32Array(src.nodes.length), links = new Uint8Array(src.nodes.length);
   const z = new Float32Array(src.nodes.length);
   src.nodes.forEach(([px,py,b], k) => {
     x[k] = (px-fit.cx)*fit.k; y[k] = (py-fit.cy)*fit.k; m[k] = b;
-    z[k] = surfaceDepth(i,px,py)+.08;
+    z[k] = surfaceDepth(i,px,py) - MESH_INSET + NODE_LIFT;
   });
-  return { x, y, z, m, nodes: x.length, segments: src.lines.length,
+  src.lines.forEach(([a,b]) => { links[a] += 1; links[b] += 1; });
+  return { x, y, z, m, links, nodes: x.length, segments: src.lines.length,
     core: buildRibbon(x, y, src.lines, LINE_CORE_WIDTH,z),
     halo: buildRibbon(x, y, src.lines, LINE_HALO_WIDTH,z) };
 }
@@ -407,6 +422,9 @@ export function buildFigureMesh(index, cloudCount) {
   const i = ((index % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;
   const art = artwork(i), fit = shapeFit(i);
   const pts = art.points.map(([x,y]) => ({x:(x-fit.cx)*fit.k, y:(y-fit.cy)*fit.k}));
+  // 面罩比星尘皮肤内收一点：亮星浮在实体前面，转动时不会和自己的身体打架。
+  const shellFront = art.depths.map(z => z - MESH_INSET);
+  const shellBack = art.depths.map(z => backDepth(z) + MESH_INSET);
   const tris = art.triangles;
   const cloud = sampleArtwork(i, cloudCount, 'zodiac-figure-cloud:' + ZODIAC[i].id + ':' + cloudCount, true);
 
@@ -427,7 +445,7 @@ export function buildFigureMesh(index, cloudCount) {
     v.forEach((p, n) => {
       meshPos[t * 9 + n * 3] = p.x;
       meshPos[t * 9 + n * 3 + 1] = p.y;
-      meshPos[t * 9 + n * 3 + 2] = art.depths[[a,b,c][n]];
+      meshPos[t * 9 + n * 3 + 2] = shellFront[[a,b,c][n]];
     });
     // 面片明度：暗面/亮面交错，低多边形才不塌成一块平色。
     const t0 = 0.62 + tintRnd() * 0.66;
@@ -442,7 +460,7 @@ export function buildFigureMesh(index, cloudCount) {
     const tone=.68+tintRnd()*.28;
     vertices.forEach(([index,back],k)=>{
       const p=pts[index], offset=face*9+k*3;
-      meshPos.set([p.x,p.y,back?backDepth(art.depths[index]):art.depths[index]],offset);
+      meshPos.set([p.x,p.y,back?shellBack[index]:shellFront[index]],offset);
       tint.set([tone,tone,tone],offset);
     });
     face++;

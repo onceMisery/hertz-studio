@@ -37,8 +37,10 @@ coast 舞台与独立 lyricStyle，原场景 ID 和参数继续兼容。
 它们是歌词叠加层，不是新的三维背景场景；不挂载 Stage3D，不使用近似滚动文字替代原演出。
 Three.js 继续独占三维背景；商籁/凝彩按需创建一个 Pixi 上下文，由同一 Stage 门推进，
 不启动 ticker。只保留当前歌词实例，回首页、关闭歌词、切换与退出时销毁。
-三维歌词轨/逐字擦除继续走 selectLyrics；四种旧空间文字工厂保留独立 API 兼容，
-不再作为 Space3D 的这四种效果。renderer 统计保留逻辑 lyricId，并以 lyricBackend 区分实现。
+2026-10-21 空间文字场景下架：三维歌词与逐字擦除不再注册进 registry，已保存的选择回落为简洁字幕，
+旧 ID 与别名不再解析；`selectLyrics`/`setLyricParams` 与 `ctx.layer === 'lyrics'` 的叠加层契约继续保留。
+四种旧空间文字工厂保留独立 API 兼容，不再作为 Space3D 的这四种效果。renderer 统计保留逻辑 lyricId，
+并以 lyricBackend 区分实现。
 镜头偏好在关闭/离页时提交最新快照，HTTP 请求使用 keepalive，仍经过原有串行设置写入队列；
 不另设浏览器存储副本或并行末次写入，避免恢复冲突与旧写覆盖新写。离页前尚未发出的请求仍是尽力保存。
 

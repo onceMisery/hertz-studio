@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Actual WebGL pixels: sparse meteors, playback, camera following and resource lifetime.
+// Actual WebGL pixels for the camera-facing meteor layer: cycle showers,
+// ambient cadence, density, portrait, pause/seek and resource lifetime.
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -12,7 +13,7 @@ const output = path.join(root, 'output/playwright/zodiac-meteors');
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const bundle = await build({
-    stdin: { contents: "import * as THREE from 'three'; import {createWorld} from './src/world.js'; window.meteorTest={THREE,createWorld};",
+    stdin: { contents: "import * as THREE from 'three'; import {createWorld} from './src/world.js'; import {CYCLE_SECONDS} from './src/zodiac.js'; window.meteorTest={THREE,createWorld,CYCLE_SECONDS};",
       resolveDir: path.join(root, 'tools/zodiac-stage') },
     bundle: true, format: 'iife', write: false,
   });
@@ -37,16 +38,20 @@ async function main() {
         scene.traverse(o => { if (o.geometry?.getAttribute('aPeriod')) meteor = o; });
         Object.assign(fixture, { world, scene, camera, meteor });
       };
-      window.drawMeteor = (time, { reduced = false, translation = 0, aim = true, composite = false } = {}) => {
+      window.drawMeteor = (time, { reduced = false, translate = 0, width = 800, height = 500 } = {}) => {
         const { scene, camera, world, meteor } = fixture;
-        camera.position.set(translation, 0, 10 * Math.max(1, 1.6 / camera.aspect));
-        const origin = new THREE.Vector3().fromBufferAttribute(meteor.geometry.getAttribute('aOrigin'), 0);
-        camera.lookAt(aim ? origin.add(camera.position) : new THREE.Vector3(translation, 0, 0));
-        world.update(time, { state: 'hold', k: 1, reduced, cameraPos: camera.position });
+        camera.position.set(translate, 0, 12);
+        camera.lookAt(translate, 0, 0);
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+        camera.updateMatrixWorld();
+        world.update(time, { state: 'hold', k: 1, reduced, cameraPos: camera.position, camera,
+          width, height, now: time * 1000, uiDt: .016 });
         const visibility = [];
         scene.traverse(o => {
-          if (o.isMesh || o.isPoints) { visibility.push([o, o.visible]); o.visible = composite ? o.visible : o === meteor; }
+          if (o.isMesh || o.isPoints) { visibility.push([o, o.visible]); if (o !== meteor) o.visible = false; }
         });
+        renderer.setSize(width, height);
         renderer.render(scene, camera);
         const gl = renderer.getContext(), size = renderer.getSize(new THREE.Vector2());
         const pixels = new Uint8Array(size.x * size.y * 4);
@@ -64,99 +69,68 @@ async function main() {
       };
       window.delta = (a, b) => a.reduce((sum, v, i) => sum + Math.abs(v - b[i]), 0);
     });
+    const showerTime = 2.0, ambientTime = 5.0;
     for (const quality of ['low', 'medium', 'high']) {
-      const result = await page.evaluate(quality => {
+      const result = await page.evaluate(({ quality, showerTime, ambientTime }) => {
         mount(quality);
         const { world, meteor, renderer } = fixture;
-        const phase = meteor.geometry.getAttribute('aPhase').getX(0);
-        const time = phase + .65;
-        const a = drawMeteor(time), b = drawMeteor(time + .22);
-        const moving = delta(a, b), frozen = delta(b, drawMeteor(time + .22));
-        drawMeteor(time + 40);
-        const seek = delta(a, drawMeteor(time));
-        const translated = delta(a, drawMeteor(time, { translation: 1000 }));
-        const reduced = energy(drawMeteor(time, { reduced: true }));
+        const shower = energy(drawMeteor(showerTime));
+        const ambient = energy(drawMeteor(ambientTime));
+        const moved = delta(drawMeteor(ambientTime), drawMeteor(ambientTime + .22));
+        const frozen = delta(drawMeteor(ambientTime + .22), drawMeteor(ambientTime + .22));
+        const seek = delta(drawMeteor(ambientTime), drawMeteor(ambientTime));
+        const repeated = energy(drawMeteor(meteorTest.CYCLE_SECONDS + showerTime));
+        const translated = delta(drawMeteor(ambientTime), drawMeteor(ambientTime, { translate: 1000 }));
+        const reduced = energy(drawMeteor(showerTime, { reduced: true }));
+        world.setMeteors(0);
+        const densityOff = energy(drawMeteor(showerTime));
+        world.setMeteors(1);
         world.setFieldVisible(false);
-        const hidden = energy(drawMeteor(time));
+        const fieldOff = energy(drawMeteor(showerTime));
         world.setFieldVisible(true);
-        const front = energy(drawMeteor(time, { aim: false }));
-        // No resource growth while seeking or switching quality; geometry is reused.
+        const portrait = energy(drawMeteor(showerTime, { width: 390, height: 720 }));
         const geometry = meteor.geometry, material = meteor.material;
-        const resident = renderer.info.memory.geometries;
-        const qualityCounts = [];
+        const resident = renderer.info.memory.geometries, counts = [];
         for (const mode of ['low', 'medium', 'high']) {
-          world.setQuality(mode); drawMeteor(time);
-          qualityCounts.push(meteor.geometry.drawRange.count / 6);
+          world.setQuality(mode);
+          drawMeteor(showerTime, { width: 800, height: 500 });
+          counts.push(meteor.geometry.drawRange.count / 6);
         }
         const stableResources = meteor.geometry === geometry && meteor.material === material
           && renderer.info.memory.geometries === resident;
         let disposed = 0;
         geometry.addEventListener('dispose', () => disposed++);
         material.addEventListener('dispose', () => disposed++);
-        drawMeteor(time, { aim: false, composite: true });
+        drawMeteor(showerTime);
         const png = renderer.domElement.toDataURL();
         world.dispose();
-        return { quality, time, visible: energy(a), moving, frozen, seek, translated, reduced, hidden, front,
-          qualityCounts, stableResources, disposed, remaining: fixture.scene.children.length, png };
-      }, quality);
+        return { quality, shower, ambient, moved, frozen, seek, repeated, translated, reduced, densityOff, fieldOff,
+          portrait, counts, stableResources, disposed, remaining: fixture.scene.children.length, png };
+      }, { quality, showerTime, ambientTime });
       const { png, ...metrics } = result;
       report.push(metrics);
       fs.writeFileSync(path.join(output, quality + '.png'), Buffer.from(png.split(',')[1], 'base64'));
       console.log(metrics);
-      assert.ok(result.visible.lit > 3, quality + ': meteors must produce visible pixels');
-      assert.ok(result.moving > 30, quality + ': playback must move the meteor');
+      assert.ok(result.shower.lit > 3, quality + ': cycle shower is visible');
+      assert.ok(result.ambient.lit > 3, quality + ': ambient meteor is visible');
+      assert.ok(result.moved > 30, quality + ': playback moves the meteor');
       assert.equal(result.frozen, 0, 'Pause freezes meteors');
       assert.equal(result.seek, 0, 'Seek reproduces the same pixels');
-      assert.ok(result.translated < result.visible.sum * .03, 'Camera translation preserves distant meteor appearance');
+      assert.ok(result.repeated.lit > 3, quality + ': shower repeats at the next sign cycle');
+      assert.ok(result.translated < result.shower.sum * .03, 'Camera translation preserves meteor appearance');
       assert.equal(result.reduced.sum, 0, 'Reduced motion suppresses streaks');
-      assert.equal(result.hidden.sum, 0, 'Field toggle hides meteors');
-      assert.ok(result.front.lit > 3, quality + ': default view must contain a meteor');
-      const cap = { low: 3, medium: 5, high: 7 }[quality];
-      assert.deepEqual(result.qualityCounts, [3, Math.min(5, cap), cap], 'Live quality updates whole meteor quads');
+      assert.equal(result.densityOff.sum, 0, 'Density zero removes meteors');
+      assert.ok(result.fieldOff.lit > 3, quality + ': star-field toggle leaves the meteor layer visible');
+      assert.ok(result.portrait.lit > 3, quality + ': portrait view contains a meteor');
+      assert.deepEqual(result.counts, quality === 'low' ? [5, 5, 5] : quality === 'medium' ? [5, 10, 10] : [5, 10, 18],
+        quality + ': live quality updates use accumulated draw ranges');
       assert.equal(result.stableResources, true, 'Seeking and quality changes reuse GPU resources');
       assert.equal(result.disposed, 2, 'Unmount releases meteor geometry and material');
       assert.equal(result.remaining, 0, 'Unmount removes scene objects');
     }
-    const portrait = await page.evaluate(() => {
-      mount('low');
-      const { renderer, camera, world, meteor } = fixture;
-      renderer.setSize(390, 720);
-      camera.aspect = 390 / 720; camera.updateProjectionMatrix();
-      const phase = meteor.geometry.getAttribute('aPhase').getX(0);
-      const period = meteor.geometry.getAttribute('aPeriod').getX(0);
-      meteor.geometry.setDrawRange(0, 6);
-      const before = energy(drawMeteor(phase - .1));
-      const after = energy(drawMeteor(phase + 1.3));
-      const next = energy(drawMeteor(phase + period + .65));
-      const visible = energy(drawMeteor(phase + .65, { aim: false }));
-      drawMeteor(phase + .65, { aim: false, composite: true });
-      const png = renderer.domElement.toDataURL();
-      world.dispose();
-      // A shared scope owns disposal in the integrated stage host.
-      const tracked = [], scene = new fixture.THREE.Scene();
-      const scoped = fixture.createWorld(fixture.THREE, scene, { quality: 'low', scope: { track: r => tracked.push(r) } });
-      let meteorObject;
-      scene.traverse(o => { if (o.geometry?.getAttribute('aPeriod')) meteorObject = o; });
-      let disposals = 0;
-      meteorObject.geometry.addEventListener('dispose', () => disposals++);
-      meteorObject.material.addEventListener('dispose', () => disposals++);
-      scoped.dispose();
-      const beforeScopeDispose = disposals;
-      tracked.forEach(r => r.dispose());
-      renderer.dispose();
-      return { before, after, next, visible, beforeScopeDispose, disposals, png };
-    });
-    assert.equal(portrait.before.sum, 0, 'No meteor before its first event');
-    assert.equal(portrait.after.sum, 0, 'Meteor disappears after its short flight');
-    assert.ok(portrait.next.lit > 3, 'Meteor repeats after its quiet interval');
-    assert.ok(portrait.visible.lit > 3, 'Portrait default view contains a meteor');
-    assert.equal(portrait.beforeScopeDispose, 0, 'World leaves scoped resources to the host');
-    assert.equal(portrait.disposals, 2, 'Host scope disposes meteor resources exactly once');
-    fs.writeFileSync(path.join(output, 'portrait.png'), Buffer.from(portrait.png.split(',')[1], 'base64'));
-    delete portrait.png;
     assert.deepEqual(errors, [], 'No WebGL or shader errors');
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ report, portrait, errors }, null, 2));
-    console.log('PASS meteor pixels, playback, camera, quality, visibility and disposal');
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ report, errors }, null, 2));
+    console.log('PASS meteor pixels, cycles, density, portrait, pause and disposal');
   } finally { await browser.close(); }
 }
 main().catch(e => { console.error(e); process.exitCode = 1; });

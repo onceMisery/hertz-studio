@@ -22,6 +22,7 @@
   var reason = null;
   var host = null;
   var canvas = null;
+  var reticle = null;
   var mounted = false;
   var quality = 'high';
   var downgraded = false;   // stage:fps 只降不升
@@ -60,6 +61,7 @@
     var ok = false;
     try { ZS().unmount(); } catch (_) { /* 死上下文上释放资源：three 会静默 */ }
     detachContextWatch();
+    detachReticle();
     if (canvas) { canvas.remove(); canvas = null; }
     ok = mountInto(host);
     if (ok) {
@@ -167,12 +169,63 @@
     return 'high';
   }
 
+  // 独立舞台没有 Space3D 的观测题签，用一枚跟手的能量准星补上「指针已经
+  // 接管舞台」的反馈：按住时星环收紧，松开后由引擎的冲击波接棒。
+  function reticleAt(e) {
+    if (!reticle || !canvas) return;
+    var rect = canvas.getBoundingClientRect();
+    reticle.style.transform = 'translate3d(' + (e.clientX - rect.left) + 'px,'
+      + (e.clientY - rect.top) + 'px,0)';
+  }
+  function hideReticle() {
+    if (reticle && reticle.classList) reticle.classList.remove('is-on', 'is-charging');
+  }
+  function onReticleMove(e) {
+    if (!currentPrefs.interactive || !reticle || !reticle.classList) return;
+    reticle.classList.add('is-on');
+    reticleAt(e);
+  }
+  function onReticleDown(e) {
+    if (!currentPrefs.interactive || !reticle || !reticle.classList) return;
+    reticle.classList.add('is-on', 'is-charging');
+    reticleAt(e);
+  }
+  function onReticleUp() {
+    if (reticle && reticle.classList) reticle.classList.remove('is-charging');
+  }
+  function onReticleLeave() {
+    hideReticle();
+  }
+  function bindReticle() {
+    if (!canvas || !reticle) return;
+    canvas.addEventListener('pointermove', onReticleMove, false);
+    canvas.addEventListener('pointerdown', onReticleDown, false);
+    canvas.addEventListener('pointerleave', onReticleLeave, false);
+    if (window.addEventListener) window.addEventListener('pointerup', onReticleUp, false);
+  }
+  function detachReticle() {
+    if (canvas) {
+      canvas.removeEventListener('pointermove', onReticleMove, false);
+      canvas.removeEventListener('pointerdown', onReticleDown, false);
+      canvas.removeEventListener('pointerleave', onReticleLeave, false);
+    }
+    if (window.removeEventListener) window.removeEventListener('pointerup', onReticleUp, false);
+    if (reticle && reticle.parentNode) reticle.parentNode.removeChild(reticle);
+    reticle = null;
+  }
+
   function mountInto(el) {
     var w = el.clientWidth || 640, h = el.clientHeight || 360;
     canvas = document.createElement('canvas');
     canvas.className = 'zodiac-canvas';
     canvas.setAttribute('aria-hidden', 'true');
     el.appendChild(canvas);
+    reticle = document.createElement('div');
+    reticle.className = 'zodiac-reticle';
+    reticle.setAttribute('aria-hidden', 'true');
+    reticle.innerHTML = '<i></i>';
+    el.appendChild(reticle);
+    bindReticle();
     lastW = w; lastH = h;
     quality = qualityForMount();
     var ok = ZS().mount(canvas, {
@@ -182,6 +235,7 @@
       palette: currentPrefs.palette,
     });
     if (!ok) {
+      detachReticle();
       canvas.remove();
       canvas = null;
       reason = '当前环境无法运行星座舞台（需要 WebGL2）';
@@ -215,6 +269,7 @@
         detachContextWatch();
         ZS().unmount();
       }
+      detachReticle();
       if (canvas) { canvas.remove(); canvas = null; }
       reason = null;
       return true;
@@ -245,6 +300,8 @@
       };
     }
     if (mounted) ZS().setPrefs(currentPrefs);
+    // 关闭「交互旋转」时准星必须立刻收掉，避免指针已经交回宿主还残留一个准星。
+    if (!currentPrefs.interactive) hideReticle();
   }
 
   function setRig(pose, opts) {
@@ -257,6 +314,7 @@
   function setInteraction(value) {
     currentPrefs.interactive = !!value;
     if (mounted) ZS().setInteraction(currentPrefs.interactive);
+    if (!currentPrefs.interactive) hideReticle();
   }
 
   // 舞台帧门测得吃不住（lowfx）就降到流畅档重建一次；之后不再回升级。
@@ -267,6 +325,7 @@
     if (host) {
       ZS().unmount();
       detachContextWatch();
+      detachReticle();
       if (canvas) { canvas.remove(); canvas = null; }
       mounted = mountInto(host);
     }

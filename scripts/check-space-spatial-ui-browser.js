@@ -189,7 +189,7 @@ async function main(){
     await page.keyboard.press('Escape');
     await page.locator('#sp-console-toggle').click();
     assert.equal(await page.locator('#sp-source option[value="lyric-sonnet"]').count(),0,'stage list excludes lyric effects');
-    assert.equal(await page.locator('#sp-lyric-style option').count(),7,'lyrics have their own complete selector');
+    assert.equal(await page.locator('#sp-lyric-style option').count(),5,'lyrics have their own complete selector');
     await page.locator('#sp-source').selectOption('zodiac');await page.waitForFunction(()=>Space3D.stats().renderer?.id==='zodiac'&&Space3D.stats().renderer.state==='ready');
     await page.locator('#sp-tab-lyrics').click();await page.locator('#sp-lyric-style').selectOption('lyric-sonnet');
     await page.waitForFunction(()=>Space3D.stats().renderer?.lyricId==='lyric-sonnet');

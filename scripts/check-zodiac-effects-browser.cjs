@@ -33,7 +33,7 @@ async function main() {
       const camera = new THREE.PerspectiveCamera(42, 1440 / 900, .1, 300);
       const world = createWorld(THREE, scene, { quality: 'high' });
       world.setSign(4);
-      window.draw = (time, context = {}, yaw = 0) => {
+      window.draw = (time, context = {}, yaw = 0, shellOpacity = null) => {
         camera.position.set(Math.sin(yaw) * 10, 0, Math.cos(yaw) * 10);
         camera.lookAt(0, 0, 0);
         world.update(time, { state: 'hold', k: 1, cameraPos: camera.position, ...context });
@@ -50,6 +50,8 @@ async function main() {
         // Remove scene rotation so pixel differences measure shader motion only.
         scene.children.forEach(o => { if (o.isGroup) o.rotation.set(0, 0, 0); });
         scene.children.forEach(o => { if (o.isMesh && o.material.uniforms?.uTime) o.material.uniforms.uTime.value = 0; });
+        // 面罩的不透明度每帧由引擎写回，测它自己的发光量要在写回之后再覆盖。
+        if (shellOpacity !== null) scene.traverse(o => { if (o.isMesh && o.renderOrder === -90) o.material.opacity = shellOpacity; });
         renderer.render(scene, camera);
         const gl = renderer.getContext(), pixels = new Uint8Array(1440 * 900 * 4);
         gl.readPixels(0, 0, 1440, 900, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
@@ -102,13 +104,16 @@ async function main() {
         world.setSign(i);
         const skyDelta = compare(background, draw(4, { state: 'disperse', k: 1 })).total;
         skyObjects.forEach(o => { o.visible = false; });
-        const pixels = draw(5.2), rgb = [0, 0, 0];
+        const pixels = draw(5.2), rgb = [0, 0, 0], hueBands = Array(12).fill(0);
         skyObjects.forEach(o => { o.visible = true; });
         for (let k = 0; k < pixels.length; k += 4) {
           const max = Math.max(pixels[k],pixels[k+1],pixels[k+2]);
           const min = Math.min(pixels[k],pixels[k+1],pixels[k+2]);
           if (max > 40 && (max-min)/max > .22) {
             for (let c = 0; c < 3; c++) rgb[c] += pixels[k+c];
+            const r = pixels[k], g = pixels[k+1], b = pixels[k+2], d = max-min;
+            const h = ((max === r ? (g-b)/d : max === g ? (b-r)/d+2 : (r-g)/d+4)+6)%6;
+            hueBands[Math.floor(h*2)]++;
           }
         }
         const total = rgb.reduce((a,b)=>a+b,0);
@@ -116,7 +121,7 @@ async function main() {
         let hue = max === rgb[0] ? (rgb[1]-rgb[2])/delta : max === rgb[1]
           ? (rgb[2]-rgb[0])/delta+2 : (rgb[0]-rgb[1])/delta+4;
         hue = (hue * 60 + 360) % 360;
-        out.push({ sign: world.stats().sign, rgb: rgb.map(v=>v/total), hue, skyDelta });
+        out.push({ sign: world.stats().sign, rgb: rgb.map(v=>v/total), hue, hueBands, skyDelta });
       }
       world.setSign(4);
       return out;
@@ -124,16 +129,16 @@ async function main() {
     assert.ok(colors.every(c => c.skyDelta === 0), 'Sign colors must not tint the natural sky');
     assert.ok(new Set(colors.map(c=>c.rgb.map(v=>v.toFixed(2)).join(','))).size >= 8,
       'A shared application theme must preserve independent sign colors');
-    const colorFor = sign => colors.find(c=>c.sign===sign).rgb;
-    const aries = colorFor('aries'), taurus = colorFor('taurus'), leo = colorFor('leo'), sagittarius = colorFor('sagittarius');
-    assert.ok(aries[0]>aries[2]*1.2 && leo[0]>leo[2]*1.2, 'Coral and amber must retain warm colors');
-    assert.ok(taurus[1]>taurus[0]*1.12, 'Jade must retain green');
-    assert.ok(sagittarius[2]>sagittarius[1]*1.1, 'Violet must retain its hue');
-    assert.ok(new Set(colors.map(c => Math.floor(c.hue/30))).size >= 6,
-      'Isolated zodiac figures must span at least six hue bands');
-    assert.ok(colors.filter(c => c.hue < 80 || c.hue > 340).length >= 3, 'Warm zodiac colors must render');
-    assert.ok(colors.filter(c => c.hue > 80 && c.hue < 190).length >= 2, 'Green zodiac colors must render');
-    assert.ok(colors.filter(c => c.hue > 240 && c.hue < 340).length >= 3, 'Violet and rose zodiac colors must render');
+    // Each figure now mixes silk-like cool/warm streams. An average RGB hue
+    // cannot describe a multicolor figure; measure its visible hue populations.
+    const colorFor = sign => colors.find(c=>c.sign===sign).hueBands;
+    assert.ok(['aries','leo'].every(sign => colorFor(sign).slice(0, 3).reduce((a,b)=>a+b,0) > 100),
+      'Coral and amber remain visible within the multicolor particles');
+    assert.ok(colorFor('taurus').slice(2, 6).reduce((a,b)=>a+b,0) > 100, 'Jade remains visible');
+    assert.ok(colorFor('sagittarius').slice(8, 12).reduce((a,b)=>a+b,0) > 100, 'Violet remains visible');
+    assert.ok(colors.every(c => c.hueBands.filter(n=>n>25).length >= 2), 'Every sign contains multiple visible hues');
+    assert.ok(new Set(colors.flatMap(c=>c.hueBands.flatMap((n,i)=>n>25?[i]:[]))).size >= 8,
+      'Zodiac particles span at least eight visible hue bands');
     const galaxy = await page.evaluate(() => {
       const pixels = draw(4, { state: 'disperse', k: 1 });
       let stars = 0, dust = 0, dark = 0;
@@ -158,19 +163,28 @@ async function main() {
       const full = draw(5.2);
       let surface;
       scene.traverse(o => { if (o.isMesh && o.renderOrder === -90) surface = o; });
+      // 把面罩调到全透明（仍然写深度）：差值只剩它自己发出的光。
+      const emission = draw(5.2, {}, 0, 0);
       surface.visible = false;
       const dustOnly = draw(5.2);
       surface.visible = true;
-      let energy = 0;
-      for (let k = 0; k < full.length; k += 4) energy += full[k] + full[k+1] + full[k+2];
+      let energy = 0, hidden = 0;
+      for (let k = 0; k < full.length; k += 4) {
+        energy += full[k] + full[k+1] + full[k+2];
+        const free = dustOnly[k] + dustOnly[k+1] + dustOnly[k+2];
+        if (free - (full[k] + full[k+1] + full[k+2]) > 12) hidden += 1;
+      }
       const a = dustFrame(5.2), b = dustFrame(6.2);
       const flow = compare(a,b);
       const frozen = compare(b,dustFrame(6.2));
       const reducedFlow = compare(dustFrame(5.2,true),dustFrame(6.2,true));
-      return { surfaceFraction: compare(full, dustOnly).total / energy, flow, frozen, reducedFlow };
+      return { surfaceFraction: compare(full, emission).total / energy, hidden,
+        occluded: compare(full, dustOnly).total / energy, flow, frozen, reducedFlow };
     });
     assert.ok(starlight.surfaceFraction < .10,
       'Starlight figures must be carried by particles and stars, not a solid surface: ' + JSON.stringify(starlight));
+    assert.ok(starlight.hidden > 1500,
+      'The volume must hide the light behind it, or it is only a glowing decal: ' + JSON.stringify(starlight));
     assert.ok(starlight.flow.changed > 100, 'Particle flow must remain visible with fixed camera and no star twinkle');
     assert.equal(starlight.frozen.total, 0, 'Frozen playback time must freeze the star-dust flow');
     assert.ok(starlight.reducedFlow.total < starlight.flow.total * .6,

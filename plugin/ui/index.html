@@ -1899,7 +1899,7 @@
     <div id="s3d-zodiac-tuning" hidden>
       <label for="s3d-zodiac-field"><input id="s3d-zodiac-field" type="checkbox" checked> 背景星云</label>
       <label for="s3d-zodiac-interact"><input id="s3d-zodiac-interact" type="checkbox" checked> 交互旋转（拖拽环绕 / 滚轮推拉 / 双击复位）</label>
-      <p class="s3d-setting-note">粒子每 13 秒汇聚成一座星座造型，停留微摆后散开换下一座；拖拽环绕、滚轮缩放。关闭背景星云可换取低端设备的流畅。</p>
+      <p class="s3d-setting-note">粒子每 13 秒汇聚成一座星座造型，停留微摆后散开换下一座。拖拽环绕、滚轮缩放、双击复位；悬停主星、按住蓄能、松开引爆星链。关闭背景星云可换取低端设备的流畅。</p>
     </div>
     <div id="s3d-anime-tuning" hidden>
       <label for="s3d-anime-scene">绘景作品</label>
@@ -2352,6 +2352,22 @@
   <div class="s3d-reading sp-reading" id="sp-reading">
     <div class="s3d-eyebrow" id="sp-status">三维空间</div>
   </div>
+  <aside class="sp-zodiac-hud" id="sp-zodiac-hud" aria-live="polite" aria-label="星座观测" hidden>
+    <div class="sp-zodiac-plaque">
+      <p class="sp-zodiac-kicker"><span>ZODIAC OBSERVATORY</span><span id="sp-zodiac-index">01 — XII</span></p>
+      <h2 id="sp-zodiac-name">白羊</h2>
+      <p class="sp-zodiac-latin" id="sp-zodiac-latin">ARIES</p>
+      <i class="sp-zodiac-rule" aria-hidden="true"></i>
+      <p class="sp-zodiac-meta" id="sp-zodiac-meta"></p>
+    </div>
+    <div class="sp-zodiac-cycle" aria-hidden="true"><span class="sp-zodiac-ticks" id="sp-zodiac-ticks"></span><span>12 SIGNS</span></div>
+    <p class="sp-zodiac-hint">拖拽环绕&nbsp;&nbsp;·&nbsp;&nbsp;悬停主星&nbsp;&nbsp;·&nbsp;&nbsp;按住蓄能&nbsp;&nbsp;·&nbsp;&nbsp;双击复位</p>
+  </aside>
+  <div class="sp-zodiac-star" id="sp-zodiac-star" hidden>
+    <span class="sp-zodiac-star-kicker">MAIN STAR</span>
+    <strong id="sp-zodiac-star-name"></strong>
+    <small id="sp-zodiac-star-meta"></small>
+  </div>
   <div class="s3d-shelf" id="sp-shelf" role="region" aria-label="3D 歌单架"><div class="s3d-shelf-plane"></div></div>
   <div class="sp-head">
     <div class="sp-brand"><span class="sp-brand-mark" aria-hidden="true">h<span>z</span></span><div>Hertz Studio<small>三维空间</small></div></div>
@@ -2410,8 +2426,13 @@
     <section id="sp-stage-settings" hidden>
       <section id="sp-console-stage" role="tabpanel" aria-labelledby="sp-tab-stage" tabindex="0">
         <label for="sp-source">舞台场景</label><select id="sp-source"></select>
-        <details class="sp-scene-picker" open><summary>场景预设</summary><div class="sp-fx-grid" id="sp-fx-grid" role="group" aria-label="选择舞台场景"></div></details>
+        <div class="sp-zodiac-console" id="sp-zodiac-console" hidden>
+          <p class="sp-zodiac-console-kicker">OBSERVATION <span id="sp-zodiac-console-index"></span></p>
+          <strong id="sp-zodiac-console-name"></strong>
+          <small id="sp-zodiac-console-meta"></small>
+        </div>
         <div id="sp-scene-params"></div>
+        <details class="sp-scene-picker" open><summary>场景预设</summary><div class="sp-fx-grid" id="sp-fx-grid" role="group" aria-label="选择舞台场景"></div></details>
       </section>
       <section id="sp-console-lyrics" role="tabpanel" aria-labelledby="sp-tab-lyrics" tabindex="0" hidden>
         <label class="sp-check" for="sp-lyrics-toggle"><input id="sp-lyrics-toggle" type="checkbox" checked> 显示歌词</label>

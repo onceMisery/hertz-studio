@@ -71,7 +71,7 @@ const sharp = previews ? require(process.env.SHARP_MODULE || 'sharp') : null;
         if (mode === 'medium') {
           const screenshot = await page.screenshot({ type: 'png' });
           if (previews) await sharp(screenshot).resize(480, 270).jpeg({ quality: 84 }).toFile(path.join(root, 'plugin/ui/space-scene-preview', id + '.jpg'));
-          if (id.startsWith('lyric-') || id === 'word-wipe' || id.startsWith('handdrawn-')) fs.writeFileSync(path.join(output, id + '-desktop.png'), screenshot);
+          if (id.startsWith('lyric-') || id.startsWith('handdrawn-')) fs.writeFileSync(path.join(output, id + '-desktop.png'), screenshot);
         }
       }
       const camera = await page.evaluate(id => {
