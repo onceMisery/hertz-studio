@@ -19,7 +19,7 @@
   "tools/space-stage/src/scenes/factories.js": "5df42efa007d9aa0",
   "tools/space-stage/src/scenes/index.js": "ae8e66f3e380a095",
   "tools/space-stage/src/scenes/particle-pointer.js": "384dd2dee2037175",
-  "tools/space-stage/src/scenes/reactor.js": "1f4306cad276f090",
+  "tools/space-stage/src/scenes/reactor.js": "8aa34cd478d60f0b",
   "tools/space-stage/src/scenes/resources.js": "2ab56bedea1d1571",
   "tools/space-stage/src/scenes/text-layout.js": "d4a6b01ba24c9d79",
   "tools/space-stage/src/scenes/text.js": "6aadaca4572dd0c8",
@@ -30,7 +30,7 @@
   "tools/space-stage/build.mjs": "32fa7ac2c0c46a88",
   "tools/space-stage/package.json": "a8bcd0a591d9c50a",
   "tools/space-stage/package-lock.json": "24b5c50b01c95cb4",
-  "plugin/ui/vendor/stage-runtime.js": "9de7dd71058e74cd",
+  "plugin/ui/vendor/stage-runtime.js": "60b045d99250ed73",
   "plugin/ui/vendor/coast-stage.js": "71879224fd5044f8",
   "plugin/ui/vendor/zodiac-stage.js": "001209d751bc8a9c",
   "plugin/ui/vendor/space-stage.js": "9d0991ceebb27dd3"

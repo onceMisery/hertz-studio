@@ -110,8 +110,16 @@ async function main() {
     assert.equal(await page.locator('#sp-reactor-telemetry').isVisible(), true, 'reactor exposes live feedback and gesture hints');
     await page.waitForFunction(() => Number.parseFloat(document.querySelector('[data-reactor-energy]').textContent) > 0);
     assert.match(await page.locator('#sp-reactor-telemetry').textContent(), /粒子反应堆/);
+    const burstsBefore = await page.evaluate(() => Space3D.stats().renderer.sceneStats.primary.bursts);
+    await page.mouse.dblclick(300, 500, { delay: 60 });
+    await page.waitForTimeout(300);
+    const burstsAfter = await page.evaluate(() => Space3D.stats().renderer.sceneStats.primary.bursts);
+    assert.equal(burstsAfter - burstsBefore, 1, 'double-click reset releases one burst, not two');
 
     await page.locator('#sp-playlist-toggle').click();
+    await page.locator('.sp-queue-row').first().hover();
+    await page.waitForTimeout(320);
+    assert.notEqual(await page.locator('#sp-scene-hud').getAttribute('data-mode'), 'preview', 'hovering the current row is not a preview');
     const row = page.locator('.sp-queue-item').nth(1);
     await row.hover();
     await until(async () => (await page.locator('#sp-scene-hud .sp-scene-hud-tag').textContent()) === '预览', 'queue hover preview');
@@ -120,6 +128,10 @@ async function main() {
     await page.screenshot({ path: path.join(output, 'queue-preview.png') });
     await row.click();
     await until(async () => (await fixture.api('/v1/state')).track_id === tracks[1].id, 'real queue playback');
+    await row.hover();
+    await until(async () => ['正在播放', '当前曲目'].includes(await page.locator('#sp-scene-hud .sp-scene-hud-tag').textContent()), 'current-row HUD');
+    assert.equal(await page.locator('#sp-scene-hud').getAttribute('data-mode'), 'current');
+    assert.doesNotMatch(await page.locator('#sp-scene-hud small').textContent(), /点击播放/, 'hovering the current row is not a preview');
     await page.keyboard.press('Escape');
     await page.mouse.move(700, 150);
     await page.waitForFunction(() => document.querySelector('#sp-scene-hud').dataset.mode !== 'preview');

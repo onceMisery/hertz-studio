@@ -5,7 +5,9 @@ import { createParticlePointer, particlePointerShader } from './particle-pointer
 
 const TAU = Math.PI * 2;
 const DEFAULT_HUE = 187 / 360;
-const MORPH_SECONDS = 1.6, HUE_TAU = .42, SHOT_TAU = .6, PULSE_SECONDS = .9, HUE_WAIT = .6, MAX_NODES = 24;
+const MORPH_SECONDS = 1.6, HUE_TAU = .42, SHOT_TAU = .6, SHOT_DELAY = .18, PULSE_SECONDS = .9, HUE_WAIT = .6, MAX_NODES = 24;
+// The accent is reserved for amber; only the primary hue follows the track.
+const ACCENT_HUE = 45 / 360;
 export const SHELLS = Object.freeze([
   Object.freeze({ id: 'torus', label: '环面' }), Object.freeze({ id: 'sphere', label: '球壳' }),
   Object.freeze({ id: 'gyro', label: '双环' }), Object.freeze({ id: 'helix', label: '螺旋' })
@@ -125,7 +127,9 @@ vec3 shell(float k,vec4 s){
   return vec3(p.x,p.y*.913-p.z*.408,p.y*.408+p.z*.913);
  }
  if(k<1.5){
-  float y=1.0-2.0*s.y,r=sqrt(max(0.0,1.0-y*y)),R=3.2+(s.z-.5)*.45+pow(s.w,3.0)*.95;
+  float band=floor(s.y*9.0);
+  float y=clamp((band+.5)/4.5-1.0+(s.y*9.0-band-.5)*.045,-1.0,1.0);
+  float r=sqrt(max(0.0,1.0-y*y)),R=3.2+(s.z-.5)*.45+pow(s.w,3.0)*.95;
   return vec3(cos(u)*r,y,sin(u)*r)*R;
  }
  if(k<2.5){
@@ -138,6 +142,12 @@ vec3 shell(float k,vec4 s){
  vec3 center=vec3(cos(a)*2.45,t*3.5,sin(a)*2.45);
  return center+vec3(cos(a)*cos(v),sin(v)*.8,sin(a)*cos(v))*tube;
 }
+vec3 shellTint(float k,vec4 s,float slot){
+ if(k<.5)return slot<.08?uColorC:slot<.46?uColorB:uColorA;
+ if(k<1.5){float band=floor(s.y*9.0);vec3 c=mod(band,2.0)<.5?uColorA:uColorB;return mod(band,5.0)<.5?mix(c,uColorC,.3):c;}
+ if(k<2.5)return s.z<.55?(slot<.3?uColorB:uColorA):uColorC;
+ return s.z<.5?uColorA:uColorC;
+}
 void main(){
  vec3 p=shell(0.0,aSeed)*uShellWeights[0]+shell(1.0,aSeed)*uShellWeights[1]
        +shell(2.0,aSeed)*uShellWeights[2]+shell(3.0,aSeed)*uShellWeights[3];
@@ -149,10 +159,13 @@ void main(){
  p=indentParticle(p);
  vec4 view=modelViewMatrix*vec4(p,1.0);gl_Position=projectionMatrix*view;
  float size=.7+pow(fract(aSeed.x*13.17+aSeed.y*7.31),3.0)*2.8;
- gl_PointSize=clamp(size*uSize*uPixel*(22.0/max(.5,-view.z))*(1.0+uEnergy*.7),1.0,14.0);
+ float shellScale=uShellWeights[0]+uShellWeights[1]*.78+uShellWeights[2]*1.16+uShellWeights[3]*.9;
+ gl_PointSize=clamp(size*uSize*uPixel*shellScale*(22.0/max(.5,-view.z))*(1.0+uEnergy*.7),1.0,14.0);
  float slot=fract(aSeed.x*7.31+aSeed.z*3.17);
- vColor=(slot<.16?uColorC:slot<.55?uColorB:uColorA)*(.72+fract(aSeed.y*5.7)*.28);
- float pulse=sin(aSeed.x*20.0+uTime*1.4);vAlpha=.38+.62*pulse*pulse;
+ vec3 tint=shellTint(0.0,aSeed,slot)*uShellWeights[0]+shellTint(1.0,aSeed,slot)*uShellWeights[1]
+          +shellTint(2.0,aSeed,slot)*uShellWeights[2]+shellTint(3.0,aSeed,slot)*uShellWeights[3];
+ vColor=tint*(.72+fract(aSeed.y*5.7)*.28);
+ float pulse=sin(aSeed.x*20.0+uTime*1.4);vAlpha=(.38+.62*pulse*pulse)*(uShellWeights[0]*.96+uShellWeights[1]*.68+uShellWeights[2]+uShellWeights[3]*.84);
 }`;
 const cloudFragment = `
 varying vec3 vColor;varying float vAlpha;
@@ -295,18 +308,19 @@ export function createReactor(ctx) {
 
   let profile = ctx.quality, params = ctx.params, width = 1280, height = 720, pose = null, lastNow = null;
   let shown = recipeFor('', null), reported = '', hueNow = shown.hue, hueTarget = shown.hue, waitHue = 0;
-  let toShell = 0, morph = 1, pulse = 1, pulseGain = 0, pulseOrigin = 0, energy = .35, burstAge = 10, lastClick = null;
+  let toShell = 0, morph = 1, pulse = 1, pulseGain = 0, pulseOrigin = 0, energy = .35, burstAge = 10, lastClick = null, burstCount = 0;
   const shot = { yaw: 0, pitch: 0, dist: 1, fov: 0 }, parallax = new T.Vector2();
+  let aimShot = 0, shotWait = 0;
   let queueKey = '', queueItems = [], renderedItems = [], hoverNode = -1, hoverTrack = null, hoverPointer = null, hueVersion = 0, paintedVersion = -1, currentId = '';
   const sampler = createHueSampler(ctx, () => { hueVersion++; ctx.services.invalidate?.(); });
-  const ray = new T.Raycaster(), ndc = new T.Vector2(), plane = new T.Plane(), hit = new T.Vector3(), normal = new T.Vector3(), projected = new T.Vector3(), cameraQuat = new T.Quaternion(), parentQuat = new T.Quaternion();
+  const ray = new T.Raycaster(), ndc = new T.Vector2(), plane = new T.Plane(), hit = new T.Vector3(), normal = new T.Vector3(), projected = new T.Vector3(), pickView = new T.Vector3(), cameraQuat = new T.Quaternion(), parentQuat = new T.Quaternion();
 
   function density() { cloudGeometry.setDrawRange(0, Math.floor(COUNT * qualityDensity(profile) * (params.density ?? 1))); dustGeometry.setDrawRange(0, Math.floor(DUST * qualityDensity(profile))); }
   density();
   function palette(hue) {
     colorA.setHSL(((hue % 1) + 1) % 1, .9, .66);
     colorB.setHSL(((hue + .12) % 1 + 1) % 1, .85, .62);
-    colorC.setHSL(((hue - .395) % 1 + 1) % 1, .95, .67);
+    colorC.setHSL(ACCENT_HUE, .95, .67);
     colorDim.setHSL(((hue % 1) + 1) % 1, .55, .26);
     coreMaterial.color.copy(colorA).lerp(white, .35); innerMaterial.color.copy(colorC);
     shockMaterial.color.copy(colorC); scanMaterialA.color.copy(colorA); scanMaterialB.color.copy(colorC);
@@ -334,9 +348,12 @@ export function createReactor(ctx) {
     ctx.services.onRecipe?.({ id: shown.id, preview: !!preview, hue: Math.round(shown.hue * 360),
       shell: SHELLS[shown.shell].label, shot: SHOTS[shown.shot].label });
   }
-  function syncQueue(list, current, previewId) {
+  function syncQueue(list, current) {
     const items = list.slice(0, MAX_NODES), key = items.map(item => item.id + '|' + (item.cover || '')).join('\n') + '|' + current;
-    for (const item of items) if (item.id !== current && item.id !== previewId) sampler.request(item.id, item.cover);
+    const currentIndex = items.findIndex(item => item.id === current);
+    const nextId = currentIndex >= 0 && items.length > 1 ? items[(currentIndex + 1) % items.length].id : '';
+    // Current and preview covers come from the frame (freshest URL); only the next track is prefetched here.
+    for (const item of items) if (item.id === nextId) sampler.request(item.id, item.cover);
     if (key === queueKey && paintedVersion === hueVersion) return;
     queueKey = key; paintedVersion = hueVersion; queueItems = items;
     const color = new T.Color();
@@ -361,12 +378,20 @@ export function createReactor(ctx) {
   function pickNode(frame) {
     const p = frame.pointer;
     if (!p?.active || !renderedItems.length || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return -1;
-    let best = -1, bestDistance = 18;
+    ctx.camera.updateMatrixWorld();
+    const dpr = ctx.renderer?.getPixelRatio() || 1;
+    const focal = height * dpr * ctx.camera.projectionMatrix.elements[5] * .5;
+    let best = -1, bestScore = 1;
     for (let i = 0; i < renderedItems.length; i++) {
-      projected.fromArray(nodePositions, i * 3).applyMatrix4(nodes.matrixWorld).project(ctx.camera);
+      projected.fromArray(nodePositions, i * 3).applyMatrix4(nodes.matrixWorld);
+      pickView.copy(projected).applyMatrix4(ctx.camera.matrixWorldInverse);
+      projected.copy(pickView).applyMatrix4(ctx.camera.projectionMatrix);
       if (projected.z > 1) continue;
       const distance = Math.hypot((projected.x - p.x) * width / 2, (projected.y - p.y) * height / 2);
-      if (distance < bestDistance) { bestDistance = distance; best = i; }
+      // Match the hit circle to the point size the shader draws, so edge clicks respond at any zoom.
+      const diameter = clamp(nodeSizes[i] * focal / Math.max(.5, -pickView.z), 2, 96) / dpr;
+      const score = distance / Math.max(12, diameter * .58);
+      if (score < bestScore) { bestScore = score; best = i; }
     }
     return best;
   }
@@ -375,7 +400,7 @@ export function createReactor(ctx) {
     ctx.camera.getWorldDirection(normal).negate(); world.updateMatrixWorld(true);
     plane.setFromNormalAndCoplanarPoint(normal, world.getWorldPosition(hit));
     if (ray.ray.intersectPlane(plane, hit)) { cloudGroup.worldToLocal(hit); uniforms.uBurstPoint.value.copy(hit); }
-    burstAge = 0;
+    burstAge = 0; burstCount++;
   }
 
   return Object.assign(basicInstance(group, params, profile, {
@@ -387,9 +412,9 @@ export function createReactor(ctx) {
       const track = frame.track || {}, preview = p.queuePreview !== false && p.trackRecipes !== false ? frame.preview : null;
       currentId = track.id ? String(track.id) : '';
       sampler.request(currentId, track.cover || (typeof ctx.services.coverUrl === 'function' ? ctx.services.coverUrl() : ''));
-      if (preview?.id) sampler.request(String(preview.id), preview.cover);
+      if (preview?.id && String(preview.id) !== currentId) sampler.request(String(preview.id), preview.cover);
       const queue = typeof ctx.services.queue === 'function' ? ctx.services.queue() || [] : [];
-      syncQueue(queue, currentId, preview?.id);
+      syncQueue(queue, currentId);
 
       const previewing = !!(preview?.id && String(preview.id) !== currentId);
       const targetId = p.trackRecipes === false ? '' : previewing ? String(preview.id) : currentId;
@@ -400,12 +425,18 @@ export function createReactor(ctx) {
       hueTarget = next.hue;
       report(previewing);
 
-      const aim = SHOTS[shown.shot];
       if (reduced) {
+        aimShot = shown.shot; shotWait = 0;
+        const aim = SHOTS[shown.shot];
         hueNow = hueTarget; Object.assign(shot, { yaw: aim.yaw, pitch: aim.pitch, dist: aim.dist, fov: aim.fov });
       } else {
+        if (aimShot !== shown.shot) { aimShot = shown.shot; shotWait = SHOT_DELAY; }
+        shotWait = Math.max(0, shotWait - dt);
         hueNow = ((hueNow + shortest(hueNow, hueTarget) * approach(dt, HUE_TAU)) % 1 + 1) % 1;
-        for (const key of ['yaw', 'pitch', 'dist', 'fov']) shot[key] += (aim[key] - shot[key]) * approach(dt, SHOT_TAU);
+        if (shotWait === 0) {
+          const aim = SHOTS[aimShot];
+          for (const key of ['yaw', 'pitch', 'dist', 'fov']) shot[key] += (aim[key] - shot[key]) * approach(dt, SHOT_TAU);
+        }
         morph = Math.min(1, morph + dt / MORPH_SECONDS); pulse = Math.min(1, pulse + dt / PULSE_SECONDS);
       }
       palette(hueNow);
@@ -416,20 +447,28 @@ export function createReactor(ctx) {
 
       world.updateMatrixWorld(true);
       const canHover = frame.pointer?.active && !frame.pointer.dragging && p.queuePreview !== false && p.trackRecipes !== false;
-      const pointerStill = canHover && hoverPointer && Math.hypot(frame.pointer.x - hoverPointer.x, frame.pointer.y - hoverPointer.y) < .001;
+      const pointerMoved = hoverPointer && frame.pointer
+        ? Math.hypot((frame.pointer.x - hoverPointer.x) * width / 2, (frame.pointer.y - hoverPointer.y) * height / 2)
+        : Infinity;
       let hoverId = null;
-      if (pointerStill && hoverTrack) hoverId = hoverTrack;
+      if (canHover && hoverTrack && pointerMoved < 8) hoverId = hoverTrack;
       else if (canHover) { const index = pickNode(frame); hoverId = index >= 0 ? renderedItems[index].id : null; }
       hoverNode = queueItems.findIndex(item => item.id === hoverId);
       const selectedHover = hoverNode >= 0 ? hoverId : null;
-      if (selectedHover !== hoverTrack) { hoverTrack = selectedHover; ctx.services.previewTrack?.(hoverTrack); }
+      if (selectedHover !== hoverTrack) {
+        hoverTrack = selectedHover;
+        const item = queueItems[hoverNode];
+        if (item) sampler.request(item.id, item.cover);
+        ctx.services.previewTrack?.(hoverTrack);
+      }
       hoverPointer = canHover ? { x: frame.pointer.x, y: frame.pointer.y } : null;
       const click = frame.pointer?.click;
       if (lastClick === null) lastClick = click ? click.serial : 0;
       if (click && click.serial !== lastClick) {
         lastClick = click.serial;
         const target = pickNode({ pointer: { active: true, x: click.x, y: click.y } });
-        const latched = hoverTrack && hoverPointer && Math.hypot(click.x - hoverPointer.x, click.y - hoverPointer.y) < .001;
+        const latched = hoverTrack && hoverPointer
+          && Math.hypot((click.x - hoverPointer.x) * width / 2, (click.y - hoverPointer.y) * height / 2) < 8;
         const id = latched ? hoverTrack : target >= 0 ? renderedItems[target].id : null;
         if (id && id !== currentId && queueItems.some(item => item.id === id)) ctx.services.playTrack?.(id);
         if (!reduced) burstAt(click);
@@ -483,7 +522,7 @@ export function createReactor(ctx) {
     resize(w, h) { width = w; height = h; },
     params(next) { params = next; density(); }, quality(next) { profile = next; density(); },
     stats: () => ({ particles: cloudGeometry.drawRange.count + dustGeometry.drawRange.count + nodeGeometry.drawRange.count, nodes: queueItems.length,
-      recipe: { id: shown.id, hue: Math.round(shown.hue * 360), shell: SHELLS[shown.shell].id, shot: SHOTS[shown.shot].id }, morph, hover: hoverNode, energy,
+      recipe: { id: shown.id, hue: Math.round(shown.hue * 360), shell: SHELLS[shown.shell].id, shot: SHOTS[shown.shot].id }, morph, hover: hoverNode, energy, bursts: burstCount,
       yaw: ((world.rotation.y * 180 / Math.PI) % 360 + 360) % 360, zoom: 15 / Math.max(1, ctx.camera.position.length()) })
   }), { setRig(value) { pose = value; } });
 }

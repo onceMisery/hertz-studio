@@ -13,7 +13,7 @@
   var shelf = null, shelfShown = false;
   var floatTarget = null;
   var panelPreview = null, nodePreview = null, previewTimer = 0, hud = null, hudRecipe = null, hudUntil = 0, hudTimer = 0;
-  var clickSerial = 0, downPoint = null, holdTimer = 0, charging = false;
+  var clickSerial = 0, lastClickAt = 0, downPoint = null, holdTimer = 0, charging = false;
   var prefs = { sceneSource: 'coast', sceneStates: {}, lyrics: true, lyricStyle: 'subtitle', cinema: true,
     qualityMode: 'auto', playerAutoHide: true, shelfMode: 'side', freeCam: null, schemaVersion: 3 };
   var labels = { auto: '自动', low: '轻量', medium: '标准', high: '高画质' };
@@ -107,8 +107,14 @@
   function clearPreview() { clearTimeout(previewTimer); previewTimer = 0; panelPreview = null; nodePreview = null; syncHud(); }
   function syncHud() {
     if (!hud) return;
-    var preview = activePreview(), recent = previewCapable() && hudRecipe && performance.now() < hudUntil, mode = '';
-    if (preview) {
+    var preview = activePreview(), presentation = present(), current = presentation.track,
+      same = !!(preview && current && preview.id === current.id),
+      recent = previewCapable() && hudRecipe && performance.now() < hudUntil, mode = '';
+    if (preview && same) {
+      mode = 'current'; hud.querySelector('.sp-scene-hud-tag').textContent = presentation.playing ? '正在播放' : '当前曲目';
+      hud.querySelector('strong').textContent = preview.title || current.title || '未知曲目';
+      hud.querySelector('small').textContent = preview.artist || current.artist || '';
+    } else if (preview) {
       mode = 'preview'; hud.querySelector('.sp-scene-hud-tag').textContent = '预览';
       hud.querySelector('strong').textContent = preview.title || '未知曲目';
       hud.querySelector('small').textContent = (preview.artist ? preview.artist + ' · ' : '') + '点击播放';
@@ -623,7 +629,11 @@
     root.addEventListener('pointerleave',function(){frame.pointer.active=false;if(page!=='closed')touch(750);});
     function end(e){
       if(e.pointerId!==pointer)return;
-      if(e.type==='pointerup'&&downPoint&&!frame.pointer.dragging)frame.pointer.click={x:e.clientX/Math.max(1,root.clientWidth)*2-1,y:1-e.clientY/Math.max(1,root.clientHeight)*2,serial:++clickSerial};
+      if(e.type==='pointerup'&&downPoint&&!frame.pointer.dragging){
+        // A double-click resets the camera; it must not release a second particle burst.
+        var clickAt=performance.now();
+        if(clickAt-lastClickAt>250){lastClickAt=clickAt;frame.pointer.click={x:e.clientX/Math.max(1,root.clientWidth)*2-1,y:1-e.clientY/Math.max(1,root.clientHeight)*2,serial:++clickSerial};}
+      }
       downPoint=null;frame.pointer.down=false;frame.pointer.dragging=false;clearTimeout(holdTimer);holdTimer=0;if(charging){charging=false;syncHud();}
       dragging=false;point=null;pointer=null;if(camera)camera.setRotating(false);scheduleSave();touch();
     }
