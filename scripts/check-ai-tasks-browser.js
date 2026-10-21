@@ -26,6 +26,14 @@ const errors = [];
 let passed = 0;
 const pass = (name) => { passed += 1; console.log('PASS ' + name); };
 
+async function serveSourceWorkshop(page) {
+  if (process.env.AI_TASKS_SOURCE_WORKSHOP !== '1') return;
+  await page.route('**/workshop.js*', async route => {
+    await route.fulfill({ status: 200, contentType: 'application/javascript; charset=utf-8',
+      body: fs.readFileSync(path.join(root, 'plugin/ui/workshop.js'), 'utf8') });
+  });
+}
+
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const fixture = await startFixture();
@@ -45,6 +53,7 @@ async function main() {
     ws.connectToServer();
     activeSocket = ws;
   });
+  await serveSourceWorkshop(page);
   page.on('request', request => {
     if (new URL(request.url()).pathname === '/v1/ai/status') aiStatusRequests += 1;
   });
@@ -187,7 +196,9 @@ async function main() {
       rejectRequests += 1;
       rejectStarted();
       await rejectGate;
-      await route.continue();
+      const response = await route.fetch();
+      if (response.ok()) await route.abort('failed'); // CAS succeeds, but its acknowledgement is lost.
+      else await route.fulfill({ response });
     });
     const rejectButton = page.locator('.ws-ai-proposal')
       .getByRole('button', { name: '拒绝', exact: true }).last();
@@ -204,10 +215,35 @@ async function main() {
     releaseReject();
     await page.waitForFunction(() => document.body.innerText.includes('提案状态：rejected'),
       null, { timeout: 5000 });
+    await page.waitForFunction(() => document.querySelector('#ws-toast').textContent === '提案已拒绝');
     await page.unroute('**/v1/ai/proposals/*/reject');
-    pass('提案拒绝后状态转为 rejected');
-
+    pass('拒绝回执丢失后读取服务端终态并收敛为成功');
     assert.equal(await page.locator('.ws-ai-proposal').getByRole('button', { name: '应用到当前舞台' }).count(), 0);
+
+    let admissionPosts = [];
+    await page.route('**/v1/ai/jobs', async route => {
+      if (route.request().method() !== 'POST') { await route.continue(); return; }
+      admissionPosts.push(route.request().postDataJSON());
+      if (admissionPosts.length === 1) {
+        await route.fulfill({ status: 429, contentType: 'application/json',
+          body: JSON.stringify({ error: { code: 'capacity_exceeded', message: '队列已满' } }) });
+      } else await route.continue();
+    });
+    await page.locator('#ws-ai-brief').fill('队列拒绝前的描述');
+    await page.getByRole('button', { name: '提交生成任务', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('#ws-toast').textContent.includes('队列已满'));
+    await page.locator('#ws-ai-brief').fill('队列恢复后的新描述');
+    const reaccepted = page.waitForFunction(() => document.querySelector('#ws-ai-brief').value === '');
+    await page.getByRole('button', { name: '提交生成任务', exact: true }).click();
+    await reaccepted;
+    assert.equal(admissionPosts.length, 2);
+    assert.equal(admissionPosts[0].brief, '队列拒绝前的描述');
+    assert.equal(admissionPosts[1].brief, '队列恢复后的新描述');
+    assert.notEqual(admissionPosts[0].idempotency_key, admissionPosts[1].idempotency_key,
+      'an explicit admission rejection must allow a fresh key for a changed brief');
+    await page.unroute('**/v1/ai/jobs');
+    pass('明确 429 未受理后可修改描述并使用新幂等键提交');
+
     const countBeforeRetry = (await fixture.api('/v1/ai/jobs?limit=20')).jobs.length;
     let droppedReply = false;
     await page.route('**/v1/ai/jobs', async route => {
@@ -321,6 +357,7 @@ async function main() {
       state: index === 19 ? 'running' : 'failed',
       stateRevision: index === 19 ? 1 : job.stateRevision,
       failureCode: index === 19 ? null : 'provider_error',
+      providerHttpStatus: index === 19 ? null : 402,
       providerFailureText: index === 19 ? null : 'fixture secret response body',
       resultProposalId: null,
       usage: null,
@@ -344,6 +381,7 @@ async function main() {
       }
     });
     await historyPage.routeWebSocket(url => url.pathname === '/ws', ws => ws.connectToServer());
+    await serveSourceWorkshop(historyPage);
     await historyPage.route('**/v1/ai/jobs?limit=20*', async route => {
       historyRouteHits += 1;
       const url = new URL(route.request().url());
@@ -369,9 +407,89 @@ async function main() {
       console.error('AI history text: ' + (await historyPage.locator('body').innerText()).slice(0, 1200));
       throw error;
     }
-    assert.match(await historyPage.locator('.ws-ai-failure').first().innerText(), /检查密钥、网络与服务状态后重试/);
+    assert.match(await historyPage.locator('.ws-ai-failure').first().innerText(), /HTTP 402/);
     assert.doesNotMatch(await historyPage.locator('.ws-ai-failure').first().innerText(), /fixture secret response body/);
     pass('失败任务显示受限类别提示且不暴露 provider 响应');
+
+    let sourcePost = null;
+    let retrySource = null;
+    await historyPage.route('**/v1/ai/jobs', async route => {
+      if (route.request().method() !== 'POST') { await route.continue(); return; }
+      sourcePost = route.request().postDataJSON();
+      const accepted = {
+        ...job,
+        jobId: 'retry-source-fixture',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        state: 'accepted',
+        stateRevision: 1,
+        failureCode: null,
+        providerFailureText: null,
+        resultProposalId: null,
+        usage: null,
+      };
+      retrySource = { ...accepted, state: 'expired', stateRevision: 2, failureCode: null };
+      latestPage = [retrySource, ...latestPage.filter(item => item.jobId !== retrySource.jobId)].slice(0, 20);
+      await route.fulfill({ json: { outcome: 'accepted', job: accepted } });
+    });
+    const originalBrief = '超时后按原描述重试';
+    await historyPage.locator('#ws-ai-brief').fill(originalBrief);
+    const sourceResponse = historyPage.waitForResponse(response =>
+      new URL(response.url()).pathname === '/v1/ai/jobs' && response.request().method() === 'POST');
+    await historyPage.getByRole('button', { name: '提交生成任务', exact: true }).click();
+    await sourceResponse;
+    const retrySourceRow = historyPage.locator('.ws-ai-job').filter({ hasText: retrySource.jobId.slice(0, 8) });
+    await retrySourceRow.waitFor();
+    const retrySourceOps = retrySourceRow.locator('xpath=following-sibling::div[contains(@class,"ws-ai-ops")]').first();
+    const retrySourceButton = retrySourceOps.getByRole('button', { name: '按原描述重试', exact: true });
+    await retrySourceButton.waitFor();
+    assert.equal(sourcePost.brief, originalBrief);
+    pass('本页超时任务保留原描述并提供重试');
+
+    const editedBrief = '用户正在编辑的另一条描述';
+    await historyPage.locator('#ws-ai-brief').fill(editedBrief);
+    await historyPage.unroute('**/v1/ai/jobs');
+    const retryPosts = [];
+    await historyPage.route('**/v1/ai/jobs', async route => {
+      if (route.request().method() !== 'POST') { await route.continue(); return; }
+      retryPosts.push(route.request().postDataJSON());
+      if (retryPosts.length === 1) {
+        await route.fetch();
+        await route.abort('failed');
+      } else await route.continue();
+    });
+    const jobsBeforeRetry = (await fixture.api('/v1/ai/jobs?limit=20')).jobs.length;
+    await retrySourceButton.click();
+    await historyPage.waitForFunction(() => document.querySelector('#ws-toast').textContent.includes('提交失败'));
+    assert.equal(await historyPage.getByRole('button', { name: '提交生成任务', exact: true }).isDisabled(), true,
+      'an unresolved retry cannot be bypassed with a different description');
+    const retryResponse = historyPage.waitForResponse(response =>
+      new URL(response.url()).pathname === '/v1/ai/jobs' && response.request().method() === 'POST');
+    await historyPage.locator('.ws-ai-job').filter({ hasText: retrySource.jobId.slice(0, 8) })
+      .locator('xpath=following-sibling::div[contains(@class,"ws-ai-ops")]').first()
+      .getByRole('button', { name: '按原描述重试', exact: true }).click();
+    await retryResponse;
+    assert.equal(retryPosts.length, 2);
+    assert.equal(retryPosts[0].brief, originalBrief);
+    assert.equal(retryPosts[1].brief, originalBrief);
+    assert.notEqual(retryPosts[0].idempotency_key, sourcePost.idempotency_key,
+      'explicit retry starts a new task with a new idempotency key');
+    assert.equal(retryPosts[1].idempotency_key, retryPosts[0].idempotency_key,
+      'retry after a lost acknowledgement reuses that attempt idempotency key');
+    assert.equal(await historyPage.locator('#ws-ai-brief').inputValue(), editedBrief,
+      'retry does not overwrite the description currently being edited');
+    await retrySourceButton.waitFor({ state: 'detached' });
+    assert.equal((await fixture.api('/v1/ai/jobs?limit=20')).jobs.length, jobsBeforeRetry + 1,
+      'lost acknowledgement retry creates only one task');
+    await historyPage.unroute('**/v1/ai/jobs');
+    pass('显式重试不覆盖输入，回执丢失后复用新幂等键且只创建一个任务');
+
+    if (process.env.AI_TASKS_RETRY_ONLY === '1') {
+      if (errors.length) fail('页面错误: ' + errors.join(' | '));
+      console.log(`✓ AI 任务重试浏览器专项通过（${passed} 项）`);
+      return;
+    }
+
     await historyPage.getByRole('button', { name: '加载更早任务', exact: true }).click();
     await historyPage.waitForFunction(() => document.querySelectorAll('.ws-ai-job').length === 21);
     const olderRow = historyPage.locator('.ws-ai-job').filter({ hasText: olderJob.jobId.slice(0, 8) });

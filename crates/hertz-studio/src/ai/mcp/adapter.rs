@@ -10,13 +10,13 @@
 //!
 //! 会话三种结局：
 //! - `Connected`：发现可达 + 唯一可用凭据 + `capabilities/context` 认证通过，
-//!   `tools/list` 按 context 里的 scope 过滤导出；
+//!   `tools/list` 仅导出远端版本兼容且被 context scope 授权的能力；
 //! - `NotConnected`：发现缺失/陈旧、没有凭据文件或认证/网络失败——协议
 //!   握手照常完成，但不公布任何业务工具，调用如实回 `not_connected`；
 //! - `AmbiguousGrants`：多个凭据文件又没指定 `--grant`——硬错误退出，
 //!   不替用户猜。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -48,6 +48,7 @@ pub(crate) enum Session {
         credential: String,
         scopes: BTreeSet<String>,
         stage_tools_enabled: bool,
+        supported_capabilities: BTreeSet<String>,
         server_instance_id: String,
     },
     NotConnected,
@@ -57,7 +58,7 @@ fn context_matches_discovery(
     body: &Value,
     doc: &DiscoveryDoc,
     grant_id: &str,
-) -> Result<(BTreeSet<String>, bool, String), String> {
+) -> Result<(BTreeSet<String>, bool, String, BTreeSet<String>), String> {
     let protocol_version = body["protocolVersion"]
         .as_str()
         .ok_or_else(|| "context 缺少 protocolVersion".to_string())?;
@@ -105,12 +106,49 @@ fn context_matches_discovery(
     {
         return Err("context 实例身份与发现文件不一致".into());
     }
+    let remote_capabilities = body["capabilities"]
+        .as_array()
+        .ok_or_else(|| "context 缺少 capabilities 数组".to_string())?;
+    let mut remote_versions = BTreeMap::new();
+    for capability in remote_capabilities {
+        let operation = capability["operation"]
+            .as_str()
+            .filter(|operation| !operation.is_empty())
+            .ok_or_else(|| "context capability 缺少 operation".to_string())?;
+        let mcp_name = capability["mcpName"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| "context capability 缺少 mcpName".to_string())?;
+        let version = capability["capabilityVersion"]
+            .as_str()
+            .filter(|version| !version.is_empty())
+            .ok_or_else(|| "context capability 缺少 capabilityVersion".to_string())?;
+        if remote_versions
+            .insert(
+                operation.to_string(),
+                (mcp_name.to_string(), version.to_string()),
+            )
+            .is_some()
+        {
+            return Err(format!("context 重复公布 capability operation {operation}"));
+        }
+    }
+    let supported_capabilities = CAPABILITIES
+        .iter()
+        .filter_map(|capability| {
+            let operation = capability.handler.operation();
+            let (mcp_name, version) = remote_versions.get(operation)?;
+            (mcp_name.as_str() == capability.mcp_name && version.as_str() == capability.version)
+                .then(|| operation.to_string())
+        })
+        .collect();
     Ok((
         parsed_scopes,
         body["stageIntentToolsEnabled"]
             .as_bool()
             .ok_or_else(|| "context 缺少 stageIntentToolsEnabled".to_string())?,
         server_instance_id.to_string(),
+        supported_capabilities,
     ))
 }
 
@@ -264,7 +302,7 @@ pub(crate) async fn open_session(
     if status != 200 {
         return Ok(Session::NotConnected);
     }
-    let (scopes, stage_tools_enabled, server_instance_id) =
+    let (scopes, stage_tools_enabled, server_instance_id, supported_capabilities) =
         context_matches_discovery(&body, &doc, &grant_id)
             .map_err(SessionError::ContextIncompatible)?;
     Ok(Session::Connected {
@@ -272,6 +310,7 @@ pub(crate) async fn open_session(
         credential,
         scopes,
         stage_tools_enabled,
+        supported_capabilities,
         server_instance_id,
     })
 }
@@ -310,12 +349,17 @@ fn output_schema(operation: &str) -> rmcp::model::JsonObject {
         .clone()
 }
 
-/// 从能力表导出工具定义（技术路线 §5.1/§5.3）：只导出该会话 scope 覆盖的
-/// 能力，不声明 resources/prompts/listChanged。annotations 是提示不是权限：
+/// 从能力表导出工具定义（技术路线 §5.1/§5.3）：仅导出远端版本兼容且该会话
+/// scope 覆盖的能力，不声明 resources/prompts/listChanged。annotations 是提示不是权限：
 /// 只读能力标 readOnlyHint；变更能力保守不标幂等，客户端不应自动重试。
-pub(crate) fn tools_for(scopes: &BTreeSet<String>, stage_tools_enabled: bool) -> Vec<Tool> {
+pub(crate) fn tools_for(
+    scopes: &BTreeSet<String>,
+    stage_tools_enabled: bool,
+    supported_capabilities: &BTreeSet<String>,
+) -> Vec<Tool> {
     CAPABILITIES
         .iter()
+        .filter(|cap| supported_capabilities.contains(cap.handler.operation()))
         // 伞 scope（playback:control）在这里同样隐含六种传输播控。
         .filter(|cap| scope_satisfied(scopes, cap.scope))
         .filter(|cap| !cap.handler.is_stage() || stage_tools_enabled)
@@ -362,6 +406,7 @@ pub(crate) async fn call_tool(
         base_url,
         credential,
         server_instance_id,
+        supported_capabilities,
         ..
     } = session
     else {
@@ -374,6 +419,12 @@ pub(crate) async fn call_tool(
             "message": format!("未登记的能力: {name}"),
         }));
     };
+    if !supported_capabilities.contains(capability.handler.operation()) {
+        return error_result(json!({
+            "code": "capability_unsupported",
+            "message": format!("远端服务未公布兼容能力: {}", capability.handler.operation()),
+        }));
+    }
     let mut arguments = arguments.cloned().unwrap_or_default();
     // clientOperationId 是适配层的调用身份（§5.2：每个新动作新键）；调用方
     // 不带就每次生成，绝不静默复用上一个键。
@@ -568,6 +619,11 @@ mod tests {
             "scopes": ["playback:pause"],
             "policyRevision": 1,
             "stageIntentToolsEnabled": false,
+            "capabilities": CAPABILITIES.iter().map(|cap| json!({
+                "operation": cap.handler.operation(),
+                "mcpName": cap.mcp_name,
+                "capabilityVersion": cap.version,
+            })).collect::<Vec<_>>(),
             "instance": {
                 "ownerInstanceId": "owner",
                 "serverInstanceId": "server",
@@ -575,7 +631,46 @@ mod tests {
                 "transport": "http"
             }
         });
-        assert!(context_matches_discovery(&valid, &doc, "grant-a").is_ok());
+        let (scopes, stage_tools_enabled, _, supported) =
+            context_matches_discovery(&valid, &doc, "grant-a").unwrap();
+        assert_eq!(supported.len(), CAPABILITIES.len());
+        assert!(!stage_tools_enabled);
+        assert!(scopes.contains("playback:pause"));
+
+        let mut missing_capabilities = valid.clone();
+        missing_capabilities
+            .as_object_mut()
+            .unwrap()
+            .remove("capabilities");
+        assert!(
+            context_matches_discovery(&missing_capabilities, &doc, "grant-a")
+                .unwrap_err()
+                .contains("capabilities")
+        );
+
+        let mut incompatible_pause = valid.clone();
+        let pause = incompatible_pause["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|cap| cap["operation"] == "playback.pause")
+            .unwrap();
+        pause["capabilityVersion"] = json!("2");
+        let (scopes, _, _, supported) =
+            context_matches_discovery(&incompatible_pause, &doc, "grant-a").unwrap();
+        let tools = tools_for(&scopes, false, &supported);
+        assert!(!tools.iter().any(|tool| tool.name == "playback_pause"));
+
+        let mut missing_operation = valid.clone();
+        missing_operation["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|cap| cap["operation"] != "playback.pause");
+        let (scopes, _, _, supported) =
+            context_matches_discovery(&missing_operation, &doc, "grant-a").unwrap();
+        assert!(!tools_for(&scopes, false, &supported)
+            .iter()
+            .any(|tool| tool.name == "playback_pause"));
 
         let mut future_version = valid.clone();
         future_version["protocolVersion"] = json!("2");
@@ -642,6 +737,7 @@ mod tests {
             credential: "fixture".into(),
             scopes: BTreeSet::new(),
             stage_tools_enabled: false,
+            supported_capabilities: ["playback.pause".to_string()].into_iter().collect(),
             server_instance_id: "server".into(),
         };
         let result = call_tool(&http_client().unwrap(), &session, "playback.pause", None).await;
@@ -654,6 +750,22 @@ mod tests {
             received["clientOperationId"]
         );
         assert!(!received["clientOperationId"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsupported_capability_is_rejected_without_remote_call() {
+        let session = Session::Connected {
+            base_url: "http://127.0.0.1:1".into(),
+            credential: "fixture".into(),
+            scopes: BTreeSet::new(),
+            stage_tools_enabled: false,
+            supported_capabilities: BTreeSet::new(),
+            server_instance_id: "server".into(),
+        };
+
+        let result = call_tool(&http_client().unwrap(), &session, "playback.pause", None).await;
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["structuredContent"]["code"], "capability_unsupported");
     }
 
     #[tokio::test]
@@ -771,7 +883,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(session, Session::NotConnected));
-        assert!(tools_for(&BTreeSet::new(), false).is_empty());
+        assert!(tools_for(&BTreeSet::new(), false, &BTreeSet::new()).is_empty());
     }
 
     #[tokio::test]
@@ -974,7 +1086,7 @@ mod tests {
         .unwrap();
         assert!(matches!(session, Session::NotConnected));
         // 未连接也能拿到（空的）工具目录与明确的 not_connected 调用结论。
-        assert!(tools_for(&BTreeSet::new(), false).is_empty());
+        assert!(tools_for(&BTreeSet::new(), false, &BTreeSet::new()).is_empty());
         let result = call_tool(&client, &session, "playback.pause", None).await;
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(value["structuredContent"]["code"], "not_connected");
@@ -985,9 +1097,13 @@ mod tests {
 
     #[test]
     fn tools_are_filtered_by_session_scopes_and_annotated() {
+        let supported = CAPABILITIES
+            .iter()
+            .map(|cap| cap.handler.operation().to_string())
+            .collect();
         let mut read_only = BTreeSet::new();
         read_only.insert("playback:read".to_string());
-        let tools = tools_for(&read_only, false);
+        let tools = tools_for(&read_only, false, &supported);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "playback_snapshot_get");
         assert_eq!(
@@ -997,7 +1113,7 @@ mod tests {
 
         let mut control = BTreeSet::new();
         control.insert("playback:control".to_string());
-        let tools = tools_for(&control, false);
+        let tools = tools_for(&control, false, &supported);
         assert_eq!(tools.len(), 6);
         assert!(tools
             .iter()
@@ -1011,12 +1127,16 @@ mod tests {
     }
     #[test]
     fn stage_tool_advertising_and_search_schema_match_execution() {
+        let supported = CAPABILITIES
+            .iter()
+            .map(|cap| cap.handler.operation().to_string())
+            .collect();
         let scopes = ["stage:capabilities_read", "stage:intent_validate"]
             .into_iter()
             .map(str::to_string)
             .collect();
-        assert!(tools_for(&scopes, false).is_empty());
-        assert_eq!(tools_for(&scopes, true).len(), 2);
+        assert!(tools_for(&scopes, false, &supported).is_empty());
+        assert_eq!(tools_for(&scopes, true, &supported).len(), 2);
         let schema = input_schema("library_search");
         assert_eq!(schema["required"], json!(["q"]));
         assert!(schema["properties"].get("q").is_some());
@@ -1025,8 +1145,12 @@ mod tests {
 
     #[test]
     fn every_registered_capability_has_one_advertised_schema_and_handler() {
+        let supported = CAPABILITIES
+            .iter()
+            .map(|cap| cap.handler.operation().to_string())
+            .collect();
         let scopes = SCOPES.iter().map(|scope| (*scope).to_string()).collect();
-        let tools = tools_for(&scopes, true);
+        let tools = tools_for(&scopes, true, &supported);
         assert_eq!(tools.len(), CAPABILITIES.len());
 
         let handlers = [

@@ -16,6 +16,7 @@ function prepare(edition) {
   const helper = path.join(path.dirname(dest), 'edition-ui' + (process.platform === 'win32' ? '.exe' : ''));
   execFileSync('rustc', ['--edition=2021', path.join(ROOT, 'build-support/edition-ui.rs'), '-o', helper], { stdio: 'inherit' });
   execFileSync(helper, [path.join(ROOT, 'plugin/ui'), path.join(dest, 'ui'), edition], { stdio: 'inherit' });
+  require('./minify-ui').minifyUi(path.join(dest, 'ui'));
   fs.cpSync(path.join(ROOT, 'plugin/assets'), path.join(dest, 'assets'), { recursive: true });
   const sdk = path.join(dest, 'sdk-root/plugins/sdk/rust/dbx-plugin-sdk');
   fs.cpSync(path.join(ROOT, 'plugin/vendor/dbx-plugin-sdk'), sdk, { recursive: true });

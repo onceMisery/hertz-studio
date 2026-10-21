@@ -54,6 +54,7 @@ async function run() {
     window: { Workshop: { onAiTask() { initialRecovery.push('aiTasks'); } } },
     Workshop: { onAiTask() { initialRecovery.push('aiTasks'); } },
     refreshAll() { initialRecovery.push('fullRefresh'); },
+    restoreQueue() { initialRecovery.push('queue'); },
     refreshLibraryInPlace() { initialRecovery.push('library'); },
     loadPlaylists() { initialRecovery.push('playlists'); },
   };
@@ -61,12 +62,12 @@ async function run() {
   vm.runInContext('let retries = 0; let missedWhileOffline = false; let hasConnected = false;\n'
     + connectionSource + '\nthis.connectionChanged = onConnectionChange;', firstConnection);
   firstConnection.connectionChanged(true);
-  assert.deepEqual(initialRecovery, ['library', 'playlists', 'aiTasks'],
+  assert.deepEqual(initialRecovery, ['queue', 'library', 'playlists', 'aiTasks'],
     'first event connection reconciles event-backed data without reloading settings');
   firstConnection.connectionChanged(false);
   firstConnection.connectionChanged(true);
   assert.deepEqual(initialRecovery,
-    ['library', 'playlists', 'aiTasks', 'fullRefresh', 'aiTasks'],
+    ['queue', 'library', 'playlists', 'aiTasks', 'fullRefresh', 'aiTasks'],
     'later reconnect keeps the full state refresh path');
 
   const subscriptions = [], requests = [], messages = [], recoveryReads = [];
@@ -78,6 +79,9 @@ async function run() {
     state: { connected: false },
     ui: { conn: { textContent: '', className: '' }, offlineBanner: { hidden: true } },
     refreshAll() { recoveryReads.push('refreshAll'); },
+    restoreQueue() { recoveryReads.push('queue'); },
+    refreshLibraryInPlace() { recoveryReads.push('library'); },
+    loadPlaylists() { recoveryReads.push('playlists'); },
     dbxCoverUrl() {}, ensureCover() {}, console: { warn() {} },
     window: { dbxPlugin: {
       onEvent(listener) {
@@ -95,7 +99,7 @@ async function run() {
     scheduleReconnect() { reconnects++; },
   };
   vm.createContext(dbx);
-  vm.runInContext('let retries = 0; let missedWhileOffline = false;\n' + connectionSource + dbxSource
+  vm.runInContext('let retries = 0; let missedWhileOffline = false; let hasConnected = false;\n' + connectionSource + dbxSource
     + '\nconst transport = DbxTransport;\n' + bootstrap
     + '\nthis.open = openSocket; this.close = () => socket.close();', dbx);
   const settle = () => new Promise(resolve => setImmediate(resolve));

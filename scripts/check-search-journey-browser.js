@@ -6,7 +6,7 @@ const fs = require('node:fs'), path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const { startFixture } = require('./ui-browser-fixture');
 const { uiUrl } = require('./ui-token');
-const output = path.resolve(__dirname, '../output/playwright/search-journey');
+const output = path.resolve(process.env.SEARCH_JOURNEY_OUTPUT || path.join(__dirname, '../output/playwright/search-journey'));
 async function main() {
   fs.mkdirSync(output, {recursive:true});
   const fixture = await startFixture();
@@ -17,7 +17,8 @@ async function main() {
   const page = await context.newPage(), errors = [], requests = [], releases = new Map();
   let active = 0, maxActive = 0;
   page.on('pageerror', e => errors.push(e.message));
-  const sources = ['netease','qq','kugou'].map((id,i) => ({id,label:['网易云音乐','QQ音乐','酷狗音乐'][i],kind:'music',caps:[],cats:[]}));
+  const sources = ['netease','qq','kugou'].map((id,i) => ({id,label:['网易云音乐','QQ音乐','酷狗音乐'][i],kind:'music',
+    caps:['playlist_search','artist_search'],cats:[]}));
   const track = (source, id, q) => ({source,id:String(id),title:q + ' ' + source + ' ' + id,artist:'Fixture',album:'Search',duration_ms:180000,playable:true,track_ref:{source,id:String(id)}});
   let failSourcesOnce = false;
   await page.route('**/v1/online/sources', route => {
@@ -60,6 +61,14 @@ async function main() {
       if (!/closed|handled|Invalid Interception/i.test(e.message)) throw e;
     } finally { active--; }
   });
+  await page.route('**/v1/online/playlists/search?**', route =>
+    route.fulfill({json:{source:'netease',keyword:'fixture',total:1,playlists:[{
+      source:'netease',id:'fixture-playlist',name:'Fixture playlist',track_count:3,kind:'created',
+    }]}}));
+  await page.route('**/v1/online/artists/search?**', route =>
+    route.fulfill({json:{source:'netease',keyword:'fixture',total:1,artists:[{
+      source:'netease',id:'fixture-artist',name:'Fixture artist',song_count:3,
+    }]}}));
   const release = q => { const fn = releases.get(q); assert.ok(fn,'slow source was started: ' + q); releases.delete(q); fn(); };
   const count = (q,source) => requests.filter(r=>r.q===q && r.source===source).length;
   try {
@@ -231,6 +240,9 @@ async function main() {
     const visibleSkins = await page.evaluate(() => Skins.list().map(skin => skin.id));
     assert.deepEqual(visibleSkins, ['classic','sheen','liunian','qingfeng','chaoxi','heijiao','orbit'],
       'the public skin list matches the seven supported layouts');
+    await page.getByRole('button',{name:'在线曲库',exact:true}).click();
+    await page.getByRole('combobox',{name:'音源',exact:true}).selectOption('netease');
+    await page.locator('#search').click();
     await page.setViewportSize({width:390,height:420});
     for (const skin of visibleSkins) {
       await page.evaluate(id => Skins.apply(id), skin);
@@ -243,7 +255,7 @@ async function main() {
       }
       await search.evaluate(el => el.focus({preventScroll:true}));
       await search.fill('R1 skin ' + skin);
-      await page.waitForSelector('.ts-menu:not([hidden]) .ts-row');
+      await page.locator('.ts-menu:not([hidden]) .ts-row, .ts-menu:not([hidden]) .ts-card').first().waitFor();
       const geometry = await page.evaluate(() => {
         const menu = document.querySelector('.ts-menu').getBoundingClientRect();
         const body = document.querySelector('.ts-body');

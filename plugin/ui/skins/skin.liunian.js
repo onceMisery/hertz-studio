@@ -121,6 +121,7 @@
       id: 'advanced',
       label: '高级',
       items: [
+        ['aigrant', 'AI 与外部连接', 'MCP 授权与外部连接'],
         ['dev', '开发者选项', '播放诊断日志'],
       ],
     },
@@ -537,9 +538,9 @@
     }
   }
 
-  function ensureSources(epoch) {
+  function ensureSources(epoch, network) {
     if (panel.sources) return Promise.resolve(panel.sources);
-    return transport().get('/v1/online/sources')
+    return network.get('/v1/online/sources', { admissionSource: 'source-catalog' })
       .then(function (data) {
         if (epoch !== panel.epoch) return null;
         panel.sources = data.sources || [];
@@ -561,7 +562,7 @@
     }
     setSectionStatus(refs.onlineSec, '正在读取音源…', 'loading');
     var network = searchNetwork;
-    ensureSources(epoch).then(function (sources) {
+    ensureSources(epoch, network).then(function (sources) {
       if (epoch !== panel.epoch || !network.active) return;
       if (!sources) {
         setSectionStatus(refs.onlineSec, '音源列表读取失败', 'error');

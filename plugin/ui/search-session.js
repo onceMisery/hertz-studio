@@ -32,11 +32,13 @@
   }
   function create(transport) {
     var session = { queryId: ++serial, active: true };
-    session.get = function (path) {
+    session.get = function (path, options) {
       if (!session.active) return Promise.reject(aborted());
       if (queue.length >= QUEUE_LIMIT) return Promise.reject(busy());
       var query = path.split('?')[1] || '';
-      var source = new URLSearchParams(query).get('source') || 'local';
+      var admissionSource = options && options.admissionSource;
+      var source = typeof admissionSource === 'string' && admissionSource
+        ? admissionSource : new URLSearchParams(query).get('source') || 'local';
       return new Promise(function (resolve, reject) {
         queue.push({ session: session, path: path, source: source, transport: transport,
           controller: typeof AbortController === 'function' ? new AbortController() : null,

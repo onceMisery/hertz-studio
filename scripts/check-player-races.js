@@ -16,7 +16,8 @@ const deferred = () => {
 async function run() {
   const requests = [];
   const state = { snapshot: { track_id: 'one', duration_ms: 100000, position_ms: 0 }, settings: {} };
-  const range = { value: '20', setAttribute() {} };
+  const rangeAttrs = {};
+  const range = { value: '20', setAttribute(key, value) { rangeAttrs[key] = value; }, getAttribute: key => rangeAttrs[key] ?? null };
   const box = vm.createContext({ Promise, DOMException, Date, state, window: {},
     ui: { volume: range, setCoverFollow: {} }, np: {}, Stage: null,
     request(url, options) {

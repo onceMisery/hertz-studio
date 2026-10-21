@@ -63,6 +63,8 @@ vm.createContext(sandbox);
 const src = fs.readFileSync(path.join(WEB, 'creative-prompt.js'), 'utf8');
 const definitions = fs.readFileSync(path.join(WEB, 'creative-gl.js'), 'utf8');
 vm.runInContext(definitions, sandbox, { filename: 'creative-gl.js' });
+vm.runInContext(fs.readFileSync(path.join(WEB, 'creative-anime.js'), 'utf8'), sandbox,
+  { filename: 'creative-anime.js' });
 
 section('加载模块（无 DOM / 无存储 / 无网络）');
 // 行为证明的一半：沙箱里根本没有那些全局量，能加载、能编译就说明没碰它们。
@@ -88,6 +90,7 @@ sandbox.CreativeStage = {
     { id: 'tunnel', label: '光隧道' },
     { id: 'nebula', label: '星云' },
     { id: 'terrain', label: '频谱地形' },
+    { id: 'anime-rail', label: '月下列车' },
     { id: 'lyric', label: '三维歌词' }
   ],
   spec: (sceneId) => ({
@@ -115,7 +118,8 @@ sandbox.CreativeStage = {
       ] }
     ],
     scene: sceneId === 'orb' ? [['sc.radius', '半径', 1, 8, 0.1, '', 3]]
-      : sceneId === 'tunnel' ? [['sc.push', '推进', 0, 4, 0.1, '', 1]] : []
+      : sceneId === 'tunnel' ? [['sc.push', '推进', 0, 4, 0.1, '', 1]]
+        : sceneId === 'anime-rail' ? [['sc.light', '月夜亮度', 0.60, 1.35, 0.01, '', 1]] : []
   })
 };
 
@@ -419,9 +423,33 @@ section('否定约束覆盖与硬约束拒绝');
   ok(r.ok === true && r.intent.scene === 'tunnel' && r.intent.patch['sc.push'] === 2,
     '英文范围说明、静态候选和默认值声明不会误判为硬约束');
 
+  r = CP.compile('New anime rail; the request does not include a song timetable, relative edit or temporal sequence, but it must require blue and must not trigger media retrieval.');
+  ok(r.ok === false && r.code === 'unrecognized_constraints' && r.intent === null,
+    '安全范围说明不会吞掉相邻的未支持硬约束');
+
+  r = CP.compile('New anime rail; the request does not include a song, but it must require blue and a timetable, relative edit or temporal sequence, and it must not trigger media retrieval.');
+  ok(r.ok === false && r.code === 'unrecognized_constraints' && r.intent === null,
+    '安全范围列表中的相邻硬约束仍需拒绝');
+
+  r = CP.compile('星云; the request does not include a song timetable relative edit or temporal sequence and it must trigger media retrieval');
+  ok(r.ok === false && r.code === 'unrecognized_constraints' && r.intent === null,
+    '肯定的媒体检索要求不得被范围说明规则吞掉');
+
+  r = CP.compile('星云; the request does not include any song or timetable and must not trigger media retrieval');
+  ok(r.ok === true && r.intent.scene === 'nebula',
+    '否定的媒体检索范围说明不会阻断有效舞台意图');
+
+  r = CP.compile('For this public example, picture a stable night train composition. The request does not include a song, timetable, relative edit, or temporal sequence, and it must not trigger media retrieval. Use the existing anime-rail scene as a new configuration. Set sc.light to exactly 1.1, and use canonical defaults for anything I have not specified.');
+  ok(r.ok === true && r.intent.scene === 'anime-rail' && r.intent.patch['sc.light'] === 1.1,
+    '长说明中的安全范围声明不会误拒绝明确的场景参数');
+
   r = CP.compile('星云，不要蓝色');
   ok(r.ok === false && r.code === 'unrecognized_constraints' && r.intent === null,
     '明确但不支持的颜色要求仍阻止部分意图应用');
+
+  r = CP.compile('I need a preset that embeds a live external video URL; a static scene alone is insufficient.');
+  ok(r.ok === false && r.code === 'unrecognized_constraints' && r.intent === null,
+    '明确提出但当前场景词典无法满足的预置要求应显式拒绝');
 }
 
 section('运行时上下文：退休路径与不可用场景');
@@ -500,6 +528,7 @@ section('按活动场景 schema 解析精确数值');
 
 section('确定性与防污染');
 {
+  const sceneRuleCount = sandbox.CreativeGL.scenes().length;
   const t = '梦幻星云，缓慢镜头，霓虹，跟随音乐';
   const a = JSON.stringify(CP.compile(t));
   const b = JSON.stringify(CP.compile(t));
@@ -520,13 +549,13 @@ section('确定性与防污染');
   const s1 = CP.supported();
   ok(s1.groups.length === 7, `supported 覆盖 7 个分组（实际 ${s1.groups.length}）`);
   ok(s1.maxLength === 512, 'supported 透露输入上限');
-  ok(s1.groups[0].id === 'scene' && s1.groups[0].rules.length === 6,
-    '场景组有 6 条规则');
+  ok(s1.groups[0].id === 'scene' && s1.groups[0].rules.length === sceneRuleCount,
+    '场景组覆盖所有当前注册场景');
   s1.groups[0].rules[0].aliases.push('污染');
   s1.groups[0].rules.push({ id: '污染' });
   const s2 = CP.supported();
   ok(s2.groups[0].rules[0].aliases.indexOf('污染') < 0
-    && s2.groups[0].rules.length === 6, 'supported 返回深拷贝，规则表改不动');
+    && s2.groups[0].rules.length === sceneRuleCount, 'supported 返回深拷贝，规则表改不动');
 
   ok(CP.compile('柱阵').intent.scene === 'towers'
     && CP.compile('星球').intent.scene === 'orb'

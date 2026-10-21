@@ -527,18 +527,12 @@ mod tests {
         let provider = StepFun::new("https://api.stepfun.com/v1", "step-5-preview").unwrap();
         let quote = provider.quote("dark orb").unwrap();
         assert_eq!(quote.max_input_tokens, 20_000);
+        assert!(provider.stage_request(&"x".repeat(2_000), &quote).is_ok());
+        assert!(provider.stage_request(&"测".repeat(2_000), &quote).is_ok());
         assert!(provider
-            .stage_request(&"x".repeat(2_000), &quote)
-            .is_ok());
-        assert!(provider
-            .stage_request(&"测".repeat(2_000), &quote)
-            .is_ok());
-        assert!(
-            provider
-                .request(&"x".repeat(REQUEST_BYTES), "x", &quote, false)
-                .unwrap_err()
-                .contains("request exceeds 64 KiB")
-        );
+            .request(&"x".repeat(REQUEST_BYTES), "x", &quote, false)
+            .unwrap_err()
+            .contains("request exceeds 64 KiB"));
         let mut quote = quote;
         quote.max_output_tokens = COMPLETION_OUTPUT_TOKENS + 1;
         assert!(provider.stage_request("dark orb", &quote).is_err());
@@ -780,7 +774,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn configured_token_only_http_job_records_usage_without_amount_gate() {
         use super::super::{credential as credentials, jobs};
-        use axum::{Json, http::HeaderMap, routing::post};
+        use axum::{
+            http::{HeaderMap, StatusCode},
+            response::IntoResponse,
+            routing::post,
+            Json,
+        };
         use std::sync::atomic::{AtomicUsize, Ordering};
         const MODEL: &str = "step-3.5-flash-2603";
         let calls = Arc::new(AtomicUsize::new(0));
@@ -797,9 +796,16 @@ mod tests {
                         assert_eq!(body["store"], false);
                         assert_eq!(body["stream"], false);
                         assert_eq!(body["max_output_tokens"], COMPLETION_OUTPUT_TOKENS);
+                        if body["input"] == "payment-required fixture" {
+                            return (
+                                StatusCode::PAYMENT_REQUIRED,
+                                Json(json!({"error":{"message":"synthetic secret response body"}})),
+                            )
+                                .into_response();
+                        }
                         let mut result = response(r#"{"version":1,"scene":"orb","patch":{}}"#);
                         result["model"] = body["model"].clone();
-                        Json(result)
+                        Json(result).into_response()
                     }
                 },
             ),
@@ -1011,6 +1017,52 @@ mod tests {
             .unwrap();
         assert_eq!(final_status["budget"], budget_before);
         assert_eq!(final_status["guard"]["halted"], true);
+
+        let payment_key = format!(
+            "v1.{}.{}",
+            vmusic_store::now_ms(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let rejected: serde_json::Value = client
+            .post(format!("{api_origin}/v1/ai/jobs"))
+            .bearer_auth("stepfun-http-fixture-token")
+            .json(&json!({"brief":"payment-required fixture", "idempotency_key":payment_key}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let rejected_id = rejected["job"]["jobId"].as_str().unwrap();
+        let mut failed_job = serde_json::Value::Null;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                failed_job = client
+                    .get(format!("{api_origin}/v1/ai/jobs/{rejected_id}"))
+                    .bearer_auth("stepfun-http-fixture-token")
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if failed_job["state"] != "accepted" && failed_job["state"] != "running" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(failed_job["state"], "failed");
+        assert_eq!(failed_job["failureCode"], "provider_error");
+        assert_eq!(failed_job["providerHttpStatus"], 402);
+        assert!(failed_job.get("providerError").is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "HTTP 402 is not retried");
         state.audio.shutdown();
         handle.join().unwrap();
         state.db.close().await;

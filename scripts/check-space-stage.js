@@ -18,7 +18,7 @@ async function main() {
   assert.ok(bundle.length < 1.6 * 1024 * 1024, 'shared stage bundle size');
   const sandbox = { Math, console, AbortController, setTimeout, clearTimeout };
   sandbox.window = sandbox; sandbox.self = sandbox; sandbox.globalThis = sandbox;
-  const api = vm.runInNewContext(bundle + ';SpaceStagePure', sandbox, { timeout: 15000 });
+  const api = vm.runInNewContext(fs.readFileSync(path.join(root, 'plugin/ui/vendor/stage-runtime.js'), 'utf8') + '\n' + bundle + ';SpaceStagePure', sandbox, { timeout: 15000 });
   for (const key of ['catalog','register','normalizeState','create','effectCatalog']) assert.equal(typeof api[key], 'function');
   const catalog = api.catalog();
   assert.ok(catalog.length > 2); assert.ok(Object.isFrozen(catalog));

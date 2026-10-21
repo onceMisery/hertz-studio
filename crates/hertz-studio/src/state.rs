@@ -4152,7 +4152,13 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     Ok(event) => event,
                     // Snapshot/spectrum are lossy; transition and natural-end
                     // control edges have their own unbounded single-consumer queue.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Rebase at the live tail before reading the shared snapshot;
+                        // otherwise an older queued event could overwrite this state.
+                        let (receiver, snapshot) = state.audio.subscribe_with_snapshot();
+                        rx = receiver;
+                        AudioEvent::Snapshot(snapshot)
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         audio_open = false;
                         continue;

@@ -1302,6 +1302,52 @@ async function loginScenario(pollStates, opts) {
       '等待清单的预取不再发空搜索');
   }
 
+  section('All 音源缩减为单源：选择器回退且搜索仍指定剩余音源');
+  {
+    const transport = makeTransport({ GET: [
+      { match: '/v1/online/sources', times: 1, returns: { sources: [
+        { id: 'netease', label: '网易云音乐', cats: [], caps: [] },
+        { id: 'qq', label: 'QQ音乐', cats: [], caps: [] },
+      ] } },
+      { match: '/v1/online/sources', returns: { sources: [
+        { id: 'netease', label: '网易云音乐', cats: [], caps: [] },
+      ] } },
+      { match: '/v1/online/search?', returns: { tracks: [T({ source: 'netease', id: 'n1' })] } },
+    ] });
+    const env = makeSandbox({ transport });
+    const bound = bindOnline(env);
+    const sourceSelect = {
+      _value: 'netease',
+      children: [],
+      get value() { return this._value; },
+      set value(value) {
+        this._value = this.children.some(option => option.value === value) ? value : '';
+      },
+      replaceChildren(...children) {
+        this.children = children;
+        if (!children.some(option => option.value === this._value)) {
+          this._value = children.length ? children[0].value : '';
+        }
+      },
+    };
+    bound.ui.onlineSource = sourceSelect;
+    const online = env.sandbox.window.Online;
+    online.init();
+    await ticks(20);
+
+    sourceSelect.value = 'all';
+    online.state.source = 'all';
+    await online.loadSources();
+    eq(sourceSelect.value, 'netease', '移除 All 选项后选择器回退到唯一音源');
+    eq(online.state.source, 'netease', '在线搜索状态同步回退到唯一音源');
+
+    online.state.q = '目录缩减后搜索';
+    await online.search();
+    const search = transport.calls.get.find(call => call.url.includes('/v1/online/search?'));
+    ok(search && new URL('http://test' + search.url).searchParams.get('source') === 'netease',
+      '搜索请求仍携带有效的剩余音源');
+  }
+
   section('单源搜索：行渲染、元数据缓存、失败诚实报错');
   {
     const transport = makeTransport({

@@ -52,6 +52,15 @@ pub async fn prepare(data_dir: &Path) -> anyhow::Result<Config> {
     Config::load(data_dir)
 }
 
+/// Resolve a caller-supplied relative data directory against the service process
+/// working directory before exposing any paths to child processes or the UI.
+pub fn absolute_data_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
+    if data_dir.is_absolute() {
+        return Ok(data_dir.to_path_buf());
+    }
+    Ok(std::env::current_dir()?.join(data_dir))
+}
+
 /// 装配出完整的运行时。
 ///
 /// `token` 只被 HTTP 形态用来鉴权；插件形态的 stdio 天然可信，传什么都行，
@@ -62,6 +71,7 @@ pub async fn boot(
     token: String,
     overlay_key: String,
 ) -> anyhow::Result<Booted> {
+    let data_dir = absolute_data_dir(&data_dir)?;
     let db = vmusic_store::open(&data_dir).await?;
 
     let backend = match config.audio.backend.as_str() {
@@ -276,4 +286,25 @@ pub async fn boot(
         audio_thread,
         ai_lock,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::absolute_data_dir;
+    use std::path::Path;
+
+    #[test]
+    fn relative_data_dir_is_resolved_against_service_working_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        let resolved = absolute_data_dir(Path::new("relative-data")).unwrap();
+
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved, cwd.join("relative-data"));
+    }
+
+    #[test]
+    fn absolute_data_dir_is_preserved() {
+        let absolute = std::env::temp_dir().join("hertz-data");
+        assert_eq!(absolute_data_dir(&absolute).unwrap(), absolute);
+    }
 }

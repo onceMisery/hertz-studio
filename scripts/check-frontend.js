@@ -84,6 +84,8 @@ const STEPS = [
     why: '情绪 Cue 的摘要/generation、A→B→A、缓存双限与清除不能串歌；无 Cue 时保持中性。' },
   { script: 'check-assets.js', stage: 'guard',
     why: '前端资源接线：文件在不在、id 对不对、脚本加载顺序。这类失败不会报错，只会「某块界面空着」。' },
+  { script: 'check-ai-grants-ui.js', stage: 'behavior',
+    why: '外部 MCP 授权的 scope、秘密白名单、配置复制、轮换、撤销和不可用形态必须保持一致。' },
   { script: 'check-lineage-names.js', stage: 'guard',
     why: '改名之后的负面不变量：上游项目名不许回到标识符与界面文案（注释里的历史出处按第二档放行）。' },
   { script: 'api-routes.js', stage: 'guard', args: ['--check'],

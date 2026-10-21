@@ -15,7 +15,7 @@ function harness(saved) {
       dispatchEvent(e){for(const fn of listeners.get(e.type)||[])fn(e);},getElementById:()=>null,
       body:{classList:{contains:()=>false}},documentElement:{classList:{toggle(){}}}},
     Stage:{presentation:()=>selection,position:()=>position,kick(){},gate(){},tier:()=>1},
-    VMusicTransport:{async post(){requests++;return identity;}}
+    VMusicTransport:{async get(){return {};},async put(){},async post(){requests++;return identity;}}
   };
   sandbox.window.Stage=sandbox.Stage;sandbox.window.VMusicTransport=sandbox.VMusicTransport;
   vm.createContext(sandbox);
@@ -66,6 +66,20 @@ async function main(){
   bad=structuredClone(file);bad.preset.look.bloom=8;assert.throws(()=>P.prepare(bad),/参数超出可用范围/);
   bad=structuredClone(file);bad.preset.look.unknown=.5;assert.throws(()=>P.prepare(bad),/未知工程字段/);
   P.apply(prepared,CS.revision());h.position(2500);assert.equal(CS.runtime()['look.bloom'],0,'Imported cue track stays off before media confirmation');
+  const shareSnapshot=CS.shareSnapshot({includeProjectContext:true});
+  assert.deepEqual(JSON.parse(JSON.stringify(shareSnapshot.project)),{
+    version:1,timelineVersion:1,schemaVersion:h.sandbox.CreativeStageContract.schemaVersion,
+    schemaHash:h.sandbox.CreativeStageContract.schemaHash,media:null,
+  },'Engineering share retains only the current schema/timeline marker, never the media fingerprint');
+  const shareCode=await h.sandbox.CreativeShareCode.encode(shareSnapshot,{compress:false});
+  const sharedPreset=await h.sandbox.CreativeShareCode.decode(shareCode);
+  const receiver=harness();receiver.CS.setPreset(sharedPreset);receiver.position(1500);
+  assert.equal(receiver.CS.runtime()['look.bloom'],0,'Shared engineering cues remain inactive before recipient confirmation');
+  assert.match(receiver.P.status(),/未绑定媒体.*cue 轨停用/);
+  await receiver.P.bindCurrent();receiver.position(1500);
+  assert.ok(Math.abs(receiver.CS.runtime()['look.bloom']-.25)<1e-9,
+    'Recipient must explicitly confirm the selected media before shared cues execute');
+  assert.equal(CS.shareSnapshot().project,undefined,'Ordinary preset snapshots remain free of project metadata');
   await P.bindCurrent();assert.match(P.status(),/已启用/);
   for(const [ms,want]of [[0,0],[1500,.25],[2000,.5],[2500,.25],[4000,0],[1500,.25]]){
     h.position(ms);assert.ok(Math.abs(CS.runtime()['look.bloom']-want)<1e-9,'Reversible overlapping timeline at '+ms);
@@ -154,7 +168,107 @@ async function main(){
   reopened.P.apply(reopenedProject,reopened.CS.revision());
   assert.equal(reopened.CS.preset().scene,'lyric','Switched scene project can be reopened');
   assert.equal(reopened.CS.preset().cues.length,1);
-  console.log('Stage projects: strict envelope, pure import, media confirmation/races, persistent metadata, refresh/switch invalidation, ordered overlapping cues and reversible seeks passed');
+
+  const seeded=harness(), oldContext={version:1,timelineVersion:1,schemaVersion:'0',
+    schemaHash:'0'.repeat(64),media:seeded.identity};
+  const oldPreset=seeded.CS.shareSnapshot();
+  oldPreset.name='旧版本舞台';oldPreset.cam.dist=23;
+  oldPreset.cues=[{at:2,len:1200,ease:'linear',set:{'look.bloom':.9}},
+    {every:1,len:500,ease:'in',set:{'cam.dist':18}}];
+  oldPreset.project=oldContext;
+  const storage=new Map([['vmusic.creative.preset',JSON.stringify(oldPreset)]]);
+  const recovered=harness(storage);recovered.CS.init();
+  assert.equal(recovered.CS.preset().scene,oldPreset.scene,'A stale but structurally valid project restores its static scene');
+  assert.equal(recovered.CS.preset().name,'旧版本舞台');
+  assert.equal(recovered.CS.preset().cam.dist,23);
+  assert.deepEqual(JSON.parse(JSON.stringify(recovered.CS.preset().cues)),[],'Stale cues are never retained on the active timeline');
+  assert.deepEqual(JSON.parse(JSON.stringify(recovered.CS.preset().legacyCues)),oldPreset.cues,
+    'Recovery moves old cue entries into a separate archive');
+  assert.equal(recovered.P.timelineAllowed(recovered.CS.preset().project),false,
+    'Stale project cues never become executable');
+  assert.match(recovered.P.status(),/2 条旧 cue 已隔离保存并停用/);
+  assert.match(recovered.P.recoveryNotice(),/2 条旧 cue 已隔离保存并停用/);
+  assert.throws(()=>recovered.CS.shareSnapshot(),/2 条旧 cue 已隔离保存并停用/,
+    'Stale projects cannot be exported through a share snapshot');
+  await assert.rejects(()=>recovered.sandbox.CreativeShareCode.encode(recovered.CS.preset(),{compress:false}),
+    /2 条旧 cue 已隔离保存并停用/,'Explicit share encoding preserves the recovery explanation');
+  await assert.rejects(()=>recovered.P.capture(false),/2 条旧 cue 已隔离保存并停用/,
+    'Project capture is rejected before any media request');
+  assert.throws(()=>recovered.CS.exportJSON(),/预置 JSON 与工程导出已暂停/,
+    'Ordinary JSON export is also blocked while the old project context is active');
+
+  const archived=JSON.parse(JSON.stringify(recovered.CS.preset().legacyCues));
+  const staticBloom=recovered.CS.preset().look.bloom;
+  assert.equal(recovered.CS.addCue({at:3,set:{'look.bloom':.4}}),false,
+    'New cues require explicitly leaving stale project mode first');
+  assert.equal(recovered.CS.updateCue(0,{at:3,set:{'look.bloom':.4}}),false);
+  assert.equal(recovered.CS.removeCue(0),false);
+  assert.equal(recovered.CS.fire(recovered.CS.preset().legacyCues[0]),false,
+    'The manual trial entry rejects an archived legacy cue');
+  recovered.position(3000);
+  assert.equal(recovered.CS.runtime()['look.bloom'],staticBloom,
+    'Song-time timeline leaves the static baseline unchanged');
+  recovered.onset.step(50,new Float64Array(64).fill(1),300);
+  assert.equal(recovered.CS.stats().beats,1,'The beat fixture reaches the onBeat callback');
+  assert.equal(recovered.CS.stats().animations,0,'Beat-triggered legacy cues remain inactive');
+  recovered.CS.setScene('orb');
+  assert.deepEqual(JSON.parse(JSON.stringify(recovered.CS.preset().legacyCues)),archived,
+    'Scene changes do not filter or rewrite archived cue data');
+  assert.deepEqual(JSON.parse(JSON.stringify(recovered.CS.preset().cues)),[],'Scene changes never promote archived cues');
+  assert.equal(recovered.CS.beginNewCueTrack(),true,'The user can explicitly start a current-version cue track');
+  assert.equal(recovered.CS.preset().project,undefined,'Starting a new track removes the stale media binding');
+  assert.deepEqual(JSON.parse(JSON.stringify(recovered.CS.preset().legacyCues)),archived,
+    'Starting a new track retains the old cues in the local archive');
+  assert.match(recovered.P.status(),/2 条旧 cue.*仅保留在本机.*不包含在分享码、预置 JSON 或工程导出/);
+  assert.equal(recovered.CS.addCue({at:1,len:1000,ease:'linear',set:{'look.bloom':1}}),true,
+    'A fresh track accepts newly authored current-version cues');
+  recovered.position(1500);
+  assert.ok(recovered.CS.runtime()['look.bloom']>staticBloom,
+    'New song-time cues execute after the explicit fresh-track action');
+  const freshSnapshot=recovered.CS.shareSnapshot();
+  assert.equal(freshSnapshot.legacyCues,undefined,'Share output excludes local archived cues');
+  const freshProject=await recovered.P.capture(false);
+  assert.equal(freshProject.project.preset.cues.length,1,'Project capture resumes for the fresh track');
+  assert.equal(freshProject.project.preset.legacyCues,undefined);
+  const freshJson=JSON.parse(recovered.CS.exportJSON());
+  assert.equal(freshJson.legacyCues,undefined,'Preset JSON export excludes local archived cues');
+
+  recovered.sandbox.document.hidden=true;
+  recovered.sandbox.document.dispatchEvent({type:'visibilitychange'});
+  const reopenedFresh=harness(recovered.storage);reopenedFresh.CS.init();
+  assert.deepEqual(JSON.parse(JSON.stringify(reopenedFresh.CS.preset().legacyCues)),archived,
+    'Archived cues persist locally after leaving stale project mode');
+  assert.equal(reopenedFresh.CS.preset().cues.length,1,'The active fresh track also persists locally');
+
+  const resetStorage=new Map([['vmusic.creative.preset',JSON.stringify(oldPreset)]]);
+  const resetRecovery=harness(resetStorage);resetRecovery.CS.init();resetRecovery.CS.resetSettings();
+  assert.equal(resetRecovery.CS.preset().project,undefined,'Reset clears stale project context');
+  assert.equal(resetRecovery.CS.preset().legacyCues,undefined,'Explicit reset discards the old cue archive');
+  assert.deepEqual(JSON.parse(JSON.stringify(resetRecovery.CS.preset().cues)),[]);
+  const draftRecovery=harness(new Map([['vmusic.creative.preset',JSON.stringify(oldPreset)]]));
+  draftRecovery.CS.init();draftRecovery.CS.setPreset(draftRecovery.CS.canonicalBaseline('orb'));
+  assert.equal(draftRecovery.CS.preset().project,undefined,'Applying a whole new draft replaces stale context');
+  assert.equal(draftRecovery.CS.preset().legacyCues,undefined,'A whole new draft clears the prior local archive');
+
+  const strictOld={projectVersion:1,timelineVersion:1,schemaVersion:'0',schemaHash:'0'.repeat(64),
+    preset:seeded.CS.shareSnapshot(),media:null};
+  assert.throws(()=>recovered.P.prepare(strictOld),/不兼容/,'Imported project files still require the current schema');
+
+  const currentPreset=seeded.CS.shareSnapshot();currentPreset.project={version:1,timelineVersion:1,
+    schemaVersion:seeded.sandbox.CreativeStageContract.schemaVersion,
+    schemaHash:seeded.sandbox.CreativeStageContract.schemaHash,media:seeded.identity};
+  const currentStorage=new Map([['vmusic.creative.preset',JSON.stringify(currentPreset)]]);
+  const currentRestore=harness(currentStorage);currentRestore.CS.init();
+  assert.equal(currentRestore.CS.preset().project.schemaHash,seeded.sandbox.CreativeStageContract.schemaHash,
+    'Current contexts keep the ordinary restore path');
+  assert.match(currentRestore.P.status(),/等待媒体内容确认/);
+
+  const unsupported=JSON.parse(JSON.stringify(oldPreset));unsupported.project.version=99;
+  const unsupportedStorage=new Map([['vmusic.creative.preset',JSON.stringify(unsupported)]]);
+  const unsupportedRestore=harness(unsupportedStorage);unsupportedRestore.CS.init();
+  assert.equal(unsupportedRestore.CS.preset().project,undefined,
+    'Unsupported project envelope versions still fail closed to the default preset');
+  console.log('Stage projects: strict envelope/import, current and stale restore, isolated legacy cues, media confirmation/races and reversible timelines passed');
 }
 if(require.main===module)main().catch(e=>{console.error(e);process.exitCode=1;});
 module.exports={harness};

@@ -3,7 +3,7 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
-const {startFixture}=require('./ui-browser-fixture'),{uiUrl}=require('./ui-token');
+const {startFixture}=require('./ui-browser-fixture'),{uiToken,uiUrl}=require('./ui-token');
 async function main(){
   const fixture=await startFixture();process.env.VMUSIC_DATA_DIR=fixture.dataDir;
   const browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL || 'chrome',headless:true});
@@ -12,6 +12,20 @@ async function main(){
   const output=path.resolve(process.env.STAGE_TEMPLATES_SHOT_DIR || 'output/playwright/stage-templates');fs.mkdirSync(output,{recursive:true});
   page.on('pageerror',e=>errors.push(e.message));
   try{
+    const uiRoot=path.resolve(__dirname,'../plugin/ui'),appOrigin=new URL(fixture.base).origin;
+    await page.route('**/*',route=>{
+      const url=new URL(route.request().url());
+      if(url.origin!==appOrigin)return route.continue();
+      if(url.pathname==='/'){
+        const html=fs.readFileSync(path.join(uiRoot,'index.html'),'utf8')
+          .replace('__VMUSIC_TOKEN_VALUE__',uiToken());
+        return route.fulfill({body:html,contentType:'text/html; charset=utf-8'});
+      }
+      const asset=path.resolve(uiRoot,'.'+decodeURIComponent(url.pathname));
+      if(asset.startsWith(uiRoot+path.sep)&&fs.existsSync(asset)&&fs.statSync(asset).isFile())
+        return route.fulfill({path:asset});
+      return route.continue();
+    });
     const track=await fixture.seed();await page.goto(uiUrl(fixture.base));
     await page.waitForFunction(()=>window.CreativeTemplates && window.Workshop);
     await page.route('**/v1/ai/**',route=>{
@@ -174,8 +188,9 @@ async function main(){
     await page.waitForFunction(()=>Stage.lyrics()?.lines?.length===2);
     await page.evaluate(()=>Workshop.close());
     await page.waitForFunction(()=>!!CreativeStage.recordingSurface());
-    await fixture.api('/v1/player/seek','POST',{position_ms:3800});
-    await page.waitForFunction(()=>Stage.position()>=3800);
+    const seekState=await fixture.api('/v1/player/seek','POST',{position_ms:3800});
+    await page.evaluate(state=>Stage.setSnapshot(state,{seek:true}),seekState);
+    assert.equal(await page.evaluate(()=>Stage.position()),3800);
     const firstLyric=await page.evaluate(()=>Stage.lyrics().lines[0].text);
     assert.ok(firstLyric.includes('第一句歌词'),'The isolated service must supply the active lyric fixture');
     for(const viewport of [{width:390,height:760},{width:320,height:760},{width:390,height:500},{width:320,height:500}]){

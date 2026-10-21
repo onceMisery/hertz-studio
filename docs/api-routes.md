@@ -11,13 +11,15 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 155 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 125 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 130 条内嵌静态资源路由。
+REST 路由表共 157 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 127 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 131 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
 | POST | `/v1/ai/budget-guard/reset` |
 | POST | `/v1/ai/capabilities/call` |
 | GET | `/v1/ai/capabilities/context` |
+| POST | `/v1/ai/evaluation/case` |
+| GET | `/v1/ai/evaluation/status` |
 | GET | `/v1/ai/grants` |
 | POST | `/v1/ai/grants` |
 | DELETE | `/v1/ai/grants/{grantId}` |

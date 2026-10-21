@@ -53,6 +53,7 @@
   var seekPosition = 0;
 
   var rafId = 0;
+  var lyricsDirty = true;
   var reduced = false;
   var userReduced = false;
   var systemMotion = null;
@@ -300,7 +301,10 @@
       var yieldToUser = function () {
         view.userScrolling = true;
         if (view.userScrollTimer) clearTimeout(view.userScrollTimer);
-        view.userScrollTimer = setTimeout(function () { view.userScrolling = false; }, tune.scrollIdleMs);
+        view.userScrollTimer = setTimeout(function () {
+          view.userScrolling = false;
+          schedule();
+        }, tune.scrollIdleMs);
       };
       // 滚轮直接按增量累加：改写 scrollY 的同时同步 target，让自动跟随从
       // "用户停手的位置"接着走，而不是恢复的瞬间把它猛地抢回去。
@@ -1212,7 +1216,7 @@
     // tickLyrics 会把 lastDt 改成歌词门累计间隔；刷新率只采主循环自己的间隔。
     sampleDisplayHz(frameDt);
     sampleFrameRate();
-    if (!hidden && (playing || energy > 0.005 || anyGateWants())) schedule();
+    if (!hidden && (playing || anyGateWants())) schedule(false);
     else lastFrameAt = 0;
   }
 
@@ -1222,12 +1226,15 @@
   // （原来是 24/40）会在 60Hz 上被夹成 20/30，档位表与实际帧率就对不上了。
   function lyricsTargetFps() {
     if (hidden || isVisualOccluded()) return 0;
-    if (!playing) return 12;
+    if (!playing) return lyricsDirty || views.some(function (view) {
+      return view.track && !view.userScrolling && Math.abs(view.scrollTarget - view.scrollY) >= 0.01;
+    }) ? 12 : 0;
     if (reduced) return 15;
     return tier === 0 ? 20 : tier === 1 ? 30 : 60;
   }
 
   function tickLyrics(dtMs) {
+    lyricsDirty = false;
     lastDt = dtMs;
     var pos = seeking ? seekPosition : currentPos();
     if (!doc) { if (!seeking) paintProgress(pos); return; }
@@ -1245,12 +1252,15 @@
 
   function energyTargetFps() {
     if (hidden) return 0;
-    if (!playing) return 12;
+    if (!playing) return energy > 0 || beatShown > 0 || (beatDet && beatDet.pulse > 0) ? 12 : 0;
     return lowfx || reduced ? 10 : 20;
   }
 
   function tickEnergy(dtMs) {
     pushEnergy(playing && !reduced ? sampleEnergy() : 0, dtMs);
+    // Below the CSS precision there is no visible energy left. Finish the
+    // release at zero so the paused gate can stop instead of decaying forever.
+    if (!playing && energy < 0.0005) energy = 0;
     paintEnergy();
     stepBeat(dtMs);
   }
@@ -1263,7 +1273,10 @@
     return sum / spectrum.length;
   }
 
-  function schedule() {
+  function schedule(invalidateLyrics) {
+    // Explicit controls/settings/layout changes need a fresh paused frame.
+    // Only the scheduler's own continuation skips invalidation.
+    if (invalidateLyrics !== false) lyricsDirty = true;
     // dock 胶囊实例不渲染舞台：那个 surface 只有窄条一块地方，跑 60fps 是纯浪费。
     // 标记由 app.js 在拿到 bridge context 之后挂到 window（见 HertzCapsuleOnly）。
     if (rafId || hidden || window.HertzCapsuleOnly) return;
@@ -1473,6 +1486,7 @@
     if (tier === 0) setLowFx(true);
 
     buildRing(tier === 0 ? 0 : 36);
+    paintEnergy();
 
     if (el.stageRange) {
       el.stageRange.addEventListener('pointerdown', function () { seeking = true; seekPosition = currentPos(); });
@@ -1542,6 +1556,7 @@
     document.addEventListener('stagecontrol:change', function (e) {
       if (e.detail && e.detail.beatAmp !== undefined) {
         beatAmp = clamp((Number(e.detail.beatAmp) || 0) / 100, 0, 2);
+        schedule();
       }
     });
     // 冷读驾驶舱当前值（它的 init 排在 Stage.init 之前，初始广播已错过）
@@ -1604,7 +1619,9 @@
 
     setSnapshot: function (snap, options) {
       if (!snap) return;
-      if ((snap.track_id || null) !== snapshotTrackId) { snapshotTrackId = snap.track_id || null; changedMedia(); }
+      var trackChanged = (snap.track_id || null) !== snapshotTrackId;
+      var previousPosition = basePos, previousDuration = durMs, previousVolume = playbackVolume;
+      if (trackChanged) { snapshotTrackId = snap.track_id || null; changedMedia(); }
       if (typeof snap.volume === 'number') playbackVolume = snap.volume;
       // A decoder can report unknown duration while library metadata is already
       // available (null backend, or loading streams). Keep the same track's known length.
@@ -1621,14 +1638,17 @@
       }
       var playingChanged = playing !== nextPlaying;
       playing = nextPlaying;
-      document.body.classList.toggle('is-playing', playing);
+      if (document.body.classList.contains('is-playing') !== playing) document.body.classList.toggle('is-playing', playing);
       // 播放态跳变沿即时广播：舞台舱按钮/状态不依赖 8fps 门控下一帧才翻面，
       // 曲尾停止等场景里图标不会比真实状态多停一两百毫秒。
       if (playingChanged) {
         document.dispatchEvent(new CustomEvent('stage:playing-changed', { detail: { playing: playing } }));
       }
-      paintProgress(seeking ? seekPosition : currentPos());
-      schedule();
+      var visualChanged = trackChanged || playingChanged || previousDuration !== durMs ||
+        previousPosition !== basePos || previousVolume !== playbackVolume || (options && options.seek);
+      if (playing || visualChanged) paintProgress(seeking ? seekPosition : currentPos());
+      if (visualChanged || playing) schedule();
+      else if (anyGateWants()) schedule(false);
     },
 
     // 频谱只存下来，不在这里写任何样式。服务端按 33ms 一帧推 64 段，

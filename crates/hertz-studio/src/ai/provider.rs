@@ -5,12 +5,12 @@
 //! must not acquire model credentials or issue model POSTs.
 
 use super::contract;
-use super::jobs::{FakeProvider, ProviderReply, RUN_DEADLINE_MS, StageIntentProvider};
+use super::jobs::{FakeProvider, ProviderReply, StageIntentProvider, RUN_DEADLINE_MS};
 use super::strict_json;
-use super::usage::{PriceQuote, PricingSnapshot, TOKEN_ONLY_PRICING_VERSION, TrustedUsage};
+use super::usage::{PriceQuote, PricingSnapshot, TrustedUsage, TOKEN_ONLY_PRICING_VERSION};
 use crate::config::AiConfig;
 use reqwest::{Client, Url};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +21,23 @@ const OUTPUT_TOKENS: u64 = 512;
 const LOCAL_PRICE_VERSION: &str = "ollama-local-zero-usd-v1";
 const OPENAI_DISABLED: &str = "OpenAI model or bounded request configuration is unsupported";
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/responses";
+
+pub(super) fn provider_http_status(reason: &str) -> Option<u16> {
+    let suffix = [
+        "StepFun HTTP status ",
+        "OpenAI HTTP status ",
+        "local model HTTP status ",
+    ]
+    .iter()
+    .find_map(|prefix| reason.strip_prefix(prefix))?;
+    if suffix.len() != 3 || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    suffix
+        .parse::<u16>()
+        .ok()
+        .filter(|status| (300..=599).contains(status))
+}
 
 pub(super) fn configured(config: &AiConfig) -> Arc<dyn StageIntentProvider> {
     match config.provider.as_str() {
@@ -795,6 +812,7 @@ pub(super) fn same_quote(left: &PriceQuote, right: &PriceQuote) -> bool {
         && left.max_output_tokens == right.max_output_tokens
 }
 
+#[cfg(test)]
 pub(super) fn parse_openai_reply(bytes: &[u8], model: &str) -> ProviderReply {
     parse_openai_reply_with_pricing(bytes, model, true)
 }
@@ -1007,6 +1025,21 @@ fn parse_completion_reply(
     let usage = parse_local_usage(&envelope, model);
     let text = if !status.is_success() {
         Err(format!("local model HTTP status {}", status.as_u16()))
+    } else if local_model_matches(&envelope, model)
+        && envelope["done"] == true
+        && envelope["done_reason"] == "length"
+    {
+        Err("local model completion was truncated".to_string())
+    } else if !local_model_matches(&envelope, model)
+        || envelope["done"] != true
+        || !envelope["error"].is_null()
+        || envelope["done_reason"] != "stop"
+        || envelope["message"]["role"] != "assistant"
+        || envelope["message"].get("tool_calls").is_some_and(|value| {
+            !value.is_null() && value.as_array().is_none_or(|calls| !calls.is_empty())
+        })
+    {
+        Err("local model did not complete a plain response".to_string())
     } else {
         envelope
             .get("message")
@@ -1111,10 +1144,9 @@ mod tests {
             .send()
             .await
             .expect_err("localhost must be rejected by the public DNS resolver");
-        let error_chain = std::iter::successors(
-            Some(&error as &dyn std::error::Error),
-            |cause| cause.source(),
-        )
+        let error_chain = std::iter::successors(Some(&error as &dyn std::error::Error), |cause| {
+            cause.source()
+        })
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
@@ -1175,15 +1207,13 @@ mod tests {
         assert_eq!(quote.reservation_micro_usd, 0);
         assert_eq!(quote.max_input_tokens, REQUEST_BYTES as u64);
         assert_eq!(quote.max_output_tokens, OUTPUT_TOKENS);
-        assert!(
-            configured(&AiConfig {
-                provider: "openai".into(),
-                model: String::new(),
-                ..AiConfig::default()
-            })
-            .diagnostic()
-            .is_some()
-        );
+        assert!(configured(&AiConfig {
+            provider: "openai".into(),
+            model: String::new(),
+            ..AiConfig::default()
+        })
+        .diagnostic()
+        .is_some());
     }
 
     #[test]
@@ -1230,9 +1260,46 @@ mod tests {
     }
 
     #[test]
-    fn ollama_failure_responses_keep_only_verified_usage() {
+    fn ollama_completion_rejects_unverified_envelopes_and_keeps_verified_usage() {
         let content = r#"{"version":1,"scene":"orb","patch":{}}"#;
         let bytes = serde_json::to_vec(&response(content)).unwrap();
+        let completion =
+            parse_completion_reply(&bytes, "test-local", reqwest::StatusCode::OK).unwrap();
+        assert_eq!(completion.text.unwrap(), content);
+
+        for (field, value) in [
+            ("done", json!(false)),
+            ("done_reason", json!("length")),
+            ("model", json!("other-model")),
+            ("error", json!("private error")),
+        ] {
+            let mut invalid = response(content);
+            invalid[field] = value;
+            let completion = parse_completion_reply(
+                &serde_json::to_vec(&invalid).unwrap(),
+                "test-local",
+                reqwest::StatusCode::OK,
+            )
+            .unwrap();
+            assert!(completion.text.is_err(), "{field}");
+            assert_eq!(completion.usage.is_some(), field == "done_reason");
+        }
+
+        for (field, value) in [
+            ("role", json!("user")),
+            ("tool_calls", json!([{ "function": { "name": "other" } }])),
+        ] {
+            let mut invalid = response(content);
+            invalid["message"][field] = value;
+            let completion = parse_completion_reply(
+                &serde_json::to_vec(&invalid).unwrap(),
+                "test-local",
+                reqwest::StatusCode::OK,
+            )
+            .unwrap();
+            assert!(completion.text.is_err(), "{field}");
+        }
+
         let failed = parse_http_reply(
             &bytes,
             "test-local",
@@ -1253,25 +1320,21 @@ mod tests {
         let mut untrusted_response = response(content);
         untrusted_response["model"] = json!("other-model");
         let untrusted = serde_json::to_vec(&untrusted_response).unwrap();
-        assert!(
-            parse_http_reply(
-                &untrusted,
-                "test-local",
-                reqwest::StatusCode::SERVICE_UNAVAILABLE
-            )
-            .usage
-            .is_none()
-        );
-        assert!(
-            parse_completion_reply(
-                &untrusted,
-                "test-local",
-                reqwest::StatusCode::SERVICE_UNAVAILABLE
-            )
-            .unwrap()
-            .usage
-            .is_none()
-        );
+        assert!(parse_http_reply(
+            &untrusted,
+            "test-local",
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        )
+        .usage
+        .is_none());
+        assert!(parse_completion_reply(
+            &untrusted,
+            "test-local",
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        )
+        .unwrap()
+        .usage
+        .is_none());
     }
 
     #[test]
@@ -1377,7 +1440,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_responses_http_fixture_checks_request_and_usage() {
-        use axum::{Json, extract::State, http::HeaderMap, routing::post};
+        use axum::{extract::State, http::HeaderMap, routing::post, Json};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1396,12 +1459,10 @@ mod tests {
                         assert!(!headers.contains_key(reqwest::header::COOKIE));
                         assert_eq!(body["model"], "test-openai");
                         assert_eq!(body["input"], "dark static orb");
-                        assert!(
-                            body["instructions"]
-                                .as_str()
-                                .unwrap()
-                                .contains("basePresetHashes")
-                        );
+                        assert!(body["instructions"]
+                            .as_str()
+                            .unwrap()
+                            .contains("basePresetHashes"));
                         assert_eq!(body["store"], false);
                         assert_eq!(body["stream"], false);
                         assert_eq!(body["max_output_tokens"], OUTPUT_TOKENS);
@@ -1462,7 +1523,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn configured_openai_token_only_job_settles_usage_without_amount_gate() {
         use super::super::{credential as credentials, jobs, ledger};
-        use axum::{Json, http::HeaderMap, routing::post};
+        use axum::{http::HeaderMap, routing::post, Json};
         use std::sync::atomic::Ordering;
 
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1618,7 +1679,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_non_success_responses_keep_only_verified_usage() {
-        use axum::{Json, http::StatusCode, routing::post};
+        use axum::{http::StatusCode, routing::post, Json};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1697,7 +1758,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_completion_http_fixture_returns_plain_text() {
-        use axum::{Json, extract::State, http::HeaderMap, routing::post};
+        use axum::{extract::State, http::HeaderMap, routing::post, Json};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1715,12 +1776,10 @@ mod tests {
                         );
                         assert_eq!(body["model"], "test-openai");
                         assert_eq!(body["input"], "{\"lyricsHash\":\"sha256:fixture\"}");
-                        assert!(
-                            body["instructions"]
-                                .as_str()
-                                .unwrap()
-                                .contains("classify lyric lines")
-                        );
+                        assert!(body["instructions"]
+                            .as_str()
+                            .unwrap()
+                            .contains("classify lyric lines"));
                         assert_eq!(body["store"], false);
                         assert_eq!(body["stream"], false);
                         assert_eq!(body["max_output_tokens"], OUTPUT_TOKENS);
@@ -1958,12 +2017,10 @@ mod tests {
         let provider =
             OpenAi::with_test_endpoint("test-openai", endpoint, Some(quote.clone())).unwrap();
         assert!(provider.ready());
-        assert!(
-            provider
-                .quote("dark static orb")
-                .unwrap_err()
-                .contains("quoted input-token budget")
-        );
+        assert!(provider
+            .quote("dark static orb")
+            .unwrap_err()
+            .contains("quoted input-token budget"));
 
         let reply = provider
             .generate(
@@ -1975,12 +2032,10 @@ mod tests {
                 Default::default(),
             )
             .await;
-        assert!(
-            reply
-                .intent
-                .unwrap_err()
-                .contains("quoted input-token budget")
-        );
+        assert!(reply
+            .intent
+            .unwrap_err()
+            .contains("quoted input-token budget"));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), listener.accept())
                 .await
@@ -1990,7 +2045,7 @@ mod tests {
 
     #[tokio::test]
     async fn real_http_post_sends_only_description_and_contract_once() {
-        use axum::{Json, extract::State, http::HeaderMap, routing::post};
+        use axum::{extract::State, http::HeaderMap, routing::post, Json};
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let app = axum::Router::new()
             .route(
@@ -2008,12 +2063,10 @@ mod tests {
                         let messages = body["messages"].as_array().unwrap();
                         assert_eq!(messages.len(), 2);
                         assert_eq!(messages[1]["content"], "dark static orb");
-                        assert!(
-                            messages[0]["content"]
-                                .as_str()
-                                .unwrap()
-                                .contains("basePresetHashes")
-                        );
+                        assert!(messages[0]["content"]
+                            .as_str()
+                            .unwrap()
+                            .contains("basePresetHashes"));
                         assert!(body.get("tools").is_none());
                         assert_eq!(
                             body["format"]["oneOf"].as_array().unwrap().len(),
@@ -2041,18 +2094,16 @@ mod tests {
         assert_eq!(result.usage.unwrap().output_tokens, 42);
         let mut bad_price = quote;
         bad_price.quote.reservation_micro_usd = 1;
-        assert!(
-            provider
-                .generate(
-                    "dark static orb".into(),
-                    bad_price,
-                    None,
-                    Default::default()
-                )
-                .await
-                .intent
-                .is_err()
-        );
+        assert!(provider
+            .generate(
+                "dark static orb".into(),
+                bad_price,
+                None,
+                Default::default()
+            )
+            .await
+            .intent
+            .is_err());
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         task.abort();
     }

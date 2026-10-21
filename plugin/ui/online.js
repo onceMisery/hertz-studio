@@ -440,6 +440,7 @@
   var sourceManuallySelected = false;
   var automaticSearchSource = null;
   var sourcesReady = Promise.resolve();
+  var pendingSearchNetwork = null;
 
   function whenSearchReady() {
     var login = window.OnlineLogin;
@@ -544,6 +545,8 @@
     }
     searchEpoch += 1;
     if (searchSession && searchSession.network) searchSession.network.cancel();
+    if (pendingSearchNetwork) pendingSearchNetwork.cancel();
+    pendingSearchNetwork = null;
     if (entityNetwork) entityNetwork.cancel();
     entityNetwork = null;
     searchSession = null;
@@ -804,26 +807,30 @@
       H.ui.onlineBody.innerHTML = '<div class="hint">聚合搜索需要输入关键词。</div>';
       return;
     }
+    var network = HertzSearch.create(T);
+    pendingSearchNetwork = network;
     if (source === 'all' && !onlineState.sources.length) {
       H.ui.onlineBody.innerHTML = '<div class="hint">正在读取音源…</div>';
       try {
-        var data = await T.get('/v1/online/sources');
+        var data = await network.get('/v1/online/sources', { admissionSource: 'source-catalog' });
         if (epoch !== searchEpoch) return;
         onlineState.sources = musicSources(data);
         if (!onlineState.sources.length) throw new Error('没有可用音源');
       } catch (err) {
         if (epoch !== searchEpoch) return;
+        network.cancel(); pendingSearchNetwork = null;
         renderOnline();
         var retry = searchButton('读取音源失败，点击重试', function () { search(opts); });
         H.ui.onlineBody.appendChild(retry);
         return;
       }
     }
+    if (epoch !== searchEpoch) { network.cancel(); pendingSearchNetwork = null; return; }
     var preferred = loggedSearchSources();
     var ids = source === 'all' ? orderedSearchSources() : [source];
     var viewKey = JSON.stringify([query, source, query ? '' : onlineState.cat]);
     var view = searchViews.get(viewKey);
-    var session = { key: viewKey, network: HertzSearch.create(T), rows: new Map(), q: query, cat: onlineState.cat, aggregate: source === 'all', preferredSources: preferred, filter: view ? view.filter : '', silent: opts.silent, pages: [] };
+    var session = { key: viewKey, network: network, rows: new Map(), q: query, cat: onlineState.cat, aggregate: source === 'all', preferredSources: preferred, filter: view ? view.filter : '', silent: opts.silent, pages: [] };
     session.pages = ids.map(function (id) {
       var cached = query && searchCache.get(JSON.stringify([query, id]));
       if (cached && Date.now() - cached.time >= CACHE_TTL) cached = null;
@@ -831,6 +838,7 @@
         more: cached ? cached.more : true, warning: cached ? cached.warning : '', error: '', loading: false, cached: !!cached };
     });
     searchSession = session;
+    pendingSearchNetwork = null;
     searchScroller().scrollTop = 0;
     renderOnline();
     if (view && session.pages.every(function (p) { return p.cached; })) searchScroller().scrollTop = view.scroll;
@@ -1993,7 +2001,7 @@
   async function refreshSources() {
     searchCache.clear();
     searchViews.clear();
-    if (searchSession) { cancelSearch(); onlineState.tracks = []; renderOnline(); }
+    if (searchSession || pendingSearchNetwork) { cancelSearch(); onlineState.tracks = []; renderOnline(); }
     var data = await T.get('/v1/online/sources').catch(function () { return null; });
     onlineState.sources = musicSources(data);
     refreshCookieUi();
@@ -2019,7 +2027,7 @@
       });
       H.ui.onlineSource.replaceChildren.apply(H.ui.onlineSource, opts);
       var hasKeep = onlineState.sources.some(function (s) { return s.id === keep; })
-        || keep === 'all';
+        || (keep === 'all' && onlineState.sources.length >= 2);
       H.ui.onlineSource.value = hasKeep ? keep : onlineState.sources[0].id;
       onlineState.source = H.ui.onlineSource.value;
     }

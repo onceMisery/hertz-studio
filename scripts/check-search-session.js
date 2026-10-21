@@ -44,14 +44,26 @@ async function main() {
   assert.deepEqual(await b1, { tracks: ['valid'] }); await b2; await tick();
   b.cancel();
 
+  const shared = coordinator.create(transport);
+  const localSearch = shared.get('/v1/tracks?q=local').catch(e => e.name);
+  const sourceCatalog = shared.get('/v1/online/sources', { admissionSource: 'source-catalog' }).catch(e => e.name);
+  await tick();
+  assert.equal(calls.length, 5, 'source catalog and local search use separate admission lanes');
+  shared.cancel();
+  assert.equal(await localSearch, 'AbortError');
+  assert.equal(await sourceCatalog, 'AbortError');
+  calls[3].resolve({ status: 200, body: { tracks: [] } });
+  calls[4].resolve({ status: 200, body: { sources: [] } });
+  await tick();
+
   const next = coordinator.create(transport);
   const failure = next.get('/search?source=qq').catch(e => coordinator.failure(e));
   await tick();
-  calls[3].resolve({ status: 504, body: { error: {code:'upstream_timeout',message:'deadline',request_id:'req-42'} } });
+  calls[5].resolve({ status: 504, body: { error: {code:'upstream_timeout',message:'deadline',request_id:'req-42'} } });
   const info = await failure;
   assert.equal(info.code, 'upstream_timeout'); assert.equal(info.requestId, 'req-42');
   assert.equal(info.retryable, true); await tick();
-  assert.equal(calls.length, 4, 'source failures do not silently retry DBX reads');
+  assert.equal(calls.length, 6, 'source failures do not silently retry DBX reads');
   const c = new AbortController(); c.abort();
   const { box, calls: canceledCalls } = setup();
   await assert.rejects(box.dbxInvoke('search', {}, c.signal, true), { name: 'AbortError' });

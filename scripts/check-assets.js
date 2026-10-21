@@ -59,9 +59,9 @@ entries.forEach(e => {
 console.log('\n目录消费');
 ok(/\.merge\(ui_asset_router\(\)\)/.test(mainRs), '主路由挂载资源目录');
 ok(/for entry in assets::UI_ASSETS/.test(mainRs), '路由遍历实际目录');
-ok(/router\.route\(entry\.path, get\(move \|\| asset\(entry\.mime, entry\.body\)\)\)/.test(mainRs), '资源路径、类型和内容来自同一条目');
+ok(/router\.route\(\s*entry\.path,\s*get\(move \|headers: axum::http::HeaderMap\| asset\(entry\.mime, entry\.body, headers\)\),?\s*\)/.test(mainRs), '资源路径、类型和内容来自同一条目');
 ok(/hash_inputs\(assets::ASSET_FINGERPRINT_INPUTS\)/.test(mainRs), '缓存使用目录派生指纹');
-ok(/ASSET_FINGERPRINT_INPUTS[^=]*= &\[\$\(\$\(#\[\$attr\]\)\* \$name,\)\+\]/.test(manifest), '宏从相同条目派生全部指纹输入');
+ok(/ASSET_FINGERPRINT_INPUTS[^=]*= &\[/.test(manifest) && manifest.includes('include_bytes!(concat!(env!("OUT_DIR"), "/ui/", $file, ".gz"))'), '宏从相同条目派生全部压缩资源指纹输入');
 
 // ---------------------------------------------------------------------------
 // 3. index.html —— 引用与路由一一对应，且脚本顺序满足依赖
@@ -109,6 +109,9 @@ includes.forEach((inc) => {
 
 console.log('\n脚本加载顺序');
 const REQUIRE_BEFORE = [
+  ['vendor/stage-runtime.js', 'vendor/coast-stage.js'],
+  ['vendor/stage-runtime.js', 'vendor/zodiac-stage.js'],
+  ['vendor/stage-runtime.js', 'vendor/space-stage.js'],
   ['bgwall.js', 'backgrounds.js'],          // 弧形墙内核先于背景模块
   ['pl-covers.js', 'shelf.js'],             // 共享封面解析先于歌单架
   ['lyric3d.js', 'creative-stage.js'],      // 歌词图集先于编排层

@@ -28,13 +28,8 @@ const manifestPath = path.join(root, 'tools/coast-stage/.build-manifest.json');
 assert.ok(fs.existsSync(manifestPath), '缺少 tools/coast-stage/.build-manifest.json：跑一次 node build.mjs');
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const { createHash } = require('node:crypto');
-const srcDir = path.join(root, 'tools/coast-stage/src');
-const onDisk = fs.readdirSync(srcDir).sort();
-assert.deepEqual(onDisk, Object.keys(manifest).map(k => k.replace('src/', '')).sort(),
-  'src 文件集合与 manifest 不一致：需要重新 node build.mjs');
-for (const name of onDisk) {
-  const hash = createHash('sha256').update(fs.readFileSync(path.join(srcDir, name))).digest('hex').slice(0, 16);
-  assert.equal(hash, manifest['src/' + name], 'src/' + name + ' 已改动但产物未重建：cd tools/coast-stage && node build.mjs');
+for (const [file, expected] of Object.entries(manifest)) {
+  assert.equal(createHash('sha256').update(fs.readFileSync(path.join(root, file))).digest('hex').slice(0, 16), expected, 'Stale shared stage: ' + file);
 }
 pass('源码哈希与 .build-manifest.json 一致（产物为最新）');
 
@@ -42,7 +37,7 @@ pass('源码哈希与 .build-manifest.json 一致（产物为最新）');
 const vm = require('node:vm');
 const sandbox = { window: {}, document: { createElement: () => ({ getContext: () => null }) }, Math, console };
 sandbox.self = sandbox;
-const api = vm.runInNewContext(bundle + ';CoastStagePure', sandbox, { timeout: 15000 });
+const api = vm.runInNewContext(fs.readFileSync(path.join(root, 'plugin/ui/vendor/stage-runtime.js'), 'utf8') + '\n' + bundle + ';CoastStagePure', sandbox, { timeout: 15000 });
 for (const fn of ['probe', 'mount', 'unmount', 'setAudio', 'setTimeOfDay', 'setInteraction', 'setRig', 'resize', 'stats', 'capture', 'debug']) {
   assert.equal(typeof api[fn], 'function', 'CoastStagePure 缺少 ' + fn);
 }

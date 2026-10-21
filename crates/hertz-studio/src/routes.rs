@@ -56,6 +56,16 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // AI 持久生成任务（技术路线 R4-J）：官方 UI 入口，全权 token 后面，
         // 固定 local-owner 身份；外部 grant 走受限门面的独立路由组。
         .route("/v1/ai/status", get(ai_status))
+        // Managed StageIntent evaluation uses the configured provider in one
+        // bounded, non-persistent call. The explicit CLI supplies the same
+        // official bearer token as the local UI.
+        .route("/v1/ai/evaluation/status", get(ai_evaluation_status))
+        .route(
+            "/v1/ai/evaluation/case",
+            post(ai_evaluation_case).layer(axum::extract::DefaultBodyLimit::max(
+                crate::ai::evaluation::CASE_BYTES,
+            )),
+        )
         .route("/v1/ai/lyrics/emotion/status", get(ai_emotion_status))
         .route(
             "/v1/ai/lyrics/emotion",
@@ -592,6 +602,23 @@ async fn ai_owner_id(state: &Arc<AppState>) -> ApiResult<String> {
 async fn ai_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let owner = ai_owner_id(&state).await?;
     Ok(Json(crate::ai::jobs::status(&state, &owner).await?))
+}
+
+async fn ai_evaluation_status(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::evaluation::managed_status(&state)
+        .await
+        .map(Json)
+}
+
+async fn ai_evaluation_case(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::ai::evaluation::Case>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::evaluation::managed_case(&state, body)
+        .await
+        .map(Json)
 }
 
 async fn ai_emotion_status(
@@ -2577,14 +2604,14 @@ pub(crate) async fn apply_settings(
             "请在持有 AI 服务锁的 Hertz 实例中撤回 AI 授权",
         ));
     }
-    vmusic_store::settings::set_all(&state.db, &body)
+    vmusic_store::settings::set_all(&state.db, body)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     if revoke_lyrics {
         state.ai_emotion.cancel_active();
     }
     if revoke_generation {
-        crate::ai::jobs::revoke_generation_consent(&state).await?;
+        crate::ai::jobs::revoke_generation_consent(state).await?;
     }
     Ok(())
 }

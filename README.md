@@ -142,7 +142,9 @@ Jamendo、ccMixter 和公开播客；显式开启 `full` feature 的 **Full** �
 ## 快速开始
 
 ```bash
-# 构建（需要 Rust 1.88+；workspace 下界由固定 1.88.0 的 CI 编译检查守护）
+# 发布构建：Rust 1.88+、Node.js 22+（开发 cargo run 不需要 Node.js）
+# 安装固定版本的发布压缩工具；仅修改暂存产物，保留 JS/CSS 开发源码可读
+npm ci --prefix tools/space-stage --no-audit --no-fund
 cargo build --release -p hertz-studio
 
 # 运行独立形态（Windows 下产物是 target\release\hertz-studio.exe）
@@ -151,6 +153,8 @@ cargo build --release -p hertz-studio
 # 或者一步到位，并自动打开浏览器
 cargo run --release -- --open
 ```
+
+发布构建在构建期压缩 JS/CSS 并内嵌 gzip；浏览器直接接收预压缩资源，identity 客户端按资源首次访问解压缓存。首页继续单独注入令牌。三个 3D 引擎共享同步 classic-script 包；修改场景源码后执行 `node tools/build-stages.mjs`，并运行 `node scripts/check-release-ui.js` 校验哈希与加载顺序。诊断 HTML 保留在源码目录，发布仅带 `index.html` 与 `overlay.html`。
 
 启动后终端会打印界面入口（Standard 默认 `http://127.0.0.1:7635/`，Full 默认端口 `7634`，后面跟着一张一次性入口票据）、
 健康检查地址，以及服务发现文件的位置。
@@ -180,7 +184,7 @@ cargo run --release -- --open
 - `plugin/ui/` 打进 `.dbxp`；界面靠 `plugin/ui/host.js` 这层宿主适配收敛差异
   （资源 URL 补全、opaque origin 下的 localStorage 替身），其余前端代码不感知自己跑在哪个宿主
 - `plugin/manifest.json` 声明 workbench + command + 菜单项；`plugin/dbx-plugin.toml` 是打包配置
-  （只带 `assets` 与 `ui`，没有 npm 步骤）
+  （只带 `assets` 与 `ui`；发布脚本在暂存目录压缩 JS/CSS）
 - 使用 `HERTZ_EDITION=standard bash scripts/ci-package-plugin.sh` 打包，Full 则设为 `full`；
   脚本生成对应界面和 manifest，再调用固定版本 DBX CLI，产物落在 `plugin/dist/<edition>/`
 
@@ -237,7 +241,7 @@ sidecar 只做传输：把宿主的调用转成与 HTTP 响应同构的返回值
 | 数据访问   | sqlx 运行时校验（非 `query!` 宏） | 无需 `.sqlx/` 元数据即可离线构建，CI 更简单；所有语句由集成测试覆盖   |
 | 搜索     | SQLite FTS5（trigram）+ LIKE 复核 | 三列候选有界合并，LIKE 复核保持原搜索语义；[五万曲本机性能基线](docs/search-performance.md) |
 | 重采样    | 固定参数流式 sinc（Rubato）   | 解码线程转换，同率直接复制；已有离线验证，真实设备/听测待验，见[实现边界](docs/audio-resampling.md) |
-| 前端     | 零构建原生 JS                 | `cargo run` 之后就能直接用，不引入 npm 工具链            |
+| 前端     | 零构建原生 JS                 | `cargo run` 之后直接用；发布压缩需要 Node.js/esbuild            |
 | 双形态    | 逻辑库 + 两个薄传输壳            | 传输只有三处差异（routes / ws / sidecar），业务只写一份      |
 
 REST 路由清单不写在 README 里，见 [docs/api-routes.md](docs/api-routes.md)，

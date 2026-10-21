@@ -70,8 +70,9 @@ impl ServerHandler for FacadeServer {
             Session::Connected {
                 scopes,
                 stage_tools_enabled,
+                supported_capabilities,
                 ..
-            } => adapter::tools_for(scopes, *stage_tools_enabled),
+            } => adapter::tools_for(scopes, *stage_tools_enabled, supported_capabilities),
             Session::NotConnected => Vec::new(),
         };
         Ok(ListToolsResult {

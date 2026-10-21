@@ -18,7 +18,7 @@ const plays = [];
 const notices = [];
 const state = { tracks: [], total: 0, loading: false, q: '', sort: 'title', offset: 0, rows: new Map(), byId: new Map(), libFilter: { artist: '', album: '' }, selected: new Set() };
 const context = vm.createContext({
-  state, PAGE: 200, Map,
+  state, PAGE: 200, Map, detailTracks: [],
   ui: { libList: { innerHTML: '' }, libSentinel: {} },
   transport: { get: (url) => new Promise((resolve, reject) => pending.push({ url, resolve, reject })) },
   renderLibrary() {}, toast: (...args) => notices.push(args), errText: (label) => label,
@@ -43,6 +43,21 @@ function page(from, count, total = 205) {
   assert(pending[0].url.endsWith('offset=200'));
   pending.shift().resolve(page(200, 5)); await retry;
   assert.equal(state.tracks.length, 205);
+  // Repeated searches may forget old pages, but active references must survive.
+  state.queue = ['queued'];
+  state.current = { id: 'current' };
+  state.snapshot = { track_id: 'snapshot' };
+  state.loadingTrack = 'loading';
+  state.selected.add('selected');
+  context.detailTracks.push({ id: 'detail' });
+  for (const id of ['queued', 'current', 'snapshot', 'loading', 'selected', 'detail']) state.byId.set(id, { id });
+  for (let i = 0; i < 6000; i++) state.byId.set('old-' + i, { id: 'old-' + i });
+  const compact = request('loadTracks(true)');
+  pending.shift().resolve(page(8000, 200, 200)); await compact;
+  assert(state.byId.size <= 1230, 'old searches cannot grow metadata indefinitely');
+  for (const id of ['queued', 'current', 'snapshot', 'loading', 'selected', 'detail', '8000', '8199']) {
+    assert(state.byId.has(id), 'retain active metadata: ' + id);
+  }
   const old = request('loadTracks(true)');
   state.q = 'new'; state.sort = 'artist';
   const fresh = request('loadTracks(true)');

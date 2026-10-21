@@ -37,6 +37,7 @@ pub struct JobRow {
     pub updated_at: i64,
     pub result_proposal_id: Option<String>,
     pub failure_code: Option<String>,
+    pub provider_http_status: Option<i64>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
@@ -62,7 +63,8 @@ pub struct BudgetRow {
 const JOB_COLUMNS: &str =
     "job_id, owner_instance_id, principal, capability, key, input_hash, state,
         state_revision, dispatch_state, attempt_id, provider, model, created_at, updated_at,
-        result_proposal_id, reservation_micro_usd, pricing_snapshot, failure_code";
+        result_proposal_id, reservation_micro_usd, pricing_snapshot, failure_code,
+        provider_http_status";
 
 pub async fn find_job_by_key<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     conn: E,
@@ -103,8 +105,9 @@ pub async fn insert_job<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
         "INSERT INTO ai_jobs (job_id, owner_instance_id, principal, capability, key, input_hash,
                               state, state_revision, dispatch_state, attempt_id, provider,
                               model, created_at, updated_at, result_proposal_id,
-                              reservation_micro_usd, pricing_snapshot, failure_code)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, ?15, ?16, ?17)",
+                              reservation_micro_usd, pricing_snapshot, failure_code,
+                              provider_http_status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, ?15, ?16, ?17, ?18)",
     )
     .bind(&job.job_id)
     .bind(&job.owner_instance_id)
@@ -123,23 +126,29 @@ pub async fn insert_job<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     .bind(job.reservation_micro_usd)
     .bind(&job.pricing_snapshot)
     .bind(&job.failure_code)
+    .bind(job.provider_http_status)
     .execute(conn)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
     Ok(())
 }
 
-pub async fn set_job_failure_code<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
+pub async fn set_job_failure_details<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     conn: E,
     job_id: &str,
     failure_code: &str,
+    provider_http_status: Option<u16>,
 ) -> Result<(), StoreError> {
-    sqlx::query("UPDATE ai_jobs SET failure_code = ?2 WHERE job_id = ?1 AND state = 'failed'")
-        .bind(job_id)
-        .bind(failure_code)
-        .execute(conn)
-        .await
-        .map_err(|e| StoreError::Database(e.to_string()))?;
+    sqlx::query(
+        "UPDATE ai_jobs SET failure_code = ?2, provider_http_status = ?3
+         WHERE job_id = ?1 AND state = 'failed'",
+    )
+    .bind(job_id)
+    .bind(failure_code)
+    .bind(provider_http_status.map(i64::from))
+    .execute(conn)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
     Ok(())
 }
 
@@ -719,14 +728,12 @@ pub async fn delete_pending_usage<'c, E: sqlx::Executor<'c, Database = sqlx::Sql
     job_id: &str,
     attempt_id: &str,
 ) -> Result<bool, StoreError> {
-    let result = sqlx::query(
-        "DELETE FROM ai_pending_usage WHERE job_id = ?1 AND attempt_id = ?2",
-    )
-    .bind(job_id)
-    .bind(attempt_id)
-    .execute(conn)
-    .await
-    .map_err(|e| StoreError::Database(e.to_string()))?;
+    let result = sqlx::query("DELETE FROM ai_pending_usage WHERE job_id = ?1 AND attempt_id = ?2")
+        .bind(job_id)
+        .bind(attempt_id)
+        .execute(conn)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
     Ok(result.rows_affected() == 1)
 }
 
@@ -1024,6 +1031,12 @@ mod retention_migration_tests {
         .execute(&mut conn)
         .await
         .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0027_ai_job_provider_http_status.sql"
+        ))
+        .execute(&mut conn)
+        .await
+        .unwrap();
         let entry = find_usage_entry(&mut conn, "legacy")
             .await
             .unwrap()
@@ -1039,6 +1052,7 @@ mod retention_migration_tests {
         assert!(entry.reported_usage.is_none());
         let job = find_job_by_id(&mut conn, "legacy").await.unwrap().unwrap();
         assert_eq!(job.reservation_micro_usd, 50000);
+        assert_eq!(job.provider_http_status, None);
         let snapshot: serde_json::Value = serde_json::from_str(&job.pricing_snapshot).unwrap();
         assert_eq!(snapshot["pricingVersion"], "legacy-unverified");
         assert!(snapshot.get("inputMicroUsdPerMillion").is_none());

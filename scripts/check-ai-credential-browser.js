@@ -67,6 +67,11 @@ async function main() {
     page.on('response', response => {
       if (response.url().endsWith(endpoint)) responses.push(response.text().catch(() => ''));
     });
+    await page.route('**/workshop.js*', route => route.fulfill({
+      status: 200,
+      contentType: 'application/javascript; charset=utf-8',
+      body: fs.readFileSync(path.join(__dirname, '../plugin/ui/workshop.js'), 'utf8'),
+    }));
     await page.goto(uiUrl(fixture.base), { waitUntil: 'domcontentloaded' });
     await page.evaluate(() => { Workshop.open(); Workshop.setTab('ai'); });
     const panel = page.locator('.ws-ai-credential');
@@ -99,6 +104,45 @@ async function main() {
       await page.getByRole('button', { name: '开启生成', exact: true }).waitFor();
       await openCredentialPanel();
       await page.getByText(`已配置 ${providerName} 密钥。`, { exact: true }).waitFor();
+      await page.getByRole('button', { name: '开启生成', exact: true }).click();
+      await page.waitForFunction(() => {
+        const button = Array.from(document.querySelectorAll('button')).find(item => item.textContent.trim() === '提交生成任务');
+        return button && !button.disabled;
+      });
+
+      let credentialReads = 0;
+      await page.route('**/v1/ai/status', async route => {
+        const response = await route.fetch();
+        const status = await response.json();
+        status.provider.resetConfigFingerprint = 'f'.repeat(64);
+        await route.fulfill({ response, json: status });
+      });
+      await page.route('**' + endpoint, async route => {
+        if (route.request().method() !== 'GET') return route.continue();
+        credentialReads += 1;
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+          provider: providerId, origin: 'https://api.stepfun.com/v1', configured: false,
+        }) });
+      });
+      const refreshedStatus = page.waitForResponse(response => response.url().endsWith('/v1/ai/status'));
+      await page.evaluate(() => Workshop.onAiTask());
+      await refreshedStatus;
+      await page.waitForFunction(() => {
+        const button = Array.from(document.querySelectorAll('button')).find(item => item.textContent.trim() === '提交生成任务');
+        return button && button.disabled;
+      });
+      assert.equal(credentialReads, 1,
+        'changing the endpoint config fingerprint rechecks credentials for the new scope');
+      await page.unroute('**' + endpoint);
+      await page.unroute('**/v1/ai/status');
+      await page.getByRole('button', { name: '查询密钥状态', exact: true }).click();
+      await page.getByText(`已配置 ${providerName} 密钥。`, { exact: true }).waitFor();
+      await page.waitForFunction(() => {
+        const button = Array.from(document.querySelectorAll('button')).find(item => item.textContent.trim() === '提交生成任务');
+        return button && !button.disabled;
+      });
+      await page.getByRole('button', { name: '关闭生成', exact: true }).click();
+      await page.getByRole('button', { name: '开启生成', exact: true }).waitFor();
     }
     assert.deepEqual(await fixture.api(endpoint), expected(true));
     assert.equal((await fixture.api('/v1/ai/status')).consent.inAppGeneration, false);

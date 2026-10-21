@@ -88,11 +88,6 @@ impl PricingSnapshot {
     pub(crate) fn pricing_known(&self) -> bool {
         self.quote.pricing_version != TOKEN_ONLY_PRICING_VERSION
     }
-
-    pub(crate) fn token_bounds_exceeded(&self, usage: &TrustedUsage) -> bool {
-        usage.input_tokens > self.quote.max_input_tokens
-            || usage.output_tokens > self.quote.max_output_tokens
-    }
 }
 
 /// Counters parsed from a managed provider response, never from StageIntent.
@@ -138,7 +133,7 @@ pub(crate) async fn persist_pending_usage(
     )
     .await
     .map_err(db_error)?;
-    let pending = store::find_pending_usage(&mut *tx, &job.job_id, attempt_id)
+    let pending = store::find_pending_usage(&mut tx, &job.job_id, attempt_id)
         .await
         .map_err(db_error)?
         .ok_or_else(|| internal("pending trusted usage was not persisted"))?;
@@ -173,17 +168,6 @@ async fn halt(
     Ok(())
 }
 
-async fn halt_token_bounds(
-    conn: &mut sqlx::SqliteConnection,
-    owner: &str,
-    job: &str,
-) -> ApiResult<()> {
-    store::halt_token_guard(conn, owner, "可信 token usage 超出受理时的上界", job)
-        .await
-        .map_err(db_error)?;
-    Ok(())
-}
-
 async fn check_limit(
     conn: &mut sqlx::SqliteConnection,
     owner: &str,
@@ -211,11 +195,37 @@ pub(crate) async fn settle_terminal(
     usage: Option<&TrustedUsage>,
     now: i64,
 ) -> ApiResult<()> {
-    let pending = if let Some(attempt_id) = job.attempt_id.as_deref() {
-        store::find_pending_usage(&mut *conn, &job.job_id, attempt_id)
-            .await
-            .map_err(db_error)?
-            .filter(|pending| pending.owner_instance_id == job.owner_instance_id)
+    settle_terminal_inner(conn, job, usage, now, true).await
+}
+
+/// Commit a terminal state from the durable dispatch marker even when trusted
+/// provider usage is what caused a previous settlement transaction to fail.
+/// The pending usage row stays available for `drain_pending_usage` to reconcile
+/// after storage recovers.
+pub(crate) async fn settle_terminal_unknown(
+    conn: &mut sqlx::SqliteConnection,
+    job: &store::JobRow,
+    now: i64,
+) -> ApiResult<()> {
+    settle_terminal_inner(conn, job, None, now, false).await
+}
+
+async fn settle_terminal_inner(
+    conn: &mut sqlx::SqliteConnection,
+    job: &store::JobRow,
+    usage: Option<&TrustedUsage>,
+    now: i64,
+    include_pending_usage: bool,
+) -> ApiResult<()> {
+    let pending = if include_pending_usage {
+        if let Some(attempt_id) = job.attempt_id.as_deref() {
+            store::find_pending_usage(&mut *conn, &job.job_id, attempt_id)
+                .await
+                .map_err(db_error)?
+                .filter(|pending| pending.owner_instance_id == job.owner_instance_id)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -276,14 +286,8 @@ pub(crate) async fn settle_terminal(
         if let Some(usage) = usage {
             let encoded = serde_json::to_string(usage).map_err(|e| internal(e.to_string()))?;
             reported_usage = Some(encoded.clone());
-            if token_only {
-                if pricing
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.token_bounds_exceeded(usage))
-                {
-                    halt_token_bounds(conn, &job.owner_instance_id, &job.job_id).await?;
-                }
-            } else {
+            // Provider counters are diagnostic; hard request bounds are enforced before dispatch.
+            if !token_only {
                 match price(&job.pricing_snapshot, job.reservation_micro_usd, usage) {
                     Ok(amount) => {
                         charge = amount;
@@ -297,21 +301,9 @@ pub(crate) async fn settle_terminal(
                             )
                             .await?;
                         }
-                        if pricing
-                            .as_ref()
-                            .is_some_and(|snapshot| snapshot.token_bounds_exceeded(usage))
-                        {
-                            halt_token_bounds(conn, &job.owner_instance_id, &job.job_id).await?;
-                        }
                     }
                     Err(reason) => {
                         halt(conn, &job.owner_instance_id, &job.job_id, reason).await?;
-                        if pricing
-                            .as_ref()
-                            .is_some_and(|snapshot| snapshot.token_bounds_exceeded(usage))
-                        {
-                            halt_token_bounds(conn, &job.owner_instance_id, &job.job_id).await?;
-                        }
                     }
                 }
             }
@@ -433,13 +425,6 @@ pub(crate) async fn reconcile(
         )
         .await
         .map_err(db_error)?;
-        if updated
-            && snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.token_bounds_exceeded(usage))
-        {
-            halt_token_bounds(conn, owner, job_id).await?;
-        }
         return Ok(updated);
     }
     let amount = match price(&entry.pricing_snapshot, entry.reservation_micro_usd, usage) {
@@ -457,13 +442,6 @@ pub(crate) async fn reconcile(
             )
             .await
             .map_err(db_error)?;
-            if updated
-                && snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.token_bounds_exceeded(usage))
-            {
-                halt_token_bounds(conn, owner, job_id).await?;
-            }
             return Ok(updated);
         }
     };
@@ -475,7 +453,7 @@ pub(crate) async fn reconcile(
         .map_err(db_error)?;
     if budget.charged_micro_usd == i64::MAX {
         halt(conn, owner, job_id, "usage month total overflow").await?;
-        return store::cas_report_usage(
+        let _ = store::cas_report_usage(
             conn,
             job_id,
             attempt,
@@ -485,14 +463,15 @@ pub(crate) async fn reconcile(
             &encoded,
         )
         .await
-        .map_err(db_error);
+        .map_err(db_error)?;
+        return Ok(false);
     }
     let Some(adjusted) = budget.charged_micro_usd.checked_add(delta) else {
         store::saturate_month_after_overflow(conn, &entry.accepted_month, 0)
             .await
             .map_err(db_error)?;
         halt(conn, owner, job_id, "usage month total overflow").await?;
-        return store::cas_report_usage(
+        let _ = store::cas_report_usage(
             conn,
             job_id,
             attempt,
@@ -502,11 +481,12 @@ pub(crate) async fn reconcile(
             &encoded,
         )
         .await
-        .map_err(db_error);
+        .map_err(db_error)?;
+        return Ok(false);
     };
     if adjusted < 0 {
         halt(conn, owner, job_id, "usage month adjustment underflow").await?;
-        return store::cas_report_usage(
+        let _ = store::cas_report_usage(
             conn,
             job_id,
             attempt,
@@ -516,7 +496,8 @@ pub(crate) async fn reconcile(
             &encoded,
         )
         .await
-        .map_err(db_error);
+        .map_err(db_error)?;
+        return Ok(false);
     }
     if !store::cas_report_usage(
         conn,
@@ -543,12 +524,6 @@ pub(crate) async fn reconcile(
             "trusted usage exceeded the accepted monetary reservation",
         )
         .await?;
-    }
-    if snapshot
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.token_bounds_exceeded(usage))
-    {
-        halt_token_bounds(conn, owner, job_id).await?;
     }
     check_limit(conn, owner, job_id, &entry.accepted_month).await?;
     Ok(true)

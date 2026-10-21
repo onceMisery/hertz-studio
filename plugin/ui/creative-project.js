@@ -57,12 +57,42 @@
       || Number(value.byteLength) > 2147483648) fail('无效的媒体内容身份');
     return {kind:value.kind,sha256:value.sha256,byteLength:value.byteLength};
   }
-  function context(value) {
+  function storedContext(value) {
     keys(value,['version','timelineVersion','schemaVersion','schemaHash','media']);
     if (value.version !== 1 || value.timelineVersion !== 1) fail('不支持的工程或时间线版本');
-    if (!window.CreativeStageContract || value.schemaVersion !== CreativeStageContract.schemaVersion
-      || value.schemaHash !== CreativeStageContract.schemaHash) fail('工程场景契约不兼容');
+    if (typeof value.schemaVersion !== 'string' || !value.schemaVersion || value.schemaVersion.length > 32
+      || typeof value.schemaHash !== 'string' || !/^[a-f0-9]{64}$/.test(value.schemaHash)) fail('工程场景契约版本无效');
     return {version:1,timelineVersion:1,schemaVersion:value.schemaVersion,schemaHash:value.schemaHash,media:media(value.media)};
+  }
+  function isCurrentContext(value) {
+    try {
+      var meta = storedContext(value);
+      return !!window.CreativeStageContract && meta.schemaVersion === CreativeStageContract.schemaVersion
+        && meta.schemaHash === CreativeStageContract.schemaHash;
+    } catch (_) { return false; }
+  }
+  function isStaleContext(value) {
+    try { return !isCurrentContext(storedContext(value)); }
+    catch (_) { return false; }
+  }
+  function context(value) {
+    var meta = storedContext(value);
+    if (!isCurrentContext(meta)) fail('工程场景契约不兼容');
+    return meta;
+  }
+  function shareContext(value) {
+    var meta = context(value);
+    return {version:meta.version,timelineVersion:meta.timelineVersion,
+      schemaVersion:meta.schemaVersion,schemaHash:meta.schemaHash,media:null};
+  }
+  function legacyCueCount(preset) {
+    return preset && Array.isArray(preset.legacyCues) ? preset.legacyCues.length : 0;
+  }
+  function recoveryMessage(count) {
+    var kept = Number.isInteger(count) && count > 0
+      ? count + ' 条旧 cue 已隔离保存并停用。'
+      : '没有旧 cue 需要恢复。';
+    return '已恢复静态舞台；' + kept + ' 分享码、预置 JSON 与工程导出已暂停，避免按当前协议重解释。';
   }
   function makeContext(identity) {
     return context({version:1,timelineVersion:1,schemaVersion:CreativeStageContract.schemaVersion,
@@ -170,19 +200,29 @@
     return identity;
   }
   function timelineAllowed(meta) {
-    if (!verified || !meta || !sameMedia(verified.media,meta.media)) return false;
+    if (!isCurrentContext(meta) || !verified || !sameMedia(verified.media,meta.media)) return false;
     try { if (sameSelection(verified.selection,presentation())) return true; } catch (_) { /* No selected media. */ }
     verified = null; return false;
   }
   function status() {
     var p = CreativeStage.preset();
+    var legacyCount = legacyCueCount(p);
+    if (p.project && isStaleContext(p.project)) return recoveryMessage(legacyCount);
+    if (legacyCount) return '当前为普通预置；' + legacyCount
+      + ' 条旧 cue 停用并仅保留在本机，不包含在分享码、预置 JSON 或工程导出中。';
     return !p.project ? '当前为普通预置' : timelineAllowed(p.project) ? '本次曲目已确认，工程 cue 轨已启用'
       : p.project.media ? '工程已载入，cue 轨等待媒体内容确认' : '工程未绑定媒体，cue 轨停用';
+  }
+  function recoveryNotice() {
+    var p = CreativeStage.preset();
+    return p.project && isStaleContext(p.project) ? recoveryMessage(legacyCueCount(p)) : '';
   }
   document.addEventListener('stage:track-changed',function () {
     verified = null; bindingSerial++;
     if (window.CreativeStage) CreativeStage.kick();
   });
   window.CreativeProject = {prepare:prepare,capture:capture,apply:apply,bindCurrent:bindCurrent,
-    normalizeContext:context,timelineAllowed:timelineAllowed,status:status};
+    normalizeContext:context,restoreContext:storedContext,shareContext:shareContext,isCurrentContext:isCurrentContext,
+    isStaleContext:isStaleContext,recoveryMessage:recoveryMessage,timelineAllowed:timelineAllowed,
+    status:status,recoveryNotice:recoveryNotice};
 })();

@@ -29,6 +29,7 @@ async function main() {
         const run = [...callbacks.values()]; callbacks.clear(); run.forEach(fn => fn(now));
       };
     });
+    await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/zodiac-stage.js') });
     assert.equal(await page.evaluate(() => ZodiacStagePure.mount(document.querySelector('canvas'),
       { quality: 'high', reduced: true, interactive: true })), true);

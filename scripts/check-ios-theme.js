@@ -246,7 +246,7 @@ ok(/--warn:\s*#[0-9a-f]{3,8}/i.test(STYLE_CSS), 'style.css 给了 --warn 的暗�
 section('接线：编进二进制');
 
 ok(THEMES_JS.length > 0, 'themes.js 可读');
-ok(/include_str!\("[^"]*\/themes\.js"\)/.test(MAIN_RS), 'themes.js 编进二进制');
+ok(require('./ui-assets').hasAsset('/themes.js'), 'themes.js 由内嵌资源目录打包');
 
 // ---------------------------------------------------------------------------
 

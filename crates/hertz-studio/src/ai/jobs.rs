@@ -31,12 +31,12 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
 use vmusic_core::StoreError;
 
-use crate::error::{ApiError, ApiResult, bad_request, internal, not_found};
+use crate::error::{bad_request, internal, not_found, ApiError, ApiResult};
 use crate::state::{AppState, WsEvent};
 use vmusic_store::ai_jobs as store;
 
@@ -52,6 +52,7 @@ pub(crate) const QUEUE_CAPACITY: i64 = 9;
 pub(crate) const QUEUE_DEADLINE_MS: i64 = 60_000;
 pub(crate) const RUN_DEADLINE_MS: i64 = 30_000;
 const TERMINAL_SETTLEMENT_RETRY_DELAYS_MS: [u64; 3] = [100, 250, 500];
+const TERMINAL_CLEANUP_TIMEOUT_MS: u64 = 2_000;
 /// 幂等键窗口（§7.2）：7 天。
 pub(crate) const KEY_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
 pub(crate) const HISTORY_JOB_LIMIT: i64 = 500;
@@ -124,6 +125,11 @@ pub(crate) struct ProviderReply {
 pub(crate) struct CompletionReply {
     pub text: Result<String, String>,
     pub usage: Option<TrustedUsage>,
+}
+
+struct RegisteredEvaluation {
+    cancel: tokio::sync::watch::Sender<()>,
+    credential_bound: bool,
 }
 
 /// One task's terminal signal, independent of its HTTP/RPC observer. Removing
@@ -217,6 +223,9 @@ pub(crate) struct AiRuntime {
     /// 有界内存输入：job_id → brief。容量受排队容量上限约束（≤9 条），
     /// 不落盘；提交后由服务端持有，HTTP waiter 消失不影响。
     inputs: Mutex<HashMap<String, (String, tokio::sync::watch::Sender<()>)>>,
+    /// Ephemeral evaluator calls share the model slot and consent cancellation
+    /// path without becoming durable jobs or retaining briefs.
+    evaluations: Mutex<HashMap<String, RegisteredEvaluation>>,
     provider: RwLock<Arc<dyn StageIntentProvider>>,
     /// 模型执行槽（§8.3）：每 DataDir 1 个受管执行——worker 先拿槽再
     /// accepted→running，等满 8 个停在 accepted。清理中的调用仍占槽。
@@ -238,6 +247,7 @@ impl AiRuntime {
         Self {
             credentials: super::credential::Service::configured(config),
             inputs: Mutex::new(HashMap::new()),
+            evaluations: Mutex::new(HashMap::new()),
             provider: RwLock::new(super::provider::configured(config)),
             execution_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         }
@@ -249,6 +259,43 @@ impl AiRuntime {
 
     pub(crate) fn completion_slots(&self) -> Arc<tokio::sync::Semaphore> {
         self.execution_slots.clone()
+    }
+
+    pub(crate) fn try_evaluation_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.execution_slots.clone().try_acquire_owned().ok()
+    }
+
+    pub(crate) async fn register_evaluation(
+        &self,
+        id: String,
+        cancel: tokio::sync::watch::Sender<()>,
+        credential_bound: bool,
+    ) {
+        self.evaluations.lock().await.insert(
+            id,
+            RegisteredEvaluation {
+                cancel,
+                credential_bound,
+            },
+        );
+    }
+
+    pub(crate) async fn remove_evaluation(&self, id: &str) {
+        self.evaluations.lock().await.remove(id);
+    }
+
+    async fn cancel_evaluations(&self) {
+        for evaluation in self.evaluations.lock().await.values() {
+            let _ = evaluation.cancel.send(());
+        }
+    }
+
+    async fn cancel_credential_evaluations(&self) {
+        for evaluation in self.evaluations.lock().await.values() {
+            if evaluation.credential_bound {
+                let _ = evaluation.cancel.send(());
+            }
+        }
     }
 
     /// 测试与将来的运行时换装入口；R5 真实 provider 落地后由配置驱动。
@@ -292,6 +339,7 @@ pub(crate) struct JobView {
     pub updated_at: i64,
     pub result_proposal_id: Option<String>,
     pub failure_code: Option<String>,
+    pub provider_http_status: Option<i64>,
     pub usage: JobUsageView,
 }
 
@@ -322,6 +370,7 @@ impl JobView {
             updated_at: row.updated_at,
             result_proposal_id: row.result_proposal_id.clone(),
             failure_code: row.failure_code.clone(),
+            provider_http_status: row.provider_http_status,
             usage: JobUsageView {
                 accepted_month: utc_month_key(row.created_at),
                 reservation_micro_usd: row.reservation_micro_usd,
@@ -537,7 +586,7 @@ async fn drain_pending_usage(state: &Arc<AppState>) -> ApiResult<usize> {
                 .await
                 .map_err(store_error)?;
             let Some(pending) = store::find_pending_usage(
-                &mut *tx,
+                &mut tx,
                 &candidate.job_id,
                 &candidate.attempt_id,
             )
@@ -566,7 +615,7 @@ async fn drain_pending_usage(state: &Arc<AppState>) -> ApiResult<usize> {
                     return Ok(None);
                 }
                 let applied = usage::reconcile(
-                    &mut *tx,
+                    &mut tx,
                     &pending.owner_instance_id,
                     &pending.job_id,
                     &pending.attempt_id,
@@ -695,6 +744,13 @@ async fn check_generation(conn: &mut sqlx::SqliteConnection, now: i64) -> ApiRes
     check_clock(conn, now).await
 }
 
+pub(crate) async fn generation_consent_enabled(state: &AppState) -> ApiResult<bool> {
+    Ok(vmusic_store::settings::get(&state.db, CONSENT_KEY)
+        .await
+        .map_err(store_error)?
+        .is_some_and(|value| value == Value::Bool(true)))
+}
+
 pub(crate) async fn check_clock(conn: &mut sqlx::SqliteConnection, now: i64) -> ApiResult<()> {
     if now.saturating_add(5 * 60_000)
         < store::accepted_watermark(&mut *conn)
@@ -739,7 +795,7 @@ pub(crate) async fn retain_history(db: &sqlx::SqlitePool, now: i64) -> ApiResult
     let mut tx = vmusic_store::begin_immediate(db)
         .await
         .map_err(store_error)?;
-    let watermark = store::accepted_watermark(&mut *tx)
+    let watermark = store::accepted_watermark(&mut tx)
         .await
         .map_err(store_error)?;
     if now.saturating_add(5 * 60_000) >= watermark {
@@ -875,13 +931,6 @@ async fn submit_owned(
             "生成预算已触发熔断",
         ));
     }
-    if !pricing.pricing_known() && guard.token_halted {
-        return Err(ApiError::new(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "token_bounds_halted",
-            "可信 token 用量曾超出受理上界，token-only 生成已暂停",
-        ));
-    }
     let pending = check_history_capacity(&mut tx, &owner).await?;
     if pending >= QUEUE_CAPACITY {
         return Err(ApiError::new(
@@ -909,7 +958,7 @@ async fn submit_owned(
             other => store_error(other),
         })?;
     } else {
-        store::get_or_create_month(&mut *tx, &utc_month_key(now))
+        store::get_or_create_month(&mut tx, &utc_month_key(now))
             .await
             .map_err(store_error)?;
     }
@@ -935,6 +984,7 @@ async fn submit_owned(
         updated_at: now,
         result_proposal_id: None,
         failure_code: None,
+        provider_http_status: None,
     };
     if let Err(e) = store::insert_job(&mut *tx, &job).await {
         // 并发同键撞唯一索引：按回放/冲突如实收口，而不是 500。
@@ -1057,7 +1107,7 @@ async fn run_job_inner(
         Ok(loaded) => loaded,
         Err(_) => {
             tracing::warn!("AI running task reload exceeded its execution deadline");
-            finish_running(state.clone(), &job_id, "failed").await;
+            finish_running(state.clone(), &job_id, "expired").await;
             state.ai_runtime.inputs.lock().await.remove(&job_id);
             return;
         }
@@ -1110,7 +1160,7 @@ async fn run_job_inner(
             Ok(Ok(lease)) => Some(lease),
             Err(_) => {
                 tracing::warn!("AI credential lease exceeded its execution deadline");
-                finish_running(state.clone(), &job_id, "failed").await;
+                finish_running(state.clone(), &job_id, "expired").await;
                 state.ai_runtime.inputs.lock().await.remove(&job_id);
                 return;
             }
@@ -1138,15 +1188,15 @@ async fn run_job_inner(
         let Ok(mut tx) = vmusic_store::begin_immediate(&state.db).await else {
             return Err("failed");
         };
-        if tokio::time::Instant::now() >= run_deadline || !provider.ready() {
+        if tokio::time::Instant::now() >= run_deadline {
+            return Err("expired");
+        }
+        if !provider.ready() {
             return Err("failed");
         }
         if let Err(error) = check_generation(&mut tx, now_ms()).await {
-            return Err(if error.code == "generation_disabled" {
-                "cancelled"
-            } else {
-                "failed"
-            });
+            tracing::warn!("AI dispatch blocked before send: {}", error.code);
+            return Err("failed");
         }
         let guard = match store::ensure_budget_guard(&mut tx, &job.owner_instance_id).await {
             Ok(guard) => guard,
@@ -1154,9 +1204,6 @@ async fn run_job_inner(
         };
         if pricing.pricing_known() && guard.halted {
             return Err("failed");
-        }
-        if !pricing.pricing_known() && guard.token_halted {
-            return Err("cancelled");
         }
         let Ok(marked) = store::mark_dispatched(&mut *tx, &job_id, &attempt_id).await else {
             return Err("failed");
@@ -1169,10 +1216,11 @@ async fn run_job_inner(
         Ok(true)
     })
     .await
-    .unwrap_or(Err("failed"));
+    .unwrap_or(Err("expired"));
     if !matches!(dispatch, Ok(true)) {
         let terminal = match dispatch {
             Err("cancelled") => "cancelled",
+            Err("expired") => "expired",
             _ => "failed",
         };
         if terminal == "cancelled" {
@@ -1198,7 +1246,7 @@ async fn run_job_inner(
     {
         Ok(brief) => brief,
         Err(_) => {
-            finish_running(state.clone(), &job_id, "failed").await;
+            finish_running(state.clone(), &job_id, "expired").await;
             state.ai_runtime.inputs.lock().await.remove(&job_id);
             return;
         }
@@ -1219,8 +1267,7 @@ async fn run_job_inner(
 
     // 一次调用；不自动修复、不自动重试。将终态信号交给 adapter 协作取消，
     // 不在外层 select 丢掉它；已完成 usage 的观察与资源结束仍由本任务负责。
-    // 执行期限（§8.3：30s）到点终止卡住的 future——超时按 provider 失败
-    // 走 failed + 结算，不无限驻留。
+    // 执行期限（§8.3：30s）到点终止卡住的 future，按 expired 收敛。
     let outcome = match tokio::time::timeout_at(
         run_deadline,
         provider.generate(
@@ -1235,7 +1282,7 @@ async fn run_job_inner(
         Ok(outcome) => outcome,
         Err(_) => {
             tracing::warn!("AI provider 调用超过执行期限，已终止");
-            finish_running(state.clone(), &job.job_id, "failed").await;
+            finish_running(state.clone(), &job.job_id, "expired").await;
             state.ai_runtime.inputs.lock().await.remove(&job_id);
             return;
         }
@@ -1284,7 +1331,6 @@ async fn run_job_inner(
                         )
                         .await
                         .map_err(store_error)?;
-                        usage::settle_terminal(&mut tx, &job, trusted_usage.as_ref(), now).await?;
                         tx.commit().await.map_err(sql_error)?;
                         if cancelled {
                             publish_task(&state);
@@ -1302,7 +1348,6 @@ async fn run_job_inner(
                     .await
                     .map_err(store_error)?;
                     if !won {
-                        usage::settle_terminal(&mut tx, &job, trusted_usage.as_ref(), now).await?;
                         tx.commit().await.map_err(sql_error)?;
                         return Ok::<(), ApiError>(());
                     }
@@ -1322,7 +1367,6 @@ async fn run_job_inner(
                     store::attach_proposal(&mut *tx, &job.job_id, &proposal_id)
                         .await
                         .map_err(store_error)?;
-                    usage::settle_terminal(&mut tx, &job, trusted_usage.as_ref(), now).await?;
                     tx.commit().await.map_err(sql_error)?;
                     publish_task(&state);
                     Ok(())
@@ -1337,6 +1381,8 @@ async fn run_job_inner(
                         trusted_usage.as_ref(),
                     )
                     .await;
+                } else {
+                    settle_terminal_after_commit(&state, &job.job_id, trusted_usage.as_ref()).await;
                 }
             }
             Err(reason) => {
@@ -1353,17 +1399,58 @@ async fn run_job_inner(
         },
         Err(reason) => {
             tracing::warn!("AI provider 调用失败: {reason}");
-            finish_running_with_failure_code(
+            finish_running_with_provider_error(
                 state.clone(),
                 &job.job_id,
                 "failed",
                 trusted_usage.as_ref(),
-                "provider_error",
+                &reason,
             )
             .await;
         }
     }
     state.ai_runtime.inputs.lock().await.remove(&job_id);
+}
+
+async fn settle_terminal_after_commit(
+    state: &Arc<AppState>,
+    job_id: &str,
+    trusted_usage: Option<&TrustedUsage>,
+) {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(TERMINAL_CLEANUP_TIMEOUT_MS);
+    let result = tokio::time::timeout_at(deadline, async {
+        let mut tx = vmusic_store::begin_immediate(&state.db)
+            .await
+            .map_err(store_error)?;
+        let Some(job) = store::find_job_by_id(&mut *tx, job_id)
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok::<(), ApiError>(());
+        };
+        if !matches!(
+            job.state.as_str(),
+            "succeeded" | "cancelled" | "failed" | "expired" | "interrupted"
+        ) {
+            return Ok(());
+        }
+        usage::settle_terminal(&mut tx, &job, trusted_usage, now_ms()).await?;
+        tx.commit().await.map_err(sql_error)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(
+            job_id = %job_id,
+            error = %error.code,
+            "AI task result was committed; usage settlement is deferred"
+        ),
+        Err(_) => tracing::warn!(
+            job_id = %job_id,
+            "AI task result was committed; usage settlement exceeded its cleanup deadline"
+        ),
+    }
 }
 
 /// Claim a queued worker without allowing a late slot wakeup to bypass its deadline.
@@ -1432,6 +1519,25 @@ async fn finish_running_with_failure_code(
     finish_running_with_failure(state, job_id, to, trusted_usage, Some(failure_code)).await;
 }
 
+async fn finish_running_with_provider_error(
+    state: Arc<AppState>,
+    job_id: &str,
+    to: &str,
+    trusted_usage: Option<&TrustedUsage>,
+    reason: &str,
+) {
+    let status = super::provider::provider_http_status(reason);
+    finish_running_with_failure_details(
+        state,
+        job_id,
+        to,
+        trusted_usage,
+        Some("provider_error"),
+        status,
+    )
+    .await;
+}
+
 async fn finish_running_with_failure(
     state: Arc<AppState>,
     job_id: &str,
@@ -1439,7 +1545,20 @@ async fn finish_running_with_failure(
     trusted_usage: Option<&TrustedUsage>,
     failure_code: Option<&str>,
 ) {
-    let result = async {
+    finish_running_with_failure_details(state, job_id, to, trusted_usage, failure_code, None).await;
+}
+
+async fn finish_running_with_failure_details(
+    state: Arc<AppState>,
+    job_id: &str,
+    to: &str,
+    trusted_usage: Option<&TrustedUsage>,
+    failure_code: Option<&str>,
+    provider_http_status: Option<u16>,
+) {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(TERMINAL_CLEANUP_TIMEOUT_MS);
+    let result = tokio::time::timeout_at(deadline, async {
         let mut tx = vmusic_store::begin_immediate(&state.db)
             .await
             .map_err(store_error)?;
@@ -1462,7 +1581,7 @@ async fn finish_running_with_failure(
             .map_err(store_error)?;
         if won {
             if let Some(code) = failure_code {
-                store::set_job_failure_code(&mut *tx, job_id, code)
+                store::set_job_failure_details(&mut *tx, job_id, code, provider_http_status)
                     .await
                     .map_err(store_error)?;
             }
@@ -1477,13 +1596,23 @@ async fn finish_running_with_failure(
             publish_task(&state);
         }
         Ok(())
-    }
+    })
     .await;
-    if let Err(error) = result {
-        tracing::error!(
-            "AI terminal settlement failed; attempting conservative interruption: {error:?}"
-        );
-        interrupt_worker_failure_with_usage(&state, job_id, trusted_usage).await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::error!(
+                "AI terminal settlement failed; attempting conservative interruption: {error:?}"
+            );
+            interrupt_worker_failure_until(&state, job_id, deadline).await;
+        }
+        Err(_) => {
+            tracing::error!(
+                job_id = %job_id,
+                "AI terminal settlement exceeded its cleanup deadline"
+            );
+            interrupt_worker_failure_until(&state, job_id, deadline).await;
+        }
     }
 }
 
@@ -1491,33 +1620,43 @@ async fn finish_running_with_failure(
 /// commits. The worker retries the same cancelled transition so a transient
 /// settlement failure cannot strand accepted/running work without an owner.
 async fn cancel_worker_after_signal(state: &Arc<AppState>, job_id: &str) {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(TERMINAL_CLEANUP_TIMEOUT_MS);
     let attempts = TERMINAL_SETTLEMENT_RETRY_DELAYS_MS.len() + 1;
-    for (attempt, retry_delay_ms) in TERMINAL_SETTLEMENT_RETRY_DELAYS_MS
-        .iter()
-        .copied()
-        .map(Some)
-        .chain(std::iter::once(None))
-        .enumerate()
-    {
-        match cancel_worker_once(state, job_id).await {
-            Ok(()) => break,
-            Err(error) => match retry_delay_ms {
-                Some(delay_ms) => {
-                    tracing::warn!(
+    let settlement = async {
+        for (attempt, retry_delay_ms) in TERMINAL_SETTLEMENT_RETRY_DELAYS_MS
+            .iter()
+            .copied()
+            .map(Some)
+            .chain(std::iter::once(None))
+            .enumerate()
+        {
+            match cancel_worker_once(state, job_id).await {
+                Ok(()) => break,
+                Err(error) => match retry_delay_ms {
+                    Some(delay_ms) => {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            total_attempts = attempts,
+                            retry_in_ms = delay_ms,
+                            "AI cancellation settlement failed; retrying: {error:?}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    None => tracing::error!(
                         attempt = attempt + 1,
                         total_attempts = attempts,
-                        retry_in_ms = delay_ms,
-                        "AI cancellation settlement failed; retrying: {error:?}"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                }
-                None => tracing::error!(
-                    attempt = attempt + 1,
-                    total_attempts = attempts,
-                    "AI cancellation settlement failed; task remains recoverable: {error:?}"
-                ),
-            },
+                        "AI cancellation settlement failed; task remains recoverable: {error:?}"
+                    ),
+                },
+            }
         }
+    };
+    if tokio::time::timeout_at(deadline, settlement).await.is_err() {
+        tracing::error!(
+            job_id = %job_id,
+            "AI cancellation settlement exceeded its cleanup deadline; task remains recoverable"
+        );
     }
     state.ai_runtime.inputs.lock().await.remove(job_id);
 }
@@ -1559,50 +1698,56 @@ async fn cancel_worker_once(state: &Arc<AppState>, job_id: &str) -> ApiResult<()
 /// short bounded retry handles transient SQLite failures without orphaning the
 /// task until its normal expiry sweep.
 async fn interrupt_worker_failure(state: &Arc<AppState>, job_id: &str) {
-    interrupt_worker_failure_with_usage(state, job_id, None).await;
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(TERMINAL_CLEANUP_TIMEOUT_MS);
+    interrupt_worker_failure_until(state, job_id, deadline).await;
 }
 
-async fn interrupt_worker_failure_with_usage(
+async fn interrupt_worker_failure_until(
     state: &Arc<AppState>,
     job_id: &str,
-    trusted_usage: Option<&TrustedUsage>,
+    deadline: tokio::time::Instant,
 ) {
     let attempts = TERMINAL_SETTLEMENT_RETRY_DELAYS_MS.len() + 1;
-    for (attempt, retry_delay_ms) in TERMINAL_SETTLEMENT_RETRY_DELAYS_MS
-        .iter()
-        .copied()
-        .map(Some)
-        .chain(std::iter::once(None))
-        .enumerate()
-    {
-        match interrupt_worker_failure_once(state, job_id, trusted_usage).await {
-            Ok(()) => break,
-            Err(error) => match retry_delay_ms {
-                Some(delay_ms) => {
-                    tracing::warn!(
+    let settlement = async {
+        for (attempt, retry_delay_ms) in TERMINAL_SETTLEMENT_RETRY_DELAYS_MS
+            .iter()
+            .copied()
+            .map(Some)
+            .chain(std::iter::once(None))
+            .enumerate()
+        {
+            match interrupt_worker_failure_once(state, job_id).await {
+                Ok(()) => break,
+                Err(error) => match retry_delay_ms {
+                    Some(delay_ms) => {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            total_attempts = attempts,
+                            retry_in_ms = delay_ms,
+                            "AI worker interruption settlement failed; retrying: {error:?}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    None => tracing::error!(
                         attempt = attempt + 1,
                         total_attempts = attempts,
-                        retry_in_ms = delay_ms,
-                        "AI worker interruption settlement failed; retrying: {error:?}"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                }
-                None => tracing::error!(
-                    attempt = attempt + 1,
-                    total_attempts = attempts,
-                    "AI worker interruption settlement failed; leaving facts recoverable: {error:?}"
-                ),
-            },
+                        "AI worker interruption settlement failed; leaving facts recoverable: {error:?}"
+                    ),
+                },
+            }
         }
+    };
+    if tokio::time::timeout_at(deadline, settlement).await.is_err() {
+        tracing::error!(
+            job_id = %job_id,
+            "AI worker interruption settlement exceeded its cleanup deadline; task remains recoverable"
+        );
     }
     state.ai_runtime.inputs.lock().await.remove(job_id);
 }
 
-async fn interrupt_worker_failure_once(
-    state: &Arc<AppState>,
-    job_id: &str,
-    trusted_usage: Option<&TrustedUsage>,
-) -> ApiResult<()> {
+async fn interrupt_worker_failure_once(state: &Arc<AppState>, job_id: &str) -> ApiResult<()> {
     let mut tx = vmusic_store::begin_immediate(&state.db)
         .await
         .map_err(store_error)?;
@@ -1628,7 +1773,7 @@ async fn interrupt_worker_failure_once(
     {
         return Ok(());
     }
-    usage::settle_terminal(&mut tx, &job, trusted_usage, now_ms()).await?;
+    usage::settle_terminal_unknown(&mut tx, &job, now_ms()).await?;
     tx.commit().await.map_err(sql_error)?;
     publish_task(state);
     Ok(())
@@ -1718,6 +1863,7 @@ pub(crate) async fn revoke_generation_consent(state: &Arc<AppState>) -> ApiResul
             let _ = cancel.send(());
         }
     }
+    state.ai_runtime.cancel_evaluations().await;
     let owner = instance_owner(state).await?;
     let mut tx = vmusic_store::begin_immediate(&state.db)
         .await
@@ -1757,6 +1903,7 @@ pub(crate) async fn revoke_generation_consent(state: &Arc<AppState>) -> ApiResul
 /// Called under the credential service's exclusive lifecycle guard, before OS
 /// mutation. Conservative cancellation also applies when the OS write fails.
 pub(super) async fn invalidate_credentials(state: &Arc<AppState>, owner: &str) -> ApiResult<()> {
+    state.ai_runtime.cancel_credential_evaluations().await;
     let mut tx = vmusic_store::begin_immediate(&state.db)
         .await
         .map_err(store_error)?;
@@ -1984,9 +2131,13 @@ pub(crate) async fn get_proposal(
         .filter(|job| job.principal == principal)
         .ok_or_else(|| not_found(format!("查无此提案: {proposal_id}")))?;
     if proposal.state == "pending" && proposal.expires_at <= now_ms() {
-        store::cas_proposal_state(&state.db, proposal_id, proposal.revision, "expired")
-            .await
-            .map_err(store_error)?;
+        let expired =
+            store::cas_proposal_state(&state.db, proposal_id, proposal.revision, "expired")
+                .await
+                .map_err(store_error)?;
+        if expired {
+            publish_task(state);
+        }
         proposal = store::find_proposal(&state.db, proposal_id)
             .await
             .map_err(store_error)?
@@ -2053,6 +2204,7 @@ pub(crate) async fn reject_proposal(
             "revision 已过期，请重查后再试",
         ));
     }
+    publish_task(state);
     view.state = "rejected".into();
     view.revision = expected_revision + 1;
     Ok(view)
@@ -2511,6 +2663,16 @@ mod tests {
         for delete in [false, true] {
             let (state, handle) = jobs_state().await;
             save_fixture_key(&state, "old-fixture-key").await.unwrap();
+            let (evaluation_cancel, evaluation_cancel_rx) = tokio::sync::watch::channel(());
+            state
+                .ai_runtime
+                .register_evaluation("credential-rotation-test".into(), evaluation_cancel, true)
+                .await;
+            let (local_cancel, local_cancel_rx) = tokio::sync::watch::channel(());
+            state
+                .ai_runtime
+                .register_evaluation("local-evaluation-test".into(), local_cancel, false)
+                .await;
             let calls = Arc::new(AtomicUsize::new(0));
             state
                 .ai_runtime
@@ -2551,6 +2713,16 @@ mod tests {
             } else {
                 save_fixture_key(&state, "new-fixture-key").await.unwrap();
             }
+            assert!(evaluation_cancel_rx.has_changed().unwrap());
+            assert!(!local_cancel_rx.has_changed().unwrap());
+            state
+                .ai_runtime
+                .remove_evaluation("credential-rotation-test")
+                .await;
+            state
+                .ai_runtime
+                .remove_evaluation("local-evaluation-test")
+                .await;
             let cancelled = store::find_job_by_id(&state.db, &job.job_id)
                 .await
                 .unwrap()
@@ -2583,8 +2755,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn frozen_credential_is_delivered_only_to_matching_dispatch_and_missing_key_reserves_nothing()
-     {
+    async fn frozen_credential_is_delivered_only_to_matching_dispatch_and_missing_key_reserves_nothing(
+    ) {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         let (state, handle) = jobs_state().await;
         let calls = Arc::new(AtomicUsize::new(0));
@@ -2734,11 +2906,9 @@ mod tests {
         };
         sqlx::query("CREATE TRIGGER fail_credential_cancel BEFORE UPDATE OF state ON ai_jobs BEGIN SELECT RAISE(ABORT, 'fixture failure'); END")
             .execute(&state.db).await.unwrap();
-        assert!(
-            save_fixture_key(&state, "must-not-be-written")
-                .await
-                .is_err()
-        );
+        assert!(save_fixture_key(&state, "must-not-be-written")
+            .await
+            .is_err());
         assert_eq!(
             store::find_job_by_id(&state.db, &job.job_id)
                 .await
@@ -2992,7 +3162,7 @@ mod tests {
     }
 
     async fn await_terminal(state: &Arc<AppState>, id: &str) -> store::JobRow {
-        for _ in 0..400 {
+        for _ in 0..2000 {
             let row = job_row(state, id).await;
             if !matches!(row.state.as_str(), "accepted" | "running") {
                 return row;
@@ -3000,6 +3170,16 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         panic!("task did not finish");
+    }
+
+    async fn await_usage_entry(state: &Arc<AppState>, id: &str) -> store::UsageEntryRow {
+        for _ in 0..2000 {
+            if let Some(entry) = store::find_usage_entry(&state.db, id).await.unwrap() {
+                return entry;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("usage entry missing");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3037,14 +3217,12 @@ mod tests {
                 .unwrap();
             assert_eq!(usage.usage_state, expected_usage);
             assert_eq!(usage.accounted_micro_usd, expected_charge);
-            assert!(
-                !state
-                    .ai_runtime
-                    .inputs
-                    .lock()
-                    .await
-                    .contains_key(&job.job_id)
-            );
+            assert!(!state
+                .ai_runtime
+                .inputs
+                .lock()
+                .await
+                .contains_key(&job.job_id));
             assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
         }
         state.audio.shutdown();
@@ -3073,14 +3251,12 @@ mod tests {
             .unwrap();
         assert_eq!(usage.usage_state, "released");
         assert_eq!(usage.accounted_micro_usd, 0);
-        assert!(
-            !state
-                .ai_runtime
-                .inputs
-                .lock()
-                .await
-                .contains_key(&job.job_id)
-        );
+        assert!(!state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .contains_key(&job.job_id));
 
         drop(held_slot);
         state.audio.shutdown();
@@ -3111,14 +3287,12 @@ mod tests {
             .unwrap();
         assert_eq!(usage.usage_state, "released");
         assert_eq!(usage.accounted_micro_usd, 0);
-        assert!(
-            !state
-                .ai_runtime
-                .inputs
-                .lock()
-                .await
-                .contains_key(&job.job_id)
-        );
+        assert!(!state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .contains_key(&job.job_id));
 
         sqlx::query("DROP TRIGGER fail_running_transition")
             .execute(&state.db)
@@ -3160,20 +3334,96 @@ mod tests {
             .unwrap();
         assert_eq!(usage.usage_state, "unknown");
         assert_eq!(usage.accounted_micro_usd, terminal.reservation_micro_usd);
-        assert!(
-            !state
-                .ai_runtime
-                .inputs
-                .lock()
-                .await
-                .contains_key(&job.job_id)
-        );
+        assert!(!state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .contains_key(&job.job_id));
         assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
 
         sqlx::query("DROP TRIGGER fail_failed_transition")
             .execute(&state.db)
             .await
             .unwrap();
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exhausted_connection_pool_releases_worker_after_cleanup_deadline() {
+        let (state, handle) = jobs_state().await;
+        let provider = metered(false, Err("fixture provider failure".into()), None);
+        let gate = provider.gate.clone();
+        state.ai_runtime.install_provider(Arc::new(provider)).await;
+        let SubmitOutcome::Accepted { job } =
+            submit(&state, "local-owner", "pool exhaustion fixture", None)
+                .await
+                .unwrap()
+        else {
+            panic!("fixture task must be accepted")
+        };
+
+        let mut dispatched = false;
+        for _ in 0..400 {
+            let row = job_row(&state, &job.job_id).await;
+            if row.state == "running" && row.dispatch_state == "may_have_been_sent" {
+                dispatched = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(dispatched, "fixture provider must be held after dispatch");
+
+        let mut held_connections = Vec::with_capacity(4);
+        for _ in 0..4 {
+            held_connections.push(state.db.acquire().await.unwrap());
+        }
+        assert_eq!(
+            state.db.size(),
+            4,
+            "all production pool connections are held"
+        );
+
+        let cleanup_started = std::time::Instant::now();
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(TERMINAL_CLEANUP_TIMEOUT_MS + 1_500),
+            async {
+                loop {
+                    let owns_input = state
+                        .ai_runtime
+                        .inputs
+                        .lock()
+                        .await
+                        .contains_key(&job.job_id);
+                    if !owns_input && state.ai_runtime.execution_slots.available_permits() == 1 {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            },
+        )
+        .await
+        .expect("worker must release its in-memory owner and execution slot");
+        assert!(
+            cleanup_started.elapsed()
+                < std::time::Duration::from_millis(TERMINAL_CLEANUP_TIMEOUT_MS + 1_000),
+            "cleanup must respect the shared total deadline"
+        );
+
+        drop(held_connections);
+        assert_eq!(job_row(&state, &job.job_id).await.state, "running");
+        sweep(&state).await.unwrap();
+        let recovered = job_row(&state, &job.job_id).await;
+        assert_eq!(recovered.state, "interrupted");
+        assert_eq!(recovered.dispatch_state, "may_have_been_sent");
+        let usage = store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage_state, "unknown");
+
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -3227,14 +3477,12 @@ mod tests {
             .unwrap();
         assert_eq!(usage.usage_state, "unknown");
         assert_eq!(usage.accounted_micro_usd, terminal.reservation_micro_usd);
-        assert!(
-            !state
-                .ai_runtime
-                .inputs
-                .lock()
-                .await
-                .contains_key(&job.job_id)
-        );
+        assert!(!state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .contains_key(&job.job_id));
         assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
 
         sqlx::query("DROP TRIGGER fail_transient_terminal")
@@ -3298,12 +3546,10 @@ mod tests {
         let stranded = job_row(&state, &job.job_id).await;
         assert_eq!(stranded.state, "running");
         assert_eq!(stranded.dispatch_state, "may_have_been_sent");
-        assert!(
-            store::find_usage_entry(&state.db, &job.job_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .is_none());
 
         let owner = instance_owner(&state).await.unwrap();
         sqlx::query("DROP TRIGGER fail_persistent_terminal")
@@ -3356,21 +3602,16 @@ mod tests {
         let terminal = await_terminal(&state, &job.job_id).await;
         assert_eq!(terminal.state, "succeeded");
         assert_eq!(terminal.dispatch_state, "may_have_been_sent");
-        let usage = store::find_usage_entry(&state.db, &job.job_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let usage = await_usage_entry(&state, &job.job_id).await;
         assert_eq!(usage.usage_state, "reported");
         assert_eq!(usage.accounted_micro_usd, 0);
         assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
-        assert!(
-            !state
-                .ai_runtime
-                .inputs
-                .lock()
-                .await
-                .contains_key(&job.job_id)
-        );
+        assert!(!state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .contains_key(&job.job_id));
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -3388,12 +3629,10 @@ mod tests {
         };
         let expired_deadline = tokio::time::Instant::now() - std::time::Duration::from_millis(1);
 
-        assert!(
-            start_running(&state, &job.job_id, expired_deadline)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(start_running(&state, &job.job_id, expired_deadline)
+            .await
+            .unwrap()
+            .is_none());
         let terminal = job_row(&state, &job.job_id).await;
         assert_eq!(terminal.state, "expired");
         assert_eq!(terminal.dispatch_state, "not_dispatched");
@@ -3414,14 +3653,12 @@ mod tests {
         .unwrap();
         drop(worker_slot);
         assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
-        assert!(
-            !state
-                .ai_runtime
-                .inputs
-                .lock()
-                .await
-                .contains_key(&job.job_id)
-        );
+        assert!(!state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .contains_key(&job.job_id));
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -3488,11 +3725,9 @@ mod tests {
                 view.usage.accounted_micro_usd,
                 Some(if counters.is_some() { 137 } else { 30_000 })
             );
-            assert!(
-                get_job(&state, "another-principal", &job.job_id)
-                    .await
-                    .is_err()
-            );
+            assert!(get_job(&state, "another-principal", &job.job_id)
+                .await
+                .is_err());
         }
         let budget = status(&state, &instance_owner(&state).await.unwrap())
             .await
@@ -3709,6 +3944,7 @@ mod tests {
                 updated_at: 0,
                 result_proposal_id: None,
                 failure_code: None,
+                provider_http_status: None,
             },
         )
         .await
@@ -3751,59 +3987,51 @@ mod tests {
         };
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
         store::settle(&mut tx, "2026-10", 0, 42).await.unwrap();
-        assert!(
-            !usage::reconcile(
-                &mut tx,
-                "wrong-owner",
-                "retained-ledger",
-                "original-attempt",
-                2,
-                &TrustedUsage {
-                    input_tokens: 10_001,
-                    output_tokens: 7,
-                }
-            )
-            .await
-            .unwrap()
-        );
+        assert!(!usage::reconcile(
+            &mut tx,
+            "wrong-owner",
+            "retained-ledger",
+            "original-attempt",
+            2,
+            &TrustedUsage {
+                input_tokens: 10_001,
+                output_tokens: 7,
+            }
+        )
+        .await
+        .unwrap());
         let unchanged = store::find_usage_entry(&mut *tx, "retained-ledger")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(unchanged.revision, 2);
         assert_eq!(unchanged.accounted_micro_usd, 30_000);
-        assert!(
-            store::budget_guard(&mut *tx)
-                .await
-                .unwrap()
-                .is_none_or(|guard| !guard.halted)
-        );
+        assert!(store::budget_guard(&mut *tx)
+            .await
+            .unwrap()
+            .is_none_or(|guard| !guard.halted));
         for (attempt, revision) in [("wrong-attempt", 2), ("original-attempt", 1)] {
-            assert!(
-                !usage::reconcile(
-                    &mut tx,
-                    &owner,
-                    "retained-ledger",
-                    attempt,
-                    revision,
-                    &counters
-                )
-                .await
-                .unwrap()
-            );
-        }
-        assert!(
-            usage::reconcile(
+            assert!(!usage::reconcile(
                 &mut tx,
                 &owner,
                 "retained-ledger",
-                "original-attempt",
-                2,
+                attempt,
+                revision,
                 &counters
             )
             .await
-            .unwrap()
-        );
+            .unwrap());
+        }
+        assert!(usage::reconcile(
+            &mut tx,
+            &owner,
+            "retained-ledger",
+            "original-attempt",
+            2,
+            &counters
+        )
+        .await
+        .unwrap());
         let revised = store::find_usage_entry(&mut *tx, "retained-ledger")
             .await
             .unwrap()
@@ -3816,42 +4044,36 @@ mod tests {
         assert_eq!(old.reserved_micro_usd, 0);
         let revision = old.revision;
         // Same callback with stale revision is a no-op. Conflicting facts never overwrite it.
-        assert!(
-            usage::reconcile(
-                &mut tx,
-                &owner,
-                "retained-ledger",
-                "original-attempt",
-                2,
-                &counters
-            )
-            .await
-            .unwrap()
-        );
-        assert!(
-            !usage::reconcile(
-                &mut tx,
-                &owner,
-                "retained-ledger",
-                "original-attempt",
-                3,
-                &TrustedUsage::free()
-            )
-            .await
-            .unwrap()
-        );
-        assert!(
-            !usage::reconcile(
-                &mut tx,
-                &owner,
-                "retained-ledger",
-                "another-attempt",
-                3,
-                &counters
-            )
-            .await
-            .unwrap()
-        );
+        assert!(usage::reconcile(
+            &mut tx,
+            &owner,
+            "retained-ledger",
+            "original-attempt",
+            2,
+            &counters
+        )
+        .await
+        .unwrap());
+        assert!(!usage::reconcile(
+            &mut tx,
+            &owner,
+            "retained-ledger",
+            "original-attempt",
+            3,
+            &TrustedUsage::free()
+        )
+        .await
+        .unwrap());
+        assert!(!usage::reconcile(
+            &mut tx,
+            &owner,
+            "retained-ledger",
+            "another-attempt",
+            3,
+            &counters
+        )
+        .await
+        .unwrap());
         assert_eq!(
             store::get_or_create_month(&mut tx, "2026-09")
                 .await
@@ -3866,12 +4088,10 @@ mod tests {
                 .charged_micro_usd,
             42
         );
-        assert!(
-            store::find_job_by_id(&mut *tx, "retained-ledger")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(store::find_job_by_id(&mut *tx, "retained-ledger")
+            .await
+            .unwrap()
+            .is_none());
         tx.commit().await.unwrap();
         state.audio.shutdown();
         handle.join().unwrap();
@@ -3885,21 +4105,19 @@ mod tests {
         sqlx::query("CREATE TRIGGER fail_month BEFORE UPDATE ON ai_budget_months BEGIN SELECT RAISE(ABORT, 'month failure'); END")
             .execute(&state.db).await.unwrap();
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
-        assert!(
-            usage::reconcile(
-                &mut tx,
-                &owner,
-                "rollback",
-                "original-attempt",
-                2,
-                &TrustedUsage {
-                    input_tokens: 1,
-                    output_tokens: 1
-                }
-            )
-            .await
-            .is_err()
-        );
+        assert!(usage::reconcile(
+            &mut tx,
+            &owner,
+            "rollback",
+            "original-attempt",
+            2,
+            &TrustedUsage {
+                input_tokens: 1,
+                output_tokens: 1
+            }
+        )
+        .await
+        .is_err());
         tx.rollback().await.unwrap();
         let entry = store::find_usage_entry(&state.db, "rollback")
             .await
@@ -3949,8 +4167,7 @@ mod tests {
         assert_eq!(entry.usage_state, "reported");
         let guard = store::budget_guard(&state.db).await.unwrap().unwrap();
         assert!(guard.halted);
-        assert!(guard.token_halted);
-        assert_eq!(guard.token_reason, "可信 token usage 超出受理时的上界");
+        assert!(!guard.token_halted);
         assert_eq!(
             submit(&state, "local-owner", "blocked", None)
                 .await
@@ -4000,21 +4217,19 @@ mod tests {
         store::reserve(&mut tx, "2026-09", 20_000, MONTHLY_LIMIT_MICRO_USD)
             .await
             .unwrap();
-        assert!(
-            usage::reconcile(
-                &mut tx,
-                &owner,
-                "late-over-bound",
-                "original-attempt",
-                2,
-                &TrustedUsage {
-                    input_tokens: 40_000,
-                    output_tokens: 7
-                }
-            )
-            .await
-            .unwrap()
-        );
+        assert!(usage::reconcile(
+            &mut tx,
+            &owner,
+            "late-over-bound",
+            "original-attempt",
+            2,
+            &TrustedUsage {
+                input_tokens: 40_000,
+                output_tokens: 7
+            }
+        )
+        .await
+        .unwrap());
         let month = store::get_or_create_month(&mut tx, "2026-09")
             .await
             .unwrap();
@@ -4048,21 +4263,19 @@ mod tests {
             .unwrap();
 
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
-        assert!(
-            !usage::reconcile(
-                &mut tx,
-                &owner,
-                "late-month-overflow",
-                "original-attempt",
-                2,
-                &TrustedUsage {
-                    input_tokens: 40_000,
-                    output_tokens: 7,
-                }
-            )
-            .await
-            .unwrap()
-        );
+        assert!(!usage::reconcile(
+            &mut tx,
+            &owner,
+            "late-month-overflow",
+            "original-attempt",
+            2,
+            &TrustedUsage {
+                input_tokens: 40_000,
+                output_tokens: 7,
+            }
+        )
+        .await
+        .unwrap());
         tx.commit().await.unwrap();
 
         let entry = store::find_usage_entry(&state.db, "late-month-overflow")
@@ -4070,7 +4283,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry.usage_state, "estimated_final");
-        assert_eq!(entry.revision, 2);
+        assert_eq!(entry.revision, 3, "the halted CAS still advances the ledger revision");
         assert_eq!(entry.accounted_micro_usd, 30_000);
         let mut conn = state.db.acquire().await.unwrap();
         let month = store::get_or_create_month(&mut conn, "2026-09")
@@ -4096,18 +4309,16 @@ mod tests {
             .unwrap();
 
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
-        assert!(
-            !usage::reconcile(
-                &mut tx,
-                &owner,
-                "late-month-underflow",
-                "original-attempt",
-                2,
-                &TrustedUsage::free(),
-            )
-            .await
-            .unwrap()
-        );
+        assert!(!usage::reconcile(
+            &mut tx,
+            &owner,
+            "late-month-underflow",
+            "original-attempt",
+            2,
+            &TrustedUsage::free(),
+        )
+        .await
+        .unwrap());
         tx.commit().await.unwrap();
 
         let entry = store::find_usage_entry(&state.db, "late-month-underflow")
@@ -4115,7 +4326,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry.usage_state, "estimated_final");
-        assert_eq!(entry.revision, 2);
+        assert_eq!(entry.revision, 3, "the halted CAS still advances the ledger revision");
         assert_eq!(entry.accounted_micro_usd, 30_000);
         let mut conn = state.db.acquire().await.unwrap();
         assert_eq!(
@@ -4285,18 +4496,16 @@ mod tests {
         );
         let task = job_row(&state, &job.job_id).await;
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
-        assert!(
-            !usage::reconcile(
-                &mut tx,
-                &task.owner_instance_id,
-                &job.job_id,
-                task.attempt_id.as_deref().unwrap(),
-                entry.revision,
-                &TrustedUsage::free(),
-            )
-            .await
-            .unwrap()
-        );
+        assert!(!usage::reconcile(
+            &mut tx,
+            &task.owner_instance_id,
+            &job.job_id,
+            task.attempt_id.as_deref().unwrap(),
+            entry.revision,
+            &TrustedUsage::free(),
+        )
+        .await
+        .unwrap());
         tx.commit().await.unwrap();
         let unchanged = store::find_usage_entry(&state.db, &job.job_id)
             .await
@@ -4328,21 +4537,19 @@ mod tests {
         let owner = instance_owner(&state).await.unwrap();
         estimated_entry(&state, "overflow").await;
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
-        assert!(
-            usage::reconcile(
-                &mut tx,
-                &owner,
-                "overflow",
-                "original-attempt",
-                2,
-                &TrustedUsage {
-                    input_tokens: u64::MAX,
-                    output_tokens: u64::MAX
-                }
-            )
-            .await
-            .unwrap()
-        );
+        assert!(usage::reconcile(
+            &mut tx,
+            &owner,
+            "overflow",
+            "original-attempt",
+            2,
+            &TrustedUsage {
+                input_tokens: u64::MAX,
+                output_tokens: u64::MAX
+            }
+        )
+        .await
+        .unwrap());
         tx.commit().await.unwrap();
         let entry = store::find_usage_entry(&state.db, "overflow")
             .await
@@ -4359,8 +4566,7 @@ mod tests {
         );
         let guard = store::budget_guard(&state.db).await.unwrap().unwrap();
         assert!(guard.halted);
-        assert!(guard.token_halted);
-        assert_eq!(guard.token_reason, "可信 token usage 超出受理时的上界");
+        assert!(!guard.token_halted);
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -4368,6 +4574,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_unrepresentable_usage_keeps_estimate_and_halts() {
         let (state, handle) = jobs_state().await;
+        let owner = instance_owner(&state).await.unwrap();
         state
             .ai_runtime
             .install_provider(Arc::new(metered(
@@ -4413,18 +4620,29 @@ mod tests {
         let guard = store::budget_guard(&mut *conn).await.unwrap().unwrap();
         assert!(guard.halted);
         assert_eq!(guard.reason, "usage amount overflow");
-        assert!(guard.token_halted);
-        assert_eq!(guard.token_reason, "可信 token usage 超出受理时的上界");
+        assert!(!guard.token_halted);
         drop(conn);
 
+        let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
+        store::halt_token_guard(&mut tx, &owner, "legacy token-only stop", "old-task")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
         state
             .ai_runtime
             .install_provider(Arc::new(TokenOnlyProvider))
             .await;
-        assert!(matches!(
-            submit(&state, "local-owner", "token bound guard fixture", None).await,
-            Err(error) if error.code == "token_bounds_halted"
-        ));
+        let SubmitOutcome::Accepted { job } = submit(
+            &state,
+            "local-owner",
+            "legacy token guard does not block",
+            None,
+        )
+        .await
+        .unwrap() else {
+            panic!("legacy token guard must not block admission");
+        };
+        assert_eq!(await_terminal(&state, &job.job_id).await.state, "succeeded");
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -4477,18 +4695,14 @@ mod tests {
         .unwrap();
 
         retain_history(&state.db, now).await.unwrap();
-        assert!(
-            store::find_job_by_id(&state.db, "pending-retention")
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            store::find_usage_entry(&state.db, "pending-retention")
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(store::find_job_by_id(&state.db, "pending-retention")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store::find_usage_entry(&state.db, "pending-retention")
+            .await
+            .unwrap()
+            .is_some());
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -4543,24 +4757,18 @@ mod tests {
             .unwrap();
         assert_eq!(proposal.validated_intent, "null");
         assert_eq!(proposal.state, "expired");
-        assert!(
-            store::find_job_by_id(&state.db, "protected")
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            store::find_job_by_id(&state.db, "old")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            store::find_proposal(&state.db, "proposal-old")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(store::find_job_by_id(&state.db, "protected")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store::find_job_by_id(&state.db, "old")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store::find_proposal(&state.db, "proposal-old")
+            .await
+            .unwrap()
+            .is_none());
         let entry = store::find_usage_entry(&state.db, "old")
             .await
             .unwrap()
@@ -4743,12 +4951,10 @@ mod tests {
                 .await
                 .unwrap();
         }
-        assert!(
-            store::find_usage_entry(&state.db, "past")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(store::find_usage_entry(&state.db, "past")
+            .await
+            .unwrap()
+            .is_none());
         let retained_budget: i64 = sqlx::query_scalar(
             "SELECT charged_micro_usd FROM ai_budget_months WHERE month = '2025-08'",
         )
@@ -4759,12 +4965,10 @@ mod tests {
             retained_budget, 100,
             "retained usage must retain its original month's aggregate"
         );
-        assert!(
-            store::find_usage_entry(&state.db, "boundary")
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(store::find_usage_entry(&state.db, "boundary")
+            .await
+            .unwrap()
+            .is_some());
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -4830,7 +5034,9 @@ mod tests {
             .unwrap();
         // A second process has no in-memory owner for this row. The blocked
         // fixture ignores cancellation so the real owner remains observable.
-        let cancel_owner = state
+        // Keep the sender alive: dropping it is itself a cancellation signal.
+        // Removing it from the map still simulates a different process owning the row.
+        let _cancel_owner = state
             .ai_runtime
             .inputs
             .lock()
@@ -4846,7 +5052,6 @@ mod tests {
             .ai_runner_held
             .store(true, std::sync::atomic::Ordering::Relaxed);
         gate.store(true, std::sync::atomic::Ordering::SeqCst);
-        drop(cancel_owner);
         let terminal = await_terminal(&state, &job.job_id).await;
         assert_eq!(terminal.state, "succeeded");
         state.audio.shutdown();
@@ -4980,11 +5185,9 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
-        assert!(
-            get_proposal(&state, "other-principal", &proposal_id)
-                .await
-                .is_err()
-        );
+        assert!(get_proposal(&state, "other-principal", &proposal_id)
+            .await
+            .is_err());
         assert_eq!(
             store::find_proposal(&state.db, &proposal_id)
                 .await
@@ -4993,16 +5196,75 @@ mod tests {
                 .state,
             "pending"
         );
+        let mut events = state.events.subscribe();
         let view = get_proposal(&state, crate::idempotency::LOCAL_OWNER, &proposal_id)
             .await
             .unwrap();
         assert_eq!(view.state, "expired");
         assert!(view.validated_intent.is_null(), "过期提案不得携带完整内容");
+        assert!(matches!(events.try_recv().unwrap(), WsEvent::AiTasksResync));
+        assert!(
+            get_proposal(&state, crate::idempotency::LOCAL_OWNER, &proposal_id)
+                .await
+                .is_ok()
+        );
+        assert!(events.try_recv().is_err(), "已过期提案重复读取不重复发布");
         // 过期提案不能再被拒绝（非 pending）。
         let err = reject_proposal(&state, crate::idempotency::LOCAL_OWNER, &proposal_id, 1)
             .await
             .unwrap_err();
         assert_eq!(err.code, "state_conflict");
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_rejection_broadcasts_resync_only_after_cas_wins() {
+        let (state, handle) = jobs_state().await;
+        let SubmitOutcome::Accepted { job } = submit(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            "拒绝事件候选",
+            None,
+        )
+        .await
+        .unwrap() else {
+            panic!("首次提交必须受理");
+        };
+        for _ in 0..200 {
+            if job_row(&state, &job.job_id).await.state == "succeeded" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let done = job_row(&state, &job.job_id).await;
+        let proposal_id = done.result_proposal_id.unwrap();
+        let proposal = get_proposal(&state, crate::idempotency::LOCAL_OWNER, &proposal_id)
+            .await
+            .unwrap();
+        let mut events = state.events.subscribe();
+
+        let rejected = reject_proposal(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            &proposal_id,
+            proposal.revision,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rejected.state, "rejected");
+        assert!(matches!(events.try_recv().unwrap(), WsEvent::AiTasksResync));
+
+        let duplicate = reject_proposal(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            &proposal_id,
+            proposal.revision,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(duplicate.code, "state_conflict");
+        assert!(events.try_recv().is_err(), "CAS 失败不得发布状态事件");
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -5394,12 +5656,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(healthy_usage.usage_state, "released");
-        assert!(
-            store::find_usage_entry(&state.db, &failed.job_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(store::find_usage_entry(&state.db, &failed.job_id)
+            .await
+            .unwrap()
+            .is_none());
 
         sqlx::query("DROP TRIGGER fail_one_recovery")
             .execute(&state.db)
@@ -5471,23 +5731,19 @@ mod tests {
         // 不在当前场景表里的 scene 一律失败（"space" 曾是假场景名）。
         assert!(validate_intent(&json!({ "version": 1, "scene": "space", "patch": {} })).is_err());
         assert!(validate_intent(&json!({ "version": 2, "scene": "towers", "patch": {} })).is_err());
-        assert!(
-            validate_intent(&json!({ "version": 1, "scene": "towers", "patch": {}, "junk": 1 }))
-                .is_err()
-        );
+        assert!(validate_intent(
+            &json!({ "version": 1, "scene": "towers", "patch": {}, "junk": 1 })
+        )
+        .is_err());
         // patch 键必须落在场景参数表内（结构合法但参数不存在也失败）。
-        assert!(
-            validate_intent(
-                &json!({ "version": 1, "scene": "towers", "patch": { "intensity": 1 } })
-            )
-            .is_err()
-        );
-        assert!(
-            validate_intent(
-                &json!({ "version": 1, "scene": "towers", "patch": { "sc.height": 5.5 } })
-            )
-            .is_ok()
-        );
+        assert!(validate_intent(
+            &json!({ "version": 1, "scene": "towers", "patch": { "intensity": 1 } })
+        )
+        .is_err());
+        assert!(validate_intent(
+            &json!({ "version": 1, "scene": "towers", "patch": { "sc.height": 5.5 } })
+        )
+        .is_ok());
         for bad in [
             json!({"version":1,"scene":"towers","patch":{"height":1}}),
             json!({"version":1,"scene":"towers","patch":{"sc.height":"1"}}),
@@ -5532,16 +5788,9 @@ mod tests {
         else {
             panic!("受理");
         };
-        for _ in 0..200 {
-            if job_row(&state, &job.job_id).await.state == "succeeded" {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        let entry = store::find_usage_entry(&state.db, &job.job_id)
-            .await
-            .unwrap()
-            .expect("成功任务必须有账目");
+        let success = await_terminal(&state, &job.job_id).await;
+        assert_eq!(success.state, "succeeded", "success fixture: {success:?}");
+        let entry = await_usage_entry(&state, &job.job_id).await;
         assert_eq!(entry.usage_state, "reported");
         assert_eq!(entry.accounted_micro_usd, 0);
 
@@ -5685,11 +5934,9 @@ mod tests {
         .execute(&state.db)
         .await
         .unwrap();
-        assert!(
-            budget_guard_reset(&state, guard.revision, &fingerprint)
-                .await
-                .is_err()
-        );
+        assert!(budget_guard_reset(&state, guard.revision, &fingerprint)
+            .await
+            .is_err());
         let unchanged = store::budget_guard(&state.db).await.unwrap().unwrap();
         assert!(unchanged.halted, "audit failure must roll the reset back");
         assert_eq!(unchanged.revision, guard.revision);
@@ -5746,12 +5993,12 @@ mod tests {
                 );
                 seen += 1;
             }
-            if job_row(&state, &job.job_id).await.state == "succeeded" {
+            if seen >= 3 && job_row(&state, &job.job_id).await.state == "succeeded" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert!(seen >= 3, "每次任务状态变化都应发布无载荷提示");
+        assert!(seen >= 3, "每次任务状态变化都应发布无载荷提示 (seen={seen})");
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -5766,9 +6013,13 @@ mod tests {
         assert_eq!(utc_month_key(1_767_225_599_000), "2025-12");
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ledger_failure_rolls_back_proposal_and_success() {
+    async fn ledger_failure_does_not_block_proposal_and_pending_tokens_reconcile_later() {
         let (state, handle) = jobs_state().await;
-        sqlx::query("CREATE TRIGGER fail_report BEFORE INSERT ON ai_usage_entries WHEN NEW.usage_state = 'reported' BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END")
+        state
+            .ai_runtime
+            .install_provider(Arc::new(TokenOnlyProvider))
+            .await;
+        sqlx::query("CREATE TRIGGER fail_usage BEFORE INSERT ON ai_usage_entries BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END")
             .execute(&state.db).await.unwrap();
         let SubmitOutcome::Accepted { job } = submit(&state, "local-owner", "ledger fault", None)
             .await
@@ -5780,25 +6031,57 @@ mod tests {
         // The worker may not have acquired its slot yet. Wait via DB rather than assuming spawn order.
         drop(slot);
         for _ in 0..200 {
-            if job_row(&state, &job.job_id).await.state == "failed" {
+            if job_row(&state, &job.job_id).await.state == "succeeded" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         let row = job_row(&state, &job.job_id).await;
-        assert_eq!(row.state, "failed");
-        assert!(row.result_proposal_id.is_none());
+        assert_eq!(row.state, "succeeded");
+        let proposal_id = row.result_proposal_id.as_deref().unwrap();
+        let proposal = get_proposal(&state, "local-owner", proposal_id)
+            .await
+            .unwrap();
+        assert_eq!(proposal.state, "pending");
+        assert!(!proposal.validated_intent.is_null());
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_proposals")
             .fetch_one(&state.db)
             .await
             .unwrap();
-        assert_eq!(count, 0);
-        let usage = store::find_usage_entry(&state.db, &job.job_id)
+        assert_eq!(count, 1);
+        let attempt = row.attempt_id.as_deref().unwrap();
+        {
+            let mut conn = state.db.acquire().await.unwrap();
+            assert!(store::find_pending_usage(&mut conn, &job.job_id, attempt)
+                .await
+                .unwrap()
+                .is_some());
+        }
+        sqlx::query("DROP TRIGGER fail_usage")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(drain_pending_usage(&state).await.unwrap(), 0);
+        let reconciled = store::find_usage_entry(&state.db, &job.job_id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(usage.usage_state, "unknown");
+        assert_eq!(reconciled.usage_state, "unpriced");
+        assert_eq!(
+            serde_json::from_str::<TrustedUsage>(reconciled.reported_usage.as_deref().unwrap())
+                .unwrap(),
+            TrustedUsage {
+                input_tokens: 345,
+                output_tokens: 67,
+            }
+        );
+        let mut conn = state.db.acquire().await.unwrap();
+        assert!(store::find_pending_usage(&mut conn, &job.job_id, attempt)
+            .await
+            .unwrap()
+            .is_none());
         let budget = status(&state, &row.owner_instance_id).await.unwrap();
+        assert_eq!(budget["budget"]["chargedMicroUsd"], 0);
         assert_eq!(budget["budget"]["reservedMicroUsd"], 0);
         state.audio.shutdown();
         handle.join().unwrap();
@@ -5847,7 +6130,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn terminal_ledger_retry_preserves_token_only_usage() {
+    async fn terminal_ledger_failure_does_not_undo_token_only_task_success() {
         let (state, handle) = jobs_state().await;
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -5887,8 +6170,29 @@ mod tests {
         gate.store(true, std::sync::atomic::Ordering::SeqCst);
 
         let terminal = await_terminal(&state, &job.job_id).await;
-        assert_eq!(terminal.state, "interrupted");
+        assert_eq!(terminal.state, "succeeded");
         assert_eq!(terminal.dispatch_state, "may_have_been_sent");
+        let row = job_row(&state, &job.job_id).await;
+        let attempt = row.attempt_id.as_deref().unwrap();
+        assert!(row.result_proposal_id.is_some());
+        assert!(store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store::find_pending_usage(
+            &mut state.db.acquire().await.unwrap(),
+            &job.job_id,
+            attempt,
+        )
+        .await
+        .unwrap()
+        .is_some());
+
+        sqlx::query("DROP TRIGGER fail_initial_unpriced_ledger")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(drain_pending_usage(&state).await.unwrap(), 0);
         let usage = store::find_usage_entry(&state.db, &job.job_id)
             .await
             .unwrap()
@@ -5904,11 +6208,6 @@ mod tests {
         );
         assert!(counter.load(std::sync::atomic::Ordering::SeqCst) == 1);
         assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
-
-        sqlx::query("DROP TRIGGER fail_initial_unpriced_ledger")
-            .execute(&state.db)
-            .await
-            .unwrap();
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -5970,13 +6269,11 @@ mod tests {
             worker_stopped,
             "provider worker should stop after bounded retries"
         );
-        assert_eq!(job_row(&state, &job.job_id).await.state, "running");
-        assert!(
-            store::find_usage_entry(&state.db, &job.job_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert_eq!(job_row(&state, &job.job_id).await.state, "succeeded");
+        assert!(store::find_usage_entry(&state.db, &job.job_id)
+            .await
+            .unwrap()
+            .is_none());
         let pending =
             store::find_pending_usage(&mut state.db.acquire().await.unwrap(), &job.job_id, attempt)
                 .await
@@ -5994,9 +6291,9 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
-        assert_eq!(recover(&state).await.unwrap(), 1);
+        assert_eq!(recover(&state).await.unwrap(), 0);
         let terminal = job_row(&state, &job.job_id).await;
-        assert_eq!(terminal.state, "interrupted");
+        assert_eq!(terminal.state, "succeeded");
         let usage = store::find_usage_entry(&state.db, &job.job_id)
             .await
             .unwrap()
@@ -6070,6 +6367,7 @@ mod tests {
                     updated_at: now,
                     result_proposal_id: None,
                     failure_code: None,
+                    provider_http_status: None,
                 },
             )
             .await
@@ -6136,7 +6434,7 @@ mod tests {
                 expected_usage
             );
             assert_eq!(
-                store::find_pending_usage(&mut *conn, job_id, &format!("{job_id}-attempt"))
+                store::find_pending_usage(&mut conn, job_id, &format!("{job_id}-attempt"))
                     .await
                     .unwrap()
                     .is_some(),
@@ -6164,7 +6462,7 @@ mod tests {
                 trusted
             );
             assert!(
-                store::find_pending_usage(&mut *conn, job_id, &format!("{job_id}-attempt"))
+                store::find_pending_usage(&mut conn, job_id, &format!("{job_id}-attempt"))
                     .await
                     .unwrap()
                     .is_none()
@@ -6401,12 +6699,10 @@ mod tests {
         assert!(sweep(&state).await.is_err());
         assert_eq!(job_row(&state, &failed.job_id).await.state, "accepted");
         assert_eq!(job_row(&state, &healthy.job_id).await.state, "expired");
-        assert!(
-            store::find_usage_entry(&state.db, &failed.job_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(store::find_usage_entry(&state.db, &failed.job_id)
+            .await
+            .unwrap()
+            .is_none());
         let healthy_usage = store::find_usage_entry(&state.db, &healthy.job_id)
             .await
             .unwrap()
@@ -6469,14 +6765,12 @@ mod tests {
             .execute(&state.db).await.unwrap();
         assert!(cancel(&state, "local-owner", &job.job_id, 1).await.is_err());
         assert!(recover(&state).await.is_err());
-        assert!(
-            state
-                .ai_runtime
-                .inputs
-                .lock()
-                .await
-                .contains_key(&job.job_id)
-        );
+        assert!(state
+            .ai_runtime
+            .inputs
+            .lock()
+            .await
+            .contains_key(&job.job_id));
         sqlx::query("UPDATE ai_jobs SET created_at = ?1 WHERE job_id = ?2")
             .bind(now_ms() - QUEUE_DEADLINE_MS - 1000)
             .bind(&job.job_id)
@@ -6923,6 +7217,7 @@ mod tests {
             updated_at: now_ms(),
             result_proposal_id: None,
             failure_code: None,
+            provider_http_status: None,
         };
         let immediate_usage = TrustedUsage {
             input_tokens: 20_001,
@@ -6935,36 +7230,34 @@ mod tests {
         let first = make_job("token-only-immediate");
         let late = make_job("token-only-late");
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
-        store::get_or_create_month(&mut *tx, &month).await.unwrap();
+        store::get_or_create_month(&mut tx, &month).await.unwrap();
         store::insert_job(&mut *tx, &first).await.unwrap();
         store::insert_job(&mut *tx, &late).await.unwrap();
+        assert!(
+            !store::ensure_budget_guard(&mut tx, &owner)
+                .await
+                .unwrap()
+                .token_halted
+        );
         usage::settle_terminal(&mut tx, &first, Some(&immediate_usage), now_ms())
             .await
             .unwrap();
         let guard = store::budget_guard(&mut *tx).await.unwrap().unwrap();
-        assert!(guard.token_halted);
+        assert!(!guard.token_halted);
         assert!(!guard.halted);
-        assert_eq!(guard.token_reason, "可信 token usage 超出受理时的上界");
-        assert!(
-            store::reset_budget_guard(&mut *tx, guard.revision)
-                .await
-                .unwrap()
-        );
         usage::settle_terminal(&mut tx, &late, None, now_ms())
             .await
             .unwrap();
-        assert!(
-            usage::reconcile(
-                &mut tx,
-                &owner,
-                &late.job_id,
-                late.attempt_id.as_deref().unwrap(),
-                1,
-                &late_usage,
-            )
-            .await
-            .unwrap()
-        );
+        assert!(usage::reconcile(
+            &mut tx,
+            &owner,
+            &late.job_id,
+            late.attempt_id.as_deref().unwrap(),
+            1,
+            &late_usage,
+        )
+        .await
+        .unwrap());
         tx.commit().await.unwrap();
 
         for (id, expected_usage) in [
@@ -6987,16 +7280,15 @@ mod tests {
         let budget = store::get_or_create_month(&mut conn, &month).await.unwrap();
         assert_eq!(budget.charged_micro_usd, 0);
         assert_eq!(budget.reserved_micro_usd, 0);
-        let guard = store::budget_guard(&mut *conn).await.unwrap().unwrap();
-        assert!(guard.token_halted);
+        let guard = store::ensure_budget_guard(&mut conn, &owner).await.unwrap();
+        assert!(!guard.token_halted);
         assert!(!guard.halted);
-        assert_eq!(guard.token_reason, "可信 token usage 超出受理时的上界");
         state.audio.shutdown();
         handle.join().unwrap();
     }
 
     #[tokio::test]
-    async fn token_only_generation_is_not_blocked_by_amount_guard() {
+    async fn token_only_generation_ignores_legacy_accounting_guards() {
         let (state, handle) = jobs_state().await;
         state
             .ai_runtime
@@ -7005,6 +7297,9 @@ mod tests {
         let owner = instance_owner(&state).await.unwrap();
         let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
         store::halt_budget_guard(&mut tx, &owner, "metered fixture", "priced-task")
+            .await
+            .unwrap();
+        store::halt_token_guard(&mut tx, &owner, "legacy token fixture", "old-task")
             .await
             .unwrap();
         tx.commit().await.unwrap();
@@ -7019,6 +7314,7 @@ mod tests {
             64
         );
         assert_eq!(state_view["guard"]["halted"], true);
+        assert_eq!(state_view["guard"]["tokenHalted"], true);
         let SubmitOutcome::Accepted { job } =
             submit(&state, crate::idempotency::LOCAL_OWNER, "继续生成", None)
                 .await

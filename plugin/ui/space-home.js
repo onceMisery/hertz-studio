@@ -79,7 +79,12 @@
     el.search.addEventListener('submit', function (event) {
       event.preventDefault(); search(true);
     });
-    el.query.addEventListener('focus', function () { if (restoringSearchFocus) return; el.searchDock.classList.add('is-expanded'); if (!el.query.value.trim()) searchHistory(); });
+    el.query.addEventListener('focus', function () {
+      if (restoringSearchFocus) return;
+      el.searchDock.classList.add('is-expanded'); buildSearchModes();
+      if (host && host.whenSearchReady) Promise.resolve(host.whenSearchReady()).then(buildSearchModes).catch(function () {});
+      if (!el.query.value.trim()) searchHistory();
+    });
     el.query.addEventListener('compositionstart', function () { searchComposing = true; clearTimeout(searchTimer); });
     el.query.addEventListener('compositionend', function () { searchComposing = false; scheduleSearch(); });
     el.query.addEventListener('input', scheduleSearch);
@@ -140,12 +145,23 @@
   }
   function buildSearchModes() {
     if (!host) return;
-    var sources = [{id:'all',name:'All'},{id:'local',name:'本地'}].concat(host.read().sources || []);
-    sources.forEach(function (source) {
-      if (Array.from(el.searchModes.children).some(function(b){return b.dataset.source === source.id;})) return;
-      var b = node('button', '', source.label || source.name || source.id); b.type = 'button'; b.dataset.source = source.id; b.setAttribute('role','tab');
-      b.addEventListener('click', function () { searchSource = source.id; buildSearchModes(); search(false); }); el.searchModes.appendChild(b);
+    var seen = new Set(['all', 'local']);
+    var sources = [{id:'all',name:'All'},{id:'local',name:'本地'}].concat((host.read().sources || []).filter(function (source) {
+      if (!source || !source.id || seen.has(source.id)) return false;
+      seen.add(source.id); return true;
+    }));
+    var available = new Set(sources.map(function (source) { return source.id; }));
+    Array.from(el.searchModes.children).forEach(function (button) {
+      if (!available.has(button.dataset.source)) button.remove();
     });
+    sources.forEach(function (source) {
+      var b = Array.from(el.searchModes.children).find(function (button) { return button.dataset.source === source.id; });
+      if (!b) {
+        b = node('button', '', source.label || source.name || source.id); b.type = 'button'; b.dataset.source = source.id; b.setAttribute('role','tab');
+        b.addEventListener('click', function () { searchSource = source.id; buildSearchModes(); search(false); }); el.searchModes.appendChild(b);
+      } else b.textContent = source.label || source.name || source.id;
+    });
+    if (!available.has(searchSource)) searchSource = 'all';
     el.searchModes.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-selected',String(b.dataset.source === searchSource)); });
   }
   function scheduleSearch() {
@@ -374,13 +390,22 @@
       else if (spec.kind === 'daily') result = await host.daily(spec.source);
       else if (spec.kind === 'recent') result = await host.recent(spec.offset);
       else if (spec.kind === 'library' && spec.source === 'playlists') result = await host.playlists();
-      else result = await host.library({ q: spec.q || '', offset: spec.offset, source: spec.provider || spec.source, network:network,
+      else {
+        if (spec.kind === 'search' && spec.source !== 'local' && host.whenSearchReady) {
+          await host.whenSearchReady();
+          if (ticket !== generation || panel !== spec) return;
+          buildSearchModes();
+          var availableSources = host.read().sources || [];
+          if (spec.source !== 'all' && !availableSources.some(function (source) { return source.id === spec.source; })) spec.source = searchSource;
+        }
+        result = await host.library({ q: spec.q || '', offset: spec.offset, source: spec.provider || spec.source, network:network,
         onResults: function (partial) {
           if (ticket !== generation || panel !== spec) return;
           spec.items = partial.items; spec.total = partial.total; spec.nextOffset = partial.nextOffset;
-          spec.sourceStates = partial.sourceStates; spec.loading = partial.loading;
+          spec.sourceStates = partial.sourceStates; spec.loading = partial.loading; spec.note = partial.note || '';
           renderPanelItems();
         } });
+      }
       if (ticket !== generation || panel !== spec) return;
       spec.items = result.items || []; spec.total = result.total || spec.items.length; spec.note = result.note || '';
       spec.sourceStates = result.sourceStates;

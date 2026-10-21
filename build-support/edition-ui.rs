@@ -31,10 +31,28 @@ pub fn render(source: &str, full: bool) -> io::Result<String> {
 
 pub fn generate(source: &Path, dest: &Path, full: bool) -> io::Result<()> {
     fs::create_dir_all(dest)?;
+    // A reused staging directory must not retain pages shipped by an older build.
+    for entry in fs::read_dir(dest)? {
+        let entry = entry?;
+        if entry.path().extension().and_then(|s| s.to_str()) == Some("html")
+            && !matches!(
+                entry.file_name().to_str(),
+                Some("index.html" | "overlay.html")
+            )
+        {
+            fs::remove_file(entry.path())?;
+        }
+    }
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        // Only public entry pages ship. Keep diagnostics in the development tree.
+        if entry.path().extension().and_then(|s| s.to_str()) == Some("html")
+            && !matches!(name.as_ref(), "index.html" | "overlay.html")
+        {
+            continue;
+        }
         if !full
             && matches!(
                 name.as_ref(),
@@ -81,5 +99,38 @@ mod tests {
         assert_eq!(render(src, true).unwrap(), "shared\nplatform\nend\n");
         assert!(render("// edition:full\n", false).is_err());
         assert!(render("// edition:end\n", true).is_err());
+    }
+
+    #[test]
+    fn public_pages_only_and_edition_assets_are_preserved() {
+        let root = std::env::temp_dir().join(format!("hertz-edition-test-{}", std::process::id()));
+        let source = root.join("source");
+        let dest = root.join("dest");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("stale-probe.html"), "old diagnostic").unwrap();
+        for file in [
+            "index.html",
+            "overlay.html",
+            "_metrics.html",
+            "probe.html",
+            "app.js",
+            "online-login.js",
+        ] {
+            fs::write(
+                source.join(file),
+                "shared\n// edition:full\nfull-only\n// edition:end\n",
+            )
+            .unwrap();
+        }
+        generate(&source, &dest, false).unwrap();
+        for file in ["index.html", "overlay.html", "app.js"] {
+            assert_eq!(fs::read_to_string(dest.join(file)).unwrap(), "shared\n");
+        }
+        for file in ["_metrics.html", "probe.html", "online-login.js"] {
+            assert!(!dest.join(file).exists());
+        }
+        assert!(!dest.join("stale-probe.html").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

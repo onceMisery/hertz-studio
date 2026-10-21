@@ -306,6 +306,26 @@ struct PendingLoad {
     play_after: bool,
 }
 
+struct SpectrumWorkspace {
+    input: Vec<Complex<f32>>,
+    scratch: Vec<Complex<f32>>,
+    hann: Vec<f32>,
+}
+
+impl SpectrumWorkspace {
+    fn new(fft: &dyn rustfft::Fft<f32>) -> Self {
+        Self {
+            input: vec![Complex::new(0.0, 0.0); FFT_SIZE],
+            scratch: vec![Complex::new(0.0, 0.0); fft.get_inplace_scratch_len()],
+            hann: (0..FFT_SIZE)
+                .map(|i| {
+                    0.5 * (1.0 - ((2.0 * std::f32::consts::PI * i as f32) / FFT_SIZE as f32).cos())
+                })
+                .collect(),
+        }
+    }
+}
+
 pub struct CpalBackend {
     shared: Arc<Shared>,
     device: Option<Device>,
@@ -319,6 +339,7 @@ pub struct CpalBackend {
     source_rate: Option<u32>,
     gapless_supported: bool,
     fft: Arc<dyn rustfft::Fft<f32>>,
+    spectrum_workspace: Mutex<SpectrumWorkspace>,
     spectrum_state: Mutex<Vec<f32>>,
     /// 暂停淡出到 0 的瞬间才真正置 playing=false。
     pending_pause: bool,
@@ -357,6 +378,7 @@ impl CpalBackend {
             duration_ms: None,
             source_rate: None,
             gapless_supported: false,
+            spectrum_workspace: Mutex::new(SpectrumWorkspace::new(fft.as_ref())),
             fft,
             spectrum_state: Mutex::new(Vec::new()),
             pending_pause: false,
@@ -782,6 +804,7 @@ impl BiQuad {
 struct EqBank {
     rate: u32,
     gains: [f32; 6],
+    neutral: bool,
     /// 每声道一份滤波器状态（采样历史），系数同源。
     states: Vec<[BiQuad; 6]>,
 }
@@ -815,6 +838,7 @@ impl EqBank {
         Self {
             rate,
             gains,
+            neutral: gains.iter().all(|gain| *gain == 0.0),
             states,
         }
     }
@@ -825,6 +849,11 @@ impl EqBank {
 
     #[inline]
     fn process_frame(&mut self, ch: usize, sample: f32) -> f32 {
+        if self.neutral && sample.is_finite() && self.states[ch][0].y1.is_finite() {
+            // Identity sections have no history-dependent contribution. Preserve
+            // the old chain's +0 result and its non-finite poisoning behavior.
+            return if sample == 0.0 { 0.0 } else { sample };
+        }
         let mut v = sample as f64;
         for band in self.states[ch].iter_mut() {
             v = band.process(v);
@@ -1471,6 +1500,10 @@ impl AudioBackend for CpalBackend {
     }
 
     fn spectrum(&self, out: &mut [f32]) -> bool {
+        let mut workspace = match self.spectrum_workspace.try_lock() {
+            Ok(workspace) => workspace,
+            Err(_) => return false,
+        };
         let tap = match self.shared.tap.try_lock() {
             Ok(t) => t,
             Err(_) => return false,
@@ -1480,13 +1513,21 @@ impl AudioBackend for CpalBackend {
         }
         let start = tap.len() - FFT_SIZE;
 
-        let mut buf: Vec<Complex<f32>> = Vec::with_capacity(FFT_SIZE);
         for (i, sample) in tap.iter().skip(start).take(FFT_SIZE).enumerate() {
-            // Hann window: without it a partial frame leaks badly across bands.
-            let w = 0.5 * (1.0 - ((2.0 * std::f32::consts::PI * i as f32) / FFT_SIZE as f32).cos());
-            buf.push(Complex::new(sample * w, 0.0));
+            workspace.input[i] = Complex::new(*sample, 0.0);
         }
-        self.fft.process(&mut buf);
+        // The audio callback only needs the tap lock for this short copy, never
+        // for windowing, FFT, band reduction or smoothing.
+        drop(tap);
+        let SpectrumWorkspace {
+            input: buf,
+            scratch,
+            hann,
+        } = &mut *workspace;
+        for (bin, window) in buf.iter_mut().zip(hann.iter()) {
+            bin.re *= window;
+        }
+        self.fft.process_with_scratch(buf, scratch);
 
         let bins = FFT_SIZE / 2;
         let bands = out.len();
@@ -1631,6 +1672,7 @@ fn decode_loop_opened(
         return;
     }
     let mut resampler: Option<Converter> = None;
+    let mut sample_buffer: Option<SampleBuffer<f32>> = None;
     let mut converted = Vec::new();
     let mut mapped = vec![0.0; 512 * device_channels];
     let capacity = (device_rate as f32 * BUFFER_SECONDS) as usize * device_channels;
@@ -1703,7 +1745,14 @@ fn decode_loop_opened(
                         if frames == 0 {
                             continue;
                         }
-                        let mut sb = SampleBuffer::<f32>::new(frames as u64, spec);
+                        if sample_buffer
+                            .as_ref()
+                            .is_none_or(|buffer| buffer.capacity() < frames * spec.channels.count())
+                        {
+                            sample_buffer =
+                                Some(SampleBuffer::new(decoded.capacity() as u64, spec));
+                        }
+                        let sb = sample_buffer.as_mut().unwrap();
                         sb.copy_interleaved_ref(decoded);
                         let skip = discard_until.map_or(0, |target| {
                             let ticks = target.saturating_sub(packet.ts());
@@ -2494,12 +2543,86 @@ mod tests {
         decoded_opened_fixture(opened, info, 8_000, 1)
     }
 
+    #[test]
+    fn spectrum_reuses_workspace_after_warmup() {
+        let backend = decoded_fixture();
+        backend
+            .shared
+            .tap
+            .lock()
+            .unwrap()
+            .extend((0..FFT_SIZE).map(|i| (i as f32 * 0.13).sin()));
+        let mut out = [0.0; 64];
+        assert!(backend.spectrum(&mut out));
+        let (_, memory) = measure_memory(|| {
+            for _ in 0..10 {
+                assert!(backend.spectrum(&mut out));
+            }
+        });
+        assert_eq!(
+            memory.allocs, 0,
+            "FFT input and rustfft scratch must be reused: {memory:?}"
+        );
+    }
+
+    #[test]
+    fn spectrum_matches_original_fft_and_smoothing_exactly() {
+        let backend = decoded_fixture();
+        let samples: Vec<f32> = (0..FFT_SIZE)
+            .map(|i| (i as f32 * 0.13).sin() * 0.4 + (i as f32 * 0.017).cos() * 0.2)
+            .collect();
+        backend
+            .shared
+            .tap
+            .lock()
+            .unwrap()
+            .extend(samples.iter().copied());
+        let mut bins: Vec<Complex<f32>> = samples
+            .iter()
+            .enumerate()
+            .map(|(i, sample)| {
+                let w =
+                    0.5 * (1.0 - ((2.0 * std::f32::consts::PI * i as f32) / FFT_SIZE as f32).cos());
+                Complex::new(sample * w, 0.0)
+            })
+            .collect();
+        backend.fft.process(&mut bins);
+        let mut raw = [0.0f32; 64];
+        let mut peak = 1e-6f32;
+        for (i, slot) in raw.iter_mut().enumerate() {
+            let lo = (((i as f32 / 64.0).powi(2)) * (FFT_SIZE / 2) as f32) as usize;
+            let hi = (((((i + 1) as f32 / 64.0).powi(2)) * (FFT_SIZE / 2) as f32)
+                .max(lo as f32 + 1.0) as usize)
+                .min(FFT_SIZE / 2);
+            let acc = bins[lo..hi]
+                .iter()
+                .fold(0.0f32, |acc, bin| acc.max(bin.norm()));
+            *slot = (acc / ((FFT_SIZE / 2) as f32).sqrt())
+                .clamp(0.0, 1.0)
+                .sqrt();
+            peak = peak.max(*slot);
+        }
+        let scale = if peak > 0.02 { 1.0 / peak } else { 1.0 };
+        let mut expected = [0.0f32; 64];
+        for _ in 0..8 {
+            let mut out = [0.0; 64];
+            assert!(backend.spectrum(&mut out));
+            for i in 0..64 {
+                let target = (raw[i] * scale).clamp(0.0, 1.0);
+                expected[i] +=
+                    (target - expected[i]) * if target > expected[i] { 0.55 } else { 0.14 };
+                assert_eq!(out[i].to_bits(), expected[i].to_bits(), "band {i}");
+            }
+        }
+    }
+
     fn decoded_opened_fixture(
         opened: OpenedReader,
         info: MediaInfo,
         device_rate: u32,
         device_channels: u16,
     ) -> CpalBackend {
+        let fft = FftPlanner::new().plan_fft_forward(FFT_SIZE);
         let mut backend = CpalBackend {
             shared: Arc::new(Shared::new()),
             device: None,
@@ -2512,7 +2635,8 @@ mod tests {
             duration_ms: info.duration_ms,
             source_rate: info.sample_rate,
             gapless_supported: false,
-            fft: FftPlanner::new().plan_fft_forward(FFT_SIZE),
+            spectrum_workspace: Mutex::new(SpectrumWorkspace::new(fft.as_ref())),
+            fft,
             spectrum_state: Mutex::new(Vec::new()),
             pending_pause: false,
             pending_stop: false,
@@ -3920,6 +4044,52 @@ mod tests {
 #[cfg(test)]
 mod dsp_tests {
     use super::*;
+
+    #[test]
+    fn eq_pcm_matches_original_filter_chain_across_parameter_switches() {
+        for rate in [8_000, 44_100, 48_000, 192_000] {
+            for gains in [[0.0; 6], [2.0, 0.0, -3.0, 0.0, 4.0, 0.0], [0.0; 6]] {
+                let mut bank = EqBank::new(rate, gains, 2);
+                let mut reference = bank.states.clone();
+                for frame in 0..4096 {
+                    for (ch, channel_reference) in reference.iter_mut().enumerate() {
+                        let sample = match frame % 31 {
+                            0 => -0.0,
+                            1 => f32::from_bits(1),
+                            _ => (frame as f32 * (0.11 + ch as f32 * 0.003)).sin(),
+                        };
+                        let mut expected = sample as f64;
+                        for band in channel_reference {
+                            expected = band.process(expected);
+                        }
+                        assert_eq!(
+                            bank.process_frame(ch, sample).to_bits(),
+                            (expected as f32).to_bits()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn neutral_eq_preserves_nonfinite_filter_history_semantics() {
+        for invalid in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            let mut bank = EqBank::new(48_000, [0.0; 6], 1);
+            let mut reference = bank.states.clone();
+            for sample in [0.5, -0.5, invalid, 0.25, 0.0] {
+                let mut expected = sample as f64;
+                for band in &mut reference[0] {
+                    expected = band.process(expected);
+                }
+                let actual = bank.process_frame(0, sample);
+                assert!(
+                    actual.to_bits() == (expected as f32).to_bits()
+                        || actual.is_nan() && expected.is_nan()
+                );
+            }
+        }
+    }
 
     #[test]
     fn peaking_filter_zero_gain_is_identity() {

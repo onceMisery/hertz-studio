@@ -36,8 +36,25 @@ async function main(){
   const draft=await T.prepare('quiet-orb'),token=CS.beginPreview(draft.preset,draft.proposalHash);
   assert.equal(CS.applyPreview(token.previewId,draft.proposalHash).ok,true);
   assert.equal(CS.preset().name,'静夜星球');
-  CS.savePreset('Template copy');assert.equal(CS.library()[0].name,'Template copy');
-  assert.equal(CS.library()[0].scene,'orb');
+  const originalFavorite=CS.savePreset('Template copy');
+  assert.equal(CS.library()[0].name,'Template copy');assert.equal(CS.library()[0].scene,'orb');
+  CS.loadPresetById(originalFavorite.id);
+  CS.setParam('look.bloom',.21);
+  const changed=CS.preset();
+  const savedCopy=CS.savePreset('Edited template copy');
+  assert.notEqual(savedCopy.id,originalFavorite.id,'Saving a loaded favorite must create a new collection identity');
+  assert.equal(CS.library().length,2,'Saving a loaded favorite adds a distinct snapshot');
+  assert.deepEqual(CS.library().find(item=>item.id===originalFavorite.id),originalFavorite,
+    'Saving edited content must preserve the original favorite snapshot');
+  assert.equal(CS.library().find(item=>item.id===savedCopy.id).look.bloom,changed.look.bloom);
+  for(let i=0;i<38;i++) CS.savePreset('Filler '+i);
+  assert.equal(CS.library().length,40);
+  CS.loadPresetById(originalFavorite.id);CS.setParam('look.bloom',.33);
+  const fullLibraryCopy=CS.savePreset('Full library copy');
+  assert.notEqual(fullLibraryCopy.id,originalFavorite.id);
+  assert.equal(CS.library().length,40);
+  assert.deepEqual(CS.library().find(item=>item.id===originalFavorite.id),originalFavorite,
+    'At capacity, saving a loaded favorite must not evict its source snapshot');
   assert.equal(h.requests(),0,'Templates never read media or call a model');
   const info=T.list();info[0].version=999;assert.equal(T.list()[0].version,2);
   draft.artifact.intent.patch['look.bloom']=99;

@@ -712,7 +712,8 @@
     credentialOperation: false, credentialOpen: false,
     rejectingProposals: Object.create(null),
     proposal: null, brief: '', loading: false, error: '',
-    snapshot: '', pendingSubmit: null, cancellingJobs: Object.create(null),
+    snapshot: '', pendingSubmit: null, retryBriefs: Object.create(null),
+    cancellingJobs: Object.create(null),
   };
   var aiTimer = 0, aiRefresh = null, aiRefreshAgain = false;
   var aiErrorRetryDelay = 2500, aiErrorRetryAt = 0;
@@ -723,7 +724,8 @@
 
   function aiCredentialTarget(provider) {
     if (!provider || !provider.ready || (provider.id !== 'openai' && provider.id !== 'stepfun')) return '';
-    return provider.id + '\n' + String(provider.model || '');
+    return provider.id + '\n' + String(provider.model || '') + '\n'
+      + String(provider.resetConfigFingerprint || '');
   }
 
   function aiCredentialReady(provider) {
@@ -800,9 +802,19 @@
     }[state] || state;
   }
 
-  function aiFailureText(code) {
+  function aiFailureText(code, providerHttpStatus) {
+    if (code === 'provider_error' && Number.isInteger(providerHttpStatus)
+      && providerHttpStatus >= 300 && providerHttpStatus <= 599) {
+      if (providerHttpStatus === 401) return '模型服务返回 HTTP 401；请检查 API key 是否有效。响应正文未保存。';
+      if (providerHttpStatus === 402) return '模型服务返回 HTTP 402；请在服务商控制台核对该接口和模型的账户权限与服务状态。响应正文未保存。';
+      if (providerHttpStatus === 403) return '模型服务返回 HTTP 403；请检查当前 API key 是否有权调用所选接口和模型。响应正文未保存。';
+      if (providerHttpStatus === 404) return '模型服务返回 HTTP 404；请检查接口地址和模型标识。响应正文未保存。';
+      if (providerHttpStatus === 429) return '模型服务返回 HTTP 429；请求暂被限流，请稍后手动重试。响应正文未保存。';
+      if (providerHttpStatus >= 500) return '模型服务返回 HTTP ' + providerHttpStatus + '；请稍后检查服务状态并手动重试。响应正文未保存。';
+      return '模型服务返回 HTTP ' + providerHttpStatus + '；请检查服务商接口状态。响应正文未保存。';
+    }
     return {
-      provider_error: '模型服务请求失败；请检查密钥、网络与服务状态后重试。',
+      provider_error: '模型服务请求失败；请检查密钥、模型与接口地址、账户权限或额度、网络和服务状态后重试。',
       invalid_output: '模型返回内容无法作为舞台提案；请改写描述后重试。',
       internal_error: '任务处理失败；请刷新后重试。若仍失败，请检查服务日志。',
     }[code] || '任务失败；请检查模型设置后重试。';
@@ -829,6 +841,24 @@
 
   function aiJobIsActive(job) {
     return job && (job.state === 'accepted' || job.state === 'running');
+  }
+
+  // 原始描述只在本页有界内存中供重试使用，不写入任务历史。
+  function rememberAiBrief(jobId, brief) {
+    if (!jobId || !brief) return;
+    aiState.retryBriefs[jobId] = brief;
+    var ids = Object.keys(aiState.retryBriefs);
+    while (ids.length > AI_JOBS_PAGE_SIZE) delete aiState.retryBriefs[ids.shift()];
+  }
+
+  function pruneAiRetryBriefs() {
+    var byId = new Map(aiState.jobs.map(function (job) { return [job.jobId, job]; }));
+    Object.keys(aiState.retryBriefs).forEach(function (jobId) {
+      var job = byId.get(jobId);
+      if (job && ['succeeded', 'cancelled'].indexOf(job.state) >= 0) {
+        delete aiState.retryBriefs[jobId];
+      }
+    });
   }
 
   function loadOlderAiJobs(button) {
@@ -903,6 +933,8 @@
           return T.get('/v1/ai/proposals/' + id).then(function (proposal) {
             if (aiState.expanded === id) aiState.proposal = proposal;
           });
+        }).then(function () {
+          pruneAiRetryBriefs();
         });
       })
       .then(function () {
@@ -938,6 +970,7 @@
       aiState.consent, aiState.guard, aiState.budget, aiState.provider, aiState.error,
       aiState.credential,
       aiState.expanded, aiState.proposal, draftState.undo,
+      Object.keys(aiState.retryBriefs).sort(),
       Object.keys(aiState.rejectingProposals).sort(),
       Object.keys(aiState.cancellingJobs).sort(),
     ]);
@@ -1172,17 +1205,14 @@
     refreshBtn.addEventListener('click', function () { refreshAi(); });
     body.appendChild(refreshBtn);
 
-    if (aiState.guard && (aiState.guard.halted || aiState.guard.tokenHalted)) {
-      if (aiState.guard.halted) {
-        body.appendChild(h('div', 'sc-note ws-warn',
-          '金额熔断：' + (aiState.guard.reason || '预算越界') + '；关联任务 '
-          + (aiState.guard.triggerJob || '未记录') + '。'));
-      }
-      if (aiState.guard.tokenHalted) {
-        body.appendChild(h('div', 'sc-note ws-warn',
-          'token-only 请求已暂停：可信 token 用量曾超过受理上界；关联任务 '
-          + (aiState.guard.tokenTriggerJob || '未记录') + '。'));
-      }
+    if (aiState.guard && aiState.guard.tokenHalted) {
+      body.appendChild(h('div', 'sc-note',
+        '历史 token 统计曾超过受理时的估算上界，仅作诊断，不会暂停后续生成。'));
+    }
+    if (aiState.guard && aiState.guard.halted) {
+      body.appendChild(h('div', 'sc-note ws-warn',
+        '金额熔断：' + (aiState.guard.reason || '预算越界') + '；关联任务 '
+        + (aiState.guard.triggerJob || '未记录') + '。'));
       var resetBtn = h('button', 'btn', '复位熔断');
       resetBtn.type = 'button';
       var resetFingerprint = aiState.provider && aiState.provider.resetConfigFingerprint;
@@ -1192,7 +1222,7 @@
         if (!resetFingerprint) return;
         var summary = aiState.provider.id + ' / ' + aiState.provider.model
           + ' · 配置指纹 ' + resetFingerprint.slice(0, 12);
-        if (!window.confirm('将复位持久生成保护标记。请确认当前 provider 与配置：\n' + summary)) return;
+        if (!window.confirm('将复位持久金额保护标记。请确认当前 provider 与配置：\n' + summary)) return;
         T.post('/v1/ai/budget-guard/reset', {
           expected_revision: aiState.guard.revision,
           config_fingerprint: resetFingerprint,
@@ -1218,39 +1248,78 @@
       syncAiButtons();
     });
     body.appendChild(ta);
+    var pendingNote = h('div', 'sc-note ws-warn', '');
+    pendingNote.hidden = true;
+    body.appendChild(pendingNote);
 
     var actions = h('div', 'ws-prompt-actions');
     var submitBtn = h('button', 'btn primary', '提交生成任务');
     submitBtn.type = 'button';
     // consent 关闭时输入框与提交一起禁用：面板状态本身就是开关的可见面。
+    function aiCanSubmit() {
+      return aiState.consent && !aiState.loading
+        && !!aiState.provider && aiState.provider.ready
+        && aiCredentialReady(aiState.provider);
+    }
     function syncAiButtons() {
+      var pending = aiState.pendingSubmit;
+      var manualBrief = aiState.brief.trim();
+      var pendingConflict = pending && (pending.brief !== manualBrief || !!pending.sourceJobId);
       ta.disabled = !aiState.consent;
-      submitBtn.disabled = !aiState.consent || aiState.loading || !aiState.brief.trim()
-        || !aiState.provider || !aiState.provider.ready || !aiCredentialReady(aiState.provider);
+      submitBtn.disabled = !aiCanSubmit() || !manualBrief || !!pendingConflict;
+      pendingNote.hidden = !pendingConflict;
+      pendingNote.textContent = !pendingConflict ? '' : pending.sourceJobId
+        ? '上次重试状态尚未确认。再次点击同一失败任务的重试可复用该请求；确认前不能提交另一条任务。'
+        : '上次提交状态尚未确认。恢复原描述后再次提交可复用同一请求；确认前不能提交另一条任务。';
     }
     aiState.syncButtons = syncAiButtons;
     syncAiButtons();
-    submitBtn.addEventListener('click', function () {
-      var brief = aiState.brief.trim();
-      if (!aiState.pendingSubmit || aiState.pendingSubmit.brief !== brief) {
+    function submitAiBrief(brief, sourceJobId) {
+      brief = String(brief || '').trim();
+      if (!brief || aiState.loading) return;
+      var source = sourceJobId || null;
+      if (source && !Object.prototype.hasOwnProperty.call(aiState.retryBriefs, source)) return;
+      var pending = aiState.pendingSubmit;
+      if (pending && (pending.brief !== brief || (pending.sourceJobId || null) !== source)) {
+        flash(pending.sourceJobId
+          ? '上次重试状态尚未确认，请继续点击同一失败任务的重试。'
+          : '上次提交状态尚未确认，请先恢复原描述并确认该请求。');
+        return;
+      }
+      if (!pending) {
         var hex = '';
         Array.prototype.forEach.call(crypto.getRandomValues(new Uint8Array(16)), function (b) {
           hex += ('0' + b.toString(16)).slice(-2);
         });
-        aiState.pendingSubmit = { brief: brief, key: 'v1.' + Date.now() + '.' + hex };
+        pending = { brief: brief, sourceJobId: source, key: 'v1.' + Date.now() + '.' + hex };
+        aiState.pendingSubmit = pending;
       }
-      var pending = aiState.pendingSubmit;
       setLoading(true);
       T.post('/v1/ai/jobs', { brief: pending.brief, idempotency_key: pending.key })
-        .then(function () {
-          aiState.pendingSubmit = null;
-          if (aiState.brief.trim() === pending.brief) aiState.brief = '';
+        .then(function (reply) {
+          var acceptedJob = reply && reply.job;
+          if (!acceptedJob || !acceptedJob.jobId) throw new Error('服务端未返回任务编号，提交状态尚未确认');
+          rememberAiBrief(acceptedJob.jobId, pending.brief);
+          if (source && source !== acceptedJob.jobId) delete aiState.retryBriefs[source];
+          if (aiState.pendingSubmit && aiState.pendingSubmit.key === pending.key) {
+            aiState.pendingSubmit = null;
+          }
+          if (!source && aiState.brief.trim() === pending.brief) aiState.brief = '';
           ta.value = aiState.brief;
           return refreshAi();
         })
-        .catch(function (e) { flash('提交失败：' + String((e && e.message) || e)); })
+        .catch(function (e) {
+          // 4xx (except request timeout) is an explicit admission rejection;
+          // transport errors and 5xx may have committed and must keep the key.
+          if (e && e.status >= 400 && e.status < 500 && e.status !== 408
+              && aiState.pendingSubmit && aiState.pendingSubmit.key === pending.key) {
+            aiState.pendingSubmit = null;
+          }
+          flash('提交失败：' + String((e && e.message) || e));
+        })
         .then(function () { setLoading(false); });
-    });
+    }
+    submitBtn.addEventListener('click', function () { submitAiBrief(aiState.brief, null); });
     actions.appendChild(submitBtn);
     body.appendChild(actions);
 
@@ -1267,7 +1336,8 @@
         aiShortId(job.jobId) + ' · ' + aiTime(job.createdAt) + ' · ' + job.provider + '/' + job.model));
       list.appendChild(row);
       if (job.state === 'failed') {
-        list.appendChild(h('div', 'sc-note ws-ai-failure', aiFailureText(job.failureCode)));
+        list.appendChild(h('div', 'sc-note ws-ai-failure',
+          aiFailureText(job.failureCode, job.providerHttpStatus)));
       }
       if (job.usage) {
         var usage = job.usage;
@@ -1291,6 +1361,19 @@
       }
 
       var ops = h('div', 'ws-ai-ops');
+      if (['failed', 'expired', 'interrupted'].indexOf(job.state) >= 0
+          && Object.prototype.hasOwnProperty.call(aiState.retryBriefs, job.jobId)) {
+        var retryBrief = aiState.retryBriefs[job.jobId];
+        var retryPending = aiState.pendingSubmit;
+        var retryBtn = h('button', 'btn', '按原描述重试');
+        retryBtn.type = 'button';
+        retryBtn.disabled = !aiCanSubmit() || (!!retryPending
+          && (retryPending.brief !== retryBrief || retryPending.sourceJobId !== job.jobId));
+        retryBtn.addEventListener('click', function () {
+          submitAiBrief(retryBrief, job.jobId);
+        });
+        ops.appendChild(retryBtn);
+      }
       if (job.state === 'accepted' || job.state === 'running') {
         var cancelling = !!aiState.cancellingJobs[job.jobId];
         var cancelBtn = h('button', 'btn', cancelling ? '正在取消…' : '取消');
@@ -1396,7 +1479,25 @@
                   flash('提案状态刷新失败：' + String((e && e.message) || e));
                 });
               })
-              .catch(function (e) { flash('拒绝失败：' + String((e && e.message) || e)); })
+              .catch(function (e) {
+                var message = String((e && e.message) || e);
+                return T.get('/v1/ai/proposals/' + encodeURIComponent(proposalId))
+                  .then(function (current) {
+                    if (aiState.expanded === proposalId) aiState.proposal = current;
+                    renderIfChanged();
+                    if (current.state === 'rejected') {
+                      flash('提案已拒绝');
+                    } else if (current.state !== 'pending') {
+                      flash('提案状态已更新：' + current.state);
+                    } else {
+                      flash('拒绝失败：' + message);
+                    }
+                  })
+                  .catch(function (statusError) {
+                    flash('拒绝失败：' + message + '；无法确认最新状态：'
+                      + String((statusError && statusError.message) || statusError));
+                  });
+              })
               .then(function () {
                 delete aiState.rejectingProposals[proposalId];
                 renderIfChanged();
@@ -1783,6 +1884,9 @@
     var CS = stage_api();
     var cur = CS.preset();
     var rt = CS.runtime();
+    var legacyCues = Array.isArray(cur.legacyCues) ? cur.legacyCues : [];
+    var staleProject = !!(cur.project && window.CreativeProject
+      && CreativeProject.isStaleContext(cur.project));
 
     renderArrangement(body);
     if (window.CreativePitch) CreativePitch.mount(body);
@@ -1801,6 +1905,22 @@
       trackStatus.setAttribute('role', 'status');
       trackStatus.setAttribute('aria-live', 'polite');
       body.appendChild(trackStatus);
+    }
+
+    if (legacyCues.length) {
+      var archive = h('details', 'sc-note');
+      archive.appendChild(h('summary', null, '旧 cue 档案 · ' + legacyCues.length + ' 条 · 已停用'));
+      archive.appendChild(h('p', null, '只读保留在本机，不参与播放、编辑或导出。可按内容手动重建当前版本 cue。'));
+      var archiveList = h('ul');
+      legacyCues.forEach(function (cue) {
+        var trigger = cue && typeof cue.at === 'number' ? num(cue.at, 1) + ' 秒'
+          : cue && typeof cue.every === 'number' ? '每 ' + cue.every + ' 拍' : '无效触发';
+        var keys = cue && cue.set && typeof cue.set === 'object' && !Array.isArray(cue.set)
+          ? Object.keys(cue.set) : [];
+        archiveList.appendChild(h('li', null, trigger + ' · ' + (keys.length ? keys.join('、') : '无有效目标')));
+      });
+      archive.appendChild(archiveList);
+      body.appendChild(archive);
     }
 
     var addRow = h('div', 'ws-row');
@@ -1824,6 +1944,9 @@
     var valueInput = h('input', 'ws-mini');
     valueInput.type = 'number';
     valueInput.step = '0.05';
+    if (staleProject) {
+      kind.disabled = amount.disabled = len.disabled = target.disabled = valueInput.disabled = true;
+    }
 
     var syncRange = function () {
       var row = findRow(target.value);
@@ -1851,6 +1974,7 @@
     syncRange();
 
     var add = h('button', 'btn primary', '加一条');
+    add.disabled = staleProject;
     add.addEventListener('click', function () {
       var trigger = Number(amount.value), duration = Number(len.value);
       var cue = { len: duration, ease: 'out', set: {} };
@@ -1869,8 +1993,21 @@
     addRow.append(kind, amount, len, target, valueInput, add);
     body.appendChild(addRow);
 
+    if (staleProject) {
+      var freshTrack = h('button', 'btn primary', '新建当前版本编排轨');
+      freshTrack.type = 'button';
+      freshTrack.addEventListener('click', function () {
+        if (!CS.beginNewCueTrack()) return;
+        flash('已新建空编排轨；旧 cue 仍只保留在本机档案');
+        render();
+      });
+      body.appendChild(freshTrack);
+    }
+
     if (!cur.cues.length) {
-      body.appendChild(h('div', 'sc-note', '还没有 cue。没有 cue 的舞台完全由绑定和导演驱动。'));
+      body.appendChild(h('div', 'sc-note', staleProject
+        ? '旧工程 cue 已隔离停用。新建当前版本编排轨后，可从空轨开始添加 cue。'
+        : '还没有 cue。没有 cue 的舞台完全由绑定和导演驱动。'));
       return;
     }
     var list = h('div', 'ws-list');
@@ -2271,7 +2408,7 @@
   function renderShareCode(body, CS) {
     body.appendChild(h('h2', 'sc-group-title', '分享创意预置'));
     body.appendChild(h('p', 'sc-note', '分享名称、场景参数、编排、绑定与背景／手绘设置。'
-      + '不包含沉浸舞台设置、媒体文件、文件地址或账户信息；媒体背景会改为跟随主题。'));
+      + '不包含沉浸舞台设置、媒体文件、文件指纹或账户信息；工程 cue 会保留版本并在确认当前媒体前停用。媒体背景会改为跟随主题。'));
     var label = h('label', 'sc-note', '分享码'); label.htmlFor = 'ws-share-code'; body.appendChild(label);
     var code = h('textarea', 'ws-json'); code.id = 'ws-share-code'; code.spellcheck = false;
     code.placeholder = '粘贴收到的分享码，或生成当前预置的分享码'; code.maxLength = 180000;
@@ -2311,7 +2448,7 @@
       var alive = ticket(); status.textContent = '正在生成分享码…';
       try {
         if (!window.CreativeShareCode) throw new Error('分享码模块尚未就绪，请刷新应用');
-        var encoded = await CreativeShareCode.encode(CS.shareSnapshot(), { compress: !plain.checked });
+        var encoded = await CreativeShareCode.encode(CS.shareSnapshot({ includeProjectContext: true }), { compress: !plain.checked });
         if (!alive()) return;
         code.value = encoded;
         await copyCode(alive);
@@ -2325,7 +2462,14 @@
         var decoded = await CreativeShareCode.decode(code.value);
         if (!alive()) return;
         CS.setPreset(decoded);
-        flash('已载入「' + decoded.name + '」');
+        var needsMediaConfirmation = !!(decoded.project && decoded.cues.some(function (cue) {
+          return Object.prototype.hasOwnProperty.call(cue, 'at') || Object.prototype.hasOwnProperty.call(cue, 'every');
+        }));
+        var message = needsMediaConfirmation
+          ? '已载入「' + decoded.name + '」；工程 cue 已停用，请确认当前媒体后再执行。'
+          : '已载入「' + decoded.name + '」';
+        status.textContent = message;
+        flash(message);
       } catch (e) { if (alive()) status.textContent = e.message || String(e); }
     });
     row.append(generate, load); body.append(row, status);
@@ -2435,11 +2579,15 @@
 
     var ta = h('textarea', 'ws-json');
     ta.spellcheck = false;
-    ta.value = CS.exportJSON();
+    var exportError = '';
+    try { ta.value = CS.exportJSON(); }
+    catch (e) { exportError = e.message || String(e); ta.value = ''; ta.disabled = true; }
     body.appendChild(ta);
+    if (exportError) body.appendChild(h('p','sc-note',exportError));
 
     var row = h('div', 'ws-row');
     var copy = h('button', 'btn', '复制');
+    copy.disabled = !!exportError;
     copy.addEventListener('click', function () {
       ta.select();
       var done = false;
@@ -2459,6 +2607,7 @@
       flash(done ? '已复制' : '复制失败，请手动选中');
     });
     var dl = h('button', 'btn', '下载 .json');
+    dl.disabled = !!exportError;
     dl.addEventListener('click', function () {
       var blob = new Blob([ta.value], { type: 'application/json' });
       var a = document.createElement('a');

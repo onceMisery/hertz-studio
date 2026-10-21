@@ -11,8 +11,91 @@ const { once } = require('node:events');
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+const { startFixture } = require('./ui-browser-fixture');
 const { loadCorpus, stageHarness, assess, summarize, validateRow, loadRun, compareRuns, exportReview, childCase,
   offlineOutcome, main:runEvaluation, driverFingerprint } = require('./evaluate-ai-stage');
+
+async function checkManagedCli(corpus,harness) {
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'hertz-managed-eval-'));
+  const requests=[],errors=[];
+  let mode='candidate';
+  const server=http.createServer(async(req,res)=>{
+    try {
+      assert.equal(req.headers.authorization,'Bearer managed-fixture-token');
+      if(req.method==='GET') {
+        assert.equal(req.url,'/v1/ai/evaluation/status');
+        requests.push('status');
+        res.setHeader('Content-Type','application/json');
+        res.end(JSON.stringify({provider:'fake',model:'fake-intent-v1',providerReady:true,
+          generationConsent:mode!=='no-consent',runnerReady:true}));
+        return;
+      }
+      assert.equal(req.method,'POST');
+      assert.equal(req.url,'/v1/ai/evaluation/case');
+      const chunks=[];for await(const chunk of req)chunks.push(chunk);
+      const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      assert.deepEqual(Object.keys(body).sort(),['brief','caseId']);
+      requests.push(body.caseId);
+      const failed=mode==='provider-error';
+      res.setHeader('Content-Type','application/json');
+      res.end(JSON.stringify({evaluationVersion:1,caseId:body.caseId,provider:'fake',model:'fake-intent-v1',
+        schemaHash:corpus.contract.schemaHash,protocolFingerprint:'a'.repeat(64),requestHash:'b'.repeat(64),
+        elapsedMs:1,kind:failed?'provider_error':'candidate',
+        intent:failed?null:{version:1,scene:'orb',patch:{}},accounting:'not_recorded'}));
+    } catch(error) { errors.push(error);res.statusCode=500;res.end('{}'); }
+  });
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  const origin='http://127.0.0.1:'+server.address().port;
+  const previousToken=process.env.VMUSIC_UI_TOKEN;
+  const previousLog=console.log,previousStderr=process.stderr.write;
+  process.env.VMUSIC_UI_TOKEN='managed-fixture-token';
+  console.log=()=>{};process.stderr.write=()=>true;
+  const run=(dir,limit)=>runEvaluation(['--run-managed','--server',origin,'--round','1',
+    ...(limit===undefined?[]:['--limit',String(limit)]),'--out',dir]);
+  try {
+    const defaultDir=path.join(temp,'default-limit');
+    await run(defaultDir);
+    assert.equal(loadRun(defaultDir,corpus,harness).rows.length,1,
+      'Managed evaluation defaults to one sample unless a larger limit is explicit');
+
+    const completedDir=path.join(temp,'completed');
+    await run(completedDir,2);
+    const completed=loadRun(completedDir,corpus,harness);
+    assert.equal(completed.meta.executionMode,'managed');
+    assert.equal(completed.meta.accounting,'not_recorded');
+    assert.equal(completed.rows.length,2);
+    assert.equal(Object.hasOwn(completed.rows[0],'usage'),false);
+    assert.equal(completed.report.metrics.accounting,'not_recorded');
+    assert.equal(Object.hasOwn(completed.report.metrics,'localPriceMicroUsd'),false);
+    assert.deepEqual(requests.slice(0,5),[
+      'status',corpus.cases[0].id,
+      'status',corpus.cases[0].id,corpus.cases[1].id,
+    ]);
+
+    mode='no-consent';
+    const deniedDir=path.join(temp,'denied');
+    await assert.rejects(()=>run(deniedDir,1),/generation consent/);
+    assert.equal(fs.existsSync(deniedDir),false);
+
+    mode='provider-error';
+    const failedDir=path.join(temp,'provider-error');
+    await assert.rejects(()=>run(failedDir,2),/stopped this round/);
+    const failed=loadRun(failedDir,corpus,harness);
+    assert.equal(failed.meta.status,'interrupted');
+    assert.equal(failed.rows.length,1);
+    assert.equal(failed.rows[0].kind,'provider_error');
+    assert.equal(requests.filter(id=>id===corpus.cases[0].id).length,3,
+      'A provider error is recorded once and never retried within the round');
+    assert.equal(requests.filter(id=>id===corpus.cases[1].id).length,1,
+      'The round stops before sending the next cloud case after a provider error');
+    assert.deepEqual(errors,[]);
+  } finally {
+    console.log=previousLog;process.stderr.write=previousStderr;
+    if(previousToken===undefined)delete process.env.VMUSIC_UI_TOKEN;else process.env.VMUSIC_UI_TOKEN=previousToken;
+    server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
+    fs.rmSync(temp,{recursive:true,force:true});
+  }
+}
 
 async function main() {
   const corpus = loadCorpus();
@@ -179,6 +262,7 @@ async function main() {
     for(const file of ['run.json','results.jsonl','reviews.json']) fs.unlinkSync(path.join(savedDir,file));
     fs.rmdirSync(savedDir);
   }
+  await checkManagedCli(corpus,harness);
   console.log('Stage evaluation offline: frozen coverage, actual baseline defaults, false acceptance/refusal, invalid materialization, sample/review denominators and release gates passed');
 
   if (!process.argv.includes('--live')) return;
@@ -289,7 +373,141 @@ async function main() {
     }
     assert.equal(requests.length,7,'SIGINT interrupts after saving one result and sending the next local POST');
     assert.deepEqual(serverErrors,[]);
-    console.log('Stage evaluation CLI: real adapter, one local POST, stable protocol/request fingerprints, preserved counters, refusal/truncation separation, resumable SIGINT report, forbidden origin and zero DataDir side effects passed');
+    const appFixture = await startFixture({backend:'null'});
+    const priorFixtureDataDir = process.env.VMUSIC_DATA_DIR;
+    const priorUiToken = process.env.VMUSIC_UI_TOKEN;
+    try {
+      process.env.VMUSIC_DATA_DIR = appFixture.dataDir;
+      delete process.env.VMUSIC_UI_TOKEN;
+      const unauthenticated = await fetch(appFixture.base+'/v1/ai/evaluation/status');
+      assert.equal(unauthenticated.status,401,'Managed evaluation status requires the app bearer token');
+      const status = await appFixture.api('/v1/ai/evaluation/status');
+      assert.equal(status.provider,'fake');
+      assert.equal(status.providerReady,true);
+      assert.equal(status.generationConsent,false);
+      await appFixture.api('/v1/settings','PUT',{ai_generation_consent:true});
+      const managedDir = path.join(temp,'managed-driver-run');
+      const managed = await driver('--run-managed','--server',appFixture.base,'--round','1',
+        '--limit','2','--out',managedDir);
+      assert.equal(JSON.parse(managed.stdout).candidateChecks,'failed',
+        'A partial managed run cannot pass its sample gate');
+      const managedRun = loadRun(managedDir,corpus,harness);
+      assert.equal(managedRun.meta.executionMode,'managed');
+      assert.equal(managedRun.meta.provider,'fake');
+      assert.equal(managedRun.rows.length,2);
+      assert.equal(managedRun.report.metrics.accounting,'not_recorded');
+      assert.equal(Object.hasOwn(managedRun.report.metrics,'usageKnown'),false);
+      assert.equal(Object.hasOwn(managedRun.report.metrics,'localPriceMicroUsd'),false);
+      for(const row of managedRun.rows) {
+        assert.equal(row.accounting,'not_recorded');
+        assert.equal(Object.hasOwn(row,'usage'),false);
+        assert.equal(Object.hasOwn(row,'reservationMicroUsd'),false);
+        assert.equal(Object.hasOwn(row,'localPriceMicroUsd'),false);
+      }
+      assert.equal((await appFixture.api('/v1/ai/jobs')).jobs.length,0,
+        'Managed evaluation does not create persistent generation jobs');
+      const deniedDir = path.join(temp,'managed-denied-run');
+      await appFixture.api('/v1/settings','PUT',{ai_generation_consent:false});
+      await assert.rejects(()=>driver('--run-managed','--server',appFixture.base,'--round','1',
+        '--limit','1','--out',deniedDir),/generation consent/);
+      assert.equal(fs.existsSync(deniedDir),false,'A disabled consent gate must make no model call or run record');
+      for(const file of ['run.json','results.jsonl','reviews.json','report.json']) {
+        const filePath=path.join(managedDir,file);
+        if(fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      }
+      fs.rmdirSync(managedDir);
+    } finally {
+      if(priorFixtureDataDir===undefined) delete process.env.VMUSIC_DATA_DIR;
+      else process.env.VMUSIC_DATA_DIR=priorFixtureDataDir;
+      if(priorUiToken===undefined) delete process.env.VMUSIC_UI_TOKEN;
+      else process.env.VMUSIC_UI_TOKEN=priorUiToken;
+      await appFixture.close();
+    }
+    const managedOllamaFixture = await startFixture({backend:'null',prepareData:async dataDir=>{
+      fs.mkdirSync(dataDir,{recursive:true});
+      fs.writeFileSync(path.join(dataDir,'config.toml'),
+        `[ai]\nprovider = "ollama"\norigin = "${origin}"\nmodel = "fixture-local"\n`);
+    }});
+    try {
+      await managedOllamaFixture.api('/v1/settings','PUT',{ai_generation_consent:true});
+      const status = await managedOllamaFixture.api('/v1/ai/evaluation/status');
+      assert.equal(status.provider,'ollama-local');
+      assert.equal(status.providerReady,true);
+      const token = JSON.parse(fs.readFileSync(path.join(managedOllamaFixture.dataDir,'vmusicd.json'),'utf8')).token;
+      const priorOllamaDataDir = process.env.VMUSIC_DATA_DIR;
+      const priorOllamaUiToken = process.env.VMUSIC_UI_TOKEN;
+      try {
+        process.env.VMUSIC_DATA_DIR = managedOllamaFixture.dataDir;
+        delete process.env.VMUSIC_UI_TOKEN;
+        const managedOllamaDir = path.join(temp,'managed-ollama-run');
+        const managedOllama = await driver('--run-managed','--server',managedOllamaFixture.base,
+          '--round','1','--limit','1','--out',managedOllamaDir);
+        assert.equal(JSON.parse(managedOllama.stdout).candidateChecks,'failed',
+          'A single managed Ollama sample cannot pass the full-sample gate');
+        const managedOllamaRun = loadRun(managedOllamaDir,corpus,harness);
+        assert.equal(managedOllamaRun.meta.executionMode,'managed');
+        assert.equal(managedOllamaRun.meta.provider,'ollama-local');
+        assert.equal(managedOllamaRun.meta.binarySha256,null,
+          'Managed mode identifies the configured server provider, not a standalone CLI binary');
+        assert.equal(managedOllamaRun.rows.length,1);
+        assert.equal(managedOllamaRun.rows[0].kind,'candidate');
+        assert.equal(Object.hasOwn(managedOllamaRun.rows[0],'usage'),false);
+        for(const file of ['run.json','results.jsonl','reviews.json','report.json']) {
+          const filePath=path.join(managedOllamaDir,file);
+          if(fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        }
+        fs.rmdirSync(managedOllamaDir);
+      } finally {
+        if(priorOllamaDataDir===undefined) delete process.env.VMUSIC_DATA_DIR;
+        else process.env.VMUSIC_DATA_DIR=priorOllamaDataDir;
+        if(priorOllamaUiToken===undefined) delete process.env.VMUSIC_UI_TOKEN;
+        else process.env.VMUSIC_UI_TOKEN=priorOllamaUiToken;
+      }
+      const requestCount = requests.length;
+      let heldManagedResolve, closedManagedResolve;
+      const heldManaged = new Promise(resolve=>{heldManagedResolve=resolve;});
+      const closedManaged = new Promise(resolve=>{closedManagedResolve=resolve;});
+      nextHold={skip:0,seen:heldManagedResolve,closed:closedManagedResolve};
+      const controller = new AbortController();
+      const pending = fetch(managedOllamaFixture.base+'/v1/ai/evaluation/case',{
+        method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+        body:JSON.stringify({caseId:'dev-common-01',brief:'dark static orb'}),signal:controller.signal,
+      }).then(()=>null,error=>error);
+      try {
+        await Promise.race([heldManaged,new Promise((_,reject)=>setTimeout(()=>reject(
+          Error('Managed request did not reach the local provider fixture')),5000))]);
+        controller.abort();
+        assert.equal((await pending)?.name,'AbortError','Abort the managed HTTP observer');
+        await Promise.race([closedManaged,new Promise((_,reject)=>setTimeout(()=>reject(
+          Error('Managed request cancellation left the local provider connection open')),5000))]);
+        assert.equal(requests.length,requestCount+1,'Disconnect cancellation must not retry the provider POST');
+        let recovered;
+        for(let attempt=0;attempt<20 && !recovered;attempt++) {
+          const response = await fetch(managedOllamaFixture.base+'/v1/ai/evaluation/case',{
+            method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+            body:JSON.stringify({caseId:'dev-common-02',brief:'dark static orb'}),
+          });
+          if(response.status===429) {
+            await response.arrayBuffer();
+            await delay(50);
+            continue;
+          }
+          assert.equal(response.status,200,'The next sample should be admitted after cancellation cleanup');
+          recovered=await response.json();
+        }
+        assert.ok(recovered,'The execution slot should return after the cancelled adapter exits');
+        assert.equal(recovered.kind,'candidate','The execution slot is released after the cancelled adapter exits');
+        assert.equal(requests.length,requestCount+2,'The next sample creates exactly one provider request');
+        assert.equal((await managedOllamaFixture.api('/v1/ai/jobs')).jobs.length,0,
+          'Aborted managed evaluation must not create a persistent job');
+      } finally {
+        controller.abort();
+        nextHold=null;
+      }
+    } finally {
+      await managedOllamaFixture.close();
+    }
+    console.log('Stage evaluation CLI: local Ollama adapter and managed fake-provider route, bearer auth, explicit consent, no persistent jobs or accounting fields, fingerprints, refusal/truncation separation, SIGINT handling and loopback-only origin passed');
   } finally {
     server.closeAllConnections(); await new Promise(resolve=>server.close(resolve));
     if(originalDataDir===undefined) delete process.env.VMUSIC_DATA_DIR; else process.env.VMUSIC_DATA_DIR=originalDataDir;

@@ -5,19 +5,48 @@
 pub(super) struct UiAsset {
     pub path: &'static str,
     pub mime: &'static str,
-    pub body: &'static str,
+    pub body: &'static UiBody,
+}
+
+// Embed one compressed representation. Identity clients inflate at most once
+// per asset, on demand; ordinary browser requests use the build-time gzip bytes.
+pub(super) struct UiBody {
+    pub gzip: &'static [u8],
+    identity: std::sync::OnceLock<String>,
+}
+
+impl UiBody {
+    const fn new(gzip: &'static [u8]) -> Self {
+        Self {
+            gzip,
+            identity: std::sync::OnceLock::new(),
+        }
+    }
+
+    pub fn identity(&self) -> &str {
+        self.identity.get_or_init(|| {
+            use std::io::Read;
+            let mut text = String::new();
+            flate2::read::GzDecoder::new(self.gzip)
+                .read_to_string(&mut text)
+                .expect("build-time gzip contains valid UI text");
+            text
+        })
+    }
 }
 
 const JS: &str = "application/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
 
 macro_rules! ui_assets {
-    ($($(#[$attr:meta])* $path:literal, $mime:ident => const $name:ident: &str = $body:expr;)+) => {
-        $($(#[$attr])* const $name: &str = $body;)+
+    ($($(#[$attr:meta])* $path:literal, $mime:ident => const $name:ident: &str = edition_ui!($file:literal);)+) => {
+        $($(#[$attr])* static $name: UiBody = UiBody::new(include_bytes!(concat!(env!("OUT_DIR"), "/ui/", $file, ".gz")));)+
         pub(super) const UI_ASSETS: &[UiAsset] = &[
-            $($(#[$attr])* UiAsset { path: $path, mime: $mime, body: $name },)+
+            $($(#[$attr])* UiAsset { path: $path, mime: $mime, body: &$name },)+
         ];
-        pub(super) const ASSET_FINGERPRINT_INPUTS: &[&str] = &[$($(#[$attr])* $name,)+];
+        pub(super) const ASSET_FINGERPRINT_INPUTS: &[&[u8]] = &[
+            $($(#[$attr])* include_bytes!(concat!(env!("OUT_DIR"), "/ui/", $file, ".gz")),)+
+        ];
     };
 }
 
@@ -73,6 +102,7 @@ ui_assets! {
     "/stage-focus.js", JS => const STAGE_FOCUS_JS: &str = edition_ui!("stage-focus.js");
     "/stage-lyrics.js", JS => const STAGE_LYRICS_JS: &str = edition_ui!("stage-lyrics.js");
     "/stage-shelf.js", JS => const STAGE_SHELF_JS: &str = edition_ui!("stage-shelf.js");
+    "/vendor/stage-runtime.js", JS => const STAGE_RUNTIME_JS: &str = edition_ui!("vendor/stage-runtime.js");
     "/vendor/coast-stage.js", JS => const COAST_STAGE_JS: &str = edition_ui!("vendor/coast-stage.js");
     "/stage-coast.js", JS => const STAGE_COAST_JS: &str = edition_ui!("stage-coast.js");
     "/vendor/zodiac-stage.js", JS => const ZODIAC_STAGE_JS: &str = edition_ui!("vendor/zodiac-stage.js");

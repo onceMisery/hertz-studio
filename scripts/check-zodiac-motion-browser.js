@@ -49,6 +49,7 @@ async function main() {
         ZodiacStagePure.resize(innerWidth, innerHeight);
       };
     });
+    await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/zodiac-stage.js') });
 
     // Supplied poses must move the rendered Three camera, including its projection

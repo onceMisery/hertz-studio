@@ -1104,9 +1104,7 @@ fn library_search_page(limit: Option<i64>, offset: Option<i64>) -> Result<(i64, 
     let limit = limit.unwrap_or(20);
     let offset = offset.unwrap_or(0);
     if !(1..=50).contains(&limit) || !(0..=10_000).contains(&offset) {
-        return Err(bad_request(
-            "limit 必须为 1-50，offset 必须为 0-10000",
-        ));
+        return Err(bad_request("limit 必须为 1-50，offset 必须为 0-10000"));
     }
     Ok((limit, offset))
 }
@@ -1123,7 +1121,10 @@ mod tests {
     fn library_search_page_matches_advertised_bounds() {
         assert_eq!(library_search_page(None, None).unwrap(), (20, 0));
         assert_eq!(library_search_page(Some(1), Some(0)).unwrap(), (1, 0));
-        assert_eq!(library_search_page(Some(50), Some(10_000)).unwrap(), (50, 10_000));
+        assert_eq!(
+            library_search_page(Some(50), Some(10_000)).unwrap(),
+            (50, 10_000)
+        );
 
         for (limit, offset) in [
             (Some(0), Some(0)),
@@ -1263,12 +1264,10 @@ mod tests {
         assert!(ensure_allowed_projection(search_capability, &leaked).is_err());
 
         assert_eq!(CAPABILITIES.len(), 10);
-        assert!(
-            CAPABILITIES
-                .iter()
-                .all(|capability| capability.output_schema.value().is_object()
-                    && !capability.allowed_projection.is_empty()
-                    && capability.version == super::CAPABILITY_VERSION)
-        );
+        assert!(CAPABILITIES
+            .iter()
+            .all(|capability| capability.output_schema.value().is_object()
+                && !capability.allowed_projection.is_empty()
+                && capability.version == super::CAPABILITY_VERSION));
     }
 }

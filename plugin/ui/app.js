@@ -1025,6 +1025,303 @@ window.VMusicTransport = {
   kind: () => transport.kind
 };
 
+// AI grant management is available only through the standalone service. Grant
+// summaries are projected onto this allowlist before they enter the view model.
+window.AiGrantSettings = (function () {
+  'use strict';
+
+  const scopeNames = {
+    'playback:read': '读取播放状态',
+    'playback:pause': '暂停',
+    'playback:resume': '继续播放',
+    'playback:previous': '上一首',
+    'playback:next': '下一首',
+    'playback:seek': '定位',
+    'playback:volume_set': '设置音量',
+    'library:read': '检索曲库',
+    'stage:capabilities_read': '读取舞台契约',
+    'stage:intent_validate': '校验舞台草稿',
+  };
+  const controlScopes = [
+    'playback:pause', 'playback:resume', 'playback:previous',
+    'playback:next', 'playback:seek', 'playback:volume_set',
+  ];
+  const presets = {
+    snapshot: ['playback:read'],
+    library: ['library:read'],
+    read: ['playback:read', 'library:read'],
+    control: ['playback:read'].concat(controlScopes),
+  };
+
+  let refs = null;
+  let settings = null;
+  let grants = [];
+  let busy = false;
+  let bound = false;
+
+  function node(id) { return document.getElementById(id); }
+
+  function projectGrant(row) {
+    if (!row || typeof row !== 'object') return null;
+    const grantId = typeof row.grant_id === 'string' ? row.grant_id : '';
+    if (!grantId) return null;
+    return {
+      grant_id: grantId,
+      label: typeof row.label === 'string' ? row.label : '',
+      scopes: Array.isArray(row.scopes) ? row.scopes.filter((scope) => typeof scope === 'string') : [],
+      revoked: row.revoked === true,
+      created_at: Number.isFinite(row.created_at) ? row.created_at : null,
+      updated_at: Number.isFinite(row.updated_at) ? row.updated_at : null,
+      credential_path: typeof row.credential_path === 'string' ? row.credential_path : '',
+    };
+  }
+
+  function dataDirFromCredentialPath(path) {
+    if (typeof path !== 'string') return '';
+    const normalized = path.replace(/\\/g, '/');
+    const marker = normalized.toLowerCase().lastIndexOf('/ai/grants/');
+    if (marker < 0) return '';
+    const file = normalized.slice(marker + '/ai/grants/'.length);
+    if (!file || file.includes('/') || !file.toLowerCase().endsWith('.key')) return '';
+    const prefix = path.slice(0, marker);
+    return prefix || (path.charAt(0) === '/' || path.charAt(0) === '\\' ? path.charAt(0) : '');
+  }
+
+  function scopesFromForm() {
+    return Array.from(refs.scopeInputs)
+      .filter((input) => input.checked)
+      .map((input) => input.dataset.aiScope);
+  }
+
+  function setScopes(scopes) {
+    const selected = new Set(scopes);
+    Array.from(refs.scopeInputs).forEach((input) => { input.checked = selected.has(input.dataset.aiScope); });
+  }
+
+  function setStatus(message, kind) {
+    refs.status.textContent = message || '';
+    if (kind) refs.status.dataset.kind = kind;
+    else delete refs.status.dataset.kind;
+  }
+
+  function formatDate(value) {
+    return Number.isFinite(value) ? new Date(value * 1000).toLocaleString() : '—';
+  }
+
+  function appendText(parent, tag, className, text) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    element.textContent = text;
+    parent.appendChild(element);
+    return element;
+  }
+
+  function makeButton(label, className, handler, disabled) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = className || 'btn';
+    button.textContent = label;
+    button.disabled = !!disabled || busy;
+    button.addEventListener('click', handler);
+    return button;
+  }
+
+  function configFor(grant) {
+    const dataDir = dataDirFromCredentialPath(grant.credential_path);
+    const command = refs.command.value.trim();
+    if (!dataDir || !command || grant.revoked) return null;
+    return {
+      mcpServers: {
+        'hertz-studio': {
+          command,
+          args: ['--mcp-stdio', '--data-dir', dataDir, '--grant', grant.grant_id],
+        },
+      },
+    };
+  }
+
+  async function copyText(value, success) {
+    try {
+      await settings.copy(value);
+      setStatus(success, 'success');
+    } catch (error) {
+      setStatus('复制失败：' + (error && error.message ? error.message : '剪贴板不可用'), 'error');
+    }
+  }
+
+  function action(run) {
+    return async function () {
+      if (busy) return;
+      busy = true;
+      render();
+      try {
+        await run();
+      } catch (error) {
+        setStatus(error && error.message ? error.message : '操作失败', 'error');
+      } finally {
+        busy = false;
+        render();
+      }
+    };
+  }
+
+  function upsertGrant(grant) {
+    if (!grant) return;
+    const index = grants.findIndex((item) => item.grant_id === grant.grant_id);
+    if (index < 0) grants.unshift(grant);
+    else grants[index] = grant;
+    render();
+  }
+
+  async function refreshAfterMutation(message) {
+    try {
+      await loadGrants();
+      setStatus(message, 'success');
+    } catch (error) {
+      setStatus(message + '；列表刷新失败，已保留本次操作结果。' + (error && error.message ? ' ' + error.message : ''), 'error');
+    }
+  }
+
+  async function loadGrants() {
+    const response = await settings.transport.get('/v1/ai/grants');
+    if (!response || !Array.isArray(response.grants)) throw new Error('授权列表应答格式无效');
+    grants = response.grants.map(projectGrant).filter(Boolean);
+    render();
+  }
+
+  function renderGrant(grant) {
+    const item = document.createElement('article');
+    item.className = 'ai-grant-item';
+
+    const head = document.createElement('div');
+    head.className = 'ai-grant-item-head';
+    item.appendChild(head);
+    appendText(head, 'strong', 'ai-grant-name', grant.label || '未命名授权');
+    const state = appendText(head, 'span', 'ai-grant-state' + (grant.revoked ? ' is-revoked' : ''), grant.revoked ? '已撤销' : '有效');
+    state.setAttribute('aria-label', grant.revoked ? '授权已撤销' : '授权有效');
+    appendText(item, 'p', 'hint ai-grant-scopes', '权限：' + (grant.scopes.length
+      ? grant.scopes.map((scope) => scopeNames[scope] || scope).join('、')
+      : '无'));
+    appendText(item, 'p', 'hint ai-grant-scopes', '创建于 ' + formatDate(grant.created_at) + ' · 更新于 ' + formatDate(grant.updated_at));
+
+    const config = configFor(grant);
+    if (!grant.revoked && config) {
+      const configText = JSON.stringify(config, null, 2);
+      appendText(item, 'pre', 'ai-grant-config', configText);
+      const actions = document.createElement('div');
+      actions.className = 'set-actions ai-grant-actions';
+      item.appendChild(actions);
+      actions.appendChild(makeButton('复制 MCP 配置', 'btn', () => copyText(configText, 'MCP 配置已复制；其中不含凭据秘密。')));
+      actions.appendChild(makeButton('轮换凭据', 'btn', action(async () => {
+        const confirmed = await settings.confirm('轮换「' + (grant.label || '未命名授权') + '」的凭据？旧凭据会立即失效，已连接的 MCP 客户端需要重启。');
+        if (!confirmed) return;
+        const result = await settings.transport.post('/v1/ai/grants/' + encodeURIComponent(grant.grant_id) + '/rotate', {});
+        const rotated = projectGrant(result);
+        if (rotated) { rotated.revoked = false; upsertGrant(rotated); }
+        await refreshAfterMutation('凭据已轮换；请重启使用此授权的 MCP 客户端。');
+      })));
+      actions.appendChild(makeButton('撤销授权', 'btn danger', action(async () => {
+        const confirmed = await settings.confirm('撤销「' + (grant.label || '未命名授权') + '」？其凭据将被删除，所有使用者都会立即失去权限。');
+        if (!confirmed) return;
+        const result = await settings.transport.del('/v1/ai/grants/' + encodeURIComponent(grant.grant_id));
+        const revoked = projectGrant(result) || Object.assign({}, grant);
+        revoked.revoked = true;
+        revoked.credential_path = '';
+        upsertGrant(revoked);
+        await refreshAfterMutation('授权已撤销。');
+      })));
+    } else if (!grant.revoked) {
+      appendText(item, 'p', 'hint set-note', '无法从服务端安全摘要推导 DataDir，不能生成连接配置。');
+    }
+    refs.list.appendChild(item);
+  }
+
+  function render() {
+    if (!refs) return;
+    refs.create.disabled = busy;
+    refs.refresh.disabled = busy;
+    refs.label.disabled = busy;
+    refs.preset.disabled = busy;
+    refs.command.disabled = busy;
+    Array.from(refs.scopeInputs).forEach((input) => { input.disabled = busy; });
+    refs.root.setAttribute('aria-busy', busy ? 'true' : 'false');
+    refs.list.replaceChildren();
+    if (!grants.length) {
+      appendText(refs.list, 'p', 'hint ai-grant-empty', '尚无外部授权。');
+      return;
+    }
+    grants.forEach(renderGrant);
+  }
+
+  function bind() {
+    if (bound) return;
+    bound = true;
+    refs.preset.addEventListener('change', () => {
+      if (presets[refs.preset.value]) setScopes(presets[refs.preset.value]);
+    });
+    Array.from(refs.scopeInputs).forEach((input) => {
+      input.addEventListener('change', () => { refs.preset.value = 'custom'; });
+    });
+    refs.command.addEventListener('input', render);
+    refs.refresh.addEventListener('click', action(async () => {
+      await loadGrants();
+      setStatus('授权列表已刷新。', 'success');
+    }));
+    refs.create.addEventListener('click', action(async () => {
+      const scopes = scopesFromForm();
+      if (!scopes.length) throw new Error('至少选择一个权限范围');
+      const result = await settings.transport.post('/v1/ai/grants', {
+        label: refs.label.value.trim(),
+        scopes,
+      });
+      const created = projectGrant(result);
+      if (created) upsertGrant(created);
+      refs.label.value = '';
+      await refreshAfterMutation('授权已创建；复制对应 MCP 配置后可在客户端添加连接。');
+    }));
+  }
+
+  function init(options) {
+    const manager = node('ai-grant-manager');
+    const unavailable = node('ai-grant-unavailable');
+    if (!manager || !unavailable) return;
+    settings = options || {};
+    const transport = settings.transport;
+    const kind = transport && (typeof transport.kind === 'function' ? transport.kind() : transport.kind);
+    if (settings.isDbx || kind === 'dbx') {
+      manager.hidden = true;
+      unavailable.hidden = false;
+      unavailable.textContent = 'DBX 插件形态不支持外部 MCP stdio 管理。';
+      return;
+    }
+    if (kind !== 'server') {
+      manager.hidden = true;
+      unavailable.hidden = false;
+      unavailable.textContent = '当前未连接独立服务，连接服务后才能管理授权。';
+      return;
+    }
+    refs = {
+      root: node('ai-grant-settings'),
+      label: node('ai-grant-label'),
+      preset: node('ai-grant-preset'),
+      scopeInputs: node('ai-grant-scope-groups').querySelectorAll('input[data-ai-scope]'),
+      create: node('ai-grant-create'),
+      refresh: node('ai-grant-refresh'),
+      command: node('ai-grant-command'),
+      status: node('ai-grant-status'),
+      list: node('ai-grant-list'),
+    };
+    manager.hidden = false;
+    unavailable.hidden = true;
+    if (presets[refs.preset.value]) setScopes(presets[refs.preset.value]);
+    bind();
+    render();
+    loadGrants().catch((error) => setStatus('读取授权列表失败：' + (error && error.message ? error.message : '未知错误'), 'error'));
+  }
+
+  return { init };
+})();
+
 async function chooseTransport() {
   // DBX 插件沙箱里 CSP 是 connect-src 'none'，下面的健康探测必然失败，
   // 而且失败后会误落到演示模式，所以直接短路。
@@ -1282,6 +1579,27 @@ function digestMs(ms) {
 let libraryEpoch = 0;
 let libraryRefreshPending = false;
 let libraryRefreshSequence = 0;
+const LIBRARY_META_SPARE_CAP = 1024;
+
+// A completed query is a safe point to retire metadata from previous searches.
+// Active lists/queues/selections remain authoritative even above the spare cap.
+function pruneLibraryMetadata() {
+  if (state.byId.size <= LIBRARY_META_SPARE_CAP) return;
+  const keep = new Set(state.queue || []);
+  for (const t of state.tracks) keep.add(t.id);
+  for (const t of detailTracks) keep.add(t.id);
+  for (const id of state.selected) keep.add(id);
+  if (state.current) keep.add(state.current.id);
+  if (state.snapshot) keep.add(state.snapshot.track_id);
+  if (state.loadingTrack) keep.add(state.loadingTrack);
+  let spare = 0;
+  for (const id of state.byId.keys()) if (!keep.has(id)) spare += 1;
+  if (spare <= LIBRARY_META_SPARE_CAP) return;
+  for (const id of state.byId.keys()) {
+    if (!keep.has(id)) { state.byId.delete(id); spare -= 1; }
+    if (spare <= LIBRARY_META_SPARE_CAP) break;
+  }
+}
 
 /// 就地刷新已加载的那一窗曲库（扫描完成 / WebDAV 导入 / 批量落地之后的
 /// `library_changed`）。
@@ -1308,6 +1626,7 @@ async function refreshLibraryInPlace() {
     state.tracks = page.tracks;
     state.offset = state.tracks.length;
     for (const t of page.tracks) state.byId.set(t.id, t);
+    pruneLibraryMetadata();
     renderLibrary();
   } catch {
     // 刷新失败就保留现有列表：这只是后台变化，没必要用 toast 打断用户。
@@ -1337,6 +1656,7 @@ async function loadTracks(reset) {
     state.tracks = state.tracks.concat(page.tracks);
     state.offset = state.tracks.length;
     for (const t of page.tracks) state.byId.set(t.id, t);
+    pruneLibraryMetadata();
     renderLibrary();
   } catch (err) {
     if (epoch !== libraryEpoch) return;
@@ -1801,14 +2121,29 @@ function staleCommand(snap) {
 let documentTitleCache = '';
 let progressLabelCache = '';
 let capsuleMediaKey = '';
+let snapshotHomeKey = '';
+let mediaSessionStateKey = '';
+
+function syncSnapshotHome() {
+  if (typeof HomeDashboard === 'undefined') return;
+  const home = homeSnapshot();
+  const track = home.current;
+  const key = JSON.stringify([home.playing, home.queueLength, home.intent, home.pending,
+    home.dailyVisible, home.recentVisible,
+    track && [track.id, track.title, track.artist, track.cover, track.has_cover]]);
+  if (key === snapshotHomeKey) return;
+  snapshotHomeKey = key;
+  HomeDashboard.update();
+}
 
 function syncBufferingIndicator(active, pct) {
   const loading = !!active;
   const button = window.HertzCapsuleOnly ? ui.capsulePlay : ui.playpause;
-  button.classList.toggle('is-loading', loading);
-  button.title = loading
+  if (button.classList.contains('is-loading') !== loading) button.classList.toggle('is-loading', loading);
+  const title = loading
     ? (pct != null ? `缓冲中 ${pct}%` : '缓冲中…')
     : '';
+  if (button.title !== title) button.title = title;
 }
 
 function applySnapshot(snap) {
@@ -1837,12 +2172,15 @@ function applySnapshot(snap) {
     if (mediaKey !== capsuleMediaKey) { capsuleMediaKey = mediaKey; syncMediaSession(); }
     return;
   }
-  if (typeof HomeDashboard !== 'undefined') HomeDashboard.update();
-  ui.playpause.classList.toggle('is-playing', snap.playing);
-  ui.playpause.setAttribute('aria-label', snap.playing ? '暂停' : '播放');
+  syncSnapshotHome();
+  if (ui.playpause.classList.contains('is-playing') !== !!snap.playing) ui.playpause.classList.toggle('is-playing', !!snap.playing);
+  const playLabel = snap.playing ? '暂停' : '播放';
+  if (ui.playpause.getAttribute('aria-label') !== playLabel) ui.playpause.setAttribute('aria-label', playLabel);
   // 胶囊上的小标签跟着播放态走：停着的时候还写「正在播放」是撒谎。
-  ui.capsuleLabel.textContent = snap.playing ? '正在播放' : '已暂停';
-  ui.mode.textContent = state.modeLabel[snap.mode] || snap.mode;
+  const capsuleLabel = snap.playing ? '正在播放' : '已暂停';
+  if (ui.capsuleLabel.textContent !== capsuleLabel) ui.capsuleLabel.textContent = capsuleLabel;
+  const modeLabel = state.modeLabel[snap.mode] || snap.mode;
+  if (ui.mode.textContent !== modeLabel) ui.mode.textContent = modeLabel;
   // 标题只在真的变了才写：这行原先每帧赋一次值，而曲名一整个播放周期都不变。
   const nextTitle = state.current ? `${state.current.title} · hertz-studio` : 'hertz-studio';
   if (nextTitle !== documentTitleCache) {
@@ -2853,8 +3191,9 @@ function syncStageIdle() {
   if (state.snapshot.playing) state.stopped = false;
   // 默认开启：设置表里没有这项（老用户、首次运行）时按「开」处理。
   const hide = state.settings.stage_idle_hide !== false && stageIdle();
-  if (hide) document.body.dataset.stageIdle = '1';
-  else delete document.body.dataset.stageIdle;
+  if (hide) {
+    if (document.body.dataset.stageIdle !== '1') document.body.dataset.stageIdle = '1';
+  } else if (document.body.dataset.stageIdle !== undefined) delete document.body.dataset.stageIdle;
 }
 
 // 持久化约定：persist 只在用户真的动了一下开关时为 true，
@@ -5129,19 +5468,25 @@ function initSpaceHome(playbackHost) {
     },
     playNext: () => post('/v1/player/next'),
     beginSearch: () => HertzSearch.create(transport),
+    whenSearchReady: () => window.Online && Online.whenSearchReady ? Online.whenSearchReady() : Promise.resolve(),
     library: async ({ q = '', offset = 0, source = 'local', onResults, network }) => {
       if (source === 'online') return { items: [], note: '选择音源并搜索在线音乐' };
       if (!q && source !== 'local') return { items: [], note: '输入歌曲或歌手，搜索当前音源' };
+      if (source === 'all' && window.Online && Online.whenSearchReady) await Online.whenSearchReady();
       const reader = network || transport;
       if (!q && source === 'local') {
         const page = await reader.get('/v1/tracks?' + new URLSearchParams({ q, sort:'title', limit:60, offset }));
         return { items:remember(page.tracks || []), total:page.total || 0 };
       }
-      const sources = source === 'all' ? [{id:'local'}].concat(window.Online ? Online.searchSources().map(id => ({id})) : []) : [{id:source}];
+      const onlineSources = source === 'all' && window.Online ? Online.searchSources() : [];
+      const sources = source === 'all' ? [{id:'local'}].concat(onlineSources.map(id => ({id}))) : [{id:source}];
+      const note = source === 'all' && window.Online && !onlineSources.length ? '当前没有可用在线音源，以下仅显示本地结果' : '';
       const pages = sources.map(provider => ({source:provider.id,items:[],offset,more:true,loading:false,error:null}));
       const aggregate = () => {
         const items = pages.flatMap(page => page.items);
-        return {items,total:items.length,nextOffset:items.length,loading:pages.some(page => page.loading),
+        const total = pages.reduce((sum,page) => sum + (page.total == null ? page.items.length : page.total),0);
+        return {items,total,nextOffset:items.length,loading:pages.some(page => page.loading),
+          note,
           sourceStates:pages.map(page => ({source:page.source,loading:page.loading,error:page.error,more:page.more,
             count:page.items.length,retry:() => load(page),next:() => load(page)}))};
       };
@@ -5159,6 +5504,7 @@ function initSpaceHome(playbackHost) {
           const seen = new Set(page.items.map(item => item.id));
           const before = page.items.length;
           incoming.forEach(item => { if (!seen.has(item.id)) { seen.add(item.id); page.items.push(item); } });
+          page.total = Number.isSafeInteger(result.total) && result.total >= 0 ? result.total : page.offset + raw.length;
           const cursor = result.pagination && result.pagination.next_offset >= page.offset ? result.pagination : null;
           const next = cursor && Number.isSafeInteger(cursor.next_offset) ? cursor.next_offset : page.offset + raw.length;
           page.more = next > page.offset && (cursor ? !!cursor.has_more : page.items.length > before && (result.total != null ? next < result.total : raw.length >= 20));
@@ -5597,19 +5943,24 @@ function updateMediaSessionMetadata(track, artUrl) {
 
 function syncMediaSession() {
   if (!('mediaSession' in navigator)) return;
+  const duration = playbackDuration(state.snapshot);
+  const playbackState = !state.snapshot.track_id || state.stopped
+    ? 'none' : state.snapshot.playing ? 'playing' : 'paused';
+  const position = Math.max(0, Math.min(duration, state.snapshot.position_ms || 0));
+  const key = JSON.stringify([state.snapshot.track_id, playbackState, duration, position]);
+  if (key === mediaSessionStateKey) return;
   try {
-    navigator.mediaSession.playbackState = !state.snapshot.track_id || state.stopped
-      ? 'none' : state.snapshot.playing ? 'playing' : 'paused';
-    const duration = playbackDuration(state.snapshot);
+    navigator.mediaSession.playbackState = playbackState;
     if (duration > 0 && !state.stopped) {
       navigator.mediaSession.setPositionState({
         duration: duration / 1000,
         playbackRate: 1,
-        position: Math.max(0, Math.min(duration, state.snapshot.position_ms || 0)) / 1000,
+        position: position / 1000,
       });
     } else {
       navigator.mediaSession.setPositionState();
     }
+    mediaSessionStateKey = key;
   } catch { /* positionState 在部分内核上不可用 */ }
 }
 
@@ -5674,8 +6025,8 @@ function syncVolume(volume) {
   if (value > 0) unmutedVolume = value;
   [ui.volume, np.volume].forEach((range) => {
     if (!range) return;
-    range.value = String(value);
-    range.setAttribute('aria-valuetext', `${value}%`);
+    if (range.value !== String(value)) range.value = String(value);
+    if (range.getAttribute('aria-valuetext') !== `${value}%`) range.setAttribute('aria-valuetext', `${value}%`);
   });
 }
 
@@ -5728,6 +6079,7 @@ const PROGRESS_PAINT_MS = 100;
 let progressPaintedAt = 0;
 let progressTrackCache = null;
 let progressDurationCache = -1;
+let progressPositionCache = -1;
 
 function renderPlaybackProgress(snap, preview) {
   const duration = playbackDuration(snap);
@@ -5737,7 +6089,9 @@ function renderPlaybackProgress(snap, preview) {
   const now = performance.now();
   const forced = interactive
     || snap.track_id !== progressTrackCache
-    || duration !== progressDurationCache;
+    || duration !== progressDurationCache
+    || (!snap.playing && position !== progressPositionCache);
+  if (!forced && !snap.playing && position === progressPositionCache) return;
   if (!forced && now - progressPaintedAt < PROGRESS_PAINT_MS) return;
   progressPaintedAt = now;
   progressTrackCache = snap.track_id || null;
@@ -5750,6 +6104,7 @@ function renderPlaybackProgress(snap, preview) {
     range.setAttribute('aria-valuetext', `${fmt(position)} / ${fmt(duration)}`);
   });
   if (state.seeking && preview == null) return;
+  progressPositionCache = position;
   const label = `${fmt(position)} / ${fmt(duration)}`;
   if (window.NowPlaying) NowPlaying.preview(position, duration);
   if (label !== progressLabelCache) {
@@ -6976,6 +7331,10 @@ function post(path) { return transport.post(path, {}).catch((err) => toast(errTe
 
 function initCreative() {
   if (window.CreativeStage) CreativeStage.init();
+  if (window.CreativeProject && CreativeProject.recoveryNotice) {
+    const notice = CreativeProject.recoveryNotice();
+    if (notice) toast(notice, 'error');
+  }
   if (window.StageCinema) StageCinema.init();
   if (window.StageFreecam) StageFreecam.init();
   if (window.StageFocus) StageFocus.init();
@@ -7062,6 +7421,7 @@ function openNowPlaying() {
   np.scrim.hidden = false;
   np.modal.hidden = false;
   if (window.NowPlaying) NowPlaying.open();
+  if (Stage) Stage.kick();
   // 弹窗内音量与底部播放栏保持一致
   np.volume.value = ui.volume.value;
   syncNpSnapshot(state.snapshot);
@@ -7084,8 +7444,9 @@ function closeNowPlaying(options) {
 function syncNpSnapshot(snap) {
   if (lyricImporter) lyricImporter.sync();
   if (!isNpOpen()) return;
-  np.play.classList.toggle('is-playing', snap.playing);
-  np.play.setAttribute('aria-label', snap.playing ? '暂停' : '播放');
+  if (np.play.classList.contains('is-playing') !== !!snap.playing) np.play.classList.toggle('is-playing', !!snap.playing);
+  const label = snap.playing ? '暂停' : '播放';
+  if (np.play.getAttribute('aria-label') !== label) np.play.setAttribute('aria-label', label);
   renderPlaybackProgress(snap);
   if (window.NowPlaying) NowPlaying.update();
 }
@@ -7656,6 +8017,14 @@ async function startApp() {
   if (transport.kind === 'demo') {
     ui.demoBadge.hidden = false;
     toast('未连接本地服务，已进入演示模式', 'info');
+  }
+  if (window.AiGrantSettings) {
+    window.AiGrantSettings.init({
+      transport: window.VMusicTransport,
+      isDbx: !!(window.hertzHost && window.hertzHost.isDbx),
+      confirm: (message) => modal().confirm(message),
+      copy: (text) => window.HertzClipboard.write(text),
+    });
   }
 
   ui.playpause.onclick = togglePlay;

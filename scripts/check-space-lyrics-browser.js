@@ -23,6 +23,7 @@ const output = path.join(root, 'output/playwright/space-lyrics');
       return route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(file, 'utf8') });
     });
     await page.goto('https://space-stage.test/');
+    await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/space-stage.js') });
     await page.evaluate(async () => {
       const { createSpatialLyrics } = await import('/scenes/text.js');

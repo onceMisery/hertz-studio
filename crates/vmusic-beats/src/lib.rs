@@ -110,27 +110,31 @@ pub fn analyze_path(path: &Path) -> Result<BeatMap, AnalyzeError> {
         .make(&params, &DecoderOptions::default())
         .map_err(|e| AnalyzeError::Failed(e.to_string()))?;
 
-    let mut sr: u32 = 0;
     let mut channels: usize = 1;
-    let mut mono: Vec<f32> = Vec::new();
-    let mut capped = false;
+    let mut pcm: Option<DecodedPcm> = None;
+    let mut sample_buffer: Option<SampleBuffer<f32>> = None;
     loop {
         match probed.format.next_packet() {
             Ok(packet) => match decoder.decode(&packet) {
                 Ok(decoded) => {
                     let spec = *decoded.spec();
-                    if sr == 0 {
-                        sr = spec.rate;
+                    if pcm.is_none() {
+                        if spec.rate == 0 {
+                            return Err(AnalyzeError::Failed("zero sample rate".into()));
+                        }
+                        pcm = Some(DecodedPcm::new(spec.rate, header_ms));
                         channels = spec.channels.count().max(1);
                     }
+                    let pcm = pcm.as_mut().unwrap();
                     let frames = decoded.frames();
-                    let max_in = (ANALYZE_MS as usize * sr as usize) / 1000;
-                    let wanted = if mono.len() >= max_in {
-                        0
-                    } else {
-                        (max_in - mono.len()).min(frames)
-                    };
-                    let mut sb = SampleBuffer::<f32>::new(frames as u64, spec);
+                    let wanted = pcm.remaining().min(frames);
+                    if sample_buffer
+                        .as_ref()
+                        .is_none_or(|buffer| buffer.capacity() < frames * spec.channels.count())
+                    {
+                        sample_buffer = Some(SampleBuffer::new(decoded.capacity() as u64, spec));
+                    }
+                    let sb = sample_buffer.as_mut().unwrap();
                     sb.copy_interleaved_ref(decoded);
                     let samples = sb.samples();
                     for f in 0..wanted {
@@ -140,10 +144,15 @@ pub fn analyze_path(path: &Path) -> Result<BeatMap, AnalyzeError> {
                             let s = samples[base + c];
                             acc += if s.is_finite() { s } else { 0.0 };
                         }
-                        mono.push(acc / channels as f32);
+                        let sample = acc / channels as f32;
+                        // Finite channels can still overflow their f32 sum.
+                        // The former analyze_mono entry point rejected this.
+                        if !sample.is_finite() {
+                            return Err(AnalyzeError::Failed("non-finite pcm".into()));
+                        }
+                        pcm.push(sample);
                     }
-                    if mono.len() >= max_in {
-                        capped = true;
+                    if pcm.remaining() == 0 {
                         break;
                     }
                 }
@@ -157,12 +166,135 @@ pub fn analyze_path(path: &Path) -> Result<BeatMap, AnalyzeError> {
             Err(_) => break,
         }
     }
-    if sr == 0 || mono.is_empty() {
+    let Some(pcm) = pcm.filter(|pcm| pcm.input_count > 0) else {
         return Err(AnalyzeError::Failed("decoded no audio samples".into()));
+    };
+    let (pcm, out_rate, duration_ms) = pcm.finish();
+    analyze_resampled(&pcm, out_rate, duration_ms)
+}
+
+/// Decode-time rate selection. With no duration header, retain both analysis
+/// rates until 480s; the high-rate candidate can then be discarded. Source-rate
+/// PCM is never accumulated, even for high-resolution files.
+struct DecodedPcm {
+    in_rate: u32,
+    header_ms: Option<u64>,
+    input_count: usize,
+    high: Option<StreamingLinear>,
+    low: Option<StreamingLinear>,
+}
+
+impl DecodedPcm {
+    fn new(in_rate: u32, header_ms: Option<u64>) -> Self {
+        Self {
+            in_rate,
+            header_ms,
+            input_count: 0,
+            high: header_ms
+                .is_none_or(|ms| ms < LONG_MS)
+                .then(|| StreamingLinear::new(in_rate, HIGH_RATE)),
+            low: header_ms
+                .is_none_or(|ms| ms >= LONG_MS)
+                .then(|| StreamingLinear::new(in_rate, LOW_RATE)),
+        }
     }
-    let decoded_ms = (mono.len() as u64 * 1000) / sr as u64;
-    let duration_ms = header_ms.unwrap_or(if capped { ANALYZE_MS + 1 } else { decoded_ms });
-    analyze_mono(&mono, sr, duration_ms)
+
+    fn remaining(&self) -> usize {
+        (ANALYZE_MS as usize * self.in_rate as usize / 1000).saturating_sub(self.input_count)
+    }
+
+    fn push(&mut self, sample: f32) {
+        debug_assert!(self.remaining() > 0);
+        self.input_count += 1;
+        if let Some(high) = &mut self.high {
+            high.push(sample);
+        }
+        if let Some(low) = &mut self.low {
+            low.push(sample);
+        }
+        if self.header_ms.is_none()
+            && self.input_count as u64 * 1000 >= LONG_MS * self.in_rate as u64
+        {
+            self.high = None;
+        }
+    }
+
+    fn finish(self) -> (Vec<f32>, u32, u64) {
+        let decoded_ms = self.input_count as u64 * 1000 / self.in_rate as u64;
+        let duration = self.header_ms.unwrap_or(if self.remaining() == 0 {
+            ANALYZE_MS + 1
+        } else {
+            decoded_ms
+        });
+        if duration >= LONG_MS {
+            (self.low.unwrap().finish(), LOW_RATE, duration)
+        } else {
+            (self.high.unwrap().finish(), HIGH_RATE, duration)
+        }
+    }
+}
+
+/// The exact batch interpolation formula, evaluated on its original global
+/// output index. Only the preceding source sample survives each push. EOF
+/// supplies the same last-sample clamp and floor output length as the batch path.
+struct StreamingLinear {
+    in_rate: u32,
+    out_rate: u32,
+    input_count: usize,
+    last: f32,
+    next_i0: usize,
+    next_frac: f64,
+    output: Vec<f32>,
+}
+
+impl StreamingLinear {
+    fn new(in_rate: u32, out_rate: u32) -> Self {
+        Self {
+            in_rate,
+            out_rate,
+            input_count: 0,
+            last: 0.0,
+            next_i0: 0,
+            next_frac: 0.0,
+            output: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, sample: f32) {
+        let index = self.input_count;
+        self.input_count += 1;
+        if self.in_rate == self.out_rate {
+            self.output.push(sample);
+        } else {
+            loop {
+                if self.next_i0 + 1 > index {
+                    break;
+                }
+                debug_assert_eq!(self.next_i0 + 1, index);
+                let frac = self.next_frac;
+                self.output
+                    .push((self.last as f64 * (1.0 - frac) + sample as f64 * frac) as f32);
+                let pos = self.output.len() as f64 * self.in_rate as f64 / self.out_rate as f64;
+                self.next_i0 = pos.floor() as usize;
+                self.next_frac = pos - self.next_i0 as f64;
+            }
+        }
+        self.last = sample;
+    }
+
+    fn finish(mut self) -> Vec<f32> {
+        let count = (self.input_count as u64 * self.out_rate as u64 / self.in_rate as u64) as usize;
+        // A downsampled prefix may speculatively contain a sample before its
+        // floor output length catches up. Trim it if EOF arrives that early.
+        self.output.truncate(count);
+        while self.output.len() < count {
+            let pos = self.output.len() as f64 * self.in_rate as f64 / self.out_rate as f64;
+            let frac = pos - pos.floor();
+            self.output
+                .push((self.last as f64 * (1.0 - frac) + self.last as f64 * frac) as f32);
+        }
+        self.output
+    }
 }
 
 /// PCM 单声道 f32（采样率 in_rate）→ 节拍地图。时长由调用方给出（用于选分析率
@@ -184,6 +316,14 @@ pub fn analyze_mono(mono: &[f32], in_rate: u32, duration_ms: u64) -> Result<Beat
     if pcm.len() > max_out {
         pcm.truncate(max_out);
     }
+    analyze_resampled(&pcm, out_rate, duration_ms)
+}
+
+fn analyze_resampled(
+    pcm: &[f32],
+    out_rate: u32,
+    duration_ms: u64,
+) -> Result<BeatMap, AnalyzeError> {
     let analyzed_ms = (pcm.len() as u64 * 1000) / out_rate as u64;
     if pcm.len() < WINDOW {
         return Err(AnalyzeError::Unsupported("audio too short".into()));
@@ -199,6 +339,7 @@ pub fn analyze_mono(mono: &[f32], in_rate: u32, duration_ms: u64) -> Result<Beat
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(WINDOW);
     let mut scratch = vec![Complex::new(0f32, 0f32); WINDOW];
+    let mut fft_scratch = vec![Complex::new(0f32, 0f32); fft.get_inplace_scratch_len()];
     let mut spectrum = vec![0f32; WINDOW / 2 + 1];
     let mut prev_band = [0f32; MEL_BANDS];
     let mut flux = Vec::with_capacity(n_frames);
@@ -207,7 +348,7 @@ pub fn analyze_mono(mono: &[f32], in_rate: u32, duration_ms: u64) -> Result<Beat
         for i in 0..WINDOW {
             scratch[i] = Complex::new(pcm[start + i] * hann[i], 0.0);
         }
-        fft.process(&mut scratch);
+        fft.process_with_scratch(&mut scratch, &mut fft_scratch);
         for i in 0..=WINDOW / 2 {
             spectrum[i] = scratch[i].norm();
         }
@@ -507,6 +648,39 @@ fn estimate_bpm(times: &[i64], env: &[f32], out_rate: u32) -> Option<f64> {
 mod tests {
     use super::*;
 
+    struct AllocationCounter;
+    thread_local! {
+        static FFT_ALLOCS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    }
+    unsafe impl std::alloc::GlobalAlloc for AllocationCounter {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let _ = FFT_ALLOCS.try_with(|count| {
+                if layout.size() == WINDOW * std::mem::size_of::<Complex<f32>>() {
+                    if let Some(n) = count.get() {
+                        count.set(Some(n + 1));
+                    }
+                }
+            });
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+    }
+    #[global_allocator]
+    static ALLOCATOR: AllocationCounter = AllocationCounter;
+
+    #[test]
+    fn stft_does_not_allocate_a_scratch_buffer_per_window() {
+        let pcm = click_train(120.0, 32, 300, 16_800, 22_050);
+        FFT_ALLOCS.with(|count| count.set(Some(0)));
+        let map = analyze_mono(&pcm, 22_050, 16_800).unwrap();
+        let allocations = FFT_ALLOCS.with(|count| count.replace(None).unwrap());
+        assert!(!map.beats.is_empty());
+        assert!(allocations < 20, "8192-byte FFT allocations: {allocations}");
+        println!("STFT 8192-byte allocations: {allocations}");
+    }
+
     /// 合成 bpm 恒定的 click 轨：每个点击是 24ms 的 200+900Hz 双音 Hann 短脉冲。
     fn click_train(bpm: f64, beats_n: usize, lead_ms: u64, total_ms: u64, sr: u32) -> Vec<f32> {
         let period = 60_000.0 / bpm;
@@ -530,6 +704,237 @@ mod tests {
             }
         }
         buf
+    }
+
+    #[test]
+    fn resampling_matches_frozen_scalar_reference() {
+        for in_rate in [8_000, 11_025, 22_050, 44_100, 48_000, 192_000] {
+            for out_rate in [LOW_RATE, HIGH_RATE] {
+                for n in [0, 1, 2, 3, 17, 513, 4097] {
+                    let input: Vec<f32> = (0..n)
+                        .map(|i| {
+                            if i % 19 == 0 {
+                                -0.0
+                            } else {
+                                (i as f32 * 0.17).sin()
+                            }
+                        })
+                        .collect();
+                    let expected = reference_resample(&input, in_rate, out_rate);
+                    let actual = resample_linear(&input, in_rate, out_rate);
+                    assert_eq!(
+                        actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "{in_rate}/{out_rate}, {n}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Frozen pre-optimization formula: independent global phase and EOF clamp.
+    fn reference_resample(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
+        if in_rate == out_rate {
+            return input.to_vec();
+        }
+        let count = (input.len() as u64 * out_rate as u64 / in_rate as u64) as usize;
+        (0..count)
+            .map(|i| {
+                let pos = i as f64 * in_rate as f64 / out_rate as f64;
+                let i0 = pos.floor() as usize;
+                let frac = pos - i0 as f64;
+                let i1 = (i0 + 1).min(input.len() - 1);
+                (input[i0] as f64 * (1.0 - frac) + input[i1] as f64 * frac) as f32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streaming_resampling_matches_batch_bits_at_all_packet_boundaries() {
+        for in_rate in [8_000, 11_025, 22_050, 44_100, 48_000, 192_000] {
+            for out_rate in [LOW_RATE, HIGH_RATE] {
+                for n in [0, 1, 2, 3, 17, 513, 4097] {
+                    let input: Vec<f32> = (0..n)
+                        .map(|i| {
+                            if i % 19 == 0 {
+                                -0.0
+                            } else {
+                                (i as f32 * 0.17).sin()
+                            }
+                        })
+                        .collect();
+                    let reference = reference_resample(&input, in_rate, out_rate);
+                    for packet_frames in [1, 7, 512, 1152] {
+                        let mut stream = StreamingLinear::new(in_rate, out_rate);
+                        for packet in input.chunks(packet_frames) {
+                            for &sample in packet {
+                                stream.push(sample);
+                            }
+                        }
+                        let actual = stream.finish();
+                        assert_eq!(actual.len(), reference.len());
+                        for (i, (a, b)) in actual.iter().zip(&reference).enumerate() {
+                            assert_eq!(
+                                a.to_bits(),
+                                b.to_bits(),
+                                "{in_rate}/{out_rate}, n={n}, packet={packet_frames}, sample={i}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_analysis_and_duration_choice_match_batch_maps() {
+        let pcm = click_train(120.0, 32, 300, 16_800, 48_000);
+        for header_ms in [
+            None,
+            Some(16_800),
+            Some(LONG_MS - 1),
+            Some(LONG_MS),
+            Some(ANALYZE_MS + 1),
+        ] {
+            let mut decoded = DecodedPcm::new(48_000, header_ms);
+            for &sample in &pcm {
+                decoded.push(sample);
+            }
+            let (streamed, rate, duration) = decoded.finish();
+            let actual = analyze_resampled(&streamed, rate, duration).unwrap();
+            let reference = analyze_mono(&pcm, 48_000, header_ms.unwrap_or(16_800)).unwrap();
+            assert_eq!(actual, reference, "header={header_ms:?}");
+        }
+    }
+
+    #[test]
+    fn streaming_decode_retains_analysis_pcm_instead_of_full_source() {
+        let in_rate = 192_000;
+        let count = in_rate * 2;
+        let mut decoded = DecodedPcm::new(in_rate, Some(2000));
+        for i in 0..count {
+            decoded.push((i as f32 * 0.017).sin());
+        }
+        assert!(decoded.low.is_none());
+        let high = decoded.high.as_ref().unwrap();
+        let retained = high.output.capacity() * std::mem::size_of::<f32>()
+            + std::mem::size_of::<StreamingLinear>();
+        let previous_source_bytes = count as usize * std::mem::size_of::<f32>();
+        assert!(retained < previous_source_bytes / 4);
+        println!("192kHz/2s: old source PCM alone={previous_source_bytes} bytes, streaming retained={retained} bytes (includes output capacity); source history=one f32");
+        let (pcm, rate, duration) = decoded.finish();
+        assert_eq!((pcm.len(), rate, duration), (44_100, HIGH_RATE, 2000));
+    }
+
+    #[test]
+    fn unknown_duration_discards_high_rate_at_480s_and_caps_at_720s() {
+        // A 1Hz source exercises duration boundaries with very few source
+        // samples; the analysis-rate outputs retain their actual production size.
+        let mut decoded = DecodedPcm::new(1, None);
+        for _ in 0..479 {
+            decoded.push(0.25);
+        }
+        assert!(decoded.high.is_some());
+        assert!(decoded.low.is_some());
+        decoded.push(0.25);
+        assert!(decoded.high.is_none());
+        while decoded.remaining() > 0 {
+            decoded.push(0.25);
+        }
+        assert_eq!(decoded.input_count, 720);
+        let (pcm, rate, duration) = decoded.finish();
+        assert_eq!(
+            (pcm.len(), rate, duration),
+            (720 * LOW_RATE as usize, LOW_RATE, ANALYZE_MS + 1)
+        );
+        assert!(pcm.iter().all(|sample| *sample == 0.25));
+    }
+
+    #[test]
+    fn decoded_stereo_wav_matches_original_mono_pipeline() {
+        let input = click_train(120.0, 32, 300, 16_800, 48_000);
+        let mut bytes = Vec::new();
+        let mut mono = Vec::with_capacity(input.len());
+        let data_len = (input.len() * 4) as u32;
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x02\0");
+        bytes.extend_from_slice(&48_000u32.to_le_bytes());
+        bytes.extend_from_slice(&192_000u32.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for sample in input {
+            let left = (sample * 15_000.0) as i16;
+            let right = (sample * 10_000.0) as i16;
+            bytes.extend_from_slice(&left.to_le_bytes());
+            bytes.extend_from_slice(&right.to_le_bytes());
+            mono.push((left as f32 / 32768.0 + right as f32 / 32768.0) / 2.0);
+        }
+        let path =
+            std::env::temp_dir().join(format!("hertz-beats-streaming-{}.wav", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let actual = analyze_path(&path);
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            actual.unwrap(),
+            analyze_mono(&mono, 48_000, 16_800).unwrap()
+        );
+    }
+
+    #[test]
+    fn decoded_channel_sum_overflow_retains_nonfinite_pcm_error() {
+        let frames = 2048u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + frames * 8).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt \x10\0\0\0\x03\0\x02\0");
+        bytes.extend_from_slice(&HIGH_RATE.to_le_bytes());
+        bytes.extend_from_slice(&(HIGH_RATE * 8).to_le_bytes());
+        bytes.extend_from_slice(&8u16.to_le_bytes());
+        bytes.extend_from_slice(&32u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(frames * 8).to_le_bytes());
+        for _ in 0..frames * 2 {
+            bytes.extend_from_slice(&f32::MAX.to_le_bytes());
+        }
+        let path =
+            std::env::temp_dir().join(format!("hertz-beats-overflow-{}.wav", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let actual = analyze_path(&path);
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            matches!(actual, Err(AnalyzeError::Failed(ref error)) if error == "non-finite pcm"),
+            "{actual:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_fft_scratch_is_bit_identical_to_allocating_reference() {
+        let pcm = click_train(120.0, 4, 300, 2500, HIGH_RATE);
+        let fft = FftPlanner::<f32>::new().plan_fft_forward(WINDOW);
+        let mut input = vec![Complex::new(0.0, 0.0); WINDOW];
+        let mut workspace = vec![Complex::new(0.0, 0.0); fft.get_inplace_scratch_len()];
+        for frame in pcm.windows(WINDOW).step_by(HOP) {
+            let mut reference: Vec<_> = frame
+                .iter()
+                .enumerate()
+                .map(|(i, sample)| {
+                    let hann = 0.5
+                        - 0.5
+                            * (2.0 * std::f32::consts::PI * i as f32 / (WINDOW as f32 - 1.0)).cos();
+                    Complex::new(sample * hann, 0.0)
+                })
+                .collect();
+            input.copy_from_slice(&reference);
+            fft.process(&mut reference);
+            fft.process_with_scratch(&mut input, &mut workspace);
+            for (actual, expected) in input.iter().zip(reference) {
+                assert_eq!(actual.re.to_bits(), expected.re.to_bits());
+                assert_eq!(actual.im.to_bits(), expected.im.to_bits());
+            }
+        }
     }
 
     #[test]

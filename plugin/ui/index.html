@@ -1076,6 +1076,61 @@
         <p class="hint set-note">「加入队列」只管列表行的快捷按钮与右键菜单；点曲名本身总是立即播放那一首。「自动进入」只在手动开始播放时触发，启动恢复与自动接力不算。</p>
       </div>
 
+      <div class="set-group" id="ai-grant-settings">
+        <h2 class="set-title">AI 与外部连接</h2>
+        <p class="hint set-note">外部 MCP 默认没有授权。仅独立服务的本机 IPv4 回环入口支持连接；每份授权只开放所选能力。这里不会显示或返回凭据秘密。</p>
+        <p class="hint set-note" id="ai-grant-unavailable" role="status" hidden></p>
+        <div id="ai-grant-manager" hidden>
+          <div class="set-row">
+            <label for="ai-grant-label">授权名称</label>
+            <input id="ai-grant-label" type="text" maxlength="128" placeholder="例如：桌面助手">
+          </div>
+          <div class="set-row">
+            <label for="ai-grant-preset">权限预设</label>
+            <select id="ai-grant-preset">
+              <option value="snapshot">只读播放状态</option>
+              <option value="library">曲库检索</option>
+              <option value="read">只读（状态与曲库）</option>
+              <option value="control">播控（状态与六种操作）</option>
+              <option value="custom">自定义范围</option>
+            </select>
+          </div>
+          <div class="ai-grant-scope-groups" id="ai-grant-scope-groups">
+            <fieldset class="ai-grant-scope-group">
+              <legend>播放</legend>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:read"><span>读取最小播放状态</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:pause"><span>暂停</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:resume"><span>继续播放</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:previous"><span>上一首</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:next"><span>下一首</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:seek"><span>定位</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:volume_set"><span>设置音量</span></label>
+            </fieldset>
+            <fieldset class="ai-grant-scope-group">
+              <legend>曲库与舞台</legend>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="library:read"><span>检索本地曲库</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="stage:capabilities_read"><span>读取舞台契约</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="stage:intent_validate"><span>校验舞台草稿</span></label>
+              <p class="hint set-note">舞台工具还需要在工坊相关设置中单独开启。</p>
+            </fieldset>
+          </div>
+          <div class="set-row">
+            <span></span>
+            <span class="set-actions">
+              <button type="button" class="btn primary" id="ai-grant-create">创建授权</button>
+              <button type="button" class="btn" id="ai-grant-refresh">刷新列表</button>
+            </span>
+          </div>
+          <div class="set-row">
+            <label for="ai-grant-command">MCP 程序</label>
+            <input id="ai-grant-command" type="text" value="hertz-studio" autocomplete="off" spellcheck="false">
+          </div>
+          <p class="hint set-note">配置中的程序在 MCP 客户端所在电脑运行；若不在 PATH，请填写 Hertz Studio 可执行文件的完整路径。</p>
+          <p class="hint set-note" id="ai-grant-status" role="status" aria-live="polite"></p>
+          <div id="ai-grant-list" class="ai-grant-list"></div>
+        </div>
+      </div>
+
       <!-- 歌词：跨曲目都成立的歌词偏好（folia 的 global lyric timeline offset /
            lyrics filter / staff credits policy）。逐曲偏移在「正在播放」弹窗里，
            那是每首自己的事；这里只管全局的。三件事都发生在歌词喂给舞台之前，
@@ -2398,6 +2453,7 @@
 <!-- 3D 歌单架（封面流）：只依赖 Stage 只读出口，必须排在 stage3d.js 之前 -->
 <script defer src="stage-shelf.js"></script>
 <script defer src="stage-settings.js"></script>
+<script defer src="vendor/stage-runtime.js"></script>
 <script defer src="vendor/coast-stage.js"></script>
 <script defer src="stage-coast.js"></script>
 <script defer src="vendor/zodiac-stage.js"></script>

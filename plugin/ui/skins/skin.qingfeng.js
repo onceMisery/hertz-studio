@@ -1800,6 +1800,7 @@
       id: 'advanced',
       label: '高级',
       items: [
+        ['aigrant', 'AI 与外部连接', 'MCP 授权与外部连接'],
         ['dev', '开发者选项', '播放诊断日志'],
       ],
     },

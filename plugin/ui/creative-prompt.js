@@ -325,7 +325,8 @@
     return { matches: matches, claimed: claimed };
   }
 
-  // 命中区间替换为空格后删掉停用词，剩余连续片段去重（保序）进 unknown。
+  // 命中区间替换为空格后删掉停用词，剩余片段去重（保序）进 unknown。
+  // 重复的 not 保留，避免多句否定在约束检查前丢失语义。
   function leftovers(text, claimed) {
     var masked = text;
     // 从后往前替换，前面的区间偏移不受影响
@@ -335,7 +336,7 @@
     var out = [];
     masked.split(' ').forEach(function (seg) {
       if (!seg || STOPWORDS[seg]) return;
-      if (out.indexOf(seg) < 0) out.push(seg);
+      if (seg === 'not' || out.indexOf(seg) < 0) out.push(seg);
     });
     return out;
   }
@@ -407,11 +408,12 @@
       .replace(/\bthere are no private (?:lyrics )?song histories account details or external assets involved\b/g, ' ')
       .replace(/\bnot editing (?:the )?player s active preset\b/g, ' ')
       .replace(/\bnot (?:a )?request to animate (?:a )?sequence of sections upload content or inspect local media\b/g, ' ')
-      .replace(/\b(?:the )?request does not include (?:a )?song timetable relative edit or temporal sequence and it must not trigger media retrieval\b/g, ' ')
-      .replace(/\brequest does not include\b.{0,64}\b(?:song|timetable|relative edit|temporal sequence)\b.{0,40}\b(?:must )?not trigger media retrieval\b/g, ' ')
+      .replace(/\b(?:the )?request does not include\b (?:(?:a|any) )?(?:song|timetable|relative edit|temporal sequence)(?: (?:(?:and|or) )?(?:(?:a|any) )?(?:song|timetable|relative edit|temporal sequence))*\b/g, ' ')
+      .replace(/\b(?:and )?(?:it )?(?:must )?not trigger media retrieval\b/g, ' ')
       .replace(/\bthis is (?:a )?public synthetic (?:evaluation )?(?:description|text) rather than private media\b/g, ' ')
       .replace(/\b(?:this )?(?:public )?synthetic description asks only for (?:existing )?parameters already present in hertz\b/g, ' ')
       .replace(/\b(?:keep|leave) unspecified (?:controls|properties|parameters) (?:at|to) (?:their )?(?:canonical )?defaults?\b/g, ' ')
+      .replace(/\b(?:use )?(?:the )?(?:canonical )?defaults (?:for )?anything (?:i|we) have not specified\b/g, ' ')
       .replace(/\b(?:use|return|create) (?:one|a single) static (?:configuration|preset|intent)\b/g, ' ')
       .replace(/\b(?:the )?(?:visual|picture|composition|forms?)\b.{0,28}\bshould be\b.{0,24}\b(?:readable|legible|gentle|clear|stable|soft)\b/g, ' ')
       .replace(/\b(?:a )?broad composition\b.{0,48}\bshould allow (?:the )?forms? to remain legible without extra effects competing for attention\b/g, ' ')
@@ -475,7 +477,7 @@
   }
 
   function hasUnrecognizedNumericSetting(unknown, paths, intent, params) {
-    var text = unknown.join(' ').toLowerCase();
+    var text = stripSafeScopeStatements(unknown.join(' ')).toLowerCase();
     var tokens = text.split(/\s+/);
     var wordNumbers = { zero: 0, one: 1, two: 2, three: 3, four: 4,
       five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
@@ -521,7 +523,8 @@
   function hasUnrecognizedSceneRequirement(text, matches) {
     var sceneMatched = matches.some(function (match) { return match.group === 'scene'; });
     return !sceneMatched && (/(?:新建|新场景|新舞台|创建|制作|做一个|打造|创作|生成)/.test(text)
-      || /(?:^|\s)(?:create|new|fresh|build|make|generate)(?=\s|$)/i.test(text));
+      || /(?:^|\s)(?:create|new|fresh|build|make|generate)(?=\s|$)/i.test(text)
+      || /\b(?:i |we )?(?:need|want) (?:a |an )?(?:new )?(?:scene|preset|stage|configuration)\b/i.test(text));
   }
 
   function hasUnrecognizedRequirement(text, unknown, matches, paths, intent, params) {

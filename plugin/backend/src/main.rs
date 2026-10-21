@@ -137,6 +137,14 @@ impl Plugin {
         let mut receiver = self.state.events.subscribe();
         let state = self.state.clone();
         let emitter = emitter.clone();
+        // Mirror the WS handshake: a subscriber gets one full state immediately.
+        // Later state changes are only published on transitions, so an initial
+        // event also keeps the forwarding path observable when idle.
+        if let Ok(params) =
+            serde_json::to_value(hertz_studio::state::WsEvent::State(state.audio.snapshot()))
+        {
+            let _ = emitter.event(EVENT_METHOD, params);
+        }
         let running = self.event_forwarder_running.clone();
         self.runtime.spawn(async move {
             let _guard = EventForwarderGuard(running);
@@ -222,7 +230,7 @@ fn init_logging() {
 /// 装配运行时。与 `Plugin::handle` 分开是因为 `runtime.block_on` 借用 runtime，
 /// 不能在同一表达式里把 runtime 移进它自己跑的 future。
 async fn boot_plugin() -> anyhow::Result<hertz_studio::bootstrap::Booted> {
-    let data_dir = resolve_data_dir();
+    let data_dir = hertz_studio::bootstrap::absolute_data_dir(&resolve_data_dir())?;
     let config = hertz_studio::bootstrap::prepare(&data_dir).await?;
     // stdio 天然可信，没有 HTTP 那一层的 bearer token；`AppState` 要求有值，
     // 所以填一个随机串，永不外泄也永不校验。

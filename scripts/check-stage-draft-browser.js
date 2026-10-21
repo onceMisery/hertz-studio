@@ -4,6 +4,8 @@
 // pending 400ms persistence, version rejection and lifecycle ownership.
 'use strict';
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const { startFixture } = require('./ui-browser-fixture');
 const { uiUrl } = require('./ui-token');
@@ -12,13 +14,22 @@ async function main() {
   const fixture = await startFixture();
   process.env.VMUSIC_DATA_DIR = fixture.dataDir;
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 960 }, reducedMotion: 'no-preference' });
   await fixture.connect(context);
   const page = await context.newPage(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
+    const uiRoot = path.resolve(__dirname, '../plugin/ui');
+    await page.route('**/*', route => {
+      const asset = path.resolve(uiRoot, '.' + decodeURIComponent(new URL(route.request().url()).pathname));
+      if (asset.startsWith(uiRoot + path.sep) && fs.existsSync(asset) && fs.statSync(asset).isFile()) {
+        return route.fulfill({ path: asset });
+      }
+      return route.continue();
+    });
     await page.goto(uiUrl(fixture.base), { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.querySelector('#workshop .ws-targets'));
+    await page.evaluate(() => Stage.setReducedMotion(false));
     await page.evaluate(() => { Workshop.open(); Workshop.setTab('prompt'); });
     await page.locator('#ws-prompt-text').fill('十秒后切换到星云');
     await page.getByRole('button', { name: '解析', exact: true }).click();
@@ -35,6 +46,34 @@ async function main() {
     const artifact = await page.evaluate(() => CreativeDraft.artifact({ version: 1, scene: 'towers',
       patch: { 'sc.height': 9999 }, hand: { on: true }, director: false }));
     const text = JSON.stringify(artifact);
+    const previewAnimations = await page.evaluate(async a => {
+      const prepared = await CreativeDraft.prepare(a);
+      CreativeStage.fire({ set: { 'look.bloom': 2.5 }, len: 5000, ease: 'linear' });
+      const committedAnimations = CreativeStage.stats().animations;
+      CreativeStage.beginPreview(prepared.preset, prepared.proposalHash);
+      return { committedAnimations, previewAnimations: CreativeStage.stats().animations,
+        reduced: Stage.presentation().reduced };
+    }, artifact);
+    assert.equal(previewAnimations.committedAnimations, 1, 'a committed cue is active before preview');
+    assert.equal(previewAnimations.previewAnimations, 0, 'preview evaluates its own motion state');
+    const immediateCue = await page.evaluate(() => {
+      const preview = CreativeStage.preview();
+      const canceled = CreativeStage.cancelPreview();
+      return { preview, canceled, animations: CreativeStage.stats().animations,
+        bloom: CreativeStage.runtime()['look.bloom'] };
+    });
+    assert.ok(immediateCue.animations > 0, 'cancel restores cue synchronously: ' + JSON.stringify(immediateCue));
+    await page.waitForTimeout(180);
+    const resumedCue = await page.evaluate(() => ({
+      animations: CreativeStage.stats().animations,
+      bloom: CreativeStage.runtime()['look.bloom'],
+      reduced: Stage.presentation().reduced,
+    }));
+    assert.ok(resumedCue.animations > 0,
+      'cancel restores committed cue animation: ' + JSON.stringify(resumedCue));
+    assert.ok(resumedCue.bloom > 0.28 && resumedCue.bloom < 2.5, 'restored cue keeps advancing');
+    await page.evaluate(() => CreativeStage.setPreset(CreativeStage.preset()));
+    console.log('PASS preview cancellation restores committed cue animation');
     let modelDispatches = 0;
     await page.route('**/v1/ai/**', route => {
       const request = route.request();
@@ -73,19 +112,34 @@ async function main() {
     assert.deepEqual(during.library, original.library);
     console.log('PASS temporary rendering, pending autosave, share and library isolation');
 
-    const mediaPreview = await page.evaluate(() => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#0f0"/></svg>';
+    const mediaPreview = await page.evaluate(async ({ artifact: a, source }) => {
       window.revokedBackgroundUrls = [];
       const revoke = URL.revokeObjectURL.bind(URL);
       URL.revokeObjectURL = url => { window.revokedBackgroundUrls.push(url); revoke(url); };
-      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#0f0"/></svg>';
-      const spec = Backgrounds.setLocalFile(new File([svg], 'local.svg', { type: 'image/svg+xml' }));
+      const prepared = await CreativeDraft.prepare(a);
+      CreativeStage.beginPreview(prepared.preset, prepared.proposalHash);
+      // Match the UI change handler: release preview-owned URLs before creating the new one.
+      CreativeStage.cancelPreview();
+      const spec = Backgrounds.setLocalFile(new File([source], 'local.svg', { type: 'image/svg+xml' }));
       CreativeStage.setBackground(spec);
       return spec;
-    });
-    await page.waitForFunction(() => {
-      const image = document.querySelector('#creative-bg .creative-bg-media');
-      return image && image.naturalWidth === 24;
-    });
+    }, { artifact, source: svg });
+    try {
+      await page.waitForFunction(() => {
+        const image = document.querySelector('#creative-bg .creative-bg-media');
+        return image && image.naturalWidth === 24;
+      }, { timeout: 5000 });
+    } catch {
+      const mediaState = await page.evaluate(() => {
+        const image = document.querySelector('#creative-bg .creative-bg-media');
+        return { spec: Backgrounds.values(), exists: !!image, src: image && image.src,
+          complete: image && image.complete, naturalWidth: image && image.naturalWidth,
+          revoked: window.revokedBackgroundUrls,
+          layer: document.getElementById('creative-bg') && document.getElementById('creative-bg').outerHTML };
+      });
+      throw new Error('local background image did not load: ' + JSON.stringify({ mediaState, errors }));
+    }
     await page.evaluate(async a => {
       const prepared = await CreativeDraft.prepare(a);
       CreativeStage.beginPreview(prepared.preset, prepared.proposalHash);
@@ -98,10 +152,13 @@ async function main() {
       return image && image.src === url && image.naturalWidth === 24;
     }, mediaPreview.url);
     assert.equal(await page.evaluate(url => Backgrounds.values().url === url, mediaPreview.url), true);
+    const mediaReplacement = await page.evaluate(() => CreativeDraft.artifact({
+      version: 1, scene: 'orb', patch: {}, director: false,
+    }));
     await page.evaluate(async a => {
       const prepared = await CreativeDraft.prepare(a);
       CreativeStage.beginPreview(prepared.preset, prepared.proposalHash);
-    }, artifact);
+    }, mediaReplacement);
     const mediaPreviewToken = await page.evaluate(() => CreativeStage.preview());
     await page.evaluate(token => CreativeStage.applyPreview(token.previewId, token.proposalHash), mediaPreviewToken);
     assert.equal(await page.evaluate(url => window.revokedBackgroundUrls.includes(url), mediaPreview.url), true,

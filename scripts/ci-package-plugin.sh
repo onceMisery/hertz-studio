@@ -43,6 +43,7 @@ DIST="$ROOT/plugin/dist/$EDITION"
 mkdir -p "$DIST"
 rm -f "$DIST"/*.dbxp "$DIST"/*.artifact.json
 
+npm ci --prefix tools/space-stage --no-audit --no-fund
 node scripts/prepare-edition.js "$EDITION"
 export DBX_PLUGIN_SDK_ROOT="$ROOT/output/editions/$EDITION/plugin/sdk-root"
 dbx-plugin package "output/editions/$EDITION/plugin" --output-dir "$DIST"

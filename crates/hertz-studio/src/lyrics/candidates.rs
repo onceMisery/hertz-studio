@@ -246,6 +246,7 @@ pub(crate) async fn search(state: &Arc<AppState>, id: &str, body: Search) -> Api
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish(
     state: &Arc<AppState>,
     id: &str,

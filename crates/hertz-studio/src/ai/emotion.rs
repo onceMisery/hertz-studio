@@ -648,6 +648,7 @@ async fn begin_completion_job(
         updated_at: now,
         result_proposal_id: None,
         failure_code: None,
+        provider_http_status: None,
     };
     let attempt_id = uuid::Uuid::new_v4().to_string();
     crate::ai::jobs::retain_history(db, now)
@@ -680,9 +681,6 @@ async fn begin_completion_job(
     if pricing.pricing_known() && guard.halted {
         return Err("budget_halted: shared AI generation is paused".into());
     }
-    if !pricing.pricing_known() && guard.token_halted {
-        return Err("token_bounds_halted: token-only generation is paused".into());
-    }
     if pricing.pricing_known() {
         store::reserve(
             &mut tx,
@@ -693,7 +691,7 @@ async fn begin_completion_job(
         .await
         .map_err(|error| format!("budget unavailable: {error}"))?;
     } else {
-        store::get_or_create_month(&mut *tx, &month)
+        store::get_or_create_month(&mut tx, &month)
             .await
             .map_err(|error| format!("usage ledger unavailable: {error}"))?;
     }
@@ -914,7 +912,9 @@ impl EmotionProvider for AiRuntimeEmotionProvider {
                     Ok(Err(error)) => (Err(error), None),
                     Err(_) => (Err("lyric emotion provider timed out".into()), None),
                 };
-                if let (Some(db), Some(job), Some(usage)) = (db.as_ref(), job.as_ref(), usage.as_ref()) {
+                if let (Some(db), Some(job), Some(usage)) =
+                    (db.as_ref(), job.as_ref(), usage.as_ref())
+                {
                     if let Err(error) =
                         crate::ai::usage::persist_pending_usage(db, job, usage).await
                     {
@@ -935,15 +935,13 @@ impl EmotionProvider for AiRuntimeEmotionProvider {
             match tokio::spawn(task).await {
                 Ok(result) => result,
                 Err(error) => {
-                    let tracked_job = recovery_job
-                        .lock()
-                        .ok()
-                        .and_then(|tracked| tracked.clone());
+                    let tracked_job = recovery_job.lock().ok().and_then(|tracked| tracked.clone());
                     if let (Some(db), Some(job)) = (recovery_db.as_ref(), tracked_job.as_ref()) {
                         let mut settled = Err("completion interruption was not attempted".into());
                         for delay_ms in [0, 10, 50, 200] {
                             if delay_ms > 0 {
-                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                    .await;
                             }
                             settled = interrupt_completion_job(db, job, None).await;
                             if settled.is_ok() {
@@ -1726,7 +1724,8 @@ mod tests {
             }
         }
 
-        let dir = std::env::temp_dir().join(format!("hertz-emotion-rotate-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("hertz-emotion-rotate-{}", uuid::Uuid::new_v4()));
         let db = vmusic_store::open(&dir).await.unwrap();
         let (mut state, handle) = crate::state::tests::playback_state_with_db(db).await;
         let config = crate::config::AiConfig {
@@ -1744,10 +1743,7 @@ mod tests {
             credential_seen: Mutex::new(None),
         });
         let provider: Arc<dyn crate::ai::jobs::StageIntentProvider> = fixture.clone();
-        state
-            .ai_runtime
-            .install_provider(provider.clone())
-            .await;
+        state.ai_runtime.install_provider(provider.clone()).await;
         let owner = vmusic_store::ai::get_or_create_instance(&state.db)
             .await
             .unwrap()
@@ -1779,7 +1775,8 @@ mod tests {
         let request = request(lines(1));
         let cache_key = state.ai_emotion.cache_key(&request.lyrics_hash).unwrap();
         let classify_state = state.clone();
-        let classification = tokio::spawn(async move { super::classify(&classify_state, request).await });
+        let classification =
+            tokio::spawn(async move { super::classify(&classify_state, request).await });
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             fixture.started.notified(),
@@ -1866,10 +1863,8 @@ mod tests {
             }
         }
 
-        let dir = std::env::temp_dir().join(format!(
-            "hertz-emotion-rpc-revoke-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("hertz-emotion-rpc-revoke-{}", uuid::Uuid::new_v4()));
         let db = vmusic_store::open(&dir).await.unwrap();
         let (mut state, handle) = crate::state::tests::playback_state_with_db(db).await;
         let fixture = Arc::new(RevocationFixture {
@@ -1896,12 +1891,9 @@ mod tests {
         .await
         .unwrap();
 
-        crate::rpc::library::put_settings(
-            &state,
-            &json!({"lyrics_emotion_ai_authorized": false}),
-        )
-        .await
-        .unwrap();
+        crate::rpc::library::put_settings(&state, &json!({"lyrics_emotion_ai_authorized": false}))
+            .await
+            .unwrap();
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             fixture.observed_cancel.notified(),
@@ -1921,7 +1913,10 @@ mod tests {
         .fetch_one(&state.db)
         .await
         .unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&authorized).unwrap(), json!(false));
+        assert_eq!(
+            serde_json::from_str::<Value>(&authorized).unwrap(),
+            json!(false)
+        );
         assert!(vmusic_store::emotion::get_cue(&state.db, &cache_key)
             .await
             .unwrap()
@@ -1989,9 +1984,7 @@ mod tests {
                 _: crate::ai::usage::PricingSnapshot,
                 _: Option<crate::ai::credential::ProviderCredential>,
                 mut cancellation: crate::ai::jobs::ProviderCancellation,
-            ) -> Pin<
-                Box<dyn Future<Output = crate::ai::jobs::ProviderReply> + Send>,
-            > {
+            ) -> Pin<Box<dyn Future<Output = crate::ai::jobs::ProviderReply> + Send>> {
                 let started = self.started.clone();
                 let observed_cancel = self.observed_cancel.clone();
                 let release = self.release.clone();
@@ -2034,13 +2027,9 @@ mod tests {
         vmusic_store::settings::set(&state.db, "lyrics_emotion_ai_authorized", &json!(true))
             .await
             .unwrap();
-        vmusic_store::settings::set(
-            &state.db,
-            crate::ai::jobs::CONSENT_KEY,
-            &json!(true),
-        )
-        .await
-        .unwrap();
+        vmusic_store::settings::set(&state.db, crate::ai::jobs::CONSENT_KEY, &json!(true))
+            .await
+            .unwrap();
         let state = Arc::new(state);
 
         let crate::ai::jobs::SubmitOutcome::Accepted { job } = crate::ai::jobs::submit(
@@ -2050,8 +2039,7 @@ mod tests {
             None,
         )
         .await
-        .unwrap()
-        else {
+        .unwrap() else {
             panic!("generation fixture was not accepted");
         };
         tokio::time::timeout(
@@ -2105,13 +2093,11 @@ mod tests {
         let settlement = crate::ai::jobs::revoke_generation_consent(&state).await;
         generation_fixture.release.notify_one();
 
-        let classification_result = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            classification,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let classification_result =
+            tokio::time::timeout(std::time::Duration::from_secs(3), classification)
+                .await
+                .unwrap()
+                .unwrap();
         let terminal_state = tokio::time::timeout(std::time::Duration::from_secs(3), async {
             loop {
                 let row = vmusic_store::ai_jobs::find_job_by_id(&state.db, &job.job_id)
@@ -2136,10 +2122,7 @@ mod tests {
             classification_result.unwrap_err().code,
             "emotion_consent_required"
         );
-        for key in [
-            "lyrics_emotion_ai_authorized",
-            crate::ai::jobs::CONSENT_KEY,
-        ] {
+        for key in ["lyrics_emotion_ai_authorized", crate::ai::jobs::CONSENT_KEY] {
             let raw: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?1")
                 .bind(key)
                 .fetch_one(&state.db)
@@ -2182,7 +2165,10 @@ mod tests {
         .fetch_one(&state.db)
         .await
         .unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&authorized).unwrap(), json!(true));
+        assert_eq!(
+            serde_json::from_str::<Value>(&authorized).unwrap(),
+            json!(true)
+        );
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -2295,6 +2281,19 @@ mod tests {
         vmusic_store::settings::set(&db, "lyrics_emotion_ai_authorized", &json!(true))
             .await
             .unwrap();
+        let mut tx = vmusic_store::begin_immediate(&db).await.unwrap();
+        vmusic_store::ai_jobs::ensure_budget_guard(&mut tx, "test-owner")
+            .await
+            .unwrap();
+        vmusic_store::ai_jobs::halt_token_guard(
+            &mut tx,
+            "test-owner",
+            "legacy token-only stop",
+            "old-task",
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
         let execution_slots = Arc::new(tokio::sync::Semaphore::new(1));
         let adapter = Arc::new(AiRuntimeEmotionProvider {
             provider: provider.clone(),
@@ -2472,10 +2471,13 @@ mod tests {
             credential: None,
         };
 
+        vmusic_store::settings::set(&db, "lyrics_emotion_ai_authorized", &serde_json::json!(true))
+            .await
+            .unwrap();
         let error = begin_completion_job(&db, "test-owner", &pricing)
             .await
             .unwrap_err();
-        assert!(error.starts_with("history_capacity_exceeded"));
+        assert!(error.starts_with("history_capacity_exceeded"), "unexpected admission error: {error}");
         let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_jobs")
             .fetch_one(&db)
             .await

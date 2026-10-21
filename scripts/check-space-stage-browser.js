@@ -11,6 +11,7 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     const errors = []; page.on('pageerror', error => errors.push(error.message));
     await page.setContent('<html><body style="margin:0"><canvas style="width:100vw;height:100vh"></canvas></body></html>');
+    await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/space-stage.js') });
     const evidence = await page.evaluate(async () => {
       const canvas = document.querySelector('canvas');

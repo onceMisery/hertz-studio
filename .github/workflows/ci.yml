@@ -54,7 +54,10 @@ jobs:
         run: node scripts/check-frontend.js
 
       - name: Verify edition staging
-        run: node scripts/check-editions.js
+        run: |
+          npm ci --prefix tools/space-stage --no-audit --no-fund
+          node scripts/check-release-ui.js
+          node scripts/check-editions.js
 
       - name: Check formatting
         # 不用 --all：它会把 vendored 的 dbx-plugin-sdk 一起重排，而那份 src/lib.rs

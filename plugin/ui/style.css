@@ -1710,6 +1710,81 @@ body.reduce-motion .shelf-vinyl { transition: none; }
   max-width: 62ch;
 }
 
+#ai-grant-settings[aria-busy="true"] { opacity: 0.78; }
+.ai-grant-scope-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.ai-grant-scope-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.ai-grant-scope-group legend,
+.ai-grant-path-label,
+.ai-grant-config-label {
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.ai-grant-scope-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: auto !important;
+  margin: 7px 0;
+  color: var(--text);
+}
+.ai-grant-scope-option input { flex: none; margin: 2px 0 0; }
+.ai-grant-scope-option span { min-width: 0; overflow-wrap: anywhere; }
+.ai-grant-list { min-width: 0; }
+.ai-grant-empty { margin: 2px 0 0; }
+.ai-grant-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+.ai-grant-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.ai-grant-name { overflow-wrap: anywhere; }
+.ai-grant-state {
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--success, #39a77a);
+  font-size: 11px;
+}
+.ai-grant-state.is-revoked { color: var(--muted); }
+.ai-grant-scopes { margin: 0; }
+.ai-grant-path,
+.ai-grant-config {
+  display: block;
+  max-width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--panel);
+  color: var(--text);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.ai-grant-config { overflow-x: auto; }
+.ai-grant-actions { padding-top: 2px; }
+.ai-grant-actions .danger { color: var(--danger); }
+#ai-grant-status[data-kind="error"] { color: var(--danger, #d85353); }
+
+@media (max-width: 620px) {
+  .ai-grant-scope-groups { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .ai-grant-item-head { align-items: flex-start; }
+  .ai-grant-actions .btn { flex: 1 1 120px; }
+}
+
 /* 渲染模式的硬件警示块。用整块内联提示而不是 toast：toast 几秒就自己消失，
    而这段话的意义恰恰是"按下确认之前先读完"。confirm 态偏琥珀（要你决策），
    saved 态偏 accent（只是告知生效条件），一眼分得清现在在流程的哪一步。 */

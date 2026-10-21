@@ -237,7 +237,7 @@ function feedHz(hz, times) {
     }
     // stage.js 的歌词档位：把函数抠出来，按各分支取值。
     const lyricSrc = grabFn(stageSrc, 'function lyricsTargetFps(');
-    const lz = { hidden: false, reduced: false, playing: true, tier: 2, document: { body: { classList: { contains: () => false } } } };
+    const lz = { hidden: false, reduced: false, playing: true, tier: 2, lyricsDirty: false, views: [], document: { body: { classList: { contains: () => false } } } };
     vm.createContext(lz);
     vm.runInContext(grabFn(stageSrc, 'function isVisualOccluded(') + '\n' + lyricSrc + '\nthis.read = lyricsTargetFps;', lz);
     const lyricVals = [];
@@ -251,6 +251,32 @@ function feedHz(hz, times) {
       eq(lz.read(), 0, mode + ' occludes the 2D lyric gate');
     }
     for (const v of lyricVals) declared.push({ file: 'stage.js:lyricsTargetFps', value: v });
+
+    lz.document.body.classList.contains = () => false;
+    lz.playing = false;
+    eq(lz.read(), 0, 'settled paused lyrics request no frames');
+    lz.lyricsDirty = true;
+    eq(lz.read(), 12, 'paused seek/settings changes retain the existing 12fps budget');
+    lz.lyricsDirty = false;
+    lz.views = [{ track: {}, scrollTarget: 100, scrollY: 20, userScrolling: false }];
+    eq(lz.read(), 12, 'paused lyric scrolling keeps its settling frames');
+    lz.views[0].scrollY = 100;
+    eq(lz.read(), 0, 'lyric gate stops after scrolling converges');
+    lz.views[0].scrollY = 20;
+    lz.views[0].userScrolling = true;
+    eq(lz.read(), 0, 'manual lyric browsing does not spin while waiting for its timer');
+
+    const ez = { hidden: false, playing: false, lowfx: false, reduced: false, energy: 0, beatDet: null, beatShown: 0 };
+    vm.runInNewContext(grabFn(stageSrc, 'function energyTargetFps(') + '\nthis.read = energyTargetFps;', ez);
+    eq(ez.read(), 0, 'settled paused energy requests no frames');
+    ez.energy = 0.2;
+    eq(ez.read(), 12, 'paused energy preserves its decay budget');
+    ez.energy = 0; ez.beatDet = { pulse: 0.1 };
+    eq(ez.read(), 12, 'beat envelope completes its release even after energy settles');
+    ez.playing = true;
+    eq(ez.read(), 20, 'playing energy keeps its original 20fps budget');
+    ez.lowfx = true;
+    eq(ez.read(), 10, 'low-effects playing energy keeps its original 10fps budget');
 
     ok(declared.length >= 10, '抓到足够多的声明档位（实得 ' + declared.length + '）');
     for (const d of declared) {

@@ -84,7 +84,13 @@ Ollama 必须已运行、已有支持结构化输出的本地模型；Hertz 不�
 
 ## 模型评测
 
-独立评测入口复用真实 adapter、提示和校验，在播放器 bootstrap 前运行，不读取用户曲库或创建生产任务。当前语料 v3 保留 120 条开发集与 40 条预留合成样本；标签独立复核、实际模型、两轮评测和正式发布阈值仍待验收，单轮报告不会自动宣布可发布。运行命令、人工评分规则与指标分母见 [StageIntent v3](../evals/stage-intent/v3/README.md)。v1/v2 基线保留为历史证据。
+离线与 Ollama 评测复用冻结提示和校验；新增 `--run-managed` 后，可通过本机 bearer-auth HTTP 入口调用当前应用 provider，包括应用配置的本地 Ollama，不传出 API key，不创建生产任务/提案/账本记录。它要求显式 loopback server、已开启生成同意和有效 provider；默认仅跑 1 个样本，完整开发集须显式 `--limit 120`。例如设置 `VMUSIC_DATA_DIR` 指向正在运行的服务 DataDir 后执行：
+
+```powershell
+node scripts/evaluate-ai-stage.js --run-managed --server http://127.0.0.1:8787 --round 1 --out evals/stage-intent/runs/stepfun-smoke
+```
+
+managed 结果不包含 token/费用字段，失败、超时或取消会停止当前轮且不自动重试。CLI 的 SIGINT 会关闭当前 HTTP 请求；服务端在请求处理 future 被丢弃时向在途 provider 发取消信号，执行槽由 provider task 持有至 adapter 返回。连接关闭不能证明远端推理停止。当前语料 v3 保留 120 条开发集与 40 条预留合成样本；标签独立复核、实际模型成功响应、两轮评测、独立保留集和人工评分仍待验收，单轮报告不会自动宣布可发布。运行命令、人工评分规则与指标分母见 [StageIntent v3](../evals/stage-intent/v3/README.md)。v1/v2 基线保留为历史证据。
 
 ## 工程验证
 
@@ -107,6 +113,6 @@ cargo test --locked -p hertz-studio --test mcp_sdk --target-dir target/mcp-sdk-c
 
 官方 Rust SDK 与真实 stdio 子进程的协议、授权、幂等和生命周期检查见 [MCP 互操作说明](./mcp-interoperability.md)，Standard / Full 应分别执行；SDK 检查不代替目标应用中的正式连接验收。
 
-StepFun `step-5-preview` 已通过独立最小 Responses 连通性检查，并接入静态 create、严格输出、持久任务及 token-only 账本；OpenAI Responses 也可在显式配置 `ai.model` 后走相同有界链路。费用未知时两者均不做金额预留或金额门槛，只记录可信 token，不表示免费。默认仍使用 fake，需显式配置 provider、型号、凭据和生成同意后才会发请求；本机尚未完成真实应用内调用、真实 usage 字段或模型质量验收。凭据浏览器检查使用合成密钥与显式内存后端；StepFun 的界面路径可用 `node scripts/check-ai-credential-browser.js --stepfun` 定向检查。
+StepFun `step-5-preview` 已通过独立最小 Responses 连通性检查，并接入静态 create、严格输出、持久任务及 token-only 账本；OpenAI Responses 也可在显式配置 `ai.model` 后走相同有界链路。费用未知不阻挡功能。默认仍使用 fake，需显式配置 provider、型号、凭据和生成同意后才会发请求。2026-10-21 曾通过本机应用对 StepFun `/v1 + step-5-preview` 派发一条真实任务，服务返回 HTTP 402，终态为 `failed/provider_error` 且未生成提案；没有重试，也没有人工模型质量结论。该结果更新了“尚无应用内调用”的历史状态，但不代表成功接入验收。评测阶段可按功能目标省略用量与费用统计；未验证云服务模型质量、数据条款或跨 OS 行为。凭据浏览器检查使用合成密钥与显式内存后端；StepFun 的界面路径可用 `node scripts/check-ai-credential-browser.js --stepfun` 定向检查。
 
 浏览器检查需要 Playwright 和已构建服务，可通过 `PLAYWRIGHT_MODULE`、`HERTZ_BIN` 指定。独立账本检查另需 Python 标准库 sqlite3 写入隔离测试数据，可通过 `PYTHON` 指定解释器；产品运行不依赖 Python。生成契约时运行 `node scripts/export-stage-contract.js`，服务端 JSON 和浏览器材料必须一起更新。全场景检查加载真实 GL、动画场景、背景、手绘、舞台及分享 codec；浏览器检查覆盖待执行的 400ms 保存、取消、切页、关闭、编辑失效和确认保存。自动化结论不代替真实 DBX、弱机 GPU 或正式 MCP 客户端验收。

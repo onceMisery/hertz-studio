@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
 const { isIP } = require('node:net');
+const { uiToken } = require('./ui-token');
 
 const ROOT = path.resolve(__dirname, '..');
 const DATA_ROOT = path.join(ROOT, 'evals/stage-intent');
@@ -20,6 +21,7 @@ const THRESHOLDS = Object.freeze({ supportedSchemaRate: 0.98, protocolStructureR
   humanSemanticPassRate: 0.9, maxTruncationRate: 0.01, p95MsBelow: 30000 });
 const LOCAL_KINDS = ['candidate','refused','truncated','invalid_intent','invalid_json',
   'invalid_protocol','transport_or_configuration','timeout'];
+const MANAGED_KINDS = [...LOCAL_KINDS,'provider_error','cancelled'];
 const isHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const DRIVER_FINGERPRINT = sha(fs.readFileSync(__filename,'utf8').replace(/\r\n/g,'\n'));
 function ensure(value, message) { if (!value) throw Error(message); }
@@ -187,14 +189,17 @@ function summarize(cases, rows, reviews, meta, harness) {
   const complete = rows.length === cases.length && meta.sampleComplete === true && meta.status === 'completed';
   const latency = { p50Ms: percentile(rows.map(r => r.elapsedMs),0.5), p95Ms: percentile(rows.map(r => r.elapsedMs),0.95) };
   const rate = (n,d) => d ? n/d : null;
+  const accountingMetrics = meta.executionMode === 'managed'
+    ? { accounting: 'not_recorded' }
+    : { usageKnown, usageMissing: rows.length-usageKnown, outputBoundExceeded: outputExceeded,
+      localPriceMicroUsd: '0', externalInvoiceVerified: false };
   const metrics = { samples: rows.length, expectedSamples: cases.length, autoMatched: matched,
     supportedSamples: expectedSupported, supportedSchemaRate: rate(supportedAccepted,expectedSupported),
     protocolStructureRate: rate(accepted+(failures.refused || 0),cases.length),
     falseAcceptances: falseAccept, falseRejections: falseReject, criticalFailures: critical,
     truncated: failures.truncated || 0, truncationRate: rate(failures.truncated || 0,rows.length),
     humanReviewedSupported: reviewed, humanSemanticPassRate: reviewed === expectedSupported ? rate(semanticPass,expectedSupported) : null,
-    usageKnown, usageMissing: rows.length-usageKnown, outputBoundExceeded: outputExceeded,
-    localPriceMicroUsd: '0', externalInvoiceVerified: false, ...latency, outcomes: failures, categories };
+    ...accountingMetrics, ...latency, outcomes: failures, categories };
   const reasons = [];
   if (expectedSupported && metrics.supportedSchemaRate < THRESHOLDS.supportedSchemaRate) reasons.push('supported_schema_below_candidate_threshold');
   if (metrics.protocolStructureRate === null || metrics.protocolStructureRate < THRESHOLDS.protocolStructureRate) reasons.push('protocol_structure_below_candidate_threshold');
@@ -203,7 +208,8 @@ function summarize(cases, rows, reviews, meta, harness) {
   if (critical || falseAccept || outputExceeded) reasons.push('critical_or_bound_failure');
   if (metrics.humanSemanticPassRate !== null && metrics.humanSemanticPassRate < THRESHOLDS.humanSemanticPassRate) reasons.push('human_semantics_below_candidate_threshold');
   if (!complete) reasons.push('incomplete_sample');
-  return { reportVersion: 1, runId: meta.runId, provider: meta.provider, split: meta.split,
+  return { reportVersion: 1, runId: meta.runId, executionMode: meta.executionMode || 'offline',
+    provider: meta.provider, split: meta.split,
     corpusVersion: meta.corpusVersion,
     model:meta.model, round:meta.round, protocolFingerprint:meta.protocolFingerprint,
     materializerFingerprint:meta.materializerFingerprint, evaluatorFingerprint:meta.evaluatorFingerprint,
@@ -222,23 +228,31 @@ function validateRow(row, meta, contract) {
   ensure(row.schemaHash === contract.schemaHash && isHash(row.protocolFingerprint) && isHash(row.requestHash),
     'Evaluator contract/fingerprint mismatch');
   ensure(Number.isFinite(row.elapsedMs) && row.elapsedMs >= 0, 'Invalid elapsed time');
-  ensure((meta.provider === 'ollama-local' ? LOCAL_KINDS : ['candidate','refused','baseline_no_match']).includes(row.kind),
+  const allowedKinds = meta.executionMode === 'managed' ? MANAGED_KINDS
+    : meta.provider === 'ollama-local' ? LOCAL_KINDS : ['candidate','refused','baseline_no_match'];
+  ensure(allowedKinds.includes(row.kind),
     'Unknown evaluation outcome');
   ensure(row.kind === 'candidate' ? row.intent && typeof row.intent === 'object' : row.intent === null,
     'Outcome and intent disagree');
-  ensure(row.reservationMicroUsd === '0' && row.localPriceMicroUsd === '0' && row.externalInvoiceVerified === false,
-    'Local-only evaluation pricing mismatch');
-  if (meta.provider === 'ollama-local') {
+  if (meta.executionMode === 'managed') {
+    ensure(row.accounting === 'not_recorded' && !Object.hasOwn(row,'usage')
+      && !Object.hasOwn(row,'reservationMicroUsd') && !Object.hasOwn(row,'localPriceMicroUsd')
+      && !Object.hasOwn(row,'externalInvoiceVerified'), 'Managed evaluation must omit usage and cost fields');
+  } else ensure(row.reservationMicroUsd === '0' && row.localPriceMicroUsd === '0'
+    && row.externalInvoiceVerified === false, 'Local-only evaluation pricing mismatch');
+  if (meta.provider === 'ollama-local' && meta.executionMode === 'local') {
     ensure(typeof row.buildVersion === 'string' && row.buildVersion && Number.isSafeInteger(row.requestBytes)
       && row.requestBytes > 0 && row.requestBytes <= 128*1024, 'Missing CLI build/request identity');
     ensure(row.basePresetHashes && Object.keys(row.basePresetHashes).length === Object.keys(contract.basePresetHashes).length
       && Object.entries(contract.basePresetHashes).every(([key,hash]) => row.basePresetHashes[key] === hash),
     'Evaluator base preset mismatch');
   }
-  ensure(row.usage === null || (row.usage && ['inputTokens','outputTokens'].every(key =>
-    typeof row.usage[key] === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(row.usage[key])
-    && BigInt(row.usage[key]) <= 18446744073709551615n)
-    && row.usage.withinOutputBound === (BigInt(row.usage.outputTokens) <= 512n)), 'Invalid normalized usage');
+  if (meta.executionMode !== 'managed') {
+    ensure(row.usage === null || (row.usage && ['inputTokens','outputTokens'].every(key =>
+      typeof row.usage[key] === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(row.usage[key])
+      && BigInt(row.usage[key]) <= 18446744073709551615n)
+      && row.usage.withinOutputBound === (BigInt(row.usage.outputTokens) <= 512n)), 'Invalid normalized usage');
+  }
 }
 
 function loadRun(dir, corpus, harness, reviewFile) {
@@ -250,9 +264,14 @@ function loadRun(dir, corpus, harness, reviewFile) {
     'Evaluation sources changed: use the original revision or create a new run');
   ensure(meta.evaluatorFingerprint === DRIVER_FINGERPRINT,
     'Evaluation driver changed: use the original revision or create a new run');
-  ensure(['offline-rules','ollama-local'].includes(meta.provider) && ['development','holdout'].includes(meta.split)
+  const validProvider = meta.executionMode === 'managed'
+    ? ['fake','ollama-local','openai','stepfun'].includes(meta.provider)
+    : ['offline-rules','ollama-local'].includes(meta.provider);
+  ensure(validProvider && ['development','holdout'].includes(meta.split)
     && typeof meta.model === 'string' && meta.model, 'Invalid run identity');
-  if (meta.provider === 'ollama-local') ensure(isHash(meta.binarySha256), 'Missing CLI executable fingerprint');
+  if (meta.executionMode === 'local' && meta.provider === 'ollama-local') {
+    ensure(isHash(meta.binarySha256), 'Missing CLI executable fingerprint');
+  }
   const cases = corpus.cases.filter(item => item.split === meta.split);
   ensure(Array.isArray(meta.selectedCases) && meta.selectedCases.length > 0 && meta.selectedCases.length <= cases.length
     && meta.selectedCases.every((id,i) => id === cases[i].id), 'Invalid selected case coverage');
@@ -269,7 +288,9 @@ function loadRun(dir, corpus, harness, reviewFile) {
   for (const row of rows) {
     validateRow(row,meta,corpus.contract);
     ensure(row.protocolFingerprint === meta.protocolFingerprint, 'Saved protocol identity changed within a round');
-    if (meta.provider === 'ollama-local') ensure(row.buildVersion === rows[0].buildVersion, 'CLI build changed within a round');
+    if (meta.executionMode === 'local' && meta.provider === 'ollama-local') {
+      ensure(row.buildVersion === rows[0].buildVersion, 'CLI build changed within a round');
+    }
   }
   const reviews = readJson(reviewFile || path.join(dir,'reviews.json'));
   const report = summarize(cases,rows,reviews,meta,harness);
@@ -313,9 +334,70 @@ async function childCase(binary, origin, model, item, signal, contract = loadCor
   });
 }
 
+async function managedFetch(server, token, pathname, options = {}, signal, responseLimit = 256*1024) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs || 45000);
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  else signal?.addEventListener('abort', abort, { once:true });
+  try {
+    const response = await fetch(new URL(pathname,server), {
+      method: options.method || 'GET',
+      headers: { Authorization:'Bearer '+token, ...(options.body ? {'Content-Type':'application/json'} : {}) },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      redirect:'error', signal:controller.signal,
+    });
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      ensure(size <= responseLimit, 'Managed evaluator response exceeds its bound');
+      chunks.push(chunk);
+    }
+    let value;
+    try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+    catch (_) { throw Error('Managed evaluator returned invalid JSON; no automatic retry'); }
+    if (!response.ok) {
+      const code = value?.error?.code;
+      throw Error('Managed evaluator request failed ('+response.status+(code ? ', '+code : '')+'); no automatic retry');
+    }
+    return value;
+  } catch (error) {
+    if (error.message?.includes('no automatic retry') || error.message?.includes('exceeds its bound')) throw error;
+    throw Error('Managed evaluator request failed; no automatic retry');
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort',abort);
+  }
+}
+
+async function managedIdentity(server, token, signal) {
+  const status = await managedFetch(server,token,'/v1/ai/evaluation/status',{},signal,16*1024);
+  ensure(typeof status.provider === 'string' && typeof status.model === 'string'
+    && typeof status.providerReady === 'boolean' && typeof status.generationConsent === 'boolean'
+    && typeof status.runnerReady === 'boolean', 'Managed evaluator status is malformed');
+  ensure(['fake','ollama-local','openai','stepfun'].includes(status.provider),
+    'Configured provider is not supported by managed stage evaluation');
+  ensure(status.runnerReady, 'Managed evaluator requires the active local AI runner');
+  ensure(status.generationConsent, 'Managed evaluator requires generation consent');
+  ensure(status.providerReady, 'Configured provider is not ready');
+  return status;
+}
+
+async function managedCase(server, token, item, meta, signal, contract = loadCorpus().contract) {
+  const row = await managedFetch(server,token,'/v1/ai/evaluation/case',{
+    method:'POST',body:{caseId:item.id,brief:item.brief},timeoutMs:45000,
+  },signal,256*1024);
+  ensure(row.caseId === item.id, 'Managed evaluator case identity mismatch');
+  ensure(row.provider === meta.provider && row.model === meta.model,
+    'Configured provider/model changed during this round');
+  validateRow(row,meta,contract);
+  return row;
+}
+
 function options(argv) {
-  const flags = new Set(['--validate','--baseline','--run-local','--allow-holdout']);
-  const values = new Set(['--corpus','--out','--split','--model','--origin','--binary','--limit','--round','--report','--reviews','--export-review',
+  const flags = new Set(['--validate','--baseline','--run-local','--run-managed','--allow-holdout']);
+  const values = new Set(['--corpus','--out','--split','--model','--origin','--server','--binary','--limit','--round','--report','--reviews','--export-review',
     '--compare','--against','--before-reviews','--after-reviews']);
   const result = {};
   for (let i=0; i<argv.length; i++) {
@@ -410,12 +492,13 @@ async function exportReview(dir, run, corpus, harness) {
 
 async function main(argv = process.argv.slice(2)) {
   const opts = options(argv);
-  const modes = ['--validate','--baseline','--run-local','--report','--compare','--export-review'].filter(key=>opts[key]);
+  const modes = ['--validate','--baseline','--run-local','--run-managed','--report','--compare','--export-review'].filter(key=>opts[key]);
   ensure(modes.length <= 1, 'Choose exactly one evaluation mode');
   if (modes.length) {
     const allowed = {
       '--validate': ['--corpus'], '--baseline':['--corpus','--split','--allow-holdout','--out','--limit'],
       '--run-local':['--corpus','--split','--allow-holdout','--out','--limit','--binary','--origin','--model','--round'],
+      '--run-managed':['--corpus','--split','--allow-holdout','--out','--limit','--server','--round'],
       '--report':['--corpus','--reviews'], '--compare':['--corpus','--against','--before-reviews','--after-reviews'],
       '--export-review':['--corpus','--out'],
     }[modes[0]];
@@ -449,33 +532,47 @@ async function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify(report,null,2));
     return;
   }
-  ensure(!!opts['--baseline'] !== !!opts['--run-local'], 'Choose exactly one of --baseline / --run-local');
+  ensure(Number(!!opts['--baseline']) + Number(!!opts['--run-local']) + Number(!!opts['--run-managed']) === 1,
+    'Choose exactly one of --baseline / --run-local / --run-managed');
   const split = opts['--split'] || 'development';
   ensure(split === 'development' || (split === 'holdout' && opts['--allow-holdout']), 'Reserved split requires --allow-holdout');
   ensure(opts['--out'], 'A new --out directory is required');
   const dir = path.resolve(opts['--out']);
   ensure(!fs.existsSync(dir), 'Run directory already exists; never overwrite a model round');
   const allCases = corpus.cases.filter(item => item.split === split);
-  const limit = opts['--limit'] === undefined ? allCases.length : Number(opts['--limit']);
+  const defaultLimit = opts['--run-managed'] ? 1 : allCases.length;
+  const limit = opts['--limit'] === undefined ? defaultLimit : Number(opts['--limit']);
   ensure(Number.isSafeInteger(limit) && limit > 0 && limit <= allCases.length, 'Invalid sample limit');
   const cases = allCases.slice(0,limit);
   const binary = path.resolve(opts['--binary'] || process.env.HERTZ_BIN || path.join(ROOT,'target/debug',process.platform==='win32'?'hertz-studio.exe':'hertz-studio'));
   if (opts['--run-local']) ensure(opts['--model'] && opts['--origin'] && opts['--round'], 'Local run requires explicit --model, --origin and --round');
+  if (opts['--run-managed']) ensure(opts['--server'] && opts['--round'], 'Managed run requires explicit --server and --round');
   if (opts['--run-local']) {
     ensure(/^[1-9][0-9]{0,2}$/.test(opts['--round']), 'Round must be a positive integer below 1000');
     ensure(/^[A-Za-z0-9._/:\-]{1,128}$/.test(opts['--model']) && !/cloud/i.test(opts['--model']),
       'Select an installed local model');
     opts['--origin'] = localOrigin(opts['--origin']);
   }
+  if (opts['--run-managed']) {
+    ensure(/^[1-9][0-9]{0,2}$/.test(opts['--round']), 'Round must be a positive integer below 1000');
+    opts['--server'] = localOrigin(opts['--server']);
+  }
+  const token = opts['--run-managed'] ? uiToken() : null;
+  const managed = opts['--run-managed']
+    ? await managedIdentity(opts['--server'],token,new AbortController().signal) : null;
   const meta = { runId:crypto.randomUUID(), startedAt:new Date().toISOString(), split,
+    executionMode:opts['--run-managed'] ? 'managed' : opts['--run-local'] ? 'local' : 'offline',
+    accounting:opts['--run-managed'] ? 'not_recorded' : undefined,
     corpusVersion:corpus.version,
     corpusSha256:corpus.manifest.corpusSha256, schemaHash:corpus.manifest.schemaHash,
-    provider:opts['--baseline']?'offline-rules':'ollama-local', model:opts['--model'] || 'offline-rules',
+    provider:managed?.provider || (opts['--baseline']?'offline-rules':'ollama-local'),
+    model:managed?.model || opts['--model'] || 'offline-rules',
     round:opts['--round'] || 'baseline', selectedCases:cases.map(item=>item.id), sampleComplete:cases.length === allCases.length,
     materializerFingerprint:harness.fingerprint,
     evaluatorFingerprint:DRIVER_FINGERPRINT,
     binarySha256:opts['--run-local'] ? await fileSha(binary) : null,
     origin:opts['--origin'] || null,
+    serverOrigin:opts['--server'] || null,
     baselineContext:opts['--baseline'] ? 'canonical towers when offline rules omit a scene; no active user preset' : null,
     status:'running' };
   fs.mkdirSync(path.dirname(dir),{recursive:true}); fs.mkdirSync(dir);
@@ -506,6 +603,8 @@ async function main(argv = process.argv.slice(2)) {
           kind:offlineOutcome(compiled), intent, usage:null,
           reservationMicroUsd:'0', localPriceMicroUsd:'0', externalInvoiceVerified:false,
           baselineWarnings:clone(compiled.warnings) };
+      } else if (opts['--run-managed']) {
+        row = await managedCase(opts['--server'],token,item,meta,interruption.signal,corpus.contract);
       } else row = await childCase(binary,opts['--origin'],opts['--model'],item,interruption.signal,corpus.contract);
       validateRow(row,meta,corpus.contract);
       if (rows.length) ensure(row.protocolFingerprint === rows[0].protocolFingerprint, 'Model protocol changed within a round');
@@ -513,6 +612,10 @@ async function main(argv = process.argv.slice(2)) {
       rows.push(row);
       fs.appendFileSync(results,JSON.stringify(row)+'\n');
       process.stderr.write(item.id + ': ' + row.kind + '\n');
+      if (opts['--run-managed']
+          && ['provider_error','transport_or_configuration','timeout','cancelled'].includes(row.kind)) {
+        throw Error('Managed provider stopped this round after '+row.kind+'; no automatic retry');
+      }
     }
     if (opts['--run-local']) ensure(await fileSha(binary) === meta.binarySha256, 'CLI executable changed within a round');
     ensure(!interruption.signal.aborted, 'Evaluation interrupted; no automatic retry');
@@ -533,6 +636,7 @@ async function main(argv = process.argv.slice(2)) {
   console.log(JSON.stringify(report,null,2));
 }
 
-module.exports = { loadCorpus, stageHarness, offlineOutcome, assess, summarize, validateRow, loadRun, compareRuns, exportReview, childCase, main,
+module.exports = { loadCorpus, stageHarness, offlineOutcome, assess, summarize, validateRow, loadRun, compareRuns,
+  exportReview, childCase, managedFetch, managedIdentity, managedCase, main,
   driverFingerprint:DRIVER_FINGERPRINT };
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode=1; });
