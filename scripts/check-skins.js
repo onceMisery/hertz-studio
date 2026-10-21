@@ -218,6 +218,29 @@ function checkCatalog() {
   s5.Skins.init();
   eq(r5.getAttribute('data-skin'), 'qingfeng', '重开后落回 qingfeng（不是 classic）');
 
+  section('默认皮肤：星轨');
+  const orbitDef = { id: 'orbit', name: '星轨', note: '侧栏导航、立体唱片与常驻队列' };
+  const d = makeSandbox(['orbit', 'classic']);
+  d.sandbox.Skins.register(orbitDef);
+  d.sandbox.Skins.init();
+  eq(d.root.getAttribute('data-skin'), 'orbit', '没有存过皮肤时默认星轨');
+  eq(d.links[0].disabled, false, '星轨 CSS 默认启用');
+
+  const migrated = makeSandbox(['orbit', 'classic']);
+  migrated.sandbox.Skins.register(orbitDef);
+  migrated.store.set('vmusic.skin', 'classic');
+  migrated.sandbox.Skins.init();
+  eq(migrated.root.getAttribute('data-skin'), 'orbit', '旧默认 classic 一次性迁到星轨');
+  migrated.sandbox.Skins.apply('classic');
+  migrated.sandbox.Skins.init();
+  eq(migrated.root.getAttribute('data-skin'), 'classic', '迁移过一次后尊重用户选择');
+
+  const chosen = makeSandbox(['orbit', 'sheen']);
+  chosen.sandbox.Skins.register(orbitDef);
+  chosen.store.set('vmusic.skin', 'sheen');
+  chosen.sandbox.Skins.init();
+  eq(chosen.root.getAttribute('data-skin'), 'sheen', '明确选过的其它皮肤不被默认值改动');
+
   section('插件形态：皮肤 CSS 被内联成 <style>，切换照样生效');
   const { sandbox: s4, root: r4, links: styles } =
     makeSandbox(['sheen', 'liunian', 'qingfeng'], 'style');
