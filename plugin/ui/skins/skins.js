@@ -251,7 +251,7 @@
       firstDefault = localStorage.getItem(DEFAULT_MARKER) === null;
     } catch (e) { saved = null; }
     var def = saved ? byId(saved) : null;
-    // 存过但不认识（比如皮肤被删了）回落默认；存的是**已隐藏**的皮肤同样
+    // 存过但不认识（比如皮肤被删了）回落默认皮肤；存的是**已隐藏**的皮肤同样
     // 回落——界面上已经没有它的入口，继续停在里面等于把用户锁在一套换不回来
     // 的布局里。
     var start = def && !def.hidden ? saved : DEFAULT_ID;
@@ -266,8 +266,8 @@
       } catch (e) { /* 隐私模式下只影响本次启动 */ }
     }
     apply(start, { silent: true });
-    if (def && def.hidden) {
-      // init 走 silent 不写盘，这里补一次：否则下次开页又读回那个没有入口的皮肤。
+    if (saved && (!def || def.hidden)) {
+      // init 走 silent 不写盘，这里补一次，避免下次继续读取无效偏好。
       try { localStorage.setItem(KEY, start); } catch (e) { /* 隐私模式 */ }
     }
     bindEntry();

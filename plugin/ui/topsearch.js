@@ -460,6 +460,16 @@
     else renderEmptyState();
   }
 
+  function onOnlineViewEnter() {
+    if (state.kind !== 'local') return;
+    var o = online();
+    var kind = o && o.state ? o.state.kind || 'song' : 'song';
+    if (kind === 'local' || !kindAllowed(kind, o && o.state && o.state.source)) kind = 'song';
+    state.kind = kind;
+    syncPlaceholder();
+    renderChips();
+  }
+
   function notifyLocalFilter() {
     // 本地筛选的落地在 app.js（state.q → loadTracks → setView('library')），
     // 这里只负责把输入框的值交回去：程序化同步不触发 input 事件。
@@ -544,6 +554,7 @@
     onInput: onInput,
     kind: effectiveKind,
     setKind: setKind,
+    onOnlineViewEnter: onOnlineViewEnter,
     open: open,
     close: close,
     scopeChanged: scopeChanged,

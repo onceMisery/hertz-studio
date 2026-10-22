@@ -31,6 +31,7 @@ const WEB = path.join(__dirname, '..', 'plugin', 'ui');
 const read = (f) => fs.readFileSync(path.join(WEB, f), 'utf8').replace(/\r\n/g, '\n');
 const APP = read('app.js');
 const HTML = read('index.html');
+const SHELF = read('shelf.js');
 
 let failures = 0;
 let checks = 0;
@@ -49,6 +50,15 @@ function grab(name) {
   const end = APP.indexOf('\n}\n', start);
   if (end < 0) throw new Error(name + ' 的函数体没有以顶格 } 结束');
   return APP.slice(start + 1, end + 2);
+}
+
+function grabShelf(name) {
+  const head = '  function ' + name + '(';
+  const start = SHELF.indexOf('\n' + head);
+  if (start < 0) throw new Error('shelf.js 里找不到 ' + name);
+  const end = SHELF.indexOf('\n  }\n', start);
+  if (end < 0) throw new Error(name + ' 的函数体没有以顶格 } 结束');
+  return SHELF.slice(start + 1, end + 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +455,69 @@ function checkGridRendering() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. 接线：数据源、容器与键名
+// 5. 歌单架在线封面走代理，迟到结果不能覆盖复用槽位
+// ---------------------------------------------------------------------------
+
+async function checkShelfCoverProxy() {
+  section('歌单架：在线封面经共享代理，槽位复用后忽略迟到结果');
+
+  const asked = [];
+  const pending = [];
+  const sandbox = {
+    Promise,
+    JSON,
+    window: {
+      HertzCovers: {
+        resolve(url) {
+          asked.push(url);
+          return new Promise((resolve) => pending.push(resolve));
+        },
+      },
+      PlaylistCovers: { state: () => ({ s: 'none', hue: 160 }) },
+    },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(grabShelf('applyCover') + '\n__apply = applyCover;', sandbox, {
+    filename: 'shelf.js:applyCover',
+  });
+
+  const slot = {
+    el: makeEl(),
+    art: makeEl(),
+  };
+  slot.el.style.removeProperty = function (key) { delete this['_' + key]; };
+  const firstUrl = 'https://qq.example/playlist.jpg';
+  slot.el._bound = 'online:qq:q1';
+  sandbox.__apply(slot, { id: 'online:qq:q1', coverUrl: firstUrl });
+  eq(asked.length, 1, '在线封面交给 HertzCovers.resolve');
+  ok(!slot.el.style.getPropertyValue('--sleeve-art').includes('https://'),
+    '远程 URL 不直接写入歌单架 CSS');
+  if (!pending.length) return;
+
+  pending[0]('data:image/jpeg;base64,first');
+  await Promise.resolve();
+  await Promise.resolve();
+  eq(slot.el.style.getPropertyValue('--sleeve-art'),
+    'url("data:image/jpeg;base64,first")', 'CSS 使用代理返回的 data URL');
+  eq(slot.el.classList.contains('has-art'), true, '解析成功后才标记有封面');
+
+  slot.el._bound = 'online:qq:q2';
+  sandbox.__apply(slot, { id: 'online:qq:q2', coverUrl: 'https://qq.example/old.jpg' });
+  slot.el._bound = 'online:qq:q3';
+  sandbox.__apply(slot, { id: 'online:qq:q3', coverUrl: 'https://qq.example/current.jpg' });
+  pending[1]('data:image/jpeg;base64,stale');
+  await Promise.resolve();
+  await Promise.resolve();
+  eq(slot.el.style.getPropertyValue('--sleeve-art'), '',
+    '复用槽位后旧请求不能写回封面');
+  pending[2]('data:image/jpeg;base64,current');
+  await Promise.resolve();
+  await Promise.resolve();
+  eq(slot.el.style.getPropertyValue('--sleeve-art'),
+    'url("data:image/jpeg;base64,current")', '当前歌单的解析结果仍能显示');
+}
+
+// 6. 接线：数据源、容器与键名
 // ---------------------------------------------------------------------------
 
 function checkWiring() {
@@ -522,11 +594,12 @@ function checkWiring() {
 
 // ---------------------------------------------------------------------------
 
-(function main() {
+(async function main() {
   checkSwitching();
   checkDefaultView();
   checkDispatch();
   checkGridRendering();
+  await checkShelfCoverProxy();
   checkWiring();
 
   console.log('\n' + '─'.repeat(60));
@@ -535,4 +608,7 @@ function checkWiring() {
     process.exit(1);
   }
   console.log(`歌单浏览方式契约检查：${checks}/${checks} 全部通过`);
-})();
+})().catch((error) => {
+  console.error('harness error:', error);
+  process.exitCode = 2;
+});

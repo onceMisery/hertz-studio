@@ -93,7 +93,7 @@ async function browserContract() {
     const html = read('index.html'), spriteStart = html.indexOf('<svg id="icon-sprite"');
     const sprite = html.slice(spriteStart, html.indexOf('</svg>', spriteStart) + 6);
     await page.setContent(sprite + '<div id="sp-home"></div>');
-    await page.addStyleTag({ content: ':root { --bg:#171a1c; --text:#eff1f3; --muted:#a0a6ae; --accent:#71ceac; --sp-line:#42494e; --sp-line-soft:#292f33; } body {margin:0;font-family:Arial,sans-serif;} * {box-sizing:border-box;}' + read('space-home.css') });
+    await page.addStyleTag({ content: ':root { --bg:#171a1c; --text:#eff1f3; --muted:#a0a6ae; --accent:#71ceac; --sp-text:#eff1f3; --sp-muted:#a0a6ae; --sp-accent:#71ceac; --sp-accent-2:#ff8fb1; --sp-line:#42494e; --sp-line-soft:#292f33; } body {margin:0;font-family:Arial,sans-serif;} * {box-sizing:border-box;}' + read('space-home.css') });
     await page.addScriptTag({ content: read('space-home.js') });
     await page.evaluate(() => {
       window.actions = []; window.searches = []; window.libraryFailures = 0;
@@ -117,6 +117,33 @@ async function browserContract() {
     });
     await page.waitForFunction(() => document.querySelectorAll('.sh-discovery-list .sh-track').length === 2);
     assert.deepEqual(await page.evaluate(() => actions), [], 'entry never auto-plays');
+    const card = page.locator('.sh-action-library');
+    const cardBox = await card.boundingBox();
+    const restingTransform = await card.evaluate((node) => getComputedStyle(node).transform);
+    await page.mouse.move(cardBox.x + cardBox.width * 0.8, cardBox.y + cardBox.height * 0.2);
+    const tilt = await card.evaluate((node) => ({
+      x: node.style.getPropertyValue('--sp-tilt-x'),
+      y: node.style.getPropertyValue('--sp-tilt-y'),
+    }));
+    assert.notEqual(tilt.x, '', 'pointer movement sets the card pitch');
+    assert.notEqual(tilt.y, '', 'pointer movement sets the card yaw');
+    await page.waitForTimeout(450);
+    assert.notEqual(await card.evaluate((node) => getComputedStyle(node).transform), restingTransform,
+      'pointer movement visibly changes the card perspective');
+    const output = path.join(root, 'target', 'space-home-verification'); fs.mkdirSync(output, { recursive: true });
+    await page.screenshot({ path: path.join(output, 'desktop-card-hover.png') });
+    await page.mouse.move(1, 1);
+    const resetTilt = await card.evaluate((node) => [
+      node.style.getPropertyValue('--sp-tilt-x'),
+      node.style.getPropertyValue('--sp-tilt-y'),
+    ]);
+    assert.deepEqual(resetTilt, ['', ''], 'pointer leave clears transient tilt');
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.mouse.move(cardBox.x + cardBox.width * 0.8, cardBox.y + cardBox.height * 0.2);
+    const reducedTilt = await card.evaluate((node) => node.style.getPropertyValue('--sp-tilt-x'));
+    assert.equal(reducedTilt, '', 'reduced motion suppresses pointer tilt');
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.mouse.move(1, 1);
     await page.locator('.sh-action-continue').click(); assert.equal(await page.evaluate(() => actions.at(-1)), 'resume');
     await page.locator('.sh-action-continue').click(); assert.equal(await page.evaluate(() => actions.at(-1)), 'queue');
     await page.locator('.sh-action-library').click(); await page.waitForSelector('.sh-panel-body .sh-track');
@@ -167,7 +194,6 @@ async function browserContract() {
     await page.waitForSelector('.sh-panel-body .sh-track');
     assert.equal(await page.locator('.sh-panel-body .sh-state').filter({hasText:'仅显示本地结果'}).count(), 1,
       'removed provider falls back to All and reports local-only results');
-    const output = path.join(root, 'target', 'space-home-verification'); fs.mkdirSync(output, { recursive: true });
     await page.screenshot({ path: path.join(output, 'desktop-panel.png') });
     await page.evaluate(() => SpaceHome.closePanel()); await page.screenshot({ path: path.join(output, 'desktop-home.png') });
     await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: path.join(output, 'mobile-home.png') });

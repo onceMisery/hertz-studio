@@ -168,8 +168,12 @@
       return;
     }
     try {
-      var lists = await tr().get('/v1/online/playlists?source=' + encodeURIComponent(sourceId)
-        + '&scope=created&limit=30&offset=0');
+      var playlistUrl = '/v1/online/playlists?source=' + encodeURIComponent(sourceId);
+      var lists = await tr().get(playlistUrl + '&scope=created&limit=30&offset=0');
+      if (sourceId === 'qq') {
+        var liked = await tr().get(playlistUrl + '&scope=liked&limit=30&offset=0');
+        lists = (lists || []).concat(liked || []);
+      }
       state.lists[sourceId] = lists || [];
       renderGrid();
     } catch (e) {

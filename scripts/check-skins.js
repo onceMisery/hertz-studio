@@ -156,6 +156,7 @@ function makeSandbox(cssIds, carrier) {
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(SKINS_JS, sandbox, { filename: 'skins.js' });
+  sandbox.Skins.register({ id: 'orbit', name: '星轨', note: '侧栏导航、立体唱片与常驻队列' });
   return { sandbox, root, body: sandboxBody, links, listHost, skinBtn, skinMenu, store, events };
 }
 
@@ -164,7 +165,7 @@ function makeSandbox(cssIds, carrier) {
 // ---------------------------------------------------------------------------
 
 function checkCatalog() {
-  section('皮肤目录：经典默认布局与可选皮肤');
+  section('皮肤目录：星轨默认布局与可选皮肤');
 
   const { sandbox, root, links, listHost } = makeSandbox(['sheen', 'liunian', 'qingfeng', 'classic']);
   const ids = sandbox.Skins.catalog().map((s) => s.id);
@@ -204,12 +205,13 @@ function checkCatalog() {
     '切肤后广播 skin:changed（舞台/3D 这类要按新尺寸重排）');
 
   section('持久化：选择被记住，坏数据回落而不是写个无效值');
-  const { sandbox: s3, store } = makeSandbox(['sheen', 'liunian']);
+  const { sandbox: s3, store } = makeSandbox(['sheen', 'liunian', 'orbit']);
   s3.Skins.apply('liunian');
   eq(store.get('vmusic.skin'), 'liunian', '选择写进 localStorage');
   store.set('vmusic.skin', 'no-such-skin');
   s3.Skins.init();
-  eq(s3.Skins.currentId(), 'classic', '存了不认识的皮肤时回落 classic');
+  eq(s3.Skins.currentId(), 'orbit', '存了不认识的皮肤时回落默认星轨');
+  eq(store.get('vmusic.skin'), 'orbit', '回落同时把无效存档冲掉（下次开页不再读回它）');
 
   section('持久化：清风的选择能被记住并复原');
   const { sandbox: s5, root: r5, store: st5 } = makeSandbox(['sheen', 'qingfeng']);
@@ -243,13 +245,13 @@ function checkCatalog() {
 
   section('插件形态：皮肤 CSS 被内联成 <style>，切换照样生效');
   const { sandbox: s4, root: r4, links: styles } =
-    makeSandbox(['sheen', 'liunian', 'qingfeng'], 'style');
+    makeSandbox(['sheen', 'liunian', 'qingfeng', 'orbit'], 'style');
   eq(styles.every((s) => s.disabled === false), true,
-    'style 的 disabled 内容属性不生效，进来时三份都是启用的');
+    'style 的 disabled 内容属性不生效，进来时四份都是启用的');
   s4.Skins.init();
-  eq(r4.getAttribute('data-skin'), 'classic', '启动落位在 classic');
-  eq(styles.every((s) => s.disabled === true), true,
-    '启动就把三份皮肤 CSS 全关掉（同时生效会把三套布局叠在一起）');
+  eq(r4.getAttribute('data-skin'), 'orbit', '插件启动默认落位在星轨');
+  eq(styles.every((s) => s.getAttribute('data-skin-css') === 'orbit' ? !s.disabled : s.disabled), true,
+    '插件启动只启用星轨 CSS（其它布局不会叠在一起）');
   s4.Skins.apply('liunian');
   eq(r4.getAttribute('data-skin'), 'liunian', 'style 载体也认得出皮肤，没有回落 classic');
   eq(styles[1].disabled, false, 'liunian 的 CSS 被启用');
@@ -268,7 +270,7 @@ function checkSkinEntry() {
   section('顶栏皮肤入口：与设置页同源，切完两处一起跟上');
 
   const { sandbox, root, body: skinBody, listHost, skinBtn, skinMenu } =
-    makeSandbox(['sheen', 'liunian', 'qingfeng']);
+    makeSandbox(['sheen', 'liunian', 'qingfeng', 'orbit']);
   sandbox.Skins.init();
 
   // 弹层的行是在**展开那一刻**渲染的（init 只绑不画），所以先点按钮再读。
@@ -283,7 +285,7 @@ function checkSkinEntry() {
   ok(rows.every((r) => r.getAttribute('role') === 'menuitemradio'), '每行都是 menuitemradio（单选语义）');
   const on = rows.filter((r) => r.getAttribute('aria-checked') === 'true');
   eq(on.length, 1, '只标记一个当前项');
-  eq(on[0] && on[0].getAttribute('data-skin-id'), 'classic', '当前项就是当前皮肤');
+  eq(on[0] && on[0].getAttribute('data-skin-id'), 'orbit', '弹层初始选中默认星轨');
 
   const pick = rows.filter((r) => r.getAttribute('data-skin-id') === 'sheen')[0];
   pick.onclick();

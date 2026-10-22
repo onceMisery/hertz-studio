@@ -92,13 +92,39 @@
     }
   }
 
-  // 封面两路：在线卡直接带平台封面直链（coverUrl）；本地卡走共享的
-  // PlaylistCovers 两跳解析，拿不到时用稳定色相占位。
+  // 在线卡的 coverUrl 经 HertzCovers 解析；本地卡走 PlaylistCovers 两跳解析，
+  // 拿不到封面时保留稳定色相占位。
   function applyCover(slot, item) {
+    var revision = (slot.coverRevision || 0) + 1;
+    slot.coverRevision = revision;
+    function applyArt(url) {
+      if (slot.coverRevision !== revision || slot.el._bound !== item.id) return;
+      slot.el.classList.toggle('has-art', !!url);
+      if (url) {
+        slot.art.style.backgroundColor = '';
+        slot.el.style.setProperty('--sleeve-art', 'url(' + JSON.stringify(url) + ')');
+      } else {
+        slot.el.style.removeProperty('--sleeve-art');
+        slot.art.style.backgroundColor = '';
+      }
+    }
+
     if (item.coverUrl) {
-      slot.el.classList.add('has-art');
+      slot.el.classList.remove('has-art');
+      slot.el.style.removeProperty('--sleeve-art');
       slot.art.style.backgroundColor = '';
-      slot.el.style.setProperty('--sleeve-art', 'url(' + JSON.stringify(item.coverUrl) + ')');
+      var covers = window.HertzCovers;
+      if (!covers || typeof covers.resolve !== 'function') {
+        applyArt(item.coverUrl);
+        return;
+      }
+      try {
+        Promise.resolve(covers.resolve(item.coverUrl)).then(applyArt, function () {
+          applyArt(null);
+        });
+      } catch (e) {
+        applyArt(null);
+      }
       return;
     }
     var st = window.PlaylistCovers.state(item.id);

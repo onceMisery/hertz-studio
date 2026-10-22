@@ -149,6 +149,9 @@ async fn search_get(
 
     // 上游在触发风控时会返回 code != 200，或者干脆返回 HTML 登录页。
     let code = body.get("code").and_then(|v| v.as_i64()).unwrap_or(200);
+    if code == 405 {
+        return Err(ApiError::rate_limited("网易云搜索请求过于频繁，请稍后重试").with_source(ID));
+    }
     if code != 200 {
         invalidate_visitor(&body).await;
         expect_200(&body, "搜索")?;

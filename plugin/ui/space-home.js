@@ -28,6 +28,31 @@
     b.setAttribute('aria-label', label); b.innerHTML = icon(name);
     b.addEventListener('click', action); return b;
   }
+  function bindDepthTilt(target) {
+    if (!target) return;
+    function reset() {
+      target.style.removeProperty('--sp-tilt-x');
+      target.style.removeProperty('--sp-tilt-y');
+      target.style.removeProperty('--sp-glare-x');
+      target.style.removeProperty('--sp-glare-y');
+    }
+    target.addEventListener('pointermove', function (event) {
+      if (event.pointerType === 'touch'
+        || global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        reset(); return;
+      }
+      var bounds = target.getBoundingClientRect();
+      if (!bounds.width || !bounds.height) return;
+      var x = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+      var y = Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height));
+      target.style.setProperty('--sp-tilt-x', ((0.5 - y) * 14).toFixed(2) + 'deg');
+      target.style.setProperty('--sp-tilt-y', ((x - 0.5) * 18).toFixed(2) + 'deg');
+      target.style.setProperty('--sp-glare-x', (x * 100).toFixed(1) + '%');
+      target.style.setProperty('--sp-glare-y', (y * 100).toFixed(1) + '%');
+    });
+    target.addEventListener('pointerleave', reset);
+    target.addEventListener('pointercancel', reset);
+  }
   function run(action, control) {
     if (!host || (control && control.disabled)) return Promise.resolve();
     if (control) control.disabled = true;
@@ -75,6 +100,7 @@
     el.searchDock = root.querySelector('.sh-header'); el.searchModes = root.querySelector('.sh-search-modes');
     el.video = root.querySelector('.sh-video'); el.videoInput = root.querySelector('.sh-video-input'); el.videoClear = root.querySelector('.sh-video-clear');
     el.nextUp = root.querySelector('.sh-next-up');
+    bindDepthTilt(el.nextUp);
     if (callbacks.chromeRoot) { callbacks.chromeRoot.append(el.searchDock, el.panelLayer); }
     el.search.addEventListener('submit', function (event) {
       event.preventDefault(); search(true);
@@ -130,6 +156,7 @@
         + '<span class="sh-action-copy"><span class="sh-eyebrow">' + entry[1] + '</span><strong>' + entry[2] + '</strong><span class="sh-action-detail"></span></span>'
         + '<span class="sh-action-foot"><span class="sh-action-open">→ 打开</span>' + (entry[0] === 'continue' || entry[0] === 'radio' ? equalizer() : '') + '</span>'
         + '<span class="sh-action-cover">' + icon(entry[3]) + '<img alt=""></span>';
+      bindDepthTilt(b);
       b.addEventListener('click', function () {
         if (entry[0] === 'continue') return continuePlayback(b);
         openEntry({ kind: entry[0], source: entry[0] === 'daily' ? 'online' : 'local', offset: 0 });

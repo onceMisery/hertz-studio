@@ -58,6 +58,16 @@
     refs.currentArtist.textContent = track && track.artist || byId('now-artist').textContent;
     refs.currentTitle.title = refs.currentTitle.textContent;
     refs.currentArtist.title = refs.currentArtist.textContent;
+    refs.currentSource.replaceChildren();
+    if (track && track.source && window.Online && window.Online.badge) {
+      refs.currentSource.appendChild(window.Online.badge(track.source));
+      refs.currentSource.hidden = false;
+    } else {
+      refs.currentSource.hidden = true;
+    }
+    var currentSeconds = Math.max(0, Math.floor((presentation.duration || 0) / 1000));
+    refs.currentDuration.textContent = currentSeconds
+      ? Math.floor(currentSeconds / 60) + ':' + String(currentSeconds % 60).padStart(2, '0') : '—';
     var cover = presentation.cover || '';
     if (coverKey !== cover) {
       coverKey = cover;
@@ -260,7 +270,11 @@
     currentArt.innerHTML = icon('disc');
     refs.currentCover = make('img', '', currentArt);
     refs.currentCover.alt = '';
-    make('span', 'orbit-current-label', current, '正在播放');
+    var currentTop = make('div', 'orbit-current-top', current);
+    make('span', 'orbit-current-label', currentTop, '正在播放');
+    var currentDetails = make('span', 'orbit-current-details', currentTop);
+    refs.currentSource = make('span', 'orbit-current-source', currentDetails);
+    refs.currentDuration = make('span', 'orbit-current-duration', currentDetails);
     refs.currentTitle = make('strong', 'orbit-current-title', current);
     refs.currentArtist = make('span', 'orbit-current-artist', current);
     refs.queueList = make('div', 'orbit-queue-list', sidebar);

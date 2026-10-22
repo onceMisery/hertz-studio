@@ -109,7 +109,7 @@
     renderShows(); status('正在搜索节目…');
     try {
       var data = await T.get('/v1/podcasts/search?q=' + encodeURIComponent(query) + '&limit=30'
-        + '&country=' + encodeURIComponent(el('podcast-country').value));
+        + '&country=' + encodeURIComponent(el('podcast-country').value), { timeoutMs: 25000 });
       if (mine !== st.epoch) return;
       st.shows = data.shows || [];
       status(st.shows.length ? '找到 ' + st.shows.length + ' 个节目 · 目录由 Apple Podcasts 提供' : '没有找到节目');
@@ -193,7 +193,7 @@
     renderDetail(); status(force ? '正在刷新节目…' : '正在加载单集…');
     try {
       var data = await T.get('/v1/podcasts/feed?url=' + encodeURIComponent(show.feed_url)
-        + '&limit=' + PAGE + '&offset=' + offset + '&refresh=' + !!force);
+        + '&limit=' + PAGE + '&offset=' + offset + '&refresh=' + !!force, { timeoutMs: 25000 });
       if (mine !== st.epoch) return;
       if (subscriptionRevision !== (subscriptionRevisions.get(show.id) || 0)) {
         data.show.subscribed = st.show.subscribed;

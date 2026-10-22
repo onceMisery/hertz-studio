@@ -490,6 +490,12 @@ impl Rpc {
             (Op::Get, ["v1", "online", "playlists", "search"]) => {
                 online::playlist_search(state, query).await
             }
+            (Op::Get, ["v1", "online", "artists", "search"]) => {
+                online::artist_search(state, query).await
+            }
+            (Op::Get, ["v1", "online", "albums", "search"]) => {
+                online::album_search(state, query).await
+            }
             (Op::Get, ["v1", "online", "playlists"]) => online::playlists(state, query).await,
             (Op::Get, ["v1", "online", "playlist"]) => online::playlist(state, query).await,
             (Op::Post, ["v1", "online", "playlist"]) => online::playlist_create(state, body).await,

@@ -73,6 +73,24 @@ pub async fn search_all(state: &Arc<AppState>, query: &Value) -> RpcResult {
     Reply::json(&online::search_all(&online_ctx(state), q.q.trim(), q.limit.clamp(1, 30)).await?)
 }
 
+pub async fn artist_search(state: &Arc<AppState>, query: &Value) -> RpcResult {
+    let q: online::SearchQuery = query_as(query)?;
+    let source = q.source.clone();
+    Reply::json(&tagged(
+        &source,
+        online::search_artists(&online_ctx(state), &source, &q).await,
+    )?)
+}
+
+pub async fn album_search(state: &Arc<AppState>, query: &Value) -> RpcResult {
+    let q: online::SearchQuery = query_as(query)?;
+    let source = q.source.clone();
+    Reply::json(&tagged(
+        &source,
+        online::search_albums(&online_ctx(state), &source, &q).await,
+    )?)
+}
+
 pub async fn stream(state: &Arc<AppState>, query: &Value) -> RpcResult {
     let q: StreamQuery = query_as(query)?;
     let source = source_of(q.source);

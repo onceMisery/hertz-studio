@@ -235,8 +235,15 @@
 }
 [data-skin="orbit"] .orbit-current::after { content: ""; position: absolute; right: -30px; top: -34px; width: 120px; height: 120px; border-radius: 50%; border: 10px solid var(--record-glint); pointer-events: none; }
 [data-skin="orbit"] .orbit-current-art { display: none; }
-[data-skin="orbit"] .orbit-current-label { font-size: 9px; opacity: .8; margin-bottom: auto; }
-[data-skin="orbit"] .orbit-current-title { font-size: 19px; font-weight: 750; margin-top: 25px; }
+[data-skin="orbit"] .orbit-current-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+[data-skin="orbit"] .orbit-current-label { font-size: 9px; opacity: .8; }
+[data-skin="orbit"] .orbit-current-details { display: inline-flex; align-items: center; gap: 8px; flex: none; }
+[data-skin="orbit"] .orbit-current-source { display: inline-flex; align-items: center; }
+[data-skin="orbit"] .orbit-current-source .src-badge { display: inline-grid; place-items: center; width: 18px; height: 18px; margin: 0; padding: 0; border-radius: 4px; background: transparent; }
+[data-skin="orbit"] .orbit-current-source .src-badge img { display: block; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+[data-skin="orbit"] .orbit-current-source .src-badge svg { width: 15px; height: 15px; }
+[data-skin="orbit"] .orbit-current-duration { font: 10px var(--font-mono); font-variant-numeric: tabular-nums; opacity: .9; }
+[data-skin="orbit"] .orbit-current-title { font-size: 19px; font-weight: 750; margin-top: auto; padding-top: 20px; }
 [data-skin="orbit"] .orbit-current-artist { font-size: 12px; opacity: .85; margin-top: 3px; }
 [data-skin="orbit"] :is(.orbit-current-title, .orbit-current-artist) { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 [data-skin="orbit"] .orbit-queue-list { overflow-y: auto; min-height: 0; padding: 8px 5px 16px; margin-inline: -5px; }

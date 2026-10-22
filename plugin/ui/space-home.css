@@ -51,8 +51,8 @@
 .sh-review-actions button:active { transform: none; }
 .sh-review-actions svg { width: 18px; height: 18px; }
 .sh-home-content { min-width: 0; display: flex; flex-direction: column; gap: 18px; }
-.sh-next-up { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 10px; margin: 0; text-align: left; background: color-mix(in srgb,var(--sh-bg) 24%,transparent); border: 1px solid var(--sh-edge); border-radius: 8px; transition: background .2s,box-shadow .2s; }
-.sh-next-up:hover, .sh-next-up:focus-visible { background: color-mix(in srgb,var(--sh-text) 8%,transparent); box-shadow: 0 8px 20px var(--sh-shade); }
+.sh-next-up { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 10px; margin: 0; text-align: left; background: color-mix(in srgb,var(--sh-bg) 24%,transparent); border: 1px solid var(--sh-edge); border-radius: 8px; transition: background .2s,box-shadow .2s,transform .2s var(--sh-ease); }
+.sh-next-up:hover, .sh-next-up:focus-visible { background: color-mix(in srgb,var(--sh-text) 8%,transparent); box-shadow: 0 8px 20px var(--sh-shade); transform: perspective(1000px) translateY(-2px) rotateX(var(--sp-tilt-x,0deg)) rotateY(var(--sp-tilt-y,0deg)); }
 .sh-next-art, .sh-next-art .sh-art { display: grid; place-items: center; width: 36px; height: 36px; flex: none; }
 .sh-next-art { background: var(--sh-edge); border-radius: 6px; overflow: hidden; }
 .sh-next-copy { display: grid; flex: 1; min-width: 0; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 4px 12px; }
@@ -303,10 +303,10 @@
 
 /* Light surfaces lift above the scene when approached. */
 .space-home, .sh-panel-layer {
-  --sh-surface: color-mix(in srgb,var(--bg,#141618) 16%,transparent);
-  --sh-raised: rgba(255,255,255,.075);
-  --sh-shadow: 0 4px 16px rgba(0,0,0,.08);
-  --sh-shadow-raised: 0 18px 30px rgba(0,0,0,.18);
+  --sh-surface: color-mix(in srgb,var(--bg,#141618) 90%,transparent);
+  --sh-raised: color-mix(in srgb,var(--bg,#141618) 76%,white 24%);
+  --sh-shadow: 0 14px 30px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.1);
+  --sh-shadow-raised: 0 28px 52px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.18);
 }
 .sh-search { background: color-mix(in srgb,var(--bg,#141618) 24%,transparent); border-color: rgba(255,255,255,.13); box-shadow: 0 8px 24px rgba(0,0,0,.1); backdrop-filter: blur(20px); transition: transform .4s var(--sp-ease),box-shadow .4s var(--sp-ease); }
 .sh-search:hover, .sh-search:focus-within { transform: translateY(-3px); box-shadow: 0 16px 30px rgba(0,0,0,.16); }
@@ -343,8 +343,8 @@
 @media (max-width:520px) { .sh-embedded-view .podcast-scroll { padding: 14px; } .sh-embedded-view.online-radio { padding: 22px 18px; } }
 @media (prefers-reduced-motion:reduce) {
   .sh-action, .sh-action-cover, .sh-track, .sh-next-up, .sh-search, .sh-panel, .sh-playlist, .sh-embedded-view .podcast-show { transition: none; }
-  .sh-action, .sh-action-cover { transform: none; }
-  .sh-action-scan { display: none; }
+  .sh-action, .sh-action-copy, .sh-action-cover { transform: none; }
+  .sh-action-scan, .sh-action-glare { display: none; }
   .sh-equalizer i { animation: none; }
   .sh-equalizer i:nth-child(odd) { height: 45%; }
   .sh-action:hover, .sh-action:focus-visible, .sh-action.is-active, .sh-action:active, .sh-action-continue .sh-action-cover, .sh-action:hover .sh-action-cover, .sh-action.is-active .sh-action-cover, .sh-track:hover, .sh-track:focus-within, .sh-track.is-current, .sh-home-track:hover, .sh-home-track:focus-within, .sh-home-track.is-current, .sh-next-up:hover, .sh-next-up:focus-visible, .sh-search:hover, .sh-search:focus-within, .sh-playlist:hover, .sh-playlist:focus-visible, .sh-embedded-view .podcast-show:hover { transform: none; }

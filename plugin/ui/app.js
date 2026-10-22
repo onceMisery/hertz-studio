@@ -487,13 +487,11 @@ const DBX_EVENT_METHOD = 'studio/event';
 const DBX_SUBSCRIBE_METHOD = 'studio/events/subscribe';
 
 /// invoke 只有 timeoutMs，没有中断能力。UI 传 signal 想表达的是「这个结果我不要了」
-/// （典型场景：搜索词变了，作废上一批响应）。普通调用让 signal 与 invoke 竞速；
-/// 搜索协调器指定 waitForSettlement，保持执行槽直到 invoke 真正结束，再丢弃结果。
-function dbxInvoke(method, params, signal, waitForSettlement) {
+/// （典型场景：搜索词变了，作废上一批响应）。普通调用让 signal 与 invoke 竞速：
+/// 本地立刻按 AbortError 拒绝，后端那次调用会跑完但结果被丢弃。搜索协调器指定
+/// waitForSettlement，保持执行槽直到 invoke 真正结束，再丢弃结果。
+function dbxInvoke(method, params, signal, waitForSettlement, timeoutMs) {
   if (signal && signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  // StepFun step-5 分类实测 14–67s；服务端总期限 300s，客户端留 30s 余量。
-  const timeoutMs = method === 'v1/stage/pitch' ? 35000
-    : method === 'v1/ai/lyrics/emotion' ? 330000 : REQUEST_TIMEOUT;
   const call = window.dbxPlugin.invoke(method, params, { timeoutMs });
   if (!signal) return call;
   if (waitForSettlement) return call.then(value => {
@@ -525,6 +523,11 @@ async function blobToBase64(blob) {
 async function dbxRequest(path, options = {}, attempt = 0) {
   const { method, query } = splitPath(path);
   const op = (options.method || 'GET').toUpperCase();
+  const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+    ? options.timeoutMs
+    // StepFun step-5 分类实测 14–67s；服务端总期限 300s，客户端留 30s 余量。
+    : method === 'v1/stage/pitch' ? 35000
+      : method === 'v1/ai/lyrics/emotion' ? 330000 : REQUEST_TIMEOUT;
   const params = { op, query };
   if (options.rawBody !== undefined) {
     // 二进制上传（封面替换）：HTTP 版是裸 body + Content-Type，这里换成信封里的 base64。
@@ -535,7 +538,7 @@ async function dbxRequest(path, options = {}, attempt = 0) {
   }
 
   try {
-    const envelope = await dbxInvoke(method, params, options.signal, options.waitForSettlement);
+    const envelope = await dbxInvoke(method, params, options.signal, options.waitForSettlement, timeoutMs);
     if (!envelope || typeof envelope.status !== 'number') {
       throw new Error('sidecar 返回了不认识的结果');
     }
@@ -850,16 +853,20 @@ const REQUEST_TIMEOUT = 15000;
 
 async function request(path, options = {}, attempt = 0) {
   const method = (options.method || 'GET').toUpperCase();
+  const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+    ? options.timeoutMs
+    // StepFun step-5 分类实测 14–67s；服务端总期限 300s，客户端留 30s 余量。
+    : path === '/v1/stage/pitch' ? 35000
+      : (path === '/v1/ai/lyrics/emotion' && method === 'POST') ? 330000
+        : REQUEST_TIMEOUT;
+  const { timeoutMs: _timeoutOverride, ...fetchOptions } = options;
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   const cancel = () => controller && controller.abort();
   if (options.signal) {
     if (options.signal.aborted) cancel();
     else options.signal.addEventListener('abort', cancel, { once: true });
   }
-  const timer = controller ? setTimeout(() => controller.abort(),
-    path === '/v1/stage/pitch' ? 35000
-      : (path === '/v1/ai/lyrics/emotion' && method === 'POST') ? 330000
-        : REQUEST_TIMEOUT) : 0;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : 0;
   try {
     // rawBody：封面替换这类二进制上传走这里，不包 JSON、不改 Content-Type。
     const body = options.rawBody !== undefined
@@ -867,7 +874,7 @@ async function request(path, options = {}, attempt = 0) {
       : (options.body !== undefined && typeof options.body !== 'string'
         ? JSON.stringify(options.body) : options.body);
     const res = await fetch(path, {
-      ...options,
+      ...fetchOptions,
       body,
       signal: controller ? controller.signal : options.signal,
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}`, ...(options.headers || {}) },
@@ -5319,7 +5326,10 @@ function setView(name, options) {
     ui.settingsEntry.setAttribute('aria-pressed', String(name === 'settings'));
   }
   document.body.classList.remove('column-open');
-  if (name === 'online' && window.Online && !(options && options.historyOnly)) window.Online.onViewEnter();
+  if (name === 'online') {
+    if (window.TopSearch && window.TopSearch.onOnlineViewEnter) window.TopSearch.onOnlineViewEnter();
+    if (!(options && options.historyOnly) && window.Online) window.Online.onViewEnter();
+  }
   if (name === 'podcasts' && window.Podcasts) window.Podcasts.onViewEnter();
   // 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
   // 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。

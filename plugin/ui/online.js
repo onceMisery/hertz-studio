@@ -100,19 +100,46 @@
     var prev = onlineMeta.get(msg.from_track_id) || metaStore[msg.from_track_id] || null;
     var parts = String(msg.track_id).split(':');   // online:<source>:<平台 id>
     var refId = parts.length > 2 ? parts.slice(2).join(':') : String(msg.track_id);
+    var origin = (prev && prev.origin) || (msg.origin_source ? {
+      source: msg.origin_source,
+      id: msg.origin_id,
+      label: msg.origin_label || null,
+    } : null);
     var next = Object.assign({}, prev || {}, {
       id: msg.track_id,
       source: msg.to_source,
       onlineId: refId,
       title: msg.title || (prev && prev.title) || refId,
-      origin: (prev && prev.origin) || (msg.origin_source ? {
-        source: msg.origin_source,
-        id: msg.origin_id,
-        label: msg.origin_label || null,
-      } : null),
+      origin: origin,
       relayed: true,
     });
+    if (origin) updateRelayedSearchRows(origin, msg.to_source);
     return rememberMeta(msg.track_id, next);
+  }
+
+  var relayedSources = new Map();
+
+  function sourceKey(source, id) { return source + '\u0000' + String(id); }
+
+  function displayedSource(track) {
+    return relayedSources.get(sourceKey(track.source, track.id)) || track.source;
+  }
+
+  function updateRelayedSearchRows(origin, source) {
+    if (!origin || !origin.source || origin.id == null || !source) return;
+    var key = sourceKey(origin.source, origin.id);
+    relayedSources.delete(key);
+    relayedSources.set(key, source);
+    while (relayedSources.size > 512) relayedSources.delete(relayedSources.keys().next().value);
+    onlineState.tracks.forEach(function (track) {
+      if (track.source !== origin.source || String(track.id) !== String(origin.id)) return;
+      var id = virtualId(track);
+      document.querySelectorAll('.online-row').forEach(function (row) {
+        if (row.dataset.onlineId !== id) return;
+        var current = row.querySelector('.t-quality .src-badge');
+        if (current) current.replaceWith(badge(source));
+      });
+    });
   }
 
   // 平台徽标：品牌名 / 品牌色 / app 图标。音源 id 以后端注册表为准，
@@ -361,7 +388,7 @@
     H.paintArt(row, rowCoverUrl(safeCoverUrl(track.cover)));
 
     var quality = row.querySelector('.t-quality');
-    quality.appendChild(badge(track.source));
+    quality.appendChild(badge(displayedSource(track)));
     if (track.vip_only) quality.appendChild(vipTag());
 
     // 在线曲目也能收藏：source 是音源 id、ref_id 是该音源内的曲目 id。

@@ -83,6 +83,15 @@ impl ApiError {
         Self::new(StatusCode::BAD_GATEWAY, "upstream_rejected", message.into())
     }
 
+    /// 上游明确限流（429），客户端不应短暂等待后重放相同请求。
+    pub fn rate_limited(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            message.into(),
+        )
+    }
+
     /// 上游超时（504），前端给行内重试。
     pub fn upstream_timeout(message: impl Into<String>) -> Self {
         Self::new(

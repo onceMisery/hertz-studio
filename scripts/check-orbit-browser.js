@@ -92,6 +92,7 @@ async function main() {
     await page.waitForFunction(() => window.Skins && document.getElementById('conn').textContent === '服务已连接');
     check(await page.evaluate(() => Skins.list().some(skin => skin.id === 'orbit' && skin.name === '星轨')),
       '星轨 is selectable through the existing skin registry');
+    check(await page.evaluate(() => Skins.currentId() === 'orbit'), 'fresh startup selects 星轨 by default');
 
     const tracks = await fixtures(), queue = tracks.map(track => track.id);
     await api('POST', '/v1/player/load', { track_id: queue[0], queue });
@@ -100,6 +101,18 @@ async function main() {
     await page.waitForFunction(() => window.Skins && document.getElementById('conn').textContent === '服务已连接');
     await page.evaluate(() => restoreQueue());
     await until(() => page.evaluate(() => Stage.presentation().track?.id), id => id === queue[0]);
+    await page.evaluate(() => {
+      const presentation = Stage.presentation();
+      Stage.setTrack({ ...presentation.track, source: 'netease' }, presentation.cover);
+      document.dispatchEvent(new Event('playback:track'));
+    });
+    await page.waitForFunction(() => document.querySelector('.orbit-current-source .src-badge'));
+    check((await page.locator('.orbit-current-source .src-badge').getAttribute('title')).includes('网易云'),
+      'current-track card shows the provider icon label');
+    check(await page.locator('.orbit-current-source .src-badge img').evaluate(img => img.complete && img.naturalWidth > 0),
+      'current-track provider icon asset renders');
+    check(await page.locator('.orbit-current-duration').textContent() === '3:00',
+      'current-track card shows the track duration');
     const theme = await page.evaluate(() => document.documentElement.dataset.theme);
     await page.evaluate(() => Skins.apply('orbit'));
     await page.waitForSelector('.orbit-queue-row');
