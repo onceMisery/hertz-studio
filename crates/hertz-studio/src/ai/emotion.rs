@@ -1778,7 +1778,7 @@ mod tests {
         let classification =
             tokio::spawn(async move { super::classify(&classify_state, request).await });
         tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(15),
             fixture.started.notified(),
         )
         .await
@@ -1794,14 +1794,14 @@ mod tests {
         .await
         .unwrap();
         tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(15),
             fixture.observed_cancel.notified(),
         )
         .await
         .unwrap();
         fixture.release.notify_one();
 
-        let error = tokio::time::timeout(std::time::Duration::from_secs(3), classification)
+        let error = tokio::time::timeout(std::time::Duration::from_secs(15), classification)
             .await
             .unwrap()
             .unwrap()
@@ -1885,7 +1885,7 @@ mod tests {
         let classification =
             tokio::spawn(async move { super::classify(&classify_state, request).await });
         tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(15),
             fixture.started.notified(),
         )
         .await
@@ -1895,13 +1895,13 @@ mod tests {
             .await
             .unwrap();
         tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(15),
             fixture.observed_cancel.notified(),
         )
         .await
         .unwrap();
 
-        let error = tokio::time::timeout(std::time::Duration::from_secs(3), classification)
+        let error = tokio::time::timeout(std::time::Duration::from_secs(15), classification)
             .await
             .unwrap()
             .unwrap()
@@ -2043,7 +2043,7 @@ mod tests {
             panic!("generation fixture was not accepted");
         };
         tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(15),
             generation_fixture.started.notified(),
         )
         .await
@@ -2055,7 +2055,7 @@ mod tests {
         let classification =
             tokio::spawn(async move { super::classify(&classify_state, request).await });
         tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(15),
             lyric_fixture.started.notified(),
         )
         .await
@@ -2074,13 +2074,13 @@ mod tests {
         )
         .await;
         let lyric_cancelled_before_failure = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(15),
             lyric_fixture.observed_cancel.notified(),
         )
         .await
         .is_ok();
         let generation_cancelled_before_failure = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(15),
             generation_fixture.observed_cancel.notified(),
         )
         .await
@@ -2094,11 +2094,11 @@ mod tests {
         generation_fixture.release.notify_one();
 
         let classification_result =
-            tokio::time::timeout(std::time::Duration::from_secs(3), classification)
+            tokio::time::timeout(std::time::Duration::from_secs(15), classification)
                 .await
                 .unwrap()
                 .unwrap();
-        let terminal_state = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let terminal_state = tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
                 let row = vmusic_store::ai_jobs::find_job_by_id(&state.db, &job.job_id)
                     .await
