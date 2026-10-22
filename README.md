@@ -548,6 +548,7 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 | 音频格式与错误边界 | 13 种扩展名，四件不同的事（检查 / 标签 / 解码 / 出声）写明并如实上报 | [audio-format-support.md](docs/audio-format-support.md) |
 | S2–S4 音频二期 | 升采样、参数 EQ、卷积 IR、EBU R128、真峰值限幅、噪声整形、交叉馈送、饱和，以及 Windows WASAPI 独占输出——排期在 R0–R6 之外 | 待音频专项重新定序 |
 | W0–W3 桌面壁纸 | 产品目标已选定，**方案待评审、尚未实施** | [desktop-wallpaper.md](docs/desktop-wallpaper.md) |
+| L0–L3 桌面歌词 | 透明置顶、锁定穿透、托盘恢复与只读歌词同步的设计已成稿（首版 Windows 11 x64）；与壁纸拟共用可选的 `hertz-desktop.exe`。**设计草案待评审、尚未实施** | [desktop-lyrics.md](docs/desktop-lyrics.md) |
 | 创意舞台二期（P8） | 基频轨迹已能本地分析与只读查看；工程、模板、分享码、视频导出已落地，人工视觉与音乐质量验收未做 | [pitch-track.md](docs/pitch-track.md) · [stage-projects.md](docs/stage-projects.md) · [stage-templates.md](docs/stage-templates.md) · [orchestration-art.md](docs/orchestration-art.md) · [video-export.md](docs/video-export.md) |
 | 星座场景视觉 | 逐座造型、配色与动效按文档调过一轮，可拖拽环绕、滚轮缩放、双击复位 | [zodiac-visual-tuning.md](docs/zodiac-visual-tuning.md) |
 | 搜索性能基线 | 五万曲本机 P95 与受控上游时延有基线，不替代真实来源 / 弱网 / 弱机验收 | [search-performance.md](docs/search-performance.md) |
