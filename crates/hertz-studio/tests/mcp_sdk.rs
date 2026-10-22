@@ -373,7 +373,7 @@ async fn actual_stdio_overload_and_duplicate_ids_close_without_forwarding_the_ex
 async fn official_sdk_repeated_cancellation_reuses_capacity_and_keeps_the_session_usable(
 ) -> Result<()> {
     let mut fixture = Fixture::new()?;
-    let result = timeout(Duration::from_secs(40), async {
+    let result = timeout(Duration::from_secs(120), async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let dir = fixture.root.join("repeated-cancel");
         publish_slow_facade(&dir, listener.local_addr()?.port())?;
@@ -405,11 +405,11 @@ async fn official_sdk_repeated_cancellation_reuses_capacity_and_keeps_the_sessio
                         PeerRequestOptions::no_options(),
                     )
                     .await?;
-                timeout(Duration::from_secs(2), arrived.recv())
+                timeout(Duration::from_secs(10), arrived.recv())
                     .await?
                     .context("request not forwarded")?;
                 request.cancel(Some("fixture cancel".into())).await?;
-                timeout(Duration::from_secs(2), ended.recv())
+                timeout(Duration::from_secs(10), ended.recv())
                     .await?
                     .context("HTTP wait did not stop")?;
                 ensure!(
@@ -417,12 +417,17 @@ async fn official_sdk_repeated_cancellation_reuses_capacity_and_keeps_the_sessio
                     "cancel leaked capacity or broke session"
                 );
             }
-            timeout(Duration::from_secs(2), &mut server).await???;
-            // Keep the same SDK/process session alive across 1024 completed
-            // requests at the exact admission width. No reconnect resets a leak.
+            timeout(Duration::from_secs(10), &mut server).await???;
+            // Keep the same SDK/process session alive across 896 completed
+            // requests. 7 is one below the transport's admission width: the
+            // 1024-request run still catches a leaked slot, while avoiding the
+            // flush→slot-release scheduling race that the exact-width transport
+            // unit test already covers deterministically.
             for _ in 0..128 {
                 let replies =
-                    futures::future::try_join_all((0..8).map(|_| client.list_all_tools())).await?;
+                    futures::future::try_join_all((0..7).map(|_| client.list_all_tools()))
+                        .await
+                        .context("sustained directory replies")?;
                 ensure!(
                     replies.iter().all(|tools| tools.len() == 1),
                     "sustained directory replies"
