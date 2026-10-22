@@ -47,3 +47,23 @@
 没有执行全部 109 项活体检查或长时间真声卡听测。短时 Debug/null 后端采样只用于核验调度与事件行为，不用于发布版总 CPU、内存或显存承诺。
 
 未引入曲库虚拟滚动、额外延迟模块加载、强制销毁隐藏渲染器或更改 Release 优化级别：这些仍需独立证明焦点/选择、首次进入时延、重开平滑度和运行速度等价，不能仅凭静态体积推断收益。
+
+## 后续待优化：Rust 源码文件体量（2026-10-22 登记，本轮不实施）
+
+本轮删除浮光与潮汐皮肤后，顺手核了服务端 Rust 文件的体量。结论不是“行数多就必须重构”，而是区分**生产代码体量**和**测试体量**：
+
+| 文件 | 总行数 | `#[cfg(test)]` 前生产行数 | 主要问题 |
+| --- | ---: | ---: | --- |
+| [`state.rs`](../crates/hertz-studio/src/state.rs) | 6,765 | 约 4,423 | 单个 `impl AppState` 从 924 行铺到测试模块前，约 3,500 行；播放、队列、扫描、在线元数据、观众计数和发现文件共用一个类型，定位一条锁序要跨全文件读 |
+| [`ai/jobs.rs`](../crates/hertz-studio/src/ai/jobs.rs) | 7,384 | 约 2,405 | 总行数最大，但 2,406 行以后几乎全是测试；先拆测试即可，业务逻辑暂不是首要瓶颈 |
+| [`routes.rs`](../crates/hertz-studio/src/routes.rs) | 4,900 | 约 3,410 | 223 个函数但文件自述“薄 handler”；主要风险是 HTTP 与 RPC 契约漂移，不按行数优先拆 |
+| [`cpal_backend.rs`](../crates/vmusic-audio/src/cpal_backend.rs) | 4,137 | 约 2,126 | 设备回调、重采样与 DSP 耦合，拆分会影响时钟与延迟语义，优先级低于 `state.rs` |
+
+下一轮建议从 `state.rs` 开始，且只做**可逆的模块边界拆分**，不改并发语义：
+
+1. 先按职责抽出子模块：播放与队列、在线元数据与下载、扫描进度、观众/发现文件、DSP 与监听统计。`AppState` 继续作为字段与锁的 owner，子模块只通过明确的 `impl AppState` 分块或 helper 访问，避免把 `play_commit`、代际和 viewer 计数拆成多把隐式锁。
+2. 每次只搬一个职责，并保留现有行为测试为门槛：`cargo test --locked -p hertz-studio --lib state::tests` 与 `ai::facade::tests` 必须同轮通过；涉及播控时再跑 `check-player-races.js` 或对应浏览器检查。
+3. `ai/jobs.rs` 的测试拆成 `ai/jobs/tests.rs` 或按“受理、派发、取消、恢复、结算”分多个测试模块；拆完用 `cargo test --locked -p hertz-studio --lib ai::jobs::tests -- --test-threads=1` 证明用例数量与结果不变。
+4. `routes.rs` 暂不拆。若后续要按端点域分文件，必须保留 `router()` 单一入口和现有 `pub(crate)` 请求体复用，防止 HTTP、RPC、MCP 三套入口各自漂移。
+
+验收口径不是“每个文件都低于某个行数”，而是：一次播控或授权变更能在一个职责模块内读完主路径，锁序和完成事实仍能由现有测试证明；拆分不新增运行时分配、不改变事件顺序、不扩大公开 API。
