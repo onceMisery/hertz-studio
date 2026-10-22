@@ -823,6 +823,29 @@ const DbxTransport = {
   },
 };
 
+/// 插件形态的「离场」：宿主要拆 webview 前会发 workbench/close（两阶段握手的
+/// 插件侧，SDK 在每个 listener settle 后回 ack），这里把声音停下。
+///
+/// 只 pause 不退出：sidecar 是宿主的子进程，宿主只在插件管理、重启、更新和整个
+/// 应用退出时才 terminate 它；我们自己去杀，宿主只会看到一次意外死亡。
+///
+/// 请求发出去就返回，不等结果：关标签那条宿主路径是 `requestWorkbenchClose(0)`，
+/// 本来就不等 ack；webview 拆掉后响应也收不到了，但请求已经进了 stdio 通道，
+/// sidecar 照样执行。返回一个已 resolve 的 Promise 只是让 ack 别被我们拖住。
+///
+/// 已知边界：tab 与浮动胶囊是两个 surface、共用一个 sidecar。关掉其中一个会暂停，
+/// 即使另一个还开着——sidecar 侧没有按 surface 计数（事件订阅是幂等的单转发器），
+/// 宁可多停一次也不留「窗口都关了声音还在放」。重开任意一个再点播放即可。
+function bindDbxCloseHook() {
+  const workbench = window.dbxPlugin && window.dbxPlugin.workbench;
+  if (!workbench || typeof workbench.onClose !== 'function') return false;
+  workbench.onClose(() => {
+    dbxRequest('/v1/player/pause', { method: 'POST' }).catch(() => {});
+    return Promise.resolve();
+  });
+  return true;
+}
+
 const REQUEST_TIMEOUT = 15000;
 
 async function request(path, options = {}, attempt = 0) {
@@ -8014,6 +8037,8 @@ async function startApp() {
   // 落盘的在线元数据先喂回内存：队列行第一帧就能显示真名字，不用等补取。
   if (window.Online && window.Online.seedFromStore) window.Online.seedFromStore();
   transport = await chooseTransport();
+  // 两种 surface（工作台 tab / 浮动胶囊）都要挂；放在分支之前，别藏在 tab 那条路里。
+  if (transport.kind === 'dbx') bindDbxCloseHook();
   if (window.HertzCapsuleOnly) return startFloatingCapsule();
   if (transport.kind === 'demo') {
     ui.demoBadge.hidden = false;

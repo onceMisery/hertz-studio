@@ -201,6 +201,32 @@ async function run() {
   assert.ok(backoff, 'transient reads still retry'); backoff.fn();
   assert.deepEqual(await recovered, { tracks: [] });
   assert.equal(attempts, 2);
+  // §8.3 workbench close: the host may tear the webview down right after the
+  // notice (tab close sends it with a 0 ms budget), so the hook must fire the
+  // pause RPC and let the SDK ack without waiting for the response.
+  const dbxRequestSource = source.slice(source.indexOf('function splitPath'), source.indexOf('const DbxTransport = {'));
+  const closeCalls = [], closeListeners = [];
+  const closeBox = {
+    REQUEST_TIMEOUT: 15000, URLSearchParams, DOMException, AbortController, setTimeout, clearTimeout,
+    dbxCoverUrl() {}, ensureCover() {}, console: { warn() {} },
+    window: { dbxPlugin: {
+      workbench: { onClose(listener) { closeListeners.push(listener); return () => {}; } },
+      // Never resolves: proves the ack does not wait for the RPC to come back.
+      invoke(method, params) { closeCalls.push({ method, params }); return new Promise(() => {}); },
+    } },
+  };
+  vm.createContext(closeBox);
+  vm.runInContext(dbxRequestSource + dbxSource + '\nthis.bindHook = bindDbxCloseHook;', closeBox);
+  assert.equal(closeBox.bindHook(), true, 'dbx SDK exposes workbench.onClose');
+  assert.equal(closeListeners.length, 1, 'one close listener per surface');
+  let acked = false;
+  closeListeners[0]().then(() => { acked = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(acked, true, 'close listener must settle without waiting for the pause RPC');
+  assert.equal(closeCalls.length, 1, 'close sends exactly one request');
+  assert.equal(closeCalls[0].method, 'v1/player/pause', 'close pauses playback');
+  assert.equal(closeCalls[0].params.op, 'POST');
+
   console.log('Transport bootstrap, real DBX subscription lifecycle, HTTP cancellation, response-body timeout and transient retry checks passed');
 }
 const watchdog = setTimeout(() => { console.error('Transport test did not settle'); process.exit(1); }, 3000);
