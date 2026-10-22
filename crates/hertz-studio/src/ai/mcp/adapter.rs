@@ -863,7 +863,7 @@ mod tests {
                 protocol_version: "1".into(),
                 owner_instance_id: owner_instance_id.to_string(),
                 server_instance_id: server_instance_id.to_string(),
-                edition: "standard".into(),
+                edition: crate::edition::NAME.to_string(),
             },
         )
         .unwrap();

@@ -109,8 +109,12 @@ async fn official_sdk_cancel_timeout_and_disconnect_drop_the_http_wait() -> Resu
                         .contains("authorization: bearer isolated-fixture-credential"),
                     "fixture auth missing"
                 );
-                let body = json!({"scopes": ["playback:pause"], "stageIntentToolsEnabled": false,
-                    "instance": {"serverInstanceId": "fixture-server"}})
+                let body = json!({"protocolVersion": "1", "principal": {"kind": "grant", "grantId": "fixture"},
+                    "scopes": ["playback:pause"], "policyRevision": 1, "stageIntentToolsEnabled": false,
+                    "instance": {"ownerInstanceId": "fixture-owner", "serverInstanceId": "fixture-server",
+                        "edition": "standard", "transport": "http"},
+                    "capabilities": [{"operation": "playback.pause", "mcpName": "playback_pause",
+                        "capabilityVersion": "1"}]})
                 .to_string();
                 context
                     .get_mut()
@@ -261,8 +265,11 @@ async fn reply_context(listener: &tokio::net::TcpListener) -> Result<()> {
         headers.starts_with("GET /v1/ai/capabilities/context "),
         "context route"
     );
-    let body = json!({"scopes":["playback:pause"],"stageIntentToolsEnabled":false,
-        "instance":{"serverInstanceId":"fixture-server"}})
+    let body = json!({"protocolVersion":"1","principal":{"kind":"grant","grantId":"fixture"},
+        "scopes":["playback:pause"],"policyRevision":1,"stageIntentToolsEnabled":false,
+        "instance":{"ownerInstanceId":"fixture-owner","serverInstanceId":"fixture-server",
+            "edition":"standard","transport":"http"},
+        "capabilities":[{"operation":"playback.pause","mcpName":"playback_pause","capabilityVersion":"1"}]})
     .to_string();
     socket
         .get_mut()
@@ -709,13 +716,13 @@ fn tool_error(result: &CallToolResult, code: &str) -> Result<()> {
         result.is_error == Some(true),
         "failure must be a tool-level error"
     );
+    let actual = &result
+        .structured_content
+        .as_ref()
+        .context("missing structured error")?["code"];
     ensure!(
-        result
-            .structured_content
-            .as_ref()
-            .context("missing structured error")?["code"]
-            == code,
-        "unexpected tool error code"
+        actual == code,
+        "unexpected tool error code: expected {code}, got {actual}"
     );
     Ok(())
 }
@@ -815,9 +822,11 @@ async fn official_sdk_authorization_idempotency_and_stage_contract() -> Result<(
         let config = ClientConfig::default().with_protocol_version(ProtocolVersion::V_2025_11_25);
         let client = fixture.connect(&data_dir, Some(&grant), config).await?;
         ensure!(client.list_all_tools().await?.len() == 8, "stage tools must default off");
+        // 关闭时远端不会公布舞台能力，适配器在本地就拦下；只有会话曾拿到、
+        // 之后被 owner 关掉的情况才会转发并得到 stage_tools_disabled。
         tool_error(
             &call(&client, "stage_capabilities_get", json!({})).await?,
-            "stage_tools_disabled",
+            "capability_unsupported",
         )?;
         owner.stage_tools(true).await?;
         ensure!(client.list_all_tools().await?.len() == 8, "directory expanded mid-session");

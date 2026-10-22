@@ -901,7 +901,11 @@ mod tests {
             let mut first = None;
             loop {
                 if let AudioEvent::Snapshot(state) = events.recv().await.unwrap() {
-                    assert!(state.playing);
+                    // play() 之后订阅者仍可能先取到入队前那条 playing=false 的
+                    // 快照；等真正进入播放态，再比较位置是否推进。
+                    if !state.playing {
+                        continue;
+                    }
                     let start = *first.get_or_insert(state.position_ms);
                     if state.position_ms > start {
                         break;
