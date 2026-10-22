@@ -54,6 +54,38 @@ fn grant_lifecycle() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// 测试缝：把指定 grant 的一次轮换钉在「库已提交、文件尚未安装」之间，
+/// 让「A 提交库 → B 提交库并装文件 → A 装文件」这个交错确定性发生，
+/// 而不是靠概率去撞调度窗口。
+#[cfg(test)]
+pub(crate) static ROTATE_INSTALL_PAUSE: std::sync::Mutex<
+    Option<(
+        String,
+        std::sync::Arc<tokio::sync::Barrier>,
+        std::sync::Arc<tokio::sync::Barrier>,
+    )>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+async fn pause_rotation_before_install(grant_id: &str) {
+    let pause = {
+        let mut slot = ROTATE_INSTALL_PAUSE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match slot.as_ref() {
+            Some((id, _, _)) if id == grant_id => {
+                slot.take().map(|(_, reached, release)| (reached, release))
+            }
+            _ => None,
+        }
+    };
+    if let Some((reached, release)) = pause {
+        // 先告诉测试「已停在缝上」，再等它放行。
+        reached.wait().await;
+        release.wait().await;
+    }
+}
+
 /// 一份通过认证的受限调用上下文。中间件把它塞进 request extensions，
 /// handler 只消费、不重建——身份与 scopes 来自可信的服务端查询，
 /// 绝不从请求参数接受。
@@ -301,6 +333,8 @@ pub(crate) async fn rotate_grant(
         let _ = std::fs::remove_file(&staged);
         return Err(not_found(format!("查无此 grant: {grant_id}")));
     }
+    #[cfg(test)]
+    pause_rotation_before_install(grant_id).await;
     if let Err(err) = install_credential_file(&staged, &path) {
         // 文件安装失败：把摘要退回旧值，旧文件仍在（安装器会先备份再恢复）。
         let _ =
@@ -560,40 +594,57 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// 并发轮换必须让库里的摘要与磁盘凭据成对。没有生命周期闸门时，8 路
-    /// 同时轮换会交错成「库认 B、磁盘存 A」：请求全部成功，读文件却 401。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    /// 并发轮换必须让库里的摘要与磁盘凭据成对。没有生命周期闸门时，
+    /// 「A 提交库 → B 提交库并装文件 → A 装文件」会留下库认 B、磁盘存 A：
+    /// 请求全部成功，读文件却 401。测试缝把 A 钉在库提交与文件安装之间，
+    /// 让这个交错确定性地发生。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_rotations_keep_db_and_disk_in_step() {
         let (state, handle) = ai_state().await;
         let (grant_id, _) = make_grant(&state, "race", &["playback:read"]).await;
         let path = credential_path(&state, &grant_id);
-        for round in 0..24 {
-            let mut tasks = Vec::new();
-            for _ in 0..8 {
-                let state = state.clone();
-                let grant_id = grant_id.clone();
-                tasks.push(tokio::spawn(
-                    async move { rotate_grant(&state, &grant_id).await },
-                ));
-            }
-            for task in tasks {
-                task.await.unwrap().unwrap();
-            }
-            let disk = std::fs::read_to_string(&path).unwrap();
-            let row = vmusic_store::ai::find_grant_by_id(&state.db, &grant_id)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                row.credential_digest,
-                digest(&disk),
-                "round {round}: DB 摘要与磁盘凭据必须成对"
-            );
-            assert!(
-                authenticate(&state, &disk).await.is_ok(),
-                "round {round}: 磁盘凭据必须能换到上下文"
-            );
-        }
+
+        let reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        *ROTATE_INSTALL_PAUSE.lock().unwrap() =
+            Some((grant_id.clone(), reached.clone(), release.clone()));
+        let first = tokio::spawn({
+            let state = state.clone();
+            let grant_id = grant_id.clone();
+            async move { rotate_grant(&state, &grant_id).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), reached.wait())
+            .await
+            .expect("第一路轮换没有到达库提交后的测试缝");
+
+        // 第一路被钉住时启动第二路：有闸门它只能排队；没有闸门它会跑完，
+        // 随后第一路再把上一代秘密装回磁盘。
+        let second = tokio::spawn({
+            let state = state.clone();
+            let grant_id = grant_id.clone();
+            async move { rotate_grant(&state, &grant_id).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), release.wait())
+            .await
+            .expect("测试没有放行被钉住的轮换");
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+
+        let disk = std::fs::read_to_string(&path).unwrap();
+        let row = vmusic_store::ai::find_grant_by_id(&state.db, &grant_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.credential_digest,
+            digest(&disk),
+            "DB 摘要与磁盘凭据必须成对"
+        );
+        assert!(
+            authenticate(&state, &disk).await.is_ok(),
+            "磁盘凭据必须能换到上下文"
+        );
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -615,9 +666,8 @@ mod tests {
         }
         let revoke_state = state.clone();
         let revoke_id = grant_id.clone();
-        let revoke = tokio::spawn(async move {
-            revoke_grant(&revoke_state, &revoke_id).await.map(|_| ())
-        });
+        let revoke =
+            tokio::spawn(async move { revoke_grant(&revoke_state, &revoke_id).await.map(|_| ()) });
         for task in tasks {
             // 撤销前的轮换成功，撤销后的轮换被拒——两种都不是错误。
             let _ = task.await.unwrap();
