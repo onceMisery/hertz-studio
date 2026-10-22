@@ -6216,7 +6216,19 @@ mod tests {
             }
         );
         assert!(counter.load(std::sync::atomic::Ordering::SeqCst) == 1);
-        assert_eq!(state.ai_runtime.execution_slots.available_permits(), 1);
+        // 终态先落库、执行槽在 worker 收尾时才归还；并发 CI 下两者之间可能有间隙。
+        let mut slot_released = false;
+        for _ in 0..1000 {
+            if state.ai_runtime.execution_slots.available_permits() == 1 {
+                slot_released = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            slot_released,
+            "provider worker must release its execution slot"
+        );
         state.audio.shutdown();
         handle.join().unwrap();
     }
