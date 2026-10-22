@@ -3760,13 +3760,20 @@ impl AppState {
         let commit = self.play_commit.lock().await;
         self.cancel_prepared_playback().await;
         self.play_generation.fetch_add(1, Ordering::Relaxed);
+        let outcome = self.pause_audio_locked().await?;
+        drop(commit);
+        Ok(outcome)
+    }
+
+    /// Caller holds play_commit and has already invalidated the play intent
+    /// (generation bump + prepared-playback cancellation).
+    async fn pause_audio_locked(&self) -> Result<ControlOutcome, vmusic_core::CoreError> {
         self.set_buffering(false, None).await;
         self.audio
             .pause()
             .await
             .map_err(vmusic_core::CoreError::Audio)?;
         self.transport_committed().await;
-        drop(commit);
         Ok(ControlOutcome::Applied {
             generation: self.play_generation.load(Ordering::Relaxed),
         })
@@ -3805,11 +3812,25 @@ impl AppState {
 
     /// 宽限期到点后的判定：没有页面开着、且确实还在出声，才暂停。返回有没有真的
     /// 停。判定只依赖当下的观看者数，与那 3 秒无关，所以单独拆出来能被直接测到。
+    ///
+    /// `playing == false` 不代表没有播放意图：在线/远程曲目取流期间音频快照尚未
+    /// 起播，若此处直接放行，加载完成后就会在零观看者下开始播放，而且不会再有
+    /// 新的离场事件来暂停。所以确认独自一人后先顶代际、取消预取，让尚未提交的
+    /// 加载在播放提交锁内复核时作废；「顶代际 → 读快照 → 暂停」整段与其它播放
+    /// 提交共用同一把锁，避免复核与提交擦肩而过。
     pub(crate) async fn pause_if_alone(&self) -> bool {
-        if self.viewers.load(Ordering::Acquire) > 0 || !self.audio.snapshot().playing {
+        let _commit = self.play_commit.lock().await;
+        if self.viewers.load(Ordering::Acquire) > 0 {
             return false;
         }
-        match self.pause_control().await {
+        self.cancel_prepared_playback().await;
+        self.play_generation.fetch_add(1, Ordering::Relaxed);
+        if !self.audio.snapshot().playing {
+            // 没有声音可停，但缓冲覆盖态属于刚被作废的播放意图，一并收口。
+            self.set_buffering(false, None).await;
+            return false;
+        }
+        match self.pause_audio_locked().await {
             Ok(outcome) => {
                 tracing::info!(?outcome, "最后一个页面已离场，播放暂停");
                 true
@@ -4580,6 +4601,92 @@ pub(crate) mod tests {
 
         drop(state);
         handle.join().unwrap();
+    }
+
+    /// 最后一个页面在慢速加载期间离场：宽限期到点时还没有声音，但取流仍在途。
+    /// 暂停判定必须让这次播放意图作废，否则加载完成后会在零观看者下起播，
+    /// 而且不会再有新的离场事件来暂停。
+    #[tokio::test]
+    async fn depart_during_a_slow_load_cannot_start_playback_later() {
+        let dir = std::env::temp_dir().join(format!("vmusic-depart-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let _ = accepted_tx.send(());
+            let _ = release_rx.await;
+            // 最小 HEAD 应答：null 后端不读正文，有 Content-Length 就能建流。
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
+                .await;
+            let _ = stream.flush().await;
+            // 连接留到客户端收完头，免得过早 RST 把 HEAD 判成失败。
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        });
+
+        let track_id = "remote-slow-depart".to_string();
+        vmusic_store::upsert_track(
+            &db,
+            &vmusic_core::Track {
+                id: track_id.clone(),
+                path: format!("http://{addr}/slow.mp3"),
+                source: vmusic_core::TrackSource::Remote,
+                title: "slow".into(),
+                artist: None,
+                album: None,
+                duration_ms: None,
+                bitrate: None,
+                sample_rate: None,
+                channels: None,
+                has_cover: false,
+                file_mtime: None,
+                file_size: None,
+                added_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let (state, handle) = playback_state_with_db(db).await;
+        let state = Arc::new(state);
+        let (gen, ..) = state.set_queue(vec![track_id], Some(0)).await;
+
+        let play = tokio::spawn({
+            let state = state.clone();
+            async move { state.play_index_for(0, Some(gen), PlayTrigger::Pick).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), accepted_rx)
+            .await
+            .expect("播放没有进入远程取流")
+            .expect("accept 信标丢失");
+        assert!(!state.audio.snapshot().playing, "取流期间不应已有声音");
+
+        // 宽限期到点：仍在取流，playing 还是 false。
+        assert!(!state.pause_if_alone().await, "没有声音时没有可暂停的对象");
+        release_tx.send(()).unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), play)
+            .await
+            .expect("释放加载后播放请求没有收尾")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !outcome.committed,
+            "离场后完成的加载必须作废，不能在没有观看者时起播"
+        );
+        assert!(!state.audio.snapshot().playing);
+        server.abort();
+        let _ = server.await;
+        state.audio.shutdown();
+        handle.join().unwrap();
+        state.db.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

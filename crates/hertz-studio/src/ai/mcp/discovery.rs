@@ -90,9 +90,16 @@ pub fn publish(data_dir: &Path, doc: &DiscoveryDoc) -> Result<(), String> {
         })
 }
 
-/// 服务端主动摘除（优雅关闭时调用）。残留不会造成错误，但摘干净更好。
-pub fn remove(data_dir: &Path) {
-    let _ = std::fs::remove_file(path(data_dir));
+/// 服务端主动摘除（优雅关闭时调用）。只删**本进程发布**的那一份：多个服务
+/// 进程可以共用同一个 DataDir（不同端口），未持有 AI runner 锁的进程不会
+/// 发布发现，它的退出更不能把持锁进程的对接入口一起删掉。返回是否真的删了。
+pub fn remove_if_owned(data_dir: &Path, server_instance_id: &str) -> bool {
+    match read(data_dir) {
+        Ok(doc) if doc.server_instance_id == server_instance_id => {
+            std::fs::remove_file(path(data_dir)).is_ok()
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn read(data_dir: &Path) -> Result<DiscoveryDoc, DiscoveryError> {
@@ -155,8 +162,18 @@ mod tests {
         let doc = read(&dir).unwrap();
         assert_eq!(doc, sample(7634));
         assert_eq!(doc.port, 7634);
-        remove(&dir);
+        assert!(remove_if_owned(&dir, "server-1"));
         assert!(matches!(read(&dir), Err(DiscoveryError::Unreachable(_))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_owner_shutdown_cannot_remove_the_published_discovery() {
+        let dir = temp_dir();
+        publish(&dir, &sample(7634)).unwrap();
+        assert!(!remove_if_owned(&dir, "server-2"));
+        assert_eq!(read(&dir).unwrap(), sample(7634));
+        assert!(remove_if_owned(&dir, "server-1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

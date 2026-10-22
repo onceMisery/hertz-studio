@@ -42,6 +42,18 @@ const CREDENTIAL_SUFFIX: &str = ".key";
 /// 凭据字节长度：256 位随机 opaque 值，落盘为 64 个十六进制字符。
 const SECRET_BYTES: usize = 32;
 
+/// grant 生命周期操作的进程内串行闸门（创建除外：新 UUID 不与任何已有
+/// grant 共享身份）。轮换是「读旧摘要 → 改库 → 换文件 → 失败回滚」的多步
+/// 序列，步骤之间没有共同的原子边界；两路并发可以交错成「库认 B、磁盘存
+/// A」，两个请求都返回成功，而磁盘凭据此后一律 401。撤销与轮换共用这把
+/// 锁，否则轮换可能已过撤销检查、撤销删完文件后再由轮换把凭据装回去。
+///
+/// 管理面操作稀少，一把进程级锁就够了；按 grant 建锁表只会多一份回收逻辑。
+fn grant_lifecycle() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// 一份通过认证的受限调用上下文。中间件把它塞进 request extensions，
 /// handler 只消费、不重建——身份与 scopes 来自可信的服务端查询，
 /// 绝不从请求参数接受。
@@ -256,6 +268,9 @@ pub(crate) async fn rotate_grant(
     state: &Arc<AppState>,
     grant_id: &str,
 ) -> Result<GrantSummary, ApiError> {
+    // 整个「读旧摘要 → 改库 → 换文件 → 回滚」是一条生命周期序列，必须
+    // 相对同一 grant 的其它轮换/撤销串行（见 [`grant_lifecycle`]）。
+    let _lifecycle = grant_lifecycle().lock().await;
     let row = vmusic_store::ai::find_grant_by_id(&state.db, grant_id)
         .await
         .map_err(store_error)?
@@ -306,6 +321,9 @@ pub(crate) async fn revoke_grant(
     state: &Arc<AppState>,
     grant_id: &str,
 ) -> Result<GrantSummary, ApiError> {
+    // 与轮换共用同一道生命周期闸门：撤销必须在「轮换已过检查但尚未装文件」
+    // 时等它收尾，之后轮换再看库就会看到 revoked 而被拒。
+    let _lifecycle = grant_lifecycle().lock().await;
     let existed = vmusic_store::ai::revoke_grant(&state.db, grant_id)
         .await
         .map_err(store_error)?;
@@ -538,6 +556,79 @@ mod tests {
         assert!(grants[0].revoked);
         let encoded = serde_json::to_string(&grants).unwrap();
         assert!(!encoded.contains(&new_secret), "摘要应答不得回显凭据");
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    /// 并发轮换必须让库里的摘要与磁盘凭据成对。没有生命周期闸门时，8 路
+    /// 同时轮换会交错成「库认 B、磁盘存 A」：请求全部成功，读文件却 401。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_rotations_keep_db_and_disk_in_step() {
+        let (state, handle) = ai_state().await;
+        let (grant_id, _) = make_grant(&state, "race", &["playback:read"]).await;
+        let path = credential_path(&state, &grant_id);
+        for round in 0..24 {
+            let mut tasks = Vec::new();
+            for _ in 0..8 {
+                let state = state.clone();
+                let grant_id = grant_id.clone();
+                tasks.push(tokio::spawn(
+                    async move { rotate_grant(&state, &grant_id).await },
+                ));
+            }
+            for task in tasks {
+                task.await.unwrap().unwrap();
+            }
+            let disk = std::fs::read_to_string(&path).unwrap();
+            let row = vmusic_store::ai::find_grant_by_id(&state.db, &grant_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.credential_digest,
+                digest(&disk),
+                "round {round}: DB 摘要与磁盘凭据必须成对"
+            );
+            assert!(
+                authenticate(&state, &disk).await.is_ok(),
+                "round {round}: 磁盘凭据必须能换到上下文"
+            );
+        }
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    /// 撤销与轮换并发时，撤销必须赢得干净：不许留下仍存在的凭据文件，
+    /// 也不许轮换在撤销之后把文件装回去。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn revoke_racing_rotations_leaves_no_live_credential_file() {
+        let (state, handle) = ai_state().await;
+        let (grant_id, _) = make_grant(&state, "race-revoke", &["playback:read"]).await;
+        let path = credential_path(&state, &grant_id);
+        let mut tasks = Vec::new();
+        for _ in 0..7 {
+            let state = state.clone();
+            let grant_id = grant_id.clone();
+            tasks.push(tokio::spawn(async move {
+                rotate_grant(&state, &grant_id).await.map(|_| ())
+            }));
+        }
+        let revoke_state = state.clone();
+        let revoke_id = grant_id.clone();
+        let revoke = tokio::spawn(async move {
+            revoke_grant(&revoke_state, &revoke_id).await.map(|_| ())
+        });
+        for task in tasks {
+            // 撤销前的轮换成功，撤销后的轮换被拒——两种都不是错误。
+            let _ = task.await.unwrap();
+        }
+        revoke.await.unwrap().unwrap();
+        let row = vmusic_store::ai::find_grant_by_id(&state.db, &grant_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.revoked);
+        assert!(!path.exists(), "撤销后不许留存任何凭据文件");
         state.audio.shutdown();
         handle.join().unwrap();
     }

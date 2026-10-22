@@ -245,6 +245,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // 时发布，且必须拿到 AI runner 锁——锁被其它进程持有（双开）就不发布，
     // 受限门面保持不可对接；0.0.0.0 / 具体网卡 / IPv6 不发布这个实验入口。
     // 锁以进程生命周期持有（forget 跳过 Drop，OS 在退出时统一释放）。
+    let mut ai_discovery_published = false;
     if local.ip() == std::net::IpAddr::from([127, 0, 0, 1]) && booted.ai_lock.is_some() {
         {
             let instance = vmusic_store::ai::get_or_create_instance(&state.db).await?;
@@ -259,6 +260,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             };
             match hertz_studio::ai::mcp::discovery::publish(&state.data_dir, &doc) {
                 Ok(()) => {
+                    ai_discovery_published = true;
                     println!(
                         "  ai-mcp   {}",
                         hertz_studio::ai::mcp::discovery::path(&state.data_dir).display()
@@ -316,7 +318,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
             tracing::info!("shutting down");
             shutdown_state.audio.shutdown();
             state::remove_discovery(&shutdown_state.data_dir).await;
-            hertz_studio::ai::mcp::discovery::remove(&shutdown_state.data_dir);
+            // 只摘自己发布的那份：未持锁的第二个进程（共用 DataDir、另一端口）
+            // 退出时不能把持锁进程的对接入口删掉。
+            if ai_discovery_published {
+                hertz_studio::ai::mcp::discovery::remove_if_owned(
+                    &shutdown_state.data_dir,
+                    shutdown_state.server_instance_id(),
+                );
+            }
             // drain 看门狗：升级过的 `/ws` 连接不属于「会自己结束的 in-flight」，
             // 页面还开着时按退出钮，hyper 能一直等到天荒地老。收尾三步已经做完
             // （声音停了、发现文件删了），所以到点直接结束进程不会留半截状态。
