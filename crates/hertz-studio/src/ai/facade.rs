@@ -54,17 +54,21 @@ fn grant_lifecycle() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// 缝上等待的两道栅栏：`reached` 报告「已停在库里」，`release` 由测试放行。
+/// 起别名是因为这个三元组本身会让 clippy 的 `type_complexity` 判错。
+#[cfg(test)]
+type RotationPause = (
+    String,
+    std::sync::Arc<tokio::sync::Barrier>,
+    std::sync::Arc<tokio::sync::Barrier>,
+);
+
 /// 测试缝：把指定 grant 的一次轮换钉在「库已提交、文件尚未安装」之间，
 /// 让「A 提交库 → B 提交库并装文件 → A 装文件」这个交错确定性发生，
 /// 而不是靠概率去撞调度窗口。
 #[cfg(test)]
-pub(crate) static ROTATE_INSTALL_PAUSE: std::sync::Mutex<
-    Option<(
-        String,
-        std::sync::Arc<tokio::sync::Barrier>,
-        std::sync::Arc<tokio::sync::Barrier>,
-    )>,
-> = std::sync::Mutex::new(None);
+pub(crate) static ROTATE_INSTALL_PAUSE: std::sync::Mutex<Option<RotationPause>> =
+    std::sync::Mutex::new(None);
 
 #[cfg(test)]
 async fn pause_rotation_before_install(grant_id: &str) {
