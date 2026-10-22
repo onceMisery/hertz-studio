@@ -814,6 +814,8 @@ pub struct AppState {
     pub(crate) cache_index: Arc<crate::online::cache::CacheIndex>,
     /// 首跳票据（签发/兑换），见 [`crate::ticket`]。只活在内存里。
     pub(crate) tickets: crate::ticket::TicketStore,
+    /// 开着的浏览器页面数，由 [`ViewerGuard`] 随 `/ws` 连接增减。
+    pub(crate) viewers: AtomicUsize,
     /// 自动接力连续失败计数，任一曲成功提交即清零；累计到 3 停止接力。
     pub(crate) auto_failures: AtomicUsize,
     /// 一轮跳曲走的起点：第一次失败时把「当时在播的那首」记下来，放弃时把游标还给
@@ -849,6 +851,10 @@ pub struct AppState {
     /// 启动后由 main 注入 Weak：on_track_committed 只有 &self，detach
     /// 'static 任务时凭它拿回 Arc（不改 play_index/step 的签名链）。
     pub(crate) weak_self: std::sync::OnceLock<std::sync::Weak<AppState>>,
+    /// 服务退出信号：首页那颗退出钮（`POST /v1/system/shutdown`）拉它，`main.rs`
+    /// 的优雅关停把它与 Ctrl-C 并进同一条收尾。用 watch 而不是 Notify 是因为
+    /// `send` 是粘的——serve 那边的注册早晚都不会丢这次唤醒。
+    pub(crate) exiting: tokio::sync::watch::Sender<bool>,
     /// 会话恢复的待回放进度：重启时从快照装进来，首次 play 成功提交后
     /// seek 过去并清空（只消费一次，之后的 play/seek 都是用户自己的意图）。
     pub(crate) pending_restore_seek: Mutex<Option<u64>>,
@@ -884,11 +890,48 @@ pub struct AppState {
     pub(crate) ai_external_ready: std::sync::atomic::AtomicBool,
 }
 
+/// 离场到停播之间的宽限。本机实测「重载 → WS 建连」257–675 ms（冷启动取 675），
+/// 前端退避重连首轮 ~1 s（`app.js` 的 `scheduleReconnect`）：宽限得盖过这两段，
+/// 否则按一次 F5 就停一次播。
+pub(crate) const DEPART_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 「还开着几个页面」的唯一出处：一条 `/ws` 连接进 `handle_socket` 时 +1，任何
+/// 出口（早退、发送失败、panic 展开）由 Drop 收回。不用 `events.receiver_count()`
+/// 是因为集合补页、AI 任务、电台取数这些内部等待者订阅的是同一条总线，那个数
+/// 答不出「有没有浏览器开着」。
+pub(crate) struct ViewerGuard {
+    state: Arc<AppState>,
+}
+
+impl ViewerGuard {
+    pub(crate) fn enter(state: Arc<AppState>) -> Self {
+        state.viewers.fetch_add(1, Ordering::AcqRel);
+        Self { state }
+    }
+}
+
+impl Drop for ViewerGuard {
+    fn drop(&mut self) {
+        self.state.viewers.fetch_sub(1, Ordering::AcqRel);
+        // 断开本身就武装一次，不靠前端的信标：实测关掉整个浏览器时
+        // `fetch(keepalive)` 请求根本发不出去（Chromium 抢先撕掉网络栈），
+        // 只认 `/v1/player/depart` 的话「关浏览器还在放」照旧成立。信标覆盖的是
+        // 主动调用与单标签关闭，这条兜住崩溃、进程被杀与整浏览器退出。
+        self.state.schedule_depart_pause();
+    }
+}
+
 impl AppState {
     /// 本次服务进程的实例身份（技术路线 §5.5）。字段保持 pub(crate)，
     /// 传输层（独立 bin 与插件宿主）经这里只读访问。
     pub fn server_instance_id(&self) -> &str {
         &self.server_instance_id
+    }
+
+    /// 退出信号的只读订阅口：`main.rs`（独立 bin）等它，字段本身是 pub(crate)，
+    /// 与上面 `server_instance_id` 同一套「bin 走方法、不直接摸字段」的边界。
+    pub fn exiting_signal(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.exiting.subscribe()
     }
 
     /// AI runner 锁是否在本进程（生成受理的门禁）。
@@ -3729,6 +3772,55 @@ impl AppState {
         })
     }
 
+    /// 页面离场的收尾：宽限期到点后，只有「没有页面开着」且「确实还在出声」两个
+    /// 条件同时成立才暂停。武装点有两处——前端的 `pagehide` 信标（`/v1/player/depart`）
+    /// 与最后一条 `/ws` 断开（[`ViewerGuard::drop`]），后者是关整个浏览器时唯一可能
+    /// 生效的那条，因为信标在那种退出里发不出去。
+    ///
+    /// 宽限期存在的理由是 `pagehide` 与 WS 断开在按 F5 时同样发生：实测本机重载
+    /// → 重连 257–675 ms，立即暂停等于每刷一次停一次。重复武装（两个标签先后关、
+    /// 信标与断开各一次）无害——判定只看当下的观看者数，多个任务只是把同一件事
+    /// 确认多次。停的是 pause 不是 stop：游标与进度留着，重开页面点播放能接回原处
+    /// （`pending_restore_seek` 那条恢复路）。
+    pub(crate) fn schedule_depart_pause(self: &Arc<Self>) {
+        let Some(state) = self.weak_self.get().and_then(std::sync::Weak::upgrade) else {
+            tracing::warn!("离场暂停没有 AppState 弱引用，跳过");
+            return;
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(DEPART_GRACE).await;
+            state.pause_if_alone().await;
+        });
+    }
+
+    /// 首页那颗退出钮：拉退出信号。先留 150 ms 让这次 POST 的应答发完——进程要是
+    /// 抢在应答之前没掉，浏览器只看到一个失败请求，用户分不清按没按成。
+    pub(crate) fn request_exit(&self) {
+        let exiting = self.exiting.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let _ = exiting.send(true);
+        });
+    }
+
+    /// 宽限期到点后的判定：没有页面开着、且确实还在出声，才暂停。返回有没有真的
+    /// 停。判定只依赖当下的观看者数，与那 3 秒无关，所以单独拆出来能被直接测到。
+    pub(crate) async fn pause_if_alone(&self) -> bool {
+        if self.viewers.load(Ordering::Acquire) > 0 || !self.audio.snapshot().playing {
+            return false;
+        }
+        match self.pause_control().await {
+            Ok(outcome) => {
+                tracing::info!(?outcome, "最后一个页面已离场，播放暂停");
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "离场暂停失败");
+                false
+            }
+        }
+    }
+
     /// 共享播控入口：恢复/开始播放。
     ///
     /// `strict` 供受限控制面（外部门面/AI）使用：播放器里没有已装载曲目就明确
@@ -4376,12 +4468,14 @@ pub(crate) mod tests {
             beat_labels: Mutex::new(BoundedMap::new(BEAT_LABEL_CAP)),
             beat_deferrals: std::sync::atomic::AtomicUsize::new(0),
             weak_self: Default::default(),
+            exiting: tokio::sync::watch::channel(false).0,
             pending_restore_seek: Default::default(),
             overlay_lyric: Default::default(),
             listen: Default::default(),
             scrobble: Default::default(),
             relay_tried: Default::default(),
             tickets: crate::ticket::TicketStore::new(),
+            viewers: AtomicUsize::new(0),
             short_writes: Default::default(),
             server_instance_id: uuid::Uuid::new_v4().to_string(),
             search_gate: Default::default(),
@@ -4393,6 +4487,99 @@ pub(crate) mod tests {
             ai_external_ready: Default::default(),
         };
         (state, handle)
+    }
+
+    /// 「关掉页面就停播」只在最后一个页面走掉时成立。一个守卫对应一条 `/ws`，
+    /// 所以第二个标签还开着（守卫还活着）时不许把声音停下；宽限期到点的判定
+    /// 也不看时间，只看当下的观看者数与是否还在出声。
+    #[tokio::test]
+    async fn depart_pause_only_fires_for_the_last_viewer() {
+        let (state, handle) = playback_state().await;
+        state.set_queue(vec!["first".into()], Some(0)).await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        state.audio.play().await.unwrap();
+        let state = Arc::new(state);
+        assert_eq!(state.viewers.load(Ordering::Acquire), 0);
+
+        let first = ViewerGuard::enter(state.clone());
+        let second = ViewerGuard::enter(state.clone());
+        assert_eq!(state.viewers.load(Ordering::Acquire), 2);
+        assert!(!state.pause_if_alone().await, "两个页面开着时不许停播");
+        assert!(state.audio.snapshot().playing);
+
+        // 关掉一个标签：另一个还在听。
+        drop(first);
+        assert_eq!(state.viewers.load(Ordering::Acquire), 1);
+        assert!(!state.pause_if_alone().await, "关掉一个标签不该停另一个");
+        assert!(state.audio.snapshot().playing);
+
+        // 最后一个走完：这次真的停。
+        drop(second);
+        assert_eq!(state.viewers.load(Ordering::Acquire), 0);
+        assert!(state.pause_if_alone().await, "最后一个页面离场应暂停");
+        assert!(!state.audio.snapshot().playing);
+
+        // 两个标签先后关会武装两次，第二次没在出声，不许再按一次暂停。
+        assert!(!state.pause_if_alone().await, "已经静音时不重复动作");
+
+        drop(state);
+        handle.join().unwrap();
+    }
+
+    /// 退出钮这条链在 lib 里能看到的最远一步：信号被粘住拉起来，且不是立刻——
+    /// 150 ms 的回执窗要先留给这次 POST 的应答。
+    #[tokio::test]
+    async fn request_exit_latches_the_signal_after_the_reply_window() {
+        let (state, handle) = playback_state().await;
+        let mut exiting = state.exiting.subscribe();
+        assert!(!*exiting.borrow(), "起始必须是未退出");
+        state.request_exit();
+        assert!(!*exiting.borrow_and_update(), "回执窗内不许已经拉起退出");
+        exiting.changed().await.unwrap();
+        assert!(
+            *exiting.borrow_and_update(),
+            "信号必须能被 serve 那边的订阅读到"
+        );
+        drop(state);
+        handle.join().unwrap();
+    }
+
+    /// 最后一条 `/ws` 断开即武装宽限检查，不依赖前端信标——关掉整个浏览器时
+    /// 信标发不出去（实测），这条是唯一能生效的。宽限与音频 actor 都按真时间走，
+    /// 所以这条要实等三秒出头。
+    #[tokio::test]
+    async fn last_socket_drop_pauses_after_the_grace() {
+        let (state, handle) = playback_state().await;
+        state.set_queue(vec!["first".into()], Some(0)).await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        state.audio.play().await.unwrap();
+        let state = Arc::new(state);
+        // 独立形态由 bootstrap 注入弱引用；这里自己补上，detach 任务要凭它拿回 Arc。
+        let _ = state.weak_self.set(Arc::downgrade(&state));
+
+        drop(ViewerGuard::enter(state.clone()));
+        assert!(state.audio.snapshot().playing, "宽限期内不许抢跑");
+
+        let deadline =
+            std::time::Instant::now() + DEPART_GRACE + std::time::Duration::from_millis(2500);
+        while state.audio.snapshot().playing && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            !state.audio.snapshot().playing,
+            "最后一条连接断开后，宽限期末应暂停"
+        );
+
+        drop(state);
+        handle.join().unwrap();
     }
 
     #[tokio::test]

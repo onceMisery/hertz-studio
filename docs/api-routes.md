@@ -11,7 +11,7 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 157 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 127 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 131 条内嵌静态资源路由。
+REST 路由表共 159 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 129 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 131 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -104,6 +104,7 @@ REST 路由表共 157 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | GET | `/v1/online/sources` |
 | GET | `/v1/online/stream` |
 | GET | `/v1/overlay/lyric` |
+| POST | `/v1/player/depart` |
 | GET | `/v1/player/dsp` |
 | POST | `/v1/player/dsp` |
 | POST | `/v1/player/load` |
@@ -150,6 +151,7 @@ REST 路由表共 157 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | POST | `/v1/stage/pitch` |
 | POST | `/v1/stage/project-media` |
 | GET | `/v1/state` |
+| POST | `/v1/system/shutdown` |
 | GET | `/v1/tracks` |
 | POST | `/v1/tracks/batch-delete` |
 | POST | `/v1/tracks/batch-edit` |

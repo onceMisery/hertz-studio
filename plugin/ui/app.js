@@ -204,6 +204,7 @@ const ui = {
   queueSave: $('queue-save'),
   sleepTimer: $('sleep-timer'),
   sleepTimerLabel: $('sleep-timer-label'),
+  serviceExit: $('service-exit'),
   queueBadge: $('queue-badge'),
 
   setDevice: $('set-device'),
@@ -8031,6 +8032,9 @@ async function startApp() {
   ui.prev.onclick = () => post('/v1/player/previous');
   ui.next.onclick = () => post('/v1/player/next');
   ui.stop.onclick = () => stopPlayback();
+  // 退出钮只在独立形态放开：dbx 里播放归宿主管管，demo 根本没有服务可退。
+  ui.serviceExit.hidden = transport.kind !== 'server';
+  ui.serviceExit.onclick = exitService;
   ui.mode.onclick = () => {
     const order = ['repeat', 'repeat_one', 'shuffle'];
     const next = order[(order.indexOf(state.snapshot.mode) + 1) % order.length];
@@ -9325,6 +9329,24 @@ async function startApp() {
   if (health) {
     ui.setBackend.textContent = `${health.backend} · v${health.version} · 协议 ${health.protocol_version}`;
   }
+  // 关掉页面 = 本客户端离场。服务端要等宽限期过去、确认「没有别的页面开着且还在
+  // 出声」才暂停，所以 F5 与「再开一个标签」都不会把正在听的歌掐掉（宽限那个数按
+  // 本机实测「重载 → WS 建连」257–675 ms 定的）。
+  //
+  // 用 fetch(keepalive) 而不是 sendBeacon：后者设不了 Authorization 头，而这条路由
+  // 在全权鉴权层后面。persisted=true 是进 bfcache（退一步还会回来），不算离场。
+  // 只挂独立形态：dbx / stdio / demo 没有这条 HTTP 通道，且 transport 到这里才定形，
+  // 放在模块顶层会读到 chooseTransport 之前的初值。
+  if (transport.kind === 'server') {
+    window.addEventListener('pagehide', (event) => {
+      if (event.persisted) return;
+      fetch('/v1/player/depart', {
+        method: 'POST',
+        keepalive: true,
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      }).catch(() => {});
+    });
+  }
   openSocket();
 }
 
@@ -9344,6 +9366,41 @@ function showBootFailure(err) {
   btn.onclick = () => location.reload();
   box.append(msg, btn);
   document.body.append(box);
+}
+
+/// 退出服务（顶栏那颗电源键）：让服务端把声音停掉、发现文件删掉、进程结束，
+/// 再把眼前这个页面也收掉。判「真退出了」用的是 /v1/health 打不通，不看那一次
+/// 应答——应答回来的那一刻进程还活着，它后面还有 150 ms 回执窗和最多 2 s 的
+/// drain 看门狗（`/ws` 这种长连接不会自己结束）。
+///
+/// `window.close()` 只对脚本自己开的窗口生效，普通标签页浏览器不让脚本关，所以
+/// 关不掉时整页换成一张收尾卡：比留在一个「服务已断开、正在重连」的死界面上诚实。
+async function exitService() {
+  ui.serviceExit.disabled = true;
+  await transport.post('/v1/system/shutdown').catch(() => null);
+  window.close();
+  if (window.closed) return;
+  toast('服务正在退出…', 'info');
+  for (let probe = 0; probe < 40; probe += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const up = await fetch('/v1/health', { cache: 'no-store' }).then((res) => res.ok).catch(() => false);
+    if (!up) { showServiceExit(); return; }
+  }
+  showServiceExit('服务没能退出，请检查进程是否还在');
+}
+
+function showServiceExit(note) {
+  document.body.classList.add('service-exited');
+  const card = document.createElement('div');
+  card.className = 'service-exit-card';
+  const line = document.createElement('span');
+  line.textContent = note || '服务已退出';
+  const hint = document.createElement('small');
+  hint.textContent = note
+    ? '这个标签页可以关掉了。'
+    : '这个标签页可以关掉了。要再听就重新运行 hertz-studio（带 --open 会顺手把页面打开）。';
+  card.append(line, hint);
+  document.body.append(card);
 }
 
 (async function boot() {

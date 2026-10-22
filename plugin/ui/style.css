@@ -3876,6 +3876,33 @@ body.is-boot-failed > *:not(.boot-failed-card) { display: none !important; }
   cursor: pointer;
 }
 
+/* 退出那颗钮：hover 走状态色而不是主题色——它的语义是「离开」，不是又一个工具。
+   写成 `.iconbtn#service-exit` 是 (0,3,0)：压得住基线那条 `.iconbtn:hover`（0,2,0），
+   又不用 id 那种 (1,1,0) 的绝对重量——皮肤若以 `[data-skin] .iconbtn:hover`（同为
+   0,3,0）想改这颗钮，靠它排在后面的加载顺序就能改走。 */
+.iconbtn#service-exit:hover { color: var(--danger); }
+
+/* 退出后的收尾页（app.js showServiceExit）：进程没了，页面只留一句「怎么再起来」。
+   与启动失败那张卡一样整页接管、藏掉其余节点（包括那条已经开始重连的提示），
+   但排版按全屏尺寸来：居中一行主句 + 一行灰字，不像贴左的调试输出。 */
+body.service-exited { background: rgb(20 23 27) !important; }
+body.service-exited > *:not(.service-exit-card) { display: none !important; }
+.service-exit-card {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 24px;
+  background: rgb(20 23 27);
+  color: #d7dbe0;
+  font: 15px/1.5 system-ui, "Microsoft YaHei", sans-serif;
+  text-align: center;
+}
+.service-exit-card small { color: #8b929b; font-size: 12px; }
+
 /* ---------------------------------------------------------------------------
  * 动效分面降级：body[data-rm] 的面名由设置页「外观 → 动效分面」写入
  * （见 app.js 的 MOTION_SURFACES）。这里认领「界面微动效」面：常亮指示、

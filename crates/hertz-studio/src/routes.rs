@@ -106,6 +106,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/player/play", post(play))
         .route("/v1/player/pause", post(pause))
         .route("/v1/player/stop", post(stop))
+        // 页面离场（pagehide）：宽限后确认没有页面开着才暂停，见 `depart`。
+        .route("/v1/player/depart", post(depart))
         .route("/v1/player/next", post(next))
         .route("/v1/player/previous", post(previous))
         .route("/v1/player/seek", post(seek))
@@ -210,6 +212,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/diagnostics/log",
             get(download_diagnostics_log).delete(clear_diagnostics_log),
         )
+        // 服务退出：首页那颗电源钮。停播 + 删发现文件 + 进程结束，见 `shutdown_service`。
+        .route("/v1/system/shutdown", post(shutdown_service))
         // 收藏：列表 / 新增 / 删除 / 开关；membership 是给一整屏曲目批量判红的。
         .route("/v1/favorites", get(list_favorites).post(add_favorite))
         .route("/v1/favorites/membership", post(favorite_membership))
@@ -1038,6 +1042,29 @@ async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::
     state.transport_committed().await;
     drop(commit);
     Ok(get_state(State(state)).await)
+}
+
+/// 页面离场通知：`app.js` 在 `pagehide` 用 keepalive fetch 打这一条，服务端在
+/// 宽限期满后确认「没有页面开着、且确实还在出声」才暂停（编排见
+/// `AppState::schedule_depart_pause`）。应答只是受理回执——按下这一条时播放还没
+/// 变，回快照会把「已暂停」说成既成事实。
+async fn depart(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    state.schedule_depart_pause();
+    Ok(Json(serde_json::json!({
+        "scheduled": true,
+        "grace_ms": crate::state::DEPART_GRACE.as_millis(),
+        "viewers": state.viewers.load(std::sync::atomic::Ordering::Acquire),
+    })))
+}
+
+/// 服务退出（首页那颗电源钮）。应答只是「已受理」：真正的收尾在 `main.rs` 的
+/// 优雅关停里——停播、删发现文件、结束进程，与 Ctrl-C 走同一条路，两条入口不许
+/// 一个干净一个留半截。150 ms 的回执窗由 `AppState::request_exit` 留着。
+async fn shutdown_service(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.request_exit();
+    Ok(Json(serde_json::json!({ "status": "exiting" })))
 }
 
 async fn next(

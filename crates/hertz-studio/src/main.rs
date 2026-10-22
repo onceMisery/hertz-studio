@@ -300,13 +300,31 @@ async fn run(args: Args) -> anyhow::Result<()> {
     }
 
     let shutdown_state = state.clone();
+    let mut exiting = state.exiting_signal();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            tokio::signal::ctrl_c().await.ok();
+            // Ctrl-C 与首页那颗退出钮走同一条收尾（`POST /v1/system/shutdown`
+            // 拉 watch），两条入口不许一个干净一个留半截状态。
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                changed = exiting.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+            }
             tracing::info!("shutting down");
             shutdown_state.audio.shutdown();
             state::remove_discovery(&shutdown_state.data_dir).await;
             hertz_studio::ai::mcp::discovery::remove(&shutdown_state.data_dir);
+            // drain 看门狗：升级过的 `/ws` 连接不属于「会自己结束的 in-flight」，
+            // 页面还开着时按退出钮，hyper 能一直等到天荒地老。收尾三步已经做完
+            // （声音停了、发现文件删了），所以到点直接结束进程不会留半截状态。
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tracing::info!("drain 未结束，直接退出进程");
+                std::process::exit(0);
+            });
         })
         .await?;
 

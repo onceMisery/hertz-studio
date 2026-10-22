@@ -17,7 +17,7 @@ use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 
 use crate::error::unauthorized;
-use crate::state::{AppState, WsEvent};
+use crate::state::{AppState, ViewerGuard, WsEvent};
 
 #[derive(Deserialize)]
 pub struct WsQuery {
@@ -45,6 +45,9 @@ pub async fn ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+    // 计数守卫：本函数返回（含下面任何一条早退）即 -1，所以「还有没有页面开着」
+    // 与这条连接的存活期一一对应。武装逻辑见 `AppState::schedule_depart_pause`。
+    let _viewer = ViewerGuard::enter(state.clone());
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.events.subscribe();
 
