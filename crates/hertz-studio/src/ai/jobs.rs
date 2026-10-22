@@ -7334,10 +7334,12 @@ mod tests {
         let mut view = get_job(&state, crate::idempotency::LOCAL_OWNER, &job.job_id)
             .await
             .unwrap();
-        for _ in 0..200 {
+        for _ in 0..1000 {
             if view.state == "succeeded" {
                 break;
             }
+            // CI 并行跑完整测试套件时，SQLite 争用会让一次假 provider 任务超过 1s；
+            // 给到 5s 只放宽等待上限，不改变「最终必须成功」的断言。
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             view = get_job(&state, crate::idempotency::LOCAL_OWNER, &job.job_id)
                 .await

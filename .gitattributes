@@ -20,3 +20,6 @@ tools/space-stage/package.json text eol=lf
 tools/space-stage/package-lock.json text eol=lf
 plugin/ui/vendor/*-stage.js text eol=lf
 plugin/ui/vendor/stage-runtime.js text eol=lf
+# export-stage-contract.js --check compares these two generated files byte-for-byte.
+crates/hertz-studio/src/ai/stage-contract/stage-contract.json text eol=lf
+plugin/ui/creative-contract.js text eol=lf
