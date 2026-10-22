@@ -142,7 +142,7 @@ async function scrollSurface(page, selector, message) {  const surface = page.lo
   await surface.evaluate(element => { element.scrollTop = 0; });
 }
 
-// 顶栏的设置齿轮在经典/浮光/潮汐/黑胶/iOS 里被皮肤摘掉了（导航里已有同一入口），
+// 顶栏的设置齿轮在经典/黑胶里被皮肤摘掉了（导航里已有同一入口），
 // 所以开设置要点当前皮肤里可见的那一颗。
 async function openSettings(page) {
   const gear = page.locator('#settings-entry');
@@ -151,7 +151,7 @@ async function openSettings(page) {
 }
 
 async function skins(page) {
-  for (const skin of ['classic', 'sheen', 'liunian']) {
+  for (const skin of ['classic', 'liunian', 'qingfeng']) {
     for (const [width, height] of [[1440, 900], [1024, 700], [390, 844], [320, 640]]) {
       await page.setViewportSize({ width, height });
       await page.evaluate(value => Skins.apply(value), skin);
@@ -302,7 +302,7 @@ async function listScrolling(page, tracks) {
   const playlist = await api('POST', '/v1/playlists', { name: 'Skin scroll audit' });
   await api('POST', `/v1/playlists/${playlist.id}/tracks`, { track_ids: queue });
   await ready(page);
-  for (const skin of ['classic', 'sheen', 'liunian']) {
+  for (const skin of ['classic', 'liunian', 'qingfeng']) {
     await page.setViewportSize({ width: 1024, height: 700 });
     await page.evaluate(value => Skins.apply(value), skin);
     for (const [view, selector] of [['library', '#lib-list'], ['queue', '#queue-list'], ['favorites', '#fav-list']]) {
@@ -377,7 +377,7 @@ async function appearance(page, tracks) {
   fs.mkdirSync(output, { recursive: true });
   const health = await fetch(base + '/v1/health').then(response => response.json());
   assert.equal(health.backend, 'null', 'Use an isolated VMUSIC_BACKEND=null service for this check');
-  for (const file of ['app.js', 'stage.js', 'style.css', 'stage.css', ...['sheen', 'liunian'].map(skin => `skins/skin.${skin}.css`)]) {
+  for (const file of ['app.js', 'stage.js', 'style.css', 'stage.css', ...['liunian', 'qingfeng'].map(skin => `skins/skin.${skin}.css`)]) {
     const response = await fetch(new URL(file, base));
     assert.ok(response.ok, `Cannot fetch ${file}`);
     const served = (await response.text()).replace(/\r\n/g, '\n');

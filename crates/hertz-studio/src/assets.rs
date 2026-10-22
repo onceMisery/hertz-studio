@@ -81,7 +81,6 @@ ui_assets! {
     "/pl-covers.js", JS => const PL_COVERS_JS: &str = edition_ui!("pl-covers.js");
     "/theme-studio.js", JS => const THEME_STUDIO_JS: &str = edition_ui!("theme-studio.js");
     "/skins/skins.js", JS => const SKINS_JS: &str = edition_ui!("skins/skins.js");
-    "/skins/skin.sheen.js", JS => const SHEEN_JS: &str = edition_ui!("skins/skin.sheen.js");
     "/creative-gl.js", JS => const CREATIVE_GL_JS: &str = edition_ui!("creative-gl.js");
     "/creative-anime.js", JS => const CREATIVE_ANIME_JS: &str = edition_ui!("creative-anime.js");
     "/creative-stage.js", JS => const CREATIVE_STAGE_JS: &str = edition_ui!("creative-stage.js");
@@ -171,16 +170,13 @@ ui_assets! {
     "/cel-ui.css", CSS => const CEL_UI_CSS: &str = edition_ui!("cel-ui.css");
     "/anime-interactions.css", CSS => const ANIME_INTERACTIONS_CSS: &str = edition_ui!("anime-interactions.css");
     "/skins/skins.css", CSS => const SKINS_CSS: &str = edition_ui!("skins/skins.css");
-    "/skins/skin.sheen.css", CSS => const SKIN_SHEEN_CSS: &str = edition_ui!("skins/skin.sheen.css");
     "/skins/skin.liunian.css", CSS => const SKIN_LIUNIAN_CSS: &str = edition_ui!("skins/skin.liunian.css");
     "/skins/skin.qingfeng.css", CSS => const SKIN_QINGFENG_CSS: &str = edition_ui!("skins/skin.qingfeng.css");
-    "/skins/skin.chaoxi.css", CSS => const SKIN_CHAOXI_CSS: &str = edition_ui!("skins/skin.chaoxi.css");
     "/skins/skin.heijiao.css", CSS => const SKIN_HEIJIAO_CSS: &str = edition_ui!("skins/skin.heijiao.css");
     "/skins/skin-shared.js", JS => const SKIN_SHARED_JS: &str = edition_ui!("skins/skin-shared.js");
     "/skins/skin-settings-sheet.js", JS => const SKIN_SETTINGS_SHEET_JS: &str = edition_ui!("skins/skin-settings-sheet.js");
     "/skins/skin.liunian.js", JS => const SKIN_LIUNIAN_JS: &str = edition_ui!("skins/skin.liunian.js");
     "/skins/skin.qingfeng.js", JS => const SKIN_QINGFENG_JS: &str = edition_ui!("skins/skin.qingfeng.js");
-    "/skins/skin.chaoxi.js", JS => const SKIN_CHAOXI_JS: &str = edition_ui!("skins/skin.chaoxi.js");
     "/skins/skin.heijiao.js", JS => const SKIN_HEIJIAO_JS: &str = edition_ui!("skins/skin.heijiao.js");
     "/skins/skin.orbit.js", JS => const SKIN_ORBIT_JS: &str = edition_ui!("skins/skin.orbit.js");
     "/skins/skin.orbit.css", CSS => const SKIN_ORBIT_CSS: &str = edition_ui!("skins/skin.orbit.css");

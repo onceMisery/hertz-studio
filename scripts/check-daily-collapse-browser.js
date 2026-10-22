@@ -85,7 +85,7 @@ async function setSkin(page, id) {
 }
 
 async function gotoLibrary(page) {
-  // 不点 rail：流年把侧栏收成胶囊、浮光把导航换成顶部胶囊，
+  // 不点 rail：流年把侧栏收成胶囊、清风隐藏左侧栏，
   // `.rail-item[data-view=library]` 在那两套皮肤下存在却被 Playwright 判不可见。
   // 直接调它自己的 onclick，走的仍是业务路径（app.js 里就是 setView(...)）。
   await page.evaluate(() => {
@@ -430,9 +430,9 @@ async function checkRowCheckbox(page) {
       `display=${restored.listDisplay}`);
 
     // ------------------------------------------------------- 逐皮肤
-    section('五套皮肤都要拿得到这颗按钮');
+    section('各套皮肤都要拿得到这颗按钮');
     for (const [id, label] of [
-      ['classic', '经典'], ['sheen', '浮光'],
+      ['classic', '经典'],
       ['liunian', '流年'], ['qingfeng', '清风'],
     ]) {
       await checkSkin(page, id, label);

@@ -75,15 +75,14 @@ function check(condition, label, details) {
         for (const b of geometry.buttons) {
           if (b.missing && b.id === 'online-account-btn') continue;
           // Qingfeng exposes these actions through its own toolbar/menu.
-          // 经典/浮光/潮汐/黑胶与 iOS 一样把顶栏设置齿轮摘了（导航里已有同一入口）。
+          // 经典/黑胶/轨道与 iOS 一样把顶栏设置齿轮摘了（导航里已有同一入口）。
           if (b.w === 0 && (skin === 'qingfeng' ||
-            (['classic', 'sheen', 'chaoxi', 'heijiao', 'orbit'].includes(skin) && b.id === 'settings-entry') ||
-            (skin === 'sheen' && b.id === 'skin-btn' && width <= 1100))) continue;
+            (['classic', 'heijiao', 'orbit'].includes(skin) && b.id === 'settings-entry'))) continue;
           const compactOrbit = skin === 'orbit';
           check(b.w >= (compactOrbit ? 26 : 30) && b.h >= (compactOrbit ? 26 : 32) && b.x >= 0 && b.right <= width && b.hit,
             label + ' button reachable', b);
         }
-        if (!['qingfeng', 'sheen'].includes(skin)) {
+        if (skin !== 'qingfeng') {
           check(geometry.search.w >= 100, label + ' usable search width', geometry.search);
           if (width <= 620) {
             if (skin === 'orbit') check(geometry.search.bottom <= geometry.topRight.y + 1,

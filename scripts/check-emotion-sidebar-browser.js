@@ -45,8 +45,8 @@ async function main() {
     await page.waitForFunction(() => window.Stage && Stage.lyrics() && Stage.lyrics().lines.length >= 2, null, { timeout: 30000 });
     await page.evaluate(() => {
       if (Stage.setMode) Stage.setMode('karaoke');
-      // classic / ios / sheen 皮肤默认把舞台收成抽屉；测试要量侧栏，显式打开。
-      document.body.classList.add('stage-open', 'sheen-mini-open');
+      // classic 皮肤默认把舞台收成抽屉；测试要量侧栏，显式打开。
+      document.body.classList.add('stage-open');
     });
     // 空闲后整个舞台会被 data-stage-idle 隐藏；指针动一下唤醒。
     async function wake() {

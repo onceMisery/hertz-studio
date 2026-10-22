@@ -86,7 +86,7 @@ function check(value, message) { assert.ok(value, message); checks++; console.lo
     }
     await apply('classic');
     check(await width() <= 76, 'classic remembers its own collapsed preference');
-    await apply('sheen');
+    await apply('qingfeng');
     check(!await toggle.isVisible(), 'other skins do not show the sidebar toggle');
     await apply('classic');
     check(await toggle.isVisible() && await width() <= 76, 'switching back restores sidebar state');

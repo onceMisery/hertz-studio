@@ -147,8 +147,8 @@ Jamendo、ccMixter 和公开播客；显式开启 `full` feature 的 **Full** �
 
 ### 外观：主题、壁纸与界面皮肤
 
-- 布局皮肤（界面可选七套）：**星轨 orbit（默认）** / 经典 classic / 浮光 sheen / 流年 liunian /
-  清风 qingfeng / 潮汐 chaoxi / 黑胶 heijiao。星轨提供单张立体黑胶、鼠标透视跟随、
+- 布局皮肤（界面可选五套）：**星轨 orbit（默认）** / 经典 classic / 流年 liunian /
+  清风 qingfeng / 黑胶 heijiao。星轨提供单张立体黑胶、鼠标透视跟随、
   浮雕列表与常驻队列。皮肤只管布局，配色一律跟当前主题走，
   所以换皮肤不会把主题色带跑，换主题也不破坏布局
 - 24 套内置主题色 + 7 套二次元主题 + 自定义配色；文字色由底色按 WCAG 反推，不是手写
@@ -158,7 +158,7 @@ Jamendo、ccMixter 和公开播客；显式开启 `full` feature 的 **Full** �
 
 ![主题与壁纸：壁纸背景配暖金主题](docs/images/ui-theme.png)
 
-![界面皮肤：七套布局，星轨为默认](docs/images/ui-skins.png)
+![界面皮肤：五套布局，星轨为默认](docs/images/ui-skins.png)
 
 ### 模型与外部接入
 
@@ -438,8 +438,8 @@ hertz-studio/
 │       ├── lyric3d.js / lyric-emotion*.js    三维歌词与情绪场
 │       ├── video-export.js / overlay.html    视频导出、歌词浮层
 │       ├── themes.js / theme-studio.*        主题色目录与主题工作室
-│       ├── skins/                           布局皮肤：orbit / classic / sheen / liunian /
-│       │                                    qingfeng / chaoxi / heijiao
+│       ├── skins/                           布局皮肤：orbit / classic / liunian /
+│       │                                    qingfeng / heijiao
 │       ├── online*.js / podcasts.js          在线音源、扫码登录、在线歌单、播客
 │       └── wallpapers/                       内嵌壁纸（13 张，已按长边 1600px 预压）
 ├── tools/                   舞台场景源码（space-stage / zodiac-stage / coast-stage）与打包脚本

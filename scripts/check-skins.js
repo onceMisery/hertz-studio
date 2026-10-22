@@ -10,9 +10,9 @@
 //
 //   1. **偷偷改配色**。皮肤 CSS 里一旦出现颜色字面量，换皮肤就会把主题色带跑，
 //      主题与皮肤不再正交。这里直接扫十六进制/rgb() 字面量。
-//   2. **两套皮肤没有区分度**。只是微调就失去了"换皮肤"的意义——对两组布局
+//   2. **各套皮肤没有区分度**。只是微调就失去了"换皮肤"的意义——对布局
 //      令牌逐项比对，要求真的反向取值。
-//   3. **模块覆盖不齐**。两套皮肤必须覆盖同一批模块，否则切过去会有页面
+//   3. **模块覆盖不齐**。各套皮肤必须覆盖同一批模块，否则切过去会有页面
 //      落回默认布局，看起来像"切了一半"。
 //   4. **扩展点不Work**。加一套皮肤应该是"一个 CSS + 一行 register"，
 //      这里真的 register 一套进去，验证切换/列表/持久化自动生效。
@@ -29,11 +29,8 @@ const SKINS = path.join(WEB, 'skins');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const SKINS_JS = read(path.join(SKINS, 'skins.js'));
 const CLASSIC = read(path.join(SKINS, 'skin.classic.css'));
-const SHEEN = read(path.join(SKINS, 'skin.sheen.css'));
 const LIUNIAN = read(path.join(SKINS, 'skin.liunian.css'));
 const QINGFENG = read(path.join(SKINS, 'skin.qingfeng.css'));
-const CHAOXI = read(path.join(SKINS, 'skin.chaoxi.css'));
-const CHAOXI_JS = read(path.join(SKINS, 'skin.chaoxi.js'));
 const HEIJIAO = read(path.join(SKINS, 'skin.heijiao.css'));
 const HEIJIAO_JS = read(path.join(SKINS, 'skin.heijiao.js'));
 const LIUNIAN_JS = read(path.join(SKINS, 'skin.liunian.js'));
@@ -167,31 +164,33 @@ function makeSandbox(cssIds, carrier) {
 function checkCatalog() {
   section('皮肤目录：星轨默认布局与可选皮肤');
 
-  const { sandbox, root, links, listHost } = makeSandbox(['sheen', 'liunian', 'qingfeng', 'classic']);
+  const { sandbox, root, links, listHost } = makeSandbox(['liunian', 'qingfeng', 'heijiao', 'classic']);
   const ids = sandbox.Skins.catalog().map((s) => s.id);
   ok(ids.indexOf('classic') >= 0, '有 classic（仓库原本那套布局）');
-  ok(ids.indexOf('sheen') >= 0, '有 sheen');
   ok(ids.indexOf('liunian') >= 0, '有 liunian');
   ok(ids.indexOf('qingfeng') >= 0, '有 qingfeng');
+  ok(ids.indexOf('heijiao') >= 0, '有 heijiao');
+  ok(ids.indexOf('sheen') < 0 && ids.indexOf('chaoxi') < 0,
+    '已下架的浮光 / 潮汐不在皮肤目录里');
   ok(sandbox.Skins.catalog().every((s) => s.name && s.note),
     '每套皮肤都有可读的名字与说明（设置页要靠它做选择）');
 
   section('切换：写 data-skin，并只启用对应那份 CSS');
 
-  sandbox.Skins.apply('sheen');
-  eq(root.getAttribute('data-skin'), 'sheen', 'html 上写了当前皮肤');
-  eq(links[0].disabled, false, 'sheen 的 CSS 被启用');
+  sandbox.Skins.apply('liunian');
+  eq(root.getAttribute('data-skin'), 'liunian', 'html 上写了当前皮肤');
+  eq(links[0].disabled, false, 'liunian 的 CSS 被启用');
   eq(links[1].disabled && links[2].disabled && links[3].disabled, true,
     '其余皮肤 CSS 保持禁用（不能同时生效）');
 
-  sandbox.Skins.apply('liunian');
-  eq(root.getAttribute('data-skin'), 'liunian', '切到 liunian');
-  eq(links[1].disabled, false, 'liunian 的 CSS 启用');
-  eq(links[0].disabled && links[2].disabled && links[3].disabled, true, 'sheen/qingfeng/classic 收起');
-
   sandbox.Skins.apply('qingfeng');
   eq(root.getAttribute('data-skin'), 'qingfeng', '切到 qingfeng');
-  eq(links[2].disabled, false, 'qingfeng 的 CSS 被启用');
+  eq(links[1].disabled, false, 'qingfeng 的 CSS 启用');
+  eq(links[0].disabled && links[2].disabled && links[3].disabled, true, 'liunian/heijiao/classic 收起');
+
+  sandbox.Skins.apply('heijiao');
+  eq(root.getAttribute('data-skin'), 'heijiao', '切到 heijiao');
+  eq(links[2].disabled, false, 'heijiao 的 CSS 被启用');
   eq(links.every((l, i) => i === 2 || l.disabled), true, '其余皮肤全部收起');
 
   sandbox.Skins.apply('classic');
@@ -199,13 +198,13 @@ function checkCatalog() {
   eq(links.every((l, i) => i === 3 || l.disabled), true, 'classic 只启用自己的布局 CSS');
 
   section('切换：广播事件让画布类模块自己重排');
-  const { sandbox: s2, events } = makeSandbox(['sheen', 'liunian']);
+  const { sandbox: s2, events } = makeSandbox(['liunian', 'qingfeng']);
   s2.Skins.apply('liunian');
   ok(events.some((e) => e.type === 'skin:changed' && e.detail && e.detail.id === 'liunian'),
     '切肤后广播 skin:changed（舞台/3D 这类要按新尺寸重排）');
 
   section('持久化：选择被记住，坏数据回落而不是写个无效值');
-  const { sandbox: s3, store } = makeSandbox(['sheen', 'liunian', 'orbit']);
+  const { sandbox: s3, store } = makeSandbox(['liunian', 'qingfeng', 'orbit']);
   s3.Skins.apply('liunian');
   eq(store.get('vmusic.skin'), 'liunian', '选择写进 localStorage');
   store.set('vmusic.skin', 'no-such-skin');
@@ -214,7 +213,7 @@ function checkCatalog() {
   eq(store.get('vmusic.skin'), 'orbit', '回落同时把无效存档冲掉（下次开页不再读回它）');
 
   section('持久化：清风的选择能被记住并复原');
-  const { sandbox: s5, root: r5, store: st5 } = makeSandbox(['sheen', 'qingfeng']);
+  const { sandbox: s5, root: r5, store: st5 } = makeSandbox(['qingfeng', 'heijiao']);
   s5.Skins.apply('qingfeng');
   eq(st5.get('vmusic.skin'), 'qingfeng', 'qingfeng 写进 localStorage');
   s5.Skins.init();
@@ -237,15 +236,15 @@ function checkCatalog() {
   migrated.sandbox.Skins.init();
   eq(migrated.root.getAttribute('data-skin'), 'classic', '迁移过一次后尊重用户选择');
 
-  const chosen = makeSandbox(['orbit', 'sheen']);
+  const chosen = makeSandbox(['orbit', 'liunian']);
   chosen.sandbox.Skins.register(orbitDef);
-  chosen.store.set('vmusic.skin', 'sheen');
+  chosen.store.set('vmusic.skin', 'liunian');
   chosen.sandbox.Skins.init();
-  eq(chosen.root.getAttribute('data-skin'), 'sheen', '明确选过的其它皮肤不被默认值改动');
+  eq(chosen.root.getAttribute('data-skin'), 'liunian', '明确选过的其它皮肤不被默认值改动');
 
   section('插件形态：皮肤 CSS 被内联成 <style>，切换照样生效');
   const { sandbox: s4, root: r4, links: styles } =
-    makeSandbox(['sheen', 'liunian', 'qingfeng', 'orbit'], 'style');
+    makeSandbox(['liunian', 'qingfeng', 'heijiao', 'orbit'], 'style');
   eq(styles.every((s) => s.disabled === false), true,
     'style 的 disabled 内容属性不生效，进来时四份都是启用的');
   s4.Skins.init();
@@ -254,12 +253,12 @@ function checkCatalog() {
     '插件启动只启用星轨 CSS（其它布局不会叠在一起）');
   s4.Skins.apply('liunian');
   eq(r4.getAttribute('data-skin'), 'liunian', 'style 载体也认得出皮肤，没有回落 classic');
-  eq(styles[1].disabled, false, 'liunian 的 CSS 被启用');
-  eq(styles.every((s, i) => i === 1 || s.disabled), true, '其余两份保持禁用');
+  eq(styles[0].disabled, false, 'liunian 的 CSS 被启用');
+  eq(styles.every((s, i) => i === 0 || s.disabled), true, '其余皮肤保持禁用');
   eq(s4.Skins.currentId(), 'liunian', 'currentId 跟着走（不是嘴上说切了）');
   s4.Skins.apply('qingfeng');
-  eq(styles[2].disabled, false, 'style 载体下 qingfeng 也能启用');
-  eq(styles.every((s, i) => i === 2 || s.disabled), true, '切到 qingfeng 后其余保持禁用');
+  eq(styles[1].disabled, false, 'style 载体下 qingfeng 也能启用');
+  eq(styles.every((s, i) => i === 1 || s.disabled), true, '切到 qingfeng 后其余保持禁用');
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +269,7 @@ function checkSkinEntry() {
   section('顶栏皮肤入口：与设置页同源，切完两处一起跟上');
 
   const { sandbox, root, body: skinBody, listHost, skinBtn, skinMenu } =
-    makeSandbox(['sheen', 'liunian', 'qingfeng', 'orbit']);
+    makeSandbox(['liunian', 'qingfeng', 'heijiao', 'orbit']);
   sandbox.Skins.init();
 
   // 弹层的行是在**展开那一刻**渲染的（init 只绑不画），所以先点按钮再读。
@@ -287,14 +286,14 @@ function checkSkinEntry() {
   eq(on.length, 1, '只标记一个当前项');
   eq(on[0] && on[0].getAttribute('data-skin-id'), 'orbit', '弹层初始选中默认星轨');
 
-  const pick = rows.filter((r) => r.getAttribute('data-skin-id') === 'sheen')[0];
+  const pick = rows.filter((r) => r.getAttribute('data-skin-id') === 'liunian')[0];
   pick.onclick();
-  eq(root.getAttribute('data-skin'), 'sheen', '点弹层里的行真的换了皮肤');
+  eq(root.getAttribute('data-skin'), 'liunian', '点弹层里的行真的换了皮肤');
   eq(skinMenu.hidden, true, '选完收起弹层');
   eq(skinBtn.getAttribute('aria-expanded'), 'false', 'aria-expanded 收回 false');
   const listOn = listHost.children.filter((r) => (r.className || '').indexOf('is-on') >= 0);
   eq(listOn.length, 1, '设置页那组也只剩一个高亮（重绘收在 apply 里，不是只改点到的那处）');
-  eq(listOn[0] && listOn[0].getAttribute('data-skin-id'), 'sheen', '设置页高亮跟着切到的那套');
+  eq(listOn[0] && listOn[0].getAttribute('data-skin-id'), 'liunian', '设置页高亮跟着切到的那套');
 
   // 一颗按钮只能有一个绑定者。check-assets 的「一条一主」只扫 plugin/ui 顶层，
   // skins/ 子目录不在它范围内，所以这条得自己钉住。
@@ -306,24 +305,24 @@ function checkSkinEntry() {
   ok(atTheme >= 0 && atTheme < atSkin && atSkin < atMore, '按钮排在主题色之后、「更多」之前');
 
   // 弹层必须搬出 .topbar：顶栏是 relative + z-index:40 + backdrop-filter，本身就
-  // 是一个层叠上下文，弹层写多高的 z-index 都只在顶栏内部参与比较。浮光的舞台面板
+  // 是一个层叠上下文，弹层写多高的 z-index 都只在顶栏内部参与比较。舞台抽屉
   // 是 fixed + z-index:58，整张菜单会被那块玻璃盖掉（浏览器实测：菜单中心与左上角
-  // 两点 elementFromPoint 都返回 #stage，用户读成「浮光把换肤弹窗挡住了」）。
+  // 两点 elementFromPoint 都返回 #stage，用户读成「换肤弹窗被挡住了」）。
   ok(skinBody.children.indexOf(skinMenu) >= 0, 'init 把弹层搬进 body（真跑过绑定，不只是源码里有这行）');
   ok(/\.skin-menu\s*\{[^}]*position:\s*fixed/.test(read(path.join(WEB, 'style.css'))),
     '.skin-menu 改成 fixed（搬进 body 后不再跟着按钮的 absolute 盒）');
   const skinMenuZ = (read(path.join(WEB, 'style.css')).match(/\.skin-menu\s*\{[^}]*z-index:\s*(\d+)/) || [])[1];
-  ok(Number(skinMenuZ) > 58, '弹层压过浮光舞台面板的 z-index:58', 'skin-menu z=' + skinMenuZ);
+  ok(Number(skinMenuZ) > 58, '弹层压过舞台抽屉的 z-index:58', 'skin-menu z=' + skinMenuZ);
   // 搬出去之后位置没人算了不行：开层那一刻必须按按钮矩形重算一次。
   ok(/renderMenu\(\);\s*positionEntryMenu\(\);/.test(SKINS_JS),
     '开弹层时按按钮矩形算位置（搬进 body 后 CSS 里的 top/right 都不成立了）');
-  // 顶栏三颗弹层是同一个坑：.topbar 自己就是层叠上下文，留在里面的浮层会被浮光
-  // 那块 fixed + z-index:58 的舞台面板整块盖住。#theme-menu 早就搬了 body，另两颗
+  // 顶栏三颗弹层是同一个坑：.topbar 自己就是层叠上下文，留在里面的浮层会被舞台
+  // 那块 fixed + z-index:58 的抽屉整块盖住。#theme-menu 早就搬了 body，另两颗
   // 照它做 —— 少搬一颗就是「这个弹窗又被挡住了」原地复发。
   const styleTop = read(path.join(WEB, 'style.css'));
   ok(/document\.body\.appendChild\(menu\)/.test(APP)
     && /\.top-more-menu\s*\{[^}]*position:\s*fixed/.test(styleTop),
-    '「更多工具」弹层也搬出顶栏（浮光下实测命中是 #stage）');
+    '「更多工具」弹层也搬出顶栏（实测命中是 #stage）');
   ok(/document\.body\.appendChild\(ui\.themeMenu\)/.test(APP)
     && /\.theme-menu\s*\{[^}]*position:\s*fixed/.test(read(path.join(WEB, 'stage.css'))),
     '主题色弹层保持搬出顶栏（另两颗的判据来源）');
@@ -336,7 +335,7 @@ function checkSkinEntry() {
 function checkExtensibility() {
   section('扩展：register 一套新皮肤后，切换/列表自动生效');
 
-  const { sandbox, root, links } = makeSandbox(['sheen', 'compact']);
+  const { sandbox, root, links } = makeSandbox(['liunian', 'compact']);
   const okReg = sandbox.Skins.register({ id: 'compact', name: '紧凑', note: '测试用的第三套' });
   ok(okReg === true, 'register 接受新皮肤');
   ok(sandbox.Skins.register({ id: 'compact', name: '重复' }) === false, '重复 id 被拒绝');
@@ -351,7 +350,7 @@ function checkExtensibility() {
   ok(opts.length >= 4, `设置页列表会多出这一项（${opts.length} 套）`);
 
   section('扩展：声明了皮肤但漏了 CSS 要显式回落，不能静默装作切成功');
-  const { sandbox: s2, root: r2 } = makeSandbox(['sheen']);
+  const { sandbox: s2, root: r2 } = makeSandbox(['liunian']);
   s2.Skins.register({ id: 'compact', name: '紧凑', note: '测试用的第三套' });
   s2.Skins.apply('compact');
   eq(r2.getAttribute('data-skin'), 'classic', '缺 CSS 的皮肤回落到 classic');
@@ -365,7 +364,7 @@ function checkExtensibility() {
 function checkNoColor() {
   section('皮肤只管布局：CSS 里不许有颜色字面量');
 
-  for (const [name, css] of [['sheen', SHEEN]]) {
+  for (const [name, css] of [['heijiao', HEIJIAO]]) {
     // 去掉注释再扫：注释里会提到"不出现颜色"这类字样。
     const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
     const hex = body.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
@@ -419,231 +418,34 @@ function checkNoColor() {
   ok(/\[data-skin="qingfeng"\] \.qf-poster\s*\{[^}]*border-radius:\s*0/.test(qfBody),
     '海报墙的卡片保持方角（「一切都方角」是这套视觉的识别特征）');
 
-  section('潮汐：颜色字面量同样全禁，且不重定义主题色变量');
-
-  const cxBody = CHAOXI.replace(/\/\*[\s\S]*?\*\//g, '');
-  const cxHex = cxBody.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
-  const cxRgb = cxBody.match(/\brgba?\(/g) || [];
-  const cxNamed = cxBody.replace(/white-space|grey|gray/g, '')
-    .match(/\b(?:red|blue|green|white|black)\b/g) || [];
-  ok(cxHex.length === 0, `chaoxi 没有十六进制颜色${cxHex.length ? '（' + cxHex.join(',') + '）' : ''}`);
-  ok(cxRgb.length === 0, `chaoxi 没有 rgb()/rgba()${cxRgb.length ? '（' + cxRgb.join(',') + '）' : ''}`);
-  ok(cxNamed.length === 0, `chaoxi 没有颜色关键字${cxNamed.length ? '（' + cxNamed.join(',') + '）' : ''}`);
-  ok(/\bvar\(--/.test(cxBody), 'chaoxi 的着色一律走 var(--…)');
-  ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(cxBody),
-    'chaoxi 不重定义主题色变量（配色归 themes.js 管）');
-  // 文字色仍归主题：允许写 color，但值必须引用 token。
-  // （把手那颗按钮是皮肤自造的节点，没有业务样式兜底 —— 不写 color 它会
-  //   拿到浏览器默认的按钮文字色，在深底上直接看不见。）
-  const cxColors = Array.from(cxBody.matchAll(/(?:^|[\s;}])color\s*:\s*([^;}]+)/g));
-  const cxBadColor = cxColors.filter((m) => !/^\s*var\(--/.test(m[1]));
-  ok(cxBadColor.length === 0,
-    `chaoxi 的 color 只能引用主题 token${cxBadColor.length ? '（' + cxBadColor.map((m) => m[1].trim()).join(',') + '）' : ''}`);
-
   section('皮肤只管布局：属性也应该是布局属性');
-  for (const [name, css] of [['sheen', SHEEN]]) {
+  for (const [name, css] of [['heijiao', HEIJIAO]]) {
     const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
-    // 这两条是"改配色"的典型入口，皮肤不该碰。
+    // 这两条是"改配色"的典型入口，皮肤不该碰；颜色只能引用主题 token。
     ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(body),
       `${name} 不重定义主题色变量`);
-    ok(!/[^-]\bcolor\s*:/.test(body), `${name} 不写 color（文字色仍由主题决定）`);
+    const colors = Array.from(body.matchAll(/(?:^|[\s;}])color\s*:\s*([^;}]+)/g));
+    ok(colors.every((m) => /^\s*var\(--/.test(m[1])),
+      `${name} 的 color 只引用主题 token`);
   }
 }
 
 // ---------------------------------------------------------------------------
-// 4. 两套皮肤要有区分度（不是微调）
+// 4. 皮肤之间要有区分度（不是微调）
 // ---------------------------------------------------------------------------
-
-function tokensOf(css) {
-  const out = {};
-  const re = /--skin-([a-z-]+):\s*([^;]+);/g;
-  let m;
-  while ((m = re.exec(css))) out[m[1]] = m[2].trim();
-  return out;
-}
-
-function num(v) {
-  const n = parseFloat(v);
-  return Number.isFinite(n) ? n : null;
-}
 
 // ---------------------------------------------------------------------------
 // 4b. iOS / macOS：分层圆角、正常分栏与原生状态
 // ---------------------------------------------------------------------------
 
-/// 浮光：胶囊并入顶栏 + 摘掉常驻搜索框。
-///
-/// 这一组防的是两个曾经出现过的静默退化：
-///
-///   1. **留白回来了**。胶囊与内容区各占一层时，.view 的 padding-top 是
-///      「顶栏 + 胶囊高 + 间距」≈134px。数字看着合理，实际内容区上方
-///      那一大片里什么都没有 —— 页面不报错、不少元素，只是白白浪费
-///      第一屏。所以这里钉死"宽屏让位值为 0"，且胶囊 top 必须落在
-///      顶栏高度**之内**（不是底边之下）。
-///   2. **`/` 与 Ctrl+K 静默失效**。摘掉常驻搜索框后，若快捷键还走
-///      裸 ui.search.focus()，浮光下那条覆盖式搜索条永远不显形 ——
-///      按键没反应、控制台干净。这里要求 app.js 走 focusSearch()，
-///      并要求 blur 与 Escape 摘掉标记，否则搜索条会一直挂顶栏。
-function checkSheenTopbarLayout() {
-  section('浮光：胶囊并入顶栏，常驻搜索框摘掉但快捷键仍可用');
-
-  const style = read(path.join(WEB, 'style.css'));
-
-  // 让位令牌必须是 0（而不是 134px）。写死 0 有点直白，但这里要的就是
-  // "宽屏不为胶囊留高度"这个事实本身 —— 换成 calc() 又会被窄屏覆盖
-  // 绕回来，不如直接钉住。
-  ok(/--skin-clear-wide:\s*0px/.test(SHEEN),
-    '浮光宽屏的内容让位值为 0（胶囊并入顶栏，不再留 134px 空白）');
-
-  // 胶囊 top 必须小于顶栏高度，也就是落在顶栏那一行里。
-  // 只断言"有个 top"太松：原来的 top = topbar-h + 12 同样有 top。
-  // 这里直接读出 .rail 规则块（花括号配平，calc 里的嵌套括号不会被截断），
-  // 再判断它是「顶栏内居中」还是「顶栏底边之下」。
-  const railRule = (() => {
-    const i = SHEEN.indexOf('[data-skin="sheen"] .rail {');
-    if (i < 0) return '';
-    let depth = 0;
-    for (let j = SHEEN.indexOf('{', i); j < SHEEN.length; j += 1) {
-      if (SHEEN[j] === '{') depth += 1;
-      else if (SHEEN[j] === '}') { depth -= 1; if (!depth) return SHEEN.slice(i, j + 1); }
-    }
-    return '';
-  })();
-  ok(!!railRule, '浮光给 .rail 定了位置');
-  const topLine = (railRule.match(/top:\s*([^;]+);/) || [])[1] || '';
-  ok(!!topLine, '.rail 规则块里有 top 声明');
-  ok(/--skin-rail-h/.test(topLine),
-    `胶囊 top 由自身高度参与计算，不是写死的偏移（${topLine.trim()}）`);
-  ok(!/var\(--topbar-h\)\s*\+\s*var\(--skin-rail-top\)/.test(topLine),
-    '胶囊 top 不是「顶栏底边 + 偏移」（那正是留白的成因）');
-  // 数值验算：topbar 58 - 胶囊 46 = 12，整除 2 = 6px < 顶栏高。
-  ok(/\)\s*\/\s*2\s*\)/.test(topLine) || /var\(--skin-rail-h\)/.test(topLine),
-    `胶囊在顶栏高度内垂直居中（${topLine.trim()}）`);
-
-  // .view 与 .stage 必须都消费归零后的让位值：漏掉 .stage 会让它
-  // 比内容低一截，两者对不齐（stage 同样浮在同一片区域）。
-  ok(/\[data-skin="sheen"\]\s+\.view\s*\{[^}]*padding:\s*var\(--skin-clear-wide\)/.test(SHEEN),
-    '.view 用归零后的让位值');
-  ok(/\[data-skin="sheen"\]\s+\.stage\s*\{[^}]*top:\s*calc\(var\(--topbar-h\)\s*\+\s*var\(--skin-clear-wide\)/.test(SHEEN),
-    '.stage 也跟着归零（否则比内容低 134px）');
-  // 宽屏规则里不该再消费旧的 134px 让位值。只查"消费"（var(...) 形式），
-  // 不查"声明"——注释里解释这个名字的来历是应该的（--skin-rail-clear
-  // 仍然是窄屏胶囊独占一行时要用的值，声明留着不删）。
-  ok(!/var\(--skin-rail-clear\)/.test(SHEEN.split('@media')[0]),
-    '宽屏基础规则里不再消费 --skin-rail-clear（那 134px 正是留白来源）');
-  ok(!/var\(--skin-rail-clear\)/.test(railRule),
-    '.rail 规则块里不消费旧的让位值');
-
-  // ⭐ 胶囊**不能居中**。这条是实测抓出来的：顶栏左右并不对称 ——
-  // 品牌块只有 --rail-w（86px），右侧图标区却要 408px（连接状态文字 +
-  // 六个图标）。`left:50% + translateX(-50%)` 把胶囊往宽的那侧挤，
-  // 实测右缘 1050 压住图标区左缘 1032，整整压了 17px。左对齐紧跟品牌块
-  // 时右缘只有 763，余量 269px，谁也不碰谁。
-  const railLeft = (railRule.match(/left:\s*([^;]+);/) || [])[1] || '';
-  ok(!/50%/.test(railLeft),
-    `胶囊不按视口居中（left=${railLeft.trim()}）—— 左右不对称会压到右侧图标`);
-  ok(!/translateX\(-50%\)/.test(railRule),
-    '.rail 没有 translateX(-50%)（那正是居中的实现）');
-  ok(/var\(--rail-w\)/.test(railLeft),
-    `胶囊左缘跟品牌块对齐（left=${railLeft.trim()}）`);
-  // 右侧图标区宽度随连接状态文案变化（"服务已连接" / "重连中 (13s)"），
-  // 所以上限必须留足余量，否则文案一变长就压上去。
-  const railMax = (railRule.match(/max-width:\s*([^;]+);/) || [])[1] || '';
-  ok(/100vw/.test(railMax) && /560px/.test(railMax),
-    `胶囊为右侧图标区留足 560px（max-width=${railMax.trim()}）`);
-
-  // 窄屏必须把让位加回来：胶囊在 ≤900px 退回"顶栏下方独占一行"，
-  // 那时 .view 的绝对 padding 是唯一防线，胶囊会盖住第一行内容。
-  ok(/@media \(max-width: 900px\)[\s\S]*?\.rail\s*\{[\s\S]*?top:\s*calc\(var\(--topbar-h\)\s*\+\s*12px\)/.test(SHEEN),
-    '≤900px 胶囊退回顶栏下方独占一行');
-  ok(/@media \(max-width: 900px\)[\s\S]*?\.view\s*\{[\s\S]*?padding:\s*calc\(var\(--topbar-h\)/.test(SHEEN),
-    '≤900px 内容重新让出高度（胶囊独占一行时不留位会盖住第一行）');
-  ok(/@media \(max-width: 900px\)[\s\S]*?\.rail\s*\{[\s\S]*?max-width:\s*none/.test(SHEEN),
-    '≤900px 放开胶囊宽度约束（宽屏那套要避开品牌块与右侧图标，窄屏没那个余量）');
-  ok(/@media \(max-width: 900px\)[\s\S]*?\.rail\s*\{[\s\S]*?left:\s*10px[\s\S]*?right:\s*10px/.test(SHEEN),
-    '≤900px 胶囊左右贴边铺开（居中/跟品牌块都不适用于窄屏）');
-
-  // 搜索框：摘的是"不常驻"，不是"功能没了"。
-  ok(/\[data-skin="sheen"\]\s+\.topsearch\s*\{[^}]*opacity:\s*0/.test(SHEEN),
-    '浮光下常驻搜索框不可见');
-  ok(/\[data-skin="sheen"\]\s+\.topsearch\s*\{[^}]*position:\s*fixed/.test(SHEEN),
-    '搜索框改成覆盖式（脱流），不再占顶栏中段把胶囊挤走');
-  // display:none / visibility:hidden 都会让 .focus() 静默失效，
-  // 所以必须用 opacity + pointer-events 这套"看不见但可聚焦"的写法。
-  ok(!/\[data-skin="sheen"\]\s+\.topsearch\s*\{[^}]*display:\s*none/.test(SHEEN),
-    '不用 display:none（那样 focus() 静默失效，快捷键就成了死键）');
-  ok(/body\.sheen-search\s+\.topsearch\s*\{[^}]*opacity:\s*1/.test(SHEEN),
-    '按 / 或 Ctrl+K 时搜索框显形');
-  ok(!/\[data-skin="sheen"\][^{}]*\.topsearch[^{}]*\{[^}]*visibility:\s*hidden/.test(SHEEN),
-    '不用 visibility:hidden（同样会让焦点丢失）');
-
-  /* --- 唤起时胶囊必须让位（这条是实测抓出来的真 bug，不是洁癖） ---------
-     .topsearch 是 header.topbar 的**子节点**，而 .topbar 自己就形成层叠
-     上下文（style.css 的 position:relative + z-index:40，再加 backdrop-filter，
-     两者任一都够）。于是 .topsearch 上的 z-index:62 只在 topbar 内部比较，
-     压不过 body 层的 #rail(61) —— 父级 40 < 兄弟 61，子元素再大也没用。
-
-     后果极静默：按 / 之后 opacity 确实 1、焦点确实在它上面、控制台干净，
-     但胶囊那层玻璃完整盖住它，**屏幕上什么都不会出现**，像按键没生效。
-
-     所以让位必须由胶囊退场来兜底，不能只靠搜索框自己的 z-index。 */
-  ok(/body\.sheen-search\s+\.rail\s*\{[^}]*visibility:\s*hidden/.test(SHEEN),
-    '唤起时胶囊退场（visibility:hidden）—— 否则盖不住，见上面那条');
-  ok(/body\.sheen-search\s+\.rail\s*\{[^}]*pointer-events:\s*none/.test(SHEEN),
-    '退场后的胶囊不可点（否则仍然吃走命中点）');
-  // 反向钉死：不能改成"抬 .topbar 的 z-index 来压过胶囊" ——
-  // 40 是给舞台抽屉（窄屏 z-index:50）与控制菜单(80)留的窗口，
-  // 抬到 62 会让抽屉贴着顶栏被切开。
-  //
-  // 必须先剥注释：.topbar 那段说明里恰好写着「窄屏下 .stage 变成
-  // z-index:50 的抽屉」，不剥的话正则先命中注释里的 50，断言永远红，
-  // 而且红得毫无道理 —— 这是"给自己造一个不会失败的检查"的反面：
-  // 造一个永远失败的检查。
-  const topbarRule = (() => {
-    const clean = stripCssComments(style);
-    const i = clean.indexOf('\n.topbar {');
-    if (i < 0) return '';
-    let depth = 0;
-    for (let j = clean.indexOf('{', i); j < clean.length; j += 1) {
-      if (clean[j] === '{') depth += 1;
-      else if (clean[j] === '}') { depth -= 1; if (!depth) return clean.slice(i, j + 1); }
-    }
-    return '';
-  })();
-  const topbarZ = (topbarRule.match(/z-index:\s*(\d+)/) || [])[1] || '';
-  ok(topbarZ === '40',
-    `.topbar 的 z-index 仍是 40（实际 ${topbarZ || '无'}）—— 抬它去压胶囊会切开舞台抽屉`);
-
-  // 业务侧：快捷键必须走 focusSearch()，并有 blur/Escape 收回标记。
-  ok(/function focusSearch\(select\)/.test(APP), 'app.js 有 focusSearch() 统一唤起搜索');
-  ok(/body\.classList\.add\('sheen-search'\)/.test(APP),
-    'focusSearch 给 body 挂 sheen-search 标记（CSS 据此显形）');
-  ok(/e\.key === '\/' && !typing\)\s*\{\s*e\.preventDefault\(\);\s*focusSearch\(false\)/.test(APP),
-    '`/` 走 focusSearch()');
-  ok(/e\.key\.toLowerCase\(\) === 'k'\)\s*\{[\s\S]{0,200}?window\.Palette\) Palette\.open\(\);[\s\S]{0,80}?else focusSearch\(true\)/.test(APP),
-    'Ctrl+K 走命令面板（palette.js 没加载时回落 focusSearch()）');
-  ok(/ui\.search\.addEventListener\('blur'[\s\S]{0,120}?classList\.remove\('sheen-search'\)/.test(APP),
-    '搜索框失焦时摘掉标记（否则那条覆盖搜索条一直挂在顶栏上）');
-  ok(/e\.key === 'Escape'[\s\S]{0,400}?classList\.remove\('sheen-search'\)/.test(APP),
-    'Esc 也能摘掉标记');
-
-  // 摘搜索框不能连业务状态一起摘：state.q 与 ui.searchClear 都还在用。
-  ok(/ui\.search\.oninput/.test(APP), '搜索输入事件仍绑定（浮光下也能搜）');
-  ok(/ui\.searchClear\.onclick/.test(APP), '清空按钮仍绑定');
-  ok(/id="search"/.test(HTML) && /id="search-clear"/.test(HTML),
-    '搜索框与清空按钮仍在 DOM 里（只是浮光下默认不显示）');
-  ok(style.length > 0, 'style.css 可读');
-}
-
-// ---------------------------------------------------------------------------
-// 5. 模块覆盖：两套必须覆盖同一批模块
+// 5. 模块覆盖：各套必须覆盖同一批模块
 // ---------------------------------------------------------------------------
 
 /// 取出皮肤覆盖到的选择器。同一个规则里的多个选择器各自带 `[data-skin=…]`
 /// 前缀，归一化后才是"覆盖了哪个模块"——不然 `.lib-head` 和
 /// `[data-skin="x"] .fav-head` 会被当成两个不同的东西，比对必然不一致。
 ///
-/// 必须先剥注释：CSS 允许把注释插在选择器列表中间（sheen 的 `.dv-row`
+/// 必须先剥注释：CSS 允许把注释插在选择器列表中间（liunian 的 `.dv-row`
 /// 前面就有一整块说明为什么补上它），不剥的话最后一条选择器会被解析成
 /// "注释文字 + .dv-row"，与其它皮肤的 `.dv-row` 比不上 —— 报出一个
 /// 根本不存在的覆盖缺口。
@@ -675,7 +477,7 @@ function selectorsOf(rawCss) {
 }
 
 function checkCoverage() {
-  section('覆盖：两套皮肤要覆盖同一批模块，不能切过去落回默认');
+  section('覆盖：各套皮肤要覆盖同一批模块，不能切过去落回默认');
 
   // 「几何模块」= 每套皮肤都必须覆盖的（漏一个 = 切过去那块的行距/内距/圆角
   // 落回 style.css 默认，与本页其它列表节奏不一致，是真缺陷）。
@@ -683,33 +485,23 @@ function checkCoverage() {
   //  a) 纯排版分档（.dv-name 的字号）：漏了只读作"没分档"，不算破相 ——
   //     各皮肤令牌名都不一样（--skin-h2 / --skin-title），强求逐字相等
   //     等于逼着后来者照抄别人的令牌体系。
-  //  b) 浮光独有的顶栏搜索框（.topsearch）：浮光把常驻搜索框摘了，让顶栏
-  //     中段给导航胶囊，改用「按 / 或 Ctrl+K 唤起一条覆盖式搜索条」。
-  //     别的皮肤没有这个交互、也不该有 —— 要求它们各写一条只等于制造死代码。
-  //     它是**皮肤间的真实差异**，不是漏覆盖，所以归这里而不是 must 名单。
-  //  c) 舞台面板内部的余量分配（.stage-lyrics / .disc-wrap）：浮光的舞台是
-  //     fixed 悬浮面板，宽度由 min(420px,32vw) 定，面板有 min-height；
-  //     于是「余量给谁」是它独有的问题 —— 实测没歌词时 .disc-wrap（flex:none、
-  //     宽高比 1）会吃满余量，把歌词区压到 26px、面板底部空 119px。
-  //     别的皮肤舞台是**栅格里的右栏**（高度由栅格给满）或 fixed 抽屉，
-  //     本来就不存在这个余量问题，让它们各写一条等于制造死代码。
-  //  d) 面板里的曲名/艺人（.stage-title / .stage-artist）：同一个悬浮面板的
-  //     另一个独有结论 —— 它是定高 flex 列，歌词区压到 min-height:96 之后
-  //     剩下的缺口会落到这两个可收缩行上（实测行盒 33px→14px、字被切半截）。
-  //     浮光干脆不展示它们（信息播放条里一直有），别的皮肤舞台有空间、
-  //     本来就得显示曲名与艺人，让它们跟着摘等于砍功能。
-  //  e) 顶栏的「界面皮肤」入口（#skin-picker）：浮光把导航做成了一颗 fixed
-  //     胶囊，宽度按「品牌块 + 右侧图标区」算出来（见 .rail 的 max-width），
-  //     右簇每多一颗 36px 的按钮就整体左移 50px —— 实测 1280 还剩 59px 余量，
-  //     1200 就压上胶囊了。所以只有浮光在 ≤1240px 摘掉这颗（皮肤列表在设置页
-  //     里仍然可达）。别的皮肤没有这颗胶囊，要求它们各写一条只等于制造死代码。
-  // The mini-panel handle belongs to sheen's floating-panel lifecycle.
+  //  b) 顶栏搜索框（.topsearch）：有的皮肤把它摘掉、搬到自己的胶囊里，
+  //     或者换成覆盖式搜索条。这是**皮肤间的真实差异**，不是漏覆盖。
+  //  c) 舞台内部的余量分配（.stage-lyrics / .disc-wrap）：舞台在有的皮肤里是
+  //     fixed 悬浮面板，有 min-height，于是「余量给谁」是它独有的问题；
+  //     别的皮肤舞台是栅格里的右栏或 fixed 抽屉，本来就不存在这个余量问题。
+  //  d) 面板里的曲名/艺人（.stage-title / .stage-artist）：定高 flex 列里它们
+  //     是最容易被压扁的一档；有的皮肤舞台有空间就显示，有的干脆不展示
+  //     （信息播放条里一直有），强求一致等于砍功能。
+  //  e) 顶栏的「界面皮肤」入口（#skin-picker）：把导航做成胶囊的皮肤在窄屏
+  //     没有它的位置，会摘掉这颗（皮肤列表在设置页里仍然可达）。
   //  f) 顶栏的设置齿轮（#settings-entry）：摘不摘是各皮肤自己的入口取舍 ——
-  //     经典/浮光/潮汐/黑胶/iOS/清风/轨道的导航里已经有「设置」条目，顶栏那颗
-  //     是同一个目标的第二份，摘掉；工作台与流年留着它。要求五套皮肤各写一条
-  //     只会逼着两套把入口删掉（那是改设计，不是补覆盖）。
-  const GEOMETRY_OPTIONAL = /^\.(dv-name|dv-sub|dv-num|dv-src|topsearch|stage-lyrics|disc-wrap|stage-title|stage-artist|sheen-player-handle)$|^#skin-picker$|^#settings-entry$/;
-  const isGeometry = (s) => !GEOMETRY_OPTIONAL.test(s) && !/^[^\s]*\s/.test(s);
+  //     导航里已经有「设置」条目的就不需要第二份。要求每套皮肤各写一条
+  //     只会逼着某些皮肤把入口删掉（那是改设计，不是补覆盖）。
+  const GEOMETRY_OPTIONAL = /^\.(dv-name|dv-sub|dv-num|dv-src|topsearch|stage-lyrics|disc-wrap|stage-title|stage-artist)$|^#skin-picker$|^#settings-entry$/;
+  // 皮肤自造的节点 / 只在某一套里成立的交互状态，不算"没覆盖"。
+  const SKIN_OWNED = /(^|[.#:\s])(ln|qf|hj|orbit)-|\[data-rail-state=|^#sleep-timer$|^\.bar-(pin-toggle|track|art|volume|controls|right)$/;
+  const isGeometry = (s) => !GEOMETRY_OPTIONAL.test(s) && !SKIN_OWNED.test(s) && !/^[^\s]*\s/.test(s);
 
   const geometryGap = (from, to, fromName, toName) => {
     const have = selectorsOf(to);
@@ -717,13 +509,12 @@ function checkCoverage() {
     ok(miss.length === 0, `${toName} 覆盖了 ${fromName} 的全部几何模块（缺：${miss.join(' ') || '无'}）`);
   };
 
-  const a = selectorsOf(SHEEN);
-  const c = selectorsOf(LIUNIAN);
-  const e = selectorsOf(QINGFENG);
+  const ln = selectorsOf(LIUNIAN);
+  const qf = selectorsOf(QINGFENG);
 
-  // 其余皮肤与 sheen 比几何模块（多覆盖如 body::after、.qf-* 允许）。
-  geometryGap(SHEEN, LIUNIAN, 'sheen', 'liunian');
-  geometryGap(SHEEN, QINGFENG, 'sheen', 'qingfeng');
+  // 其余皮肤与经典布局比几何模块（多覆盖如 body::after、.ln-* / .qf-* 允许）。
+  geometryGap(CLASSIC, LIUNIAN, 'classic', 'liunian');
+  geometryGap(CLASSIC, QINGFENG, 'classic', 'qingfeng');
 
   // 这些是主要模块，一套皮肤漏了任何一个，切过去那块就是"没换皮肤"。
   const must = [
@@ -737,7 +528,7 @@ function checkCoverage() {
     '.dv-row',
   ];
   for (const m of must) {
-    for (const [set, name] of [[a, 'sheen'], [c, 'liunian'], [e, 'qingfeng']]) {
+    for (const [set, name] of [[ln, 'liunian'], [qf, 'qingfeng']]) {
       ok([...set].some((s) => s.indexOf(m) >= 0), `${name} 覆盖了 ${m}`);
     }
   }
@@ -756,7 +547,7 @@ function checkCoverage() {
     const m = /\.daily-strip\s*\{([^}]*)\}/.exec(stripCssComments(src));
     return m ? m[1] : '';
   };
-  for (const [src, name] of [[SHEEN, 'sheen'], [LIUNIAN, 'liunian'], [QINGFENG, 'qingfeng']]) {
+  for (const [src, name] of [[LIUNIAN, 'liunian'], [QINGFENG, 'qingfeng'], [HEIJIAO, 'heijiao']]) {
     const body = stripRule(src);
     ok(!/display\s*:\s*(grid|inline-grid|flex)/.test(body),
       `${name} 没把 .daily-strip 改成网格/弹性容器`, `实际：${body.trim().slice(0, 60)}`);
@@ -767,16 +558,12 @@ function checkCoverage() {
 
   // 每日推荐的行不能只是"被提到"，还得真的调过几何。只写一条空规则
   // 骗过上面的选择器计数是可能的，所以这里断言声明真的落地。
-  ok(/\.dv-row\s*\{[^}]*padding/.test(SHEEN),
-    'sheen 的 .dv-row 真的调了 padding（不是空壳规则）');
-  ok(/\.dv-row\s*\{[^}]*border-radius/.test(SHEEN),
-    'sheen 的 .dv-row 真的调了 border-radius');
-  ok(/\.dv-row\s*\{[^}]*--skin-row-py/.test(SHEEN),
-    'sheen 的 .dv-row 跟着 --skin-row-py 走（行距归皮肤令牌，不写死 px）');
-  ok(/\.dv-row\s*\{[^}]*--skin-line-h/.test(SHEEN),
-    'sheen 的 .dv-row 跟着 --skin-line-h 走（行高在行容器上定一次）');
-  ok(/\.dv-body\s*\{[^}]*--skin-gap/.test(SHEEN),
-    'sheen 把 .dv-body 的行距交给 --skin-gap（否则这一屏比同页任何列表都紧）');
+  ok(/\.dv-row\s*\{[^}]*padding:\s*var\(--skin-row-py\)/.test(QINGFENG),
+    'qingfeng 的 .dv-row 真的调了 padding，且跟着 --skin-row-py 走（不是空壳规则）');
+  ok(/\.dv-row\s*\{[^}]*border-radius/.test(QINGFENG),
+    'qingfeng 的 .dv-row 真的调了 border-radius');
+  ok(/\.dv-body\s*\{[^}]*gap:\s*var\(--skin-row-py\)/.test(QINGFENG),
+    'qingfeng 把 .dv-body 的行距交给皮肤令牌（否则这一屏比同页任何列表都紧）');
 }
 
 // ---------------------------------------------------------------------------
@@ -961,7 +748,7 @@ function checkLiunianNavigation() {
     '桥接分流本地 playTrack / 在线 Online.playAll');
 
   // 9) 作用域：搜索面板只属于流年。
-  ok(!/ln-sp/.test(SHEEN), '其它皮肤不引入遮罩浮层');
+  ok(!/ln-sp/.test(HEIJIAO), '其它皮肤不引入遮罩浮层');
   ok(!/ln-right|ln-sp/.test(HTML), '业务 HTML 不内置右栏面板（皮肤自持，切走即消失）');
 }
 
@@ -1164,32 +951,8 @@ function checkLiunianSettingsNav() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. 接线
+// 7. 保留主题的对比度（潮汐·夜 / 潮汐·昼）
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// 8. 潮汐（chaoxi）：低密度 + 内容定宽居中 + 唱片聚焦
-// ---------------------------------------------------------------------------
-// 这套皮肤的判据与其它几套不同：它不做重编排、不带 JS，全部差异都在**几何
-// 数值与余量归属**上。所以这里钉的是"密度真的更松""余量真的给歌词""真的
-// 一条状态规则都没写"这三件事——前两件是它的设计意图，第三件是它对项目纪律
-// 的额外承诺（设计稿 9.4 第 2 条）。
-//
-// 它没有进 checkCoverage 那份"各套皮肤几何模块相等"的名单，理由是那条名单
-// 里含 .dv-row:hover 这类交互态选择器，而潮汐主动不写状态规则；硬把它塞进
-// 去等于逼它写一条只为凑数的 :hover。所以这里自己比一遍 sheen 的几何模块
-// （**排除**交互态），保证"切过去不落回默认"这件事仍然有人管。
-
-/// 只取皮肤 CSS 最前面那个基础令牌块里的 --skin-* 值（不含 @media 里的覆盖）。
-function baseTokens(css) {
-  const m = /\[data-skin="[a-z]+"\]\s*\{([^}]*)\}/.exec(stripCssComments(css));
-  const out = {};
-  if (!m) return out;
-  const re = /--skin-([a-z-]+):\s*([^;]+);/g;
-  let x;
-  while ((x = re.exec(m[1]))) out[x[1]] = x[2].trim();
-  return out;
-}
 
 /// 从 themes.js 里取出某套主题的 token 表。
 /// 只认单引号包裹的字面量值（渐变值内部没有单引号，可安全切开）。
@@ -1223,319 +986,13 @@ function contrastOf(a, b) {
   return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
 }
 
-function checkChaoxiSkin() {
-  section('潮汐：单列内容流、定宽居中、面板按需浮出、余量给歌词');
-
-  const body = stripCssComments(CHAOXI);
-
-  // 1) 尺度必须**守在可用范围内**，不能靠"更大"来做差异化。
-  //
-  // 第一版取 gap 32 / pad 40 / title 34 / card-min 300，看着"留白很足"，
-  // 浏览器实测直接坏掉：曲库页的 .lib-list 被压到 **12px**
-  // （clientHeight 12 / scrollHeight 1564）——"滚不动"就是这个，
-  // 同一屏的"字体太大"也是同一个根因：一屏总高就那么多，留白吃掉的
-  // 全是从内容里扣的。所以这里钉的是**上限**，不是下限。
-  //
-  // 只取**基础令牌块**（第一个 `[data-skin=…] {}`）：tokensOf() 抓的是全文件
-  // 所有同名声明、最后一次赋值胜出，而窄屏断点里还覆盖了一次更小的值 ——
-  // 拿那个比会读偏。
-  const cx = baseTokens(CHAOXI);
-  const LIMITS = { gap: 24, pad: 28, 'row-py': 12, 'card-min': 220 };
-  for (const k of Object.keys(LIMITS)) {
-    const a = num(cx[k]);
-    ok(a !== null, `chaoxi 声明了 --skin-${k}（${cx[k]}）`);
-    ok(a <= LIMITS[k], `--skin-${k} 不超过 ${LIMITS[k]}px（实际 ${a}，超了会把内容挤出可视区）`);
-  }
-  ok(num(cx['title']) <= 26, `--skin-title 不超过 26px（实际 ${cx['title']}）`);
-  ok(/--skin-stage-w:\s*min\(4[0-9]{2}px/.test(stripCssComments(CHAOXI)),
-    '舞台宽度收在 440px 以内（脱流件宽度直接从内容区扣，宽了内容就没了）');
-  // 圆角反着来：设计稿纪律是"任何圆角不得超过 20px"，超过就与克制冲突，
-  // 所以它必须**收**在 sheen（22px）之内。
-  ok(num(cx['radius']) <= 20, `--skin-radius 不超过 20px（实际 ${cx['radius']}）`);
-
-  // 2) 内容区定宽居中：只写 max-width 在 flex 列里不会居中，会靠左。
-  const viewRule = /\[data-skin="chaoxi"\] \.view \{([^}]*)\}/.exec(body);
-  ok(viewRule && /max-width:\s*var\(--skin-content-max\)/.test(viewRule[1]),
-    '.view 有 max-width（宽屏不铺满，两侧留白本身当分区手段）');
-  ok(viewRule && /margin-inline:\s*auto/.test(viewRule[1]),
-    '.view 有 margin-inline:auto（只写 max-width 在 flex 列里不会居中）');
-  // 内容区上限别往小里调：第一版取 1080 居中，1440 屏上左右各空 180px，
-  // 用户直接读成"两侧大片留白"。定宽居中是阅读型页面的手段，音乐库不是 ——
-  // 列表与卡片该铺满，留白留在块与块之间。
-  const cm = num(cx['content-max']);
-  ok(cm !== null && cm >= 1440,
-    `内容区上限不低于 1440px（实际 ${cx['content-max']}，太小两侧就会空出一大片）`);
-
-  // 3) 导航是**顶部通栏**，不再占栅格第一轨 —— 这是骨架从"三栏工作台"
-  //    变成"单列内容流"的那一步，也是用户要的 MOO 式首页的前提。
-  ok(/\[data-skin="chaoxi"\] \.rail \{[^}]*position:\s*fixed/.test(body),
-    '.rail 脱离栅格（fixed 顶部通栏，栅格里不再有第一轨）');
-  ok(/\[data-skin="chaoxi"\] \.rail \{[^}]*flex-direction:\s*row/.test(body),
-    '.rail 横向排布');
-  ok(/\[data-skin="chaoxi"\] \.app \{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(body),
-    '.app 是单列（没有留给竖轨的第一轨）');
-  ok(/\[data-skin="chaoxi"\] \.app \{[^}]*padding:\s*var\(--skin-nav-h\)/.test(body),
-    '外壳顶部让出导航条高度（它是 fixed，栅格里没有它的位置）');
-
-  // 4) 舞台留位：必须走 --skin-stage-foot，不能拿 --bar-h 当播放条高度。
-  //    --bar-h 只是 min-height，实高随断点重排（80 / 117 / 163px），
-  //    按它让位的结果是面板底边插进播放条——两块都是暗玻璃，不量 rect 看不出来。
-  ok(/--skin-stage-foot:\s*calc\(80px \+ var\(--skin-gap\)/.test(body),
-    '默认留位按播放条实高算（不是 --bar-h）');
-  ok(/--skin-stage-foot:\s*calc\(117px \+ var\(--skin-gap\)/.test(body),
-    '≤900px 留位跟着播放条重排（117px）');
-  ok(/--skin-stage-foot:\s*calc\(163px \+ var\(--skin-gap\)/.test(body),
-    '≤620px 留位跟着播放条重排（163px）');
-
-  // 5) 余量归属。舞台是定高 flex 列：歌词区必须自己有 min-height 兜底，
-  //    否则它被压到内容那么高；缺口则转嫁到仅剩的可收缩项上——sheen 实测
-  //    曲名行盒 33px→14px、艺人 20px→9px，21px 的字被切成半截。
-  //    潮汐的解法是两头一起钉，而不是像 sheen 那样把曲名摘掉（那是砍功能）。
-  ok(/\[data-skin="chaoxi"\] \.stage-lyrics \{[^}]*min-height:\s*100px/.test(body),
-    '.stage-lyrics 有 100px 兜底（余量明确落给歌词）');
-  ok(/\[data-skin="chaoxi"\] \.stage-lyrics \{[^}]*flex:\s*1 1 auto/.test(body),
-    '.stage-lyrics 可伸缩');
-
-  // 5b) 唱片尺寸必须跟**视口高度**挂钩。这条是浏览器实测抓出来的：
-  //     第一版写 width: min(72%, 320px) + flex:none —— 面板定高 634、内容区
-  //     554，而 head 30 + 唱片 320 + 曲名 33 + 艺人 20 + 进度 47 + 频谱 44 = 494
-  //     全是不可收缩项，歌词区只剩不到 60px，整块被 overflow:hidden 裁掉
-  //     （scrollHeight 826 / clientHeight 632，溢出的 194px 里装的就是歌词）。
-  //     页面不报错、元素一个不少，只有量 rect 才看得出来。
-  //     第二版换成 flex 收缩更糟：收缩按 basis 比例分配，歌词的 basis 是内容高
-  //     （500px+），缺口大头落在它身上，唱片被一路压到 45×45。
-  //     所以钉 clamp + flex:none：尺寸算得出来，就不该让浏览器按比例猜。
-  ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*clamp\(\s*110px,\s*calc\(\s*100dvh -/.test(body),
-    '唱片尺寸由视口高度算出（写死尺寸必然把歌词挤没，交给 flex 分配会压成 45px）');
-  ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*flex:\s*none/.test(body),
-    '唱片不参与 flex 收缩（尺寸由 clamp 精确给出）');
-  ok(/@media \(max-height: 820px\)/.test(body),
-    '有矮屏断点（宽屏但矮屏同样会把歌词挤没，宽度断点管不到）');
-  ok(/@media \(max-height: 820px\) \{[\s\S]*?\.stage \{[\s\S]*?overflow-y:\s*auto/.test(body),
-    '矮屏下面板自身可滚（宁可滚，也不能让内容被裁掉）');
-
-  // 5c) 播放面板必须**按需浮出**，不能常驻。
-  //     常驻 = 它的宽度直接从内容区里扣，骨架就还是三栏 —— 前两版正是
-  //     这么被否掉的（1440 屏上内容只剩 846）。改回去就会重演。
-  ok(/\[data-skin="chaoxi"\] \.stage \{\s*display:\s*none/.test(body),
-    '播放面板默认收起（不占内容宽度）');
-  ok(/\[data-skin="chaoxi"\] body\.chaoxi-stage-open \.stage \{[^}]*display:\s*flex/.test(body),
-    '展开态才浮出（状态类名由 skin.chaoxi.js 加在 body 上）');
-  ok(/\[data-skin="chaoxi"\] \.stage-title,\s*\n?\s*\[data-skin="chaoxi"\] \.stage-artist \{[^}]*flex:\s*none/.test(body),
-    '.stage-title/.stage-artist 是 flex:none（曲名与艺人不可被压缩）');
-  ok(!/\[data-skin="chaoxi"\] \.stage-title[^{]*\{[^}]*display:\s*none/.test(body),
-    '潮汐不摘掉曲名与艺人（与 sheen 的取舍相反，这是两套皮肤的实质差异）');
-
-  // 6) 唱片是主角：上限比 sheen 的 236px 大一档。
-  ok(/\[data-skin="chaoxi"\] \.disc-wrap \{[^}]*320px\s*\)/.test(body),
-    '.disc-wrap 上限 320px（比 sheen 的 236px 大一档，封面是这一屏的视觉锚点）');
-
-  // 7) 卡片列宽必须落在 .daily-list，且 .daily-strip 不能被改成网格容器。
-  //    .daily-strip 的直接子元素是 .daily-head 与 .daily-list 两个块，
-  //    给它加 grid 会把 .daily-head 变成网格项，内部横向 flex 按内容均分，
-  //    长文案被压成竖排一条。
-  const strip = /\.daily-strip\s*\{([^}]*)\}/.exec(body);
-  ok(strip && !/display\s*:\s*(grid|inline-grid|flex)/.test(strip[1]),
-    '没把 .daily-strip 改成网格/弹性容器', strip ? strip[1].trim().slice(0, 60) : '');
-  // 长廊里每张卡必须定宽且不可压缩：写成 flex:1 会让 24 张卡挤成一屏，
-  // 长廊就退化成一行小方块 —— 那还不如原来的网格。
-  ok(/\[data-skin="chaoxi"\] \.daily-list > \* \{[^}]*flex:\s*0 0 var\(--skin-daily-card-w\)/.test(body),
-    '长廊里每张卡定宽不可压缩（否则退化成一行小方块）');
-  // 光把容器改成横向还不够：业务默认是「40px 小封面 + 右侧文字」的横排小卡，
-  // 扔进长廊就是一排 66px 的缩略卡。得让封面在上、撑满卡片宽度。
-  ok(/\[data-skin="chaoxi"\] \.daily-card \{[^}]*flex-direction:\s*column/.test(body),
-    '长廊卡片改成纵向（封面在上、文字在下）');
-  ok(/\[data-skin="chaoxi"\] \.daily-cover \{[^}]*width:\s*100%/.test(body),
-    '长廊卡片的封面撑满卡片宽度（不是写死的 40px）');
-  ok(/\[data-skin="chaoxi"\] \.daily-cover \{[^}]*aspect-ratio:\s*1/.test(body),
-    '长廊卡片的封面保持正方');
-
-  // 8) 覆盖：切过去不能落回默认。比 sheen 的几何模块，但排除交互态选择器
-  //    —— 那些是历史包袱，潮汐主动不写（见下一条）。
-  const OPTIONAL = /^\.(dv-name|dv-sub|dv-num|dv-src|topsearch|stage-lyrics|disc-wrap|stage-title|stage-artist|sheen-player-handle)$|^#skin-picker$/;
-  const isGeom = (s) => !OPTIONAL.test(s)
-    && !/^[^\s]*\s/.test(s)
-    && !/:hover|:active|:focus|:disabled|::/.test(s);
-  const have = selectorsOf(CHAOXI);
-  const need = [...selectorsOf(SHEEN)].filter(isGeom);
-  const miss = need.filter((s) => !have.has(s));
-  ok(miss.length === 0, `chaoxi 覆盖了 sheen 的全部几何模块（缺：${miss.join(' ') || '无'}）`);
-
-  // 8b) 整页滚动：滚动权必须收在 .view 一个容器上，列表体交出 flex:1。
-  //     默认链路是每个列表体各自 overflow-y:auto + flex:1 —— 它们只能拿
-  //     "剩余高度"，在潮汐这种内容多的首页里被压成 12px（实测 clientHeight 12 /
-  //     scrollHeight 1564），用户报的"旁边无法滚动"正是这个。这不是调尺寸能
-  //     解决的，得换滚动结构；改回去就会重演，所以钉住。
-  ok(/\[data-skin="chaoxi"\] \.view \{[^}]*overflow-y:\s*auto/.test(body),
-    '.view 是滚动容器（整页滚动，而不是各列表各滚一份）');
-  ok(/\.lib-list,[\s\S]{0,320}?\.dv-body \{\s*flex:\s*none/.test(body),
-    '列表体（含 .dv-body）全部交出滚动权（flex:none）');
-  ok(/\.lib-list,[\s\S]{0,320}?\.dv-body \{\s*flex:\s*none[\s\S]{0,80}?overflow:\s*visible/.test(body),
-    '列表体同时把 overflow 放开（留着自己滚 = 两层滚动条）');
-  // 只换滚动结构还不够：.view 是 flex 列，内容超出时 flex 会先把可收缩项
-  // 压扁，根本轮不到滚动。第 3 版就栽在这 —— .lib-list 已经拿到完整高度，
-  // 但 .daily-strip 被压成 50px（overflow:hidden 顺手裁掉里面的标题与 24 张卡）。
-  ok(/\[data-skin="chaoxi"\] \.view > \* \{\s*flex:\s*none/.test(body),
-    '.view 的直接子元素一律不可收缩（否则被压扁，滚动永远不触发）');
-
-  // 9) 零交互状态选择器。这是潮汐对设计稿 9.4 第 2 条的承诺：
-  //    状态语义由 style.css 全站统一，皮肤再写一遍会让"换皮肤"读成"改行为"，
-  //    而且为一条状态样式给别的皮肤各抄一遍，浓淡必然对不上。
-  const stateful = [...have].filter((s) => /:hover|:active|:focus|:disabled/.test(s));
-  ok(stateful.length === 0,
-    `chaoxi 不写任何交互状态选择器${stateful.length ? '（' + stateful.join(' ') + '）' : ''}`);
-
-  // 8d) 每日推荐是**横向封面长廊**（用户点的 MOO 式首页那一块），不是网格。
-  ok(/\[data-skin="chaoxi"\] \.daily-list \{[^}]*flex-direction:\s*row/.test(body),
-    '每日推荐是横向长廊（一行铺开，不是多列网格）');
-  ok(/\[data-skin="chaoxi"\] \.daily-list \{[^}]*overflow-x:\s*auto/.test(body),
-    '长廊横向可滚');
-
-  section('潮汐：播放面板把手的生命周期');
-
-  // 展开/收起是一个用户动作，而皮肤 CSS 不许写交互状态选择器，
-  // 所以这件事只能由生命周期来做。造出来的节点必须摘干净。
-  const cxJs = stripJsComments(CHAOXI_JS);
-  ok(/registerLifecycle\(/.test(cxJs) && /mount: mount, unmount: unmount/.test(cxJs),
-    '按 registerLifecycle(SKIN_ID, { mount, unmount }) 登记');
-  ok(/document\.body\.appendChild\(handle\)/.test(cxJs),
-    '把手挂 body（留在 .topbar/.bar 里会落进它们的层叠上下文）');
-  ok(/classList\.remove\(OPEN_CLASS\)/.test(cxJs), 'unmount 摘掉 body 上的状态类');
-  ok(/parentNode\.removeChild\(handle\)/.test(cxJs), 'unmount 摘掉把手节点本身');
-  ok(!/removeItem\(KEY\)/.test(cxJs),
-    'unmount 不清 localStorage（那是用户的选择，切回来该是开着还是开着）');
-  ok(/localStorage\.setItem\(KEY/.test(cxJs), '展开状态被记住');
-
-  // ---- 晴空族 × 潮汐：顶栏必须是扁平通栏，不能是浮起卡片 ----
-  //
-  // 这条规则原先按 `html[data-theme="celestial"]` 写死，于是外观族机制
-  // （data-look）上线后，新增的四套主题全都匹配不上：它们在潮汐下顶栏仍
-  // 保持满宽浮卡、左右各探出一个 --skin-pad，症状是"顶部两张卡浮在内容卡
-  // 上方"。老规则失配不报错、不掉样式，只是安静地不生效。
-  //
-  // 所以这里钉两件事：
-  //   ① 皮肤层不得再按主题 id 写晴空专属规则（该判族）；
-  //   ② 那条还原规则确实存在，且两族都覆盖到。
-  section('潮汐 × 晴空族：顶栏保持扁平通栏');
-
-  ok(!/\[data-theme=["']?celestial/.test(CHAOXI),
-    '潮汐皮肤里没有按 celestial 主题 id 写的规则（外观族机制下这会静默失配：' +
-    '新主题匹配不上，老规则无声失效）');
-  ok(/html:is\(\[data-look="glass"\], \[data-look="cel"\]\)\[data-skin="chaoxi"\] \.topbar/.test(CHAOXI),
-    '顶栏扁平化规则认的是外观族而不是主题 id');
-  ok(/html:is\(\[data-look="glass"\], \[data-look="cel"\]\)\[data-skin="chaoxi"\] \.rail/.test(CHAOXI),
-    '导航条扁平化规则同样认族（漏了它通栏条又会变回浮卡）');
-  // 扁平化的具体形态：圆角归零、只留一条下边框、去掉投影。
-  // 少任何一条，满宽的顶栏就会重新读成"另一张卡"。
-  // 提取声明块时用 [\s\S] 而不是 [^}]*：选择器列表是跨行的，
-  // `[^}]*` 虽然也能跨行，但整个模式里的 `[^}]*`（第一段）会一路吃到
-  // 第二个选择器后面，结果整条匹配不上 —— 而"抓不到块"与"块里没写"
-  // 在断言里长得一模一样，都是红，却指向完全不同的问题。
-  const chaoxiFlat = new RegExp(
-    'html:is\\(\\[data-look="glass"\], \\[data-look="cel"\\]\\)\\[data-skin="chaoxi"\\] \\.topbar,[\\s\\S]*?\\{([\\s\\S]*?)\\n\\}'
-  ).exec(CHAOXI);
-  ok(!!chaoxiFlat, '抓得到顶栏扁平化规则的声明块');
-  if (chaoxiFlat) {
-    ok(/border-radius:\s*0\b/.test(chaoxiFlat[1]), '顶栏圆角归零（满宽浮卡是"顶部没对齐"的直接原因）');
-    ok(/border-width:\s*0 0 1px/.test(chaoxiFlat[1]), '顶栏只保留一条下边框');
-    ok(/box-shadow:\s*none/.test(chaoxiFlat[1]), '顶栏去掉投影（否则仍是浮起件）');
-    // 背景与模糊不能动：fixed 导航条压在滚动内容上仍需要它。
-    ok(!/background[^:]*:/.test(chaoxiFlat[1]) && !/backdrop-filter/.test(chaoxiFlat[1]),
-      '扁平化不动背景与背景模糊（导航条是 fixed，压在滚动内容上仍需要）');
-  }
-
-  // ---- 潮汐 × 晴空族：通栏导航条必须有实底 ----------------------------
-  //
-  // ⚠ 这条曾经写错两次，两次的症状都不同，值得逐条记下来：
-  //
-  // ① 材质规则只写 [data-skin="chaoxi"]（0,2,0），压不过装饰层的
-  //    html:is([data-look=…])（0,2,1）→ 满宽玻璃渐变、通栏看着没底色。
-  //    同一 bug 在两套主题下表现不同：亮壁纸（晴空绘卷的云）现形，
-  //    暗壁纸（夜景）看不出来 —— 于是被当成"这是配色问题"。
-  //
-  // ② 修成 html:is([data-look=…])[data-skin="chaoxi"]（0,3,1）压过了，
-  //    但**把材质绑在了族上**。而 22 套内置主题里有 18 套是 data-look="plain"
-  //    （族是装饰层的概念，不是主题的必选项）—— 161 个「主题 × 皮肤」组合
-  //    里立刻坏掉 18 个，全是"潮汐 × 不带族的主题"，正是用户截图那套。
-  //
-  // 结论：**皮肤材质不该依赖族**。潮汐的通栏是皮肤自己的设计，对每个主题
-  // 都成立。压过装饰层靠 html[data-skin] 前缀拿到 (0,3,1)，与族无关。
-  //
-  // 判据：材质规则里必须有一条**不带 data-look 的**选择器。
-  // 提取"选择器 → 声明"的对应关系。
-  //
-  // ⚠ 两个坑，都踩过：
-  //  ① 切块前必须**先剥注释**，否则注释里出现的 data-look / .rail 会被当成
-  //     选择器的一部分，判断就红在不存在的地方。
-  //  ② 一条规则的**选择器列表**（`a, b { }`）必须按逗号拆开逐项判。
-  //     否则 `html[data-skin="chaoxi"] .rail, html:is([data-look…]) .rail {…}`
-  //     被当成"一个带 data-look 的选择器" → 断言误报"没有不带族的"。
-  //  ③ 只看**紧跟 { 的那一段**判断是否 .rail 块，别把 `.rail-item` 也算进来 ——
-  //     .rail-item 里同样有 `flex-direction: row`，会让"布局重复"误报。
-  const chaoxiNoComment = CHAOXI.replace(/\/\*[\s\S]*?\*\//g, '');
-  // 材质的标志是「用了 --skin-surface」——可能单独用，也可能叠一层遮罩用
-  // （叠遮罩是为了把 0.78 的默认档补到实底）。所以只认这个令牌，不认写法。
-  const SURFACE_RE = new RegExp('var\\(--skin-surface\\)');
-  const VEIL_RE = new RegExp('--skin-rail-veil');
-  const chaoxiRules = (chaoxiNoComment.match(/[^{}]+\{[^{}]*\}/g) || []).map(b => ({
-    selectors: b.slice(0, b.indexOf('{'))
-      .split(',').map(s => s.trim()).filter(Boolean),
-    body: b
-  }));
-  // 只取"选择器里恰好以 .rail 结尾"的规则（排除 .rail-item / .rail-badge …）
-  const isPlainRail = (s) => /\.rail$/.test(s);
-  const railMatRules = chaoxiRules.filter(r =>
-    r.selectors.some(isPlainRail) && SURFACE_RE.test(r.body));
-  ok(railMatRules.length > 0, '抓得到潮汐导航条材质规则');
-  ok(railMatRules.some(r => r.selectors.some(s => isPlainRail(s) && !/data-look/.test(s))),
-    '潮汐导航条的实底材质有一条不带 data-look 的选择器（18 套 plain 主题也要生效：' +
-    '族是装饰层的概念，皮肤依赖它就会漏掉大部分主题）');
-  ok(railMatRules.some(r => r.selectors.some(s => /html\[data-skin="chaoxi"\]/.test(s) && isPlainRail(s))),
-    '材质规则带 html[data-skin] 前缀（0,3,1 才能稳压装饰层的 0,2,1，且不依赖族）');
-  // 通栏是 fixed 且压在滚动内容之上，半透明底会让壁纸/内容从底下透上来 ——
-  // 用户明确要求"参照深空那样留一个底色"，所以必须是 --skin-surface 实底。
-  const chaoxiRail = railMatRules.find(r => r.selectors.some(s => /html\[data-skin="chaoxi"\]/.test(s)));
-  if (chaoxiRail) {
-    ok(/backdrop-filter/.test(chaoxiRail.body),
-      '模糊保留（它负责把底下滚动内容化成色块，不是当遮罩用）');
-    const radius0 = new RegExp('border-radius:\\s*0\\b').test(chaoxiRail.body);
-    const borderOnlyBottom = new RegExp('border-width:\\s*0 0 1px').test(chaoxiRail.body);
-    ok(radius0 && borderOnlyBottom,
-      '导航条是扁平通栏：圆角归零、只留一条下边框',
-      'radius0=' + radius0 + ' border=' + borderOnlyBottom);
-    // ★ 必须叠遮罩。只用 --skin-surface 是不够的：它来自主题的
-    // --glass-bg-strong，而 22 套内置主题里只有 5 套给了 0.96，
-    // 其余 17 套走 style.css 默认的 .78 —— 通栏在 .78 下仍半透明，
-    // 亮壁纸照样透上来（161 个组合里正好坏这 18 个）。
-    ok(VEIL_RE.test(chaoxiRail.body),
-      '导航条叠了补不透明遮罩（单靠 --skin-surface 时那17 套主题只有 .78 透明度）');
-  }
-  // 遮罩色必须走令牌：本皮肤零颜色字面量（见上面「颜色字面量同样全禁」那条），
-  // 且走 --bg 才能深浅自动跟随 —— 写死暗色会把浅色主题的通栏压成脏灰。
-  ok(new RegExp('--skin-rail-veil:\\s*color-mix\\(in srgb,\\s*var\\(--bg\\)').test(chaoxiNoComment),
-    '补不透明遮罩用 color-mix(var(--bg)) 推导（走令牌、深浅自动跟随，且不违反零字面量纪律）');
-  // 顶栏的"浮卡还原成扁平"只对族生效是**对的**——不带族的主题本来就不画
-  // 浮卡，无需还原。这条钉住那个区别，防止有人"顺手"把它也改成全主题。
-  ok(/html:is\(\[data-look="glass"\], \[data-look="cel"\]\)\[data-skin="chaoxi"\] \.topbar/.test(CHAOXI),
-    '顶栏的浮卡还原仍只对族生效（不带族的主题不画浮卡，不需要还原）');
-
-  // 布局（fixed / flex / padding / z-index）不该在两条选择器里各写一遍：
-  // 重复的代价是日后改一处忘另一处，同一条通栏在两套主题下宽度不同。
-  const railLayout = chaoxiRules.filter(r => r.selectors.some(isPlainRail) &&
-    !SURFACE_RE.test(r.body));
-  const layoutProps = ['position: fixed', 'flex-direction: row', 'z-index: 55'];
-  const dupLayout = layoutProps.filter(p =>
-    railLayout.filter(r => r.body.includes(p)).length > 1);
-  ok(dupLayout.length === 0,
-    '潮汐的导航条布局属性没有在两条选择器里重复（实得重复：' + (dupLayout.join(', ') || '无') +
-    '；重复的代价是改一处忘另一处）');
-
-  section('潮汐：配套主题的深浅两套与对比度');
+function checkChaoxiThemes() {
+  section('主题：潮汐·夜 / 潮汐·昼 的对比度');
 
   const themes = read(path.join(WEB, 'themes.js'));
   const night = themeTokens(themes, 'chaoxi-night');
   const day = themeTokens(themes, 'chaoxi-day');
-  ok(night && day, 'themes.js 登记了 chaoxi-night / chaoxi-day 两套配套主题');
+  ok(night && day, 'themes.js 登记了 chaoxi-night / chaoxi-day 两套主题');
 
   if (night) {
     const cText = contrastOf(night['--text'], night['--bg']);
@@ -1576,18 +1033,22 @@ function checkWiring() {
   section('接线：HTML / 路由 / 启动');
 
   ok(/<link rel="stylesheet" href="skins\/skins\.css">/.test(HTML), 'skins.css 常驻引入');
-  for (const id of ['sheen', 'liunian', 'qingfeng', 'chaoxi', 'heijiao']) {
+  for (const id of ['liunian', 'qingfeng', 'heijiao']) {
     ok(new RegExp('href="skins/skin\\.' + id + '\\.css"[^>]*data-skin-css="' + id + '"').test(HTML),
       `skin.${id}.css 引了进来并带上 data-skin-css`);
     ok(new RegExp('data-skin-css="' + id + '"[^>]*disabled').test(HTML),
       `skin.${id}.css 默认 disabled（默认不生效）`);
   }
+  ok(!/skins\/skin\.(sheen|chaoxi)\.(css|js)/.test(HTML),
+    'index.html 不再引入已下架的浮光 / 潮汐资源');
+  ok(!/skin\.(sheen|chaoxi)/.test(MAIN_RS),
+    'assets.rs 不再登记已下架的浮光 / 潮汐资源');
   ok(/src="skins\/skins\.js"/.test(HTML), 'skins.js 引了进来');
   ok(HTML.indexOf('skins/skins.js') < HTML.indexOf('src="app.js"'),
     'skins.js 排在 app.js 之前（app.js 启动时要能拿到它）');
   ok(/id="skins-list"/.test(HTML), '设置页有皮肤列表容器');
 
-  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.sheen.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js', 'skins/skin.qingfeng.css', 'skins/skin.qingfeng.js', 'skins/skin.chaoxi.js', 'skins/skin.chaoxi.css', 'skins/skin.heijiao.js', 'skins/skin.heijiao.css']) {
+  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js', 'skins/skin.qingfeng.css', 'skins/skin.qingfeng.js', 'skins/skin.heijiao.js', 'skins/skin.heijiao.css']) {
     ok(MAIN_RS.includes(`/skins/${p.split('/')[1]}`) || MAIN_RS.includes(p),
       `main.rs 注册了 /${p} 路由`);
   }
@@ -2596,7 +2057,7 @@ function checkQingfengWiring() {
   // 作用域：海报墙与设置浮层只属于清风，别漏进业务 HTML。
   ok(!/qf-nav|qf-lattice|qf-modal|qf-poster/.test(HTML),
     '业务 HTML 不内置清风的结构（皮肤自持，切走即消失）');
-  ok(!/qf-nav|qf-lattice|qf-modal|qf-poster/.test(SHEEN),
+  ok(!/qf-nav|qf-lattice|qf-modal|qf-poster/.test(LIUNIAN),
     '其它皮肤不引入清风的结构');
 }
 
@@ -2672,7 +2133,7 @@ function checkSkinSwitchViewHandoff() {
 /// 舞台面板不该长出横向滚动条。
 ///
 /// `.stage::before` 是 inset:-30% 的取色光晕（绝对定位），面板一旦
-/// `overflow:auto`，它就把面板撑宽：实测 sheen 420px 面板被撑宽 125px、
+/// `overflow:auto`，它就把面板撑宽：实测一块 420px 的悬浮舞台面板被撑宽 125px、
 /// 窄栏里被撑宽，底部那条横滚动条就是它。
 /// 基础样式 style.css 的 .stage 本来就是 overflow:hidden，
 /// 皮肤覆盖成 auto 属于覆盖过头。
@@ -2688,7 +2149,7 @@ function checkStageNoHorizontalScroll() {
   // —— 不剥注释的话 `/overflow:\s*hidden/` 会匹配到**注释自己**，无论实际
   // 写的是什么值都绿。变异测试（把 overflow 改回 auto）当时就是不红的，
   // 靠这条才发现。
-  const sheenClean = stripCssComments(SHEEN);
+  const liunianClean = stripCssComments(LIUNIAN);
   const stageClean = stripCssComments(STAGE_CSS);
 
   // 取一条规则**整块**（含声明体），花括号配平 ——
@@ -2711,8 +2172,8 @@ function checkStageNoHorizontalScroll() {
     return '';
   };
 
-  ok(/overflow:\s*hidden/.test(rule(sheenClean, '\\[data-skin="sheen"\\] \\.stage')),
-    '浮光的 .stage 面板不滚（歌词区自己滚）');
+  ok(/overflow:\s*hidden/.test(rule(liunianClean, '\\[data-skin="liunian"\\] \\.stage')),
+    '流年的 .stage 面板不滚（歌词区自己滚）');
   // 歌词区必须自己有滚动/裁剪能力，否则面板改成 hidden 之后歌词就够不着了。
   // 注意它不是 overflow-y:auto —— 歌词滚动是 JS 用 translate3d 推
   // .lyric-track 实现的（用 scrollTop + CSS smooth 会与 transform 打架，
@@ -2878,7 +2339,7 @@ function checkHeijiaoSkin() {
   ok(/\[data-skin="heijiao"\] \.track\s*\{[^}]*position:\s*relative/.test(hjBody),
     '.track 保持定位基准（操作按钮浮在封面角上）');
   // 定高 flex 列的纪律：滚动容器里的直接子元素一律不可收缩，
-  // 否则浏览器先压扁可收缩项而不产生滚动（潮汐栽在这上面）。
+  // 否则浏览器先压扁可收缩项而不产生滚动（低密度单列皮肤栽在这上面）。
   ok(/\[data-skin="heijiao"\] \.view > \*\s*\{[^}]*flex:\s*none/.test(hjBody),
     '.view 的直接子元素不可收缩（否则列表被压扁而不是出滚动条）');
   ok(/\[data-skin="heijiao"\] \.view\s*\{[^}]*overflow-y:\s*auto/.test(hjBody),
@@ -2890,7 +2351,7 @@ function checkHeijiaoSkin() {
 
   // 队列从「只有卡片」变成「卡片 + 行列表」两档。判据不是"有没有写列表样式"，
   // 恰恰相反：列表档必须**没有**皮肤自己的行样式，几何全部交回 style.css 的
-  // 行列表基线 —— 重写一份行几何迟早跟基线漂移，而基线是其余六套皮肤共用的。
+  // 行列表基线 —— 重写一份行几何迟早跟基线漂移，而基线是其余皮肤共用的。
   const hjGridGroup = hjBody.match(/\[data-skin="heijiao"\] \.lib-list[^{]*\{/);
   ok(!!hjGridGroup && !/\.q-list/.test(hjGridGroup[0]),
     '队列容器已从「所有列表都是网格」那一组里拆出来（它不再恒为网格）');
@@ -2966,7 +2427,7 @@ function checkHeijiaoSkin() {
   // position:fixed —— fixed 脱离栅格流不占轨道，于是源序第一格归了 .column、
   // .stage 落进第二格：实测左卡 916px / 右面板 458px，比例整个反过来，
   // 而页面不报错、卡片照旧渲染，看上去只是"左边那块宽了点"。
-  // 潮汐是单列，永远碰不到这个 —— 所以这条规则在潮汐里根本不存在，
+  // 单列皮肤永远碰不到这个 —— 所以这条规则在单列布局里根本不存在，
   // 照抄它的写法也发现不了。
   ok(/\[data-skin="heijiao"\] \.stage\s*\{\s*grid-area:\s*1 \/ 1/.test(hjBody),
     '左卡钉在 (1行,1列)（fixed 的 rail 不占轨道，靠源序会排反）');
@@ -3130,7 +2591,6 @@ function checkHeijiaoSkin() {
   checkExtensibility();
   checkSkinEntry();
   checkNoColor();
-  checkSheenTopbarLayout();
   checkCoverage();
   checkDailyScroll();
   checkLiunianExpandedBarStability();
@@ -3141,7 +2601,7 @@ function checkHeijiaoSkin() {
   checkQingfengWall();
   checkQingfengSettings();
   checkQingfengWiring();
-  checkChaoxiSkin();
+  checkChaoxiThemes();
   checkHeijiaoSkin();
   checkSkinSwitchViewHandoff();
   checkStageNoHorizontalScroll();

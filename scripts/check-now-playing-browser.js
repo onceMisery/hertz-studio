@@ -180,7 +180,7 @@ async function fixtures() {
     await api('POST', '/v1/player/load', { track_id: queue[0], queue });
     await api('POST', '/v1/player/pause');
     await until(() => page.evaluate(() => Stage.presentation().track?.id), id => id === queue[0]);
-    const skins = ['classic', 'sheen', 'chaoxi', 'qingfeng', 'liunian', 'heijiao'];
+    const skins = ['classic', 'qingfeng', 'liunian', 'heijiao'];
     const sizes = [[1366,768], [1920,1080], [2560,1080], [1024,600], [390,844]];
     for (const skin of skins) {
       await page.evaluate(skin => Skins.apply(skin), skin);
@@ -228,18 +228,6 @@ async function fixtures() {
     check(await page.locator('#bar-track').evaluate(el => el === document.activeElement), 'collapse restores the keyboard entry focus');
     check(await page.evaluate(() => Stage.gateRates().find(gate => gate.name === 'ordinary-player').target === 0), 'closed player releases its frame budget');
 
-    for (const skin of ['sheen','chaoxi']) {
-      await page.evaluate(skin => Skins.apply(skin), skin);
-      const handle = page.locator(skin === 'sheen' ? '#sheen-player-handle' : '#chaoxi-stage-handle');
-      if (await handle.getAttribute('aria-expanded') !== 'true') await handle.click();
-      const preference = await page.evaluate(() => localStorage.getItem('vmusic.chaoxi.stage'));
-      await page.locator('#bar-player-expand').click(); await page.locator('#np-close').click();
-      check(await handle.getAttribute('aria-expanded') === 'true' && await page.evaluate(() => localStorage.getItem('vmusic.chaoxi.stage')) === preference, skin + ' restores the mini panel preference');
-      const panel = await page.locator('#stage').boundingBox();
-      check(panel && panel.x >= 0 && panel.y >= 0 && panel.x + panel.width <= 1367, skin + ' mini panel is on screen');
-      await handle.click();
-      if (skin === 'sheen') check((await page.locator('#column').boundingBox()).width > 1300, 'sheen releases the mini panel space when closed');
-    }
     await page.evaluate(() => Skins.apply('liunian'));
     await page.locator('.ln-sp-q').fill('Player');
     const compact = await page.locator('.bar').evaluate(el => el.classList.contains('ln-capsule'));

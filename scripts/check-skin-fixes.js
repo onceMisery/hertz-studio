@@ -45,7 +45,7 @@ async function applySkin(page, id) {
 
   // ---------------------------------------------------------------- 问题 3/4/5
   section('问题 3/4/5：在设置页里切皮肤，首页必须有内容（不空白、不停在设置页）');
-  for (const target of ['liunian', 'qingfeng', 'sheen', 'classic']) {
+  for (const target of ['liunian', 'qingfeng', 'classic']) {
     // 每轮都先回到 classic 并进入设置页 —— 这才是用户的真实路径
     await applySkin(page, 'classic');
     await page.evaluate(() => {
@@ -116,7 +116,7 @@ async function applySkin(page, id) {
 
   // ---------------------------------------------------------------- 问题 1
   section('问题 1：播放条不能永久消失（显隐竞态）');
-  await applySkin(page, 'sheen');
+  await applySkin(page, 'classic');
   const race = await page.evaluate(async () => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const btn = document.getElementById('bar-pin-toggle');
@@ -156,63 +156,6 @@ async function applySkin(page, id) {
   await page.screenshot({ path: `${OUT}/fix-bar-race.png` });
 
   // ---------------------------------------------------------------- 问题 1/2
-  section('问题 1/2：舞台面板没有多余的横向滚动条，几何对齐');
-  for (const target of ['sheen']) {
-    await applySkin(page, target);
-    await page.evaluate(() => { const b = document.querySelector('.bar'); b.classList.remove('is-hidden'); b.style.transform = ''; b.style.opacity = ''; });
-    await page.waitForTimeout(300);
-    const m = await page.evaluate(() => {
-      const st = document.getElementById('stage');
-      const r = st.getBoundingClientRect();
-      const cs = getComputedStyle(st);
-      const bar = document.querySelector('.bar');
-      const br = bar.getBoundingClientRect();
-      // **判据是「有没有可见滚动条」，不是 scrollWidth。**
-      // overflow:hidden 时 scrollWidth 仍然报告被裁掉的尺寸（inset:-30% 的
-      // 光晕让 sheen 报 543 / clientW 418），scrollLeft 也能被程序化赋值 ——
-      // 但滚动条**不画、用户也滚不到**。拿 scrollWidth 判会得出「没修好」
-      // 的假结论（我第一版就写在这里，红了两轮）。
-      //
-      // 用户能看到滚动条的条件：overflow 算出来是 auto / scroll，
-      // 且溢出量 > 0。gutter（offsetWidth - clientWidth）在有滚动条时
-      // 会明显大于边框宽度，这里一并量出来佐证。
-      const borderX = parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth);
-      const borderY = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
-      const xOver = st.scrollWidth - st.clientWidth;
-      const yOver = st.scrollHeight - st.clientHeight;
-      return {
-        rect: { w: Math.round(r.width), h: Math.round(r.height), left: Math.round(r.left), top: Math.round(r.top), bottom: Math.round(r.bottom) },
-        overflowX: cs.overflowX, overflowY: cs.overflowY,
-        xOver, yOver,
-        // 会画出滚动条吗
-        showsXBar: (cs.overflowX === 'auto' || cs.overflowX === 'scroll') && xOver > 0,
-        showsYBar: (cs.overflowY === 'auto' || cs.overflowY === 'scroll') && yOver > 0,
-        gutterX: st.offsetWidth - st.clientWidth - borderX,
-        gutterY: st.offsetHeight - st.clientHeight - borderY,
-        modesFit: (() => {
-          const modes = document.getElementById('stage-modes');
-          if (!modes) return null;
-          const mr = modes.getBoundingClientRect();
-          return { right: Math.round(mr.right), over: Math.round(mr.right - r.right), w: Math.round(mr.width) };
-        })(),
-        gapToBar: Math.round(br.top - r.bottom),
-        barTop: Math.round(br.top),
-        viewportH: window.innerHeight,
-      };
-    });
-    console.log('    ' + target + ': ' + JSON.stringify(m));
-    ok(!m.showsXBar && !m.showsYBar,
-      `${target}：面板不画滚动条`,
-      `overflow=${m.overflowX}/${m.overflowY} 溢出=${m.xOver}/${m.yOver} 槽=${m.gutterX}/${m.gutterY}`);
-    ok(m.gutterX <= 1 && m.gutterY <= 1,
-      `${target}：没有滚动条槽占宽`, `gutterX=${m.gutterX} gutterY=${m.gutterY}`);
-    ok(m.modesFit && m.modesFit.over <= 1, `${target}：模式胶囊不顶破面板`, JSON.stringify(m.modesFit));
-    ok(m.gapToBar >= 0, `${target}：面板不压进播放条`, 'gap=' + m.gapToBar);
-    ok(m.rect.w > 100 && m.rect.h > 200, `${target}：面板尺寸正常`, JSON.stringify(m.rect));
-    await page.screenshot({ path: `${OUT}/fix-stage-${target}.png` });
-  }
-
-  // ---------------------------------------------------------------- 问题 6
   section('问题 6：清风墙上/下一曲 + 左下角卡片悬停播放按钮');
   await applySkin(page, 'qingfeng');
   await page.evaluate(() => {

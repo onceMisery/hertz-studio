@@ -79,10 +79,6 @@
       "purpose": "Full shipped page + DBX bridge fixture; playback uses an isolated real service."
     },
     {
-      "script": "check-chaoxi-look-browser.js",
-      "purpose": "潮汐皮肤 × 晴空外观族：顶栏必须保持扁平通栏，不能是浮起卡片。"
-    },
-    {
       "script": "check-click-fx-browser.js",
       "purpose": "点击特效必须**按主题**分叉：每套主题声明自己的 fx 原型，换主题 ="
     },
@@ -289,14 +285,6 @@
     {
       "script": "check-settings-sheet-browser.js",
       "purpose": "共享设置浮层（skins/skin-settings-sheet.js）的浏览器验收。"
-    },
-    {
-      "script": "check-sheen-picker-browser.js",
-      "purpose": "浏览器手工验收（原文件未写说明）"
-    },
-    {
-      "script": "check-sheen-topbar-browser.js",
-      "purpose": "!/usr/bin/env node"
     },
     {
       "script": "check-sidebar-browser.js",

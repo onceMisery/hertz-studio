@@ -101,9 +101,9 @@
 .np-lyric-candidates { list-style: none; padding: 0; }
 .np-lyric-candidates > li { border-top: 1px solid var(--line); padding-block: 12px; }
 #np-modal .np-goto { margin-top: 12px; }
-.np-expanded .topbar, .np-expanded .app, .np-expanded .bar, .np-expanded #bar-restore, .np-expanded #capsule, .np-expanded .qf-stage-dragging, .np-expanded .chaoxi-handle { visibility: hidden; pointer-events: none; }
+.np-expanded .topbar, .np-expanded .app, .np-expanded .bar, .np-expanded #bar-restore, .np-expanded #capsule, .np-expanded .qf-stage-dragging { visibility: hidden; pointer-events: none; }
 .np-expanded #ctx-menu { z-index: 110; }
-.np-expanded #stage, .np-expanded #sheen-player-handle, .np-expanded .qf-lattice { visibility: hidden; pointer-events: none; }
+.np-expanded #stage, .np-expanded .qf-lattice { visibility: hidden; pointer-events: none; }
 .np-expanded #np-disc-host .disc-wrap { visibility: visible; pointer-events: auto; }
 #np-modal [hidden] { display: none !important; }
 [data-skin="heijiao"] #np-modal .np-art { border-radius: 50%; padding: 24px; background-size: 70%; background-color: var(--panel-2); border: 18px solid var(--field-border); }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 //
-// 每日推荐滚动链 + iOS 齿轮隐藏 + 浮光行节奏（浏览器验收，需 Playwright + 服务）。
+// 每日推荐滚动链 + iOS 齿轮隐藏 + 各皮肤行节奏（浏览器验收，需 Playwright + 服务）。
 //
 //   SETTINGS_NAV_URL=http://127.0.0.1:18790/ \
 //   NODE_PATH=<装有 playwright 的 node_modules 路径> \
@@ -77,7 +77,7 @@ const FREEZE = `
 `;
 
 async function gotoDaily(page) {
-  // 不点 rail：流年把侧栏收成胶囊、浮光把导航换成顶部胶囊，
+  // 不点 rail：流年把侧栏收成胶囊、清风隐藏左侧栏，
   // `.rail-item[data-view=daily]` 在那两套皮肤下存在却被 Playwright 判不可见
   // （实测一直重试到超时）。改为直接调它自己的 onclick ——
   // app.js 里是 `b.onclick = () => setView(b.dataset.view)`，所以这条
@@ -185,59 +185,9 @@ const geom = (page, sel) => page.evaluate((s) => {
     await page.evaluate(() => { document.getElementById('dv-body').scrollTop = 0; });
     await page.screenshot({ path: `${SHOTS}/daily-classic-top.png` });
 
-    // ------------------------------------------------ 浮光的行节奏
-    section('浮光：.dv-row 跟上低密度名单');
-    await setSkin(page, 'sheen');
-    await gotoDaily(page);
-
-    const sheenRow = await geom(page, '.dv-row');
-    ok(!!sheenRow, '浮光下 .dv-row 存在');
-
-    // 与 sheen 自己声明的令牌比，而不是与一个写死的 px 比 ——
-    // 皮肤令牌以后还会调，钉 px 会立刻假失败。
-    const skinTokens = await page.evaluate(() => {
-      const cs = getComputedStyle(document.documentElement);
-      const row = document.querySelector('.dv-row');
-      const rs = getComputedStyle(row);
-      return {
-        rowPy: cs.getPropertyValue('--skin-row-py').trim(),
-        gap: cs.getPropertyValue('--skin-gap').trim(),
-        padTop: parseFloat(rs.paddingTop),
-        padBottom: parseFloat(rs.paddingBottom),
-        lineHeight: rs.lineHeight,
-        fontSize: parseFloat(rs.fontSize),
-        radius: rs.borderRadius,
-        gapApplied: parseFloat(getComputedStyle(document.getElementById('dv-body')).rowGap),
-        // 基线间距：--sp-2 是 8px，--skin-gap 是 18px。若二者相等说明令牌没接上。
-        sp2: cs.getPropertyValue('--sp-2').trim(),
-      };
-    });
-    ok(parseFloat(skinTokens.padTop) > parseFloat(skinTokens.sp2),
-      `.dv-row 上下内距跟着 --skin-row-py 走（${skinTokens.padTop}px > 基线 ${skinTokens.sp2}）`,
-      JSON.stringify(skinTokens));
-    ok(skinTokens.gapApplied > parseFloat(skinTokens.sp2),
-      `.dv-body 行距跟着 --skin-gap 走（${skinTokens.gapApplied}px > 基线 ${skinTokens.sp2}）`);
-    ok(parseFloat(skinTokens.radius) > 4,
-      `.dv-row 有圆角（${skinTokens.radius}），不是直角灰块`);
-    // 行高要真的比字号宽（浮光 1.55），否则"低密度"只是内距在撑
-    ok(skinTokens.lineHeight !== 'normal',
-      `.dv-row 行高被显式定过（${skinTokens.lineHeight}），由行容器统一`);
-
-    // 浮光下滚动仍然成立（皮肤不能把基线修好的东西弄坏）
-    const sheenScroll = await page.evaluate(async () => {
-      const el = document.getElementById('dv-body');
-      const before = el.scrollHeight;
-      el.scrollTop = el.scrollHeight;
-      await new Promise((r) => setTimeout(r, 120));
-      return { before, after: Math.round(el.scrollTop) };
-    });
-    ok(sheenScroll.after > 0, '浮光下仍能滚到底', JSON.stringify(sheenScroll));
-
-    await page.screenshot({ path: `${SHOTS}/daily-sheen-top.png` });
-
     // ------------------------------------------------ 其它皮肤没被带坏
     section('回归：其余皮肤下每日推荐仍能滚');
-    for (const skin of ['liunian', 'qingfeng', 'sheen']) {
+    for (const skin of ['liunian', 'qingfeng']) {
       await setSkin(page, skin);
       await gotoDaily(page);
       const r = await page.evaluate(async () => {

@@ -172,7 +172,7 @@
     el.modal.dataset.skin = document.documentElement.getAttribute('data-skin'); document.body.classList.add('np-expanded');
     // Fullscreen exposes only descendants of the fullscreen element.
     move(document.getElementById('ctx-menu'), el.modal, moves);
-    background = Array.from(document.querySelectorAll('.topbar,.app,.bar,#capsule,.chaoxi-handle,.qf-lattice'));
+    background = Array.from(document.querySelectorAll('.topbar,.app,.bar,#capsule,.qf-lattice'));
     background = background.map(function (n) { var old = n.inert; n.inert = true; return { node: n, inert: old }; });
     if (el.modal.dataset.skin === 'heijiao') {
       var disc = document.querySelector('#stage .disc-wrap'), parent = document.getElementById('np-art').parentElement;

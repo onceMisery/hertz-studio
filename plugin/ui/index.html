@@ -55,10 +55,8 @@
      排在其它样式表之后——皮肤做的是覆盖，必须在最后。
      skins.css 是"选皮肤的地方"，常驻加载，不带 data-skin-css。 -->
 <link rel="stylesheet" href="skins/skins.css">
-<link rel="stylesheet" href="skins/skin.sheen.css" data-skin-css="sheen" disabled>
 <link rel="stylesheet" href="skins/skin.liunian.css" data-skin-css="liunian" disabled>
 <link rel="stylesheet" href="skins/skin.qingfeng.css" data-skin-css="qingfeng" disabled>
-<link rel="stylesheet" href="skins/skin.chaoxi.css" data-skin-css="chaoxi" disabled>
 <link rel="stylesheet" href="skins/skin.heijiao.css" data-skin-css="heijiao" disabled>
 <link rel="stylesheet" href="skins/skin.orbit.css" data-skin-css="orbit" disabled>
 </head>
@@ -2274,9 +2272,8 @@
 <!-- 皮肤公共段（锚点搬运 / 自建节点登记 / 封面位图回填）：必须在两张重编排
      皮肤（流年 / 清风）之前加载。 -->
 <script defer src="skins/skin-shared.js"></script>
-<script defer src="skins/skin.sheen.js"></script>
-<!-- 共享设置浮层（清风同款）：classic / sheen / workbench / ios 的生命周期
-     由它代管，chaoxi 在自己的生命周期里调用；依赖 skins.js 与 skin-shared.js。 -->
+<!-- 共享设置浮层（清风同款）：classic 的生命周期由它代管，heijiao / orbit
+     在自己的生命周期里调用；依赖 skins.js 与 skin-shared.js。 -->
 <script defer src="skins/skin-settings-sheet.js"></script>
 <!-- 流年皮肤的 DOM 重编排层：在 Skins 上登记挂载与卸载，
      必须在 app.js 初始化皮肤宿主之前加载。 -->
@@ -2284,9 +2281,6 @@
 <!-- 清风皮肤同样登记生命周期；队列快照与业务动作经 Skins 公共宿主接口交接，
      必须在 app.js 初始化皮肤宿主之前加载。 -->
 <script defer src="skins/skin.qingfeng.js"></script>
-<!-- 潮汐登记生命周期（播放面板的展开/收起把手）；不重编排业务节点，
-     但把手的挂载要在 app.js 之前登记完。 -->
-<script defer src="skins/skin.chaoxi.js"></script>
 <!-- 黑胶同款：唱片卡的歌词展开 + 唱片拖转旋钮。必须在 app.js 初始化
      皮肤宿主之前加载（registerLifecycle 要先于 Skins.init）。 -->
 <script defer src="skins/skin.heijiao.js"></script>

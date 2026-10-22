@@ -37,11 +37,6 @@
       note: '侧栏与全宽曲库，底栏展开封面与歌词播放页',
     },
     {
-      id: 'sheen',
-      name: '浮光',
-      note: '顶部悬浮胶囊导航 + 全宽卡片网格，舞台贴右侧边',
-    },
-    {
       id: 'liunian',
       name: '流年',
       note: '清晰导航、暖调播放卡与凝彩舞台，可收为胶囊，手机端直接浏览歌曲',
@@ -50,11 +45,6 @@
       id: 'qingfeng',
       name: '清风',
       note: '全宽展墙：顶部胶囊主菜单、方形海报墙队列拼接、浮层式设置面板',
-    },
-    {
-      id: 'chaoxi',
-      name: '潮汐',
-      note: '内容定宽居中的极低密度布局：竖轨图标导航、大留白大卡片、唱片聚焦舞台',
     },
     {
       id: 'heijiao',
@@ -384,7 +374,7 @@
 
     // 关键一步（与 app.js 的 #theme-menu 同源）：把弹层搬出 .topbar。顶栏是
     // relative + z-index:40 + backdrop-filter，自己就是一个层叠上下文，弹层写多高
-    // 的 z-index 都出不去；浮光的舞台面板是 fixed + z-index:58，整张菜单会被它盖住
+    // 的 z-index 都出不去；舞台抽屉是 fixed + z-index:58，整张菜单会被它盖住
     // （实测两点命中都是 #stage）。搬进 body 后它就是根上下文里的 fixed 元素。
     document.body.appendChild(entryMenu);
 

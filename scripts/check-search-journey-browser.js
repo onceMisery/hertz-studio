@@ -238,8 +238,8 @@ async function main() {
     await page.waitForFunction(()=>!document.querySelector('.ln-sp'));
 
     const visibleSkins = await page.evaluate(() => Skins.list().map(skin => skin.id));
-    assert.deepEqual(visibleSkins, ['classic','sheen','liunian','qingfeng','chaoxi','heijiao','orbit'],
-      'the public skin list matches the seven supported layouts');
+    assert.deepEqual(visibleSkins, ['classic','liunian','qingfeng','heijiao','orbit'],
+      'the public skin list matches the five supported layouts');
     await page.getByRole('button',{name:'在线曲库',exact:true}).click();
     await page.getByRole('combobox',{name:'音源',exact:true}).selectOption('netease');
     await page.locator('#search').click();
@@ -247,7 +247,6 @@ async function main() {
     for (const skin of visibleSkins) {
       await page.evaluate(id => Skins.apply(id), skin);
       await page.waitForFunction(id => id === 'classic' || !!document.querySelector('link[data-skin-css="' + id + '"]').sheet, skin);
-      if (skin === 'sheen') await page.keyboard.press('/');
       const search = page.locator('#search');
       if (skin === 'qingfeng') {
         assert.equal(await search.isVisible(),false,'Qingfeng intentionally hides topbar search below 900px');

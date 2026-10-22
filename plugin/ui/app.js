@@ -2957,12 +2957,10 @@ function applyMotionSurfaces() {
 // 用户最常见的换肤路径是「在设置页里点皮肤」（皮肤列表就在设置页里），于是
 // 换肤那一刻 state.view 停在 'settings'。各皮肤对设置视图的处理完全不同：
 //
-//   · classic / sheen / workbench / ios —— 设置是中栏的一个普通视图，
-//     setView('settings') 把其它视图全藏掉、只留它；
 //   · liunian / qingfeng —— 把 #view-settings **搬进自己的浮层**
 //     （ln-set-pane / qf-set-pane），并把它的 hidden 置 true
 //     （浮层没开时不该露出来）；
-//   · classic / sheen / workbench / ios / chaoxi —— 设置走共享的清风同款
+//   · classic / heijiao / orbit —— 设置走共享的清风同款
 //     浮层（skins/skin-settings-sheet.js），视图同样被搬走并隐藏，
 //     setView('settings') 被它的 MutationObserver 拦截成开浮层。
 //
@@ -5866,7 +5864,7 @@ function initTopMoreMenu() {
   if (!root || !btn || !menu) return;
 
   // 与 #theme-menu / #skin-menu 同一件事：把弹层搬出 .topbar 的层叠上下文。留在
-  // 原处的话浮光那块 fixed + z-index:58 的舞台面板会整块盖住它（实测命中 #stage）。
+  // 原处的话舞台抽屉那块 fixed + z-index:58 的面板会整块盖住它（实测命中 #stage）。
   document.body.appendChild(menu);
 
   let open = false;
@@ -6651,13 +6649,8 @@ function initPalette() {
 // 快捷键
 // ---------------------------------------------------------------------------
 
-/// 唤起搜索框。浮光皮肤把常驻搜索框摘掉了（顶栏中段让给导航胶囊），
-/// 但 `/` 与 Ctrl+K 必须仍然能把它叫出来 —— 否则这条快捷键就成了
-/// "按了没反应且不报错"的静默失效。所以聚焦的同时给 body 挂一个标记，
-/// 由 skin.sheen.css 的 `body.sheen-search .topsearch { opacity:1 }` 显形，
-/// blur 时（见下）摘掉标记让它收回。
+/// 唤起搜索框。`/` 与 Ctrl+K 都落到这里；聚焦后输入框自己的业务事件照常生效。
 function focusSearch(select) {
-  document.body.classList.add('sheen-search');
   ui.search.focus();
   if (select) ui.search.select();
 }
@@ -6677,7 +6670,7 @@ function bindShortcuts() {
     }
     if (e.key === 'Escape') {
       if (window.NowPlaying && NowPlaying.back()) { e.preventDefault(); return; }
-      closeMenu(); closeNowPlaying(); if (typing) document.activeElement.blur(); setView(state.view); document.body.classList.remove('stage-open'); document.body.classList.remove('sheen-search'); return;
+      closeMenu(); closeNowPlaying(); if (typing) document.activeElement.blur(); setView(state.view); document.body.classList.remove('stage-open'); return;
     }
     if (e.key === '/' && !typing) { e.preventDefault(); focusSearch(false); return; }
     if (typing || e.ctrlKey || e.metaKey || e.altKey || target.closest('button, a, [role="button"], [role="slider"]')) return;
@@ -8104,9 +8097,6 @@ async function startApp() {
   };
   ui.searchClear.onclick = () => { ui.search.value = ''; ui.searchClear.hidden = true; state.q = ''; loadTracks(true); };
 
-  // 浮光下搜索框默认收着（opacity:0），靠 body.sheen-search 显形。
-  // blur 时必须摘掉标记让它收回，否则那条覆盖式搜索条会一直挂在顶栏上。
-  ui.search.addEventListener('blur', () => { document.body.classList.remove('sheen-search'); });
   // 本地档的搜索是「边输边查」，没有按钮可记，所以按 Enter 作为提交点：
   // 与流年面板、在线框同一个历史 owner。逐字输入不进历史——那样每次搜索都会
   // 留下一串「周」「周杰」这类前缀，最近十条里全是打字中间态。

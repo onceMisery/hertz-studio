@@ -565,7 +565,7 @@ async function main() {
     assert.equal(await page.evaluate(() => document.activeElement.dataset.skinId), 'classic', 'skin menu focuses the current selection');
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('Enter');
-    await page.waitForFunction(() => Skins.currentId() === 'sheen' && document.querySelector('[data-skin-css="sheen"]').sheet);
+    await page.waitForFunction(() => Skins.currentId() === 'liunian' && document.querySelector('[data-skin-css="liunian"]').sheet);
     assert.equal(await page.evaluate(() => Theme.current().id), 'celestial', 'keyboard skin selection retains theme');
     for (const skin of ['liunian', 'qingfeng', 'classic']) {
       await page.evaluate(id => Skins.apply(id), skin);

@@ -817,7 +817,7 @@
     {
       id: 'chaoxi-night',
       name: '潮汐·夜',
-      note: '留白·夜 · 近黑纸面 + 暖铜色唱片辉光（皮肤「潮汐」的配套深色）',
+      note: '留白·夜 · 近黑纸面 + 暖铜色唱片辉光',
       fx: 'bubble',
       // 对比度（自 --bg #0E0E10 反推，WCAG AA）：
       //   text ≈ 16.5   muted ≈ 6.4   brand ≈ 8.6
@@ -854,7 +854,7 @@
     {
       id: 'chaoxi-day',
       name: '潮汐·昼',
-      note: '留白·昼 · 暖白纸面 + 压深铜色（皮肤「潮汐」的配套浅色）',
+      note: '留白·昼 · 暖白纸面 + 压深铜色',
       fx: 'tide',
       // 对比度（自 --bg #F7F6F4 反推，WCAG AA）：
       //   text ≈ 16.6   muted ≈ 4.7   brand-ink ≈ 4.6

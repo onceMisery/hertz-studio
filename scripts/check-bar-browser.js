@@ -70,7 +70,7 @@ async function workspaceAssets(route) {
     await ready(page);
     await api('POST', '/v1/player/load', { track_id: track.id, queue: [track.id] });
     await favoriteReady(page);
-    for (const skin of ['classic', 'sheen', 'liunian', 'qingfeng']) {
+    for (const skin of ['classic', 'liunian', 'qingfeng']) {
       for (const width of [1440, 1024, 390, 320]) {
         await page.setViewportSize({ width, height: width < 500 ? 844 : 900 });
         await page.evaluate(value => Skins.apply(value), skin);
