@@ -40,36 +40,38 @@ Current-worktree recheck: each report's embedded probe, log and memory hashes, o
 
 Dispatch-order audit: of the 12 v9 reports, the eight current/final reports and three other early reports pass the actual-start alternation check. The remaining early Standard R1 report is rejected because six HTTP/RPC pairs started in the reverse order from their schedule. Its metrics remain archival data, but it is excluded from evidence that the alternating schedule was followed. The audit adds no latency threshold and does not change the candidate gate.
 
+Reports and sidecars are committed as `.gz`; `.gitattributes` keeps them binary and pins the remaining text artifacts to LF. CI verifies the eight current/final reports through [`verified.json`](./verified.json) (`node scripts/check-search-pressure-evidence.js --archive evals/search/pressure-v9/verified.json`). The early runs stay archival and are intentionally outside that manifest.
+
 ```powershell
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v9/search-pressure-balanced-20261019-standard-r1.json `
+  evals/search/pressure-v9/search-pressure-balanced-20261019-standard-r1.json.gz `
   target/search-pressure-v9/debug/deps/hertz_studio-61db3b33b663eb0e.exe --current
 
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v9/search-pressure-balanced-20261019-standard-r2.json `
+  evals/search/pressure-v9/search-pressure-balanced-20261019-standard-r2.json.gz `
   target/search-pressure-v9/debug/deps/hertz_studio-61db3b33b663eb0e.exe --current
 
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v9/search-pressure-balanced-20261019-full-r1.json `
+  evals/search/pressure-v9/search-pressure-balanced-20261019-full-r1.json.gz `
   target/search-pressure-v9/debug/deps/hertz_studio-c4c77093892779d1.exe --current
 
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v9/search-pressure-balanced-20261019-full-r2.json `
+  evals/search/pressure-v9/search-pressure-balanced-20261019-full-r2.json.gz `
   target/search-pressure-v9/debug/deps/hertz_studio-c4c77093892779d1.exe --current
 
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v9/final-20261019-standard-r1.json `
+  evals/search/pressure-v9/final-20261019-standard-r1.json.gz `
   target/search-pressure-final/debug/deps/hertz_studio-1c6d71add61e1950.exe --current
 
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v9/final-20261019-standard-r2.json `
+  evals/search/pressure-v9/final-20261019-standard-r2.json.gz `
   target/search-pressure-final/debug/deps/hertz_studio-1c6d71add61e1950.exe --current
 
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v9/final-20261019-full-r1.json `
+  evals/search/pressure-v9/final-20261019-full-r1.json.gz `
   target/search-pressure-final/debug/deps/hertz_studio-6fa1dfdcad4c1f52.exe --current
 
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v9/final-20261019-full-r2.json `
+  evals/search/pressure-v9/final-20261019-full-r2.json.gz `
   target/search-pressure-final/debug/deps/hertz_studio-6fa1dfdcad4c1f52.exe --current
 ```

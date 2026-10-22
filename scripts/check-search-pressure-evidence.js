@@ -310,13 +310,50 @@ function verify(file, { binary, current = false } = {}) {
     processMemory: { scope: m.scope, samples: m.samples.length, maxGapMs: maxGap, phaseDeliverySkewMs: skew,
       phases, idleDeltas, productionServiceRssVerified: false }, releaseEligible: false };
 }
+// Verify every report listed in a committed archive manifest. The manifest
+// keeps the known-rejected early run out of CI without pretending it never
+// existed; each entry still has to pass the full structural and sidecar check.
+function verifyArchive(manifest) {
+  const file = path.resolve(ROOT, manifest);
+  const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(doc.schemaVersion, 1);
+  assert.ok(Array.isArray(doc.reports) && doc.reports.length > 0);
+  assert.equal(new Set(doc.reports).size, doc.reports.length, 'Duplicate archive report');
+  const dir = path.dirname(file);
+  return {
+    manifest,
+    reports: doc.reports.map(name => {
+      assert.equal(path.basename(name), name, 'Unsafe archive filename ' + name);
+      const report = path.join(dir, name);
+      assert.ok(fs.existsSync(report), 'Missing archive report ' + name);
+      const result = verify(report);
+      return {
+        file: name,
+        edition: result.edition,
+        requests: result.requests,
+        sourceSuccessRateSpread: result.balancedThroughput?.sourceSuccessRateSpread,
+        releaseEligible: result.releaseEligible,
+      };
+    }),
+  };
+}
+
 if (require.main === module) {
   const args = process.argv.slice(2), current = args.includes('--current');
-  const positional = args.filter(a => a !== '--current');
+  const archiveIndex = args.indexOf('--archive');
+  const archive = archiveIndex >= 0 ? args[archiveIndex + 1] : null;
+  const positional = args.filter((a, i) => a !== '--current' && a !== '--archive'
+    && !(archiveIndex >= 0 && i === archiveIndex + 1));
   try {
-    assert.ok(positional.length >= 1 && positional.length <= 2,
-      'Usage: node scripts/check-search-pressure-evidence.js report.json[.gz] [library-test.exe] [--current]');
-    console.log(JSON.stringify(verify(positional[0], { binary: positional[1], current }), null, 2));
+    if (archive) {
+      assert.ok(positional.length === 0, '--archive cannot be combined with a report path');
+      console.log(JSON.stringify(verifyArchive(archive), null, 2));
+    } else {
+      assert.ok(positional.length >= 1 && positional.length <= 2,
+        'Usage: node scripts/check-search-pressure-evidence.js report.json[.gz] [library-test.exe] [--current]\n'
+        + '       node scripts/check-search-pressure-evidence.js --archive <manifest.json>');
+      console.log(JSON.stringify(verify(positional[0], { binary: positional[1], current }), null, 2));
+    }
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
-module.exports = { verify, verifyAlternatingActualStart };
+module.exports = { verify, verifyArchive, verifyAlternatingActualStart };

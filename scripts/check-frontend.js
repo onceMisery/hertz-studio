@@ -84,6 +84,8 @@ const STEPS = [
     why: '情绪 Cue 的摘要/generation、A→B→A、缓存双限与清除不能串歌；无 Cue 时保持中性。' },
   { script: 'check-assets.js', stage: 'guard',
     why: '前端资源接线：文件在不在、id 对不对、脚本加载顺序。这类失败不会报错，只会「某块界面空着」。' },
+  { script: 'check-scripts.js', stage: 'guard',
+    why: '每个 check-* 必须进入聚合入口或在 manual-checks.json 登记；新脚本不能再悄悄堆在 scripts/ 里无人运行。' },
   { script: 'check-ai-grants-ui.js', stage: 'behavior',
     why: '外部 MCP 授权的 scope、秘密白名单、配置复制、轮换、撤销和不可用形态必须保持一致。' },
   { script: 'check-lineage-names.js', stage: 'guard',
@@ -98,6 +100,8 @@ const STEPS = [
     why: '在线音源：扫码状态机与登录意图归属、聚合搜索、能力闸门、账号态三态、封面与徽标通道。' },
   { script: 'check-search-session.js', stage: 'behavior',
     why: '全部搜索入口共用额度，取消后 DBX 真实 invoke 结束才释放，排队有界且错误事实保留。' },
+  { script: 'check-search-pressure-evidence.js', stage: 'guard', args: ['--archive', 'evals/search/pressure-v9/verified.json'],
+    why: '已提交的 v9 压测报告、probe/log/memory 附属文件与记录哈希必须逐字节一致；行尾或归档损坏会在这里暴露。' },
   { script: 'check-online-transport.js', stage: 'behavior',
     why: 'HTTP/DBX 传输取消、重试和事件重连恢复。' },
   { script: 'check-quality-ceiling.js', stage: 'behavior',
@@ -175,7 +179,6 @@ const EXTRA = [
   { script: 'check-lib-empty.js', why: '曲库空态。' },
   { script: 'check-cover-sphere.js', why: '球形封面。' },
   { script: 'check-stage-theme.js', why: '舞台主题。' },
-  { script: 'check-ios-theme.js', why: 'iOS 主题。' },
   { script: 'check-creative-prompt.js', why: '创意提示词。' },
 ];
 

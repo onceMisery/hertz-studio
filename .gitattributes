@@ -6,8 +6,15 @@
 # core.autocrlf=true 的机器上默认是 CRLF，所以这里强行钉死 LF，
 # 优先级高于 core.autocrlf。
 *.sql text eol=lf
-# Frozen evaluation prompts are byte-hashed; preserve the same bytes on Windows.
+# Frozen evaluation artifacts are byte-hashed; preserve the same bytes on Windows.
+evals/**/*.json text eol=lf
 evals/**/*.jsonl text eol=lf
+evals/**/*.log text eol=lf
+evals/**/*.py text eol=lf
+evals/**/*.cjs text eol=lf
+# Compressed run artifacts and screenshots must never be line-ending converted.
+evals/**/*.gz -text
+evals/**/*.png -text
 # Frozen historical behavior is byte-hashed, including its measured source snapshot.
 evals/stage/legacy-v1/*.json text eol=lf
 evals/search/page-v1/profile-search-candidates.rs.txt -text

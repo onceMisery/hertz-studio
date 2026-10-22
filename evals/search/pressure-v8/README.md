@@ -23,18 +23,18 @@ Both runs per edition were independently checked against the exact current sourc
 
 ```powershell
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v8/search-pressure-balanced-20261018-standard-r2.json `
+  evals/search/pressure-v8/search-pressure-balanced-20261018-standard-r2.json.gz `
   target/search-pressure-repeat/debug/deps/hertz_studio-6f3eb86935af49f7.exe --current
 
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v8/search-pressure-balanced-20261018-standard-r3.json `
+  evals/search/pressure-v8/search-pressure-balanced-20261018-standard-r3.json.gz `
   target/search-pressure-repeat/debug/deps/hertz_studio-6f3eb86935af49f7.exe --current
 
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v8/search-pressure-balanced-20261018-full-r2.json `
+  evals/search/pressure-v8/search-pressure-balanced-20261018-full-r2.json.gz `
   target/search-pressure-repeat/debug/deps/hertz_studio-6d710df5b809c2cc.exe --current
 
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v8/search-pressure-balanced-20261018-full-r3.json `
+  evals/search/pressure-v8/search-pressure-balanced-20261018-full-r3.json.gz `
   target/search-pressure-repeat/debug/deps/hertz_studio-6d710df5b809c2cc.exe --current
 ```

@@ -1,0 +1,578 @@
+{
+  "schemaVersion": 1,
+  "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
+  "scripts": [
+    {
+      "script": "check-3d-browser.js",
+      "purpose": "/v1/auth/ticket 是 WS 凭据的一次性签发（3b3dc52 起 openSocket 每连必签），"
+    },
+    {
+      "script": "check-3d-interactions.js",
+      "purpose": "手工检查（原文件未写说明）"
+    },
+    {
+      "script": "check-ai-credential-browser.js",
+      "purpose": "Isolated service + in-memory secrets + real browser. No cloud requests/keys."
+    },
+    {
+      "script": "check-ai-credential-keyring.js",
+      "purpose": "Explicit Windows OS-keyring acceptance using only fresh, isolated AI scopes."
+    },
+    {
+      "script": "check-ai-credential-owner.js",
+      "purpose": "Two isolated service processes, memory secrets and null audio. No model calls."
+    },
+    {
+      "script": "check-ai-ledger-browser.js",
+      "purpose": "Read-only ledger against a real isolated service and historical SQLite facts."
+    },
+    {
+      "script": "check-ai-process-recovery.js",
+      "purpose": "Real Windows service restart with a loopback model fixture. No cloud calls."
+    },
+    {
+      "script": "check-ai-provider-browser.js",
+      "purpose": "Real Hertz service + controlled loopback Ollama HTTP server + official UI."
+    },
+    {
+      "script": "check-ai-sidecar-recovery.js",
+      "purpose": "Real DBX Rust sidecar process restart over JSON-RPC. No cloud calls."
+    },
+    {
+      "script": "check-ai-tasks-browser.js",
+      "purpose": "工坊「AI 生成」任务面板的浏览器契约。真实服务 + 真实 fake provider"
+    },
+    {
+      "script": "check-anime-scenes-browser.js",
+      "purpose": "Real WebGL pixels plus the workshop journey against an isolated null backend."
+    },
+    {
+      "script": "check-anime-ui-browser.js",
+      "purpose": "Browser acceptance for the celestial UI, against a rebuilt isolated null service."
+    },
+    {
+      "script": "check-anime-ui-look-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-audio-errors-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-auto-advance-browser.js",
+      "purpose": "Uses a real, muted audio device: null playback cannot emit natural EOF."
+    },
+    {
+      "script": "check-bar-browser.js",
+      "purpose": "Post-change acceptance against a dedicated null backend and workspace assets."
+    },
+    {
+      "script": "check-browser-preflight.js",
+      "purpose": "浏览器类检查的前置自检：node scripts/check-browser-preflight.js"
+    },
+    {
+      "script": "check-capsule-browser.js",
+      "purpose": "Source-only layout regression; no running service or native DBX host required."
+    },
+    {
+      "script": "check-capsule-performance-browser.js",
+      "purpose": "Full shipped page + DBX bridge fixture; playback uses an isolated real service."
+    },
+    {
+      "script": "check-chaoxi-look-browser.js",
+      "purpose": "潮汐皮肤 × 晴空外观族：顶栏必须保持扁平通栏，不能是浮起卡片。"
+    },
+    {
+      "script": "check-click-fx-browser.js",
+      "purpose": "点击特效必须**按主题**分叉：每套主题声明自己的 fx 原型，换主题 ="
+    },
+    {
+      "script": "check-coast-rig-browser.js",
+      "purpose": "Real Three camera, pixels and the existing rAF: Space3D camera handoff to Coast."
+    },
+    {
+      "script": "check-coast-stage-browser.js",
+      "purpose": "「纯真3D」海岸舞台的浏览器冒烟：真实 WebGL 像素 + 飞出入口交互 + 音频反应"
+    },
+    {
+      "script": "check-coast-stage.js",
+      "purpose": "「纯真3D」海岸舞台的 Node 侧契约：产物存在且不超预算、暴露完整 API、"
+    },
+    {
+      "script": "check-creative-scenes-browser.js",
+      "purpose": "Real WebGL rendering and transform feedback; no service or music library required."
+    },
+    {
+      "script": "check-creative-share-code-browser.js",
+      "purpose": "Default: complete shipped document/scripts, only app startup removed. Set"
+    },
+    {
+      "script": "check-daily-collapse-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-daily-firstpaint.js",
+      "purpose": "每日推荐首屏实测：量「第一次画出卡片」的时刻，以及落位前后的来源切换。"
+    },
+    {
+      "script": "check-daily-scroll-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-daily-strip.js",
+      "purpose": "首页每日推荐条到底显不显示：把 index.html 的真实结构 + style.css + daily.js"
+    },
+    {
+      "script": "check-emotion-cadenza-browser.js",
+      "purpose": "心象 cadenza 情绪层检查：当前行场位移、配色、字重/字距，清除后恢复。"
+    },
+    {
+      "script": "check-emotion-classic-browser.js",
+      "purpose": "classic stanza 情绪层浏览器检查：真实 Stage3D + StanzaClassic + LyricEmotion。"
+    },
+    {
+      "script": "check-emotion-field.js",
+      "purpose": "情绪场纯函数检查：不启浏览器，直接 require plugin/ui/lyric-emotion-field.js。"
+    },
+    {
+      "script": "check-emotion-lyric3d-browser.js",
+      "purpose": "GL 歌词图集情绪层检查：当前行按情绪取字重/配色/基线，签名随情绪变化。"
+    },
+    {
+      "script": "check-emotion-sidebar-browser.js",
+      "purpose": "侧栏 P0 浏览器检查：真实隔离服务 + 真实 Stage。"
+    },
+    {
+      "script": "check-emotion-track-browser.js",
+      "purpose": "3D 歌词轨情绪层检查：独立夹具，验证当前行的场位移、配色、字重/字距。"
+    },
+    {
+      "script": "check-freecam-angle-browser.js",
+      "purpose": "存档往返 + 窄屏：自由相机在真实页面上的实测。"
+    },
+    {
+      "script": "check-freecam-angle.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-glyph-browser.js",
+      "purpose": "字形引擎 G1 浏览器检查：SDF 渲染 vs 原生 fillText。"
+    },
+    {
+      "script": "check-glyph-g2.js",
+      "purpose": "字形引擎 G2 浏览器检查：粗细扫描、字怀检查、五种情绪效果图。"
+    },
+    {
+      "script": "check-glyph-g3.js",
+      "purpose": "字形引擎 G3 浏览器检查：真实 StanzaGlyph 渲染五种情绪场。"
+    },
+    {
+      "script": "check-glyph-g4.js",
+      "purpose": "字形引擎 G4 检查：LyricEmotion 的 Cue 契约 + DOM/GL 场一致性。"
+    },
+    {
+      "script": "check-glyph-sdf.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-heijiao-browser.js",
+      "purpose": "浏览器验收：黑胶皮肤（heijiao）"
+    },
+    {
+      "script": "check-home-card-browser.js",
+      "purpose": "首页卡片改版（封面左置 + 右侧名言）的浏览器实测。"
+    },
+    {
+      "script": "check-home-dashboard-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-liunian-settings-nav-browser.js",
+      "purpose": "流年设置分类导航的浏览器验收（Node 契约脚本跑不到的部分）。"
+    },
+    {
+      "script": "check-lyric-import-browser.js",
+      "purpose": "Real parser/store/Stage journey; controlled replies are only lifecycle fixtures."
+    },
+    {
+      "script": "check-lyric-online-browser.js",
+      "purpose": "UI fixtures only: search/provenance are controlled, parser/apply use the real"
+    },
+    {
+      "script": "check-mcp-stdio.js",
+      "purpose": "真实 MCP stdio 客户端端到端检查（技术路线 §12.1 MCP 反例的协议层实现）。"
+    },
+    {
+      "script": "check-narrow-topbar-browser.js",
+      "purpose": "Real layout/click regression. Build first, then run with Playwright on NODE_PATH."
+    },
+    {
+      "script": "check-now-playing-browser.js",
+      "purpose": "Use real API/WS, but the current source assets during the RED/GREEN loop."
+    },
+    {
+      "script": "check-online-login-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-online-window-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-open-music-browser.js",
+      "purpose": "Run against an isolated instance with VMUSIC_DATA_DIR and OPEN_MUSIC_URL set."
+    },
+    {
+      "script": "check-orbit-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-perf-probe-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-player-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-player-races.js",
+      "purpose": "切片必须**紧贴 ServerTransport 的闭合**。"
+    },
+    {
+      "script": "check-podcasts-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-podcasts-live-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-qf-nav-visual.js",
+      "purpose": "清风「本地选项卡」（顶部胶囊主菜单）改版后的浏览器实测。"
+    },
+    {
+      "script": "check-qingfeng-browser.js",
+      "purpose": "清风皮肤的浏览器实测（一次性验收脚本，非契约）。"
+    },
+    {
+      "script": "check-qingfeng-wall.js",
+      "purpose": "一次性：往播放队列里灌一批曲目，然后跑队列拼接页的密排/展开/关灯实测。"
+    },
+    {
+      "script": "check-queue-cross-surface-browser.js",
+      "purpose": "Reconcile a queue change made after startup reads but before the first event subscription."
+    },
+    {
+      "script": "check-radio-browser.js",
+      "purpose": "Run against an isolated hertz-studio. Upstream/playback responses are fixtures."
+    },
+    {
+      "script": "check-reactor-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-search-browser.js",
+      "purpose": "Run with SEARCH_UI_URL pointing to an isolated service. Requires Playwright."
+    },
+    {
+      "script": "check-search-evidence.js",
+      "purpose": "Independently recompute the two-edition sustained search evidence statistics."
+    },
+    {
+      "script": "check-search-journey-browser.js",
+      "purpose": "Real isolated UI, controlled source responses, no external search or playback."
+    },
+    {
+      "script": "check-search-pressure-alternation.js",
+      "purpose": "Equal actual start times are not a reversal and have no new latency threshold."
+    },
+    {
+      "script": "check-settings-sheet-browser.js",
+      "purpose": "共享设置浮层（skins/skin-settings-sheet.js）的浏览器验收。"
+    },
+    {
+      "script": "check-sheen-picker-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-sheen-topbar-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-sidebar-browser.js",
+      "purpose": "hover 会给这行铺底色（两套皮肤都有），量基线前先把指针挪开并等过渡走完，"
+    },
+    {
+      "script": "check-skin-fixes.js",
+      "purpose": "六个皮肤问题的浏览器实测验收。每一项都量**真实几何/计算样式**，"
+    },
+    {
+      "script": "check-skin-matrix-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-artwork-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-space-artwork-ui-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-space-favorite-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-space-fields-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-floating-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-space-home-stage-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-home.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-layers-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-lyric-layout.js",
+      "purpose": "手工检查（原文件未写说明）"
+    },
+    {
+      "script": "check-space-lyric-parity-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-space-lyrics-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-space-material-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-space-native-dbx-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-particles-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-space-playback-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-scenes-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-scenes.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-search-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-space-shelf-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-spatial-native-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-spatial-ui-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-space-stage-browser.js",
+      "purpose": "Real renderer/plugin lifecycle; no backend or independent plugin frame loop."
+    },
+    {
+      "script": "check-space-stage.js",
+      "purpose": "手工检查（原文件未写说明）"
+    },
+    {
+      "script": "check-space-vip-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-space3d-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-stage-anime-svg-browser.js",
+      "purpose": "Browser acceptance for the animated-SVG stage source: mount through the real"
+    },
+    {
+      "script": "check-stage-control-3d-browser.js",
+      "purpose": "舞台控制舱「真3D 语境」的浏览器契约。静态检查（check-stage-control.js）"
+    },
+    {
+      "script": "check-stage-control-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-stage-draft-browser.js",
+      "purpose": "Real browser + isolated service; no model calls. Checks temporary presentation,"
+    },
+    {
+      "script": "check-stage-handoff-browser.js",
+      "purpose": "Exercise the actual host handoff functions and CSS in Chrome with a controlled media clock."
+    },
+    {
+      "script": "check-stage-media-browser.js",
+      "purpose": "Actual service, complete cache and authenticated loopback remote bytes. No"
+    },
+    {
+      "script": "check-stage-particles-browser.js",
+      "purpose": "Small production WebGL probes: lyric clearance, quality caps and complete subsystem lifetime."
+    },
+    {
+      "script": "check-stage-pitch-browser.js",
+      "purpose": "Real local WAV analysis and Stage clock; injected replies only for UI races."
+    },
+    {
+      "script": "check-stage-project-browser.js",
+      "purpose": "Real isolated service, content hashing, project file reopening and song clock."
+    },
+    {
+      "script": "check-stage-queue-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-stage-queue-playback-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-stage-settings-browser.js",
+      "purpose": "Full application verification against an isolated null-backend instance."
+    },
+    {
+      "script": "check-stage-settings-drawer-browser.js",
+      "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-stage-templates-browser.js",
+      "purpose": "Real UI + isolated service. Catalog candidates are not human acceptance."
+    },
+    {
+      "script": "check-stage-visual-browser.js",
+      "purpose": "球面是否真的画出来：preserveDrawingBuffer=false，只能在 rAF 内合成清屏前"
+    },
+    {
+      "script": "check-stanza-dom-browser.js",
+      "purpose": "Real DOM/canvas checks for classic/cadenza media-clock behavior."
+    },
+    {
+      "script": "check-stanza-motion-browser.js",
+      "purpose": "Real Pixi playback/seek checks. Uses the production renderers with an isolated lyric clock."
+    },
+    {
+      "script": "check-stanza-tempera-browser.js",
+      "purpose": "Production Pixi coverage for neutral themes, finite screen geometry and renderer lifetime."
+    },
+    {
+      "script": "check-stanza-transitions-browser.js",
+      "purpose": "Real Pixi regression checks for transition ownership and bounded editorial-window work."
+    },
+    {
+      "script": "check-stanza-visual-fx.js",
+      "purpose": "商籁 / 凝彩 视觉改造的浏览器实测：真跑 Pixi，确认后期 pass 能编译、能出像素。"
+    },
+    {
+      "script": "check-stanza-visual.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-theme-contrast-browser.js",
+      "purpose": "在真实页面上量对比度，而不是只算令牌值。"
+    },
+    {
+      "script": "check-topbar-popup-browser.js",
+      "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-topsearch-browser.js",
+      "purpose": "顶栏在线搜索（topsearch.js）的七套公开皮肤浏览器实测（验收脚本，非契约）。"
+    },
+    {
+      "script": "check-video-export-browser.js",
+      "purpose": "Isolated service + real Chromium canvas capture/MediaRecorder/download/decode."
+    },
+    {
+      "script": "check-video-export-layout-browser.js",
+      "purpose": "Real Chromium canvas layout check with a lightweight MediaRecorder stub."
+    },
+    {
+      "script": "check-workshop-art-browser.js",
+      "purpose": "Real CSS animation and production Workshop lifecycle; no service or GPU stage needed."
+    },
+    {
+      "script": "check-workshop-art-loops.js",
+      "purpose": "Compare actual SVG pixels on both sides of every loop boundary."
+    },
+    {
+      "script": "check-workshop-looks-browser.js",
+      "purpose": "Post-implementation acceptance using the rebuilt UI and an isolated null service."
+    },
+    {
+      "script": "check-workshop-prompt-browser.js",
+      "purpose": "Real Workshop prompt flow; no service, model, or GPU stage needed."
+    },
+    {
+      "script": "check-workshop-stage-browser.js",
+      "purpose": "Post-implementation verification against an isolated null-backend service."
+    },
+    {
+      "script": "check-workshop-stanza-lock.js",
+      "purpose": "浏览器实测：商籁/凝彩接管画面时，创意工坊只允许选择不允许编辑。"
+    },
+    {
+      "script": "check-zodiac-artwork.mjs",
+      "purpose": "Edge midpoints catch bridges across narrow negative spaces as well as missing faces."
+    },
+    {
+      "script": "check-zodiac-effects-browser.cjs",
+      "purpose": "Isolate sky breathing and particle recipes with a fixed WebGL camera."
+    },
+    {
+      "script": "check-zodiac-meteors-browser.cjs",
+      "purpose": "Actual WebGL pixels for the camera-facing meteor layer: cycle showers,"
+    },
+    {
+      "script": "check-zodiac-motion-browser.js",
+      "purpose": "Real WebGL with a controlled rAF clock: gather/hold/disperse lifecycle,"
+    },
+    {
+      "script": "check-zodiac-observatory-browser.js",
+      "purpose": "Zodiac observatory integration: HUD content, star hover/pin, parallax,"
+    },
+    {
+      "script": "check-zodiac-silk-browser.cjs",
+      "purpose": "Real WebGL checks for zodiac color, frequency response and particle interaction."
+    },
+    {
+      "script": "check-zodiac-stage-browser.js",
+      "purpose": "「星座 · 十二星图」粒子舞台浏览器冒烟：真实 WebGL 像素 + 单座生命周期"
+    },
+    {
+      "script": "check-zodiac-stage.js",
+      "purpose": "「星座 · 十二星图」舞台的 Node 侧契约：产物存在且不超预算、暴露完整 API、"
+    },
+    {
+      "script": "check-zodiac-volume.mjs",
+      "purpose": "手工检查（原文件未写说明）"
+    }
+  ]
+}

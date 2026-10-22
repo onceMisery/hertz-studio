@@ -2,6 +2,8 @@
 
 Hertz 的外部 MCP 入口是独立程序的 `--mcp-stdio --data-dir <显式目录> --grant <grantId>` 模式。业务仍由已运行的独立服务执行；适配进程只读发现与专用授权凭据，不启动播放器、音频、数据库或 HTTP 服务。DBX 外部 MCP 桥接不在首发范围。
 
+受限授权凭据是 `DataDir/ai/grants/<grantId>.key` 的 256 位随机 bearer，数据库只存 SHA-256 摘要，应答与日志不回显秘密。该文件是明文而不是系统钥匙串条目（只有 provider API key 走钥匙串）：Unix 上目录收为 0700、文件 0600，Windows 继承 DataDir ACL，具体 ACL 行为仍按 §13 在 R2-G/R4-J 实测固定。轮换先写临时文件、再提交摘要、最后替换旧文件；失败时保留旧摘要和旧文件。
+
 ## 协议与工具契约
 
 当前适配器仅支持 MCP `2025-11-25`。`ServerHandler::supported_protocol_versions` 与初始化回退版本都显式固定，避免把 SDK 默认支持的更新生命周期自动当作 Hertz 已验收的协议。客户端若请求其它版本，初始化响应会返回此基线，由客户端决定能否继续。

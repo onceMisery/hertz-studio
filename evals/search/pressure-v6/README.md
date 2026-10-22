@@ -33,17 +33,17 @@ Both reports remain `releaseEligible: false`. Process memory covers the test pro
 
 ## Evidence files
 
-`search-pressure-balanced-20261018-standard.json` is the Standard report. `search-pressure-balanced-20261018-full-rebuilt.json` is the valid Full report. Each report has a `-probe.json`, `-probe.log`, and `-memory.jsonl` sidecar with raw probe output and 500 ms process samples. The independent checker verified both reports against current source bytes; Full was also checked against the exact test executable hash.
+`search-pressure-balanced-20261018-standard.json.gz` is the Standard report. `search-pressure-balanced-20261018-full-rebuilt.json.gz` is the valid Full report. Each report has a `-probe.json.gz`, `-probe.log.gz`, and `-memory.jsonl.gz` sidecar with raw probe output and 500 ms process samples. The independent checker verified both reports against current source bytes; Full was also checked against the exact test executable hash.
 
-The initial Full attempt at `search-pressure-balanced-20261018-full.json` is retained but is not a measurement: its older test binary rejected startup because its embedded `online/mod.rs` source fingerprint no longer matched. Full was rebuilt with Rust 1.88.0 and rerun under the `full-rebuilt` name. No failed or historical evidence file was overwritten.
+The initial Full attempt at `search-pressure-balanced-20261018-full.json.gz` is retained but is not a measurement: its older test binary rejected startup because its embedded `online/mod.rs` source fingerprint no longer matched. Full was rebuilt with Rust 1.88.0 and rerun under the `full-rebuilt` name. No failed or historical evidence file was overwritten.
 
 Recheck a completed report and its source fingerprint with:
 
 ```powershell
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v6/search-pressure-balanced-20261018-standard.json --current
+  evals/search/pressure-v6/search-pressure-balanced-20261018-standard.json.gz --current
 
 node scripts/check-search-pressure-evidence.js `
-  evals/search/pressure-v6/search-pressure-balanced-20261018-full-rebuilt.json `
+  evals/search/pressure-v6/search-pressure-balanced-20261018-full-rebuilt.json.gz `
   target/search-pressure-balanced/debug/deps/hertz_studio-c4c77093892779d1.exe --current
 ```

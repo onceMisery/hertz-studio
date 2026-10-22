@@ -17,7 +17,7 @@
 //!   持久于 `ai_instance`；调用方重启后必须凭新 context 重新对接。
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -89,25 +89,83 @@ fn digest(secret: &str) -> String {
     hex(&Sha256::digest(secret.as_bytes()))
 }
 
-/// 原子替换凭据文件：写同目录临时名后 rename。Windows 的 rename 不能覆盖
-/// 已存在目标，先移走旧文件（窗口极小且目录固定；§13 留待实测收紧）。
-fn write_credential_file(path: &PathBuf, secret: &str) -> Result<(), ApiError> {
+/// Unix 上把凭据目录收成 0700；Windows 的 ACL 行为仍按 §13 在
+/// R2-G/R4-J 实测固定，这里不改继承来的权限。
+fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::fs;
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn restrict_credential_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// 先把新秘密写进同目录临时文件。尚未动旧文件；轮换失败时旧凭据仍可认证。
+fn stage_credential_file(path: &Path, secret: &str) -> Result<PathBuf, ApiError> {
     use std::fs;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| internal(format!("凭据目录创建失败: {e}")))?;
+        ensure_private_dir(parent).map_err(|e| internal(format!("凭据目录创建失败: {e}")))?;
     }
     let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     fs::write(&tmp, secret).map_err(|e| {
         let _ = fs::remove_file(&tmp);
         internal(format!("凭据写入失败: {e}"))
     })?;
-    if path.exists() {
-        let _ = fs::remove_file(path);
-    }
-    fs::rename(&tmp, path).map_err(|e| {
+    restrict_credential_file(&tmp).map_err(|e| {
         let _ = fs::remove_file(&tmp);
-        internal(format!("凭据文件替换失败: {e}"))
-    })
+        internal(format!("凭据权限设置失败: {e}"))
+    })?;
+    Ok(tmp)
+}
+
+/// 用已暂存的秘密替换目标。Unix 的 rename 直接覆盖；Windows 的 rename
+/// 不能覆盖已存在目标，先把旧文件移到备份名，安装失败时再移回来，避免
+/// 「先删旧、再装新」把唯一可用的凭据删在半路。
+fn install_credential_file(staged: &Path, path: &Path) -> Result<(), ApiError> {
+    use std::fs;
+    match fs::rename(staged, path) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            if !path.exists() {
+                let _ = fs::remove_file(staged);
+                return Err(internal(format!("凭据文件替换失败: {first}")));
+            }
+            let backup = path.with_extension(format!("old-{}", uuid::Uuid::new_v4()));
+            fs::rename(path, &backup).map_err(|e| {
+                let _ = fs::remove_file(staged);
+                internal(format!("凭据文件替换失败: {e}"))
+            })?;
+            match fs::rename(staged, path) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&backup);
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = fs::rename(&backup, path);
+                    let _ = fs::remove_file(staged);
+                    Err(internal(format!("凭据文件替换失败: {e}")))
+                }
+            }
+        }
+    }
+}
+
+fn write_credential_file(path: &Path, secret: &str) -> Result<(), ApiError> {
+    let staged = stage_credential_file(path, secret)?;
+    install_credential_file(&staged, path)
 }
 
 fn scopes_json(scopes: &[String]) -> String {
@@ -205,11 +263,35 @@ pub(crate) async fn rotate_grant(
     if row.revoked {
         return Err(bad_request("已撤销的授权不能轮换，请新建"));
     }
+    let previous_digest = row.credential_digest;
     let secret = random_secret()?;
-    vmusic_store::ai::update_grant_credential(&state.db, grant_id, &digest(&secret))
-        .await
-        .map_err(store_error)?;
-    write_credential_file(&credential_path(state, grant_id), &secret)?;
+    let path = credential_path(state, grant_id);
+    // 先写新秘密、再提交 DB、最后替换文件：任何一步失败都让旧摘要和旧文件
+    // 仍然成对，不会留下「DB 已换、磁盘还是旧键」的不可认证状态。
+    let staged = stage_credential_file(&path, &secret)?;
+    let updated = match vmusic_store::ai::update_grant_credential(
+        &state.db,
+        grant_id,
+        &digest(&secret),
+    )
+    .await
+    {
+        Ok(updated) => updated,
+        Err(err) => {
+            let _ = std::fs::remove_file(&staged);
+            return Err(store_error(err));
+        }
+    };
+    if !updated {
+        let _ = std::fs::remove_file(&staged);
+        return Err(not_found(format!("查无此 grant: {grant_id}")));
+    }
+    if let Err(err) = install_credential_file(&staged, &path) {
+        // 文件安装失败：把摘要退回旧值，旧文件仍在（安装器会先备份再恢复）。
+        let _ =
+            vmusic_store::ai::update_grant_credential(&state.db, grant_id, &previous_digest).await;
+        return Err(err);
+    }
     vmusic_store::ai::bump_policy_revision(&state.db)
         .await
         .map_err(store_error)?;
@@ -458,6 +540,43 @@ mod tests {
         assert!(!encoded.contains(&new_secret), "摘要应答不得回显凭据");
         state.audio.shutdown();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn credential_files_replace_cleanly_and_stay_private() {
+        let dir = std::env::temp_dir().join(format!("vmusic-cred-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("grants").join("example.key");
+        let staged = stage_credential_file(&path, "old-secret").unwrap();
+        install_credential_file(&staged, &path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old-secret");
+
+        // Second install replaces an existing target: Unix rename overwrites,
+        // Windows goes through the backup-and-restore branch.
+        let staged = stage_credential_file(&path, "new-secret").unwrap();
+        install_credential_file(&staged, &path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new-secret");
+
+        let leftovers: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "example.key")
+            .collect();
+        assert!(leftovers.is_empty(), "leftover files: {leftovers:?}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            let parent = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(file, 0o600);
+            assert_eq!(parent, 0o700);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
