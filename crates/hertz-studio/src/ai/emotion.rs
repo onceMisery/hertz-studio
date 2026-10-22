@@ -2471,13 +2471,20 @@ mod tests {
             credential: None,
         };
 
-        vmusic_store::settings::set(&db, "lyrics_emotion_ai_authorized", &serde_json::json!(true))
-            .await
-            .unwrap();
+        vmusic_store::settings::set(
+            &db,
+            "lyrics_emotion_ai_authorized",
+            &serde_json::json!(true),
+        )
+        .await
+        .unwrap();
         let error = begin_completion_job(&db, "test-owner", &pricing)
             .await
             .unwrap_err();
-        assert!(error.starts_with("history_capacity_exceeded"), "unexpected admission error: {error}");
+        assert!(
+            error.starts_with("history_capacity_exceeded"),
+            "unexpected admission error: {error}"
+        );
         let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_jobs")
             .fetch_one(&db)
             .await

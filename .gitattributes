@@ -11,3 +11,12 @@ evals/**/*.jsonl text eol=lf
 # Frozen historical behavior is byte-hashed, including its measured source snapshot.
 evals/stage/legacy-v1/*.json text eol=lf
 evals/search/page-v1/profile-search-candidates.rs.txt -text
+# Stage sources and build inputs are byte-hashed into .build-manifest.json.
+# Pin LF so a Windows checkout (core.autocrlf=true) produces the same bytes as CI.
+tools/*-stage/src/** text eol=lf
+tools/*-stage/build.mjs text eol=lf
+tools/build-stages.mjs text eol=lf
+tools/space-stage/package.json text eol=lf
+tools/space-stage/package-lock.json text eol=lf
+plugin/ui/vendor/*-stage.js text eol=lf
+plugin/ui/vendor/stage-runtime.js text eol=lf

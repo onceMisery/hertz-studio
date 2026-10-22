@@ -41,7 +41,7 @@ const CSS: &str = "text/css; charset=utf-8";
 macro_rules! ui_assets {
     ($($(#[$attr:meta])* $path:literal, $mime:ident => const $name:ident: &str = edition_ui!($file:literal);)+) => {
         $($(#[$attr])* static $name: UiBody = UiBody::new(include_bytes!(concat!(env!("OUT_DIR"), "/ui/", $file, ".gz")));)+
-        pub(super) const UI_ASSETS: &[UiAsset] = &[
+        pub(super) static UI_ASSETS: &[UiAsset] = &[
             $($(#[$attr])* UiAsset { path: $path, mime: $mime, body: &$name },)+
         ];
         pub(super) const ASSET_FINGERPRINT_INPUTS: &[&[u8]] = &[

@@ -4283,7 +4283,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry.usage_state, "estimated_final");
-        assert_eq!(entry.revision, 3, "the halted CAS still advances the ledger revision");
+        assert_eq!(
+            entry.revision, 3,
+            "the halted CAS still advances the ledger revision"
+        );
         assert_eq!(entry.accounted_micro_usd, 30_000);
         let mut conn = state.db.acquire().await.unwrap();
         let month = store::get_or_create_month(&mut conn, "2026-09")
@@ -4326,7 +4329,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry.usage_state, "estimated_final");
-        assert_eq!(entry.revision, 3, "the halted CAS still advances the ledger revision");
+        assert_eq!(
+            entry.revision, 3,
+            "the halted CAS still advances the ledger revision"
+        );
         assert_eq!(entry.accounted_micro_usd, 30_000);
         let mut conn = state.db.acquire().await.unwrap();
         assert_eq!(
@@ -5998,7 +6004,10 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert!(seen >= 3, "每次任务状态变化都应发布无载荷提示 (seen={seen})");
+        assert!(
+            seen >= 3,
+            "每次任务状态变化都应发布无载荷提示 (seen={seen})"
+        );
         state.audio.shutdown();
         handle.join().unwrap();
     }
