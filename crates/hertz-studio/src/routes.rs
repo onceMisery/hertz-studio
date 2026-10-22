@@ -7,9 +7,10 @@
 //!
 //! 一批请求体结构与 helper 标了 `pub(crate)`：`rpc` 门面（DBX 插件形态）复用
 //! 的是同一份定义，而不是照着重写。上百个端点两边各写一份，加字段时漏一边
-//! 就是静默的契约漂移。handler 本体没有共享——两边取参与表达应答的方式不同
-//! （axum 抽取器 / HTTP 状态码 vs 信封 / `Reply.status`），强行抽公共层只会
-//! 多一层间接。
+//! 就是静默的契约漂移。handler 本体原则上各自取参与整形应答（axum 抽取器 /
+//! HTTP 状态码 vs 信封 / `Reply.status`），但六种播控（play/pause、上/下一曲、
+//! seek、volume）的命令编排收敛在 `AppState` 的 `*_control` 共享入口里——
+//! 完成事实（applied/无操作/被取代）只有一个出处，两条传输不再各说各话。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -43,11 +44,70 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // 取浮层只读钥匙。OBS 那边要把它拼进长期保存的 URL，所以给的不是 token
         // 而是一把权限收窄的钥匙（见 require_token 里的 overlay_key_allows）。
         .route("/v1/auth/overlay-key", get(get_overlay_key))
+        // AI 受限授权的官方管理面（技术路线 §5.4）：全权 token 后面，只回
+        // 安全摘要与凭据文件位置，不回显秘密。受限门面本体在下面的
+        // `ai_restricted` 独立路由组里，两组 handler 走同一应用服务。
+        .route("/v1/ai/grants", get(list_ai_grants).post(create_ai_grant))
+        .route("/v1/ai/grants/{grantId}/rotate", post(rotate_ai_grant))
+        .route(
+            "/v1/ai/grants/{grantId}",
+            axum::routing::delete(revoke_ai_grant),
+        )
+        // AI 持久生成任务（技术路线 R4-J）：官方 UI 入口，全权 token 后面，
+        // 固定 local-owner 身份；外部 grant 走受限门面的独立路由组。
+        .route("/v1/ai/status", get(ai_status))
+        // Managed StageIntent evaluation uses the configured provider in one
+        // bounded, non-persistent call. The explicit CLI supplies the same
+        // official bearer token as the local UI.
+        .route("/v1/ai/evaluation/status", get(ai_evaluation_status))
+        .route(
+            "/v1/ai/evaluation/case",
+            post(ai_evaluation_case).layer(axum::extract::DefaultBodyLimit::max(
+                crate::ai::evaluation::CASE_BYTES,
+            )),
+        )
+        .route("/v1/ai/lyrics/emotion/status", get(ai_emotion_status))
+        .route(
+            "/v1/ai/lyrics/emotion",
+            post(ai_emotion_classify).layer(axum::extract::DefaultBodyLimit::max(
+                crate::ai::emotion::MAX_BODY_BYTES,
+            )),
+        )
+        .route(
+            "/v1/ai/lyrics/emotion/locks",
+            get(ai_emotion_locks)
+                .put(ai_put_emotion_locks)
+                .delete(ai_delete_emotion_locks)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::ai::emotion::MAX_BODY_BYTES,
+                )),
+        )
+        .route(
+            "/v1/ai/provider-credential",
+            get(ai_credential_status)
+                .put(ai_put_credential)
+                .delete(ai_delete_credential)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::ai::credential::BODY_BYTES,
+                )),
+        )
+        .route("/v1/ai/ledger", get(ai_ledger))
+        .route("/v1/ai/jobs", get(ai_list_jobs).post(ai_create_job))
+        .route("/v1/ai/jobs/{jobId}", get(ai_get_job))
+        .route("/v1/ai/jobs/{jobId}/cancel", post(ai_cancel_job))
+        .route("/v1/ai/proposals/{proposalId}", get(ai_get_proposal))
+        .route(
+            "/v1/ai/proposals/{proposalId}/reject",
+            post(ai_reject_proposal),
+        )
+        .route("/v1/ai/budget-guard/reset", post(ai_budget_guard_reset))
         .route("/v1/state", get(get_state))
         .route("/v1/player/load", post(load))
         .route("/v1/player/play", post(play))
         .route("/v1/player/pause", post(pause))
         .route("/v1/player/stop", post(stop))
+        // 页面离场（pagehide）：宽限后确认没有页面开着才暂停，见 `depart`。
+        .route("/v1/player/depart", post(depart))
         .route("/v1/player/next", post(next))
         .route("/v1/player/previous", post(previous))
         .route("/v1/player/seek", post(seek))
@@ -91,6 +151,22 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(get_lyrics).put(import_lyrics).delete(clear_lyrics),
         )
         .route("/v1/tracks/{id}/lyrics/offset", put(set_lyrics_offset))
+        .route(
+            "/v1/tracks/{id}/lyrics/candidates",
+            post(prepare_lyric_candidate),
+        )
+        .route(
+            "/v1/tracks/{id}/lyrics/candidates/apply",
+            post(apply_lyric_candidate),
+        )
+        .route(
+            "/v1/tracks/{id}/lyrics/candidates/search",
+            post(search_lyric_candidates),
+        )
+        .route(
+            "/v1/tracks/{id}/lyrics/candidates/prepare-online",
+            post(prepare_online_lyric_candidate),
+        )
         .route("/v1/library/scan", post(start_scan))
         .route("/v1/library/status", get(scan_status))
         .route("/v1/library/scan/cancel", post(cancel_scan))
@@ -136,6 +212,8 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/diagnostics/log",
             get(download_diagnostics_log).delete(clear_diagnostics_log),
         )
+        // 服务退出：首页那颗电源钮。停播 + 删发现文件 + 进程结束，见 `shutdown_service`。
+        .route("/v1/system/shutdown", post(shutdown_service))
         // 收藏：列表 / 新增 / 删除 / 开关；membership 是给一整屏曲目批量判红的。
         .route("/v1/favorites", get(list_favorites).post(add_favorite))
         .route("/v1/favorites/membership", post(favorite_membership))
@@ -151,6 +229,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/player/replay", post(replay_index))
         .route("/v1/podcasts/search", get(podcast_search))
         .route("/v1/podcasts/feed", get(podcast_feed))
+        .route("/v1/podcasts/progress", post(podcast_progress))
         .route(
             "/v1/podcasts/subscriptions",
             get(podcast_subscriptions).post(podcast_subscribe),
@@ -220,11 +299,23 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // 后台分析的状态面板（在算 / 已落盘 / 只在这轮内存 / 已放弃 + 让路次数）。
         .route("/v1/stage/beatmap/status", get(beatmap_status))
         .route("/v1/stage/beatmap/retry", post(beatmap_retry))
+        .route("/v1/stage/project-media", post(project_media))
+        .route("/v1/stage/pitch", post(stage_pitch))
         // OBS 歌词输出：「正在播放」歌词+播放态快照，轮询驱动 /overlay 浮层页。
         .route("/v1/overlay/lyric", get(overlay_lyric))
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
 
-    Router::new().route("/v1/health", get(health)).merge(api)
+    // 受限能力门面（技术路线 §5.4）：专用 Authorization header + 独立路由组，
+    // 与全权 require_token 组互不重叠——受限凭据够不到上面任何一条路由。
+    let ai_restricted = Router::new()
+        .route("/v1/ai/capabilities/context", get(ai_capabilities_context))
+        .route("/v1/ai/capabilities/call", post(ai_capabilities_call))
+        .layer(middleware::from_fn_with_state(state.clone(), require_grant));
+
+    Router::new()
+        .route("/v1/health", get(health))
+        .merge(api)
+        .merge(ai_restricted)
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +355,21 @@ async fn beatmap_status(
 #[derive(Debug, Deserialize)]
 pub(crate) struct BeatmapRetry {
     pub(crate) track_id: String,
+}
+
+/// Explicit local file identity for editable stage projects; HTTP/RPC share the reader.
+async fn project_media(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::stage_project::IdentifyRequest>,
+) -> ApiResult<Json<crate::stage_project::MediaIdentity>> {
+    Ok(Json(crate::stage_project::identify(&state, body).await?))
+}
+
+async fn stage_pitch(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::stage_project::MediaRequest>,
+) -> ApiResult<Json<crate::stage_pitch::Reply>> {
+    Ok(Json(crate::stage_pitch::request(&state, body).await?))
 }
 
 /// 手动重试某一首的分析：忘掉既有结论（含「已放弃三次」）再跑一次。应答就是
@@ -487,48 +593,437 @@ async fn get_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
     Json(v)
 }
 
-async fn play(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    // 会话恢复后的首次 play：audio 里还没装任何曲目，但队列/游标已从快照
-    // 回来——按游标起播，提交成功后把上次进度 seek 回去。此后走正常路径。
-    if state.audio.snapshot().track_id.is_none() {
-        if let Some(index) = state.current_index().await {
-            let outcome = state.play_index_for(index, None, PlayTrigger::Pick).await?;
-            if outcome.committed {
-                state.consume_restore_seek().await;
-                state.post_commit_background();
-            }
-            return Ok(get_state(State(state)).await);
+// ---- AI 持久生成任务（技术路线 R4-J）：状态机在 crate::ai::jobs，
+// 这里只做取参与应答整形；主体固定为 local-owner（官方 UI 身份）。----
+
+async fn ai_owner_id(state: &Arc<AppState>) -> ApiResult<String> {
+    Ok(vmusic_store::ai::get_or_create_instance(&state.db)
+        .await
+        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?
+        .owner_instance_id)
+}
+
+async fn ai_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let owner = ai_owner_id(&state).await?;
+    Ok(Json(crate::ai::jobs::status(&state, &owner).await?))
+}
+
+async fn ai_evaluation_status(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::evaluation::managed_status(&state)
+        .await
+        .map(Json)
+}
+
+async fn ai_evaluation_case(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::ai::evaluation::Case>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::evaluation::managed_case(&state, body)
+        .await
+        .map(Json)
+}
+
+async fn ai_emotion_status(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::emotion::status(&state).await.map(Json)
+}
+
+async fn ai_emotion_classify(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::ai::emotion::ClassifyRequest>,
+) -> ApiResult<Json<crate::ai::emotion::CueDoc>> {
+    crate::ai::emotion::classify(&state, body).await.map(Json)
+}
+
+async fn ai_emotion_locks(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<crate::ai::emotion::LocksQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::emotion::read_locks(&state, query)
+        .await
+        .map(Json)
+}
+
+async fn ai_put_emotion_locks(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::ai::emotion::LocksRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::emotion::write_locks(&state, body)
+        .await
+        .map(Json)
+}
+
+async fn ai_delete_emotion_locks(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<crate::ai::emotion::LocksQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ai::emotion::clear_locks(&state, query)
+        .await
+        .map(Json)
+}
+
+async fn ai_credential_status(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<crate::ai::credential::CredentialStatus>> {
+    crate::ai::credential::status(&state).await.map(Json)
+}
+
+async fn ai_put_credential(
+    State(state): State<Arc<AppState>>,
+    body: Bytes,
+) -> ApiResult<Json<crate::ai::credential::CredentialStatus>> {
+    let request = crate::ai::credential::CredentialRequest::parse(&body)?;
+    crate::ai::credential::put(&state, request).await.map(Json)
+}
+
+async fn ai_delete_credential(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<crate::ai::credential::CredentialStatus>> {
+    crate::ai::credential::delete(&state).await.map(Json)
+}
+
+#[derive(Deserialize)]
+pub struct AiCreateJobRequest {
+    pub brief: String,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+async fn ai_create_job(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AiCreateJobRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let outcome = crate::ai::jobs::submit(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &body.brief,
+        body.idempotency_key.as_deref(),
+    )
+    .await?;
+    Ok(Json(
+        serde_json::to_value(outcome).map_err(|e| internal(e.to_string()))?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct AiJobsQuery {
+    #[serde(default)]
+    pub before_created_at: Option<i64>,
+    #[serde(default)]
+    pub before_job_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+async fn ai_ledger(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<crate::ai::ledger::Query>,
+) -> ApiResult<Json<crate::ai::ledger::Page>> {
+    Ok(Json(crate::ai::ledger::read(&state, query).await?))
+}
+
+async fn ai_list_jobs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AiJobsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let owner = ai_owner_id(&state).await?;
+    let jobs = crate::ai::jobs::list_jobs(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &owner,
+        query.before_created_at,
+        query.before_job_id.as_deref(),
+        query.limit.unwrap_or(20),
+    )
+    .await?;
+    Ok(Json(serde_json::json!({ "jobs": jobs })))
+}
+
+async fn ai_get_job(
+    State(state): State<Arc<AppState>>,
+    AxumPath(job_id): AxumPath<String>,
+) -> ApiResult<Json<crate::ai::jobs::JobView>> {
+    Ok(Json(
+        crate::ai::jobs::get_job(&state, crate::idempotency::LOCAL_OWNER, &job_id).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct AiCancelRequest {
+    pub expected_state_revision: i64,
+}
+
+async fn ai_cancel_job(
+    State(state): State<Arc<AppState>>,
+    AxumPath(job_id): AxumPath<String>,
+    Json(body): Json<AiCancelRequest>,
+) -> ApiResult<Json<crate::ai::jobs::JobView>> {
+    Ok(Json(
+        crate::ai::jobs::cancel(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            &job_id,
+            body.expected_state_revision,
+        )
+        .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiGuardResetRequest {
+    pub expected_revision: i64,
+    pub config_fingerprint: String,
+}
+
+async fn ai_budget_guard_reset(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AiGuardResetRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::ai::jobs::budget_guard_reset(
+            &state,
+            body.expected_revision,
+            &body.config_fingerprint,
+        )
+        .await?,
+    ))
+}
+
+async fn ai_get_proposal(
+    State(state): State<Arc<AppState>>,
+    AxumPath(proposal_id): AxumPath<String>,
+) -> ApiResult<Json<crate::ai::jobs::ProposalView>> {
+    Ok(Json(
+        crate::ai::jobs::get_proposal(&state, crate::idempotency::LOCAL_OWNER, &proposal_id)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct AiRejectRequest {
+    pub expected_revision: i64,
+}
+
+async fn ai_reject_proposal(
+    State(state): State<Arc<AppState>>,
+    AxumPath(proposal_id): AxumPath<String>,
+    Json(body): Json<AiRejectRequest>,
+) -> ApiResult<Json<crate::ai::jobs::ProposalView>> {
+    Ok(Json(
+        crate::ai::jobs::reject_proposal(
+            &state,
+            crate::idempotency::LOCAL_OWNER,
+            &proposal_id,
+            body.expected_revision,
+        )
+        .await?,
+    ))
+}
+
+// ---- AI 受限授权（技术路线 R2-G）：官方管理面与受限门面两组入口，
+// 各自的认证与投影都在这里，应用逻辑下沉到 crate::ai。----
+
+#[derive(Deserialize)]
+pub struct CreateGrantRequest {
+    #[serde(default)]
+    pub label: String,
+    pub scopes: Vec<String>,
+}
+
+async fn list_ai_grants(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let grants = crate::ai::facade::list_grants(&state).await?;
+    Ok(Json(serde_json::json!({ "grants": grants })))
+}
+
+async fn create_ai_grant(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateGrantRequest>,
+) -> ApiResult<Json<crate::ai::facade::GrantSummary>> {
+    let summary = crate::ai::facade::create_grant(&state, &body.label, &body.scopes).await?;
+    Ok(Json(summary))
+}
+
+async fn rotate_ai_grant(
+    State(state): State<Arc<AppState>>,
+    AxumPath(grant_id): AxumPath<String>,
+) -> ApiResult<Json<crate::ai::facade::GrantSummary>> {
+    let summary = crate::ai::facade::rotate_grant(&state, &grant_id).await?;
+    Ok(Json(summary))
+}
+
+async fn revoke_ai_grant(
+    State(state): State<Arc<AppState>>,
+    AxumPath(grant_id): AxumPath<String>,
+) -> ApiResult<Json<crate::ai::facade::GrantSummary>> {
+    let summary = crate::ai::facade::revoke_grant(&state, &grant_id).await?;
+    Ok(Json(summary))
+}
+
+/// 受限门面的认证层（技术路线 §5.4）：只认 `Authorization: Bearer`，不接
+/// 受 query/cookie 传递。凭据换成服务端查询出的 `GrantContext` 才放行；
+/// 失败一律不回显凭据内容，日志也不落明文。
+async fn require_grant(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    // 首发约束（§5.5）：锁失或非回环绑定时，受限门面对一切调用方都不可用
+    // ——不发布发现只挡住「找到它」，这里挡住「访问它」。
+    if !state.ai_external_ready() {
+        return ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ai_unavailable",
+            "受限门面未开放（锁失或非回环绑定）",
+        )
+        .into_response();
+    }
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let Some(presented) = presented else {
+        return unauthorized().into_response();
+    };
+    // 实例绑定（§5.5）：每个调用必须携带会话建立时看到的 serverInstanceId；
+    // 服务重启后旧适配进程的请求在这里被拒绝，不能自动重放旧写。
+    let bound_instance = request
+        .headers()
+        .get("x-server-instance-id")
+        .and_then(|v| v.to_str().ok());
+    let Some(bound) = bound_instance else {
+        return ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "instance_changed",
+            "缺少 x-server-instance-id，请重新连接获取会话",
+        )
+        .into_response();
+    };
+    if bound != state.server_instance_id() {
+        tracing::warn!(
+            code = "instance_changed",
+            "restricted facade bound to a stale instance"
+        );
+        return ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "instance_changed",
+            "服务已重启，请重新连接后再发起受限调用",
+        )
+        .into_response();
+    }
+    match crate::ai::facade::authenticate(&state, &presented).await {
+        Ok(ctx) => {
+            let mut request = request;
+            request.extensions_mut().insert(Arc::new(ctx));
+            next.run(request).await
+        }
+        Err(err) => {
+            tracing::warn!(code = %err.code, "restricted facade authentication failed");
+            err.into_response()
         }
     }
-    let commit = state.play_commit.lock().await;
-    state.cancel_prepared_playback().await;
-    state
-        .play_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state
-        .audio
-        .play()
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.transport_committed().await;
-    drop(commit);
+}
+
+/// 受限门面：身份、scope、策略水位与能力表投影。
+async fn ai_capabilities_context(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(ctx): axum::Extension<Arc<crate::ai::facade::GrantContext>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let enabled = crate::ai::capability::stage_tools_enabled(&state).await?;
+    Ok(Json(crate::ai::facade::context_json(&ctx, enabled)))
+}
+
+#[derive(Deserialize)]
+pub struct CapabilityCallRequest {
+    pub operation: String,
+    // MCP 适配器（camelCase）与既有调用方（snake_case）都收：字段曾被
+    // 静默丢弃，整条短写幂等链路因此失效。
+    #[serde(default, alias = "clientOperationId")]
+    pub client_operation_id: Option<String>,
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+}
+
+/// 受限门面的能力执行点：scope 核对与分派在 `capability::execute`，
+/// 这里只做信封拆装。
+async fn ai_capabilities_call(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(ctx): axum::Extension<Arc<crate::ai::facade::GrantContext>>,
+    Json(body): Json<CapabilityCallRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let call = crate::ai::capability::CapabilityCall {
+        operation: body.operation,
+        client_operation_id: body.client_operation_id,
+        input: body.input.unwrap_or(serde_json::Value::Null),
+    };
+    let result = crate::ai::capability::execute(&state, &ctx, call).await?;
+    Ok(Json(result))
+}
+
+/// `x-client-operation-id` 请求头：短写幂等键的客户端部分（技术路线 R2-P）。
+/// 不带即旁路，行为与从前一致；带了但非法（空、超长）由幂等入口回 400。
+/// 值本身不承担授权——`principal` 由服务端可信上下文提供。
+#[derive(Debug, Clone)]
+struct ClientOperationId(Option<String>);
+
+impl<S> axum::extract::FromRequestParts<S> for ClientOperationId
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let value = match parts.headers.get("x-client-operation-id") {
+            None => return Ok(Self(None)),
+            // 非可见 ASCII 的头是畸形的：如实拒绝，不静默当没带——
+            // 那会让客户端以为有幂等保护而实际没有。
+            Some(value) => value
+                .to_str()
+                .map_err(|_| bad_request("x-client-operation-id 必须是可见 ASCII"))?,
+        };
+        Ok(Self(Some(value.to_string())))
+    }
+}
+
+async fn play(
+    State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
+) -> ApiResult<Json<serde_json::Value>> {
+    // 完成事实在 resume_control 里；官方 UI 保持既有行为（含会话恢复分支），
+    // 兼容应答不变：非失败一律回快照。带幂等键时由短写层去重（R2-P）。
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.resume",
+        client_op.as_deref(),
+        serde_json::Value::Null,
+        |s| async move { s.resume_control(false).await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
-async fn pause(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    let commit = state.play_commit.lock().await;
-    state.cancel_prepared_playback().await;
-    state
-        .play_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.set_buffering(false, None).await;
-    state
-        .audio
-        .pause()
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.transport_committed().await;
-    drop(commit);
+async fn pause(
+    State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.pause",
+        client_op.as_deref(),
+        serde_json::Value::Null,
+        |s| async move { s.pause_control().await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
@@ -549,16 +1044,59 @@ async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::
     Ok(get_state(State(state)).await)
 }
 
-async fn next(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    state.step_by_user(1).await?;
-    // 成功起播后在路由入口 detach 预取 + LRU（每首恰好一次）。
-    state.post_commit_background();
+/// 页面离场通知：`app.js` 在 `pagehide` 用 keepalive fetch 打这一条，服务端在
+/// 宽限期满后确认「没有页面开着、且确实还在出声」才暂停（编排见
+/// `AppState::schedule_depart_pause`）。应答只是受理回执——按下这一条时播放还没
+/// 变，回快照会把「已暂停」说成既成事实。
+async fn depart(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    state.schedule_depart_pause();
+    Ok(Json(serde_json::json!({
+        "scheduled": true,
+        "grace_ms": crate::state::DEPART_GRACE.as_millis(),
+        "viewers": state.viewers.load(std::sync::atomic::Ordering::Acquire),
+    })))
+}
+
+/// 服务退出（首页那颗电源钮）。应答只是「已受理」：真正的收尾在 `main.rs` 的
+/// 优雅关停里——停播、删发现文件、结束进程，与 Ctrl-C 走同一条路，两条入口不许
+/// 一个干净一个留半截。150 ms 的回执窗由 `AppState::request_exit` 留着。
+async fn shutdown_service(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.request_exit();
+    Ok(Json(serde_json::json!({ "status": "exiting" })))
+}
+
+async fn next(
+    State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
+) -> ApiResult<Json<serde_json::Value>> {
+    // 成功起播后的预取 + LRU detach 在 step_by_user 里（每首恰好一次）。
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.next",
+        client_op.as_deref(),
+        serde_json::Value::Null,
+        |s| async move { s.step_by_user(1).await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
-async fn previous(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    state.step_by_user(-1).await?;
-    state.post_commit_background();
+async fn previous(
+    State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.previous",
+        client_op.as_deref(),
+        serde_json::Value::Null,
+        |s| async move { s.step_by_user(-1).await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
@@ -653,20 +1191,19 @@ pub struct SeekRequest {
 
 async fn seek(
     State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
     Json(body): Json<SeekRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let commit = state.play_commit.lock().await;
-    state.cancel_prepared_playback().await;
-    state
-        .play_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state
-        .audio
-        .seek(body.position_ms)
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.transport_committed().await;
-    drop(commit);
+    let position_ms = body.position_ms;
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.seek",
+        client_op.as_deref(),
+        serde_json::json!(position_ms),
+        move |s| async move { s.seek_control(position_ms).await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
@@ -677,17 +1214,20 @@ pub struct VolumeRequest {
 
 async fn volume(
     State(state): State<Arc<AppState>>,
+    ClientOperationId(client_op): ClientOperationId,
     Json(body): Json<VolumeRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !(0.0..=1.0).contains(&body.volume) {
-        return Err(bad_request("volume must be between 0.0 and 1.0"));
-    }
-    state
-        .audio
-        .set_volume(body.volume)
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    crate::persist::save_volume(&state.db, body.volume).await;
+    let volume = body.volume;
+    // 非有限值经 json! 归一成 Null：幂等输入与校验错误互不串键。
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.volume_set",
+        client_op.as_deref(),
+        serde_json::json!(volume),
+        move |s| async move { s.set_volume_control(volume).await },
+    )
+    .await?;
     Ok(get_state(State(state)).await)
 }
 
@@ -875,7 +1415,7 @@ async fn list_tracks(
     let offset = query.offset.unwrap_or(0).max(0);
     let sort = parse_track_sort(query.sort.as_deref())?;
     let filter = track_filter_from(&query);
-    let tracks = vmusic_store::list_tracks_filtered(
+    let (tracks, total) = vmusic_store::list_tracks_page_filtered(
         &state.db,
         query.q.as_deref(),
         &filter,
@@ -885,9 +1425,6 @@ async fn list_tracks(
     )
     .await
     .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    let total = vmusic_store::count_tracks_filtered(&state.db, query.q.as_deref(), &filter)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     Ok(Json(TrackPage { total, tracks }))
 }
 
@@ -1305,38 +1842,7 @@ async fn get_lyrics(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let track = vmusic_store::get_track(&state.db, &id)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?
-        .ok_or_else(|| not_found(format!("track {id}")))?;
-
-    let saved = vmusic_store::lyrics::get(&state.db, &id)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
-    let imported = saved
-        .as_ref()
-        .map(|s| !s.content.trim().is_empty())
-        .unwrap_or(false);
-
-    let doc = lyric_doc_for(&state, &track).await;
-
-    let body = serde_json::to_value(&doc).map_err(|e| internal(e.to_string()))?;
-    let mut body = match body {
-        serde_json::Value::Object(map) => map,
-        _ => unreachable!("LyricDocument serializes to an object"),
-    };
-    if imported {
-        body.insert(
-            "source".into(),
-            serde_json::Value::String("imported".into()),
-        );
-    }
-    body.insert(
-        "user_offset_ms".into(),
-        serde_json::Value::from(user_offset),
-    );
-    Ok(Json(serde_json::Value::Object(body)))
+    Ok(Json(crate::lyrics::read(&state, &id).await?))
 }
 
 /// 这首已存的每曲用户偏移（毫秒），没有行就是 0。
@@ -1368,7 +1874,7 @@ pub(crate) async fn online_lyric_body(
         online::lyric(&online_ctx(state), source, ref_id).await,
     )?;
     let user_offset = lyrics_user_offset(state, &crate::online::virtual_id(source, ref_id)).await;
-    doc.offset_ms += user_offset;
+    doc.offset_ms = doc.offset_ms.saturating_add(user_offset);
     vmusic_lyrics::apply_offset(&mut doc);
     let mut body = serde_json::to_value(&doc).map_err(|e| internal(e.to_string()))?;
     let Some(map) = body.as_object_mut() else {
@@ -1392,12 +1898,8 @@ pub(crate) async fn lyric_doc_for(
         .ok()
         .flatten();
     let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
-    let path = Path::new(&track.path);
-    let mut doc = match saved.filter(|s| !s.content.trim().is_empty()) {
-        Some(saved) => vmusic_lyrics::parse_lrc(&saved.content),
-        None => read_embedded_or_sidecar_lyrics(path).await,
-    };
-    doc.offset_ms += user_offset;
+    let mut doc = crate::lyrics::raw_local(track, saved.as_ref().map(|s| s.content.as_str())).await;
+    doc.offset_ms = doc.offset_ms.saturating_add(user_offset);
     vmusic_lyrics::apply_offset(&mut doc);
     doc
 }
@@ -1434,8 +1936,42 @@ pub(crate) async fn read_embedded_or_sidecar_lyrics(path: &Path) -> vmusic_core:
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct LyricsImport {
     pub(crate) content: String,
+}
+
+async fn prepare_lyric_candidate(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::lyrics::Prepare>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::lyrics::prepare(&state, &id, body).await?))
+}
+async fn search_lyric_candidates(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::lyrics::candidates::Search>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::lyrics::candidates::search(&state, &id, body).await?,
+    ))
+}
+async fn prepare_online_lyric_candidate(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::lyrics::Apply>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::lyrics::candidates::prepare(&state, &id, body).await?,
+    ))
+}
+async fn apply_lyric_candidate(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::lyrics::Apply>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::lyrics::apply(&state, &id, body).await?))
 }
 
 /// 手动导入歌词：存 LRC 原文，读取端按 imported 优先返回。清空内容用 DELETE。
@@ -1444,14 +1980,8 @@ async fn import_lyrics(
     AxumPath(id): AxumPath<String>,
     Json(body): Json<LyricsImport>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if body.content.trim().is_empty() {
-        return Err(bad_request("lyrics content must not be empty"));
-    }
-    vmusic_store::lyrics::import(&state.db, &id, &body.content)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     Ok(Json(
-        serde_json::json!({ "ok": true, "source": "imported" }),
+        crate::lyrics::import(&state, &id, body.content).await?,
     ))
 }
 
@@ -1460,10 +1990,7 @@ async fn clear_lyrics(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    vmusic_store::lyrics::remove(&state.db, &id)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(crate::lyrics::clear(&state, &id).await?))
 }
 
 #[derive(Deserialize)]
@@ -1477,11 +2004,8 @@ async fn set_lyrics_offset(
     AxumPath(id): AxumPath<String>,
     Json(body): Json<LyricsOffset>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    vmusic_store::lyrics::set_offset(&state.db, &id, body.offset_ms)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
     Ok(Json(
-        serde_json::json!({ "ok": true, "offset_ms": body.offset_ms }),
+        crate::lyrics::set_offset(&state, &id, body.offset_ms).await?,
     ))
 }
 
@@ -1522,7 +2046,8 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
         .ok()
         .flatten()
         .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .clamp(-2000, 2000);
 
     let (title, artist, album, cover, mut doc) =
         if let Some((source, ref_id)) = crate::online::split_virtual_id(&track_id) {
@@ -1544,7 +2069,9 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
             // 同一个虚拟 id 当键。浮层与主页面必须共用这一份时间语义，否则
             // 「校准只在其中一个窗口有效」——正是清单 §9 G11 说的那件事。
             let mut doc = doc;
-            doc.offset_ms += lyrics_user_offset(state, &track_id).await;
+            doc.offset_ms = doc
+                .offset_ms
+                .saturating_add(lyrics_user_offset(state, &track_id).await);
             let cover = meta
                 .as_ref()
                 .and_then(|m| m.cover.as_deref())
@@ -1564,27 +2091,30 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
                 return overlay_idle();
             };
             // 取词链与 /v1/tracks/{id}/lyrics 相同（imported > embedded >
-            // sidecar），但偏移在这里统一叠加后再一次性应用：文件 [offset:] +
-            // 每曲用户偏移 + 全局偏移。apply_offset 不是幂等的，绝不能叠加两次。
+            // sidecar）。先应用文件+每曲偏移，再与前端一样应用全局呈现偏移；
+            // 两段都只应用一次，零点饱和顺序也必须一致。
             // 缓存存的是叠加用户偏移之前的原始解析文档。
-            let saved = vmusic_store::lyrics::get(&state.db, &track.id)
+            let saved = vmusic_store::lyrics::snapshot(&state.db, &track.id)
                 .await
-                .ok()
-                .flatten();
+                .ok();
             let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
-            let mut doc = match cached_overlay_doc(state, &track_id).await {
+            let cache_key = format!(
+                "{track_id}:lyrics:{}",
+                saved.as_ref().map(|s| s.revision).unwrap_or(0)
+            );
+            let mut doc = match cached_overlay_doc(state, &cache_key).await {
                 Some(doc) => doc,
                 None => {
-                    let path = Path::new(&track.path);
-                    let doc = match saved.filter(|s| !s.content.trim().is_empty()) {
-                        Some(saved) => vmusic_lyrics::parse_lrc(&saved.content),
-                        None => read_embedded_or_sidecar_lyrics(path).await,
-                    };
-                    *state.overlay_lyric.lock().await = Some((track_id.clone(), doc.clone()));
+                    let doc = crate::lyrics::raw_local(
+                        &track,
+                        saved.as_ref().and_then(|s| s.content.as_deref()),
+                    )
+                    .await;
+                    *state.overlay_lyric.lock().await = Some((cache_key, doc.clone()));
                     doc
                 }
             };
-            doc.offset_ms += user_offset;
+            doc.offset_ms = doc.offset_ms.saturating_add(user_offset);
             let cover = track
                 .has_cover
                 .then(|| format!("/v1/tracks/{}/cover", track.id));
@@ -1596,9 +2126,8 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
                 doc,
             )
         };
-    // 全局偏移最后叠加，两种来源都只应用这一次。
-    doc.offset_ms += global_offset;
-    vmusic_lyrics::apply_offset(&mut doc);
+    // Match the main Stage even when the source shift saturates at zero.
+    vmusic_lyrics::apply_presentation_offset(&mut doc, global_offset);
 
     let word_by_word = doc.lines.iter().any(|l| !l.words.is_empty());
     let translation = doc.translation.as_deref();
@@ -1622,6 +2151,14 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
                     v["translation"] = serde_json::Value::String(tr.clone());
                 }
             }
+            if let Some(roman) = doc
+                .romanization
+                .as_ref()
+                .and_then(|r| r.get(i))
+                .filter(|s| !s.trim().is_empty())
+            {
+                v["romanization"] = serde_json::Value::String(roman.clone());
+            }
             v
         })
         .collect();
@@ -1637,6 +2174,9 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
         "duration_ms": snap.duration_ms,
         "offset": doc.offset_ms,
         "wordByWord": word_by_word,
+        "format": doc.format,
+        "origin": doc.origin,
+        "timing_precision": doc.timing_precision,
         "lines": lines,
     })
 }
@@ -2065,15 +2605,42 @@ async fn put_settings(
     State(state): State<Arc<AppState>>,
     Json(body): Json<std::collections::BTreeMap<String, serde_json::Value>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if let Some(key) = body.keys().find(|k| is_credential(k)) {
-        return Err(bad_request(format!(
-            "{key} 属于音源凭据，只能通过 /v1/online/cookie 修改"
-        )));
+    apply_settings(&state, &body).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub(crate) async fn apply_settings(
+    state: &Arc<AppState>,
+    body: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> ApiResult<()> {
+    if body.keys().any(|k| is_credential(k)) {
+        return Err(bad_request(
+            "凭据只能通过对应的凭据管理入口修改，不能写入通用设置",
+        ));
     }
-    vmusic_store::settings::set_all(&state.db, &body)
+    let revoke_generation = body
+        .get(crate::ai::jobs::CONSENT_KEY)
+        .is_some_and(|value| value != &serde_json::Value::Bool(true));
+    let revoke_lyrics = body
+        .get("lyrics_emotion_ai_authorized")
+        .is_some_and(|value| value != &serde_json::Value::Bool(true));
+    if (revoke_generation || revoke_lyrics) && !state.ai_runner_held() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ai_locked",
+            "请在持有 AI 服务锁的 Hertz 实例中撤回 AI 授权",
+        ));
+    }
+    vmusic_store::settings::set_all(&state.db, body)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    if revoke_lyrics {
+        state.ai_emotion.cancel_active();
+    }
+    if revoke_generation {
+        crate::ai::jobs::revoke_generation_consent(state).await?;
+    }
+    Ok(())
 }
 
 /// 设置表里存的是「用户在音源站点的登录凭据」（旧版裸 cookie 键
@@ -2082,7 +2649,10 @@ async fn put_settings(
 /// 改它只能走 `/v1/online/cookie`（那里才校验得了音源是否真的支持登录）。
 /// `online_device_*` 是非敏感设备身份，不在此列。
 pub(crate) fn is_credential(key: &str) -> bool {
-    key.starts_with(online::COOKIE_PREFIX) || key.starts_with(online::CRED_PREFIX)
+    key.starts_with(online::COOKIE_PREFIX)
+        || key.starts_with(online::CRED_PREFIX)
+        || key.starts_with("ai_provider_")
+        || matches!(key, "openai_api_key" | "ai_api_key")
 }
 
 // ---------------------------------------------------------------------------
@@ -2809,9 +3379,7 @@ async fn online_cookie(
 
 /// 每个上游请求都要摸到设置表（读用户自己填的凭据），所以统一从这里造 Ctx。
 pub(crate) fn online_ctx(state: &AppState) -> online::Ctx {
-    online::Ctx {
-        db: state.db.clone(),
-    }
+    online::Ctx::with_gate(state.db.clone(), state.search_gate.clone())
 }
 
 /// 没带 source 参数时用注册表的第一个音源，而不是把名字再抄一遍进代码。
@@ -2941,6 +3509,14 @@ pub(crate) struct PodcastSubscribeRequest {
     pub feed_url: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct PodcastProgressRequest {
+    pub episode_id: String,
+    pub position_ms: u64,
+    #[serde(default)]
+    pub completed: bool,
+}
+
 async fn podcast_search(
     State(state): State<Arc<AppState>>,
     Query(q): Query<PodcastSearchQuery>,
@@ -2959,6 +3535,23 @@ async fn podcast_feed(
     tagged(
         "podcast",
         crate::podcasts::feed(&online_ctx(&state), &q.url, q.offset, q.limit, q.refresh).await,
+    )
+    .map(Json)
+}
+
+async fn podcast_progress(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PodcastProgressRequest>,
+) -> ApiResult<Json<crate::podcasts::EpisodeProgress>> {
+    tagged(
+        "podcast",
+        crate::podcasts::save_progress(
+            &online_ctx(&state),
+            &body.episode_id,
+            body.position_ms,
+            body.completed,
+        )
+        .await,
     )
     .map(Json)
 }
@@ -3777,6 +4370,20 @@ mod tests {
                 200,
             ),
             (
+                Op::Post,
+                "podcasts/progress",
+                json!({}),
+                json!({"episode_id":"episode1","position_ms":60000,"completed":false}),
+                200,
+            ),
+            (
+                Op::Get,
+                "podcasts/feed",
+                json!({"url":"https://example.com/podcast.xml","offset":"1","limit":"1"}),
+                Value::Null,
+                200,
+            ),
+            (
                 Op::Delete,
                 "podcasts/subscriptions/show",
                 json!({}),
@@ -3798,6 +4405,7 @@ mod tests {
                 200,
             ),
         ];
+        let mut progress_saved = false;
         for (op, path, query, body, expected_status) in cases {
             let path = format!("v1/{path}");
             let result = rpc
@@ -3807,6 +4415,7 @@ mod tests {
                     query: query.clone(),
                     body: body.clone(),
                     raw: None,
+                    client_operation_id: None,
                 })
                 .await;
             let method = match op {
@@ -3833,6 +4442,15 @@ mod tests {
                     assert_eq!(http["total"], 3);
                     assert_eq!(http["episodes"].as_array().unwrap().len(), 1);
                     assert_eq!(http["episodes"][0]["id"], "episode1");
+                    if progress_saved {
+                        assert_eq!(http["episodes"][0]["progress_ms"], 60_000);
+                        assert_eq!(http["episodes"][0]["completed"], false);
+                    }
+                }
+                if path.ends_with("/progress") {
+                    assert_eq!(http["progress_ms"], 60_000);
+                    assert_eq!(http["completed"], false);
+                    progress_saved = true;
                 }
                 if path.ends_with("/stream") {
                     assert_eq!(http["url"], "https://example.com/episode.mp3");

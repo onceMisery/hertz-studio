@@ -85,7 +85,7 @@ async function setSkin(page, id) {
 }
 
 async function gotoLibrary(page) {
-  // 不点 rail：流年把侧栏收成胶囊、浮光把导航换成顶部胶囊，
+  // 不点 rail：流年把侧栏收成胶囊、清风隐藏左侧栏，
   // `.rail-item[data-view=library]` 在那两套皮肤下存在却被 Playwright 判不可见。
   // 直接调它自己的 onclick，走的仍是业务路径（app.js 里就是 setView(...)）。
   await page.evaluate(() => {
@@ -430,10 +430,10 @@ async function checkRowCheckbox(page) {
       `display=${restored.listDisplay}`);
 
     // ------------------------------------------------------- 逐皮肤
-    section('五套皮肤都要拿得到这颗按钮');
+    section('各套皮肤都要拿得到这颗按钮');
     for (const [id, label] of [
-      ['classic', '经典'], ['sheen', '浮光'], ['workbench', '工作台'],
-      ['liunian', '流年'], ['ios', 'OS风'], ['qingfeng', '清风'],
+      ['classic', '经典'],
+      ['liunian', '流年'], ['qingfeng', '清风'],
     ]) {
       await checkSkin(page, id, label);
     }
@@ -443,7 +443,7 @@ async function checkRowCheckbox(page) {
     // 「三列还撑着、但内容栏已经很紧」的一档。
     section('窄窗口：按钮不能被压掉、文案不能竖排');
     await page.setViewportSize({ width: 969, height: 800 });
-    for (const [id, label] of [['classic', '经典'], ['ios', 'OS风'], ['qingfeng', '清风']]) {
+    for (const [id, label] of [['classic', '经典'], ['qingfeng', '清风']]) {
       await setSkin(page, id);
       await gotoLibrary(page);
       const s = await stripState(page);

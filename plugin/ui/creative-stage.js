@@ -113,7 +113,7 @@
   var interactionBlocker = null;
   // 各交互入口统一走 blocked 早退：钩子返回 true（自由相机开启/飞回中）时，
   // 原生拖拽/视差/惯性/爆闪/滚轮/双击复位全部不触发，避免与 freecam 双控。
-  function blocked(e) { return !!(interactionBlocker && interactionBlocker(e)); }
+  function blocked(e) { return !!preview || !!(interactionBlocker && interactionBlocker(e)); }
   var activeIdx = 0;
   var attached = false;
   var wanted = false;        // 用户是否要求启用三维舞台
@@ -122,10 +122,19 @@
   var degradedBecause = null;
   var degradedByProbe = false;   // 这次降级是"量出来太贵"，不是"起不来"
 
-  var preset = null;
+  var preset = null; // Committed preset: storage, sharing and collection always read this object.
+  var preview = null, presetRevision = 0, previewSerial = 0;
+  function displayedPreset() { return preview ? preview.preset : preset; }
+
   var runtime = {};          // 每帧解析结果
   var animations = [];       // 正在跑的 cue 实例
   var timelineCues = null;
+  function discardSongClockAnimations() {
+    animations = animations.filter(function (a) { return !a.songClock; });
+    if (preview && preview.motion) {
+      preview.motion.animations = preview.motion.animations.filter(function (a) { return !a.songClock; });
+    }
+  }
   var renderedPosition = null;
   var section = 'verse';
   var sectionSince = 0;
@@ -187,7 +196,7 @@
   var sceneSpecCache = null, sceneSpecScene = null;
 
   function buildBaseSpec() {
-    baseSpec = {};
+    baseSpec = Object.create(null);
     BASE_SPEC.forEach(function (g) {
       (g.items || []).forEach(function (it) { baseSpec[it[0]] = it; });
       (g.selects || []).forEach(function (it) { baseSpec[it[0]] = it; });
@@ -201,11 +210,12 @@
   }
 
   function specFor(path) {
+    if (typeof path !== 'string') return null;
     if (!baseSpec) buildBaseSpec();
     if (path.slice(0, 3) !== 'sc.') return baseSpec[path] || null;
     var scene = currentScene();
     if (!sceneSpecCache || sceneSpecScene !== scene) {
-      sceneSpecCache = {};
+      sceneSpecCache = Object.create(null);
       (sceneDefinition(scene).params).forEach(function (it) { sceneSpecCache['sc.' + it[0]] = it; });
       sceneSpecScene = scene;
     }
@@ -227,7 +237,18 @@
    *  数据里，下次导入时变成一个永远解释不了的字段。 */
   function writable(path) { return !!specFor(path); }
 
-  function currentScene() { return (preset && preset.scene) ? preset.scene : null; }
+  function currentScene() { var p = displayedPreset(); return p && p.scene || null; }
+
+  function hasStaleProject() {
+    return !!(preset && preset.project && window.CreativeProject
+      && CreativeProject.isStaleContext(preset.project));
+  }
+
+  function legacyCueCount(value) {
+    if (!value || typeof value !== 'object') return 0;
+    if (Array.isArray(value.legacyCues)) return value.legacyCues.length;
+    return Array.isArray(value.cues) ? value.cues.length : 0;
+  }
 
   function readPath(src, path) {
     var dot = path.indexOf('.');
@@ -239,6 +260,8 @@
   function writePath(dst, path, value) {
     var dot = path.indexOf('.');
     var head = path.slice(0, dot), key = path.slice(dot + 1);
+    if (['cam','look','stage','sc'].indexOf(head) < 0 || !key || key.indexOf('.') >= 0
+      || ['__proto__','prototype','constructor'].indexOf(key) >= 0) return;
     if (head === 'sc') {
       if (!dst.sc) dst.sc = {};
       dst.sc[key] = value;
@@ -278,6 +301,12 @@
   function normalize(p) {
     var out = basePreset();
     if (!p) return out;
+    var restoredProject = null;
+    if (p.project) {
+      if (!window.CreativeProject) throw new Error('工程模块尚未就绪');
+      restoredProject = CreativeProject.restoreContext(p.project);
+    }
+    var staleProject = restoredProject && !CreativeProject.isCurrentContext(restoredProject);
     out.name = typeof p.name === 'string' ? p.name : out.name;
     if (typeof p.id === 'string') out.id = p.id;
     if (typeof p.thumb === 'string') out.thumb = p.thumb;
@@ -307,31 +336,72 @@
         out.sc[kk] = clampTo(sceneRow(out.scene, kk), sv);
       });
     }
-    out.cues = Array.isArray(p.cues) ? p.cues.filter(validCue).slice(0, 64) : [];
+    var archivedCues = Array.isArray(p.legacyCues) ? deep(p.legacyCues) : [];
+    if (staleProject) {
+      if (Array.isArray(p.cues) && p.cues.length) archivedCues = archivedCues.concat(deep(p.cues));
+      if (archivedCues.length) out.legacyCues = archivedCues;
+      out.cues = [];
+    } else {
+      if (archivedCues.length) out.legacyCues = archivedCues;
+      out.cues = Array.isArray(p.cues) ? p.cues.filter(function (cue) { return validCue(cue, out.scene); }).slice(0, 64) : [];
+    }
     out.bindings = Array.isArray(p.bindings) ? p.bindings.filter(validBinding).slice(0, 32) : [];
     out.director = p.director !== false;
     out.bg = (p.bg && typeof p.bg === 'object' && p.bg.type) ? p.bg : { type: 'theme' };
     out.hand = Object.assign({}, out.hand, p.hand && typeof p.hand === 'object' ? p.hand : {});
+    if (restoredProject) out.project = restoredProject;
     return out;
   }
 
-  function validCue(c) {
+  function validCue(c, sceneId) {
     if (!c || typeof c !== 'object') return false;
-    if (typeof c.at !== 'number' && typeof c.every !== 'number') return false;
-    return !!c.set && typeof c.set === 'object';
+    var fields = ['at', 'every', 'len', 'ease', 'set'];
+    if (Object.keys(c).some(function (key) { return fields.indexOf(key) < 0; })) return false;
+    if ((typeof c.at === 'number') === (typeof c.every === 'number')) return false;
+    if (c.at !== undefined && (!Number.isFinite(c.at) || c.at < 0 || c.at > 86400)) return false;
+    if (c.every !== undefined && (!Number.isInteger(c.every) || c.every < 1 || c.every > 4096)) return false;
+    if (c.len !== undefined && (!Number.isFinite(c.len) || c.len < 16 || c.len > 600000)) return false;
+    if (c.ease !== undefined && ['linear', 'in', 'out', 'inout'].indexOf(c.ease) < 0) return false;
+    var activeScene = sceneId || currentScene();
+    return !!c.set && typeof c.set === 'object' && !Array.isArray(c.set)
+      && Object.keys(c.set).length > 0 && Object.keys(c.set).every(function (key) {
+        var row;
+        if (key.slice(0, 3) === 'sc.') {
+          row = sceneRow(activeScene, key.slice(3));
+        } else {
+          row = specFor(key);
+        }
+        var value = c.set[key];
+        if (!row || typeof value !== 'number' || !Number.isFinite(value)) return false;
+        if (key.slice(0, 3) === 'sc.') {
+          var sceneParam = row.slice();
+          sceneParam[0] = key;
+          row = sceneParam;
+        }
+        if (typeof row[2] === 'number') return value >= row[2] && value <= row[3];
+        return Array.isArray(row[2]) && row[2].some(function (option) {
+          return Number(option[0]) === value;
+        });
+      });
   }
 
   function validBinding(b) {
-    return !!(b && typeof b.target === 'string' && typeof b.source === 'string');
+    return !!(b && typeof b.target === 'string' && typeof b.source === 'string'
+      && (b.gain === undefined || Number.isFinite(b.gain)));
   }
 
   // Share v1 is a complete preset, not a delta against today's defaults. The
   // codec owns bytes only; this owner derives parameter keys from the same specs
   // as the renderer. Changing this schema/meaning requires a new share version.
-  function normalizeSharePreset(input) {
-    function fail() { throw new Error('分享码中的创意预置不完整或含无效参数'); }
+  function normalizeSharePreset(input, options) {
+    function fail(message) { throw new Error(message || '分享码中的创意预置不完整或含无效参数'); }
     function object(value) { return value && typeof value === 'object' && !Array.isArray(value); }
     function own(value, key) { return object(value) && Object.prototype.hasOwnProperty.call(value, key); }
+    if (own(input, 'project') && window.CreativeProject
+      && !CreativeProject.isCurrentContext(input.project)) {
+      fail(CreativeProject.isStaleContext(input.project) ? CreativeProject.recoveryMessage(legacyCueCount(input))
+        : '工程 context 不兼容，不能编码为普通分享码');
+    }
     function number(value, min, max) {
       if (typeof value !== 'number' || !isFinite(value) || value < min || value > max) fail();
       return value;
@@ -404,15 +474,27 @@
       if (typeof hand[key] !== 'boolean') fail(); safe.hand[key] = hand[key];
     });
     safe.hand.jitter = number(hand.jitter, 0, 200); safe.hand.speed = number(hand.speed, 25, 200);
+    if (options && options.preserveProjectContext && own(input, 'project')) {
+      if (!window.CreativeProject) fail('工程模块尚未就绪');
+      safe.project = CreativeProject.shareContext(input.project);
+    }
     return normalize(safe);
   }
 
-  function shareSnapshot() {
+  function committedArtwork() {
     if (!window.Backgrounds || !window.HandDrawn) throw new Error('背景与手绘模块尚未就绪');
-    var full = normalize(preset);
+    return preview ? { bg: deep(preview.committedBg), hand: deep(preview.committedHand) }
+      : { bg: Backgrounds.values(), hand: HandDrawn.values() };
+  }
+
+  function shareSnapshot(options) {
+    var full = normalize(preset), artwork = committedArtwork();
+    if (full.project && CreativeProject.isStaleContext(full.project)) {
+      throw new Error(CreativeProject.recoveryMessage(legacyCueCount(full)));
+    }
     // Materialize effective settings via their existing owners, not a second defaults table.
-    full.bg = Backgrounds.values(); full.hand = HandDrawn.values();
-    return normalizeSharePreset(full);
+    full.bg = artwork.bg; full.hand = artwork.hand;
+    return normalizeSharePreset(full, {preserveProjectContext:!!(options && options.includeProjectContext)});
   }
 
   // ---------------------------------------------------------------------------
@@ -423,10 +505,12 @@
   // ---------------------------------------------------------------------------
 
   function onBeat() {
+    var preset = displayedPreset();
     var shake = fixedComposition() ? 0 : readPath(runtime, 'cam.shake') / 100;
     cam.shakeYaw += (Math.random() - 0.5) * 0.055 * shake;
     cam.shakePitch += (Math.random() - 0.5) * 0.040 * shake;
     // 编排轨里 every=N 的 cue 由节拍计数触发，不必再自己维护一个 BPM 估计。
+    if (preset.project && (!window.CreativeProject || !CreativeProject.timelineAllowed(preset.project))) return;
     for (var i = 0; i < preset.cues.length; i += 1) {
       var c = preset.cues[i];
       if (typeof c.every === 'number' && c.every > 0 && feat.beats % Math.round(c.every) === 0) {
@@ -448,12 +532,12 @@
 
   function fire(cue, lenOverride, songClock) {
     var set = cue.set || {};
-    var keys = Object.keys(set);
+    var keys = Object.keys(set).filter(function (key) { return specFor(key) && Number.isFinite(set[key]); });
     if (!keys.length) return;
-    var from = {};
-    keys.forEach(function (k) { from[k] = readPath(runtime, k); });
+    var from = {}, to = {};
+    keys.forEach(function (k) { from[k] = readPath(runtime, k); to[k] = set[k]; });
     animations.push({
-      keys: keys, from: from, to: set,
+      keys: keys, from: from, to: to,
       start: songClock && window.Stage && Stage.position ? Stage.position() : now(),
       songClock: !!songClock,
       len: Math.max(16, lenOverride || cue.len || 600),
@@ -496,8 +580,11 @@
   };
 
   function stepBindings(fixed) {
+    if (!feat) return;
+    var preset = displayedPreset();
     for (var i = 0; i < preset.bindings.length; i += 1) {
       var b = preset.bindings[i];
+      if (!validBinding(b) || !specFor(b.target) || !Object.prototype.hasOwnProperty.call(BIND_SOURCES,b.source)) continue;
       if (fixed && framingPath(b.target)) continue;
       var src = BIND_SOURCES[b.source];
       if (!src) continue;
@@ -518,6 +605,7 @@
   var SHORT_MS = 1500, LONG_MS = 8000, DWELL_MS = 4500;
 
   function stepDirector(t) {
+    var preset = displayedPreset();
     if (!preset.director) return;
     if (t - lastHistAt < 250) return;
     lastHistAt = t;
@@ -563,6 +651,7 @@
   // scene time continues. This is a runtime policy, never a preset rewrite.
   // Deliberate camera sliders and authored cues still pass through unchanged.
   function fixedComposition() {
+    var preset = displayedPreset();
     var presentation = sceneDefinition(preset.scene).presentation;
     return !!(presentation && presentation.family === 'anime')
       || !!(window.Workshop && Workshop.isEditingAdvanced && Workshop.isEditingAdvanced());
@@ -573,11 +662,17 @@
   }
 
   function resolve(t) {
-    runtime = { cam: {}, look: {}, stage: {}, sc: {} };
-    ['cam', 'look', 'stage'].forEach(function (k) {
-      Object.keys(preset[k] || {}).forEach(function (kk) { runtime[k][kk] = preset[k][kk]; });
+    var preset = displayedPreset();
+    // Normalization guarantees numeric leaves. Keep this private workspace,
+    // clearing removed scene keys, while public runtime() still returns a copy.
+    ['cam', 'look', 'stage', 'sc'].forEach(function (k) {
+      var target = runtime[k] || (runtime[k] = {});
+      var source = preset[k] || {};
+      for (var key in target) {
+        if (!Object.prototype.hasOwnProperty.call(source, key)) delete target[key];
+      }
+      for (var name in source) if (Object.prototype.hasOwnProperty.call(source, name)) target[name] = source[name];
     });
-    runtime.sc = deep(preset.sc);
 
     // 低频跟随：整体抬高机位注视点。放在绑定之前，所以绑定可以再叠加。
     var fixed = fixedComposition();
@@ -593,6 +688,8 @@
   // Completed cues hold their value; later cues start from the preceding value.
   // No triggered flags or saved preset mutation: seeking backwards is reversible.
   function stepTimeline() {
+    var preset = displayedPreset();
+    if (preset.project && (!window.CreativeProject || !CreativeProject.timelineAllowed(preset.project))) return;
     var position = window.Stage && Stage.position ? Number(Stage.position()) : 0;
     if (!Number.isFinite(position)) return;
     if (!timelineCues) timelineCues = preset.cues.filter(function (c) {
@@ -608,7 +705,9 @@
       if (start > position) return;
       Object.keys(cue.set).forEach(function (key) {
         if (!specFor(key) || !Number.isFinite(cue.set[key])) return;
-        var from = tracks[key] ? valueAt(tracks[key], start) : readPath(runtime, key);
+        // Project timeline v1 uses authored baselines. Legacy preset/share v1
+        // retains its audio-composited starting value until explicitly upgraded.
+        var from = tracks[key] ? valueAt(tracks[key], start) : readPath(preset.project ? preset : runtime, key);
         tracks[key] = { from: from, to: clampPath(key, cue.set[key]), start: start,
           len: Math.max(16, Number(cue.len) || 600), ease: cue.ease || 'out' };
       });
@@ -693,6 +792,7 @@
   // 每帧的交互连续量：拖拽惯性、滚轮缩放的平滑趋近、指针视差。
   // 全部放在渲染帧里推进，与事件循环解耦 —— 事件是离散的，画面是连续的。
   function stepInteraction(dtMs, fixed) {
+    if (preview) return;
     if (reducedMotion() || fixed) {
       interact.vx = interact.vy = interact.parYaw = interact.parPitch = 0;
       interact.hadInertia = false;
@@ -779,6 +879,7 @@
   // 双击复位：基础值立刻落到目标（保证动画出栈后不会回弹），同时推一个
   // 从当前值出发的补间 —— 于是看到的是镜头"滑回去"，而不是跳回去。
   function resetView() {
+    invalidatePreview();
     var target = sceneDefinition(preset.scene).camera;
     Object.keys(target).forEach(function (k) { writePath(preset, k, target[k]); });
     interact.zoomTarget = null;
@@ -808,12 +909,13 @@
   }
 
   function setParam(path, v) {
+    invalidatePreview();
     if (!writable(path)) return;
     var val = clampPath(path, v);
     writePath(preset, path, val);
     writePath(runtime, path, val);
-    emit('param', { path: path, value: val });
     saveLocalSoon();
+    emit('param', { path: path, value: val });
     kickStaticFrame();
   }
 
@@ -835,12 +937,30 @@
     return sceneRow(sceneId, path.slice(3));
   }
 
-  function applyIntent(intent) {
+  // create 模式的规范默认基线（技术路线 §6.2）：版本内建的默认预置 +
+  // 目标场景的参数默认与机位入画点。显式交给 materializeIntent，绝不从
+  // 当前舞台猜——同一份 (基线, 意图) 永远物化出同一个候选。
+  function canonicalBaseline(sceneId) {
+    var p = basePreset();
+    if (sceneId && typeof sceneId === 'string'
+      && window.CreativeGL && CreativeGL.sceneById(sceneId) && sceneId !== p.scene) {
+      p.scene = sceneId;
+      p.sc = sceneDefaults(sceneId);
+      var cam = sceneDefinition(sceneId).camera;
+      Object.keys(cam).forEach(function (k) {
+        writePath(p, k, clampPath(k, cam[k]));
+      });
+    }
+    return p;
+  }
+
+  // 纯物化（R3-K）：显式基线 + 意图 → 候选预置与诊断。不读舞台状态、
+  // 不写任何东西、不发事件、不落盘——applyIntent = 本函数 + 提交，
+  // 工坊导入/AI 候选预览用同一份实现。base 为空时取目标场景的规范
+  // 默认基线（create 模式）。
+  function materializeIntent(base, intent) {
     if (!intent || typeof intent !== 'object' || intent.version !== 1) {
       return { ok: false, code: 'bad_version', message: '意图版本不受支持' };
-    }
-    if (!preset) {
-      return { ok: false, code: 'bad_state', message: '舞台尚未初始化' };
     }
     var hasScene = typeof intent.scene === 'string' && !!intent.scene;
     var hasDirector = typeof intent.director === 'boolean';
@@ -855,15 +975,14 @@
       return { ok: false, code: 'bad_scene', message: '未知场景：' + intent.scene };
     }
 
-    var next = deep(preset);
+    var next = deep(base || canonicalBaseline(intent.scene));
     var applied = [];
     var ignored = [];
-    var changed = false;
-    var sceneSwitched = hasScene && intent.scene !== preset.scene;
+    var sceneSwitched = hasScene && intent.scene !== next.scene;
 
-    // 切场景：私有参数整体换成目标场景的默认值，机位落到入画点。与 setScene
-    // 同语义（含"同场景不算切换、不重置用户调参"），但先建好再上任，中途
-    // 不广播。patch 在机位落位之后应用 —— 意图里明确写了的值优先于场景默认。
+    // 切场景：私有参数整体换成目标场景的默认值，机位落到入画点。与
+    // setScene 同语义（"同场景不算切换、不重置用户调参"）。patch 在
+    // 机位落位之后应用——意图里明确写了的值优先于场景默认。
     if (sceneSwitched) {
       next.scene = intent.scene;
       next.sc = sceneDefaults(intent.scene);
@@ -873,7 +992,6 @@
           writePath(next, k, clampPath(k, camTo[k]));
         });
       }
-      changed = true;
     }
 
     patchKeys.forEach(function (path) {
@@ -890,29 +1008,42 @@
       }
       writePath(next, path, val);
       applied.push(path);
-      changed = true;
     });
 
-    if (hasDirector) { next.director = intent.director; changed = true; }
+    if (hasDirector) { next.director = intent.director; }
     if (hasHand) {
       // 首期意图只表达 on；jitter/frame/wave 等用户设置原样保留
       next.hand = Object.assign({}, next.hand, { on: intent.hand.on });
-      changed = true;
     }
 
-    if (!changed) {
+    if (!applied.length && !hasDirector && !hasHand && !sceneSwitched && !(!base && hasScene)) {
       return { ok: false, code: 'empty',
         message: '意图与当前舞台一致，没有需要应用的改变' };
     }
+    return {
+      ok: true,
+      preset: normalize(next),
+      applied: applied,
+      ignored: ignored,
+      sceneSwitched: sceneSwitched,
+    };
+  }
 
-    if (sceneSwitched) animations.length = 0;   // 旧场景的 cue 动画不跨场景续跑
-    preset = normalize(next);
+  function applyIntent(intent) {
+    if (!preset) {
+      return { ok: false, code: 'bad_state', message: '舞台尚未初始化' };
+    }
+    var m = materializeIntent(preset, intent);
+    if (!m.ok) return m;
+    invalidatePreview();
+    if (m.sceneSwitched) animations.length = 0;   // 旧场景的 cue 动画不跨场景续跑
+    preset = m.preset;                            // 物化时已 normalize
     runtime = {};
     resolve(now());
     applyHand();
     saveLocalSoon();
     emit('preset', preset);
-    return { ok: true, preset: deep(preset), applied: applied, ignored: ignored };
+    return { ok: true, preset: deep(preset), applied: m.applied, ignored: m.ignored };
   }
 
   // -------------------------------------------------------------------------
@@ -1018,6 +1149,7 @@
   // 一帧只在活动视图的那个引擎上跑：另一个停着不画，省下来的 GPU 时间正好
   // 留给后处理链；切回去时由 pickView 触发一次即时重绘。
   function renderOne(v, dtMs) {
+    var preset = displayedPreset();
     cameraFramePending = false;
     var definition = sceneDefinition(preset.scene);
     var family = definition && definition.presentation && definition.presentation.family || '';
@@ -1032,7 +1164,7 @@
     if (reduced) sceneTime = v.motionTime;
     if (v === stageView) {
       if (renderedPosition !== null && (position < renderedPosition || position - renderedPosition > 1500)) {
-        animations = animations.filter(function (a) { return !a.songClock; });
+        discardSongClockAnimations();
         energyHist.length = 0; lastHistAt = 0; sectionSince = 0;
       }
       renderedPosition = position;
@@ -1127,7 +1259,7 @@
       colors: colors(),
       // 模型矩阵只承载绕 Y 旋转与整体缩放，但仍然走完整的 mat4：towers 场景
       // 的地面倒影需要把它整体换成镜像矩阵再画一遍，接口一致才不用特殊分支。
-      modelMatrix: makeRotScale(rot, sc),
+      modelMatrix: makeRotScale(rot, sc, v.modelMatrix),
       post: {
         bloom: readPath(runtime, 'look.bloom'),
         bloomThresh: readPath(runtime, 'look.bloomThresh'),
@@ -1178,9 +1310,8 @@
     if (window.Backgrounds) Backgrounds.frame(state);
   }
 
-  function makeRotScale(rotY, scale) {
+  function makeRotScale(rotY, scale, m) {
     var c = Math.cos(rotY) * scale, s = Math.sin(rotY) * scale;
-    var m = new Float32Array(16);
     m[0] = c; m[1] = 0; m[2] = -s; m[3] = 0;
     m[4] = 0; m[5] = scale; m[6] = 0; m[7] = 0;
     m[8] = s; m[9] = 0; m[10] = c; m[11] = 0;
@@ -1188,16 +1319,21 @@
     return m;
   }
 
+  var colorCache = null, colorRawA = null, colorRawB = null;
   function colors() {
-    var a = cssRgb('--music-highlight-rgb', '226, 176, 113');
-    var b = cssRgb('--music-highlight-alt-rgb', null) || a;
-    return [a, b];
+    // Read current computed values so CSS transitions/custom themes remain live;
+    // parse only when they change, using one style lookup for both channels.
+    var style = getComputedStyle(document.documentElement);
+    var a = style.getPropertyValue('--music-highlight-rgb').trim() || '226, 176, 113';
+    var b = style.getPropertyValue('--music-highlight-alt-rgb').trim() || a;
+    if (a !== colorRawA || b !== colorRawB) {
+      colorRawA = a; colorRawB = b;
+      colorCache = [cssRgb(a), cssRgb(b)];
+    }
+    return colorCache;
   }
 
-  function cssRgb(name, fallback) {
-    var raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    if (!raw && fallback) raw = fallback;
-    if (!raw) return null;
+  function cssRgb(raw) {
     var p = raw.split(',');
     return [
       clamp(parseFloat(p[0]) / 255 || 0, 0, 1),
@@ -1322,7 +1458,7 @@
     // 必须是第一个孩子：三维场景在最底下，歌词、唱盘、粒子层都压在它上面。
     // 反过来放会让文字被场景糊住，而且是那种"看上去只是有点脏"的糊。
     el.insertBefore(c, el.firstChild);
-    return { el: el, canvas: c, eng: null, w: 0, h: 0, dpr: 0 };
+    return { el: el, canvas: c, eng: null, w: 0, h: 0, dpr: 0, modelMatrix: new Float32Array(16) };
   }
 
   // 只在两个挂载点上切可见性与那个抬层类的开关。
@@ -1343,6 +1479,7 @@
 
   // 真拆： dispose 上下文 + 把画布从 DOM 摘掉。降级走这条，强制重试也走这条。
   function teardown() {
+    cancelPreview();
     for (var i = 0; i < views.length; i += 1) {
       var v = views[i];
       if (v.eng) { try { v.eng.dispose(); } catch (e) { /* 上下文没了就算了 */ } v.eng = null; }
@@ -1370,6 +1507,7 @@
   // 同一个编排 owner 同时服务侧栏和大舞台；只渲染可见目标。
   // 大舞台开合不改侧栏增强渲染偏好，也不创建模拟频谱或第二个调度器。
   function attachStage(el) {
+    if (!el) cancelPreview();
     if (stageView && stageView.el === el) return true;
     cameraFramePending = false;
     if (stageView) {
@@ -1562,8 +1700,16 @@
     emit('change', preset);
   }
   function saveLocalSoon() {
+    presetRevision += 1;
     if (saveTimer) return;
     saveTimer = setTimeout(saveLocal, 400);
+  }
+
+  function flushLocalSave() {
+    if (!saveTimer) return;
+    clearTimeout(saveTimer);
+    saveTimer = 0;
+    try { localStorage.setItem(LOCAL_KEY, JSON.stringify(preset)); } catch (e) { /* 隐私模式 */ }
   }
 
   function loadLocal() {
@@ -1587,14 +1733,18 @@
   // -------------------------------------------------------------------------
 
   function applyBackground() {
+    var preset = displayedPreset();
     if (window.Backgrounds) Backgrounds.apply(preset.bg || { type: 'theme' });
   }
 
   function applyHand() {
+    var preset = displayedPreset();
     if (window.HandDrawn) HandDrawn.apply(preset.hand || { on: false });
   }
 
   function init() {
+    if (window.Backgrounds && Backgrounds.cancelTemporaryApply) Backgrounds.cancelTemporaryApply();
+    preview = null; presetRevision += 1;
     preset = loadLocal() || basePreset();
     loadLibrary();
     applyBackground();
@@ -1603,12 +1753,91 @@
     return api2;
   }
 
+  function refreshPresentation(preserveMotion) {
+    if (!preserveMotion) {
+      animations.length = 0;
+      timelineCues = null;
+    }
+    runtime = {};
+    interact.dragging = false; interact.vx = interact.vy = 0; interact.zoomTarget = null;
+    resolve(now());
+    applyBackground(); applyHand();
+    kickStaticFrame();
+    if (window.Stage && Stage.kick) Stage.kick();
+  }
+
+  function invalidatePreview() {
+    if (!preview) return;
+    var motion = preview.motion;
+    preview = null;
+    if (window.Backgrounds && Backgrounds.cancelTemporaryApply) Backgrounds.cancelTemporaryApply();
+    if (motion) {
+      var pausedFor = Math.max(0, now() - motion.startedAt);
+      animations = motion.animations;
+      animations.forEach(function (animation) {
+        if (!animation.songClock) animation.start += pausedFor;
+      });
+      timelineCues = motion.timelineCues;
+    }
+    refreshPresentation(!!motion);
+  }
+
+  function cancelPreview(id) {
+    if (!preview || (id && preview.previewId !== id)) return false;
+    invalidatePreview();
+    emit('preview', null);
+    return true;
+  }
+
+  function beginPreview(candidate, proposalHash) {
+    // Only complete, share-safe presets may enter the temporary presentation layer.
+    var next = normalizeSharePreset(candidate);
+    if (preview) cancelPreview(preview.previewId);
+    var committed = committedArtwork();
+    if (window.Backgrounds && Backgrounds.beginTemporaryApply) Backgrounds.beginTemporaryApply();
+    preview = { committedBg: committed.bg, committedHand: committed.hand, previewId: 'preview-' + (++previewSerial), baseRevision: presetRevision,
+      proposalHash: String(proposalHash || ''), preset: next,
+      motion: { animations: deep(animations), timelineCues: timelineCues === null ? null : deep(timelineCues), startedAt: now() } };
+    refreshPresentation();
+    emit('preview', previewStatus());
+    return previewStatus();
+  }
+
+  function previewStatus() {
+    return preview ? { previewId: preview.previewId, baseRevision: preview.baseRevision,
+      proposalHash: preview.proposalHash } : null;
+  }
+
+  function applyPreview(id, proposalHash) {
+    if (!preview || preview.previewId !== id || preview.baseRevision !== presetRevision
+      || preview.proposalHash !== proposalHash) {
+      return { ok: false, code: 'preview_stale', message: '预览已失效，请重新预览后应用' };
+    }
+    var next = preview.preset;
+    preview = null;
+    api2.setPreset(next);
+    if (window.Backgrounds && Backgrounds.commitTemporaryApply) Backgrounds.commitTemporaryApply();
+    emit('preview', null);
+    return { ok: true, preset: deep(preset) };
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { flushLocalSave(); cancelPreview(); }
+  });
+  if (window.addEventListener) window.addEventListener('pagehide', function () {
+    flushLocalSave(); cancelPreview();
+  });
+
   var api2 = {
     init: init,
     attach: attach,
     attachStage: attachStage,
     requestCameraFrame: requestCameraFrame,
     stageActive: function () { return !!stageView; },
+    recordingSurface: function () {
+      return stageView && stageView.eng && !degradedBecause
+        ? {canvas:stageView.canvas,source:'creative',ownsLyrics:api2.ownsLyrics(),requestFrame:kickStaticFrame} : null;
+    },
     syncPosition: function () {
       if (!stageView || !window.Stage || !Stage.position) return;
       if (Stage.position() !== renderedPosition) kickStaticFrame();
@@ -1625,7 +1854,18 @@
     scene: currentScene,
     ownsLyrics: function () { return !!(preset && sceneDefinition(currentScene()).ownsLyrics); },
     shareSnapshot: shareSnapshot,
+    beginPreview: beginPreview,
+    cancelPreview: cancelPreview,
+    applyPreview: applyPreview,
+    preview: previewStatus,
+    revision: function () { return presetRevision; },
     normalizeSharePreset: normalizeSharePreset,
+    setProjectContext: function (value) {
+      var next = CreativeProject.normalizeContext(value);
+      preset.project = next;
+      animations.length = 0;
+      resolve(now()); saveLocalSoon(); emit('project', next);
+    },
     setPreset: function (p, opts) {
       preset = normalize(p);
       if (!(opts && opts.keepName)) { /* 名字随预置走 */ }
@@ -1638,6 +1878,17 @@
       saveLocalSoon();
       emit('preset', preset);
       return deep(preset);
+    },
+    beginNewCueTrack: function () {
+      if (!hasStaleProject()) return false;
+      delete preset.project;
+      preset.cues = [];
+      animations = animations.filter(function (animation) { return !animation.songClock; });
+      timelineCues = null;
+      resolve(now());
+      saveLocalSoon();
+      emit('preset', preset);
+      return true;
     },
     resetSettings: function () {
       // Stop input that could write the previous camera back on the next frame.
@@ -1670,6 +1921,17 @@
       }
       preset.scene = id;
       preset.sc = sceneDefaults(id);
+      if (hasStaleProject()) preset.cues = [];
+      else preset.cues = preset.cues.map(function (cue) {
+        var set = {};
+        Object.keys(cue.set).forEach(function (key) {
+          if (specFor(key)) set[key] = cue.set[key];
+        });
+        return Object.assign({}, cue, { set: set });
+      }).filter(function (cue) { return validCue(cue, id); });
+      preset.bindings = preset.bindings.filter(function (binding) {
+        return specFor(binding.target) && Object.prototype.hasOwnProperty.call(BIND_SOURCES, binding.source);
+      });
       animations.length = 0;
       if (camTo) {
         Object.keys(camTo).forEach(function (k) { writePath(preset, k, clampPath(k, camTo[k])); });
@@ -1710,18 +1972,26 @@
     /** 原子应用一份 StageIntent（提示词编译器的产出）。要么整份预置一次性
      *  换掉并广播一次 preset 事件，要么状态零变化返回 {ok:false,...}。 */
     applyIntent: applyIntent,
+    // R3-K：纯物化与规范默认基线——工坊导入/AI 候选预览用，零副作用。
+    materializeIntent: materializeIntent,
+    canonicalBaseline: function (sceneId) { return deep(canonicalBaseline(sceneId)); },
 
     // 场景与参数元数据：工坊用它们生成控件，不自己维护一份表
     scenes: function () { return window.CreativeGL ? CreativeGL.scenes() : []; },
-    spec: function () {
+    baseSpec: function () { return deep(BASE_SPEC); },
+    // Manual section authoring and the live director use the same bounded rules.
+    sectionRules: function () { return deep(MOODS); },
+    spec: function (sceneId) {
       // 场景行路径必须带 sc. 前缀：setParam/readPath/readRuntime 全都按
       // "sc.键"寻址，runtime() 返回的扁平映射里也是 sc.dimK 这样的键。
       // 工坊拿到前缀后，滑块写值、pathPicker 选值、findRow 反查名称三处才一致。
-      var sceneRows = deep(sceneDefinition(currentScene()).params).map(function (row) {
+      var selectedScene = typeof sceneId === 'string' ? sceneId
+        : sceneId === null ? null : currentScene();
+      var sceneRows = selectedScene ? deep(sceneDefinition(selectedScene).params).map(function (row) {
         var out = row.slice();
         out[0] = 'sc.' + row[0];
         return out;
-      });
+      }) : [];
       return { base: deep(BASE_SPEC),
         scene: sceneRows,
         binds: Object.keys(BIND_SOURCES) };
@@ -1730,20 +2000,23 @@
 
     // 编排轨与绑定
     addCue: function (cue) {
-      if (!validCue(cue)) return false;
-      preset.cues.push(cue);
+      if (hasStaleProject()) return false;
+      if (!validCue(cue, preset.scene) || preset.cues.length >= 64) return false;
+      preset.cues.push(deep(cue));
       saveLocalSoon();
       emit('preset', preset);
       return true;
     },
     updateCue: function (i, cue) {
-      if (!preset.cues[i] || !validCue(cue)) return false;
-      preset.cues[i] = cue;
+      if (hasStaleProject()) return false;
+      if (!preset.cues[i] || !validCue(cue, preset.scene)) return false;
+      preset.cues[i] = deep(cue);
       saveLocalSoon();
       emit('preset', preset);
       return true;
     },
     removeCue: function (i) {
+      if (hasStaleProject()) return false;
       if (!preset.cues[i]) return false;
       preset.cues.splice(i, 1);
       saveLocalSoon();
@@ -1751,12 +2024,17 @@
       return true;
     },
     setBindings: function (list) {
+      if (!Array.isArray(list) || list.length > 32) return false;
       preset.bindings = (list || []).filter(validBinding);
       saveLocalSoon();
       emit('preset', preset);
       return true;
     },
-    fire: function (cue) { fire(cue); },
+    fire: function (cue) {
+      if (hasStaleProject() || !validCue(cue, preset.scene)) return false;
+      fire(cue);
+      return true;
+    },
     setDirector: function (on) {
       preset.director = !!on;
       sectionSince = 0;
@@ -1800,14 +2078,21 @@
     savePreset: function (name) {
       var p = deep(preset);
       p.name = name || p.name || '未命名舞台';
-      var thumb = capture();
+      var thumb = preview ? null : capture();
       if (thumb) p.thumb = thumb;
-      var id = p.id || ('p' + Date.now().toString(36));
+      var sourceId = p.id;
+      var baseId = 'p' + Date.now().toString(36), id = baseId, suffix = 1;
+      while (library.some(function (item) { return item.id === id; })) {
+        id = baseId + '-' + suffix.toString(36);
+        suffix += 1;
+      }
       p.id = id;
-      var at = -1;
-      for (var i = 0; i < library.length; i += 1) if (library[i].id === id) at = i;
-      if (at >= 0) library[at] = p; else library.unshift(p);
-      if (library.length > 40) library.length = 40;
+      library.unshift(p);
+      if (library.length > 40) {
+        var oldest = library.length - 1;
+        if (library[oldest].id === sourceId) oldest -= 1;
+        library.splice(oldest, 1);
+      }
       persistLibrary();
       emit('library', library);
       return p;
@@ -1824,7 +2109,12 @@
       emit('library', library);
       return true;
     },
-    exportJSON: function () { return JSON.stringify(preset, null, 2); },
+    exportJSON: function () {
+      if (hasStaleProject()) throw new Error(CreativeProject.recoveryMessage(legacyCueCount(preset)));
+      var exported = deep(preset);
+      delete exported.legacyCues;
+      return JSON.stringify(exported, null, 2);
+    },
     importJSON: function (text) {
       try {
         var p = JSON.parse(text);
@@ -1871,6 +2161,13 @@
     }
   };
 
+  // Every authoring entry invalidates a temporary candidate before touching committed data.
+  ['setPreset', 'setProjectContext', 'beginNewCueTrack', 'setScene', 'renamePreset', 'patch', 'addCue', 'updateCue', 'removeCue',
+    'setBindings', 'setDirector', 'setStyle', 'setBackground', 'setHandDrawn'].forEach(function (name) {
+    var edit = api2[name];
+    api2[name] = function () { invalidatePreview(); return edit.apply(api2, arguments); };
+  });
+
   function readRuntime() {
     var out = {};
     ['cam.', 'look.', 'stage.', 'sc.'].forEach(function (pre) {
@@ -1892,4 +2189,10 @@
   }
 
   window.CreativeStage = api2;
+  document.addEventListener('stage:track-changed', function () {
+    discardSongClockAnimations();
+    renderedPosition = null;
+    energyHist.length = 0; lastHistAt = 0; sectionSince = 0;
+    resolve(now()); kickStaticFrame();
+  });
 })();

@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT
+     Copyright (c) 2026 hertz-studio contributors
+     3D 歌词轨情绪检查夹具（非产品页）。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>emotion track check</title>
+<link rel="stylesheet" href="stage3d.css">
+<link rel="stylesheet" href="emotion.css">
+<style>
+  body { margin: 0; background: #0a0f0d; }
+  #host { position: relative; width: 1100px; height: 620px; margin: 20px; background: #0a0f0d; }
+  #s3d-reading { position: absolute; inset: 0; color: #dbe4e0; }
+  #out { position: absolute; left: 20px; bottom: 20px; color: #9aa; font: 12px/1.5 monospace; white-space: pre; }
+</style>
+</head>
+<body>
+<div id="host"><div id="s3d-reading" class="s3d-reading"></div></div>
+<pre id="out">running…</pre>
+<script src="lyric-emotion-field.js"></script>
+<script src="lyric-emotion.js"></script>
+<script src="stage-lyrics.js"></script>
+<script>
+(function () {
+  'use strict';
+  var EM = window.LyricEmotion;
+  var LINES = [
+    { start_ms: 0, end_ms: 5000, text: '晚风 吹过 你的 眼睛' },
+    { start_ms: 5000, end_ms: 9000, text: '星光 落在 你我 之间' }
+  ];
+  var TOKENS = [
+    [{ text: '晚风', start_ms: 0, end_ms: 1200 }, { text: '吹过', start_ms: 1200, end_ms: 2600 },
+     { text: '你的', start_ms: 2600, end_ms: 3800 }, { text: '眼睛', start_ms: 3800, end_ms: 5000 }],
+    [{ text: '星光', start_ms: 5000, end_ms: 6200 }, { text: '落在', start_ms: 6200, end_ms: 7600 },
+     { text: '你我', start_ms: 7600, end_ms: 8600 }, { text: '之间', start_ms: 8600, end_ms: 9000 }]
+  ];
+  var position = 500;
+  window.Stage = {
+    lyrics: function () { return { lines: LINES, index: position >= 5000 ? 1 : 0 }; },
+    position: function () { return position; },
+    lyricTokens: function (line) { return TOKENS[LINES.indexOf(line)] || []; }
+  };
+  var host = document.getElementById('s3d-reading');
+  var view = window.StageLyrics.init(host, function () {});
+  var hash = null;
+  var current = null;
+  function snapshot() {
+    var line = host.querySelector('.sl-line.is-active');
+    if (!line) return null;
+    var words = Array.prototype.slice.call(line.querySelectorAll('.sl-word'));
+    var state = EM.resolveForLine(0, { host: 'track-check' });
+    return {
+      emotion: line.getAttribute('data-emotion'),
+      palette: state && state.palette,
+      lineColor: getComputedStyle(line).color,
+      active: line.getAttribute('data-emo-active'),
+      weight: getComputedStyle(line).fontWeight,
+      spacing: getComputedStyle(line).letterSpacing,
+      dy: words.map(function (w) { return getComputedStyle(w).getPropertyValue('--emo-dy').trim(); }),
+      translate: words.map(function (w) { return getComputedStyle(w).translate; }),
+      accents: words.map(function (w) {
+        return {
+          text: w.textContent,
+          marked: w.hasAttribute('data-emo-accent'),
+          weight: getComputedStyle(w).fontWeight
+        };
+      }),
+      colors: words.map(function (w) { return getComputedStyle(w).color; }),
+      bg: words.length ? getComputedStyle(words[0]).backgroundImage : null
+    };
+  }
+  async function select(id) {
+    if (!hash) {
+      var bound = await EM.bindLyrics({ lines: LINES });
+      hash = bound.hash;
+    }
+    EM.setCueDoc({
+      version: 1, lyricsHash: hash, source: 'fixture',
+      lines: id === 'neutral' ? [] : [{ index: 0, emotion: id, intensity: 1, confidence: 1 }]
+    });
+    EM.commitAtBoundary();
+    current = id;
+    position = 500;
+    view.update({ position: position, reduced: false, track: null });
+    view.paint(position);
+    await new Promise(function (r) { requestAnimationFrame(r); });
+    document.getElementById('out').textContent = JSON.stringify(snapshot(), null, 2);
+    return snapshot();
+  }
+  view.update({ position: 500, reduced: false, track: null });
+  function advance() {
+    position = 5500;
+    view.update({ position: position, reduced: false, track: null });
+    view.paint(position);
+    var previous = host.querySelector('.sl-line[data-index="0"]');
+    return previous ? Array.prototype.map.call(previous.querySelectorAll('.sl-word'), function (word) {
+      return word.style.getPropertyValue('--emo-dy');
+    }) : null;
+  }
+  function accent(pattern) {
+    EM.setAccent(true, pattern);
+    view.update({ position: position, reduced: false, track: null });
+    view.paint(position);
+    return snapshot();
+  }
+  window.__trackCheck = { ready: true, select: select, advance: advance, accent: accent, snapshot: snapshot };
+})();
+</script>
+</body>
+</html>

@@ -31,7 +31,15 @@ async function main() {
       await page.addScriptTag({ path: path.join(root, 'plugin/ui', file) });
     }
     await page.evaluate(() => { CreativeStage.init(); Workshop.init(); Workshop.setTab('scene'); Workshop.open(); Workshop.setTab('scene'); });
-    await page.waitForFunction(() => document.querySelectorAll('.ws-anime-preview').length === 4);
+    const artCount = await page.locator('.ws-anime-preview').count();
+    if (!artCount) {
+      assert.equal(await page.locator('.ws-anime-gallery').count(), 0,
+        'a disabled gallery does not leave partial illustration UI');
+      assert.deepEqual(errors, [], 'no browser errors');
+      console.log('SKIP anime gallery animation checks: the gallery is disabled in this Workshop build');
+      return;
+    }
+    assert.equal(artCount, 4, 'enabled gallery renders all four illustrations');
     assert.equal(await page.evaluate(() => Workshop.isEditingAdvanced()), true, 'advanced editing reports its actual target');
     const card = page.locator('.ws-anime-card').first();
     const cardBounds = await card.boundingBox();

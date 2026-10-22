@@ -556,7 +556,7 @@ mod symphonia_features {
     /// wav/aiff 里的 PCM 与 ADPCM 载体：没有扩展名单独指向它们，缺了就放不出声。
     const CODEC_FEATURES: &[&str] = &["pcm", "adpcm"];
 
-    /// symphonia 0.5 没有解码器的扩展名：扫描收得进、播放会报 unsupported，
+    /// symphonia 0.5 没有解码器的扩展名：扫描会检查，但元数据可能读取失败，
     /// 是既有差距，不在本契约内（要支持得先换实现）。
     const UNSUPPORTED_EXTS: &[&str] = &["opus", "ape", "wma"];
 

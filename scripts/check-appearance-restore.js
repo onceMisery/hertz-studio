@@ -79,7 +79,7 @@ function makeEl(tag, id) {
 function makeApp(store) {
   const html = makeEl('html');
   const body = makeEl('body');
-  const links = ['sheen', 'workbench', 'liunian'].map((id) => {
+  const links = ['liunian', 'qingfeng'].map((id) => {
     const l = makeEl('link');
     l.setAttribute('data-skin-css', id);
     l.disabled = true;
@@ -154,23 +154,21 @@ function enabledSkin(app) {
 function checkSkinRestore() {
   section('布局皮肤：刷新后 data-skin 与配套 CSS 的启用状态都还在');
 
-  // 样本取 sheen 而不是 workbench：后者是隐藏皮肤（界面上没有入口），开页会
-  // 主动回落到 classic，用它当样本测的就不是"刷新恢复"了。
   const store = new Map();
   const first = boot(makeApp(store));
-  first.sandbox.Skins.apply('sheen');
-  eq(store.get('vmusic.skin'), 'sheen', '选择写进 localStorage');
+  first.sandbox.Skins.apply('liunian');
+  eq(store.get('vmusic.skin'), 'liunian', '选择写进 localStorage');
 
   const second = boot(makeApp(store));
-  eq(second.html.getAttribute('data-skin'), 'sheen', '刷新后 html 上还是这套皮肤');
-  eq(enabledSkin(second), 'sheen', '刷新后启用的还是这套皮肤的 CSS');
-  eq(second.sandbox.Skins.currentId(), 'sheen', 'Skins.currentId 与之一致');
+  eq(second.html.getAttribute('data-skin'), 'liunian', '刷新后 html 上还是这套皮肤');
+  eq(enabledSkin(second), 'liunian', '刷新后启用的还是这套皮肤的 CSS');
+  eq(second.sandbox.Skins.currentId(), 'liunian', 'Skins.currentId 与之一致');
 
   // 换回去也要成立，否则只是"记住了第一次"。
-  second.sandbox.Skins.apply('liunian');
+  second.sandbox.Skins.apply('qingfeng');
   const third = boot(makeApp(store));
-  eq(third.html.getAttribute('data-skin'), 'liunian', '改成另一套后刷新仍然保持');
-  eq(enabledSkin(third), 'liunian', 'CSS 跟着换到流年');
+  eq(third.html.getAttribute('data-skin'), 'qingfeng', '改成另一套后刷新仍然保持');
+  eq(enabledSkin(third), 'qingfeng', 'CSS 跟着换到清风');
 
   const bad = new Map([['vmusic.skin', 'no-such-skin']]);
   const fourth = boot(makeApp(bad));

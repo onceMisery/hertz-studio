@@ -41,6 +41,47 @@ async function until(read, predicate, message, timeout = 10000) {
   throw new Error(message + ': ' + JSON.stringify(value));
 }
 
+async function progressUsesPalette(page, names) {
+  return page.evaluate((variables) => {
+    const root = document.documentElement;
+    const background = getComputedStyle(document.getElementById('progress-ghost')).backgroundImage;
+    return variables.every((name) => {
+      const probe = document.createElement('span');
+      probe.style.color = getComputedStyle(root).getPropertyValue(name).trim();
+      document.body.appendChild(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return background.includes(color);
+    });
+  }, names);
+}
+
+async function setCoverFollow(page, enabled) {
+  await openSettings(page);
+  const appearance = page.locator('.skset-link[data-skset-key="look"]');
+  if (await appearance.count()) await appearance.click();
+  else await page.locator('.ln-set-link[data-ln-key="look"]').click();
+  if (enabled) await page.locator('#set-cover-follow').check();
+  else await page.locator('#set-cover-follow').uncheck();
+}
+
+function renderEdition(source, full) {
+  let output = '';
+  let inFull = false;
+  for (const line of source.match(/[^\n]*\n|[^\n]+$/g) || []) {
+    const marker = line.trim();
+    if (marker === '// edition:full' || marker === '<!-- edition:full -->') {
+      assert.equal(inFull, false, 'nested edition block');
+      inFull = true;
+    } else if (marker === '// edition:end' || marker === '<!-- edition:end -->') {
+      assert.equal(inFull, true, 'unmatched edition end');
+      inFull = false;
+    } else if (full || !inFull) output += line;
+  }
+  assert.equal(inFull, false, 'unterminated edition block');
+  return output;
+}
+
 async function fixtures() {
   const folder = path.join(root, 'output/skin-playback/fixtures');
   fs.mkdirSync(folder, { recursive: true });
@@ -101,7 +142,7 @@ async function scrollSurface(page, selector, message) {  const surface = page.lo
   await surface.evaluate(element => { element.scrollTop = 0; });
 }
 
-// 顶栏的设置齿轮在经典/浮光/潮汐/黑胶/iOS 里被皮肤摘掉了（导航里已有同一入口），
+// 顶栏的设置齿轮在经典/黑胶里被皮肤摘掉了（导航里已有同一入口），
 // 所以开设置要点当前皮肤里可见的那一颗。
 async function openSettings(page) {
   const gear = page.locator('#settings-entry');
@@ -110,7 +151,7 @@ async function openSettings(page) {
 }
 
 async function skins(page) {
-  for (const skin of ['classic', 'sheen', 'workbench', 'liunian']) {
+  for (const skin of ['classic', 'liunian', 'qingfeng']) {
     for (const [width, height] of [[1440, 900], [1024, 700], [390, 844], [320, 640]]) {
       await page.setViewportSize({ width, height });
       await page.evaluate(value => Skins.apply(value), skin);
@@ -261,7 +302,7 @@ async function listScrolling(page, tracks) {
   const playlist = await api('POST', '/v1/playlists', { name: 'Skin scroll audit' });
   await api('POST', `/v1/playlists/${playlist.id}/tracks`, { track_ids: queue });
   await ready(page);
-  for (const skin of ['classic', 'sheen', 'workbench', 'liunian']) {
+  for (const skin of ['classic', 'liunian', 'qingfeng']) {
     await page.setViewportSize({ width: 1024, height: 700 });
     await page.evaluate(value => Skins.apply(value), skin);
     for (const [view, selector] of [['library', '#lib-list'], ['queue', '#queue-list'], ['favorites', '#fav-list']]) {
@@ -310,18 +351,20 @@ async function appearance(page, tracks) {
   await api('POST', '/v1/player/load', { track_id: tracks[0].id, queue: tracks.slice(0, 4).map(track => track.id) });
   await ready(page);
   await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--music-highlight'));
-  await openSettings(page);
-  await page.locator('#set-cover-follow').uncheck();
+  check(await progressUsesPalette(page, ['--music-highlight', '--music-highlight-alt']),
+    'playback progress uses both cover palette colors');
+  await setCoverFollow(page, false);
   await until(() => api('GET', '/v1/settings'), value => value.cover_follow === false, 'cover preference saved');
   check(await page.evaluate(() => !document.documentElement.style.getPropertyValue('--music-highlight')
     && !document.getElementById('ambient').classList.contains('has-art')
     && document.getElementById('cover').style.backgroundImage !== 'none'), 'cover follow off restores theme and preserves album art');
+  check(await progressUsesPalette(page, ['--accent', '--accent-2']),
+    'playback progress falls back to the active theme palette');
   await ready(page);
   await page.waitForFunction(() => !document.getElementById('set-cover-follow').checked);
   check(await page.evaluate(() => !document.documentElement.style.getPropertyValue('--music-highlight')
     && !document.getElementById('ambient').classList.contains('has-art')), 'cover follow preference survives refresh');
-  await openSettings(page);
-  await page.locator('#set-cover-follow').check();
+  await setCoverFollow(page, true);
   await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--music-highlight'));
   check(true, 'cover follow re-enables without changing track');
   await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -334,10 +377,14 @@ async function appearance(page, tracks) {
   fs.mkdirSync(output, { recursive: true });
   const health = await fetch(base + '/v1/health').then(response => response.json());
   assert.equal(health.backend, 'null', 'Use an isolated VMUSIC_BACKEND=null service for this check');
-  for (const file of ['app.js', 'stage.js', 'style.css', ...['sheen', 'workbench', 'liunian'].map(skin => `skins/skin.${skin}.css`)]) {
+  for (const file of ['app.js', 'stage.js', 'style.css', 'stage.css', ...['liunian', 'qingfeng'].map(skin => `skins/skin.${skin}.css`)]) {
     const response = await fetch(new URL(file, base));
     assert.ok(response.ok, `Cannot fetch ${file}`);
-    assert.ok((await response.text()).replace(/\r\n/g, '\n') === fs.readFileSync(path.join(web, file), 'utf8').replace(/\r\n/g, '\n'),
+    const served = (await response.text()).replace(/\r\n/g, '\n');
+    const source = fs.readFileSync(path.join(web, file), 'utf8');
+    const matchesEdition = [false, true].some(full =>
+      renderEdition(source, full).replace(/\r\n/g, '\n') === served);
+    assert.ok(matchesEdition,
       `Stale embedded asset ${file}; rebuild the isolated service`);
   }
   // 令牌不再从页面里抠：`GET /` 只在出示凭据时把令牌写进 HTML，裸请求回的是

@@ -15,6 +15,7 @@
 //! `downloads`、`quality`、`keep`、`protected` 等），插件的 dispatcher 必须留在本 crate
 //! 内部才碰得到，所以 `rpc` 在这里而不在 `plugin/backend`。
 
+pub mod ai;
 pub mod bootstrap;
 pub mod collection;
 pub mod complete;
@@ -24,6 +25,8 @@ pub mod diag;
 pub mod edition;
 pub mod error;
 pub mod history;
+pub(crate) mod idempotency;
+pub(crate) mod lyrics;
 pub mod online;
 mod online_play;
 pub mod persist;
@@ -36,6 +39,8 @@ pub mod rpc;
 pub mod scan;
 pub mod secrets;
 pub mod stage_beats;
+pub(crate) mod stage_pitch;
+pub(crate) mod stage_project;
 pub mod state;
 pub mod ticket;
 pub mod ws;

@@ -1,0 +1,35 @@
+{
+  "corpusVersion": "stage-intent-v3",
+  "frozenAt": "2026-10-20",
+  "provenance": "Byte-identical reuse of the public synthetic v2 prompts and authored labels; no user lyrics or media",
+  "labelStatus": "authored; independent semantic label review still required",
+  "holdoutStatus": "reserved, disjoint synthetic prompts; not independently collected or evaluated",
+  "mechanicalAudit": {
+    "status": "passed",
+    "contractHash": "b21f66f38c39f600319cb68754ab273e52fc454bfbbc080abc2d7eceaa052337",
+    "candidateLabelsMaterialized": 89,
+    "candidateLabelsChecked": 89,
+    "refusalLabelsStructurallyConflicted": 0,
+    "semanticReviewComplete": false
+  },
+  "corpusSha256": "25c1653899043b36b644172712a53fca5d7552cc8ae447e74c426a48f91bf3ed",
+  "schemaHash": "b21f66f38c39f600319cb68754ab273e52fc454bfbbc080abc2d7eceaa052337",
+  "total": 160,
+  "splits": {
+    "development": 120,
+    "holdout": 40
+  },
+  "categories": {
+    "common": 25,
+    "open_vocabulary": 14,
+    "negation": 25,
+    "conflict": 13,
+    "boundary": 13,
+    "cross_scene": 13,
+    "unknown": 13,
+    "injection": 14,
+    "long": 13,
+    "temporal": 9,
+    "relative": 8
+  }
+}

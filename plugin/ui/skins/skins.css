@@ -96,7 +96,7 @@
 }
 
 /* ===================== 共享设置浮层（清风同款） ==========================
-   classic / sheen / workbench / ios / chaoxi 的设置走这层（DOM 由
+   classic / heijiao / orbit 的设置走这层（DOM 由
    skins/skin-settings-sheet.js 建）。本文件常驻加载、不随皮肤启停；
    尺寸与描边读当前皮肤的 --skin-* 令牌，classic 没有令牌时走回退值。
    颜色一律用主题令牌 —— 皮肤只管布局，配色跟主题走。 */

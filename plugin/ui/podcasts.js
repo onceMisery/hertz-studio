@@ -10,6 +10,8 @@
   var subscriptionRevisions = new Map();
   var PAGE = 50;
   var COUNTRY_KEY = 'hertz.podcasts.country';
+  var activeEpisode = null, progressWrite = Promise.resolve();
+  var pendingResume = null, observedTrackId = null;
   function el(id) { return document.getElementById(id); }
   function node(tag, className, text) {
     var n = document.createElement(tag);
@@ -135,6 +137,7 @@
     rows.replaceChildren();
     st.episodes.forEach(function (episode, index) {
       var row = node('article', 'podcast-episode');
+      row.dataset.episodeId = episode.id;
       var copy = node('div', 'podcast-episode-copy');
       copy.appendChild(node('span', 'podcast-episode-meta',
         [dateText(episode.published_at), duration(episode.duration_ms)].filter(Boolean).join(' · ')));
@@ -143,6 +146,11 @@
       play.setAttribute('aria-label', '播放：' + episode.title);
       play.onclick = function () { playAt(index); };
       copy.appendChild(play);
+      if (episode.completed) {
+        copy.appendChild(node('span', 'podcast-episode-progress', '已听完'));
+      } else if (episode.progress_ms > 0) {
+        copy.appendChild(node('span', 'podcast-episode-progress', '继续收听 · ' + duration(episode.progress_ms)));
+      }
       if (episode.description) {
         var detail = node('details', 'podcast-episode-description');
         detail.appendChild(node('summary', '', '单集简介'));
@@ -154,6 +162,27 @@
     el('podcast-more').hidden = !st.more;
     el('podcast-more').disabled = st.busy;
     el('podcast-feed-refresh').disabled = st.busy;
+  }
+  function updateEpisodeProgress(episode) {
+    var rows = el('podcast-episodes').children;
+    for (var i = 0; i < rows.length; i += 1) {
+      var row = rows[i];
+      if (row.dataset.episodeId !== episode.id) continue;
+      var copy = row.querySelector('.podcast-episode-copy');
+      var badge = copy.querySelector('.podcast-episode-progress');
+      var label = episode.completed ? '已听完'
+        : episode.progress_ms > 0 ? '继续收听 · ' + duration(episode.progress_ms) : '';
+      if (!label) {
+        if (badge) badge.remove();
+      } else if (badge) {
+        badge.textContent = label;
+      } else {
+        badge = node('span', 'podcast-episode-progress', label);
+        var description = copy.querySelector('.podcast-episode-description');
+        copy.insertBefore(badge, description || null);
+      }
+      return;
+    }
   }
   async function loadEpisodes(reset, force) {
     if (!st.show || st.busy) return;
@@ -185,12 +214,103 @@
     st.episodes = []; st.offset = 0; st.total = 0; st.limit = 0; st.more = false;
     return loadEpisodes(true, false);
   }
-  function playAt(index) {
+  async function playAt(index) {
     var playable = st.episodes.filter(function (episode) { return episode.playable; });
     var selected = st.episodes[index];
     var position = playable.indexOf(selected);
     if (position < 0) return;
-    Promise.resolve(H.play(playable, position)).catch(function (error) { failure('播放失败', error); });
+    var resume = !selected.completed && selected.progress_ms >= 5_000
+      ? { id: selected.id, previousTrackId: observedTrackId, position_ms: selected.progress_ms, ready: false }
+      : null;
+    pendingResume = resume;
+    try {
+      await H.play(playable, position);
+      if (resume && pendingResume === resume) {
+        resume.ready = true;
+        if (observedTrackId === 'online:podcast:' + resume.id
+          && activeEpisode && activeEpisode.id === resume.id) {
+          pendingResume = null;
+          restoreEpisodePosition(resume);
+        }
+      }
+    } catch (error) {
+      if (pendingResume === resume) pendingResume = null;
+      failure('播放失败', error);
+    }
+  }
+  function restoreEpisodePosition(resume) {
+    activeEpisode.position_ms = resume.position_ms;
+    activeEpisode.lastSavedPosition = resume.position_ms;
+    activeEpisode.restoring = true;
+    H.seek(resume.position_ms).then(function () {
+      if (activeEpisode && activeEpisode.id === resume.id) activeEpisode.restoring = false;
+    }).catch(function (error) { failure('恢复收听位置失败', error); });
+  }
+  function persistProgress(episode, positionMs, completed) {
+    if (!episode || !episode.id || !Number.isFinite(positionMs)) return progressWrite;
+    var position = Math.max(0, Math.floor(positionMs));
+    progressWrite = progressWrite.catch(function () {}).then(async function () {
+      var progress = await T.post('/v1/podcasts/progress', {
+        episode_id: episode.id, position_ms: position, completed: !!completed,
+      });
+      st.episodes.forEach(function (item) {
+        if (item.id !== episode.id) return;
+        item.progress_ms = progress.progress_ms;
+        item.completed = progress.completed;
+        updateEpisodeProgress(item);
+      });
+    }).catch(function () { /* Playback must continue if progress storage is unavailable. */ });
+    return progressWrite;
+  }
+  function onPlaybackSnapshot(snap) {
+    var match = /^online:podcast:([a-f0-9]{40})$/.exec(snap && snap.track_id || '');
+    var id = match && match[1];
+    var trackId = snap && snap.track_id || null;
+    var resume = null;
+    if (pendingResume) {
+      if (id === pendingResume.id) {
+        if (pendingResume.ready) {
+          resume = pendingResume;
+          pendingResume = null;
+        }
+      } else if (trackId !== pendingResume.previousTrackId) {
+        pendingResume = null;
+      }
+    }
+    observedTrackId = trackId;
+    if (activeEpisode && activeEpisode.id !== id) {
+      persistProgress(activeEpisode, activeEpisode.position_ms, activeEpisode.completed);
+    }
+    if (!id) { activeEpisode = null; return; }
+    var now = Date.now();
+    if (!activeEpisode || activeEpisode.id !== id) {
+      var savedEpisode = st.episodes.find(function (episode) { return episode.id === id; });
+      activeEpisode = { id: id, position_ms: snap.position_ms || 0,
+        duration_ms: snap.duration_ms || 0, playing: !!snap.playing,
+        completed: !!(savedEpisode && savedEpisode.completed),
+        lastSavedAt: now, lastSavedPosition: snap.position_ms || 0, restoring: false };
+    } else {
+      if (!activeEpisode.restoring) activeEpisode.position_ms = snap.position_ms || 0;
+      activeEpisode.duration_ms = snap.duration_ms || activeEpisode.duration_ms;
+      activeEpisode.playing = !!snap.playing;
+    }
+    if (activeEpisode.completed && activeEpisode.playing && activeEpisode.position_ms < 5_000) {
+      activeEpisode.completed = false;
+      persistProgress(activeEpisode, activeEpisode.position_ms, false);
+    }
+    if (resume) {
+      restoreEpisodePosition(resume);
+    }
+    if (activeEpisode.playing && activeEpisode.position_ms >= 5_000
+      && now - activeEpisode.lastSavedAt >= 10_000) {
+      activeEpisode.lastSavedAt = now;
+      activeEpisode.lastSavedPosition = activeEpisode.position_ms;
+      persistProgress(activeEpisode, activeEpisode.position_ms, activeEpisode.completed);
+    } else if (!activeEpisode.playing && activeEpisode.position_ms !== activeEpisode.lastSavedPosition) {
+      activeEpisode.lastSavedAt = now;
+      activeEpisode.lastSavedPosition = activeEpisode.position_ms;
+      persistProgress(activeEpisode, activeEpisode.position_ms, activeEpisode.completed);
+    }
   }
   async function changeSubscription() {
     if (!st.show || changingSubscription) return;
@@ -260,6 +380,13 @@
     el('podcast-more').onclick = function () { loadEpisodes(false, false); };
     el('podcast-feed-refresh').onclick = function () { loadEpisodes(true, true); };
     el('podcast-play-loaded').onclick = function () { playAt(0); };
+    document.addEventListener('playback:snapshot', function (event) { onPlaybackSnapshot(event.detail); });
+    document.addEventListener('playback:ended', function (event) {
+      if (!activeEpisode) return;
+      activeEpisode.completed = true;
+      activeEpisode.position_ms = activeEpisode.duration_ms || event.detail.position_ms || activeEpisode.position_ms;
+      persistProgress(activeEpisode, activeEpisode.position_ms, true);
+    });
     renderShows();
   }
   window.Podcasts = { bind: bind, onViewEnter: function () { return refreshSubscriptions(); } };

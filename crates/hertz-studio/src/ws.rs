@@ -17,7 +17,7 @@ use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 
 use crate::error::unauthorized;
-use crate::state::{AppState, WsEvent};
+use crate::state::{AppState, ViewerGuard, WsEvent};
 
 #[derive(Deserialize)]
 pub struct WsQuery {
@@ -45,6 +45,9 @@ pub async fn ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+    // 计数守卫：本函数返回（含下面任何一条早退）即 -1，所以「还有没有页面开着」
+    // 与这条连接的存活期一一对应。武装逻辑见 `AppState::schedule_depart_pause`。
+    let _viewer = ViewerGuard::enter(state.clone());
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.events.subscribe();
 
@@ -55,39 +58,24 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         return;
     }
 
-    loop {
+    'events: loop {
         tokio::select! {
-            event = rx.recv() => match event {
-                Ok(event) => {
-                    let text = match serde_json::to_string(&event) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            // 丢帧是对的，但一声不吭地丢不是：这里曾经因为
-                            // Spectrum 变体的表示法问题长期一帧不发，而状态帧
-                            // 照常，界面上只是"频谱不动了"，没有任何线索指向这里。
-                            tracing::warn!(error = %e, "ws event failed to serialise");
-                            continue;
+            event_batch = state.next_event_batch(&mut rx) => match event_batch {
+                Some(events) => {
+                    for event in events.into_iter().flatten() {
+                        let text = match serde_json::to_string(&event) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "ws event failed to serialise");
+                                continue;
+                            }
+                        };
+                        if sender.send(Message::Text(text.into())).await.is_err() {
+                            break 'events;
                         }
-                    };
-                    if sender.send(Message::Text(text.into())).await.is_err() {
-                        break;
                     }
                 }
-                // 状态 + 频谱约 80 帧/秒，广播容量 128：消费稍慢（GC、
-                // 后台标签页、系统卡顿）就必然掉队。缺几帧增量无所谓——状态帧
-                // 每拍都在全量重发，跳过即可；若直接断开，客户端要走指数退避
-                // 重连，退避窗口里界面会停在旧状态（例如曲尾的「暂停」按钮）。
-                // 唯一的例外是 buffering：它是边沿事件，不随状态帧重发，掉了
-                // active=false 就是播放键永久转圈，所以掉队时按真值补一帧。
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let resync = serde_json::to_string(&state.buffering_event().await)
-                        .unwrap_or_default();
-                    if sender.send(Message::Text(resync.into())).await.is_err() {
-                        break;
-                    }
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                None => break,
             },
             incoming = receiver.next() => match incoming {
                 Some(Ok(Message::Close(_))) | None => break,
@@ -117,6 +105,9 @@ mod tests {
     /// 状态帧却一切正常，界面只是安静地不动。
     #[test]
     fn data_carrying_events_serialise_with_a_type_tag() {
+        let json = serde_json::to_string(&WsEvent::QueueChanged).unwrap();
+        assert_eq!(json, "{\"type\":\"queue_changed\"}");
+
         let json = serde_json::to_string(&WsEvent::Spectrum {
             bands: vec![0.5, 0.25],
         })
@@ -182,6 +173,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json, "{\"type\":\"buffering\",\"active\":true,\"pct\":40}");
+
+        let json = serde_json::to_string(&WsEvent::AiTasksResync).unwrap();
+        assert_eq!(json, "{\"type\":\"ai_tasks_resync\"}");
 
         // beatmap_ready：bpm=None 时字段必须整体缺席（不是 null）。
         // persisted 不许缺席：「就绪」与「已写进磁盘」是两种状态，消费方要能

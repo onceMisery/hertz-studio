@@ -126,10 +126,29 @@ const PLATFORM_ICONS: &[(&str, &[u8])] = &[
 
 const HTML: &str = "text/html; charset=utf-8";
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let mcp_stdio = args.mcp_stdio;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run(args));
+    if mcp_stdio {
+        // Tokio stdio uses blocking OS reads/writes. Dropping an async wait does
+        // not stop a pipe syscall; default runtime Drop can then wait forever.
+        // This process owns only the thin adapter, so bound runtime shutdown and
+        // let process exit reclaim its stdio threads. Playback lives elsewhere.
+        runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    }
+    result
+}
 
+async fn run(args: Args) -> anyhow::Result<()> {
+    // Evaluation is a separate local-only developer process. Branch before
+    // config migration, DB/audio bootstrap, runner locks and HTTP listeners.
+    if std::env::args().nth(1).as_deref() == Some("--evaluate-stage") {
+        return hertz_studio::ai::evaluation::run_stdio().await;
+    }
     if args.version {
         println!(
             "hertz-studio {} ({})",
@@ -143,10 +162,28 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // MCP 适配进程（技术路线 §5.3）：必须在数据迁移、bootstrap、数据库、
+    // 音频初始化与 HTTP 监听之前分流。它只读显式 DataDir 里的发现与凭据
+    // 文件，业务副作用全在已运行的独立服务里；日志走 stderr，stdout 专属
+    // transport。DataDir 必须显式给出——适配器不猜默认目录。
+    if args.mcp_stdio {
+        let Some(data_dir) = args.data_dir.clone() else {
+            eprintln!("hertz-studio-ai: --mcp-stdio 需要显式 --data-dir");
+            std::process::exit(2);
+        };
+        init_logging_stderr("info");
+        let cfg = hertz_studio::ai::mcp::adapter::AdapterConfig {
+            data_dir,
+            grant_id: args.grant,
+        };
+        return hertz_studio::ai::mcp::server::run_stdio(cfg).await;
+    }
+
     // 改名前的数据目录叫 mmusic-studio；必须在任何读写路径碰到目录之前搬完，
     // 否则 prepare 会先把新目录建成空库。
     config::migrate_legacy_data_dir();
     let data_dir = args.data_dir.unwrap_or_else(config::default_data_dir);
+    let data_dir = bootstrap::absolute_data_dir(&data_dir)?;
     let boot_config = bootstrap::prepare(&data_dir).await?;
     init_logging(&boot_config.log.level, &boot_config.log.format);
 
@@ -189,7 +226,7 @@ async fn main() -> anyhow::Result<()> {
         )
         // OBS 浮层页：静态壳不走鉴权（没有数据），数据端点 /v1/overlay/lyric
         // 自带 token 校验，页面从 ?token= 读。与 index 同款 no-cache。
-        .route("/overlay", get(|| asset(HTML, OVERLAY_HTML)))
+        .route("/overlay", get(|| html_asset(HTML, OVERLAY_HTML)))
         // 带内容指纹的 JS/CSS 升级成长缓存；其余（含 /v1 接口）不受影响。
         .layer(axum::middleware::from_fn(asset_cache))
         .with_state(state.clone());
@@ -199,8 +236,40 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
     let local = listener.local_addr()?;
     let actual_port = local.port();
+    // 受限门面的开放条件（§5.5）：锁在本进程 + 实际绑定回环。0.0.0.0、
+    // 具体网卡与 IPv6 一律不开放——不发布发现，也不挂认证后的受限路由。
+    state.set_ai_external_ready(local.ip().is_loopback() && booted.ai_lock.is_some());
 
     let discovery = state::write_discovery(&state, actual_port).await?;
+    // AI 受限门面的发现文件（技术路线 §5.5）：只在**实际绑定** IPv4 回环
+    // 时发布，且必须拿到 AI runner 锁——锁被其它进程持有（双开）就不发布，
+    // 受限门面保持不可对接；0.0.0.0 / 具体网卡 / IPv6 不发布这个实验入口。
+    // 锁以进程生命周期持有（forget 跳过 Drop，OS 在退出时统一释放）。
+    let mut ai_discovery_published = false;
+    if local.ip() == std::net::IpAddr::from([127, 0, 0, 1]) && booted.ai_lock.is_some() {
+        {
+            let instance = vmusic_store::ai::get_or_create_instance(&state.db).await?;
+            let doc = hertz_studio::ai::mcp::discovery::DiscoveryDoc {
+                version: hertz_studio::ai::mcp::discovery::DISCOVERY_VERSION,
+                pid: std::process::id(),
+                port: actual_port,
+                protocol_version: vmusic_core::PROTOCOL_VERSION.to_string(),
+                owner_instance_id: instance.owner_instance_id,
+                server_instance_id: state.server_instance_id().to_string(),
+                edition: hertz_studio::edition::NAME.to_string(),
+            };
+            match hertz_studio::ai::mcp::discovery::publish(&state.data_dir, &doc) {
+                Ok(()) => {
+                    ai_discovery_published = true;
+                    println!(
+                        "  ai-mcp   {}",
+                        hertz_studio::ai::mcp::discovery::path(&state.data_dir).display()
+                    );
+                }
+                Err(e) => tracing::warn!("AI 发现文件发布失败: {e}"),
+            }
+        }
+    }
     // 打印的地址按**实际绑定**的接口来（绑 0.0.0.0 时回落到 127.0.0.1，那是本机
     // 访问的正确入口；绑具体网卡时给那个地址，否则用户会照着 127.0.0.1 去别的机器上试）。
     let shown = if local.ip().is_unspecified() {
@@ -233,12 +302,38 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let shutdown_state = state.clone();
+    let mut exiting = state.exiting_signal();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            tokio::signal::ctrl_c().await.ok();
+            // Ctrl-C 与首页那颗退出钮走同一条收尾（`POST /v1/system/shutdown`
+            // 拉 watch），两条入口不许一个干净一个留半截状态。
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                changed = exiting.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+            }
             tracing::info!("shutting down");
             shutdown_state.audio.shutdown();
             state::remove_discovery(&shutdown_state.data_dir).await;
+            // 只摘自己发布的那份：未持锁的第二个进程（共用 DataDir、另一端口）
+            // 退出时不能把持锁进程的对接入口删掉。
+            if ai_discovery_published {
+                hertz_studio::ai::mcp::discovery::remove_if_owned(
+                    &shutdown_state.data_dir,
+                    shutdown_state.server_instance_id(),
+                );
+            }
+            // drain 看门狗：升级过的 `/ws` 连接不属于「会自己结束的 in-flight」，
+            // 页面还开着时按退出钮，hyper 能一直等到天荒地老。收尾三步已经做完
+            // （声音停了、发现文件删了），所以到点直接结束进程不会留半截状态。
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tracing::info!("drain 未结束，直接退出进程");
+                std::process::exit(0);
+            });
         })
         .await?;
 
@@ -249,7 +344,10 @@ async fn main() -> anyhow::Result<()> {
 fn ui_asset_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
     let mut router = Router::new();
     for entry in assets::UI_ASSETS {
-        router = router.route(entry.path, get(move || asset(entry.mime, entry.body)));
+        router = router.route(
+            entry.path,
+            get(move |headers: axum::http::HeaderMap| asset(entry.mime, entry.body, headers)),
+        );
     }
     router
 }
@@ -270,13 +368,13 @@ fn assets_fingerprint() -> &'static str {
 }
 
 /// FNV-1a over the given bodies, as 16 hex digits.
-fn hash_inputs(inputs: &[&str]) -> String {
+fn hash_inputs(inputs: &[&[u8]]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for body in inputs {
         // 先混入长度，否则 ["ab","c"] 会与 ["a","bc"] 撞成同一个值。
         hash ^= body.len() as u64;
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        for byte in body.as_bytes() {
+        for byte in *body {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
@@ -550,15 +648,117 @@ async fn index(
 /// 唯一的例外是 `asset_cache`：index.html 渲染时会给引用挂上 `?v=<内容指纹>`，
 /// 那种 URL 已经随内容变化，中间件把响应升级成 immutable。裸路径（没有指纹）
 /// 仍走这里的 no-cache。
-async fn asset(mime: &'static str, body: &'static str) -> axum::response::Response {
+async fn html_asset(mime: &'static str, html: &'static str) -> axum::response::Response {
     (
         [
             (axum::http::header::CONTENT_TYPE, mime),
             (axum::http::header::CACHE_CONTROL, "no-cache"),
         ],
-        body,
+        html,
     )
         .into_response()
+}
+
+fn accepts_gzip(headers: &axum::http::HeaderMap) -> bool {
+    let mut gzip = None;
+    let mut wildcard = None;
+    for value in headers.get_all(axum::http::header::ACCEPT_ENCODING) {
+        let Ok(value) = value.to_str() else { continue };
+        for item in value.split(',') {
+            let mut parts = item.trim().split(';');
+            let encoding = parts.next().unwrap_or("").trim();
+            let mut quality = 1.0_f32;
+            for parameter in parts {
+                if let Some((key, value)) = parameter.trim().split_once('=') {
+                    if key.trim().eq_ignore_ascii_case("q") {
+                        quality = value
+                            .trim()
+                            .parse::<f32>()
+                            .ok()
+                            .filter(|q| q.is_finite() && (0.0..=1.0).contains(q))
+                            .unwrap_or(0.0);
+                    }
+                }
+            }
+            if encoding.eq_ignore_ascii_case("gzip") {
+                gzip = Some(quality);
+            } else if encoding == "*" {
+                wildcard = Some(quality);
+            }
+        }
+    }
+    gzip.or(wildcard).is_some_and(|q| q > 0.0)
+}
+
+fn accepts_identity(headers: &axum::http::HeaderMap) -> bool {
+    let mut identity = None;
+    let mut wildcard = None;
+    for value in headers.get_all(axum::http::header::ACCEPT_ENCODING) {
+        let Ok(value) = value.to_str() else { continue };
+        for item in value.split(',') {
+            let mut parts = item.trim().split(';');
+            let encoding = parts.next().unwrap_or("").trim();
+            let mut quality = 1.0_f32;
+            for parameter in parts {
+                if let Some((key, value)) = parameter.trim().split_once('=') {
+                    if key.trim().eq_ignore_ascii_case("q") {
+                        quality = value
+                            .trim()
+                            .parse::<f32>()
+                            .ok()
+                            .filter(|q| q.is_finite() && (0.0..=1.0).contains(q))
+                            .unwrap_or(0.0);
+                    }
+                }
+            }
+            if encoding.eq_ignore_ascii_case("identity") {
+                identity = Some(quality);
+            } else if encoding == "*" {
+                wildcard = Some(quality);
+            }
+        }
+    }
+    identity.map_or(!wildcard.is_some_and(|q| q == 0.0), |q| q > 0.0)
+}
+
+async fn asset(
+    mime: &'static str,
+    body: &'static assets::UiBody,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let gzip = accepts_gzip(&headers);
+    if !gzip && !accepts_identity(&headers) {
+        let mut response = axum::http::StatusCode::NOT_ACCEPTABLE.into_response();
+        response.headers_mut().insert(
+            axum::http::header::VARY,
+            axum::http::HeaderValue::from_static("Accept-Encoding"),
+        );
+        return response;
+    }
+    let payload = if gzip {
+        body.gzip
+    } else {
+        body.identity().as_bytes()
+    };
+    let mut response = (
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        payload,
+    )
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::VARY,
+        axum::http::HeaderValue::from_static("Accept-Encoding"),
+    );
+    if gzip {
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_ENCODING,
+            axum::http::HeaderValue::from_static("gzip"),
+        );
+    }
+    response
 }
 
 /// 壁纸字节出口。名字取自白名单表，查不到就是 404 —— `{name}` 只匹配单段
@@ -667,6 +867,17 @@ fn init_logging(level: &str, format: &str) {
     }
 }
 
+/// MCP 适配进程专用：stdout 是 SDK transport，一行日志污染都会让帧解析
+/// 失败——日志（含 rmcp 自己的）一律去 stderr（技术路线 §5.3）。
+fn init_logging_stderr(level: &str) {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 struct Args {
     help: bool,
     open: bool,
@@ -674,6 +885,8 @@ struct Args {
     port: Option<u16>,
     data_dir: Option<std::path::PathBuf>,
     version: bool,
+    mcp_stdio: bool,
+    grant: Option<String>,
 }
 
 impl Args {
@@ -685,6 +898,8 @@ impl Args {
             port: None,
             data_dir: None,
             version: false,
+            mcp_stdio: false,
+            grant: None,
         };
         let mut iter = std::env::args().skip(1);
         while let Some(arg) = iter.next() {
@@ -692,6 +907,8 @@ impl Args {
                 "-h" | "--help" => args.help = true,
                 "--version" => args.version = true,
                 "--open" => args.open = true,
+                "--mcp-stdio" => args.mcp_stdio = true,
+                "--grant" => args.grant = iter.next(),
                 "--bind" => args.bind = iter.next(),
                 "--port" => args.port = iter.next().and_then(|v| v.parse().ok()),
                 "--data-dir" => args.data_dir = iter.next().map(std::path::PathBuf::from),
@@ -711,6 +928,7 @@ fn print_help() {
          --port PORT      Port, 0 for a random free port (Standard 7635, Full 7634)\n  \
          --data-dir DIR   Where the database, cache and token live\n  \
          --open           Open the UI in the default browser\n  \
+         --evaluate-stage --origin URL --model NAME  Evaluate one local synthetic case from stdin\n  \
          -h, --help       Show this help\n\n\
          Environment: VMUSIC_BIND, VMUSIC_PORT, VMUSIC_BACKEND, VMUSIC_LOG, VMUSIC_DATA_DIR"
     );
@@ -758,7 +976,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().no_gzip().build().unwrap();
         let mut paths = std::collections::HashSet::new();
         for entry in assets::UI_ASSETS {
             assert!(
@@ -774,8 +992,43 @@ mod tests {
             assert_eq!(response.status(), 200, "{}", entry.path);
             assert_eq!(response.headers()["content-type"], entry.mime);
             assert_eq!(response.headers()["cache-control"], "no-cache");
-            assert_eq!(response.text().await.unwrap(), entry.body, "{}", entry.path);
+            assert_eq!(response.headers()["vary"], "Accept-Encoding");
+            assert_eq!(
+                response.text().await.unwrap(),
+                entry.body.identity(),
+                "{}",
+                entry.path
+            );
+            for encoding in ["gzip", "br, gzip;q=0.5", "*;q=1"] {
+                let response = client
+                    .get(format!("http://{addr}{}", entry.path))
+                    .header("accept-encoding", encoding)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.headers()["content-encoding"], "gzip");
+                assert_eq!(response.headers()["vary"], "Accept-Encoding");
+                assert_eq!(response.bytes().await.unwrap().as_ref(), entry.body.gzip);
+            }
+            for encoding in ["identity", "br", "gzip;q=0, *;q=1"] {
+                let response = client
+                    .get(format!("http://{addr}{}", entry.path))
+                    .header("accept-encoding", encoding)
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(!response.headers().contains_key("content-encoding"));
+                assert_eq!(response.text().await.unwrap(), entry.body.identity());
+            }
         }
+        let rejected = client
+            .get(format!("http://{addr}/host.js"))
+            .header("accept-encoding", "identity;q=0, gzip;q=0")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), axum::http::StatusCode::NOT_ACCEPTABLE);
+        assert_eq!(rejected.headers()["vary"], "Accept-Encoding");
         assert_eq!(
             client
                 .get(format!("http://{addr}/not-registered.js"))
@@ -789,6 +1042,39 @@ mod tests {
     }
 
     #[test]
+    fn content_encoding_negotiation_honors_quality_and_explicit_rejection() {
+        for (value, expected) in [
+            ("GZip; q=0.1", true),
+            ("gzip;q=0", false),
+            ("gzip;q=garbage", false),
+            ("gzip;q=NaN", false),
+            ("gzip;q=2", false),
+            ("br, *;q=0.8", true),
+            ("gzip;q=0, *;q=1", false),
+            ("identity", false),
+        ] {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("accept-encoding", value.parse().unwrap());
+            assert_eq!(accepts_gzip(&headers), expected, "{value}");
+        }
+        assert!(!accepts_gzip(&axum::http::HeaderMap::new()));
+
+        for (value, expected) in [
+            ("identity", true),
+            ("gzip;q=0", true),
+            ("identity;q=0", false),
+            ("identity;q=0, gzip;q=0", false),
+            ("identity;q=0, *;q=1", false),
+            ("identity;q=1, *;q=0", true),
+        ] {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("accept-encoding", value.parse().unwrap());
+            assert_eq!(accepts_identity(&headers), expected, "{value}");
+        }
+        assert!(accepts_identity(&axum::http::HeaderMap::new()));
+    }
+
+    #[test]
     fn every_registered_asset_affects_the_cache_fingerprint() {
         let original = hash_inputs(assets::ASSET_FINGERPRINT_INPUTS);
         assert_eq!(
@@ -796,9 +1082,9 @@ mod tests {
             assets::ASSET_FINGERPRINT_INPUTS.len()
         );
         for (i, entry) in assets::UI_ASSETS.iter().enumerate() {
-            assert_eq!(assets::ASSET_FINGERPRINT_INPUTS[i], entry.body);
+            assert_eq!(assets::ASSET_FINGERPRINT_INPUTS[i], entry.body.gzip);
             let mut changed = assets::ASSET_FINGERPRINT_INPUTS.to_vec();
-            changed[i] = "changed resource content";
+            changed[i] = b"changed resource content";
             assert_ne!(hash_inputs(&changed), original, "{}", entry.path);
         }
     }
@@ -895,8 +1181,8 @@ mod tests {
     #[test]
     fn fingerprint_is_content_addressed() {
         assert_eq!(assets_fingerprint(), assets_fingerprint());
-        assert_ne!(hash_inputs(&["a", "b"]), hash_inputs(&["ab"]));
-        assert_ne!(hash_inputs(&["x"]), hash_inputs(&["y"]));
+        assert_ne!(hash_inputs(&[b"a", b"b"]), hash_inputs(&[b"ab"]));
+        assert_ne!(hash_inputs(&[b"x"]), hash_inputs(&[b"y"]));
     }
 
     /// `/` 的凭据闸门：四条信道任一条对上就放行，一条都没对上（或对错了值）必须拒。

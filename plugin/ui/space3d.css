@@ -620,9 +620,149 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
 }
 .sp-stage-tools { position: absolute; z-index: 6; bottom: max(112px,calc(env(safe-area-inset-bottom) + 112px)); right: 22px; display: flex; gap: 6px; }
 .sp-stage-tools .sp-head-btn { width: 36px; height: 36px; border-radius: 6px; }
+#space3d:has(#sp-sheet.sp-show) .sp-stage-tools,
+#space3d:has(#sp-sheet.sp-show) .sp-return { opacity: 0; pointer-events: none; }
 #sp-console-toggle svg { transform: rotate(0deg); transform-origin: center; transition: transform .32s var(--sp-ease); }
 #sp-console-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
 #space3d:not([data-page="stage"]) .sp-stage-tools { display: none; }
+#space3d[data-page="home"] .sp-return { top: 78px; bottom: auto; }
+@media (max-width:800px) { #space3d[data-page="home"] .sp-return { top: 18px; left: calc(50% - 22px); } }
+.sp-scene-hud { position: absolute; z-index: 6; top: 96px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; box-sizing: border-box; max-width: min(520px,calc(100% - 40px)); padding: 8px 14px; border: 1px solid var(--sp-line); border-radius: 6px; background: var(--sp-glass-strong); backdrop-filter: blur(18px); color: var(--sp-text); font-size: 12px; pointer-events: none; animation: sp-hud-in .32s var(--sp-ease); }
+.sp-scene-hud i { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--sp-hud-hue,var(--sp-accent)); box-shadow: 0 0 12px var(--sp-hud-hue,var(--sp-accent)); }
+.sp-scene-hud-tag { flex: none; padding: 2px 6px; border: 1px solid var(--sp-line); border-radius: 4px; font-size: 10px; color: var(--sp-accent); }
+.sp-scene-hud strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.sp-scene-hud small { flex: none; color: var(--sp-muted); }
+.sp-scene-hud[data-mode="charge"] .sp-scene-hud-tag { color: var(--sp-accent-2); border-color: currentColor; }
+#space3d:not([data-page="stage"]) .sp-scene-hud { display: none; }
+@media (max-width:1100px) { .sp-scene-hud { top: 150px; } }
+@media (max-width:520px) { .sp-scene-hud { top: 136px; } .sp-scene-hud small { display: none; } }
+@keyframes sp-hud-in { from { opacity: 0; translate: 0 -6px; } }
+@media (prefers-reduced-motion:reduce) { .sp-scene-hud { animation: none; } }
+
+/* —— 星座观测题签 —— */
+.sp-zodiac-hud {
+  position: absolute; z-index: 5; left: clamp(38px, 4.4vw, 72px); top: max(150px, 18vh);
+  width: 248px; pointer-events: none; color: var(--sp-text);
+}
+.sp-zodiac-plaque {
+  padding-left: 17px; border-left: 1px solid color-mix(in srgb, var(--sp-text) 17%, transparent);
+  text-shadow: 0 1px 18px rgba(0, 0, 0, .45);
+  transition: opacity .18s var(--sp-ease), transform .18s var(--sp-ease);
+}
+.sp-zodiac-hud.is-changing .sp-zodiac-plaque { opacity: 0; transform: translateX(-5px); }
+.sp-zodiac-kicker {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 22px;
+  color: var(--sp-muted); font: 9px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .20em;
+  white-space: nowrap;
+}
+.sp-zodiac-kicker span:last-child { color: color-mix(in srgb, var(--sp-text) 65%, transparent); letter-spacing: .13em; }
+.sp-zodiac-plaque h2 {
+  margin: 0; color: var(--sp-text); font-size: 50px; line-height: 1; font-weight: 300; letter-spacing: .12em;
+}
+.sp-zodiac-latin {
+  margin: 10px 0 0; color: var(--sp-accent); font-family: Georgia, "Times New Roman", serif;
+  font-size: 13px; letter-spacing: .40em;
+}
+.sp-zodiac-rule {
+  display: block; width: 76px; height: 1px; margin-top: 18px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--sp-accent) 78%, transparent), transparent);
+}
+.sp-zodiac-meta {
+  margin: 15px 0 0; color: var(--sp-muted); font-size: 10px; line-height: 1.8; letter-spacing: .075em;
+}
+.sp-zodiac-cycle {
+  display: flex; align-items: flex-end; gap: 9px; margin: 30px 0 0 17px; color: var(--sp-muted);
+  font: 8px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .16em;
+}
+.sp-zodiac-ticks { display: flex; align-items: flex-end; gap: 5px; }
+.sp-zodiac-ticks i { display: block; width: 1px; height: 7px; background: color-mix(in srgb, var(--sp-text) 20%, transparent); transition: height .25s var(--sp-ease), background-color .25s var(--sp-ease); }
+.sp-zodiac-ticks i.is-on { height: 17px; background: var(--sp-accent); box-shadow: 0 0 10px color-mix(in srgb, var(--sp-accent) 55%, transparent); }
+.sp-zodiac-hint {
+  margin: 13px 0 0 17px; color: color-mix(in srgb, var(--sp-muted) 82%, transparent);
+  font: 9px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .11em;
+}
+.sp-zodiac-star {
+  position: absolute; z-index: 6; left: 0; top: 0; min-width: 132px; padding: 9px 12px 8px;
+  border: 1px solid color-mix(in srgb, var(--sp-accent) 38%, transparent); border-radius: 5px;
+  background: color-mix(in srgb, var(--sp-glass) 92%, transparent); backdrop-filter: blur(14px) saturate(1.1);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .28); pointer-events: none;
+  transform: translate(18px, -50%); transition: border-color .16s var(--sp-ease), opacity .16s var(--sp-ease);
+}
+.sp-zodiac-star::before {
+  content: ""; position: absolute; left: -18px; top: 50%; width: 17px; height: 1px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--sp-accent) 72%, transparent));
+}
+.sp-zodiac-star.is-left { transform: translate(calc(-100% - 18px), -50%); }
+.sp-zodiac-star.is-left::before { left: auto; right: -18px; background: linear-gradient(90deg, color-mix(in srgb, var(--sp-accent) 72%, transparent), transparent); }
+.sp-zodiac-star.is-pinned { border-color: color-mix(in srgb, var(--sp-accent) 68%, transparent); }
+.sp-zodiac-star-kicker { display: block; color: var(--sp-muted); font: 8px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .20em; }
+.sp-zodiac-star strong { display: block; margin-top: 4px; color: var(--sp-text); font-size: 12px; font-weight: 550; letter-spacing: .05em; }
+.sp-zodiac-star small { display: block; margin-top: 4px; color: var(--sp-muted); font: 9px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .04em; }
+#space3d:not([data-page="stage"]) .sp-zodiac-hud,
+#space3d:not([data-page="stage"]) .sp-zodiac-star,
+#space3d.sp-immersive .sp-zodiac-hud,
+#space3d.sp-immersive .sp-zodiac-star,
+#space3d:has(#sp-playlist.sp-show) .sp-zodiac-hud,
+#space3d:has(#sp-playlist.sp-show) .sp-zodiac-star { display: none !important; }
+@media (max-width: 1100px) {
+  .sp-zodiac-hud { left: 36px; top: 132px; width: 214px; }
+  .sp-zodiac-plaque h2 { font-size: 42px; }
+}
+@media (max-width: 760px) {
+  .sp-zodiac-hud { left: 18px; top: 130px; width: auto; max-width: calc(100% - 90px); }
+  .sp-zodiac-plaque { padding-left: 12px; }
+  .sp-zodiac-kicker { margin-bottom: 11px; font-size: 8px; letter-spacing: .14em; }
+  .sp-zodiac-kicker span:first-child { display: none; }
+  .sp-zodiac-plaque h2 { font-size: 30px; letter-spacing: .1em; }
+  .sp-zodiac-latin { margin-top: 6px; font-size: 10px; letter-spacing: .3em; }
+  .sp-zodiac-rule, .sp-zodiac-meta, .sp-zodiac-cycle, .sp-zodiac-hint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sp-zodiac-plaque, .sp-zodiac-ticks i, .sp-zodiac-star { transition: none; }
+}
+
+/* —— 星座控制台题头与参数排版 —— */
+.sp-zodiac-console {
+  margin-top: 16px; padding: 13px 14px 12px; border: 1px solid var(--sp-line-soft); border-radius: 7px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--sp-accent) 7%, transparent), transparent 62%);
+}
+.sp-zodiac-console-kicker {
+  display: flex; justify-content: space-between; gap: 10px; margin: 0 0 8px; color: var(--sp-muted);
+  font: 8px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .20em;
+}
+.sp-zodiac-console > strong { display: block; color: var(--sp-text); font-size: 25px; font-weight: 300; letter-spacing: .12em; line-height: 1.1; }
+.sp-zodiac-console > small { display: block; margin-top: 7px; color: var(--sp-muted); font-size: 10px; line-height: 1.65; letter-spacing: .03em; }
+#sp-sheet :is(#sp-scene-params, #sp-lyric-params) { margin-top: 14px; }
+#sp-sheet .sp-param-field { position: relative; padding-top: 11px; margin-top: 11px; border-top: 1px solid var(--sp-line-soft); }
+#sp-sheet .sp-param-field:first-child { padding-top: 0; margin-top: 0; border-top: 0; }
+#sp-sheet .sp-param-field > label { margin: 0; padding-right: 62px; font-size: 11px; letter-spacing: .03em; color: var(--sp-muted); }
+#sp-sheet .sp-param-field > output { position: absolute; right: 0; top: 11px; margin: 0; color: var(--sp-accent); font: 10px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; text-align: right; }
+#sp-sheet .sp-param-field:first-child > output { top: 0; }
+#sp-sheet .sp-param-field > input[type="range"] { display: block; width: 100%; height: 18px; margin: 7px 0 0; }
+#sp-sheet .sp-param-field.is-toggle { display: flex; align-items: center; gap: 10px; padding-top: 10px; }
+#sp-sheet .sp-param-field.is-toggle > input { order: 1; flex: none; margin: 0; width: 32px; height: 18px; appearance: none; border: 1px solid var(--sp-line); border-radius: 999px; background: color-mix(in srgb, var(--sp-text) 8%, transparent); cursor: pointer; position: relative; transition: background-color .18s var(--sp-ease), border-color .18s var(--sp-ease); }
+#sp-sheet .sp-param-field.is-toggle > input::after { content: ""; position: absolute; left: 3px; top: 3px; width: 10px; height: 10px; border-radius: 50%; background: var(--sp-muted); transition: transform .18s var(--sp-ease), background-color .18s var(--sp-ease); }
+#sp-sheet .sp-param-field.is-toggle > input:checked { border-color: color-mix(in srgb, var(--sp-accent) 54%, transparent); background: color-mix(in srgb, var(--sp-accent) 22%, transparent); }
+#sp-sheet .sp-param-field.is-toggle > input:checked::after { transform: translateX(14px); background: var(--sp-accent); }
+#sp-sheet .sp-param-field.is-toggle > label { order: 2; flex: 1; padding: 0; color: var(--sp-text); font-size: 12px; cursor: pointer; }
+#sp-sheet .sp-param-field.is-toggle > output { display: none; }
+.sp-reactor-telemetry { position: absolute; z-index: 6; left: 28px; top: 50%; transform: translateY(-50%); width: 170px; color: var(--sp-text); pointer-events: none; }
+.sp-reactor-label { display: block; color: var(--sp-accent); font: 10px ui-monospace,monospace; letter-spacing: .12em; }
+.sp-reactor-telemetry > strong { display: block; margin-top: 6px; font-size: 18px; font-weight: 600; }
+.sp-reactor-telemetry dl { margin: 18px 0 12px; font: 11px ui-monospace,monospace; font-variant-numeric: tabular-nums; }
+.sp-reactor-telemetry dl > div { display: flex; justify-content: space-between; gap: 12px; padding: 9px 12px; margin-bottom: 2px; border-left: 1px solid var(--sp-accent); background: var(--sp-glass); backdrop-filter: blur(8px); }
+.sp-reactor-telemetry dt { color: var(--sp-muted); }
+.sp-reactor-telemetry dd { margin: 0; color: var(--sp-accent); }
+.sp-reactor-telemetry p { margin: 0; color: var(--sp-muted); font-size: 10px; line-height: 1.9; }
+#space3d:has(#sp-playlist.sp-show) .sp-reactor-telemetry { visibility: hidden; }
+@media (max-width:760px) {
+  .sp-reactor-telemetry { left: 20px; top: 166px; transform: none; width: calc(100% - 40px); }
+  .sp-reactor-label { display: none; }
+  .sp-reactor-telemetry > strong { font-size: 12px; }
+  .sp-reactor-telemetry dl { display: flex; gap: 12px; margin: 8px 0 0; font-size: 9px; }
+  .sp-reactor-telemetry dl > div { gap: 5px; padding: 0; margin: 0; border: 0; background: transparent; backdrop-filter: none; }
+  .sp-reactor-telemetry p { display: none; }
+}
 #space3d #sp-sheet { z-index: 18; width: min(400px,calc(100% - 20px)); padding: 0; overflow: hidden; display: flex; flex-direction: column; }
 #space3d #sp-sheet h2 { flex: none; position: static; margin: 0; padding: 18px 20px 12px; background: transparent; color: var(--sp-text); }
 .sp-console-tabs { display: flex; flex: none; gap: 4px; padding: 0 20px 12px; border-bottom: 1px solid var(--sp-line-soft); }

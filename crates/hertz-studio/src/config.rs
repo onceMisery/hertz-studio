@@ -17,7 +17,28 @@ pub struct Config {
     pub audio: AudioConfig,
     pub library: LibraryConfig,
     pub online: OnlineConfig,
+    pub ai: AiConfig,
     pub log: LogConfig,
+}
+
+/// Non-secret provider selection. Model requests still require the separate
+/// generation consent setting. Changes take effect on service restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AiConfig {
+    pub provider: String,
+    pub origin: String,
+    pub model: String,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            provider: "fake".into(),
+            origin: "http://127.0.0.1:11434".into(),
+            model: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +108,7 @@ impl Default for Config {
                 follow_symlinks: false,
             },
             online: OnlineConfig::default(),
+            ai: AiConfig::default(),
             log: LogConfig {
                 level: "info".into(),
                 format: "pretty".into(),
@@ -123,10 +145,11 @@ impl Config {
         let path = data_dir.join("config.toml");
         let mut config = if path.is_file() {
             let raw = std::fs::read_to_string(&path)?;
-            toml::from_str(&raw).unwrap_or_else(|e| {
-                tracing::warn!("ignoring malformed {}: {e}", path.display());
-                Config::default()
-            })
+            // Never replace an explicitly selected provider with the default
+            // after a syntax/shape error. Report the file, without echoing its
+            // possibly sensitive contents through a TOML diagnostic.
+            toml::from_str(&raw)
+                .map_err(|_| anyhow::anyhow!("invalid configuration file: {}", path.display()))?
         } else {
             let config = Config::default();
             if let Ok(text) = toml::to_string_pretty(&config) {
@@ -202,5 +225,41 @@ pub fn migrate_legacy_data_dir() {
                 current.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ai_config_tests {
+    use super::*;
+
+    #[test]
+    fn provider_configuration_defaults_and_roundtrips_without_secrets() {
+        let default: Config = toml::from_str("").unwrap();
+        assert_eq!(default.ai.provider, "fake");
+        assert!(default.ai.model.is_empty());
+        let configured: Config = toml::from_str(
+            "[ai]\nprovider='ollama'\norigin='http://[::1]:11434'\nmodel='test:local'\n",
+        )
+        .unwrap();
+        let roundtrip: Config = toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(roundtrip.ai.provider, "ollama");
+        assert_eq!(roundtrip.ai.model, "test:local");
+        assert!(toml::from_str::<Config>("[ai]\napi_key='secret'\n").is_err());
+    }
+
+    #[test]
+    fn malformed_file_is_an_error_without_echoing_contents() {
+        let dir = std::env::temp_dir().join(format!("hertz-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "[ai]\nprovider='ollama'\napi_key='private-sentinel'\n",
+        )
+        .unwrap();
+        let error = Config::load(&dir).unwrap_err().to_string();
+        assert!(error.contains("invalid configuration file"));
+        assert!(!error.contains("private-sentinel"));
+        std::fs::remove_file(dir.join("config.toml")).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 }

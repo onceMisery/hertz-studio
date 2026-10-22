@@ -1,0 +1,572 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 hertz-studio contributors
+//
+// 工坊「AI 生成」任务面板的浏览器契约。真实服务 + 真实 fake provider
+//（零费用、即时完成），覆盖：
+//   1. consent 默认关闭：面板显示已关闭、提交不可用；开启后可用；
+//   2. 提交 → 任务到 succeeded（fake 即时）→ 查看提案 → 应用到舞台
+//      → 舞台场景随提案切换；
+//   3. 拒绝：提案进入 rejected，内容不再可应用；
+//   4. 无载荷 WS ai_tasks_resync 提示刷新任务快照（事件比轮询先到也不重复渲染崩溃）。
+//
+//   node scripts/check-ai-tasks-browser.js
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const { startFixture } = require('./ui-browser-fixture');
+const { uiUrl } = require('./ui-token');
+
+const root = path.resolve(__dirname, '..');
+const output = process.env.AI_TASKS_OUTPUT
+  ? path.resolve(process.env.AI_TASKS_OUTPUT)
+  : path.join(root, 'output/playwright/ai-tasks');
+const errors = [];
+let passed = 0;
+const pass = (name) => { passed += 1; console.log('PASS ' + name); };
+
+async function serveSourceWorkshop(page) {
+  if (process.env.AI_TASKS_SOURCE_WORKSHOP !== '1') return;
+  await page.route('**/workshop.js*', async route => {
+    await route.fulfill({ status: 200, contentType: 'application/javascript; charset=utf-8',
+      body: fs.readFileSync(path.join(root, 'plugin/ui/workshop.js'), 'utf8') });
+  });
+}
+
+async function main() {
+  fs.mkdirSync(output, { recursive: true });
+  const fixture = await startFixture();
+  // ui-token 从这里读隔离实例的令牌文件（与既有自启动检查同一招）。
+  process.env.VMUSIC_DATA_DIR = fixture.dataDir;
+  // consent 默认关闭是产品语义：第一段先验证关闭态，随后用官方 API 打开。
+  const browser = await chromium.launch({
+    channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome',
+    headless: process.env.SC_HEADED !== '1',
+  });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+  await fixture.connect(context);
+  const page = await context.newPage();
+  let activeSocket = null;
+  let aiStatusRequests = 0;
+  await page.routeWebSocket(url => url.pathname === '/ws', ws => {
+    ws.connectToServer();
+    activeSocket = ws;
+  });
+  await serveSourceWorkshop(page);
+  page.on('request', request => {
+    if (new URL(request.url()).pathname === '/v1/ai/status') aiStatusRequests += 1;
+  });
+  page.on('pageerror', (e) => errors.push(e.message));
+
+  try {
+    await page.goto(uiUrl(fixture.base), { waitUntil: 'domcontentloaded' });
+
+    // 打开工坊并切到 AI 页签（Workshop.open/setTab 是既有公共口）。
+    await page.evaluate(() => { Workshop.open(); Workshop.setTab('ai'); });
+    await assert.equal(await page.locator('#ws-ai-brief').count(), 1, 'AI 页签应有输入框');
+    pass('AI 页签打开');
+
+    // consent 默认关闭：开关显示已关闭、提交禁用、状态行说明。
+    assert.equal(await page.locator('#ws-ai-brief').isDisabled(), true, 'consent 关闭时提交必须禁用');
+    const consentText = await page.locator('.ws-kv').filter({ hasText: '生成开关' }).innerText();
+    assert.match(consentText, /已关闭/);
+    pass('consent 默认关闭且提交禁用');
+
+    // 面板内开启：PUT 设置 → 状态刷新 → 提交可用。
+    await page.getByRole('button', { name: '开启生成', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('#ws-ai-brief') && !document.querySelector('#ws-ai-brief').disabled);
+    assert.equal(await page.locator('#ws-ai-brief').isDisabled(), false, '开启后提交应可用');
+    pass('面板内开启 consent');
+
+    // 提交 → fake provider 即时完成 → 列表出现 succeeded → 查看提案。
+    await page.locator('#ws-ai-brief').fill('星云缓慢推进，霓虹颗粒');
+    await page.getByRole('button', { name: '提交生成任务', exact: true }).click();
+    await page.getByRole('button', { name: '查看提案', exact: true }).first().waitFor({ timeout: 15000 });
+    const stateText = await page.locator('.ws-ai-state').first().innerText();
+    assert.equal(stateText, '已完成');
+    pass('任务跑到已完成并列出提案');
+
+    assert.ok(activeSocket, '任务面板应已建立 WebSocket');
+    const statusBeforeResync = aiStatusRequests;
+    const resyncResponse = page.waitForResponse(response =>
+      new URL(response.url()).pathname === '/v1/ai/status');
+    activeSocket.send(JSON.stringify({ type: 'ai_tasks_resync' }));
+    await resyncResponse;
+    assert.ok(aiStatusRequests > statusBeforeResync, '掉队提示应触发任务快照重查');
+    pass('ai_tasks_resync 事件触发任务快照重查');
+
+    // A repeated click while cancellation is in flight is ignored. If another
+    // actor wins the state transition, a fresh terminal snapshot must suppress
+    // the stale-request error toast.
+    const cancelSource = (await fixture.api('/v1/ai/jobs?limit=20')).jobs[0];
+    const cancelJobId = 'cancel-race-fixture';
+    let cancelState = 'running';
+    let cancelRevision = 4;
+    let cancelRequests = 0;
+    let releaseCancel;
+    const cancelGate = new Promise(resolve => { releaseCancel = resolve; });
+    await page.route('**/v1/ai/jobs?limit=20', async route => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      payload.jobs = [{ ...cancelSource, jobId: cancelJobId, state: cancelState,
+        stateRevision: cancelRevision, resultProposalId: null, usage: null },
+      ...payload.jobs.filter(item => item.jobId !== cancelJobId)];
+      await route.fulfill({ response, json: payload });
+    });
+    await page.route('**/v1/ai/jobs/' + cancelJobId + '/cancel', async route => {
+      cancelRequests += 1;
+      await cancelGate;
+      cancelState = 'cancelled'; cancelRevision += 1;
+      await route.fulfill({ status: 409, contentType: 'application/json',
+        body: JSON.stringify({ error: { code: 'state_conflict', message: '任务已是终态: cancelled' } }) });
+    });
+    const cancelRow = page.locator('.ws-ai-job').filter({ hasText: cancelJobId.slice(0, 8) });
+    const cancelOps = cancelRow.locator('xpath=following-sibling::div[contains(@class,"ws-ai-ops")]').first();
+    const cancelButton = cancelOps.getByRole('button', { name: '取消', exact: true });
+    await page.getByRole('button', { name: '刷新任务与费用', exact: true }).click();
+    await cancelRow.waitFor();
+    await cancelButton.click();
+    const cancellingButton = cancelOps.getByRole('button', { name: '正在取消…', exact: true });
+    await cancellingButton.waitFor();
+    await cancellingButton.evaluate(button => button.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    assert.equal(cancelRequests, 1, '重复点击期间每个任务只发送一次取消请求');
+    releaseCancel();
+    await page.waitForFunction(id => {
+      const row = Array.from(document.querySelectorAll('.ws-ai-job')).find(item => item.textContent.includes(id));
+      return row && row.textContent.includes('已取消');
+    }, cancelJobId.slice(0, 8));
+    assert.doesNotMatch(await page.locator('#ws-toast').innerText(), /取消失败/,
+      'a terminal state conflict is reconciled from the refreshed task snapshot');
+    pass('取消请求去重，状态冲突后按终态刷新且不误报失败');
+    await page.unroute('**/v1/ai/jobs/' + cancelJobId + '/cancel');
+    await page.unroute('**/v1/ai/jobs?limit=20');
+
+    await page.locator('.ws-ai-budget').waitFor();
+    assert.match(await page.locator('.ws-ai-budget').innerText(), /UTC 自然月/);
+    assert.match(await page.locator('.ws-ai-usage').first().innerText(), /已报告费用 \$0\.000000 USD/);
+    pass('费用面板显示 UTC 预算和 fake 零费用事实');
+
+    // 展开提案：场景来自真实契约表，patch 有内容。
+    await page.getByRole('button', { name: '查看提案', exact: true }).first().click();
+    const head = await page.locator('.ws-ai-proposal .ws-prompt-head').first().innerText();
+    assert.match(head, /提案 · 场景：/);
+    const proposalScene = head.split('：')[1];
+    assert.ok(await page.evaluate(scene => !!CreativeGL.sceneById(scene), proposalScene),
+      '提案场景必须在真实契约表内: ' + proposalScene);
+    pass('提案展开且场景来自契约表');
+
+    // 应用到舞台：舞台场景随提案切换。
+    const before = await page.evaluate(() => window.CreativeStage.preset());
+    const [job] = (await fixture.api('/v1/ai/jobs?limit=20')).jobs;
+    const proposal = await fixture.api('/v1/ai/proposals/' + job.resultProposalId);
+    const expected = await page.evaluate(intent => CreativeStage.materializeIntent(null, intent).preset,
+      proposal.validatedIntent);
+    await page.locator('.ws-ai-proposal').getByRole('button', { name: '预览候选舞台' }).click();
+    await page.locator('.ws-ai-proposal').getByRole('button', { name: '应用到当前舞台' }).waitFor();
+    assert.deepEqual(await page.evaluate(() => CreativeStage.preset()), before, '预览不得提交');
+    await page.locator('.ws-ai-proposal').getByRole('button', { name: '应用到当前舞台' }).click();
+    await page.waitForFunction(() => !CreativeStage.preview());
+    assert.deepEqual(await page.evaluate(() => CreativeStage.preset()), expected,
+      '应用必须提交纯物化候选，包含全部 patch 值');
+    pass('提案完整物化并应用（包含场景参数）');
+    await page.getByRole('button', { name: '撤销本次应用', exact: true }).click();
+    assert.deepEqual(await page.evaluate(() => CreativeStage.preset()), before);
+    pass('应用可整体撤销');
+
+    await page.locator('.ws-ai-proposal').getByRole('button', { name: '预览候选舞台' }).click();
+    await page.locator('.ws-ai-proposal').getByRole('button', { name: '应用到当前舞台' }).waitFor();
+    await page.locator('.ws-ai-proposal').getByRole('button', { name: '应用到当前舞台' }).click();
+    await page.waitForFunction(() => !CreativeStage.preview());
+    await page.evaluate(() => CreativeStage.setParam('cam.yaw', CreativeStage.preset().cam.yaw + 5));
+    assert.equal(await page.locator('#ws-draft-undo').isHidden(), true,
+      'a manual edit invalidates the AI proposal undo snapshot');
+    pass('手动修改舞台后 AI 提案撤销失效');
+
+    // 拒绝另一单：提交第二个任务，拒绝其提案，行内状态转为已拒绝。
+    await page.evaluate(() => Workshop.setTab('ai'));
+    await page.locator('#ws-ai-brief').fill('第二单，随后拒绝');
+    await page.getByRole('button', { name: '提交生成任务', exact: true }).click();
+    await page.locator('.ws-ai-job').nth(1).waitFor({ timeout: 15000 });
+    await page.getByRole('button', { name: '查看提案', exact: true }).first().click();
+    let rejectRequests = 0, releaseReject, rejectStarted;
+    const rejectGate = new Promise(resolve => { releaseReject = resolve; });
+    const rejectIntercepted = new Promise(resolve => { rejectStarted = resolve; });
+    await page.route('**/v1/ai/proposals/*/reject', async route => {
+      rejectRequests += 1;
+      rejectStarted();
+      await rejectGate;
+      const response = await route.fetch();
+      if (response.ok()) await route.abort('failed'); // CAS succeeds, but its acknowledgement is lost.
+      else await route.fulfill({ response });
+    });
+    const rejectButton = page.locator('.ws-ai-proposal')
+      .getByRole('button', { name: '拒绝', exact: true }).last();
+    await rejectButton.click();
+    await rejectIntercepted;
+    await page.waitForFunction(() => {
+      const button = Array.from(document.querySelectorAll('.ws-ai-proposal button'))
+        .find(item => item.textContent.trim() === '拒绝');
+      return button && button.disabled;
+    });
+    await page.locator('.ws-ai-proposal').getByRole('button', { name: '拒绝', exact: true })
+      .last().evaluate(button => button.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    assert.equal(rejectRequests, 1, 'a proposal only sends one rejection while the request is pending');
+    releaseReject();
+    await page.waitForFunction(() => document.body.innerText.includes('提案状态：rejected'),
+      null, { timeout: 5000 });
+    await page.waitForFunction(() => document.querySelector('#ws-toast').textContent === '提案已拒绝');
+    await page.unroute('**/v1/ai/proposals/*/reject');
+    pass('拒绝回执丢失后读取服务端终态并收敛为成功');
+    assert.equal(await page.locator('.ws-ai-proposal').getByRole('button', { name: '应用到当前舞台' }).count(), 0);
+
+    let admissionPosts = [];
+    await page.route('**/v1/ai/jobs', async route => {
+      if (route.request().method() !== 'POST') { await route.continue(); return; }
+      admissionPosts.push(route.request().postDataJSON());
+      if (admissionPosts.length === 1) {
+        await route.fulfill({ status: 429, contentType: 'application/json',
+          body: JSON.stringify({ error: { code: 'capacity_exceeded', message: '队列已满' } }) });
+      } else await route.continue();
+    });
+    await page.locator('#ws-ai-brief').fill('队列拒绝前的描述');
+    await page.getByRole('button', { name: '提交生成任务', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('#ws-toast').textContent.includes('队列已满'));
+    await page.locator('#ws-ai-brief').fill('队列恢复后的新描述');
+    const reaccepted = page.waitForFunction(() => document.querySelector('#ws-ai-brief').value === '');
+    await page.getByRole('button', { name: '提交生成任务', exact: true }).click();
+    await reaccepted;
+    assert.equal(admissionPosts.length, 2);
+    assert.equal(admissionPosts[0].brief, '队列拒绝前的描述');
+    assert.equal(admissionPosts[1].brief, '队列恢复后的新描述');
+    assert.notEqual(admissionPosts[0].idempotency_key, admissionPosts[1].idempotency_key,
+      'an explicit admission rejection must allow a fresh key for a changed brief');
+    await page.unroute('**/v1/ai/jobs');
+    pass('明确 429 未受理后可修改描述并使用新幂等键提交');
+
+    const countBeforeRetry = (await fixture.api('/v1/ai/jobs?limit=20')).jobs.length;
+    let droppedReply = false;
+    await page.route('**/v1/ai/jobs', async route => {
+      if (route.request().method() === 'POST' && !droppedReply) {
+        droppedReply = true;
+        await route.fetch(); // Server accepts, but the browser loses its acknowledgement.
+        await route.abort('failed');
+      } else await route.continue();
+    });
+    await page.locator('#ws-ai-brief').fill('响应丢失后重试');
+    await page.getByRole('button', { name: '提交生成任务', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('#ws-toast').textContent.includes('提交失败'));
+    await page.getByRole('button', { name: '提交生成任务', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('#ws-ai-brief').value === '');
+    assert.equal((await fixture.api('/v1/ai/jobs?limit=20')).jobs.length, countBeforeRetry + 1,
+      '响应丢失后的同输入重试必须复用幂等键');
+    pass('响应丢失后重试不重复创建任务');
+
+    // Events arriving during an older snapshot must schedule one fresh read.
+    let snapshotReady = false, releaseSnapshot;
+    const snapshotGate = new Promise(resolve => { releaseSnapshot = resolve; });
+    await page.route('**/v1/ai/jobs?limit=20', async route => {
+      if (snapshotReady) { await route.continue(); return; }
+      const response = await route.fetch();
+      snapshotReady = true;
+      await snapshotGate;
+      await route.fulfill({ response });
+    });
+    for (let i = 0; i < 100 && !snapshotReady; i++) {
+      await page.evaluate(() => Workshop.onAiTask());
+      await page.waitForTimeout(50);
+    }
+    assert.ok(snapshotReady);
+    const concurrent = await fixture.api('/v1/ai/jobs', 'POST', { brief: '快照在途时到来的任务' });
+    await page.evaluate(() => Workshop.onAiTask());
+    releaseSnapshot();
+    await page.locator('.ws-ai-job').filter({ hasText: concurrent.job.jobId.slice(0, 8) })
+      .waitFor({ timeout: 1500 });
+    pass('旧快照在途时的任务事件会补查新事实');
+    await page.unroute('**/v1/ai/jobs?limit=20');
+
+    // UI-only adapter fixture: keep task state/revision fixed and let its bill
+    // move unknown -> reported. Rust tests cover the real ledger transaction.
+    let billingPhase = 'unknown';
+    await page.route('**/v1/ai/jobs?limit=20', async route => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      const job = payload.jobs[0];
+      job.usage = { ...job.usage, usageState: billingPhase,
+        accountedMicroUsd: billingPhase === 'unknown' ? 30000 : 137,
+        usageRevision: billingPhase === 'unknown' ? 1 : 2 };
+      await route.fulfill({ response, json: payload });
+    });
+    await page.getByRole('button', { name: '刷新任务与费用', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('.ws-ai-usage').textContent.includes('费用未确认'));
+    billingPhase = 'reported';
+    // No task event: polling must continue for an unknown bill after task completion.
+    await page.waitForFunction(() => document.querySelector('.ws-ai-usage').textContent.includes('$0.000137'), null, { timeout: 6000 });
+    pass('终态任务仍等待未知费用，独立 usage revision 更新显示');
+    await page.unroute('**/v1/ai/jobs?limit=20');
+
+    // A transient first snapshot failure must recover without a new task event
+    // or a manual refresh, even when the panel has no known active jobs.
+    let statusRequests = 0;
+    await page.route('**/v1/ai/status', async route => {
+      statusRequests++;
+      if (statusRequests <= 2) {
+        await route.fulfill({ status: 503, json: { error: {
+          code: 'fixture_unavailable', message: 'fixture snapshot unavailable',
+        } } });
+      } else await route.continue();
+    });
+    await page.getByRole('button', { name: '刷新任务与费用', exact: true }).click();
+    await page.getByText('fixture snapshot unavailable', { exact: true }).waitFor();
+    await page.waitForFunction(() => !document.body.innerText.includes('fixture snapshot unavailable'),
+      null, { timeout: 10000 });
+    assert.ok(statusRequests >= 2, '退避后再次读取 AI 状态');
+    pass('AI 状态快照首次失败后自动退避重试并恢复');
+    await page.unroute('**/v1/ai/status');
+
+    // A task created by another entry point while this browser is offline has
+    // no WebSocket event to deliver. Reconnect must refresh the open AI panel.
+    await context.setOffline(true);
+    assert.ok(activeSocket, '浏览器已建立可控的真实服务 WebSocket');
+    await activeSocket.close({ code: 1001, reason: 'fixture disconnect' });
+    await page.waitForFunction(() => {
+      const banner = document.querySelector('#offline-banner');
+      return banner && !banner.hidden;
+    }, null, { timeout: 5000 });
+    const disconnected = await fixture.api('/v1/ai/jobs', 'POST', { brief: '断线期间由另一入口提交的任务' });
+    const disconnectedJobId = disconnected.job.jobId;
+    let disconnectedJob = null;
+    const jobDeadline = Date.now() + 10000;
+    while (Date.now() < jobDeadline) {
+      const jobs = await fixture.api('/v1/ai/jobs?limit=20');
+      disconnectedJob = jobs.jobs.find(job => job.jobId === disconnectedJobId);
+      if (disconnectedJob && ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(disconnectedJob.state)) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(disconnectedJob && disconnectedJob.state, 'succeeded', '断线期间的 fake 任务已完成');
+    await context.setOffline(false);
+    await page.waitForFunction(() => document.querySelector('#conn').textContent === '服务已连接',
+      null, { timeout: 20000 });
+    await page.locator('.ws-ai-job').filter({ hasText: disconnectedJobId.slice(0, 8) }).waitFor({ timeout: 5000 });
+    pass('AI 面板打开时断线，重连后找回另一入口完成的任务');
+
+    const pageOne = Array.from({ length: 20 }, (_, index) => ({
+      ...job,
+      jobId: index === 19 ? 'offpage-running-fixture' : 'newer-' + String(index).padStart(2, '0') + '-fixture',
+      createdAt: job.createdAt + 100000 + (20 - index) * 1000,
+      state: index === 19 ? 'running' : 'failed',
+      stateRevision: index === 19 ? 1 : job.stateRevision,
+      failureCode: index === 19 ? null : 'provider_error',
+      providerHttpStatus: index === 19 ? null : 402,
+      providerFailureText: index === 19 ? null : 'fixture secret response body',
+      resultProposalId: null,
+      usage: null,
+    }));
+    let offPageJob = pageOne[19];
+    let latestPage = pageOne;
+    const olderJob = {
+      ...job,
+      jobId: 'fixture-older-proposal',
+      createdAt: job.createdAt - 1000,
+    };
+    const historyPage = await context.newPage();
+    let historyRouteHits = 0;
+    historyPage.on('pageerror', error => console.error('AI history page error: ' + error.message));
+    historyPage.on('console', message => {
+      if (message.type() === 'error') console.error('AI history console: ' + message.text());
+    });
+    historyPage.on('request', request => {
+      if (new URL(request.url()).pathname.includes('/v1/ai/')) {
+        console.log('AI history request ' + request.method() + ' ' + request.url());
+      }
+    });
+    await historyPage.routeWebSocket(url => url.pathname === '/ws', ws => ws.connectToServer());
+    await serveSourceWorkshop(historyPage);
+    await historyPage.route('**/v1/ai/jobs?limit=20*', async route => {
+      historyRouteHits += 1;
+      const url = new URL(route.request().url());
+      if (url.searchParams.has('before_created_at')) {
+        assert.ok(url.searchParams.has('before_job_id'), 'older page carries the stable compound cursor');
+        await route.fulfill({ json: { jobs: [olderJob] } });
+      } else await route.fulfill({ json: { jobs: latestPage } });
+    });
+    await historyPage.route('**/v1/ai/jobs/offpage-running-fixture', route =>
+      route.fulfill({ json: offPageJob }));
+    await historyPage.goto(uiUrl(fixture.base), { waitUntil: 'domcontentloaded' });
+    // app.js finishes several asynchronous startup steps before Workshop.init().
+    // DOMContentLoaded only guarantees that the scripts were loaded, not that the
+    // workshop API has bound its panel refs yet.
+    await historyPage.waitForFunction(() => document.querySelector('#workshop .ws-targets'));
+    await historyPage.evaluate(() => { Workshop.open(); Workshop.setTab('ai'); });
+    try {
+      await historyPage.waitForFunction(() => document.querySelectorAll('.ws-ai-job').length === 20, null, { timeout: 8000 });
+    } catch (error) {
+      console.error('AI history URL: ' + historyPage.url());
+      console.error('AI history route hits: ' + historyRouteHits);
+      console.error('AI history prompt: ' + await historyPage.locator('#ws-ai-brief').count());
+      console.error('AI history text: ' + (await historyPage.locator('body').innerText()).slice(0, 1200));
+      throw error;
+    }
+    assert.match(await historyPage.locator('.ws-ai-failure').first().innerText(), /HTTP 402/);
+    assert.doesNotMatch(await historyPage.locator('.ws-ai-failure').first().innerText(), /fixture secret response body/);
+    pass('失败任务显示受限类别提示且不暴露 provider 响应');
+
+    let sourcePost = null;
+    let retrySource = null;
+    await historyPage.route('**/v1/ai/jobs', async route => {
+      if (route.request().method() !== 'POST') { await route.continue(); return; }
+      sourcePost = route.request().postDataJSON();
+      const accepted = {
+        ...job,
+        jobId: 'retry-source-fixture',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        state: 'accepted',
+        stateRevision: 1,
+        failureCode: null,
+        providerFailureText: null,
+        resultProposalId: null,
+        usage: null,
+      };
+      retrySource = { ...accepted, state: 'expired', stateRevision: 2, failureCode: null };
+      latestPage = [retrySource, ...latestPage.filter(item => item.jobId !== retrySource.jobId)].slice(0, 20);
+      await route.fulfill({ json: { outcome: 'accepted', job: accepted } });
+    });
+    const originalBrief = '超时后按原描述重试';
+    await historyPage.locator('#ws-ai-brief').fill(originalBrief);
+    const sourceResponse = historyPage.waitForResponse(response =>
+      new URL(response.url()).pathname === '/v1/ai/jobs' && response.request().method() === 'POST');
+    await historyPage.getByRole('button', { name: '提交生成任务', exact: true }).click();
+    await sourceResponse;
+    const retrySourceRow = historyPage.locator('.ws-ai-job').filter({ hasText: retrySource.jobId.slice(0, 8) });
+    await retrySourceRow.waitFor();
+    const retrySourceOps = retrySourceRow.locator('xpath=following-sibling::div[contains(@class,"ws-ai-ops")]').first();
+    const retrySourceButton = retrySourceOps.getByRole('button', { name: '按原描述重试', exact: true });
+    await retrySourceButton.waitFor();
+    assert.equal(sourcePost.brief, originalBrief);
+    pass('本页超时任务保留原描述并提供重试');
+
+    const editedBrief = '用户正在编辑的另一条描述';
+    await historyPage.locator('#ws-ai-brief').fill(editedBrief);
+    await historyPage.unroute('**/v1/ai/jobs');
+    const retryPosts = [];
+    await historyPage.route('**/v1/ai/jobs', async route => {
+      if (route.request().method() !== 'POST') { await route.continue(); return; }
+      retryPosts.push(route.request().postDataJSON());
+      if (retryPosts.length === 1) {
+        await route.fetch();
+        await route.abort('failed');
+      } else await route.continue();
+    });
+    const jobsBeforeRetry = (await fixture.api('/v1/ai/jobs?limit=20')).jobs.length;
+    await retrySourceButton.click();
+    await historyPage.waitForFunction(() => document.querySelector('#ws-toast').textContent.includes('提交失败'));
+    assert.equal(await historyPage.getByRole('button', { name: '提交生成任务', exact: true }).isDisabled(), true,
+      'an unresolved retry cannot be bypassed with a different description');
+    const retryResponse = historyPage.waitForResponse(response =>
+      new URL(response.url()).pathname === '/v1/ai/jobs' && response.request().method() === 'POST');
+    await historyPage.locator('.ws-ai-job').filter({ hasText: retrySource.jobId.slice(0, 8) })
+      .locator('xpath=following-sibling::div[contains(@class,"ws-ai-ops")]').first()
+      .getByRole('button', { name: '按原描述重试', exact: true }).click();
+    await retryResponse;
+    assert.equal(retryPosts.length, 2);
+    assert.equal(retryPosts[0].brief, originalBrief);
+    assert.equal(retryPosts[1].brief, originalBrief);
+    assert.notEqual(retryPosts[0].idempotency_key, sourcePost.idempotency_key,
+      'explicit retry starts a new task with a new idempotency key');
+    assert.equal(retryPosts[1].idempotency_key, retryPosts[0].idempotency_key,
+      'retry after a lost acknowledgement reuses that attempt idempotency key');
+    assert.equal(await historyPage.locator('#ws-ai-brief').inputValue(), editedBrief,
+      'retry does not overwrite the description currently being edited');
+    await retrySourceButton.waitFor({ state: 'detached' });
+    assert.equal((await fixture.api('/v1/ai/jobs?limit=20')).jobs.length, jobsBeforeRetry + 1,
+      'lost acknowledgement retry creates only one task');
+    await historyPage.unroute('**/v1/ai/jobs');
+    pass('显式重试不覆盖输入，回执丢失后复用新幂等键且只创建一个任务');
+
+    if (process.env.AI_TASKS_RETRY_ONLY === '1') {
+      if (errors.length) fail('页面错误: ' + errors.join(' | '));
+      console.log(`✓ AI 任务重试浏览器专项通过（${passed} 项）`);
+      return;
+    }
+
+    await historyPage.getByRole('button', { name: '加载更早任务', exact: true }).click();
+    await historyPage.waitForFunction(() => document.querySelectorAll('.ws-ai-job').length === 21);
+    const olderRow = historyPage.locator('.ws-ai-job').filter({ hasText: olderJob.jobId.slice(0, 8) });
+    const olderOps = olderRow.locator('xpath=following-sibling::div[contains(@class,"ws-ai-ops")]').first();
+    await olderOps.getByRole('button', { name: '查看提案', exact: true }).click();
+    await historyPage.locator('.ws-ai-proposal .ws-prompt-head').waitFor();
+    assert.match(await historyPage.locator('.ws-ai-proposal .ws-prompt-head').innerText(), /提案 · 场景：/);
+    pass('AI 任务历史使用稳定游标翻页并能读取较早提案');
+    await olderOps.getByRole('button', { name: '收起提案', exact: true }).click();
+
+    offPageJob = {
+      ...offPageJob,
+      state: 'succeeded',
+      stateRevision: 2,
+      resultProposalId: job.resultProposalId,
+    };
+    latestPage = [
+      { ...pageOne[0], jobId: 'recent-00-fixture', createdAt: pageOne[0].createdAt + 2000 },
+      { ...pageOne[0], jobId: 'recent-01-fixture', createdAt: pageOne[0].createdAt + 1000 },
+      ...pageOne.slice(0, 18),
+    ];
+    await historyPage.getByRole('button', { name: '刷新任务与费用', exact: true }).click();
+    await historyPage.waitForFunction(() => document.querySelectorAll('.ws-ai-job').length === 23);
+    const shiftedActiveRow = historyPage.locator('.ws-ai-job').filter({ hasText: offPageJob.jobId.slice(0, 8) });
+    await historyPage.waitForFunction(id => {
+      const row = Array.from(document.querySelectorAll('.ws-ai-job')).find(item => item.textContent.includes(id));
+      return row && row.textContent.includes('已完成');
+    }, offPageJob.jobId.slice(0, 8));
+    await shiftedActiveRow.locator('xpath=following-sibling::div[contains(@class,"ws-ai-ops")]').first()
+      .getByRole('button', { name: '查看提案', exact: true }).waitFor();
+    pass('活跃任务被挤出最近页后按 ID 刷新终态与提案');
+    for (const shiftedJob of pageOne.slice(18)) {
+      assert.equal(await historyPage.locator('.ws-ai-job').filter({ hasText: shiftedJob.jobId.slice(0, 8) }).count(), 1,
+        'refresh must retain tasks shifted out of the latest page: ' + shiftedJob.jobId);
+    }
+    pass('刷新时保留已加载历史中被新任务挤出最近页的记录');
+    await historyPage.unroute('**/v1/ai/jobs?limit=20*');
+
+    // A delayed response must not redraw a closed panel or restart polling.
+    let aiRequests = 0;
+    let release;
+    const responseGate = new Promise(resolve => { release = resolve; });
+    await page.route('**/v1/ai/status', async route => {
+      aiRequests += 1;
+      await responseGate;
+      await route.continue();
+    });
+    for (let i = 0; i < 100 && !aiRequests; i++) {
+      await page.evaluate(() => Workshop.onAiTask());
+      await page.waitForTimeout(50);
+    }
+    assert.ok(aiRequests > 0, '延迟刷新已发出');
+    await page.evaluate(() => Workshop.close());
+    release();
+    await page.waitForTimeout(300);
+    const stoppedAt = aiRequests;
+    await page.waitForTimeout(2800);
+    assert.equal(aiRequests, stoppedAt, '关闭后不再轮询');
+    assert.equal(await page.evaluate(() => Workshop.isOpen()), false);
+    pass('迟到刷新不重开面板或轮询');
+
+    await page.screenshot({ path: path.join(output, 'ai-tasks.png') });
+  } finally {
+    await browser.close();
+    await fixture.close();
+  }
+
+  if (errors.length) fail('页面错误: ' + errors.join(' | '));
+  console.log(`✓ AI 任务面板浏览器契约全部通过（${passed} 项）`);
+
+  function fail(message) {
+    console.error('✗ ' + message);
+    process.exit(1);
+  }
+}
+
+main().catch((error) => {
+  console.error('✗ ' + (error && error.stack || error && error.message || error));
+  process.exit(1);
+});

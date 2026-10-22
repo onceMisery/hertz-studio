@@ -38,7 +38,7 @@ async function check(page) {
   try {
     await page.setViewportSize({ width: 1440, height: 960 });
     await page.getByRole('combobox', { name: '音源', exact: true }).selectOption('all');
-    await page.getByRole('searchbox', { name: '搜索在线曲库' }).fill('晴天');
+    await page.locator('#online-q').fill('晴天');
     await page.getByRole('button', { name: '搜索', exact: true }).click();
     await page.waitForFunction(() => Online.state.tracks.length === 20 && Online.state.loading);
     await page.screenshot({ path: 'output/playwright/search-progressive.png' });
@@ -48,7 +48,7 @@ async function check(page) {
     releaseQQ();
     await page.waitForFunction(() => !Online.state.loading && Online.state.tracks.length === 40);
     await page.getByRole('button', { name: '综合 · 40', exact: true }).click();
-    if (!(await page.locator('.online-row').first().getAttribute('data-online-id')).startsWith('online:qq:')) throw new Error('Exact title should rank first');
+    if (!(await page.locator('.online-row').first().getAttribute('data-online-id')).startsWith('online:netease:')) throw new Error('Late exact titles must preserve captured source grouping');
     await page.screenshot({ path: 'output/playwright/search-desktop.png' });
     await page.locator('.search-source-status').filter({ hasText: '网易云音乐' }).getByRole('button', { name: '加载更多' }).click();
     await page.waitForFunction(() => Online.state.tracks.length === 42);
@@ -80,10 +80,10 @@ async function check(page) {
       }
     }
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    await page.getByRole('searchbox', { name: '搜索在线曲库' }).fill('');
+    await page.locator('#online-q').fill('');
     if (await page.locator('.online-row').count()) throw new Error('Clearing search retained stale rows');
     if (errors.length) throw new Error(errors.join('\n'));
-    console.log('Browser checks passed: partial results, skeletons, ranking, paging, duplicate play, retry feedback, 320/390px overflow, clearing.');
+    console.log('Browser checks passed: partial results, skeletons, stable source grouping, paging, duplicate play, retry feedback, 320/390px overflow, clearing.');
   } finally {
     releaseQQ();
     if (playReply) playReply();
@@ -97,6 +97,10 @@ async function check(page) {
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
   try {
     const page = await browser.newPage();
+    // This journey deliberately needs three music sources even in Standard.
+    await page.route('**/v1/online/sources', route => route.fulfill({ json: { sources:
+      [['netease', '网易云音乐'], ['qq', 'QQ音乐'], ['kugou', '酷狗音乐']]
+        .map(([id, label]) => ({ id, label, kind: 'music', caps: [], cats: [] })) } }));
     if (process.env.SEARCH_LOCAL_ASSETS === '1') {
       for (const file of ['online.css', 'online.js', 'app.js']) {
         await page.route('**/' + file, route => route.fulfill({

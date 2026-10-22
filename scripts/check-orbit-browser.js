@@ -282,7 +282,7 @@ async function main() {
         && getComputedStyle(document.getElementById('rail')).display !== 'none';
       const stage = document.getElementById('stage'), column = document.getElementById('column');
       const stageParent = stage.parentNode, columnParent = column.parentNode;
-      for (const id of ['orbit','orbit','sheen','orbit','heijiao','orbit','liunian','orbit','qingfeng','orbit','classic']) Skins.apply(id);
+      for (const id of ['orbit','orbit','liunian','orbit','heijiao','orbit','qingfeng','orbit','classic']) Skins.apply(id);
       const clean = stage.parentNode === stageParent && column.parentNode === columnParent
         && !document.querySelector('.orbit-main, .orbit-queue, .orbit-anchor, #orbit-record-toggle');
       const Observer = window.MutationObserver;

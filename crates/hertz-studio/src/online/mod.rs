@@ -48,6 +48,9 @@ mod jamendo;
 mod kugou;
 #[cfg(feature = "full")]
 mod kuwo;
+pub(crate) mod search_gate;
+#[cfg(test)]
+mod search_pressure;
 // 取流候选阶梯：Candidate 出现在 StreamInfo 与 progressive::start 的公开签名里，
 // 所以对外可见；阶梯的构造规则集中在该文件。
 pub mod ladder;
@@ -86,12 +89,18 @@ pub(crate) use cred::{
 // 实现，分类白名单与字段归一只有一个 owner。
 pub(crate) use quote::{daily_quote, QuoteQuery};
 
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::error::{bad_request, ApiError, ApiResult};
+
+static AGGREGATE_SOURCE_START: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(not(feature = "full"))]
 const UA: &str = concat!("HertzStudio/", env!("CARGO_PKG_VERSION"));
@@ -210,6 +219,9 @@ pub struct SearchPage {
     pub source: String,
     pub keyword: String,
     pub total: usize,
+    /// True only when `total` came from an explicit upstream count field.
+    #[serde(skip)]
+    pub total_is_exact: bool,
     pub tracks: Vec<OnlineTrack>,
     /// 上游返回的错误或降级说明；为空表示一切正常
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -266,6 +278,8 @@ pub enum Capability {
     ArtistSearch,
     /// 在线专辑搜索：按关键词检索平台侧专辑，可进专辑页取全部曲目。
     AlbumSearch,
+    /// Explicit local-track lyric lookup. Does not grant redistribution rights.
+    LyricCandidates,
 }
 
 /// 平台曲目原始引用。写操作/播放取流时平台模块需要平台专有 id，
@@ -611,6 +625,25 @@ pub(crate) fn referer(source: &str) -> Option<&'static str> {
 #[derive(Clone)]
 pub struct Ctx {
     pub db: SqlitePool,
+    /// 搜索入场限制（§4.1）。真实闸来自 `AppState.search_gate`（见
+    /// `routes::online_ctx`）；内部播放链路经 [`Ctx::new`] 拿一把从不用于
+    /// 搜索的默认闸。字段随 Ctx 走，搜索应用路径之外没有第二个入口。
+    pub(crate) gate: Arc<search_gate::SearchGate>,
+}
+
+impl Ctx {
+    /// 内部链路（取流、探测、补全）用的构造器：不执行用户搜索。
+    pub fn new(db: SqlitePool) -> Self {
+        Self {
+            db,
+            gate: Arc::new(search_gate::SearchGate::default()),
+        }
+    }
+
+    /// 用户可达路径的构造器：携带 AppState 的共享搜索闸。
+    pub(crate) fn with_gate(db: SqlitePool, gate: Arc<search_gate::SearchGate>) -> Self {
+        Self { db, gate }
+    }
 }
 
 /// 封面地址统一升到 https。
@@ -806,11 +839,13 @@ pub async fn daily_source_states(ctx: &Ctx) -> Vec<DailySourceState> {
     out
 }
 
+/// 单源搜索（用户驱动的入口）：先校验输入，再过共享搜索闸——有界等待
+/// 入场 + 从入场到读完结果 6 秒总期限（§4.1）。
 pub async fn search(ctx: &Ctx, q: SearchQuery) -> ApiResult<SearchPage> {
     if q.q.as_deref().map(str::trim).unwrap_or("").is_empty() && q.cat.is_none() {
         return Err(bad_request("需要给出搜索关键词或分类"));
     }
-    provider::registry().search(ctx, &q).await
+    ctx.gate.run(provider::registry().search(ctx, &q)).await
 }
 
 /// All 聚合搜索：并发打全部已注册音源，单源超时/失败只进 `failed`。
@@ -825,9 +860,14 @@ pub async fn search_all(ctx: &Ctx, query: &str, limit: usize) -> ApiResult<Aggre
             ids.push(src.id);
         }
     }
-    // spec §2.4：单源 6s 预算，慢源不该拖慢整个聚合页。
-    let agg = aggregate::collect(
-        &ids,
+    // Do not let the first registered sources repeatedly consume the bounded
+    // shared waiter budget. Result arrays are restored to registration order below.
+    let dispatch_ids =
+        rotate_source_order(&ids, AGGREGATE_SOURCE_START.fetch_add(1, Ordering::Relaxed));
+    // Each actual source uses the same admission/deadline path as direct reads.
+    // The aggregate itself must not reserve an additional permit.
+    let mut result = aggregate::collect(
+        &dispatch_ids,
         query.trim(),
         limit,
         move |_src, q| {
@@ -838,10 +878,31 @@ pub async fn search_all(ctx: &Ctx, query: &str, limit: usize) -> ApiResult<Aggre
                     .map_err(|e| (e.code.to_string(), e.message))
             })
         },
-        std::time::Duration::from_secs(6),
+        search_gate::SOURCE_DEADLINE,
     )
     .await;
-    Ok(agg)
+    restore_source_order(&mut result, &ids);
+    Ok(result)
+}
+
+fn rotate_source_order<'a>(sources: &[&'a str], start: usize) -> Vec<&'a str> {
+    let mut rotated = sources.to_vec();
+    if !rotated.is_empty() {
+        let offset = start % rotated.len();
+        rotated.rotate_left(offset);
+    }
+    rotated
+}
+
+fn restore_source_order(result: &mut AggregateSearch, source_order: &[&str]) {
+    let rank = |source: &str| {
+        source_order
+            .iter()
+            .position(|candidate| *candidate == source)
+            .unwrap_or(source_order.len())
+    };
+    result.results.sort_by_key(|page| rank(&page.source));
+    result.failed.sort_by_key(|failure| rank(&failure.source));
 }
 
 /// 试听地址。
@@ -951,8 +1012,8 @@ pub async fn detail(ctx: &Ctx, source: &str, id: &str) -> ApiResult<OnlineDetail
     (provider::require(source)?.core.detail)(ctx, id).await
 }
 
-/// 在线歌词。返回的形状和本地 `/v1/tracks/{id}/lyrics` 完全一致，
-/// 前端因此可以复用同一套渲染代码，不需要为在线歌词再写一份解析。
+/// 原始在线歌词，保留文件 offset、尚未平移时间戳。公共 HTTP/RPC/OBS
+/// 读取层叠加用户偏移后仅调用一次 apply_offset，provider 不得预先应用。
 ///
 /// 「这首歌没有歌词」是正常结果而不是错误：一律返回空文档，由前端显示占位文案。
 pub async fn lyric(ctx: &Ctx, source: &str, id: &str) -> ApiResult<vmusic_core::LyricDocument> {
@@ -960,6 +1021,12 @@ pub async fn lyric(ctx: &Ctx, source: &str, id: &str) -> ApiResult<vmusic_core::
         return Err(bad_request("缺少曲目 id"));
     }
     (provider::require(source)?.core.lyric)(ctx, id).await
+}
+
+pub(crate) fn lyric_candidate_source(source: &str) -> ApiResult<SourceInfo> {
+    let provider = provider::require(source)?;
+    provider.gate(Capability::LyricCandidates)?;
+    Ok(provider.info)
 }
 
 /// 听歌打卡（网易云专属，state 的 ListenTracker 在有效收听满 30s 后调用）。
@@ -1053,7 +1120,8 @@ pub async fn search_playlists(
         "歌单搜索",
         provider.playlist_search,
     )?;
-    op(ctx, q).await
+    // 辅助搜索与歌曲搜索共用同一把入场闸（§4.1：覆盖全部实际执行中的搜索）。
+    ctx.gate.run(op(ctx, q)).await
 }
 
 /// 在线歌手搜索：能力位 [`Capability::ArtistSearch`] 未开的音源在这里拿到
@@ -1065,14 +1133,14 @@ pub async fn search_artists(
 ) -> ApiResult<ArtistSearchPage> {
     let provider = provider::require(source)?;
     let op = provider.operation(Capability::ArtistSearch, "歌手搜索", provider.artists)?;
-    (op.search)(ctx, q).await
+    ctx.gate.run((op.search)(ctx, q)).await
 }
 
 /// 在线专辑搜索：能力位 [`Capability::AlbumSearch`] 同上。
 pub async fn search_albums(ctx: &Ctx, source: &str, q: &SearchQuery) -> ApiResult<AlbumSearchPage> {
     let provider = provider::require(source)?;
     let op = provider.operation(Capability::AlbumSearch, "专辑搜索", provider.albums)?;
-    (op.search)(ctx, q).await
+    ctx.gate.run((op.search)(ctx, q)).await
 }
 
 /// 歌手页：该歌手的热门歌曲列表。与歌手搜索同一条能力位——搜得到歌手就
@@ -1293,6 +1361,62 @@ mod tests {
         assert_eq!(default_source(), SOURCES[0].id);
     }
 
+    #[test]
+    fn aggregate_dispatch_rotates_sources_and_restores_response_order() {
+        let sources = ["first", "second", "third", "fourth"];
+        let orders: Vec<_> = (0..sources.len())
+            .map(|start| rotate_source_order(&sources, start))
+            .collect();
+        for position in 0..sources.len() {
+            let mut seen: Vec<_> = orders.iter().map(|order| order[position]).collect();
+            seen.sort_unstable();
+            let mut expected = sources.to_vec();
+            expected.sort_unstable();
+            assert_eq!(seen, expected);
+        }
+
+        let mut result = AggregateSearch {
+            query: "x".into(),
+            results: ["third", "first", "fourth", "second"]
+                .into_iter()
+                .map(|source| SearchPage {
+                    source: source.into(),
+                    keyword: "x".into(),
+                    total: 0,
+                    total_is_exact: false,
+                    tracks: Vec::new(),
+                    warning: None,
+                    pagination: None,
+                })
+                .collect(),
+            failed: ["fourth", "second", "first", "third"]
+                .into_iter()
+                .map(|source| FailedSource {
+                    source: source.into(),
+                    code: "search_busy".into(),
+                    message: String::new(),
+                })
+                .collect(),
+        };
+        restore_source_order(&mut result, &sources);
+        assert_eq!(
+            result
+                .results
+                .iter()
+                .map(|page| page.source.as_str())
+                .collect::<Vec<_>>(),
+            sources
+        );
+        assert_eq!(
+            result
+                .failed
+                .iter()
+                .map(|failure| failure.source.as_str())
+                .collect::<Vec<_>>(),
+            sources
+        );
+    }
+
     /// 汽水音乐：能力位与「本项目拒绝做什么」绑定，不能随手加。
     ///
     /// 加登录态之外的能力位（尤其是 HighQuality）等于承诺能播受保护的高音质，
@@ -1491,6 +1615,7 @@ mod tests {
         assert_eq!(
             caps_of("netease"),
             &[
+                Capability::LyricCandidates,
                 Capability::CookieLogin,
                 Capability::QrLogin,
                 Capability::UserPlaylists,
@@ -1512,6 +1637,7 @@ mod tests {
         assert_eq!(
             caps_of("qq"),
             &[
+                Capability::LyricCandidates,
                 Capability::CookieLogin,
                 Capability::QrLogin,
                 Capability::UserPlaylists,
@@ -1526,6 +1652,7 @@ mod tests {
         assert_eq!(
             caps_of("kugou"),
             &[
+                Capability::LyricCandidates,
                 Capability::CookieLogin,
                 Capability::QrLogin,
                 Capability::HighQuality,
@@ -1533,7 +1660,10 @@ mod tests {
         );
         // 酷我：只有 cookie 粘贴登录；匿名上限 128k/试听，登录通道效果待
         // 实测，不标 HighQuality。
-        assert_eq!(caps_of("kuwo"), &[Capability::CookieLogin]);
+        assert_eq!(
+            caps_of("kuwo"),
+            &[Capability::LyricCandidates, Capability::CookieLogin]
+        );
         // ccmixter 是 CC 授权匿名曲库，没有任何账号能力。
         assert!(caps_of("ccmixter").is_empty());
         // Jamendo 同为 CC 匿名曲库；可用性由 client_id 配置决定，不占能力位。
@@ -1543,12 +1673,16 @@ mod tests {
         assert_eq!(
             caps_of("migu"),
             &[
+                Capability::LyricCandidates,
                 Capability::CookieLogin,
                 Capability::PlaylistSearch,
                 Capability::PlaylistDetail,
             ]
         );
-        assert_eq!(unverified_caps("migu"), &[Capability::CookieLogin]);
+        assert_eq!(
+            unverified_caps("migu"),
+            &[Capability::LyricCandidates, Capability::CookieLogin]
+        );
     }
 
     /// 设置页的音质清单由档位表派生：有多档才给入口，单档不给。
@@ -1623,7 +1757,9 @@ mod tests {
         assert_eq!(!annotations.is_empty(), crate::edition::FULL);
         // 未知源与没登记的源一律空表：「我不知道」不许画成「没验过」。
         assert!(unverified_caps("ghost").is_empty());
-        assert!(unverified_caps("netease").is_empty());
+        assert!(unverified_caps("ccmixter").is_empty());
+        #[cfg(feature = "full")]
+        assert_eq!(unverified_caps("netease"), &[Capability::LyricCandidates]);
     }
 
     /// `/v1/online/sources` 与 RPC 共用这份载荷，所以第三档必须真的出到线上——
@@ -1633,7 +1769,7 @@ mod tests {
     async fn sources_payload_carries_the_unverified_axis() {
         let dir = std::env::temp_dir().join(format!("vmusic-unverified-{}", uuid::Uuid::new_v4()));
         let db = vmusic_store::open(&dir).await.unwrap();
-        let ctx = Ctx { db };
+        let ctx = Ctx::new(db);
         let payload = list_sources(&ctx).await;
         let kugou = payload
             .iter()
@@ -1650,12 +1786,14 @@ mod tests {
             .find(|s| s["id"] == serde_json::json!("netease"))
             .expect("网易云在清单里");
         assert_eq!(
-            netease["unverified"]
-                .as_array()
-                .map(|v| v.len())
-                .unwrap_or(99),
-            0,
-            "没标注的源要回空数组，而不是缺字段——前端按数组读"
+            netease["unverified"],
+            serde_json::json!(["lyric_candidates"])
+        );
+        let ccmixter = payload.iter().find(|s| s["id"] == "ccmixter").unwrap();
+        assert_eq!(
+            ccmixter["unverified"],
+            serde_json::json!([]),
+            "没标注的源要回空数组，而不是缺字段"
         );
 
         ctx.db.close().await;
@@ -1669,7 +1807,7 @@ mod tests {
     async fn playlist_write_ops_stay_behind_the_capability_gate() {
         let dir = std::env::temp_dir().join(format!("vmusic-pl-gate-{}", uuid::Uuid::new_v4()));
         let db = vmusic_store::open(&dir).await.unwrap();
-        let ctx = Ctx { db };
+        let ctx = Ctx::new(db);
 
         // 酷狗转发臂已接线，但 PlaylistWrite 位未登记（真机闸门未过）→ 404。
         #[cfg(feature = "full")]

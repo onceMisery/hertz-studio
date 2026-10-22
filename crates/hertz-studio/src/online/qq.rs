@@ -328,16 +328,17 @@ pub async fn search(_ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         .map(map_track)
         .filter(|t| !t.id.is_empty())
         .collect();
-    let total = body
+    let reported_total = body
         .pointer("/req/data/body/total_song")
         .and_then(val_u64)
-        .or_else(|| body.pointer("/req/data/meta/sum").and_then(val_u64))
-        .unwrap_or(tracks.len() as u64) as usize;
+        .or_else(|| body.pointer("/req/data/meta/sum").and_then(val_u64));
+    let total = reported_total.unwrap_or(tracks.len() as u64) as usize;
 
     Ok(SearchPage {
         source: ID.into(),
         keyword: keyword.to_string(),
         total,
+        total_is_exact: reported_total.is_some(),
         tracks,
         warning: None,
         pagination: None,
@@ -832,7 +833,6 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
                 doc.translation = vmusic_lyrics::align_translation(&doc, &trans);
             }
         }
-        vmusic_lyrics::apply_offset(&mut doc);
         return Ok(doc);
     }
 

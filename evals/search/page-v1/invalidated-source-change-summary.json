@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "acceptedEvidence": false,
+  "releaseEligible": false,
+  "reason": "Source changed during measurement: scripts/benchmark-search.js\n+ actual - expected\n\n+ 'fbb45c1ec2ffe2424934fdc54c9600b8c436cbfcfe405ab622553eae3cd8beab'\n- 'a225cb307aa094d79a6e61e4316c380d09433d94d66707b9594c7f2fbd0f4a48'\n",
+  "rawHash": "a559889f8896fc1c3fe73830cc41e158965bdcf31a69fee1f9bed12dcb040e8c",
+  "compressedHash": "4c75c5f6ee6f1a6580f9aac1024e9be5d63b4dfaddb22fcfb2873a1dd20b2a9c",
+  "binaryHash": "8d4a83571f654e112be7fa2a739735b54b1764c41d03ffdb2b4f89ea4b2e5469",
+  "originalToolHash": "a225cb307aa094d79a6e61e4316c380d09433d94d66707b9594c7f2fbd0f4a48",
+  "measuredAt": "2026-10-18T05:55:56.961Z",
+  "screenshotHash": "03b3833f9805e96a6a2cd4f938f3446bc65fd8ab018337eda0236c76568187da"
+}

@@ -17,6 +17,7 @@
   --s3d-btn: 38px;
   --s3d-dock-h: 54px;
   --s3d-gap: 10px;
+  --s3d-safe-bottom: env(safe-area-inset-bottom, 0px);
   --s3d-text: #eef3f0;
   --s3d-muted: #a1aaa8;
   --s3d-accent: #c3e5da;
@@ -552,6 +553,9 @@ body.s3d-open > .bar { display: none; }
 .sl-line:active { cursor: grabbing; }
 .sl-line:hover { opacity: 1; filter: none; }
 .sl-word { display: inline-block; white-space: pre-wrap; }
+.sl-translation, .sl-romanization { display: block; font-weight: 450; letter-spacing: 0; }
+.sl-translation { margin-top: .12em; color: #acbcb5; font-size: .42em; line-height: 1.35; }
+.sl-romanization { margin-top: .06em; color: #82958c; font-size: .32em; line-height: 1.3; }
 .sl-line.is-active .sl-word { color: transparent; background: linear-gradient(90deg,#f4fff9 calc(var(--sl-fill,-10%) - 10%),#83958d calc(var(--sl-fill,-10%) + 10%)); background-clip: text; -webkit-background-clip: text; transform: translateY(var(--sl-rise,0px)); filter: drop-shadow(0 0 calc(var(--sl-glow,.45) * 14px) rgba(221,255,237,.32)); }
 .sl-line.is-past .sl-word { color: #d9e8e0; }
 .sl-return { position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%); border-radius: 30px; padding: 9px 18px; border: 1px solid rgba(255,255,255,.14); background: #182521; color: #d6eade; font-size: 12px; pointer-events: auto; cursor: pointer; }
@@ -1233,7 +1237,8 @@ body.s3d-open > .bar { display: none; }
 .s3d-sc:not(.is-current):hover .s3d-sc-hint { opacity: 1; transform: translateY(0); }
 
 /* ---------------------------------------------------------------------------
-   歌单架响应式：窄屏 / 竖屏缩小卡片并上抬避让底播条；超短高度整体收小
+   歌单架响应式：窄屏侧架压成横卡，歌词保留上半区、播放条上方留独立卡片带。
+   超短高度通过 max-height 分支再压缩该区域。
    --------------------------------------------------------------------------- */
 
 @media (max-width: 1180px) {
@@ -1261,10 +1266,20 @@ body.s3d-open > .bar { display: none; }
     padding: 3%;
     gap: 5%;
   }
-  /* 竖屏：卡半宽 min(34vw,124) + 12px 净距，当前卡完整在右缘内侧 */
+  /* 侧架当前卡会放大至约 1.3 倍，并向前悬浮。窄屏按变换后的
+     宽度留空间，不能只用原始卡宽的一半定位，否则右缘会被裁切。 */
+  .s3d[data-shelf-mode='side'] .s3d-sc { width: min(62vw, 236px); }
   .s3d[data-shelf-mode='side'] .s3d-shelf-plane {
-    right: calc(min(34vw, 124px) + 12px);
-    top: 45%;
+    right: calc(min(31vw, 118px) + 34px);
+    top: calc(100% - 205px);
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-sc { aspect-ratio: 2.6 / 1; }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-reading {
+    bottom: clamp(300px, 48vh, 340px);
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .fl-classic {
+    top: 15vh;
+    height: calc(100% - 15vh - clamp(300px, 48vh, 340px));
   }
   .s3d-sc-meta { display: none; }
 }
@@ -1272,6 +1287,9 @@ body.s3d-open > .bar { display: none; }
 @media (max-width: 760px) and (orientation: portrait) {
   .s3d-shelf-plane { bottom: 226px; }
   .s3d-sc { width: min(74vw, 260px); }
+  .s3d[data-shelf-mode='side'] .s3d-shelf-plane {
+    top: calc(100% - clamp(252px, 36vh, 286px) - var(--s3d-safe-bottom));
+  }
 }
 
 @media (max-height: 560px) {
@@ -1279,7 +1297,36 @@ body.s3d-open > .bar { display: none; }
   .s3d-chrome .s3d-shelf-plane { bottom: 226px; }
   .s3d-sc { width: clamp(170px, 20vw, 224px); font-size: 9.5px; }
   .s3d-sc-sub, .s3d-sc-meta { display: none; }
-  .s3d[data-shelf-mode='side'] .s3d-shelf-plane { top: 50%; }
+  .s3d[data-shelf-mode='side'] .s3d-shelf-plane { top: calc(50% - var(--s3d-safe-bottom)); }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-shelf-plane { top: calc(63% - var(--s3d-safe-bottom)); }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-sc { aspect-ratio: 3 / 1; }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-reading {
+    top: 54px;
+    bottom: clamp(250px, 50vh, 300px);
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .fl-classic {
+    top: 15vh;
+    height: calc(100% - 15vh - clamp(250px, 50vh, 300px));
+  }
+}
+
+@media (max-width: 760px) and (orientation: portrait) and (max-height: 560px) {
+  /* Lift the shelf slightly; reserve the lyric gap and move settings opposite the close button. */
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-shelf-plane {
+    top: calc(61.5% - var(--s3d-safe-bottom));
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .s3d-reading {
+    bottom: clamp(300px, 60vh, 340px);
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .fl-classic {
+    height: calc(100% - 15vh - clamp(300px, 60vh, 340px));
+  }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] #s3d-settings-toggle {
+    top: 12px;
+    right: auto;
+    bottom: auto;
+    left: 12px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1311,11 +1358,95 @@ body.s3d-open > .bar { display: none; }
 .s3d-zodiac { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 2; background: #05060a; }
 .s3d-zodiac[hidden] { display: none; }
 .s3d-zodiac .zodiac-canvas { display: block; width: 100%; height: 100%; }
-.s3d-zodiac.zodiac-interact { pointer-events: auto; cursor: grab; }
+.s3d-zodiac.zodiac-interact { pointer-events: auto; cursor: none; }
 .s3d-zodiac.zodiac-interact:active { cursor: grabbing; }
 .s3d-zodiac-source .s3d-canvas-wrap > .s3d-canvas { visibility: hidden; }
 .s3d-zodiac-source::before, .s3d-zodiac-source::after { display: none; }
 .s3d-zodiac-source .s3d-reading { z-index: 3; }
+/* 星座画布是 z-index 2 的整层，品牌/提示/快捷键原本没有层级会被它整块盖住：
+   播放舱和顶栏因为本来就是 4 才看得见，左下角那句「按住蓄能」却一直藏在
+   画布下面。这里把三条无命中文字层抬到与 chrome 同一层。 */
+.s3d-zodiac-source .s3d-brand,
+.s3d-zodiac-source .s3d-hint,
+.s3d-zodiac-source .s3d-keys { z-index: 4; }
+/* 画布上有高亮星点和连线，浅灰提示会被吃掉；加一层近黑投影并略微提亮。 */
+.s3d-zodiac-source .s3d-hint {
+  color: rgba(190, 248, 245, .80);
+  letter-spacing: .03em;
+}
+.s3d-zodiac-source .s3d-hint,
+.s3d-zodiac-source .s3d-keys {
+  text-shadow: 0 1px 12px rgba(0, 0, 0, .92), 0 0 3px rgba(0, 0, 0, .72);
+}
+/* 歌词层的暗底原本为文字可读性服务，但星座舞台的主体就在正中央：0.74 的
+   径向压暗会把星尘颜色和中段星环一起吃成灰黑。这里只留一层薄雾，标题用
+   轻微投影保证可读，其余亮度交还给星座。 */
+.s3d-zodiac-source .s3d-reading::before {
+  background: radial-gradient(ellipse,
+    rgba(4, 10, 8, .34), rgba(4, 10, 8, .12) 42%, transparent 74%);
+}
+.s3d-zodiac-source .sl-empty strong {
+  text-shadow: 0 2px 26px rgba(0, 0, 0, .62), 0 0 2px rgba(0, 0, 0, .4);
+}
+
+/* 星座独立舞台的能量准星：跟着指针走，按住时收紧并发光。它只表达
+   「指针已被星座接管 / 正在蓄能」，不参与命中；触摸设备直接隐藏。 */
+.zodiac-reticle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 48px;
+  height: 48px;
+  margin: -24px 0 0 -24px;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity 180ms ease;
+  mix-blend-mode: screen;
+  will-change: transform;
+}
+.zodiac-reticle.is-on { opacity: .88; }
+.zodiac-reticle i {
+  position: absolute;
+  inset: 0;
+  display: block;
+  border-radius: 50%;
+  border: 1px solid rgba(111, 242, 255, .62);
+  box-shadow: 0 0 18px rgba(111, 242, 255, .22),
+    inset 0 0 14px rgba(111, 242, 255, .12);
+  transition: transform 180ms cubic-bezier(.16, 1, .3, 1),
+    border-color 180ms ease, box-shadow 180ms ease;
+}
+.zodiac-reticle i::before,
+.zodiac-reticle i::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  background: rgba(180, 252, 255, .82);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 8px rgba(111, 242, 255, .55);
+}
+.zodiac-reticle i::before { width: 1px; height: 12px; }
+.zodiac-reticle i::after { width: 12px; height: 1px; }
+.zodiac-reticle.is-charging i {
+  transform: scale(1.24) rotate(90deg);
+  border-color: rgba(255, 94, 203, .9);
+  box-shadow: 0 0 26px rgba(255, 94, 203, .42),
+    inset 0 0 18px rgba(255, 94, 203, .28);
+  animation: zodiac-reticle-spin 1.15s linear infinite;
+}
+.zodiac-reticle.is-charging i::before,
+.zodiac-reticle.is-charging i::after {
+  background: rgba(255, 214, 245, .95);
+  box-shadow: 0 0 10px rgba(255, 94, 203, .72);
+}
+@keyframes zodiac-reticle-spin { to { transform: scale(1.24) rotate(450deg); } }
+@media (hover: none) { .zodiac-reticle { display: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .zodiac-reticle, .zodiac-reticle i { transition-duration: .01ms; }
+  .zodiac-reticle.is-charging i { animation: none; }
+}
 
 /* 普通舞台来源（创意编排 / 动画绘景）没有三维镜头：复位视角这类
    3D 专属键不显示，来源切换与歌词/设置/全屏照常。class 由 syncLayout

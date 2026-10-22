@@ -91,16 +91,17 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         .cloned()
         .unwrap_or_default();
     let tracks: Vec<OnlineTrack> = items.iter().filter_map(map_track).collect();
-    let total = body
+    let reported_total = body
         .get("TOTAL")
         .and_then(val_string)
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .unwrap_or(tracks.len());
+        .and_then(|s| s.trim().parse::<usize>().ok());
+    let total = reported_total.unwrap_or(tracks.len());
 
     Ok(SearchPage {
         source: ID.into(),
         keyword: term.to_string(),
         total,
+        total_is_exact: reported_total.is_some(),
         tracks,
         warning: None,
         pagination: None,
@@ -425,9 +426,7 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
     if text.trim().is_empty() {
         return Ok(vmusic_core::LyricDocument::empty());
     }
-    let mut doc = vmusic_lyrics::parse_lrc(&text);
-    vmusic_lyrics::apply_offset(&mut doc);
-    Ok(doc)
+    Ok(vmusic_lyrics::parse_lrc(&text))
 }
 
 /// lrclist → LRC 文本。time 秒（"0.0" / "12.34"）；脏数据按 0 处理。

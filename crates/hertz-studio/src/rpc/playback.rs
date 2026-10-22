@@ -3,14 +3,15 @@
 
 //! 播放域：状态快照、播放控制、队列、DSP、音频设备、舞台节拍地图。
 //!
-//! 逐个对应 `routes.rs` 里的同名 handler，逻辑照抄——两边唯一的差别是取参方式
-//! （axum 的 `State`/`Json`/`Query` 抽取器 vs 信封里的 `body`/`query`）和应答
-//! 如何表达（HTTP 状态码 vs `Reply.status`）。请求体结构直接复用 `routes` 里那
-//! 一份，两处定义才不会漂移。
+//! 播放控制的命令编排不在两个传输里各写一份：六种播控（play/pause、
+//! 上/下一曲、seek、volume）统一走 `AppState` 的 `*_control` 共享入口，
+//! 完成事实（applied/无操作/被取代）由它唯一给出；这里只负责取参（信封里的
+//! `body`/`query`）与应答整形（HTTP 状态码 vs `Reply.status`）。请求体结构
+//! 直接复用 `routes` 里那一份，两处定义才不会漂移。
 //!
-//! 播放控制统一走 `play_commit` 锁 + `play_generation` 代际：新的播放意图会把
+//! 播控语义核心是 `play_commit` 锁 + `play_generation` 代际：新的播放意图会把
 //! 还在准备中的旧意图顶掉，避免"点了下一首却又跳回上一首"。这套语义在 HTTP
-//! 与 RPC 两条路上必须一致，所以照抄而不是另写一份。
+//! 与 RPC 两条路上必须一致，所以收敛到原 owner 一处，而不是照抄两份。
 
 use std::sync::Arc;
 
@@ -44,50 +45,31 @@ async fn with_state(state: &Arc<AppState>) -> RpcResult {
     Ok(Reply::ok(snapshot(state).await))
 }
 
-pub async fn play(state: &Arc<AppState>) -> RpcResult {
-    // 会话恢复后的首次 play：按恢复的游标起播 + 接续上次进度（见 routes::play）。
-    if state.audio.snapshot().track_id.is_none() {
-        if let Some(index) = state.current_index().await {
-            let outcome = state
-                .play_index_for(index, None, PlayTrigger::Pick)
-                .await
-                .map_err(|e| ApiError::internal(e.to_string()))?;
-            if outcome.committed {
-                state.consume_restore_seek().await;
-                state.post_commit_background();
-            }
-            return with_state(state).await;
-        }
-    }
-    let commit = state.play_commit.lock().await;
-    state.cancel_prepared_playback().await;
-    state
-        .play_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state
-        .audio
-        .play()
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.transport_committed().await;
-    drop(commit);
+pub async fn play(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
+    // 完成事实在 resume_control 里；官方 UI 形态保持既有行为（含会话恢复
+    // 分支，见 routes::play）。带幂等键时由短写层去重（R2-P）。
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.resume",
+        client_op,
+        serde_json::Value::Null,
+        |s| async move { s.resume_control(false).await },
+    )
+    .await?;
     with_state(state).await
 }
 
-pub async fn pause(state: &Arc<AppState>) -> RpcResult {
-    let commit = state.play_commit.lock().await;
-    state.cancel_prepared_playback().await;
-    state
-        .play_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.set_buffering(false, None).await;
-    state
-        .audio
-        .pause()
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.transport_committed().await;
-    drop(commit);
+pub async fn pause(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.pause",
+        client_op,
+        serde_json::Value::Null,
+        |s| async move { s.pause_control().await },
+    )
+    .await?;
     with_state(state).await
 }
 
@@ -108,47 +90,61 @@ pub async fn stop(state: &Arc<AppState>) -> RpcResult {
     with_state(state).await
 }
 
-pub async fn next(state: &Arc<AppState>) -> RpcResult {
-    state.step_by_user(1).await?;
-    // 成功起播后在入口 detach 预取 + LRU（每首恰好一次）。
-    state.post_commit_background();
+pub async fn next(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
+    // 成功起播后的预取 + LRU detach 在 step_by_user 里（每首恰好一次）。
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.next",
+        client_op,
+        serde_json::Value::Null,
+        |s| async move { s.step_by_user(1).await },
+    )
+    .await?;
     with_state(state).await
 }
 
-pub async fn previous(state: &Arc<AppState>) -> RpcResult {
-    state.step_by_user(-1).await?;
-    state.post_commit_background();
+pub async fn previous(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult {
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.previous",
+        client_op,
+        serde_json::Value::Null,
+        |s| async move { s.step_by_user(-1).await },
+    )
+    .await?;
     with_state(state).await
 }
 
-pub async fn seek(state: &Arc<AppState>, body: &Value) -> RpcResult {
+pub async fn seek(state: &Arc<AppState>, body: &Value, client_op: Option<&str>) -> RpcResult {
     let request: SeekRequest = body_as(body)?;
-    let commit = state.play_commit.lock().await;
-    state.cancel_prepared_playback().await;
-    state
-        .play_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state
-        .audio
-        .seek(request.position_ms)
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.transport_committed().await;
-    drop(commit);
+    let position_ms = request.position_ms;
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.seek",
+        client_op,
+        serde_json::json!(position_ms),
+        move |s| async move { s.seek_control(position_ms).await },
+    )
+    .await?;
     with_state(state).await
 }
 
-pub async fn volume(state: &Arc<AppState>, body: &Value) -> RpcResult {
+pub async fn volume(state: &Arc<AppState>, body: &Value, client_op: Option<&str>) -> RpcResult {
     let request: VolumeRequest = body_as(body)?;
-    if !(0.0..=1.0).contains(&request.volume) {
-        return Err(bad_request("volume must be between 0.0 and 1.0"));
-    }
-    state
-        .audio
-        .set_volume(request.volume)
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    crate::persist::save_volume(&state.db, request.volume).await;
+    let volume = request.volume;
+    // 非有限值经 json! 归一成 Null：幂等输入与校验错误互不串键。
+    crate::idempotency::short_write(
+        state.clone(),
+        crate::idempotency::LOCAL_OWNER,
+        "playback.volume_set",
+        client_op,
+        serde_json::json!(volume),
+        move |s| async move { s.set_volume_control(volume).await },
+    )
+    .await?;
     with_state(state).await
 }
 

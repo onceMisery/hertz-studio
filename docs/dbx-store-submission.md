@@ -4,6 +4,10 @@
 store 仓库的 `CONTRIBUTING.md` + `schemas/plugin-candidate.schema.json`；本文只写
 「我们这边具体怎么做、哪些字段填什么」。
 
+当前发行策略以 [Standard / Full](./editions.md) 为准：只有 Standard 进入商店候选，tag 必须为
+`hertz-plugin-standard-v<version>`；Full 通过手动 release workflow 取得检视产物。文末的 0.1.0
+联调与首次提交属于历史记录，不能作为当前版本的宿主、声音、账号或上架状态证据。
+
 ## 信任边界（先记住这条，别的都是细节）
 
 | 产物 | 归谁 | 放哪 |
@@ -49,11 +53,14 @@ manifest 的 `id`/`version`/`publisher`，`onceMisery` 这种带大写的写法�
 
 ## 每次发版
 
-1. `plugin/manifest.json` 的 `version` 递增。同名版本**不可原地重建**——源码、元数据、
+1. 按 [Standard / Full](./editions.md) 同步递增 workspace、插件 manifest 与发行版版本；打包从
+   `scripts/prepare-edition.js` 生成的 Standard 目录读取身份。同名版本**不可原地重建**——源码、元数据、
    包字节任一处变了，就得开新版本（已被列进目录或被吊销的版本也不能重交）。
 2. 跑一遍本地契约检查（`node scripts/check-frontend.js`，等价于 CI 的 Frontend contract
    checks），确认插件形态没退化。
-3. 建 tag 与 Release，命名沿用 `hertz-plugin-v<version>`（例：`hertz-plugin-v0.1.0`）。
+3. 验证当前提交的 CI 与 [发布验收矩阵](./release-validation.md)，再建 tag 与 Release，命名为
+   `hertz-plugin-standard-v<version>`（当前 0.2.1 对应 `hertz-plugin-standard-v0.2.1`）。旧
+   `hertz-plugin-v...` 与 Full tag 不触发当前候选链路。
    Release 正文见下面「Release notes 模板」。
 4. Publish 该 Release → `release dbx plugin` workflow 跑完，Release 资产里应出现
    5 个 `.dbxp` + 5 个 `.artifact.json` + `release-candidates.json`。
@@ -94,26 +101,26 @@ manifest 的 `id`/`version`/`publisher`，`onceMisery` 这种带大写的写法�
   "schemaVersion": 1,
   "id": "io.github.oncemisery.hertz-studio",
   "publisher": "oncemisery",
-  "version": "0.1.0",
-  "name": "Hertz Studio",
+  "version": "0.2.1",
+  "name": "Hertz Studio Standard",
   "description": "Local-first music service and player: library scanning, native playback, playlists, word-level lyrics and an immersive 3D stage, all running on your own machine.",
   // icon 要 URI。照 store 里现有条目的做法，钉到 tag 的 raw 地址，别用 HEAD。
-  "icon": "https://raw.githubusercontent.com/onceMisery/hertz-studio/hertz-plugin-v0.1.0/plugin/assets/plugin.svg",
+  "icon": "https://raw.githubusercontent.com/onceMisery/hertz-studio/hertz-plugin-standard-v0.2.1/plugin/assets/plugin.svg",
   "tags": ["music", "player", "lyrics", "audio", "local-first"],
   "permissions": ["host.events", "host.storage", "host.workbench"],
   // source 也钉到 tag：reviewer 要能从源码对上包字节。
-  "source": "https://github.com/onceMisery/hertz-studio/tree/hertz-plugin-v0.1.0",
+  "source": "https://github.com/onceMisery/hertz-studio/tree/hertz-plugin-standard-v0.2.1",
   "homepage": "https://github.com/onceMisery/hertz-studio",
   "license": "MIT",
   "releaseNotes": "与 Release 正文一致的那段。",
   "localizations": {
     "zh-CN": {
-      "name": "Hertz Studio",
+      "name": "Hertz Studio Standard",
       "description": "本地优先的音乐服务与播放器：曲库扫描、原生出声、歌单、逐字歌词与沉浸式 3D 舞台，全部跑在你自己的机器上。"
     }
   },
   "targets": [
-    { "target": "windows-x64", "url": "https://github.com/onceMisery/hertz-studio/releases/download/hertz-plugin-v0.1.0/<包名>.dbxp", "sha256": "<64位hex>", "size": 0 }
+    { "target": "windows-x64", "url": "https://github.com/onceMisery/hertz-studio/releases/download/hertz-plugin-standard-v0.2.1/<包名>.dbxp", "sha256": "<64位hex>", "size": 0 }
     // linux-x64 / linux-arm64 / darwin-x64 / darwin-arm64 各一条
   ]
 }
@@ -129,15 +136,16 @@ schema 是 `additionalProperties: false`，所以：没有 `screenshots` 字段�
 照 `t8y2/dbx-store/.github/PULL_REQUEST_TEMPLATE.md` 的小节写，内容我们都有：
 
 - 身份：Plugin ID / Version / Publisher ID。
-- 源码与 tag：`https://github.com/onceMisery/hertz-studio` + `hertz-plugin-v0.1.0`。
+- 源码与 tag：`https://github.com/onceMisery/hertz-studio` + 对应版本的 `hertz-plugin-standard-v<version>`。
 - 能力与工作流：一个 workbench（曲库浏览 + 原生出声播放 + 沉浸式歌词舞台），一个命令
   `Open Hertz Studio`（singleton tab），入口在命令面板和 app 工具栏。
 - 权限与数据/网络访问：`host.events`、`host.storage`、`host.workbench`。曲库扫描只读用户
-  指定的本地目录；在线音源要用户自己登录，凭据进操作系统钥匙串（Windows Credential
+  指定的本地目录；Standard 保留本地/WebDAV、Jamendo、ccMixter 与公开播客，Jamendo 需自备 client_id。
+  不把 Full 的商业平台账号与协议写入 Standard 能力清单。需要保存的凭据进操作系统钥匙串（Windows Credential
   Manager / macOS Keychain / freedesktop Secret Service），不落 SQLite 明文、不上传第三方。
 - 原生 sidecar 行为：自带 `bin/dbx-plugin-hertz`，与宿主走 stdio JSON-RPC。**插件形态不开监听口**——
   HTTP + token 那一层只存在于独立形态（独立默认绑 `127.0.0.1`，绑到非回环会打警告）。
-  插件路径不 spawn 子进程：全仓唯一的 `Command::new` 是独立 CLI 的 `--open`（`cmd /C start <url>`）。
+  DBX 不开放外部 MCP stdio，也不会自动启动本地模型；不要把独立 CLI 的 MCP 模式宣传成 DBX 外部接入。
   浮动胶囊是渐进增强：宿主没有 `capabilities.floating` 时自动退回页内最小化。
 - License：MIT（仓库 LICENSE；上游第三方署名见 NOTICE）。
 - Support：`https://github.com/onceMisery/hertz-studio/issues`。
@@ -160,7 +168,7 @@ schema 是 `additionalProperties: false`，所以：没有 `screenshots` 字段�
 ## Release notes 模板
 
 ```markdown
-## Hertz Studio 插件 <version>
+## Hertz Studio Standard 插件 <version>
 
 - 独立形态与插件形态同一份前端/后端；插件形态自带 sidecar。
 - 桌面浮动胶囊：最小化后是独立置顶窗口，可拖到任意位置，贴边停靠（拖到边缘松手即收起，
@@ -179,10 +187,11 @@ publish Release，机器人只凭 Release 和 `release-candidates.json` 就自�
 `.dbx-store.json` 只在首次提交或有意改列表信息时才用，字段形状照他们的 CONTRIBUTING.md。
 这条路要先给 `t8y2/dbx-store` 提一条登记 PR，属于可选优化。
 
-## 提交前的材料状态
+## 0.1.0 首次提交历史（不是当前候选验收）
 
 首次提交已发出：**`t8y2/dbx-store` PR #242**（`io.github.oncemisery.hertz-studio@0.1.0`，
-切自 tag `hertz-plugin-v0.1.0`）。它停在维护者侧要两步：先 approve workflow runs，再 review + `/sign`。
+切自 tag `hertz-plugin-v0.1.0`）。当时记录的待办是先 approve workflow runs，再 review + `/sign`；
+本文没有重新查询该 PR 的当前状态。
 
 2026-10-08 已在 DBX 0.6.35 验证最终候选包的六皮肤切换、创意/沉浸场景、事件链路与网易云原生播放；
 2026-10-10 又把 5 个候选包逐个下载回算过 `sha256`/`size`，与 `release-candidates.json` 一致。
@@ -216,8 +225,9 @@ Windows 下替换同版本插件前，先关闭它的工作台并停止插件进
    2026-10-10 为了挂 review 截图发了一条 `hertz-plugin-v0.1.0-screenshots`，结果 `release dbx plugin`
    按 0.1.0 又编了一套塞进去，其中 `windows-x64` 与已提交那套差 5 字节——同一版本号两种字节，
    reviewer 拿错 URL 就签不过。现在 workflow 里有 `gate` job 兜底：只有 tag 名**精确等于**
-   `hertz-plugin-v` + `manifest.json` 的 `version` 才打候选，其余只留一条 notice 跳过。
-   约定：上架候选只认 `hertz-plugin-v<version>` 那条 release 的 `release-candidates.json`；
+   当时的 `hertz-plugin-v` + `manifest.json` 的 `version` 才打候选，其余只留一条 notice 跳过。
+   当前 Standard / Full 分版后，gate 已改为 `hertz-plugin-standard-v<version>`；上架候选只认该
+   Standard release 的 `release-candidates.json`。
    截图等附属材料另发 tag（本次是 `hertz-plugin-v0.1.0-screenshots`，里面那 6 个候选资产保留但
    **不作为提交内容**）；独立形态的安装包另发 `hertz-studio-v<version>`，别混进插件那条。
    **但 gate 不是全能的**：`on: release` 取的是**触发事件那个提交里**的 workflow 文件，不是默认分支

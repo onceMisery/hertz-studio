@@ -11,6 +11,7 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     const errors = []; page.on('pageerror', error => errors.push(error.message));
     await page.setContent('<html><body style="margin:0"><canvas style="width:100vw;height:100vh"></canvas></body></html>');
+    await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/space-stage.js') });
     const evidence = await page.evaluate(async () => {
       const canvas = document.querySelector('canvas');
@@ -110,7 +111,7 @@ async function main() {
       let invalidLyric='';try{await host.selectLyrics('coast');}catch(error){invalidLyric=error.message;}
       let releaseLyric,staleLyricUpdates=0,staleLyricDisposes=0;
       SpaceStagePure.register({...definition,id:'browser-delayed-lyric',capabilities:{...definition.capabilities,ownsLyrics:true},create(){return new Promise(resolve=>{releaseLyric=()=>resolve({update(){staleLyricUpdates++;},dispose(){staleLyricDisposes++;}});});}});
-      const delayedLyric=host.selectLyrics('browser-delayed-lyric');await host.selectLyrics('word-wipe');releaseLyric();await delayedLyric;
+      const delayedLyric=host.selectLyrics('browser-delayed-lyric');await host.selectLyrics('lyric-sonnet');releaseLyric();await delayedLyric;
       snapshot(lyricFrame);const latestLyric=host.stats().lyricId;
       await host.select('zodiac');snapshot(lyricFrame);const retainedLyric=host.stats().lyricId;
       await host.selectLyrics(null);
@@ -149,7 +150,7 @@ async function main() {
     assert.equal(new Set(evidence.layerResources).size,1,'repeated layer changes retain bounded resources');
     assert.equal(evidence.offStats.lyricId,null);assert.equal(evidence.offHash,evidence.baseHash);assert.ok(evidence.portrait>0);
     assert.match(evidence.invalidLyric,/Expected a lyric/);assert.equal(evidence.staleLyricUpdates,0);assert.equal(evidence.staleLyricDisposes,1);
-    assert.equal(evidence.latestLyric,'word-wipe');assert.equal(evidence.retainedLyric,'word-wipe','world changes retain lyric selection');
+    assert.equal(evidence.latestLyric,'lyric-sonnet');assert.equal(evidence.retainedLyric,'lyric-sonnet','world changes retain lyric selection');
     for(const world of evidence.frozenWorlds){
       assert.notEqual(world.first,world.moving,world.id+' moves during playback');
       assert.equal(world.reducedFirst,world.reducedNext,world.id+' freezes under global reduced motion');

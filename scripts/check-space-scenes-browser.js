@@ -19,6 +19,7 @@ const sharp = previews ? require(process.env.SHARP_MODULE || 'sharp') : null;
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
     await page.setContent('<html><body style="margin:0;background:#030405"><canvas style="width:100vw;height:100vh;display:block"></canvas></body></html>');
+    await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/space-stage.js') });
     const ids = await page.evaluate(() => {
       const canvas = document.querySelector('canvas'), original = canvas.getContext.bind(canvas);
@@ -70,7 +71,7 @@ const sharp = previews ? require(process.env.SHARP_MODULE || 'sharp') : null;
         if (mode === 'medium') {
           const screenshot = await page.screenshot({ type: 'png' });
           if (previews) await sharp(screenshot).resize(480, 270).jpeg({ quality: 84 }).toFile(path.join(root, 'plugin/ui/space-scene-preview', id + '.jpg'));
-          if (id.startsWith('lyric-') || id === 'word-wipe' || id.startsWith('handdrawn-')) fs.writeFileSync(path.join(output, id + '-desktop.png'), screenshot);
+          if (id.startsWith('lyric-') || id.startsWith('handdrawn-')) fs.writeFileSync(path.join(output, id + '-desktop.png'), screenshot);
         }
       }
       const camera = await page.evaluate(id => {

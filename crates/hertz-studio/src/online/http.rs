@@ -134,9 +134,9 @@ pub async fn get_json_with_headers(
         .await
         .map_err(send_error)?;
     let status = resp.status();
-    // 响应头先拷出来：resp 随后被 bytes() 消费掉。
+    // 响应头先拷出来：随后有界读取会消费 resp。
     let resp_headers = resp.headers().clone();
-    let bytes = resp.bytes().await.map_err(read_error)?;
+    let bytes = bounded_bytes(resp).await?;
     Ok((resp_headers, decode_json(status, &bytes)?))
 }
 
@@ -180,7 +180,7 @@ pub async fn post_json_with_headers(
     let status = resp.status();
     // 响应头先拷出来：resp 随后被 bytes() 消费掉。
     let resp_headers = resp.headers().clone();
-    let bytes = resp.bytes().await.map_err(read_error)?;
+    let bytes = bounded_bytes(resp).await?;
     Ok((resp_headers, decode_json(status, &bytes)?))
 }
 
@@ -208,10 +208,30 @@ fn decode_json(status: reqwest::StatusCode, bytes: &[u8]) -> ApiResult<serde_jso
 }
 
 /// 取字节后交给 [`decode_json`]（GET/POST 共用）。
-async fn read_json(resp: reqwest::Response) -> ApiResult<serde_json::Value> {
+pub(super) async fn read_json(resp: reqwest::Response) -> ApiResult<serde_json::Value> {
     let status = resp.status();
-    let bytes = resp.bytes().await.map_err(read_error)?;
+    let bytes = bounded_bytes(resp).await?;
     decode_json(status, &bytes)
+}
+
+/// Enforce the same bound while reading success and error bodies, including
+/// chunked responses. Checking after bytes() has already allocated is too late.
+async fn bounded_bytes(mut resp: reqwest::Response) -> ApiResult<Vec<u8>> {
+    let too_large = || ApiError::upstream_rejected("音源响应超过 2MiB 上限");
+    if resp
+        .content_length()
+        .is_some_and(|n| n > MAX_TEXT_BYTES as u64)
+    {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(read_error)? {
+        if chunk.len() > MAX_TEXT_BYTES - bytes.len() {
+            return Err(too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// GET 纯文本：QQ 经典 fcgi 网关部分接口回 JSONP（`callback({...})`），
@@ -258,25 +278,19 @@ pub async fn get_bytes(
         .map_err(send_error)?;
     let status = resp.status();
     let resp_headers = resp.headers().clone();
-    let bytes = resp.bytes().await.map_err(read_error)?;
+    let bytes = bounded_bytes(resp).await?;
     if !status.is_success() {
         let snippet = error_snippet(&bytes);
         return Err(ApiError::upstream_rejected(format!(
             "音源返回 HTTP {status}，响应片段: {snippet}"
         )));
     }
-    if bytes.len() > MAX_TEXT_BYTES {
-        let len = bytes.len();
-        return Err(ApiError::upstream_rejected(format!(
-            "音源响应体积超过上限（{len} 字节 > 2MiB）"
-        )));
-    }
-    Ok((resp_headers, bytes.to_vec()))
+    Ok((resp_headers, bytes))
 }
 
 async fn read_text(resp: reqwest::Response) -> ApiResult<String> {
     let status = resp.status();
-    let bytes = resp.bytes().await.map_err(read_error)?;
+    let bytes = bounded_bytes(resp).await?;
     if !status.is_success() {
         let snippet = error_snippet(&bytes);
         return Err(ApiError::upstream_rejected(format!(
@@ -361,6 +375,104 @@ pub(crate) fn merge_cookie(base: &str, incoming: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn response(raw: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/fixture", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).await;
+            // The bounded reader may disconnect before the remaining chunks.
+            let _ = stream.write_all(&raw).await;
+        });
+        (url, task)
+    }
+    fn chunked(status: &str, body: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut raw=format!("HTTP/1.1 {status}\r\nTransfer-Encoding: chunked\r\nSet-Cookie: ticket=fixture; HttpOnly\r\nConnection: close\r\n\r\n").into_bytes();
+        for chunk in body.chunks(65536) {
+            write!(&mut raw, "{:x}\r\n", chunk.len()).unwrap();
+            raw.extend_from_slice(chunk);
+            raw.extend_from_slice(b"\r\n");
+        }
+        raw.extend_from_slice(b"0\r\n\r\n");
+        raw
+    }
+
+    #[tokio::test]
+    async fn actual_http_streams_enforce_limits_for_json_text_bytes_and_errors() {
+        let client = Client::builder().no_proxy().build().unwrap();
+        let (url, task) = response(chunked("200 OK", br#"{"ok":true}"#)).await;
+        let (headers, body) = get_json_with_headers(&client, &url, HeaderMap::new())
+            .await
+            .unwrap();
+        assert_eq!(body["ok"], true);
+        assert!(headers.contains_key(reqwest::header::SET_COOKIE));
+        task.await.unwrap();
+        let (url, task) = response(chunked("200 OK", br#"{"ok":true}"#)).await;
+        let (headers, body) = post_json_with_headers(&client, &url, HeaderMap::new(), "{}".into())
+            .await
+            .unwrap();
+        assert_eq!(body["ok"], true);
+        assert!(headers.contains_key(reqwest::header::SET_COOKIE));
+        task.await.unwrap();
+        let exactly = vec![b'x'; MAX_TEXT_BYTES];
+        let (url, task) = response(chunked("200 OK", &exactly)).await;
+        let (headers, body) = get_bytes(&client, &url, HeaderMap::new()).await.unwrap();
+        assert_eq!(body.len(), MAX_TEXT_BYTES);
+        assert!(headers.contains_key(reqwest::header::SET_COOKIE));
+        task.await.unwrap();
+        let over = vec![b'x'; MAX_TEXT_BYTES + 1];
+        for kind in 0..4 {
+            let (url, task) = response(chunked(
+                if kind == 3 {
+                    "503 Unavailable"
+                } else {
+                    "200 OK"
+                },
+                &over,
+            ))
+            .await;
+            let error = match kind {
+                0 => get_json(&client, &url, HeaderMap::new()).await.unwrap_err(),
+                1 => get_text(&client, &url, HeaderMap::new()).await.unwrap_err(),
+                2 => get_bytes(&client, &url, HeaderMap::new())
+                    .await
+                    .unwrap_err(),
+                _ => post_json(&client, &url, HeaderMap::new(), "{}".into())
+                    .await
+                    .unwrap_err(),
+            };
+            assert!(error.message.contains("2MiB"));
+            task.await.unwrap();
+        }
+        // Declared overflow is rejected before attempting to read a missing body.
+        let (url, task) = response(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                MAX_TEXT_BYTES + 1
+            )
+            .into_bytes(),
+        )
+        .await;
+        assert!(get_text(&client, &url, HeaderMap::new())
+            .await
+            .unwrap_err()
+            .message
+            .contains("2MiB"));
+        task.await.unwrap();
+        let (url, task) = response(chunked(
+            "403 Forbidden",
+            b"https://fixture/denied?token=secret",
+        ))
+        .await;
+        let error = get_json(&client, &url, HeaderMap::new()).await.unwrap_err();
+        assert!(error.message.contains("403"));
+        assert!(!error.message.contains("secret"));
+        task.await.unwrap();
+    }
 
     #[test]
     fn merge_cookie_keeps_base_and_lets_fresh_pair_win() {

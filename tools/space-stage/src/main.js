@@ -20,6 +20,9 @@ registry.register({ apiVersion: 1, id: 'zodiac', stateVersion: 1, label: '星座
   preview: '/space-scene-preview/zodiac.jpg', aliases: [],
   params: { ...optionalEffectSpecs, sign: { type: 'select', label: '星座', default: 'cycle', options: [{value:'cycle',label:'循环'}, ...zodiac.ZODIAC.map(sign => ({value:sign.id,label:sign.cn}))] },
     field: { type: 'boolean', label: '星尘', default: true }, glow: { type: 'number', label: '辉光', default: 1, min: 0, max: 2, step: .05 },
+    meteors: { type: 'number', label: '流星密度', default: 1, min: 0, max: 1.5, step: .05 },
+    reactivity: { type: 'number', label: '音乐响应', default: 1, min: 0, max: 2, step: .05 },
+    pointerStrength: { type: 'number', label: '悬停凹陷', default: 1, min: 0, max: 2, step: .05 },
     speed: { type: 'number', label: '运动', default: 1, min: .15, max: 3, step: .05 }, reduced: { type: 'boolean', label: '减少动态', default: false } },
   camera: { theta: 0, phi: .06, radius: 11.87, fov: 52, lookAt: [0,0,0], minRadius: 2.6, maxRadius: 30,
     fit: { halfWidth: zodiac.FIG_HALF_W * 1.3, halfHeight: zodiac.FIG_HALF * 1.3 } },
@@ -76,7 +79,8 @@ export function create(canvas, options = {}) {
       textures: info.memory.textures, programs: info.programs ? info.programs.length : 0,
       physicalPixels: canvas.width * canvas.height, memorySource: 'tracked-resource-estimate',
       ...scoped, resources: scoped.resources + lyricStats.resources, estimatedBytes: scoped.estimatedBytes + lyricStats.estimatedBytes + shared.bytes + post.bytes,
-      textTextures: shared.textTextures, coverTextures: shared.coverTextures, tasks: scoped.tasks + lyricStats.tasks + shared.queued };
+      textTextures: shared.textTextures, coverTextures: shared.coverTextures, tasks: scoped.tasks + lyricStats.tasks + shared.queued,
+      sceneStats: active?.instance?.stats?.() || null };
   }
   function notify() { if (typeof options.onStatus === 'function') options.onStatus(stats()); }
   function releaseActive() {

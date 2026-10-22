@@ -188,6 +188,7 @@ impl Provider {
             Capability::PlaylistSearch => self.playlist_search.is_some(),
             Capability::ArtistSearch => self.artists.is_some(),
             Capability::AlbumSearch => self.albums.is_some(),
+            Capability::LyricCandidates => self.kind == MediaKind::Music,
         }
     }
 }
@@ -261,7 +262,15 @@ impl<'a> Registry<'a> {
     }
 
     pub async fn search(&self, ctx: &Ctx, query: &SearchQuery) -> ApiResult<SearchPage> {
-        (self.require(&query.source)?.core.search)(ctx, query).await
+        let provider = self.require(&query.source)?;
+        // Explicit pressure probes substitute only the provider's I/O. Routing,
+        // validation, aggregate ownership and the real shared gate still run.
+        // Task scope avoids process-wide hooks leaking into concurrent tests.
+        #[cfg(test)]
+        if let Ok(target) = super::search_pressure::UPSTREAM.try_with(Clone::clone) {
+            return super::search_pressure::search(target, query).await;
+        }
+        (provider.core.search)(ctx, query).await
     }
 }
 
@@ -294,6 +303,7 @@ pub(super) const fn source_infos() -> [SourceInfo; PROVIDERS.len()] {
 const PROVIDERS: &[Provider] = &[
     #[cfg(feature = "full")]
     Provider {
+        unverified: &[Capability::LyricCandidates],
         referer: Some("https://music.163.com"),
         quality: QualityProfile {
             default: quality::Quality::Hires,
@@ -358,6 +368,7 @@ const PROVIDERS: &[Provider] = &[
                     keys: &["MUSIC_U"],
                 }),
                 caps: &[
+                    Capability::LyricCandidates,
                     Capability::CookieLogin,
                     Capability::QrLogin,
                     Capability::UserPlaylists,
@@ -396,7 +407,7 @@ const PROVIDERS: &[Provider] = &[
                 quality::Quality::Hires,
             ],
         },
-        unverified: &[Capability::QrLogin],
+        unverified: &[Capability::LyricCandidates, Capability::QrLogin],
         credentials: Some(CredentialRules {
             enrich: cred::enrich_qq,
             signed_in: cred::signed_in_qq,
@@ -450,6 +461,7 @@ const PROVIDERS: &[Provider] = &[
                 // Web CGI 上没有叫"每日推荐"的端点，但 GetRadarSong 给的就是个性化
                 // 推荐歌曲，见 qq::recommend_songs 的注释。
                 caps: &[
+                    Capability::LyricCandidates,
                     Capability::CookieLogin,
                     Capability::QrLogin,
                     Capability::UserPlaylists,
@@ -479,7 +491,7 @@ const PROVIDERS: &[Provider] = &[
                 quality::Quality::Lossless,
             ],
         },
-        unverified: &[Capability::QrLogin],
+        unverified: &[Capability::LyricCandidates, Capability::QrLogin],
         credentials: Some(CredentialRules {
             enrich: cred::enrich_kugou,
             signed_in: cred::signed_in_kugou,
@@ -528,6 +540,7 @@ const PROVIDERS: &[Provider] = &[
                 // create + waiting 正常）；confirmed 换票链路待真机确认。
                 // 歌单详情/用户歌单/写操作/推荐/红心端点仍待真机后逐个摘开。
                 caps: &[
+                    Capability::LyricCandidates,
                     Capability::CookieLogin,
                     Capability::QrLogin,
                     Capability::HighQuality,
@@ -543,6 +556,7 @@ const PROVIDERS: &[Provider] = &[
     },
     #[cfg(feature = "full")]
     Provider {
+        unverified: &[Capability::LyricCandidates],
         referer: Some("https://www.kuwo.cn/"),
         quality: QualityProfile {
             default: quality::Quality::Exhigh,
@@ -573,7 +587,7 @@ const PROVIDERS: &[Provider] = &[
                 // 实测，字段名待核对）；匿名档位上限 128k 完整曲/试听片段，登录
                 // 通道对移动接口的效果待实测——不标 HighQuality（标了等于承诺
                 // 拿得到无损）。
-                caps: &[Capability::CookieLogin],
+                caps: &[Capability::LyricCandidates, Capability::CookieLogin],
             },
             CoreOps {
                 search: |ctx, q| Box::pin(kuwo::search(ctx, q)),
@@ -664,7 +678,7 @@ const PROVIDERS: &[Provider] = &[
     #[cfg(feature = "full")]
     Provider {
         referer: Some("https://music.migu.cn/v5/"),
-        unverified: &[Capability::CookieLogin],
+        unverified: &[Capability::LyricCandidates, Capability::CookieLogin],
         credentials: Some(CredentialRules {
             enrich: |_| {},
             signed_in: migu::signed_in,
@@ -689,6 +703,7 @@ const PROVIDERS: &[Provider] = &[
                 // v5 的 pacmtoken 账号接口与公开歌单；有效本人账号仍待验收。
                 // 取流使用官方 Web 响应封装，是否有权播放以返回的 URL/权限码为准。
                 caps: &[
+                    Capability::LyricCandidates,
                     Capability::CookieLogin,
                     Capability::PlaylistSearch,
                     Capability::PlaylistDetail,
@@ -754,6 +769,7 @@ mod tests {
                         source: q.source.clone(),
                         keyword: q.q.clone().unwrap_or_default(),
                         total: q.offset + q.limit,
+                        total_is_exact: false,
                         tracks: vec![],
                         warning: q.cat.clone(),
                     })
@@ -800,9 +816,7 @@ mod tests {
     );
 
     fn lazy_context() -> Ctx {
-        Ctx {
-            db: SqlitePool::connect_lazy("sqlite::memory:").unwrap(),
-        }
+        Ctx::new(SqlitePool::connect_lazy("sqlite::memory:").unwrap())
     }
 
     #[cfg(not(feature = "full"))]
@@ -1054,9 +1068,7 @@ mod tests {
     async fn configured_readiness_reaches_sources_and_daily_state_without_network() {
         let dir =
             std::env::temp_dir().join(format!("hertz-provider-ready-{}", uuid::Uuid::new_v4()));
-        let ctx = Ctx {
-            db: vmusic_store::open(&dir).await.unwrap(),
-        };
+        let ctx = Ctx::new(vmusic_store::open(&dir).await.unwrap());
         let provider = require("jamendo").unwrap();
         assert!(!provider.is_ready(&ctx).await);
         for empty in [serde_json::json!("  "), serde_json::json!(42)] {

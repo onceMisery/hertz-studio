@@ -6,7 +6,7 @@ const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..'), web = path.join(root, 'plugin/ui');
 const output = path.join(root, 'output/playwright/space-lyric-parity');
-const scripts = ['vendor/space-stage.js', 'space-camera.js', 'stanza/stanza-util.js', 'stanza/stanza-theme.js',
+const scripts = ['vendor/stage-runtime.js', 'vendor/space-stage.js', 'space-camera.js', 'stanza/stanza-util.js', 'stanza/stanza-theme.js',
   'stanza/stanza-textlayout.js', 'stanza/stanza-classic.js', 'stanza/stanza-cadenza.js',
   'stanza/stanza-sonnet-fx.js', 'stanza/stanza-sonnet.js', 'stanza/stanza-tempera.js',
   'stanza/stanza-songform.js', 'stage-lyrics.js', 'space3d.js'];
@@ -106,8 +106,8 @@ const scripts = ['vendor/space-stage.js', 'space-camera.js', 'stanza/stanza-util
         await page.evaluate(() => draw(2));
       }
     }
-    await page.evaluate(() => { Space3D.setLyricStyle('lyric-corridor'); draw(8); });
-    assert.equal(await page.locator('#sp-stanza > *').count(), 0, 'native spatial lyrics release the shared renderer');
+    await page.evaluate(() => { Space3D.setLyricStyle('subtitle'); draw(8); });
+    assert.equal(await page.locator('#sp-stanza > *').count(), 0, 'plain subtitle releases the shared renderer');
     await page.evaluate(() => { Space3D.setLyricStyle('lyric-classic'); draw(); document.getElementById('sp-lyric-button').click(); draw(); });
     assert.equal(await page.locator('#sp-stanza').isVisible(), false, 'global lyric toggle hides shared performance');
     await page.evaluate(() => Space3D.close());

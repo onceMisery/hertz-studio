@@ -24,7 +24,7 @@
 import * as THREE from 'three';
 import { clamp, aggregateBands, envelopeBands, damp } from './util.js';
 import {
-  ZODIAC, SIGN_COUNT, GATHER_SECONDS, DISPERSE_SECONDS, CYCLE_SECONDS,
+  ZODIAC, SIGN_COUNT, GATHER_SECONDS, HOLD_SECONDS, DISPERSE_SECONDS, CYCLE_SECONDS,
   timelineAt, transitionStyle, viewBass, zoomClamp, buildShape, buildCloud, buildSeeds,
   buildFigureMesh, buildConstellation, CONSTELLATION, delaunay2, buildRibbon,
   shapeFit, FIG_HALF, FIG_HALF_W, FIG_ASPECT, FIGURE_DEPTH, SHAPE_BOX, SHAPE_BOX_V,
@@ -109,14 +109,16 @@ function createStage(canvas, opts = {}, context = null) {
 
   const prefs = {
     field: true, interactive: opts.interactive !== false,
-    glow: 1, speed: 1, reduced: !!opts.reduced,
+    glow: 1, speed: 1, reactivity: 1, pointerStrength: 1,
+    reduced: !!opts.reduced, meteors: clamp(Number(opts.meteors ?? 1), 0, 1.5),
     palette: opts.palette || {},
   };
-  const world = createWorld(THREE, scene, { quality: context ? 'high' : quality, scope: context && context.scope });
+  const world = createWorld(THREE, scene, { quality: context ? 'high' : quality, scope: context && context.scope,
+    meteors: prefs.meteors, onEvent: opts.onEvent });
   if (context) context.scope.defer(() => world.dispose());
   world.setPalette(prefs.palette);
   const audio = {
-    raw: null, onset: false,
+    raw: null, levels: null, onset: false,
     bins: new Float32Array(BIN_COUNT), target: new Float32Array(BIN_COUNT),
     bass: 0, onsetLevel: 0,
   };
@@ -127,23 +129,96 @@ function createStage(canvas, opts = {}, context = null) {
   const rig = {
     drift: 0, yaw: 0, pitch: 0.06, zoom: 1, distFit: fitDistance(FIG_ASPECT),
     dist: fitDistance(FIG_ASPECT), dragging: false, fov: FOV_BASE,
+    spinYaw: 0, spinPitch: 0, roll: 0,
   };
 
   function updateDist() {
     rig.dist = orbitDistance(rig);
   }
 
+  // 独立舞台（stage3d）没有 Space3D 的 frame.pointer，指针所有权在引擎自己手里。
+  // 这里维护一份与宿主同形的 localPointer：x/y 为 NDC、active/down/dragging/click
+  // 供 world 的悬停形变、蓄能与点击冲击使用；双指用 Map 算捏合缩放。
+  const localPointer = { x: 0, y: 0, active: false, down: false, dragging: false, click: null };
+  const touchPoints = new Map();
+  let localSerial = 0, lastClickAt = 0, downX = 0, downY = 0, downAt = 0, pinchDistance = 0;
+
+  function pointerNdc(e) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: ((e.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1,
+      y: 1 - ((e.clientY - rect.top) / Math.max(1, rect.height)) * 2,
+    };
+  }
+
   function onPointerDown(e) {
     if (!prefs.interactive) return;
+    const p = pointerNdc(e);
+    localPointer.x = p.x; localPointer.y = p.y; localPointer.active = true;
+    touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touchPoints.size > 1) {
+      // 第二根手指落下：取消拖拽/点击，改走捏合缩放。
+      const [a, b] = Array.from(touchPoints.values());
+      pinchDistance = Math.hypot(a.x - b.x, a.y - b.y);
+      localPointer.down = false;
+      localPointer.dragging = true;
+      rig.dragging = false;
+      return;
+    }
+    localPointer.down = true;
+    localPointer.dragging = false;
+    downX = e.clientX; downY = e.clientY; downAt = performance.now();
     rig.dragging = true;
     try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* 无捕获也能拖 */ }
   }
   function onPointerMove(e) {
-    if (!prefs.interactive || !rig.dragging || !(e.buttons & 1)) return;
+    if (!prefs.interactive) return;
+    const p = pointerNdc(e);
+    localPointer.x = p.x; localPointer.y = p.y; localPointer.active = true;
+    if (touchPoints.has(e.pointerId)) touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touchPoints.size > 1) {
+      const [a, b] = Array.from(touchPoints.values());
+      const distance = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinchDistance > 4) {
+        rig.zoom = zoomClamp(rig.zoom * (pinchDistance / distance), ZOOM_MIN, ZOOM_MAX);
+        updateDist();
+      }
+      pinchDistance = distance;
+      return;
+    }
+    if (!rig.dragging || !(e.buttons & 1)) return;
     rig.yaw -= e.movementX * 0.008;
     rig.pitch = clamp(rig.pitch + e.movementY * 0.006, -PITCH_LIMIT, PITCH_LIMIT);
+    // 拖拽惯性：松手后沿用最后一小段角速度，转场不再「说停就停」。
+    rig.spinYaw = -e.movementX * 0.0009;
+    rig.spinPitch = e.movementY * 0.0007;
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) localPointer.dragging = true;
   }
-  function onPointerUp() { rig.dragging = false; }
+  function onPointerUp(e) {
+    if (e && touchPoints.has(e.pointerId)) touchPoints.delete(e.pointerId);
+    if (touchPoints.size < 2) pinchDistance = 0;
+    const wasDown = localPointer.down;
+    const wasDragging = localPointer.dragging;
+    localPointer.down = false;
+    localPointer.dragging = false;
+    if (wasDown && !wasDragging && performance.now() - downAt > 30) {
+      // 双击复位会先落两次 click；250ms 内只发一次粒子冲击（与 Space3D 同规则）。
+      const now = performance.now();
+      if (now - lastClickAt > 250) {
+        lastClickAt = now;
+        localPointer.click = { x: localPointer.x, y: localPointer.y, serial: ++localSerial };
+      }
+    }
+    rig.dragging = false;
+  }
+  function onPointerLeave() {
+    localPointer.active = false;
+    localPointer.down = false;
+    localPointer.dragging = false;
+    rig.dragging = false;
+    touchPoints.clear();
+    pinchDistance = 0;
+  }
   function onWheel(e) {
     if (!prefs.interactive) return;
     e.preventDefault();
@@ -152,12 +227,16 @@ function createStage(canvas, opts = {}, context = null) {
   }
   function onDouble() {
     if (!prefs.interactive) return;
-    rig.yaw = 0; rig.pitch = 0.06; rig.zoom = 1; updateDist();
+    rig.yaw = 0; rig.pitch = 0.06; rig.zoom = 1;
+    rig.spinYaw = 0; rig.spinPitch = 0;
+    updateDist();
   }
   function bindInput() {
     canvas.addEventListener('pointerdown', onPointerDown);
     canvas.addEventListener('pointermove', onPointerMove);
+    canvas.addEventListener('pointerleave', onPointerLeave);
     window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('dblclick', onDouble);
     canvas.style.touchAction = prefs.interactive ? 'none' : '';
@@ -165,17 +244,20 @@ function createStage(canvas, opts = {}, context = null) {
   function unbindInput() {
     canvas.removeEventListener('pointerdown', onPointerDown);
     canvas.removeEventListener('pointermove', onPointerMove);
+    canvas.removeEventListener('pointerleave', onPointerLeave);
     window.removeEventListener('pointerup', onPointerUp);
+    window.removeEventListener('pointercancel', onPointerUp);
     canvas.removeEventListener('wheel', onWheel);
     canvas.removeEventListener('dblclick', onDouble);
     canvas.style.touchAction = '';
+    touchPoints.clear();
   }
 
   const stage = {
     canvas, renderer, scene, camera, cameraTarget, control: null, world, quality, prefs, audio, rig,
     raf: 0, lastFrame: 0, lastRender: 0, lastTime: -1,
     time: 0, sceneTime: 0, playing: false, dirty: true,
-    width: 0, height: 0, pr: 1,
+    width: 0, height: 0, pr: 1, pointer: null, localPointer, charge: 0,
     timeline: { index: -1, state: 'gather', t: 0 },
     warmed: !!context,
     bindInput, unbindInput,
@@ -269,7 +351,13 @@ export function setPrefs(patch = {}) {
   }
   if (patch.glow != null) st.prefs.glow = clamp(Number(patch.glow), 0, 2);
   if (patch.speed != null) st.prefs.speed = clamp(Number(patch.speed), 0.15, 3);
+  if (patch.reactivity != null) st.prefs.reactivity = clamp(Number(patch.reactivity), 0, 2);
+  if (patch.pointerStrength != null) st.prefs.pointerStrength = clamp(Number(patch.pointerStrength), 0, 2);
   if (patch.reduced != null) st.prefs.reduced = !!patch.reduced;
+  if (patch.meteors != null) {
+    st.prefs.meteors = clamp(Number(patch.meteors), 0, 1.5);
+    st.world.setMeteors(st.prefs.meteors);
+  }
   if (patch.palette) {
     st.prefs.palette = patch.palette;
     st.world.setPalette(st.prefs.palette);
@@ -280,7 +368,15 @@ export function setPrefs(patch = {}) {
 export function setInteraction(value) {
   if (!st) return;
   st.prefs.interactive = !!value;
-  if (!value) st.rig.dragging = false;
+  if (!value) {
+    st.rig.dragging = false;
+    st.rig.spinYaw = 0;
+    st.rig.spinPitch = 0;
+    st.localPointer.active = false;
+    st.localPointer.down = false;
+    st.localPointer.dragging = false;
+    st.localPointer.click = null;
+  }
   st.canvas.style.touchAction = value ? 'none' : '';
 }
 
@@ -335,8 +431,9 @@ function tick(now) {
   st.renderer.render(st.scene, st.camera);
 }
 
-function updateStage(st, now, suppliedDt) {
+function updateStage(st, now, suppliedDt, suppliedUiDt) {
   const dt = suppliedDt === undefined ? st.lastFrame ? Math.min((now - st.lastFrame) / 1000, st.playing ? 0.1 : 0.25) : 0.016 : suppliedDt;
+  const uiDt = suppliedUiDt === undefined ? dt : suppliedUiDt;
   st.lastFrame = now;
   const prefs = st.prefs;
   const time = st.time;
@@ -350,6 +447,11 @@ function updateStage(st, now, suppliedDt) {
 
   // 频带包络：seek 落位，否则快攻慢放；暂停时目标归零。
   const target = aggregateBands(st.playing ? st.audio.raw : null, BIN_COUNT, st.audio.target);
+  if (st.playing && !st.audio.raw && st.audio.levels) {
+    for (let i = 0; i < BIN_COUNT; i++) {
+      target[i] = clamp(Number(st.audio.levels[i < 8 ? 'bass' : i < 17 ? 'mid' : 'treble']) || 0);
+    }
+  }
   if (seek) st.audio.bins.set(target);
   else envelopeBands(st.audio.bins, target, dt);
   const bassTarget = viewBass(st.audio.bins);
@@ -358,13 +460,28 @@ function updateStage(st, now, suppliedDt) {
   const onsetEnv = st.playing && st.audio.onset ? 1 : 0;
   st.audio.onsetLevel = seek ? onsetEnv
     : damp(st.audio.onsetLevel || 0, onsetEnv, onsetEnv ? 0.05 : 0.22, dt);
+  let mid = 0, treble = 0;
+  for (let i = 8; i < 17; i++) mid += st.audio.bins[i];
+  for (let i = 17; i < BIN_COUNT; i++) treble += st.audio.bins[i];
+  const response = prefs.reactivity ?? 1;
+  const bass = st.audio.bass * response, onset = st.audio.onsetLevel * response;
 
   if (!prefs.reduced || seek) st.sceneTime = time;
-  const tl = timelineAt(st.sceneTime);
+  const tl = prefs.sign >= 0
+    ? { index: prefs.sign, state: 'hold', t: HOLD_SECONDS * .5, cycle: 0 }
+    : timelineAt(st.sceneTime);
   st.timeline = tl;
   st.world.setSign(tl.index);
   const k = tl.state === 'gather' ? clamp(tl.t / GATHER_SECONDS)
     : tl.state === 'disperse' ? clamp(tl.t / DISPERSE_SECONDS) : 1;
+
+  // 指针所有权：Space3D 会每帧提供 frame.pointer；独立舞台没有宿主指针，
+  // 用引擎自己 canvas 上采到的 localPointer。两边同形，world 无需分支。
+  const pointer = st.pointer || st.localPointer;
+  const pointerActive = !!(pointer && pointer.active && !pointer.dragging && !prefs.reduced);
+  const charging = !!(pointerActive && pointer.down);
+  st.charge = prefs.reduced ? 0
+    : charging ? Math.min(1, st.charge + dt / .85) : Math.max(0, st.charge - dt * 7);
 
   const rig = st.rig;
   const camera = st.camera;
@@ -381,8 +498,15 @@ function updateStage(st, now, suppliedDt) {
       || Math.abs(camera.fov - target.fov) > 0.0001;
   } else {
     // 相机：极慢漂移 + 拖拽偏移；造型本身也在自转，两层速度错开有视差。
+    // 松手后保留一小段角速度（惯性），拖拽的余韵比「说停就停」更像游戏镜头。
+    if (!rig.dragging) {
+      rig.yaw += rig.spinYaw * dt * 60;
+      rig.pitch = clamp(rig.pitch + rig.spinPitch * dt * 60, -PITCH_LIMIT, PITCH_LIMIT);
+      rig.spinYaw = damp(rig.spinYaw, 0, .22, dt);
+      rig.spinPitch = damp(rig.spinPitch, 0, .22, dt);
+    }
     rig.drift += dt * CAMERA_DRIFT * (prefs.reduced ? 0.3 : 1) * prefs.speed
-      + dt * st.audio.bass * 0.04 * (prefs.reduced ? 0.3 : 1);
+      + dt * bass * 0.04 * (prefs.reduced ? 0.3 : 1);
     const effYaw = rig.drift + rig.yaw;
     const cp = Math.cos(rig.pitch);
     camera.position.set(
@@ -391,7 +515,12 @@ function updateStage(st, now, suppliedDt) {
       Math.cos(effYaw) * cp * rig.dist,
     );
     camera.lookAt(0, 0, 0);
-    const fovTarget = FOV_BASE + st.audio.bass * 1.6;
+    // 指针在屏幕左右移动时给一点极轻的滚转，像手持镜头跟着视线倾斜。
+    const rollTarget = pointerActive && pointer ? clamp(pointer.x, -1, 1) * .018 : 0;
+    rig.roll = prefs.reduced ? 0 : damp(rig.roll, rollTarget, .22, dt);
+    if (Math.abs(rig.roll) > 1e-5) camera.rotateZ(rig.roll);
+    // 蓄能时轻微推近（FOV 收窄）+ 低频 FOV 呼吸，松开瞬间由冲击波接棒。
+    const fovTarget = FOV_BASE + bass * 1.6 + st.charge * 2.4;
     rig.fov = seek ? fovTarget : damp(rig.fov, fovTarget, 0.32, dt);
     if (Math.abs(camera.fov - rig.fov) > 0.001) {
       camera.fov = rig.fov;
@@ -400,35 +529,45 @@ function updateStage(st, now, suppliedDt) {
   }
 
   st.world.update(st.sceneTime, {
-    bass: st.audio.bass, onset: st.audio.onsetLevel, cycle: tl.cycle,
-    reduced: prefs.reduced, glow: prefs.glow, dt,
-    state: tl.state, k, cameraPos: camera.position,
+    bass, mid: mid / 9 * response, treble: treble / (BIN_COUNT - 17) * response,
+    onset, cycle: tl.cycle, pointerStrength: prefs.pointerStrength,
+    reduced: prefs.reduced, glow: prefs.glow, dt, uiDt,
+    state: tl.state, k, cameraPos: camera.position, camera,
+    pointer, width: st.width, height: st.height, now,
   });
 
-  st.dirty = cameraMoving;
+  st.dirty = cameraMoving || rig.dragging
+    || Math.abs(rig.spinYaw) > 1e-5 || Math.abs(rig.spinPitch) > 1e-5
+    || Math.abs(rig.roll) > 1e-4 || st.charge > 1e-3;
   st.lastRender = now;
 }
 
 export function createScene(context) {
-  const stage = createStage(context.renderer.domElement, { quality: context.quality.mode, interactive: false }, context);
+  const stage = createStage(context.renderer.domElement, {
+    quality: context.quality.mode, interactive: false, meteors: context.params.meteors,
+    onEvent: event => { if (context.services && typeof context.services.zodiacEvent === 'function') context.services.zodiacEvent(event); },
+  }, context);
   if (!stage) throw new Error('Zodiac world initialization failed');
   let reduced = !!context.params.reduced;
+  function motion(frame) {
+    const elapsed = stage.timeline.state === 'gather' ? clamp(stage.timeline.t / GATHER_SECONDS)
+      : stage.timeline.state === 'disperse' ? clamp(stage.timeline.t / DISPERSE_SECONDS) : 1;
+    return { ...stage.timeline, morph: elapsed };
+  }
   return {
     update(frame) {
       stage.prefs.reduced = reduced || !!frame.reduced;
       const frozen = stage.prefs.reduced || frame.playing === false;
       if (!frozen) stage.time = Number(frame.sceneTime ?? frame.time) || 0;
       stage.playing = !!frame.playing;
-      stage.audio.raw = frame.bands || null;
+      stage.pointer = frame.pointer || null;
+      stage.audio.raw = frame.spectrum && frame.spectrum.length ? frame.spectrum
+        : frame.bands && (Array.isArray(frame.bands) || ArrayBuffer.isView(frame.bands)) ? frame.bands : null;
+      stage.audio.levels = frame.bands && !stage.audio.raw ? frame.bands : null;
       stage.audio.onset = !frozen && !!frame.onset;
       const dt = frozen ? 0 : Math.max(0, Math.min(frame.dynamicDt ?? frame.dt ?? .016, .1));
-      updateStage(stage, Number(frame.now) || 0, dt);
-      if (stage.prefs.sign >= 0) {
-        stage.world.setSign(stage.prefs.sign);
-        stage.world.update(stage.sceneTime, { bass: stage.audio.bass, onset: stage.audio.onsetLevel,
-          cycle: 0, reduced: stage.prefs.reduced, glow: stage.prefs.glow, dt,
-          state: 'hold', k: 1, cameraPos: stage.camera.position });
-      }
+      const uiDt = Math.max(0, Math.min(frame.dt ?? .016, .1));
+      updateStage(stage, Number(frame.now) || 0, dt, uiDt);
     },
     resize(width, height) {
       stage.width = width; stage.height = height;
@@ -438,8 +577,12 @@ export function createScene(context) {
     },
     setParams(params) {
       stage.prefs.glow = params.glow; stage.prefs.speed = params.speed; reduced = !!params.reduced; stage.prefs.reduced = reduced;
+      stage.prefs.reactivity = clamp(Number(params.reactivity ?? 1), 0, 2);
+      stage.prefs.pointerStrength = clamp(Number(params.pointerStrength ?? 1), 0, 2);
+      stage.prefs.meteors = clamp(Number(params.meteors ?? 1), 0, 1.5);
       stage.prefs.sign = params.sign === 'cycle' ? -1 : ZODIAC.findIndex(sign => sign.id === params.sign);
       stage.world.setFieldVisible(params.field);
+      stage.world.setMeteors(stage.prefs.meteors);
     },
     setQuality(profile) { stage.world.setQuality(profile.mode); stage.world.setPixelRatio(stage.renderer.getPixelRatio()); },
     setRig(pose) {
@@ -449,6 +592,12 @@ export function createScene(context) {
       if (pose.position) { target.position.fromArray(pose.position); target.rotation.set(pose.pitch, pose.yaw, pose.roll || 0, 'YXZ'); }
       else { const cp = Math.cos(pose.pitch); target.position.set(pose.tx + Math.sin(pose.yaw) * cp * pose.dist, pose.ty + Math.sin(pose.pitch) * pose.dist, pose.tz + Math.cos(pose.yaw) * cp * pose.dist); target.lookAt(pose.tx, pose.ty, pose.tz); target.rotateZ(pose.roll || 0); }
       target.fov = pose.fov;
+    },
+    stats() {
+      const tl = motion(stage.timeline);
+      return { ...stage.world.stats(), state: tl.state, stateT: tl.t, morph: tl.morph,
+        cycleSeconds: CYCLE_SECONDS, time: stage.time, playing: stage.playing,
+        yaw: stage.rig.drift + stage.rig.yaw, dist: stage.rig.dist };
     },
     dispose() {},
   };

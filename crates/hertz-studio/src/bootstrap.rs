@@ -38,6 +38,9 @@ pub struct Booted {
     pub backend_label: String,
     /// 音频 actor 的专属线程。
     pub audio_thread: std::thread::JoinHandle<()>,
+    /// AI runner 锁（§5.5）：拿到才恢复了任务、才允许发布外部对接发现；
+    /// `None` = 同 DataDir 已有别的服务进程在跑。持有期 = Booted 生命周期。
+    pub ai_lock: Option<crate::ai::lock::AiRunnerLock>,
 }
 
 /// 建好数据目录并读出配置。
@@ -47,6 +50,15 @@ pub struct Booted {
 pub async fn prepare(data_dir: &Path) -> anyhow::Result<Config> {
     tokio::fs::create_dir_all(data_dir).await?;
     Config::load(data_dir)
+}
+
+/// Resolve a caller-supplied relative data directory against the service process
+/// working directory before exposing any paths to child processes or the UI.
+pub fn absolute_data_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
+    if data_dir.is_absolute() {
+        return Ok(data_dir.to_path_buf());
+    }
+    Ok(std::env::current_dir()?.join(data_dir))
 }
 
 /// 装配出完整的运行时。
@@ -59,6 +71,7 @@ pub async fn boot(
     token: String,
     overlay_key: String,
 ) -> anyhow::Result<Booted> {
+    let data_dir = absolute_data_dir(&data_dir)?;
     let db = vmusic_store::open(&data_dir).await?;
 
     let backend = match config.audio.backend.as_str() {
@@ -165,16 +178,27 @@ pub async fn boot(
         committed_quality: Default::default(),
         stage_beats: tokio::sync::Mutex::new(BoundedMap::new(STAGE_BEATS_CAP)),
         beat_slots: Arc::new(tokio::sync::Semaphore::new(BEAT_ANALYZE_BUDGET)),
+        pitch_cache: tokio::sync::Mutex::new(BoundedMap::new(8)),
+        lyric_candidates: Default::default(),
         beat_volatile: tokio::sync::Mutex::new(BoundedMap::new(BEAT_VOLATILE_CAP)),
         beat_labels: tokio::sync::Mutex::new(BoundedMap::new(BEAT_LABEL_CAP)),
         beat_deferrals: std::sync::atomic::AtomicUsize::new(0),
         weak_self: Default::default(),
+        exiting: tokio::sync::watch::channel(false).0,
         pending_restore_seek: Default::default(),
         overlay_lyric: Default::default(),
         listen: Default::default(),
         scrobble: Default::default(),
         relay_tried: Default::default(),
         tickets: crate::ticket::TicketStore::new(),
+        viewers: Default::default(),
+        short_writes: Default::default(),
+        server_instance_id: uuid::Uuid::new_v4().to_string(),
+        search_gate: Default::default(),
+        ai_runtime: crate::ai::jobs::AiRuntime::from_config(&config.ai),
+        ai_emotion: crate::ai::emotion::EmotionService::configured(&config.ai),
+        ai_runner_held: Default::default(),
+        ai_external_ready: Default::default(),
     });
     // 供 on_track_committed detach 'static 后台任务用；set 失败只可能是
     // 重复注入，启动路径只走一次，忽略即可。
@@ -227,10 +251,62 @@ pub async fn boot(
         }
     }
 
+    // AI runner 锁 + 任务恢复（§5.5/§7.2）：官方任务模式即使关闭外部 MCP
+    // 也独立获取锁并恢复未完结任务；拿不到锁则外部对接停用，本地功能不受影响。
+    let ai_lock = crate::ai::lock::AiRunnerLock::try_acquire(&data_dir)?;
+    // 锁是生成受理的门禁：失锁的第二进程即使共享同一个 DataDir，也不得
+    // 受理新任务（§5.5 唯一 AI runner）。
+    state
+        .ai_runner_held
+        .store(ai_lock.is_some(), std::sync::atomic::Ordering::Relaxed);
+    if ai_lock.is_some() {
+        if let Err(e) = crate::ai::jobs::recover(&state).await {
+            tracing::warn!("AI 任务恢复失败: {}", e.code);
+        }
+        if config.ai.provider != "fake" {
+            match crate::ai::jobs::instance_owner(&state).await {
+                Ok(owner) => state.ai_emotion.install_ai_provider(
+                    state.ai_runtime.provider().await,
+                    state.ai_runtime.credentials.clone(),
+                    state.ai_runtime.completion_slots(),
+                    state.db.clone(),
+                    owner,
+                ),
+                Err(error) => {
+                    tracing::warn!("歌词情绪 provider 未能绑定实例: {}", error.code)
+                }
+            }
+        }
+    } else {
+        tracing::warn!("AI runner 锁被其它进程持有，AI 生成与外部对接停用");
+    }
+
     Ok(Booted {
         state,
         config,
         backend_label,
         audio_thread,
+        ai_lock,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::absolute_data_dir;
+    use std::path::Path;
+
+    #[test]
+    fn relative_data_dir_is_resolved_against_service_working_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        let resolved = absolute_data_dir(Path::new("relative-data")).unwrap();
+
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved, cwd.join("relative-data"));
+    }
+
+    #[test]
+    fn absolute_data_dir_is_preserved() {
+        let absolute = std::env::temp_dir().join("hertz-data");
+        assert_eq!(absolute_data_dir(&absolute).unwrap(), absolute);
+    }
 }

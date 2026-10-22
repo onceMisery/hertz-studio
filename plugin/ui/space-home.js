@@ -7,7 +7,7 @@
   var recent = [], discovery = [], quoteEpoch = 0, homeEpoch = 0, continueKey = '';
   var searchSource = 'all', searchTimer = null, searchComposing = false, restoringSearchFocus = false, videoUrl = '';
   var playAction = null, playGeneration = 0;
-  var surface = null;
+  var surface = null, panelNetwork = null;
 
   var iconNames = { play: 'i-play', library: 'i-library', daily: 'i-daily', timer: 'i-timer',
     search: 'i-search', reset: 'i-reset', next: 'i-next', undo: 'i-undo',
@@ -76,6 +76,9 @@
     var img = node('img'); img.alt = ''; img.loading = 'lazy'; frame.appendChild(img);
     cover(img, item, playlist); return frame;
   }
+  function equalizer() {
+    return '<span class="sh-equalizer" aria-hidden="true"><i></i><i></i><i></i><i></i></span>';
+  }
   function clock() {
     var d = new Date();
     el.time.textContent = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -86,9 +89,10 @@
     root = container; callbacks = nextCallbacks || {}; root.classList.add('space-home');
     root.innerHTML = [
       '<header class="sh-header"><form class="sh-search" role="search"><button type="submit" title="搜索" aria-label="搜索">' + icon('search') + '</button><label class="sh-sr" for="sh-query">搜索音乐</label><input id="sh-query" type="search" placeholder="搜索歌曲、歌手..." autocomplete="off" spellcheck="false"></form><div class="sh-search-modes" role="tablist" aria-label="搜索来源"></div></header>',
-      '<div class="sh-shell"><section class="sh-daily-review"><video class="sh-video" muted loop playsinline hidden></video><div class="sh-date"></div><div class="sh-time"></div><blockquote class="sh-quote" aria-live="polite"></blockquote><div class="sh-quote-foot"><span class="sh-quote-source"></span></div><div class="sh-review-actions"><button type="button" class="sh-quote-next" title="换一条每日内容" aria-label="换一条每日内容">' + icon('reset') + '</button><button type="button" class="sh-video-choose" title="选择 MP4" aria-label="选择 MP4">' + icon('disc') + '</button><button type="button" class="sh-video-clear" hidden title="移除视频" aria-label="移除视频">' + icon('close') + '</button><button type="button" class="sh-player-open" title="展开播放器控制台" aria-label="展开播放器控制台">' + icon('play') + '</button></div><input class="sh-video-input" type="file" accept=".mp4,video/mp4" hidden></section>',
+      '<div class="sh-shell"><div class="sh-home-aside"><section class="sh-daily-review"><video class="sh-video" muted loop playsinline hidden></video><div class="sh-date"></div><div class="sh-time"></div><blockquote class="sh-quote" aria-live="polite"></blockquote><div class="sh-quote-foot"><span class="sh-quote-source"></span></div><div class="sh-review-actions"><button type="button" class="sh-quote-next" title="换一条每日内容" aria-label="换一条每日内容">' + icon('reset') + '</button><button type="button" class="sh-video-choose" title="选择 MP4" aria-label="选择 MP4">' + icon('disc') + '</button><button type="button" class="sh-video-clear" hidden title="移除视频" aria-label="移除视频">' + icon('close') + '</button><button type="button" class="sh-player-open" title="展开播放器控制台" aria-label="展开播放器控制台">' + icon('play') + '</button></div><input class="sh-video-input" type="file" accept=".mp4,video/mp4" hidden></section>',
+      '<section class="sh-recent"><header><div><span class="sh-eyebrow">RECENT</span><h2>最近聆听</h2></div><button type="button" class="sh-recent-more">全部记录 ' + icon('next') + '</button></header><div class="sh-recent-list" aria-live="polite"></div></section></div>',
       '<div class="sh-home-content"><div class="sh-actions" aria-label="音乐入口"></div><button class="sh-next-up" type="button"><span class="sh-next-art"></span><span class="sh-next-copy"><span class="sh-eyebrow">NEXT UP · 接下来播放</span><strong></strong><small></small></span>' + icon('next') + '</button>',
-      '<section class="sh-discovery"><header><div><span class="sh-eyebrow">FOR YOU</span><h2>为你挑选</h2></div><button type="button" class="sh-discovery-more">每日推荐 ' + icon('next') + '</button></header><div class="sh-discovery-list" aria-live="polite"></div></section><section class="sh-recent"><header><div><span class="sh-eyebrow">RECENT</span><h2>最近聆听</h2></div><button type="button" class="sh-recent-more">全部记录 ' + icon('next') + '</button></header><div class="sh-recent-list" aria-live="polite"></div></section></div></div>',
+      '<section class="sh-discovery"><header><div><span class="sh-eyebrow">FOR YOU</span><h2>为你挑选</h2></div><button type="button" class="sh-discovery-more">每日推荐 ' + icon('next') + '</button></header><div class="sh-discovery-list" aria-live="polite"></div></section></div></div>',
       '<div class="sh-panel-layer" hidden><div class="sh-scrim"></div><section class="sh-panel" id="sh-panel" role="dialog" aria-modal="true" aria-labelledby="sh-panel-title"><header class="sh-panel-head"><div class="sh-panel-leading"></div><h2 id="sh-panel-title"></h2><div class="sh-panel-tools"></div></header><div class="sh-panel-controls"></div><div class="sh-panel-body" tabindex="-1"></div></section></div>'
     ].join('');
     ['time', 'date', 'quote', 'quote-source', 'quote-next', 'actions', 'search', 'discovery-list', 'recent-list', 'panel-layer', 'panel', 'panel-leading', 'panel-tools', 'panel-controls', 'panel-body'].forEach(function (key) { el[key.replace(/-([a-z])/g, function (_, c) { return c.toUpperCase(); })] = root.querySelector('.sh-' + key); });
@@ -101,7 +105,12 @@
     el.search.addEventListener('submit', function (event) {
       event.preventDefault(); search(true);
     });
-    el.query.addEventListener('focus', function () { if (restoringSearchFocus) return; el.searchDock.classList.add('is-expanded'); if (!el.query.value.trim()) searchHistory(); });
+    el.query.addEventListener('focus', function () {
+      if (restoringSearchFocus) return;
+      el.searchDock.classList.add('is-expanded'); buildSearchModes();
+      if (host && host.whenSearchReady) Promise.resolve(host.whenSearchReady()).then(buildSearchModes).catch(function () {});
+      if (!el.query.value.trim()) searchHistory();
+    });
     el.query.addEventListener('compositionstart', function () { searchComposing = true; clearTimeout(searchTimer); });
     el.query.addEventListener('compositionend', function () { searchComposing = false; scheduleSearch(); });
     el.query.addEventListener('input', scheduleSearch);
@@ -138,11 +147,15 @@
       if (event.shiftKey && (document.activeElement === first || !el.panel.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     });
-    [['continue', 'CONTINUE', '继续播放', 'play'], ['library', 'LIBRARY', '音乐库', 'library'], ['daily', 'DAILY MIX', '每日推荐', 'daily'], ['recent', 'RECENT', '最近播放', 'timer'], ['radio', 'RADIO', '电台', 'radio'], ['podcasts', 'PODCASTS', 'RSS · 播客', 'rss']].forEach(function (entry) {
+    [['continue', 'NOW PLAYING', '继续播放', 'play'], ['library', 'LIBRARY', '音乐库', 'library'], ['daily', 'DAILY MIX', '每日推荐', 'daily'], ['recent', 'HISTORY', '最近播放', 'timer'], ['radio', 'RADIO', '电台', 'radio'], ['podcasts', 'PODCAST', 'RSS · 播客', 'rss']].forEach(function (entry) {
       var b = node('button', 'sh-action sh-action-' + entry[0]); b.type = 'button';
       b.dataset.entry = entry[0];
       if (entry[0] !== 'continue') { b.setAttribute('aria-haspopup', 'dialog'); b.setAttribute('aria-controls', 'sh-panel'); b.setAttribute('aria-expanded', 'false'); }
-      b.innerHTML = '<span class="sh-action-copy"><span class="sh-eyebrow">' + entry[1] + '</span><strong>' + entry[2] + '</strong><span class="sh-action-detail"></span></span><span class="sh-action-cover">' + icon(entry[3]) + '<img alt=""></span>';
+      b.innerHTML = '<span class="sh-action-depth" aria-hidden="true"></span><span class="sh-action-glare" aria-hidden="true"></span><span class="sh-action-scan" aria-hidden="true"></span>'
+        + ['top-left', 'top-right', 'bottom-left', 'bottom-right'].map(function (corner) { return '<span class="sh-action-corner is-' + corner + '" aria-hidden="true"></span>'; }).join('')
+        + '<span class="sh-action-copy"><span class="sh-eyebrow">' + entry[1] + '</span><strong>' + entry[2] + '</strong><span class="sh-action-detail"></span></span>'
+        + '<span class="sh-action-foot"><span class="sh-action-open">→ 打开</span>' + (entry[0] === 'continue' || entry[0] === 'radio' ? equalizer() : '') + '</span>'
+        + '<span class="sh-action-cover">' + icon(entry[3]) + '<img alt=""></span>';
       bindDepthTilt(b);
       b.addEventListener('click', function () {
         if (entry[0] === 'continue') return continuePlayback(b);
@@ -159,15 +172,35 @@
   }
   function buildSearchModes() {
     if (!host) return;
-    var sources = [{id:'all',name:'All'},{id:'local',name:'本地'}].concat(host.read().sources || []);
-    sources.forEach(function (source) {
-      if (Array.from(el.searchModes.children).some(function(b){return b.dataset.source === source.id;})) return;
-      var b = node('button', '', source.label || source.name || source.id); b.type = 'button'; b.dataset.source = source.id; b.setAttribute('role','tab');
-      b.addEventListener('click', function () { searchSource = source.id; buildSearchModes(); search(false); }); el.searchModes.appendChild(b);
+    var seen = new Set(['all', 'local']);
+    var sources = [{id:'all',name:'All'},{id:'local',name:'本地'}].concat((host.read().sources || []).filter(function (source) {
+      if (!source || !source.id || seen.has(source.id)) return false;
+      seen.add(source.id); return true;
+    }));
+    var available = new Set(sources.map(function (source) { return source.id; }));
+    Array.from(el.searchModes.children).forEach(function (button) {
+      if (!available.has(button.dataset.source)) button.remove();
     });
+    sources.forEach(function (source) {
+      var b = Array.from(el.searchModes.children).find(function (button) { return button.dataset.source === source.id; });
+      if (!b) {
+        b = node('button', '', source.label || source.name || source.id); b.type = 'button'; b.dataset.source = source.id; b.setAttribute('role','tab');
+        b.addEventListener('click', function () { searchSource = source.id; buildSearchModes(); search(false); }); el.searchModes.appendChild(b);
+      } else b.textContent = source.label || source.name || source.id;
+    });
+    if (!available.has(searchSource)) searchSource = 'all';
     el.searchModes.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-selected',String(b.dataset.source === searchSource)); });
   }
-  function scheduleSearch() { clearTimeout(searchTimer); if (!searchComposing) searchTimer = setTimeout(function () { search(false); }, 400); }
+  function scheduleSearch() {
+    cancelPanelSearch(); clearTimeout(searchTimer);
+    if (panel && panel.kind === 'search') {
+      panel.items = null; panel.sourceStates = null; panel.loading = true; renderPanelItems();
+    }
+    if (!searchComposing) {
+      if (!el.query.value.trim()) search(false);
+      else searchTimer = setTimeout(function () { search(false); }, 400);
+    }
+  }
   function search(commit) {
     clearTimeout(searchTimer); if (searchComposing || !host) return;
     var q = el.query.value.trim(); el.searchDock.classList.add('is-expanded');
@@ -184,7 +217,7 @@
     if (!items.length) el.panelBody.appendChild(node('p','sh-state','还没有搜索记录'));
     items.forEach(function (q) { var b = node('button','sh-history-item',q); b.type='button'; b.addEventListener('click',function () { el.query.value=q; search(true); }); el.panelBody.appendChild(b); });
   }
-  function contextKey(spec) { return [spec.kind, spec.source || '', spec.provider || '', spec.q || '', spec.playlist ? spec.playlist.id : '', spec.offset || 0].join('|'); }
+  function contextKey(spec) { return [spec.kind, spec.source || '', spec.provider || '', spec.q || '', spec.playlist ? spec.playlist.id : '', spec.offset || 0, spec.history ? 'history' : ''].join('|'); }
   function remember() {
     if (panel) { panel.scroll = el.panelBody.scrollTop; contexts.set(contextKey(panel), panel); }
   }
@@ -195,14 +228,19 @@
   function open(spec) {
     if (!host) return;
     if (callbacks.beforeOpenPanel) callbacks.beforeOpenPanel();
-    remember(); releaseSurface(); if (el.panelLayer.hidden) returnFocus = document.activeElement;
+    remember(); cancelPanelSearch(); releaseSurface(); if (el.panelLayer.hidden) returnFocus = document.activeElement;
     var saved = contexts.get(contextKey(spec)); panel = saved || Object.assign({ scroll: 0, items: null }, spec);
     lastViews.set(panel.kind === 'playlist' ? 'library' : panel.kind, panel);
     el.panelLayer.hidden = false; drawPanel();
     syncSelection();
     if (spec.kind !== 'search') el.panelBody.focus({ preventScroll: true });
     if (spec.kind === 'radio' || spec.kind === 'podcasts') return;
-    if (!panel.items || panel.loading) loadPanel();
+    if (!panel.history && (!panel.items || panel.loading || spec.kind === 'search')) loadPanel();
+  }
+  function cancelPanelSearch() {
+    generation += 1;
+    if (panelNetwork) panelNetwork.cancel();
+    panelNetwork = null;
   }
   function releaseSurface() { if (surface) { surface.dispose(); surface = null; } }
   function syncSelection() {
@@ -217,7 +255,7 @@
     if (!root) return false;
     el.searchDock.classList.remove('is-expanded'); clearTimeout(searchTimer);
     if (el.panelLayer.hidden) return false;
-    remember(); releaseSurface(); el.panelLayer.hidden = true; syncSelection();
+    remember(); cancelPanelSearch(); releaseSurface(); el.panelLayer.hidden = true; syncSelection();
     restoringSearchFocus = true;
     try { if ((!options || options.restoreFocus !== false) && returnFocus && returnFocus.isConnected) returnFocus.focus({ preventScroll: true }); }
     finally { restoringSearchFocus = false; }
@@ -232,13 +270,13 @@
     }); return row;
   }
   function drawPanel() {
-    var spec = panel; generation += 1;
+    var spec = panel;
     el.panelLayer.dataset.kind = spec.kind;
     el.panelLayer.classList.toggle('is-search', spec.kind === 'search');
     el.panelTitle.textContent = spec.kind === 'playlist' ? spec.playlist.name : { library: '音乐库', search: '搜索 · ' + (spec.q || ''), daily: '每日推荐', recent: '最近播放', radio: '电台 · 私人 FM', podcasts: 'RSS · 播客' }[spec.kind];
     el.panelLeading.replaceChildren(); el.panelTools.replaceChildren(); el.panelControls.replaceChildren();
     if (spec.kind === 'playlist') el.panelLeading.appendChild(button('返回歌单', 'undo', function () { open(spec.parent); }));
-    el.panelTools.appendChild(button('刷新', 'reset', function () { if (spec.kind === 'radio' || spec.kind === 'podcasts') { if (surface) return run(surface.refresh); return drawPanel(); } panel.items = null; loadPanel(); }));
+    el.panelTools.appendChild(button('刷新', 'reset', function () { if (spec.kind === 'radio' || spec.kind === 'podcasts') { if (surface) return run(surface.refresh); return drawPanel(); } if (spec.history) return searchHistory(); panel.items = null; loadPanel(); }));
     el.panelTools.appendChild(button('关闭', 'close', closePanel));
     if (spec.kind === 'radio' || spec.kind === 'podcasts') {
       el.panelBody.replaceChildren(); el.panelBody.setAttribute('aria-busy', 'false');
@@ -273,12 +311,33 @@
     renderPanelItems();
   }
   function renderPanelItems() {
-    var spec = panel; el.panelBody.replaceChildren();
+    var spec = panel, body = el.panelBody, focused = document.activeElement;
+    var focusKey = focused && focused.dataset && focused.dataset.searchKey;
+    var oldScroll = body.scrollTop;
+    var anchor = Array.from(body.querySelectorAll('.sh-track')).find(function (row) {
+      return row.getBoundingClientRect().bottom > body.getBoundingClientRect().top;
+    });
+    var anchorId = anchor && anchor.dataset.trackId, anchorTop = anchor && anchor.getBoundingClientRect().top;
+    el.panelBody.replaceChildren();
     el.panelBody.setAttribute('aria-busy', String(!!spec.loading));
-    if (!spec.items) { el.panelBody.appendChild(node('p', 'sh-state', '正在读取音乐…')); return; }
+    if (!spec.items) {
+      var loading = node('p', 'sh-state', '正在读取音乐…');
+      if (focusKey === 'panel:retry' || (focusKey && focusKey.indexOf('source:') === 0)) {
+        loading.tabIndex = -1;
+        loading.dataset.searchKey = focusKey;
+      }
+      el.panelBody.appendChild(loading);
+      if (loading.dataset.searchKey) loading.focus({ preventScroll: true });
+      return;
+    }
     if (spec.note) el.panelBody.appendChild(node('p', 'sh-state', spec.note));
     if (spec.error) {
-      var retry = node('button', 'sh-retry', '重试'); retry.addEventListener('click', function () { loadPanel(); }); el.panelBody.appendChild(retry); return;
+      var retry = node('button', 'sh-retry', '重试');
+      retry.dataset.searchKey = 'panel:retry';
+      retry.addEventListener('click', function () { loadPanel(); });
+      el.panelBody.appendChild(retry);
+      if (focusKey === 'panel:retry') retry.focus({ preventScroll: true });
+      return;
     }
     if (!spec.items.length && !spec.note && !spec.loading) el.panelBody.appendChild(node('p', 'sh-state', spec.kind === 'search' ? '没有找到匹配的音乐' : spec.kind === 'recent' ? '还没有播放记录' : '这里还没有音乐'));
     if (spec.kind === 'library' && spec.source === 'playlists') {
@@ -287,9 +346,31 @@
         var b = node('button', 'sh-playlist'); b.type = 'button'; b.appendChild(art(item, true)); b.appendChild(node('strong', '', item.name)); b.appendChild(node('span', '', (item.sourceLabel || '本地') + ' · ' + (item.track_count || 0) + ' 首'));
         b.addEventListener('click', function () { remember(); open({ kind: 'playlist', playlist: item, parent: spec, offset: 0 }); }); grid.appendChild(b);
       }); el.panelBody.appendChild(grid);
-    } else trackList(el.panelBody, spec.items);
+    } else if (spec.sourceStates) {
+      spec.sourceStates.forEach(function (source) {
+        var label = source.source === 'local' ? '本地' : global.Online ? Online.sourceLabel(source.source) : source.source;
+        var section = node('section', 'sh-search-source'); section.dataset.source = source.source;
+        section.appendChild(node('h3', 'sh-state', label));
+        trackList(section, spec.items.filter(function (item) { return item.source === source.source; }), spec);
+        var text = source.loading ? '搜索中…' : source.error ? source.error.label
+          : source.count ? source.count + ' 首已加载' : '没有匹配的音乐';
+        var status = node('p', 'sh-state', text);
+        status.tabIndex = -1;
+        status.dataset.searchStatus = 'true';
+        if (source.loading && focusKey === 'source:' + source.source) status.dataset.searchKey = focusKey;
+        if (source.error) status.dataset.errorCode = source.error.code;
+        if (source.error) status.dataset.requestId = source.error.requestId;
+        section.appendChild(status);
+        if (!source.loading && ((source.error && source.error.retryable) || (!source.error && source.more))) {
+          var more = node('button', 'sh-retry', source.error ? '重试 ' + label : '加载更多 · ' + label);
+          more.type = 'button'; more.dataset.searchKey = 'source:' + source.source;
+          more.addEventListener('click', source.error ? source.retry : source.next); section.appendChild(more);
+        }
+        el.panelBody.appendChild(section);
+      });
+    } else trackList(el.panelBody, spec.items, spec);
     if (spec.loading) el.panelBody.appendChild(node('p', 'sh-state', '正在搜索其他音源…'));
-    if (spec.nextOffset < spec.total || spec.offset) {
+    if (!spec.sourceStates && (spec.nextOffset < spec.total || spec.offset)) {
       var pages = node('div', 'sh-pages');
       var pagePrev = node('button', '', '上一页'), pageNext = node('button', '', '下一页'); pagePrev.type = pageNext.type = 'button'; pagePrev.disabled = !spec.offset; pageNext.disabled = spec.nextOffset >= spec.total || spec.nextOffset <= spec.offset;
       pagePrev.addEventListener('click', function () {
@@ -300,33 +381,72 @@
         open(Object.assign({}, spec, { offset: spec.nextOffset, previousOffsets: (spec.previousOffsets || []).concat(spec.offset), items: null, scroll: 0 }));
       }); pages.append(pagePrev, node('span', '', (spec.offset + 1) + '–' + spec.nextOffset + ' / ' + spec.total), pageNext); el.panelBody.appendChild(pages);
     }
-    el.panelBody.scrollTop = spec.scroll || 0; updateRows();
+    el.panelBody.scrollTop = oldScroll || spec.scroll || 0;
+    if (anchorId) {
+      var restored = spec.rows && spec.rows.get(anchorId);
+      if (restored && restored.isConnected) body.scrollTop += restored.getBoundingClientRect().top - anchorTop;
+    }
+    var restoredFocus = false;
+    if (focusKey) body.querySelectorAll('[data-search-key]').forEach(function (control) {
+      if (control.dataset.searchKey === focusKey) {
+        control.focus({preventScroll:true});
+        restoredFocus = true;
+      }
+    });
+    if (!restoredFocus && focusKey && focusKey.indexOf('source:') === 0) {
+      var focusSource = focusKey.slice('source:'.length);
+      body.querySelectorAll('.sh-search-source').forEach(function (section) {
+        if (section.dataset.source === focusSource) {
+          var status = section.querySelector('[data-search-status]');
+          if (status) status.focus({preventScroll:true});
+        }
+      });
+    }
+    if (!restoredFocus && focusKey === 'panel:retry') body.focus({ preventScroll: true });
+    updateRows();
   }
   async function loadPanel() {
-    var spec = panel, ticket = ++generation; spec.error = false; spec.loading = true; spec.items = null; spec.note = ''; renderPanelItems();
+    cancelPanelSearch();
+    var spec = panel, ticket = ++generation;
+    panelNetwork = host.beginSearch ? host.beginSearch() : null;
+    var network = panelNetwork;
+    spec.sourceStates = null; spec.rows = new Map(); spec.error = false; spec.loading = true; spec.items = null; spec.note = ''; renderPanelItems();
     try {
       var result;
       if (spec.kind === 'playlist') result = await host.playlist(spec.playlist, spec.offset);
       else if (spec.kind === 'daily') result = await host.daily(spec.source);
       else if (spec.kind === 'recent') result = await host.recent(spec.offset);
       else if (spec.kind === 'library' && spec.source === 'playlists') result = await host.playlists();
-      else result = await host.library({ q: spec.q || '', offset: spec.offset, source: spec.provider || spec.source,
+      else {
+        if (spec.kind === 'search' && spec.source !== 'local' && host.whenSearchReady) {
+          await host.whenSearchReady();
+          if (ticket !== generation || panel !== spec) return;
+          buildSearchModes();
+          var availableSources = host.read().sources || [];
+          if (spec.source !== 'all' && !availableSources.some(function (source) { return source.id === spec.source; })) spec.source = searchSource;
+        }
+        result = await host.library({ q: spec.q || '', offset: spec.offset, source: spec.provider || spec.source, network:network,
         onResults: function (partial) {
           if (ticket !== generation || panel !== spec) return;
           spec.items = partial.items; spec.total = partial.total; spec.nextOffset = partial.nextOffset;
+          spec.sourceStates = partial.sourceStates; spec.loading = partial.loading; spec.note = partial.note || '';
           renderPanelItems();
         } });
+      }
       if (ticket !== generation || panel !== spec) return;
       spec.items = result.items || []; spec.total = result.total || spec.items.length; spec.note = result.note || '';
+      spec.sourceStates = result.sourceStates;
       spec.nextOffset = result.nextOffset == null ? spec.offset + spec.items.length : result.nextOffset;
     } catch (error) { if (ticket !== generation || panel !== spec) return; spec.items = []; spec.error = true; spec.note = error.message || '读取失败，请重试'; }
     spec.loading = false; contexts.set(contextKey(spec), spec);
     if (ticket === generation && panel === spec) drawPanel();
   }
-  function trackList(container, items) {
-    items.forEach(function (item) {
-      var row = node('div', 'sh-track'); row.dataset.trackId = item.id;
+  function trackList(container, items, spec) {
+    items.forEach(function (item, index) {
+      if (spec && spec.rows && spec.rows.has(item.id)) { container.appendChild(spec.rows.get(item.id)); return; }
+      var row = node('div', 'sh-track' + (spec ? '' : ' sh-home-track')); row.dataset.trackId = item.id;
       var play = node('button', 'sh-track-main'); play.type = 'button'; play.setAttribute('aria-label', '播放 ' + item.title);
+      if (!spec) { var number = node('span', 'sh-track-index', String(index + 1).padStart(2, '0')); number.setAttribute('aria-hidden', 'true'); play.appendChild(number); }
       var artwork = art(item), cue = node('span', 'sh-track-cue'); cue.innerHTML = icon('play'); artwork.appendChild(cue); play.appendChild(artwork);
       var title = item.title || '未知曲目', artist = item.artist || '未知艺术家', album = item.album || '未知专辑';
       var source = item.source || (String(item.id).startsWith('online:') ? String(item.id).split(':')[1] : 'local');
@@ -342,8 +462,12 @@
       meta.append(origin, node('span', 'sh-track-artist', artist));
       var albumText = node('span', 'sh-track-album', album); albumText.title = album; meta.appendChild(albumText);
       text.appendChild(meta); var status = node('span', 'sh-track-status'); status.setAttribute('role','status'); status.hidden = true; text.appendChild(status); play.appendChild(text);
-      play.addEventListener('click', function () { activateTrack(item, items); });
+      play.dataset.searchKey = 'track:' + item.id;
+      play.addEventListener('click', function () { activateTrack(item, spec ? spec.items : items); });
       var queue = button('加入队列 · ' + item.title, 'queue-next', function () { run(function () { return host.enqueue(item); }, queue); });
+      queue.dataset.searchKey = 'queue:' + item.id;
+      if (!spec) { var live = node('span', 'sh-track-live'); live.innerHTML = equalizer(); play.appendChild(live); queue.appendChild(node('span', 'sh-queue-label', '+Q')); }
+      if (spec && spec.rows) spec.rows.set(item.id, row);
       row.append(play, queue); container.appendChild(row);
     });
   }
@@ -392,6 +516,7 @@
     var detail = current ? (current.artist || '未知艺术家') + (snap.playing ? ' · 正在播放' : ' · 接着听') : snap.queueLength ? snap.queueLength + ' 首歌曲在队列中' : item ? item.title : '从喜欢的音乐开始';
     el.continueAction.querySelector('.sh-action-detail').textContent = detail;
     el.continueAction.querySelector('strong').textContent = current ? current.title || '当前曲目' : '继续播放'; el.continueAction.disabled = !!snap.pending;
+    el.continueAction.dataset.playing = String(!!current && !!snap.playing);
     el.continueAction.title = current ? (snap.playing ? '打开播放队列：' : '继续播放：') + (current.title || '当前曲目') : '继续播放';
     el.libraryAction.querySelector('.sh-action-detail').textContent = '本地音乐与收藏歌单';
     el.dailyAction.querySelector('.sh-action-detail').textContent = discovery.length ? discovery.length + ' 首今日推荐' : '今天的新声音';

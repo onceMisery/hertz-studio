@@ -20,7 +20,7 @@ const sourceMode = process.argv.includes('--source');
 const viewport = { width: 1707, height: 898 };
 const assets = ['app.js', 'space3d.js', 'space3d.css', 'space-camera.js', 'space-fields.js', 'space-post.js',
   'space-layers.js', 'space-layers.css', 'creative-gl.js', 'creative-stage.js', 'backgrounds.js',
-  'stage.js', 'handdrawn.js', 'stage-coast.js', 'vendor/coast-stage.js', 'stage-zodiac.js', 'vendor/zodiac-stage.js', 'skins/skin-settings-sheet.js'];
+  'vendor/stage-runtime.js', 'stage.js', 'handdrawn.js', 'stage-coast.js', 'vendor/coast-stage.js', 'stage-zodiac.js', 'vendor/zodiac-stage.js', 'skins/skin-settings-sheet.js'];
 const normalize = text => text.replace(/\r\n/g, '\n').trim();
 
 function registeredAssets() {

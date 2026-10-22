@@ -17,10 +17,9 @@
 //! 2. The decoder thread decodes outside the lock and pushes in whole chunks.
 //! 3. The FFT runs on the actor thread, never inside the audio callback.
 //!
-//! Resampling is linear interpolation. It is not the sinc/FIR resampler a
-//! Hi-Fi player would use, but it keeps the first version dependency-light and
-//! the code auditable; the [`AudioBackend`] trait is the seam where a better
-//! one gets dropped in later.
+//! Fixed-rate sinc resampling runs only on each deck's decoder thread, through
+//! the consumed/produced/finish/reset contract in [`crate::resample`]. Device
+//! PCM queues, crossfade and the existing device-domain DSP retain their owners.
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -29,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use crate::resample::{Converter, Format as ResampleFormat, State as ResampleState};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, SupportedStreamConfig};
 use num_complex::Complex;
@@ -306,6 +306,26 @@ struct PendingLoad {
     play_after: bool,
 }
 
+struct SpectrumWorkspace {
+    input: Vec<Complex<f32>>,
+    scratch: Vec<Complex<f32>>,
+    hann: Vec<f32>,
+}
+
+impl SpectrumWorkspace {
+    fn new(fft: &dyn rustfft::Fft<f32>) -> Self {
+        Self {
+            input: vec![Complex::new(0.0, 0.0); FFT_SIZE],
+            scratch: vec![Complex::new(0.0, 0.0); fft.get_inplace_scratch_len()],
+            hann: (0..FFT_SIZE)
+                .map(|i| {
+                    0.5 * (1.0 - ((2.0 * std::f32::consts::PI * i as f32) / FFT_SIZE as f32).cos())
+                })
+                .collect(),
+        }
+    }
+}
+
 pub struct CpalBackend {
     shared: Arc<Shared>,
     device: Option<Device>,
@@ -319,6 +339,7 @@ pub struct CpalBackend {
     source_rate: Option<u32>,
     gapless_supported: bool,
     fft: Arc<dyn rustfft::Fft<f32>>,
+    spectrum_workspace: Mutex<SpectrumWorkspace>,
     spectrum_state: Mutex<Vec<f32>>,
     /// 暂停淡出到 0 的瞬间才真正置 playing=false。
     pending_pause: bool,
@@ -357,6 +378,7 @@ impl CpalBackend {
             duration_ms: None,
             source_rate: None,
             gapless_supported: false,
+            spectrum_workspace: Mutex::new(SpectrumWorkspace::new(fft.as_ref())),
             fft,
             spectrum_state: Mutex::new(Vec::new()),
             pending_pause: false,
@@ -397,10 +419,21 @@ impl CpalBackend {
         }
         let device = self.device.as_ref().ok_or_else(no_device)?;
         let config = self.config.as_ref().ok_or_else(no_device)?;
-        let shared = self.shared.clone();
-        let channels = config.channels().max(1) as usize;
+        let stream = Self::build_stream(device, config, self.shared.clone())?;
+        stream
+            .play()
+            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
+        self.stream = Some(stream);
+        Ok(())
+    }
 
-        let stream = device
+    fn build_stream(
+        device: &Device,
+        config: &SupportedStreamConfig,
+        shared: Arc<Shared>,
+    ) -> Result<Stream, AudioError> {
+        let channels = config.channels().max(1) as usize;
+        device
             .build_output_stream(
                 &config.config(),
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
@@ -409,13 +442,7 @@ impl CpalBackend {
                 |err| tracing::warn!("audio output error: {err}"),
                 None,
             )
-            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
-
-        stream
-            .play()
-            .map_err(|e| AudioError::BackendInit(e.to_string()))?;
-        self.stream = Some(stream);
-        Ok(())
+            .map_err(|e| AudioError::BackendInit(e.to_string()))
     }
 
     fn stop_decoder(&mut self) {
@@ -777,6 +804,7 @@ impl BiQuad {
 struct EqBank {
     rate: u32,
     gains: [f32; 6],
+    neutral: bool,
     /// 每声道一份滤波器状态（采样历史），系数同源。
     states: Vec<[BiQuad; 6]>,
 }
@@ -810,6 +838,7 @@ impl EqBank {
         Self {
             rate,
             gains,
+            neutral: gains.iter().all(|gain| *gain == 0.0),
             states,
         }
     }
@@ -820,6 +849,11 @@ impl EqBank {
 
     #[inline]
     fn process_frame(&mut self, ch: usize, sample: f32) -> f32 {
+        if self.neutral && sample.is_finite() && self.states[ch][0].y1.is_finite() {
+            // Identity sections have no history-dependent contribution. Preserve
+            // the old chain's +0 result and its non-finite poisoning behavior.
+            return if sample == 0.0 { 0.0 } else { sample };
+        }
         let mut v = sample as f64;
         for band in self.states[ch].iter_mut() {
             v = band.process(v);
@@ -1130,18 +1164,43 @@ impl AudioBackend for CpalBackend {
         };
         let config = pick_config(&device)?;
 
-        // Rebuilding the device means rebuilding the stream and re-decoding.
-        self.stop_decoder();
-        self.stream = None;
+        let next_rate = config.sample_rate().0;
+        let next_channels = config.channels();
+        let has_prepared_audio =
+            self.decoder.is_some() || self.next_decoder.is_some() || self.pending_load.is_some();
+        if has_prepared_audio
+            && (next_rate != self.device_rate || next_channels != self.device_channels)
+        {
+            return Err(AudioError::BackendInit(format!(
+                "所选设备格式为 {next_rate} Hz/{next_channels} 声道，当前播放链为 {} Hz/{} 声道；为保留播放状态，本次未切换设备",
+                self.device_rate, self.device_channels
+            )));
+        }
+
+        let next_stream = if self.stream.is_some() {
+            Some(Self::build_stream(&device, &config, self.shared.clone())?)
+        } else {
+            None
+        };
+        if let Some(stream) = &next_stream {
+            if let Some(current) = &self.stream {
+                current
+                    .pause()
+                    .map_err(|error| AudioError::BackendInit(error.to_string()))?;
+            }
+            if let Err(error) = stream.play() {
+                if let Some(current) = &self.stream {
+                    let _ = current.play();
+                }
+                return Err(AudioError::BackendInit(error.to_string()));
+            }
+        }
+        self.stream = next_stream;
         self.device_rate = config.sample_rate().0;
         self.device_channels = config.channels();
         self.device = Some(device);
         self.config = Some(config);
-        self.clear_buffers();
-        self.shared
-            .current_deck()
-            .frames_played
-            .store(0, Ordering::Relaxed);
+        self.sync_dsp_context();
         Ok(())
     }
 
@@ -1441,6 +1500,10 @@ impl AudioBackend for CpalBackend {
     }
 
     fn spectrum(&self, out: &mut [f32]) -> bool {
+        let mut workspace = match self.spectrum_workspace.try_lock() {
+            Ok(workspace) => workspace,
+            Err(_) => return false,
+        };
         let tap = match self.shared.tap.try_lock() {
             Ok(t) => t,
             Err(_) => return false,
@@ -1450,13 +1513,21 @@ impl AudioBackend for CpalBackend {
         }
         let start = tap.len() - FFT_SIZE;
 
-        let mut buf: Vec<Complex<f32>> = Vec::with_capacity(FFT_SIZE);
         for (i, sample) in tap.iter().skip(start).take(FFT_SIZE).enumerate() {
-            // Hann window: without it a partial frame leaks badly across bands.
-            let w = 0.5 * (1.0 - ((2.0 * std::f32::consts::PI * i as f32) / FFT_SIZE as f32).cos());
-            buf.push(Complex::new(sample * w, 0.0));
+            workspace.input[i] = Complex::new(*sample, 0.0);
         }
-        self.fft.process(&mut buf);
+        // The audio callback only needs the tap lock for this short copy, never
+        // for windowing, FFT, band reduction or smoothing.
+        drop(tap);
+        let SpectrumWorkspace {
+            input: buf,
+            scratch,
+            hann,
+        } = &mut *workspace;
+        for (bin, window) in buf.iter_mut().zip(hann.iter()) {
+            bin.re *= window;
+        }
+        self.fft.process_with_scratch(buf, scratch);
 
         let bins = FFT_SIZE / 2;
         let bands = out.len();
@@ -1595,11 +1666,15 @@ fn decode_loop_opened(
         ..
     } = opened;
 
-    let src_rate = reader
-        .default_track()
-        .and_then(|t| t.codec_params.sample_rate)
-        .unwrap_or(device_rate);
-    let mut resampler = Resampler::new(src_rate, device_rate);
+    if device_channels == 0 || device_channels > 32 || device_rate == 0 {
+        shared.flag_decode_error();
+        stop.store(true, Ordering::Relaxed);
+        return;
+    }
+    let mut resampler: Option<Converter> = None;
+    let mut sample_buffer: Option<SampleBuffer<f32>> = None;
+    let mut converted = Vec::new();
+    let mut mapped = vec![0.0; 512 * device_channels];
     let capacity = (device_rate as f32 * BUFFER_SECONDS) as usize * device_channels;
     // 循环退出原因有三种「正常」：symphonia 的 UnexpectedEof("end of stream")
     // 自然播完；io::ErrorKind::Interrupted（下载 abort / seek-stop 主动中止）；
@@ -1633,7 +1708,9 @@ fn decode_loop_opened(
             };
             discard_until = Some(sought.required_ts);
             decoder.reset();
-            resampler.reset();
+            if let Some(converter) = &mut resampler {
+                converter.reset();
+            }
             if let Ok(mut q) = shared.samples.lock() {
                 q.clear();
                 shared
@@ -1660,53 +1737,92 @@ fn decode_loop_opened(
 
         match reader.next_packet() {
             Ok(packet) if packet.track_id() != track_id => continue,
-            Ok(packet) => match decoder.decode(&packet) {
-                Ok(decoded) => {
-                    let spec = *decoded.spec();
-                    let frames = decoded.frames();
-                    if frames == 0 {
-                        continue;
+            Ok(packet) => {
+                match decoder.decode(&packet) {
+                    Ok(decoded) => {
+                        let spec = *decoded.spec();
+                        let frames = decoded.frames();
+                        if frames == 0 {
+                            continue;
+                        }
+                        if sample_buffer
+                            .as_ref()
+                            .is_none_or(|buffer| buffer.capacity() < frames * spec.channels.count())
+                        {
+                            sample_buffer =
+                                Some(SampleBuffer::new(decoded.capacity() as u64, spec));
+                        }
+                        let sb = sample_buffer.as_mut().unwrap();
+                        sb.copy_interleaved_ref(decoded);
+                        let skip = discard_until.map_or(0, |target| {
+                            let ticks = target.saturating_sub(packet.ts());
+                            reader
+                                .default_track()
+                                .and_then(|track| track.codec_params.time_base)
+                                .map_or(ticks as usize, |base| {
+                                    let time = base.calc_time(ticks);
+                                    ((time.seconds as f64 + time.frac) * spec.rate as f64).round()
+                                        as usize
+                                })
+                                .min(frames)
+                        });
+                        if skip == frames {
+                            continue;
+                        }
+                        discard_until = None;
+                        let format = ResampleFormat {
+                            input_rate: spec.rate,
+                            output_rate: device_rate,
+                            channels: spec.channels.count(),
+                        };
+                        // Decoded PCM is authoritative: e.g. SBR can expose a
+                        // different rate than the container's codec metadata.
+                        if resampler.as_ref().is_some_and(|r| r.format() != format) {
+                            tracing::warn!("decoded PCM format changed midstream");
+                            break;
+                        }
+                        if resampler.is_none() {
+                            match Converter::new(format) {
+                                Ok(converter) => {
+                                    converted.resize(512 * format.channels, 0.0);
+                                    resampler = Some(converter);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error,"resampler preparation failed");
+                                    break;
+                                }
+                            }
+                        }
+                        if let Err(error) = pump_pcm(
+                            resampler.as_mut().unwrap(),
+                            Some(&sb.samples()[skip * spec.channels.count()..]),
+                            &mut converted,
+                            &mut mapped,
+                            device_channels,
+                            &shared,
+                            &stop,
+                        ) {
+                            tracing::warn!(%error,"PCM conversion failed");
+                            break;
+                        }
                     }
-                    let mut sb = SampleBuffer::<f32>::new(frames as u64, spec);
-                    sb.copy_interleaved_ref(decoded);
-                    let skip = discard_until.map_or(0, |target| {
-                        let ticks = target.saturating_sub(packet.ts());
-                        reader
-                            .default_track()
-                            .and_then(|track| track.codec_params.time_base)
-                            .map_or(ticks as usize, |base| {
-                                let time = base.calc_time(ticks);
-                                ((time.seconds as f64 + time.frac) * spec.rate as f64).round()
-                                    as usize
-                            })
-                            .min(frames)
-                    });
-                    if skip == frames {
-                        continue;
+                    Err(SymError::DecodeError(e)) => {
+                        tracing::debug!("skipping undecodable packet: {e}");
                     }
-                    discard_until = None;
-                    let resampled = resampler.push(
-                        &sb.samples()[skip * spec.channels.count()..],
-                        spec.channels.count(),
-                    );
-                    let mapped = map_channels(&resampled, spec.channels.count(), device_channels);
-                    if let Ok(mut q) = shared.samples.lock() {
-                        q.extend(mapped);
+                    Err(e) => {
+                        tracing::warn!("decode error: {e}");
+                        // 解码器正常不做 I/O，但若主动中止的 Interrupted 从这里
+                        // 冒出来，同样按中止收口，不能误报早夭。
+                        interrupted = is_interrupted(&e);
+                        break;
                     }
                 }
-                Err(SymError::DecodeError(e)) => {
-                    tracing::debug!("skipping undecodable packet: {e}");
-                }
-                Err(e) => {
-                    tracing::warn!("decode error: {e}");
-                    // 解码器正常不做 I/O，但若主动中止的 Interrupted 从这里
-                    // 冒出来，同样按中止收口，不能误报早夭。
-                    interrupted = is_interrupted(&e);
-                    break;
-                }
-            },
+            }
             Err(SymError::ResetRequired) => {
                 decoder.reset();
+                if let Some(converter) = &mut resampler {
+                    converter.reset();
+                }
             }
             Err(e) => {
                 // symphonia 以 IoError(UnexpectedEof) 表示自然播完；
@@ -1718,6 +1834,20 @@ fn decode_loop_opened(
                     SymError::IoError(ioe)
                         if ioe.kind() == std::io::ErrorKind::UnexpectedEof
                 ) {
+                    if let Some(converter) = &mut resampler {
+                        if let Err(error) = pump_pcm(
+                            converter,
+                            None,
+                            &mut converted,
+                            &mut mapped,
+                            device_channels,
+                            &shared,
+                            &stop,
+                        ) {
+                            tracing::warn!(%error,"PCM tail conversion failed");
+                            break;
+                        }
+                    }
                     natural_eof = true;
                     shared.eof.store(true, Ordering::Release);
                     continue;
@@ -1782,6 +1912,17 @@ fn should_flag_decode_error(stop: bool, interrupted: bool, natural_eof: bool) ->
     !stop && !interrupted && !natural_eof
 }
 
+// A failed probe is not always an unsupported codec: damaged headers and I/O
+// failures must remain decode/read errors, including for a supported suffix.
+fn media_open_error(error: symphonia::core::errors::Error) -> AudioError {
+    match error {
+        symphonia::core::errors::Error::Unsupported(_) => {
+            AudioError::UnsupportedFormat(error.to_string())
+        }
+        _ => AudioError::DecodeFailed(error.to_string()),
+    }
+}
+
 fn open_media(
     mss: MediaSourceStream,
     ext: Option<&str>,
@@ -1802,7 +1943,7 @@ fn open_media(
             },
             &MetadataOptions::default(),
         )
-        .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+        .map_err(media_open_error)?;
 
     let track = probed
         .format
@@ -1825,7 +1966,7 @@ fn open_media(
     let gapless_supported = supports_gapless(&track.codec_params);
     let decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+        .map_err(media_open_error)?;
 
     let opened = OpenedReader {
         reader: probed.format,
@@ -1912,96 +2053,87 @@ impl symphonia::core::io::MediaSource for DynMediaSource {
     }
 }
 
-/// Linear-interpolating resampler with carry-over between decode blocks.
-struct Resampler {
-    ratio: f64,
-    frac: f64,
-    prev: Vec<f32>,
-}
-
-impl Resampler {
-    fn new(src_rate: u32, dst_rate: u32) -> Self {
-        Self {
-            ratio: src_rate.max(1) as f64 / dst_rate.max(1) as f64,
-            frac: 0.0,
-            prev: Vec::new(),
+/// Consume a packet or drain finite EOF before publishing the deck EOF flag.
+/// Filter work and channel mapping run outside the PCM queue lock.
+fn pump_pcm(
+    converter: &mut Converter,
+    input: Option<&[f32]>,
+    converted: &mut [f32],
+    mapped: &mut [f32],
+    device_channels: usize,
+    shared: &Deck,
+    stop: &AtomicBool,
+) -> Result<(), AudioError> {
+    let channels = converter.format().channels;
+    let mut at = 0;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
         }
-    }
-
-    fn reset(&mut self) {
-        self.frac = 0.0;
-        self.prev.clear();
-    }
-
-    fn push(&mut self, interleaved: &[f32], channels: usize) -> Vec<f32> {
-        if channels == 0 || interleaved.is_empty() {
-            return Vec::new();
+        let progress = match input {
+            Some(input) => converter.process(&input[at..], converted),
+            None => converter.finish(converted),
         }
-        if (self.ratio - 1.0).abs() < 1e-6 {
-            return interleaved.to_vec();
+        .map_err(|e| AudioError::DecodeFailed(e.to_string()))?;
+        at += progress.consumed_frames * channels;
+        let count = map_channels(
+            &converted[..progress.produced_frames * channels],
+            channels,
+            device_channels,
+            mapped,
+        );
+        if count > 0 {
+            let mut queue = shared
+                .samples
+                .lock()
+                .map_err(|_| AudioError::DecodeFailed("PCM queue unavailable".into()))?;
+            queue.extend(mapped[..count].iter().copied());
         }
-        let frames_in = interleaved.len() / channels;
-        if frames_in == 0 {
-            return Vec::new();
-        }
-        let mut out =
-            Vec::with_capacity((frames_in as f64 / self.ratio) as usize * channels + channels);
-        // The interpolation needs one frame from before this block; keep a
-        // local copy so the loop below can work on plain slices.
-        let prev: Vec<f32> = if self.prev.len() == channels {
-            self.prev.clone()
-        } else {
-            vec![0.0; channels]
-        };
-
-        let mut pos = self.frac;
-        while pos < frames_in as f64 {
-            let i = pos.floor() as i64;
-            let f = (pos - pos.floor()) as f32;
-
-            let cur: &[f32] = if i < 0 {
-                &prev
-            } else {
-                &interleaved[i as usize * channels..(i as usize + 1) * channels]
-            };
-            let next: &[f32] = if i + 1 < frames_in as i64 {
-                &interleaved[(i + 1) as usize * channels..(i as usize + 2) * channels]
-            } else {
-                cur
-            };
-
-            for (a, b) in cur.iter().zip(next) {
-                out.push(a + (b - a) * f);
+        match input {
+            None if progress.state == ResampleState::Finished => break,
+            Some(input) if at == input.len() && progress.state != ResampleState::NeedOutput => {
+                break
             }
-            pos += self.ratio;
+            Some(_) if progress.consumed_frames == 0 && progress.produced_frames == 0 => {
+                return Err(AudioError::DecodeFailed(
+                    "PCM conversion made no progress".into(),
+                ));
+            }
+            _ => {}
         }
-        self.frac = pos - frames_in as f64;
-        self.prev = interleaved[(frames_in - 1) * channels..].to_vec();
-        out
     }
+    Ok(())
 }
 
-fn map_channels(interleaved: &[f32], from: usize, to: usize) -> Vec<f32> {
-    if from == to || from == 0 || to == 0 {
-        return interleaved.to_vec();
-    }
-    let frames = interleaved.len() / from;
-    let mut out = Vec::with_capacity(frames * to);
-    for frame in interleaved.chunks_exact(from) {
+fn map_channels(interleaved: &[f32], from: usize, to: usize, out: &mut [f32]) -> usize {
+    let samples = interleaved.len() / from * to;
+    for (frame, mapped) in interleaved
+        .chunks_exact(from)
+        .zip(out[..samples].chunks_exact_mut(to))
+    {
         if from == 1 {
-            out.extend(std::iter::repeat_n(frame[0], to));
+            mapped.fill(frame[0]);
         } else if to == 1 {
-            out.push(frame.iter().sum::<f32>() / from as f32);
+            mapped[0] = (frame.iter().map(|v| f64::from(*v)).sum::<f64>() / from as f64) as f32;
         } else {
-            out.extend((0..to).map(|c| frame[c % from]));
+            for (c, value) in mapped.iter_mut().enumerate() {
+                *value = frame[c % from];
+            }
         }
     }
-    out
+    samples
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
+    use std::collections::VecDeque;
+    use std::sync::Barrier;
+    use symphonia::core::audio::{AudioBuffer, AudioBufferRef, Channels, Signal, SignalSpec};
+    use symphonia::core::codecs::{CodecDescriptor, CodecParameters, Decoder, FinalizeResult};
+    use symphonia::core::formats::{Cue, Packet, SeekedTo, Track};
+    use symphonia::core::meta::{Metadata, MetadataLog};
 
     struct CallbackAllocator;
 
@@ -2411,12 +2543,86 @@ mod tests {
         decoded_opened_fixture(opened, info, 8_000, 1)
     }
 
+    #[test]
+    fn spectrum_reuses_workspace_after_warmup() {
+        let backend = decoded_fixture();
+        backend
+            .shared
+            .tap
+            .lock()
+            .unwrap()
+            .extend((0..FFT_SIZE).map(|i| (i as f32 * 0.13).sin()));
+        let mut out = [0.0; 64];
+        assert!(backend.spectrum(&mut out));
+        let (_, memory) = measure_memory(|| {
+            for _ in 0..10 {
+                assert!(backend.spectrum(&mut out));
+            }
+        });
+        assert_eq!(
+            memory.allocs, 0,
+            "FFT input and rustfft scratch must be reused: {memory:?}"
+        );
+    }
+
+    #[test]
+    fn spectrum_matches_original_fft_and_smoothing_exactly() {
+        let backend = decoded_fixture();
+        let samples: Vec<f32> = (0..FFT_SIZE)
+            .map(|i| (i as f32 * 0.13).sin() * 0.4 + (i as f32 * 0.017).cos() * 0.2)
+            .collect();
+        backend
+            .shared
+            .tap
+            .lock()
+            .unwrap()
+            .extend(samples.iter().copied());
+        let mut bins: Vec<Complex<f32>> = samples
+            .iter()
+            .enumerate()
+            .map(|(i, sample)| {
+                let w =
+                    0.5 * (1.0 - ((2.0 * std::f32::consts::PI * i as f32) / FFT_SIZE as f32).cos());
+                Complex::new(sample * w, 0.0)
+            })
+            .collect();
+        backend.fft.process(&mut bins);
+        let mut raw = [0.0f32; 64];
+        let mut peak = 1e-6f32;
+        for (i, slot) in raw.iter_mut().enumerate() {
+            let lo = (((i as f32 / 64.0).powi(2)) * (FFT_SIZE / 2) as f32) as usize;
+            let hi = (((((i + 1) as f32 / 64.0).powi(2)) * (FFT_SIZE / 2) as f32)
+                .max(lo as f32 + 1.0) as usize)
+                .min(FFT_SIZE / 2);
+            let acc = bins[lo..hi]
+                .iter()
+                .fold(0.0f32, |acc, bin| acc.max(bin.norm()));
+            *slot = (acc / ((FFT_SIZE / 2) as f32).sqrt())
+                .clamp(0.0, 1.0)
+                .sqrt();
+            peak = peak.max(*slot);
+        }
+        let scale = if peak > 0.02 { 1.0 / peak } else { 1.0 };
+        let mut expected = [0.0f32; 64];
+        for _ in 0..8 {
+            let mut out = [0.0; 64];
+            assert!(backend.spectrum(&mut out));
+            for i in 0..64 {
+                let target = (raw[i] * scale).clamp(0.0, 1.0);
+                expected[i] +=
+                    (target - expected[i]) * if target > expected[i] { 0.55 } else { 0.14 };
+                assert_eq!(out[i].to_bits(), expected[i].to_bits(), "band {i}");
+            }
+        }
+    }
+
     fn decoded_opened_fixture(
         opened: OpenedReader,
         info: MediaInfo,
         device_rate: u32,
         device_channels: u16,
     ) -> CpalBackend {
+        let fft = FftPlanner::new().plan_fft_forward(FFT_SIZE);
         let mut backend = CpalBackend {
             shared: Arc::new(Shared::new()),
             device: None,
@@ -2429,7 +2635,8 @@ mod tests {
             duration_ms: info.duration_ms,
             source_rate: info.sample_rate,
             gapless_supported: false,
-            fft: FftPlanner::new().plan_fft_forward(FFT_SIZE),
+            spectrum_workspace: Mutex::new(SpectrumWorkspace::new(fft.as_ref())),
+            fft,
             spectrum_state: Mutex::new(Vec::new()),
             pending_pause: false,
             pending_stop: false,
@@ -2445,6 +2652,256 @@ mod tests {
         backend.spawn_now(opened).unwrap();
         wait_for_eof(&backend);
         backend
+    }
+
+    enum ScriptedReaderEvent {
+        Packet(Packet),
+        Error(SymError),
+        Gate(Arc<Barrier>, Arc<Barrier>),
+    }
+
+    struct ScriptedReader {
+        source: Option<MediaSourceStream>,
+        tracks: Vec<Track>,
+        events: VecDeque<ScriptedReaderEvent>,
+        metadata: MetadataLog,
+    }
+
+    impl FormatReader for ScriptedReader {
+        fn try_new(
+            _: MediaSourceStream,
+            _: &FormatOptions,
+        ) -> symphonia::core::errors::Result<Self> {
+            Err(SymError::Unsupported("scripted test reader"))
+        }
+
+        fn cues(&self) -> &[Cue] {
+            &[]
+        }
+
+        fn metadata(&mut self) -> Metadata<'_> {
+            self.metadata.metadata()
+        }
+
+        fn seek(&mut self, _: SeekMode, _: SeekTo) -> symphonia::core::errors::Result<SeekedTo> {
+            Err(SymError::SeekError(
+                symphonia::core::errors::SeekErrorKind::Unseekable,
+            ))
+        }
+
+        fn tracks(&self) -> &[Track] {
+            &self.tracks
+        }
+
+        fn next_packet(&mut self) -> symphonia::core::errors::Result<Packet> {
+            while let Some(event) = self.events.pop_front() {
+                match event {
+                    ScriptedReaderEvent::Packet(packet) => return Ok(packet),
+                    ScriptedReaderEvent::Error(error) => return Err(error),
+                    ScriptedReaderEvent::Gate(entered, release) => {
+                        entered.wait();
+                        release.wait();
+                    }
+                }
+            }
+            Err(SymError::IoError(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "end of stream",
+            )))
+        }
+
+        fn into_inner(mut self: Box<Self>) -> MediaSourceStream {
+            self.source.take().unwrap()
+        }
+    }
+
+    struct ScriptedDecoder {
+        params: CodecParameters,
+        reset_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Decoder for ScriptedDecoder {
+        fn try_new(
+            _: &CodecParameters,
+            _: &DecoderOptions,
+        ) -> symphonia::core::errors::Result<Self> {
+            Err(SymError::Unsupported("scripted test decoder"))
+        }
+
+        fn supported_codecs() -> &'static [CodecDescriptor] {
+            &[]
+        }
+
+        fn reset(&mut self) {
+            self.reset_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn codec_params(&self) -> &CodecParameters {
+            &self.params
+        }
+
+        fn decode(
+            &mut self,
+            packet: &Packet,
+        ) -> symphonia::core::errors::Result<AudioBufferRef<'_>> {
+            let (rate, frames, value) = match packet.buf().first().copied() {
+                Some(1) => (44_100, 512, 0.75),
+                Some(2) => (44_100, 32, 0.0),
+                Some(3) => (48_000, 512, -0.75),
+                _ => return Err(SymError::DecodeError("unknown scripted packet")),
+            };
+            let mut buffer =
+                AudioBuffer::<f32>::new(frames as u64, SignalSpec::new(rate, Channels::FRONT_LEFT));
+            buffer.render_reserved(Some(frames));
+            buffer.chan_mut(0).fill(value);
+            Ok(AudioBufferRef::F32(Cow::Owned(buffer)))
+        }
+
+        fn finalize(&mut self) -> FinalizeResult {
+            FinalizeResult::default()
+        }
+
+        fn last_decoded(&self) -> AudioBufferRef<'_> {
+            AudioBufferRef::F32(Cow::Owned(AudioBuffer::unused()))
+        }
+    }
+
+    fn scripted_opened_reader(
+        events: Vec<ScriptedReaderEvent>,
+    ) -> (OpenedReader, Arc<std::sync::atomic::AtomicUsize>) {
+        let mut params = CodecParameters::new();
+        params
+            .for_codec(symphonia::core::codecs::CODEC_TYPE_PCM_F32LE)
+            .with_sample_rate(44_100)
+            .with_channels(Channels::FRONT_LEFT);
+        let track = Track::new(1, params.clone());
+        let reader = ScriptedReader {
+            source: Some(MediaSourceStream::new(
+                Box::new(std::io::Cursor::new(Vec::<u8>::new())),
+                Default::default(),
+            )),
+            tracks: vec![track],
+            events: events.into(),
+            metadata: MetadataLog::default(),
+        };
+        let reset_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let decoder = ScriptedDecoder {
+            params,
+            reset_count: reset_count.clone(),
+        };
+        (
+            OpenedReader {
+                reader: Box::new(reader),
+                decoder: Box::new(decoder),
+                track_id: 1,
+                gapless_supported: false,
+            },
+            reset_count,
+        )
+    }
+
+    fn start_scripted_decoder(
+        opened: OpenedReader,
+    ) -> (Arc<Deck>, Arc<AtomicBool>, JoinHandle<()>) {
+        let deck = Arc::new(Deck::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_deck = deck.clone();
+        let worker_stop = stop.clone();
+        let seek_to = Arc::new(Mutex::new(None));
+        let worker_seek = seek_to.clone();
+        let handle = std::thread::spawn(move || {
+            decode_loop_opened(opened, worker_deck, worker_stop, worker_seek, 48_000, 1);
+        });
+        (deck, stop, handle)
+    }
+
+    fn wait_for_decoder_result(deck: &Deck) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !deck.eof.load(Ordering::Acquire) && !deck.decode_error.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "decoder did not report EOF or a decode error"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn scripted_packet(marker: u8) -> Packet {
+        Packet::new_from_slice(1, 0, 1, &[marker])
+    }
+
+    #[test]
+    fn reset_required_clears_decoder_and_resampler_history() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let (opened, reset_count) = scripted_opened_reader(vec![
+            ScriptedReaderEvent::Packet(scripted_packet(1)),
+            ScriptedReaderEvent::Gate(entered.clone(), release.clone()),
+            ScriptedReaderEvent::Error(SymError::ResetRequired),
+            ScriptedReaderEvent::Packet(scripted_packet(2)),
+            ScriptedReaderEvent::Error(SymError::IoError(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "end of stream",
+            ))),
+        ]);
+        let (deck, stop, handle) = start_scripted_decoder(opened);
+
+        entered.wait();
+        let first_segment_len = deck.samples.lock().unwrap().len();
+        assert!(
+            first_segment_len > 0,
+            "first decoded segment must be queued"
+        );
+        release.wait();
+
+        wait_for_decoder_result(&deck);
+        assert!(deck.eof.load(Ordering::Acquire));
+        assert!(!deck.decode_error.load(Ordering::Acquire));
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        assert_eq!(reset_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let samples = deck.samples.lock().unwrap();
+        let tail_len = samples.len() - first_segment_len;
+        assert_eq!(tail_len, (32usize * 48_000).div_ceil(44_100));
+        assert!(
+            samples
+                .iter()
+                .skip(first_segment_len)
+                .all(|sample| sample.abs() < 1e-6),
+            "ResetRequired must prevent prior nonzero filter history from bleeding into the next segment"
+        );
+    }
+
+    #[test]
+    fn decoded_format_change_fails_before_mixing_new_pcm() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let (opened, reset_count) = scripted_opened_reader(vec![
+            ScriptedReaderEvent::Packet(scripted_packet(1)),
+            ScriptedReaderEvent::Gate(entered.clone(), release.clone()),
+            ScriptedReaderEvent::Packet(scripted_packet(3)),
+        ]);
+        let (deck, stop, handle) = start_scripted_decoder(opened);
+
+        entered.wait();
+        let first_segment_len = deck.samples.lock().unwrap().len();
+        assert!(
+            first_segment_len > 0,
+            "first decoded segment must be queued"
+        );
+        release.wait();
+
+        wait_for_decoder_result(&deck);
+        let decode_error = deck.decode_error.load(Ordering::Acquire);
+        let eof = deck.eof.load(Ordering::Acquire);
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        assert!(decode_error);
+        assert!(!eof);
+        assert_eq!(reset_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(deck.samples.lock().unwrap().len(), first_segment_len);
     }
 
     fn wait_for_eof(backend: &CpalBackend) {
@@ -2496,6 +2953,44 @@ mod tests {
             Some("wav"),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn media_open_classification_uses_actual_container_and_codec() {
+        fn wave(tag: u16, bits: u16) -> Vec<u8> {
+            let mut bytes = b"RIFF".to_vec();
+            bytes.extend_from_slice(&52u32.to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&44100u32.to_le_bytes());
+            bytes.extend_from_slice(&88200u32.to_le_bytes());
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&bits.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&[0; 16]);
+            bytes
+        }
+        let open = |bytes: Vec<u8>, suffix| {
+            open_media(
+                MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes)), Default::default()),
+                suffix,
+            )
+        };
+        // Extensions are probe hints, not a playback capability decision.
+        assert!(open(wave(1, 16), Some("opus")).is_ok());
+        let malformed = open(wave(1, 12), Some("wav")).err().unwrap();
+        let malformed = vmusic_core::CoreError::from(malformed);
+        assert_eq!(malformed.code(), "decode_failed");
+        assert_ne!(malformed.status(), 415);
+        let unsupported = open(wave(0xffff, 16), Some("wav")).err().unwrap();
+        let unsupported = vmusic_core::CoreError::from(unsupported);
+        assert_eq!(unsupported.code(), "unsupported_format");
+        assert_eq!(unsupported.status(), 415);
+        let truncated = open(wave(1, 16)[..24].to_vec(), Some("wav")).err().unwrap();
+        assert!(matches!(truncated, AudioError::DecodeFailed(_)));
     }
 
     fn prepare_pcm(
@@ -2926,9 +3421,10 @@ mod tests {
         // Four stereo source frames at 4 kHz become eight mono frames at 8 kHz.
         let samples = next.as_ref().unwrap().deck.samples.lock().unwrap();
         assert_eq!(samples.len(), 8);
-        assert!(samples
-            .iter()
-            .all(|sample| (*sample - 1000.0 / 32768.0).abs() < 1e-6));
+        // A finite four-frame source is zero-extended for sinc filtering; its
+        // boundary transient is not the old repeated-last-sample interpolation.
+        assert!(samples.iter().all(|sample| sample.is_finite()));
+        assert!(samples.iter().any(|sample| sample.abs() > 0.01));
 
         // The outgoing source's native rate also matters, even though its queue
         // has already been resampled to the device rate.
@@ -3312,9 +3808,13 @@ mod tests {
     #[test]
     fn channel_mapping_covers_the_common_cases() {
         let stereo = vec![1.0f32, 2.0, 3.0, 4.0];
-        assert_eq!(map_channels(&stereo, 2, 2), stereo);
-        assert_eq!(map_channels(&stereo, 2, 1), vec![1.5, 3.5]);
-        assert_eq!(map_channels(&[1.0, 2.0], 1, 2), vec![1.0, 1.0, 2.0, 2.0]);
+        let mut out = [0.0; 4];
+        assert_eq!(map_channels(&stereo, 2, 2, &mut out), 4);
+        assert_eq!(out, stereo.as_slice());
+        assert_eq!(map_channels(&stereo, 2, 1, &mut out), 2);
+        assert_eq!(&out[..2], &[1.5, 3.5]);
+        assert_eq!(map_channels(&[1.0, 2.0], 1, 2, &mut out), 4);
+        assert_eq!(out, [1.0, 1.0, 2.0, 2.0]);
     }
 
     /// Regression: the callback used to ignore `playing`, so pausing only
@@ -3430,30 +3930,79 @@ mod tests {
     }
 
     #[test]
-    fn resampler_passes_through_when_rates_match() {
-        let mut r = Resampler::new(48_000, 48_000);
-        let input = vec![0.1f32, 0.2, 0.3, 0.4];
-        assert_eq!(r.push(&input, 2), input);
+    fn resampler_process_finish_and_reset_do_not_allocate_or_free() {
+        for (src, dst) in [(44100, 48000), (96000, 44100), (48000, 48000)] {
+            let mut r = Converter::new(ResampleFormat {
+                input_rate: src,
+                output_rate: dst,
+                channels: 2,
+            })
+            .unwrap();
+            let input = vec![0.1; 3002];
+            let mut output = [0.0; 254];
+            let (_, memory) = measure_memory(|| {
+                for _ in 0..3 {
+                    let mut at = 0;
+                    loop {
+                        let p = r.process(&input[at..], &mut output).unwrap();
+                        at += p.consumed_frames * 2;
+                        if at == input.len() && p.state != ResampleState::NeedOutput {
+                            break;
+                        }
+                    }
+                    while r.finish(&mut output).unwrap().state != ResampleState::Finished {}
+                    r.reset();
+                }
+            });
+            assert_eq!(memory, CallbackMemory::ZERO, "resampler {src}->{dst}");
+        }
     }
 
     #[test]
-    fn resampler_changes_length_when_rates_differ() {
-        let (src, dst) = (44_100u32, 48_000u32);
-        let channels = 2;
-        let frames_in = 2_205usize;
-        let mut r = Resampler::new(src, dst);
-        // `push` takes interleaved samples, so the buffer holds frames * channels.
-        let input: Vec<f32> = (0..frames_in * channels)
-            .map(|i| (i % 97) as f32 / 97.0)
+    fn decoded_sinc_eof_seek_and_channel_mapping_share_the_device_clock() {
+        let rate = 44100;
+        let n = 5003;
+        let samples: Vec<i16> = (0..n)
+            .flat_map(|i| {
+                let v = ((i as f64 * std::f64::consts::TAU * 997.0 / rate as f64).sin() * 16000.0)
+                    as i16;
+                [v, -v]
+            })
             .collect();
-        let out = r.push(&input, channels);
-        let out_frames = out.len() / channels;
-        // Expect the rate ratio, not a hand-copied constant: 2205 frames at
-        // 44.1 kHz is 50 ms, which is 2400 frames at 48 kHz.
-        let expected = (frames_in as f64 * dst as f64 / src as f64).round() as i64;
+        let (opened, info) = open_pcm(&samples, rate, 2);
+        let mut backend = decoded_opened_fixture(opened, info, 48000, 1);
+        let output = decoded_samples(&backend);
+        assert_eq!(
+            output.len(),
+            (n as u64 * 48000).div_ceil(rate as u64) as usize
+        );
         assert!(
-            (out_frames as i64 - expected).abs() <= 2,
-            "unexpected frame count {out_frames}, expected about {expected}"
+            output.iter().all(|v| v.abs() < 1e-6),
+            "independent stereo filters must cancel when downmixed"
+        );
+        backend.seek(50).unwrap();
+        wait_for_eof(&backend);
+        let after = decoded_samples(&backend);
+        let skipped = 2205;
+        assert_eq!(
+            after.len(),
+            ((n - skipped) as u64 * 48000).div_ceil(rate as u64) as usize
+        );
+        assert!(after.iter().all(|v| v.abs() < 1e-6));
+        assert_eq!(
+            backend
+                .shared
+                .current_deck()
+                .frames_played
+                .load(Ordering::Relaxed),
+            2400
+        );
+        backend.seek(0).unwrap();
+        wait_for_eof(&backend);
+        assert_eq!(
+            decoded_samples(&backend),
+            output,
+            "seek must reset both sinc and trim/length history"
         );
     }
 
@@ -3495,6 +4044,52 @@ mod tests {
 #[cfg(test)]
 mod dsp_tests {
     use super::*;
+
+    #[test]
+    fn eq_pcm_matches_original_filter_chain_across_parameter_switches() {
+        for rate in [8_000, 44_100, 48_000, 192_000] {
+            for gains in [[0.0; 6], [2.0, 0.0, -3.0, 0.0, 4.0, 0.0], [0.0; 6]] {
+                let mut bank = EqBank::new(rate, gains, 2);
+                let mut reference = bank.states.clone();
+                for frame in 0..4096 {
+                    for (ch, channel_reference) in reference.iter_mut().enumerate() {
+                        let sample = match frame % 31 {
+                            0 => -0.0,
+                            1 => f32::from_bits(1),
+                            _ => (frame as f32 * (0.11 + ch as f32 * 0.003)).sin(),
+                        };
+                        let mut expected = sample as f64;
+                        for band in channel_reference {
+                            expected = band.process(expected);
+                        }
+                        assert_eq!(
+                            bank.process_frame(ch, sample).to_bits(),
+                            (expected as f32).to_bits()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn neutral_eq_preserves_nonfinite_filter_history_semantics() {
+        for invalid in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            let mut bank = EqBank::new(48_000, [0.0; 6], 1);
+            let mut reference = bank.states.clone();
+            for sample in [0.5, -0.5, invalid, 0.25, 0.0] {
+                let mut expected = sample as f64;
+                for band in &mut reference[0] {
+                    expected = band.process(expected);
+                }
+                let actual = bank.process_frame(0, sample);
+                assert!(
+                    actual.to_bits() == (expected as f32).to_bits()
+                        || actual.is_nan() && expected.is_nan()
+                );
+            }
+        }
+    }
 
     #[test]
     fn peaking_filter_zero_gain_is_identity() {

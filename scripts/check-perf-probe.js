@@ -582,7 +582,7 @@ function uiSourceFiles() {
     let time = 1000, callback = null, nextId = 0;
     const seen = [];
     const ctx = {
-      rafId: 0, lastFrameAt: 0, lastDt: 0, hidden: false, playing: true, energy: 0,
+      rafId: 0, lastFrameAt: 0, lastDt: 0, hidden: false, playing: true, energy: 0, lyricsDirty: false,
       document: { hidden: false }, gates: [],
       now: () => time, clamp: (x, a, b) => Math.max(a, Math.min(b, x)),
       runGates: () => {}, sampleDisplayHz: dt => seen.push(dt), sampleFrameRate: () => {},
@@ -592,12 +592,20 @@ function uiSourceFiles() {
     };
     ctx.window = ctx;
     vm.createContext(ctx);
-    for (const [name, args] of [['frame', ''], ['schedule', ''], ['setHidden', 'v']]) {
-      vm.runInContext('function ' + name + '(' + args + ') ' + blockAfter(stage, 'function ' + name + '('), ctx);
+    for (const name of ['frame', 'schedule', 'setHidden']) {
+      const marker = 'function ' + name + '(';
+      const start = stage.indexOf(marker);
+      // Preserve the production parameters as well as the body: scheduling
+      // options must not become undeclared globals in this VM fixture.
+      const signature = stage.slice(start, stage.indexOf('{', start));
+      vm.runInContext(signature + blockAfter(stage, marker), ctx);
     }
     const tick = gap => { time += gap; const fn = callback; callback = null; fn(); };
     ctx.schedule();
+    eq(ctx.lyricsDirty, true, '显式唤醒会标记歌词需要补画');
+    ctx.lyricsDirty = false;
     tick(1000 / 120); tick(1000 / 120);
+    eq(ctx.lyricsDirty, false, '主循环续帧不重新弄脏已绘制的暂停歌词');
     ok(Math.abs(seen[1] - 1000 / 120) < 0.001, '120Hz 续帧向估计器提供实际 8.33ms');
     ctx.runGates = () => { ctx.lastDt = 80; };
     tick(1000 / 120);

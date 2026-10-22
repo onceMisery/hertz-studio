@@ -74,6 +74,7 @@ function makeEl(id) {
     classList: makeClassList(),
     appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
     append(...cs) { cs.forEach((c) => this.appendChild(c)); },
+    contains(c) { while (c) { if (c === this) return true; c = c.parentNode; } return false; },
     replaceChildren(...cs) {
       this.children = [];
       cs.forEach((c) => this.appendChild(c));
@@ -192,6 +193,11 @@ function makeClock() {
     async flushNext() {
       const t = this.pending()[0];
       if (!t) return false;
+      return this.flush(t.id);
+    },
+    async flush(id) {
+      const t = this.pending().find(t => t.id === id);
+      if (!t) return false;
       t.cancelled = true;
       t.fn();
       await ticks();
@@ -301,6 +307,7 @@ function makeSandbox(opts) {
     const src = fs.readFileSync(path.join(WEB, file), 'utf8');
     vm.runInContext(src, sandbox, { filename: file });
   }
+  load('search-session.js');
   load('online.js');
   load('online-login.js');
   load('online-playlists.js');
@@ -901,14 +908,16 @@ async function loginScenario(pollStates, opts) {
       online.state.source = 'netease'; online.state.kind = kind;
       top.state.kind = kind; top.close();
       env.doc.getElementById('search').value = '顶栏' + kind;
-      top.onInput(); await ticks(30);
+      top.onInput(); await env.clock.flush(top.state.timer); await ticks(30);
       ok(searches().at(-1).url.includes('source=' + source), '顶栏 ' + kind + ' 与完整搜索共用平台优先级');
     }
     online.state.source = 'all'; online.state.kind = 'song';
     top.state.kind = 'song'; top.close();
     env.doc.getElementById('search').value = '顶栏综合';
-    top.onInput(); await ticks(30);
-    ok(searches().at(-1).url.includes('source=qq'), 'All 顶栏预览优先已登录平台');
+    const beforePreview = searches().length;
+    top.onInput(); await env.clock.flush(top.state.timer); await ticks(30);
+    ok(searches()[beforePreview].url.includes('source=qq'), 'All 顶栏预览优先已登录平台');
+    eq(searches().length - beforePreview, 3, 'All 顶栏分源渐进查询全部音乐源');
 
     online.state.q = ''; online.state.kind = 'song';
     online.init(); await ticks(30);
@@ -916,7 +925,7 @@ async function loginScenario(pollStates, opts) {
     online.state.q = '手动选择'; await online.search();
     ok(searches().at(-1).url.includes('source=netease'), '手动选源后优先级不覆盖用户选择');
     top.close(); env.doc.getElementById('search').value = '顶栏手动选择';
-    top.onInput(); await ticks(30);
+    top.onInput(); await env.clock.flush(top.state.timer); await ticks(30);
     ok(searches().at(-1).url.includes('source=netease'), '顶栏同样尊重手动选源');
   }
 
@@ -963,11 +972,36 @@ async function loginScenario(pollStates, opts) {
     eq(findByClass(body, 'all-failed').length, 1, '失败源独立显示');
     finishSlow({ tracks: [T({ source: 'qq', id: '9', title: '晴天' })] });
     await pending;
-    eq(online.state.tracks[0].source, 'qq', '精确歌名优先于 Live 版本');
+    eq(online.state.tracks[0].source, 'netease', '来源分组顺序固定，迟到精确匹配不插入已显示来源组');
     eq(online.state.tracks.length, 2, '跨源不同版本均保留');
     eq(online.state.loading, false, '所有源完成后结束加载');
     eq(env.doc.getElementById('online-count').textContent, '2 首已加载', '显示实际加载数量');
-    eq(transport.calls.get.length, 3, '每源一次并发搜索');
+    eq(transport.calls.get.length, 3, '每源一次搜索（并发受闸，总数不变）');
+  }
+
+  section('并发上限：聚合页初始并发 2 个源（§4.1）');
+  {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let done = 0;
+    const transport = makeTransport({ GET: [{ match: '/v1/online/search?', returns(url) {
+      inFlight += 1;
+      if (inFlight > maxInFlight) maxInFlight = inFlight;
+      // 让请求至少存活几个事件循环，避免同步完成掩盖并发窗口。
+      return new Promise((resolve) => setImmediate(() => {
+        inFlight -= 1;
+        done += 1;
+        resolve({ tracks: [T({ id: String(done) })] });
+      }));
+    } }] });
+    const env = makeSandbox({ transport }); bindOnline(env);
+    const online = env.sandbox.window.Online;
+    online.state.sources = ['a', 'b', 'c', 'd', 'e'].map(id => ({ id }));
+    online.state.source = 'all'; online.state.q = '并发';
+    await online.search();
+    eq(transport.calls.get.length, 5, '五个源全部完成');
+    ok(maxInFlight <= 2, '在途请求不超 2 (max ' + maxInFlight + ')');
+    eq(online.state.tracks.length, 5, '每源各得一条结果');
   }
 
   section('搜索竞态：新查询与清空均作废旧响应');
@@ -1266,6 +1300,52 @@ async function loginScenario(pollStates, opts) {
     eq(online.state.cat, '', '首屏清单移除不存在的分类');
     eq(transport.calls.get.filter(c => c.url.includes('/v1/online/search?')).length, 0,
       '等待清单的预取不再发空搜索');
+  }
+
+  section('All 音源缩减为单源：选择器回退且搜索仍指定剩余音源');
+  {
+    const transport = makeTransport({ GET: [
+      { match: '/v1/online/sources', times: 1, returns: { sources: [
+        { id: 'netease', label: '网易云音乐', cats: [], caps: [] },
+        { id: 'qq', label: 'QQ音乐', cats: [], caps: [] },
+      ] } },
+      { match: '/v1/online/sources', returns: { sources: [
+        { id: 'netease', label: '网易云音乐', cats: [], caps: [] },
+      ] } },
+      { match: '/v1/online/search?', returns: { tracks: [T({ source: 'netease', id: 'n1' })] } },
+    ] });
+    const env = makeSandbox({ transport });
+    const bound = bindOnline(env);
+    const sourceSelect = {
+      _value: 'netease',
+      children: [],
+      get value() { return this._value; },
+      set value(value) {
+        this._value = this.children.some(option => option.value === value) ? value : '';
+      },
+      replaceChildren(...children) {
+        this.children = children;
+        if (!children.some(option => option.value === this._value)) {
+          this._value = children.length ? children[0].value : '';
+        }
+      },
+    };
+    bound.ui.onlineSource = sourceSelect;
+    const online = env.sandbox.window.Online;
+    online.init();
+    await ticks(20);
+
+    sourceSelect.value = 'all';
+    online.state.source = 'all';
+    await online.loadSources();
+    eq(sourceSelect.value, 'netease', '移除 All 选项后选择器回退到唯一音源');
+    eq(online.state.source, 'netease', '在线搜索状态同步回退到唯一音源');
+
+    online.state.q = '目录缩减后搜索';
+    await online.search();
+    const search = transport.calls.get.find(call => call.url.includes('/v1/online/search?'));
+    ok(search && new URL('http://test' + search.url).searchParams.get('source') === 'netease',
+      '搜索请求仍携带有效的剩余音源');
   }
 
   section('单源搜索：行渲染、元数据缓存、失败诚实报错');

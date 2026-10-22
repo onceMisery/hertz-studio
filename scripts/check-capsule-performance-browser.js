@@ -17,7 +17,9 @@ async function main() {
   let browser;
   try {
     const track = await fixture.seed();
-    browser = await playwright[engine].launch({ headless: true });
+    const launchOptions = { headless: true };
+    if (process.env.PLAYWRIGHT_EXECUTABLE_PATH) launchOptions.executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+    browser = await playwright[engine].launch(launchOptions);
     const page = await browser.newPage({ viewport: { width: 268, height: 55 }, deviceScaleFactor: 2 });
     const errors = [], requests = [];
     let failCommand = false;

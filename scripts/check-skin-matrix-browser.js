@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
-// 全量遍历：23 套内置主题 × 7 套皮肤 = 161 个组合，逐组合量关键几何。
+// 全量遍历：23 套内置主题 × 4 套可选皮肤 = 92 个组合，逐组合量关键几何。
+// （星轨由单独的脚本覆盖；这里用 localStorage + reload 起皮肤，写它只会报「切不过去」。）
 //
-// 为什么必须全量：只验晴空族那五套会漏掉「潮汐皮肤 + 其他主题」——
+// 为什么必须全量：只验晴空族那五套会漏掉「某套皮肤 + 其他主题」——
 // 用户就是这么发现漏的。而这类 bug 的特点是**只出现在特定组合**：单看主题
 // 或单看皮肤都正常，凑一起才炸。所以任何"抽样验过"都不算验过。
 //
 // 判定口径：
-//   ① 潮汐的通栏导航条必须**实底**（合成后有效不透明度 ≥ 0.9）
-//   ② 潮汐的顶栏是扁平通栏（圆角 0），内容卡是圆角内缩卡
+//   ① 黑胶的通栏导航条必须**实底**（合成后有效不透明度 ≥ 0.9）
+//   ② 黑胶的顶栏是扁平通栏（圆角 0），内容卡是圆角内缩卡
 //   ③ 面板/播放条/顶栏不能塌陷、不能横向溢出视口
 //   ④ 页面无运行时错误
 //
@@ -30,10 +31,9 @@ const THEMES = ['mineral', 'celestial', 'kiminona', 'spirited', 'starrail', 'liy
   'starblue', 'emerald', 'midnight-neon', 'mono', 'aero', 'codeide', 'sakura',
   'crimson', 'paper-ink', 'forest', 'porcelain', 'snow-dawn', 'acid', 'liunian',
   'ios-light', 'chaoxi-night', 'chaoxi-day'];
-// workbench 不在矩阵里：它是隐藏皮肤（设置页/顶栏都不给入口），开页会被主动
 // 回落到 classic —— 这里靠写 localStorage + reload 起皮肤，写上它只会报
 // 「皮肤切不过去」。组合矩阵只跑界面上真能选到的那几套。
-const SKINS = ['classic', 'sheen', 'liunian', 'ios', 'qingfeng', 'chaoxi', 'heijiao'];
+const SKINS = ['classic', 'liunian', 'qingfeng', 'heijiao'];
 
 const issues = [];
 let combos = 0;
@@ -139,16 +139,7 @@ let combos = 0;
           if (b && b.visible && (b.left < -2 || b.right > m.vw + 2))
             issues.push({ tag, why: k + ' 横向溢出 [' + b.left + ',' + b.right + '] 视口 ' + m.vw });
         }
-        // ①② 潮汐专属：通栏导航要有实底、顶栏要扁平
-        if (skin === 'chaoxi') {
-          if (m.rail && m.rail.visible && m.rail.alpha < 0.9)
-            issues.push({ tag, why: '导航条没实底 alpha=' + m.rail.alpha });
-          if (m.topbar && m.topbar.radius > 0)
-            issues.push({ tag, why: '顶栏是浮起卡片（圆角 ' + m.topbar.radius + '），应为扁平通栏' });
-          if (m.column && m.column.radius <= 0)
-            issues.push({ tag, why: '内容卡不是圆角卡（潮汐的设计）' });
-        }
-        // ④ 黑胶专属：通栏同潮汐，另加「双卡片比例」与「左卡不塌」
+        // ④ 黑胶专属：通栏导航要实底、顶栏要扁平，另加「双卡片比例」与「左卡不塌」
         if (skin === 'heijiao') {
           if (m.rail && m.rail.visible && m.rail.alpha < 0.9)
             issues.push({ tag, why: '导航条没实底 alpha=' + m.rail.alpha });
@@ -160,7 +151,7 @@ let combos = 0;
           if (!m.stage || !m.stage.visible)
             issues.push({ tag, why: '左卡不见了（data-stage-idle 把它 display:none 了）' });
           // 唱片不能在左卡里被压成一条缝。300px 是设计下限：
-          // 低于它就说明卡片被压扁了（与潮汐栽过的 .lib-list 12px 同一类）。
+          // 低于它就说明卡片被压扁了（与单列皮肤栽过的 .lib-list 12px 同一类）。
           if (m.disc && m.disc.visible && m.disc.h < 120)
             issues.push({ tag, why: '唱片被压扁 h=' + m.disc.h });
           // 宽屏下必须是两轨（1/3 + 2/3）。

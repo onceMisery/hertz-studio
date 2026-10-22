@@ -528,7 +528,7 @@ body.is-playing .disc { animation-play-state: running; }
 .progress-ghost {
   height: 6px;
   border-radius: 3px;
-  background: linear-gradient(90deg, var(--music-highlight), rgba(var(--music-highlight-rgb), 0.55));
+  background: linear-gradient(90deg, var(--music-highlight), var(--music-highlight-alt));
 }
 
 input[type="range"] {

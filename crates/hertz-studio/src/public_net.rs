@@ -107,7 +107,11 @@ fn public_addresses(addrs: Vec<SocketAddr>) -> io::Result<Vec<SocketAddr>> {
     Ok(addrs)
 }
 
-struct PublicDns;
+pub(crate) struct PublicDns;
+
+pub(crate) fn public_dns_resolver() -> Arc<PublicDns> {
+    Arc::new(PublicDns)
+}
 
 impl Resolve for PublicDns {
     fn resolve(&self, name: Name) -> Resolving {
@@ -144,7 +148,7 @@ pub(crate) fn client(scheme: SchemePolicy) -> Result<Client, &'static str> {
             .connect_timeout(Duration::from_secs(8))
             .read_timeout(Duration::from_secs(30))
             .user_agent("HertzStudio/0.1 public-resources")
-            .dns_resolver(Arc::new(PublicDns))
+            .dns_resolver(public_dns_resolver())
             .redirect(reqwest::redirect::Policy::custom(
                 move |attempt| match redirect_target(
                     attempt.url(),

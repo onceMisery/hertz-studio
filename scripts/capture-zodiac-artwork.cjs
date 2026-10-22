@@ -29,6 +29,7 @@ async function main() {
         const run = [...callbacks.values()]; callbacks.clear(); run.forEach(fn => fn(now));
       };
     });
+    await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/zodiac-stage.js') });
     assert.equal(await page.evaluate(() => ZodiacStagePure.mount(document.querySelector('canvas'),
       { quality: 'high', reduced: true, interactive: true })), true);
@@ -68,7 +69,8 @@ async function main() {
         assert.ok(Math.abs(data.stats.dist - data.stats.distDefault) < .01,
           data.stats.sign + suffix + ': default camera must fit the viewport without distance-cap clipping');
         assert.ok(data.bright > 30, data.stats.sign + suffix + ': WebGL artwork is blank');
-        assert.equal(data.stats.geometries, 112);
+        // 113 = 十二座 × 9 个预建几何 + 天空 + 星场 + 星云 + 四芒星 + 流星。
+        assert.equal(data.stats.geometries, 113);
         assert.ok(Math.max(...data.background)<22 && data.background[2]-data.background[0]<10,
           'Natural sky must stay near black, not a blue wash: '+data.background);
         fs.writeFileSync(path.join(output, data.stats.sign + suffix + '.png'),

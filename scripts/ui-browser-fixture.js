@@ -11,6 +11,7 @@ const { once } = require('node:events');
 
 const TITLE = 'Layout Audit Fixture';
 const ARTIST = 'Hertz Audit Artist';
+const ALBUM = 'Hertz Audit Album';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function until(probe, label, timeout = 20000) {
@@ -40,7 +41,8 @@ function writeTaggedWav(file) {
   const payload = Buffer.concat([
     Buffer.from('WAVE'), chunk('fmt ', format),
     chunk('LIST', Buffer.concat([Buffer.from('INFO'),
-      chunk('INAM', Buffer.from(TITLE + '\0')), chunk('IART', Buffer.from(ARTIST + '\0'))])),
+      chunk('INAM', Buffer.from(TITLE + '\0')), chunk('IART', Buffer.from(ARTIST + '\0')),
+      chunk('IPRD', Buffer.from(ALBUM + '\0'))])),
     chunk('data', Buffer.alloc(44100 * 2 * 30)),
   ]);
   fs.writeFileSync(file, chunk('RIFF', payload));
@@ -61,9 +63,23 @@ async function startFixture({ backend = 'null', prepareData } = {}) {
   child.on('error', error => { launchError = error; });
   async function close() {
     if (child.exitCode === null && child.signalCode === null && !launchError) {
-      const exited = once(child, 'exit');
+      const exited = once(child, 'exit').then(() => true, () => true);
       child.kill();
-      await exited;
+      const stopped = await Promise.race([exited, delay(1500).then(() => false)]);
+      if (!stopped) {
+        if (process.platform === 'win32') {
+          await new Promise(resolve => {
+            const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+              windowsHide: true, stdio: 'ignore',
+            });
+            killer.once('error', resolve);
+            killer.once('exit', resolve);
+          });
+        } else {
+          child.kill('SIGKILL');
+        }
+        await Promise.race([exited, delay(1500).then(() => false)]);
+      }
     }
     const resolved = fs.realpathSync(dir);
     assert.equal(path.dirname(resolved), fs.realpathSync(os.tmpdir()), 'Cleanup stays in the temporary directory');
@@ -89,7 +105,7 @@ async function startFixture({ backend = 'null', prepareData } = {}) {
     }
     assert.equal((await api('/v1/health')).backend, backend, 'Fixture must use the requested backend');
     return {
-      base, api, close, dataDir: data,
+      base, api, close, dataDir: data, processId: child.pid,
       async connect(context) {
         await context.addCookies([{ name: 'vmusic_session', value: discovery.token,
           url: base, httpOnly: true, sameSite: 'Strict' }]);
@@ -107,6 +123,7 @@ async function startFixture({ backend = 'null', prepareData } = {}) {
         const track = (await api('/v1/tracks?limit=10')).tracks.find(t => t.title === TITLE);
         assert.ok(track, 'Scanner read WAV title');
         assert.equal(track.artist, ARTIST, 'Scanner read WAV artist');
+        assert.equal(track.album, ALBUM, 'Scanner read WAV album');
         await api('/v1/player/volume', 'POST', { volume: 0 });
         await api('/v1/player/load', 'POST', { track_id: track.id });
         await api('/v1/player/pause', 'POST', {});
@@ -119,4 +136,4 @@ async function startFixture({ backend = 'null', prepareData } = {}) {
   }
 }
 
-module.exports = { startFixture, TITLE, ARTIST };
+module.exports = { startFixture, writeTaggedWav, TITLE, ARTIST };

@@ -22,6 +22,8 @@ use crate::config::Config;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsEvent {
     State(PlayerSnapshot),
+    /// Queue contents remain on the queue endpoint; this invalidates client snapshots.
+    QueueChanged,
     /// 必须是命名变体。`#[serde(tag = "type")]` 是内部标签表示法，serde 只
     /// 允许它包住 struct/map 形状的数据；newtype 变体（`Spectrum(Vec<f32>)`）
     /// 会在序列化时直接报错，而 ws.rs 对 `to_string` 失败是 `continue`，
@@ -30,6 +32,8 @@ pub enum WsEvent {
         bands: Vec<f32>,
     },
     Ended,
+    /// AI 任务状态变化只发送无载荷提示；消费端重查经过授权过滤的持久快照。
+    AiTasksResync,
     /// 界面实例之间的轻量信号。浮动胶囊窗口与 tab 实例是两个 opaque-origin 的
     /// iframe，BroadcastChannel / storage 事件都不通，只能借这条已有的广播管道
     /// 绕一圈：浮窗里点胶囊时发 `expand-capsule`，tab 实例收到就解除最小化。
@@ -235,8 +239,8 @@ pub(crate) const ONLINE_META_CAP: usize = 8192;
 /// 节拍任务表上限（每格只有几十字节状态，节拍地图本体在磁盘上）。
 pub(crate) const STAGE_BEATS_CAP: usize = 8192;
 
-/// 同时跑的节拍分析数。2 = 「当前这首在算，上一首切走的那份也能收尾」，再多就
-/// 开始和正在解码的音频抢 CPU；一台机器上的音频解码只需要一份。
+/// 节拍与显式基频分析共用的并发数。当前曲与切走的工作能收尾，基频最多占一槽；
+/// 再多会和正在解码的音频抢 CPU。
 pub(crate) const BEAT_ANALYZE_BUDGET: usize = 2;
 
 /// 一首的节拍分析最多试几次。到顶就放弃到进程结束：一首真放不出地图的文件不该
@@ -388,6 +392,69 @@ impl OnlineMetaSnap {
 pub(crate) struct PlayOutcome {
     pub committed: bool,
     pub actual_quality: Option<crate::online::quality::Quality>,
+}
+
+/// 一次共享播控命令的完成事实。
+///
+/// HTTP/RPC 的 200/Ok 从来不能证明「已播放」——空队列、未装载、被更新意图
+/// 顶掉都曾是静默的 `Ok(())`。这个类型把事实拆开：只有原 owner 确认提交才是
+/// [`ControlOutcome::Applied`]；无操作与被取代各带稳定机器码，需要完成事实的
+/// 调用方据此如实回答，不靠曲目 id 变化反推。它只描述播放事实与代际，不携带
+/// 任何界面或场景引擎概念——传输层（HTTP/RPC/未来的受限门面）与自研引擎的
+/// 控制面复用同一套语义。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ControlOutcome {
+    /// 本次命令已完成提交；不保证之后没有别的操作。
+    Applied {
+        /// 与本次命令关联的应用层播放代际：传输命令（pause/resume/seek）是
+        /// 它制造的新意图代际；换曲（上/下一曲）是它被受理时的预留代际——
+        /// 提交由 `play_index_for` 在提交锁内推进到更新的代际；音量不是
+        /// 播放意图，不 bump 代际，回当前值。
+        generation: usize,
+    },
+    /// 明确没做任何事：原因稳定可分支，既不是失败也不是成功。
+    NoOp { code: NoOpCode },
+    /// 准备期间被更新的播放意图取代：本次命令没有生效，也没有失败。
+    Superseded { generation: usize },
+}
+
+/// [`ControlOutcome::NoOp`] 的稳定机器码。取值会出现在诊断与外部门面应答里：
+/// 新增成员可以，改动既有取值不行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoOpCode {
+    /// 队列为空，没有可切换的目标（上一曲/下一曲）。
+    EmptyQueue,
+    /// 严格模式下播放器里没有已装载曲目（resume）。
+    NoLoadedTrack,
+    /// 私电台已到尾端，不再推进（下一曲）。
+    RadioTail,
+}
+
+impl NoOpCode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            NoOpCode::EmptyQueue => "empty_queue",
+            NoOpCode::NoLoadedTrack => "no_loaded_track",
+            NoOpCode::RadioTail => "radio_tail",
+        }
+    }
+}
+
+impl ControlOutcome {
+    /// 本次命令是否真正提交。HTTP/RPC 的兼容应答一律照旧回快照；
+    /// 只有需要完成事实的调用方才看这个。
+    pub(crate) fn committed(&self) -> bool {
+        matches!(self, ControlOutcome::Applied { .. })
+    }
+
+    /// 稳定机器码，与 [`vmusic_core::CoreError::code`] 同一风格。
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            ControlOutcome::Applied { .. } => "applied",
+            ControlOutcome::NoOp { code } => code.as_str(),
+            ControlOutcome::Superseded { .. } => "superseded",
+        }
+    }
 }
 
 /// 一次播放尝试由什么触发。取流失败后的处置全靠它分流，所以原来那个 `auto: bool`
@@ -668,6 +735,7 @@ pub(crate) struct CommittedQuality {
     actor_generation: u64,
     actual: Option<crate::online::quality::Quality>,
     cached_path: Option<PathBuf>,
+    download: Option<crate::online::progressive::DownloadView>,
 }
 
 /// One optional actor preparation tied to existing queue positions, not a
@@ -746,6 +814,8 @@ pub struct AppState {
     pub(crate) cache_index: Arc<crate::online::cache::CacheIndex>,
     /// 首跳票据（签发/兑换），见 [`crate::ticket`]。只活在内存里。
     pub(crate) tickets: crate::ticket::TicketStore,
+    /// 开着的浏览器页面数，由 [`ViewerGuard`] 随 `/ws` 连接增减。
+    pub(crate) viewers: AtomicUsize,
     /// 自动接力连续失败计数，任一曲成功提交即清零；累计到 3 停止接力。
     pub(crate) auto_failures: AtomicUsize,
     /// 一轮跳曲走的起点：第一次失败时把「当时在播的那首」记下来，放弃时把游标还给
@@ -761,10 +831,13 @@ pub struct AppState {
     pub(crate) committed_quality: Mutex<Option<CommittedQuality>>,
     /// 节拍分析幂等表：缓存键 → 任务态。
     pub(crate) stage_beats: Mutex<BoundedMap<crate::stage_beats::TaskState>>,
-    /// 节拍分析的总并发预算：一首的 FFT 是几秒的满核运算，快速连切歌时若每首
+    /// 节拍与基频分析的总并发预算：一首的 FFT 是几秒的满核运算，快速连切歌时若每首
     /// 都立刻开跑，抢的是正在解码那首歌的 CPU（听感是声音发卡，而画面一切正常）。
-    /// 额度只有这么一处，用完之后提交路径直接推迟、GET 路径等一手。
+    /// 提交路径直接推迟、节拍 GET 路径等一手；显式基频分析拿不到就返回 busy。
     pub(crate) beat_slots: Arc<tokio::sync::Semaphore>,
+    /// Content identity + algorithm/version; eight bounded, rebuildable pitch maps.
+    pub(crate) pitch_cache: Mutex<BoundedMap<Arc<vmusic_beats::pitch::PitchMap>>>,
+    pub(crate) lyric_candidates: Mutex<crate::lyrics::Candidates>,
     /// 「分析出来了但没写进磁盘」的地图（缓存键 → 地图）。这是刻意保留的第二
     /// 种状态，不是失败：这轮播放能用，重启不能。表本身有界（
     /// [`BEAT_VOLATILE_CAP`]），落盘长期失败的机器最多占这几首的内存。
@@ -778,6 +851,10 @@ pub struct AppState {
     /// 启动后由 main 注入 Weak：on_track_committed 只有 &self，detach
     /// 'static 任务时凭它拿回 Arc（不改 play_index/step 的签名链）。
     pub(crate) weak_self: std::sync::OnceLock<std::sync::Weak<AppState>>,
+    /// 服务退出信号：首页那颗退出钮（`POST /v1/system/shutdown`）拉它，`main.rs`
+    /// 的优雅关停把它与 Ctrl-C 并进同一条收尾。用 watch 而不是 Notify 是因为
+    /// `send` 是粘的——serve 那边的注册早晚都不会丢这次唤醒。
+    pub(crate) exiting: tokio::sync::watch::Sender<bool>,
     /// 会话恢复的待回放进度：重启时从快照装进来，首次 play 成功提交后
     /// seek 过去并清空（只消费一次，之后的 play/seek 都是用户自己的意图）。
     pub(crate) pending_restore_seek: Mutex<Option<u64>>,
@@ -793,9 +870,88 @@ pub struct AppState {
     /// 等于每秒打两次上游歌词接口、本地曲每次重开音频文件读标签。换曲
     /// 自然失效；同一曲播放中导入新歌词要等换曲才反映（OBS 场景可接受）。
     pub(crate) overlay_lyric: Mutex<Option<(String, vmusic_core::LyricDocument)>>,
+    /// 短写幂等表（见 [`crate::idempotency`]）：带 `clientOperationId` 的播控
+    /// 命令在 10 分钟窗口内按 `(principal, operation, clientOperationId)` 去重。
+    pub(crate) short_writes: crate::idempotency::ShortWriteStore,
+    /// 本次服务进程的实例身份（技术路线 §5.5）：每次启动随机，受限门面在
+    /// context 里下发；凭据绑定它的调用在服务重启后必须重新连接。
+    pub(crate) server_instance_id: String,
+    /// 共享搜索闸（§4.1）：HTTP 单源、RPC 单源、旧聚合、内部接力搜索都
+    /// 经过同一份入场额度；经 `online_ctx` 随 Ctx 分发。
+    pub(crate) search_gate: Arc<crate::online::search_gate::SearchGate>,
+    /// AI 持久任务运行时（R4-J）：有界内存输入 + 当前 provider。
+    pub(crate) ai_runtime: crate::ai::jobs::AiRuntime,
+    /// 歌词情绪服务与其进程内 Cue 缓存。
+    pub(crate) ai_emotion: crate::ai::emotion::EmotionService,
+    /// AI runner 锁是否由本进程持有（§5.5）：锁失则生成受理停用（bootstrap 置位）。
+    pub(crate) ai_runner_held: std::sync::atomic::AtomicBool,
+    /// 受限门面是否对外开放：锁 + 实际回环绑定双条件，main 在监听后置位；
+    /// 0.0.0.0、具体网卡与 IPv6 一律不开放（§5.5 首发约束）。
+    pub(crate) ai_external_ready: std::sync::atomic::AtomicBool,
+}
+
+/// 离场到停播之间的宽限。本机实测「重载 → WS 建连」257–675 ms（冷启动取 675），
+/// 前端退避重连首轮 ~1 s（`app.js` 的 `scheduleReconnect`）：宽限得盖过这两段，
+/// 否则按一次 F5 就停一次播。
+pub(crate) const DEPART_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 「还开着几个页面」的唯一出处：一条 `/ws` 连接进 `handle_socket` 时 +1，任何
+/// 出口（早退、发送失败、panic 展开）由 Drop 收回。不用 `events.receiver_count()`
+/// 是因为集合补页、AI 任务、电台取数这些内部等待者订阅的是同一条总线，那个数
+/// 答不出「有没有浏览器开着」。
+pub(crate) struct ViewerGuard {
+    state: Arc<AppState>,
+}
+
+impl ViewerGuard {
+    pub(crate) fn enter(state: Arc<AppState>) -> Self {
+        state.viewers.fetch_add(1, Ordering::AcqRel);
+        Self { state }
+    }
+}
+
+impl Drop for ViewerGuard {
+    fn drop(&mut self) {
+        self.state.viewers.fetch_sub(1, Ordering::AcqRel);
+        // 断开本身就武装一次，不靠前端的信标：实测关掉整个浏览器时
+        // `fetch(keepalive)` 请求根本发不出去（Chromium 抢先撕掉网络栈），
+        // 只认 `/v1/player/depart` 的话「关浏览器还在放」照旧成立。信标覆盖的是
+        // 主动调用与单标签关闭，这条兜住崩溃、进程被杀与整浏览器退出。
+        self.state.schedule_depart_pause();
+    }
 }
 
 impl AppState {
+    /// 本次服务进程的实例身份（技术路线 §5.5）。字段保持 pub(crate)，
+    /// 传输层（独立 bin 与插件宿主）经这里只读访问。
+    pub fn server_instance_id(&self) -> &str {
+        &self.server_instance_id
+    }
+
+    /// 退出信号的只读订阅口：`main.rs`（独立 bin）等它，字段本身是 pub(crate)，
+    /// 与上面 `server_instance_id` 同一套「bin 走方法、不直接摸字段」的边界。
+    pub fn exiting_signal(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.exiting.subscribe()
+    }
+
+    /// AI runner 锁是否在本进程（生成受理的门禁）。
+    pub fn ai_runner_held(&self) -> bool {
+        self.ai_runner_held
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 受限门面对外开放与否（锁 + 回环绑定）。
+    pub fn ai_external_ready(&self) -> bool {
+        self.ai_external_ready
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// main 在监听绑定后置位（bin 不碰 pub(crate) 字段）。
+    pub fn set_ai_external_ready(&self, ready: bool) {
+        self.ai_external_ready
+            .store(ready, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// 缓存根目录（`cache/`），下面是 `covers/` 与 `online/` 两个子目录。
     ///
     /// 需要它而不是 `cover_dir()` 的地方只有一类：调
@@ -1136,7 +1292,10 @@ impl AppState {
         // 且「顶代际 + 换队列 + 写 cursor」要相对某个提交原子地发生，否则旧盘
         // 的下载晚于新盘的 load 完成时，会把新歌盖掉。
         let _commit = self.play_commit.lock().await;
-        self.set_queue_locked(ids, start).await
+        let result = self.set_queue_locked(ids, start).await;
+        drop(_commit);
+        self.publish(WsEvent::QueueChanged);
+        result
     }
 
     /// Caller holds play_commit; shared online preparation adds metadata in that same transaction.
@@ -1741,9 +1900,7 @@ impl AppState {
             );
             (dl, None)
         } else {
-            let ctx = crate::online::Ctx {
-                db: self.db.clone(),
-            };
+            let ctx = crate::online::Ctx::new(self.db.clone());
             let resolved = self
                 .resolve_online_stream(
                     gen,
@@ -2079,6 +2236,9 @@ impl AppState {
         if committed && play.is_ok() {
             self.remember_committed_quality(gen, &track_id, actual, None)
                 .await;
+            if let Some(committed) = self.committed_quality.lock().await.as_mut() {
+                committed.download = Some(view.clone());
+            }
         }
         self.set_buffering(false, None).await;
         if let Err(e) = play {
@@ -2245,14 +2405,46 @@ impl AppState {
         self.publish(WsEvent::Buffering { active, pct });
     }
 
-    /// 按服务端真值现取一帧缓冲态事件，供事件泵**掉队时补发**。
-    ///
-    /// `Buffering` 是边沿事件：状态帧每拍全量重发，所以别的帧掉了无所谓，唯独它
-    /// 掉了 `active=false` 会把播放键的转圈永久留在屏幕上。两条泵（独立形态的
-    /// WS、插件形态的 stdio 转发）在 `Lagged` 分支各调一次这里。
-    pub async fn buffering_event(&self) -> WsEvent {
+    /// 为慢客户端从当前真值重建非周期事件。buffering 是边沿状态，其余事件要求
+    /// 前端刷新各自的事实快照。
+    pub async fn resync_events(&self) -> [WsEvent; 5] {
         let (active, pct) = *self.buffering.lock().await;
-        WsEvent::Buffering { active, pct }
+        let scan = self.scan.lock().await;
+        [
+            WsEvent::Buffering { active, pct },
+            WsEvent::AiTasksResync,
+            WsEvent::LibraryChanged,
+            WsEvent::Scan {
+                phase: scan.phase.clone(),
+                done: scan.done,
+                total: scan.total,
+            },
+            WsEvent::QueueChanged,
+        ]
+    }
+
+    /// Read one event or recover from broadcast loss. Resubscribe before taking
+    /// the snapshot so stale queued edges cannot overwrite the recovered truth.
+    pub async fn next_event_batch(
+        &self,
+        receiver: &mut broadcast::Receiver<WsEvent>,
+    ) -> Option<[Option<WsEvent>; 5]> {
+        match receiver.recv().await {
+            Ok(event) => Some([Some(event), None, None, None, None]),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::debug!(skipped, "event consumer lagged; resynchronizing");
+                *receiver = receiver.resubscribe();
+                let [buffering, tasks, library, scan, queue] = self.resync_events().await;
+                Some([
+                    Some(buffering),
+                    Some(tasks),
+                    Some(library),
+                    Some(scan),
+                    Some(queue),
+                ])
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
     }
 
     /// 中止全部在途下载并清空注册表（切到本地曲/换队预留时调用）。
@@ -2658,7 +2850,25 @@ impl AppState {
             actor_generation: self.audio.snapshot().generation,
             actual,
             cached_path,
+            download: None,
         });
+    }
+
+    /// Exact bytes selected by the playback owner, independent of later quality
+    /// preferences and cache relabelling. An unfinished download has no identity.
+    pub(crate) async fn project_online_media(&self, track_id: &str) -> Option<PathBuf> {
+        let snapshot = self.audio.snapshot();
+        let committed = self.committed_quality.lock().await;
+        let current = committed.as_ref().filter(|c| {
+            c.track_id == track_id
+                && snapshot.track_id.as_deref() == Some(track_id)
+                && c.play_generation == self.play_generation.load(Ordering::Relaxed)
+                && c.actor_generation == snapshot.generation
+        })?;
+        current
+            .cached_path
+            .clone()
+            .or_else(|| current.download.as_ref().and_then(|d| d.completed_path()))
     }
 
     /// The caller holds play_commit. Consume exactly one failure from the matching attempt.
@@ -2811,9 +3021,7 @@ impl AppState {
         {
             return;
         }
-        let ctx = crate::online::Ctx {
-            db: self.db.clone(),
-        };
+        let ctx = crate::online::Ctx::new(self.db.clone());
         let Ok(info) = crate::online::stream(&ctx, &source, &id, None, Some(quality.bps())).await
         else {
             return;
@@ -2924,9 +3132,8 @@ impl AppState {
             trigger = trigger.as_str()
         );
         self.set_buffering(true, None).await;
-        let ctx = crate::online::Ctx {
-            db: self.db.clone(),
-        };
+        // 接力搜索也走共享搜索闸：真闸来自 AppState，不绕过入场限制。
+        let ctx = crate::online::Ctx::with_gate(self.db.clone(), self.search_gate.clone());
         let searched = crate::online::search_all(&ctx, &query, 8).await;
         let agg = match searched {
             Ok(agg) => agg,
@@ -3066,6 +3273,10 @@ impl AppState {
         snap.rg_peak = None;
         let origin = snap.origin.clone();
         map.insert(new_id, snap);
+        drop(map);
+        drop(queue);
+        drop(_commit);
+        self.publish(WsEvent::QueueChanged);
         origin
     }
 
@@ -3090,9 +3301,7 @@ impl AppState {
             return None;
         }
         let ids: Vec<String> = candidates.iter().map(|(_, id)| id.clone()).collect();
-        let ctx = crate::online::Ctx {
-            db: self.db.clone(),
-        };
+        let ctx = crate::online::Ctx::new(self.db.clone());
         let quality = self.online_quality_for(source, track_id).await.bps();
         let verdicts = crate::online::probe_playable(&ctx, source, &ids, quality)
             .await
@@ -3495,6 +3704,8 @@ impl AppState {
     /// button press: `RepeatOne` only repeats on auto, a user pressing "next"
     /// always moves forward. A failed play attempt is reported back as-is — use
     /// [`Self::step_by_user`] for the 上一曲/下一曲 buttons, which keep looking.
+    /// 内部接力只关心成败，[`ControlOutcome`] 的完成事实在这里丢弃；需要事实
+    /// 的调用方走 [`Self::step_by_user`]。
     pub async fn step(&self, delta: isize, auto: bool) -> Result<(), vmusic_core::CoreError> {
         self.step_for(
             delta,
@@ -3507,14 +3718,222 @@ impl AppState {
             None,
         )
         .await
+        .map(|_| ())
     }
 
     /// 用户按「上一曲/下一曲」。和 [`Self::step`] 的差别只在失败处置：按下按钮要的
     /// 是「换一首能播的」，所以撞上本身放不了的曲子（VIP、需登录、曲目已失效）会按
     /// 同一方向继续找；上游整体不健康时不试，直接把错误交回去。
-    pub async fn step_by_user(&self, delta: isize) -> Result<(), vmusic_core::CoreError> {
-        self.step_for(delta, PlayTrigger::Step { delta }, None, None)
+    ///
+    /// 返回类型化的完成事实（见 [`ControlOutcome`]）；成功提交后在这里 detach
+    /// 一次后台预取 + LRU——挂在原 owner 的 Applied 上而不是传输层，无操作/
+    /// 被取代就不会白跑后台任务。
+    pub(crate) async fn step_by_user(
+        &self,
+        delta: isize,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        let outcome = self
+            .step_for(delta, PlayTrigger::Step { delta }, None, None)
+            .await?;
+        if outcome.committed() {
+            if let Some(arc) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
+                arc.post_commit_background();
+            }
+        } else {
+            // 无操作/被取代不是错误，但要留痕：前端「点了没反应」的报告，
+            // 靠的就是这里的机器码。
+            crate::diaglog!(
+                "play.control",
+                op = "step",
+                delta = delta,
+                code = outcome.code()
+            );
+        }
+        Ok(outcome)
+    }
+
+    /// 共享播控入口：暂停当前播放。
+    ///
+    /// 「lock → 顶掉在途预取 → actor 命令 → 提交收口」的编排只存在于这几个
+    /// `*_control` 方法里，HTTP 与 RPC 各自只做取参与应答整形。
+    pub(crate) async fn pause_control(&self) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        let commit = self.play_commit.lock().await;
+        self.cancel_prepared_playback().await;
+        self.play_generation.fetch_add(1, Ordering::Relaxed);
+        let outcome = self.pause_audio_locked().await?;
+        drop(commit);
+        Ok(outcome)
+    }
+
+    /// Caller holds play_commit and has already invalidated the play intent
+    /// (generation bump + prepared-playback cancellation).
+    async fn pause_audio_locked(&self) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        self.set_buffering(false, None).await;
+        self.audio
+            .pause()
             .await
+            .map_err(vmusic_core::CoreError::Audio)?;
+        self.transport_committed().await;
+        Ok(ControlOutcome::Applied {
+            generation: self.play_generation.load(Ordering::Relaxed),
+        })
+    }
+
+    /// 页面离场的收尾：宽限期到点后，只有「没有页面开着」且「确实还在出声」两个
+    /// 条件同时成立才暂停。武装点有两处——前端的 `pagehide` 信标（`/v1/player/depart`）
+    /// 与最后一条 `/ws` 断开（[`ViewerGuard::drop`]），后者是关整个浏览器时唯一可能
+    /// 生效的那条，因为信标在那种退出里发不出去。
+    ///
+    /// 宽限期存在的理由是 `pagehide` 与 WS 断开在按 F5 时同样发生：实测本机重载
+    /// → 重连 257–675 ms，立即暂停等于每刷一次停一次。重复武装（两个标签先后关、
+    /// 信标与断开各一次）无害——判定只看当下的观看者数，多个任务只是把同一件事
+    /// 确认多次。停的是 pause 不是 stop：游标与进度留着，重开页面点播放能接回原处
+    /// （`pending_restore_seek` 那条恢复路）。
+    pub(crate) fn schedule_depart_pause(self: &Arc<Self>) {
+        let Some(state) = self.weak_self.get().and_then(std::sync::Weak::upgrade) else {
+            tracing::warn!("离场暂停没有 AppState 弱引用，跳过");
+            return;
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(DEPART_GRACE).await;
+            state.pause_if_alone().await;
+        });
+    }
+
+    /// 首页那颗退出钮：拉退出信号。先留 150 ms 让这次 POST 的应答发完——进程要是
+    /// 抢在应答之前没掉，浏览器只看到一个失败请求，用户分不清按没按成。
+    pub(crate) fn request_exit(&self) {
+        let exiting = self.exiting.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let _ = exiting.send(true);
+        });
+    }
+
+    /// 宽限期到点后的判定：没有页面开着、且确实还在出声，才暂停。返回有没有真的
+    /// 停。判定只依赖当下的观看者数，与那 3 秒无关，所以单独拆出来能被直接测到。
+    ///
+    /// `playing == false` 不代表没有播放意图：在线/远程曲目取流期间音频快照尚未
+    /// 起播，若此处直接放行，加载完成后就会在零观看者下开始播放，而且不会再有
+    /// 新的离场事件来暂停。所以确认独自一人后先顶代际、取消预取，让尚未提交的
+    /// 加载在播放提交锁内复核时作废；「顶代际 → 读快照 → 暂停」整段与其它播放
+    /// 提交共用同一把锁，避免复核与提交擦肩而过。
+    pub(crate) async fn pause_if_alone(&self) -> bool {
+        let _commit = self.play_commit.lock().await;
+        if self.viewers.load(Ordering::Acquire) > 0 {
+            return false;
+        }
+        self.cancel_prepared_playback().await;
+        self.play_generation.fetch_add(1, Ordering::Relaxed);
+        if !self.audio.snapshot().playing {
+            // 没有声音可停，但缓冲覆盖态属于刚被作废的播放意图，一并收口。
+            self.set_buffering(false, None).await;
+            return false;
+        }
+        match self.pause_audio_locked().await {
+            Ok(outcome) => {
+                tracing::info!(?outcome, "最后一个页面已离场，播放暂停");
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "离场暂停失败");
+                false
+            }
+        }
+    }
+
+    /// 共享播控入口：恢复/开始播放。
+    ///
+    /// `strict` 供受限控制面（外部门面/AI）使用：播放器里没有已装载曲目就明确
+    /// 无操作，绝不走「恢复会话游标起播」的分支——那语义只属于官方 UI 的 play。
+    /// `false` 保持官方 UI play 的既有行为：未装载但队列游标还在时按游标起播，
+    /// 提交成功后接续上次进度。
+    pub(crate) async fn resume_control(
+        &self,
+        strict: bool,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        if self.audio.snapshot().track_id.is_none() {
+            if strict {
+                crate::diaglog!(
+                    "play.control",
+                    op = "resume_strict",
+                    code = NoOpCode::NoLoadedTrack.as_str()
+                );
+                return Ok(ControlOutcome::NoOp {
+                    code: NoOpCode::NoLoadedTrack,
+                });
+            }
+            // 会话恢复后的首次 play：audio 里还没装任何曲目，但队列/游标已从快照
+            // 回来——按游标起播，提交成功后把上次进度 seek 回去。此后走正常路径。
+            if let Some(index) = self.current_index().await {
+                let outcome = self.play_index_for(index, None, PlayTrigger::Pick).await?;
+                if !outcome.committed {
+                    return Ok(ControlOutcome::Superseded {
+                        generation: self.play_generation.load(Ordering::Relaxed),
+                    });
+                }
+                self.consume_restore_seek().await;
+                if let Some(arc) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
+                    arc.post_commit_background();
+                }
+                return Ok(ControlOutcome::Applied {
+                    generation: self.play_generation.load(Ordering::Relaxed),
+                });
+            }
+        }
+        let commit = self.play_commit.lock().await;
+        self.cancel_prepared_playback().await;
+        self.play_generation.fetch_add(1, Ordering::Relaxed);
+        self.audio
+            .play()
+            .await
+            .map_err(vmusic_core::CoreError::Audio)?;
+        self.transport_committed().await;
+        drop(commit);
+        Ok(ControlOutcome::Applied {
+            generation: self.play_generation.load(Ordering::Relaxed),
+        })
+    }
+
+    /// 共享播控入口：在当前曲目内定位。
+    pub(crate) async fn seek_control(
+        &self,
+        position_ms: u64,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        let commit = self.play_commit.lock().await;
+        self.cancel_prepared_playback().await;
+        self.play_generation.fetch_add(1, Ordering::Relaxed);
+        self.audio
+            .seek(position_ms)
+            .await
+            .map_err(vmusic_core::CoreError::Audio)?;
+        self.transport_committed().await;
+        drop(commit);
+        Ok(ControlOutcome::Applied {
+            generation: self.play_generation.load(Ordering::Relaxed),
+        })
+    }
+
+    /// 共享播控入口：设置音量。音量不是播放意图——不动播放代际、不碰预取；
+    /// 越界与非有限值一律拒绝（`CoreError::Invalid` 映射回 400/bad_request，
+    /// 与既有 HTTP 契约一致）。
+    pub(crate) async fn set_volume_control(
+        &self,
+        volume: f32,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        if !volume.is_finite() || !(0.0..=1.0).contains(&volume) {
+            return Err(vmusic_core::CoreError::Invalid(
+                "volume must be between 0.0 and 1.0".into(),
+            ));
+        }
+        self.audio
+            .set_volume(volume)
+            .await
+            .map_err(vmusic_core::CoreError::Audio)?;
+        crate::persist::save_volume(&self.db, volume).await;
+        Ok(ControlOutcome::Applied {
+            generation: self.play_generation.load(Ordering::Relaxed),
+        })
     }
 
     async fn step_for(
@@ -3523,7 +3942,7 @@ impl AppState {
         trigger: PlayTrigger,
         ended: Option<(u64, Option<String>)>,
         reservation: Option<usize>,
-    ) -> Result<(), vmusic_core::CoreError> {
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
         let before_refill = self.play_generation.load(Ordering::Relaxed);
         let at_tail = {
             let queue = self.queue.lock().await;
@@ -3535,22 +3954,30 @@ impl AppState {
         }
         let commit = self.play_commit.lock().await;
         if self.play_generation.load(Ordering::Relaxed) != before_refill {
-            return Ok(());
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
         }
         if reservation
             .is_some_and(|expected| self.play_generation.load(Ordering::Relaxed) != expected)
         {
-            return Ok(());
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
         }
         let snapshot = self.audio.snapshot();
         if let Some((generation, track_id)) = ended {
             if snapshot.generation != generation || snapshot.track_id != track_id {
-                return Ok(());
+                return Ok(ControlOutcome::Superseded {
+                    generation: self.play_generation.load(Ordering::Relaxed),
+                });
             }
             let queue = self.queue.lock().await;
             let current = *self.cursor.lock().await;
             if current.and_then(|index| queue.get(index)) != track_id.as_ref() {
-                return Ok(());
+                return Ok(ControlOutcome::Superseded {
+                    generation: self.play_generation.load(Ordering::Relaxed),
+                });
             }
         }
         let fm = {
@@ -3572,12 +3999,16 @@ impl AppState {
         let mode = self.audio.snapshot().mode;
         let len = self.queue.lock().await.len();
         if len == 0 {
-            return Ok(());
+            return Ok(ControlOutcome::NoOp {
+                code: NoOpCode::EmptyQueue,
+            });
         }
         let current = self.current_index().await.unwrap_or(0);
 
         if fm && delta > 0 && current + 1 >= len {
-            return Ok(());
+            return Ok(ControlOutcome::NoOp {
+                code: NoOpCode::RadioTail,
+            });
         }
         let next = if fm {
             (current as isize + delta).max(0) as usize
@@ -3602,9 +4033,15 @@ impl AppState {
         };
 
         drop(commit);
-        self.play_index_for(next, Some(generation), trigger)
-            .await
-            .map(|_| ())
+        match self.play_index_for(next, Some(generation), trigger).await {
+            Ok(outcome) if outcome.committed => Ok(ControlOutcome::Applied { generation }),
+            // 准备期间被更新意图顶掉（跨源接力救回、点播替换、用户切走）：
+            // 不是失败，但本次命令没有生效。
+            Ok(_) => Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            }),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -3810,16 +4247,36 @@ pub fn spawn_session_saver(state: Arc<AppState>) {
 /// Bridges audio-actor events onto the WebSocket bus and drives auto-advance.
 pub fn spawn_event_pump(state: Arc<AppState>) {
     let mut rx = state.audio.subscribe();
+    let Some(mut control_rx) = state.audio.take_control_events() else {
+        tracing::error!("audio control event receiver is already owned");
+        return;
+    };
     tokio::spawn(async move {
+        let mut audio_open = true;
+        let mut last_transition_generation = 0;
+        let mut last_ended_generation = None;
         loop {
-            let event = match rx.recv().await {
-                Ok(event) => event,
-                // 这是状态帧/频谱/自动接力的唯一转发任务。状态+频谱约 80 条/秒，
-                // 而广播容量只有 64：在线曲自动接力要在 Ended 分支里现取流数秒，
-                // 一旦消费停顿必然 Lagged。丢几帧增量无所谓，退泵才是致命的——
-                // 退了之后整条 WS 链路静默全灭，所以 Lagged 只 continue。
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            let event = tokio::select! {
+                control = control_rx.recv() => match control {
+                    Some(event) => event,
+                    None => break,
+                },
+                event = rx.recv(), if audio_open => match event {
+                    Ok(event) => event,
+                    // Snapshot/spectrum are lossy; transition and natural-end
+                    // control edges have their own unbounded single-consumer queue.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Rebase at the live tail before reading the shared snapshot;
+                        // otherwise an older queued event could overwrite this state.
+                        let (receiver, snapshot) = state.audio.subscribe_with_snapshot();
+                        rx = receiver;
+                        AudioEvent::Snapshot(snapshot)
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        audio_open = false;
+                        continue;
+                    }
+                },
             };
             match event {
                 AudioEvent::Transitioned {
@@ -3827,6 +4284,10 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     generation,
                     track_id,
                 } => {
+                    if generation <= last_transition_generation {
+                        continue;
+                    }
+                    last_transition_generation = generation;
                     // Commit the queue before reading the next event: an extremely
                     // short successor can emit Ended in this very actor tick.
                     if let Some(next) = state
@@ -3867,6 +4328,10 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     generation,
                     track_id,
                 } => {
+                    if last_ended_generation.is_some_and(|handled| generation <= handled) {
+                        continue;
+                    }
+                    last_ended_generation = Some(generation);
                     state.publish(WsEvent::Ended);
                     // 自然播完是听歌打卡的收口点之一（换曲帧在 Snapshot 里收）。
                     state.harvest_listen().await;
@@ -3886,7 +4351,7 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                             .step_for(1, PlayTrigger::AutoNext, Some((generation, track_id)), None)
                             .await
                         {
-                            Ok(()) => advance.post_commit_background(),
+                            Ok(_) => advance.post_commit_background(),
                             Err(e) => {
                                 tracing::warn!("auto-advance failed: {e}");
                                 crate::diaglog!("advance.fail", reason = e.to_string());
@@ -4018,18 +4483,210 @@ pub(crate) mod tests {
             committed_quality: Default::default(),
             stage_beats: Mutex::new(BoundedMap::new(STAGE_BEATS_CAP)),
             beat_slots: Arc::new(tokio::sync::Semaphore::new(BEAT_ANALYZE_BUDGET)),
+            pitch_cache: Mutex::new(BoundedMap::new(8)),
+            lyric_candidates: Default::default(),
             beat_volatile: Mutex::new(BoundedMap::new(BEAT_VOLATILE_CAP)),
             beat_labels: Mutex::new(BoundedMap::new(BEAT_LABEL_CAP)),
             beat_deferrals: std::sync::atomic::AtomicUsize::new(0),
             weak_self: Default::default(),
+            exiting: tokio::sync::watch::channel(false).0,
             pending_restore_seek: Default::default(),
             overlay_lyric: Default::default(),
             listen: Default::default(),
             scrobble: Default::default(),
             relay_tried: Default::default(),
             tickets: crate::ticket::TicketStore::new(),
+            viewers: AtomicUsize::new(0),
+            short_writes: Default::default(),
+            server_instance_id: uuid::Uuid::new_v4().to_string(),
+            search_gate: Default::default(),
+            ai_runtime: Default::default(),
+            ai_emotion: crate::ai::emotion::EmotionService::configured(
+                &crate::config::Config::default().ai,
+            ),
+            ai_runner_held: Default::default(),
+            ai_external_ready: Default::default(),
         };
         (state, handle)
+    }
+
+    /// 「关掉页面就停播」只在最后一个页面走掉时成立。一个守卫对应一条 `/ws`，
+    /// 所以第二个标签还开着（守卫还活着）时不许把声音停下；宽限期到点的判定
+    /// 也不看时间，只看当下的观看者数与是否还在出声。
+    #[tokio::test]
+    async fn depart_pause_only_fires_for_the_last_viewer() {
+        let (state, handle) = playback_state().await;
+        state.set_queue(vec!["first".into()], Some(0)).await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        state.audio.play().await.unwrap();
+        let state = Arc::new(state);
+        assert_eq!(state.viewers.load(Ordering::Acquire), 0);
+
+        let first = ViewerGuard::enter(state.clone());
+        let second = ViewerGuard::enter(state.clone());
+        assert_eq!(state.viewers.load(Ordering::Acquire), 2);
+        assert!(!state.pause_if_alone().await, "两个页面开着时不许停播");
+        assert!(state.audio.snapshot().playing);
+
+        // 关掉一个标签：另一个还在听。
+        drop(first);
+        assert_eq!(state.viewers.load(Ordering::Acquire), 1);
+        assert!(!state.pause_if_alone().await, "关掉一个标签不该停另一个");
+        assert!(state.audio.snapshot().playing);
+
+        // 最后一个走完：这次真的停。
+        drop(second);
+        assert_eq!(state.viewers.load(Ordering::Acquire), 0);
+        assert!(state.pause_if_alone().await, "最后一个页面离场应暂停");
+        assert!(!state.audio.snapshot().playing);
+
+        // 两个标签先后关会武装两次，第二次没在出声，不许再按一次暂停。
+        assert!(!state.pause_if_alone().await, "已经静音时不重复动作");
+
+        drop(state);
+        handle.join().unwrap();
+    }
+
+    /// 退出钮这条链在 lib 里能看到的最远一步：信号被粘住拉起来，且不是立刻——
+    /// 150 ms 的回执窗要先留给这次 POST 的应答。
+    #[tokio::test]
+    async fn request_exit_latches_the_signal_after_the_reply_window() {
+        let (state, handle) = playback_state().await;
+        let mut exiting = state.exiting.subscribe();
+        assert!(!*exiting.borrow(), "起始必须是未退出");
+        state.request_exit();
+        assert!(!*exiting.borrow_and_update(), "回执窗内不许已经拉起退出");
+        exiting.changed().await.unwrap();
+        assert!(
+            *exiting.borrow_and_update(),
+            "信号必须能被 serve 那边的订阅读到"
+        );
+        drop(state);
+        handle.join().unwrap();
+    }
+
+    /// 最后一条 `/ws` 断开即武装宽限检查，不依赖前端信标——关掉整个浏览器时
+    /// 信标发不出去（实测），这条是唯一能生效的。宽限与音频 actor 都按真时间走，
+    /// 所以这条要实等三秒出头。
+    #[tokio::test]
+    async fn last_socket_drop_pauses_after_the_grace() {
+        let (state, handle) = playback_state().await;
+        state.set_queue(vec!["first".into()], Some(0)).await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        state.audio.play().await.unwrap();
+        let state = Arc::new(state);
+        // 独立形态由 bootstrap 注入弱引用；这里自己补上，detach 任务要凭它拿回 Arc。
+        let _ = state.weak_self.set(Arc::downgrade(&state));
+
+        drop(ViewerGuard::enter(state.clone()));
+        assert!(state.audio.snapshot().playing, "宽限期内不许抢跑");
+
+        let deadline =
+            std::time::Instant::now() + DEPART_GRACE + std::time::Duration::from_millis(2500);
+        while state.audio.snapshot().playing && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            !state.audio.snapshot().playing,
+            "最后一条连接断开后，宽限期末应暂停"
+        );
+
+        drop(state);
+        handle.join().unwrap();
+    }
+
+    /// 最后一个页面在慢速加载期间离场：宽限期到点时还没有声音，但取流仍在途。
+    /// 暂停判定必须让这次播放意图作废，否则加载完成后会在零观看者下起播，
+    /// 而且不会再有新的离场事件来暂停。
+    #[tokio::test]
+    async fn depart_during_a_slow_load_cannot_start_playback_later() {
+        let dir = std::env::temp_dir().join(format!("vmusic-depart-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let _ = accepted_tx.send(());
+            let _ = release_rx.await;
+            // 最小 HEAD 应答：null 后端不读正文，有 Content-Length 就能建流。
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
+                .await;
+            let _ = stream.flush().await;
+            // 连接留到客户端收完头，免得过早 RST 把 HEAD 判成失败。
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        });
+
+        let track_id = "remote-slow-depart".to_string();
+        vmusic_store::upsert_track(
+            &db,
+            &vmusic_core::Track {
+                id: track_id.clone(),
+                path: format!("http://{addr}/slow.mp3"),
+                source: vmusic_core::TrackSource::Remote,
+                title: "slow".into(),
+                artist: None,
+                album: None,
+                duration_ms: None,
+                bitrate: None,
+                sample_rate: None,
+                channels: None,
+                has_cover: false,
+                file_mtime: None,
+                file_size: None,
+                added_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let (state, handle) = playback_state_with_db(db).await;
+        let state = Arc::new(state);
+        let (gen, ..) = state.set_queue(vec![track_id], Some(0)).await;
+
+        let play = tokio::spawn({
+            let state = state.clone();
+            async move { state.play_index_for(0, Some(gen), PlayTrigger::Pick).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), accepted_rx)
+            .await
+            .expect("播放没有进入远程取流")
+            .expect("accept 信标丢失");
+        assert!(!state.audio.snapshot().playing, "取流期间不应已有声音");
+
+        // 宽限期到点：仍在取流，playing 还是 false。
+        assert!(!state.pause_if_alone().await, "没有声音时没有可暂停的对象");
+        release_tx.send(()).unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), play)
+            .await
+            .expect("释放加载后播放请求没有收尾")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !outcome.committed,
+            "离场后完成的加载必须作废，不能在没有观看者时起播"
+        );
+        assert!(!state.audio.snapshot().playing);
+        server.abort();
+        let _ = server.await;
+        state.audio.shutdown();
+        handle.join().unwrap();
+        state.db.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -4311,22 +4968,29 @@ pub(crate) mod tests {
         let probe = async {
             // 等到 play_local 真的进入网络建连（服务端已接受连接）再开始计时：
             // 否则可能在它还忙着读 DB 时就量了，测不到锁的行为。
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), accepted_rx).await;
+            let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), accepted_rx)
+                .await
+                .is_ok_and(|result| result.is_ok());
             let t0 = std::time::Instant::now();
             state.set_queue(vec!["other".into()], Some(0)).await;
-            t0.elapsed()
+            (accepted, t0.elapsed())
         };
-        let (_, elapsed) = tokio::join!(play, probe);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            tokio::join!(play, probe)
+        })
+        .await;
+        holder.abort();
+        let _ = holder.await;
+        state.audio.shutdown();
+        handle.join().unwrap();
+        state.db.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let (_, (accepted, elapsed)) = result.expect("慢源检查超过总期限");
+        assert!(accepted, "未观察到真实慢源连接，不能证明换队锁边界");
         assert!(
             elapsed < std::time::Duration::from_millis(500),
             "慢源建连期间换队被阻塞了 {elapsed:?}——锁纪律回退了"
         );
-
-        holder.abort();
-        state.db.close().await;
-        state.audio.shutdown();
-        handle.join().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -4453,6 +5117,7 @@ pub(crate) mod tests {
             source: "qq".into(),
             keyword: String::new(),
             total: 1,
+            total_is_exact: false,
             tracks: vec![candidate],
             warning: None,
         };
@@ -4509,10 +5174,12 @@ pub(crate) mod tests {
         state
             .remember_online_meta(old.into(), online_snap(Some(2.0), None))
             .await;
+        let mut events = state.events.subscribe();
         let origin = state
             .commit_relay_target(gen, 0, old, &relay_track("song", "artist", 1000))
             .await
             .unwrap();
+        assert!(matches!(events.try_recv(), Ok(WsEvent::QueueChanged)));
         assert_eq!(origin.source, "netease");
         assert_eq!(origin.id, "n1");
         assert_eq!(*state.queue.lock().await, vec!["online:qq:t1", old]);
@@ -4635,6 +5302,7 @@ pub(crate) mod tests {
                 source: source.into(),
                 keyword: "稻香".into(),
                 total: tracks.len(),
+                total_is_exact: false,
                 tracks,
                 warning: None,
             }
@@ -5412,27 +6080,114 @@ pub(crate) mod tests {
         handle.join().unwrap();
     }
 
-    /// 掉队补发的帧必须读实时标志，而不是某个边沿值：补发的意义就是「客户端
-    /// 错过了切换，把现在的真值告诉它」。
+    /// 整盘换队提交后发布失效提示，供各播放界面重读权威队列。
     #[tokio::test]
-    async fn buffering_event_resyncs_from_the_live_flag() {
+    async fn set_queue_publishes_invalidation_after_replacing_the_queue() {
+        let (state, handle) = playback_state().await;
+        let mut events = state.events.subscribe();
+
+        state
+            .set_queue(vec!["first".into(), "second".into()], Some(1))
+            .await;
+
+        assert!(matches!(events.try_recv(), Ok(WsEvent::QueueChanged)));
+        assert_eq!(
+            *state.queue.lock().await,
+            vec!["first".to_string(), "second".to_string()]
+        );
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    /// 掉队恢复批次重建 buffering 与扫描真值，并失效化任务、曲库和队列快照。
+    #[tokio::test]
+    async fn resync_events_include_live_buffering_scan_and_ai_tasks_hint() {
         let (state, handle) = playback_state().await;
         state.set_buffering(true, Some(40)).await;
+        {
+            let mut scan = state.scan.lock().await;
+            scan.phase = "walking".into();
+            scan.done = 2;
+            scan.total = 9;
+        }
+        let events = state.resync_events().await;
         assert!(matches!(
-            state.buffering_event().await,
+            &events[0],
             WsEvent::Buffering {
                 active: true,
                 pct: Some(40)
             }
         ));
+        assert!(matches!(&events[1], WsEvent::AiTasksResync));
+        assert!(matches!(&events[2], WsEvent::LibraryChanged));
+        assert!(
+            matches!(&events[3], WsEvent::Scan { phase, done: 2, total: 9 } if phase == "walking")
+        );
+        assert!(matches!(&events[4], WsEvent::QueueChanged));
         state.set_buffering(false, None).await;
+        let events = state.resync_events().await;
         assert!(matches!(
-            state.buffering_event().await,
+            &events[0],
             WsEvent::Buffering {
                 active: false,
                 pct: None
             }
         ));
+        assert!(matches!(&events[1], WsEvent::AiTasksResync));
+        assert!(matches!(&events[2], WsEvent::LibraryChanged));
+        assert!(
+            matches!(&events[3], WsEvent::Scan { phase, done: 2, total: 9 } if phase == "walking")
+        );
+        assert!(matches!(&events[4], WsEvent::QueueChanged));
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn lagged_event_batch_discards_stale_edges_and_keeps_receiving() {
+        let (state, handle) = playback_state().await;
+        {
+            let mut scan = state.scan.lock().await;
+            scan.phase = "failed".into();
+            scan.done = 5;
+            scan.total = 5;
+        }
+        let (events, mut receiver) = broadcast::channel(1);
+        events
+            .send(WsEvent::Buffering {
+                active: true,
+                pct: Some(40),
+            })
+            .unwrap();
+        events.send(WsEvent::Ended).unwrap();
+
+        let batch = state.next_event_batch(&mut receiver).await.unwrap();
+        assert!(matches!(
+            batch[0].as_ref(),
+            Some(WsEvent::Buffering {
+                active: false,
+                pct: None
+            })
+        ));
+        assert!(matches!(batch[1].as_ref(), Some(WsEvent::AiTasksResync)));
+        assert!(matches!(batch[2].as_ref(), Some(WsEvent::LibraryChanged)));
+        assert!(
+            matches!(batch[3].as_ref(), Some(WsEvent::Scan { phase, done: 5, total: 5 }) if phase == "failed")
+        );
+        assert!(matches!(batch[4].as_ref(), Some(WsEvent::QueueChanged)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        events.send(WsEvent::Ended).unwrap();
+        let batch = state.next_event_batch(&mut receiver).await.unwrap();
+        assert!(matches!(batch[0].as_ref(), Some(WsEvent::Ended)));
+        assert!(batch[1].is_none());
+        assert!(batch[2].is_none());
+        assert!(batch[3].is_none());
+        assert!(batch[4].is_none());
+
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -5499,6 +6254,39 @@ pub(crate) mod tests {
         assert_eq!(result.unwrap_err().code, "upstream_rejected");
         assert_eq!(attempts, 1);
         assert!(state.quality_caps.lock().await.get(vid).is_none());
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_media_keeps_exact_cached_path_and_rejects_stale_playback() {
+        use crate::online::quality::Quality;
+        let (state, handle) = playback_state().await;
+        let vid = "online:ccmixter:project";
+        let path = Path::new("exact-standard.wav");
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        state
+            .try_commit_cached(gen, 0, vid, path, Some(Quality::Standard))
+            .await
+            .unwrap();
+        state
+            .quality
+            .lock()
+            .await
+            .insert("ccmixter".into(), Quality::Hires);
+        assert_eq!(state.project_online_media(vid).await.as_deref(), Some(path));
+        assert!(state
+            .project_online_media("online:ccmixter:other")
+            .await
+            .is_none());
+        state.audio.seek(100).await.unwrap();
+        state.transport_committed().await;
+        assert_eq!(state.project_online_media(vid).await.as_deref(), Some(path));
+        state.set_queue(vec![vid.into()], Some(0)).await;
+        assert!(
+            state.project_online_media(vid).await.is_none(),
+            "new same-track intent cannot inherit the old bytes"
+        );
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -5790,5 +6578,188 @@ pub(crate) mod tests {
         }
         assert!(gate.try_claim(now), "记录全部过期后额度释放");
         gate.release();
+    }
+
+    // ---- 共享播控入口的完成事实（R2-C）----
+    // 这些用例守住的是「200/Ok 不等于已播放」的底线：无操作、被取代、严格拒绝
+    // 必须作为独立事实浮出来，而不是静默 Ok。
+
+    #[tokio::test]
+    async fn step_by_user_on_empty_queue_is_a_noop() {
+        let (state, handle) = playback_state().await;
+        let outcome = state.step_by_user(1).await.unwrap();
+        assert_eq!(
+            outcome,
+            ControlOutcome::NoOp {
+                code: NoOpCode::EmptyQueue
+            }
+        );
+        assert_eq!(outcome.code(), "empty_queue");
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn user_step_reports_applied_and_moves_the_cursor() {
+        // 本地播放路径要查 tracks 表：用带 schema 的文件库（见 playback_state_with_db）。
+        let dir = std::env::temp_dir().join(format!("vmusic-step-user-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let (state, handle) = playback_state_with_db(db).await;
+        state
+            .set_queue(vec!["first".into(), "second".into()], Some(0))
+            .await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        vmusic_store::upsert_track(
+            &state.db,
+            &vmusic_core::Track {
+                id: "second".into(),
+                path: "second.wav".into(),
+                source: vmusic_core::TrackSource::Local,
+                title: "second".into(),
+                artist: None,
+                album: None,
+                duration_ms: None,
+                bitrate: None,
+                sample_rate: None,
+                channels: None,
+                has_cover: false,
+                file_mtime: None,
+                file_size: None,
+                added_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let before = state.play_generation.load(Ordering::Relaxed);
+        let outcome = state.step_by_user(1).await.unwrap();
+        let ControlOutcome::Applied { generation } = outcome else {
+            panic!(
+                "可播队列上的用户切歌必须 Applied，实际: {:?}",
+                outcome.code()
+            );
+        };
+        assert_eq!(state.current_index().await, Some(1));
+        // 换曲的 Applied 携带受理时的预留代际：提交本身在 play_index_for 锁内
+        // 再推进一拍，之后的 prepare-next 属于更后面的事，都不回填进这条事实。
+        assert_eq!(generation, before);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn step_for_reports_superseded_when_ended_generation_moved() {
+        // ended 快照与当前播放不一致 = 准备期间被更新意图顶掉：必须如实上报
+        // Superseded，而不是静默 Ok 让调用方以为换曲成功。
+        let (state, handle) = playback_state().await;
+        state
+            .set_queue(vec!["first".into(), "second".into()], Some(0))
+            .await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let stale = (state.audio.snapshot().generation, Some("first".into()));
+        state
+            .audio
+            .load("second.wav", Some("second".into()))
+            .await
+            .unwrap();
+        state.play_generation.fetch_add(1, Ordering::Relaxed);
+        let outcome = state
+            .step_for(1, PlayTrigger::Step { delta: 1 }, Some(stale), None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.code(), "superseded");
+        assert!(matches!(outcome, ControlOutcome::Superseded { .. }));
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn strict_resume_without_loaded_track_refuses_and_touches_nothing() {
+        let (state, handle) = playback_state().await;
+        // 队列和游标都在：严格模式仍然拒绝——恢复会话语义只属于官方 UI 的 play。
+        state
+            .set_queue(vec!["first".into(), "second".into()], Some(0))
+            .await;
+        let generation = state.play_generation.load(Ordering::Relaxed);
+        let outcome = state.resume_control(true).await.unwrap();
+        assert_eq!(
+            outcome,
+            ControlOutcome::NoOp {
+                code: NoOpCode::NoLoadedTrack
+            }
+        );
+        assert_eq!(outcome.code(), "no_loaded_track");
+        // 拒绝不触碰播放器：不 bump 代际、不装载任何曲目。
+        assert_eq!(state.play_generation.load(Ordering::Relaxed), generation);
+        assert!(state.audio.snapshot().track_id.is_none());
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_control_applies_when_track_is_loaded() {
+        let (state, handle) = playback_state().await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let before = state.play_generation.load(Ordering::Relaxed);
+        let outcome = state.resume_control(true).await.unwrap();
+        let ControlOutcome::Applied { generation } = outcome else {
+            panic!("已装载曲目上的 resume 必须 Applied");
+        };
+        assert_eq!(generation, before + 1);
+        assert!(state.audio.snapshot().playing);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn pause_and_seek_report_applied_with_advancing_generation() {
+        let (state, handle) = playback_state().await;
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let before = state.play_generation.load(Ordering::Relaxed);
+        let ControlOutcome::Applied { generation } = state.pause_control().await.unwrap() else {
+            panic!("pause 必须 Applied");
+        };
+        assert_eq!(generation, before + 1);
+        let ControlOutcome::Applied { generation } = state.seek_control(1500).await.unwrap() else {
+            panic!("seek 必须 Applied");
+        };
+        assert_eq!(generation, before + 2);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn volume_control_validates_range_and_reports_applied() {
+        let (state, handle) = playback_state().await;
+        // 越界与非有限值都是 bad_request（CoreError::Invalid 的机器码）。
+        for bad in [1.5f32, -0.1, f32::NAN, f32::INFINITY] {
+            let err = state.set_volume_control(bad).await.unwrap_err();
+            assert_eq!(err.code(), "bad_request", "音量 {bad} 应被拒绝");
+        }
+        let before = state.play_generation.load(Ordering::Relaxed);
+        let ControlOutcome::Applied { generation } = state.set_volume_control(0.4).await.unwrap()
+        else {
+            panic!("合法音量必须 Applied");
+        };
+        // 音量不是播放意图：不 bump 播放代际。
+        assert_eq!(generation, before);
+        assert_eq!(state.audio.snapshot().volume, 0.4);
+        state.audio.shutdown();
+        handle.join().unwrap();
     }
 }

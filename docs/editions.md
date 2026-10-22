@@ -76,3 +76,8 @@ HERTZ_EDITION=full node scripts/check-plugin-sidecar.js
 
 `check-editions.js` 检查两版 UI 语法、引用、登录素材排除、插件 ID 和版本同步。
 可通过 `HERTZ_STANDARD_BIN` 指定 Standard 二进制，额外检查特定平台协议签名和端点不在包内。
+
+最低 Rust 版本为 workspace 声明的 1.88。CI 的 `msrv` job 使用固定 1.88.0，对 Windows、Linux、macOS
+分别检查 Standard / Full 工作区的全部 target；stable job 继续跑 lint 与运行回归。依赖 metadata 的
+rust-version 上界不是源码编译通过的证据，`cargo check` 也不代表真实声音或宿主通过。
+本机复核命令与当前能力/平台证据见[发布验收矩阵](./release-validation.md)。

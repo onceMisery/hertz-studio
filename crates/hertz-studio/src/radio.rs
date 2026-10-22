@@ -134,13 +134,7 @@ impl AppState {
             radio.last_attempt = Some(std::time::Instant::now());
             (radio.session, radio.initial_generation)
         };
-        let result = online::personal_fm(
-            &online::Ctx {
-                db: self.db.clone(),
-            },
-            "netease",
-        )
-        .await;
+        let result = online::personal_fm(&online::Ctx::new(self.db.clone()), "netease").await;
         self.radio_accept(session, initial, result).await
     }
 
@@ -208,6 +202,12 @@ impl AppState {
         // History is compacted by step_for while reserving a new playback generation.
         radio.initial_generation = None;
         radio.error = None;
+        drop(meta);
+        drop(cursor);
+        drop(queue);
+        drop(radio);
+        drop(_commit);
+        self.publish(crate::state::WsEvent::QueueChanged);
         Ok(())
     }
 }
@@ -240,10 +240,15 @@ mod tests {
             r.session = 10;
             r.initial_generation = Some(gen);
         }
+        let mut events = state.events.subscribe();
         state
             .radio_accept(10, Some(gen), Ok(vec![track("1"), track("1"), track("2")]))
             .await
             .unwrap();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(crate::state::WsEvent::QueueChanged)
+        ));
         assert_eq!(
             *state.queue.lock().await,
             vec!["online:netease:1", "online:netease:2"]
@@ -252,6 +257,10 @@ mod tests {
             .radio_accept(10, None, Ok(vec![track("2"), track("3")]))
             .await
             .unwrap();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(crate::state::WsEvent::QueueChanged)
+        ));
         assert_eq!(state.queue.lock().await.len(), 3);
         assert!(state
             .radio_accept(10, None, Ok(vec![track("3")]))

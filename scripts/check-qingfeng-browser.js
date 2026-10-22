@@ -691,7 +691,7 @@ ok(drill.hasBack, '歌单点开后进了第二层（左上角出现返回键）'
   await page.screenshot({ path: path.join(OUT, '06-restored-classic.png') });
 
   section('与其他皮肤并存');
-  for (const id of ['sheen', 'workbench', 'liunian', 'ios', 'qingfeng']) {
+  for (const id of ['liunian', 'qingfeng', 'heijiao']) {
     await page.evaluate((s) => window.Skins.apply(s), id);
     await page.waitForTimeout(350);
     const st = await page.evaluate(() => {

@@ -275,8 +275,18 @@
       });
       el._cancelDrag = function () { if (down) finish({ pointerId: down.id }, true); };
 
-      el.addEventListener('mouseenter', function () { hoverId = id; });
-      el.addEventListener('mouseleave', function () { if (hoverId === id) hoverId = null; });
+      el.addEventListener('mouseenter', function () { setHover(id); });
+      el.addEventListener('mouseleave', function () { if (hoverId === id) setHover(null); });
+      if (options.onHover) {
+        el.addEventListener('focus', function () { setHover(id); });
+        el.addEventListener('blur', function () { if (hoverId === id) setHover(null); });
+      }
+    }
+
+    function setHover(id) {
+      if (hoverId === id) return;
+      hoverId = id;
+      if (options.onHover) options.onHover(id);
     }
 
     function onCardTap(id) {
@@ -393,7 +403,7 @@
           el.style.pointerEvents = 'none';
           dying.push(el);
         }
-        if (hoverId === id) hoverId = null;
+        if (hoverId === id) setHover(null);
         nodes.delete(id);
       });
       while (dying.length > capacity) {
@@ -445,7 +455,7 @@
       clearDying();
       nodes.forEach(function (el) { if (el.parentNode) el.parentNode.removeChild(el); });
       nodes.clear();
-      hoverId = null;
+      setHover(null);
       windowStart = windowEnd = -1;
       windowDirty = true;
     }
@@ -694,7 +704,7 @@
 
     function setBlocked(on) {
       blocked = !!on;
-      if (blocked) { cancelDrags(); clearDying(); }
+      if (blocked) { cancelDrags(); clearDying(); setHover(null); }
       root.classList.toggle('s3d-shelf-blocked', blocked);
       plane.inert = blocked || !active || mode === 'off';
       if (!blocked && active && Stage && Stage.kick) Stage.kick();
@@ -710,7 +720,7 @@
     }
 
     function onVisibilityChange() {
-      if (document.hidden) { cancelDrags(); clearDying(); }
+      if (document.hidden) { cancelDrags(); clearDying(); setHover(null); }
       else if (active && Stage && Stage.kick) Stage.kick();
     }
 

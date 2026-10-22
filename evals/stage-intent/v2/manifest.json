@@ -1,0 +1,35 @@
+{
+  "corpusVersion": "stage-intent-v2",
+  "frozenAt": "2026-10-20",
+  "provenance": "Public synthetic descriptions authored for this repository; byte-identical to v1; no user lyrics or media",
+  "labelStatus": "authored; human independent label review still required",
+  "holdoutStatus": "reserved, disjoint synthetic prompts; not independently collected or evaluated",
+  "mechanicalAudit": {
+    "status": "passed",
+    "contractHash": "9eeda3eea3c20f2526c6180269944ae437c9289cc321206e0a1db4ea6754ff6e",
+    "candidateLabelsMaterialized": 89,
+    "candidateLabelsChecked": 89,
+    "refusalLabelsStructurallyConflicted": 0,
+    "semanticReviewComplete": false
+  },
+  "corpusSha256": "25c1653899043b36b644172712a53fca5d7552cc8ae447e74c426a48f91bf3ed",
+  "schemaHash": "9eeda3eea3c20f2526c6180269944ae437c9289cc321206e0a1db4ea6754ff6e",
+  "total": 160,
+  "splits": {
+    "development": 120,
+    "holdout": 40
+  },
+  "categories": {
+    "common": 25,
+    "open_vocabulary": 14,
+    "negation": 25,
+    "conflict": 13,
+    "boundary": 13,
+    "cross_scene": 13,
+    "unknown": 13,
+    "injection": 14,
+    "long": 13,
+    "temporal": 9,
+    "relative": 8
+  }
+}

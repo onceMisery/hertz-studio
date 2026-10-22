@@ -84,13 +84,9 @@ function check(value, message) { assert.ok(value, message); checks++; console.lo
       await page.setViewportSize({ width: 1440, height: 900 });
       check(await width() <= 76, skin + ' manual collapse survives resize');
     }
-    // OS风已下架（隐藏），手机端那套横向导航不再是用户能落到的状态，这里只留
-    // 「每套皮肤各记各的收起偏好」这条仍然成立的判据。
     await apply('classic');
     check(await width() <= 76, 'classic remembers its own collapsed preference');
-    await apply('ios');
-    check(await width() > 140, 'OS remembers its own expanded preference');
-    await apply('sheen');
+    await apply('qingfeng');
     check(!await toggle.isVisible(), 'other skins do not show the sidebar toggle');
     await apply('classic');
     check(await toggle.isVisible() && await width() <= 76, 'switching back restores sidebar state');

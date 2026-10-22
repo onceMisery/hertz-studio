@@ -66,6 +66,18 @@
     return ln ? String(ln.text == null ? '' : ln.text) : '';
   }
 
+  function emotionState(lyric) {
+    var E = typeof window !== 'undefined' ? window.LyricEmotion : null;
+    if (!E || !E.resolveForLine || !lyric || lyric.index == null || lyric.index < 0) return null;
+    var state = E.resolveForLine(lyric.index, { host: 'lyric3d' });
+    return state && state.id !== 'neutral' ? state : null;
+  }
+
+  function withAlpha(hex, alpha) {
+    var n = parseInt(String(hex || '#ffffff').slice(1), 16);
+    return 'rgba(' + ((n >> 16) & 255) + ', ' + ((n >> 8) & 255) + ', ' + (n & 255) + ', ' + alpha + ')';
+  }
+
   // 从大字号往下试，直到一行放得下。长句靠缩字号而不是换行 —— 三维空间里
   // 两行文字的面片高度会破坏等距排布。
   function fitFont(weight, startSize, text) {
@@ -78,7 +90,7 @@
     return size;
   }
 
-  function drawCell(cell, text, active) {
+  function drawCell(cell, text, active, emotion) {
     var cy = cell * CELL_H + CELL_H / 2;
     if (!text) return;
     if (active) {
@@ -88,17 +100,30 @@
       // 粗体 + 大字号在密集中文长句上会把字怀（笔画间隙）全部堵死，
       // 远看就是一整条实心棒。600 重 + 72px 既保住"当前行"的分量，
       // 又留得出字形内部的呼吸。
-      var s1 = fitFont(600, Math.round(CELL_H * 0.375), text);
-      ctx.font = '600 ' + s1 + 'px ' + FONT_STACK;
+      var E = typeof window !== 'undefined' ? window.LyricEmotion : null;
+      var paletteOn = !E || !E.paletteEnabled || E.paletteEnabled();
+      var weight = emotion && emotion.type && emotion.type.weight || 600;
+      var fill = emotion && paletteOn ? emotion.palette.accent : '#ffffff';
+      var glow = emotion && paletteOn ? withAlpha(emotion.palette.accent, 0.4) : 'rgba(255,255,255,0.4)';
+      var s1 = fitFont(weight, Math.round(CELL_H * 0.375), text);
+      ctx.font = weight + ' ' + s1 + 'px ' + FONT_STACK;
+      ctx.letterSpacing = emotion && emotion.type && emotion.type.tracking || '0px';
+      if (emotion && window.LyricEmotionField) {
+        var shift = window.LyricEmotionField.evaluate(
+          emotion.profile, 0.5, emotion.intensity, s1, 0, 0
+        ).b;
+        cy += shift;
+      }
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.shadowColor = 'rgba(255,255,255,0.4)';
+      ctx.shadowColor = glow;
       ctx.shadowBlur = CELL_H * 0.018;
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle = fill;
       ctx.fillText(text, ATLAS_W / 2, cy, MAX_TEXT_W);
       // 无 shadow 再描一遍实心字：shadow 在字芯下会让字形发虚。
       ctx.shadowBlur = 0;
       ctx.fillText(text, ATLAS_W / 2, cy, MAX_TEXT_W);
+      ctx.letterSpacing = '0px';
     } else {
       // 周边句：暗蓝灰、轻晕。亮度刻意压低，着色器再按距离乘衰减，
       // 保证视觉焦点永远在当前行。
@@ -122,12 +147,18 @@
       index = -1;
     }
 
-    var parts = new Array(CELLS + 1);
+    var parts = new Array(CELLS + 2);
     parts[0] = String(index);
     for (var c = 0; c < CELLS; c += 1) {
       parts[c + 1] = index < 0 ? '' : textOf(lyric, index + c - MID);
     }
-    return { sig: parts.join('\u001f'), index: index };
+    var emotion = emotionState(lyric);
+    parts[CELLS + 1] = emotion ? [
+      emotion.id, emotion.intensity.toFixed(3), emotion.revision,
+      emotion.type && emotion.type.weight, emotion.type && emotion.type.tracking,
+      emotion.palette.ink, emotion.palette.accent
+    ].join(':') : '';
+    return { sig: parts.join('\u001f'), index: index, emotion: emotion };
   }
 
   // lyric = { lines: [{start_ms, text}], index } 或 null。
@@ -145,14 +176,14 @@
     if (index < 0) {
       // 无歌词（纯音乐 / 歌词未加载）：当前格放一对音符，场景仍然成立，
       // 不会出现「切进三维歌词却空空荡荡」的空窗。
-      drawCell(MID, '♪ ♪', true);
+      drawCell(MID, '♪ ♪', true, null);
       return true;
     }
 
     for (var cell = 0; cell < CELLS; cell += 1) {
       var lineIdx = index + cell - MID;
       if (lineIdx < 0 || lineIdx >= lyric.lines.length) continue;
-      drawCell(cell, textOf(lyric, lineIdx), cell === MID);
+      drawCell(cell, textOf(lyric, lineIdx), cell === MID, cell === MID ? r.emotion : null);
     }
     return true;
   }

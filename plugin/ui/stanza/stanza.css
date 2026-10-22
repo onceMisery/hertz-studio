@@ -72,6 +72,13 @@
   display: flex; align-items: center; justify-content: center; padding: 0 32px; pointer-events: none; }
 /* [hidden] 需自包含压制上面的 display:flex（UA 样式优先级低于类选择器），setVisible(false) 才能真正隐藏。 */
 .fl-classic[hidden] { display: none; }
+/* 字形 stanza：canvas 画视觉，透明文字层给读屏，逐词热区接 seek。 */
+.fl-glyph { position: absolute; inset: 0; }
+.fl-glyph[hidden] { display: none; }
+.fl-glyph-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.fl-glyph-a11y { position: absolute; inset: 0; color: transparent; opacity: 0; pointer-events: none; user-select: none; }
+.fl-glyph-hit { position: absolute; inset: 0; pointer-events: none; }
+.fl-glyph-hit .fl-glyph-hot { position: absolute; pointer-events: auto; cursor: pointer; background: transparent; }
 .fl-cline { position: absolute; display: flex; flex-wrap: wrap; width: 100%; max-width: 1152px;
   min-height: 300px; align-content: center; justify-content: center; }
 .fl-cword { position: relative; display: inline-block; white-space: nowrap; line-height: 1.22;
@@ -255,6 +262,12 @@ body[data-rm~="lyrics"] .fl-cword .fl-body { transform: none !important; }
 
 @media (max-width: 760px) {
   .fl-classic { padding: 0 16px; }
+  .s3d.s3d-shelf-on[data-shelf-mode='side'] .fl-classic .fl-cline {
+    left: 28px;
+    right: 28px;
+    width: auto;
+    max-width: none;
+  }
   .fl-sub { padding: 0 16px; bottom: calc(104px + env(safe-area-inset-bottom)); }
   .fl-sub-card { max-width: calc(100vw - 48px); }
   .fl-sub-next ~ .fl-sub-next { display: none; } /* 窄屏预告只留 1 行 */

@@ -6,7 +6,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, 'plugin/ui', file), 'utf8');
 
@@ -18,7 +17,7 @@ async function bridgeContract() {
   const local = { id: 'local-a', title: 'Local', has_cover: true };
   const online = { id: 'remote-a', source: 'netease', virtual_id: 'online:netease:remote-a', title: 'Remote', cover: 'https://cover.example/a.jpg', vip_only: true };
   const context = {
-    window: { SpaceHome: {}, Online: { sources: () => [{ id: 'netease', label: '网易云' }], safeCoverUrl: (url) => url, getMeta: () => null }, Space3D: { openQueue: () => commands.push('queue') } },
+    window: { SpaceHome: {}, Online: { sources: () => [{ id: 'netease', label: '网易云' }], searchSources: () => ['netease'], whenSearchReady: () => Promise.resolve(), safeCoverUrl: (url) => url, getMeta: () => null }, Space3D: { openQueue: () => commands.push('queue') } },
     state: { byId: new Map(), tracks: [local], queue: ['current'], settings: {} }, plCovers: null,
     homeSnapshot: () => ({ current: local, playing: false, queueLength: 1 }),
     onlineItemId: (track) => String(track.id).startsWith('online:') ? track.id : 'online:' + track.source + ':' + track.id,
@@ -50,6 +49,20 @@ async function bridgeContract() {
   assert.deepEqual(commands, [], 'binding is read-only');
   assert.equal((await host.library({ q: 'A & B', offset: 60 })).total, 121);
   assert.match(requests.at(-1), /q=A\+%26\+B/); assert.match(requests.at(-1), /offset=60/);
+  let releaseSearchReady;
+  context.window.Online.whenSearchReady = () => new Promise((resolve) => { releaseSearchReady = resolve; });
+  const allSearch = host.library({ q: 'all providers', source: 'all' });
+  await Promise.resolve();
+  assert.equal(requests.some((url) => url.includes('all+providers')), false, 'All search waits for the online source catalog');
+  releaseSearchReady();
+  const allResults = await allSearch;
+  assert.equal(allResults.sourceStates.length, 2, 'All includes local and every ready online source');
+  assert.equal(allResults.items.length, 2);
+  assert.equal(allResults.total, 202, 'All totals combine the server counts from each source');
+  context.window.Online.searchSources = () => [];
+  const localFallback = await host.library({ q: 'local fallback', source: 'all' });
+  assert.match(localFallback.note, /仅显示本地结果/, 'All reports when only local results can be searched');
+  assert.deepEqual(Array.from(localFallback.sourceStates, (entry) => entry.source), ['local']);
   const found = await host.library({ source: 'netease', q: 'music' });
   assert.equal(found.items[0].id, online.virtual_id);
   assert.equal((await host.playlists()).items.length, 2, 'existing account playlists share the library');
@@ -72,6 +85,7 @@ async function bridgeContract() {
 }
 
 async function browserContract() {
+  const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
@@ -82,7 +96,7 @@ async function browserContract() {
     await page.addStyleTag({ content: ':root { --bg:#171a1c; --text:#eff1f3; --muted:#a0a6ae; --accent:#71ceac; --sp-text:#eff1f3; --sp-muted:#a0a6ae; --sp-accent:#71ceac; --sp-accent-2:#ff8fb1; --sp-line:#42494e; --sp-line-soft:#292f33; } body {margin:0;font-family:Arial,sans-serif;} * {box-sizing:border-box;}' + read('space-home.css') });
     await page.addScriptTag({ content: read('space-home.js') });
     await page.evaluate(() => {
-      window.actions = []; window.searches = [];
+      window.actions = []; window.searches = []; window.libraryFailures = 0;
       window.snapshot = { current: { id: 'a', title: '当前音乐', artist: '歌手' }, playing: false, pending: false, queueLength: 1, sources: [{ id: 'netease', label: '网易云' }] };
       const items = [{ id: 'a', title: '当前音乐', artist: '歌手' }, { id: 'b', title: '这是很长的歌曲名称需要保持曲目列表布局和按钮可用', artist: '很长的艺术家名字' }];
       const png = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="red"/></svg>');
@@ -90,9 +104,14 @@ async function browserContract() {
       SpaceHome.init(document.querySelector('#sp-home'), {});
       SpaceHome.bind({ read: () => snapshot, library: async (spec) => {
         searches.push(spec);
+        if (window.libraryFailures > 0) {
+          window.libraryFailures -= 1;
+          throw new Error('fixture library failure');
+        }
+        if (spec.source === 'all' && !snapshot.sources.length) return { items, total: 2, note: '当前没有可用在线音源，以下仅显示本地结果' };
         if (spec.source === 'netease') return { items: Array.from({ length: Math.min(20, 45 - spec.offset) }, (_, i) => ({ id: 'remote-' + (spec.offset + i), title: 'Remote ' + (spec.offset + i), artist: 'Artist' })), total: 45 };
         return { items, total: 2 };
-      }, playlists: async () => ({ items: [{ id: 'p', name: '收藏歌单', track_count: 2 }] }), playlist: async () => ({ items }), daily: async () => ({ items }), recent: async () => ({ items }), quote: async () => ({ text: '每日内容来自共享服务', source: '来源' }),
+      }, whenSearchReady: async () => {}, playlists: async () => ({ items: [{ id: 'p', name: '收藏歌单', track_count: 2 }] }), playlist: async () => ({ items }), daily: async () => ({ items }), recent: async () => ({ items }), quote: async () => ({ text: '每日内容来自共享服务', source: '来源' }),
         play: async (item, list) => { actions.push(['play', item.id, list.map((t) => t.id)]); }, enqueue: async (item, list) => actions.push(['enqueue', item ? item.id : list.length]), resume: async () => { actions.push('resume'); snapshot.playing = true; }, queue: () => actions.push('queue'), cover: async () => png, playlistCover: async () => png, applyCover: (img, url) => { if (url) img.src = url; else img.removeAttribute('src'); }, notify: (message) => actions.push(['error', message]) });
       SpaceHome.enter();
     });
@@ -131,6 +150,19 @@ async function browserContract() {
     await page.locator('.sh-panel-body .sh-track-main').first().click(); assert.equal(await page.evaluate(() => actions.at(-1)[0]), 'play');
     assert.equal(await page.locator('.sh-panel-layer').isVisible(), true, 'play remains inside panel');
     await page.locator('.sh-panel-body .sh-track .sh-icon').first().click(); assert.equal(await page.evaluate(() => actions.at(-1)[0]), 'enqueue');
+    await page.evaluate(() => { window.libraryFailures = 2; });
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
+    await page.waitForSelector('.sh-panel-body .sh-retry');
+    await page.locator('.sh-panel-body .sh-retry').focus();
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.activeElement && document.activeElement.dataset.searchKey === 'panel:retry'
+      && document.activeElement.matches('button'));
+    assert.equal(await page.locator('.sh-panel-body .sh-retry').count(), 1, 'failed retry remains available');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelectorAll('.sh-panel-body .sh-track').length === 2);
+    assert.equal(await page.evaluate(() => document.activeElement.classList.contains('sh-panel-body')),
+      'successful retry returns focus to the loaded panel');
+    console.log('SpaceHome generic retry restores keyboard focus after failure and success');
     await page.getByRole('button', { name: '歌单', exact: true }).click(); await page.waitForSelector('.sh-playlist');
     await page.locator('.sh-playlist').click(); await page.waitForSelector('.sh-playlist-summary');
     assert.equal(await page.locator('#sh-panel-title').textContent(), '收藏歌单');
@@ -155,6 +187,13 @@ async function browserContract() {
     assert.equal(await page.evaluate(() => SpaceHome.closePanel()), true); assert.equal(await page.evaluate(() => SpaceHome.closePanel()), false);
     await page.locator('#sh-query').press('Enter'); assert.equal(await page.locator('#sh-query').inputValue(), 'A & B');
     assert.equal(await page.getByRole('tab', {name:'网易云',exact:true}).getAttribute('aria-selected'), 'true', 'reopened query keeps provider context');
+    await page.evaluate(() => { snapshot.sources = []; });
+    await page.locator('#sh-query').fill('R1 removed source');
+    await page.waitForFunction(() => !document.querySelector('.sh-search-modes [data-source="netease"]')
+      && document.querySelector('.sh-search-modes [data-source="all"]')?.getAttribute('aria-selected') === 'true');
+    await page.waitForSelector('.sh-panel-body .sh-track');
+    assert.equal(await page.locator('.sh-panel-body .sh-state').filter({hasText:'仅显示本地结果'}).count(), 1,
+      'removed provider falls back to All and reports local-only results');
     await page.screenshot({ path: path.join(output, 'desktop-panel.png') });
     await page.evaluate(() => SpaceHome.closePanel()); await page.screenshot({ path: path.join(output, 'desktop-home.png') });
     await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: path.join(output, 'mobile-home.png') });
@@ -166,4 +205,5 @@ async function browserContract() {
     assert.deepEqual(errors, []); console.log('SpaceHome browser interactions and responsive screenshots: passed');
   } finally { await browser.close(); }
 }
-bridgeContract().then(browserContract).catch((error) => { console.error(error); process.exitCode = 1; });
+bridgeContract().then(() => process.argv.includes('--bridge-only') ? undefined : browserContract())
+  .catch((error) => { console.error(error); process.exitCode = 1; });

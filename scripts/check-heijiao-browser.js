@@ -77,7 +77,7 @@ async function measure(page) {
 
     // 走真实入口切皮肤：localStorage + reload，让启动序列自己应用。
     // 直接 setAttribute('data-skin') 会被 skins.js 的状态机覆盖回去，
-    // 量出来的全是 classic 的数字（这个坑在 check-chaoxi-look 里也踩过）。
+    // 量出来的全是 classic 的数字（这个坑在其它皮肤检查里也踩过）。
     await page.goto(fixture.base, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.topbar');
     await page.evaluate(() => { try { localStorage.setItem('vmusic.skin', 'heijiao'); } catch (e) {} });

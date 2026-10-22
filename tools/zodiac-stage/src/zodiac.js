@@ -22,8 +22,17 @@ export const FIG_HALF = 2.50;
 export const FIG_ASPECT = 1.78;
 // 设计框半宽。缩放是等比的（x/y 同一个 k），所以横宽的星座会撑满宽度、顶到 ±这里。
 export const FIG_HALF_W = FIG_HALF * FIG_ASPECT;
-// 体积深度上限；正面依轮廓距离隆起，背面与侧壁封闭体积。
-export const FIGURE_DEPTH = 0.85;
+// 体积深度上限。正面按「离轮廓的距离」指数饱和隆起（肢体薄、躯干厚），
+// 背面镜像同一曲面 —— 两头夹出的是一枚可读的浮雕体，不是一层贴片。
+export const FIGURE_DEPTH = 2.05;
+// 隆起饱和半径：0.42 让 0.15 宽的细肢只吃到三成厚度，0.8 以上的躯干接近满值。
+const RELIEF_TAU = 0.42;
+// 星尘皮肤比实体面罩往外抬的量；面罩往里收的量。两者合起来让亮星始终
+// 浮在体积表面之上，转动时不会被自己挡住。
+const SKIN_LIFT = 0.16;
+const MESH_INSET = 0.07;
+// 主星网浮在皮肤外的高度：四芒星要能读成「挂在体量前面的灯」。
+const NODE_LIFT = 0.14;
 // 公开的画框边界，留量供呼吸与交互使用。
 export const SHAPE_BOX = FIG_HALF_W * 1.06;
 export const SHAPE_BOX_V = FIG_HALF * 1.06;
@@ -122,10 +131,39 @@ function reliefDepth(index, x, y) {
     }
     distance = Math.max(distance, nearest * shapeFit(index).k);
   }
-  return FIGURE_Z + .06 + Math.min(FIGURE_DEPTH-FIGURE_Z-.08, Math.sqrt(distance)*.52);
+  return FIGURE_Z + .06 + (FIGURE_DEPTH - FIGURE_Z - .08) * (1 - Math.exp(-distance / RELIEF_TAU));
 }
 
-const backDepth = z => -(z-FIGURE_Z)*.8-.08;
+// 背面是正面的镜像壳体（略浅），世界层与着色器都按这个范围算纵深比。
+export const figureBackDepth = z => -(z - FIGURE_Z) * .82 - .12;
+const backDepth = figureBackDepth;
+
+// 体积法线：由三角面片按面积加权求和，再把 z 翻正（正面朝机位）。
+// 起伏只来自 reliefDepth 的径向隆起，所以内部法线接近 +z、靠轮廓处向外倾斜 ——
+// 正好让轮廓附近的星尘能吃到轮廓光。一次按座烘焙，采样时只做插值。
+function vertexNormals(points, triangles, depths) {
+  const out = new Float32Array(points.length * 3);
+  for (const [a, b, c] of triangles) {
+    const p = points[a], q = points[b], r = points[c];
+    const ux = q[0]-p[0], uy = q[1]-p[1], uz = depths[b]-depths[a];
+    const vx = r[0]-p[0], vy = r[1]-p[1], vz = depths[c]-depths[a];
+    let nx = uy*vz - uz*vy, ny = uz*vx - ux*vz, nz = ux*vy - uy*vx;
+    if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }
+    for (const v of [a, b, c]) {
+      out[v*3] += nx; out[v*3+1] += ny; out[v*3+2] += nz;
+    }
+  }
+  for (let i = 0; i < out.length; i += 3) {
+    const length = Math.hypot(out[i], out[i+1], out[i+2]);
+    if (length > 1e-9) {
+      out[i] /= length; out[i+1] /= length; out[i+2] /= length;
+    } else {
+      out[i] = 0; out[i+1] = 0; out[i+2] = 1;
+    }
+  }
+  return out;
+}
+
 function artwork(index) {
   if (artworkCache[index]) return artworkCache[index];
   const points = [], triangles = [], contours = [];
@@ -181,7 +219,8 @@ function artwork(index) {
     return totalLength;
   });
   const depths = points.map(([x,y]) => reliefDepth(index,x,y));
-  return (artworkCache[index] = { points, triangles, contours, areas, lengths, totalArea, totalLength, depths });
+  const normals = vertexNormals(points, triangles, depths);
+  return (artworkCache[index] = { points, triangles, contours, areas, lengths, totalArea, totalLength, depths, normals });
 }
 
 function weightedIndex(cumulative, value) {
@@ -193,16 +232,20 @@ function weightedIndex(cumulative, value) {
   return lo;
 }
 
-function sampleArtwork(index, count, seed, surface = false) {
+function sampleArtwork(index, count, seed, surface = false, normalsOut = null) {
   const art = artwork(index), fit = shapeFit(index), rnd = seededRandom(seed);
   const pos = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) {
     let x, y, depth;
+    let nx = 0, ny = 0, nz = 1;
     if (rnd() < .18) {
       const [a,b] = art.contours[weightedIndex(art.lengths, rnd() * art.totalLength)];
       const t = rnd(), p = art.points[a], q = art.points[b];
       x = p[0] + (q[0]-p[0])*t; y = p[1] + (q[1]-p[1])*t;
       depth = art.depths[a]*(1-t)+art.depths[b]*t;
+      nx = art.normals[a*3]*(1-t)+art.normals[b*3]*t;
+      ny = art.normals[a*3+1]*(1-t)+art.normals[b*3+1]*t;
+      nz = art.normals[a*3+2]*(1-t)+art.normals[b*3+2]*t;
     } else {
       const tri = art.triangles[weightedIndex(art.areas, rnd() * art.totalArea)];
       const [p,q,r] = tri.map(v => art.points[v]);
@@ -210,22 +253,42 @@ function sampleArtwork(index, count, seed, surface = false) {
       x = p[0]*(1-u) + q[0]*u*(1-v) + r[0]*u*v;
       y = p[1]*(1-u) + q[1]*u*(1-v) + r[1]*u*v;
       depth = art.depths[tri[0]]*(1-u)+art.depths[tri[1]]*u*(1-v)+art.depths[tri[2]]*u*v;
+      for (let k = 0; k < 3; k += 1) {
+        const w = [1-u, u*(1-v), u*v][k], at = tri[k]*3;
+        nx += art.normals[at]*w; ny += art.normals[at+1]*w; nz += art.normals[at+2]*w;
+      }
     }
     pos[i*3] = (x-fit.cx)*fit.k;
     pos[i*3+1] = (y-fit.cy)*fit.k;
-    const zMix = rnd();
-    pos[i*3+2] = surface ? depth : backDepth(depth)+(depth-backDepth(depth))*zMix;
+    // 三层星尘：前壳浮在体积表面之上、中层补体积、背层只在转动时露出来。
+    const layer = rnd();
+    const zMix = surface ? 1 : layer < .62 ? .64 + .36 * Math.sqrt(rnd())
+      : layer < .9 ? .2 + .44 * rnd() : .02 + .22 * rnd();
+    const back = backDepth(depth);
+    pos[i*3+2] = surface ? depth + SKIN_LIFT * .6
+      : back + (depth - back) * zMix + SKIN_LIFT * Math.pow(zMix, 6);
+    if (normalsOut) {
+      // 体积内粒子：前半参考正面法线、后半沿深度翻转，中间过渡到侧壁；
+      // 这样从背后看过去也有一致的受光面，而不是一块均匀发光的贴片。
+      const flip = surface ? 1 : zMix * 2 - 1;
+      let nx2 = nx, ny2 = ny, nz2 = nz * flip;
+      const length = Math.hypot(nx2, ny2, nz2);
+      if (length > 1e-6) { nx2 /= length; ny2 /= length; nz2 /= length; }
+      else { nx2 = 0; ny2 = 0; nz2 = 1; }
+      normalsOut[i*3] = nx2; normalsOut[i*3+1] = ny2; normalsOut[i*3+2] = nz2;
+    }
   }
   return pos;
 }
 
 export function buildShape(index, count) {
   const i = ((index % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;
-  const pos = sampleArtwork(i, count, 'zodiac-shape:' + ZODIAC[i].id + ':' + count);
+  const normals = new Float32Array(count * 3);
+  const pos = sampleArtwork(i, count, 'zodiac-shape:' + ZODIAC[i].id + ':' + count, false, normals);
   const rnd = seededRandom('zodiac-shine:' + ZODIAC[i].id + ':' + count);
   const shine = new Float32Array(count);
   for (let k = 0; k < count; k++) shine[k] = .40 + Math.pow(rnd(), 3) * .8;
-  return { pos, shine, sign: ZODIAC[i] };
+  return { pos, normals, shine, sign: ZODIAC[i] };
 }
 
 export const CONSTELLATION = FIGURES.map(({nodes,lines}) => ({nodes,lines}));
@@ -242,21 +305,39 @@ function surfaceDepth(index, x, y) {
   return reliefDepth(index,x,y);
 }
 
-export function transitionStyle(cycle) {
+export function transitionStyle(cycle, sign = 0) {
   const n = Math.max(0,Math.floor(Number(cycle)||0));
-  return { gather:n%5, disperse:(n*3+Math.floor(n/5)+1)%5, direction:n%2 ? -1 : 1 };
+  const s = Math.max(0,Math.floor(Number(sign)||0));
+  // 座次也参与配方：同一轮里十二座各有各的轨迹，下一轮同一座又是另一种。
+  // hash 只做确定性的整数混合，跳转回同一时刻仍得到相同配方。
+  const hash = (salt) => {
+    let h = Math.imul(n + 0x9e3779b9, 0x85ebca6b)
+      ^ Math.imul(s + 0x7f4a7c15, 0xc2b2ae35) ^ salt;
+    h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+    h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
+    return ((h ^ (h >>> 15)) >>> 0) / 4294967296;
+  };
+  return {
+    // 八种轨迹：旋涡、纵深星流、波浪、轨道、放射、螺旋、星雨、脉冲。
+    gather: (n*3+s*5)%8, disperse: (n*5+s*3+1)%8,
+    direction: (n+s)%2 ? -1 : 1,
+    stagger: .30+hash(0x1f)*.30,   // 粒子错峰窗口
+    spin: .65+hash(0x2f)*.90,      // 旋进速度
+    arc: .72+hash(0x3f)*.65,       // 飞行弧幅
+  };
 }
 export function buildConstellation(index) {
   const i = ((index % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;
   const src = CONSTELLATION[i], fit = shapeFit(i);
   const x = new Float32Array(src.nodes.length), y = new Float32Array(src.nodes.length);
-  const m = new Float32Array(src.nodes.length);
+  const m = new Float32Array(src.nodes.length), links = new Uint8Array(src.nodes.length);
   const z = new Float32Array(src.nodes.length);
   src.nodes.forEach(([px,py,b], k) => {
     x[k] = (px-fit.cx)*fit.k; y[k] = (py-fit.cy)*fit.k; m[k] = b;
-    z[k] = surfaceDepth(i,px,py)+.08;
+    z[k] = surfaceDepth(i,px,py) - MESH_INSET + NODE_LIFT;
   });
-  return { x, y, z, m, nodes: x.length, segments: src.lines.length,
+  src.lines.forEach(([a,b]) => { links[a] += 1; links[b] += 1; });
+  return { x, y, z, m, links, nodes: x.length, segments: src.lines.length,
     core: buildRibbon(x, y, src.lines, LINE_CORE_WIDTH,z),
     halo: buildRibbon(x, y, src.lines, LINE_HALO_WIDTH,z) };
 }
@@ -341,6 +422,9 @@ export function buildFigureMesh(index, cloudCount) {
   const i = ((index % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;
   const art = artwork(i), fit = shapeFit(i);
   const pts = art.points.map(([x,y]) => ({x:(x-fit.cx)*fit.k, y:(y-fit.cy)*fit.k}));
+  // 面罩比星尘皮肤内收一点：亮星浮在实体前面，转动时不会和自己的身体打架。
+  const shellFront = art.depths.map(z => z - MESH_INSET);
+  const shellBack = art.depths.map(z => backDepth(z) + MESH_INSET);
   const tris = art.triangles;
   const cloud = sampleArtwork(i, cloudCount, 'zodiac-figure-cloud:' + ZODIAC[i].id + ':' + cloudCount, true);
 
@@ -361,7 +445,7 @@ export function buildFigureMesh(index, cloudCount) {
     v.forEach((p, n) => {
       meshPos[t * 9 + n * 3] = p.x;
       meshPos[t * 9 + n * 3 + 1] = p.y;
-      meshPos[t * 9 + n * 3 + 2] = art.depths[[a,b,c][n]];
+      meshPos[t * 9 + n * 3 + 2] = shellFront[[a,b,c][n]];
     });
     // 面片明度：暗面/亮面交错，低多边形才不塌成一块平色。
     const t0 = 0.62 + tintRnd() * 0.66;
@@ -376,7 +460,7 @@ export function buildFigureMesh(index, cloudCount) {
     const tone=.68+tintRnd()*.28;
     vertices.forEach(([index,back],k)=>{
       const p=pts[index], offset=face*9+k*3;
-      meshPos.set([p.x,p.y,back?backDepth(art.depths[index]):art.depths[index]],offset);
+      meshPos.set([p.x,p.y,back?shellBack[index]:shellFront[index]],offset);
       tint.set([tone,tone,tone],offset);
     });
     face++;

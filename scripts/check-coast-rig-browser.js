@@ -35,6 +35,7 @@ async function main() {
           rig: d.rig, distance: d.distance };
       };
     });
+    await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/coast-stage.js') });
     const result = await page.evaluate(() => {
       CoastStagePure.mount(document.querySelector('canvas'), { quality: 'low' });

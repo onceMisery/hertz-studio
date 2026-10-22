@@ -512,16 +512,17 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         .cloned()
         .unwrap_or_default();
     let tracks: Vec<OnlineTrack> = items.iter().filter_map(map_track).collect();
-    let total = data
+    let reported_total = data
         .and_then(|d| d.get("totalCount"))
         .and_then(val_u64)
-        .map(|n| n as usize)
-        .unwrap_or(tracks.len());
+        .map(|n| n as usize);
+    let total = reported_total.unwrap_or(tracks.len());
 
     Ok(SearchPage {
         source: ID.into(),
         keyword: term.to_string(),
         total,
+        total_is_exact: reported_total.is_some(),
         tracks,
         warning: None,
         pagination: None,
@@ -821,9 +822,7 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
     if text.trim().is_empty() {
         return Ok(vmusic_core::LyricDocument::empty());
     }
-    let mut doc = vmusic_lyrics::parse_lrc(&text);
-    vmusic_lyrics::apply_offset(&mut doc);
-    Ok(doc)
+    Ok(vmusic_lyrics::parse_lrc(&text))
 }
 
 // ---------------------------------------------------------------------------
@@ -934,7 +933,7 @@ mod tests {
         let db = sqlx::sqlite::SqlitePoolOptions::new()
             .connect_lazy("sqlite::memory:")
             .expect("lazy sqlite pool");
-        let ctx = Ctx { db };
+        let ctx = Ctx::new(db);
         let err = stream(&ctx, "   ", None, 128_000).await.unwrap_err();
         assert_eq!(err.code, "bad_request");
     }

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT
+     Copyright (c) 2026 hertz-studio contributors
+
+     字形引擎对照页：同一字号、同一坐标，左原生 fillText、右引擎 SDF，
+     中间是放大 4 倍的细节对照（不插值，看像素级边缘）。
+
+     判定依据不是"看起来像"，而是：
+       1. 单像素边缘宽度（原生的抗锯齿带 vs 引擎的抗锯齿带）
+       2. 横笔画厚度（找一竖排 alpha 剖面，量 alpha>0.5 的连续长度）
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>glyph A/B</title>
+<style>
+  body { margin: 0; background: #101014; color: #d6d6da; font: 13px "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 14px; margin: 16px 20px 6px; }
+  canvas { display: block; border: 1px solid #22222a; margin: 8px 20px; }
+  pre { margin: 12px 20px 30px; font: 12px/1.5 ui-monospace, Consolas, monospace; color: #9aa0aa; }
+</style>
+</head>
+<body>
+<h1>原生 fillText（左） / 引擎 SDF（右） / 4× 放大对照（下）</h1>
+<canvas id="ab"></canvas>
+<canvas id="zoom"></canvas>
+<pre id="r">running…</pre>
+
+<script src="lyric-glyph-sdf.js"></script>
+<script src="lyric-glyph-atlas.js"></script>
+<script src="lyric-glyph-gl.js"></script>
+<script>
+window.addEventListener('error', function (e) {
+  document.getElementById('r').textContent = 'ERROR ' + e.message + ' @' + e.lineno;
+});
+(function () {
+  'use strict';
+  var FONT = '"Noto Sans CJK SC","Source Han Sans SC","Microsoft YaHei",system-ui,sans-serif';
+  var TEXT = '永口回一鬱';
+  var out = { glyphs: [] };
+
+  function cv(w, h) { var c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+  var atlas = LyricGlyphAtlas.createDual(FONT);
+  var CELL = atlas.CELL, PAD = atlas.PAD, CONTENT = atlas.CONTENT, BASE = atlas.BASELINE, RPX = atlas.RENDER_PX;
+  var RANGE = atlas.RANGE;
+
+  // 中文按全角 advance 排，与引擎的排版一致
+  var adv = {};
+  var mctx = cv(1, 1).getContext('2d');
+  mctx.font = '600 ' + RPX + 'px ' + FONT;
+  Array.from(TEXT).forEach(function (ch) { adv[ch] = mctx.measureText(ch).width; });
+
+  var totalW = 0;
+  Array.from(TEXT).forEach(function (ch) { totalW += adv[ch]; });
+
+  var W = Math.ceil(totalW + 40), H = CELL + 20;
+
+  // ---- 原生 ----
+  var nat = cv(W, H);
+  var nctx = nat.getContext('2d', { willReadFrequently: true });
+  nctx.fillStyle = '#fff';
+  nctx.textBaseline = 'alphabetic';
+  nctx.font = '600 ' + RPX + 'px ' + FONT;
+  var nx = 20;
+  Array.from(TEXT).forEach(function (ch) {
+    nctx.fillText(ch, nx, 10 + BASE);
+    nx += adv[ch];
+  });
+
+  // ---- 引擎 ----
+  var probe = cv(W, H);
+  var gl = LyricGlyphGL.create(probe);
+  gl.initTexture(atlas.W, atlas.H, true);
+
+  var items = [];
+  var ex = 20;
+  Array.from(TEXT).forEach(function (ch, i) {
+    var s = atlas.acquire(ch);
+    var u0 = ex / totalW, u1 = (ex + adv[ch]) / totalW;
+    items.push({
+      x: ex - PAD, y: 10 + BASE - (PAD + BASE),
+      w: CELL, h: CELL, u0: s.u0, v0: s.v0, uStart: u0, uEnd: u1,
+      startMs: -1e9, durMs: 1
+    });
+    ex += adv[ch];
+  });
+
+  var dirty = atlas.takeDirty();
+  for (var k = 0; k < dirty.length; k += 1) {
+    var o = atlas.cellOrigin(dirty[k]);
+    gl.uploadCell(o.x, o.y, CELL, atlas.cellBytes(dirty[k]));
+  }
+
+  gl.gl.canvas.width = W; gl.gl.canvas.height = H;
+  gl.beginFrame(W, H);
+  gl.draw(items, items.length, {
+    uvW: CELL / atlas.W, uvH: CELL / atlas.H,
+    timeMs: 0, shear: 0, baseY: 1e6,
+    amp: 0, freq: 0, damp: 2,
+    curveB: new Float32Array(33), curveW: new Float32Array(33).fill(0.5),
+    range: RANGE, pxScale: 1, weightGain: 0, weightGainHi: 0,
+    glowK: 1, glowAmt: 0, rimAmt: 0, rimWidth: 0.001,
+    clipU: 1, soft: 0.001, wobble: 0, turbAmp: 0, opacity: 1, dual: true,
+    idleColor: [1, 1, 1], sungColor: [1, 1, 1], glowColor: [1, 1, 1]
+  });
+
+  var px = new Uint8Array(W * H * 4);
+  gl.gl.bindFramebuffer(gl.gl.FRAMEBUFFER, null);
+  gl.gl.readPixels(0, 0, W, H, gl.gl.RGBA, gl.gl.UNSIGNED_BYTE, px);
+  var eng = cv(W, H);
+  var ectx = eng.getContext('2d', { willReadFrequently: true });
+  var img = ectx.createImageData(W, H);
+  for (var y = 0; y < H; y += 1) {
+    var src = (H - 1 - y) * W * 4, dst = y * W * 4;
+    for (var x = 0; x < W * 4; x += 1) img.data[dst + x] = px[src + x];
+  }
+  ectx.putImageData(img, 0, 0);
+
+  // ---- 拼版 ----
+  var ab = document.getElementById('ab');
+  ab.width = W; ab.height = H * 2 + 8;
+  var actx = ab.getContext('2d');
+  actx.fillStyle = '#0b0b0e'; actx.fillRect(0, 0, ab.width, ab.height);
+  actx.drawImage(nat, 0, 0);
+  actx.drawImage(eng, 0, H + 8);
+
+  // ---- 4× 放大：取「永」的第一笔，不做平滑 ----
+  var zoom = document.getElementById('zoom');
+  var ZW = 120, ZH = 120, Z = 4;
+  zoom.width = ZW * Z * 2 + 8; zoom.height = ZH * Z;
+  var zctx = zoom.getContext('2d');
+  zctx.imageSmoothingEnabled = false;
+  zctx.fillStyle = '#0b0b0e'; zctx.fillRect(0, 0, zoom.width, zoom.height);
+  zctx.drawImage(nat, 20, 0, ZW, ZH, 0, 0, ZW * Z, ZH * Z);
+  zctx.drawImage(eng, 20, 0, ZW, ZH, ZW * Z + 8, 0, ZW * Z, ZH * Z);
+
+  // ---- 量化指标：横笔画厚度与边缘带宽 ----
+  function scanlineAlpha(ctx, w, y) {
+    var d = ctx.getImageData(0, y, w, 1).data;
+    var a = [];
+    for (var i = 0; i < w; i += 1) a.push(d[i * 4 + 3] / 255);
+    return a;
+  }
+  function solidRuns(a) {
+    var runs = [], cur = 0;
+    for (var i = 0; i < a.length; i += 1) {
+      if (a[i] > 0.5) cur += 1;
+      else { if (cur > 1) runs.push(cur); cur = 0; }
+    }
+    if (cur > 1) runs.push(cur);
+    return runs;
+  }
+  function edgeWidth(a) {
+    var n = 0;
+    for (var i = 0; i < a.length; i += 1) if (a[i] > 0.05 && a[i] < 0.95) n += 1;
+    return n;
+  }
+
+  // 取「永」中部的一行（y = 10 + BASE - 0.3*RPX），那里有明确的竖笔
+  var probeY = Math.round(10 + BASE - RPX * 0.30);
+  var nA = scanlineAlpha(nctx, W, probeY);
+  var eA = scanlineAlpha(ectx, W, probeY);
+
+  out.atlas = { CELL: CELL, PAD: PAD, CONTENT: CONTENT, BASELINE: BASE, RENDER_PX: RPX, RANGE: RANGE };
+  out.probeY = probeY;
+  out.native = { runs: solidRuns(nA), edgePx: edgeWidth(nA), ink: nA.reduce(function (s, v) { return s + v; }, 0) };
+  out.engine = { runs: solidRuns(eA), edgePx: edgeWidth(eA), ink: eA.reduce(function (s, v) { return s + v; }, 0) };
+  out.verdict = 'ok';
+
+  document.getElementById('r').textContent = JSON.stringify(out, null, 2);
+  window.__glyphAB = out;
+})();
+</script>
+</body>
+</html>

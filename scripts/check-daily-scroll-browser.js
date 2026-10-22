@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 //
-// 每日推荐滚动链 + iOS 齿轮隐藏 + 浮光行节奏（浏览器验收，需 Playwright + 服务）。
+// 每日推荐滚动链 + iOS 齿轮隐藏 + 各皮肤行节奏（浏览器验收，需 Playwright + 服务）。
 //
 //   SETTINGS_NAV_URL=http://127.0.0.1:18790/ \
 //   NODE_PATH=<装有 playwright 的 node_modules 路径> \
@@ -77,7 +77,7 @@ const FREEZE = `
 `;
 
 async function gotoDaily(page) {
-  // 不点 rail：流年把侧栏收成胶囊、浮光把导航换成顶部胶囊，
+  // 不点 rail：流年把侧栏收成胶囊、清风隐藏左侧栏，
   // `.rail-item[data-view=daily]` 在那两套皮肤下存在却被 Playwright 判不可见
   // （实测一直重试到超时）。改为直接调它自己的 onclick ——
   // app.js 里是 `b.onclick = () => setView(b.dataset.view)`，所以这条
@@ -185,128 +185,9 @@ const geom = (page, sel) => page.evaluate((s) => {
     await page.evaluate(() => { document.getElementById('dv-body').scrollTop = 0; });
     await page.screenshot({ path: `${SHOTS}/daily-classic-top.png` });
 
-    // ------------------------------------------------ 浮光的行节奏
-    section('浮光：.dv-row 跟上低密度名单');
-    await setSkin(page, 'sheen');
-    await gotoDaily(page);
-
-    const sheenRow = await geom(page, '.dv-row');
-    ok(!!sheenRow, '浮光下 .dv-row 存在');
-
-    // 与 sheen 自己声明的令牌比，而不是与一个写死的 px 比 ——
-    // 皮肤令牌以后还会调，钉 px 会立刻假失败。
-    const skinTokens = await page.evaluate(() => {
-      const cs = getComputedStyle(document.documentElement);
-      const row = document.querySelector('.dv-row');
-      const rs = getComputedStyle(row);
-      return {
-        rowPy: cs.getPropertyValue('--skin-row-py').trim(),
-        gap: cs.getPropertyValue('--skin-gap').trim(),
-        padTop: parseFloat(rs.paddingTop),
-        padBottom: parseFloat(rs.paddingBottom),
-        lineHeight: rs.lineHeight,
-        fontSize: parseFloat(rs.fontSize),
-        radius: rs.borderRadius,
-        gapApplied: parseFloat(getComputedStyle(document.getElementById('dv-body')).rowGap),
-        // 基线间距：--sp-2 是 8px，--skin-gap 是 18px。若二者相等说明令牌没接上。
-        sp2: cs.getPropertyValue('--sp-2').trim(),
-      };
-    });
-    ok(parseFloat(skinTokens.padTop) > parseFloat(skinTokens.sp2),
-      `.dv-row 上下内距跟着 --skin-row-py 走（${skinTokens.padTop}px > 基线 ${skinTokens.sp2}）`,
-      JSON.stringify(skinTokens));
-    ok(skinTokens.gapApplied > parseFloat(skinTokens.sp2),
-      `.dv-body 行距跟着 --skin-gap 走（${skinTokens.gapApplied}px > 基线 ${skinTokens.sp2}）`);
-    ok(parseFloat(skinTokens.radius) > 4,
-      `.dv-row 有圆角（${skinTokens.radius}），不是直角灰块`);
-    // 行高要真的比字号宽（浮光 1.55），否则"低密度"只是内距在撑
-    ok(skinTokens.lineHeight !== 'normal',
-      `.dv-row 行高被显式定过（${skinTokens.lineHeight}），由行容器统一`);
-
-    // 浮光下滚动仍然成立（皮肤不能把基线修好的东西弄坏）
-    const sheenScroll = await page.evaluate(async () => {
-      const el = document.getElementById('dv-body');
-      const before = el.scrollHeight;
-      el.scrollTop = el.scrollHeight;
-      await new Promise((r) => setTimeout(r, 120));
-      return { before, after: Math.round(el.scrollTop) };
-    });
-    ok(sheenScroll.after > 0, '浮光下仍能滚到底', JSON.stringify(sheenScroll));
-
-    await page.screenshot({ path: `${SHOTS}/daily-sheen-top.png` });
-
-    // ------------------------------------------------ iOS 齿轮
-    section('iOS：顶栏齿轮摘掉，侧栏仍可达设置');
-    await setSkin(page, 'ios');
-
-    const entry = await page.evaluate(() => {
-      const el = document.getElementById('settings-entry');
-      if (!el) return null;
-      const r = el.getBoundingClientRect();
-      const cs = getComputedStyle(el);
-      // 取它后面那个兄弟的位置：按钮若还占位，后面元素会被顶偏
-      let next = el.nextElementSibling;
-      while (next && getComputedStyle(next).display === 'none') next = next.nextElementSibling;
-      const nr = next ? next.getBoundingClientRect() : null;
-      return {
-        display: cs.display, visibility: cs.visibility,
-        width: Math.round(r.width), height: Math.round(r.height),
-        onclick: typeof el.onclick === 'function',
-        nextLeft: nr ? Math.round(nr.left) : null,
-        // Tab 序：不可见元素不该还能被聚焦到
-        focusable: (() => { el.focus(); return document.activeElement === el; })(),
-      };
-    });
-    ok(!!entry, '#settings-entry 仍在 DOM 里（功能没被删，只是不显示）');
-    ok(entry.display === 'none', `#settings-entry 在 iOS 下 display:none（实际 ${entry.display}）`);
-    ok(entry.visibility !== 'hidden' || entry.display === 'none',
-      '不是用 visibility 藏的');
-    ok(entry.width === 0 && entry.height === 0, '几何为零（不占位，没把后面的图标顶偏）',
-      `${entry.width}×${entry.height}`);
-    ok(entry.focusable === false, '不在 Tab 序里（focus 后 activeElement 不是它）');
-    ok(entry.onclick === true, 'onclick 仍绑定（快捷键等路径仍能开设置）');
-
-    // 侧栏必须有设置入口，否则摘掉齿轮就等于把设置藏没了
-    const railOk = await page.evaluate(() => {
-      const item = document.querySelector('.rail-item[data-view="settings"]');
-      if (!item) return { found: false };
-      const r = item.getBoundingClientRect();
-      return { found: true, w: Math.round(r.width), h: Math.round(r.height), text: item.textContent.trim() };
-    });
-    ok(railOk.found, '侧栏仍有 data-view="settings" 入口');
-    ok(railOk.w > 0 && railOk.h > 0, '侧栏设置入口可见可点',
-      `${railOk.w}×${railOk.h} "${railOk.text}"`);
-
-    // 切回别的皮肤，齿轮必须回来（不能把 display:none 焊死）
-    await setSkin(page, 'classic');
-    const backAgain = await page.evaluate(() => getComputedStyle(document.getElementById('settings-entry')).display);
-    ok(backAgain !== 'none', `切回 classic 后齿轮恢复（display=${backAgain}）`);
-
-    // ------------------------------------------------ 改名
-    section('OS风：显示名改了，持久化键没动');
-    const names = await page.evaluate(() => {
-      window.Skins.apply('ios');
-      const list = window.Skins.list ? window.Skins.list() : [];
-      return {
-        catalog: list.map((d) => ({ id: d.id, name: d.name })),
-        current: document.documentElement.getAttribute('data-skin'),
-        stored: localStorage.getItem('vmusic.skin'),
-      };
-    });
-    const iosEntry = names.catalog.find((d) => d.id === 'ios');
-    ok(!!iosEntry, "目录里仍以 id 'ios' 登记");
-    ok(iosEntry && iosEntry.name === 'OS风', `显示名是 'OS风'（实际 '${iosEntry && iosEntry.name}'）`);
-    ok(!names.catalog.some((d) => d.name === 'iOS'), "目录里不再有叫 'iOS' 的皮肤");
-    ok(names.current === 'ios', "data-skin 仍是 'ios'");
-    ok(names.stored !== 'OS风' && names.stored !== 'ios风',
-      `localStorage 键仍是 id 而非显示名（存的是 '${names.stored}'）`);
-
-    await setSkin(page, 'ios');
-    await page.screenshot({ path: `${SHOTS}/ios-no-settings-entry.png` });
-
     // ------------------------------------------------ 其它皮肤没被带坏
     section('回归：其余皮肤下每日推荐仍能滚');
-    for (const skin of ['workbench', 'liunian', 'qingfeng', 'sheen']) {
+    for (const skin of ['liunian', 'qingfeng']) {
       await setSkin(page, skin);
       await gotoDaily(page);
       const r = await page.evaluate(async () => {

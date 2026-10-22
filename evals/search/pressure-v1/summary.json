@@ -1,0 +1,141 @@
+{
+  "schemaVersion": 1,
+  "environment": {
+    "os": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13620H",
+    "logicalCpus": 16,
+    "totalMemoryBytes": 34049220608
+  },
+  "gitHead": "401a90376c0fa8391b5d60234103eeb381ef2c2c",
+  "dirty": true,
+  "releaseEligible": false,
+  "editions": {
+    "standard": {
+      "archive": "windows-x64-standard-20261018.json.gz",
+      "rawSha256": "aa173a4b7fde50ec0638f1743aa4141d6c8f6cfd4c4cbe9dd01f4fcf36f49dff",
+      "gzipSha256": "3a496ca9e0318254b3d21cd6848ab4f2ff6df1f55d64c8b46d509b0d26587cdc",
+      "rawBytes": 640405,
+      "gzipBytes": 37573,
+      "startedAt": "2026-10-18T02:54:01.000Z",
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "profile": "test",
+      "runtimeWorkers": 4,
+      "testBinaryHash": "f02fadd7e59e69b344eb12d6ff515385224e26eacd88960d606cd4a6cabce413",
+      "sourceHashes": {
+        "Cargo.lock": "aee27bb3a1e90730ddbb21da42b4cbfed6abd281b49e42500e82cec5f670cbc1",
+        "crates/hertz-studio/Cargo.toml": "e37d3358bb88c0144f4e3f700cf1980c824c3377317b7d6c5290663aed5c8443",
+        "crates/hertz-studio/src/online/aggregate.rs": "50aa6acb951474ba5a0ab4a39898687fbe7598301e99fa0c601b6218aded866d",
+        "crates/hertz-studio/src/online/mod.rs": "c5f7d550723f8e50a2da774d62375ab54010401c9c5f4b613afedcc7d316a84d",
+        "crates/hertz-studio/src/online/provider.rs": "26d86a66e873a911610258a6ab93ce56dff357e172d679e38e9a9c02da4f01ae",
+        "crates/hertz-studio/src/online/search_gate.rs": "4e74eac052eb3e72747a38a8d12acdae1bdc42997499155531ecd6a8a60143d4",
+        "crates/hertz-studio/src/online/search_pressure.rs": "b175ecdaadf68a6436cdfc02bebcde9fe4beb6690fdeecfe5432ec704461d0d1",
+        "crates/hertz-studio/src/routes.rs": "635bd82109471d7b267bdbafb1781d587d50ea206eba885fbaf9db30b92aaff8",
+        "crates/hertz-studio/src/rpc/online.rs": "ed6b25c8f2c1f8a8ee571a4c022bfbdcf71e83fd77101146575959527d2fbe20"
+      },
+      "productionGate": {
+        "permits": 4,
+        "totalSeconds": 6,
+        "waitSeconds": 2,
+        "waiters": 16
+      },
+      "closedBeforeRequest": 15,
+      "outerOutcomeCounts": {
+        "0:search_busy": 1006,
+        "2:ok": 1008,
+        "3:ok": 923,
+        "0:cancelled": 2,
+        "1:cancelled": 245,
+        "1:ok": 486,
+        "3:cancelled": 85,
+        "1:upstream_rejected": 234,
+        "1:search_busy": 43
+      },
+      "results": {
+        "bodyDeadlineMs": [
+          6008.9317,
+          6008.8841999999995,
+          6009.5428,
+          6010.571
+        ],
+        "finalAvailable": [
+          4,
+          16
+        ],
+        "finalLocalExecution": 0,
+        "overflowRejectMs": 3.5777,
+        "peakLocalExecution": 4,
+        "peakUpstream": 5,
+        "requests": 4032,
+        "sustainedSeconds": 60.4586756,
+        "upstreamDisconnected": 165,
+        "upstreamReplied": 2115,
+        "upstreamStarted": 2280,
+        "waves": 126
+      }
+    },
+    "full": {
+      "archive": "windows-x64-full-20261018.json.gz",
+      "rawSha256": "8b523c9b24b7bd3cc4a7658105ae6174ca4b4dfa7f1d112d319ca1537980f132",
+      "gzipSha256": "b5122076c72eb336397744d0c911a1c086d7c4ea7e8fe167c2fb521af4ecc8de",
+      "rawBytes": 655421,
+      "gzipBytes": 38367,
+      "startedAt": "2026-10-18T02:58:33.000Z",
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "profile": "test",
+      "runtimeWorkers": 4,
+      "testBinaryHash": "8bfff5dd6053123b328dd98e64dcd88bacc0cc7117f371b32997f0d0f0e8f61f",
+      "sourceHashes": {
+        "Cargo.lock": "aee27bb3a1e90730ddbb21da42b4cbfed6abd281b49e42500e82cec5f670cbc1",
+        "crates/hertz-studio/Cargo.toml": "e37d3358bb88c0144f4e3f700cf1980c824c3377317b7d6c5290663aed5c8443",
+        "crates/hertz-studio/src/online/aggregate.rs": "50aa6acb951474ba5a0ab4a39898687fbe7598301e99fa0c601b6218aded866d",
+        "crates/hertz-studio/src/online/mod.rs": "c5f7d550723f8e50a2da774d62375ab54010401c9c5f4b613afedcc7d316a84d",
+        "crates/hertz-studio/src/online/provider.rs": "26d86a66e873a911610258a6ab93ce56dff357e172d679e38e9a9c02da4f01ae",
+        "crates/hertz-studio/src/online/search_gate.rs": "4e74eac052eb3e72747a38a8d12acdae1bdc42997499155531ecd6a8a60143d4",
+        "crates/hertz-studio/src/online/search_pressure.rs": "b175ecdaadf68a6436cdfc02bebcde9fe4beb6690fdeecfe5432ec704461d0d1",
+        "crates/hertz-studio/src/routes.rs": "635bd82109471d7b267bdbafb1781d587d50ea206eba885fbaf9db30b92aaff8",
+        "crates/hertz-studio/src/rpc/online.rs": "ed6b25c8f2c1f8a8ee571a4c022bfbdcf71e83fd77101146575959527d2fbe20"
+      },
+      "productionGate": {
+        "permits": 4,
+        "totalSeconds": 6,
+        "waitSeconds": 2,
+        "waiters": 16
+      },
+      "closedBeforeRequest": 18,
+      "outerOutcomeCounts": {
+        "1:search_busy": 184,
+        "3:ok": 998,
+        "0:search_busy": 1032,
+        "2:ok": 1032,
+        "1:upstream_rejected": 198,
+        "1:ok": 433,
+        "1:cancelled": 217,
+        "3:cancelled": 34
+      },
+      "results": {
+        "bodyDeadlineMs": [
+          6006.9487,
+          6007.099,
+          6007.6125999999995,
+          6007.6801
+        ],
+        "finalAvailable": [
+          4,
+          16
+        ],
+        "finalLocalExecution": 0,
+        "overflowRejectMs": 4.0635,
+        "peakLocalExecution": 4,
+        "peakUpstream": 4,
+        "requests": 4128,
+        "sustainedSeconds": 60.1103262,
+        "upstreamDisconnected": 160,
+        "upstreamReplied": 2152,
+        "upstreamStarted": 2312,
+        "waves": 129
+      }
+    }
+  }
+}

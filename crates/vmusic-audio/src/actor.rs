@@ -149,6 +149,8 @@ pub struct AudioHandle {
     tx: Sender<Command>,
     snapshot: std::sync::Arc<ArcSwap<PlayerSnapshot>>,
     events: broadcast::Sender<AudioEvent>,
+    control_events:
+        std::sync::Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<AudioEvent>>>>,
     /// 真正装配成功的那个后端的名字，由 actor 在 init 握手时送回。配置里的
     /// `audio.backend` 只是「请求」，空值或拼错时它跟跑起来的东西不是一回事。
     backend: &'static str,
@@ -165,6 +167,20 @@ impl AudioHandle {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AudioEvent> {
         self.events.subscribe()
+    }
+
+    /// Subscribe first, then read the authoritative snapshot so callers can
+    /// recover from a lagged event stream without missing a newer transition.
+    pub fn subscribe_with_snapshot(&self) -> (broadcast::Receiver<AudioEvent>, PlayerSnapshot) {
+        let receiver = self.events.subscribe();
+        let snapshot = self.snapshot();
+        (receiver, snapshot)
+    }
+
+    /// Take the single-consumer queue for transitions and natural ends. These
+    /// control edges must survive lag in the lossy snapshot/spectrum broadcast.
+    pub fn take_control_events(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<AudioEvent>> {
+        self.control_events.lock().ok()?.take()
     }
 
     pub async fn load(&self, uri: &str, track_id: Option<String>) -> Result<MediaInfo, AudioError> {
@@ -315,13 +331,24 @@ pub async fn spawn(kind: BackendKind) -> Result<(AudioHandle, JoinHandle<()>), A
     let (tx, rx) = mpsc::channel::<Command>();
     let snapshot = std::sync::Arc::new(ArcSwap::from_pointee(PlayerSnapshot::default()));
     let (events, _) = broadcast::channel(64);
+    let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let actor_snapshot = snapshot.clone();
     let actor_events = events.clone();
+    let actor_control_events = control_tx.clone();
 
     let handle = std::thread::Builder::new()
         .name("vmusic-audio".into())
-        .spawn(move || run(kind, rx, actor_snapshot, actor_events, init_tx))
+        .spawn(move || {
+            run(
+                kind,
+                rx,
+                actor_snapshot,
+                actor_events,
+                actor_control_events,
+                init_tx,
+            )
+        })
         .map_err(|e| AudioError::BackendInit(e.to_string()))?;
 
     match init_rx.await {
@@ -330,6 +357,7 @@ pub async fn spawn(kind: BackendKind) -> Result<(AudioHandle, JoinHandle<()>), A
                 tx,
                 snapshot,
                 events,
+                control_events: std::sync::Arc::new(std::sync::Mutex::new(Some(control_rx))),
                 backend,
             },
             handle,
@@ -348,6 +376,7 @@ fn run(
     rx: Receiver<Command>,
     snapshot: std::sync::Arc<ArcSwap<PlayerSnapshot>>,
     events: broadcast::Sender<AudioEvent>,
+    control_events: tokio::sync::mpsc::UnboundedSender<AudioEvent>,
     init_tx: oneshot::Sender<Result<&'static str, AudioError>>,
 ) {
     let mut backend: Box<dyn AudioBackend> = match kind {
@@ -373,6 +402,7 @@ fn run(
     tracing::info!("audio actor started with backend '{}'", backend.name());
 
     let mut state = PlayerSnapshot::default();
+    let mut last_broadcast = None;
     let mut spectrum = vec![0f32; SPECTRUM_BANDS];
     let mut last_spectrum = Instant::now();
     // 「本首的 Ended 是否已发过」门闩。它必须在每次换装/停止后复位，否则进程
@@ -388,7 +418,13 @@ fn run(
         }) {
             backend.clear_next();
         }
-        if settle_transition(&mut *backend, &mut state, &snapshot, &events) {
+        if settle_transition(
+            &mut *backend,
+            &mut state,
+            &snapshot,
+            &events,
+            &control_events,
+        ) {
             ended_emitted = false;
         }
         match command {
@@ -410,7 +446,13 @@ fn run(
         // 后端自己线程上的延迟状态机：淡出到点再暂停/停止、换装、尾部淡出。
         // 必须在命令处理之后、Ended 判定之前——换装会复位解码进度与门闩输入。
         backend.maintain();
-        if settle_transition(&mut *backend, &mut state, &snapshot, &events) {
+        if settle_transition(
+            &mut *backend,
+            &mut state,
+            &snapshot,
+            &events,
+            &control_events,
+        ) {
             ended_emitted = false;
         }
         if let Some(error) = backend.take_transport_error() {
@@ -426,21 +468,28 @@ fn run(
             state.playing = false;
             ended_emitted = true;
             tracing::warn!(?track_id, "decoder stalled");
-            snapshot.store(std::sync::Arc::new(state.clone()));
+            publish(&snapshot, &state);
             let _ = events.send(AudioEvent::DecodeError {
                 track_id,
                 generation: state.generation,
             });
-            let _ = events.send(AudioEvent::Snapshot(state.clone()));
+            broadcast_snapshot(&events, &state, &mut last_broadcast);
         }
 
-        emit_ended(&mut *backend, &mut state, &events, &mut ended_emitted);
+        emit_ended(
+            &mut *backend,
+            &mut state,
+            &snapshot,
+            &events,
+            &control_events,
+            &mut ended_emitted,
+        );
 
         state.position_ms = backend.position_ms();
         state.duration_ms = backend.duration_ms();
 
-        let _ = events.send(AudioEvent::Snapshot(state.clone()));
-        snapshot.store(std::sync::Arc::new(state.clone()));
+        publish(&snapshot, &state);
+        broadcast_snapshot(&events, &state, &mut last_broadcast);
 
         if last_spectrum.elapsed() >= SPECTRUM_INTERVAL {
             last_spectrum = Instant::now();
@@ -462,13 +511,56 @@ fn run(
 /// （`a_completed_command_is_visible_immediately` 就是钉这个不变量的回归测试，
 /// 在机器有负载时能稳定复现失败）。先发布再回复，窗口就不存在了。
 fn publish(sink: &ArcSwap<PlayerSnapshot>, state: &PlayerSnapshot) {
-    sink.store(std::sync::Arc::new(state.clone()));
+    if !same_snapshot(&sink.load(), state) {
+        sink.store(std::sync::Arc::new(state.clone()));
+    }
+}
+
+fn broadcast_snapshot(
+    events: &broadcast::Sender<AudioEvent>,
+    state: &PlayerSnapshot,
+    previous: &mut Option<PlayerSnapshot>,
+) {
+    if previous
+        .as_ref()
+        .is_some_and(|old| same_snapshot(old, state))
+    {
+        return;
+    }
+    if events.send(AudioEvent::Snapshot(state.clone())).is_ok() {
+        *previous = Some(state.clone());
+    }
+}
+
+fn same_snapshot(a: &PlayerSnapshot, b: &PlayerSnapshot) -> bool {
+    // Exhaustive destructuring makes newly added snapshot fields a compile-time
+    // reminder to extend this comparison. Bit comparison also handles NaN stably.
+    let PlayerSnapshot {
+        track_id,
+        position_ms,
+        duration_ms,
+        playing,
+        volume,
+        mode,
+        device,
+        generation,
+    } = a;
+    track_id == &b.track_id
+        && *position_ms == b.position_ms
+        && *duration_ms == b.duration_ms
+        && *playing == b.playing
+        && volume.to_bits() == b.volume.to_bits()
+        && *mode == b.mode
+        && device == &b.device
+        && *generation == b.generation
 }
 
 fn emit_ended(
     backend: &mut dyn AudioBackend,
     state: &mut PlayerSnapshot,
+    sink: &ArcSwap<PlayerSnapshot>,
     events: &broadcast::Sender<AudioEvent>,
+    control_events: &tokio::sync::mpsc::UnboundedSender<AudioEvent>,
     emitted: &mut bool,
 ) {
     if !*emitted && backend.finished() {
@@ -477,10 +569,15 @@ fn emit_ended(
         if let Err(error) = backend.pause() {
             let _ = events.send(AudioEvent::Error(error.to_string()));
         }
-        let _ = events.send(AudioEvent::Ended {
+        state.position_ms = backend.position_ms();
+        state.duration_ms = backend.duration_ms();
+        publish(sink, state);
+        let ended = AudioEvent::Ended {
             generation: state.generation,
             track_id: state.track_id.clone(),
-        });
+        };
+        let _ = control_events.send(ended.clone());
+        let _ = events.send(ended);
     }
 }
 
@@ -489,6 +586,7 @@ fn settle_transition(
     state: &mut PlayerSnapshot,
     sink: &ArcSwap<PlayerSnapshot>,
     events: &broadcast::Sender<AudioEvent>,
+    control_events: &tokio::sync::mpsc::UnboundedSender<AudioEvent>,
 ) -> bool {
     match backend.take_next_event() {
         Some(vmusic_core::NextEvent::Transitioned {
@@ -502,11 +600,13 @@ fn settle_transition(
             state.position_ms = backend.position_ms();
             state.playing = true;
             publish(sink, state);
-            let _ = events.send(AudioEvent::Transitioned {
+            let transitioned = AudioEvent::Transitioned {
                 from_generation,
                 generation: state.generation,
                 track_id,
-            });
+            };
+            let _ = control_events.send(transitioned.clone());
+            let _ = events.send(transitioned);
             true
         }
         Some(vmusic_core::NextEvent::Bypassed {
@@ -710,6 +810,113 @@ mod tests {
             assert!(Instant::now() < deadline, "{what} 在 1s 内没有达成");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[tokio::test]
+    async fn stable_paused_state_does_not_publish_redundant_snapshots() {
+        let (audio, actor) = spawn(BackendKind::Null).await.unwrap();
+        let mut events = audio.subscribe();
+        audio.set_volume(0.25).await.unwrap();
+        // Wait for the command's broadcast, independently of thread scheduling.
+        loop {
+            if let AudioEvent::Snapshot(state) =
+                tokio::time::timeout(Duration::from_secs(1), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            {
+                if state.volume == 0.25 {
+                    break;
+                }
+            }
+        }
+        let mut repeats = 0;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+        while let Ok(Ok(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
+            if matches!(event, AudioEvent::Snapshot(_)) {
+                repeats += 1;
+            }
+        }
+        audio.shutdown();
+        actor.join().unwrap();
+        assert_eq!(repeats, 0, "unchanged paused snapshots must be suppressed");
+    }
+
+    #[tokio::test]
+    async fn lagged_receiver_can_rebase_on_the_authoritative_snapshot() {
+        let (audio, actor) = spawn(BackendKind::Null).await.unwrap();
+        let mut lagging = audio.subscribe();
+        for index in 0..80 {
+            audio.set_volume(index as f32 / 100.0).await.unwrap();
+        }
+        assert!(matches!(
+            lagging.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(_))
+        ));
+        let (mut recovered, snapshot) = audio.subscribe_with_snapshot();
+        assert!((snapshot.volume - 0.79).abs() < 1e-6);
+        assert!(matches!(
+            recovered.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        audio.shutdown();
+        actor.join().unwrap();
+    }
+
+    #[test]
+    fn unchanged_snapshot_is_retried_after_broadcast_had_no_receivers() {
+        let (events, receiver) = broadcast::channel(1);
+        drop(receiver);
+        let state = PlayerSnapshot::default();
+        let mut previous = None;
+        broadcast_snapshot(&events, &state, &mut previous);
+        let mut receiver = events.subscribe();
+        broadcast_snapshot(&events, &state, &mut previous);
+        assert!(matches!(receiver.try_recv(), Ok(AudioEvent::Snapshot(_))));
+    }
+
+    #[test]
+    fn unchanged_shared_snapshots_reuse_the_existing_allocation() {
+        let mut state = PlayerSnapshot::default();
+        let sink = ArcSwap::from_pointee(state.clone());
+        let initial = sink.load_full();
+        publish(&sink, &state);
+        assert!(std::sync::Arc::ptr_eq(&initial, &sink.load_full()));
+        state.position_ms = 1;
+        publish(&sink, &state);
+        assert!(!std::sync::Arc::ptr_eq(&initial, &sink.load_full()));
+        assert_eq!(sink.load().position_ms, 1);
+    }
+
+    #[tokio::test]
+    async fn playback_still_broadcasts_advancing_positions() {
+        let (audio, actor) = spawn(BackendKind::Null).await.unwrap();
+        audio
+            .load("current.wav", Some("current".into()))
+            .await
+            .unwrap();
+        let mut events = audio.subscribe();
+        audio.play().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let mut first = None;
+            loop {
+                if let AudioEvent::Snapshot(state) = events.recv().await.unwrap() {
+                    // play() 之后订阅者仍可能先取到入队前那条 playing=false 的
+                    // 快照；等真正进入播放态，再比较位置是否推进。
+                    if !state.playing {
+                        continue;
+                    }
+                    let start = *first.get_or_insert(state.position_ms);
+                    if state.position_ms > start {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        audio.shutdown();
+        actor.join().unwrap();
     }
 
     #[tokio::test]
@@ -932,15 +1139,37 @@ mod tests {
             assert_eq!(state.track_id.as_deref(), Some("current"));
         }
         assert_eq!(backend.prepare_calls, 1);
-        let (events, mut rx) = broadcast::channel(8);
+        let (events, mut rx) = broadcast::channel(1);
+        let (control_events, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut emitted = false;
-        emit_ended(&mut backend, &mut state, &events, &mut emitted);
+        emit_ended(
+            &mut backend,
+            &mut state,
+            &sink,
+            &events,
+            &control_events,
+            &mut emitted,
+        );
+        events.send(AudioEvent::Spectrum(vec![0.0])).unwrap();
         assert!(matches!(
-            rx.try_recv().unwrap(),
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(_))
+        ));
+        assert!(matches!(
+            control_rx.try_recv().unwrap(),
             AudioEvent::Ended { generation: 7, .. }
         ));
-        emit_ended(&mut backend, &mut state, &events, &mut emitted);
-        assert!(rx.try_recv().is_err());
+        assert!(!sink.load().playing);
+        emit_ended(
+            &mut backend,
+            &mut state,
+            &sink,
+            &events,
+            &control_events,
+            &mut emitted,
+        );
+        assert!(matches!(rx.try_recv().unwrap(), AudioEvent::Spectrum(_)));
+        assert!(control_rx.try_recv().is_err());
     }
 
     #[test]
@@ -965,10 +1194,17 @@ mod tests {
         };
         let sink = ArcSwap::from_pointee(state.clone());
         let (events, mut rx) = broadcast::channel(8);
+        let (control_events, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
         let command = Command::Stop(unit_reply());
         assert!(command.cancels_next());
         backend.clear_next();
-        assert!(settle_transition(&mut backend, &mut state, &sink, &events));
+        assert!(settle_transition(
+            &mut backend,
+            &mut state,
+            &sink,
+            &events,
+            &control_events,
+        ));
         assert_eq!(sink.load().track_id.as_deref(), Some("next"));
         assert_eq!(sink.load().generation, 8);
         assert!(matches!(
@@ -979,7 +1215,21 @@ mod tests {
                 ..
             }
         ));
-        assert!(!settle_transition(&mut backend, &mut state, &sink, &events));
+        assert!(matches!(
+            control_rx.try_recv().unwrap(),
+            AudioEvent::Transitioned {
+                from_generation: 7,
+                generation: 8,
+                ..
+            }
+        ));
+        assert!(!settle_transition(
+            &mut backend,
+            &mut state,
+            &sink,
+            &events,
+            &control_events,
+        ));
         apply(&mut backend, &mut state, &sink, command).unwrap();
         assert!(!state.playing);
         assert!(!backend.next_prepared);

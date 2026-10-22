@@ -17,6 +17,10 @@
 
 use vmusic_core::{LyricDocument, LyricLine, LyricSource, LyricWord};
 
+mod structured;
+pub use structured::validate as validate_document;
+pub use structured::{parse_import, ImportError, MAX_BYTES, MAX_LINES, MAX_TIME_MS, MAX_WORDS};
+
 /// Metadata tags we pull out of the header; the rest are ignored.
 #[derive(Debug, Default)]
 pub struct LrcMeta {
@@ -31,8 +35,17 @@ pub struct LrcMeta {
 /// lines rather than an error, because a half-broken lyric file is still more
 /// useful to the user than no lyrics at all.
 pub fn parse_lrc(input: &str) -> LyricDocument {
+    parse_lrc_bounded(input).unwrap_or_else(|_| LyricDocument::empty())
+}
+
+fn parse_lrc_bounded(input: &str) -> Result<LyricDocument, ImportError> {
+    if input.len() > MAX_BYTES {
+        return Err(ImportError::Limit);
+    }
     let mut meta = LrcMeta::default();
     let mut lines: Vec<LyricLine> = Vec::new();
+    let mut word_count = 0;
+    let mut text_bytes = 0;
 
     for raw in input.lines() {
         let raw = raw.trim();
@@ -56,7 +69,12 @@ pub fn parse_lrc(input: &str) -> LyricDocument {
             continue;
         }
 
-        for line in parse_lyric_line(raw) {
+        for line in parse_lyric_line(raw)? {
+            word_count += line.words.len();
+            text_bytes += line.text.len();
+            if lines.len() >= MAX_LINES || word_count > MAX_WORDS || text_bytes > MAX_BYTES {
+                return Err(ImportError::Limit);
+            }
             lines.push(line);
         }
     }
@@ -68,7 +86,15 @@ pub fn parse_lrc(input: &str) -> LyricDocument {
         }
     }
 
-    LyricDocument {
+    let word_lines = lines.iter().filter(|l| !l.words.is_empty()).count();
+    let precision = if word_lines == 0 {
+        "line"
+    } else if word_lines == lines.len() {
+        "word"
+    } else {
+        "mixed"
+    };
+    Ok(LyricDocument {
         source: if lines.is_empty() {
             LyricSource::None
         } else {
@@ -77,7 +103,18 @@ pub fn parse_lrc(input: &str) -> LyricDocument {
         offset_ms: meta.offset_ms,
         lines,
         translation: None,
-    }
+        format: Some(
+            if word_lines == 0 {
+                "lrc"
+            } else {
+                "enhanced_lrc"
+            }
+            .into(),
+        ),
+        timing_precision: Some(precision.into()),
+        romanization: None,
+        origin: None,
+    })
 }
 
 fn tag_value<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
@@ -95,7 +132,7 @@ fn tag_value<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
 
 /// One physical line may expand to several logical lines (repeated timestamps)
 /// and may carry inline word timings.
-fn parse_lyric_line(raw: &str) -> Vec<LyricLine> {
+fn parse_lyric_line(raw: &str) -> Result<Vec<LyricLine>, ImportError> {
     // Collect (timestamp, following text) runs.
     let mut runs: Vec<(u64, String)> = Vec::new();
     let bytes = raw.as_bytes();
@@ -108,6 +145,9 @@ fn parse_lyric_line(raw: &str) -> Vec<LyricLine> {
             if let Some((ts, consumed)) = try_timestamp(&raw[i..]) {
                 if let Some(prev) = pending {
                     runs.push((prev, std::mem::take(&mut buf)));
+                    if runs.len() > MAX_WORDS {
+                        return Err(ImportError::Limit);
+                    }
                 } else if !buf.is_empty() {
                     // Text before the first timestamp on this line: keep it as
                     // the tail of the previous run if we have one.
@@ -130,7 +170,7 @@ fn parse_lyric_line(raw: &str) -> Vec<LyricLine> {
     }
 
     if runs.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Runs that share a timestamp-free continuation form word timings of one
@@ -152,7 +192,10 @@ fn parse_lyric_line(raw: &str) -> Vec<LyricLine> {
     // unambiguous marker for the repeated-stamp form.
     if runs.len() > 1 && runs[0].1.is_empty() {
         let shared: String = runs.iter().map(|(_, t)| t.as_str()).collect();
-        return runs
+        if runs.len() > MAX_LINES || shared.len().saturating_mul(runs.len()) > MAX_BYTES {
+            return Err(ImportError::Limit);
+        }
+        return Ok(runs
             .into_iter()
             .map(|(start_ms, _)| LyricLine {
                 start_ms,
@@ -160,7 +203,7 @@ fn parse_lyric_line(raw: &str) -> Vec<LyricLine> {
                 text: shared.clone(),
                 words: Vec::new(),
             })
-            .collect();
+            .collect());
     }
 
     // A single run means no word-level information is present.
@@ -171,12 +214,12 @@ fn parse_lyric_line(raw: &str) -> Vec<LyricLine> {
         first_text.clone()
     };
 
-    vec![LyricLine {
+    Ok(vec![LyricLine {
         start_ms: *start_ms,
         end_ms: None,
         text,
         words: if has_words { words } else { Vec::new() },
-    }]
+    }])
 }
 
 /// Recognises `[mm:ss.xx]`, `[mm:ss.xxx]` and `[mm:ss:xx]`.
@@ -197,8 +240,14 @@ fn try_timestamp(s: &str) -> Option<(u64, usize)> {
     };
     let minutes: u64 = mm.trim().parse().ok()?;
     let seconds: u64 = ss.trim().parse().ok()?;
+    if seconds >= 60 {
+        return None;
+    }
     // Fractional part may be `.25`, `25`, `.250` — normalise to milliseconds.
     let frac = frac.trim().trim_start_matches('.');
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let millis: u64 = if frac.is_empty() {
         0
     } else if frac.len() <= 3 {
@@ -207,7 +256,11 @@ fn try_timestamp(s: &str) -> Option<(u64, usize)> {
     } else {
         frac[..3].parse().ok()?
     };
-    Some((minutes * 60_000 + seconds * 1_000 + millis, end + 1))
+    let timestamp = minutes
+        .checked_mul(60_000)?
+        .checked_add(seconds.checked_mul(1_000)?)?
+        .checked_add(millis)?;
+    Some((timestamp, end + 1))
 }
 
 /// Applies the document offset to every timestamp.
@@ -224,20 +277,20 @@ pub fn apply_offset(doc: &mut LyricDocument) {
 
     for line in &mut doc.lines {
         line.start_ms = if positive {
-            line.start_ms + shift_abs
+            line.start_ms.saturating_add(shift_abs)
         } else {
             line.start_ms.saturating_sub(shift_abs)
         };
         line.end_ms = line.end_ms.map(|e| {
             if positive {
-                e + shift_abs
+                e.saturating_add(shift_abs)
             } else {
                 e.saturating_sub(shift_abs)
             }
         });
         for word in &mut line.words {
             word.start_ms = if positive {
-                word.start_ms + shift_abs
+                word.start_ms.saturating_add(shift_abs)
             } else {
                 word.start_ms.saturating_sub(shift_abs)
             };
@@ -245,13 +298,23 @@ pub fn apply_offset(doc: &mut LyricDocument) {
             // 只偏起点会让扫色边界整体错开一个偏移量。
             word.end_ms = word.end_ms.map(|e| {
                 if positive {
-                    e + shift_abs
+                    e.saturating_add(shift_abs)
                 } else {
                     e.saturating_sub(shift_abs)
                 }
             });
         }
     }
+}
+
+/// Match Stage's ordered presentation: source+per-track first, global second.
+/// Saturation at zero makes combining the two shifts observably different.
+pub fn apply_presentation_offset(doc: &mut LyricDocument, global: i64) {
+    apply_offset(doc);
+    let source = doc.offset_ms;
+    doc.offset_ms = global;
+    apply_offset(doc);
+    doc.offset_ms = source.saturating_add(global);
 }
 
 /// 把翻译 LRC 对齐到已解析文档上，产出与 `doc.lines` 等长的平行数组。

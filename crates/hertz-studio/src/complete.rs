@@ -169,6 +169,9 @@ fn doc_to_lrc(doc: &vmusic_core::LyricDocument) -> String {
         format!("[{mm:02}:{ss:02}.{ms:03}]")
     }
     let mut out = String::new();
+    if doc.offset_ms != 0 {
+        out.push_str(&format!("[offset:{}]\n", doc.offset_ms));
+    }
     for line in &doc.lines {
         if line.words.is_empty() {
             out.push_str(&format!("{}{}\n", stamp(line.start_ms), line.text));
@@ -244,7 +247,7 @@ async fn missing_slots(state: &AppState, track: &vmusic_core::Track) -> Value {
 /// 单曲落地：按用户选中的候选补缺。`candidate_id` 为 None 表示「不匹配」，
 /// 只记决定、不写数据。
 async fn apply_one(
-    state: &AppState,
+    state: &Arc<AppState>,
     track: &vmusic_core::Track,
     source: &str,
     candidate_id: Option<&str>,
@@ -258,6 +261,14 @@ async fn apply_one(
         return Ok(json!({ "status": "skipped", "reason": "已标记不再自动匹配" }));
     };
 
+    // Freeze lyric identity before any network wait or our own metadata writes.
+    let lyric_baseline = if slot_enabled(slots, "lyrics") {
+        let (current, saved) = crate::lyrics::snapshot(state, &track.id).await?;
+        let existing = crate::lyrics::raw_local(&current, saved.content.as_deref()).await;
+        existing.lines.is_empty().then_some((current, saved))
+    } else {
+        None
+    };
     let ctx = online_ctx(state);
     // 候选详情重新取一次：封面/专辑以平台当前值为准，不信任前端回传的字段。
     let detail = online::detail(&ctx, source, candidate_id).await?;
@@ -267,6 +278,18 @@ async fn apply_one(
         cover: false,
         lyrics: false,
     };
+
+    // 无歌词（三层都空）→ 导入在线歌词原文。
+    if let Some((current, saved)) = lyric_baseline {
+        let doc = online::lyric(&ctx, source, candidate_id)
+            .await
+            .unwrap_or_else(|_| vmusic_core::LyricDocument::empty());
+        if !doc.lines.is_empty() {
+            let lrc = doc_to_lrc(&doc);
+            filled.lyrics =
+                crate::lyrics::import_if_unchanged(state, &current, &saved, lrc).await?;
+        }
+    }
 
     // 专辑缺失 → 写覆盖层（不碰文件标签）。
     if slot_enabled(slots, "album")
@@ -297,23 +320,6 @@ async fn apply_one(
             match download_cover(state, &track.id, &cover_url).await {
                 Ok(()) => filled.cover = true,
                 Err(e) => tracing::debug!("补全封面下载失败（不影响其余字段）: {e:?}"),
-            }
-        }
-    }
-
-    // 无歌词（三层都空）→ 导入在线歌词原文。
-    if slot_enabled(slots, "lyrics") {
-        let existing = crate::routes::lyric_doc_for(state, track).await;
-        if existing.lines.is_empty() {
-            let doc = online::lyric(&ctx, source, candidate_id)
-                .await
-                .unwrap_or_else(|_| vmusic_core::LyricDocument::empty());
-            if !doc.lines.is_empty() {
-                let lrc = doc_to_lrc(&doc);
-                vmusic_store::lyrics::import(&state.db, &track.id, &lrc)
-                    .await
-                    .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
-                filled.lyrics = true;
             }
         }
     }
@@ -565,6 +571,10 @@ mod tests {
                 },
             ],
             translation: None,
+            format: None,
+            timing_precision: None,
+            romanization: None,
+            origin: None,
         };
         let parsed = vmusic_lyrics::parse_lrc(&doc_to_lrc(&doc));
         assert_eq!(parsed.lines.len(), 2);
@@ -573,5 +583,16 @@ mod tests {
         // 逐词行还原出词级时间戳（词序保持）。
         let words: Vec<u64> = parsed.lines[0].words.iter().map(|w| w.start_ms).collect();
         assert_eq!(words, vec![165_123, 166_000]);
+    }
+
+    #[test]
+    fn completion_preserves_raw_file_offset_once() {
+        let doc = vmusic_lyrics::parse_lrc("[offset:250]\n[00:01.00]hello[00:01.50]world");
+        let mut restored = vmusic_lyrics::parse_import(&doc_to_lrc(&doc), "lrc").unwrap();
+        assert_eq!(restored.offset_ms, 250);
+        assert_eq!(restored.lines[0].start_ms, 1000);
+        vmusic_lyrics::apply_offset(&mut restored);
+        assert_eq!(restored.lines[0].start_ms, 1250);
+        assert_eq!(restored.lines[0].words[1].start_ms, 1750);
     }
 }

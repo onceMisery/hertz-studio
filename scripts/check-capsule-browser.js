@@ -8,7 +8,7 @@ const path = require('node:path');
 const playwright = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const web = path.resolve(__dirname, '../plugin/ui');
 const output = path.resolve(__dirname, '../output/playwright/capsule');
-const skins = ['orbit', 'classic', 'sheen', 'workbench', 'liunian', 'ios', 'qingfeng', 'chaoxi', 'heijiao'];
+const skins = ['orbit', 'classic', 'liunian', 'qingfeng', 'heijiao'];
 const source = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
 const html = source.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '');
 const app = fs.readFileSync(path.join(web, 'app.js'), 'utf8');
@@ -29,7 +29,9 @@ function contrast(foreground, background) {
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const engine = process.env.CAPSULE_BROWSER || 'chromium';
-  const browser = await playwright[engine].launch({ headless: true });
+  const launchOptions = { headless: true };
+  if (process.env.PLAYWRIGHT_EXECUTABLE_PATH) launchOptions.executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+  const browser = await playwright[engine].launch(launchOptions);
   const evidence = [];
   try {
     for (const scale of [1, 2]) {

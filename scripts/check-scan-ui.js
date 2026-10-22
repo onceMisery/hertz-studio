@@ -22,6 +22,7 @@ const timers = new Map();
 const errors = node();
 const ui = {
   scanRoot: {value: 'D:\\Music'}, scanBtn: node(), scanLabel: node(),
+  scanPanel: {hidden: false},
   scanRoots: node(), scanCancel: node(), scanBar: node(),
   scanErrors: {...node(), querySelector: () => errors},
 };
@@ -82,5 +83,19 @@ const root = {path: 'D:\\Music', enabled: true, last_error: null, last_scanned_a
   assert.equal(ui.scanErrors.hidden, false);
   assert.match(errors.children[0].textContent, /bad.wav.*cannot decode/);
   assert.match(ui.scanLabel.textContent, /失败 1/);
+
+  const failedRead = run('refreshScanStatus()');
+  requests.shift().reject(new Error('temporary outage'));
+  await failedRead;
+  assert.equal(timers.size, 1, 'a transient status failure retries while the panel is open');
+  const retry = timers.entries().next().value;
+  timers.delete(retry[0]);
+  retry[1]();
+  await flush();
+  requests.shift().resolve({running: false, root: null, phase: '', done: 0, total: 0,
+    added: 0, updated: 0, skipped: 0, removed: 0, failed: 0, errors: []});
+  await flush();
+  requests.shift().resolve({roots: []}); await flush();
+  assert.equal(timers.size, 0, 'a successful retry clears the retry timer');
   console.log('Directory controls, stale roots and terminal scan status checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

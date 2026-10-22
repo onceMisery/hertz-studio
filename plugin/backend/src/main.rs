@@ -25,7 +25,8 @@
 //! 任何日志都不能写 stdout，否则会把帧写花。这里显式把 tracing 接到 stderr。
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use dbx_plugin_sdk::{
     PluginEmitter, PluginError, PluginHandler, PluginMetadata, PluginServer, RequestContext,
@@ -34,7 +35,6 @@ use hertz_studio::error::{ErrorBody, ErrorDetail};
 use hertz_studio::rpc::{decode_base64, Call, Op, RawBody, Rpc, RpcResult};
 use hertz_studio::state::AppState;
 use serde_json::{json, Value};
-use tokio::sync::broadcast;
 
 /// 必须与 `plugin/manifest.json` 的 `id` 一致：宿主按它过滤事件，不一致的话
 /// UI 一个事件都收不到。
@@ -58,8 +58,16 @@ struct Plugin {
     /// 保活音频 actor 的线程句柄。丢掉句柄只会 detach 而不会杀线程，但显式持有
     /// 到进程结束更贴近独立形态的语义。
     _booted: hertz_studio::bootstrap::Booted,
-    /// 事件转发器是否已启动。
-    forwarded: OnceLock<()>,
+    /// Whether the current event-forwarding task is still active.
+    event_forwarder_running: Arc<AtomicBool>,
+}
+
+struct EventForwarderGuard(Arc<AtomicBool>);
+
+impl Drop for EventForwarderGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl PluginHandler for Plugin {
@@ -105,50 +113,50 @@ impl PluginHandler for Plugin {
             query,
             body,
             raw,
+            // 短写幂等键（技术路线 R2-P）：与 HTTP 的 x-client-operation-id 头
+            // 同源同义，宿主信封可选携带。
+            client_operation_id: envelope_str(&params, "client_operation_id")?.map(str::to_string),
         }));
         Ok(envelope_result(result))
     }
 }
 
 impl Plugin {
-    /// 把 `state.events` 上的服务端事件转发到 UI。幂等：只有第一次调用真正起任务。
+    /// 把 `state.events` 上的服务端事件转发到 UI。运行中幂等，任务退出后可重启。
     ///
     /// 订阅之前产生的事件会丢，这与独立形态的 WS 语义一致（连接建立时补发一帧
     /// 完整 state，UI 启动时也会主动拉一次 `/v1/state`），所以不影响正确性。
     fn start_event_forwarder(&self, emitter: &PluginEmitter) {
-        if self.forwarded.set(()).is_err() {
+        if self
+            .event_forwarder_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return;
         }
         let mut receiver = self.state.events.subscribe();
         let state = self.state.clone();
         let emitter = emitter.clone();
+        // Mirror the WS handshake: a subscriber gets one full state immediately.
+        // Later state changes are only published on transitions, so an initial
+        // event also keeps the forwarding path observable when idle.
+        if let Ok(params) =
+            serde_json::to_value(hertz_studio::state::WsEvent::State(state.audio.snapshot()))
+        {
+            let _ = emitter.event(EVENT_METHOD, params);
+        }
+        let running = self.event_forwarder_running.clone();
         self.runtime.spawn(async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        let Ok(params) = serde_json::to_value(&event) else {
-                            continue;
-                        };
-                        if let Err(error) = emitter.event(EVENT_METHOD, params) {
-                            tracing::warn!("事件转发失败，停止下发: {}", error.message);
-                            break;
-                        }
+            let _guard = EventForwarderGuard(running);
+            'forward: while let Some(events) = state.next_event_batch(&mut receiver).await {
+                for event in events.into_iter().flatten() {
+                    let Ok(params) = serde_json::to_value(event) else {
+                        continue;
+                    };
+                    if let Err(error) = emitter.event(EVENT_METHOD, params) {
+                        tracing::warn!("事件转发失败，停止下发: {}", error.message);
+                        break 'forward;
                     }
-                    // 宿主侧 broadcast 队列只有 256 深，UI 卡住时会走到这里。
-                    // 丢掉积压帧继续跑正是频谱这类流式数据想要的语义。
-                    // 例外是 buffering：边沿事件不随状态帧重发，掉了 active=false
-                    // 播放键就永久转圈，所以按服务端真值补一帧。
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::debug!("事件积压，丢弃 {skipped} 帧");
-                        let Ok(params) = serde_json::to_value(state.buffering_event().await) else {
-                            continue;
-                        };
-                        if let Err(error) = emitter.event(EVENT_METHOD, params) {
-                            tracing::warn!("事件转发失败，停止下发: {}", error.message);
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -222,7 +230,7 @@ fn init_logging() {
 /// 装配运行时。与 `Plugin::handle` 分开是因为 `runtime.block_on` 借用 runtime，
 /// 不能在同一表达式里把 runtime 移进它自己跑的 future。
 async fn boot_plugin() -> anyhow::Result<hertz_studio::bootstrap::Booted> {
-    let data_dir = resolve_data_dir();
+    let data_dir = hertz_studio::bootstrap::absolute_data_dir(&resolve_data_dir())?;
     let config = hertz_studio::bootstrap::prepare(&data_dir).await?;
     // stdio 天然可信，没有 HTTP 那一层的 bearer token；`AppState` 要求有值，
     // 所以填一个随机串，永不外泄也永不校验。
@@ -252,7 +260,7 @@ fn main() -> std::io::Result<()> {
     let plugin = Plugin {
         rpc: Rpc::new(booted.state.clone()),
         state: booted.state.clone(),
-        forwarded: OnceLock::new(),
+        event_forwarder_running: Arc::new(AtomicBool::new(false)),
         runtime,
         _booted: booted,
     };

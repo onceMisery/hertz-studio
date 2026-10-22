@@ -2,7 +2,7 @@
 
 use sqlx::FromRow;
 
-use super::{unix_now, Episode, FeedPage, ParsedFeed, Show, MAX_EPISODES};
+use super::{unix_now, Episode, EpisodeProgress, FeedPage, ParsedFeed, Show, MAX_EPISODES};
 use crate::error::{not_found, ApiError, ApiResult};
 use crate::online::{self, OnlineTrack};
 
@@ -47,10 +47,18 @@ pub(super) struct EpisodeRow {
     pub enclosure_url: String,
     pub feed_url: String,
     pub fetched_at: i64,
+    progress_ms: i64,
+    completed: bool,
 }
 
 impl EpisodeRow {
     pub fn episode(self) -> Episode {
+        let duration_ms = self.duration_ms.max(0) as u64;
+        let progress_ms = (self.progress_ms.max(0) as u64).min(if duration_ms == 0 {
+            i64::MAX as u64
+        } else {
+            duration_ms
+        });
         Episode {
             track: OnlineTrack {
                 source: "podcast".into(),
@@ -58,7 +66,7 @@ impl EpisodeRow {
                 title: self.title,
                 artist: self.artist,
                 album: self.album,
-                duration_ms: self.duration_ms.max(0) as u64,
+                duration_ms,
                 cover: self.cover,
                 playable: true,
                 vip_only: false,
@@ -66,13 +74,17 @@ impl EpisodeRow {
             },
             published_at: self.published_at,
             description: self.description,
+            progress_ms,
+            completed: self.completed,
         }
     }
 }
 
 const EPISODE_SELECT: &str = "SELECT e.id, e.title, e.artist, e.album, e.duration_ms, e.cover,
-    e.published_at, e.description, e.enclosure_url, s.feed_url, s.fetched_at
-    FROM podcast_episodes e JOIN podcast_shows s ON s.id = e.show_id";
+    e.published_at, e.description, e.enclosure_url, s.feed_url, s.fetched_at,
+    COALESCE(p.position_ms, 0) AS progress_ms, COALESCE(p.completed, 0) AS completed
+    FROM podcast_episodes e JOIN podcast_shows s ON s.id = e.show_id
+    LEFT JOIN podcast_episode_progress p ON p.episode_id = e.id";
 
 pub(super) fn db_error(error: sqlx::Error) -> ApiError {
     let api =
@@ -172,6 +184,58 @@ pub(super) async fn set_subscribed(ctx: &online::Ctx, id: &str, value: bool) -> 
         return Err(not_found("未找到此播客节目").with_source("podcast"));
     }
     Ok(())
+}
+
+pub(super) async fn save_progress(
+    ctx: &online::Ctx,
+    episode_id: &str,
+    requested_position_ms: u64,
+    completed: bool,
+) -> ApiResult<EpisodeProgress> {
+    let duration_ms =
+        sqlx::query_scalar::<_, i64>("SELECT duration_ms FROM podcast_episodes WHERE id = ?")
+            .bind(episode_id)
+            .fetch_optional(&ctx.db)
+            .await
+            .map_err(db_error)?
+            .ok_or_else(|| not_found("未找到此播客单集").with_source("podcast"))?
+            .max(0) as u64;
+    let requested_position_ms = requested_position_ms.min(i64::MAX as u64);
+    let progress_ms = if duration_ms > 0 {
+        requested_position_ms.min(duration_ms)
+    } else {
+        requested_position_ms
+    };
+    let completed =
+        completed || (duration_ms > 0 && progress_ms >= duration_ms.saturating_mul(95) / 100);
+    if progress_ms < 5_000 && !completed {
+        sqlx::query("DELETE FROM podcast_episode_progress WHERE episode_id = ?")
+            .bind(episode_id)
+            .execute(&ctx.db)
+            .await
+            .map_err(db_error)?;
+        return Ok(EpisodeProgress {
+            progress_ms: 0,
+            completed: false,
+        });
+    }
+    sqlx::query(
+        r#"INSERT INTO podcast_episode_progress (episode_id, position_ms, completed, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(episode_id) DO UPDATE SET position_ms = excluded.position_ms,
+             completed = excluded.completed, updated_at = excluded.updated_at"#,
+    )
+    .bind(episode_id)
+    .bind(progress_ms as i64)
+    .bind(completed)
+    .bind(unix_now())
+    .execute(&ctx.db)
+    .await
+    .map_err(db_error)?;
+    Ok(EpisodeProgress {
+        progress_ms,
+        completed,
+    })
 }
 
 pub(super) async fn persist_feed(ctx: &online::Ctx, parsed: &ParsedFeed) -> ApiResult<()> {

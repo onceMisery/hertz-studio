@@ -25,10 +25,20 @@
   var el = {};
   var doc = null;          // LyricDocument
   var views = [];          // [{ container, nodes, big }]
+  var emotionReadyDoc = null;   // 已绑定摘要的歌词快照（null = 情绪层关闭）
+  var emotionCueDoc = null;     // 摘要就绪前暂存的 Cue
+  var emotionRequestGeneration = 0;
+  var emotionRevisionSeen = -1;
+  var emotionSettings = { mode: 'off', preview: 'joy', scale: 1, curve: 1, accent: false, accentWords: '', palette: true };
   var mode = 'karaoke';
   var activeIdx = -2;
   var playing = false;
   var track = null;
+  var mediaEpoch = 0, snapshotTrackId = null;
+  function changedMedia() {
+    mediaEpoch++;
+    document.dispatchEvent(new CustomEvent('stage:track-changed'));
+  }
   var lastCover = null;    // 记住封面，换主题时用它重新取色（retint）
   var coverFollow = false;
   var paletteEpoch = 0;
@@ -43,6 +53,7 @@
   var seekPosition = 0;
 
   var rafId = 0;
+  var lyricsDirty = true;
   var reduced = false;
   var userReduced = false;
   var systemMotion = null;
@@ -290,7 +301,10 @@
       var yieldToUser = function () {
         view.userScrolling = true;
         if (view.userScrollTimer) clearTimeout(view.userScrollTimer);
-        view.userScrollTimer = setTimeout(function () { view.userScrolling = false; }, tune.scrollIdleMs);
+        view.userScrollTimer = setTimeout(function () {
+          view.userScrolling = false;
+          schedule();
+        }, tune.scrollIdleMs);
       };
       // 滚轮直接按增量累加：改写 scrollY 的同时同步 target，让自动跟随从
       // "用户停手的位置"接着走，而不是恢复的瞬间把它猛地抢回去。
@@ -582,6 +596,188 @@
     }
   }
 
+  // 情绪层默认关闭：只有 setEmotionCueDoc() 被调用时才绑定歌词并算摘要，
+  // 没有 Cue 时不写任何属性、不做摘要。P0 只写 data-*/--emo-*，不加视觉。
+  function emotionApi() {
+    return typeof window !== 'undefined' ? window.LyricEmotion : null;
+  }
+
+  function emotionWords(node) {
+    var words = node && node.words ? node.words : [];
+    if (!words.length) return [];
+    var first = words[0].offsetLeft;
+    var last = words[words.length - 1].offsetLeft + words[words.length - 1].offsetWidth;
+    var total = last - first;
+    // 舞台隐藏时布局为 0；用序号兜底，避免所有词都采到 u=0。
+    if (!(total > 0)) {
+      return words.map(function (word, i) {
+        return { el: word, uStart: i / words.length, uEnd: (i + 1) / words.length };
+      });
+    }
+    return words.map(function (word) {
+      var x = word.offsetLeft - first;
+      return { el: word, uStart: x / total, uEnd: (x + word.offsetWidth) / total };
+    });
+  }
+
+  function applyEmotion(view, idx) {
+    var E = emotionApi();
+    if (!E || !doc || emotionReadyDoc !== doc || !view.track || view.empty || idx < 0) return;
+    var node = view.nodes[idx];
+    if (!node) return;
+    if (view._emoIdx != null && view._emoIdx !== idx) {
+      var old = view.nodes[view._emoIdx];
+      if (old) E.clearLine(old.el, old.words);
+      view._emoIdx = null;
+      view._emoSign = null;
+    }
+    var state = E.resolveForLine(idx, { host: 'sidebar' });
+    var emPx = parseFloat(getComputedStyle(node.el).fontSize) || 14.5;
+    var sign = state.id + ':' + state.intensity.toFixed(3) + ':' + state.revision + ':' +
+      emPx.toFixed(2) + ':' + (node.words ? node.words.length : 0);
+    if (view._emoSign === sign) return;
+    view._emoSign = sign;
+    view._emoIdx = idx;
+    E.applyLine(node.el, emotionWords(node), state, emPx);
+  }
+
+  function applyEmotionAll(current) {
+    var idx = current == null ? activeIdx : current;
+    views.forEach(function (view) { applyEmotion(view, idx); });
+  }
+
+  function bindEmotionForCue() {
+    var E = emotionApi();
+    if (!E || !doc || emotionReadyDoc === doc) return;
+    var targetDoc = doc;
+    var request = ++emotionRequestGeneration;
+    E.bindLyrics({ lines: targetDoc.lines }).then(function (res) {
+      if (res.stale || request !== emotionRequestGeneration || doc !== targetDoc || emotionSettings.mode !== 'auto') return;
+      emotionReadyDoc = targetDoc;
+      if (emotionCueDoc) {
+        try {
+          E.setCueDoc(emotionCueDoc, res.generation);
+          E.commitAtBoundary(res.generation);
+        } catch (err) {
+          emotionCueDoc = null;
+          return;
+        }
+        emotionCueDoc = null;
+        emotionRevisionSeen = E.revision();
+        applyEmotionAll();
+        schedule();
+      }
+    }).catch(function () { /* 摘要失败时保持中性，不阻塞播放 */ });
+  }
+
+  function setEmotionCueDoc(cueDoc) {
+    var E = emotionApi();
+    if (!E || !doc || !cueDoc || emotionSettings.mode !== 'auto') return false;
+    if (emotionReadyDoc === doc) {
+      try {
+        E.setCueDoc(cueDoc, E.generation());
+        E.commitAtBoundary(E.generation());
+      } catch (err) {
+        return false;
+      }
+      emotionRevisionSeen = E.revision();
+      applyEmotionAll();
+      schedule();
+      return true;
+    }
+    emotionCueDoc = cueDoc;
+    bindEmotionForCue();
+    return true;
+  }
+
+  function clearEmotionCues() {
+    emotionRequestGeneration += 1;
+    var E = emotionApi();
+    if (E && emotionReadyDoc === doc) {
+      E.clearCues();
+      emotionRevisionSeen = E.revision();
+      applyEmotionAll();
+      schedule();
+    }
+    emotionCueDoc = null;
+  }
+
+  // 手动预览：用一条覆盖整首的 section Cue，播放时每一行都能看到同一情绪。
+  // 这是 P1 的手动预览入口；正式自动分类由 app.js 在显式授权后驱动。
+  function setManualEmotion(id) {
+    var E = emotionApi();
+    if (!E || !doc || !doc.lines.length) return false;
+    var targetDoc = doc;
+    var request = ++emotionRequestGeneration;
+    var emotion = E.profiles && E.profiles[id] ? id : 'joy';
+    function commit() {
+      if (request !== emotionRequestGeneration || doc !== targetDoc || emotionSettings.mode !== 'manual') return false;
+      try {
+        E.setCueDoc({
+          version: 1, lyricsHash: E.lyricsHash(), source: 'manual',
+          sections: [{ from: 0, to: targetDoc.lines.length - 1, emotion: emotion,
+            intensity: 1, confidence: 1 }]
+        }, E.generation());
+        E.commitAtBoundary(E.generation());
+      } catch (err) {
+        return false;
+      }
+      emotionRevisionSeen = E.revision();
+      applyEmotionAll(activeIdx);
+      schedule();
+      return true;
+    }
+    if (emotionReadyDoc === targetDoc) return commit();
+    E.bindLyrics({ lines: targetDoc.lines }).then(function (res) {
+      if (res.stale || request !== emotionRequestGeneration || doc !== targetDoc || emotionSettings.mode !== 'manual') return;
+      emotionReadyDoc = targetDoc;
+      commit();
+    }).catch(function () { /* 摘要失败：保持中性 */ });
+    return true;
+  }
+
+  function setEmotionSettings(next) {
+    var patch = next || {};
+    var previousMode = emotionSettings.mode;
+    if (patch.scale != null) {
+      var scale = Number(patch.scale);
+      if (isFinite(scale) && scale >= 0 && scale <= 1.5) emotionSettings.scale = scale;
+    }
+    if (patch.curve != null) {
+      var curve = Number(patch.curve);
+      if (isFinite(curve) && curve >= 0.5 && curve <= 1.5) emotionSettings.curve = curve;
+    }
+    if (patch.accent != null) emotionSettings.accent = patch.accent === true;
+    if (patch.accentWords != null) emotionSettings.accentWords = String(patch.accentWords);
+    if (patch.palette != null) emotionSettings.palette = patch.palette !== false;
+    if (patch.preview != null) {
+      var E = emotionApi();
+      if (E && E.profiles && E.profiles[patch.preview]) emotionSettings.preview = patch.preview;
+    }
+    if (patch.mode != null) {
+      emotionSettings.mode = ['manual', 'auto', 'off'].indexOf(patch.mode) >= 0 ? patch.mode : 'off';
+    }
+    var api = emotionApi();
+    if (api) {
+      try {
+        api.setScale(emotionSettings.scale);
+        if (api.setCurve) api.setCurve(emotionSettings.curve);
+        if (api.setAccent) api.setAccent(emotionSettings.accent, emotionSettings.accentWords);
+        if (api.setPaletteEnabled) api.setPaletteEnabled(emotionSettings.palette);
+      } catch (err) { /* 设置值越界时保留上一档 */ }
+    }
+    applyEmotionAll(activeIdx);
+    schedule();
+    if (!doc) return;
+    if (emotionSettings.mode === 'manual') {
+      emotionCueDoc = null;
+      setManualEmotion(emotionSettings.preview);
+    } else if (emotionSettings.mode === 'off' || previousMode !== emotionSettings.mode) {
+      // auto：由 app 的异步分类任务写入 Cue；模式切换时先清掉旧模型/manual 结果。
+      clearEmotionCues();
+    }
+  }
+
   // 只刷「变了的那几行」。换行时真正需要动的元素是：下放的旧当前行、新当前行，
   // 以及两个索引之间那一段的 past 位——而不是像以前那样遍历整首歌。
   function markRows(view, idx) {
@@ -600,6 +796,7 @@
       if (nodes[i]) nodes[i].el.classList.toggle('past', prev < idx);
     }
     view.shownIdx = idx;
+    applyEmotion(view, idx);
   }
 
   // 每帧一次地把「当前行」这件事刷到所有视图上。动的三样东西：
@@ -609,6 +806,15 @@
   // snap=true 时跳过动画直接落位，用于切歌、开全屏页、改尺寸。
   function update(idx, pos, snap, changed) {
     if (!doc) return;
+    // Cue 可以在同一行内提交/清除；revision 变一次就重写一次属性，不逐帧写。
+    var emotion = emotionApi();
+    if (emotion && emotionReadyDoc === doc) {
+      var rev = emotion.revision();
+      if (rev !== emotionRevisionSeen) {
+        emotionRevisionSeen = rev;
+        applyEmotionAll(idx);
+      }
+    }
     views.forEach(function (view) {
       if (view.empty) return;
       // 先改类再量：--lyric-active-weight 会改行高，量早了拿到的还是旧几何
@@ -642,6 +848,7 @@
       if (!view.track || view.empty) return;
       if (changed) markRows(view, idx);
       view.measure();
+      applyEmotion(view, idx);
       view.aim(idx, pos);
       if (snap) view.jump();
       view.dim(idx);
@@ -1009,7 +1216,7 @@
     // tickLyrics 会把 lastDt 改成歌词门累计间隔；刷新率只采主循环自己的间隔。
     sampleDisplayHz(frameDt);
     sampleFrameRate();
-    if (!hidden && (playing || energy > 0.005 || anyGateWants())) schedule();
+    if (!hidden && (playing || anyGateWants())) schedule(false);
     else lastFrameAt = 0;
   }
 
@@ -1019,12 +1226,15 @@
   // （原来是 24/40）会在 60Hz 上被夹成 20/30，档位表与实际帧率就对不上了。
   function lyricsTargetFps() {
     if (hidden || isVisualOccluded()) return 0;
-    if (!playing) return 12;
+    if (!playing) return lyricsDirty || views.some(function (view) {
+      return view.track && !view.userScrolling && Math.abs(view.scrollTarget - view.scrollY) >= 0.01;
+    }) ? 12 : 0;
     if (reduced) return 15;
     return tier === 0 ? 20 : tier === 1 ? 30 : 60;
   }
 
   function tickLyrics(dtMs) {
+    lyricsDirty = false;
     lastDt = dtMs;
     var pos = seeking ? seekPosition : currentPos();
     if (!doc) { if (!seeking) paintProgress(pos); return; }
@@ -1042,12 +1252,15 @@
 
   function energyTargetFps() {
     if (hidden) return 0;
-    if (!playing) return 12;
+    if (!playing) return energy > 0 || beatShown > 0 || (beatDet && beatDet.pulse > 0) ? 12 : 0;
     return lowfx || reduced ? 10 : 20;
   }
 
   function tickEnergy(dtMs) {
     pushEnergy(playing && !reduced ? sampleEnergy() : 0, dtMs);
+    // Below the CSS precision there is no visible energy left. Finish the
+    // release at zero so the paused gate can stop instead of decaying forever.
+    if (!playing && energy < 0.0005) energy = 0;
     paintEnergy();
     stepBeat(dtMs);
   }
@@ -1060,7 +1273,10 @@
     return sum / spectrum.length;
   }
 
-  function schedule() {
+  function schedule(invalidateLyrics) {
+    // Explicit controls/settings/layout changes need a fresh paused frame.
+    // Only the scheduler's own continuation skips invalidation.
+    if (invalidateLyrics !== false) lyricsDirty = true;
     // dock 胶囊实例不渲染舞台：那个 surface 只有窄条一块地方，跑 60fps 是纯浪费。
     // 标记由 app.js 在拿到 bridge context 之后挂到 window（见 HertzCapsuleOnly）。
     if (rafId || hidden || window.HertzCapsuleOnly) return;
@@ -1270,6 +1486,7 @@
     if (tier === 0) setLowFx(true);
 
     buildRing(tier === 0 ? 0 : 36);
+    paintEnergy();
 
     if (el.stageRange) {
       el.stageRange.addEventListener('pointerdown', function () { seeking = true; seekPosition = currentPos(); });
@@ -1339,6 +1556,7 @@
     document.addEventListener('stagecontrol:change', function (e) {
       if (e.detail && e.detail.beatAmp !== undefined) {
         beatAmp = clamp((Number(e.detail.beatAmp) || 0) / 100, 0, 2);
+        schedule();
       }
     });
     // 冷读驾驶舱当前值（它的 init 排在 Stage.init 之前，初始广播已错过）
@@ -1386,7 +1604,9 @@
 
     setTrack: function (t, coverUrl) {
       if (!t || !track || t.id !== track.id) cancelStageSeek();
+      var trackChanged = (t && t.id || null) !== (track && track.id || null);
       track = t || null;
+      if (trackChanged) changedMedia();
       if (!durMs && t) durMs = t.duration_ms || 0;
       lastCover = coverUrl || null;
       if (el.disc) {
@@ -1399,6 +1619,9 @@
 
     setSnapshot: function (snap, options) {
       if (!snap) return;
+      var trackChanged = (snap.track_id || null) !== snapshotTrackId;
+      var previousPosition = basePos, previousDuration = durMs, previousVolume = playbackVolume;
+      if (trackChanged) { snapshotTrackId = snap.track_id || null; changedMedia(); }
       if (typeof snap.volume === 'number') playbackVolume = snap.volume;
       // A decoder can report unknown duration while library metadata is already
       // available (null backend, or loading streams). Keep the same track's known length.
@@ -1415,14 +1638,17 @@
       }
       var playingChanged = playing !== nextPlaying;
       playing = nextPlaying;
-      document.body.classList.toggle('is-playing', playing);
+      if (document.body.classList.contains('is-playing') !== playing) document.body.classList.toggle('is-playing', playing);
       // 播放态跳变沿即时广播：舞台舱按钮/状态不依赖 8fps 门控下一帧才翻面，
       // 曲尾停止等场景里图标不会比真实状态多停一两百毫秒。
       if (playingChanged) {
         document.dispatchEvent(new CustomEvent('stage:playing-changed', { detail: { playing: playing } }));
       }
-      paintProgress(seeking ? seekPosition : currentPos());
-      schedule();
+      var visualChanged = trackChanged || playingChanged || previousDuration !== durMs ||
+        previousPosition !== basePos || previousVolume !== playbackVolume || (options && options.seek);
+      if (playing || visualChanged) paintProgress(seeking ? seekPosition : currentPos());
+      if (visualChanged || playing) schedule();
+      else if (anyGateWants()) schedule(false);
     },
 
     // 频谱只存下来，不在这里写任何样式。服务端按 33ms 一帧推 64 段，
@@ -1432,6 +1658,13 @@
     },
 
     setLyrics: function (d) {
+      emotionRequestGeneration += 1;
+      var previousEmotionDoc = emotionReadyDoc;
+      var emotion = emotionApi();
+      if (previousEmotionDoc && emotion) emotion.clearCues();
+      emotionReadyDoc = null;
+      emotionCueDoc = null;
+      emotionRevisionSeen = -1;
       doc = (d && d.lines && d.lines.length) ? d : null;
       activeIdx = -2;
       guardPos = -1;
@@ -1441,6 +1674,7 @@
       var i = resolveIndex(doc, pos);
       update(i, pos, true, true);
       activeIdx = i;
+      if (emotionSettings.mode === 'manual') setManualEmotion(emotionSettings.preview);
       schedule();
     },
 
@@ -1490,7 +1724,7 @@
 
     // Read-only presentation data. All stages share this playback clock and track owner.
     presentation: function () {
-      return { track: track, cover: lastCover, playing: playing,
+      return { track: track, cover: lastCover, playing: playing, mediaEpoch:mediaEpoch, mediaTrackId:snapshotTrackId,
         position: currentPos(), duration: durMs, volume: playbackVolume,
         reduced: reduced || !!(systemMotion && systemMotion.matches) };
     },
@@ -1507,9 +1741,31 @@
         Number.isFinite(position) ? position : currentPos())) } : null;
     },
 
+    // 情绪层手动注入（P0 只写属性、默认无 Cue；设置 UI 留到 P1）。
+    // 传入的 Cue 必须回显当前歌词的 lyricsHash；摘要就绪后自动提交。
+    emotion: function () {
+      var E = emotionApi();
+      return E ? {
+        bound: E.bound(), ready: emotionReadyDoc === doc,
+        hash: E.lyricsHash(), generation: E.generation(), revision: E.revision()
+      } : null;
+    },
+    setEmotionCueDoc: function (cueDoc) { return setEmotionCueDoc(cueDoc); },
+    clearEmotionCues: function () { clearEmotionCues(); },
+    setEmotionSettings: function (next) { setEmotionSettings(next); },
+    previewEmotion: function (id) {
+      emotionSettings.mode = 'manual';
+      if (id) emotionSettings.preview = id;
+      if (!doc) return false;
+      return setManualEmotion(emotionSettings.preview);
+    },
+
     // stanza 歌词模式：翻译行与每曲偏移（数据已在 doc 内，只读暴露，不复制）。
     lyricTranslation: function (i) {
       return doc && doc.translation ? (doc.translation[i] || null) : null;
+    },
+    lyricRomanization: function (i) {
+      return doc && doc.romanization ? (doc.romanization[i] || null) : null;
     },
     lyricOffset: function () {
       return doc && typeof doc.user_offset_ms === 'number' ? doc.user_offset_ms : 0;

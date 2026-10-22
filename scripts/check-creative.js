@@ -354,6 +354,12 @@ for (let f = 0; f < FRAMES; f += 1) {
   sectionsSeen[st.section] = 1;
 }
 ok(frames === FRAMES, `${FRAMES} 帧全部跑完没有抛异常`);
+ok(renderCalls[0].p === renderCalls[renderCalls.length - 1].p,
+  '同一场景逐帧复用内部参数工作区');
+ok(renderCalls[0].modelMatrix === renderCalls[renderCalls.length - 1].modelMatrix,
+  '同一视图逐帧复用模型矩阵');
+ok(renderCalls[0].colors === renderCalls[renderCalls.length - 1].colors,
+  '主题色未改变时复用已解析色值');
 // 渲染次数要逐帧对上账，而不是"大概够多"：静默窗口里一次都不许画，
 // 非静默帧每帧恰好一次（外加换挂载点补的那帧）。这条等式同时钉住了
 // A/B 的隔离性 —— 基线窗口里要是偷偷画了，等式就不成立。
@@ -363,6 +369,16 @@ ok(mutedFrames > 0 && mutedFrames < FRAMES / 4,
   `探测跑过一个静默窗口后自己收了（${mutedFrames} 帧没画）`);
 ok(CS.stats().probe.rounds >= 1 && CS.stats().probe.loss === 0,
   `假引擎没有代价，探测结论是 0（rounds=${CS.stats().probe.rounds}）`);
+const runtimeSnapshot = CS.runtime();
+const savedRuntimeSnapshot = JSON.stringify(runtimeSnapshot);
+cssVars['--music-highlight-rgb'] = '51, 102, 153';
+fakeNow += 16.7;
+tick(16.7);
+ok(JSON.stringify(runtimeSnapshot) === savedRuntimeSnapshot,
+  '公开的 runtime 快照不随下一帧工作区改变');
+ok(renderCalls[renderCalls.length - 1].colors[0][0] === 0.2,
+  'CSS 色值改变在下一帧即时生效');
+cssVars['--music-highlight-rgb'] = '226, 176, 113';
 
 // 关键断言：喂给渲染器的每个字段都必须是有限数。
 let badField = null;
@@ -1818,6 +1834,28 @@ section('性能收口：不可见画布门控（E1）');
     await new Promise((r) => setTimeout(r, 0));
     ok(trackCalls === 3 && inst.state('PL1').s === 'url',
       'invalidate 后重新解析（fetchTracks x' + trackCalls + '，含此前空歌单的一次）');
+
+    // Invalidating/reinitializing while either hop is pending must not restore
+    // the previous playlist or retain its tracks in a second cache.
+    const pendingTracks = [];
+    const pendingCovers = [];
+    const racing = sandbox.PlaylistCovers.init({
+      fetchTracks: () => new Promise((resolve) => pendingTracks.push(resolve)),
+      fetchCover: (id) => new Promise((resolve) => pendingCovers.push({ id, resolve }))
+    });
+    racing.state('race');
+    racing.invalidate('race');
+    racing.state('race');
+    pendingTracks[1]([{ id: 'new', has_cover: true }]);
+    await new Promise((r) => setTimeout(r, 0));
+    pendingCovers[0].resolve('new-cover');
+    await new Promise((r) => setTimeout(r, 0));
+    pendingTracks[0]([{ id: 'old', has_cover: true }]);
+    await new Promise((r) => setTimeout(r, 0));
+    pendingCovers.filter((c) => c.id === 'old').forEach((c) => c.resolve('old-cover'));
+    await new Promise((r) => setTimeout(r, 0));
+    ok(racing.state('race').url === 'new-cover', '失效前的曲目响应不能覆盖新封面');
+    ok(pendingCovers.every((c) => c.id !== 'old'), '失效的曲目数组不再进入封面请求');
   } catch (err) {
     failures += 1;
     console.error('PlaylistCovers 行为测试异常：' + (err && err.stack || err));

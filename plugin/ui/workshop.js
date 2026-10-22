@@ -313,6 +313,19 @@
   // -------------------------------------------------------------------------
 
   var promptState = { text: '', result: null, undo: null };
+  var promptLengthLimit = null;
+
+  function promptMaxLength() {
+    if (promptLengthLimit !== null) return promptLengthLimit;
+    var prompt = window.CreativePrompt;
+    var supported = prompt && typeof prompt.supported === 'function' && prompt.supported();
+    promptLengthLimit = supported && supported.maxLength || 512;
+    return promptLengthLimit;
+  }
+
+  function boundedPromptText(value) {
+    return Array.from(String(value || '')).slice(0, promptMaxLength()).join('');
+  }
 
   var PROMPT_EXAMPLES = [
     '梦幻星云，缓慢镜头，霓虹，跟随音乐',
@@ -323,13 +336,13 @@
 
   var PROMPT_GROUPS = [
     ['scene', '场景'], ['energy', '氛围'], ['camera', '镜头'],
-    ['look', '质感'], ['hand', '手绘'], ['director', '音乐响应']
+    ['look', '质感'], ['hand', '手绘'], ['director', '音乐响应'], ['parameter', '参数']
   ];
 
   function renderPrompt(body) {
     var CP = window.CreativePrompt;
     body.appendChild(h('div', 'sc-note',
-      '用一句中文或英文描述想要的舞台。识别是离线、确定性的：只认支持的词，'
+      '用中文或英文描述舞台、镜头、质感和参数；参数值会按目标场景的范围校验。'
       + '解析不改动舞台，点「应用到当前舞台」才生效，且可整体撤销。'));
 
     if (!CP || typeof CP.compile !== 'function') {
@@ -346,13 +359,13 @@
 
     var ta = h('textarea', 'ws-prompt-text');
     ta.id = inputId;
-    ta.maxLength = 120;
+    ta.maxLength = promptMaxLength() * 2;
     ta.spellcheck = false;
     ta.value = promptState.text;
     ta.placeholder = '例：梦幻星云，缓慢镜头，霓虹，跟随音乐';
     body.appendChild(ta);
 
-    var count = h('span', 'sc-value', promptState.text.length + ' / 120');
+    var count = h('span', 'sc-value', Array.from(promptState.text).length + ' / ' + promptMaxLength());
     var metaRow = h('div', 'ws-prompt-meta');
     metaRow.appendChild(count);
     body.appendChild(metaRow);
@@ -378,6 +391,7 @@
     applyBtn.disabled = !(promptState.result && promptState.result.ok);
     var undoBtn = h('button', 'btn', '撤销本次应用');
     undoBtn.type = 'button';
+    undoBtn.id = 'ws-prompt-undo';
     undoBtn.hidden = !promptState.undo;
     actions.append(parseBtn, applyBtn, undoBtn);
     body.appendChild(actions);
@@ -387,8 +401,9 @@
     body.appendChild(resultBox);
 
     function syncInput(value) {
-      promptState.text = String(value).slice(0, 120);
-      count.textContent = promptState.text.length + ' / 120';
+      promptState.text = boundedPromptText(value);
+      if (ta.value !== promptState.text) ta.value = promptState.text;
+      count.textContent = Array.from(promptState.text).length + ' / ' + promptMaxLength();
       // 输入再次改变：上一次的解析结果作废，避免拿旧解释应用新文本
       promptState.result = null;
       resultBox.textContent = '';
@@ -403,16 +418,28 @@
       resultBox.textContent = '';
       if (!r) return;
       if (!r.ok) {
+        var guarded = r.code === 'unsatisfiable_constraints'
+          || r.code === 'unrecognized_constraints' || r.code === 'unsafe_instruction'
+          || r.code === 'unsupported_edit' || r.code === 'unsupported_timeline';
+        var failureMessage = r.code === 'empty'
+          ? '没有可识别的文本。'
+          : guarded ? r.message
+            : (r.message || '没有命中任何支持的词') + '，舞台未改动。';
         resultBox.appendChild(h('div', 'sc-note ws-warn',
-          r.code === 'empty' ? '没有可识别的文本。' : '没有命中任何支持的词，舞台未改动。'));
+          failureMessage));
         if (r.unknown && r.unknown.length) {
+          var unknownLabel = r.code === 'unsafe_instruction'
+            ? '越界操作要求（结果未应用）：'
+            : r.code === 'unsupported_edit'
+              ? '不支持的编辑要求（结果未应用）：'
+              : guarded ? '未识别约束（结果未应用）：' : '未识别：';
           resultBox.appendChild(h('div', 'ws-prompt-unknown',
-            '未识别：' + r.unknown.join('、')));
+            unknownLabel + r.unknown.join('、')));
         }
-        resultBox.appendChild(h('div', 'sc-note',
-          '只认这些词：场景（塔林/星球/隧道/星云/地形/歌词走廊）、氛围（安静/律动/爆发）、'
-          + '镜头（近景/远景/广角/缓慢/高速）、质感（霓虹/单色/双色/胶片/干净）、'
-          + '手绘、跟随音乐/固定镜头，以及"不要抖动/颗粒/泛光"。'));
+        if (!guarded) {
+          resultBox.appendChild(h('div', 'sc-note',
+            '可用场景、氛围、镜头与质感词生成候选，也可按参数名给出数值；数值须处于目标场景支持范围内。'));
+        }
         return;
       }
       resultBox.appendChild(h('div', 'ws-prompt-head', '识别结果'));
@@ -447,7 +474,7 @@
     }
 
     parseBtn.addEventListener('click', function () {
-      var text = (ta.value || '').slice(0, 120);
+      var text = promptState.text;
       var r;
       try {
         r = CP.compile(text);
@@ -472,7 +499,7 @@
       // 先挂上快照再应用：applyIntent 内部会同步广播 preset 事件并触发面板重排，
       // 重排时撤销按钮就必须已经可见。失败时回滚快照（失败不广播，无需重排）。
       var prevUndo = promptState.undo;
-      promptState.undo = before;
+      promptState.undo = { preset: before, revision: null };
       var out;
       try {
         out = CS.applyIntent(r.intent);
@@ -487,6 +514,7 @@
         flash(out && out.message ? '未应用：' + out.message : '该意图无法应用，舞台未改动');
         return;
       }
+      promptState.undo.revision = CS.revision();
       flash('已应用'
         + (r.intent.scene ? '（场景：' + r.intent.scene + '）' : '')
         + '，可撤销本次改动');
@@ -494,17 +522,23 @@
     });
 
     undoBtn.addEventListener('click', function () {
-      var snap = promptState.undo;
-      if (!snap) return;
+      var undo = promptState.undo;
+      if (!undo) return;
       var CS = stage_api();
       if (!CS) return;
+      if (undo.revision !== CS.revision()) {
+        promptState.undo = null;
+        undoBtn.hidden = true;
+        flash('舞台已修改，本次撤销已失效');
+        return;
+      }
       // 先清快照再恢复：setPreset 会同步广播 preset 事件并触发面板重排，
       // 重排时按钮就必须已经回到隐藏态。
       promptState.undo = null;
       try {
-        CS.setPreset(snap);
+        CS.setPreset(undo.preset);
       } catch (e) {
-        promptState.undo = snap;    // 恢复失败时保住撤销能力，舞台未动
+        if (CS.revision() === undo.revision) promptState.undo = undo;
         flash('撤销失败：' + (e && e.message || e));
         return;
       }
@@ -514,6 +548,994 @@
 
     // 重排重建时回放已有解析结果（应用/撤销都会触发一次重排）
     renderResult();
+  }
+
+  // -------------------------------------------------------------------------
+  // AI 生成（R4-E 任务面板）：服务端持久任务 + 提案。离线「一句成景」覆盖
+  // 不到的云端生成走这里：submit → 任务列表（WS 事件 + 轮询双通道）→
+  // succeeded 后读提案 → 应用到舞台或拒绝。离开面板任务继续跑，回来看结果。
+  // 面板消费 /v1/ai/*，候选经同一草稿校验与临时预览入口，确认后由原 owner 提交。
+  // -------------------------------------------------------------------------
+
+  // Local draft state never creates a server job or writes the preset until confirmation.
+  var draftState = { text: '', prepared: null, token: null, source: null, error: '', busy: false, serial: 0, undo: null };
+  function isTemplateSource(source) { return typeof source === 'string' && source.indexOf('template:') === 0; }
+  function isAiDraftSource(source) { return !!source && source !== 'import' && !isTemplateSource(source); }
+  function draftRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+  function collectDraftDiff(before, after, path, out) {
+    if (draftRecord(before) && draftRecord(after)) {
+      var keys = Object.create(null);
+      Object.keys(before).forEach(function (key) { keys[key] = true; });
+      Object.keys(after).forEach(function (key) { keys[key] = true; });
+      Object.keys(keys).sort().forEach(function (key) {
+        collectDraftDiff(before[key], after[key], path ? path + '.' + key : key, out);
+      });
+      return;
+    }
+    if (CreativeDraft.canonical(before) === CreativeDraft.canonical(after)) return;
+    out.push({ path: path, before: before, after: after });
+  }
+  function formatDraftDiffValue(value) {
+    if (value === undefined) return '（无）';
+    if (typeof value === 'string') return value;
+    var formatted = JSON.stringify(value);
+    return typeof formatted === 'string' ? formatted : String(value);
+  }
+  function prepareDraftSource(input, source) {
+    return isTemplateSource(source) ? CreativeTemplates.prepare(source.slice(9)) : CreativeDraft.prepare(input);
+  }
+  function discardDraft() {
+    draftState.serial += 1; draftState.prepared = null; draftState.token = null;
+    draftState.busy = false; draftState.error = '';
+    var CS = stage_api(); if (CS && CS.cancelPreview) CS.cancelPreview();
+  }
+  function renderDraftUndo(body) {
+    var previous = draftState.undo, CS = stage_api();
+    if (!previous || !CS) return;
+    var undo = h('button', 'btn', '撤销本次应用');
+    undo.type = 'button';
+    undo.id = 'ws-draft-undo';
+    undo.addEventListener('click', function () {
+      if (draftState.undo !== previous) return;
+      if (previous.revision !== CS.revision()) {
+        draftState.undo = null;
+        undo.hidden = true;
+        flash('舞台已修改，本次撤销已失效');
+        return;
+      }
+      draftState.undo = null;
+      try { CS.setPreset(previous.preset); render(); flash('已撤销本次应用'); }
+      catch (e) {
+        if (CS.revision() === previous.revision) draftState.undo = previous;
+        flash('撤销失败：' + String(e && e.message || e));
+      }
+    });
+    body.appendChild(undo);
+  }
+  async function previewDraft(input, source) {
+    discardDraft(); draftState.source = source; draftState.busy = true;
+    var serial = draftState.serial, page = target + ':' + tab, CS = stage_api(), revision = CS.revision();
+    render();
+    try {
+      var prepared = await prepareDraftSource(input,source);
+      if (serial !== draftState.serial || !isOpen() || document.hidden || page !== target + ':' + tab) return;
+      if (revision !== CS.revision()) throw new Error('舞台已修改，请重新预览');
+      var current = CS.preset();
+      prepared.diff = [];
+      collectDraftDiff(current, prepared.preset, '', prepared.diff);
+      draftState.prepared = prepared;
+      draftState.token = CS.beginPreview(prepared.preset, prepared.proposalHash);
+    } catch (e) { if (serial === draftState.serial) draftState.error = String(e.message || e); }
+    finally { if (serial === draftState.serial) { draftState.busy = false; render(); } }
+  }
+  function renderDraftControls(body, source) {
+    if (draftState.source !== source) return;
+    if (draftState.error) body.appendChild(h('div', 'sc-note ws-warn', draftState.error));
+    var prepared = draftState.prepared, token = draftState.token, CS = stage_api();
+    if (!prepared || !token || !CS.preview() || CS.preview().previewId !== token.previewId) return;
+    if (prepared.template) {
+      body.appendChild(h('p','sc-note',prepared.template.source + ' · ' + prepared.template.title + ' v'
+        + prepared.template.version + ' · 舞台契约 v' + prepared.template.schemaVersion + ' · 待视觉验收'));
+    }
+    if (prepared.artifact && prepared.artifact.mode === 'create') {
+      body.appendChild(h('p','sc-note','该草稿按场景规范默认值创建。应用会替换整份当前预置；未指定参数按候选默认值写入，当前 cue、绑定和工程上下文会被替换。原曲目不会自动播放或切换。'));
+    }
+    body.appendChild(h('div', 'sc-note', '正在临时预览。确认应用后才会保存；切页、关闭或取消会恢复已提交的舞台。'));
+    (prepared.diff || []).filter(function (d) { return d.before !== d.after; }).forEach(function (d) {
+      body.appendChild(h('div', 'ws-kv', d.path + '：当前 ' + formatDraftDiffValue(d.before)
+        + ' → 候选 ' + formatDraftDiffValue(d.after)));
+    });
+    prepared.diagnostics.forEach(function (d) {
+      body.appendChild(h('div', d.clamped ? 'ws-kv ws-warn' : 'ws-kv',
+        d.path + '：' + d.requested + ' → ' + d.normalized + (d.clamped ? '（已调整到支持范围）' : '')));
+    });
+    var detail = h('details'), title = h('summary', null, '查看完整候选与分享码');
+    var code = h('textarea', 'ws-json'); code.readOnly = true; code.value = prepared.shareCode;
+    code.setAttribute('aria-label', '草稿分享码');
+    var json = h('pre', 'sc-note', JSON.stringify(prepared.preset, null, 2));
+    detail.append(title, code, json); body.appendChild(detail);
+    var row = h('div', 'ws-prompt-actions');
+    var apply = h('button', 'btn primary', '应用到当前舞台'); apply.type = 'button';
+    apply.addEventListener('click', async function () {
+      if (draftState.busy) return;
+      var serial = draftState.serial;
+      draftState.busy = true; apply.disabled = true;
+      try {
+        var checked = await prepareDraftSource(prepared.artifact,source);
+        if (isAiDraftSource(source)) {
+          var latest = await VMusicTransport.get('/v1/ai/proposals/' + source);
+          if (latest.state !== 'pending' || latest.expiresAt <= Date.now()
+            || CreativeDraft.canonical(latest.artifact) !== CreativeDraft.canonical(prepared.artifact)) {
+            throw new Error('提案已失效，请重新读取');
+          }
+        }
+        if (serial !== draftState.serial) return;
+        if (!isOpen() || document.hidden || checked.proposalHash !== token.proposalHash) throw new Error('预览已失效');
+        var previous = CS.preset();
+        var result = CS.applyPreview(token.previewId, checked.proposalHash);
+        if (!result.ok) throw new Error(result.message);
+        draftState.undo = { preset: previous, revision: CS.revision() };
+        discardDraft(); flash('已应用到本页面；收藏请使用原收藏入口');
+      } catch (e) {
+        if (serial === draftState.serial) { draftState.error = String(e.message || e); }
+      } finally {
+        if (serial === draftState.serial) draftState.busy = false;
+        render();
+      }
+    });
+    var cancel = h('button', 'btn', '取消预览'); cancel.type = 'button';
+    cancel.addEventListener('click', function () { discardDraft(); render(); });
+    row.append(apply, cancel); body.appendChild(row);
+  }
+  function renderDraftImport(body) {
+    body.appendChild(h('h2', 'sc-group-title', '导入舞台意图草稿'));
+    body.appendChild(h('div', 'sc-note', '粘贴带版本信息的草稿 JSON（最多 16 KiB）。本地校验并临时预览，无需开启生成或外部连接。'));
+    var ta = h('textarea', 'ws-json'); ta.id = 'ws-draft-json'; ta.spellcheck = false;
+    ta.value = draftState.text; ta.setAttribute('aria-label', '舞台意图草稿 JSON');
+    ta.addEventListener('input', function () {
+      var active = draftState.token || draftState.busy || draftState.error;
+      draftState.text = ta.value; discardDraft(); if (active) render();
+    });
+    var preview = h('button', 'btn primary', draftState.busy ? '正在校验…' : '校验并预览草稿');
+    preview.type = 'button'; preview.id = 'ws-draft-preview'; preview.disabled = draftState.busy;
+    preview.addEventListener('click', function () { previewDraft(draftState.text, 'import'); });
+    body.append(ta, preview); renderDraftControls(body, 'import'); renderDraftUndo(body);
+  }
+
+  var AI_JOBS_PAGE_SIZE = 20;
+  var aiState = {
+    jobs: [], jobsHasMore: false, jobsHistoryExhausted: false,
+    jobsLoadingMore: false, jobsHistoryError: '',
+    consent: false, guard: null, budget: null, provider: null, expanded: null,
+    credential: null, credentialTarget: '', credentialRevision: 0,
+    credentialHint: null, syncButtons: null, syncCredentialPanel: null,
+    credentialOperation: false, credentialOpen: false,
+    rejectingProposals: Object.create(null),
+    proposal: null, brief: '', loading: false, error: '',
+    snapshot: '', pendingSubmit: null, retryBriefs: Object.create(null),
+    cancellingJobs: Object.create(null),
+  };
+  var aiTimer = 0, aiRefresh = null, aiRefreshAgain = false;
+  var aiErrorRetryDelay = 2500, aiErrorRetryAt = 0;
+
+  function aiVisible() {
+    return isOpen() && target === 'advanced' && tab === 'ai' && !document.hidden;
+  }
+
+  function aiCredentialTarget(provider) {
+    if (!provider || !provider.ready || (provider.id !== 'openai' && provider.id !== 'stepfun')) return '';
+    return provider.id + '\n' + String(provider.model || '') + '\n'
+      + String(provider.resetConfigFingerprint || '');
+  }
+
+  function aiCredentialReady(provider) {
+    var target = aiCredentialTarget(provider);
+    if (!target) return true;
+    var credential = aiState.credential;
+    return aiState.credentialTarget === target && credential
+      && credential.provider === provider.id && !credential.checking && !credential.error
+      && credential.configured === true;
+  }
+
+  function aiCredentialHintText() {
+    var provider = aiState.provider;
+    var target = aiCredentialTarget(provider);
+    if (!target) return '';
+    var credential = aiState.credential;
+    if (!credential || aiState.credentialTarget !== target || credential.checking) {
+      return '正在确认当前模型密钥状态…';
+    }
+    if (credential.provider !== provider.id) return '当前模型密钥状态不匹配，请展开密钥设置重新查询。';
+    if (credential.error) return '无法确认当前模型密钥状态，请展开密钥设置并查询后再提交。';
+    if (!credential.configured) return '尚未配置当前模型所需密钥，请展开模型密钥设置后再提交。';
+    return '';
+  }
+
+  function syncAiCredentialUi() {
+    var hint = aiState.credentialHint;
+    if (hint && hint.isConnected) {
+      var message = aiCredentialHintText();
+      hint.textContent = message;
+      hint.hidden = !message;
+    }
+    if (aiState.syncButtons) aiState.syncButtons();
+    if (aiState.syncCredentialPanel) aiState.syncCredentialPanel();
+  }
+
+  function refreshAiCredential(T, provider) {
+    var target = aiCredentialTarget(provider);
+    if (!target) {
+      if (aiState.credentialTarget || aiState.credential) {
+        aiState.credentialTarget = '';
+        aiState.credential = null;
+        aiState.credentialRevision += 1;
+        syncAiCredentialUi();
+      }
+      return;
+    }
+    if (aiState.credentialTarget === target && aiState.credential) return;
+    aiState.credentialTarget = target;
+    aiState.credential = { provider: provider.id, checking: true };
+    var revision = ++aiState.credentialRevision;
+    syncAiCredentialUi();
+    T.get('/v1/ai/provider-credential', { retry: false }).then(function (reply) {
+      if (revision !== aiState.credentialRevision || aiState.credentialTarget !== target) return;
+      aiState.credential = reply && reply.provider === provider.id
+        ? reply : { provider: provider.id, error: 'provider_mismatch' };
+    }, function (error) {
+      if (revision !== aiState.credentialRevision || aiState.credentialTarget !== target) return;
+      aiState.credential = { provider: provider.id, error: error.code || 'status_unavailable' };
+    }).then(function () {
+      if (revision === aiState.credentialRevision && aiState.credentialTarget === target) syncAiCredentialUi();
+    });
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { discardDraft(); if (isOpen()) render(); }
+    if (aiVisible()) refreshAi();
+  });
+
+  function aiStateLabel(state) {
+    return {
+      accepted: '排队中', running: '生成中', succeeded: '已完成',
+      failed: '失败', cancelled: '已取消', expired: '已超时', interrupted: '已中断',
+    }[state] || state;
+  }
+
+  function aiFailureText(code, providerHttpStatus) {
+    if (code === 'provider_error' && Number.isInteger(providerHttpStatus)
+      && providerHttpStatus >= 300 && providerHttpStatus <= 599) {
+      if (providerHttpStatus === 401) return '模型服务返回 HTTP 401；请检查 API key 是否有效。响应正文未保存。';
+      if (providerHttpStatus === 402) return '模型服务返回 HTTP 402；请在服务商控制台核对该接口和模型的账户权限与服务状态。响应正文未保存。';
+      if (providerHttpStatus === 403) return '模型服务返回 HTTP 403；请检查当前 API key 是否有权调用所选接口和模型。响应正文未保存。';
+      if (providerHttpStatus === 404) return '模型服务返回 HTTP 404；请检查接口地址和模型标识。响应正文未保存。';
+      if (providerHttpStatus === 429) return '模型服务返回 HTTP 429；请求暂被限流，请稍后手动重试。响应正文未保存。';
+      if (providerHttpStatus >= 500) return '模型服务返回 HTTP ' + providerHttpStatus + '；请稍后检查服务状态并手动重试。响应正文未保存。';
+      return '模型服务返回 HTTP ' + providerHttpStatus + '；请检查服务商接口状态。响应正文未保存。';
+    }
+    return {
+      provider_error: '模型服务请求失败；请检查密钥、模型与接口地址、账户权限或额度、网络和服务状态后重试。',
+      invalid_output: '模型返回内容无法作为舞台提案；请改写描述后重试。',
+      internal_error: '任务处理失败；请刷新后重试。若仍失败，请检查服务日志。',
+    }[code] || '任务失败；请检查模型设置后重试。';
+  }
+
+  function aiShortId(id) {
+    return String(id || '').slice(0, 8);
+  }
+
+  function aiTime(ms) {
+    var d = new Date(Number(ms) || 0);
+    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+  }
+
+  function mergeAiJobs(primary, older) {
+    var byId = new Map();
+    primary.concat(older).forEach(function (job) {
+      if (job && job.jobId) byId.set(job.jobId, job);
+    });
+    return Array.from(byId.values()).sort(function (a, b) {
+      return Number(b.createdAt) - Number(a.createdAt) || String(b.jobId).localeCompare(String(a.jobId));
+    });
+  }
+
+  function aiJobIsActive(job) {
+    return job && (job.state === 'accepted' || job.state === 'running');
+  }
+
+  // 原始描述只在本页有界内存中供重试使用，不写入任务历史。
+  function rememberAiBrief(jobId, brief) {
+    if (!jobId || !brief) return;
+    aiState.retryBriefs[jobId] = brief;
+    var ids = Object.keys(aiState.retryBriefs);
+    while (ids.length > AI_JOBS_PAGE_SIZE) delete aiState.retryBriefs[ids.shift()];
+  }
+
+  function pruneAiRetryBriefs() {
+    var byId = new Map(aiState.jobs.map(function (job) { return [job.jobId, job]; }));
+    Object.keys(aiState.retryBriefs).forEach(function (jobId) {
+      var job = byId.get(jobId);
+      if (job && ['succeeded', 'cancelled'].indexOf(job.state) >= 0) {
+        delete aiState.retryBriefs[jobId];
+      }
+    });
+  }
+
+  function loadOlderAiJobs(button) {
+    if (aiState.jobsLoadingMore || aiState.jobsHistoryExhausted) return;
+    var cursor = aiState.jobs[aiState.jobs.length - 1];
+    if (!cursor) return;
+    aiState.jobsLoadingMore = true;
+    aiState.jobsHistoryError = '';
+    if (button) { button.disabled = true; button.textContent = '读取中…'; }
+    var query = new URLSearchParams({
+      limit: String(AI_JOBS_PAGE_SIZE),
+      before_created_at: String(cursor.createdAt),
+      before_job_id: cursor.jobId,
+    });
+    window.VMusicTransport.get('/v1/ai/jobs?' + query.toString())
+      .then(function (data) {
+        var page = (data && data.jobs) || [];
+        aiState.jobs = mergeAiJobs(page, aiState.jobs);
+        aiState.jobsHistoryExhausted = page.length < AI_JOBS_PAGE_SIZE;
+        aiState.jobsHasMore = !aiState.jobsHistoryExhausted;
+      })
+      .catch(function (error) {
+        aiState.jobsHistoryError = String((error && error.message) || error);
+      })
+      .then(function () {
+        aiState.jobsLoadingMore = false;
+        aiState.snapshot = '';
+        renderIfChanged();
+      });
+  }
+
+  function refreshAi() {
+    var T = window.VMusicTransport;
+    if (!T) return Promise.resolve();
+    if (aiRefresh) { aiRefreshAgain = true; return aiRefresh; }
+    aiRefresh = T.get('/v1/ai/status')
+      .then(function (status) {
+        aiState.consent = !!(status.consent && status.consent.inAppGeneration);
+        aiState.guard = status.guard || null;
+        aiState.budget = status.budget || null;
+        aiState.provider = status.provider || null;
+        refreshAiCredential(T, aiState.provider);
+        return T.get('/v1/ai/jobs?limit=20');
+      })
+      .then(function (data) {
+        var latest = (data && data.jobs) || [];
+        var latestIds = new Set(latest.map(function (job) { return job.jobId; }));
+        var activeOutsidePage = latest.length < AI_JOBS_PAGE_SIZE ? [] : aiState.jobs.filter(function (job) {
+          return aiJobIsActive(job) && !latestIds.has(job.jobId);
+        });
+        if (latest.length < AI_JOBS_PAGE_SIZE) {
+          aiState.jobs = latest;
+          aiState.jobsHistoryExhausted = true;
+          aiState.jobsHasMore = false;
+        } else {
+          aiState.jobs = mergeAiJobs(aiState.jobs, latest);
+          aiState.jobsHasMore = !aiState.jobsHistoryExhausted;
+        }
+        aiState.jobsHistoryError = '';
+        return Promise.all(activeOutsidePage.map(function (job) {
+          return T.get('/v1/ai/jobs/' + encodeURIComponent(job.jobId))
+            .catch(function () { return null; });
+        })).then(function (refreshedJobs) {
+          refreshedJobs.forEach(function (job) {
+            if (job && job.jobId && !latestIds.has(job.jobId)) {
+              aiState.jobs = mergeAiJobs(aiState.jobs, [job]);
+            }
+          });
+        }).then(function () {
+          if (!aiState.expanded) return;
+          var id = aiState.expanded;
+          return T.get('/v1/ai/proposals/' + id).then(function (proposal) {
+            if (aiState.expanded === id) aiState.proposal = proposal;
+          });
+        }).then(function () {
+          pruneAiRetryBriefs();
+        });
+      })
+      .then(function () {
+        aiState.error = '';
+        aiErrorRetryDelay = 2500;
+        aiErrorRetryAt = 0;
+        renderIfChanged();
+      })
+      .catch(function (e) {
+        aiState.error = String((e && e.message) || e);
+        aiErrorRetryAt = Date.now() + aiErrorRetryDelay;
+        aiErrorRetryDelay = Math.min(15000, aiErrorRetryDelay * 2);
+        renderIfChanged();
+      })
+      .then(function () {
+        aiRefresh = null;
+        var again = aiRefreshAgain;
+        aiRefreshAgain = false;
+        if (again && aiVisible()) return refreshAi();
+      });
+    return aiRefresh;
+  }
+
+  /// 快照比较：轮询拿到同样的事实就不重画——2.5 秒撕一次 DOM 会把用户
+  /// 正在点的按钮从手底下抽走。展开态与错误信息都参与比较。
+  function renderIfChanged() {
+    var fingerprint = JSON.stringify([
+      aiState.jobs.map(function (job) {
+        return [job.jobId, job.state, job.stateRevision, job.resultProposalId, job.usage];
+      }),
+      aiState.jobsHasMore, aiState.jobsHistoryExhausted,
+      aiState.jobsLoadingMore, aiState.jobsHistoryError,
+      aiState.consent, aiState.guard, aiState.budget, aiState.provider, aiState.error,
+      aiState.credential,
+      aiState.expanded, aiState.proposal, draftState.undo,
+      Object.keys(aiState.retryBriefs).sort(),
+      Object.keys(aiState.rejectingProposals).sort(),
+      Object.keys(aiState.cancellingJobs).sort(),
+    ]);
+    if (fingerprint === aiState.snapshot) return;
+    aiState.snapshot = fingerprint;
+    if (aiVisible()) render();
+  }
+
+  function clearAiCredential() {
+    var input = document.getElementById('ws-ai-key');
+    if (input) input.value = '';
+  }
+
+  function renderAiCredential(body, T) {
+    var details = h('details', 'ws-ai-credential');
+    var restoredOpen = !!aiState.credentialOpen;
+    details.open = restoredOpen;
+    var summary = h('summary', 'sc-label', '模型密钥设置（接入准备）');
+    details.appendChild(summary);
+    var destination = h('p', 'sc-note',
+      '展开后查询当前模型服务与接收地址。密钥保存在系统钥匙串；保存密钥不会开启云端生成。');
+    details.appendChild(destination);
+    var status = h('p', 'sc-note', '展开后只显示是否已配置，服务端不回传密钥。');
+    status.setAttribute('aria-live', 'polite');
+    var label = h('label', 'sc-label', '模型 API key');
+    label.setAttribute('for', 'ws-ai-key');
+    var input = h('input', 'ws-prompt-text');
+    input.id = 'ws-ai-key'; input.type = 'password'; input.autocomplete = 'off';
+    input.maxLength = 4096; input.spellcheck = false;
+    input.setAttribute('autocapitalize', 'none');
+    var actions = h('div', 'ws-prompt-actions');
+    var save = h('button', 'btn', '保存模型密钥');
+    var remove = h('button', 'btn', '删除模型密钥');
+    var query = h('button', 'btn', '查询密钥状态');
+    [save, remove, query].forEach(function (button) { button.type = 'button'; actions.appendChild(button); });
+    var busy = false, revision = 0, targetReady = false, localStatusError = '';
+    function valid(serial) { return serial === revision && details.isConnected && details.open && aiVisible(); }
+    function present(reply) {
+      var provider = reply && reply.provider === 'stepfun' ? 'StepFun'
+        : reply && reply.provider === 'openai' ? 'OpenAI' : null;
+      targetReady = !!provider;
+      if (!provider) { status.textContent = '当前模型服务的密钥设置不可用。'; return; }
+      summary.textContent = provider + ' 密钥设置（接入准备）';
+      label.textContent = provider + ' API key';
+      save.textContent = '保存 ' + provider + ' 密钥';
+      remove.textContent = '删除 ' + provider + ' 密钥';
+      destination.textContent = '密钥保存在系统钥匙串，仅绑定本安装与 ' + reply.origin + '。保存密钥不会开启云端生成。';
+      status.textContent = reply.configured ? '已配置 ' + provider + ' 密钥。' : '尚未配置 ' + provider + ' 密钥。';
+    }
+    function buttons() {
+      var operationBusy = busy || aiState.credentialOperation;
+      save.disabled = operationBusy || !targetReady || !input.value;
+      remove.disabled = operationBusy || !targetReady;
+      query.disabled = input.disabled = operationBusy;
+    }
+    function syncPanel() {
+      if (!details.isConnected) return;
+      var credentialTarget = aiCredentialTarget(aiState.provider);
+      var credential = aiState.credential;
+      if (aiState.credentialOperation) {
+        targetReady = false;
+        status.textContent = '正在操作系统钥匙串…';
+      } else if (credentialTarget && aiState.credentialTarget === credentialTarget && credential) {
+        if (credential.checking) {
+          targetReady = false;
+          status.textContent = '正在确认当前模型密钥状态…';
+        } else if (credential.error || credential.provider !== aiState.provider.id) {
+          targetReady = false;
+          status.textContent = localStatusError || '无法确认当前模型密钥状态，请手动查询后再决定是否使用。';
+        } else present(credential);
+      }
+      buttons();
+    }
+    function run(method) {
+      if (busy || aiState.credentialOperation) return;
+      var serial = ++revision;
+      var credentialTarget = aiCredentialTarget(aiState.provider);
+      var credentialRevision = ++aiState.credentialRevision;
+      localStatusError = '';
+      busy = true; aiState.credentialOperation = true; buttons(); status.textContent = '正在操作系统钥匙串…';
+      if (credentialTarget) {
+        aiState.credentialTarget = credentialTarget;
+        aiState.credential = { provider: aiState.provider.id, checking: true };
+        syncAiCredentialUi();
+      }
+      var task;
+      if (method === 'PUT') {
+        task = T.put('/v1/ai/provider-credential', { api_key: input.value });
+        input.value = ''; // No secret in module state, retry state or browser storage.
+      } else if (method === 'DELETE') {
+        input.value = '';
+        task = T.del('/v1/ai/provider-credential');
+      } else task = T.get('/v1/ai/provider-credential', { retry: false });
+      Promise.resolve(task).then(function (reply) {
+        if (credentialTarget && credentialRevision === aiState.credentialRevision
+          && credentialTarget === aiCredentialTarget(aiState.provider)) {
+          aiState.credentialTarget = credentialTarget;
+          aiState.credential = reply && reply.provider === aiState.provider.id
+            ? reply : { provider: aiState.provider.id, error: 'provider_mismatch' };
+          syncAiCredentialUi();
+        }
+        if (!valid(serial)) return;
+        present(reply);
+      }).catch(function (error) {
+        if (credentialTarget && credentialRevision === aiState.credentialRevision
+          && credentialTarget === aiCredentialTarget(aiState.provider)) {
+          aiState.credentialTarget = credentialTarget;
+          aiState.credential = { provider: aiState.provider.id, error: error.code || 'status_unavailable' };
+          syncAiCredentialUi();
+        }
+        if (!valid(serial)) return;
+        targetReady = false;
+        var messages = {
+          ai_locked: '请在持有 AI 服务锁的 Hertz 实例中管理模型密钥；当前实例无法执行。',
+          ai_credential_invalid: '密钥格式不合法，请重新输入；不允许空白或控制字符。',
+          ai_credential_busy: '钥匙串操作仍在执行，请稍后手动查询状态。',
+          ai_credential_timeout: '钥匙串操作尚未结束，结果待确认；请稍后手动查询状态。',
+          ai_credential_unavailable: '系统钥匙串不可用，请检查系统凭据服务。',
+        };
+        localStatusError = (messages[error.code] || '操作未确认，请手动查询状态后再决定是否重新提交。')
+          + (error.requestId ? '（request_id ' + error.requestId + '）' : '');
+        status.textContent = localStatusError;
+      }).then(function () {
+        busy = false; aiState.credentialOperation = false;
+        if (aiState.syncCredentialPanel) aiState.syncCredentialPanel();
+        else if (details.isConnected) buttons();
+      });
+    }
+    input.addEventListener('input', buttons);
+    save.addEventListener('click', function () { run('PUT'); });
+    remove.addEventListener('click', function () { run('DELETE'); });
+    query.addEventListener('click', function () { run('GET'); });
+    details.addEventListener('toggle', function () {
+      if (restoredOpen && details.open) { restoredOpen = false; return; }
+      restoredOpen = false;
+      aiState.credentialOpen = details.open;
+      if (details.open) run('GET');
+      else { input.value = ''; revision += 1; }
+    });
+    details.append(status, label, input, actions); body.appendChild(details);
+    aiState.syncCredentialPanel = syncPanel;
+    syncPanel();
+  }
+
+  function renderAi(body) {
+    var T = window.VMusicTransport;
+    aiState.credentialHint = null;
+    aiState.syncButtons = null;
+    aiState.syncCredentialPanel = null;
+    if (!T) {
+      body.appendChild(h('div', 'sc-note ws-warn', 'transport 未就绪，本页暂不可用。'));
+      return;
+    }
+    if (!aiTimer && aiVisible()) {
+      // 事件是提示，轮询是事实来源（§7.4）：事件允许丢失/乱序，列表以
+      // 查询快照为准；面板开着时低频轮询兜底。
+      aiTimer = setInterval(function () {
+        if (!aiVisible()) return;
+        if (aiState.error) {
+          if (Date.now() >= aiErrorRetryAt) refreshAi();
+          return;
+        }
+        if (aiState.expanded || aiState.jobs.some(function (j) {
+          var usage = j.usage;
+          var waitingForUsage = usage && (usage.usageState === 'unknown'
+            || (usage.usageState === 'unpriced' && !usage.reportedUsage));
+          return aiJobIsActive(j)
+            || (waitingForUsage && Date.now() - j.createdAt < 24 * 60 * 60 * 1000);
+        })) refreshAi();
+      }, 2500);
+      refreshAi();
+    }
+
+    body.appendChild(h('div', 'sc-note',
+      '把描述交给服务端生成（实验）：任务在后台跑，离开面板不影响，回来在这里看结果。'
+      + '功能默认关闭，开关在下方；先查看候选参数，点「应用」才上舞台，且可整体撤销。'));
+
+    if (aiState.error) {
+      body.appendChild(h('div', 'sc-note ws-warn', aiState.error));
+    }
+
+    var consentRow = h('div', 'ws-kv');
+    consentRow.appendChild(h('span', null, '生成开关'));
+    consentRow.appendChild(h('span', 'sc-value', aiState.consent ? '已开启' : '已关闭'));
+    body.appendChild(consentRow);
+    var toggle = h('button', 'btn', aiState.consent ? '关闭生成' : '开启生成');
+    toggle.type = 'button';
+    toggle.disabled = aiState.loading;
+    toggle.addEventListener('click', function () {
+      setLoading(true);
+      T.put('/v1/settings', { ai_generation_consent: !aiState.consent })
+        .then(function () { return refreshAi(); })
+        .catch(function (e) { flash('保存失败：' + String((e && e.message) || e)); })
+        .then(function () { setLoading(false); });
+    });
+    body.appendChild(toggle);
+
+    function usd(micro) {
+      return Number.isSafeInteger(micro) && micro >= 0
+        ? '$' + (micro / 1000000).toFixed(6) + ' USD' : '金额暂不可显示';
+    }
+    if (aiState.provider && aiState.provider.id === 'fake') {
+      body.appendChild(h('div', 'sc-note', '当前为本地模拟生成，不调用真实模型，费用为零。'));
+    } else if (aiState.provider && aiState.provider.id === 'ollama-local') {
+      body.appendChild(h('div', 'sc-note', '当前使用本地 Ollama 模型：' + aiState.provider.model
+        + '。仅发送生成描述与舞台参数契约，不读取歌曲、歌词或音频；Hertz 不计云端费用。'));
+    } else if (aiState.provider && aiState.provider.pricingMode === 'token_only') {
+      body.appendChild(h('div', 'sc-note ws-warn', '当前模型价格未知，不会因此阻止生成；会记录可信输入/输出 token，金额未知且不计入费用总额。'));
+    } else if (aiState.provider && !aiState.provider.ready) {
+      body.appendChild(h('div', 'sc-note ws-warn', '生成服务配置不可用：'
+        + (aiState.provider.diagnostic || '请检查服务配置')));
+    }
+    if (aiCredentialTarget(aiState.provider)) {
+      var credentialHint = h('div', 'sc-note ws-warn ws-ai-credential-readiness', '');
+      credentialHint.setAttribute('aria-live', 'polite');
+      aiState.credentialHint = credentialHint;
+      body.appendChild(credentialHint);
+      syncAiCredentialUi();
+    }
+    renderAiCredential(body, T);
+    if (aiState.budget) {
+      var budget = aiState.budget;
+      var charged = budget.chargedTotalOverflowed ? '超出可表示范围' : usd(budget.chargedMicroUsd);
+      var budgetLine = h('div', 'sc-note ws-ai-budget',
+        '预算周期：' + budget.month + '（UTC 自然月） · 已核价 ' + charged
+        + ' · 在途预留 ' + usd(budget.reservedMicroUsd) + ' · 月限额 ' + usd(budget.limitMicroUsd)
+        + ' · 未核价请求的金额不计入总额');
+      body.appendChild(budgetLine);
+    }
+    var refreshBtn = h('button', 'btn', '刷新任务与费用');
+    refreshBtn.type = 'button';
+    refreshBtn.addEventListener('click', function () { refreshAi(); });
+    body.appendChild(refreshBtn);
+
+    if (aiState.guard && aiState.guard.tokenHalted) {
+      body.appendChild(h('div', 'sc-note',
+        '历史 token 统计曾超过受理时的估算上界，仅作诊断，不会暂停后续生成。'));
+    }
+    if (aiState.guard && aiState.guard.halted) {
+      body.appendChild(h('div', 'sc-note ws-warn',
+        '金额熔断：' + (aiState.guard.reason || '预算越界') + '；关联任务 '
+        + (aiState.guard.triggerJob || '未记录') + '。'));
+      var resetBtn = h('button', 'btn', '复位熔断');
+      resetBtn.type = 'button';
+      var resetFingerprint = aiState.provider && aiState.provider.resetConfigFingerprint;
+      resetBtn.disabled = aiState.loading || !resetFingerprint;
+      resetBtn.title = resetFingerprint ? '核对当前模型与价格配置后复位' : '当前配置无法核对，暂不能复位';
+      resetBtn.addEventListener('click', function () {
+        if (!resetFingerprint) return;
+        var summary = aiState.provider.id + ' / ' + aiState.provider.model
+          + ' · 配置指纹 ' + resetFingerprint.slice(0, 12);
+        if (!window.confirm('将复位持久金额保护标记。请确认当前 provider 与配置：\n' + summary)) return;
+        T.post('/v1/ai/budget-guard/reset', {
+          expected_revision: aiState.guard.revision,
+          config_fingerprint: resetFingerprint,
+        })
+          .then(function () { return refreshAi(); })
+          .catch(function (e) { flash('复位失败：' + String((e && e.message) || e)); });
+      });
+      body.appendChild(resetBtn);
+    }
+
+    var label = h('label', 'sc-label');
+    label.setAttribute('for', 'ws-ai-brief');
+    label.appendChild(h('span', null, '生成描述'));
+    body.appendChild(label);
+    var ta = h('textarea', 'ws-prompt-text');
+    ta.id = 'ws-ai-brief';
+    ta.maxLength = 2000;
+    ta.spellcheck = false;
+    ta.value = aiState.brief;
+    ta.placeholder = '例：星云缓慢推进，霓虹颗粒，跟随音乐律动';
+    ta.addEventListener('input', function () {
+      aiState.brief = String(ta.value).slice(0, 2000);
+      syncAiButtons();
+    });
+    body.appendChild(ta);
+    var pendingNote = h('div', 'sc-note ws-warn', '');
+    pendingNote.hidden = true;
+    body.appendChild(pendingNote);
+
+    var actions = h('div', 'ws-prompt-actions');
+    var submitBtn = h('button', 'btn primary', '提交生成任务');
+    submitBtn.type = 'button';
+    // consent 关闭时输入框与提交一起禁用：面板状态本身就是开关的可见面。
+    function aiCanSubmit() {
+      return aiState.consent && !aiState.loading
+        && !!aiState.provider && aiState.provider.ready
+        && aiCredentialReady(aiState.provider);
+    }
+    function syncAiButtons() {
+      var pending = aiState.pendingSubmit;
+      var manualBrief = aiState.brief.trim();
+      var pendingConflict = pending && (pending.brief !== manualBrief || !!pending.sourceJobId);
+      ta.disabled = !aiState.consent;
+      submitBtn.disabled = !aiCanSubmit() || !manualBrief || !!pendingConflict;
+      pendingNote.hidden = !pendingConflict;
+      pendingNote.textContent = !pendingConflict ? '' : pending.sourceJobId
+        ? '上次重试状态尚未确认。再次点击同一失败任务的重试可复用该请求；确认前不能提交另一条任务。'
+        : '上次提交状态尚未确认。恢复原描述后再次提交可复用同一请求；确认前不能提交另一条任务。';
+    }
+    aiState.syncButtons = syncAiButtons;
+    syncAiButtons();
+    function submitAiBrief(brief, sourceJobId) {
+      brief = String(brief || '').trim();
+      if (!brief || aiState.loading) return;
+      var source = sourceJobId || null;
+      if (source && !Object.prototype.hasOwnProperty.call(aiState.retryBriefs, source)) return;
+      var pending = aiState.pendingSubmit;
+      if (pending && (pending.brief !== brief || (pending.sourceJobId || null) !== source)) {
+        flash(pending.sourceJobId
+          ? '上次重试状态尚未确认，请继续点击同一失败任务的重试。'
+          : '上次提交状态尚未确认，请先恢复原描述并确认该请求。');
+        return;
+      }
+      if (!pending) {
+        var hex = '';
+        Array.prototype.forEach.call(crypto.getRandomValues(new Uint8Array(16)), function (b) {
+          hex += ('0' + b.toString(16)).slice(-2);
+        });
+        pending = { brief: brief, sourceJobId: source, key: 'v1.' + Date.now() + '.' + hex };
+        aiState.pendingSubmit = pending;
+      }
+      setLoading(true);
+      T.post('/v1/ai/jobs', { brief: pending.brief, idempotency_key: pending.key })
+        .then(function (reply) {
+          var acceptedJob = reply && reply.job;
+          if (!acceptedJob || !acceptedJob.jobId) throw new Error('服务端未返回任务编号，提交状态尚未确认');
+          rememberAiBrief(acceptedJob.jobId, pending.brief);
+          if (source && source !== acceptedJob.jobId) delete aiState.retryBriefs[source];
+          if (aiState.pendingSubmit && aiState.pendingSubmit.key === pending.key) {
+            aiState.pendingSubmit = null;
+          }
+          if (!source && aiState.brief.trim() === pending.brief) aiState.brief = '';
+          ta.value = aiState.brief;
+          return refreshAi();
+        })
+        .catch(function (e) {
+          // 4xx (except request timeout) is an explicit admission rejection;
+          // transport errors and 5xx may have committed and must keep the key.
+          if (e && e.status >= 400 && e.status < 500 && e.status !== 408
+              && aiState.pendingSubmit && aiState.pendingSubmit.key === pending.key) {
+            aiState.pendingSubmit = null;
+          }
+          flash('提交失败：' + String((e && e.message) || e));
+        })
+        .then(function () { setLoading(false); });
+    }
+    submitBtn.addEventListener('click', function () { submitAiBrief(aiState.brief, null); });
+    actions.appendChild(submitBtn);
+    body.appendChild(actions);
+
+    var list = h('div', 'ws-ai-jobs');
+    list.setAttribute('aria-live', 'polite');
+    body.appendChild(list);
+    if (!aiState.jobs.length) {
+      list.appendChild(h('div', 'sc-note', '还没有任务。'));
+    }
+    aiState.jobs.forEach(function (job) {
+      var row = h('div', 'ws-ai-job');
+      row.appendChild(h('span', 'ws-ai-state', aiStateLabel(job.state)));
+      row.appendChild(h('span', 'sc-value',
+        aiShortId(job.jobId) + ' · ' + aiTime(job.createdAt) + ' · ' + job.provider + '/' + job.model));
+      list.appendChild(row);
+      if (job.state === 'failed') {
+        list.appendChild(h('div', 'sc-note ws-ai-failure',
+          aiFailureText(job.failureCode, job.providerHttpStatus)));
+      }
+      if (job.usage) {
+        var usage = job.usage;
+        var usageText;
+        if (!usage.pricingKnown) {
+          usageText = usage.usageState === 'unpriced'
+            ? usage.reportedUsage
+              ? '费用未核价；输入 ' + usage.reportedUsage.inputTokens + ' tokens，输出 ' + usage.reportedUsage.outputTokens + ' tokens'
+              : '费用与 token 数未知，供应商可能已处理请求'
+            : '价格未核实；请求只记录 token 数，费用未知';
+        } else {
+          usageText = {
+            reserved: '在途预留 ' + usd(usage.reservationMicroUsd),
+            reported: '已报告费用 ' + usd(usage.accountedMicroUsd),
+            released: '未派发，预留已释放',
+            unknown: '费用未确认，暂按 ' + usd(usage.accountedMicroUsd) + ' 计入预算，后续可能校正',
+            estimated_final: '估算费用 ' + usd(usage.accountedMicroUsd) + '，已停止自动等待；取得可信记录后仍可校正',
+          }[usage.usageState] || '费用状态待查询';
+        }
+        list.appendChild(h('div', 'sc-note ws-ai-usage', usageText + ' · 归属 ' + usage.acceptedMonth + '（UTC）'));
+      }
+
+      var ops = h('div', 'ws-ai-ops');
+      if (['failed', 'expired', 'interrupted'].indexOf(job.state) >= 0
+          && Object.prototype.hasOwnProperty.call(aiState.retryBriefs, job.jobId)) {
+        var retryBrief = aiState.retryBriefs[job.jobId];
+        var retryPending = aiState.pendingSubmit;
+        var retryBtn = h('button', 'btn', '按原描述重试');
+        retryBtn.type = 'button';
+        retryBtn.disabled = !aiCanSubmit() || (!!retryPending
+          && (retryPending.brief !== retryBrief || retryPending.sourceJobId !== job.jobId));
+        retryBtn.addEventListener('click', function () {
+          submitAiBrief(retryBrief, job.jobId);
+        });
+        ops.appendChild(retryBtn);
+      }
+      if (job.state === 'accepted' || job.state === 'running') {
+        var cancelling = !!aiState.cancellingJobs[job.jobId];
+        var cancelBtn = h('button', 'btn', cancelling ? '正在取消…' : '取消');
+        cancelBtn.type = 'button';
+        cancelBtn.disabled = cancelling;
+        cancelBtn.addEventListener('click', function () {
+          if (aiState.cancellingJobs[job.jobId]) return;
+          aiState.cancellingJobs[job.jobId] = true;
+          aiState.snapshot = '';
+          cancelBtn.disabled = true;
+          cancelBtn.textContent = '正在取消…';
+          T.post('/v1/ai/jobs/' + job.jobId + '/cancel',
+            { expected_state_revision: job.stateRevision })
+            .then(function () { return refreshAi(); })
+            .catch(function (e) {
+              return refreshAi().then(function () {
+                var current = aiState.jobs.find(function (item) { return item.jobId === job.jobId; });
+                var terminal = current && ['succeeded', 'failed', 'cancelled', 'expired', 'interrupted'].indexOf(current.state) >= 0;
+                if (terminal) return;
+                flash(e && e.code === 'state_conflict'
+                  ? '任务状态已变化，取消未确认，请刷新后重试。'
+                  : '取消状态未确认，请刷新任务状态。');
+              });
+            })
+            .then(function () {
+              delete aiState.cancellingJobs[job.jobId];
+              aiState.snapshot = '';
+              renderIfChanged();
+            });
+        });
+        ops.appendChild(cancelBtn);
+      }
+      if (job.state === 'succeeded' && job.resultProposalId) {
+        var viewBtn = h('button', 'btn primary',
+          aiState.expanded === job.resultProposalId ? '收起提案' : '查看提案');
+        viewBtn.type = 'button';
+        viewBtn.addEventListener('click', function () {
+          if (aiState.expanded === job.resultProposalId) {
+            discardDraft();
+            aiState.expanded = null;
+            aiState.proposal = null;
+            render();
+            return;
+          }
+          discardDraft();
+          aiState.expanded = job.resultProposalId;
+          aiState.proposal = null;
+          renderIfChanged();
+          T.get('/v1/ai/proposals/' + job.resultProposalId)
+            .then(function (proposal) {
+              if (aiState.expanded !== job.resultProposalId) return;
+              aiState.proposal = proposal;
+              renderIfChanged();
+            })
+            .catch(function (e) { flash('读取提案失败：' + String((e && e.message) || e)); });
+        });
+        ops.appendChild(viewBtn);
+      }
+      if (ops.children.length) list.appendChild(ops);
+
+      if (aiState.expanded && aiState.expanded === job.resultProposalId) {
+        var box = h('div', 'ws-ai-proposal');
+        box.setAttribute('aria-live', 'polite');
+        var proposal = aiState.proposal && aiState.proposal.proposalId === job.resultProposalId
+          ? aiState.proposal : null;
+        if (!proposal) {
+          box.appendChild(h('div', 'sc-note', '读取提案中…'));
+        } else if (proposal.state !== 'pending') {
+          box.appendChild(h('div', 'sc-note', '提案状态：' + proposal.state));
+        } else {
+          var intent = proposal.validatedIntent || {};
+          box.appendChild(h('div', 'ws-prompt-head', '提案 · 场景：' + (intent.scene || '—')));
+          var patch = intent.patch || {};
+          Object.keys(patch).forEach(function (key) {
+            var line = h('div', 'ws-kv');
+            line.appendChild(h('span', null, key));
+            line.appendChild(h('span', 'sc-value', String(patch[key])));
+            box.appendChild(line);
+          });
+          var proposalOps = h('div', 'ws-prompt-actions');
+          var applyBtn = h('button', 'btn primary', '预览候选舞台');
+          applyBtn.type = 'button'; applyBtn.disabled = draftState.busy;
+          applyBtn.addEventListener('click', function () {
+            if (proposal.expiresAt <= Date.now()) { refreshAi(); flash('提案已过期'); return; }
+            if (!proposal.artifact) { flash('旧提案缺少版本信息，请重新生成'); return; }
+            previewDraft(proposal.artifact, proposal.proposalId);
+          });
+          var rejectBtn = h('button', 'btn', '拒绝');
+          rejectBtn.type = 'button';
+          rejectBtn.disabled = !!aiState.rejectingProposals[proposal.proposalId];
+          rejectBtn.addEventListener('click', function () {
+            var proposalId = proposal.proposalId;
+            if (aiState.rejectingProposals[proposalId]) return;
+            if (draftState.source === proposal.proposalId) discardDraft();
+            aiState.rejectingProposals[proposalId] = true;
+            renderIfChanged();
+            T.post('/v1/ai/proposals/' + proposalId + '/reject',
+              { expected_revision: proposal.revision })
+              .then(function (updated) {
+                if (aiState.expanded === updated.proposalId) aiState.proposal = updated;
+                renderIfChanged();
+                return refreshAi().catch(function (e) {
+                  flash('提案状态刷新失败：' + String((e && e.message) || e));
+                });
+              })
+              .catch(function (e) {
+                var message = String((e && e.message) || e);
+                return T.get('/v1/ai/proposals/' + encodeURIComponent(proposalId))
+                  .then(function (current) {
+                    if (aiState.expanded === proposalId) aiState.proposal = current;
+                    renderIfChanged();
+                    if (current.state === 'rejected') {
+                      flash('提案已拒绝');
+                    } else if (current.state !== 'pending') {
+                      flash('提案状态已更新：' + current.state);
+                    } else {
+                      flash('拒绝失败：' + message);
+                    }
+                  })
+                  .catch(function (statusError) {
+                    flash('拒绝失败：' + message + '；无法确认最新状态：'
+                      + String((statusError && statusError.message) || statusError));
+                  });
+              })
+              .then(function () {
+                delete aiState.rejectingProposals[proposalId];
+                renderIfChanged();
+              });
+          });
+          proposalOps.append(applyBtn, rejectBtn);
+          box.appendChild(proposalOps);
+          renderDraftControls(box, proposal.proposalId);
+          box.appendChild(h('div', 'sc-note',
+            '候选从默认基线物化后整体应用，可整体撤销；提案 24 小时后过期。'));
+        }
+        list.appendChild(box);
+      }
+    });
+
+    if (aiState.jobsHasMore || aiState.jobsHistoryError) {
+      var olderBtn = h('button', 'btn', aiState.jobsHistoryError ? '重试读取更早任务' : '加载更早任务');
+      olderBtn.type = 'button';
+      olderBtn.disabled = aiState.jobsLoadingMore;
+      olderBtn.addEventListener('click', function () { loadOlderAiJobs(olderBtn); });
+      list.appendChild(olderBtn);
+      if (aiState.jobsHistoryError) list.appendChild(h('div', 'sc-note ws-warn', aiState.jobsHistoryError));
+    }
+
+    function setLoading(on) {
+      var changed = aiState.loading !== on;
+      aiState.loading = on;
+      toggle.disabled = on;
+      syncAiButtons();
+      if (changed && aiVisible()) render();
+    }
+    renderDraftUndo(body);
+    setLoading(aiState.loading);
+  }
+
+  /// 无载荷任务提示（WS ai_tasks_resync）到达：面板开着就立刻刷新，其余场合等下次轮询。
+  function onAiTask() {
+    if (aiVisible()) refreshAi();
   }
 
   function renderScene(body) {
@@ -540,6 +1562,9 @@
     nameRow.appendChild(nameInput);
 
     var saveBtn = h('button', 'btn primary', '存进工坊');
+    var stagePreview = !!CS.preview();
+    saveBtn.disabled = stagePreview;
+    if (stagePreview) saveBtn.title = '请先确认或取消舞台预览，再保存收藏';
     saveBtn.addEventListener('click', function () {
       var p = CS.savePreset(nameInput.value || cur.name);
       flash('已保存「' + p.name + '」');
@@ -547,6 +1572,13 @@
     });
     nameRow.appendChild(saveBtn);
     body.appendChild(nameRow);
+
+    body.appendChild(h('p','sc-note','当前编排已提交并自动保存在本机，预置格式 v' + cur.version
+      + (cur.project ? '，工程 / 时间线 v' + cur.project.version + ' / v' + cur.project.timelineVersion : '')
+      + (stagePreview
+        ? '。候选仍是临时预览；请先确认或取消，再保存当前编排为收藏。'
+        : '。存进工坊会另建收藏；模板与草稿须先预览、确认应用，才会替换当前编排。')));
+    renderCreativeTemplates(body);
 
     body.appendChild(h('h2', 'sc-group-title', '三维场景'));
     // 场景、参数和编排使用同一份创意预置，直接交给大舞台的渲染器。
@@ -565,14 +1597,14 @@
         card.setAttribute('aria-pressed', String(on));
         card.addEventListener('click', function () {
           activateCreativeStage();
-          CS.setScene(s.id);
+          if (CS.preset().scene !== s.id) CS.setScene(s.id);
           render();
         });
         grid.appendChild(card);
       });
       body.appendChild(grid);
       body.appendChild(h('div', 'sc-note',
-        '场景、镜头、编排与电影风格直接呈现在大舞台，关闭工坊后继续演出。'));
+        '场景、镜头、编排与电影风格直接呈现在大舞台，关闭工坊后继续演出。切换场景会移除不适用的 cue 和绑定目标。'));
     }
 
     var opts = h('div', 'sc-grid');
@@ -588,6 +1620,31 @@
       '打开舞台交互后：拖拽转视角、滚轮推拉、单击爆闪、双击复位。'
       + '默认关闭是为了不抢歌词行的点击。'));
 
+  }
+
+  function renderCreativeTemplates(body) {
+    if (!window.CreativeTemplates) return;
+    var catalog = h('section','ws-template-catalog');
+    catalog.appendChild(h('h2','sc-group-title','创作模板候选'));
+    catalog.appendChild(h('p','sc-note','内置配方，先在舞台临时预览，确认后才应用。卡片插图仅示意场景；模板尚待人工视觉验收，不保证跨设备画面一致。'));
+    var grid = h('div','ws-creative-templates');
+    CreativeTemplates.list().forEach(function (t) {
+      var card = h('article','ws-creative-template'); card.dataset.templateCard = t.id;
+      var art = h('div','ws-creative-template-art'); art.innerHTML = sceneArt(t.scene); art.setAttribute('aria-hidden','true');
+      card.append(art,h('h3',null,t.title),h('p','sc-note',t.mood + ' · ' + t.motion),h('p','sc-note',t.boundary),
+        h('p','sc-note',t.source + ' · 模板 v' + t.version + ' · ' + (t.compatible ? '与本版本兼容' : '版本不兼容')));
+      var details = h('details'), summary = h('summary',null,'来源与兼容信息');
+      details.append(summary,h('p','sc-note','预置格式 v1 · 舞台契约 v' + t.schemaVersion + ' · 待视觉验收'),
+        h('p','sc-note','契约 ' + t.schemaHash),h('p','sc-note','默认基线 ' + t.basePresetHash));
+      var preview = h('button','btn','预览「' + t.title + '」'); preview.type = 'button'; preview.dataset.template = t.id;
+      preview.disabled = !t.compatible || draftState.busy;
+      preview.addEventListener('click',function () { previewDraft(null,'template:' + t.id); });
+      card.append(details,preview); grid.appendChild(card);
+    });
+    catalog.appendChild(grid);
+    if (isTemplateSource(draftState.source)) renderDraftControls(catalog,draftState.source);
+    renderDraftUndo(catalog);
+    body.appendChild(catalog);
   }
 
   function renderAnimeGallery(body, CS, cur) {
@@ -639,7 +1696,7 @@
     });
     section.appendChild(grid);
     var footer = h('div', 'ws-anime-footer');
-    var note = h('p', 'ws-anime-note', '聚焦画册 · 空格暂停 · ← → 调速');
+    var note = h('p', 'ws-anime-note', '聚焦画册 · 空格暂停 · ← → 调速 · 切换场景会移除不适用的 cue 和绑定目标');
     var motion = h('button', 'ws-anime-motion-toggle', artPaused ? '继续动画' : '暂停动画');
     motion.type = 'button';
     motion.setAttribute('aria-pressed', String(artPaused));
@@ -665,6 +1722,7 @@
     head.appendChild(h('h2', 'sc-group-title', '工坊收藏'));
     head.appendChild(help('收藏只保存在本机；载入会立即替换当前舞台，删除前会再次确认。'));
     body.appendChild(head);
+    body.appendChild(h('p','sc-note','本机收藏是另存的完整预置快照；载入会立即替换当前编排。旧收藏未记录来源与契约 hash 时，不推断其作者或兼容性。收藏不保存本次媒体确认，工程执行状态以导出页为准。'));
     renderPresetGallery(body, stage_api());
   }
 
@@ -687,6 +1745,8 @@
         card.appendChild(h('div', 'ws-shot-empty', '无预览'));
       }
       card.appendChild(h('div', 'ws-shot-name', p.name || '未命名'));
+      card.appendChild(h('p','sc-note','本机收藏 · 预置格式 v' + (p.version || '未知')
+        + (p.project ? ' · 工程契约 v' + p.project.schemaVersion : ' · 未记录契约版本')));
       var btns = h('div', 'ws-shot-btns');
       var load = h('button', 'btn', '载入并应用');
       load.addEventListener('click', function () {
@@ -747,10 +1807,89 @@
       '这里调整基础值；自动导演、绑定和编排会在演出时叠加变化。点击重置可恢复单项默认值。'));
   }
 
+  var arrangementState = {sections:[
+    {at:0,mode:'quiet',fade:1000},{at:30,mode:'verse',fade:1200},
+    {at:60,mode:'chorus',fade:1600},{at:90,mode:'original',fade:1600}
+  ],plan:null,message:''};
+  function renderArrangement(body) {
+    if (!window.CreativeArrangement || !window.CreativeProject) return;
+    var A = CreativeArrangement, state = arrangementState;
+    if (state.plan && state.plan.revision !== stage_api().revision()) {
+      state.plan = null; state.message = '舞台已改变，请重新检查分段。';
+    }
+    var box = h('details','ws-arrangement');
+    box.appendChild(h('summary',null,'按分段生成编排'));
+    box.appendChild(h('p','sc-note','手动填写歌曲分段，再选择平静、叙述、增强或原始参数。示例秒数需按歌曲修改，不会自动识别前奏或副歌。检查不改变舞台。'));
+    box.appendChild(h('p','sc-note','应用将替换全部 cue 并关闭自动导演，保留场景、基础参数与音频绑定。分段只用于生成，下方 cue 是保存和继续编辑的结果；需在“导出”确认媒体后执行，末段结束后保持目标值。'));
+    var list = h('div'), actions = h('div','ws-row');
+    var message = h('p','sc-note',state.message); message.setAttribute('role','status'); message.dataset.arrangementStatus = '';
+    var preview = h('div','sc-note'); preview.dataset.arrangementPreview = '';
+    var check = h('button','btn','检查分段'), apply = h('button','btn primary','替换当前编排');
+    check.dataset.arrangement = 'check'; apply.dataset.arrangement = 'apply';
+    function showPlan() {
+      apply.disabled = !state.plan;
+      preview.textContent = state.plan ? '将生成 ' + state.plan.sections.length + ' 条歌曲时间 cue，替换现有 '
+        + state.plan.replacedCueCount + ' 条 cue；自动导演关闭，保留 ' + state.plan.bindingCount + ' 条音频绑定。'
+        + state.plan.prepared.warnings.join(' ') : '';
+    }
+    function invalidate() { state.plan = null; state.message = ''; message.textContent = ''; showPlan(); }
+    var add = h('button','btn','增加分段'); add.dataset.arrangement = 'add';
+    function paintRows() {
+      list.replaceChildren(); add.disabled = state.sections.length >= 32;
+      state.sections.forEach(function (s,i) {
+        var row = h('div','ws-row');
+        var timeLabel = h('label',null,'开始秒数 '), at = h('input','ws-mini');
+        at.type = 'number'; at.min = '0'; at.max = '86400'; at.step = '0.1'; at.value = String(s.at);
+        at.setAttribute('aria-label','分段 ' + (i+1) + ' 开始秒数'); timeLabel.appendChild(at);
+        var mode = h('select'); mode.setAttribute('aria-label','分段 ' + (i+1) + ' 规则');
+        A.modes().forEach(function (m) { var o = h('option',null,m[1]); o.value = m[0]; mode.appendChild(o); });
+        mode.value = s.mode;
+        var fadeLabel = h('label',null,'过渡毫秒 '), fade = h('input','ws-mini');
+        fade.type = 'number'; fade.min = '16'; fade.max = '600000'; fade.step = '100'; fade.value = String(s.fade);
+        fade.setAttribute('aria-label','分段 ' + (i+1) + ' 过渡毫秒'); fadeLabel.appendChild(fade);
+        at.addEventListener('input',function () { s.at = at.value === '' ? NaN : Number(at.value); invalidate(); });
+        fade.addEventListener('input',function () { s.fade = fade.value === '' ? NaN : Number(fade.value); invalidate(); });
+        mode.addEventListener('change',function () { s.mode = mode.value; invalidate(); });
+        var remove = h('button','ws-icon','删'); remove.disabled = state.sections.length === 1;
+        remove.setAttribute('aria-label','删除分段 ' + (i+1));
+        remove.addEventListener('click',function () { state.sections.splice(i,1); invalidate(); paintRows(); });
+        row.append(timeLabel,mode,fadeLabel,remove); list.appendChild(row);
+      });
+    }
+    add.addEventListener('click',function () {
+      if (state.sections.length >= 32) return;
+      var last = state.sections[state.sections.length-1];
+      state.sections.push({at:Math.min(86400,(Number.isFinite(last.at) ? last.at : 0)+30),mode:'verse',fade:1000});
+      invalidate(); paintRows();
+    });
+    check.addEventListener('click',function () {
+      try { state.plan = A.prepare(state.sections); state.message = '检查通过，请核对替换范围后应用。'; }
+      catch (e) { state.plan = null; state.message = e.message; }
+      message.textContent = state.message; showPlan();
+    });
+    apply.addEventListener('click',function () {
+      var plan = state.plan; state.plan = null;
+      try {
+        state.message = '已生成工程 cue，可在下方继续编辑；请到“导出”确认媒体并保存工程。';
+        A.apply(plan); render();
+      } catch (e) { state.message = e.message; message.textContent = e.message; showPlan(); }
+    });
+    var project = h('button','btn','媒体确认与工程保存');
+    project.addEventListener('click',function () { api.setTab('io'); });
+    paintRows(); showPlan(); actions.append(add,check,apply,project);
+    box.append(list,actions,preview,message); body.appendChild(box);
+  }
+
   function renderCues(body) {
     var CS = stage_api();
     var cur = CS.preset();
     var rt = CS.runtime();
+    var legacyCues = Array.isArray(cur.legacyCues) ? cur.legacyCues : [];
+    var staleProject = !!(cur.project && window.CreativeProject
+      && CreativeProject.isStaleContext(cur.project));
+
+    renderArrangement(body);
+    if (window.CreativePitch) CreativePitch.mount(body);
 
     var head = h('div', 'ws-section-head');
     head.appendChild(h('h2', 'sc-group-title', '编排轨'));
@@ -759,6 +1898,30 @@
     body.appendChild(h('div', 'sc-note',
       '一条 cue = 在某个时刻（或每 N 拍）把一组参数缓动到目标值。'
       + '秒级 cue 跟着歌曲进度走，节拍 cue 跟着鼓点走。'));
+
+    if (window.CreativeProject) {
+      var trackStatus = h('p', 'sc-note', CreativeProject.status());
+      trackStatus.dataset.cueTrackStatus = '';
+      trackStatus.setAttribute('role', 'status');
+      trackStatus.setAttribute('aria-live', 'polite');
+      body.appendChild(trackStatus);
+    }
+
+    if (legacyCues.length) {
+      var archive = h('details', 'sc-note');
+      archive.appendChild(h('summary', null, '旧 cue 档案 · ' + legacyCues.length + ' 条 · 已停用'));
+      archive.appendChild(h('p', null, '只读保留在本机，不参与播放、编辑或导出。可按内容手动重建当前版本 cue。'));
+      var archiveList = h('ul');
+      legacyCues.forEach(function (cue) {
+        var trigger = cue && typeof cue.at === 'number' ? num(cue.at, 1) + ' 秒'
+          : cue && typeof cue.every === 'number' ? '每 ' + cue.every + ' 拍' : '无效触发';
+        var keys = cue && cue.set && typeof cue.set === 'object' && !Array.isArray(cue.set)
+          ? Object.keys(cue.set) : [];
+        archiveList.appendChild(h('li', null, trigger + ' · ' + (keys.length ? keys.join('、') : '无有效目标')));
+      });
+      archive.appendChild(archiveList);
+      body.appendChild(archive);
+    }
 
     var addRow = h('div', 'ws-row');
     var kind = h('select', 'ws-mini');
@@ -769,42 +1932,82 @@
     amount.type = 'number';
     amount.value = '12';
     amount.min = '0';
+    amount.max = '86400';
     amount.step = '0.5';
     var len = h('input', 'ws-mini');
     len.type = 'number';
     len.value = '800';
-    len.min = '50';
+    len.min = '16';
+    len.max = '600000';
     len.step = '50';
     var target = pathPicker(lastParamPath || 'look.bloom', function (v) { lastParamPath = v; });
     var valueInput = h('input', 'ws-mini');
     valueInput.type = 'number';
     valueInput.step = '0.05';
+    if (staleProject) {
+      kind.disabled = amount.disabled = len.disabled = target.disabled = valueInput.disabled = true;
+    }
 
     var syncRange = function () {
       var row = findRow(target.value);
       if (!row) return;
-      valueInput.min = String(row[2]);
-      valueInput.max = String(row[3]);
-      valueInput.step = String(row[4]);
-      if (valueInput.value === '') valueInput.value = String(row[6]);
+      var values = Array.isArray(row[2]) ? row[2].map(function (option) { return Number(option[0]); }) : null;
+      valueInput.min = String(values ? Math.min.apply(Math, values) : row[2]);
+      valueInput.max = String(values ? Math.max.apply(Math, values) : row[3]);
+      valueInput.step = String(values ? 1 : row[4]);
+      var defaultValue = values ? row[3] : row[6];
+      var currentValue = Number(valueInput.value);
+      if (valueInput.value === '' || !Number.isFinite(currentValue)
+        || currentValue < Number(valueInput.min) || currentValue > Number(valueInput.max)) {
+        valueInput.value = String(defaultValue);
+      }
     };
+    var syncTrigger = function () {
+      amount.min = kind.value === 'at' ? '0' : '1';
+      amount.max = kind.value === 'at' ? '86400' : '4096';
+      amount.step = kind.value === 'at' ? '0.1' : '1';
+      if (kind.value === 'every' && !Number.isInteger(Number(amount.value))) amount.value = '4';
+    };
+    kind.addEventListener('change', syncTrigger);
+    syncTrigger();
     target.addEventListener('change', syncRange);
     syncRange();
 
     var add = h('button', 'btn primary', '加一条');
+    add.disabled = staleProject;
     add.addEventListener('click', function () {
-      var cue = { len: Number(len.value) || 600, ease: 'out', set: {} };
-      if (kind.value === 'at') cue.at = Number(amount.value) || 0;
-      else cue.every = Math.max(1, Math.round(Number(amount.value) || 4));
+      var trigger = Number(amount.value), duration = Number(len.value);
+      var cue = { len: duration, ease: 'out', set: {} };
+      if (kind.value === 'at') cue.at = trigger;
+      else cue.every = trigger;
       cue.set[target.value] = Number(valueInput.value);
-      CS.addCue(cue);
+      if (amount.value === '' || len.value === '' || valueInput.value === ''
+        || !Number.isFinite(trigger) || trigger < Number(amount.min) || trigger > Number(amount.max)
+        || (kind.value === 'every' && !Number.isInteger(trigger))
+        || !Number.isFinite(cue.set[target.value]) || !Number.isFinite(cue.len) || cue.len < 16 || cue.len > 600000
+        || (cue.at !== undefined && (cue.at < 0 || cue.at > 86400))
+        || (cue.every !== undefined && cue.every > 4096)) { flash('请检查时间、时长与目标数值。'); return; }
+      if (!CS.addCue(cue)) { flash('编排最多 64 条，或目标值、触发参数无效。'); return; }
       render();
     });
     addRow.append(kind, amount, len, target, valueInput, add);
     body.appendChild(addRow);
 
+    if (staleProject) {
+      var freshTrack = h('button', 'btn primary', '新建当前版本编排轨');
+      freshTrack.type = 'button';
+      freshTrack.addEventListener('click', function () {
+        if (!CS.beginNewCueTrack()) return;
+        flash('已新建空编排轨；旧 cue 仍只保留在本机档案');
+        render();
+      });
+      body.appendChild(freshTrack);
+    }
+
     if (!cur.cues.length) {
-      body.appendChild(h('div', 'sc-note', '还没有 cue。没有 cue 的舞台完全由绑定和导演驱动。'));
+      body.appendChild(h('div', 'sc-note', staleProject
+        ? '旧工程 cue 已隔离停用。新建当前版本编排轨后，可从空轨开始添加 cue。'
+        : '还没有 cue。没有 cue 的舞台完全由绑定和导演驱动。'));
       return;
     }
     var list = h('div', 'ws-list');
@@ -827,17 +2030,53 @@
       row.appendChild(head);
 
       var detail = h('div', 'ws-item-body');
+      var timeLine = h('label','ws-kv');
+      timeLine.appendChild(h('span',null,typeof cue.at === 'number' ? '歌曲秒数' : '每几拍'));
+      var timeInput = h('input','ws-mini'); timeInput.type = 'number';
+      timeInput.min = typeof cue.at === 'number' ? '0' : '1';
+      timeInput.max = typeof cue.at === 'number' ? '86400' : '4096';
+      timeInput.step = typeof cue.at === 'number' ? '0.1' : '1';
+      timeInput.value = String(typeof cue.at === 'number' ? cue.at : cue.every);
+      timeInput.addEventListener('change',function () {
+        var v = Number(timeInput.value);
+        var previous = String(typeof cue.at === 'number' ? cue.at : cue.every);
+        if (timeInput.value === '' || !Number.isFinite(v) || v < Number(timeInput.min) || v > Number(timeInput.max)) {
+          timeInput.value = previous; flash('触发时间超出范围'); return;
+        }
+        var next = JSON.parse(JSON.stringify(cue));
+        if (typeof cue.at === 'number') next.at = v; else next.every = Math.round(v);
+        if (CS.updateCue(i, next)) cue = next;
+        else { timeInput.value = previous; flash('触发参数无效，已恢复原值'); }
+      });
+      timeLine.appendChild(timeInput); detail.appendChild(timeLine);
+      detail.appendChild(select('缓动曲线',[['linear','线性'],['in','渐入'],['out','渐出'],['inout','渐入渐出']],cue.ease || 'out',function (v) {
+        var previous = cue.ease;
+        var next = JSON.parse(JSON.stringify(cue)); next.ease = v;
+        if (CS.updateCue(i,next)) cue = next;
+        else { flash('缓动曲线无效，已恢复原值'); render(); }
+      }));
       keys.forEach(function (k) {
         var r = findRow(k);
         var line = h('div', 'ws-kv');
         line.appendChild(h('span', null, r ? r[1] : k));
         var inp = h('input', 'ws-mini');
         inp.type = 'number';
-        inp.step = r ? String(r[4]) : '0.05';
+        if (r) {
+          var enumValues = Array.isArray(r[2]) ? r[2].map(function (option) { return Number(option[0]); }) : null;
+          inp.min = String(enumValues ? Math.min.apply(Math, enumValues) : r[2]);
+          inp.max = String(enumValues ? Math.max.apply(Math, enumValues) : r[3]);
+          inp.step = String(enumValues ? 1 : r[4]);
+        } else {
+          inp.min = '0'; inp.max = '0'; inp.step = '0.05'; inp.disabled = true;
+        }
         inp.value = String(cue.set[k]);
         inp.addEventListener('change', function () {
-          cue.set[k] = Number(inp.value);
-          CS.updateCue(i, cue);
+          var previous = String(cue.set[k]);
+          var value = Number(inp.value);
+          if (inp.value === '' || !Number.isFinite(value)) { inp.value = previous; flash('目标值无效'); return; }
+          var next = JSON.parse(JSON.stringify(cue)); next.set[k] = value;
+          if (CS.updateCue(i,next)) cue = next;
+          else { inp.value = previous; flash('目标值超出该参数范围，已恢复原值'); }
         });
         line.appendChild(inp);
         detail.appendChild(line);
@@ -846,10 +2085,17 @@
       lenLine.appendChild(h('span', null, '缓动时长'));
       var lenInp = h('input', 'ws-mini');
       lenInp.type = 'number';
+      lenInp.min = '16'; lenInp.max = '600000'; lenInp.step = '1';
       lenInp.value = String(cue.len || 600);
       lenInp.addEventListener('change', function () {
-        cue.len = Number(lenInp.value) || 600;
-        CS.updateCue(i, cue);
+        var v = Number(lenInp.value);
+        var previous = String(cue.len || 600);
+        if (lenInp.value === '' || !Number.isFinite(v) || v < 16 || v > 600000) {
+          lenInp.value = previous; flash('缓动时长需为 16–600000 毫秒'); return;
+        }
+        var next = JSON.parse(JSON.stringify(cue)); next.len = v;
+        if (CS.updateCue(i,next)) cue = next;
+        else { lenInp.value = previous; flash('缓动时长无效，已恢复原值'); }
       });
       lenLine.appendChild(lenInp);
       detail.appendChild(lenLine);
@@ -892,7 +2138,7 @@
       var list = cur.bindings.concat([{
         target: target.value, source: source.value, gain: Number(gain.value) || 1
       }]);
-      CS.setBindings(list);
+      if (!CS.setBindings(list)) { flash('绑定最多 32 条，请先删除一条。'); return; }
       render();
     });
     addRow.append(target, source, gain, add);
@@ -1079,6 +2325,7 @@
       file.addEventListener('change', function () {
         var f = file.files && file.files[0];
         if (!f) return;
+        if (CS.cancelPreview) CS.cancelPreview();
         // 只有这个 ObjectURL 会离开浏览器内存，服务端从头到尾不知道有这张图。
         var spec2 = window.Backgrounds
           ? Backgrounds.setLocalFile(f)
@@ -1161,7 +2408,7 @@
   function renderShareCode(body, CS) {
     body.appendChild(h('h2', 'sc-group-title', '分享创意预置'));
     body.appendChild(h('p', 'sc-note', '分享名称、场景参数、编排、绑定与背景／手绘设置。'
-      + '不包含沉浸舞台设置、媒体文件、文件地址或账户信息；媒体背景会改为跟随主题。'));
+      + '不包含沉浸舞台设置、媒体文件、文件指纹或账户信息；工程 cue 会保留版本并在确认当前媒体前停用。媒体背景会改为跟随主题。'));
     var label = h('label', 'sc-note', '分享码'); label.htmlFor = 'ws-share-code'; body.appendChild(label);
     var code = h('textarea', 'ws-json'); code.id = 'ws-share-code'; code.spellcheck = false;
     code.placeholder = '粘贴收到的分享码，或生成当前预置的分享码'; code.maxLength = 180000;
@@ -1201,7 +2448,7 @@
       var alive = ticket(); status.textContent = '正在生成分享码…';
       try {
         if (!window.CreativeShareCode) throw new Error('分享码模块尚未就绪，请刷新应用');
-        var encoded = await CreativeShareCode.encode(CS.shareSnapshot(), { compress: !plain.checked });
+        var encoded = await CreativeShareCode.encode(CS.shareSnapshot({ includeProjectContext: true }), { compress: !plain.checked });
         if (!alive()) return;
         code.value = encoded;
         await copyCode(alive);
@@ -1215,14 +2462,112 @@
         var decoded = await CreativeShareCode.decode(code.value);
         if (!alive()) return;
         CS.setPreset(decoded);
-        flash('已载入「' + decoded.name + '」');
+        var needsMediaConfirmation = !!(decoded.project && decoded.cues.some(function (cue) {
+          return Object.prototype.hasOwnProperty.call(cue, 'at') || Object.prototype.hasOwnProperty.call(cue, 'every');
+        }));
+        var message = needsMediaConfirmation
+          ? '已载入「' + decoded.name + '」；工程 cue 已停用，请确认当前媒体后再执行。'
+          : '已载入「' + decoded.name + '」';
+        status.textContent = message;
+        flash(message);
       } catch (e) { if (alive()) status.textContent = e.message || String(e); }
     });
     row.append(generate, load); body.append(row, status);
   }
 
+  var projectState = {text:'',prepared:null,revision:0,message:''};
+  function renderProject(body) {
+    if (!window.CreativeProject) return;
+    var P = CreativeProject, CS = stage_api();
+    body.appendChild(h('h2','sc-group-title','可编辑工程'));
+    body.appendChild(h('div','sc-note','工程保存完整参数、cue 轨和可选的媒体内容身份，不包含音乐文件或自定义图片/视频。在线曲目需先完成缓存；远程文件需允许完整读取。cue 轨需确认媒体后才执行，换曲或刷新后须重新确认。'));
+    var remoteRead = h('input'); remoteRead.type = 'checkbox'; remoteRead.dataset.project = 'remote-read';
+    var remoteLabel = h('label','sc-note');
+    remoteLabel.append(remoteRead,document.createTextNode('允许读取远程完整音频以核对内容（最多 2 GiB / 10 秒，可能消耗流量）'));
+    body.appendChild(remoteLabel);
+    var status = h('p','sc-note',P.status()); status.dataset.projectStatus = '';
+    body.appendChild(status);
+    var ta = h('textarea','ws-json'); ta.id = 'ws-project-json'; ta.setAttribute('aria-label','舞台工程 JSON');
+    ta.spellcheck = false; ta.value = projectState.text;
+    var message = h('p','sc-note',projectState.message); message.setAttribute('role','status');
+    message.dataset.projectMessage = '';
+    var row = h('div','ws-row');
+    var check = h('button','btn','检查工程'), apply = h('button','btn primary','应用已检查工程');
+    check.dataset.project = 'check'; apply.dataset.project = 'apply';
+    if (projectState.prepared && projectState.revision !== CS.revision()) {
+      projectState.prepared = null;
+      projectState.message = '舞台已修改，请重新检查工程';
+    }
+    apply.disabled = !projectState.prepared;
+    function valid() { return check.isConnected && isOpen() && target === 'advanced' && tab === 'io' && !document.hidden; }
+    function say(text) { projectState.message = text; message.textContent = text; }
+    ta.addEventListener('input',function () { projectState.text = ta.value; projectState.prepared = null; apply.disabled = true; say(''); });
+    check.addEventListener('click',function () {
+      try {
+        projectState.prepared = P.prepare(ta.value); projectState.revision = CS.revision();
+        apply.disabled = false;
+        var p = projectState.prepared;
+        say('检查通过：' + p.project.preset.scene + ' · ' + p.project.preset.cues.length + ' 条 cue。'
+          + (p.project.media ? '包含媒体内容身份。' : '未绑定媒体。') + p.warnings.join(' '));
+      } catch (e) { projectState.prepared = null; apply.disabled = true; say(e.message); }
+    });
+    apply.addEventListener('click',function () {
+      try {
+        var prepared = projectState.prepared;
+        projectState.prepared = null;
+        projectState.message = '工程已应用，参数与编排可继续编辑；请确认绑定当前曲目后执行 cue。';
+        P.apply(prepared,projectState.revision);
+        render();
+      } catch (e) { say(e.message); }
+    });
+    var bind = h('button','btn','确认绑定当前曲目'); bind.dataset.project = 'bind';
+    bind.addEventListener('click',async function () {
+      bind.disabled = true; say('正在核对完整媒体内容…');
+      try { await P.bindCurrent(valid,remoteRead.checked); if (valid()) { status.textContent = P.status(); say('媒体内容已确认；本次曲目 cue 轨已启用。'); } }
+      catch (e) { if (valid()) { status.textContent = P.status(); say(e.message); } }
+      finally { if (valid()) bind.disabled = false; }
+    });
+    row.append(check,apply,bind);
+    var file = h('input'); file.type = 'file'; file.accept = '.json,.hertz-stage,application/json'; file.setAttribute('aria-label','打开舞台工程文件');
+    file.addEventListener('change',async function () {
+      var selected = file.files && file.files[0]; if (!selected) return;
+      if (selected.size > 256 * 1024) { say('工程超过 256 KiB'); return; }
+      try { var text = await selected.text(); if (valid() && file.files[0] === selected) { ta.value = text; ta.dispatchEvent(new Event('input')); say('文件已读取，请检查后应用。'); } }
+      catch (_) { if (valid()) say('无法读取工程文件'); }
+    });
+    var exportRow = h('div','ws-row');
+    var include = h('input'); include.type = 'checkbox'; include.checked = true;
+    var label = h('label'); label.append(include,document.createTextNode('包含当前曲目内容指纹'));
+    var save = h('button','btn','下载可编辑工程'); save.dataset.project = 'save';
+    save.addEventListener('click',async function () {
+      save.disabled = true; say('正在生成工程…');
+      try {
+        var prepared = await P.capture(include.checked,valid,remoteRead.checked);
+        if (!valid()) return;
+        var text = JSON.stringify(prepared.project,null,2), blob = new Blob([text],{type:'application/json'});
+        var url = URL.createObjectURL(blob), a = h('a');
+        a.href = url; a.download = (prepared.project.preset.name || 'stage').replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').slice(0,80) + '.hertz-stage.json';
+        try { document.body.appendChild(a); a.click(); }
+        finally { a.remove(); setTimeout(function () { URL.revokeObjectURL(url); },30000); }
+        say('工程下载已发起，请确认保存。' + prepared.warnings.join(' '));
+      } catch (e) { if (valid()) say(e.message); }
+      finally { if (valid()) save.disabled = false; }
+    });
+    exportRow.append(label,save); body.append(exportRow,file,ta,row,message);
+  }
+
+  document.addEventListener('stage:track-changed',function () {
+    if (!refs.body || !window.CreativeProject) return;
+    refs.body.querySelectorAll('[data-project-status], [data-cue-track-status]').forEach(function (status) {
+      status.textContent = CreativeProject.status();
+    });
+  });
+
   function renderIO(body) {
     var CS = stage_api();
+    body.appendChild(h('p','sc-note','草稿是待确认的候选；分享码携带完整预置并在载入时立即应用；工程另含时间线版本与媒体身份；视频是成片。收藏只由“存进工坊”另存，预览不会替换已保存内容。'));
+    renderProject(body);
+    renderDraftImport(body);
     renderShareCode(body, CS);
     var head = h('div', 'ws-section-head');
     head.appendChild(h('h2', 'sc-group-title', '导出 / 导入'));
@@ -1230,15 +2575,19 @@
     body.appendChild(head);
     body.appendChild(h('div', 'sc-note',
       '一份预置就是一段 JSON：场景、全部参数、cue 轨、绑定、背景与手绘设置。'
-      + '把这段文字发给别人，对面粘进来就能得到一模一样的舞台。'));
+      + '它是普通预置；媒体绑定请使用上方工程文件，外部素材与跨设备画面需另行确认。'));
 
     var ta = h('textarea', 'ws-json');
     ta.spellcheck = false;
-    ta.value = CS.exportJSON();
+    var exportError = '';
+    try { ta.value = CS.exportJSON(); }
+    catch (e) { exportError = e.message || String(e); ta.value = ''; ta.disabled = true; }
     body.appendChild(ta);
+    if (exportError) body.appendChild(h('p','sc-note',exportError));
 
     var row = h('div', 'ws-row');
     var copy = h('button', 'btn', '复制');
+    copy.disabled = !!exportError;
     copy.addEventListener('click', function () {
       ta.select();
       var done = false;
@@ -1258,6 +2607,7 @@
       flash(done ? '已复制' : '复制失败，请手动选中');
     });
     var dl = h('button', 'btn', '下载 .json');
+    dl.disabled = !!exportError;
     dl.addEventListener('click', function () {
       var blob = new Blob([ta.value], { type: 'application/json' });
       var a = document.createElement('a');
@@ -1565,7 +2915,7 @@
   }
 
   var TABS = [
-    ['prompt', '一句成景'], ['scene', '场景'], ['presets', '收藏'], ['params', '参数'],
+    ['prompt', '一句成景'], ['ai', 'AI 生成'], ['ledger', '费用账本'], ['scene', '场景'], ['presets', '收藏'], ['params', '参数'],
     ['cues', '编排'], ['binds', '绑定'], ['look', '电影风格'], ['io', '导出']
   ];
 
@@ -1577,10 +2927,19 @@
 
   function render() {
     if (!refs.body) return;
-    releaseSceneArt();
-    shareViewRevision += 1;
     var page = target + ':' + tab;
     var samePage = renderedPage === page;
+    var credentialPanel = refs.body.querySelector('.ws-ai-credential');
+    aiState.credentialOpen = isOpen() && samePage && !!(credentialPanel && credentialPanel.open);
+    clearAiCredential();
+    if (window.CreativePitch) CreativePitch.unmount();
+    if (window.AiLedger && (target !== 'advanced' || tab !== 'ledger' || !isOpen())) AiLedger.unmount();
+    if (!aiVisible() && aiTimer) { clearInterval(aiTimer); aiTimer = 0; }
+    releaseSceneArt();
+    shareViewRevision += 1;
+    if (!samePage) discardDraft();
+    if (isAiDraftSource(draftState.source) && aiState.proposal
+      && aiState.proposal.proposalId === draftState.source && aiState.proposal.state !== 'pending') discardDraft();
     var scroll = samePage ? refs.body.scrollTop : 0;
     var focused = document.activeElement;
     var focusId = samePage && refs.body.contains(focused) && focused.id;
@@ -1599,7 +2958,10 @@
       if (refs.tabs && refs.tabs[t[0]]) refs.tabs[t[0]].classList.toggle('on', tab === t[0]);
     });
     revealTab();
+    if (tab !== 'ai' && aiTimer) { clearInterval(aiTimer); aiTimer = 0; }
     if (tab === 'prompt') renderPrompt(refs.body);
+    else if (tab === 'ai') renderAi(refs.body);
+    else if (tab === 'ledger' && window.AiLedger) AiLedger.mount(refs.body, window.VMusicTransport);
     else if (tab === 'scene') renderScene(refs.body);
     else if (tab === 'presets') renderPresets(refs.body);
     else if (tab === 'params') renderParams(refs.body);
@@ -1629,6 +2991,10 @@
     var panel = refs.panel;
     if (!panel) return false;
     if (next === isOpen()) return next;
+    if (!next) clearAiCredential();
+    if (!next && aiTimer) { clearInterval(aiTimer); aiTimer = 0; }
+    if (!next && window.AiLedger) AiLedger.unmount();
+    if (!next && window.CreativePitch) CreativePitch.unmount();
     shareViewRevision += 1;
     if (next) {
       returnFocus = document.activeElement;
@@ -1642,6 +3008,7 @@
       }
       panel.inert = false;
     } else {
+      discardDraft();
       releaseSceneArt();
       if (gesture) { remember(gesture); gesture = null; Stage3D.save(); }
       $('stage3d').classList.remove('s3d-editing');
@@ -1726,6 +3093,34 @@
     // 但只在"结构变了"的时候刷：每帧都重排 DOM 会让正在拖的滑块失焦。
     if (window.CreativeStage && CreativeStage.onChange) {
       CreativeStage.onChange(function (kind) {
+        if (promptState.undo && promptState.undo.revision !== null
+          && promptState.undo.revision !== CreativeStage.revision()) {
+          promptState.undo = null;
+          var promptUndo = document.getElementById('ws-prompt-undo');
+          if (promptUndo) promptUndo.hidden = true;
+        }
+        if (draftState.undo && draftState.undo.revision !== CreativeStage.revision()) {
+          draftState.undo = null;
+          var draftUndo = document.getElementById('ws-draft-undo');
+          if (draftUndo) draftUndo.hidden = true;
+        }
+        if (projectState.prepared && projectState.revision !== CreativeStage.revision()) {
+          projectState.prepared = null;
+          projectState.message = '舞台已修改，请重新检查工程';
+          var projectApply = refs.body.querySelector('[data-project="apply"]');
+          var projectMessage = refs.body.querySelector('[data-project-message]');
+          if (projectApply) projectApply.disabled = true;
+          if (projectMessage) projectMessage.textContent = projectState.message;
+        }
+        if (arrangementState.plan && arrangementState.plan.revision !== CreativeStage.revision()) {
+          arrangementState.plan = null; arrangementState.message = '舞台已改变，请重新检查分段。';
+          var arrangementApply = refs.body.querySelector('[data-arrangement="apply"]');
+          var arrangementPreview = refs.body.querySelector('[data-arrangement-preview]');
+          var arrangementMessage = refs.body.querySelector('[data-arrangement-status]');
+          if (arrangementApply) arrangementApply.disabled = true;
+          if (arrangementPreview) arrangementPreview.textContent = '';
+          if (arrangementMessage) arrangementMessage.textContent = arrangementState.message;
+        }
         if (['preset', 'param', 'background', 'hand'].indexOf(kind) >= 0) {
           shareEditRevision += 1;
           var status = $('ws-share-status');
@@ -1733,7 +3128,10 @@
         }
         if (!isOpen() || target !== 'advanced') return;
         syncStageStatus();
-        if (kind === 'preset' || kind === 'library') render();
+        var invalidated = draftState.token && (!CreativeStage.preview()
+          || CreativeStage.preview().previewId !== draftState.token.previewId);
+        if (invalidated) { discardDraft(); }
+        if (kind === 'preset' || kind === 'library' || kind === 'preview' || invalidated) render();
       });
     }
 
@@ -1769,6 +3167,7 @@
       return tab;
     },
     render: render,
+    onAiTask: onAiTask,
     tabs: function () { return TABS.map(function (t) { return t[0]; }); }
   };
 

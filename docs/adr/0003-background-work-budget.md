@@ -4,7 +4,7 @@
 
 ## 决定
 
-后台任务（节拍分析、渲染上下文恢复、打卡上报）一律有**总额度**，且额度按「谁在等」
+后台任务（节拍/基频分析、渲染上下文恢复、打卡上报）一律有**总额度**，且额度按「谁在等」
 分两种耐心：
 
 - 顺手预热（播放提交后的分析）：拿不到额度就**当场推迟**，绝不排队。用户在连切歌时，
@@ -14,19 +14,33 @@
 
 额度的持有范围是**整个后台任务，含落盘 await**，不是「阻塞线程返回就算还」。
 
+显式基频分析共用节拍的两个槽，另外以进程内单槽限制基频同时最多一份，不排队，
+拿不到返回 `pitch_busy`。完整哈希、解码、计算、内存缓存发布和退出均在额度内；
+三十秒期限或观察者离开只发取消信号，系统 I/O 未实际退出不提前归还。算法与缓存边界见[基频轨迹](../pitch-track.md)。
+
+工程内容指纹另用全进程一个读取槽，不排队；本地普通文件、播放 owner 确认的在线完整缓存与用户显式允许的远程完整响应共用，不按来源扩容。完整读取最多 2 GiB、64 KiB 缓冲、十秒工作期限和十二秒调用期限；远程 GET 不重试或跟随重定向，取消后的 I/O/钥匙串工作未实际退出时不提前归还。它不运行解码/FFT，也不触发在线播放下载；详细来源和一致性边界见[工程媒体身份](../stage-projects.md)。
+
+MCP 适配会话在 SDK 解码后、创建 handler 前限制未完成请求；额度覆盖处理、响应排队和实际 stdout flush，不因取消通知或 handler 返回提前归还。超额与未完成 ID 重复均关闭当前适配会话；取消仍可被接收，未声明的通知不会产生 SDK 任务。它限制的是单个适配进程内的未完成请求，不代替原服务的业务执行额度或释放远端副作用。出站 JSON 在 SDK 编码前按实际编码字节检查，详见[MCP 互操作](../mcp-interoperability.md)。
+
 ## 边界与 owner
 
 | 数值 | 现在是多少 | 定义在哪 | 改它要一起改什么 |
 | --- | --- | --- | --- |
-| 同时在跑的节拍分析数 | 2 | `crates/hertz-studio/src/state.rs::BEAT_ANALYZE_BUDGET` | 快切歌时的 CPU 竞争与队列排空速度 |
+| 同时在跑的节拍/基频分析总数 | 2 | `crates/hertz-studio/src/state.rs::BEAT_ANALYZE_BUDGET` | 快切歌时的 CPU 竞争与队列排空速度 |
 | 一首的分析最多尝试次数 | 3 | `crates/hertz-studio/src/state.rs::BEAT_ATTEMPTS_MAX` | 到顶即放弃到进程结束；改大就等于允许反复满核重算 |
 | 界面路径等额度的上限（秒） | 4 | `crates/hertz-studio/src/stage_beats.rs::BEAT_PERMIT_WAIT` | GET 的最坏响应时间；测试里用注入的短时长，别改生产值来迁就测试 |
 | 状态面板列出的最近条目数 | 6 | `crates/hertz-studio/src/state.rs::BEAT_STATUS_RECENT` | 设置页那一行还读得动的上限；再大就该做成列表页，不是这条 hint |
 | 渲染上下文恢复的窗口（毫秒） | 120000 | `plugin/ui/stage3d.js::RECOVERY_WINDOW_MS` | 与 `RECOVERY_MAX` 一起决定「停用还是再试」；窗口滑过后用户再进三维会再给一次机会 |
 | 同一窗口内允许的恢复次数 | 3 | `plugin/ui/stage3d.js::RECOVERY_MAX` | 停用文案里那句「2 分钟内已丢失 N 次」要跟它一致 |
 | 打卡上报每小时上限 | 60 | `crates/hertz-studio/src/state.rs::MAX_PER_HOUR` | 平台侧频控与「已提交」提示的诚实性（接口 200 ≠ 平台累计增加） |
+| MCP 会话未完成请求上限 | 8 | `crates/hertz-studio/src/ai/mcp/transport.rs::MAX_PENDING_REQUESTS` | 同时持有输入、HTTP 与响应的容量；真实客户端并发、取消与慢读检查必须一起更新 |
+| MCP 入站 LF 前字节上限 | 262144 | `crates/hertz-studio/src/ai/mcp/transport.rs::MAX_INPUT_LINE_BYTES` | SDK 解码前的原始帧限制，含可能的 CR，不等同业务 JSON 额度 |
+| MCP 出站 LF 前字节上限 | 262144 | `crates/hertz-studio/src/ai/mcp/transport.rs::MAX_OUTPUT_LINE_BYTES` | 按实际 JSON 转义/双表示计算，超限必须完整错误替换，不能输出半帧 |
+| MCP 等待与写出单帧期限（秒） | 8 | `crates/hertz-studio/src/ai/mcp/transport.rs::WRITE_TIMEOUT` | SDK 内联协议错误、等待 writer 与实际 flush 都受边界约束 |
 
 ## 禁止回退
+
+- 不许把 MCP 的响应写入额度在 handler 返回或收到取消通知时归还；SDK 的响应仍可能排队，慢 stdout 下会重新积累无界任务。过载后不为每个新请求继续创建一个 busy 响应任务；关闭会话后不自动重放已发变更。
 
 - 不许「先写幂等表、再拿额度」。顺序反了会在表里留下一格没人真的在算的 `Analyzing`，
   后来者一看就在等，而这个等永远不会有结果 —— 表现是舞台一直不出节拍镜头、日志无错。

@@ -140,6 +140,15 @@
   registerLyricRenderer({ id: 'classic', label: '流光', host: 's3d-fl-lyric',
     create: function (host, seek) { return global.StanzaClassic && global.StanzaClassic.init(host, seek); },
     theme: baseLyricTheme, tuning: 'classicTuning', cameraRig: true, viewportResize: true });
+  // 自研字形渲染器：与 classic 共用歌词宿主，但不设 cameraRig，避免机位互相污染。
+  // tier0 不建上下文，直接让 planeFor 回退到已有渲染器。
+  registerLyricRenderer({ id: 'glyph', label: '字形', host: 's3d-fl-lyric',
+    create: function (host, seek) {
+      if (!global.StanzaGlyph || !global.LyricGlyphGL) return null;
+      if (global.Stage && Stage.tier && Stage.tier() === 0) return null;
+      return global.StanzaGlyph.init(host, seek);
+    },
+    theme: baseLyricTheme, tuning: 'classicTuning', viewportResize: true });
   registerLyricRenderer({ id: 'cadenza', label: '心象', host: 's3d-fl-lyric',
     create: function (host, seek) { return global.StanzaCadenza && global.StanzaCadenza.init(host, seek); },
     theme: baseLyricTheme, tuning: 'cadenzaTuning', cameraRig: true });
@@ -773,7 +782,7 @@
     '  col = max(mix(vec3(lum), col, 1.10), vec3(0.0));',
     //   指数 tonemap：比 ACES 便宜，且不会把 LDR 场景压暗太多
     '  col = vec3(1.0) - exp(-max(col, 0.0));',
-    '  float vig = smoothstep(1.18, 0.16, length(c*vec2(1.06, 1.0)));',
+    '  float vig = 1.0 - smoothstep(0.16, 1.18, length(c*vec2(1.06, 1.0)));',
     '  col *= mix(1.0, vig, uVignette);',
     '  float n = fract(sin(dot(vUv*uRes + uTime*13.7, vec2(12.9898, 78.233)))*43758.5453);',
     '  col += (n - 0.5)*uGrain;',
@@ -2667,6 +2676,15 @@
     zodiacHost.hidden = !useZodiac;
     root.classList.toggle('s3d-zodiac-source', useZodiac);
     zodiacHost.classList.toggle('zodiac-interact', useZodiac && zodiacInteract);
+    // 切到星座时立刻把左下角提示换成交互说明；syncNowPlaying 只在曲目帧更新，
+    // 提前把这句话补上，用户不必等下一帧才知道「按住蓄能」。
+    var hintEl = $('s3d-hint');
+    if (hintEl) {
+      if (useZodiac) hintEl.textContent = '星座 · 拖拽环绕 / 悬停主星 / 按住蓄能 · 松开引爆';
+      else if (hintEl.textContent.indexOf('星座 ·') === 0) {
+        hintEl.textContent = ('0' + (stageIndex + 1)).slice(-2) + ' / ' + STAGES[stageIndex].label;
+      }
+    }
     var tuning = $('s3d-zodiac-tuning');
     if (tuning) {
       tuning.hidden = !useZodiac;
@@ -3457,7 +3475,9 @@
     }
     text('s3d-title', track ? track.title || '未知曲目' : '还没有播放音乐');
     text('s3d-artist', track ? track.artist || '未知艺术家' : '从曲库选择一首喜欢的歌');
-    text('s3d-hint', ('0' + (stageIndex + 1)).slice(-2) + ' / ' + STAGES[stageIndex].label);
+    text('s3d-hint', sceneSource === 'zodiac'
+    ? '星座 · 拖拽环绕 / 悬停主星 / 按住蓄能 · 松开引爆'
+    : ('0' + (stageIndex + 1)).slice(-2) + ' / ' + STAGES[stageIndex].label);
     syncSeek(data);
     text('s3d-duration', fmt(data.duration));
     text('s3d-status', track ? (data.playing ? '正在聆听' : '已暂停') : '让音乐，拥有形状');
@@ -4274,6 +4294,16 @@
     open: open,
     close: close,
     isActive: isActive,
+    // The exporter must capture the actual scene owner, never a hidden canvas
+    // left behind by a different source. DOM/SVG renderers need their own path.
+    recordingSurface: function () {
+      if (!active) return null;
+      if (sceneSource === 'creative' && global.CreativeStage && CreativeStage.recordingSurface) {
+        return CreativeStage.recordingSurface();
+      }
+      return sceneSource === 'immersive' && !sceneCovered() && gl && !contextLost && canvas
+        ? {canvas:canvas,source:'immersive',ownsLyrics:false} : null;
+    },
     setQueue: setQueue,
     // 全屏舞台入口（stage-immersive / 模式键）统一走这里申请原生全屏；
     // 此前这两个方法没导出，外部调用静默失效，全屏链路整个断了。

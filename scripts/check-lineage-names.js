@@ -7,7 +7,7 @@
 //   node scripts/check-lineage-names.js
 //
 // 2026-10 的改名把上游参考项目的名字从产品里撤掉了：歌词视觉层 `folia` →
-// `stanza`、皮肤 id `mineradio` → `sheen`、13 个主题 id 去掉 `vcp-` 前缀、
+// `stanza`、皮肤 id `mineradio`（已改名 sheen 后移除）、13 个主题 id 去掉 `vcp-` 前缀、
 // 产物与 crate 改叫 hertz-studio。上游署名集中在 `NOTICE`。
 //
 // 这类「删掉的东西」最容易跟着别的功能修复漂回来：注释里顺手写一句上游名不会
@@ -41,7 +41,7 @@ const OUTSIDE_COMMENTS = 1;
 const EVERYWHERE = 2;
 
 const RULES = [
-  { re: /mineradio/ig, tier: EVERYWHERE, why: '上游项目名；皮肤 id 已改名 sheen，署名只写 NOTICE' },
+  { re: /mineradio/ig, tier: EVERYWHERE, why: '上游项目名；旧皮肤 id 已移除，署名只写 NOTICE' },
   { re: /vcpchat/ig, tier: EVERYWHERE, why: '上游项目名' },
   { re: /\bvcp-[a-z]/ig, tier: EVERYWHERE, why: '主题 id 已去掉 vcp- 前缀' },
   { re: /\bfolia\b/ig, tier: OUTSIDE_COMMENTS, why: '歌词视觉层已改名 stanza；上游名不该进标识符或界面文案' },

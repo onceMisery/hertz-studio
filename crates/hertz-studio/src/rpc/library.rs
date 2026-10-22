@@ -45,7 +45,7 @@ pub async fn list_tracks(state: &Arc<AppState>, query: &Value) -> RpcResult {
     let offset = query.offset.unwrap_or(0).max(0);
     let sort = parse_track_sort(query.sort.as_deref())?;
     let filter = track_filter_from(&query);
-    let tracks = vmusic_store::list_tracks_filtered(
+    let (tracks, total) = vmusic_store::list_tracks_page_filtered(
         &state.db,
         query.q.as_deref(),
         &filter,
@@ -55,9 +55,6 @@ pub async fn list_tracks(state: &Arc<AppState>, query: &Value) -> RpcResult {
     )
     .await
     .map_err(store_err)?;
-    let total = vmusic_store::count_tracks_filtered(&state.db, query.q.as_deref(), &filter)
-        .await
-        .map_err(store_err)?;
     Ok(Reply::ok(json!({ "total": total, "tracks": tracks })))
 }
 
@@ -253,66 +250,27 @@ pub async fn replace_cover(state: &Arc<AppState>, id: &str, raw: Option<&RawBody
 /// 本地曲目歌词读取，来源优先级固定为 imported > embedded > sidecar；每曲用户
 /// 偏移与文件自身的 `[offset:]` 标签叠加（total = file_offset + user）。
 pub async fn get_lyrics(state: &Arc<AppState>, id: &str) -> RpcResult {
-    let track = vmusic_store::get_track(&state.db, &id.to_string())
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| not_found(format!("track {id}")))?;
-
-    let saved = vmusic_store::lyrics::get(&state.db, id)
-        .await
-        .map_err(store_err)?;
-    let user_offset = saved.as_ref().map(|s| s.offset_ms).unwrap_or(0);
-
-    let path = Path::new(&track.path);
-    let (mut doc, imported) = match saved.filter(|s| !s.content.trim().is_empty()) {
-        Some(saved) => (vmusic_lyrics::parse_lrc(&saved.content), true),
-        None => (
-            crate::routes::read_embedded_or_sidecar_lyrics(path).await,
-            false,
-        ),
-    };
-    doc.offset_ms += user_offset;
-    vmusic_lyrics::apply_offset(&mut doc);
-
-    let mut body = match serde_json::to_value(&doc).map_err(|e| internal(e.to_string()))? {
-        Value::Object(map) => map,
-        _ => unreachable!("LyricDocument serializes to an object"),
-    };
-    if imported {
-        body.insert("source".into(), Value::String("imported".into()));
-    }
-    body.insert("user_offset_ms".into(), Value::from(user_offset));
-    Ok(Reply::ok(Value::Object(body)))
+    Ok(Reply::ok(crate::lyrics::read(state, id).await?))
 }
 
 /// 手动导入歌词：存 LRC 原文，读取端按 imported 优先返回。清空内容用 DELETE。
 pub async fn import_lyrics(state: &Arc<AppState>, id: &str, body: &Value) -> RpcResult {
     let request: LyricsImport = body_as(body)?;
-    if request.content.trim().is_empty() {
-        return Err(bad_request("lyrics content must not be empty"));
-    }
-    vmusic_store::lyrics::import(&state.db, id, &request.content)
-        .await
-        .map_err(store_err)?;
-    Ok(Reply::ok(json!({ "ok": true, "source": "imported" })))
+    Ok(Reply::ok(
+        crate::lyrics::import(state, id, request.content).await?,
+    ))
 }
 
 /// 清除手动导入（偏移一并删除），歌词回退到内嵌/sidecar。
 pub async fn clear_lyrics(state: &Arc<AppState>, id: &str) -> RpcResult {
-    vmusic_store::lyrics::remove(&state.db, id)
-        .await
-        .map_err(store_err)?;
-    Ok(Reply::ok(json!({ "ok": true })))
+    Ok(Reply::ok(crate::lyrics::clear(state, id).await?))
 }
 
 /// 保存每曲歌词偏移（毫秒），与歌词来源无关，重启后保留。
 pub async fn set_lyrics_offset(state: &Arc<AppState>, id: &str, body: &Value) -> RpcResult {
     let request: LyricsOffset = body_as(body)?;
-    vmusic_store::lyrics::set_offset(&state.db, id, request.offset_ms)
-        .await
-        .map_err(store_err)?;
     Ok(Reply::ok(
-        json!({ "ok": true, "offset_ms": request.offset_ms }),
+        crate::lyrics::set_offset(state, id, request.offset_ms).await?,
     ))
 }
 
@@ -411,14 +369,7 @@ pub async fn get_settings(state: &Arc<AppState>) -> RpcResult {
 
 pub async fn put_settings(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let request: std::collections::BTreeMap<String, Value> = body_as(body)?;
-    if let Some(key) = request.keys().find(|k| is_credential(k)) {
-        return Err(bad_request(format!(
-            "{key} 属于音源凭据，只能通过 /v1/online/cookie 修改"
-        )));
-    }
-    vmusic_store::settings::set_all(&state.db, &request)
-        .await
-        .map_err(store_err)?;
+    crate::routes::apply_settings(state, &request).await?;
     Ok(Reply::ok(json!({ "ok": true })))
 }
 
@@ -573,4 +524,106 @@ pub async fn history_remove(state: &Arc<AppState>, id: &str) -> RpcResult {
         return Err(not_found("历史记录不存在"));
     }
     Ok(Reply::ok(json!({ "removed": removed })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpc::{Call, Op, Rpc};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn track_page_http_and_rpc_keep_filtered_totals_and_past_end_pages() -> anyhow::Result<()>
+    {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::migrate!("../../migrations").run(&db).await?;
+        for (id, title, album) in [
+            ("a", "Track A", "Album A"),
+            ("b", "Track B", "Album B"),
+            ("c", "Other", "Album B"),
+        ] {
+            let track =
+                serde_json::from_value(json!({"id":id,"path":format!("/fixture/{id}.wav"),
+                "source":"local","title":title,"artist":"Artist A","album":album,
+                "duration_ms":30000,"bitrate":null,"sample_rate":44100,"channels":1,
+                "has_cover":false,"file_mtime":null,"file_size":null,"added_at":0}))?;
+            vmusic_store::upsert_track(&db, &track).await?;
+        }
+        vmusic_store::track_edits::apply(
+            &db,
+            "c",
+            &vmusic_store::track_edits::EditInput {
+                title: Some("Edited Track C".into()),
+                artist: None,
+                album: Some("Album A".into()),
+            },
+        )
+        .await?;
+        let (mut state, audio) = crate::state::tests::playback_state_with_db(db).await;
+        state.token = "track-page-fixture".into();
+        let state = Arc::new(state);
+        let app = crate::routes::router(state.clone()).with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}/v1/tracks", listener.local_addr()?);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let result = async {
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()?;
+            let rpc = Rpc::new(state.clone());
+            for (query, total, ids) in [
+                (json!({"q":"Track","sort":"title","limit":1}), 3, vec!["c"]),
+                (json!({"q":"Edited","offset":50}), 1, vec![]),
+                (
+                    json!({"artist":"Artist A","album":"Album A","sort":"title"}),
+                    2,
+                    vec!["c", "a"],
+                ),
+                (json!({"q":"missing"}), 0, vec![]),
+                (json!({"limit":0,"offset":1,"sort":"title"}), 3, vec!["a"]),
+            ] {
+                let response = client
+                    .get(&url)
+                    .bearer_auth("track-page-fixture")
+                    .query(&query)
+                    .send()
+                    .await?;
+                anyhow::ensure!(response.status() == 200);
+                let http: Value = response.json().await?;
+                let reply = rpc
+                    .call(Call {
+                        op: Op::Get,
+                        path: "v1/tracks",
+                        query,
+                        body: Value::Null,
+                        raw: None,
+                        client_operation_id: None,
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+                anyhow::ensure!(reply.status == 200 && reply.body == http);
+                assert_eq!(http["total"], total);
+                assert_eq!(
+                    http["tracks"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|t| t["id"].as_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    ids
+                );
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        server.abort();
+        let _ = server.await;
+        state.audio.shutdown();
+        audio.join().unwrap();
+        state.db.close().await;
+        result
+    }
 }

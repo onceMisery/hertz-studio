@@ -32,7 +32,7 @@ CSS 在 `index.html` 中声明带 `data-skin-css` 的 disabled 样式表；JS �
 
 完整布局样式限定于 `#np-modal`，共享远程目录及自建输入弹窗保持原尺寸。全屏只扩大普通播放页；舞台继续通过独立入口打开。DBX 全屏中的自建输入弹窗使用浏览器 dialog 顶层，按 Escape 后保留播放页和全屏。
 
-运行 `scripts/check-now-playing-browser.js` 时，设置 `PLAYER_UI_URL` 和隔离实例的 `VMUSIC_DATA_DIR`，使用 null 后端。默认检查构建后的内嵌资源；`PLAYER_SOURCE_ASSETS=1` 仅用于源文件开发回归。脚本覆盖七套公开皮肤、五种视口、真实播放/队列/seek/音量、歌词、全屏、皮肤状态恢复及共享弹窗，截图保存在 `output/playwright/now-playing`。DBX 自建弹窗在浏览器中执行其实际实现，原生宿主的端到端验证仍需另行运行。
+运行 `scripts/check-now-playing-browser.js` 时，设置 `PLAYER_UI_URL` 和隔离实例的 `VMUSIC_DATA_DIR`，使用 null 后端。默认检查构建后的内嵌资源；`PLAYER_SOURCE_ASSETS=1` 仅用于源文件开发回归。脚本覆盖多套公开皮肤、五种视口、真实播放/队列/seek/音量、歌词、全屏、皮肤状态恢复及共享弹窗，截图保存在 `output/playwright/now-playing`。DBX 自建弹窗在浏览器中执行其实际实现，原生宿主的端到端验证仍需另行运行。
 
 ## 舞台场景与歌词渲染器
 
@@ -79,7 +79,7 @@ Stage 是唯一时钟；音频位置用于歌词，`sceneTime/dynamicDt` 用于�
 只供开发；旧 `check-space3d-browser.js` 的 SpaceFields 路径已被该入口替代。
 普通电脑性能和原生 DBX 需另行实测，软件 WebGL 截图不证明硬件 FPS。
 
-空间菜单将 registry 分为 24 个舞台与 6 个 ownsLyrics 歌词效果；普通字幕另外提供。
+空间菜单从 registry 派生，把可挂载的舞台场景与 `ownsLyrics` 歌词效果分成两组；普通字幕另外提供。
 宿主 selectLyrics(id|null, savedState) 与 setLyricParams(patch) 独立控制歌词，
 切换歌词保留舞台及机位，切换舞台保留歌词。工厂通过 ctx.layer === 'lyrics'
 识别叠加挂载，使用透明场景并省略底图效果；宿主负责稳定阅读机位、清深度与

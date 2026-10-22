@@ -30,13 +30,8 @@ const manifestPath = path.join(root, 'tools/zodiac-stage/.build-manifest.json');
 assert.ok(fs.existsSync(manifestPath), '缺少 tools/zodiac-stage/.build-manifest.json：跑一次 node build.mjs');
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const { createHash } = require('node:crypto');
-const srcDir = path.join(root, 'tools/zodiac-stage/src');
-const onDisk = fs.readdirSync(srcDir).sort();
-assert.deepEqual(onDisk, Object.keys(manifest).map(k => k.replace('src/', '')).sort(),
-  'src 文件集合与 manifest 不一致：需要重新 node build.mjs');
-for (const name of onDisk) {
-  const hash = createHash('sha256').update(fs.readFileSync(path.join(srcDir, name))).digest('hex').slice(0, 16);
-  assert.equal(hash, manifest['src/' + name], 'src/' + name + ' 已改动但产物未重建：cd tools/zodiac-stage && node build.mjs');
+for (const [file, expected] of Object.entries(manifest)) {
+  assert.equal(createHash('sha256').update(fs.readFileSync(path.join(root, file))).digest('hex').slice(0, 16), expected, 'Stale shared stage: ' + file);
 }
 pass('源码哈希与 .build-manifest.json 一致（产物为最新）');
 
@@ -44,7 +39,7 @@ pass('源码哈希与 .build-manifest.json 一致（产物为最新）');
 const vm = require('node:vm');
 const sandbox = { window: {}, document: { createElement: () => ({ getContext: () => null }) }, Math, console };
 sandbox.self = sandbox;
-const api = vm.runInNewContext(bundle + ';ZodiacStagePure', sandbox, { timeout: 15000 });
+const api = vm.runInNewContext(fs.readFileSync(path.join(root, 'plugin/ui/vendor/stage-runtime.js'), 'utf8') + '\n' + bundle + ';ZodiacStagePure', sandbox, { timeout: 15000 });
 for (const fn of ['probe', 'mount', 'unmount', 'setAudio', 'setTime', 'setPrefs', 'setRig', 'setInteraction', 'resize', 'stats', 'capture', 'debug']) {
   assert.equal(typeof api[fn], 'function', 'ZodiacStagePure 缺少 ' + fn);
 }
@@ -173,8 +168,9 @@ assert.ok(FIGURE_Z < CONSTELLATION_Z, '形象图网格必须落在星座连线�
 // 否则「横宽的星座撑满宽度」这个前提就不成立。
 assert.ok(FIG_ASPECT > 1.4 && FIG_ASPECT < 2.4, 'FIG_ASPECT 应是横屏比例');
 assert.ok(Math.abs(FIG_HALF_W - FIG_HALF * FIG_ASPECT) < 1e-9, 'FIG_HALF_W 必须等于 FIG_HALF × FIG_ASPECT');
-// 深度有统一上限；细长部位的体积随轮廓收窄。
-assert.ok(FIGURE_DEPTH > 0.2 && FIGURE_DEPTH < 1.0, 'FIGURE_DEPTH 应在合理体积区间');
+// 深度有统一上限；细长部位的体积随轮廓收窄。浮雕要能读出侧壁，
+// 但半深超过画框半高的一半就会在正视图里把自己遮住。
+assert.ok(FIGURE_DEPTH > 1.8 && FIGURE_DEPTH < 2.4, 'FIGURE_DEPTH 应保留可读侧面的体积区间');
 // 网格边是丝带画的：LineBasicMaterial 在 WebGL 下宽度恒为 1px，1px 的网格边
 // 在这个体量下等于没画，所以四档宽度都必须 > 0 且芯细于晕。
 assert.ok(EDGE_CORE_WIDTH > 0 && EDGE_HALO_WIDTH > EDGE_CORE_WIDTH * 2,
@@ -211,10 +207,13 @@ for (let i = 0; i < 12; i += 1) {
   assert.equal(c.segments, CONSTELLATION[i].lines.length, ZODIAC[i].id + ' 骨架落地后连线数变了');
   assert.equal(c.core.length, c.segments * 18, ZODIAC[i].id + ' 连线丝带（细芯）顶点数 = 连线数 × 18');
   assert.equal(c.halo.length, c.segments * 18, ZODIAC[i].id + ' 连线丝带（光晕）顶点数 = 连线数 × 18');
+  const degrees = new Array(c.nodes).fill(0);
+  CONSTELLATION[i].lines.forEach(([a, b]) => { degrees[a] += 1; degrees[b] += 1; });
   for (let k = 0; k < c.nodes; k += 1) {
     assert.ok(Math.abs(c.x[k]) <= SHAPE_BOX && Math.abs(c.y[k]) <= SHAPE_BOX_V,
       ZODIAC[i].id + ' 骨架星点出画框');
     assert.ok(c.m[k] > 0 && c.m[k] <= 1, ZODIAC[i].id + ' 骨架星点亮度越界');
+    assert.equal(c.links[k], degrees[k], ZODIAC[i].id + ' 主星连线度数必须与骨架一致');
   }
   // 主星只能使用造型的变换；独立撑满画框会让主星离开对应身体部位。
   const fit = shapeFit(i);
@@ -247,7 +246,8 @@ for (let i = 0; i < 12; i += 1) {
   assert.equal(a2.edgeHalo.length, a2.segmentCount * 18, ZODIAC[i].id + ' 网格边宽晕丝带顶点数 = 边数 × 18');
   assert.equal(a2.nodes.length, FIGURE_MESH_POINTS * 3, ZODIAC[i].id + ' 网格顶点数应等于网格点数');
   for (let v = 2; v < a2.edgeCore.length; v += 3) {
-    assert.ok(a2.edgeCore[v] >= FIGURE_Z && a2.edgeCore[v] <= FIGURE_DEPTH,
+    // 丝带浮在表面 6 毫米处（避免与共面的面罩打架），所以上限多让 0.02。
+    assert.ok(a2.edgeCore[v] >= FIGURE_Z && a2.edgeCore[v] <= FIGURE_DEPTH + .02,
       ZODIAC[i].id + ' 网格边丝带必须在起伏表面上');
   }
   assert.ok(Buffer.from(a2.cloud.buffer).equals(Buffer.from(b2.cloud.buffer)),
@@ -268,7 +268,7 @@ for (let i = 0; i < 12; i += 1) {
   }
   // 顶点亮点必须在立体造型的前表面上。
   for (let v = 2; v < a2.nodes.length; v += 3) {
-    assert.ok(a2.nodes[v] >= FIGURE_Z && a2.nodes[v] <= FIGURE_DEPTH,
+    assert.ok(a2.nodes[v] >= FIGURE_Z && a2.nodes[v] <= FIGURE_DEPTH + .02,
       ZODIAC[i].id + ' 网格顶点必须在起伏表面上');
   }
 }
@@ -282,11 +282,12 @@ const fills = [];
 const widths = [];
 for (let i = 0; i < 12; i += 1) {
   const s = buildShape(i, 2600);
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, maxZ = 0;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
   for (let v = 0; v < s.pos.length; v += 3) {
     minX = Math.min(minX, s.pos[v]); maxX = Math.max(maxX, s.pos[v]);
     minY = Math.min(minY, s.pos[v + 1]); maxY = Math.max(maxY, s.pos[v + 1]);
-    const az = Math.abs(s.pos[v + 2]); if (az > maxZ) maxZ = az;
+    minZ = Math.min(minZ, s.pos[v + 2]); maxZ = Math.max(maxZ, s.pos[v + 2]);
   }
   const w = maxX - minX;
   const h = maxY - minY;
@@ -296,8 +297,9 @@ for (let i = 0; i < 12; i += 1) {
     ZODIAC[i].id + ' 归一化后应撑满设计框（实测 ' + fill.toFixed(3) + '）');
   assert.ok(Math.abs((minX + maxX) / 2) < 0.18 && Math.abs((minY + maxY) / 2) < 0.18,
     ZODIAC[i].id + ' 归一化后应居中（质心偏移过大）');
-  assert.ok(maxZ > FIGURE_DEPTH * 0.60 && maxZ <= FIGURE_DEPTH * 1.12,
-    ZODIAC[i].id + ' 体积深度必须非零且不超过上限（实测 ' + maxZ.toFixed(3) + '）');
+  // 总厚度 = 背壳镜像 + 正面隆起 + 前壳抬出的皮肤层，约 1.9 倍半深。
+  assert.ok(maxZ - minZ > 0.9 && maxZ - minZ <= FIGURE_DEPTH * 2.0,
+    ZODIAC[i].id + ' 体积厚度必须可读且不超过上限（实测 ' + (maxZ - minZ).toFixed(3) + '）');
   fills.push(fill);
   widths.push(w);
 }

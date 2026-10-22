@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT
+     Copyright (c) 2026 hertz-studio contributors
+
+     G4 检查页（非产品代码）：同一份 Cue、同一句、同一字号，
+     左侧 DOM 后端写 --emo-dy，右侧字形引擎消费同一份场采样。
+     页面只验证场层接线；粒子/装饰未接。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>lyric glyph G4 · LyricEmotion bridge</title>
+<style>
+  body { margin: 0; background: #101014; color: #d6d6da; font: 13px/1.5 "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 15px; font-weight: 600; margin: 18px 20px 4px; }
+  p.hint { margin: 0 20px 14px; color: #7d828c; font-size: 12px; }
+  .controls { display: flex; align-items: center; gap: 8px; margin: 0 20px 14px; flex-wrap: wrap; }
+  .controls button {
+    border: 1px solid #2a2a33; background: #17171d; color: #cfd2d9;
+    border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit;
+  }
+  .controls button[aria-pressed="true"] { border-color: #ffd166; color: #ffd166; }
+  .g4-pair { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; margin: 0 20px 12px; align-items: center; }
+  .g4-label { text-align: right; color: #aab0ba; font-size: 12px; line-height: 1.45; }
+  .g4-label strong { display: block; color: #e6e8ec; font-weight: 600; }
+  .g4-label small { display: block; color: #676d78; font: 10px/1.5 ui-monospace, Consolas, monospace; }
+  .g4-stage {
+    position: relative; height: 150px; overflow: hidden;
+    border: 1px solid #22222a; border-radius: 8px; background: #0b0b0e;
+  }
+  .g4-dom-line { position: absolute; inset: 0; }
+  .g4-dom-line .g4-word {
+    position: absolute; top: 36px; white-space: pre; line-height: 1;
+    font: 700 72px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: var(--emo-ink, #f4f4f5);
+    transform: translateY(var(--emo-dy, 0px));
+    will-change: transform;
+  }
+  .fl-glyph { position: absolute; inset: 0; }
+  .fl-glyph[hidden] { display: none; }
+  .fl-glyph-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .fl-glyph-a11y { position: absolute; inset: 0; color: transparent; opacity: 0; pointer-events: none; user-select: none; }
+  .fl-glyph-hit { position: absolute; inset: 0; pointer-events: none; }
+  .fl-glyph-hit .fl-glyph-hot { position: absolute; pointer-events: auto; cursor: pointer; background: transparent; }
+  pre { margin: 10px 20px 40px; padding: 12px; background: #14141a; border: 1px solid #22222a;
+        white-space: pre-wrap; font: 12px/1.55 ui-monospace, Consolas, monospace; }
+  #result { display: none; }
+</style>
+</head>
+<body>
+<h1>G4 · LyricEmotion × 字形引擎</h1>
+<p class="hint">同一句、同一 Cue、同一字号（72px）。左：DOM 后端写入 <code>--emo-dy</code>；右：真实 <code>StanzaGlyph</code> 消费同一份场采样。只验场层，粒子/装饰未接。</p>
+<div class="controls">
+  <span>情绪</span>
+  <button type="button" data-emotion="neutral">neutral</button>
+  <button type="button" data-emotion="joy">joy</button>
+  <button type="button" data-emotion="sorrow">sorrow</button>
+  <button type="button" data-emotion="anger">anger</button>
+  <button type="button" data-emotion="anxious">anxious</button>
+  <button type="button" data-emotion="tender">tender</button>
+  <span id="status">初始化…</span>
+</div>
+<div class="g4-pair">
+  <div class="g4-label"><strong>DOM</strong><small>--emo-dy</small></div>
+  <div class="g4-stage"><div class="g4-dom-line" id="g4-dom"></div></div>
+</div>
+<div class="g4-pair">
+  <div class="g4-label"><strong>字形引擎</strong><small>StanzaGlyph</small></div>
+  <div class="g4-stage" id="g4-glyph-stage"></div>
+</div>
+<pre id="result">running…</pre>
+
+<script src="stanza/stanza-util.js"></script>
+<script src="stanza/stanza-theme.js"></script>
+<script src="lyric-glyph-sdf.js"></script>
+<script src="lyric-glyph-atlas.js"></script>
+<script src="lyric-glyph-gl.js"></script>
+<script src="lyric-emotion-field.js"></script>
+<script src="lyric-emotion.js"></script>
+<script src="stanza/stanza-glyph.js"></script>
+<script>
+window.addEventListener('error', function (e) {
+  var el = document.getElementById('result');
+  if (el) el.textContent = 'ERROR: ' + (e.message || '') + '\n@ ' + (e.filename || '') + ':' + (e.lineno || '');
+});
+</script>
+<script>
+(function () {
+  'use strict';
+
+  var EM = window.LyricEmotion;
+  var FIELD = window.LyricEmotionField;
+  var POS = 3200;
+  var TOKENS = [
+    { text: '他', start_ms: 0, end_ms: 700 },
+    { text: '跑', start_ms: 700, end_ms: 1400 },
+    { text: '过', start_ms: 1400, end_ms: 2200 },
+    { text: '整', start_ms: 2200, end_ms: 3100 },
+    { text: '个', start_ms: 3100, end_ms: 3900 },
+    { text: '夏', start_ms: 3900, end_ms: 5000 },
+    { text: '天', start_ms: 5000, end_ms: 6000 }
+  ];
+  var LINE = { start_ms: 0, end_ms: 6000, text: '他跑过整个夏天' };
+  var DOC = { lines: [LINE] };
+
+  window.Stage = {
+    tier: function () { return 2; },
+    lyrics: function () { return DOC; },
+    position: function () { return POS; },
+    beat: function () { return 0.35; },
+    energy: function () { return 0.4; },
+    lyricTokens: function () { return TOKENS; }
+  };
+
+  var CJK = /[一-龥぀-ヿ가-힯]/;
+  var EM_PX = 72;
+
+  var domLine = document.getElementById('g4-dom');
+  var glyphStage = document.getElementById('g4-glyph-stage');
+  var status = document.getElementById('status');
+  var result = document.getElementById('result');
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('.controls button'));
+  var renderer = null;
+  var hash = null;
+  var current = 'neutral';
+  var busy = null;
+
+  // 与 stanza-glyph.buildLayout 同一套分词与步进，保证 DOM 与 GL 的 u 同源。
+  function buildWords() {
+    var measure = document.createElement('canvas').getContext('2d');
+    measure.font = '700 ' + EM_PX + 'px ' + window.StanzaTheme.fontStack('sans');
+    var words = [], x = 0, last = '';
+    TOKENS.forEach(function (tok) {
+      if (last) x += (CJK.test(last) && CJK.test(tok.text.charAt(0))) ? EM_PX * 0.04 : EM_PX * 0.26;
+      var start = x;
+      x += measure.measureText(tok.text).width;
+      words.push({ text: tok.text, x: start, w: x - start, uStart: start, uEnd: x });
+      last = tok.text.charAt(tok.text.length - 1);
+    });
+    var total = x || 1;
+    words.forEach(function (word) {
+      word.uStart /= total;
+      word.uEnd /= total;
+    });
+    return { words: words, total: total };
+  }
+
+  var layout = buildWords();
+  domLine.style.width = (layout.total + 32) + 'px';
+  domLine.style.left = 'calc(50% - ' + ((layout.total + 32) / 2) + 'px)';
+  var domWords = layout.words.map(function (word) {
+    var el = document.createElement('span');
+    el.className = 'g4-word';
+    el.textContent = word.text;
+    el.style.left = (word.x + 16) + 'px';
+    el.style.width = word.w + 'px';
+    el.setAttribute('data-u-start', word.uStart.toFixed(6));
+    el.setAttribute('data-u-end', word.uEnd.toFixed(6));
+    domLine.appendChild(el);
+    return { el: el, uStart: word.uStart, uEnd: word.uEnd };
+  });
+
+  function stateInfo(state) {
+    return state ? {
+      id: state.id, intensity: state.intensity,
+      revision: state.revision, confidence: state.confidence
+    } : null;
+  }
+
+  function domSnapshot(state) {
+    return domWords.map(function (word) {
+      var el = word.el;
+      var dy = parseFloat(getComputedStyle(el).getPropertyValue('--emo-dy')) || 0;
+      var matrix = getComputedStyle(el).transform;
+      var ty = 0;
+      var match = matrix && matrix.match(/matrix\(([^)]+)\)/);
+      if (match) ty = parseFloat(match[1].split(',')[5]) || 0;
+      var u = (word.uStart + word.uEnd) / 2;
+      return {
+        u: Math.round(u * 1e6) / 1e6,
+        dy: Math.round(dy * 1000) / 1000,
+        ty: Math.round(ty * 1000) / 1000,
+        expected: Math.round(EM.sampleAt(state, u, EM_PX).b * 1000) / 1000
+      };
+    });
+  }
+
+  function applyDom(state) {
+    EM.applyLine(domLine, domWords, state, EM_PX);
+  }
+
+  function snapshot() {
+    var state = EM.resolveForLine(0, { host: 'g4' });
+    return {
+      emotion: current,
+      state: stateInfo(state),
+      dom: domSnapshot(state),
+      hash: hash,
+      emPx: EM_PX
+    };
+  }
+
+  function select(id) {
+    if (busy) return busy;
+    busy = (async function () {
+      if (!hash) throw new Error('歌词摘要未就绪');
+      var cueDoc = {
+        version: 1, lyricsHash: hash, source: 'fixture',
+        lines: id === 'neutral' ? [] : [
+          { index: 0, emotion: id, intensity: 1, confidence: 1 }
+        ]
+      };
+      EM.setCueDoc(cueDoc);
+      EM.commitAtBoundary();
+      current = id;
+      renderer.frame();
+      applyDom(EM.resolveForLine(0, { host: 'g4' }));
+      buttons.forEach(function (button) {
+        button.setAttribute('aria-pressed', button.getAttribute('data-emotion') === id ? 'true' : 'false');
+      });
+      status.textContent = id + ' · eI ' + EM.resolveForLine(0).intensity.toFixed(2);
+      return snapshot();
+    })().finally(function () { busy = null; });
+    return busy;
+  }
+
+  buttons.forEach(function (button) {
+    button.addEventListener('click', function () { select(button.getAttribute('data-emotion')); });
+  });
+
+  (async function init() {
+    var bound = await EM.bindLyrics(DOC);
+    hash = bound.hash;
+    renderer = window.StanzaGlyph.init(glyphStage, function () {});
+    renderer.setTheme(Object.assign({}, window.StanzaTheme.DEFAULT, {
+      name: 'g4',
+      backgroundColor: '#0b0b0e',
+      primaryColor: '#F4F4F5',
+      accentColor: '#E4E4E7',
+      secondaryColor: '#71717a',
+      wordColors: [],
+      animationIntensity: 'normal',
+      fontStyle: 'sans'
+    }));
+    renderer.setVisible(true);
+    await select('joy');
+    window.__glyphG4 = {
+      ready: true,
+      select: select,
+      snapshot: snapshot,
+      verdict: 'PASS'
+    };
+    result.textContent = JSON.stringify(snapshot(), null, 2);
+  })().catch(function (err) {
+    result.textContent = 'ERROR: ' + (err && err.message || err);
+    window.__glyphG4 = { ready: true, error: String(err && err.message || err), verdict: 'ERROR' };
+  });
+})();
+</script>
+</body>
+</html>

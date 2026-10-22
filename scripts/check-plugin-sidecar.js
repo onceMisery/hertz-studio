@@ -27,6 +27,7 @@
 //      删除幂等。整个检查用 VMUSIC_SECRETS=memory，绝不碰真实系统钥匙串。
 //
 // 用法：node scripts/check-plugin-sidecar.js
+// 慢消费者探针：HERTZ_SIDECAR_LAG_PROBE=1 node scripts/check-plugin-sidecar.js
 // 二进制默认找 target/debug/dbx-plugin-hertz[.exe]，可用 HERTZ_PLUGIN_BIN 覆盖。
 
 'use strict';
@@ -37,6 +38,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..');
+const runLagProbe = process.env.HERTZ_SIDECAR_LAG_PROBE === '1';
+const playbackSeconds = runLagProbe ? 120 : 6;
 
 let passed = 0;
 const failures = [];
@@ -238,6 +241,7 @@ async function main() {
     env: { ...process.env, DBX_PLUGIN_DATA_DIR: dataDir, VMUSIC_LOG: 'warn', VMUSIC_SECRETS: 'memory' },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  const childClosed = new Promise((resolve) => child.once('close', resolve));
   // stderr 只收集不打印：sidecar 的日志必须走 stderr，stdout 是协议信道。
   const stderr = [];
   child.stderr.setEncoding('utf8');
@@ -501,7 +505,7 @@ async function main() {
 
     console.log('\n端到端：扫描 → 播放 → 频谱');
     musicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hertz-plugin-music-'));
-    writeWav(path.join(musicDir, 'smoke-tone.wav'), { seconds: 6 });
+    writeWav(path.join(musicDir, 'smoke-tone.wav'), { seconds: playbackSeconds });
 
     const addedRoot = await client.send('v1/library/roots', {
       op: 'POST',
@@ -540,8 +544,8 @@ async function main() {
     eq(track.title, 'Sidecar Smoke Tone', '标题来自文件标签，且没带着 RIFF INFO 的 NUL 终止符');
     eq(track.artist, 'Hertz Studio', '艺术家来自文件标签');
     ok(
-      Math.abs((track.duration_ms || 0) - 6000) <= 250,
-      '时长约 6000ms（得到 ' + track.duration_ms + '）',
+      Math.abs((track.duration_ms || 0) - playbackSeconds * 1000) <= 250,
+      `时长约 ${playbackSeconds * 1000}ms（得到 ${track.duration_ms}）`,
     );
 
     const one = await client.send('v1/tracks/' + encodeURIComponent(track.id), { op: 'GET' });
@@ -615,7 +619,8 @@ async function main() {
     eq((shifted.result || {}).body?.lines?.[0]?.start_ms, 1500, '用户偏移叠加到行时间戳上（1000+500）');
 
     const blankLyrics = await client.send(lyricsPath, { op: 'PUT', body: { content: '   ' } });
-    eq(blankLyrics.result && blankLyrics.result.status, 400, '导入空白歌词 → 400');
+    eq(blankLyrics.result && blankLyrics.result.status, 422, '导入空白歌词 → 422');
+    eq(((blankLyrics.result || {}).body || {}).error?.code, 'lyrics_empty', '空白歌词错误码稳定');
 
     await client.send(lyricsPath, { op: 'DELETE' });
     const cleared = await client.send(lyricsPath, { op: 'GET' });
@@ -643,6 +648,37 @@ async function main() {
       (after.position_ms || 0) > (before.position_ms || 0),
       `position_ms 在前进（${before.position_ms} → ${after.position_ms}）`,
     );
+
+    if (runLagProbe) {
+      console.log('\n事件桥：恢复慢消费者掉队');
+      const resyncEvent = waitForEvent(
+        client,
+        (params) => params.type === 'ai_tasks_resync',
+        120000,
+      );
+      const notificationsBeforePause = client.notifications.length;
+      const pauseStartedAt = Date.now();
+      child.stdout.pause();
+      ok(child.stdout.isPaused(), '已暂停读取 sidecar stdout');
+      try {
+        // Fill the OS pipe as well as Node's readable buffer before expecting the
+        // sidecar event task to stop draining the bounded broadcast receiver.
+        await sleep(90000);
+      } finally {
+        child.stdout.resume();
+      }
+      const recovered = await resyncEvent;
+      const resumedNotifications = client.notifications.slice(notificationsBeforePause);
+      const resumedBytes = resumedNotifications.reduce(
+        (sum, message) => sum + Buffer.byteLength(JSON.stringify(message)) + 1,
+        0,
+      );
+      console.log(
+        `  --   stdout 停读 ${Math.round((Date.now() - pauseStartedAt) / 1000)}s，` +
+          `恢复后收到 ${resumedNotifications.length} 条事件 / ${resumedBytes}B`,
+      );
+      ok(recovered, 'stdout 恢复后收到 ai_tasks_resync');
+    }
 
     // 频谱是「真的在解码并输出音频」的唯一可观测证据：NullBackend 不产生频谱帧，
     // 解码停摆也不产生。收不到就说明这条链断了。
@@ -1323,12 +1359,11 @@ async function main() {
     if (stderr.length) console.error('--- sidecar stderr ---\n' + stderr.join('').slice(-2000));
     exitCode = 1;
   } finally {
-    child.kill();
-    // 临时数据目录里是 SQLite + WAL，Windows 下要等子进程真的退出才能删。
-    setTimeout(() => {
-      fs.rmSync(dataDir, { recursive: true, force: true });
-      if (musicDir) fs.rmSync(musicDir, { recursive: true, force: true });
-    }, 500);
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    // The data directory contains SQLite + WAL; wait until the sidecar closes it.
+    await childClosed;
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    if (musicDir) fs.rmSync(musicDir, { recursive: true, force: true });
   }
 
   console.log('\n' + '─'.repeat(56));
@@ -1338,7 +1373,7 @@ async function main() {
     console.log(`插件 sidecar 协议检查：${passed} 通过 / ${failures.length} 失败`);
     failures.forEach((label) => console.log('  - ' + label));
   }
-  process.exit(exitCode);
+  process.exitCode = exitCode;
 }
 
 main();

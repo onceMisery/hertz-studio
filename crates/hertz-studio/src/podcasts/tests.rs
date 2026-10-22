@@ -34,7 +34,7 @@ fn parsed(xml: &str) -> ParsedFeed {
 async fn context() -> (online::Ctx, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("hertz-podcasts-{}", uuid::Uuid::new_v4()));
     let db = vmusic_store::open(&dir).await.unwrap();
-    (online::Ctx { db }, dir)
+    (online::Ctx::new(db), dir)
 }
 
 async fn cleanup(ctx: online::Ctx, dir: std::path::PathBuf) {
@@ -322,9 +322,7 @@ async fn imported_episodes_survive_restart_unsubscribe_and_pagination() {
     unsubscribe(&ctx, &show.id).await.unwrap();
     assert!(subscriptions(&ctx).await.unwrap().is_empty());
     ctx.db.close().await;
-    let ctx = online::Ctx {
-        db: vmusic_store::open(&dir).await.unwrap(),
-    };
+    let ctx = online::Ctx::new(vmusic_store::open(&dir).await.unwrap());
     let detail = episode_detail(&ctx, &id).await.unwrap();
     assert_eq!(detail.title, "第一集：茶 & 故事");
     assert_eq!(detail.source, "podcast");
@@ -332,6 +330,53 @@ async fn imported_episodes_survive_restart_unsubscribe_and_pagination() {
     assert_eq!(stream.url, "https://example.com/one.m4a?token=old");
     assert_eq!(stream.bitrate, None);
     assert!(stream.fallbacks.is_empty());
+    cleanup(ctx, dir).await;
+}
+
+#[tokio::test]
+async fn episode_progress_is_stable_independent_and_marks_completion_from_duration() {
+    let (ctx, dir) = context().await;
+    let parsed_feed = parsed(RSS);
+    let id = parsed_feed.episodes[0].episode.track.id.clone();
+    let duration_ms = parsed_feed.episodes[0].episode.track.duration_ms;
+    persist_feed(&ctx, &parsed_feed).await.unwrap();
+
+    let saved = save_progress(&ctx, &id, 1_234_567, false).await.unwrap();
+    assert_eq!(saved.progress_ms, 1_234_567);
+    assert!(!saved.completed);
+    let page = feed(&ctx, FEED, 0, 1, false).await.unwrap();
+    assert_eq!(page.episodes[0].progress_ms, 1_234_567);
+    assert!(!page.episodes[0].completed);
+
+    let mut refreshed = parsed(&RSS.replace("token=old", "token=new"));
+    refreshed.episodes.truncate(1);
+    refreshed.show.episode_count = 1;
+    persist_feed(&ctx, &refreshed).await.unwrap();
+    let retained = feed(&ctx, FEED, 0, 1, false).await.unwrap();
+    assert_eq!(retained.episodes[0].progress_ms, 1_234_567);
+
+    let nearly_complete = save_progress(&ctx, &id, duration_ms * 95 / 100, false)
+        .await
+        .unwrap();
+    assert!(nearly_complete.completed);
+    let completed = save_progress(&ctx, &id, duration_ms * 94 / 100, true)
+        .await
+        .unwrap();
+    assert!(completed.completed);
+    let replayed = save_progress(&ctx, &id, 0, false).await.unwrap();
+    assert_eq!(replayed.progress_ms, 0);
+    assert!(!replayed.completed);
+    let reset = feed(&ctx, FEED, 0, 1, false).await.unwrap();
+    assert_eq!(reset.episodes[0].progress_ms, 0);
+    assert!(!reset.episodes[0].completed);
+
+    assert_eq!(
+        save_progress(&ctx, "missing-episode", 10_000, false)
+            .await
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
     cleanup(ctx, dir).await;
 }
 
@@ -390,9 +435,7 @@ async fn feed_page_keeps_one_snapshot_when_refresh_commits_between_its_reads() {
     let (ctx, dir) = context().await;
     persist_feed(&ctx, &parsed(RSS)).await.unwrap();
     // 独立连接池保证刷新提交来自另一个 SQLite 连接。
-    let writer = online::Ctx {
-        db: vmusic_store::open(&dir).await.unwrap(),
-    };
+    let writer = online::Ctx::new(vmusic_store::open(&dir).await.unwrap());
     let page_read = store::begin_page(&ctx, FEED).await.unwrap();
     let mut refreshed = parsed(&RSS.replace("第一集：茶 & 故事", "刷新后的第一集"));
     refreshed.episodes.truncate(1);

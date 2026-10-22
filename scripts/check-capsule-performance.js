@@ -89,12 +89,18 @@ async function main() {
   const ui = { capsuleLabel: el(), capsulePlay: el() };
   let mediaCalls = 0;
   const runtime = vm.createContext({ state, ui, window: { HertzCapsuleOnly: true, Online: online },
-    document: { body: el(), title: '' }, console,
+    document: { body: el(), title: '', dispatchEvent() { return true; } }, console,
+    CustomEvent: class CustomEvent {
+      constructor(type, options) { this.type = type; this.detail = options && options.detail; }
+    },
     PlaybackIntent: { queueRevision: 0, generation: 0, current: () => true },
     Stage: new Proxy({}, { get: () => hidden }),
     staleCommand: () => false, volumeTarget: null, capsuleMediaKey: '',
     syncMediaSession() { mediaCalls++; },
     syncCapsule(track, url) { covers.push({ id: track && track.id, title: track && track.title, url }); },
+    syncBufferingIndicator(active, pct) {
+      ui.capsulePlay.title = active ? (pct != null ? `缓冲中 ${pct}%` : '缓冲中…') : '';
+    },
     updateMediaSessionMetadata(track, url) { metadata.push({ id: track.id, url }); },
     transport: {
       get(url) {

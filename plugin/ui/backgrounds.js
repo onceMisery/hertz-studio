@@ -59,6 +59,7 @@
     txShown: null, tyShown: null, // 上次写出的视差位移
     inputBound: false
   };
+  var temporaryApply = null;
 
   // 视差输入：指针在视口内的归一化位置（-1..1）+ 平滑后的版本。
   // 所有「随动」都读这同一个值，墙和 DOM 位移才不会各晃各的。
@@ -384,7 +385,13 @@
       state.media.load();
     }
     if (state.media.parentNode) state.media.parentNode.removeChild(state.media);
-    if (urlForMedia) { try { URL.revokeObjectURL(urlForMedia); } catch (e) { /* 忽略 */ } }
+    if (urlForMedia) {
+      if (temporaryApply) {
+        if (temporaryApply.urls.indexOf(urlForMedia) < 0) temporaryApply.urls.push(urlForMedia);
+      } else {
+        try { URL.revokeObjectURL(urlForMedia); } catch (e) { /* 忽略 */ }
+      }
+    }
     state.media = null;
     state.mediaUrl = null;
   }
@@ -781,6 +788,26 @@
     return state.spec;
   }
 
+  function beginTemporaryApply() {
+    if (temporaryApply) return;
+    temporaryApply = { spec: JSON.parse(JSON.stringify(state.spec)), urls: [] };
+  }
+
+  function releaseTemporaryApply(restore) {
+    if (!temporaryApply) return false;
+    var pending = temporaryApply;
+    var restored = !restore;
+    if (restore) {
+      try { apply(pending.spec); restored = true; } catch (e) { /* 仍需清理临时资源 */ }
+    }
+    temporaryApply = null;
+    pending.urls.forEach(function (url) {
+      if (url === state.mediaUrl || (!restored && restore && pending.spec.url === url)) return;
+      try { URL.revokeObjectURL(url); } catch (e) { /* 忽略 */ }
+    });
+    return true;
+  }
+
   function applyMedia() {
     clearMedia();
     var src = state.spec.url;
@@ -858,6 +885,9 @@
   var api = {
     init: init,
     apply: apply,
+    beginTemporaryApply: beginTemporaryApply,
+    cancelTemporaryApply: function () { return releaseTemporaryApply(true); },
+    commitTemporaryApply: function () { return releaseTemporaryApply(false); },
     update: update,
     setStageHost: setStageHost,
     setStageState: setStageState,

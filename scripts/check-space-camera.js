@@ -313,7 +313,7 @@ section('机位基线表：注册表是唯一 owner');
   const bundle = fs.readFileSync(path.join(WEB, 'vendor/space-stage.js'), 'utf8');
   const sandbox = { console, AbortController, setTimeout, clearTimeout };
   sandbox.window = sandbox; sandbox.self = sandbox; sandbox.globalThis = sandbox;
-  const api = vm.runInNewContext(bundle + ';SpaceStagePure', sandbox);
+  const api = vm.runInNewContext(fs.readFileSync(path.join(WEB, 'vendor/stage-runtime.js'), 'utf8') + '\n' + bundle + ';SpaceStagePure', sandbox);
   api.catalog().forEach(d => {
     const sc = fresh();
     sc.setBaseline(Object.assign({}, d.camera, { look: d.camera.lookAt }));

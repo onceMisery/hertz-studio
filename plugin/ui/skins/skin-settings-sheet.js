@@ -8,8 +8,8 @@
 // ----
 // 设置原本是中栏的一个普通视图（#view-settings，17 个 .set-group 一路滚到底）。
 // 清风率先把它搬进浮层：左栏两级分类、右栏一次只显示一组。这个形态用户反馈
-// 很好，于是收敛成**所有皮肤共用**的一层 —— classic / sheen / workbench / ios
-// 在这里直接注册生命周期，chaoxi 在自己的生命周期里调用 mount/unmount；
+// 很好，于是收敛成**所有皮肤共用**的一层 —— classic 在这里直接注册生命周期，
+// heijiao / orbit 在自己的生命周期里调用 mount/unmount；
 // liunian / qingfeng 保留各自的浮层实现（它们比本模块更早存在，且有各自的
 // 皮肤化样式与契约脚本钉着）。
 //
@@ -93,8 +93,8 @@
   ];
 
   // 本模块服务哪些皮肤：它们没有自己的生命周期脚本，由这里代管。
-  // liunian / qingfeng / chaoxi 各有自己的 skin.<id>.js，不在此列。
-  var MANAGED_SKINS = ['classic', 'sheen', 'workbench', 'ios'];
+  // liunian / qingfeng / heijiao / orbit 各有自己的 skin.<id>.js，不在此列。
+  var MANAGED_SKINS = ['classic'];
 
   var mounted = false;
   var st = {
@@ -490,8 +490,8 @@
   }
 
   // -------------------------------------------------------------------------
-  // 皮肤接入：四个没有自有生命周期脚本的皮肤在这里代管。
-  // registerLifecycle 对已有生命周期的皮肤（liunian/qingfeng/chaoxi）是
+  // 皮肤接入：没有自有生命周期脚本的皮肤在这里代管。
+  // registerLifecycle 对已有生命周期的皮肤（liunian/qingfeng/heijiao/orbit）是
   // no-op，所以这份名单写宽一点也不冲突。
   // -------------------------------------------------------------------------
 
@@ -504,7 +504,7 @@
 
   attach();
 
-  // 暴露给 chaoxi 的生命周期与契约/排障脚本。
+  // 暴露给其它皮肤的生命周期与契约/排障脚本。
   window.SkinSettingsSheet = {
     mount: mount,
     unmount: unmount,

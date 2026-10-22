@@ -144,6 +144,7 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         source: ID.into(),
         keyword: term.to_string(),
         total,
+        total_is_exact: false,
         tracks,
         warning: body
             .pointer("/headers/warnings")
@@ -396,7 +397,7 @@ mod tests {
     async fn missing_client_id_gives_a_registration_hint() {
         let dir = std::env::temp_dir().join(format!("vmusic-jam-test-{}", uuid::Uuid::new_v4()));
         let db = vmusic_store::open(&dir).await.unwrap();
-        let ctx = Ctx { db };
+        let ctx = Ctx::new(db);
 
         let err = client_id(&ctx).await.unwrap_err();
         assert_eq!(err.status, 400);

@@ -54,7 +54,8 @@
   }
 
   async function encode(preset, options) {
-    var full = preset === undefined ? CreativeStage.shareSnapshot() : CreativeStage.normalizeSharePreset(preset);
+    var full = preset === undefined ? CreativeStage.shareSnapshot({ includeProjectContext: true })
+      : CreativeStage.normalizeSharePreset(preset, { preserveProjectContext: true });
     var bytes = new TextEncoder().encode(JSON.stringify(full));
     if (bytes.length > MAX_BYTES) throw new Error('创意预置过大（最多 128 KiB）');
     var mode = 'J';
@@ -89,7 +90,7 @@
     var value;
     try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
     catch (e) { throw new Error('分享码中的 UTF-8 / JSON 数据无效'); }
-    return CreativeStage.normalizeSharePreset(value);
+    return CreativeStage.normalizeSharePreset(value, { preserveProjectContext: true });
   }
 
   window.CreativeShareCode = { encode: encode, decode: decode };

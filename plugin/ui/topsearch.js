@@ -6,7 +6,7 @@
 // 为什么是下拉面板：顶栏只有一行的高度，五档类型塞不进去；而预览结果
 // （歌能直接播、歌单/歌手/专辑能直接进详情）让这个框成为真正的全局搜索，
 // 而不是「回车才见结果」的跳转器。面板是 position:fixed 的自由浮层，坐标
-// 由 JS 按输入框的实际位置算 —— 五套皮肤各自给 .topsearch 换了圆角/底色/
+// 由 JS 按输入框的实际位置算 —— 各套皮肤分别给 .topsearch 换圆角/底色/
 // 摆位（清风把它挪到顶栏右侧、流年换底色），锚在布局流里要么被皮肤裁掉
 // 要么贴错边，只有 JS 定位对所有皮肤一视同仁。
 //
@@ -37,6 +37,7 @@
   var kindHost = null;
   var body = null;      // 预览结果滚动区
   var moreBtn = null;   // 「在「在线」页查看全部」脚注
+  var suppressFocusOpen = false;
 
   var KINDS = [
     { id: 'song', label: '歌曲' },
@@ -68,6 +69,7 @@
     open: false,
     epoch: 0,
     timer: 0,
+    network: null,
     q: '',
     // 预览里的歌列表：点行播歌时按这套顺序整盘入队。
     previewTracks: [],
@@ -154,6 +156,7 @@
 
   function renderChips() {
     if (!kindHost) return;
+    var focusedKind = kindHost.contains(document.activeElement) && document.activeElement.dataset.kind;
     kindHost.textContent = '';
     var active = effectiveKind();
     KINDS.forEach(function (k) {
@@ -168,6 +171,10 @@
       b.addEventListener('click', function () { setKind(k.id); });
       kindHost.appendChild(b);
     });
+    if (focusedKind) {
+      var replacement = kindHost.querySelector('[data-kind="' + focusedKind + '"]');
+      if (replacement) replacement.focus({ preventScroll: true });
+    }
   }
 
   function syncPlaceholder() {
@@ -186,12 +193,14 @@
     var left = Math.round(r.left);
     var maxLeft = window.innerWidth - w - 12;
     if (left > maxLeft) left = Math.max(12, maxLeft);
+    var top = Math.round(r.bottom + 8);
     menu.style.left = left + 'px';
-    menu.style.top = Math.round(r.bottom + 8) + 'px';
+    menu.style.top = top + 'px';
     menu.style.width = w + 'px';
+    menu.style.maxHeight = Math.max(0, window.innerHeight - top - 12) + 'px';
   }
 
-  function open() {
+  function open(skipPreview) {
     if (!menu || state.open) return;
     state.open = true;
     renderChips();
@@ -199,10 +208,18 @@
     menu.hidden = false;
     place();
     renderEmptyState();
-    if (state.q) runPreview(state.q);
+    if (state.q && !skipPreview) runPreview(state.q);
+  }
+
+  function invalidate() {
+    state.epoch += 1;
+    clearTimeout(state.timer);
+    if (state.network) state.network.cancel();
+    state.network = null;
   }
 
   function close() {
+    invalidate();
     if (!menu || !state.open) return;
     state.open = false;
     menu.hidden = true;
@@ -227,12 +244,17 @@
     var q = input.value.trim();
     if (q === state.q) return;
     state.q = q;
-    clearTimeout(state.timer);
+    invalidate();
+    if (effectiveKind() === 'local') {
+      if (state.open) close();
+      return;
+    }
+    if (state.open) renderEmptyState();
     if (!q) {
       if (state.open) renderEmptyState();
       return;
     }
-    if (!state.open) open();
+    if (!state.open) open(true);
     state.timer = setTimeout(function () { runPreview(q); }, 300);
   }
 
@@ -332,63 +354,94 @@
   }
 
   async function runPreview(q) {
-    if (effectiveKind() === 'local' || !q) return;
-    var epoch = ++state.epoch;
-    var o = online();
+    if (!state.open || effectiveKind() === 'local' || !q) return;
+    invalidate();
+    var epoch = state.epoch, o = online();
     if (!o || !transport()) return;
     if (o.whenSearchReady) await o.whenSearchReady();
-    if (epoch !== state.epoch || q !== state.q) return;
-    var kind = effectiveKind();
+    if (epoch !== state.epoch || q !== state.q || !state.open) return;
+    var kind = effectiveKind(), scopeSource = o.state.source;
     renderChips();
-    // Preview and full search share account and capability priorities.
     var source = o.searchSource ? o.searchSource(kind, true) : o.state.source;
-    if (source === 'all') {
-      var first = (o.sources() || [])[0];
-      source = first ? first.id : 'ccmixter';
-    }
+    var sources = kind === 'song' && o.state.source === 'all' ? (o.searchSources ? o.searchSources() : o.sources().map(function (s) { return s.id; })) : [source];
+    var network = state.network = HertzSearch.create(transport());
     var endpoint = kind === 'song' ? '/v1/online/search'
       : kind === 'playlist' ? '/v1/online/playlists/search'
-        : kind === 'artist' ? '/v1/online/artists/search'
-          : '/v1/online/albums/search';
-    var params = new URLSearchParams({
-      source: source,
-      q: q,
-      limit: kind === 'song' ? '8' : '6',
+        : kind === 'artist' ? '/v1/online/artists/search' : '/v1/online/albums/search';
+    body.textContent = ''; state.previewTracks = [];
+    moreBtn.hidden = false;
+    moreBtn.textContent = '在「在线」页查看全部「' + q + '」→';
+    var groups = sources.map(function (id) {
+      var container = document.createElement('section'); container.dataset.source = id;
+      var status = document.createElement('div'); status.className = 'ts-hint';
+      status.textContent = o.sourceLabel(id) + ' · 搜索中…'; container.appendChild(status); body.appendChild(container);
+      return { source: id, container: container, tracks: [] };
     });
-    body.textContent = '';
-    var loading = document.createElement('div');
-    loading.className = 'ts-hint';
-    loading.textContent = '搜索中…';
-    body.appendChild(loading);
-    try {
-      var data = await transport().get(endpoint + '?' + params.toString());
-      if (epoch !== state.epoch || q !== state.q) return;
-      renderPreview(kind, q, data);
-      moreBtn.hidden = false;
-      moreBtn.textContent = '在「在线」页查看全部「' + q + '」→';
-    } catch (err) {
-      if (epoch !== state.epoch) return;
-      body.textContent = '';
-      var hint = document.createElement('div');
-      hint.className = 'ts-hint';
-      hint.textContent = errText('搜索失败', err);
-      body.appendChild(hint);
+    async function load(group) {
+      if (!network.active || group.loading) return;
+      var restoreFocus = document.activeElement && group.container.contains(document.activeElement);
+      group.loading = true; group.container.textContent = '';
+      var status = document.createElement('div'); status.className = 'ts-hint';
+      status.tabIndex = -1;
+      status.textContent = o.sourceLabel(group.source) + ' · 搜索中…'; group.container.appendChild(status);
+      if (restoreFocus) status.focus({ preventScroll: true });
+      try {
+        var params = new URLSearchParams({ source:group.source, q:q, limit:kind === 'song' ? '8' : '6' });
+        var data = await network.get(endpoint + '?' + params.toString());
+        if (epoch !== state.epoch || q !== state.q || !state.open || effectiveKind() !== kind || o.state.source !== scopeSource) return;
+        if (kind !== 'song') {
+          var key = kind === 'playlist' ? 'playlists' : kind === 'artist' ? 'artists' : 'albums';
+          data[key] = (data[key] || []).map(function (item) { return Object.assign({}, item, {source:group.source}); });
+          renderPreview(kind, q, data); return;
+        }
+        group.tracks = (data.tracks || []).map(function (t) { return Object.assign({}, t, { source:group.source }); });
+        state.previewTracks = groups.reduce(function (all, g) { return all.concat(g.tracks); }, []);
+        status.textContent = o.sourceLabel(group.source) + ' · ' + (group.tracks.length ? group.tracks.length + ' 首' : '没有匹配的歌曲');
+        group.tracks.forEach(function (t) {
+          var row = o.row(t, function () {
+            if (!t.playable) return;
+            o.playAll(group.tracks, group.tracks.indexOf(t)); close();
+          });
+          row.classList.add('ts-row'); group.container.appendChild(row);
+        });
+      } catch (err) {
+        if (epoch !== state.epoch || q !== state.q || !state.open || effectiveKind() !== kind || o.state.source !== scopeSource) return;
+        var failure = HertzSearch.failure(err);
+        status.textContent = o.sourceLabel(group.source) + ' · ' + failure.label;
+        status.dataset.errorCode = failure.code;
+        status.dataset.requestId = failure.requestId;
+        if (failure.retryable) {
+          var retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn';
+          retry.textContent = '重试 ' + o.sourceLabel(group.source);
+          retry.addEventListener('click', function () { load(group); }); group.container.appendChild(retry);
+        }
+      } finally { group.loading = false; }
     }
+    groups.forEach(function (group) { load(group); });
   }
 
   // ── 档位切换 ─────────────────────────────────────────────────────────────
+
+  function scopeChanged() {
+    invalidate(); renderChips(); syncPlaceholder();
+    if (state.open) {
+      renderEmptyState();
+      if (state.q) runPreview(state.q);
+    }
+  }
 
   function setKind(kind) {
     if (KINDS.every(function (k) { return k.id !== kind; })) return;
     if (kind === state.kind) return;
     state.kind = kind;
-    state.epoch += 1; // 作废在途预览
-    clearTimeout(state.timer);
+    invalidate(); // 作废在途预览
     syncPlaceholder();
     renderChips();
     if (kind === 'local') {
       close();
+      suppressFocusOpen = true;
       input.focus();
+      if (document.activeElement === input) suppressFocusOpen = false;
       // 框里已有的词立刻生效为本地筛选（app.js 的 oninput 不会因程序化
       // 改值而触发，这里手动补一发）。
       if (input.value.trim()) notifyLocalFilter();
@@ -434,7 +487,14 @@
 
   function onDocumentKeyDown(e) {
     if (e.key !== 'Escape' || !state.open) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var restoreFocus = menu && menu.contains(document.activeElement);
     close();
+    if (restoreFocus) {
+      suppressFocusOpen = true;
+      input.focus({ preventScroll: true });
+    }
   }
 
   function onReflow(e) {
@@ -451,13 +511,15 @@
     if (!input) return;
     build();
     input.addEventListener('focus', function () {
-      if (effectiveKind() !== 'local') open();
+      if (suppressFocusOpen) { suppressFocusOpen = false; return; }
+      open();
     });
     // 焦点已在输入框时再点不会重发 focus（回车跳转后、点外面收起后都是
     // 这样），click 兜底把面板重新拉开。
     input.addEventListener('click', function () {
-      if (!state.open && effectiveKind() !== 'local' && document.activeElement === input) open();
+      if (!state.open && document.activeElement === input) open();
     });
+    input.addEventListener('input', onInput);
     input.addEventListener('keydown', function (e) {
       if (e.key !== 'Enter') return;
       if (effectiveKind() === 'local') return; // 本地行为归 app.js
@@ -475,13 +537,12 @@
     if (clearBtn) {
       clearBtn.addEventListener('click', function () {
         state.q = '';
-        state.epoch += 1;
-        clearTimeout(state.timer);
+        invalidate();
         if (state.open) renderEmptyState();
       });
     }
     document.addEventListener('pointerdown', onDocumentPointerDown, true);
-    document.addEventListener('keydown', onDocumentKeyDown);
+    window.addEventListener('keydown', onDocumentKeyDown, true);
     // 固定定位的面板不跟着布局走：页面滚动/窗口变形时直接收起，最省心。
     window.addEventListener('scroll', onReflow, true);
     window.addEventListener('resize', onReflow);
@@ -496,6 +557,7 @@
     onOnlineViewEnter: onOnlineViewEnter,
     open: open,
     close: close,
+    scopeChanged: scopeChanged,
     isOpen: function () { return state.open; },
     state: state,
   };

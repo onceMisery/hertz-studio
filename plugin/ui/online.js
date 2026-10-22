@@ -461,11 +461,13 @@
   // One search session owns all source pages. Late responses never mutate a newer session.
   var searchEpoch = 0;
   var searchSession = null;
+  var entityNetwork = null;
   var searchCache = new Map();
   var searchViews = new Map();
   var sourceManuallySelected = false;
   var automaticSearchSource = null;
   var sourcesReady = Promise.resolve();
+  var pendingSearchNetwork = null;
 
   function whenSearchReady() {
     var login = window.OnlineLogin;
@@ -488,6 +490,13 @@
     var fallback = current === automaticSearchSource || current === 'all' ? available[0]
       : available.find(function (s) { return s.id === current; }) || available[0];
     return fallback ? fallback.id : current === 'all' ? DEFAULT_SOURCE : current;
+  }
+
+  function orderedSearchSources() {
+    return loggedSearchSources().concat(onlineState.sources.map(function (source) { return source.id; }))
+      .filter(function (id, index, all) {
+        return all.indexOf(id) === index && onlineState.sources.some(function (source) { return source.id === id; });
+      });
   }
 
   function prepareSearchSource(kind) {
@@ -562,9 +571,11 @@
       while (searchViews.size > CACHE_LIMIT) searchViews.delete(searchViews.keys().next().value);
     }
     searchEpoch += 1;
-    if (searchSession) searchSession.pages.forEach(function (p) {
-      if (p.controller) p.controller.abort();
-    });
+    if (searchSession && searchSession.network) searchSession.network.cancel();
+    if (pendingSearchNetwork) pendingSearchNetwork.cancel();
+    pendingSearchNetwork = null;
+    if (entityNetwork) entityNetwork.cancel();
+    entityNetwork = null;
     searchSession = null;
     onlineState.loading = false;
     if (H.ui.onlineSentinel) H.ui.onlineSentinel.hidden = true;
@@ -603,15 +614,16 @@
       return;
     }
     var pages = session.pages;
+    // Keep source groups in the session's captured order. A later source must
+    // not interleave higher-scoring rows through an already focused group.
     var flat = [];
-    pages.forEach(function (p) { flat = flat.concat(p.tracks); });
-    // Account priority is captured for the session; ties retain relevance/page order.
-    if (session.aggregate) flat = flat.map(function (track, index) {
-      var priority = session.preferredSources.indexOf(track.source);
-      return { track: track, index: index, score: relevance(track, session.q),
-        priority: priority < 0 ? session.preferredSources.length : priority };
-    }).sort(function (a, b) { return a.priority - b.priority || b.score - a.score || a.index - b.index; })
-      .map(function (item) { return item.track; });
+    pages.forEach(function (p) {
+      var tracks = p.tracks.map(function (track, index) { return {track:track,index:index}; });
+      if (session.aggregate) tracks.sort(function (a,b) {
+        return relevance(b.track, session.q) - relevance(a.track, session.q) || a.index - b.index;
+      });
+      flat = flat.concat(tracks.map(function (entry) { return entry.track; }));
+    });
     onlineState.tracks = flat;
     onlineState.total = flat.length;
     onlineState.loading = pages.some(function (p) { return p.loading; });
@@ -646,13 +658,23 @@
     var shown = session.filter ? flat.filter(function (t) { return t.source === session.filter; }) : flat;
     var list = document.createElement('div');
     list.className = 'search-results';
+    var lastSource = null;
     shown.forEach(function (t) {
+      if (session.aggregate && t.source !== lastSource) {
+        var heading = document.createElement('h3');
+        heading.className = 'search-source-heading'; heading.textContent = sourceLabel(t.source);
+        list.appendChild(heading); lastSource = t.source;
+      }
       var row = session.rows.get(virtualId(t));
       if (!row) {
         row = onlineRow(t);
         highlight(row.querySelector('.t-title'), t.title, session.q);
         highlight(row.querySelector('.t-sub'), t.artist || '未知艺术家', session.q);
         highlight(row.querySelector('.t-album'), t.album || '—', session.q);
+        row.dataset.searchKey = 'row:' + virtualId(t);
+        row.querySelectorAll('button').forEach(function (button, index) {
+          button.dataset.searchKey = 'row:' + virtualId(t) + ':button:' + index;
+        });
         session.rows.set(virtualId(t), row);
       }
       paintRowPlayback(row);
@@ -676,16 +698,20 @@
     }
     var statuses = document.createElement('div');
     statuses.className = 'search-source-statuses';
+    var focusRestored = false;
     visiblePages.forEach(function (p) {
       var item = document.createElement('div');
       item.className = 'search-source-status' + (p.error ? ' all-failed' : '');
+      item.dataset.source = p.source;
+      item.tabIndex = -1;
       item.appendChild(badge(p.source));
       var text = document.createElement('span');
       text.textContent = sourceLabel(p.source) + ' · ' + p.tracks.length + ' 首已加载'
         + (p.loading ? ' · 加载中…' : p.error ? ' · ' + p.error : !p.more ? ' · 暂无更多结果' : '')
         + (p.warning ? ' · ' + p.warning : '');
       item.appendChild(text);
-      if (p.error || p.more) {
+      if (p.failure) { item.dataset.errorCode = p.failure.code; item.dataset.requestId = p.failure.requestId; }
+      if ((p.error && (!p.failure || p.failure.retryable)) || (!p.error && p.more)) {
         var more = searchButton(p.error ? '重试' : '加载更多', function () { return loadSearchPage(session, p); });
         more.disabled = p.loading;
         more.dataset.searchKey = 'more:' + p.source;
@@ -703,22 +729,41 @@
       }
     }
     if (focusKey) body.querySelectorAll('[data-search-key]').forEach(function (el) {
-      if (el.dataset.searchKey === focusKey) el.focus({ preventScroll: true });
+      if (el.dataset.searchKey === focusKey) {
+        el.focus({ preventScroll: true });
+        focusRestored = true;
+      }
     });
+    if (!focusRestored && session.focusFallbackSource) {
+      var fallback = Array.from(statuses.children).find(function (item) {
+        return item.dataset.source === session.focusFallbackSource;
+      });
+      // Restore only when replacing the result tree dropped focus to body. A
+      // user who moved to the search input or another control owns that focus.
+      if (fallback && document.activeElement === document.body) {
+        fallback.focus({ preventScroll: true });
+      }
+      session.focusFallbackSource = null;
+    } else if (focusRestored && session.focusFallbackSource) {
+      var focusPage = pages.find(function (page) { return page.source === session.focusFallbackSource; });
+      if (focusPage && !focusPage.loading) session.focusFallbackSource = null;
+    }
   }
 
   async function loadSearchPage(session, page) {
     if (session !== searchSession || page.loading || (!page.more && !page.error)) return;
+    var focusKey = 'more:' + page.source;
+    session.focusFallbackSource = document.activeElement && document.activeElement.dataset
+      && document.activeElement.dataset.searchKey === focusKey ? page.source : null;
     page.loading = true;
     page.error = '';
-    page.controller = typeof AbortController === 'function' ? new AbortController() : null;
+    page.failure = null;
     renderOnline();
     try {
       var params = new URLSearchParams({ source: page.source, limit: String(PAGE_SIZE), offset: String(page.offset) });
       if (session.q) params.set('q', session.q);
       else if (session.cat) params.set('cat', session.cat);
-      var result = await T.get('/v1/online/search?' + params.toString(),
-        page.controller ? { signal: page.controller.signal } : {});
+      var result = await session.network.get('/v1/online/search?' + params.toString());
       if (session !== searchSession) return;
       var raw = result.tracks || [];
       var seen = new Set(page.tracks.map(virtualId));
@@ -749,12 +794,12 @@
       }
     } catch (err) {
       if (session !== searchSession) return;
-      page.error = H.errText('搜索失败', err);
+      page.failure = HertzSearch.failure(err);
+      page.error = page.failure.label;
       if (!session.aggregate && !session.silent) H.toast(page.error, 'error');
     } finally {
       if (session === searchSession) {
         page.loading = false;
-        page.controller = null;
         renderOnline();
       }
     }
@@ -789,29 +834,30 @@
       H.ui.onlineBody.innerHTML = '<div class="hint">聚合搜索需要输入关键词。</div>';
       return;
     }
+    var network = HertzSearch.create(T);
+    pendingSearchNetwork = network;
     if (source === 'all' && !onlineState.sources.length) {
       H.ui.onlineBody.innerHTML = '<div class="hint">正在读取音源…</div>';
       try {
-        var data = await T.get('/v1/online/sources');
+        var data = await network.get('/v1/online/sources', { admissionSource: 'source-catalog' });
         if (epoch !== searchEpoch) return;
         onlineState.sources = musicSources(data);
         if (!onlineState.sources.length) throw new Error('没有可用音源');
       } catch (err) {
         if (epoch !== searchEpoch) return;
+        network.cancel(); pendingSearchNetwork = null;
         renderOnline();
         var retry = searchButton('读取音源失败，点击重试', function () { search(opts); });
         H.ui.onlineBody.appendChild(retry);
         return;
       }
     }
+    if (epoch !== searchEpoch) { network.cancel(); pendingSearchNetwork = null; return; }
     var preferred = loggedSearchSources();
-    var ids = source === 'all' ? preferred.concat(onlineState.sources.map(function (s) { return s.id; }))
-      .filter(function (id, index, all) {
-        return all.indexOf(id) === index && onlineState.sources.some(function (s) { return s.id === id; });
-      }) : [source];
+    var ids = source === 'all' ? orderedSearchSources() : [source];
     var viewKey = JSON.stringify([query, source, query ? '' : onlineState.cat]);
     var view = searchViews.get(viewKey);
-    var session = { key: viewKey, rows: new Map(), q: query, cat: onlineState.cat, aggregate: source === 'all', preferredSources: preferred, filter: view ? view.filter : '', silent: opts.silent, pages: [] };
+    var session = { key: viewKey, network: network, rows: new Map(), q: query, cat: onlineState.cat, aggregate: source === 'all', preferredSources: preferred, filter: view ? view.filter : '', silent: opts.silent, pages: [] };
     session.pages = ids.map(function (id) {
       var cached = query && searchCache.get(JSON.stringify([query, id]));
       if (cached && Date.now() - cached.time >= CACHE_TTL) cached = null;
@@ -819,12 +865,13 @@
         more: cached ? cached.more : true, warning: cached ? cached.warning : '', error: '', loading: false, cached: !!cached };
     });
     searchSession = session;
+    pendingSearchNetwork = null;
     searchScroller().scrollTop = 0;
     renderOnline();
     if (view && session.pages.every(function (p) { return p.cached; })) searchScroller().scrollTop = view.scroll;
-    await Promise.all(session.pages.map(function (p) {
-      return p.cached ? Promise.resolve() : loadSearchPage(session, p);
-    }));
+    // The shared coordinator also covers previews, space and explicit page retries.
+    await Promise.all(session.pages.filter(function (p) { return !p.cached; })
+      .map(function (p) { return loadSearchPage(session, p); }));
   }
 
   function searchOnline(opts) { return search(opts); }
@@ -878,6 +925,7 @@
     onlineState.kind = kind;
     prepareSearchSource(kind);
     renderKind();
+    if (window.TopSearch && TopSearch.state.kind !== kind) TopSearch.scopeChanged();
     // 切类型即作废旧结果：有词时立刻按新类型搜索，没词时给对应引导。
     onlineState.tracks = [];
     onlineState.total = 0;
@@ -892,6 +940,14 @@
     hint.className = 'hint';
     hint.textContent = text;
     body.appendChild(hint);
+  }
+
+  function renderSearchFailure(prefix, err, retry) {
+    var failure = HertzSearch.failure(err);
+    renderPlaylistHint(H.errText(prefix + ' · ' + failure.label, err));
+    H.ui.onlineBody.dataset.errorCode = failure.code;
+    H.ui.onlineBody.dataset.requestId = failure.requestId;
+    if (failure.retryable) H.ui.onlineBody.appendChild(searchButton('重试', retry));
   }
 
   async function searchPlaylists(opts) {
@@ -916,12 +972,13 @@
     if (H.ui.onlineCount) H.ui.onlineCount.textContent = '搜索中…';
     var params = new URLSearchParams({ source: source, q: query, limit: String(PAGE_SIZE) });
     try {
-      var result = await T.get('/v1/online/playlists/search?' + params.toString());
+      entityNetwork = HertzSearch.create(T);
+      var result = await entityNetwork.get('/v1/online/playlists/search?' + params.toString());
       if (epoch !== searchEpoch) return;
       renderPlaylists(result, query);
     } catch (err) {
       if (epoch !== searchEpoch) return;
-      renderPlaylistHint(H.errText('歌单搜索失败', err));
+      renderSearchFailure('歌单搜索失败', err, function () { search(opts); });
       if (!opts.silent) H.toast(H.errText('歌单搜索失败', err), 'error');
     }
   }
@@ -1085,12 +1142,13 @@
     if (H.ui.onlineCount) H.ui.onlineCount.textContent = '搜索中…';
     var params = new URLSearchParams({ source: source, q: query, limit: String(PAGE_SIZE) });
     try {
-      var result = await T.get(endpoint + '?' + params.toString());
+      entityNetwork = HertzSearch.create(T);
+      var result = await entityNetwork.get(endpoint + '?' + params.toString());
       if (epoch !== searchEpoch) return;
       renderEntities(kind, result, query);
     } catch (err) {
       if (epoch !== searchEpoch) return;
-      renderPlaylistHint(H.errText(label + '搜索失败', err));
+      renderSearchFailure(label + '搜索失败', err, function () { search(opts); });
       if (!opts.silent) H.toast(H.errText(label + '搜索失败', err), 'error');
     }
   }
@@ -1209,6 +1267,7 @@
       ticket = T.playbackIntent ? T.playbackIntent() : null;
       refreshPlaybackRows();
       if (window.Stage) window.Stage.setLyrics(null);
+      if (window.HertzEmotionAuto) window.HertzEmotionAuto.onLyricsChanged();
       res = await request;
       if (!current()) return;
     } catch (err) {
@@ -1249,6 +1308,7 @@
       ticket = T.playbackIntent ? T.playbackIntent() : null;
       refreshPlaybackRows();
       if (window.Stage) window.Stage.setLyrics(null);
+      if (window.HertzEmotionAuto) window.HertzEmotionAuto.onLyricsChanged();
       res = await request;
       if (!current()) return;
     } catch (err) {
@@ -1363,6 +1423,7 @@
       // 与本地歌词同一出口：全局偏移 / 逐行过滤 / 片头策略在这里统一生效。
       var staged = window.HertzLyrics ? window.HertzLyrics.stageDoc(doc) : doc;
       window.Stage.setLyrics(staged && staged.lines && staged.lines.length ? staged : null);
+      if (window.HertzEmotionAuto) window.HertzEmotionAuto.onLyricsChanged();
     }
   }
 
@@ -1740,6 +1801,7 @@
         // 换源后重算「单曲 / 歌单」切换是否可见（只有带 playlist_search
         // 能力的音源才显示歌单）。
         renderKind();
+        if (window.TopSearch) TopSearch.scopeChanged();
         // 按新音源重建档位选项（All 无档位描述，选择器自动隐藏）。
         renderQualityOptions();
         // All 是音源维度的聚合项：没有分类，也不自动拉取（需要关键词）。
@@ -1966,7 +2028,7 @@
   async function refreshSources() {
     searchCache.clear();
     searchViews.clear();
-    if (searchSession) { cancelSearch(); onlineState.tracks = []; renderOnline(); }
+    if (searchSession || pendingSearchNetwork) { cancelSearch(); onlineState.tracks = []; renderOnline(); }
     var data = await T.get('/v1/online/sources').catch(function () { return null; });
     onlineState.sources = musicSources(data);
     refreshCookieUi();
@@ -1992,7 +2054,7 @@
       });
       H.ui.onlineSource.replaceChildren.apply(H.ui.onlineSource, opts);
       var hasKeep = onlineState.sources.some(function (s) { return s.id === keep; })
-        || keep === 'all';
+        || (keep === 'all' && onlineState.sources.length >= 2);
       H.ui.onlineSource.value = hasKeep ? keep : onlineState.sources[0].id;
       onlineState.source = H.ui.onlineSource.value;
     }
@@ -2092,12 +2154,14 @@
       // 新记录能置顶（下面的早退只针对搜索预取）。
       loadHistory();
       if (onlineState.loading) return;
-      if (onlineState.tracks.length) return;
+      if (onlineState.tracks.length && searchSession) return;
       if (!onlineState.q.trim() && !onlineState.cat) return;
       search({ silent: true });
     },
     search: search,
+    cancelSearch: cancelSearch,
     searchSource: searchSource,
+    searchSources: orderedSearchSources,
     whenSearchReady: whenSearchReady,
     // 搜索类型切换（song | playlist | artist | album）。顶栏搜索框与在线页
     // 的类型 chips 共用这一份 kind；切到没有能力位的类型会被 renderKind

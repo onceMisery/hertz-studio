@@ -1,0 +1,116 @@
+{
+  "reportVersion": 1,
+  "runId": "083d4d91-37d3-499c-80ef-0c2e653a3000",
+  "provider": "offline-rules",
+  "split": "development",
+  "corpusVersion": "v3",
+  "model": "offline-rules",
+  "round": "baseline",
+  "protocolFingerprint": "c6ef1080d73f180dd9e5925f9b422828260bcc9a7ce3a0d11de02f1c084f79ab",
+  "materializerFingerprint": "c6ef1080d73f180dd9e5925f9b422828260bcc9a7ce3a0d11de02f1c084f79ab",
+  "evaluatorFingerprint": "762fd2dac9d1d4288fc7b549f0fe93cd102d4abd4a020f27a7afb208eee9bf14",
+  "binarySha256": null,
+  "corpusSha256": "25c1653899043b36b644172712a53fca5d7552cc8ae447e74c426a48f91bf3ed",
+  "sampleComplete": true,
+  "metrics": {
+    "samples": 120,
+    "expectedSamples": 120,
+    "autoMatched": 101,
+    "supportedSamples": 70,
+    "supportedSchemaRate": 0.7428571428571429,
+    "protocolStructureRate": 0.9833333333333333,
+    "falseAcceptances": 0,
+    "falseRejections": 18,
+    "criticalFailures": 0,
+    "truncated": 0,
+    "truncationRate": 0,
+    "humanReviewedSupported": 0,
+    "humanSemanticPassRate": null,
+    "usageKnown": 0,
+    "usageMissing": 120,
+    "outputBoundExceeded": 0,
+    "localPriceMicroUsd": "0",
+    "externalInvoiceVerified": false,
+    "p50Ms": 0.8646999999999991,
+    "p95Ms": 1.3783999999999992,
+    "outcomes": {
+      "candidate": 52,
+      "refused": 66,
+      "baseline_no_match": 2
+    },
+    "categories": {
+      "common": {
+        "samples": 20,
+        "autoMatched": 20,
+        "criticalFailures": 0
+      },
+      "open_vocabulary": {
+        "samples": 10,
+        "autoMatched": 7,
+        "criticalFailures": 0
+      },
+      "negation": {
+        "samples": 20,
+        "autoMatched": 20,
+        "criticalFailures": 0
+      },
+      "conflict": {
+        "samples": 10,
+        "autoMatched": 7,
+        "criticalFailures": 0
+      },
+      "boundary": {
+        "samples": 10,
+        "autoMatched": 5,
+        "criticalFailures": 0
+      },
+      "cross_scene": {
+        "samples": 10,
+        "autoMatched": 10,
+        "criticalFailures": 0
+      },
+      "unknown": {
+        "samples": 10,
+        "autoMatched": 9,
+        "criticalFailures": 0
+      },
+      "injection": {
+        "samples": 10,
+        "autoMatched": 10,
+        "criticalFailures": 0
+      },
+      "long": {
+        "samples": 10,
+        "autoMatched": 3,
+        "criticalFailures": 0
+      },
+      "temporal": {
+        "samples": 5,
+        "autoMatched": 5,
+        "criticalFailures": 0
+      },
+      "relative": {
+        "samples": 5,
+        "autoMatched": 5,
+        "criticalFailures": 0
+      }
+    }
+  },
+  "candidateThresholds": {
+    "supportedSchemaRate": 0.98,
+    "protocolStructureRate": 0.98,
+    "humanSemanticPassRate": 0.9,
+    "maxTruncationRate": 0.01,
+    "p95MsBelow": 30000
+  },
+  "candidateChecks": "failed",
+  "reasons": [
+    "supported_schema_below_candidate_threshold"
+  ],
+  "releaseEligible": false,
+  "outstanding": [
+    "thresholds_not_frozen_for_a_verified_model",
+    "two_model_rounds_and_reserved_split_required",
+    "actual_model_digest_runtime_and_hardware_acceptance_required"
+  ]
+}

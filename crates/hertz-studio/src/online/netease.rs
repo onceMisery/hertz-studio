@@ -95,11 +95,11 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         .cloned()
         .unwrap_or_default();
 
-    let total = body
+    let reported_total = body
         .get("result")
         .and_then(|r| r.get("songCount"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(songs.len() as u64) as usize;
+        .and_then(|v| v.as_u64());
+    let total = reported_total.unwrap_or(songs.len() as u64) as usize;
 
     let mut tracks = songs.iter().map(netease_track).collect::<Vec<_>>();
     fill_album_covers(ctx, &mut tracks).await;
@@ -108,6 +108,7 @@ pub async fn search(ctx: &Ctx, q: &SearchQuery) -> ApiResult<SearchPage> {
         source: "netease".into(),
         keyword: term,
         total,
+        total_is_exact: reported_total.is_some(),
         tracks,
         warning: None,
         pagination: None,
@@ -144,10 +145,7 @@ async fn search_get(
         return Err(ApiError::internal(format!("网易云返回 {}", resp.status())));
     }
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| ApiError::internal(format!("网易云响应解析失败: {e}")))?;
+    let body = super::http::read_json(resp).await?;
 
     // 上游在触发风控时会返回 code != 200，或者干脆返回 HTML 登录页。
     let code = body.get("code").and_then(|v| v.as_i64()).unwrap_or(200);
@@ -589,10 +587,10 @@ async fn fetch_detail_covers(
                 continue;
             }
         };
-        let body: serde_json::Value = match resp.json().await {
+        let body = match super::http::read_json(resp).await {
             Ok(b) => b,
             Err(e) => {
-                tracing::debug!("封面补全：第 {attempt} 次解析歌曲详情失败: {e}");
+                tracing::debug!(attempt, code = e.code, "封面补全：歌曲详情读取失败");
                 continue;
             }
         };
@@ -768,10 +766,7 @@ async fn api_rung(id: &str, quality: u32, cookie: Option<&str>) -> ApiResult<Opt
         .await
         .map_err(super::http::send_error)?;
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| ApiError::internal(format!("试听响应解析失败: {e}")))?;
+    let body = super::http::read_json(resp).await?;
 
     invalidate_visitor(&body).await;
     if body.get("code").is_some() {
@@ -901,10 +896,7 @@ pub async fn detail(ctx: &Ctx, id: &str) -> ApiResult<OnlineDetail> {
             resp.status()
         )));
     }
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| ApiError::internal(format!("解析歌曲详情失败: {e}")))?;
+    let body = super::http::read_json(resp).await?;
 
     let song = body
         .get("songs")
@@ -971,10 +963,7 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
             resp.status()
         )));
     }
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| ApiError::internal(format!("解析歌词失败: {e}")))?;
+    let body = super::http::read_json(resp).await?;
 
     // 翻译歌词（tlyric，tv=-1 已随请求带回）：不混进 LRC 文本（那会把同刻
     // 译文行读进时间轴、毁掉逐字扫色的词级结构），走 LyricDocument.translation
@@ -998,7 +987,6 @@ pub async fn lyric(ctx: &Ctx, id: &str) -> ApiResult<vmusic_core::LyricDocument>
     {
         doc.translation = vmusic_lyrics::align_translation(&doc, tlyric);
     }
-    vmusic_lyrics::apply_offset(&mut doc);
     Ok(doc)
 }
 

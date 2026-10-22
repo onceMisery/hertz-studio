@@ -9,6 +9,176 @@ const base = path.resolve(__dirname, '..'), stage = path.join(base, 'tools/space
 const read = relative => fs.readFileSync(path.join(base, relative), 'utf8');
 const load = relative => import(pathToFileURL(path.join(stage, relative)).href);
 
+async function reactorArtworkContract(THREE, registry, createScope, PROFILES) {
+  const documentBefore = global.document, imageBefore = global.Image, requested = [], delayed = [];
+  const pixels = color => new Uint8ClampedArray(Array.from({ length: 24 * 24 }, () => [...color, 255]).flat());
+  global.document = { createElement: () => ({ getContext: () => {
+    let image; return { drawImage(img) { image = img; }, getImageData() { return { data: pixels(image.src.includes('red') ? [220, 30, 40] : [20, 70, 230]) }; } };
+  } }) };
+  global.Image = class {
+    set src(value) { this.url = value; requested.push(value); queueMicrotask(() => { if (value.includes('pending')) delayed.push(this); else if (value.includes('missing')) this.onerror?.(); else this.onload?.(); }); }
+    get src() { return this.url; }
+  };
+  const scope = createScope(), scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera();
+  const instance = registry.get('reactor').create({ THREE, scene, camera, scope, signal: scope.signal, params: registry.normalizeState('reactor').params, quality: PROFILES.low, services: {} });
+  let now = 0;
+  const step = (id, cover) => instance.update({ now: now += 100, sceneTime: 1, playing: false, track: { id, cover } });
+  const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+  try {
+    step('art-failure', 'cover:missing'); await settle();
+    step('art-failure', 'cover:red'); await settle(); step('art-failure', 'cover:red');
+    assert.ok(requested.includes('cover:red'), 'a corrected artwork URL is sampled after an earlier failure');
+    assert.ok(instance.stats().primary.recipe.hue < 10 || instance.stats().primary.recipe.hue > 350, 'corrected red artwork replaces the fallback hue');
+    step('art-race', 'cover:pending-red'); await settle();
+    step('art-race', 'cover:blue'); await settle();
+    delayed.forEach(image => image.onload?.()); await settle(); step('art-race', 'cover:blue');
+    assert.ok(Math.abs(instance.stats().primary.recipe.hue - 226) < 12, 'late old artwork cannot replace the latest blue URL');
+  } finally { instance.dispose(); scope.trackTree(scene); scope.dispose(); global.document = documentBefore; global.Image = imageBefore; }
+}
+
+async function reactorPrefetchContract(THREE, registry, createScope, PROFILES) {
+  const documentBefore = global.document, imageBefore = global.Image, requested = [];
+  global.document = { createElement: () => ({ getContext: () => ({
+    drawImage() {}, getImageData() { return { data: new Uint8ClampedArray(24 * 24 * 4).fill(120) }; }
+  }) }) };
+  global.Image = class {
+    set src(value) { this.url = value; requested.push(value); queueMicrotask(() => this.onload?.()); }
+    get src() { return this.url; }
+  };
+  const queue = Array.from({ length: 24 }, (_, i) => ({ id: 'prefetch-' + i, cover: 'cover:' + i }));
+  const scope = createScope(), scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera();
+  const instance = registry.get('reactor').create({ THREE, scene, camera, scope, signal: scope.signal,
+    params: registry.normalizeState('reactor').params, quality: PROFILES.low, services: { queue: () => queue } });
+  let now = 0;
+  const step = async (extra = {}) => {
+    instance.update({ now: now += 100, sceneTime: 1, playing: false, track: { id: queue[0].id, cover: queue[0].cover }, ...extra });
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+  };
+  try {
+    await step();
+    assert.ok(requested.length <= 4, 'first frame samples only the active and next covers: ' + requested.length);
+    assert.ok(requested.includes(queue[0].cover), 'current cover is sampled');
+    assert.ok(requested.includes(queue[1].cover), 'next cover is sampled ahead of time');
+    assert.ok(!requested.includes(queue[12].cover), 'distant queue covers keep their hash hue');
+    await step({ preview: { id: queue[12].id, cover: queue[12].cover } });
+    assert.ok(requested.includes(queue[12].cover), 'preview cover is sampled on demand');
+    assert.ok(!requested.includes(queue[13].cover), 'preview does not fan out to its neighbours');
+  } finally { instance.dispose(); scope.trackTree(scene); scope.dispose(); global.document = documentBefore; global.Image = imageBefore; }
+}
+
+async function reactorContract(THREE, registry, createScope, PROFILES) {
+  const { recipeFor, dominantHue, SHELLS, SHOTS } = await load('src/scenes/reactor.js');
+  const a = recipeFor('online:netease:42'), b = recipeFor('online:netease:42');
+  assert.deepEqual(a, b, 'same track always binds the same recipe');
+  assert.ok(a.hue >= 0 && a.hue < 1 && a.shell < SHELLS.length && a.shot < SHOTS.length, 'recipe stays inside the catalog');
+  const withCover = recipeFor('online:netease:42', .5);
+  assert.equal(withCover.hue, .5, 'cover hue overrides the hash hue');
+  assert.equal(withCover.shell, a.shell, 'cover hue never reshuffles shell'); assert.equal(withCover.shot, a.shot, 'cover hue never reshuffles shot');
+  const kinds = new Set(Array.from({ length: 64 }, (_, i) => recipeFor('track-' + i).shell + ':' + recipeFor('track-' + i).shot));
+  assert.ok(kinds.size >= 10, 'hash spreads tracks across shell/shot combinations');
+  const pixels = (fn) => { const data = new Uint8ClampedArray(24 * 24 * 4); for (let i = 0; i < 24 * 24; i++) data.set([...fn(i), 255], i * 4); return data; };
+  const blue = dominantHue(pixels(i => i % 3 ? [128, 128, 128] : [30, 70, 230]));
+  assert.ok(Math.abs(blue - 228 / 360) < .03, 'saturated blue wins over the grey background: ' + blue);
+  assert.equal(dominantHue(pixels(() => [140, 140, 140])), null, 'grey artwork defers to the id hash');
+  const red = dominantHue(pixels(() => [220, 30, 40]));
+  assert.ok(Math.min(red, 1 - red) < .02, 'hue wraps around red: ' + red);
+
+  const scope = createScope(), scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(48, 16 / 9, .05, 900);
+  const [first, second, third] = ['t1', 't4', 't6'], ra = recipeFor(first), rb = recipeFor(second);
+  assert.ok(ra.shell !== rb.shell && ra.shot !== rb.shot && recipeFor(third).shell !== rb.shell, 'fixture tracks exercise both shell and shot changes');
+  const queue = [first, second, third].map(id => ({ id, title: id }));
+  const reports = [], previews = [], plays = [];
+  const services = { queue: () => queue, onRecipe: info => reports.push(info), previewTrack: id => previews.push(id), playTrack: id => plays.push(id) };
+  const params = registry.normalizeState('reactor').params;
+  const instance = registry.get('reactor').create({ THREE, scene, camera, scope, signal: scope.signal, params, quality: PROFILES.medium, services });
+  instance.resize(1280, 720);
+  instance.setRig({ yaw: 0, pitch: .06, dist: 15, fov: 48, tx: 0, ty: 0, tz: 0, roll: 0 });
+  let now = 0;
+  const step = (extra = {}, frames = 1) => { for (let i = 0; i < frames; i++) { now += 16; instance.update({ now, time: now / 1000, sceneTime: now / 1000, dt: .016, playing: true, track: { id: first }, ...extra }); } };
+  step();
+  const stats = () => instance.stats().primary;
+  assert.equal(stats().recipe.id, first); assert.equal(stats().nodes, 3, 'every queue entry becomes a satellite node');
+  step({}, 120); assert.equal(stats().morph, 1, 'shell morph settles');
+  step({}, 480);
+  const settled = camera.position.clone();
+  step({ preview: { id: second } });
+  assert.equal(stats().recipe.id, second, 'hovering the queue previews that track recipe');
+  assert.equal(reports.at(-1).preview, true, 'host learns the preview recipe');
+  step({ preview: { id: second } }, 20); const half = stats().morph; assert.ok(half > 0 && half < 1, 'preview morph is gradual');
+  let shellUniforms; scene.traverse(o => { if (o.material?.uniforms?.uMorph) shellUniforms = o.material.uniforms; });
+  const weights = () => {
+    if (shellUniforms.uShellWeights) return Array.from(shellUniforms.uShellWeights.value);
+    const t = Math.min(1, shellUniforms.uMorph.value * 1.35), mix = t * t * (3 - 2 * t), values = [0, 0, 0, 0];
+    values[shellUniforms.uFrom.value] += 1 - mix; values[shellUniforms.uTo.value] += mix; return values;
+  };
+  const blended = weights();
+  step({ preview: { id: third } });
+  const retargeted = weights();
+  assert.ok(retargeted.every((v, i) => Math.abs(v - blended[i]) < .002), 'A to B to C preserves the in-flight shell blend');
+  step({}, 1);
+  const reversed = weights();
+  assert.ok(reversed.every((v, i) => Math.abs(v - retargeted[i]) < .002), 'leaving an unfinished preview preserves its visual shape');
+  step({}, 400);
+  const beforePreview = camera.position.clone();
+  step({ preview: { id: second } }, 6);
+  assert.ok(camera.position.distanceTo(beforePreview) < .01, 'camera preset waits for the color/shell beat');
+  step({ preview: { id: second } }, 24);
+  assert.ok(camera.position.distanceTo(beforePreview) > .05, 'camera preset follows after the beat');
+  step({ preview: { id: second } }, 300);
+  assert.ok(camera.position.distanceTo(settled) > .5, 'preview moves to that track camera preset');
+  step({}, 400);
+  assert.ok(camera.position.distanceTo(settled) < .01, 'camera preset returns after preview');
+  const satellites = []; scene.traverse(o => { if (o.isPoints && o.geometry.attributes.aSize) satellites.push(o); });
+  const aim = new THREE.Vector3().fromArray(satellites[0].geometry.attributes.position.array, 3).applyMatrix4(satellites[0].matrixWorld).project(camera);
+  step({ pointer: { active: true, x: aim.x, y: aim.y } });
+  assert.equal(previews.at(-1), second, 'hovering a satellite node previews its track');
+  const currentWorld = new THREE.Vector3().fromArray(satellites[0].geometry.attributes.position.array, 0).applyMatrix4(satellites[0].matrixWorld);
+  const currentView = currentWorld.clone().applyMatrix4(camera.matrixWorldInverse);
+  const currentAim = currentWorld.clone().project(camera);
+  const currentRadius = Math.min(96, satellites[0].geometry.attributes.aSize.array[0] * 720
+    * camera.projectionMatrix.elements[5] * .5 / -currentView.z) / 2;
+  assert.ok(currentRadius > 20, 'current node draws wider than the old 18px hit radius: ' + currentRadius);
+  const edge = { x: currentAim.x + currentRadius * .9 / (1280 / 2), y: currentAim.y };
+  step({ pointer: { active: true, x: edge.x, y: edge.y } });
+  assert.equal(previews.at(-1), first, 'hovering the visual edge of the current node still picks it');
+  step({ pointer: { active: true, x: aim.x, y: aim.y, click: { x: aim.x, y: aim.y, serial: 1 } } });
+  assert.deepEqual(plays, [second], 'clicking a satellite node plays its track');
+  let cloudUniforms = null; scene.traverse(o => { if (o.material?.uniforms?.uMorph) cloudUniforms = o.material.uniforms; });
+  assert.ok(cloudUniforms.uBurst.value > .5, 'click releases a particle burst');
+  queue.splice(1, 2, { id: third }, { id: second });
+  const rendered = new THREE.Vector3().fromArray(satellites[0].geometry.attributes.position.array, 3).applyMatrix4(satellites[0].matrixWorld).project(camera);
+  step({ pointer: { click: { x: rendered.x, y: rendered.y, serial: 2 } } });
+  assert.deepEqual(plays, [second, second], 'queue reorder cannot relabel the node that was displayed at click time');
+  step({ reduced: true });
+  const quietNode = new THREE.Vector3().fromArray(satellites[0].geometry.attributes.position.array, 6).applyMatrix4(satellites[0].matrixWorld).project(camera);
+  step({ reduced: true, pointer: { click: { x: quietNode.x, y: quietNode.y, serial: 3 } } });
+  assert.deepEqual(plays, [second, second, second], 'reduced motion preserves node playback actions');
+  step({ pointer: { active: true, x: .95, y: -.9, down: true } }, 60);
+  assert.ok(cloudUniforms.uEnergy.value > .95, 'holding charges the field');
+  step({ track: { id: third } }); assert.equal(stats().recipe.id, third, 'track change re-targets the recipe');
+  step({ track: { id: third }, reduced: true }); assert.equal(stats().morph, 1, 'reduced motion lands on the target recipe');
+  instance.setParams({ ...params, trackRecipes: false }); step({ track: { id: third } });
+  assert.equal(stats().recipe.id, '', 'turning recipes off returns to the neutral reactor');
+  instance.setParams(params);
+  step({ track: { id: first }, reduced: true });
+  const fixedAccent = cloudUniforms.uColorC.value.getHexString(), firstPrimary = cloudUniforms.uColorA.value.getHexString();
+  step({ track: { id: third }, reduced: true });
+  assert.notEqual(cloudUniforms.uColorA.value.getHexString(), firstPrimary, 'primary hue follows the track');
+  assert.equal(cloudUniforms.uColorC.value.getHexString(), fixedAccent, 'accent hue stays fixed across tracks');
+  step({ playing: false, sceneTime: 1 }, 500);
+  const fixedAim = new THREE.Vector3().fromArray(satellites[0].geometry.attributes.position.array, 3).applyMatrix4(satellites[0].matrixWorld).project(camera);
+  let hovered = null; const hoverChanges = [];
+  services.previewTrack = id => { hovered = id; hoverChanges.push(id); };
+  for (let i = 0; i < 600; i++) step({ playing: false, sceneTime: 1, preview: hovered ? { id: hovered } : null, pointer: { active: true, x: fixedAim.x, y: fixedAim.y } });
+  assert.ok(hoverChanges.length <= 2 && hovered, 'stationary node preview does not oscillate as its camera preset moves: ' + hoverChanges.length);
+  const freePose = { position: [2, 3, 14], yaw: .3, pitch: .1, roll: .02, fov: 55 };
+  instance.setRig(freePose); step({ preview: { id: second } }, 80);
+  assert.deepEqual(camera.position.toArray(), freePose.position, 'recipe previews cannot move a free camera');
+  assert.equal(camera.fov, freePose.fov, 'recipe previews cannot change the free camera FOV');
+  instance.dispose(); scope.trackTree(scene); scope.dispose();
+  assert.equal(scene.children.length, 0, 'reactor cleanup'); assert.equal(plays.length, 3, 'only node clicks switched tracks');
+}
+
 (async () => {
   const THREE = await load('node_modules/three/build/three.module.js');
   const { createRegistry } = await load('src/registry.js'), { createScope } = await load('src/scope.js');
@@ -128,6 +298,9 @@ const load = relative => import(pathToFileURL(path.join(stage, relative)).href);
     }
   }
   const scope = createScope(), ctx = { THREE, scope, signal: scope.signal, params: {}, camera: new THREE.PerspectiveCamera(), quality: PROFILES.low, services: {} };
+  await reactorContract(THREE, registry, createScope, PROFILES);
+  await reactorArtworkContract(THREE, registry, createScope, PROFILES);
+  await reactorPrefetchContract(THREE, registry, createScope, PROFILES);
   const post = createPostChain(ctx); post.resize(800, 600);
   const calls = [], fakeRenderer = { autoClear: false, getRenderTarget: () => null, setRenderTarget: target => calls.push(target), render: () => calls.push('render') };
   post.render(fakeRenderer, new THREE.Scene(), ctx.camera); assert.equal(post.stats().bytes, 0, 'no post target while disabled');

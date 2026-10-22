@@ -1,0 +1,582 @@
+{
+  "schemaVersion": 1,
+  "verifierHash": "a3b2b49dc21946171f9090832772fe7fbf6025dfe27494333fc80f9f792f367d",
+  "releaseEligible": false,
+  "results": [
+    {
+      "edition": "standard",
+      "rawHash": "bf14f9c2b7e6852764adfadb83732ad69c85ba5622b5feff74bdbad4ae7e22fe",
+      "storedHash": "18373eeb875a93d609c39f42cf42270866d565a34a1b99d2e445d8d90c32e96f",
+      "binaryHash": "88fe87d210160393a705e6e29693ab1b56cd5035f80b74e0d3d588cdc19d9d72",
+      "candidate": {
+        "binaryHash": "88fe87d210160393a705e6e29693ab1b56cd5035f80b74e0d3d588cdc19d9d72",
+        "buildProfile": "release",
+        "gitHead": "401a90376c0fa8391b5d60234103eeb381ef2c2c",
+        "dirty": true
+      },
+      "sourceHashes": {
+        "Cargo.toml": "c91638073f1c0d9bad0fdf6edcbea6b421d4a152370336704fd5e544544e0663",
+        "Cargo.lock": "aee27bb3a1e90730ddbb21da42b4cbfed6abd281b49e42500e82cec5f670cbc1",
+        "crates/vmusic-store/src/lib.rs": "c64c5bf0f221272cfb27fad3d1591a744cc43e6127ea4b4d2dee04f9f0e4d953",
+        "crates/hertz-studio/src/routes.rs": "635bd82109471d7b267bdbafb1781d587d50ea206eba885fbaf9db30b92aaff8",
+        "crates/hertz-studio/src/online/search_gate.rs": "4e74eac052eb3e72747a38a8d12acdae1bdc42997499155531ecd6a8a60143d4",
+        "plugin/ui/search-session.js": "dbd78c2f536d6b32c9c75fe571fea6d6997e8f4cd3ce0010a3b19661aba9cfd3",
+        "plugin/ui/online.js": "1a352102e680bdc3147d2be16d245042ab7a9695043c0dc5cfc57b82d9118ff1",
+        "scripts/ui-browser-fixture.js": "868221d3080a761906451f8f692c2502415d5ec27a5d39a4bf0950f8e483c108",
+        "scripts/benchmark-search.js": "a225cb307aa094d79a6e61e4316c380d09433d94d66707b9594c7f2fbd0f4a48",
+        "scripts/sample-process-memory.ps1": "3f38b6682240093a670b54b349d79913d573a2a88d1f69305f65879c26afd777",
+        "evals/search/v1/corpus.py": "2b588b3d6139f742dbc06ff991eca15862ffc314a27f50a8aeb23633a18ac356"
+      },
+      "screenshotHash": "03b3833f9805e96a6a2cd4f938f3446bc65fd8ab018337eda0236c76568187da",
+      "environment": {
+        "os": "win32",
+        "release": "10.0.26200",
+        "arch": "x64",
+        "cpu": "13th Gen Intel(R) Core(TM) i7-13620H",
+        "logicalCpus": 16,
+        "totalMemoryBytes": 34049220608,
+        "node": "v22.14.0",
+        "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8"
+      },
+      "startedAt": "2026-10-18T04:55:50.381Z",
+      "completedAt": "2026-10-18T05:02:36.517Z",
+      "localWorstP95Ms": 124.17719999999827,
+      "concurrent": {
+        "count": 168,
+        "p50Ms": 117.3205999999991,
+        "p95Ms": 159.1903999999995,
+        "maxMs": 166.01469999999972
+      },
+      "firstSource": {
+        "count": 30,
+        "p50Ms": 253.5,
+        "p95Ms": 274.59999990463257,
+        "maxMs": 335.7000000476837
+      },
+      "sustained": {
+        "count": 11206,
+        "p50Ms": 75.37789999999222,
+        "p95Ms": 256.428899999999,
+        "maxMs": 504.79100000002654,
+        "actualSeconds": 300.20758720000003,
+        "perCase": {
+          "ascii-rare": {
+            "count": 800,
+            "p50Ms": 5.296399999991991,
+            "p95Ms": 14.701999999990221,
+            "maxMs": 31.76909999997588
+          },
+          "chinese-indexed": {
+            "count": 801,
+            "p50Ms": 8.459699999992154,
+            "p95Ms": 24.833299999998417,
+            "maxMs": 49.412799999990966
+          },
+          "chinese-broad": {
+            "count": 802,
+            "p50Ms": 116.05980000001728,
+            "p95Ms": 369.7289999999921,
+            "maxMs": 490.6138000000501
+          },
+          "short-chinese": {
+            "count": 803,
+            "p50Ms": 109.36549999999988,
+            "p95Ms": 318.46019999997225,
+            "maxMs": 422.023199999996
+          },
+          "wildcard": {
+            "count": 803,
+            "p50Ms": 111.3173999999999,
+            "p95Ms": 330.4330000000191,
+            "maxMs": 461.7926999999909
+          },
+          "broad-ascii": {
+            "count": 801,
+            "p50Ms": 124.19109999999637,
+            "p95Ms": 374.6796000000322,
+            "maxMs": 504.79100000002654
+          },
+          "no-match": {
+            "count": 800,
+            "p50Ms": 1.5625,
+            "p95Ms": 3.4628999999840744,
+            "maxMs": 7.332800000032876
+          },
+          "edited-title": {
+            "count": 800,
+            "p50Ms": 12.831799999985378,
+            "p95Ms": 49.96609999996144,
+            "maxMs": 106.1763000000501
+          },
+          "spaced-pattern": {
+            "count": 800,
+            "p50Ms": 6.6706000000122,
+            "p95Ms": 20.676600000006147,
+            "maxMs": 36.17469999997411
+          },
+          "all-wildcard": {
+            "count": 800,
+            "p50Ms": 94.54420000000391,
+            "p95Ms": 285.64399999997113,
+            "maxMs": 411.31670000002487
+          },
+          "trimmed-artist": {
+            "count": 799,
+            "p50Ms": 16.254799999995157,
+            "p95Ms": 59.44409999996424,
+            "maxMs": 100.89980000001378
+          },
+          "artist-filter": {
+            "count": 799,
+            "p50Ms": 92.33479999995325,
+            "p95Ms": 270.1999000000069,
+            "maxMs": 380.62630000000354
+          },
+          "album-filter": {
+            "count": 799,
+            "p50Ms": 92.81780000000435,
+            "p95Ms": 271.65580000000773,
+            "maxMs": 357.40950000000885
+          },
+          "browse-added": {
+            "count": 799,
+            "p50Ms": 111.16429999998945,
+            "p95Ms": 333.3159000000451,
+            "maxMs": 435.6771000000299
+          }
+        }
+      },
+      "processMemory": {
+        "sampleCount": 777,
+        "maxSampleGapMs": 953.1886999999988,
+        "phases": {
+          "startup": {
+            "count": 14,
+            "spanMs": 6805.9117,
+            "workingSetBytesMedian": 29847552,
+            "workingSetBytesMax": 40005632,
+            "privateBytesMedian": 5992448,
+            "privateBytesMax": 16392192,
+            "handlesMedian": 194,
+            "handlesMax": 196,
+            "threadsMedian": 26,
+            "threadsMax": 26
+          },
+          "baseline-idle": {
+            "count": 19,
+            "spanMs": 9255.994,
+            "workingSetBytesMedian": 39829504,
+            "workingSetBytesMax": 39829504,
+            "privateBytesMedian": 16343040,
+            "privateBytesMax": 16392192,
+            "handlesMedian": 194,
+            "handlesMax": 196,
+            "threadsMedian": 25,
+            "threadsMax": 26
+          },
+          "local-sequential": {
+            "count": 50,
+            "spanMs": 25223.3483,
+            "workingSetBytesMedian": 40243200,
+            "workingSetBytesMax": 41189376,
+            "privateBytesMedian": 16867328,
+            "privateBytesMax": 17526784,
+            "handlesMedian": 196,
+            "handlesMax": 196,
+            "threadsMedian": 25,
+            "threadsMax": 25
+          },
+          "local-concurrent": {
+            "count": 7,
+            "spanMs": 3093.2072000000044,
+            "workingSetBytesMedian": 53436416,
+            "workingSetBytesMax": 55394304,
+            "privateBytesMedian": 30134272,
+            "privateBytesMax": 32059392,
+            "handlesMedian": 203,
+            "handlesMax": 203,
+            "threadsMedian": 23,
+            "threadsMax": 23
+          },
+          "sustained-local": {
+            "count": 580,
+            "spanMs": 299274.6005,
+            "workingSetBytesMedian": 54730752,
+            "workingSetBytesMax": 61149184,
+            "privateBytesMedian": 32497664,
+            "privateBytesMax": 39444480,
+            "handlesMedian": 204,
+            "handlesMax": 204,
+            "threadsMedian": 23,
+            "threadsMax": 25
+          },
+          "after-load-idle": {
+            "count": 19,
+            "spanMs": 9425.867800000007,
+            "workingSetBytesMedian": 58720256,
+            "workingSetBytesMax": 58720256,
+            "privateBytesMedian": 36642816,
+            "privateBytesMax": 36642816,
+            "handlesMedian": 200,
+            "handlesMax": 204,
+            "threadsMedian": 25,
+            "threadsMax": 25
+          },
+          "browser-controlled-sources": {
+            "count": 88,
+            "spanMs": 47608.06900000002,
+            "workingSetBytesMedian": 64667648,
+            "workingSetBytesMax": 70606848,
+            "privateBytesMedian": 31756288,
+            "privateBytesMax": 37429248,
+            "handlesMedian": 208,
+            "handlesMax": 208,
+            "threadsMedian": 25,
+            "threadsMax": 25
+          }
+        },
+        "idleDeltaBytes": {
+          "workingSetBytes": 18890752,
+          "privateBytes": 20299776
+        }
+      },
+      "gates": {
+        "local": true,
+        "firstSource": true
+      },
+      "targetPassed": true,
+      "releaseEligible": false
+    },
+    {
+      "edition": "full",
+      "rawHash": "8427d88add949681ea83173f11a08c865dc6bbf3920377a715c3daca8e756b9e",
+      "storedHash": "eed566f51b7f3ebf07b037111577ea4897897223c669d27de9316114148d4cbd",
+      "binaryHash": "65103e440a2520317a393ee7c2ef00c97fc4b147aabba24d58ea2552251e16cb",
+      "candidate": {
+        "binaryHash": "65103e440a2520317a393ee7c2ef00c97fc4b147aabba24d58ea2552251e16cb",
+        "buildProfile": "release",
+        "gitHead": "401a90376c0fa8391b5d60234103eeb381ef2c2c",
+        "dirty": true
+      },
+      "sourceHashes": {
+        "Cargo.toml": "c91638073f1c0d9bad0fdf6edcbea6b421d4a152370336704fd5e544544e0663",
+        "Cargo.lock": "aee27bb3a1e90730ddbb21da42b4cbfed6abd281b49e42500e82cec5f670cbc1",
+        "crates/vmusic-store/src/lib.rs": "c64c5bf0f221272cfb27fad3d1591a744cc43e6127ea4b4d2dee04f9f0e4d953",
+        "crates/hertz-studio/src/routes.rs": "635bd82109471d7b267bdbafb1781d587d50ea206eba885fbaf9db30b92aaff8",
+        "crates/hertz-studio/src/online/search_gate.rs": "4e74eac052eb3e72747a38a8d12acdae1bdc42997499155531ecd6a8a60143d4",
+        "plugin/ui/search-session.js": "dbd78c2f536d6b32c9c75fe571fea6d6997e8f4cd3ce0010a3b19661aba9cfd3",
+        "plugin/ui/online.js": "1a352102e680bdc3147d2be16d245042ab7a9695043c0dc5cfc57b82d9118ff1",
+        "scripts/ui-browser-fixture.js": "868221d3080a761906451f8f692c2502415d5ec27a5d39a4bf0950f8e483c108",
+        "scripts/benchmark-search.js": "a225cb307aa094d79a6e61e4316c380d09433d94d66707b9594c7f2fbd0f4a48",
+        "scripts/sample-process-memory.ps1": "3f38b6682240093a670b54b349d79913d573a2a88d1f69305f65879c26afd777",
+        "evals/search/v1/corpus.py": "2b588b3d6139f742dbc06ff991eca15862ffc314a27f50a8aeb23633a18ac356"
+      },
+      "screenshotHash": "bc2599dd6c5a481e93582646fd3fbdea0b5fece437569f347a85241954d7bb49",
+      "environment": {
+        "os": "win32",
+        "release": "10.0.26200",
+        "arch": "x64",
+        "cpu": "13th Gen Intel(R) Core(TM) i7-13620H",
+        "logicalCpus": 16,
+        "totalMemoryBytes": 34049220608,
+        "node": "v22.14.0",
+        "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8"
+      },
+      "startedAt": "2026-10-18T05:02:38.597Z",
+      "completedAt": "2026-10-18T05:11:33.016Z",
+      "localWorstP95Ms": 720.4372999999905,
+      "concurrent": {
+        "count": 168,
+        "p50Ms": 255.98219999999856,
+        "p95Ms": 435.04769999999553,
+        "maxMs": 592.7243999999773
+      },
+      "firstSource": {
+        "count": 30,
+        "p50Ms": 250.89999997615814,
+        "p95Ms": 290.60000002384186,
+        "maxMs": 323.89999997615814
+      },
+      "sustained": {
+        "count": 5275,
+        "p50Ms": 256.60579999999027,
+        "p95Ms": 397.6650999999838,
+        "maxMs": 1210.928200000024,
+        "actualSeconds": 300.68242369999996,
+        "perCase": {
+          "ascii-rare": {
+            "count": 377,
+            "p50Ms": 14.698199999984354,
+            "p95Ms": 22.367700000002515,
+            "maxMs": 38.18499999999767
+          },
+          "chinese-indexed": {
+            "count": 378,
+            "p50Ms": 24.96129999999539,
+            "p95Ms": 36.823099999979604,
+            "maxMs": 51.20919999998296
+          },
+          "chinese-broad": {
+            "count": 379,
+            "p50Ms": 366.48120000000927,
+            "p95Ms": 447.4884000000311,
+            "maxMs": 975.5718999999808
+          },
+          "short-chinese": {
+            "count": 380,
+            "p50Ms": 317.28800000000047,
+            "p95Ms": 389.1003999999957,
+            "maxMs": 1210.928200000024
+          },
+          "wildcard": {
+            "count": 377,
+            "p50Ms": 323.67500000004657,
+            "p95Ms": 411.7360000000335,
+            "maxMs": 868.539300000004
+          },
+          "broad-ascii": {
+            "count": 376,
+            "p50Ms": 373.6959999999963,
+            "p95Ms": 457.078600000008,
+            "maxMs": 612.6969999999856
+          },
+          "no-match": {
+            "count": 376,
+            "p50Ms": 3.524299999990035,
+            "p95Ms": 6.725800000014715,
+            "maxMs": 13.15559999999823
+          },
+          "edited-title": {
+            "count": 376,
+            "p50Ms": 50.32570000004489,
+            "p95Ms": 91.47329999995418,
+            "maxMs": 120.42699999996694
+          },
+          "spaced-pattern": {
+            "count": 376,
+            "p50Ms": 20.069599999987986,
+            "p95Ms": 30.87589999998454,
+            "maxMs": 48.04719999997178
+          },
+          "all-wildcard": {
+            "count": 376,
+            "p50Ms": 278.78149999998277,
+            "p95Ms": 348.9116999999969,
+            "maxMs": 442.85169999999925
+          },
+          "trimmed-artist": {
+            "count": 376,
+            "p50Ms": 60.45120000001043,
+            "p95Ms": 91.56230000004871,
+            "maxMs": 125.18820000003325
+          },
+          "artist-filter": {
+            "count": 376,
+            "p50Ms": 276.15280000001076,
+            "p95Ms": 342.0450000000128,
+            "maxMs": 397.6842999999644
+          },
+          "album-filter": {
+            "count": 376,
+            "p50Ms": 272.49499999999534,
+            "p95Ms": 331.5259000000078,
+            "maxMs": 528.8855000000331
+          },
+          "browse-added": {
+            "count": 376,
+            "p50Ms": 331.8000999999931,
+            "p95Ms": 410.24830000000657,
+            "maxMs": 606.5547999999835
+          }
+        }
+      },
+      "processMemory": {
+        "sampleCount": 1012,
+        "maxSampleGapMs": 751.9139000000432,
+        "phases": {
+          "startup": {
+            "count": 42,
+            "spanMs": 21592.6488,
+            "workingSetBytesMedian": 38088704,
+            "workingSetBytesMax": 41893888,
+            "privateBytesMedian": 12603392,
+            "privateBytesMax": 16494592,
+            "handlesMedian": 220,
+            "handlesMax": 222,
+            "threadsMedian": 25,
+            "threadsMax": 25
+          },
+          "baseline-idle": {
+            "count": 19,
+            "spanMs": 9452.5838,
+            "workingSetBytesMedian": 40828928,
+            "workingSetBytesMax": 41906176,
+            "privateBytesMedian": 15532032,
+            "privateBytesMax": 16494592,
+            "handlesMedian": 220,
+            "handlesMax": 222,
+            "threadsMedian": 25,
+            "threadsMax": 25
+          },
+          "local-sequential": {
+            "count": 254,
+            "spanMs": 132289.2159,
+            "workingSetBytesMedian": 42156032,
+            "workingSetBytesMax": 42737664,
+            "privateBytesMedian": 16736256,
+            "privateBytesMax": 17559552,
+            "handlesMedian": 224,
+            "handlesMax": 224,
+            "threadsMedian": 22,
+            "threadsMax": 22
+          },
+          "local-concurrent": {
+            "count": 18,
+            "spanMs": 9014.385600000009,
+            "workingSetBytesMedian": 50716672,
+            "workingSetBytesMax": 51027968,
+            "privateBytesMedian": 25612288,
+            "privateBytesMax": 25886720,
+            "handlesMedian": 229,
+            "handlesMax": 229,
+            "threadsMedian": 23,
+            "threadsMax": 23
+          },
+          "sustained-local": {
+            "count": 573,
+            "spanMs": 300107.8396,
+            "workingSetBytesMedian": 53989376,
+            "workingSetBytesMax": 60780544,
+            "privateBytesMedian": 29851648,
+            "privateBytesMax": 36605952,
+            "handlesMedian": 228,
+            "handlesMax": 229,
+            "threadsMedian": 23,
+            "threadsMax": 25
+          },
+          "after-load-idle": {
+            "count": 19,
+            "spanMs": 9498.258199999982,
+            "workingSetBytesMedian": 58970112,
+            "workingSetBytesMax": 58970112,
+            "privateBytesMedian": 34996224,
+            "privateBytesMax": 34996224,
+            "handlesMedian": 224,
+            "handlesMax": 228,
+            "threadsMedian": 23,
+            "threadsMax": 23
+          },
+          "browser-controlled-sources": {
+            "count": 87,
+            "spanMs": 46722.302600000054,
+            "workingSetBytesMedian": 64548864,
+            "workingSetBytesMax": 72413184,
+            "privateBytesMedian": 27447296,
+            "privateBytesMax": 36503552,
+            "handlesMedian": 232,
+            "handlesMax": 232,
+            "threadsMedian": 23,
+            "threadsMax": 23
+          }
+        },
+        "idleDeltaBytes": {
+          "workingSetBytes": 18141184,
+          "privateBytes": 19464192
+        }
+      },
+      "gates": {
+        "local": false,
+        "firstSource": true
+      },
+      "targetPassed": false,
+      "releaseEligible": false
+    }
+  ],
+  "diagnostics": [
+    {
+      "name": "crosscheck",
+      "rawHash": "ae7e75cc7d71ecf95b34a55363a1377c612a531d02e97b1ca483f3655a7c71cb",
+      "storedHash": "74abc1187a776727aa84f43fd6cc1f6fdb2ea4ae1e87cd0cb3d6ad22e7f3b285",
+      "diagnosticOnly": true,
+      "pinnedCoreZero": false,
+      "observations": 196,
+      "meanMsByCase": {
+        "standard": {
+          "ascii-rare": 12.886039999999047,
+          "chinese-indexed": 21.952080000001295,
+          "chinese-broad": 233.50407999999734,
+          "short-chinese": 552.5774599999983,
+          "wildcard": 562.8429799999983,
+          "broad-ascii": 304.1793800000014,
+          "no-match": 3.8854400000011085,
+          "edited-title": 52.9552400000015,
+          "spaced-pattern": 17.91573999999964,
+          "all-wildcard": 460.90894000000117,
+          "trimmed-artist": 39.3549600000013,
+          "artist-filter": 446.2693200000009,
+          "album-filter": 442.12799999999845,
+          "browse-added": 503.3564599999983
+        },
+        "full": {
+          "ascii-rare": 15.1846800000043,
+          "chinese-indexed": 30.479759999999807,
+          "chinese-broad": 578.5009800000007,
+          "short-chinese": 517.3809999999983,
+          "wildcard": 568.3030799999993,
+          "broad-ascii": 641.4931400000002,
+          "no-match": 4.1516200000027315,
+          "edited-title": 49.91869999999908,
+          "spaced-pattern": 16.838980000000447,
+          "all-wildcard": 467.5086400000015,
+          "trimmed-artist": 45.61015999999945,
+          "artist-filter": 413.32713999999834,
+          "album-filter": 464.5970399999991,
+          "browse-added": 525.004359999999
+        }
+      }
+    },
+    {
+      "name": "crosscheck-pinned",
+      "rawHash": "b65adbb4e3cd622293da29577b05c01ef674e2d39833d540eaa407c40aa0b4da",
+      "storedHash": "52b5320506b70c28766d9a1292323bc7458ca909fe6a6a01daad7f8fddabff39",
+      "diagnosticOnly": true,
+      "pinnedCoreZero": true,
+      "observations": 196,
+      "meanMsByCase": {
+        "standard": {
+          "ascii-rare": 6.2308199999992215,
+          "chinese-indexed": 21.418819999999688,
+          "chinese-broad": 233.2660600000003,
+          "short-chinese": 149.58714000000037,
+          "wildcard": 168.52690000000075,
+          "broad-ascii": 225.80172000000022,
+          "no-match": 1.6371600000013131,
+          "edited-title": 30.99878000000026,
+          "spaced-pattern": 6.88072000000102,
+          "all-wildcard": 135.02281999999977,
+          "trimmed-artist": 22.108659999998782,
+          "artist-filter": 130.45781999999963,
+          "album-filter": 145.83668000000108,
+          "browse-added": 172.0046800000011
+        },
+        "full": {
+          "ascii-rare": 4.8039999999986325,
+          "chinese-indexed": 19.572299999999814,
+          "chinese-broad": 234.25566000000035,
+          "short-chinese": 150.4079800000014,
+          "wildcard": 170.95930000000152,
+          "broad-ascii": 239.90829999999988,
+          "no-match": 2.0945200000001933,
+          "edited-title": 29.41027999999933,
+          "spaced-pattern": 7.381539999999222,
+          "all-wildcard": 136.40170000000072,
+          "trimmed-artist": 20.90703999999896,
+          "artist-filter": 128.94637999999978,
+          "album-filter": 140.4155200000001,
+          "browse-added": 164.48889999999955
+        }
+      }
+    }
+  ],
+  "diagnosticReproductionDriverHash": "550b05e08970673f76f83f715876d64be6045133614ec68b617acafdeaebc374"
+}

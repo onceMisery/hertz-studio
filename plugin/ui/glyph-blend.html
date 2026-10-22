@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT
+     Copyright (c) 2026 hertz-studio contributors
+
+     双图集端点验证页（非产品代码）。
+     端点已经定为 0.30 → 原生 400、0.50 → 原生 700；这里不再从 600 反推，
+     只验证两条等值线的墨量与原生锚点是否一致，并给出 0.30–0.62 的墨量轨迹。
+-->
+<html lang="zh-CN"><meta charset="utf-8"><pre id="r">running…</pre>
+<script src="lyric-glyph-sdf.js"></script>
+<script src="lyric-glyph-atlas.js"></script>
+<script src="lyric-glyph-gl.js"></script>
+<script>
+window.addEventListener('error', e => {
+  document.getElementById('r').textContent = 'ERROR ' + e.message + ' @' + e.lineno;
+});
+(function () {
+  'use strict';
+  var FONT = '"Noto Sans CJK SC","Source Han Sans SC","Microsoft YaHei",system-ui,sans-serif';
+  var GLYPHS = ['口', '回', '一', '永', '鬱'];
+
+  function cv(w, h) { var c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+  var atlas = LyricGlyphAtlas.createDual(FONT);
+  var CELL = atlas.CELL, PAD = atlas.PAD, CONTENT = atlas.CONTENT, BASE = atlas.BASELINE, RPX = atlas.RENDER_PX;
+
+  var probe = cv(CELL, CELL);
+  var gl = LyricGlyphGL.create(probe);
+  gl.initTexture(atlas.W, atlas.H, true);
+
+  // 原生基准：同一字号、同一基线、内容盒尺寸
+  function nativeInk(ch, weight) {
+    var c = cv(CONTENT, CONTENT);
+    var ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff';
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = weight + ' ' + RPX + 'px ' + FONT;
+    ctx.fillText(ch, 0, BASE);
+    var d = ctx.getImageData(0, 0, CONTENT, CONTENT).data;
+    var n = 0;
+    for (var i = 3; i < d.length; i += 4) if (d[i] > 128) n += 1;
+    return n;
+  }
+
+  var anchor400 = {}, anchor700 = {};
+  GLYPHS.forEach(function (ch) {
+    anchor400[ch] = nativeInk(ch, 400);
+    anchor700[ch] = nativeInk(ch, 700);
+  });
+
+  function engineInk(ch, w) {
+    var a = atlas.acquire(ch);
+    var dirty = atlas.takeDirty();
+    for (var k = 0; k < dirty.length; k += 1) {
+      var o = atlas.cellOrigin(dirty[k]);
+      gl.uploadCell(o.x, o.y, CELL, atlas.cellBytes(dirty[k]));
+    }
+    gl.gl.canvas.width = CELL; gl.gl.canvas.height = CELL;
+    gl.beginFrame(CELL, CELL);
+    gl.draw([{ x: -PAD, y: -PAD, w: CELL, h: CELL, u0: a.u0, v0: a.v0,
+      uStart: 0, uEnd: 1, startMs: -1e9, durMs: 1 }], 1, {
+      uvW: CELL / atlas.W, uvH: CELL / atlas.H,
+      timeMs: 0, shear: 0, baseY: 1e6, amp: 0, freq: 0, damp: 2,
+      curveB: new Float32Array(33), curveW: new Float32Array(33).fill(w),
+      range: atlas.RANGE, pxScale: 1, weightGain: 0, weightGainHi: 0,
+      glowK: 1, glowAmt: 0, rimAmt: 0, rimWidth: 0.001,
+      clipU: 1, soft: 0.001, wobble: 0, turbAmp: 0, opacity: 1, dual: true,
+      wLo: 0.30, wHi: 0.50,
+      idleColor: [1, 1, 1], sungColor: [1, 1, 1], glowColor: [1, 1, 1]
+    });
+    var px = new Uint8Array(CELL * CELL * 4);
+    gl.gl.bindFramebuffer(gl.gl.FRAMEBUFFER, null);
+    gl.gl.readPixels(0, 0, CELL, CELL, gl.gl.RGBA, gl.gl.UNSIGNED_BYTE, px);
+    var n = 0;
+    for (var p = 3; p < px.length; p += 4) if (px[p] > 128) n += 1;
+    return n;
+  }
+
+  function endpointError(w, anchors) {
+    var err = 0;
+    GLYPHS.forEach(function (ch) {
+      err += Math.abs(engineInk(ch, w) / anchors[ch] - 1);
+    });
+    return Math.round(err / GLYPHS.length * 1000) / 1000;
+  }
+
+  var errors = {
+    w400: endpointError(0.30, anchor400),
+    w700: endpointError(0.50, anchor700)
+  };
+
+  var trace = [];
+  for (var w = 0.30; w <= 0.6201; w += 0.04) {
+    var area = 0;
+    GLYPHS.forEach(function (ch) { area += engineInk(ch, w); });
+    trace.push([Math.round(w * 100) / 100, Math.round(area / GLYPHS.length)]);
+  }
+
+  document.getElementById('r').textContent = JSON.stringify({
+    atlas: { CELL: CELL, CONTENT: CONTENT, BASELINE: BASE, RENDER_PX: RPX },
+    anchors: { w400: anchor400, w700: anchor700 },
+    errors: errors,
+    trace: trace
+  }, null, 2);
+})();
+</script>
+</html>

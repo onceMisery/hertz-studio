@@ -22,10 +22,19 @@ const KEYRING_SERVICE_LEGACY: &str = "mmusic-studio";
 /// 一个平台的全部秘密：CredPack JSON + 非密设备身份。设备身份本来就不是
 /// 秘密，但和凭据同生共灭，一起放进钥匙串最不容易出现「cookie 清了 guid
 /// 还在」这类半迁移状态。
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SecretEntry {
     pub cred: Option<String>,
     pub device: Option<String>,
+}
+
+impl std::fmt::Debug for SecretEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretEntry")
+            .field("cred", &self.cred.as_ref().map(|_| "[REDACTED]"))
+            .field("device", &self.device.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 pub trait SecretBackend: Send + Sync {
@@ -45,11 +54,7 @@ impl SecretBackend for OsKeyring {
             Some(value) if !value.is_empty() => store
                 .set_password(value)
                 .map_err(|e| format!("keyring set failed for {key}: {e}"))?,
-            _ => match store.delete_credential() {
-                Ok(()) => {}
-                Err(keyring::Error::NoEntry) => {}
-                Err(e) => return Err(format!("keyring delete failed for {key}: {e}")),
-            },
+            _ => delete_entry(&format!("{key}:cred"))?,
         }
         put_aux(&format!("{key}:device"), &entry.device)?;
         Ok(())
@@ -63,15 +68,29 @@ impl SecretBackend for OsKeyring {
 
     fn delete(&self, key: &str) -> Result<(), String> {
         for suffix in [":cred", ":device"] {
-            let entry = keyring::Entry::new(KEYRING_SERVICE, &format!("{key}{suffix}"))
-                .map_err(|e| format!("cannot open keyring entry: {e}"))?;
-            match entry.delete_credential() {
-                Ok(()) => {}
-                Err(keyring::Error::NoEntry) => {}
-                Err(e) => return Err(format!("keyring delete failed for {key}: {e}")),
-            }
+            delete_entry(&format!("{key}{suffix}"))?;
         }
         Ok(())
+    }
+}
+
+fn delete_entry(name: &str) -> Result<(), String> {
+    // Full reads through to the old service when the current entry is absent.
+    // Remove that fallback first: returning success after deleting only the
+    // current entry would let the next read resurrect a logged-out credential.
+    // Standard never reads or mutates the old Full service.
+    if crate::edition::FULL {
+        delete_from_service(KEYRING_SERVICE_LEGACY, name)?;
+    }
+    delete_from_service(KEYRING_SERVICE, name)
+}
+
+fn delete_from_service(service: &str, name: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(service, name)
+        .map_err(|e| format!("cannot open keyring entry: {e}"))?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("keyring delete failed for {name}: {e}")),
     }
 }
 
@@ -114,11 +133,7 @@ fn put_aux(name: &str, value: &Option<String>) -> Result<(), String> {
         Some(v) if !v.is_empty() => entry
             .set_password(v)
             .map_err(|e| format!("keyring set failed for {name}: {e}")),
-        _ => match entry.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(format!("keyring delete failed for {name}: {e}")),
-        },
+        _ => delete_entry(name),
     }
 }
 
@@ -179,6 +194,18 @@ pub fn backend() -> std::sync::Arc<dyn SecretBackend> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_redacts_both_credential_and_device_material() {
+        let entry = SecretEntry {
+            cred: Some("secret-fixture".into()),
+            device: Some("device-fixture".into()),
+        };
+        let debug = format!("{entry:?}");
+        assert!(!debug.contains("secret-fixture"));
+        assert!(!debug.contains("device-fixture"));
+        assert!(debug.contains("[REDACTED]"));
+    }
 
     #[test]
     fn memory_backend_round_trips_and_deletes() {

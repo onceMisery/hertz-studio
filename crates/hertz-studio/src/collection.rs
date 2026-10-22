@@ -167,9 +167,7 @@ impl AppState {
             offset,
         } = next;
         let result = online::playlist_detail(
-            &online::Ctx {
-                db: self.db.clone(),
-            },
+            &online::Ctx::new(self.db.clone()),
             &source,
             &id,
             offset,
@@ -337,6 +335,8 @@ mod tests {
             .set_queue(vec!["online:netease:dup".into()], Some(0))
             .await;
         seeded(&state, gen, 120).await;
+        // set_queue now publishes QueueChanged; drain setup noise before asserting collection progress.
+        while rx.try_recv().is_ok() {}
         let session = state.playlist_load.lock().await.session;
 
         // 一页三首，其中一首已在队：去重后只入两首；offset 按**平台侧**页数前进。
@@ -467,6 +467,8 @@ mod tests {
             .set_queue(vec!["online:netease:a".into()], Some(0))
             .await;
         seeded(&state, gen, 120).await;
+        // set_queue now publishes QueueChanged; drain setup noise before asserting collection progress.
+        while rx.try_recv().is_ok() {}
         let session = state.playlist_load.lock().await.session;
 
         // 整页都是已在队的重复（平台在原地打转）：一次就判 done，防无限翻页。
@@ -518,6 +520,8 @@ mod tests {
         state
             .begin_collection_load("netease", "pl1", 120, 2, gen)
             .await;
+        // set_queue now publishes QueueChanged; drain setup noise before asserting the error event.
+        while rx.try_recv().is_ok() {}
 
         let session = state.playlist_load.lock().await.session;
         let err = state

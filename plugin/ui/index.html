@@ -29,6 +29,7 @@
 <link rel="stylesheet" href="stage-themes/starfall.css">
 <link rel="stylesheet" href="stage-themes/ios.css">
 <link rel="stylesheet" href="stanza/stanza.css">
+<link rel="stylesheet" href="emotion.css">
 <link rel="stylesheet" href="stanza/stanza-starborn.css">
 <link rel="stylesheet" href="online.css">
 <link rel="stylesheet" href="podcasts.css">
@@ -54,12 +55,8 @@
      排在其它样式表之后——皮肤做的是覆盖，必须在最后。
      skins.css 是"选皮肤的地方"，常驻加载，不带 data-skin-css。 -->
 <link rel="stylesheet" href="skins/skins.css">
-<link rel="stylesheet" href="skins/skin.sheen.css" data-skin-css="sheen" disabled>
-<link rel="stylesheet" href="skins/skin.workbench.css" data-skin-css="workbench" disabled>
 <link rel="stylesheet" href="skins/skin.liunian.css" data-skin-css="liunian" disabled>
-<link rel="stylesheet" href="skins/skin.ios.css" data-skin-css="ios" disabled>
 <link rel="stylesheet" href="skins/skin.qingfeng.css" data-skin-css="qingfeng" disabled>
-<link rel="stylesheet" href="skins/skin.chaoxi.css" data-skin-css="chaoxi" disabled>
 <link rel="stylesheet" href="skins/skin.heijiao.css" data-skin-css="heijiao" disabled>
 <link rel="stylesheet" href="skins/skin.orbit.css" data-skin-css="orbit" disabled>
 </head>
@@ -171,6 +168,10 @@
   </symbol>
   <symbol id="i-heart-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M20.2 5.3c-1.9-1.8-4.8-1.6-6.5.4L12 7.5l-1.7-1.8c-1.7-2-4.6-2.2-6.5-.4-1.9 1.9-1.8 4.8.1 6.7L12 20l8.1-8c1.9-1.9 2-4.8.1-6.7Z"/>
+  </symbol>
+  <symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3v8"/>
+    <path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>
   </symbol>
   <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M9.7 3h4.6l.5 2.7a7 7 0 0 1 1.8 1.1l2.6-.9 2.3 4-2.1 1.8v.6l2.1 1.8-2.3 4-2.6-.9a7 7 0 0 1-1.8 1.1l-.5 2.7H9.7l-.5-2.7a7 7 0 0 1-1.8-1.1l-2.6.9-2.3-4 2.1-1.8v-.6L2.5 9.9l2.3-4 2.6.9a7 7 0 0 1 1.8-1.1Z"/>
@@ -419,6 +420,13 @@
     </button>
     <!-- edition:end -->
 
+    <!-- 退出服务：像系统电源键那样，一颗钮把播放、进程、这个页面一起收掉。
+         初值 hidden —— dbx / demo 形态没有可退的独立服务，由 app.js 只在
+         独立形态放开。放在簇的最右，与窗口那套「右边是离开」的习惯对齐。 -->
+    <button type="button" id="service-exit" class="iconbtn" title="退出服务" aria-label="退出播放服务" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-power"/></svg>
+    </button>
+
   </div>
 </header>
 
@@ -493,13 +501,14 @@
 
       <div class="scan-panel" id="scan-panel" hidden>
         <div class="scan-row">
-          <input id="scan-root" type="text" placeholder="音乐目录，例如 D:\Music" autocomplete="off">
+          <input id="scan-root" type="text" placeholder="音乐目录，例如 D:\Music" autocomplete="off" aria-describedby="scan-format-note">
           <button id="scan-btn" class="btn primary">添加并自动同步</button>
           <button id="scan-cancel" class="btn" type="button" hidden>取消扫描</button>
         </div>
         <div class="scan-history" id="scan-history" hidden></div>
         <div id="scan-roots" class="scan-roots" aria-label="已添加音乐目录"></div>
         <p class="hint">启用的目录会自动同步文件变化。移除目录会停止同步，保留已收录歌曲和原文件。</p>
+        <p class="hint" id="scan-format-note">扫描会检查 Opus、APE、WMA，但当前不能解码，无法读取元数据的文件会列入扫描失败。MP3、FLAC、WAV、AAC、ALAC、Vorbis 等也取决于文件完整性和实际编码；修改扩展名不能转换格式。</p>
         <div class="scan-progress"><div class="scan-bar" id="scan-bar"></div></div>
         <div class="hint" id="scan-label" role="status">尚未扫描</div>
         <details id="scan-errors" class="scan-errors" hidden><summary>扫描失败明细</summary><ul></ul></details>
@@ -1076,6 +1085,61 @@
         <p class="hint set-note">「加入队列」只管列表行的快捷按钮与右键菜单；点曲名本身总是立即播放那一首。「自动进入」只在手动开始播放时触发，启动恢复与自动接力不算。</p>
       </div>
 
+      <div class="set-group" id="ai-grant-settings">
+        <h2 class="set-title">AI 与外部连接</h2>
+        <p class="hint set-note">外部 MCP 默认没有授权。仅独立服务的本机 IPv4 回环入口支持连接；每份授权只开放所选能力。这里不会显示或返回凭据秘密。</p>
+        <p class="hint set-note" id="ai-grant-unavailable" role="status" hidden></p>
+        <div id="ai-grant-manager" hidden>
+          <div class="set-row">
+            <label for="ai-grant-label">授权名称</label>
+            <input id="ai-grant-label" type="text" maxlength="128" placeholder="例如：桌面助手">
+          </div>
+          <div class="set-row">
+            <label for="ai-grant-preset">权限预设</label>
+            <select id="ai-grant-preset">
+              <option value="snapshot">只读播放状态</option>
+              <option value="library">曲库检索</option>
+              <option value="read">只读（状态与曲库）</option>
+              <option value="control">播控（状态与六种操作）</option>
+              <option value="custom">自定义范围</option>
+            </select>
+          </div>
+          <div class="ai-grant-scope-groups" id="ai-grant-scope-groups">
+            <fieldset class="ai-grant-scope-group">
+              <legend>播放</legend>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:read"><span>读取最小播放状态</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:pause"><span>暂停</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:resume"><span>继续播放</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:previous"><span>上一首</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:next"><span>下一首</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:seek"><span>定位</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="playback:volume_set"><span>设置音量</span></label>
+            </fieldset>
+            <fieldset class="ai-grant-scope-group">
+              <legend>曲库与舞台</legend>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="library:read"><span>检索本地曲库</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="stage:capabilities_read"><span>读取舞台契约</span></label>
+              <label class="ai-grant-scope-option"><input type="checkbox" data-ai-scope="stage:intent_validate"><span>校验舞台草稿</span></label>
+              <p class="hint set-note">舞台工具还需要在工坊相关设置中单独开启。</p>
+            </fieldset>
+          </div>
+          <div class="set-row">
+            <span></span>
+            <span class="set-actions">
+              <button type="button" class="btn primary" id="ai-grant-create">创建授权</button>
+              <button type="button" class="btn" id="ai-grant-refresh">刷新列表</button>
+            </span>
+          </div>
+          <div class="set-row">
+            <label for="ai-grant-command">MCP 程序</label>
+            <input id="ai-grant-command" type="text" value="hertz-studio" autocomplete="off" spellcheck="false">
+          </div>
+          <p class="hint set-note">配置中的程序在 MCP 客户端所在电脑运行；若不在 PATH，请填写 Hertz Studio 可执行文件的完整路径。</p>
+          <p class="hint set-note" id="ai-grant-status" role="status" aria-live="polite"></p>
+          <div id="ai-grant-list" class="ai-grant-list"></div>
+        </div>
+      </div>
+
       <!-- 歌词：跨曲目都成立的歌词偏好（folia 的 global lyric timeline offset /
            lyrics filter / staff credits policy）。逐曲偏移在「正在播放」弹窗里，
            那是每首自己的事；这里只管全局的。三件事都发生在歌词喂给舞台之前，
@@ -1116,6 +1180,75 @@
           <input id="set-lyric-filter-pattern" type="text" placeholder="如 ^\（.*\）$">
         </div>
         <p class="hint set-note" id="set-lyric-filter-note" hidden></p>
+        <div class="set-row">
+          <label for="set-emotion-mode">情绪演出</label>
+          <select id="set-emotion-mode">
+            <option value="off">关闭</option>
+            <option value="manual">手动预览</option>
+            <option value="auto" disabled>自动（需模型，未开放）</option>
+          </select>
+        </div>
+        <div class="set-row" id="set-emotion-preview-row">
+          <label for="set-emotion-preview">预览情绪</label>
+          <select id="set-emotion-preview">
+            <option value="joy">雀跃</option>
+            <option value="sorrow">悲伤</option>
+            <option value="anger">愤怒</option>
+            <option value="anxious">不安</option>
+            <option value="tender">温柔</option>
+            <option value="triumph">胜利</option>
+            <option value="lonely">孤独</option>
+          </select>
+        </div>
+        <div class="set-row">
+          <label for="set-emotion-scale">情绪强度</label>
+          <input id="set-emotion-scale" type="range" min="0" max="1.5" step="0.05" value="1">
+          <span class="count" id="set-emotion-scale-value">1.00</span>
+        </div>
+        <div class="set-row">
+          <label for="set-emotion-curve">强度曲线</label>
+          <input id="set-emotion-curve" type="range" min="0.5" max="1.5" step="0.05" value="1">
+          <span class="count" id="set-emotion-curve-value">1.00</span>
+          <span class="hint" id="set-emotion-curve-note">小于 1 放大弱情绪，大于 1 让强弱对比更明显</span>
+        </div>
+        <div class="set-row">
+          <label for="set-emotion-accent">重音词强调</label>
+          <input id="set-emotion-accent" type="checkbox">
+          <span class="hint" id="set-emotion-accent-note">只加粗匹配词，不改变行级字重</span>
+        </div>
+        <div class="set-row">
+          <label for="set-emotion-accent-words">重音词</label>
+          <input id="set-emotion-accent-words" type="text" placeholder="逗号分隔，如：星光,眼睛">
+        </div>
+        <div class="set-row">
+          <label for="set-emotion-palette">情绪配色</label>
+          <input id="set-emotion-palette" type="checkbox" checked>
+          <span class="hint" id="set-emotion-palette-note">关闭时保留场位移与字体参数，尊重自定义歌词色</span>
+        </div>
+        <div class="set-row">
+          <label for="set-emotion-ai-authorized">允许歌词发送给模型</label>
+          <input id="set-emotion-ai-authorized" type="checkbox">
+          <span class="hint" id="set-emotion-ai-note">仅自动分类需要；未授权时不发送歌词</span>
+        </div>
+        <div class="set-row">
+          <label for="set-emotion-lock">手动锁定当前行</label>
+          <span class="set-actions">
+            <select id="set-emotion-lock">
+              <option value="joy">雀跃</option>
+              <option value="sorrow">悲伤</option>
+              <option value="anger">愤怒</option>
+              <option value="anxious">不安</option>
+              <option value="tender">温柔</option>
+              <option value="triumph">胜利</option>
+              <option value="lonely">孤独</option>
+              <option value="neutral">中性</option>
+            </select>
+            <button id="set-emotion-lock-apply" class="btn" type="button">锁定</button>
+            <button id="set-emotion-lock-clear" class="btn" type="button">清除</button>
+          </span>
+          <span class="hint" id="set-emotion-lock-note">手动覆盖优先于 auto 结果；关闭情绪演出时不生效</span>
+        </div>
+        <p class="hint set-note" id="set-emotion-note">关闭时与当前版本完全一致；手动预览只用于调试，自动分类需要模型 provider 和显式授权。</p>
       </div>
 
       <!-- 歌词输出：本地 HTTP 歌词 API + OBS 浮层页（folia 的 lyric api / obs
@@ -1775,7 +1908,7 @@
     <div id="s3d-zodiac-tuning" hidden>
       <label for="s3d-zodiac-field"><input id="s3d-zodiac-field" type="checkbox" checked> 背景星云</label>
       <label for="s3d-zodiac-interact"><input id="s3d-zodiac-interact" type="checkbox" checked> 交互旋转（拖拽环绕 / 滚轮推拉 / 双击复位）</label>
-      <p class="s3d-setting-note">粒子每 13 秒汇聚成一座星座造型，停留微摆后散开换下一座；拖拽环绕、滚轮缩放。关闭背景星云可换取低端设备的流畅。</p>
+      <p class="s3d-setting-note">粒子每 13 秒汇聚成一座星座造型，停留微摆后散开换下一座。拖拽环绕、滚轮缩放、双击复位；悬停主星、按住蓄能、松开引爆星链。关闭背景星云可换取低端设备的流畅。</p>
     </div>
     <div id="s3d-anime-tuning" hidden>
       <label for="s3d-anime-scene">绘景作品</label>
@@ -2114,9 +2247,11 @@
         <span id="np-lyric-offset-value" aria-live="polite">0.0s</span>
         <button type="button" id="np-lyric-offset-up" class="np-lyric-btn" title="歌词延后 0.5 秒" aria-label="歌词延后零点五秒">+0.5s</button>
       </span>
-      <input type="file" id="np-lyric-file" accept=".lrc,text/plain" hidden>
+      <input type="file" id="np-lyric-file" accept=".lrc,.ttml,.xml,text/plain,application/ttml+xml,application/xml" hidden>
       <button type="button" id="np-lyric-import" class="np-lyric-btn">导入歌词</button>
+      <button type="button" id="np-lyric-search" class="np-lyric-btn" hidden>查找在线歌词</button>
       <button type="button" id="np-lyric-clear" class="np-lyric-btn" hidden>清除导入</button>
+      <div id="np-lyric-import-panel" class="np-lyric-import-panel" hidden></div>
     </div>
 
     <!-- 底部播放控制区域：跳转到舞台播放页面 -->
@@ -2137,9 +2272,8 @@
 <!-- 皮肤公共段（锚点搬运 / 自建节点登记 / 封面位图回填）：必须在两张重编排
      皮肤（流年 / 清风）之前加载。 -->
 <script defer src="skins/skin-shared.js"></script>
-<script defer src="skins/skin.sheen.js"></script>
-<!-- 共享设置浮层（清风同款）：classic / sheen / workbench / ios 的生命周期
-     由它代管，chaoxi 在自己的生命周期里调用；依赖 skins.js 与 skin-shared.js。 -->
+<!-- 共享设置浮层（清风同款）：classic 的生命周期由它代管，heijiao / orbit
+     在自己的生命周期里调用；依赖 skins.js 与 skin-shared.js。 -->
 <script defer src="skins/skin-settings-sheet.js"></script>
 <!-- 流年皮肤的 DOM 重编排层：在 Skins 上登记挂载与卸载，
      必须在 app.js 初始化皮肤宿主之前加载。 -->
@@ -2147,9 +2281,6 @@
 <!-- 清风皮肤同样登记生命周期；队列快照与业务动作经 Skins 公共宿主接口交接，
      必须在 app.js 初始化皮肤宿主之前加载。 -->
 <script defer src="skins/skin.qingfeng.js"></script>
-<!-- 潮汐登记生命周期（播放面板的展开/收起把手）；不重编排业务节点，
-     但把手的挂载要在 app.js 之前登记完。 -->
-<script defer src="skins/skin.chaoxi.js"></script>
 <!-- 黑胶同款：唱片卡的歌词展开 + 唱片拖转旋钮。必须在 app.js 初始化
      皮肤宿主之前加载（registerLifecycle 要先于 Skins.init）。 -->
 <script defer src="skins/skin.heijiao.js"></script>
@@ -2182,9 +2313,16 @@
      必须排在 creative-stage.js 之后——它读CreativeStage 的场景表。 -->
 <script defer src="creative-anime.js"></script>
 <script defer src="creative-share-code.js"></script>
+<script defer src="creative-contract.js"></script>
+<script defer src="creative-draft.js"></script>
+<script defer src="creative-project.js"></script>
+<script defer src="creative-arrangement.js"></script>
+<script defer src="creative-pitch.js"></script>
+<script defer src="creative-templates.js"></script>
 <!-- 离线提示词编译器：compile 只读 CreativeStage.scenes/spec，写入走
      CreativeStage.applyIntent；排在编排层之后、工坊之前。 -->
 <script defer src="creative-prompt.js"></script>
+<script defer src="ai-ledger.js"></script>
 <script defer src="workshop.js"></script>
 <!-- 节拍电影相机：纯时间轴 + 驱动（消费 /v1/stage/beatmap） -->
 <script defer src="stage-cinema.js"></script>
@@ -2202,6 +2340,14 @@
 <script defer src="stanza/stanza-sonnet-fx.js"></script>
 <script defer src="stanza/stanza-sonnet.js"></script>
 <script defer src="stanza/stanza-tempera.js"></script>
+<!-- 自研字形引擎：SDF → 图集 → GL → 情绪场，最后是 stanza 渲染器；
+     全部排在 stage3d.js 之前，注册发生在 stage3d 的模块体里。 -->
+<script defer src="lyric-glyph-sdf.js"></script>
+<script defer src="lyric-glyph-atlas.js"></script>
+<script defer src="lyric-glyph-gl.js"></script>
+<script defer src="lyric-emotion-field.js"></script>
+<script defer src="lyric-emotion.js"></script>
+<script defer src="stanza/stanza-glyph.js"></script>
 <!-- Home and stage share one Three.js background and one playback owner. -->
 <div class="sp" id="space3d" data-page="closed" data-fx-zone="stage" aria-hidden="true" aria-modal="true" role="dialog" aria-label="三维空间" tabindex="-1">
   <div class="sp-bg" id="sp-bg" aria-hidden="true"></div>
@@ -2210,6 +2356,22 @@
   <div class="sp-vignette" aria-hidden="true"></div>
   <div class="s3d-reading sp-reading" id="sp-reading">
     <div class="s3d-eyebrow" id="sp-status">三维空间</div>
+  </div>
+  <aside class="sp-zodiac-hud" id="sp-zodiac-hud" aria-live="polite" aria-label="星座观测" hidden>
+    <div class="sp-zodiac-plaque">
+      <p class="sp-zodiac-kicker"><span>ZODIAC OBSERVATORY</span><span id="sp-zodiac-index">01 — XII</span></p>
+      <h2 id="sp-zodiac-name">白羊</h2>
+      <p class="sp-zodiac-latin" id="sp-zodiac-latin">ARIES</p>
+      <i class="sp-zodiac-rule" aria-hidden="true"></i>
+      <p class="sp-zodiac-meta" id="sp-zodiac-meta"></p>
+    </div>
+    <div class="sp-zodiac-cycle" aria-hidden="true"><span class="sp-zodiac-ticks" id="sp-zodiac-ticks"></span><span>12 SIGNS</span></div>
+    <p class="sp-zodiac-hint">拖拽环绕&nbsp;&nbsp;·&nbsp;&nbsp;悬停主星&nbsp;&nbsp;·&nbsp;&nbsp;按住蓄能&nbsp;&nbsp;·&nbsp;&nbsp;双击复位</p>
+  </aside>
+  <div class="sp-zodiac-star" id="sp-zodiac-star" hidden>
+    <span class="sp-zodiac-star-kicker">MAIN STAR</span>
+    <strong id="sp-zodiac-star-name"></strong>
+    <small id="sp-zodiac-star-meta"></small>
   </div>
   <div class="s3d-shelf" id="sp-shelf" role="region" aria-label="3D 歌单架"><div class="s3d-shelf-plane"></div></div>
   <div class="sp-head">
@@ -2269,8 +2431,13 @@
     <section id="sp-stage-settings" hidden>
       <section id="sp-console-stage" role="tabpanel" aria-labelledby="sp-tab-stage" tabindex="0">
         <label for="sp-source">舞台场景</label><select id="sp-source"></select>
-        <details class="sp-scene-picker" open><summary>场景预设</summary><div class="sp-fx-grid" id="sp-fx-grid" role="group" aria-label="选择舞台场景"></div></details>
+        <div class="sp-zodiac-console" id="sp-zodiac-console" hidden>
+          <p class="sp-zodiac-console-kicker">OBSERVATION <span id="sp-zodiac-console-index"></span></p>
+          <strong id="sp-zodiac-console-name"></strong>
+          <small id="sp-zodiac-console-meta"></small>
+        </div>
         <div id="sp-scene-params"></div>
+        <details class="sp-scene-picker" open><summary>场景预设</summary><div class="sp-fx-grid" id="sp-fx-grid" role="group" aria-label="选择舞台场景"></div></details>
       </section>
       <section id="sp-console-lyrics" role="tabpanel" aria-labelledby="sp-tab-lyrics" tabindex="0" hidden>
         <label class="sp-check" for="sp-lyrics-toggle"><input id="sp-lyrics-toggle" type="checkbox" checked> 显示歌词</label>
@@ -2308,9 +2475,11 @@
 <script defer src="stanza/stanza-starborn.js"></script>
 <script defer src="stage-lyrics.js"></script>
 <script defer src="now-playing.js"></script>
+<script defer src="lyric-import.js"></script>
 <!-- 3D 歌单架（封面流）：只依赖 Stage 只读出口，必须排在 stage3d.js 之前 -->
 <script defer src="stage-shelf.js"></script>
 <script defer src="stage-settings.js"></script>
+<script defer src="vendor/stage-runtime.js"></script>
 <script defer src="vendor/coast-stage.js"></script>
 <script defer src="stage-coast.js"></script>
 <script defer src="vendor/zodiac-stage.js"></script>
@@ -2335,6 +2504,7 @@
 <script defer src="vendor/qrcode.js"></script>
 <script defer src="online-login.js"></script>
 <!-- edition:end -->
+<script defer src="search-session.js"></script>
 <script defer src="online.js"></script>
 <script defer src="podcasts.js"></script>
 <script defer src="online-playlists.js"></script>

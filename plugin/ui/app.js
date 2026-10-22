@@ -77,6 +77,23 @@ const ui = {
   setLyricFilterOn: $('set-lyric-filter-on'),
   setLyricFilterPattern: $('set-lyric-filter-pattern'),
   setLyricFilterNote: $('set-lyric-filter-note'),
+  setEmotionMode: $('set-emotion-mode'),
+  setEmotionPreviewRow: $('set-emotion-preview-row'),
+  setEmotionPreview: $('set-emotion-preview'),
+  setEmotionScale: $('set-emotion-scale'),
+  setEmotionScaleValue: $('set-emotion-scale-value'),
+  setEmotionCurve: $('set-emotion-curve'),
+  setEmotionCurveValue: $('set-emotion-curve-value'),
+  setEmotionAccent: $('set-emotion-accent'),
+  setEmotionAccentWords: $('set-emotion-accent-words'),
+  setEmotionPalette: $('set-emotion-palette'),
+  setEmotionAiAuthorized: $('set-emotion-ai-authorized'),
+  setEmotionAiNote: $('set-emotion-ai-note'),
+  setEmotionLock: $('set-emotion-lock'),
+  setEmotionLockApply: $('set-emotion-lock-apply'),
+  setEmotionLockClear: $('set-emotion-lock-clear'),
+  setEmotionLockNote: $('set-emotion-lock-note'),
+  setEmotionNote: $('set-emotion-note'),
   setRmBg: $('set-rm-bg'),
   setRmLyrics: $('set-rm-lyrics'),
   setRmUi: $('set-rm-ui'),
@@ -187,6 +204,7 @@ const ui = {
   queueSave: $('queue-save'),
   sleepTimer: $('sleep-timer'),
   sleepTimerLabel: $('sleep-timer-label'),
+  serviceExit: $('service-exit'),
   queueBadge: $('queue-badge'),
 
   setDevice: $('set-device'),
@@ -469,12 +487,17 @@ const DBX_EVENT_METHOD = 'studio/event';
 const DBX_SUBSCRIBE_METHOD = 'studio/events/subscribe';
 
 /// invoke 只有 timeoutMs，没有中断能力。UI 传 signal 想表达的是「这个结果我不要了」
-/// （典型场景：搜索词变了，作废上一批响应），所以让 signal 与 invoke 竞速：本地立刻
-/// 按 AbortError 拒绝，后端那次调用会跑完但结果被丢弃。对调用方与 HTTP 版的 abort
-/// 等价，代价是白跑一次后端。
-function dbxInvoke(method, params, signal, timeoutMs) {
+/// （典型场景：搜索词变了，作废上一批响应）。普通调用让 signal 与 invoke 竞速：
+/// 本地立刻按 AbortError 拒绝，后端那次调用会跑完但结果被丢弃。搜索协调器指定
+/// waitForSettlement，保持执行槽直到 invoke 真正结束，再丢弃结果。
+function dbxInvoke(method, params, signal, waitForSettlement, timeoutMs) {
+  if (signal && signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
   const call = window.dbxPlugin.invoke(method, params, { timeoutMs });
   if (!signal) return call;
+  if (waitForSettlement) return call.then(value => {
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    return value;
+  });
   if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
   return new Promise((resolve, reject) => {
     const onAbort = () => reject(new DOMException('Aborted', 'AbortError'));
@@ -501,7 +524,10 @@ async function dbxRequest(path, options = {}, attempt = 0) {
   const { method, query } = splitPath(path);
   const op = (options.method || 'GET').toUpperCase();
   const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
-    ? options.timeoutMs : REQUEST_TIMEOUT;
+    ? options.timeoutMs
+    // StepFun step-5 分类实测 14–67s；服务端总期限 300s，客户端留 30s 余量。
+    : method === 'v1/stage/pitch' ? 35000
+      : method === 'v1/ai/lyrics/emotion' ? 330000 : REQUEST_TIMEOUT;
   const params = { op, query };
   if (options.rawBody !== undefined) {
     // 二进制上传（封面替换）：HTTP 版是裸 body + Content-Type，这里换成信封里的 base64。
@@ -512,7 +538,7 @@ async function dbxRequest(path, options = {}, attempt = 0) {
   }
 
   try {
-    const envelope = await dbxInvoke(method, params, options.signal, timeoutMs);
+    const envelope = await dbxInvoke(method, params, options.signal, options.waitForSettlement, timeoutMs);
     if (!envelope || typeof envelope.status !== 'number') {
       throw new Error('sidecar 返回了不认识的结果');
     }
@@ -532,7 +558,7 @@ async function dbxRequest(path, options = {}, attempt = 0) {
   } catch (err) {
     // 与 HTTP 版同一套重试判据：幂等读、瞬时故障、重试一次。
     const transient = !err.status || err.status >= 500 || err.name === 'AbortError' || err.name === 'TypeError';
-    if (op === 'GET' && attempt === 0 && transient && !(options.signal && options.signal.aborted)) {
+    if (op === 'GET' && options.retry !== false && attempt === 0 && transient && !(options.signal && options.signal.aborted)) {
       await new Promise((r) => setTimeout(r, 300));
       return dbxRequest(path, options, attempt + 1);
     }
@@ -800,12 +826,39 @@ const DbxTransport = {
   },
 };
 
+/// 插件形态的「离场」：宿主要拆 webview 前会发 workbench/close（两阶段握手的
+/// 插件侧，SDK 在每个 listener settle 后回 ack），这里把声音停下。
+///
+/// 只 pause 不退出：sidecar 是宿主的子进程，宿主只在插件管理、重启、更新和整个
+/// 应用退出时才 terminate 它；我们自己去杀，宿主只会看到一次意外死亡。
+///
+/// 请求发出去就返回，不等结果：关标签那条宿主路径是 `requestWorkbenchClose(0)`，
+/// 本来就不等 ack；webview 拆掉后响应也收不到了，但请求已经进了 stdio 通道，
+/// sidecar 照样执行。返回一个已 resolve 的 Promise 只是让 ack 别被我们拖住。
+///
+/// 已知边界：tab 与浮动胶囊是两个 surface、共用一个 sidecar。关掉其中一个会暂停，
+/// 即使另一个还开着——sidecar 侧没有按 surface 计数（事件订阅是幂等的单转发器），
+/// 宁可多停一次也不留「窗口都关了声音还在放」。重开任意一个再点播放即可。
+function bindDbxCloseHook() {
+  const workbench = window.dbxPlugin && window.dbxPlugin.workbench;
+  if (!workbench || typeof workbench.onClose !== 'function') return false;
+  workbench.onClose(() => {
+    dbxRequest('/v1/player/pause', { method: 'POST' }).catch(() => {});
+    return Promise.resolve();
+  });
+  return true;
+}
+
 const REQUEST_TIMEOUT = 15000;
 
 async function request(path, options = {}, attempt = 0) {
   const method = (options.method || 'GET').toUpperCase();
   const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
-    ? options.timeoutMs : REQUEST_TIMEOUT;
+    ? options.timeoutMs
+    // StepFun step-5 分类实测 14–67s；服务端总期限 300s，客户端留 30s 余量。
+    : path === '/v1/stage/pitch' ? 35000
+      : (path === '/v1/ai/lyrics/emotion' && method === 'POST') ? 330000
+        : REQUEST_TIMEOUT;
   const { timeoutMs: _timeoutOverride, ...fetchOptions } = options;
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   const cancel = () => controller && controller.abort();
@@ -840,7 +893,7 @@ async function request(path, options = {}, attempt = 0) {
   } catch (err) {
     // 网络抖动、超时、服务端 5xx：幂等读重试一次，避免偶发失败直接弹红。
     const transient = !err.status || err.status >= 500 || err.name === 'AbortError' || err.name === 'TypeError';
-    if (method === 'GET' && attempt === 0 && transient && !(options.signal && options.signal.aborted)) {
+    if (method === 'GET' && options.retry !== false && attempt === 0 && transient && !(options.signal && options.signal.aborted)) {
       await new Promise((r) => setTimeout(r, 300));
       return request(path, options, attempt + 1);
     }
@@ -853,7 +906,12 @@ async function request(path, options = {}, attempt = 0) {
 
 // 后端错误契约里有 request_id，没有它就只能靠猜去翻日志。
 function errText(prefix, err) {
-  return `${prefix}：${err.message}${err.requestId ? `（request_id ${err.requestId}）` : ''}`;
+  const guidance = {
+    unsupported_format: '无法识别容器或编码。Opus / APE / WMA 暂不支持，也可能是文件损坏。请检查原文件或另存为 FLAC / WAV，改扩展名无效。',
+    decode_failed: '音频读取或解码失败。请检查文件是否可访问、下载完整，或用其它播放器检查；不代表该格式全部不受支持。',
+  };
+  const message = Object.prototype.hasOwnProperty.call(guidance, err.code) ? guidance[err.code] : err.message;
+  return `${prefix}：${message}${err.requestId ? `（request_id ${err.requestId}）` : ''}`;
 }
 
 /// 弹窗统一走 dialogs.js：DBX 的插件 iframe 没有 allow-modals，原生
@@ -992,11 +1050,308 @@ window.VMusicTransport = {
   playbackIntent: () => PlaybackIntent.generation,
   get: (p, options) => transport.get(p, options),
   put: (p, body) => transport.put(p, body),
-  post: (p, body) => transport.post(p, body),
+  post: (p, body, options) => transport.post(p, body, options),
   postRaw: (p, blob, contentType) => transport.postRaw(p, blob, contentType),
   del: (p) => transport.del(p),
   kind: () => transport.kind
 };
+
+// AI grant management is available only through the standalone service. Grant
+// summaries are projected onto this allowlist before they enter the view model.
+window.AiGrantSettings = (function () {
+  'use strict';
+
+  const scopeNames = {
+    'playback:read': '读取播放状态',
+    'playback:pause': '暂停',
+    'playback:resume': '继续播放',
+    'playback:previous': '上一首',
+    'playback:next': '下一首',
+    'playback:seek': '定位',
+    'playback:volume_set': '设置音量',
+    'library:read': '检索曲库',
+    'stage:capabilities_read': '读取舞台契约',
+    'stage:intent_validate': '校验舞台草稿',
+  };
+  const controlScopes = [
+    'playback:pause', 'playback:resume', 'playback:previous',
+    'playback:next', 'playback:seek', 'playback:volume_set',
+  ];
+  const presets = {
+    snapshot: ['playback:read'],
+    library: ['library:read'],
+    read: ['playback:read', 'library:read'],
+    control: ['playback:read'].concat(controlScopes),
+  };
+
+  let refs = null;
+  let settings = null;
+  let grants = [];
+  let busy = false;
+  let bound = false;
+
+  function node(id) { return document.getElementById(id); }
+
+  function projectGrant(row) {
+    if (!row || typeof row !== 'object') return null;
+    const grantId = typeof row.grant_id === 'string' ? row.grant_id : '';
+    if (!grantId) return null;
+    return {
+      grant_id: grantId,
+      label: typeof row.label === 'string' ? row.label : '',
+      scopes: Array.isArray(row.scopes) ? row.scopes.filter((scope) => typeof scope === 'string') : [],
+      revoked: row.revoked === true,
+      created_at: Number.isFinite(row.created_at) ? row.created_at : null,
+      updated_at: Number.isFinite(row.updated_at) ? row.updated_at : null,
+      credential_path: typeof row.credential_path === 'string' ? row.credential_path : '',
+    };
+  }
+
+  function dataDirFromCredentialPath(path) {
+    if (typeof path !== 'string') return '';
+    const normalized = path.replace(/\\/g, '/');
+    const marker = normalized.toLowerCase().lastIndexOf('/ai/grants/');
+    if (marker < 0) return '';
+    const file = normalized.slice(marker + '/ai/grants/'.length);
+    if (!file || file.includes('/') || !file.toLowerCase().endsWith('.key')) return '';
+    const prefix = path.slice(0, marker);
+    return prefix || (path.charAt(0) === '/' || path.charAt(0) === '\\' ? path.charAt(0) : '');
+  }
+
+  function scopesFromForm() {
+    return Array.from(refs.scopeInputs)
+      .filter((input) => input.checked)
+      .map((input) => input.dataset.aiScope);
+  }
+
+  function setScopes(scopes) {
+    const selected = new Set(scopes);
+    Array.from(refs.scopeInputs).forEach((input) => { input.checked = selected.has(input.dataset.aiScope); });
+  }
+
+  function setStatus(message, kind) {
+    refs.status.textContent = message || '';
+    if (kind) refs.status.dataset.kind = kind;
+    else delete refs.status.dataset.kind;
+  }
+
+  function formatDate(value) {
+    return Number.isFinite(value) ? new Date(value * 1000).toLocaleString() : '—';
+  }
+
+  function appendText(parent, tag, className, text) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    element.textContent = text;
+    parent.appendChild(element);
+    return element;
+  }
+
+  function makeButton(label, className, handler, disabled) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = className || 'btn';
+    button.textContent = label;
+    button.disabled = !!disabled || busy;
+    button.addEventListener('click', handler);
+    return button;
+  }
+
+  function configFor(grant) {
+    const dataDir = dataDirFromCredentialPath(grant.credential_path);
+    const command = refs.command.value.trim();
+    if (!dataDir || !command || grant.revoked) return null;
+    return {
+      mcpServers: {
+        'hertz-studio': {
+          command,
+          args: ['--mcp-stdio', '--data-dir', dataDir, '--grant', grant.grant_id],
+        },
+      },
+    };
+  }
+
+  async function copyText(value, success) {
+    try {
+      await settings.copy(value);
+      setStatus(success, 'success');
+    } catch (error) {
+      setStatus('复制失败：' + (error && error.message ? error.message : '剪贴板不可用'), 'error');
+    }
+  }
+
+  function action(run) {
+    return async function () {
+      if (busy) return;
+      busy = true;
+      render();
+      try {
+        await run();
+      } catch (error) {
+        setStatus(error && error.message ? error.message : '操作失败', 'error');
+      } finally {
+        busy = false;
+        render();
+      }
+    };
+  }
+
+  function upsertGrant(grant) {
+    if (!grant) return;
+    const index = grants.findIndex((item) => item.grant_id === grant.grant_id);
+    if (index < 0) grants.unshift(grant);
+    else grants[index] = grant;
+    render();
+  }
+
+  async function refreshAfterMutation(message) {
+    try {
+      await loadGrants();
+      setStatus(message, 'success');
+    } catch (error) {
+      setStatus(message + '；列表刷新失败，已保留本次操作结果。' + (error && error.message ? ' ' + error.message : ''), 'error');
+    }
+  }
+
+  async function loadGrants() {
+    const response = await settings.transport.get('/v1/ai/grants');
+    if (!response || !Array.isArray(response.grants)) throw new Error('授权列表应答格式无效');
+    grants = response.grants.map(projectGrant).filter(Boolean);
+    render();
+  }
+
+  function renderGrant(grant) {
+    const item = document.createElement('article');
+    item.className = 'ai-grant-item';
+
+    const head = document.createElement('div');
+    head.className = 'ai-grant-item-head';
+    item.appendChild(head);
+    appendText(head, 'strong', 'ai-grant-name', grant.label || '未命名授权');
+    const state = appendText(head, 'span', 'ai-grant-state' + (grant.revoked ? ' is-revoked' : ''), grant.revoked ? '已撤销' : '有效');
+    state.setAttribute('aria-label', grant.revoked ? '授权已撤销' : '授权有效');
+    appendText(item, 'p', 'hint ai-grant-scopes', '权限：' + (grant.scopes.length
+      ? grant.scopes.map((scope) => scopeNames[scope] || scope).join('、')
+      : '无'));
+    appendText(item, 'p', 'hint ai-grant-scopes', '创建于 ' + formatDate(grant.created_at) + ' · 更新于 ' + formatDate(grant.updated_at));
+
+    const config = configFor(grant);
+    if (!grant.revoked && config) {
+      const configText = JSON.stringify(config, null, 2);
+      appendText(item, 'pre', 'ai-grant-config', configText);
+      const actions = document.createElement('div');
+      actions.className = 'set-actions ai-grant-actions';
+      item.appendChild(actions);
+      actions.appendChild(makeButton('复制 MCP 配置', 'btn', () => copyText(configText, 'MCP 配置已复制；其中不含凭据秘密。')));
+      actions.appendChild(makeButton('轮换凭据', 'btn', action(async () => {
+        const confirmed = await settings.confirm('轮换「' + (grant.label || '未命名授权') + '」的凭据？旧凭据会立即失效，已连接的 MCP 客户端需要重启。');
+        if (!confirmed) return;
+        const result = await settings.transport.post('/v1/ai/grants/' + encodeURIComponent(grant.grant_id) + '/rotate', {});
+        const rotated = projectGrant(result);
+        if (rotated) { rotated.revoked = false; upsertGrant(rotated); }
+        await refreshAfterMutation('凭据已轮换；请重启使用此授权的 MCP 客户端。');
+      })));
+      actions.appendChild(makeButton('撤销授权', 'btn danger', action(async () => {
+        const confirmed = await settings.confirm('撤销「' + (grant.label || '未命名授权') + '」？其凭据将被删除，所有使用者都会立即失去权限。');
+        if (!confirmed) return;
+        const result = await settings.transport.del('/v1/ai/grants/' + encodeURIComponent(grant.grant_id));
+        const revoked = projectGrant(result) || Object.assign({}, grant);
+        revoked.revoked = true;
+        revoked.credential_path = '';
+        upsertGrant(revoked);
+        await refreshAfterMutation('授权已撤销。');
+      })));
+    } else if (!grant.revoked) {
+      appendText(item, 'p', 'hint set-note', '无法从服务端安全摘要推导 DataDir，不能生成连接配置。');
+    }
+    refs.list.appendChild(item);
+  }
+
+  function render() {
+    if (!refs) return;
+    refs.create.disabled = busy;
+    refs.refresh.disabled = busy;
+    refs.label.disabled = busy;
+    refs.preset.disabled = busy;
+    refs.command.disabled = busy;
+    Array.from(refs.scopeInputs).forEach((input) => { input.disabled = busy; });
+    refs.root.setAttribute('aria-busy', busy ? 'true' : 'false');
+    refs.list.replaceChildren();
+    if (!grants.length) {
+      appendText(refs.list, 'p', 'hint ai-grant-empty', '尚无外部授权。');
+      return;
+    }
+    grants.forEach(renderGrant);
+  }
+
+  function bind() {
+    if (bound) return;
+    bound = true;
+    refs.preset.addEventListener('change', () => {
+      if (presets[refs.preset.value]) setScopes(presets[refs.preset.value]);
+    });
+    Array.from(refs.scopeInputs).forEach((input) => {
+      input.addEventListener('change', () => { refs.preset.value = 'custom'; });
+    });
+    refs.command.addEventListener('input', render);
+    refs.refresh.addEventListener('click', action(async () => {
+      await loadGrants();
+      setStatus('授权列表已刷新。', 'success');
+    }));
+    refs.create.addEventListener('click', action(async () => {
+      const scopes = scopesFromForm();
+      if (!scopes.length) throw new Error('至少选择一个权限范围');
+      const result = await settings.transport.post('/v1/ai/grants', {
+        label: refs.label.value.trim(),
+        scopes,
+      });
+      const created = projectGrant(result);
+      if (created) upsertGrant(created);
+      refs.label.value = '';
+      await refreshAfterMutation('授权已创建；复制对应 MCP 配置后可在客户端添加连接。');
+    }));
+  }
+
+  function init(options) {
+    const manager = node('ai-grant-manager');
+    const unavailable = node('ai-grant-unavailable');
+    if (!manager || !unavailable) return;
+    settings = options || {};
+    const transport = settings.transport;
+    const kind = transport && (typeof transport.kind === 'function' ? transport.kind() : transport.kind);
+    if (settings.isDbx || kind === 'dbx') {
+      manager.hidden = true;
+      unavailable.hidden = false;
+      unavailable.textContent = 'DBX 插件形态不支持外部 MCP stdio 管理。';
+      return;
+    }
+    if (kind !== 'server') {
+      manager.hidden = true;
+      unavailable.hidden = false;
+      unavailable.textContent = '当前未连接独立服务，连接服务后才能管理授权。';
+      return;
+    }
+    refs = {
+      root: node('ai-grant-settings'),
+      label: node('ai-grant-label'),
+      preset: node('ai-grant-preset'),
+      scopeInputs: node('ai-grant-scope-groups').querySelectorAll('input[data-ai-scope]'),
+      create: node('ai-grant-create'),
+      refresh: node('ai-grant-refresh'),
+      command: node('ai-grant-command'),
+      status: node('ai-grant-status'),
+      list: node('ai-grant-list'),
+    };
+    manager.hidden = false;
+    unavailable.hidden = true;
+    if (presets[refs.preset.value]) setScopes(presets[refs.preset.value]);
+    bind();
+    render();
+    loadGrants().catch((error) => setStatus('读取授权列表失败：' + (error && error.message ? error.message : '未知错误'), 'error'));
+  }
+
+  return { init };
+})();
 
 async function chooseTransport() {
   // DBX 插件沙箱里 CSP 是 connect-src 'none'，下面的健康探测必然失败，
@@ -1053,10 +1408,8 @@ function toast(message, kind = 'info') {
 
 let retries = 0;
 let reconnectTimer = 0;
-// 只有「真的断过线」才需要在重连时补一次全量拉取。启动流程自己会
-// await refreshAll()，WebSocket 的首次 onopen 不该再补一遍——那第二遍
-// loadSettings 的响应是异步到达的，落在用户已经开始操作的时刻，会把刚点
-// 下的即时开关按服务端旧值覆盖回去（症状：舞台上的按钮点了没反应）。
+let hasConnected = false;
+// 首次连接只补事件驱动数据；全量重连会重载设置，可能覆盖用户刚做的即时修改。
 let missedWhileOffline = false;
 
 function onConnectionChange(ok) {
@@ -1070,7 +1423,16 @@ function onConnectionChange(ok) {
     if (missedWhileOffline) {
       missedWhileOffline = false;
       refreshAll();
+      if (window.Workshop && Workshop.onAiTask) Workshop.onAiTask();
+    } else if (!hasConnected) {
+      // Startup queries begin before this subscription. Reconcile event-backed
+      // data after the listener is live, without reloading settings mid-edit.
+      restoreQueue();
+      refreshLibraryInPlace();
+      loadPlaylists();
+      if (window.Workshop && Workshop.onAiTask) Workshop.onAiTask();
     }
+    hasConnected = true;
   } else {
     missedWhileOffline = true;
   }
@@ -1118,6 +1480,7 @@ function handleEvent(msg) {
   }
   switch (msg.type) {
     case 'state': applySnapshot(msg); break;
+    case 'queue_changed': restoreQueue().catch(() => {}); break;
     case 'spectrum':
       state.spectrum = msg.bands || [];
       spectrumDirty = true;
@@ -1126,7 +1489,16 @@ function handleEvent(msg) {
       break;
     case 'scan': onScanProgress(msg); break;
     case 'library_changed': refreshLibraryInPlace(); loadPlaylists(); break;
-    case 'ended': reconcileEnded(); break;
+    case 'ended':
+      document.dispatchEvent(new CustomEvent('playback:ended', { detail: state.snapshot }));
+      reconcileEnded();
+      break;
+    case 'ai_task':
+    case 'ai_tasks_resync':
+      // R4-E：任务状态变化——工坊的任务面板开着时立刻刷新，其它场合它自己的
+      // 低频轮询兜底。ai_tasks_resync 在广播掉队时覆盖可能丢失的变更提醒；快照是事实。
+      if (window.Workshop && Workshop.onAiTask) Workshop.onAiTask();
+      break;
     case 'ui_notice':
       // dock 胶囊点了一下：tab 实例解除最小化。dock 实例自己忽略（它永远是最小化态）。
       if (msg.action === 'expand-capsule' && !window.HertzCapsuleOnly) setCapsuleMinimized(false);
@@ -1155,12 +1527,7 @@ function handleEvent(msg) {
     }
     case 'buffering': {
       // 在线曲边下边播：播放键转 loading 态，title 提示缓冲进度；收口时清空。
-      const active = !!msg.active;
-      const button = window.HertzCapsuleOnly ? ui.capsulePlay : ui.playpause;
-      button.classList.toggle('is-loading', active);
-      button.title = active
-        ? (msg.pct != null ? `缓冲中 ${msg.pct}%` : '缓冲中…')
-        : '';
+      syncBufferingIndicator(msg.active, msg.pct);
       break;
     }
     case 'beatmap_ready':
@@ -1241,6 +1608,29 @@ function digestMs(ms) {
 // ---------------------------------------------------------------------------
 
 let libraryEpoch = 0;
+let libraryRefreshPending = false;
+let libraryRefreshSequence = 0;
+const LIBRARY_META_SPARE_CAP = 1024;
+
+// A completed query is a safe point to retire metadata from previous searches.
+// Active lists/queues/selections remain authoritative even above the spare cap.
+function pruneLibraryMetadata() {
+  if (state.byId.size <= LIBRARY_META_SPARE_CAP) return;
+  const keep = new Set(state.queue || []);
+  for (const t of state.tracks) keep.add(t.id);
+  for (const t of detailTracks) keep.add(t.id);
+  for (const id of state.selected) keep.add(id);
+  if (state.current) keep.add(state.current.id);
+  if (state.snapshot) keep.add(state.snapshot.track_id);
+  if (state.loadingTrack) keep.add(state.loadingTrack);
+  let spare = 0;
+  for (const id of state.byId.keys()) if (!keep.has(id)) spare += 1;
+  if (spare <= LIBRARY_META_SPARE_CAP) return;
+  for (const id of state.byId.keys()) {
+    if (!keep.has(id)) { state.byId.delete(id); spare -= 1; }
+    if (spare <= LIBRARY_META_SPARE_CAP) break;
+  }
+}
 
 /// 就地刷新已加载的那一窗曲库（扫描完成 / WebDAV 导入 / 批量落地之后的
 /// `library_changed`）。
@@ -1250,9 +1640,10 @@ let libraryEpoch = 0;
 /// 「加载更多」攒出来的窗口也一起丢掉。`renderLibrary` 本来就是按 id 复用行节点、
 /// 只删不在新列表里的行、必要时才搬位置，所以这里只要求「同一窗口的新数据」。
 async function refreshLibraryInPlace() {
-  // 正在分页加载时交给那一轮：它自己会带上最新数据渲染。
-  if (state.loading) return;
+  // 初次查询可能早于事件订阅且仍在途；等它结束后再补读，不能丢掉边沿。
+  if (state.loading) { libraryRefreshPending = true; return; }
   const epoch = libraryEpoch;
+  const sequence = ++libraryRefreshSequence;
   // 保持用户已经攒出来的窗口大小，至少一页。
   const limit = Math.max(PAGE, state.tracks.length);
   const artist = state.libFilter.artist ? `&artist=${encodeURIComponent(state.libFilter.artist)}` : '';
@@ -1261,11 +1652,12 @@ async function refreshLibraryInPlace() {
     const page = await transport.get(
       `/v1/tracks?q=${encodeURIComponent(state.q)}&sort=${encodeURIComponent(state.sort)}${artist}${album}&limit=${limit}&offset=0`);
     // 期间用户改了查询/排序/筛选：那条路径自己会整体重画，这里不要插一脚。
-    if (epoch !== libraryEpoch) return;
+    if (epoch !== libraryEpoch || sequence !== libraryRefreshSequence) return;
     state.total = page.total;
     state.tracks = page.tracks;
     state.offset = state.tracks.length;
     for (const t of page.tracks) state.byId.set(t.id, t);
+    pruneLibraryMetadata();
     renderLibrary();
   } catch {
     // 刷新失败就保留现有列表：这只是后台变化，没必要用 toast 打断用户。
@@ -1275,6 +1667,7 @@ async function refreshLibraryInPlace() {
 async function loadTracks(reset) {
   if (state.loading && !reset) return;
   if (reset) libraryEpoch += 1;
+  if (reset) libraryRefreshPending = false;
   const epoch = libraryEpoch;
   const offset = reset ? 0 : state.tracks.length;
   const q = state.q;
@@ -1294,6 +1687,7 @@ async function loadTracks(reset) {
     state.tracks = state.tracks.concat(page.tracks);
     state.offset = state.tracks.length;
     for (const t of page.tracks) state.byId.set(t.id, t);
+    pruneLibraryMetadata();
     renderLibrary();
   } catch (err) {
     if (epoch !== libraryEpoch) return;
@@ -1305,6 +1699,10 @@ async function loadTracks(reset) {
       ui.libSentinel.disabled = false;
       ui.libSentinel.textContent = failed ? '重试读取曲库' : '加载更多歌曲';
       ui.libSentinel.hidden = !failed && state.tracks.length >= state.total;
+      if (libraryRefreshPending) {
+        libraryRefreshPending = false;
+        refreshLibraryInPlace();
+      }
     }
   }
 }
@@ -1754,8 +2152,35 @@ function staleCommand(snap) {
 let documentTitleCache = '';
 let progressLabelCache = '';
 let capsuleMediaKey = '';
+let snapshotHomeKey = '';
+let mediaSessionStateKey = '';
+
+function syncSnapshotHome() {
+  if (typeof HomeDashboard === 'undefined') return;
+  const home = homeSnapshot();
+  const track = home.current;
+  const key = JSON.stringify([home.playing, home.queueLength, home.intent, home.pending,
+    home.dailyVisible, home.recentVisible,
+    track && [track.id, track.title, track.artist, track.cover, track.has_cover]]);
+  if (key === snapshotHomeKey) return;
+  snapshotHomeKey = key;
+  HomeDashboard.update();
+}
+
+function syncBufferingIndicator(active, pct) {
+  const loading = !!active;
+  const button = window.HertzCapsuleOnly ? ui.capsulePlay : ui.playpause;
+  if (button.classList.contains('is-loading') !== loading) button.classList.toggle('is-loading', loading);
+  const title = loading
+    ? (pct != null ? `缓冲中 ${pct}%` : '缓冲中…')
+    : '';
+  if (button.title !== title) button.title = title;
+}
 
 function applySnapshot(snap) {
+  if (Object.prototype.hasOwnProperty.call(snap, 'buffering')) {
+    syncBufferingIndicator(snap.buffering, snap.pct);
+  }
   const previous = state.snapshot.track_id;
   const wasPlaying = state.snapshot.playing === true;
   if (previous !== snap.track_id && state.seeking) cancelSeek();
@@ -1764,6 +2189,7 @@ function applySnapshot(snap) {
   else if (state.commandAt && !state.commandPending) state.commandAt = 0;
   if (volumeTarget !== null) snap = { ...snap, volume: volumeTarget };
   state.snapshot = snap;
+  document.dispatchEvent(new CustomEvent('playback:snapshot', { detail: snap }));
   if (window.HertzCapsuleOnly) {
     const label = snap.playing ? '正在播放' : '已暂停';
     if (ui.capsuleLabel.textContent !== label) ui.capsuleLabel.textContent = label;
@@ -1777,12 +2203,15 @@ function applySnapshot(snap) {
     if (mediaKey !== capsuleMediaKey) { capsuleMediaKey = mediaKey; syncMediaSession(); }
     return;
   }
-  if (typeof HomeDashboard !== 'undefined') HomeDashboard.update();
-  ui.playpause.classList.toggle('is-playing', snap.playing);
-  ui.playpause.setAttribute('aria-label', snap.playing ? '暂停' : '播放');
+  syncSnapshotHome();
+  if (ui.playpause.classList.contains('is-playing') !== !!snap.playing) ui.playpause.classList.toggle('is-playing', !!snap.playing);
+  const playLabel = snap.playing ? '暂停' : '播放';
+  if (ui.playpause.getAttribute('aria-label') !== playLabel) ui.playpause.setAttribute('aria-label', playLabel);
   // 胶囊上的小标签跟着播放态走：停着的时候还写「正在播放」是撒谎。
-  ui.capsuleLabel.textContent = snap.playing ? '正在播放' : '已暂停';
-  ui.mode.textContent = state.modeLabel[snap.mode] || snap.mode;
+  const capsuleLabel = snap.playing ? '正在播放' : '已暂停';
+  if (ui.capsuleLabel.textContent !== capsuleLabel) ui.capsuleLabel.textContent = capsuleLabel;
+  const modeLabel = state.modeLabel[snap.mode] || snap.mode;
+  if (ui.mode.textContent !== modeLabel) ui.mode.textContent = modeLabel;
   // 标题只在真的变了才写：这行原先每帧赋一次值，而曲名一整个播放周期都不变。
   const nextTitle = state.current ? `${state.current.title} · hertz-studio` : 'hertz-studio';
   if (nextTitle !== documentTitleCache) {
@@ -2106,6 +2535,7 @@ function stageDoc(doc) {
 
   let lines = doc.lines;
   let translation = Array.isArray(doc.translation) ? doc.translation : null;
+  let romanization = Array.isArray(doc.romanization) ? doc.romanization : null;
 
   if (sRe) {
     const drop = new Set();
@@ -2124,26 +2554,38 @@ function stageDoc(doc) {
     if (drop.size) {
       lines = lines.filter((_, i) => !drop.has(i));
       if (translation) translation = translation.filter((_, i) => !drop.has(i));
+      if (romanization) romanization = romanization.filter((_, i) => !drop.has(i));
     }
   }
 
   if (fRe) {
     const kept = [];
     const keptT = translation ? [] : null;
+    const keptR = romanization ? [] : null;
     for (let i = 0; i < lines.length; i += 1) {
       if (fRe.test(String(lines[i].text || ''))) continue;
       kept.push(lines[i]);
       if (keptT) keptT.push(translation[i]);
+      if (keptR) keptR.push(romanization[i]);
     }
     lines = kept;
     if (keptT) translation = keptT;
+    if (keptR) romanization = keptR;
   }
 
-  const offset = (doc.user_offset_ms || 0) + globalLyricOffsetMs();
+  const offset = globalLyricOffsetMs();
   if (lines === doc.lines && translation === (Array.isArray(doc.translation) ? doc.translation : null)
-    && offset === (doc.user_offset_ms || 0)) return doc;
-  const out = { ...doc, lines, user_offset_ms: offset };
+    && offset === 0) return doc;
+  // Server already applied file/per-track offsets. Shift only the presentation
+  // copy; calibration must continue to display/write the per-track value.
+  const shift = value => value == null ? value : Math.max(0, value + offset);
+  if (offset) lines = lines.map(line => ({ ...line,
+    start_ms: shift(line.start_ms), end_ms: shift(line.end_ms),
+    words: (line.words || []).map(word => ({ ...word, start_ms: shift(word.start_ms), end_ms: shift(word.end_ms) })),
+  }));
+  const out = { ...doc, lines };
   if (translation) out.translation = translation;
+  if (romanization) out.romanization = romanization;
   return out;
 }
 
@@ -2175,6 +2617,273 @@ function paintPatternNotes() {
   }
 }
 
+let emotionAiStatus = null;
+let emotionAutoToken = 0;
+let emotionAutoScanToken = 0;
+let emotionAutoController = null;
+let emotionAutoPendingHash = null;
+let emotionAutoAppliedHash = null;
+let emotionStatusEpoch = 0;
+function lyricEmotionReady() {
+  return !!(emotionAiStatus && emotionAiStatus.provider && emotionAiStatus.provider.ready &&
+    emotionAiStatus.authorized === true && state.settings.lyrics_emotion_ai_authorized === true);
+}
+function lyricEmotionMode() {
+  if (state.settings.lyrics_emotion_mode === 'manual') return 'manual';
+  if (state.settings.lyrics_emotion_mode === 'auto' && lyricEmotionReady()) return 'auto';
+  return 'off';
+}
+function lyricEmotionPreview() {
+  var id = state.settings.lyrics_emotion_preview;
+  return ['joy', 'sorrow', 'anger', 'anxious', 'tender', 'triumph', 'lonely'].indexOf(id) >= 0 ? id : 'joy';
+}
+function lyricEmotionScale() {
+  var v = Number(state.settings.lyrics_emotion_scale);
+  return isFinite(v) ? Math.max(0, Math.min(1.5, v)) : 1;
+}
+function lyricEmotionCurve() {
+  var v = Number(state.settings.lyrics_emotion_curve);
+  return isFinite(v) ? Math.max(0.5, Math.min(1.5, v)) : 1;
+}
+function lyricEmotionAccent() {
+  return state.settings.lyrics_emotion_accent === true;
+}
+function lyricEmotionAccentWords() {
+  return typeof state.settings.lyrics_emotion_accent_words === 'string'
+    ? state.settings.lyrics_emotion_accent_words : '';
+}
+function lyricEmotionPalette() {
+  return state.settings.lyrics_emotion_palette !== false;
+}
+function applyEmotionSettings() {
+  if (!window.Stage || !Stage.setEmotionSettings) return;
+  const mode = lyricEmotionMode();
+  if (mode !== 'auto') invalidateEmotionAuto();
+  Stage.setEmotionSettings({
+    mode,
+    preview: lyricEmotionPreview(),
+    scale: lyricEmotionScale(),
+    curve: lyricEmotionCurve(),
+    accent: lyricEmotionAccent(),
+    accentWords: lyricEmotionAccentWords(),
+    palette: lyricEmotionPalette()
+  });
+}
+function paintEmotionSettings() {
+  if (!ui.setEmotionMode) return;
+  var mode = lyricEmotionMode();
+  var auto = state.settings.lyrics_emotion_mode === 'auto';
+  ui.setEmotionMode.value = auto ? 'auto' : mode;
+  ui.setEmotionPreview.value = lyricEmotionPreview();
+  ui.setEmotionPreviewRow.hidden = mode !== 'manual';
+  ui.setEmotionScale.value = lyricEmotionScale();
+  if (ui.setEmotionScaleValue) ui.setEmotionScaleValue.textContent = lyricEmotionScale().toFixed(2);
+  if (ui.setEmotionCurve) ui.setEmotionCurve.value = lyricEmotionCurve();
+  if (ui.setEmotionCurveValue) ui.setEmotionCurveValue.textContent = lyricEmotionCurve().toFixed(2);
+  if (ui.setEmotionAccent) ui.setEmotionAccent.checked = lyricEmotionAccent();
+  if (ui.setEmotionAccentWords) ui.setEmotionAccentWords.value = lyricEmotionAccentWords();
+  ui.setEmotionPalette.checked = lyricEmotionPalette();
+  if (ui.setEmotionAiAuthorized) ui.setEmotionAiAuthorized.checked = state.settings.lyrics_emotion_ai_authorized === true;
+  var autoOption = ui.setEmotionMode.querySelector('option[value="auto"]');
+  if (autoOption) autoOption.disabled = !lyricEmotionReady();
+  if (ui.setEmotionAiNote) {
+    var provider = emotionAiStatus && emotionAiStatus.provider;
+    ui.setEmotionAiNote.textContent = !emotionAiStatus
+      ? '正在检查模型状态…'
+      : provider && provider.simulated
+        ? (lyricEmotionReady() ? '本地模拟 provider 已就绪，不访问云端；结果仅用于联调' : '启用后只运行本地模拟分类，不访问云端')
+        : provider && provider.ready
+          ? (lyricEmotionReady() ? '模型已就绪；授权后会在每首歌载入时分类' : '授权前不会发送歌词')
+          : ((provider && provider.diagnostic) || '模型未就绪；不会发送歌词');
+  }
+  if (ui.setEmotionLockNote) {
+    var lockCount = Object.keys(emotionLockCache).reduce(function (sum, hash) {
+      return sum + (emotionLockCache[hash] ? emotionLockCache[hash].length : 0);
+    }, 0);
+    ui.setEmotionLockNote.textContent = lockCount
+      ? '已锁定 ' + lockCount + ' 行；手动覆盖优先于 auto 结果'
+      : '手动覆盖优先于 auto 结果；关闭情绪演出时不生效';
+  }
+  if (ui.setEmotionNote) {
+    ui.setEmotionNote.textContent = auto
+      ? '自动分类使用已配置的模型 provider；失败时保持中性，不影响播放。'
+      : '关闭时与当前版本完全一致；手动预览只用于调试，自动分类需要模型 provider 和显式授权。';
+  }
+}
+
+let emotionLockCache = Object.create(null);
+let emotionLockLoading = Object.create(null);
+
+function validEmotionHash(hash) {
+  return typeof hash === 'string' && /^sha256:[0-9a-f]{64}$/.test(hash);
+}
+
+function normalEmotionLocks(locks) {
+  return (Array.isArray(locks) ? locks : []).filter(function (lock) {
+    return lock && Number.isFinite(lock.from) && Number.isFinite(lock.to) &&
+      lock.to >= lock.from && lock.emotion && typeof lock.emotion === 'string';
+  }).map(function (lock) {
+    return {
+      from: lock.from, to: lock.to, emotion: lock.emotion,
+      intensity: Number.isFinite(lock.intensity) ? lock.intensity : 1,
+      confidence: Number.isFinite(lock.confidence) ? lock.confidence : 1
+    };
+  });
+}
+
+async function emotionLocks(hash) {
+  if (!validEmotionHash(hash)) return [];
+  if (emotionLockCache[hash]) return emotionLockCache[hash];
+  if (!emotionLockLoading[hash]) {
+    emotionLockLoading[hash] = transport.get('/v1/ai/lyrics/emotion/locks?lyricsHash=' +
+      encodeURIComponent(hash)).then(function (result) {
+      var locks = normalEmotionLocks(result && result.locks);
+      emotionLockCache[hash] = locks;
+      return locks;
+    }).catch(function () {
+      // 读取失败不阻断播放；下一次请求会重试。
+      delete emotionLockCache[hash];
+      return [];
+    }).finally(function () {
+      delete emotionLockLoading[hash];
+    });
+  }
+  return emotionLockLoading[hash];
+}
+
+async function persistEmotionLocks(hash, locks) {
+  if (!validEmotionHash(hash)) return [];
+  var next = normalEmotionLocks(locks);
+  var saved = await transport.put('/v1/ai/lyrics/emotion/locks', {
+    lyricsHash: hash, locks: next
+  });
+  next = normalEmotionLocks(saved && saved.locks);
+  emotionLockCache[hash] = next;
+  paintEmotionSettings();
+  return next;
+}
+
+async function clearEmotionLocks(hash) {
+  if (!validEmotionHash(hash)) return;
+  await transport.del('/v1/ai/lyrics/emotion/locks?lyricsHash=' + encodeURIComponent(hash));
+  emotionLockCache[hash] = [];
+  paintEmotionSettings();
+}
+
+/// 旧版本把锁定存在 settings 数组里；服务端表上线后一次性搬过去。
+async function migrateEmotionLocks() {
+  var legacy = state.settings && state.settings.lyrics_emotion_locks;
+  if (!Array.isArray(legacy) || !legacy.length) return;
+  var grouped = Object.create(null);
+  legacy.forEach(function (lock) {
+    if (!lock || !validEmotionHash(lock.hash) || !Number.isFinite(lock.from) ||
+        !Number.isFinite(lock.to)) return;
+    (grouped[lock.hash] || (grouped[lock.hash] = [])).push({
+      from: lock.from, to: lock.to, emotion: lock.emotion,
+      intensity: Number.isFinite(lock.intensity) ? lock.intensity : 1,
+      confidence: Number.isFinite(lock.confidence) ? lock.confidence : 1
+    });
+  });
+  var hashes = Object.keys(grouped);
+  try {
+    for (var i = 0; i < hashes.length; i += 1) {
+      await persistEmotionLocks(hashes[i], grouped[hashes[i]]);
+    }
+    await transport.put('/v1/settings', { lyrics_emotion_locks: [] });
+    state.settings.lyrics_emotion_locks = [];
+  } catch (error) {
+    // 迁移失败保留旧数据，下次启动重试；不影响当前播放。
+  }
+}
+
+async function applyEmotionLocks(cue) {
+  if (!cue) return cue;
+  var locks = await emotionLocks(cue.lyricsHash);
+  if (!locks.length) return cue;
+  var doc = Stage && Stage.lyrics ? Stage.lyrics() : null;
+  var count = doc && doc.lines ? doc.lines.length : 0;
+  if (!count) return cue;
+  var lines = Array.isArray(cue.lines) ? cue.lines.filter(function (line) {
+    return !locks.some(function (lock) { return line.index >= lock.from && line.index <= lock.to; });
+  }) : [];
+  locks.forEach(function (lock) {
+    var to = Math.min(count - 1, lock.to);
+    for (var i = Math.max(0, lock.from); i <= to; i += 1) {
+      lines.push({
+        index: i, emotion: lock.emotion,
+        intensity: Number.isFinite(lock.intensity) ? lock.intensity : 1,
+        confidence: Number.isFinite(lock.confidence) ? lock.confidence : 1
+      });
+    }
+  });
+  return Object.assign({}, cue, { lines: lines });
+}
+
+async function refreshEmotionAiStatus() {
+  const epoch = ++emotionStatusEpoch;
+  let nextStatus = null;
+  try {
+    nextStatus = await transport.get('/v1/ai/lyrics/emotion/status');
+  } catch (error) {
+    nextStatus = null;
+  }
+  if (epoch !== emotionStatusEpoch) return;
+  emotionAiStatus = nextStatus;
+  paintEmotionSettings();
+  applyEmotionSettings();
+  if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
+}
+
+async function maybeAutoEmotion() {
+  if (lyricEmotionMode() !== 'auto' || !window.LyricEmotion || !Stage || !Stage.lyrics) return;
+  var doc = Stage.lyrics();
+  if (!doc || !doc.lines || !doc.lines.length) return;
+  var scanToken = ++emotionAutoScanToken;
+  var lines = doc.lines.map(function (line, index) {
+    return { index: index, start_ms: line.start_ms, text: String(line.text == null ? '' : line.text).normalize('NFC') };
+  });
+  var requestToken = null;
+  try {
+    var hash = await LyricEmotion.hashLyrics(lines);
+    if (scanToken !== emotionAutoScanToken || lyricEmotionMode() !== 'auto') return;
+    if (hash === emotionAutoAppliedHash || hash === emotionAutoPendingHash) return;
+    if (emotionAutoController) emotionAutoController.abort();
+    requestToken = ++emotionAutoToken;
+    var controller = new AbortController();
+    emotionAutoController = controller;
+    emotionAutoPendingHash = hash;
+    var cue = await transport.post('/v1/ai/lyrics/emotion',
+      { lyricsHash: hash, lines: lines }, { signal: controller.signal });
+    if (requestToken !== emotionAutoToken || lyricEmotionMode() !== 'auto' || !cue || cue.version !== 1) return;
+    var merged = await applyEmotionLocks(cue);
+    if (requestToken !== emotionAutoToken || lyricEmotionMode() !== 'auto') return;
+    if (Stage.setEmotionCueDoc(merged)) emotionAutoAppliedHash = hash;
+  } catch (error) {
+    // Provider 未就绪/授权撤销/超时都保持中性；播放不受影响。
+  } finally {
+    if (requestToken != null && requestToken === emotionAutoToken) {
+      emotionAutoPendingHash = null;
+      emotionAutoController = null;
+    }
+  }
+}
+
+function invalidateEmotionAuto() {
+  emotionAutoScanToken += 1;
+  emotionAutoToken += 1;
+  if (emotionAutoController) emotionAutoController.abort();
+  emotionAutoController = null;
+  emotionAutoPendingHash = null;
+  emotionAutoAppliedHash = null;
+}
+
+window.HertzEmotionAuto = {
+  onLyricsChanged: function () {
+    invalidateEmotionAuto();
+    if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
+  }
+};
+
 function paintLyricSettings() {
   if (!ui.setLyricStaff) return;
   ui.setLyricStaff.value = lyricStaffPolicy();
@@ -2183,6 +2892,8 @@ function paintLyricSettings() {
   ui.setLyricFilterPattern.value = state.settings.lyrics_filter_pattern || '';
   paintLyricOffset();
   paintPatternNotes();
+  paintEmotionSettings();
+  applyEmotionSettings();
 }
 
 // 设置项写失败的统一出口。写设置表都是用户动作的收尾（拨了个开关、改了档位），
@@ -2197,11 +2908,12 @@ async function saveLyricSettings(patch) {
   Object.assign(state.settings, patch);
   paintLyricSettings();
   applyMotionSurfaces();
-  persistSettings(patch);
+  await persistSettings(patch);
   const id = state.current && state.current.id;
   // 重拉歌词失败不提示：它只是拿服务端最新歌词刷新显示，偏移/过滤已经生效，
   // 失败时保持当前显示比弹一个 toast 更不打扰。
   if (id && state.snapshot.track_id === id) await refreshLyrics(id, state.current).catch(() => {});
+  if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
 }
 
 // ---------------------------------------------------------------------------
@@ -2245,12 +2957,10 @@ function applyMotionSurfaces() {
 // 用户最常见的换肤路径是「在设置页里点皮肤」（皮肤列表就在设置页里），于是
 // 换肤那一刻 state.view 停在 'settings'。各皮肤对设置视图的处理完全不同：
 //
-//   · classic / sheen / workbench / ios —— 设置是中栏的一个普通视图，
-//     setView('settings') 把其它视图全藏掉、只留它；
 //   · liunian / qingfeng —— 把 #view-settings **搬进自己的浮层**
 //     （ln-set-pane / qf-set-pane），并把它的 hidden 置 true
 //     （浮层没开时不该露出来）；
-//   · classic / sheen / workbench / ios / chaoxi —— 设置走共享的清风同款
+//   · classic / heijiao / orbit —— 设置走共享的清风同款
 //     浮层（skins/skin-settings-sheet.js），视图同样被搬走并隐藏，
 //     setView('settings') 被它的 MutationObserver 拦截成开浮层。
 //
@@ -2372,6 +3082,7 @@ async function refreshLyrics(id, track) {
   const staged = stageDoc(doc);
   if (epoch !== lyricRefreshEpoch || !state.current || state.current.id !== id) return doc;
   if (Stage) Stage.setLyrics(staged && staged.lines && staged.lines.length ? staged : null);
+  if (window.HertzEmotionAuto) window.HertzEmotionAuto.onLyricsChanged();
   if (window.NowPlaying) NowPlaying.lyricState(doc ? 'ready' : 'empty');
   syncNpLyrics(id, doc);
   return doc;
@@ -2509,8 +3220,9 @@ function syncStageIdle() {
   if (state.snapshot.playing) state.stopped = false;
   // 默认开启：设置表里没有这项（老用户、首次运行）时按「开」处理。
   const hide = state.settings.stage_idle_hide !== false && stageIdle();
-  if (hide) document.body.dataset.stageIdle = '1';
-  else delete document.body.dataset.stageIdle;
+  if (hide) {
+    if (document.body.dataset.stageIdle !== '1') document.body.dataset.stageIdle = '1';
+  } else if (document.body.dataset.stageIdle !== undefined) delete document.body.dataset.stageIdle;
 }
 
 // 持久化约定：persist 只在用户真的动了一下开关时为 true，
@@ -2814,8 +3526,12 @@ function paintRowArt(art, id) {
   }
 }
 
+let playlistLoadSequence = 0;
+
 async function loadPlaylists() {
+  const sequence = ++playlistLoadSequence;
   const data = await transport.get('/v1/playlists').catch(() => ({ playlists: [] }));
+  if (sequence !== playlistLoadSequence) return;
   state.playlists = data.playlists || [];
   if (ui.playlistCount) ui.playlistCount.textContent = state.playlists.length
     ? `${state.playlists.length} 个歌单` : '';
@@ -4058,9 +4774,10 @@ async function loadScanRoots() {
 
 let scanStatusTimer = 0;
 let scanStatusPending = false;
-function scheduleScanStatus() {
+let scanStatusRetryCount = 0;
+function scheduleScanStatus(delay = 1000) {
   clearTimeout(scanStatusTimer);
-  scanStatusTimer = setTimeout(() => { scanStatusTimer = 0; refreshScanStatus(); }, 1000);
+  scanStatusTimer = setTimeout(() => { scanStatusTimer = 0; refreshScanStatus(); }, delay);
 }
 
 async function refreshScanStatus() {
@@ -4069,6 +4786,7 @@ async function refreshScanStatus() {
   clearTimeout(scanStatusTimer); scanStatusTimer = 0;
   try {
     const status = await transport.get('/v1/library/status');
+    scanStatusRetryCount = 0;
     ui.scanCancel.hidden = !status.running;
     ui.scanCancel.disabled = !!status.cancelled;
     ui.scanCancel.textContent = status.cancelled ? '正在取消…' : '取消扫描';
@@ -4093,6 +4811,11 @@ async function refreshScanStatus() {
     else await loadScanRoots();
   } catch (err) {
     ui.scanLabel.textContent = errText('扫描状态读取失败', err);
+    if (!ui.scanPanel.hidden) {
+      const delay = Math.min(15000, 1000 * 2 ** scanStatusRetryCount);
+      scanStatusRetryCount = Math.min(scanStatusRetryCount + 1, 4);
+      scheduleScanStatus(delay);
+    }
   } finally { scanStatusPending = false; }
 }
 
@@ -4156,6 +4879,7 @@ async function loadSettings() {
   if (ui.setScrobble) ui.setScrobble.checked = state.settings.scrobble_enabled !== false;
   if (ui.setRelay) ui.setRelay.checked = state.settings.online_auto_relay !== false;
   paintLyricSettings();
+  refreshEmotionAiStatus();
   // 封面取色会盖掉用户选的主题，默认不这么做：设置表里没有这项时按关闭回填。
   setCoverFollow(state.settings.cover_follow === true, false);
   // 导航里「每日推荐」的可见性：关掉就把入口摘掉，其它菜单项不受影响。
@@ -4591,6 +5315,7 @@ async function loadDevices() {
 // ---------------------------------------------------------------------------
 
 function setView(name, options) {
+  if (state.view === 'online' && name !== 'online' && window.Online) Online.cancelSearch();
   state.view = name;
   for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
   ui.rail.querySelectorAll('.rail-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
@@ -4774,36 +5499,54 @@ function initSpaceHome(playbackHost) {
         libraryPreview: state.tracks[0] || null, sources: window.Online ? Online.sources() : [] };
     },
     playNext: () => post('/v1/player/next'),
-    library: async ({ q = '', offset = 0, source = 'local', onResults }) => {
-      if (source === 'all') {
-        if (!q) return {items:[]};
-        const sources = [{id:'local'}].concat(window.Online ? Online.sources() : []);
-        const completed = new Map();
-        const aggregate = () => {
-          const good = sources.map(provider => completed.get(provider.id)).filter(Boolean);
-          return {items:good.flatMap(page => page.items),total:good.reduce((max,page) => Math.max(max,page.total),0),nextOffset:offset+20};
-        };
-        const pages = await Promise.allSettled(sources.map(async (provider) => {
-          const local = provider.id === 'local';
-          const page = await transport.get((local ? '/v1/tracks?' : '/v1/online/search?') + new URLSearchParams({q,source:provider.id,sort:'title',limit:20,offset}));
-          const result = {items:remember((page.tracks || []).map(track => local ? track : {...track,source:track.source || provider.id})),total:page.total || 0};
-          completed.set(provider.id,result);
-          if (onResults) onResults(aggregate());
-          return result;
-        }));
-        const good = pages.filter(page => page.status === 'fulfilled').map(page => page.value);
-        if (!good.length) throw pages[0].reason;
-        return {...aggregate(),
-          note:pages.some(page => page.status === 'rejected') ? '部分音源暂不可用，已显示其他搜索结果' : ''};
-      }
-      if (source === 'local') {
-        const page = await transport.get('/v1/tracks?' + new URLSearchParams({ q, sort: 'title', limit: 60, offset }));
-        return { items: remember(page.tracks || []), total: page.total || 0 };
-      }
+    beginSearch: () => HertzSearch.create(transport),
+    whenSearchReady: () => window.Online && Online.whenSearchReady ? Online.whenSearchReady() : Promise.resolve(),
+    library: async ({ q = '', offset = 0, source = 'local', onResults, network }) => {
       if (source === 'online') return { items: [], note: '选择音源并搜索在线音乐' };
-      if (!q) return { items: [], note: '输入歌曲或歌手，搜索当前音源' };
-      const page = await transport.get('/v1/online/search?' + new URLSearchParams({ source, q, limit: 60, offset }));
-      return { items: remember((page.tracks || []).map((track) => ({ ...track, source: track.source || source }))), total: page.total || 0 };
+      if (!q && source !== 'local') return { items: [], note: '输入歌曲或歌手，搜索当前音源' };
+      if (source === 'all' && window.Online && Online.whenSearchReady) await Online.whenSearchReady();
+      const reader = network || transport;
+      if (!q && source === 'local') {
+        const page = await reader.get('/v1/tracks?' + new URLSearchParams({ q, sort:'title', limit:60, offset }));
+        return { items:remember(page.tracks || []), total:page.total || 0 };
+      }
+      const onlineSources = source === 'all' && window.Online ? Online.searchSources() : [];
+      const sources = source === 'all' ? [{id:'local'}].concat(onlineSources.map(id => ({id}))) : [{id:source}];
+      const note = source === 'all' && window.Online && !onlineSources.length ? '当前没有可用在线音源，以下仅显示本地结果' : '';
+      const pages = sources.map(provider => ({source:provider.id,items:[],offset,more:true,loading:false,error:null}));
+      const aggregate = () => {
+        const items = pages.flatMap(page => page.items);
+        const total = pages.reduce((sum,page) => sum + (page.total == null ? page.items.length : page.total),0);
+        return {items,total,nextOffset:items.length,loading:pages.some(page => page.loading),
+          note,
+          sourceStates:pages.map(page => ({source:page.source,loading:page.loading,error:page.error,more:page.more,
+            count:page.items.length,retry:() => load(page),next:() => load(page)}))};
+      };
+      const publish = () => { if (onResults && (!network || network.active)) onResults(aggregate()); };
+      const load = async page => {
+        if (page.loading || (network && !network.active)) return;
+        page.loading = true; page.error = null; publish();
+        try {
+          const local = page.source === 'local';
+          const result = await reader.get((local ? '/v1/tracks?' : '/v1/online/search?')
+            + new URLSearchParams({q,source:page.source,sort:'title',limit:20,offset:page.offset}));
+          if (network && !network.active) return;
+          const raw = result.tracks || [];
+          const incoming = remember(raw.map(track => ({...track,source:page.source})));
+          const seen = new Set(page.items.map(item => item.id));
+          const before = page.items.length;
+          incoming.forEach(item => { if (!seen.has(item.id)) { seen.add(item.id); page.items.push(item); } });
+          page.total = Number.isSafeInteger(result.total) && result.total >= 0 ? result.total : page.offset + raw.length;
+          const cursor = result.pagination && result.pagination.next_offset >= page.offset ? result.pagination : null;
+          const next = cursor && Number.isSafeInteger(cursor.next_offset) ? cursor.next_offset : page.offset + raw.length;
+          page.more = next > page.offset && (cursor ? !!cursor.has_more : page.items.length > before && (result.total != null ? next < result.total : raw.length >= 20));
+          page.offset = next;
+        } catch (error) {
+          if (!network || network.active) page.error = HertzSearch.failure(error);
+        } finally { page.loading = false; publish(); }
+      };
+      await Promise.all(pages.map(load));
+      return aggregate();
     },
     playlists: async () => {
       const page = await transport.get('/v1/playlists');
@@ -5121,7 +5864,7 @@ function initTopMoreMenu() {
   if (!root || !btn || !menu) return;
 
   // 与 #theme-menu / #skin-menu 同一件事：把弹层搬出 .topbar 的层叠上下文。留在
-  // 原处的话浮光那块 fixed + z-index:58 的舞台面板会整块盖住它（实测命中 #stage）。
+  // 原处的话舞台抽屉那块 fixed + z-index:58 的面板会整块盖住它（实测命中 #stage）。
   document.body.appendChild(menu);
 
   let open = false;
@@ -5232,19 +5975,24 @@ function updateMediaSessionMetadata(track, artUrl) {
 
 function syncMediaSession() {
   if (!('mediaSession' in navigator)) return;
+  const duration = playbackDuration(state.snapshot);
+  const playbackState = !state.snapshot.track_id || state.stopped
+    ? 'none' : state.snapshot.playing ? 'playing' : 'paused';
+  const position = Math.max(0, Math.min(duration, state.snapshot.position_ms || 0));
+  const key = JSON.stringify([state.snapshot.track_id, playbackState, duration, position]);
+  if (key === mediaSessionStateKey) return;
   try {
-    navigator.mediaSession.playbackState = !state.snapshot.track_id || state.stopped
-      ? 'none' : state.snapshot.playing ? 'playing' : 'paused';
-    const duration = playbackDuration(state.snapshot);
+    navigator.mediaSession.playbackState = playbackState;
     if (duration > 0 && !state.stopped) {
       navigator.mediaSession.setPositionState({
         duration: duration / 1000,
         playbackRate: 1,
-        position: Math.max(0, Math.min(duration, state.snapshot.position_ms || 0)) / 1000,
+        position: position / 1000,
       });
     } else {
       navigator.mediaSession.setPositionState();
     }
+    mediaSessionStateKey = key;
   } catch { /* positionState 在部分内核上不可用 */ }
 }
 
@@ -5309,8 +6057,8 @@ function syncVolume(volume) {
   if (value > 0) unmutedVolume = value;
   [ui.volume, np.volume].forEach((range) => {
     if (!range) return;
-    range.value = String(value);
-    range.setAttribute('aria-valuetext', `${value}%`);
+    if (range.value !== String(value)) range.value = String(value);
+    if (range.getAttribute('aria-valuetext') !== `${value}%`) range.setAttribute('aria-valuetext', `${value}%`);
   });
 }
 
@@ -5363,6 +6111,7 @@ const PROGRESS_PAINT_MS = 100;
 let progressPaintedAt = 0;
 let progressTrackCache = null;
 let progressDurationCache = -1;
+let progressPositionCache = -1;
 
 function renderPlaybackProgress(snap, preview) {
   const duration = playbackDuration(snap);
@@ -5372,7 +6121,9 @@ function renderPlaybackProgress(snap, preview) {
   const now = performance.now();
   const forced = interactive
     || snap.track_id !== progressTrackCache
-    || duration !== progressDurationCache;
+    || duration !== progressDurationCache
+    || (!snap.playing && position !== progressPositionCache);
+  if (!forced && !snap.playing && position === progressPositionCache) return;
   if (!forced && now - progressPaintedAt < PROGRESS_PAINT_MS) return;
   progressPaintedAt = now;
   progressTrackCache = snap.track_id || null;
@@ -5385,6 +6136,7 @@ function renderPlaybackProgress(snap, preview) {
     range.setAttribute('aria-valuetext', `${fmt(position)} / ${fmt(duration)}`);
   });
   if (state.seeking && preview == null) return;
+  progressPositionCache = position;
   const label = `${fmt(position)} / ${fmt(duration)}`;
   if (window.NowPlaying) NowPlaying.preview(position, duration);
   if (label !== progressLabelCache) {
@@ -5897,13 +6649,8 @@ function initPalette() {
 // 快捷键
 // ---------------------------------------------------------------------------
 
-/// 唤起搜索框。浮光皮肤把常驻搜索框摘掉了（顶栏中段让给导航胶囊），
-/// 但 `/` 与 Ctrl+K 必须仍然能把它叫出来 —— 否则这条快捷键就成了
-/// "按了没反应且不报错"的静默失效。所以聚焦的同时给 body 挂一个标记，
-/// 由 skin.sheen.css 的 `body.sheen-search .topsearch { opacity:1 }` 显形，
-/// blur 时（见下）摘掉标记让它收回。
+/// 唤起搜索框。`/` 与 Ctrl+K 都落到这里；聚焦后输入框自己的业务事件照常生效。
 function focusSearch(select) {
-  document.body.classList.add('sheen-search');
   ui.search.focus();
   if (select) ui.search.select();
 }
@@ -5923,7 +6670,7 @@ function bindShortcuts() {
     }
     if (e.key === 'Escape') {
       if (window.NowPlaying && NowPlaying.back()) { e.preventDefault(); return; }
-      closeMenu(); closeNowPlaying(); if (typing) document.activeElement.blur(); setView(state.view); document.body.classList.remove('stage-open'); document.body.classList.remove('sheen-search'); return;
+      closeMenu(); closeNowPlaying(); if (typing) document.activeElement.blur(); setView(state.view); document.body.classList.remove('stage-open'); return;
     }
     if (e.key === '/' && !typing) { e.preventDefault(); focusSearch(false); return; }
     if (typing || e.ctrlKey || e.metaKey || e.altKey || target.closest('button, a, [role="button"], [role="slider"]')) return;
@@ -6611,6 +7358,10 @@ function post(path) { return transport.post(path, {}).catch((err) => toast(errTe
 
 function initCreative() {
   if (window.CreativeStage) CreativeStage.init();
+  if (window.CreativeProject && CreativeProject.recoveryNotice) {
+    const notice = CreativeProject.recoveryNotice();
+    if (notice) toast(notice, 'error');
+  }
   if (window.StageCinema) StageCinema.init();
   if (window.StageFreecam) StageFreecam.init();
   if (window.StageFocus) StageFocus.init();
@@ -6687,6 +7438,7 @@ const np = {
   lyricOffsetDown: $('np-lyric-offset-down'), lyricOffsetUp: $('np-lyric-offset-up'),
   lyricOffsetMs: 0,
 };
+let lyricImporter = null;
 
 function isNpOpen() {
   return !!np.modal && !np.modal.hidden;
@@ -6696,6 +7448,7 @@ function openNowPlaying() {
   np.scrim.hidden = false;
   np.modal.hidden = false;
   if (window.NowPlaying) NowPlaying.open();
+  if (Stage) Stage.kick();
   // 弹窗内音量与底部播放栏保持一致
   np.volume.value = ui.volume.value;
   syncNpSnapshot(state.snapshot);
@@ -6708,6 +7461,7 @@ function openNowPlaying() {
 }
 
 function closeNowPlaying(options) {
+  if (lyricImporter) lyricImporter.close();
   if (window.NowPlaying) NowPlaying.close(options);
   np.scrim.hidden = true;
   np.modal.hidden = true;
@@ -6715,9 +7469,11 @@ function closeNowPlaying(options) {
 
 // 播放快照 → 弹窗（播放态 / 时间 / 进度）
 function syncNpSnapshot(snap) {
+  if (lyricImporter) lyricImporter.sync();
   if (!isNpOpen()) return;
-  np.play.classList.toggle('is-playing', snap.playing);
-  np.play.setAttribute('aria-label', snap.playing ? '暂停' : '播放');
+  if (np.play.classList.contains('is-playing') !== !!snap.playing) np.play.classList.toggle('is-playing', !!snap.playing);
+  const label = snap.playing ? '暂停' : '播放';
+  if (np.play.getAttribute('aria-label') !== label) np.play.setAttribute('aria-label', label);
   renderPlaybackProgress(snap);
   if (window.NowPlaying) NowPlaying.update();
 }
@@ -6956,6 +7712,7 @@ function initCapsuleMarquee() {
 
 // 曲目信息 → 弹窗（标题 / 艺术家 / 封面）
 function syncNpTrack(track, coverUrl) {
+  if (lyricImporter) lyricImporter.sync();
   if (!isNpOpen() || !track) return;
   np.name.textContent = track.title || '未命名';
   np.artist.textContent = [track.artist, track.album].filter(Boolean).join(' · ') || '未知艺术家';
@@ -6993,6 +7750,19 @@ function initNowPlayingModal() {
     modeState: () => ({ label: ui.mode.textContent, icon: state.snapshot.mode === 'shuffle' ? '#i-shuffle' : '#i-repeat' }),
     mute: () => toggleMute(), sleep: openSleepTimerMenu, notice: toast,
     closeTop: () => { if (!ui.menu.hidden) { closeMenu(); return true; } return false; },
+    closeLyricImport: () => { if (lyricImporter) lyricImporter.close(); },
+  });
+  if (window.LyricImport) lyricImporter = LyricImport.create($('np-lyric-import-panel'), {
+    selection: () => {
+      const p = window.Stage && Stage.presentation();
+      return isNpOpen() && p && p.track && p.track.id === p.mediaTrackId && !p.track.id.startsWith('online:')
+        ? { id: p.track.id, epoch: p.mediaEpoch, title: p.track.title || '', artist: p.track.artist || '' } : null;
+    },
+    get: (path, options) => transport.get(path, options),
+    post: (path, body, options) => transport.post(path, body, options),
+    applied: (id) => refreshLyrics(id, state.current),
+    sources: () => window.Online ? Online.sources().filter(source => (source.caps || []).includes('lyric_candidates')) : [],
+    availability: available => { $('np-lyric-search').hidden = !available; },
   });
 
   np.close.onclick = closeNowPlaying;
@@ -7013,24 +7783,16 @@ function initNowPlayingModal() {
   np.next.onclick = () => post('/v1/player/next');
   np.stop.onclick = () => stopPlayback();
 
-  // 歌词控件：导入读 .lrc 文本按原文入库；偏移每次 ±500ms 直接落库；
-  // 两者成功后都重拉歌词，舞台与弹窗徽标一起刷新。
+  // 文件先检查并预览；应用候选才写覆盖层，所有视图仍从原读取出口刷新。
   np.lyricImport.onclick = () => np.lyricFile.click();
-  np.lyricFile.onchange = async () => {
+  $('np-lyric-search').onclick = () => { if (lyricImporter) lyricImporter.search(); };
+  np.lyricFile.onchange = () => {
     const file = np.lyricFile.files && np.lyricFile.files[0];
     np.lyricFile.value = '';
-    const id = state.current && state.current.id;
-    if (!file || !id || id.startsWith('online:')) return;
-    try {
-      const content = await file.text();
-      await transport.put(`/v1/tracks/${encodeURIComponent(id)}/lyrics`, { content });
-      toast('歌词已导入');
-      await refreshLyrics(id, state.current);
-    } catch (err) {
-      toast(errText('歌词导入失败', err), 'error');
-    }
+    if (file && lyricImporter) lyricImporter.choose(file);
   };
   np.lyricClear.onclick = async () => {
+    if (lyricImporter) lyricImporter.close();
     const id = state.current && state.current.id;
     if (!id || id.startsWith('online:')) return;
     try {
@@ -7260,6 +8022,7 @@ async function refreshFloatingCapsule() {
     state.settings = s || {};
     document.body.classList.toggle('reduce-motion', state.settings.reduce_motion === true);
     refreshCapsuleMarquee();
+    migrateEmotionLocks().catch(function () {});
   }).catch(() => {});
   const snapshot = transport.get('/v1/state').then(applySnapshot).catch(() => {});
   await Promise.all([settings, snapshot]);
@@ -7277,16 +8040,29 @@ async function startApp() {
   // 落盘的在线元数据先喂回内存：队列行第一帧就能显示真名字，不用等补取。
   if (window.Online && window.Online.seedFromStore) window.Online.seedFromStore();
   transport = await chooseTransport();
+  // 两种 surface（工作台 tab / 浮动胶囊）都要挂；放在分支之前，别藏在 tab 那条路里。
+  if (transport.kind === 'dbx') bindDbxCloseHook();
   if (window.HertzCapsuleOnly) return startFloatingCapsule();
   if (transport.kind === 'demo') {
     ui.demoBadge.hidden = false;
     toast('未连接本地服务，已进入演示模式', 'info');
+  }
+  if (window.AiGrantSettings) {
+    window.AiGrantSettings.init({
+      transport: window.VMusicTransport,
+      isDbx: !!(window.hertzHost && window.hertzHost.isDbx),
+      confirm: (message) => modal().confirm(message),
+      copy: (text) => window.HertzClipboard.write(text),
+    });
   }
 
   ui.playpause.onclick = togglePlay;
   ui.prev.onclick = () => post('/v1/player/previous');
   ui.next.onclick = () => post('/v1/player/next');
   ui.stop.onclick = () => stopPlayback();
+  // 退出钮只在独立形态放开：dbx 里播放归宿主管管，demo 根本没有服务可退。
+  ui.serviceExit.hidden = transport.kind !== 'server';
+  ui.serviceExit.onclick = exitService;
   ui.mode.onclick = () => {
     const order = ['repeat', 'repeat_one', 'shuffle'];
     const next = order[(order.indexOf(state.snapshot.mode) + 1) % order.length];
@@ -7321,9 +8097,6 @@ async function startApp() {
   };
   ui.searchClear.onclick = () => { ui.search.value = ''; ui.searchClear.hidden = true; state.q = ''; loadTracks(true); };
 
-  // 浮光下搜索框默认收着（opacity:0），靠 body.sheen-search 显形。
-  // blur 时必须摘掉标记让它收回，否则那条覆盖式搜索条会一直挂在顶栏上。
-  ui.search.addEventListener('blur', () => { document.body.classList.remove('sheen-search'); });
   // 本地档的搜索是「边输边查」，没有按钮可记，所以按 Enter 作为提交点：
   // 与流年面板、在线框同一个历史 owner。逐字输入不进历史——那样每次搜索都会
   // 留下一串「周」「周杰」这类前缀，最近十条里全是打字中间态。
@@ -8233,6 +9006,79 @@ async function startApp() {
   ui.setLyricStaffPattern.onchange = () => saveLyricSettings({ lyrics_staff_pattern: ui.setLyricStaffPattern.value.trim() });
   ui.setLyricFilterOn.onchange = () => saveLyricSettings({ lyrics_filter_enabled: ui.setLyricFilterOn.checked });
   ui.setLyricFilterPattern.onchange = () => saveLyricSettings({ lyrics_filter_pattern: ui.setLyricFilterPattern.value });
+  if (ui.setEmotionMode) {
+    ui.setEmotionMode.onchange = () => saveLyricSettings({ lyrics_emotion_mode: ui.setEmotionMode.value });
+    ui.setEmotionPreview.onchange = () => saveLyricSettings({ lyrics_emotion_preview: ui.setEmotionPreview.value });
+    ui.setEmotionScale.oninput = () => {
+      if (ui.setEmotionScaleValue) ui.setEmotionScaleValue.textContent = Number(ui.setEmotionScale.value).toFixed(2);
+    };
+    ui.setEmotionScale.onchange = () => saveLyricSettings({ lyrics_emotion_scale: Number(ui.setEmotionScale.value) });
+    if (ui.setEmotionCurve) {
+      ui.setEmotionCurve.oninput = () => {
+        if (ui.setEmotionCurveValue) ui.setEmotionCurveValue.textContent = Number(ui.setEmotionCurve.value).toFixed(2);
+      };
+      ui.setEmotionCurve.onchange = () => saveLyricSettings({ lyrics_emotion_curve: Number(ui.setEmotionCurve.value) });
+    }
+    if (ui.setEmotionAccent) {
+      ui.setEmotionAccent.onchange = () => saveLyricSettings({ lyrics_emotion_accent: ui.setEmotionAccent.checked });
+    }
+    if (ui.setEmotionAccentWords) {
+      ui.setEmotionAccentWords.onchange = () => saveLyricSettings({
+        lyrics_emotion_accent_words: ui.setEmotionAccentWords.value.trim()
+      });
+    }
+    ui.setEmotionPalette.onchange = () => saveLyricSettings({ lyrics_emotion_palette: ui.setEmotionPalette.checked });
+    if (ui.setEmotionAiAuthorized) {
+      ui.setEmotionAiAuthorized.onchange = async () => {
+        var authorized = ui.setEmotionAiAuthorized.checked;
+        if (!authorized) {
+          emotionAiStatus = emotionAiStatus ? Object.assign({}, emotionAiStatus, { authorized: false }) : null;
+          invalidateEmotionAuto();
+          applyEmotionSettings();
+        }
+        await saveLyricSettings({ lyrics_emotion_ai_authorized: authorized });
+        await refreshEmotionAiStatus();
+      };
+    }
+    if (ui.setEmotionLockApply && ui.setEmotionLockClear) {
+      ui.setEmotionLockApply.onclick = async () => {
+        if (!Stage || !Stage.lyrics || !window.LyricEmotion) return;
+        var doc = Stage.lyrics();
+        var index = doc && Number.isFinite(doc.index) ? doc.index : -1;
+        if (index < 0 || !doc.lines || index >= doc.lines.length) return;
+        var lines = doc.lines.map(function (line, i) {
+          return { index: i, start_ms: line.start_ms, text: String(line.text == null ? '' : line.text).normalize('NFC') };
+        });
+        var hash = await LyricEmotion.hashLyrics(lines);
+        var locks = await emotionLocks(hash);
+        locks = locks.filter(function (lock) { return !(lock.from <= index && lock.to >= index); });
+        locks.push({ from: index, to: index, emotion: ui.setEmotionLock.value, intensity: 1, confidence: 1 });
+        invalidateEmotionAuto();
+        try {
+          await persistEmotionLocks(hash, locks);
+          if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
+        } catch (error) {
+          toast(errText('手动覆盖保存失败', error), 'error');
+        }
+      };
+      ui.setEmotionLockClear.onclick = async () => {
+        if (!Stage || !Stage.lyrics || !window.LyricEmotion) return;
+        var doc = Stage.lyrics();
+        var lines = doc && doc.lines ? doc.lines.map(function (line, i) {
+          return { index: i, start_ms: line.start_ms, text: String(line.text == null ? '' : line.text).normalize('NFC') };
+        }) : [];
+        if (!lines.length) return;
+        var hash = await LyricEmotion.hashLyrics(lines);
+        invalidateEmotionAuto();
+        try {
+          await clearEmotionLocks(hash);
+          if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
+        } catch (error) {
+          toast(errText('手动覆盖清除失败', error), 'error');
+        }
+      };
+    }
+  }
   // 动效分面：写设置表 + 刷 body[data-rm]，各面 CSS 即时生效。
   for (const [uiKey, settingKey] of MOTION_SURFACES) {
     if (!ui[uiKey]) continue;
@@ -8324,7 +9170,9 @@ async function startApp() {
     addToPlaylistMenu: openPlaylistMenu,
   });
   window.Online.init();
-  if (window.Podcasts) window.Podcasts.bind({ play: (tracks, index) => Online.playAll(tracks, index), toast });
+  if (window.Podcasts) window.Podcasts.bind({
+    play: (tracks, index) => Online.playAll(tracks, index), seek: seekTo, toast,
+  });
   // 扫码登录模块（web/online-login.js）：放在 Online.init 之后，头像 URL
   // 归一化要用它挂出的 safeCoverUrl。init() 负责在启动阶段就把顶栏头像按
   // 服务端持久化的选择恢复出来（以前只有打开登录弹窗才恢复）。
@@ -8506,6 +9354,24 @@ async function startApp() {
   if (health) {
     ui.setBackend.textContent = `${health.backend} · v${health.version} · 协议 ${health.protocol_version}`;
   }
+  // 关掉页面 = 本客户端离场。服务端要等宽限期过去、确认「没有别的页面开着且还在
+  // 出声」才暂停，所以 F5 与「再开一个标签」都不会把正在听的歌掐掉（宽限那个数按
+  // 本机实测「重载 → WS 建连」257–675 ms 定的）。
+  //
+  // 用 fetch(keepalive) 而不是 sendBeacon：后者设不了 Authorization 头，而这条路由
+  // 在全权鉴权层后面。persisted=true 是进 bfcache（退一步还会回来），不算离场。
+  // 只挂独立形态：dbx / stdio / demo 没有这条 HTTP 通道，且 transport 到这里才定形，
+  // 放在模块顶层会读到 chooseTransport 之前的初值。
+  if (transport.kind === 'server') {
+    window.addEventListener('pagehide', (event) => {
+      if (event.persisted) return;
+      fetch('/v1/player/depart', {
+        method: 'POST',
+        keepalive: true,
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      }).catch(() => {});
+    });
+  }
   openSocket();
 }
 
@@ -8525,6 +9391,41 @@ function showBootFailure(err) {
   btn.onclick = () => location.reload();
   box.append(msg, btn);
   document.body.append(box);
+}
+
+/// 退出服务（顶栏那颗电源键）：让服务端把声音停掉、发现文件删掉、进程结束，
+/// 再把眼前这个页面也收掉。判「真退出了」用的是 /v1/health 打不通，不看那一次
+/// 应答——应答回来的那一刻进程还活着，它后面还有 150 ms 回执窗和最多 2 s 的
+/// drain 看门狗（`/ws` 这种长连接不会自己结束）。
+///
+/// `window.close()` 只对脚本自己开的窗口生效，普通标签页浏览器不让脚本关，所以
+/// 关不掉时整页换成一张收尾卡：比留在一个「服务已断开、正在重连」的死界面上诚实。
+async function exitService() {
+  ui.serviceExit.disabled = true;
+  await transport.post('/v1/system/shutdown').catch(() => null);
+  window.close();
+  if (window.closed) return;
+  toast('服务正在退出…', 'info');
+  for (let probe = 0; probe < 40; probe += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const up = await fetch('/v1/health', { cache: 'no-store' }).then((res) => res.ok).catch(() => false);
+    if (!up) { showServiceExit(); return; }
+  }
+  showServiceExit('服务没能退出，请检查进程是否还在');
+}
+
+function showServiceExit(note) {
+  document.body.classList.add('service-exited');
+  const card = document.createElement('div');
+  card.className = 'service-exit-card';
+  const line = document.createElement('span');
+  line.textContent = note || '服务已退出';
+  const hint = document.createElement('small');
+  hint.textContent = note
+    ? '这个标签页可以关掉了。'
+    : '这个标签页可以关掉了。要再听就重新运行 hertz-studio（带 --open 会顺手把页面打开）。';
+  card.append(line, hint);
+  document.body.append(card);
 }
 
 (async function boot() {

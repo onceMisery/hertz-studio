@@ -1,0 +1,2664 @@
+{
+  "schemaVersion": 1,
+  "sourceRef": "b8aff4a89dc3f1e43981d2227838e497e65ea9b2",
+  "sourceHashes": {
+    "onset.js": "e6b3f01f0acdb2920998e5c3758e1c74e9a2d9f09b2d7463f2a243b0df64f2fc",
+    "creative-gl.js": "f6904ffe756f5b504072dc36d2a27bb2f12c0e2eb22633ca135eff865072833c",
+    "backgrounds.js": "07672444068d3f567b90f27a5789a6c67f544500738babfc5fcbb8a7b2a5f8cf",
+    "handdrawn.js": "17f50d5d38c33d63d3238f537821c1d9ee53d4635b0581b5d584b8d3dbaf1f75",
+    "creative-anime.js": "3d4dde7edc9d9eafae60b8840e6a207034d6c11695f4b77121d32c8b781d149d",
+    "creative-stage.js": "c1a9c0a89572f0954beb039bf0f8d0f1388c8484aa34145b16a56b5e98dbd6c9",
+    "creative-share-code.js": "366581f75bb9cbd60b91ab2ee724ab97e62ed4298e4ca46f59febf6b445fb77a"
+  },
+  "rows": [
+    {
+      "scene": "towers",
+      "mode": "switch",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "orb",
+        "cam": {
+          "fov": 52,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 8,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "radius": 3,
+          "amp": 0.65,
+          "wire": 0.42,
+          "wobble": 0.22
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "towers",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.height": 122
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 22,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.height"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJ0b3dlcnMiLCJjYW0iOnsiZm92Ijo1NCwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6MTIsImhlaWdodCI6MSwiZHJpZnQiOjE4LCJzaGFrZSI6MTIsImtpY2siOjI0fSwibG9vayI6eyJibG9vbSI6MC4yOCwiYmxvb21UaHJlc2giOjAuNzQsImNocm9tYSI6MC4wOCwidmlnbmV0dGUiOjAuMjgsImdyYWluIjowLjA2LCJ0b29uIjowLCJwYXBlciI6MCwiZXhwb3N1cmUiOjEsInNhdHVyYXRpb24iOjAuOTUsImdyYWRlIjozfSwic3RhZ2UiOnsicm90WSI6MCwic2NhbGUiOjEsInNlZWQiOjAuNDJ9LCJzYyI6eyJoZWlnaHQiOjIyLCJzcGFuIjoyNCwid2lkdGgiOjAuMSwiZGVwdGgiOjAuMTYsIm1pcnJvciI6MC4xNn0sImN1ZXMiOltdLCJiaW5kaW5ncyI6W10sImRpcmVjdG9yIjpmYWxzZSwiYmciOnsidHlwZSI6InRoZW1lIn0sImhhbmQiOnsib24iOnRydWUsInN0eWxlIjoibWFuZ2EiLCJmcmFtZSI6dHJ1ZSwid2F2ZSI6dHJ1ZSwiYW5ub3QiOnRydWUsInBhcGVyIjp0cnVlLCJqaXR0ZXIiOjEwMCwic3BlZWQiOjEwMH19.f72b0d79"
+    },
+    {
+      "scene": "towers",
+      "mode": "edit",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 5.5,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "towers",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.height": 122
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 22,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.height"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJ0b3dlcnMiLCJjYW0iOnsiZm92Ijo1NCwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6MTIsImhlaWdodCI6MSwiZHJpZnQiOjE4LCJzaGFrZSI6MTIsImtpY2siOjI0fSwibG9vayI6eyJibG9vbSI6MC4yOCwiYmxvb21UaHJlc2giOjAuNzQsImNocm9tYSI6MC4wOCwidmlnbmV0dGUiOjAuMjgsImdyYWluIjowLjA2LCJ0b29uIjowLCJwYXBlciI6MCwiZXhwb3N1cmUiOjEsInNhdHVyYXRpb24iOjAuOTUsImdyYWRlIjozfSwic3RhZ2UiOnsicm90WSI6MCwic2NhbGUiOjEsInNlZWQiOjAuNDJ9LCJzYyI6eyJoZWlnaHQiOjIyLCJzcGFuIjoyNCwid2lkdGgiOjAuMSwiZGVwdGgiOjAuMTYsIm1pcnJvciI6MC4xNn0sImN1ZXMiOltdLCJiaW5kaW5ncyI6W10sImRpcmVjdG9yIjpmYWxzZSwiYmciOnsidHlwZSI6InRoZW1lIn0sImhhbmQiOnsib24iOnRydWUsInN0eWxlIjoibWFuZ2EiLCJmcmFtZSI6dHJ1ZSwid2F2ZSI6dHJ1ZSwiYW5ub3QiOnRydWUsInBhcGVyIjp0cnVlLCJqaXR0ZXIiOjEwMCwic3BlZWQiOjEwMH19.f72b0d79"
+    },
+    {
+      "scene": "orb",
+      "mode": "switch",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 5.5,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "orb",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.radius": 108
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "orb",
+        "cam": {
+          "fov": 52,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 8,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "radius": 8,
+          "amp": 0.65,
+          "wire": 0.42,
+          "wobble": 0.22
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.radius"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJvcmIiLCJjYW0iOnsiZm92Ijo1MiwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6OCwiaGVpZ2h0IjowLCJkcmlmdCI6MTgsInNoYWtlIjoxMiwia2ljayI6MjR9LCJsb29rIjp7ImJsb29tIjowLjI4LCJibG9vbVRocmVzaCI6MC43NCwiY2hyb21hIjowLjA4LCJ2aWduZXR0ZSI6MC4yOCwiZ3JhaW4iOjAuMDYsInRvb24iOjAsInBhcGVyIjowLCJleHBvc3VyZSI6MSwic2F0dXJhdGlvbiI6MC45NSwiZ3JhZGUiOjN9LCJzdGFnZSI6eyJyb3RZIjowLCJzY2FsZSI6MSwic2VlZCI6MC40Mn0sInNjIjp7InJhZGl1cyI6OCwiYW1wIjowLjY1LCJ3aXJlIjowLjQyLCJ3b2JibGUiOjAuMjJ9LCJjdWVzIjpbXSwiYmluZGluZ3MiOltdLCJkaXJlY3RvciI6ZmFsc2UsImJnIjp7InR5cGUiOiJ0aGVtZSJ9LCJoYW5kIjp7Im9uIjp0cnVlLCJzdHlsZSI6Im1hbmdhIiwiZnJhbWUiOnRydWUsIndhdmUiOnRydWUsImFubm90Ijp0cnVlLCJwYXBlciI6dHJ1ZSwiaml0dGVyIjoxMDAsInNwZWVkIjoxMDB9fQ.c36e57e8"
+    },
+    {
+      "scene": "orb",
+      "mode": "edit",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "orb",
+        "cam": {
+          "fov": 52,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 8,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "radius": 3,
+          "amp": 0.65,
+          "wire": 0.42,
+          "wobble": 0.22
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "orb",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.radius": 108
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "orb",
+        "cam": {
+          "fov": 52,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 8,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "radius": 8,
+          "amp": 0.65,
+          "wire": 0.42,
+          "wobble": 0.22
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.radius"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJvcmIiLCJjYW0iOnsiZm92Ijo1MiwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6OCwiaGVpZ2h0IjowLCJkcmlmdCI6MTgsInNoYWtlIjoxMiwia2ljayI6MjR9LCJsb29rIjp7ImJsb29tIjowLjI4LCJibG9vbVRocmVzaCI6MC43NCwiY2hyb21hIjowLjA4LCJ2aWduZXR0ZSI6MC4yOCwiZ3JhaW4iOjAuMDYsInRvb24iOjAsInBhcGVyIjowLCJleHBvc3VyZSI6MSwic2F0dXJhdGlvbiI6MC45NSwiZ3JhZGUiOjN9LCJzdGFnZSI6eyJyb3RZIjowLCJzY2FsZSI6MSwic2VlZCI6MC40Mn0sInNjIjp7InJhZGl1cyI6OCwiYW1wIjowLjY1LCJ3aXJlIjowLjQyLCJ3b2JibGUiOjAuMjJ9LCJjdWVzIjpbXSwiYmluZGluZ3MiOltdLCJkaXJlY3RvciI6ZmFsc2UsImJnIjp7InR5cGUiOiJ0aGVtZSJ9LCJoYW5kIjp7Im9uIjp0cnVlLCJzdHlsZSI6Im1hbmdhIiwiZnJhbWUiOnRydWUsIndhdmUiOnRydWUsImFubm90Ijp0cnVlLCJwYXBlciI6dHJ1ZSwiaml0dGVyIjoxMDAsInNwZWVkIjoxMDB9fQ.c36e57e8"
+    },
+    {
+      "scene": "tunnel",
+      "mode": "switch",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 5.5,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "tunnel",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.ringRadius": 112
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "tunnel",
+        "cam": {
+          "fov": 68,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 2,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "ringRadius": 12,
+          "ringLen": 28,
+          "spread": 0.65,
+          "push": 2.4
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.ringRadius"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJ0dW5uZWwiLCJjYW0iOnsiZm92Ijo2OCwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6MiwiaGVpZ2h0IjowLCJkcmlmdCI6MTgsInNoYWtlIjoxMiwia2ljayI6MjR9LCJsb29rIjp7ImJsb29tIjowLjI4LCJibG9vbVRocmVzaCI6MC43NCwiY2hyb21hIjowLjA4LCJ2aWduZXR0ZSI6MC4yOCwiZ3JhaW4iOjAuMDYsInRvb24iOjAsInBhcGVyIjowLCJleHBvc3VyZSI6MSwic2F0dXJhdGlvbiI6MC45NSwiZ3JhZGUiOjN9LCJzdGFnZSI6eyJyb3RZIjowLCJzY2FsZSI6MSwic2VlZCI6MC40Mn0sInNjIjp7InJpbmdSYWRpdXMiOjEyLCJyaW5nTGVuIjoyOCwic3ByZWFkIjowLjY1LCJwdXNoIjoyLjR9LCJjdWVzIjpbXSwiYmluZGluZ3MiOltdLCJkaXJlY3RvciI6ZmFsc2UsImJnIjp7InR5cGUiOiJ0aGVtZSJ9LCJoYW5kIjp7Im9uIjp0cnVlLCJzdHlsZSI6Im1hbmdhIiwiZnJhbWUiOnRydWUsIndhdmUiOnRydWUsImFubm90Ijp0cnVlLCJwYXBlciI6dHJ1ZSwiaml0dGVyIjoxMDAsInNwZWVkIjoxMDB9fQ.e1d07e28"
+    },
+    {
+      "scene": "tunnel",
+      "mode": "edit",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "tunnel",
+        "cam": {
+          "fov": 68,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 2,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "ringRadius": 4.2,
+          "ringLen": 28,
+          "spread": 0.65,
+          "push": 2.4
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "tunnel",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.ringRadius": 112
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "tunnel",
+        "cam": {
+          "fov": 68,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 2,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "ringRadius": 12,
+          "ringLen": 28,
+          "spread": 0.65,
+          "push": 2.4
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.ringRadius"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJ0dW5uZWwiLCJjYW0iOnsiZm92Ijo2OCwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6MiwiaGVpZ2h0IjowLCJkcmlmdCI6MTgsInNoYWtlIjoxMiwia2ljayI6MjR9LCJsb29rIjp7ImJsb29tIjowLjI4LCJibG9vbVRocmVzaCI6MC43NCwiY2hyb21hIjowLjA4LCJ2aWduZXR0ZSI6MC4yOCwiZ3JhaW4iOjAuMDYsInRvb24iOjAsInBhcGVyIjowLCJleHBvc3VyZSI6MSwic2F0dXJhdGlvbiI6MC45NSwiZ3JhZGUiOjN9LCJzdGFnZSI6eyJyb3RZIjowLCJzY2FsZSI6MSwic2VlZCI6MC40Mn0sInNjIjp7InJpbmdSYWRpdXMiOjEyLCJyaW5nTGVuIjoyOCwic3ByZWFkIjowLjY1LCJwdXNoIjoyLjR9LCJjdWVzIjpbXSwiYmluZGluZ3MiOltdLCJkaXJlY3RvciI6ZmFsc2UsImJnIjp7InR5cGUiOiJ0aGVtZSJ9LCJoYW5kIjp7Im9uIjp0cnVlLCJzdHlsZSI6Im1hbmdhIiwiZnJhbWUiOnRydWUsIndhdmUiOnRydWUsImFubm90Ijp0cnVlLCJwYXBlciI6dHJ1ZSwiaml0dGVyIjoxMDAsInNwZWVkIjoxMDB9fQ.e1d07e28"
+    },
+    {
+      "scene": "nebula",
+      "mode": "switch",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 5.5,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "nebula",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.cloudR": 116
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "nebula",
+        "cam": {
+          "fov": 54,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 28,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "cloudR": 16,
+          "spread3": 1.6,
+          "size": 1.25,
+          "spin": 0.18,
+          "densityK": 0.8
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.cloudR"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJuZWJ1bGEiLCJjYW0iOnsiZm92Ijo1NCwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6MjgsImhlaWdodCI6MCwiZHJpZnQiOjE4LCJzaGFrZSI6MTIsImtpY2siOjI0fSwibG9vayI6eyJibG9vbSI6MC4yOCwiYmxvb21UaHJlc2giOjAuNzQsImNocm9tYSI6MC4wOCwidmlnbmV0dGUiOjAuMjgsImdyYWluIjowLjA2LCJ0b29uIjowLCJwYXBlciI6MCwiZXhwb3N1cmUiOjEsInNhdHVyYXRpb24iOjAuOTUsImdyYWRlIjozfSwic3RhZ2UiOnsicm90WSI6MCwic2NhbGUiOjEsInNlZWQiOjAuNDJ9LCJzYyI6eyJjbG91ZFIiOjE2LCJzcHJlYWQzIjoxLjYsInNpemUiOjEuMjUsInNwaW4iOjAuMTgsImRlbnNpdHlLIjowLjh9LCJjdWVzIjpbXSwiYmluZGluZ3MiOltdLCJkaXJlY3RvciI6ZmFsc2UsImJnIjp7InR5cGUiOiJ0aGVtZSJ9LCJoYW5kIjp7Im9uIjp0cnVlLCJzdHlsZSI6Im1hbmdhIiwiZnJhbWUiOnRydWUsIndhdmUiOnRydWUsImFubm90Ijp0cnVlLCJwYXBlciI6dHJ1ZSwiaml0dGVyIjoxMDAsInNwZWVkIjoxMDB9fQ.fcc9c5ec"
+    },
+    {
+      "scene": "nebula",
+      "mode": "edit",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "nebula",
+        "cam": {
+          "fov": 54,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 28,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "cloudR": 6,
+          "spread3": 1.6,
+          "size": 1.25,
+          "spin": 0.18,
+          "densityK": 0.8
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "nebula",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.cloudR": 116
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "nebula",
+        "cam": {
+          "fov": 54,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 28,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "cloudR": 16,
+          "spread3": 1.6,
+          "size": 1.25,
+          "spin": 0.18,
+          "densityK": 0.8
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.cloudR"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJuZWJ1bGEiLCJjYW0iOnsiZm92Ijo1NCwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6MjgsImhlaWdodCI6MCwiZHJpZnQiOjE4LCJzaGFrZSI6MTIsImtpY2siOjI0fSwibG9vayI6eyJibG9vbSI6MC4yOCwiYmxvb21UaHJlc2giOjAuNzQsImNocm9tYSI6MC4wOCwidmlnbmV0dGUiOjAuMjgsImdyYWluIjowLjA2LCJ0b29uIjowLCJwYXBlciI6MCwiZXhwb3N1cmUiOjEsInNhdHVyYXRpb24iOjAuOTUsImdyYWRlIjozfSwic3RhZ2UiOnsicm90WSI6MCwic2NhbGUiOjEsInNlZWQiOjAuNDJ9LCJzYyI6eyJjbG91ZFIiOjE2LCJzcHJlYWQzIjoxLjYsInNpemUiOjEuMjUsInNwaW4iOjAuMTgsImRlbnNpdHlLIjowLjh9LCJjdWVzIjpbXSwiYmluZGluZ3MiOltdLCJkaXJlY3RvciI6ZmFsc2UsImJnIjp7InR5cGUiOiJ0aGVtZSJ9LCJoYW5kIjp7Im9uIjp0cnVlLCJzdHlsZSI6Im1hbmdhIiwiZnJhbWUiOnRydWUsIndhdmUiOnRydWUsImFubm90Ijp0cnVlLCJwYXBlciI6dHJ1ZSwiaml0dGVyIjoxMDAsInNwZWVkIjoxMDB9fQ.fcc9c5ec"
+    },
+    {
+      "scene": "terrain",
+      "mode": "switch",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 5.5,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "terrain",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.extent": 160
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "terrain",
+        "cam": {
+          "fov": 58,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 30,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "extent": 60,
+          "amp2": 1.8,
+          "scroll": 0.22,
+          "wire2": 0.42
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.extent"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJ0ZXJyYWluIiwiY2FtIjp7ImZvdiI6NTgsImRpc3QiOjgsInlhdyI6MCwicGl0Y2giOjMwLCJoZWlnaHQiOjAsImRyaWZ0IjoxOCwic2hha2UiOjEyLCJraWNrIjoyNH0sImxvb2siOnsiYmxvb20iOjAuMjgsImJsb29tVGhyZXNoIjowLjc0LCJjaHJvbWEiOjAuMDgsInZpZ25ldHRlIjowLjI4LCJncmFpbiI6MC4wNiwidG9vbiI6MCwicGFwZXIiOjAsImV4cG9zdXJlIjoxLCJzYXR1cmF0aW9uIjowLjk1LCJncmFkZSI6M30sInN0YWdlIjp7InJvdFkiOjAsInNjYWxlIjoxLCJzZWVkIjowLjQyfSwic2MiOnsiZXh0ZW50Ijo2MCwiYW1wMiI6MS44LCJzY3JvbGwiOjAuMjIsIndpcmUyIjowLjQyfSwiY3VlcyI6W10sImJpbmRpbmdzIjpbXSwiZGlyZWN0b3IiOmZhbHNlLCJiZyI6eyJ0eXBlIjoidGhlbWUifSwiaGFuZCI6eyJvbiI6dHJ1ZSwic3R5bGUiOiJtYW5nYSIsImZyYW1lIjp0cnVlLCJ3YXZlIjp0cnVlLCJhbm5vdCI6dHJ1ZSwicGFwZXIiOnRydWUsImppdHRlciI6MTAwLCJzcGVlZCI6MTAwfX0.29e13927"
+    },
+    {
+      "scene": "terrain",
+      "mode": "edit",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "terrain",
+        "cam": {
+          "fov": 58,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 30,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "extent": 24,
+          "amp2": 1.8,
+          "scroll": 0.22,
+          "wire2": 0.42
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "terrain",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.extent": 160
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "terrain",
+        "cam": {
+          "fov": 58,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 30,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "extent": 60,
+          "amp2": 1.8,
+          "scroll": 0.22,
+          "wire2": 0.42
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.extent"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJ0ZXJyYWluIiwiY2FtIjp7ImZvdiI6NTgsImRpc3QiOjgsInlhdyI6MCwicGl0Y2giOjMwLCJoZWlnaHQiOjAsImRyaWZ0IjoxOCwic2hha2UiOjEyLCJraWNrIjoyNH0sImxvb2siOnsiYmxvb20iOjAuMjgsImJsb29tVGhyZXNoIjowLjc0LCJjaHJvbWEiOjAuMDgsInZpZ25ldHRlIjowLjI4LCJncmFpbiI6MC4wNiwidG9vbiI6MCwicGFwZXIiOjAsImV4cG9zdXJlIjoxLCJzYXR1cmF0aW9uIjowLjk1LCJncmFkZSI6M30sInN0YWdlIjp7InJvdFkiOjAsInNjYWxlIjoxLCJzZWVkIjowLjQyfSwic2MiOnsiZXh0ZW50Ijo2MCwiYW1wMiI6MS44LCJzY3JvbGwiOjAuMjIsIndpcmUyIjowLjQyfSwiY3VlcyI6W10sImJpbmRpbmdzIjpbXSwiZGlyZWN0b3IiOmZhbHNlLCJiZyI6eyJ0eXBlIjoidGhlbWUifSwiaGFuZCI6eyJvbiI6dHJ1ZSwic3R5bGUiOiJtYW5nYSIsImZyYW1lIjp0cnVlLCJ3YXZlIjp0cnVlLCJhbm5vdCI6dHJ1ZSwicGFwZXIiOnRydWUsImppdHRlciI6MTAwLCJzcGVlZCI6MTAwfX0.29e13927"
+    },
+    {
+      "scene": "lyric",
+      "mode": "switch",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 5.5,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "lyric",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.spacing": 109
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "lyric",
+        "cam": {
+          "fov": 58,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "spacing": 9,
+          "arc": 0.65,
+          "pwidth": 16,
+          "dimK": 0.48,
+          "bob": 0.18,
+          "tint": 0.5
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.spacing"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJseXJpYyIsImNhbSI6eyJmb3YiOjU4LCJkaXN0Ijo4LCJ5YXciOjAsInBpdGNoIjowLCJoZWlnaHQiOjAsImRyaWZ0IjoxOCwic2hha2UiOjEyLCJraWNrIjoyNH0sImxvb2siOnsiYmxvb20iOjAuMjgsImJsb29tVGhyZXNoIjowLjc0LCJjaHJvbWEiOjAuMDgsInZpZ25ldHRlIjowLjI4LCJncmFpbiI6MC4wNiwidG9vbiI6MCwicGFwZXIiOjAsImV4cG9zdXJlIjoxLCJzYXR1cmF0aW9uIjowLjk1LCJncmFkZSI6M30sInN0YWdlIjp7InJvdFkiOjAsInNjYWxlIjoxLCJzZWVkIjowLjQyfSwic2MiOnsic3BhY2luZyI6OSwiYXJjIjowLjY1LCJwd2lkdGgiOjE2LCJkaW1LIjowLjQ4LCJib2IiOjAuMTgsInRpbnQiOjAuNX0sImN1ZXMiOltdLCJiaW5kaW5ncyI6W10sImRpcmVjdG9yIjpmYWxzZSwiYmciOnsidHlwZSI6InRoZW1lIn0sImhhbmQiOnsib24iOnRydWUsInN0eWxlIjoibWFuZ2EiLCJmcmFtZSI6dHJ1ZSwid2F2ZSI6dHJ1ZSwiYW5ub3QiOnRydWUsInBhcGVyIjp0cnVlLCJqaXR0ZXIiOjEwMCwic3BlZWQiOjEwMH19.fe63a891"
+    },
+    {
+      "scene": "lyric",
+      "mode": "edit",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "lyric",
+        "cam": {
+          "fov": 58,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "spacing": 2.5,
+          "arc": 0.65,
+          "pwidth": 16,
+          "dimK": 0.48,
+          "bob": 0.18,
+          "tint": 0.5
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "lyric",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.spacing": 109
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "lyric",
+        "cam": {
+          "fov": 58,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "spacing": 9,
+          "arc": 0.65,
+          "pwidth": 16,
+          "dimK": 0.48,
+          "bob": 0.18,
+          "tint": 0.5
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.spacing"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJseXJpYyIsImNhbSI6eyJmb3YiOjU4LCJkaXN0Ijo4LCJ5YXciOjAsInBpdGNoIjowLCJoZWlnaHQiOjAsImRyaWZ0IjoxOCwic2hha2UiOjEyLCJraWNrIjoyNH0sImxvb2siOnsiYmxvb20iOjAuMjgsImJsb29tVGhyZXNoIjowLjc0LCJjaHJvbWEiOjAuMDgsInZpZ25ldHRlIjowLjI4LCJncmFpbiI6MC4wNiwidG9vbiI6MCwicGFwZXIiOjAsImV4cG9zdXJlIjoxLCJzYXR1cmF0aW9uIjowLjk1LCJncmFkZSI6M30sInN0YWdlIjp7InJvdFkiOjAsInNjYWxlIjoxLCJzZWVkIjowLjQyfSwic2MiOnsic3BhY2luZyI6OSwiYXJjIjowLjY1LCJwd2lkdGgiOjE2LCJkaW1LIjowLjQ4LCJib2IiOjAuMTgsInRpbnQiOjAuNX0sImN1ZXMiOltdLCJiaW5kaW5ncyI6W10sImRpcmVjdG9yIjpmYWxzZSwiYmciOnsidHlwZSI6InRoZW1lIn0sImhhbmQiOnsib24iOnRydWUsInN0eWxlIjoibWFuZ2EiLCJmcmFtZSI6dHJ1ZSwid2F2ZSI6dHJ1ZSwiYW5ub3QiOnRydWUsInBhcGVyIjp0cnVlLCJqaXR0ZXIiOjEwMCwic3BlZWQiOjEwMH19.fe63a891"
+    },
+    {
+      "scene": "anime-sky",
+      "mode": "switch",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 5.5,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "anime-sky",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.light": 101.35
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-sky",
+        "cam": {
+          "fov": 55,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1.35,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.light"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJhbmltZS1za3kiLCJjYW0iOnsiZm92Ijo1NSwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6MCwiaGVpZ2h0IjowLCJkcmlmdCI6MTgsInNoYWtlIjoxMiwia2ljayI6MjR9LCJsb29rIjp7ImJsb29tIjowLjI4LCJibG9vbVRocmVzaCI6MC43NCwiY2hyb21hIjowLjA4LCJ2aWduZXR0ZSI6MC4yOCwiZ3JhaW4iOjAuMDYsInRvb24iOjAsInBhcGVyIjowLCJleHBvc3VyZSI6MSwic2F0dXJhdGlvbiI6MC45NSwiZ3JhZGUiOjN9LCJzdGFnZSI6eyJyb3RZIjowLCJzY2FsZSI6MSwic2VlZCI6MC40Mn0sInNjIjp7ImxpZ2h0IjoxLjM1LCJtb3Rpb24iOjAuNjUsImRldGFpbCI6MC42Mn0sImN1ZXMiOltdLCJiaW5kaW5ncyI6W10sImRpcmVjdG9yIjpmYWxzZSwiYmciOnsidHlwZSI6InRoZW1lIn0sImhhbmQiOnsib24iOnRydWUsInN0eWxlIjoibWFuZ2EiLCJmcmFtZSI6dHJ1ZSwid2F2ZSI6dHJ1ZSwiYW5ub3QiOnRydWUsInBhcGVyIjp0cnVlLCJqaXR0ZXIiOjEwMCwic3BlZWQiOjEwMH19.cb49a200"
+    },
+    {
+      "scene": "anime-sky",
+      "mode": "edit",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-sky",
+        "cam": {
+          "fov": 55,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "anime-sky",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.light": 101.35
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-sky",
+        "cam": {
+          "fov": 55,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1.35,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.light"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJhbmltZS1za3kiLCJjYW0iOnsiZm92Ijo1NSwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6MCwiaGVpZ2h0IjowLCJkcmlmdCI6MTgsInNoYWtlIjoxMiwia2ljayI6MjR9LCJsb29rIjp7ImJsb29tIjowLjI4LCJibG9vbVRocmVzaCI6MC43NCwiY2hyb21hIjowLjA4LCJ2aWduZXR0ZSI6MC4yOCwiZ3JhaW4iOjAuMDYsInRvb24iOjAsInBhcGVyIjowLCJleHBvc3VyZSI6MSwic2F0dXJhdGlvbiI6MC45NSwiZ3JhZGUiOjN9LCJzdGFnZSI6eyJyb3RZIjowLCJzY2FsZSI6MSwic2VlZCI6MC40Mn0sInNjIjp7ImxpZ2h0IjoxLjM1LCJtb3Rpb24iOjAuNjUsImRldGFpbCI6MC42Mn0sImN1ZXMiOltdLCJiaW5kaW5ncyI6W10sImRpcmVjdG9yIjpmYWxzZSwiYmciOnsidHlwZSI6InRoZW1lIn0sImhhbmQiOnsib24iOnRydWUsInN0eWxlIjoibWFuZ2EiLCJmcmFtZSI6dHJ1ZSwid2F2ZSI6dHJ1ZSwiYW5ub3QiOnRydWUsInBhcGVyIjp0cnVlLCJqaXR0ZXIiOjEwMCwic3BlZWQiOjEwMH19.cb49a200"
+    },
+    {
+      "scene": "anime-coast",
+      "mode": "switch",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 5.5,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "anime-coast",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.light": 101.35
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-coast",
+        "cam": {
+          "fov": 55,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1.35,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.light"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJhbmltZS1jb2FzdCIsImNhbSI6eyJmb3YiOjU1LCJkaXN0Ijo4LCJ5YXciOjAsInBpdGNoIjowLCJoZWlnaHQiOjAsImRyaWZ0IjoxOCwic2hha2UiOjEyLCJraWNrIjoyNH0sImxvb2siOnsiYmxvb20iOjAuMjgsImJsb29tVGhyZXNoIjowLjc0LCJjaHJvbWEiOjAuMDgsInZpZ25ldHRlIjowLjI4LCJncmFpbiI6MC4wNiwidG9vbiI6MCwicGFwZXIiOjAsImV4cG9zdXJlIjoxLCJzYXR1cmF0aW9uIjowLjk1LCJncmFkZSI6M30sInN0YWdlIjp7InJvdFkiOjAsInNjYWxlIjoxLCJzZWVkIjowLjQyfSwic2MiOnsibGlnaHQiOjEuMzUsIm1vdGlvbiI6MC42NSwiZGV0YWlsIjowLjYyfSwiY3VlcyI6W10sImJpbmRpbmdzIjpbXSwiZGlyZWN0b3IiOmZhbHNlLCJiZyI6eyJ0eXBlIjoidGhlbWUifSwiaGFuZCI6eyJvbiI6dHJ1ZSwic3R5bGUiOiJtYW5nYSIsImZyYW1lIjp0cnVlLCJ3YXZlIjp0cnVlLCJhbm5vdCI6dHJ1ZSwicGFwZXIiOnRydWUsImppdHRlciI6MTAwLCJzcGVlZCI6MTAwfX0.19a30579"
+    },
+    {
+      "scene": "anime-coast",
+      "mode": "edit",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-coast",
+        "cam": {
+          "fov": 55,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "anime-coast",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.light": 101.35
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-coast",
+        "cam": {
+          "fov": 55,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1.35,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.light"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJhbmltZS1jb2FzdCIsImNhbSI6eyJmb3YiOjU1LCJkaXN0Ijo4LCJ5YXciOjAsInBpdGNoIjowLCJoZWlnaHQiOjAsImRyaWZ0IjoxOCwic2hha2UiOjEyLCJraWNrIjoyNH0sImxvb2siOnsiYmxvb20iOjAuMjgsImJsb29tVGhyZXNoIjowLjc0LCJjaHJvbWEiOjAuMDgsInZpZ25ldHRlIjowLjI4LCJncmFpbiI6MC4wNiwidG9vbiI6MCwicGFwZXIiOjAsImV4cG9zdXJlIjoxLCJzYXR1cmF0aW9uIjowLjk1LCJncmFkZSI6M30sInN0YWdlIjp7InJvdFkiOjAsInNjYWxlIjoxLCJzZWVkIjowLjQyfSwic2MiOnsibGlnaHQiOjEuMzUsIm1vdGlvbiI6MC42NSwiZGV0YWlsIjowLjYyfSwiY3VlcyI6W10sImJpbmRpbmdzIjpbXSwiZGlyZWN0b3IiOmZhbHNlLCJiZyI6eyJ0eXBlIjoidGhlbWUifSwiaGFuZCI6eyJvbiI6dHJ1ZSwic3R5bGUiOiJtYW5nYSIsImZyYW1lIjp0cnVlLCJ3YXZlIjp0cnVlLCJhbm5vdCI6dHJ1ZSwicGFwZXIiOnRydWUsImppdHRlciI6MTAwLCJzcGVlZCI6MTAwfX0.19a30579"
+    },
+    {
+      "scene": "anime-rail",
+      "mode": "switch",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 5.5,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "anime-rail",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.light": 101.35
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-rail",
+        "cam": {
+          "fov": 55,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1.35,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.light"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJhbmltZS1yYWlsIiwiY2FtIjp7ImZvdiI6NTUsImRpc3QiOjgsInlhdyI6MCwicGl0Y2giOjAsImhlaWdodCI6MCwiZHJpZnQiOjE4LCJzaGFrZSI6MTIsImtpY2siOjI0fSwibG9vayI6eyJibG9vbSI6MC4yOCwiYmxvb21UaHJlc2giOjAuNzQsImNocm9tYSI6MC4wOCwidmlnbmV0dGUiOjAuMjgsImdyYWluIjowLjA2LCJ0b29uIjowLCJwYXBlciI6MCwiZXhwb3N1cmUiOjEsInNhdHVyYXRpb24iOjAuOTUsImdyYWRlIjozfSwic3RhZ2UiOnsicm90WSI6MCwic2NhbGUiOjEsInNlZWQiOjAuNDJ9LCJzYyI6eyJsaWdodCI6MS4zNSwibW90aW9uIjowLjY1LCJkZXRhaWwiOjAuNjJ9LCJjdWVzIjpbXSwiYmluZGluZ3MiOltdLCJkaXJlY3RvciI6ZmFsc2UsImJnIjp7InR5cGUiOiJ0aGVtZSJ9LCJoYW5kIjp7Im9uIjp0cnVlLCJzdHlsZSI6Im1hbmdhIiwiZnJhbWUiOnRydWUsIndhdmUiOnRydWUsImFubm90Ijp0cnVlLCJwYXBlciI6dHJ1ZSwiaml0dGVyIjoxMDAsInNwZWVkIjoxMDB9fQ.df35ef45"
+    },
+    {
+      "scene": "anime-rail",
+      "mode": "edit",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-rail",
+        "cam": {
+          "fov": 55,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "anime-rail",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.light": 101.35
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-rail",
+        "cam": {
+          "fov": 55,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1.35,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.light"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJhbmltZS1yYWlsIiwiY2FtIjp7ImZvdiI6NTUsImRpc3QiOjgsInlhdyI6MCwicGl0Y2giOjAsImhlaWdodCI6MCwiZHJpZnQiOjE4LCJzaGFrZSI6MTIsImtpY2siOjI0fSwibG9vayI6eyJibG9vbSI6MC4yOCwiYmxvb21UaHJlc2giOjAuNzQsImNocm9tYSI6MC4wOCwidmlnbmV0dGUiOjAuMjgsImdyYWluIjowLjA2LCJ0b29uIjowLCJwYXBlciI6MCwiZXhwb3N1cmUiOjEsInNhdHVyYXRpb24iOjAuOTUsImdyYWRlIjozfSwic3RhZ2UiOnsicm90WSI6MCwic2NhbGUiOjEsInNlZWQiOjAuNDJ9LCJzYyI6eyJsaWdodCI6MS4zNSwibW90aW9uIjowLjY1LCJkZXRhaWwiOjAuNjJ9LCJjdWVzIjpbXSwiYmluZGluZ3MiOltdLCJkaXJlY3RvciI6ZmFsc2UsImJnIjp7InR5cGUiOiJ0aGVtZSJ9LCJoYW5kIjp7Im9uIjp0cnVlLCJzdHlsZSI6Im1hbmdhIiwiZnJhbWUiOnRydWUsIndhdmUiOnRydWUsImFubm90Ijp0cnVlLCJwYXBlciI6dHJ1ZSwiaml0dGVyIjoxMDAsInNwZWVkIjoxMDB9fQ.df35ef45"
+    },
+    {
+      "scene": "anime-forest",
+      "mode": "switch",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "towers",
+        "cam": {
+          "fov": 54,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 12,
+          "height": 1,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "height": 5.5,
+          "span": 24,
+          "width": 0.1,
+          "depth": 0.16,
+          "mirror": 0.16
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "anime-forest",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.light": 101.35
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-forest",
+        "cam": {
+          "fov": 55,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1.35,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.light"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJhbmltZS1mb3Jlc3QiLCJjYW0iOnsiZm92Ijo1NSwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6MCwiaGVpZ2h0IjowLCJkcmlmdCI6MTgsInNoYWtlIjoxMiwia2ljayI6MjR9LCJsb29rIjp7ImJsb29tIjowLjI4LCJibG9vbVRocmVzaCI6MC43NCwiY2hyb21hIjowLjA4LCJ2aWduZXR0ZSI6MC4yOCwiZ3JhaW4iOjAuMDYsInRvb24iOjAsInBhcGVyIjowLCJleHBvc3VyZSI6MSwic2F0dXJhdGlvbiI6MC45NSwiZ3JhZGUiOjN9LCJzdGFnZSI6eyJyb3RZIjowLCJzY2FsZSI6MSwic2VlZCI6MC40Mn0sInNjIjp7ImxpZ2h0IjoxLjM1LCJtb3Rpb24iOjAuNjUsImRldGFpbCI6MC42Mn0sImN1ZXMiOltdLCJiaW5kaW5ncyI6W10sImRpcmVjdG9yIjpmYWxzZSwiYmciOnsidHlwZSI6InRoZW1lIn0sImhhbmQiOnsib24iOnRydWUsInN0eWxlIjoibWFuZ2EiLCJmcmFtZSI6dHJ1ZSwid2F2ZSI6dHJ1ZSwiYW5ub3QiOnRydWUsInBhcGVyIjp0cnVlLCJqaXR0ZXIiOjEwMCwic3BlZWQiOjEwMH19.874dfcc6"
+    },
+    {
+      "scene": "anime-forest",
+      "mode": "edit",
+      "base": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-forest",
+        "cam": {
+          "fov": 55,
+          "dist": 12,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 2
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": true,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": false,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "intent": {
+        "version": 1,
+        "scene": "anime-forest",
+        "director": false,
+        "hand": {
+          "on": true
+        },
+        "patch": {
+          "look.grade": 99,
+          "cam.dist": 8,
+          "sc.light": 101.35
+        }
+      },
+      "expected": {
+        "version": 1,
+        "name": "Historical fixture",
+        "scene": "anime-forest",
+        "cam": {
+          "fov": 55,
+          "dist": 8,
+          "yaw": 0,
+          "pitch": 0,
+          "height": 0,
+          "drift": 18,
+          "shake": 12,
+          "kick": 24
+        },
+        "look": {
+          "bloom": 0.28,
+          "bloomThresh": 0.74,
+          "chroma": 0.08,
+          "vignette": 0.28,
+          "grain": 0.06,
+          "toon": 0,
+          "paper": 0,
+          "exposure": 1,
+          "saturation": 0.95,
+          "grade": 3
+        },
+        "stage": {
+          "rotY": 0,
+          "scale": 1,
+          "seed": 0.42
+        },
+        "sc": {
+          "light": 1.35,
+          "motion": 0.65,
+          "detail": 0.62
+        },
+        "cues": [],
+        "bindings": [],
+        "director": false,
+        "bg": {
+          "type": "theme"
+        },
+        "hand": {
+          "on": true,
+          "style": "manga",
+          "frame": true,
+          "wave": true,
+          "annot": true,
+          "paper": true,
+          "jitter": 100,
+          "speed": 100
+        }
+      },
+      "applied": [
+        "look.grade",
+        "cam.dist",
+        "sc.light"
+      ],
+      "ignored": [],
+      "shareCode": "HSCP1.J.eyJ2ZXJzaW9uIjoxLCJuYW1lIjoiSGlzdG9yaWNhbCBmaXh0dXJlIiwic2NlbmUiOiJhbmltZS1mb3Jlc3QiLCJjYW0iOnsiZm92Ijo1NSwiZGlzdCI6OCwieWF3IjowLCJwaXRjaCI6MCwiaGVpZ2h0IjowLCJkcmlmdCI6MTgsInNoYWtlIjoxMiwia2ljayI6MjR9LCJsb29rIjp7ImJsb29tIjowLjI4LCJibG9vbVRocmVzaCI6MC43NCwiY2hyb21hIjowLjA4LCJ2aWduZXR0ZSI6MC4yOCwiZ3JhaW4iOjAuMDYsInRvb24iOjAsInBhcGVyIjowLCJleHBvc3VyZSI6MSwic2F0dXJhdGlvbiI6MC45NSwiZ3JhZGUiOjN9LCJzdGFnZSI6eyJyb3RZIjowLCJzY2FsZSI6MSwic2VlZCI6MC40Mn0sInNjIjp7ImxpZ2h0IjoxLjM1LCJtb3Rpb24iOjAuNjUsImRldGFpbCI6MC42Mn0sImN1ZXMiOltdLCJiaW5kaW5ncyI6W10sImRpcmVjdG9yIjpmYWxzZSwiYmciOnsidHlwZSI6InRoZW1lIn0sImhhbmQiOnsib24iOnRydWUsInN0eWxlIjoibWFuZ2EiLCJmcmFtZSI6dHJ1ZSwid2F2ZSI6dHJ1ZSwiYW5ub3QiOnRydWUsInBhcGVyIjp0cnVlLCJqaXR0ZXIiOjEwMCwic3BlZWQiOjEwMH19.874dfcc6"
+    }
+  ]
+}

@@ -30,6 +30,7 @@
 //! 包成 `{status, body}`，`body` 就是原来那个 `{"error":{...}}`。协议级错误
 //! （方法不存在、信封非法）才用真正的 JSON-RPC error。
 
+mod ai;
 pub mod library;
 pub mod maintenance;
 pub mod online;
@@ -80,6 +81,9 @@ pub struct Call<'a> {
     pub body: Value,
     /// 二进制请求体，见 [`RawBody`]。
     pub raw: Option<RawBody>,
+    /// 短写幂等键的客户端部分（技术路线 R2-P）。与 HTTP 的
+    /// `x-client-operation-id` 头同源同义：不带即旁路，带空/超长由幂等入口回 400。
+    pub client_operation_id: Option<String>,
 }
 
 /// 二进制请求体。
@@ -202,6 +206,35 @@ impl Rpc {
         let raw = call.raw.as_ref();
 
         match (call.op, segments.as_slice()) {
+            (Op::Get, ["v1", "ai", "status"]) => ai::status(state).await,
+            (Op::Get, ["v1", "ai", "lyrics", "emotion", "status"]) => {
+                ai::emotion_status(state).await
+            }
+            (Op::Post, ["v1", "ai", "lyrics", "emotion"]) => {
+                ai::emotion_classify(state, body).await
+            }
+            (Op::Get, ["v1", "ai", "lyrics", "emotion", "locks"]) => {
+                ai::emotion_locks(state, query).await
+            }
+            (Op::Put, ["v1", "ai", "lyrics", "emotion", "locks"]) => {
+                ai::put_emotion_locks(state, body).await
+            }
+            (Op::Delete, ["v1", "ai", "lyrics", "emotion", "locks"]) => {
+                ai::delete_emotion_locks(state, query).await
+            }
+            (Op::Get, ["v1", "ai", "provider-credential"]) => ai::credential_status(state).await,
+            (Op::Put, ["v1", "ai", "provider-credential"]) => ai::put_credential(state, body).await,
+            (Op::Delete, ["v1", "ai", "provider-credential"]) => ai::delete_credential(state).await,
+            (Op::Get, ["v1", "ai", "ledger"]) => ai::ledger(state, query).await,
+            (Op::Get, ["v1", "ai", "jobs"]) => ai::list(state, query).await,
+            (Op::Post, ["v1", "ai", "jobs"]) => ai::create(state, body).await,
+            (Op::Get, ["v1", "ai", "jobs", id]) => ai::get(state, id).await,
+            (Op::Post, ["v1", "ai", "jobs", id, "cancel"]) => ai::cancel(state, id, body).await,
+            (Op::Get, ["v1", "ai", "proposals", id]) => ai::proposal(state, id).await,
+            (Op::Post, ["v1", "ai", "proposals", id, "reject"]) => {
+                ai::reject(state, id, body).await
+            }
+            (Op::Post, ["v1", "ai", "budget-guard", "reset"]) => ai::reset(state, body).await,
             // --- 元信息 / 状态 ---
             (Op::Get, ["v1", "health"]) => Ok(Reply::ok(self.health())),
             (Op::Get, ["v1", "state"]) => Ok(Reply::ok(playback::snapshot(state).await)),
@@ -217,14 +250,27 @@ impl Rpc {
             }
 
             // --- 播放控制 ---
+            // 六种播控带可选 clientOperationId：短写幂等键，见 crate::idempotency。
             (Op::Post, ["v1", "player", "load"]) => playback::load(state, body).await,
-            (Op::Post, ["v1", "player", "play"]) => playback::play(state).await,
-            (Op::Post, ["v1", "player", "pause"]) => playback::pause(state).await,
+            (Op::Post, ["v1", "player", "play"]) => {
+                playback::play(state, call.client_operation_id.as_deref()).await
+            }
+            (Op::Post, ["v1", "player", "pause"]) => {
+                playback::pause(state, call.client_operation_id.as_deref()).await
+            }
             (Op::Post, ["v1", "player", "stop"]) => playback::stop(state).await,
-            (Op::Post, ["v1", "player", "next"]) => playback::next(state).await,
-            (Op::Post, ["v1", "player", "previous"]) => playback::previous(state).await,
-            (Op::Post, ["v1", "player", "seek"]) => playback::seek(state, body).await,
-            (Op::Post, ["v1", "player", "volume"]) => playback::volume(state, body).await,
+            (Op::Post, ["v1", "player", "next"]) => {
+                playback::next(state, call.client_operation_id.as_deref()).await
+            }
+            (Op::Post, ["v1", "player", "previous"]) => {
+                playback::previous(state, call.client_operation_id.as_deref()).await
+            }
+            (Op::Post, ["v1", "player", "seek"]) => {
+                playback::seek(state, body, call.client_operation_id.as_deref()).await
+            }
+            (Op::Post, ["v1", "player", "volume"]) => {
+                playback::volume(state, body, call.client_operation_id.as_deref()).await
+            }
             (Op::Post, ["v1", "player", "mode"]) => playback::mode(state, body).await,
             (Op::Post, ["v1", "player", "replay"]) => playback::replay(state, body).await,
             (Op::Get, ["v1", "player", "queue"]) => playback::get_queue(state).await,
@@ -238,6 +284,17 @@ impl Rpc {
 
             // --- 舞台节拍图 ---
             (Op::Get, ["v1", "stage", "beatmap"]) => playback::beatmap(state, query).await,
+            (Op::Post, ["v1", "stage", "project-media"]) => {
+                let request = body_as(body)?;
+                Ok(Reply::ok(
+                    serde_json::to_value(crate::stage_project::identify(state, request).await?)
+                        .map_err(|_| crate::error::internal("媒体身份编码失败"))?,
+                ))
+            }
+            (Op::Post, ["v1", "stage", "pitch"]) => Ok(Reply::ok(
+                serde_json::to_value(crate::stage_pitch::request(state, body_as(body)?).await?)
+                    .map_err(|_| crate::error::internal("基频轨迹编码失败"))?,
+            )),
             // 段数不同，这两条与上面那条不会互相遮蔽（slice pattern 要求全长匹配）。
             (Op::Get, ["v1", "stage", "beatmap", "status"]) => {
                 playback::beatmap_status(state, query).await
@@ -288,6 +345,18 @@ impl Rpc {
                 library::clear_track_edit(state, id).await
             }
             (Op::Get, ["v1", "tracks", id, "lyrics"]) => library::get_lyrics(state, id).await,
+            (Op::Post, ["v1", "tracks", id, "lyrics", "candidates"]) => Ok(Reply::ok(
+                crate::lyrics::prepare(state, id, body_as(body)?).await?,
+            )),
+            (Op::Post, ["v1", "tracks", id, "lyrics", "candidates", "search"]) => Ok(Reply::ok(
+                crate::lyrics::candidates::search(state, id, body_as(body)?).await?,
+            )),
+            (Op::Post, ["v1", "tracks", id, "lyrics", "candidates", "prepare-online"]) => Ok(
+                Reply::ok(crate::lyrics::candidates::prepare(state, id, body_as(body)?).await?),
+            ),
+            (Op::Post, ["v1", "tracks", id, "lyrics", "candidates", "apply"]) => Ok(Reply::ok(
+                crate::lyrics::apply(state, id, body_as(body)?).await?,
+            )),
             (Op::Put, ["v1", "tracks", id, "lyrics"]) => {
                 library::import_lyrics(state, id, body).await
             }
@@ -376,6 +445,7 @@ impl Rpc {
 
             (Op::Get, ["v1", "podcasts", "search"]) => podcasts::search(state, query).await,
             (Op::Get, ["v1", "podcasts", "feed"]) => podcasts::feed(state, query).await,
+            (Op::Post, ["v1", "podcasts", "progress"]) => podcasts::progress(state, body).await,
             (Op::Get, ["v1", "podcasts", "subscriptions"]) => podcasts::subscriptions(state).await,
             (Op::Post, ["v1", "podcasts", "subscriptions"]) => {
                 podcasts::subscribe(state, body).await
