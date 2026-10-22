@@ -7,6 +7,7 @@
   var camera = global.SpaceCamera, returnFocus, background = [], queue = [], panels = [];
   var saveTimer = 0, idleTimer = 0, until = 0, dragging = false, pointer = null, point = null;
   var seeking = false, lockRequest = 0, status = { state: 'idle' }, lyricView;
+  var contextRetries = 0, contextRetryAt = 0, contextRetryTimer = 0;
   var performanceHost, lyricPerformance = null, performanceId = '', performanceSignature = '';
   var performances = { classic: 'StanzaClassic', cadenza: 'StanzaCadenza', sonnet: 'StanzaSonnet', tempera: 'StanzaTempera' };
   var paramEvents, playerBridge = {}, playerTimer = 0, immersiveNodes = [], immersiveFocus;
@@ -427,11 +428,31 @@
   function showStatus(next) {
     if (page === 'closed') return;
     var failed = next.state === 'error' || next.state === 'failed' || !!next.error;
+    var errorText = String(next.error && next.error.message || next.error || '');
+    var contextLost = failed && /webgl context lost/i.test(errorText);
     if (failed) { immersive(false);if(host)disposeStage(); }
     status = next;
     $('sp-failure').hidden = !failed;
-    $('sp-error-message').textContent = failed ? String(next.error && next.error.message || next.error || '场景加载失败') : '';
+    $('sp-error-message').textContent = failed ? (errorText || '场景加载失败') : '';
     $('sp-loading').hidden = next.state !== 'loading'; root.dataset.sceneState=next.state||'idle'; syncSettings(); syncShelf(); syncHud(); syncZodiacHud(); kick();
+    if (next.state === 'ready') { contextRetries = 0; clearTimeout(contextRetryTimer); contextRetryTimer = 0; }
+    else if (contextLost) {
+      // GPU 进程重启会带走 WebGL 上下文；浏览器会重建进程，这里等一拍再重建舞台。
+      // 每分钟最多两次，避免驱动持续崩溃时在「重建→再丢」之间空转。
+      var now = performance.now();
+      if (now - contextRetryAt > 60000) contextRetries = 0;
+      if (contextRetries < 2) {
+        contextRetries += 1; contextRetryAt = now;
+        clearTimeout(contextRetryTimer);
+        contextRetryTimer = setTimeout(function () {
+          contextRetryTimer = 0;
+          if (page === 'closed' || status.state !== 'failed') return;
+          var onStage = page === 'stage';
+          disposeStage();
+          if (onStage) enterStage(prefs.sceneSource); else ensureStage(prefs.sceneSource);
+        }, 1500);
+      }
+    }
   }
   async function enterStage(id) {
     if (page === 'closed') open();
