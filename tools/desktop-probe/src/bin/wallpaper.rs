@@ -57,7 +57,7 @@ mod wallpaper {
         MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT,
     };
     use windows_sys::Win32::UI::Shell::{
-        SHQueryUserNotificationState, QUERY_USER_NOTIFICATION_STATE, QUNS_BUSY,
+        SHQueryUserNotificationState, QUERY_USER_NOTIFICATION_STATE, QUNS_BUSY, QUNS_NOT_PRESENT,
         QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -184,6 +184,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
 
     const REASON_MANUAL: u8 = 1 << 0;
     const REASON_FULLSCREEN: u8 = 1 << 1;
+    const REASON_SESSION: u8 = 1 << 2;
 
     #[derive(Clone)]
     struct TreeSample {
@@ -396,13 +397,16 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         fn check_fullscreen(&mut self) {
             let state = query_notification_state();
             let active = is_fullscreen_state(state);
+            let session = state == QUNS_NOT_PRESENT;
             if self.fullscreen_state == Some(state) {
                 return;
             }
             self.fullscreen_state = Some(state);
-            self.evidence
-                .log(format!("fullscreen_state state={state} active={active}"));
+            self.evidence.log(format!(
+                "notification_state state={state} fullscreen={active} session_absent={session}"
+            ));
             self.set_reason(REASON_FULLSCREEN, active, "fullscreen");
+            self.set_reason(REASON_SESSION, session, "session-absent");
         }
 
         fn start_cpu(&mut self, tag: &str) {
