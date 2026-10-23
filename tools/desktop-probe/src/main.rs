@@ -238,6 +238,7 @@ window.restoreText = function () {
         tray_wait_ms: u64,
         tray_events: usize,
         tray_click_pass: Option<bool>,
+        webview_failure_observed: bool,
     }
 
     impl Probe {
@@ -388,6 +389,33 @@ window.restoreText = function () {
                 self.env_reasons & REASON_LOCK_SIMULATED != 0
             ));
             visible
+        }
+
+        fn eval(&self, tag: &str, script: &str) {
+            match self.overlay_view.evaluate_script(script) {
+                Ok(()) => self.evidence.log(format!("eval tag={tag} ok")),
+                Err(error) => self.evidence.log(format!("eval tag={tag} error={error}")),
+            }
+        }
+
+        fn eval_backdrop(&self, tag: &str, script: &str) {
+            match self.backdrop_view.evaluate_script(script) {
+                Ok(()) => self.evidence.log(format!("eval_backdrop tag={tag} ok")),
+                Err(error) => self
+                    .evidence
+                    .log(format!("eval_backdrop tag={tag} error={error}")),
+            }
+        }
+
+        fn observe_webview_failure(&mut self, tag: &str) {
+            let tree = sample_process_tree();
+            if tree.webview_processes == 0 {
+                self.webview_failure_observed = true;
+                self.evidence.log(format!(
+                    "webview_failure tag={tag} processes={} pids={:?}",
+                    tree.processes, tree.pids
+                ));
+            }
         }
 
         fn start_cpu(&mut self, tag: &str) {
@@ -610,7 +638,7 @@ window.restoreText = function () {
                 }
                 1 => {
                     self.set_locked(true);
-                    let _ = self.overlay_view.evaluate_script("window.setInk(false)");
+                    self.eval("setInk-light", "window.setInk(false)");
                     self.record_styles("locked-light");
                     let (_, root) = self.hit("locked-light");
                     self.locked_hit_pass = Some(root == self.backdrop_hwnd());
@@ -618,8 +646,8 @@ window.restoreText = function () {
                     self.evidence.marker("light-ready");
                 }
                 2 => {
-                    let _ = self.backdrop_view.evaluate_script("window.setDark(true)");
-                    let _ = self.overlay_view.evaluate_script("window.setInk(true)");
+                    self.eval_backdrop("setDark", "window.setDark(true)");
+                    self.eval("setInk-dark", "window.setInk(true)");
                     self.evidence.log("phase=dark-ready");
                     self.evidence.marker("dark-ready");
                 }
@@ -704,38 +732,56 @@ window.restoreText = function () {
                 8 => {
                     self.set_locked(true);
                     self.start_cpu("motion30");
-                    let _ = self.overlay_view.evaluate_script("window.startMotion(30)");
+                    self.eval("motion30", "window.startMotion(30)");
                     self.evidence.marker("motion30");
                 }
                 9 => {
-                    let _ = self.overlay_view.evaluate_script("window.stopMotion()");
+                    self.eval("stop-motion30", "window.stopMotion()");
                     self.finish_cpu("motion30");
+                    self.observe_webview_failure("tick9");
                     self.start_cpu("motion15");
-                    let _ = self.overlay_view.evaluate_script("window.startMotion(15)");
+                    self.eval("motion15", "window.startMotion(15)");
                     self.evidence.marker("motion15");
                 }
                 10 => {
-                    let _ = self.overlay_view.evaluate_script("window.stopMotion()");
+                    self.eval("stop-motion15", "window.stopMotion()");
                     self.finish_cpu("motion15");
+                    self.observe_webview_failure("tick10");
                     self.start_cpu("static");
-                    let _ = self.overlay_view.evaluate_script("window.restoreText()");
+                    self.eval("restore-text", "window.restoreText()");
                     self.evidence.marker("static");
                 }
                 11 => {
                     self.finish_cpu("static");
+                    self.observe_webview_failure("tick11");
                     self.start_cpu("idle10");
                     self.evidence.marker("idle10");
                 }
                 12 => {
                     self.finish_cpu("idle10");
+                    self.observe_webview_failure("tick12");
                     let tree = sample_process_tree();
                     self.evidence.log(format!(
                         "tree_before_exit processes={} webview_processes={} pids={:?}",
                         tree.processes, tree.webview_processes, tree.pids
                     ));
-                    let l0_1 = self.no_activate_pass == Some(true);
+                    let overlay_visible = unsafe { IsWindowVisible(self.overlay_hwnd()) } != 0;
+                    let (raw, root) = hit_test(self.overlay_hwnd());
                     self.evidence.log(format!(
-                        "RESULT l0_1_no_activate_show={} l0_1_styles={} l0_2_window_from_point={} control_click_backdrop_visible={} l0_2_synthetic_click_through={} l0_2_synthetic_click_blocked_unlocked={} l0_2_tray_real_click={} tray_built=true l0_3_policy_reasons={} l0_3_no_focus_steal={} l0_5_lifecycle_50=true l0_6_raw_metrics=see_cpu_and_js_lines",
+                        "failure_state webview_processes={} overlay_visible={overlay_visible} hit_root={} raw={} overlay={}",
+                        tree.webview_processes,
+                        fmt_hwnd(root),
+                        fmt_hwnd(raw),
+                        fmt_hwnd(self.overlay_hwnd())
+                    ));
+                    let l0_1 = self.no_activate_pass == Some(true);
+                    let failure_status = if self.webview_failure_observed {
+                        "observed"
+                    } else {
+                        "not-run"
+                    };
+                    self.evidence.log(format!(
+                        "RESULT l0_1_no_activate_show={} l0_1_styles={} l0_2_window_from_point={} control_click_backdrop_visible={} l0_2_synthetic_click_through={} l0_2_synthetic_click_blocked_unlocked={} l0_2_tray_real_click={} tray_built=true l0_3_policy_reasons={} l0_3_no_focus_steal={} l0_5_lifecycle_50=true l0_5_webview_process_failure={failure_status} l0_6_raw_metrics=see_cpu_and_js_lines",
                         verdict(l0_1),
                         verdict(self.no_activate_pass == Some(true)),
                         verdict(self.locked_hit_pass == Some(true)),
@@ -933,6 +979,7 @@ window.restoreText = function () {
             tray_wait_ms,
             tray_events: 0,
             tray_click_pass: None,
+            webview_failure_observed: false,
         };
 
         let mut schedule = vec![
