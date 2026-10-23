@@ -35,9 +35,21 @@ mod wallpaper {
     use tao::window::{Window, WindowBuilder};
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, FILETIME, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT,
+    };
     use windows_sys::Win32::Graphics::Gdi::{
         RedrawWindow, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcessId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -173,6 +185,16 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
     const REASON_MANUAL: u8 = 1 << 0;
     const REASON_FULLSCREEN: u8 = 1 << 1;
 
+    #[derive(Clone)]
+    struct TreeSample {
+        cpu_100ns: u64,
+        working_set: u64,
+        processes: usize,
+        webview_processes: usize,
+        pids: Vec<u32>,
+        per_process: Vec<(u32, String, u64)>,
+    }
+
     struct Recovery {
         attempts: Vec<Instant>,
         terminal: bool,
@@ -244,6 +266,8 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         policy_reasons: u8,
         policy_hidden: bool,
         fullscreen_state: Option<QUERY_USER_NOTIFICATION_STATE>,
+        restart_test: bool,
+        cpu_mark: Option<(String, Instant, TreeSample)>,
     }
 
     impl Probe {
@@ -379,6 +403,60 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             self.evidence
                 .log(format!("fullscreen_state state={state} active={active}"));
             self.set_reason(REASON_FULLSCREEN, active, "fullscreen");
+        }
+
+        fn start_cpu(&mut self, tag: &str) {
+            let sample = sample_process_tree();
+            self.evidence.log(format!(
+                "cpu_mark tag={tag} processes={} webview_processes={} pids={:?} cpu_ms={} working_set_mb={:.1}",
+                sample.processes,
+                sample.webview_processes,
+                sample.pids,
+                sample.cpu_100ns / 10_000,
+                sample.working_set as f64 / (1024.0 * 1024.0)
+            ));
+            self.cpu_mark = Some((tag.to_string(), Instant::now(), sample));
+        }
+
+        fn finish_cpu(&mut self, tag: &str) {
+            let Some((prev_tag, started, prev)) = self.cpu_mark.take() else {
+                return;
+            };
+            let now = sample_process_tree();
+            let elapsed_ms = started.elapsed().as_millis().max(1);
+            let delta_ms = now.cpu_100ns.saturating_sub(prev.cpu_100ns) as f64 / 10_000.0;
+            let mut deltas: Vec<(u32, String, f64)> = now
+                .per_process
+                .iter()
+                .map(|(pid, name, cpu)| {
+                    let before = prev
+                        .per_process
+                        .iter()
+                        .find(|(previous_pid, _, _)| previous_pid == pid)
+                        .map(|(_, _, previous_cpu)| *previous_cpu)
+                        .unwrap_or(0);
+                    (
+                        *pid,
+                        name.clone(),
+                        cpu.saturating_sub(before) as f64 / 10_000.0,
+                    )
+                })
+                .filter(|(_, _, delta)| *delta >= 1.0)
+                .collect();
+            deltas.sort_by(|left, right| right.2.total_cmp(&left.2));
+            let top = deltas
+                .iter()
+                .take(5)
+                .map(|(pid, name, delta)| format!("{name}:{pid}:{delta:.0}ms"))
+                .collect::<Vec<_>>()
+                .join(",");
+            self.evidence.log(format!(
+                "cpu tag={tag} from={prev_tag} elapsed_ms={elapsed_ms} delta_ms={delta_ms:.0} single_core_percent={:.1} working_set_mb={:.1} processes={} webview_processes={} top=[{top}]",
+                delta_ms * 100.0 / elapsed_ms as f64,
+                now.working_set as f64 / (1024.0 * 1024.0),
+                now.processes,
+                now.webview_processes
+            ));
         }
 
         fn recover(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
@@ -519,6 +597,13 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         }
 
         fn tick(&mut self, n: u8) -> bool {
+            if self.restart_test && n == 2 {
+                self.stopping = true;
+                self.state("done");
+                self.eval("final", "window.stopMotion()");
+                self.evidence.marker("done");
+                return true;
+            }
             match n {
                 0 => {
                     self.state("mounted");
@@ -532,20 +617,31 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                         parent_chain(self.hwnd())
                     ));
                     self.eval("motion30", "window.startMotion(30)");
+                    if !self.restart_test {
+                        self.start_cpu("startup");
+                    }
                     self.evidence.marker("mounted");
                 }
                 1 => {
+                    if !self.restart_test {
+                        self.finish_cpu("startup");
+                        self.start_cpu("fps30");
+                    }
                     self.state("running");
                     self.probe_input("desktop-point");
                     self.evidence.marker("input-tested");
                 }
                 2 => {
+                    self.finish_cpu("fps30");
+                    self.start_cpu("manual-paused");
                     self.state("before-policy-pause");
                     self.eval("watch-visibility", "window.watchVisibility()");
                     self.set_reason(REASON_MANUAL, true, "manual-pause");
                     self.evidence.marker("policy-paused");
                 }
                 3 => {
+                    self.finish_cpu("manual-paused");
+                    self.start_cpu("fps30-resume");
                     self.state("policy-paused");
                     self.set_reason(REASON_MANUAL, false, "manual-resume");
                     self.eval("stop-watch", "window.stopWatch()");
@@ -553,18 +649,23 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                     self.evidence.marker("policy-resumed");
                 }
                 4 => {
+                    self.finish_cpu("fps30-resume");
+                    self.start_cpu("fps15");
                     self.state("running-15");
                     self.current_fps = 15;
                     self.eval("motion15", "window.startMotion(15)");
                     self.evidence.marker("motion15");
                 }
                 5 => {
+                    self.finish_cpu("fps15");
+                    self.start_cpu("fps60");
                     self.state("running-60");
                     self.current_fps = 60;
                     self.eval("motion60", "window.startMotion(60)");
                     self.evidence.marker("motion60");
                 }
                 6 => {
+                    self.finish_cpu("fps60");
                     self.stopping = true;
                     self.state("done");
                     self.eval("final", "window.stopMotion()");
@@ -579,11 +680,17 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
     pub fn run() -> Result<(), Box<dyn Error>> {
         let mut out = PathBuf::from("wallpaper-probe-out");
         let mut source = String::from("unknown");
+        let mut restart_test = false;
+        let mut duration_ms = 40_000u64;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--out" => out = PathBuf::from(args.next().ok_or("--out needs a path")?),
                 "--source" => source = args.next().ok_or("--source needs a revision")?,
+                "--restart-test" => restart_test = true,
+                "--duration-ms" => {
+                    duration_ms = args.next().ok_or("--duration-ms needs a value")?.parse()?;
+                }
                 other => return Err(format!("unknown argument: {other}").into()),
             }
         }
@@ -594,7 +701,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             None => std::process::exit(3),
         };
         evidence.log(format!(
-            "probe=desk-w0 source={source} pid={} webview2_user_data={}",
+            "probe=desk-w0 source={source} pid={} restart_test={restart_test} duration_ms={duration_ms} webview2_user_data={}",
             std::process::id(),
             out.join("webview2").display()
         ));
@@ -715,6 +822,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let quit_id = quit_item.id().0.clone();
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
+            .with_menu_on_left_click(false)
             .with_tooltip("Hertz DESK-W0 probe")
             .with_icon(probe_icon()?)
             .build()?;
@@ -735,16 +843,20 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             policy_reasons: 0,
             policy_hidden: false,
             fullscreen_state: None,
+            restart_test,
+            cpu_mark: None,
         };
 
         let _ticker = {
             let proxy = proxy.clone();
+            let schedule: Vec<u64> = if restart_test {
+                vec![0, 3_000, duration_ms]
+            } else {
+                vec![0, 3_000, 15_000, 25_000, 30_000, 35_000, 40_000]
+            };
             std::thread::spawn(move || {
                 let start = Instant::now();
-                for (index, at_ms) in [0u64, 3_000, 15_000, 25_000, 30_000, 35_000, 40_000]
-                    .into_iter()
-                    .enumerate()
-                {
+                for (index, at_ms) in schedule.into_iter().enumerate() {
                     std::thread::sleep(
                         Duration::from_millis(at_ms).saturating_sub(start.elapsed()),
                     );
@@ -1005,6 +1117,107 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let mut rect = RECT::default();
         unsafe { GetWindowRect(hwnd, &mut rect) };
         format!("{},{},{},{}", rect.left, rect.top, rect.right, rect.bottom)
+    }
+
+    fn sample_process_tree() -> TreeSample {
+        let processes = process_snapshot();
+        let root = unsafe { GetCurrentProcessId() };
+        let pids = descendants(&processes, root);
+        let mut cpu_100ns = 0u64;
+        let mut working_set = 0u64;
+        let mut webview_processes = 0usize;
+        let mut per_process = Vec::new();
+        for (pid, _, name) in &processes {
+            if !pids.contains(pid) {
+                continue;
+            }
+            if name.eq_ignore_ascii_case("msedgewebview2.exe") {
+                webview_processes += 1;
+            }
+            unsafe {
+                let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, *pid);
+                if handle.is_null() {
+                    continue;
+                }
+                let mut creation = FILETIME::default();
+                let mut exit = FILETIME::default();
+                let mut kernel = FILETIME::default();
+                let mut user = FILETIME::default();
+                if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0 {
+                    let cpu = filetime_to_u64(kernel) + filetime_to_u64(user);
+                    cpu_100ns += cpu;
+                    per_process.push((*pid, name.clone(), cpu));
+                }
+                let mut counters = PROCESS_MEMORY_COUNTERS {
+                    cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+                    ..Default::default()
+                };
+                if GetProcessMemoryInfo(handle, &mut counters, counters.cb) != 0 {
+                    working_set += counters.WorkingSetSize as u64;
+                }
+                CloseHandle(handle);
+            }
+        }
+        TreeSample {
+            cpu_100ns,
+            working_set,
+            processes: pids.len(),
+            webview_processes,
+            pids,
+            per_process,
+        }
+    }
+
+    fn process_snapshot() -> Vec<(u32, u32, String)> {
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Vec::new();
+        }
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut processes = Vec::new();
+        unsafe {
+            if Process32FirstW(snapshot, &mut entry) != 0 {
+                loop {
+                    let end = entry
+                        .szExeFile
+                        .iter()
+                        .position(|value| *value == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    processes.push((
+                        entry.th32ProcessID,
+                        entry.th32ParentProcessID,
+                        String::from_utf16_lossy(&entry.szExeFile[..end]),
+                    ));
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snapshot);
+        }
+        processes
+    }
+
+    fn descendants(processes: &[(u32, u32, String)], root: u32) -> Vec<u32> {
+        let mut pids = vec![root];
+        let mut index = 0;
+        while index < pids.len() {
+            let parent = pids[index];
+            index += 1;
+            for (pid, parent_pid, _) in processes {
+                if *parent_pid == parent && !pids.contains(pid) {
+                    pids.push(*pid);
+                }
+            }
+        }
+        pids
+    }
+
+    fn filetime_to_u64(time: FILETIME) -> u64 {
+        ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64
     }
 
     fn query_notification_state() -> QUERY_USER_NOTIFICATION_STATE {
