@@ -19,7 +19,7 @@ cargo run --release -p lan-probe --bin wasapi-probe -- --seconds 6       # 会�
 
 | 证据 | 报告 | 关键结果 | 门禁 |
 | --- | --- | --- | --- |
-| §8.2 计划状态机仿真 | `cargo test -p vmusic-core`（无独立报告） | 17 项确定性用例全过：next→next→seek→pause 合并、Commit 后前缀冻结、applied 恰好一次、同键重试不重复执行、busy/no-op/过期/乱序/revision 冲突 | 通过 |
+| §8.2 计划状态机 + 接收门禁仿真 | `cargo test -p vmusic-core`（无独立报告） | 28 项确定性用例全过：房主侧 17 项（next→next→seek→pause 合并、Commit 后前缀冻结、applied 恰好一次、同键重试不重复执行、busy/no-op/过期/乱序/revision 冲突）；接收侧 11 项（PCM 先于 Format/Plan、匹配超时丢弃重同步、无 Commit 不出声、迟到 Commit 不追播、旧会话不复活、计划 ID 不符拒绝、第三代只留意图、切换后旧代际丢弃、非法序号/重叠帧/零长块拒绝、欠载计数、等匹配窗口溢出） | 通过 |
 | 可变比 sinc（`clocked_resample`） | [clocked-resample.json](./clocked-resample.json) | 15 组速率×漂移增益误差 ≤0.001dB（候选线 0.1dB）；96→48k 混叠 −135~−151dB（候选线 −90dB）；±500ppm 变比阶跃最大相邻步进为稳态 1.003 倍（无 click）；立体声 48k RTF≈0.014 | 通过 |
 | CPAL 输出时间戳语义 | [device-clock.json](./device-clock.json) | `callback`（IAudioClock QPC）单调、与宿主单调钟同速率（+2.1ppm）→ **可作设备时钟锚点**；`playback` 估算有回归且斜率偏差 −5436ppm → **不可作呈现期限**，设备排队深度需原生查询 | 通过（分项判定） |
 | 对时估计器 + H 节奏（回环 TCP） | [sync-experiment.json](./sync-experiment.json) | 服务端虚拟钟真值 12.5ms/50ppm，应用层 1ms±0.3ms 时延 + 5% 尖峰：偏移误差 P95 0.166ms（候选 1ms）、最大 0.303ms；1100 个 20ms 块 0 迟到、0 超 H 水位，缓冲 slack 中位 996.9ms ≈ H=1s | 通过 |

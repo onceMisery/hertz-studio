@@ -14,8 +14,11 @@
 //! 到 LAN 协议。完成事实沿用既有词汇（applied / no_op / superseded），操作键
 //! 对齐 `clientOperationId` 幂等语义，不引入第二套结果口径。
 //!
-//! 仿真测试即 P0 门槛「8.2 时序仿真通过」的机器可查形式；§12.3 的传输层
-//! 交错（PCM 先于 Format/Commit 迟到等）属于 P2 协议仿真，不在本模块。
+//! 仿真测试即 P0 门槛「8.2 时序仿真通过」的机器可查形式；接收侧的
+//! 代际/Ready/Commit 音频门禁（PCM 先于 Format/Plan、Commit 迟到不追播等
+//! §12.3 反例）在子模块 [`receiver`]，同属 P0 冻结的最小协议状态机。
+
+pub mod receiver;
 
 use std::collections::{HashMap, VecDeque};
 

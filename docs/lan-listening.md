@@ -499,6 +499,7 @@ P0 必须给出设备时钟可用性、实际提交期限、动态 sinc 相位/�
 | 落点 | 内容 | 结果 |
 | --- | --- | --- |
 | `crates/vmusic-core/src/room.rs` | §8.2 最小协议状态机：操作键去重/顺序水位/revision、preparing→superseded、Ready 门禁、Commit 前缀冻结、effective_at 处 applied 恰好一次；17 项确定性仿真用例（含 next→next→seek→pause 合并、Commit 前后交错） | 全过；P0 门槛「8.2 时序仿真通过」 |
+| `crates/vmusic-core/src/room/receiver.rs` | 接收端音频门禁（§8.1/§12.3 反例）：Format+Plan 匹配、Commit 期限、迟到不追播、旧会话不复活、第三代只留意图、非法序号/重叠帧拒绝、欠载受控静音；11 项确定性用例 | 全过；P0 的「状态机反例证据」（§13） |
 | `crates/vmusic-audio/src/clocked_resample.rs` + `examples/clocked_resample_probe.rs` | 接收侧可变比 sinc（§7.3）：窗 sinc 多相表 + f64 相位累加 + 变比限速 slew；11 项单测 + 质量探针 | 增益 ≤0.001dB、混叠 ≤−135dB、±500ppm 阶跃无 click（候选线 0.1dB / −90dB 均满足，冻结前仍为候选值） |
 | `crates/vmusic-audio/examples/device_clock_probe.rs` | §7.2 CPAL `OutputCallbackInfo` 语义探针（静音输出） | WASAPI：`callback`（QPC 锚点）单调且同域 +2.1ppm 可用；`playback` 估算有回归、斜率偏差 −5436ppm **不可作呈现期限**——实证了第 7.2 节预判的缺口 |
 | `tools/lan-probe`（独立工作区） | §7.1 四时间戳估计器（中值/MAD、RTT 剔除、频偏回归、阶跃重建）+ `sync-experiment` 回环 TCP 实验 + `wasapi-probe` 原生时钟/回录相关性探针 | 估计器 4 项仿真用例过；回环偏移误差 P95 0.166ms、1100 块 0 迟到 0 超水位；WASAPI 回录 22/23 标记检出、呈现时延常数 −5.74ms（std 0.019ms） |
@@ -508,5 +509,6 @@ P0 必须给出设备时钟可用性、实际提交期限、动态 sinc 相位/�
 - Realtek `IAudioClock` 的设备位置按端点内钟计数，实测单位比例 8.00003×（384kHz 对 48k 流）；呈现时间换算必须做位置单位自标定，不能假设位置即流帧。拟合残差 ≤0.095ms、单调。
 - cpal 0.15 WASAPI 丢弃设备帧位置、`playback` 按「可写空间」估算；接收端设备提交期限须走原生 `IAudioClock` 位置 + 排队查询路径（本批已给出探针实现）。
 - 单机回录的端到端呈现常数（−5.74ms）绑定设备/后端/采样率，是 §7.2 校准值的实测输入，不是可移植规格。
+- 接收端门禁与房主计划状态机（`vmusic-core::room`）合计 28 项确定性用例，构成 §13 要求的「最小协议状态机 + 反例证据」；两机链路上的实机反例注入仍待第二台机器。
 
 仍未完成（进入 P1 前需补）：macOS/Linux 设备时钟探针、两机真实链路 48k/f32 同步与声学互相关、长稳与断连/休眠故障注入（§12.2/§12.3 对应项）。P0 参数（H=1s、slew、阈值）保持候选值，未冻结。
