@@ -1,6 +1,6 @@
 # 桌面壁纸 W0 首轮原生验证报告
 
-日期：2026-10-23。执行：本机 Qoder agent。状态：**W0 首轮局部通过；阶段未完成，不进入 W1**。已验证 WorkerW 图标层挂载、桌面输入、手动/全屏/锁屏/息屏/S3 睡眠五类暂停原因与原因叠加、视觉时钟、Explorer 重启后的窗口重建与托盘重建、10 次快速重启的终态预算，以及探针页面的 CPU/GPU/内存基线；多屏、50 次启停、生产场景与长稳仍未完成。这是隔离探针结论，不是生产宿主方案，也不改变[桌面壁纸方案](../desktop-wallpaper.md)与[共享宿主设计](../desktop-host.md)的草案状态。
+日期：2026-10-23。执行：本机 Qoder agent。状态：**W0 首轮局部通过；阶段未完成，不进入 W1**。已验证 WorkerW 图标层挂载、桌面输入、手动/全屏/锁屏/息屏/S3 睡眠五类暂停原因与原因叠加、视觉时钟、Explorer 重启恢复、托盘重建与右键菜单、终态重试、10 次快速重启预算，以及探针页面资源基线；多屏、50 次启停、生产场景与长稳仍未完成。这是隔离探针结论，不是生产宿主方案，也不改变[桌面壁纸方案](../desktop-wallpaper.md)与[共享宿主设计](../desktop-host.md)的草案状态。
 
 ## 1. 结论
 
@@ -10,7 +10,9 @@
 - **W0-2（策略停绘）**：只调用 `controller.SetIsVisible(false)` 时，页面 rAF 继续（约 165 次/秒）且仍按 30 fps 绘制；必须同时让页面停止调度。`SetIsVisible(false) + window.stopMotion()` 后 `document.hidden=true`，10 秒内无 frame 回调，`sceneTime` 冻结在 7981 ms，截图露出系统壁纸；恢复时无大 dt。四类原因分别实测：手动、真实 Chrome 全屏（`QUNS_BUSY`）、锁屏（`QUNS_NOT_PRESENT`）、息屏（`WM_POWERBROADCAST` + `GUID_MONITOR_POWER_ON`）；锁屏复现两次，55 秒运行画面只推进约 31 秒，息屏触发 `reasons=0x08 hidden=true` 后帧停止、亮屏事件后恢复。S3 休眠期间 session 与息屏原因同时生效（`0x0c`），逐个解除不会提前恢复，唤醒后从同一 `sceneTime` 继续。**四类原因与原因叠加均通过；但传统 `PBT_APMSUSPEND` 未送达窗口。**
 - **W0-4（时钟与预算，局部）**：30 fps 实际上约 27 次绘制/秒，15 fps 为 15 次/秒，60 fps 为约 55 次/秒；`seekSong(60000)` 只改变歌曲位置，视觉时间继续，不回退。**局部通过；15/30/60 组合、质量降档与真实场景未测。**
 - **资源基线（探针页面）**：7 个进程（探针 + 6 个 WebView2）；30 fps 阶段单核约 12.4%、工作集约 406 MB；手动暂停 0.8%；恢复 12.2%；15 fps 7.2%；60 fps 14.4%，工作集升至约 442 MB；GPU Engine 运动阶段约 5–13%，暂停为 0。**这是合成 canvas 页面的基线，不是生产星座场景；未做无壁纸对照或 8 小时曲线，不冻结发布阈值。**
-- **W0-3（Explorer 恢复与托盘，局部）**：首次实现前，Explorer 重启会销毁 WorkerW/壁纸窗/controller，无恢复；实现健康检查与重建后，单次重启和连续两次重启都在同一 120 秒窗口内重新探测 Progman/WorkerW、重建窗口与 WebView 并重新挂载（attempt 1、2 均成功），截图恢复星空且图标仍在上层。Explorer 重启后托盘图标自动重建（无需宿主手工重注册），9 秒后可被 UIA 找到并真实左键点击，探针记录 Down/Up 事件且正常退出。**右键菜单在重建后的行为未验证；连续 10 次成功重启未达成（见终态预算）。**
+- **W0-3（Explorer 恢复与托盘，局部）**：首次实现前，Explorer 重启会销毁 WorkerW/壁纸窗/controller，无恢复；实现健康检查与重建后，单次重启和连续两次重启都在同一 120 秒窗口内重新探测 Progman/WorkerW、重建窗口与 WebView 并重新挂载（attempt 1、2 均成功），截图恢复星空且图标仍在上层。Explorer 重启后托盘图标自动重建（无需宿主手工重注册），9 秒后可被 UIA 找到并真实左键点击，探针记录 Down/Up 事件且正常退出。终态后右键菜单可打开，第一项“重新挂载”可触发显式重试。**连续 10 次成功重启未达成（见终态预算）。**
+- **W0-3（终态重试）**：4 次快速重启进入终态后，右键托盘选“重新挂载”：`retry_requested` → 预算清零 → `attempt=1` 恢复成功；随后第 5 次重启以 `attempt=2` 再次恢复；探针退出码 0、残留 0。**显式用户重试路径通过。**
+- **W0-2（挂起通知，局部）**：`RegisterSuspendResumeNotification` 返回非零句柄；`--power-selftest` 直接向窗口投递 suspend/resume 消息，`reasons=0x10 hidden=true` 停绘、恢复后从同一 `sceneTime` 继续。**注册与处理链通过；真实 S3 送达待复测（上一轮旧 APM 消息未送达）。**
 - **W0-3（终态预算）**：`--restart-test` 连续 10 次重启 Explorer；第 1–3 次恢复成功（attempt 1/2/3），第 4 次触发 `recovery_terminal attempts>=3 window=120s`，之后不再尝试或刷健康日志；截图露出系统壁纸，探针最终退出码 0、残留 0。**快速 10 次重启在“3 次/120 秒”预算下按设计进入终态；需要重新定义 A6 的“10 次”是间隔超过窗口还是允许快速连续。**
 - **W0-5（退出与回收，局部）**：正常退出后壁纸窗口消失，当前系统壁纸可见，专属 WebView2 进程残留为 0。50 次启停、设置预览与恢复预算未测。
 
@@ -20,7 +22,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 探针版本 | 锁屏策略实测于 `75e8ee4`；当前二进制 `bae5ca3`，1,144,832 bytes，SHA-256 `0fa51f0a9495e280ad097c225a1c5d1c2506ba7473d737ef87ad101dd7eaf266`；早期轮次 `cbf4347`/`b6185eb`/`2404413`/`2214858` |
+| 探针版本 | 锁屏策略实测于 `75e8ee4`；息屏/睡眠通知 `bae5ca3`；当前 `33c7a1d`，1,152,000 bytes，SHA-256 `b7f8fe95bf6e07a17c17e096f873d535f36bd78b4f9790f4b3bd2c5b29d39a7b`；早期轮次 `cbf4347`/`b6185eb`/`2404413`/`2214858` |
 | 工具链 | rustc/cargo 1.98.1；`cargo +1.88.0 check --release --all-targets` 通过；`cargo clippy --release --all-targets -- -D warnings` 通过 |
 | OS / 架构 | Windows 11 `10.0.26200` x64 |
 | WebView2 Runtime | 155.0.4283.62 |
@@ -31,7 +33,7 @@
 
 ## 3. 实验记录
 
-运行时间 2026-10-23 17:00–23:02。`run1/run2` 用于定位 Z 序与输入，`run3/run5` 为停绘与时钟主证据，`run4` 为恢复实现前的 Explorer 重启，`recovery2` 为恢复第一版的单次重启，`recovery4` 为加入单次尝试内等待后的连续两次重启，`fullscreen1` 为真实 Chrome 全屏，`tray-rebuild3` 为恢复后的托盘点击，`restart10` 为 10 次重启/终态预算，`resource1` 为资源基线，`lock-observe2`/`lock-policy1`/`lock-policy2` 为锁屏，`monitor-off1`/`monitor-off2` 为息屏，`sleep3` 为强制 S3 睡眠/唤醒。托盘重建使用左键菜单修正后的构建；终态与资源使用加入 `--restart-test`/采样后的构建；锁屏策略为 `75e8ee4`，息屏/睡眠通知为 `bae5ca3`。
+运行时间 2026-10-23 17:00–23:22。`run1/run2` 用于定位 Z 序与输入，`run3/run5` 为停绘与时钟主证据，`run4` 为恢复实现前的 Explorer 重启，`recovery2` 为恢复第一版的单次重启，`recovery4` 为加入单次尝试内等待后的连续两次重启，`fullscreen1` 为真实 Chrome 全屏，`tray-rebuild3` 为恢复后的托盘点击，`restart10` 为 10 次重启/终态预算，`resource1` 为资源基线，`lock-observe2`/`lock-policy1`/`lock-policy2` 为锁屏，`monitor-off1`/`monitor-off2` 为息屏，`sleep3` 为强制 S3 睡眠/唤醒，`retry3` 为终态后托盘重试，`power-selftest1` 为挂起通知自检。托盘重建使用左键菜单修正后的构建；终态与资源使用加入 `--restart-test`/采样后的构建；锁屏策略为 `75e8ee4`，息屏/睡眠通知为 `bae5ca3`，托盘重试为 `33c7a1d`。
 
 | ID | 操作与观测 | 结果 |
 | --- | --- | --- |
@@ -48,6 +50,9 @@
 | W0-3 连续两次重启 | 第一次恢复后再次重启 Explorer | `attempt=1`、`attempt=2` 均成功；新 WorkerW 重建；截图星空与图标正确；未触发终态 |
 | W0-3 托盘重建 | Explorer 重启恢复后等待 9 秒，用 UIA 打开溢出并真实左键点击托盘图标 | 图标自动重建（rect x=1954），`tray_event` Down/Up；探针正常退出、无挂起 |
 | W0-3 10 次重启/终态 | `--restart-test --duration-ms 90000`；连续 10 次 `restart-explorer.ps1` | 第 1–3 次恢复成功；第 4 次 `recovery_terminal attempts>=3 window=120s`；之后无健康/恢复日志；截图露出系统壁纸；退出 0、`leftover=0` |
+| W0-3 托盘右键菜单 | 终态后等待约 15 秒，`tray-menu.ps1` 真实右键并选择第一项 | `menu_window` 非空，`menu_event=1001`；第一项“重新挂载”触发 `retry_requested` |
+| W0-3 终态重试 | 终态后经托盘“重新挂载”，随后第 5 次重启 Explorer | 预算清零 → `attempt=1` 恢复成功；第 5 次重启 `attempt=2` 成功；截图星空；退出 0、`leftover=0` |
+| W0-2 挂起通知自检 | `--power-selftest` 向窗口投递 suspend/resume | `register_power monitor_handle`/`suspend_resume_handle` 均非零；`reasons=0x10 hidden=true` → 恢复；真实 S3 送达待复测 |
 | W0-5 正常退出 | 完成计划后退出，截图桌面 | 壁纸消失，露出当前系统壁纸；`leftover=0` |
 | W0-5 50 次启停 | 应用/停止循环、设置预览、退出计数 | 未执行 |
 | W0-2 真实全屏 | Chrome `--start-fullscreen` 覆盖目标屏；探针每 500 ms 轮询 `SHQueryUserNotificationState` | 5→2 触发 `fullscreen` 原因：`hidden=true`、`stopMotion`、无 frame；2→5 后 `hidden=false`，从 `sceneTime=5993 ms` 恢复，无大 dt |
@@ -88,11 +93,11 @@ GPU Engine 采样（`sample-gpu.ps1`，约 4 秒一个点，按探针进程树 P
 6. **Explorer 重启恢复已跑通，但恢复预算的计数语义需要谨慎。** 壁纸窗作为 WorkerW 子窗会被连带销毁，controller 失效；实现健康检查后在单次重启和连续两次重启中都完成了重新探测、重建窗口/WebView 与重新挂载（attempt 1/2 成功），截图恢复星空。第一版在 Explorer 尚未重建 Progman 时立即计一次失败，导致连续重启很快耗尽 3 次预算；改为单次尝试内等待 Progman/WorkerW 后，重建期的暂时缺失不再提前消耗预算。托盘图标在 Explorer 重启后自动重建（约 9 秒后可用 UIA 找到并点击），但右键菜单路径未验。
 7. **正常退出露出当前系统壁纸。** 退出后窗口销毁、专属进程归零，系统壁纸没有被覆盖或回滚；这满足“不使用旧截图恢复”的方向，但崩溃路径和系统壁纸运行期改动仍未测。
 8. **全屏检测可用，但仍是单屏 QUNS 近似。** 真实 Chrome 全屏使 `SHQueryUserNotificationState=2`，独立“全屏”原因触发隐藏与停绘，关闭后恢复。当前只验证单屏系统级状态；多屏目标边界、无边框/独占全屏差异、全屏与手动暂停叠加未测。生产实现应按目标屏前台窗口边界计算，不能只依赖系统级 QUNS。
-9. **托盘左键默认弹菜单会阻塞宿主消息循环。** 第一次托盘点击测试使用默认 `menu_on_left_click=true`，弹出原生菜单后探针在计划时间无法退出；显式改为 false 后左键只产生 `tray_event`，探针正常退出。生产托盘必须定义左键动作与菜单执行路径，不能让模态菜单阻塞 tick、退出或恢复。
-10. **3 次/120 秒预算与“10 次连续重启”验收存在口径冲突。** 快速 10 次重启中前 3 次恢复成功，第 4 次进入终态，之后不再尝试；这是当前设计（成功恢复也占预算）的结果。10 次成功恢复需要把重启间隔拉到 40 秒以上（120/3）或修改预算语义；A6 的“10 次”需要明确是间隔测试还是快速连续测试。终态后的显式用户重试/清空预算未实现。
+9. **托盘左键默认弹菜单会阻塞宿主消息循环。** 第一次托盘点击测试使用默认 `menu_on_left_click=true`，弹出原生菜单后探针在计划时间无法退出；显式改为 false 后左键只产生 `tray_event`，探针正常退出。右键菜单随后实测可用：终态后 `menu_window` 非空，选择第一项“重新挂载”触发重试。生产托盘必须定义左键动作与菜单执行路径，不能让模态菜单阻塞 tick、退出或恢复。
+10. **3 次/120 秒预算与“10 次连续重启”验收存在口径冲突。** 快速 10 次重启中前 3 次恢复成功，第 4 次进入终态，之后不再尝试；这是当前设计（成功恢复也占预算）的结果。显式重试已验证：托盘“重新挂载”清空预算并从 attempt 1 恢复，随后第 5 次重启以 attempt 2 继续成功；终态不会被自动解除。10 次成功恢复仍需把重启间隔拉到 40 秒以上（120/3）或修改预算语义，A6 的“10 次”需要明确是间隔测试还是快速连续测试。
 11. **探针页面资源基线可用于对照，但不能冻结发布阈值。** 30 fps 阶段整树 CPU 约 12.4% 单核、GPU 约 5–8%、工作集约 406 MB；手动暂停降到 0.8% CPU/0 GPU；15 fps 7.2%，60 fps 14.4%，工作集升至约 442 MB。该页面是 canvas 星场，不是生产星座/Three.js 场景，且没有无壁纸对照与 8 小时曲线。
 12. **锁屏与息屏都不会自动停绘，且信号来源不同。** 锁屏只体现在 `SHQueryUserNotificationState=QUNS_NOT_PRESENT`（息屏时 QUNS 仍是 5）；息屏只能通过 `WM_POWERBROADCAST` + `GUID_MONITOR_POWER_ON` 得到。两类都必须映射为独立暂停原因并真正取消页面调度，否则显示器关闭后 WebView 仍以约 165 rAF/s 绘制。
-13. **S3 睡眠不会把 `PBT_APMSUSPEND` 送达该窗口。** 强制 S3 后探针收到的是 `QUNS_NOT_PRESENT` 与 `GUID_MONITOR_POWER_ON` 的 off/on，APM 挂起/恢复分支一次都没触发（`tag=sleep` 计数 0）。页面本身被 S3 冻结、dt 上限也避免了跳变，但生产宿主不能依赖传统 APM 消息：应改用 `RegisterSuspendResumeNotification`，或以 session/显示器信号为准。
+13. **S3 睡眠不会把 `PBT_APMSUSPEND` 送达该窗口。** 强制 S3 后探针收到的是 `QUNS_NOT_PRESENT` 与 `GUID_MONITOR_POWER_ON` 的 off/on，APM 挂起/恢复分支一次都没触发（`tag=sleep` 计数 0）。页面本身被 S3 冻结、dt 上限也避免了跳变。已改为 `RegisterSuspendResumeNotification`：注册返回非零句柄，`--power-selftest` 投递 suspend/resume 后 `reasons=0x10 hidden=true` 并恢复；**真实 S3 是否送达该注册仍需一次实测确认**。
 
 ## 6. 复现
 
@@ -106,14 +111,16 @@ OUT=../../output/desk-w0/<run>
 ./target/release/wallpaper.exe --out "$OUT" --source <commit>
 # 连续重启/终态预算：约 90 秒内连续重启 Explorer，前 3 次恢复、第 4 次进入终态
 ./target/release/wallpaper.exe --out "$OUT" --source <commit> --restart-test --duration-ms 90000
+# 挂起通知自检：向自身窗口投递 suspend/resume，无需真实睡眠
+./target/release/wallpaper.exe --out "$OUT" --source <commit> --restart-test --power-selftest --duration-ms 12000
 ```
 
-实验时在另一终端运行 `show-desktop.ps1` 把桌面置前；截图用同目录 `capture-screen.ps1`。全屏实验用 `fullscreen-check.ps1 -Out <OUT>\real-fullscreen`。Explorer 恢复实验运行 `restart-explorer.ps1 -WaitSeconds 15`；恢复后等待约 9 秒再运行 `tray-click.ps1 -Name 'Hertz DESK-W0 probe'` 验证托盘图标重建。退出后用 `check-leftovers.ps1 -UserData <OUT>\webview2` 检查专属 WebView2 残留；资源采样用 `sample-gpu.ps1 -RootPid <pid> -Out <OUT>\gpu.csv`，阶段 CPU/工作集在探针日志的 `cpu_mark/cpu` 行。
+实验时在另一终端运行 `show-desktop.ps1` 把桌面置前；截图用同目录 `capture-screen.ps1`。全屏实验用 `fullscreen-check.ps1 -Out <OUT>\real-fullscreen`。Explorer 恢复实验运行 `restart-explorer.ps1 -WaitSeconds 15`；恢复后等待约 9 秒再运行 `tray-click.ps1 -Name 'Hertz DESK-W0 probe'` 验证托盘图标重建。终态后等待约 15 秒，用 `tray-menu.ps1 -Name 'Hertz DESK-W0 probe' -ItemIndex 0` 右键并选择“重新挂载”。退出后用 `check-leftovers.ps1 -UserData <OUT>\webview2` 检查专属 WebView2 残留；资源采样用 `sample-gpu.ps1 -RootPid <pid> -Out <OUT>\gpu.csv`，阶段 CPU/工作集在探针日志的 `cpu_mark/cpu` 行。
 
 ## 7. 决定与下一步
 
-- **决定：** 保留 `wallpaper` 探针作为 W0 复现入口；不把 WorkerW 挂载写成已批准生产方案，不进入 W1。W0 仍缺多屏、50 次启停、生产场景与长稳；托盘右键菜单、终态后的显式重试未验证，系统挂起通知需要换成 `RegisterSuspendResumeNotification` 再确认。策略停绘必须按“原生可见性 + 页面停止调度”实现，不能只调 controller。
-- **下一轮最小任务：** ① 目标屏断开/重连与混合 DPI；② 50 次启停、controller/WebGL 失败与进程回收；③ `RegisterSuspendResumeNotification` 挂起信号、终态后的显式用户重试/预算清空、托盘右键菜单；④ 接入生产星座场景并做无壁纸对照、8 小时与资源阈值。
+- **决定：** 保留 `wallpaper` 探针作为 W0 复现入口；不把 WorkerW 挂载写成已批准生产方案，不进入 W1。W0 仍缺多屏、50 次启停、生产场景与长稳；托盘右键菜单与终态重试已通过，`RegisterSuspendResumeNotification` 的真实 S3 送达还需一次复测。策略停绘必须按“原生可见性 + 页面停止调度”实现，不能只调 controller。
+- **下一轮最小任务：** ① 目标屏断开/重连与混合 DPI；② 50 次启停、controller/WebGL 失败与进程回收；③ 真实 S3 复测 `RegisterSuspendResumeNotification` 送达；④ 接入生产星座场景并做无壁纸对照、8 小时与资源阈值。
 - **复验触发：** Windows 构建、Explorer 桌面层级、WebView2 Runtime、wry/tao/tray-icon、DPI/刷新率或挂载算法任一变化，都必须重跑本报告对应实验。
 
 本报告不把一次全屏/快速重启或短窗口资源采样当作完整 W0 通过，也不以合成页面替代生产星座场景的长稳与预算。
