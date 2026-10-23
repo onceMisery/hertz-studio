@@ -22,7 +22,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 探针源码 | `14e88c7`（`tools/desktop-probe/` 第二轮改动，含托盘等待与失败注入记录）；本报告为该提交的实机结果记录 |
+| 探针源码 | `14e88c7`（探针二进制）；`tray-click.ps1`、`kill-webview.ps1`、`fullscreen-check.ps1` 随本报告提交 |
 | 探针二进制 | `desktop-probe.exe`，1,148,416 bytes，SHA-256 `20cbb2296bc408e20ed8e75f374ed7483199854fa881a27f51cd17ab12197b31` |
 | Cargo.lock | SHA-256 `ca62e6adef134f969d696bba297db6b499d1bd895c3e3d876bb1f1fe6eed113f` |
 | 工具链 | rustc/cargo 1.98.1；`cargo +1.88.0 check --release` 通过；`cargo clippy --release -- -D warnings` 通过 |
