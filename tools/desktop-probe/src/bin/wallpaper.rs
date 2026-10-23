@@ -65,16 +65,16 @@ mod wallpaper {
         QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, DefWindowProcW, EnumWindows, FindWindowExW, GetAncestor, GetClassNameW,
-        GetCursorPos, GetParent, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect,
-        IsWindow, IsWindowVisible, PostMessageW, SendMessageTimeoutW, SetCursorPos, SetParent,
-        SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint, DEVICE_NOTIFY_WINDOW_HANDLE,
-        GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_HWNDNEXT, HWND_BOTTOM,
-        PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE,
-        SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        SWP_SHOWWINDOW, SW_SHOW, WM_POWERBROADCAST, WNDPROC, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
-        WS_THICKFRAME,
+        CallWindowProcW, DefWindowProcW, DestroyWindow, EnumWindows, FindWindowExW, GetAncestor,
+        GetClassNameW, GetCursorPos, GetParent, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
+        GetWindowRect, IsWindow, IsWindowVisible, PostMessageW, SendMessageTimeoutW, SetCursorPos,
+        SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint,
+        DEVICE_NOTIFY_WINDOW_HANDLE, GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, GW_CHILD,
+        GW_HWNDNEXT, HWND_BOTTOM, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
+        PBT_POWERSETTINGCHANGE, SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_SHOW, WM_POWERBROADCAST, WNDPROC, WS_CAPTION,
+        WS_CHILD, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+        WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
     };
     use wry::{WebViewBuilder, WebViewExtWindows};
 
@@ -185,6 +185,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
     enum UserEvent {
         Tick(u8),
         Check,
+        CloseController,
         EnvChange { reason: u8, on: bool },
         Tray(TrayIconEvent),
         Menu(MenuEvent),
@@ -283,6 +284,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         fullscreen_state: Option<QUERY_USER_NOTIFICATION_STATE>,
         restart_test: bool,
         cpu_mark: Option<(String, Instant, TreeSample)>,
+        last_liveness: Instant,
     }
 
     impl Probe {
@@ -361,6 +363,13 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             };
             let workerw_alive = unsafe { IsWindow(self.workerw) } != 0;
             if alive && parent == self.workerw && workerw_alive {
+                if self.last_liveness.elapsed() >= Duration::from_secs(2) {
+                    self.last_liveness = Instant::now();
+                    if let Err(error) = self.view.evaluate_script("1") {
+                        self.evidence.log(format!("liveness_lost error={error}"));
+                        self.recover(target);
+                    }
+                }
                 return;
             }
             self.evidence.log(format!(
@@ -370,6 +379,12 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 fmt_hwnd(self.workerw)
             ));
             self.recover(target);
+        }
+
+        fn close_controller(&mut self) {
+            let result = unsafe { self.view.controller().Close() };
+            self.evidence
+                .log(format!("controller_close result={result:?}"));
         }
 
         fn set_reason(&mut self, reason: u8, on: bool, tag: &str) {
@@ -527,6 +542,16 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             }
             let old_hwnd = self.hwnd();
             let old_workerw = self.workerw;
+            if unsafe { IsWindow(old_hwnd) } != 0 {
+                let _ = unsafe { self.view.controller().Close() };
+                let destroyed = unsafe { DestroyWindow(old_hwnd) };
+                self.evidence.log(format!(
+                    "recover_destroy_old hwnd={} destroyed={destroyed}",
+                    fmt_hwnd(old_hwnd)
+                ));
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            self.last_liveness = Instant::now();
             let new_window = match WindowBuilder::new()
                 .with_title("Hertz DESK-W0 wallpaper probe")
                 .with_inner_size(PhysicalSize::new(
@@ -715,6 +740,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let mut restart_test = false;
         let mut duration_ms = 40_000u64;
         let mut power_selftest = false;
+        let mut close_controller_after_ms = 0u64;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -722,6 +748,12 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 "--source" => source = args.next().ok_or("--source needs a revision")?,
                 "--restart-test" => restart_test = true,
                 "--power-selftest" => power_selftest = true,
+                "--close-controller-after-ms" => {
+                    close_controller_after_ms = args
+                        .next()
+                        .ok_or("--close-controller-after-ms needs a value")?
+                        .parse()?;
+                }
                 "--duration-ms" => {
                     duration_ms = args.next().ok_or("--duration-ms needs a value")?.parse()?;
                 }
@@ -735,7 +767,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             None => std::process::exit(3),
         };
         evidence.log(format!(
-            "probe=desk-w0 source={source} pid={} restart_test={restart_test} duration_ms={duration_ms} power_selftest={power_selftest} webview2_user_data={}",
+            "probe=desk-w0 source={source} pid={} restart_test={restart_test} duration_ms={duration_ms} power_selftest={power_selftest} close_controller_after_ms={close_controller_after_ms} webview2_user_data={}",
             std::process::id(),
             out.join("webview2").display()
         ));
@@ -770,6 +802,13 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let event_loop = event_loop_builder.build();
         let proxy = event_loop.create_proxy();
         let _ = EVENT_PROXY.set(proxy.clone());
+        if close_controller_after_ms > 0 {
+            let proxy = proxy.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(close_controller_after_ms));
+                let _ = proxy.send_event(UserEvent::CloseController);
+            });
+        }
         let tray_proxy = proxy.clone();
         TrayIconEvent::set_event_handler(Some(move |event| {
             let _ = tray_proxy.send_event(UserEvent::Tray(event));
@@ -912,6 +951,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             fullscreen_state: None,
             restart_test,
             cpu_mark: None,
+            last_liveness: Instant::now(),
         };
 
         let _ticker = {
@@ -952,6 +992,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                         *control_flow = ControlFlow::Exit;
                     }
                 }
+                Event::UserEvent(UserEvent::CloseController) => probe.close_controller(),
                 Event::UserEvent(UserEvent::Check) => {
                     probe.check_health(event_loop_target);
                     if !probe.recovery.terminal {
