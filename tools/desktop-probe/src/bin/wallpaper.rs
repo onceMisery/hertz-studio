@@ -30,7 +30,7 @@ mod wallpaper {
 
     use tao::dpi::PhysicalSize;
     use tao::event::{Event, WindowEvent};
-    use tao::event_loop::{ControlFlow, EventLoopBuilder};
+    use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget};
     use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
     use tao::window::{Window, WindowBuilder};
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
@@ -161,8 +161,35 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
 
     enum UserEvent {
         Tick(u8),
+        Check,
         Tray(TrayIconEvent),
         Menu(MenuEvent),
+    }
+
+    struct Recovery {
+        attempts: Vec<Instant>,
+        terminal: bool,
+    }
+
+    impl Recovery {
+        fn new() -> Self {
+            Self {
+                attempts: Vec::new(),
+                terminal: false,
+            }
+        }
+
+        fn begin(&mut self) -> bool {
+            let now = Instant::now();
+            self.attempts
+                .retain(|attempt| now.duration_since(*attempt) < Duration::from_secs(120));
+            if self.attempts.len() >= 3 {
+                self.terminal = true;
+                return false;
+            }
+            self.attempts.push(now);
+            true
+        }
     }
 
     #[derive(Clone)]
@@ -202,6 +229,11 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         #[allow(dead_code)]
         tray: TrayIcon,
         quit_id: String,
+        screen_w: i32,
+        screen_h: i32,
+        current_fps: u32,
+        stopping: bool,
+        recovery: Recovery,
     }
 
     impl Probe {
@@ -267,6 +299,156 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             ));
         }
 
+        fn check_health(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+            if self.stopping || self.recovery.terminal {
+                return;
+            }
+            let hwnd = self.hwnd();
+            let alive = unsafe { IsWindow(hwnd) } != 0;
+            let parent = if alive {
+                unsafe { GetParent(hwnd) }
+            } else {
+                std::ptr::null_mut()
+            };
+            let workerw_alive = unsafe { IsWindow(self.workerw) } != 0;
+            if alive && parent == self.workerw && workerw_alive {
+                return;
+            }
+            self.evidence.log(format!(
+                "health_lost hwnd={} alive={alive} parent={} workerw={} workerw_alive={workerw_alive}",
+                fmt_hwnd(hwnd),
+                fmt_hwnd(parent),
+                fmt_hwnd(self.workerw)
+            ));
+            self.recover(target);
+        }
+
+        fn recover(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+            if self.recovery.terminal {
+                return;
+            }
+            if !self.recovery.begin() {
+                self.evidence
+                    .log("recovery_terminal attempts>=3 window=120s");
+                return;
+            }
+            let attempt = self.recovery.attempts.len();
+            self.evidence
+                .log(format!("recovery_begin attempt={attempt}"));
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut progman = find_progman();
+            while progman.is_null() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(200));
+                progman = find_progman();
+            }
+            if progman.is_null() {
+                self.evidence.log("recovery_fail reason=progman");
+                return;
+            }
+            let mut workerw = find_wallpaper_workerw(progman);
+            if workerw.is_null() {
+                request_workerw(progman);
+                let worker_deadline = Instant::now() + Duration::from_secs(2);
+                while workerw.is_null() && Instant::now() < worker_deadline {
+                    std::thread::sleep(Duration::from_millis(200));
+                    workerw = find_wallpaper_workerw(progman);
+                }
+            }
+            if workerw.is_null() {
+                self.evidence.log("recovery_fail reason=workerw");
+                return;
+            }
+            let old_hwnd = self.hwnd();
+            let old_workerw = self.workerw;
+            let new_window = match WindowBuilder::new()
+                .with_title("Hertz DESK-W0 wallpaper probe")
+                .with_inner_size(PhysicalSize::new(
+                    self.screen_w as u32,
+                    self.screen_h as u32,
+                ))
+                .with_position(tao::dpi::PhysicalPosition::new(0, 0))
+                .with_decorations(false)
+                .with_resizable(false)
+                .with_visible(false)
+                .with_focused(false)
+                .with_skip_taskbar(true)
+                .with_undecorated_shadow(false)
+                .build(target)
+            {
+                Ok(window) => window,
+                Err(error) => {
+                    self.evidence
+                        .log(format!("recovery_fail reason=window error={error}"));
+                    return;
+                }
+            };
+            let hwnd = new_window.hwnd() as HWND;
+            strip_styles(hwnd);
+            install_wallpaper_style(hwnd);
+            let previous_parent = unsafe { SetParent(hwnd, workerw) };
+            unsafe {
+                SetWindowPos(
+                    workerw,
+                    HWND_BOTTOM,
+                    0,
+                    0,
+                    self.screen_w,
+                    self.screen_h,
+                    SWP_NOACTIVATE,
+                );
+                SetWindowPos(
+                    hwnd,
+                    HWND_BOTTOM,
+                    0,
+                    0,
+                    self.screen_w,
+                    self.screen_h,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
+                );
+                ShowWindow(hwnd, SW_SHOW);
+            }
+            let clicks = self.clicks.clone();
+            let evidence = self.evidence.clone();
+            let new_view = match WebViewBuilder::new()
+                .with_html(PAGE)
+                .with_background_color((8, 16, 31, 255))
+                .with_ipc_handler(move |request| {
+                    let body = request.body();
+                    if body == "click" {
+                        clicks.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        evidence.log(format!("js {body}"));
+                    }
+                })
+                .build(&new_window)
+            {
+                Ok(view) => view,
+                Err(error) => {
+                    self.evidence
+                        .log(format!("recovery_fail reason=webview error={error}"));
+                    return;
+                }
+            };
+            let old_window = std::mem::replace(&mut self.window, new_window);
+            let old_view = std::mem::replace(&mut self.view, new_view);
+            std::mem::forget(old_window);
+            std::mem::forget(old_view);
+            self.workerw = workerw;
+            self.eval(
+                "recover-motion",
+                &format!("window.startMotion({})", self.current_fps),
+            );
+            self.evidence.log(format!(
+                "recovery_success attempt={attempt} old_hwnd={} old_workerw={} new_hwnd={} new_workerw={} previous_parent={} progman_children={}",
+                fmt_hwnd(old_hwnd),
+                fmt_hwnd(old_workerw),
+                fmt_hwnd(hwnd),
+                fmt_hwnd(workerw),
+                fmt_hwnd(previous_parent),
+                progman_children(progman)
+            ));
+        }
+
         fn tick(&mut self, n: u8) -> bool {
             match n {
                 0 => {
@@ -301,6 +483,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 3 => {
                     self.state("policy-paused");
                     let visible = unsafe { self.view.controller().SetIsVisible(true) };
+                    self.current_fps = 30;
                     self.eval("resume-scene", "window.startMotion(30)");
                     self.eval("stop-watch", "window.stopWatch()");
                     self.evidence.log(format!(
@@ -311,15 +494,18 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 }
                 4 => {
                     self.state("running-15");
+                    self.current_fps = 15;
                     self.eval("motion15", "window.startMotion(15)");
                     self.evidence.marker("motion15");
                 }
                 5 => {
                     self.state("running-60");
+                    self.current_fps = 60;
                     self.eval("motion60", "window.startMotion(60)");
                     self.evidence.marker("motion60");
                 }
                 6 => {
+                    self.stopping = true;
                     self.state("done");
                     self.eval("final", "window.stopMotion()");
                     self.evidence.marker("done");
@@ -449,6 +635,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
 
         let clicks = Arc::new(AtomicUsize::new(0));
         let clicks_view = clicks.clone();
+        let evidence_view = evidence.clone();
         let view = WebViewBuilder::new()
             .with_html(PAGE)
             .with_background_color((8, 16, 31, 255))
@@ -457,7 +644,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 if body == "click" {
                     clicks_view.fetch_add(1, Ordering::SeqCst);
                 } else {
-                    println!("js {body}");
+                    evidence_view.log(format!("js {body}"));
                 }
             })
             .build(&window)?;
@@ -480,13 +667,18 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             clicks,
             tray,
             quit_id,
+            screen_w,
+            screen_h,
+            current_fps: 30,
+            stopping: false,
+            recovery: Recovery::new(),
         };
 
         let _ticker = {
             let proxy = proxy.clone();
             std::thread::spawn(move || {
                 let start = Instant::now();
-                for (index, at_ms) in [0u64, 3_000, 8_000, 18_000, 23_000, 28_000, 33_000]
+                for (index, at_ms) in [0u64, 3_000, 15_000, 25_000, 30_000, 35_000, 40_000]
                     .into_iter()
                     .enumerate()
                 {
@@ -500,7 +692,17 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             })
         };
 
-        event_loop.run(move |event, _, control_flow| {
+        let _watcher = {
+            let proxy = proxy.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(500));
+                if proxy.send_event(UserEvent::Check).is_err() {
+                    break;
+                }
+            })
+        };
+
+        event_loop.run(move |event, event_loop_target, control_flow| {
             *control_flow = ControlFlow::Wait;
             match event {
                 Event::UserEvent(UserEvent::Tick(n)) => {
@@ -508,6 +710,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                         *control_flow = ControlFlow::Exit;
                     }
                 }
+                Event::UserEvent(UserEvent::Check) => probe.check_health(event_loop_target),
                 Event::UserEvent(UserEvent::Tray(event)) => {
                     probe.evidence.log(format!("tray_event={event:?}"));
                 }
@@ -515,13 +718,17 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                     let id = event.id.0.clone();
                     probe.evidence.log(format!("menu_event={id}"));
                     if id == probe.quit_id {
+                        probe.stopping = true;
                         *control_flow = ControlFlow::Exit;
                     }
                 }
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested,
                     ..
-                } => *control_flow = ControlFlow::Exit,
+                } => {
+                    probe.stopping = true;
+                    *control_flow = ControlFlow::Exit;
+                }
                 _ => {}
             }
         })
