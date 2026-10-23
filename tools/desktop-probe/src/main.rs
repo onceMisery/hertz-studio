@@ -235,6 +235,9 @@ window.restoreText = function () {
         focus_after_restore_pass: Option<bool>,
         fullscreen_state: Option<QUERY_USER_NOTIFICATION_STATE>,
         cpu_mark: Option<(String, Instant, TreeSample)>,
+        tray_wait_ms: u64,
+        tray_events: usize,
+        tray_click_pass: Option<bool>,
     }
 
     impl Probe {
@@ -442,7 +445,7 @@ window.restoreText = function () {
         }
 
         fn fullscreen_policy(&mut self) {
-            self.restore();
+            self.restore("policy-reset");
             self.set_env_reason(REASON_USER_HIDDEN, true, "user-hide");
             let mut original = RECT::default();
             unsafe { GetWindowRect(self.backdrop_hwnd(), &mut original) };
@@ -528,11 +531,11 @@ window.restoreText = function () {
             }
         }
 
-        fn restore(&self) {
+        fn restore(&self, source: &str) {
             self.set_locked(false);
             self.show_overlay();
             self.evidence
-                .log("restore source=simulated-tray visible=true locked=false");
+                .log(format!("restore source={source} visible=true locked=false"));
         }
 
         fn record_styles(&self, tag: &str) {
@@ -631,7 +634,7 @@ window.restoreText = function () {
                     self.evidence.marker("hidden");
                 }
                 4 => {
-                    self.restore();
+                    self.restore("synthetic-unlock");
                     self.record_styles("restored");
                     let (_, root) = self.hit("restored-unlocked");
                     self.evidence.log(format!(
@@ -670,8 +673,31 @@ window.restoreText = function () {
                             .count()
                     ));
                     self.evidence.marker("lifecycle");
+                    if self.tray_wait_ms > 0 {
+                        self.set_env_reason(REASON_USER_HIDDEN, true, "tray-wait-hide");
+                        self.evidence.log(format!(
+                            "tray_wait begin wait_ms={} awaiting real tray click",
+                            self.tray_wait_ms
+                        ));
+                        self.evidence.marker("tray-wait");
+                    }
                 }
                 7 => {
+                    if self.tray_wait_ms > 0 {
+                        let visible = unsafe { IsWindowVisible(self.overlay_hwnd()) } != 0;
+                        let pass = self.tray_events > 0 && visible && self.env_reasons == 0;
+                        self.tray_click_pass = Some(pass);
+                        self.evidence.log(format!(
+                            "tray_wait_result events={} reasons={:#04x} visible={visible} l0_2_tray_real_click={}",
+                            self.tray_events,
+                            self.env_reasons,
+                            verdict(pass)
+                        ));
+                        self.set_env_reason(REASON_USER_HIDDEN, false, "tray-wait-cleanup");
+                    } else {
+                        self.evidence
+                            .log("tray_wait_result skipped (--tray-wait-ms 0)");
+                    }
                     self.fullscreen_policy();
                     self.evidence.marker("policy");
                 }
@@ -709,13 +735,14 @@ window.restoreText = function () {
                     ));
                     let l0_1 = self.no_activate_pass == Some(true);
                     self.evidence.log(format!(
-                        "RESULT l0_1_no_activate_show={} l0_1_styles={} l0_2_window_from_point={} control_click_backdrop_visible={} l0_2_synthetic_click_through={} l0_2_synthetic_click_blocked_unlocked={} tray_built=true l0_3_policy_reasons={} l0_3_no_focus_steal={} l0_5_lifecycle_50=true l0_6_raw_metrics=see_cpu_and_js_lines",
+                        "RESULT l0_1_no_activate_show={} l0_1_styles={} l0_2_window_from_point={} control_click_backdrop_visible={} l0_2_synthetic_click_through={} l0_2_synthetic_click_blocked_unlocked={} l0_2_tray_real_click={} tray_built=true l0_3_policy_reasons={} l0_3_no_focus_steal={} l0_5_lifecycle_50=true l0_6_raw_metrics=see_cpu_and_js_lines",
                         verdict(l0_1),
                         verdict(self.no_activate_pass == Some(true)),
                         verdict(self.locked_hit_pass == Some(true)),
                         verdict(self.backdrop_click_pass == Some(true)),
                         verdict(self.locked_click_pass == Some(true)),
                         verdict(self.unlocked_click_blocked == Some(true)),
+                        optional_verdict(self.tray_click_pass),
                         verdict(self.policy_pass == Some(true)),
                         verdict(self.focus_after_restore_pass == Some(true))
                     ));
@@ -731,7 +758,7 @@ window.restoreText = function () {
                         ));
                     }
                     self.evidence.log(
-                        "NOT_RUN lockscreen/display-sleep/hibernate, mixed-DPI topology, tray real click/rebuild, controller failure, 8h stable, real lyrics sync",
+                        "NOT_RUN lockscreen/display-sleep/hibernate, mixed-DPI topology, tray rebuild/menu loss, controller failure, 8h stable, real lyrics sync",
                     );
                     self.evidence.marker("done");
                 }
@@ -745,12 +772,16 @@ window.restoreText = function () {
         let mut out = PathBuf::from("desktop-probe-out");
         let mut source = String::from("unknown");
         let mut lock_mode = String::from("layered");
+        let mut tray_wait_ms = 0u64;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--out" => out = PathBuf::from(args.next().ok_or("--out needs a path")?),
                 "--source" => source = args.next().ok_or("--source needs a revision")?,
                 "--lock-mode" => lock_mode = args.next().ok_or("--lock-mode needs a value")?,
+                "--tray-wait-ms" => {
+                    tray_wait_ms = args.next().ok_or("--tray-wait-ms needs a value")?.parse()?;
+                }
                 other => return Err(format!("unknown argument: {other}").into()),
             }
         }
@@ -767,7 +798,7 @@ window.restoreText = function () {
             None => std::process::exit(3),
         };
         evidence.log(format!(
-            "probe=desk-l0 source={source} lock_mode={lock_mode} pid={} webview2_user_data={}",
+            "probe=desk-l0 source={source} lock_mode={lock_mode} tray_wait_ms={tray_wait_ms} pid={} webview2_user_data={}",
             std::process::id(),
             out.join("webview2").display()
         ));
@@ -899,19 +930,26 @@ window.restoreText = function () {
             focus_after_restore_pass: None,
             fullscreen_state: None,
             cpu_mark: None,
+            tray_wait_ms,
+            tray_events: 0,
+            tray_click_pass: None,
         };
+
+        let mut schedule = vec![
+            0u64, 1_200, 3_200, 5_200, 6_200, 7_600, 9_200, 11_000, 13_000, 18_000, 23_000, 28_000,
+            39_500,
+        ];
+        if tray_wait_ms > 0 {
+            for at_ms in schedule.iter_mut().skip(7) {
+                *at_ms += tray_wait_ms;
+            }
+        }
 
         let _ticker = {
             let proxy = proxy.clone();
             std::thread::spawn(move || {
                 let start = Instant::now();
-                for (index, at_ms) in [
-                    0u64, 1_200, 3_200, 5_200, 6_200, 7_600, 9_200, 11_000, 13_000, 18_000, 23_000,
-                    28_000, 39_500,
-                ]
-                .into_iter()
-                .enumerate()
-                {
+                for (index, at_ms) in schedule.into_iter().enumerate() {
                     std::thread::sleep(
                         Duration::from_millis(at_ms).saturating_sub(start.elapsed()),
                     );
@@ -937,16 +975,18 @@ window.restoreText = function () {
                     inserted,
                 }) => probe.evaluate_click(tag, backdrop_before, overlay_before, inserted),
                 Event::UserEvent(UserEvent::Tray(event)) => {
+                    probe.tray_events += 1;
                     probe
                         .evidence
                         .log(format!("tray_event={event:?} -> restore"));
-                    probe.restore();
+                    probe.set_env_reason(REASON_USER_HIDDEN, false, "tray-restore");
+                    probe.restore("tray-event");
                 }
                 Event::UserEvent(UserEvent::Menu(event)) => {
                     let id = event.id.0.clone();
                     probe.evidence.log(format!("menu_event={id}"));
                     if id == probe.restore_id {
-                        probe.restore();
+                        probe.restore("tray-menu");
                     } else if id == probe.quit_id {
                         probe.evidence.log("quit source=tray-menu");
                         *control_flow = ControlFlow::Exit;
@@ -1324,6 +1364,14 @@ window.restoreText = function () {
             "pass"
         } else {
             "fail"
+        }
+    }
+
+    fn optional_verdict(pass: Option<bool>) -> &'static str {
+        match pass {
+            Some(true) => "pass",
+            Some(false) => "fail",
+            None => "not-run",
         }
     }
 
