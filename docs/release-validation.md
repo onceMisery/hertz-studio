@@ -2,6 +2,18 @@
 
 核对日期：2026-10-21。适用于 0.2.1 开发工作区，基于 HEAD `401a90376c0fa8391b5d60234103eeb381ef2c2c` 加未提交改动；不是该提交、已发布二进制或商店候选的验收结论。发布时必须用实际候选的源码、依赖和产物身份重跑，不能直接沿用开发工作区结果。完整范围仍由[产品路线](./product-roadmap.md)、[技术方案](./technical-roadmap.md)与[进度记录](./roadmap-progress.md)约束。
 
+## 2026-10-23 远端自动化与构建增量
+
+本次通过 GitHub API 核对 `origin/master` 提交 `2f2765c2867f9295ab28dd05aff21bc9ae324b17` 的远端运行结果；未在本机重跑产品测试或安装候选。以下增量只替换旧记录中相应的“远端未核对”状态，其余历史本机证据仍绑定各自源码和产物。
+
+| 证据 | 核对结果 | 范围 |
+| --- | --- | --- |
+| [CI 39815799925](https://github.com/onceMisery/hertz-studio/actions/runs/39815799925) | 13/13 job 成功，`head_sha` 与当前基线一致 | Windows/Linux/macOS × Standard/Full 的 stable 格式、Clippy、测试及 Rust 1.88 全 target 检查；另有一个 Linux smoke |
+| [release 构建 39815999209](https://github.com/onceMisery/hertz-studio/actions/runs/39815999209) | 13/13 job 成功，同一 `head_sha` | 两版独立程序的 Windows x64/Linux x64/macOS ARM64 构建、两版三 OS 插件打包，以及校验和汇总 |
+| 上述构建的 artifact 元数据 | 12 份分项产物及 `dist-all` 汇总存在，核对时均未过期 | 只核对元数据，未下载/解包、未复算二进制 SHA-256；安装、升级/回滚、签名与 Store 不在此证据内 |
+
+release workflow 由 `workflow_dispatch` 手动触发，只保留 artifacts；运行成功不代表自动发布。真实声卡/设备切换、正式 MCP 客户端、原生 DBX 完整旅程、实际账号、模型质量及长时资源仍分别待验。下一批候选绑定与验收任务见[开发计划](./plans/2026-10-23-next-development.md)。
+
 ## 2026-10-21 DBX、硬件与发布验收增量
 
 本次只验 DBX、当前机器硬件可用性和发布产物；真实模型验收不在范围内。检查基于当前 dirty 工作区，不代表 0.2.1 发布候选通过。
@@ -58,15 +70,16 @@ R1-L 的严格自动选择已有实现，尚余来源许可、在线真实来源
 
 | 类型 | Windows Standard | Windows Full | Linux Standard / Full | macOS Standard / Full |
 | --- | --- | --- | --- | --- |
-| Rust 1.88.0，锁定依赖、工作区全部 target 的 cargo check | 本轮通过 | 本轮通过，单独启用 Full | 已配置 CI，当前工作区尚无远端结果 | 已配置 CI，当前工作区尚无远端结果 |
-| stable 格式/Clippy/单测 | 分页增量 Hertz 库 421 项通过、4 项忽略；全 target Clippy；范围见进度 | 分页增量 Hertz 库 578 项通过、6 项忽略；全 target Clippy | 已有 stable CI 配置；此工作区当期结果未核对 | 同左 |
-| Standard / Full 资源与身份裁剪 | 本轮源码暂存检查通过 | 同次检查独立生成 Full | 检查可跨平台运行，本机结果不能替代目标 OS | 同左 |
+| Rust 1.88.0，锁定依赖、工作区全部 target 的 cargo check | `2f2765c` 远端 CI 通过 | 同提交单独启用 Full，远端通过 | 两版远端 CI 通过，见 10-23 增量 | 两版远端 CI 通过，见 10-23 增量 |
+| stable 格式/Clippy/测试 | `2f2765c` 远端 CI job 通过；历史本机计数见进度 | 同提交 Full CI job 通过；历史本机计数见进度 | 两版远端 CI job 通过，未逐项摘录测试计数 | 同左 |
+| Standard / Full 资源与身份裁剪 | `2f2765c` CI 的 release UI / edition 检查通过 | 同左 | 两版 CI 对应检查通过 | 同左 |
+| Release 独立程序构建与 DBX 插件打包 | `2f2765c` 远端 x64 独立程序及 Windows 插件构建通过 | 同左 | 两版 x64 独立程序及 Linux 插件构建通过 | 两版 ARM64 独立程序及 macOS 插件构建通过 |
 | 受控 HTTP、实际 Chrome 画布与视频编解码 | 有开发工作区记录，逐次使用的形态与边界见进度 | 没有独立冻结 Full 候选的当前记录 | 未完成当期记录 | 未完成当期记录 |
 | 原生 DBX UI / 权限 / 浮窗 | 待当期候选验收 | 待当期候选验收 | 待验 | 待验 |
 | 实际声卡 / 系统音频 / 设备切换 / 长时间听测 | 待验 | 待验 | 待验 | 待验 |
 | 实际账号 / 正式 MCP 客户端 / 真实模型 | 按能力分别待验 | 按能力分别待验 | 待验 | 待验 |
 | 模型凭据系统钥匙串（合成值，null 音频） | 本机实际保存/原生值匹配/跨进程重启/隔离/删除通过 | 同左，另含旧 service 迁移及删除不复活、辅助字段清理 | 待验 | 待验 |
-| 官方 Rust MCP SDK 与真实 stdio 子进程 | 七项通过，含超载/取消回收/大响应；null 后端 | 独立启用 Full 后相同七项通过；null 后端 | 工作区测试已纳入，当期远端结果待验 | 同左 |
+| 官方 Rust MCP SDK 与真实 stdio 子进程 | 历史本机七项通过；当前 CI 测试 job 通过，专项计数未另摘录；null 后端 | 同提交 Full CI 测试 job 通过；历史专项记录见进度 | 工作区测试已纳入，当前两版 CI job 通过；专项日志未另摘录 | 同左 |
 | 发布候选包 hash、安装/升级/回滚与 Store 签名 | 无当期验收 | Full 不进 Store；其它待验 | 待验，Full 不进 Store | 同左 |
 
 最低编译器检查覆盖 standalone、DBX、共享库、build scripts 和测试代码的编译；不链接或运行播放器/sidecar 产物，不启动宿主、不验证声音，构建脚本和 proc macro 仍会执行。2026-10-18 本机使用 `rustc 1.88.0 (6b00bc388 2025-06-23)`、`x86_64-pc-windows-msvc` 分别执行：
@@ -77,7 +90,7 @@ cargo +1.88.0 check --locked --workspace --all-targets --features hertz-studio/f
 node scripts/check-editions.js
 ```
 
-两版不能用一次 `--all-features` 的结果替代。CI 的 `msrv` job 对三个 OS、两个发行版分别使用 1.88.0；stable 测试 job 继续提供新编译器下的 lint/运行回归。新增 workflow 在本机只核对了 YAML 和六个组合的命令接线，没有运行 GitHub Actions，不记远端通过。
+两版不能用一次 `--all-features` 的结果替代。CI 的 `msrv` job 对三个 OS、两个发行版分别使用 1.88.0；stable 测试 job 继续提供新编译器下的 lint/运行回归。2026-10-18 本机增量只核对 YAML 和命令接线；2026-10-23 已取得绑定 `2f2765c` 的远端成功结果，见本页最新增量，不扩大为原生声音或安装验收。
 
 ## 发布时需绑定的证据
 
