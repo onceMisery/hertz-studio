@@ -46,7 +46,7 @@ mod wallpaper {
         TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::Power::{
-        RegisterPowerSettingNotification, POWERBROADCAST_SETTING,
+        RegisterPowerSettingNotification, RegisterSuspendResumeNotification, POWERBROADCAST_SETTING,
     };
     use windows_sys::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
@@ -67,9 +67,9 @@ mod wallpaper {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, EnumWindows, FindWindowExW, GetAncestor, GetClassNameW,
         GetCursorPos, GetParent, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect,
-        IsWindow, IsWindowVisible, SendMessageTimeoutW, SetCursorPos, SetParent, SetWindowLongPtrW,
-        SetWindowPos, ShowWindow, WindowFromPoint, DEVICE_NOTIFY_WINDOW_HANDLE, GA_ROOT,
-        GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_HWNDNEXT, HWND_BOTTOM,
+        IsWindow, IsWindowVisible, PostMessageW, SendMessageTimeoutW, SetCursorPos, SetParent,
+        SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint, DEVICE_NOTIFY_WINDOW_HANDLE,
+        GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_HWNDNEXT, HWND_BOTTOM,
         PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE,
         SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
         SWP_SHOWWINDOW, SW_SHOW, WM_POWERBROADCAST, WNDPROC, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
@@ -272,6 +272,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         #[allow(dead_code)]
         tray: TrayIcon,
         quit_id: String,
+        retry_id: String,
         screen_w: i32,
         screen_h: i32,
         current_fps: u32,
@@ -476,6 +477,19 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             ));
         }
 
+        fn retry(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+            self.evidence.log("retry_requested");
+            let alive = unsafe { IsWindow(self.hwnd()) } != 0;
+            if !self.recovery.terminal && alive {
+                self.evidence.log("retry_ignored healthy");
+                return;
+            }
+            self.recovery.attempts.clear();
+            self.recovery.terminal = false;
+            self.recover(target);
+            self.evidence.marker("retry");
+        }
+
         fn recover(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
             if self.recovery.terminal {
                 return;
@@ -538,7 +552,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             let hwnd = new_window.hwnd() as HWND;
             strip_styles(hwnd);
             install_wallpaper_style(hwnd);
-            install_power_hook(hwnd);
+            install_power_hook(hwnd, &self.evidence);
             let previous_parent = unsafe { SetParent(hwnd, workerw) };
             unsafe {
                 SetWindowPos(
@@ -700,12 +714,14 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let mut source = String::from("unknown");
         let mut restart_test = false;
         let mut duration_ms = 40_000u64;
+        let mut power_selftest = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--out" => out = PathBuf::from(args.next().ok_or("--out needs a path")?),
                 "--source" => source = args.next().ok_or("--source needs a revision")?,
                 "--restart-test" => restart_test = true,
+                "--power-selftest" => power_selftest = true,
                 "--duration-ms" => {
                     duration_ms = args.next().ok_or("--duration-ms needs a value")?.parse()?;
                 }
@@ -719,7 +735,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             None => std::process::exit(3),
         };
         evidence.log(format!(
-            "probe=desk-w0 source={source} pid={} restart_test={restart_test} duration_ms={duration_ms} webview2_user_data={}",
+            "probe=desk-w0 source={source} pid={} restart_test={restart_test} duration_ms={duration_ms} power_selftest={power_selftest} webview2_user_data={}",
             std::process::id(),
             out.join("webview2").display()
         ));
@@ -779,7 +795,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let hwnd = window.hwnd() as HWND;
         strip_styles(hwnd);
         install_wallpaper_style(hwnd);
-        install_power_hook(hwnd);
+        install_power_hook(hwnd, &evidence);
         let previous_parent = unsafe { SetParent(hwnd, workerw) };
         evidence.log(format!(
             "progman_children_before={}",
@@ -836,9 +852,39 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             })
             .build(&window)?;
 
+        if power_selftest {
+            let hwnd_selftest = hwnd as usize;
+            let evidence_selftest = evidence.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(3));
+                evidence_selftest.log("selftest_post_suspend");
+                unsafe {
+                    PostMessageW(
+                        hwnd_selftest as HWND,
+                        WM_POWERBROADCAST,
+                        PBT_APMSUSPEND as usize,
+                        0,
+                    )
+                };
+                std::thread::sleep(Duration::from_secs(2));
+                evidence_selftest.log("selftest_post_resume");
+                unsafe {
+                    PostMessageW(
+                        hwnd_selftest as HWND,
+                        WM_POWERBROADCAST,
+                        PBT_APMRESUMEAUTOMATIC as usize,
+                        0,
+                    )
+                };
+            });
+        }
+
         let menu = Menu::new();
+        let retry_item = MenuItem::new("Retry / 重新挂载", true, None);
         let quit_item = MenuItem::new("Quit / 退出 W0 探针", true, None);
+        menu.append(&retry_item)?;
         menu.append(&quit_item)?;
+        let retry_id = retry_item.id().0.clone();
         let quit_id = quit_item.id().0.clone();
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -855,6 +901,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             clicks,
             tray,
             quit_id,
+            retry_id,
             screen_w,
             screen_h,
             current_fps: 30,
@@ -925,7 +972,9 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 Event::UserEvent(UserEvent::Menu(event)) => {
                     let id = event.id.0.clone();
                     probe.evidence.log(format!("menu_event={id}"));
-                    if id == probe.quit_id {
+                    if id == probe.retry_id {
+                        probe.retry(event_loop_target);
+                    } else if id == probe.quit_id {
                         probe.stopping = true;
                         *control_flow = ControlFlow::Exit;
                     }
@@ -1248,16 +1297,20 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64
     }
 
-    fn install_power_hook(hwnd: HWND) {
+    fn install_power_hook(hwnd: HWND, evidence: &Evidence) {
         let original = unsafe { GetWindowLongPtrW(hwnd, GWLP_WNDPROC) };
         ORIGINAL_WNDPROC.store(original, Ordering::SeqCst);
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_wndproc as *const () as isize);
-            RegisterPowerSettingNotification(
+            let monitor = RegisterPowerSettingNotification(
                 hwnd as _,
                 &GUID_MONITOR_POWER_ON,
                 DEVICE_NOTIFY_WINDOW_HANDLE,
             );
+            let suspend = RegisterSuspendResumeNotification(hwnd as _, DEVICE_NOTIFY_WINDOW_HANDLE);
+            evidence.log(format!(
+                "register_power monitor_handle={monitor} suspend_resume_handle={suspend}"
+            ));
         }
     }
 
