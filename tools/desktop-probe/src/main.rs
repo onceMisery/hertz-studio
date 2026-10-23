@@ -59,7 +59,7 @@ mod probe {
 
     static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
     static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
-    static LOCK_MODE: AtomicU8 = AtomicU8::new(0);
+    static LOCK_MODE: AtomicU8 = AtomicU8::new(2);
 
     const BACKDROP_HTML: &str = r#"<!doctype html>
 <html><body style="margin:0;overflow:hidden;font-family:'Segoe UI',sans-serif">
@@ -455,7 +455,7 @@ window.setInk = function (dark) {
     pub fn run() -> Result<(), Box<dyn Error>> {
         let mut out = PathBuf::from("desktop-probe-out");
         let mut source = String::from("unknown");
-        let mut lock_mode = String::from("style");
+        let mut lock_mode = String::from("layered");
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
