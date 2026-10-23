@@ -35,25 +35,43 @@ mod probe {
     use tao::window::{Window, WindowBuilder};
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, FILETIME, HANDLE, HWND,
+        INVALID_HANDLE_VALUE, LPARAM, POINT, RECT,
+    };
     use windows_sys::Win32::Graphics::Gdi::{
         RedrawWindow, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateMutexW, GetCurrentProcessId, GetProcessTimes, OpenProcess,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         EnableWindow, IsWindowEnabled, SendInput, INPUT, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE,
         MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT,
     };
+    use windows_sys::Win32::UI::Shell::{
+        SHQueryUserNotificationState, QUERY_USER_NOTIFICATION_STATE, QUNS_BUSY,
+        QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, EnumChildWindows, GetAncestor, GetClassNameW,
         GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
-        GetWindowThreadProcessId, IsWindowVisible, SetCursorPos, SetLayeredWindowAttributes,
-        SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GWLP_WNDPROC,
-        GWL_EXSTYLE, GWL_STYLE, HTTRANSPARENT, HWND_TOPMOST, LWA_ALPHA, SM_CMONITORS,
-        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
-        SW_SHOWNOACTIVATE, WM_NCHITTEST, WNDPROC, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_LAYERED,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
-        WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+        GetWindowThreadProcessId, IsWindowVisible, SetCursorPos, SetForegroundWindow,
+        SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint,
+        GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, HTTRANSPARENT, HWND_TOPMOST, LWA_ALPHA,
+        SM_CMONITORS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_NCHITTEST, WNDPROC, WS_CAPTION, WS_EX_APPWINDOW,
+        WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
     };
     use wry::WebViewBuilder;
 
@@ -93,6 +111,47 @@ window.setInk = function (dark) {
   document.getElementById('sub').style.textShadow = dark
     ? '0 2px 9px rgba(0,0,0,.72)' : '0 1px 6px rgba(255,255,255,.9)';
 };
+let motion = { raf: 0, frames: 0, updates: 0, started: 0, cap: 0, lastPaint: 0, lastReport: 0, paintMs: 0, maxPaintMs: 0 };
+window.startMotion = function (fps) {
+  if (motion.raf) cancelAnimationFrame(motion.raf);
+  motion = { raf: 0, frames: 0, updates: 0, started: performance.now(), cap: fps, lastPaint: 0, lastReport: 0, paintMs: 0, maxPaintMs: 0 };
+  const line = document.getElementById('line');
+  function loop(now) {
+    motion.raf = requestAnimationFrame(loop);
+    motion.frames++;
+    if (!motion.cap || now - motion.lastPaint >= (1000 / motion.cap) - 0.5) {
+      motion.lastPaint = now;
+      const paintStart = performance.now();
+      motion.updates++;
+      line.textContent = '夜航星 · 穿过无声的云层 · ' + motion.updates + ' · Hertz DESK-L0';
+      const paintMs = performance.now() - paintStart;
+      motion.paintMs += paintMs;
+      if (paintMs > motion.maxPaintMs) motion.maxPaintMs = paintMs;
+    }
+    if (now - motion.lastReport >= 1000) {
+      motion.lastReport = now;
+      if (window.ipc) window.ipc.postMessage(JSON.stringify({
+        kind: 'motion', cap: motion.cap, frames: motion.frames, updates: motion.updates,
+        ms: Math.max(0, Math.round(now - motion.started)),
+        paintAvgMs: +(motion.paintMs / Math.max(1, motion.updates)).toFixed(3),
+        paintMaxMs: +motion.maxPaintMs.toFixed(3),
+        dpr: devicePixelRatio, size: [innerWidth, innerHeight]
+      }));
+    }
+  }
+  motion.raf = requestAnimationFrame(loop);
+};
+window.stopMotion = function () {
+  if (motion.raf) cancelAnimationFrame(motion.raf);
+  motion.raf = 0;
+  if (window.ipc) window.ipc.postMessage(JSON.stringify({
+    kind: 'stopped', cap: motion.cap, frames: motion.frames, updates: motion.updates,
+    ms: Math.max(0, Math.round(performance.now() - motion.started))
+  }));
+};
+window.restoreText = function () {
+  document.getElementById('line').textContent = '夜航星 · 穿过无声的云层';
+};
 </script></body></html>"#;
 
     enum UserEvent {
@@ -114,6 +173,11 @@ window.setInk = function (dark) {
         BackdropVisible,
     }
 
+    const REASON_USER_HIDDEN: u8 = 1 << 0;
+    const REASON_FULLSCREEN: u8 = 1 << 1;
+    const REASON_LOCK_SIMULATED: u8 = 1 << 2;
+
+    #[derive(Clone)]
     struct Evidence {
         dir: PathBuf,
     }
@@ -138,6 +202,16 @@ window.setInk = function (dark) {
         }
     }
 
+    #[derive(Clone)]
+    struct TreeSample {
+        cpu_100ns: u64,
+        working_set: u64,
+        processes: usize,
+        webview_processes: usize,
+        pids: Vec<u32>,
+        per_process: Vec<(u32, String, u64)>,
+    }
+
     struct Probe {
         backdrop: Window,
         overlay: Window,
@@ -156,6 +230,11 @@ window.setInk = function (dark) {
         backdrop_clicks: Arc<AtomicUsize>,
         overlay_clicks: Arc<AtomicUsize>,
         proxy: EventLoopProxy<UserEvent>,
+        env_reasons: u8,
+        policy_pass: Option<bool>,
+        focus_after_restore_pass: Option<bool>,
+        fullscreen_state: Option<QUERY_USER_NOTIFICATION_STATE>,
+        cpu_mark: Option<(String, Instant, TreeSample)>,
     }
 
     impl Probe {
@@ -286,6 +365,169 @@ window.setInk = function (dark) {
             unsafe { ShowWindow(self.overlay_hwnd(), SW_HIDE) };
         }
 
+        fn set_env_reason(&mut self, reason: u8, on: bool, tag: &str) -> bool {
+            if on {
+                self.env_reasons |= reason;
+            } else {
+                self.env_reasons &= !reason;
+            }
+            if self.env_reasons == 0 {
+                self.show_overlay();
+            } else {
+                self.hide_overlay();
+            }
+            let visible = unsafe { IsWindowVisible(self.overlay_hwnd()) } != 0;
+            self.evidence.log(format!(
+                "policy tag={tag} reasons={:#04x} user_hidden={} fullscreen={} lock_simulated={} visible={visible}",
+                self.env_reasons,
+                self.env_reasons & REASON_USER_HIDDEN != 0,
+                self.env_reasons & REASON_FULLSCREEN != 0,
+                self.env_reasons & REASON_LOCK_SIMULATED != 0
+            ));
+            visible
+        }
+
+        fn start_cpu(&mut self, tag: &str) {
+            let sample = sample_process_tree();
+            self.evidence.log(format!(
+                "cpu_mark tag={tag} processes={} webview_processes={} pids={:?} cpu_ms={} working_set_mb={:.1}",
+                sample.processes,
+                sample.webview_processes,
+                sample.pids,
+                sample.cpu_100ns / 10_000,
+                sample.working_set as f64 / (1024.0 * 1024.0)
+            ));
+            self.cpu_mark = Some((tag.to_string(), Instant::now(), sample));
+        }
+
+        fn finish_cpu(&mut self, tag: &str) {
+            let Some((prev_tag, started, prev)) = self.cpu_mark.take() else {
+                return;
+            };
+            let now = sample_process_tree();
+            let elapsed_ms = started.elapsed().as_millis().max(1);
+            let delta_ms = now.cpu_100ns.saturating_sub(prev.cpu_100ns) as f64 / 10_000.0;
+            let mut deltas: Vec<(u32, String, f64)> = now
+                .per_process
+                .iter()
+                .map(|(pid, name, cpu)| {
+                    let before = prev
+                        .per_process
+                        .iter()
+                        .find(|(previous_pid, _, _)| previous_pid == pid)
+                        .map(|(_, _, previous_cpu)| *previous_cpu)
+                        .unwrap_or(0);
+                    (
+                        *pid,
+                        name.clone(),
+                        cpu.saturating_sub(before) as f64 / 10_000.0,
+                    )
+                })
+                .filter(|(_, _, delta)| *delta >= 1.0)
+                .collect();
+            deltas.sort_by(|left, right| right.2.total_cmp(&left.2));
+            let top = deltas
+                .iter()
+                .take(5)
+                .map(|(pid, name, delta)| format!("{name}:{pid}:{delta:.0}ms"))
+                .collect::<Vec<_>>()
+                .join(",");
+            self.evidence.log(format!(
+                "cpu tag={tag} from={prev_tag} elapsed_ms={elapsed_ms} delta_ms={delta_ms:.0} single_core_percent={:.1} working_set_mb={:.1} processes={} webview_processes={} top=[{top}]",
+                delta_ms * 100.0 / elapsed_ms as f64,
+                now.working_set as f64 / (1024.0 * 1024.0),
+                now.processes,
+                now.webview_processes
+            ));
+        }
+
+        fn fullscreen_policy(&mut self) {
+            self.restore();
+            self.set_env_reason(REASON_USER_HIDDEN, true, "user-hide");
+            let mut original = RECT::default();
+            unsafe { GetWindowRect(self.backdrop_hwnd(), &mut original) };
+            let previous_foreground = foreground_root();
+            unsafe {
+                SetWindowPos(
+                    self.backdrop_hwnd(),
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    GetSystemMetrics(0),
+                    GetSystemMetrics(1),
+                    SWP_NOACTIVATE,
+                );
+                ShowWindow(self.backdrop_hwnd(), SW_SHOW);
+                SetForegroundWindow(self.backdrop_hwnd());
+            }
+            std::thread::sleep(Duration::from_millis(700));
+            let state = query_notification_state();
+            self.fullscreen_state = Some(state);
+            let detected = is_fullscreen_state(state);
+            self.evidence.log(format!(
+                "fullscreen_env state={state} detected={detected} foreground={}",
+                fmt_hwnd(foreground_root())
+            ));
+
+            if detected {
+                self.set_env_reason(REASON_FULLSCREEN, true, "fullscreen-detected");
+                self.set_env_reason(REASON_USER_HIDDEN, false, "user-unhide-under-fullscreen");
+                let hidden = unsafe { IsWindowVisible(self.overlay_hwnd()) } == 0;
+                unsafe {
+                    SetWindowPos(
+                        self.backdrop_hwnd(),
+                        HWND_TOPMOST,
+                        original.left,
+                        original.top,
+                        original.right - original.left,
+                        original.bottom - original.top,
+                        SWP_NOACTIVATE,
+                    );
+                    ShowWindow(self.backdrop_hwnd(), SW_HIDE);
+                }
+                std::thread::sleep(Duration::from_millis(700));
+                let after = query_notification_state();
+                self.evidence.log(format!(
+                    "fullscreen_exit state={after} detected={}",
+                    is_fullscreen_state(after)
+                ));
+                self.set_env_reason(REASON_FULLSCREEN, false, "fullscreen-cleared");
+                let visible = unsafe { IsWindowVisible(self.overlay_hwnd()) } != 0;
+                self.policy_pass = Some(hidden && visible);
+            } else {
+                self.set_env_reason(REASON_LOCK_SIMULATED, true, "lock-simulated");
+                self.set_env_reason(REASON_USER_HIDDEN, false, "user-unhide-under-lock");
+                let hidden = unsafe { IsWindowVisible(self.overlay_hwnd()) } == 0;
+                self.set_env_reason(REASON_LOCK_SIMULATED, false, "lock-cleared");
+                let visible = unsafe { IsWindowVisible(self.overlay_hwnd()) } != 0;
+                self.policy_pass = Some(hidden && visible);
+                unsafe {
+                    SetWindowPos(
+                        self.backdrop_hwnd(),
+                        HWND_TOPMOST,
+                        original.left,
+                        original.top,
+                        original.right - original.left,
+                        original.bottom - original.top,
+                        SWP_NOACTIVATE,
+                    );
+                    ShowWindow(self.backdrop_hwnd(), SW_HIDE);
+                }
+            }
+
+            let foreground = foreground_root();
+            let focus_pass = foreground != self.overlay_hwnd();
+            self.focus_after_restore_pass = Some(focus_pass);
+            self.evidence.log(format!(
+                "policy_restore foreground={} overlay={} no_focus_steal={focus_pass}",
+                fmt_hwnd(foreground),
+                fmt_hwnd(self.overlay_hwnd())
+            ));
+            if !previous_foreground.is_null() && previous_foreground != foreground {
+                unsafe { SetForegroundWindow(previous_foreground) };
+            }
+        }
+
         fn restore(&self) {
             self.set_locked(false);
             self.show_overlay();
@@ -317,7 +559,7 @@ window.setInk = function (dark) {
             (raw, root)
         }
 
-        fn tick(&mut self, n: u8) {
+        fn tick(&mut self, n: u8) -> bool {
             match n {
                 0 => {
                     strip_title_bar(self.overlay_hwnd());
@@ -427,28 +669,75 @@ window.setInk = function (dark) {
                             .filter(|value| !value.is_empty())
                             .count()
                     ));
+                    self.evidence.marker("lifecycle");
+                }
+                7 => {
+                    self.fullscreen_policy();
+                    self.evidence.marker("policy");
+                }
+                8 => {
+                    self.set_locked(true);
+                    self.start_cpu("motion30");
+                    let _ = self.overlay_view.evaluate_script("window.startMotion(30)");
+                    self.evidence.marker("motion30");
+                }
+                9 => {
+                    let _ = self.overlay_view.evaluate_script("window.stopMotion()");
+                    self.finish_cpu("motion30");
+                    self.start_cpu("motion15");
+                    let _ = self.overlay_view.evaluate_script("window.startMotion(15)");
+                    self.evidence.marker("motion15");
+                }
+                10 => {
+                    let _ = self.overlay_view.evaluate_script("window.stopMotion()");
+                    self.finish_cpu("motion15");
+                    self.start_cpu("static");
+                    let _ = self.overlay_view.evaluate_script("window.restoreText()");
+                    self.evidence.marker("static");
+                }
+                11 => {
+                    self.finish_cpu("static");
+                    self.start_cpu("idle10");
+                    self.evidence.marker("idle10");
+                }
+                12 => {
+                    self.finish_cpu("idle10");
+                    let tree = sample_process_tree();
+                    self.evidence.log(format!(
+                        "tree_before_exit processes={} webview_processes={} pids={:?}",
+                        tree.processes, tree.webview_processes, tree.pids
+                    ));
                     let l0_1 = self.no_activate_pass == Some(true);
                     self.evidence.log(format!(
-                        "RESULT l0_1_no_activate_show={} l0_1_styles={} l0_2_window_from_point={} control_click_backdrop_visible={} l0_2_synthetic_click_through={} l0_2_synthetic_click_blocked_unlocked={} tray_built=true",
+                        "RESULT l0_1_no_activate_show={} l0_1_styles={} l0_2_window_from_point={} control_click_backdrop_visible={} l0_2_synthetic_click_through={} l0_2_synthetic_click_blocked_unlocked={} tray_built=true l0_3_policy_reasons={} l0_3_no_focus_steal={} l0_5_lifecycle_50=true l0_6_raw_metrics=see_cpu_and_js_lines",
                         verdict(l0_1),
                         verdict(self.no_activate_pass == Some(true)),
                         verdict(self.locked_hit_pass == Some(true)),
                         verdict(self.backdrop_click_pass == Some(true)),
                         verdict(self.locked_click_pass == Some(true)),
-                        verdict(self.unlocked_click_blocked == Some(true))
+                        verdict(self.unlocked_click_blocked == Some(true)),
+                        verdict(self.policy_pass == Some(true)),
+                        verdict(self.focus_after_restore_pass == Some(true))
                     ));
                     self.evidence.log(format!(
                         "click_counts backdrop={} overlay={}",
                         self.backdrop_clicks.load(Ordering::SeqCst),
                         self.overlay_clicks.load(Ordering::SeqCst)
                     ));
+                    if let Some(state) = self.fullscreen_state {
+                        self.evidence.log(format!(
+                            "fullscreen_state_final={state} detected={}",
+                            is_fullscreen_state(state)
+                        ));
+                    }
                     self.evidence.log(
-                        "NOT_RUN fullscreen/lockscreen/sleep, mixed-DPI move, tray rebuild, 50x lifecycle, 8h stable, real lyrics sync",
+                        "NOT_RUN lockscreen/display-sleep/hibernate, mixed-DPI topology, tray real click/rebuild, controller failure, 8h stable, real lyrics sync",
                     );
                     self.evidence.marker("done");
                 }
                 _ => {}
             }
+            n == 12
         }
     }
 
@@ -473,6 +762,10 @@ window.setInk = function (dark) {
         };
         LOCK_MODE.store(mode, Ordering::SeqCst);
         let evidence = Evidence::new(out.clone())?;
+        let _mutex = match acquire_single_instance(&evidence) {
+            Some(handle) => handle,
+            None => std::process::exit(3),
+        };
         evidence.log(format!(
             "probe=desk-l0 source={source} lock_mode={lock_mode} pid={} webview2_user_data={}",
             std::process::id(),
@@ -541,12 +834,15 @@ window.setInk = function (dark) {
             })
             .build(&backdrop)?;
         let overlay_clicks_view = overlay_clicks.clone();
+        let overlay_evidence = evidence.clone();
         let overlay_view = WebViewBuilder::new()
             .with_transparent(true)
             .with_html(OVERLAY_HTML)
             .with_ipc_handler(move |request| {
                 if request.body() == "click" {
                     overlay_clicks_view.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    overlay_evidence.log(format!("js {}", request.body()));
                 }
             })
             .build(&overlay)?;
@@ -598,15 +894,23 @@ window.setInk = function (dark) {
             backdrop_clicks,
             overlay_clicks,
             proxy: proxy.clone(),
+            env_reasons: 0,
+            policy_pass: None,
+            focus_after_restore_pass: None,
+            fullscreen_state: None,
+            cpu_mark: None,
         };
 
         let _ticker = {
             let proxy = proxy.clone();
             std::thread::spawn(move || {
                 let start = Instant::now();
-                for (index, at_ms) in [0u64, 1_200, 3_200, 5_200, 6_200, 7_600, 9_200]
-                    .into_iter()
-                    .enumerate()
+                for (index, at_ms) in [
+                    0u64, 1_200, 3_200, 5_200, 6_200, 7_600, 9_200, 11_000, 13_000, 18_000, 23_000,
+                    28_000, 39_500,
+                ]
+                .into_iter()
+                .enumerate()
                 {
                     std::thread::sleep(
                         Duration::from_millis(at_ms).saturating_sub(start.elapsed()),
@@ -621,11 +925,11 @@ window.setInk = function (dark) {
         event_loop.run(move |event, _, control_flow| {
             *control_flow = ControlFlow::Wait;
             match event {
-                Event::UserEvent(UserEvent::Tick(6)) => {
-                    probe.tick(6);
-                    *control_flow = ControlFlow::Exit;
+                Event::UserEvent(UserEvent::Tick(n)) => {
+                    if probe.tick(n) {
+                        *control_flow = ControlFlow::Exit;
+                    }
                 }
-                Event::UserEvent(UserEvent::Tick(n)) => probe.tick(n),
                 Event::UserEvent(UserEvent::ClickChecked {
                     tag,
                     backdrop_before,
@@ -655,6 +959,147 @@ window.setInk = function (dark) {
                 _ => {}
             }
         })
+    }
+
+    fn acquire_single_instance(evidence: &Evidence) -> Option<HANDLE> {
+        let name: Vec<u16> = "Local\\Hertz.DesktopProbe.Singleton\0"
+            .encode_utf16()
+            .collect();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            evidence.log("single_instance=error");
+            return None;
+        }
+        let conflict = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+        evidence.log(format!(
+            "single_instance={} name=Local\\\\Hertz.DesktopProbe.Singleton pid={}",
+            if conflict { "conflict" } else { "acquired" },
+            unsafe { GetCurrentProcessId() }
+        ));
+        if conflict {
+            unsafe { CloseHandle(handle) };
+            None
+        } else {
+            Some(handle)
+        }
+    }
+
+    fn sample_process_tree() -> TreeSample {
+        let processes = process_snapshot();
+        let root = unsafe { GetCurrentProcessId() };
+        let pids = descendants(&processes, root);
+        let mut cpu_100ns = 0u64;
+        let mut working_set = 0u64;
+        let mut webview_processes = 0usize;
+        let mut per_process = Vec::new();
+        for (pid, _, name) in &processes {
+            if !pids.contains(pid) {
+                continue;
+            }
+            if name.eq_ignore_ascii_case("msedgewebview2.exe") {
+                webview_processes += 1;
+            }
+            unsafe {
+                let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, *pid);
+                if handle.is_null() {
+                    continue;
+                }
+                let mut creation = FILETIME::default();
+                let mut exit = FILETIME::default();
+                let mut kernel = FILETIME::default();
+                let mut user = FILETIME::default();
+                if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0 {
+                    let cpu = filetime_to_u64(kernel) + filetime_to_u64(user);
+                    cpu_100ns += cpu;
+                    per_process.push((*pid, name.clone(), cpu));
+                }
+                let mut counters = PROCESS_MEMORY_COUNTERS {
+                    cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+                    ..Default::default()
+                };
+                if GetProcessMemoryInfo(handle, &mut counters, counters.cb) != 0 {
+                    working_set += counters.WorkingSetSize as u64;
+                }
+                CloseHandle(handle);
+            }
+        }
+        TreeSample {
+            cpu_100ns,
+            working_set,
+            processes: pids.len(),
+            webview_processes,
+            pids,
+            per_process,
+        }
+    }
+
+    fn process_snapshot() -> Vec<(u32, u32, String)> {
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Vec::new();
+        }
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut processes = Vec::new();
+        unsafe {
+            if Process32FirstW(snapshot, &mut entry) != 0 {
+                loop {
+                    let end = entry
+                        .szExeFile
+                        .iter()
+                        .position(|value| *value == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    processes.push((
+                        entry.th32ProcessID,
+                        entry.th32ParentProcessID,
+                        String::from_utf16_lossy(&entry.szExeFile[..end]),
+                    ));
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snapshot);
+        }
+        processes
+    }
+
+    fn descendants(processes: &[(u32, u32, String)], root: u32) -> Vec<u32> {
+        let mut pids = vec![root];
+        let mut index = 0;
+        while index < pids.len() {
+            let parent = pids[index];
+            index += 1;
+            for (pid, parent_pid, _) in processes {
+                if *parent_pid == parent && !pids.contains(pid) {
+                    pids.push(*pid);
+                }
+            }
+        }
+        pids
+    }
+
+    fn filetime_to_u64(time: FILETIME) -> u64 {
+        ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64
+    }
+
+    fn query_notification_state() -> QUERY_USER_NOTIFICATION_STATE {
+        let mut state: QUERY_USER_NOTIFICATION_STATE = -1;
+        let result = unsafe { SHQueryUserNotificationState(&mut state) };
+        if result < 0 {
+            -1
+        } else {
+            state
+        }
+    }
+
+    fn is_fullscreen_state(state: QUERY_USER_NOTIFICATION_STATE) -> bool {
+        matches!(
+            state,
+            QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE
+        )
     }
 
     fn send_absolute_click(x: i32, y: i32) -> u32 {
