@@ -24,13 +24,13 @@ mod wallpaper {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+    use std::sync::{Arc, OnceLock};
     use std::time::{Duration, Instant};
 
     use tao::dpi::PhysicalSize;
     use tao::event::{Event, WindowEvent};
-    use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget};
+    use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
     use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
     use tao::window::{Window, WindowBuilder};
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
@@ -45,9 +45,13 @@ mod wallpaper {
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
+    use windows_sys::Win32::System::Power::{
+        RegisterPowerSettingNotification, POWERBROADCAST_SETTING,
+    };
     use windows_sys::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
     };
+    use windows_sys::Win32::System::SystemServices::GUID_MONITOR_POWER_ON;
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcessId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -61,13 +65,16 @@ mod wallpaper {
         QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, FindWindowExW, GetAncestor, GetClassNameW, GetCursorPos, GetParent,
-        GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect, IsWindow, IsWindowVisible,
-        SendMessageTimeoutW, SetCursorPos, SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-        WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_HWNDNEXT, HWND_BOTTOM,
+        CallWindowProcW, DefWindowProcW, EnumWindows, FindWindowExW, GetAncestor, GetClassNameW,
+        GetCursorPos, GetParent, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect,
+        IsWindow, IsWindowVisible, SendMessageTimeoutW, SetCursorPos, SetParent, SetWindowLongPtrW,
+        SetWindowPos, ShowWindow, WindowFromPoint, DEVICE_NOTIFY_WINDOW_HANDLE, GA_ROOT,
+        GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_HWNDNEXT, HWND_BOTTOM,
+        PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE,
         SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        SWP_SHOWWINDOW, SW_SHOW, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        SWP_SHOWWINDOW, SW_SHOW, WM_POWERBROADCAST, WNDPROC, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+        WS_THICKFRAME,
     };
     use wry::{WebViewBuilder, WebViewExtWindows};
 
@@ -178,6 +185,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
     enum UserEvent {
         Tick(u8),
         Check,
+        EnvChange { reason: u8, on: bool },
         Tray(TrayIconEvent),
         Menu(MenuEvent),
     }
@@ -185,6 +193,11 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
     const REASON_MANUAL: u8 = 1 << 0;
     const REASON_FULLSCREEN: u8 = 1 << 1;
     const REASON_SESSION: u8 = 1 << 2;
+    const REASON_DISPLAY_OFF: u8 = 1 << 3;
+    const REASON_SLEEP: u8 = 1 << 4;
+
+    static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+    static EVENT_PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
 
     #[derive(Clone)]
     struct TreeSample {
@@ -525,6 +538,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             let hwnd = new_window.hwnd() as HWND;
             strip_styles(hwnd);
             install_wallpaper_style(hwnd);
+            install_power_hook(hwnd);
             let previous_parent = unsafe { SetParent(hwnd, workerw) };
             unsafe {
                 SetWindowPos(
@@ -739,6 +753,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let mut event_loop_builder = EventLoopBuilder::<UserEvent>::with_user_event();
         let event_loop = event_loop_builder.build();
         let proxy = event_loop.create_proxy();
+        let _ = EVENT_PROXY.set(proxy.clone());
         let tray_proxy = proxy.clone();
         TrayIconEvent::set_event_handler(Some(move |event| {
             let _ = tray_proxy.send_event(UserEvent::Tray(event));
@@ -764,6 +779,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let hwnd = window.hwnd() as HWND;
         strip_styles(hwnd);
         install_wallpaper_style(hwnd);
+        install_power_hook(hwnd);
         let previous_parent = unsafe { SetParent(hwnd, workerw) };
         evidence.log(format!(
             "progman_children_before={}",
@@ -894,6 +910,14 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                     if !probe.recovery.terminal {
                         probe.check_fullscreen();
                     }
+                }
+                Event::UserEvent(UserEvent::EnvChange { reason, on }) => {
+                    let tag = match reason {
+                        REASON_DISPLAY_OFF => "display-off",
+                        REASON_SLEEP => "sleep",
+                        _ => "environment",
+                    };
+                    probe.set_reason(reason, on, tag);
                 }
                 Event::UserEvent(UserEvent::Tray(event)) => {
                     probe.evidence.log(format!("tray_event={event:?}"));
@@ -1222,6 +1246,61 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
 
     fn filetime_to_u64(time: FILETIME) -> u64 {
         ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64
+    }
+
+    fn install_power_hook(hwnd: HWND) {
+        let original = unsafe { GetWindowLongPtrW(hwnd, GWLP_WNDPROC) };
+        ORIGINAL_WNDPROC.store(original, Ordering::SeqCst);
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_wndproc as *const () as isize);
+            RegisterPowerSettingNotification(
+                hwnd as _,
+                &GUID_MONITOR_POWER_ON,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            );
+        }
+    }
+
+    fn send_env_change(reason: u8, on: bool) {
+        if let Some(proxy) = EVENT_PROXY.get() {
+            let _ = proxy.send_event(UserEvent::EnvChange { reason, on });
+        }
+    }
+
+    unsafe extern "system" fn hook_wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> isize {
+        if msg == WM_POWERBROADCAST {
+            match wparam as u32 {
+                PBT_APMSUSPEND => send_env_change(REASON_SLEEP, true),
+                PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
+                    send_env_change(REASON_SLEEP, false)
+                }
+                PBT_POWERSETTINGCHANGE => {
+                    let setting = &*(lparam as *const POWERBROADCAST_SETTING);
+                    let expected = &GUID_MONITOR_POWER_ON;
+                    let actual = &setting.PowerSetting;
+                    if actual.data1 == expected.data1
+                        && actual.data2 == expected.data2
+                        && actual.data3 == expected.data3
+                        && actual.data4 == expected.data4
+                    {
+                        let value = *(setting.Data.as_ptr() as *const u32);
+                        send_env_change(REASON_DISPLAY_OFF, value == 0);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let original = ORIGINAL_WNDPROC.load(Ordering::SeqCst);
+        if original == 0 {
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
+        let procedure: WNDPROC = unsafe { std::mem::transmute(original) };
+        unsafe { CallWindowProcW(procedure, hwnd, msg, wparam, lparam) }
     }
 
     fn query_notification_state() -> QUERY_USER_NOTIFICATION_STATE {
