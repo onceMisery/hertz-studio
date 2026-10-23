@@ -7484,7 +7484,14 @@ function syncNpSnapshot(snap) {
 
 const CAPSULE_KEY = 'vmusic.capsule.minimized';
 const CAPSULE_POS_KEY = 'vmusic.capsule.pos';
+// Full 发行版打包时会把插件 ID 改写成 io.github.oncemisery.hertz-studio.full，
+// 写死的贡献点在那边会被宿主当成别家的贡献点拒掉。宿主 init 下发的 contributionId
+// 就是本实例所在的工作台贡献点，两种发行版都对；没有桥（独立形态）时用 Standard 的值兜底。
 const PLAYER_WORKBENCH = 'io.github.oncemisery.hertz-studio.player';
+function playerWorkbench() {
+  const bridge = window.dbxPlugin;
+  return (bridge && bridge.contributionId) || PLAYER_WORKBENCH;
+}
 // 拖拽与点击的位移阈值：小于它算「点了一下」（展开），大于才算拖。
 const CAPSULE_DRAG_PX = 4;
 // 页内最小化态：离边多远开始吸附；20 与默认外边距同值，吸上之后正好落回默认位。
@@ -7863,7 +7870,7 @@ function initCapsuleControls() {
     const floating = floatingApi();
     if (!floating) return Promise.resolve(null);
     return floating
-      .open({ contributionId: PLAYER_WORKBENCH, title: '正在播放', width: 268, height: 55 })
+      .open({ contributionId: playerWorkbench(), title: '正在播放', width: 268, height: 55 })
       .catch((err) => {
         console.warn('[hertz] 打开浮动胶囊失败：', err);
         return null;
@@ -7881,7 +7888,7 @@ function initCapsuleControls() {
       // 必须等转发落地再关自己：窗口一销毁，还在路上的那次转发就没人送了，用户点了
       // 展开却什么也没开出来。
       Promise.allSettled([
-        window.dbxPlugin.openWorkbench(PLAYER_WORKBENCH, {}, { target: 'tab' }),
+        window.dbxPlugin.openWorkbench(playerWorkbench(), {}, { target: 'tab' }),
         transport.post('/v1/ui/notice', { action: 'expand-capsule' }),
       ]).then(() => {
         const floating = floatingApi();
