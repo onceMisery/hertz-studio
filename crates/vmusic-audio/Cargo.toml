@@ -35,3 +35,11 @@ sha2 = { workspace = true }
 [[example]]
 name = "resample_probe"
 required-features = ["playback"]
+
+[[example]]
+name = "clocked_resample_probe"
+required-features = ["playback"]
+
+[[example]]
+name = "device_clock_probe"
+required-features = ["playback"]

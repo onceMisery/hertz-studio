@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 hertz-studio contributors
+
+[package]
+name = "lan-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 独立工作区：P0 网络探针只在隔离测试网络/回环运行、退出即关闭，不进产品
+# workspace（同 tools/desktop-probe 惯例，避免把探针依赖带进产品 CI）。
+[workspace]
+
+[dependencies]
+serde_json = "1"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.61.1", features = [
+  "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
+] }
+
+[profile.release]
+debug = false

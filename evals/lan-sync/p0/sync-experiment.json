@@ -1,0 +1,41 @@
+{
+  "accepted": 32,
+  "audio": {
+    "blocks": 1100,
+    "hOvershoot": 0,
+    "lateBlocks": 0,
+    "slackMsMedian": 996.865515,
+    "slackMsMin": 984.326469,
+    "slackMsP95": 999.329455
+  },
+  "config": {
+    "audioChannels": 2,
+    "audioRate": 48000,
+    "blockMs": 20,
+    "estimatorWindow": 32,
+    "groundTruthDriftPpm": 50.0,
+    "groundTruthOffsetMs": 12.5,
+    "jitterMs": 0.3,
+    "leadHMs": 1000.0,
+    "oneWayDelayMs": 1.0,
+    "seconds": 20.0,
+    "spikePct": 5.0
+  },
+  "convergenceTo1msMs": 0.0,
+  "discontinuities": 0,
+  "driftEstimatePpm": 89.28216201715549,
+  "driftTruthPpm": 50.0,
+  "offsetErrorMs": {
+    "maxAbs": 0.303388,
+    "p50": 0.07618,
+    "p95AfterHalf": 0.165763
+  },
+  "os": "windows",
+  "probe": "loopback-time-sync",
+  "rejected": 12,
+  "rttMinMs": 2.4479,
+  "samples": 211,
+  "schemaVersion": 1,
+  "shaping": "app-layer",
+  "uncertaintyMs": 0.165649
+}

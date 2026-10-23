@@ -1,0 +1,44 @@
+{
+  "bufferFrames": 9600,
+  "capture": {
+    "packets": 599,
+    "qpcFallbackPackets": 0,
+    "samples": 287520
+  },
+  "channels": 2,
+  "correlationPeakNormMedian": 0.9999999583867553,
+  "cpu": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+  "deviceClock": {
+    "anchors": 291,
+    "fitResidualMsMax": 0.0948523532117978,
+    "monotonic": true,
+    "positionDropped": "cpal 0.15 丢弃的帧位置由本探针直接读取；Realtek 实测位置按端点内钟计数（比例≠1），需自标定",
+    "positionUnitRatio": 8.000031413282995
+  },
+  "latencyMs": {
+    "max": -5.702143,
+    "mean": -5.74318390909091,
+    "min": -5.778543,
+    "p50": -5.742443,
+    "p95": -5.717043,
+    "std": 0.019236179432869528
+  },
+  "markers": {
+    "detected": 22,
+    "detectionRate": 0.9565217391304348,
+    "scheduled": 23
+  },
+  "os": "windows",
+  "padding": {
+    "msMedian": 180.0,
+    "msP95": 180.0
+  },
+  "probe": "wasapi-loopback-correlation",
+  "requestedSeconds": 6.0,
+  "sampleRate": 48000,
+  "schemaVersion": 1,
+  "verdict": {
+    "correlationEvidence": true,
+    "deviceClockUsable": true
+  }
+}

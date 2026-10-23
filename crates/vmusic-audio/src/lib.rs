@@ -9,6 +9,9 @@ pub mod actor;
 pub mod null;
 
 #[cfg(feature = "playback")]
+pub mod clocked_resample;
+
+#[cfg(feature = "playback")]
 pub mod cpal_backend;
 
 #[cfg(feature = "playback")]
