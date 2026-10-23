@@ -73,7 +73,7 @@ mod probe {
         WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
         WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
     };
-    use wry::WebViewBuilder;
+    use wry::{WebViewBuilder, WebViewExtWindows};
 
     static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
     static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -237,8 +237,11 @@ window.restoreText = function () {
         cpu_mark: Option<(String, Instant, TreeSample)>,
         tray_wait_ms: u64,
         tray_events: usize,
+        tray_expect_clicks: usize,
         tray_click_pass: Option<bool>,
         webview_failure_observed: bool,
+        controller_close_done: bool,
+        close_controller: bool,
     }
 
     impl Probe {
@@ -713,11 +716,14 @@ window.restoreText = function () {
                 7 => {
                     if self.tray_wait_ms > 0 {
                         let visible = unsafe { IsWindowVisible(self.overlay_hwnd()) } != 0;
-                        let pass = self.tray_events > 0 && visible && self.env_reasons == 0;
+                        let pass = self.tray_events >= self.tray_expect_clicks
+                            && visible
+                            && self.env_reasons == 0;
                         self.tray_click_pass = Some(pass);
                         self.evidence.log(format!(
-                            "tray_wait_result events={} reasons={:#04x} visible={visible} l0_2_tray_real_click={}",
+                            "tray_wait_result events={} expected={} reasons={:#04x} visible={visible} l0_2_tray_real_click={}",
                             self.tray_events,
+                            self.tray_expect_clicks,
                             self.env_reasons,
                             verdict(pass)
                         ));
@@ -736,6 +742,15 @@ window.restoreText = function () {
                     self.evidence.marker("motion30");
                 }
                 9 => {
+                    if self.close_controller && !self.controller_close_done {
+                        self.controller_close_done = true;
+                        match unsafe { self.overlay_view.controller().Close() } {
+                            Ok(()) => self.evidence.log("controller_close tag=overlay result=ok"),
+                            Err(error) => self
+                                .evidence
+                                .log(format!("controller_close tag=overlay error={error}")),
+                        }
+                    }
                     self.eval("stop-motion30", "window.stopMotion()");
                     self.finish_cpu("motion30");
                     self.observe_webview_failure("tick9");
@@ -780,8 +795,13 @@ window.restoreText = function () {
                     } else {
                         "not-run"
                     };
+                    let controller_status = if self.controller_close_done {
+                        "injected"
+                    } else {
+                        "not-run"
+                    };
                     self.evidence.log(format!(
-                        "RESULT l0_1_no_activate_show={} l0_1_styles={} l0_2_window_from_point={} control_click_backdrop_visible={} l0_2_synthetic_click_through={} l0_2_synthetic_click_blocked_unlocked={} l0_2_tray_real_click={} tray_built=true l0_3_policy_reasons={} l0_3_no_focus_steal={} l0_5_lifecycle_50=true l0_5_webview_process_failure={failure_status} l0_6_raw_metrics=see_cpu_and_js_lines",
+                        "RESULT l0_1_no_activate_show={} l0_1_styles={} l0_2_window_from_point={} control_click_backdrop_visible={} l0_2_synthetic_click_through={} l0_2_synthetic_click_blocked_unlocked={} l0_2_tray_real_click={} tray_built=true l0_3_policy_reasons={} l0_3_no_focus_steal={} l0_5_lifecycle_50=true l0_5_webview_process_failure={failure_status} l0_5_controller_api_failure={controller_status} l0_6_raw_metrics=see_cpu_and_js_lines",
                         verdict(l0_1),
                         verdict(self.no_activate_pass == Some(true)),
                         verdict(self.locked_hit_pass == Some(true)),
@@ -819,6 +839,8 @@ window.restoreText = function () {
         let mut source = String::from("unknown");
         let mut lock_mode = String::from("layered");
         let mut tray_wait_ms = 0u64;
+        let mut tray_expect_clicks = 1usize;
+        let mut close_controller = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -828,6 +850,13 @@ window.restoreText = function () {
                 "--tray-wait-ms" => {
                     tray_wait_ms = args.next().ok_or("--tray-wait-ms needs a value")?.parse()?;
                 }
+                "--tray-expect-clicks" => {
+                    tray_expect_clicks = args
+                        .next()
+                        .ok_or("--tray-expect-clicks needs a value")?
+                        .parse()?;
+                }
+                "--close-controller" => close_controller = true,
                 other => return Err(format!("unknown argument: {other}").into()),
             }
         }
@@ -844,7 +873,7 @@ window.restoreText = function () {
             None => std::process::exit(3),
         };
         evidence.log(format!(
-            "probe=desk-l0 source={source} lock_mode={lock_mode} tray_wait_ms={tray_wait_ms} pid={} webview2_user_data={}",
+            "probe=desk-l0 source={source} lock_mode={lock_mode} tray_wait_ms={tray_wait_ms} tray_expect_clicks={tray_expect_clicks} close_controller={close_controller} pid={} webview2_user_data={}",
             std::process::id(),
             out.join("webview2").display()
         ));
@@ -978,8 +1007,11 @@ window.restoreText = function () {
             cpu_mark: None,
             tray_wait_ms,
             tray_events: 0,
+            tray_expect_clicks,
             tray_click_pass: None,
             webview_failure_observed: false,
+            controller_close_done: false,
+            close_controller,
         };
 
         let mut schedule = vec![
