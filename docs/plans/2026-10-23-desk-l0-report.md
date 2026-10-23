@@ -57,6 +57,7 @@
 | --- | --- | --- |
 | L0-2 真实托盘点击 | `--tray-wait-ms 8000` 先把歌词按“用户隐藏”原因隐藏；`tray-click.ps1` 用 UIA 找到任务栏溢出按钮并发送真实鼠标点击，再点击溢出面板中的 `Hertz DESK-L0 probe` | 探针记录 Down/Up 两条 `tray_event`；`reasons=0x00`、`visible=true`，`l0_2_tray_real_click=pass` |
 | L0-2 Explorer 重建 | `--tray-wait-ms 45000 --tray-expect-clicks 2`；第一次点击后运行 `restart-explorer.ps1`（Explorer `10024→6956`），等待任务栏恢复后再次点击 | 图标重新注册，位置从 x=1906 变为 x=1954；累计 4 条事件，`tray_wait_result events=4 expected=2`、`l0_2_tray_real_click=pass` |
+| L0-2 托盘右键菜单 | 真实右键托盘图标，读取 UIA `MenuItem` 并定位 `Restore` | 右键 Down/Up 到达探针；UIA 未找到原生菜单项，菜单路径未验收 |
 | L0-3 合成全屏 | 把背景窗改为覆盖主屏的置顶无边框窗口并置前台；读取 `SHQueryUserNotificationState`；用位掩码叠加“用户隐藏”和“全屏”原因 | 进入时 `state=2 (QUNS_BUSY)`，检测为全屏；维持全屏时解除用户隐藏仍不可见；退出全屏后 `state=5`，清除全屏原因才恢复可见；恢复后前台不是歌词窗口 |
 | L0-5 启停与回收 | 正常启动、完成实验、退出；退出后按专属 WebView2 数据目录匹配进程及其后代 | 探针退出码 0；`leftover=0`；退出前进程树为 8 个进程（探针 + 7 个 `msedgewebview2.exe`） |
 | L0-5 失败注入（进程） | 运动阶段一次终止探针的 7 个 `msedgewebview2.exe` 进程 | 宿主存活；后续 eval 返回 `HRESULT(0x8007139F)`；进程树只剩探针（约 34 MB）；`overlay_visible=true` 且命中背景；无自动重启；退出码 0、`leftover=0`；没有失败恢复策略 |
@@ -116,7 +117,7 @@ layered 锁定态、启动约 1.2 s 时：`desktop-probe.exe` 33.6 MB，7 个 `m
 5. **30 fps 上限实测为 27.6 次/秒。** 以 rAF 计时、`1000/fps - 0.5 ms` 门限的简单调度会损失约 8%。若 L1 需要严格 30 fps 文本更新，应改用带累计误差修正的调度，或在产品口径中接受该偏差；15 fps 路径在本次为 15.0 次/秒。
 6. **整树 CPU 主要由持续 rAF/合成循环决定，而不是文本更新次数。** 两次运行中把更新上限从 30 降到 15 fps，CPU 均值几乎不变（约 15.5% 对 15.4%），且高低顺序在运行间反转；单次 `textContent` 更新平均仅约 0.03 ms。静态阶段取消 rAF 后 CPU 接近零。生产控制器若要降成本，应停止或节流动画循环本身，而不是只降低文字更新频率。
 7. **正常退出回收成立；WebView2 进程或 controller 失败时宿主能存活并退出，但没有失败策略。** 两种注入后宿主继续运行、后续 eval 返回 `0x8007139F`、退出后无残留；同时空白歌词窗仍保持 `visible=true` 直到退出。生产宿主必须定义检测、隐藏、重试或报告策略，不能把“进程没崩”当作失败恢复。GPU 进程崩溃、托盘退出与窗口关闭竞争仍未测。
-8. **真实托盘点击与 Explorer 重建均通过，菜单路径未验。** UIA 打开任务栏溢出后对图标发送真实鼠标点击，歌词可从隐藏状态恢复；Explorer 重启后图标重新注册并出现在新的溢出位置，第二次点击仍有效。右键菜单在重建后的行为、菜单失联恢复未单独验证，不能据此宣称完整“托盘找回”已通过。
+8. **真实托盘点击与 Explorer 重建均通过，菜单路径未验。** UIA 打开任务栏溢出后对图标发送真实鼠标点击，歌词可从隐藏状态恢复；Explorer 重启后图标重新注册并出现在新的溢出位置，第二次点击仍有效。右键事件能到达探针，但一次 UIA 试验未能在原生菜单中找到 `Restore` 项；右键菜单在重建后的行为、菜单失联恢复仍未验证，不能据此宣称完整“托盘找回”已通过。
 9. **单实例只验证了同一会话。** `Local\` 命名互斥量能阻止同会话第二次启动；跨用户/跨会话的命名对象 ACL、配置写者和退出再启未验证。
 
 ## 6. 复现与证据
@@ -149,7 +150,7 @@ powershell -File restart-explorer.ps1 -WaitSeconds 15
 
 单实例复验：第一实例运行时用不同 `--out` 再启动一次，第二实例应记录 `single_instance=conflict` 并以退出码 3 结束。阶段就绪后仍可用同目录 `process-tree.ps1 -Out <文件>` 与 `capture-screen.ps1 -Out <png>`。托盘点击脚本按 `SystemTrayIcon` 中 x 坐标最小的按钮识别溢出入口，不依赖系统语言；若托盘图标已经在任务栏可见，则直接按名称点击。`restart-explorer.ps1` 会强制重启 Explorer，只能在测试机/已确认的桌面上运行。
 
-第二轮原始证据位于本机忽略目录 `output/desk-l0/2026-10-23-run11/`（`probe.log`、`stdout.log`、`gpu.csv`、`leftovers.txt`、`single-instance.log`）、`output/desk-l0/2026-10-23-run16/`（含 `tray-click.log`、`gpu.csv`、`leftovers.txt`）、`output/desk-l0/2026-10-23-run19/`（含 `kill.log`、`after-kill.png`、`leftovers.txt`）、`output/desk-l0/2026-10-23-run20/`（含 `tray-click-1.log`、`tray-click-2-attempt1.log`、`restart-explorer.log`）、`output/desk-l0/2026-10-23-run21/`（controller Close）与 `output/desk-l0/2026-10-23-real-fullscreen2/`（含 `real-fullscreen.png`），以及被拒绝的第二实例目录 `output/desk-l0/2026-10-23-run11-single/`；按上面的命令重跑即可再生。仓库内只提交裁切后的首轮明暗截图。本次运行未发起任何 provider 请求，未使用 LLM key。
+第二轮原始证据位于本机忽略目录 `output/desk-l0/2026-10-23-run11/`（`probe.log`、`stdout.log`、`gpu.csv`、`leftovers.txt`、`single-instance.log`）、`output/desk-l0/2026-10-23-run16/`（含 `tray-click.log`、`gpu.csv`、`leftovers.txt`）、`output/desk-l0/2026-10-23-run19/`（含 `kill.log`、`after-kill.png`、`leftovers.txt`）、`output/desk-l0/2026-10-23-run20/`（含 `tray-click-1.log`、`tray-click-2-attempt1.log`、`restart-explorer.log`）、`output/desk-l0/2026-10-23-run21/`（controller Close）、`output/desk-l0/2026-10-23-run22/`（含 `tray-menu.log`、`restart-explorer.log`）与 `output/desk-l0/2026-10-23-real-fullscreen2/`（含 `real-fullscreen.png`），以及被拒绝的第二实例目录 `output/desk-l0/2026-10-23-run11-single/`；按上面的命令重跑即可再生。仓库内只提交裁切后的首轮明暗截图。本次运行未发起任何 provider 请求，未使用 LLM key。
 
 ## 7. 决定与下一步
 
