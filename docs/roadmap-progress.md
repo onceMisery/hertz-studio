@@ -8,6 +8,8 @@
 
 > 2026-10-23 维护与候选增量：MAINT-01 将 `ViewerGuard`、离场宽限武装与 `pause_if_alone` 搬入 `state/viewers.rs`，`depart_pause_only_fires_for_the_last_viewer`、慢加载离场与最后连接断开反例保留；Standard `state::tests` 58/58、Full 64/64，两版 `ai::facade::tests` 各 9/9，`node scripts/check-player-races.js` 9 项通过。MAINT-02 只把 jobs 回归测试搬到 `ai/jobs/tests.rs`，搬前搬后 `--list` 均为 72 项，两版各 72/72，格式与 Clippy 通过。REL-01 在同一源码提交构建 Standard/Full 独立程序与 DBX 包共四份 Windows x64 候选，身份与 SHA-256 见[发布矩阵候选表](./release-validation.md#2026-10-23-windows-021-验收候选本机构建)。候选未安装/启动，PLAY-01、MCP-01、真实声音、正式客户端与模型仍待验，本轮未发起 provider 请求。
 
+> 同日 DESK-L0 首轮：隔离探针在本机 Windows 11 x64 / WebView2 155 上验证 windowed WebView2 + layered 顶层可透明无边框、非激活置顶、锁定穿透、解锁恢复输入与 50 次显隐循环；tao 0.37.1 的去边框需手动补偿，纯样式与禁用窗口两条路径失败。L0-3/4/6、真实托盘点击、启停/controller 失败未执行，**L0 阶段未完成，不进入 L1**；报告与明暗截图见[DESK-L0 报告](./plans/2026-10-23-desk-l0-report.md)。
+
 当前开发停点：已核对搜索、歌词候选、MCP 授权与播控、舞台草稿、持久任务、provider/凭据、评测入口和工程/导出主线的现有代码，未发现需要在缺少真实环境时继续新增的明确主线功能。此结论是功能实现核对，不是全部异常、平台、模型质量或发布条件已经验收。
 
 按用户当前要求，没有可用 API key 时不发起云请求，也不为重复受控结果继续运行测试；用量和费用统计不作为功能门槛。后续应先取得具体的功能失败证据，或具备真实模型、账号、DBX、声卡/GPU、其他 OS 与候选发行环境后完成对应验收。原路线中的这些待验项继续保留，不能将“当前可结束编码”记为“路线图全部完成”。
