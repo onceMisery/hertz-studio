@@ -44,6 +44,10 @@ mod wallpaper {
         SendInput, INPUT, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
         MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT,
     };
+    use windows_sys::Win32::UI::Shell::{
+        SHQueryUserNotificationState, QUERY_USER_NOTIFICATION_STATE, QUNS_BUSY,
+        QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, FindWindowExW, GetAncestor, GetClassNameW, GetCursorPos, GetParent,
         GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect, IsWindow, IsWindowVisible,
@@ -166,6 +170,9 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         Menu(MenuEvent),
     }
 
+    const REASON_MANUAL: u8 = 1 << 0;
+    const REASON_FULLSCREEN: u8 = 1 << 1;
+
     struct Recovery {
         attempts: Vec<Instant>,
         terminal: bool,
@@ -234,6 +241,9 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         current_fps: u32,
         stopping: bool,
         recovery: Recovery,
+        policy_reasons: u8,
+        policy_hidden: bool,
+        fullscreen_state: Option<QUERY_USER_NOTIFICATION_STATE>,
     }
 
     impl Probe {
@@ -321,6 +331,54 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 fmt_hwnd(self.workerw)
             ));
             self.recover(target);
+        }
+
+        fn set_reason(&mut self, reason: u8, on: bool, tag: &str) {
+            let before = self.policy_reasons;
+            if on {
+                self.policy_reasons |= reason;
+            } else {
+                self.policy_reasons &= !reason;
+            }
+            let hidden = self.policy_reasons != 0;
+            if hidden == self.policy_hidden {
+                self.evidence.log(format!(
+                    "policy_reason tag={tag} reasons={:#04x} before={before:#04x} hidden={hidden}",
+                    self.policy_reasons
+                ));
+                return;
+            }
+            self.policy_hidden = hidden;
+            if hidden {
+                let result = unsafe { self.view.controller().SetIsVisible(false) };
+                self.eval("policy-stop", "window.stopMotion()");
+                self.evidence.log(format!(
+                    "policy_change tag={tag} reasons={:#04x} hidden=true controller={result:?}",
+                    self.policy_reasons
+                ));
+            } else {
+                let result = unsafe { self.view.controller().SetIsVisible(true) };
+                self.eval(
+                    "policy-start",
+                    &format!("window.startMotion({})", self.current_fps),
+                );
+                self.evidence.log(format!(
+                    "policy_change tag={tag} reasons={:#04x} hidden=false controller={result:?}",
+                    self.policy_reasons
+                ));
+            }
+        }
+
+        fn check_fullscreen(&mut self) {
+            let state = query_notification_state();
+            let active = is_fullscreen_state(state);
+            if self.fullscreen_state == Some(state) {
+                return;
+            }
+            self.fullscreen_state = Some(state);
+            self.evidence
+                .log(format!("fullscreen_state state={state} active={active}"));
+            self.set_reason(REASON_FULLSCREEN, active, "fullscreen");
         }
 
         fn recover(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
@@ -434,10 +492,21 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             std::mem::forget(old_window);
             std::mem::forget(old_view);
             self.workerw = workerw;
-            self.eval(
-                "recover-motion",
-                &format!("window.startMotion({})", self.current_fps),
-            );
+            if self.policy_hidden {
+                let result = unsafe { self.view.controller().SetIsVisible(false) };
+                self.eval("recover-policy-stop", "window.stopMotion()");
+                self.evidence
+                    .log(format!("recovery_policy hidden=true controller={result:?}"));
+            } else {
+                let result = unsafe { self.view.controller().SetIsVisible(true) };
+                self.eval(
+                    "recover-motion",
+                    &format!("window.startMotion({})", self.current_fps),
+                );
+                self.evidence.log(format!(
+                    "recovery_policy hidden=false controller={result:?}"
+                ));
+            }
             self.evidence.log(format!(
                 "recovery_success attempt={attempt} old_hwnd={} old_workerw={} new_hwnd={} new_workerw={} previous_parent={} progman_children={}",
                 fmt_hwnd(old_hwnd),
@@ -472,23 +541,14 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 }
                 2 => {
                     self.state("before-policy-pause");
-                    let hidden = unsafe { self.view.controller().SetIsVisible(false) };
                     self.eval("watch-visibility", "window.watchVisibility()");
-                    self.eval("pause-scene", "window.stopMotion()");
-                    self.evidence.log(format!(
-                        "policy_pause source=controller.SetIsVisible(false)+stopMotion result={hidden:?}"
-                    ));
+                    self.set_reason(REASON_MANUAL, true, "manual-pause");
                     self.evidence.marker("policy-paused");
                 }
                 3 => {
                     self.state("policy-paused");
-                    let visible = unsafe { self.view.controller().SetIsVisible(true) };
-                    self.current_fps = 30;
-                    self.eval("resume-scene", "window.startMotion(30)");
+                    self.set_reason(REASON_MANUAL, false, "manual-resume");
                     self.eval("stop-watch", "window.stopWatch()");
-                    self.evidence.log(format!(
-                        "policy_resume source=controller.SetIsVisible(true)+startMotion result={visible:?}"
-                    ));
                     self.eval("seek-song", "window.seekSong(60000)");
                     self.evidence.marker("policy-resumed");
                 }
@@ -672,6 +732,9 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             current_fps: 30,
             stopping: false,
             recovery: Recovery::new(),
+            policy_reasons: 0,
+            policy_hidden: false,
+            fullscreen_state: None,
         };
 
         let _ticker = {
@@ -710,7 +773,12 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                         *control_flow = ControlFlow::Exit;
                     }
                 }
-                Event::UserEvent(UserEvent::Check) => probe.check_health(event_loop_target),
+                Event::UserEvent(UserEvent::Check) => {
+                    probe.check_health(event_loop_target);
+                    if !probe.recovery.terminal {
+                        probe.check_fullscreen();
+                    }
+                }
                 Event::UserEvent(UserEvent::Tray(event)) => {
                     probe.evidence.log(format!("tray_event={event:?}"));
                 }
@@ -937,6 +1005,23 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let mut rect = RECT::default();
         unsafe { GetWindowRect(hwnd, &mut rect) };
         format!("{},{},{},{}", rect.left, rect.top, rect.right, rect.bottom)
+    }
+
+    fn query_notification_state() -> QUERY_USER_NOTIFICATION_STATE {
+        let mut state: QUERY_USER_NOTIFICATION_STATE = -1;
+        let result = unsafe { SHQueryUserNotificationState(&mut state) };
+        if result < 0 {
+            -1
+        } else {
+            state
+        }
+    }
+
+    fn is_fullscreen_state(state: QUERY_USER_NOTIFICATION_STATE) -> bool {
+        matches!(
+            state,
+            QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE
+        )
     }
 
     fn wide(value: &str) -> Vec<u16> {
