@@ -14,6 +14,30 @@
 
 release workflow 由 `workflow_dispatch` 手动触发，只保留 artifacts；运行成功不代表自动发布。真实声卡/设备切换、正式 MCP 客户端、原生 DBX 完整旅程、实际账号、模型质量及长时资源仍分别待验。下一批候选绑定与验收任务见[开发计划](./plans/2026-10-23-next-development.md)。
 
+## 2026-10-23 Windows 0.2.1 验收候选（本机构建）
+
+本次在同一源码提交上生成四份 Windows x64 候选：Standard/Full 独立程序各一份、Standard/Full DBX 包各一份。只冻结候选身份并核对包体与元数据；未安装、未启动、未签名，也不代表 PLAY-01 或发布验收通过。
+
+| 身份项 | 值 |
+| --- | --- |
+| 源码 | `27638bbc58af25b31b74c3a581d7c17a5ec7b2fc`（`codex/roadmap-next-steps-20261023`），构建时工作区干净 |
+| `Cargo.lock` SHA-256 | `5f55b733bd121b23d539296f754929a39d0347de4938d79e406582327d466c4c` |
+| 版本 | 0.2.1，Cargo 与 `plugin/manifest.json` 一致 |
+| 工具链 | cargo/rustc 1.98.1，host/target `x86_64-pc-windows-msvc` |
+| 构建主机 | Windows 11 `10.0.26200` x64 |
+| DBX 打包 CLI | `@dbx-app/plugin-cli@0.1.2` |
+
+| 形态 | 候选文件 | 大小（字节） | 包体 SHA-256 | 内部身份 |
+| --- | --- | --- | --- | --- |
+| 独立 Standard | `hertz-studio-standard-0.2.1-x86_64-pc-windows-msvc.zip` | 12,493,309 | `b67da054c809f26103c1875fd7adc4b53bb03972bc5c06229d7609072bf94392` | `hertz-studio.exe` `ebe0125c09f74dc55d68d364310e0c98f26b8dc9828f3d5af3bc60e3e33e37f0` |
+| 独立 Full | `hertz-studio-full-0.2.1-x86_64-pc-windows-msvc.zip` | 13,251,517 | `09d8185088a129f3e5fbccd33fb10857cfb0b3b3ee09724692d8818b42f5522a` | `hertz-studio.exe` `d04a562d8f50897596fa1ed07f7e5140b66f617101f242da2c08de019c612ee4` |
+| DBX Standard | `io.github.oncemisery.hertz-studio-0.2.1-windows-x64.dbxp` | 11,342,810 | `536cea26986a186f2c559020d7e25c3bbb047d522460bf1da9a0b0dcc4cf1fd8` | manifest `io.github.oncemisery.hertz-studio` 0.2.1；sidecar `b44fe4ccc1617ff6d51010e55655cd9ac00cb01e07f38ed561573ddfff2bd203` |
+| DBX Full | `io.github.oncemisery.hertz-studio.full-0.2.1-windows-x64.dbxp` | 12,093,282 | `e56d33bce8006a48a015f55d0599886249447b083c5944e8bf97cb7ce0790335` | manifest `io.github.oncemisery.hertz-studio.full` 0.2.1；sidecar `7edf005e9a9a82b9abf6f2a144756af84ca72b9eb78c383228de36e6eaed790b` |
+
+构建命令与 `release.yml` 的 Windows 分支一致：两版分别执行 `cargo build --locked --release -p hertz-studio --target x86_64-pc-windows-msvc`（Full 加 `--features full`），随后按 `<名称>/hertz-studio.exe + README + LICENSE` 组包；DBX 包执行 `HERTZ_EDITION=<edition> bash scripts/ci-package-plugin.sh`（未设 `PLUGIN_RELEASE`）。两版独立构建共用同一 target 路径，故每版 zip 都在对应构建结束后立即生成，表中 exe 哈希即当时产物。
+
+同轮静态检查：`node scripts/check-editions.js` 与 `node scripts/check-release-ui.js` 通过；打包脚本逐包核对 `.artifact.json` 的 hash/size、未签名、manifest 身份、Standard 侧仅一个 sidecar 且不含 Full 协议/资源。以下仍未验证：四份候选的启动与安装、升级/回滚、签名与 Store、真实 DBX 宿主、真实声卡与播放旅程、正式 MCP 客户端、模型或任何 provider 请求。两个 `.artifact.json` 的 `url` 为裸文件名而非不可变 Release URL；它们是检视候选，不是上架候选。
+
 ## 2026-10-21 DBX、硬件与发布验收增量
 
 本次只验 DBX、当前机器硬件可用性和发布产物；真实模型验收不在范围内。检查基于当前 dirty 工作区，不代表 0.2.1 发布候选通过。

@@ -6,6 +6,8 @@
 
 > 同日设计文档复核：新增[共享桌面宿主设计](./desktop-host.md)与[L0/W0 原生验证计划](./plans/2026-10-23-desktop-native-validation.md)，歌词/壁纸方案统一共同规则并修正固定离场暂停事实；[ADR-0010](./adr/0010-ai-drafts-and-retention.md)回写已实施的成功事务与 token-only 边界。仅为文档补齐，没有新增桌面代码或原生验收结果；设计准备度见近期计划 §5。
 
+> 2026-10-23 维护与候选增量：MAINT-01 将 `ViewerGuard`、离场宽限武装与 `pause_if_alone` 搬入 `state/viewers.rs`，`depart_pause_only_fires_for_the_last_viewer`、慢加载离场与最后连接断开反例保留；Standard `state::tests` 58/58、Full 64/64，两版 `ai::facade::tests` 各 9/9，`node scripts/check-player-races.js` 9 项通过。MAINT-02 只把 jobs 回归测试搬到 `ai/jobs/tests.rs`，搬前搬后 `--list` 均为 72 项，两版各 72/72，格式与 Clippy 通过。REL-01 在同一源码提交构建 Standard/Full 独立程序与 DBX 包共四份 Windows x64 候选，身份与 SHA-256 见[发布矩阵候选表](./release-validation.md#2026-10-23-windows-021-验收候选本机构建)。候选未安装/启动，PLAY-01、MCP-01、真实声音、正式客户端与模型仍待验，本轮未发起 provider 请求。
+
 当前开发停点：已核对搜索、歌词候选、MCP 授权与播控、舞台草稿、持久任务、provider/凭据、评测入口和工程/导出主线的现有代码，未发现需要在缺少真实环境时继续新增的明确主线功能。此结论是功能实现核对，不是全部异常、平台、模型质量或发布条件已经验收。
 
 按用户当前要求，没有可用 API key 时不发起云请求，也不为重复受控结果继续运行测试；用量和费用统计不作为功能门槛。后续应先取得具体的功能失败证据，或具备真实模型、账号、DBX、声卡/GPU、其他 OS 与候选发行环境后完成对应验收。原路线中的这些待验项继续保留，不能将“当前可结束编码”记为“路线图全部完成”。
