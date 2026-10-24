@@ -244,35 +244,34 @@ impl SharedLibrary {
                 let saved_offset = row.as_ref().map(|r| r.1).unwrap_or(0);
                 let mut doc =
                     if let Some(content) = row.and_then(|r| r.0).filter(|s| !s.trim().is_empty()) {
-                        crate::lyrics::parse_saved(&content)
+                        crate::lyrics::parse_saved_checked(&content).map_err(lyric_error)?
                     } else {
                         let source = path.clone();
                         let embedded = tokio::task::spawn_blocking(move || {
                             vmusic_library::read_metadata_bounded(&source, MAX_RESOURCE_BYTES)
-                                .ok()
-                                .and_then(|m| m.lyrics)
                         })
                         .await
                         .map_err(|_| RoomError::storage())?;
-                        let content = if let Some(content) = embedded {
-                            content
-                        } else if let Some(sidecar) = vmusic_library::find_sidecar_lyrics(&path) {
-                            let sidecar = tokio::fs::canonicalize(sidecar)
-                                .await
-                                .map_err(|_| RoomError::denied())?;
-                            if sidecar.parent() != path.parent() {
-                                return Err(RoomError::denied());
-                            }
-                            let bytes = read_bounded(&sidecar).await?;
-                            String::from_utf8(bytes)
-                                .map_err(|_| RoomError::invalid("歌词文本编码不受支持"))?
-                        } else {
-                            String::new()
-                        };
-                        if content.len() > MAX_RESOURCE_BYTES {
-                            return Err(RoomError::invalid("歌词超过2MiB"));
+                        let embedded = embedded
+                            .map_err(|_| {
+                                RoomError::new(
+                                    "resource_metadata_invalid",
+                                    "歌曲内嵌元数据无效、超过读取限额或格式不受支持",
+                                )
+                            })
+                            .and_then(|meta| {
+                                meta.lyrics
+                                    .filter(|s| !s.trim().is_empty())
+                                    .map(|content| parse_lyrics_checked(&content))
+                                    .transpose()
+                            });
+                        match embedded {
+                            Ok(Some(doc)) => doc,
+                            result => match sidecar_lyrics(&path).await? {
+                                Some(doc) => doc,
+                                None => result?.unwrap_or_else(vmusic_core::LyricDocument::empty),
+                            },
                         }
-                        vmusic_lyrics::parse_lrc(&content)
                     };
                 doc.offset_ms = doc.offset_ms.saturating_add(saved_offset);
                 vmusic_lyrics::apply_offset(&mut doc);
@@ -355,6 +354,31 @@ impl SharedLibrary {
         library.resources.push_back(resource);
         Ok(chunk)
     }
+}
+fn lyric_error(error: crate::error::ApiError) -> RoomError {
+    RoomError::new(error.code, error.message)
+}
+fn parse_lyrics_checked(content: &str) -> RoomResult<vmusic_core::LyricDocument> {
+    // Keep size/structure failures distinct from the absence of a lyric source.
+    crate::lyrics::parse_saved_checked(content).map_err(lyric_error)
+}
+async fn sidecar_lyrics(path: &Path) -> RoomResult<Option<vmusic_core::LyricDocument>> {
+    let Some(sidecar) = vmusic_library::find_sidecar_lyrics(path) else {
+        return Ok(None);
+    };
+    let sidecar = tokio::fs::canonicalize(sidecar)
+        .await
+        .map_err(|_| RoomError::denied())?;
+    if sidecar.parent() != path.parent() {
+        return Err(RoomError::denied());
+    }
+    let bytes = read_bounded(&sidecar).await?;
+    let content =
+        String::from_utf8(bytes).map_err(|_| RoomError::invalid("歌词文本编码不受支持"))?;
+    if content.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_lyrics_checked(&content).map(Some)
 }
 async fn local_track(state: &AppState, id: &str) -> RoomResult<Track> {
     // Track's compatibility decoder maps unknown source values to Local. A

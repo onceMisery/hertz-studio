@@ -633,3 +633,196 @@ async fn revoking_sharing_during_resource_io_denies_the_pending_read() {
     assert!(library.0.read().await.resources.is_empty());
     f.finish().await;
 }
+
+fn saved_document() -> serde_json::Value {
+    let mut doc = vmusic_lyrics::parse_import("[00:01]saved", "lrc").unwrap();
+    doc.origin = Some(vmusic_core::LyricOrigin {
+        provider: "fixture".into(),
+        label: "Fixture".into(),
+        ref_id: "one".into(),
+        license_status: "not_provided".into(),
+    });
+    serde_json::json!({"version":1,"kind":"hertz-provider-lyrics","document":doc})
+}
+
+#[tokio::test]
+async fn malformed_or_over_limit_saved_lrc_json_and_xml_return_typed_errors() {
+    let f = Fixture::new().await;
+    let library = SharedLibrary::default();
+    let track = f.track("checked-saved").await;
+    let id = f.share(&library, &[&track.id]).await[0].resource_id;
+    let mut json_lines = saved_document();
+    json_lines["document"]["lines"] = serde_json::json!(vec![
+        json_lines["document"]["lines"][0]
+            .clone();
+        vmusic_lyrics::MAX_LINES + 1
+    ]);
+    let mut json_text = saved_document();
+    json_text["document"]["lines"][0]["text"] =
+        serde_json::json!("x".repeat(vmusic_lyrics::MAX_BYTES * 2 + 1));
+    let mut json_invalid = saved_document();
+    json_invalid["document"]["origin"]["licenseStatus"] = serde_json::json!("unverified");
+    let xml_lines = format!(
+        "<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div>{}</div></body></tt>",
+        (0..=vmusic_lyrics::MAX_LINES)
+            .map(|n| format!("<p begin=\"{n}s\" end=\"{}s\">line</p>", n + 1))
+            .collect::<String>()
+    );
+    let cases = [
+        (
+            "[00:01]valid\nunparseable line".to_string(),
+            "lyrics_invalid",
+        ),
+        (format!("[00:01]{}", "x".repeat(300 * 1024)), "lyrics_limit"),
+        (
+            "[00:01]line\n".repeat(vmusic_lyrics::MAX_LINES + 1),
+            "lyrics_limit",
+        ),
+        ("{\"version\":".to_string(), "lyrics_invalid"),
+        (json_invalid.to_string(), "lyrics_invalid"),
+        (json_lines.to_string(), "lyrics_limit"),
+        (json_text.to_string(), "lyrics_limit"),
+        ("<tt><body>".to_string(), "lyrics_invalid"),
+        (
+            format!("<tt>{}</tt>", "x".repeat(300 * 1024)),
+            "lyrics_limit",
+        ),
+        (xml_lines, "lyrics_limit"),
+    ];
+    for (index, (content, code)) in cases.into_iter().enumerate() {
+        assert!(
+            content.len() < MAX_RESOURCE_BYTES,
+            "exercise parser bounds below the transport limit"
+        );
+        vmusic_store::lyrics::import(&f.state.db, &track.id, &content)
+            .await
+            .unwrap();
+        match library
+            .read(&f.state, id, ResourceKind::Lyrics, 0, None)
+            .await
+        {
+            Err(error) => assert_eq!(error.code, code, "saved lyric fixture {index}"),
+            Ok(_) => panic!("saved lyric fixture {index} must fail with {code}"),
+        }
+        assert!(library.0.read().await.resources.is_empty());
+    }
+    // Checked reads accept the existing structured envelope and TTML subset.
+    for content in [format!("\u{feff}{}",saved_document()),"<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div><p begin=\"1s\" end=\"2s\">xml</p></div></body></tt>".into()]{
+        vmusic_store::lyrics::import(&f.state.db,&track.id,&content).await.unwrap();
+        let chunk=library.read(&f.state,id,ResourceKind::Lyrics,0,None).await.unwrap();
+        let doc:vmusic_core::LyricDocument=serde_json::from_slice(&decoded(&chunk)).unwrap();assert_eq!(doc.lines.len(),1);
+    }
+    f.finish().await;
+}
+
+fn flac_lyric_fixture(lyrics: Option<&str>) -> Vec<u8> {
+    let mut bytes = b"fLaC".to_vec();
+    bytes.extend([if lyrics.is_some() { 0 } else { 0x80 }, 0, 0, 34]);
+    bytes.extend([0; 34]);
+    if let Some(lyrics) = lyrics {
+        let entry = format!("LYRICS={lyrics}");
+        let mut comments = 0u32.to_le_bytes().to_vec();
+        comments.extend(1u32.to_le_bytes());
+        comments.extend((entry.len() as u32).to_le_bytes());
+        comments.extend(entry.as_bytes());
+        bytes.push(0x84);
+        bytes.extend(&(comments.len() as u32).to_be_bytes()[1..]);
+        bytes.extend(comments);
+    }
+    bytes
+}
+
+#[tokio::test]
+async fn metadata_failures_require_a_usable_sidecar_and_absence_stays_empty() {
+    let f = Fixture::new().await;
+    let library = SharedLibrary::default();
+    let track = f.track("metadata-result").await;
+    let id = f.share(&library, &[&track.id]).await[0].resource_id;
+    let sidecar = Path::new(&track.path).with_extension("lrc");
+    error(
+        library
+            .read(&f.state, id, ResourceKind::Lyrics, 0, None)
+            .await,
+        "resource_metadata_invalid",
+    );
+    tokio::fs::write(&sidecar, b" \n\t").await.unwrap();
+    error(
+        library
+            .read(&f.state, id, ResourceKind::Lyrics, 0, None)
+            .await,
+        "resource_metadata_invalid",
+    );
+    assert!(library.0.read().await.resources.is_empty());
+    tokio::fs::write(&sidecar, b"[00:01]safe fallback")
+        .await
+        .unwrap();
+    let chunk = library
+        .read(&f.state, id, ResourceKind::Lyrics, 0, None)
+        .await
+        .unwrap();
+    let doc: vmusic_core::LyricDocument = serde_json::from_slice(&decoded(&chunk)).unwrap();
+    assert_eq!(doc.lines[0].text, "safe fallback");
+    tokio::fs::write(&sidecar, b"invalid sidecar")
+        .await
+        .unwrap();
+    error(
+        library
+            .read(&f.state, id, ResourceKind::Lyrics, 0, None)
+            .await,
+        "lyrics_invalid",
+    );
+    tokio::fs::write(&sidecar, format!("[00:01]{}", "x".repeat(300 * 1024)))
+        .await
+        .unwrap();
+    error(
+        library
+            .read(&f.state, id, ResourceKind::Lyrics, 0, None)
+            .await,
+        "lyrics_limit",
+    );
+    tokio::fs::write(&track.path, flac_lyric_fixture(None))
+        .await
+        .unwrap();
+    tokio::fs::write(&sidecar, b" \n").await.unwrap();
+    let chunk = library
+        .read(&f.state, id, ResourceKind::Lyrics, 0, None)
+        .await
+        .unwrap();
+    let doc: vmusic_core::LyricDocument = serde_json::from_slice(&decoded(&chunk)).unwrap();
+    assert!(doc.lines.is_empty());
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn malformed_or_over_limit_embedded_lyrics_can_recover_through_a_checked_sidecar() {
+    let f = Fixture::new().await;
+    let library = SharedLibrary::default();
+    let track = f.track("checked-embedded").await;
+    let id = f.share(&library, &[&track.id]).await[0].resource_id;
+    let sidecar = Path::new(&track.path).with_extension("lrc");
+    for (content, code) in [
+        ("[00:01]valid\ninvalid line".to_string(), "lyrics_invalid"),
+        (format!("[00:01]{}", "x".repeat(300 * 1024)), "lyrics_limit"),
+    ] {
+        tokio::fs::write(&track.path, flac_lyric_fixture(Some(&content)))
+            .await
+            .unwrap();
+        error(
+            library
+                .read(&f.state, id, ResourceKind::Lyrics, 0, None)
+                .await,
+            code,
+        );
+        tokio::fs::write(&sidecar, b"[00:02]recovered")
+            .await
+            .unwrap();
+        let chunk = library
+            .read(&f.state, id, ResourceKind::Lyrics, 0, None)
+            .await
+            .unwrap();
+        let doc: vmusic_core::LyricDocument = serde_json::from_slice(&decoded(&chunk)).unwrap();
+        assert_eq!(doc.lines[0].text, "recovered");
+        tokio::fs::remove_file(&sidecar).await.unwrap();
+    }
+    f.finish().await;
+}
