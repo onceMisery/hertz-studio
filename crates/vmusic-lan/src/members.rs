@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 pub const MAX_MEMBERS: usize = 16;
+pub const MAX_AUDIO_OUTPUTS: usize = 8;
 pub const MAX_INVITATIONS: usize = 16;
 pub const INVITATION_TTL: Duration = Duration::from_secs(300);
 const MAX_RATE_SOURCES: usize = 128;
@@ -148,6 +149,7 @@ pub struct MemberRegistry {
     invitations: Vec<Invitation>,
     sources: HashMap<IpAddr, Rate>,
     global_rate: Rate,
+    local_output_reserved: bool,
 }
 pub struct Paired {
     pub member_id: Uuid,
@@ -169,6 +171,7 @@ impl MemberRegistry {
             invitations: Vec::new(),
             sources: HashMap::new(),
             global_rate: Rate::new(now, 10.0),
+            local_output_reserved: false,
         }
     }
     pub fn invite(
@@ -270,6 +273,21 @@ impl MemberRegistry {
             invalidated: rx,
         })
     }
+    /// Reserve the host's native output in the same atomic admission domain as
+    /// remote audio handshakes. Disabling releases only after its device closes.
+    pub fn reserve_local_output(&mut self, enabled: bool) -> Result<(), AccessError> {
+        if enabled && !self.local_output_reserved && self.audio_count() >= MAX_AUDIO_OUTPUTS {
+            return Err(AccessError::Capacity);
+        }
+        self.local_output_reserved = enabled;
+        Ok(())
+    }
+    fn audio_count(&self) -> usize {
+        self.members
+            .values()
+            .filter(|m| m.session.as_ref().is_some_and(|s| s.audio_attached))
+            .count()
+    }
     pub fn audio(
         &mut self,
         member_id: Uuid,
@@ -278,6 +296,9 @@ impl MemberRegistry {
     ) -> Result<AuthorizedSession, AccessError> {
         if identity.room_id != self.room_id || identity.instance_id != self.instance_id {
             return Err(AccessError::Denied);
+        }
+        if self.audio_count() + usize::from(self.local_output_reserved) >= MAX_AUDIO_OUTPUTS {
+            return Err(AccessError::Capacity);
         }
         let member = self.authenticate_mut(member_id, credential)?;
         if !member.permissions.listen {
@@ -392,6 +413,43 @@ pub fn validate_name(name: &str) -> Result<(), AccessError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn audio_admission_counts_local_reservation_and_releases_disconnected_sessions() {
+        let now = Instant::now();
+        let mut r = registry(now);
+        r.reserve_local_output(true).unwrap();
+        let mut clients = Vec::new();
+        for i in 0..9 {
+            let at = now + Duration::from_secs(i * 5);
+            let invite = r.invite(at, Permissions::default()).unwrap();
+            let paired = r
+                .pair("127.0.0.1".parse().unwrap(), &invite, "client", at)
+                .unwrap();
+            let session = r.control(paired.member_id, &paired.credential).unwrap();
+            clients.push((paired, session));
+        }
+        for (p, s) in clients.iter().take(7) {
+            r.audio(p.member_id, &p.credential, s.identity).unwrap();
+        }
+        let (p, s) = &clients[7];
+        assert!(matches!(
+            r.audio(p.member_id, &p.credential, s.identity),
+            Err(AccessError::Capacity)
+        ));
+        r.reserve_local_output(false).unwrap();
+        r.audio(p.member_id, &p.credential, s.identity).unwrap();
+        assert!(matches!(
+            r.reserve_local_output(true),
+            Err(AccessError::Capacity)
+        ));
+        r.disconnect(clients[0].0.member_id, clients[0].1.identity.session_id);
+        r.reserve_local_output(true).unwrap();
+        let (p, s) = &clients[8];
+        assert!(matches!(
+            r.audio(p.member_id, &p.credential, s.identity),
+            Err(AccessError::Capacity)
+        ));
+    }
     fn registry(now: Instant) -> MemberRegistry {
         MemberRegistry::new(Uuid::new_v4(), Uuid::new_v4(), now)
     }

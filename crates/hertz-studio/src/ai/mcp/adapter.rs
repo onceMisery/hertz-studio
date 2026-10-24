@@ -1007,7 +1007,8 @@ mod tests {
         .unwrap();
         state
             .set_queue(vec!["first".into(), "second".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         state
             .audio
             .load("first.wav", Some("first".into()))

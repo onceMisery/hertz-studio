@@ -18,7 +18,7 @@
 
 | 数值 | 现在是多少 | 定义在哪 | 改它要一起改什么 |
 | --- | --- | --- | --- |
-| 暂停/停止短淡出毫秒 | 200 | `crates/vmusic-audio/src/cpal_backend.rs::FADE_OUT_MS` | transport 时序与回调样本测试，不能随歌曲重叠时长变化 |
+| 暂停/停止短淡出毫秒 | 200 | `crates/vmusic-audio/src/render.rs::FADE_OUT_MS` | transport 时序与回调样本测试，不能随歌曲重叠时长变化 |
 | 在线歌单窗口启用条数 | 120 | `plugin/ui/online-playlist-view.js::WINDOW_THRESHOLD` | 实际 DOM/渲染耗时、末项点击及键盘焦点测试 |
 | 集合续载上限 | 2000 | `crates/hertz-studio/src/collection.rs::LOAD_CAP` | 必须显示容量边界，不能把被截断的集合宣称已全部准备 |
 | 节拍等待重取次数 | 8 | `plugin/ui/stage-cinema.js::WAIT_RETRIES` | 预算不足时无任务事件的恢复路径、换曲作废和到限回退 |

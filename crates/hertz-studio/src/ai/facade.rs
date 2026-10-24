@@ -819,7 +819,8 @@ mod tests {
                 vec!["first".into(), "second".into(), "third".into()],
                 Some(0),
             )
-            .await;
+            .await
+            .unwrap();
         state
             .audio
             .load("first.wav", Some("first".into()))
@@ -885,7 +886,10 @@ mod tests {
 
         // 受限门面的 resume 是严格语义：未装载曲目时如实上报 no_op。
         let (state2, handle2) = ai_state().await;
-        state2.set_queue(vec!["first".into()], Some(0)).await;
+        state2
+            .set_queue(vec!["first".into()], Some(0))
+            .await
+            .unwrap();
         let (_id_c, secret_c) = make_grant(&state2, "c", &["playback:control"]).await;
         let ctx_c = authenticate(&state2, &secret_c).await.unwrap();
         let resumed = call(&state2, &ctx_c, "playback.resume", None, Value::Null)

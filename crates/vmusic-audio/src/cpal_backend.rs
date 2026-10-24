@@ -77,26 +77,7 @@ impl AudioBackend for CpalBackend {
     }
 
     fn devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
-        let host = cpal::default_host();
-        let default_name = host.default_output_device().and_then(|d| d.name().ok());
-        let mut out = Vec::new();
-        for device in host.output_devices().into_iter().flatten() {
-            let Ok(name) = device.name() else { continue };
-            let is_default = default_name.as_deref() == Some(name.as_str());
-            out.push(DeviceInfo {
-                id: name.clone(),
-                name,
-                is_default,
-            });
-        }
-        if out.is_empty() {
-            out.push(DeviceInfo {
-                id: "default".into(),
-                name: "System default".into(),
-                is_default: true,
-            });
-        }
-        Ok(out)
+        crate::scheduled_output::enumerate_output_devices()
     }
 
     fn select_device(&mut self, id: Option<&str>) -> Result<(), AudioError> {

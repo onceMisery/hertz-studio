@@ -206,6 +206,16 @@ impl Rpc {
         let raw = call.raw.as_ref();
 
         match (call.op, segments.as_slice()) {
+            (Op::Get, ["v1", "room"]) => Ok(Reply::ok(state.room.snapshot())),
+            (Op::Post, ["v1", "room"]) => {
+                if serde_json::to_vec(body).map_or(true, |v| v.len() > 64 * 1024) {
+                    return Err(bad_request("房间请求超过64KiB"));
+                }
+                let (status, body) = crate::room::api::response(
+                    crate::room::api::execute(state.clone(), body.clone()).await,
+                );
+                Ok(Reply { status, body })
+            }
             (Op::Get, ["v1", "ai", "status"]) => ai::status(state).await,
             (Op::Get, ["v1", "ai", "lyrics", "emotion", "status"]) => {
                 ai::emotion_status(state).await

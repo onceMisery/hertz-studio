@@ -44,6 +44,8 @@ const SYNTAX_SKIP = new Set(['vendor']);
 // why 字段就是原来贴在 ci.yml 里的判断依据：它解释的是「这条失败意味着什么」，
 // 挪到脚本里才不会和 workflow 的 YAML 缩进互相拖累。
 const STEPS = [
+  { script: 'check-room-ui.js', stage: 'behavior',
+    why: '房间聊天分页、未知写结果和旧会话响应不能重复发送或覆盖新房间。' },
   { script: 'check-audio-errors.js', stage: 'behavior',
     why: '播放格式提示按稳定错误码分流，读取/损坏不冒充格式不支持，并保留 request_id。' },
   { script: 'export-stage-contract.js', stage: 'guard', args: ['--check'],

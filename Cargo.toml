@@ -22,6 +22,7 @@ repository = "https://github.com/onceMisery/hertz-studio"
 # --- internal ---
 vmusic-core = { path = "crates/vmusic-core", version = "0.2.1" }
 vmusic-audio = { path = "crates/vmusic-audio", version = "0.2.1" }
+vmusic-lan = { path = "crates/vmusic-lan", version = "0.2.1" }
 vmusic-store = { path = "crates/vmusic-store", version = "0.2.1" }
 vmusic-library = { path = "crates/vmusic-library", version = "0.2.1" }
 vmusic-lyrics = { path = "crates/vmusic-lyrics", version = "0.2.1" }

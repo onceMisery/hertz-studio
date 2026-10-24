@@ -30,7 +30,9 @@ pub mod resample;
 pub use render::{RenderCore, RenderFormat};
 
 #[cfg(feature = "playback")]
-pub use scheduled_output::{OutputError, OutputOptions, OutputTelemetry, ScheduledOutput};
+pub use scheduled_output::{
+    OutputBinding, OutputError, OutputOptions, OutputTelemetry, ScheduledOutput,
+};
 
 pub use actor::{spawn, AudioEvent, AudioHandle, BackendKind};
 pub use null::NullBackend;

@@ -145,6 +145,7 @@ pub async fn boot(
     let state = Arc::new(AppState {
         db,
         audio,
+        room: Default::default(),
         config: Arc::new(config.clone()),
         data_dir: data_dir.clone(),
         token: token.clone(),
@@ -209,10 +210,16 @@ pub async fn boot(
         let queue_len = session.queue.len();
         let cursor = session.cursor.filter(|i| *i < queue_len);
         if queue_len > 0 {
+            let pending = cursor.and_then(|i| session.queue.get(i)).map(|track_id| {
+                crate::state::PendingRestore {
+                    track_id: track_id.clone(),
+                    position_ms: session.position_ms,
+                }
+            });
             *state.queue.lock().await = session.queue;
             *state.cursor.lock().await = cursor;
             if session.position_ms > 3000 {
-                *state.pending_restore_seek.lock().await = Some(session.position_ms);
+                *state.pending_restore_seek.lock().await = pending;
             }
             tracing::info!(
                 queue = queue_len,

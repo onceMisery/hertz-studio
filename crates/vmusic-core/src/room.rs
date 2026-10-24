@@ -114,6 +114,8 @@ pub enum PlanFailure {
     StaleTrackInstance,
     /// Next 解析不到后继（队列耗尽）。
     NoSuccessor,
+    OutputNotReady,
+    DecodeFailed,
 }
 
 impl PlanFailure {
@@ -121,6 +123,8 @@ impl PlanFailure {
         match self {
             PlanFailure::StaleTrackInstance => "stale_track_instance",
             PlanFailure::NoSuccessor => "no_successor",
+            PlanFailure::OutputNotReady => "no_ready_endpoint",
+            PlanFailure::DecodeFailed => "decode_failed",
         }
     }
 }
@@ -213,6 +217,46 @@ pub struct PlanScheduler {
 }
 
 impl PlanScheduler {
+    /// Cancel only the unpublished candidate. The committed prefix remains
+    /// immutable, and retries observe the terminal failure under the same key.
+    pub fn retarget_preparing(&mut self, plan: PlanId, target: PlanTarget) -> bool {
+        let Some(p) = self.preparing.as_mut().filter(|p| p.plan.id == plan) else {
+            return false;
+        };
+        p.plan.target = target;
+        true
+    }
+    pub fn fail_preparing(&mut self, plan: PlanId, reason: PlanFailure) -> bool {
+        if self.preparing.as_ref().is_none_or(|p| p.plan.id != plan) {
+            return false;
+        }
+        let pending = self.preparing.take().unwrap();
+        if let Some(record) = self.outcomes.get_mut(&pending.key) {
+            record.outcome = Outcome::Failed { reason };
+        }
+        self.revision = Revision(self.revision.0.saturating_add(1));
+        true
+    }
+
+    /// Natural track promotions are presentation facts from the renderer.
+    /// They never supersede a committed control plan.
+    pub fn observe_transition(&mut self, target: PlanTarget) {
+        self.presentation = target;
+    }
+    /// Non-timeline control edits (queue/mode/gain) share the same revision.
+    /// Progress observations never call this method.
+    pub fn control_changed(&mut self) -> Option<Revision> {
+        self.revision = Revision(self.revision.0.checked_add(1)?);
+        Some(self.revision)
+    }
+
+    /// Refresh the currently audible track position without changing control
+    /// revision. Pending target identity remains owned by its accepted plan.
+    pub fn observe_position(&mut self, track: TrackInstanceId, position_ms: u64) {
+        if self.presentation.track == track {
+            self.presentation.position_ms = position_ms;
+        }
+    }
     /// `initial` 是进入房间前或上次停止后的当前呈现事实。
     pub fn new(initial: PlanTarget) -> Self {
         Self {
@@ -225,7 +269,7 @@ impl PlanScheduler {
             outcomes: std::collections::HashMap::new(),
             order: VecDeque::new(),
             high_water: std::collections::HashMap::new(),
-            has_started: false,
+            has_started: initial.playing,
         }
     }
 
@@ -423,7 +467,7 @@ impl PlanScheduler {
         let Some(p) = self.preparing.as_ref() else {
             return Err(CommitError::NothingPreparing);
         };
-        if !self.has_started && p.ready.is_empty() {
+        if !self.has_started && p.plan.target.playing && p.ready.is_empty() {
             return Err(CommitError::NotReady);
         }
         if effective_at < now.saturating_add(min_lead) {
@@ -434,7 +478,7 @@ impl PlanScheduler {
         plan.effective_at = effective_at;
         self.preparing = None;
         self.published = Some(plan);
-        self.has_started = true;
+        self.has_started |= plan.target.playing;
         self.revision = Revision(self.revision.0 + 1);
         if let Some(record) = self.outcomes.get_mut(&key) {
             record.outcome = Outcome::Scheduled {
@@ -769,13 +813,20 @@ mod tests {
         // 取代旧意图，让 stale_plan 成为已死计划。
         room.submit(0, key(2), None, Command::Stop).unwrap();
         assert!(!room.report_ready(EndpointId(1), stale_plan));
+        // Silence is safe to publish without an output, but does not waive the
+        // Ready requirement for the first subsequent audible start.
+        room.commit(0, 500 * MS, 100 * MS).unwrap();
+        room.advance(500 * MS);
+        room.submit(500 * MS, key(3), None, Command::Play).unwrap();
         assert_eq!(
-            room.commit(0, 500 * MS, 100 * MS).unwrap_err().code(),
+            room.commit(500 * MS, 1000 * MS, 100 * MS)
+                .unwrap_err()
+                .code(),
             "no_ready_endpoint"
         );
         let current = room.preparing().unwrap().id;
         assert!(room.report_ready(EndpointId(1), current));
-        room.commit(0, 500 * MS, 100 * MS).unwrap();
+        room.commit(500 * MS, 1000 * MS, 100 * MS).unwrap();
     }
 
     /// 生效期限必须覆盖最小提前量。

@@ -34,6 +34,7 @@ pub mod podcasts;
 pub(crate) mod public_net;
 pub mod radio;
 pub mod remote;
+pub mod room;
 pub mod routes;
 pub mod rpc;
 pub mod scan;

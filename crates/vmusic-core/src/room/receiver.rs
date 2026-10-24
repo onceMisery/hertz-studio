@@ -461,18 +461,32 @@ impl ReceiverGate {
                 reason: DiscardReason::SessionMismatch,
             }];
         }
-        let due = self.due_until(now);
+        // Settle the presentation debt before a new arrival trims its late
+        // prefix. Previously accept() also trimmed older, on-time buffered
+        // frames, so an input between two timer ticks manufactured a gap.
+        // These actions describe only the elapsed interval, never future audio.
+        let mut actions = Vec::new();
+        let presentation_now = self
+            .preparing
+            .as_ref()
+            .and_then(|p| p.commit)
+            .map_or(now, |at| now.min(at.saturating_sub(1)));
+        if self.current_epoch() == Some(epoch) {
+            self.present_current(presentation_now, &mut actions);
+        }
+        let due = self.due_until(presentation_now);
         // 当前已提交代际。
         if let Some((current_epoch, _, _, buffer)) = &mut self.current {
             if *current_epoch == epoch {
-                return match buffer.accept(sequence, frame_index, frame_count, due) {
-                    Ok(true) => Vec::new(),
-                    Ok(false) => vec![GateAction::DiscardPcm {
+                match buffer.accept(sequence, frame_index, frame_count, due) {
+                    Ok(true) => {}
+                    Ok(false) => actions.push(GateAction::DiscardPcm {
                         epoch,
                         reason: DiscardReason::PastDeadline,
-                    }],
-                    Err(reason) => vec![GateAction::DiscardPcm { epoch, reason }],
-                };
+                    }),
+                    Err(reason) => actions.push(GateAction::DiscardPcm { epoch, reason }),
+                }
+                return actions;
             }
         }
         // 准备中代际（含已收 Commit、等生效的未来帧）。
@@ -636,6 +650,11 @@ impl ReceiverGate {
             // 同拍继续按呈现时间出帧（新代际可能已有到期帧）。
         }
         // 3) 按呈现时间出帧：到期帧送声卡，缺口记欠载（受控静音）。
+        self.present_current(now, &mut actions);
+        actions
+    }
+
+    fn present_current(&mut self, now: Nanos, actions: &mut Vec<GateAction>) {
         let due_now = self.due_until(now);
         if let Some((epoch, _, _, buffer)) = &mut self.current {
             if let Some(due_until) = due_now {
@@ -670,7 +689,6 @@ impl ReceiverGate {
                 buffer.presented_until = cursor.max(due_until);
             }
         }
-        actions
     }
 }
 
@@ -1261,5 +1279,95 @@ mod tests {
             ]
         );
         assert!(gate.advance(1_099 * MS).is_empty());
+    }
+
+    #[test]
+    fn on_time_pcm_between_timer_ticks_preserves_already_buffered_audio() {
+        let mut gate = prepared(1000);
+        gate.input(0, pcm(1, 1, 0, 100));
+        gate.input(0, commit(1, 10, 1_000 * MS));
+        assert_eq!(played(&gate.advance(1_000 * MS)), 1);
+        // No timer tick between 1000 and 1020 ms. Frames 1..21 were
+        // already buffered on time; receiving 100..200 must not erase them.
+        let arrival = gate.input(1_020 * MS, pcm(1, 2, 100, 100));
+        assert_eq!(
+            arrival,
+            vec![GateAction::Play {
+                epoch: 1,
+                frames: 20
+            }]
+        );
+        assert_eq!(
+            gate.advance(1_039 * MS),
+            vec![GateAction::Play {
+                epoch: 1,
+                frames: 19
+            }]
+        );
+        assert_eq!(played(&gate.advance(1_199 * MS)), 160);
+    }
+
+    #[test]
+    fn late_pcm_between_ticks_reports_real_gap_without_replaying_late_prefix() {
+        let mut gate = prepared(1000);
+        gate.input(0, pcm(1, 1, 0, 20));
+        gate.input(0, commit(1, 10, 1_000 * MS));
+        gate.advance(1_000 * MS);
+        assert_eq!(
+            gate.input(1_030 * MS, pcm(1, 2, 20, 40)),
+            vec![
+                GateAction::Play {
+                    epoch: 1,
+                    frames: 19
+                },
+                GateAction::Underrun {
+                    epoch: 1,
+                    frames: 11
+                },
+            ]
+        );
+        assert!(gate.advance(1_030 * MS).is_empty());
+        assert_eq!(
+            gate.advance(1_059 * MS),
+            vec![GateAction::Play {
+                epoch: 1,
+                frames: 29
+            }]
+        );
+    }
+
+    #[test]
+    fn pcm_arrival_after_pending_switch_cannot_present_old_epoch_past_its_boundary() {
+        let mut gate = prepared(1000);
+        gate.input(0, pcm(1, 1, 0, 100));
+        gate.input(0, commit(1, 10, 1_000 * MS));
+        gate.advance(1_000 * MS);
+        gate.input(1_000 * MS, format(2));
+        gate.input(1_000 * MS, plan(2, 11, 1_100 * MS, 0));
+        gate.input(1_000 * MS, pcm(2, 1, 0, 100));
+        gate.input(1_000 * MS, commit(2, 11, 1_100 * MS));
+        // A command batch can deliver old PCM before the timer handles the
+        // already due switch. Its accounting stops immediately before it.
+        assert_eq!(
+            gate.input(1_110 * MS, pcm(1, 2, 100, 20)),
+            vec![GateAction::Play {
+                epoch: 1,
+                frames: 99
+            }]
+        );
+        assert_eq!(
+            gate.advance(1_110 * MS),
+            vec![
+                GateAction::EpochSwitch {
+                    from: Some(1),
+                    to: 2,
+                    at: 1_100 * MS
+                },
+                GateAction::Play {
+                    epoch: 2,
+                    frames: 11
+                },
+            ]
+        );
     }
 }

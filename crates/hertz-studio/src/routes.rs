@@ -102,6 +102,12 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/v1/ai/budget-guard/reset", post(ai_budget_guard_reset))
         .route("/v1/state", get(get_state))
+        .route(
+            "/v1/room",
+            get(crate::room::api::snapshot)
+                .post(crate::room::api::command)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/v1/player/load", post(load))
         .route("/v1/player/play", post(play))
         .route("/v1/player/pause", post(pause))
@@ -1029,6 +1035,7 @@ async fn pause(
 
 async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let commit = state.play_commit.lock().await;
+    state.require_local_playback()?;
     state.cancel_prepared_playback().await;
     state
         .play_generation
@@ -1130,7 +1137,7 @@ async fn load(
         .iter()
         .position(|id| *id == body.track_id)
         .unwrap_or(0);
-    let (generation, _, _) = state.set_queue(queue, Some(index)).await;
+    let (generation, _, _) = state.set_queue(queue, Some(index)).await?;
     state
         .play_index_for(index, Some(generation), PlayTrigger::Pick)
         .await?;
@@ -1177,7 +1184,7 @@ async fn set_queue(
             .and_then(|track_id| body.queue.iter().position(|id| id == track_id)),
         _ => None,
     };
-    state.set_queue(body.queue.clone(), index).await;
+    state.set_queue(body.queue.clone(), index).await?;
     Ok(Json(serde_json::json!({
         "queue": body.queue,
         "index": index,
@@ -1241,6 +1248,7 @@ async fn mode(
     Json(body): Json<ModeRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let commit = state.play_commit.lock().await;
+    state.require_local_playback()?;
     state.cancel_prepared_playback().await;
     state
         .play_generation
@@ -1281,6 +1289,8 @@ async fn set_dsp(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DspUpdate>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let _room_commit = state.play_commit.lock().await;
+    state.require_local_playback()?;
     let settings = vmusic_store::settings::get_all(&state.db)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
@@ -1340,7 +1350,6 @@ async fn set_dsp(
         .ok();
     state.audio.set_crossfade(cfg.crossfade_ms).await.ok();
     {
-        let _commit = state.play_commit.lock().await;
         state.cancel_prepared_playback().await;
     }
     state.schedule_prepare_next();

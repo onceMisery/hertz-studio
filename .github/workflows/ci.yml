@@ -69,6 +69,7 @@ jobs:
           -p hertz-studio
           -p vmusic-core
           -p vmusic-audio
+          -p vmusic-lan
           -p vmusic-store
           -p vmusic-library
           -p vmusic-lyrics
@@ -203,6 +204,9 @@ jobs:
       - name: Library and filesystem integration
         if: steps.smoke.outcome == 'success'
         run: python3 scripts/check-library-api.py --maintenance
+      - name: LAN room control and lifecycle integration
+        if: steps.smoke.outcome == 'success'
+        run: python3 scripts/check-lan-room.py --binary target/debug/hertz-studio --report output/lan-control.json
       - name: DBX plugin sidecar protocol
         id: sidecar
         if: steps.smoke.outcome == 'success'

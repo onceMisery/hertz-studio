@@ -45,6 +45,7 @@ const ui = {
     // 每日推荐：一级目的地，容器在 index.html，菜单项由 daily-view.js 注入。
     daily: $('view-daily'),
     queue: $('view-queue'),
+    room: $('view-room'),
     favorites: $('view-favorites'),
     settings: $('view-settings'),
   },
@@ -2178,6 +2179,7 @@ function syncBufferingIndicator(active, pct) {
 }
 
 function applySnapshot(snap) {
+  if (window.HertzRoom && HertzRoom.active()) return;
   if (Object.prototype.hasOwnProperty.call(snap, 'buffering')) {
     syncBufferingIndicator(snap.buffering, snap.pct);
   }
@@ -5317,6 +5319,7 @@ async function loadDevices() {
 function setView(name, options) {
   if (state.view === 'online' && name !== 'online' && window.Online) Online.cancelSearch();
   state.view = name;
+  document.body.classList.toggle('room-view', name === 'room');
   for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
   ui.rail.querySelectorAll('.rail-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   if (ui.settingsEntry) {
@@ -5328,6 +5331,7 @@ function setView(name, options) {
     if (window.TopSearch && window.TopSearch.onOnlineViewEnter) window.TopSearch.onOnlineViewEnter();
     if (!(options && options.historyOnly) && window.Online) window.Online.onViewEnter();
   }
+  if (name === 'room' && window.HertzRoom) window.HertzRoom.onViewEnter();
   if (name === 'podcasts' && window.Podcasts) window.Podcasts.onViewEnter();
   // 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
   // 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。
@@ -5962,6 +5966,7 @@ function probeImage(url, timeoutMs = 8000) {
 // ---------------------------------------------------------------------------
 
 function updateMediaSessionMetadata(track, artUrl) {
+  if (window.HertzRoom && HertzRoom.active()) return;
   if (!('mediaSession' in navigator)) return;
   try {
     navigator.mediaSession.metadata = new window.MediaMetadata({
@@ -5974,6 +5979,7 @@ function updateMediaSessionMetadata(track, artUrl) {
 }
 
 function syncMediaSession() {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.syncMediaSession();
   if (!('mediaSession' in navigator)) return;
   const duration = playbackDuration(state.snapshot);
   const playbackState = !state.snapshot.track_id || state.stopped
@@ -6022,6 +6028,7 @@ function bindMediaSession() {
 let seekRequestEpoch = 0;
 
 async function seekTo(ms) {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.playback('seek', { instance_id: HertzRoom.snapshot().track_instance_id, position_ms: String(Math.max(0, Math.round(ms))) });
   if (!state.snapshot.track_id || !Number.isFinite(ms)) return;
   const epoch = ++seekRequestEpoch;
   const intent = PlaybackIntent.generation;
@@ -6043,7 +6050,7 @@ async function seekTo(ms) {
 }
 
 async function seekRelative(deltaSec) {
-  const base = !window.HertzCapsuleOnly && Stage ? Stage.position() : state.snapshot.position_ms || 0;
+  const base = window.HertzRoom && HertzRoom.active() ? Number(HertzRoom.snapshot().position_ms || 0) : !window.HertzCapsuleOnly && Stage ? Stage.position() : state.snapshot.position_ms || 0;
   await seekTo(base + deltaSec * 1000);
 }
 
@@ -6074,7 +6081,7 @@ function setVolumeFromInput() {
         do {
           sent = volumeTarget;
           try {
-            await transport.post('/v1/player/volume', { volume: sent });
+            if (window.HertzRoom && HertzRoom.active()) await HertzRoom.localVolume(sent); else await transport.post('/v1/player/volume', { volume: sent });
           } catch (error) {
             toast(errText('调整音量失败', error), 'error');
           }
@@ -6527,6 +6534,7 @@ function initPalette() {
     { id: 'view-podcasts', group: '导航', title: '转到：播客', keywords: 'podcast 播客 RSS', run: () => setView('podcasts') },
     { id: 'view-playlists', group: '导航', title: '转到：歌单', keywords: 'playlist 歌单', run: () => setView('playlists') },
     { id: 'view-daily', group: '导航', title: '转到：每日推荐', keywords: 'daily 推荐 每日', run: () => setView('daily') },
+    { id: 'view-room', group: '导航', title: '转到：局域网一起听', keywords: 'room lan 一起听 同步 房间', run: () => setView('room') },
     { id: 'view-queue', group: '导航', title: '转到：播放队列', keywords: 'queue 队列', run: () => setView('queue') },
     { id: 'view-favorites', group: '导航', title: '转到：收藏', keywords: 'favorite 收藏 红心', run: () => setView('favorites') },
     { id: 'view-settings', group: '导航', title: '转到：设置', keywords: 'settings 设置', run: () => setView('settings') },
@@ -7346,7 +7354,7 @@ function initBarVisibility() {
   sync();
 }
 
-function post(path) { return transport.post(path, {}).catch((err) => toast(errText('操作失败', err), 'error')); }
+function post(path) { const action = path.match(/^\/v1\/player\/(play|pause|stop|next|previous)$/); if (action && window.HertzRoom && HertzRoom.active()) return HertzRoom.playback(action[1]); return transport.post(path, {}).catch((err) => toast(errText('操作失败', err), 'error')); }
 
 // ---------------------------------------------------------------------------
 // 创意舞台
@@ -7380,6 +7388,7 @@ function initCreative() {
 let playbackCommandEpoch = 0;
 
 async function setPlayback(action) {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.playback(action);
   const epoch = ++playbackCommandEpoch;
   if (action === 'stop') seekRequestEpoch += 1;
   const previous = state.snapshot;
@@ -7410,6 +7419,7 @@ async function setPlayback(action) {
 }
 
 function togglePlay() {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.playback('toggle');
   return setPlayback(state.snapshot.playing ? 'pause' : 'play');
 }
 
@@ -7445,6 +7455,7 @@ function isNpOpen() {
 }
 
 function openNowPlaying() {
+  if (window.HertzRoom && HertzRoom.active()) { setView('room'); return; }
   np.scrim.hidden = false;
   np.modal.hidden = false;
   if (window.NowPlaying) NowPlaying.open();
@@ -8040,6 +8051,20 @@ async function startApp() {
   // 落盘的在线元数据先喂回内存：队列行第一帧就能显示真名字，不用等补取。
   if (window.Online && window.Online.seedFromStore) window.Online.seedFromStore();
   transport = await chooseTransport();
+  if (window.HertzRoom) window.HertzRoom.init({
+    root: ui.views.room, transport, confirm: message => modal().confirm(message),
+    onModeChange(active) {
+      cancelSeek(); clearSleepTimer(true); closeNowPlaying();
+      if (window.Stage3D) Stage3D.close();
+      if (active) document.title = '一起听 · hertz-studio';
+      else {
+        mediaSessionStateKey = ''; documentTitleCache = '';
+        if (state.current) updateMediaSessionMetadata(state.current, Stage && Stage.coverUrl());
+        transport.get('/v1/state').then(applySnapshot).catch(() => {});
+        restoreQueue();
+      }
+    }
+  });
   // 两种 surface（工作台 tab / 浮动胶囊）都要挂；放在分支之前，别藏在 tab 那条路里。
   if (transport.kind === 'dbx') bindDbxCloseHook();
   if (window.HertzCapsuleOnly) return startFloatingCapsule();

@@ -327,7 +327,7 @@ mod bounded_metadata {
                 if bytes.len() % 2 != 0 {
                     return Err(invalid());
                 }
-                let units = bytes.chunks_exact(2).map(|b| {
+                let units = bytes.as_chunks::<2>().0.iter().map(|b| {
                     if little {
                         u16::from_le_bytes([b[0], b[1]])
                     } else {
@@ -575,7 +575,7 @@ mod bounded_metadata {
                 mp4(r, text, next, depth + 1, None)?;
             } else if wanted(&key) {
                 mp4(r, text, next, depth + 1, Some(key))?
-            } else if &key == b"data" && tag.is_some() {
+            } else if let (b"data", Some(tag)) = (&key, tag) {
                 if next - r.pos < 8 {
                     return Err(invalid());
                 }
@@ -583,7 +583,7 @@ mod bounded_metadata {
                 r.array::<4>()?;
                 if kind == 1 || kind == 2 {
                     let data = r.bytes((next - r.pos).try_into().map_err(|_| invalid())?)?;
-                    text.put(&tag.unwrap(), &data, if kind == 1 { 3 } else { 2 })?
+                    text.put(&tag, &data, if kind == 1 { 3 } else { 2 })?
                 }
             }
             r.jump(next)?;

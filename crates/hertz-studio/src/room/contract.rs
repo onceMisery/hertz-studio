@@ -61,10 +61,14 @@ pub enum PeerRequest {
     Library {
         offset: usize,
         limit: usize,
+        #[serde(default)]
+        revision: Option<Counter>,
     },
     QueuePage {
         offset: usize,
         limit: usize,
+        #[serde(default)]
+        revision: Option<Counter>,
     },
     Playback {
         operation_id: Counter,
@@ -160,6 +164,10 @@ pub enum LocalRequest {
         settings: OutputSettings,
         enabled: bool,
     },
+    SleepTimer {
+        seconds: Option<u32>,
+    },
+    TestOutput,
     Peer {
         request: PeerRequest,
     },

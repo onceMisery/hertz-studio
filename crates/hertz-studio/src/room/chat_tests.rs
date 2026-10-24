@@ -908,14 +908,14 @@ async fn damaged_readonly_and_oversized_fields_are_rejected_without_file_changes
     service.shutdown().await;
     let path = profile.0.join("room-chat.sqlite");
     let before = std::fs::read(&path).unwrap();
-    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    let original_permissions = std::fs::metadata(&path).unwrap().permissions();
+    let mut permissions = original_permissions.clone();
     permissions.set_readonly(true);
     std::fs::set_permissions(&path, permissions.clone()).unwrap();
     let result = ChatService::open(&profile.0, Uuid::new_v4(), Arc::new(|_| {})).await;
     assert_eq!(result.err().unwrap().code, "chat_history_readonly");
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    permissions.set_readonly(false);
-    std::fs::set_permissions(&path, permissions).unwrap();
+    std::fs::set_permissions(&path, original_permissions).unwrap();
     let mut writer = SqliteConnection::connect_with(&options(&path))
         .await
         .unwrap();

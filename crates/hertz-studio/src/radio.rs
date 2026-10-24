@@ -65,6 +65,7 @@ impl AppState {
         // 语义追加，会污染 FM 的推荐队列。
         let (session, generation) = {
             let _commit = self.play_commit.lock().await;
+            self.require_local_playback()?;
             self.cancel_prepared_playback().await;
             {
                 let mut load = self.playlist_load.lock().await;
@@ -84,6 +85,7 @@ impl AppState {
         };
         self.radio_refill(true).await?;
         let _commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         let radio = self.radio.lock().await;
         if !radio.active
             || radio.session != session
@@ -97,6 +99,9 @@ impl AppState {
 
     pub(crate) async fn radio_stop(&self) {
         let _commit = self.play_commit.lock().await;
+        if self.require_local_playback().is_err() {
+            return;
+        }
         self.cancel_prepared_playback().await;
         self.play_generation.fetch_add(1, Ordering::Relaxed);
         let mut radio = self.radio.lock().await;
@@ -111,6 +116,7 @@ impl AppState {
         let _fetch = self.radio_fetch.lock().await;
         let (session, initial) = {
             let _commit = self.play_commit.lock().await;
+            self.require_local_playback()?;
             let mut radio = self.radio.lock().await;
             if !radio.active {
                 return Ok(());
@@ -145,6 +151,7 @@ impl AppState {
         result: ApiResult<Vec<online::OnlineTrack>>,
     ) -> ApiResult<()> {
         let _commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         let mut radio = self.radio.lock().await;
         if !radio.active || radio.session != session {
             return Ok(());
@@ -233,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn radio_batch_is_deduplicated_and_old_session_cannot_replace_queue() {
         let (state, handle) = crate::state::tests::playback_state().await;
-        let (gen, _, _) = state.set_queue(vec!["old".into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec!["old".into()], Some(0)).await.unwrap();
         {
             let mut r = state.radio.lock().await;
             r.active = true;
@@ -267,7 +274,10 @@ mod tests {
             .await
             .is_err());
         assert!(state.radio.lock().await.error.is_some());
-        state.set_queue(vec!["user-choice".into()], Some(0)).await;
+        state
+            .set_queue(vec!["user-choice".into()], Some(0))
+            .await
+            .unwrap();
         state
             .radio_accept(10, None, Ok(vec![track("4")]))
             .await
@@ -281,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn failed_start_preserves_queue_and_stop_invalidates_pending_start() {
         let (state, handle) = crate::state::tests::playback_state().await;
-        let (gen, _, _) = state.set_queue(vec!["old".into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec!["old".into()], Some(0)).await.unwrap();
         {
             let mut r = state.radio.lock().await;
             r.active = true;
@@ -308,7 +318,8 @@ mod tests {
         let (state, handle) = crate::state::tests::playback_state().await;
         state
             .set_queue(vec!["online:netease:1".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         {
             let mut r = state.radio.lock().await;
             r.active = true;
@@ -326,7 +337,7 @@ mod tests {
     async fn radio_history_compacts_when_advancing_and_keeps_current_track() {
         let (state, handle) = crate::state::tests::playback_state().await;
         let ids: Vec<_> = (0..81).map(|i| format!("online:netease:{i}")).collect();
-        state.set_queue(ids, Some(80)).await;
+        state.set_queue(ids, Some(80)).await.unwrap();
         {
             let mut r = state.radio.lock().await;
             r.active = true;

@@ -66,7 +66,7 @@ impl AppState {
     /// 提交共用同一把锁，避免复核与提交擦肩而过。
     pub(crate) async fn pause_if_alone(&self) -> bool {
         let _commit = self.play_commit.lock().await;
-        if self.viewers.load(Ordering::Acquire) > 0 {
+        if self.room.is_active() || self.viewers.load(Ordering::Acquire) > 0 {
             return false;
         }
         self.cancel_prepared_playback().await;
