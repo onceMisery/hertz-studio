@@ -3,6 +3,7 @@
 //! filesystem lease; neither the library nor playback participates in a write.
 use std::{
     collections::{HashMap, VecDeque},
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -279,6 +280,12 @@ fn damaged() -> RoomError {
 fn format_error() -> RoomError {
     RoomError::new("chat_history_format", "聊天历史格式不受支持；原文件已保留")
 }
+fn recovery_error() -> RoomError {
+    RoomError::new(
+        "chat_history_recovery_required",
+        "聊天事务文件不受支持或无法在原配额内安全恢复；原文件已保留，请先备份并恢复",
+    )
+}
 fn quota_error() -> RoomError {
     RoomError::new(
         "chat_quota_exceeded",
@@ -353,42 +360,7 @@ impl ChatService {
         }
         let fresh = !tokio::fs::try_exists(&path).await.map_err(|_| storage())?;
         if !fresh {
-            // Validate in read-only mode first. In particular, never let opening a
-            // damaged or unsupported file change its journal mode or recover it.
-            if tokio::fs::metadata(&path)
-                .await
-                .map_err(|_| storage())?
-                .permissions()
-                .readonly()
-            {
-                return Err(RoomError::new(
-                    "chat_history_readonly",
-                    "聊天历史为只读；原文件已保留",
-                ));
-            }
-            for suffix in ["-journal", "-wal", "-shm"] {
-                let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
-                match tokio::fs::metadata(sidecar).await {
-                    Ok(metadata) if metadata.len() > 0 => {
-                        return Err(RoomError::new(
-                            "chat_history_recovery_required",
-                            "聊天历史存在待恢复的事务文件；原文件已保留，请先备份并恢复",
-                        ))
-                    }
-                    Ok(_) => (),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(_) => return Err(storage()),
-                }
-            }
-            if file_bytes(&path).await? > 256 * MIB {
-                return Err(quota_error());
-            }
-            let mut inspection = SqliteConnection::connect_with(&options(&path).read_only(true))
-                .await
-                .map_err(|_| damaged())?;
-            let inspected = Store::inspect(&mut inspection, &path).await;
-            inspection.close().await.map_err(|_| storage())?;
-            inspected?;
+            Store::prepare_existing(&path).await?;
         }
         let write_options = if fresh {
             options(&path)
@@ -518,6 +490,140 @@ impl ChatService {
 }
 
 impl Store {
+    async fn prepare_existing(path: &Path) -> RoomResult<()> {
+        let metadata = tokio::fs::metadata(path).await.map_err(|_| storage())?;
+        if metadata.permissions().readonly() {
+            return Err(RoomError::new(
+                "chat_history_readonly",
+                "聊天历史为只读；原文件已保留",
+            ));
+        }
+        if file_bytes(path).await? > 256 * MIB {
+            return Err(quota_error());
+        }
+        let mut journal_bytes = 0;
+        for suffix in ["-journal", "-wal", "-shm"] {
+            match tokio::fs::metadata(PathBuf::from(format!("{}{suffix}", path.display()))).await {
+                Ok(sidecar) if sidecar.len() > 0 => {
+                    if suffix != "-journal" || sidecar.permissions().readonly() {
+                        return Err(recovery_error());
+                    }
+                    journal_bytes = sidecar.len();
+                }
+                Ok(_) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(_) => return Err(storage()),
+            }
+        }
+        if journal_bytes == 0 {
+            // Ordinary damaged/unsupported databases are inspected without any
+            // recovery or persistent pragma before a writable connection exists.
+            let mut inspection = SqliteConnection::connect_with(&options(path).read_only(true))
+                .await
+                .map_err(|_| damaged())?;
+            let result = Self::inspect(&mut inspection, path).await;
+            inspection.close().await.map_err(|_| storage())?;
+            result?;
+            return Ok(());
+        }
+
+        // Only inspect the documented fixed header, never replay journal pages.
+        // SQLite remains the sole implementation of locking/checksums/rollback.
+        let mut database_header = [0u8; 100];
+        std::fs::File::open(path)
+            .and_then(|mut file| file.read_exact(&mut database_header))
+            .map_err(|_| damaged())?;
+        if &database_header[..16] != b"SQLite format 3\0" {
+            return Err(damaged());
+        }
+        if u16::from_be_bytes(database_header[16..18].try_into().unwrap()) != PAGE as u16
+            || database_header[18..20] != [1, 1]
+            || u32::from_be_bytes(database_header[60..64].try_into().unwrap()) != 1
+            || u32::from_be_bytes(database_header[64..68].try_into().unwrap()) != 1
+        {
+            return Err(format_error());
+        }
+        let mut header = [0u8; 28];
+        let journal_path = PathBuf::from(format!("{}-journal", path.display()));
+        std::fs::File::open(&journal_path)
+            .and_then(|mut file| file.read_exact(&mut header))
+            .map_err(|_| recovery_error())?;
+        let cold = header[..8] == [0; 8];
+        let original_pages = if cold {
+            metadata.len() / PAGE
+        } else {
+            if header[..8] != [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7] {
+                return Err(recovery_error());
+            }
+            let records = u32::from_be_bytes(header[8..12].try_into().unwrap());
+            let sector = u32::from_be_bytes(header[20..24].try_into().unwrap());
+            let page = u32::from_be_bytes(header[24..28].try_into().unwrap());
+            if page != PAGE as u32
+                || !(32..=65_536).contains(&sector)
+                || !sector.is_power_of_two()
+                || u64::from(sector) > journal_bytes
+                || (records != u32::MAX
+                    && u64::from(sector) + u64::from(records) * (PAGE + 8) > journal_bytes)
+            {
+                return Err(recovery_error());
+            }
+            u64::from(u32::from_be_bytes(header[16..20].try_into().unwrap()))
+        };
+        // immutable suppresses SQLite recovery during this bounded preflight.
+        // A hot database can be temporarily inconsistent, so quick_check runs
+        // after rollback. Schema and readable settings must still identify our
+        // format and budget; otherwise preserve both files for explicit recovery.
+        let mut inspection =
+            SqliteConnection::connect_with(&options(path).read_only(true).immutable(true))
+                .await
+                .map_err(|_| recovery_error())?;
+        let preflight = async {
+            Self::inspect_schema(&mut inspection).await?;
+            let (config, _, _) = Self::read_settings(&mut inspection).await?;
+            if cold {
+                Self::inspect_data(&mut inspection, path, true).await?;
+            }
+            let peak_bytes = metadata
+                .len()
+                .max(original_pages.saturating_mul(PAGE))
+                .saturating_add(journal_bytes);
+            if original_pages == 0
+                || original_pages > config.pages()
+                || metadata.len() % PAGE != 0
+                || metadata.len() > config.pages() * PAGE
+                || peak_bytes > config.quota()
+            {
+                return Err(recovery_error());
+            }
+            Ok(())
+        }
+        .await;
+        inspection.close().await.map_err(|_| storage())?;
+        preflight?;
+        // No staging files or manual repair: supported SQLite recovery uses the
+        // already-budgeted rollback journal. Reassert the validated format version
+        // in a normal transaction so SQLite also finalizes an unused cold journal.
+        // Only after recovery do we validate all pages,
+        // field limits, the physical budget and the retention window (open()).
+        let mut recovery =
+            SqliteConnection::connect_with(&options(path).synchronous(SqliteSynchronous::Full))
+                .await
+                .map_err(|_| recovery_error())?;
+        let recovered = async {
+            let mut tx = recovery.begin().await.map_err(|_| recovery_error())?;
+            sqlx::query("PRAGMA user_version=1")
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| recovery_error())?;
+            tx.commit().await.map_err(|_| recovery_error())?;
+            Self::inspect(&mut recovery, path).await
+        }
+        .await;
+        recovery.close().await.map_err(|_| storage())?;
+        recovered?;
+        Ok(())
+    }
+
     async fn create(connection: &mut SqliteConnection) -> RoomResult<()> {
         let mut tx = connection.begin().await.map_err(|_| storage())?;
         for statement in SCHEMA.into_iter().chain(["PRAGMA user_version=1"]) {
@@ -537,6 +643,59 @@ impl Store {
     async fn inspect(
         connection: &mut SqliteConnection,
         path: &Path,
+    ) -> RoomResult<(ChatConfig, u64, u64)> {
+        Self::inspect_data(connection, path, false).await
+    }
+
+    async fn inspect_schema(connection: &mut SqliteConnection) -> RoomResult<()> {
+        let schema_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| format_error())?;
+        let expected: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE sql IN (?,?,?,?)")
+                .bind(SCHEMA[0])
+                .bind(SCHEMA[1])
+                .bind(SCHEMA[2])
+                .bind(SCHEMA[3])
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(|_| format_error())?;
+        if schema_count != SCHEMA.len() as i64 || expected != schema_count {
+            return Err(format_error());
+        }
+        Ok(())
+    }
+
+    async fn read_settings(
+        connection: &mut SqliteConnection,
+    ) -> RoomResult<(ChatConfig, u64, u64)> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| damaged())?;
+        if count != 1 {
+            return Err(damaged());
+        }
+        let row = sqlx::query(
+            "SELECT CASE WHEN typeof(config)='text' AND length(CAST(config AS BLOB))<=1024 THEN config END AS config,revision,next_id FROM settings WHERE singleton=1")
+            .fetch_one(&mut *connection).await.map_err(|_| damaged())?;
+        let encoded: Option<String> = row.try_get("config").map_err(|_| damaged())?;
+        let config: ChatConfig =
+            serde_json::from_str(encoded.as_deref().ok_or_else(damaged)?).map_err(|_| damaged())?;
+        config.validate().map_err(|_| damaged())?;
+        let revision: i64 = row.try_get("revision").map_err(|_| damaged())?;
+        let next_id: i64 = row.try_get("next_id").map_err(|_| damaged())?;
+        if revision <= 0 || next_id <= 0 {
+            return Err(damaged());
+        }
+        Ok((config, revision as u64, next_id as u64))
+    }
+
+    async fn inspect_data(
+        connection: &mut SqliteConnection,
+        path: &Path,
+        allow_journal: bool,
     ) -> RoomResult<(ChatConfig, u64, u64)> {
         let integrity: Option<String> = sqlx::query_scalar(
             "SELECT CASE WHEN length(CAST(quick_check AS BLOB))<=128 THEN quick_check END FROM pragma_quick_check LIMIT 1")
@@ -567,41 +726,8 @@ impl Store {
         }
         // Inspect bounded scalar counts rather than allocating names or SQL from
         // an untrusted sqlite_schema. Views and triggers have no role in chat.
-        let schema_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema")
-            .fetch_one(&mut *connection)
-            .await
-            .map_err(|_| format_error())?;
-        let expected: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE sql IN (?,?,?,?)")
-                .bind(SCHEMA[0])
-                .bind(SCHEMA[1])
-                .bind(SCHEMA[2])
-                .bind(SCHEMA[3])
-                .fetch_one(&mut *connection)
-                .await
-                .map_err(|_| format_error())?;
-        if schema_count != SCHEMA.len() as i64 || expected != schema_count {
-            return Err(format_error());
-        }
-        let settings_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings")
-            .fetch_one(&mut *connection)
-            .await
-            .map_err(|_| damaged())?;
-        if settings_count != 1 {
-            return Err(damaged());
-        }
-        let row = sqlx::query(
-            "SELECT CASE WHEN typeof(config)='text' AND length(CAST(config AS BLOB))<=1024 THEN config END AS config,revision,next_id FROM settings WHERE singleton=1")
-            .fetch_one(&mut *connection).await.map_err(|_| damaged())?;
-        let encoded: Option<String> = row.try_get("config").map_err(|_| damaged())?;
-        let config: ChatConfig =
-            serde_json::from_str(encoded.as_deref().ok_or_else(damaged)?).map_err(|_| damaged())?;
-        config.validate().map_err(|_| damaged())?;
-        let revision: i64 = row.try_get("revision").map_err(|_| damaged())?;
-        let next_id: i64 = row.try_get("next_id").map_err(|_| damaged())?;
-        if revision <= 0 || next_id <= 0 {
-            return Err(damaged());
-        }
+        Self::inspect_schema(connection).await?;
+        let (config, revision, next_id) = Self::read_settings(connection).await?;
         let invalid: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM messages WHERE typeof(id)<>'integer' OR id<=0 OR id>=? \
              OR typeof(room)<>'text' OR length(CAST(room AS BLOB))<>36 \
@@ -610,7 +736,7 @@ impl Store {
              OR typeof(text)<>'text' OR length(text) NOT BETWEEN 1 AND 200 OR length(CAST(text AS BLOB))>800 \
              OR typeof(received)<>'integer' OR received<0 \
              OR (track IS NOT NULL AND (typeof(track)<>'text' OR length(CAST(track AS BLOB)) NOT BETWEEN 1 AND 20)))")
-            .bind(next_id).fetch_one(&mut *connection).await.map_err(|_| damaged())?;
+            .bind(i64::try_from(next_id).map_err(|_| damaged())?).fetch_one(&mut *connection).await.map_err(|_| damaged())?;
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
             .fetch_one(&mut *connection)
             .await
@@ -622,7 +748,14 @@ impl Store {
             .fetch_one(&mut *connection)
             .await
             .map_err(|_| damaged())?;
-        let bytes = file_bytes(path).await?;
+        let bytes = if allow_journal {
+            tokio::fs::metadata(path)
+                .await
+                .map_err(|_| storage())?
+                .len()
+        } else {
+            file_bytes(path).await?
+        };
         if pages < 1
             || pages as u64 > config.pages()
             || bytes != pages as u64 * PAGE
@@ -633,7 +766,7 @@ impl Store {
         {
             return Err(quota_error());
         }
-        Ok((config, revision as u64, next_id as u64))
+        Ok((config, revision, next_id))
     }
 
     async fn files(&self) -> RoomResult<u64> {
@@ -734,22 +867,11 @@ impl Store {
         self.reserve().await?;
         let mut cached = Vec::new();
         match &selection {
-            Deletion::Retention { config, reserve } => {
+            Deletion::Retention { config, .. } => {
                 let cutoff = config.cutoff(now_ms());
-                let keep =
-                    (config.max_messages.saturating_sub(*reserve) as usize).min(RECENT_MESSAGES);
-                let live = self
-                    .recent
-                    .iter()
-                    .filter(|m| m.received() >= cutoff)
-                    .count();
-                let mut overflow = live.saturating_sub(keep);
                 for message in &self.recent {
                     if message.received() < cutoff {
                         cached.push(message.id());
-                    } else if overflow > 0 {
-                        cached.push(message.id());
-                        overflow -= 1;
                     }
                 }
             }
@@ -774,23 +896,75 @@ impl Store {
                     .await
                     .map_err(|_| storage())?
                     .rows_affected();
-                let recent_count = self.recent.len().saturating_sub(cached.len()) as u32;
-                let keep = config
-                    .max_messages
-                    .saturating_sub(reserve)
-                    .saturating_sub(recent_count);
-                let overflow = sqlx::query("DELETE FROM messages WHERE id IN (SELECT id FROM messages ORDER BY id DESC LIMIT -1 OFFSET ?)")
-                    .bind(i64::from(keep)).execute(&mut *tx).await.map_err(|_| storage())?.rows_affected();
+                let keep = config.max_messages.saturating_sub(reserve) as usize;
+                let live_cached: Vec<u64> = self
+                    .recent
+                    .iter()
+                    .filter(|m| !cached.contains(&m.id()))
+                    .map(Message::id)
+                    .collect();
+                let overflow = if keep == 0 {
+                    cached.extend(live_cached);
+                    sqlx::query("DELETE FROM messages")
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|_| storage())?
+                        .rows_affected()
+                } else {
+                    // The skipped durable prefix must fit even if every cached
+                    // message is newer. Only the following <=201 durable IDs
+                    // can compete with the <=200 cached IDs for the boundary.
+                    let offset = keep.saturating_sub(live_cached.len() + 1);
+                    let mut boundary: Vec<i64> = sqlx::query_scalar(
+                        "SELECT id FROM messages ORDER BY id DESC LIMIT ? OFFSET ?",
+                    )
+                    .bind((live_cached.len() + 1) as i64)
+                    .bind(offset as i64)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|_| storage())?;
+                    boundary.extend(live_cached.iter().map(|id| *id as i64));
+                    boundary.sort_unstable_by(|a, b| b.cmp(a));
+                    match boundary.get(keep - offset - 1).copied() {
+                        Some(cutoff) => {
+                            cached.extend(live_cached.into_iter().filter(|id| *id < cutoff as u64));
+                            sqlx::query("DELETE FROM messages WHERE id<?")
+                                .bind(cutoff)
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(|_| storage())?
+                                .rows_affected()
+                        }
+                        None => 0,
+                    }
+                };
                 expired + overflow
             }
-            Deletion::Oldest(count) => sqlx::query(
-                "DELETE FROM messages WHERE id IN (SELECT id FROM messages ORDER BY id LIMIT ?)",
-            )
-            .bind(i64::from(count))
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| storage())?
-            .rows_affected(),
+            Deletion::Oldest(count) => {
+                let cutoff: Option<i64> = sqlx::query_scalar(
+                    "SELECT MAX(id) FROM (SELECT id FROM messages ORDER BY id LIMIT ?)",
+                )
+                .bind(i64::from(count))
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|_| storage())?;
+                if let Some(cutoff) = cutoff {
+                    cached.extend(
+                        self.recent
+                            .iter()
+                            .filter(|m| m.id() <= cutoff as u64)
+                            .map(Message::id),
+                    );
+                    sqlx::query("DELETE FROM messages WHERE id<=?")
+                        .bind(cutoff)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|_| storage())?
+                        .rows_affected()
+                } else {
+                    0
+                }
+            }
             Deletion::Message(id) => sqlx::query("DELETE FROM messages WHERE id=?")
                 .bind(id as i64)
                 .execute(&mut *tx)

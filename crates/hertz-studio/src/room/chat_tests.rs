@@ -386,6 +386,50 @@ async fn only_realtime_history_is_bounded_and_delete_clear_invalidate_cursors() 
 }
 
 #[tokio::test]
+async fn retention_evicts_globally_oldest_across_realtime_and_durable_modes() {
+    let profile = Profile::new();
+    let room = Uuid::new_v4();
+    let (mut store, _) = store(&profile, room).await;
+    store.config.max_messages = 100;
+    store.config.retained = false;
+    for operation in 1..=100 {
+        refill(&mut store);
+        send(&mut store, owner(), operation, "older realtime")
+            .await
+            .unwrap();
+    }
+    store.config.retained = true;
+    for operation in 101..=110 {
+        refill(&mut store);
+        send(&mut store, owner(), operation, "newer durable")
+            .await
+            .unwrap();
+    }
+    assert_eq!(count(&mut store).await, 10);
+    assert_eq!(store.recent.len(), 90);
+    let page = store.history(Uuid::nil(), None, None).await.unwrap();
+    let ids: Vec<_> = page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["message_id"].as_str().unwrap().parse::<u64>().unwrap())
+        .collect();
+    assert_eq!(ids, (11..=110).collect::<Vec<_>>());
+    // Exercise the reverse ordering too: newer realtime must evict older DB rows.
+    store.config.retained = false;
+    for operation in 111..=210 {
+        refill(&mut store);
+        send(&mut store, owner(), operation, "newest realtime")
+            .await
+            .unwrap();
+    }
+    assert_eq!(count(&mut store).await, 0);
+    assert_eq!(store.recent.front().unwrap().id(), 111);
+    assert_eq!(store.recent.back().unwrap().id(), 210);
+    assert_eq!(store.recent.len(), 100);
+}
+
+#[tokio::test]
 async fn deletion_and_revision_rollback_together_and_preserve_cache() {
     let profile = Profile::new();
     let room = Uuid::new_v4();
@@ -753,4 +797,203 @@ async fn startup_rejects_sidecars_and_over_budget_database_without_repair() {
     let result = ChatService::open(&profile.0, Uuid::new_v4(), Arc::new(|_| {})).await;
     assert_eq!(result.err().unwrap().code, "chat_quota_exceeded");
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 257 * MIB);
+}
+
+// Launched only by the crash tests below; the parent kills this process while
+// SQLite holds an uncommitted transaction and dirty pages have spilled to disk.
+#[test]
+#[ignore = "subprocess fixture for rollback recovery"]
+fn rollback_writer_process() {
+    let Some(profile) = std::env::var_os("HERTZ_CHAT_CRASH_PROFILE") else {
+        return;
+    };
+    let profile = PathBuf::from(profile);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut connection = SqliteConnection::connect_with(
+            &options(&profile.join("room-chat.sqlite")).synchronous(SqliteSynchronous::Full),
+        )
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA cache_size=5")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA cache_spill=ON")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE messages SET text=?")
+            .bind("😀".repeat(200))
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        std::fs::write(profile.join("crash-ready"), b"ready").unwrap();
+        loop {
+            std::thread::park();
+        }
+    });
+}
+
+async fn kill_during_transaction(profile: &Profile) {
+    let _ = std::fs::remove_file(profile.0.join("crash-ready"));
+    let test_name = format!(
+        "{}::rollback_writer_process",
+        module_path!().split_once("::").unwrap().1
+    );
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &test_name, "--ignored", "--nocapture"])
+        .env("HERTZ_CHAT_CRASH_PROFILE", &profile.0)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    for _ in 0..500 {
+        if profile.0.join("crash-ready").exists() {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            return;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("crash fixture exited early: {status}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("crash fixture did not reach an active write transaction");
+}
+
+async fn seeded_profile_for_crash(profile: &Profile, room: Uuid) {
+    let (mut store, _) = store(profile, room).await;
+    seed(&mut store, 500, room, now_ms(), &"a".repeat(200)).await;
+    store.connection.close().await.unwrap();
+    drop(store._lock);
+}
+
+#[tokio::test]
+async fn startup_recovers_hot_rollback_after_process_is_killed_and_keeps_budget_bounded() {
+    let profile = Profile::new();
+    let room = Uuid::new_v4();
+    seeded_profile_for_crash(&profile, room).await;
+    let path = profile.0.join("room-chat.sqlite");
+    let original_size = std::fs::metadata(&path).unwrap().len();
+    for _ in 0..3 {
+        let before = std::fs::read(&path).unwrap();
+        kill_during_transaction(&profile).await;
+        let journal = std::fs::read(profile.0.join("room-chat.sqlite-journal")).unwrap();
+        assert_eq!(
+            &journal[..8],
+            &[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]
+        );
+        assert_ne!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the killed transaction must have spilled DB pages"
+        );
+        assert!(file_bytes(&path).await.unwrap() <= ChatConfig::default().quota());
+        let service = ChatService::open(&profile.0, room, Arc::new(|_| {}))
+            .await
+            .unwrap();
+        let history = service
+            .request(
+                owner(),
+                ChatRequest::History {
+                    before: None,
+                    revision: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["text"] == "a".repeat(200)));
+        assert_eq!(service.status.borrow().messages, 500);
+        assert!(file_bytes(&path).await.unwrap() <= ChatConfig::default().quota());
+        assert!(!profile.0.join("room-chat.sqlite-journal").exists());
+        service.shutdown().await;
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), original_size);
+    }
+    let mut reader = SqliteConnection::connect_with(&options(&path).read_only(true))
+        .await
+        .unwrap();
+    let unchanged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE text=?")
+        .bind("a".repeat(200))
+        .fetch_one(&mut reader)
+        .await
+        .unwrap();
+    assert_eq!(unchanged, 500);
+    reader.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn malformed_hot_journal_and_unsupported_wal_are_preserved_without_recovery() {
+    let profile = Profile::new();
+    let room = Uuid::new_v4();
+    seeded_profile_for_crash(&profile, room).await;
+    kill_during_transaction(&profile).await;
+    let path = profile.0.join("room-chat.sqlite");
+    let journal_path = profile.0.join("room-chat.sqlite-journal");
+    let mut journal = std::fs::read(&journal_path).unwrap();
+    journal[0] ^= 0xff;
+    std::fs::write(&journal_path, &journal).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let result = ChatService::open(&profile.0, room, Arc::new(|_| {})).await;
+    assert_eq!(result.err().unwrap().code, "chat_history_recovery_required");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+    let wal = profile.0.join("room-chat.sqlite-wal");
+    std::fs::write(&wal, b"unsupported WAL").unwrap();
+    assert!(ChatService::open(&profile.0, room, Arc::new(|_| {}))
+        .await
+        .is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+    assert_eq!(std::fs::read(&wal).unwrap(), b"unsupported WAL");
+}
+
+#[tokio::test]
+async fn startup_finalizes_cold_journal_only_after_validating_original_database() {
+    let profile = Profile::new();
+    let room = Uuid::new_v4();
+    let service = ChatService::open(&profile.0, room, Arc::new(|_| {}))
+        .await
+        .unwrap();
+    service
+        .request(
+            owner(),
+            ChatRequest::Send {
+                operation: 1,
+                text: "committed".into(),
+                track: None,
+            },
+        )
+        .await
+        .unwrap();
+    service.shutdown().await;
+    std::fs::write(profile.0.join("room-chat.sqlite-journal"), [0u8; 512]).unwrap();
+    let recovered = ChatService::open(&profile.0, room, Arc::new(|_| {}))
+        .await
+        .unwrap();
+    let history = recovered
+        .request(
+            owner(),
+            ChatRequest::History {
+                before: None,
+                revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(history["messages"][0]["text"], "committed");
+    assert!(!profile.0.join("room-chat.sqlite-journal").exists());
+    recovered.shutdown().await;
 }
