@@ -248,11 +248,15 @@ impl OutputClock {
                 // the minimum forever would accumulate a permanent phase bias
                 // while learning two clock domains' different slopes. Slewing
                 // phase above keeps this calibration change sample-continuous.
-                let next_ratio = self.host_ratio + (host_ratio - self.host_ratio) * 0.1;
                 self.offset_ns = minimum.local_ns as f64
-                    - (minimum.callback_ns - anchor.callback_ns) as f64 * next_ratio;
-                self.host_ratio = next_ratio;
-                self.period_ns += (period - self.period_ns) * 0.2;
+                    - (minimum.callback_ns - anchor.callback_ns) as f64 * host_ratio;
+                // The separated-window median already smooths callback noise.
+                // A second slow domain filter would accumulate >20ms of phase
+                // debt while learning an otherwise valid +/-4000ppm slope.
+                // Keep one short device-period filter; phase still uses the
+                // existing subframe slew and the real discontinuity threshold.
+                self.host_ratio = host_ratio;
+                self.period_ns += (period - self.period_ns) * 0.5;
                 self.window = Some((observation, self.frames));
                 self.offset_min_observation = Some(observation);
             }
@@ -424,6 +428,27 @@ mod tests {
                 }
             }
             assert!((reading.device_clock_ppm - (1.0 / slope - 1.0) * 1e6).abs() < 3.0);
+        }
+    }
+
+    #[test]
+    fn large_valid_domain_slopes_learn_without_accumulating_a_phase_fault() {
+        for slope in [0.996, 1.004] {
+            let mut clock = OutputClock::new(48_000, 0).unwrap();
+            let mut reading = clock.observe(None);
+            for index in 0..6_000 {
+                let mut obs = observation(index, 1e9 / 48_000.0, 0);
+                obs.local_ns = 1_000_000_000 + (obs.callback_ns as f64 * slope).round() as u64;
+                reading = clock.observe(Some(obs));
+                if index >= 8 {
+                    assert_eq!(
+                        reading.status,
+                        ClockStatus::Valid,
+                        "callback {index}, slope {slope}"
+                    );
+                }
+            }
+            assert!((reading.device_clock_ppm - (1.0 / slope - 1.0) * 1e6).abs() < 1.0);
         }
     }
 
