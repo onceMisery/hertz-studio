@@ -1,6 +1,6 @@
 # 桌面壁纸 W0 首轮原生验证报告
 
-日期：2026-10-23。执行：本机 Qoder agent。状态：**W0 首轮局部通过；阶段未完成，不进入 W1**。已验证 WorkerW 图标层挂载、桌面输入、手动/全屏/锁屏/息屏/S3 睡眠五类暂停原因与原因叠加、视觉时钟、Explorer 重启恢复、托盘重建与右键菜单、终态重试、10 次快速重启预算、controller 失败恢复、50 次进程级应用/停止，以及探针页面资源基线；多屏、生产场景与长稳仍未完成。这是隔离探针结论，不是生产宿主方案，也不改变[桌面壁纸方案](../desktop-wallpaper.md)与[共享宿主设计](../desktop-host.md)的草案状态。
+日期：2026-10-23。执行：本机 Qoder agent。状态：**W0 首轮局部通过；阶段未完成，不进入 W1**。已验证 WorkerW 图标层挂载、桌面输入、手动/全屏/锁屏/息屏/S3 睡眠五类暂停原因与原因叠加、视觉时钟、Explorer 重启恢复、托盘重建与右键菜单、终态重试、10 次快速重启预算、controller 失败恢复、50 次进程级与进程内 surface churn，以及探针页面资源基线；多屏、设置预览/托盘图标累计、生产场景与长稳仍未完成。这是隔离探针结论，不是生产宿主方案，也不改变[桌面壁纸方案](../desktop-wallpaper.md)与[共享宿主设计](../desktop-host.md)的草案状态。
 
 ## 1. 结论
 
@@ -14,7 +14,7 @@
 - **W0-3（终态重试）**：4 次快速重启进入终态后，右键托盘选“重新挂载”：`retry_requested` → 预算清零 → `attempt=1` 恢复成功；随后第 5 次重启以 `attempt=2` 再次恢复；探针退出码 0、残留 0。**显式用户重试路径通过。**
 - **W0-2（挂起通知，局部）**：`RegisterSuspendResumeNotification` 返回非零句柄；`--power-selftest` 直接向窗口投递 suspend/resume 消息，`reasons=0x10 hidden=true` 停绘、恢复后从同一 `sceneTime` 继续。**注册与处理链通过；真实 S3 送达待复测（上一轮旧 APM 消息未送达）。**
 - **W0-3（终态预算）**：`--restart-test` 连续 10 次重启 Explorer；第 1–3 次恢复成功（attempt 1/2/3），第 4 次触发 `recovery_terminal attempts>=3 window=120s`，之后不再尝试或刷健康日志；截图露出系统壁纸，探针最终退出码 0、残留 0。**快速 10 次重启在“3 次/120 秒”预算下按设计进入终态；需要重新定义 A6 的“10 次”是间隔超过窗口还是允许快速连续。**
-- **W0-5（退出、失败与回收，局部）**：正常退出后壁纸窗口消失，当前系统壁纸可见，专属 WebView2 进程残留为 0。`--close-controller-after-ms` 注入 controller Close 后，周期 liveness 探测发现 `0x8007139F`，先关闭/销毁旧窗口再按统一预算重建，页面重新开始并正常退出。50 次进程级应用/停止全部退出码 0，结束时 `wallpaper.exe` 与专属 WebView2 残留均为 0。**设置预览租约、进程内 controller/scope 反复创建销毁与托盘图标累计未测。**
+- **W0-5（退出、失败与回收，局部）**：正常退出后壁纸窗口消失，当前系统壁纸可见，专属 WebView2 进程残留为 0。`--close-controller-after-ms` 注入 controller Close 后，周期 liveness 探测发现 `0x8007139F`，先关闭/销毁旧窗口再按统一预算重建，页面重新开始并正常退出。50 次进程级应用/停止全部退出码 0；进程内 50 次 controller/窗口重建同样零失败，每轮稳定为 7 个进程（6 个 WebView2）、工作集约 340–345 MB，无累积，退出后残留 0。**设置预览租约、场景 GPU scope/纹理释放与托盘图标累计未测。**
 
 因此 W0 不能标记通过：挂载、停绘、恢复与进程级启停路线已成立，剩余阻断项是多屏等环境矩阵、进程内 surface/scope churn、生产场景接入和长稳资源阈值。
 
@@ -22,7 +22,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 探针版本 | 锁屏策略实测于 `75e8ee4`；息屏/睡眠通知 `bae5ca3`；托盘重试 `33c7a1d`；当前 `25e5e7e`，1,162,752 bytes，SHA-256 `2485fb0ace8d103f3e01d3ef1a2bae45029896669aa44e73cb88566402d86ff6`；早期轮次 `cbf4347`/`b6185eb`/`2404413`/`2214858` |
+| 探针版本 | 锁屏策略实测于 `75e8ee4`；息屏/睡眠通知 `bae5ca3`；托盘重试 `33c7a1d`；controller 失败恢复 `25e5e7e`；当前 `a379095`，1,173,504 bytes，SHA-256 `df04b956aa8f6720e9a91528d196b97c4292d188abe301c17c7c7a66b6d673fa`；早期轮次 `cbf4347`/`b6185eb`/`2404413`/`2214858` |
 | 工具链 | rustc/cargo 1.98.1；`cargo +1.88.0 check --release --all-targets` 通过；`cargo clippy --release --all-targets -- -D warnings` 通过 |
 | OS / 架构 | Windows 11 `10.0.26200` x64 |
 | WebView2 Runtime | 155.0.4283.62 |
@@ -33,7 +33,7 @@
 
 ## 3. 实验记录
 
-运行时间 2026-10-23 17:00–2026-10-24 00:52。`run1/run2` 用于定位 Z 序与输入，`run3/run5` 为停绘与时钟主证据，`run4` 为恢复实现前的 Explorer 重启，`recovery2` 为恢复第一版的单次重启，`recovery4` 为加入单次尝试内等待后的连续两次重启，`fullscreen1` 为真实 Chrome 全屏，`tray-rebuild3` 为恢复后的托盘点击，`restart10` 为 10 次重启/终态预算，`resource1` 为资源基线，`lock-observe2`/`lock-policy1`/`lock-policy2` 为锁屏，`monitor-off1`/`monitor-off2` 为息屏，`sleep3` 为强制 S3 睡眠/唤醒，`retry3` 为终态后托盘重试，`power-selftest1` 为挂起通知自检，`controller-fail1` 为 controller 失败恢复，`cycle50` 为 50 次进程级启停。托盘重建使用左键菜单修正后的构建；终态与资源使用加入 `--restart-test`/采样后的构建；锁屏策略为 `75e8ee4`，息屏/睡眠通知为 `bae5ca3`，托盘重试为 `33c7a1d`，controller 失败恢复为 `25e5e7e`。
+运行时间 2026-10-23 17:00–2026-10-24 08:40。`run1/run2` 用于定位 Z 序与输入，`run3/run5` 为停绘与时钟主证据，`run4` 为恢复实现前的 Explorer 重启，`recovery2` 为恢复第一版的单次重启，`recovery4` 为加入单次尝试内等待后的连续两次重启，`fullscreen1` 为真实 Chrome 全屏，`tray-rebuild3` 为恢复后的托盘点击，`restart10` 为 10 次重启/终态预算，`resource1` 为资源基线，`lock-observe2`/`lock-policy1`/`lock-policy2` 为锁屏，`monitor-off1`/`monitor-off2` 为息屏，`sleep3` 为强制 S3 睡眠/唤醒，`retry3` 为终态后托盘重试，`power-selftest1` 为挂起通知自检，`controller-fail1` 为 controller 失败恢复，`cycle50` 为 50 次进程级启停，`w0-cycle-in-process1` 为 50 次进程内 churn。托盘重建使用左键菜单修正后的构建；终态与资源使用加入 `--restart-test`/采样后的构建；锁屏策略为 `75e8ee4`，息屏/睡眠通知为 `bae5ca3`，托盘重试为 `33c7a1d`，controller 失败恢复为 `25e5e7e`，进程内 churn 为 `a379095`。
 
 | ID | 操作与观测 | 结果 |
 | --- | --- | --- |
@@ -55,7 +55,8 @@
 | W0-2 挂起通知自检 | `--power-selftest` 向窗口投递 suspend/resume | `register_power monitor_handle`/`suspend_resume_handle` 均非零；`reasons=0x10 hidden=true` → 恢复；真实 S3 送达待复测 |
 | W0-5 正常退出 | 完成计划后退出，截图桌面 | 壁纸消失，露出当前系统壁纸；`leftover=0` |
 | W0-5 controller 失败 | `--close-controller-after-ms 5000` 关闭壁纸 controller | `controller_close=Ok`；周期 liveness 探测报 `0x8007139F`；`recover_destroy_old destroyed=1` → `recovery_success`；页面重启并退出 0 |
-| W0-5 50 次启停（进程级） | 50 次 `--restart-test --duration-ms 1500` | 50/50 退出码 0；结束时 `wallpaper.exe` 与专属 WebView2 残留均为 0；进程内 controller/scope churn 未测 |
+| W0-5 50 次启停（进程级） | 50 次 `--restart-test --duration-ms 1500` | 50/50 退出码 0；结束时 `wallpaper.exe` 与专属 WebView2 残留均为 0 |
+| W0-5 50 次进程内 churn | `--cycle-test --cycles 50`：每轮关闭 controller、销毁旧窗、重建挂载 | 50/50 `alive=true`、`failures=0`；每轮 7 进程/6 WebView2，工作集 340–345 MB，无累积；退出后残留 0 |
 | W0-2 真实全屏 | Chrome `--start-fullscreen` 覆盖目标屏；探针每 500 ms 轮询 `SHQueryUserNotificationState` | 5→2 触发 `fullscreen` 原因：`hidden=true`、`stopMotion`、无 frame；2→5 后 `hidden=false`，从 `sceneTime=5993 ms` 恢复，无大 dt |
 | W0-2 原因叠加 | S3 睡眠期间 session 与息屏同时生效，再逐个解除 | `reasons=0x0c`（session+display-off）；亮屏先清 `0x08` 时仍 `hidden=true`，只有 session 解除后才恢复绘制；**通过** |
 | W0-3 休眠/唤醒 | `SetSuspendState(hibernate=false)` 强制 S3，约 20 秒后唤醒 | 页面被 S3 冻结；`QUNS_NOT_PRESENT` 与息屏通知都到达；恢复后 `sceneTime` 从 11009 ms 继续，无大 dt；`PBT_APMSUSPEND` 钩子未触发（`tag=sleep` 计数 0） |
@@ -100,7 +101,7 @@ GPU Engine 采样（`sample-gpu.ps1`，约 4 秒一个点，按探针进程树 P
 12. **锁屏与息屏都不会自动停绘，且信号来源不同。** 锁屏只体现在 `SHQueryUserNotificationState=QUNS_NOT_PRESENT`（息屏时 QUNS 仍是 5）；息屏只能通过 `WM_POWERBROADCAST` + `GUID_MONITOR_POWER_ON` 得到。两类都必须映射为独立暂停原因并真正取消页面调度，否则显示器关闭后 WebView 仍以约 165 rAF/s 绘制。
 13. **S3 睡眠不会把 `PBT_APMSUSPEND` 送达该窗口。** 强制 S3 后探针收到的是 `QUNS_NOT_PRESENT` 与 `GUID_MONITOR_POWER_ON` 的 off/on，APM 挂起/恢复分支一次都没触发（`tag=sleep` 计数 0）。页面本身被 S3 冻结、dt 上限也避免了跳变。已改为 `RegisterSuspendResumeNotification`：注册返回非零句柄，`--power-selftest` 投递 suspend/resume 后 `reasons=0x10 hidden=true` 并恢复；**真实 S3 是否送达该注册仍需一次实测确认**。
 14. **controller 失效可被周期 liveness 探测捕获并重建。** 关闭 controller 后窗口仍在、父链正常，单纯窗口健康检查不会发现；用 `evaluate_script("1")` 每 2 秒探测，收到 `0x8007139F` 后关闭并销毁旧窗口，再按统一预算重建。生产实现可优先用 WebView2 的 `ProcessFailed` 事件替代轮询，但必须验证事件在 WorkerW 子窗下的送达。
-15. **50 次进程级启停未留下专属进程，但不等于进程内 surface churn 已通过。** 50 次独立启动/退出全部退出码 0，结束时 `wallpaper.exe` 与专属 WebView2 残留为 0；仍未测同一进程内反复创建/销毁 controller、场景 scope 与托盘图标累计，A7 的“活动 renderer/scope 回到基线”仍需进程内计数证据。
+15. **进程级与进程内 50 次启停均未累积。** 50 次独立启动/退出全部退出码 0，结束时 `wallpaper.exe` 与专属 WebView2 残留为 0；同一进程内 50 次关闭 controller、销毁窗口并重建，逐轮保持 7 个进程/6 个 WebView2、工作集 340–345 MB，`failures=0`，退出后残留 0。仍缺：设置预览租约、场景 GPU scope/纹理释放（探针页面是 canvas，不产生 Three.js scope）与托盘图标累计。
 
 ## 6. 复现
 
@@ -120,14 +121,16 @@ OUT=../../output/desk-w0/<run>
 ./target/release/wallpaper.exe --out "$OUT" --source <commit> --restart-test --duration-ms 30000 --close-controller-after-ms 5000
 # 50 次进程级应用/停止（共享同一输出目录便于残留检查）
 for i in $(seq 1 50); do ./target/release/wallpaper.exe --out "$OUT" --source <commit> --restart-test --duration-ms 1500; done
+# 50 次进程内 surface churn：同一进程反复关闭 controller、销毁窗口并重建
+./target/release/wallpaper.exe --out "$OUT" --source <commit> --cycle-test --cycles 50
 ```
 
 实验时在另一终端运行 `show-desktop.ps1` 把桌面置前；截图用同目录 `capture-screen.ps1`。全屏实验用 `fullscreen-check.ps1 -Out <OUT>\real-fullscreen`。Explorer 恢复实验运行 `restart-explorer.ps1 -WaitSeconds 15`；恢复后等待约 9 秒再运行 `tray-click.ps1 -Name 'Hertz DESK-W0 probe'` 验证托盘图标重建。终态后等待约 15 秒，用 `tray-menu.ps1 -Name 'Hertz DESK-W0 probe' -ItemIndex 0` 右键并选择“重新挂载”。退出后用 `check-leftovers.ps1 -UserData <OUT>\webview2` 检查专属 WebView2 残留；资源采样用 `sample-gpu.ps1 -RootPid <pid> -Out <OUT>\gpu.csv`，阶段 CPU/工作集在探针日志的 `cpu_mark/cpu` 行。
 
 ## 7. 决定与下一步
 
-- **决定：** 保留 `wallpaper` 探针作为 W0 复现入口；不把 WorkerW 挂载写成已批准生产方案，不进入 W1。W0 仍缺多屏、进程内 surface/scope churn、生产场景与长稳；controller 失败恢复与 50 次进程级启停已通过，`RegisterSuspendResumeNotification` 的真实 S3 送达还需一次复测。策略停绘必须按“原生可见性 + 页面停止调度”实现，不能只调 controller。
-- **下一轮最小任务：** ① 目标屏断开/重连与混合 DPI；② 同一进程内反复创建/销毁 controller、场景 scope、设置预览租约与托盘图标累计；③ 真实 S3 复测 `RegisterSuspendResumeNotification` 送达；④ 接入生产星座场景并做无壁纸对照、8 小时与资源阈值。
+- **决定：** 保留 `wallpaper` 探针作为 W0 复现入口；不把 WorkerW 挂载写成已批准生产方案，不进入 W1。W0 仍缺多屏、设置预览租约/托盘图标累计、真实场景 GPU scope 释放、生产场景与长稳；进程级与进程内 50 次 surface churn、controller 失败恢复已通过，`RegisterSuspendResumeNotification` 的真实 S3 送达还需一次复测。
+- **下一轮最小任务：** ① 目标屏断开/重连与混合 DPI；② 设置预览租约、托盘图标累计与真实场景 GPU scope/纹理释放；③ 真实 S3 复测 `RegisterSuspendResumeNotification` 送达；④ 接入生产星座场景并做无壁纸对照、8 小时与资源阈值。
 - **复验触发：** Windows 构建、Explorer 桌面层级、WebView2 Runtime、wry/tao/tray-icon、DPI/刷新率或挂载算法任一变化，都必须重跑本报告对应实验。
 
 本报告不把一次全屏/快速重启或短窗口资源采样当作完整 W0 通过，也不以合成页面替代生产星座场景的长稳与预算。
