@@ -145,13 +145,25 @@ impl Estimator {
             let observed_host = i128::from(mid) + i128::from(offset);
             let predicted_host = mapping.host_time(mid).map(i128::from);
             let error = predicted_host.map(|predicted| (predicted - observed_host).unsigned_abs());
-            if error.is_none_or(|error| {
-                error > u128::from(mapping.uncertainty_ns.saturating_mul(8).max(2_000_000))
-            }) {
+            // Frequency uncertainty comes from the uncertainty at both ends
+            // of the observed span. Bound its extrapolation by the same 3s
+            // freshness horizon that expires the fit above.
+            let horizon = (mid - mapping.reference_local_ns).min(CLOCK_FRESHNESS_NS);
+            let frequency_uncertainty =
+                u128::from(mapping.uncertainty_ns) * 2 * u128::from(horizon)
+                    / u128::from(mapping.observation_span_ns);
+            let prediction_uncertainty =
+                u128::from(mapping.uncertainty_ns) + u128::from(rtt / 2) + frequency_uncertainty;
+            if error
+                .is_none_or(|error| error > prediction_uncertainty.saturating_mul(4).max(2_000_000))
+            {
                 self.window.clear();
                 self.discontinuities += 1;
             } else if error.is_some_and(|error| {
-                error > u128::from(mapping.residual_mad_ns.saturating_mul(6).max(200_000))
+                error
+                    > u128::from(mapping.residual_mad_ns.saturating_mul(6))
+                        .max(prediction_uncertainty)
+                        .max(200_000)
             }) {
                 return false;
             }
@@ -164,6 +176,7 @@ impl Estimator {
     }
     pub fn mapping(&self) -> Option<ClockMapping> {
         let reference = self.window.back()?.0;
+        let observation_span = reference - self.window.front()?.0;
         let x = |time: u64| (i128::from(time) - i128::from(reference)) as f64 / 1e9;
         let origin_offset = self.window.back()?.1;
         let y = |offset: i64| (i128::from(offset) - i128::from(origin_offset)) as f64;
@@ -194,16 +207,22 @@ impl Estimator {
         errors.sort_by(f64::total_cmp);
         let rtt = self.window.iter().map(|s| s.2).min().unwrap_or(0);
         let residual_mad_ns = (errors[errors.len() / 2] * 1.4826).ceil() as u64;
+        // A dense earlier burst can still own the median while newer samples
+        // disagree with its extrapolation. Include the latest residual so the
+        // reported precision cannot hide that evidence and reject all updates.
+        let latest_residual_ns = intercept.abs().ceil() as u64;
         Some(ClockMapping {
             reference_local_ns: reference,
             offset_ns: (i128::from(origin_offset) + intercept.round() as i128)
                 .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
             drift_ppm: slope / 1000.0,
-            uncertainty_ns: residual_mad_ns.saturating_add(rtt / 2),
+            uncertainty_ns: residual_mad_ns
+                .max(latest_residual_ns)
+                .saturating_add(rtt / 2),
             min_rtt_ns: rtt,
             samples: self.window.len(),
             residual_mad_ns,
-            observation_span_ns: reference - self.window.front()?.0,
+            observation_span_ns: observation_span,
         })
     }
     pub fn mapping_at(&self, local_now: u64) -> Option<ClockMapping> {
@@ -291,11 +310,95 @@ mod tests {
         for second in 1..=8 {
             assert!(estimator.push(sample(second * 1_000_000_000, 0, 0.0)));
         }
-        assert!(!estimator.push(sample(9_000_000_000, 900_000, 0.0)));
+        // This offset is inside the measured RTT uncertainty. Admit it to the
+        // robust fit; rejecting every such sample can freeze a startup slope
+        // until its freshness lease expires on an otherwise healthy network.
+        assert!(estimator.push(sample(9_000_000_000, 900_000, 0.0)));
         let mapping = estimator.mapping().unwrap();
         assert_eq!(mapping.drift_ppm, 0.0);
         assert_eq!(mapping.host_time(19_000_000_000), Some(19_000_000_000));
         assert!(!estimator.push(sample(8_000_000_000, 0, 0.0)));
+    }
+    #[test]
+    fn startup_offset_noise_inside_measured_rtt_cannot_freeze_a_healthy_clock() {
+        let mut estimator = Estimator::default();
+        let measured = |local: u64, offset: i64| TimeSample {
+            t1: local,
+            t2: (i128::from(local) + 250_000 + i128::from(offset)) as u64,
+            t3: (i128::from(local) + 260_000 + i128::from(offset)) as u64,
+            t4: local + 510_000,
+        };
+        // An ordinary half-millisecond RTT contains a short correlated startup
+        // asymmetry. Later unbiased measurements must refresh the fit rather
+        // than all being rejected against a spuriously precise startup slope.
+        for i in 0..20 {
+            assert!(estimator.push(measured(
+                1_000_000_000 + i * 100_000_000,
+                100_000 - i as i64 * 10_000
+            )));
+        }
+        for second in 4..=60 {
+            let now = second * 1_000_000_000;
+            assert!(
+                estimator.push(measured(now, 0)),
+                "healthy sample rejected at {second}s"
+            );
+            assert!(
+                estimator.mapping_at(now + 900_000_000).is_some(),
+                "clock became stale at {second}s"
+            );
+        }
+        let mapping = estimator.mapping().unwrap();
+        assert!(mapping.drift_ppm.abs() < 10.0);
+        assert!(mapping.offset_ns.abs() < 100_000);
+    }
+    #[test]
+    fn startup_asymmetry_near_the_rtt_boundary_keeps_refreshing_with_real_drift() {
+        for ppm in [-180.0, 0.0, 180.0] {
+            let mut estimator = Estimator::default();
+            let host = |local: u64| (local as f64 * (1.0 + ppm * 1e-6)).round() as u64;
+            let measured = |local: u64, offset: i64| TimeSample {
+                t1: local,
+                t2: (i128::from(host(local + 250_000)) + i128::from(offset)) as u64,
+                t3: (i128::from(host(local + 260_000)) + i128::from(offset)) as u64,
+                t4: local + 510_000,
+            };
+            for i in 0..20 {
+                assert!(estimator.push(measured(
+                    1_000_000_000 + i * 100_000_000,
+                    247_000 - i as i64 * 26_000
+                )));
+            }
+            for second in 4..=60 {
+                let now = second * 1_000_000_000;
+                assert!(
+                    estimator.push(measured(now, 0)),
+                    "rejected at {second}s, {ppm}ppm"
+                );
+                assert!(estimator.mapping_at(now + 900_000_000).is_some());
+                assert_eq!(estimator.discontinuities(), 0);
+            }
+            let mapping = estimator.mapping().unwrap();
+            assert!((mapping.drift_ppm - ppm).abs() < 10.0);
+            assert!(
+                mapping
+                    .host_time(60_900_000_000)
+                    .unwrap()
+                    .abs_diff(host(60_900_000_000))
+                    < 100_000
+            );
+        }
+    }
+    #[test]
+    fn one_sparse_endpoint_outlier_cannot_own_a_later_dense_burst() {
+        let mut estimator = Estimator::default();
+        assert!(estimator.push(sample(1_000_000_000, 900_000, 0.0)));
+        for i in 0..7 {
+            assert!(estimator.push(sample(2_000_000_000 + i * 100_000_000, 0, 0.0)));
+        }
+        let mapping = estimator.mapping().unwrap();
+        assert_eq!(mapping.drift_ppm, 0.0);
+        assert_eq!(mapping.offset_ns, 0);
     }
     #[test]
     fn a_short_initial_burst_cannot_authorize_unmeasured_frequency_extrapolation() {
