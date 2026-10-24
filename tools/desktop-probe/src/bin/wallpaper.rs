@@ -283,6 +283,9 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         policy_hidden: bool,
         fullscreen_state: Option<QUERY_USER_NOTIFICATION_STATE>,
         restart_test: bool,
+        cycle_test: bool,
+        cycles: u32,
+        cycle_failures: u32,
         cpu_mark: Option<(String, Instant, TreeSample)>,
         last_liveness: Instant,
     }
@@ -653,7 +656,53 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             ));
         }
 
-        fn tick(&mut self, n: u8) -> bool {
+        fn cycle(&mut self, n: u8, target: &EventLoopWindowTarget<UserEvent>) {
+            let before = sample_process_tree();
+            self.recovery.attempts.clear();
+            self.recovery.terminal = false;
+            self.recover(target);
+            std::thread::sleep(Duration::from_millis(400));
+            let after = sample_process_tree();
+            let alive = unsafe { IsWindow(self.hwnd()) } != 0;
+            if !alive {
+                self.cycle_failures += 1;
+            }
+            self.evidence.log(format!(
+                "cycle n={n} alive={alive} before_processes={} after_processes={} before_webview={} after_webview={} after_ws_mb={:.1} failures={}",
+                before.processes,
+                after.processes,
+                before.webview_processes,
+                after.webview_processes,
+                after.working_set as f64 / (1024.0 * 1024.0),
+                self.cycle_failures
+            ));
+            if matches!(n, 10 | 20 | 30 | 40 | 50) {
+                self.evidence.marker(&format!("cycle-{n}"));
+            }
+        }
+
+        fn tick(&mut self, n: u8, target: &EventLoopWindowTarget<UserEvent>) -> bool {
+            if self.cycle_test {
+                if n == 0 {
+                    self.state("mounted");
+                    self.eval("motion30", "window.startMotion(30)");
+                    self.evidence.marker("mounted");
+                    return false;
+                }
+                if (n as u32) <= self.cycles {
+                    self.cycle(n, target);
+                    return false;
+                }
+                self.stopping = true;
+                self.state("done");
+                self.evidence.log(format!(
+                    "cycle_summary cycles={} failures={}",
+                    self.cycles, self.cycle_failures
+                ));
+                self.eval("final", "window.stopMotion()");
+                self.evidence.marker("done");
+                return true;
+            }
             if self.restart_test && n == 2 {
                 self.stopping = true;
                 self.state("done");
@@ -741,6 +790,8 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let mut duration_ms = 40_000u64;
         let mut power_selftest = false;
         let mut close_controller_after_ms = 0u64;
+        let mut cycle_test = false;
+        let mut cycles = 50u32;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -748,6 +799,10 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 "--source" => source = args.next().ok_or("--source needs a revision")?,
                 "--restart-test" => restart_test = true,
                 "--power-selftest" => power_selftest = true,
+                "--cycle-test" => cycle_test = true,
+                "--cycles" => {
+                    cycles = args.next().ok_or("--cycles needs a value")?.parse()?;
+                }
                 "--close-controller-after-ms" => {
                     close_controller_after_ms = args
                         .next()
@@ -767,7 +822,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             None => std::process::exit(3),
         };
         evidence.log(format!(
-            "probe=desk-w0 source={source} pid={} restart_test={restart_test} duration_ms={duration_ms} power_selftest={power_selftest} close_controller_after_ms={close_controller_after_ms} webview2_user_data={}",
+            "probe=desk-w0 source={source} pid={} restart_test={restart_test} cycle_test={cycle_test} cycles={cycles} duration_ms={duration_ms} power_selftest={power_selftest} close_controller_after_ms={close_controller_after_ms} webview2_user_data={}",
             std::process::id(),
             out.join("webview2").display()
         ));
@@ -950,13 +1005,20 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             policy_hidden: false,
             fullscreen_state: None,
             restart_test,
+            cycle_test,
+            cycles,
+            cycle_failures: 0,
             cpu_mark: None,
             last_liveness: Instant::now(),
         };
 
         let _ticker = {
             let proxy = proxy.clone();
-            let schedule: Vec<u64> = if restart_test {
+            let schedule: Vec<u64> = if cycle_test {
+                (0..=(cycles as u64 + 1))
+                    .map(|index| index * 1_000)
+                    .collect()
+            } else if restart_test {
                 vec![0, 3_000, duration_ms]
             } else {
                 vec![0, 3_000, 15_000, 25_000, 30_000, 35_000, 40_000]
@@ -988,7 +1050,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             *control_flow = ControlFlow::Wait;
             match event {
                 Event::UserEvent(UserEvent::Tick(n)) => {
-                    if probe.tick(n) {
+                    if probe.tick(n, event_loop_target) {
                         *control_flow = ControlFlow::Exit;
                     }
                 }
