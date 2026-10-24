@@ -39,7 +39,8 @@ mod wallpaper {
         CloseHandle, FILETIME, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT,
     };
     use windows_sys::Win32::Graphics::Gdi::{
-        RedrawWindow, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
+        EnumDisplayMonitors, GetMonitorInfoW, RedrawWindow, HDC, HMONITOR, MONITORINFO,
+        MONITORINFOEXW, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
     };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -55,7 +56,7 @@ mod wallpaper {
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcessId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
         MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT,
@@ -71,7 +72,8 @@ mod wallpaper {
         SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint,
         DEVICE_NOTIFY_WINDOW_HANDLE, GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, GW_CHILD,
         GW_HWNDNEXT, HWND_BOTTOM, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
-        PBT_POWERSETTINGCHANGE, SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        PBT_POWERSETTINGCHANGE, SMTO_NORMAL, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
         SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_SHOW, WM_POWERBROADCAST, WNDPROC, WS_CAPTION,
         WS_CHILD, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
         WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
@@ -196,6 +198,8 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
     const REASON_SESSION: u8 = 1 << 2;
     const REASON_DISPLAY_OFF: u8 = 1 << 3;
     const REASON_SLEEP: u8 = 1 << 4;
+    const REASON_DISPLAY_MISSING: u8 = 1 << 5;
+    const MONITORINFOF_PRIMARY_FLAG: u32 = 1;
 
     static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
     static EVENT_PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
@@ -208,6 +212,15 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         webview_processes: usize,
         pids: Vec<u32>,
         per_process: Vec<(u32, String, u64)>,
+    }
+
+    #[derive(Clone)]
+    struct MonitorEntry {
+        device: String,
+        rect: RECT,
+        work: RECT,
+        primary: bool,
+        dpi: u32,
     }
 
     struct Recovery {
@@ -276,6 +289,13 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         retry_id: String,
         screen_w: i32,
         screen_h: i32,
+        target_x: i32,
+        target_y: i32,
+        target_dpi: u32,
+        worker_x: i32,
+        worker_y: i32,
+        worker_w: i32,
+        worker_h: i32,
         current_fps: u32,
         stopping: bool,
         recovery: Recovery,
@@ -287,6 +307,10 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         cycle_test: bool,
         cycles: u32,
         cycle_failures: u32,
+        dpi_compensate: bool,
+        target_device: String,
+        target_missing: bool,
+        last_monitor_check: Instant,
         cpu_mark: Option<(String, Instant, TreeSample)>,
         last_liveness: Instant,
     }
@@ -325,7 +349,10 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         }
 
         fn probe_input(&self, tag: &str) {
-            let point = POINT { x: 1500, y: 360 };
+            let point = POINT {
+                x: self.target_x + self.screen_w * 3 / 4,
+                y: self.target_y + self.screen_h / 4,
+            };
             let raw = unsafe { WindowFromPoint(point) };
             let root = if raw.is_null() {
                 raw
@@ -354,10 +381,136 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             ));
         }
 
+        fn apply_monitor(&mut self, monitor: &MonitorEntry) {
+            self.target_x = monitor.rect.left;
+            self.target_y = monitor.rect.top;
+            self.screen_w = monitor.rect.right - monitor.rect.left;
+            self.screen_h = monitor.rect.bottom - monitor.rect.top;
+            self.target_dpi = monitor.dpi;
+            self.worker_x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+            self.worker_y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+            self.worker_w = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+            self.worker_h = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+            if unsafe { IsWindow(self.hwnd()) } == 0 || unsafe { IsWindow(self.workerw) } == 0 {
+                self.evidence
+                    .log("monitor_apply skipped reason=window_missing");
+                return;
+            }
+            unsafe {
+                SetWindowPos(
+                    self.workerw,
+                    HWND_BOTTOM,
+                    self.worker_x,
+                    self.worker_y,
+                    self.worker_w,
+                    self.worker_h,
+                    SWP_NOACTIVATE,
+                );
+                SetWindowPos(
+                    self.hwnd(),
+                    HWND_BOTTOM,
+                    self.target_x - self.worker_x,
+                    self.target_y - self.worker_y,
+                    self.screen_w,
+                    self.screen_h,
+                    SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                );
+            }
+            if self.dpi_compensate {
+                let window_dpi = unsafe { GetDpiForWindow(self.hwnd()) };
+                let factor = self.target_dpi as f64 / window_dpi as f64;
+                let _ = self.view.zoom(factor);
+                self.evidence.log(format!(
+                    "dpi_compensate factor={factor:.3} target_dpi={} window_dpi={window_dpi}",
+                    self.target_dpi
+                ));
+            }
+            self.evidence.log(format!(
+                "monitor_apply device={} rect={},{},{},{} dpi={} window_dpi={}",
+                monitor.device,
+                self.target_x,
+                self.target_y,
+                self.target_x + self.screen_w,
+                self.target_y + self.screen_h,
+                self.target_dpi,
+                unsafe { GetDpiForWindow(self.hwnd()) }
+            ));
+        }
+
+        fn check_monitor(&mut self) {
+            if self.stopping || self.recovery.terminal {
+                return;
+            }
+            if self.last_monitor_check.elapsed() < Duration::from_millis(1_000) {
+                return;
+            }
+            self.last_monitor_check = Instant::now();
+            let monitors = enumerate_monitors();
+            let found = monitors
+                .iter()
+                .find(|monitor| {
+                    normalize_device(&monitor.device)
+                        .eq_ignore_ascii_case(normalize_device(&self.target_device))
+                })
+                .cloned()
+                .or_else(|| {
+                    if self.target_missing {
+                        monitors
+                            .iter()
+                            .find(|monitor| {
+                                !monitor.primary
+                                    && monitor.rect.right - monitor.rect.left == self.screen_w
+                                    && monitor.rect.bottom - monitor.rect.top == self.screen_h
+                            })
+                            .cloned()
+                    } else {
+                        None
+                    }
+                });
+            match found {
+                Some(monitor) => {
+                    let returned = self.target_missing;
+                    if returned {
+                        self.target_missing = false;
+                        self.target_device = monitor.device.clone();
+                        self.evidence.log(format!(
+                            "monitor_returned device={} rect={},{},{},{} dpi={}",
+                            monitor.device,
+                            monitor.rect.left,
+                            monitor.rect.top,
+                            monitor.rect.right,
+                            monitor.rect.bottom,
+                            monitor.dpi
+                        ));
+                    }
+                    let changed = monitor.rect.left != self.target_x
+                        || monitor.rect.top != self.target_y
+                        || monitor.rect.right - monitor.rect.left != self.screen_w
+                        || monitor.rect.bottom - monitor.rect.top != self.screen_h
+                        || monitor.dpi != self.target_dpi;
+                    if returned || changed {
+                        self.apply_monitor(&monitor);
+                    }
+                    if returned || self.policy_reasons & REASON_DISPLAY_MISSING != 0 {
+                        self.set_reason(REASON_DISPLAY_MISSING, false, "monitor-return");
+                    }
+                }
+                None => {
+                    if !self.target_missing {
+                        self.target_missing = true;
+                        self.evidence
+                            .log(format!("monitor_missing device={}", self.target_device));
+                        self.set_reason(REASON_DISPLAY_MISSING, true, "monitor-missing");
+                    }
+                }
+            }
+        }
+
         fn check_health(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
             if self.stopping || self.recovery.terminal {
                 return;
             }
+            self.check_monitor();
             let hwnd = self.hwnd();
             let alive = unsafe { IsWindow(hwnd) } != 0;
             let parent = if alive {
@@ -583,7 +736,10 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                     self.screen_w as u32,
                     self.screen_h as u32,
                 ))
-                .with_position(tao::dpi::PhysicalPosition::new(0, 0))
+                .with_position(tao::dpi::PhysicalPosition::new(
+                    self.target_x,
+                    self.target_y,
+                ))
                 .with_decorations(false)
                 .with_resizable(false)
                 .with_visible(false)
@@ -608,17 +764,17 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 SetWindowPos(
                     workerw,
                     HWND_BOTTOM,
-                    0,
-                    0,
-                    self.screen_w,
-                    self.screen_h,
+                    self.worker_x,
+                    self.worker_y,
+                    self.worker_w,
+                    self.worker_h,
                     SWP_NOACTIVATE,
                 );
                 SetWindowPos(
                     hwnd,
                     HWND_BOTTOM,
-                    0,
-                    0,
+                    self.target_x - self.worker_x,
+                    self.target_y - self.worker_y,
                     self.screen_w,
                     self.screen_h,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
@@ -647,6 +803,17 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                     return;
                 }
             };
+            let window_dpi = unsafe { GetDpiForWindow(hwnd) };
+            if self.dpi_compensate && self.target_dpi != window_dpi {
+                let factor = self.target_dpi as f64 / window_dpi as f64;
+                match new_view.zoom(factor) {
+                    Ok(()) => self.evidence.log(format!(
+                        "dpi_compensate factor={factor:.3} target_dpi={} window_dpi={window_dpi}",
+                        self.target_dpi
+                    )),
+                    Err(error) => self.evidence.log(format!("dpi_compensate error={error}")),
+                }
+            }
             let old_window = std::mem::replace(&mut self.window, new_window);
             let old_view = std::mem::replace(&mut self.view, new_view);
             std::mem::forget(old_window);
@@ -736,12 +903,17 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 0 => {
                     self.state("mounted");
                     self.evidence.log(format!(
-                        "mount workerw={} workerw_rect={} screen={}x{} dpi={} parent_chain={}",
+                        "mount workerw={} workerw_rect={} target={}x{}@{},{} target_dpi={} window_dpi={} screen={}x{} parent_chain={}",
                         fmt_hwnd(self.workerw),
                         rect_string(self.workerw),
+                        self.screen_w,
+                        self.screen_h,
+                        self.target_x,
+                        self.target_y,
+                        self.target_dpi,
+                        unsafe { GetDpiForWindow(self.hwnd()) },
                         unsafe { GetSystemMetrics(0) },
                         unsafe { GetSystemMetrics(1) },
-                        unsafe { GetDpiForWindow(self.hwnd()) },
                         parent_chain(self.hwnd())
                     ));
                     self.eval("motion30", "window.startMotion(30)");
@@ -814,11 +986,24 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let mut close_controller_after_ms = 0u64;
         let mut cycle_test = false;
         let mut cycles = 50u32;
+        let mut monitor_device = String::new();
+        let mut monitor_index = 0usize;
+        let mut dpi_compensate = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--out" => out = PathBuf::from(args.next().ok_or("--out needs a path")?),
                 "--source" => source = args.next().ok_or("--source needs a revision")?,
+                "--monitor-device" => {
+                    monitor_device = args.next().ok_or("--monitor-device needs a value")?;
+                }
+                "--monitor-index" => {
+                    monitor_index = args
+                        .next()
+                        .ok_or("--monitor-index needs a value")?
+                        .parse()?;
+                }
+                "--dpi-compensate" => dpi_compensate = true,
                 "--restart-test" => restart_test = true,
                 "--power-selftest" => power_selftest = true,
                 "--cycle-test" => cycle_test = true,
@@ -844,7 +1029,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             None => std::process::exit(3),
         };
         evidence.log(format!(
-            "probe=desk-w0 source={source} pid={} restart_test={restart_test} cycle_test={cycle_test} cycles={cycles} duration_ms={duration_ms} power_selftest={power_selftest} close_controller_after_ms={close_controller_after_ms} webview2_user_data={}",
+            "probe=desk-w0 source={source} pid={} restart_test={restart_test} cycle_test={cycle_test} cycles={cycles} duration_ms={duration_ms} power_selftest={power_selftest} close_controller_after_ms={close_controller_after_ms} monitor_device={monitor_device} monitor_index={monitor_index} dpi_compensate={dpi_compensate} webview2_user_data={}",
             std::process::id(),
             out.join("webview2").display()
         ));
@@ -895,12 +1080,65 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             let _ = menu_proxy.send_event(UserEvent::Menu(event));
         }));
 
-        let screen_w = unsafe { GetSystemMetrics(0) };
-        let screen_h = unsafe { GetSystemMetrics(1) };
+        let monitors = enumerate_monitors();
+        for monitor in &monitors {
+            evidence.log(format!(
+                "monitor device={} rect={},{},{},{} work={},{},{},{} primary={} dpi={}",
+                monitor.device,
+                monitor.rect.left,
+                monitor.rect.top,
+                monitor.rect.right,
+                monitor.rect.bottom,
+                monitor.work.left,
+                monitor.work.top,
+                monitor.work.right,
+                monitor.work.bottom,
+                monitor.primary,
+                monitor.dpi
+            ));
+        }
+        let target = if monitor_index > 0 {
+            monitors.get(monitor_index - 1)
+        } else if monitor_device.is_empty() {
+            monitors
+                .iter()
+                .find(|monitor| monitor.primary)
+                .or_else(|| monitors.first())
+        } else {
+            monitors.iter().find(|monitor| {
+                normalize_device(&monitor.device)
+                    .eq_ignore_ascii_case(normalize_device(&monitor_device))
+            })
+        };
+        let target = match target {
+            Some(monitor) => monitor.clone(),
+            None => return Err(format!("monitor not found: {monitor_device}").into()),
+        };
+        let screen_w = target.rect.right - target.rect.left;
+        let screen_h = target.rect.bottom - target.rect.top;
+        let target_x = target.rect.left;
+        let target_y = target.rect.top;
+        let worker_x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+        let worker_y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+        let worker_w = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+        let worker_h = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+        evidence.log(format!(
+            "monitor_target device={} rect={},{},{},{} dpi={} virtual={},{},{},{}",
+            target.device,
+            target_x,
+            target_y,
+            target_x + screen_w,
+            target_y + screen_h,
+            target.dpi,
+            worker_x,
+            worker_y,
+            worker_w,
+            worker_h
+        ));
         let window = WindowBuilder::new()
             .with_title("Hertz DESK-W0 wallpaper probe")
             .with_inner_size(PhysicalSize::new(screen_w as u32, screen_h as u32))
-            .with_position(tao::dpi::PhysicalPosition::new(0, 0))
+            .with_position(tao::dpi::PhysicalPosition::new(target_x, target_y))
             .with_decorations(false)
             .with_resizable(false)
             .with_visible(false)
@@ -921,17 +1159,17 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             SetWindowPos(
                 workerw,
                 HWND_BOTTOM,
-                0,
-                0,
-                screen_w,
-                screen_h,
+                worker_x,
+                worker_y,
+                worker_w,
+                worker_h,
                 SWP_NOACTIVATE,
             );
             SetWindowPos(
                 hwnd,
                 HWND_BOTTOM,
-                0,
-                0,
+                target_x - worker_x,
+                target_y - worker_y,
                 screen_w,
                 screen_h,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
@@ -943,13 +1181,19 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             progman_children(progman)
         ));
         evidence.log(format!(
-            "attach hwnd={} workerw={} previous_parent={} parent_now={} styles after={:#x} rect={}",
+            "attach hwnd={} workerw={} previous_parent={} parent_now={} styles after={:#x} rect={} window_dpi={} target_dpi={} target={}x{}@{},{}",
             fmt_hwnd(hwnd),
             fmt_hwnd(workerw),
             fmt_hwnd(previous_parent),
             fmt_hwnd(unsafe { GetParent(hwnd) }),
             window_style(hwnd),
-            rect_string(hwnd)
+            rect_string(hwnd),
+            unsafe { GetDpiForWindow(hwnd) },
+            target.dpi,
+            screen_w,
+            screen_h,
+            target_x,
+            target_y
         ));
 
         let clicks = Arc::new(AtomicUsize::new(0));
@@ -967,6 +1211,17 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 }
             })
             .build(&window)?;
+        let window_dpi = unsafe { GetDpiForWindow(hwnd) };
+        if dpi_compensate && target.dpi != window_dpi {
+            let factor = target.dpi as f64 / window_dpi as f64;
+            match view.zoom(factor) {
+                Ok(()) => evidence.log(format!(
+                    "dpi_compensate factor={factor:.3} target_dpi={} window_dpi={window_dpi}",
+                    target.dpi
+                )),
+                Err(error) => evidence.log(format!("dpi_compensate error={error}")),
+            }
+        }
 
         if power_selftest {
             let hwnd_selftest = hwnd as usize;
@@ -1020,6 +1275,13 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             retry_id,
             screen_w,
             screen_h,
+            target_x,
+            target_y,
+            target_dpi: target.dpi,
+            worker_x,
+            worker_y,
+            worker_w,
+            worker_h,
             current_fps: 30,
             stopping: false,
             recovery: Recovery::new(),
@@ -1031,6 +1293,10 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             cycle_test,
             cycles,
             cycle_failures: 0,
+            dpi_compensate,
+            target_device: target.device.clone(),
+            target_missing: false,
+            last_monitor_check: Instant::now(),
             cpu_mark: None,
             last_liveness: Instant::now(),
         };
@@ -1141,6 +1407,56 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         } else {
             Some(handle)
         }
+    }
+
+    fn normalize_device(device: &str) -> &str {
+        device.trim_start_matches(['\\', '.'])
+    }
+
+    fn enumerate_monitors() -> Vec<MonitorEntry> {
+        unsafe extern "system" fn callback(
+            monitor: HMONITOR,
+            _hdc: HDC,
+            _rect: *mut RECT,
+            lparam: LPARAM,
+        ) -> i32 {
+            let entries = &mut *(lparam as *mut Vec<MonitorEntry>);
+            let mut info = MONITORINFOEXW::default();
+            info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+            if GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut MONITORINFO) != 0 {
+                let mut dpi_x = 96u32;
+                let mut dpi_y = 96u32;
+                let dpi =
+                    if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) == 0 {
+                        dpi_x
+                    } else {
+                        96
+                    };
+                let end = info
+                    .szDevice
+                    .iter()
+                    .position(|value| *value == 0)
+                    .unwrap_or(info.szDevice.len());
+                entries.push(MonitorEntry {
+                    device: String::from_utf16_lossy(&info.szDevice[..end]),
+                    rect: info.monitorInfo.rcMonitor,
+                    work: info.monitorInfo.rcWork,
+                    primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY_FLAG != 0,
+                    dpi,
+                });
+            }
+            1
+        }
+        let mut entries = Vec::new();
+        unsafe {
+            EnumDisplayMonitors(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                Some(callback),
+                &mut entries as *mut Vec<MonitorEntry> as LPARAM,
+            );
+        }
+        entries
     }
 
     fn find_progman() -> HWND {
