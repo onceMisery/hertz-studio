@@ -1417,6 +1417,32 @@ impl Owner {
             let _ = self.send(*member, frame);
         }
     }
+    fn send_plan_frame(&mut self, member: Uuid, frame: &ControlFrame) -> RoomResult<bool> {
+        if member == OWNER {
+            self.send(member, frame)?;
+            return Ok(true);
+        }
+        let Some(identity) = self
+            .endpoints
+            .get(&member)
+            .map(|endpoint| endpoint.identity)
+        else {
+            return Ok(false);
+        };
+        match self.server.transport.send(member, identity, frame) {
+            Ok(()) => Ok(true),
+            Err(vmusic_lan::server::TransportError::Closed)
+            | Err(vmusic_lan::server::TransportError::Access(
+                vmusic_lan::members::AccessError::Denied,
+            )) => {
+                // Congestion and disconnect races retire only this output.
+                // The shared candidate and healthy endpoints keep their prefix.
+                self.endpoints.remove(&member);
+                Ok(false)
+            }
+            Err(error) => Err(transport_error(error)),
+        }
+    }
     fn resync(&mut self, member: Uuid) -> RoomResult<()> {
         // A receiver has discarded this prefix. Keep its old plan as a token
         // fence until the shared candidate commits or expires; re-sending its
@@ -1526,7 +1552,8 @@ impl Owner {
         endpoint.plan = Some(plan.clone());
         endpoint.committed = false;
         endpoint.ready = false;
-        self.send(member, &ControlFrame::Prepare { plan })
+        self.send_plan_frame(member, &ControlFrame::Prepare { plan })?;
+        Ok(())
     }
     fn join_commit(&mut self, member: Uuid, epoch: u64, plan_id: u64) -> RoomResult<()> {
         let Some(endpoint) = self.endpoints.get(&member) else {
@@ -1549,14 +1576,16 @@ impl Owner {
         if self.clock.now_ns().saturating_add(MIN_COMMIT_NS) > at {
             return self.join(member);
         }
-        self.send(
+        if !self.send_plan_frame(
             member,
             &ControlFrame::Commit {
                 epoch: Counter(epoch),
                 plan_id: Counter(plan_id),
                 effective_at: Counter(at),
             },
-        )?;
+        )? {
+            return Ok(());
+        }
         self.endpoints.get_mut(&member).unwrap().committed = true;
         Ok(())
     }
@@ -3262,9 +3291,20 @@ pub(super) mod join_retry_tests {
         finish_owner(owner, audio).await;
     }
 
-    #[tokio::test]
-    async fn one_resyncing_endpoint_preserves_the_shared_candidate_and_healthy_commit() {
-        let (mut owner, audio, _render, _inbound) = playing_owner().await;
+    type TestClients = Vec<(
+        Uuid,
+        vmusic_lan::client::ClientConnection,
+        vmusic_lan::client::ClientEvents,
+    )>;
+    async fn prepared_owner_with_clients() -> (
+        Owner,
+        std::thread::JoinHandle<()>,
+        mpsc::Receiver<ProducerEvent>,
+        mpsc::Receiver<Inbound>,
+        TestClients,
+        Plan,
+    ) {
+        let (mut owner, audio, render, inbound) = playing_owner().await;
         let mut clients = Vec::new();
         for name in ["Healthy", "Resyncing"] {
             let invitation = owner.server.transport.invite(Default::default()).unwrap();
@@ -3344,6 +3384,13 @@ pub(super) mod join_retry_tests {
                 },
             );
         }
+        (owner, audio, render, inbound, clients, wire)
+    }
+
+    #[tokio::test]
+    async fn one_resyncing_endpoint_preserves_the_shared_candidate_and_healthy_commit() {
+        let (mut owner, audio, _render, _inbound, mut clients, wire) =
+            prepared_owner_with_clients().await;
         let healthy = clients[0].0;
         let resyncing = clients[1].0;
         owner.resync(resyncing).unwrap();
@@ -3365,6 +3412,65 @@ pub(super) mod join_retry_tests {
         .unwrap()
         .unwrap();
         assert!(matches!(commit, ControlFrame::Commit { epoch, .. } if epoch == wire.epoch));
+        for (_, connection, _) in clients {
+            connection.shutdown().await;
+        }
+        finish_owner(owner, audio).await;
+    }
+
+    #[tokio::test]
+    async fn congested_remote_prepare_isolated_without_ending_the_shared_operation() {
+        let (mut owner, audio, _render, _inbound, mut clients, wire) =
+            prepared_owner_with_clients().await;
+        let healthy = clients[0].0;
+        let resyncing = clients[1].0;
+        let identity = clients[1].1.handle.identity;
+        // No await occurs between filling the transport's 32-slot priority
+        // queue and Prepare. On this current-thread runtime the writer cannot
+        // drain it, so the real send path deterministically disconnects only B.
+        for _ in 0..32 {
+            owner
+                .server
+                .transport
+                .send(
+                    resyncing,
+                    identity,
+                    &ControlFrame::Notification {
+                        topic: "test_queue_fill".into(),
+                        body: Value::Null,
+                    },
+                )
+                .unwrap();
+        }
+        owner.endpoints.get_mut(&resyncing).unwrap().plan = None;
+        owner.resync(resyncing).unwrap();
+        assert!(!owner.endpoints.contains_key(&resyncing));
+        assert!(owner
+            .server
+            .transport
+            .authorize(resyncing, identity)
+            .is_err());
+        assert_eq!(owner.candidate.as_ref().unwrap().wire, wire);
+        assert!(owner.candidate.as_ref().unwrap().ready);
+        assert!(owner.endpoints[&healthy].ready);
+        owner.try_commit().await.unwrap();
+        assert_eq!(owner.scheduled.as_ref().unwrap().plan, wire);
+        assert!(owner.endpoints[&healthy].committed);
+        let commit = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            clients[0].2.control.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(commit, ControlFrame::Commit { epoch, .. } if epoch == wire.epoch));
+        // Global plan exhaustion remains an Owner error, independent of the
+        // peer-local send failure handled above.
+        owner.next_wire_plan = u64::MAX;
+        assert_eq!(
+            owner.join(healthy).unwrap_err().code,
+            "room_counter_exhausted"
+        );
         for (_, connection, _) in clients {
             connection.shutdown().await;
         }

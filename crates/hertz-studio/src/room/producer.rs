@@ -1104,7 +1104,9 @@ mod tests {
     async fn started_overlap_keeps_its_source_and_defers_the_whole_mixer_until_promotion() {
         let gains = super::super::host::join_retry_tests::removed_successor_mix_gains().await;
         let a = wave(48_000, 48_000);
-        let b = wave(48_000, 48_000);
+        // Leave B outside the renderer's final 500ms natural tail fade so the
+        // first post-promotion PCM measures only the requested gain and volume.
+        let b = wave(96_000, 48_000);
         let c = wave(48_000, 48_000);
         let (mut worker, mut received, _retire) = prepared_worker(&a);
         let source = |fixture: &Fixture, instance| Source {
