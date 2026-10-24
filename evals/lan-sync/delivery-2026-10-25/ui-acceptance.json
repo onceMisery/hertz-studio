@@ -1,0 +1,38 @@
+{
+  "browser_checks": [
+    "create room and share three songs",
+    "one-time invitation and verified guest join",
+    "guest playback and queue permissions",
+    "chat markup displayed as exact plain text",
+    "enumerate device, enable muted native output, play and pause",
+    "guest leave restores entry page",
+    "host, guest and 390px layouts without horizontal overflow"
+  ],
+  "layout": {
+    "host": {
+      "viewport": 1440,
+      "body": 1440,
+      "room": 1099
+    },
+    "guest": {
+      "viewport": 1440,
+      "body": 1440,
+      "room": 1099
+    },
+    "narrow": {
+      "viewport": 390,
+      "body": 390,
+      "room": 337
+    }
+  },
+  "screenshots": {
+    "docs/images/lan-room/entry.png": "df67c356d4841d4d641aee7158c23ed5a42fbf11c222c1a24c4019ec320879cd",
+    "docs/images/lan-room/host.png": "3e4ee8edc876f3980007e99699db8a180cad2c3f01bac1f6c9442bed1592196c",
+    "docs/images/lan-room/guest.png": "31162a2fd27a0e5405451153bf6c8eb44452790692bd0a2e87b466ae73c78f29",
+    "docs/images/lan-room/narrow.png": "37e665bb28c7aec86a4506d750be436d42cf2af0512675e92c62e50e4b066c5b"
+  },
+  "scope": "Screenshots record the real browser layout before the final contract fixes. Final queue identity, reconnect receipt and service shutdown changes are verified by their automated regressions.",
+  "frontend_contract_steps": 64,
+  "frontend_failed_steps": 0,
+  "frontend_log_sha256": "28f55a54d11c455fbfd5a339a3a4d948c55034102cb1b2ee9f01cb77e114a458"
+}
