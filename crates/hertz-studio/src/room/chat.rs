@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{
-    sqlite::{SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
+    sqlite::{
+        SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqliteRow, SqliteSynchronous,
+    },
     Connection, Row, SqliteConnection,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -41,6 +43,13 @@ const SCHEMA: [&str; 4] = [
     "CREATE INDEX room_messages ON messages(room,id)",
     "CREATE INDEX message_age ON messages(received,id)",
 ];
+// Apply allocation bounds in SQLite before decoding untrusted stored strings.
+const MESSAGE_COLUMNS: &str = "id,received, \
+    CASE WHEN typeof(room)='text' AND length(CAST(room AS BLOB))=36 THEN room END AS room, \
+    CASE WHEN typeof(member)='text' AND length(CAST(member AS BLOB))=36 THEN member END AS member, \
+    CASE WHEN typeof(name)='text' AND length(name) BETWEEN 1 AND 32 AND length(CAST(name AS BLOB))<=128 THEN name END AS name, \
+    CASE WHEN typeof(text)='text' AND length(text) BETWEEN 1 AND 200 AND length(CAST(text AS BLOB))<=800 THEN text END AS text, \
+    CASE WHEN track IS NULL OR (typeof(track)='text' AND length(CAST(track AS BLOB)) BETWEEN 1 AND 20) THEN track ELSE 'invalid' END AS track";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -182,6 +191,38 @@ struct Message {
 }
 
 impl Message {
+    fn decode(row: &SqliteRow) -> RoomResult<Self> {
+        let id: i64 = row.try_get("id").map_err(|_| damaged())?;
+        let received: i64 = row.try_get("received").map_err(|_| damaged())?;
+        let room: Option<String> = row.try_get("room").map_err(|_| damaged())?;
+        let member: Option<String> = row.try_get("member").map_err(|_| damaged())?;
+        let name: Option<String> = row.try_get("name").map_err(|_| damaged())?;
+        let text: Option<String> = row.try_get("text").map_err(|_| damaged())?;
+        let track: Option<String> = row.try_get("track").map_err(|_| damaged())?;
+        let name = name.ok_or_else(damaged)?;
+        let text = text.ok_or_else(damaged)?;
+        Uuid::parse_str(room.as_deref().ok_or_else(damaged)?).map_err(|_| damaged())?;
+        if id <= 0
+            || received < 0
+            || !name_valid(&name)
+            || !text_valid(&text)
+            || track.as_ref().is_some_and(|v| v.parse::<u64>().is_err())
+        {
+            return Err(damaged());
+        }
+        Ok(Self {
+            message_id: id.to_string(),
+            chat_seq: id.to_string(),
+            received_at_ms: received.to_string(),
+            member_id: Uuid::parse_str(member.as_deref().ok_or_else(damaged)?)
+                .map_err(|_| damaged())?,
+            name,
+            text,
+            track_instance_id: track,
+            retained: true,
+        })
+    }
+
     fn id(&self) -> u64 {
         self.message_id
             .parse()
@@ -779,6 +820,25 @@ impl Store {
         if invalid != 0 || count > 50_000 {
             return Err(damaged());
         }
+        // Validate every row before startup cleanup, including expired rows.
+        // Pagination and SQL-side field bounds keep each allocation bounded.
+        let mut after = 0_i64;
+        loop {
+            let rows = sqlx::query(&format!(
+                "SELECT {MESSAGE_COLUMNS} FROM messages WHERE id>? ORDER BY id LIMIT 128"
+            ))
+            .bind(after)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(|_| damaged())?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                let message = Message::decode(&row)?;
+                after = message.id() as i64;
+            }
+        }
         let pages: i64 = sqlx::query_scalar("PRAGMA page_count")
             .fetch_one(&mut *connection)
             .await
@@ -898,42 +958,42 @@ impl Store {
         .await
     }
 
-    async fn delete(&mut self, selection: Deletion) -> RoomResult<u64> {
-        self.reserve().await?;
+    // Stage deletions on the caller's transaction; cache and revision change
+    // only after that transaction (including any replacement insert) commits.
+    async fn delete_rows(
+        connection: &mut SqliteConnection,
+        recent: &VecDeque<Message>,
+        room: Uuid,
+        selection: Deletion,
+    ) -> Result<(u64, Vec<u64>), sqlx::Error> {
         let mut cached = Vec::new();
+        let now = now_ms();
         match &selection {
             Deletion::Retention { config, .. } => {
-                let cutoff = config.cutoff(now_ms());
-                for message in &self.recent {
+                let cutoff = config.cutoff(now);
+                for message in recent {
                     if message.received() < cutoff {
                         cached.push(message.id());
                     }
                 }
             }
-            Deletion::Message(id) => cached.extend(
-                self.recent
-                    .iter()
-                    .filter(|m| m.id() == *id)
-                    .map(Message::id),
-            ),
-            Deletion::Room(room) if *room == self.room => {
-                cached.extend(self.recent.iter().map(Message::id))
+            Deletion::Message(id) => {
+                cached.extend(recent.iter().filter(|m| m.id() == *id).map(Message::id))
+            }
+            Deletion::Room(selected) if *selected == room => {
+                cached.extend(recent.iter().map(Message::id))
             }
             _ => (),
         }
-        let revision = self.next_revision()?;
-        let mut tx = self.connection.begin().await.map_err(|_| storage())?;
         let retained = match selection {
             Deletion::Retention { config, reserve } => {
                 let expired = sqlx::query("DELETE FROM messages WHERE received<?")
-                    .bind(config.cutoff(now_ms()))
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|_| storage())?
+                    .bind(config.cutoff(now))
+                    .execute(&mut *connection)
+                    .await?
                     .rows_affected();
                 let keep = config.max_messages.saturating_sub(reserve) as usize;
-                let live_cached: Vec<u64> = self
-                    .recent
+                let live_cached: Vec<u64> = recent
                     .iter()
                     .filter(|m| !cached.contains(&m.id()))
                     .map(Message::id)
@@ -941,9 +1001,8 @@ impl Store {
                 let overflow = if keep == 0 {
                     cached.extend(live_cached);
                     sqlx::query("DELETE FROM messages")
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|_| storage())?
+                        .execute(&mut *connection)
+                        .await?
                         .rows_affected()
                 } else {
                     // The skipped durable prefix must fit even if every cached
@@ -955,9 +1014,8 @@ impl Store {
                     )
                     .bind((live_cached.len() + 1) as i64)
                     .bind(offset as i64)
-                    .fetch_all(&mut *tx)
-                    .await
-                    .map_err(|_| storage())?;
+                    .fetch_all(&mut *connection)
+                    .await?;
                     boundary.extend(live_cached.iter().map(|id| *id as i64));
                     boundary.sort_unstable_by(|a, b| b.cmp(a));
                     match boundary.get(keep - offset - 1).copied() {
@@ -965,9 +1023,8 @@ impl Store {
                             cached.extend(live_cached.into_iter().filter(|id| *id < cutoff as u64));
                             sqlx::query("DELETE FROM messages WHERE id<?")
                                 .bind(cutoff)
-                                .execute(&mut *tx)
-                                .await
-                                .map_err(|_| storage())?
+                                .execute(&mut *connection)
+                                .await?
                                 .rows_affected()
                         }
                         None => 0,
@@ -980,21 +1037,19 @@ impl Store {
                     "SELECT MAX(id) FROM (SELECT id FROM messages ORDER BY id LIMIT ?)",
                 )
                 .bind(i64::from(count))
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|_| storage())?;
+                .fetch_one(&mut *connection)
+                .await?;
                 if let Some(cutoff) = cutoff {
                     cached.extend(
-                        self.recent
+                        recent
                             .iter()
                             .filter(|m| m.id() <= cutoff as u64)
                             .map(Message::id),
                     );
                     sqlx::query("DELETE FROM messages WHERE id<=?")
                         .bind(cutoff)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|_| storage())?
+                        .execute(&mut *connection)
+                        .await?
                         .rows_affected()
                 } else {
                     0
@@ -1002,17 +1057,25 @@ impl Store {
             }
             Deletion::Message(id) => sqlx::query("DELETE FROM messages WHERE id=?")
                 .bind(id as i64)
-                .execute(&mut *tx)
-                .await
-                .map_err(|_| storage())?
+                .execute(&mut *connection)
+                .await?
                 .rows_affected(),
             Deletion::Room(room) => sqlx::query("DELETE FROM messages WHERE room=?")
                 .bind(room.to_string())
-                .execute(&mut *tx)
-                .await
-                .map_err(|_| storage())?
+                .execute(&mut *connection)
+                .await?
                 .rows_affected(),
         };
+        Ok((retained, cached))
+    }
+
+    async fn delete(&mut self, selection: Deletion) -> RoomResult<u64> {
+        self.reserve().await?;
+        let revision = self.next_revision()?;
+        let mut tx = self.connection.begin().await.map_err(|_| storage())?;
+        let (retained, cached) = Self::delete_rows(&mut tx, &self.recent, self.room, selection)
+            .await
+            .map_err(|_| storage())?;
         let deleted = retained + cached.len() as u64;
         if deleted > 0 {
             sqlx::query("UPDATE settings SET revision=? WHERE singleton=1")
@@ -1186,33 +1249,47 @@ impl Store {
         {
             return Err(RoomError::invalid("完整聊天消息超过2KiB"));
         }
-        self.cleanup(1).await?;
         let cache_limit = RECENT_MESSAGES.min(self.config.max_messages as usize);
-        let mut drop_cached = 0;
-        let mut remaining_bytes = self.recent_bytes;
-        if !message.retained {
-            for cached in &self.recent {
-                if self.recent.len() - drop_cached < cache_limit
-                    && remaining_bytes + size <= RECENT_BYTES
-                {
-                    break;
-                }
-                drop_cached += 1;
-                remaining_bytes = remaining_bytes.saturating_sub(cached.bytes());
-            }
-        }
         // SQLite may reach the physical page cap before the configured row cap.
-        // Roll back, evict a real global batch, and retry the insertion once.
+        // Retry once with a global eviction batch in the SAME insert transaction.
+        // A refused send must never commit retention or physical-cap eviction.
         let mut retried = false;
-        loop {
+        let (deleted, cached, revision) = loop {
             self.reserve().await?;
-            let revision = if drop_cached > 0 {
-                self.next_revision()?
-            } else {
-                self.revision
-            };
+            let next_revision = self.next_revision()?;
             let mut tx = self.connection.begin().await.map_err(|_| storage())?;
             let written = async {
+                let (mut deleted, mut cached) = Self::delete_rows(
+                    &mut tx, &self.recent, self.room,
+                    Deletion::Retention { config: self.config.clone(), reserve: 1 },
+                ).await?;
+                if retried {
+                    let (rows, evicted) = Self::delete_rows(
+                        &mut tx, &self.recent, self.room, Deletion::Oldest(256),
+                    ).await?;
+                    deleted += rows;
+                    cached.extend(evicted);
+                }
+                cached.sort_unstable();
+                cached.dedup();
+                if !message.retained {
+                    let mut remaining = self.recent.len() - cached.len();
+                    let mut remaining_bytes: usize = self.recent.iter()
+                        .filter(|m| !cached.contains(&m.id())).map(Message::bytes).sum();
+                    for old in &self.recent {
+                        if cached.contains(&old.id()) {
+                            continue;
+                        }
+                        if remaining < cache_limit && remaining_bytes + size <= RECENT_BYTES {
+                            break;
+                        }
+                        cached.push(old.id());
+                        remaining -= 1;
+                        remaining_bytes = remaining_bytes.saturating_sub(old.bytes());
+                    }
+                }
+                deleted += cached.len() as u64;
+                let revision = if deleted > 0 { next_revision } else { self.revision };
                 if message.retained {
                     sqlx::query("INSERT INTO messages(id,room,member,name,text,received,track) VALUES(?,?,?,?,?,?,?)")
                         .bind(id as i64).bind(self.room.to_string()).bind(access.member.to_string())
@@ -1221,25 +1298,24 @@ impl Store {
                 }
                 sqlx::query("UPDATE settings SET next_id=?,revision=? WHERE singleton=1")
                     .bind(next as i64).bind(revision as i64).execute(&mut *tx).await?;
-                Ok::<(), sqlx::Error>(())
+                Ok::<_, sqlx::Error>((deleted, cached, revision))
             }.await;
-            if let Err(error) = written {
-                let rollback = tx.rollback().await;
-                if full(&error) {
-                    self.reopen_after_full().await?;
-                    if retried {
-                        return Err(quota_error());
+            let changes = match written {
+                Ok(changes) => changes,
+                Err(error) => {
+                    let rollback = tx.rollback().await;
+                    if full(&error) {
+                        self.reopen_after_full().await?;
+                        if retried {
+                            return Err(quota_error());
+                        }
+                        retried = true;
+                        continue;
                     }
-                    retried = true;
-                    if self.delete(Deletion::Oldest(256)).await? == 0 {
-                        return Err(quota_error());
-                    }
-                    self.vacuum(VACUUM_PAGES).await?;
-                    continue;
+                    rollback.map_err(|_| storage())?;
+                    return Err(storage());
                 }
-                rollback.map_err(|_| storage())?;
-                return Err(storage());
-            }
+            };
             if !(access.active)() || !(access.send)() {
                 tx.rollback().await.map_err(|_| storage())?;
                 return Err(RoomError::denied());
@@ -1249,34 +1325,28 @@ impl Store {
                     self.reopen_after_full().await?;
                     if !retried {
                         retried = true;
-                        if self.delete(Deletion::Oldest(256)).await? == 0 {
-                            return Err(quota_error());
-                        }
-                        self.vacuum(VACUUM_PAGES).await?;
                         continue;
                     }
                     return Err(quota_error());
                 }
                 return Err(storage());
             }
-            self.next_id = next;
-            self.revision = revision;
-            break;
-        }
+            break changes;
+        };
         // No sequence, cache, receipt or notification is published before commit.
+        self.next_id = next;
+        self.revision = revision;
+        self.recent.retain(|m| !cached.contains(&m.id()));
         self.identities
             .get_mut(&access.member)
             .expect("registered sender")
             .highwater = operation;
         if !message.retained {
-            for _ in 0..drop_cached {
-                self.recent.pop_front();
-            }
             self.recent.push_back(message.clone());
-            self.recent_bytes = self.recent.iter().map(Message::bytes).sum();
-            if drop_cached > 0 {
-                self.history_changed(drop_cached as u64);
-            }
+        }
+        self.recent_bytes = self.recent.iter().map(Message::bytes).sum();
+        if deleted > 0 {
+            self.history_changed(deleted);
         }
         self.receipts.push_back(Receipt {
             member: access.member,
@@ -1310,45 +1380,13 @@ impl Store {
             return Err(RoomError::invalid("历史游标无效"));
         }
         let cutoff = self.config.cutoff(now_ms());
-        // CASE checks run inside SQLite, before sqlx allocates any Rust strings.
-        let rows = sqlx::query(
-            "SELECT id,received, \
-             CASE WHEN typeof(member)='text' AND length(CAST(member AS BLOB))=36 THEN member END AS member, \
-             CASE WHEN typeof(name)='text' AND length(name) BETWEEN 1 AND 32 AND length(CAST(name AS BLOB))<=128 THEN name END AS name, \
-             CASE WHEN typeof(text)='text' AND length(text) BETWEEN 1 AND 200 AND length(CAST(text AS BLOB))<=800 THEN text END AS text, \
-             CASE WHEN track IS NULL OR (typeof(track)='text' AND length(CAST(track AS BLOB)) BETWEEN 1 AND 20) THEN track ELSE 'invalid' END AS track \
-             FROM messages WHERE room=? AND received>=? AND id<? ORDER BY id DESC LIMIT 101")
+        let rows = sqlx::query(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages WHERE room=? AND received>=? AND id<? ORDER BY id DESC LIMIT 101"))
             .bind(self.room.to_string()).bind(cutoff).bind(before)
             .fetch_all(&mut self.connection).await.map_err(|_| storage())?;
         let mut candidates = Vec::with_capacity(rows.len() + self.recent.len());
         for row in rows {
-            let id: i64 = row.try_get("id").map_err(|_| damaged())?;
-            let received: i64 = row.try_get("received").map_err(|_| damaged())?;
-            let member: Option<String> = row.try_get("member").map_err(|_| damaged())?;
-            let name: Option<String> = row.try_get("name").map_err(|_| damaged())?;
-            let text: Option<String> = row.try_get("text").map_err(|_| damaged())?;
-            let track: Option<String> = row.try_get("track").map_err(|_| damaged())?;
-            let name = name.ok_or_else(damaged)?;
-            let text = text.ok_or_else(damaged)?;
-            if id <= 0
-                || received < 0
-                || !name_valid(&name)
-                || !text_valid(&text)
-                || track.as_ref().is_some_and(|v| v.parse::<u64>().is_err())
-            {
-                return Err(damaged());
-            }
-            candidates.push(Message {
-                message_id: id.to_string(),
-                chat_seq: id.to_string(),
-                received_at_ms: received.to_string(),
-                member_id: Uuid::parse_str(member.as_deref().ok_or_else(damaged)?)
-                    .map_err(|_| damaged())?,
-                name,
-                text,
-                track_instance_id: track,
-                retained: true,
-            });
+            candidates.push(Message::decode(&row)?);
         }
         candidates.extend(
             self.recent

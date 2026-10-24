@@ -142,6 +142,22 @@ async fn seed(store: &mut Store, rows: i64, room: Uuid, received: i64, text: &st
     store.next_id = next;
 }
 
+async fn fill_mixed_history(store: &mut Store, oldest_is_cached: bool) {
+    store.config.max_messages = 100;
+    store.config.retained = false;
+    if oldest_is_cached {
+        send(store, owner(), 1, "live").await.unwrap();
+    }
+    let room = store.room;
+    seed(store, 99, room, now_ms(), "saved").await;
+    if !oldest_is_cached {
+        send(store, owner(), 1, "live").await.unwrap();
+    }
+    store.config.retained = true;
+    assert_eq!(count(store).await, 99);
+    assert_eq!(store.recent.len(), 1);
+}
+
 #[tokio::test]
 async fn durable_profile_history_and_ids_survive_restart_clear_and_realtime() {
     let profile = Profile::new();
@@ -480,6 +496,65 @@ async fn failed_insert_never_advances_sequence_or_notifies() {
 }
 
 #[tokio::test]
+async fn failed_insert_at_full_history_preserves_oldest_durable_or_cached_message() {
+    for oldest_is_cached in [false, true] {
+        let profile = Profile::new();
+        let (mut store, events) = store(&profile, Uuid::new_v4()).await;
+        fill_mixed_history(&mut store, oldest_is_cached).await;
+        let before = store.history(Uuid::nil(), None, None).await.unwrap();
+        let event_count = events.lock().unwrap().len();
+        let revision = store.revision;
+        let recent_bytes = store.recent_bytes;
+        sqlx::query("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT,'test insert failure'); END")
+            .execute(&mut store.connection).await.unwrap();
+        assert_eq!(
+            send(&mut store, owner(), 2, "refused")
+                .await
+                .unwrap_err()
+                .code,
+            "chat_storage_failed"
+        );
+        assert_eq!(
+            store.history(Uuid::nil(), None, None).await.unwrap(),
+            before
+        );
+        assert_eq!(count(&mut store).await, 99);
+        assert_eq!(store.recent.len(), 1);
+        assert_eq!(store.recent_bytes, recent_bytes);
+        assert_eq!(store.next_id, 101);
+        assert_eq!(store.revision, revision);
+        assert_eq!(store.identities[&Uuid::nil()].highwater, 1);
+        assert_eq!(store.receipts.len(), 1);
+        assert_eq!(events.lock().unwrap().len(), event_count);
+        let persisted: (i64, i64) = sqlx::query_as("SELECT revision,next_id FROM settings")
+            .fetch_one(&mut store.connection)
+            .await
+            .unwrap();
+        assert_eq!(persisted, (revision as i64, 101));
+
+        sqlx::query("DROP TRIGGER fail_insert")
+            .execute(&mut store.connection)
+            .await
+            .unwrap();
+        refill(&mut store);
+        let sent = send(&mut store, owner(), 2, "accepted").await.unwrap();
+        assert_eq!(sent["message_id"], "101");
+        let page = store.history(Uuid::nil(), None, None).await.unwrap();
+        assert_eq!(page["messages"].as_array().unwrap().len(), 100);
+        assert_eq!(page["messages"][0]["message_id"], "2");
+        assert_eq!(store.revision, revision + 1);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), event_count + 2);
+        assert_eq!(events[event_count]["deleted"], 1);
+        assert_eq!(
+            events[event_count]["history_revision"],
+            (revision + 1).to_string()
+        );
+        assert_eq!(events[event_count + 1]["topic"], "chat_message");
+    }
+}
+
+#[tokio::test]
 async fn rate_limits_member_burst_and_room_burst_without_spending_room_on_rejection() {
     let profile = Profile::new();
     let (mut store, _) = store(&profile, Uuid::new_v4()).await;
@@ -575,6 +650,57 @@ async fn revoked_permission_at_commit_rolls_back_message() {
     );
     assert_eq!(count(&mut store).await, 0);
     assert_eq!(store.next_id, 1);
+}
+
+#[tokio::test]
+async fn permission_denial_at_full_history_rolls_back_durable_and_cache_retention() {
+    for oldest_is_cached in [false, true] {
+        for retained in [false, true] {
+            let profile = Profile::new();
+            let (mut store, events) = store(&profile, Uuid::new_v4()).await;
+            fill_mixed_history(&mut store, oldest_is_cached).await;
+            store.config.retained = retained;
+            let before = store.history(Uuid::nil(), None, None).await.unwrap();
+            let event_count = events.lock().unwrap().len();
+            let revision = store.revision;
+            let recent_bytes = store.recent_bytes;
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let check = calls.clone();
+            let mut member = owner();
+            member.send = Arc::new(move || check.fetch_add(1, Ordering::AcqRel) == 0);
+            assert_eq!(
+                send(&mut store, member, 2, "revoked")
+                    .await
+                    .unwrap_err()
+                    .code,
+                "room_denied"
+            );
+            assert_eq!(calls.load(Ordering::Acquire), 2);
+            assert_eq!(
+                store.history(Uuid::nil(), None, None).await.unwrap(),
+                before
+            );
+            assert_eq!(count(&mut store).await, 99);
+            assert_eq!(store.recent.len(), 1);
+            assert_eq!(store.recent_bytes, recent_bytes);
+            assert_eq!(store.next_id, 101);
+            assert_eq!(store.revision, revision);
+            assert_eq!(store.identities[&Uuid::nil()].highwater, 1);
+            assert_eq!(store.receipts.len(), 1);
+            assert_eq!(events.lock().unwrap().len(), event_count);
+            let persisted: (i64, i64) = sqlx::query_as("SELECT revision,next_id FROM settings")
+                .fetch_one(&mut store.connection)
+                .await
+                .unwrap();
+            assert_eq!(persisted, (revision as i64, 101));
+            refill(&mut store);
+            assert_eq!(
+                send(&mut store, owner(), 2, "accepted").await.unwrap()["message_id"],
+                "101"
+            );
+            assert_eq!(store.revision, revision + 1);
+        }
+    }
 }
 
 #[tokio::test]
@@ -692,13 +818,49 @@ async fn failed_configuration_reports_committed_cleanup_and_truthful_old_config(
 async fn physical_page_full_evicts_below_message_cap_then_retries_once() {
     let profile = Profile::new();
     let room = Uuid::new_v4();
-    let (mut store, _) = store(&profile, room).await;
+    let (mut store, events) = store(&profile, room).await;
     let text = "😀".repeat(200);
     seed(&mut store, 200, room, now_ms(), &text).await;
     let cap = store.pages().await.unwrap();
     store.set_limit(cap).await.unwrap();
     let mut evicted = false;
     for seq in 1..=20 {
+        // Probe the exact same insertion with permission revoked at commit.
+        // When the accepted send below needs eviction, this probe traverses
+        // the physical-full retry too, and must roll all of that eviction back.
+        let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM messages ORDER BY id")
+            .fetch_all(&mut store.connection)
+            .await
+            .unwrap();
+        let revision = store.revision;
+        let next_id = store.next_id;
+        let receipts = store.receipts.len();
+        let event_count = events.lock().unwrap().len();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let check = calls.clone();
+        let mut member = owner();
+        member.send = Arc::new(move || check.fetch_add(1, Ordering::AcqRel) == 0);
+        refill(&mut store);
+        assert_eq!(
+            send(&mut store, member, seq, &text).await.unwrap_err().code,
+            "room_denied"
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+        let remaining: Vec<i64> = sqlx::query_scalar("SELECT id FROM messages ORDER BY id")
+            .fetch_all(&mut store.connection)
+            .await
+            .unwrap();
+        assert_eq!(remaining, ids);
+        assert_eq!(store.revision, revision);
+        assert_eq!(store.next_id, next_id);
+        assert_eq!(store.receipts.len(), receipts);
+        assert_eq!(events.lock().unwrap().len(), event_count);
+        let persisted: (i64, i64) = sqlx::query_as("SELECT revision,next_id FROM settings")
+            .fetch_one(&mut store.connection)
+            .await
+            .unwrap();
+        assert_eq!(persisted, (revision as i64, next_id as i64));
+
         refill(&mut store);
         send(&mut store, owner(), seq, &text).await.unwrap();
         if count(&mut store).await < 200 {
@@ -774,6 +936,61 @@ async fn damaged_readonly_and_oversized_fields_are_rejected_without_file_changes
             .is_err()
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn semantic_damage_in_retained_or_expired_rows_is_rejected_before_any_cleanup() {
+    let failures = [
+        ("room", "x".repeat(36)),
+        ("member", "x".repeat(36)),
+        ("name", " \u{2003}".into()),
+        ("name", "bad\u{1f}".into()),
+        ("text", " \n\t".into()),
+        ("text", "bad\u{7f}".into()),
+        ("text", "bad\0text".into()),
+        ("track", "not-a-number".into()),
+        ("track", "18446744073709551616".into()),
+    ];
+    for expired in [false, true] {
+        for (field, value) in &failures {
+            let profile = Profile::new();
+            let room = Uuid::new_v4();
+            let path = {
+                let (mut store, _) = store(&profile, room).await;
+                let received = if expired {
+                    now_ms() - 8 * 86_400_000
+                } else {
+                    now_ms()
+                };
+                // Put the invalid row beyond the first bounded preflight page.
+                seed(&mut store, 130, room, received, "valid").await;
+                sqlx::query(&format!("UPDATE messages SET {field}=? WHERE id=129"))
+                    .bind(value)
+                    .execute(&mut store.connection)
+                    .await
+                    .unwrap();
+                let path = store.path.clone();
+                store.connection.close().await.unwrap();
+                path
+            };
+            let original = std::fs::read(&path).unwrap();
+            let error = ChatService::open(&profile.0, room, Arc::new(|_| {}))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.code, "chat_history_damaged",
+                "{field} expired={expired}"
+            );
+            assert!(error.message.contains("原文件已保留"));
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                original,
+                "{field} expired={expired}"
+            );
+            assert!(!profile.0.join("room-chat.sqlite-journal").exists());
+        }
+    }
 }
 
 #[tokio::test]
