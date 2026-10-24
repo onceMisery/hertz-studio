@@ -421,6 +421,7 @@ impl RenderCore {
     /// Fill interleaved PCM through the same mixer and DSP as the device callback.
     /// Paused output and underruns are silent. This never allocates, deallocates
     /// or waits for a lock. Only one output consumer may pull this timeline.
+    /// Only complete frames consume PCM; any incomplete trailing frame is silent.
     pub fn render(&self, data: &mut [f32]) {
         write_samples(data, &self.shared, self.output_channels as usize);
     }
@@ -1060,6 +1061,12 @@ fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, b
     (copied, false)
 }
 fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
+    // No complete output frame was requested. This is not a source underrun:
+    // leave the deck, DSP and transport envelope untouched for both callers.
+    if data.len() < channels {
+        data.fill(0.0);
+        return;
+    }
     // Paused means "stop consuming", not "play silence we already decoded":
     // draining the queue here would keep the sound going and keep advancing
     // the position, so the transport would report paused while audio played on.
@@ -2312,6 +2319,126 @@ mod tests {
         renderer.render(&mut [0.0; 128]);
         assert_eq!(renderer.position_frames(), 128);
         assert_eq!(renderer.position_ms(), 16);
+    }
+
+    #[test]
+    fn short_output_buffers_preserve_fades_and_frame_position() {
+        for callback in [false, true] {
+            let mut renderer = RenderCore::new(RenderFormat {
+                sample_rate: 8_000,
+                channels: 2,
+            })
+            .unwrap();
+            renderer
+                .load_source(
+                    Box::new(FixtureSource(std::io::Cursor::new(pcm_bytes(
+                        &vec![16_000; 16_000],
+                        8_000,
+                        2,
+                    )))),
+                    Some("wav".into()),
+                )
+                .unwrap();
+            wait_for_eof(&renderer);
+            renderer.play().unwrap();
+            renderer.render(&mut [0.0; 128]);
+            let output = renderer.output();
+            let fade_state = |shared: &Shared| {
+                (
+                    shared.fade_gain.load(Ordering::Relaxed),
+                    shared.fade_from.load(Ordering::Relaxed),
+                    shared.fade_to.load(Ordering::Relaxed),
+                    shared.fade_frames.load(Ordering::Relaxed),
+                    shared.fade_done.load(Ordering::Relaxed),
+                )
+            };
+            for pause in [false, true] {
+                if pause {
+                    renderer.pause().unwrap();
+                }
+                let position = renderer.position_frames();
+                let fade = fade_state(&renderer.shared);
+                let queued = renderer.shared.current_deck().samples.lock().unwrap().len();
+                for len in [0, 1] {
+                    let mut data = [1.0; 1];
+                    let (_, memory) = measure_memory(|| {
+                        if callback {
+                            output.render(&mut data[..len], 2);
+                        } else {
+                            renderer.render(&mut data[..len]);
+                        }
+                    });
+                    assert_eq!(memory, CallbackMemory::ZERO);
+                    assert!(data[..len].iter().all(|sample| *sample == 0.0));
+                    renderer.maintain();
+                    assert_eq!(renderer.position_frames(), position);
+                    assert_eq!(fade_state(&renderer.shared), fade);
+                    assert_eq!(renderer.pending_pause, pause);
+                    assert!(renderer.shared.playing.load(Ordering::Relaxed));
+                    assert_eq!(
+                        renderer.shared.current_deck().samples.lock().unwrap().len(),
+                        queued
+                    );
+                }
+                let mut data = [0.0; 128];
+                if callback {
+                    output.render(&mut data, 2);
+                } else {
+                    renderer.render(&mut data);
+                }
+                assert!(data.iter().all(|sample| *sample > 0.0));
+                assert_eq!(renderer.position_frames(), position + 64);
+                assert_eq!(
+                    renderer.shared.fade_done.load(Ordering::Relaxed),
+                    fade.4 + 64
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn partial_output_tail_preserves_complete_frame_pcm_and_timing() {
+        for callback in [false, true] {
+            let make_renderer = || {
+                let (opened, info) = open_pcm(&vec![16_000; 16_000], 8_000, 2);
+                let mut renderer = decoded_opened_fixture(opened, info, 8_000, 2);
+                renderer.play().unwrap();
+                renderer.render(&mut [0.0; 128]);
+                renderer.pause().unwrap();
+                renderer
+            };
+            let mut aligned = make_renderer();
+            let mut partial = make_renderer();
+            let aligned_output = aligned.output();
+            let partial_output = partial.output();
+            for frames in [1, 64, 1] {
+                let mut aligned_pcm = vec![1.0; frames * 2];
+                let mut partial_pcm = vec![1.0; frames * 2 + 1];
+                if callback {
+                    aligned_output.render(&mut aligned_pcm, 2);
+                    partial_output.render(&mut partial_pcm, 2);
+                } else {
+                    aligned.render(&mut aligned_pcm);
+                    partial.render(&mut partial_pcm);
+                }
+                assert_eq!(aligned_pcm, partial_pcm[..frames * 2]);
+                assert!(aligned_pcm.iter().all(|sample| *sample > 0.0));
+                assert_eq!(partial_pcm[frames * 2], 0.0);
+                assert_eq!(aligned.position_frames(), partial.position_frames());
+                assert_eq!(
+                    aligned.shared.fade_done.load(Ordering::Relaxed),
+                    partial.shared.fade_done.load(Ordering::Relaxed)
+                );
+                assert_eq!(
+                    aligned.shared.fade_gain.load(Ordering::Relaxed),
+                    partial.shared.fade_gain.load(Ordering::Relaxed)
+                );
+                aligned.maintain();
+                partial.maintain();
+                assert!(aligned.pending_pause);
+                assert!(partial.pending_pause);
+            }
+        }
     }
 
     #[test]
