@@ -184,6 +184,104 @@ window.seekSong = function (ms) {
 document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.postMessage('click'); });
 </script></body></html>"#;
 
+    const SCENE_RUNTIME: &str = include_str!("../../../../plugin/ui/vendor/stage-runtime.js");
+    const SCENE_SHIM: &str = include_str!("../../../../plugin/ui/vendor/zodiac-stage.js");
+
+    const SCENE_PAGE_TEMPLATE: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;height:100%;overflow:hidden;background:#030405}
+#host{position:fixed;inset:0}
+canvas{display:block;width:100%;height:100%}
+</style></head><body><div id="host"></div>
+<script>__RUNTIME__</script>
+<script>__SHIM__</script>
+<script>
+(function () {
+  'use strict';
+  var host = document.getElementById('host');
+  var canvas = null, mounted = false, raf = 0, last = 0, lastDraw = 0, lastReport = 0;
+  var sceneTime = 0, frames = 0, cap = 30;
+  var bands = new Float32Array(64);
+  function ipc(message) { if (window.ipc) window.ipc.postMessage(message); }
+  function stats() {
+    try { return window.ZodiacStagePure.stats(); } catch (_) { return null; }
+  }
+  function report(tag) {
+    ipc(JSON.stringify({ kind: 'scene', tag: tag, mounted: mounted, frames: frames,
+      sceneTime: Math.round(sceneTime), stats: stats() }));
+  }
+  function loop(now) {
+    raf = requestAnimationFrame(loop);
+    if (!mounted) return;
+    if (!last) last = now;
+    var dt = Math.min(100, now - last); last = now; sceneTime += dt;
+    if (now - lastDraw >= 1000 / cap - 0.5) {
+      lastDraw = now;
+      window.ZodiacStagePure.setAudio({ bands: bands, onset: false });
+      window.ZodiacStagePure.setTime({ time: sceneTime / 1000, playing: true });
+      frames++;
+    }
+    if (now - lastReport >= 1000) { lastReport = now; report('frame'); }
+  }
+  function startLoop(fps) {
+    cap = fps || cap;
+    if (!raf) { last = 0; raf = requestAnimationFrame(loop); }
+  }
+  function stopLoop() { if (raf) cancelAnimationFrame(raf); raf = 0; }
+  function mount() {
+    if (mounted) return true;
+    canvas = document.createElement('canvas');
+    canvas.style.cssText = 'display:block;width:100%;height:100%';
+    host.appendChild(canvas);
+    var ok = false;
+    try {
+      ok = window.ZodiacStagePure.mount(canvas, { quality: 'low', reduced: false, interactive: false });
+    } catch (error) {
+      ipc(JSON.stringify({ kind: 'scene_mount_error', error: String(error) }));
+    }
+    if (!ok) {
+      if (canvas) { canvas.remove(); canvas = null; }
+      ipc(JSON.stringify({ kind: 'scene_mount_failed' }));
+      return false;
+    }
+    window.ZodiacStagePure.resize(innerWidth, innerHeight);
+    try { window.ZodiacStagePure.setPrefs({ field: true, interactive: false }); } catch (_) {}
+    mounted = true; sceneTime = 0; frames = 0; last = 0; lastDraw = 0; lastReport = 0;
+    report('mounted');
+    return true;
+  }
+  function unmount() {
+    stopLoop();
+    if (!mounted) return;
+    report('before_unmount');
+    try { window.ZodiacStagePure.unmount(); } catch (error) {
+      ipc(JSON.stringify({ kind: 'scene_unmount_error', error: String(error) }));
+    }
+    mounted = false;
+    if (canvas) { canvas.remove(); canvas = null; }
+    report('unmounted');
+  }
+  window.startMotion = function (fps) {
+    startLoop(fps);
+    try { window.ZodiacStagePure.setTime({ time: sceneTime / 1000, playing: true }); } catch (_) {}
+  };
+  window.stopMotion = function () {
+    stopLoop();
+    try { window.ZodiacStagePure.setTime({ time: sceneTime / 1000, playing: false }); } catch (_) {}
+  };
+  window.sceneCycle = function (n) { unmount(); if (mount()) startLoop(cap); report('cycle:' + n); };
+  window.sceneUnmount = function () { unmount(); };
+  addEventListener('resize', function () { if (mounted) window.ZodiacStagePure.resize(innerWidth, innerHeight); });
+  if (mount()) startLoop(30);
+})();
+</script></body></html>"#;
+
+    fn scene_page() -> String {
+        SCENE_PAGE_TEMPLATE
+            .replace("__RUNTIME__", SCENE_RUNTIME)
+            .replace("__SHIM__", SCENE_SHIM)
+    }
+
     enum UserEvent {
         Tick(u8),
         Check,
@@ -322,6 +420,8 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         pending_preview: Option<Instant>,
         preview_test: bool,
         preview_lease_count: u32,
+        scene_test: bool,
+        page_html: String,
         cpu_mark: Option<(String, Instant, TreeSample)>,
         last_liveness: Instant,
     }
@@ -794,15 +894,16 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             }
             let clicks = self.clicks.clone();
             let evidence = self.evidence.clone();
+            let log_prefix = if self.scene_test { "scene_js" } else { "js" };
             let new_view = match WebViewBuilder::new()
-                .with_html(PAGE)
+                .with_html(self.page_html.clone())
                 .with_background_color((8, 16, 31, 255))
                 .with_ipc_handler(move |request| {
                     let body = request.body();
                     if body == "click" {
                         clicks.fetch_add(1, Ordering::SeqCst);
                     } else {
-                        evidence.log(format!("js {body}"));
+                        evidence.log(format!("{log_prefix} {body}"));
                     }
                 })
                 .build(&new_window)
@@ -1018,6 +1119,32 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         }
 
         fn tick(&mut self, n: u8, target: &EventLoopWindowTarget<UserEvent>) -> bool {
+            if self.scene_test {
+                match n {
+                    0 => {
+                        self.state("mounted");
+                        self.eval("motion30", "window.startMotion(30)");
+                        self.evidence.marker("mounted");
+                    }
+                    1 => {
+                        self.state("settled");
+                        self.start_cpu("scene");
+                    }
+                    2..=11 => {
+                        self.eval("scene-cycle", &format!("window.sceneCycle({n})"));
+                    }
+                    12 => {
+                        self.finish_cpu("scene");
+                        self.eval("scene-unmount", "window.sceneUnmount()");
+                        self.stopping = true;
+                        self.state("done");
+                        self.evidence.marker("done");
+                        return true;
+                    }
+                    _ => {}
+                }
+                return false;
+            }
             if self.preview_test {
                 match n {
                     0 => {
@@ -1161,6 +1288,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let mut monitor_index = 0usize;
         let mut dpi_compensate = false;
         let mut preview_test = false;
+        let mut scene_test = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -1177,6 +1305,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 }
                 "--dpi-compensate" => dpi_compensate = true,
                 "--preview-test" => preview_test = true,
+                "--scene-test" => scene_test = true,
                 "--restart-test" => restart_test = true,
                 "--power-selftest" => power_selftest = true,
                 "--cycle-test" => cycle_test = true,
@@ -1195,17 +1324,25 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 other => return Err(format!("unknown argument: {other}").into()),
             }
         }
-        if [restart_test, cycle_test, preview_test]
+        if [restart_test, cycle_test, preview_test, scene_test]
             .iter()
             .filter(|mode| **mode)
             .count()
             > 1
         {
-            return Err("--restart-test/--cycle-test/--preview-test are mutually exclusive".into());
+            return Err(
+                "--restart-test/--cycle-test/--preview-test/--scene-test are mutually exclusive"
+                    .into(),
+            );
         }
         if !monitor_device.is_empty() && monitor_index > 0 {
             return Err("--monitor-device and --monitor-index are mutually exclusive".into());
         }
+        let page_html = if scene_test {
+            scene_page()
+        } else {
+            PAGE.to_string()
+        };
         let evidence = Evidence::new(out.clone())?;
         let mutex = acquire_single_instance(&evidence);
         let _mutex = match mutex {
@@ -1213,7 +1350,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             None => std::process::exit(3),
         };
         evidence.log(format!(
-            "probe=desk-w0 source={source} pid={} restart_test={restart_test} cycle_test={cycle_test} cycles={cycles} duration_ms={duration_ms} power_selftest={power_selftest} close_controller_after_ms={close_controller_after_ms} monitor_device={monitor_device} monitor_index={monitor_index} dpi_compensate={dpi_compensate} preview_test={preview_test} webview2_user_data={}",
+            "probe=desk-w0 source={source} pid={} restart_test={restart_test} cycle_test={cycle_test} cycles={cycles} duration_ms={duration_ms} power_selftest={power_selftest} close_controller_after_ms={close_controller_after_ms} monitor_device={monitor_device} monitor_index={monitor_index} dpi_compensate={dpi_compensate} preview_test={preview_test} scene_test={scene_test} webview2_user_data={}",
             std::process::id(),
             out.join("webview2").display()
         ));
@@ -1383,15 +1520,16 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let clicks = Arc::new(AtomicUsize::new(0));
         let clicks_view = clicks.clone();
         let evidence_view = evidence.clone();
+        let log_prefix = if scene_test { "scene_js" } else { "js" };
         let view = WebViewBuilder::new()
-            .with_html(PAGE)
+            .with_html(page_html.clone())
             .with_background_color((8, 16, 31, 255))
             .with_ipc_handler(move |request| {
                 let body = request.body();
                 if body == "click" {
                     clicks_view.fetch_add(1, Ordering::SeqCst);
                 } else {
-                    evidence_view.log(format!("js {body}"));
+                    evidence_view.log(format!("{log_prefix} {body}"));
                 }
             })
             .build(&window)?;
@@ -1485,13 +1623,20 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             pending_preview: None,
             preview_test,
             preview_lease_count: 0,
+            scene_test,
+            page_html,
             cpu_mark: None,
             last_liveness: Instant::now(),
         };
 
         let _ticker = {
             let proxy = proxy.clone();
-            let schedule: Vec<u64> = if preview_test {
+            let schedule: Vec<u64> = if scene_test {
+                vec![
+                    0, 5_000, 7_000, 9_000, 11_000, 13_000, 15_000, 17_000, 19_000, 21_000, 23_000,
+                    25_000, 28_000,
+                ]
+            } else if preview_test {
                 vec![0, 2_000, 5_000, 8_000, 24_000, 26_000, 30_000]
             } else if cycle_test {
                 (0..=(cycles as u64 + 1))
