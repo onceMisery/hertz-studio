@@ -130,6 +130,7 @@ struct Shared {
     late: AtomicU64,
     dropped: AtomicU64,
     capability: TimestampCapability,
+    nominal_period: f64,
 }
 
 impl Shared {
@@ -144,8 +145,20 @@ impl Shared {
 
     // Both publication paths have the same unique callback writer. The error
     // callback only sets the sticky device_error flag/status, never time fields.
-    fn publish_presentation(&self, status: ClockStatus, presentation: Option<u64>) {
+    fn publish_presentation(
+        &self,
+        status: ClockStatus,
+        presentation: Option<u64>,
+        period: Option<f64>,
+    ) {
         self.clock_sequence.fetch_add(1, Ordering::AcqRel);
+        if let Some(period) = period {
+            self.period_bits.store(period.to_bits(), Ordering::Release);
+            self.ppm_bits.store(
+                ((self.nominal_period / period - 1.0) * 1e6).to_bits(),
+                Ordering::Release,
+            );
+        }
         self.presentation
             .store(presentation.unwrap_or(u64::MAX), Ordering::Release);
         self.callback_local_ns.store(u64::MAX, Ordering::Release);
@@ -295,6 +308,7 @@ impl ScheduledPcmQueue {
             late: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             capability,
+            nominal_period: period,
         });
         Ok((
             Self {
@@ -479,7 +493,8 @@ impl PresentationConsumer {
 
     fn invalidate_clock(&mut self) {
         self.shared.muted.store(true, Ordering::Release);
-        self.shared.publish_presentation(ClockStatus::Invalid, None);
+        self.shared
+            .publish_presentation(ClockStatus::Invalid, None, None);
         self.discard();
     }
 
@@ -538,7 +553,7 @@ impl PresentationConsumer {
         let period = presentation.ns_per_frame;
         let first = presentation.first_frame_local_ns as f64;
         let channels = self.shared.channels;
-        let nominal = f64::from_bits(self.shared.period_bits.load(Ordering::Relaxed));
+        let nominal = self.shared.nominal_period;
         if !output.len().is_multiple_of(channels)
             || !period.is_finite()
             || !(nominal * 0.99..=nominal * 1.01).contains(&period)
@@ -553,8 +568,11 @@ impl PresentationConsumer {
         // Clock observation continues during startup/recovery mute. A worker
         // needs this time to infer device lead before it can safely unmute.
         if self.shared.capability == TimestampCapability::External {
-            self.shared
-                .publish_presentation(ClockStatus::Valid, Some(presentation.first_frame_local_ns));
+            self.shared.publish_presentation(
+                ClockStatus::Valid,
+                Some(presentation.first_frame_local_ns),
+                Some(period),
+            );
         }
         if self.shared.device_error.load(Ordering::Acquire) {
             self.shared.muted.store(true, Ordering::Release);
@@ -1167,7 +1185,32 @@ mod tests {
             }
             assert_eq!(producer.telemetry().late_frames, 0);
             assert_eq!(producer.telemetry().underrun_frames, 0);
+            assert!((producer.telemetry().ns_per_frame - period).abs() < 1e-9);
+            assert!((producer.telemetry().device_clock_ppm - ppm).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn external_period_validation_keeps_the_original_nominal_reference() {
+        let (producer, mut consumer) = queue(48_000, 1);
+        let nominal = 1e9 / 48_000.0;
+        consumer.render(
+            &mut [0.0; 4],
+            Some(PresentationTime {
+                first_frame_local_ns: 0,
+                ns_per_frame: nominal * 1.009,
+            }),
+        );
+        assert_eq!(producer.telemetry().clock_status, ClockStatus::Valid);
+        consumer.render(
+            &mut [0.0; 4],
+            Some(PresentationTime {
+                first_frame_local_ns: 1_000_000,
+                ns_per_frame: nominal * 1.018,
+            }),
+        );
+        assert_eq!(producer.telemetry().clock_status, ClockStatus::Invalid);
+        assert!(producer.telemetry().muted);
     }
 
     #[test]
