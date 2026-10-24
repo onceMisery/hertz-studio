@@ -1654,6 +1654,87 @@ mod tests {
     }
 
     #[test]
+    fn deferred_intents_recheck_the_epoch_floor_after_suspend_and_commit() {
+        for suspend in [true, false] {
+            let mut engine = engine();
+            let first = plan(1, 10, 400 * MS, 0);
+            prepare(&mut engine, first.clone());
+            feed(&mut engine, 1, 0, 30_000);
+            commit(&mut engine, 0, &first);
+            assert!(tick(&mut engine, 400 * MS).is_empty());
+            assert_eq!(engine.epoch_floor, 1);
+            let mut events = Vec::new();
+            if suspend {
+                engine.command(
+                    400 * MS,
+                    Command::Suspend {
+                        identity: identity(),
+                        epoch: 2,
+                        plan_id: 11,
+                        effective_at: 700 * MS,
+                    },
+                    &mut events,
+                );
+            } else {
+                let next = plan(2, 11, 700 * MS, 0);
+                engine.command(
+                    400 * MS,
+                    Command::Prepare(identity(), next.clone()),
+                    &mut events,
+                );
+                let block = pcm(&engine, 2, 0, 0, 4096);
+                engine.command(400 * MS, Command::Pcm(block), &mut events);
+                assert!(engine.preparing.as_ref().unwrap().ready);
+                assert!(commit(&mut engine, 400 * MS, &next).is_empty());
+            }
+            let stale = plan(1, 12, 400 * MS, 22_050);
+            engine.command(
+                400 * MS,
+                Command::Prepare(identity(), stale.clone()),
+                &mut events,
+            );
+            assert_eq!(engine.intent.as_ref().unwrap().epoch.0, 1);
+            assert!(tick(&mut engine, 700 * MS).is_empty());
+            assert_eq!(engine.epoch_floor, 2);
+            assert!(engine.intent.is_none());
+            assert!(
+                engine.preparing.is_none(),
+                "stale intent must not be installed"
+            );
+            assert_eq!(
+                engine.current.as_ref().map(|p| p.plan.epoch.0),
+                (!suspend).then_some(2)
+            );
+            events.clear();
+            // Even complete, newer wire PCM and Commit cannot revive the old
+            // intent after promotion raises the session's accepted epoch.
+            let old_pcm = pcm(&engine, 1, 100, 22_050 - 128, 4096);
+            engine.command(700 * MS, Command::Pcm(old_pcm), &mut events);
+            events.extend(commit(&mut engine, 700 * MS, &stale));
+            assert!(events.is_empty());
+            assert!(engine.preparing.is_none());
+            if suspend {
+                assert!(engine.output.as_ref().unwrap().telemetry().muted);
+            }
+            // A genuinely future generation still prepares normally.
+            engine.command(
+                700 * MS,
+                Command::Prepare(identity(), plan(3, 13, 1100 * MS, 0)),
+                &mut events,
+            );
+            let fresh = pcm(&engine, 3, 0, 0, 4096);
+            engine.command(700 * MS, Command::Pcm(fresh), &mut events);
+            assert!(matches!(
+                events.as_slice(),
+                [ReceiverEvent::Ready {
+                    epoch: 3,
+                    plan_id: 13
+                }]
+            ));
+        }
+    }
+
+    #[test]
     fn scheduled_pause_keeps_its_complete_tail_and_a_fresh_run_can_resume() {
         let mut engine = engine();
         let first = plan(1, 10, 400 * MS, 0);
@@ -2263,6 +2344,11 @@ impl<D: DeviceOutput> Engine<D> {
     }
 
     fn install_plan(&mut self, now: u64, plan: Plan, events: &mut Vec<ReceiverEvent>) {
+        // Deferred intents can outlive the epoch floor they passed at ingress:
+        // both a committed switch and a suspension raise it before promotion.
+        if plan.epoch.0 < self.epoch_floor {
+            return;
+        }
         // A new token for the current media epoch is a per-endpoint future
         // rejoin. Its old samples and authorization must not cross the join.
         if self
