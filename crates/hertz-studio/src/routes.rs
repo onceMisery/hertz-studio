@@ -248,11 +248,17 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/reader/subscriptions/{id}",
             axum::routing::delete(reader_unsubscribe),
         )
-        .route("/v1/reader/feeds/{id}", axum::routing::delete(reader_delete_feed))
+        .route(
+            "/v1/reader/feeds/{id}",
+            axum::routing::delete(reader_delete_feed),
+        )
         .route("/v1/reader/feeds/{id}/refresh", post(reader_refresh))
         .route("/v1/reader/entries", get(reader_entries))
         .route("/v1/reader/entries/{id}", get(reader_entry_detail))
-        .route("/v1/reader/entries/{id}/state", axum::routing::put(reader_entry_state))
+        .route(
+            "/v1/reader/entries/{id}/state",
+            axum::routing::put(reader_entry_state),
+        )
         .route(
             "/v1/reader/entries/{id}/images/{key}",
             get(reader_entry_image),

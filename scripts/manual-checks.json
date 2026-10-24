@@ -267,6 +267,10 @@
       "purpose": "!/usr/bin/env node"
     },
     {
+      "script": "check-reader-browser.js",
+      "purpose": "Shipped reader UI in real Chrome with deterministic transport: unread badges, entry reading, client-side XSS hardening, deferred image proxy via data-URL envelope, read/star PUT persistence, filters, cursor pagination, subscribe/unsubscribe/delete confirmation and narrow layout. No real feeds or network."
+    },
+    {
       "script": "check-search-browser.js",
       "purpose": "Run with SEARCH_UI_URL pointing to an isolated service. Requires Playwright."
     },

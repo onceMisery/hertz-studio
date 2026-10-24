@@ -400,9 +400,9 @@
     ABBR: 1, CITE: 1, KBD: 1, SAMP: 1, VAR: 1,
   };
 
-  function safeAttribute(tag, name) {
+  function safeAttribute(tag, name, value) {
     if (name === 'colspan' || name === 'rowspan') return true;
-    if (tag === 'A' && name === 'href') return true;
+    if (tag === 'A' && name === 'href') return /^https?:\/\//i.test(value || '');
     if (tag === 'IMG' && (name === 'src' || name === 'alt' || name === 'width' || name === 'height')) return true;
     return false;
   }
@@ -428,7 +428,7 @@
         }
         var attributes = Array.prototype.slice.call(child.attributes);
         attributes.forEach(function (attr) {
-          if (!safeAttribute(tag, attr.name.toLowerCase())) child.removeAttribute(attr.name);
+          if (!safeAttribute(tag, attr.name.toLowerCase(), attr.value)) child.removeAttribute(attr.name);
         });
         if (tag === 'A') {
           child.setAttribute('target', '_blank');
