@@ -250,6 +250,13 @@ pub enum ControlFrame {
         plan_id: Counter,
         effective_at: Counter,
     },
+    /// Stop rendering at a frozen future presentation boundary without a
+    /// replacement PCM generation (pause/stop has no synthetic audio).
+    Suspend {
+        epoch: Counter,
+        plan_id: Counter,
+        effective_at: Counter,
+    },
     Heartbeat {
         output_ready: bool,
         played_frame: Counter,
@@ -392,5 +399,20 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<Counter>(bad).is_err());
         }
+    }
+
+    #[test]
+    fn suspend_roundtrips_exact_counters_without_a_pcm_plan() {
+        let frame = ControlFrame::Suspend {
+            epoch: Counter(u64::MAX - 2),
+            plan_id: Counter(u64::MAX - 1),
+            effective_at: Counter(u64::MAX),
+        };
+        let wire = frame.encode().unwrap();
+        assert!(
+            matches!(ControlFrame::decode(&wire).unwrap(), ControlFrame::Suspend {
+            epoch: Counter(e), plan_id: Counter(p), effective_at: Counter(t)
+        } if e == u64::MAX - 2 && p == u64::MAX - 1 && t == u64::MAX)
+        );
     }
 }

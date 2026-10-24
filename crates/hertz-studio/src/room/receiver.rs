@@ -10,12 +10,13 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
 use vmusic_audio::clocked_resample::{ClockedConverter, State as ConvertState};
 use vmusic_audio::output_clock::ClockStatus;
+use vmusic_audio::scheduled_output::EmergencyMute;
 use vmusic_audio::{OutputError, OutputOptions, OutputTelemetry, RenderFormat, ScheduledOutput};
 use vmusic_core::room::receiver::{FormatDesc, GateAction, GateInput, PlanDesc, ReceiverGate};
 use vmusic_lan::clock::{ClockMapping, MonotonicClock};
@@ -33,6 +34,7 @@ const HORIZON_NS: u64 = 100_000_000;
 const SUBMIT_MARGIN_NS: u64 = 20_000_000;
 const DEVICE_FRESHNESS_NS: u64 = 250_000_000;
 const MAX_DEVICE_LEAD_NS: u64 = 500_000_000;
+const MAX_PHASE_ERROR_NS: f64 = 3_000_000.0;
 const TICK: Duration = Duration::from_millis(2);
 const GATE_SESSION: u64 = 1; // Used only after comparing all three UUIDs.
 
@@ -58,8 +60,10 @@ pub(crate) struct ReceiverStatus {
     pub network_clock: Option<ClockMapping>,
     pub output: Option<OutputTelemetry>,
     pub buffered_input_frames: usize,
-    /// Nominal source-frame estimate from actual device output progress. Exact
-    /// device played/underrun counts and clock quality are exposed in `output`.
+    /// Source-frame estimate from the converter's accumulated phase and device
+    /// progress. Pending output is back-projected at the current smoothed ratio;
+    /// it is not an exact source-sample counter during ratio slew. Exact device
+    /// played/underrun counts and clock quality are exposed in `output`.
     pub played_frame: u64,
     pub underrun_frames: u64,
     pub discarded_blocks: u64,
@@ -144,10 +148,15 @@ enum Command {
         plan_id: u64,
         effective_at: u64,
     },
+    Suspend {
+        identity: StreamIdentity,
+        epoch: u64,
+        plan_id: u64,
+        effective_at: u64,
+    },
     Pcm(Pcm),
     Mapping(ClockMapping),
     Volume(f32),
-    Reopen(OutputOptions),
 }
 
 struct Envelope {
@@ -155,10 +164,26 @@ struct Envelope {
     command: Command,
 }
 
-struct Lease(Arc<AtomicBool>);
+type Emergency = Arc<Mutex<Option<EmergencyMute>>>;
+
+fn emergency_mute(emergency: &Emergency) {
+    if let Some(control) = emergency
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+    {
+        control.mute();
+    }
+}
+
+struct Lease {
+    shutdown: Arc<AtomicBool>,
+    emergency: Emergency,
+}
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
+        self.shutdown.store(true, Ordering::Release);
+        emergency_mute(&self.emergency);
     }
 }
 
@@ -175,6 +200,7 @@ pub(crate) struct ReceiverHandle {
     trip: Arc<AtomicBool>,
     invalidated: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
+    emergency: Emergency,
     disconnected: Arc<AtomicBool>,
     budget: Arc<Budget>,
     status: watch::Receiver<ReceiverStatus>,
@@ -196,6 +222,7 @@ impl ReceiverHandle {
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.generation.fetch_add(1, Ordering::AcqRel);
                 self.trip.store(true, Ordering::Release);
+                emergency_mute(&self.emergency);
                 Err(ReceiverError::Capacity)
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(ReceiverError::Closed),
@@ -221,11 +248,31 @@ impl ReceiverHandle {
         })
     }
 
+    pub fn suspend(
+        &self,
+        identity: StreamIdentity,
+        epoch: u64,
+        plan_id: u64,
+        effective_at: u64,
+    ) -> Result<(), ReceiverError> {
+        self.send(Command::Suspend {
+            identity,
+            epoch,
+            plan_id,
+            effective_at,
+        })
+    }
+
     pub fn pcm(&self, block: PcmBlock) -> Result<(), ReceiverError> {
-        validate_block(&block)?;
+        validate_block(&block).inspect_err(|_| {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+            self.trip.store(true, Ordering::Release);
+            emergency_mute(&self.emergency);
+        })?;
         let reservation = Reservation::acquire(&self.budget, &block).inspect_err(|_| {
             self.generation.fetch_add(1, Ordering::AcqRel);
             self.trip.store(true, Ordering::Release);
+            emergency_mute(&self.emergency);
         })?;
         self.send(Command::Pcm(Pcm {
             block,
@@ -242,6 +289,7 @@ impl ReceiverHandle {
     /// fresh identity; queued commands cannot undo this out-of-band latch.
     pub fn disconnect(&self) {
         self.disconnected.store(true, Ordering::Release);
+        emergency_mute(&self.emergency);
     }
 
     /// Revoke queued authorization immediately while retaining this session's
@@ -250,6 +298,7 @@ impl ReceiverHandle {
     pub fn invalidate(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.invalidated.store(true, Ordering::Release);
+        emergency_mute(&self.emergency);
     }
 
     pub fn set_volume(&self, volume: f32) -> Result<(), ReceiverError> {
@@ -257,11 +306,6 @@ impl ReceiverHandle {
             return Err(ReceiverError::Invalid("volume"));
         }
         self.send(Command::Volume(volume))
-    }
-
-    pub fn reopen(&self, options: OutputOptions) -> Result<(), ReceiverError> {
-        validate_options(&options)?;
-        self.send(Command::Reopen(options))
     }
 
     pub fn status(&self) -> ReceiverStatus {
@@ -276,26 +320,33 @@ impl ReceiverHandle {
     /// the native output was dropped on its owner thread, so an exclusive
     /// device lease may be released. A timeout must not be treated as release.
     pub async fn shutdown(self) -> Result<(), ReceiverError> {
+        self._lease.shutdown.store(true, Ordering::Release);
         self.disconnect();
+        tokio::time::timeout(Duration::from_secs(3), self.wait_closed())
+            .await
+            .map_err(|_| ReceiverError::Output("native output shutdown timed out".into()))?
+    }
+
+    pub async fn wait_closed(&self) -> Result<(), ReceiverError> {
         let mut done = self.done.clone();
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while !*done.borrow_and_update() {
-                done.changed().await.map_err(|_| ReceiverError::Closed)?;
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|_| ReceiverError::Output("native output shutdown timed out".into()))?
+        while !*done.borrow_and_update() {
+            done.changed().await.map_err(|_| ReceiverError::Closed)?;
+        }
+        Ok(())
     }
 }
 
 /// `OutputOptions.clock_origin` is normalized to the supplied shared clock.
 /// CPAL never crosses an await or thread boundary. Initialization errors are
-/// returned before the handle is published; reopening reports through status.
+/// returned before the handle is published. A replacement session uses a new
+/// spawn after the prior worker's completion barrier. `registry` is populated
+/// before the first await, so an owning lifecycle guard can close and await
+/// the worker even when initialization itself is cancelled.
 pub(crate) async fn spawn(
     mut options: OutputOptions,
     identity: StreamIdentity,
     clock: MonotonicClock,
+    registry: Arc<Mutex<Option<ReceiverHandle>>>,
 ) -> Result<(ReceiverHandle, mpsc::Receiver<ReceiverEvent>), ReceiverError> {
     validate_options(&options)?;
     options.clock_origin = clock.origin();
@@ -307,6 +358,8 @@ pub(crate) async fn spawn(
     let generation = Arc::new(AtomicU64::new(0));
     let disconnected = Arc::new(AtomicBool::new(false));
     let shutdown = Arc::new(AtomicBool::new(false));
+    let emergency = Arc::new(Mutex::new(None));
+    let armed_generation = Arc::new(AtomicU64::new(0));
     let initial = ReceiverStatus {
         identity,
         connected: true,
@@ -328,11 +381,15 @@ pub(crate) async fn spawn(
         trip: Arc::clone(&trip),
         invalidated: Arc::clone(&invalidated),
         generation: Arc::clone(&generation),
+        emergency: Arc::clone(&emergency),
         disconnected: Arc::clone(&disconnected),
         budget: Arc::clone(&budget),
         status: status_rx,
         done: done_rx,
-        _lease: Arc::new(Lease(Arc::clone(&shutdown))),
+        _lease: Arc::new(Lease {
+            shutdown: Arc::clone(&shutdown),
+            emergency: Arc::clone(&emergency),
+        }),
     };
     let (initialized, init_rx) = oneshot::channel();
     std::thread::Builder::new()
@@ -348,6 +405,17 @@ pub(crate) async fn spawn(
                     return;
                 }
             };
+            let output = NativeOutput {
+                output,
+                emergency: Arc::clone(&emergency),
+                generation: Arc::clone(&generation),
+                armed_generation: Arc::clone(&armed_generation),
+                trip: Arc::clone(&trip),
+                invalidated: Arc::clone(&invalidated),
+                disconnected: Arc::clone(&disconnected),
+                shutdown: Arc::clone(&shutdown),
+            };
+            output.publish_emergency();
             let mut engine = Engine::new(output, identity, budget);
             if initialized.send(Ok(())).is_err() {
                 return;
@@ -363,6 +431,7 @@ pub(crate) async fn spawn(
                 if trip.swap(false, Ordering::AcqRel) {
                     engine.fail("receiver ingress backpressure", &mut outgoing);
                     active_generation = generation.load(Ordering::Acquire);
+                    armed_generation.store(active_generation, Ordering::Release);
                 }
                 if invalidated.swap(false, Ordering::AcqRel) {
                     engine.fail(
@@ -370,6 +439,7 @@ pub(crate) async fn spawn(
                         &mut outgoing,
                     );
                     active_generation = generation.load(Ordering::Acquire);
+                    armed_generation.store(active_generation, Ordering::Release);
                 }
                 for _ in 0..8 {
                     if disconnected.load(Ordering::Acquire)
@@ -385,27 +455,21 @@ pub(crate) async fn spawn(
                         continue;
                     }
                     let command = envelope.command;
-                    match command {
-                        Command::Reopen(mut options) => {
-                            engine
-                                .fail("output device reopened; fresh join required", &mut outgoing);
-                            options.clock_origin = clock.origin();
-                            // Drop old CPAL stream before opening the new device.
-                            engine.output.take();
-                            match ScheduledOutput::open(options) {
-                                Ok(mut output) => {
-                                    output.mute();
-                                    let _ = output.set_local_volume(engine.volume);
-                                    engine.output = Some(output);
-                                }
-                                Err(error) => engine.last_error = Some(error.to_string()),
-                            }
-                        }
-                        command => engine.command(clock.now_ns(), command, &mut outgoing),
+                    let faults = engine.faults;
+                    engine.command(clock.now_ns(), command, &mut outgoing);
+                    if engine.faults != faults {
+                        active_generation = revoke_generation(&generation, active_generation);
+                        armed_generation.store(active_generation, Ordering::Release);
+                        break;
                     }
                 }
                 let now = clock.now_ns();
+                let faults = engine.faults;
                 engine.tick(now, &mut outgoing);
+                if engine.faults != faults {
+                    active_generation = revoke_generation(&generation, active_generation);
+                    armed_generation.store(active_generation, Ordering::Release);
+                }
                 let status = engine.status(now);
                 status_tx.send_replace(status.clone());
                 if now.saturating_sub(last_status) >= 250_000_000 {
@@ -430,9 +494,12 @@ pub(crate) async fn spawn(
             if let Some(output) = engine.output.as_mut() {
                 output.mute();
             }
+            engine.connected = false;
+            status_tx.send_replace(engine.status(clock.now_ns()));
             drop(engine);
         })
         .map_err(|error| ReceiverError::Output(error.to_string()))?;
+    *registry.lock().unwrap_or_else(|error| error.into_inner()) = Some(handle.clone());
     init_rx.await.map_err(|_| ReceiverError::Closed)??;
     Ok((handle, event_rx))
 }
@@ -448,6 +515,16 @@ fn validate_options(options: &OutputOptions) -> Result<(), ReceiverError> {
         return Err(ReceiverError::Invalid("output format/device"));
     }
     Ok(())
+}
+
+// A concurrent explicit invalidate already moved ingress to a fresh
+// generation. Internal faults revoke only the generation they processed,
+// preserving the newly authorized commands queued after that invalidate.
+fn revoke_generation(generation: &AtomicU64, active: u64) -> u64 {
+    match generation.compare_exchange(active, active + 1, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => active + 1,
+        Err(current) => current,
+    }
 }
 
 fn validate_block(block: &PcmBlock) -> Result<(), ReceiverError> {
@@ -474,10 +551,91 @@ fn validate_block(block: &PcmBlock) -> Result<(), ReceiverError> {
 trait DeviceOutput {
     fn format(&self) -> RenderFormat;
     fn telemetry(&self) -> OutputTelemetry;
-    fn write(&mut self, start: u64, samples: &[f32], now: u64) -> Result<(), OutputError>;
+    fn write(
+        &mut self,
+        start: u64,
+        samples: &[f32],
+        now: u64,
+        period: f64,
+    ) -> Result<(), OutputError>;
     fn mute(&mut self);
     fn unmute(&mut self);
+    fn silence_from(&mut self, local_ns: u64);
     fn volume(&mut self, volume: f32) -> Result<(), OutputError>;
+}
+
+/// Only the native owner holds CPAL. A short control lock serializes each
+/// unmute/write with external emergency mute; conversion never holds it and
+/// the audio callback never takes it. Generation checks prevent a worker
+/// already converting an old epoch from undoing emergency mute afterwards.
+struct NativeOutput {
+    output: ScheduledOutput,
+    emergency: Emergency,
+    generation: Arc<AtomicU64>,
+    armed_generation: Arc<AtomicU64>,
+    trip: Arc<AtomicBool>,
+    invalidated: Arc<AtomicBool>,
+    disconnected: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl NativeOutput {
+    fn publish_emergency(&self) {
+        *self
+            .emergency
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(self.output.emergency_mute());
+    }
+    fn authorized(&self) -> bool {
+        self.generation.load(Ordering::Acquire) == self.armed_generation.load(Ordering::Acquire)
+            && !self.trip.load(Ordering::Acquire)
+            && !self.invalidated.load(Ordering::Acquire)
+            && !self.disconnected.load(Ordering::Acquire)
+            && !self.shutdown.load(Ordering::Acquire)
+    }
+}
+
+impl DeviceOutput for NativeOutput {
+    fn format(&self) -> RenderFormat {
+        self.output.format()
+    }
+    fn telemetry(&self) -> OutputTelemetry {
+        self.output.telemetry()
+    }
+    fn write(
+        &mut self,
+        start: u64,
+        samples: &[f32],
+        _now: u64,
+        period: f64,
+    ) -> Result<(), OutputError> {
+        let _guard = self
+            .emergency
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.authorized() {
+            return Err(OutputError::Muted);
+        }
+        self.output.write_clocked(start, samples, period)
+    }
+    fn mute(&mut self) {
+        self.output.mute();
+    }
+    fn unmute(&mut self) {
+        let _guard = self
+            .emergency
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.authorized() {
+            self.output.unmute();
+        }
+    }
+    fn volume(&mut self, volume: f32) -> Result<(), OutputError> {
+        self.output.set_local_volume(volume)
+    }
+    fn silence_from(&mut self, local_ns: u64) {
+        self.output.silence_from(local_ns);
+    }
 }
 
 impl DeviceOutput for ScheduledOutput {
@@ -487,8 +645,14 @@ impl DeviceOutput for ScheduledOutput {
     fn telemetry(&self) -> OutputTelemetry {
         self.telemetry()
     }
-    fn write(&mut self, start: u64, samples: &[f32], _now: u64) -> Result<(), OutputError> {
-        self.write(start, samples)
+    fn write(
+        &mut self,
+        start: u64,
+        samples: &[f32],
+        _now: u64,
+        period: f64,
+    ) -> Result<(), OutputError> {
+        self.write_clocked(start, samples, period)
     }
     fn mute(&mut self) {
         self.mute();
@@ -499,11 +663,13 @@ impl DeviceOutput for ScheduledOutput {
     fn volume(&mut self, volume: f32) -> Result<(), OutputError> {
         self.set_local_volume(volume)
     }
+    fn silence_from(&mut self, local_ns: u64) {
+        self.silence_from(local_ns);
+    }
 }
 
 struct Epoch {
     plan: Plan,
-    local_anchor: u64,
     start: u64,
     ready: bool,
     committed: bool,
@@ -511,11 +677,64 @@ struct Epoch {
     sequence: Option<u64>,
     pcm: VecDeque<Pcm>,
     converter: ClockedConverter,
+    history: Vec<f32>,
+    history_have: Vec<bool>,
+    history_primed: bool,
+    tail_padded: bool,
     // Once a continuous run starts this remains the output sample grid. The
     // source packet's nominal timestamp is never used as a new run boundary.
     output_frames: u64,
+    cursor: DeviceCursor,
     drain: bool,
     played_baseline: Option<u64>,
+}
+
+struct DeviceCursor {
+    anchor: u64,
+    fraction: f64,
+    frames: u64,
+    period: f64,
+}
+impl DeviceCursor {
+    fn time(&self) -> Result<u64, &'static str> {
+        let offset = self.fraction + self.frames as f64 * self.period;
+        if !offset.is_finite() || offset < 0.0 || offset >= u64::MAX as f64 {
+            return Err("output cursor overflow");
+        }
+        self.anchor
+            .checked_add(offset.round() as u64)
+            .ok_or("output cursor overflow")
+    }
+    fn period(&mut self, period: f64) -> Result<(), &'static str> {
+        if !period.is_finite() || period <= 0.0 {
+            return Err("invalid output period");
+        }
+        if self.period != period {
+            let offset = self.fraction + self.frames as f64 * self.period;
+            let whole = offset.floor() as u64;
+            self.anchor = self
+                .anchor
+                .checked_add(whole)
+                .ok_or("output cursor overflow")?;
+            self.fraction = offset - whole as f64;
+            self.frames = 0;
+            self.period = period;
+        }
+        Ok(())
+    }
+}
+
+fn submission_frames(start: u64, now: u64, horizon: u64, period: f64, queued: usize) -> usize {
+    if start >= horizon {
+        return 0;
+    }
+    let target = (horizon.saturating_sub(now) as f64 / period).ceil() as usize;
+    // Callback run boundaries use nearest-frame alignment. Rounding here
+    // avoids stranding the final sample behind a fixed EOF due to a rounded
+    // nanosecond cursor; the exclusive boundary remains within half a frame.
+    (((horizon - start) as f64 / period).round() as usize)
+        .min(target.saturating_sub(queued))
+        .min(2048)
 }
 
 impl Epoch {
@@ -523,9 +742,6 @@ impl Epoch {
         plan.format.validate().map_err(|_| "invalid plan format")?;
         let host_start = frame_time(plan.anchor_ns.0, plan.join_frame.0, plan.format.sample_rate)
             .ok_or("plan time overflow")?;
-        let local_anchor = mapping
-            .local_time(plan.anchor_ns.0)
-            .ok_or("plan anchor outside local domain")?;
         let start = mapping
             .local_time(host_start)
             .ok_or("plan start outside local domain")?;
@@ -535,24 +751,125 @@ impl Epoch {
             usize::from(output.channels),
         )
         .map_err(|_| "unsupported conversion")?;
+        let history_frames = converter.lookahead_frames() as usize;
+        let real_history = plan.join_frame.0.min(history_frames as u64) as usize;
+        let mut history_have = vec![true; history_frames];
+        history_have[history_frames - real_history..].fill(false);
         Ok(Self {
             expected_frame: plan.join_frame.0,
             plan,
-            local_anchor,
             start,
             ready: false,
             committed: false,
             sequence: None,
             pcm: VecDeque::new(),
             converter,
+            history: vec![0.0; history_frames * usize::from(output.channels)],
+            history_have,
+            history_primed: false,
+            tail_padded: false,
             output_frames: 0,
+            cursor: DeviceCursor {
+                anchor: start,
+                fraction: 0.0,
+                frames: 0,
+                period: 1e9 / f64::from(output.sample_rate),
+            },
             drain: false,
             played_baseline: None,
         })
     }
 
-    fn next_time(&self, rate: u32) -> Result<u64, &'static str> {
-        frame_time(self.start, self.output_frames, rate).ok_or("output cursor overflow")
+    fn next_time(&self, _rate: u32) -> Result<u64, &'static str> {
+        self.cursor.time()
+    }
+
+    fn collect_history(&mut self, block: &PcmBlock) {
+        if self.history_primed {
+            return;
+        }
+        let frames = self.history_have.len();
+        let join = self.plan.join_frame.0;
+        let start = join.saturating_sub(frames as u64).max(block.frame_index);
+        let end = join.min(block.end_frame());
+        let source_channels = usize::from(block.channels);
+        let channels = self.history.len() / frames;
+        for source_frame in start..end {
+            let src = (source_frame - block.frame_index) as usize * source_channels;
+            let at = frames - (join - source_frame) as usize;
+            let dst = at * channels;
+            match (source_channels, channels) {
+                (1, 2) => self.history[dst..dst + 2].fill(block.samples[src]),
+                (2, 1) => {
+                    self.history[dst] = (block.samples[src] + block.samples[src + 1]) * 0.5;
+                }
+                _ => self.history[dst..dst + channels]
+                    .copy_from_slice(&block.samples[src..src + channels]),
+            }
+            self.history_have[at] = true;
+        }
+    }
+
+    fn prime_history(&mut self) -> Result<bool, &'static str> {
+        if !self.history_have.iter().all(|have| *have) {
+            return Ok(false);
+        }
+        if !self.history_primed {
+            self.converter
+                .prime_history(&self.history)
+                .map_err(|_| "invalid source history prewarm")?;
+            self.history_primed = true;
+        }
+        Ok(true)
+    }
+
+    fn phase_error_ns(&self, mapping: ClockMapping) -> Option<f64> {
+        let host_time = mapping.host_time(self.cursor.time().ok()?)?;
+        let mapped_source_ns = (i128::from(host_time) - i128::from(self.plan.anchor_ns.0)) as f64;
+        let actual_source_ns = (self.plan.join_frame.0 as f64 + self.converter.source_phase())
+            * 1e9
+            / f64::from(self.plan.format.sample_rate);
+        Some(actual_source_ns - mapped_source_ns)
+    }
+
+    fn played_frame(&self, played: u64) -> u64 {
+        if played == 0 {
+            return self.plan.join_frame.0;
+        }
+        let pending = self.output_frames.saturating_sub(played);
+        let phase = self.converter.source_phase() - pending as f64 * self.converter.ratio();
+        self.plan.join_frame.0.saturating_add(phase.max(0.0) as u64)
+    }
+
+    fn source_end_frame(&self, end_host_ns: u64) -> Result<u64, &'static str> {
+        end_host_ns
+            .checked_sub(self.plan.anchor_ns.0)
+            .and_then(|duration| {
+                u64::try_from(
+                    u128::from(duration) * u128::from(self.plan.format.sample_rate) / 1_000_000_000,
+                )
+                .ok()
+            })
+            .ok_or("source end outside the media timeline")
+    }
+
+    fn gate_eof_limit(&self, end_host_ns: u64) -> Result<Option<u64>, &'static str> {
+        let frames = self.source_end_frame(end_host_ns)?;
+        if frames == 0 {
+            return Ok(None);
+        }
+        // Gate due_until(t) includes the sample at t. The producer sends only
+        // floor(duration * rate) frames, so cap immediately before frame N's
+        // actual deadline, including when stop falls between source frames.
+        let offset =
+            (u128::from(frames) * 1_000_000_000).div_ceil(u128::from(self.plan.format.sample_rate));
+        self.plan
+            .anchor_ns
+            .0
+            .checked_add(u64::try_from(offset).map_err(|_| "source end time overflow")?)
+            .and_then(|end| end.checked_sub(1))
+            .map(Some)
+            .ok_or("source end time overflow")
     }
 
     fn submit<D: DeviceOutput>(
@@ -561,35 +878,79 @@ impl Epoch {
         mapping: ClockMapping,
         now: u64,
         horizon: u64,
+        end_host_ns: Option<u64>,
+        silence_from: Option<u64>,
     ) -> Result<(), String> {
         if !self.committed {
             return Ok(());
+        }
+        if self
+            .phase_error_ns(mapping)
+            .is_none_or(|error| error.abs() > MAX_PHASE_ERROR_NS)
+        {
+            return Err("mapped device/source phase diverged; fresh future join required".into());
         }
         let format = output.format();
         let telemetry = output.telemetry();
         let combined = relative_drift_ppm(mapping.drift_ppm, telemetry.device_clock_ppm)
             .ok_or("relative device/network clock drift is unsupported")?;
         self.converter.set_drift_ppm(combined);
+        self.cursor.period(telemetry.ns_per_frame)?;
         let channels = usize::from(format.channels);
+        // Only a published Commit/Suspend freezes an EOF. A moving submission
+        // horizon is never permission to synthesize missing source samples.
+        let source_end = end_host_ns
+            .map(|end| self.source_end_frame(end))
+            .transpose()?;
         let mut input = Vec::with_capacity(1024 * channels);
         let mut samples = vec![0.0; 2048 * channels];
         // Bound worker work per tick even when ingress is continuously full.
         for _ in 0..8 {
             let start = self.next_time(format.sample_rate)?;
-            if start >= horizon {
-                break;
-            }
-            let frames = ((u128::from(horizon - start) * u128::from(format.sample_rate)
-                / 1_000_000_000) as usize)
-                .min(2048);
+            let frames = submission_frames(
+                start,
+                now,
+                horizon,
+                telemetry.ns_per_frame,
+                output.telemetry().queued_frames,
+            );
             if frames == 0 {
                 break;
             }
             input.clear();
             if !self.drain {
-                if let Some(front) = self.pcm.front_mut() {
+                let consumed = self
+                    .plan
+                    .join_frame
+                    .0
+                    .saturating_add(self.converter.counts().0);
+                let remaining = source_end.map_or(usize::MAX, |end| {
+                    end.saturating_sub(consumed).min(usize::MAX as u64) as usize
+                });
+                if remaining == 0 {
+                    // The ingress cursor proves every real frame before EOF
+                    // arrived contiguously. Zero extension supplies only the
+                    // sinc lookahead; output is still limited to the boundary.
+                    if !self.tail_padded && source_end.is_some_and(|end| self.expected_frame >= end)
+                    {
+                        // A stop may fall between source/device frames. Also
+                        // cover the permitted phase residual plus one output
+                        // step; all of this extension lies after proven EOF.
+                        let phase_tail =
+                            (MAX_PHASE_ERROR_NS * f64::from(self.plan.format.sample_rate) / 1e9)
+                                .ceil() as usize;
+                        let pad = self.converter.lookahead_frames() as usize
+                            + phase_tail
+                            + self.converter.nominal_ratio().ceil() as usize
+                            + 1;
+                        input.resize(pad * channels, 0.0);
+                        self.tail_padded = true;
+                    }
+                } else if let Some(front) = self.pcm.front_mut() {
                     let block = &front.block;
-                    let count = (block.frame_count() as usize - front.offset_frames).min(1024);
+                    let count = (block.frame_count() as usize - front.offset_frames)
+                        .min(1024)
+                        .min(remaining);
                     let source_channels = usize::from(block.channels);
                     for frame in block
                         .samples
@@ -619,6 +980,9 @@ impl Epoch {
                     // Only an accepted Commit reaches here. The queue's
                     // deadlines keep this unmute silent until the future join.
                     output.unmute();
+                    if let Some(boundary) = silence_from {
+                        output.silence_from(boundary);
+                    }
                 }
                 if self.played_baseline.is_none() {
                     let t = output.telemetry();
@@ -626,10 +990,20 @@ impl Epoch {
                         Some(t.played_frames.saturating_add(t.queued_frames as u64));
                 }
                 output
-                    .write(start, &samples[..progress.produced_frames * channels], now)
+                    .write(
+                        start,
+                        &samples[..progress.produced_frames * channels],
+                        now,
+                        telemetry.ns_per_frame,
+                    )
                     .map_err(|error| error.to_string())?;
                 self.output_frames = self
                     .output_frames
+                    .checked_add(progress.produced_frames as u64)
+                    .ok_or("output frame counter overflow")?;
+                self.cursor.frames = self
+                    .cursor
+                    .frames
                     .checked_add(progress.produced_frames as u64)
                     .ok_or("output frame counter overflow")?;
             }
@@ -707,8 +1081,14 @@ mod tests {
             t.ns_per_frame = 1e9 / (f64::from(self.format().sample_rate) * (1.0 + self.ppm * 1e-6));
             t
         }
-        fn write(&mut self, start: u64, samples: &[f32], now: u64) -> Result<(), OutputError> {
-            self.queue.write_at(start, samples, now)
+        fn write(
+            &mut self,
+            start: u64,
+            samples: &[f32],
+            now: u64,
+            period: f64,
+        ) -> Result<(), OutputError> {
+            self.queue.write_clocked_at(start, samples, now, period)
         }
         fn mute(&mut self) {
             self.queue.mute();
@@ -718,6 +1098,9 @@ mod tests {
         }
         fn volume(&mut self, volume: f32) -> Result<(), OutputError> {
             self.queue.set_local_volume(volume)
+        }
+        fn silence_from(&mut self, local_ns: u64) {
+            self.queue.silence_from(local_ns);
         }
     }
 
@@ -841,14 +1224,10 @@ mod tests {
     fn ready_never_authorizes_audio_without_commit() {
         let mut engine = engine();
         let events = prepare(&mut engine, plan(1, 10, 400 * MS, 0));
-        assert!(matches!(
-            events.as_slice(),
-            [ReceiverEvent::Ready {
-                epoch: 1,
-                plan_id: 10
-            }]
-        ));
+        assert!(events.is_empty());
+        assert!(!engine.preparing.as_ref().unwrap().ready);
         feed(&mut engine, 1, 0, 22_050);
+        assert!(engine.preparing.as_ref().unwrap().ready);
         tick(&mut engine, 200 * MS);
         assert!(engine.output.as_ref().unwrap().telemetry().muted);
         assert_eq!(engine.output.as_ref().unwrap().telemetry().queued_frames, 0);
@@ -921,6 +1300,27 @@ mod tests {
     }
 
     #[test]
+    fn late_join_allows_a_media_anchor_older_than_the_client_clock_origin() {
+        let mut engine = engine();
+        let mut clock = mapping(0, 0.0);
+        clock.offset_ns = 10_000 * MS as i64;
+        engine.command(0, Command::Mapping(clock), &mut Vec::new());
+        // Host media frame 0 predates this process by one second. Only the
+        // selected future join must be representable in the local clock.
+        let plan = plan(7, 100, 9_000 * MS, 61_740);
+        assert!(prepare(&mut engine, plan.clone()).is_empty());
+        feed(&mut engine, 7, 61_740 - 128, 10_128);
+        assert!(engine.preparing.as_ref().unwrap().ready);
+        assert!(commit(&mut engine, 0, &plan).is_empty());
+        assert_eq!(engine.preparing.as_ref().unwrap().start, 400 * MS);
+        assert!(tick(&mut engine, 350 * MS).is_empty());
+        assert!(engine.output.as_ref().unwrap().telemetry().queued_frames > 0);
+        assert!(tick(&mut engine, 400 * MS).is_empty());
+        assert_eq!(engine.gate.current_epoch(), Some(7));
+        assert!(engine.last_error.is_none());
+    }
+
+    #[test]
     fn uuid_collision_reordered_trailing_and_wrong_format_never_change_cursor() {
         let mut engine = engine();
         prepare(&mut engine, plan(1, 10, 400 * MS, 0));
@@ -962,6 +1362,9 @@ mod tests {
         let rejoin = plan(1, 11, 400 * MS, 22_050);
         let mut events = Vec::new();
         engine.command(350 * MS, Command::Prepare(identity(), rejoin), &mut events);
+        assert!(events.is_empty());
+        let block = pcm(&engine, 1, 9, 22_050 - 128, 4096);
+        engine.command(350 * MS, Command::Pcm(block), &mut events);
         assert!(matches!(
             events.as_slice(),
             [ReceiverEvent::Ready { plan_id: 11, .. }]
@@ -1019,7 +1422,9 @@ mod tests {
             .any(|e| matches!(e, ReceiverEvent::Resync { .. })));
         let first = plan(1, 11, 400 * MS, 0);
         prepare(&mut engine, first.clone());
+        feed(&mut engine, 1, 0, 4096);
         commit(&mut engine, 0, &first);
+        tick(&mut engine, 350 * MS);
         prepare(&mut engine, plan(2, 12, 800 * MS, 0));
         let block = pcm(&engine, 2, 1, 0, 1000);
         engine.command(0, Command::Pcm(block), &mut Vec::new());
@@ -1074,9 +1479,12 @@ mod tests {
         tick(&mut engine, 350 * MS);
         let epoch = engine.preparing.as_ref().unwrap();
         assert!(epoch.output_frames > 0);
-        assert_eq!(
-            epoch.next_time(48_000).unwrap(),
-            400 * MS + epoch.output_frames * 1_000_000_000 / 48_000
+        assert!(
+            epoch
+                .next_time(48_000)
+                .unwrap()
+                .abs_diff(400 * MS + epoch.output_frames * 1_000_000_000 / 48_000)
+                <= 1
         );
         engine.command(
             350 * MS,
@@ -1086,11 +1494,416 @@ mod tests {
         engine.output.as_mut().unwrap().ppm = 500.0;
         tick(&mut engine, 370 * MS);
         let epoch = engine.preparing.as_ref().unwrap();
-        assert_eq!(
-            epoch.next_time(48_000).unwrap(),
-            400 * MS + epoch.output_frames * 1_000_000_000 / 48_000
+        assert!(
+            epoch.next_time(48_000).unwrap()
+                < 400 * MS + epoch.output_frames * 1_000_000_000 / 48_000
         );
         assert!(engine.last_error.is_none());
+    }
+
+    #[test]
+    fn internal_fault_does_not_revoke_commands_after_explicit_invalidation() {
+        let generation = AtomicU64::new(4);
+        assert_eq!(revoke_generation(&generation, 4), 5);
+        // invalidate() and a fresh Prepare raced an old in-flight conversion.
+        generation.store(6, Ordering::Release);
+        assert_eq!(revoke_generation(&generation, 5), 6);
+        assert_eq!(generation.load(Ordering::Acquire), 6);
+    }
+
+    #[tokio::test]
+    async fn shutdown_completes_after_output_drop_while_other_handle_clones_live() {
+        struct OutputDropped(Arc<AtomicBool>);
+        impl Drop for OutputDropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let emergency = Arc::new(Mutex::new(None));
+        let (commands, _inbox) = mpsc::channel(1);
+        let (_status, status) = watch::channel(engine().status(0));
+        let (done_tx, done) = watch::channel(false);
+        let handle = ReceiverHandle {
+            commands,
+            trip: Arc::new(AtomicBool::new(false)),
+            invalidated: Arc::new(AtomicBool::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
+            emergency: emergency.clone(),
+            disconnected: Arc::new(AtomicBool::new(false)),
+            budget: Arc::new(Budget::default()),
+            status,
+            done,
+            _lease: Arc::new(Lease {
+                shutdown: shutdown.clone(),
+                emergency,
+            }),
+        };
+        let registry_clone = handle.clone();
+        let completion_clone = handle.clone();
+        let output_dropped = dropped.clone();
+        let worker = std::thread::spawn(move || {
+            let _done = WorkerDone(done_tx);
+            let _output = OutputDropped(output_dropped);
+            while !shutdown.load(Ordering::Acquire) {
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+        });
+        handle.shutdown().await.unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(*registry_clone.done.borrow());
+        completion_clone.wait_closed().await.unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn late_join_requires_real_complete_history_and_future_pcm_before_ready() {
+        let mut missing = engine();
+        prepare(&mut missing, plan(1, 10, 0, 22_050));
+        // A post-join suffix alone cannot silently use zero history.
+        let block = pcm(&missing, 1, 8, 22_050, 2000);
+        missing.command(0, Command::Pcm(block), &mut Vec::new());
+        assert!(!missing.preparing.as_ref().unwrap().ready);
+        assert!(!missing.preparing.as_ref().unwrap().history_primed);
+        // Rewinding the broadcast sequence to retrieve history is forbidden.
+        let old = pcm(&missing, 1, 7, 22_050 - 128, 128);
+        missing.command(0, Command::Pcm(old), &mut Vec::new());
+        assert!(!missing.preparing.as_ref().unwrap().ready);
+        let mut engine = engine();
+        prepare(&mut engine, plan(1, 10, 0, 22_050));
+        let history = pcm(&engine, 1, 8, 22_050 - 128, 128);
+        engine.command(0, Command::Pcm(history), &mut Vec::new());
+        assert!(!engine.preparing.as_ref().unwrap().ready);
+        assert_eq!(engine.preparing.as_ref().unwrap().sequence, None);
+        let future = pcm(&engine, 1, 9, 22_050, 2000);
+        let mut events = Vec::new();
+        engine.command(0, Command::Pcm(future), &mut events);
+        assert!(matches!(events.as_slice(), [ReceiverEvent::Ready { .. }]));
+        let epoch = engine.preparing.as_ref().unwrap();
+        assert!(epoch.history.iter().all(|sample| *sample == 0.5));
+        assert!(epoch.history_primed);
+        assert_eq!(epoch.converter.counts(), (0, 0));
+    }
+
+    #[test]
+    fn speculative_prepares_cannot_evict_the_current_epoch_contract() {
+        let mut engine = engine();
+        let initial = plan(1, 10, 400 * MS, 0);
+        prepare(&mut engine, initial.clone());
+        feed(&mut engine, 1, 0, 30_000);
+        commit(&mut engine, 0, &initial);
+        tick(&mut engine, 400 * MS);
+        assert_eq!(engine.current.as_ref().unwrap().plan.epoch.0, 1);
+        for epoch in 2..=5 {
+            let future = plan(epoch, 10 + epoch, 1000 * MS, 0);
+            engine.command(
+                400 * MS,
+                Command::Prepare(identity(), future),
+                &mut Vec::new(),
+            );
+        }
+        assert!(engine.contracts.iter().any(|(epoch, ..)| *epoch == 1));
+        let mut changed = plan(1, 20, 400 * MS, 44_100);
+        changed.format.sample_rate = 48_000;
+        let mut events = Vec::new();
+        engine.command(400 * MS, Command::Prepare(identity(), changed), &mut events);
+        assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
+        assert!(engine.output.as_ref().unwrap().telemetry().muted);
+    }
+
+    #[test]
+    fn pending_suspend_is_frozen_and_does_not_require_pcm_ready() {
+        for changed in [false, true] {
+            let mut engine = engine();
+            let mut events = Vec::new();
+            let suspend = |id, at| Command::Suspend {
+                identity: identity(),
+                epoch: 2,
+                plan_id: id,
+                effective_at: at,
+            };
+            engine.command(0, suspend(10, 400 * MS), &mut events);
+            assert!(events.is_empty());
+            assert!(engine.suspension.is_some());
+            engine.command(0, suspend(10, 400 * MS), &mut events);
+            assert!(events.is_empty());
+            engine.command(
+                0,
+                suspend(if changed { 11 } else { 10 }, 500 * MS),
+                &mut events,
+            );
+            assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
+            assert!(engine.suspension.is_none());
+        }
+        let mut engine = engine();
+        engine.command(
+            0,
+            Command::Suspend {
+                identity: identity(),
+                epoch: 2,
+                plan_id: 10,
+                effective_at: 400 * MS,
+            },
+            &mut Vec::new(),
+        );
+        assert!(tick(&mut engine, 400 * MS).is_empty());
+        assert!(engine.suspension.is_none());
+        assert_eq!(engine.epoch_floor, 2);
+        assert!(engine.output.as_ref().unwrap().telemetry().muted);
+    }
+
+    #[test]
+    fn scheduled_pause_keeps_its_complete_tail_and_a_fresh_run_can_resume() {
+        let mut engine = engine();
+        let first = plan(1, 10, 400 * MS, 0);
+        prepare(&mut engine, first.clone());
+        // Producer ends exactly at the 700ms boundary, with no future PCM
+        // available to satisfy the converter's final 128-frame lookahead.
+        feed(&mut engine, 1, 0, 13_230);
+        commit(&mut engine, 0, &first);
+        engine.command(
+            0,
+            Command::Suspend {
+                identity: identity(),
+                epoch: 2,
+                plan_id: 11,
+                effective_at: 700 * MS,
+            },
+            &mut Vec::new(),
+        );
+        for millis in (0..=700).step_by(10) {
+            let now = millis * MS;
+            assert!(tick(&mut engine, now).is_empty(), "{:?}", engine.last_error);
+            let at = now + 20 * MS;
+            let samples = engine.output.as_mut().unwrap().render(at, 480);
+            if (400 * MS..700 * MS).contains(&at) {
+                assert!(samples.iter().all(|sample| *sample > 0.4));
+            } else {
+                assert!(samples.iter().all(|sample| *sample == 0.0));
+            }
+        }
+        assert_eq!(
+            engine.output.as_ref().unwrap().telemetry().underrun_frames,
+            0
+        );
+        assert!(engine.current.is_none());
+        assert!(engine.preparing.is_none());
+        let next = plan(3, 12, 1100 * MS, 0);
+        engine.command(
+            700 * MS,
+            Command::Prepare(identity(), next.clone()),
+            &mut Vec::new(),
+        );
+        let block = pcm(&engine, 3, 0, 0, 16_000);
+        engine.command(700 * MS, Command::Pcm(block), &mut Vec::new());
+        assert!(engine.preparing.as_ref().unwrap().ready);
+        assert!(commit(&mut engine, 700 * MS, &next).is_empty());
+        for millis in (710..=1140).step_by(10) {
+            let now = millis * MS;
+            assert!(tick(&mut engine, now).is_empty(), "{:?}", engine.last_error);
+            let at = now + 20 * MS;
+            let samples = engine.output.as_mut().unwrap().render(at, 480);
+            if at < 1100 * MS {
+                assert!(samples.iter().all(|sample| *sample == 0.0));
+            } else {
+                assert!(samples.iter().all(|sample| *sample > 0.4));
+            }
+        }
+        assert_eq!(engine.current.as_ref().unwrap().plan.epoch.0, 3);
+    }
+
+    #[test]
+    fn published_eof_never_zero_fills_a_missing_real_source_frame() {
+        let mut engine = engine();
+        let first = plan(1, 10, 400 * MS, 0);
+        prepare(&mut engine, first.clone());
+        feed(&mut engine, 1, 0, 13_229); // EOF needs 13_230 real frames.
+        commit(&mut engine, 0, &first);
+        engine.command(
+            0,
+            Command::Suspend {
+                identity: identity(),
+                epoch: 2,
+                plan_id: 11,
+                effective_at: 700 * MS,
+            },
+            &mut Vec::new(),
+        );
+        let mut faulted = false;
+        for millis in (0..700).step_by(10) {
+            let now = millis * MS;
+            let events = tick(&mut engine, now);
+            if !events.is_empty() {
+                assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
+                assert!(engine.last_error.as_ref().unwrap().contains("underrun"));
+                faulted = true;
+                break;
+            }
+            engine.output.as_mut().unwrap().render(now + 20 * MS, 480);
+        }
+        assert!(faulted);
+        assert!(engine.output.as_ref().unwrap().telemetry().muted);
+    }
+
+    #[test]
+    fn ordinary_epoch_switch_flushes_the_complete_old_source_tail() {
+        let mut engine = engine();
+        let first = plan(1, 10, 400 * MS, 0);
+        prepare(&mut engine, first.clone());
+        feed(&mut engine, 1, 0, 13_230);
+        commit(&mut engine, 0, &first);
+        for millis in (0..=850).step_by(10) {
+            let now = millis * MS;
+            assert!(tick(&mut engine, now).is_empty(), "{:?}", engine.last_error);
+            if now == 400 * MS {
+                let next = plan(2, 11, 700 * MS, 0);
+                engine.command(
+                    now,
+                    Command::Prepare(identity(), next.clone()),
+                    &mut Vec::new(),
+                );
+                let block = pcm(&engine, 2, 0, 0, 16_000);
+                engine.command(now, Command::Pcm(block), &mut Vec::new());
+                assert!(engine.preparing.as_ref().unwrap().ready);
+                assert!(commit(&mut engine, now, &next).is_empty());
+            }
+            let at = now + 20 * MS;
+            let samples = engine.output.as_mut().unwrap().render(at, 480);
+            if at >= 400 * MS {
+                assert!(
+                    samples.iter().all(|sample| *sample > 0.4),
+                    "tail gap at {at}"
+                );
+            }
+        }
+        assert_eq!(
+            engine.output.as_ref().unwrap().telemetry().underrun_frames,
+            0
+        );
+        assert_eq!(engine.current.as_ref().unwrap().plan.epoch.0, 2);
+    }
+
+    #[test]
+    fn pending_suspend_caps_metadata_at_real_eof_after_small_mapping_updates() {
+        for stop in [700 * MS, 700 * MS + 12_345] {
+            let mut engine = engine();
+            let first = plan(1, 10, 400 * MS, 0);
+            prepare(&mut engine, first.clone());
+            let frames = ((stop - 400 * MS) as u128 * 44_100 / 1_000_000_000) as usize;
+            feed(&mut engine, 1, 0, frames);
+            commit(&mut engine, 0, &first);
+            engine.command(
+                0,
+                Command::Suspend {
+                    identity: identity(),
+                    epoch: 2,
+                    plan_id: 11,
+                    effective_at: stop,
+                },
+                &mut Vec::new(),
+            );
+            for millis in 0..=702 {
+                let now = millis * MS;
+                if millis == 600 {
+                    let mut updated = mapping(now, 0.0);
+                    updated.offset_ns = 2 * MS as i64;
+                    engine.command(now, Command::Mapping(updated), &mut Vec::new());
+                }
+                assert!(
+                    tick(&mut engine, now).is_empty(),
+                    "stop {stop}, now {now}: {:?}",
+                    engine.last_error
+                );
+                engine.output.as_mut().unwrap().render(now + 20 * MS, 48);
+            }
+            assert_eq!(engine.epoch_floor, 2);
+            assert_eq!(
+                engine.output.as_ref().unwrap().telemetry().underrun_frames,
+                0
+            );
+            assert!(engine.last_error.is_none());
+            assert!(engine.output.as_ref().unwrap().telemetry().muted);
+        }
+    }
+
+    #[test]
+    fn accumulated_small_mapping_offsets_revoke_a_frozen_sample_grid() {
+        let mut engine = engine();
+        let plan = plan(1, 10, 400 * MS, 0);
+        prepare(&mut engine, plan.clone());
+        feed(&mut engine, 1, 0, 30_000);
+        commit(&mut engine, 0, &plan);
+        tick(&mut engine, 350 * MS);
+        for step in 1..=13 {
+            let mut clock = mapping(350 * MS, 0.0);
+            clock.offset_ns = step * 240_000;
+            let mut events = Vec::new();
+            engine.command(350 * MS, Command::Mapping(clock), &mut events);
+            events.extend(tick(&mut engine, 350 * MS));
+            if step <= 12 {
+                assert!(events.is_empty(), "step {step}: {:?}", engine.last_error);
+            } else {
+                assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
+                assert!(engine.output.as_ref().unwrap().telemetry().muted);
+                assert!(engine
+                    .last_error
+                    .as_ref()
+                    .unwrap()
+                    .contains("phase diverged"));
+            }
+        }
+    }
+
+    #[test]
+    fn eight_virtual_hours_keep_a_measured_device_cursor_and_queue_bounded() {
+        // Production cursor + submission policy, virtual 48kHz hardware counts.
+        // Avoid billions of sinc operations; separate converter/consumer tests
+        // cover real samples and the output queue over the same duration.
+        for ppm in [-500.0, 500.0] {
+            let period = 1e9 / (48_000.0 * (1.0 + ppm * 1e-6));
+            let mut cursor = DeviceCursor {
+                anchor: 400 * MS,
+                fraction: 0.0,
+                frames: 0,
+                period,
+            };
+            let mut submitted = 0u64;
+            let mut phase = 0.0;
+            let ratio = 1.0 + relative_drift_ppm(0.0, ppm).unwrap() * 1e-6;
+            let mut max_queue = 0;
+            for tick in 0..=2_880_000u64 {
+                let now = tick * 10 * MS;
+                let hardware = (now.saturating_sub(400 * MS) as f64 / period).floor() as u64;
+                assert!(hardware <= submitted, "underrun at {now}, ppm {ppm}");
+                let mut queued = (submitted - hardware) as usize;
+                let horizon = now + 100 * MS;
+                loop {
+                    let frames =
+                        submission_frames(cursor.time().unwrap(), now, horizon, period, queued);
+                    if frames == 0 {
+                        break;
+                    }
+                    cursor.frames += frames as u64;
+                    submitted += frames as u64;
+                    queued += frames;
+                    phase += frames as f64 * ratio;
+                }
+                max_queue = max_queue.max(queued);
+                assert!(queued <= 4_804);
+                if now >= 400 * MS {
+                    assert!(queued > 4_300);
+                    assert!(cursor.time().unwrap() <= horizon + period.ceil() as u64);
+                    // A slowly revised offset remains below the 3ms rejoin
+                    // threshold; adjacent mapping steps are under 10ns.
+                    let offset = (tick as f64 / 300_000.0).sin() * 2_000_000.0;
+                    let actual_ns = phase * 1e9 / 48_000.0;
+                    let mapped_ns = (cursor.time().unwrap() - 400 * MS) as f64 + offset;
+                    assert!((actual_ns - mapped_ns).abs() < MAX_PHASE_ERROR_NS);
+                }
+            }
+            assert!(max_queue >= 4_790);
+        }
     }
 
     #[test]
@@ -1115,7 +1928,9 @@ mod tests {
             output.ppm = device_ppm;
             let epoch = engine.preparing.as_mut().unwrap();
             for _ in 0..64 {
-                epoch.submit(output, mapping(0, 0.0), 0, 1500 * MS).unwrap();
+                epoch
+                    .submit(output, mapping(0, 0.0), 0, 1500 * MS, None, None)
+                    .unwrap();
             }
             let frames = epoch.output_frames;
             // Production consumer reads the submitted continuous run. Changes
@@ -1161,11 +1976,13 @@ struct Engine<D: DeviceOutput> {
     current: Option<Epoch>,
     preparing: Option<Epoch>,
     intent: Option<Plan>,
+    suspension: Option<(u64, u64, u64, u64)>,
+    faults: u64,
     /// Applied epochs never move backwards, while per-endpoint rejoin tokens
     /// may replace the same epoch without changing the room's media epoch.
     epoch_floor: u64,
     latest_plan_id: Option<u64>,
-    contracts: VecDeque<(u64, u64, AudioFormat, u64)>,
+    contracts: VecDeque<(u64, u64, AudioFormat, u64, Option<u64>)>,
     unmatched: VecDeque<(u64, Pcm)>,
     volume: f32,
     last_error: Option<String>,
@@ -1176,6 +1993,26 @@ struct Engine<D: DeviceOutput> {
 }
 
 impl<D: DeviceOutput> Engine<D> {
+    fn bounded_gate_time(&self, host_now: u64) -> Result<Option<u64>, &'static str> {
+        let Some((_, _, _, stop)) = self.suspension else {
+            return Ok(Some(host_now));
+        };
+        // ReceiverGate applies a due committed preparation before presenting
+        // frames, so select the epoch it will use on this exact advance.
+        let next = self.preparing.as_ref().filter(|p| {
+            p.committed
+                && frame_time(
+                    p.plan.anchor_ns.0,
+                    p.plan.join_frame.0,
+                    p.plan.format.sample_rate,
+                )
+                .is_some_and(|start| host_now >= start)
+        });
+        let Some(epoch) = next.or(self.current.as_ref()) else {
+            return Ok(Some(host_now));
+        };
+        Ok(epoch.gate_eof_limit(stop)?.map(|limit| host_now.min(limit)))
+    }
     fn new(mut output: D, identity: StreamIdentity, budget: Arc<Budget>) -> Self {
         output.mute();
         let mut gate = ReceiverGate::new(SUBMIT_MARGIN_NS, 500_000_000, INPUT_FRAME_LIMIT as u32);
@@ -1195,6 +2032,8 @@ impl<D: DeviceOutput> Engine<D> {
             current: None,
             preparing: None,
             intent: None,
+            suspension: None,
+            faults: 0,
             epoch_floor: 0,
             latest_plan_id: None,
             contracts: VecDeque::new(),
@@ -1209,12 +2048,14 @@ impl<D: DeviceOutput> Engine<D> {
     }
 
     fn fail(&mut self, reason: &str, events: &mut Vec<ReceiverEvent>) {
+        self.faults = self.faults.wrapping_add(1);
         if let Some(output) = self.output.as_mut() {
             output.mute();
         }
         self.current = None;
         self.preparing = None;
         self.intent = None;
+        self.suspension = None;
         self.unmatched.clear();
         self.gate.input(
             0,
@@ -1301,6 +2142,41 @@ impl<D: DeviceOutput> Engine<D> {
             } if self.connected && identity == self.identity => {
                 self.commit(now, epoch, plan_id, effective_at, events);
             }
+            Command::Suspend {
+                identity,
+                epoch,
+                plan_id,
+                effective_at,
+            } if self.connected && identity == self.identity => {
+                if let Some((e, p, _, h)) = self.suspension {
+                    if e != epoch || p != plan_id || h != effective_at {
+                        self.fail("immutable pending suspension changed", events);
+                    }
+                    return;
+                }
+                if epoch < self.epoch_floor || self.latest_plan_id.is_some_and(|id| plan_id <= id) {
+                    return;
+                }
+                let local = self
+                    .mapping
+                    .filter(|m| m.valid_at(now))
+                    .and_then(|m| m.local_time(effective_at));
+                if !self.output_ready(now)
+                    || local.is_none_or(|local| now.saturating_add(self.lead(now)) >= local)
+                    || self
+                        .preparing
+                        .as_ref()
+                        .is_some_and(|p| p.committed && local.is_some_and(|local| local <= p.start))
+                {
+                    self.fail("suspension missed its presentation deadline", events);
+                    return;
+                }
+                self.latest_plan_id = Some(plan_id);
+                self.suspension = Some((epoch, plan_id, local.unwrap(), effective_at));
+                if let Some(output) = self.output.as_mut() {
+                    output.silence_from(local.unwrap());
+                }
+            }
             Command::Pcm(pcm) if self.connected && pcm.block.identity == self.identity => {
                 self.pcm(now, pcm, events)
             }
@@ -1337,7 +2213,7 @@ impl<D: DeviceOutput> Engine<D> {
             self.fail("invalid plan format", events);
             return;
         }
-        if let Some((_, anchor, format, join)) = self
+        if let Some((_, anchor, format, join, _)) = self
             .contracts
             .iter_mut()
             .find(|(epoch, ..)| *epoch == plan.epoch.0)
@@ -1356,13 +2232,28 @@ impl<D: DeviceOutput> Engine<D> {
                 plan.anchor_ns.0,
                 plan.format,
                 plan.join_frame.0,
+                None,
             ));
             while self.contracts.len() > 4 {
-                self.contracts.pop_front();
+                let current = self.current.as_ref().map(|p| p.plan.epoch.0);
+                let preparing = self.preparing.as_ref().map(|p| p.plan.epoch.0);
+                let intent = self.intent.as_ref().map(|p| p.epoch.0);
+                let removable = self.contracts.iter().position(|(epoch, ..)| {
+                    *epoch != self.epoch_floor
+                        && Some(*epoch) != current
+                        && Some(*epoch) != preparing
+                        && Some(*epoch) != intent
+                        && *epoch != plan.epoch.0
+                });
+                if let Some(index) = removable {
+                    self.contracts.remove(index);
+                } else {
+                    break;
+                }
             }
         }
         self.latest_plan_id = Some(plan.plan_id.0);
-        if self.preparing.as_ref().is_some_and(|p| p.committed) {
+        if self.suspension.is_some() || self.preparing.as_ref().is_some_and(|p| p.committed) {
             // Only the newest third intent survives; it receives neither PCM
             // nor Ready until the committed preparation actually switches.
             self.intent = Some(plan);
@@ -1428,17 +2319,34 @@ impl<D: DeviceOutput> Engine<D> {
         if !self.output_ready(now) {
             return;
         }
+        let Some(gate_now) = self.mapping.and_then(|mapping| mapping.host_time(now)) else {
+            self.fail("network clock cannot map the current time", events);
+            return;
+        };
         let lead = self.lead(now);
         let Some(epoch) = self.preparing.as_mut().filter(|p| !p.ready) else {
             return;
         };
+        let required = u64::from(epoch.plan.format.sample_rate).div_ceil(50)
+            + epoch.converter.lookahead_frames();
+        if epoch.expected_frame.saturating_sub(epoch.plan.join_frame.0) < required {
+            return;
+        }
+        match epoch.prime_history() {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(reason) => {
+                self.fail(reason, events);
+                return;
+            }
+        }
         if epoch.start <= now.saturating_add(lead) {
             self.fail("clock became ready after plan submission deadline", events);
             return;
         }
         let plan = &epoch.plan;
         self.gate.input(
-            now,
+            gate_now,
             GateInput::Format {
                 session: GATE_SESSION,
                 epoch: plan.epoch.0,
@@ -1450,13 +2358,17 @@ impl<D: DeviceOutput> Engine<D> {
             },
         );
         let actions = self.gate.input(
-            now,
+            gate_now,
             GateInput::Plan {
                 session: GATE_SESSION,
                 plan: PlanDesc {
                     epoch: plan.epoch.0,
                     plan_id: plan.plan_id.0,
-                    anchor_ns: epoch.local_anchor,
+                    // Metadata gate time is real current time in the host domain.
+                    // This preserves the source frame rate under host/local drift
+                    // and permits anchors preceding the client's Instant origin.
+                    // Device submissions use the separate mapped local `start`.
+                    anchor_ns: plan.anchor_ns.0,
                     join_frame: plan.join_frame.0,
                 },
             },
@@ -1524,12 +2436,14 @@ impl<D: DeviceOutput> Engine<D> {
             return;
         }
         let actions = self.gate.input(
-            now,
+            self.mapping
+                .and_then(|mapping| mapping.host_time(now))
+                .unwrap_or(now),
             GateInput::Commit {
                 session: GATE_SESSION,
                 epoch,
                 plan_id,
-                effective_at: local,
+                effective_at,
             },
         );
         if actions
@@ -1543,7 +2457,20 @@ impl<D: DeviceOutput> Engine<D> {
     }
 
     fn pcm(&mut self, now: u64, mut pcm: Pcm, events: &mut Vec<ReceiverEvent>) {
+        let gate_now = self
+            .mapping
+            .and_then(|mapping| mapping.host_time(now))
+            .unwrap_or(now);
         let block = &pcm.block;
+        let previous_sequence = self
+            .contracts
+            .iter()
+            .find(|(epoch, ..)| *epoch == block.epoch)
+            .and_then(|(_, _, _, _, sequence)| *sequence);
+        if previous_sequence.is_some_and(|sequence| block.sequence <= sequence) {
+            self.discarded += 1;
+            return;
+        }
         let slot = if self
             .current
             .as_ref()
@@ -1575,11 +2502,25 @@ impl<D: DeviceOutput> Engine<D> {
             }
             return;
         };
-        // Broadcast PCM may precede a late join. It carries the media epoch,
-        // not a join token. Skip its prefix without establishing sequence state.
-        let join = epoch.plan.join_frame.0;
-        if block.end_frame() <= join {
+        if block.format_id != epoch.plan.format.id || block.channels != epoch.plan.format.channels {
             self.discarded += 1;
+            return;
+        }
+        // The sinc window needs real samples immediately before a late join.
+        // Historical packets advance the wire highwater but never establish
+        // the post-join contiguous sequence cursor or consume a PCM slot.
+        let join = epoch.plan.join_frame.0;
+        epoch.collect_history(block);
+        if block.end_frame() <= join {
+            if let Some((_, _, _, _, high)) = self
+                .contracts
+                .iter_mut()
+                .find(|(known, ..)| *known == block.epoch)
+            {
+                *high = Some(block.sequence);
+            }
+            self.discarded += 1;
+            self.ready(now, events);
             return;
         }
         if epoch.sequence.is_none() && block.frame_index < join {
@@ -1587,9 +2528,7 @@ impl<D: DeviceOutput> Engine<D> {
         }
         let frame_index = block.frame_index + pcm.offset_frames as u64;
         let frame_count = block.frame_count() - pcm.offset_frames as u32;
-        if block.format_id != epoch.plan.format.id
-            || block.channels != epoch.plan.format.channels
-            || frame_index < epoch.expected_frame
+        if frame_index < epoch.expected_frame
             || epoch
                 .sequence
                 .is_some_and(|sequence| block.sequence <= sequence)
@@ -1609,7 +2548,7 @@ impl<D: DeviceOutput> Engine<D> {
         epoch.expected_frame = block.end_frame();
         epoch.sequence = Some(block.sequence);
         let actions = self.gate.input(
-            now,
+            gate_now,
             GateInput::Pcm {
                 session: GATE_SESSION,
                 epoch: block.epoch,
@@ -1627,9 +2566,38 @@ impl<D: DeviceOutput> Engine<D> {
             return;
         }
         epoch.pcm.push_back(pcm);
+        if let Some((_, _, _, _, high)) = self
+            .contracts
+            .iter_mut()
+            .find(|(known, ..)| *known == epoch.plan.epoch.0)
+        {
+            *high = epoch.sequence;
+        }
+        self.ready(now, events);
     }
 
     fn tick(&mut self, now: u64, events: &mut Vec<ReceiverEvent>) {
+        if self.suspension.is_some_and(|(_, _, local, _)| now >= local) {
+            let (epoch, _, _, _) = self.suspension.take().unwrap();
+            let intent = self.intent.take();
+            if let Some(output) = self.output.as_mut() {
+                output.mute();
+            }
+            self.current = None;
+            self.preparing = None;
+            self.unmatched.clear();
+            self.epoch_floor = self.epoch_floor.max(epoch);
+            self.gate.input(
+                0,
+                GateInput::Rebind {
+                    session: GATE_SESSION,
+                },
+            );
+            self.last_error = None;
+            if let Some(plan) = intent {
+                self.install_plan(now, plan, events);
+            }
+        }
         let Some(output) = &self.output else {
             return;
         };
@@ -1698,7 +2666,21 @@ impl<D: DeviceOutput> Engine<D> {
             return;
         }
         self.ready(now, events);
-        let actions = self.gate.advance(now);
+        let Some(gate_now) = self
+            .mapping
+            .filter(|mapping| mapping.valid_at(now))
+            .and_then(|mapping| mapping.host_time(now))
+        else {
+            return;
+        };
+        let actions = match self.bounded_gate_time(gate_now) {
+            Ok(Some(time)) => self.gate.advance(time),
+            Ok(None) => Vec::new(),
+            Err(reason) => {
+                self.fail(reason, events);
+                return;
+            }
+        };
         if actions.iter().any(|action| {
             matches!(
                 action,
@@ -1731,27 +2713,50 @@ impl<D: DeviceOutput> Engine<D> {
         let horizon = now
             .saturating_add(self.device_lead().unwrap_or(0))
             .saturating_add(HORIZON_NS);
-        let boundary = self
+        let stop = self
             .preparing
             .as_ref()
             .filter(|p| p.committed)
-            .map(|p| p.start)
-            .unwrap_or(u64::MAX);
+            .and_then(|p| {
+                Some((
+                    p.start,
+                    frame_time(
+                        p.plan.anchor_ns.0,
+                        p.plan.join_frame.0,
+                        p.plan.format.sample_rate,
+                    )?,
+                ))
+            })
+            .into_iter()
+            .chain(self.suspension.map(|(_, _, local, host)| (local, host)))
+            .min_by_key(|(local, _)| *local);
+        let boundary = stop.map_or(u64::MAX, |(local, _)| local);
         let output = self.output.as_mut().unwrap();
+        let silence_from = self.suspension.map(|(_, _, local, _)| local);
         let result = (|| {
             if let Some(current) = self.current.as_mut() {
-                current.submit(output, mapping, now, horizon.min(boundary))?;
+                current.submit(
+                    output,
+                    mapping,
+                    now,
+                    horizon.min(boundary),
+                    stop.map(|(_, host)| host),
+                    silence_from,
+                )?;
                 if let Some(baseline) = current.played_baseline {
                     let frames = output.telemetry().played_frames.saturating_sub(baseline);
-                    self.played_frame = current.plan.join_frame.0.saturating_add(
-                        (u128::from(frames) * u128::from(current.plan.format.sample_rate)
-                            / u128::from(output.format().sample_rate))
-                        .min(u128::from(u64::MAX)) as u64,
-                    );
+                    self.played_frame = current.played_frame(frames.min(current.output_frames));
                 }
             }
             if let Some(preparing) = self.preparing.as_mut() {
-                preparing.submit(output, mapping, now, horizon)?;
+                preparing.submit(
+                    output,
+                    mapping,
+                    now,
+                    horizon.min(silence_from.unwrap_or(u64::MAX)),
+                    self.suspension.map(|(_, _, _, host)| host),
+                    silence_from,
+                )?;
             }
             Ok::<_, String>(())
         })();

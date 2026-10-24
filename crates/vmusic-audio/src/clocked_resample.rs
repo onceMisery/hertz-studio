@@ -15,7 +15,7 @@
 //! 时序口径：产生输出帧需要 `half = TAPS/2` 帧输入前视（lookahead），输出
 //! 帧 y 对应输入时间轴上的绝对相位 pos（从 0 起）。滤波器对阶跃脉冲的峰值
 //! 落在 pos = 脉冲帧号处（见脉冲回归）；`reset` 后从相位 0 重新开始，预热
-//! 策略（用静音填充转换历史）由接收端调度决定，不在这里隐含。
+//! 策略由接收端调度决定；晚入可用 `prime_history` 提供真实的过去源帧。
 
 /// 每输出帧访问的输入帧数（偶数；前视 = TAPS/2）。
 const TAPS: usize = 256;
@@ -55,6 +55,8 @@ pub enum Error {
     NonFinite,
     #[error("clocked history overflow: caller produced faster than consumed")]
     Overflow,
+    #[error("clocked history can only be primed before processing")]
+    Started,
 }
 
 /// 可变比流式转换器。通道交错布局，与 [`crate::resample::Converter`] 一致。
@@ -124,7 +126,7 @@ impl ClockedConverter {
         self.ratio
     }
 
-    /// 目标漂移（ppm）。正值表示接收端设备时钟偏快，需要更多输入帧/输出帧。
+    /// 目标变比修正（ppm）。正值表示每个输出帧需要更多输入帧。
     pub fn set_drift_ppm(&mut self, ppm: f64) {
         let clamped = ppm.clamp(-5000.0, 5000.0);
         self.target_ratio = self.nominal_ratio * (1.0 + clamped * 1e-6);
@@ -138,6 +140,32 @@ impl ClockedConverter {
     /// 已消耗/已产生的累计帧数（重置于 `reset`）。
     pub fn counts(&self) -> (u64, u64) {
         (self.consumed, self.produced)
+    }
+
+    /// Source position of the next output sample, relative to the first
+    /// post-join input frame. This is the phase accumulated by the converter,
+    /// including ratio slew; callers can compare it with mapped device time.
+    pub fn source_phase(&self) -> f64 {
+        self.pos
+    }
+
+    /// Replace the initial history with exactly `lookahead_frames()` real
+    /// interleaved source frames immediately preceding phase zero. This does
+    /// not consume input, produce output, or change phase. At media frame zero
+    /// the default zero history is valid; a shorter media prefix must be
+    /// explicitly zero-padded by the caller. No allocation is performed.
+    pub fn prime_history(&mut self, history: &[f32]) -> Result<(), Error> {
+        if self.consumed != 0 || self.produced != 0 {
+            return Err(Error::Started);
+        }
+        if history.len() != self.half * self.channels {
+            return Err(Error::Alignment);
+        }
+        if history.iter().any(|value| !value.is_finite()) {
+            return Err(Error::NonFinite);
+        }
+        self.buf.copy_from_slice(history);
+        Ok(())
     }
 
     /// 丢弃转换历史，从相位 0 重新开始（换代际/重同步用）。
@@ -332,6 +360,37 @@ mod tests {
         assert_eq!(c.process(&bad, &mut out).unwrap_err(), Error::Alignment);
         let nan = vec![f32::NAN; 8];
         assert_eq!(c.process(&nan, &mut out).unwrap_err(), Error::NonFinite);
+    }
+
+    #[test]
+    fn real_history_matches_an_already_running_converter_at_join() {
+        let input = sine(0.1, 48_000, 1379.0, 2);
+        let join = 512;
+        let mut continuous = ClockedConverter::new(48_000, 48_000, 2).unwrap();
+        let mut reference = vec![0.0; 2048 * 2];
+        continuous.process(&input, &mut reference).unwrap();
+        let mut joined = ClockedConverter::new(48_000, 48_000, 2).unwrap();
+        let history = joined.lookahead_frames() as usize;
+        joined
+            .prime_history(&input[(join - history) * 2..join * 2])
+            .unwrap();
+        assert_eq!(joined.counts(), (0, 0));
+        assert_eq!(joined.source_phase(), 0.0);
+        let mut output = vec![0.0; 1024 * 2];
+        joined.process(&input[join * 2..], &mut output).unwrap();
+        assert_eq!(output, reference[join * 2..(join + 1024) * 2]);
+        assert_eq!(joined.source_phase(), 1024.0);
+        assert_eq!(
+            joined.prime_history(&vec![0.0; history * 2]),
+            Err(Error::Started)
+        );
+        joined.reset();
+        assert_eq!(joined.prime_history(&[0.0]), Err(Error::Alignment));
+        assert_eq!(
+            joined.prime_history(&vec![f32::NAN; history * 2]),
+            Err(Error::NonFinite)
+        );
+        joined.prime_history(&vec![0.0; history * 2]).unwrap();
     }
 
     #[test]

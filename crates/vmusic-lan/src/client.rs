@@ -380,7 +380,7 @@ async fn run_control(
                         if text.len() > 2048 { return Err(ClientError::Protocol); }
                         chat.push(text);
                     },
-                    ControlFrame::Prepare { .. } | ControlFrame::Commit { .. } | ControlFrame::Resync { .. } | ControlFrame::Response { .. } | ControlFrame::Notification { .. } => {
+                    ControlFrame::Prepare { .. } | ControlFrame::Commit { .. } | ControlFrame::Suspend { .. } | ControlFrame::Resync { .. } | ControlFrame::Response { .. } | ControlFrame::Notification { .. } => {
                         controls.try_send(frame).map_err(|_| ClientError::Connection)?;
                     },
                     ControlFrame::End { .. } => return Err(ClientError::Connection),

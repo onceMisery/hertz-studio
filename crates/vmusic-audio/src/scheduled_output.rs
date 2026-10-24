@@ -115,6 +115,7 @@ struct Shared {
     clear_before: AtomicU64,
     generation: AtomicU64,
     muted: AtomicBool,
+    silence_from: AtomicU64,
     device_error: AtomicBool,
     volume: AtomicU32,
     clock_sequence: AtomicU64,
@@ -137,6 +138,7 @@ impl Shared {
     fn clear(&self, written: u64) {
         self.clear_before.fetch_max(written, Ordering::AcqRel);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.silence_from.store(u64::MAX, Ordering::Release);
     }
 
     fn status(&self, status: ClockStatus) {
@@ -229,15 +231,47 @@ impl Shared {
 struct Schedule {
     start_ns: u64,
     frames: u64,
+    /// None preserves the exact integer nominal-rate grid of `write_at`.
+    period_ns: Option<f64>,
+    fraction_ns: f64,
 }
 
 impl Schedule {
     fn time(self, frames: u64, rate: u32) -> Result<u64, OutputError> {
-        let offset = u128::from(frames) * 1_000_000_000 / u128::from(rate);
-        let offset = u64::try_from(offset).map_err(|_| OutputError::Overflow)?;
+        let offset = match self.period_ns {
+            Some(period) => {
+                let offset = frames as f64 * period + self.fraction_ns;
+                if !offset.is_finite() || offset >= u64::MAX as f64 {
+                    return Err(OutputError::Overflow);
+                }
+                offset.round() as u64
+            }
+            None => u64::try_from(u128::from(frames) * 1_000_000_000 / u128::from(rate))
+                .map_err(|_| OutputError::Overflow)?,
+        };
         self.start_ns
             .checked_add(offset)
             .ok_or(OutputError::Overflow)
+    }
+
+    fn reperiod(self, period_ns: Option<f64>, rate: u32) -> Result<Self, OutputError> {
+        let offset = match self.period_ns {
+            Some(period) => self.frames as f64 * period + self.fraction_ns,
+            None => self.frames as f64 * 1e9 / f64::from(rate),
+        };
+        if !offset.is_finite() || offset >= u64::MAX as f64 {
+            return Err(OutputError::Overflow);
+        }
+        let whole = offset.floor() as u64;
+        Ok(Self {
+            start_ns: self
+                .start_ns
+                .checked_add(whole)
+                .ok_or(OutputError::Overflow)?,
+            frames: 0,
+            period_ns,
+            fraction_ns: offset - whole as f64,
+        })
     }
 }
 
@@ -249,6 +283,21 @@ pub struct ScheduledPcmQueue {
     written: u64,
     generation: u64,
     schedule: Option<Schedule>,
+}
+
+/// Fail-closed control usable by transport cancellation while the output owner
+/// is decoding or converting. This handle cannot write PCM or enable output.
+#[derive(Clone)]
+pub struct EmergencyMute {
+    shared: Arc<Shared>,
+}
+
+impl EmergencyMute {
+    pub fn mute(&self) {
+        self.shared.muted.store(true, Ordering::Release);
+        self.shared
+            .clear(self.shared.written.load(Ordering::Acquire));
+    }
 }
 
 /// Unique SPSC consumer, owned by the native audio callback. Dropping this
@@ -293,6 +342,7 @@ impl ScheduledPcmQueue {
             clear_before: AtomicU64::new(0),
             generation: AtomicU64::new(0),
             muted: AtomicBool::new(true),
+            silence_from: AtomicU64::new(u64::MAX),
             device_error: AtomicBool::new(false),
             volume: AtomicU32::new(1.0f32.to_bits()),
             clock_sequence: AtomicU64::new(0),
@@ -342,6 +392,34 @@ impl ScheduledPcmQueue {
         samples: &[f32],
         now_local_ns: u64,
     ) -> Result<(), OutputError> {
+        self.write_inner(start_local_ns, samples, now_local_ns, None)
+    }
+
+    /// Continuous device-clock scheduling. The period is measured local
+    /// nanoseconds per physical output frame, within 1% of nominal. Updating
+    /// it starts a new local segment at the previous segment's exact end;
+    /// packet boundaries never accumulate nanosecond rounding drift.
+    pub fn write_clocked_at(
+        &mut self,
+        start_local_ns: u64,
+        samples: &[f32],
+        now_local_ns: u64,
+        ns_per_frame: f64,
+    ) -> Result<(), OutputError> {
+        let nominal = 1e9 / f64::from(self.format.sample_rate);
+        if !ns_per_frame.is_finite() || !(nominal * 0.99..=nominal * 1.01).contains(&ns_per_frame) {
+            return Err(OutputError::Format);
+        }
+        self.write_inner(start_local_ns, samples, now_local_ns, Some(ns_per_frame))
+    }
+
+    fn write_inner(
+        &mut self,
+        start_local_ns: u64,
+        samples: &[f32],
+        now_local_ns: u64,
+        period_ns: Option<f64>,
+    ) -> Result<(), OutputError> {
         if self.shared.device_error.load(Ordering::Acquire) {
             return Err(OutputError::DeviceError);
         }
@@ -367,12 +445,18 @@ impl ScheduledPcmQueue {
         let mut schedule = Schedule {
             start_ns: start_local_ns,
             frames: 0,
+            period_ns,
+            fraction_ns: 0.0,
         };
         if let Some(previous) = self.schedule {
             let end = previous.time(previous.frames, self.format.sample_rate)?;
             let half_frame_ns = 500_000_000 / u64::from(self.format.sample_rate);
             if start_local_ns.abs_diff(end) <= half_frame_ns {
-                schedule = previous;
+                schedule = if previous.period_ns == period_ns {
+                    previous
+                } else {
+                    previous.reperiod(period_ns, self.format.sample_rate)?
+                };
             } else if start_local_ns < end {
                 return Err(OutputError::OutOfOrder);
             }
@@ -453,6 +537,14 @@ impl ScheduledPcmQueue {
         self.shared.muted.store(false, Ordering::Release);
     }
 
+    /// A published pause/stop boundary. The callback may render beyond it
+    /// before the worker's local clock reaches it; those frames are planned
+    /// silence, while missing frames before it remain genuine underruns.
+    /// Clearing/muting retires this boundary along with the current run.
+    pub fn silence_from(&mut self, local_ns: u64) {
+        self.shared.silence_from.store(local_ns, Ordering::Release);
+    }
+
     pub fn set_local_volume(&mut self, volume: f32) -> Result<(), OutputError> {
         if !volume.is_finite() || !(0.0..=1.0).contains(&volume) {
             return Err(OutputError::NonFinite);
@@ -465,6 +557,12 @@ impl ScheduledPcmQueue {
 
     pub fn telemetry(&self) -> OutputTelemetry {
         self.shared.telemetry()
+    }
+
+    pub fn emergency_mute(&self) -> EmergencyMute {
+        EmergencyMute {
+            shared: self.shared.clone(),
+        }
     }
 }
 
@@ -601,6 +699,11 @@ impl PresentationConsumer {
         let mut future = 0u64;
         for (index, frame) in output.chunks_exact_mut(channels).enumerate() {
             let time = first + index as f64 * period;
+            if time + period * 0.5 >= self.shared.silence_from.load(Ordering::Acquire) as f64 {
+                self.last_deadline = None;
+                future += 1;
+                continue;
+            }
             let contiguous = if self.read < written {
                 let slot = (self.read % self.shared.capacity as u64) as usize;
                 let epoch = self.shared.epochs[slot].load(Ordering::Acquire);
@@ -817,6 +920,18 @@ impl ScheduledOutput {
         self.queue.write_at(start_local_ns, samples, now)
     }
 
+    pub fn write_clocked(
+        &mut self,
+        start_local_ns: u64,
+        samples: &[f32],
+        ns_per_frame: f64,
+    ) -> Result<(), OutputError> {
+        let now = u64::try_from(self.clock_origin.elapsed().as_nanos())
+            .map_err(|_| OutputError::Overflow)?;
+        self.queue
+            .write_clocked_at(start_local_ns, samples, now, ns_per_frame)
+    }
+
     pub fn clear(&mut self) {
         self.queue.clear();
     }
@@ -826,11 +941,18 @@ impl ScheduledOutput {
     pub fn unmute(&mut self) {
         self.queue.unmute();
     }
+    pub fn silence_from(&mut self, local_ns: u64) {
+        self.queue.silence_from(local_ns);
+    }
     pub fn set_local_volume(&mut self, volume: f32) -> Result<(), OutputError> {
         self.queue.set_local_volume(volume)
     }
     pub fn telemetry(&self) -> OutputTelemetry {
         self.queue.telemetry()
+    }
+
+    pub fn emergency_mute(&self) -> EmergencyMute {
+        self.queue.emergency_mute()
     }
 }
 
@@ -846,6 +968,132 @@ impl Drop for ScheduledOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn published_silence_boundary_preserves_audio_and_counts_only_real_gaps() {
+        for supplied in [120, 480] {
+            let (mut queue, mut consumer) = ScheduledPcmQueue::new(RenderFormat {
+                sample_rate: 48_000,
+                channels: 1,
+            })
+            .unwrap();
+            queue.unmute();
+            queue.silence_from(15_000_000);
+            queue
+                .write_at(10_000_000, &vec![0.75; supplied], 0)
+                .unwrap();
+            let mut samples = vec![0.0; 480];
+            consumer.render(
+                &mut samples,
+                Some(PresentationTime {
+                    first_frame_local_ns: 10_000_000,
+                    ns_per_frame: 1e9 / 48_000.0,
+                }),
+            );
+            assert!(samples[..supplied.min(240)]
+                .iter()
+                .all(|sample| *sample == 0.75));
+            assert!(samples[supplied.min(240)..]
+                .iter()
+                .all(|sample| *sample == 0.0));
+            assert_eq!(
+                queue.telemetry().underrun_frames,
+                240usize.saturating_sub(supplied) as u64
+            );
+            assert_eq!(queue.telemetry().played_frames, supplied.min(240) as u64);
+            // A later fresh run retires the old stop boundary.
+            queue.mute();
+            queue.unmute();
+            queue.write_at(20_000_000, &[0.5; 48], 0).unwrap();
+            consumer.render(
+                &mut samples[..48],
+                Some(PresentationTime {
+                    first_frame_local_ns: 20_000_000,
+                    ns_per_frame: 1e9 / 48_000.0,
+                }),
+            );
+            assert!(samples[..48].iter().all(|sample| *sample == 0.5));
+        }
+    }
+
+    #[test]
+    fn clocked_queue_remains_bounded_and_on_time_for_eight_virtual_hours() {
+        // One Hz keeps this a cheap deterministic simulation while preserving
+        // the same physical-period/cursor/queue path used at audio rates. The
+        // nominal schedule would diverge by 14.4s over this observation span.
+        for ppm in [-500.0, 500.0] {
+            let (mut producer, mut consumer) = queue(1, 1);
+            let period: f64 = 1e9 / (1.0 + ppm * 1e-6);
+            let mut next = 0u64;
+            let mut submitted = 0u64;
+            let frames = (8.0 * 3600.0 * 1e9 / period).ceil() as u64;
+            for played in 0..frames {
+                let now = (played as f64 * period).round() as u64;
+                while producer.telemetry().queued_frames < 2 {
+                    producer
+                        .write_clocked_at(next, &[0.75], now, period)
+                        .unwrap();
+                    submitted += 1;
+                    next = (submitted as f64 * period).round() as u64;
+                }
+                let mut output = [0.0];
+                consumer.render(
+                    &mut output,
+                    Some(PresentationTime {
+                        first_frame_local_ns: now,
+                        ns_per_frame: period,
+                    }),
+                );
+                assert_eq!(output, [0.75]);
+                let telemetry = producer.telemetry();
+                assert_eq!(telemetry.played_frames, played + 1);
+                assert_eq!(telemetry.underrun_frames, 0);
+                assert_eq!(telemetry.late_frames, 0);
+                assert_eq!(telemetry.queued_frames, 1);
+                assert!(
+                    producer
+                        .schedule
+                        .unwrap()
+                        .time(submitted, 1)
+                        .unwrap()
+                        .abs_diff((submitted as f64 * period).round() as u64)
+                        <= 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clocked_period_updates_preserve_fractional_cursor_and_validate_period() {
+        let (mut producer, _) = queue(48_000, 1);
+        for bad in [f64::NAN, f64::INFINITY, 0.0, 1.0] {
+            assert_eq!(
+                producer.write_clocked_at(0, &[0.0], 0, bad),
+                Err(OutputError::Format)
+            );
+        }
+        let mut schedule = Schedule {
+            start_ns: 0,
+            frames: 0,
+            period_ns: Some(1e9 / 48_000.0),
+            fraction_ns: 0.0,
+        };
+        let mut reference = 0.0;
+        for packet in 0..100_000 {
+            let period =
+                1e9 / (48_000.0 * (1.0 + if packet % 2 == 0 { 499.0e-6 } else { 500.0e-6 }));
+            schedule = schedule.reperiod(Some(period), 48_000).unwrap();
+            schedule.frames += 137;
+            reference += 137.0 * period;
+        }
+        assert!(
+            schedule
+                .time(schedule.frames, 48_000)
+                .unwrap()
+                .abs_diff(reference.round() as u64)
+                < 16
+        );
+    }
 
     fn queue(rate: u32, channels: u16) -> (ScheduledPcmQueue, PresentationConsumer) {
         let (mut producer, consumer) = ScheduledPcmQueue::new(RenderFormat {
