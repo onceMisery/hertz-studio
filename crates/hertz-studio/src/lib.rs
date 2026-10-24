@@ -24,6 +24,7 @@ pub mod daily;
 pub mod diag;
 pub mod edition;
 pub mod error;
+pub(crate) mod feed_xml;
 pub mod history;
 pub(crate) mod idempotency;
 pub(crate) mod lyrics;
