@@ -228,6 +228,13 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         terminal: bool,
     }
 
+    struct Preview {
+        view: wry::WebView,
+        window: Window,
+        opened_at: Instant,
+        lease_until: Instant,
+    }
+
     impl Recovery {
         fn new() -> Self {
             Self {
@@ -311,6 +318,10 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         target_device: String,
         target_missing: bool,
         last_monitor_check: Instant,
+        preview: Option<Preview>,
+        pending_preview: Option<Instant>,
+        preview_test: bool,
+        preview_lease_count: u32,
         cpu_mark: Option<(String, Instant, TreeSample)>,
         last_liveness: Instant,
     }
@@ -845,6 +856,142 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             ));
         }
 
+        fn open_preview(&mut self, target: &EventLoopWindowTarget<UserEvent>, tag: &str) {
+            if self.preview.is_some() {
+                if self.pending_preview.is_none() {
+                    self.pending_preview = Some(Instant::now());
+                }
+                self.evidence.log(format!(
+                    "preview_busy tag={tag} pending={}",
+                    self.pending_preview.is_some()
+                ));
+                return;
+            }
+            let before = sample_process_tree();
+            let window = match WindowBuilder::new()
+                .with_title("Hertz DESK-W0 preview")
+                .with_inner_size(PhysicalSize::new(480, 270))
+                .with_position(tao::dpi::PhysicalPosition::new(80, 80))
+                .with_resizable(false)
+                .with_focused(false)
+                .build(target)
+            {
+                Ok(window) => window,
+                Err(error) => {
+                    self.evidence
+                        .log(format!("preview_open error={error} tag={tag}"));
+                    return;
+                }
+            };
+            let hwnd = window.hwnd() as HWND;
+            let evidence = self.evidence.clone();
+            let view = match WebViewBuilder::new()
+                .with_html(PAGE)
+                .with_background_color((8, 16, 31, 255))
+                .with_ipc_handler(move |request| {
+                    evidence.log(format!("preview_js {}", request.body()));
+                })
+                .build(&window)
+            {
+                Ok(view) => view,
+                Err(error) => {
+                    self.evidence.log(format!(
+                        "preview_open error={error} tag={tag} hwnd={}",
+                        fmt_hwnd(hwnd)
+                    ));
+                    drop(window);
+                    return;
+                }
+            };
+            let _ = view.evaluate_script("window.startMotion(15)");
+            let now = Instant::now();
+            self.preview = Some(Preview {
+                view,
+                window,
+                opened_at: now,
+                lease_until: now + Duration::from_secs(15),
+            });
+            self.preview_lease_count += 1;
+            let after = sample_process_tree();
+            self.evidence.log(format!(
+                "preview_open tag={tag} hwnd={} leases={} lease_s=15 processes={}->{} webview={}->{}",
+                fmt_hwnd(hwnd),
+                self.preview_lease_count,
+                before.processes,
+                after.processes,
+                before.webview_processes,
+                after.webview_processes
+            ));
+        }
+
+        fn renew_preview(&mut self) {
+            if let Some(preview) = &mut self.preview {
+                preview.lease_until = Instant::now() + Duration::from_secs(15);
+                self.evidence.log("preview_renew lease_s=15");
+            } else {
+                self.evidence.log("preview_renew active=false");
+            }
+        }
+
+        fn close_preview(&mut self, target: &EventLoopWindowTarget<UserEvent>, reason: &str) {
+            let Some(preview) = self.preview.take() else {
+                self.evidence
+                    .log(format!("preview_close reason={reason} active=false"));
+                return;
+            };
+            let lifetime = preview.opened_at.elapsed().as_secs_f32();
+            let hwnd = preview.window.hwnd() as HWND;
+            self.evidence.log(format!(
+                "preview_close reason={reason} hwnd={} lifetime_s={lifetime:.1}",
+                fmt_hwnd(hwnd)
+            ));
+            let Preview { view, window, .. } = preview;
+            drop(view);
+            drop(window);
+            let pending = self.pending_preview.take();
+            if let Some(requested) = pending {
+                let age = requested.elapsed();
+                if age < Duration::from_secs(15) {
+                    self.open_preview(target, "pending");
+                } else {
+                    self.evidence.log(format!(
+                        "preview_pending_expired age_s={:.1}",
+                        age.as_secs_f32()
+                    ));
+                }
+            }
+        }
+
+        fn check_preview(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+            let expired = self
+                .preview
+                .as_ref()
+                .is_some_and(|preview| Instant::now() >= preview.lease_until);
+            if expired {
+                self.evidence.log("preview_expired lease_s=15");
+                self.close_preview(target, "expired");
+            }
+        }
+
+        fn log_preview_state(&self, tag: &str) {
+            match &self.preview {
+                Some(preview) => self.evidence.log(format!(
+                    "preview_state tag={tag} active=true leases={} remaining_ms={} pending={}",
+                    self.preview_lease_count,
+                    preview
+                        .lease_until
+                        .saturating_duration_since(Instant::now())
+                        .as_millis(),
+                    self.pending_preview.is_some()
+                )),
+                None => self.evidence.log(format!(
+                    "preview_state tag={tag} active=false leases={} pending={}",
+                    self.preview_lease_count,
+                    self.pending_preview.is_some()
+                )),
+            }
+        }
+
         fn cycle(&mut self, n: u8, target: &EventLoopWindowTarget<UserEvent>) {
             let before = sample_process_tree();
             self.recovery.attempts.clear();
@@ -871,6 +1018,30 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         }
 
         fn tick(&mut self, n: u8, target: &EventLoopWindowTarget<UserEvent>) -> bool {
+            if self.preview_test {
+                match n {
+                    0 => {
+                        self.state("mounted");
+                        self.eval("motion30", "window.startMotion(30)");
+                        self.evidence.marker("mounted");
+                    }
+                    1 => self.open_preview(target, "first"),
+                    2 => self.open_preview(target, "second"),
+                    3 => self.renew_preview(),
+                    4 => self.log_preview_state("after-expiry"),
+                    5 => self.open_preview(target, "third"),
+                    6 => {
+                        self.pending_preview = None;
+                        self.close_preview(target, "test-end");
+                        self.stopping = true;
+                        self.state("done");
+                        self.evidence.marker("done");
+                        return true;
+                    }
+                    _ => {}
+                }
+                return false;
+            }
             if self.cycle_test {
                 if n == 0 {
                     self.state("mounted");
@@ -989,6 +1160,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         let mut monitor_device = String::new();
         let mut monitor_index = 0usize;
         let mut dpi_compensate = false;
+        let mut preview_test = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -1004,6 +1176,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                         .parse()?;
                 }
                 "--dpi-compensate" => dpi_compensate = true,
+                "--preview-test" => preview_test = true,
                 "--restart-test" => restart_test = true,
                 "--power-selftest" => power_selftest = true,
                 "--cycle-test" => cycle_test = true,
@@ -1022,6 +1195,17 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                 other => return Err(format!("unknown argument: {other}").into()),
             }
         }
+        if [restart_test, cycle_test, preview_test]
+            .iter()
+            .filter(|mode| **mode)
+            .count()
+            > 1
+        {
+            return Err("--restart-test/--cycle-test/--preview-test are mutually exclusive".into());
+        }
+        if !monitor_device.is_empty() && monitor_index > 0 {
+            return Err("--monitor-device and --monitor-index are mutually exclusive".into());
+        }
         let evidence = Evidence::new(out.clone())?;
         let mutex = acquire_single_instance(&evidence);
         let _mutex = match mutex {
@@ -1029,7 +1213,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             None => std::process::exit(3),
         };
         evidence.log(format!(
-            "probe=desk-w0 source={source} pid={} restart_test={restart_test} cycle_test={cycle_test} cycles={cycles} duration_ms={duration_ms} power_selftest={power_selftest} close_controller_after_ms={close_controller_after_ms} monitor_device={monitor_device} monitor_index={monitor_index} dpi_compensate={dpi_compensate} webview2_user_data={}",
+            "probe=desk-w0 source={source} pid={} restart_test={restart_test} cycle_test={cycle_test} cycles={cycles} duration_ms={duration_ms} power_selftest={power_selftest} close_controller_after_ms={close_controller_after_ms} monitor_device={monitor_device} monitor_index={monitor_index} dpi_compensate={dpi_compensate} preview_test={preview_test} webview2_user_data={}",
             std::process::id(),
             out.join("webview2").display()
         ));
@@ -1297,13 +1481,19 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             target_device: target.device.clone(),
             target_missing: false,
             last_monitor_check: Instant::now(),
+            preview: None,
+            pending_preview: None,
+            preview_test,
+            preview_lease_count: 0,
             cpu_mark: None,
             last_liveness: Instant::now(),
         };
 
         let _ticker = {
             let proxy = proxy.clone();
-            let schedule: Vec<u64> = if cycle_test {
+            let schedule: Vec<u64> = if preview_test {
+                vec![0, 2_000, 5_000, 8_000, 24_000, 26_000, 30_000]
+            } else if cycle_test {
                 (0..=(cycles as u64 + 1))
                     .map(|index| index * 1_000)
                     .collect()
@@ -1349,6 +1539,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
                     if !probe.recovery.terminal {
                         probe.check_fullscreen();
                     }
+                    probe.check_preview(event_loop_target);
                 }
                 Event::UserEvent(UserEvent::EnvChange { reason, on }) => {
                     let tag = match reason {
