@@ -18,7 +18,7 @@
 //! 策略（用静音填充转换历史）由接收端调度决定，不在这里隐含。
 
 /// 每输出帧访问的输入帧数（偶数；前视 = TAPS/2）。
-const TAPS: usize = 128;
+const TAPS: usize = 256;
 /// 相位子表密度：相邻子相位之间线性插值。
 const SUBPHASES: usize = 1024;
 /// 内部历史容量（输入帧）。超过即调用方生产过快，明确溢出而不是丢弃。
@@ -28,7 +28,7 @@ const COMPACT_THRESHOLD: usize = 2048;
 /// 瞬时变比每输出帧的最大变化量。500ppm ≈ 1 秒内平滑达成。
 const MAX_RATIO_STEP_PER_FRAME: f64 = 1.5e-8;
 
-pub const ALGORITHM: &str = "clocked-sinc-taps128-sub1024-bh4-cutoff095-slew1e8-v1";
+pub const ALGORITHM: &str = "clocked-sinc-taps256-sub1024-bh4-cutoff095-slew1e8-v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -93,8 +93,9 @@ impl ClockedConverter {
             return Err(Error::Format);
         }
         let half = TAPS / 2;
-        // 下变换时截止必须压到输出奈奎斯特（输入域 0.5×out/in），否则混叠。
-        let c = 0.95 * f64::min(1.0, 0.5 * f64::from(output_rate) / f64::from(input_rate));
+        // build_table 的 sin(πcu)/(πu) 中 c 以输入奈奎斯特归一化，
+        // 下变换时对应 out/in；不能再乘 0.5，否则同率也会砍掉一半通带。
+        let c = 0.95 * f64::min(1.0, f64::from(output_rate) / f64::from(input_rate));
         let table = build_table(c, half);
         let mut buf = Vec::with_capacity(HISTORY_CAP * channels);
         buf.resize(half * channels, 0.0);
@@ -381,6 +382,25 @@ mod tests {
         }
     }
 
+    /// 覆盖可听高频和较低 Nyquist 的 90%，防止只测 1kHz 漏掉通带被截半。
+    #[test]
+    fn audible_passband_survives_equal_up_and_down_conversion() {
+        for (src, dst) in [
+            (48_000, 48_000),
+            (44_100, 48_000),
+            (48_000, 44_100),
+            (96_000, 48_000),
+            (48_000, 96_000),
+        ] {
+            for freq in [1000.0, 10_000.0, 18_000.0, f64::from(src.min(dst)) * 0.45] {
+                let mut c = ClockedConverter::new(src, dst, 1).unwrap();
+                let out = run(&mut c, &sine(0.5, src, freq, 1), 1);
+                let gain = db(amplitude(&out, 1, freq, dst));
+                assert!(gain.abs() <= 0.1, "{src}->{dst} {freq}Hz: {gain}dB");
+            }
+        }
+    }
+
     /// 超出输出奈奎斯特的音调按截止频率抑制（混叠候选线在探针里记录）。
     #[test]
     fn aliasing_is_suppressed_on_downconvert() {
@@ -391,8 +411,8 @@ mod tests {
             let alias = (freq - (freq / 48_000.0).round() * 48_000.0).abs();
             let level = db(amplitude(&out, 1, alias, 48_000));
             assert!(
-                level < -70.0,
-                "{freq}Hz 折到 {alias}Hz: {level} dB 高于 -70dB"
+                level < -90.0,
+                "{freq}Hz 折到 {alias}Hz: {level} dB 高于 -90dB"
             );
         }
     }
@@ -506,7 +526,7 @@ mod tests {
         let mut c = ClockedConverter::new(48_000, 48_000, 1).unwrap();
         // 只喂不取：灌满历史（首次 process 产出受输出缓冲限制）。
         let mut out = vec![0.0f32; 0];
-        let big = vec![0.0f32; HISTORY_CAP - 64];
+        let big = vec![0.0f32; HISTORY_CAP - TAPS / 2];
         assert!(c.process(&big, &mut out).is_ok());
         let more = vec![0.0f32; 128];
         assert_eq!(c.process(&more, &mut out).unwrap_err(), Error::Overflow);

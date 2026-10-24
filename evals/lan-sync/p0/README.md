@@ -1,21 +1,38 @@
-# L0「局域网一起听」P0 技术验证（Windows 单机）v1
+# L0「局域网一起听」P0 技术验证（Windows 单机）
 
 对[lan-listening 方案](../../../docs/lan-listening.md) P0 批次（§11）的四项机器证据：CPAL 设备时钟语义、可变比 sinc 质量、对时估计器 + H 节奏回环实验、WASAPI 数字回录相关性。全部只用合成信号；本目录**不包含**两机真实链路、macOS/Linux 探针、声学录音与多端同步测量——P0 进入 P1 的其余门槛仍待三平台与第二台机器补测。
+
+## 2026-10-24 修复与复测（当前有效证据）
+
+Review 发现旧转换器把截止频率多乘了 0.5，1kHz 测幅掩盖了高频损失；旧 WASAPI 探针把包内帧的秒偏移直接当纳秒，延迟结果被包起始时间量化。原始 JSON/meta 保留作历史，下面的 v2 报告替代这两项结论。**旧 sinc 质量通过和 −5.74ms 延迟均值不再作为验收/校准依据。**
+
+| 证据 | 当前结果 | 报告/范围 |
+| --- | --- | --- |
+| 房主计划 + 接收门禁 | 36 项房间状态机用例通过（15 房主 + 21 接收）；core 全库 39 项通过 | 覆盖提前 PCM 的原序号/部分匹配交错、及时匹配不超时、超时后匹配、未 Ready 的 Commit、已发布描述与边界冻结、四种采样率 600 秒精确期限、静音推进与迟到前缀裁剪、NoOp/Failed 水位 |
+| 可变比 sinc v2 | 12 项转换单测通过；20 个通带测点最大绝对误差 0.005174dB；96→48k 三个混叠测点最差 −121.156dB；变比阶跃最大步进约稳态 1.003 倍 | [clocked-resample-v2.json](./clocked-resample-v2.json)；5 组 44.1/48/96k 组合，测点含 1k/10k/18k 及较低 Nyquist 的 90%；漂移增益另测 ±500ppm；不外推至其它转换组合 |
+| WASAPI 包内时间戳 | 纳秒换算与逐帧单调回归通过；6 秒复测 22/23 标记检出，0 次 QPC 回退；设备钟拟合最大残差 0.0208ms；回录映射时差均值 +0.6835ms、std 0.0116ms | [wasapi-loopback-v2.json](./wasapi-loopback-v2.json)；48k、双声道、同一默认渲染端点；数字回录而非真实 DAC/声学延迟 |
+
+v2 sinc 使用 256 抽头（原 128）、1024 相位子表；正确截止下 128 抽头在 96→48k、21.6kHz 仍衰减约 0.63dB，故增加抽头数而未放宽 0.1dB 候选线。输入前视变为 128 帧（48k 时约 2.667ms），接收端必须继续通过 `lookahead_frames()` 读取。当前本机 48k 立体声 RTF≈0.0128，仅供本次构建参考。
+
+本次总计 core 39 + clocked 12 + 对时估计器 4 + WASAPI 时间戳 1 = 56 项测试通过；review 的 8 个独立复现用例也已全过。未接通产品房间网络、公共渲染器或前端，未新增对跨平台/多机同步的通过声明。
 
 ## 运行方式（仓库根目录，Windows）
 
 ```powershell
-cargo test -p vmusic-core                 # 含 §8.2 计划状态机仿真（17 项）
-cargo test -p vmusic-audio --lib clocked  # 可变比转换单测（11 项）
+cargo test -p vmusic-core --lib           # 39 项，含房间状态机 36 项
+cargo test -p vmusic-audio --lib clocked  # 可变比转换单测（12 项）
 cargo run --release -p vmusic-audio --example clocked_resample_probe
 cargo run --release -p vmusic-audio --example device_clock_probe -- --seconds 5
 cargo run --release -p lan-probe --bin sync-experiment -- --seconds 20   # 在 tools/lan-probe
 cargo run --release -p lan-probe --bin wasapi-probe -- --seconds 6       # 会放出轻微标记音
+cargo test --offline --lib --bin wasapi-probe                          # 在 tools/lan-probe，无设备播放
 ```
 
 `tools/lan-probe` 是独立工作区（同 `tools/desktop-probe` 惯例），不进产品 CI；探针退出即关闭，不随正式包发布（§11 P0 边界）。
 
-## 2026-10-23 本机结果（Windows 11 build 26200、Realtek 扬声器、WASAPI 共享模式、rustc 1.98.1）
+## 2026-10-23 历史结果（Windows 11 build 26200、Realtek 扬声器、WASAPI 共享模式、rustc 1.98.1）
+
+下表记录原探针运行事实；sinc/WASAPI 的通过结论已被 2026-10-24 复测替代，不代表当前版本验收。
 
 | 证据 | 报告 | 关键结果 | 门禁 |
 | --- | --- | --- | --- |
@@ -30,7 +47,7 @@ cargo run --release -p lan-probe --bin wasapi-probe -- --seconds 6       # 会�
 ## 读数口径与限制
 
 - **同步精度未测量**：单机回环只验证估计器误差、节奏与缓冲记账；不构成 §12.2 的多端出声同步证据（那需要同一采集时钟的多通道录音与第二台机器）。
-- **WASAPI 的 −5.39ms 端到端常数**是本机本驱动的回录（mix 后、DAC 前）与 IAudioClock 拟合映射之差，符号大小绑定设备/后端/采样率，属 §7.2「校准值」的输入数据，不是可移植的延迟规格。
+- **WASAPI v2 的 +0.6835ms 映射时差**是本机本驱动的数字回录（mix 后、DAC 前）与 IAudioClock 拟合映射之差，符号大小绑定设备/后端/采样率；不能直接当成物理声卡/DAC/声学校准值。旧负延迟均值受时间戳缺陷影响，已失效。
 - `playback` 估算（cpal）按「可写空间」推算且丢弃设备帧位置；接收端呈现期限应使用原生 `IAudioClock` 位置 + 排队（本探针路径），cpal 时间戳仅作 QPC 锚点。
 - 对时实验的漂移估计（89 vs 真值 50ppm）受窗口跨度（32 样本 ×100ms）限制，偏移误差不受影响；生产端点应按 §7.1 用分钟级窗口估频偏。
 - 6 秒窗口、单设备、单次运行；没有长稳、休眠唤醒、断连重入与无线链路数据。§12.3 的故障矩阵属 P2+。

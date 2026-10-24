@@ -390,7 +390,6 @@ impl PlanScheduler {
             },
             ready: Vec::new(),
         });
-        self.high_water.insert((key.member, key.namespace), key.seq);
         self.revision = Revision(self.revision.0 + 1);
         self.record(now, key, command, Outcome::Preparing { plan: plan_id });
         Ok(Outcome::Preparing { plan: plan_id })
@@ -472,6 +471,8 @@ impl PlanScheduler {
     }
 
     fn record(&mut self, now: Nanos, key: OperationKey, content: Command, outcome: Outcome) {
+        // 所有已受理结果（包括 NoOp/Failed）都消费操作序号；重试先查结果。
+        self.high_water.insert((key.member, key.namespace), key.seq);
         self.order.push_back(key);
         self.outcomes.insert(
             key,
@@ -528,6 +529,37 @@ mod tests {
             track,
             position_ms: 0,
             playing: false,
+        }
+    }
+
+    #[test]
+    fn noop_and_failed_operations_advance_watermark_without_changing_revision() {
+        for command in [
+            Command::Play,
+            Command::Seek {
+                track: TRACK_B,
+                position_ms: 100,
+            },
+        ] {
+            let mut room = PlanScheduler::new(playing(TRACK_A, 0));
+            let revision = room.revision();
+            let outcome = room.submit(0, key(10), None, command).unwrap();
+            assert!(matches!(outcome, Outcome::NoOp | Outcome::Failed { .. }));
+            assert_eq!(room.revision(), revision);
+            assert_eq!(
+                room.submit(1, key(9), None, Command::Pause),
+                Err(SubmitError::OperationUnknown)
+            );
+            assert_eq!(room.submit(2, key(10), None, command), Ok(outcome));
+            // 结果过期后，高水位也必须阻止旧操作重新执行。
+            assert_eq!(
+                room.submit(OUTCOME_TTL + 1, key(10), None, command),
+                Err(SubmitError::OperationUnknown)
+            );
+            assert!(matches!(
+                room.submit(OUTCOME_TTL + 2, key(11), None, Command::Pause),
+                Ok(Outcome::Preparing { .. })
+            ));
         }
     }
 

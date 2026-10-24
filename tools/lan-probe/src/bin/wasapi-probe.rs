@@ -138,6 +138,44 @@ struct Capture {
     qpc_fallback: u64,
 }
 
+/// GetBuffer 的 QPC 对应包首帧；每帧须按采样率换算纳秒，不能截断秒数。
+fn capture_frame_time(base_qpc_ns: u64, frame: u32, rate: u32) -> u64 {
+    base_qpc_ns.saturating_add((u128::from(frame) * 1_000_000_000 / u128::from(rate)) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capture_frame_time;
+
+    #[test]
+    fn capture_timestamps_follow_each_frame_in_nanoseconds() {
+        let base = 123_456_789;
+        for rate in [44_100, 48_000, 96_000] {
+            assert_eq!(capture_frame_time(base, 0, rate), base);
+            assert_eq!(
+                capture_frame_time(base, 1, rate),
+                base + 1_000_000_000 / u64::from(rate)
+            );
+            assert_eq!(
+                capture_frame_time(base, rate / 100, rate),
+                base + 10_000_000
+            );
+            assert_eq!(capture_frame_time(base, rate, rate), base + 1_000_000_000);
+            for frame in 1..rate / 100 {
+                assert!(
+                    capture_frame_time(base, frame, rate)
+                        > capture_frame_time(base, frame - 1, rate)
+                );
+            }
+        }
+        // 宽整数乘法避免大帧号在纳秒换算中溢出。
+        assert_eq!(
+            capture_frame_time(0, u32::MAX, 48_000),
+            u64::from(u32::MAX) * 1_000_000_000 / 48_000
+        );
+    }
+}
+
 unsafe fn capture_loop(
     audio_client: &IAudioClient,
     capture_client: &IAudioCaptureClient,
@@ -185,9 +223,9 @@ unsafe fn capture_loop(
                 capture.samples.push(v);
                 capture
                     .times
-                    .push(base_qpc_ns + (i as f64 / f64::from(rate)) as u64);
+                    .push(capture_frame_time(base_qpc_ns, i as u32, rate));
             }
-            capture_client.ReleaseBuffer(packet)?;
+            capture_client.ReleaseBuffer(frames)?;
             capture.packets += 1;
             packet = capture_client.GetNextPacketSize()?;
         }
