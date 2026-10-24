@@ -425,13 +425,11 @@ impl RenderCore {
         write_samples(data, &self.shared, self.output_channels as usize);
     }
 
-    /// Current track position in output frames, without millisecond rounding.
-    /// Pending stop or source replacement has the same zero-position semantics
-    /// as [`AudioBackend::position_ms`]. This clock resets at track transitions.
+    /// Actual current-deck position in output frames, without rounding.
+    /// Frames consumed during a pending stop or source-replacement fade remain
+    /// observable until the deck is rewound or replaced. Track transitions reset
+    /// this clock to the incoming deck's position.
     pub fn position_frames(&self) -> u64 {
-        if self.pending_stop || self.pending_load.is_some() {
-            return 0;
-        }
         self.shared
             .current_deck()
             .frames_played
@@ -1410,6 +1408,9 @@ impl AudioBackend for RenderCore {
     }
 
     fn position_ms(&self) -> u64 {
+        if self.pending_stop || self.pending_load.is_some() {
+            return 0;
+        }
         frames_to_ms(self.position_frames(), self.output_rate)
             .min(self.duration_ms.unwrap_or(u64::MAX))
     }
@@ -2247,6 +2248,70 @@ mod tests {
             assert_eq!(renderer.duration_ms(), info.duration_ms);
             assert!(!renderer.finished());
         }
+    }
+
+    #[test]
+    fn position_frames_tracks_consumption_until_stop_reset() {
+        let mut renderer = decoded_fixture();
+        renderer.play().unwrap();
+        renderer.render(&mut [0.0; 400]);
+        assert_eq!(renderer.position_frames(), 400);
+        assert_eq!(renderer.position_ms(), 50);
+
+        renderer.stop().unwrap();
+        assert_eq!(renderer.position_frames(), 400);
+        assert_eq!(renderer.position_ms(), 0);
+        renderer.render(&mut [0.0; 800]);
+        renderer.maintain();
+        assert_eq!(renderer.position_frames(), 1_200);
+        assert_eq!(renderer.position_ms(), 0);
+        assert!(renderer.pending_stop);
+
+        renderer.render(&mut [0.0; 800]);
+        assert_eq!(renderer.position_frames(), 2_000);
+        assert_eq!(renderer.position_ms(), 0);
+        renderer.maintain();
+        assert_eq!(renderer.position_frames(), 0);
+        assert_eq!(renderer.position_ms(), 0);
+        assert!(!renderer.pending_stop);
+        renderer.render(&mut [0.0; 128]);
+        assert_eq!(renderer.position_frames(), 0);
+    }
+
+    #[test]
+    fn position_frames_tracks_outgoing_deck_until_pending_load_commits() {
+        let mut renderer = decoded_fixture();
+        renderer.play().unwrap();
+        renderer.render(&mut [0.0; 400]);
+        assert_eq!(renderer.position_frames(), 400);
+        assert_eq!(renderer.position_ms(), 50);
+
+        let incoming = renderer
+            .load(compressed_path("a.mp3").to_str().unwrap())
+            .unwrap();
+        assert_eq!(renderer.position_frames(), 400);
+        assert_eq!(renderer.position_ms(), 0);
+        renderer.render(&mut [0.0; 800]);
+        renderer.maintain();
+        assert_eq!(renderer.position_frames(), 1_200);
+        assert_eq!(renderer.position_ms(), 0);
+        assert!(renderer.pending_load.is_some());
+
+        renderer.render(&mut [0.0; 800]);
+        assert_eq!(renderer.position_frames(), 2_000);
+        assert_eq!(renderer.position_ms(), 0);
+        renderer.maintain();
+        assert_eq!(renderer.position_frames(), 0);
+        assert_eq!(renderer.position_ms(), 0);
+        assert!(renderer.pending_load.is_none());
+        assert_eq!(renderer.duration_ms(), incoming.duration_ms);
+        wait_for_eof(&renderer);
+        renderer.render(&mut [0.0; 128]);
+        assert_eq!(renderer.position_frames(), 0);
+        renderer.play().unwrap();
+        renderer.render(&mut [0.0; 128]);
+        assert_eq!(renderer.position_frames(), 128);
+        assert_eq!(renderer.position_ms(), 16);
     }
 
     #[test]
