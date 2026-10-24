@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 //! Real loopback TCP/TLS/WSS. No soundcard or permissive certificate verifier.
+use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 use vmusic_lan::client::{self, ClientConnection, ClientEvents, ConnectionState};
 use vmusic_lan::clock::MonotonicClock;
 use vmusic_lan::members::Permissions;
-use vmusic_lan::protocol::{AudioFormat, ControlFrame, Counter, Plan};
+use vmusic_lan::protocol::{AudioFormat, ControlFrame, Counter, Plan, StreamIdentity, VERSION};
 use vmusic_lan::server::{Inbound, RoomServer};
 use vmusic_lan::tls::HostIdentity;
 
@@ -15,6 +16,246 @@ async fn control(events: &mut ClientEvents) -> ControlFrame {
         .await
         .unwrap()
         .unwrap()
+}
+
+type PeerSocket =
+    tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>;
+
+async fn accept_scripted_peer(
+    listener: &tokio::net::TcpListener,
+    acceptor: &tokio_rustls::TlsAcceptor,
+) -> PeerSocket {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let tls = acceptor.accept(tcp).await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(tls).await.unwrap();
+        assert!(matches!(
+            socket.next().await.unwrap().unwrap(),
+            tokio_tungstenite::tungstenite::Message::Text(_)
+        ));
+        socket
+    })
+    .await
+    .unwrap()
+}
+
+// Keep each peer socket under test control so EOF and a delayed End cannot be
+// confused with RoomServer's normal membership invalidation during Drop.
+async fn scripted_connection(
+    mode: client::ConnectionMode,
+) -> (
+    ClientConnection,
+    ClientEvents,
+    PeerSocket,
+    Option<PeerSocket>,
+) {
+    let host = HostIdentity::generate().unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(host.server_config().unwrap());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fingerprint = host.fingerprint();
+    let room = Uuid::new_v4();
+    let identity = StreamIdentity {
+        room_id: room,
+        instance_id: Uuid::new_v4(),
+        session_id: Uuid::new_v4(),
+    };
+    let connecting = tokio::spawn(async move {
+        let credential = vmusic_lan::members::Secret::generate().unwrap();
+        ClientConnection::connect_mode(
+            address,
+            fingerprint,
+            room,
+            Uuid::new_v4(),
+            &credential,
+            mode,
+        )
+        .await
+        .unwrap()
+    });
+    let mut control = accept_scripted_peer(&listener, &acceptor).await;
+    let hello = ControlFrame::Hello {
+        version: VERSION,
+        identity,
+        required: vec![],
+    };
+    control
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            hello.encode().unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    let audio = if mode == client::ConnectionMode::Listening {
+        Some(accept_scripted_peer(&listener, &acceptor).await)
+    } else {
+        None
+    };
+    let (connection, events) = connecting.await.unwrap();
+    (connection, events, control, audio)
+}
+
+async fn closed(events: &mut ClientEvents) -> ConnectionState {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !matches!(*events.state.borrow(), ConnectionState::Closed { .. }) {
+            events.state.changed().await.unwrap();
+        }
+        events.state.borrow().clone()
+    })
+    .await
+    .unwrap()
+}
+#[tokio::test]
+async fn normal_room_shutdown_delivers_terminal_end_before_connection_tasks_are_cancelled() {
+    for mode in [
+        client::ConnectionMode::ControlOnly,
+        client::ConnectionMode::Listening,
+    ] {
+        let host = HostIdentity::generate().unwrap();
+        let room = Uuid::new_v4();
+        let (server, mut inbound) = RoomServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            room,
+            Uuid::new_v4(),
+            &host,
+            MonotonicClock::default(),
+        )
+        .await
+        .unwrap();
+        let secret = server.transport.invite(Permissions::default()).unwrap();
+        let paired = client::pair(
+            server.address,
+            server.fingerprint,
+            room,
+            &secret,
+            "control only",
+        )
+        .await
+        .unwrap();
+        let (connection, mut events) = ClientConnection::connect_mode(
+            server.address,
+            server.fingerprint,
+            room,
+            paired.member_id,
+            &paired.credential,
+            mode,
+        )
+        .await
+        .unwrap();
+        if mode == client::ConnectionMode::Listening {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !matches!(inbound.recv().await, Some(Inbound::AudioAttached { .. })) {}
+            })
+            .await
+            .unwrap();
+        }
+        // Match the guest's startup snapshot and output update. These must not
+        // hide an End already being delivered when the host closes the room.
+        connection
+            .handle
+            .send(ControlFrame::Request {
+                request_id: Counter(1),
+                body: serde_json::json!({"action":"snapshot"}),
+            })
+            .unwrap();
+        connection.handle.output_status(client::OutputStatus {
+            ready: true,
+            ..Default::default()
+        });
+        server.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !matches!(*events.state.borrow(), ConnectionState::Closed { .. }) {
+                events.state.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                *events.state.borrow(),
+                ConnectionState::Closed { terminal: true, .. }
+            ),
+            "{mode:?}: {:?}",
+            *events.state.borrow()
+        );
+        connection.shutdown().await;
+    }
+}
+#[tokio::test]
+async fn abrupt_room_transport_loss_is_reconnectable_without_a_terminal_end() {
+    for mode in [
+        client::ConnectionMode::ControlOnly,
+        client::ConnectionMode::Listening,
+    ] {
+        let (connection, mut events, control, audio) = scripted_connection(mode).await;
+        drop((control, audio));
+        let state = closed(&mut events).await;
+        assert!(
+            matches!(
+                state,
+                ConnectionState::Closed {
+                    terminal: false,
+                    ..
+                }
+            ),
+            "{mode:?}: {state:?}"
+        );
+        connection.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn audio_loss_mutes_immediately_and_keeps_consumers_alive_for_the_terminal_end() {
+    let (connection, mut events, mut control, audio) =
+        scripted_connection(client::ConnectionMode::Listening).await;
+    drop(audio);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while *events.state.borrow() == ConnectionState::Connected {
+            events.state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        *events.state.borrow(),
+        ConnectionState::Closing { .. }
+    ));
+    assert!(matches!(
+        events.audio.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        events.control.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    let end = ControlFrame::End {
+        reason: "room_authorization_expired".into(),
+    };
+    control
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            end.encode().unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        closed(&mut events).await,
+        ConnectionState::Closed { terminal: true, .. }
+    ));
+    connection.shutdown().await;
+}
+
+#[tokio::test]
+async fn audio_loss_with_silent_control_has_a_bounded_reconnectable_close() {
+    let (connection, mut events, _silent_control, audio) =
+        scripted_connection(client::ConnectionMode::Listening).await;
+    drop(audio);
+    assert!(matches!(
+        closed(&mut events).await,
+        ConnectionState::Closed {
+            terminal: false,
+            ..
+        }
+    ));
+    connection.shutdown().await;
 }
 #[tokio::test]
 async fn pinned_pair_dual_stream_request_pcm_and_revocation_are_one_lifecycle() {
@@ -169,6 +410,19 @@ async fn pinned_pair_dual_stream_request_pcm_and_revocation_are_one_lifecycle() 
         .transport
         .authorize(paired.member_id, stream)
         .is_err());
+    let reconnect = ClientConnection::connect_mode(
+        server.address,
+        server.fingerprint,
+        room_id,
+        paired.member_id,
+        &paired.credential,
+        client::ConnectionMode::ControlOnly,
+    )
+    .await;
+    assert!(matches!(
+        reconnect,
+        Err(client::ClientError::AuthorizationExpired)
+    ));
     connection.shutdown().await;
     tokio::time::timeout(Duration::from_secs(2), server.shutdown())
         .await

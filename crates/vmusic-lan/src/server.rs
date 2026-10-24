@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, watch, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
@@ -261,8 +262,13 @@ impl RoomServer {
                 .unwrap_or_else(|e| e.into_inner())
                 .members
                 .end();
-            // Cancellation closes sockets and request futures, including peers
-            // stuck mid-send. No detached connection tasks survive shutdown.
+            // Let invalidated control streams flush their terminal End first.
+            // One shared deadline also bounds peers stuck in TLS or a send;
+            // cancellation then closes every remaining socket/request future.
+            let _ = tokio::time::timeout(SEND_TIMEOUT + Duration::from_millis(100), async {
+                while tasks.join_next().await.is_some() {}
+            })
+            .await;
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}
         });
@@ -292,6 +298,15 @@ impl Drop for RoomServer {
     }
 }
 impl Transport {
+    pub fn reserve_local_output(&self, enabled: bool) -> Result<(), TransportError> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .members
+            .reserve_local_output(enabled)?;
+        Ok(())
+    }
     pub fn clock(&self) -> MonotonicClock {
         self.inner.clock.clone()
     }
@@ -349,10 +364,11 @@ impl Transport {
         Ok(())
     }
     pub fn end(&self) {
-        self.inner.stop.send_replace(true);
         let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         state.members.end();
         state.endpoints.clear();
+        drop(state);
+        self.inner.stop.send_replace(true);
     }
     pub fn send(
         &self,
@@ -502,17 +518,27 @@ async fn handle(inner: Arc<Inner>, mut socket: Socket, request: Handshake, sourc
             room_id,
             member_id,
             credential,
-        } if version == VERSION && room_id == inner.room_id => {
-            let session = inner
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .members
-                .control(member_id, &credential);
-            if let Ok(session) = session {
-                let identity = session.identity;
-                run_control(inner.clone(), socket, session).await;
-                disconnect(&inner, member_id, identity);
+        } if version == VERSION => {
+            let session = if room_id == inner.room_id {
+                inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .members
+                    .control(member_id, &credential)
+            } else {
+                Err(AccessError::Denied)
+            };
+            match session {
+                Ok(session) => {
+                    let identity = session.identity;
+                    run_control(inner.clone(), socket, session).await;
+                    disconnect(&inner, member_id, identity);
+                }
+                Err(AccessError::Denied) => {
+                    send_end(&mut socket, "room_authorization_expired").await;
+                }
+                Err(_) => {}
             }
         }
         Handshake::Audio {
@@ -555,6 +581,36 @@ async fn send_text(socket: &mut Socket, text: String) -> Result<(), TransportErr
         .await
         .map_err(|_| TransportError::Closed)?
         .map_err(|_| TransportError::Closed)
+}
+async fn send_end<S>(socket: &mut WebSocketStream<S>, reason: &str)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // Dropping TCP with unread startup requests can reset the connection and
+    // discard the End we just flushed (notably on Windows). Finish the bounded
+    // WebSocket close while consuming those requests without executing them.
+    let _ = tokio::time::timeout(SEND_TIMEOUT, async {
+        let frame = ControlFrame::End {
+            reason: reason.into(),
+        };
+        socket
+            .send(Message::Text(
+                frame.encode().expect("bounded end frame").into(),
+            ))
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        socket
+            .close(None)
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        while let Some(Ok(message)) = socket.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+        Ok::<(), TransportError>(())
+    })
+    .await;
 }
 async fn run_control(
     inner: Arc<Inner>,
@@ -609,7 +665,15 @@ async fn run_control(
     loop {
         tokio::select! {
             biased;
-            _ = session.invalidated.changed() => break,
+            _ = session.invalidated.changed() => {
+                // Superseding a connection or withdrawing listen permission
+                // keeps membership; removal/end permanently retires it.
+                let removed = !inner.state.lock().unwrap_or_else(|e| e.into_inner()).members.members().iter().any(|m| m.id == session.member_id);
+                if removed {
+                    send_end(&mut socket, "room_authorization_expired").await;
+                }
+                break;
+            },
             _ = tick.tick() => { if last_received.elapsed() > HANDSHAKE_TIMEOUT { break; } },
             _ = requests.join_next(), if !requests.is_empty() => {},
             message = socket.next() => {
@@ -709,6 +773,65 @@ async fn run_audio(
                 let Ok(bytes) = block.block.encode() else { break; };
                 if !matches!(tokio::time::timeout(SEND_TIMEOUT, socket.send(Message::Binary(bytes.into()))).await, Ok(Ok(()))) { break; }
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tungstenite::protocol::Role;
+
+    #[tokio::test]
+    async fn terminal_end_waits_for_close_while_draining_queued_startup_frames() {
+        let (host, peer) = tokio::io::duplex(4096);
+        let mut host = WebSocketStream::from_raw_socket(host, Role::Server, None).await;
+        let mut peer = WebSocketStream::from_raw_socket(peer, Role::Client, None).await;
+        for id in 1..=2 {
+            let request = ControlFrame::Request {
+                request_id: Counter(id),
+                body: serde_json::json!({"action":"snapshot"}),
+            };
+            peer.send(Message::Text(request.encode().unwrap().into()))
+                .await
+                .unwrap();
+        }
+        let closing = tokio::spawn(async move {
+            send_end(&mut host, "room_authorization_expired").await;
+        });
+        let Message::Text(text) = peer.next().await.unwrap().unwrap() else {
+            panic!("missing terminal End");
+        };
+        assert!(matches!(
+            ControlFrame::decode(&text).unwrap(),
+            ControlFrame::End { reason } if reason == "room_authorization_expired"
+        ));
+        assert!(
+            !closing.is_finished(),
+            "closed before the peer acknowledged"
+        );
+        assert!(matches!(
+            peer.next().await.unwrap().unwrap(),
+            Message::Close(_)
+        ));
+        peer.flush().await.unwrap();
+        tokio::time::timeout(SEND_TIMEOUT, closing)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_end_bounds_both_a_blocked_send_and_an_unresponsive_peer() {
+        for capacity in [1, 4096] {
+            let (host, _unresponsive_peer) = tokio::io::duplex(capacity);
+            let mut host = WebSocketStream::from_raw_socket(host, Role::Server, None).await;
+            tokio::time::timeout(
+                SEND_TIMEOUT + Duration::from_millis(250),
+                send_end(&mut host, "room_authorization_expired"),
+            )
+            .await
+            .expect("terminal close exceeded its shared send/drain deadline");
         }
     }
 }

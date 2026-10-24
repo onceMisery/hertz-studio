@@ -33,6 +33,10 @@ pub enum ClientError {
     Protocol,
     #[error("pairing rejected")]
     Pairing,
+    #[error("room authorization expired; a new invitation is required")]
+    AuthorizationExpired,
+    #[error("room ended: {0}")]
+    Ended(String),
     #[error(transparent)]
     Tls(#[from] tls::TlsError),
 }
@@ -45,7 +49,8 @@ pub struct OutputStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionState {
     Connected,
-    Closed { reason: String },
+    Closing { reason: String },
+    Closed { reason: String, terminal: bool },
 }
 pub struct ReceivedPcm {
     block: PcmBlock,
@@ -149,10 +154,12 @@ impl ClientConnection {
         let Some(Ok(Message::Text(text))) = message else {
             return Err(ClientError::Protocol);
         };
-        let ControlFrame::Hello { identity, .. } =
-            ControlFrame::decode(&text).map_err(|_| ClientError::Protocol)?
-        else {
-            return Err(ClientError::Protocol);
+        let identity = match ControlFrame::decode(&text).map_err(|_| ClientError::Protocol)? {
+            ControlFrame::Hello { identity, .. } => identity,
+            ControlFrame::End { reason } if reason == "room_authorization_expired" => {
+                return Err(ClientError::AuthorizationExpired);
+            }
+            _ => return Err(ClientError::Protocol),
         };
         if identity.room_id != room_id
             || identity.session_id.is_nil()
@@ -184,31 +191,49 @@ impl ClientConnection {
         let clock = MonotonicClock::default();
         let task_clock = clock.clone();
         let task = tokio::spawn(async move {
+            // Publish the typed terminal state before closing consumers' data
+            // channels, including a connection that ends before its first poll.
+            let control_lifetime = control_tx.clone();
+            let audio_lifetime = audio_tx.clone();
             let mut stop_wait = stopped;
+            let control = run_control(
+                control, task_clock, command_rx, output_rx, control_tx, mapping_tx, chat_tx,
+            );
+            let audio = async move {
+                if let Some(audio) = audio {
+                    run_audio(audio, identity, audio_tx).await
+                } else {
+                    std::future::pending::<Result<(), ClientError>>().await
+                }
+            };
+            tokio::pin!(control, audio);
             let result = tokio::select! {
                 biased;
                 _ = stop_wait.changed() => Ok(()),
-                result = async {
-                    tokio::try_join!(
-                        run_control(control, task_clock, command_rx, output_rx, control_tx, mapping_tx, chat_tx),
-                        async move {
-                            if let Some(audio) = audio {
-                                run_audio(audio, identity, audio_tx).await
-                            } else {
-                                // Control-only members intentionally have no
-                                // audio lease. Their lifetime follows control.
-                                std::future::pending::<Result<(), ClientError>>().await
-                            }
-                        })?;
-                    Ok::<(), ClientError>(())
-                } => result,
+                result = &mut control => result,
+                failure = &mut audio => {
+                    // Audio stops immediately. Keep control alive briefly so a
+                    // normal End racing the audio EOF retains its terminal
+                    // meaning; a missing control stream is still bounded.
+                    state_tx.send_replace(ConnectionState::Closing { reason: "audio_connection_closed".into() });
+                    tokio::select! {
+                        _ = stop_wait.changed() => Ok(()),
+                        result = tokio::time::timeout(Duration::from_secs(1), &mut control) => result.unwrap_or(failure),
+                    }
+                },
             };
+            let failure = result.err();
+            let terminal = matches!(
+                failure,
+                Some(ClientError::Ended(_) | ClientError::AuthorizationExpired)
+            );
             state_tx.send_replace(ConnectionState::Closed {
-                reason: result
-                    .err()
+                reason: failure
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| "left_room".into()),
+                terminal,
             });
+            drop((control_lifetime, audio_lifetime));
         });
         Ok((
             Self {
@@ -323,7 +348,7 @@ async fn run_control(
     mut socket: Socket,
     clock: MonotonicClock,
     mut commands: mpsc::Receiver<ControlFrame>,
-    output: watch::Receiver<OutputStatus>,
+    mut output: watch::Receiver<OutputStatus>,
     controls: mpsc::Sender<ControlFrame>,
     mapping: watch::Sender<Option<ClockMapping>>,
     chat: Arc<Notifications>,
@@ -336,6 +361,7 @@ async fn run_control(
     let mut ticks = 0u64;
     let mut last_received = tokio::time::Instant::now();
     let mut current_mapping: Option<ClockMapping> = None;
+    let mut reported_output_ready = false;
     loop {
         tokio::select! {
             biased;
@@ -346,7 +372,9 @@ async fn run_control(
                     current_mapping = None;
                     mapping.send_replace(None);
                 }
-                if ticks <= 20 || ticks.is_multiple_of(10) {
+                // Rebuild a lost clock at the startup cadence. Waiting one
+                // second per sample would outlast the last-output grace period.
+                if ticks <= 20 || current_mapping.is_none_or(|m| !m.converged()) || ticks.is_multiple_of(10) {
                     sequence = sequence.checked_add(1).ok_or(ClientError::Protocol)?;
                     let t1 = clock.now_ns(); pending.push_back((sequence, t1));
                     while pending.len() > 32 { pending.pop_front(); }
@@ -355,8 +383,18 @@ async fn run_control(
                 }
                 if ticks.is_multiple_of(10) {
                     let status = *output.borrow();
+                    reported_output_ready = status.ready;
                     let frame = ControlFrame::Heartbeat { output_ready: status.ready, played_frame: Counter(status.played_frame), underrun_frames: Counter(status.underrun_frames) };
                     send(&mut socket, Message::Text(frame.encode().unwrap().into())).await?;
+                }
+            },
+            changed = output.changed() => {
+                changed.map_err(|_| ClientError::Connection)?;
+                let status = *output.borrow_and_update();
+                if status.ready != reported_output_ready {
+                    reported_output_ready = status.ready;
+                    let frame = ControlFrame::Heartbeat { output_ready: status.ready, played_frame: Counter(status.played_frame), underrun_frames: Counter(status.underrun_frames) };
+                    send(&mut socket, Message::Text(frame.encode().map_err(|_| ClientError::Protocol)?.into())).await?;
                 }
             },
             frame = commands.recv() => { let Some(frame) = frame else { return Err(ClientError::Connection); };
@@ -383,7 +421,7 @@ async fn run_control(
                     ControlFrame::Prepare { .. } | ControlFrame::Commit { .. } | ControlFrame::Suspend { .. } | ControlFrame::Resync { .. } | ControlFrame::Response { .. } | ControlFrame::Notification { .. } => {
                         controls.try_send(frame).map_err(|_| ClientError::Connection)?;
                     },
-                    ControlFrame::End { .. } => return Err(ClientError::Connection),
+                    ControlFrame::End { reason } => return Err(ClientError::Ended(reason)),
                     _ => return Err(ClientError::Protocol),
                 }
             }
