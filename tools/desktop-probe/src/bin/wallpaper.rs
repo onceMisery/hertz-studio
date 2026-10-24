@@ -282,6 +282,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
         policy_reasons: u8,
         policy_hidden: bool,
         fullscreen_state: Option<QUERY_USER_NOTIFICATION_STATE>,
+        pending_notification: Option<(QUERY_USER_NOTIFICATION_STATE, Instant)>,
         restart_test: bool,
         cycle_test: bool,
         cycles: u32,
@@ -428,17 +429,38 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
 
         fn check_fullscreen(&mut self) {
             let state = query_notification_state();
-            let active = is_fullscreen_state(state);
-            let session = state == QUNS_NOT_PRESENT;
+            self.sample_notification_state(state);
+        }
+
+        fn sample_notification_state(&mut self, state: QUERY_USER_NOTIFICATION_STATE) {
             if self.fullscreen_state == Some(state) {
+                self.pending_notification = None;
                 return;
             }
-            self.fullscreen_state = Some(state);
-            self.evidence.log(format!(
-                "notification_state state={state} fullscreen={active} session_absent={session}"
-            ));
-            self.set_reason(REASON_FULLSCREEN, active, "fullscreen");
-            self.set_reason(REASON_SESSION, session, "session-absent");
+            let now = Instant::now();
+            match self.pending_notification {
+                Some((pending, since)) if pending == state => {
+                    if now.duration_since(since) >= Duration::from_millis(1_000) {
+                        self.pending_notification = None;
+                        self.fullscreen_state = Some(state);
+                        let active = is_fullscreen_state(state);
+                        let session = state == QUNS_NOT_PRESENT;
+                        self.evidence.log(format!(
+                            "notification_state state={state} fullscreen={active} session_absent={session} applied=true"
+                        ));
+                        self.set_reason(REASON_FULLSCREEN, active, "fullscreen");
+                        self.set_reason(REASON_SESSION, session, "session-absent");
+                    }
+                }
+                _ => {
+                    self.pending_notification = Some((state, now));
+                    self.evidence.log(format!(
+                        "notification_pending state={state} fullscreen={} session_absent={}",
+                        is_fullscreen_state(state),
+                        state == QUNS_NOT_PRESENT
+                    ));
+                }
+            }
         }
 
         fn start_cpu(&mut self, tag: &str) {
@@ -1004,6 +1026,7 @@ document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.
             policy_reasons: 0,
             policy_hidden: false,
             fullscreen_state: None,
+            pending_notification: None,
             restart_test,
             cycle_test,
             cycles,
