@@ -11,7 +11,7 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 159 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 129 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 127 条内嵌静态资源路由。
+REST 路由表共 169 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 138 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 127 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -136,6 +136,16 @@ REST 路由表共 159 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | GET | `/v1/podcasts/subscriptions` |
 | POST | `/v1/podcasts/subscriptions` |
 | DELETE | `/v1/podcasts/subscriptions/{id}` |
+| GET | `/v1/reader/entries` |
+| GET | `/v1/reader/entries/{id}` |
+| GET | `/v1/reader/entries/{id}/images/{key}` |
+| PUT | `/v1/reader/entries/{id}/state` |
+| DELETE | `/v1/reader/feeds/{id}` |
+| POST | `/v1/reader/feeds/{id}/refresh` |
+| POST | `/v1/reader/preview` |
+| GET | `/v1/reader/subscriptions` |
+| POST | `/v1/reader/subscriptions` |
+| DELETE | `/v1/reader/subscriptions/{id}` |
 | GET | `/v1/recommend/daily` |
 | GET | `/v1/recommend/daily/online` |
 | GET | `/v1/remote/roots` |
