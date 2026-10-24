@@ -69,6 +69,12 @@ impl Drop for Secret {
         self.0.zeroize();
     }
 }
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = zeroize::Zeroizing::new(String::deserialize(deserializer)?);
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AccessError {
@@ -191,9 +197,6 @@ impl MemberRegistry {
     ) -> Result<Paired, AccessError> {
         self.sources
             .retain(|_, rate| now.saturating_duration_since(rate.updated) < INVITATION_TTL);
-        if !self.global_rate.allow(now, 1.0, 10.0) {
-            return Err(AccessError::RateLimited);
-        }
         if !self.sources.contains_key(&source) && self.sources.len() >= MAX_RATE_SOURCES {
             return Err(AccessError::RateLimited);
         }
@@ -203,6 +206,11 @@ impl MemberRegistry {
             .or_insert_with(|| Rate::new(now, 3.0))
             .allow(now, 0.2, 3.0)
         {
+            return Err(AccessError::RateLimited);
+        }
+        // Requests already rejected by their source quota must not spend the
+        // global quota; otherwise one blocked source can deny pairing to all.
+        if !self.global_rate.allow(now, 1.0, 10.0) {
             return Err(AccessError::RateLimited);
         }
         validate_name(name)?;
@@ -457,5 +465,25 @@ mod tests {
             let _ = registry.pair(source, &secret, "test", now + Duration::from_secs(i));
         }
         assert!(registry.sources.len() <= MAX_RATE_SOURCES);
+    }
+    #[test]
+    fn a_source_over_its_quota_cannot_exhaust_the_global_pairing_budget() {
+        let now = Instant::now();
+        let mut registry = registry(now);
+        let invite = registry.invite(now, Permissions::default()).unwrap();
+        let wrong = Secret::generate().unwrap();
+        let attacker = "10.0.0.1".parse().unwrap();
+        for _ in 0..20 {
+            assert!(registry.pair(attacker, &wrong, "invalid", now).is_err());
+        }
+        for second in 1..=10 {
+            let time = now + Duration::from_secs(second);
+            let _ = registry.pair(attacker, &wrong, "invalid", time);
+            if second == 10 {
+                assert!(registry
+                    .pair("10.0.0.2".parse().unwrap(), &invite, "电脑", time)
+                    .is_ok());
+            }
+        }
     }
 }
