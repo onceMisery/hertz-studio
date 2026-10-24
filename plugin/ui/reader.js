@@ -188,8 +188,8 @@
   function entriesQuery(reset) {
     var query = '';
     if (st.currentFeed) query += 'feed_id=' + encodeURIComponent(st.currentFeed) + '&';
-    if (st.filter === 'unread') query += 'unread=1&';
-    if (st.filter === 'starred') query += 'starred=1&';
+    if (st.filter === 'unread') query += 'unread=true&';
+    if (st.filter === 'starred') query += 'starred=true&';
     if (!reset && st.cursor) query += 'cursor=' + encodeURIComponent(st.cursor) + '&';
     return '/v1/reader/entries?' + query + 'limit=30';
   }

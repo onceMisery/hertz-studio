@@ -64,8 +64,8 @@ async function main() {
           };
         });
         if (u.searchParams.get('feed_id')) items = items.filter(e => e.feed_id === u.searchParams.get('feed_id'));
-        if (u.searchParams.get('unread') === '1') items = items.filter(e => !e.is_read);
-        if (u.searchParams.get('starred') === '1') items = items.filter(e => e.starred);
+        if (u.searchParams.get('unread') === 'true') items = items.filter(e => !e.is_read);
+        if (u.searchParams.get('starred') === 'true') items = items.filter(e => e.starred);
         const limit = Number(u.searchParams.get('limit') || 30);
         const cursor = u.searchParams.get('cursor');
         if (cursor) {
