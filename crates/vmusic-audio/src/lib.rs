@@ -15,7 +15,13 @@ pub mod clocked_resample;
 pub mod cpal_backend;
 
 #[cfg(feature = "playback")]
+pub mod render;
+
+#[cfg(feature = "playback")]
 pub mod resample;
+
+#[cfg(feature = "playback")]
+pub use render::{RenderCore, RenderFormat};
 
 pub use actor::{spawn, AudioEvent, AudioHandle, BackendKind};
 pub use null::NullBackend;
