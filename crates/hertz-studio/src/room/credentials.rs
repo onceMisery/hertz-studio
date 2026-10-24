@@ -5,9 +5,10 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use vmusic_lan::members::Secret;
@@ -18,7 +19,9 @@ use zeroize::Zeroize;
 pub enum CredentialError {
     #[error("room credential operation still running")]
     Busy,
-    #[error("system credential service unavailable; room credentials were not saved")]
+    #[error(
+        "system credential service unavailable or timed out; room credential operation could not be confirmed"
+    )]
     Unavailable,
     #[error("stored room identity is invalid; explicit identity reset is required")]
     Invalid,
@@ -41,6 +44,21 @@ impl From<CredentialError> for super::contract::RoomError {
 }
 
 const MAX_RECENT_ROOM_BYTES: usize = 2048;
+
+fn profile_slot(scope: &str) -> Arc<Semaphore> {
+    static SLOTS: OnceLock<Mutex<HashMap<String, Weak<Semaphore>>>> = OnceLock::new();
+    let mut slots = SLOTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    slots.retain(|_, slot| slot.strong_count() > 0);
+    if let Some(slot) = slots.get(scope).and_then(Weak::upgrade) {
+        return slot;
+    }
+    let slot = Arc::new(Semaphore::new(1));
+    slots.insert(scope.to_owned(), Arc::downgrade(&slot));
+    slot
+}
 
 /// Safe local UI summary. The credential is never part of this descriptor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,7 +139,7 @@ impl ProfileSecrets {
         );
         Self {
             backend,
-            slot: Arc::new(Semaphore::new(1)),
+            slot: profile_slot(&scope),
             scope,
             identity_lock: data_dir.join("room-identity.lock"),
         }
@@ -137,6 +155,9 @@ impl ProfileSecrets {
             .map_err(|_| CredentialError::Busy)?;
         let backend = self.backend.clone();
         let task = tokio::task::spawn_blocking(move || {
+            // The owned permit keeps this profile's shared slot alive even
+            // after timeout/cancellation drops every ProfileSecrets owner.
+            // A new owner must wait for the actual OS operation to finish.
             let _permit = permit;
             operation(backend)
         });
@@ -348,6 +369,71 @@ mod tests {
         std::fs::remove_file(directory.join("room-identity.lock")).unwrap();
         std::fs::remove_dir(directory).unwrap();
     }
+    #[tokio::test]
+    async fn timed_out_worker_keeps_profile_slot_across_new_owners_until_os_write_finishes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct BlockingStore {
+            memory: crate::secrets::MemoryStore,
+            paused: Mutex<bool>,
+            release: std::sync::Condvar,
+            writes: AtomicUsize,
+        }
+        impl SecretBackend for BlockingStore {
+            fn put(&self, key: &str, entry: &SecretEntry) -> Result<(), String> {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                let paused = self.paused.lock().unwrap();
+                drop(self.release.wait_while(paused, |paused| *paused).unwrap());
+                self.memory.put(key, entry)
+            }
+            fn get(&self, key: &str) -> Result<SecretEntry, String> {
+                self.memory.get(key)
+            }
+            fn delete(&self, key: &str) -> Result<(), String> {
+                self.memory.delete(key)
+            }
+        }
+        let backend = Arc::new(BlockingStore {
+            memory: Default::default(),
+            paused: Mutex::new(true),
+            release: Default::default(),
+            writes: AtomicUsize::new(0),
+        });
+        let profile =
+            std::env::temp_dir().join(format!("hertz-blocked-secrets-{}", uuid::Uuid::new_v4()));
+        let first = ProfileSecrets::new(&profile, backend.clone());
+        let saved = descriptor();
+        let timed_out = first
+            .save_recent(saved.clone(), Secret::generate().unwrap())
+            .await;
+        // Drop every owner: only the blocked worker's owned permit now keeps
+        // the registry's weak reference upgradeable.
+        drop(first);
+        let restarted = ProfileSecrets::new(&profile, backend.clone());
+        let newer = descriptor();
+        let second_write = tokio::time::timeout(
+            Duration::from_secs(1),
+            restarted.save_recent(newer.clone(), Secret::generate().unwrap()),
+        )
+        .await;
+        let writes_while_blocked = backend.writes.load(Ordering::SeqCst);
+        // Always release the blocking threads before assertions, including
+        // when a regression incorrectly allowed a second OS write to start.
+        *backend.paused.lock().unwrap() = false;
+        backend.release.notify_all();
+        assert!(matches!(timed_out, Err(CredentialError::Unavailable)));
+        assert!(matches!(second_write, Ok(Err(CredentialError::Busy))));
+        assert_eq!(writes_while_blocked, 1);
+        let permit = restarted.slot.acquire().await.unwrap();
+        drop(permit);
+        assert_eq!(restarted.saved_room().await.unwrap(), Some(saved));
+        restarted
+            .save_recent(newer.clone(), Secret::generate().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(restarted.saved_room().await.unwrap(), Some(newer));
+        assert_eq!(backend.writes.load(Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn replacement_is_bounded_and_failed_store_preserves_previous_membership() {
         struct Store {
