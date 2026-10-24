@@ -42,6 +42,12 @@
 
 订阅一致性：恰好 10 个可达源入库，错误路径零残留。
 
+真实 UI 旅程：同一隔离服务 + 真实订阅数据，经 `?token=` 打开真实 Chrome 界面，
+侧栏「阅读」进入真实文章（OpenAI News 当日更新的 "Rapidly scaling online storage
+to serve over 1 billion ChatGPT users (Part II)"），列表/正文/未读徽标（1318 条
+显示 99+）均正常渲染，正文容器 0 个 script 元素。截图（本机忽略目录）：
+`output/reader-browser/real-service-{empty,list,article}.png`。
+
 ## 真实发现
 
 1. **修复：查询布尔参数**。UI 最初发送 `unread=1`，服务端 serde 严格 bool 只接受
