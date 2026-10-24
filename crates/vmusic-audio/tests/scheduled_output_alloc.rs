@@ -60,7 +60,7 @@ fn all_callback_paths_allocate_and_free_nothing() {
             local_ns: start + 1_000_000_000,
             frames: 512,
         }));
-        producer.clear();
+        producer.unmute();
         producer.write_at(start, &input, start).unwrap();
         consumer.render(
             &mut output,
@@ -70,7 +70,7 @@ fn all_callback_paths_allocate_and_free_nothing() {
             }),
         );
         consumer.render(&mut output, None);
-        producer.clear();
+        producer.unmute();
         producer.write_at(start + 1_000_000, &input, start).unwrap();
         consumer.render(
             &mut output,
@@ -87,7 +87,7 @@ fn all_callback_paths_allocate_and_free_nothing() {
             }),
         );
         consumer.render(&mut output, None);
-        producer.clear();
+        producer.unmute();
         producer.write_at(start, &input, start).unwrap();
         consumer.render(
             &mut output,

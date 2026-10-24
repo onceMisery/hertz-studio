@@ -66,6 +66,10 @@ pub struct OutputTelemetry {
     pub clock_uncertainty_ns: u64,
     pub ns_per_frame: f64,
     pub last_presentation_local_ns: Option<u64>,
+    /// CPAL callback entry observation in the same origin domain. It advances
+    /// while muted, so a worker can check freshness before enabling playback.
+    /// External adapters using `render` directly do not supply this observation.
+    pub last_callback_local_ns: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -113,11 +117,13 @@ struct Shared {
     muted: AtomicBool,
     device_error: AtomicBool,
     volume: AtomicU32,
+    clock_sequence: AtomicU64,
     clock_status: AtomicU32,
     period_bits: AtomicU64,
     ppm_bits: AtomicU64,
     uncertainty: AtomicU64,
     presentation: AtomicU64,
+    callback_local_ns: AtomicU64,
     played: AtomicU64,
     underrun: AtomicU64,
     future_silence: AtomicU64,
@@ -136,20 +142,51 @@ impl Shared {
         self.clock_status.store(status as u32, Ordering::Release);
     }
 
+    // Both publication paths have the same unique callback writer. The error
+    // callback only sets the sticky device_error flag/status, never time fields.
+    fn publish_presentation(&self, status: ClockStatus, presentation: Option<u64>) {
+        self.clock_sequence.fetch_add(1, Ordering::AcqRel);
+        self.presentation
+            .store(presentation.unwrap_or(u64::MAX), Ordering::Release);
+        self.callback_local_ns.store(u64::MAX, Ordering::Release);
+        self.status(status);
+        self.clock_sequence.fetch_add(1, Ordering::Release);
+    }
+
     fn telemetry(&self) -> OutputTelemetry {
         let written = self.written.load(Ordering::Acquire);
         let read = self
             .read
             .load(Ordering::Acquire)
             .max(self.clear_before.load(Ordering::Acquire));
+        // This read happens on the worker, never in the callback. Retry if a
+        // short clock publication overlaps it: mixing two callbacks' timestamps
+        // could misestimate device lead by an entire callback period.
+        let (status, period, ppm, uncertainty, presentation, callback) = loop {
+            let sequence = self.clock_sequence.load(Ordering::Acquire);
+            if !sequence.is_multiple_of(2) {
+                std::hint::spin_loop();
+                continue;
+            }
+            let values = (
+                self.clock_status.load(Ordering::Acquire),
+                self.period_bits.load(Ordering::Acquire),
+                self.ppm_bits.load(Ordering::Acquire),
+                self.uncertainty.load(Ordering::Acquire),
+                self.presentation.load(Ordering::Acquire),
+                self.callback_local_ns.load(Ordering::Acquire),
+            );
+            if self.clock_sequence.load(Ordering::Acquire) == sequence {
+                break values;
+            }
+        };
         let device_error = self.device_error.load(Ordering::Acquire);
-        let status = match self.clock_status.load(Ordering::Acquire) {
+        let status = match status {
             0 => ClockStatus::AwaitingTimestamps,
             1 => ClockStatus::Valid,
             2 => ClockStatus::Invalid,
             _ => ClockStatus::DeviceError,
         };
-        let presentation = self.presentation.load(Ordering::Acquire);
         OutputTelemetry {
             clock_status: if device_error {
                 ClockStatus::DeviceError
@@ -166,10 +203,11 @@ impl Shared {
             dropped_frames: self.dropped.load(Ordering::Relaxed),
             queued_frames: written.saturating_sub(read).min(self.capacity as u64) as usize,
             capacity_frames: self.capacity,
-            device_clock_ppm: f64::from_bits(self.ppm_bits.load(Ordering::Relaxed)),
-            clock_uncertainty_ns: self.uncertainty.load(Ordering::Relaxed),
-            ns_per_frame: f64::from_bits(self.period_bits.load(Ordering::Relaxed)),
+            device_clock_ppm: f64::from_bits(ppm),
+            clock_uncertainty_ns: uncertainty,
+            ns_per_frame: f64::from_bits(period),
             last_presentation_local_ns: (presentation != u64::MAX).then_some(presentation),
+            last_callback_local_ns: (callback != u64::MAX).then_some(callback),
         }
     }
 }
@@ -210,6 +248,8 @@ pub struct PresentationConsumer {
 }
 
 impl ScheduledPcmQueue {
+    /// Create a muted queue. The owner must explicitly `unmute` after checking
+    /// that its presentation clock and schedule are ready.
     pub fn new(format: RenderFormat) -> Result<(Self, PresentationConsumer), OutputError> {
         Self::with_capability(format, TimestampCapability::External)
     }
@@ -239,14 +279,16 @@ impl ScheduledPcmQueue {
             read: AtomicU64::new(0),
             clear_before: AtomicU64::new(0),
             generation: AtomicU64::new(0),
-            muted: AtomicBool::new(false),
+            muted: AtomicBool::new(true),
             device_error: AtomicBool::new(false),
             volume: AtomicU32::new(1.0f32.to_bits()),
+            clock_sequence: AtomicU64::new(0),
             clock_status: AtomicU32::new(ClockStatus::AwaitingTimestamps as u32),
             period_bits: AtomicU64::new(period.to_bits()),
             ppm_bits: AtomicU64::new(0.0f64.to_bits()),
             uncertainty: AtomicU64::new(0),
             presentation: AtomicU64::new(u64::MAX),
+            callback_local_ns: AtomicU64::new(u64::MAX),
             played: AtomicU64::new(0),
             underrun: AtomicU64::new(0),
             future_silence: AtomicU64::new(0),
@@ -413,17 +455,32 @@ impl ScheduledPcmQueue {
 }
 
 impl PresentationConsumer {
-    fn publish_clock(&self, reading: ClockReading) {
+    fn publish_clock(&self, reading: ClockReading, callback_local_ns: Option<u64>) {
+        self.shared.clock_sequence.fetch_add(1, Ordering::AcqRel);
         self.shared
             .period_bits
-            .store(reading.ns_per_frame.to_bits(), Ordering::Relaxed);
+            .store(reading.ns_per_frame.to_bits(), Ordering::Release);
         self.shared
             .ppm_bits
-            .store(reading.device_clock_ppm.to_bits(), Ordering::Relaxed);
+            .store(reading.device_clock_ppm.to_bits(), Ordering::Release);
         self.shared
             .uncertainty
-            .store(reading.uncertainty_ns, Ordering::Relaxed);
+            .store(reading.uncertainty_ns, Ordering::Release);
+        self.shared.presentation.store(
+            reading.first_frame_local_ns.unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
+        self.shared
+            .callback_local_ns
+            .store(callback_local_ns.unwrap_or(u64::MAX), Ordering::Release);
         self.shared.status(reading.status);
+        self.shared.clock_sequence.fetch_add(1, Ordering::Release);
+    }
+
+    fn invalidate_clock(&mut self) {
+        self.shared.muted.store(true, Ordering::Release);
+        self.shared.publish_presentation(ClockStatus::Invalid, None);
+        self.discard();
     }
 
     fn discard(&mut self) {
@@ -437,6 +494,19 @@ impl PresentationConsumer {
         self.last_deadline = None;
     }
 
+    fn acknowledge_clear(&mut self) {
+        // Mute/clear/unmute already published the exact retirement boundary.
+        // A callback that saw `muted` just before an owner unmutes must not
+        // discard fresh PCM published after that unmute or create a new epoch.
+        let before = self.shared.clear_before.load(Ordering::Acquire);
+        let dropped = before.saturating_sub(self.read);
+        self.read = self.read.max(before);
+        self.shared.read.store(self.read, Ordering::Release);
+        self.shared.dropped.fetch_add(dropped, Ordering::Relaxed);
+        self.next_presentation_ns = None;
+        self.last_deadline = None;
+    }
+
     /// Fill a device buffer without allocating, deallocating, locking or I/O.
     /// Run starts align to the nearest device frame (half-frame tolerance).
     /// A contiguous PCM run then advances exactly one sample per device frame;
@@ -444,7 +514,9 @@ impl PresentationConsumer {
     /// sample deadlines within a continuous run would cause periodic drops.
     /// Future runs stay queued; expired runs trim by binary search, never play
     /// to catch up. Underflow or a callback gap releases that continuity lock.
-    /// Missing/invalid time discards the entire old epoch.
+    /// Missing/invalid time discards the entire old epoch and latches mute.
+    /// Valid timestamps resume telemetry; the owner must explicitly `unmute`
+    /// after resynchronizing before any new PCM can be played.
     ///
     /// `clear`/`mute` racing this function silence the whole unsubmitted buffer.
     /// Already submitted hardware buffers cannot be recalled by any CPAL API.
@@ -460,8 +532,7 @@ impl PresentationConsumer {
     ) {
         output.fill(0.0);
         let Some(presentation) = presentation else {
-            self.shared.status(ClockStatus::Invalid);
-            self.discard();
+            self.invalidate_clock();
             return;
         };
         let period = presentation.ns_per_frame;
@@ -476,14 +547,22 @@ impl PresentationConsumer {
                 .is_some_and(|next| first < next - period * 0.5)
             || first + (output.len() / channels) as f64 * period >= u64::MAX as f64
         {
-            self.shared.status(ClockStatus::Invalid);
+            self.invalidate_clock();
+            return;
+        }
+        // Clock observation continues during startup/recovery mute. A worker
+        // needs this time to infer device lead before it can safely unmute.
+        if self.shared.capability == TimestampCapability::External {
+            self.shared
+                .publish_presentation(ClockStatus::Valid, Some(presentation.first_frame_local_ns));
+        }
+        if self.shared.device_error.load(Ordering::Acquire) {
+            self.shared.muted.store(true, Ordering::Release);
             self.discard();
             return;
         }
-        if self.shared.muted.load(Ordering::Acquire)
-            || self.shared.device_error.load(Ordering::Acquire)
-        {
-            self.discard();
+        if self.shared.muted.load(Ordering::Acquire) {
+            self.acknowledge_clear();
             return;
         }
         if self
@@ -492,10 +571,6 @@ impl PresentationConsumer {
         {
             self.last_deadline = None;
         }
-        self.shared.status(ClockStatus::Valid);
-        self.shared
-            .presentation
-            .store(presentation.first_frame_local_ns, Ordering::Release);
         let generation = self.shared.generation.load(Ordering::Acquire);
         let clear_before = self.shared.clear_before.load(Ordering::Acquire);
         let mut dropped = clear_before.saturating_sub(self.read);
@@ -598,6 +673,8 @@ pub struct ScheduledOutput {
 }
 
 impl ScheduledOutput {
+    /// Start the native stream muted. Clock telemetry continues while muted;
+    /// the receiver must explicitly enable output after synchronization.
     pub fn open(options: OutputOptions) -> Result<Self, AudioError> {
         if !(1..=768_000).contains(&options.preferred_rate)
             || !(1..=32).contains(&options.channels)
@@ -691,9 +768,10 @@ impl ScheduledOutput {
                                 ns_per_frame: reading.ns_per_frame,
                             }),
                     );
-                    consumer.publish_clock(reading);
+                    consumer.publish_clock(reading, observation.map(|value| value.local_ns));
                 },
                 move |_error| {
+                    errors.muted.store(true, Ordering::Release);
                     errors.device_error.store(true, Ordering::Release);
                     errors.status(ClockStatus::DeviceError);
                     errors.clear(errors.written.load(Ordering::Acquire));
@@ -752,11 +830,13 @@ mod tests {
     use super::*;
 
     fn queue(rate: u32, channels: u16) -> (ScheduledPcmQueue, PresentationConsumer) {
-        ScheduledPcmQueue::new(RenderFormat {
+        let (mut producer, consumer) = ScheduledPcmQueue::new(RenderFormat {
             sample_rate: rate,
             channels,
         })
-        .unwrap()
+        .unwrap();
+        producer.unmute();
+        (producer, consumer)
     }
 
     fn time(start: u64, rate: u32) -> Option<PresentationTime> {
@@ -764,6 +844,161 @@ mod tests {
             first_frame_local_ns: start,
             ns_per_frame: 1e9 / f64::from(rate),
         })
+    }
+
+    #[test]
+    fn every_output_starts_muted_until_explicitly_enabled() {
+        for capability in [
+            TimestampCapability::External,
+            TimestampCapability::BackendEstimate,
+        ] {
+            let (mut producer, mut consumer) = ScheduledPcmQueue::with_capability(
+                RenderFormat {
+                    sample_rate: 1_000,
+                    channels: 1,
+                },
+                capability,
+            )
+            .unwrap();
+            assert!(producer.telemetry().muted);
+            assert_eq!(producer.write_at(0, &[0.5], 0), Err(OutputError::Muted));
+            let mut output = [9.0];
+            consumer.render(&mut output, time(0, 1_000));
+            assert_eq!(output, [0.0]);
+            assert!(producer.telemetry().muted);
+            producer.unmute();
+            producer.write_at(1_000_000, &[0.5], 0).unwrap();
+            consumer.render(&mut output, time(1_000_000, 1_000));
+            assert_eq!(output, [0.5]);
+        }
+    }
+
+    #[test]
+    fn clock_recovery_never_unmutes_a_failed_output() {
+        let (mut producer, mut consumer) = queue(1_000, 1);
+        producer.write_at(0, &[0.5; 4], 0).unwrap();
+        let mut output = [9.0; 4];
+        consumer.render(&mut output, None);
+        assert!(producer.telemetry().muted);
+        assert_eq!(producer.telemetry().queued_frames, 0);
+        consumer.render(&mut output, time(0, 1_000));
+        assert!(producer.telemetry().muted);
+        assert_eq!(producer.telemetry().clock_status, ClockStatus::Valid);
+        assert_eq!(
+            producer.write_at(4_000_000, &[0.75; 4], 0),
+            Err(OutputError::Muted)
+        );
+        assert_eq!(output, [0.0; 4]);
+        producer.unmute();
+        producer.write_at(4_000_000, &[0.75; 4], 0).unwrap();
+        consumer.render(&mut output, time(4_000_000, 1_000));
+        assert_eq!(output, [0.75; 4]);
+        consumer.render(
+            &mut output,
+            Some(PresentationTime {
+                first_frame_local_ns: 8_000_000,
+                ns_per_frame: f64::NAN,
+            }),
+        );
+        assert!(producer.telemetry().muted);
+        consumer.render(&mut output, time(8_000_000, 1_000));
+        assert!(producer.telemetry().muted);
+        assert_eq!(output, [0.0; 4]);
+    }
+
+    #[test]
+    fn native_clock_telemetry_advances_while_output_is_muted() {
+        let (mut producer, mut consumer) = queue(48_000, 2);
+        producer.mute();
+        let mut clock = OutputClock::new(48_000, 0).unwrap();
+        let mut output = [9.0; 960];
+        for index in 0..10u64 {
+            let observation = ClockObservation {
+                callback_ns: index * 10_000_000,
+                playback_ns: index * 10_000_000 + 30_000_000,
+                local_ns: index * 10_000_000 + 1_000_000_000,
+                frames: 480,
+            };
+            let reading = clock.observe(Some(observation));
+            consumer.render(
+                &mut output,
+                reading
+                    .first_frame_local_ns
+                    .map(|first_frame_local_ns| PresentationTime {
+                        first_frame_local_ns,
+                        ns_per_frame: reading.ns_per_frame,
+                    }),
+            );
+            consumer.publish_clock(reading, Some(observation.local_ns));
+            let telemetry = producer.telemetry();
+            assert!(telemetry.muted);
+            assert_eq!(telemetry.last_callback_local_ns, Some(observation.local_ns));
+            assert_eq!(output, [0.0; 960]);
+            if index >= 7 {
+                assert_eq!(telemetry.clock_status, ClockStatus::Valid);
+                assert_eq!(
+                    telemetry.last_presentation_local_ns,
+                    Some(observation.local_ns + 30_000_000)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clock_telemetry_never_mixes_two_callback_observations() {
+        let (producer, consumer) = ScheduledPcmQueue::with_capability(
+            RenderFormat {
+                sample_rate: 48_000,
+                channels: 2,
+            },
+            TimestampCapability::BackendEstimate,
+        )
+        .unwrap();
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let writer_ready = Arc::clone(&ready);
+        let writer = std::thread::spawn(move || {
+            writer_ready.wait();
+            for index in 0..50_000u64 {
+                let callback = 1_000_000_000 + index * 1_000_000;
+                consumer.publish_clock(
+                    ClockReading {
+                        status: ClockStatus::Valid,
+                        first_frame_local_ns: Some(callback + 30_000_000),
+                        ns_per_frame: 1e9 / 48_000.0,
+                        device_clock_ppm: 0.0,
+                        uncertainty_ns: 1_000,
+                    },
+                    Some(callback),
+                );
+            }
+        });
+        ready.wait();
+        while !writer.is_finished() {
+            let telemetry = producer.telemetry();
+            if let Some(presentation) = telemetry.last_presentation_local_ns {
+                assert_eq!(
+                    presentation - telemetry.last_callback_local_ns.unwrap(),
+                    30_000_000
+                );
+            }
+        }
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn a_callback_finishing_mute_cannot_discard_newly_enabled_pcm() {
+        let (mut producer, mut consumer) = queue(1_000, 1);
+        producer.write_at(0, &[0.5; 4], 0).unwrap();
+        producer.mute();
+        // The callback has observed mute, then the owner explicitly enables a
+        // fresh epoch before that callback acknowledges the retirement boundary.
+        producer.unmute();
+        producer.write_at(4_000_000, &[0.75; 4], 0).unwrap();
+        consumer.acknowledge_clear();
+        assert_eq!(producer.telemetry().queued_frames, 4);
+        let mut output = [0.0; 4];
+        consumer.render(&mut output, time(4_000_000, 1_000));
+        assert_eq!(output, [0.75; 4]);
     }
 
     #[test]
