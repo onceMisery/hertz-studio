@@ -157,8 +157,487 @@ pub struct FileMeta {
 }
 
 pub fn read_metadata(path: &Path) -> Result<FileMeta, String> {
+    read_metadata_source(
+        path,
+        Box::new(std::fs::File::open(path).map_err(|e| e.to_string())?),
+        MetadataOptions::default(),
+    )
+}
+
+/// Reads bounded text metadata for on-demand resources, without decoding audio
+/// or pictures. Supports ID3v2, FLAC/Vorbis comments, Ogg Vorbis/Opus, MP4 iTunes
+/// tags and RIFF INFO/ID3. Unsupported or malformed metadata returns an error so
+/// callers can use an explicitly bounded sidecar instead.
+///
+/// Symphonia 0.5 ignores MetadataOptions allocation limits in several readers;
+/// an I/O wrapper alone cannot stop allocations from forged length fields.
+pub fn read_metadata_bounded(path: &Path, max_bytes: usize) -> Result<FileMeta, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let info = file.metadata().map_err(|e| e.to_string())?;
+    if !info.is_file() {
+        return Err("metadata source must be a regular file".into());
+    }
+    bounded_metadata::read(file, info.len(), max_bytes).map_err(|e| e.to_string())
+}
+
+mod bounded_metadata {
+    use super::FileMeta;
+    use std::io::{self, Read, Seek, SeekFrom};
+    fn invalid() -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, "invalid or oversized metadata")
+    }
+
+    // Every read, including reads after backward seeks, spends the same budget.
+    pub(super) struct Reader<R> {
+        pub(super) inner: R,
+        pub(super) remaining: usize,
+        len: u64,
+        pos: u64,
+    }
+    impl<R: Read + Seek> Reader<R> {
+        pub(super) fn new(inner: R, len: u64, remaining: usize) -> Self {
+            Self {
+                inner,
+                remaining,
+                len,
+                pos: 0,
+            }
+        }
+        fn bytes(&mut self, n: usize) -> io::Result<Vec<u8>> {
+            if n > self.remaining || n as u64 > self.len.saturating_sub(self.pos) {
+                return Err(invalid());
+            }
+            let mut bytes = vec![0; n];
+            self.read_exact(&mut bytes)?;
+            Ok(bytes)
+        }
+        fn array<const N: usize>(&mut self) -> io::Result<[u8; N]> {
+            let mut bytes = [0; N];
+            self.read_exact(&mut bytes)?;
+            Ok(bytes)
+        }
+        fn jump(&mut self, pos: u64) -> io::Result<()> {
+            if pos > self.len {
+                return Err(invalid());
+            }
+            self.seek(SeekFrom::Start(pos))?;
+            Ok(())
+        }
+        fn end(&self, n: u64, limit: u64) -> io::Result<u64> {
+            self.pos
+                .checked_add(n)
+                .filter(|end| *end <= limit && *end <= self.len)
+                .ok_or_else(invalid)
+        }
+    }
+    impl<R: Read + Seek> Read for Reader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            if self.remaining == 0 {
+                return Err(invalid());
+            }
+            let n = buf.len().min(self.remaining);
+            let read = self.inner.read(&mut buf[..n])?;
+            self.remaining -= read;
+            self.pos += read as u64;
+            Ok(read)
+        }
+    }
+    impl<R: Read + Seek> Seek for Reader<R> {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            let pos = self.inner.seek(pos)?;
+            self.pos = pos;
+            Ok(pos)
+        }
+    }
+    struct Text {
+        meta: FileMeta,
+        remaining: usize,
+    }
+    impl Text {
+        fn put(&mut self, key: &[u8], bytes: &[u8], encoding: u8) -> io::Result<()> {
+            let slot = match key {
+                b"TITLE" | b"TIT2" | b"TT2" | b"\xa9nam" | b"INAM" => &mut self.meta.title,
+                b"ARTIST" | b"TPE1" | b"TP1" | b"\xa9ART" | b"IART" => &mut self.meta.artist,
+                b"ALBUM" | b"TALB" | b"TAL" | b"\xa9alb" | b"IPRD" => &mut self.meta.album,
+                b"LYRICS" | b"UNSYNCEDLYRICS" | b"SYNCEDLYRICS" | b"USLT" | b"ULT" | b"\xa9lyr" => {
+                    &mut self.meta.lyrics
+                }
+                _ => return Ok(()),
+            };
+            if slot.is_some() {
+                return Ok(());
+            }
+            let text = decode(bytes, encoding, self.remaining)?;
+            let text = text.trim_end_matches('\0');
+            if !text.trim().is_empty() {
+                self.remaining -= text.len();
+                *slot = Some(text.to_owned())
+            }
+            Ok(())
+        }
+    }
+    fn wanted(key: &[u8]) -> bool {
+        matches!(
+            key,
+            b"TIT2"
+                | b"TT2"
+                | b"TPE1"
+                | b"TP1"
+                | b"TALB"
+                | b"TAL"
+                | b"USLT"
+                | b"ULT"
+                | b"\xa9nam"
+                | b"\xa9ART"
+                | b"\xa9alb"
+                | b"\xa9lyr"
+                | b"INAM"
+                | b"IART"
+                | b"IPRD"
+        )
+    }
+    fn decode(bytes: &[u8], encoding: u8, max: usize) -> io::Result<String> {
+        let mut text = String::new();
+        let mut push = |c: char| {
+            if text.len() + c.len_utf8() > max {
+                return Err(invalid());
+            }
+            text.push(c);
+            Ok(())
+        };
+        match encoding {
+            0 => {
+                for b in bytes {
+                    push(char::from(*b))?
+                }
+            }
+            1 | 2 => {
+                let (bytes, little) = if encoding == 1 {
+                    match bytes.get(..2) {
+                        Some([0xff, 0xfe]) => (&bytes[2..], true),
+                        Some([0xfe, 0xff]) => (&bytes[2..], false),
+                        _ => return Err(invalid()),
+                    }
+                } else {
+                    (bytes, false)
+                };
+                if bytes.len() % 2 != 0 {
+                    return Err(invalid());
+                }
+                let units = bytes.chunks_exact(2).map(|b| {
+                    if little {
+                        u16::from_le_bytes([b[0], b[1]])
+                    } else {
+                        u16::from_be_bytes([b[0], b[1]])
+                    }
+                });
+                for c in char::decode_utf16(units) {
+                    push(c.map_err(|_| invalid())?)?
+                }
+            }
+            3 => {
+                let s = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+                if s.len() > max {
+                    return Err(invalid());
+                }
+                return Ok(s.to_owned());
+            }
+            _ => return Err(invalid()),
+        }
+        Ok(text)
+    }
+    pub(super) fn read<R: Read + Seek>(inner: R, len: u64, max: usize) -> io::Result<FileMeta> {
+        let mut r = Reader::new(inner, len, max);
+        let mut text = Text {
+            meta: FileMeta::default(),
+            remaining: max,
+        };
+        let magic = r.array::<12>()?;
+        r.jump(0)?;
+        if magic.starts_with(b"ID3") {
+            id3(&mut r, &mut text, len)?
+        } else if magic.starts_with(b"fLaC") {
+            flac(&mut r, &mut text)?
+        } else if magic.starts_with(b"OggS") {
+            ogg(&mut r, &mut text)?
+        } else if &magic[4..8] == b"ftyp" {
+            mp4(&mut r, &mut text, len, 0, None)?
+        } else if magic.starts_with(b"RIFF") && &magic[8..12] == b"WAVE" {
+            riff(&mut r, &mut text)?
+        } else {
+            return Err(invalid());
+        }
+        Ok(text.meta)
+    }
+    fn synchsafe(bytes: &[u8]) -> io::Result<u32> {
+        bytes.iter().try_fold(0, |n, b| {
+            if b & 0x80 == 0 {
+                Ok((n << 7) | u32::from(*b))
+            } else {
+                Err(invalid())
+            }
+        })
+    }
+    fn id3<R: Read + Seek>(r: &mut Reader<R>, text: &mut Text, limit: u64) -> io::Result<()> {
+        let h = r.array::<10>()?;
+        if &h[..3] != b"ID3" || !(2..=4).contains(&h[3]) || h[5] & 0xc0 != 0 {
+            return Err(invalid());
+        }
+        let end = r.end(u64::from(synchsafe(&h[6..10])?), limit)?;
+        while r.pos < end {
+            let size = if h[3] == 2 { 6 } else { 10 };
+            if end - r.pos < size as u64 {
+                let padding = r.bytes((end - r.pos) as usize)?;
+                return if padding.iter().all(|b| *b == 0) {
+                    Ok(())
+                } else {
+                    Err(invalid())
+                };
+            }
+            let frame = r.bytes(size)?;
+            if frame[0] == 0 {
+                break;
+            }
+            let (key, n, flags) = if h[3] == 2 {
+                (
+                    &frame[..3],
+                    u32::from_be_bytes([0, frame[3], frame[4], frame[5]]),
+                    0,
+                )
+            } else {
+                (
+                    &frame[..4],
+                    if h[3] == 4 {
+                        synchsafe(&frame[4..8])?
+                    } else {
+                        u32::from_be_bytes(frame[4..8].try_into().unwrap())
+                    },
+                    frame[9],
+                )
+            };
+            let next = r.end(u64::from(n), end)?;
+            if wanted(key) && flags == 0 {
+                let data = r.bytes(n as usize)?;
+                let encoding = *data.first().ok_or_else(invalid)?;
+                let mut value = &data[1..];
+                if key == b"USLT" || key == b"ULT" {
+                    value = value.get(3..).ok_or_else(invalid)?;
+                    let width = if encoding == 1 || encoding == 2 { 2 } else { 1 };
+                    let desc = value
+                        .chunks_exact(width)
+                        .position(|c| c.iter().all(|b| *b == 0))
+                        .ok_or_else(invalid)?;
+                    let bom = if encoding == 1 { value.get(..2) } else { None };
+                    value = &value[(desc + 1) * width..];
+                    // UTF-16 lyric text may inherit its description's BOM.
+                    if let Some(bom) = bom.filter(|_| {
+                        !value.starts_with(&[0xff, 0xfe]) && !value.starts_with(&[0xfe, 0xff])
+                    }) {
+                        let mut bytes = bom.to_vec();
+                        bytes.extend_from_slice(value);
+                        text.put(key, &bytes, encoding)?;
+                        r.jump(next)?;
+                        continue;
+                    }
+                }
+                text.put(key, value, encoding)?;
+            }
+            r.jump(next)?;
+        }
+        r.jump(end)
+    }
+    fn comments(bytes: &[u8], text: &mut Text) -> io::Result<()> {
+        fn take<'a>(bytes: &mut &'a [u8], n: usize) -> io::Result<&'a [u8]> {
+            let out = bytes.get(..n).ok_or_else(invalid)?;
+            *bytes = &bytes[n..];
+            Ok(out)
+        }
+        fn number(bytes: &mut &[u8]) -> io::Result<usize> {
+            Ok(u32::from_le_bytes(take(bytes, 4)?.try_into().unwrap()) as usize)
+        }
+        let mut bytes = bytes;
+        let vendor = number(&mut bytes)?;
+        take(&mut bytes, vendor)?;
+        let count = number(&mut bytes)?;
+        if count > bytes.len() / 4 {
+            return Err(invalid());
+        }
+        for _ in 0..count {
+            let n = number(&mut bytes)?;
+            let entry = take(&mut bytes, n)?;
+            if let Some(split) = entry.iter().position(|b| *b == b'=') {
+                // A key needs no allocation proportional to an untrusted comment.
+                if split <= 32 {
+                    let key = entry[..split].to_ascii_uppercase();
+                    text.put(&key, &entry[split + 1..], 3)?
+                }
+            }
+        }
+        Ok(())
+    }
+    fn flac<R: Read + Seek>(r: &mut Reader<R>, text: &mut Text) -> io::Result<()> {
+        r.jump(4)?;
+        loop {
+            let h = r.array::<4>()?;
+            let n = u32::from_be_bytes([0, h[1], h[2], h[3]]);
+            let end = r.end(u64::from(n), r.len)?;
+            if h[0] & 0x7f == 4 {
+                comments(&r.bytes(n as usize)?, text)?
+            }
+            r.jump(end)?;
+            if h[0] & 0x80 != 0 {
+                break;
+            }
+        }
+        Ok(())
+    }
+    fn ogg<R: Read + Seek>(r: &mut Reader<R>, text: &mut Text) -> io::Result<()> {
+        let mut packet = Vec::new();
+        let mut serial = None;
+        let mut sequence = 0;
+        loop {
+            let h = r.array::<27>()?;
+            if &h[..4] != b"OggS" || h[4] != 0 {
+                return Err(invalid());
+            }
+            let page_serial = u32::from_le_bytes(h[14..18].try_into().unwrap());
+            let page_seq = u32::from_le_bytes(h[18..22].try_into().unwrap());
+            if serial.is_some_and(|s| s != page_serial)
+                || page_seq != sequence
+                || (h[5] & 1 != 0) != !packet.is_empty()
+            {
+                return Err(invalid());
+            }
+            serial = Some(page_serial);
+            sequence = sequence.checked_add(1).ok_or_else(invalid)?;
+            let segments = r.bytes(h[26] as usize)?;
+            for n in segments {
+                let data = r.bytes(n as usize)?;
+                if packet.len() + data.len() > text.remaining {
+                    return Err(invalid());
+                }
+                packet.extend(data);
+                if n < 255 {
+                    if packet.starts_with(b"\x03vorbis") {
+                        return comments(&packet[7..], text);
+                    }
+                    if packet.starts_with(b"OpusTags") {
+                        return comments(&packet[8..], text);
+                    }
+                    if !packet.starts_with(b"\x01vorbis") && !packet.starts_with(b"OpusHead") {
+                        return Err(invalid());
+                    }
+                    packet.clear();
+                }
+            }
+            if h[5] & 4 != 0 {
+                return Ok(());
+            }
+        }
+    }
+    fn mp4<R: Read + Seek>(
+        r: &mut Reader<R>,
+        text: &mut Text,
+        end: u64,
+        depth: u8,
+        tag: Option<[u8; 4]>,
+    ) -> io::Result<()> {
+        if depth > 8 {
+            return Err(invalid());
+        }
+        while r.pos < end {
+            if end - r.pos < 8 {
+                return Err(invalid());
+            }
+            let start = r.pos;
+            let h = r.array::<8>()?;
+            let size = u32::from_be_bytes(h[..4].try_into().unwrap());
+            let key: [u8; 4] = h[4..8].try_into().unwrap();
+            let n = match size {
+                0 => end - start,
+                1 => u64::from_be_bytes(r.array::<8>()?),
+                n => u64::from(n),
+            };
+            let next = start
+                .checked_add(n)
+                .filter(|n| *n >= r.pos && *n <= end)
+                .ok_or_else(invalid)?;
+            if matches!(&key, b"moov" | b"udta" | b"meta" | b"ilst") {
+                if &key == b"meta" {
+                    if next - r.pos < 4 {
+                        return Err(invalid());
+                    }
+                    r.array::<4>()?;
+                }
+                mp4(r, text, next, depth + 1, None)?;
+            } else if wanted(&key) {
+                mp4(r, text, next, depth + 1, Some(key))?
+            } else if &key == b"data" && tag.is_some() {
+                if next - r.pos < 8 {
+                    return Err(invalid());
+                }
+                let kind = u32::from_be_bytes(r.array::<4>()?) & 0xffffff;
+                r.array::<4>()?;
+                if kind == 1 || kind == 2 {
+                    let data = r.bytes((next - r.pos).try_into().map_err(|_| invalid())?)?;
+                    text.put(&tag.unwrap(), &data, if kind == 1 { 3 } else { 2 })?
+                }
+            }
+            r.jump(next)?;
+        }
+        Ok(())
+    }
+    fn riff<R: Read + Seek>(r: &mut Reader<R>, text: &mut Text) -> io::Result<()> {
+        let h = r.array::<12>()?;
+        let end = 8u64
+            .checked_add(u64::from(u32::from_le_bytes(h[4..8].try_into().unwrap())))
+            .filter(|e| *e <= r.len)
+            .ok_or_else(invalid)?;
+        while r.pos < end {
+            if end - r.pos < 8 {
+                return Err(invalid());
+            }
+            let h = r.array::<8>()?;
+            let n = u32::from_le_bytes(h[4..8].try_into().unwrap());
+            let next = r.end(u64::from(n), end)?;
+            if &h[..4] == b"LIST" && n >= 4 && &r.array::<4>()? == b"INFO" {
+                while r.pos < next {
+                    if next - r.pos < 8 {
+                        return Err(invalid());
+                    }
+                    let tag = r.array::<8>()?;
+                    let n = u32::from_le_bytes(tag[4..8].try_into().unwrap());
+                    let tail = r.end(u64::from(n), next)?;
+                    if wanted(&tag[..4]) {
+                        text.put(&tag[..4], &r.bytes(n as usize)?, 3)?
+                    }
+                    let padded = tail + (u64::from(n) & 1);
+                    if padded > next {
+                        return Err(invalid());
+                    }
+                    r.jump(padded)?;
+                }
+            } else if h[..4].eq_ignore_ascii_case(b"id3 ") {
+                id3(r, text, next)?
+            }
+            let padded = next + (u64::from(n) & 1);
+            if padded > end {
+                return Err(invalid());
+            }
+            r.jump(padded)?;
+        }
+        Ok(())
+    }
+}
+fn read_metadata_source(
+    path: &Path,
+    source: Box<dyn symphonia::core::io::MediaSource>,
+    options: MetadataOptions,
+) -> Result<FileMeta, String> {
+    let mss = MediaSourceStream::new(source, Default::default());
 
     let ext = path
         .extension()
@@ -171,12 +650,7 @@ pub fn read_metadata(path: &Path) -> Result<FileMeta, String> {
     }
 
     let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
+        .format(&hint, mss, &FormatOptions::default(), &options)
         .map_err(|e| e.to_string())?;
 
     let mut meta = FileMeta::default();
@@ -910,6 +1384,171 @@ mod tests {
         let meta = read_metadata(&file).unwrap();
         assert_eq!(meta.lyrics.as_deref(), Some("[00:01.00]内嵌歌词"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn bounded_meta(bytes: &[u8], budget: usize) -> Result<FileMeta, String> {
+        bounded_metadata::read(std::io::Cursor::new(bytes), bytes.len() as u64, budget)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn bounded_flac_reads_text_and_skips_untrusted_picture_lengths() {
+        let mut bytes = flac_with_comment(&[("TITLE", "bounded"), ("LYRICS", "[00:01]words")]);
+        // Insert a final PICTURE block after the comments and before audio.
+        bytes[42] &= 0x7f;
+        let frame = bytes.split_off(bytes.len() - 14);
+        bytes.extend([0x86, 0, 0, 8]);
+        bytes.extend(3u32.to_be_bytes());
+        bytes.extend(u32::MAX.to_be_bytes()); // forged MIME allocation length
+        bytes.extend(frame);
+        let meta = bounded_meta(&bytes, 1024).unwrap();
+        assert_eq!(meta.title.as_deref(), Some("bounded"));
+        assert_eq!(meta.lyrics.as_deref(), Some("[00:01]words"));
+        assert!(meta.cover.is_none());
+    }
+
+    #[test]
+    fn bounded_metadata_rejects_forged_comment_sizes_before_allocating() {
+        let mut bytes = flac_with_comment(&[("LYRICS", "words")]);
+        // Comment payload: vendor length + vendor + count + entry length.
+        let entry_length = 46 + 4 + b"vmusic-test".len() + 4;
+        bytes[entry_length..entry_length + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(bounded_meta(&bytes, 1024).is_err());
+        bytes[entry_length..entry_length + 4].copy_from_slice(&4097u32.to_le_bytes());
+        assert!(bounded_meta(&bytes, 1024).is_err());
+        assert!(bounded_meta(&bytes, 0).is_err());
+    }
+
+    #[test]
+    fn bounded_read_budget_is_shared_across_backward_and_forward_seeks() {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut reader = bounded_metadata::Reader::new(std::io::Cursor::new(vec![7; 128]), 128, 12);
+        let mut out = [0; 8];
+        assert_eq!(reader.read(&mut out).unwrap(), 8);
+        reader.seek(SeekFrom::Start(100)).unwrap();
+        assert_eq!(reader.read(&mut out).unwrap(), 4);
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        assert!(reader.read(&mut out).is_err());
+        assert_eq!(reader.remaining, 0);
+        assert_eq!(reader.read(&mut []).unwrap(), 0);
+    }
+
+    fn id3_lyrics(text: &[u8], encoding: u8) -> Vec<u8> {
+        let mut payload = vec![encoding, b'e', b'n', b'g', 0];
+        payload.extend(text);
+        let mut body = b"USLT".to_vec();
+        body.extend((payload.len() as u32).to_be_bytes());
+        body.extend([0, 0]);
+        body.extend(payload);
+        let n = body.len() as u32;
+        let mut bytes = vec![
+            b'I',
+            b'D',
+            b'3',
+            3,
+            0,
+            0,
+            ((n >> 21) & 127) as u8,
+            ((n >> 14) & 127) as u8,
+            ((n >> 7) & 127) as u8,
+            (n & 127) as u8,
+        ];
+        bytes.extend(body);
+        bytes
+    }
+
+    #[test]
+    fn bounded_id3_reads_lyrics_and_rejects_forged_frames_and_text_expansion() {
+        let mut bytes = id3_lyrics("[00:01]歌词".as_bytes(), 3);
+        assert_eq!(
+            bounded_meta(&bytes, 1024).unwrap().lyrics.as_deref(),
+            Some("[00:01]歌词")
+        );
+        bytes[14..18].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(bounded_meta(&bytes, 1024).is_err());
+        // Latin-1 expands in UTF-8; decoded output has its own byte bound.
+        assert!(bounded_meta(&id3_lyrics(&vec![255; 3000], 0), 4096).is_err());
+    }
+
+    fn mp4_atom(key: &[u8; 4], payload: Vec<u8>) -> Vec<u8> {
+        let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        out.extend(key);
+        out.extend(payload);
+        out
+    }
+
+    #[test]
+    fn bounded_m4a_reads_itunes_lyrics_and_rejects_extended_atom_overflow() {
+        let mut data = vec![0, 0, 0, 1, 0, 0, 0, 0];
+        data.extend("[00:01]m4a".as_bytes());
+        let ilst = mp4_atom(b"ilst", mp4_atom(b"\xa9lyr", mp4_atom(b"data", data)));
+        let mut meta = vec![0; 4];
+        meta.extend(ilst);
+        let mut bytes = mp4_atom(b"ftyp", b"M4A \0\0\0\0".to_vec());
+        bytes.extend(mp4_atom(
+            b"moov",
+            mp4_atom(b"udta", mp4_atom(b"meta", meta)),
+        ));
+        assert_eq!(
+            bounded_meta(&bytes, 1024).unwrap().lyrics.as_deref(),
+            Some("[00:01]m4a")
+        );
+        bytes.extend(1u32.to_be_bytes());
+        bytes.extend(b"moov");
+        bytes.extend(u64::MAX.to_be_bytes());
+        assert!(bounded_meta(&bytes, 1024).is_err());
+    }
+
+    fn ogg_page(packet: &[u8], sequence: u32) -> Vec<u8> {
+        assert!(packet.len() < 255);
+        let mut h = vec![0; 27];
+        h[..4].copy_from_slice(b"OggS");
+        h[14..18].copy_from_slice(&42u32.to_le_bytes());
+        h[18..22].copy_from_slice(&sequence.to_le_bytes());
+        h[26] = 1;
+        h.push(packet.len() as u8);
+        h.extend(packet);
+        h
+    }
+
+    #[test]
+    fn bounded_ogg_reads_vorbis_and_opus_comments_with_checked_lengths() {
+        for (head, tags) in [
+            (b"\x01vorbis".as_slice(), b"\x03vorbis".as_slice()),
+            (b"OpusHead".as_slice(), b"OpusTags".as_slice()),
+        ] {
+            let mut comment = tags.to_vec();
+            comment.extend(0u32.to_le_bytes());
+            comment.extend(1u32.to_le_bytes());
+            comment.extend(18u32.to_le_bytes());
+            comment.extend(b"LYRICS=[00:01]ogg");
+            // Correct the literal entry size so the corrupt case below is separate.
+            let length = comment.len() - tags.len() - 12;
+            comment[tags.len() + 8..tags.len() + 12]
+                .copy_from_slice(&(length as u32).to_le_bytes());
+            let mut bytes = ogg_page(head, 0);
+            bytes.extend(ogg_page(&comment, 1));
+            assert_eq!(
+                bounded_meta(&bytes, 1024).unwrap().lyrics.as_deref(),
+                Some("[00:01]ogg")
+            );
+            comment[tags.len() + 8..tags.len() + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+            let mut bytes = ogg_page(head, 0);
+            bytes.extend(ogg_page(&comment, 1));
+            assert!(bounded_meta(&bytes, 1024).is_err());
+        }
+    }
+
+    #[test]
+    fn bounded_wav_reads_info_and_rejects_truncated_or_oversized_chunks() {
+        let mut bytes = wav_with_info(&[("INAM", "bounded title")]);
+        assert_eq!(
+            bounded_meta(&bytes, 1024).unwrap().title.as_deref(),
+            Some("bounded title")
+        );
+        bytes[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(bounded_meta(&bytes, 1024).is_err());
+        assert!(bounded_meta(&bytes[..15], 1024).is_err());
     }
 
     #[test]
