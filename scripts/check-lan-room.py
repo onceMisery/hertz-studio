@@ -155,7 +155,41 @@ def verify(host, guest, music, native, duration, samples):
     library = host.peer(action="library", offset=0, limit=32)["tracks"]
     assert len(library) == 3
     assert all("path" not in row and "id" not in row for row in library)
-    host.control("queue", resources=[track["resource_id"] for track in library])
+    def new_item(resource):
+        return {"instance_id": None, "resource_id": resource}
+
+    def queue_items():
+        return host.peer(action="queue_page", offset=0, limit=32)["queue"]
+
+    # Real HTTP preparation and Owner commits, including repeated resources.
+    first, second = library[0]["resource_id"], library[1]["resource_id"]
+    host.control("queue", items=[new_item(first), new_item(first), new_item(second)])
+    duplicated = queue_items()
+    assert len({q["instance_id"] for q in duplicated}) == 3
+    host.control("queue", items=duplicated[1:])
+    assert queue_items() == duplicated[1:]
+    host.control("queue", items=list(reversed(duplicated[1:])))
+    assert queue_items() == list(reversed(duplicated[1:]))
+    unchanged = queue_items()
+    revision = host.room()["revision"]
+    invalid = [
+        (unchanged + [unchanged[0]], revision, "room_invalid"),
+        ([dict(unchanged[0], resource_id=first)], revision, "room_invalid"),
+        ([duplicated[0]], revision, "room_invalid"),
+        (unchanged, str(int(revision) - 1), "revision_conflict"),
+    ]
+    for items, expected, code in invalid:
+        before = host.room()
+        try:
+            host.peer(action="queue", operation_id=before["next_operation_id"],
+                      expected_revision=expected, items=items)
+            raise AssertionError("invalid queue identity was accepted")
+        except ApiError as error:
+            assert error.code == code, error
+        assert host.room()["revision"] == revision
+        assert queue_items() == unchanged
+    host.control("queue", items=[new_item(track["resource_id"]) for track in library])
+    checks.append("duplicate queue occurrences retain identity; duplicate, mismatched, removed and stale writes are atomic")
     permissions = dict(listen=True, queue=True, transport=True, volume=True, chat_read=True, chat_send=True)
     invitation = host.room({"action": "invite", "permissions": permissions})["invitation"]
     guest.room({"action": "join", "invitation": invitation, "name": "Acceptance desktop", "listen": native})
@@ -236,20 +270,51 @@ def verify(host, guest, music, native, duration, samples):
             assert int(receiver["resync_count"]) == resync_baseline, receiver.get("last_resync_reason")
             return receiver
 
+        def presented_after(previous_epoch, label):
+            def presented():
+                receiver = healthy_output()
+                epoch = receiver.get("current_epoch")
+                return receiver if receiver.get("ready") and epoch and int(epoch) > int(previous_epoch) else None
+
+            receiver = wait_for(presented, label)
+            epoch, frame = receiver["current_epoch"], int(receiver["played_frame"])
+
+            def advanced():
+                receiver = healthy_output()
+                return receiver if (receiver.get("ready") and receiver.get("current_epoch") == epoch
+                                    and int(receiver["played_frame"]) > frame) else None
+
+            return wait_for(advanced, label + " advances native presented frames")
+
         before = wait_for(settled, "playback settled before next")
+        previous_epoch = healthy_output()["current_epoch"]
         host.play("next")
         wait_for(lambda: (lambda s: s if s and s["track_instance_id"] != before["track_instance_id"] else None)(settled()), "next presented on native timeline")
+        previous_epoch = presented_after(previous_epoch, "next reaches a new native epoch")["current_epoch"]
         before = host.room()
         host.play("seek", instance_id=before["track_instance_id"], position_ms="1000")
         wait_for(lambda: (lambda s: s if s and 1000 <= int(s["position_ms"]) < 3000 else None)(settled()), "seek presented at requested position")
-        time.sleep(.3)
-        healthy_output()
+        presented_after(previous_epoch, "seek reaches a new native epoch")
         checks.append("next and instance-bound seek commit on the native receiver without underruns")
+
+        before = wait_for(settled, "playback settled before duplicate insertion")
+        epoch = healthy_output()["current_epoch"]
+        queue = queue_items()
+        current = next(q for q in queue if q["instance_id"] == before["track_instance_id"])
+        host.control("queue", items=[new_item(current["resource_id"])] + queue)
+        duplicate_queue = queue_items()
+        assert duplicate_queue[0]["instance_id"] != current["instance_id"]
+        host.control("queue", items=duplicate_queue[1:])
+        after = host.room()
+        assert after["track_instance_id"] == current["instance_id"] and after["playing"]
+        assert not after.get("pending") and not after.get("scheduled")
+        assert healthy_output()["current_epoch"] == epoch
+        checks.append("removing an earlier duplicate preserves the playing instance and native epoch without a pause")
 
         before = wait_for(settled, "playback settled before reorder")
         epoch = healthy_output()["current_epoch"]
         queue = host.peer(action="queue_page", offset=0, limit=32)["queue"]
-        host.control("queue", resources=[q["resource_id"] for q in reversed(queue)])
+        host.control("queue", items=list(reversed(queue)))
         time.sleep(.3)
         assert host.room()["track_instance_id"] == before["track_instance_id"]
         assert healthy_output()["current_epoch"] == epoch
@@ -266,7 +331,7 @@ def verify(host, guest, music, native, duration, samples):
         time.sleep(.4)
         assert host.room()["position_ms"] == paused["position_ms"]
         queue = host.peer(action="queue_page", offset=0, limit=32)["queue"]
-        host.control("queue", resources=[q["resource_id"] for q in reversed(queue)])
+        host.control("queue", items=list(reversed(queue)))
         assert host.room()["track_instance_id"] == paused["track_instance_id"]
         host.play("play")
         wait_for(lambda: host.room().get("playing"), "resume after paused reorder")
@@ -298,6 +363,17 @@ def verify(host, guest, music, native, duration, samples):
     wait_for(lambda: guest.room()["mode"] == "local", "host End restores guest local mode", 8)
     assert not guest.call("/v1/state").get("playing", False)
     checks.append("host End restores the connected guest to silent local mode")
+    host.room({"action": "create", "name": "Service shutdown", "address": "127.0.0.1:0",
+               "sample_rate": 48000, "local_output": False})
+    invitation = host.room({"action": "invite", "permissions": permissions})["invitation"]
+    guest.room({"action": "join", "invitation": invitation, "name": "Shutdown observer", "listen": False})
+    wait_for(guest.connected, "connected before service shutdown", 20)
+    host.call("/v1/system/shutdown", {})
+    wait_for(lambda: guest.room()["mode"] == "local", "service shutdown drains terminal End", 8)
+    assert guest.room({"action": "saved_room"})["saved_room"] is None
+    wait_for(lambda: host.process.poll() is not None, "host service exits after room cleanup", 8)
+    assert not (host.directory / "vmusicd.json").exists()
+    checks.append("host service shutdown drains End, forgets ended guest membership and removes discovery before exit")
     return {"checks": checks, "native_output_tested": native, "output_binding": output,
             "duration_seconds": duration if native else 0, "samples": list(samples),
             "sample_retention": "Last 600 observations; every observation is checked during the run.",

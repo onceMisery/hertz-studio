@@ -11,7 +11,7 @@ use super::receiver::{self, ReceiverEvent, ReceiverHandle, ReceiverRegistry};
 use super::resources::SharedLibrary;
 use crate::state::AppState;
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -240,6 +240,7 @@ pub(crate) async fn start(
         )
         .await
         .map_err(transport_error)?;
+        handle.set_volume(output.volume).map_err(transport_error)?;
         handle
             .mapping(local_mapping(clock.now_ns()))
             .map_err(transport_error)?;
@@ -688,13 +689,13 @@ impl Owner {
             self.jobs.spawn(async move {
                 let result = host_jobs::bounded(async {
                     match request {
-                        PeerRequest::Queue { ref resources, .. } => {
-                            if resources.len() > 2000 {
+                        PeerRequest::Queue { ref items, .. } => {
+                            if items.len() > 2000 {
                                 return Err(RoomError::invalid("队列最多2000项"));
                             }
-                            let mut tracks = Vec::with_capacity(resources.len());
-                            for resource in resources {
-                                tracks.push(library.source(&state, *resource).await?.0);
+                            let mut tracks = Vec::with_capacity(items.len());
+                            for item in items {
+                                tracks.push(library.source(&state, item.resource_id).await?.0);
                             }
                             Ok(PreparedAction::Queue { request, tracks })
                         }
@@ -964,9 +965,15 @@ impl Owner {
         let mut last_publish = 0;
         let mut last_interface = 0;
         let mut failure = self.producer.failure.clone();
+        let mut exiting = self.state.exiting_signal();
         loop {
+            if *stop.borrow() || *exiting.borrow() {
+                break;
+            }
             tokio::select! {
+                biased;
                 _=stop.changed()=>break,
+                _=exiting.changed()=>break,
                 _=failure.changed()=>{return Err(RoomError::new("room_render",failure.borrow().clone().unwrap_or_else(||"共享渲染已停止".into())));},
                 _=tick.tick()=>{
                     let now=self.clock.now_ns();self.advance(now).await?;
@@ -2601,7 +2608,7 @@ impl Owner {
                 self.playback(member, session, seq, expected, command)
                     .await?
             }
-            PeerRequest::Queue { resources, .. } => {
+            PeerRequest::Queue { items, .. } => {
                 if !permissions.queue {
                     return Err(RoomError::denied());
                 }
@@ -2611,32 +2618,37 @@ impl Owner {
                 {
                     return Err(RoomError::new("room_busy", "请等待当前切换生效后编辑队列"));
                 }
-                if resources.len() > 2000 {
+                if items.len() > 2000 {
                     return Err(RoomError::invalid("队列最多2000项"));
                 }
                 let old_tracks = self.state.queue.lock().await.clone();
-                let mut available = old_tracks
-                    .into_iter()
-                    .zip(self.instances.iter().copied())
-                    .collect::<VecDeque<_>>();
-                let mut tracks = Vec::with_capacity(resources.len());
-                let mut instances = Vec::with_capacity(resources.len());
-                let resolved = resolved_queue.ok_or_else(|| {
+                let tracks = resolved_queue.ok_or_else(|| {
                     RoomError::new("room_preparation_required", "队列尚未完成资源检查")
                 })?;
-                for track in resolved {
-                    let instance =
-                        if let Some(index) = available.iter().position(|(old, _)| old == &track) {
-                            available.remove(index).unwrap().1
-                        } else {
-                            let instance = self.next_instance;
-                            self.next_instance = self
-                                .next_instance
-                                .checked_add(1)
-                                .ok_or_else(RoomError::exhausted)?;
-                            instance
-                        };
-                    tracks.push(track);
+                if tracks.len() != items.len() {
+                    return Err(RoomError::invalid("队列资源检查结果不完整"));
+                }
+                let mut instances = Vec::with_capacity(items.len());
+                let mut retained = HashSet::with_capacity(items.len());
+                let mut next_instance = self.next_instance;
+                for (item, track) in items.iter().zip(&tracks) {
+                    let instance = if let Some(instance) = item.instance_id {
+                        let index = self
+                            .instances
+                            .iter()
+                            .position(|id| *id == instance.0)
+                            .ok_or_else(|| RoomError::invalid("队列实例已失效或不属于此房间"))?;
+                        if !retained.insert(instance.0) || old_tracks.get(index) != Some(track) {
+                            return Err(RoomError::invalid("队列实例重复或与资源不匹配"));
+                        }
+                        instance.0
+                    } else {
+                        let instance = next_instance;
+                        next_instance = next_instance
+                            .checked_add(1)
+                            .ok_or_else(RoomError::exhausted)?;
+                        instance
+                    };
                     instances.push(instance);
                 }
                 // The queue only exists here, in AppState. Instance IDs are
@@ -2656,6 +2668,7 @@ impl Owner {
                 *self.state.queue.lock().await = tracks;
                 *self.state.cursor.lock().await = instances.iter().position(|id| *id == current.0);
                 self.instances = instances;
+                self.next_instance = next_instance;
                 self.scheduler
                     .control_changed()
                     .ok_or_else(RoomError::exhausted)?;
@@ -2879,6 +2892,7 @@ impl Owner {
             })
             .await;
         value["mode"] = json!("host");
+        value["member_id"] = json!(OWNER);
         value["address"] = json!(self.server.address);
         value["fingerprint"] = json!(self.server.fingerprint.hex());
         value["output"] = output_json(self.local.as_ref(), &self.output);
@@ -2911,7 +2925,7 @@ pub(super) fn output_json(receiver: Option<&ReceiverHandle>, settings: &OutputSe
         return json!({"enabled":false,"settings":settings});
     };
     let status = receiver.status();
-    json!({"enabled":true,"settings":settings,"ready":status.output_ready,"connected":status.connected,"played_frame":status.played_frame.to_string(),"underrun_frames":status.underrun_frames.to_string(),"buffered_input_frames":status.buffered_input_frames,"current_epoch":status.current_epoch.map(|v|v.to_string()),"preparing_epoch":status.preparing_epoch.map(|v|v.to_string()),"discarded_blocks":status.discarded_blocks.to_string(),"output_session_id":status.identity.session_id,"binding":status.binding,"error":status.last_error,"clock":status.network_clock.map(|m|json!({"converged":m.converged(),"uncertainty_ns":m.uncertainty_ns.to_string(),"drift_ppm":m.drift_ppm,"rtt_ns":m.min_rtt_ns.to_string()})),"device":status.output.map(|o|json!({"clock_status":format!("{:?}",o.clock_status),"timestamp_capability":format!("{:?}",o.timestamp_capability),"clock_uncertainty_ns":o.clock_uncertainty_ns.to_string(),"device_clock_ppm":o.device_clock_ppm,"queued_frames":o.queued_frames,"muted":o.muted}))})
+    json!({"enabled":true,"settings":settings,"ready":status.output_ready,"connected":status.connected,"played_frame":status.played_frame.to_string(),"underrun_frames":status.underrun_frames.to_string(),"buffered_input_frames":status.buffered_input_frames,"current_epoch":status.current_epoch.map(|v|v.to_string()),"preparing_epoch":status.preparing_epoch.map(|v|v.to_string()),"discarded_blocks":status.discarded_blocks.to_string(),"resync_count":status.resync_count.to_string(),"last_resync_reason":status.last_resync_reason,"output_session_id":status.identity.session_id,"binding":status.binding,"error":status.last_error,"clock":status.network_clock.map(|m|json!({"converged":m.converged(),"uncertainty_ns":m.uncertainty_ns.to_string(),"drift_ppm":m.drift_ppm,"rtt_ns":m.min_rtt_ns.to_string()})),"device":status.output.map(|o|json!({"clock_status":format!("{:?}",o.clock_status),"timestamp_capability":format!("{:?}",o.timestamp_capability),"clock_uncertainty_ns":o.clock_uncertainty_ns.to_string(),"clock_fault_count":o.clock_fault_count.to_string(),"last_clock_fault":o.last_clock_fault.map(|f|json!({"kind":format!("{:?}",f.kind),"value":f.value})),"device_clock_ppm":o.device_clock_ppm,"queued_frames":o.queued_frames,"muted":o.muted}))})
 }
 fn random_next(len: usize, current: usize) -> usize {
     if len <= 1 {
@@ -3115,6 +3129,206 @@ pub(super) mod join_retry_tests {
         audio.join().unwrap();
     }
 
+    #[tokio::test]
+    async fn service_exit_already_requested_stops_host_owner() {
+        let (mut owner, audio, render, inbound) = playing_owner().await;
+        let (_commands, local) = mpsc::channel(1);
+        let (_stop, stopped) = watch::channel(false);
+        owner.state.exiting.send_replace(true);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            owner.run(local, inbound, render, stopped),
+        )
+        .await;
+        finish_owner(owner, audio).await;
+        assert!(
+            result.is_ok(),
+            "Host must observe an exit requested before run starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_first_duplicate_retains_the_playing_second_instance() {
+        let (mut owner, audio, _render, _inbound) = playing_owner().await;
+        *owner.state.queue.lock().await = vec!["a".into(), "a".into(), "b".into()];
+        *owner.state.cursor.lock().await = Some(1);
+        owner.instances = vec![1, 2, 3];
+        owner.next_instance = 4;
+        owner.audible.as_mut().unwrap().target.track = TrackInstanceId(2);
+        owner.scheduler = PlanScheduler::new(owner.audible.as_ref().unwrap().target);
+        owner.render_heads.insert(1, 2);
+        owner
+            .peer(
+                OWNER,
+                None,
+                owner_permissions(),
+                PeerRequest::Queue {
+                    operation_id: Counter(1),
+                    expected_revision: Counter(owner.scheduler.revision().0),
+                    items: vec![
+                        QueueItem {
+                            instance_id: Some(Counter(2)),
+                            resource_id: Uuid::new_v4(),
+                        },
+                        QueueItem {
+                            instance_id: Some(Counter(3)),
+                            resource_id: Uuid::new_v4(),
+                        },
+                    ],
+                },
+                Some(vec!["a".into(), "b".into()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner.instances, [2, 3]);
+        assert_eq!(*owner.state.cursor.lock().await, Some(0));
+        assert!(
+            owner.candidate.is_none(),
+            "retaining the current instance must not schedule a pause"
+        );
+        owner
+            .peer(
+                OWNER,
+                None,
+                owner_permissions(),
+                PeerRequest::Queue {
+                    operation_id: Counter(2),
+                    expected_revision: Counter(owner.scheduler.revision().0),
+                    items: vec![
+                        QueueItem {
+                            instance_id: Some(Counter(3)),
+                            resource_id: Uuid::new_v4(),
+                        },
+                        QueueItem {
+                            instance_id: Some(Counter(2)),
+                            resource_id: Uuid::new_v4(),
+                        },
+                        QueueItem {
+                            instance_id: None,
+                            resource_id: Uuid::new_v4(),
+                        },
+                        QueueItem {
+                            instance_id: None,
+                            resource_id: Uuid::new_v4(),
+                        },
+                    ],
+                },
+                Some(vec!["b".into(), "a".into(), "a".into(), "a".into()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner.instances, [3, 2, 4, 5]);
+        assert_eq!(*owner.state.cursor.lock().await, Some(1));
+        assert!(owner.candidate.is_none());
+        assert_eq!(owner.position(owner.clock.now_ns()).0, 2);
+        assert!(owner.position(owner.clock.now_ns()).2);
+        finish_owner(owner, audio).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_queue_instances_do_not_change_queue_revision_or_allocate_ids() {
+        let (mut owner, audio, _render, _inbound) = playing_owner().await;
+        let revision = owner.scheduler.revision().0;
+        let resource = Uuid::new_v4();
+        for (ids, tracks, expected, code) in [
+            (
+                vec![Some(1), Some(1)],
+                vec!["a", "a"],
+                revision,
+                "room_invalid",
+            ),
+            (vec![Some(1)], vec!["b"], revision, "room_invalid"),
+            (
+                vec![None, Some(999)],
+                vec!["a", "a"],
+                revision,
+                "room_invalid",
+            ),
+            (vec![Some(1)], vec!["a"], revision + 1, "revision_conflict"),
+        ] {
+            let error = owner
+                .peer(
+                    OWNER,
+                    None,
+                    owner_permissions(),
+                    PeerRequest::Queue {
+                        operation_id: Counter(1),
+                        expected_revision: Counter(expected),
+                        items: ids
+                            .into_iter()
+                            .map(|id| QueueItem {
+                                instance_id: id.map(Counter),
+                                resource_id: resource,
+                            })
+                            .collect(),
+                    },
+                    Some(tracks.into_iter().map(String::from).collect()),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(owner.scheduler.revision().0, revision);
+            assert_eq!(*owner.state.queue.lock().await, ["a"]);
+            assert_eq!(owner.instances, [1]);
+            assert_eq!(owner.next_instance, 2);
+            assert!(owner.candidate.is_none());
+        }
+        // Removing the currently presented instance retains the original
+        // future-pause semantics; it does not silently switch to another copy.
+        owner
+            .peer(
+                OWNER,
+                None,
+                owner_permissions(),
+                PeerRequest::Queue {
+                    operation_id: Counter(1),
+                    expected_revision: Counter(revision),
+                    items: vec![QueueItem {
+                        instance_id: None,
+                        resource_id: resource,
+                    }],
+                },
+                Some(vec!["a".into()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner.instances, [2]);
+        assert_eq!(*owner.state.cursor.lock().await, None);
+        assert!(
+            owner.position(owner.clock.now_ns()).2,
+            "old PCM remains audible before the pause boundary"
+        );
+        let pause = owner.candidate.as_ref().unwrap();
+        assert!(!pause.target.playing);
+        assert_eq!(pause.target.track.0, 1);
+        assert!(pause.preserve_position);
+        // An already removed ID is not reusable even at the current revision.
+        owner.candidate = None;
+        let revision = owner.scheduler.revision().0;
+        let error = owner
+            .peer(
+                OWNER,
+                None,
+                owner_permissions(),
+                PeerRequest::Queue {
+                    operation_id: Counter(2),
+                    expected_revision: Counter(revision),
+                    items: vec![QueueItem {
+                        instance_id: Some(Counter(1)),
+                        resource_id: resource,
+                    }],
+                },
+                Some(vec!["a".into()]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "room_invalid");
+        assert_eq!(owner.scheduler.revision().0, revision);
+        assert_eq!(owner.instances, [2]);
+        assert_eq!(owner.next_instance, 3);
+        finish_owner(owner, audio).await;
+    }
+
     // The producer overlap regression consumes the actual Owner preflight,
     // covering the queue removal/acknowledgment race and the affected PCM.
     pub(in crate::room) async fn removed_successor_mix_gains() -> HashMap<u64, f32> {
@@ -3160,7 +3374,16 @@ pub(super) mod join_retry_tests {
                 PeerRequest::Queue {
                     operation_id: Counter(1),
                     expected_revision: Counter(owner.scheduler.revision().0),
-                    resources: vec![Uuid::new_v4(), Uuid::new_v4()],
+                    items: vec![
+                        QueueItem {
+                            instance_id: Some(Counter(1)),
+                            resource_id: Uuid::new_v4(),
+                        },
+                        QueueItem {
+                            instance_id: Some(Counter(3)),
+                            resource_id: Uuid::new_v4(),
+                        },
+                    ],
                 },
                 Some(vec!["a".into(), "c".into()]),
             )

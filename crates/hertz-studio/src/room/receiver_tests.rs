@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 use super::*;
+use std::cell::Cell;
+use std::rc::Rc;
 use uuid::Uuid;
 use vmusic_audio::scheduled_output::{PresentationConsumer, PresentationTime, ScheduledPcmQueue};
 use vmusic_lan::protocol::{AudioFormat, Counter};
@@ -12,6 +14,8 @@ struct FakeOutput {
     now: u64,
     valid: bool,
     ppm: f64,
+    cancel_diagnostic_on_write: Option<oneshot::Receiver<Result<(), ReceiverError>>>,
+    telemetry_clock: Option<Rc<Cell<u64>>>,
 }
 
 impl FakeOutput {
@@ -27,6 +31,8 @@ impl FakeOutput {
             now: 0,
             valid: true,
             ppm: 0.0,
+            cancel_diagnostic_on_write: None,
+            telemetry_clock: None,
         }
     }
 
@@ -55,11 +61,22 @@ impl DeviceOutput for FakeOutput {
         } else {
             ClockStatus::Invalid
         };
-        t.last_callback_local_ns = Some(self.now);
-        t.last_presentation_local_ns = Some(self.now + 20 * MS);
+        let callback = self.telemetry_clock.as_ref().map_or(self.now, |clock| {
+            let next = clock.get() + 10 * MS;
+            clock.set(next);
+            next
+        });
+        t.last_callback_local_ns = Some(callback);
+        t.last_presentation_local_ns = Some(callback + 20 * MS);
         t.device_clock_ppm = self.ppm;
         t.ns_per_frame = 1e9 / (f64::from(self.format().sample_rate) * (1.0 + self.ppm * 1e-6));
         t
+    }
+    fn clocked_cursor(&self, start: u64, period: f64) -> Result<OutputCursor, OutputError> {
+        self.queue.clocked_cursor_at(start, period)
+    }
+    fn scheduled_cursor(&self) -> Option<OutputCursor> {
+        self.queue.scheduled_cursor()
     }
     fn write(
         &mut self,
@@ -67,14 +84,29 @@ impl DeviceOutput for FakeOutput {
         samples: &[f32],
         now: u64,
         period: f64,
+    ) -> Result<OutputCursor, OutputError> {
+        drop(self.cancel_diagnostic_on_write.take());
+        self.queue.write_clocked_at(start, samples, now, period)?;
+        self.queue
+            .scheduled_cursor()
+            .ok_or(OutputError::Interrupted)
+    }
+    fn write_finite(
+        &mut self,
+        start: u64,
+        samples: &[f32],
+        now: u64,
+        period: f64,
     ) -> Result<(), OutputError> {
-        self.queue.write_clocked_at(start, samples, now, period)
+        drop(self.cancel_diagnostic_on_write.take());
+        self.queue
+            .write_finite_clocked_at(start, samples, now, period)
     }
     fn mute(&mut self) {
         self.queue.mute();
     }
-    fn unmute(&mut self) {
-        self.queue.unmute();
+    fn unmute(&mut self, start: u64) {
+        self.queue.unmute_at(start);
     }
     fn volume(&mut self, volume: f32) -> Result<(), OutputError> {
         self.queue.set_local_volume(volume)
@@ -125,8 +157,251 @@ fn engine() -> Engine<FakeOutput> {
         identity(),
         Arc::new(Budget::default()),
     );
-    engine.command(0, Command::Mapping(mapping(0, 0.0)), &mut Vec::new());
+    engine.command(
+        engine.observe(|| 0),
+        Command::Mapping(mapping(0, 0.0)),
+        &mut Vec::new(),
+    );
     engine
+}
+
+#[test]
+fn callback_snapshot_precedes_status_time_even_after_long_conversion_work() {
+    let mut engine = engine();
+    let clock = Rc::new(Cell::new(0));
+    engine.output.as_mut().unwrap().telemetry_clock = Some(clock.clone());
+    for index in 0..4_500 {
+        engine.mapping = Some(mapping(clock.get(), 0.0));
+        let snapshot = engine.observe(|| clock.get());
+        assert_eq!(snapshot.observed_at, (index + 1) * 10 * MS);
+        let status = engine.status(snapshot);
+        assert!(status.output_ready, "callback {index}");
+        // Readiness and device lead must use the captured callback, including
+        // when another callback would advance during any second telemetry read.
+        assert_eq!(clock.get(), snapshot.observed_at);
+        assert_eq!(
+            status.output.unwrap().last_callback_local_ns,
+            Some(clock.get())
+        );
+    }
+    // Reproduce a tick whose conversion work lasts longer than the 2ms future
+    // guard. A new callback arrives before status is sampled; it belongs to the
+    // new status time, not the time sampled before conversion.
+    let tick_time = clock.get();
+    clock.set(tick_time + 6 * MS);
+    engine.mapping = Some(mapping(clock.get(), 0.0));
+    let snapshot = engine.observe(|| clock.get());
+    assert!(snapshot.telemetry.unwrap().last_callback_local_ns.unwrap() > tick_time + 2 * MS);
+    assert!(engine.status(snapshot).output_ready);
+    assert_eq!(clock.get(), tick_time + 16 * MS);
+
+    // Causal sampling preserves all gates: stalled callbacks, truly future
+    // timestamps and excessive submission lead still make output unavailable.
+    let mut stale = snapshot;
+    stale.observed_at += DEVICE_FRESHNESS_NS + 1;
+    assert!(!engine.status(stale).output_ready);
+    assert_eq!(
+        engine.output_unavailable(stale),
+        Some(("device_callback_age_ns", DEVICE_FRESHNESS_NS + 1))
+    );
+    let mut future = snapshot;
+    future.observed_at -= 2 * MS + 1;
+    assert!(!engine.status(future).output_ready);
+    assert_eq!(
+        engine.output_unavailable(future),
+        Some(("device_callback_future_ns", 2 * MS + 1))
+    );
+    let mut excessive_lead = snapshot;
+    let telemetry = excessive_lead.telemetry.as_mut().unwrap();
+    telemetry.last_presentation_local_ns = telemetry
+        .last_callback_local_ns
+        .map(|callback| callback + MAX_DEVICE_LEAD_NS + 1);
+    assert!(!engine.status(excessive_lead).output_ready);
+}
+
+#[test]
+fn fractional_device_grid_hands_off_without_overlapping_the_next_epoch() {
+    let nominal = 1e9 / 48_000.0;
+    let (mut queue, _) = ScheduledPcmQueue::new(RenderFormat {
+        sample_rate: 48_000,
+        channels: 2,
+    })
+    .unwrap();
+    queue.unmute_at(1_000_000_000);
+    queue
+        .write_clocked_at(1_000_000_000, &[1.0; 2], 0, 20_833.49)
+        .unwrap();
+    let cursor = queue.clocked_cursor_at(1_000_020_833, nominal).unwrap();
+    assert_eq!(cursor.time_after(1).unwrap(), 1_000_041_667);
+    let start = cursor.time_after(0).unwrap();
+    let boundary = start + 10_417;
+    let frames = submission_frames(cursor, 0, boundary, 48_000, 0).unwrap();
+    if frames > 0 {
+        queue
+            .write_clocked_at(start, &vec![1.0; frames * 2], 0, nominal)
+            .unwrap();
+    }
+    queue
+        .write_clocked_at(boundary, &[2.0; 2], 0, nominal)
+        .unwrap();
+}
+
+#[test]
+fn consecutive_epoch_handoffs_budget_from_the_retained_device_grid() {
+    let period = 20_833.0;
+    let (mut queue, _) = ScheduledPcmQueue::new(RenderFormat {
+        sample_rate: 48_000,
+        channels: 2,
+    })
+    .unwrap();
+    let first = 1_000_000_000;
+    queue.unmute_at(first);
+    queue.write_clocked_at(first, &[1.0; 2], 0, period).unwrap();
+    let second = first + 20_833 - 10_000;
+    let third = second + 48_000 * 20_833 - 10_000;
+    let mut cursor = queue.clocked_cursor_at(second, period).unwrap();
+    assert_eq!(cursor.time_after(0).unwrap(), first + 20_833);
+    loop {
+        let frames = submission_frames(cursor, 0, third, 48_000, 0).unwrap();
+        if frames == 0 {
+            break;
+        }
+        queue
+            .write_clocked_at(
+                cursor.time_after(0).unwrap(),
+                &vec![1.0; frames * 2],
+                0,
+                period,
+            )
+            .unwrap();
+        cursor = queue.scheduled_cursor().unwrap();
+    }
+    queue.write_clocked_at(third, &[2.0; 2], 0, period).unwrap();
+}
+
+#[test]
+fn resync_diagnostics_survive_a_fresh_preparation() {
+    let mut engine = engine();
+    let mut events = Vec::new();
+    engine.fail("device clock lost", &mut events);
+    engine.command(
+        engine.observe(|| 0),
+        Command::Prepare(identity(), plan(1, 1, 1000 * MS, 0)),
+        &mut events,
+    );
+    let status = engine.status(engine.observe(|| 0));
+    assert_eq!(status.resync_count, 1);
+    assert_eq!(
+        status.last_resync_reason.as_deref(),
+        Some("device clock lost")
+    );
+}
+
+#[test]
+fn native_diagnostic_is_bounded_ramped_and_silent_at_both_boundaries() {
+    let mut engine = engine();
+    engine.start_test_output(engine.observe(|| 0)).unwrap();
+    let until = engine.test_until.unwrap();
+    assert!(!engine.output_ready(engine.observe(|| 0)));
+    assert!(engine.start_test_output(engine.observe(|| 0)).is_err());
+    let output = engine.output.as_mut().unwrap();
+    assert_eq!(output.queue.telemetry().queued_frames, 12_000);
+    assert!(output.render(0, 480).iter().all(|v| *v == 0.0));
+    let tone = output.render(until - 250 * MS, 12_000);
+    assert!(tone.iter().any(|v| v.abs() > 0.03));
+    assert!(tone.iter().all(|v| v.is_finite() && v.abs() < 0.032));
+    assert_eq!(tone[0], 0.0);
+    assert_eq!(tone[tone.len() - 1], 0.0);
+    assert!(output.render(until, 480).iter().all(|v| *v == 0.0));
+    assert_eq!(output.queue.telemetry().underrun_frames, 0);
+    output.now = until;
+    let mut events = Vec::new();
+    engine.tick(engine.observe(|| until), &mut events);
+    assert!(engine.test_until.is_none());
+    assert!(engine.output_ready(engine.observe(|| until)));
+    assert!(events.is_empty());
+}
+
+#[test]
+fn native_diagnostic_ends_on_its_pcm_extent_with_fractional_clock_phase_slew() {
+    for ppm in [-500.0, 151.260_500_040_884, 500.0] {
+        for phase in [-0.49, 0.49] {
+            for slew in [-1.0 / 32.0, 1.0 / 32.0] {
+                let mut engine = engine();
+                let now = 123_456_789;
+                let output = engine.output.as_mut().unwrap();
+                output.now = now;
+                output.ppm = ppm;
+                let period = output.telemetry().ns_per_frame;
+                let start = now + engine.lead(engine.observe(|| now));
+                engine.start_test_output(engine.observe(|| now)).unwrap();
+                let until = engine.test_until.unwrap();
+                let output = engine.output.as_mut().unwrap();
+                // A run starts on the nearest physical frame. The native clock
+                // can slew phase by 1/32 frame per callback without a gap; that
+                // must neither truncate the tone nor append empty PCM frames.
+                let first = start as f64 - (3.0 + phase) * period;
+                for block in 0..50 {
+                    let at = (first + block as f64 * (256.0 + slew) * period).round() as u64;
+                    output.render(at, 256);
+                }
+                let telemetry = output.queue.telemetry();
+                assert_eq!(telemetry.played_frames, 12_000);
+                assert_eq!(telemetry.late_frames, 0);
+                assert_eq!(telemetry.underrun_frames, 0);
+                assert_eq!(telemetry.queued_frames, 0);
+                assert!(output
+                    .render(until + 20 * MS, 480)
+                    .iter()
+                    .all(|v| *v == 0.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_room_plan_preempts_diagnostics_and_cancelled_requests_cannot_play_late() {
+    let mut engine = engine();
+    let (tx, rx) = oneshot::channel();
+    drop(rx);
+    engine.command(
+        engine.observe(|| 0),
+        Command::TestOutput(tx),
+        &mut Vec::new(),
+    );
+    assert!(engine.test_until.is_none());
+    engine.start_test_output(engine.observe(|| 0)).unwrap();
+    let mut events = Vec::new();
+    engine.command(
+        engine.observe(|| 0),
+        Command::Prepare(identity(), plan(1, 1, 1_000 * MS, 0)),
+        &mut events,
+    );
+    assert!(engine.test_until.is_none());
+    assert!(engine
+        .output
+        .as_mut()
+        .unwrap()
+        .render(140 * MS, 12_000)
+        .iter()
+        .all(|v| *v == 0.0));
+    assert!(engine.start_test_output(engine.observe(|| 0)).is_err());
+}
+
+#[test]
+fn cancelling_a_diagnostic_during_pcm_submission_revokes_its_future_audio() {
+    let mut engine = engine();
+    let (tx, rx) = oneshot::channel();
+    engine.output.as_mut().unwrap().cancel_diagnostic_on_write = Some(rx);
+    engine.command(
+        engine.observe(|| 0),
+        Command::TestOutput(tx),
+        &mut Vec::new(),
+    );
+    assert!(engine.test_until.is_none());
+    let output = engine.output.as_mut().unwrap();
+    assert!(output.queue.telemetry().muted);
+    assert!(output.render(140 * MS, 12_000).iter().all(|v| *v == 0.0));
 }
 
 fn pcm(engine: &Engine<FakeOutput>, epoch: u64, sequence: u64, frame: u64, frames: usize) -> Pcm {
@@ -154,7 +429,7 @@ fn feed(engine: &mut Engine<FakeOutput>, epoch: u64, first: u64, frames: usize) 
     while offset < frames {
         let count = (frames - offset).min(4096);
         let block = pcm(engine, epoch, sequence, first + offset as u64, count);
-        engine.command(0, Command::Pcm(block), &mut Vec::new());
+        engine.command(engine.observe(|| 0), Command::Pcm(block), &mut Vec::new());
         offset += count;
         sequence += 1;
     }
@@ -162,7 +437,11 @@ fn feed(engine: &mut Engine<FakeOutput>, epoch: u64, first: u64, frames: usize) 
 
 fn prepare(engine: &mut Engine<FakeOutput>, plan: Plan) -> Vec<ReceiverEvent> {
     let mut events = Vec::new();
-    engine.command(0, Command::Prepare(identity(), plan), &mut events);
+    engine.command(
+        engine.observe(|| 0),
+        Command::Prepare(identity(), plan),
+        &mut events,
+    );
     events
 }
 
@@ -170,7 +449,7 @@ fn commit(engine: &mut Engine<FakeOutput>, now: u64, plan: &Plan) -> Vec<Receive
     let mut events = Vec::new();
     engine.output.as_mut().unwrap().now = now;
     engine.command(
-        now,
+        engine.observe(|| now),
         Command::Commit {
             identity: identity(),
             epoch: plan.epoch.0,
@@ -186,7 +465,7 @@ fn commit(engine: &mut Engine<FakeOutput>, now: u64, plan: &Plan) -> Vec<Receive
 fn tick(engine: &mut Engine<FakeOutput>, now: u64) -> Vec<ReceiverEvent> {
     engine.output.as_mut().unwrap().now = now;
     let mut events = Vec::new();
-    engine.tick(now, &mut events);
+    engine.tick(engine.observe(|| now), &mut events);
     events
 }
 
@@ -257,13 +536,17 @@ fn streaming_pcm_arrivals_between_ticks_do_not_manufacture_source_gaps() {
         let now = millis * MS;
         engine.output.as_mut().unwrap().now = now;
         if millis % 200 == 0 {
-            engine.command(now, Command::Mapping(mapping(now, 0.0)), &mut Vec::new());
+            engine.command(
+                engine.observe(|| now),
+                Command::Mapping(mapping(now, 0.0)),
+                &mut Vec::new(),
+            );
         }
         if millis >= 200 && millis % 20 == 0 {
             // Wire input is deliberately processed before this timer tick.
             let block = pcm(&engine, 1, sequence, next_frame, 882);
             let mut events = Vec::new();
-            engine.command(now, Command::Pcm(block), &mut events);
+            engine.command(engine.observe(|| now), Command::Pcm(block), &mut events);
             assert!(events.is_empty(), "{millis}: {events:?}");
             sequence += 1;
             next_frame += 882;
@@ -285,7 +568,7 @@ fn late_join_matches_early_pcm_and_trims_only_the_prejoin_prefix() {
     // Broadcast reaches the endpoint before its Prepare. Sequence 50 is
     // arbitrary and the first block straddles the eventual join boundary.
     let first = pcm(&engine, 7, 50, 17_000, 4096);
-    engine.command(0, Command::Pcm(first), &mut Vec::new());
+    engine.command(engine.observe(|| 0), Command::Pcm(first), &mut Vec::new());
     assert_eq!(engine.unmatched.len(), 1);
     let plan = plan(7, 100, 0, 17_640); // 400ms
     assert!(matches!(
@@ -297,7 +580,7 @@ fn late_join_matches_early_pcm_and_trims_only_the_prejoin_prefix() {
     assert_eq!(preparing.expected_frame, 21_096);
     assert_eq!(preparing.pcm.front().unwrap().offset_frames, 640);
     let old = pcm(&engine, 7, 49, 0, 4096);
-    engine.command(0, Command::Pcm(old), &mut Vec::new());
+    engine.command(engine.observe(|| 0), Command::Pcm(old), &mut Vec::new());
     assert_eq!(engine.preparing.as_ref().unwrap().sequence, Some(50));
     assert!(commit(&mut engine, 0, &plan).is_empty());
     tick(&mut engine, 350 * MS);
@@ -309,7 +592,11 @@ fn late_join_allows_a_media_anchor_older_than_the_client_clock_origin() {
     let mut engine = engine();
     let mut clock = mapping(0, 0.0);
     clock.offset_ns = 10_000 * MS as i64;
-    engine.command(0, Command::Mapping(clock), &mut Vec::new());
+    engine.command(
+        engine.observe(|| 0),
+        Command::Mapping(clock),
+        &mut Vec::new(),
+    );
     // Host media frame 0 predates this process by one second. Only the
     // selected future join must be representable in the local clock.
     let plan = plan(7, 100, 9_000 * MS, 61_740);
@@ -331,14 +618,14 @@ fn uuid_collision_reordered_trailing_and_wrong_format_never_change_cursor() {
     prepare(&mut engine, plan(1, 10, 400 * MS, 0));
     let mut wrong = pcm(&engine, 1, 1, 0, 1000);
     wrong.block.identity.session_id = Uuid::from_u128((2u128 << 64) | 7);
-    engine.command(0, Command::Pcm(wrong), &mut Vec::new());
+    engine.command(engine.observe(|| 0), Command::Pcm(wrong), &mut Vec::new());
     assert_eq!(engine.preparing.as_ref().unwrap().expected_frame, 0);
     let good = pcm(&engine, 1, 1, 0, 1000);
-    engine.command(0, Command::Pcm(good), &mut Vec::new());
+    engine.command(engine.observe(|| 0), Command::Pcm(good), &mut Vec::new());
     for (sequence, frame, format) in [(1, 0, 3), (0, 1000, 3), (2, 1000, 4)] {
         let mut wrong = pcm(&engine, 1, sequence, frame, 1000);
         wrong.block.format_id = format;
-        engine.command(0, Command::Pcm(wrong), &mut Vec::new());
+        engine.command(engine.observe(|| 0), Command::Pcm(wrong), &mut Vec::new());
     }
     assert_eq!(engine.preparing.as_ref().unwrap().expected_frame, 1000);
     assert_eq!(engine.discarded, 4);
@@ -350,13 +637,17 @@ fn gap_mutes_clears_and_requires_a_new_monotonic_join_token() {
     let original = plan(1, 10, 400 * MS, 0);
     prepare(&mut engine, original.clone());
     let first = pcm(&engine, 1, 1, 0, 4096);
-    engine.command(0, Command::Pcm(first), &mut Vec::new());
+    engine.command(engine.observe(|| 0), Command::Pcm(first), &mut Vec::new());
     commit(&mut engine, 0, &original);
     tick(&mut engine, 350 * MS);
     assert!(engine.output.as_ref().unwrap().telemetry().queued_frames > 0);
     let missing = pcm(&engine, 1, 3, 4096, 1000);
     let mut events = Vec::new();
-    engine.command(350 * MS, Command::Pcm(missing), &mut events);
+    engine.command(
+        engine.observe(|| 350 * MS),
+        Command::Pcm(missing),
+        &mut events,
+    );
     assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
     assert!(engine.output.as_ref().unwrap().telemetry().muted);
     assert_eq!(engine.output.as_ref().unwrap().telemetry().queued_frames, 0);
@@ -366,10 +657,18 @@ fn gap_mutes_clears_and_requires_a_new_monotonic_join_token() {
     // Same media epoch, immutable anchor/format, increasing future join.
     let rejoin = plan(1, 11, 400 * MS, 22_050);
     let mut events = Vec::new();
-    engine.command(350 * MS, Command::Prepare(identity(), rejoin), &mut events);
+    engine.command(
+        engine.observe(|| 350 * MS),
+        Command::Prepare(identity(), rejoin),
+        &mut events,
+    );
     assert!(events.is_empty());
     let block = pcm(&engine, 1, 9, 22_050 - 128, 4096);
-    engine.command(350 * MS, Command::Pcm(block), &mut events);
+    engine.command(
+        engine.observe(|| 350 * MS),
+        Command::Pcm(block),
+        &mut events,
+    );
     assert!(matches!(
         events.as_slice(),
         [ReceiverEvent::Ready { plan_id: 11, .. }]
@@ -413,7 +712,7 @@ fn commit_cannot_move_the_plan_boundary_and_third_epoch_has_no_pcm() {
     prepare(&mut engine, first.clone());
     let mut events = Vec::new();
     engine.command(
-        0,
+        engine.observe(|| 0),
         Command::Commit {
             identity: identity(),
             epoch: 1,
@@ -432,7 +731,7 @@ fn commit_cannot_move_the_plan_boundary_and_third_epoch_has_no_pcm() {
     tick(&mut engine, 350 * MS);
     prepare(&mut engine, plan(2, 12, 800 * MS, 0));
     let block = pcm(&engine, 2, 1, 0, 1000);
-    engine.command(0, Command::Pcm(block), &mut Vec::new());
+    engine.command(engine.observe(|| 0), Command::Pcm(block), &mut Vec::new());
     assert_eq!(engine.intent.as_ref().unwrap().epoch.0, 2);
     assert_eq!(engine.preparing.as_ref().unwrap().plan.epoch.0, 1);
     assert!(engine.unmatched.is_empty());
@@ -465,7 +764,7 @@ fn input_budget_includes_pending_commands_and_releases_on_drop() {
     assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), 0);
     assert_eq!(engine.budget.bytes.load(Ordering::Acquire), 0);
     let waiting = pcm(&engine, 1, 0, 0, 1000);
-    engine.command(0, Command::Pcm(waiting), &mut Vec::new());
+    engine.command(engine.observe(|| 0), Command::Pcm(waiting), &mut Vec::new());
     assert!(tick(&mut engine, 501 * MS)
         .iter()
         .any(|event| matches!(event, ReceiverEvent::Resync { .. })));
@@ -503,7 +802,7 @@ fn minimum_rate_input_budget_cannot_exceed_its_duration_even_before_matching() {
     ));
     prepare(&mut engine, plan(1, 10, 400 * MS, 0));
     for block in pending {
-        engine.command(0, Command::Pcm(block), &mut Vec::new());
+        engine.command(engine.observe(|| 0), Command::Pcm(block), &mut Vec::new());
     }
     assert_eq!(
         engine.budget.duration_ns.load(Ordering::Acquire),
@@ -521,7 +820,7 @@ fn minimum_rate_input_budget_cannot_exceed_its_duration_even_before_matching() {
 fn matching_early_pcm_reprices_duration_and_byte_rejection_rolls_it_back() {
     let mut engine = engine();
     let block = pcm(&engine, 1, 0, 0, 8820);
-    engine.command(0, Command::Pcm(block), &mut Vec::new());
+    engine.command(engine.observe(|| 0), Command::Pcm(block), &mut Vec::new());
     assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), 200 * MS);
     let mut future = plan(1, 10, 400 * MS, 0);
     future.format.sample_rate = 192_000;
@@ -629,7 +928,7 @@ fn high_rate_epoch_switch_buffers_current_and_pending_candidate_without_capacity
             );
             for block in pending {
                 let mut events = Vec::new();
-                engine.command(now, Command::Pcm(block), &mut events);
+                engine.command(engine.observe(|| now), Command::Pcm(block), &mut events);
                 assert!(events
                     .iter()
                     .all(|event| matches!(event, ReceiverEvent::Ready { .. })));
@@ -681,7 +980,7 @@ fn device_positive_ppm_reduces_input_per_output_and_packet_grid_stays_continuous
             <= 1
     );
     engine.command(
-        350 * MS,
+        engine.observe(|| 350 * MS),
         Command::Mapping(mapping(350 * MS, 300.0)),
         &mut Vec::new(),
     );
@@ -716,7 +1015,8 @@ async fn shutdown_completes_after_output_drop_while_other_handle_clones_live() {
     let dropped = Arc::new(AtomicBool::new(false));
     let emergency = Arc::new(Mutex::new(None));
     let (commands, _inbox) = mpsc::channel(1);
-    let (_status, status) = watch::channel(engine().status(0));
+    let engine = engine();
+    let (_status, status) = watch::channel(engine.status(engine.observe(|| 0)));
     let (done_tx, done) = watch::channel(false);
     let handle = ReceiverHandle {
         commands,
@@ -756,22 +1056,22 @@ fn late_join_requires_real_complete_history_and_future_pcm_before_ready() {
     prepare(&mut missing, plan(1, 10, 0, 22_050));
     // A post-join suffix alone cannot silently use zero history.
     let block = pcm(&missing, 1, 8, 22_050, 2000);
-    missing.command(0, Command::Pcm(block), &mut Vec::new());
+    missing.command(missing.observe(|| 0), Command::Pcm(block), &mut Vec::new());
     assert!(!missing.preparing.as_ref().unwrap().ready);
     assert!(!missing.preparing.as_ref().unwrap().history_primed);
     // Rewinding the broadcast sequence to retrieve history is forbidden.
     let old = pcm(&missing, 1, 7, 22_050 - 128, 128);
-    missing.command(0, Command::Pcm(old), &mut Vec::new());
+    missing.command(missing.observe(|| 0), Command::Pcm(old), &mut Vec::new());
     assert!(!missing.preparing.as_ref().unwrap().ready);
     let mut engine = engine();
     prepare(&mut engine, plan(1, 10, 0, 22_050));
     let history = pcm(&engine, 1, 8, 22_050 - 128, 128);
-    engine.command(0, Command::Pcm(history), &mut Vec::new());
+    engine.command(engine.observe(|| 0), Command::Pcm(history), &mut Vec::new());
     assert!(!engine.preparing.as_ref().unwrap().ready);
     assert_eq!(engine.preparing.as_ref().unwrap().sequence, None);
     let future = pcm(&engine, 1, 9, 22_050, 2000);
     let mut events = Vec::new();
-    engine.command(0, Command::Pcm(future), &mut events);
+    engine.command(engine.observe(|| 0), Command::Pcm(future), &mut events);
     assert!(matches!(events.as_slice(), [ReceiverEvent::Ready { .. }]));
     let epoch = engine.preparing.as_ref().unwrap();
     assert!(epoch.history.iter().all(|sample| *sample == 0.5));
@@ -791,7 +1091,7 @@ fn speculative_prepares_cannot_evict_the_current_epoch_contract() {
     for epoch in 2..=5 {
         let future = plan(epoch, 10 + epoch, 1000 * MS, 0);
         engine.command(
-            400 * MS,
+            engine.observe(|| 400 * MS),
             Command::Prepare(identity(), future),
             &mut Vec::new(),
         );
@@ -800,7 +1100,11 @@ fn speculative_prepares_cannot_evict_the_current_epoch_contract() {
     let mut changed = plan(1, 20, 400 * MS, 44_100);
     changed.format.sample_rate = 48_000;
     let mut events = Vec::new();
-    engine.command(400 * MS, Command::Prepare(identity(), changed), &mut events);
+    engine.command(
+        engine.observe(|| 400 * MS),
+        Command::Prepare(identity(), changed),
+        &mut events,
+    );
     assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
     assert!(engine.output.as_ref().unwrap().telemetry().muted);
 }
@@ -816,13 +1120,13 @@ fn pending_suspend_is_frozen_and_does_not_require_pcm_ready() {
             plan_id: id,
             effective_at: at,
         };
-        engine.command(0, suspend(10, 400 * MS), &mut events);
+        engine.command(engine.observe(|| 0), suspend(10, 400 * MS), &mut events);
         assert!(events.is_empty());
         assert!(engine.suspension.is_some());
-        engine.command(0, suspend(10, 400 * MS), &mut events);
+        engine.command(engine.observe(|| 0), suspend(10, 400 * MS), &mut events);
         assert!(events.is_empty());
         engine.command(
-            0,
+            engine.observe(|| 0),
             suspend(if changed { 11 } else { 10 }, 500 * MS),
             &mut events,
         );
@@ -831,7 +1135,7 @@ fn pending_suspend_is_frozen_and_does_not_require_pcm_ready() {
     }
     let mut engine = engine();
     engine.command(
-        0,
+        engine.observe(|| 0),
         Command::Suspend {
             identity: identity(),
             epoch: 2,
@@ -859,7 +1163,7 @@ fn deferred_intents_recheck_the_epoch_floor_after_suspend_and_commit() {
         let mut events = Vec::new();
         if suspend {
             engine.command(
-                400 * MS,
+                engine.observe(|| 400 * MS),
                 Command::Suspend {
                     identity: identity(),
                     epoch: 2,
@@ -871,22 +1175,36 @@ fn deferred_intents_recheck_the_epoch_floor_after_suspend_and_commit() {
         } else {
             let next = plan(2, 11, 700 * MS, 0);
             engine.command(
-                400 * MS,
+                engine.observe(|| 400 * MS),
                 Command::Prepare(identity(), next.clone()),
                 &mut events,
             );
             let block = pcm(&engine, 2, 0, 0, 4096);
-            engine.command(400 * MS, Command::Pcm(block), &mut events);
+            engine.command(
+                engine.observe(|| 400 * MS),
+                Command::Pcm(block),
+                &mut events,
+            );
             assert!(engine.preparing.as_ref().unwrap().ready);
             assert!(commit(&mut engine, 400 * MS, &next).is_empty());
         }
         let stale = plan(1, 12, 400 * MS, 22_050);
         engine.command(
-            400 * MS,
+            engine.observe(|| 400 * MS),
             Command::Prepare(identity(), stale.clone()),
             &mut events,
         );
         assert_eq!(engine.intent.as_ref().unwrap().epoch.0, 1);
+        // Continue the native worker/callback lifecycle through the handoff.
+        // Jumping 300ms without ticks cannot complete a bounded conversion or
+        // authorize discarding the old device owner at the switch deadline.
+        for millis in (400..700).step_by(10) {
+            let now = millis * MS;
+            if millis > 400 {
+                assert!(tick(&mut engine, now).is_empty(), "{:?}", engine.last_error);
+            }
+            engine.output.as_mut().unwrap().render(now, 480);
+        }
         assert!(tick(&mut engine, 700 * MS).is_empty());
         assert_eq!(engine.epoch_floor, 2);
         assert!(engine.intent.is_none());
@@ -902,7 +1220,11 @@ fn deferred_intents_recheck_the_epoch_floor_after_suspend_and_commit() {
         // Even complete, newer wire PCM and Commit cannot revive the old
         // intent after promotion raises the session's accepted epoch.
         let old_pcm = pcm(&engine, 1, 100, 22_050 - 128, 4096);
-        engine.command(700 * MS, Command::Pcm(old_pcm), &mut events);
+        engine.command(
+            engine.observe(|| 700 * MS),
+            Command::Pcm(old_pcm),
+            &mut events,
+        );
         events.extend(commit(&mut engine, 700 * MS, &stale));
         assert!(events.is_empty());
         assert!(engine.preparing.is_none());
@@ -911,12 +1233,16 @@ fn deferred_intents_recheck_the_epoch_floor_after_suspend_and_commit() {
         }
         // A genuinely future generation still prepares normally.
         engine.command(
-            700 * MS,
+            engine.observe(|| 700 * MS),
             Command::Prepare(identity(), plan(3, 13, 1100 * MS, 0)),
             &mut events,
         );
         let fresh = pcm(&engine, 3, 0, 0, 4096);
-        engine.command(700 * MS, Command::Pcm(fresh), &mut events);
+        engine.command(
+            engine.observe(|| 700 * MS),
+            Command::Pcm(fresh),
+            &mut events,
+        );
         assert!(matches!(
             events.as_slice(),
             [ReceiverEvent::Ready {
@@ -937,7 +1263,7 @@ fn scheduled_pause_keeps_its_complete_tail_and_a_fresh_run_can_resume() {
     feed(&mut engine, 1, 0, 13_230);
     commit(&mut engine, 0, &first);
     engine.command(
-        0,
+        engine.observe(|| 0),
         Command::Suspend {
             identity: identity(),
             epoch: 2,
@@ -965,12 +1291,16 @@ fn scheduled_pause_keeps_its_complete_tail_and_a_fresh_run_can_resume() {
     assert!(engine.preparing.is_none());
     let next = plan(3, 12, 1100 * MS, 0);
     engine.command(
-        700 * MS,
+        engine.observe(|| 700 * MS),
         Command::Prepare(identity(), next.clone()),
         &mut Vec::new(),
     );
     let block = pcm(&engine, 3, 0, 0, 16_000);
-    engine.command(700 * MS, Command::Pcm(block), &mut Vec::new());
+    engine.command(
+        engine.observe(|| 700 * MS),
+        Command::Pcm(block),
+        &mut Vec::new(),
+    );
     assert!(engine.preparing.as_ref().unwrap().ready);
     assert!(commit(&mut engine, 700 * MS, &next).is_empty());
     for millis in (710..=1140).step_by(10) {
@@ -995,7 +1325,7 @@ fn published_eof_never_zero_fills_a_missing_real_source_frame() {
     feed(&mut engine, 1, 0, 13_229); // EOF needs 13_230 real frames.
     commit(&mut engine, 0, &first);
     engine.command(
-        0,
+        engine.observe(|| 0),
         Command::Suspend {
             identity: identity(),
             epoch: 2,
@@ -1033,12 +1363,12 @@ fn ordinary_epoch_switch_flushes_the_complete_old_source_tail() {
         if now == 400 * MS {
             let next = plan(2, 11, 700 * MS, 0);
             engine.command(
-                now,
+                engine.observe(|| now),
                 Command::Prepare(identity(), next.clone()),
                 &mut Vec::new(),
             );
             let block = pcm(&engine, 2, 0, 0, 16_000);
-            engine.command(now, Command::Pcm(block), &mut Vec::new());
+            engine.command(engine.observe(|| now), Command::Pcm(block), &mut Vec::new());
             assert!(engine.preparing.as_ref().unwrap().ready);
             assert!(commit(&mut engine, now, &next).is_empty());
         }
@@ -1059,6 +1389,264 @@ fn ordinary_epoch_switch_flushes_the_complete_old_source_tail() {
 }
 
 #[test]
+fn consecutive_engine_switches_transfer_the_retained_grid_and_retire_predecessors() {
+    let mut engine = engine();
+    let period = 20_833u64;
+    engine.output.as_mut().unwrap().ppm = (1e9 / (48_000.0 * period as f64) - 1.0) * 1e6;
+    let start = 400 * MS;
+    let retained_second = start + 14_400 * period;
+    let second = retained_second - 10_000;
+    let third = second + 48_000 * period - 10_000;
+    let mut first_plan = plan(1, 10, start, 0);
+    first_plan.format.sample_rate = 48_000;
+    prepare(&mut engine, first_plan.clone());
+    feed(&mut engine, 1, 0, 14_399);
+    assert!(commit(&mut engine, 0, &first_plan).is_empty());
+    let mut retired = None;
+    let mut handoffs = 0;
+    for millis in (0..=1850).step_by(10) {
+        let now = millis * MS;
+        assert!(
+            tick(&mut engine, now).is_empty(),
+            "{millis}: {:?}",
+            engine.last_error
+        );
+        if let Some(candidate) = engine
+            .preparing
+            .as_ref()
+            .filter(|epoch| epoch.output_frames > 0)
+        {
+            if let Some(current) = engine.current.as_ref() {
+                let state = (current.plan.epoch.0, current.output_frames);
+                if let Some(previous) =
+                    retired.filter(|previous: &(u64, u64)| previous.0 == state.0)
+                {
+                    assert_eq!(state, previous, "retired predecessor appended PCM");
+                } else {
+                    retired = Some(state);
+                    handoffs += 1;
+                    let expected = if state.0 == 1 { 14_400 } else { 47_999 };
+                    assert_eq!(current.output_frames, expected);
+                    assert!(
+                        current.pcm.is_empty(),
+                        "all real predecessor frames must be consumed"
+                    );
+                    assert_eq!(
+                        current.expected_frame,
+                        if state.0 == 1 { 14_399 } else { 47_998 }
+                    );
+                }
+                let actual_start = candidate.next_output_ns - candidate.output_frames * period;
+                assert_eq!(
+                    actual_start,
+                    if candidate.plan.epoch.0 == 2 {
+                        retained_second
+                    } else {
+                        retained_second + 47_999 * period
+                    }
+                );
+                assert_eq!(
+                    candidate.next_output_ns,
+                    engine
+                        .output
+                        .as_ref()
+                        .unwrap()
+                        .queue
+                        .scheduled_cursor()
+                        .unwrap()
+                        .time_after(0)
+                        .unwrap()
+                );
+            }
+        }
+        if now == 400 * MS || now == 1000 * MS {
+            let (epoch, boundary, frames) = if now == 400 * MS {
+                (2, second, 47_998)
+            } else {
+                (3, third, 16_000)
+            };
+            let mut next = plan(epoch, epoch + 9, boundary, 0);
+            next.format.sample_rate = 48_000;
+            engine.command(
+                engine.observe(|| now),
+                Command::Prepare(identity(), next.clone()),
+                &mut Vec::new(),
+            );
+            for (sequence, frame) in (0..frames).step_by(4096).enumerate() {
+                let block = pcm(
+                    &engine,
+                    epoch,
+                    sequence as u64,
+                    frame as u64,
+                    (frames - frame).min(4096),
+                );
+                engine.command(engine.observe(|| now), Command::Pcm(block), &mut Vec::new());
+            }
+            assert!(engine.preparing.as_ref().unwrap().ready);
+            assert!(commit(&mut engine, now, &next).is_empty());
+        }
+        if now >= start {
+            let expected_epoch = if now < second {
+                1
+            } else if now < third {
+                2
+            } else {
+                3
+            };
+            assert_eq!(
+                engine.current.as_ref().unwrap().plan.epoch.0,
+                expected_epoch
+            );
+        }
+        let at = now + 20 * MS;
+        let samples = engine.output.as_mut().unwrap().render(at, 480);
+        if at >= start && at.abs_diff(second) > 20 * MS && at.abs_diff(third) > 20 * MS {
+            assert!(samples.iter().all(|sample| *sample > 0.4), "gap at {at}");
+        }
+    }
+    assert_eq!(handoffs, 2);
+    assert_eq!(engine.current.as_ref().unwrap().plan.epoch.0, 3);
+    let telemetry = engine.output.as_ref().unwrap().telemetry();
+    assert_eq!(telemetry.underrun_frames, 0);
+    assert_eq!(telemetry.late_frames, 0);
+    assert_eq!(engine.faults, 0);
+}
+
+#[test]
+fn a_committed_successor_cannot_hide_a_missing_real_predecessor_tail() {
+    let mut engine = engine();
+    let first = plan(1, 10, 400 * MS, 0);
+    prepare(&mut engine, first.clone());
+    feed(&mut engine, 1, 0, 13_229); // The 700ms EOF needs 13_230 real frames.
+    assert!(commit(&mut engine, 0, &first).is_empty());
+    for millis in (0..=600).step_by(10) {
+        let now = millis * MS;
+        assert!(tick(&mut engine, now).is_empty(), "{:?}", engine.last_error);
+        if now == 400 * MS {
+            let next = plan(2, 11, 700 * MS, 0);
+            engine.command(
+                engine.observe(|| now),
+                Command::Prepare(identity(), next.clone()),
+                &mut Vec::new(),
+            );
+            let block = pcm(&engine, 2, 0, 0, 16_000);
+            engine.command(engine.observe(|| now), Command::Pcm(block), &mut Vec::new());
+            assert!(commit(&mut engine, now, &next).is_empty());
+        }
+        engine.output.as_mut().unwrap().render(now + 20 * MS, 480);
+    }
+    assert!(engine.preparing.as_ref().unwrap().committed);
+    assert_eq!(engine.preparing.as_ref().unwrap().output_frames, 0);
+    let output = engine.output.as_mut().unwrap();
+    output.render(630 * MS, 3_360);
+    assert!(output.telemetry().underrun_frames > 0);
+    let events = tick(&mut engine, 610 * MS);
+    assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
+    assert!(engine.last_error.as_ref().unwrap().contains("underrun"));
+    assert!(engine.output.as_ref().unwrap().telemetry().muted);
+}
+
+#[test]
+fn slow_device_midpoints_prequeue_a_successor_on_the_retained_grid() {
+    for (ppm, boundary) in [(-500.0, 700_139_653), (-150.0, 700_034_588)] {
+        let mut engine = engine();
+        engine.output.as_mut().unwrap().ppm = ppm;
+        let first = plan(1, 10, 400 * MS, 0);
+        prepare(&mut engine, first.clone());
+        let real_frames = ((boundary - 400 * MS) as u128 * 44_100 / 1_000_000_000) as usize;
+        feed(&mut engine, 1, 0, real_frames);
+        assert!(commit(&mut engine, 0, &first).is_empty());
+        for millis in (0..=850).step_by(10) {
+            let now = millis * MS;
+            assert!(
+                tick(&mut engine, now).is_empty(),
+                "{ppm}/{millis}: {:?}",
+                engine.last_error
+            );
+            if now == 400 * MS {
+                let next = plan(2, 11, boundary, 0);
+                engine.command(
+                    engine.observe(|| now),
+                    Command::Prepare(identity(), next.clone()),
+                    &mut Vec::new(),
+                );
+                let block = pcm(&engine, 2, 0, 0, 16_000);
+                engine.command(engine.observe(|| now), Command::Pcm(block), &mut Vec::new());
+                assert!(commit(&mut engine, now, &next).is_empty());
+            }
+            if now == 610 * MS {
+                assert!(
+                    engine.preparing.as_ref().unwrap().output_frames > 0,
+                    "no midpoint owner at {ppm}ppm"
+                );
+                assert_eq!(
+                    engine.current.as_ref().unwrap().expected_frame,
+                    real_frames as u64
+                );
+            }
+            engine.output.as_mut().unwrap().render(now + 20 * MS, 480);
+        }
+        assert_eq!(engine.current.as_ref().unwrap().plan.epoch.0, 2);
+        assert_eq!(
+            engine.output.as_ref().unwrap().telemetry().underrun_frames,
+            0
+        );
+    }
+}
+
+#[test]
+fn an_early_metadata_switch_cannot_retire_an_incomplete_device_tail() {
+    let mut engine = engine();
+    let first = plan(1, 10, 400 * MS, 0);
+    prepare(&mut engine, first.clone());
+    feed(&mut engine, 1, 0, 13_229);
+    assert!(commit(&mut engine, 0, &first).is_empty());
+    for millis in (0..=660).step_by(10) {
+        let now = millis * MS;
+        assert!(
+            tick(&mut engine, now).is_empty(),
+            "{millis}: {:?}",
+            engine.last_error
+        );
+        if now == 400 * MS {
+            let next = plan(2, 11, 700 * MS, 0);
+            engine.command(
+                engine.observe(|| now),
+                Command::Prepare(identity(), next.clone()),
+                &mut Vec::new(),
+            );
+            let block = pcm(&engine, 2, 0, 0, 16_000);
+            engine.command(engine.observe(|| now), Command::Pcm(block), &mut Vec::new());
+            assert!(commit(&mut engine, now, &next).is_empty());
+        }
+        engine.output.as_mut().unwrap().render(now + 20 * MS, 480);
+    }
+    assert_eq!(
+        engine.output.as_ref().unwrap().telemetry().underrun_frames,
+        0
+    );
+    assert_eq!(engine.preparing.as_ref().unwrap().output_frames, 0);
+    let mut updated = mapping(697 * MS, 0.0);
+    updated.offset_ns = 3 * MS as i64;
+    engine.command(
+        engine.observe(|| 697 * MS),
+        Command::Mapping(updated),
+        &mut Vec::new(),
+    );
+    let events = tick(&mut engine, 697 * MS);
+    assert!(
+        matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]),
+        "{:?}",
+        engine.last_error
+    );
+    assert!(engine.output.as_ref().unwrap().telemetry().muted);
+    assert!(
+        engine.last_error.as_ref().unwrap().contains("handoff")
+            || engine.last_error.as_ref().unwrap().contains("source gap")
+    );
+}
+
+#[test]
 fn pending_suspend_caps_metadata_at_real_eof_after_small_mapping_updates() {
     for stop in [700 * MS, 700 * MS + 12_345] {
         let mut engine = engine();
@@ -1068,7 +1656,7 @@ fn pending_suspend_caps_metadata_at_real_eof_after_small_mapping_updates() {
         feed(&mut engine, 1, 0, frames);
         commit(&mut engine, 0, &first);
         engine.command(
-            0,
+            engine.observe(|| 0),
             Command::Suspend {
                 identity: identity(),
                 epoch: 2,
@@ -1082,7 +1670,11 @@ fn pending_suspend_caps_metadata_at_real_eof_after_small_mapping_updates() {
             if millis == 600 {
                 let mut updated = mapping(now, 0.0);
                 updated.offset_ns = 2 * MS as i64;
-                engine.command(now, Command::Mapping(updated), &mut Vec::new());
+                engine.command(
+                    engine.observe(|| now),
+                    Command::Mapping(updated),
+                    &mut Vec::new(),
+                );
             }
             assert!(
                 tick(&mut engine, now).is_empty(),
@@ -1113,7 +1705,11 @@ fn accumulated_small_mapping_offsets_revoke_a_frozen_sample_grid() {
         let mut clock = mapping(350 * MS, 0.0);
         clock.offset_ns = step * 240_000;
         let mut events = Vec::new();
-        engine.command(350 * MS, Command::Mapping(clock), &mut events);
+        engine.command(
+            engine.observe(|| 350 * MS),
+            Command::Mapping(clock),
+            &mut events,
+        );
         events.extend(tick(&mut engine, 350 * MS));
         if step <= 12 {
             assert!(events.is_empty(), "step {step}: {:?}", engine.last_error);
@@ -1136,12 +1732,12 @@ fn eight_virtual_hours_keep_a_measured_device_cursor_and_queue_bounded() {
     // cover real samples and the output queue over the same duration.
     for ppm in [-500.0, 500.0] {
         let period = 1e9 / (48_000.0 * (1.0 + ppm * 1e-6));
-        let mut cursor = DeviceCursor {
-            anchor: 400 * MS,
-            fraction: 0.0,
-            frames: 0,
-            period,
-        };
+        let (queue, _) = ScheduledPcmQueue::new(RenderFormat {
+            sample_rate: 48_000,
+            channels: 2,
+        })
+        .unwrap();
+        let mut cursor = queue.clocked_cursor_at(400 * MS, period).unwrap();
         let mut submitted = 0u64;
         let mut phase = 0.0;
         let ratio = 1.0 + relative_drift_ppm(0.0, ppm).unwrap() * 1e-6;
@@ -1153,12 +1749,11 @@ fn eight_virtual_hours_keep_a_measured_device_cursor_and_queue_bounded() {
             let mut queued = (submitted - hardware) as usize;
             let horizon = now + 100 * MS;
             loop {
-                let frames =
-                    submission_frames(cursor.time().unwrap(), now, horizon, period, queued);
+                let frames = submission_frames(cursor, now, horizon, 48_000, queued).unwrap();
                 if frames == 0 {
                     break;
                 }
-                cursor.frames += frames as u64;
+                cursor = cursor.advanced(frames as u64).unwrap();
                 submitted += frames as u64;
                 queued += frames;
                 phase += frames as f64 * ratio;
@@ -1167,12 +1762,12 @@ fn eight_virtual_hours_keep_a_measured_device_cursor_and_queue_bounded() {
             assert!(queued <= 4_804);
             if now >= 400 * MS {
                 assert!(queued > 4_300);
-                assert!(cursor.time().unwrap() <= horizon + period.ceil() as u64);
+                assert!(cursor.time_after(0).unwrap() <= horizon + period.ceil() as u64);
                 // A slowly revised offset remains below the 3ms rejoin
                 // threshold; adjacent mapping steps are under 10ns.
                 let offset = (tick as f64 / 300_000.0).sin() * 2_000_000.0;
                 let actual_ns = phase * 1e9 / 48_000.0;
-                let mapped_ns = (cursor.time().unwrap() - 400 * MS) as f64 + offset;
+                let mapped_ns = (cursor.time_after(0).unwrap() - 400 * MS) as f64 + offset;
                 assert!((actual_ns - mapped_ns).abs() < MAX_PHASE_ERROR_NS);
             }
         }
@@ -1195,7 +1790,7 @@ fn converting_different_wire_packet_sizes_produces_identical_continuous_audio() 
                 first as u64,
                 (total - first).min(packet_frames),
             );
-            engine.command(0, Command::Pcm(block), &mut Vec::new());
+            engine.command(engine.observe(|| 0), Command::Pcm(block), &mut Vec::new());
         }
         commit(&mut engine, 0, &plan);
         let output = engine.output.as_mut().unwrap();

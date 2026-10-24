@@ -181,6 +181,16 @@ REST 路由表共 161 个「方法 + 路径」（`crates/hertz-studio/src/routes
 
 <!-- api-routes:end -->
 
+## 房间队列与退出合同
+
+本机 `POST /v1/room` 与插件 RPC 共用同一房间应用合同；LAN 受限通道使用线协议 **v2**，握手拒绝 v1。邀请链接的 `hertz-listen:v1:` 是独立封装版本。
+
+替换队列时使用 `{"action":"peer","request":{"action":"queue","operation_id":"7","expected_revision":"12","items":[{"instance_id":"31","resource_id":"<UUID>"},{"instance_id":null,"resource_id":"<UUID>"}]}}`。从 `queue_page` 读取的保留项必须原样携带 `instance_id` 与 `resource_id`；新增项显式传 `instance_id: null`，由 Host 分配新身份。相同资源可以出现多次，各有不同实例。重复使用实例、实例与资源不符、已删除或其它房间的实例会返回 `room_invalid`；过期 revision 返回 `revision_conflict`。拒绝时不改变队列或 revision。旧 `resources: [UUID]` 合同不再接受，调用方不能自行猜测重复项身份。
+
+播控、队列等写请求不自动重试。未知播控结果使用原 `operation_id` 查询 `{"action":"peer","request":{"action":"operation","operation_id":"7"}}`。投影包含本机成员的 `member_id`；同一 `(room_id, instance_id, member_id)` 在新 `session_id` 上仍查询原操作，换房或成员后不沿用。
+
+`POST /v1/system/shutdown` 先返回退出受理，再启动与 Ctrl-C 相同的关闭流程：阻止新 Create/Join/Resume，取消尚未完成的房间启动，等待 Host End、输出租约和模式恢复，再停 audio actor 并删除发现文件。嵌入宿主使用公开的 `AppState::shutdown().await` 等待同一屏障。Guest 服务退出保留最近房间凭据，显式离开或 Host End 会清除凭据。
+
 ## 播客目录搜索
 
 `GET /v1/podcasts/search?q=Planet%20Money&country=US&limit=30` 搜索指定地区的

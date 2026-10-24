@@ -105,6 +105,57 @@ async fn closed(events: &mut ClientEvents) -> ConnectionState {
     .unwrap()
 }
 #[tokio::test]
+async fn legacy_queue_protocol_handshake_cannot_pair_or_consume_an_invitation() {
+    let host = HostIdentity::generate().unwrap();
+    let room = Uuid::new_v4();
+    let (server, _inbound) = RoomServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        room,
+        Uuid::new_v4(),
+        &host,
+        MonotonicClock::default(),
+    )
+    .await
+    .unwrap();
+    let invitation = server.transport.invite(Permissions::default()).unwrap();
+    let tls = vmusic_lan::tls::connect(server.address, server.fingerprint)
+        .await
+        .unwrap();
+    let (mut socket, _) = tokio_tungstenite::client_async(
+        format!("wss://{}{}", server.address, vmusic_lan::server::ROOM_PATH),
+        tls,
+    )
+    .await
+    .unwrap();
+    let request = serde_json::json!({"channel":"pair","version":1,"room_id":room,
+        "invitation":invitation.expose(),"name":"legacy"});
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            request.to_string().into(),
+        ))
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .unwrap();
+    assert!(!matches!(
+        response,
+        Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_)))
+    ));
+    assert!(server.transport.members().is_empty());
+    client::pair(
+        server.address,
+        server.fingerprint,
+        room,
+        &invitation,
+        "version two",
+    )
+    .await
+    .unwrap();
+    assert_eq!(server.transport.members().len(), 1);
+    server.shutdown().await;
+}
+#[tokio::test]
 async fn normal_room_shutdown_delivers_terminal_end_before_connection_tasks_are_cancelled() {
     for mode in [
         client::ConnectionMode::ControlOnly,

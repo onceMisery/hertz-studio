@@ -928,6 +928,16 @@ impl AppState {
         self.exiting.subscribe()
     }
 
+    /// Shared shutdown barrier for the service binary and embedded hosts.
+    /// Stop room admission first, drain Host End and all native output leases,
+    /// then stop the local actor and remove the service discovery file.
+    pub async fn shutdown(&self) {
+        self.exiting.send_replace(true);
+        self.room.shutdown().await;
+        self.audio.shutdown();
+        remove_discovery(&self.data_dir).await;
+    }
+
     /// AI runner 锁是否在本进程（生成受理的门禁）。
     pub fn ai_runner_held(&self) -> bool {
         self.ai_runner_held

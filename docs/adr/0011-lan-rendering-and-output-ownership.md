@@ -1,0 +1,49 @@
+# ADR-0011 · 房间渲染、呈现提交与原生输出归属
+
+状态：实施（2026-10-25）。本决策固定源码契约；设备支持与声学精度仍以[交付证据](../../evals/lan-sync/delivery-2026-10-25/README.md)中的实测范围为准。
+
+## 决定
+
+AppState 是业务队列与模式的唯一所有者，audio actor 与 RenderCore 共享单机和房间的解码、混音与 DSP。房间 producer 在固定房间格式中提前渲染；成员只接收这份 PCM，不各自下载原文件解码。主机收听也经过原生 Receiver。房间模式下旧 HTTP、RPC、AI 和内部播控入口在原裁决边界拒绝写入，不能通过另一套队列或播放器绕过。
+
+渲染事实和呈现事实分开提交。已生成后继 PCM 不表示听众已听到下一曲；队列游标、歌名和历史按房间呈现边界提交。Prepare/Ready/Commit 绑定实例、房间、会话和 epoch，已 Commit 的前缀不可悄悄撤回。一次未确认的 next 只查询原操作终态，不自动重发相对写命令。
+
+队列写入携带 `items: [{instance_id, resource_id}]`，保留项必须携带原实例 ID，新增项显式写 `instance_id: null`，由 Host 分配新 ID。同一资源的多次出现各有独立身份；重复实例、实例与资源不符、已移除实例和过期 revision 全部拒绝，不能按资源 ID 猜测原实例。AppState 仍是唯一业务队列，Host 只保存与它平行的实例身份元数据。未确认播控回执归属 `(room_id, instance_id, member_id)`，同成员网络重连后仍能查询原操作；换房、房主实例或成员时清理。
+
+Receiver 的转换工作线程负责源相位与设备调度；ScheduledPcmQueue 唯一拥有接受后的设备时间网格，回调只读取有界预分配队列。预算、连续写和交接必须使用同一网格及其分数相位。后继段不得把缺失的真实旧尾帧变成计划静音；源尾完整、边界合法且后继实际写入后才能转移输出所有权，期限内不能完成则静音并重同步。有限测试音用最终帧序号结束，不用墙钟截断制造假欠载。遥测先采样、后取新鲜单调时间，一次门禁使用同一快照。
+
+房间 TLS listener 独立于本机全权 API。mDNS 仅用于发现；邀请、指纹和系统凭据服务负责信任，控制与音频通道持续检查权限。任一通道失效先撤销输出，重连只加入新的未来播放点。关闭先封住 Receiver 注册入口，撤销并等待原生输出退出，再恢复暂停的本地模式；End 使用有期限的 WebSocket 关闭，不能以立即断 TCP 代替终止通知。
+
+独立服务的 Ctrl-C、系统退出按钮和插件宿主都调用 `AppState::shutdown`：先封住模式入口并取消未完成启动，等待 RoomManager、Receiver 与 ModeLease 的共同关闭屏障，Host 发送并排空 End 后才关闭本地 audio actor、删除服务发现。Guest 服务退出保留最近房间凭据；显式离开或收到 Host End 才删除该成员凭据。
+
+插件主线程唯一持有 Runtime 与 Booted，在 `PluginServer::serve` 因 stdin EOF 或读取错误返回后显式等待同一关闭屏障，再允许 main 返回。SDK 工作线程只持 Runtime Handle；正在执行或排队的请求可以保留 `Arc<Plugin>`，因此不能依赖最后一个 Plugin 的 Drop 来结束房间或销毁 Runtime。
+
+聊天有独立的存储、历史和低优先级发送预算，不持有音频租约。浏览器只管理本机界面；关闭浏览器不终止健康收听，全部音频端离场才按租约与宽限暂停。设备音量仅在本机应用，房间 DSP 只在共同渲染路径应用一次。
+
+## 边界与 owner
+
+| 名称（含单位） | 数值 | 定义在哪 | 改它要一起改什么 |
+| --- | --- | --- | --- |
+| 线协议版本 | 2 | `crates/vmusic-lan/src/protocol.rs::VERSION` | 握手能力、二进制头、实例队列写合同与不兼容拒绝测试 |
+| 单条传输消息上限（字节） | 65536 | `crates/vmusic-lan/src/protocol.rs::MAX_MESSAGE` | PCM 分块、分片累计校验与控制消息界限 |
+| 每端广播保留上限（字节） | 8388608 | `crates/vmusic-lan/src/buffer.rs::ENDPOINT_BYTES` | 慢端隔离、Arc 引用释放与全局预算 |
+| 全房间广播保留上限（字节） | 67108864 | `crates/vmusic-lan/src/buffer.rs::GLOBAL_BYTES` | 多端压力与同时排队的共享块记账 |
+| Receiver 输入上限（字节） | 4194304 | `crates/hertz-studio/src/room/receiver.rs::INPUT_BYTE_LIMIT` | 命令入口预留、取消归还与高采样率回归 |
+| Receiver 输入时长上限（纳秒） | 1300000000 | `crates/hertz-studio/src/room/receiver.rs::INPUT_DURATION_LIMIT_NS` | 源率计时、已接收帧与全部代际合计预算 |
+| 设备提交窗口（纳秒） | 100000000 | `crates/hertz-studio/src/room/receiver.rs::HORIZON_NS` | CPAL 队列水位、转换工作量与 Commit 截止 |
+| 设备回调最大年龄（纳秒） | 250000000 | `crates/hertz-studio/src/room/receiver.rs::DEVICE_FRESHNESS_NS` | 单快照门禁、回调中断和恢复回归 |
+| 最后音频端离场宽限（秒） | 3 | `crates/hertz-studio/src/state.rs::DEPART_GRACE` | 音频租约、UI 关闭与房间暂停行为 |
+
+线协议 v2 在握手与 PCM 头拒绝 v1 peer，不兼容转换成仅资源 ID 的队列请求。`hertz-listen:v1:` 邀请封装和本地 RecentRoom 的 `version: 1` 是各自独立的存储格式版本，不是线协议版本。
+
+## 禁止回退
+
+- 不复制第二套混音器或真实队列：否则单机与房间的 DSP、自然转场和退出恢复会分叉。
+- 不以 render head 更新呈现历史：否则提前渲染的下一曲会在扬声器出声前出现在播放记录。
+- 不在 Receiver 重建一套近似设备网格：否则跨段 snapping 与分数相位积累后会提交重叠帧或丢失尾音。
+- 不以零填充代替缺失真实源帧，不先丢旧 owner 再检查交接：否则后继 PCM 可把真实断音伪装成计划静音。
+- 不用放宽新鲜度、关闭时钟门禁或扩大缓冲掩盖时序失败：否则页面显示就绪而设备已脱离共同时间线。
+- 不在回调分配、做格式转换、等网络或操作数据库：否则一端聊天、磁盘或网络阻塞会成为设备欠载。
+- 不把 mDNS 地址当可信身份，不让控制连接代替音频租约：否则可越权加入，或关闭全部声音后房间仍无限播放。
+- 不在旧原生 stream 退出前恢复本地播放器：否则离开/结束与迟到注册竞争会叠播两个输出。
+- 不把数字无损传输、同机对时日志和两分钟运行当成跨机声学或八小时长稳验收：否则未测设备会被错误纳入精度保证。

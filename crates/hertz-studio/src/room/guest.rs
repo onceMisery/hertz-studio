@@ -22,6 +22,7 @@ struct Pending {
     snapshot: bool,
 }
 struct Guest {
+    member_id: uuid::Uuid,
     recent: super::recent_chat::RecentChat,
     mode: ConnectionMode,
     output_enabled: bool,
@@ -168,6 +169,7 @@ pub(super) async fn start_session(
     let (_receiver_tx, receiver_events) = mpsc::channel(1);
     let cleanup = lease.completion.clone();
     let mut guest = Guest {
+        member_id: descriptor.member_id,
         diagnostics: tokio::task::JoinSet::new(),
         recent: Default::default(),
         mode,
@@ -356,7 +358,11 @@ impl Guest {
     ) -> Option<T> {
         tokio::pin!(operation);
         loop {
+            if *stopped.borrow() || *self.shutdown.borrow() {
+                return None;
+            }
             tokio::select! {
+                biased;
                 _=stopped.changed()=>return None,
                 _=self.shutdown.changed()=>return None,
                 result=&mut operation=>return Some(result),
@@ -439,6 +445,9 @@ impl Guest {
         local: &mut mpsc::Receiver<Envelope>,
         stopped: &mut watch::Receiver<bool>,
     ) -> RoomResult<()> {
+        if *stopped.borrow() || *self.shutdown.borrow() {
+            return Ok(());
+        }
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         let mut closing = matches!(
             &*self.events.state.borrow(),
@@ -546,6 +555,9 @@ impl Guest {
             value = json!({});
         }
         value["mode"] = json!(mode);
+        value["room_id"] = json!(self.connection.handle.identity.room_id);
+        value["instance_id"] = json!(self.connection.handle.identity.instance_id);
+        value["member_id"] = json!(self.member_id);
         value["output"] = super::host::output_json(self.receiver.as_ref(), &self.output);
         value["local_error"] = json!(self.error);
         value["output"]["preferences_error"] = json!(*self.preferences.error.borrow());

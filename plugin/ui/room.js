@@ -3,7 +3,7 @@
 (function (global) {
   'use strict';
   let root, transport, confirmAction, timer, chrome, onModeChange, snap = { mode: 'local' }, busy = false;
-  let mountedSession = '', mediaKey = '', lifecycle = 0;
+  let mountedSession = '', mediaKey = '', lifecycle = 0, playbackPending = null;
   let mounted = '', sequence = 1n, chatSequence = 1n, revision = '', polling = false;
   let libraryPage = 0, queuePage = 0, lastChatId = '', historyRevision = '', messages = [];
   let chatBefore = null, chatHasMore = false, chatBrowsing = false, chatLoading = null;
@@ -16,34 +16,45 @@
   function status(text, error) { if (chrome) chrome.notice(text, error); if (!refs.notice) return; refs.notice.textContent = text || ''; refs.notice.classList.toggle('room-error', !!error); refs.notice.hidden = !text; }
   function counter(v) { return typeof v === 'string' && /^(0|[1-9]\d*)$/.test(v) ? BigInt(v) : 1n; }
   function op(chat) { if (chat) { chatSequence = chatSequence > counter(snap.next_chat_operation_id) ? chatSequence : counter(snap.next_chat_operation_id); return String(chatSequence++); } sequence = sequence > counter(snap.next_operation_id) ? sequence : counter(snap.next_operation_id); return String(sequence++); }
-  function sessionKey() { return [lifecycle, snap.mode === 'local' ? 'local' : 'active', snap.room_id || '', snap.instance_id || '', snap.session_id || ''].join(':'); }
+  function sessionKey() { return [lifecycle, snap.mode === 'local' ? 'local' : 'active', snap.room_id || '', snap.instance_id || '', snap.member_id || '', snap.session_id || ''].join(':'); }
+  function operationOwner() { return snap.mode !== 'local' && snap.room_id && snap.instance_id && snap.member_id ? [lifecycle, snap.room_id, snap.instance_id, snap.member_id].join(':') : ''; }
   function current(key) { return !!root && key === mountedSession && key === sessionKey(); }
   function uncertain(error) { return !error.status || /timeout|unknown|connection|network/i.test(error.code || error.message || ''); }
   async function command(body) { return transport.post('/v1/room', body, { retry: false }); }
   async function peer(request) { return command({ action: 'peer', request }); }
   async function control(action, extra) { return peer({ action, operation_id: op(false), expected_revision: snap.revision, ...extra }); }
   async function playback(action, extra) {
-    const id = op(false), key = sessionKey();
+    const id = op(false), owner = operationOwner(), receipt = { id, owner };
+    if (!owner) throw new Error('正在读取房间身份，请稍后重试。');
+    // Store before sending: a new transport session may arrive before the
+    // original request reports its outcome. Reconnection never resends it.
+    playbackPending = receipt; drawPlaybackReceipt();
     let result;
     try { result = await peer({ action: 'playback', operation_id: id, expected_revision: snap.revision, command: { action, ...extra } }); }
     catch (e) {
-      if (!current(key)) return;
-      if (!uncertain(e)) throw e;
-      playbackReceipt(id, key);
+      if (operationOwner() !== owner || playbackPending !== receipt) return;
+      if (!uncertain(e)) { playbackPending = null; drawPlaybackReceipt(); throw e; }
+      drawPlaybackReceipt();
       status('操作结果尚未确认，请查询原操作。不要重复执行下一首等相对操作。', true);
       return;
     }
-    if (!current(key)) return;
-    if (result && result.state && /preparing|scheduled/.test(result.state.status)) {
-      playbackReceipt(id, key);
-    }
+    if (operationOwner() !== owner || playbackPending !== receipt) return;
+    if (!(result && result.state && /preparing|scheduled/.test(result.state.status))) playbackPending = null;
+    drawPlaybackReceipt();
     status(operationText(result));
   }
-  function playbackReceipt(id, key) {
-    refs.operations.replaceChildren(h('span', '', '操作 ' + id), button('查询操作结果', async () => {
-      if (!current(key)) return;
-      const value = await peer({ action: 'operation', operation_id: id });
-      if (current(key)) status(operationText(value));
+  function drawPlaybackReceipt() {
+    if (!refs.operations) return;
+    const receipt = playbackPending;
+    refs.operations.replaceChildren();
+    if (!receipt || receipt.owner !== operationOwner()) return;
+    refs.operations.append(h('span', '', '操作 ' + receipt.id), button('查询操作结果', async () => {
+      const key = sessionKey();
+      if (playbackPending !== receipt || receipt.owner !== operationOwner()) return;
+      const value = await peer({ action: 'operation', operation_id: receipt.id });
+      if (!current(key) || playbackPending !== receipt || receipt.owner !== operationOwner()) return;
+      if (value && value.state && /^(applied|superseded|no_op|failed)$/.test(value.state.status || value.state)) { playbackPending = null; drawPlaybackReceipt(); }
+      status(operationText(value));
     }));
   }
   function operationText(v) { const labels = { preparing: '正在准备音频', scheduled: '已安排，等待生效', applied: '已生效', superseded: '已被后续操作取代', no_op: '当前已是此状态', failed: '操作未生效' }; const key = v && v.state && (v.state.status || v.state); return labels[key] || '操作已受理'; }
@@ -60,6 +71,7 @@
   function mount() {
     const key = snap.mode === 'local' ? 'local' : 'active';
     const roomSession = sessionKey();
+    if (playbackPending && playbackPending.owner !== operationOwner()) playbackPending = null;
     if (mounted === key && mountedSession === roomSession) return;
     mountedSession = roomSession; metadata.clear(); selection.clear(); chatUnknown = null; chatSending = null; resetChat(); chatLoading = null;
     mounted = key; memberSignature = ''; queueSignature = ''; librarySignature = ''; resourceGeneration++; resourceKey = ''; lyrics = []; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = ''; root.replaceChildren(); Object.keys(refs).forEach(k => delete refs[k]);
@@ -67,6 +79,7 @@
     refs.title = h('h2', '', '一起听'); header.append(refs.title, h('p', 'room-sub', '把本地音乐分享给同一网络里的电脑。')); root.append(header);
     refs.notice = h('p', 'room-notice'); refs.notice.setAttribute('role', 'status'); refs.notice.setAttribute('aria-live', 'polite'); refs.notice.hidden = true; root.append(refs.notice);
     if (key === 'local') mountEntry(); else mountActive();
+    drawPlaybackReceipt();
   }
   function mountEntry() {
     const grid = h('div', 'room-entry'); root.append(grid);
@@ -243,7 +256,7 @@
   async function mutateQueue(change) {
     const snapshot = await allQueue();
     const queue = change(snapshot.queue);
-    if (queue) await control('queue', { resources: queue.map(q => q.resource_id), expected_revision: snapshot.revision });
+    if (queue) await control('queue', { items: queue.map(q => ({ instance_id: q.instance_id == null ? null : q.instance_id, resource_id: q.resource_id })), expected_revision: snapshot.revision });
   }
   async function appendResource(resource) { await mutateQueue(queue => queue.concat({ resource_id: resource })); }
   function drawQueue(items) {
@@ -355,6 +368,6 @@
     snapshot() { return snap; },
     syncMediaSession,
     async localVolume(volume) { const o = snap.output || {}; if (!o.enabled) throw new Error('请先启用房间本机输出'); const result = await command({ action: 'output', enabled: true, settings: { ...(o.settings || {}), volume } }); await poll(true); return result; },
-    destroy() { lifecycle++; if (timer) clearInterval(timer); timer = 0; if (chrome) chrome.destroy(); root = null; messages = []; }
+    destroy() { lifecycle++; if (timer) clearInterval(timer); timer = 0; if (chrome) chrome.destroy(); root = null; messages = []; playbackPending = null; }
   };
 })(window);

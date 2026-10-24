@@ -21,11 +21,47 @@ use std::time::Instant;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use vmusic_core::AudioError;
 
-use crate::output_clock::{ClockObservation, ClockReading, ClockStatus, OutputClock};
+use crate::output_clock::{
+    ClockFault, ClockFaultKind, ClockObservation, ClockReading, ClockStatus, OutputClock,
+};
 use crate::RenderFormat;
 
 pub const MAX_BUFFERED_NS: u64 = 3_000_000_000;
 pub const MAX_QUEUE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read capabilities without constructing a player or opening an audio stream.
+pub fn enumerate_output_devices() -> Result<Vec<vmusic_core::DeviceInfo>, AudioError> {
+    let host = cpal::default_host();
+    let default = host.default_output_device().and_then(|d| d.name().ok());
+    let devices = host
+        .output_devices()
+        .map_err(|e| AudioError::DeviceUnavailable(e.to_string()))?;
+    Ok(devices
+        .filter_map(|d| d.name().ok())
+        .take(128)
+        .map(|name| vmusic_core::DeviceInfo {
+            id: name.clone(),
+            is_default: default.as_deref() == Some(name.as_str()),
+            name,
+        })
+        .collect())
+}
+
+/// The exact native stream configuration to which a measured correction applies.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputBinding {
+    pub backend: String,
+    pub device: String,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub configuration: String,
+}
+impl OutputBinding {
+    pub fn accepts_correction(&self, expected: Option<&Self>, correction: i64) -> bool {
+        correction == 0 || expected == Some(self)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OutputOptions {
@@ -38,6 +74,7 @@ pub struct OutputOptions {
     /// Additional measured device latency. Positive values advance the PCM
     /// relative to CPAL's reported presentation time by this amount.
     pub latency_correction_ns: i64,
+    pub calibration_binding: Option<OutputBinding>,
 }
 
 /// A capability statement, not a physical DAC synchronization guarantee.
@@ -64,6 +101,8 @@ pub struct OutputTelemetry {
     pub capacity_frames: usize,
     pub device_clock_ppm: f64,
     pub clock_uncertainty_ns: u64,
+    pub clock_fault_count: u64,
+    pub last_clock_fault: Option<ClockFault>,
     pub ns_per_frame: f64,
     pub last_presentation_local_ns: Option<u64>,
     /// CPAL callback entry observation in the same origin domain. It advances
@@ -94,6 +133,8 @@ pub enum OutputError {
     DeviceError,
     #[error("output was cleared while the PCM was being written")]
     Interrupted,
+    #[error("scheduled PCM run has ended; clear before starting another run")]
+    RunEnded,
 }
 
 /// Presentation time for the first output frame; subsequent frames advance by
@@ -114,8 +155,11 @@ struct Shared {
     read: AtomicU64,
     clear_before: AtomicU64,
     generation: AtomicU64,
+    end_generation: AtomicU64,
+    end_frame: AtomicU64,
     muted: AtomicBool,
     silence_from: AtomicU64,
+    silence_until: AtomicU64,
     device_error: AtomicBool,
     volume: AtomicU32,
     clock_sequence: AtomicU64,
@@ -123,6 +167,9 @@ struct Shared {
     period_bits: AtomicU64,
     ppm_bits: AtomicU64,
     uncertainty: AtomicU64,
+    clock_fault_count: AtomicU64,
+    clock_fault_kind: AtomicU32,
+    clock_fault_value: AtomicU64,
     presentation: AtomicU64,
     callback_local_ns: AtomicU64,
     played: AtomicU64,
@@ -139,6 +186,7 @@ impl Shared {
         self.clear_before.fetch_max(written, Ordering::AcqRel);
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.silence_from.store(u64::MAX, Ordering::Release);
+        self.silence_until.store(0, Ordering::Release);
     }
 
     fn status(&self, status: ClockStatus) {
@@ -177,7 +225,17 @@ impl Shared {
         // This read happens on the worker, never in the callback. Retry if a
         // short clock publication overlaps it: mixing two callbacks' timestamps
         // could misestimate device lead by an entire callback period.
-        let (status, period, ppm, uncertainty, presentation, callback) = loop {
+        let (
+            status,
+            period,
+            ppm,
+            uncertainty,
+            presentation,
+            callback,
+            faults,
+            fault_kind,
+            fault_value,
+        ) = loop {
             let sequence = self.clock_sequence.load(Ordering::Acquire);
             if !sequence.is_multiple_of(2) {
                 std::hint::spin_loop();
@@ -190,6 +248,9 @@ impl Shared {
                 self.uncertainty.load(Ordering::Acquire),
                 self.presentation.load(Ordering::Acquire),
                 self.callback_local_ns.load(Ordering::Acquire),
+                self.clock_fault_count.load(Ordering::Acquire),
+                self.clock_fault_kind.load(Ordering::Acquire),
+                self.clock_fault_value.load(Ordering::Acquire),
             );
             if self.clock_sequence.load(Ordering::Acquire) == sequence {
                 break values;
@@ -220,6 +281,11 @@ impl Shared {
             capacity_frames: self.capacity,
             device_clock_ppm: f64::from_bits(ppm),
             clock_uncertainty_ns: uncertainty,
+            clock_fault_count: faults,
+            last_clock_fault: ClockFaultKind::from_code(fault_kind).map(|kind| ClockFault {
+                kind,
+                value: f64::from_bits(fault_value),
+            }),
             ns_per_frame: f64::from_bits(period),
             last_presentation_local_ns: (presentation != u64::MAX).then_some(presentation),
             last_callback_local_ns: (callback != u64::MAX).then_some(callback),
@@ -227,7 +293,7 @@ impl Shared {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct Schedule {
     start_ns: u64,
     frames: u64,
@@ -236,7 +302,105 @@ struct Schedule {
     fraction_ns: f64,
 }
 
+/// Read-only position on the queue's retained sample grid. The producer uses
+/// this same grid to budget a block before conversion and observe its accepted
+/// end afterwards, including sub-nanosecond phase and epoch-boundary snapping.
+#[derive(Debug, Clone, Copy)]
+pub struct OutputCursor {
+    schedule: Schedule,
+    sample_rate: u32,
+}
+
+impl OutputCursor {
+    pub fn time_after(self, additional_frames: u64) -> Result<u64, OutputError> {
+        let frames = self
+            .schedule
+            .frames
+            .checked_add(additional_frames)
+            .ok_or(OutputError::Overflow)?;
+        self.schedule.time(frames, self.sample_rate)
+    }
+
+    pub fn ns_per_frame(self) -> f64 {
+        self.schedule
+            .period_ns
+            .unwrap_or(1e9 / f64::from(self.sample_rate))
+    }
+
+    /// Compare this retained endpoint with the unique grid point nearest an
+    /// integer presentation boundary. Midpoints belong to the later point.
+    /// Adjacent integer deadlines define the cells, so fractional phase and
+    /// slow device periods cannot leave a one-nanosecond hole between cells.
+    pub fn boundary_relation(self, boundary_ns: u64) -> Result<std::cmp::Ordering, OutputError> {
+        let frame = i128::from(self.schedule.frames);
+        let previous = self.schedule.signed_time(frame - 1, self.sample_rate)?;
+        let current = i128::from(self.time_after(0)?);
+        let next = self.schedule.signed_time(frame + 1, self.sample_rate)?;
+        let boundary = i128::from(boundary_ns) * 2;
+        Ok(if boundary < previous + current {
+            std::cmp::Ordering::Greater
+        } else if boundary >= current + next {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Equal
+        })
+    }
+
+    /// Frames to the nearest retained grid point at a boundary. This is the
+    /// same midpoint policy used by write snapping and handoff verification.
+    pub fn frames_until(self, boundary_ns: u64) -> Result<u64, OutputError> {
+        let start = self.time_after(0)?;
+        if boundary_ns <= start {
+            return Ok(0);
+        }
+        let mut frames = ((boundary_ns - start) as f64 / self.ns_per_frame()).round() as u64;
+        match self.advanced(frames)?.boundary_relation(boundary_ns)? {
+            std::cmp::Ordering::Greater => frames = frames.saturating_sub(1),
+            std::cmp::Ordering::Less => {
+                frames = frames.checked_add(1).ok_or(OutputError::Overflow)?;
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+        Ok(frames)
+    }
+
+    pub fn advanced(self, frames: u64) -> Result<Self, OutputError> {
+        let frames = self
+            .schedule
+            .frames
+            .checked_add(frames)
+            .ok_or(OutputError::Overflow)?;
+        self.schedule.time(frames, self.sample_rate)?;
+        Ok(Self {
+            schedule: Schedule {
+                frames,
+                ..self.schedule
+            },
+            ..self
+        })
+    }
+}
+
 impl Schedule {
+    fn signed_time(self, frames: i128, rate: u32) -> Result<i128, OutputError> {
+        if let Ok(frames) = u64::try_from(frames) {
+            return self.time(frames, rate).map(i128::from);
+        }
+        let offset = match self.period_ns {
+            Some(period) => {
+                let offset = frames as f64 * period + self.fraction_ns;
+                if !offset.is_finite() || offset.abs() >= u64::MAX as f64 {
+                    return Err(OutputError::Overflow);
+                }
+                // Unlike f64::round, floor(x + 0.5) also places negative
+                // half-integer neighbors on the same positive-time grid.
+                (offset + 0.5).floor() as i128
+            }
+            None => (frames * 1_000_000_000).div_euclid(i128::from(rate)),
+        };
+        Ok(i128::from(self.start_ns) + offset)
+    }
+
     fn time(self, frames: u64, rate: u32) -> Result<u64, OutputError> {
         let offset = match self.period_ns {
             Some(period) => {
@@ -341,8 +505,11 @@ impl ScheduledPcmQueue {
             read: AtomicU64::new(0),
             clear_before: AtomicU64::new(0),
             generation: AtomicU64::new(0),
+            end_generation: AtomicU64::new(u64::MAX),
+            end_frame: AtomicU64::new(0),
             muted: AtomicBool::new(true),
             silence_from: AtomicU64::new(u64::MAX),
+            silence_until: AtomicU64::new(0),
             device_error: AtomicBool::new(false),
             volume: AtomicU32::new(1.0f32.to_bits()),
             clock_sequence: AtomicU64::new(0),
@@ -350,6 +517,9 @@ impl ScheduledPcmQueue {
             period_bits: AtomicU64::new(period.to_bits()),
             ppm_bits: AtomicU64::new(0.0f64.to_bits()),
             uncertainty: AtomicU64::new(0),
+            clock_fault_count: AtomicU64::new(0),
+            clock_fault_kind: AtomicU32::new(0),
+            clock_fault_value: AtomicU64::new(0),
             presentation: AtomicU64::new(u64::MAX),
             callback_local_ns: AtomicU64::new(u64::MAX),
             played: AtomicU64::new(0),
@@ -381,18 +551,84 @@ impl ScheduledPcmQueue {
         self.format
     }
 
+    /// Project the exact grid that a clocked write would retain. This shares
+    /// the write path's snapping/reperioding policy; it does not publish PCM.
+    pub fn clocked_cursor_at(
+        &self,
+        start_local_ns: u64,
+        ns_per_frame: f64,
+    ) -> Result<OutputCursor, OutputError> {
+        self.validate_clocked_period(ns_per_frame)?;
+        Ok(OutputCursor {
+            schedule: self.schedule_at(start_local_ns, Some(ns_per_frame))?,
+            sample_rate: self.format.sample_rate,
+        })
+    }
+
+    /// Exact end of the last accepted write. A clear or emergency invalidation
+    /// retires this cursor with its PCM generation.
+    pub fn scheduled_cursor(&self) -> Option<OutputCursor> {
+        (self.generation == self.shared.generation.load(Ordering::Acquire))
+            .then_some(self.schedule)
+            .flatten()
+            .map(|schedule| OutputCursor {
+                schedule,
+                sample_rate: self.format.sample_rate,
+            })
+    }
+
+    fn validate_clocked_period(&self, ns_per_frame: f64) -> Result<(), OutputError> {
+        let nominal = 1e9 / f64::from(self.format.sample_rate);
+        if !ns_per_frame.is_finite() || !(nominal * 0.99..=nominal * 1.01).contains(&ns_per_frame) {
+            return Err(OutputError::Format);
+        }
+        Ok(())
+    }
+
+    fn schedule_at(
+        &self,
+        start_local_ns: u64,
+        period_ns: Option<f64>,
+    ) -> Result<Schedule, OutputError> {
+        let mut schedule = Schedule {
+            start_ns: start_local_ns,
+            frames: 0,
+            period_ns,
+            fraction_ns: 0.0,
+        };
+        if let Some(previous) = self.scheduled_cursor().map(|cursor| cursor.schedule) {
+            let end = previous.time(previous.frames, self.format.sample_rate)?;
+            let relation = OutputCursor {
+                schedule: previous,
+                sample_rate: self.format.sample_rate,
+            }
+            .boundary_relation(start_local_ns)?;
+            if relation == std::cmp::Ordering::Equal {
+                schedule = if previous.period_ns == period_ns {
+                    previous
+                } else {
+                    previous.reperiod(period_ns, self.format.sample_rate)?
+                };
+            } else if start_local_ns < end {
+                return Err(OutputError::OutOfOrder);
+            }
+        }
+        Ok(schedule)
+    }
+
     /// All-or-nothing write with an explicit local "now" for deterministic
     /// embedding. Production [`ScheduledOutput::write`] supplies its origin's
     /// current elapsed time. Blocks must be chronological. Starts within half
-    /// a nominal sample of the prior end snap to the same rational sample grid,
-    /// so packet timestamp rounding does not periodically duplicate/drop frames.
+    /// the midpoint cell of the prior end snap to the same sample grid, so
+    /// timestamp rounding does not periodically duplicate/drop frames. The
+    /// queue's retained period and fractional phase define that cell.
     pub fn write_at(
         &mut self,
         start_local_ns: u64,
         samples: &[f32],
         now_local_ns: u64,
     ) -> Result<(), OutputError> {
-        self.write_inner(start_local_ns, samples, now_local_ns, None)
+        self.write_inner(start_local_ns, samples, now_local_ns, None, false)
     }
 
     /// Continuous device-clock scheduling. The period is measured local
@@ -406,11 +642,39 @@ impl ScheduledPcmQueue {
         now_local_ns: u64,
         ns_per_frame: f64,
     ) -> Result<(), OutputError> {
-        let nominal = 1e9 / f64::from(self.format.sample_rate);
-        if !ns_per_frame.is_finite() || !(nominal * 0.99..=nominal * 1.01).contains(&ns_per_frame) {
-            return Err(OutputError::Format);
-        }
-        self.write_inner(start_local_ns, samples, now_local_ns, Some(ns_per_frame))
+        self.write_clocked_inner_at(start_local_ns, samples, now_local_ns, ns_per_frame, false)
+    }
+
+    /// Publish the last block of a finite run. After its last PCM frame the
+    /// callback emits planned silence, independent of presentation-phase slew.
+    /// The end marker is published with the block; further writes require a
+    /// clear/unmute so cancellation can never revive a retired run.
+    pub fn write_finite_clocked_at(
+        &mut self,
+        start_local_ns: u64,
+        samples: &[f32],
+        now_local_ns: u64,
+        ns_per_frame: f64,
+    ) -> Result<(), OutputError> {
+        self.write_clocked_inner_at(start_local_ns, samples, now_local_ns, ns_per_frame, true)
+    }
+
+    fn write_clocked_inner_at(
+        &mut self,
+        start_local_ns: u64,
+        samples: &[f32],
+        now_local_ns: u64,
+        ns_per_frame: f64,
+        finite: bool,
+    ) -> Result<(), OutputError> {
+        self.validate_clocked_period(ns_per_frame)?;
+        self.write_inner(
+            start_local_ns,
+            samples,
+            now_local_ns,
+            Some(ns_per_frame),
+            finite,
+        )
     }
 
     fn write_inner(
@@ -419,6 +683,7 @@ impl ScheduledPcmQueue {
         samples: &[f32],
         now_local_ns: u64,
         period_ns: Option<f64>,
+        finite: bool,
     ) -> Result<(), OutputError> {
         if self.shared.device_error.load(Ordering::Acquire) {
             return Err(OutputError::DeviceError);
@@ -438,29 +703,14 @@ impl ScheduledPcmQueue {
             return Ok(());
         }
         let generation = self.shared.generation.load(Ordering::Acquire);
+        if self.shared.end_generation.load(Ordering::Acquire) == generation {
+            return Err(OutputError::RunEnded);
+        }
         if self.generation != generation {
             self.schedule = None;
             self.generation = generation;
         }
-        let mut schedule = Schedule {
-            start_ns: start_local_ns,
-            frames: 0,
-            period_ns,
-            fraction_ns: 0.0,
-        };
-        if let Some(previous) = self.schedule {
-            let end = previous.time(previous.frames, self.format.sample_rate)?;
-            let half_frame_ns = 500_000_000 / u64::from(self.format.sample_rate);
-            if start_local_ns.abs_diff(end) <= half_frame_ns {
-                schedule = if previous.period_ns == period_ns {
-                    previous
-                } else {
-                    previous.reperiod(period_ns, self.format.sample_rate)?
-                };
-            } else if start_local_ns < end {
-                return Err(OutputError::OutOfOrder);
-            }
-        }
+        let schedule = self.schedule_at(start_local_ns, period_ns)?;
         let end_frame = schedule
             .frames
             .checked_add(frames as u64)
@@ -501,6 +751,12 @@ impl ScheduledPcmQueue {
             self.shared.epochs[slot].store(generation, Ordering::Release);
         }
         self.written = new_written;
+        if finite {
+            self.shared.end_frame.store(new_written, Ordering::Release);
+            self.shared
+                .end_generation
+                .store(generation, Ordering::Release);
+        }
         self.shared.written.store(new_written, Ordering::Release);
         // Epochs on every frame also cover a fault/clear in the narrow interval
         // between this publication and the generation check.
@@ -533,7 +789,17 @@ impl ScheduledPcmQueue {
 
     /// Clear again before enabling output; a previous epoch cannot revive.
     pub fn unmute(&mut self) {
+        self.unmute_at(0);
+    }
+
+    /// Authorize a future run. Before its first deadline the callback emits
+    /// planned silence even if it races the worker's first PCM publication.
+    /// Missing PCM at/after the deadline still counts as a real underrun.
+    pub fn unmute_at(&mut self, first_frame_local_ns: u64) {
         self.clear();
+        self.shared
+            .silence_until
+            .store(first_frame_local_ns, Ordering::Release);
         self.shared.muted.store(false, Ordering::Release);
     }
 
@@ -578,6 +844,20 @@ impl PresentationConsumer {
         self.shared
             .uncertainty
             .store(reading.uncertainty_ns, Ordering::Release);
+        self.shared
+            .clock_fault_count
+            .store(reading.fault_count, Ordering::Release);
+        self.shared.clock_fault_kind.store(
+            reading.last_fault.map_or(0, |fault| fault.kind as u32),
+            Ordering::Release,
+        );
+        self.shared.clock_fault_value.store(
+            reading
+                .last_fault
+                .map_or(0.0, |fault| fault.value)
+                .to_bits(),
+            Ordering::Release,
+        );
         self.shared.presentation.store(
             reading.first_frame_local_ns.unwrap_or(u64::MAX),
             Ordering::Release,
@@ -692,6 +972,8 @@ impl PresentationConsumer {
         let mut dropped = clear_before.saturating_sub(self.read);
         self.read = self.read.max(clear_before);
         let written = self.shared.written.load(Ordering::Acquire);
+        let end_frame = (self.shared.end_generation.load(Ordering::Acquire) == generation)
+            .then(|| self.shared.end_frame.load(Ordering::Acquire));
         let gain = f32::from_bits(self.shared.volume.load(Ordering::Acquire));
         let mut played = 0u64;
         let mut late = 0u64;
@@ -699,6 +981,11 @@ impl PresentationConsumer {
         let mut future = 0u64;
         for (index, frame) in output.chunks_exact_mut(channels).enumerate() {
             let time = first + index as f64 * period;
+            if time + period * 0.5 < self.shared.silence_until.load(Ordering::Acquire) as f64 {
+                self.last_deadline = None;
+                future += 1;
+                continue;
+            }
             if time + period * 0.5 >= self.shared.silence_from.load(Ordering::Acquire) as f64 {
                 self.last_deadline = None;
                 future += 1;
@@ -739,6 +1026,11 @@ impl PresentationConsumer {
                 late += expired;
                 dropped += expired;
                 self.read = low;
+            }
+            if end_frame.is_some_and(|end| self.read >= end) {
+                self.last_deadline = None;
+                future += 1;
+                continue;
             }
             if self.read == written {
                 underrun += 1;
@@ -791,6 +1083,7 @@ pub struct ScheduledOutput {
     stream: Option<cpal::Stream>,
     queue: ScheduledPcmQueue,
     clock_origin: Instant,
+    binding: OutputBinding,
 }
 
 impl ScheduledOutput {
@@ -847,6 +1140,21 @@ impl ScheduledOutput {
             sample_rate: config.sample_rate().0,
             channels: config.channels(),
         };
+        let binding = OutputBinding {
+            backend: host.id().name().to_owned(),
+            device: device
+                .name()
+                .map_err(|e| AudioError::DeviceUnavailable(e.to_string()))?,
+            sample_rate: format.sample_rate,
+            channels: format.channels,
+            configuration: "cpal-default/f32/default-buffer".into(),
+        };
+        if !binding.accepts_correction(
+            options.calibration_binding.as_ref(),
+            options.latency_correction_ns,
+        ) {
+            return Err(AudioError::UnsupportedFormat("output configuration changed; set correction to zero, reopen and confirm calibration for this device".into()));
+        }
         let (queue, mut consumer) =
             ScheduledPcmQueue::with_capability(format, TimestampCapability::BackendEstimate)
                 .map_err(|error| AudioError::BackendInit(error.to_string()))?;
@@ -907,11 +1215,27 @@ impl ScheduledOutput {
             stream: Some(stream),
             queue,
             clock_origin,
+            binding,
         })
     }
 
     pub fn format(&self) -> RenderFormat {
         self.queue.format()
+    }
+    pub fn binding(&self) -> &OutputBinding {
+        &self.binding
+    }
+
+    pub fn clocked_cursor_at(
+        &self,
+        start_local_ns: u64,
+        ns_per_frame: f64,
+    ) -> Result<OutputCursor, OutputError> {
+        self.queue.clocked_cursor_at(start_local_ns, ns_per_frame)
+    }
+
+    pub fn scheduled_cursor(&self) -> Option<OutputCursor> {
+        self.queue.scheduled_cursor()
     }
 
     pub fn write(&mut self, start_local_ns: u64, samples: &[f32]) -> Result<(), OutputError> {
@@ -932,6 +1256,19 @@ impl ScheduledOutput {
             .write_clocked_at(start_local_ns, samples, now, ns_per_frame)
     }
 
+    /// Schedule the final PCM block of a finite run with an exact frame end.
+    pub fn write_finite_clocked(
+        &mut self,
+        start_local_ns: u64,
+        samples: &[f32],
+        ns_per_frame: f64,
+    ) -> Result<(), OutputError> {
+        let now = u64::try_from(self.clock_origin.elapsed().as_nanos())
+            .map_err(|_| OutputError::Overflow)?;
+        self.queue
+            .write_finite_clocked_at(start_local_ns, samples, now, ns_per_frame)
+    }
+
     pub fn clear(&mut self) {
         self.queue.clear();
     }
@@ -940,6 +1277,9 @@ impl ScheduledOutput {
     }
     pub fn unmute(&mut self) {
         self.queue.unmute();
+    }
+    pub fn unmute_at(&mut self, first_frame_local_ns: u64) {
+        self.queue.unmute_at(first_frame_local_ns);
     }
     pub fn silence_from(&mut self, local_ns: u64) {
         self.queue.silence_from(local_ns);
@@ -968,6 +1308,40 @@ impl Drop for ScheduledOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn correction_requires_exact_device_stream_binding() {
+        let binding = OutputBinding {
+            backend: "WASAPI".into(),
+            device: "speakers".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            configuration: "cpal-default/f32/default-buffer".into(),
+        };
+        assert!(binding.accepts_correction(None, 0));
+        assert!(!binding.accepts_correction(None, 1));
+        assert!(binding.accepts_correction(Some(&binding), 123));
+        for changed in [
+            OutputBinding {
+                device: "headphones".into(),
+                ..binding.clone()
+            },
+            OutputBinding {
+                sample_rate: 44_100,
+                ..binding.clone()
+            },
+            OutputBinding {
+                backend: "ASIO".into(),
+                ..binding.clone()
+            },
+            OutputBinding {
+                configuration: "exclusive".into(),
+                ..binding.clone()
+            },
+        ] {
+            assert!(!changed.accepts_correction(Some(&binding), 123));
+        }
+    }
 
     #[test]
     fn published_silence_boundary_preserves_audio_and_counts_only_real_gaps() {
@@ -1093,6 +1467,54 @@ mod tests {
                 .abs_diff(reference.round() as u64)
                 < 16
         );
+    }
+
+    #[test]
+    fn retained_grid_midpoints_have_one_owner_and_match_preview_and_writes() {
+        for ppm in [-500.0, -150.0, 0.0, 500.0] {
+            let period = 1e9 / (48_000.0 * (1.0 + ppm * 1e-6));
+            let (mut producer, _) = queue(48_000, 1);
+            let origin = 400_000_000;
+            producer
+                .write_clocked_at(origin, &vec![0.5; 14_400], 0, period)
+                .unwrap();
+            let accepted = producer.scheduled_cursor().unwrap();
+            let next = accepted.advanced(1).unwrap();
+            let first = accepted.time_after(0).unwrap();
+            let second = next.time_after(0).unwrap();
+            for boundary in first..=second {
+                let first_owns =
+                    accepted.boundary_relation(boundary).unwrap() == std::cmp::Ordering::Equal;
+                let second_owns =
+                    next.boundary_relation(boundary).unwrap() == std::cmp::Ordering::Equal;
+                assert_ne!(first_owns, second_owns, "{ppm}ppm at {boundary}");
+                assert_eq!(
+                    accepted.frames_until(boundary).unwrap(),
+                    u64::from(second_owns)
+                );
+            }
+            // Previewing a newly measured period still decides the initial
+            // snap against the old accepted grid; only then may it reperiod.
+            let last_owned = (first + second - 1) / 2;
+            let new_period = 1e9 / (48_000.0 * (1.0 + (ppm + 1.0) * 1e-6));
+            let preview = producer.clocked_cursor_at(last_owned, new_period).unwrap();
+            assert_eq!(preview.time_after(0).unwrap(), first);
+            producer
+                .write_clocked_at(last_owned, &[0.75], 0, new_period)
+                .unwrap();
+            assert_eq!(
+                producer.scheduled_cursor().unwrap().time_after(0).unwrap(),
+                preview.time_after(1).unwrap()
+            );
+            // The midpoint's earlier side cannot attach behind the retained
+            // endpoint. No extra fixed nanosecond allowance was introduced.
+            let accepted = producer.scheduled_cursor().unwrap();
+            let before_cell = (first + accepted.time_after(0).unwrap() - 1) / 2;
+            assert!(matches!(
+                producer.clocked_cursor_at(before_cell, new_period),
+                Err(OutputError::OutOfOrder)
+            ));
+        }
     }
 
     fn queue(rate: u32, channels: u16) -> (ScheduledPcmQueue, PresentationConsumer) {
@@ -1233,6 +1655,8 @@ mod tests {
                         ns_per_frame: 1e9 / 48_000.0,
                         device_clock_ppm: 0.0,
                         uncertainty_ns: 1_000,
+                        fault_count: 0,
+                        last_fault: None,
                     },
                     Some(callback),
                 );
@@ -1265,6 +1689,94 @@ mod tests {
         let mut output = [0.0; 4];
         consumer.render(&mut output, time(4_000_000, 1_000));
         assert_eq!(output, [0.75; 4]);
+    }
+
+    #[test]
+    fn future_unmute_racing_first_write_is_planned_silence_but_deadline_still_requires_pcm() {
+        let (mut producer, mut consumer) = queue(1_000, 1);
+        producer.mute();
+        producer.unmute_at(10_000_000);
+        let mut output = [9.0; 4];
+        consumer.render(&mut output, time(0, 1_000));
+        assert_eq!(output, [0.0; 4]);
+        assert_eq!(producer.telemetry().underrun_frames, 0);
+        assert_eq!(producer.telemetry().future_silence_frames, 4);
+        consumer.render(&mut output, time(10_000_000, 1_000));
+        assert_eq!(producer.telemetry().underrun_frames, 4);
+        producer.mute();
+        producer.unmute_at(20_000_000);
+        producer
+            .write_at(20_000_000, &[0.5; 4], 14_000_000)
+            .unwrap();
+        consumer.render(&mut output, time(20_000_000, 1_000));
+        assert_eq!(output, [0.5; 4]);
+        assert_eq!(producer.telemetry().underrun_frames, 4);
+    }
+
+    #[test]
+    fn finite_run_end_is_exact_and_does_not_mask_a_new_runs_missing_pcm() {
+        let (mut producer, mut consumer) = queue(1_000, 1);
+        producer.unmute_at(10_000_000);
+        producer
+            .write_finite_clocked_at(10_000_000, &[0.75; 4], 0, 1_000_000.0)
+            .unwrap();
+        assert_eq!(
+            producer.write_clocked_at(14_000_000, &[0.5], 0, 1_000_000.0),
+            Err(OutputError::RunEnded)
+        );
+        let mut output = [9.0; 8];
+        consumer.render(&mut output, time(10_000_000, 1_000));
+        assert_eq!(output, [0.75, 0.75, 0.75, 0.75, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(producer.telemetry().played_frames, 4);
+        assert_eq!(producer.telemetry().underrun_frames, 0);
+        producer.unmute_at(20_000_000);
+        consumer.render(&mut output, time(20_000_000, 1_000));
+        assert_eq!(output, [0.0; 8]);
+        assert_eq!(producer.telemetry().underrun_frames, 8);
+        producer
+            .write_finite_clocked_at(28_000_000, &[0.5; 4], 20_000_000, 1_000_000.0)
+            .unwrap();
+        consumer.render(&mut output, time(28_000_000, 1_000));
+        assert_eq!(output, [0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(producer.telemetry().underrun_frames, 8);
+    }
+
+    #[test]
+    fn cancelling_a_finite_run_retires_its_pcm_and_end_marker() {
+        let (mut producer, mut consumer) = queue(1_000, 1);
+        producer
+            .write_finite_clocked_at(0, &[0.75; 4], 0, 1_000_000.0)
+            .unwrap();
+        let mut output = [9.0; 4];
+        consumer.render_inner(&mut output, time(0, 1_000), || {
+            producer.emergency_mute().mute();
+        });
+        assert_eq!(output, [0.0; 4]);
+        assert_eq!(producer.telemetry().played_frames, 0);
+        producer.unmute_at(4_000_000);
+        producer
+            .write_clocked_at(4_000_000, &[0.5; 4], 0, 1_000_000.0)
+            .unwrap();
+        consumer.render(&mut output, time(4_000_000, 1_000));
+        assert_eq!(output, [0.5; 4]);
+        consumer.render(&mut output, time(8_000_000, 1_000));
+        assert_eq!(producer.telemetry().underrun_frames, 4);
+    }
+
+    #[test]
+    fn an_expired_finite_run_reports_late_pcm_and_planned_silence_after_its_end() {
+        let (mut producer, mut consumer) = queue(1_000, 1);
+        producer
+            .write_finite_clocked_at(0, &[0.75; 4], 0, 1_000_000.0)
+            .unwrap();
+        let mut output = [9.0; 8];
+        consumer.render(&mut output, time(4_000_000, 1_000));
+        assert_eq!(output, [0.0; 8]);
+        let telemetry = producer.telemetry();
+        assert_eq!(telemetry.late_frames, 4);
+        assert_eq!(telemetry.played_frames, 0);
+        assert_eq!(telemetry.underrun_frames, 0);
+        assert_eq!(telemetry.future_silence_frames, 8);
     }
 
     #[test]

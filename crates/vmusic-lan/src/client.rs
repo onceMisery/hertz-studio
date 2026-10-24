@@ -24,6 +24,16 @@ use uuid::Uuid;
 type Socket = WebSocketStream<TlsStream<TcpStream>>;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SEND_TIMEOUT: Duration = Duration::from_millis(500);
+const CLOCK_PROBE_INTERVAL_NS: u64 = 1_000_000_000;
+
+fn clock_probe_due(ticks: u64, mapping: Option<ClockMapping>, now: u64) -> bool {
+    ticks <= 20
+        || ticks.is_multiple_of(10)
+        || mapping.is_none_or(|mapping| {
+            !mapping.valid_at(now)
+                || now.saturating_sub(mapping.reference_local_ns) >= CLOCK_PROBE_INTERVAL_NS
+        })
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -372,9 +382,10 @@ async fn run_control(
                     current_mapping = None;
                     mapping.send_replace(None);
                 }
-                // Rebuild a lost clock at the startup cadence. Waiting one
-                // second per sample would outlast the last-output grace period.
-                if ticks <= 20 || current_mapping.is_none_or(|m| !m.converged()) || ticks.is_multiple_of(10) {
+                // Retry rejected measurements at the existing startup cadence
+                // before the last accepted sample's freshness lease expires.
+                // Only a newly accepted timestamp can renew that lease.
+                if clock_probe_due(ticks, current_mapping, clock.now_ns()) {
                     sequence = sequence.checked_add(1).ok_or(ClientError::Protocol)?;
                     let t1 = clock.now_ns(); pending.push_back((sequence, t1));
                     while pending.len() > 32 { pending.pop_front(); }
@@ -457,5 +468,54 @@ async fn run_audio(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod clock_probe_tests {
+    use super::*;
+
+    fn response_at(now: u64, rtt: u64) -> TimeSample {
+        let t1 = now - rtt - 1_000;
+        let t2 = t1 + rtt / 2 + 500_000;
+        TimeSample {
+            t1,
+            t2,
+            t3: t2 + 1_000,
+            t4: now,
+        }
+    }
+
+    #[test]
+    fn rejected_steady_probes_get_fresh_measurements_before_the_mapping_expires() {
+        let mut estimator = Estimator::default();
+        for tick in 1..=20 {
+            assert!(estimator.push(response_at(tick * 100_000_000, 200_000)));
+        }
+        let mut mapping = estimator.mapping_at(2_000_000_000);
+        assert!(mapping.is_some());
+        let mut rejected = 0;
+        let mut recovered = 0;
+        for tick in 21..=70 {
+            let now = tick * 100_000_000;
+            if clock_probe_due(tick, mapping, now) {
+                // Every ordinary one-second probe arrives late. The estimator
+                // must keep rejecting them; fresh retry samples are required.
+                if tick.is_multiple_of(10) {
+                    assert!(!estimator.push(response_at(now, 3_000_000)));
+                    rejected += 1;
+                } else {
+                    assert!(estimator.push(response_at(now, 200_000)));
+                    recovered += 1;
+                }
+                mapping = estimator.mapping_at(now);
+            }
+            assert!(mapping.is_some_and(|m| m.valid_at(now)), "tick {tick}");
+        }
+        assert!(rejected >= 3);
+        assert!(recovered > 0);
+        // Retrying never refreshes the fit by itself. Without accepted samples
+        // the existing three-second freshness gate still expires it.
+        assert!(estimator.mapping_at(10_000_000_001).is_none());
     }
 }

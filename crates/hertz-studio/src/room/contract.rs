@@ -52,6 +52,15 @@ pub enum Playback {
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueItem {
+    /// Null allocates a new occurrence; an existing ID preserves that exact
+    /// occurrence and must still refer to this resource at expected_revision.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub instance_id: Option<Counter>,
+    pub resource_id: Uuid,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PeerRequest {
     Snapshot,
@@ -78,7 +87,7 @@ pub enum PeerRequest {
     Queue {
         operation_id: Counter,
         expected_revision: Counter,
-        resources: Vec<Uuid>,
+        items: Vec<QueueItem>,
     },
     Mode {
         operation_id: Counter,
@@ -179,4 +188,34 @@ pub enum LocalRequest {
         crossfade_ms: u64,
         loudness_mode: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn queue_contract_requires_explicit_instance_identity_and_rejects_the_old_resource_list() {
+        let resource = Uuid::new_v4();
+        let request = json!({"action":"queue", "operation_id":"1", "expected_revision":"2",
+            "items":[{"instance_id":"9007199254740993","resource_id":resource},
+                     {"instance_id":null,"resource_id":resource}]});
+        let parsed: PeerRequest = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), request);
+        for items in [
+            json!([{"resource_id":resource}]),
+            json!([{"instance_id":1,"resource_id":resource}]),
+            json!([{"instance_id":null,"resource_id":resource,"unknown":true}]),
+        ] {
+            let mut invalid = request.clone();
+            invalid["items"] = items;
+            assert!(serde_json::from_value::<PeerRequest>(invalid).is_err());
+        }
+        assert!(
+            serde_json::from_value::<PeerRequest>(json!({"action":"queue",
+            "operation_id":"1","expected_revision":"2","resources":[resource]}))
+            .is_err()
+        );
+    }
 }

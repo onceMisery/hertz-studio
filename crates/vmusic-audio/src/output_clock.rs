@@ -23,6 +23,51 @@ pub enum ClockStatus {
     DeviceError,
 }
 
+/// Latched clock rejection reason. Time residuals are nanoseconds; rate
+/// residuals are parts per million relative to the nominal/reference clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ClockFaultKind {
+    MissingTimestamp = 1,
+    InvalidLeadNs,
+    EmptyCallback,
+    CallbackRegressionNs,
+    PlaybackRegressionNs,
+    LocalRegressionNs,
+    FrameOverflow,
+    PhaseResidualNs,
+    HostRatePpm,
+    BackendRatePpm,
+    CombinedRatePpm,
+    InvalidPresentationNs,
+}
+
+impl ClockFaultKind {
+    pub(crate) fn from_code(code: u32) -> Option<Self> {
+        Some(match code {
+            1 => Self::MissingTimestamp,
+            2 => Self::InvalidLeadNs,
+            3 => Self::EmptyCallback,
+            4 => Self::CallbackRegressionNs,
+            5 => Self::PlaybackRegressionNs,
+            6 => Self::LocalRegressionNs,
+            7 => Self::FrameOverflow,
+            8 => Self::PhaseResidualNs,
+            9 => Self::HostRatePpm,
+            10 => Self::BackendRatePpm,
+            11 => Self::CombinedRatePpm,
+            12 => Self::InvalidPresentationNs,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ClockFault {
+    pub kind: ClockFaultKind,
+    pub value: f64,
+}
+
 /// One callback observation. Backend timestamps must share one monotonic domain;
 /// `local_ns` is the callback entry's `Instant` relative to the caller's origin.
 #[derive(Debug, Clone, Copy)]
@@ -45,6 +90,9 @@ pub struct ClockReading {
     /// Timestamp/model residual, including observed callback delivery jitter.
     /// This is an estimate, not a bound on unreported hardware/acoustic latency.
     pub uncertainty_ns: u64,
+    /// Lifetime rejection count and last rejection survive clock warmup.
+    pub fault_count: u64,
+    pub last_fault: Option<ClockFault>,
 }
 
 /// Backend-independent clock filter. No allocation, locking or I/O in `observe`.
@@ -71,6 +119,8 @@ pub struct OutputClock {
     period_ns: f64,
     phase_ns: f64,
     uncertainty_ns: f64,
+    fault_count: u64,
+    last_fault: Option<ClockFault>,
 }
 
 impl OutputClock {
@@ -96,10 +146,14 @@ impl OutputClock {
             period_ns: nominal,
             phase_ns: 0.0,
             uncertainty_ns: 0.0,
+            fault_count: 0,
+            last_fault: None,
         })
     }
 
-    fn invalidate(&mut self) -> ClockReading {
+    fn invalidate(&mut self, kind: ClockFaultKind, value: f64) -> ClockReading {
+        self.fault_count = self.fault_count.saturating_add(1);
+        self.last_fault = Some(ClockFault { kind, value });
         self.anchor = None;
         self.previous = None;
         self.window = None;
@@ -127,6 +181,8 @@ impl OutputClock {
             ns_per_frame: self.period_ns,
             device_clock_ppm: (self.nominal_period / self.period_ns - 1.0) * 1e6,
             uncertainty_ns: self.uncertainty_ns.ceil().max(1.0) as u64,
+            fault_count: self.fault_count,
+            last_fault: self.last_fault,
         }
     }
 
@@ -164,23 +220,41 @@ impl OutputClock {
 
     pub fn observe(&mut self, observation: Option<ClockObservation>) -> ClockReading {
         let Some(observation) = observation else {
-            return self.invalidate();
+            return self.invalidate(ClockFaultKind::MissingTimestamp, 0.0);
         };
         let Some(lead_ns) = observation.playback_ns.checked_sub(observation.callback_ns) else {
-            return self.invalidate();
+            return self.invalidate(
+                ClockFaultKind::InvalidLeadNs,
+                observation.playback_ns as f64 - observation.callback_ns as f64,
+            );
         };
-        if lead_ns > MAX_LEAD_NS || observation.frames == 0 {
-            return self.invalidate();
+        if lead_ns > MAX_LEAD_NS {
+            return self.invalidate(ClockFaultKind::InvalidLeadNs, lead_ns as f64);
+        }
+        if observation.frames == 0 {
+            return self.invalidate(ClockFaultKind::EmptyCallback, 0.0);
         }
         if let Some(previous) = self.previous {
-            if observation.callback_ns <= previous.callback_ns
-                || observation.playback_ns <= previous.playback_ns
-                || observation.local_ns <= previous.local_ns
-            {
-                return self.invalidate();
+            if observation.callback_ns <= previous.callback_ns {
+                return self.invalidate(
+                    ClockFaultKind::CallbackRegressionNs,
+                    observation.callback_ns as f64 - previous.callback_ns as f64,
+                );
+            }
+            if observation.playback_ns <= previous.playback_ns {
+                return self.invalidate(
+                    ClockFaultKind::PlaybackRegressionNs,
+                    observation.playback_ns as f64 - previous.playback_ns as f64,
+                );
+            }
+            if observation.local_ns <= previous.local_ns {
+                return self.invalidate(
+                    ClockFaultKind::LocalRegressionNs,
+                    observation.local_ns as f64 - previous.local_ns as f64,
+                );
             }
             let Some(frames) = self.frames.checked_add(previous.frames as u64) else {
-                return self.invalidate();
+                return self.invalidate(ClockFaultKind::FrameOverflow, self.frames as f64);
             };
             self.frames = frames;
         }
@@ -210,7 +284,7 @@ impl OutputClock {
             let predicted = self.phase_ns + previous.frames as f64 * self.period_ns;
             let error = raw_phase - predicted;
             if error.abs() > MAX_PHASE_ERROR_NS {
-                return self.invalidate();
+                return self.invalidate(ClockFaultKind::PhaseResidualNs, error);
             }
             let delivery_jitter = (offset - self.offset_ns).abs();
             self.uncertainty_ns = (self.uncertainty_ns * 0.98)
@@ -237,12 +311,23 @@ impl OutputClock {
                 let period = backend_period * host_ratio;
                 // Reject stale/fabricated timestamps or wildly inconsistent
                 // device frame positions. Ordinary callback jitter is filtered.
-                if frame_span == 0
-                    || !(0.995..=1.005).contains(&host_ratio)
-                    || !(0.995..=1.005).contains(&(backend_period / self.nominal_period))
-                    || !(0.995..=1.005).contains(&(period / self.nominal_period))
-                {
-                    return self.invalidate();
+                if frame_span == 0 {
+                    return self.invalidate(ClockFaultKind::FrameOverflow, 0.0);
+                }
+                if !(0.995..=1.005).contains(&host_ratio) {
+                    return self.invalidate(ClockFaultKind::HostRatePpm, (host_ratio - 1.0) * 1e6);
+                }
+                if !(0.995..=1.005).contains(&(backend_period / self.nominal_period)) {
+                    return self.invalidate(
+                        ClockFaultKind::BackendRatePpm,
+                        (backend_period / self.nominal_period - 1.0) * 1e6,
+                    );
+                }
+                if !(0.995..=1.005).contains(&(period / self.nominal_period)) {
+                    return self.invalidate(
+                        ClockFaultKind::CombinedRatePpm,
+                        (period / self.nominal_period - 1.0) * 1e6,
+                    );
                 }
                 // Refresh the lower envelope once per rate window. Retaining
                 // the minimum forever would accumulate a permanent phase bias
@@ -266,7 +351,7 @@ impl OutputClock {
         self.good = self.good.saturating_add(1);
         let corrected = self.phase_ns + self.correction_ns as f64;
         if !corrected.is_finite() || corrected < 0.0 || corrected >= u64::MAX as f64 {
-            return self.invalidate();
+            return self.invalidate(ClockFaultKind::InvalidPresentationNs, corrected);
         }
         let ready = self.good >= WARMUP_OBSERVATIONS;
         self.reading(ready.then_some(corrected.round() as u64))
@@ -468,5 +553,28 @@ mod tests {
             changed.playback_ns += if phase_jump { 21_000_000 } else { 6_000_000 };
             assert_eq!(clock.observe(Some(changed)).status, ClockStatus::Invalid);
         }
+    }
+
+    #[test]
+    fn fault_diagnostic_survives_successful_timestamp_recovery() {
+        let mut clock = OutputClock::new(48_000, 0).unwrap();
+        for index in 0..4_500 {
+            clock.observe(Some(observation(index, 1e9 / 48_000.0, 0)));
+        }
+        let mut changed = observation(4_500, 1e9 / 48_000.0, 0);
+        changed.playback_ns += 6_000_000;
+        let failed = clock.observe(Some(changed));
+        assert_eq!(failed.status, ClockStatus::Invalid);
+        let fault = failed.last_fault.unwrap();
+        assert_eq!(fault.kind, ClockFaultKind::BackendRatePpm);
+        assert!((fault.value - 6_000.0).abs() < 1e-6);
+        let mut recovered = failed;
+        for index in 4_501..4_509 {
+            recovered = clock.observe(Some(observation(index, 1e9 / 48_000.0, 0)));
+        }
+        assert_eq!(recovered.status, ClockStatus::Valid);
+        assert_eq!(recovered.fault_count, 1);
+        assert_eq!(recovered.last_fault.unwrap().kind, fault.kind);
+        assert_eq!(recovered.last_fault.unwrap().value, fault.value);
     }
 }

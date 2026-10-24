@@ -21,7 +21,7 @@ function deferred() { let resolve, reject; const promise = new Promise((a, b) =>
 async function settle() { for (let i = 0; i < 40; i++) await Promise.resolve(); }
 function fixture() {
   const root = new Node('main'), calls = [], hooks = new Map();
-  let snapshot = { mode: 'host', room_id: 'room', instance_id: 'instance', session_id: 's1', revision: '1', sharing_revision: '1', next_operation_id: '1', next_chat_operation_id: '1', permissions: { transport: true, chat_read: true, chat_send: true }, output: {}, queue: [], members: [] };
+  let snapshot = { mode: 'host', room_id: 'room', instance_id: 'instance', session_id: 's1', member_id: 'owner', revision: '1', sharing_revision: '1', next_operation_id: '1', next_chat_operation_id: '1', permissions: { transport: true, chat_read: true, chat_send: true }, output: {}, queue: [], members: [] };
   const history = Array.from({ length: 450 }, (_, i) => ({ message_id: String(i + 1), name: 'Guest', text: 'Message ' + (i + 1), received_at_ms: '0' }));
   snapshot.recent_chat = { history_revision: '1', messages: history.slice(-16) };
   const transport = {
@@ -59,6 +59,65 @@ function fixture() {
   };
 }
 async function main() {
+  const reconnect = fixture(); await settle();
+  reconnect.set({ mode: 'guest', member_id: 'member' }); await reconnect.poll();
+  reconnect.hooks.set('playback', async () => { throw Object.assign(new Error('connection closed'), { code: 'room_outcome_unknown', status: 504 }); });
+  await reconnect.api.playback('next');
+  const original = reconnect.calls.find(c => c.action === 'playback');
+  reconnect.set({ mode: 'reconnecting' }); await reconnect.poll();
+  reconnect.set({ mode: 'guest', session_id: 's2' }); await reconnect.poll();
+  reconnect.hooks.set('operation', async () => ({ state: { status: 'applied' } }));
+  await reconnect.button('查询操作结果').onclick();
+  assert.equal(reconnect.calls.find(c => c.action === 'operation').operation_id, original.operation_id);
+  assert.equal(reconnect.calls.filter(c => c.action === 'playback').length, 1, 'reconnect never repeats next');
+  assert.equal(walk(reconnect.root).some(n => n.textContent === '查询操作结果'), false, 'terminal receipt clears the query');
+  reconnect.api.destroy();
+
+  for (const outcome of ['unknown', 'scheduled', 'applied']) {
+    const late = fixture(), pending = deferred(); await settle();
+    late.set({ mode: 'guest', member_id: 'member' }); await late.poll();
+    late.hooks.set('playback', () => pending.promise);
+    const sending = late.api.playback('next'); await settle();
+    const sent = late.calls.find(c => c.action === 'playback');
+    late.set({ session_id: 's2' }); await late.poll();
+    assert.ok(late.button('查询操作结果'), 'receipt exists while the old request is still pending');
+    if (outcome === 'unknown') pending.reject(Object.assign(new Error('connection closed'), { code: 'room_outcome_unknown', status: 504 }));
+    else pending.resolve({ state: { status: outcome } });
+    await sending;
+    if (outcome !== 'applied') {
+      late.hooks.set('operation', async () => ({ state: { status: 'scheduled' } }));
+      await late.button('查询操作结果').onclick();
+      assert.equal(late.calls.find(c => c.action === 'operation').operation_id, sent.operation_id);
+    }
+    assert.equal(late.calls.filter(c => c.action === 'playback').length, 1);
+    late.api.destroy();
+  }
+  for (const patch of [{ member_id: 'other-member' }, { room_id: 'other-room' }, { instance_id: 'other-host-instance' }]) {
+    const changed = fixture(), pending = deferred(); await settle();
+    changed.hooks.set('playback', () => pending.promise);
+    const sending = changed.api.playback('next'); await settle();
+    changed.set(patch); await changed.poll();
+    pending.reject(Object.assign(new Error('connection closed'), { code: 'room_outcome_unknown', status: 504 }));
+    await sending;
+    assert.equal(walk(changed.root).some(n => n.tagName === 'button' && n.textContent === '查询操作结果'), false, 'different membership rejects even a late unknown outcome');
+    assert.equal(changed.calls.filter(c => c.action === 'playback').length, 1);
+    changed.api.destroy();
+  }
+
+  const queue = fixture(); await settle();
+  const duplicate = [{ instance_id: '1', resource_id: 'A' }, { instance_id: '2', resource_id: 'A' }, { instance_id: '3', resource_id: 'B' }];
+  queue.hooks.set('queue_page', async () => ({ revision: '1', queue: duplicate, tracks: [] }));
+  queue.hooks.set('library', async () => ({ revision: '1', tracks: [{ resource_id: 'A', title: 'A' }] }));
+  queue.set({ queue_count: 3, track_instance_id: '2', permissions: { queue: true, transport: true } }); await queue.poll();
+  await queue.button('移除').onclick();
+  assert.deepEqual(queue.calls.find(c => c.action === 'queue').items, duplicate.slice(1), 'deletion retains the playing second occurrence by ID');
+  const up = walk(queue.root).filter(n => n.tagName === 'button' && n.textContent === '上移');
+  await up[1].onclick();
+  assert.deepEqual(queue.calls.filter(c => c.action === 'queue').at(-1).items, [duplicate[1], duplicate[0], duplicate[2]], 'reorder sends both duplicate identities');
+  await queue.button('加入队列').onclick();
+  assert.deepEqual(queue.calls.filter(c => c.action === 'queue').at(-1).items, duplicate.concat({ instance_id: null, resource_id: 'A' }), 'append asks Host to assign a new instance');
+  assert.ok(queue.calls.filter(c => c.action === 'queue').every(c => !('resources' in c)));
+  queue.api.destroy();
   const f = fixture(); await settle();
   assert.equal(f.chat().children.length, 100, 'history and recent snapshot overlap renders once');
   await f.button('更早消息').onclick(); await settle();
@@ -150,6 +209,6 @@ async function main() {
   assert.equal(seeks.length, 0, 'a track change cancels an old seek gesture');
   seek.value = 500; seek.oninput(); seek.onchange();
   assert.deepEqual(seeks, [['B', 100000]], 'same-track seek uses the gesture duration');
-  console.log('Room UI: history, uncertain writes and session isolation passed.');
+  console.log('Room UI: queue instance identity, reconnect receipts, history and session isolation passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

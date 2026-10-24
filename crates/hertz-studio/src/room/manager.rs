@@ -193,6 +193,65 @@ impl Default for RoomManager {
     }
 }
 impl RoomManager {
+    fn shutting_down() -> RoomError {
+        RoomError::new("room_shutting_down", "服务正在退出，不能再开始房间操作")
+    }
+    /// Serializes with startup and explicit Leave. Service shutdown signals the
+    /// owners through AppState::exiting rather than Guest's forget-on-Leave flag.
+    pub(crate) async fn shutdown(&self) {
+        let _transition = self.transition.lock().await;
+        self.close_session(false).await;
+    }
+    async fn close_session(&self, leave: bool) {
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(mut session) = session {
+            if leave {
+                session.stop.send_replace(true);
+            }
+            let _ = session.done.await;
+            while !*session.cleanup.borrow() {
+                if session.cleanup.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+        // Also covers a cancelled startup that never published a Session and
+        // panic recovery, where ModeLease owns the asynchronous close barrier.
+        let cleanup = self
+            .cleanup
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(mut cleanup) = cleanup {
+            while !*cleanup.borrow() {
+                if cleanup.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+        self.active.store(false, Ordering::Release);
+        let last_error = self.snapshot()["last_error"].clone();
+        *self.projection.write().unwrap_or_else(|e| e.into_inner()) =
+            json!({"mode":"local","last_error":last_error});
+    }
+    async fn starting<T>(
+        state: &AppState,
+        opening: impl std::future::Future<Output = RoomResult<T>>,
+    ) -> RoomResult<T> {
+        let mut exiting = state.exiting_signal();
+        if *exiting.borrow() {
+            return Err(Self::shutting_down());
+        }
+        tokio::select! {
+            biased;
+            _ = exiting.changed() => Err(Self::shutting_down()),
+            result = opening => result,
+        }
+    }
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
     }
@@ -213,6 +272,11 @@ impl RoomManager {
         state: Arc<AppState>,
         request: LocalRequest,
     ) -> RoomResult<Value> {
+        if *state.exiting.borrow()
+            && !matches!(request, LocalRequest::Snapshot | LocalRequest::SavedRoom)
+        {
+            return Err(Self::shutting_down());
+        }
         match request {
             LocalRequest::Snapshot => Ok(self.snapshot()),
             LocalRequest::SavedRoom => {
@@ -266,27 +330,30 @@ impl RoomManager {
                 if self.is_active() {
                     return Err(RoomError::new("room_busy", "请先离开当前房间"));
                 }
-                let lease = ModeLease::enter(
-                    state.clone(),
-                    self.active.clone(),
-                    &self.cleanup,
-                    self.local_resume.clone(),
-                )
-                .await?;
-                match super::host::start(
-                    state,
-                    super::host::HostOptions {
-                        name,
-                        address,
-                        sample_rate,
-                        local_output,
-                    },
-                    lease,
-                    self.projection.clone(),
-                    self.active.clone(),
-                )
-                .await
-                {
+                let started = Self::starting(&state, async {
+                    let lease = ModeLease::enter(
+                        state.clone(),
+                        self.active.clone(),
+                        &self.cleanup,
+                        self.local_resume.clone(),
+                    )
+                    .await?;
+                    super::host::start(
+                        state.clone(),
+                        super::host::HostOptions {
+                            name,
+                            address,
+                            sample_rate,
+                            local_output,
+                        },
+                        lease,
+                        self.projection.clone(),
+                        self.active.clone(),
+                    )
+                    .await
+                })
+                .await;
+                match started {
                     Ok(session) => {
                         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
                         Ok(self.snapshot())
@@ -299,51 +366,54 @@ impl RoomManager {
                 if self.is_active() {
                     return Err(RoomError::new("room_busy", "请先离开当前房间"));
                 }
-                if matches!(request, LocalRequest::Resume) {
-                    let secrets = super::credentials::ProfileSecrets::new(
-                        &state.data_dir,
-                        crate::secrets::backend(),
-                    );
-                    secrets
-                        .saved_room()
-                        .await?
-                        .ok_or(super::credentials::CredentialError::MissingRoom)?;
-                }
-                let lease = ModeLease::enter(
-                    state.clone(),
-                    self.active.clone(),
-                    &self.cleanup,
-                    self.local_resume.clone(),
-                )
-                .await?;
-                let started = match request {
-                    LocalRequest::Join {
-                        invitation,
-                        name,
-                        listen,
-                    } => {
-                        super::guest::start(
-                            state,
+                let started = Self::starting(&state, async {
+                    if matches!(request, LocalRequest::Resume) {
+                        let secrets = super::credentials::ProfileSecrets::new(
+                            &state.data_dir,
+                            crate::secrets::backend(),
+                        );
+                        secrets
+                            .saved_room()
+                            .await?
+                            .ok_or(super::credentials::CredentialError::MissingRoom)?;
+                    }
+                    let lease = ModeLease::enter(
+                        state.clone(),
+                        self.active.clone(),
+                        &self.cleanup,
+                        self.local_resume.clone(),
+                    )
+                    .await?;
+                    match request {
+                        LocalRequest::Join {
                             invitation,
                             name,
                             listen,
-                            lease,
-                            self.projection.clone(),
-                            self.active.clone(),
-                        )
-                        .await
+                        } => {
+                            super::guest::start(
+                                state.clone(),
+                                invitation,
+                                name,
+                                listen,
+                                lease,
+                                self.projection.clone(),
+                                self.active.clone(),
+                            )
+                            .await
+                        }
+                        LocalRequest::Resume => {
+                            super::guest::resume(
+                                state.clone(),
+                                lease,
+                                self.projection.clone(),
+                                self.active.clone(),
+                            )
+                            .await
+                        }
+                        _ => unreachable!(),
                     }
-                    LocalRequest::Resume => {
-                        super::guest::resume(
-                            state,
-                            lease,
-                            self.projection.clone(),
-                            self.active.clone(),
-                        )
-                        .await
-                    }
-                    _ => unreachable!(),
-                };
+                })
+                .await;
                 match started {
                     Ok(session) => {
                         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
@@ -354,36 +424,8 @@ impl RoomManager {
             }
             LocalRequest::Leave => {
                 let _transition = self.transition.lock().await;
-                let session = self
-                    .session
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
-                if let Some(mut session) = session {
-                    session.stop.send_replace(true);
-                    let _ = session.done.await;
-                    while !*session.cleanup.borrow() {
-                        if session.cleanup.changed().await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                let cleanup = self
-                    .cleanup
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                if let Some(mut cleanup) = cleanup {
-                    while !*cleanup.borrow() {
-                        if cleanup.changed().await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                self.active.store(false, Ordering::Release);
-                let last_error = self.snapshot()["last_error"].clone();
-                *self.projection.write().unwrap_or_else(|e| e.into_inner()) =
-                    json!({"mode":"local","last_error":last_error});
+                let leave = !*state.exiting.borrow();
+                self.close_session(leave).await;
                 Ok(self.snapshot())
             }
             request => {
@@ -499,11 +541,12 @@ mod tests {
         .await
         .unwrap();
         let old_session = state.room.snapshot()["session_id"].clone();
-        state.exiting.send_replace(true);
-        tokio::time::timeout(std::time::Duration::from_secs(3), session.done)
+        *state.room.session.lock().unwrap() = Some(session);
+        tokio::time::timeout(std::time::Duration::from_secs(3), state.shutdown())
             .await
-            .unwrap()
             .unwrap();
+        assert!(!state.room.is_active());
+        assert!(!state.audio.exclusively_owned());
         assert_eq!(
             secrets.saved_room().await.unwrap(),
             Some(descriptor.clone())
@@ -989,5 +1032,97 @@ mod tests {
         );
         state.audio.shutdown();
         let _ = thread.join();
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_startup_and_waits_for_its_mode_lease_cleanup() {
+        let (state, audio) = resume_test_state().await;
+        *state.queue.lock().await = vec!["local".into()];
+        *state.cursor.lock().await = Some(0);
+        let (ready, entered) = oneshot::channel();
+        let opening_state = state.clone();
+        let opening = tokio::spawn(async move {
+            let state = opening_state;
+            let _transition = state.room.transition.lock().await;
+            RoomManager::starting(&state, async {
+                let lease = ModeLease::enter(
+                    state.clone(),
+                    state.room.active.clone(),
+                    &state.room.cleanup,
+                    state.room.local_resume.clone(),
+                )
+                .await?;
+                assert!(ready.send(lease.receiver.clone()).is_ok());
+                std::future::pending::<()>().await;
+                lease.finish().await;
+                Ok(())
+            })
+            .await
+        });
+        let registry = entered.await.unwrap();
+        let commit = state.play_commit.lock().await;
+        let shutdown_state = state.clone();
+        let shutdown = tokio::spawn(async move { shutdown_state.shutdown().await });
+        let error = opening.await.unwrap().unwrap_err();
+        assert_eq!(error.code, "room_shutting_down");
+        assert!(registry.is_closing());
+        assert!(state.audio.exclusively_owned());
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must wait for restoration"
+        );
+        drop(commit);
+        tokio::time::timeout(std::time::Duration::from_secs(2), shutdown)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!state.audio.exclusively_owned());
+        assert!(!state.room.is_active());
+        assert_eq!(*state.queue.lock().await, ["local"]);
+        audio.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_new_and_already_waiting_mode_entries() {
+        for request in [
+            LocalRequest::Create {
+                name: "closed".into(),
+                address: "127.0.0.1:0".parse().unwrap(),
+                sample_rate: 48_000,
+                local_output: false,
+            },
+            LocalRequest::Join {
+                invitation: "invalid".into(),
+                name: "closed".into(),
+                listen: false,
+            },
+            LocalRequest::Resume,
+        ] {
+            let (state, audio) = resume_test_state().await;
+            let transition = state.room.transition.lock().await;
+            let pending_state = state.clone();
+            let pending = tokio::spawn(async move {
+                pending_state
+                    .room
+                    .request(pending_state.clone(), request)
+                    .await
+            });
+            tokio::task::yield_now().await;
+            assert!(!pending.is_finished());
+            state.exiting.send_replace(true);
+            drop(transition);
+            let error = pending.await.unwrap().unwrap_err();
+            assert_eq!(error.code, "room_shutting_down");
+            let error = state
+                .room
+                .request(state.clone(), LocalRequest::Resume)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "room_shutting_down");
+            state.shutdown().await;
+            assert!(!state.room.is_active());
+            assert!(!state.audio.exclusively_owned());
+            audio.join().unwrap();
+        }
     }
 }

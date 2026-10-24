@@ -5,8 +5,8 @@
 //! ReceiverGate remains the protocol authority; its time is never advanced to
 //! a speculative submission horizon. Accepted commits separately authorize
 //! future writes to ScheduledOutput, whose callback enforces presentation time.
-//! A converter's output counter is the only packet scheduling cursor: changing
-//! the clock estimate never reanchors packets or drops/duplicates samples.
+//! The queue owns the device sample grid across packets and epochs. Conversion
+//! budgets and accepted cursors use that same grid, including clock updates.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use vmusic_audio::clocked_resample::{ClockedConverter, State as ConvertState};
 use vmusic_audio::output_clock::ClockStatus;
-use vmusic_audio::scheduled_output::EmergencyMute;
+use vmusic_audio::scheduled_output::{EmergencyMute, OutputCursor};
 use vmusic_audio::{OutputError, OutputOptions, OutputTelemetry, RenderFormat, ScheduledOutput};
 use vmusic_core::room::receiver::{FormatDesc, GateAction, GateInput, PlanDesc, ReceiverGate};
 use vmusic_lan::clock::{ClockMapping, MonotonicClock};
@@ -77,6 +77,8 @@ pub(crate) struct ReceiverStatus {
     pub played_frame: u64,
     pub underrun_frames: u64,
     pub discarded_blocks: u64,
+    pub resync_count: u64,
+    pub last_resync_reason: Option<String>,
     pub last_error: Option<String>,
 }
 
@@ -533,6 +535,8 @@ pub(crate) async fn spawn(
         played_frame: 0,
         underrun_frames: 0,
         discarded_blocks: 0,
+        resync_count: 0,
+        last_resync_reason: None,
         last_error: None,
     };
     let (status_tx, status_rx) = watch::channel(initial);
@@ -587,7 +591,7 @@ pub(crate) async fn spawn(
                 };
                 output.publish_emergency();
                 let mut engine = Engine::new(output, identity, budget);
-                status_tx.send_replace(engine.status(0));
+                status_tx.send_replace(engine.status(engine.observe(|| clock.now_ns())));
                 if initialized.send(Ok(())).is_err() {
                     return;
                 }
@@ -627,21 +631,24 @@ pub(crate) async fn spawn(
                         }
                         let command = envelope.command;
                         let faults = engine.faults;
-                        engine.command(clock.now_ns(), command, &mut outgoing);
+                        let snapshot = engine.observe(|| clock.now_ns());
+                        engine.command(snapshot, command, &mut outgoing);
                         if engine.faults != faults {
                             active_generation = revoke_generation(&generation, active_generation);
                             armed_generation.store(active_generation, Ordering::Release);
                             break;
                         }
                     }
-                    let now = clock.now_ns();
+                    let snapshot = engine.observe(|| clock.now_ns());
                     let faults = engine.faults;
-                    engine.tick(now, &mut outgoing);
+                    engine.tick(snapshot, &mut outgoing);
                     if engine.faults != faults {
                         active_generation = revoke_generation(&generation, active_generation);
                         armed_generation.store(active_generation, Ordering::Release);
                     }
-                    let status = engine.status(now);
+                    let snapshot = engine.observe(|| clock.now_ns());
+                    let now = snapshot.observed_at;
+                    let status = engine.status(snapshot);
                     status_tx.send_replace(status.clone());
                     if now.saturating_sub(last_status) >= 250_000_000 {
                         // Status is lossy and coalesced in watch. Protocol actions are
@@ -653,7 +660,8 @@ pub(crate) async fn spawn(
                         if events.try_send(event).is_err() {
                             engine.fail("receiver event consumer stalled", &mut Vec::new());
                             engine.connected = false;
-                            status_tx.send_replace(engine.status(now));
+                            status_tx
+                                .send_replace(engine.status(engine.observe(|| clock.now_ns())));
                             break;
                         }
                     }
@@ -666,7 +674,7 @@ pub(crate) async fn spawn(
                     output.mute();
                 }
                 engine.connected = false;
-                status_tx.send_replace(engine.status(clock.now_ns()));
+                status_tx.send_replace(engine.status(engine.observe(|| clock.now_ns())));
                 drop(engine);
             })
             .map(|_| ())
@@ -726,7 +734,16 @@ trait DeviceOutput {
     }
     fn format(&self) -> RenderFormat;
     fn telemetry(&self) -> OutputTelemetry;
+    fn clocked_cursor(&self, start: u64, period: f64) -> Result<OutputCursor, OutputError>;
+    fn scheduled_cursor(&self) -> Option<OutputCursor>;
     fn write(
+        &mut self,
+        start: u64,
+        samples: &[f32],
+        now: u64,
+        period: f64,
+    ) -> Result<OutputCursor, OutputError>;
+    fn write_finite(
         &mut self,
         start: u64,
         samples: &[f32],
@@ -780,7 +797,32 @@ impl DeviceOutput for NativeOutput {
     fn telemetry(&self) -> OutputTelemetry {
         self.output.telemetry()
     }
+    fn clocked_cursor(&self, start: u64, period: f64) -> Result<OutputCursor, OutputError> {
+        self.output.clocked_cursor_at(start, period)
+    }
+    fn scheduled_cursor(&self) -> Option<OutputCursor> {
+        self.output.scheduled_cursor()
+    }
     fn write(
+        &mut self,
+        start: u64,
+        samples: &[f32],
+        _now: u64,
+        period: f64,
+    ) -> Result<OutputCursor, OutputError> {
+        let _guard = self
+            .emergency
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.authorized() {
+            return Err(OutputError::Muted);
+        }
+        self.output.write_clocked(start, samples, period)?;
+        self.output
+            .scheduled_cursor()
+            .ok_or(OutputError::Interrupted)
+    }
+    fn write_finite(
         &mut self,
         start: u64,
         samples: &[f32],
@@ -794,7 +836,7 @@ impl DeviceOutput for NativeOutput {
         if !self.authorized() {
             return Err(OutputError::Muted);
         }
-        self.output.write_clocked(start, samples, period)
+        self.output.write_finite_clocked(start, samples, period)
     }
     fn mute(&mut self) {
         self.output.mute();
@@ -823,14 +865,30 @@ impl DeviceOutput for ScheduledOutput {
     fn telemetry(&self) -> OutputTelemetry {
         self.telemetry()
     }
+    fn clocked_cursor(&self, start: u64, period: f64) -> Result<OutputCursor, OutputError> {
+        self.clocked_cursor_at(start, period)
+    }
+    fn scheduled_cursor(&self) -> Option<OutputCursor> {
+        self.scheduled_cursor()
+    }
     fn write(
         &mut self,
         start: u64,
         samples: &[f32],
         _now: u64,
         period: f64,
+    ) -> Result<OutputCursor, OutputError> {
+        self.write_clocked(start, samples, period)?;
+        self.scheduled_cursor().ok_or(OutputError::Interrupted)
+    }
+    fn write_finite(
+        &mut self,
+        start: u64,
+        samples: &[f32],
+        _now: u64,
+        period: f64,
     ) -> Result<(), OutputError> {
-        self.write_clocked(start, samples, period)
+        self.write_finite_clocked(start, samples, period)
     }
     fn mute(&mut self) {
         self.mute();
@@ -859,60 +917,38 @@ struct Epoch {
     history_have: Vec<bool>,
     history_primed: bool,
     tail_padded: bool,
-    // Once a continuous run starts this remains the output sample grid. The
-    // source packet's nominal timestamp is never used as a new run boundary.
+    // Only the accepted queue cursor advances this deadline. The queue keeps
+    // the exact fractional sample grid, including across epoch handoffs.
     output_frames: u64,
-    cursor: DeviceCursor,
+    next_output_ns: u64,
     drain: bool,
     played_baseline: Option<u64>,
 }
 
-struct DeviceCursor {
-    anchor: u64,
-    fraction: f64,
-    frames: u64,
-    period: f64,
-}
-impl DeviceCursor {
-    fn time(&self) -> Result<u64, &'static str> {
-        let offset = self.fraction + self.frames as f64 * self.period;
-        if !offset.is_finite() || offset < 0.0 || offset >= u64::MAX as f64 {
-            return Err("output cursor overflow");
-        }
-        self.anchor
-            .checked_add(offset.round() as u64)
-            .ok_or("output cursor overflow")
-    }
-    fn period(&mut self, period: f64) -> Result<(), &'static str> {
-        if !period.is_finite() || period <= 0.0 {
-            return Err("invalid output period");
-        }
-        if self.period != period {
-            let offset = self.fraction + self.frames as f64 * self.period;
-            let whole = offset.floor() as u64;
-            self.anchor = self
-                .anchor
-                .checked_add(whole)
-                .ok_or("output cursor overflow")?;
-            self.fraction = offset - whole as f64;
-            self.frames = 0;
-            self.period = period;
-        }
-        Ok(())
-    }
-}
-
-fn submission_frames(start: u64, now: u64, horizon: u64, period: f64, queued: usize) -> usize {
+fn submission_frames(
+    cursor: OutputCursor,
+    now: u64,
+    horizon: u64,
+    _sample_rate: u32,
+    queued: usize,
+) -> Result<usize, &'static str> {
+    let start = cursor.time_after(0).map_err(|_| "output cursor overflow")?;
     if start >= horizon {
-        return 0;
+        return Ok(0);
     }
+    let period = cursor.ns_per_frame();
     let target = (horizon.saturating_sub(now) as f64 / period).ceil() as usize;
-    // Callback run boundaries use nearest-frame alignment. Rounding here
-    // avoids stranding the final sample behind a fixed EOF due to a rounded
-    // nanosecond cursor; the exclusive boundary remains within half a frame.
-    (((horizon - start) as f64 / period).round() as usize)
-        .min(target.saturating_sub(queued))
-        .min(2048)
+    // The queue owns nearest-frame alignment, including retained fractional
+    // phase and measured device period. Budget/fence/write share its cells.
+    let frames = usize::try_from(
+        cursor
+            .frames_until(horizon)
+            .map_err(|_| "output cursor overflow")?,
+    )
+    .map_err(|_| "output cursor overflow")?
+    .min(target.saturating_sub(queued))
+    .min(2048);
+    Ok(frames)
 }
 
 impl Epoch {
@@ -947,19 +983,14 @@ impl Epoch {
             history_primed: false,
             tail_padded: false,
             output_frames: 0,
-            cursor: DeviceCursor {
-                anchor: start,
-                fraction: 0.0,
-                frames: 0,
-                period: 1e9 / f64::from(output.sample_rate),
-            },
+            next_output_ns: start,
             drain: false,
             played_baseline: None,
         })
     }
 
     fn next_time(&self, _rate: u32) -> Result<u64, &'static str> {
-        self.cursor.time()
+        Ok(self.next_output_ns)
     }
 
     fn collect_history(&mut self, block: &PcmBlock) {
@@ -1002,7 +1033,7 @@ impl Epoch {
     }
 
     fn phase_error_ns(&self, mapping: ClockMapping) -> Option<f64> {
-        let host_time = mapping.host_time(self.cursor.time().ok()?)?;
+        let host_time = mapping.host_time(self.next_output_ns)?;
         let mapped_source_ns = (i128::from(host_time) - i128::from(self.plan.anchor_ns.0)) as f64;
         let actual_source_ns = (self.plan.join_frame.0 as f64 + self.converter.source_phase())
             * 1e9
@@ -1029,6 +1060,33 @@ impl Epoch {
                 .ok()
             })
             .ok_or("source end outside the media timeline")
+    }
+
+    fn handoff_complete(
+        &self,
+        end_local_ns: u64,
+        end_host_ns: u64,
+        accepted: Option<OutputCursor>,
+    ) -> Result<bool, &'static str> {
+        let source_end = self.source_end_frame(end_host_ns)?;
+        let consumed = self
+            .plan
+            .join_frame
+            .0
+            .saturating_add(self.converter.counts().0);
+        let Some(accepted) = accepted.filter(|_| self.output_frames > 0) else {
+            return Ok(false);
+        };
+        Ok(self.expected_frame >= source_end
+            && consumed >= source_end
+            && accepted
+                .time_after(0)
+                .map_err(|_| "output cursor overflow")?
+                == self.next_output_ns
+            && accepted
+                .boundary_relation(end_local_ns)
+                .map_err(|_| "output cursor overflow")?
+                == std::cmp::Ordering::Equal)
     }
 
     fn gate_eof_limit(&self, end_host_ns: u64) -> Result<Option<u64>, &'static str> {
@@ -1062,18 +1120,21 @@ impl Epoch {
         if !self.committed {
             return Ok(());
         }
+        let format = output.format();
+        let telemetry = output.telemetry();
+        let mut cursor = output
+            .clocked_cursor(self.next_output_ns, telemetry.ns_per_frame)
+            .map_err(|error| error.to_string())?;
+        self.next_output_ns = cursor.time_after(0).map_err(|error| error.to_string())?;
         if self
             .phase_error_ns(mapping)
             .is_none_or(|error| error.abs() > MAX_PHASE_ERROR_NS)
         {
             return Err("mapped device/source phase diverged; fresh future join required".into());
         }
-        let format = output.format();
-        let telemetry = output.telemetry();
         let combined = relative_drift_ppm(mapping.drift_ppm, telemetry.device_clock_ppm)
             .ok_or("relative device/network clock drift is unsupported")?;
         self.converter.set_drift_ppm(combined);
-        self.cursor.period(telemetry.ns_per_frame)?;
         let channels = usize::from(format.channels);
         // Only a published Commit/Suspend freezes an EOF. A moving submission
         // horizon is never permission to synthesize missing source samples.
@@ -1086,12 +1147,12 @@ impl Epoch {
         for _ in 0..8 {
             let start = self.next_time(format.sample_rate)?;
             let frames = submission_frames(
-                start,
+                cursor,
                 now,
                 horizon,
-                telemetry.ns_per_frame,
+                format.sample_rate,
                 output.telemetry().queued_frames,
-            );
+            )?;
             if frames == 0 {
                 break;
             }
@@ -1167,7 +1228,7 @@ impl Epoch {
                     self.played_baseline =
                         Some(t.played_frames.saturating_add(t.queued_frames as u64));
                 }
-                output
+                cursor = output
                     .write(
                         start,
                         &samples[..progress.produced_frames * channels],
@@ -1179,11 +1240,7 @@ impl Epoch {
                     .output_frames
                     .checked_add(progress.produced_frames as u64)
                     .ok_or("output frame counter overflow")?;
-                self.cursor.frames = self
-                    .cursor
-                    .frames
-                    .checked_add(progress.produced_frames as u64)
-                    .ok_or("output frame counter overflow")?;
+                self.next_output_ns = cursor.time_after(0).map_err(|error| error.to_string())?;
             }
             if progress.produced_frames == 0 && input.is_empty() {
                 break;
@@ -1206,6 +1263,16 @@ fn relative_drift_ppm(host: f64, device: f64) -> Option<f64> {
         .then_some(ppm)
 }
 
+/// Callback telemetry is read before the receiver's time sample. Every gate in
+/// one operation uses this pair, so a callback arriving during conversion cannot
+/// appear to come from the future relative to an earlier worker time sample.
+#[derive(Clone, Copy)]
+struct OutputSnapshot {
+    telemetry: Option<OutputTelemetry>,
+    observed_at: u64,
+    capture_span_ns: u64,
+}
+
 struct Engine<D: DeviceOutput> {
     output: Option<D>,
     identity: StreamIdentity,
@@ -1218,6 +1285,7 @@ struct Engine<D: DeviceOutput> {
     intent: Option<Plan>,
     suspension: Option<(u64, u64, u64, u64)>,
     faults: u64,
+    last_resync_reason: Option<String>,
     /// Applied epochs never move backwards, while per-endpoint rejoin tokens
     /// may replace the same epoch without changing the room's media epoch.
     epoch_floor: u64,
@@ -1249,6 +1317,36 @@ impl<D: DeviceOutput> Engine<D> {
         ];
     }
     fn bounded_gate_time(&self, host_now: u64) -> Result<Option<u64>, &'static str> {
+        // Metadata time cannot retire the device owner before its successor's
+        // first accepted write. A mapping update may cross the media boundary
+        // before the frozen local presentation boundary; preserve the old tail
+        // and its EOF proof until the native ownership transfer is complete.
+        let host_now = if let Some(next) = self
+            .preparing
+            .as_ref()
+            .filter(|next| next.committed && next.output_frames == 0)
+        {
+            let start = frame_time(
+                next.plan.anchor_ns.0,
+                next.plan.join_frame.0,
+                next.plan.format.sample_rate,
+            )
+            .ok_or("plan time overflow")?;
+            let Some(before) = start.checked_sub(1) else {
+                return Ok(None);
+            };
+            let before = if let Some(current) = self.current.as_ref() {
+                let Some(eof) = current.gate_eof_limit(start)? else {
+                    return Ok(None);
+                };
+                before.min(eof)
+            } else {
+                before
+            };
+            host_now.min(before)
+        } else {
+            host_now
+        };
         let Some((_, _, _, stop)) = self.suspension else {
             return Ok(Some(host_now));
         };
@@ -1289,6 +1387,7 @@ impl<D: DeviceOutput> Engine<D> {
             intent: None,
             suspension: None,
             faults: 0,
+            last_resync_reason: None,
             epoch_floor: 0,
             latest_plan_id: None,
             contracts: VecDeque::new(),
@@ -1304,7 +1403,8 @@ impl<D: DeviceOutput> Engine<D> {
     }
 
     fn fail(&mut self, reason: &str, events: &mut Vec<ReceiverEvent>) {
-        self.faults = self.faults.wrapping_add(1);
+        self.faults = self.faults.saturating_add(1);
+        self.last_resync_reason = Some(reason.into());
         if let Some(output) = self.output.as_mut() {
             output.mute();
         }
@@ -1327,32 +1427,80 @@ impl<D: DeviceOutput> Engine<D> {
         });
     }
 
-    fn output_ready(&self, now: u64) -> bool {
-        self.test_until.is_none()
-            && self.connected
-            && self
-                .device_lead()
-                .is_some_and(|lead| lead <= MAX_DEVICE_LEAD_NS)
-            && self.mapping.is_some_and(|mapping| mapping.valid_at(now))
-            && self.output.as_ref().is_some_and(|output| {
-                let t = output.telemetry();
-                t.clock_status == ClockStatus::Valid
-                    && !t.device_error
-                    && t.device_clock_ppm.is_finite()
-                    && t.ns_per_frame.is_finite()
-                    && t.last_presentation_local_ns.is_some_and(|presentation| {
-                        presentation <= now.saturating_add(3_000_000_000)
-                    })
-                    && t.last_callback_local_ns.is_some_and(|seen| {
-                        seen <= now.saturating_add(2_000_000)
-                            && now.saturating_sub(seen) <= DEVICE_FRESHNESS_NS
-                    })
-            })
+    fn observe(&self, mut now: impl FnMut() -> u64) -> OutputSnapshot {
+        let started_at = now();
+        let telemetry = self.output.as_ref().map(|output| output.telemetry());
+        let observed_at = now();
+        OutputSnapshot {
+            telemetry,
+            observed_at,
+            capture_span_ns: observed_at.saturating_sub(started_at),
+        }
     }
 
-    fn device_lead(&self) -> Option<u64> {
-        self.output.as_ref().and_then(|o| {
-            let t = o.telemetry();
+    fn output_ready(&self, snapshot: OutputSnapshot) -> bool {
+        self.output_unavailable(snapshot).is_none()
+    }
+
+    /// Exact gate and observed scalar; diagnostics never alter acceptance.
+    fn output_unavailable(&self, snapshot: OutputSnapshot) -> Option<(&'static str, u64)> {
+        let now = snapshot.observed_at;
+        if self.test_until.is_some() {
+            return Some(("diagnostic_active", 0));
+        }
+        if !self.connected {
+            return Some(("disconnected", 0));
+        }
+        let Some(t) = snapshot.telemetry else {
+            return Some(("device_timestamps_missing", 0));
+        };
+        let (Some(presentation), Some(seen)) =
+            (t.last_presentation_local_ns, t.last_callback_local_ns)
+        else {
+            return Some(("device_timestamps_missing", 0));
+        };
+        let lead = presentation.saturating_sub(seen);
+        if lead > MAX_DEVICE_LEAD_NS {
+            return Some(("device_lead_ns", lead));
+        }
+        let Some(mapping) = self.mapping else {
+            return Some(("network_mapping_missing", 0));
+        };
+        if !mapping.valid_at(now) {
+            return if now < mapping.reference_local_ns {
+                Some((
+                    "network_reference_future_ns",
+                    mapping.reference_local_ns - now,
+                ))
+            } else if !mapping.converged() {
+                Some(("network_mapping_unconverged", mapping.uncertainty_ns))
+            } else {
+                Some(("network_mapping_age_ns", now - mapping.reference_local_ns))
+            };
+        }
+        if t.clock_status != ClockStatus::Valid {
+            return Some(("device_clock_status", t.clock_status as u64));
+        }
+        if t.device_error {
+            return Some(("device_error", 0));
+        }
+        if !t.device_clock_ppm.is_finite() || !t.ns_per_frame.is_finite() {
+            return Some(("device_rate_not_finite", 0));
+        }
+        if presentation > now.saturating_add(3_000_000_000) {
+            return Some(("device_presentation_future_ns", presentation - now));
+        }
+        if seen > now.saturating_add(2_000_000) {
+            return Some(("device_callback_future_ns", seen - now));
+        }
+        if now.saturating_sub(seen) > DEVICE_FRESHNESS_NS {
+            return Some(("device_callback_age_ns", now - seen));
+        }
+        None
+    }
+
+    fn device_lead(&self, snapshot: OutputSnapshot) -> Option<u64> {
+        snapshot.telemetry.and_then(|t| {
             Some(
                 t.last_presentation_local_ns?
                     .saturating_sub(t.last_callback_local_ns?),
@@ -1360,31 +1508,35 @@ impl<D: DeviceOutput> Engine<D> {
         })
     }
 
-    fn lead(&self, _now: u64) -> u64 {
-        self.device_lead()
+    fn lead(&self, snapshot: OutputSnapshot) -> u64 {
+        self.device_lead(snapshot)
             .unwrap_or(0)
             .saturating_add(HORIZON_NS + SUBMIT_MARGIN_NS)
     }
 
-    fn start_test_output(&mut self, now: u64) -> Result<(), ReceiverError> {
+    fn start_test_output(&mut self, snapshot: OutputSnapshot) -> Result<(), ReceiverError> {
+        let now = snapshot.observed_at;
         // A local diagnostic never replaces a room epoch. A concurrently
         // arriving authorized Prepare cancels it before installing its plan.
         if self.current.is_some()
             || self.preparing.is_some()
             || self.intent.is_some()
             || self.suspension.is_some()
-            || !self.output_ready(now)
+            || !self.output_ready(snapshot)
         {
             return Err(ReceiverError::Invalid(
                 "pause playback and wait for the output clock before testing",
             ));
         }
         let start = now
-            .checked_add(self.lead(now))
+            .checked_add(self.lead(snapshot))
             .ok_or(ReceiverError::Invalid("test time overflow"))?;
         let output = self.output.as_mut().ok_or(ReceiverError::Closed)?;
         let format = output.format();
-        let period = output.telemetry().ns_per_frame;
+        let period = snapshot
+            .telemetry
+            .ok_or(ReceiverError::Closed)?
+            .ns_per_frame;
         let frames = format.sample_rate as usize / 4;
         let end = start
             .checked_add((frames as f64 * period).round() as u64)
@@ -1398,8 +1550,7 @@ impl<D: DeviceOutput> Engine<D> {
             samples.extend(std::iter::repeat_n(sample, usize::from(format.channels)));
         }
         output.unmute(start);
-        output.silence_from(end);
-        if let Err(error) = output.write(start, &samples, now, period) {
+        if let Err(error) = output.write_finite(start, &samples, now, period) {
             output.mute();
             return Err(ReceiverError::Output(error.to_string()));
         }
@@ -1407,11 +1558,17 @@ impl<D: DeviceOutput> Engine<D> {
         Ok(())
     }
 
-    fn command(&mut self, now: u64, command: Command, events: &mut Vec<ReceiverEvent>) {
+    fn command(
+        &mut self,
+        snapshot: OutputSnapshot,
+        command: Command,
+        events: &mut Vec<ReceiverEvent>,
+    ) {
+        let now = snapshot.observed_at;
         match command {
             Command::TestOutput(reply) => {
                 if !reply.is_closed() {
-                    let result = self.start_test_output(now);
+                    let result = self.start_test_output(snapshot);
                     let started = result.is_ok();
                     if reply.send(result).is_err() && started {
                         self.test_until = None;
@@ -1449,7 +1606,7 @@ impl<D: DeviceOutput> Engine<D> {
                         output.mute();
                     }
                 }
-                self.prepare(now, plan, events)
+                self.prepare(snapshot, plan, events)
             }
             Command::Commit {
                 identity,
@@ -1457,7 +1614,7 @@ impl<D: DeviceOutput> Engine<D> {
                 plan_id,
                 effective_at,
             } if self.connected && identity == self.identity => {
-                self.commit(now, epoch, plan_id, effective_at, events);
+                self.commit(snapshot, epoch, plan_id, effective_at, events);
             }
             Command::Suspend {
                 identity,
@@ -1478,8 +1635,8 @@ impl<D: DeviceOutput> Engine<D> {
                     .mapping
                     .filter(|m| m.valid_at(now))
                     .and_then(|m| m.local_time(effective_at));
-                if !self.output_ready(now)
-                    || local.is_none_or(|local| now.saturating_add(self.lead(now)) >= local)
+                if !self.output_ready(snapshot)
+                    || local.is_none_or(|local| now.saturating_add(self.lead(snapshot)) >= local)
                     || self
                         .preparing
                         .as_ref()
@@ -1495,7 +1652,7 @@ impl<D: DeviceOutput> Engine<D> {
                 }
             }
             Command::Pcm(pcm) if self.connected && pcm.block.identity == self.identity => {
-                self.pcm(now, pcm, events)
+                self.pcm(snapshot, pcm, events)
             }
             Command::Pcm(_) => self.discarded += 1,
             _ => {}
@@ -1503,7 +1660,7 @@ impl<D: DeviceOutput> Engine<D> {
         self.publish_budget_formats();
     }
 
-    fn prepare(&mut self, now: u64, plan: Plan, events: &mut Vec<ReceiverEvent>) {
+    fn prepare(&mut self, snapshot: OutputSnapshot, plan: Plan, events: &mut Vec<ReceiverEvent>) {
         if plan.epoch.0 < self.epoch_floor {
             return;
         }
@@ -1577,10 +1734,16 @@ impl<D: DeviceOutput> Engine<D> {
             self.intent = Some(plan);
             return;
         }
-        self.install_plan(now, plan, events);
+        self.install_plan(snapshot, plan, events);
     }
 
-    fn install_plan(&mut self, now: u64, plan: Plan, events: &mut Vec<ReceiverEvent>) {
+    fn install_plan(
+        &mut self,
+        snapshot: OutputSnapshot,
+        plan: Plan,
+        events: &mut Vec<ReceiverEvent>,
+    ) {
+        let now = snapshot.observed_at;
         // Deferred intents can outlive the epoch floor they passed at ingress:
         // both a committed switch and a suspension raise it before promotion.
         if plan.epoch.0 < self.epoch_floor {
@@ -1617,7 +1780,7 @@ impl<D: DeviceOutput> Engine<D> {
         };
         match Epoch::new(plan, mapping, output.format()) {
             Ok(epoch)
-                if epoch.start > now.saturating_add(self.lead(now))
+                if epoch.start > now.saturating_add(self.lead(snapshot))
                     && epoch.start <= now.saturating_add(3_000_000_000) =>
             {
                 self.preparing.take();
@@ -1625,28 +1788,29 @@ impl<D: DeviceOutput> Engine<D> {
                 let unmatched = std::mem::take(&mut self.unmatched);
                 for (arrived, pcm) in unmatched {
                     if now.saturating_sub(arrived) <= 500_000_000 {
-                        self.pcm(now, pcm, events);
+                        self.pcm(snapshot, pcm, events);
                     } else {
                         self.fail("PCM arrived before an expired format/plan match", events);
                         return;
                     }
                 }
-                self.ready(now, events);
+                self.ready(snapshot, events);
             }
             Ok(_) => self.fail("prepared join is past device submission deadline", events),
             Err(reason) => self.fail(reason, events),
         }
     }
 
-    fn ready(&mut self, now: u64, events: &mut Vec<ReceiverEvent>) {
-        if !self.output_ready(now) {
+    fn ready(&mut self, snapshot: OutputSnapshot, events: &mut Vec<ReceiverEvent>) {
+        let now = snapshot.observed_at;
+        if !self.output_ready(snapshot) {
             return;
         }
         let Some(gate_now) = self.mapping.and_then(|mapping| mapping.host_time(now)) else {
             self.fail("network clock cannot map the current time", events);
             return;
         };
-        let lead = self.lead(now);
+        let lead = self.lead(snapshot);
         let Some(epoch) = self.preparing.as_mut().filter(|p| !p.ready) else {
             return;
         };
@@ -1722,12 +1886,13 @@ impl<D: DeviceOutput> Engine<D> {
 
     fn commit(
         &mut self,
-        now: u64,
+        snapshot: OutputSnapshot,
         epoch: u64,
         plan_id: u64,
         effective_at: u64,
         events: &mut Vec<ReceiverEvent>,
     ) {
+        let now = snapshot.observed_at;
         let Some(preparing) = self.preparing.as_ref() else {
             return;
         };
@@ -1749,12 +1914,12 @@ impl<D: DeviceOutput> Engine<D> {
         if !preparing.ready {
             return;
         }
-        if !self.output_ready(now) {
+        if !self.output_ready(snapshot) {
             self.fail("commit arrived without a fresh presentation clock", events);
             return;
         }
         let local = preparing.start;
-        if now.saturating_add(self.lead(now)) >= local {
+        if now.saturating_add(self.lead(snapshot)) >= local {
             self.fail("commit arrived past device submission deadline", events);
             return;
         }
@@ -1779,7 +1944,8 @@ impl<D: DeviceOutput> Engine<D> {
         self.preparing.as_mut().unwrap().committed = true;
     }
 
-    fn pcm(&mut self, now: u64, mut pcm: Pcm, events: &mut Vec<ReceiverEvent>) {
+    fn pcm(&mut self, snapshot: OutputSnapshot, mut pcm: Pcm, events: &mut Vec<ReceiverEvent>) {
+        let now = snapshot.observed_at;
         let host_now = self
             .mapping
             .and_then(|mapping| mapping.host_time(now))
@@ -1860,7 +2026,7 @@ impl<D: DeviceOutput> Engine<D> {
                 *high = Some(block.sequence);
             }
             self.discarded += 1;
-            self.ready(now, events);
+            self.ready(snapshot, events);
             return;
         }
         if epoch.sequence.is_none() && block.frame_index < join {
@@ -1925,15 +2091,65 @@ impl<D: DeviceOutput> Engine<D> {
         {
             *high = epoch.sequence;
         }
-        self.ready(now, events);
+        self.ready(snapshot, events);
     }
 
-    fn tick(&mut self, now: u64, events: &mut Vec<ReceiverEvent>) {
-        if let Some(until) = self.test_until {
-            let healthy = self.output.as_ref().is_some_and(|output| {
-                let t = output.telemetry();
-                t.clock_status == ClockStatus::Valid && !t.device_error
+    fn advance_metadata(
+        &mut self,
+        snapshot: OutputSnapshot,
+        gate_now: u64,
+        events: &mut Vec<ReceiverEvent>,
+    ) -> bool {
+        let actions = match self.bounded_gate_time(gate_now) {
+            Ok(Some(time)) => self.gate.advance(time),
+            Ok(None) => Vec::new(),
+            Err(reason) => {
+                self.fail(reason, events);
+                return false;
+            }
+        };
+        if actions.iter().any(|action| {
+            matches!(
+                action,
+                GateAction::Resync { .. } | GateAction::Underrun { .. }
+            )
+        }) {
+            self.fail(
+                "presentation source gap; fresh future join required",
+                events,
+            );
+            return false;
+        }
+        if actions
+            .iter()
+            .any(|action| matches!(action, GateAction::EpochSwitch { .. }))
+        {
+            if self
+                .preparing
+                .as_ref()
+                .is_none_or(|next| next.output_frames == 0)
+            {
+                self.fail("device handoff has no accepted successor PCM", events);
+                return false;
+            }
+            self.current = self.preparing.take();
+            self.epoch_floor = self.current.as_ref().map_or(self.epoch_floor, |epoch| {
+                epoch.plan.epoch.0.max(self.epoch_floor)
             });
+            if let Some(plan) = self.intent.take() {
+                self.install_plan(snapshot, plan, events);
+            }
+            self.publish_budget_formats();
+        }
+        true
+    }
+
+    fn tick(&mut self, snapshot: OutputSnapshot, events: &mut Vec<ReceiverEvent>) {
+        let now = snapshot.observed_at;
+        if let Some(until) = self.test_until {
+            let healthy = snapshot
+                .telemetry
+                .is_some_and(|t| t.clock_status == ClockStatus::Valid && !t.device_error);
             if now >= until || !healthy {
                 if let Some(output) = self.output.as_mut() {
                     output.mute();
@@ -1961,16 +2177,15 @@ impl<D: DeviceOutput> Engine<D> {
             );
             self.last_error = None;
             if let Some(plan) = intent {
-                self.install_plan(now, plan, events);
+                self.install_plan(snapshot, plan, events);
             }
             self.publish_budget_formats();
         }
-        let Some(output) = &self.output else {
+        let Some(telemetry) = snapshot.telemetry else {
             return;
         };
-        let telemetry = output.telemetry();
         if self
-            .device_lead()
+            .device_lead(snapshot)
             .is_some_and(|lead| lead > MAX_DEVICE_LEAD_NS)
         {
             if self.last_error.as_deref()
@@ -1996,12 +2211,21 @@ impl<D: DeviceOutput> Engine<D> {
                 .preparing
                 .as_ref()
                 .is_some_and(|p| p.ready || p.committed);
-        if authorized && !self.output_ready(now) {
-            self.fail(
-                "network/device presentation clock unavailable or stale",
-                events,
-            );
-            return;
+        if authorized {
+            if let Some((gate, value)) = self.output_unavailable(snapshot) {
+                let callback_age = snapshot
+                    .telemetry
+                    .and_then(|t| t.last_callback_local_ns)
+                    .map(|seen| now.saturating_sub(seen));
+                let network_age = self
+                    .mapping
+                    .map(|m| now.saturating_sub(m.reference_local_ns));
+                self.fail(&format!(
+                    "presentation clock unavailable: gate={gate}, value={value}, capture_span_ns={}, callback_age_ns={callback_age:?}, network_age_ns={network_age:?}",
+                    snapshot.capture_span_ns,
+                ), events);
+                return;
+            }
         }
         if telemetry.device_error {
             if self.last_error.as_deref() != Some("device output failed") {
@@ -2027,12 +2251,12 @@ impl<D: DeviceOutput> Engine<D> {
         if self
             .preparing
             .as_ref()
-            .is_some_and(|p| !p.committed && now.saturating_add(self.lead(now)) >= p.start)
+            .is_some_and(|p| !p.committed && now.saturating_add(self.lead(snapshot)) >= p.start)
         {
             self.fail("prepared plan expired without a timely commit", events);
             return;
         }
-        self.ready(now, events);
+        self.ready(snapshot, events);
         let Some(gate_now) = self
             .mapping
             .filter(|mapping| mapping.valid_at(now))
@@ -2040,46 +2264,15 @@ impl<D: DeviceOutput> Engine<D> {
         else {
             return;
         };
-        let actions = match self.bounded_gate_time(gate_now) {
-            Ok(Some(time)) => self.gate.advance(time),
-            Ok(None) => Vec::new(),
-            Err(reason) => {
-                self.fail(reason, events);
-                return;
-            }
-        };
-        if actions.iter().any(|action| {
-            matches!(
-                action,
-                GateAction::Resync { .. } | GateAction::Underrun { .. }
-            )
-        }) {
-            self.fail(
-                "presentation source gap; fresh future join required",
-                events,
-            );
+        if !self.advance_metadata(snapshot, gate_now, events) {
             return;
         }
-        if actions
-            .iter()
-            .any(|a| matches!(a, GateAction::EpochSwitch { .. }))
-        {
-            self.current = self.preparing.take();
-            self.epoch_floor = self
-                .current
-                .as_ref()
-                .map_or(self.epoch_floor, |p| p.plan.epoch.0.max(self.epoch_floor));
-            if let Some(plan) = self.intent.take() {
-                self.install_plan(now, plan, events);
-            }
-            self.publish_budget_formats();
-        }
-        if !self.output_ready(now) {
+        if !self.output_ready(snapshot) {
             return;
         }
         let mapping = self.mapping.unwrap();
         let horizon = now
-            .saturating_add(self.device_lead().unwrap_or(0))
+            .saturating_add(self.device_lead(snapshot).unwrap_or(0))
             .saturating_add(HORIZON_NS);
         let stop = self
             .preparing
@@ -2099,46 +2292,85 @@ impl<D: DeviceOutput> Engine<D> {
             .chain(self.suspension.map(|(_, _, local, host)| (local, host)))
             .min_by_key(|(local, _)| *local);
         let boundary = stop.map_or(u64::MAX, |(local, _)| local);
+        let presentation_deadline = now.saturating_add(self.device_lead(snapshot).unwrap_or(0));
         let output = self.output.as_mut().unwrap();
         let silence_from = self.suspension.map(|(_, _, local, _)| local);
+        // Once the successor has published PCM, it owns the append-only device
+        // grid. The predecessor's complete queued tail remains playable, but it
+        // cannot append more samples after the successor's accepted first frame.
+        let successor_has_pcm = self
+            .preparing
+            .as_ref()
+            .is_some_and(|epoch| epoch.output_frames > 0);
         let result = (|| {
             if let Some(current) = self.current.as_mut() {
-                current.submit(
-                    output,
-                    mapping,
-                    now,
-                    horizon.min(boundary),
-                    stop.map(|(_, host)| host),
-                    silence_from,
-                )?;
+                if !successor_has_pcm {
+                    current.submit(
+                        output,
+                        mapping,
+                        now,
+                        horizon.min(boundary),
+                        stop.map(|(_, host)| host),
+                        silence_from,
+                    )?;
+                }
                 if let Some(baseline) = current.played_baseline {
                     let frames = output.telemetry().played_frames.saturating_sub(baseline);
                     self.played_frame = current.played_frame(frames.min(current.output_frames));
                 }
             }
             if let Some(preparing) = self.preparing.as_mut() {
-                preparing.submit(
-                    output,
-                    mapping,
-                    now,
-                    horizon.min(silence_from.unwrap_or(u64::MAX)),
-                    self.suspension.map(|(_, _, _, host)| host),
-                    silence_from,
-                )?;
+                // A positive queue gap is intentional silence to the callback.
+                // Do not let a successor turn a missing real predecessor tail
+                // into such a gap. Bounded conversion may continue next tick;
+                // missing source still fails through the source/underrun gates.
+                let predecessor_complete = match (self.current.as_ref(), stop) {
+                    (Some(current), Some((local, host))) => {
+                        current.handoff_complete(local, host, output.scheduled_cursor())?
+                    }
+                    (None, _) => true,
+                    _ => false,
+                };
+                if successor_has_pcm || predecessor_complete {
+                    preparing.submit(
+                        output,
+                        mapping,
+                        now,
+                        horizon.min(silence_from.unwrap_or(u64::MAX)),
+                        self.suspension.map(|(_, _, _, host)| host),
+                        silence_from,
+                    )?;
+                }
+                if preparing.committed
+                    && preparing.output_frames == 0
+                    && presentation_deadline >= preparing.start
+                {
+                    return Err("device handoff missed its presentation submission deadline".into());
+                }
             }
             Ok::<_, String>(())
         })();
         if let Err(reason) = result {
             self.fail(&reason, events);
+        } else if !successor_has_pcm
+            && self
+                .preparing
+                .as_ref()
+                .is_some_and(|next| next.output_frames > 0)
+        {
+            // The first native receipt releases the metadata boundary in this
+            // same tick. Earlier metadata advancement never discarded its old
+            // owner; the common path now promotes only the accepted successor.
+            self.advance_metadata(snapshot, gate_now, events);
         }
     }
 
-    fn status(&self, now: u64) -> ReceiverStatus {
-        let output = self.output.as_ref().map(|output| output.telemetry());
+    fn status(&self, snapshot: OutputSnapshot) -> ReceiverStatus {
+        let output = snapshot.telemetry;
         ReceiverStatus {
             identity: self.identity,
             connected: self.connected,
-            output_ready: self.output_ready(now),
+            output_ready: self.output_ready(snapshot),
             current_epoch: self.current.as_ref().map(|p| p.plan.epoch.0),
             preparing_epoch: self.preparing.as_ref().map(|p| p.plan.epoch.0),
             network_clock: self.mapping,
@@ -2148,6 +2380,8 @@ impl<D: DeviceOutput> Engine<D> {
             played_frame: self.played_frame,
             underrun_frames: output.map_or(0, |o| o.underrun_frames),
             discarded_blocks: self.discarded,
+            resync_count: self.faults,
+            last_resync_reason: self.last_resync_reason.clone(),
             last_error: self.last_error.clone(),
         }
     }
@@ -2183,6 +2417,8 @@ mod registry_tests {
             played_frame: 0,
             underrun_frames: 0,
             discarded_blocks: 0,
+            resync_count: 0,
+            last_resync_reason: None,
             last_error: None,
         });
         let (done_tx, done) = watch::channel(false);

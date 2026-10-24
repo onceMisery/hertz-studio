@@ -307,17 +307,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .with_graceful_shutdown(async move {
             // Ctrl-C 与首页那颗退出钮走同一条收尾（`POST /v1/system/shutdown`
             // 拉 watch），两条入口不许一个干净一个留半截状态。
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                changed = exiting.changed() => {
-                    if changed.is_err() {
-                        return;
+            if !*exiting.borrow() {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    changed = exiting.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
                     }
                 }
             }
             tracing::info!("shutting down");
-            shutdown_state.audio.shutdown();
-            state::remove_discovery(&shutdown_state.data_dir).await;
+            shutdown_state.shutdown().await;
             // 只摘自己发布的那份：未持锁的第二个进程（共用 DataDir、另一端口）
             // 退出时不能把持锁进程的对接入口删掉。
             if ai_discovery_published {
