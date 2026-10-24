@@ -499,7 +499,7 @@ impl Guest {
                         ControlFrame::End{reason}=>{self.terminated=true;return Err(error(reason))},
                         ControlFrame::Response{request_id,body}=>{if let Some(pending)=self.pending.remove(&request_id.0){
                             let result=response_result(body);
-                            if pending.snapshot{if let Ok(value)=&result{self.remote=value.clone();if !self.output_fault {self.error=None;}self.recent.revision(self.remote["chat"]["history_revision"].as_str());if self.remote["permissions"]["chat_read"]!=true{self.recent.clear();}self.publish("guest");}}
+                            if pending.snapshot{if let Ok(value)=&result{self.remote=value.clone();if !self.output_fault {self.error=None;}self.recent.revision(self.remote["chat"]["history_revision"].as_str());self.recent.sharing_revision(self.remote["sharing_revision"].as_str());if self.remote["permissions"]["chat_read"]!=true{self.recent.clear();}self.publish("guest");}}
                             if let Some(reply)=pending.reply{let _=reply.send(result);}
                             if self.desired_mode()!=self.mode{self.reconfigure=true;return Ok(());}
                         }},

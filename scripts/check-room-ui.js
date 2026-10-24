@@ -6,12 +6,15 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../plugin/ui/room.js'), 'utf8');
+const sources = ['room-workspace.js', 'room-view.js', 'room.js'].map(name => ({ name, source: fs.readFileSync(path.join(__dirname, '../plugin/ui', name), 'utf8') }));
 class Node {
   constructor(tag) { this.tagName = tag; this.children = []; this.value = ''; this.dataset = {}; this._text = ''; this.style = { setProperty() {} }; this.classList = { toggle() {}, add() {}, remove() {} }; }
   set textContent(text) { this._text = String(text); this.children = []; }
   get textContent() { return this._text + this.children.map(n => n.textContent).join(''); }
   append(...nodes) { this.children.push(...nodes); }
+  prepend(...nodes) { this.children.unshift(...nodes); }
+  focus() {}
+  remove() {}
   replaceChildren(...nodes) { this._text = ''; this.children = nodes; }
   setAttribute() {}
   addEventListener() {}
@@ -20,7 +23,9 @@ const walk = node => [node, ...node.children.flatMap(walk)];
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 async function settle() { for (let i = 0; i < 40; i++) await Promise.resolve(); }
 function fixture() {
-  const root = new Node('main'), calls = [], hooks = new Map();
+  const root = new Node('main'), calls = [], hooks = new Map(), chromeEvents = [];
+  let now = Date.now();
+  class FixtureDate extends Date { static now() { return now; } }
   let snapshot = { mode: 'host', room_id: 'room', instance_id: 'instance', session_id: 's1', member_id: 'owner', revision: '1', sharing_revision: '1', next_operation_id: '1', next_chat_operation_id: '1', permissions: { transport: true, chat_read: true, chat_send: true }, output: {}, queue: [], members: [] };
   const history = Array.from({ length: 450 }, (_, i) => ({ message_id: String(i + 1), name: 'Guest', text: 'Message ' + (i + 1), received_at_ms: '0' }));
   snapshot.recent_chat = { history_revision: '1', messages: history.slice(-16) };
@@ -42,28 +47,183 @@ function fixture() {
       }
     }
   };
-  const context = { document: { createElement: tag => new Node(tag), hidden: false }, TextEncoder, URL, Blob, Option: function (text, value) { const n = new Node('option'); n.textContent = text; n.value = value; return n; }, navigator: {}, setInterval: () => 1, clearInterval() {}, setTimeout() {}, matchMedia: () => ({ matches: true }) };
+  const context = { document: { createElement: tag => new Node(tag), hidden: false }, Date: FixtureDate, TextEncoder, URL, Blob, Option: function (text, value) { const n = new Node('option'); n.textContent = text; n.value = value; return n; }, navigator: {}, setInterval: () => 1, clearInterval() {}, setTimeout() {}, matchMedia: () => ({ matches: true }) };
   context.window = context;
-  context.HertzRoomTransport = { create: () => ({ render() {}, notice() {}, destroy() {} }) };
-  vm.createContext(context); vm.runInContext(source, context);
+  context.HertzRoomTransport = { create: () => ({ render() {}, notice() {}, destroy() {}, setWorkspaceVisible: value => chromeEvents.push(value) }) };
+  vm.createContext(context);
+  sources.forEach(({ name, source }) => vm.runInContext(source, context, { filename: name }));
   context.HertzRoom.init({ root, transport, confirm: async () => true });
   const nodes = () => walk(root);
   return {
-    api: context.HertzRoom, calls, hooks, root,
-    button: text => { const n = nodes().find(n => n.tagName === 'button' && n.textContent === text); assert.ok(n, text); return n; },
+    api: context.HertzRoom, calls, hooks, root, chromeEvents, history,
+    button: (text, scope) => { const parent = scope ? nodes().filter(n => n.className === scope).at(-1) : root; assert.ok(parent, scope || 'root'); const n = walk(parent).find(n => n.tagName === 'button' && n.textContent === text); assert.ok(n, text); return n; },
     field: label => { const n = nodes().find(n => n.tagName === 'label' && n._text === label); assert.ok(n, label); return n.children[0]; },
     chat: () => nodes().find(n => n.tagName === 'ol' && n.className === 'room-chat'),
     form: () => nodes().find(n => n.tagName === 'form'),
     set: patch => { snapshot = { ...snapshot, ...patch }; },
+    advance: milliseconds => { now += milliseconds; },
     async poll() { await context.HertzRoom.onViewEnter(); await settle(); }
   };
 }
+async function applicantFixture() {
+  const f = fixture(); await settle();
+  f.set({ mode: 'local' }); await f.poll();
+  f.hooks.set('discover', async () => ({ interfaces: [], rooms: [{ name: 'Approval room', room_id: 'approval-room', room_code: 'A1B2C3D4', addresses: ['192.0.2.5:17000'], fingerprint: 'ab'.repeat(32) }] }));
+  f.hooks.set('apply', async () => ({ application_id: 'application-one', applicant_secret: 'fixture-applicant-secret', state: 'pending', expires_in_seconds: 300 }));
+  await f.button('发现房间与网卡').onclick();
+  await f.button('申请加入').onclick();
+  return f;
+}
 async function main() {
+  for (const [action, className, errorCode] of [['queue_page', 'room-queue', 'room_denied'], ['library', 'room-list', 'storage']]) {
+    const projection = fixture(); await settle();
+    const initialCalls = projection.calls.length;
+    const notice = () => walk(projection.root).find(node => node.className === 'room-notice');
+    let attempts = 0;
+    projection.hooks.set(action, async () => {
+      if (++attempts === 1) throw Object.assign(new Error('队列已更新，请重新读取'), { code: 'revision_conflict', status: 409 });
+      const tracks = [{ resource_id: 'projected-song', title: 'Recovered projection' }];
+      return { revision: '2', queue: [{ instance_id: 'projected-instance', resource_id: 'projected-song' }], tracks };
+    });
+    projection.set({ revision: '2', sharing_revision: '2' }); await projection.poll();
+    assert.equal(attempts, 1, action + ' conflict waits for the next poll');
+    assert.equal(notice().hidden, true, action + ' background conflict does not surface a user error');
+    assert.doesNotMatch(projection.root.textContent, /队列已更新，请重新读取/);
+    await projection.poll();
+    assert.equal(attempts, 2, action + ' invalidates its signature even when the next snapshot is unchanged');
+    assert.match(walk(projection.root).find(node => node.className === className).textContent, /Recovered projection/, action + ' next poll renders the successful projection');
+    assert.equal(notice().hidden, true, 'recovery leaves no stale global error');
+    assert.ok(projection.calls.slice(initialCalls).every(call => ['queue_page', 'library', 'chat_history'].includes(call.action)), 'background recovery sends reads only');
+    projection.hooks.set(action, async () => { throw Object.assign(new Error('Projection access failed'), { code: errorCode, status: 403 }); });
+    projection.set({ revision: '3', sharing_revision: '3' }); await projection.poll();
+    assert.equal(notice().hidden, false, action + ' genuine failure stays visible');
+    assert.equal(notice().textContent, 'Projection access failed');
+    projection.api.destroy();
+  }
+
+  const writeConflict = fixture(); await settle();
+  writeConflict.hooks.set('queue_page', async () => ({ revision: '2', queue: [{ instance_id: 'existing', resource_id: 'song' }], tracks: [] }));
+  writeConflict.hooks.set('queue', async () => { throw Object.assign(new Error('Write revision conflict'), { code: 'revision_conflict', status: 409 }); });
+  writeConflict.set({ revision: '2', queue_count: 1, permissions: { queue: true } }); await writeConflict.poll();
+  await writeConflict.button('移除').onclick();
+  assert.equal(walk(writeConflict.root).find(node => node.className === 'room-notice').textContent, 'Write revision conflict', 'user write conflicts remain visible');
+  await writeConflict.poll();
+  assert.equal(writeConflict.calls.filter(call => call.action === 'queue').length, 1, 'polling never replays a conflicted write');
+  writeConflict.api.destroy();
+
+  const retryAdmission = await applicantFixture();
+  retryAdmission.hooks.set('admission_status', async () => ({ state: 'approved', invitation: 'first-approved-capability', expires_in_seconds: 300 }));
+  retryAdmission.hooks.set('join', async () => {
+    if (retryAdmission.calls.filter(call => call.action === 'join').length === 1) throw Object.assign(new Error('pinned TLS failed'), { code: 'room_pin', status: 400 });
+    retryAdmission.set({ mode: 'guest', member_id: 'approved-member' }); return { mode: 'guest' };
+  });
+  await retryAdmission.button('查看申请结果').onclick();
+  assert.equal(retryAdmission.calls.filter(call => call.action === 'join').length, 1, 'first approval attempts joining once');
+  assert.match(retryAdmission.root.textContent, /本次连接失败/);
+  assert.doesNotMatch(retryAdmission.root.textContent, /fixture-applicant-secret|first-approved-capability/, 'retained application capabilities never enter DOM text');
+  await retryAdmission.poll();
+  assert.equal(retryAdmission.calls.filter(call => call.action === 'join').length, 1, 'ordinary polling never retries a failed join');
+  retryAdmission.hooks.set('admission_status', async () => ({ state: 'approved', invitation: 'checked-approved-capability', expires_in_seconds: 280 }));
+  await retryAdmission.button('查看入房状态').onclick();
+  const retainedStatus = retryAdmission.calls.filter(call => call.action === 'admission_status').at(-1);
+  assert.equal(retainedStatus.application_id, 'application-one');
+  assert.equal(retainedStatus.applicant_secret, 'fixture-applicant-secret', 'failed join preserves the original applicant identity for status checks');
+  assert.equal(retryAdmission.calls.filter(call => call.action === 'join').length, 1, 'checking approval after failure does not repeat joining');
+  const freshApproval = deferred(); retryAdmission.hooks.set('admission_status', () => freshApproval.promise);
+  const retryingJoin = retryAdmission.button('重试加入房间').onclick(); await settle();
+  assert.equal(retryAdmission.calls.filter(call => call.action === 'join').length, 1, 'explicit retry waits for fresh authoritative approval');
+  freshApproval.resolve({ state: 'approved', invitation: 'fresh-approved-capability', expires_in_seconds: 270 }); await retryingJoin;
+  assert.equal(retryAdmission.calls.filter(call => call.action === 'join').length, 2, 'explicit retry adds exactly one join');
+  assert.equal(retryAdmission.calls.filter(call => call.action === 'join').at(-1).invitation, 'fresh-approved-capability', 'retry uses the freshly checked capability');
+  assert.equal(retryAdmission.api.active(), true);
+  await retryAdmission.poll();
+  assert.equal(retryAdmission.calls.filter(call => call.action === 'join').length, 2, 'successful joining is not replayed by polling');
+  retryAdmission.api.destroy();
+
+  const consumedAdmission = await applicantFixture();
+  consumedAdmission.hooks.set('admission_status', async () => ({ state: 'approved', invitation: 'uncertain-capability' }));
+  consumedAdmission.hooks.set('join', async () => { throw Object.assign(new Error('request timed out'), { code: 'timeout', status: 504 }); });
+  await consumedAdmission.button('查看申请结果').onclick();
+  assert.match(consumedAdmission.root.textContent, /加入结果尚未确认/);
+  consumedAdmission.hooks.set('admission_status', async () => ({ state: 'consumed', member_id: 'already-paired-member' }));
+  await consumedAdmission.button('查看入房状态').onclick(); await consumedAdmission.poll();
+  assert.equal(consumedAdmission.calls.filter(call => call.action === 'join').length, 1, 'consumed approval never replays an uncertain join');
+  assert.match(consumedAdmission.root.textContent, /该申请已经用于加入房间/);
+  assert.equal(walk(consumedAdmission.root).some(node => node.tagName === 'button' && node.textContent === '重试加入房间'), false, 'consumed capability exposes no retry action');
+  consumedAdmission.api.destroy();
+
+  const lateApproval = await applicantFixture();
+  lateApproval.advance(301000); await lateApproval.poll();
+  lateApproval.hooks.set('admission_status', async () => ({ state: 'approved', invitation: 'renewed-after-approval-capability', expires_in_seconds: 300 }));
+  lateApproval.hooks.set('join', async () => { lateApproval.set({ mode: 'guest', member_id: 'late-approved-member' }); return { mode: 'guest' }; });
+  await lateApproval.button('查看申请结果').onclick();
+  assert.equal(lateApproval.calls.filter(call => call.action === 'admission_status').at(-1).applicant_secret, 'fixture-applicant-secret', 'original local TTL cannot discard a potentially renewed approval');
+  assert.equal(lateApproval.calls.filter(call => call.action === 'join').length, 1, 'server-approved capability remains usable after original local TTL');
+  assert.equal(lateApproval.api.active(), true);
+  lateApproval.api.destroy();
+
+  const navigation = fixture(); await settle();
+  navigation.api.navigate('collaborate');
+  navigation.field('说点什么（最多 200 字）').value = 'Unsent draft';
+  const beforeNavigation = navigation.calls.length;
+  navigation.api.navigate('settings'); navigation.api.navigate('collaborate');
+  assert.equal(navigation.calls.length, beforeNavigation, 'page navigation never sends room writes');
+  navigation.set({ session_id: 's2' }); await navigation.poll();
+  assert.equal(navigation.root.dataset.roomPage, 'collaborate', 'same-member reconnect keeps selected page');
+  assert.equal(navigation.field('说点什么（最多 200 字）').value, 'Unsent draft', 'same-member reconnect preserves an unsent draft');
+  navigation.api.onViewExit();
+  assert.equal(navigation.chromeEvents.at(-1), false, 'returning to Hertz restores compact room controls');
+  await navigation.poll();
+  assert.equal(navigation.chromeEvents.at(-1), true, 'workspace hides duplicate compact controls');
+  navigation.set({ member_id: 'different-member' }); await navigation.poll();
+  assert.equal(navigation.root.dataset.roomPage, 'play', 'membership change starts a fresh workspace');
+  assert.equal(navigation.field('说点什么（最多 200 字）').value, '', 'drafts never cross memberships');
+  navigation.api.destroy();
+
+  const song = fixture(); await settle();
+  song.set({ current_track: { resource_id: 'shared-song', title: '<script>song</script>' + '长标题'.repeat(100), artist: 'Artist' } }); await song.poll();
+  song.hooks.set('chat_song', async () => { throw Object.assign(new Error('timeout'), { code: 'timeout', status: 504 }); });
+  await song.button('分享歌曲到聊天').onclick();
+  const songRequest = song.calls.find(c => c.action === 'chat_song');
+  assert.equal(songRequest.resource_id, 'shared-song', 'song share sends a typed authorized resource reference');
+  assert.equal(song.calls.filter(c => c.action === 'chat_send').length, 0, 'song share does not encode executable markup or a fake text card');
+  await song.button('分享歌曲到聊天').onclick();
+  assert.equal(song.calls.filter(c => c.action === 'chat_song').length, 1, 'unknown song share cannot be sent again');
+  song.hooks.set('chat_operation', async () => ({ status: 'applied' }));
+  await song.button('查询这条消息的发送结果').onclick();
+  assert.equal(song.calls.find(c => c.action === 'chat_operation').operation_id, songRequest.operation_id);
+  song.api.destroy();
+
+  const withdrawn = fixture(); await settle();
+  Object.assign(withdrawn.history[300], { content_kind: 'song', song: { resource_id: 'withdrawn-resource', title: 'Withdrawn private title' }, sharing_revision: '1' });
+  await withdrawn.button('更早消息').onclick(); await settle();
+  assert.match(withdrawn.chat().textContent, /Withdrawn private title/, 'older history contains the shared card before withdrawal');
+  const staleHistory = deferred(); withdrawn.hooks.set('chat_history', () => staleHistory.promise);
+  withdrawn.set({ sharing_revision: '2' }); await withdrawn.poll();
+  assert.doesNotMatch(withdrawn.chat().textContent, /Withdrawn private title/, 'withdrawal removes older rendered card metadata before a fresh history response');
+  staleHistory.resolve({ messages: [withdrawn.history[300]], history_revision: '1', has_more: false }); await settle();
+  assert.doesNotMatch(withdrawn.chat().textContent, /Withdrawn private title/, 'a delayed history projection cannot resurrect withdrawn metadata');
+  withdrawn.api.destroy();
+
+  const reconnectChat = fixture(); await settle();
+  reconnectChat.hooks.set('chat_send', async () => { throw Object.assign(new Error('timeout'), { code: 'timeout', status: 504 }); });
+  reconnectChat.field('说点什么（最多 200 字）').value = 'One uncertain message';
+  reconnectChat.form().onsubmit({ preventDefault() {} }); await settle();
+  const chatRequest = reconnectChat.calls.find(c => c.action === 'chat_send');
+  reconnectChat.set({ session_id: 'replacement-session' }); await reconnectChat.poll();
+  assert.equal(reconnectChat.field('说点什么（最多 200 字）').disabled, true, 'reconnect keeps an uncertain composer closed');
+  reconnectChat.hooks.set('chat_operation', async () => ({ status: 'applied' }));
+  await reconnectChat.button('查询这条消息的发送结果').onclick();
+  assert.equal(reconnectChat.calls.find(c => c.action === 'chat_operation').operation_id, chatRequest.operation_id);
+  assert.equal(reconnectChat.calls.filter(c => c.action === 'chat_send').length, 1);
+  reconnectChat.api.destroy();
   const reconnect = fixture(); await settle();
   reconnect.set({ mode: 'guest', member_id: 'member' }); await reconnect.poll();
   reconnect.hooks.set('playback', async () => { throw Object.assign(new Error('connection closed'), { code: 'room_outcome_unknown', status: 504 }); });
   await reconnect.api.playback('next');
   const original = reconnect.calls.find(c => c.action === 'playback');
+  await reconnect.api.playback('next');
+  assert.equal(reconnect.calls.filter(c => c.action === 'playback').length, 1, 'uncertain playback cannot be replaced by another relative operation');
   reconnect.set({ mode: 'reconnecting' }); await reconnect.poll();
   reconnect.set({ mode: 'guest', session_id: 's2' }); await reconnect.poll();
   reconnect.hooks.set('operation', async () => ({ state: { status: 'applied' } }));
@@ -114,7 +274,7 @@ async function main() {
   const up = walk(queue.root).filter(n => n.tagName === 'button' && n.textContent === '上移');
   await up[1].onclick();
   assert.deepEqual(queue.calls.filter(c => c.action === 'queue').at(-1).items, [duplicate[1], duplicate[0], duplicate[2]], 'reorder sends both duplicate identities');
-  await queue.button('加入队列').onclick();
+  await queue.button('加入队列', 'room-list').onclick();
   assert.deepEqual(queue.calls.filter(c => c.action === 'queue').at(-1).items, duplicate.concat({ instance_id: null, resource_id: 'A' }), 'append asks Host to assign a new instance');
   assert.ok(queue.calls.filter(c => c.action === 'queue').every(c => !('resources' in c)));
   queue.api.destroy();
@@ -136,11 +296,11 @@ async function main() {
   f.hooks.set('queue_page', async () => ({ revision: '2', queue: [{ instance_id: '1', resource_id: 'shared' }], tracks: [] }));
   const permissions = { transport: false, queue: false, chat_read: true, chat_send: true };
   f.set({ revision: '2', sharing_revision: '2', permissions }); await f.poll();
-  assert.equal(walk(f.root).some(n => n.tagName === 'button' && n.textContent === '加入队列'), false);
+  assert.equal(walk(f.root).some(n => n.tagName === 'button' && n.textContent === '加入队列' && !n.disabled), false);
   f.set({ permissions: { ...permissions, queue: true, transport: true } }); await f.poll();
   assert.ok(f.button('加入队列')); assert.ok(f.button('上移')); assert.ok(f.button('移除'));
   f.set({ permissions }); await f.poll();
-  assert.equal(walk(f.root).some(n => n.tagName === 'button' && n.textContent === '加入队列'), false, 'revocation rebuilds already displayed library actions');
+  assert.equal(walk(f.root).some(n => n.tagName === 'button' && n.textContent === '加入队列' && !n.disabled), false, 'revocation rebuilds already displayed library actions');
   assert.equal(walk(f.root).some(n => n.tagName === 'button' && n.textContent === '移除'), false, 'revocation rebuilds already displayed queue actions');
   f.set({ permissions: { ...permissions, transport: true } }); await f.poll();
   f.set({ recent_chat: undefined, chat: { history_revision: '1' } }); await f.poll();
@@ -203,12 +363,18 @@ async function main() {
   const bar = transportContext.HertzRoomTransport.create({ seek: (...args) => seeks.push(args) });
   const trackSnapshot = (id, duration) => ({ mode: 'host', track_instance_id: id, current_track: { duration_ms: duration }, permissions: { transport: true } });
   bar.render(trackSnapshot('A', 100000));
+  bar.setWorkspaceVisible(true);
+  assert.equal(body.children[0].hidden, true);
+  bar.render(trackSnapshot('A', 100000));
+  assert.equal(body.children[0].hidden, true, 'polling does not reveal duplicate controls inside workspace');
+  bar.setWorkspaceVisible(false);
+  assert.equal(body.children[0].hidden, false);
   const seek = walk(body).find(n => n.tagName === 'input' && n.max === 1000);
   seek.value = 500; seek.oninput();
   bar.render(trackSnapshot('B', 200000)); seek.onchange();
   assert.equal(seeks.length, 0, 'a track change cancels an old seek gesture');
   seek.value = 500; seek.oninput(); seek.onchange();
   assert.deepEqual(seeks, [['B', 100000]], 'same-track seek uses the gesture duration');
-  console.log('Room UI: queue instance identity, reconnect receipts, history and session isolation passed.');
+  console.log('Room UI: background projection recovery, admission retries, queue instance identity, reconnect receipts, history and session isolation passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

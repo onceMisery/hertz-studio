@@ -331,6 +331,103 @@ pub async fn pair(
         }
     }
 }
+pub struct Applied {
+    pub application_id: Uuid,
+    pub applicant_secret: Secret,
+}
+pub enum AdmissionStatus {
+    Pending,
+    Rejected,
+    Approved(Secret),
+    Consumed(Uuid),
+}
+/// Restricted one-shot TLS request; this never opens a member/control session.
+pub async fn apply(
+    address: SocketAddr,
+    fingerprint: Fingerprint,
+    room_id: Uuid,
+    room_code: &str,
+    name: &str,
+) -> Result<Applied, ClientError> {
+    crate::members::validate_name(name).map_err(|_| ClientError::Pairing)?;
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+    enum Response {
+        Application {
+            application_id: Uuid,
+            applicant_secret: Secret,
+            state: String,
+            expires_in_seconds: u32,
+        },
+        Rejected,
+    }
+    let response = admission_exchange(address, fingerprint, serde_json::json!({"channel":"apply","version":VERSION,"room_id":room_id,"room_code":room_code,"name":name})).await?;
+    match serde_json::from_str::<Response>(&response).map_err(|_| ClientError::Protocol)? {
+        Response::Application {
+            application_id,
+            applicant_secret,
+            state,
+            expires_in_seconds,
+        } if state == "pending" && expires_in_seconds == 300 && !application_id.is_nil() => {
+            Ok(Applied {
+                application_id,
+                applicant_secret,
+            })
+        }
+        _ => Err(ClientError::Pairing),
+    }
+}
+pub async fn admission_status(
+    address: SocketAddr,
+    fingerprint: Fingerprint,
+    room_id: Uuid,
+    application_id: Uuid,
+    applicant_secret: &Secret,
+) -> Result<AdmissionStatus, ClientError> {
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+    enum Response {
+        ApplicationStatus {
+            state: String,
+            invitation_secret: Option<Secret>,
+            member_id: Option<Uuid>,
+        },
+        Rejected,
+    }
+    let response = admission_exchange(address, fingerprint, serde_json::json!({"channel":"admission_status","version":VERSION,"room_id":room_id,"application_id":application_id,"applicant_secret":applicant_secret.expose()})).await?;
+    match serde_json::from_str::<Response>(&response).map_err(|_| ClientError::Protocol)? {
+        Response::ApplicationStatus {
+            state,
+            invitation_secret,
+            member_id,
+        } => match (state.as_str(), invitation_secret, member_id) {
+            ("pending", None, None) => Ok(AdmissionStatus::Pending),
+            ("rejected", None, None) => Ok(AdmissionStatus::Rejected),
+            ("approved", Some(secret), None) => Ok(AdmissionStatus::Approved(secret)),
+            ("consumed", None, Some(member)) if !member.is_nil() => {
+                Ok(AdmissionStatus::Consumed(member))
+            }
+            _ => Err(ClientError::Protocol),
+        },
+        Response::Rejected => Err(ClientError::Pairing),
+    }
+}
+async fn admission_exchange(
+    address: SocketAddr,
+    fingerprint: Fingerprint,
+    body: serde_json::Value,
+) -> Result<zeroize::Zeroizing<String>, ClientError> {
+    let mut socket = socket(address, fingerprint).await?;
+    let text = zeroize::Zeroizing::new(body.to_string());
+    send(&mut socket, Message::Text(text.to_string().into())).await?;
+    match tokio::time::timeout(TIMEOUT, socket.next())
+        .await
+        .map_err(|_| ClientError::Connection)?
+    {
+        Some(Ok(Message::Text(text))) => Ok(zeroize::Zeroizing::new(text.to_string())),
+        _ => Err(ClientError::Protocol),
+    }
+}
 async fn socket(address: SocketAddr, fingerprint: Fingerprint) -> Result<Socket, ClientError> {
     let tls = tls::connect(address, fingerprint).await?;
     let config = WebSocketConfig::default()

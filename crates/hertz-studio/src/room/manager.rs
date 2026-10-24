@@ -320,11 +320,71 @@ impl RoomManager {
                     json!({"interfaces":interfaces,"rooms":discovery.as_ref().map(|d|d.candidates()).unwrap_or_default(),"discovery_available":discovery.is_some()}),
                 )
             }
+            LocalRequest::Apply {
+                address,
+                fingerprint,
+                room_id,
+                room_code,
+                name,
+            } => {
+                let pin = vmusic_lan::tls::Fingerprint::parse(&fingerprint)
+                    .map_err(|_| RoomError::invalid("请核对房主的完整证书指纹"))?;
+                let applied = vmusic_lan::client::apply(address, pin, room_id, &room_code, &name)
+                    .await
+                    .map_err(|_| {
+                        RoomError::new(
+                            "room_admission",
+                            "入房申请失败，请检查指纹、房间码或稍后重试",
+                        )
+                    })?;
+                Ok(
+                    json!({"application_id":applied.application_id,"applicant_secret":applied.applicant_secret.expose(),"state":"pending","expires_in_seconds":300}),
+                )
+            }
+            LocalRequest::AdmissionStatus {
+                address,
+                fingerprint,
+                room_id,
+                application_id,
+                applicant_secret,
+            } => {
+                let pin = vmusic_lan::tls::Fingerprint::parse(&fingerprint)
+                    .map_err(|_| RoomError::invalid("请核对房主的完整证书指纹"))?;
+                let status = vmusic_lan::client::admission_status(
+                    address,
+                    pin,
+                    room_id,
+                    application_id,
+                    &applicant_secret,
+                )
+                .await
+                .map_err(|_| {
+                    RoomError::new("room_admission", "申请已失效、访问被拒绝或房主暂时不可达")
+                })?;
+                Ok(match status {
+                    vmusic_lan::client::AdmissionStatus::Pending => json!({"state":"pending"}),
+                    vmusic_lan::client::AdmissionStatus::Rejected => json!({"state":"rejected"}),
+                    vmusic_lan::client::AdmissionStatus::Consumed(member_id) => {
+                        json!({"state":"consumed","member_id":member_id})
+                    }
+                    vmusic_lan::client::AdmissionStatus::Approved(secret) => {
+                        let invitation = vmusic_lan::invitation::Invitation {
+                            address,
+                            room_id,
+                            fingerprint: pin,
+                            secret,
+                        }
+                        .encode();
+                        json!({"state":"approved","invitation":invitation.as_str()})
+                    }
+                })
+            }
             LocalRequest::Create {
                 name,
                 address,
                 sample_rate,
                 local_output,
+                discoverable,
             } => {
                 let _transition = self.transition.lock().await;
                 if self.is_active() {
@@ -345,6 +405,7 @@ impl RoomManager {
                             address,
                             sample_rate,
                             local_output,
+                            discoverable,
                         },
                         lease,
                         self.projection.clone(),
@@ -1090,6 +1151,7 @@ mod tests {
                 address: "127.0.0.1:0".parse().unwrap(),
                 sample_rate: 48_000,
                 local_output: false,
+                discoverable: false,
             },
             LocalRequest::Join {
                 invitation: "invalid".into(),

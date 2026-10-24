@@ -95,6 +95,18 @@ pub enum TransportError {
 #[derive(Deserialize)]
 #[serde(tag = "channel", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Handshake {
+    Apply {
+        version: u16,
+        room_id: Uuid,
+        room_code: String,
+        name: String,
+    },
+    AdmissionStatus {
+        version: u16,
+        room_id: Uuid,
+        application_id: Uuid,
+        applicant_secret: Secret,
+    },
     Pair {
         version: u16,
         room_id: Uuid,
@@ -168,6 +180,7 @@ struct Endpoint {
 }
 struct State {
     members: MemberRegistry,
+    admissions: crate::admission::Admissions,
     endpoints: HashMap<Uuid, Endpoint>,
 }
 struct Inner {
@@ -211,6 +224,7 @@ impl RoomServer {
             instance_id,
             state: Mutex::new(State {
                 members: MemberRegistry::new(room_id, instance_id, Instant::now()),
+                admissions: crate::admission::Admissions::new(room_id, Instant::now()),
                 endpoints: HashMap::new(),
             }),
             events,
@@ -298,6 +312,40 @@ impl Drop for RoomServer {
     }
 }
 impl Transport {
+    pub fn admission_views(&self) -> Vec<crate::admission::ApplicationView> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .admissions
+            .views(Instant::now())
+    }
+    pub fn room_code(&self) -> String {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .admissions
+            .code()
+            .to_owned()
+    }
+    pub fn review_admission(
+        &self,
+        id: Uuid,
+        approve: bool,
+        permissions: Permissions,
+    ) -> Result<(), TransportError> {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        if approve {
+            state.admissions.pending(id, now)?;
+            let invitation = state.members.invite(now, permissions)?;
+            state.admissions.approve(id, invitation, now)?;
+        } else if let Some(invitation) = state.admissions.reject(id, now)? {
+            state.members.revoke_invitation(&invitation);
+        }
+        Ok(())
+    }
     pub fn reserve_local_output(&self, enabled: bool) -> Result<(), TransportError> {
         self.inner
             .state
@@ -318,6 +366,81 @@ impl Transport {
             .unwrap_or_else(|e| e.into_inner())
             .members
             .invite(Instant::now(), permissions)?)
+    }
+    pub fn member_invite(
+        &self,
+        member: Uuid,
+        identity: StreamIdentity,
+    ) -> Result<crate::members::IssuedInvitation, TransportError> {
+        if identity.room_id != self.inner.room_id || identity.instance_id != self.inner.instance_id
+        {
+            return Err(AccessError::Denied.into());
+        }
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let permissions = state.members.permissions(member, identity.session_id)?;
+        if !permissions.invite {
+            return Err(AccessError::Denied.into());
+        }
+        // Delegate only basic rights the inviter still holds; elevated rights
+        // (including invitation delegation) remain a host decision.
+        Ok(state.members.issue_invitation(
+            Instant::now(),
+            Permissions {
+                listen: permissions.listen,
+                chat_read: permissions.chat_read,
+                chat_send: permissions.chat_send,
+                queue: false,
+                transport: false,
+                volume: false,
+                invite: false,
+            },
+            Some(member),
+        )?)
+    }
+    pub fn issue_invitation(
+        &self,
+        permissions: Permissions,
+    ) -> Result<crate::members::IssuedInvitation, TransportError> {
+        Ok(self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .members
+            .issue_invitation(Instant::now(), permissions, None)?)
+    }
+    pub fn invitation_views(&self) -> Vec<crate::members::InvitationView> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .members
+            .invitation_views(Instant::now())
+    }
+    pub fn revoke_invitation(
+        &self,
+        id: Uuid,
+        issuer: Option<(Uuid, StreamIdentity)>,
+    ) -> Result<(), TransportError> {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let member = if let Some((member, identity)) = issuer {
+            if identity.room_id != self.inner.room_id
+                || identity.instance_id != self.inner.instance_id
+                || !state
+                    .members
+                    .permissions(member, identity.session_id)?
+                    .invite
+            {
+                return Err(AccessError::Denied.into());
+            }
+            Some(member)
+        } else {
+            None
+        };
+        state
+            .members
+            .revoke_invitation_id(id, member, Instant::now())?;
+        Ok(())
     }
     pub fn members(&self) -> Vec<MemberView> {
         self.inner
@@ -366,6 +489,7 @@ impl Transport {
     pub fn end(&self) {
         let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         state.members.end();
+        state.admissions.end();
         state.endpoints.clear();
         drop(state);
         self.inner.stop.send_replace(true);
@@ -487,18 +611,63 @@ impl Transport {
 
 async fn handle(inner: Arc<Inner>, mut socket: Socket, request: Handshake, source: SocketAddr) {
     match request {
+        Handshake::Apply {
+            version,
+            room_id,
+            room_code,
+            name,
+        } if version == VERSION && room_id == inner.room_id => {
+            let result = inner
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .admissions
+                .apply(source.ip(), &room_code, &name, Instant::now());
+            let response = match result {
+                Ok((id, secret)) => zeroize::Zeroizing::new(serde_json::json!({"type":"application","application_id":id,"applicant_secret":secret.expose(),"state":"pending","expires_in_seconds":300}).to_string()),
+                Err(_) => zeroize::Zeroizing::new(serde_json::json!({"type":"rejected"}).to_string()),
+            };
+            let _ = send_text(&mut socket, response.to_string()).await;
+        }
+        Handshake::AdmissionStatus {
+            version,
+            room_id,
+            application_id,
+            applicant_secret,
+        } if version == VERSION && room_id == inner.room_id => {
+            let result = inner
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .admissions
+                .status(
+                    source.ip(),
+                    application_id,
+                    &applicant_secret,
+                    Instant::now(),
+                );
+            let response = match result {
+                Ok((state, secret, member_id)) => zeroize::Zeroizing::new(serde_json::json!({"type":"application_status","state":state,"invitation_secret":secret.as_ref().map(Secret::expose),"member_id":member_id}).to_string()),
+                Err(_) => zeroize::Zeroizing::new(serde_json::json!({"type":"rejected"}).to_string()),
+            };
+            let _ = send_text(&mut socket, response.to_string()).await;
+        }
         Handshake::Pair {
             version,
             room_id,
             invitation,
             name,
         } if version == VERSION && room_id == inner.room_id => {
-            let paired = inner
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .members
-                .pair(source.ip(), &invitation, &name, Instant::now());
+            let paired = {
+                let mut state = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                let paired = state
+                    .members
+                    .pair(source.ip(), &invitation, &name, Instant::now());
+                if let Ok(paired) = &paired {
+                    state.admissions.consumed(&invitation, paired.member_id);
+                }
+                paired
+            };
             match paired {
                 Ok(paired) => {
                     let response = zeroize::Zeroizing::new(serde_json::json!({ "type": "paired", "member_id": paired.member_id, "credential": paired.credential.expose(), "permissions": paired.permissions }).to_string());

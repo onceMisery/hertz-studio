@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Native room primitives. No library paths, queue ownership or HTTP business rules.
+pub mod admission;
 pub mod buffer;
 pub mod client;
 pub mod clock;

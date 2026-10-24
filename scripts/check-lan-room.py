@@ -43,6 +43,9 @@ class App:
         )
         self.url = None
         self.token = None
+        self.operation_highwater = {False: 0, True: 0}
+        self.pair_credit = 3.0
+        self.pair_updated = time.monotonic()
         try:
             wait_for(self._discovered, "application startup", 20)
         except Exception:
@@ -78,6 +81,18 @@ class App:
             raise ApiError(error.code, json.load(error)) from None
 
     def room(self, body=None):
+        if body and body.get("action") == "join":
+            # Admission/revocation coverage deliberately attempts invalid
+            # invitations too. Pace new attempts to the production source
+            # quota (burst 3, one per 5s); never retry an uncertain Join.
+            now = time.monotonic()
+            credit = min(3.0, self.pair_credit + (now - self.pair_updated) * .2)
+            if credit < 1:
+                time.sleep((1 - credit) / .2 + .1)
+                now = time.monotonic()
+                credit = min(3.0, self.pair_credit + (now - self.pair_updated) * .2)
+            self.pair_credit = credit - 1
+            self.pair_updated = now
         return self.call("/v1/room", body)
 
     def peer(self, **request):
@@ -95,9 +110,18 @@ class App:
             raise
 
     def control(self, action, **content):
-        snapshot = self.room()
-        return self.peer(action=action, operation_id=snapshot["next_operation_id"],
+        snapshot = self.peer(action="snapshot")
+        return self.peer(action=action, operation_id=self.operation(snapshot=snapshot),
                          expected_revision=snapshot["revision"], **content)
+
+    def operation(self, chat=False, snapshot=None):
+        # Guest snapshots arrive asynchronously. Treat the advertised next ID
+        # as a lower bound, just as the real controller's monotonic allocator.
+        snapshot = snapshot or (self.peer(action="chat_history", before=None, revision=None)
+                                if chat else self.peer(action="snapshot"))
+        value = max(self.operation_highwater[chat] + 1, int(snapshot["next_operation_id"]))
+        self.operation_highwater[chat] = value
+        return str(value)
 
     def play(self, action, **content):
         return self.control("playback", command={"action": action, **content})
@@ -159,7 +183,8 @@ def verify(host, guest, music, native, duration, samples):
         return {"instance_id": None, "resource_id": resource}
 
     def queue_items():
-        return host.peer(action="queue_page", offset=0, limit=32)["queue"]
+        return [{"instance_id": item["instance_id"], "resource_id": item["resource_id"]}
+                for item in host.peer(action="queue_page", offset=0, limit=32)["queue"]]
 
     # Real HTTP preparation and Owner commits, including repeated resources.
     first, second = library[0]["resource_id"], library[1]["resource_id"]
@@ -191,6 +216,64 @@ def verify(host, guest, music, native, duration, samples):
     host.control("queue", items=[new_item(track["resource_id"]) for track in library])
     checks.append("duplicate queue occurrences retain identity; duplicate, mismatched, removed and stale writes are atomic")
     permissions = dict(listen=True, queue=True, transport=True, volume=True, chat_read=True, chat_send=True)
+    # Exercise the complete local API -> pinned TLS admission path before a
+    # member exists. Public lookup metadata must never grant membership.
+    host.room({"action": "discoverable", "enabled": False})
+    assert host.room()["discoverable"] is False
+    assert host.room()["discovery_available"] is False
+    room = host.room()
+    target = dict(address=room["address"], fingerprint=room["fingerprint"], room_id=room["room_id"])
+
+    def apply(name):
+        result = guest.room(dict(action="apply", **target,
+                                 room_code=room["admission"]["room_code"], name=name))
+        assert result["state"] == "pending" and guest.room()["mode"] == "local"
+        return dict(application_id=result["application_id"], applicant_secret=result["applicant_secret"])
+
+    def status(application):
+        return guest.room(dict(action="admission_status", **target, **application))
+
+    rejected = apply("Rejected applicant")
+    assert status(rejected)["state"] == "pending"
+    host.room(dict(action="admission_review", application_id=rejected["application_id"],
+                   approve=False, permissions=permissions))
+    assert status(rejected)["state"] == "rejected"
+    revoked = apply("Revoked approval")
+    host.room(dict(action="admission_review", application_id=revoked["application_id"],
+                   approve=True, permissions=permissions))
+    approved = status(revoked)
+    assert approved["state"] == "approved"
+    host.room(dict(action="admission_revoke", application_id=revoked["application_id"]))
+    assert status(revoked)["state"] == "rejected"
+    try:
+        guest.room(dict(action="join", invitation=approved["invitation"], name="Revoked", listen=False))
+        raise AssertionError("revoked admission invitation was accepted")
+    except ApiError:
+        assert guest.room()["mode"] == "local"
+    consumed = apply("Approved applicant")
+    host.room(dict(action="admission_review", application_id=consumed["application_id"],
+                   approve=True, permissions=permissions))
+    approved = status(consumed)
+    guest.room(dict(action="join", invitation=approved["invitation"], name="Approved", listen=False))
+    wait_for(guest.connected, "approved applicant becomes a member", 20)
+    receipt = status(consumed)
+    assert receipt["state"] == "consumed" and receipt["member_id"] == guest.room()["member_id"]
+    try:
+        host.room(dict(action="admission_revoke", application_id=consumed["application_id"]))
+        raise AssertionError("consumed admission was falsely reported revoked")
+    except ApiError as error:
+        assert error.code == "room_denied", error
+    guest.room({"action": "leave"})
+    checks.append("public room-code admission stays unauthenticated until approval; rejection, approval revocation and atomic consumption round-trip over TLS")
+    issued = host.room({"action": "invite", "permissions": permissions})
+    host.room(dict(action="revoke_invitation", invitation_id=issued["invitation_id"]))
+    try:
+        guest.room(dict(action="join", invitation=issued["invitation"], name="Revoked invite", listen=False))
+        raise AssertionError("revoked direct invitation was accepted")
+    except ApiError:
+        assert guest.room()["mode"] == "local"
+    assert not host.room()["discovery_available"]
+    checks.append("discovery publication can be disabled and direct invitations can be revoked before pairing")
     invitation = host.room({"action": "invite", "permissions": permissions})["invitation"]
     guest.room({"action": "join", "invitation": invitation, "name": "Acceptance desktop", "listen": native})
     wait_for(guest.connected, "guest connected with current permissions", 20)
@@ -198,6 +281,41 @@ def verify(host, guest, music, native, duration, samples):
         wait_for(lambda: guest.connected() and guest.room().get("output", {}).get("ready"), "native device and clocks", 20)
     assert guest.peer(action="library", offset=0, limit=32)["tracks"] == library
     checks.append("independent profiles, pinned TLS pairing, restricted shared library and queue")
+    # Collaborative queue state is authoritative and scoped to occurrences,
+    # including repeated resources contributed by the same member.
+    def guest_control(action, **content):
+        snapshot = guest.peer(action="snapshot")
+        return guest.peer(action=action, operation_id=guest.operation(snapshot=snapshot),
+                          expected_revision=snapshot["revision"], **content)
+
+    guest_control("queue", items=queue_items() + [new_item(first), new_item(first)])
+    projected = host.peer(action="queue_page", offset=0, limit=32)["queue"]
+    added = projected[-2:]
+    assert all(item["requester"]["member_id"] == guest.room()["member_id"] for item in added)
+    assert added[0]["instance_id"] != added[1]["instance_id"]
+    target = added[-1]["instance_id"]
+    vote = dict(action="vote", operation_id=guest.operation(),
+                expected_revision=host.room()["revision"], instance_id=target, voted=True)
+    guest.peer(**vote)
+    guest.peer(**vote)  # Retry the exact receipt; never count a second vote.
+    projected = host.peer(action="queue_page", offset=0, limit=32)["queue"]
+    assert next(item for item in projected if item["instance_id"] == target)["votes"] == 1
+    assert next(item for item in projected if item["instance_id"] == added[0]["instance_id"])["votes"] == 0
+    host.control("queue_order", mode="votes")
+    ranked = host.peer(action="queue_page", offset=0, limit=32)["queue"]
+    assert next(i for i, item in enumerate(ranked) if item["instance_id"] == target) < next(
+        i for i, item in enumerate(ranked) if item["instance_id"] == added[0]["instance_id"])
+    try:
+        guest_control("queue_order", mode="manual")
+        raise AssertionError("guest changed the host-owned ordering policy")
+    except ApiError as error:
+        assert error.code == "room_denied", error
+    guest_control("vote", instance_id=target, voted=False)
+    assert next(item for item in host.peer(action="queue_page", offset=0, limit=32)["queue"]
+                if item["instance_id"] == target)["votes"] == 0
+    host.control("queue_order", mode="manual")
+    host.control("queue", items=[new_item(track["resource_id"]) for track in library])
+    checks.append("real member attribution, occurrence-bound idempotent votes and host-owned authoritative ranking")
     for app in [host, guest]:
         try:
             app.call("/v1/player/play", {})
@@ -206,10 +324,18 @@ def verify(host, guest, music, native, duration, samples):
             assert error.status == 400 and "room_mode_requires_room_command" in error.message, error
     checks.append("legacy local playback rejects room-mode writes")
     text = "一起听 <script>alert(1)</script> 🎵"
-    guest.peer(action="chat_send", operation_id="1", text=text)
+    guest.peer(action="chat_send", operation_id=guest.operation(chat=True), text=text)
     history = host.peer(action="chat_history", before=None, revision=None)
     assert any(message["text"] == text for message in history["messages"])
     checks.append("native chat persists and returns exact plain text")
+    song_request = dict(action="chat_song", operation_id=guest.operation(chat=True), resource_id=first)
+    guest.peer(**song_request)
+    guest.peer(**song_request)
+    songs = [message for message in host.peer(action="chat_history", before=None, revision=None)["messages"]
+             if message.get("content_kind") == "song"]
+    assert len(songs) == 1 and songs[0]["song"]["resource_id"] == first
+    assert "path" not in songs[0]["song"]
+    checks.append("structured song chat is durable, resource-scoped and idempotent")
     output = None
     transitions = set()
     if native:
@@ -313,7 +439,7 @@ def verify(host, guest, music, native, duration, samples):
 
         before = wait_for(settled, "playback settled before reorder")
         epoch = healthy_output()["current_epoch"]
-        queue = host.peer(action="queue_page", offset=0, limit=32)["queue"]
+        queue = queue_items()
         host.control("queue", items=list(reversed(queue)))
         time.sleep(.3)
         assert host.room()["track_instance_id"] == before["track_instance_id"]
@@ -330,7 +456,7 @@ def verify(host, guest, music, native, duration, samples):
         paused = host.room()
         time.sleep(.4)
         assert host.room()["position_ms"] == paused["position_ms"]
-        queue = host.peer(action="queue_page", offset=0, limit=32)["queue"]
+        queue = queue_items()
         host.control("queue", items=list(reversed(queue)))
         assert host.room()["track_instance_id"] == paused["track_instance_id"]
         host.play("play")
@@ -338,7 +464,7 @@ def verify(host, guest, music, native, duration, samples):
         guest.room({"action": "output", "settings": settings, "enabled": False})
         wait_for(lambda: not host.room().get("playing"), "last audio output grace halts playback", 10)
         checks.append("scheduled pause, paused queue reorder, resume and last-output halt")
-    member = host.room()["members"][0]["id"]
+    member = guest.room()["member_id"]
     permissions["transport"] = False
     host.room({"action": "permissions", "member_id": member, "permissions": permissions})
     # Permission changes invalidate both channels. Wait for the new authorized

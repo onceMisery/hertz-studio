@@ -35,7 +35,7 @@
       const timestamp = element('span', 'room-mono');
       const seek = element('input'); seek.type = 'range'; seek.min = 0; seek.max = 1000; seek.step = 1;
       seek.setAttribute('aria-label', '房间播放进度');
-      let instance = '', duration = 0, seeking = false, seekContext = null, adjustingVolume = false;
+      let instance = '', duration = 0, seeking = false, seekContext = null, adjustingVolume = false, workspaceVisible = false, roomActive = false, playbackUncertain = false, lastSnapshot = null;
       seek.oninput = () => { if (!seeking) seekContext = { instance, duration }; seeking = true; };
       seek.onblur = () => { seeking = false; seekContext = null; };
       seek.onchange = () => {
@@ -56,8 +56,9 @@
       document.body.append(bar);
       return {
         render(snapshot) {
+          lastSnapshot = snapshot;
           const active = snapshot.mode !== 'local';
-          bar.hidden = !active;
+          roomActive = active; bar.hidden = !active || workspaceVisible;
           document.body.classList.toggle('room-active', active);
           if (!active) return;
           const track = snapshot.current_track;
@@ -71,9 +72,9 @@
           title.textContent = track ? track.title : snapshot.name || '等待共享歌曲';
           artist.textContent = track ? track.artist || '未知歌手' : '打开房间查看队列';
           play.textContent = snapshot.playing ? '暂停' : '播放';
-          [previous, play, next].forEach(node => { node.disabled = !connected || !permissions.transport; });
+          [previous, play, next].forEach(node => { node.disabled = !connected || !permissions.transport || playbackUncertain; node.title = playbackUncertain ? '请打开房间查询原播放操作的结果' : node.textContent; });
           timestamp.textContent = time(position) + ' / ' + time(duration);
-          seek.disabled = !connected || !permissions.transport || !duration;
+          seek.disabled = !connected || !permissions.transport || !duration || playbackUncertain;
           if (!seeking) seek.value = duration ? Math.round(Math.min(position / duration, 1) * 1000) : 0;
           volume.disabled = !output.enabled;
           if (!adjustingVolume) volume.value = Math.round(Number((output.settings || {}).volume ?? 1) * 100);
@@ -83,6 +84,8 @@
           notice.hidden = !text;
           notice.classList.toggle('room-error', !!error);
         },
+        setWorkspaceVisible(visible) { workspaceVisible = !!visible; bar.hidden = !roomActive || workspaceVisible; },
+        setPlaybackUncertain(value) { playbackUncertain = !!value; if (lastSnapshot) this.render(lastSnapshot); },
         destroy() { bar.remove(); document.body.classList.remove('room-active'); }
       };
     }

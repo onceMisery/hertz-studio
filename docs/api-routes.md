@@ -11,7 +11,7 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 161 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 130 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 130 条内嵌静态资源路由。
+REST 路由表共 161 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 130 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 132 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -183,11 +183,25 @@ REST 路由表共 161 个「方法 + 路径」（`crates/hertz-studio/src/routes
 
 ## 房间队列与退出合同
 
-本机 `POST /v1/room` 与插件 RPC 共用同一房间应用合同；LAN 受限通道使用线协议 **v2**，握手拒绝 v1。邀请链接的 `hertz-listen:v1:` 是独立封装版本。
+本机 `POST /v1/room` 与插件 RPC 共用同一房间应用合同；LAN 受限通道使用线协议 **v3**，握手与 PCM 拒绝 v1/v2。邀请链接的 `hertz-listen:v1:` 是独立封装版本。
 
 替换队列时使用 `{"action":"peer","request":{"action":"queue","operation_id":"7","expected_revision":"12","items":[{"instance_id":"31","resource_id":"<UUID>"},{"instance_id":null,"resource_id":"<UUID>"}]}}`。从 `queue_page` 读取的保留项必须原样携带 `instance_id` 与 `resource_id`；新增项显式传 `instance_id: null`，由 Host 分配新身份。相同资源可以出现多次，各有不同实例。重复使用实例、实例与资源不符、已删除或其它房间的实例会返回 `room_invalid`；过期 revision 返回 `revision_conflict`。拒绝时不改变队列或 revision。旧 `resources: [UUID]` 合同不再接受，调用方不能自行猜测重复项身份。
 
 播控、队列等写请求不自动重试。未知播控结果使用原 `operation_id` 查询 `{"action":"peer","request":{"action":"operation","operation_id":"7"}}`。投影包含本机成员的 `member_id`；同一 `(room_id, instance_id, member_id)` 在新 `session_id` 上仍查询原操作，换房或成员后不沿用。
+
+队列投票使用 `peer.vote {operation_id, expected_revision, instance_id, voted}`，房主排序使用 `peer.queue_order {operation_id, expected_revision, mode: "manual" | "votes"}`。条目投影的点歌人、票数和 `voted_by_me` 是只读信息；替换队列时仅提交 `instance_id/resource_id`。排序只改变可变未来后缀，保留当前播放和已冻结前缀。
+
+歌曲聊天使用 `peer.chat_song {operation_id, resource_id}`，与 `chat_send` 共用独立聊天操作命名空间。分配序号从 `peer.chat_history.next_operation_id` 取得下界，并保持本机单调递增；控制序号从 `peer.snapshot.next_operation_id` 取得。歌曲卡片的元数据按当前分享权限解析，撤销后 `song: null`，不得缓存旧投影继续提供操作。
+
+## 房间发现、申请与邀请
+
+`create.discoverable` 默认 `true`；房主 `discoverable {enabled}` 控制 mDNS 发布生命周期。快照的 `discoverable` 是配置意图，`discovery_available` 是当前发布状态，两者不能混为一谈。关闭发布仍可用已核验的地址和邀请加入。
+
+公开的八位 `admission.room_code` 仅用于查找和申请。申请端调用 `apply {address, fingerprint, room_id, room_code, name}`，取得 `application_id/applicant_secret`；查询使用 `admission_status {address, fingerprint, room_id, application_id, applicant_secret}`。原生服务固定证书指纹，申请凭据只保留在页面控制器内存，不写浏览器存储、URL或日志。批准前没有成员身份、PCM、控制、聊天或资源读取权。
+
+房主 `admission_review {application_id, approve, permissions}` 批准或拒绝，`admission_revoke {application_id}` 撤销尚未消费的批准。状态可为 `pending/rejected/approved/consumed`；`approved` 仅向持有申请秘密的查询返回一次性邀请，`consumed` 返回实际 `member_id`。批准重新给予五分钟消费窗口，不能用最初申请的本地倒计时删除已批准记录。查询失败不代表批准被撤销；加入结果不确定时先查状态，禁止自动重放 Join。已消费申请应在成员管理中移除成员，审批撤销不能替代成员撤权。
+
+直接邀请返回无秘密的 `invitation_id`，房主或签发成员可用 `revoke_invitation {invitation_id}` 撤销未消费邀请。邀请消费与成员权限是独立生命周期。成员须持有 `permissions.invite` 才可签发，且只能授予自己当前的基础收听、读聊与发言权限；不能转授队列、播控、房间音量或邀请权。房主快照的邀请列表不包含邀请秘密。
 
 `POST /v1/system/shutdown` 先返回退出受理，再启动与 Ctrl-C 相同的关闭流程：阻止新 Create/Join/Resume，取消尚未完成的房间启动，等待 Host End、输出租约和模式恢复，再停 audio actor 并删除发现文件。嵌入宿主使用公开的 `AppState::shutdown().await` 等待同一屏障。Guest 服务退出保留最近房间凭据，显式离开或 Host End 会清除凭据。
 

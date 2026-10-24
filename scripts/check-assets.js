@@ -109,6 +109,10 @@ includes.forEach((inc) => {
 
 console.log('\n脚本加载顺序');
 const REQUIRE_BEFORE = [
+  ['room-transport.js', 'room.js'],
+  ['room-workspace.js', 'room.js'],
+  ['room-view.js', 'room.js'],
+  ['room.js', 'app.js'],
   ['vendor/stage-runtime.js', 'vendor/coast-stage.js'],
   ['vendor/stage-runtime.js', 'vendor/zodiac-stage.js'],
   ['vendor/stage-runtime.js', 'vendor/space-stage.js'],

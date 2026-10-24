@@ -76,7 +76,12 @@ pub struct Advertisement {
     fullname: String,
 }
 impl Advertisement {
-    pub fn start(name: &str, address: SocketAddr, room_id: Uuid) -> Result<Self, DiscoveryError> {
+    pub fn start(
+        name: &str,
+        address: SocketAddr,
+        room_id: Uuid,
+        fingerprint: crate::tls::Fingerprint,
+    ) -> Result<Self, DiscoveryError> {
         if !valid_name(name) || room_id.is_nil() || address.port() == 0 {
             return Err(DiscoveryError::Metadata);
         }
@@ -92,11 +97,16 @@ impl Advertisement {
                 .map_err(|_| DiscoveryError::Mdns)?;
             let room = room_id.to_string();
             let port = address.port().to_string();
+            let fingerprint = fingerprint.hex();
+            let version = crate::protocol::VERSION.to_string();
+            let code = crate::admission::room_code(room_id);
             let properties = [
                 ("name", name),
-                ("version", "1"),
+                ("version", version.as_str()),
                 ("room_id", &room),
                 ("port", &port),
+                ("room_code", code.as_str()),
+                ("fingerprint", fingerprint.as_str()),
             ];
             let info = ServiceInfo::new(
                 SERVICE_TYPE,
@@ -133,6 +143,9 @@ pub struct Candidate {
     pub room_id: Uuid,
     pub version: u16,
     pub addresses: Vec<SocketAddr>,
+    pub room_code: String,
+    /// A discovery claim, not authority: callers must confirm the host pin.
+    pub fingerprint: String,
 }
 pub struct Discovery {
     daemon: ServiceDaemon,
@@ -216,6 +229,13 @@ fn candidate(info: &mdns_sd::ResolvedService) -> Option<Candidate> {
     if room_id.is_nil() {
         return None;
     }
+    let room_code = info.get_property_val_str("room_code")?;
+    if room_code != crate::admission::room_code(room_id) {
+        return None;
+    }
+    let fingerprint = crate::tls::Fingerprint::parse(info.get_property_val_str("fingerprint")?)
+        .ok()?
+        .hex();
     let addresses = info
         .addresses
         .iter()
@@ -244,6 +264,8 @@ fn candidate(info: &mdns_sd::ResolvedService) -> Option<Candidate> {
         room_id,
         version,
         addresses,
+        room_code: room_code.to_owned(),
+        fingerprint,
     })
 }
 #[cfg(test)]
@@ -255,9 +277,13 @@ mod tests {
         assert!(!valid_name(" "));
         assert!(!valid_name("name\n"));
         assert!(!valid_name(&"文".repeat(65)));
-        assert!(
-            Advertisement::start("room", "0.0.0.0:1234".parse().unwrap(), Uuid::new_v4()).is_err()
-        );
+        assert!(Advertisement::start(
+            "room",
+            "0.0.0.0:1234".parse().unwrap(),
+            Uuid::new_v4(),
+            crate::tls::Fingerprint::of(b"test")
+        )
+        .is_err());
     }
 
     #[test]

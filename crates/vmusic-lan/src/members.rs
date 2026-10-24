@@ -25,6 +25,8 @@ pub struct Permissions {
     pub volume: bool,
     pub chat_read: bool,
     pub chat_send: bool,
+    #[serde(default)]
+    pub invite: bool,
 }
 impl Default for Permissions {
     fn default() -> Self {
@@ -35,6 +37,7 @@ impl Default for Permissions {
             volume: false,
             chat_read: true,
             chat_send: true,
+            invite: false,
         }
     }
 }
@@ -101,9 +104,21 @@ pub struct MemberView {
     pub connected: bool,
 }
 struct Invitation {
+    id: Option<Uuid>,
+    issuer: Option<Uuid>,
     hash: [u8; 32],
     expires: Instant,
     permissions: Permissions,
+}
+pub struct IssuedInvitation {
+    pub id: Uuid,
+    pub secret: Secret,
+}
+#[derive(Clone, Serialize)]
+pub struct InvitationView {
+    pub id: Uuid,
+    pub issuer: Option<Uuid>,
+    pub expires_in_seconds: u64,
 }
 struct Session {
     id: Uuid,
@@ -185,11 +200,54 @@ impl MemberRegistry {
         }
         let secret = Secret::generate()?;
         self.invitations.push(Invitation {
+            id: None,
+            issuer: None,
             hash: secret.digest(),
             expires: now + INVITATION_TTL,
             permissions,
         });
         Ok(secret)
+    }
+    pub fn issue_invitation(
+        &mut self,
+        now: Instant,
+        permissions: Permissions,
+        issuer: Option<Uuid>,
+    ) -> Result<IssuedInvitation, AccessError> {
+        let secret = self.invite(now, permissions)?;
+        let id = Uuid::new_v4();
+        let invitation = self.invitations.last_mut().ok_or(AccessError::Denied)?;
+        invitation.id = Some(id);
+        invitation.issuer = issuer;
+        Ok(IssuedInvitation { id, secret })
+    }
+    pub fn invitation_views(&mut self, now: Instant) -> Vec<InvitationView> {
+        self.invitations.retain(|i| i.expires > now);
+        self.invitations
+            .iter()
+            .filter_map(|i| {
+                i.id.map(|id| InvitationView {
+                    id,
+                    issuer: i.issuer,
+                    expires_in_seconds: i.expires.saturating_duration_since(now).as_secs(),
+                })
+            })
+            .collect()
+    }
+    pub fn revoke_invitation_id(
+        &mut self,
+        id: Uuid,
+        issuer: Option<Uuid>,
+        now: Instant,
+    ) -> Result<(), AccessError> {
+        self.invitations.retain(|i| i.expires > now);
+        let index = self
+            .invitations
+            .iter()
+            .position(|i| i.id == Some(id) && (issuer.is_none() || i.issuer == issuer))
+            .ok_or(AccessError::Denied)?;
+        self.invitations.swap_remove(index);
+        Ok(())
     }
     pub fn pair(
         &mut self,
@@ -246,6 +304,10 @@ impl MemberRegistry {
             credential,
             permissions: invitation.permissions,
         })
+    }
+    pub fn revoke_invitation(&mut self, secret: &Secret) {
+        let hash = secret.digest();
+        self.invitations.retain(|i| !constant_eq(&i.hash, &hash));
     }
     pub fn control(
         &mut self,
@@ -413,6 +475,40 @@ pub fn validate_name(name: &str) -> Result<(), AccessError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn revocable_invitation_ids_enforce_issuer_expiry_and_consumption() {
+        let now = Instant::now();
+        let mut registry = registry(now);
+        let issuer = Uuid::new_v4();
+        let issued = registry
+            .issue_invitation(now, Permissions::default(), Some(issuer))
+            .unwrap();
+        assert!(registry
+            .revoke_invitation_id(issued.id, Some(Uuid::new_v4()), now)
+            .is_err());
+        assert_eq!(registry.invitation_views(now).len(), 1);
+        registry
+            .revoke_invitation_id(issued.id, Some(issuer), now)
+            .unwrap();
+        assert!(registry
+            .pair("10.0.0.1".parse().unwrap(), &issued.secret, "revoked", now)
+            .is_err());
+        let issued = registry
+            .issue_invitation(now, Permissions::default(), Some(issuer))
+            .unwrap();
+        let member = registry
+            .pair("10.0.0.2".parse().unwrap(), &issued.secret, "joined", now)
+            .unwrap();
+        assert!(registry.revoke_invitation_id(issued.id, None, now).is_err());
+        assert_eq!(registry.members()[0].id, member.member_id);
+        let issued = registry
+            .issue_invitation(now, Permissions::default(), None)
+            .unwrap();
+        assert!(registry
+            .revoke_invitation_id(issued.id, None, now + INVITATION_TTL)
+            .is_err());
+        assert!(registry.invitation_views(now + INVITATION_TTL).is_empty());
+    }
     #[test]
     fn audio_admission_counts_local_reservation_and_releases_disconnected_sessions() {
         let now = Instant::now();

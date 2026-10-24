@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pub(crate) use manager::RoomManager;
+mod collaboration;
 pub(crate) mod contract;
 pub(crate) mod credentials;
 mod guest;

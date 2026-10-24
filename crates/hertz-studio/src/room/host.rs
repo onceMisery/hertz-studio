@@ -113,6 +113,8 @@ struct Owner {
     next_job: u64,
     request_jobs: usize,
     mutation_preparing: bool,
+    collaboration: super::collaboration::Collaboration,
+    started_at_ms: u64,
     instances: Vec<u64>,
     next_instance: u64,
     next_wire_plan: u64,
@@ -144,6 +146,7 @@ struct Owner {
     sleep_timer: super::sleep_timer::SleepTimer,
     next_internal_op: u64,
     advertisement: Option<vmusic_lan::discovery::Advertisement>,
+    discoverable: bool,
 }
 fn transport_error(error: impl std::fmt::Display) -> RoomError {
     RoomError::new("room_transport", error.to_string())
@@ -179,6 +182,7 @@ pub(super) struct HostOptions {
     pub address: SocketAddr,
     pub sample_rate: u32,
     pub local_output: bool,
+    pub discoverable: bool,
 }
 pub(crate) async fn start(
     state: Arc<AppState>,
@@ -192,6 +196,7 @@ pub(crate) async fn start(
         address,
         sample_rate,
         local_output,
+        discoverable,
     } = options;
     if name.trim().is_empty()
         || name.len() > 128
@@ -255,14 +260,25 @@ pub(crate) async fn start(
         let topic = value["topic"].as_str().unwrap_or("chat_gap").to_owned();
         let _ = chat_transport.notify_chat(&ControlFrame::Notification { topic, body: value });
     });
-    let (chat, chat_error) =
-        match super::chat::ChatService::open(&state.data_dir, room, notify).await {
-            Ok(chat) => (Some(chat), None),
-            Err(e) => (None, Some(e.message)),
-        };
+    let library = SharedLibrary::default();
+    let (chat, chat_error) = match super::chat::ChatService::open_with_library(
+        &state.data_dir,
+        room,
+        notify,
+        library.clone(),
+    )
+    .await
+    {
+        Ok(chat) => (Some(chat), None),
+        Err(e) => (None, Some(e.message)),
+    };
     let (producer, render) = Producer::spawn(clock.clone()).map_err(transport_error)?;
-    let advertisement =
-        vmusic_lan::discovery::Advertisement::start(&name, server.address, room).ok();
+    let advertisement = if discoverable {
+        vmusic_lan::discovery::Advertisement::start(&name, server.address, room, server.fingerprint)
+            .ok()
+    } else {
+        None
+    };
     let current = state.audio.snapshot();
     let dsp = state.dsp.lock().await.clone();
     let history = super::history_writer::HistoryWriter::spawn(state.clone());
@@ -272,7 +288,7 @@ pub(crate) async fn start(
         clock,
         name,
         format,
-        library: SharedLibrary::default(),
+        library,
         chat,
         chat_error,
         producer,
@@ -293,6 +309,8 @@ pub(crate) async fn start(
         next_job: 1,
         request_jobs: 0,
         mutation_preparing: false,
+        collaboration: Default::default(),
+        started_at_ms: wall_ms(),
         instances: Vec::new(),
         next_instance: 1,
         next_wire_plan: 1,
@@ -328,6 +346,7 @@ pub(crate) async fn start(
         sleep_timer: super::sleep_timer::SleepTimer::default(),
         next_internal_op: 1,
         advertisement,
+        discoverable,
     };
     owner.publish().await;
     let (commands, rx) = mpsc::channel(32);
@@ -367,7 +386,78 @@ pub(crate) async fn start(
         cleanup,
     })
 }
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
 impl Owner {
+    fn requester(&self, member: Uuid) -> super::collaboration::Requester {
+        super::collaboration::Requester {
+            member_id: member,
+            name: if member == OWNER {
+                "房主".into()
+            } else {
+                self.server
+                    .transport
+                    .members()
+                    .into_iter()
+                    .find(|m| m.id == member)
+                    .map(|m| m.name)
+                    .unwrap_or_else(|| "已离开成员".into())
+            },
+        }
+    }
+    fn frozen_prefix(&self) -> usize {
+        let current = self.position(self.clock.now_ns()).0;
+        self.presentation_instances()
+            .into_iter()
+            .chain([current])
+            .filter_map(|id| self.instances.iter().position(|v| *v == id))
+            .max()
+            .map_or(0, |i| i + 1)
+    }
+    fn queue_item(&self, instance: u64, resource: Uuid, member: Uuid, votable: bool) -> Value {
+        let mut value = self.collaboration.projection(instance, member, votable);
+        value["instance_id"] = json!(instance.to_string());
+        value["resource_id"] = json!(resource);
+        value
+    }
+    async fn apply_social(
+        &mut self,
+        member: Uuid,
+        session: Option<StreamIdentity>,
+        vote: Option<(u64, bool)>,
+        mode: Option<QueueOrder>,
+    ) -> RoomResult<bool> {
+        let _commit = self.state.play_commit.lock().await;
+        let mut queue = self.state.queue.lock().await;
+        self.check_access(member, session, |p| p.queue)?;
+        if queue.len() != self.instances.len() {
+            return Err(RoomError::new("room_queue_invariant", "队列身份状态不一致"));
+        }
+        let changed = match vote {
+            Some((id, voted)) => self.collaboration.vote(id, member, voted)?,
+            None => true,
+        };
+        if let Some(mode) = mode {
+            self.collaboration.order = mode;
+        }
+        if self.collaboration.order == QueueOrder::Votes {
+            let order = self
+                .collaboration
+                .sorted_suffix(&self.instances, self.frozen_prefix());
+            let old = queue.clone();
+            let old_instances = self.instances.clone();
+            *queue = order.iter().map(|&i| old[i].clone()).collect();
+            self.instances = order.iter().map(|&i| old_instances[i]).collect();
+        }
+        // The frozen prefix includes the presented instance and all distributed,
+        // prepared and in-flight successors. No renderer work is displaced.
+        Ok(changed)
+    }
     fn presentation_instances(&self) -> Vec<u64> {
         let mut instances = self.boundaries.instances();
         instances.extend(self.render_heads.values().copied());
@@ -1038,6 +1128,8 @@ impl Owner {
         self.pending_successors
             .retain(|epoch, _| epochs.contains(&Some(*epoch)));
         let members = self.server.transport.members();
+        self.collaboration
+            .retain_members(&members.iter().map(|m| m.id).collect::<Vec<_>>());
         self.high_water
             .retain(|id, _| *id == OWNER || members.iter().any(|m| m.id == *id));
         // Merge presentation events by audible time, across both epochs.
@@ -1249,6 +1341,8 @@ impl Owner {
                     .next_endpoint
                     .checked_add(1)
                     .ok_or_else(RoomError::exhausted)?;
+                self.collaboration
+                    .event("join", self.requester(member_id), None, wall_ms());
                 self.endpoints.insert(
                     member_id,
                     Endpoint {
@@ -1286,6 +1380,8 @@ impl Owner {
                     .is_some_and(|e| e.identity == identity)
                 {
                     self.endpoints.remove(&member_id);
+                    self.collaboration
+                        .event("leave", self.requester(member_id), None, wall_ms());
                 }
             }
             Inbound::Heartbeat {
@@ -2170,6 +2266,8 @@ impl Owner {
             *self.state.cursor.lock().await = Some(index);
         }
         if history {
+            self.collaboration
+                .event("playback", self.requester(OWNER), Some(instance), wall_ms());
             if let Ok(track) = self.track_for(instance).await {
                 if self.history.record(track).is_err() {
                     self.error = Some("播放历史队列已满，部分记录可能未保存".into());
@@ -2371,6 +2469,13 @@ impl Owner {
     ) -> Option<ChatJob> {
         use super::chat::ChatRequest;
         let request = match request {
+            PeerRequest::ChatSong {
+                operation_id,
+                resource_id,
+            } => ChatRequest::Song {
+                operation: operation_id.0,
+                resource_id,
+            },
             PeerRequest::ChatSend { operation_id, text } => ChatRequest::Send {
                 operation: operation_id.0,
                 text,
@@ -2446,7 +2551,7 @@ impl Owner {
     ) -> RoomResult<Value> {
         match request {
             PeerRequest::Snapshot => {
-                let mut snapshot = self.peer_snapshot(permissions).await;
+                let mut snapshot = self.peer_snapshot_for(permissions, member).await;
                 snapshot["next_operation_id"] = json!(self
                     .high_water
                     .get(&member)
@@ -2455,6 +2560,43 @@ impl Owner {
                     .saturating_add(1)
                     .to_string());
                 return Ok(snapshot);
+            }
+            PeerRequest::Invite => {
+                self.check_access(member, session, |p| p.invite)?;
+                let issued = if member == OWNER {
+                    self.server
+                        .transport
+                        .issue_invitation(Permissions::default())
+                } else {
+                    self.server
+                        .transport
+                        .member_invite(member, session.ok_or_else(RoomError::denied)?)
+                }
+                .map_err(transport_error)?;
+                let invitation = vmusic_lan::invitation::Invitation {
+                    address: self.server.address,
+                    room_id: self.local_identity.room_id,
+                    fingerprint: self.server.fingerprint,
+                    secret: issued.secret,
+                }
+                .encode();
+                return Ok(
+                    json!({"invitation":invitation.as_str(),"invitation_id":issued.id,"expires_in_seconds":300,"fingerprint":self.server.fingerprint.hex()}),
+                );
+            }
+            PeerRequest::RevokeInvitation { invitation_id } => {
+                self.check_access(member, session, |p| p.invite)?;
+                let issuer = if member == OWNER {
+                    None
+                } else {
+                    Some((member, session.ok_or_else(RoomError::denied)?))
+                };
+                self.server
+                    .transport
+                    .revoke_invitation(invitation_id, issuer)
+                    .map_err(|_| RoomError::denied())?;
+                self.publish().await;
+                return Ok(json!({"state":"applied"}));
             }
             PeerRequest::Library {
                 offset,
@@ -2488,6 +2630,7 @@ impl Owner {
                 let tracks = self.state.queue.lock().await.clone();
                 let mut queue = Vec::new();
                 let mut metadata = Vec::new();
+                let frozen = self.frozen_prefix();
                 for (index, track) in tracks
                     .iter()
                     .enumerate()
@@ -2498,9 +2641,7 @@ impl Owner {
                         self.instances.get(index),
                         self.library.resource_for(track).await,
                     ) {
-                        queue.push(
-                            json!({"instance_id":instance.to_string(),"resource_id":resource}),
-                        );
+                        queue.push(self.queue_item(*instance, resource, member, index >= frozen));
                         if let Some(view) = self.library.view(resource).await {
                             metadata.push(view);
                         }
@@ -2539,7 +2680,8 @@ impl Owner {
                 self.check_access(member, session, |p| p.listen || p.queue || p.transport)?;
                 return serde_json::to_value(resource).map_err(|_| RoomError::storage());
             }
-            PeerRequest::ChatSend { .. }
+            PeerRequest::ChatSong { .. }
+            | PeerRequest::ChatSend { .. }
             | PeerRequest::ChatHistory { .. }
             | PeerRequest::ChatOperation { .. } => {
                 return Err(RoomError::new(
@@ -2549,11 +2691,18 @@ impl Owner {
             }
             _ => {}
         }
+        match &request {
+            PeerRequest::Vote { .. } => self.check_access(member, session, |p| p.queue)?,
+            PeerRequest::QueueOrder { .. } if member != OWNER => return Err(RoomError::denied()),
+            _ => {}
+        }
         let seq = match &request {
             PeerRequest::Playback { operation_id, .. }
             | PeerRequest::Queue { operation_id, .. }
             | PeerRequest::Mode { operation_id, .. }
-            | PeerRequest::Volume { operation_id, .. } => operation_id.0,
+            | PeerRequest::Volume { operation_id, .. }
+            | PeerRequest::Vote { operation_id, .. }
+            | PeerRequest::QueueOrder { operation_id, .. } => operation_id.0,
             _ => unreachable!(),
         };
         let body =
@@ -2591,6 +2740,12 @@ impl Owner {
             }
             | PeerRequest::Volume {
                 expected_revision, ..
+            }
+            | PeerRequest::Vote {
+                expected_revision, ..
+            }
+            | PeerRequest::QueueOrder {
+                expected_revision, ..
             } => expected_revision.0,
             _ => unreachable!(),
         };
@@ -2600,7 +2755,57 @@ impl Owner {
                 "房间状态已更新，请刷新后重试",
             ));
         }
+        if self.scheduler.revision().0 == u64::MAX {
+            return Err(RoomError::exhausted());
+        }
         let result = match request {
+            PeerRequest::Vote {
+                instance_id, voted, ..
+            } => {
+                self.check_access(member, session, |p| p.queue)?;
+                if !permissions.queue {
+                    return Err(RoomError::denied());
+                }
+                if self.candidate.is_some() || self.scheduled.is_some() || self.mutation_preparing {
+                    return Err(RoomError::new("room_busy", "请等待当前切换或队列准备完成"));
+                }
+                let index = self
+                    .instances
+                    .iter()
+                    .position(|id| *id == instance_id.0)
+                    .ok_or_else(|| RoomError::invalid("队列实例已失效"))?;
+                if index < self.frozen_prefix() {
+                    return Err(RoomError::invalid("当前或已冻结的歌曲不能投票"));
+                }
+                let changed = self
+                    .apply_social(member, session, Some((instance_id.0, voted)), None)
+                    .await?;
+                if changed {
+                    self.scheduler
+                        .control_changed()
+                        .ok_or_else(RoomError::exhausted)?;
+                    self.collaboration.event(
+                        if voted { "vote" } else { "unvote" },
+                        self.requester(member),
+                        Some(instance_id.0),
+                        wall_ms(),
+                    );
+                }
+                json!({"state":"applied","revision":self.scheduler.revision().0.to_string()})
+            }
+            PeerRequest::QueueOrder { mode, .. } => {
+                if member != OWNER {
+                    return Err(RoomError::denied());
+                }
+                if self.candidate.is_some() || self.scheduled.is_some() || self.mutation_preparing {
+                    return Err(RoomError::new("room_busy", "请等待当前切换或队列准备完成"));
+                }
+                self.apply_social(member, session, None, Some(mode)).await?;
+                self.scheduler
+                    .control_changed()
+                    .ok_or_else(RoomError::exhausted)?;
+                json!({"state":"applied","revision":self.scheduler.revision().0.to_string()})
+            }
             PeerRequest::Playback { command, .. } => {
                 if !permissions.transport {
                     return Err(RoomError::denied());
@@ -2665,15 +2870,34 @@ impl Owner {
                 }
                 let _commit = self.state.play_commit.lock().await;
                 self.check_access(member, session, |p| p.queue)?;
+                if self.scheduler.revision().0 == u64::MAX {
+                    return Err(RoomError::exhausted());
+                }
                 *self.state.queue.lock().await = tracks;
                 *self.state.cursor.lock().await = instances.iter().position(|id| *id == current.0);
+                self.collaboration
+                    .reconcile(&instances, self.requester(member), wall_ms());
                 self.instances = instances;
                 self.next_instance = next_instance;
                 self.scheduler
                     .control_changed()
                     .ok_or_else(RoomError::exhausted)?;
+                if self.collaboration.order == QueueOrder::Votes {
+                    let order = self
+                        .collaboration
+                        .sorted_suffix(&self.instances, self.frozen_prefix());
+                    let mut queue = self.state.queue.lock().await;
+                    let old = queue.clone();
+                    let old_instances = self.instances.clone();
+                    *queue = order.iter().map(|&i| old[i].clone()).collect();
+                    self.instances = order.iter().map(|&i| old_instances[i]).collect();
+                    *self.state.cursor.lock().await =
+                        self.instances.iter().position(|id| *id == current.0);
+                }
                 drop(_commit);
-                self.prepare_successor().await?;
+                if let Err(error) = self.prepare_successor().await {
+                    self.error = Some(error.message);
+                }
                 json!({"state":"applied","revision":self.scheduler.revision().0.to_string()})
             }
             PeerRequest::Mode { mode, .. } => {
@@ -2744,6 +2968,54 @@ impl Owner {
     }
     async fn local_request(&mut self, request: LocalRequest) -> RoomResult<Value> {
         match request {
+            LocalRequest::Discoverable { enabled } => {
+                if enabled && self.advertisement.is_none() {
+                    self.advertisement = Some(
+                        vmusic_lan::discovery::Advertisement::start(
+                            &self.name,
+                            self.server.address,
+                            self.local_identity.room_id,
+                            self.server.fingerprint,
+                        )
+                        .map_err(|_| {
+                            RoomError::new("room_discovery", "无法发布房间，请稍后重试")
+                        })?,
+                    );
+                } else if !enabled {
+                    self.advertisement.take();
+                }
+                self.discoverable = enabled;
+                self.publish().await;
+                Ok(json!({"state":"applied"}))
+            }
+            LocalRequest::RevokeInvitation { invitation_id } => {
+                self.server
+                    .transport
+                    .revoke_invitation(invitation_id, None)
+                    .map_err(|_| RoomError::denied())?;
+                self.publish().await;
+                Ok(json!({"state":"applied"}))
+            }
+            LocalRequest::AdmissionReview {
+                application_id,
+                approve,
+                permissions,
+            } => {
+                self.server
+                    .transport
+                    .review_admission(application_id, approve, permissions)
+                    .map_err(transport_error)?;
+                self.publish().await;
+                Ok(json!({"state":"applied"}))
+            }
+            LocalRequest::AdmissionRevoke { application_id } => {
+                self.server
+                    .transport
+                    .review_admission(application_id, false, Permissions::default())
+                    .map_err(|_| RoomError::denied())?;
+                self.publish().await;
+                Ok(json!({"state":"applied"}))
+            }
             LocalRequest::SleepTimer { seconds } => {
                 self.sleep_timer.set(self.clock.now_ns(), seconds)?;
                 self.publish().await;
@@ -2754,20 +3026,20 @@ impl Owner {
                     .await
             }
             LocalRequest::Invite { permissions } => {
-                let invitation = self
+                let issued = self
                     .server
                     .transport
-                    .invite(permissions)
+                    .issue_invitation(permissions)
                     .map_err(transport_error)?;
                 let code = vmusic_lan::invitation::Invitation {
                     address: self.server.address,
                     room_id: self.local_identity.room_id,
                     fingerprint: self.server.fingerprint,
-                    secret: invitation,
+                    secret: issued.secret,
                 }
                 .encode();
                 Ok(
-                    json!({"invitation":code.as_str(),"expires_in_seconds":300,"fingerprint":self.server.fingerprint.hex()}),
+                    json!({"invitation":code.as_str(),"invitation_id":issued.id,"expires_in_seconds":300,"fingerprint":self.server.fingerprint.hex()}),
                 )
             }
             LocalRequest::Permissions {
@@ -2783,6 +3055,10 @@ impl Owner {
                 Ok(json!({"state":"applied"}))
             }
             LocalRequest::Remove { member_id } => {
+                let requester = self.requester(member_id);
+                if self.scheduler.revision().0 == u64::MAX {
+                    return Err(RoomError::exhausted());
+                }
                 self.server
                     .transport
                     .revoke(member_id)
@@ -2790,6 +3066,20 @@ impl Owner {
                 self.endpoints.remove(&member_id);
                 self.cancel_member_candidate(member_id)?;
                 self.high_water.remove(&member_id);
+                let members = self
+                    .server
+                    .transport
+                    .members()
+                    .into_iter()
+                    .map(|m| m.id)
+                    .collect::<Vec<_>>();
+                self.collaboration.retain_members(&members);
+                self.collaboration
+                    .event("leave", requester, None, wall_ms());
+                self.scheduler
+                    .control_changed()
+                    .ok_or_else(RoomError::exhausted)?;
+                self.apply_social(OWNER, None, None, None).await?;
                 self.publish().await;
                 Ok(json!({"state":"applied"}))
             }
@@ -2847,16 +3137,20 @@ impl Owner {
         }
     }
     async fn peer_snapshot(&self, permissions: Permissions) -> Value {
+        self.peer_snapshot_for(permissions, OWNER).await
+    }
+    async fn peer_snapshot_for(&self, permissions: Permissions, member: Uuid) -> Value {
         let now = self.clock.now_ns();
         let (instance, position, playing) = self.position(now);
         let tracks = self.state.queue.lock().await.clone();
         let mut queue = Vec::new();
+        let frozen = self.frozen_prefix();
         for (index, track) in tracks.iter().enumerate().take(64) {
             if let (Some(instance), Some(resource)) = (
                 self.instances.get(index),
                 self.library.resource_for(track).await,
             ) {
-                queue.push(json!({"instance_id":instance.to_string(),"resource_id":resource}));
+                queue.push(self.queue_item(*instance, resource, member, index >= frozen));
             }
         }
         let current_track =
@@ -2878,7 +3172,22 @@ impl Owner {
                     .get(instance)
                     .and_then(|track| track.view.clone())
             });
-        json!({"current_track":current_track,"mode":"room","room_id":self.local_identity.room_id,"instance_id":self.local_identity.instance_id,"name":self.name,"revision":self.scheduler.revision().0.to_string(),"sharing_revision":self.library.revision().await.to_string(),"host_time_ns":now.to_string(),"playing":playing,"track_instance_id":instance.to_string(),"position_ms":position.to_string(),"queue":queue,"queue_count":tracks.len(),"tracks":self.library.views().await.into_iter().take(16).collect::<Vec<_>>(),"shared_count":self.library.views().await.len(),"format":self.format,"volume":self.volume,"pending_mix":self.mixer.pending.as_ref().and_then(|p|self.mixer.outcome(p.id)),"play_mode":self.mode,"dsp":self.dsp,"crossfade_ms":self.crossfade_ms,"loudness_mode":self.loudness_mode,"permissions":permissions,"members":self.server.transport.members(),"pending":self.candidate.as_ref().map(|c|json!({"epoch":c.wire.epoch,"plan_id":c.wire.plan_id,"effective_at":c.wire.anchor_ns,"ready":c.ready,"prepared":c.prepared})),"scheduled":self.scheduled.as_ref().map(|s|json!({"epoch":s.plan.epoch,"plan_id":s.plan.plan_id,"effective_at":s.plan.anchor_ns})),"chat":self.chat.as_ref().map(|c|c.status.borrow().clone()),"chat_error":self.chat_error,"error":self.error})
+        let mut members = self.server.transport.members().into_iter().map(|m| {
+            let endpoint = self.endpoints.get(&m.id);
+            json!({"id":m.id,"name":m.name,"permissions":m.permissions,"connected":m.connected,"owner":false,
+                "audio":endpoint.is_some_and(|e| e.audio),"ready":endpoint.is_some_and(|e| e.ready),
+                "committed":endpoint.is_some_and(|e|e.committed),"last_output_age_ms":endpoint.and_then(|e|e.last_output).map(|at|now.saturating_sub(at)/1_000_000),
+                "rtt_ns":null,"acoustic_error_ms":null,"buffer_percent":null})
+        }).collect::<Vec<_>>();
+        let local = self.local.as_ref().map(|r| r.status());
+        members.insert(0, json!({"id":OWNER,"name":"房主","permissions":owner_permissions(),"connected":true,"owner":true,
+            "audio":self.local.is_some(),"ready":local.as_ref().is_some_and(|s|s.output_ready),
+            "committed":local.as_ref().is_some_and(|s|s.current_epoch.is_some()),"last_output_age_ms":null,
+            "rtt_ns":null,"acoustic_error_ms":null,"buffer_percent":null}));
+        json!({"collaboration":{"queue_order":self.collaboration.order,"activity":self.collaboration.activity},
+            "started_at_ms":self.started_at_ms.to_string(),"elapsed_ms":(now/1_000_000).to_string(),
+            "member_capacity":vmusic_lan::members::MAX_MEMBERS+1,"audio_capacity":vmusic_lan::members::MAX_AUDIO_OUTPUTS,
+            "online_count":members.iter().filter(|m|m["connected"]==true).count(),"members":members,"current_track":current_track,"mode":"room","room_id":self.local_identity.room_id,"instance_id":self.local_identity.instance_id,"name":self.name,"revision":self.scheduler.revision().0.to_string(),"sharing_revision":self.library.revision().await.to_string(),"host_time_ns":now.to_string(),"playing":playing,"track_instance_id":instance.to_string(),"position_ms":position.to_string(),"queue":queue,"queue_count":tracks.len(),"tracks":self.library.views().await.into_iter().take(16).collect::<Vec<_>>(),"shared_count":self.library.views().await.len(),"format":self.format,"volume":self.volume,"pending_mix":self.mixer.pending.as_ref().and_then(|p|self.mixer.outcome(p.id)),"play_mode":self.mode,"dsp":self.dsp,"crossfade_ms":self.crossfade_ms,"loudness_mode":self.loudness_mode,"permissions":permissions,"pending":self.candidate.as_ref().map(|c|json!({"epoch":c.wire.epoch,"plan_id":c.wire.plan_id,"effective_at":c.wire.anchor_ns,"ready":c.ready,"prepared":c.prepared})),"scheduled":self.scheduled.as_ref().map(|s|json!({"epoch":s.plan.epoch,"plan_id":s.plan.plan_id,"effective_at":s.plan.anchor_ns})),"chat":self.chat.as_ref().map(|c|c.status.borrow().clone()),"chat_error":self.chat_error,"error":self.error})
     }
     async fn publish(&self) {
         let mut value = self
@@ -2889,6 +3198,7 @@ impl Owner {
                 volume: true,
                 chat_read: true,
                 chat_send: true,
+                invite: true,
             })
             .await;
         value["mode"] = json!("host");
@@ -2906,6 +3216,9 @@ impl Owner {
         value["output"]["preferences_error"] = json!(*self.preferences.error.borrow());
         value["shared_track_ids"] = json!(self.library.local_ids().await);
         value["discovery_available"] = json!(self.advertisement.is_some());
+        value["discoverable"] = json!(self.discoverable);
+        value["invitations"] = json!(self.server.transport.invitation_views());
+        value["admission"] = json!({"room_code":self.server.transport.room_code(),"pending":self.server.transport.admission_views(),"capacity":vmusic_lan::admission::MAX_APPLICATIONS});
         value["sleep_timer_remaining_seconds"] =
             json!(self.sleep_timer.remaining_seconds(self.clock.now_ns()));
         *self.projection.write().unwrap_or_else(|e| e.into_inner()) = value;
@@ -2969,6 +3282,7 @@ fn owner_permissions() -> Permissions {
         volume: true,
         chat_read: true,
         chat_send: true,
+        invite: true,
     }
 }
 
@@ -3045,7 +3359,7 @@ pub(super) mod join_retry_tests {
                 },
             )
             .unwrap();
-        let owner = Owner {
+        let mut owner = Owner {
             history: super::super::history_writer::HistoryWriter::spawn(state.clone()),
             preferences: super::super::output_preferences::Preferences::spawn(state.db.clone()),
             state: state.clone(),
@@ -3069,6 +3383,8 @@ pub(super) mod join_retry_tests {
             next_job: 1,
             request_jobs: 0,
             mutation_preparing: false,
+            collaboration: Default::default(),
+            started_at_ms: wall_ms(),
             instances: vec![1],
             next_instance: 2,
             next_wire_plan: 2,
@@ -3115,7 +3431,11 @@ pub(super) mod join_retry_tests {
             sleep_timer: super::super::sleep_timer::SleepTimer::default(),
             next_internal_op: 1,
             advertisement: None,
+            discoverable: false,
         };
+        owner
+            .collaboration
+            .reconcile(&[1], owner.requester(OWNER), wall_ms());
         (owner, audio, render, inbound)
     }
     async fn finish_owner(mut owner: Owner, audio: std::thread::JoinHandle<()>) {
@@ -3326,6 +3646,222 @@ pub(super) mod join_retry_tests {
         assert_eq!(owner.scheduler.revision().0, revision);
         assert_eq!(owner.instances, [2]);
         assert_eq!(owner.next_instance, 3);
+        finish_owner(owner, audio).await;
+    }
+
+    #[tokio::test]
+    async fn authenticated_votes_survive_reconnect_and_rank_only_unfrozen_duplicate_occurrences() {
+        let (mut owner, audio, _render, mut inbound) = playing_owner().await;
+        *owner.state.queue.lock().await = vec!["a".into(), "b".into(), "b".into(), "b".into()];
+        owner.instances = vec![1, 2, 3, 4];
+        owner.next_instance = 5;
+        owner
+            .collaboration
+            .reconcile(&owner.instances, owner.requester(OWNER), wall_ms());
+        owner
+            .pending_successors
+            .insert(1, VecDeque::from([Some(2)]));
+        let invitation = owner
+            .server
+            .transport
+            .invite(Permissions {
+                queue: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let paired = vmusic_lan::client::pair(
+            owner.server.address,
+            owner.server.fingerprint,
+            owner.local_identity.room_id,
+            &invitation,
+            "Alice",
+        )
+        .await
+        .unwrap();
+        let (connection, _events) = vmusic_lan::client::ClientConnection::connect(
+            owner.server.address,
+            owner.server.fingerprint,
+            owner.local_identity.room_id,
+            paired.member_id,
+            &paired.credential,
+        )
+        .await
+        .unwrap();
+        owner.network(inbound.recv().await.unwrap()).await.unwrap();
+        let identity = connection.handle.identity;
+        let permissions = owner
+            .server
+            .transport
+            .authorize(paired.member_id, identity)
+            .unwrap();
+        let vote = PeerRequest::Vote {
+            operation_id: Counter(1),
+            expected_revision: Counter(owner.scheduler.revision().0),
+            instance_id: Counter(4),
+            voted: true,
+        };
+        let applied = owner
+            .peer(
+                paired.member_id,
+                Some(identity),
+                permissions,
+                vote.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner.collaboration.count(4), 1);
+        assert_eq!(owner.collaboration.count(3), 0);
+        assert_eq!(
+            owner.collaboration.projection(4, paired.member_id, true)["voted_by_me"],
+            true
+        );
+        assert_eq!(
+            owner.collaboration.projection(4, OWNER, true)["voted_by_me"],
+            false
+        );
+        assert_eq!(
+            owner
+                .peer(
+                    paired.member_id,
+                    Some(identity),
+                    permissions,
+                    vote.clone(),
+                    None
+                )
+                .await
+                .unwrap(),
+            applied
+        );
+        let activity_len = owner.collaboration.activity.len();
+        connection.shutdown().await;
+        owner.network(inbound.recv().await.unwrap()).await.unwrap();
+        owner.advance(owner.clock.now_ns()).await.unwrap();
+        let (reconnected, _events) = vmusic_lan::client::ClientConnection::connect(
+            owner.server.address,
+            owner.server.fingerprint,
+            owner.local_identity.room_id,
+            paired.member_id,
+            &paired.credential,
+        )
+        .await
+        .unwrap();
+        owner.network(inbound.recv().await.unwrap()).await.unwrap();
+        assert_eq!(
+            owner
+                .peer(
+                    paired.member_id,
+                    Some(reconnected.handle.identity),
+                    permissions,
+                    vote,
+                    None
+                )
+                .await
+                .unwrap(),
+            applied
+        );
+        assert_eq!(owner.collaboration.count(4), 1);
+        assert_eq!(owner.collaboration.activity.len(), activity_len + 2);
+        for id in [1, 2, 999] {
+            let error = owner
+                .peer(
+                    paired.member_id,
+                    Some(reconnected.handle.identity),
+                    permissions,
+                    PeerRequest::Vote {
+                        operation_id: Counter(2),
+                        expected_revision: Counter(owner.scheduler.revision().0),
+                        instance_id: Counter(id),
+                        voted: true,
+                    },
+                    None,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "room_invalid");
+        }
+        let denied = owner
+            .peer(
+                paired.member_id,
+                Some(reconnected.handle.identity),
+                permissions,
+                PeerRequest::QueueOrder {
+                    operation_id: Counter(2),
+                    expected_revision: Counter(owner.scheduler.revision().0),
+                    mode: QueueOrder::Votes,
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, "room_denied");
+        owner
+            .peer(
+                OWNER,
+                None,
+                owner_permissions(),
+                PeerRequest::QueueOrder {
+                    operation_id: Counter(1),
+                    expected_revision: Counter(owner.scheduler.revision().0),
+                    mode: QueueOrder::Votes,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner.instances, [1, 2, 4, 3]);
+        assert_eq!(*owner.state.queue.lock().await, ["a", "b", "b", "b"]);
+        assert_eq!(*owner.state.cursor.lock().await, Some(0));
+        assert_eq!(owner.pending_successors[&1].front(), Some(&Some(2)));
+        assert!(owner.candidate.is_none());
+        let revision = owner.scheduler.revision().0;
+        owner
+            .peer(
+                paired.member_id,
+                Some(reconnected.handle.identity),
+                permissions,
+                PeerRequest::Vote {
+                    operation_id: Counter(2),
+                    expected_revision: Counter(revision),
+                    instance_id: Counter(4),
+                    voted: false,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner.instances, [1, 2, 3, 4]);
+        assert_eq!(owner.collaboration.count(4), 0);
+        reconnected.shutdown().await;
+        finish_owner(owner, audio).await;
+    }
+
+    #[tokio::test]
+    async fn failed_social_admission_does_not_publish_votes_or_activity() {
+        let (mut owner, audio, _render, _inbound) = playing_owner().await;
+        owner.instances.push(2);
+        owner
+            .collaboration
+            .reconcile(&owner.instances, owner.requester(OWNER), wall_ms());
+        let revision = owner.scheduler.revision().0;
+        let activity = owner.collaboration.activity.len();
+        let request = PeerRequest::Vote {
+            operation_id: Counter(1),
+            expected_revision: Counter(revision),
+            instance_id: Counter(2),
+            voted: true,
+        };
+        assert_eq!(
+            owner
+                .peer(OWNER, None, owner_permissions(), request, None)
+                .await
+                .unwrap_err()
+                .code,
+            "room_queue_invariant"
+        );
+        assert_eq!(owner.collaboration.count(2), 0);
+        assert_eq!(owner.collaboration.activity.len(), activity);
+        assert_eq!(owner.scheduler.revision().0, revision);
         finish_owner(owner, audio).await;
     }
 

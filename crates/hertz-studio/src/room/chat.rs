@@ -37,20 +37,45 @@ const RECEIPTS: usize = 256;
 const RECEIPT_TTL: Duration = Duration::from_secs(600);
 const MAINTENANCE_STEPS: usize = 256;
 const VACUUM_PAGES: u32 = 512;
-const SCHEMA: [&str; 4] = [
+const SCHEMA_V1: [&str; 4] = [
     "CREATE TABLE settings(singleton INTEGER PRIMARY KEY CHECK(singleton=1),config TEXT NOT NULL CHECK(length(CAST(config AS BLOB))<=1024),revision INTEGER NOT NULL CHECK(revision>0),next_id INTEGER NOT NULL CHECK(next_id>0))",
     "CREATE TABLE messages(id INTEGER PRIMARY KEY CHECK(id>0),room TEXT NOT NULL CHECK(length(room)=36),member TEXT NOT NULL CHECK(length(member)=36),name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 32 AND length(CAST(name AS BLOB))<=128),text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 200 AND length(CAST(text AS BLOB))<=800),received INTEGER NOT NULL CHECK(received>=0),track TEXT CHECK(track IS NULL OR length(track) BETWEEN 1 AND 20))",
     "CREATE INDEX room_messages ON messages(room,id)",
     "CREATE INDEX message_age ON messages(received,id)",
 ];
+const SONG_COLUMN: &str = "song TEXT CHECK(song IS NULL OR length(CAST(song AS BLOB))=36)";
+fn schema() -> [String; 4] {
+    [
+        SCHEMA_V1[0].into(),
+        format!(
+            "{},{})",
+            &SCHEMA_V1[1][..SCHEMA_V1[1].len() - 1],
+            SONG_COLUMN
+        ),
+        SCHEMA_V1[2].into(),
+        SCHEMA_V1[3].into(),
+    ]
+}
+fn altered_messages_schema() -> String {
+    // SQLite's ADD COLUMN inserts a comma followed by one space. Keep both
+    // exact v2 spellings supported: fresh databases and upgraded v1 databases.
+    format!(
+        "{}, {})",
+        &SCHEMA_V1[1][..SCHEMA_V1[1].len() - 1],
+        SONG_COLUMN
+    )
+}
 // Apply allocation bounds in SQLite before decoding untrusted stored strings.
-const MESSAGE_COLUMNS: &str = "id,received, \
+const LEGACY_MESSAGE_COLUMNS: &str = "id,received, \
     CASE WHEN typeof(room)='text' AND length(CAST(room AS BLOB))=36 THEN room END AS room, \
     CASE WHEN typeof(member)='text' AND length(CAST(member AS BLOB))=36 THEN member END AS member, \
     CASE WHEN typeof(name)='text' AND length(name) BETWEEN 1 AND 32 AND length(CAST(name AS BLOB))<=128 THEN name END AS name, \
     CASE WHEN typeof(text)='text' AND length(text) BETWEEN 1 AND 200 AND length(CAST(text AS BLOB))<=800 THEN text END AS text, \
     CASE WHEN track IS NULL OR (typeof(track)='text' AND length(CAST(track AS BLOB)) BETWEEN 1 AND 20) THEN track ELSE 'invalid' END AS track";
 
+fn message_columns() -> String {
+    format!("{LEGACY_MESSAGE_COLUMNS}, CASE WHEN song IS NULL OR (typeof(song)='text' AND length(CAST(song AS BLOB))=36) THEN song ELSE 'invalid' END AS song")
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ChatConfig {
@@ -149,6 +174,10 @@ pub struct ChatAccess {
 }
 
 pub enum ChatRequest {
+    Song {
+        operation: u64,
+        resource_id: Uuid,
+    },
     Send {
         operation: u64,
         text: String,
@@ -188,6 +217,11 @@ struct Message {
     text: String,
     track_instance_id: Option<String>,
     retained: bool,
+    content_kind: &'static str,
+    #[serde(skip)]
+    song_resource_id: Option<Uuid>,
+    song: Option<super::resources::SharedTrack>,
+    sharing_revision: Option<String>,
 }
 
 impl Message {
@@ -199,6 +233,12 @@ impl Message {
         let name: Option<String> = row.try_get("name").map_err(|_| damaged())?;
         let text: Option<String> = row.try_get("text").map_err(|_| damaged())?;
         let track: Option<String> = row.try_get("track").map_err(|_| damaged())?;
+        let song: Option<String> = row.try_get("song").unwrap_or(None);
+        let song_resource_id = song
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|_| damaged())?;
         let name = name.ok_or_else(damaged)?;
         let text = text.ok_or_else(damaged)?;
         Uuid::parse_str(room.as_deref().ok_or_else(damaged)?).map_err(|_| damaged())?;
@@ -220,6 +260,14 @@ impl Message {
             text,
             track_instance_id: track,
             retained: true,
+            content_kind: if song_resource_id.is_some() {
+                "song"
+            } else {
+                "text"
+            },
+            song_resource_id,
+            song: None,
+            sharing_revision: None,
         })
     }
 
@@ -282,6 +330,7 @@ enum Deletion {
 }
 
 struct Store {
+    library: super::resources::SharedLibrary,
     connection: SqliteConnection,
     path: PathBuf,
     room: Uuid,
@@ -402,10 +451,19 @@ fn options(path: &Path) -> SqliteConnectOptions {
 }
 
 impl ChatService {
+    #[cfg(test)]
     pub async fn open(
         profile: &Path,
         room: Uuid,
         notify: Arc<dyn Fn(Value) + Send + Sync>,
+    ) -> RoomResult<Self> {
+        Self::open_with_library(profile, room, notify, Default::default()).await
+    }
+    pub async fn open_with_library(
+        profile: &Path,
+        room: Uuid,
+        notify: Arc<dyn Fn(Value) + Send + Sync>,
+        library: super::resources::SharedLibrary,
     ) -> RoomResult<Self> {
         let path = profile.join("room-chat.sqlite");
         let mut lock =
@@ -440,6 +498,7 @@ impl ChatService {
         if fresh {
             Store::create(&mut connection).await?;
         }
+        Store::migrate(&mut connection).await?;
         let (config, revision, next_id) =
             Store::inspect(&mut connection, &path)
                 .await
@@ -460,6 +519,7 @@ impl ChatService {
             maintenance: None,
         });
         let mut store = Store {
+            library,
             connection,
             path,
             room,
@@ -607,7 +667,10 @@ impl Store {
         }
         if u16::from_be_bytes(database_header[16..18].try_into().unwrap()) != PAGE as u16
             || database_header[18..20] != [1, 1]
-            || u32::from_be_bytes(database_header[60..64].try_into().unwrap()) != 1
+            || !matches!(
+                u32::from_be_bytes(database_header[60..64].try_into().unwrap()),
+                1 | 2
+            )
             || u32::from_be_bytes(database_header[64..68].try_into().unwrap()) != 1
         {
             return Err(format_error());
@@ -683,8 +746,12 @@ impl Store {
                 .await
                 .map_err(|_| after_recovery(storage()))?;
         let recovered = async {
+            let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+                .fetch_one(&mut recovery)
+                .await
+                .map_err(|_| storage())?;
             let mut tx = recovery.begin().await.map_err(|_| storage())?;
-            sqlx::query("PRAGMA user_version=1")
+            sqlx::query(&format!("PRAGMA user_version={version}"))
                 .execute(&mut *tx)
                 .await
                 .map_err(|_| storage())?;
@@ -702,8 +769,8 @@ impl Store {
 
     async fn create(connection: &mut SqliteConnection) -> RoomResult<()> {
         let mut tx = connection.begin().await.map_err(|_| storage())?;
-        for statement in SCHEMA.into_iter().chain(["PRAGMA user_version=1"]) {
-            sqlx::query(statement)
+        for statement in schema().into_iter().chain(["PRAGMA user_version=2".into()]) {
+            sqlx::query(&statement)
                 .execute(&mut *tx)
                 .await
                 .map_err(|_| storage())?;
@@ -723,21 +790,63 @@ impl Store {
         Self::inspect_data(connection, path, false).await
     }
 
+    async fn migrate(connection: &mut SqliteConnection) -> RoomResult<()> {
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| storage())?;
+        if version != 1 {
+            return Ok(());
+        }
+        Self::inspect_schema(connection).await?;
+        let (config, _, _) = Self::read_settings(connection).await?;
+        // Preserve the existing physical budget. ADD COLUMN stores the nullable
+        // default in the schema rather than copying every retained row; a
+        // near-full valid history therefore needs no second messages table.
+        sqlx::query(&format!("PRAGMA max_page_count={}", config.pages()))
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| storage())?;
+        let mut tx = connection.begin().await.map_err(|_| storage())?;
+        sqlx::query(&format!("ALTER TABLE messages ADD COLUMN {SONG_COLUMN}"))
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| storage())?;
+        sqlx::query("PRAGMA user_version=2")
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| storage())?;
+        tx.commit().await.map_err(|_| storage())
+    }
     async fn inspect_schema(connection: &mut SqliteConnection) -> RoomResult<()> {
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| format_error())?;
+        let expected_schema: Vec<String> = match version {
+            1 => SCHEMA_V1.iter().map(|s| (*s).into()).collect(),
+            2 => schema().into(),
+            _ => return Err(format_error()),
+        };
         let schema_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema")
             .fetch_one(&mut *connection)
             .await
             .map_err(|_| format_error())?;
         let expected: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE sql IN (?,?,?,?)")
-                .bind(SCHEMA[0])
-                .bind(SCHEMA[1])
-                .bind(SCHEMA[2])
-                .bind(SCHEMA[3])
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE sql IN (?,?,?,?,?)")
+                .bind(&expected_schema[0])
+                .bind(&expected_schema[1])
+                .bind(&expected_schema[2])
+                .bind(&expected_schema[3])
+                .bind(if version == 2 {
+                    altered_messages_schema()
+                } else {
+                    SCHEMA_V1[1].to_owned()
+                })
                 .fetch_one(&mut *connection)
                 .await
                 .map_err(|_| format_error())?;
-        if schema_count != SCHEMA.len() as i64 || expected != schema_count {
+        if schema_count != 4 || expected != schema_count {
             return Err(format_error());
         }
         Ok(())
@@ -797,7 +906,11 @@ impl Store {
             .fetch_one(&mut *connection)
             .await
             .map_err(|_| damaged())?;
-        if page_size != PAGE as i64 || vacuum != 2 || version != 1 || journal != "delete" {
+        if page_size != PAGE as i64
+            || vacuum != 2
+            || !matches!(version, 1 | 2)
+            || journal != "delete"
+        {
             return Err(format_error());
         }
         // Inspect bounded scalar counts rather than allocating names or SQL from
@@ -824,8 +937,13 @@ impl Store {
         // Pagination and SQL-side field bounds keep each allocation bounded.
         let mut after = 0_i64;
         loop {
+            let columns = if version == 1 {
+                LEGACY_MESSAGE_COLUMNS.to_owned()
+            } else {
+                message_columns()
+            };
             let rows = sqlx::query(&format!(
-                "SELECT {MESSAGE_COLUMNS} FROM messages WHERE id>? ORDER BY id LIMIT 128"
+                "SELECT {columns} FROM messages WHERE id>? ORDER BY id LIMIT 128"
             ))
             .bind(after)
             .fetch_all(&mut *connection)
@@ -1131,7 +1249,20 @@ impl Store {
                 operation,
                 text,
                 track,
-            } => self.send(access, operation, text, track).await,
+            } => self.send(access, operation, text, track, None).await,
+            ChatRequest::Song {
+                operation,
+                resource_id,
+            } => {
+                self.send(
+                    access,
+                    operation,
+                    "分享歌曲".into(),
+                    None,
+                    Some(resource_id),
+                )
+                .await
+            }
             ChatRequest::History { before, revision } => {
                 if !(access.read)() {
                     return Err(RoomError::denied());
@@ -1166,6 +1297,7 @@ impl Store {
         operation: u64,
         text: String,
         track: Option<u64>,
+        song_resource_id: Option<Uuid>,
     ) -> RoomResult<Value> {
         if !(access.send)() {
             return Err(RoomError::denied());
@@ -1180,7 +1312,11 @@ impl Store {
         {
             return Err(RoomError::invalid("聊天操作序号、正文或显示名称无效"));
         }
-        let hash: [u8; 32] = Sha256::digest(text.as_bytes()).into();
+        let hash: [u8; 32] = Sha256::digest(
+            serde_json::to_vec(&("chat_content_v2", &text, song_resource_id))
+                .map_err(|_| storage())?,
+        )
+        .into();
         if let Some(receipt) = self.receipt(access.member, operation) {
             if receipt.hash != hash {
                 return Err(RoomError::new(
@@ -1207,6 +1343,16 @@ impl Store {
                 "聊天授权成员超过房间并发上限",
             ));
         }
+        let song = if let Some(resource) = song_resource_id {
+            Some(
+                self.library
+                    .view(resource)
+                    .await
+                    .ok_or_else(|| RoomError::invalid("歌曲不在当前分享范围内"))?,
+            )
+        } else {
+            None
+        };
         let identity = self
             .identities
             .entry(access.member)
@@ -1231,7 +1377,7 @@ impl Store {
             .checked_add(1)
             .filter(|v| *v <= i64::MAX as u64)
             .ok_or_else(RoomError::exhausted)?;
-        let message = Message {
+        let mut message = Message {
             message_id: id.to_string(),
             chat_seq: id.to_string(),
             received_at_ms: now_ms().to_string(),
@@ -1240,6 +1386,14 @@ impl Store {
             text,
             track_instance_id: track.map(|t| t.to_string()),
             retained: self.config.retained,
+            content_kind: if song_resource_id.is_some() {
+                "song"
+            } else {
+                "text"
+            },
+            song_resource_id,
+            song,
+            sharing_revision: None,
         };
         let size = message.bytes();
         if serde_json::to_vec(&json!({"topic":"chat_message", "message":message}))
@@ -1291,10 +1445,10 @@ impl Store {
                 deleted += cached.len() as u64;
                 let revision = if deleted > 0 { next_revision } else { self.revision };
                 if message.retained {
-                    sqlx::query("INSERT INTO messages(id,room,member,name,text,received,track) VALUES(?,?,?,?,?,?,?)")
+                    sqlx::query("INSERT INTO messages(id,room,member,name,text,received,track,song) VALUES(?,?,?,?,?,?,?,?)")
                         .bind(id as i64).bind(self.room.to_string()).bind(access.member.to_string())
                         .bind(&message.name).bind(&message.text).bind(message.received())
-                        .bind(&message.track_instance_id).execute(&mut *tx).await?;
+                        .bind(&message.track_instance_id).bind(message.song_resource_id.map(|id|id.to_string())).execute(&mut *tx).await?;
                 }
                 sqlx::query("UPDATE settings SET next_id=?,revision=? WHERE singleton=1")
                     .bind(next as i64).bind(revision as i64).execute(&mut *tx).await?;
@@ -1316,7 +1470,11 @@ impl Store {
                     return Err(storage());
                 }
             };
-            if !(access.active)() || !(access.send)() {
+            if !(access.active)()
+                || !(access.send)()
+                || (song_resource_id.is_some()
+                    && self.library.view(song_resource_id.unwrap()).await.is_none())
+            {
                 tx.rollback().await.map_err(|_| storage())?;
                 return Err(RoomError::denied());
             }
@@ -1357,6 +1515,11 @@ impl Store {
             retained: message.retained,
         });
         self.evict_receipts();
+        if let Some(resource) = message.song_resource_id {
+            let (revision, song) = self.library.card(resource).await;
+            message.song = song;
+            message.sharing_revision = Some(revision.to_string());
+        }
         (self.notify)(json!({"topic":"chat_message", "message":message}));
         Ok(json!({"status":"applied", "message_id":id.to_string(), "retained":message.retained}))
     }
@@ -1381,7 +1544,7 @@ impl Store {
         }
         let cutoff = self.config.cutoff(now_ms());
         let rows = sqlx::query(&format!(
-            "SELECT {MESSAGE_COLUMNS} FROM messages WHERE room=? AND received>=? AND id<? ORDER BY id DESC LIMIT 101"))
+            "SELECT {} FROM messages WHERE room=? AND received>=? AND id<? ORDER BY id DESC LIMIT 101", message_columns()))
             .bind(self.room.to_string()).bind(cutoff).bind(before)
             .fetch_all(&mut self.connection).await.map_err(|_| storage())?;
         let mut candidates = Vec::with_capacity(rows.len() + self.recent.len());
@@ -1398,7 +1561,12 @@ impl Store {
         let mut messages = Vec::new();
         let mut bytes = HISTORY_METADATA_BYTES;
         let total = candidates.len();
-        for message in candidates {
+        for mut message in candidates {
+            if let Some(resource) = message.song_resource_id {
+                let (revision, song) = self.library.card(resource).await;
+                message.song = song;
+                message.sharing_revision = Some(revision.to_string());
+            }
             let size = message.bytes() + 1;
             if messages.len() == 100 || bytes + size > HISTORY_BYTES {
                 break;

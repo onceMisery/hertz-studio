@@ -60,10 +60,21 @@ pub struct QueueItem {
     pub instance_id: Option<Counter>,
     pub resource_id: Uuid,
 }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueOrder {
+    #[default]
+    Manual,
+    Votes,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PeerRequest {
     Snapshot,
+    Invite,
+    RevokeInvitation {
+        invitation_id: Uuid,
+    },
     Operation {
         operation_id: Counter,
     },
@@ -89,6 +100,17 @@ pub enum PeerRequest {
         expected_revision: Counter,
         items: Vec<QueueItem>,
     },
+    Vote {
+        operation_id: Counter,
+        expected_revision: Counter,
+        instance_id: Counter,
+        voted: bool,
+    },
+    QueueOrder {
+        operation_id: Counter,
+        expected_revision: Counter,
+        mode: QueueOrder,
+    },
     Mode {
         operation_id: Counter,
         expected_revision: Counter,
@@ -108,6 +130,10 @@ pub enum PeerRequest {
     ChatSend {
         operation_id: Counter,
         text: String,
+    },
+    ChatSong {
+        operation_id: Counter,
+        resource_id: Uuid,
     },
     ChatOperation {
         operation_id: Counter,
@@ -149,15 +175,45 @@ pub enum LocalRequest {
         address: std::net::SocketAddr,
         sample_rate: u32,
         local_output: bool,
+        #[serde(default = "default_discoverable")]
+        discoverable: bool,
     },
     Join {
         invitation: String,
         name: String,
         listen: bool,
     },
+    Apply {
+        address: std::net::SocketAddr,
+        fingerprint: String,
+        room_id: Uuid,
+        room_code: String,
+        name: String,
+    },
+    AdmissionStatus {
+        address: std::net::SocketAddr,
+        fingerprint: String,
+        room_id: Uuid,
+        application_id: Uuid,
+        applicant_secret: vmusic_lan::members::Secret,
+    },
+    AdmissionReview {
+        application_id: Uuid,
+        approve: bool,
+        permissions: Permissions,
+    },
+    AdmissionRevoke {
+        application_id: Uuid,
+    },
     Leave,
     Invite {
         permissions: Permissions,
+    },
+    RevokeInvitation {
+        invitation_id: Uuid,
+    },
+    Discoverable {
+        enabled: bool,
     },
     Share {
         track_ids: Vec<String>,
@@ -189,11 +245,41 @@ pub enum LocalRequest {
         loudness_mode: String,
     },
 }
+fn default_discoverable() -> bool {
+    true
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn discoverability_preserves_old_create_requests_and_is_host_local_only() {
+        let old = json!({"action":"create","name":"room","address":"127.0.0.1:0","sample_rate":48000,"local_output":false});
+        assert!(matches!(
+            serde_json::from_value::<LocalRequest>(old.clone()).unwrap(),
+            LocalRequest::Create {
+                discoverable: true,
+                ..
+            }
+        ));
+        let mut hidden = old.clone();
+        hidden["discoverable"] = json!(false);
+        assert!(matches!(
+            serde_json::from_value::<LocalRequest>(hidden.clone()).unwrap(),
+            LocalRequest::Create {
+                discoverable: false,
+                ..
+            }
+        ));
+        hidden["discoverable"] = json!("false");
+        assert!(serde_json::from_value::<LocalRequest>(hidden).is_err());
+        assert!(serde_json::from_value::<PeerRequest>(
+            json!({"action":"discoverable","enabled":true})
+        )
+        .is_err());
+    }
 
     #[test]
     fn queue_contract_requires_explicit_instance_identity_and_rejects_the_old_resource_list() {

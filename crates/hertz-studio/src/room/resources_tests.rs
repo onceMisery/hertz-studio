@@ -826,3 +826,141 @@ async fn malformed_or_over_limit_embedded_lyrics_can_recover_through_a_checked_s
     }
     f.finish().await;
 }
+
+#[tokio::test]
+async fn structured_song_chat_is_durable_deduplicated_and_scrubs_revoked_resources() {
+    use crate::room::chat::{ChatAccess, ChatRequest, ChatService};
+    let f = Fixture::new().await;
+    let library = SharedLibrary::default();
+    f.track("song-card").await;
+    let resource = f.share(&library, &["song-card"]).await[0].resource_id;
+    let room = Uuid::new_v4();
+    let events = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let sink = events.clone();
+    let access = || ChatAccess {
+        member: Uuid::nil(),
+        name: "Host".into(),
+        active: Arc::new(|| true),
+        read: Arc::new(|| true),
+        send: Arc::new(|| true),
+    };
+    let chat = ChatService::open_with_library(
+        &f.base,
+        room,
+        Arc::new(move |v| sink.lock().unwrap().push(v)),
+        library.clone(),
+    )
+    .await
+    .unwrap();
+    let receipt = chat
+        .request(
+            access(),
+            ChatRequest::Song {
+                operation: 1,
+                resource_id: resource,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        chat.request(
+            access(),
+            ChatRequest::Song {
+                operation: 1,
+                resource_id: resource
+            }
+        )
+        .await
+        .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v["topic"] == "chat_message")
+            .count(),
+        1
+    );
+    let history = chat
+        .request(
+            access(),
+            ChatRequest::History {
+                before: None,
+                revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(history["messages"][0]["content_kind"], "song");
+    assert_eq!(
+        history["messages"][0]["song"]["resource_id"],
+        resource.to_string()
+    );
+    assert!(history["messages"][0].get("song_resource_id").is_none());
+    assert!(!serde_json::to_string(&history)
+        .unwrap()
+        .contains(&f.base.to_string_lossy().replace("\\", "\\\\")));
+    let conflict = chat
+        .request(
+            access(),
+            ChatRequest::Send {
+                operation: 1,
+                text: "分享歌曲".into(),
+                track: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code, "operation_key_conflict");
+    let invalid = chat
+        .request(
+            access(),
+            ChatRequest::Song {
+                operation: 2,
+                resource_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.code, "room_invalid");
+    chat.shutdown().await;
+    let restarted =
+        ChatService::open_with_library(&f.base, room, Arc::new(|_| {}), library.clone())
+            .await
+            .unwrap();
+    let history = restarted
+        .request(
+            access(),
+            ChatRequest::History {
+                before: None,
+                revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(history["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        history["messages"][0]["song"]["resource_id"],
+        resource.to_string()
+    );
+    f.share(&library, &[]).await;
+    let scrubbed = restarted
+        .request(
+            access(),
+            ChatRequest::History {
+                before: None,
+                revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(scrubbed["messages"][0]["song"].is_null());
+    assert_eq!(scrubbed["messages"][0]["content_kind"], "song");
+    assert!(!serde_json::to_string(&scrubbed)
+        .unwrap()
+        .contains(&resource.to_string()));
+    restarted.shutdown().await;
+    f.finish().await;
+}

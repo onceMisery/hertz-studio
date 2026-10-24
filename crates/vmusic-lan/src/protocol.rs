@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
 use uuid::Uuid;
 
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 pub const MAX_MESSAGE: usize = 65_536;
 pub const PCM_HEADER: usize = 96;
 pub const CAPABILITIES: &[&str] = &["pcm_f32le", "plan_commit", "clock_v1"];
@@ -355,20 +355,22 @@ mod tests {
         );
     }
     #[test]
-    fn version_one_peers_cannot_negotiate_the_instance_preserving_queue_contract() {
-        let hello = serde_json::json!({"type":"hello","version":1,
+    fn old_peers_cannot_negotiate_the_collaboration_contract() {
+        for version in [1u16, 2] {
+            let hello = serde_json::json!({"type":"hello","version":version,
             "identity":identity(),"required":[]});
-        assert_eq!(
-            ControlFrame::decode(&hello.to_string()).unwrap_err(),
-            ProtocolError::Version
-        );
-        let original = block();
-        let mut bytes = original.encode().unwrap();
-        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
-        assert_eq!(
-            PcmBlock::decode(&bytes, original.identity).unwrap_err(),
-            ProtocolError::Version
-        );
+            assert_eq!(
+                ControlFrame::decode(&hello.to_string()).unwrap_err(),
+                ProtocolError::Version
+            );
+            let original = block();
+            let mut bytes = original.encode().unwrap();
+            bytes[4..6].copy_from_slice(&version.to_le_bytes());
+            assert_eq!(
+                PcmBlock::decode(&bytes, original.identity).unwrap_err(),
+                ProtocolError::Version
+            );
+        }
     }
     #[test]
     fn malformed_pcm_and_wrong_session_are_rejected() {

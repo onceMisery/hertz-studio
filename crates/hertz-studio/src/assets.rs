@@ -52,6 +52,8 @@ macro_rules! ui_assets {
 
 ui_assets! {
     "/room-transport.js", JS => const ROOM_TRANSPORT_JS: &str = edition_ui!("room-transport.js");
+    "/room-workspace.js", JS => const ROOM_WORKSPACE_JS: &str = edition_ui!("room-workspace.js");
+    "/room-view.js", JS => const ROOM_VIEW_JS: &str = edition_ui!("room-view.js");
     "/room.js", JS => const ROOM_JS: &str = edition_ui!("room.js");
     "/room.css", CSS => const ROOM_CSS: &str = edition_ui!("room.css");
     "/host.js", JS => const HOST_JS: &str = edition_ui!("host.js");

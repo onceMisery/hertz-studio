@@ -14,17 +14,23 @@ Receiver 的转换工作线程负责源相位与设备调度；ScheduledPcmQueue
 
 房间 TLS listener 独立于本机全权 API。mDNS 仅用于发现；邀请、指纹和系统凭据服务负责信任，控制与音频通道持续检查权限。任一通道失效先撤销输出，重连只加入新的未来播放点。关闭先封住 Receiver 注册入口，撤销并等待原生输出退出，再恢复暂停的本地模式；End 使用有期限的 WebSocket 关闭，不能以立即断 TCP 代替终止通知。
 
+Admission 与一次性邀请由同一传输 owner 串行裁决：公开查找码不授权，申请查询必须证明持有独立 256-bit 秘密，批准才签发高熵邀请，配对原子标记申请已消费。消费后移除成员与撤销邀请分属不同生命周期。申请数、存活时间、来源和全局频率均有界。成员签发邀请必须持有独立邀请权限，且不能转授队列、播控、音量或邀请权限。mDNS Advertisement 的创建与销毁属于 Host，界面只提交可发现意图，不把失败的发布显示成可用。
+
 独立服务的 Ctrl-C、系统退出按钮和插件宿主都调用 `AppState::shutdown`：先封住模式入口并取消未完成启动，等待 RoomManager、Receiver 与 ModeLease 的共同关闭屏障，Host 发送并排空 End 后才关闭本地 audio actor、删除服务发现。Guest 服务退出保留最近房间凭据；显式离开或收到 Host End 才删除该成员凭据。
 
 插件主线程唯一持有 Runtime 与 Booted，在 `PluginServer::serve` 因 stdin EOF 或读取错误返回后显式等待同一关闭屏障，再允许 main 返回。SDK 工作线程只持 Runtime Handle；正在执行或排队的请求可以保留 `Arc<Plugin>`，因此不能依赖最后一个 Plugin 的 Drop 来结束房间或销毁 Runtime。
 
 聊天有独立的存储、历史和低优先级发送预算，不持有音频租约。浏览器只管理本机界面；关闭浏览器不终止健康收听，全部音频端离场才按租约与宽限暂停。设备音量仅在本机应用，房间 DSP 只在共同渲染路径应用一次。
 
+Host 保存与队列实例绑定的点歌人、成员投票和有界活动投影。投票不创建另一份业务队列；排序通过正式播放提交锁更新 AppState，仅调整可变后缀，保留当前曲与已经准备或分发的音频前缀。相同成员对相同实例至多一票，重连不重新计票。聊天歌曲卡片使用独立的结构化资源请求，持久化资源引用；每次读取重新解析当前分享权限，撤销分享后不再呈现歌曲卡片元数据或操作。
+
+一起听工作区视图只拥有页面导航与 DOM，HertzRoom 继续唯一持有房间快照、请求、回执和资源 URL。退出工作区恢复紧凑房间播控，不结束健康的房间会话。主应用导航与工作区导航通过显式回调衔接，不新增播放器或业务快照副本。
+
 ## 边界与 owner
 
 | 名称（含单位） | 数值 | 定义在哪 | 改它要一起改什么 |
 | --- | --- | --- | --- |
-| 线协议版本 | 2 | `crates/vmusic-lan/src/protocol.rs::VERSION` | 握手能力、二进制头、实例队列写合同与不兼容拒绝测试 |
+| 线协议版本 | 3 | `crates/vmusic-lan/src/protocol.rs::VERSION` | 握手能力、二进制头、实例队列、投票与歌曲消息合同及不兼容拒绝测试 |
 | 单条传输消息上限（字节） | 65536 | `crates/vmusic-lan/src/protocol.rs::MAX_MESSAGE` | PCM 分块、分片累计校验与控制消息界限 |
 | 每端广播保留上限（字节） | 8388608 | `crates/vmusic-lan/src/buffer.rs::ENDPOINT_BYTES` | 慢端隔离、Arc 引用释放与全局预算 |
 | 全房间广播保留上限（字节） | 67108864 | `crates/vmusic-lan/src/buffer.rs::GLOBAL_BYTES` | 多端压力与同时排队的共享块记账 |
@@ -34,7 +40,7 @@ Receiver 的转换工作线程负责源相位与设备调度；ScheduledPcmQueue
 | 设备回调最大年龄（纳秒） | 250000000 | `crates/hertz-studio/src/room/receiver.rs::DEVICE_FRESHNESS_NS` | 单快照门禁、回调中断和恢复回归 |
 | 最后音频端离场宽限（秒） | 3 | `crates/hertz-studio/src/state.rs::DEPART_GRACE` | 音频租约、UI 关闭与房间暂停行为 |
 
-线协议 v2 在握手与 PCM 头拒绝 v1 peer，不兼容转换成仅资源 ID 的队列请求。`hertz-listen:v1:` 邀请封装和本地 RecentRoom 的 `version: 1` 是各自独立的存储格式版本，不是线协议版本。
+线协议 v3 在握手与 PCM 头拒绝旧版 peer，不将旧版队列写请求或聊天正文隐式转换为新的协作请求。`hertz-listen:v1:` 邀请封装和本地 RecentRoom 的 `version: 1` 是各自独立的存储格式版本，不是线协议版本。聊天数据库结构版本独立迁移，不能因网络版本变化丢弃已有文本历史。
 
 ## 禁止回退
 

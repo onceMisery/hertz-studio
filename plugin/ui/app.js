@@ -5318,6 +5318,7 @@ async function loadDevices() {
 
 function setView(name, options) {
   if (state.view === 'online' && name !== 'online' && window.Online) Online.cancelSearch();
+  if (state.view === 'room' && name !== 'room' && window.HertzRoom) window.HertzRoom.onViewExit();
   state.view = name;
   document.body.classList.toggle('room-view', name === 'room');
   for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
@@ -8053,6 +8054,8 @@ async function startApp() {
   transport = await chooseTransport();
   if (window.HertzRoom) window.HertzRoom.init({
     root: ui.views.room, transport, confirm: message => modal().confirm(message),
+    onReturn: () => setView('library'),
+    onNavigate: name => { if (name === 'library' || name === 'favorites') setView(name); },
     onModeChange(active) {
       cancelSeek(); clearSleepTimer(true); closeNowPlaying();
       if (window.Stage3D) Stage3D.close();

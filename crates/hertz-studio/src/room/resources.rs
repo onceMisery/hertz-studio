@@ -170,6 +170,14 @@ impl SharedLibrary {
     pub async fn view(&self, id: Uuid) -> Option<SharedTrack> {
         self.0.read().await.entries.get(&id).map(|e| e.view.clone())
     }
+    /// A card and its sharing revision come from the same authorization snapshot.
+    pub(super) async fn card(&self, id: Uuid) -> (u64, Option<SharedTrack>) {
+        let library = self.0.read().await;
+        (
+            library.revision,
+            library.entries.get(&id).map(|e| e.view.clone()),
+        )
+    }
     pub async fn resource_for(&self, track: &str) -> Option<Uuid> {
         self.0.read().await.by_track.get(track).copied()
     }

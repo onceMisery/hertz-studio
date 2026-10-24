@@ -62,6 +62,7 @@ async fn store(profile: &Profile, room: Uuid) -> (Store, Arc<Mutex<Vec<Value>>>)
         maintenance: None,
     });
     let mut store = Store {
+        library: Default::default(),
         connection,
         path,
         room,
@@ -1282,4 +1283,204 @@ async fn post_recovery_validation_failure_reports_that_files_may_have_changed() 
         !profile.0.join("room-chat.sqlite-journal").exists(),
         "SQLite must have performed rollback before validation failed"
     );
+}
+
+#[tokio::test]
+async fn version_one_text_history_migrates_atomically_to_structured_song_schema() {
+    let profile = Profile::new();
+    let room = Uuid::new_v4();
+    let path = profile.0.join("room-chat.sqlite");
+    let mut connection = SqliteConnection::connect_with(
+        &options(&path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Delete)
+            .synchronous(SqliteSynchronous::Full)
+            .page_size(PAGE as u32)
+            .auto_vacuum(SqliteAutoVacuum::Incremental),
+    )
+    .await
+    .unwrap();
+    for statement in SCHEMA_V1.into_iter().chain(["PRAGMA user_version=1"]) {
+        sqlx::query(statement)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO settings VALUES(1,?,1,2)")
+        .bind(serde_json::to_string(&ChatConfig::default()).unwrap())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO messages VALUES(1,?,?,?,'<b>still plain text</b>',?,NULL)")
+        .bind(room.to_string())
+        .bind(Uuid::nil().to_string())
+        .bind("Host")
+        .bind(now_ms())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let chat = ChatService::open(&profile.0, room, Arc::new(|_| {}))
+        .await
+        .unwrap();
+    let history = chat
+        .request(
+            owner(),
+            ChatRequest::History {
+                before: None,
+                revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(history["messages"][0]["text"], "<b>still plain text</b>");
+    assert_eq!(history["messages"][0]["content_kind"], "text");
+    assert!(history["messages"][0]["song"].is_null());
+    let receipt = chat
+        .request(
+            owner(),
+            ChatRequest::Send {
+                operation: 1,
+                text: "after migration".into(),
+                track: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt["message_id"], "2");
+    chat.shutdown().await;
+    let mut connection = SqliteConnection::connect_with(&options(&path).read_only(true))
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("PRAGMA user_version")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+        2
+    );
+    Store::inspect(&mut connection, &path).await.unwrap();
+    connection.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn near_quota_version_one_history_upgrades_without_copying_or_losing_messages() {
+    let profile = Profile::new();
+    let room = Uuid::new_v4();
+    let member = Uuid::new_v4();
+    let path = profile.0.join("room-chat.sqlite");
+    let config = ChatConfig {
+        disk_quota_mib: 16,
+        ..Default::default()
+    };
+    let text = "😀".repeat(200);
+    let name = "n".repeat(32);
+    let received = now_ms();
+    let mut connection = SqliteConnection::connect_with(
+        &options(&path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Delete)
+            .synchronous(SqliteSynchronous::Full)
+            .page_size(PAGE as u32)
+            .auto_vacuum(SqliteAutoVacuum::Incremental),
+    )
+    .await
+    .unwrap();
+    sqlx::query(&format!("PRAGMA max_page_count={}", config.pages()))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let mut tx = connection.begin().await.unwrap();
+    for statement in SCHEMA_V1.into_iter().chain(["PRAGMA user_version=1"]) {
+        sqlx::query(statement).execute(&mut *tx).await.unwrap();
+    }
+    sqlx::query("INSERT INTO settings VALUES(1,?,1,6001)")
+        .bind(serde_json::to_string(&config).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<6000) INSERT INTO messages(id,room,member,name,text,received,track) SELECT n,?,?,?,?,?,'42' FROM seq")
+        .bind(room.to_string()).bind(member.to_string()).bind(&name).bind(&text).bind(received)
+        .execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let before_pages: i64 = sqlx::query_scalar("PRAGMA page_count")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        before_pages as u64 <= config.pages(),
+        "fixture must pass the actual database plus rollback-reserve budget"
+    );
+    assert!(
+        before_pages as u64 > config.pages() * 4 / 5,
+        "fixture must be close enough to the database cap that duplicating rows fails"
+    );
+    Store::inspect(&mut connection, &path).await.unwrap();
+    connection.close().await.unwrap();
+
+    let chat = ChatService::open(&profile.0, room, Arc::new(|_| {}))
+        .await
+        .unwrap();
+    let history = chat
+        .request(
+            owner(),
+            ChatRequest::History {
+                before: None,
+                revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        history["messages"].as_array().unwrap().last().unwrap()["message_id"],
+        "6000"
+    );
+    assert_eq!(
+        history["messages"].as_array().unwrap().last().unwrap()["text"],
+        text
+    );
+    chat.shutdown().await;
+    let mut connection = SqliteConnection::connect_with(&options(&path).read_only(true))
+        .await
+        .unwrap();
+    let after_pages: i64 = sqlx::query_scalar("PRAGMA page_count")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        after_pages, before_pages,
+        "adding a nullable song reference must not copy retained data or indexes"
+    );
+    let preserved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE room=? AND member=? AND name=? AND text=? AND received=? AND track='42' AND song IS NULL")
+        .bind(room.to_string()).bind(member.to_string()).bind(&name).bind(&text).bind(received)
+        .fetch_one(&mut connection).await.unwrap();
+    assert_eq!(preserved, 6000);
+    let (saved_config, revision, next_id) = Store::inspect(&mut connection, &path).await.unwrap();
+    assert_eq!(saved_config, config);
+    assert_eq!((revision, next_id), (1, 6001));
+    let schema_sql: String =
+        sqlx::query_scalar("SELECT sql FROM sqlite_schema WHERE name='messages'")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(schema_sql, altered_messages_schema());
+    connection.close().await.unwrap();
+    assert!(file_bytes(&path).await.unwrap() * 2 + TRANSACTION_OVERHEAD <= config.quota());
+
+    let restarted = ChatService::open(&profile.0, room, Arc::new(|_| {}))
+        .await
+        .unwrap();
+    let receipt = restarted
+        .request(
+            owner(),
+            ChatRequest::Send {
+                operation: 1,
+                text: "after near-quota migration".into(),
+                track: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt["message_id"], "6001");
+    restarted.shutdown().await;
 }
