@@ -8,6 +8,7 @@ pub(super) const PREVIEWS: &[(&str, &[u8])] = &[
     ("background-flow.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/background-flow.jpg")),
     ("background-mesh.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/background-mesh.jpg")),
     ("background-spectrogram.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/background-spectrogram.jpg")),
+    ("butterfly-vortex.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/butterfly-vortex.jpg")),
     ("coast.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/coast.jpg")),
     ("cover-particles.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/cover-particles.jpg")),
     ("cover-sphere.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/cover-sphere.jpg")),
