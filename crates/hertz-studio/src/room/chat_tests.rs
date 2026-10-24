@@ -997,3 +997,72 @@ async fn startup_finalizes_cold_journal_only_after_validating_original_database(
     assert!(!profile.0.join("room-chat.sqlite-journal").exists());
     recovered.shutdown().await;
 }
+
+#[tokio::test]
+async fn unreadable_hot_journal_preflight_requires_recovery_and_leaves_all_bytes_untouched() {
+    for failure in ["settings", "schema"] {
+        let profile = Profile::new();
+        let room = Uuid::new_v4();
+        seeded_profile_for_crash(&profile, room).await;
+        let path = profile.0.join("room-chat.sqlite");
+        let mut writer = SqliteConnection::connect_with(&options(&path))
+            .await
+            .unwrap();
+        let statement = if failure == "settings" {
+            "UPDATE settings SET config='invalid JSON'"
+        } else {
+            "CREATE TABLE unexpected(value TEXT)"
+        };
+        sqlx::query(statement).execute(&mut writer).await.unwrap();
+        writer.close().await.unwrap();
+        kill_during_transaction(&profile).await;
+        let journal_path = profile.0.join("room-chat.sqlite-journal");
+        let database = std::fs::read(&path).unwrap();
+        let journal = std::fs::read(&journal_path).unwrap();
+        let error = ChatService::open(&profile.0, room, Arc::new(|_| {}))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "chat_history_recovery_required", "{failure}");
+        assert!(error.message.contains("原数据库及事务文件均未修改"));
+        assert_eq!(std::fs::read(&path).unwrap(), database);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+    }
+}
+
+#[tokio::test]
+async fn post_recovery_validation_failure_reports_that_files_may_have_changed() {
+    let profile = Profile::new();
+    let room = Uuid::new_v4();
+    seeded_profile_for_crash(&profile, room).await;
+    let path = profile.0.join("room-chat.sqlite");
+    let mut writer = SqliteConnection::connect_with(&options(&path))
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints=ON")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE messages SET text=? WHERE id=1")
+        .bind("x".repeat(201))
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    writer.close().await.unwrap();
+    kill_during_transaction(&profile).await;
+    let database = std::fs::read(&path).unwrap();
+    let error = ChatService::open(&profile.0, room, Arc::new(|_| {}))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code, "chat_history_damaged");
+    assert!(error.message.contains("SQLite 回滚恢复已启动"));
+    assert!(error.message.contains("文件可能已改变"));
+    assert!(!error.message.contains("原文件已保留"));
+    assert!(!error.message.contains("均未修改"));
+    assert_ne!(std::fs::read(&path).unwrap(), database);
+    assert!(
+        !profile.0.join("room-chat.sqlite-journal").exists(),
+        "SQLite must have performed rollback before validation failed"
+    );
+}

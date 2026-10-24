@@ -283,7 +283,24 @@ fn format_error() -> RoomError {
 fn recovery_error() -> RoomError {
     RoomError::new(
         "chat_history_recovery_required",
-        "聊天事务文件不受支持或无法在原配额内安全恢复；原文件已保留，请先备份并恢复",
+        "聊天事务文件不受支持，或无法读取配置并在原配额内安全恢复；原数据库及事务文件均未修改，请先备份并恢复",
+    )
+}
+fn after_recovery(error: RoomError) -> RoomError {
+    let reason = match error.code.as_str() {
+        "chat_history_damaged" => "恢复后的历史完整性或字段校验失败",
+        "chat_history_format" => "恢复后的历史格式不受支持",
+        "chat_quota_exceeded" => "恢复后的文件占用超出配置配额",
+        _ => "事务恢复或存储操作失败",
+    };
+    let code = if error.code == "chat_storage_failed" {
+        "chat_history_recovery_failed"
+    } else {
+        &error.code
+    };
+    RoomError::new(
+        code,
+        format!("SQLite 回滚恢复已启动，但{reason}；文件可能已改变，请先备份现有文件并恢复聊天"),
     )
 }
 fn quota_error() -> RoomError {
@@ -359,9 +376,11 @@ impl ChatService {
             ));
         }
         let fresh = !tokio::fs::try_exists(&path).await.map_err(|_| storage())?;
-        if !fresh {
-            Store::prepare_existing(&path).await?;
-        }
+        let recovery_started = if fresh {
+            false
+        } else {
+            Store::prepare_existing(&path).await?
+        };
         let write_options = if fresh {
             options(&path)
                 .create_if_missing(true)
@@ -380,7 +399,16 @@ impl ChatService {
         if fresh {
             Store::create(&mut connection).await?;
         }
-        let (config, revision, next_id) = Store::inspect(&mut connection, &path).await?;
+        let (config, revision, next_id) =
+            Store::inspect(&mut connection, &path)
+                .await
+                .map_err(|error| {
+                    if recovery_started {
+                        after_recovery(error)
+                    } else {
+                        error
+                    }
+                })?;
         let (status, status_rx) = watch::channel(ChatStatus {
             available: true,
             history_revision: revision.to_string(),
@@ -490,7 +518,7 @@ impl ChatService {
 }
 
 impl Store {
-    async fn prepare_existing(path: &Path) -> RoomResult<()> {
+    async fn prepare_existing(path: &Path) -> RoomResult<bool> {
         let metadata = tokio::fs::metadata(path).await.map_err(|_| storage())?;
         if metadata.permissions().readonly() {
             return Err(RoomError::new(
@@ -524,7 +552,7 @@ impl Store {
             let result = Self::inspect(&mut inspection, path).await;
             inspection.close().await.map_err(|_| storage())?;
             result?;
-            return Ok(());
+            return Ok(false);
         }
 
         // Only inspect the documented fixed header, never replay journal pages.
@@ -578,8 +606,12 @@ impl Store {
                 .await
                 .map_err(|_| recovery_error())?;
         let preflight = async {
-            Self::inspect_schema(&mut inspection).await?;
-            let (config, _, _) = Self::read_settings(&mut inspection).await?;
+            Self::inspect_schema(&mut inspection)
+                .await
+                .map_err(|error| if cold { error } else { recovery_error() })?;
+            let (config, _, _) = Self::read_settings(&mut inspection)
+                .await
+                .map_err(|error| if cold { error } else { recovery_error() })?;
             if cold {
                 Self::inspect_data(&mut inspection, path, true).await?;
             }
@@ -608,20 +640,23 @@ impl Store {
         let mut recovery =
             SqliteConnection::connect_with(&options(path).synchronous(SqliteSynchronous::Full))
                 .await
-                .map_err(|_| recovery_error())?;
+                .map_err(|_| after_recovery(storage()))?;
         let recovered = async {
-            let mut tx = recovery.begin().await.map_err(|_| recovery_error())?;
+            let mut tx = recovery.begin().await.map_err(|_| storage())?;
             sqlx::query("PRAGMA user_version=1")
                 .execute(&mut *tx)
                 .await
-                .map_err(|_| recovery_error())?;
-            tx.commit().await.map_err(|_| recovery_error())?;
+                .map_err(|_| storage())?;
+            tx.commit().await.map_err(|_| storage())?;
             Self::inspect(&mut recovery, path).await
         }
         .await;
-        recovery.close().await.map_err(|_| storage())?;
-        recovered?;
-        Ok(())
+        recovery
+            .close()
+            .await
+            .map_err(|_| after_recovery(storage()))?;
+        recovered.map_err(after_recovery)?;
+        Ok(true)
     }
 
     async fn create(connection: &mut SqliteConnection) -> RoomResult<()> {
