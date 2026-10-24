@@ -255,10 +255,7 @@ mod tests {
             Err(FeedXmlError::Malformed)
         );
         // 预检只查资源形状，不保证闭合配对；孤立闭标签在这里就拒绝。
-        assert_eq!(
-            preflight_xml("</a>", 100),
-            Err(FeedXmlError::Malformed)
-        );
+        assert_eq!(preflight_xml("</a>", 100), Err(FeedXmlError::Malformed));
         assert_eq!(
             preflight_xml("<a><b/><c/><d/></a>", 3),
             Err(FeedXmlError::Malformed)

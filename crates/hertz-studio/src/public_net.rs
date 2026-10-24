@@ -166,6 +166,38 @@ pub(crate) fn client(scheme: SchemePolicy) -> Result<Client, &'static str> {
     .map_err(|_| "failed to create public-network client")
 }
 
+/// 有界读取响应体：状态码、Content-Length 预检与逐块累计都受 `limit` 约束。
+/// 各领域（播客、阅读）拿到枚举后自行映射错误文案；这里不携带领域语义。
+pub(crate) enum BoundedReadError {
+    Status(u16),
+    TooLarge,
+    Transport(reqwest::Error),
+}
+
+pub(crate) async fn read_bounded(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, BoundedReadError> {
+    if !response.status().is_success() {
+        return Err(BoundedReadError::Status(response.status().as_u16()));
+    }
+    if response.content_length().is_some_and(|n| n > limit as u64) {
+        return Err(BoundedReadError::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(BoundedReadError::Transport)?
+    {
+        if chunk.len() > limit.saturating_sub(bytes.len()) {
+            return Err(BoundedReadError::TooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -34,6 +34,7 @@ pub mod persist;
 pub mod podcasts;
 pub(crate) mod public_net;
 pub mod radio;
+pub mod reader;
 pub mod remote;
 pub mod routes;
 pub mod rpc;
