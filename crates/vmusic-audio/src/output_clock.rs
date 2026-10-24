@@ -12,6 +12,8 @@ const WARMUP_OBSERVATIONS: u32 = 8;
 const MAX_LEAD_NS: u64 = 3_000_000_000;
 const MAX_PHASE_ERROR_NS: f64 = 20_000_000.0;
 const RATE_WINDOW_NS: u64 = 1_000_000_000;
+const RATE_ENVELOPES: usize = 8;
+const MIN_RATE_SPAN_NS: u64 = 2 * RATE_WINDOW_NS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClockStatus {
@@ -58,6 +60,8 @@ pub struct OutputClock {
     anchor: Option<ClockObservation>,
     previous: Option<ClockObservation>,
     window: Option<(ClockObservation, u64)>,
+    rate_envelopes: [Option<ClockObservation>; RATE_ENVELOPES],
+    next_rate_envelope: usize,
     offset_min_observation: Option<ClockObservation>,
     frames: u64,
     good: u32,
@@ -81,6 +85,8 @@ impl OutputClock {
             anchor: None,
             previous: None,
             window: None,
+            rate_envelopes: [None; RATE_ENVELOPES],
+            next_rate_envelope: 0,
             offset_min_observation: None,
             frames: 0,
             good: 0,
@@ -97,6 +103,8 @@ impl OutputClock {
         self.anchor = None;
         self.previous = None;
         self.window = None;
+        self.rate_envelopes.fill(None);
+        self.next_rate_envelope = 0;
         self.offset_min_observation = None;
         self.frames = 0;
         self.good = 0;
@@ -120,6 +128,38 @@ impl OutputClock {
             device_clock_ppm: (self.nominal_period / self.period_ns - 1.0) * 1e6,
             uncertainty_ns: self.uncertainty_ns.ceil().max(1.0) as u64,
         }
+    }
+
+    fn observe_rate_envelope(&mut self, minimum: ClockObservation) -> f64 {
+        self.rate_envelopes[self.next_rate_envelope] = Some(minimum);
+        self.next_rate_envelope = (self.next_rate_envelope + 1) % RATE_ENVELOPES;
+        // Median of pairwise slopes over separated lower-envelope windows.
+        // An isolated late window cannot dominate a populated rate estimate;
+        // two-second minimum spans also bound short startup delivery steps.
+        // Both arrays live inline; this executes only once per rate window.
+        let mut slopes = [0.0; RATE_ENVELOPES * (RATE_ENVELOPES - 1) / 2];
+        let mut count = 0;
+        for (index, left) in self.rate_envelopes.iter().enumerate() {
+            let Some(left) = left else { continue };
+            for right in self.rate_envelopes.iter().skip(index + 1).flatten() {
+                let (first, last) = if left.callback_ns <= right.callback_ns {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                let span = last.callback_ns - first.callback_ns;
+                if span >= MIN_RATE_SPAN_NS {
+                    slopes[count] = (last.local_ns - first.local_ns) as f64 / span as f64;
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 {
+            return self.host_ratio;
+        }
+        let slopes = &mut slopes[..count];
+        slopes.sort_unstable_by(f64::total_cmp);
+        (slopes[(count - 1) / 2] + slopes[count / 2]) * 0.5
     }
 
     pub fn observe(&mut self, observation: Option<ClockObservation>) -> ClockReading {
@@ -189,13 +229,17 @@ impl OutputClock {
             if callback_span >= RATE_WINDOW_NS {
                 let frame_span = self.frames - frame_origin;
                 let playback_span = observation.playback_ns - window.playback_ns;
-                let local_span = observation.local_ns - window.local_ns;
-                let host_ratio = local_span as f64 / callback_span as f64;
-                let period = playback_span as f64 / frame_span as f64 * host_ratio;
+                // Callback delivery time is a noisy upper bound. Whole windows
+                // of delayed delivery must not become a false device fault.
+                let minimum = self.offset_min_observation.unwrap_or(observation);
+                let host_ratio = self.observe_rate_envelope(minimum);
+                let backend_period = playback_span as f64 / frame_span as f64;
+                let period = backend_period * host_ratio;
                 // Reject stale/fabricated timestamps or wildly inconsistent
                 // device frame positions. Ordinary callback jitter is filtered.
                 if frame_span == 0
                     || !(0.995..=1.005).contains(&host_ratio)
+                    || !(0.995..=1.005).contains(&(backend_period / self.nominal_period))
                     || !(0.995..=1.005).contains(&(period / self.nominal_period))
                 {
                     return self.invalidate();
@@ -205,7 +249,6 @@ impl OutputClock {
                 // while learning two clock domains' different slopes. Slewing
                 // phase above keeps this calibration change sample-continuous.
                 let next_ratio = self.host_ratio + (host_ratio - self.host_ratio) * 0.1;
-                let minimum = self.offset_min_observation.unwrap_or(observation);
                 self.offset_ns = minimum.local_ns as f64
                     - (minimum.callback_ns - anchor.callback_ns) as f64 * next_ratio;
                 self.host_ratio = next_ratio;
@@ -336,5 +379,69 @@ mod tests {
         }
         assert_eq!(last.status, ClockStatus::Valid);
         assert!((last.device_clock_ppm + 249.94).abs() < 2.0);
+    }
+
+    #[test]
+    fn delivery_jitter_on_rate_window_boundaries_does_not_invalidate_device_clock() {
+        let mut clock = OutputClock::new(48_000, 0).unwrap();
+        let mut reading = clock.observe(None);
+        for index in 0..600 {
+            let jitter = if index % 100 == 0 { 6_000_000 } else { 0 };
+            reading = clock.observe(Some(observation(index, 1e9 / 48_000.0, jitter)));
+            if index >= 8 {
+                assert_eq!(reading.status, ClockStatus::Valid, "callback {index}");
+            }
+        }
+        assert!(reading.device_clock_ppm.abs() < 1.0);
+    }
+
+    #[test]
+    fn entire_late_delivery_windows_do_not_invalidate_the_device_clock() {
+        for slope in [0.9995, 1.0, 1.0005] {
+            let mut clock = OutputClock::new(48_000, 0).unwrap();
+            let mut reading = clock.observe(None);
+            for index in 0..6_000 {
+                // The initial observation is late too; two later bursts leave
+                // several consecutive windows with no clean callback at all.
+                let jitter = if index == 0
+                    || (101..=400).contains(&index)
+                    || (901..=1200).contains(&index)
+                {
+                    6_000_000
+                } else {
+                    0
+                };
+                let mut obs = observation(index, 1e9 / 48_000.0, jitter);
+                obs.local_ns =
+                    1_000_000_000 + (obs.callback_ns as f64 * slope).round() as u64 + jitter;
+                reading = clock.observe(Some(obs));
+                if index >= 8 {
+                    assert_eq!(
+                        reading.status,
+                        ClockStatus::Valid,
+                        "callback {index}, slope {slope}"
+                    );
+                }
+            }
+            assert!((reading.device_clock_ppm - (1.0 / slope - 1.0) * 1e6).abs() < 3.0);
+        }
+    }
+
+    #[test]
+    fn robust_delivery_filter_keeps_backend_rate_and_phase_faults_explicit() {
+        for phase_jump in [false, true] {
+            let mut clock = OutputClock::new(48_000, 0).unwrap();
+            for index in 0..100 {
+                let reading = clock.observe(Some(observation(index, 1e9 / 48_000.0, 0)));
+                if index >= 8 {
+                    assert_eq!(reading.status, ClockStatus::Valid);
+                }
+            }
+            let mut changed = observation(100, 1e9 / 48_000.0, 6_000_000);
+            // A real 0.6% playback-frame mismatch still fails at the first
+            // one-second measurement, even when the same callback is late.
+            changed.playback_ns += if phase_jump { 21_000_000 } else { 6_000_000 };
+            assert_eq!(clock.observe(Some(changed)).status, ClockStatus::Invalid);
+        }
     }
 }
