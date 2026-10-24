@@ -17,6 +17,11 @@ impl Default for MonotonicClock {
     }
 }
 impl MonotonicClock {
+    /// Origin shared with the native device adapter; never serialize this value.
+    pub fn origin(&self) -> Instant {
+        self.origin
+    }
+
     pub fn now_ns(&self) -> u64 {
         self.origin.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
     }

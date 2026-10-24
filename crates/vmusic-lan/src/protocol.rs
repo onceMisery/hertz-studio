@@ -261,6 +261,19 @@ pub enum ControlFrame {
     End {
         reason: String,
     },
+    /// The application owner parses its own whitelisted request contract.
+    Request {
+        request_id: Counter,
+        body: serde_json::Value,
+    },
+    Response {
+        request_id: Counter,
+        body: serde_json::Value,
+    },
+    Notification {
+        topic: String,
+        body: serde_json::Value,
+    },
 }
 impl ControlFrame {
     pub fn encode(&self) -> Result<String, ProtocolError> {

@@ -30,7 +30,7 @@ impl MemoryBudget {
     pub fn used(&self) -> usize {
         self.used.load(Ordering::Acquire)
     }
-    fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation, BufferError> {
+    pub(crate) fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation, BufferError> {
         self.used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(bytes).filter(|&n| n <= self.limit)
@@ -42,7 +42,7 @@ impl MemoryBudget {
         })
     }
 }
-struct Reservation {
+pub(crate) struct Reservation {
     budget: Arc<MemoryBudget>,
     bytes: usize,
 }

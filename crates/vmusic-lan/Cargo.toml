@@ -8,6 +8,9 @@ authors.workspace = true
 description = "Bounded native room transport, clock estimation and protocol"
 
 [dependencies]
+base64 = { workspace = true }
+mdns-sd = "0.15"
+if-addrs = "0.14"
 subtle = "2"
 zeroize = "1"
 vmusic-core = { workspace = true }
