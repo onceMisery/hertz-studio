@@ -41,6 +41,7 @@ const ui = {
     library: $('view-library'),
     online: $('view-online'),
     podcasts: $('view-podcasts'),
+    reader: $('view-reader'),
     playlists: $('view-playlists'),
     // 每日推荐：一级目的地，容器在 index.html，菜单项由 daily-view.js 注入。
     daily: $('view-daily'),
@@ -5329,6 +5330,7 @@ function setView(name, options) {
     if (!(options && options.historyOnly) && window.Online) window.Online.onViewEnter();
   }
   if (name === 'podcasts' && window.Podcasts) window.Podcasts.onViewEnter();
+  if (name === 'reader' && window.Reader) window.Reader.onViewEnter();
   // 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
   // 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。
   if (name === 'settings') loadDiagnostics();
@@ -9180,6 +9182,7 @@ async function startApp() {
   if (window.Podcasts) window.Podcasts.bind({
     play: (tracks, index) => Online.playAll(tracks, index), seek: seekTo, toast,
   });
+  if (window.Reader) window.Reader.bind({ toast });
   // 扫码登录模块（web/online-login.js）：放在 Online.init 之后，头像 URL
   // 归一化要用它挂出的 safeCoverUrl。init() 负责在启动阶段就把顶栏头像按
   // 服务端持久化的选择恢复出来（以前只有打开登录弹窗才恢复）。
