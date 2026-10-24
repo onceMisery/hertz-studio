@@ -107,6 +107,16 @@ fn refill(store: &mut Store) {
     }
 }
 
+fn freeze_rate_clock(store: &mut Store) {
+    // Filesystem flushes can take longer than a 100 ms room token interval.
+    // Isolate burst accounting from wall-clock I/O latency in this test.
+    let future = Instant::now() + Duration::from_secs(60);
+    store.room_rate.at = future;
+    for identity in store.identities.values_mut() {
+        identity.rate.at = future;
+    }
+}
+
 async fn count(store: &mut Store) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM messages")
         .fetch_one(&mut store.connection)
@@ -430,9 +440,11 @@ async fn rate_limits_member_burst_and_room_burst_without_spending_room_on_reject
     let profile = Profile::new();
     let (mut store, _) = store(&profile, Uuid::new_v4()).await;
     for seq in 1..=3 {
+        freeze_rate_clock(&mut store);
         send(&mut store, owner(), seq, "burst").await.unwrap();
     }
     let room_credit = store.room_rate.credit;
+    freeze_rate_clock(&mut store);
     assert_eq!(
         send(&mut store, owner(), 4, "burst")
             .await
@@ -440,12 +452,14 @@ async fn rate_limits_member_burst_and_room_burst_without_spending_room_on_reject
             .code,
         "chat_rate_limited"
     );
-    assert!(store.room_rate.credit >= room_credit);
+    assert_eq!(store.room_rate.credit, room_credit);
     for _ in 0..7 {
+        freeze_rate_clock(&mut store);
         send(&mut store, access(Uuid::new_v4()), 1, "room burst")
             .await
             .unwrap();
     }
+    freeze_rate_clock(&mut store);
     assert_eq!(
         send(&mut store, access(Uuid::new_v4()), 1, "over")
             .await
